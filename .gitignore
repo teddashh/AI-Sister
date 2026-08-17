@@ -1,0 +1,11 @@
+node_modules/
+target/
+dist/
+.DS_Store
+*.log
+.env
+
+# 私下 roundtable 辯論的逐字萃取 — 設計源頭，不公開
+research/extracts/
+# 自有 repo 的內部盤點（含資產授權待確認事項）— 不公開
+research/ted-repos-dna.md
