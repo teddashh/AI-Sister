@@ -234,6 +234,17 @@ datetime）、`raw`（螢幕原文）、`normalized`，以及回指
    還沒開始），要嘛靠 Phase 1 的重播評測集量出每條規則的準確率——
    在那之前，搜尋結果裡出現不像日期的日期是預期行為。
 
+8. **兩個字的中文詞沒有索引，而且只找得回最近 30 天。** `text_fts` 用
+   trigram，比不了少於 3 個字的東西；`text_fts_uni` 用 unicode61，而它把
+   「客服專線」整串當成**一個** token（不是逐字切），所以 `MATCH "客服"`
+   是 0 筆。剩下唯一找得到的辦法是掃過所有文字，而那個成本跟你用了多久成
+   正比：實測 30 天的資料（207 萬行字）要 104 ms，SPEC §8.2 的預算是 100 ms，
+   而文字保留期是 **365 天**。
+   所以掃描被夾在 30 天內（`LIKE_SCAN_DAYS`）。代價講清楚：**兩個字的中文
+   查詢找不回 30 天以前的東西**；三個字以上走 trigram，完全不受影響。
+   真正的解是補一個 bigram 索引——原型量到 0.01 ms，代價是文字索引大約翻倍
+   （200,000 行字：50.9 MB → 105.3 MB）。那是 Phase 1 的決定。
+
 ---
 
 ## 怎麼自己查證
@@ -243,6 +254,8 @@ sister stats               # 記了多少、佔多少空間、哪條排除規則
 sister doctor              # 排除規則、失效的保護、schema 版本、現在有多少已過期
 sister query <關鍵字>      # 每一筆都附出處
 sister facts --kind phone
+SISTER_BENCH_DAYS=45 cargo test -p sister-core --release \
+  --test search_latency -- --nocapture   # 查詢延遲，附語料規模
 sister prune --dry-run     # 保留期現在會刪掉什麼（一個位元組都不動）
 ```
 

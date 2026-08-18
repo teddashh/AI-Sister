@@ -641,9 +641,23 @@ impl Db {
             }
         }
 
-        // 任一個詞短於 3 字，或兩個索引都空手而回 → 走 LIKE 補漏
-        let short_term = query.split_whitespace().any(|t| t.chars().count() < 3);
-        if short_term || hits.is_empty() {
+        // 兩個索引都空手而回 → 才走 LIKE 掃描。
+        //
+        // 這個條件原本是「任一個詞短於 3 字 **或** 兩個索引都空手」。那個
+        // `short_term ||` 讓一次全表掃描變成日常：查「客服」時 FTS 0.1 ms
+        // 就交出了答案，然後照樣掃完整張表——在一個月份量的資料庫上
+        // （2,073,600 行字）量到 **102.4 ms**。而 Phase 0 的退場條件寫的就是
+        // `sister query 電話`，兩個字。
+        //
+        // 它是多餘的，不只是貴：`fts_query` 把詞用 AND 串起來，所以只要有
+        // 任何一個詞索引比不到（`80` 藏在 `0800` 裡就是這種），整個 MATCH
+        // 就是空的，`hits.is_empty()` 自己會成立。`short_term` 唯一多做的事，
+        // 是在索引已經答得出來的時候也去掃一次。
+        //
+        // （中間試過 `hits.len() < limit`，更糟：查得到但結果少於一頁的查詢
+        // ——也就是「找一件很少見的事」，這個產品的主要用途——通通變成全表
+        // 掃描。量到 103.8 ms。改條件之前先量，不然只是把成本搬個位置。）
+        if hits.is_empty() {
             for hit in self.search_like(query, limit)? {
                 if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(hit.chunk_id) {
                     e.insert(hits.len());
@@ -688,17 +702,32 @@ impl Db {
             .map(|i| format!("text LIKE ?{i} ESCAPE '\\'"))
             .collect::<Vec<_>>()
             .join(" AND ");
+        // 界線從**資料庫裡最新的一列**往回算，不是從 `now()`。查一份三年前
+        // 封存起來的資料庫時，用現在時間當基準會掃出 0 列，然後長得像「查無
+        // 此資料」——那是這個專案最不想要的那種失敗。
+        let newest: Option<i64> = self
+            .conn
+            .query_row("SELECT MAX(ts) FROM text_chunks", [], |r| r.get(0))
+            .optional()?
+            .flatten();
+        let Some(newest) = newest else {
+            return Ok(Vec::new());
+        };
+        let cutoff = newest - LIKE_SCAN_DAYS * 86_400_000;
+
         let sql = format!(
             "SELECT id, ts, source_kind, frame_id, app_id, window_title, url, text
-             FROM text_chunks WHERE {conds}
+             FROM text_chunks WHERE ts >= ?{} AND {conds}
              ORDER BY ts DESC LIMIT ?{}",
-            terms.len() + 1
+            terms.len() + 1,
+            terms.len() + 2
         );
 
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = terms
             .into_iter()
             .map(|t| Box::new(t) as Box<dyn rusqlite::ToSql>)
             .collect();
+        params.push(Box::new(cutoff));
         params.push(Box::new(limit as i64));
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -925,6 +954,22 @@ fn insert_facts_tx(
     }
     Ok(facts.len())
 }
+
+/// LIKE 掃描往回看多久。**這是一個能力上限，不是效能調校。**
+///
+/// 兩個字的中文詞在這個 schema 底下沒有索引可用：trigram 比不了 <3 字，
+/// 而 unicode61 把「客服專線」整串當成**一個** token（不是逐字切），所以
+/// MATCH "客服" 是 0 筆。剩下唯一找得到的方法就是掃全表。
+///
+/// 掃全表的成本跟你用了多久成正比。實測（2,073,600 行字 ≈ 一個月）：
+/// 查「客服」104.6 ms，而 SPEC §8.2 的預算是 100 ms、文字保留期是 365 天。
+/// 不設界的話，這個產品用得越久，最常見的中文查詢就越慢，而且沒有盡頭。
+///
+/// 所以掃描只往回看 30 天。代價是誠實的：**超過 30 天以前的資料，兩個字的
+/// 中文查詢找不回來**（三個字以上照樣走 trigram，完全不受影響）。真正的解
+/// 是補一個 bigram 索引，那是 Phase 1 的事——在那之前這個上限被寫進
+/// DATA_INVENTORY 的已知缺口，而不是靠沒有人去量它來維持體面。
+const LIKE_SCAN_DAYS: i64 = 30;
 
 /// LIKE 後援命中的固定分數。負值確保它永遠排在任何 FTS 命中之後——
 /// 它證明「有這段文字」，但不宣稱相關性。
