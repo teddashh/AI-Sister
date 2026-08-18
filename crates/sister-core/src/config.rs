@@ -204,15 +204,22 @@ impl Default for RetentionConfig {
 /// 而它們平時是主要的工作與對話場所。光憑 app 名稱分不出模式，
 /// 把它們列進來等於讓整個工作日最重要的對話永遠不被記得——
 /// 那個代價比防到的風險大得多。
+/// 有兩條寫成 `xxx.exe` 而不是裸字根，那不是手滑：比對是子字串，而
+/// `obs` 會命中 **Obsidian**、`teams` 會命中 **TeamSpeak**。兩個都是
+/// 有人整天開著的程式，而命中的後果是「她在那個程式裡什麼都記不住」——
+/// 一個沒有人選過的暫停。帶著 `.exe` 就把字根釘在檔名結尾上了。
+/// 同一個形狀的另一半見 `sister-capture` 的 `browsers.rs`。
 const SCREENSHARE_APPS: &[&str] = &[
     "zoom",
-    "teams",
+    "teams.exe",
     "ms-teams",
     "webex",
     "gotomeeting",
     "bluejeans",
-    "obs",
+    "obs.exe",
+    "obs32",
     "obs64",
+    "obs-studio",
     "streamlabs",
     "google meet",
     "skype",
@@ -590,13 +597,15 @@ mod url_rule_lint_tests {
         ];
         const MEETINGS: &[(&str, &str)] = &[
             ("zoom", "Zoom.exe"),
-            ("teams", "Teams.exe"),
+            ("teams.exe", "Teams.exe"),
             ("ms-teams", "ms-teams.exe"),
             ("webex", "webexmta.exe"),
             ("gotomeeting", "gotomeeting.exe"),
             ("bluejeans", "bluejeans.exe"),
-            ("obs", "obs.exe"),
+            ("obs.exe", "obs.exe"),
+            ("obs32", "obs32.exe"),
             ("obs64", "obs64.exe"),
+            ("obs-studio", "obs-studio.exe"),
             ("streamlabs", "streamlabs obs.exe"),
             ("google meet", "google meet.exe"),
             ("skype", "Skype.exe"),
@@ -641,6 +650,39 @@ mod url_rule_lint_tests {
             assert!(
                 glob_match(&rule.to_ascii_lowercase(), &witness.to_ascii_lowercase()),
                 "標題規則 {rule} 碰不到它自己舉的例子 {witness}"
+            );
+        }
+    }
+
+    /// 證人只證明規則「碰得到該碰的」，證明不了它「不碰不該碰的」。
+    ///
+    /// 這條補的就是另外那一半。實際踩到的：`obs` 是子字串，於是
+    /// **Obsidian** 每次跳到前景都被當成在分享螢幕，整段時間一個字都不記；
+    /// `teams` 同理命中 **TeamSpeak**。兩個都是會開一整天的程式，而症狀是
+    /// 「她在那裡面什麼都記不住」——一個沒有人選過的暫停，而且畫面上
+    /// 只會顯示成一個沒有解釋的排除次數。
+    ///
+    /// 螢幕分享這份清單的取捨跟別的不一樣：漏掉一個會錄到**別人的畫面**，
+    /// 所以預設要寬。但「寬」必須是選出來的，不是某個字根剛好短。
+    #[test]
+    fn everyday_apps_are_not_mistaken_for_screen_sharing() {
+        let cfg = PrivacyConfig::default();
+        for innocent in [
+            "obsidian.exe",  // `obs` 的受害者
+            "teamspeak.exe", // `teams` 的受害者
+            "code.exe",
+            "explorer.exe",
+            "slack.exe", // 能分享螢幕，但刻意不列（見 SCREENSHARE_APPS 說明）
+            "discord.exe",
+        ] {
+            let verdict = cfg.check(&FocusSnapshot {
+                app_id: Some(innocent.into()),
+                ..Default::default()
+            });
+            assert!(
+                !verdict.is_blocked(),
+                "{innocent} 被擋掉了（{:?}）——等於在它前景時什麼都不記",
+                verdict.reason()
             );
         }
     }
