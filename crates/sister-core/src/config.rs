@@ -560,6 +560,91 @@ mod url_rule_lint_tests {
         }
     }
 
+    /// 另外三份預設清單，同一個要求。
+    ///
+    /// 網址那條寫完之後回頭看，其他三份清單的破口一模一樣，而且更大：
+    /// 既有測試碰過的是 app 9 條裡的 7 條、標題 4 條裡的 3 條、會議 app
+    /// **13 條裡的 5 條**。沒被碰到的那些之中包括 `gnome-keyring`、
+    /// `seahorse`、`*private browsing*`、`anydesk`、`skype`——每一條都
+    /// 可能已經是錯的，而 `doctor` 照樣把它們算進「N 條規則」裡。
+    #[test]
+    fn every_other_default_rule_is_demonstrated_too() {
+        // app 是子字串比對（見 `app_pattern_matches`），所以證人寫成
+        // 真實的執行檔名／bundle id，不是規則自己。
+        const APPS: &[(&str, &str)] = &[
+            ("keepassxc", "keepassxc.exe"),
+            ("keepass", "KeePass.exe"),
+            ("1password", "1Password.exe"),
+            ("bitwarden", "Bitwarden.exe"),
+            ("dashlane", "dashlane.exe"),
+            ("lastpass", "LastPass.exe"),
+            ("enpass", "Enpass.exe"),
+            ("gnome-keyring", "gnome-keyring-daemon"),
+            ("seahorse", "org.gnome.seahorse.Application"),
+        ];
+        const TITLES: &[(&str, &str)] = &[
+            ("*password*", "change password — github"),
+            ("*密碼*", "變更密碼"),
+            ("*private browsing*", "private browsing — mozilla firefox"),
+            ("*無痕*", "無痕視窗"),
+        ];
+        const MEETINGS: &[(&str, &str)] = &[
+            ("zoom", "Zoom.exe"),
+            ("teams", "Teams.exe"),
+            ("ms-teams", "ms-teams.exe"),
+            ("webex", "webexmta.exe"),
+            ("gotomeeting", "gotomeeting.exe"),
+            ("bluejeans", "bluejeans.exe"),
+            ("obs", "obs.exe"),
+            ("obs64", "obs64.exe"),
+            ("streamlabs", "streamlabs obs.exe"),
+            ("google meet", "google meet.exe"),
+            ("skype", "Skype.exe"),
+            ("anydesk", "AnyDesk.exe"),
+            ("teamviewer", "TeamViewer.exe"),
+        ];
+
+        let cfg = PrivacyConfig::default();
+        let same = |label: &str, rules: Vec<String>, table: &[(&str, &str)]| {
+            let named: std::collections::BTreeSet<String> =
+                table.iter().map(|(r, _)| (*r).to_string()).collect();
+            let actual: std::collections::BTreeSet<String> = rules.into_iter().collect();
+            assert_eq!(
+                actual, named,
+                "{label} 的預設清單和證人對不起來——加了規則就要補一個證人"
+            );
+        };
+
+        same("excluded_apps", cfg.excluded_apps.clone(), APPS);
+        same("excluded_titles", cfg.excluded_titles.clone(), TITLES);
+        same(
+            "SCREENSHARE_APPS",
+            SCREENSHARE_APPS.iter().map(|s| s.to_string()).collect(),
+            MEETINGS,
+        );
+
+        // app 與會議 app 都走小寫子字串，證人要先降成小寫再比——
+        // `check()` 就是這樣做的（`focus.app_key()`）。
+        for (rule, witness) in APPS {
+            assert!(
+                app_pattern_matches(rule, &witness.to_ascii_lowercase()),
+                "app 規則 {rule} 碰不到它自己舉的例子 {witness}"
+            );
+        }
+        for (rule, witness) in MEETINGS {
+            assert!(
+                witness.to_ascii_lowercase().contains(rule),
+                "會議 app 規則 {rule} 碰不到它自己舉的例子 {witness}"
+            );
+        }
+        for (rule, witness) in TITLES {
+            assert!(
+                glob_match(&rule.to_ascii_lowercase(), &witness.to_ascii_lowercase()),
+                "標題規則 {rule} 碰不到它自己舉的例子 {witness}"
+            );
+        }
+    }
+
     /// Chromium 交出來的是縮寫版網址。預設規則必須在**那個**形狀上命中，
     /// 不是在我們想像中的完整網址上命中。
     #[test]
