@@ -349,10 +349,10 @@ mod tests {
     fn password_managers_are_blocked_in_every_platform_naming_style() {
         let c = Config::default();
         for id in [
-            "keepassxc",                    // Linux
-            "keepassxc.exe",                // Windows
-            "KeePassXC.exe",                // Windows，大小寫不一
-            "org.keepassxc.keepassxc",      // macOS bundle id
+            "keepassxc",               // Linux
+            "keepassxc.exe",           // Windows
+            "KeePassXC.exe",           // Windows，大小寫不一
+            "org.keepassxc.keepassxc", // macOS bundle id
             "1Password.exe",
             "com.1password.1password",
             "bitwarden.exe",
@@ -371,7 +371,13 @@ mod tests {
     #[test]
     fn ordinary_apps_still_get_recorded() {
         let c = Config::default();
-        for id in ["chrome.exe", "code.exe", "explorer.exe", "firefox", "Terminal"] {
+        for id in [
+            "chrome.exe",
+            "code.exe",
+            "explorer.exe",
+            "firefox",
+            "Terminal",
+        ] {
             assert!(!c.privacy.check(&app(id)).is_blocked(), "{id} 不該被擋");
         }
     }

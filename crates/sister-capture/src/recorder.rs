@@ -165,6 +165,9 @@ impl<B: Backend> Recorder<B> {
             // 排除期間的畫面沒被看過，下一張必須當成全新的
             self.deduper.reset();
             self.last_frame_id = None;
+            // 剪貼簿要「跳過」而不是「不看」：她在密碼管理員裡複製的東西
+            // 還躺在剪貼簿上，不把水位推過去，切回瀏覽器的下一秒就撈進來了
+            self.backend.skip_clipboard(ts);
             // 輸入節奏不含任何內容，繼續累積才不會在節奏訊號上開洞
             self.record_input(ts)?;
             return Ok(Tick::Excluded {
@@ -337,6 +340,69 @@ mod tests {
     use super::*;
     use crate::replay::{Scenario, Step};
     use sister_core::config::PrivacyConfig;
+
+    /// 只記錄「有沒有被叫到」的假剪貼簿，用來驗證排除期間的行為。
+    #[derive(Default)]
+    struct SpyClipboard {
+        polled: Vec<Millis>,
+        skipped: Vec<Millis>,
+    }
+
+    impl crate::traits::ClipboardSource for std::rc::Rc<std::cell::RefCell<SpyClipboard>> {
+        fn poll(&mut self, ts: Millis) -> Result<Option<ClipboardEvent>> {
+            self.borrow_mut().polled.push(ts);
+            Ok(None)
+        }
+        fn skip(&mut self, ts: Millis) {
+            self.borrow_mut().skipped.push(ts);
+        }
+    }
+
+    /// 被排除時剪貼簿必須「跳過」，不能只是「不看」。
+    ///
+    /// 以水位判斷新舊的來源（Windows 的 sequence number）如果只是不讀，
+    /// 她在密碼管理員裡複製的密碼會留在剪貼簿上，等她切回瀏覽器的下一個
+    /// tick 照樣被撈進資料庫——排除規則只延後了洩漏，沒有擋掉。
+    /// 這個性質 replay 後端測不出來（它以事件時間為準），所以在這裡釘住。
+    #[test]
+    fn exclusion_skips_the_clipboard_instead_of_merely_not_polling_it() {
+        use crate::traits::{CompositeBackend, NullInput, NullOcr, NullScreen};
+
+        let spy = std::rc::Rc::new(std::cell::RefCell::new(SpyClipboard::default()));
+
+        struct Focus(String);
+        impl crate::traits::FocusSource for Focus {
+            fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
+                Ok(FocusSnapshot {
+                    app_id: Some(self.0.clone()),
+                    ..Default::default()
+                })
+            }
+        }
+
+        let mut config = Config::default();
+        config.privacy.excluded_apps = vec!["keepassxc".into()];
+
+        let backend = CompositeBackend {
+            name: "spy".into(),
+            screen: NullScreen,
+            focus: Focus("keepassxc.exe".into()),
+            clipboard: spy.clone(),
+            input: NullInput,
+            ocr: NullOcr,
+        };
+        let mut rec = Recorder::new(backend, Db::open_in_memory().unwrap(), config, None).unwrap();
+
+        let tick = rec.tick(1_000).unwrap();
+        assert!(
+            matches!(tick, Tick::Excluded { .. }),
+            "應該被排除：{tick:?}"
+        );
+
+        let spy = spy.borrow();
+        assert!(spy.polled.is_empty(), "排除期間不該讀剪貼簿內容");
+        assert_eq!(spy.skipped, vec![1_000], "但一定要把水位推過去");
+    }
 
     fn step(at_ms: Millis, app: &str, title: &str, text: &[&str]) -> Step {
         Step {

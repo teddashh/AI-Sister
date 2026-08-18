@@ -9,8 +9,12 @@
 
 pub mod frames;
 pub mod recorder;
+
 pub mod replay;
 pub mod traits;
+/// Windows 擷取後端。只在 Windows 上編譯。
+#[cfg(windows)]
+pub mod windows;
 
 pub use recorder::{Recorder, RecorderStats, Tick};
 pub use replay::{ReplayBackend, Scenario, Step};

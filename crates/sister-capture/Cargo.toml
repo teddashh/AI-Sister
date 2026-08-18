@@ -7,6 +7,10 @@ repository.workspace = true
 authors.workspace = true
 description = "AI-Sister capture layer: platform traits, replay backend, recording loop"
 
+[features]
+default = ["bundled-sqlite"]
+bundled-sqlite = ["sister-core/bundled-sqlite"]
+
 [dependencies]
 sister-core.workspace = true
 anyhow.workspace = true
@@ -14,3 +18,22 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 image.workspace = true
+
+# 平台相依的部分只在該平台編譯。Linux 上的開發機不會因此付出任何代價，
+# 而 `cargo check --target x86_64-pc-windows-msvc` 仍然檢查得到這些程式碼。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

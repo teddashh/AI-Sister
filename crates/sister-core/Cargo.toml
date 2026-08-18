@@ -7,6 +7,15 @@ repository.workspace = true
 authors.workspace = true
 description = "AI-Sister core: L0/L1 truth model, local storage, zero-LLM fact extraction"
 
+[features]
+default = ["bundled-sqlite"]
+# 自帶 SQLite 原始碼編譯。出貨一定要開——使用者的機器上不保證有 sqlite3。
+#
+# 關掉它的唯一用途是從 Linux 對 Windows 做 `cargo check`：bundled 會叫
+# libsqlite3-sys 用 MSVC 相容的編譯器去編 sqlite3.c，而交叉檢查的機器上
+# 沒有。`cargo check` 本來就不連結，所以關掉之後型別檢查完全不受影響。
+bundled-sqlite = ["rusqlite/bundled"]
+
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true

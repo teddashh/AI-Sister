@@ -429,6 +429,29 @@ pub mod doctor {
         println!("  {} {label:<22} {detail}", if ok { "✓" } else { "✗" });
     }
 
+    fn url_capture_available() -> bool {
+        #[cfg(windows)]
+        {
+            sister_capture::windows::Capabilities::current().url
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    fn broken_privacy_rules(config: &Config) -> Vec<String> {
+        #[cfg(windows)]
+        {
+            sister_capture::windows::Capabilities::current().broken_privacy_rules(config)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = config;
+            Vec::new()
+        }
+    }
+
     pub fn run(data_dir: &Path, config: &Config) -> Result<()> {
         println!("🩺 AI-Sister 環境檢查\n");
 
@@ -520,10 +543,21 @@ pub mod doctor {
             "排除的 app",
             &format!("{} 條規則", config.privacy.excluded_apps.len()),
         );
+        // 規則數量不等於規則有效。沒有 URL 擷取能力時這些規則一條都不會跑，
+        // 而使用者看到「16 條規則 ✓」只會更放心——那正是最糟的結果。
+        let url_capture = url_capture_available();
         line(
-            true,
+            url_capture,
             "排除的網址",
-            &format!("{} 條規則", config.privacy.excluded_urls.len()),
+            &format!(
+                "{} 條規則{}",
+                config.privacy.excluded_urls.len(),
+                if url_capture {
+                    ""
+                } else {
+                    "（本平台無法讀取網址，這些規則目前不生效）"
+                }
+            ),
         );
         line(
             true,
@@ -557,6 +591,14 @@ pub mod doctor {
                 "否（text-only 模式）"
             },
         );
+
+        let broken = broken_privacy_rules(config);
+        if !broken.is_empty() {
+            println!("\n⚠ 目前失效的隱私保護");
+            for w in &broken {
+                println!("  ✗ {w}");
+            }
+        }
 
         println!("\n保留期");
         line(
@@ -661,20 +703,130 @@ pub mod record {
 
     /// 這台機器上可用的擷取後端名稱。
     pub fn backend_name() -> Option<&'static str> {
-        // 平台後端逐一接上時，這裡跟著長出對應分支
-        None
+        #[cfg(windows)]
+        {
+            Some("windows-gdi")
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
     }
 
-    pub fn run(_data_dir: &Path, _config: Config, _duration: Option<u64>) -> Result<()> {
-        match backend_name() {
-            Some(_) => unreachable!("backend advertised but not wired"),
-            None => anyhow::bail!(
+    pub fn run(data_dir: &Path, config: Config, duration: Option<u64>) -> Result<()> {
+        #[cfg(not(windows))]
+        {
+            let _ = (data_dir, config, duration);
+            anyhow::bail!(
                 "這個平台（{}）還沒有擷取後端。\n\n\
                  Phase 0 的目標平台是 Windows；核心與錄製迴圈本身是平台無關的，\n\
                  可以用腳本完整驗證：\n\n    \
                  sister replay scenarios/bill-lookup.json\n",
                 std::env::consts::OS
-            ),
+            )
         }
+        #[cfg(windows)]
+        {
+            windows_record(data_dir, config, duration)
+        }
+    }
+
+    /// Ctrl-C 只設一個旗標，真正的收尾留給主迴圈。
+    ///
+    /// console handler 跑在另一條執行緒上，在那裡碰資料庫等於在 SQLite
+    /// 交易中間插隊。設一個 bool 是這裡唯一安全的動作。
+    #[cfg(windows)]
+    static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    #[cfg(windows)]
+    fn install_ctrl_c_handler() {
+        use windows::Win32::System::Console::{
+            CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, SetConsoleCtrlHandler,
+        };
+        use windows::core::BOOL;
+
+        unsafe extern "system" fn handler(ctrl_type: u32) -> BOOL {
+            match ctrl_type {
+                CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT => {
+                    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+                    true.into()
+                }
+                _ => false.into(),
+            }
+        }
+        let _ = unsafe { SetConsoleCtrlHandler(Some(handler), true) };
+    }
+
+    #[cfg(windows)]
+    fn windows_record(data_dir: &Path, config: Config, duration: Option<u64>) -> Result<()> {
+        use sister_capture::windows::{self, Capabilities};
+        use sister_capture::{Recorder, Tick};
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        std::fs::create_dir_all(data_dir)
+            .with_context(|| format!("create {}", data_dir.display()))?;
+
+        // 缺席的能力會讓某些排除規則整組失效。這件事要在開始錄之前講，
+        // 不是藏在 doctor 裡等使用者自己去發現。
+        for warning in Capabilities::current().broken_privacy_rules(&config) {
+            println!("⚠  {warning}");
+        }
+
+        let db = Db::open(&crate::db_path(data_dir))?;
+        let backend = windows::backend(&config)?;
+        let images = config.capture.store_images.then(|| data_dir.join("frames"));
+        let interval = Duration::from_millis(config.capture.min_interval_ms.max(200));
+        let mut rec = Recorder::new(backend, db, config, images)?;
+
+        install_ctrl_c_handler();
+        let deadline = duration.map(|d| Instant::now() + Duration::from_secs(d));
+        println!(
+            "● 錄製中（{}），每 {} ms 一次。Ctrl-C 停止。",
+            backend_name().unwrap_or("?"),
+            interval.as_millis()
+        );
+
+        let mut last_report = Instant::now();
+        while !STOP.load(Ordering::SeqCst) {
+            if let Some(d) = deadline
+                && Instant::now() >= d
+            {
+                break;
+            }
+
+            match rec.tick(sister_core::now_ms()) {
+                // 單次 tick 失敗不該終止 session：抓不到畫面的原因多半是
+                // 暫時的（切換使用者、顯示器休眠），下一秒就好了
+                Err(e) => tracing::warn!("tick failed: {e:#}"),
+                Ok(Tick::Kept {
+                    frame_id,
+                    ocr_blocks,
+                    facts,
+                }) => {
+                    tracing::debug!("frame #{frame_id}：{ocr_blocks} 段文字、{facts} 個事實");
+                }
+                Ok(_) => {}
+            }
+
+            if last_report.elapsed() >= Duration::from_secs(60) {
+                let s = rec.stats();
+                println!(
+                    "  … {} tick：保留 {}、重複 {}、排除 {}",
+                    s.ticks, s.kept, s.duplicates, s.excluded
+                );
+                last_report = Instant::now();
+            }
+
+            std::thread::sleep(interval);
+        }
+
+        let stats = rec.stats().clone();
+        rec.finish()?;
+        println!(
+            "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
+            stats.ticks, stats.kept, stats.duplicates, stats.excluded, stats.no_screen
+        );
+        Ok(())
     }
 }

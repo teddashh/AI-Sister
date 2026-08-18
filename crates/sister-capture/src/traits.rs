@@ -60,6 +60,18 @@ pub trait FocusSource {
 /// 剪貼簿來源。回傳自上次呼叫以來的新事件。
 pub trait ClipboardSource {
     fn poll(&mut self, ts: Millis) -> Result<Option<ClipboardEvent>>;
+
+    /// 放棄這一刻的剪貼簿內容，但把「看到哪裡了」推到現在。
+    ///
+    /// 排除期間必須呼叫這個，不能只是不呼叫 [`poll`](Self::poll)。差別在於
+    /// 以水位（sequence number）判斷新舊的來源：她在密碼管理員裡複製的密碼
+    /// 會留在剪貼簿上，只要沒有人把水位推過去，等她切回瀏覽器的下一個 tick，
+    /// 那份內容照樣會被讀進資料庫——排除規則只是延後了洩漏，沒有擋掉它。
+    ///
+    /// 預設是 no-op：以事件時間為準的來源（replay）本來就沒有這個問題。
+    fn skip(&mut self, ts: Millis) {
+        let _ = ts;
+    }
 }
 
 /// 輸入動態來源。取走並清空目前累積的計數。
@@ -85,6 +97,10 @@ pub trait Backend {
     fn grab_screen(&mut self, ts: Millis) -> Result<Option<RawFrame>>;
     fn focus_snapshot(&mut self, ts: Millis) -> Result<FocusSnapshot>;
     fn poll_clipboard(&mut self, ts: Millis) -> Result<Option<ClipboardEvent>>;
+    /// 見 [`ClipboardSource::skip`]。排除期間必須呼叫。
+    fn skip_clipboard(&mut self, ts: Millis) {
+        let _ = ts;
+    }
     fn drain_input(&mut self, ts: Millis) -> Result<Option<InputMetrics>>;
     fn recognize(&mut self, frame: &RawFrame) -> Result<Vec<OcrBlock>>;
 }
@@ -121,6 +137,9 @@ where
     }
     fn poll_clipboard(&mut self, ts: Millis) -> Result<Option<ClipboardEvent>> {
         self.clipboard.poll(ts)
+    }
+    fn skip_clipboard(&mut self, ts: Millis) {
+        self.clipboard.skip(ts)
     }
     fn drain_input(&mut self, ts: Millis) -> Result<Option<InputMetrics>> {
         self.input.drain(ts)

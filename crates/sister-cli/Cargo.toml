@@ -11,6 +11,10 @@ description = "AI-Sister command line: record, replay, query, stats, doctor"
 name = "sister"
 path = "src/main.rs"
 
+[features]
+default = ["bundled-sqlite"]
+bundled-sqlite = ["sister-core/bundled-sqlite", "sister-capture/bundled-sqlite"]
+
 [dependencies]
 sister-core.workspace = true
 sister-capture.workspace = true
@@ -20,3 +24,7 @@ chrono.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# 只為了 Ctrl-C 收尾。與其為這一件事多拉一個相依套件，不如直接用平台 API。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Console"] }
