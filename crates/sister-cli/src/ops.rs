@@ -213,6 +213,10 @@ pub mod query {
             let out = serde_json::json!({
                 "query": text,
                 "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
+                // 撈滿上限＝被切掉了。機器讀的那一份更要講：寫腳本的人
+                // 看不到終端機上的那個「+」，會直接把長度當成總數。
+                "limit": limit,
+                "truncated": answers.len() >= limit || hits.len() >= limit,
                 "answers": answers.iter().map(|a| serde_json::json!({
                     "kind": a.latest.kind, "value": a.latest.normalized, "raw": a.latest.raw,
                     "sightings": a.sightings, "ts": a.latest.ts,
@@ -231,11 +235,21 @@ pub mod query {
             return Ok(());
         }
 
+        // `20 筆原文` 和「一共就這 20 筆」是兩件事，而畫面上長得一模一樣。
+        // 撈滿上限就代表**被切掉了**，說出來使用者才知道還有第二頁。
+        let more = |n: usize| if n >= limit { "+" } else { "" };
         println!(
-            "🔍 「{text}」 {} 筆答案、{} 筆原文，{:.1} ms",
+            "🔍 「{text}」 {}{} 筆答案、{}{} 筆原文，{:.1} ms{}",
             answers.len(),
+            more(answers.len()),
             hits.len(),
-            elapsed.as_secs_f64() * 1000.0
+            more(hits.len()),
+            elapsed.as_secs_f64() * 1000.0,
+            if answers.len() >= limit || hits.len() >= limit {
+                format!("（+ 代表撈滿 {limit} 筆就停了，用 --limit 看更多）")
+            } else {
+                String::new()
+            }
         );
 
         if !answers.is_empty() {

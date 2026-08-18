@@ -79,6 +79,13 @@ pub struct ExtractedFact {
     pub normalized: String,
     pub byte_start: usize,
     pub byte_end: usize,
+    /// **不是機率。** 是每條規則手寫的優先序，唯一的用途是兩條規則搶同一
+    /// 段文字時決定誰贏（見 `extract` 的去重）。
+    ///
+    /// 沒有任何一組標註資料校準過它，所以「0.93」不代表 93% 會是對的。
+    /// 名字取成 confidence 是個歷史錯誤——它長得像一個有意義的數字，而
+    /// 「一個沒辦法歸因的數字，會讓人去修最好修的地方，而不是最貴的地方」。
+    /// 等 Phase 1 有了重播評測集，這裡要嘛真的校準，要嘛改名成 priority。
     pub confidence: f32,
 }
 

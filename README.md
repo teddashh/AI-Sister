@@ -7,7 +7,27 @@
 > forgets, an event-driven brain that can admit it's wrong, and a letter-person
 > who knows when to stay quiet. Raw screen data never leaves your machine.
 
-**Status: design phase.** 本 repo 目前只有設計文件與研究資料；程式碼從 Phase 0 開始。
+**Status: Phase 0，Windows alpha 可以下載來跑**
+（[Releases](https://github.com/teddashh/AI-Sister/releases)）。
+
+跑得起來的是最底下那一層：看畫面、讀字、抓出電話與金額之類的事實、存進 SQLite、搜得回來。
+**這一層一個模型呼叫都沒有**，全部是程式在抄寫。L2/L3（會推論的那個腦）還沒開始。
+
+先跑 `sister doctor`——它不會宣稱任何東西，只會當場示範給你看：能不能讀到你現在的網址、
+OCR 引擎讀不讀得出內建那張圖上的字、哪幾條隱私規則現在其實不生效。
+
+已經量過的（GitHub Actions 的 windows-latest runner、release build、1024×768，
+**不是**一般桌機的數字，主要拿來擋回歸）：
+
+| 一次要多少 | 實測 |
+|---|---|
+| 抓一次畫面（縮到 OCR 用的大小） | 30.1 ms |
+| OCR 一張 | 193.3 ms |
+| 寫一張 PNG | 6.3 ms |
+| 沒有人動鍵盤滑鼠的那些 tick | 0 ms（根本不碰螢幕，最多每 5 秒睜眼一次） |
+
+Phase 0 的退場條件是「連續 7 天自我錄製、CPU <3%、RAM <400MB、磁碟 <300MB/天」，
+還沒達成——真實機器上的數字要等實地跑完才會寫進來。
 
 ## 文件地圖
 

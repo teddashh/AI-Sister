@@ -124,6 +124,11 @@ datetime）、`raw`（螢幕原文）、`normalized`、`confidence`，以及回�
 
 **純 regex，零模型。** 敏感度等同來源文字：螢幕上有電話，這裡就有電話。
 
+> `confidence` **不是機率**。它是每條 regex 手寫死的優先序，唯一的用途是
+> 兩條規則搶同一段文字時決定誰贏。沒有任何標註資料校準過它，所以 `0.93`
+> 不代表「93% 會是對的」——別拿它當閾值，也別拿它排序給使用者看。
+> 名字取錯了，等 Phase 1 有重播評測集之後要嘛真的校準、要嘛改名 priority。
+
 ### `system_events` — 她自己的動作
 
 `kind`（session_start/end、lock、unlock、capture_paused/resumed、

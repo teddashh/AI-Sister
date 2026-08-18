@@ -23,11 +23,12 @@ use crate::traits::{Backend, CompositeBackend};
 /// 這台機器上這個後端實際做得到什麼。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capabilities {
-    pub screen: bool,
-    pub focus: bool,
+    // `screen` / `focus` / `clipboard` 這三個欄位曾經在這裡，永遠是 `true`，
+    // 而且沒有任何一行程式碼讀過它們。那正是這個專案在對付的東西：一個
+    // 回報 ✓ 但什麼都沒驗證的能力欄位。真的要知道前景讀不讀得到，
+    // `doctor` 現在會當場問一次——見那裡的 `focus_probe`。
     /// 瀏覽器網址（需要 UIA）。**沒有它，`excluded_urls` 整組規則不會生效。**
     pub url: bool,
-    pub clipboard: bool,
     /// 輸入 hook 的三態。**不能是布林**：`doctor` 不會去裝 hook，而
     /// 「沒去裝」不等於「裝失敗」——把兩者壓成 false 會產生一則永遠錯的
     /// 警告，然後整個警告區塊都會被使用者學會忽略。
@@ -44,12 +45,9 @@ impl Capabilities {
     pub fn current(config: &Config) -> Self {
         let ocr = ocr::OcrStatus::probe(&config.capture.ocr_languages);
         Self {
-            screen: true,
-            focus: true,
             // 「UIA 建得起來」而已。真的讀不讀得到位址列要在有瀏覽器開著
             // 的時候才知道——那件事由 `doctor` 的實測那一段回答，不是這裡。
             url: uia::Uia::probe(),
-            clipboard: true,
             input: input::WindowsInput::state(),
             ocr: ocr.chosen.is_some(),
             ocr_language: ocr.chosen,
@@ -141,10 +139,7 @@ mod tests {
     /// 這樣斷言就不會受跑測試的那台機器裝了什麼影響。
     fn fully_capable() -> Capabilities {
         Capabilities {
-            screen: true,
-            focus: true,
             url: true,
-            clipboard: true,
             input: input::HookState::Active,
             ocr: true,
             ocr_language: Some("zh-Hant-TW".into()),
