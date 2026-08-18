@@ -43,10 +43,17 @@ jobs:
         run: ./scripts/check-no-network.sh
 
       # 「三天前那通電話 100ms 內查得回來」是 Phase 0 的退場條件之一，而在
-      # 這一步存在之前，它唯一的實作是一行註解。45 天的語料會**超過**
-      # `LIKE_SCAN_DAYS` 那道 30 天的界線——沒有界線的話這一步會紅。
-      # （`cargo test` 預設只灌一天，因為每次 push 都要跑。）
+      # 這一步存在之前，它唯一的實作是一行註解。
+      #
+      # 只在打 tag 和手動觸發時跑：灌 45 天要兩分鐘，加上 release build 是
+      # 每次 push 多四分鐘。它買到的是 README 上那幾個絕對數字，而那幾個數字
+      # 只有出版本的時候才需要新的。
+      #
+      # 每次 push 該擋的東西沒有被放掉：掃描的 30 天界線由 db.rs 的
+      # `the_like_scan_does_not_look_past_its_window` 用行為驗，跑不到一秒，
+      # 而且不受機器快慢影響。這裡量的是「多快」，那裡驗的是「對不對」。
       - name: Search latency — the exit criterion, measured at a month and a half
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: SISTER_BENCH_DAYS=45 cargo test -p sister-core --release --test search_latency -- --nocapture
 
       # 稽核路徑要真的走一次。`system_events` 和 `secret_suspected` 都當過
