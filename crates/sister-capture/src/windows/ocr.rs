@@ -119,9 +119,13 @@ impl OcrStatus {
 
 /// Windows 內建 OCR。
 ///
-/// 建構永遠不會失敗：沒有可用的語言時它就是一個什麼都讀不出來的引擎，
-/// 而那件事由 [`OcrStatus`] 負責讓使用者看見。錄製不該因為 OCR 缺席而停擺，
-/// 但也不該假裝 OCR 有在運作。
+/// 建構永遠不會失敗：沒有可用的語言時它就是一個建不出引擎的 `WindowsOcr`。
+/// 錄製不該因為 OCR 缺席而停擺——畫面與脈絡還是值得留下來。
+///
+/// 但「不停擺」不等於「不出聲」。這裡踩過一次：建不出引擎時
+/// `recognize()` 回 `Ok(Vec::new())`，上層讀起來就是「這張畫面上沒有字」，
+/// 於是失敗計數是 0、摘要全綠、資料庫空的。現在它回 `Err`，由 recorder
+/// 接住——畫面照樣保留，但 `last_ocr_error` 會說出原因。
 pub struct WindowsOcr {
     engine: Option<OcrEngine>,
     max_dimension: u32,
@@ -191,11 +195,20 @@ impl WindowsOcr {
 
 impl Ocr for WindowsOcr {
     fn recognize(&mut self, frame: &RawFrame) -> Result<Vec<OcrBlock>> {
+        // 這兩個以前都回 `Ok(Vec::new())`，理由是「錄製不該因為 OCR 缺席而
+        // 停擺」——那個目標是對的，但作法錯了：回空的等於告訴上層「這張畫面
+        // 上沒有字」，於是 `ocr_failures` 是 0、`last_ocr_error` 是 None、
+        // 摘要一片綠，而資料庫裡一個字都沒有。錄製照樣不會停（recorder 會
+        // 接住這個錯、保留畫面），差別只在於它**說得出來**。
         let Some(engine) = self.engine.as_ref() else {
-            return Ok(Vec::new());
+            bail!(
+                "OCR 引擎沒有建起來——這台機器上沒有可用的 OCR 語言包。\
+                 到「設定 → 語言 → 選用功能」加裝光學字元辨識，再跑 `sister doctor` 確認"
+            );
         };
         let Some(rgba) = frame.rgba.as_deref() else {
-            return Ok(Vec::new());
+            // 擷取端交出一張沒有像素的畫面。那不是「畫面上沒有字」，是 bug。
+            bail!("這一幀沒有像素資料（{}x{}）", frame.width, frame.height);
         };
         let (w, h) = (frame.width, frame.height);
 
