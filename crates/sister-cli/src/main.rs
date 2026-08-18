@@ -99,6 +99,16 @@ enum Command {
         json: bool,
     },
 
+    /// 讓過期的東西真的消失（保留期由 config 的 retention 決定）
+    ///
+    /// 錄製開始時本來就會自動跑一次。這個子命令是給「我現在就要它消失」
+    /// 以及「先讓我看看會刪掉什麼」用的。
+    Prune {
+        /// 只印出會刪掉什麼，一個位元組都不動
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// 環境檢查：這台機器能不能好好跑
     Doctor,
 }
@@ -149,6 +159,7 @@ fn main() -> Result<()> {
             json,
         } => ops::facts::run(&data_dir, kind.as_deref(), search.as_deref(), limit, json),
         Command::Stats { json } => ops::stats::run(&data_dir, json),
+        Command::Prune { dry_run } => ops::prune::run(&data_dir, &config, dry_run),
         Command::Doctor => ops::doctor::run(&data_dir, &config),
     }
 }

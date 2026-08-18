@@ -45,7 +45,10 @@
 | `dup_run` | 這張畫面連續重複了幾次 | 低 |
 | `app_id` / `window_title` / `url` | 當下的脈絡 | **中**：標題與網址常含人名、案號、單號 |
 
-畫面檔本身是**最敏感的東西**：螢幕上有什麼，它就有什麼。預設保留 30 天。
+畫面檔本身是**最敏感的東西**：螢幕上有什麼，它就有什麼。預設保留 30 天，
+到期後 PNG 真的會從磁碟上消失，但這一列與它的文字留到 `text_days`（預設
+365 天）——截圖和「三個月前那通客服電話」不是同一件東西，不該綁在一起刪。
+清理在每次錄製開始時自動跑，也可以隨時 `sister prune`（`--dry-run` 先看）。
 
 ### `ocr_blocks` — 畫面上的文字（含位置）
 
@@ -176,10 +179,11 @@ datetime）、`raw`（螢幕原文）、`normalized`、`confidence`，以及回�
 ## 怎麼自己查證
 
 ```bash
-sister stats            # 記了多少、佔多少空間
-sister doctor           # 排除規則、失效的保護、schema 版本
-sister query <關鍵字>   # 每一筆都附出處
+sister stats               # 記了多少、佔多少空間
+sister doctor              # 排除規則、失效的保護、schema 版本、現在有多少已過期
+sister query <關鍵字>      # 每一筆都附出處
 sister facts --kind phone
+sister prune --dry-run     # 保留期現在會刪掉什麼（一個位元組都不動）
 ```
 
 驗證排除真的生效：

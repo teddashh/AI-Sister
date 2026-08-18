@@ -45,6 +45,72 @@ fn report_exclusions(stats: &sister_capture::RecorderStats) {
     }
 }
 
+pub mod prune {
+    use super::*;
+    use sister_core::config::Config;
+    use sister_core::retention::PruneReport;
+
+    /// 畫面檔的根目錄。和 `record` 用的是同一個算式。
+    pub fn frames_dir(data_dir: &Path) -> std::path::PathBuf {
+        data_dir.join("frames")
+    }
+
+    pub fn run(data_dir: &Path, config: &Config, dry_run: bool) -> Result<()> {
+        let mut db = open_existing(data_dir)?;
+        let now = sister_core::now_ms();
+        let r = &config.retention;
+
+        println!(
+            "保留期：畫面 {} 天、文字與事實 {} 天",
+            r.frames_days, r.text_days
+        );
+
+        if dry_run {
+            let report = db.prune_preview(now, r)?;
+            print_report(&report, true);
+            return Ok(());
+        }
+        let report = db.prune(now, r, Some(&frames_dir(data_dir)))?;
+        print_report(&report, false);
+        Ok(())
+    }
+
+    /// 刪掉的東西要一項一項講出來。
+    ///
+    /// 「清理完成」這種話等於沒說：使用者沒辦法分辨「沒有東西過期」和
+    /// 「清理其實沒生效」——而這兩件事在磁碟上長得一模一樣。
+    pub fn print_report(r: &PruneReport, preview: bool) {
+        let verb = if preview { "會刪掉" } else { "刪掉了" };
+        if r.is_empty() {
+            println!("  沒有東西過期，什麼都沒動。");
+            return;
+        }
+        if r.images_deleted > 0 {
+            println!(
+                "  {verb} {} 個畫面檔（{}）",
+                r.images_deleted,
+                crate::fmt::bytes(r.image_bytes_freed as i64)
+            );
+        }
+        if r.frames_deleted > 0 {
+            println!(
+                "  {verb} {} 列畫面紀錄、{} 段文字、{} 個事實、{} 筆事件",
+                r.frames_deleted, r.chunks_deleted, r.facts_deleted, r.events_deleted
+            );
+        } else if r.chunks_deleted + r.facts_deleted + r.events_deleted > 0 {
+            println!(
+                "  {verb} {} 段文字、{} 個事實、{} 筆事件",
+                r.chunks_deleted, r.facts_deleted, r.events_deleted
+            );
+        }
+        // 刪不掉的檔案仍然躺在磁碟上，而使用者以為它已經不在了。
+        // 這是整份報告裡唯一絕對不能安靜掉的一項。
+        for f in &r.failed {
+            println!("  ⚠  刪不掉，這個畫面還在磁碟上：{f}");
+        }
+    }
+}
+
 pub mod query {
     use super::*;
     use crate::fmt;
@@ -755,8 +821,9 @@ pub mod doctor {
             .unwrap_or(0);
         line(fts == 2, "FTS5 雙索引", "trigram + unicode61");
 
-        if db_file.exists() {
-            let db = Db::open(&db_file)?;
+        // 開著不關：底下「保留期」那一段還要拿它去問「現在有多少已過期」。
+        let db = db_file.exists().then(|| Db::open(&db_file)).transpose()?;
+        if let Some(db) = &db {
             line(
                 true,
                 "Schema 版本",
@@ -912,13 +979,29 @@ pub mod doctor {
         line(
             true,
             "畫面",
-            &format!("{} 天", config.retention.frames_days),
+            &format!("{} 天（到期只刪圖，字留著）", config.retention.frames_days),
         );
         line(
             true,
             "文字與事實",
-            &format!("{} 天", config.retention.text_days),
+            &format!("{} 天（到期整列消失）", config.retention.text_days),
         );
+        // 這兩個數字以前是**純粹的宣稱**——設定檔裡寫著 30 天，而沒有任何
+        // 一行程式碼會刪掉任何東西。同樣不宣稱、直接示範：現在就去問資料庫
+        // 「這一刻有多少東西已經過期」。`?` 代表還沒有資料庫可以問。
+        match db.as_ref().map(|d| {
+            d.prune_preview(sister_core::now_ms(), &config.retention)
+                .map(|r| (r.images_deleted, r.frames_deleted))
+        }) {
+            Some(Ok((0, 0))) => line(true, "現在有多少已過期", "沒有——都還在保留期內"),
+            Some(Ok((imgs, rows))) => mark(
+                "?",
+                "現在有多少已過期",
+                &format!("{imgs} 個畫面檔、{rows} 列紀錄。跑 `sister prune` 讓它們消失"),
+            ),
+            Some(Err(e)) => line(false, "現在有多少已過期", &format!("問不出來：{e:#}")),
+            None => mark("?", "現在有多少已過期", "還沒有資料庫"),
+        }
         Ok(())
     }
 }
@@ -1076,7 +1159,7 @@ pub mod record {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create {}", data_dir.display()))?;
 
-        let db = Db::open(&crate::db_path(data_dir))?;
+        let mut db = Db::open(&crate::db_path(data_dir))?;
         // **先建後端、再問能力。** 反過來的話，「輸入 hook 裝上了沒」永遠
         // 是在 hook 還沒裝之前問的，於是永遠回報失敗——一則恆假的警告。
         let backend = windows::backend(&config)?;
@@ -1089,6 +1172,29 @@ pub mod record {
         }
         for warning in caps.silently_degraded(&config) {
             println!("⚠  {warning}");
+        }
+
+        // 開錄之前先讓過期的東西消失。放在這裡而不是收工時，是因為收工
+        // 有太多種方式不會發生（Ctrl-C、當機、關機、拔電），而開錄只有
+        // 一種方式：她真的開始了。一個只在乾淨結束時才生效的保留期，
+        // 就是一個在最需要它的機器上永遠不生效的保留期。
+        match db.prune(
+            sister_core::now_ms(),
+            &config.retention,
+            config
+                .capture
+                .store_images
+                .then(|| crate::ops::prune::frames_dir(data_dir))
+                .as_deref(),
+        ) {
+            Ok(report) if !report.is_empty() => {
+                println!("○ 保留期清理");
+                crate::ops::prune::print_report(&report, false);
+            }
+            Ok(_) => {}
+            // 清不掉不該擋住錄製，但也絕對不能安靜——這整個模組的存在
+            // 理由就是「說好會消失的東西沒有消失」不可以沒有人知道。
+            Err(e) => println!("⚠  保留期清理失敗，過期的資料還在：{e:#}"),
         }
 
         let images = config.capture.store_images.then(|| data_dir.join("frames"));

@@ -19,6 +19,7 @@ pub mod dedup;
 pub mod facts;
 pub mod model;
 pub mod redact;
+pub mod retention;
 
 pub use config::{CaptureConfig, Config, Exclusion, PrivacyConfig, RetentionConfig};
 pub use db::{Db, DbStats, FactRow, FrameContext, SCHEMA_VERSION};

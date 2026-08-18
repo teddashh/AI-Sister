@@ -142,24 +142,27 @@ impl Default for PrivacyConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+/// 東西活多久。由 [`crate::retention`] 執行。
+///
+/// 這裡曾經還有 `thumbs_days` 和 `max_disk_gb_per_day` 兩個欄位。它們被
+/// 拿掉了，因為**沒有縮圖、也沒有任何東西會在超過磁碟上限時降級**——
+/// 一個什麼都不做的設定項比沒有這個設定項更糟：使用者會調它、會相信它，
+/// 然後在需要它的那天發現它從來沒有存在過。要就實作，不然就刪掉。
+///
+/// `0` 代表**立刻刪除**，不是「永久保留」。理由見
+/// [`crate::retention::cutoff`]。
 pub struct RetentionConfig {
-    /// 全解析度畫面保留天數。
+    /// 全解析度畫面保留天數。到期後刪掉 PNG，但**保留文字**。
     pub frames_days: u32,
-    /// 縮圖保留天數。
-    pub thumbs_days: u32,
-    /// OCR 文字與 L1 事實保留天數。
+    /// OCR 文字與 L1 事實保留天數。到期後整列消失。
     pub text_days: u32,
-    /// 單日磁碟上限（GB），超過觸發自動降級。
-    pub max_disk_gb_per_day: f64,
 }
 
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
             frames_days: 30,
-            thumbs_days: 90,
             text_days: 365,
-            max_disk_gb_per_day: 2.0,
         }
     }
 }

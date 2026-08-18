@@ -170,7 +170,9 @@ CREATE INDEX idx_facts_ts ON facts(ts);
 "#;
 
 pub struct Db {
-    conn: Connection,
+    /// `pub(crate)` 只為了 [`crate::retention`]：清理要跨好幾張表、還要在
+    /// 同一個 transaction 裡跑，包成一堆窄 API 反而更難看出它到底刪了什麼。
+    pub(crate) conn: Connection,
 }
 
 impl Db {
