@@ -519,6 +519,34 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 排除稽核：哪幾條規則真的生效過、生效過幾**段**、第一段和最後一段何時開始。
+    ///
+    /// 這張表以前是只寫不讀的。DATA_INVENTORY 說 `excluded` 這一列「是稽核用的，
+    /// 沒有它使用者無法驗證排除真的生效了」——但只有錄製當下的那份記憶體統計
+    /// 印得出來，錄完就再也叫不回來。一條查不回來的稽核紀錄，跟沒有稽核紀錄
+    /// 對使用者是一樣的。
+    ///
+    /// **數的是「段」，不是「幀」。** recorder 只在踏進一段排除狀態時寫一列
+    /// （見 `last_exclusion` 的去抖），所以在 keepassxc 裡待了十分鐘＝一列。
+    /// 被擋掉的畫面張數沒有被存下來，只有那一次錄製的即時統計知道——把這裡的
+    /// 數字說成「擋掉幾張畫面」會差好幾個數量級。
+    pub fn exclusion_audit(&self) -> Result<Vec<ExclusionAudit>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(detail, '（沒寫理由）'), COUNT(*), MIN(ts), MAX(ts)
+             FROM system_events WHERE kind = 'excluded'
+             GROUP BY detail ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ExclusionAudit {
+                reason: r.get(0)?,
+                episodes: r.get(1)?,
+                first_ts: r.get(2)?,
+                last_ts: r.get(3)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
     // ---------- 檢索 ----------
 
     /// 全文檢索。trigram 與 unicode61 兩個索引各查一次再合併取最佳分數，
@@ -950,6 +978,17 @@ pub struct FactRow {
     pub url: Option<String>,
 }
 
+/// 一條排除規則生效過的紀錄（見 [`Db::exclusion_audit`]）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExclusionAudit {
+    pub reason: String,
+    /// 進入這個排除狀態的**次數**，不是被擋掉的畫面張數。
+    pub episodes: i64,
+    /// 第一段與最後一段**開始**的時間。段的結束沒有被記錄。
+    pub first_ts: Millis,
+    pub last_ts: Millis,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameContext {
     pub frame_id: i64,
@@ -1318,6 +1357,50 @@ mod tests {
         let st = db.stats().expect("stats");
         assert_eq!(st.input_windows, 1);
         assert_eq!(st.system_events, 1);
+    }
+
+    /// 錄製結束之後，還叫得回來「哪條規則擋掉了什麼、擋了幾次」。
+    ///
+    /// 這件事以前只有錄製當下的記憶體統計答得出來。使用者關掉終端機之後，
+    /// 「排除真的生效了嗎」就再也無從查證——而文件說這張表就是為了讓他能查證
+    /// 才存的。稽核紀錄查不回來等於沒有稽核紀錄。
+    #[test]
+    fn the_exclusion_audit_survives_the_recording_that_wrote_it() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for (ts, reason) in [
+            (100, "app 在排除清單：1password"),
+            (300, "app 在排除清單：1password"),
+            (200, "網址在排除清單：bank.example.com"),
+        ] {
+            db.insert_system(
+                s,
+                &SystemEvent {
+                    ts,
+                    kind: SystemKind::Excluded,
+                    detail: Some(reason.into()),
+                },
+            )
+            .expect("insert");
+        }
+        // 不是排除的事件不該混進來
+        db.insert_system(
+            s,
+            &SystemEvent {
+                ts: 400,
+                kind: SystemKind::Lock,
+                detail: None,
+            },
+        )
+        .expect("insert lock");
+
+        let audit = db.exclusion_audit().expect("audit");
+        assert_eq!(audit.len(), 2, "應該依理由分組：{audit:?}");
+        assert_eq!(audit[0].reason, "app 在排除清單：1password", "多的排前面");
+        assert_eq!(audit[0].episodes, 2);
+        assert_eq!(audit[0].first_ts, 100);
+        assert_eq!(audit[0].last_ts, 300);
+        assert_eq!(audit[1].episodes, 1);
     }
 
     #[test]

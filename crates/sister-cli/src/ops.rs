@@ -503,6 +503,7 @@ pub mod stats {
         // 是 2.4 GB/天——超標八倍卻長得像通過。隔壁的 `footprint.rs` 早就
         // 為同一件事寫了規則（不到 60 秒不外推）並且有測試守著，是這裡沒跟上。
         let per_day = (span_days >= 0.5).then(|| disk_total as f64 / span_days);
+        let audit = db.exclusion_audit()?;
 
         if json {
             println!(
@@ -515,6 +516,10 @@ pub mod stats {
                     "sessions": s.sessions, "db_bytes": s.db_bytes,
                     "image_bytes": s.image_bytes, "span_days": span_days,
                     "bytes_per_day": per_day,  // null = 資料還不夠久，不外推
+                    "exclusions": audit.iter().map(|a| serde_json::json!({
+                        "reason": a.reason, "episodes": a.episodes,
+                        "first_ts": a.first_ts, "last_ts": a.last_ts,
+                    })).collect::<Vec<_>>(),
                 }))?
             );
             return Ok(());
@@ -547,6 +552,37 @@ pub mod stats {
             "  事件      焦點 {} · 剪貼簿 {} · 輸入 {} · 系統 {}",
             s.focus_events, s.clipboard_events, s.input_windows, s.system_events
         );
+        println!();
+
+        // 排除稽核。這一段的重點不是「有幾條規則」——那是設定檔，doctor 會念。
+        // 這裡回答的是「它們到底生效過沒有」，而錄製結束之後只有資料庫答得出來。
+        //
+        // 數的是「段」：踏進 keepassxc 待十分鐘算一段。被擋掉的畫面**張數**
+        // 沒有存進資料庫，所以這裡不講張數——講了就是把一個 2 說成 8000。
+        if audit.is_empty() {
+            println!("  排除      沒有任何一段擷取因為隱私規則被擋下來");
+            println!("            （規則有沒有寫對是另一回事，跑 `sister doctor` 當場驗）");
+        } else {
+            let total: i64 = audit.iter().map(|a| a.episodes).sum();
+            println!("  排除      隱私規則生效過 {total} 段（不是張數，張數沒存）");
+            for a in &audit {
+                let when = if a.first_ts == a.last_ts {
+                    fmt::timestamp(a.first_ts)
+                } else {
+                    format!(
+                        "{} → {}",
+                        fmt::timestamp(a.first_ts),
+                        fmt::timestamp(a.last_ts)
+                    )
+                };
+                println!(
+                    "            {:>4} 段  {}",
+                    a.episodes,
+                    fmt::one_line(&a.reason, 46)
+                );
+                println!("                    {when}");
+            }
+        }
         println!();
         println!(
             "  資料庫    {}\n  畫面檔    {}",
