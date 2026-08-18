@@ -429,31 +429,44 @@ pub mod doctor {
         println!("  {} {label:<22} {detail}", if ok { "✓" } else { "✗" });
     }
 
-    fn url_capture_available() -> bool {
-        #[cfg(windows)]
-        {
-            sister_capture::windows::Capabilities::current().url
-        }
-        #[cfg(not(windows))]
-        {
-            false
-        }
+    /// doctor 要用到的能力摘要。平台差異只收在這一個地方。
+    ///
+    /// 探測 OCR 要真的把引擎建起來，所以整份報告只問一次。
+    #[derive(Default)]
+    struct Caps {
+        url: bool,
+        ocr: bool,
+        ocr_language: Option<String>,
+        ocr_available: Vec<String>,
+        /// 記了不該記的（排除規則失效）
+        broken_privacy: Vec<String>,
+        /// 其實什麼都沒記住，但你不會發現
+        degraded: Vec<String>,
     }
 
-    fn broken_privacy_rules(config: &Config) -> Vec<String> {
+    fn caps(config: &Config) -> Caps {
         #[cfg(windows)]
         {
-            sister_capture::windows::Capabilities::current().broken_privacy_rules(config)
+            let c = sister_capture::windows::Capabilities::current(config);
+            Caps {
+                url: c.url,
+                ocr: c.ocr,
+                ocr_language: c.ocr_language.clone(),
+                ocr_available: c.ocr_languages_available.clone(),
+                broken_privacy: c.broken_privacy_rules(config),
+                degraded: c.silently_degraded(config),
+            }
         }
         #[cfg(not(windows))]
         {
             let _ = config;
-            Vec::new()
+            Caps::default()
         }
     }
 
     pub fn run(data_dir: &Path, config: &Config) -> Result<()> {
         println!("🩺 AI-Sister 環境檢查\n");
+        let caps = caps(config);
 
         println!("環境");
         line(
@@ -545,7 +558,7 @@ pub mod doctor {
         );
         // 規則數量不等於規則有效。沒有 URL 擷取能力時這些規則一條都不會跑，
         // 而使用者看到「16 條規則 ✓」只會更放心——那正是最糟的結果。
-        let url_capture = url_capture_available();
+        let url_capture = caps.url;
         line(
             url_capture,
             "排除的網址",
@@ -592,10 +605,42 @@ pub mod doctor {
             },
         );
 
-        let broken = broken_privacy_rules(config);
-        if !broken.is_empty() {
+        // OCR 語言決定她讀不讀得懂你的螢幕，所以要把**實際挑中的**那個印出來，
+        // 不是印設定檔裡的偏好清單——兩者不一致正是問題所在。
+        println!("\n讀字");
+        if !config.capture.ocr {
+            line(false, "OCR", "已關閉（畫面會留下，但上面的字不會進資料庫）");
+        } else {
+            line(
+                caps.ocr,
+                "OCR 語言",
+                &match &caps.ocr_language {
+                    Some(tag) => format!("{tag}（實際使用）"),
+                    None => "無：這台機器沒有安裝任何 OCR 語言".to_string(),
+                },
+            );
+            line(
+                !caps.ocr_available.is_empty(),
+                "已安裝的語言",
+                &if caps.ocr_available.is_empty() {
+                    "（無）".to_string()
+                } else {
+                    caps.ocr_available.join("、")
+                },
+            );
+        }
+
+        if !caps.broken_privacy.is_empty() {
             println!("\n⚠ 目前失效的隱私保護");
-            for w in &broken {
+            for w in &caps.broken_privacy {
+                println!("  ✗ {w}");
+            }
+        }
+
+        // 「她會不會記錯」和「她到底有沒有記住」是兩回事，分開報。
+        if !caps.degraded.is_empty() {
+            println!("\n⚠ 看起來正常，但其實記不住東西");
+            for w in &caps.degraded {
                 println!("  ✗ {w}");
             }
         }
@@ -767,9 +812,13 @@ pub mod record {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create {}", data_dir.display()))?;
 
-        // 缺席的能力會讓某些排除規則整組失效。這件事要在開始錄之前講，
-        // 不是藏在 doctor 裡等使用者自己去發現。
-        for warning in Capabilities::current().broken_privacy_rules(&config) {
+        // 缺席的能力會讓某些排除規則整組失效，或讓她其實什麼都沒記住。
+        // 這兩件事都要在開始錄之前講，不是藏在 doctor 裡等使用者自己去發現。
+        let caps = Capabilities::current(&config);
+        for warning in caps.broken_privacy_rules(&config) {
+            println!("⚠  {warning}");
+        }
+        for warning in caps.silently_degraded(&config) {
             println!("⚠  {warning}");
         }
 

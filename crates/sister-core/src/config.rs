@@ -36,6 +36,12 @@ pub struct CaptureConfig {
     pub store_images: bool,
     /// 是否對保留幀跑 OCR。
     pub ocr: bool,
+    /// OCR 語言的偏好順序（BCP-47），第一個裝得起來的就用。
+    ///
+    /// 這個順序直接決定她讀不讀得懂你的螢幕。Windows 的 OCR 是**逐語言**
+    /// 安裝的；沒裝中文的話引擎會安靜地退回英文，然後把滿螢幕的中文讀成
+    /// 空白。`sister doctor` 會把實際選中的語言講出來，就是為了這件事。
+    pub ocr_languages: Vec<String>,
     /// 輸入動態的聚合視窗（秒）。
     pub input_window_secs: u64,
 }
@@ -50,6 +56,12 @@ impl Default for CaptureConfig {
             max_long_edge: 1568,
             store_images: true,
             ocr: true,
+            // 繁體中文優先，英文墊底。中文的 OCR 引擎本來就讀得懂拉丁字母，
+            // 反過來則完全不行——所以順序不能顛倒。
+            ocr_languages: ["zh-Hant-TW", "zh-Hant", "en-US"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             input_window_secs: 10,
         }
     }

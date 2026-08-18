@@ -451,7 +451,7 @@ SQLCipher 或 OS-keyring 包裹的 at-rest 加密；一鍵 pause；一鍵 panic 
 | core daemon | **Rust** 單 binary（Tauri sidecar 形式打包，獨立於 UI 存活） | macOS TCC 權限歸屬 responsible process——sidecar 必須簽進 .app bundle，權限只要一次 |
 | 截圖 | per-OS 原生：`windows-capture` 2.0（WGC）/ `screencapturekit` 8.0 / Linux `ashpd`+PipeWire；原型期可用 `xcap` | 〔定案〕不賭單一跨平台 capture crate |
 | 去重 | `image_hasher` 3.1（dHash 64-bit，螢幕畫面 Hamming ≤4–8 視為同幀）+ Windows DXGI dirty rects + 髒區塊 crop-hash → 只 OCR 髒區塊 | |
-| OCR | macOS：Apple Vision（zh-Hant 一等公民，accurate ~0.3–1.4s/全幅，搭配 OCR gate 只跑 crop）；Windows：**繁中正解 = 自帶 PP-OCRv5/v6 via `oar-ocr`**（全 Rust、原生繁中，CPU ~0.25–0.6s/幀）——`Windows.Media.Ocr` 有 CJK 逐字拆詞 bug + 語言包依賴、TextRecognizer 鎖 Copilot+ NPU，兩者只當機會型升級；OneOCR 授權灰色，只做使用者自機 opt-in；Tesseract 僅最後底線 | 搜尋前全半形正規化 + OpenCC 繁簡歸一 |
+| OCR | macOS：Apple Vision（zh-Hant 一等公民，accurate ~0.3–1.4s/全幅，搭配 OCR gate 只跑 crop）；Windows：**Phase 0 實作改用 `Windows.Media.Ocr`，見 §14.1**；PP-OCRv5 via `oar-ocr` 保留為精準度升級路線；TextRecognizer 鎖 Copilot+ NPU；OneOCR 授權灰色，只做使用者自機 opt-in；Tesseract 僅最後底線 | 搜尋前全半形正規化 + OpenCC 繁簡歸一 |
 | DB | SQLite 3.53（`rusqlite` 0.40，WAL）+ **FTS5 trigram + unicode61 雙索引**（external-content table；trigram 補 CJK、unicode61 補英文整詞與 <3 字查詢洞） | 之後要拼音再上 `simple` tokenizer |
 | 向量（選配） | `sqlite-vec` 0.1.9（2026 復活版；256-d int8 MRL，brute-force 在我們規模內互動級） | pre-1.0 格式風險 → 存 model-id+dim，設計成可背景 re-embed |
 | 本地 embedding | `fastembed` 6.0：EmbeddingGemma-300m 首選（量化 <200MB RAM）/ Qwen3-Embedding-0.6B 品質檔 | 批次排到 idle/插電 |
@@ -470,6 +470,35 @@ macOS 於 Phase 5 公開宣傳前補齊（紫點與 TCC 憲法見 §2.4）；
 Linux **X11 首發、Wayland 明示降級**〔定案〕——Wayland 背景連續擷取是架構性死路
 （restore_token 單次、鎖屏拒發、GNOME 缺 toplevel/idle-notify），不承諾、文件明講。
 capture 從 day 1 走 trait 抽象，三平台介面同形。
+
+### §14.1 偏離紀錄：Windows OCR 引擎（Phase 0）
+
+上表原本〔定案〕Windows 用 PP-OCRv5 via `oar-ocr`。**Phase 0 的實作沒有照做**，
+改用系統內建的 `Windows.Media.Ocr`。這一節記錄理由，以及在什麼條件下該改回去。
+
+實際去看相依樹之後才發現的、選型當時不知道的事：
+
+1. **`oar-ocr` 的 `auto-download` 會把 `ureq` 連進執行檔。** 那是一個真的 HTTP
+   client，存在於出貨的二進位檔裡。PRIVACY.md 的第一句是「程式裡沒有任何對外
+   連線的程式碼路徑」——那句話要嘛是真的，要嘛不是。
+2. **`ort` 用 `copy-dylibs` 出貨 `onnxruntime.dll`**（~15MB）加上模型（~20MB），
+   使用者要下載的就不再是一個檔案。目前 `sister.exe` 是 2.4MB 的單檔。
+3. **Phase 0 的驗收條件是 CPU < 3%、RAM < 400MB**，而 ONNX Runtime 常駐兩個
+   模型光是 arena 就吃掉大半。這是一個整天都在跑的背景程式。
+
+上表列出的兩項反對意見，處理方式如下：
+
+- **「CJK 逐字拆詞 bug」→ 已緩解。** 不採信引擎給的整行字串，改由每個詞的
+  幾何間距重新組行（`crates/sister-capture/src/ocr_layout.rs`，8 個單元測試 +
+  一個真的在 Windows 上跑的 CI 步驟）。
+- **「語言包依賴」→ 未消除，改為可見。** 沒裝中文語言包時引擎會安靜地退回
+  英文。`sister doctor` 因此印出**實際挑中的**語言並明講後果。這是缺陷被
+  攤開，不是缺陷被解決。
+
+**什麼時候該改回 PP-OCRv5**：Phase 0 的七天自錄若顯示繁中準確度不可接受
+（尤其小字級、深色主題、反鋸齒），就把它接在 `Ocr` trait 後面作為 opt-in 引擎，
+並用 build-time 下載 + checksum 內嵌模型，避免執行期網路。`Ocr` trait 的存在
+就是為了讓這個決定可以事後改，而且只動一個檔案。
 
 ## §16. 開源與 repo 策略
 

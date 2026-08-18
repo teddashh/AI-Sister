@@ -50,6 +50,12 @@ pub struct RecorderStats {
     pub secrets_redacted: u64,
     pub focus_events: u64,
     pub image_bytes: u64,
+    /// OCR 失敗了幾次。
+    ///
+    /// OCR 壞掉不該讓錄製停擺——畫面與脈絡還是值得留下來。但它也絕對不能
+    /// 靜靜地壞：一個「一直在錄、什麼都搜不到」的產品，比一個明講自己
+    /// 讀不到字的產品糟得多。所以錯誤吞掉可以，計數不能不留。
+    pub ocr_failures: u64,
 }
 
 pub struct Recorder<B: Backend> {
@@ -205,7 +211,15 @@ impl<B: Backend> Recorder<B> {
 
     fn keep_frame(&mut self, ts: Millis, frame: RawFrame, focus: FocusSnapshot) -> Result<Tick> {
         let ocr = if self.config.capture.ocr {
-            self.backend.recognize(&frame).unwrap_or_default()
+            // OCR 失敗不擋錄製，但要留下計數——見 `RecorderStats::ocr_failures`
+            match self.backend.recognize(&frame) {
+                Ok(blocks) => blocks,
+                Err(e) => {
+                    self.stats.ocr_failures += 1;
+                    tracing::warn!(error = %e, "OCR failed; keeping the frame without text");
+                    Vec::new()
+                }
+            }
         } else {
             Vec::new()
         };

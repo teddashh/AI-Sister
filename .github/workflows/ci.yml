@@ -37,6 +37,11 @@ jobs:
       - name: Privacy — sensitive content must never reach disk
         run: cargo test -p sister-capture --test privacy -- --nocapture
 
+      # PRIVACY.md 說「整個 repo 搜不到 HTTP client」。這一步讓那句話由 CI
+      # 保證，而不是由記性保證——缺口通常是相依套件帶進來的，不是人手動加的。
+      - name: Privacy — there must be no HTTP client in the shipped binary
+        run: ./scripts/check-no-network.sh
+
       # Windows 那一半在 Linux 上被 cfg 關掉，這裡至少要型別檢查到
       - name: Cross-check the Windows half
         run: ./scripts/check-windows.sh
@@ -58,6 +63,13 @@ jobs:
       # 這一步是 Linux 上做不到的事：Win32 程式碼真的被執行
       - name: Test
         run: cargo test --workspace
+
+      # 微軟的文件說 Windows.Media.Ocr 需要 package identity，也就是這支
+      # 沒打包的 exe 理論上叫不動它。實務上叫得動——這一步就是把「理論上」
+      # 換成實測。--nocapture 是為了讓辨識結果直接印在 log 裡：CI 記錄的是
+      # 這台機器上裝了哪些 OCR 語言、以及中文到底有沒有被逐字切開。
+      - name: OCR — really run it on real Windows
+        run: cargo test -p sister-capture --test windows_ocr -- --nocapture
 
       - name: Build release
         run: cargo build --release -p sister-cli

@@ -8,6 +8,7 @@
 //! 也是 SPEC §12 replay 評測的地基。
 
 pub mod frames;
+pub mod ocr_layout;
 pub mod recorder;
 
 pub mod replay;

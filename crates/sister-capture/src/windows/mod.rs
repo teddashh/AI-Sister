@@ -10,16 +10,17 @@
 pub mod clipboard;
 pub mod focus;
 pub mod input;
+pub mod ocr;
 pub mod screen;
 
 use anyhow::Result;
 use sister_core::config::Config;
 use sister_core::now_ms;
 
-use crate::traits::{Backend, CompositeBackend, NullOcr};
+use crate::traits::{Backend, CompositeBackend};
 
 /// 這台機器上這個後端實際做得到什麼。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capabilities {
     pub screen: bool,
     pub focus: bool,
@@ -28,10 +29,16 @@ pub struct Capabilities {
     pub clipboard: bool,
     pub input: bool,
     pub ocr: bool,
+    /// OCR 實際挑中的語言，以及這台機器上裝了哪些。
+    ///
+    /// 「有沒有 OCR」是個布林，但「讀不讀得懂中文」不是——所以兩件事分開存。
+    pub ocr_language: Option<String>,
+    pub ocr_languages_available: Vec<String>,
 }
 
 impl Capabilities {
-    pub fn current() -> Self {
+    pub fn current(config: &Config) -> Self {
+        let ocr = ocr::OcrStatus::probe(&config.capture.ocr_languages);
         Self {
             screen: true,
             focus: true,
@@ -39,8 +46,9 @@ impl Capabilities {
             url: false,
             clipboard: true,
             input: input::WindowsInput::hooks_active(),
-            // Windows 的 OCR 走 PP-OCRv5/ONNX，和平台無關，另外接
-            ocr: false,
+            ocr: ocr.chosen.is_some(),
+            ocr_language: ocr.chosen,
+            ocr_languages_available: ocr.available,
         }
     }
 
@@ -63,6 +71,32 @@ impl Capabilities {
         }
         out
     }
+
+    /// 看起來在運作、實際上不會有結果的地方。
+    ///
+    /// 和 [`Self::broken_privacy_rules`] 分開：那個講的是「她記了不該記的」，
+    /// 這個講的是「她其實什麼都沒記住，但你不會發現」。兩者都是安靜的失敗，
+    /// 但補救方式完全不同，混在一起講只會兩邊都被忽略。
+    pub fn silently_degraded(&self, config: &Config) -> Vec<String> {
+        let mut out = Vec::new();
+        if config.capture.ocr {
+            if !self.ocr {
+                out.push(
+                    "這台機器沒有任何 OCR 語言：畫面會被記下來，但上面的字\
+                     一個都不會進資料庫，搜尋永遠是空的"
+                        .into(),
+                );
+            } else if let Some(gap) = (ocr::OcrStatus {
+                available: self.ocr_languages_available.clone(),
+                chosen: self.ocr_language.clone(),
+            })
+            .cjk_gap()
+            {
+                out.push(gap);
+            }
+        }
+        out
+    }
 }
 
 /// 組出 Windows 後端。
@@ -75,7 +109,7 @@ pub fn backend(config: &Config) -> Result<impl Backend + use<>> {
         focus: focus::WindowsFocus,
         clipboard: clipboard::WindowsClipboard::new(),
         input: input::WindowsInput::start(now_ms()),
-        ocr: NullOcr,
+        ocr: ocr::WindowsOcr::new(&config.capture.ocr_languages),
     })
 }
 
@@ -96,17 +130,30 @@ fn enable_dpi_awareness() {
 mod tests {
     use super::*;
 
+    /// 一台什麼都做得到的機器。測試從這裡出發，只改要測的那一項，
+    /// 這樣斷言就不會受跑測試的那台機器裝了什麼影響。
+    fn fully_capable() -> Capabilities {
+        Capabilities {
+            screen: true,
+            focus: true,
+            url: true,
+            clipboard: true,
+            input: true,
+            ocr: true,
+            ocr_language: Some("zh-Hant-TW".into()),
+            ocr_languages_available: vec!["zh-Hant-TW".into()],
+        }
+    }
+
     /// 缺 URL 擷取必須被說成隱私問題，不能只算功能缺口——
     /// 使用者設了網銀排除規則，她有權知道那些規則現在是空的。
     #[test]
     fn missing_url_capture_is_reported_as_a_privacy_gap() {
-        let config = Config::default();
         let caps = Capabilities {
             url: false,
-            input: true,
-            ..Capabilities::current()
+            ..fully_capable()
         };
-        let broken = caps.broken_privacy_rules(&config);
+        let broken = caps.broken_privacy_rules(&Config::default());
         assert!(
             broken.iter().any(|w| w.contains("excluded_urls")),
             "沒有把失效的網址規則講出來：{broken:?}"
@@ -115,14 +162,56 @@ mod tests {
 
     #[test]
     fn a_fully_capable_backend_reports_nothing_broken() {
+        let config = Config::default();
+        assert!(fully_capable().broken_privacy_rules(&config).is_empty());
+        assert!(fully_capable().silently_degraded(&config).is_empty());
+    }
+
+    /// 沒有 OCR 的話，錄製看起來一切正常但搜尋永遠是空的。
+    /// 這件事必須有人講出來。
+    #[test]
+    fn missing_ocr_is_reported_as_a_silent_failure() {
         let caps = Capabilities {
-            screen: true,
-            focus: true,
-            url: true,
-            clipboard: true,
-            input: true,
-            ocr: true,
+            ocr: false,
+            ocr_language: None,
+            ocr_languages_available: vec![],
+            ..fully_capable()
         };
-        assert!(caps.broken_privacy_rules(&Config::default()).is_empty());
+        let warnings = caps.silently_degraded(&Config::default());
+        assert!(
+            warnings.iter().any(|w| w.contains("搜尋")),
+            "沒有講出「搜尋會是空的」這個實際後果：{warnings:?}"
+        );
+    }
+
+    /// 有 OCR 但只讀得懂英文，比完全沒有 OCR 更陰險：
+    /// 英文介面讀得到，中文內容讀不到，看起來就只是「她沒記到那件事」。
+    #[test]
+    fn an_english_only_ocr_engine_is_reported_as_a_gap() {
+        let caps = Capabilities {
+            ocr: true,
+            ocr_language: Some("en-US".into()),
+            ocr_languages_available: vec!["en-US".into()],
+            ..fully_capable()
+        };
+        let warnings = caps.silently_degraded(&Config::default());
+        assert!(
+            warnings.iter().any(|w| w.contains("中文")),
+            "英文引擎讀不懂中文這件事沒有被講出來：{warnings:?}"
+        );
+    }
+
+    /// 使用者自己把 OCR 關掉時，不該再嘮叨語言的事。
+    #[test]
+    fn disabling_ocr_on_purpose_is_not_a_warning() {
+        let mut config = Config::default();
+        config.capture.ocr = false;
+        let caps = Capabilities {
+            ocr: false,
+            ocr_language: None,
+            ocr_languages_available: vec![],
+            ..fully_capable()
+        };
+        assert!(caps.silently_degraded(&config).is_empty());
     }
 }
