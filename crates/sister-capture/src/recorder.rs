@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use sister_core::config::Config;
 use sister_core::db::Db;
@@ -60,6 +61,19 @@ pub struct RecorderStats {
     pub secrets_redacted: u64,
     pub focus_events: u64,
     pub image_bytes: u64,
+    /// 保留了這一幀、但**刻意沒有寫畫面檔**的次數。
+    ///
+    /// 見 `CaptureConfig::image_min_interval_ms`。這個數字要印出來，因為
+    /// 「有 300 筆搜尋結果，其中 240 筆點下去沒有圖」是使用者遲早會遇到、
+    /// 而且會以為是壞掉的事。講出來它是設計，不講它就是 bug。
+    pub images_throttled: u64,
+    /// 因為**今天的畫面額度用完**而沒有寫圖的次數。
+    ///
+    /// 和 `images_throttled` 分開計數，因為兩者要使用者做的事完全不同：
+    /// 前者是正常運作，後者是「你今天的螢幕比預算忙，接下來只會留字」——
+    /// 那是一句必須說出口的話，否則使用者只會發現下午的記憶莫名其妙比
+    /// 上午差，而找不到任何解釋。
+    pub images_over_budget: u64,
     /// OCR 一共讀出幾行字。
     ///
     /// 「保留了 12 張畫面」和「記住了 12 張畫面上的字」是兩回事，而摘要
@@ -93,7 +107,14 @@ pub struct Recorder<B: Backend> {
     last_exclusion: Option<String>,
     /// 畫面檔的根目錄。`None` = text-only 模式。
     image_dir: Option<PathBuf>,
+    /// 上一次**真的寫出**畫面檔的時刻。見 `image_min_interval_ms`。
+    last_image_ts: Option<Millis>,
+    /// `image_bytes_today` 算的是哪一天（UTC 天序號）。
+    image_day: i64,
+    /// 今天已經寫出去多少畫面位元組。見 `max_image_mb_per_day`。
+    image_bytes_today: u64,
     stats: RecorderStats,
+    timings: crate::timings::Timings,
 }
 
 impl<B: Backend> Recorder<B> {
@@ -128,12 +149,21 @@ impl<B: Backend> Recorder<B> {
             last_focus: None,
             last_exclusion: None,
             image_dir,
+            last_image_ts: None,
+            image_day: i64::MIN,
+            image_bytes_today: 0,
             stats: RecorderStats::default(),
+            timings: Default::default(),
         })
     }
 
     pub fn stats(&self) -> &RecorderStats {
         &self.stats
+    }
+
+    /// 各階段的耗時。回答「CPU 花到哪裡去了」——見 [`crate::timings`]。
+    pub fn timings(&self) -> &crate::timings::Timings {
+        &self.timings
     }
 
     pub fn db(&self) -> &Db {
@@ -180,7 +210,9 @@ impl<B: Backend> Recorder<B> {
         }
 
         // 1) 先看脈絡。這一步很便宜，而且是排除判定的依據。
+        let t = Instant::now();
         let focus = self.backend.focus_snapshot(ts).unwrap_or_default();
+        self.timings.focus.record(t.elapsed());
 
         // 2) 排除判定 —— 必須在任何截圖之前
         let exclusion = self.config.privacy.check(&focus);
@@ -225,13 +257,18 @@ impl<B: Backend> Recorder<B> {
 
         self.record_input(ts)?;
 
-        // 5) 到這裡才真的抓畫面
-        let Some(frame) = self.backend.grab_screen(ts)? else {
+        // 5) 到這裡才碰螢幕——而且先用**便宜的探測圖**問一句「變了沒」。
+        //    一天裡絕大多數的 tick 答案都是「沒變」，而它們原本每一個都
+        //    要付一次全解析度搬運的錢，只為了算出一個 64-bit 的雜湊。
+        let t = Instant::now();
+        let probe = self.backend.probe_screen(ts)?;
+        self.timings.probe.record(t.elapsed());
+        let Some(probe) = probe else {
             self.stats.no_screen += 1;
             return Ok(Tick::NoScreen);
         };
 
-        match self.deduper.check(frame.dhash) {
+        match self.deduper.check(probe.dhash) {
             FrameVerdict::Duplicate { run } => {
                 self.stats.duplicates += 1;
                 if let Some(id) = self.last_frame_id {
@@ -239,14 +276,38 @@ impl<B: Backend> Recorder<B> {
                 }
                 Ok(Tick::Duplicate { run })
             }
-            FrameVerdict::New => self.keep_frame(ts, frame, focus),
+            FrameVerdict::New => {
+                // 畫面真的變了，現在才付原生解析度的錢：OCR 要的是原生像素，
+                // 縮過的圖上 12px 的字會掉到 7px，然後被讀成一串亂碼。
+                let t = Instant::now();
+                let full = self.backend.grab_screen(ts)?;
+                self.timings.grab.record(t.elapsed());
+
+                let Some(mut full) = full else {
+                    // 探測與正式抓圖之間畫面沒了（剛好鎖屏）。`check` 已經
+                    // 把去重基準推到這個雜湊上了，但我們什麼都沒存——不退回去
+                    // 的話，下一張一模一樣的畫面會被判成重複，然後把重複數
+                    // 加到一張**更早**的幀身上。
+                    self.deduper.reset();
+                    self.stats.no_screen += 1;
+                    return Ok(Tick::NoScreen);
+                };
+                // 去重看的是探測圖，資料庫裡也就存探測圖的雜湊。兩邊必須是
+                // 同一個數字，否則「這一列記的 dhash」與「當初據以判斷的
+                // dhash」是兩回事，事後任何重算都會得到對不起來的答案。
+                full.dhash = probe.dhash;
+                self.keep_frame(ts, full, focus)
+            }
         }
     }
 
     fn keep_frame(&mut self, ts: Millis, frame: RawFrame, focus: FocusSnapshot) -> Result<Tick> {
         let ocr = if self.config.capture.ocr {
             // OCR 失敗不擋錄製，但要留下計數——見 `RecorderStats::ocr_failures`
-            match self.backend.recognize(&frame) {
+            let t = Instant::now();
+            let result = self.backend.recognize(&frame);
+            self.timings.ocr.record(t.elapsed());
+            match result {
                 Ok(blocks) => {
                     self.stats.ocr_blocks += blocks.len() as u64;
                     blocks
@@ -264,7 +325,7 @@ impl<B: Backend> Recorder<B> {
             Vec::new()
         };
 
-        let (image_path, image_bytes) = self.store_image(&frame).unwrap_or_else(|e| {
+        let (image_path, image_bytes) = self.store_image(ts, &frame).unwrap_or_else(|e| {
             // 存不下畫面不該讓文字也跟著遺失
             tracing::warn!(error = %e, "failed to store frame image; keeping text only");
             (None, 0)
@@ -283,12 +344,14 @@ impl<B: Backend> Recorder<B> {
             focus,
         };
 
+        let t = Instant::now();
         let (frame_id, _chunk, facts) = self.db.insert_frame(
             self.session_id,
             &capture,
             image_path.as_deref(),
             image_bytes,
         )?;
+        self.timings.db.record(t.elapsed());
 
         self.last_frame_id = Some(frame_id);
         self.stats.kept += 1;
@@ -299,11 +362,52 @@ impl<B: Backend> Recorder<B> {
         })
     }
 
-    /// 把畫面寫到磁碟。回傳 (相對路徑, 位元組數)。
-    fn store_image(&self, frame: &RawFrame) -> Result<(Option<String>, i64)> {
-        let (Some(root), Some(rgba)) = (self.image_dir.as_deref(), frame.rgba.as_deref()) else {
+    /// 把畫面寫到磁碟，受**兩道閘門**節制。回傳 (相對路徑, 位元組數)。
+    ///
+    /// 節流的是圖，不是這一幀。文字、事實、脈絡全部照常寫進資料庫，被跳過
+    /// 的只有 PNG——搜尋得到的東西一筆都不會少，少的是「點下去看得到圖」。
+    /// 這個取捨是刻意的：磁碟預算幾乎全部花在 PNG 上，而 PNG 是這裡面唯一
+    /// 可以少存卻不會少記住東西的層（SPEC §2.3 也是這樣分層的）。
+    ///
+    /// 兩道閘門管的是不同的東西，缺一不可：
+    ///
+    /// - **最小間隔**管速率。它讓忙碌的那幾秒不會爆衝。
+    /// - **每日上限**管總量。單靠間隔擋不住一整天都在變的螢幕：5 秒一張
+    ///   的最壞情況是一天 17,280 張，乘上 500KB 還是 8.8 GB。
+    fn store_image(&mut self, ts: Millis, frame: &RawFrame) -> Result<(Option<String>, i64)> {
+        // 借用打架的關係先取出來：底下要改 `self.stats` 與 `last_image_ts`。
+        // 一次 PathBuf clone 落在「畫面真的變了」這條路徑上，一秒鐘最多幾次。
+        let Some(root) = self.image_dir.clone() else {
             return Ok((None, 0));
         };
+        let Some(rgba) = frame.rgba.as_deref() else {
+            return Ok((None, 0));
+        };
+
+        let gap = self.config.capture.image_min_interval_ms as i64;
+        if self
+            .last_image_ts
+            .is_some_and(|prev| ts.saturating_sub(prev) < gap)
+        {
+            self.stats.images_throttled += 1;
+            return Ok((None, 0));
+        }
+
+        // 跨日就把今天的額度歸零。用 UTC 天切，和 `frames::relative_path`
+        // 的資料夾分層是同一條線，這樣「某一天的圖」在磁碟上與在預算上
+        // 講的是同一天。
+        let day = ts.div_euclid(86_400_000);
+        if day != self.image_day {
+            self.image_day = day;
+            self.image_bytes_today = 0;
+        }
+        let budget = self.config.capture.max_image_mb_per_day * 1024 * 1024;
+        if budget > 0 && self.image_bytes_today >= budget {
+            self.stats.images_over_budget += 1;
+            return Ok((None, 0));
+        }
+
+        let t = Instant::now();
         let bytes = crate::frames::encode_downscaled(
             rgba,
             frame.width,
@@ -318,6 +422,12 @@ impl<B: Backend> Recorder<B> {
         }
         let len = bytes.len() as i64;
         std::fs::write(&full, bytes).with_context(|| format!("write {}", full.display()))?;
+        // 只有真的寫出去才計時。把跳過的次數也算進去的話，平均會被稀釋成
+        // 一個看起來很便宜、但沒有對應到任何一次實際工作的數字。
+        // 於是 `timings.store.calls` 恰好就是「寫出了幾張圖」。
+        self.timings.store.record(t.elapsed());
+        self.last_image_ts = Some(ts);
+        self.image_bytes_today += len as u64;
         Ok((Some(rel), len))
     }
 
@@ -545,6 +655,198 @@ mod tests {
         );
     }
 
+    // ---------- 兩段式抓圖 ----------
+    //
+    // 這一組測試釘住的是 alpha.4 實測踩到的兩個數字：CPU 27.1%（預算 3%）
+    // 與一段被讀成 `Micr099ftTeamsTr` 的 OCR 文字。兩者是同一個原因——
+    // 一份像素同時被拿去做三件需求互相衝突的事。
+
+    #[derive(Default)]
+    struct StageLog {
+        probes: u32,
+        grabs: u32,
+        /// OCR 每次拿到的尺寸。這就是文字品質的全部。
+        ocr_sizes: Vec<(u32, u32)>,
+    }
+
+    /// 灰階漸層。同一個 `seed` 一定算出同一個 dhash，換 seed 就會變。
+    fn pattern(w: u32, h: u32, seed: u32) -> Vec<u8> {
+        let mut px = vec![255u8; (w * h * 4) as usize];
+        for (i, p) in px.chunks_exact_mut(4).enumerate() {
+            let v = ((i as u32 * 7 + seed * 40) % 256) as u8;
+            (p[0], p[1], p[2]) = (v, v, v);
+        }
+        px
+    }
+
+    /// 探測給小圖、正式抓圖給大圖——正是 Windows 後端的形狀。
+    struct TwoStage {
+        log: std::rc::Rc<std::cell::RefCell<StageLog>>,
+    }
+
+    const PROBE: (u32, u32) = (64, 36);
+    const FULL: (u32, u32) = (256, 144);
+
+    impl crate::traits::ScreenSource for TwoStage {
+        fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+            self.log.borrow_mut().grabs += 1;
+            let (w, h) = FULL;
+            Ok(Some(RawFrame::from_rgba(ts, 0, w, h, pattern(w, h, 1))))
+        }
+        fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+            self.log.borrow_mut().probes += 1;
+            let (w, h) = PROBE;
+            Ok(Some(RawFrame::from_rgba(ts, 0, w, h, pattern(w, h, 1))))
+        }
+    }
+
+    struct SizeSpy(std::rc::Rc<std::cell::RefCell<StageLog>>);
+    impl crate::traits::Ocr for SizeSpy {
+        fn recognize(&mut self, f: &RawFrame) -> Result<Vec<sister_core::model::OcrBlock>> {
+            self.0.borrow_mut().ocr_sizes.push((f.width, f.height));
+            Ok(Vec::new())
+        }
+    }
+
+    fn two_stage(
+        log: std::rc::Rc<std::cell::RefCell<StageLog>>,
+    ) -> Recorder<
+        crate::traits::CompositeBackend<
+            TwoStage,
+            crate::traits::NullFocus,
+            crate::traits::NullClipboard,
+            crate::traits::NullInput,
+            SizeSpy,
+        >,
+    > {
+        let backend = crate::traits::CompositeBackend {
+            name: "two-stage".into(),
+            screen: TwoStage { log: log.clone() },
+            focus: crate::traits::NullFocus,
+            clipboard: crate::traits::NullClipboard,
+            input: crate::traits::NullInput,
+            ocr: SizeSpy(log),
+        };
+        Recorder::new(
+            backend,
+            Db::open_in_memory().expect("db"),
+            Config::default(),
+            None,
+        )
+        .expect("recorder")
+    }
+
+    /// **OCR 必須拿到正式抓圖，不是那張便宜的探測圖。**
+    ///
+    /// 這條線是實測那串亂碼的來源。原本三件事共用同一份像素：去重只需要
+    /// 9×8、存檔想要 1568、OCR 要原生解析度——結果所有人都拿到 1568，
+    /// 2560 的螢幕縮成 0.61 倍，12px 的字掉到 7px，於是
+    /// `Microsoft Teams` 被讀成 `Micr099ftTeamsTr`。引擎不報錯，只是讀錯。
+    #[test]
+    fn ocr_reads_the_full_resolution_frame_not_the_cheap_probe() {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(StageLog::default()));
+        let mut r = two_stage(log.clone());
+        r.tick(0).expect("tick");
+
+        let log = log.borrow();
+        assert_eq!(
+            log.ocr_sizes,
+            vec![FULL],
+            "OCR 拿到探測圖就等於讀不出字；實際 {:?}",
+            log.ocr_sizes
+        );
+    }
+
+    /// **重複的畫面不可以付原生解析度的錢。**
+    ///
+    /// 這是 CPU 那個數字的修法本身。實測 120 個 tick 裡有 103 個是重複的，
+    /// 而它們每一個都搬了一張全尺寸的圖，只為了算出一個 64-bit 的雜湊然後
+    /// 整張丟掉。如果哪天重構把 `probe` 接回 `grab`，這次改動就等於沒做，
+    /// 而摘要上完全看不出差別——只有電池會知道。
+    #[test]
+    fn a_duplicate_screen_never_pays_for_a_full_resolution_grab() {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(StageLog::default()));
+        let mut r = two_stage(log.clone());
+        for i in 0..4 {
+            r.tick(i * 1_000).expect("tick");
+        }
+
+        assert_eq!(r.stats().kept, 1);
+        assert_eq!(r.stats().duplicates, 3);
+
+        let log = log.borrow();
+        assert_eq!(log.probes, 4, "每個 tick 都要探一次");
+        assert_eq!(log.grabs, 1, "但只有畫面真的變了才抓完整的那張");
+    }
+
+    /// 資料庫裡記的 dhash，必須就是當初據以判斷「變了沒」的那一個。
+    ///
+    /// 兩張圖尺寸不同，dhash 通常也會差一點。存錯那一個不會有任何症狀，
+    /// 直到有人拿資料庫裡的雜湊去重算或比對，得到一組對不起來的答案。
+    #[test]
+    fn the_stored_hash_is_the_one_dedup_actually_used() {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(StageLog::default()));
+        let mut r = two_stage(log);
+        r.tick(0).expect("tick");
+
+        let (pw, ph) = PROBE;
+        let expected = sister_core::dedup::dhash_rgb(&pattern(pw, ph, 1), pw, ph, 4);
+        let stored: i64 = r
+            .db()
+            .conn()
+            .query_row("SELECT dhash FROM frames", [], |row| row.get(0))
+            .expect("query");
+        assert_eq!(stored as u64, expected, "存的必須是探測圖的雜湊");
+    }
+
+    /// 探測成功、正式抓圖卻沒了（剛好鎖屏），不可以污染去重狀態。
+    ///
+    /// `check()` 已經把基準推到那個雜湊上，但我們什麼都沒存。不退回去的話，
+    /// 下一張一模一樣的畫面會被判成「重複」，然後把重複計數加到一張**更早**
+    /// 的幀身上——那一幀的 `dup_run` 從此是假的，而且沒有人會發現。
+    #[test]
+    fn a_screen_that_vanishes_between_probe_and_grab_does_not_poison_dedup() {
+        struct Vanishing(std::rc::Rc<std::cell::RefCell<bool>>);
+        impl crate::traits::ScreenSource for Vanishing {
+            fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+                if *self.0.borrow() {
+                    return Ok(None); // 第一次：抓的時候螢幕鎖了
+                }
+                let (w, h) = FULL;
+                Ok(Some(RawFrame::from_rgba(ts, 0, w, h, pattern(w, h, 1))))
+            }
+            fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+                let (w, h) = PROBE;
+                Ok(Some(RawFrame::from_rgba(ts, 0, w, h, pattern(w, h, 1))))
+            }
+        }
+
+        let locked = std::rc::Rc::new(std::cell::RefCell::new(true));
+        let backend = crate::traits::CompositeBackend {
+            name: "vanishing".into(),
+            screen: Vanishing(locked.clone()),
+            focus: crate::traits::NullFocus,
+            clipboard: crate::traits::NullClipboard,
+            input: crate::traits::NullInput,
+            ocr: crate::traits::NullOcr,
+        };
+        let mut r = Recorder::new(
+            backend,
+            Db::open_in_memory().expect("db"),
+            Config::default(),
+            None,
+        )
+        .expect("recorder");
+
+        assert_eq!(r.tick(0).expect("tick"), Tick::NoScreen);
+        *locked.borrow_mut() = false;
+        // 同一個畫面回來了。它從來沒被存過，所以必須是新的。
+        assert!(
+            matches!(r.tick(1_000).expect("tick"), Tick::Kept { .. }),
+            "沒存成的那一張不能把後面真的那一張擋掉"
+        );
+    }
+
     fn step(at_ms: Millis, app: &str, title: &str, text: &[&str]) -> Step {
         Step {
             at_ms,
@@ -556,12 +858,255 @@ mod tests {
     }
 
     fn recorder(steps: Vec<Step>, config: Config) -> Recorder<crate::replay::ReplayBackend> {
+        recorder_in(steps, config, None)
+    }
+
+    fn recorder_in(
+        steps: Vec<Step>,
+        config: Config,
+        image_dir: Option<PathBuf>,
+    ) -> Recorder<crate::replay::ReplayBackend> {
         let backend = crate::replay::ReplayBackend::new(Scenario {
             name: "t".into(),
             steps,
         });
         let db = Db::open_in_memory().expect("db");
-        Recorder::new(backend, db, config, None).expect("recorder")
+        Recorder::new(backend, db, config, image_dir).expect("recorder")
+    }
+
+    struct Tmp(PathBuf);
+    impl Tmp {
+        fn new(name: &str) -> Self {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "sister-recorder-{}-{name}-{}",
+                std::process::id(),
+                N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            Self(dir)
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn count_pngs(root: &std::path::Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|e| {
+                let p = e.path();
+                if p.is_dir() {
+                    count_pngs(&p)
+                } else {
+                    usize::from(p.extension().is_some_and(|x| x == "png"))
+                }
+            })
+            .sum()
+    }
+
+    /// 每次探測都給一張不同的畫面，正式抓圖則是同一畫面的放大版。
+    /// replay 後端不產生像素（`rgba: None`），所以存圖這條路徑測不到。
+    #[derive(Default)]
+    struct ChangingScreen {
+        seed: u32,
+    }
+    impl crate::traits::ScreenSource for ChangingScreen {
+        fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+            self.seed += 1;
+            let (w, h) = PROBE;
+            Ok(Some(RawFrame::from_rgba(
+                ts,
+                0,
+                w,
+                h,
+                pattern(w, h, self.seed),
+            )))
+        }
+        fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+            let (w, h) = FULL;
+            Ok(Some(RawFrame::from_rgba(
+                ts,
+                0,
+                w,
+                h,
+                pattern(w, h, self.seed),
+            )))
+        }
+    }
+
+    /// 每次讀出一句可搜尋、且彼此不同的文字。
+    #[derive(Default)]
+    struct NumberedLines(u32);
+    impl crate::traits::Ocr for NumberedLines {
+        fn recognize(&mut self, _f: &RawFrame) -> Result<Vec<sister_core::model::OcrBlock>> {
+            self.0 += 1;
+            Ok(vec![sister_core::model::OcrBlock {
+                text: format!("第{}句話", self.0),
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 20,
+                confidence: -1.0,
+            }])
+        }
+    }
+
+    fn image_recorder(
+        config: Config,
+        dir: PathBuf,
+    ) -> Recorder<
+        crate::traits::CompositeBackend<
+            ChangingScreen,
+            crate::traits::NullFocus,
+            crate::traits::NullClipboard,
+            crate::traits::NullInput,
+            NumberedLines,
+        >,
+    > {
+        let backend = crate::traits::CompositeBackend {
+            name: "images".into(),
+            screen: ChangingScreen::default(),
+            focus: crate::traits::NullFocus,
+            clipboard: crate::traits::NullClipboard,
+            input: crate::traits::NullInput,
+            ocr: NumberedLines::default(),
+        };
+        Recorder::new(
+            backend,
+            Db::open_in_memory().expect("db"),
+            config,
+            Some(dir),
+        )
+        .expect("recorder")
+    }
+
+    /// **少存圖，但一個字都不能少。**
+    ///
+    /// 磁碟預算幾乎全部花在 PNG 上，而 PNG 是唯一可以少存卻不會少記住東西
+    /// 的那一層。這條線同時盯著兩件事：圖真的變少了（磁碟），而且每一句話
+    /// 照樣搜得到——沒有偷偷用「記得比較少」換掉「佔得比較少」。
+    ///
+    /// 實測沒有這道閘門時是 11.4 GB/天，預算是 300MB/天。
+    #[test]
+    fn throttling_images_saves_disk_without_losing_a_single_word() {
+        let tmp = Tmp::new("throttle");
+        let mut config = Config::default();
+        config.capture.image_min_interval_ms = 5_000;
+
+        let mut r = image_recorder(config, tmp.0.clone());
+        for ts in [0, 1_000, 2_000] {
+            assert!(matches!(r.tick(ts).expect("tick"), Tick::Kept { .. }));
+        }
+
+        assert_eq!(r.stats().kept, 3, "三張畫面全都保留了");
+        assert_eq!(r.stats().images_throttled, 2, "但只有第一張寫了圖");
+        assert_eq!(r.timings().store.calls, 1);
+        assert_eq!(count_pngs(&tmp.0), 1, "磁碟上就該只有一個檔");
+
+        // 而三句話一句都不能少——這才是重點
+        for word in ["第1句話", "第2句話", "第3句話"] {
+            assert!(
+                !r.db().search(word, 10).expect("search").is_empty(),
+                "{word} 應該仍然搜得到"
+            );
+        }
+    }
+
+    /// **每日上限是硬的：螢幕再忙，磁碟也不會失控。**
+    ///
+    /// 這條線擋的是「間隔節流看起來夠用」這個錯覺。5 秒一張聽起來很省，
+    /// 但一天有 17,280 個 5 秒，乘上一張 500KB 就是 8.8 GB——比沒節流的
+    /// 11.4 GB 好不了多少。間隔管得住速率，管不住總量，所以要有第二道
+    /// 直接盯著預算數字本身的閘門。
+    #[test]
+    fn a_busy_screen_cannot_blow_through_the_daily_image_budget() {
+        let tmp = Tmp::new("budget");
+        let mut config = Config::default();
+        config.capture.image_min_interval_ms = 0; // 只驗每日上限這一道
+        config.capture.max_image_mb_per_day = 0; // 先確認「0 = 不設限」
+
+        let mut r = image_recorder(config.clone(), tmp.0.clone());
+        for i in 0..6 {
+            r.tick(i * 1_000).expect("tick");
+        }
+        assert_eq!(r.stats().images_over_budget, 0, "0 應該是不設限");
+        let unlimited = count_pngs(&tmp.0);
+        assert_eq!(unlimited, 6, "不設限時每一張都該寫出來");
+
+        // 把上限壓到 1MB。這些圖很小，所以要先讓它真的超過——
+        // 直接把「今天已經用掉的量」設到上限之上，比生成 1MB 的圖乾淨。
+        let tmp2 = Tmp::new("budget-hit");
+        config.capture.max_image_mb_per_day = 1;
+        let mut r = image_recorder(config, tmp2.0.clone());
+        r.tick(0).expect("tick");
+        assert_eq!(count_pngs(&tmp2.0), 1, "第一張在預算內");
+        r.image_bytes_today = 2 * 1024 * 1024; // 額度用光
+
+        for i in 1..4 {
+            assert!(
+                matches!(r.tick(i * 1_000).expect("tick"), Tick::Kept { .. }),
+                "超出預算之後畫面仍然要保留，少的只有圖"
+            );
+        }
+        assert_eq!(r.stats().images_over_budget, 3);
+        assert_eq!(count_pngs(&tmp2.0), 1, "磁碟上不該再多出任何一個檔");
+
+        // 而字一句都不能少——這正是這個取捨成立的前提
+        for word in ["第2句話", "第3句話", "第4句話"] {
+            assert!(
+                !r.db().search(word, 10).expect("search").is_empty(),
+                "{word} 在預算用完之後仍然要搜得到"
+            );
+        }
+    }
+
+    /// 跨過午夜，額度要自己歸零。
+    ///
+    /// 沒有這一步的話，一個連續跑三十天的行程會在第一天就把額度用光，
+    /// 然後**永遠**不再存圖——而且症狀是「她越用越沒用」，沒有人查得出來。
+    #[test]
+    fn the_daily_image_budget_resets_at_midnight() {
+        let tmp = Tmp::new("budget-reset");
+        let mut config = Config::default();
+        config.capture.image_min_interval_ms = 0;
+        config.capture.max_image_mb_per_day = 1;
+
+        let mut r = image_recorder(config, tmp.0.clone());
+        r.tick(0).expect("tick");
+        r.image_bytes_today = 2 * 1024 * 1024;
+        r.tick(1_000).expect("tick");
+        assert_eq!(r.stats().images_over_budget, 1);
+        assert_eq!(count_pngs(&tmp.0), 1);
+
+        // 隔天
+        r.tick(86_400_000 + 1_000).expect("tick");
+        assert_eq!(r.stats().images_over_budget, 1, "新的一天不該再被擋");
+        assert_eq!(count_pngs(&tmp.0), 2);
+    }
+
+    /// 節流是**時間**間隔，不是「每 N 張存一張」。
+    ///
+    /// 差別出現在使用者不在電腦前面的時候：畫面十分鐘才變一次的話，每一次
+    /// 都該有圖，不該因為「上一張才剛存過」而被跳掉。
+    #[test]
+    fn a_slow_changing_screen_keeps_every_image() {
+        let tmp = Tmp::new("slow");
+        let mut config = Config::default();
+        config.capture.image_min_interval_ms = 5_000;
+
+        let mut r = image_recorder(config, tmp.0.clone());
+        for ts in [0, 30_000, 60_000] {
+            r.tick(ts).expect("tick");
+        }
+        assert_eq!(r.stats().images_throttled, 0);
+        assert_eq!(count_pngs(&tmp.0), 3, "隔得夠開就每一張都該有圖");
     }
 
     #[test]

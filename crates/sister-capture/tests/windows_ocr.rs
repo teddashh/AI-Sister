@@ -153,7 +153,11 @@ fn chinese_comes_back_as_words_not_scattered_characters() {
 /// 畫面大小的圖進去才知道——`MaxImageDimension`、5MB 的 buffer、
 /// 5:3 的長寬比，這些在 900×300 的 fixture 上全都碰不到。
 ///
-/// 尺寸取 `capture.max_long_edge` 的預設值 1568，也就是 4K 螢幕縮完的樣子。
+/// 尺寸取 **2560×1440**，因為那就是實際送進 OCR 的東西：OCR 吃的是原生
+/// 解析度的像素，不是存檔用的縮圖。這個測試原本用 1568×882（`max_long_edge`
+/// 的預設值），而那正好是出事的那一版——把 2560 縮成 1568 是 0.61 倍，
+/// 12px 的字掉到 7px，於是 `Microsoft Teams` 被讀成 `Micr099ftTeamsTr`。
+/// 用縮過的尺寸測試，等於測了一條production 已經不再走的路。
 #[test]
 fn a_full_screen_sized_frame_still_yields_text() {
     let status = OcrStatus::probe(&preferred());
@@ -161,7 +165,7 @@ fn a_full_screen_sized_frame_still_yields_text() {
         return;
     }
 
-    // 把 fixture 貼在白底的 1568×882 上，其餘留白。
+    // 把 fixture 貼在白底的 2560×1440 上，其餘留白。
     // 內容一樣、尺寸變成真實畫面那麼大——變因只有一個。
     let src = image::open(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -170,7 +174,7 @@ fn a_full_screen_sized_frame_still_yields_text() {
     .expect("讀不到測試圖")
     .to_rgba8();
     let (sw, sh) = src.dimensions();
-    let (w, h) = (1568u32, 882u32);
+    let (w, h) = (2560u32, 1440u32);
     assert!(sw <= w && sh <= h, "fixture {sw}x{sh} 比目標畫布還大");
 
     let mut canvas = image::RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));

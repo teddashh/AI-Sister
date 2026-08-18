@@ -56,14 +56,22 @@ pub mod prune {
     }
 
     pub fn run(data_dir: &Path, config: &Config, dry_run: bool) -> Result<()> {
-        let mut db = open_existing(data_dir)?;
-        let now = sister_core::now_ms();
         let r = &config.retention;
-
         println!(
             "保留期：畫面 {} 天、文字與事實 {} 天",
             r.frames_days, r.text_days
         );
+
+        // 還沒錄過東西不是錯誤。`prune` 是維護動作，「沒有東西要清」是它
+        // 成功的結果之一——而 `query` 查不到資料庫才該報錯，因為那代表
+        // 使用者以為自己有資料。同一個 helper 套在兩種語意上會弄錯其中一個。
+        let path = crate::db_path(data_dir);
+        if !path.exists() {
+            println!("  還沒有資料庫（{}），沒有東西可以清。", path.display());
+            return Ok(());
+        }
+        let mut db = Db::open(&path).with_context(|| format!("open {}", path.display()))?;
+        let now = sister_core::now_ms();
 
         if dry_run {
             let report = db.prune_preview(now, r)?;
@@ -676,10 +684,15 @@ pub mod doctor {
             }
 
             // 第二關：你**現在這台螢幕**讀不讀得到。跟錄製走同一條路
-            // （同一個 max_long_edge、同一個縮圖、同一顆引擎），所以
-            // 「內建圖過了但這關沒過」就直接指向縮圖尺寸或畫面本身。
-            let mut screen = WindowsScreen::new(config.capture.max_long_edge);
-            let probe = match screen.grab(sister_core::now_ms()) {
+            // （同一顆引擎、同一個原生解析度的抓圖），所以「內建圖過了但這關
+            // 沒過」就直接指向畫面本身，而不是引擎或語言包。
+            let mut screen = WindowsScreen::new();
+            let grabbed = screen.grab(sister_core::now_ms());
+            let grabbed_edge = match &grabbed {
+                Ok(Some(f)) => Some(f.width.max(f.height)),
+                _ => None,
+            };
+            let probe = match grabbed {
                 Err(e) => (false, "讀你現在的螢幕", format!("抓不到畫面：{e:#}")),
                 Ok(None) => (
                     false,
@@ -727,15 +740,19 @@ pub mod doctor {
             probes.push(probe);
 
             // 只在真的卡到的時候講。平常這是一個沒有人需要知道的數字。
+            //
+            // 比的是**剛剛真的抓到的那張圖**，不是設定檔裡的數字。OCR 吃的是
+            // 原生解析度的像素，`max_long_edge` 只管存檔——拿它來比等於比錯
+            // 對象，而且會比出一條永遠不會成立的規則：一條讀起來很對、卻
+            // 一輩子命中不了任何東西的檢查，正是這個專案在獵的那種 bug。
             let limit = ocr.max_dimension();
-            if config.capture.max_long_edge > limit {
+            if let Some(edge) = grabbed_edge
+                && edge > limit
+            {
                 probes.push((
                     false,
                     "影像尺寸上限",
-                    format!(
-                        "capture.max_long_edge = {} 超過引擎上限 {limit}：每一張畫面都會被拒絕",
-                        config.capture.max_long_edge
-                    ),
+                    format!("剛剛抓到的畫面長邊 {edge} 超過引擎上限 {limit}：每一張畫面都會被拒絕"),
                 ));
             }
         }
@@ -1201,6 +1218,7 @@ pub mod record {
         let interval = Duration::from_millis(config.capture.min_interval_ms.max(200));
         // config 等一下會被 Recorder 吃掉，但收尾的摘要與定期清理還需要這幾項
         let config_ocr = config.capture.ocr;
+        let image_budget_mb = config.capture.max_image_mb_per_day;
         let retention = config.retention.clone();
         let prune_images = images.clone();
         let mut rec = Recorder::new(backend, db, config, images)?;
@@ -1301,6 +1319,8 @@ pub mod record {
         );
         report_exclusions(&stats);
         report_ocr(&stats, config_ocr);
+        report_images(&stats, rec.timings(), image_budget_mb);
+        report_timings(rec.timings(), stats.ticks);
         footprint.tick();
         report_footprint(
             &footprint,
@@ -1309,6 +1329,7 @@ pub mod record {
                 .map(|s| s.db_bytes + s.image_bytes)
                 .unwrap_or(0)
                 - disk_at_start,
+            stats.image_bytes,
         );
         for line in &lost {
             println!("  ⚠  錄製途中失去的能力：{line}");
@@ -1325,26 +1346,165 @@ pub mod record {
     ///
     /// 量不到就不印。印一個 0 或一個從三分鐘外推出來的「每天 300MB」，
     /// 都會變成一個很有說服力的假消息，而且會被抄進文件裡。
+    /// Phase 0 的驗收預算（PHASES.md）。
+    ///
+    /// 寫在程式裡而不是只寫在文件裡，是因為文件不會在超標的時候出聲。
+    /// 實測那次是 CPU 27.1%、磁碟 11.4 GB/天，而摘要照樣平鋪直敘地印出來，
+    /// 沒有任何一個字說「這超標九倍」——要靠讀的人自己記得預算是多少，
+    /// 再自己心算。她應該自己講。
     #[cfg(windows)]
-    fn report_footprint(f: &sister_capture::footprint::Footprint, disk_delta: i64) {
+    const BUDGET_CPU_PCT: f64 = 3.0;
+    #[cfg(windows)]
+    const BUDGET_RSS_BYTES: u64 = 400 * 1024 * 1024;
+    #[cfg(windows)]
+    const BUDGET_DISK_PER_DAY: f64 = 300.0 * 1024.0 * 1024.0;
+
+    #[cfg(windows)]
+    fn report_footprint(
+        f: &sister_capture::footprint::Footprint,
+        disk_delta: i64,
+        image_bytes: u64,
+    ) {
+        /// 超標的就標出來。合格的不標——每一項都掛一個記號等於沒有記號。
+        fn over(actual: f64, budget: f64) -> &'static str {
+            if actual > budget { "⚠ " } else { "" }
+        }
+
         let mut parts = Vec::new();
+        let mut breached = Vec::new();
         if let Some(cpu) = f.cpu_percent() {
-            parts.push(format!("CPU 平均 {cpu:.1}%"));
+            parts.push(format!("{}CPU 平均 {cpu:.1}%", over(cpu, BUDGET_CPU_PCT)));
+            if cpu > BUDGET_CPU_PCT {
+                breached.push(format!(
+                    "CPU {cpu:.1}% 超過預算 {BUDGET_CPU_PCT:.0}%（{:.0} 倍）",
+                    cpu / BUDGET_CPU_PCT
+                ));
+            }
         }
         if let Some(rss) = f.peak_rss_bytes() {
-            parts.push(format!("RAM 峰值 {}", crate::fmt::bytes(rss as i64)));
+            parts.push(format!(
+                "{}RAM 峰值 {}",
+                over(rss as f64, BUDGET_RSS_BYTES as f64),
+                crate::fmt::bytes(rss as i64)
+            ));
+            if rss > BUDGET_RSS_BYTES {
+                breached.push(format!(
+                    "RAM {} 超過預算 {}",
+                    crate::fmt::bytes(rss as i64),
+                    crate::fmt::bytes(BUDGET_RSS_BYTES as i64)
+                ));
+            }
         }
         if let Some(per_day) = f.bytes_per_day(disk_delta.max(0) as u64) {
+            // 圖與資料庫要分開講。合成一個數字的話，「磁碟 11.4 GB/天」
+            // 沒辦法回答唯一有用的那個問題——該去縮圖，還是該去縮索引。
+            // 實測那次就是這樣：一個很嚇人、但指不出方向的數字。
+            let grew = disk_delta.max(0);
+            let rest = grew.saturating_sub(image_bytes as i64);
             parts.push(format!(
-                "磁碟 {}/天（這段實際長了 {}）",
+                "{}磁碟 {}/天（這段實際長了 {}：畫面 {}、其他 {}）",
+                over(per_day, BUDGET_DISK_PER_DAY),
                 crate::fmt::bytes(per_day as i64),
-                crate::fmt::bytes(disk_delta.max(0))
+                crate::fmt::bytes(grew),
+                crate::fmt::bytes(image_bytes as i64),
+                crate::fmt::bytes(rest)
             ));
+            if per_day > BUDGET_DISK_PER_DAY {
+                breached.push(format!(
+                    "磁碟 {}/天 超過預算 {}/天（{:.0} 倍）",
+                    crate::fmt::bytes(per_day as i64),
+                    crate::fmt::bytes(BUDGET_DISK_PER_DAY as i64),
+                    per_day / BUDGET_DISK_PER_DAY
+                ));
+            }
         }
         if parts.is_empty() {
             return;
         }
         println!("  足跡：{}", parts.join("、"));
+        for line in &breached {
+            println!("  ⚠  {line}");
+        }
+        if !breached.is_empty() {
+            println!(
+                "        （Phase 0 的驗收條件見 docs/PHASES.md。\
+                 短時間的錄製外推一整天本來就會偏高，真正算數的是整天的實測）"
+            );
+        }
+    }
+
+    /// 畫面檔寫了幾張、跳過幾張。
+    ///
+    /// `images_throttled` 一定要講出來，因為使用者遲早會點到一筆沒有圖的
+    /// 搜尋結果，然後合理地以為壞掉了。講出來它是設計，不講它就是 bug。
+    #[cfg(windows)]
+    fn report_images(
+        stats: &sister_capture::RecorderStats,
+        timings: &sister_capture::timings::Timings,
+        budget_mb: u64,
+    ) {
+        let written = timings.store.calls;
+        if written == 0 && stats.images_throttled == 0 && stats.images_over_budget == 0 {
+            return;
+        }
+        let mut line = format!(
+            "  畫面：寫了 {written} 張（{}",
+            crate::fmt::bytes(stats.image_bytes as i64)
+        );
+        if let Some(each) = timings.store.per_call().filter(|_| written > 0) {
+            // 每張多大，是「該不該換編碼格式」唯一問得出答案的數字。
+            line += &format!(
+                "，平均一張 {}、{:.0} ms",
+                crate::fmt::bytes((stats.image_bytes / written) as i64),
+                each.as_secs_f64() * 1000.0
+            );
+        }
+        line.push('）');
+        if stats.images_throttled > 0 {
+            line += &format!("，另外 {} 張只留了字（間隔未到）", stats.images_throttled);
+        }
+        println!("{line}");
+
+        // 這一句要單獨佔一行、而且要講得像一件事，不是像一個統計欄位。
+        if stats.images_over_budget > 0 {
+            println!(
+                "  ⚠  今天的畫面額度（{budget_mb} MB）用完了，之後的 {} 張只留了字。\
+                 文字與搜尋不受影響；要留更多圖就調大 capture.max_image_mb_per_day",
+                stats.images_over_budget
+            );
+        }
+    }
+
+    /// CPU 花到哪一段去了。
+    ///
+    /// 存在的理由：足跡那行說得出「CPU 平均 27.1%」，但那是一個**沒有下一步**
+    /// 的數字。我為了它猜過兩次原因，兩次都猜 PNG 編碼，兩次都猜錯——實測
+    /// PNG 編一張只要 1.7ms。一個超標九倍的預算配上一份說不出錢花到哪裡的
+    /// 報告，只會讓人去改那個最好改的地方，而不是那個最貴的地方。
+    #[cfg(windows)]
+    fn report_timings(t: &sister_capture::timings::Timings, ticks: u64) {
+        let total = t.total();
+        if total.is_zero() || ticks == 0 {
+            return;
+        }
+        println!(
+            "  時間：{ticks} tick 共忙了 {:.1} 秒（每 tick {:.0} ms）",
+            total.as_secs_f64(),
+            total.as_secs_f64() * 1000.0 / ticks as f64
+        );
+        for (name, s) in t.ranked() {
+            // CJK 是雙寬字元，`{:<6}` 只數字元數會對不齊
+            let cols: usize = name.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
+            let pad = " ".repeat(7usize.saturating_sub(cols));
+            let per_call = s.per_call().unwrap_or_default();
+            println!(
+                "        {name}{pad}{:>6.2} 秒 / {:>3.0}%　{:>5} 次，每次 {:.1} ms",
+                s.total.as_secs_f64(),
+                s.total.as_secs_f64() / total.as_secs_f64() * 100.0,
+                s.calls,
+                per_call.as_secs_f64() * 1000.0
+            );
+        }
     }
 
     /// 這一段的存在理由：上面那行摘要在「12 張畫面、上面的字一個都沒讀到」

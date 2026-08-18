@@ -112,7 +112,7 @@ pub fn backend(config: &Config) -> Result<impl Backend + use<>> {
 
     Ok(CompositeBackend {
         name: "windows-gdi".to_string(),
-        screen: screen::WindowsScreen::new(config.capture.max_long_edge),
+        screen: screen::WindowsScreen::new(),
         focus: focus::WindowsFocus::new(),
         clipboard: clipboard::WindowsClipboard::new(),
         input: input::WindowsInput::start(now_ms()),

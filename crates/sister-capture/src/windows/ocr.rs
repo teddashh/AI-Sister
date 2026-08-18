@@ -226,10 +226,10 @@ impl Ocr for WindowsOcr {
             return Ok(Vec::new());
         }
         if w.max(h) > self.max_dimension {
-            bail!(
-                "畫面 {w}x{h} 超過引擎上限 {}；請調小 capture.max_long_edge",
-                self.max_dimension
-            );
+            // 不要在這裡叫人去調 `capture.max_long_edge`：那個設定只管存檔，
+            // 送進來這裡的是原生解析度的像素（上限是 screen.rs 的
+            // `OCR_LONG_EDGE`）。一句指錯地方的建議，比沒有建議更浪費時間。
+            bail!("畫面 {w}x{h} 超過引擎上限 {}", self.max_dimension);
         }
 
         // RGBA → BGRA。順便把 alpha 壓成不透明：來源若留下未定義的 alpha，

@@ -18,8 +18,23 @@
 //! 兩個不能省的細節：
 //! - **只拍前景視窗所在的那一台螢幕**。她在看的就是那一台；拍整個虛擬桌面
 //!   等於為了沒人在看的畫面付三倍的 CPU 與磁碟。
-//! - **在 GDI 裡就縮好圖**。縮圖後 4K 從 33MB 掉到 5MB，而我們本來就只存
-//!   縮圖，沒有理由先把全解析度的位元組搬進使用者空間再丟掉。
+//! - **在 GDI 裡就縮好圖**。縮放交給 `StretchBlt` 幾乎不用錢，搬進使用者
+//!   空間再用 `image::imageops::resize` 縮同一張圖要 54ms。
+//!
+//! ## 為什麼有兩條抓圖路徑
+//!
+//! 原本只有一條，一次抓到 `max_long_edge`（1568），同一份像素同時拿去
+//! 算 dhash、餵 OCR、存檔。三件事的需求其實完全衝突，於是三件事一起壞：
+//!
+//! - **去重**只需要 9×8。它卻讓每個 tick 都搬一張全尺寸的圖，而實測
+//!   120 個 tick 裡有 103 個算完雜湊就把整張圖丟掉。
+//! - **OCR** 需要原生像素。2560 縮到 1568 是 0.61 倍，12px 的字掉到 7px，
+//!   於是 `Microsoft Teams` 被讀成 `Micr099ftTeamsTr`——不報錯，只是讀錯。
+//! - **存檔**要小。它是唯一真的想要 1568 的人。
+//!
+//! 所以拆成 [`ScreenSource::probe`]（便宜、只保證 dhash）與
+//! [`ScreenSource::grab`]（原生解析度）。存檔的縮圖留在 `frames.rs`，
+//! 因為那是磁碟預算的事，不是擷取的事。
 
 use anyhow::{Result, bail};
 use sister_core::model::Millis;
@@ -38,18 +53,40 @@ use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 use crate::traits::{RawFrame, ScreenSource};
 
+/// 完整解析度抓圖的長邊上限。
+///
+/// 這不是畫質旋鈕，是一道防線，所以刻意寫死而不是開成設定：8K 螢幕一張
+/// RGBA 是 132MB，而 Windows 的 OCR 引擎本身也只吃到 10000 像素。4096
+/// 讓 4K（3840）以下的螢幕全部拿到**原生**像素——也就是絕大多數人——
+/// 更大的才縮，而且縮一半仍然遠好過為了它把每個人都降到 1568。
+const OCR_LONG_EDGE: u32 = 4096;
+
+/// 探測圖的長邊。
+///
+/// dhash 會把任何尺寸 box-average 成 9×8，所以這個數字只要大到保住版面
+/// 結構就夠——實測 2560×1440 的原圖與 256×144 的探測圖算出來的 dhash
+/// **完全相同**（hamming 距離 0）。
+///
+/// 代價這樣算：`GetDIBits` 要搬的位元組從 14MB 掉到 147KB，之後那個
+/// BGRA→RGBA 的逐像素迴圈從 370 萬次掉到 3.7 萬次。而這是每個 tick
+/// 都要付的錢。
+const PROBE_LONG_EDGE: u32 = 256;
+
 pub struct WindowsScreen {
-    /// 縮圖後的長邊上限（像素）。
-    max_long_edge: u32,
     /// HMONITOR → 穩定的小整數。指標本身太大也不穩，但同一個 session 裡
     /// 出現順序是穩的，而 frames 表只需要「同不同台」這個資訊。
     monitors: Vec<isize>,
 }
 
+impl Default for WindowsScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WindowsScreen {
-    pub fn new(max_long_edge: u32) -> Self {
+    pub fn new() -> Self {
         Self {
-            max_long_edge: max_long_edge.max(64),
             monitors: Vec::new(),
         }
     }
@@ -64,10 +101,9 @@ impl WindowsScreen {
             }
         }
     }
-}
 
-impl ScreenSource for WindowsScreen {
-    fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+    /// 兩條路徑唯一的差別就是這個 `long_edge`。
+    fn capture(&mut self, ts: Millis, long_edge: u32) -> Result<Option<RawFrame>> {
         // 鎖定時不擷取。這裡要主動問，不能只靠「拍出來是黑的」——
         // 黑畫面會被當成一張正常的畫面存起來、算 dhash、跑 OCR。
         if session_locked() {
@@ -85,11 +121,21 @@ impl ScreenSource for WindowsScreen {
             return Ok(None);
         }
 
-        let (dst_w, dst_h) = fit(src_w as u32, src_h as u32, self.max_long_edge);
+        let (dst_w, dst_h) = fit(src_w as u32, src_h as u32, long_edge);
         let monitor = self.monitor_index(mon);
         let rgba = unsafe { blit(rect, src_w, src_h, dst_w, dst_h)? };
 
         Ok(Some(RawFrame::from_rgba(ts, monitor, dst_w, dst_h, rgba)))
+    }
+}
+
+impl ScreenSource for WindowsScreen {
+    fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+        self.capture(ts, OCR_LONG_EDGE)
+    }
+
+    fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+        self.capture(ts, PROBE_LONG_EDGE)
     }
 }
 
