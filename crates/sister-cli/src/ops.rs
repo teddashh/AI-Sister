@@ -454,7 +454,17 @@ pub mod doctor {
     use sister_core::config::Config;
 
     fn line(ok: bool, label: &str, detail: &str) {
-        println!("  {} {label:<22} {detail}", if ok { "✓" } else { "✗" });
+        mark(if ok { "✓" } else { "✗" }, label, detail);
+    }
+
+    /// 第三種狀態：**還沒驗到**。
+    ///
+    /// ✓ 和 ✗ 都是斷言，而有些東西 doctor 當下沒辦法斷言——例如網址擷取，
+    /// 前景不是瀏覽器的時候根本沒有東西可讀。把它畫成 ✓ 是說謊（那正是
+    /// 上一版 `✓ OCR 語言` 的錯法），畫成 ✗ 則是製造一則使用者每次都會
+    /// 看到、於是很快就學會忽略的假警報。所以給它自己的符號。
+    fn mark(sym: &str, label: &str, detail: &str) {
+        println!("  {sym} {label:<22} {detail}");
     }
 
     /// doctor 要用到的能力摘要。平台差異只收在這一個地方。
@@ -464,7 +474,7 @@ pub mod doctor {
     struct Caps {
         url: bool,
         /// 對現在的前景視窗真的問一次網址的結果。`None` = 本平台問不了。
-        url_probe: Option<(bool, &'static str, String)>,
+        url_probe: Option<(&'static str, &'static str, String)>,
         /// 輸入 hook：`None` = 本平台沒有這個東西。
         /// 不是「沒試過」——doctor 現在會真的裝一次（見 [`caps`]）。
         input_hooks: Option<bool>,
@@ -531,24 +541,26 @@ pub mod doctor {
             let app = snapshot.app_key();
             url_probe = Some(match (&snapshot.url, source.url_capture_alive()) {
                 (Some(url), _) => (
-                    true,
+                    "✓",
                     "讀你現在的網址",
                     format!("{app} → {}", crate::fmt::one_line(url, 60)),
                 ),
                 (None, false) => (
-                    false,
+                    "✗",
                     "讀你現在的網址",
                     "UIA 卡住太多次，已經放棄——excluded_urls 這一整組規則不生效".to_string(),
                 ),
+                // 以下兩種都**不是失敗**，是「這一刻沒東西可測」。畫成 ✗ 的話，
+                // 從終端機跑 doctor 永遠會看到它（前景就是那個終端機），
+                // 於是它變成一則恆真的警告——那種東西會把整個警告區塊一起
+                // 教壞。但也絕不能畫成 ✓：那會讓使用者以為驗過了。
                 (None, true) if app.is_empty() => (
-                    false,
+                    "?",
                     "讀你現在的網址",
-                    "現在沒有前景視窗，測不出來".to_string(),
+                    "現在沒有前景視窗，這一刻測不出來".to_string(),
                 ),
                 (None, true) => (
-                    // 不是失敗，只是這次沒東西可讀。但也不能報成 ✓：
-                    // 那會讓使用者以為驗過了。
-                    false,
+                    "?",
                     "讀你現在的網址",
                     format!(
                         "前景是 {app}，不是瀏覽器（或位址列是空的）。\
@@ -775,19 +787,22 @@ pub mod doctor {
         );
         // 規則數量不等於規則有效。沒有 URL 擷取能力時這些規則一條都不會跑，
         // 而使用者看到「16 條規則 ✓」只會更放心——那正是最糟的結果。
-        let url_capture = caps.url;
-        line(
-            url_capture,
+        //
+        // 但「UIA 建得起來」也不夠格畫 ✓：那只證明了一個 COM 物件生得出來，
+        // 沒有證明我們從位址列上讀得到任何東西（Firefox 的樹長得就不一樣）。
+        // 這就是上一版 `✓ OCR 語言 zh-Hant-TW` 的錯法，只是換了個能力。
+        // 所以 ✓ 只給「下面那一列真的讀到了網址」的情況。
+        let demonstrated = caps.url_probe.as_ref().is_some_and(|(s, ..)| *s == "✓");
+        let (sym, note) = match (caps.url, demonstrated) {
+            (false, _) => ("✗", "（本平台無法讀取網址，這些規則目前不生效）"),
+            (true, true) => ("✓", ""),
+            // UIA 在，但這一刻沒能證明讀得到。可能只是前景不是瀏覽器。
+            (true, false) => ("?", "（還沒驗到——見下面那一列）"),
+        };
+        mark(
+            sym,
             "排除的網址",
-            &format!(
-                "{} 條規則{}",
-                config.privacy.excluded_urls.len(),
-                if url_capture {
-                    ""
-                } else {
-                    "（本平台無法讀取網址，這些規則目前不生效）"
-                }
-            ),
+            &format!("{} 條規則{note}", config.privacy.excluded_urls.len()),
         );
         // 規則寫錯的方式是安靜的：少擋了不會有任何症狀。這裡把「寫了也不會
         // 命中」的規則挑出來，因為使用者自己永遠不會發現。
@@ -799,8 +814,8 @@ pub mod doctor {
         }
         // 規則數量與規則寫法都對，還有第三個問題：**網址到底讀不讀得到**。
         // 這一列是真的去問了現在的前景視窗，不是宣稱 UIA 建得起來。
-        if let Some((ok, label, detail)) = &caps.url_probe {
-            line(*ok, label, detail);
+        if let Some((sym, label, detail)) = &caps.url_probe {
+            mark(sym, label, detail);
         }
         line(
             true,
