@@ -396,9 +396,9 @@ mod tests {
     /// 真的去抓這台機器的螢幕，把每一種抓法的耗時印出來。
     ///
     /// 存在的理由：探測圖這條路是我**推論**出來的便宜——「`GetDIBits` 從
-    /// 14MB 掉到 147KB」——然後在真的 Windows 上量到探測 30.0ms、而整張
-    /// 原生解析度的抓圖只要 16.0ms。縮圖比不縮還貴，因為 `HALFTONE` 是
-    /// CPU 逐像素平均。推論算得很漂亮，方向卻是反的。
+    /// 14MB 掉到 147KB」——然後在真的 Windows 上量到探測和抓圖一樣貴。
+    /// 縮小目的地並不會讓來源變小：錢花在把整個畫面從顯示驅動搬過來，
+    /// 而那筆錢跟你要縮到多小關係不大。推論算得很漂亮，方向卻是反的。
     ///
     /// 所以這裡不再推論。時間會印進 CI log，換一種抓法就換一組數字。
     /// 它**不對耗時下斷言**（那會隨機器飄），只斷言一件真的會壞的事：
@@ -433,24 +433,41 @@ mod tests {
             ("512 / 丟像素", 512, Sampling::Fast),
         ];
 
-        println!("每種抓法各 {ROUNDS} 次：");
-        for (name, edge, sampling) in ways {
-            let t = Instant::now();
-            let mut last = None;
-            for i in 0..ROUNDS {
-                match s.capture(i as i64, edge, sampling) {
-                    Ok(Some(f)) => last = Some((f.width, f.height, f.dhash)),
-                    other => {
-                        println!("  {name}：中途抓不到了（{other:?} 之類），跳過");
-                        last = None;
-                        break;
-                    }
+        // 量測順序本身會污染結果。上一版是「一種抓法連跑 8 次、換下一種」，
+        // 於是 CI 上量到 512px 比 256px **還快**——第一種抓法替後面所有人
+        // 付了 DC 建立與快取預熱的錢。一個順序敏感的基準會給出順序敏感的
+        // 結論，而那種結論剛好長得像真的。
+        //
+        // 改成：先各跑一輪熱身（不計時），再一輪一輪輪流跑、各自累加。
+        // 這樣任何隨時間的漂移（別的 job 在同一台機器上搶 CPU）會平均攤到
+        // 每一種抓法身上，而不是全壓在第一個。
+        let mut total = vec![std::time::Duration::ZERO; ways.len()];
+        let mut shape = vec![None; ways.len()];
+
+        for (i, (_, edge, sampling)) in ways.iter().enumerate() {
+            if let Ok(Some(f)) = s.capture(-1, *edge, *sampling) {
+                shape[i] = Some((f.width, f.height));
+            }
+        }
+
+        println!("每種抓法各 {ROUNDS} 次（已熱身、輪流跑）：");
+        'rounds: for r in 0..ROUNDS {
+            for (i, (name, edge, sampling)) in ways.iter().enumerate() {
+                let t = Instant::now();
+                let got = s.capture(r as i64, *edge, *sampling);
+                total[i] += t.elapsed();
+                if !matches!(got, Ok(Some(_))) {
+                    println!("  {name}：中途抓不到了（{got:?} 之類），整張表作廢");
+                    break 'rounds;
                 }
             }
-            let Some((w, h, _)) = last else { continue };
+        }
+
+        for (i, (name, ..)) in ways.iter().enumerate() {
+            let Some((w, h)) = shape[i] else { continue };
             println!(
                 "  {name}\t{w}x{h}\t每次 {:.1} ms",
-                t.elapsed().as_secs_f64() * 1000.0 / ROUNDS as f64
+                total[i].as_secs_f64() * 1000.0 / ROUNDS as f64
             );
         }
 
