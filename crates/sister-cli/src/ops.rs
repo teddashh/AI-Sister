@@ -993,6 +993,31 @@ pub mod doctor {
             }
         }
 
+        // 先講「她會存多少圖」，再講「存下來的留多久」。順序是刻意的：
+        // 使用者遲早會點到一筆沒有圖的搜尋結果，而那不是壞掉——與其等他
+        // 來問，不如在他按下 record 之前就講清楚。
+        println!("\n畫面檔");
+        line(
+            true,
+            "多久存一張",
+            &format!(
+                "最快 {:.0} 秒一張（其餘只留字，搜尋不受影響）",
+                config.capture.image_min_interval_ms as f64 / 1000.0
+            ),
+        );
+        line(
+            true,
+            "一天最多存",
+            &if config.capture.max_image_mb_per_day == 0 {
+                "不設上限——磁碟要自己盯".to_string()
+            } else {
+                format!(
+                    "{} MB（用完就只留字，隔天歸零）",
+                    config.capture.max_image_mb_per_day
+                )
+            },
+        );
+
         println!("\n保留期");
         line(
             true,
