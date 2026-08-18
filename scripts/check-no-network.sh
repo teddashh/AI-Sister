@@ -21,7 +21,12 @@ cd "$(dirname "$0")/.."
 
 # 常見的 Rust HTTP/網路 client。名單寧可長一點——多列一個頂多是誤報，
 # 少列一個就是一句沒有人守著的承諾。
-FORBIDDEN='^(reqwest|ureq|hyper|curl|isahc|attohttpc|surf|minreq|ehttp|awc|http-req|tokio-tungstenite|tungstenite|async-tungstenite|websocket)$'
+#
+# 後半段是推論引擎。PRIVACY.md 與 README 都寫著「目前整份程式碼零次模型
+# 呼叫」，而那句話跟「沒有 HTTP client」是兩件不同的事：一個本機的 ONNX
+# runtime 一條網路連線都不會開，照樣讓那句話變成假的。這裡守的是 L0/L1
+# 「抄寫歸程式」那條線本身，不是隱私。
+FORBIDDEN='^(reqwest|ureq|hyper|curl|isahc|attohttpc|surf|minreq|ehttp|awc|http-req|tokio-tungstenite|tungstenite|async-tungstenite|websocket|ort|onnxruntime|onnxruntime-sys|tract-onnx|tract-core|candle-core|candle-nn|candle-transformers|llama-cpp-2|llm|tch|burn|rten|openai-api-rs|async-openai)$'
 
 fail=0
 for target in "" "x86_64-pc-windows-msvc"; do
@@ -49,8 +54,24 @@ for target in "" "x86_64-pc-windows-msvc"; do
     fi
 done
 
+# THREAT_MODEL.md 對遠端攻擊者寫的是「結構性免疫：**沒有監聽埠**、沒有輸出
+# 連線」。上面那個相依樹檢查只擋得住 client——一個 `TcpListener::bind` 只用
+# std，一個相依都不會多，而那句話從那一刻起就是假的。
+#
+# 這裡看的是原始碼而不是相依樹，因為 std 本來就在相依樹裡。
+echo "▶ 檢查原始碼裡有沒有 socket"
+sockets=$(grep -rnE '\b(TcpListener|UdpSocket|TcpStream|std::net::)' crates/ --include='*.rs' || true)
+if [ -n "$sockets" ]; then
+    echo "✗ 原始碼裡出現了 socket："
+    echo "$sockets" | sed 's/^/    /'
+    echo
+    echo "  THREAT_MODEL.md 說「沒有監聽埠、沒有輸出連線」，而那是它對"
+    echo "  遠端攻擊者宣稱的**結構性**免疫——不是設定、不是預設值。"
+    fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-echo "✓ 出貨的相依樹裡沒有 HTTP client，PRIVACY.md 的第一句仍然成立"
+echo "✓ 出貨的相依樹裡沒有 HTTP client 也沒有推論引擎，原始碼裡沒有 socket"

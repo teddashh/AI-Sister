@@ -124,6 +124,12 @@ trigram 給中日韓、unicode61 給英文。
 Windows 的鍵盤 hook **從未解參考 `KBDLLHOOKSTRUCT`**——按鍵碼從來沒有進入
 過這個程序的記憶體。這比「我們有記得過濾」強，因為它不需要你相信任何人。
 
+> 話雖如此，這句話一直到 alpha.9 之後才真的不需要相信任何人：在
+> `scripts/check-no-keylogging.py` 之前，守著它的東西是**零**——沒有測試、
+> 沒有 lint、沒有 CI 檢查。加一行讀 `vkCode` 的程式碼，整套測試照樣全綠。
+> 一句「不需要你相信任何人」的承諾，如果只能靠寫的人記得，那它要求的
+> 信任比它宣稱的還多。
+
 ### `facts` — L1 抽取出來的事實
 
 `kind`（money / phone / url / email / file_path / error_code / id_like /
