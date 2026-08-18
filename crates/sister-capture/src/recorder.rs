@@ -291,17 +291,27 @@ impl<B: Backend> Recorder<B> {
                 // 畫面真的變了，現在才付原生解析度的錢：OCR 要的是原生像素，
                 // 縮過的圖上 12px 的字會掉到 7px，然後被讀成一串亂碼。
                 let t = Instant::now();
-                let full = self.backend.grab_screen(ts)?;
+                let grabbed = self.backend.grab_screen(ts);
                 self.timings.grab.record(t.elapsed());
 
-                let Some(mut full) = full else {
-                    // 探測與正式抓圖之間畫面沒了（剛好鎖屏）。`check` 已經
-                    // 把去重基準推到這個雜湊上了，但我們什麼都沒存——不退回去
-                    // 的話，下一張一模一樣的畫面會被判成重複，然後把重複數
-                    // 加到一張**更早**的幀身上。
-                    self.deduper.reset();
-                    self.stats.no_screen += 1;
-                    return Ok(Tick::NoScreen);
+                // 「抓不到」有兩種寫法，兩種都得走同一條退路。`check` 已經把
+                // 去重基準推到這個雜湊上了，但我們什麼都沒存——不退回去的話，
+                // 下一張一模一樣的畫面會被判成重複，然後把重複數加到一張
+                // **更早**的幀身上，那一幀的 `dup_run` 從此是假的。
+                //
+                // 鎖屏（`Ok(None)`）本來就守住了；抓圖失敗（`Err`）沒有，
+                // 因為 `?` 會在退路之前就把錯誤帶走。同一個 bug，差一行。
+                let mut full = match grabbed {
+                    Ok(Some(f)) => f,
+                    Ok(None) => {
+                        self.deduper.reset();
+                        self.stats.no_screen += 1;
+                        return Ok(Tick::NoScreen);
+                    }
+                    Err(e) => {
+                        self.deduper.reset();
+                        return Err(e);
+                    }
                 };
                 // 去重看的是探測圖，資料庫裡也就存探測圖的雜湊。兩邊必須是
                 // 同一個數字，否則「這一列記的 dhash」與「當初據以判斷的
@@ -810,21 +820,29 @@ mod tests {
         assert_eq!(stored as u64, expected, "存的必須是探測圖的雜湊");
     }
 
-    /// 探測成功、正式抓圖卻沒了（剛好鎖屏），不可以污染去重狀態。
+    /// 探測成功、正式抓圖卻沒交出東西，不可以污染去重狀態。
     ///
     /// `check()` 已經把基準推到那個雜湊上，但我們什麼都沒存。不退回去的話，
     /// 下一張一模一樣的畫面會被判成「重複」，然後把重複計數加到一張**更早**
     /// 的幀身上——那一幀的 `dup_run` 從此是假的，而且沒有人會發現。
+    ///
+    /// 「抓不到」有兩種：`Ok(None)`（鎖屏）與 `Err`（抓圖失敗）。兩種都要
+    /// 走同一條退路——第一版只守住了前者，因為 `?` 會在退路之前就把錯誤
+    /// 帶走。所以這裡兩種各測一次。
     #[test]
     fn a_screen_that_vanishes_between_probe_and_grab_does_not_poison_dedup() {
-        struct Vanishing(std::rc::Rc<std::cell::RefCell<bool>>);
-        impl crate::traits::ScreenSource for Vanishing {
+        /// 0 = 交出畫面、1 = 回 `None`（鎖屏）、2 = 回 `Err`（抓圖失敗）
+        struct Flaky(std::rc::Rc<std::cell::Cell<u8>>);
+        impl crate::traits::ScreenSource for Flaky {
             fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
-                if *self.0.borrow() {
-                    return Ok(None); // 第一次：抓的時候螢幕鎖了
+                match self.0.get() {
+                    1 => Ok(None),
+                    2 => Err(anyhow::anyhow!("GetDIBits returned no scanlines")),
+                    _ => {
+                        let (w, h) = FULL;
+                        Ok(Some(RawFrame::from_rgba(ts, 0, w, h, pattern(w, h, 1))))
+                    }
                 }
-                let (w, h) = FULL;
-                Ok(Some(RawFrame::from_rgba(ts, 0, w, h, pattern(w, h, 1))))
             }
             fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
                 let (w, h) = PROBE;
@@ -832,30 +850,36 @@ mod tests {
             }
         }
 
-        let locked = std::rc::Rc::new(std::cell::RefCell::new(true));
-        let backend = crate::traits::CompositeBackend {
-            name: "vanishing".into(),
-            screen: Vanishing(locked.clone()),
-            focus: crate::traits::NullFocus,
-            clipboard: crate::traits::NullClipboard,
-            input: crate::traits::NullInput,
-            ocr: crate::traits::NullOcr,
-        };
-        let mut r = Recorder::new(
-            backend,
-            Db::open_in_memory().expect("db"),
-            Config::default(),
-            None,
-        )
-        .expect("recorder");
+        for failure in [1u8, 2] {
+            let mode = std::rc::Rc::new(std::cell::Cell::new(failure));
+            let backend = crate::traits::CompositeBackend {
+                name: "flaky".into(),
+                screen: Flaky(mode.clone()),
+                focus: crate::traits::NullFocus,
+                clipboard: crate::traits::NullClipboard,
+                input: crate::traits::NullInput,
+                ocr: crate::traits::NullOcr,
+            };
+            let mut r = Recorder::new(
+                backend,
+                Db::open_in_memory().expect("db"),
+                Config::default(),
+                None,
+            )
+            .expect("recorder");
 
-        assert_eq!(r.tick(0).expect("tick"), Tick::NoScreen);
-        *locked.borrow_mut() = false;
-        // 同一個畫面回來了。它從來沒被存過，所以必須是新的。
-        assert!(
-            matches!(r.tick(1_000).expect("tick"), Tick::Kept { .. }),
-            "沒存成的那一張不能把後面真的那一張擋掉"
-        );
+            match failure {
+                1 => assert_eq!(r.tick(0).expect("鎖屏不是錯誤"), Tick::NoScreen),
+                _ => assert!(r.tick(0).is_err(), "抓圖失敗要往上報，不能吞掉"),
+            }
+
+            // 同一個畫面回來了。它從來沒被存過，所以必須是新的。
+            mode.set(0);
+            assert!(
+                matches!(r.tick(1_000).expect("tick"), Tick::Kept { .. }),
+                "抓不到的第 {failure} 種：沒存成的那一張不能把後面真的那一張擋掉"
+            );
+        }
     }
 
     fn step(at_ms: Millis, app: &str, title: &str, text: &[&str]) -> Step {
