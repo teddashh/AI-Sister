@@ -1199,8 +1199,10 @@ pub mod record {
 
         let images = config.capture.store_images.then(|| data_dir.join("frames"));
         let interval = Duration::from_millis(config.capture.min_interval_ms.max(200));
-        // config 等一下會被 Recorder 吃掉，但收尾的摘要還需要這一項
+        // config 等一下會被 Recorder 吃掉，但收尾的摘要與定期清理還需要這幾項
         let config_ocr = config.capture.ocr;
+        let retention = config.retention.clone();
+        let prune_images = images.clone();
         let mut rec = Recorder::new(backend, db, config, images)?;
 
         install_ctrl_c_handler();
@@ -1218,6 +1220,13 @@ pub mod record {
             backend_name().unwrap_or("?"),
             interval.as_millis()
         );
+
+        // 保留期要在錄製途中反覆跑，不能只在開機時跑一次。一個連續開著
+        // 三十天的行程，只清一次的話從第 31 天起保留期就等於不存在——
+        // 而且它跑得越久、越沒有人重開，這個洞就越大。六小時一次：夠密到
+        // 不會累積出一整天的過期資料，夠疏到不會變成足跡本身的一部分。
+        const PRUNE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+        let mut last_prune = Instant::now();
 
         let mut last_report = Instant::now();
         while !STOP.load(Ordering::SeqCst) {
@@ -1239,6 +1248,21 @@ pub mod record {
                     tracing::debug!("frame #{frame_id}：{ocr_blocks} 段文字、{facts} 個事實");
                 }
                 Ok(_) => {}
+            }
+
+            if last_prune.elapsed() >= PRUNE_EVERY {
+                last_prune = Instant::now();
+                match rec
+                    .db_mut()
+                    .prune(sister_core::now_ms(), &retention, prune_images.as_deref())
+                {
+                    Ok(r) if !r.is_empty() => {
+                        println!("  ○ 保留期清理");
+                        crate::ops::prune::print_report(&r, false);
+                    }
+                    Ok(_) => {}
+                    Err(e) => println!("  ⚠  保留期清理失敗，過期的資料還在：{e:#}"),
+                }
             }
 
             if last_report.elapsed() >= Duration::from_secs(60) {

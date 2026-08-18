@@ -140,6 +140,14 @@ impl<B: Backend> Recorder<B> {
         &self.db
     }
 
+    /// 給長時間執行的呼叫端用：錄製途中還要定期做保留期清理。
+    ///
+    /// 一個跑了三十天的行程，如果只在啟動時清一次，那從第 31 天起
+    /// 保留期就等於不存在——而它跑得越久、越沒有人重開，這個洞就越大。
+    pub fn db_mut(&mut self) -> &mut Db {
+        &mut self.db
+    }
+
     pub fn session_id(&self) -> i64 {
         self.session_id
     }
