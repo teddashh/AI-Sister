@@ -103,6 +103,26 @@ impl FocusSource for WindowsFocus {
         // 那只會讓她什麼都記不住，而且原因藏在一個沒有人看的地方。
         Ok(snapshot)
     }
+
+    fn degradations(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.uia.is_alive() {
+            out.push(
+                "UIA 在錄製途中卡住太多次已放棄：從那一刻起讀不到網址，\
+                 excluded_urls 整組規則不再生效（網銀、登入頁可能被錄了進去）"
+                    .to_string(),
+            );
+        } else if self.uia.password_check_broken() {
+            // `else if`：整個 UIA 都沒了的話，上面那句已經涵蓋，
+            // 再多印一則只是稀釋掉真正要看的那一則
+            out.push(
+                "問不出焦點是不是在密碼欄上（連續失敗），已停止用它擋畫面：\
+                 瀏覽器裡的密碼欄現在只靠圓點遮蔽保護"
+                    .to_string(),
+            );
+        }
+        out
+    }
 }
 
 /// 現在的前景視窗。任何一步失敗都退化成 `None`，不往上冒錯誤。

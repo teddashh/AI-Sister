@@ -78,6 +78,11 @@ pub trait ScreenSource {
 /// 前景視窗來源。
 pub trait FocusSource {
     fn snapshot(&mut self, ts: Millis) -> Result<FocusSnapshot>;
+
+    /// 見 [`Backend::degradations`]。
+    fn degradations(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// 剪貼簿來源。回傳自上次呼叫以來的新事件。
@@ -126,6 +131,20 @@ pub trait Backend {
     }
     fn drain_input(&mut self, ts: Millis) -> Result<Option<InputMetrics>>;
     fn recognize(&mut self, frame: &RawFrame) -> Result<Vec<OcrBlock>>;
+
+    /// 這段錄製中途**壞掉**的能力，一句一則人話。
+    ///
+    /// `sister doctor` 只看得到開機那一瞬間。但能力是會在半路上掉的：UIA
+    /// 卡三次之後就永久投降，而它一投降，`excluded_urls` 整組規則從那一刻起
+    /// 一條都不生效——`doctor` 當時是綠的，摘要也是綠的，只有網銀從那之後
+    /// 全被錄了進去。那是這個專案最不能接受的失效方式（THREAT_MODEL
+    /// 「安靜地不生效」）。
+    ///
+    /// 所以收工前問一次。預設空的：沒有東西掉，就不要製造雜訊——一則
+    /// 恆真的警告會讓整個警告區塊被學會忽略。
+    fn degradations(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// 把五個各自獨立的來源組成一個 [`Backend`]。
@@ -157,6 +176,11 @@ where
     }
     fn focus_snapshot(&mut self, ts: Millis) -> Result<FocusSnapshot> {
         self.focus.snapshot(ts)
+    }
+    fn degradations(&self) -> Vec<String> {
+        // 目前只有 focus 那一支會半路掉能力（UIA）。其他來源要嘛一開始就
+        // 不在，要嘛一直都在，那些由 `Capabilities` 在開機時講完。
+        self.focus.degradations()
     }
     fn poll_clipboard(&mut self, ts: Millis) -> Result<Option<ClipboardEvent>> {
         self.clipboard.poll(ts)
@@ -299,5 +323,46 @@ mod tests {
             dhash: 0,
         };
         assert!(NullOcr.recognize(&f).expect("no error").is_empty());
+    }
+
+    /// 半路上掉的能力要走得出後端這一層。
+    ///
+    /// 這條線存在的理由很具體：UIA 卡三次之後會永久投降，而它一投降，
+    /// `excluded_urls` 從那一刻起一條都不生效。開機時的 `doctor` 是綠的、
+    /// 錄製摘要也是綠的——除非有人在收工時問一句。這個測試就是在盯著
+    /// 那句問話還在不在，別哪天重構把它接丟了。
+    #[test]
+    fn a_capability_lost_mid_run_makes_it_out_of_the_backend() {
+        struct Flaky;
+        impl FocusSource for Flaky {
+            fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
+                Ok(FocusSnapshot::default())
+            }
+            fn degradations(&self) -> Vec<String> {
+                vec!["UIA 投降了".into()]
+            }
+        }
+
+        let backend = CompositeBackend {
+            name: "test".into(),
+            screen: NullScreen,
+            focus: Flaky,
+            clipboard: NullClipboard,
+            input: NullInput,
+            ocr: NullOcr,
+        };
+        assert_eq!(Backend::degradations(&backend), vec!["UIA 投降了"]);
+
+        // 而沒掉東西的時候必須完全安靜：一則恆真的警告會讓整個警告區塊
+        // 被學會忽略，包括旁邊那則是真的
+        let healthy = CompositeBackend {
+            name: "test".into(),
+            screen: NullScreen,
+            focus: NullFocus,
+            clipboard: NullClipboard,
+            input: NullInput,
+            ocr: NullOcr,
+        };
+        assert!(Backend::degradations(&healthy).is_empty());
     }
 }

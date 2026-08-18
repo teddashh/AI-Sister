@@ -1125,6 +1125,10 @@ pub mod record {
         }
 
         let stats = rec.stats().clone();
+        // 收工前問一次「這段路上掉了什麼」。`doctor` 只看得到開機那一瞬間，
+        // 而 UIA 會在半路上永久投降——那之後 excluded_urls 一條都不生效，
+        // 卻沒有任何地方會講。見 `Backend::degradations`。
+        let lost = sister_capture::Backend::degradations(rec.backend());
         rec.finish()?;
         println!(
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
@@ -1132,6 +1136,9 @@ pub mod record {
         );
         report_exclusions(&stats);
         report_ocr(&stats, config_ocr);
+        for line in &lost {
+            println!("  ⚠  錄製途中失去的能力：{line}");
+        }
         Ok(())
     }
 
