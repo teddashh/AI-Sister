@@ -65,10 +65,16 @@ jobs:
         run: cargo test --workspace
 
       # runner 預設只有英文 OCR，於是「中文會不會被逐字切開」這一題永遠停在
-      # 「跳過」——而那是這個產品的主要語言。裝上繁中語言包，讓它真的被驗到。
-      # 裝不起來不讓 CI 紅：那是環境問題，測試本身會誠實印出跳過的理由。
+      # 「跳過」——而那是這個產品的主要語言。裝上繁中語言包讓它真的被驗到。
+      #
+      # 只在打 tag 或手動觸發時跑：`Add-WindowsCapability` 要跟 Windows Update
+      # 要一份 FOD，實測會掛在那裡超過 20 分鐘（很可能被 runner 的網路擋掉）。
+      # 每次 push 都付這個代價不值得，但每次發版驗一次值得。
+      # timeout + continue-on-error 是為了讓它最壞情況只是浪費幾分鐘，不會卡死。
       - name: Install Traditional Chinese OCR language pack
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         continue-on-error: true
+        timeout-minutes: 8
         shell: powershell
         run: |
           foreach ($cap in @("Language.Basic~~~zh-TW~0.0.1.0", "Language.OCR~~~zh-TW~0.0.1.0")) {
