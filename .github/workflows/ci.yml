@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Linux 上跑的是平台無關的那一半：核心邏輯、L1 抽取、replay、隱私驗證。
+  linux:
+    name: Linux — test, lint, privacy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      # 敏感排除是 Phase 0 的 exit criteria，值得單獨、顯眼地跑一次
+      - name: Privacy — sensitive content must never reach disk
+        run: cargo test -p sister-capture --test privacy -- --nocapture
+
+      # Windows 那一半在 Linux 上被 cfg 關掉，這裡至少要型別檢查到
+      - name: Cross-check the Windows half
+        run: ./scripts/check-windows.sh
+
+  # 真正的 Windows：這裡才會連結、才會執行 Win32 的單元測試。
+  windows:
+    name: Windows — test and build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # 這一步是 Linux 上做不到的事：Win32 程式碼真的被執行
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build release
+        run: cargo build --release -p sister-cli
+
+      # Phase 0 的 exit criteria，在真正的 Windows 上驗一次：
+      # 「sister query 電話 能撈回三天前畫面上的電話，附出處」。
+      # 斷言看 JSON 裡的正規化值，避免主控台的中文編碼影響判定。
+      - name: Smoke test — Phase 0 exit criterion on real Windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          S=./target/release/sister.exe
+          $S --version
+          $S --data-dir ./smoke doctor
+          $S --data-dir ./smoke replay scenarios/bill-lookup.json --days-ago 3
+          $S --data-dir ./smoke stats
+
+          $S --data-dir ./smoke query 電話 --json > out.json
+          cat out.json
+          grep -q '"+886800080123"' out.json \
+            || { echo "::error::query 電話 沒有撈回三天前的客服電話"; exit 1; }
+          grep -q '"frame_id"' out.json \
+            || { echo "::error::答案沒有附出處"; exit 1; }
+
+      - name: Upload sister.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: sister-windows-x64
+          path: target/release/sister.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  # 打 tag 才發 release，這樣才有一個不用登入就能下載的連結。
+  release:
+    name: Release
+    needs: [linux, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sister-windows-x64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: sister.exe
+          generate_release_notes: true
