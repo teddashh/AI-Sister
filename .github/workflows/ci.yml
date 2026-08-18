@@ -115,6 +115,32 @@ jobs:
           grep -q '"frame_id"' out.json \
             || { echo "::error::答案沒有附出處"; exit 1; }
 
+      # 上面那一段走的是 replay，也就是**真正的擷取迴圈一行都沒被執行過**。
+      # alpha.4 三個缺陷全部長在那條路上：抓圖、去重、寫檔、報告。它們在
+      # Linux 上跑得好好的，在 Ted 的機器上一起壞掉，而中間沒有任何一關。
+      #
+      # 這裡把迴圈真的跑起來。runner 的桌面幾乎不動，所以「保留了幾張」
+      # 不能拿來斷言——會 flaky。能斷言的是**報告有沒有解釋得了自己**：
+      # 時間表把每個階段加起來之後，剩下沒歸因到的那一段必須是小的。
+      # 那一行是這份效能報告對自己的誠實度檢查，拿它當關卡，等於「以後
+      # 有人加了一個沒被量到的階段，CI 會先發現」。
+      - name: Capture loop — really run it on real Windows
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          S=./target/release/sister.exe
+          # 導向管線時 Rust 直接寫 UTF-8 位元組（不走 WriteConsoleW），
+          # 所以這裡可以拿中文當關鍵字——讀不到就當成失敗，不要靜靜放過。
+          $S --data-dir ./loop record --duration 8 2>&1 | tee rec.txt
+
+          grep -q '時間：' rec.txt \
+            || { echo "::error::錄完了卻沒印出時間表——CPU 又變成一個沒有下一步的數字"; exit 1; }
+          if grep -q '這段沒歸因到任何階段' rec.txt; then
+            echo "::error::時間表解釋不了自己：有一段 CPU 沒有任何階段認領"
+            exit 1
+          fi
+
       - name: Upload sister.exe
         uses: actions/upload-artifact@v4
         with:
