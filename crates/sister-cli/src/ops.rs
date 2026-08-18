@@ -526,6 +526,14 @@ pub mod stats {
                         "reason": a.reason, "episodes": a.episodes,
                         "first_ts": a.first_ts, "last_ts": a.last_ts,
                     })).collect::<Vec<_>>(),
+                    // 這三個訊號在 Phase 0 沒有讀者，所以也沒有回歸保護：
+                    // 哪天 recorder 不再寫 focus_events，`stats` 照樣印一個
+                    // 很小的數字，沒有一個測試會紅。`doctor` 會講，但 doctor
+                    // 要有人去跑——一個要有人記得去跑的檢查，遲早沒人跑。
+                    "signals": db.signal_audit()?.iter().map(|a| serde_json::json!({
+                        "name": a.name, "rows": a.rows,
+                        "populated": a.populated, "broken": a.broken,
+                    })).collect::<Vec<_>>(),
                 }))?
             );
             return Ok(());

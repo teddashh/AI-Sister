@@ -55,9 +55,32 @@ def main() -> None:
         if e["episodes"] < 1:
             fail(f"排除理由 {e['reason']!r} 的段數是 {e['episodes']}")
 
+    # 三個沒有讀者的訊號。這裡是它們唯一的回歸保護——少了這一段，哪天
+    # recorder 不再寫 focus_events，整套測試都不會紅。
+    signals = stats.get("signals")
+    if not signals:
+        fail("stats --json 裡沒有 signals——空殼偵測的機器可讀路徑不見了")
+
+    for s in signals:
+        if s["broken"]:
+            fail(
+                f"訊號「{s['name']}」有 {s['rows']} 列，但沒有一列有內容。"
+                "這是「寫了一堆空殼」的形狀，不是「使用者很安靜」"
+            )
+        # 空表也要擋，但理由不一樣：replay 腳本一定會產生這三種訊號，
+        # 所以在 CI 上「一列都沒有」代表寫入端斷了。這個斷言在使用者的
+        # 機器上不成立（可能真的還沒錄到），所以它只活在這支腳本裡。
+        if s["rows"] < 1:
+            fail(
+                f"訊號「{s['name']}」一列都沒有。bill-lookup 有換視窗、有打字、"
+                "也有 OCR 文字——三種訊號都該留下東西"
+            )
+
     print(
         f"✓ 遮蔽 {redaction['flagged']} 次、外洩 {redaction['leaked']} 次；"
-        f"排除稽核 {len(exclusions)} 條理由"
+        f"排除稽核 {len(exclusions)} 條理由；"
+        + "訊號 "
+        + "、".join("{} {}".format(s["name"], s["rows"]) for s in signals)
     )
 
 
