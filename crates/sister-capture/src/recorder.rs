@@ -319,20 +319,23 @@ impl<B: Backend> Recorder<B> {
 
         // 5) 先問一個不用碰螢幕就答得出來的問題：有人動過嗎？
         //
-        //    這一步是量出來的，不是想出來的。實測（release、真 Windows）：
-        //    探測圖 27.0 ms，它想省下的那次抓圖 30.1 ms——省 10%，而且是
-        //    **每個 tick 都付**去賭那次抓圖不會發生。等於沒省。縮圖也救不
-        //    了：256px 用面積平均 30.3 ms、用丟像素 31.3 ms，兩者一樣貴，
-        //    因為錢花在「從顯示驅動把畫面搬過來」，不在縮放的算術上。
+        //    這一步是量出來的，不是想出來的。真 Windows、release、三次獨立
+        //    量測都指向同一件事：一次擷取的成本幾乎完全由「讀了多少來源
+        //    像素」決定，跟你要縮到多小**沒有關係**——
         //
-        //    真正便宜的做法是**不要搬**。沒有人碰過鍵盤滑鼠、焦點也沒變，
-        //    畫面就多半沒變——那是一次系統呼叫，0.0 ms。
+        //        原生 1024x768   24.2 ms      256x192（面積平均） 22.1 ms
+        //        512x384         20.9 ms      256x192（丟像素）   19.5 ms
         //
-        //    「多半」不是「一定」，所以上面有 `MAX_BLIND_MS` 這個天花板：
+        //    目的地像素差 12 倍，時間差不到 25%。所以想省錢只有一條路：
+        //    **不要讀**。沒有人碰過鍵盤滑鼠、焦點也沒變，畫面就多半沒變，
+        //    而問這件事是一次系統呼叫，0.0 ms。
+        //
+        //    「多半」不是「一定」，所以下面有 `MAX_BLIND_MS` 這個天花板：
         //    「不知道就擋住」必須有上限，反過來「猜沒變就不看」也一樣。
-        // 換了視窗、換了分頁、標題變了 → 畫面幾乎不可能沒變，直接睜眼。
-        // 這一條不是為了效能，是為了收窄那個 5 秒的盲區：通知搶焦點、
-        // 安裝程式跳出來這類事情不需要任何輸入，但它們都會動到脈絡。
+        //
+        //    換了視窗、換了分頁、標題變了 → 畫面幾乎不可能沒變，直接睜眼。
+        //    這一條不是為了效能，是為了收窄那個 5 秒的盲區：通知搶焦點、
+        //    安裝程式跳出來這類事情不需要任何輸入，但都會動到脈絡。
         let idle_signal = if context_changed {
             None
         } else {
@@ -348,16 +351,37 @@ impl<B: Backend> Recorder<B> {
         }
         self.last_look_ts = Some(ts);
 
-        // 6) 到這裡才碰螢幕——而且先用**便宜的探測圖**問一句「變了沒」。
+        // 6) 讀一次螢幕。**只讀一次。**
+        //
+        //    這裡本來有兩次：先抓一張 256px 的「探測圖」算雜湊，變了才付
+        //    原生解析度的錢。那個設計來自一個算得很漂亮的推論——要搬的
+        //    位元組從 14MB 掉到 147KB——而它整整活了兩個版本，因為沒有人
+        //    去量。量了之後：探測 43.1 ms、它想省的那次抓圖 33.4 ms。
+        //
+        //    原因上面那張表已經寫了：成本由**來源**像素決定，而探測圖和
+        //    抓圖讀的是同一個螢幕。縮小目的地什麼都沒省，只是把一張讀完
+        //    的畫面丟掉，然後再讀一次。
+        //
+        //    所以現在一次讀到底，dhash 直接從這張算。少一次擷取、少一個
+        //    「兩張圖的雜湊必須一致」的隱性約定，也少一整個 `probe` 概念。
         let t = Instant::now();
-        let probe = self.backend.probe_screen(ts)?;
-        self.timings.probe.record(t.elapsed());
-        let Some(probe) = probe else {
-            self.stats.no_screen += 1;
-            return Ok(Tick::NoScreen);
+        let grabbed = self.backend.grab_screen(ts);
+        self.timings.grab.record(t.elapsed());
+
+        // 這條路上的每一個退出點都不必手動退回去重基準：`check` 不會推進
+        // 它，推進的是 `keep_frame` 裡真的存完之後那一句 `kept`。這裡曾經
+        // 有三個地方各自漏掉那個退回動作（鎖屏、抓圖失敗、資料庫寫不進
+        // 去），所以問題不在漏了三次，在於形狀。
+        let frame = match grabbed {
+            Ok(Some(f)) => f,
+            Ok(None) => {
+                self.stats.no_screen += 1;
+                return Ok(Tick::NoScreen);
+            }
+            Err(e) => return Err(e),
         };
 
-        match self.deduper.check(probe.dhash) {
+        match self.deduper.check(frame.dhash) {
             FrameVerdict::Duplicate { run } => {
                 self.stats.duplicates += 1;
                 if let Some(id) = self.last_frame_id {
@@ -365,31 +389,7 @@ impl<B: Backend> Recorder<B> {
                 }
                 Ok(Tick::Duplicate { run })
             }
-            FrameVerdict::New => {
-                // 畫面真的變了，現在才付原生解析度的錢：OCR 要的是原生像素，
-                // 縮過的圖上 12px 的字會掉到 7px，然後被讀成一串亂碼。
-                let t = Instant::now();
-                let grabbed = self.backend.grab_screen(ts);
-                self.timings.grab.record(t.elapsed());
-
-                // 這裡的每一條退路都不必再手動退回去重基準：`check` 不會推進
-                // 它，推進的是 `keep_frame` 裡真的存完之後那一句 `kept`。
-                // 這條路上曾經有三個地方各自漏掉那個退回動作（鎖屏、抓圖
-                // 失敗、資料庫寫不進去），所以問題不在漏了三次，在於形狀。
-                let mut full = match grabbed {
-                    Ok(Some(f)) => f,
-                    Ok(None) => {
-                        self.stats.no_screen += 1;
-                        return Ok(Tick::NoScreen);
-                    }
-                    Err(e) => return Err(e),
-                };
-                // 去重看的是探測圖，資料庫裡也就存探測圖的雜湊。兩邊必須是
-                // 同一個數字，否則「這一列記的 dhash」與「當初據以判斷的
-                // dhash」是兩回事，事後任何重算都會得到對不起來的答案。
-                full.dhash = probe.dhash;
-                self.keep_frame(ts, full, focus)
-            }
+            FrameVerdict::New => self.keep_frame(ts, frame, focus),
         }
     }
 
@@ -968,15 +968,18 @@ mod tests {
         );
     }
 
-    // ---------- 兩段式抓圖 ----------
+    // ---------- 一個 tick 只讀一次螢幕 ----------
     //
     // 這一組測試釘住的是 alpha.4 實測踩到的兩個數字：CPU 27.1%（預算 3%）
-    // 與一段被讀成 `Micr099ftTeamsTr` 的 OCR 文字。兩者是同一個原因——
-    // 一份像素同時被拿去做三件需求互相衝突的事。
+    // 與一段被讀成 `Micr099ftTeamsTr` 的 OCR 文字。
+    //
+    // 第一版的解法是「兩段式抓圖」：先讀一張便宜的小圖算雜湊，變了才讀
+    // 完整的那張。OCR 那個問題確實修好了。CPU 那個沒有——實測探測
+    // 43.1 ms、它想省的抓圖 33.4 ms，因為擷取成本由**來源**像素決定，
+    // 而兩次讀的是同一個螢幕。所以現在只讀一次。
 
     #[derive(Default)]
     struct StageLog {
-        probes: u32,
         grabs: u32,
         /// OCR 每次拿到的尺寸。這就是文字品質的全部。
         ocr_sizes: Vec<(u32, u32)>,
@@ -992,23 +995,17 @@ mod tests {
         px
     }
 
-    /// 探測給小圖、正式抓圖給大圖——正是 Windows 後端的形狀。
-    struct TwoStage {
+    /// 數自己被讀了幾次的螢幕。
+    struct CountedScreen {
         log: std::rc::Rc<std::cell::RefCell<StageLog>>,
     }
 
-    const PROBE: (u32, u32) = (64, 36);
     const FULL: (u32, u32) = (256, 144);
 
-    impl crate::traits::ScreenSource for TwoStage {
+    impl crate::traits::ScreenSource for CountedScreen {
         fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
             self.log.borrow_mut().grabs += 1;
             let (w, h) = FULL;
-            Ok(Some(RawFrame::from_rgba(ts, 0, w, h, pattern(w, h, 1))))
-        }
-        fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
-            self.log.borrow_mut().probes += 1;
-            let (w, h) = PROBE;
             Ok(Some(RawFrame::from_rgba(ts, 0, w, h, pattern(w, h, 1))))
         }
     }
@@ -1021,11 +1018,11 @@ mod tests {
         }
     }
 
-    fn two_stage(
+    fn counted(
         log: std::rc::Rc<std::cell::RefCell<StageLog>>,
     ) -> Recorder<
         crate::traits::CompositeBackend<
-            TwoStage,
+            CountedScreen,
             crate::traits::NullFocus,
             crate::traits::NullClipboard,
             crate::traits::NullInput,
@@ -1033,8 +1030,8 @@ mod tests {
         >,
     > {
         let backend = crate::traits::CompositeBackend {
-            name: "two-stage".into(),
-            screen: TwoStage { log: log.clone() },
+            name: "counted".into(),
+            screen: CountedScreen { log: log.clone() },
             focus: crate::traits::NullFocus,
             clipboard: crate::traits::NullClipboard,
             input: crate::traits::NullInput,
@@ -1049,67 +1046,69 @@ mod tests {
         .expect("recorder")
     }
 
-    /// **OCR 必須拿到正式抓圖，不是那張便宜的探測圖。**
+    /// **OCR 必須拿到完整解析度的那一張。**
     ///
     /// 這條線是實測那串亂碼的來源。原本三件事共用同一份像素：去重只需要
     /// 9×8、存檔想要 1568、OCR 要原生解析度——結果所有人都拿到 1568，
     /// 2560 的螢幕縮成 0.61 倍，12px 的字掉到 7px，於是
     /// `Microsoft Teams` 被讀成 `Micr099ftTeamsTr`。引擎不報錯，只是讀錯。
     #[test]
-    fn ocr_reads_the_full_resolution_frame_not_the_cheap_probe() {
+    fn ocr_reads_the_frame_at_the_resolution_the_screen_handed_over() {
         let log = std::rc::Rc::new(std::cell::RefCell::new(StageLog::default()));
-        let mut r = two_stage(log.clone());
+        let mut r = counted(log.clone());
         r.tick(0).expect("tick");
 
         let log = log.borrow();
         assert_eq!(
             log.ocr_sizes,
             vec![FULL],
-            "OCR 拿到探測圖就等於讀不出字；實際 {:?}",
+            "OCR 拿到縮過的圖就等於讀不出字；實際 {:?}",
             log.ocr_sizes
         );
     }
 
-    /// **重複的畫面不可以付原生解析度的錢。**
+    /// **一個 tick 只准讀一次螢幕。**
     ///
-    /// 這是 CPU 那個數字的修法本身。實測 120 個 tick 裡有 103 個是重複的，
-    /// 而它們每一個都搬了一張全尺寸的圖，只為了算出一個 64-bit 的雜湊然後
-    /// 整張丟掉。如果哪天重構把 `probe` 接回 `grab`，這次改動就等於沒做，
-    /// 而摘要上完全看不出差別——只有電池會知道。
+    /// 這是 CPU 那個數字真正的修法。第一版反過來：每個 tick 讀兩次——
+    /// 一張便宜的探測圖算雜湊，變了再讀完整的那張。算式看起來很划算
+    /// （要搬的位元組 14MB → 147KB），實測是白付的（探測 43.1 ms、
+    /// 抓圖 33.4 ms），因為成本由**來源**像素決定，而兩次讀的是同一個
+    /// 螢幕。縮小目的地只是把一張讀完的畫面丟掉，然後再讀一次。
+    ///
+    /// 這條斷言擋的就是「再讀一次」以任何形式長回來。它長回來的時候，
+    /// 摘要上完全看不出差別——只有電池會知道。
     #[test]
-    fn a_duplicate_screen_never_pays_for_a_full_resolution_grab() {
+    fn one_tick_reads_the_screen_exactly_once() {
         let log = std::rc::Rc::new(std::cell::RefCell::new(StageLog::default()));
-        let mut r = two_stage(log.clone());
+        let mut r = counted(log.clone());
         for i in 0..4 {
             r.tick(i * 1_000).expect("tick");
         }
 
         assert_eq!(r.stats().kept, 1);
         assert_eq!(r.stats().duplicates, 3);
-
-        let log = log.borrow();
-        assert_eq!(log.probes, 4, "每個 tick 都要探一次");
-        assert_eq!(log.grabs, 1, "但只有畫面真的變了才抓完整的那張");
+        assert_eq!(log.borrow().grabs, 4, "四個 tick 就該剛好讀四次");
     }
 
     /// 資料庫裡記的 dhash，必須就是當初據以判斷「變了沒」的那一個。
     ///
-    /// 兩張圖尺寸不同，dhash 通常也會差一點。存錯那一個不會有任何症狀，
-    /// 直到有人拿資料庫裡的雜湊去重算或比對，得到一組對不起來的答案。
+    /// 兩段式的時候這件事會安靜地錯：判定用探測圖的雜湊、存的卻是完整圖
+    /// 的，而兩張尺寸不同、雜湊也就不同。現在只有一張圖，所以它應該是
+    /// 自動成立的——留著這條斷言，是為了讓「自動成立」這件事有人看著。
     #[test]
     fn the_stored_hash_is_the_one_dedup_actually_used() {
         let log = std::rc::Rc::new(std::cell::RefCell::new(StageLog::default()));
-        let mut r = two_stage(log);
+        let mut r = counted(log);
         r.tick(0).expect("tick");
 
-        let (pw, ph) = PROBE;
-        let expected = sister_core::dedup::dhash_rgb(&pattern(pw, ph, 1), pw, ph, 4);
+        let (w, h) = FULL;
+        let expected = sister_core::dedup::dhash_rgb(&pattern(w, h, 1), w, h, 4);
         let stored: i64 = r
             .db()
             .conn()
             .query_row("SELECT dhash FROM frames", [], |row| row.get(0))
             .expect("query");
-        assert_eq!(stored as u64, expected, "存的必須是探測圖的雜湊");
+        assert_eq!(stored as u64, expected, "存的必須是判定用的那一個雜湊");
     }
 
     /// 判定為「新的」卻沒有真的存下來，不可以污染去重狀態。
@@ -1138,10 +1137,6 @@ mod tests {
                         Ok(Some(RawFrame::from_rgba(ts, 0, w, h, pattern(w, h, 1))))
                     }
                 }
-            }
-            fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
-                let (w, h) = PROBE;
-                Ok(Some(RawFrame::from_rgba(ts, 0, w, h, pattern(w, h, 1))))
             }
         }
 
@@ -1300,16 +1295,6 @@ mod tests {
         /// 畫面內容由外面控制，這樣「同一個畫面再來一次」才做得出來。
         struct Held(std::rc::Rc<std::cell::Cell<u32>>);
         impl crate::traits::ScreenSource for Held {
-            fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
-                let (w, h) = PROBE;
-                Ok(Some(RawFrame::from_rgba(
-                    ts,
-                    0,
-                    w,
-                    h,
-                    pattern(w, h, self.0.get()),
-                )))
-            }
             fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
                 let (w, h) = FULL;
                 Ok(Some(RawFrame::from_rgba(
@@ -1413,25 +1398,15 @@ mod tests {
             .sum()
     }
 
-    /// 每次探測都給一張不同的畫面，正式抓圖則是同一畫面的放大版。
+    /// 每次都給一張不一樣的畫面，這樣去重不會把它們併掉。
     /// replay 後端不產生像素（`rgba: None`），所以存圖這條路徑測不到。
     #[derive(Default)]
     struct ChangingScreen {
         seed: u32,
     }
     impl crate::traits::ScreenSource for ChangingScreen {
-        fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
-            self.seed += 1;
-            let (w, h) = PROBE;
-            Ok(Some(RawFrame::from_rgba(
-                ts,
-                0,
-                w,
-                h,
-                pattern(w, h, self.seed),
-            )))
-        }
         fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+            self.seed += 1;
             let (w, h) = FULL;
             Ok(Some(RawFrame::from_rgba(
                 ts,

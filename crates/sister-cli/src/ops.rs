@@ -1754,26 +1754,6 @@ pub mod record {
                 per_call.as_secs_f64() * 1000.0
             );
         }
-        // 探測圖唯一的存在理由是「省下抓圖」，所以它必須自己結一次帳。
-        //
-        // 這一段是實測換來的：探測 27.0 ms、它想省的那次抓圖 30.1 ms，
-        // 而探測是每個 tick 都先付。整整兩個版本裡沒有人發現，因為時間表
-        // 上它就只是「排第一名的那一項」——排第一很正常，一個為了省錢而
-        // 存在、結果自己變成最大開銷的階段，才是要被抓出來的形狀。
-        //
-        // 帳這樣算：省下的 = 沒抓成的次數 × 抓一次要多少；成本 = 探測全部。
-        if let (Some(per_grab), true) = (t.grab.per_call(), t.probe.calls > 0) {
-            let avoided = t.probe.calls.saturating_sub(t.grab.calls);
-            let saved = per_grab.mul_f64(avoided as f64);
-            if saved < t.probe.total {
-                println!(
-                    "        ⚠ 探測圖倒賠：花了 {:.2} 秒去省 {:.2} 秒（{avoided} 次沒抓成 × {:.1} ms）",
-                    t.probe.total.as_secs_f64(),
-                    saved.as_secs_f64(),
-                    per_grab.as_secs_f64() * 1000.0
-                );
-            }
-        }
         // 這一行是上面那份排名對自己的誠實度檢查。它小，代表排名真的解釋了
         // CPU 花到哪裡；它大，代表最貴的東西根本沒被量到，而排第一的那一項
         // 只是「被量到的裡面最大的」——那正是一份效能報告最會騙人的形狀。

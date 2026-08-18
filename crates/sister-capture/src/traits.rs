@@ -77,22 +77,6 @@ pub trait ScreenSource {
     /// 12px 的字會掉到 7px，Windows 的 OCR 就會把 `Microsoft Teams`
     /// 讀成 `Micr099ftTeamsTr`——不報錯、不失敗，只是讀錯。
     fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>>;
-
-    /// 便宜地探一張，**只保證 dhash 能用**。
-    ///
-    /// 一天裡絕大多數的 tick 畫面根本沒變，而它們全都要付一次抓圖的錢。
-    /// 實測 120 個 tick 裡有 103 個是重複的——那 86% 完整解析度的搬運，
-    /// 從頭到尾只是為了算出一個 64-bit 的雜湊然後把整張圖丟掉。
-    ///
-    /// 回傳的像素可能小到不能 OCR、不能存檔，呼叫端只能看 `dhash`。
-    /// 這是安全的：dhash 本來就會把任何尺寸的圖 box-average 成 9×8，
-    /// 所以探測圖與全圖算出來的雜湊一致（`hamming == 0`）。
-    ///
-    /// 預設轉呼 [`grab`](Self::grab)：沒有便宜路徑的來源（replay、測試）
-    /// 行為完全不變。
-    fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
-        self.grab(ts)
-    }
 }
 
 /// 前景視窗來源。
@@ -152,10 +136,6 @@ pub trait Backend {
     /// 人類看得懂的後端名稱，寫進 sessions 表。
     fn name(&self) -> &str;
     fn grab_screen(&mut self, ts: Millis) -> Result<Option<RawFrame>>;
-    /// 見 [`ScreenSource::probe`]。
-    fn probe_screen(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
-        self.grab_screen(ts)
-    }
     fn focus_snapshot(&mut self, ts: Millis) -> Result<FocusSnapshot>;
     fn poll_clipboard(&mut self, ts: Millis) -> Result<Option<ClipboardEvent>>;
     /// 見 [`ClipboardSource::skip`]。排除期間必須呼叫。
@@ -210,9 +190,6 @@ where
     }
     fn grab_screen(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
         self.screen.grab(ts)
-    }
-    fn probe_screen(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
-        self.screen.probe(ts)
     }
     fn focus_snapshot(&mut self, ts: Millis) -> Result<FocusSnapshot> {
         self.focus.snapshot(ts)

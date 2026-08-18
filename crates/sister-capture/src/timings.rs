@@ -55,9 +55,10 @@ pub struct Timings {
     pub clipboard: Stage,
     /// 收輸入節奏計數（不含內容）。
     pub input: Stage,
-    /// 便宜的探測抓圖 + dhash。**每個 tick 都付**。
-    pub probe: Stage,
-    /// 完整解析度抓圖。只有畫面真的變了才付。
+    /// 抓一次螢幕 + 算 dhash。**每個真的睜眼的 tick 都付一次，只付一次。**
+    ///
+    /// 這裡以前有兩欄（探測、抓圖），因為以前一個 tick 會讀兩次螢幕。
+    /// 實測那是白付的：擷取成本由來源像素決定，而兩次讀的是同一個螢幕。
     pub grab: Stage,
     pub ocr: Stage,
     /// 縮圖 + PNG 編碼 + 寫檔。
@@ -75,7 +76,6 @@ impl Timings {
             ("脈絡", self.focus),
             ("剪貼簿", self.clipboard),
             ("輸入", self.input),
-            ("探測", self.probe),
             ("抓圖", self.grab),
             ("OCR", self.ocr),
             ("存檔", self.store),
@@ -134,13 +134,16 @@ mod tests {
     #[test]
     fn the_ranking_names_the_expensive_stage_first_and_hides_the_unused() {
         let mut t = Timings::default();
-        t.probe.record(Duration::from_millis(1));
         t.ocr.record(Duration::from_millis(50));
         t.grab.record(Duration::from_millis(10));
 
         let names: Vec<&str> = t.ranked().iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, vec!["OCR", "抓圖", "探測"], "最貴的要排第一");
-        assert_eq!(t.total(), Duration::from_millis(61));
+        assert_eq!(
+            names,
+            vec!["OCR", "抓圖"],
+            "最貴的要排第一，沒跑過的不佔版面"
+        );
+        assert_eq!(t.total(), Duration::from_millis(60));
     }
 
     /// 沒量過整個 tick 的時候，「沒歸因到的時間」必須說不知道。

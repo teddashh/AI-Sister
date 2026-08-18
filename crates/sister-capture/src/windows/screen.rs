@@ -27,7 +27,6 @@
 //!   `HALFTONE` 是 CPU 逐一平均每個來源像素——省下來的是 `GetDIBits` 的
 //!   搬運量，付出去的是整張圖的算術。
 //!
-//!   所以取樣模式跟著消費者走，見 [`Sampling`]。
 //!
 //! ## 為什麼有兩條抓圖路徑
 //!
@@ -48,7 +47,7 @@ use anyhow::{Result, bail};
 use sister_core::model::Millis;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, COLORONCOLOR, CreateCompatibleBitmap,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
     CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, GetMonitorInfoW,
     HALFTONE, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
     MonitorFromWindow, ReleaseDC, SRCCOPY, SelectObject, SetBrushOrgEx, SetStretchBltMode,
@@ -69,36 +68,15 @@ use crate::traits::{RawFrame, ScreenSource};
 /// 更大的才縮，而且縮一半仍然遠好過為了它把每個人都降到 1568。
 const OCR_LONG_EDGE: u32 = 4096;
 
-/// 探測圖的長邊。
+/// 縮圖時怎麼取樣。
 ///
-/// dhash 會把任何尺寸 box-average 成 9×8，所以這個數字只要大到保住版面
-/// 結構就夠——實測 2560×1440 的原圖與 256×144 的探測圖算出來的 dhash
-/// **完全相同**（hamming 距離 0）。
+/// 只剩一種：面積平均（`HALFTONE`）。這裡曾經有第二種（`COLORONCOLOR`，
+/// 「直接丟像素」），因為探測圖的唯一讀者是一個 9×8 的雜湊、不需要細節。
+/// 實測兩種一樣貴（256px：面積平均 27.4 ms、丟像素 24.2 ms），而探測圖
+/// 本身也已經不存在了。留一個沒有人選的選項，只會讓下一個人以為它有用。
 ///
-/// 省下來的是搬運：`GetDIBits` 從 14MB 掉到 147KB，之後那個 BGRA→RGBA
-/// 的逐像素迴圈從 370 萬次掉到 3.7 萬次。而這是每個 tick 都要付的錢。
-///
-/// **這筆帳一開始只算了一半。** 縮圖本身也要錢，而且用 `HALFTONE` 縮的
-/// 話比省下來的還多（實測 30.0ms vs 原生不縮的 16.0ms）。所以探測圖用
-/// [`Sampling::Fast`]——尺寸負責搬運量，取樣模式負責算術量，兩件事都得算。
-const PROBE_LONG_EDGE: u32 = 256;
-
-/// 縮圖時怎麼取樣。**這是一個「誰要看這張圖」的決定，不是畫質旋鈕。**
-///
-/// 一開始兩條路共用 `HALFTONE`，理由寫的是「其餘模式縮完文字會糊到 OCR
-/// 認不出來」——那句話對 OCR 是真的，對探測圖是假的：探測圖唯一的讀者是
-/// 一個 9×8 的雜湊，它本來就看不到任何細節。
-///
-/// 這是同一個錯誤的第二次：一份像素被拿去餵三個需求不同的消費者。
-/// 第一次發生在解析度上（1568 對三邊都是錯的），這次發生在取樣模式上。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Sampling {
-    /// 面積平均（`HALFTONE`）。縮完的字還讀得出來，代價是 CPU 逐像素平均。
-    Area,
-    /// 直接丟像素（`COLORONCOLOR`）。給只看得到輪廓的消費者用。
-    Fast,
-}
-
+/// 這一段留著是因為它記著一件事：目的地像素差 12 倍、取樣模式換掉，
+/// 時間都幾乎不動——**擷取的錢花在讀來源，不在寫目的地。**
 pub struct WindowsScreen {
     /// HMONITOR → 穩定的小整數。指標本身太大也不穩，但同一個 session 裡
     /// 出現順序是穩的，而 frames 表只需要「同不同台」這個資訊。
@@ -130,12 +108,7 @@ impl WindowsScreen {
     }
 
     /// 兩條路徑的差別只有「縮到多大」與「怎麼縮」。
-    pub(crate) fn capture(
-        &mut self,
-        ts: Millis,
-        long_edge: u32,
-        sampling: Sampling,
-    ) -> Result<Option<RawFrame>> {
+    pub(crate) fn capture(&mut self, ts: Millis, long_edge: u32) -> Result<Option<RawFrame>> {
         // 鎖定時不擷取。這裡要主動問，不能只靠「拍出來是黑的」——
         // 黑畫面會被當成一張正常的畫面存起來、算 dhash、跑 OCR。
         if session_locked() {
@@ -155,7 +128,7 @@ impl WindowsScreen {
 
         let (dst_w, dst_h) = fit(src_w as u32, src_h as u32, long_edge);
         let monitor = self.monitor_index(mon);
-        let rgba = unsafe { blit(rect, src_w, src_h, dst_w, dst_h, sampling)? };
+        let rgba = unsafe { blit(rect, src_w, src_h, dst_w, dst_h)? };
 
         Ok(Some(RawFrame::from_rgba(ts, monitor, dst_w, dst_h, rgba)))
     }
@@ -163,11 +136,7 @@ impl WindowsScreen {
 
 impl ScreenSource for WindowsScreen {
     fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
-        self.capture(ts, OCR_LONG_EDGE, Sampling::Area)
-    }
-
-    fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
-        self.capture(ts, PROBE_LONG_EDGE, Sampling::Fast)
+        self.capture(ts, OCR_LONG_EDGE)
     }
 }
 
@@ -221,14 +190,7 @@ fn focused_monitor(hwnd: HWND) -> Option<(HMONITOR, RECT)> {
 ///
 /// # Safety
 /// 呼叫端要保證 `rect` 是一個有效的桌面矩形，且長寬為正。
-unsafe fn blit(
-    rect: RECT,
-    src_w: i32,
-    src_h: i32,
-    dst_w: u32,
-    dst_h: u32,
-    sampling: Sampling,
-) -> Result<Vec<u8>> {
+unsafe fn blit(rect: RECT, src_w: i32, src_h: i32, dst_w: u32, dst_h: u32) -> Result<Vec<u8>> {
     unsafe {
         let screen = GetDC(None);
         if screen.is_invalid() {
@@ -236,7 +198,7 @@ unsafe fn blit(
         }
 
         // 從這裡開始每一條失敗路徑都要收乾淨，所以不用 `?`
-        let result = blit_inner(screen, rect, src_w, src_h, dst_w, dst_h, sampling);
+        let result = blit_inner(screen, rect, src_w, src_h, dst_w, dst_h);
         ReleaseDC(None, screen);
         result
     }
@@ -249,7 +211,6 @@ unsafe fn blit_inner(
     src_h: i32,
     dst_w: u32,
     dst_h: u32,
-    sampling: Sampling,
 ) -> Result<Vec<u8>> {
     unsafe {
         let mem = CreateCompatibleDC(Some(screen));
@@ -282,15 +243,8 @@ unsafe fn blit_inner(
             // 代價是它逐一平均每個來源像素，實測比整張原生 BitBlt 還貴。
             // 只看輪廓的消費者（探測圖的 9×8 雜湊）不需要付這筆錢。
             // 文件要求 HALFTONE 設完之後補一次 SetBrushOrgEx。
-            match sampling {
-                Sampling::Area => {
-                    SetStretchBltMode(mem, HALFTONE);
-                    let _ = SetBrushOrgEx(mem, 0, 0, None);
-                }
-                Sampling::Fast => {
-                    SetStretchBltMode(mem, COLORONCOLOR);
-                }
-            }
+            SetStretchBltMode(mem, HALFTONE);
+            let _ = SetBrushOrgEx(mem, 0, 0, None);
             StretchBlt(
                 mem,
                 0,
@@ -408,8 +362,8 @@ mod tests {
     fn how_expensive_is_each_way_of_grabbing_this_screen() {
         use super::{
             BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-            HGDIOBJ, OCR_LONG_EDGE, PROBE_LONG_EDGE, RECT, ReleaseDC, SRCCOPY, Sampling,
-            SelectObject, WindowsScreen, blit, read_pixels,
+            HGDIOBJ, OCR_LONG_EDGE, RECT, ReleaseDC, SRCCOPY, SelectObject, WindowsScreen, blit,
+            read_pixels,
         };
         use std::time::Instant;
         use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -419,7 +373,7 @@ mod tests {
 
         // 先確認這台機器抓得到畫面。抓不到（session 0、鎖屏）不是失敗，
         // 但要講出來——不然這個測試會變成一個永遠亮綠燈的空殼。
-        match s.capture(0, PROBE_LONG_EDGE, Sampling::Fast) {
+        match s.capture(0, 256) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 println!("略過：這個 session 抓不到畫面（鎖屏或沒有互動桌面）");
@@ -431,11 +385,13 @@ mod tests {
             }
         }
 
+        // 目的地大小這一軸已經量完了，答案是「幾乎不影響」。留三列在這裡
+        // 不是為了再問一次，是因為換一台機器（多螢幕、HDR、遠端桌面）
+        // 答案可能不一樣，而那時候要看得出來。
         let ways = [
-            ("原生 / 面積平均", OCR_LONG_EDGE, Sampling::Area),
-            ("256 / 面積平均", PROBE_LONG_EDGE, Sampling::Area),
-            ("256 / 丟像素", PROBE_LONG_EDGE, Sampling::Fast),
-            ("512 / 丟像素", 512, Sampling::Fast),
+            ("原生（OCR 用的大小）", OCR_LONG_EDGE),
+            ("縮到 512", 512),
+            ("縮到 256", 256),
         ];
 
         // 量測順序本身會污染結果。上一版是「一種抓法連跑 8 次、換下一種」，
@@ -449,17 +405,17 @@ mod tests {
         let mut total = vec![std::time::Duration::ZERO; ways.len()];
         let mut shape = vec![None; ways.len()];
 
-        for (i, (_, edge, sampling)) in ways.iter().enumerate() {
-            if let Ok(Some(f)) = s.capture(-1, *edge, *sampling) {
+        for (i, (_, edge)) in ways.iter().enumerate() {
+            if let Ok(Some(f)) = s.capture(-1, *edge) {
                 shape[i] = Some((f.width, f.height));
             }
         }
 
         println!("每種抓法各 {ROUNDS} 次（已熱身、輪流跑）：");
         'rounds: for r in 0..ROUNDS {
-            for (i, (name, edge, sampling)) in ways.iter().enumerate() {
+            for (i, (name, edge)) in ways.iter().enumerate() {
                 let t = Instant::now();
-                let got = s.capture(r as i64, *edge, *sampling);
+                let got = s.capture(r as i64, *edge);
                 total[i] += t.elapsed();
                 if !matches!(got, Ok(Some(_))) {
                     println!("  {name}：中途抓不到了（{got:?} 之類），整張表作廢");
@@ -498,15 +454,12 @@ mod tests {
                 bottom: cy + SIDE / 2,
             };
             // 熱身一次再計時，理由同上。
-            let warm = unsafe { blit(patch, SIDE, SIDE, SIDE as u32, SIDE as u32, Sampling::Fast) };
+            let warm = unsafe { blit(patch, SIDE, SIDE, SIDE as u32, SIDE as u32) };
             if warm.is_ok() {
                 let t = Instant::now();
                 let mut ok = true;
                 for _ in 0..ROUNDS {
-                    ok &= unsafe {
-                        blit(patch, SIDE, SIDE, SIDE as u32, SIDE as u32, Sampling::Fast)
-                    }
-                    .is_ok();
+                    ok &= unsafe { blit(patch, SIDE, SIDE, SIDE as u32, SIDE as u32) }.is_ok();
                 }
                 if ok {
                     println!(
@@ -582,13 +535,13 @@ mod tests {
 
         // 這裡真的下斷言，而且斷言的是一件**會安靜地壞掉**的事。
         //
-        // 不能斷言「雜湊四次都一樣」：真實桌面上有時鐘和游標，那個測試會
+        // 不能斷言「雜湊兩次都一樣」：真實桌面上有時鐘和游標，那個測試會
         // 因為跳秒而變紅，最後被人加上 #[ignore]，比沒有更糟。
         //
-        // 能斷言的是這個：換了取樣模式之後，探測圖不可以變成一整片同色。
-        // `COLORONCOLOR` 如果在某台機器上失敗或取樣取歪了，最可能的結果
-        // 不是報錯，是回一張平的圖——於是每一幀的 dhash 都一樣、每一幀
-        // 都被判成重複、她整天什麼都記不住，而錄製摘要一片祥和。
+        // 能斷言的是這個：抓回來的畫面不可以是一整片同色。GDI 這條路失敗
+        // 的時候（權限不足、遠端桌面、某些顯示驅動）最可能的結果不是報錯，
+        // 是回一張全黑或全白的圖——於是每一幀的 dhash 都一樣、每一幀都被
+        // 判成重複、她整天什麼都記不住，而錄製摘要一片祥和。
         // 這正是這個專案最主要的失敗形狀，所以它值得一條斷言。
         let spread = |f: &RawFrame| -> u8 {
             let Some(px) = f.rgba.as_deref() else {
@@ -600,27 +553,15 @@ mod tests {
             hi - lo
         };
 
-        let Ok(Some(area)) = s.capture(0, PROBE_LONG_EDGE, Sampling::Area) else {
+        let Ok(Some(full)) = s.capture(0, OCR_LONG_EDGE) else {
             return;
         };
-        let Ok(Some(fast)) = s.capture(1, PROBE_LONG_EDGE, Sampling::Fast) else {
-            return;
-        };
-        println!(
-            "亮度範圍：面積平均 {}、丟像素 {}",
-            spread(&area),
-            spread(&fast)
+        println!("亮度範圍：{}", spread(&full));
+        assert!(
+            spread(&full) >= 8,
+            "抓回來的整張畫面只有一個亮度（範圍 {}）：\
+             每一幀的雜湊都會一樣，去重會把所有東西都當成重複",
+            spread(&full)
         );
-
-        // 面積平均那張本來就是平的（純色桌布、全黑螢幕），就沒得比。
-        if spread(&area) >= 16 {
-            assert!(
-                spread(&fast) >= 8,
-                "換成丟像素之後探測圖變平了（面積平均 {}、丟像素 {}）：\
-                 每一幀的雜湊都會一樣，去重會把所有東西都當成重複",
-                spread(&area),
-                spread(&fast)
-            );
-        }
     }
 }

@@ -157,6 +157,14 @@ jobs:
           grep -q '省下：' rec.txt \
             || { echo "::error::閒置時照樣每個 tick 都去搬畫面——省電那條路沒有接上"; exit 1; }
 
+          # 一個 tick 只准讀一次螢幕。這一行是 alpha.7 那個「探測圖倒賠」的
+          # 墓碑：它自己印出來過一次，然後那個階段就被刪掉了。再出現代表
+          # 它以某種形式長回來了。
+          if grep -q '探測' rec.txt; then
+            echo "::error::時間表上又出現探測階段了——一個 tick 應該只讀一次螢幕"
+            exit 1
+          fi
+
       - name: Upload sister.exe
         uses: actions/upload-artifact@v4
         with:
