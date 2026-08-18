@@ -64,6 +64,21 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # runner 預設只有英文 OCR，於是「中文會不會被逐字切開」這一題永遠停在
+      # 「跳過」——而那是這個產品的主要語言。裝上繁中語言包，讓它真的被驗到。
+      # 裝不起來不讓 CI 紅：那是環境問題，測試本身會誠實印出跳過的理由。
+      - name: Install Traditional Chinese OCR language pack
+        continue-on-error: true
+        shell: powershell
+        run: |
+          foreach ($cap in @("Language.Basic~~~zh-TW~0.0.1.0", "Language.OCR~~~zh-TW~0.0.1.0")) {
+            Write-Host "Installing $cap"
+            try { Add-WindowsCapability -Online -Name $cap -ErrorAction Stop | Out-Null }
+            catch { Write-Host "  failed: $_" }
+          }
+          Get-WindowsCapability -Online -Name "Language.OCR*" |
+            Where-Object State -eq Installed | Select-Object -ExpandProperty Name
+
       # 微軟的文件說 Windows.Media.Ocr 需要 package identity，也就是這支
       # 沒打包的 exe 理論上叫不動它。實務上叫得動——這一步就是把「理論上」
       # 換成實測。--nocapture 是為了讓辨識結果直接印在 log 裡：CI 記錄的是
@@ -118,3 +133,36 @@ jobs:
         with:
           files: sister.exe
           generate_release_notes: true
+          body: |
+            單一執行檔，不需要安裝，沒有任何外掛 DLL 或模型檔。
+
+            ```
+            sister.exe doctor                 # 先看這個：她在這台機器上做得到什麼
+            sister.exe record --duration 60   # 錄一分鐘
+            sister.exe stats                  # 記了多少
+            sister.exe query 電話             # 查，每筆都附出處
+            ```
+
+            資料放在 `%APPDATA%\ai-sister\`，刪掉那個資料夾就等於全部忘掉。
+            也可以用 `--data-dir .\test` 錄到別的地方，測完直接刪。
+
+            ### 先跑 `doctor`
+
+            它會誠實列出**現在失效的東西**，而不是報一排 ✓。目前已知會看到：
+
+            - `✗ 沒有 UIA 網址擷取` — 16 條網銀/登入頁排除規則在 Windows 上
+              還不會生效，瀏覽器只靠視窗標題規則擋。UIA 尚未接上。
+            - `✗ OCR 語言是 en-US，不是中文` — 如果你的 Windows 沒裝中文
+              OCR 語言包，螢幕上的中文會讀不出來，搜尋中文會是空的。
+              到「設定 → 語言 → 選用功能」加裝光學字元辨識。
+
+            ### 這個版本還不會做的事
+
+            尚未達成 Phase 0 的驗收條件（七天連續自錄、CPU<3%、RAM<400MB）。
+            沒有 UI、沒有常駐、沒有任何模型呼叫——整份程式碼**零次 LLM 呼叫**。
+
+            隱私承諾與邊界見
+            [PRIVACY.md](https://github.com/teddashh/AI-Sister/blob/main/docs/PRIVACY.md)、
+            [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
+
+            最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
