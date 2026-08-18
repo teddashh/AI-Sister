@@ -492,6 +492,74 @@ mod url_rule_lint_tests {
         );
     }
 
+    /// THREAT_MODEL 說「每一條規則都必須有測試證明它在真實的識別碼形狀下
+    /// 會命中」。在這條測試之前，那句話沒有任何東西在執行。
+    ///
+    /// 既有的測試各自舉了幾個網址當例子，加起來大概碰到 16 條裡的一半；
+    /// `our_own_defaults_would_actually_match_something` 只擋得住**語法上**
+    /// 就註定不會命中的規則（帶 scheme、帶 www.）。兩個都攔不住這一種：
+    ///
+    ///     "*cathybk.com*"      ← 少一個 a
+    ///
+    /// 它語法完全正確、`suspicious_url_rules` 一聲不吭、沒有任何既有測試
+    /// 舉的例子會碰到它。使用者看到的是「✓ 17 條規則」。
+    /// **規則的數量從來不是問題，規則會不會命中才是**——而數量是唯一被
+    /// 印出來的那個數字。
+    ///
+    /// 所以這裡強制一條規則配一個證人，而且兩邊都不准有多的：加規則不補
+    /// 證人會紅，刪規則忘了刪證人也會紅。
+    #[test]
+    fn every_default_url_rule_is_demonstrated_by_a_real_url() {
+        // 證人一律寫成**縮寫版**——那是 Chromium 位址列真正交出來的形狀
+        // （見 `uia.rs` 模組說明）。拿完整網址當證人會讓這張表在一個
+        // 我們實際上拿不到的字串上通過。
+        const WITNESSES: &[(&str, &str)] = &[
+            ("*onlinebanking*", "hsbc.com.tw/onlinebanking/logon"),
+            ("*netbank*", "netbank.example.com/transfer"),
+            ("*ebank*", "ebank.megabank.com.tw/"),
+            ("*/ib/*", "cathaybk.com.tw/ib/login"),
+            ("*cathaybk.com*", "cathaybk.com.tw/mybank"),
+            ("*esunbank.com*", "esunbank.com.tw/ib/home"),
+            ("*ctbcbank.com*", "ctbcbank.com/twrbo/zh_tw"),
+            ("*bot.com.tw*", "bot.com.tw/tw/personal-banking"),
+            ("*taishinbank.com*", "taishinbank.com.tw/TSB/personal"),
+            ("*firstbank.com.tw*", "firstbank.com.tw/sites/fcb/index"),
+            ("*megabank.com.tw*", "megabank.com.tw/personal/deposit"),
+            ("*accounts.google.com*", "accounts.google.com/signin/v2"),
+            (
+                "*login.microsoftonline.com*",
+                "login.microsoftonline.com/common/oauth2",
+            ),
+            ("*password*", "github.com/settings/password"),
+            ("*/signin*", "example.com/signin?next=/"),
+            ("*/login*", "app.example.com/login?next=/"),
+        ];
+
+        let rules = PrivacyConfig::default().excluded_urls;
+
+        // 兩邊必須完全對得起來。少了證人代表有規則沒有被證明過；
+        // 多了證人代表這張表在替一條已經不存在的規則作證。
+        let named: std::collections::BTreeSet<&str> =
+            WITNESSES.iter().map(|(rule, _)| *rule).collect();
+        let actual: std::collections::BTreeSet<&str> = rules.iter().map(String::as_str).collect();
+        assert_eq!(
+            actual, named,
+            "預設規則和證人對不起來。新增一條規則就要補一個\
+             「真的長這樣的網址」證明它會命中，不然它可能是個錯字"
+        );
+
+        for (rule, witness) in WITNESSES {
+            // 關鍵是**指名道姓**：不能只問「這個網址有沒有被擋下來」。
+            // `*password*` 幾乎什麼登入頁都吃得到，所以一個給 `*/login*`
+            // 寫的證人很可能是被別條順手擋掉的——那樣的話這條規則就算
+            // 拼錯了，測試照樣是綠的。
+            assert!(
+                glob_match(&rule.to_ascii_lowercase(), witness),
+                "規則 {rule} 擋不下 {witness}——它自己舉的例子它都碰不到"
+            );
+        }
+    }
+
     /// Chromium 交出來的是縮寫版網址。預設規則必須在**那個**形狀上命中，
     /// 不是在我們想像中的完整網址上命中。
     #[test]
