@@ -8,8 +8,11 @@
 一切都在**一個檔案**裡：`<資料目錄>/sister.db`。畫面檔在旁邊的
 `frames/YYYY/MM/DD/`。備份、加密、刪除，都只有這兩個對象。
 
-    Windows   %APPDATA%\ai-sister\
+    Windows   %APPDATA%\ted-h\AI-Sister\data\
     Linux     ~/.local/share/ai-sister/
+
+（實際路徑由 `directories` 依平台慣例決定，`sister doctor` 的「資料目錄」
+那一行印的永遠是真的那一個。）
 
 沒有雲端、沒有遙測、沒有帳號。目前整份程式碼**零次模型呼叫**。
 
