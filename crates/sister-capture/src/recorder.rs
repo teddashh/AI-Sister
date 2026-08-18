@@ -34,6 +34,12 @@ pub enum Tick {
     Excluded { reason: String },
     /// 這一刻沒有可用畫面（鎖屏、顯示器休眠）。
     NoScreen,
+    /// 沒有人碰過鍵盤滑鼠、焦點也沒變，所以**這一次連螢幕都沒看**。
+    ///
+    /// 和 `Duplicate` 差在哪裡很重要：`Duplicate` 是看過了、確認一樣；
+    /// 這個是沒看。省下來的正是最貴的那一步，代價是「畫面自己會動」的
+    /// 東西（影片、進度條）最多會晚 `MAX_BLIND_MS` 才被看到。
+    Idle,
     /// 與上一張保留幀相同，只把重複計數加一。
     Duplicate { run: u32 },
     /// 保留了一張新畫面。
@@ -61,6 +67,12 @@ pub struct RecorderStats {
     /// 所以摘要上看到的東西，可以原封不動拿去資料庫裡查。
     pub excluded_reasons: std::collections::BTreeMap<String, u64>,
     pub no_screen: u64,
+    /// 因為沒有人動、而**完全沒有碰螢幕**的 tick 數。
+    ///
+    /// 這個數字一定要印出來。它代表「她這段時間是閉著眼睛的」，而那件事
+    /// 從摘要的其他任何一個數字上都看不出來——省電和停止工作在帳面上長得
+    /// 一模一樣，正是 alpha.4 那種「✓ 但什麼都沒產出」的失效形狀。
+    pub skipped_idle: u64,
     pub clipboard_events: u64,
     pub secrets_redacted: u64,
     pub focus_events: u64,
@@ -105,6 +117,14 @@ pub struct RecorderStats {
     pub last_ocr_error: Option<String>,
 }
 
+/// 就算沒有人碰任何東西，最多也只能連續多久不看螢幕。
+///
+/// 沒有這個上限的話，「沒有輸入 ⇒ 畫面沒變」就從一個很好的猜測變成一個
+/// 錯的斷言：影片、進度條、跑動的 log、別人傳進來的訊息，全都會在她閉著
+/// 眼睛的時候發生。5 秒是拿最壞情況換來的——閒置時每 5 秒看一次，以實測的
+/// 27 ms 一次計算，閒著的時候大約是 0.5% CPU。
+const MAX_BLIND_MS: i64 = 5_000;
+
 pub struct Recorder<B: Backend> {
     backend: B,
     db: Db,
@@ -121,6 +141,9 @@ pub struct Recorder<B: Backend> {
     image_dir: Option<PathBuf>,
     /// 上一次**真的寫出**畫面檔的時刻。見 `image_min_interval_ms`。
     last_image_ts: Option<Millis>,
+    /// 上一次真的去看螢幕的時刻（不管結果是新是舊）。空閒跳過的天花板
+    /// 就是從這裡算的。
+    last_look_ts: Option<Millis>,
     /// `image_bytes_today` 算的是哪一天（UTC 天序號）。
     image_day: i64,
     /// 今天已經寫出去多少畫面位元組。見 `max_image_mb_per_day`。
@@ -175,6 +198,7 @@ impl<B: Backend> Recorder<B> {
             last_exclusion: None,
             image_dir,
             last_image_ts: None,
+            last_look_ts: None,
             image_day,
             image_bytes_today,
             stats: RecorderStats::default(),
@@ -293,9 +317,30 @@ impl<B: Backend> Recorder<B> {
 
         self.record_input(ts)?;
 
-        // 5) 到這裡才碰螢幕——而且先用**便宜的探測圖**問一句「變了沒」。
-        //    一天裡絕大多數的 tick 答案都是「沒變」，而它們原本每一個都
-        //    要付一次全解析度搬運的錢，只為了算出一個 64-bit 的雜湊。
+        // 5) 先問一個不用碰螢幕就答得出來的問題：有人動過嗎？
+        //
+        //    這一步是量出來的，不是想出來的。實測（release、真 Windows）：
+        //    探測圖 27.0 ms，它想省下的那次抓圖 30.1 ms——省 10%，而且是
+        //    **每個 tick 都付**去賭那次抓圖不會發生。等於沒省。縮圖也救不
+        //    了：256px 用面積平均 30.3 ms、用丟像素 31.3 ms，兩者一樣貴，
+        //    因為錢花在「從顯示驅動把畫面搬過來」，不在縮放的算術上。
+        //
+        //    真正便宜的做法是**不要搬**。沒有人碰過鍵盤滑鼠、焦點也沒變，
+        //    畫面就多半沒變——那是一次系統呼叫，0.0 ms。
+        //
+        //    「多半」不是「一定」，所以上面有 `MAX_BLIND_MS` 這個天花板：
+        //    「不知道就擋住」必須有上限，反過來「猜沒變就不看」也一樣。
+        if let (Some(idle), Some(last_look)) = (self.backend.idle_ms(), self.last_look_ts) {
+            let since_look = ts.saturating_sub(last_look);
+            // idle >= since_look 的意思是：從上次看螢幕到現在，沒有任何輸入。
+            if idle as i64 >= since_look && since_look < MAX_BLIND_MS {
+                self.stats.skipped_idle += 1;
+                return Ok(Tick::Idle);
+            }
+        }
+        self.last_look_ts = Some(ts);
+
+        // 6) 到這裡才碰螢幕——而且先用**便宜的探測圖**問一句「變了沒」。
         let t = Instant::now();
         let probe = self.backend.probe_screen(ts)?;
         self.timings.probe.record(t.elapsed());
@@ -670,6 +715,89 @@ mod tests {
         let spy = spy.borrow();
         assert!(spy.polled.is_empty(), "排除期間不該讀剪貼簿內容");
         assert_eq!(spy.skipped, vec![1_000], "但一定要把水位推過去");
+    }
+
+    /// 沒有人動的時候不看螢幕——但**不准無限期不看**。
+    ///
+    /// 這一條是實測逼出來的：探測圖 27.0 ms，它想省的那次抓圖 30.1 ms，
+    /// 而探測是每個 tick 都付。真正的省法是連螢幕都不碰。
+    ///
+    /// 危險在另一邊：影片和進度條不需要任何輸入就會變。所以這裡兩件事一起
+    /// 釘住——閒著時真的跳過，而且跳過有天花板。少釘後面那一半的話，這個
+    /// 最佳化就變成一顆「CPU 很漂亮但什麼都沒錄到」的定時炸彈。
+    #[test]
+    fn nobody_touched_anything_so_she_does_not_look_but_she_still_blinks() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        /// 回報「上次輸入是很久以前」，並數自己被問了幾次螢幕。
+        struct CountingScreen(Rc<Cell<u32>>);
+        impl crate::traits::ScreenSource for CountingScreen {
+            fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+                self.0.set(self.0.get() + 1);
+                Ok(Some(RawFrame::from_rgba(ts, 0, 8, 8, vec![9u8; 8 * 8 * 4])))
+            }
+        }
+        struct NeverTouched;
+        impl crate::traits::InputSource for NeverTouched {
+            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputMetrics>> {
+                Ok(None)
+            }
+            fn idle_ms(&mut self) -> Option<u64> {
+                Some(60 * 60 * 1000) // 一小時沒動
+            }
+        }
+
+        let looks = Rc::new(Cell::new(0));
+        let backend = crate::traits::CompositeBackend {
+            name: "idle".into(),
+            screen: CountingScreen(looks.clone()),
+            focus: crate::traits::NullFocus,
+            clipboard: crate::traits::NullClipboard,
+            input: NeverTouched,
+            ocr: crate::traits::NullOcr,
+        };
+        let mut rec = Recorder::new(
+            backend,
+            Db::open_in_memory().unwrap(),
+            Config::default(),
+            None,
+        )
+        .unwrap();
+
+        // 第一次一定要看：還沒有「上次看螢幕」可以比。
+        rec.tick(0).unwrap();
+        let after_first = looks.get();
+        assert!(after_first > 0, "第一個 tick 一定要真的看一次");
+
+        // 天花板之內、又沒有人動 → 一次都不碰螢幕。
+        for ts in [400, 800, 1_200, 4_800] {
+            assert!(matches!(rec.tick(ts).unwrap(), Tick::Idle), "ts={ts}");
+        }
+        assert_eq!(looks.get(), after_first, "沒有人動，不該再碰螢幕");
+
+        // 超過天花板 → 就算沒人動也要睜眼。
+        assert!(!matches!(rec.tick(5_000).unwrap(), Tick::Idle));
+        assert!(
+            looks.get() > after_first,
+            "閉眼超過 MAX_BLIND_MS 就得看一次"
+        );
+
+        // 而且要看得見自己省了多少——省電和停工在帳面上長得一樣。
+        assert_eq!(rec.stats().skipped_idle, 4);
+    }
+
+    /// 答不出閒置時間的平台，行為必須和以前一模一樣。
+    ///
+    /// 這個最佳化的預設值只能是「照舊」：Linux/macOS 後端還沒有這個訊號，
+    /// 而一個「不知道 ⇒ 就當作沒變」的預設會讓她在那些平台上直接瞎掉。
+    #[test]
+    fn a_platform_that_cannot_tell_idle_time_keeps_looking_every_tick() {
+        let mut rec = screen_only(crate::traits::NullOcr);
+        for ts in [0, 400, 800, 1_200] {
+            assert!(!matches!(rec.tick(ts).unwrap(), Tick::Idle), "ts={ts}");
+        }
+        assert_eq!(rec.stats().skipped_idle, 0);
     }
 
     /// 每次都給一張**不一樣**的畫面，好讓去重不會把它們併掉。

@@ -96,8 +96,11 @@ jobs:
       # 換一種抓法就換一組數字——這是目前唯一不靠 Ted 的機器就拿得到
       # 真實數字的管道。第一次量到的結果就推翻了一個我算得很漂亮、方向
       # 卻是反的推論（縮圖比不縮貴一倍）。
+      # `--release` 不是可有可無：debug build 量到的「原生 141.9 ms」裡有
+      # 一大半是 Rust 端沒最佳化的像素搬運迴圈，而那個數字曾經被拿來當作
+      # 縮圖有沒有用的證據。量錯的東西比不量更糟。
       - name: Screen capture — how expensive is each way, on real Windows
-        run: cargo test -p sister-capture --lib windows::screen -- --nocapture
+        run: cargo test --release -p sister-capture --lib windows::screen -- --nocapture
 
       - name: Build release
         run: cargo build --release -p sister-cli
@@ -147,6 +150,12 @@ jobs:
             echo "::error::時間表解釋不了自己：有一段 CPU 沒有任何階段認領"
             exit 1
           fi
+
+          # runner 上沒有人碰鍵盤滑鼠，所以「沒動就不看螢幕」一定要生效。
+          # 這一條在 Linux 上測不到——`GetLastInputInfo` 只有 Windows 有，
+          # 而單元測試餵的是假的閒置時間。真的接上去了沒有，只有這裡知道。
+          grep -q '省下：' rec.txt \
+            || { echo "::error::閒置時照樣每個 tick 都去搬畫面——省電那條路沒有接上"; exit 1; }
 
       - name: Upload sister.exe
         uses: actions/upload-artifact@v4

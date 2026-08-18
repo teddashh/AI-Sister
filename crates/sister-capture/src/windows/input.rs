@@ -100,6 +100,10 @@ impl WindowsInput {
 }
 
 impl InputSource for WindowsInput {
+    fn idle_ms(&mut self) -> Option<u64> {
+        system_idle_ms()
+    }
+
     fn drain(&mut self, ts: Millis) -> Result<Option<InputMetrics>> {
         // 視窗還沒滿就先繼續累積。**這個 early return 一定要在 swap 之前**：
         // 先把計數器清掉再判斷要不要出一列，等於把那一段的輸入丟掉。
@@ -139,6 +143,26 @@ impl InputSource for WindowsInput {
             typing_bursts,
         }))
     }
+}
+
+/// 距離最後一次輸入過了多久——**問作業系統**，不看我們自己的 hook。
+///
+/// 和下面那個 `idle_ms()` 的差別很重要：那個依賴 hook 裝得起來，而擷取
+/// 迴圈拿這個數字去決定「要不要碰螢幕」。hook 沒裝上的時候，那個會永遠
+/// 回 0（＝剛剛才有人動過）——對計數欄位來說是保守的好答案，對省電來說
+/// 卻是「永遠不省」。這一個不需要 hook，一次系統呼叫，不配置記憶體。
+fn system_idle_ms() -> Option<u64> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    // SAFETY: cbSize 填對了，info 是我們自己的堆疊變數
+    if unsafe { GetLastInputInfo(&mut info) }.ok().is_err() {
+        return None; // 答不出來就說答不出來，不要回一個會讓她閉眼的數字
+    }
+    // dwTime 和 GetTickCount 同源，都是 32-bit 回繞的毫秒數
+    Some((tick_now() as u32).wrapping_sub(info.dwTime) as u64)
 }
 
 /// 距離最後一次輸入過了多久。

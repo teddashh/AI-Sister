@@ -33,6 +33,23 @@ fn open_existing(data_dir: &Path) -> Result<Db> {
 ///
 /// 印出來的理由字串和寫進 `system_events` 的是同一串，所以看到什麼就能
 /// 拿什麼去資料庫裡查。
+/// 把「她有多少時間是閉著眼睛的」講出來。
+///
+/// 這個數字不講就是 bug。省電和停止工作在帳面上長得一模一樣：tick 照跑、
+/// 沒有錯誤、CPU 很漂亮，而畫面上完全看不出來她其實有 87% 的時間沒看螢幕。
+/// 那正是 alpha.4 那種「✓ 但什麼都沒產出」的失效形狀，只是這次是我們自己
+/// 刻意造出來的——所以更該說。
+fn report_idle(stats: &sister_capture::RecorderStats) {
+    if stats.skipped_idle == 0 {
+        return;
+    }
+    let pct = stats.skipped_idle as f64 / stats.ticks.max(1) as f64 * 100.0;
+    println!(
+        "  省下：{} 次沒碰螢幕（{pct:.0}%——那段時間你沒動鍵盤滑鼠；最多每 5 秒仍會看一次）",
+        stats.skipped_idle
+    );
+}
+
 fn report_exclusions(stats: &sister_capture::RecorderStats) {
     if stats.excluded_reasons.is_empty() {
         return;
@@ -635,7 +652,10 @@ pub mod doctor {
             let snapshot = source.snapshot(sister_core::now_ms()).unwrap_or_default();
             let app = snapshot.app_key();
             // 排除規則比對的就是這兩個字串。讀得到才代表那些規則跑得動。
-            focus_probe = Some((app.clone(), snapshot.title.clone().unwrap_or_default()));
+            focus_probe = Some((
+                app.clone(),
+                snapshot.window_title.clone().unwrap_or_default(),
+            ));
             url_probe = Some(match (&snapshot.url, source.url_capture_alive()) {
                 (Some(url), _) => (
                     "✓",
@@ -1235,7 +1255,7 @@ pub mod replay {
                 }
                 Tick::Excluded { reason } => println!("  {offset:>7} ms  排除：{reason}"),
                 Tick::NoScreen => println!("  {offset:>7} ms  沒有畫面"),
-                Tick::Duplicate { .. } | Tick::Disabled => {}
+                Tick::Duplicate { .. } | Tick::Disabled | Tick::Idle => {}
             }
             offset += interval_ms;
         }
@@ -1246,6 +1266,7 @@ pub mod replay {
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
             s.ticks, s.kept, s.duplicates, s.excluded, s.no_screen
         );
+        report_idle(s);
         report_exclusions(s);
         if s.secrets_redacted > 0 {
             println!("  偵測到 {} 次疑似秘密，內容未落地。", s.secrets_redacted);
@@ -1479,6 +1500,7 @@ pub mod record {
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
             stats.ticks, stats.kept, stats.duplicates, stats.excluded, stats.no_screen
         );
+        report_idle(&stats);
         report_exclusions(&stats);
         report_ocr(&stats, config_ocr);
         report_images(&stats, rec.timings(), image_budget_mb, config_store_images);

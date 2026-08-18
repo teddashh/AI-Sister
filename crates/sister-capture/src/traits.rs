@@ -127,6 +127,15 @@ pub trait ClipboardSource {
 /// 實作者的鐵律：**永遠不記錄按鍵內容**，只記節奏與計數。
 pub trait InputSource {
     fn drain(&mut self, ts: Millis) -> Result<Option<InputMetrics>>;
+
+    /// 距離使用者最後一次碰鍵盤滑鼠過了多久。`None` = 這個平台答不出來。
+    ///
+    /// 這是整個 tick 裡唯一**不用碰螢幕就能問到的變化訊號**，而且便宜到
+    /// 可以每次都問。沒有人動過任何東西，畫面就多半沒變——「多半」是關鍵
+    /// 字，所以呼叫端不准無限相信它（見 `Recorder` 的 `MAX_BLIND_MS`）。
+    fn idle_ms(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// OCR 引擎。
@@ -154,6 +163,10 @@ pub trait Backend {
         let _ = ts;
     }
     fn drain_input(&mut self, ts: Millis) -> Result<Option<InputMetrics>>;
+    /// 見 [`InputSource::idle_ms`]。
+    fn idle_ms(&mut self) -> Option<u64> {
+        None
+    }
     fn recognize(&mut self, frame: &RawFrame) -> Result<Vec<OcrBlock>>;
 
     /// 這段錄製中途**壞掉**的能力，一句一則人話。
@@ -217,6 +230,9 @@ where
     }
     fn drain_input(&mut self, ts: Millis) -> Result<Option<InputMetrics>> {
         self.input.drain(ts)
+    }
+    fn idle_ms(&mut self) -> Option<u64> {
+        self.input.idle_ms()
     }
     fn recognize(&mut self, frame: &RawFrame) -> Result<Vec<OcrBlock>> {
         self.ocr.recognize(frame)
