@@ -309,7 +309,7 @@ impl<B: Backend> Recorder<B> {
         self.last_exclusion = None;
 
         // 3) 脈絡變了才記一筆 focus 事件
-        self.record_focus_if_changed(ts, &focus)?;
+        let context_changed = self.record_focus_if_changed(ts, &focus)?;
 
         // 4) 剪貼簿。只有在沒被排除時才碰——不然密碼管理員裡複製的
         //    密碼會從這裡漏進資料庫。
@@ -330,7 +330,15 @@ impl<B: Backend> Recorder<B> {
         //
         //    「多半」不是「一定」，所以上面有 `MAX_BLIND_MS` 這個天花板：
         //    「不知道就擋住」必須有上限，反過來「猜沒變就不看」也一樣。
-        if let (Some(idle), Some(last_look)) = (self.backend.idle_ms(), self.last_look_ts) {
+        // 換了視窗、換了分頁、標題變了 → 畫面幾乎不可能沒變，直接睜眼。
+        // 這一條不是為了效能，是為了收窄那個 5 秒的盲區：通知搶焦點、
+        // 安裝程式跳出來這類事情不需要任何輸入，但它們都會動到脈絡。
+        let idle_signal = if context_changed {
+            None
+        } else {
+            self.backend.idle_ms()
+        };
+        if let (Some(idle), Some(last_look)) = (idle_signal, self.last_look_ts) {
             let since_look = ts.saturating_sub(last_look);
             // idle >= since_look 的意思是：從上次看螢幕到現在，沒有任何輸入。
             if idle as i64 >= since_look && since_look < MAX_BLIND_MS {
@@ -569,16 +577,18 @@ impl<B: Backend> Recorder<B> {
         }
     }
 
-    fn record_focus_if_changed(&mut self, ts: Millis, focus: &FocusSnapshot) -> Result<()> {
+    /// 回傳「脈絡有沒有變」。呼叫端拿它決定要不要睜眼看螢幕：換了視窗、
+    /// 換了分頁、標題變了，畫面幾乎不可能沒變。
+    fn record_focus_if_changed(&mut self, ts: Millis, focus: &FocusSnapshot) -> Result<bool> {
         let kind = match &self.last_focus {
             None => FocusKind::Focus,
             Some(prev) if prev.app_id != focus.app_id => FocusKind::Focus,
             Some(prev) if prev.url != focus.url && focus.url.is_some() => FocusKind::UrlChange,
             Some(prev) if prev.window_title != focus.window_title => FocusKind::TitleChange,
-            Some(_) => return Ok(()),
+            Some(_) => return Ok(false),
         };
         if focus.app_id.is_none() && focus.window_title.is_none() && focus.url.is_none() {
-            return Ok(());
+            return Ok(false);
         }
         self.db.insert_focus(
             self.session_id,
@@ -590,7 +600,7 @@ impl<B: Backend> Recorder<B> {
         )?;
         self.last_focus = Some(focus.clone());
         self.stats.focus_events += 1;
-        Ok(())
+        Ok(true)
     }
 
     fn record_clipboard(&mut self, ts: Millis, focus: &FocusSnapshot) -> Result<()> {
@@ -785,6 +795,77 @@ mod tests {
 
         // 而且要看得見自己省了多少——省電和停工在帳面上長得一樣。
         assert_eq!(rec.stats().skipped_idle, 4);
+    }
+
+    /// 通知搶走焦點、安裝程式跳出來——這些不需要任何輸入，但畫面變了。
+    ///
+    /// 沒有這一條的話它們最多要等 5 秒才被看到。有了它，那個盲區只剩下
+    /// 「畫面自己在動、而且連視窗標題都沒變」的情況（影片、進度條）。
+    #[test]
+    fn a_window_that_stole_focus_gets_looked_at_even_though_nobody_typed() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct CountingScreen(Rc<Cell<u32>>);
+        impl crate::traits::ScreenSource for CountingScreen {
+            fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+                self.0.set(self.0.get() + 1);
+                Ok(Some(RawFrame::from_rgba(ts, 0, 8, 8, vec![9u8; 8 * 8 * 4])))
+            }
+        }
+        struct NeverTouched;
+        impl crate::traits::InputSource for NeverTouched {
+            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputMetrics>> {
+                Ok(None)
+            }
+            fn idle_ms(&mut self) -> Option<u64> {
+                Some(60 * 60 * 1000)
+            }
+        }
+        /// 第三次被問的時候換一個 app——完全沒有人碰鍵盤滑鼠。
+        struct Intruder(u32);
+        impl crate::traits::FocusSource for Intruder {
+            fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
+                self.0 += 1;
+                Ok(FocusSnapshot {
+                    app_id: Some(
+                        if self.0 >= 3 {
+                            "installer.exe"
+                        } else {
+                            "code.exe"
+                        }
+                        .into(),
+                    ),
+                    ..Default::default()
+                })
+            }
+        }
+
+        let looks = Rc::new(Cell::new(0));
+        let backend = crate::traits::CompositeBackend {
+            name: "intruder".into(),
+            screen: CountingScreen(looks.clone()),
+            focus: Intruder(0),
+            clipboard: crate::traits::NullClipboard,
+            input: NeverTouched,
+            ocr: crate::traits::NullOcr,
+        };
+        let mut rec = Recorder::new(
+            backend,
+            Db::open_in_memory().unwrap(),
+            Config::default(),
+            None,
+        )
+        .unwrap();
+
+        rec.tick(0).unwrap(); // 第一次一定看（還沒有基準）
+        let baseline = looks.get();
+        assert!(matches!(rec.tick(400).unwrap(), Tick::Idle), "沒人動就別看");
+        assert_eq!(looks.get(), baseline);
+
+        // 第三個 tick 換了 app。時間還遠在天花板之內，也還是沒有人動。
+        assert!(!matches!(rec.tick(800).unwrap(), Tick::Idle));
+        assert!(looks.get() > baseline, "脈絡變了就得睜眼，別等到 5 秒");
     }
 
     /// 答不出閒置時間的平台，行為必須和以前一模一樣。
