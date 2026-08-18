@@ -207,9 +207,16 @@ fn tiny_images_are_skipped_not_crashed() {
     assert_eq!(ocr.recognize(&frame).expect("不該報錯").len(), 0);
 }
 
-/// 沒有像素的幀（text-only 模式、replay）不該讓 OCR 出事。
+/// 沒有像素的幀不該讓 OCR panic——但也**不該被當成「這張畫面上沒有字」**。
+///
+/// 這條測試原本斷言的是 `Ok(空的)`，理由是「不該出事」。那個理由對，
+/// 但那個回傳值把一個 bug（擷取端交出一張沒有像素的畫面）翻譯成了一句
+/// 平靜的事實陳述，於是 `ocr_failures` 是 0、摘要全綠、資料庫是空的。
+///
+/// 現在斷言 `Err`：錄製照樣不會停（recorder 接住它、保留畫面），
+/// 差別只在於它說得出原因。
 #[test]
-fn frames_without_pixels_are_harmless() {
+fn a_frame_without_pixels_is_an_error_not_an_empty_page() {
     let mut ocr = WindowsOcr::new(&preferred());
     let frame = RawFrame {
         ts: 0,
@@ -219,7 +226,9 @@ fn frames_without_pixels_are_harmless() {
         rgba: None,
         dhash: 0,
     };
-    assert_eq!(ocr.recognize(&frame).expect("不該報錯").len(), 0);
+    let err = ocr.recognize(&frame).expect_err("沒有像素不是「沒有字」");
+    // 訊息要說得出是哪一種壞法：使用者貼一行回來就要能定位
+    assert!(format!("{err:#}").contains("像素"), "{err:#}");
 }
 
 /// 這條在所有平台都成立，放這裡是為了讓上面的中文斷言有個對照組：

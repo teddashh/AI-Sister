@@ -13,6 +13,12 @@
 # 這支腳本**不能**取代在真正的 Windows 上執行。它只保證「編得過」，
 # 不保證「行為正確」——GDI 有沒有真的拍到畫面、hook 有沒有真的收到按鍵，
 # 只有那台機器答得出來。
+#
+# 而且它連「斷言還成不成立」都測不到，因為那些測試只在 Windows 上跑。
+# 實際踩過：把 `recognize()` 的一條 `Ok(空的)` 改成 `Err`，這支腳本全綠，
+# CI 上的 Windows job 才紅——因為 `tests/windows_ocr.rs` 裡有一條測試
+# 寫死了舊的約定。**動到 windows/ 底下的回傳約定時，先 grep 一次
+# tests/windows_*.rs**，那些斷言在這台機器上永遠不會執行。
 
 set -euo pipefail
 

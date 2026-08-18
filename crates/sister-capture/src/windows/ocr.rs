@@ -200,15 +200,16 @@ impl Ocr for WindowsOcr {
         // 上沒有字」，於是 `ocr_failures` 是 0、`last_ocr_error` 是 None、
         // 摘要一片綠，而資料庫裡一個字都沒有。錄製照樣不會停（recorder 會
         // 接住這個錯、保留畫面），差別只在於它**說得出來**。
+        // 呼叫端的約定先驗（跟這台機器裝了什麼無關），環境的問題後驗。
+        let Some(rgba) = frame.rgba.as_deref() else {
+            // 擷取端交出一張沒有像素的畫面。那不是「畫面上沒有字」，是 bug。
+            bail!("這一幀沒有像素資料（{}x{}）", frame.width, frame.height);
+        };
         let Some(engine) = self.engine.as_ref() else {
             bail!(
                 "OCR 引擎沒有建起來——這台機器上沒有可用的 OCR 語言包。\
                  到「設定 → 語言 → 選用功能」加裝光學字元辨識，再跑 `sister doctor` 確認"
             );
-        };
-        let Some(rgba) = frame.rgba.as_deref() else {
-            // 擷取端交出一張沒有像素的畫面。那不是「畫面上沒有字」，是 bug。
-            bail!("這一幀沒有像素資料（{}x{}）", frame.width, frame.height);
         };
         let (w, h) = (frame.width, frame.height);
 
