@@ -1204,6 +1204,14 @@ pub mod record {
         let mut rec = Recorder::new(backend, db, config, images)?;
 
         install_ctrl_c_handler();
+        // 從這一刻開始算足跡。Phase 0 的驗收條件裡有三個數字，而在這之前
+        // 沒有任何辦法知道它們是多少——一個量不到的預算不是預算，是一句話。
+        let mut footprint = sister_capture::footprint::Footprint::new();
+        let disk_at_start = rec
+            .db()
+            .stats()
+            .map(|s| s.db_bytes + s.image_bytes)
+            .unwrap_or(0);
         let deadline = duration.map(|d| Instant::now() + Duration::from_secs(d));
         println!(
             "● 錄製中（{}），每 {} ms 一次。Ctrl-C 停止。",
@@ -1234,10 +1242,22 @@ pub mod record {
             }
 
             if last_report.elapsed() >= Duration::from_secs(60) {
+                footprint.tick();
                 let s = rec.stats();
                 println!(
-                    "  … {} tick：保留 {}、重複 {}、排除 {}、讀到 {} 行字",
-                    s.ticks, s.kept, s.duplicates, s.excluded, s.ocr_blocks
+                    "  … {} tick：保留 {}、重複 {}、排除 {}、讀到 {} 行字{}",
+                    s.ticks,
+                    s.kept,
+                    s.duplicates,
+                    s.excluded,
+                    s.ocr_blocks,
+                    match (footprint.cpu_percent(), footprint.peak_rss_bytes()) {
+                        (Some(cpu), Some(rss)) => format!(
+                            "；CPU {cpu:.1}%、RAM 峰值 {}",
+                            crate::fmt::bytes(rss as i64)
+                        ),
+                        _ => String::new(),
+                    }
                 );
                 last_report = Instant::now();
             }
@@ -1257,10 +1277,50 @@ pub mod record {
         );
         report_exclusions(&stats);
         report_ocr(&stats, config_ocr);
+        footprint.tick();
+        report_footprint(
+            &footprint,
+            rec.db()
+                .stats()
+                .map(|s| s.db_bytes + s.image_bytes)
+                .unwrap_or(0)
+                - disk_at_start,
+        );
         for line in &lost {
             println!("  ⚠  錄製途中失去的能力：{line}");
         }
         Ok(())
+    }
+
+    /// 她自己佔了多少。
+    ///
+    /// Phase 0 的驗收條件裡有三個數字（CPU < 3%、RAM < 400MB、
+    /// 磁碟 < 300MB/天），而在這一段出現之前**沒有任何辦法知道它們是多少**。
+    /// 一個量不到的預算不是預算，是一句話——而 README 上遲早要寫這些數字，
+    /// 那就必須是她自己量出來的，不是我開工作管理員瞄一眼記下來的。
+    ///
+    /// 量不到就不印。印一個 0 或一個從三分鐘外推出來的「每天 300MB」，
+    /// 都會變成一個很有說服力的假消息，而且會被抄進文件裡。
+    #[cfg(windows)]
+    fn report_footprint(f: &sister_capture::footprint::Footprint, disk_delta: i64) {
+        let mut parts = Vec::new();
+        if let Some(cpu) = f.cpu_percent() {
+            parts.push(format!("CPU 平均 {cpu:.1}%"));
+        }
+        if let Some(rss) = f.peak_rss_bytes() {
+            parts.push(format!("RAM 峰值 {}", crate::fmt::bytes(rss as i64)));
+        }
+        if let Some(per_day) = f.bytes_per_day(disk_delta.max(0) as u64) {
+            parts.push(format!(
+                "磁碟 {}/天（這段實際長了 {}）",
+                crate::fmt::bytes(per_day as i64),
+                crate::fmt::bytes(disk_delta.max(0))
+            ));
+        }
+        if parts.is_empty() {
+            return;
+        }
+        println!("  足跡：{}", parts.join("、"));
     }
 
     /// 這一段的存在理由：上面那行摘要在「12 張畫面、上面的字一個都沒讀到」

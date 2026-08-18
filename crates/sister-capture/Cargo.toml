@@ -37,6 +37,8 @@ windows = { version = "0.62", features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Threading",
+    # 量她自己的 CPU 與記憶體（GetProcessMemoryInfo）
+    "Win32_System_ProcessStatus",
     "Win32_System_Com",
     "Win32_System_Ole",
     "Win32_System_StationsAndDesktops",

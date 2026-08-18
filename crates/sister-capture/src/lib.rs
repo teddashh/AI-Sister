@@ -7,6 +7,7 @@
 //! [`replay`] 讓整條錄製迴圈能在沒有螢幕的機器上被完整測試，
 //! 也是 SPEC §12 replay 評測的地基。
 
+pub mod footprint;
 pub mod frames;
 pub mod ocr_layout;
 pub mod recorder;
