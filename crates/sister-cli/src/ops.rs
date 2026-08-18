@@ -220,7 +220,6 @@ pub mod query {
                 "answers": answers.iter().map(|a| serde_json::json!({
                     "kind": a.latest.kind, "value": a.latest.normalized, "raw": a.latest.raw,
                     "sightings": a.sightings, "ts": a.latest.ts,
-                    "confidence": a.latest.confidence,
                     "frame_id": a.latest.frame_id, "chunk_id": a.latest.chunk_id,
                     "app_id": a.latest.app_id, "window_title": a.latest.window_title,
                     "url": a.latest.url,
@@ -439,16 +438,18 @@ pub mod facts {
         };
 
         if json {
-            let out: Vec<_> = rows
-                .iter()
-                .map(|f| {
-                    serde_json::json!({
-                        "kind": f.kind, "raw": f.raw, "normalized": f.normalized,
-                        "confidence": f.confidence, "ts": f.ts, "source": f.source_kind,
-                        "frame_id": f.frame_id, "app_id": f.app_id, "url": f.url,
-                    })
-                })
-                .collect();
+            // 這裡以前直接印一個裸陣列。裸陣列講不出「後面還有」——
+            // 拿到 200 筆的腳本只能假設一共就 200 筆。所以跟 query 一樣
+            // 包一層信封，把上限和有沒有被切掉講明白。
+            let out = serde_json::json!({
+                "limit": limit,
+                "truncated": rows.len() >= limit,
+                "facts": rows.iter().map(|f| serde_json::json!({
+                    "kind": f.kind, "raw": f.raw, "normalized": f.normalized,
+                    "ts": f.ts, "source": f.source_kind,
+                    "frame_id": f.frame_id, "app_id": f.app_id, "url": f.url,
+                })).collect::<Vec<_>>(),
+            });
             println!("{}", serde_json::to_string_pretty(&out)?);
             return Ok(());
         }
@@ -457,7 +458,14 @@ pub mod facts {
             println!("沒有符合的事實。");
             return Ok(());
         }
-        println!("{} 筆事實\n", rows.len());
+        // 撈滿上限就是被切掉了。`{n} 筆事實` 和「一共就這 n 筆」在畫面上
+        // 長得一模一樣，而使用者會拿後者去下結論。
+        let more = if rows.len() >= limit {
+            format!("（撈滿 {limit} 筆就停了，用 --limit 看更多）")
+        } else {
+            String::new()
+        };
+        println!("{} 筆事實{more}\n", rows.len());
         for f in &rows {
             println!(
                 "{:<10} {:<24} 「{}」",
@@ -466,10 +474,9 @@ pub mod facts {
                 fmt::one_line(&f.raw, 40)
             );
             println!(
-                "           {}  {}  信心 {:.2}",
+                "           {}  {}",
                 fmt::timestamp(f.ts),
-                fmt::context_line(f.app_id.as_deref(), f.window_title.as_deref()),
-                f.confidence
+                fmt::context_line(f.app_id.as_deref(), f.window_title.as_deref())
             );
         }
         Ok(())

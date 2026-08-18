@@ -18,7 +18,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE meta (
@@ -169,6 +169,17 @@ CREATE INDEX idx_facts_norm ON facts(normalized);
 CREATE INDEX idx_facts_ts ON facts(ts);
 "#;
 
+/// 拿掉 `facts.confidence`。
+///
+/// 那個欄位每一列都寫，然後沒有任何一行程式讀它——連它自己的註解宣稱的
+/// 用途（規則搶同一段文字時決定誰贏）都是假的，去重讀的是 `kind.priority()`。
+/// 留著它只會讓「信心 0.93」繼續出現在畫面和 JSON 上，讓人以為有校準過。
+///
+/// 舊資料庫裡的值不值得搬去別的地方：它不是量出來的。
+const MIGRATION_002: &str = r#"
+ALTER TABLE facts DROP COLUMN confidence;
+"#;
+
 pub struct Db {
     /// `pub(crate)` 只為了 [`crate::retention`]：清理要跨好幾張表、還要在
     /// 同一個 transaction 裡跑，包成一堆窄 API 反而更難看出它到底刪了什麼。
@@ -211,6 +222,12 @@ impl Db {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap_or(0);
 
+        // 一級一級走，每一級蓋自己的版號。
+        //
+        // 這裡本來是「跑完 001 就蓋成 SCHEMA_VERSION」。那樣寫的話，002 若在
+        // 半路失敗（舊版 SQLite 不支援 DROP COLUMN 之類），資料庫已經被蓋成
+        // 「最新」了——下次開機它不會重試，只會安安靜靜地少跑了一段。
+        // 每段各蓋各的，失敗就停在上一段，下次自己接著跑。
         if version < 1 {
             let tx = self.conn.transaction()?;
             tx.execute_batch(MIGRATION_001).context("migration 001")?;
@@ -219,8 +236,13 @@ impl Db {
                 params![now_ms().to_string()],
             )?;
             tx.commit()?;
-            self.conn
-                .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            self.conn.pragma_update(None, "user_version", 1)?;
+        }
+        if version < 2 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(MIGRATION_002).context("migration 002")?;
+            tx.commit()?;
+            self.conn.pragma_update(None, "user_version", 2)?;
         }
         Ok(())
     }
@@ -652,7 +674,7 @@ impl Db {
     /// 依 typed fact 直查（「帳單多少錢」「電話幾號」走這條，不經全文檢索）。
     pub fn facts_by_kind(&self, kind: &str, limit: usize) -> Result<Vec<FactRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, ts, kind, raw, normalized, confidence, source_kind,
+            "SELECT id, ts, kind, raw, normalized, source_kind,
                     chunk_id, frame_id, app_id, window_title, url
              FROM facts WHERE kind = ?1 ORDER BY ts DESC LIMIT ?2",
         )?;
@@ -669,7 +691,7 @@ impl Db {
     ) -> Result<Vec<FactRow>> {
         let pattern = format!("%{needle}%");
         let mut stmt = self.conn.prepare(
-            "SELECT id, ts, kind, raw, normalized, confidence, source_kind,
+            "SELECT id, ts, kind, raw, normalized, source_kind,
                     chunk_id, frame_id, app_id, window_title, url
              FROM facts
              WHERE (?1 IS NULL OR kind = ?1) AND (raw LIKE ?2 OR normalized LIKE ?2)
@@ -776,13 +798,12 @@ fn map_fact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FactRow> {
         kind: row.get(2)?,
         raw: row.get(3)?,
         normalized: row.get(4)?,
-        confidence: row.get(5)?,
-        source_kind: row.get(6)?,
-        chunk_id: row.get(7)?,
-        frame_id: row.get(8)?,
-        app_id: row.get(9)?,
-        window_title: row.get(10)?,
-        url: row.get(11)?,
+        source_kind: row.get(5)?,
+        chunk_id: row.get(6)?,
+        frame_id: row.get(7)?,
+        app_id: row.get(8)?,
+        window_title: row.get(9)?,
+        url: row.get(10)?,
     })
 }
 
@@ -831,9 +852,9 @@ fn insert_facts_tx(
         return Ok(0);
     }
     let mut stmt = tx.prepare(
-        "INSERT INTO facts(ts, session_id, kind, raw, normalized, confidence, source_kind,
+        "INSERT INTO facts(ts, session_id, kind, raw, normalized, source_kind,
                            chunk_id, frame_id, app_id, window_title, url, byte_start, byte_end)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
     )?;
     for f in facts {
         stmt.execute(params![
@@ -842,7 +863,6 @@ fn insert_facts_tx(
             f.kind.as_str(),
             f.raw,
             f.normalized,
-            f.confidence as f64,
             source_kind.as_str(),
             chunk_id,
             frame_id,
@@ -922,7 +942,6 @@ pub struct FactRow {
     pub kind: String,
     pub raw: String,
     pub normalized: String,
-    pub confidence: f64,
     pub source_kind: String,
     pub chunk_id: Option<i64>,
     pub frame_id: Option<i64>,
@@ -1004,10 +1023,57 @@ mod tests {
         }
     }
 
+    fn columns_of(db: &Db, table: &str) -> Vec<String> {
+        db.conn
+            .prepare(&format!("SELECT * FROM {table}"))
+            .expect("prepare")
+            .column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// 全新建立的資料庫，版號要對、schema 也要對。
+    ///
+    /// 只斷言版號是不夠的：`pragma_update(user_version, SCHEMA_VERSION)` 寫在
+    /// 第一段 migration 後面時，版號永遠會是對的，而後面幾段一次都沒跑過。
     #[test]
     fn migrations_apply_and_set_version() {
         let db = test_db();
         assert_eq!(db.schema_version().expect("version"), SCHEMA_VERSION);
+        assert!(
+            !columns_of(&db, "facts").contains(&"confidence".to_string()),
+            "版號說跑到最新了，但 002 沒真的跑"
+        );
+    }
+
+    /// 已經在跑的資料庫升級上來，事實不能掉，欄位要真的消失。
+    ///
+    /// 這個測試存在的理由是它抓得到「版號蓋了但 migration 沒跑」：那種錯不會
+    /// 當場爆炸，只會讓舊機器上的欄位一直留著，而 `SELECT` 早就不撈它了。
+    #[test]
+    fn a_database_from_the_previous_version_upgrades_without_losing_its_facts() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(MIGRATION_001).expect("v1 schema");
+        conn.execute(
+            "INSERT INTO facts(ts, kind, raw, normalized, confidence, source_kind)
+             VALUES(1000, 'phone', '0800-000-123', '0800000123', 0.95, 'ocr')",
+            [],
+        )
+        .expect("v1 row");
+        conn.pragma_update(None, "user_version", 1).expect("stamp");
+
+        let db = Db::init(conn).expect("upgrade");
+
+        assert_eq!(db.schema_version().expect("version"), 2);
+        let rows = db.facts_by_kind("phone", 10).expect("facts survive");
+        assert_eq!(rows.len(), 1, "升級把舊事實弄丟了");
+        assert_eq!(rows[0].raw, "0800-000-123");
+
+        assert!(
+            !columns_of(&db, "facts").contains(&"confidence".to_string()),
+            "欄位還在——002 沒跑，但版號已經蓋成 2 了"
+        );
     }
 
     #[test]

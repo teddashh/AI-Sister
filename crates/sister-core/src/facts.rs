@@ -79,22 +79,24 @@ pub struct ExtractedFact {
     pub normalized: String,
     pub byte_start: usize,
     pub byte_end: usize,
-    /// **不是機率。** 是每條規則手寫的優先序，唯一的用途是兩條規則搶同一
-    /// 段文字時決定誰贏（見 `extract` 的去重）。
-    ///
-    /// 沒有任何一組標註資料校準過它，所以「0.93」不代表 93% 會是對的。
-    /// 名字取成 confidence 是個歷史錯誤——它長得像一個有意義的數字，而
-    /// 「一個沒辦法歸因的數字，會讓人去修最好修的地方，而不是最貴的地方」。
-    /// 等 Phase 1 有了重播評測集，這裡要嘛真的校準，要嘛改名成 priority。
-    pub confidence: f32,
 }
+
+// 這裡以前有一個 `confidence: f32`，每條規則手寫一個 0.85～0.97 的數字。
+//
+// 它的註解說它是用來決定「兩條規則搶同一段文字時誰贏」的——那句話是假的。
+// 去重排序讀的是 `kind.priority()`，從來沒有讀過這個欄位。把每一個值都
+// 改成 0.5，99 個測試全過。
+//
+// 也就是說：它被算出來、寫進資料庫的每一列、印在使用者眼前（「信心 0.93」）、
+// 出現在 JSON 裡，然後沒有任何一行程式讀它。設定項要嘛實作要嘛刪掉，
+// 存起來的欄位也一樣。等 Phase 1 有了重播評測集、真的量得出「這條規則抽對
+// 的比例是多少」，它再帶著一個有來源的數字回來。
 
 struct Cand {
     kind: FactKind,
     start: usize,
     end: usize,
     normalized: String,
-    confidence: f32,
 }
 
 /// 從一段文字抽出所有事實，依 `byte_start` 排序、互不重疊。
@@ -147,7 +149,6 @@ pub fn extract(text: &str) -> Vec<ExtractedFact> {
             normalized: c.normalized,
             byte_start: c.start,
             byte_end: c.end,
-            confidence: c.confidence,
         });
     }
 
@@ -384,14 +385,14 @@ fn money(text: &str, out: &mut Vec<Cand>) {
         let mult = c.get(3).map_or(1.0, |m| multiplier(m.as_str()));
 
         // 孤零零的 `$`：旁邊有中文就是台幣，否則按國際慣例算美元
-        let (cur, conf) = if sym == "$" || sym == "＄" {
+        let cur = if sym == "$" || sym == "＄" {
             if cjk_nearby(text, whole.start(), whole.end()) {
-                ("TWD", 0.75)
+                "TWD"
             } else {
-                ("USD", 0.70)
+                "USD"
             }
         } else {
-            (currency_of(sym).unwrap_or("TWD"), 0.95)
+            currency_of(sym).unwrap_or("TWD")
         };
 
         out.push(Cand {
@@ -399,7 +400,6 @@ fn money(text: &str, out: &mut Vec<Cand>) {
             start: whole.start(),
             end: whole.end(),
             normalized: format!("{cur}:{}", fmt_amount(num * mult)),
-            confidence: conf,
         });
     }
 
@@ -416,7 +416,6 @@ fn money(text: &str, out: &mut Vec<Cand>) {
             start: whole.start(),
             end: whole.end(),
             normalized: format!("{cur}:{}", fmt_amount(num * mult)),
-            confidence: 0.93,
         });
     }
 
@@ -433,7 +432,6 @@ fn money(text: &str, out: &mut Vec<Cand>) {
             start: whole.start(),
             end: whole.end(),
             normalized: format!("{cur}:{}", fmt_amount(v)),
-            confidence: 0.85,
         });
     }
 }
@@ -471,23 +469,11 @@ fn phones(text: &str, out: &mut Vec<Cand>) {
             continue;
         }
 
-        let conf = if raw.starts_with('+') || raw.starts_with("886") {
-            0.98
-        } else if national.starts_with('9')
-            || national.starts_with("800")
-            || national.starts_with("809")
-        {
-            0.95 // 手機與 0800 客服號碼的格式最不容易撞號
-        } else {
-            0.82 // 市話最容易和日期、流水號撞號
-        };
-
         out.push(Cand {
             kind: FactKind::Phone,
             start: m.start(),
             end: m.end(),
             normalized: format!("+886{national}"),
-            confidence: conf,
         });
     }
 }
@@ -525,7 +511,6 @@ fn urls(text: &str, out: &mut Vec<Cand>) {
             start: m.start(),
             end: m.start() + trimmed.len(),
             normalized,
-            confidence: 0.97,
         });
     }
 }
@@ -537,7 +522,6 @@ fn emails(text: &str, out: &mut Vec<Cand>) {
             start: m.start(),
             end: m.end(),
             normalized: m.as_str().to_ascii_lowercase(),
-            confidence: 0.96,
         });
     }
 }
@@ -594,7 +578,6 @@ fn file_paths(text: &str, out: &mut Vec<Cand>) {
             start: m.start(),
             end: m.start() + raw.len(),
             normalized: raw.replace('\\', "/"),
-            confidence: 0.85,
         });
     }
 }
@@ -684,24 +667,23 @@ fn snake_looks_like_error(s: &str) -> bool {
 }
 
 fn error_codes(text: &str, out: &mut Vec<Cand>) {
-    let mut push = |start: usize, end: usize, norm: String, conf: f32| {
+    let mut push = |start: usize, end: usize, norm: String| {
         out.push(Cand {
             kind: FactKind::ErrorCode,
             start,
             end,
             normalized: norm,
-            confidence: conf,
         });
     };
 
     for m in RE_ERR_SNAKE.find_iter(text) {
         if snake_looks_like_error(m.as_str()) {
-            push(m.start(), m.end(), m.as_str().to_string(), 0.90);
+            push(m.start(), m.end(), m.as_str().to_string());
         }
     }
     for m in RE_ERRNO.find_iter(text) {
         if ERRNO.contains(&m.as_str()) {
-            push(m.start(), m.end(), m.as_str().to_string(), 0.95);
+            push(m.start(), m.end(), m.as_str().to_string());
         }
     }
     for m in RE_ERR_HEX.find_iter(text) {
@@ -709,26 +691,20 @@ fn error_codes(text: &str, out: &mut Vec<Cand>) {
             m.start(),
             m.end(),
             m.as_str().to_ascii_uppercase().replace("0X", "0x"),
-            0.80,
         );
     }
     for m in RE_ERR_COMPILER.find_iter(text) {
-        push(m.start(), m.end(), m.as_str().to_ascii_uppercase(), 0.85);
+        push(m.start(), m.end(), m.as_str().to_ascii_uppercase());
     }
     for m in RE_ERR_SIGNAL.find_iter(text) {
-        push(m.start(), m.end(), m.as_str().to_string(), 0.95);
+        push(m.start(), m.end(), m.as_str().to_string());
     }
     for m in RE_ERR_EXC.find_iter(text) {
-        push(m.start(), m.end(), m.as_str().to_string(), 0.88);
+        push(m.start(), m.end(), m.as_str().to_string());
     }
     for c in RE_ERR_HTTP.captures_iter(text) {
         let code = c.get(1).expect("status group");
-        push(
-            code.start(),
-            code.end(),
-            format!("HTTP:{}", code.as_str()),
-            0.85,
-        );
+        push(code.start(), code.end(), format!("HTTP:{}", code.as_str()));
     }
 }
 
@@ -780,22 +756,21 @@ fn tw_id_valid(s: &str) -> bool {
 }
 
 fn ids(text: &str, out: &mut Vec<Cand>) {
-    let mut push = |start: usize, end: usize, norm: String, conf: f32| {
+    let mut push = |start: usize, end: usize, norm: String| {
         out.push(Cand {
             kind: FactKind::IdLike,
             start,
             end,
             normalized: norm,
-            confidence: conf,
         });
     };
 
     for m in RE_UUID.find_iter(text) {
-        push(m.start(), m.end(), m.as_str().to_ascii_lowercase(), 0.99);
+        push(m.start(), m.end(), m.as_str().to_ascii_lowercase());
     }
     for m in RE_TWID.find_iter(text) {
         if tw_id_valid(m.as_str()) {
-            push(m.start(), m.end(), m.as_str().to_string(), 0.92);
+            push(m.start(), m.end(), m.as_str().to_string());
         }
     }
     for c in [&*RE_VAT, &*RE_SHA, &*RE_ORDER]
@@ -803,7 +778,7 @@ fn ids(text: &str, out: &mut Vec<Cand>) {
         .flat_map(|re| re.captures_iter(text))
     {
         let g = c.get(1).expect("id group");
-        push(g.start(), g.end(), g.as_str().to_string(), 0.90);
+        push(g.start(), g.end(), g.as_str().to_string());
     }
 }
 
@@ -854,13 +829,12 @@ fn week_offset_days(prefix: &str) -> i32 {
 }
 
 fn datetimes(text: &str, out: &mut Vec<Cand>) {
-    let mut push = |start: usize, end: usize, norm: String, conf: f32| {
+    let mut push = |start: usize, end: usize, norm: String| {
         out.push(Cand {
             kind: FactKind::DateTimeMention,
             start,
             end,
             normalized: norm,
-            confidence: conf,
         });
     };
 
@@ -874,12 +848,7 @@ fn datetimes(text: &str, out: &mut Vec<Cand>) {
             continue;
         }
         let w = c.get(0).expect("group 0");
-        push(
-            w.start(),
-            w.end(),
-            format!("DATE:{y:04}-{m:02}-{d:02}"),
-            0.95,
-        );
+        push(w.start(), w.end(), format!("DATE:{y:04}-{m:02}-{d:02}"));
     }
 
     for c in RE_DATE_PART.captures_iter(text) {
@@ -891,9 +860,11 @@ fn datetimes(text: &str, out: &mut Vec<Cand>) {
             continue;
         }
         let w = c.get(0).expect("group 0");
-        // `8月17日` 不會有別的意思；`8/17` 可能是分數或比例，信心壓低
-        let conf = if &c[2] == "月" { 0.92 } else { 0.65 };
-        push(w.start(), w.end(), format!("DATE:--{m:02}-{d:02}"), conf);
+        // `8月17日` 不會有別的意思；`8/17` 可能是分數、比例或版本號。
+        // 這裡以前把後者的 confidence 壓成 0.65 就算處理過了——但沒有人讀
+        // 那個數字，所以 `8/17` 一直是以「日期」的身分照樣抽出來的。留著這
+        // 段話是為了記住：這個歧義還沒有解，壓一個沒人看的分數不算解。
+        push(w.start(), w.end(), format!("DATE:--{m:02}-{d:02}"));
     }
 
     for c in RE_CLOCK.captures_iter(text) {
@@ -905,7 +876,7 @@ fn datetimes(text: &str, out: &mut Vec<Cand>) {
             continue;
         }
         let w = c.get(0).expect("group 0");
-        push(w.start(), w.end(), format!("TIME:{h:02}:{m:02}"), 0.80);
+        push(w.start(), w.end(), format!("TIME:{h:02}:{m:02}"));
     }
 
     for c in RE_AMPM.captures_iter(text) {
@@ -924,7 +895,7 @@ fn datetimes(text: &str, out: &mut Vec<Cand>) {
             h = 0;
         }
         let w = c.get(0).expect("group 0");
-        push(w.start(), w.end(), format!("TIME:{h:02}:{m:02}"), 0.90);
+        push(w.start(), w.end(), format!("TIME:{h:02}:{m:02}"));
     }
 
     for c in RE_CJK_CLOCK.captures_iter(text) {
@@ -952,7 +923,7 @@ fn datetimes(text: &str, out: &mut Vec<Cand>) {
             _ => {}
         }
         let w = c.get(0).expect("group 0");
-        push(w.start(), w.end(), format!("TIME:{h:02}:{m:02}"), 0.90);
+        push(w.start(), w.end(), format!("TIME:{h:02}:{m:02}"));
     }
 
     for m in RE_REL_WORD.find_iter(text) {
@@ -966,7 +937,7 @@ fn datetimes(text: &str, out: &mut Vec<Cand>) {
             "大前天" => -3,
             _ => continue,
         };
-        push(m.start(), m.end(), format!("REL:{days:+}d"), 0.92);
+        push(m.start(), m.end(), format!("REL:{days:+}d"));
     }
 
     for c in RE_REL_QTY.captures_iter(text) {
@@ -990,7 +961,7 @@ fn datetimes(text: &str, out: &mut Vec<Cand>) {
         let sign = if c[3].contains('前') { -1.0 } else { 1.0 };
         let v = (n * mult * sign) as i64;
         let w = c.get(0).expect("group 0");
-        push(w.start(), w.end(), format!("REL:{v:+}{unit}"), 0.88);
+        push(w.start(), w.end(), format!("REL:{v:+}{unit}"));
     }
 
     for c in RE_WEEK.captures_iter(text) {
@@ -1006,13 +977,13 @@ fn datetimes(text: &str, out: &mut Vec<Cand>) {
                     "六" => 6,
                     _ => 7, // 日 / 天
                 };
-                push(w.start(), w.end(), format!("WEEKDAY:{n}"), 0.90);
+                push(w.start(), w.end(), format!("WEEKDAY:{n}"));
             }
             // 光一個「週」太模糊，只有帶上/下/這才是時間指涉
             None => {
                 if let Some(p) = c.get(1) {
                     let days = week_offset_days(p.as_str());
-                    push(w.start(), w.end(), format!("REL:{days:+}d"), 0.85);
+                    push(w.start(), w.end(), format!("REL:{days:+}d"));
                 }
             }
         }
@@ -1021,7 +992,7 @@ fn datetimes(text: &str, out: &mut Vec<Cand>) {
     for c in RE_MONTH_OFF.captures_iter(text) {
         let days = week_offset_days(&c[1]) / 7 * 30;
         let w = c.get(0).expect("group 0");
-        push(w.start(), w.end(), format!("REL:{days:+}d"), 0.85);
+        push(w.start(), w.end(), format!("REL:{days:+}d"));
     }
 }
 
@@ -1068,7 +1039,6 @@ mod tests {
                 f.raw,
                 "raw must match its span"
             );
-            assert!(f.confidence > 0.0 && f.confidence <= 1.0);
             prev_end = f.byte_end;
         }
     }
