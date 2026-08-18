@@ -606,6 +606,32 @@ impl Db {
         LIKE_SCAN_DAYS
     }
 
+    /// 有幾段錄製沒有正常收尾——也就是 Phase 0 那句「零當機」的實作。
+    ///
+    /// `finish()` 會寫 `ended_at`，而 Ctrl-C 只設旗標、真正的收尾照樣走
+    /// `finish()`（見 `ops.rs` 的 `install_ctrl_c_handler`）。所以
+    /// `ended_at IS NULL` 剩下的解釋只有：程序被殺、當機、關機、拔電。
+    ///
+    /// 在這之前 Phase 0 的退場條件「連續 7 天自我錄製、零當機」，驗證方式是
+    /// **使用者要自己記得有沒有當過**。那不是一個退場條件，那是一個印象。
+    /// 資料庫一直都知道答案，只是沒有人問過它。
+    ///
+    /// 回傳 `(全部, 沒收尾的, 最後一次沒收尾的時間)`。
+    ///
+    /// **有一個沒有被解決的歧義寫在這裡而不是被藏起來**：如果此刻另一個終端
+    /// 機正在錄，那一段的 `ended_at` 也是 NULL，看起來跟當機一樣。可以靠存
+    /// PID 再去問作業系統那個 PID 還在不在來分辨，但那是一條跨平台的、而且
+    /// 會因為 PID 重用而給出錯誤答案的路。所以這裡不猜——呼叫端負責把這個
+    /// 可能性講出來，而不是安靜地報一個可能是錯的數字。
+    pub fn crash_audit(&self) -> Result<(i64, i64, Option<Millis>)> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(ended_at IS NULL), 0), MAX(CASE WHEN ended_at IS NULL THEN started_at END)
+             FROM sessions",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    }
+
     /// 那三張「只寫不讀」的表，裡面到底有沒有東西。
     ///
     /// `ocr_blocks` 的座標、`focus_events`、`input_metrics` 整整三張表，
@@ -1570,6 +1596,24 @@ mod tests {
         let st = db.stats().expect("stats");
         assert_eq!(st.input_windows, 1);
         assert_eq!(st.system_events, 1);
+    }
+
+    /// 「零當機」現在有實作了，而不是靠使用者的印象。
+    #[test]
+    fn a_session_that_never_closed_is_counted_as_a_crash() {
+        let mut db = test_db();
+
+        let clean = db.start_session("test", "0.0.1").expect("session");
+        db.end_session(clean).expect("end");
+        let (all, unfinished, last) = db.crash_audit().expect("audit");
+        assert_eq!((all, unfinished, last), (1, 0, None), "收好尾的不該算當機");
+
+        // 開了就不收尾——程序被殺、當機、拔電，都長這樣。
+        db.start_session("test", "0.0.1").expect("session");
+        let (all, unfinished, last) = db.crash_audit().expect("audit");
+        assert_eq!(all, 2);
+        assert_eq!(unfinished, 1, "沒收尾的那一段沒有被算到");
+        assert!(last.is_some(), "沒收尾的話要講得出是什麼時候");
     }
 
     /// 空殼跟安靜長得不一樣，這個檢查必須認得出差別。

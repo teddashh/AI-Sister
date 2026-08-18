@@ -1075,6 +1075,31 @@ pub mod doctor {
                 _ => line(true, "已記錄", &detail),
             }
 
+            // Phase 0 的退場條件是「連續 7 天自我錄製、零當機」，而在這
+            // 之前那句話的驗證方式是使用者自己記得有沒有當過。資料庫一直
+            // 知道答案：Ctrl-C 走的是正常收尾，所以沒有 `ended_at` 的那幾
+            // 段，剩下的解釋只有被殺、當機、關機、拔電。
+            let (all_sessions, unfinished, last_crash) = db.crash_audit()?;
+            match (all_sessions, unfinished) {
+                (0, _) => mark("?", "零當機", "還沒錄過"),
+                (n, 0) => line(true, "零當機", &format!("{n} 段錄製全部正常收尾")),
+                (n, u) => mark(
+                    // 不畫 ✗。此刻另一個終端機正在錄的話，那一段也沒有
+                    // `ended_at`，長得跟當機一模一樣——而我沒有一條不會
+                    // 因為 PID 重用而說謊的路可以分辨。不知道就說不知道，
+                    // 不要為了讓輸出好看而猜一個。
+                    "!",
+                    "零當機",
+                    &format!(
+                        "{n} 段錄製裡有 {u} 段沒有正常收尾{}——當機、關機、拔電，\
+                         或者現在正有另一個 sister 在錄",
+                        last_crash
+                            .map(|t| format!("（最後一次 {}）", fmt::timestamp(t)))
+                            .unwrap_or_default()
+                    ),
+                ),
+            }
+
             // 上面那一列擋的是「一個字都沒有」。它擋不住的是**有一堆列、
             // 每一列都是空殼**——`COUNT(*)` 對這兩種故障的回答一模一樣。
             //
