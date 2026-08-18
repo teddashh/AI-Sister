@@ -1002,6 +1002,36 @@ pub mod doctor {
                 ),
             ),
         }
+
+        // 兩個字的中文詞沒有索引可用。與其在文件裡宣稱「只找得回 30 天」，
+        // 不如當場告訴他**他自己的資料庫**有多少行字已經在那條線外面。
+        let days = Db::like_scan_days();
+        match &db {
+            Some(d) => {
+                let (outside, total) = d.text_outside_scan_window()?;
+                if total == 0 {
+                    mark("?", "兩個字的中文", "資料庫是空的，等你錄過再驗一次");
+                } else if outside == 0 {
+                    mark(
+                        "✓",
+                        "兩個字的中文",
+                        &format!("{total} 行字全都在 {days} 天內，現在查得到全部"),
+                    );
+                } else {
+                    let pct = outside as f64 / total as f64 * 100.0;
+                    mark(
+                        "!",
+                        "兩個字的中文",
+                        &format!(
+                            "{outside}/{total} 行字（{pct:.0}%）比 {days} 天更舊——\
+                             「帳單」「電話」這種兩個字的詞，在「原文」那一半裡搜不到那些。\
+                             三個字以上不受影響，L1 抽出來的事實也不受影響",
+                        ),
+                    );
+                }
+            }
+            None => mark("?", "兩個字的中文", "還沒有資料庫"),
+        }
         if let Some(db) = &db {
             // 兩個數字並排印出來、讓讀者自己比對，是把判斷丟給人。
             // 對不上的時候（別的版本開過這顆資料庫）程式照樣會去查它，

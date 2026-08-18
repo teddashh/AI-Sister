@@ -577,6 +577,35 @@ impl Db {
         )?)
     }
 
+    /// 有多少行字落在 LIKE 掃描的窗外——也就是兩個字的中文查詢碰不到的部分。
+    ///
+    /// 回傳 `(窗外, 全部)`。這是給 `doctor` 用的：與其宣稱「兩個字的中文只
+    /// 找得回 30 天」，不如當場告訴使用者他自己的資料庫裡有多少行字已經在
+    /// 那條線的外面。
+    pub fn text_outside_scan_window(&self) -> Result<(i64, i64)> {
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM text_chunks", [], |r| r.get(0))?;
+        if total == 0 {
+            return Ok((0, 0));
+        }
+        let newest: i64 = self
+            .conn
+            .query_row("SELECT MAX(ts) FROM text_chunks", [], |r| r.get(0))?;
+        let cutoff = newest - LIKE_SCAN_DAYS * 86_400_000;
+        let outside: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM text_chunks WHERE ts < ?1",
+            params![cutoff],
+            |r| r.get(0),
+        )?;
+        Ok((outside, total))
+    }
+
+    /// 掃描窗口有多少天。`doctor` 要講出這個數字，不能自己另外寫一個。
+    pub const fn like_scan_days() -> i64 {
+        LIKE_SCAN_DAYS
+    }
+
     // ---------- 檢索 ----------
 
     /// 全文檢索。trigram 與 unicode61 兩個索引各查一次再合併取最佳分數，
