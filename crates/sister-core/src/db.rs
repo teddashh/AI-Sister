@@ -5,7 +5,15 @@
 //!
 //! 檢索走 FTS5 雙索引（SPEC §15）：
 //! - `text_fts`（trigram）：CJK 子字串比對的主力，繁中天然支援、免字典。
-//! - `text_fts_uni`（unicode61）：補 trigram 的兩個洞——英文整詞、以及 <3 字的查詢。
+//!   比不了少於 3 個字的東西——這是 trigram 的定義，不是設定問題。
+//! - `text_fts_uni`（unicode61）：補英文整詞（`dns` 這種短英文詞它答得出來，
+//!   trigram 反而不行）。
+//!
+//! 這段註解本來寫著 unicode61「補 <3 字的查詢」。**那句話對中文是假的**：
+//! unicode61 不是逐字切 CJK 的，它把「客服專線」整串當成**一個** token，
+//! 所以 `MATCH "客服"` 是 0 筆。兩個字的中文詞——也就是中文裡最常見的詞長
+//! ——在這裡沒有任何索引可用，只剩 [`Db::search_like`] 的掃描。
+//! 見 `LIKE_SCAN_DAYS` 與 DATA_INVENTORY 的已知缺口第 8 條。
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
