@@ -21,6 +21,10 @@ use sister_core::redact;
 
 use crate::traits::{Backend, RawFrame};
 
+/// 一天有多少毫秒。畫面額度以 UTC 天為單位重置，和
+/// `frames::relative_path` 的資料夾分層是同一條線。
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// 一次 tick 的結果。呼叫端據此決定要不要記錄、要不要退避。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tick {
@@ -139,6 +143,13 @@ impl<B: Backend> Recorder<B> {
             None
         };
 
+        // 今天已經用掉多少畫面額度，要從資料庫接回來，不能從 0 開始。
+        // 從 0 開始的話，那個「每日上限」只管得住單一次執行——關掉再開就
+        // 歸零，一天重開十次就是十倍額度。一個可以靠重開繞過的上限不是上限。
+        let now = sister_core::now_ms();
+        let image_day = now.div_euclid(DAY_MS);
+        let image_bytes_today = db.image_bytes_since(image_day * DAY_MS).unwrap_or(0);
+
         Ok(Self {
             backend,
             db,
@@ -150,8 +161,8 @@ impl<B: Backend> Recorder<B> {
             last_exclusion: None,
             image_dir,
             last_image_ts: None,
-            image_day: i64::MIN,
-            image_bytes_today: 0,
+            image_day,
+            image_bytes_today,
             stats: RecorderStats::default(),
             timings: Default::default(),
         })
@@ -396,7 +407,7 @@ impl<B: Backend> Recorder<B> {
         // 跨日就把今天的額度歸零。用 UTC 天切，和 `frames::relative_path`
         // 的資料夾分層是同一條線，這樣「某一天的圖」在磁碟上與在預算上
         // 講的是同一天。
-        let day = ts.div_euclid(86_400_000);
+        let day = ts.div_euclid(DAY_MS);
         if day != self.image_day {
             self.image_day = day;
             self.image_bytes_today = 0;
@@ -1065,6 +1076,45 @@ mod tests {
                 "{word} 在預算用完之後仍然要搜得到"
             );
         }
+    }
+
+    /// **關掉再開不可以拿到新的額度。**
+    ///
+    /// 這是「每日上限」這句話成不成立的關鍵。額度只記在記憶體裡的話，它
+    /// 管得住的是「單一次執行」，不是「一天」——而錄製程式本來就會被關掉、
+    /// 重開、當掉、跟著開機再起來。一個重開就能繞過的上限不是上限，而且
+    /// 它會安靜地不生效：磁碟照樣長，摘要照樣是綠的。
+    #[test]
+    fn restarting_does_not_hand_out_a_fresh_daily_image_budget() {
+        let tmp = Tmp::new("budget-restart");
+        let mut config = Config::default();
+        config.capture.image_min_interval_ms = 0;
+        config.capture.max_image_mb_per_day = 1;
+
+        // 同一顆資料庫貫穿兩次「執行」
+        let db = Db::open_in_memory().expect("db");
+        let backend = || crate::traits::CompositeBackend {
+            name: "images".into(),
+            screen: ChangingScreen::default(),
+            focus: crate::traits::NullFocus,
+            clipboard: crate::traits::NullClipboard,
+            input: crate::traits::NullInput,
+            ocr: NumberedLines::default(),
+        };
+
+        let now = sister_core::now_ms();
+        let mut r =
+            Recorder::new(backend(), db, config.clone(), Some(tmp.0.clone())).expect("recorder");
+        r.tick(now).expect("tick");
+        assert_eq!(count_pngs(&tmp.0), 1);
+        let db = r.into_db();
+
+        // 第二次啟動：這一天已經用掉的量必須從資料庫接回來
+        let r2 = Recorder::new(backend(), db, config, Some(tmp.0.clone())).expect("recorder");
+        assert!(
+            r2.image_bytes_today > 0,
+            "重開之後額度歸零了——那個上限等於不存在"
+        );
     }
 
     /// 跨過午夜，額度要自己歸零。

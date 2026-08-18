@@ -704,6 +704,24 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// `ts` 之後寫出去的畫面檔一共多少位元組。
+    ///
+    /// 用途是讓「每天畫面上限」在**重開之後仍然成立**。少了這一步，那個
+    /// 上限只管得住單一次執行：關掉再開就歸零，一天重開十次就是十倍額度。
+    /// 一個可以靠重開繞過的上限不是上限，而且它會安靜地不生效——正是這個
+    /// 專案最主要的失效形狀。
+    pub fn image_bytes_since(&self, ts: crate::model::Millis) -> Result<u64> {
+        let n: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(image_bytes),0) FROM frames WHERE ts >= ?1",
+                [ts],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok(n.max(0) as u64)
+    }
+
     /// 足跡統計——直接對應 Phase 0 的 exit criteria。
     pub fn stats(&self) -> Result<DbStats> {
         let count = |sql: &str| -> Result<i64> {
