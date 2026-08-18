@@ -435,33 +435,166 @@ pub mod doctor {
     #[derive(Default)]
     struct Caps {
         url: bool,
+        /// 輸入 hook：`None` = 本平台沒有這個東西。
+        /// 不是「沒試過」——doctor 現在會真的裝一次（見 [`caps`]）。
+        input_hooks: Option<bool>,
         ocr: bool,
         ocr_language: Option<String>,
         ocr_available: Vec<String>,
+        /// **實測**出來的檢查列：(過了沒, 標籤, 說明)。
+        ///
+        /// 刻意在這裡就判定完、只留下要印的字，是為了把平台專屬的型別
+        /// （`WindowsOcr`、`RawFrame`…）全部關在 `caps()` 裡面。
+        /// doctor 的輸出段落不該長出一堆 `#[cfg]`。
+        ocr_probes: Vec<(bool, &'static str, String)>,
         /// 記了不該記的（排除規則失效）
         broken_privacy: Vec<String>,
         /// 其實什麼都沒記住，但你不會發現
         degraded: Vec<String>,
     }
 
+    /// 把一段辨識結果縮成一行可以印的樣子。
+    ///
+    /// doctor 是使用者自己對著自己的螢幕跑的，所以印出畫面上的字並不是外洩；
+    /// 但完整倒出來會把終端機洗掉，而且真正要回答的問題只有一個：
+    /// 「讀到的是人話，還是亂碼」。一行就夠了。
+    #[cfg(windows)]
+    fn sample(lines: &[String]) -> String {
+        const MAX: usize = 36;
+        let Some(first) = lines.iter().find(|l| !l.trim().is_empty()) else {
+            return String::new();
+        };
+        let mut s: String = first.chars().take(MAX).collect();
+        if first.chars().count() > MAX {
+            s.push('…');
+        }
+        format!("「{s}」")
+    }
+
+    #[cfg(windows)]
     fn caps(config: &Config) -> Caps {
-        #[cfg(windows)]
-        {
-            let c = sister_capture::windows::Capabilities::current(config);
-            Caps {
-                url: c.url,
-                ocr: c.ocr,
-                ocr_language: c.ocr_language.clone(),
-                ocr_available: c.ocr_languages_available.clone(),
-                broken_privacy: c.broken_privacy_rules(config),
-                degraded: c.silently_degraded(config),
+        use sister_capture::traits::{Ocr, ScreenSource};
+        use sister_capture::windows::input::{HookState, WindowsInput};
+        use sister_capture::windows::{Capabilities, ocr::WindowsOcr, screen::WindowsScreen};
+
+        // 不宣稱，直接裝一次。以前 doctor 永遠印「輸入 hook 沒裝上」，
+        // 因為它根本沒去裝——那是一則恆真的假警報，而假警報會連坐旁邊
+        // 那則真的警告一起被忽略。hook 只數次數不看內容，裝一次很便宜。
+        let _ = WindowsInput::start(sister_core::now_ms());
+        let input_hooks = match WindowsInput::state() {
+            HookState::Active => Some(true),
+            // NotStarted 在上一行之後不可能發生；真發生了也是「沒裝上」
+            HookState::Failed | HookState::NotStarted => Some(false),
+        };
+
+        let c = Capabilities::current(config);
+        let mut probes = Vec::new();
+
+        if c.ocr && config.capture.ocr {
+            let mut ocr = WindowsOcr::new(&config.capture.ocr_languages);
+
+            // 第一關：引擎讀不讀得到字。圖是編進執行檔的，答案是已知的。
+            match ocr.self_test() {
+                Ok(lines) => {
+                    let text = lines.join(" ");
+                    let missing: Vec<_> = WindowsOcr::SELF_TEST_EXPECTS
+                        .iter()
+                        .filter(|w| !text.contains(**w))
+                        .collect();
+                    probes.push(if lines.is_empty() {
+                        (
+                            false,
+                            "內建圖自我測試",
+                            "一行都沒讀到——引擎建得起來，但它讀不出字".to_string(),
+                        )
+                    } else if missing.is_empty() {
+                        (
+                            true,
+                            "內建圖自我測試",
+                            format!("{} 行，內容正確 {}", lines.len(), sample(&lines)),
+                        )
+                    } else {
+                        (
+                            false,
+                            "內建圖自我測試",
+                            format!(
+                                "讀到 {} 行，但少了 {:?}——讀得到字，讀錯了。實際：{}",
+                                lines.len(),
+                                missing,
+                                sample(&lines)
+                            ),
+                        )
+                    });
+                }
+                Err(e) => probes.push((false, "內建圖自我測試", format!("失敗：{e:#}"))),
+            }
+
+            // 第二關：你**現在這台螢幕**讀不讀得到。跟錄製走同一條路
+            // （同一個 max_long_edge、同一個縮圖、同一顆引擎），所以
+            // 「內建圖過了但這關沒過」就直接指向縮圖尺寸或畫面本身。
+            let mut screen = WindowsScreen::new(config.capture.max_long_edge);
+            let probe = match screen.grab(sister_core::now_ms()) {
+                Err(e) => (false, "讀你現在的螢幕", format!("抓不到畫面：{e:#}")),
+                Ok(None) => (
+                    false,
+                    "讀你現在的螢幕",
+                    "抓不到畫面（工作站鎖定時本來就不抓）".to_string(),
+                ),
+                Ok(Some(frame)) => {
+                    let (w, h) = (frame.width, frame.height);
+                    match ocr.recognize(&frame) {
+                        Ok(lines) if lines.is_empty() => (
+                            false,
+                            "讀你現在的螢幕",
+                            format!(
+                                "{w}×{h} → 0 行。錄製會照跑、畫面會留下，\
+                                 但搜尋永遠是空的"
+                            ),
+                        ),
+                        Ok(lines) => {
+                            let texts: Vec<String> = lines.into_iter().map(|b| b.text).collect();
+                            (
+                                true,
+                                "讀你現在的螢幕",
+                                format!("{w}×{h} → {} 行 {}", texts.len(), sample(&texts)),
+                            )
+                        }
+                        Err(e) => (false, "讀你現在的螢幕", format!("{w}×{h} 辨識失敗：{e:#}")),
+                    }
+                }
+            };
+            probes.push(probe);
+
+            // 只在真的卡到的時候講。平常這是一個沒有人需要知道的數字。
+            let limit = ocr.max_dimension();
+            if config.capture.max_long_edge > limit {
+                probes.push((
+                    false,
+                    "影像尺寸上限",
+                    format!(
+                        "capture.max_long_edge = {} 超過引擎上限 {limit}：每一張畫面都會被拒絕",
+                        config.capture.max_long_edge
+                    ),
+                ));
             }
         }
-        #[cfg(not(windows))]
-        {
-            let _ = config;
-            Caps::default()
+
+        Caps {
+            url: c.url,
+            input_hooks,
+            ocr: c.ocr,
+            ocr_language: c.ocr_language.clone(),
+            ocr_available: c.ocr_languages_available.clone(),
+            ocr_probes: probes,
+            broken_privacy: c.broken_privacy_rules(config),
+            degraded: c.silently_degraded(config),
         }
+    }
+
+    #[cfg(not(windows))]
+    fn caps(config: &Config) -> Caps {
+        let _ = config;
+        Caps::default()
     }
 
     pub fn run(data_dir: &Path, config: &Config) -> Result<()> {
@@ -634,6 +767,24 @@ pub mod doctor {
                     "（無）".to_string()
                 } else {
                     caps.ocr_available.join("、")
+                },
+            );
+            // 上面兩行講的都是「引擎建得起來」。下面這些是真的去讀了。
+            // 這個分野是實測換來的：語言 ✓、錄了一分鐘、資料庫裡零個字。
+            for (ok, label, detail) in &caps.ocr_probes {
+                line(*ok, label, detail);
+            }
+        }
+
+        if let Some(ok) = caps.input_hooks {
+            println!("\n節奏");
+            line(
+                ok,
+                "輸入 hook",
+                if ok {
+                    "裝得上（doctor 剛剛真的裝了一次；只數次數，不看按了什麼）"
+                } else {
+                    "裝不上：打字節奏這一路訊號會是空的"
                 },
             );
         }
@@ -820,6 +971,11 @@ pub mod record {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create {}", data_dir.display()))?;
 
+        let db = Db::open(&crate::db_path(data_dir))?;
+        // **先建後端、再問能力。** 反過來的話，「輸入 hook 裝上了沒」永遠
+        // 是在 hook 還沒裝之前問的，於是永遠回報失敗——一則恆假的警告。
+        let backend = windows::backend(&config)?;
+
         // 缺席的能力會讓某些排除規則整組失效，或讓她其實什麼都沒記住。
         // 這兩件事都要在開始錄之前講，不是藏在 doctor 裡等使用者自己去發現。
         let caps = Capabilities::current(&config);
@@ -830,10 +986,10 @@ pub mod record {
             println!("⚠  {warning}");
         }
 
-        let db = Db::open(&crate::db_path(data_dir))?;
-        let backend = windows::backend(&config)?;
         let images = config.capture.store_images.then(|| data_dir.join("frames"));
         let interval = Duration::from_millis(config.capture.min_interval_ms.max(200));
+        // config 等一下會被 Recorder 吃掉，但收尾的摘要還需要這一項
+        let config_ocr = config.capture.ocr;
         let mut rec = Recorder::new(backend, db, config, images)?;
 
         install_ctrl_c_handler();
@@ -869,8 +1025,8 @@ pub mod record {
             if last_report.elapsed() >= Duration::from_secs(60) {
                 let s = rec.stats();
                 println!(
-                    "  … {} tick：保留 {}、重複 {}、排除 {}",
-                    s.ticks, s.kept, s.duplicates, s.excluded
+                    "  … {} tick：保留 {}、重複 {}、排除 {}、讀到 {} 行字",
+                    s.ticks, s.kept, s.duplicates, s.excluded, s.ocr_blocks
                 );
                 last_report = Instant::now();
             }
@@ -884,6 +1040,39 @@ pub mod record {
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
             stats.ticks, stats.kept, stats.duplicates, stats.excluded, stats.no_screen
         );
+        report_ocr(&stats, config_ocr);
         Ok(())
+    }
+
+    /// 這一段的存在理由：上面那行摘要在「12 張畫面、上面的字一個都沒讀到」
+    /// 的時候，看起來和一切正常一模一樣。
+    ///
+    /// 保留了幾張畫面是**容量**，讀到了幾行字才是**記憶**。只印前者，等於
+    /// 讓一個安靜的失敗長期偽裝成成功——那正是這個專案最主要的失敗形狀。
+    #[cfg(windows)]
+    fn report_ocr(stats: &sister_capture::RecorderStats, ocr_enabled: bool) {
+        if !ocr_enabled {
+            println!("  讀字：已關閉（畫面留下了，但上面的字沒有進資料庫）");
+            return;
+        }
+        println!(
+            "  讀字：{} 行{}",
+            stats.ocr_blocks,
+            if stats.ocr_failures > 0 {
+                format!("，{} 次失敗", stats.ocr_failures)
+            } else {
+                String::new()
+            }
+        );
+        if let Some(e) = &stats.last_ocr_error {
+            println!("        最後一次的錯誤：{e}");
+        }
+        if stats.ocr_blocks == 0 && stats.kept > 0 {
+            println!(
+                "  ⚠  保留了 {} 張畫面，但一行字都沒讀到——這些畫面搜不到。\
+                 跑 `sister doctor` 看是引擎讀不出字，還是讀不到你這台螢幕。",
+                stats.kept
+            );
+        }
     }
 }

@@ -42,7 +42,28 @@ static HAVE_POS: AtomicBool = AtomicBool::new(false);
 static LAST_INPUT_TICK: AtomicU64 = AtomicU64::new(0);
 /// 最後一次按鍵的 tick，用來切「打字段落」。
 static LAST_KEY_TICK: AtomicU64 = AtomicU64::new(0);
-static HOOKS_INSTALLED: AtomicBool = AtomicBool::new(false);
+/// 有沒有**試過**裝 hook。和「裝成功了沒」是兩件事。
+static HOOK_START_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+/// 試過之後，到底裝上了沒。
+static HOOKS_OK: AtomicBool = AtomicBool::new(false);
+
+/// hook 在這個程序裡的狀態。
+///
+/// 一定要是三態，不能是布林。原本用布林的時候，`doctor` 永遠回報
+/// 「輸入 hook 沒裝上」——因為 `doctor` 根本不會去裝，而「沒去裝」和
+/// 「裝了但失敗」被壓成了同一個 `false`。
+///
+/// 那條假警報的代價不是它自己：它和真正的警告（缺 UIA）並排印在同一個
+/// 「目前失效的隱私保護」區塊裡。**一則永遠錯的警告會讓整個區塊被忽略**，
+/// 包括旁邊那則是真的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookState {
+    /// 還沒試過——`record` 以外的命令都是這個狀態，不是問題。
+    NotStarted,
+    Active,
+    /// 試過而且失敗了。這個才需要吵。
+    Failed,
+}
 
 /// 中斷多久算是新的一段打字。
 const BURST_GAP_MS: u64 = 2_000;
@@ -58,8 +79,18 @@ impl WindowsInput {
         Self { window_start: now }
     }
 
+    pub fn state() -> HookState {
+        if !HOOK_START_ATTEMPTED.load(Relaxed) {
+            HookState::NotStarted
+        } else if HOOKS_OK.load(Relaxed) {
+            HookState::Active
+        } else {
+            HookState::Failed
+        }
+    }
+
     pub fn hooks_active() -> bool {
-        HOOKS_INSTALLED.load(Relaxed)
+        Self::state() == HookState::Active
     }
 }
 
@@ -114,18 +145,23 @@ fn tick_now() -> u64 {
 /// low-level hook 的事件是送到**安裝它的那條執行緒**的訊息佇列，所以那條
 /// 執行緒必須一直在抽訊息。錄製迴圈自己在忙別的事，不能兼任。
 fn install_hooks() {
-    if HOOKS_INSTALLED.swap(true, Relaxed) {
-        return; // 一個程序一組就夠
+    if HOOK_START_ATTEMPTED.swap(true, Relaxed) {
+        return; // 一個程序一組就夠。裝兩次會讓每個按鍵被數兩下。
     }
 
-    std::thread::Builder::new()
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
         .name("sister-input-hooks".into())
-        .spawn(|| unsafe {
+        .spawn(move || unsafe {
             let kb: Option<HHOOK> = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), None, 0).ok();
             let ms: Option<HHOOK> = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0).ok();
 
-            if kb.is_none() && ms.is_none() {
-                HOOKS_INSTALLED.store(false, Relaxed);
+            let ok = kb.is_some() || ms.is_some();
+            HOOKS_OK.store(ok, Relaxed);
+            // 先報告結果再進訊息迴圈，否則呼叫端要等到迴圈結束才問得到
+            let _ = tx.send(());
+
+            if !ok {
                 tracing::warn!("輸入 hook 裝不上，節奏訊號這個 session 不會有");
                 return;
             }
@@ -137,7 +173,17 @@ fn install_hooks() {
                 DispatchMessageW(&msg);
             }
         })
-        .ok();
+        .is_ok();
+
+    // hook 必須裝在有訊息迴圈的那條執行緒上，但呼叫端在下一行就要能誠實回答
+    // 「裝上了沒」——所以在這裡等它回報。等不到就當作失敗，不要樂觀假設。
+    if !spawned
+        || rx
+            .recv_timeout(std::time::Duration::from_millis(1_000))
+            .is_err()
+    {
+        HOOKS_OK.store(false, Relaxed);
+    }
 }
 
 /// 鍵盤 hook。**只加一，不看按了什麼。**

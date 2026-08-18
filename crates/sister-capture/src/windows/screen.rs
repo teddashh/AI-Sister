@@ -212,13 +212,18 @@ unsafe fn blit_inner(
             .as_bool()
         };
 
+        // **先把 bitmap 從 DC 裡選出來再讀。** GetDIBits 的文件寫得很明白：
+        // 「hbmp 指定的 bitmap 在呼叫時不可以是被選進某個 DC 的狀態」。
+        // 違反它多數時候還是拿得到像素，所以這種 bug 會活很久——直到某台
+        // 機器上它開始回傳 0 條掃描線，而症狀是「她什麼都記不住」。
+        SelectObject(mem, old);
+
         let out = if copied {
             read_pixels(mem, bmp, dst_w, dst_h)
         } else {
             Err(anyhow::anyhow!("BitBlt/StretchBlt failed"))
         };
 
-        SelectObject(mem, old);
         let _ = DeleteObject(HGDIOBJ(bmp.0));
         let _ = DeleteDC(mem);
         out

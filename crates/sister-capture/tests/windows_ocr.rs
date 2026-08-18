@@ -14,9 +14,10 @@
 //!    「本 期 應 繳 金 額」，於是搜尋永遠是空的——而且沒有人會發現。
 //!    這裡用一張真的圖驗一次：組回來的字串裡，「本期應繳金額」必須是連著的。
 //!
-//! 圖是用 Noto Sans CJK TC 產的（`tests/fixtures/`），不是螢幕截圖，
-//! 所以它驗的是「這條管線通不通」，不是「OCR 準不準」。準確度要等到
-//! Phase 0 的七天自錄才有真實答案。
+//! 圖是用 Noto Sans CJK TC 產的（`assets/`，和 `doctor` 的自我測試共用
+//! 同一張——那張是 `include_bytes!` 進執行檔的），不是螢幕截圖，所以它驗的是
+//! 「這條管線通不通」，不是「OCR 準不準」。準確度要等到 Phase 0 的
+//! 七天自錄才有真實答案。
 
 #![cfg(windows)]
 
@@ -31,7 +32,7 @@ fn preferred() -> Vec<String> {
 }
 
 fn load(name: &str) -> RawFrame {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/");
     let img = image::open(format!("{path}{name}"))
         .unwrap_or_else(|e| panic!("讀不到測試圖 {name}: {e}"))
         .to_rgba8();
@@ -82,7 +83,9 @@ fn ocr_runs_at_all_from_an_unpackaged_exe() {
     let mut ocr = WindowsOcr::new(&preferred());
     assert!(ocr.is_available(), "探測說有 OCR，但引擎建不起來");
 
-    let blocks = ocr.recognize(&load("ocr-en.png")).expect("OCR 失敗");
+    let blocks = ocr
+        .recognize(&load("ocr-selftest-en.png"))
+        .expect("OCR 失敗");
     let text = text_of(&blocks);
     eprintln!("--- 英文辨識結果 ---\n{text}\n---");
 
@@ -117,7 +120,9 @@ fn chinese_comes_back_as_words_not_scattered_characters() {
     }
 
     let mut ocr = WindowsOcr::new(&preferred());
-    let blocks = ocr.recognize(&load("ocr-zh.png")).expect("OCR 失敗");
+    let blocks = ocr
+        .recognize(&load("ocr-selftest-zh.png"))
+        .expect("OCR 失敗");
     let text = text_of(&blocks);
     eprintln!("--- 中文辨識結果 ---\n{text}\n---");
 
@@ -138,6 +143,54 @@ fn chinese_comes_back_as_words_not_scattered_characters() {
             .iter()
             .any(|f| f.kind == sister_core::facts::FactKind::Phone),
         "辨識出來的文字抽不出電話，L1 等於沒接上：\n{text}"
+    );
+}
+
+/// **整個螢幕那麼大的一張圖，讀不讀得到字。**
+///
+/// 這條是實測逼出來的：CI 上小圖過了、`doctor` 說 OCR ✓、真的錄一分鐘卻
+/// 一個字都沒進資料庫。小圖與整張畫面之間差了什麼，只有真的送一張整張
+/// 畫面大小的圖進去才知道——`MaxImageDimension`、5MB 的 buffer、
+/// 5:3 的長寬比，這些在 900×300 的 fixture 上全都碰不到。
+///
+/// 尺寸取 `capture.max_long_edge` 的預設值 1568，也就是 4K 螢幕縮完的樣子。
+#[test]
+fn a_full_screen_sized_frame_still_yields_text() {
+    let status = OcrStatus::probe(&preferred());
+    if skip_without_ocr(&status) {
+        return;
+    }
+
+    // 把 fixture 貼在白底的 1568×882 上，其餘留白。
+    // 內容一樣、尺寸變成真實畫面那麼大——變因只有一個。
+    let src = image::open(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/ocr-selftest-en.png"
+    ))
+    .expect("讀不到測試圖")
+    .to_rgba8();
+    let (sw, sh) = src.dimensions();
+    let (w, h) = (1568u32, 882u32);
+    assert!(sw <= w && sh <= h, "fixture {sw}x{sh} 比目標畫布還大");
+
+    let mut canvas = image::RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
+    image::imageops::replace(&mut canvas, &src, 40, 40);
+
+    let mut ocr = WindowsOcr::new(&preferred());
+    eprintln!("引擎回報的單邊上限：{}", ocr.max_dimension());
+    let blocks = ocr
+        .recognize(&RawFrame::from_rgba(0, 0, w, h, canvas.into_raw()))
+        .expect("整張畫面大小的圖辨識失敗");
+    let text = text_of(&blocks);
+    eprintln!(
+        "--- {w}x{h} 辨識結果（{} 行）---\n{text}\n---",
+        blocks.len()
+    );
+
+    assert!(
+        text.contains("13,450"),
+        "小圖讀得到、{w}×{h} 讀不到——這正是錄製時一個字都沒有的原因。\
+         實際讀到的是：\n{text}"
     );
 }
 

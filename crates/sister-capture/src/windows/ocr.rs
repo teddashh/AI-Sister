@@ -34,7 +34,7 @@
 //! 而且不給任何錯誤。我們擷取的是整個螢幕所以碰不到，但還是擋在前面，
 //! 免得以後改成擷取單一視窗時撞上一個不會出聲的失敗。
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use sister_core::model::OcrBlock;
 
 use windows::Globalization::Language;
@@ -151,6 +151,42 @@ impl WindowsOcr {
     pub fn language(&self) -> Option<String> {
         recognizer_tag(self.engine.as_ref()?)
     }
+
+    /// 引擎回報的單邊像素上限。畫面比它大就整張讀不了。
+    pub fn max_dimension(&self) -> u32 {
+        self.max_dimension
+    }
+
+    /// 拿一張內建的圖真的辨識一次，回傳讀到的每一行。
+    ///
+    /// 為什麼要有這個：`doctor` 原本只會說「OCR 語言 zh-Hant-TW ✓」，
+    /// 那句話的意思其實只是「引擎建得起來」。實測發現引擎建得起來、語言
+    /// 也對，錄了一分鐘卻一個字都沒有進資料庫——**「能建立」和「能讀字」
+    /// 是兩件事，而我們只驗了前者。**
+    ///
+    /// 所以改成不宣稱、直接示範：讀一張答案已知的圖給使用者看。
+    /// 圖是編進執行檔裡的（約 16KB），不需要外部檔案，也就不會因為
+    /// 少一個檔案而變成另一種安靜的失敗。
+    pub fn self_test(&mut self) -> Result<Vec<String>> {
+        const IMAGE: &[u8] = include_bytes!("../../assets/ocr-selftest-zh.png");
+
+        if self.engine.is_none() {
+            bail!("沒有可用的 OCR 語言");
+        }
+        let img = image::load_from_memory(IMAGE)
+            .context("內建的自我測試圖解不開")?
+            .to_rgba8();
+        let (w, h) = img.dimensions();
+        let frame = RawFrame::from_rgba(0, 0, w, h, img.into_raw());
+        Ok(self
+            .recognize(&frame)?
+            .into_iter()
+            .map(|b| b.text)
+            .collect())
+    }
+
+    /// 自我測試該讀到的東西。給呼叫端判斷「讀到了但讀錯」用。
+    pub const SELF_TEST_EXPECTS: &'static [&'static str] = &["本期應繳金額", "客服專線"];
 }
 
 impl Ocr for WindowsOcr {
@@ -190,27 +226,36 @@ impl Ocr for WindowsOcr {
             self.bgra.extend_from_slice(&[px[2], px[1], px[0], 255]);
         }
 
-        let buffer = CryptographicBuffer::CreateFromByteArray(&self.bgra)?;
+        // 底下每一步都掛了 context。理由不是好看：這支程式跑在別人的機器上，
+        // 我摸不到。一句「OCR 失敗」等於沒說，而「哪一步失敗」是使用者
+        // 貼一行回來就能定位的東西。
+        let buffer =
+            CryptographicBuffer::CreateFromByteArray(&self.bgra).context("CreateFromByteArray")?;
         let bitmap = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
             &buffer,
             BitmapPixelFormat::Bgra8,
             w as i32,
             h as i32,
             BitmapAlphaMode::Premultiplied,
-        )?;
+        )
+        .with_context(|| format!("CreateCopyWithAlphaFromBuffer {w}x{h}"))?;
 
         // `join()` 會阻塞而且不會 pump 訊息。錄製迴圈這條執行緒是 MTA
         // （見 `init_apartment`），所以阻塞是安全的；放到 STA 上會卡死訊息迴圈。
-        let result = engine.RecognizeAsync(&bitmap)?.join()?;
+        let result = engine
+            .RecognizeAsync(&bitmap)
+            .context("RecognizeAsync")?
+            .join()
+            .context("等 RecognizeAsync 的結果")?;
 
-        let lines = result.Lines()?;
+        let lines = result.Lines().context("OcrResult::Lines")?;
         let mut blocks = Vec::with_capacity(lines.Size().unwrap_or(0) as usize);
         for line in &lines {
             let mut words = Vec::new();
-            for word in &line.Words()? {
-                let r = word.BoundingRect()?;
+            for word in &line.Words().context("OcrLine::Words")? {
+                let r = word.BoundingRect().context("OcrWord::BoundingRect")?;
                 words.push(Word {
-                    text: word.Text()?.to_string(),
+                    text: word.Text().context("OcrWord::Text")?.to_string(),
                     x: r.X,
                     y: r.Y,
                     w: r.Width,

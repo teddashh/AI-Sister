@@ -27,7 +27,10 @@ pub struct Capabilities {
     /// 瀏覽器網址（需要 UIA）。**沒有它，`excluded_urls` 整組規則不會生效。**
     pub url: bool,
     pub clipboard: bool,
-    pub input: bool,
+    /// 輸入 hook 的三態。**不能是布林**：`doctor` 不會去裝 hook，而
+    /// 「沒去裝」不等於「裝失敗」——把兩者壓成 false 會產生一則永遠錯的
+    /// 警告，然後整個警告區塊都會被使用者學會忽略。
+    pub input: input::HookState,
     pub ocr: bool,
     /// OCR 實際挑中的語言，以及這台機器上裝了哪些。
     ///
@@ -45,7 +48,7 @@ impl Capabilities {
             // UIA 讀址欄還沒接（見 SPEC §5.2）
             url: false,
             clipboard: true,
-            input: input::WindowsInput::hooks_active(),
+            input: input::WindowsInput::state(),
             ocr: ocr.chosen.is_some(),
             ocr_language: ocr.chosen,
             ocr_languages_available: ocr.available,
@@ -66,8 +69,10 @@ impl Capabilities {
                 config.privacy.excluded_urls.len()
             ));
         }
-        if !self.input {
-            out.push("輸入 hook 沒裝上：節奏訊號這個 session 會是空的".into());
+        // 只有「試過而且失敗」才算失效。還沒試過不是問題，`record` 起來時
+        // 才會裝——在那之前吵，吵的是一件還沒發生的事。
+        if self.input == input::HookState::Failed {
+            out.push("輸入 hook 裝不上：節奏訊號這個 session 會是空的".into());
         }
         out
     }
@@ -138,7 +143,7 @@ mod tests {
             focus: true,
             url: true,
             clipboard: true,
-            input: true,
+            input: input::HookState::Active,
             ocr: true,
             ocr_language: Some("zh-Hant-TW".into()),
             ocr_languages_available: vec!["zh-Hant-TW".into()],

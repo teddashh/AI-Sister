@@ -50,12 +50,23 @@ pub struct RecorderStats {
     pub secrets_redacted: u64,
     pub focus_events: u64,
     pub image_bytes: u64,
+    /// OCR 一共讀出幾行字。
+    ///
+    /// 「保留了 12 張畫面」和「記住了 12 張畫面上的字」是兩回事，而摘要
+    /// 只印前者的話，兩者看起來一模一樣。實測踩過：12 張畫面、0 行文字、
+    /// 摘要一片祥和，要等到搜尋永遠是空的才會發現。
+    pub ocr_blocks: u64,
     /// OCR 失敗了幾次。
     ///
     /// OCR 壞掉不該讓錄製停擺——畫面與脈絡還是值得留下來。但它也絕對不能
     /// 靜靜地壞：一個「一直在錄、什麼都搜不到」的產品，比一個明講自己
     /// 讀不到字的產品糟得多。所以錯誤吞掉可以，計數不能不留。
     pub ocr_failures: u64,
+    /// 最後一次 OCR 失敗的訊息。
+    ///
+    /// 只有計數的話，使用者能看見「壞了」卻沒辦法告訴我們哪裡壞——而這是
+    /// 一個跑在別人機器上、我摸不到的程式。一句原文遠比一個數字有用。
+    pub last_ocr_error: Option<String>,
 }
 
 pub struct Recorder<B: Backend> {
@@ -213,9 +224,15 @@ impl<B: Backend> Recorder<B> {
         let ocr = if self.config.capture.ocr {
             // OCR 失敗不擋錄製，但要留下計數——見 `RecorderStats::ocr_failures`
             match self.backend.recognize(&frame) {
-                Ok(blocks) => blocks,
+                Ok(blocks) => {
+                    self.stats.ocr_blocks += blocks.len() as u64;
+                    blocks
+                }
                 Err(e) => {
                     self.stats.ocr_failures += 1;
+                    // `{e:#}` 帶上整條 anyhow context 鏈。只留最外層那句的話，
+                    // 使用者回報的會是「OCR 失敗」這種等於沒說的訊息。
+                    self.stats.last_ocr_error = Some(format!("{e:#}"));
                     tracing::warn!(error = %e, "OCR failed; keeping the frame without text");
                     Vec::new()
                 }
@@ -416,6 +433,93 @@ mod tests {
         let spy = spy.borrow();
         assert!(spy.polled.is_empty(), "排除期間不該讀剪貼簿內容");
         assert_eq!(spy.skipped, vec![1_000], "但一定要把水位推過去");
+    }
+
+    /// 每次都給一張**不一樣**的畫面，好讓去重不會把它們併掉。
+    ///
+    /// 均勻色塊在這裡沒有用：dhash 看的是相鄰像素的梯度，一整片灰不管
+    /// 哪一階都算出同一個 hash，於是全部變成「重複」。
+    struct ShiftingScreen(u32);
+    impl crate::traits::ScreenSource for ShiftingScreen {
+        fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+            self.0 = self.0.wrapping_add(1);
+            let mut px = vec![255u8; 64 * 64 * 4];
+            for (i, p) in px.chunks_exact_mut(4).enumerate() {
+                let v = ((i as u32 * 7 + self.0 * 40) % 256) as u8;
+                (p[0], p[1], p[2]) = (v, v, v);
+            }
+            Ok(Some(RawFrame::from_rgba(ts, 0, 64, 64, px)))
+        }
+    }
+
+    fn screen_only<O: crate::traits::Ocr>(
+        ocr: O,
+    ) -> Recorder<
+        crate::traits::CompositeBackend<
+            ShiftingScreen,
+            crate::traits::NullFocus,
+            crate::traits::NullClipboard,
+            crate::traits::NullInput,
+            O,
+        >,
+    > {
+        let backend = crate::traits::CompositeBackend {
+            name: "screen-only".into(),
+            screen: ShiftingScreen(0),
+            focus: crate::traits::NullFocus,
+            clipboard: crate::traits::NullClipboard,
+            input: crate::traits::NullInput,
+            ocr,
+        };
+        Recorder::new(
+            backend,
+            Db::open_in_memory().expect("db"),
+            Config::default(),
+            None,
+        )
+        .expect("recorder")
+    }
+
+    /// **保留了畫面 ≠ 記住了畫面上的字。**
+    ///
+    /// 這是實測踩到的那個形狀：12 張畫面被保留、統計數字一片祥和、
+    /// 搜尋永遠是空的。統計裡必須有一個欄位能把這兩件事分開，否則
+    /// 「她其實什麼都沒讀到」就永遠不會被任何人看見。
+    #[test]
+    fn keeping_frames_without_reading_any_text_is_visible_in_the_stats() {
+        let mut r = screen_only(crate::traits::NullOcr);
+        for i in 1..=3 {
+            r.tick(i * 1_000).expect("tick");
+        }
+        let s = r.stats();
+        assert!(s.kept > 0, "畫面該被保留：{s:?}");
+        assert_eq!(s.ocr_blocks, 0);
+        assert_eq!(s.ocr_failures, 0, "沒讀到字不等於出錯");
+    }
+
+    /// OCR 失敗要留下**訊息**，不能只留下一個數字。
+    ///
+    /// 這支程式跑在別人的機器上。「失敗 12 次」沒辦法讓任何人往下查，
+    /// 而一句原文（含 anyhow 的 context 鏈）可以。
+    #[test]
+    fn a_failing_ocr_keeps_the_frame_and_records_why() {
+        struct Failing;
+        impl crate::traits::Ocr for Failing {
+            fn recognize(&mut self, _f: &RawFrame) -> Result<Vec<sister_core::model::OcrBlock>> {
+                Err(anyhow::anyhow!("engine said no").context("RecognizeAsync"))
+            }
+        }
+
+        let mut r = screen_only(Failing);
+        r.tick(1_000).expect("OCR 壞掉不該讓整個 tick 失敗");
+        let s = r.stats();
+        assert_eq!(s.kept, 1, "畫面與脈絡還是值得留下來");
+        assert_eq!(s.ocr_failures, 1);
+        let msg = s.last_ocr_error.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("RecognizeAsync") && msg.contains("engine said no"),
+            "錯誤訊息要含整條 context 鏈，實際是：{msg:?}"
+        );
     }
 
     fn step(at_ms: Millis, app: &str, title: &str, text: &[&str]) -> Step {
