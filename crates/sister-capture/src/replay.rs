@@ -103,6 +103,11 @@ fn text_hash(lines: &[String]) -> u64 {
 /// 因此 replay 是完全確定性的，不依賴真實時鐘。
 pub struct ReplayBackend {
     scenario: Scenario,
+    /// 腳本時間零點對應的真實 epoch 毫秒。
+    ///
+    /// 腳本裡寫的是相對時間（第 0 秒、第 5 秒），但資料庫記的必須是絕對時間。
+    /// 把兩者的接縫放在這裡，腳本本身才能保持可攜與確定性。
+    origin: Millis,
     /// 下一個尚未消費的 step。
     cursor: usize,
     /// 目前生效的 step（游標已經越過它）。
@@ -115,14 +120,25 @@ pub struct ReplayBackend {
 
 impl ReplayBackend {
     pub fn new(scenario: Scenario) -> Self {
+        Self::with_origin(scenario, 0)
+    }
+
+    /// 指定腳本零點對應的真實時間。
+    pub fn with_origin(scenario: Scenario, origin: Millis) -> Self {
         Self {
             scenario,
+            origin,
             cursor: 0,
             current: Step::default(),
             clipboard_emitted: None,
-            input_since: 0,
+            input_since: origin,
             input_acc: InputMetrics::default(),
         }
+    }
+
+    /// 腳本零點的真實時間。
+    pub fn origin(&self) -> Millis {
+        self.origin
     }
 
     pub fn scenario(&self) -> &Scenario {
@@ -132,7 +148,7 @@ impl ReplayBackend {
     /// 把時間推進到 `ts`，套用所有已到期的 step。
     fn advance(&mut self, ts: Millis) {
         while self.cursor < self.scenario.steps.len()
-            && self.scenario.steps[self.cursor].at_ms <= ts
+            && self.origin + self.scenario.steps[self.cursor].at_ms <= ts
         {
             let step = self.scenario.steps[self.cursor].clone();
             self.input_acc.keystrokes += step.keystrokes;
@@ -149,8 +165,11 @@ impl ReplayBackend {
     }
 
     /// 時間軸是否已經播完。
+    ///
+    /// 只看時間、不看游標：否則答案會取決於呼叫者先前問過什麼，
+    /// 這種依賴呼叫順序的 API 遲早會被誤用。
     pub fn is_finished(&self, ts: Millis) -> bool {
-        self.cursor >= self.scenario.steps.len() && ts >= self.scenario.duration_ms()
+        ts >= self.origin + self.scenario.duration_ms()
     }
 }
 
@@ -364,6 +383,25 @@ mod tests {
             b.drain_input(2000).expect("input").is_none(),
             "drained means empty"
         );
+    }
+
+    #[test]
+    fn origin_shifts_the_whole_timeline_into_real_time() {
+        // 腳本寫相對時間，資料庫記絕對時間——接縫只有這一處
+        let origin = 1_786_924_800_000; // 2026-08-17T00:00:00Z
+        let mut b = ReplayBackend::with_origin(scenario(), origin);
+
+        // 還沒到零點，什麼都還沒生效
+        assert_eq!(b.focus_snapshot(origin - 1).expect("focus").app_id, None);
+
+        let f = b.focus_snapshot(origin).expect("focus");
+        assert_eq!(f.app_id.as_deref(), Some("chrome.exe"));
+
+        let f = b.focus_snapshot(origin + 9000).expect("focus");
+        assert_eq!(f.app_id.as_deref(), Some("code.exe"));
+
+        assert!(!b.is_finished(origin + 11_999));
+        assert!(b.is_finished(origin + 12_000));
     }
 
     #[test]

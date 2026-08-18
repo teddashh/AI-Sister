@@ -12,6 +12,7 @@ authors = ["Ted Huang <ted@ted-h.com>"]
 [workspace.dependencies]
 sister-core = { path = "crates/sister-core" }
 sister-capture = { path = "crates/sister-capture" }
+sister-cli = { path = "crates/sister-cli" }
 
 anyhow = "1"
 thiserror = "2"

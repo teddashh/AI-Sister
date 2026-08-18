@@ -1,0 +1,56 @@
+{
+  "name": "bill-lookup",
+  "steps": [
+    { "at_ms": 0, "app": "chrome.exe", "app_name": "Google Chrome",
+      "title": "中華電信 客戶服務 - 帳單查詢",
+      "url": "https://bill.cht.com.tw/query",
+      "text": ["中華電信 帳單查詢",
+               "門號 0912-345-678",
+               "本期應繳金額 NT$13,450",
+               "繳費期限 2026/08/25",
+               "客服專線 0800-080-123"],
+      "keystrokes": 24, "clicks": 3, "mouse_px": 1840 },
+
+    { "at_ms": 8000, "app": "chrome.exe",
+      "title": "中華電信 客戶服務 - 帳單查詢",
+      "url": "https://bill.cht.com.tw/query",
+      "text": ["中華電信 帳單查詢",
+               "門號 0912-345-678",
+               "本期應繳金額 NT$13,450",
+               "繳費期限 2026/08/25",
+               "客服專線 0800-080-123"] },
+
+    { "at_ms": 16000, "app": "keepassxc", "app_name": "KeePassXC",
+      "title": "Passwords.kdbx - KeePassXC",
+      "text": ["中華電信網銀", "使用者名稱 ted", "密碼 ●●●●●●●●"],
+      "clipboard": "correct-horse-battery-staple-9x",
+      "keystrokes": 8 },
+
+    { "at_ms": 24000, "app": "chrome.exe",
+      "title": "網路銀行 - 轉帳確認",
+      "url": "https://netbank.example.com/transfer",
+      "text": ["轉帳金額 NT$13,450", "帳號 ****1234"] },
+
+    { "at_ms": 32000, "app": "code.exe", "app_name": "Visual Studio Code",
+      "title": "db.rs - AI-Sister",
+      "text": ["crates/sister-core/src/db.rs",
+               "error[E0308]: mismatched types",
+               "expected `i64`, found `u64`"],
+      "keystrokes": 96, "clicks": 12, "mouse_px": 3200 },
+
+    { "at_ms": 44000, "app": "code.exe",
+      "title": "db.rs - AI-Sister",
+      "text": ["crates/sister-core/src/db.rs",
+               "test result: ok. 73 passed; 0 failed"],
+      "keystrokes": 40 },
+
+    { "at_ms": 52000, "app": "slack.exe", "app_name": "Slack",
+      "title": "#general - Slack",
+      "text": ["Ted: 帳單我下週三之前會處理",
+               "Amy: 記得順便問客服有沒有優惠方案"],
+      "clipboard": "0800-080-123",
+      "keystrokes": 52 },
+
+    { "at_ms": 60000, "no_screen": true }
+  ]
+}

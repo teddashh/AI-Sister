@@ -148,6 +148,70 @@ pub fn extract(text: &str) -> Vec<ExtractedFact> {
     out
 }
 
+/// 從自然語言查詢裡辨認出使用者要的是哪一類事實。
+///
+/// 為什麼需要這個：螢幕上寫的是「客服**專線**」，使用者問的是「電話」。
+/// 全文檢索永遠接不起這兩個詞——但 L1 早就把那串數字標成了 `phone`。
+/// 這張表就是把「使用者的說法」接到「事實的型別」的那條線。
+///
+/// 純查表、零模型。詞彙不足時寧可回空集合，不猜。
+pub fn kinds_for_query(query: &str) -> Vec<FactKind> {
+    const TABLE: &[(&str, FactKind)] = &[
+        ("電話", FactKind::Phone),
+        ("手機", FactKind::Phone),
+        ("專線", FactKind::Phone),
+        ("號碼", FactKind::Phone),
+        ("phone", FactKind::Phone),
+        ("tel", FactKind::Phone),
+        ("金額", FactKind::Money),
+        ("價格", FactKind::Money),
+        ("價錢", FactKind::Money),
+        ("多少錢", FactKind::Money),
+        ("費用", FactKind::Money),
+        ("帳單", FactKind::Money),
+        ("繳費", FactKind::Money),
+        ("money", FactKind::Money),
+        ("price", FactKind::Money),
+        ("cost", FactKind::Money),
+        ("網址", FactKind::Url),
+        ("連結", FactKind::Url),
+        ("url", FactKind::Url),
+        ("link", FactKind::Url),
+        ("信箱", FactKind::Email),
+        ("郵件", FactKind::Email),
+        ("email", FactKind::Email),
+        ("mail", FactKind::Email),
+        ("檔案", FactKind::FilePath),
+        ("路徑", FactKind::FilePath),
+        ("file", FactKind::FilePath),
+        ("path", FactKind::FilePath),
+        ("錯誤", FactKind::ErrorCode),
+        ("例外", FactKind::ErrorCode),
+        ("error", FactKind::ErrorCode),
+        ("exception", FactKind::ErrorCode),
+        ("編號", FactKind::IdLike),
+        ("單號", FactKind::IdLike),
+        ("序號", FactKind::IdLike),
+        ("日期", FactKind::DateTimeMention),
+        ("時間", FactKind::DateTimeMention),
+        ("期限", FactKind::DateTimeMention),
+        // 「幾號」刻意不收：「今天幾號」問日期，「電話幾號」問號碼，分不出來就不猜
+        ("什麼時候", FactKind::DateTimeMention),
+        ("date", FactKind::DateTimeMention),
+        ("when", FactKind::DateTimeMention),
+        ("deadline", FactKind::DateTimeMention),
+    ];
+
+    let q = query.to_lowercase();
+    let mut out: Vec<FactKind> = Vec::new();
+    for (word, kind) in TABLE {
+        if q.contains(word) && !out.contains(kind) {
+            out.push(*kind);
+        }
+    }
+    out
+}
+
 // ---------- 共用工具 ----------
 
 /// 兩端不得緊鄰 ASCII 英數字或底線。
@@ -1018,6 +1082,27 @@ mod tests {
         assert_eq!(f[0].raw, "$20", "span must not include trailing space");
         assert_eq!(f[0].normalized, "USD:20");
         assert_eq!(raws("訂閱費 $390 每月", FactKind::Money), vec!["$390"]);
+    }
+
+    #[test]
+    fn query_keywords_map_to_fact_kinds() {
+        // 這條線就是 Phase 0 退出條件成立的原因：螢幕上是「客服專線」，
+        // 使用者問「電話」，接起來的不是全文檢索而是 L1 的型別。
+        assert_eq!(kinds_for_query("電話"), vec![FactKind::Phone]);
+        assert_eq!(kinds_for_query("客服電話幾號"), vec![FactKind::Phone]);
+        assert_eq!(kinds_for_query("phone number"), vec![FactKind::Phone]);
+        assert_eq!(kinds_for_query("帳單多少錢"), vec![FactKind::Money]);
+        assert_eq!(
+            kinds_for_query("繳費期限"),
+            vec![FactKind::Money, FactKind::DateTimeMention]
+        );
+        assert_eq!(
+            kinds_for_query("那個 error code"),
+            vec![FactKind::ErrorCode]
+        );
+        // 認不出來就回空的，不猜
+        assert!(kinds_for_query("我昨天在幹嘛").is_empty());
+        assert!(kinds_for_query("").is_empty());
     }
 
     #[test]

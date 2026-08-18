@@ -1,0 +1,22 @@
+[package]
+name = "sister-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "AI-Sister command line: record, replay, query, stats, doctor"
+
+[[bin]]
+name = "sister"
+path = "src/main.rs"
+
+[dependencies]
+sister-core.workspace = true
+sister-capture.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
