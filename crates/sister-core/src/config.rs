@@ -255,6 +255,50 @@ impl PrivacyConfig {
     }
 }
 
+/// 讀起來正確、但**在真實輸入上不會命中**的網址規則。
+///
+/// 這條 lint 的存在是因為我們拿得到的網址不是使用者以為的那一個。
+/// Windows 上唯一讀得到網址的地方是瀏覽器的網址列，而 Chromium 交出來的是
+/// **給人看的縮寫版**：`kFormatUrlOmitHTTPS | kFormatUrlOmitTrivialSubdomains`
+/// 會把 scheme 和 `www.` 拿掉。使用者看到網址列寫著 `mybank.com/login`，
+/// 她照抄進設定檔的 `https://mybank.com/login` 就永遠不會命中。
+///
+/// 這正是本專案已經踩過三次的那個形狀：規則讀起來完全正確，但什麼都沒比對到，
+/// 而且**少擋了不會有任何症狀**。所以寧可在 `doctor` 上吵一句。
+///
+/// 回傳 `(規則, 為什麼不會命中)`。
+pub fn suspicious_url_rules(rules: &[String]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for rule in rules {
+        let lc = rule.to_ascii_lowercase();
+        // 去掉開頭的 `*` 再看，`*https://...*` 一樣有問題
+        let bare = lc.trim_start_matches('*');
+        if bare.starts_with("http://") || bare.starts_with("https://") {
+            out.push((
+                rule.clone(),
+                "含 scheme：瀏覽器網址列交出來的字串已經把 `https://` 拿掉了，\
+                 這條規則不會命中。把 scheme 刪掉即可"
+                    .to_string(),
+            ));
+        } else if bare.starts_with("www.") {
+            out.push((
+                rule.clone(),
+                "以 `www.` 開頭：網址列會省略 `www.`，這條規則不會命中。\
+                 改成 `*` 開頭的子字串即可"
+                    .to_string(),
+            ));
+        } else if !rule.contains('*') && !rule.is_empty() {
+            out.push((
+                rule.clone(),
+                "沒有 `*`：網址規則是全字比對，整條網址要一字不差才會命中。\
+                 多半應該寫成 `*關鍵字*`"
+                    .to_string(),
+            ));
+        }
+    }
+    out
+}
+
 /// app 排除規則的比對。**不含 `*` 的樣式一律視為子字串。**
 ///
 /// 因為使用者寫下 `keepassxc` 時，她的意思是「這個程式不要錄」，
@@ -340,6 +384,91 @@ impl Config {
         }
         std::fs::write(path, toml::to_string_pretty(self)?)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod url_rule_lint_tests {
+    use super::*;
+
+    /// 使用者從網址列抄下來的東西會長這樣，而她抄的時候會補上 scheme。
+    #[test]
+    fn a_rule_with_a_scheme_is_flagged() {
+        let bad = vec!["https://mybank.com/login".to_string()];
+        let found = suspicious_url_rules(&bad);
+        assert_eq!(found.len(), 1, "含 scheme 的規則沒被抓出來");
+        assert!(found[0].1.contains("scheme"));
+    }
+
+    #[test]
+    fn a_wildcarded_scheme_is_still_flagged() {
+        let found = suspicious_url_rules(&["*https://mybank.com*".to_string()]);
+        assert_eq!(found.len(), 1, "前面加了 * 就漏掉了");
+    }
+
+    #[test]
+    fn a_www_prefix_is_flagged() {
+        let found = suspicious_url_rules(&["www.mybank.com".to_string()]);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].1.contains("www."));
+    }
+
+    /// 沒有 `*` 的網址規則是全字比對，幾乎不可能命中一整條真實網址。
+    #[test]
+    fn a_bare_substring_without_wildcards_is_flagged() {
+        let found = suspicious_url_rules(&["mybank.com".to_string()]);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].1.contains('*'));
+    }
+
+    /// 反面對照：這條 lint 不可以對正確的規則亂叫，否則使用者會學會無視它。
+    #[test]
+    fn well_formed_rules_are_left_alone() {
+        let good = vec![
+            "*cathaybk.com*".to_string(),
+            "*/login*".to_string(),
+            "*accounts.google.com*".to_string(),
+        ];
+        assert!(
+            suspicious_url_rules(&good).is_empty(),
+            "對正確的規則誤報：{:?}",
+            suspicious_url_rules(&good)
+        );
+    }
+
+    /// **我們自己的預設值必須通過這條 lint。**
+    ///
+    /// 這一條比上面所有測試都重要：預設清單是絕大多數使用者唯一會用到的
+    /// 保護，而它出錯的方式是安靜的。如果哪天有人往預設值裡加了一條
+    /// `https://...`，這裡會立刻紅。
+    #[test]
+    fn our_own_defaults_would_actually_match_something() {
+        let defaults = PrivacyConfig::default().excluded_urls;
+        assert!(!defaults.is_empty(), "預設清單空了，這個測試就沒有意義");
+        let bad = suspicious_url_rules(&defaults);
+        assert!(
+            bad.is_empty(),
+            "預設的網址規則裡有寫了也不會生效的：{bad:#?}"
+        );
+    }
+
+    /// Chromium 交出來的是縮寫版網址。預設規則必須在**那個**形狀上命中，
+    /// 不是在我們想像中的完整網址上命中。
+    #[test]
+    fn defaults_match_the_elided_url_the_browser_actually_gives_us() {
+        let privacy = PrivacyConfig::default();
+        // 網址列實際顯示的樣子：沒有 scheme、沒有 www.
+        for elided in [
+            "cathaybk.com.tw/ib/login",
+            "accounts.google.com/signin/v2",
+            "esunbank.com.tw/ib/home",
+        ] {
+            let hit = privacy
+                .excluded_urls
+                .iter()
+                .any(|p| glob_match(&p.to_ascii_lowercase(), elided));
+            assert!(hit, "縮寫版網址「{elided}」沒有被任何一條預設規則擋下來");
+        }
     }
 }
 

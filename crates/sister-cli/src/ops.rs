@@ -572,6 +572,14 @@ pub mod doctor {
                 }
             ),
         );
+        // 規則寫錯的方式是安靜的：少擋了不會有任何症狀。這裡把「寫了也不會
+        // 命中」的規則挑出來，因為使用者自己永遠不會發現。
+        let suspicious = sister_core::config::suspicious_url_rules(&config.privacy.excluded_urls);
+        if !suspicious.is_empty() {
+            for (rule, why) in &suspicious {
+                line(false, "  規則不會命中", &format!("{rule} — {why}"));
+            }
+        }
         line(
             true,
             "排除的標題",
