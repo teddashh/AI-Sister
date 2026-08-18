@@ -305,24 +305,17 @@ impl<B: Backend> Recorder<B> {
                 let grabbed = self.backend.grab_screen(ts);
                 self.timings.grab.record(t.elapsed());
 
-                // 「抓不到」有兩種寫法，兩種都得走同一條退路。`check` 已經把
-                // 去重基準推到這個雜湊上了，但我們什麼都沒存——不退回去的話，
-                // 下一張一模一樣的畫面會被判成重複，然後把重複數加到一張
-                // **更早**的幀身上，那一幀的 `dup_run` 從此是假的。
-                //
-                // 鎖屏（`Ok(None)`）本來就守住了；抓圖失敗（`Err`）沒有，
-                // 因為 `?` 會在退路之前就把錯誤帶走。同一個 bug，差一行。
+                // 這裡的每一條退路都不必再手動退回去重基準：`check` 不會推進
+                // 它，推進的是 `keep_frame` 裡真的存完之後那一句 `kept`。
+                // 這條路上曾經有三個地方各自漏掉那個退回動作（鎖屏、抓圖
+                // 失敗、資料庫寫不進去），所以問題不在漏了三次，在於形狀。
                 let mut full = match grabbed {
                     Ok(Some(f)) => f,
                     Ok(None) => {
-                        self.deduper.reset();
                         self.stats.no_screen += 1;
                         return Ok(Tick::NoScreen);
                     }
-                    Err(e) => {
-                        self.deduper.reset();
-                        return Err(e);
-                    }
+                    Err(e) => return Err(e),
                 };
                 // 去重看的是探測圖，資料庫裡也就存探測圖的雜湊。兩邊必須是
                 // 同一個數字，否則「這一列記的 dhash」與「當初據以判斷的
@@ -385,6 +378,10 @@ impl<B: Backend> Recorder<B> {
         )?;
         self.timings.db.record(t.elapsed());
 
+        // 到這裡才推進去重基準：畫面、文字、那一列都已經落地了。
+        // 寫不進去時上面那個 `?` 會直接帶著錯誤離開，而基準原封不動——
+        // 下一次同一個畫面回來仍然算新的，這正是我們要的。
+        self.deduper.kept(frame.dhash);
         self.last_frame_id = Some(frame_id);
         self.stats.kept += 1;
         Ok(Tick::Kept {
@@ -842,15 +839,18 @@ mod tests {
         assert_eq!(stored as u64, expected, "存的必須是探測圖的雜湊");
     }
 
-    /// 探測成功、正式抓圖卻沒交出東西，不可以污染去重狀態。
+    /// 判定為「新的」卻沒有真的存下來，不可以污染去重狀態。
     ///
-    /// `check()` 已經把基準推到那個雜湊上，但我們什麼都沒存。不退回去的話，
-    /// 下一張一模一樣的畫面會被判成「重複」，然後把重複計數加到一張**更早**
-    /// 的幀身上——那一幀的 `dup_run` 從此是假的，而且沒有人會發現。
+    /// 沒退回去的話，下一張一模一樣的畫面會被判成「重複」，然後把重複計數
+    /// 加到一張**更早**的幀身上——那一幀的 `dup_run` 從此是假的，而且沒有
+    /// 人會發現。
     ///
-    /// 「抓不到」有兩種：`Ok(None)`（鎖屏）與 `Err`（抓圖失敗）。兩種都要
-    /// 走同一條退路——第一版只守住了前者，因為 `?` 會在退路之前就把錯誤
-    /// 帶走。所以這裡兩種各測一次。
+    /// 「沒存成」有三種，而三種都出現過、也都漏掉過：`Ok(None)`（鎖屏）、
+    /// `Err`（抓圖失敗）、以及資料庫那一列寫不進去。前兩種在這裡測，第三種
+    /// 在 [`a_failed_database_write_does_not_poison_dedup`]。
+    ///
+    /// 修法不是在三個地方各補一次退回，是讓 `check` 不再推進基準——推進的
+    /// 是存完之後那一句 `kept`。三個 bug 是同一個形狀。
     #[test]
     fn a_screen_that_vanishes_between_probe_and_grab_does_not_poison_dedup() {
         /// 0 = 交出畫面、1 = 回 `None`（鎖屏）、2 = 回 `Err`（抓圖失敗）
@@ -902,6 +902,76 @@ mod tests {
                 "抓不到的第 {failure} 種：沒存成的那一張不能把後面真的那一張擋掉"
             );
         }
+    }
+
+    /// 第三種「沒存成」：畫面抓到了、字讀到了，資料庫那一列寫不進去。
+    ///
+    /// 這一種最晚被發現，因為前面每一步看起來都成功了。磁碟滿、資料庫被
+    /// 鎖住、schema 對不上都會走到這裡，而它們都不是不會發生的事。
+    #[test]
+    fn a_failed_database_write_does_not_poison_dedup() {
+        let db = Db::open_in_memory().expect("db");
+        // 用一個可以開關的 trigger 模擬寫入失敗，這樣同一顆資料庫可以先壞後好
+        db.conn()
+            .execute_batch(
+                "CREATE TABLE boom(on_ INTEGER);
+                 INSERT INTO boom VALUES(0);
+                 CREATE TRIGGER t_boom BEFORE INSERT ON frames
+                 WHEN (SELECT on_ FROM boom) = 1
+                 BEGIN SELECT RAISE(ABORT, 'simulated disk failure'); END;",
+            )
+            .expect("ddl");
+
+        /// 畫面內容由外面控制，這樣「同一個畫面再來一次」才做得出來。
+        struct Held(std::rc::Rc<std::cell::Cell<u32>>);
+        impl crate::traits::ScreenSource for Held {
+            fn probe(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+                let (w, h) = PROBE;
+                Ok(Some(RawFrame::from_rgba(
+                    ts,
+                    0,
+                    w,
+                    h,
+                    pattern(w, h, self.0.get()),
+                )))
+            }
+            fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+                let (w, h) = FULL;
+                Ok(Some(RawFrame::from_rgba(
+                    ts,
+                    0,
+                    w,
+                    h,
+                    pattern(w, h, self.0.get()),
+                )))
+            }
+        }
+
+        let screen = std::rc::Rc::new(std::cell::Cell::new(1u32));
+        let backend = crate::traits::CompositeBackend {
+            name: "held".into(),
+            screen: Held(screen.clone()),
+            focus: crate::traits::NullFocus,
+            clipboard: crate::traits::NullClipboard,
+            input: crate::traits::NullInput,
+            ocr: crate::traits::NullOcr,
+        };
+        let mut r = Recorder::new(backend, db, Config::default(), None).expect("recorder");
+
+        // 畫面 A 存進去了
+        assert!(matches!(r.tick(0).expect("tick"), Tick::Kept { .. }));
+
+        // 畫面換成 B，但這一列寫不進去
+        screen.set(2);
+        r.db().conn().execute("UPDATE boom SET on_=1", []).unwrap();
+        assert!(r.tick(1_000).is_err(), "寫不進去要往上報");
+
+        // 資料庫好了，螢幕上還是 B。B 從來沒被存過，所以必須是新的。
+        r.db().conn().execute("UPDATE boom SET on_=0", []).unwrap();
+        assert!(
+            matches!(r.tick(2_000).expect("tick"), Tick::Kept { .. }),
+            "寫不進去的那一張不能把後面真的那一張擋成重複"
+        );
     }
 
     fn step(at_ms: Millis, app: &str, title: &str, text: &[&str]) -> Step {

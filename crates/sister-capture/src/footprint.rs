@@ -81,6 +81,20 @@ impl Footprint {
         (self.peak_rss > 0).then_some(self.peak_rss)
     }
 
+    /// 這段期間一共燒掉多少 CPU 秒。`None` = 量不到。
+    ///
+    /// 拿來和各階段的耗時對帳用，而那是兩個不同的量：階段耗時是**牆上
+    /// 時間**（`Instant`），卡在顯示驅動裡等的時間也算在內；這個是真的
+    /// 燒掉的 CPU。實測 CI 上一段 0.8 秒的 tick 時間只對應 0.27 秒 CPU
+    /// ——三分之二是等，不是算。
+    ///
+    /// 兩個都要報出來，否則一份「拆得很細的耗時表」會被讀成「CPU 花在
+    /// 哪裡」，而使用者抱怨的明明是後者。
+    pub fn cpu_seconds_used(&self) -> Option<f64> {
+        let (a, b) = (self.first?, self.latest?);
+        Some((b.cpu_seconds - a.cpu_seconds).max(0.0))
+    }
+
     pub fn elapsed_secs(&self) -> f64 {
         self.started.elapsed().as_secs_f64()
     }

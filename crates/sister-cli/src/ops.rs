@@ -1346,8 +1346,10 @@ pub mod record {
         report_exclusions(&stats);
         report_ocr(&stats, config_ocr);
         report_images(&stats, rec.timings(), image_budget_mb);
-        report_timings(rec.timings(), stats.ticks);
+        // 先取最後一次足跡樣本，時間表才拿得到「這段期間燒了多少 CPU」，
+        // 而那是把牆上時間和 CPU 分開講的前提。
         footprint.tick();
+        report_timings(rec.timings(), stats.ticks, footprint.cpu_seconds_used());
         report_footprint(
             &footprint,
             rec.db()
@@ -1507,14 +1509,27 @@ pub mod record {
     /// 的數字。我為了它猜過兩次原因，兩次都猜 PNG 編碼，兩次都猜錯——實測
     /// PNG 編一張只要 1.7ms。一個超標九倍的預算配上一份說不出錢花到哪裡的
     /// 報告，只會讓人去改那個最好改的地方，而不是那個最貴的地方。
+    ///
+    /// **這張表拆的是牆上時間，不是 CPU。** 兩者差很多：CI 上量到 0.8 秒的
+    /// tick 時間只對應 0.27 秒 CPU，三分之二是卡在顯示驅動裡等。所以標題
+    /// 那行要把 CPU 秒數一起印出來——不然一份拆得很細的耗時表會被讀成
+    /// 「CPU 花在哪裡」，而使用者抱怨的明明是後者。
     #[cfg(windows)]
-    fn report_timings(t: &sister_capture::timings::Timings, ticks: u64) {
+    fn report_timings(t: &sister_capture::timings::Timings, ticks: u64, cpu_secs: Option<f64>) {
         let total = t.total();
         if total.is_zero() || ticks == 0 {
             return;
         }
+        let cpu = match cpu_secs {
+            // 「等」跟「算」差得夠遠才值得多說一句；差不多的時候多印只是雜訊
+            Some(c) if c < total.as_secs_f64() * 0.8 => {
+                format!("；其中真的燒掉 {c:.1} 秒 CPU，其餘是等（多半在顯示驅動裡）")
+            }
+            Some(c) => format!("；同期間燒掉 {c:.1} 秒 CPU"),
+            None => String::new(),
+        };
         println!(
-            "  時間：{ticks} tick 共忙了 {:.1} 秒（每 tick {:.0} ms）",
+            "  時間：{ticks} tick 佔了 {:.1} 秒（每 tick {:.0} ms）{cpu}",
             total.as_secs_f64(),
             total.as_secs_f64() * 1000.0 / ticks as f64
         );

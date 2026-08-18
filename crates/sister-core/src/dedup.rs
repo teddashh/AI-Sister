@@ -126,22 +126,37 @@ impl Deduper {
         self.run
     }
 
-    /// 判斷一張新幀。判定為 `New` 時，內部狀態會更新為以它為基準。
+    /// 判斷一張新幀。**判定為 `New` 不會更新基準**——那要等它真的存下來，
+    /// 由呼叫端呼叫 [`Deduper::kept`]。
+    ///
+    /// 這兩件事一開始是同一個動作，而那是個會反覆生出同一個 bug 的形狀：
+    /// 判定與寫入之間每多一條中途離開的路（螢幕沒了、抓圖失敗、資料庫
+    /// 寫不進去），就多一個必須記得手動退回基準的地方。實際上三條都出現過，
+    /// 三條都漏掉過，而漏掉的症狀完全看不見：那一張沒存成的畫面把後面
+    /// 真的那一張擋成「重複」，重複數記到一張**更早**的幀身上。
+    ///
+    /// 拆開之後兩種疏忽的代價不對稱，而且方向是對的：
+    /// - 忘了呼叫 `kept` → 同一張畫面被存兩次。浪費，但看得見。
+    /// - 忘了退回基準 → 不可能發生了，因為根本沒有推進過。
     pub fn check(&mut self, hash: u64) -> FrameVerdict {
         match self.last_kept {
             Some(prev) if hamming(prev, hash) <= self.threshold => {
                 self.run += 1;
                 FrameVerdict::Duplicate { run: self.run }
             }
-            _ => {
-                self.last_kept = Some(hash);
-                self.run = 0;
-                FrameVerdict::New
-            }
+            _ => FrameVerdict::New,
         }
     }
 
-    /// 強制把下一張視為新幀（例如剛從 pause 恢復、或跨越 idle 心跳）。
+    /// 這一張真的存下來了：把基準推到它身上。
+    ///
+    /// 只有在畫面、文字、資料庫那一列都落地之後才可以呼叫。
+    pub fn kept(&mut self, hash: u64) {
+        self.last_kept = Some(hash);
+        self.run = 0;
+    }
+
+    /// 強制把下一張視為新幀（例如剛從 pause 恢復、或剛結束一段被排除的時間）。
     pub fn reset(&mut self) {
         self.last_kept = None;
         self.run = 0;
@@ -237,28 +252,37 @@ mod tests {
         assert_eq!(hamming(u64::MAX, 0), 64);
     }
 
+    /// 存下來的那一張才會變成基準。`store` 就是呼叫端的那兩步。
+    fn store(d: &mut Deduper, hash: u64) -> FrameVerdict {
+        let v = d.check(hash);
+        if v == FrameVerdict::New {
+            d.kept(hash);
+        }
+        v
+    }
+
     #[test]
     fn deduper_collapses_runs_and_counts_them() {
         let mut d = Deduper::new(5);
-        assert_eq!(d.check(0xFFFF_0000_FFFF_0000), FrameVerdict::New);
+        assert_eq!(store(&mut d, 0xFFFF_0000_FFFF_0000), FrameVerdict::New);
         assert_eq!(
-            d.check(0xFFFF_0000_FFFF_0000),
+            store(&mut d, 0xFFFF_0000_FFFF_0000),
             FrameVerdict::Duplicate { run: 1 }
         );
         assert_eq!(
-            d.check(0xFFFF_0000_FFFF_0000),
+            store(&mut d, 0xFFFF_0000_FFFF_0000),
             FrameVerdict::Duplicate { run: 2 }
         );
         assert_eq!(d.run(), 2);
 
         // 差 1 bit，在門檻內 → 仍算同一畫面
         assert_eq!(
-            d.check(0xFFFF_0000_FFFF_0001),
+            store(&mut d, 0xFFFF_0000_FFFF_0001),
             FrameVerdict::Duplicate { run: 3 }
         );
 
         // 差很多 → 新畫面，run 歸零
-        assert_eq!(d.check(0x0000_FFFF_0000_FFFF), FrameVerdict::New);
+        assert_eq!(store(&mut d, 0x0000_FFFF_0000_FFFF), FrameVerdict::New);
         assert_eq!(d.run(), 0);
     }
 
@@ -266,25 +290,53 @@ mod tests {
     fn deduper_threshold_is_respected() {
         // 門檻 0 = 只有完全相同才算重複
         let mut strict = Deduper::new(0);
-        assert_eq!(strict.check(0b0), FrameVerdict::New);
-        assert_eq!(strict.check(0b1), FrameVerdict::New);
+        assert_eq!(store(&mut strict, 0b0), FrameVerdict::New);
+        assert_eq!(store(&mut strict, 0b1), FrameVerdict::New);
 
         let mut loose = Deduper::new(64);
-        assert_eq!(loose.check(0), FrameVerdict::New);
-        assert_eq!(loose.check(u64::MAX), FrameVerdict::Duplicate { run: 1 });
+        assert_eq!(store(&mut loose, 0), FrameVerdict::New);
+        assert_eq!(
+            store(&mut loose, u64::MAX),
+            FrameVerdict::Duplicate { run: 1 }
+        );
     }
 
     #[test]
     fn reset_forces_next_frame_to_be_new() {
         let mut d = Deduper::default();
-        assert_eq!(d.check(42), FrameVerdict::New);
-        assert_eq!(d.check(42), FrameVerdict::Duplicate { run: 1 });
+        assert_eq!(store(&mut d, 42), FrameVerdict::New);
+        assert_eq!(store(&mut d, 42), FrameVerdict::Duplicate { run: 1 });
         d.reset();
         assert_eq!(
-            d.check(42),
+            store(&mut d, 42),
             FrameVerdict::New,
             "after reset the same frame must count as new"
         );
+        assert_eq!(d.run(), 0);
+    }
+
+    /// 判定為「新的」卻沒有存成，不可以影響到下一張。
+    ///
+    /// 這是把 `check` 和 `kept` 拆開的全部理由。舊版的 `check` 自己就把基準
+    /// 推過去了，於是判定與寫入之間每一條中途離開的路都得記得手動退回——
+    /// 實際上有三條，三條都漏過。漏掉的症狀完全看不見：那張沒存成的畫面
+    /// 把後面真的那一張擋成「重複」，而重複數記到一張更早的幀身上。
+    #[test]
+    fn a_frame_that_was_never_stored_does_not_become_the_baseline() {
+        let mut d = Deduper::default();
+        assert_eq!(store(&mut d, 42), FrameVerdict::New);
+
+        // 畫面變了，判定為新的——然後抓圖/OCR/資料庫其中一步失敗了，
+        // 呼叫端直接離開，沒有呼叫 `kept`。
+        assert_eq!(d.check(0xFFFF_FFFF_0000_0000), FrameVerdict::New);
+
+        // 同一個畫面再來一次。它從來沒被存過，所以還是新的。
+        assert_eq!(
+            store(&mut d, 0xFFFF_FFFF_0000_0000),
+            FrameVerdict::New,
+            "沒存成的那一張不可以把後面真的那一張擋掉"
+        );
+        // 而且沒有把重複數算到那張更早的幀身上
         assert_eq!(d.run(), 0);
     }
 }
