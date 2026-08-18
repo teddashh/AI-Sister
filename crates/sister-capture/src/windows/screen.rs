@@ -406,7 +406,11 @@ mod tests {
     /// 每一幀都會被判成「新的」，去重整個失效，而症狀是磁碟爆掉。
     #[test]
     fn how_expensive_is_each_way_of_grabbing_this_screen() {
-        use super::{OCR_LONG_EDGE, PROBE_LONG_EDGE, RECT, Sampling, WindowsScreen, blit};
+        use super::{
+            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+            HGDIOBJ, OCR_LONG_EDGE, PROBE_LONG_EDGE, RECT, ReleaseDC, SRCCOPY, Sampling,
+            SelectObject, WindowsScreen, blit, read_pixels,
+        };
         use std::time::Instant;
         use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
@@ -512,6 +516,66 @@ mod tests {
                             / ((full.right - full.left) as f64 * (full.bottom - full.top) as f64)
                             * 100.0
                     );
+                }
+            }
+        }
+
+        // 上面那一列告訴我們「來源像素變少 ⇒ 時間變少，但**不成比例**」：
+        // 來源砍到 8%，時間只掉到 57%。所以底下還壓著一筆固定成本，而那筆
+        // 才是決定要不要去寫 DXGI 的關鍵。
+        //
+        // 它有兩個嫌疑犯，各自的下一步天差地遠：
+        //
+        //   GDI 物件的手續費 → 我們**每一次擷取**都新建 DC 和 bitmap 再刪掉。
+        //                      如果錢在這裡，改法是快取它們，一天就做得完。
+        //   顯示驅動的過路費 → 每次跟驅動要畫面就是要付。那 GDI 這條路
+        //                      到頭了，只有 Desktop Duplication（畫面沒變
+        //                      時直接回「沒有新的一張」）救得了。
+        //
+        // 所以再量一次：同一塊 256×256，但 DC 與 bitmap 在計時之外只建一次。
+        if let Some((_, full)) = super::focused_monitor(unsafe { GetForegroundWindow() }) {
+            const SIDE: i32 = 256;
+            let cx = (full.left + full.right) / 2;
+            let cy = (full.top + full.bottom) / 2;
+            let (x, y) = (cx - SIDE / 2, cy - SIDE / 2);
+
+            unsafe {
+                let screen = GetDC(None);
+                if !screen.is_invalid() {
+                    let mem = CreateCompatibleDC(Some(screen));
+                    let bmp = CreateCompatibleBitmap(screen, SIDE, SIDE);
+                    if !mem.is_invalid() && !bmp.is_invalid() {
+                        let mut ok = true;
+                        // 熱身
+                        for _ in 0..2 {
+                            let old = SelectObject(mem, HGDIOBJ(bmp.0));
+                            ok &=
+                                BitBlt(mem, 0, 0, SIDE, SIDE, Some(screen), x, y, SRCCOPY).is_ok();
+                            SelectObject(mem, old);
+                            ok &= read_pixels(mem, bmp, SIDE as u32, SIDE as u32).is_ok();
+                        }
+                        let t = Instant::now();
+                        for _ in 0..ROUNDS {
+                            let old = SelectObject(mem, HGDIOBJ(bmp.0));
+                            ok &=
+                                BitBlt(mem, 0, 0, SIDE, SIDE, Some(screen), x, y, SRCCOPY).is_ok();
+                            SelectObject(mem, old);
+                            ok &= read_pixels(mem, bmp, SIDE as u32, SIDE as u32).is_ok();
+                        }
+                        if ok {
+                            println!(
+                                "  中央一小塊 / 重用 DC\t{SIDE}x{SIDE}\t每次 {:.1} ms（DC 與 bitmap 只建一次）",
+                                t.elapsed().as_secs_f64() * 1000.0 / ROUNDS as f64
+                            );
+                        }
+                    }
+                    if !bmp.is_invalid() {
+                        let _ = DeleteObject(HGDIOBJ(bmp.0));
+                    }
+                    if !mem.is_invalid() {
+                        let _ = DeleteDC(mem);
+                    }
+                    ReleaseDC(None, screen);
                 }
             }
         }
