@@ -406,8 +406,9 @@ mod tests {
     /// 每一幀都會被判成「新的」，去重整個失效，而症狀是磁碟爆掉。
     #[test]
     fn how_expensive_is_each_way_of_grabbing_this_screen() {
-        use super::{OCR_LONG_EDGE, PROBE_LONG_EDGE, Sampling, WindowsScreen};
+        use super::{OCR_LONG_EDGE, PROBE_LONG_EDGE, RECT, Sampling, WindowsScreen, blit};
         use std::time::Instant;
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
         const ROUNDS: u32 = 8;
         let mut s = WindowsScreen::new();
@@ -469,6 +470,50 @@ mod tests {
                 "  {name}\t{w}x{h}\t每次 {:.1} ms",
                 total[i].as_secs_f64() * 1000.0 / ROUNDS as f64
             );
+        }
+
+        // 上面那張表全部都是「整個螢幕 → 某個大小」。它回答不了下一個問題：
+        // 這 27 ms 到底是花在**讀了多少來源像素**上，還是「跟顯示驅動要一次
+        // 畫面」這個**固定成本**上？兩個答案通往完全不同的下一步——
+        //
+        //   花在來源像素   → 只抓螢幕的一小塊當變化偵測就好，很便宜。
+        //   固定成本       → 抓多小都一樣，只有 DXGI Desktop Duplication
+        //                    （它能在畫面沒變時直接回「沒有新的一張」、
+        //                    一個位元組都不搬）救得了。
+        //
+        // 所以量一次。中央 256×256 一比一、不縮放，來源像素大約是全螢幕的
+        // 3%——如果時間也掉到 3%，答案是前者；如果幾乎沒變，答案是後者。
+        if let Some((_, full)) = super::focused_monitor(unsafe { GetForegroundWindow() }) {
+            const SIDE: i32 = 256;
+            let cx = (full.left + full.right) / 2;
+            let cy = (full.top + full.bottom) / 2;
+            let patch = RECT {
+                left: cx - SIDE / 2,
+                top: cy - SIDE / 2,
+                right: cx + SIDE / 2,
+                bottom: cy + SIDE / 2,
+            };
+            // 熱身一次再計時，理由同上。
+            let warm = unsafe { blit(patch, SIDE, SIDE, SIDE as u32, SIDE as u32, Sampling::Fast) };
+            if warm.is_ok() {
+                let t = Instant::now();
+                let mut ok = true;
+                for _ in 0..ROUNDS {
+                    ok &= unsafe {
+                        blit(patch, SIDE, SIDE, SIDE as u32, SIDE as u32, Sampling::Fast)
+                    }
+                    .is_ok();
+                }
+                if ok {
+                    println!(
+                        "  中央一小塊 / 不縮放\t{SIDE}x{SIDE}\t每次 {:.1} ms（來源像素約全螢幕的 {:.0}%）",
+                        t.elapsed().as_secs_f64() * 1000.0 / ROUNDS as f64,
+                        (SIDE as f64 * SIDE as f64)
+                            / ((full.right - full.left) as f64 * (full.bottom - full.top) as f64)
+                            * 100.0
+                    );
+                }
+            }
         }
 
         // 這裡真的下斷言，而且斷言的是一件**會安靜地壞掉**的事。
