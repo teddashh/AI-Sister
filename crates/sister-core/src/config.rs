@@ -58,7 +58,10 @@ impl Default for CaptureConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PrivacyConfig {
-    /// app 識別字（小寫比對，支援 `*` glob）。命中則整段不擷取。
+    /// app 識別字（小寫比對）。命中則整段不擷取。
+    ///
+    /// 裸字串 = 子字串比對，要精準比對再自己寫 `*`。理由見
+    /// [`app_pattern_matches`]。
     pub excluded_apps: Vec<String>,
     /// URL glob。命中則不擷取。
     pub excluded_urls: Vec<String>,
@@ -74,11 +77,12 @@ impl Default for PrivacyConfig {
     fn default() -> Self {
         Self {
             // 預設就把最敏感的擋掉；使用者可再加。
+            // 寫成裸名字即可：比對是子字串，`keepassxc` 同時涵蓋
+            // Windows 的 keepassxc.exe 與 macOS 的 org.keepassxc.keepassxc。
             excluded_apps: [
                 "keepassxc",
                 "keepass",
                 "1password",
-                "1password.exe",
                 "bitwarden",
                 "dashlane",
                 "lastpass",
@@ -211,7 +215,7 @@ impl PrivacyConfig {
 
         if !app.is_empty() {
             for pat in &self.excluded_apps {
-                if glob_match(&pat.to_ascii_lowercase(), &app) {
+                if app_pattern_matches(&pat.to_ascii_lowercase(), &app) {
                     return Exclusion::Blocked(format!("excluded app: {app}"));
                 }
             }
@@ -236,6 +240,28 @@ impl PrivacyConfig {
         }
 
         Exclusion::Allowed
+    }
+}
+
+/// app 排除規則的比對。**不含 `*` 的樣式一律視為子字串。**
+///
+/// 因為使用者寫下 `keepassxc` 時，她的意思是「這個程式不要錄」，
+/// 而不是「app 識別碼要恰好等於這九個字」。平台給的識別碼長什麼樣
+/// 她不知道也不該知道：Windows 是 `keepassxc.exe`、macOS 是
+/// `org.keepassxc.keepassxc`、Linux 是 `keepassxc`。用全字比對的話，
+/// 同一條規則只在三個平台的其中一個生效——而且是靜默地不生效。
+///
+/// 副作用是可能多擋（`code` 會連 `vscode.exe` 一起擋掉）。這個方向的錯
+/// 是「你以為會記的沒記到」，使用者看得見也改得掉；反過來的錯是
+/// 「你以為擋住的其實一直在錄」，她永遠不會發現。兩者不對等。
+pub fn app_pattern_matches(pattern: &str, app: &str) -> bool {
+    if pattern.is_empty() {
+        return false;
+    }
+    if pattern.contains('*') {
+        glob_match(pattern, app)
+    } else {
+        app.contains(pattern)
     }
 }
 
@@ -308,6 +334,58 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app(id: &str) -> FocusSnapshot {
+        FocusSnapshot {
+            app_id: Some(id.into()),
+            ..Default::default()
+        }
+    }
+
+    /// 這條規則的預設值是裸名字，但三個平台給的識別碼長得都不一樣。
+    /// 曾經只有剛好寫成 `1password.exe` 的那一條在 Windows 上生效，
+    /// 其餘密碼管理員全部靜默漏接。
+    #[test]
+    fn password_managers_are_blocked_in_every_platform_naming_style() {
+        let c = Config::default();
+        for id in [
+            "keepassxc",                    // Linux
+            "keepassxc.exe",                // Windows
+            "KeePassXC.exe",                // Windows，大小寫不一
+            "org.keepassxc.keepassxc",      // macOS bundle id
+            "1Password.exe",
+            "com.1password.1password",
+            "bitwarden.exe",
+            "Bitwarden.exe",
+            "dashlane.exe",
+            "lastpass.exe",
+            "enpass.exe",
+        ] {
+            assert!(
+                c.privacy.check(&app(id)).is_blocked(),
+                "{id} 沒有被擋下來——使用者會以為它被擋住了"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_apps_still_get_recorded() {
+        let c = Config::default();
+        for id in ["chrome.exe", "code.exe", "explorer.exe", "firefox", "Terminal"] {
+            assert!(!c.privacy.check(&app(id)).is_blocked(), "{id} 不該被擋");
+        }
+    }
+
+    #[test]
+    fn star_patterns_still_mean_glob_not_substring() {
+        // 有寫 `*` 的人是刻意的，要照 glob 語意走
+        assert!(app_pattern_matches("*pass*", "keepassxc.exe"));
+        assert!(!app_pattern_matches("keepass", "kee-pass.exe"));
+        assert!(!app_pattern_matches("*.exe", "keepassxc"));
+        assert!(app_pattern_matches("*.exe", "keepassxc.exe"));
+        // 空樣式不該變成「擋掉全部」
+        assert!(!app_pattern_matches("", "chrome.exe"));
+    }
 
     fn focus(app: &str, title: &str, url: Option<&str>) -> FocusSnapshot {
         FocusSnapshot {
