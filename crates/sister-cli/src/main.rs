@@ -160,7 +160,7 @@ fn main() -> Result<()> {
         } => ops::facts::run(&data_dir, kind.as_deref(), search.as_deref(), limit, json),
         Command::Stats { json } => ops::stats::run(&data_dir, json),
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config, dry_run),
-        Command::Doctor => ops::doctor::run(&data_dir, &config),
+        Command::Doctor => ops::doctor::run(&data_dir, &config, cli.config.clone()),
     }
 }
 

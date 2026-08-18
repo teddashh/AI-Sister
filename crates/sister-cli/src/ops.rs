@@ -2,9 +2,15 @@
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sister_core::db::Db;
+
+/// 兩次看螢幕之間的下限。設定檔可以寫得更慢，寫得更快則無效。
+///
+/// 定在這裡而不是各自 `.max(200)`，是因為 doctor 得印出**實際會用的值**：
+/// 一個調了不生效的旋鈕，比一個沒有這個旋鈕更糟。
+pub(crate) const MIN_TICK_MS: u64 = 200;
 
 /// 開啟既有資料庫。查詢類命令不該憑空造一顆空的資料庫出來——
 /// 那會讓「我明明錄了東西」變成「查無資料」的無聲錯誤。
@@ -555,6 +561,13 @@ pub mod doctor {
         url: bool,
         /// 對現在的前景視窗真的問一次網址的結果。`None` = 本平台問不了。
         url_probe: Option<(&'static str, &'static str, String)>,
+        /// 現在的前景視窗是誰：`(app, 標題)`。`None` = 本平台問不到，
+        /// 兩個欄位各自可能是空字串（讀得到視窗但讀不到那一項）。
+        ///
+        /// `excluded_apps` / `excluded_titles` 比對的就是這兩個字串，所以
+        /// 「規則有幾條」和「規則會不會生效」是兩件事：讀不到字串的話，
+        /// 那些規則一條都不會命中——而數量照樣印得出來。
+        focus_probe: Option<(String, String)>,
         /// 輸入 hook：`None` = 本平台沒有這個東西。
         /// 不是「沒試過」——doctor 現在會真的裝一次（見 [`caps`]）。
         input_hooks: Option<bool>,
@@ -611,6 +624,7 @@ pub mod doctor {
         let c = Capabilities::current(config);
         let mut probes = Vec::new();
         let url_probe;
+        let focus_probe;
 
         // UIA：一樣不宣稱。真的對現在的前景視窗問一次網址。
         // `✓ UIA 建得起來` 這句話的價值是零——使用者要知道的是
@@ -620,6 +634,8 @@ pub mod doctor {
             let mut source = sister_capture::windows::focus::WindowsFocus::new();
             let snapshot = source.snapshot(sister_core::now_ms()).unwrap_or_default();
             let app = snapshot.app_key();
+            // 排除規則比對的就是這兩個字串。讀得到才代表那些規則跑得動。
+            focus_probe = Some((app.clone(), snapshot.title.clone().unwrap_or_default()));
             url_probe = Some(match (&snapshot.url, source.url_capture_alive()) {
                 (Some(url), _) => (
                     "✓",
@@ -767,6 +783,7 @@ pub mod doctor {
         Caps {
             url: c.url,
             url_probe,
+            focus_probe,
             input_hooks,
             ocr: c.ocr,
             ocr_language: c.ocr_language.clone(),
@@ -783,7 +800,7 @@ pub mod doctor {
         Caps::default()
     }
 
-    pub fn run(data_dir: &Path, config: &Config) -> Result<()> {
+    pub fn run(data_dir: &Path, config: &Config, config_path: Option<PathBuf>) -> Result<()> {
         println!("🩺 AI-Sister 環境檢查\n");
         let caps = caps(config);
 
@@ -818,63 +835,123 @@ pub mod doctor {
             ),
         );
         line(db_file.exists(), "資料庫", &db_file.display().to_string());
-        match Config::default_path() {
+        // `--config` 指到哪就印哪。舊版一律印 `default_path()`，於是一個
+        // 用 `--config` 跑的人會看到一個他沒在用的路徑，後面還接一句
+        // 「用預設值」——而底下的保留期天數明明是他自訂的那一份。
+        // doctor 是出事時唯一的稽核面，這一行不能指錯地方。
+        match config_path.or_else(Config::default_path) {
             Some(p) => line(
                 true,
                 "設定檔",
                 &format!(
                     "{}{}",
                     p.display(),
-                    if p.exists() { "" } else { "（用預設值）" }
+                    if p.exists() {
+                        ""
+                    } else {
+                        "（不存在，用預設值）"
+                    }
                 ),
             ),
             None => line(false, "設定檔", "無法決定路徑"),
         }
 
         println!("\n儲存");
-        // 用暫時的記憶體資料庫檢查 SQLite 能力，不動到真正的資料
         let probe = Db::open_in_memory().context("open probe database")?;
         line(true, "SQLite", &probe.sqlite_version());
-        let fts = probe
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('text_fts','text_fts_uni')",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0);
-        line(fts == 2, "FTS5 雙索引", "trigram + unicode61");
 
         // 開著不關：底下「保留期」那一段還要拿它去問「現在有多少已過期」。
         let db = db_file.exists().then(|| Db::open(&db_file)).transpose()?;
-        if let Some(db) = &db {
-            line(
-                true,
-                "Schema 版本",
+
+        // **問使用者那一顆，不是問一顆現做的。** 舊版查的是上面那個
+        // in-memory probe，於是它證明的是「這份程式碼建得出索引」，
+        // 而不是「你的資料庫裡有索引」。索引掉了的話 `db.rs` 會安靜地
+        // 退回 LIKE 全表掃描——答案還是對的，只是一年份的資料要掃到天亮，
+        // 而 doctor 會說 ✓。
+        let fts_of = |d: &Db| {
+            d.conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('text_fts','text_fts_uni')",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+        };
+        match &db {
+            Some(d) => {
+                let n = fts_of(d);
+                line(
+                    n == 2,
+                    "FTS5 雙索引",
+                    &if n == 2 {
+                        "trigram + unicode61（你的資料庫裡）".to_string()
+                    } else {
+                        format!("你的資料庫裡只有 {n}/2 個——搜尋會退回全表掃描，資料還在但會很慢")
+                    },
+                );
+            }
+            // 還沒有資料庫時，能證明的只有「這台機器的 SQLite 支援 FTS5」
+            None => mark(
+                "?",
+                "FTS5 雙索引",
                 &format!(
-                    "{} (目前程式為 {})",
-                    db.schema_version()?,
-                    sister_core::db::SCHEMA_VERSION
+                    "還沒有資料庫；這份程式碼建得出來（{}/2），等你錄過再驗一次",
+                    fts_of(&probe)
                 ),
+            ),
+        }
+        if let Some(db) = &db {
+            // 兩個數字並排印出來、讓讀者自己比對，是把判斷丟給人。
+            // 對不上的時候（別的版本開過這顆資料庫）程式照樣會去查它，
+            // 那正是需要一個 ✗ 的時候。
+            let have = db.schema_version()?;
+            let want = sister_core::db::SCHEMA_VERSION;
+            line(
+                have == want,
+                "Schema 版本",
+                &if have == want {
+                    format!("{have}")
+                } else {
+                    format!("{have}，但這支程式是 {want}——可能是別的版本開過這顆資料庫")
+                },
             );
             let s = db.stats()?;
-            line(
-                true,
-                "已記錄",
-                &format!(
-                    "{} 張畫面 · {} 段文字 · {}",
-                    s.frames,
-                    s.chunks,
-                    fmt::bytes(s.db_bytes + s.image_bytes)
-                ),
+            // 「0 張畫面 · 0 段文字 ✓」是這個專案一路在修的那個災難本身
+            // ——錄了一整天、資料庫在長大、一個字都沒進去。有資料庫卻沒
+            // 內容不該是打勾。
+            let detail = format!(
+                "{} 張畫面 · {} 段文字 · {}",
+                s.frames,
+                s.chunks,
+                fmt::bytes(s.db_bytes + s.image_bytes)
             );
+            match (s.frames, s.chunks) {
+                (0, 0) => mark("?", "已記錄", &format!("{detail}（還沒有任何內容）")),
+                (_, 0) => mark(
+                    "✗",
+                    "已記錄",
+                    &format!("{detail}——有畫面卻一個字都沒有，OCR 沒讀到東西"),
+                ),
+                _ => line(true, "已記錄", &detail),
+            }
         }
 
         println!("\n隱私");
-        line(
-            true,
+        // 「9 條規則 ✓」是 THREAT_MODEL 明文禁止的那種寫法：規則的**數量**
+        // 從來不是問題，規則**會不會命中**才是。這些規則比對的是前景 app
+        // 名稱，所以讀不到名稱的時候它們一條都不生效——而數量照樣是 9。
+        let (sym, note) = match &caps.focus_probe {
+            Some((app, _)) if !app.is_empty() => ("✓", format!("，現在讀到的是 {app}")),
+            Some(_) => ("?", "，但現在沒有前景視窗，這一刻測不出來".to_string()),
+            None => (
+                "✗",
+                "（本平台讀不到前景 app，這些規則目前不生效）".to_string(),
+            ),
+        };
+        mark(
+            sym,
             "排除的 app",
-            &format!("{} 條規則", config.privacy.excluded_apps.len()),
+            &format!("{} 條規則{note}", config.privacy.excluded_apps.len()),
         );
         // 規則數量不等於規則有效。沒有 URL 擷取能力時這些規則一條都不會跑，
         // 而使用者看到「16 條規則 ✓」只會更放心——那正是最糟的結果。
@@ -908,10 +985,23 @@ pub mod doctor {
         if let Some((sym, label, detail)) = &caps.url_probe {
             mark(sym, label, detail);
         }
-        line(
-            true,
+        // 標題和 app 來自同一次 snapshot，但**失敗方式不一樣**：有些視窗
+        // 讀得到 exe 名稱卻沒有標題。分開報，才不會讓 app 的 ✓ 幫標題背書。
+        let (sym, note) = match &caps.focus_probe {
+            Some((_, title)) if !title.is_empty() => (
+                "✓",
+                format!("，現在讀到的是「{}」", crate::fmt::one_line(title, 40)),
+            ),
+            Some(_) => ("?", "，但現在這個視窗沒有標題可比對".to_string()),
+            None => (
+                "✗",
+                "（本平台讀不到視窗標題，這些規則目前不生效）".to_string(),
+            ),
+        };
+        mark(
+            sym,
             "排除的標題",
-            &format!("{} 條規則", config.privacy.excluded_titles.len()),
+            &format!("{} 條規則{note}", config.privacy.excluded_titles.len()),
         );
         line(
             config.privacy.pause_on_screenshare,
@@ -971,8 +1061,24 @@ pub mod doctor {
             }
         }
 
+        println!("\n節奏");
+        // 設定檔寫 50，程式跑 200。以前 doctor 只是不提這件事，於是使用者
+        // 調了一個不會生效的旋鈕，而畫面上沒有任何地方看得出來。
+        let asked = config.capture.min_interval_ms;
+        let used = asked.max(crate::ops::MIN_TICK_MS);
+        line(
+            true,
+            "多久看一次螢幕",
+            &if used == asked {
+                format!("{used} ms")
+            } else {
+                format!(
+                    "{used} ms（你設的是 {asked} ms，但下限是 {} ms）",
+                    crate::ops::MIN_TICK_MS
+                )
+            },
+        );
         if let Some(ok) = caps.input_hooks {
-            println!("\n節奏");
             line(
                 ok,
                 "輸入 hook",
@@ -1003,26 +1109,36 @@ pub mod doctor {
         // 使用者遲早會點到一筆沒有圖的搜尋結果，而那不是壞掉——與其等他
         // 來問，不如在他按下 record 之前就講清楚。
         println!("\n畫面檔");
-        line(
-            true,
-            "多久存一張",
-            &format!(
-                "最快 {:.0} 秒一張（其餘只留字，搜尋不受影響）",
-                config.capture.image_min_interval_ms as f64 / 1000.0
-            ),
-        );
-        line(
-            true,
-            "一天最多存",
-            &if config.capture.max_image_mb_per_day == 0 {
-                "不設上限——磁碟要自己盯".to_string()
-            } else {
-                format!(
-                    "{} MB（用完就只留字，隔天歸零）",
-                    config.capture.max_image_mb_per_day
-                )
-            },
-        );
+        // `store_images = false` 的時候，下面兩條設定一條都不會跑。照樣印
+        // 「最快 5 秒一張 ✓」等於在回答一個沒有人問的問題——而且答錯了。
+        if config.capture.store_images {
+            line(
+                true,
+                "多久存一張",
+                &format!(
+                    "最快 {:.0} 秒一張（其餘只留字，搜尋不受影響）",
+                    config.capture.image_min_interval_ms as f64 / 1000.0
+                ),
+            );
+            line(
+                true,
+                "一天最多存",
+                &if config.capture.max_image_mb_per_day == 0 {
+                    "不設上限——磁碟要自己盯".to_string()
+                } else {
+                    format!(
+                        "{} MB（用完就只留字，隔天歸零）",
+                        config.capture.max_image_mb_per_day
+                    )
+                },
+            );
+        } else {
+            mark(
+                "—",
+                "一張都不存",
+                "store_images = false：只留字。下面的保留期只管得到文字",
+            );
+        }
 
         println!("\n保留期");
         line(
@@ -1259,7 +1375,8 @@ pub mod record {
         }
 
         let images = config.capture.store_images.then(|| data_dir.join("frames"));
-        let interval = Duration::from_millis(config.capture.min_interval_ms.max(200));
+        let interval =
+            Duration::from_millis(config.capture.min_interval_ms.max(crate::ops::MIN_TICK_MS));
         // config 等一下會被 Recorder 吃掉，但收尾的摘要與定期清理還需要這幾項
         let config_ocr = config.capture.ocr;
         let config_store_images = config.capture.store_images;
@@ -1447,14 +1564,27 @@ pub mod record {
             // 沒辦法回答唯一有用的那個問題——該去縮圖，還是該去縮索引。
             // 實測那次就是這樣：一個很嚇人、但指不出方向的數字。
             let grew = disk_delta.max(0);
-            let rest = grew.saturating_sub(image_bytes as i64);
+            let rest = grew - image_bytes as i64;
+            // 減出負數代表這段期間有東西被刪掉了（錄到一半觸發保留期清理，
+            // 或另一支 sister 在跑）。這時候「畫面 X、其他 -3 MB」是**算術
+            // 上正確、意義上胡說**的一行——寧可承認拆不開。
+            let breakdown = if rest < 0 {
+                format!(
+                    "這段實際長了 {}，但同時也有東西被刪掉，拆不開",
+                    crate::fmt::bytes(grew)
+                )
+            } else {
+                format!(
+                    "這段實際長了 {}：畫面 {}、其他 {}",
+                    crate::fmt::bytes(grew),
+                    crate::fmt::bytes(image_bytes as i64),
+                    crate::fmt::bytes(rest)
+                )
+            };
             parts.push(format!(
-                "{}磁碟 {}/天（這段實際長了 {}：畫面 {}、其他 {}）",
+                "{}磁碟 {}/天（{breakdown}）",
                 over(per_day, BUDGET_DISK_PER_DAY),
                 crate::fmt::bytes(per_day as i64),
-                crate::fmt::bytes(grew),
-                crate::fmt::bytes(image_bytes as i64),
-                crate::fmt::bytes(rest)
             ));
             if per_day > BUDGET_DISK_PER_DAY {
                 breached.push(format!(
