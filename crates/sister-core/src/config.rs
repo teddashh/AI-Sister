@@ -744,17 +744,70 @@ mod tests {
         }
     }
 
+    /// 一整天會開的程式，一個都不准被擋。
+    ///
+    /// 這份名單本來只有五個，而**兩個真的 bug 就從那個缺口走過去**：
+    /// `obs` 命中 Obsidian、`teams` 命中 TeamSpeak，兩個都是子字串比對
+    /// 太寬，兩個都讓她在那些程式前景時完全不記東西，而且都不報錯。
+    ///
+    /// 排除規則的測試天生偏心：寫規則的人會測「它擋得住目標嗎」，
+    /// 不會測「它擋掉了誰」。前者失敗看得見（密碼管理員被錄到），
+    /// 後者失敗只是一段查不到的空白，而使用者會當成那段時間沒事發生。
+    /// 所以這份名單要夠雜、夠像真的一天。
     #[test]
     fn ordinary_apps_still_get_recorded() {
         let c = Config::default();
         for id in [
+            // 瀏覽器與終端機
             "chrome.exe",
-            "code.exe",
-            "explorer.exe",
+            "msedge.exe",
             "firefox",
+            "windowsterminal.exe",
+            "powershell.exe",
+            "cmd.exe",
+            // 編輯器／IDE
+            "code.exe",
+            "devenv.exe",
+            "idea64.exe",
+            "pycharm64.exe",
+            "sublime_text.exe",
+            // 筆記與文書——`obs` 那個 bug 的受害區
+            "obsidian.exe",
+            "logseq.exe",
+            "notion.exe",
+            "onenote.exe",
+            "typora.exe",
+            "winword.exe",
+            "excel.exe",
+            "notepad.exe",
+            "notepad++.exe",
+            // 通訊——`teams` 那個 bug 的受害區
+            "slack.exe",
+            "discord.exe",
+            "teamspeak.exe",
+            "line.exe",
+            "telegram.exe",
+            "outlook.exe",
+            // 系統自己的東西
+            "explorer.exe",
+            "searchapp.exe",
+            "searchhost.exe",
+            "taskmgr.exe",
+            "snippingtool.exe",
+            // 其他整天開著的
+            "spotify.exe",
+            "vlc.exe",
+            "figma.exe",
+            "photoshop.exe",
+            "docker desktop.exe",
             "Terminal",
         ] {
-            assert!(!c.privacy.check(&app(id)).is_blocked(), "{id} 不該被擋");
+            let verdict = c.privacy.check(&app(id));
+            assert!(
+                !verdict.is_blocked(),
+                "{id} 被擋掉了（{:?}）——她在這個程式前景時會什麼都記不住",
+                verdict.reason()
+            );
         }
     }
 
