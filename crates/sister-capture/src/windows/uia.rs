@@ -163,6 +163,45 @@ impl Uia {
         self.unknown_streak >= MAX_UNKNOWN_STREAK
     }
 
+    /// 一次問答回來了。兩個計數器都在這裡結帳。
+    ///
+    /// 卡住的計數是**連續**的：中間只要有一次回得來，就證明這條路還通，
+    /// 前面那幾次是偶發而不是壞掉。所以歸零，而不是累積到某天湊滿三次
+    /// 就把整組網址規則關掉——那會讓一台好機器在跑了一整個下午之後，
+    /// 因為三次分散的抽筋而失去所有網銀防護。
+    fn note_answer_arrived(&mut self, password_seen: Option<bool>) {
+        self.abandons = 0;
+        self.note_password_reading(password_seen);
+    }
+
+    /// 記一次「執行緒卡住、被丟掉」，回傳這一幀還問不問得出東西。
+    ///
+    /// 搬出來的理由跟 [`Self::note_password_reading`] 一樣，而且更急：
+    /// 這段以前長在 `read()` 中間，而 `read()` 要一條活的 COM 工作執行緒，
+    /// 於是這個**會把 `excluded_urls` 整組規則永久關掉**的狀態機，
+    /// 一條測試都沒有。它關掉之後不會有錯誤、不會有例外，只是從那一刻起
+    /// 網銀跟登入頁開始被錄進去。
+    ///
+    /// 跟密碼欄那個計數不一樣，這裡**沒有復原**：每放棄一次就漏一條卡在
+    /// UIA 裡回不來的執行緒，「再試一次」的代價是再漏一條。誠實地宣告
+    /// 做不到，比為了一個可能好不了的機會繼續漏執行緒划算。
+    fn note_abandoned_thread(&mut self) -> Option<Reading> {
+        // 對面卡住了，而我們沒有辦法把它叫回來。整條丟掉。
+        // **不要 join。** join 就等於把自己也賠進去。
+        self.worker = None;
+        self.walked = None;
+        self.cached_url = None;
+        self.abandons += 1;
+        if self.abandons >= MAX_ABANDONS {
+            self.surrendered = true;
+            tracing::warn!("UIA 連續卡住 {MAX_ABANDONS} 次，放棄讀取網址");
+            return None;
+        }
+        // 這一次問不出來。焦點狀態未知 → 照 `should_skip_frame`
+        // 的規則往安全的那邊倒。
+        Some(Reading::default())
+    }
+
     /// 記一次密碼欄問答的結果，維護那個連續失敗計數。
     ///
     /// 這段本來長在 `ask()` 中間。搬出來的唯一理由是**它以前沒有辦法被
@@ -249,8 +288,7 @@ impl Uia {
 
         match rx.recv_timeout(ASK_BUDGET) {
             Ok(mut reading) => {
-                self.abandons = 0;
-                self.note_password_reading(reading.password_focused);
+                self.note_answer_arrived(reading.password_focused);
                 if want_url {
                     self.walked = Some(key);
                     self.cached_url = reading.url.clone();
@@ -268,22 +306,7 @@ impl Uia {
                 }
                 Some(reading)
             }
-            Err(_) => {
-                // 對面卡住了，而我們沒有辦法把它叫回來。整條丟掉。
-                // **不要 join。** join 就等於把自己也賠進去。
-                self.worker = None;
-                self.walked = None;
-                self.cached_url = None;
-                self.abandons += 1;
-                if self.abandons >= MAX_ABANDONS {
-                    self.surrendered = true;
-                    tracing::warn!("UIA 連續卡住 {MAX_ABANDONS} 次，放棄讀取網址");
-                    return None;
-                }
-                // 這一次問不出來。焦點狀態未知 → 照 `should_skip_frame`
-                // 的規則往安全的那邊倒。
-                Some(Reading::default())
-            }
+            Err(_) => self.note_abandoned_thread(),
         }
     }
 }
@@ -549,6 +572,89 @@ mod tests {
         // 而且是真的歸零，不是減一——否則下一次失敗就又壞掉。
         uia.note_password_reading(None);
         assert!(!uia.password_check_broken(), "歸零之後不該一次失敗就再壞掉");
+    }
+
+    /// 卡住三次之後投降，而在那之前每一幀都還是往安全的那邊倒。
+    ///
+    /// 這是這個檔案裡代價最大的一個狀態機：踩到之後 `read()` 永遠回
+    /// `None`，於是 `excluded_urls` 那 16 條規則**整組停止生效**——
+    /// 網銀、登入頁從那一刻起原封不動地錄進資料庫。而它在這條測試之前
+    /// 一條測試都沒有。
+    #[test]
+    fn three_stuck_threads_in_a_row_end_the_url_rules() {
+        let mut uia = Uia::new();
+        assert!(uia.is_alive(), "一開始不該是投降狀態");
+
+        // 還沒到門檻：仍然給得出一幀，而且那一幀是「不知道」→ 擋住。
+        for i in 1..MAX_ABANDONS {
+            let reading = uia.note_abandoned_thread();
+            let reading = reading.unwrap_or_else(|| {
+                panic!("第 {i} 次就投降了，門檻是 {MAX_ABANDONS}")
+            });
+            assert!(
+                reading.should_skip_frame(),
+                "問不出來的時候要擋掉這一幀，不是放它過去"
+            );
+            assert!(uia.is_alive());
+        }
+
+        assert!(
+            uia.note_abandoned_thread().is_none(),
+            "連續 {MAX_ABANDONS} 次之後該投降"
+        );
+        assert!(
+            !uia.is_alive(),
+            "投降之後 is_alive() 要是 false，degradations() 才講得出那句\
+             「excluded_urls 整組規則不再生效」"
+        );
+    }
+
+    /// 三次**分散**的抽筋不算投降。
+    ///
+    /// 沒有這一條的話，一台跑了整個下午的好機器會因為三次互不相干的
+    /// 逾時而永久失去所有網址規則。註解寫的是「連續」，這裡是那兩個字
+    /// 唯一被執行的地方——`abandons = 0` 那一行刪掉，測試套件其餘部分
+    /// 不會有任何反應。
+    #[test]
+    fn a_machine_that_recovers_in_between_does_not_surrender() {
+        let mut uia = Uia::new();
+        for _ in 0..MAX_ABANDONS * 3 {
+            for _ in 1..MAX_ABANDONS {
+                assert!(uia.note_abandoned_thread().is_some());
+            }
+            // 中間回得來一次，就證明這條路還通。
+            uia.note_answer_arrived(Some(false));
+            assert!(uia.is_alive(), "分散的逾時不該累積成投降");
+        }
+    }
+
+    /// 投降是**單向**的：跟密碼欄那個計數不一樣，它不會自己好起來。
+    ///
+    /// 這是刻意的不對稱——每放棄一次就漏一條回不來的執行緒，所以
+    /// 「再試一次」的代價是再漏一條。兩個計數器長得像，行為卻相反，
+    /// 所以要有東西釘住這件事。
+    #[test]
+    fn surrender_is_permanent_even_if_an_answer_shows_up_later() {
+        let mut uia = Uia::new();
+        for _ in 0..MAX_ABANDONS {
+            uia.note_abandoned_thread();
+        }
+        assert!(!uia.is_alive());
+
+        uia.note_answer_arrived(Some(false));
+        assert!(
+            !uia.is_alive(),
+            "投降之後不該因為一次成功就回來——那會再開始漏執行緒"
+        );
+
+        // 而且是真的不再問了。這一行走的是 `read()` 開頭那道閘門：
+        // 投降之後它在碰任何 COM 之前就回 `None`，所以拿一個空的 HWND
+        // 問它是安全的——如果哪天那道閘門不見了，這裡會直接當掉，
+        // 而不是安靜地又開始漏執行緒。
+        assert!(
+            uia.read(HWND(std::ptr::null_mut()), "任何視窗").is_none(),
+            "投降之後不該再送出任何一個 job"
+        );
     }
 
     /// 位址列在「還沒輸入」時是提示語，不是網址。那種字串進了
