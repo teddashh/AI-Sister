@@ -1066,6 +1066,32 @@ pub mod doctor {
                 ),
                 _ => line(true, "已記錄", &detail),
             }
+
+            // 上面那一列擋的是「一個字都沒有」。它擋不住的是**有一堆列、
+            // 每一列都是空殼**——`COUNT(*)` 對這兩種故障的回答一模一樣。
+            //
+            // 這三個訊號（焦點、輸入節奏、文字座標）在 Phase 0 沒有任何讀者，
+            // 它們是 Phase 1 之後才要用的原料。沒人讀不是問題，**沒人讀所以
+            // 沒人驗**才是：真的壞掉的那一天，這裡是唯一會講話的地方。
+            for a in db.signal_audit()? {
+                if a.rows == 0 {
+                    // 沒有列 ≠ 壞掉。可能只是這台機器沒有那個能力（replay
+                    // 讀不到 pid），或還沒錄到。不知道就說不知道。
+                    mark("?", a.name, "還沒有資料");
+                } else if a.broken {
+                    mark(
+                        "✗",
+                        a.name,
+                        &format!("{} 列，但沒有一列有內容——{}", a.rows, a.note),
+                    );
+                } else {
+                    line(
+                        true,
+                        a.name,
+                        &format!("{} 列，{} {}", a.rows, a.populated, a.populated_label),
+                    );
+                }
+            }
         }
 
         println!("\n隱私");

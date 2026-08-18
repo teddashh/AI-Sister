@@ -606,6 +606,80 @@ impl Db {
         LIKE_SCAN_DAYS
     }
 
+    /// 那三張「只寫不讀」的表，裡面到底有沒有東西。
+    ///
+    /// `ocr_blocks` 的座標、`focus_events`、`input_metrics` 整整三張表，
+    /// 除了 `stats` 的 `COUNT(*)` 之外，這份 codebase 沒有任何一行 SELECT
+    /// 讀過它們。它們是 Phase 1 之後才會被用到的原料，**存著本身就是對的**
+    /// ——「暴力要暴在保存」講的就是這件事，不該為了「有人讀」而硬加讀者。
+    ///
+    /// 危險的不是沒人讀，是**沒人讀所以沒人驗**。alpha.1 的教訓正是這個形狀：
+    /// `doctor` 說 OCR 引擎好好的、錄了一分鐘、摘要一切正常，而資料庫裡一個
+    /// 字都沒有。`COUNT(*)` 擋得住「整張表是空的」，擋不住「有一堆列、每一列
+    /// 都是空殼」。
+    ///
+    /// 所以這裡問的不是數量，是**內部一致性**：三個判斷各自都是「這個狀態
+    /// 自相矛盾」，而不是「這個數字看起來很小」。使用者只是安靜地坐著不動，
+    /// 也會讓數字很小——那種情況下報警，就是我在 `check-audit.py` 剛修掉的
+    /// 那個錯誤的鏡像。
+    pub fn signal_audit(&self) -> Result<Vec<SignalAudit>> {
+        let mut out = Vec::new();
+
+        // 焦點事件：有列、卻沒有任何一列知道那是哪個 app。
+        // 一段「不知道是哪個程式」的焦點事件不含任何資訊，那不是安靜，是壞了。
+        let (focus, named): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*), COUNT(app_id) FROM focus_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        out.push(SignalAudit {
+            name: "視窗焦點",
+            rows: focus,
+            populated: named,
+            populated_label: "列知道自己是哪個 app",
+            broken: focus > 0 && named == 0,
+            note: "每段焦點事件應該知道自己是哪個 app",
+        });
+
+        // 打字節奏：有列、卻每一個計數器都是 0。
+        // 擷取端在「這個窗口什麼都沒發生」時**根本不會寫列**（見
+        // `windows/input.rs` 的早退），所以一列全 0 代表那道閘門壞了，
+        // 不代表使用者沒動。
+        let (input, active): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(keystrokes + clicks + mouse_px + scroll_ticks > 0), 0)
+             FROM input_metrics",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        out.push(SignalAudit {
+            name: "輸入節奏",
+            rows: input,
+            populated: active,
+            populated_label: "列真的有動作",
+            broken: input > 0 && active == 0,
+            note: "沒有動靜的窗口本來就不該寫列，所以全 0 的列是壞的不是閒的",
+        });
+
+        // 文字方框的座標：有列、卻全部疊在同一個位置。
+        // 這是「以後要在畫面上把那行字圈起來」唯一的依據，而它壞掉的樣子
+        // 是所有字都在 (0,0)——搜尋照樣全中，沒有任何地方會報錯。
+        let (blocks, distinct): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT y) FROM ocr_blocks",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        out.push(SignalAudit {
+            name: "文字座標",
+            rows: blocks,
+            populated: distinct,
+            populated_label: "個不同的高度",
+            broken: blocks > 1 && distinct <= 1,
+            note: "一整張畫面的字不會全部在同一個高度",
+        });
+
+        Ok(out)
+    }
+
     // ---------- 檢索 ----------
 
     /// 全文檢索。trigram 與 unicode61 兩個索引各查一次再合併取最佳分數，
@@ -1091,6 +1165,32 @@ pub struct RedactionAudit {
     pub leaked: i64,
 }
 
+/// 一種存下來的訊號，現在到底是有內容還是空殼（見 [`Db::signal_audit`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalAudit {
+    pub name: &'static str,
+    /// 存了幾列。
+    pub rows: i64,
+    /// 其中「真的有內容」的有多少——每個訊號自己定義那是什麼意思。
+    pub populated: i64,
+    /// `populated` 數的是什麼，用來湊出那一句話。
+    ///
+    /// 沒有這個欄位的第一版把三個訊號印成同一句「其中 N 列有內容」，而文字
+    /// 座標的 N 是**有幾個不同的高度**、不是列數：36 個方框散在 5 個高度，
+    /// 印出來變成「36 列裡有 5 列有內容」。三個數字各自都對，只是其中兩個
+    /// 被安上了第三個的名字——跟排除稽核那次把「段」說成「張」是同一個錯誤，
+    /// 隔了幾天又犯一次，所以這次把單位釘在資料旁邊而不是印的時候現編。
+    pub populated_label: &'static str,
+    /// `rows > 0` 而 `populated == 0`：這個狀態自相矛盾，不是「使用者很安靜」。
+    ///
+    /// 刻意不用「populated 佔比很低」當條件。低佔比在真實使用中隨時會發生
+    /// （整個下午都在看影片、沒碰鍵盤），拿它報警等於製造一個大家學會忽略的
+    /// 警告。這裡只認**不可能同時成立**的組合。
+    pub broken: bool,
+    /// 為什麼那個組合不可能——警告要能解釋自己。
+    pub note: &'static str,
+}
+
 /// 一條排除規則生效過的紀錄（見 [`Db::exclusion_audit`]）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExclusionAudit {
@@ -1470,6 +1570,114 @@ mod tests {
         let st = db.stats().expect("stats");
         assert_eq!(st.input_windows, 1);
         assert_eq!(st.system_events, 1);
+    }
+
+    /// 空殼跟安靜長得不一樣，這個檢查必須認得出差別。
+    ///
+    /// 這條測試有兩半，缺任何一半它就沒有意義：
+    ///
+    /// 後半（會不會叫）是明顯的那一半。**前半（會不會亂叫）才是重點**——
+    /// 一個對著正常資料報警的檢查，三天之內就會被學會忽略，然後它跟不存在
+    /// 是同一件事。使用者整個下午都在看影片、完全沒碰鍵盤，是合法狀態。
+    #[test]
+    fn a_signal_that_is_merely_quiet_is_not_reported_as_broken() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+
+        // 一段合法的「幾乎沒動」：滑鼠動了 3 px，其他全 0。
+        // 這種列在真實使用中每天都有，不該有任何警告。
+        db.insert_input(
+            s,
+            &InputMetrics {
+                ts_start: 0,
+                ts_end: 10_000,
+                keystrokes: 0,
+                clicks: 0,
+                mouse_px: 3,
+                scroll_ticks: 0,
+                window_switches: 0,
+                idle_ms: 9_000,
+                typing_bursts: 0,
+            },
+        )
+        .expect("insert input");
+
+        db.insert_focus(
+            s,
+            &FocusEvent {
+                ts: 0,
+                kind: FocusKind::Focus,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    app_name: Some("Google Chrome".into()),
+                    window_title: Some("影片".into()),
+                    url: None,
+                    // pid 在 replay 上永遠是 None，那是後端的限制不是故障。
+                    pid: None,
+                    password_field: false,
+                },
+            },
+        )
+        .expect("insert focus");
+
+        for a in db.signal_audit().expect("audit") {
+            assert!(!a.broken, "{} 只是安靜，不該被說成壞掉", a.name);
+        }
+    }
+
+    /// 有一堆列、每一列都是空殼——`COUNT(*)` 看起來完全正常的那種故障。
+    #[test]
+    fn rows_that_carry_nothing_are_reported_as_broken() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+
+        // 擷取端在「什麼都沒發生」時根本不該寫列（見 windows/input.rs 的
+        // 早退）。所以一列全 0 代表那道閘門壞了，不是使用者很安靜。
+        for i in 0..5 {
+            db.insert_input(
+                s,
+                &InputMetrics {
+                    ts_start: i * 10_000,
+                    ts_end: i * 10_000 + 10_000,
+                    keystrokes: 0,
+                    clicks: 0,
+                    mouse_px: 0,
+                    scroll_ticks: 0,
+                    window_switches: 0,
+                    idle_ms: 10_000,
+                    typing_bursts: 0,
+                },
+            )
+            .expect("insert input");
+        }
+
+        // 焦點事件不知道自己是哪個 app——這種列不含任何資訊。
+        db.insert_focus(
+            s,
+            &FocusEvent {
+                ts: 0,
+                kind: FocusKind::Focus,
+                snapshot: FocusSnapshot::default(),
+            },
+        )
+        .expect("insert focus");
+
+        let audit = db.signal_audit().expect("audit");
+        let broken: Vec<_> = audit.iter().filter(|a| a.broken).map(|a| a.name).collect();
+        assert!(
+            broken.contains(&"輸入節奏"),
+            "五列全 0 的輸入沒被抓到：{audit:?}"
+        );
+        assert!(
+            broken.contains(&"視窗焦點"),
+            "不知道 app 的焦點事件沒被抓到：{audit:?}"
+        );
+
+        // 一列都沒有的訊號不算壞——那是「還沒錄到」，不是「錄壞了」。
+        // 兩者的差別由 `rows` 講，不是由 `broken` 講。
+        let coords = audit.iter().find(|a| a.name == "文字座標").expect("座標");
+        assert_eq!(coords.rows, 0);
+        assert!(!coords.broken, "空的表不該被說成壞掉");
     }
 
     /// 掃描的界線是**行為**，不是一個比較快的數字。
