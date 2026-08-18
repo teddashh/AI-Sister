@@ -43,8 +43,18 @@ impl Stage {
 /// 一整段錄製裡，各階段的耗時。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Timings {
+    /// 一整個 tick 的耗時。**它是分母，不是階段之一。**
+    ///
+    /// 沒有它的話，這份報告只能講「我量到的那幾件事誰比較貴」，而那正是
+    /// 一份效能報告最會騙人的形狀：沒被量到的那一段完全不會出現在版面上，
+    /// 於是「我量到的最大的那一項」看起來就像「最大的那一項」。
+    pub tick: Stage,
     /// 問前景視窗是誰（含 UIA 的跨程序往返）。
     pub focus: Stage,
+    /// 讀剪貼簿。**每個 tick 都付**，而且是一次跨程序的 Win32 往返。
+    pub clipboard: Stage,
+    /// 收輸入節奏計數（不含內容）。
+    pub input: Stage,
     /// 便宜的探測抓圖 + dhash。**每個 tick 都付**。
     pub probe: Stage,
     /// 完整解析度抓圖。只有畫面真的變了才付。
@@ -57,9 +67,14 @@ pub struct Timings {
 
 impl Timings {
     /// 依總耗時由大到小。報告只印得下前幾名，而使用者要看的就是前幾名。
+    ///
+    /// 不含 `tick`：它是這些階段的容器，排進來會永遠是第一名，
+    /// 而且會讓百分比加起來超過 100%。
     pub fn ranked(&self) -> Vec<(&'static str, Stage)> {
         let mut v = vec![
             ("脈絡", self.focus),
+            ("剪貼簿", self.clipboard),
+            ("輸入", self.input),
             ("探測", self.probe),
             ("抓圖", self.grab),
             ("OCR", self.ocr),
@@ -71,9 +86,32 @@ impl Timings {
         v
     }
 
-    /// 所有階段的總和。這是「她在忙」的時間，不是牆上時鐘的時間。
+    /// 分母：量得到整個 tick 就用它，否則退回各階段的總和。
+    ///
+    /// 兩者都是「她在忙」的時間，不是牆上時鐘的時間——tick 與 tick 之間
+    /// 的睡眠不算在內。
     pub fn total(&self) -> Duration {
-        self.ranked().iter().map(|(_, s)| s.total).sum()
+        if self.tick.calls > 0 {
+            self.tick.total
+        } else {
+            self.ranked().iter().map(|(_, s)| s.total).sum()
+        }
+    }
+
+    /// 沒有歸因到任何階段的時間。`None` = 沒量過整個 tick，答不出來。
+    ///
+    /// 這個數字是**這份報告對自己的誠實度檢查**。它小，代表上面那份排名
+    /// 真的解釋了 CPU 花到哪裡去；它大，代表最貴的東西根本沒被量到，
+    /// 而排名第一的那一項只是「被量到的裡面最大的」。
+    ///
+    /// 不回 0：答不出來和「全部都歸因到了」是完全相反的兩件事。
+    pub fn unattributed(&self) -> Option<Duration> {
+        if self.tick.calls == 0 {
+            return None;
+        }
+        let accounted: Duration = self.ranked().iter().map(|(_, s)| s.total).sum();
+        // 巢狀量測會有奈秒級的重疊，saturating 讓它變成 0 而不是 panic
+        Some(self.tick.total.saturating_sub(accounted))
     }
 }
 
@@ -103,5 +141,44 @@ mod tests {
         let names: Vec<&str> = t.ranked().iter().map(|(n, _)| *n).collect();
         assert_eq!(names, vec!["OCR", "抓圖", "探測"], "最貴的要排第一");
         assert_eq!(t.total(), Duration::from_millis(61));
+    }
+
+    /// 沒量過整個 tick 的時候，「沒歸因到的時間」必須說不知道。
+    ///
+    /// 回 0 的話，一份**什麼都沒量到**的報告會顯示「歸因率 100%」——
+    /// 這是這個模組存在的理由的反面。
+    #[test]
+    fn without_a_denominator_the_leftover_is_unknown_not_zero() {
+        let mut t = Timings::default();
+        t.ocr.record(Duration::from_millis(50));
+        assert_eq!(t.unattributed(), None);
+        assert_eq!(t.total(), Duration::from_millis(50), "沒有分母就退回總和");
+    }
+
+    /// tick 是分母，不是階段之一：它不進排名，而沒被量到的那一段要跑出來。
+    #[test]
+    fn the_time_no_stage_claimed_shows_up_as_its_own_line() {
+        let mut t = Timings::default();
+        t.tick.record(Duration::from_millis(100));
+        t.ocr.record(Duration::from_millis(30));
+        t.clipboard.record(Duration::from_millis(10));
+
+        let names: Vec<&str> = t.ranked().iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, vec!["OCR", "剪貼簿"], "tick 不可以出現在排名裡");
+        assert_eq!(t.total(), Duration::from_millis(100), "分母是整個 tick");
+        assert_eq!(
+            t.unattributed(),
+            Some(Duration::from_millis(60)),
+            "60ms 沒有任何階段認領——這正是要印出來的那個數字"
+        );
+    }
+
+    /// 巢狀量測的奈秒級重疊不可以讓它爆掉。
+    #[test]
+    fn overlapping_measurements_clamp_to_zero_instead_of_panicking() {
+        let mut t = Timings::default();
+        t.tick.record(Duration::from_millis(10));
+        t.ocr.record(Duration::from_millis(11));
+        assert_eq!(t.unattributed(), Some(Duration::ZERO));
     }
 }

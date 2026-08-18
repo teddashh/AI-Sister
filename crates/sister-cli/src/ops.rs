@@ -1518,17 +1518,36 @@ pub mod record {
             total.as_secs_f64(),
             total.as_secs_f64() * 1000.0 / ticks as f64
         );
-        for (name, s) in t.ranked() {
-            // CJK 是雙寬字元，`{:<6}` 只數字元數會對不齊
+        // CJK 是雙寬字元，`{:<6}` 只數字元數會對不齊
+        let pad = |name: &str| {
             let cols: usize = name.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
-            let pad = " ".repeat(7usize.saturating_sub(cols));
+            " ".repeat(7usize.saturating_sub(cols))
+        };
+        for (name, s) in t.ranked() {
             let per_call = s.per_call().unwrap_or_default();
             println!(
-                "        {name}{pad}{:>6.2} 秒 / {:>3.0}%　{:>5} 次，每次 {:.1} ms",
+                "        {name}{}{:>6.2} 秒 / {:>3.0}%　{:>5} 次，每次 {:.1} ms",
+                pad(name),
                 s.total.as_secs_f64(),
                 s.total.as_secs_f64() / total.as_secs_f64() * 100.0,
                 s.calls,
                 per_call.as_secs_f64() * 1000.0
+            );
+        }
+        // 這一行是上面那份排名對自己的誠實度檢查。它小，代表排名真的解釋了
+        // CPU 花到哪裡；它大，代表最貴的東西根本沒被量到，而排第一的那一項
+        // 只是「被量到的裡面最大的」——那正是一份效能報告最會騙人的形狀。
+        if let Some(rest) = t.unattributed() {
+            let pct = rest.as_secs_f64() / total.as_secs_f64() * 100.0;
+            println!(
+                "        其他{}{:>6.2} 秒 / {pct:>3.0}%　{}",
+                pad("其他"),
+                rest.as_secs_f64(),
+                if pct >= 25.0 {
+                    "⚠ 這段沒歸因到任何階段，上面的排名解釋不了它"
+                } else {
+                    "（沒歸因到任何階段）"
+                }
             );
         }
     }

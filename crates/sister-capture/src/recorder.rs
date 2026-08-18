@@ -213,7 +213,18 @@ impl<B: Backend> Recorder<B> {
     }
 
     /// 走一輪感官。`ts` 由呼叫端給定，因此 replay 完全確定性。
+    ///
+    /// 這一層只做一件事：量整個 tick 有多久。它必須包住**每一條**離開的
+    /// 路徑（含被排除、沒畫面、以及 `?` 帶出去的錯誤），否則「沒歸因到的
+    /// 時間」那個數字會偏向好看的方向——而那個數字唯一的用途就是抓自己說謊。
     pub fn tick(&mut self, ts: Millis) -> Result<Tick> {
+        let t = Instant::now();
+        let out = self.tick_inner(ts);
+        self.timings.tick.record(t.elapsed());
+        out
+    }
+
+    fn tick_inner(&mut self, ts: Millis) -> Result<Tick> {
         self.stats.ticks += 1;
 
         if !self.config.capture.enabled {
@@ -477,7 +488,14 @@ impl<B: Backend> Recorder<B> {
     }
 
     fn record_clipboard(&mut self, ts: Millis, focus: &FocusSnapshot) -> Result<()> {
-        let Some(mut event) = self.backend.poll_clipboard(ts)? else {
+        // 每個 tick 都會問一次，而在 Windows 上這是 OpenClipboard →
+        // GetClipboardData → CloseClipboard 的跨程序往返，別的程式正抓著
+        // 剪貼簿時它會等。所以它必須有自己的一欄，不能混在「其他」裡面。
+        let t = Instant::now();
+        let polled = self.backend.poll_clipboard(ts);
+        self.timings.clipboard.record(t.elapsed());
+
+        let Some(mut event) = polled? else {
             return Ok(());
         };
         if event.source_app.is_none() {
@@ -508,7 +526,11 @@ impl<B: Backend> Recorder<B> {
     }
 
     fn record_input(&mut self, ts: Millis) -> Result<()> {
-        if let Some(metrics) = self.backend.drain_input(ts)? {
+        let t = Instant::now();
+        let drained = self.backend.drain_input(ts);
+        self.timings.input.record(t.elapsed());
+
+        if let Some(metrics) = drained? {
             self.db.insert_input(self.session_id, &metrics)?;
         }
         Ok(())
