@@ -78,6 +78,14 @@ pub struct RecorderStats {
     /// 那是一句必須說出口的話，否則使用者只會發現下午的記憶莫名其妙比
     /// 上午差，而找不到任何解釋。
     pub images_over_budget: u64,
+    /// 想存圖卻失敗了幾次（磁碟滿、資料夾沒權限、路徑被佔用）。
+    ///
+    /// 和 `ocr_failures` 同一個理由：吞掉錯誤可以，不留計數不行。少了它，
+    /// 「錄了一整天、一張圖都沒有」和「一切正常」在摘要上長得一模一樣
+    /// ——摘要甚至會因為每個計數都是 0 而整段不印。
+    pub image_failures: u64,
+    /// 最後一次存圖失敗的原因。一句原文遠比一個數字有用。
+    pub last_image_error: Option<String>,
     /// OCR 一共讀出幾行字。
     ///
     /// 「保留了 12 張畫面」和「記住了 12 張畫面上的字」是兩回事，而摘要
@@ -146,9 +154,15 @@ impl<B: Backend> Recorder<B> {
         // 今天已經用掉多少畫面額度，要從資料庫接回來，不能從 0 開始。
         // 從 0 開始的話，那個「每日上限」只管得住單一次執行——關掉再開就
         // 歸零，一天重開十次就是十倍額度。一個可以靠重開繞過的上限不是上限。
+        //
+        // 問不出來時也**不可以**當成 0：那同樣是重新發一整份額度，只是這次
+        // 連使用者都不知道發生過。開不起來比較誠實——資料庫壞到連一句 SUM
+        // 都算不出來，本來就不該繼續往裡面寫。
         let now = sister_core::now_ms();
         let image_day = now.div_euclid(DAY_MS);
-        let image_bytes_today = db.image_bytes_since(image_day * DAY_MS).unwrap_or(0);
+        let image_bytes_today = db
+            .image_bytes_since(image_day * DAY_MS)
+            .context("今天用掉多少畫面額度，問不出來")?;
 
         Ok(Self {
             backend,
@@ -350,11 +364,18 @@ impl<B: Backend> Recorder<B> {
             Vec::new()
         };
 
-        let (image_path, image_bytes) = self.store_image(ts, &frame).unwrap_or_else(|e| {
-            // 存不下畫面不該讓文字也跟著遺失
-            tracing::warn!(error = %e, "failed to store frame image; keeping text only");
-            (None, 0)
-        });
+        let (image_path, image_bytes) = match self.store_image(ts, &frame) {
+            Ok(v) => v,
+            Err(e) => {
+                // 存不下畫面不該讓文字也跟著遺失——但也不可以只寫進 log
+                // 就算了。磁碟滿、資料夾沒權限、路徑被佔用，症狀都是
+                // 「錄了一天、一張圖都沒有」，而摘要本來連提都不會提。
+                tracing::warn!(error = %e, "failed to store frame image; keeping text only");
+                self.stats.image_failures += 1;
+                self.stats.last_image_error = Some(format!("{e:#}"));
+                (None, 0)
+            }
+        };
         self.stats.image_bytes += image_bytes as u64;
 
         let capture = FrameCapture {
@@ -370,13 +391,25 @@ impl<B: Backend> Recorder<B> {
         };
 
         let t = Instant::now();
-        let (frame_id, _chunk, facts) = self.db.insert_frame(
+        let inserted = self.db.insert_frame(
             self.session_id,
             &capture,
             image_path.as_deref(),
             image_bytes,
-        )?;
+        );
         self.timings.db.record(t.elapsed());
+
+        let (frame_id, _chunk, facts) = match inserted {
+            Ok(v) => v,
+            Err(e) => {
+                // 那一列沒成立，這張 PNG 就沒有任何東西指向它了。而
+                // `retention::prune` 只走 `image_path IS NOT NULL` 的列，
+                // 所以它永遠不會被清掉——「畫面 30 天後刪掉」對它是假的，
+                // 而且它還佔著今天的畫面額度。現在就收乾淨。
+                self.discard_image(image_path.as_deref(), image_bytes);
+                return Err(e);
+            }
+        };
 
         // 到這裡才推進去重基準：畫面、文字、那一列都已經落地了。
         // 寫不進去時上面那個 `?` 會直接帶著錯誤離開，而基準原封不動——
@@ -413,13 +446,20 @@ impl<B: Backend> Recorder<B> {
             return Ok((None, 0));
         };
 
+        // 時鐘往回跳的話，「距離上一張多久」會是負數，而負數永遠小於間隔
+        // ——於是節流會一路擋到時鐘追回來為止。實測一次 8 小時的時區修正
+        // （雙系統把 RTC 當本地時間寫、VM 從快照恢復、NTP 校時）就等於
+        // 8 小時一張圖都不存，而摘要會說「間隔未到」，那是假的。
+        //
+        // 往回跳就當作「上一張的時間已經沒有意義了」，直接放行。
         let gap = self.config.capture.image_min_interval_ms as i64;
-        if self
-            .last_image_ts
-            .is_some_and(|prev| ts.saturating_sub(prev) < gap)
-        {
-            self.stats.images_throttled += 1;
-            return Ok((None, 0));
+        match self.last_image_ts {
+            Some(prev) if ts < prev => self.last_image_ts = None,
+            Some(prev) if ts - prev < gap => {
+                self.stats.images_throttled += 1;
+                return Ok((None, 0));
+            }
+            _ => {}
         }
 
         // 跨日就把今天的額度歸零。用 UTC 天切，和 `frames::relative_path`
@@ -458,6 +498,30 @@ impl<B: Backend> Recorder<B> {
         self.last_image_ts = Some(ts);
         self.image_bytes_today += len as u64;
         Ok((Some(rel), len))
+    }
+
+    /// 把一張已經寫出去、但那一列沒成立的 PNG 收掉，並退回它佔用的額度。
+    ///
+    /// 刪不掉就把它留著並記一筆——留一個孤兒檔比留一個假的額度數字好，
+    /// 因為前者只是浪費磁碟，後者會讓今天剩下的時間少存好幾百張圖。
+    fn discard_image(&mut self, rel: Option<&str>, bytes: i64) {
+        let (Some(rel), Some(root)) = (rel, self.image_dir.as_ref()) else {
+            return;
+        };
+        let full = root.join(rel);
+        match std::fs::remove_file(&full) {
+            Ok(()) => {
+                let n = bytes.max(0) as u64;
+                self.image_bytes_today = self.image_bytes_today.saturating_sub(n);
+                self.stats.image_bytes = self.stats.image_bytes.saturating_sub(n);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %full.display(), "orphaned frame image");
+                self.stats.image_failures += 1;
+                self.stats.last_image_error =
+                    Some(format!("那一列沒寫成，這張圖也刪不掉：{full:?}（{e}）"));
+            }
+        }
     }
 
     fn record_focus_if_changed(&mut self, ts: Millis, focus: &FocusSnapshot) -> Result<()> {
@@ -902,6 +966,108 @@ mod tests {
                 "抓不到的第 {failure} 種：沒存成的那一張不能把後面真的那一張擋掉"
             );
         }
+    }
+
+    /// 那一列沒寫成，剛寫出去的 PNG 不可以留在磁碟上。
+    ///
+    /// `retention::prune` 只走 `image_path IS NOT NULL` 的列，所以一張沒有
+    /// 對應列的圖**永遠不會被清掉**——「畫面 30 天後刪掉」對它是一句假話，
+    /// 而且它還一直佔著今天的畫面額度。
+    #[test]
+    fn an_image_whose_row_never_landed_does_not_stay_on_disk() {
+        let dir = std::env::temp_dir().join(format!("sister-orphan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let db = Db::open_in_memory().expect("db");
+        db.conn()
+            .execute_batch(
+                "CREATE TRIGGER t_boom BEFORE INSERT ON frames
+                 BEGIN SELECT RAISE(ABORT, 'simulated disk failure'); END;",
+            )
+            .expect("ddl");
+
+        let backend = crate::traits::CompositeBackend {
+            name: "orphan".into(),
+            screen: ChangingScreen::default(),
+            focus: crate::traits::NullFocus,
+            clipboard: crate::traits::NullClipboard,
+            input: crate::traits::NullInput,
+            ocr: NumberedLines::default(),
+        };
+        let mut r =
+            Recorder::new(backend, db, Config::default(), Some(dir.clone())).expect("recorder");
+
+        assert!(r.tick(0).is_err(), "寫不進去要往上報");
+
+        let pngs = walk_pngs(&dir);
+        assert!(
+            pngs.is_empty(),
+            "那一列沒成立，這張圖沒有任何東西指向它，清理也永遠掃不到它：{pngs:?}"
+        );
+        // 額度也要退回去，否則今天剩下的時間會少存好幾百張
+        assert_eq!(r.stats().image_bytes, 0, "沒算數的圖不可以佔額度");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn walk_pngs(dir: &std::path::Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "png") {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// 時鐘往回跳，不可以讓她整整幾小時一張圖都不存。
+    ///
+    /// `ts - prev` 是負數，而負數永遠小於間隔——於是節流會一路擋到時鐘
+    /// 追回來為止。8 小時的時區修正（雙系統把 RTC 當本地時間寫、VM 從
+    /// 快照恢復）就等於 8 小時只留字，而摘要會說「間隔未到」，那是假的。
+    #[test]
+    fn a_clock_that_jumps_backwards_does_not_stop_her_saving_screens() {
+        let dir = std::env::temp_dir().join(format!("sister-clock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut cfg = Config::default();
+        cfg.capture.image_min_interval_ms = 5_000;
+        let mut r = image_recorder(cfg, dir.clone());
+
+        let noon = 12 * 60 * 60 * 1000;
+        assert!(matches!(r.tick(noon).expect("tick"), Tick::Kept { .. }));
+        assert_eq!(walk_pngs(&dir).len(), 1);
+
+        // 時鐘往回跳 8 小時
+        let before = noon - 8 * 60 * 60 * 1000;
+        assert!(matches!(r.tick(before).expect("tick"), Tick::Kept { .. }));
+        assert_eq!(
+            walk_pngs(&dir).len(),
+            2,
+            "時鐘往回跳不是「間隔未到」，不能拿它當理由不存圖"
+        );
+        assert_eq!(
+            r.stats().images_throttled,
+            0,
+            "更不能把它算成節流——那會讓摘要講出一個假的原因"
+        );
+
+        // 跳回去之後，節流照常生效
+        assert!(matches!(
+            r.tick(before + 100).expect("tick"),
+            Tick::Kept { .. }
+        ));
+        assert_eq!(walk_pngs(&dir).len(), 2, "剛存過，這張要被間隔擋下");
+        assert_eq!(r.stats().images_throttled, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 第三種「沒存成」：畫面抓到了、字讀到了，資料庫那一列寫不進去。

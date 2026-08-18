@@ -452,11 +452,13 @@ pub mod stats {
             _ => 0.0,
         };
         let disk_total = s.db_bytes + s.image_bytes;
-        let per_day = if span_days >= 0.5 {
-            disk_total as f64 / span_days
-        } else {
-            disk_total as f64
-        };
+        // 不到半天就不外推。`None` = 「還答不出來」，不是 0，也不是「就是這麼多」。
+        //
+        // 舊版在不到半天的時候把**累計總量**塞進這個欄位，然後照樣蓋一個 ✓
+        // 上去：錄兩小時長了 200MB，它會印「每天約 200.0 MB ✓」，而真實速率
+        // 是 2.4 GB/天——超標八倍卻長得像通過。隔壁的 `footprint.rs` 早就
+        // 為同一件事寫了規則（不到 60 秒不外推）並且有測試守著，是這裡沒跟上。
+        let per_day = (span_days >= 0.5).then(|| disk_total as f64 / span_days);
 
         if json {
             println!(
@@ -468,7 +470,7 @@ pub mod stats {
                     "input_windows": s.input_windows, "system_events": s.system_events,
                     "sessions": s.sessions, "db_bytes": s.db_bytes,
                     "image_bytes": s.image_bytes, "span_days": span_days,
-                    "bytes_per_day": per_day,
+                    "bytes_per_day": per_day,  // null = 資料還不夠久，不外推
                 }))?
             );
             return Ok(());
@@ -509,15 +511,19 @@ pub mod stats {
         );
         // Phase 0 的退出條件之一：每天 < 300MB
         let budget = 300 * 1024 * 1024;
-        let mark = if per_day as i64 <= budget {
-            "✓"
-        } else {
-            "✗"
-        };
-        println!(
-            "  每天約    {} {mark}  （Phase 0 預算 300 MB/天）",
-            fmt::bytes(per_day as i64)
-        );
+        match per_day {
+            Some(p) => println!(
+                "  每天約    {} {}  （Phase 0 預算 300 MB/天）",
+                fmt::bytes(p as i64),
+                if p as i64 <= budget { "✓" } else { "✗" }
+            ),
+            None => println!(
+                "  每天約    還不知道（只錄了 {:.1} 小時，不到半天不外推）\
+                 \n            目前一共 {}。要驗 Phase 0 的 300 MB/天，得先錄滿一天。",
+                span_days * 24.0,
+                fmt::bytes(disk_total)
+            ),
+        }
         Ok(())
     }
 }
@@ -1216,20 +1222,32 @@ pub mod record {
         for warning in caps.silently_degraded(&config) {
             println!("⚠  {warning}");
         }
+        // 總開關關著的時候，每個 tick 都直接回 `Disabled`，而摘要的四個
+        // 欄位剛好全部是 0——和「錄得好好的、只是螢幕沒變」長得一模一樣。
+        // 一個打字打錯、或一個沒關回來的暫停，就能讓她整天什麼都沒記，
+        // 而且沒有任何一行字提過。
+        if !config.capture.enabled {
+            println!(
+                "⚠  capture.enabled = false：接下來每一個 tick 都會直接跳過，\
+                 什麼都不會記錄。改成 true 才會真的開始錄。"
+            );
+        }
+        // doctor 會挑出「寫了也不會命中」的網址規則，但一個只跑 record 的人
+        // 永遠看不到那份清單——而那正是把網銀畫面錄一整年的那種規則。
+        for (rule, why) in sister_core::config::suspicious_url_rules(&config.privacy.excluded_urls)
+        {
+            println!("⚠  這條排除規則寫了也不會命中：{rule} — {why}");
+        }
 
         // 開錄之前先讓過期的東西消失。放在這裡而不是收工時，是因為收工
         // 有太多種方式不會發生（Ctrl-C、當機、關機、拔電），而開錄只有
         // 一種方式：她真的開始了。一個只在乾淨結束時才生效的保留期，
         // 就是一個在最需要它的機器上永遠不生效的保留期。
-        match db.prune(
-            sister_core::now_ms(),
-            &config.retention,
-            config
-                .capture
-                .store_images
-                .then(|| crate::ops::prune::frames_dir(data_dir))
-                .as_deref(),
-        ) {
+        // 清理**一律**帶著畫面資料夾，即使現在是 text-only。
+        // `store_images = false` 的意思是「不要再寫新的圖」，不是「以前
+        // 寫的那些不存在」——不帶的話那些舊圖會永遠留在磁碟上。
+        let frames_root = crate::ops::prune::frames_dir(data_dir);
+        match db.prune(sister_core::now_ms(), &config.retention, Some(&frames_root)) {
             Ok(report) if !report.is_empty() => {
                 println!("○ 保留期清理");
                 crate::ops::prune::print_report(&report, false);
@@ -1244,9 +1262,10 @@ pub mod record {
         let interval = Duration::from_millis(config.capture.min_interval_ms.max(200));
         // config 等一下會被 Recorder 吃掉，但收尾的摘要與定期清理還需要這幾項
         let config_ocr = config.capture.ocr;
+        let config_store_images = config.capture.store_images;
         let image_budget_mb = config.capture.max_image_mb_per_day;
         let retention = config.retention.clone();
-        let prune_images = images.clone();
+        let prune_images = frames_root.clone();
         let mut rec = Recorder::new(backend, db, config, images)?;
 
         install_ctrl_c_handler();
@@ -1298,7 +1317,7 @@ pub mod record {
                 last_prune = Instant::now();
                 match rec
                     .db_mut()
-                    .prune(sister_core::now_ms(), &retention, prune_images.as_deref())
+                    .prune(sister_core::now_ms(), &retention, Some(&prune_images))
                 {
                     Ok(r) if !r.is_empty() => {
                         println!("  ○ 保留期清理");
@@ -1345,7 +1364,7 @@ pub mod record {
         );
         report_exclusions(&stats);
         report_ocr(&stats, config_ocr);
-        report_images(&stats, rec.timings(), image_budget_mb);
+        report_images(&stats, rec.timings(), image_budget_mb, config_store_images);
         // 先取最後一次足跡樣本，時間表才拿得到「這段期間燒了多少 CPU」，
         // 而那是把牆上時間和 CPU 分開講的前提。
         footprint.tick();
@@ -1470,8 +1489,28 @@ pub mod record {
         stats: &sister_capture::RecorderStats,
         timings: &sister_capture::timings::Timings,
         budget_mb: u64,
+        store_images: bool,
     ) {
         let written = timings.store.calls;
+
+        // 「保留了 12 張畫面、磁碟上一張圖都沒有」原本會讓這一整段消失，
+        // 因為每個計數剛好都是 0。那正好是最需要說話的時候：資料夾沒權限、
+        // 磁碟滿了、路徑被佔用，症狀全都長這樣。
+        if written == 0 && stats.kept > 0 && store_images {
+            println!(
+                "  ⚠  畫面：保留了 {} 張，但一張圖都沒有寫成{}",
+                stats.kept,
+                if stats.image_failures > 0 {
+                    format!("（失敗 {} 次）", stats.image_failures)
+                } else {
+                    String::new()
+                }
+            );
+            if let Some(e) = &stats.last_image_error {
+                println!("        最後一次的原因：{e}");
+            }
+            return;
+        }
         if written == 0 && stats.images_throttled == 0 && stats.images_over_budget == 0 {
             return;
         }

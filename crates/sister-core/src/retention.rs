@@ -156,9 +156,16 @@ impl crate::db::Db {
 
     /// 把過期的東西刪掉。回報**實際**刪了什麼。
     ///
-    /// `image_root` 是畫面檔的根目錄；`None` 代表這次不碰檔案系統
-    /// （text-only 模式，或呼叫端只想清資料庫）。注意 `None` 時仍然會把
-    /// `image_path` 清成 NULL——否則資料庫會指向一堆再也不會被刪的檔案。
+    /// `image_root` 是畫面檔的根目錄；`None` 代表這次完全不碰畫面檔——
+    /// **既不刪檔，也不動 `image_path`**。只清欄位不刪檔會讓那些檔案
+    /// 從此沒有任何東西指向（下次的條件是 `image_path IS NOT NULL`），
+    /// 於是永遠不會被清掉。
+    ///
+    /// 呼叫端幾乎都應該給 `Some`：`store_images = false` 的意思是「不要再
+    /// 寫新的圖」，不是「昨天寫的那些不存在」。
+    ///
+    /// 過了 `text_days` 的整列刪除不受這個參數影響——那一段連紀錄都不留，
+    /// 沒有「留著下次再刪」這個選項。
     pub fn prune(
         &mut self,
         now: Millis,
@@ -236,12 +243,17 @@ impl crate::db::Db {
             .collect::<std::result::Result<_, _>>()?;
         tx.commit()?;
 
-        if !stale.is_empty() {
-            if let Some(root) = image_root {
-                let before = report.failed.len();
-                delete_files(root, stale.iter().map(|(_, p, _)| p.as_str()), &mut report);
-                report.images_deleted += (stale.len() - (report.failed.len() - before)) as u64;
-            }
+        // 沒給根目錄就整段不做。**不可以只把 `image_path` 清成 NULL**：
+        // 那些檔案還躺在磁碟上，而清成 NULL 之後就沒有任何東西指向它們，
+        // 下一次 prune 也永遠掃不到（條件是 `image_path IS NOT NULL`）。
+        // 檔案從此不可能被刪，而「畫面 30 天後刪掉」對它們是一句假話。
+        //
+        // 兩害相權：留著一列指向真實檔案的紀錄，最多是「這一列的圖還沒清掉」，
+        // 下次帶著根目錄再跑一次就好；清成 NULL 是不可逆的失憶。
+        if let (false, Some(root)) = (stale.is_empty(), image_root) {
+            let before = report.failed.len();
+            delete_files(root, stale.iter().map(|(_, p, _)| p.as_str()), &mut report);
+            report.images_deleted += (stale.len() - (report.failed.len() - before)) as u64;
             report.image_bytes_freed += stale.iter().map(|(_, _, b)| *b as u64).sum::<u64>();
             let tx = self.conn.transaction()?;
             {
@@ -424,6 +436,49 @@ mod tests {
         assert_eq!(r.frames_deleted, 1, "{r:?}");
         assert!(r.failed.is_empty(), "{:?}", r.failed);
         assert!(!r.is_empty());
+    }
+
+    /// 不給根目錄時，**不可以只把欄位清掉而把檔案留在磁碟上**。
+    ///
+    /// 清成 NULL 之後就沒有任何東西指向那些檔案，而下一次 prune 的條件是
+    /// `image_path IS NOT NULL`——它們從此不可能被掃到，也就永遠不會被刪。
+    /// 「畫面 30 天後會消失」對它們是一句假話，而且是不可逆的：連要刪的人
+    /// 都不知道該刪哪些。留著紀錄最多是「這次沒清到」，下次帶著根目錄再跑
+    /// 一次就好。
+    #[test]
+    fn without_a_frames_dir_the_pointer_survives_so_the_file_can_still_be_reclaimed() {
+        let tmp = Tmp::new("no-root");
+        let (mut db, paths) = seeded(&tmp);
+        let retention = RetentionConfig {
+            frames_days: 30,
+            text_days: 365,
+        };
+
+        let r = db.prune(NOW, &retention, None).expect("prune");
+
+        // 兩個月前那張：檔案還在（我們沒有根目錄，刪不了）
+        let stale = tmp.path().join(&paths[1]);
+        assert!(stale.exists(), "沒有根目錄就不該假裝刪掉了");
+        assert_eq!(r.images_deleted, 0, "一個檔案都沒刪，就不能說刪了");
+
+        // 關鍵：指標必須還在，否則這個檔案從此沒有人找得到
+        let still_pointed: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM frames WHERE image_path = ?1",
+                [&paths[1]],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(
+            still_pointed, 1,
+            "檔案還在磁碟上，指向它的那一列就不能被清成 NULL"
+        );
+
+        // 而且帶著根目錄再跑一次，它真的清得掉——這就是留著指標的意義
+        let r2 = db.prune(NOW, &retention, Some(tmp.path())).expect("prune");
+        assert!(!stale.exists(), "第二次帶了根目錄，就該真的刪掉");
+        assert_eq!(r2.images_deleted, 1, "{r2:?}");
     }
 
     /// FTS 是文字的**另一份副本**。刪 chunk 而索引沒跟著掉，等於資料

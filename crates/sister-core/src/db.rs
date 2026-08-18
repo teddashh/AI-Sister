@@ -710,6 +710,9 @@ impl Db {
     /// 上限只管得住單一次執行：關掉再開就歸零，一天重開十次就是十倍額度。
     /// 一個可以靠重開繞過的上限不是上限，而且它會安靜地不生效——正是這個
     /// 專案最主要的失效形狀。
+    /// **問不出來要往上報，不可以回 0。** 回 0 的意思是「今天還沒寫過圖」，
+    /// 也就是「整份額度都還在」——一個問不到答案的上限會安靜地變成沒有上限。
+    /// 這和 `timings` 那邊用 `Option` 區分「零」與「不知道」是同一條紀律。
     pub fn image_bytes_since(&self, ts: crate::model::Millis) -> Result<u64> {
         let n: i64 = self
             .conn
@@ -718,7 +721,7 @@ impl Db {
                 [ts],
                 |r| r.get(0),
             )
-            .unwrap_or(0);
+            .context("sum today's image bytes")?;
         Ok(n.max(0) as u64)
     }
 
