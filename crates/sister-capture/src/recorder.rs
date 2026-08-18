@@ -45,6 +45,16 @@ pub struct RecorderStats {
     pub kept: u64,
     pub duplicates: u64,
     pub excluded: u64,
+    /// 每個排除理由各擋掉幾次。
+    ///
+    /// 「排除 80」這個數字沒有辦法回答使用者唯一會問的那個問題：**為什麼**。
+    /// 而排除是本專案最容易安靜地過度生效的地方——一條規則寫寬了、UIA 一直
+    /// 答不出密碼欄狀態、某個 app 名稱剛好是別人的子字串，症狀全都一樣：
+    /// 她什麼都記不住，而摘要上只有一個沒有解釋的數字。
+    ///
+    /// 用理由字串當 key 是刻意的：那就是寫進 `system_events` 的同一串字，
+    /// 所以摘要上看到的東西，可以原封不動拿去資料庫裡查。
+    pub excluded_reasons: std::collections::BTreeMap<String, u64>,
     pub no_screen: u64,
     pub clipboard_events: u64,
     pub secrets_redacted: u64,
@@ -168,6 +178,11 @@ impl<B: Backend> Recorder<B> {
         let exclusion = self.config.privacy.check(&focus);
         if let Some(reason) = exclusion.reason() {
             self.stats.excluded += 1;
+            *self
+                .stats
+                .excluded_reasons
+                .entry(reason.to_string())
+                .or_default() += 1;
             if self.last_exclusion.as_deref() != Some(reason) {
                 self.db.insert_system(
                     self.session_id,
@@ -627,6 +642,37 @@ mod tests {
         let st = r.db().stats().expect("stats");
         assert_eq!(st.system_events, 2, "session_start + one exclusion notice");
         assert_eq!(r.stats().excluded, 5);
+    }
+
+    /// 「排除 5」對使用者沒有用；「排除 5：excluded app "1password"」才有。
+    ///
+    /// 這一條擋的是一個很具體的未來：某條規則寬到把一整天吃掉，而唯一的
+    /// 症狀是一個沒有解釋的數字。摘要要能直接說出是誰擋的，而且說法要和
+    /// 資料庫裡那一列一模一樣，這樣使用者才查得下去。
+    #[test]
+    fn the_summary_can_name_which_rule_ate_the_day() {
+        let mut r = recorder(
+            vec![
+                step(0, "1password", "Vault", &["secret"]),
+                step(1000, "keepassxc", "Vault", &["secret"]),
+                step(2000, "1password", "Vault", &["secret"]),
+            ],
+            Config::default(),
+        );
+        for ts in [0, 1000, 2000] {
+            assert!(matches!(r.tick(ts).expect("tick"), Tick::Excluded { .. }));
+        }
+
+        let reasons = &r.stats().excluded_reasons;
+        assert_eq!(reasons.values().sum::<u64>(), r.stats().excluded);
+        assert_eq!(
+            reasons.len(),
+            2,
+            "two different apps, two reasons: {reasons:?}"
+        );
+        let (top, n) = reasons.iter().max_by_key(|(_, n)| **n).expect("some");
+        assert_eq!(*n, 2);
+        assert!(top.contains("1password"), "理由要說得出是誰：{top}");
     }
 
     #[test]

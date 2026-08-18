@@ -73,6 +73,17 @@ const MAX_ABANDONS: u32 = 3;
 const MAX_DEPTH: u32 = 8;
 const MAX_NODES: u32 = 400;
 
+/// 連續問不出「焦點在不在密碼欄上」幾次之後，停止拿它擋畫面。
+///
+/// [`Reading::should_skip_frame`] 在不知道的時候會擋掉那一幀，那是對的。
+/// 但如果**每一次都不知道**，那就不是在保守了——那是「她在瀏覽器裡
+/// 什麼都記不住」，而原因藏在一個沒有人會去看的地方。這正是這個專案
+/// 一直在修的那個形狀，只是這次是我自己用一條安全規則造出來的。
+///
+/// 所以分兩段：短暫的不知道 → 擋住（安全）；持續的不知道 → 宣告做不到
+/// （誠實），並且大聲講出來。
+const MAX_UNKNOWN_STREAK: u32 = 5;
+
 /// 對某個視窗問到的東西。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reading {
@@ -109,6 +120,8 @@ pub struct Uia {
     /// 上一次走過樹的視窗與標題。網址只在這一對變了才重新走。
     walked: Option<(isize, String)>,
     cached_url: Option<String>,
+    /// 連續幾次問不出密碼欄狀態。見 [`MAX_UNKNOWN_STREAK`]。
+    unknown_streak: u32,
 }
 
 struct Job {
@@ -132,12 +145,22 @@ impl Uia {
             surrendered: false,
             walked: None,
             cached_url: None,
+            unknown_streak: 0,
         }
     }
 
     /// 這台機器上還讀不讀得到。放棄之後永遠是 `false`。
     pub fn is_alive(&self) -> bool {
         !self.surrendered
+    }
+
+    /// 密碼欄那一路已經連續問不出來太多次了。
+    ///
+    /// `true` 的時候呼叫端**不該**再用「不知道」去擋畫面——見
+    /// [`MAX_UNKNOWN_STREAK`]。這是一個要被講出來的缺口，不是一個
+    /// 可以安靜維持的保守狀態。
+    pub fn password_check_broken(&self) -> bool {
+        self.unknown_streak >= MAX_UNKNOWN_STREAK
     }
 
     /// UIA 這個東西在這台機器上叫不叫得動。
@@ -200,6 +223,18 @@ impl Uia {
         match rx.recv_timeout(ASK_BUDGET) {
             Ok(mut reading) => {
                 self.abandons = 0;
+                match reading.password_focused {
+                    Some(_) => self.unknown_streak = 0,
+                    None => {
+                        self.unknown_streak += 1;
+                        if self.unknown_streak == MAX_UNKNOWN_STREAK {
+                            tracing::warn!(
+                                "連續 {MAX_UNKNOWN_STREAK} 次問不出焦點是否在密碼欄上；\
+                                 停止用它擋畫面，否則瀏覽器裡會什麼都記不住"
+                            );
+                        }
+                    }
+                }
                 if want_url {
                     self.walked = Some(key);
                     self.cached_url = reading.url.clone();

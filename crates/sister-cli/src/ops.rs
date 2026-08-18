@@ -18,6 +18,33 @@ fn open_existing(data_dir: &Path) -> Result<Db> {
     Db::open(&path).with_context(|| format!("open {}", path.display()))
 }
 
+/// 把「排除 80」拆成「是誰擋的」。
+///
+/// 摘要上那個數字本身沒有錯，但它回答不了使用者唯一會問的問題。而排除
+/// 恰恰是這個專案最容易安靜地過度生效的地方——規則寫寬了、UIA 一直答不出
+/// 密碼欄狀態、某個 app 名稱剛好是別人的子字串，症狀全都長得一樣：
+/// 她什麼都記不住，摘要上只有一個沒有解釋的數字。
+///
+/// 印出來的理由字串和寫進 `system_events` 的是同一串，所以看到什麼就能
+/// 拿什麼去資料庫裡查。
+fn report_exclusions(stats: &sister_capture::RecorderStats) {
+    if stats.excluded_reasons.is_empty() {
+        return;
+    }
+    // 擋最多的排前面：真正在吃掉一天的那條規則要第一個被看見
+    let mut by_count: Vec<_> = stats.excluded_reasons.iter().collect();
+    by_count.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    for (reason, n) in by_count {
+        println!("        排除 {n} 次：{reason}");
+    }
+    if stats.kept == 0 && stats.excluded > 0 {
+        println!(
+            "  ⚠  這一整段沒有留下任何畫面，全部被上面的規則擋掉了。\
+             如果那不是你要的，改 config 的 privacy 那一段。"
+        );
+    }
+}
+
 pub mod query {
     use super::*;
     use crate::fmt;
@@ -956,6 +983,7 @@ pub mod replay {
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
             s.ticks, s.kept, s.duplicates, s.excluded, s.no_screen
         );
+        report_exclusions(s);
         if s.secrets_redacted > 0 {
             println!("  偵測到 {} 次疑似秘密，內容未落地。", s.secrets_redacted);
         }
@@ -1102,6 +1130,7 @@ pub mod record {
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
             stats.ticks, stats.kept, stats.duplicates, stats.excluded, stats.no_screen
         );
+        report_exclusions(&stats);
         report_ocr(&stats, config_ocr);
         Ok(())
     }

@@ -90,7 +90,12 @@ impl FocusSource for WindowsFocus {
 
         let title = snapshot.window_title.clone().unwrap_or_default();
         if let Some(reading) = self.uia.read(hwnd, &title) {
-            snapshot.password_field = reading.should_skip_frame();
+            // 「不知道焦點在不在密碼欄上」→ 擋掉這一幀，那是對的。
+            // 但**每一次都不知道**就不是保守了，那是「她在瀏覽器裡什麼都
+            // 記不住」，而原因藏在沒有人會看的地方。`password_check_broken`
+            // 是那條線：踩到之後改成「宣告做不到」而不是「安靜地全擋」。
+            snapshot.password_field =
+                reading.should_skip_frame() && !self.uia.password_check_broken();
             snapshot.url = reading.url;
         }
         // `None` = UIA 在這台機器上不能用。那是一個能力缺口，由
