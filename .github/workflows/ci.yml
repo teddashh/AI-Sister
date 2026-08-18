@@ -42,6 +42,29 @@ jobs:
       - name: Privacy — there must be no HTTP client in the shipped binary
         run: ./scripts/check-no-network.sh
 
+      # 稽核路徑要真的走一次。`system_events` 和 `secret_suspected` 都當過
+      # 「寫進去然後沒人讀」的欄位好幾個月——不會報錯、測試全綠、文件照樣
+      # 承諾使用者查得到。單元測試守得住查詢本身，守不住「CLI 有沒有叫它」。
+      - name: Privacy — the audit trail must survive the recording that wrote it
+        run: |
+          set -euo pipefail
+          # bill-lookup：排除規則會生效（keepassxc、銀行網址）
+          cargo run -q -p sister-cli -- --data-dir ./ci-audit \
+            replay scenarios/bill-lookup.json --interval-ms 500 > /dev/null
+          # secret-copy：秘密出現在一個**沒有**被排除的 app 裡，遮蔽才會真的觸發
+          cargo run -q -p sister-cli -- --data-dir ./ci-audit \
+            replay scenarios/secret-copy.json --interval-ms 500 > /dev/null
+          cargo run -q -p sister-cli -- --data-dir ./ci-audit stats | tee stats.txt
+          grep -q '排除' stats.txt \
+            || { echo "::error::stats 不再報告排除稽核——排除有沒有生效又變成查不回來的事"; exit 1; }
+          grep -q '遮蔽' stats.txt \
+            || { echo "::error::stats 不再報告遮蔽稽核——「內容沒有落地」又變成一句只能相信的話"; exit 1; }
+          # 段數不是張數。這行寫錯過一次，差四個數量級。
+          grep -q '不是張數' stats.txt \
+            || { echo "::error::排除稽核沒講清楚數的是段——那個數字會被當成擋掉幾張畫面"; exit 1; }
+          cargo run -q -p sister-cli -- --data-dir ./ci-audit stats --json > stats.json
+          python3 ./scripts/check-audit.py stats.json
+
       # Windows 那一半在 Linux 上被 cfg 關掉，這裡至少要型別檢查到
       - name: Cross-check the Windows half
         run: ./scripts/check-windows.sh
