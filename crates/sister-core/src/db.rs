@@ -977,7 +977,7 @@ fn insert_facts_tx(
 /// 中文查詢找不回來**（三個字以上照樣走 trigram，完全不受影響）。真正的解
 /// 是補一個 bigram 索引，那是 Phase 1 的事——在那之前這個上限被寫進
 /// DATA_INVENTORY 的已知缺口，而不是靠沒有人去量它來維持體面。
-const LIKE_SCAN_DAYS: i64 = 30;
+pub(crate) const LIKE_SCAN_DAYS: i64 = 30;
 
 /// LIKE 後援命中的固定分數。負值確保它永遠排在任何 FTS 命中之後——
 /// 它證明「有這段文字」，但不宣稱相關性。
@@ -1441,6 +1441,60 @@ mod tests {
         let st = db.stats().expect("stats");
         assert_eq!(st.input_windows, 1);
         assert_eq!(st.system_events, 1);
+    }
+
+    /// 掃描的界線是**行為**，不是一個比較快的數字。
+    ///
+    /// 界線唯一的效果就是「看不到更舊的東西」。用時間去驗它是脆的——CI 的
+    /// 機器比開發機慢一倍，一個 150 ms 的天花板就會因為機器慢而變紅，然後
+    /// 大家開始把天花板往上調，直到它不再代表任何事。
+    ///
+    /// 所以界線在這裡用它的**後果**來驗：窗外的那一列查不到，窗內的查得到。
+    /// 快不快留給 tests/search_latency.rs，那邊只擋災難級的回歸。
+    #[test]
+    fn the_like_scan_does_not_look_past_its_window() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+
+        // 「兩個字的中文」是唯一會走到掃描的那條路：trigram 比不了 <3 字，
+        // 而 unicode61 把整串 CJK 當一個 token。
+        let now = 1_700_000_000_000i64;
+        let inside = now - (LIKE_SCAN_DAYS - 1) * 86_400_000;
+        let outside = now - (LIKE_SCAN_DAYS + 1) * 86_400_000;
+
+        for (ts, marker) in [(outside, "舊"), (inside, "新"), (now, "今")] {
+            db.insert_frame(
+                s,
+                &frame_with_text(
+                    ts,
+                    "chrome.exe",
+                    "客服系統",
+                    &[&format!("{marker}客服專線紀錄")],
+                ),
+                None,
+                0,
+            )
+            .expect("insert");
+        }
+
+        let hits = db.search("客服", 20).expect("search");
+        let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+
+        assert!(
+            texts.iter().any(|t| t.starts_with('今')),
+            "窗內最新的那列查不到，界線把該找的也擋掉了：{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.starts_with('新')),
+            "窗內第 {} 天的那列查不到：{texts:?}",
+            LIKE_SCAN_DAYS - 1
+        );
+        assert!(
+            !texts.iter().any(|t| t.starts_with('舊')),
+            "第 {} 天前的那列被查到了——界線沒有生效，掃描成本會一直跟著\n\
+             使用時間長大，而且不會有任何錯誤訊息：{texts:?}",
+            LIKE_SCAN_DAYS + 1
+        );
     }
 
     /// 遮蔽稽核問的是資料庫，不是旗子。
