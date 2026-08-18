@@ -203,6 +203,7 @@ pub mod query {
                     window_title: Some("t".into()),
                     url: None,
                     pid: None,
+                    password_field: false,
                 },
             }
         }
@@ -435,6 +436,8 @@ pub mod doctor {
     #[derive(Default)]
     struct Caps {
         url: bool,
+        /// 對現在的前景視窗真的問一次網址的結果。`None` = 本平台問不了。
+        url_probe: Option<(bool, &'static str, String)>,
         /// 輸入 hook：`None` = 本平台沒有這個東西。
         /// 不是「沒試過」——doctor 現在會真的裝一次（見 [`caps`]）。
         input_hooks: Option<bool>,
@@ -489,6 +492,44 @@ pub mod doctor {
 
         let c = Capabilities::current(config);
         let mut probes = Vec::new();
+        let url_probe;
+
+        // UIA：一樣不宣稱。真的對現在的前景視窗問一次網址。
+        // `✓ UIA 建得起來` 這句話的價值是零——使用者要知道的是
+        // 「我的網銀規則現在到底會不會生效」。
+        {
+            use sister_capture::traits::FocusSource;
+            let mut source = sister_capture::windows::focus::WindowsFocus::new();
+            let snapshot = source.snapshot(sister_core::now_ms()).unwrap_or_default();
+            let app = snapshot.app_key();
+            url_probe = Some(match (&snapshot.url, source.url_capture_alive()) {
+                (Some(url), _) => (
+                    true,
+                    "讀你現在的網址",
+                    format!("{app} → {}", crate::fmt::one_line(url, 60)),
+                ),
+                (None, false) => (
+                    false,
+                    "讀你現在的網址",
+                    "UIA 卡住太多次，已經放棄——excluded_urls 這一整組規則不生效".to_string(),
+                ),
+                (None, true) if app.is_empty() => (
+                    false,
+                    "讀你現在的網址",
+                    "現在沒有前景視窗，測不出來".to_string(),
+                ),
+                (None, true) => (
+                    // 不是失敗，只是這次沒東西可讀。但也不能報成 ✓：
+                    // 那會讓使用者以為驗過了。
+                    false,
+                    "讀你現在的網址",
+                    format!(
+                        "前景是 {app}，不是瀏覽器（或位址列是空的）。\
+                         把瀏覽器切到前景再跑一次 doctor 才驗得到"
+                    ),
+                ),
+            });
+        }
 
         if c.ocr && config.capture.ocr {
             let mut ocr = WindowsOcr::new(&config.capture.ocr_languages);
@@ -596,6 +637,7 @@ pub mod doctor {
 
         Caps {
             url: c.url,
+            url_probe,
             input_hooks,
             ocr: c.ocr,
             ocr_language: c.ocr_language.clone(),
@@ -727,6 +769,11 @@ pub mod doctor {
             for (rule, why) in &suspicious {
                 line(false, "  規則不會命中", &format!("{rule} — {why}"));
             }
+        }
+        // 規則數量與規則寫法都對，還有第三個問題：**網址到底讀不讀得到**。
+        // 這一列是真的去問了現在的前景視窗，不是宣稱 UIA 建得起來。
+        if let Some((ok, label, detail)) = &caps.url_probe {
+            line(*ok, label, detail);
         }
         line(
             true,

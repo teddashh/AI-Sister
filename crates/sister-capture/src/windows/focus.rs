@@ -1,8 +1,16 @@
-//! 前景視窗：她現在在看哪個程式、哪個視窗。
+//! 前景視窗：她現在在看哪個程式、哪個視窗、哪個網址。
 //!
-//! 純 Win32，不碰 COM。這是整條管線最先跑的東西——排除規則要靠它決定
-//! 這一刻該不該擷取，所以它必須快、必須不會卡住，而且抓不到就安靜地
-//! 回傳空值（`FocusSnapshot::default()`），不是錯誤。
+//! 視窗那一半是純 Win32，不碰 COM，快到可以每個 tick 跑一次。這是整條
+//! 管線最先跑的東西——排除規則要靠它決定這一刻該不該擷取，所以它必須快、
+//! 必須不會卡住，而且抓不到就安靜地回傳空值（`FocusSnapshot::default()`），
+//! 不是錯誤。
+//!
+//! 網址那一半（以及「焦點是不是在密碼欄上」）只能靠 UIA，而 UIA 會卡。
+//! 那一整包風險關在 [`crate::windows::uia`] 裡的一條可拋棄執行緒中，
+//! 這裡只負責問與不問：
+//!
+//! - **網址**只對瀏覽器問，而且只在 `(hwnd, 標題)` 變了才走一次樹
+//! - **密碼欄**每個 tick 都問，但那只是一次呼叫，不走樹
 
 use anyhow::Result;
 use sister_core::model::{FocusSnapshot, Millis};
@@ -17,11 +25,78 @@ use windows::core::PWSTR;
 
 use crate::traits::FocusSource;
 
-pub struct WindowsFocus;
+/// 會叫 UIA 的瀏覽器。
+///
+/// 比對的是 `app_id`（小寫的執行檔名），用**子字串**——`chrome` 同時涵蓋
+/// `chrome.exe` 與各種 Chromium 分支的命名，而漏掉一個瀏覽器的代價是
+/// 那個瀏覽器的網銀規則整組失效（THREAT_MODEL 安靜失效 #2 就是這個形狀）。
+const BROWSERS: &[&str] = &[
+    "chrome",
+    "msedge",
+    "firefox",
+    "brave",
+    "vivaldi",
+    "opera",
+    "chromium",
+    "arc",
+    "zen",
+    "librewolf",
+    "waterfox",
+    "floorp",
+    "thorium",
+    "iexplore",
+];
+
+pub struct WindowsFocus {
+    uia: crate::windows::uia::Uia,
+}
+
+impl Default for WindowsFocus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WindowsFocus {
+    pub fn new() -> Self {
+        Self {
+            uia: crate::windows::uia::Uia::new(),
+        }
+    }
+
+    /// UIA 還活著嗎。`false` = `excluded_urls` 整組規則目前不生效。
+    pub fn url_capture_alive(&self) -> bool {
+        self.uia.is_alive()
+    }
+}
 
 impl FocusSource for WindowsFocus {
     fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
-        Ok(foreground())
+        let mut snapshot = foreground();
+
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.0.is_null() {
+            return Ok(snapshot);
+        }
+        // **不是瀏覽器就完全不碰 UIA。** 這不只是省時間：每一次 UIA 呼叫
+        // 都是一次可能卡住、而且叫不回來的跨程序往返，對一個整天在跑的
+        // 背景程式來說，「一天裡絕大多數時間根本沒有這個風險」本身就是
+        // 一項功能。代價是非瀏覽器的密碼欄我們看不到（DATA_INVENTORY
+        // 「已知缺口」有記）。
+        let app = snapshot.app_key();
+        if !BROWSERS.iter().any(|b| app.contains(b)) {
+            return Ok(snapshot);
+        }
+
+        let title = snapshot.window_title.clone().unwrap_or_default();
+        if let Some(reading) = self.uia.read(hwnd, &title) {
+            snapshot.password_field = reading.should_skip_frame();
+            snapshot.url = reading.url;
+        }
+        // `None` = UIA 在這台機器上不能用。那是一個能力缺口，由
+        // `Capabilities` 一次講清楚，不是在這裡每秒擋掉一幀——
+        // 那只會讓她什麼都記不住，而且原因藏在一個沒有人看的地方。
+        Ok(snapshot)
     }
 }
 
@@ -47,9 +122,11 @@ pub fn foreground() -> FocusSnapshot {
         app_id,
         app_name,
         window_title: window_title(hwnd),
-        // URL 由 UIA 另外補上（見 `url` 模組）；這一層不管瀏覽器
+        // 網址與密碼欄由 UIA 在 `snapshot()` 裡補上。這個函式刻意只碰
+        // Win32：它是排除判定的第一手資料，不能因為 COM 卡住而跟著卡住。
         url: None,
         pid: process_id(hwnd).map(|p| p as i64),
+        password_field: false,
     }
 }
 

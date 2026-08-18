@@ -208,6 +208,9 @@ impl Backend for ReplayBackend {
             window_title: self.current.title.clone(),
             url: self.current.url.clone(),
             pid: None,
+            // 腳本裡沒有密碼欄這個概念。replay 是拿來重現管線的，
+            // 不是拿來重現 UIA 的。
+            password_field: false,
         })
     }
 

@@ -27,6 +27,14 @@ pub struct FocusSnapshot {
     /// 僅瀏覽器；抓不到就是 None（失敗容忍，不重試不阻塞）。
     pub url: Option<String>,
     pub pid: Option<i64>,
+    /// 鍵盤焦點在密碼欄上。**這一欄不落地**，它只活到排除判定為止。
+    ///
+    /// 用 `bool` 而不是 `Option<bool>` 是刻意的：「不知道」要在**來源那一端**
+    /// 就決定成 `true`（見 `sister_capture::windows::uia::Reading::should_skip_frame`），
+    /// 而不是一路傳下來讓每個看到它的人各自決定一次要不要保守。
+    /// 那種設計遲早會有一個地方選錯，而且沒有人會發現。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub password_field: bool,
 }
 
 impl FocusSnapshot {

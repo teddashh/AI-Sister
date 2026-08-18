@@ -12,6 +12,7 @@ pub mod focus;
 pub mod input;
 pub mod ocr;
 pub mod screen;
+pub mod uia;
 
 use anyhow::Result;
 use sister_core::config::Config;
@@ -45,8 +46,9 @@ impl Capabilities {
         Self {
             screen: true,
             focus: true,
-            // UIA 讀址欄還沒接（見 SPEC §5.2）
-            url: false,
+            // 「UIA 建得起來」而已。真的讀不讀得到位址列要在有瀏覽器開著
+            // 的時候才知道——那件事由 `doctor` 的實測那一段回答，不是這裡。
+            url: uia::Uia::probe(),
             clipboard: true,
             input: input::WindowsInput::state(),
             ocr: ocr.chosen.is_some(),
@@ -111,7 +113,7 @@ pub fn backend(config: &Config) -> Result<impl Backend + use<>> {
     Ok(CompositeBackend {
         name: "windows-gdi".to_string(),
         screen: screen::WindowsScreen::new(config.capture.max_long_edge),
-        focus: focus::WindowsFocus,
+        focus: focus::WindowsFocus::new(),
         clipboard: clipboard::WindowsClipboard::new(),
         input: input::WindowsInput::start(now_ms()),
         ocr: ocr::WindowsOcr::new(&config.capture.ocr_languages),

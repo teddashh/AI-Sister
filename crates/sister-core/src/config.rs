@@ -217,6 +217,13 @@ impl PrivacyConfig {
     pub fn check(&self, focus: &FocusSnapshot) -> Exclusion {
         let app = focus.app_key();
 
+        // 排在所有規則之前。規則是在猜「這個 app 大概會有秘密」，
+        // 這一條是「她**現在正在**輸入秘密」——後者確定得多，而且不需要
+        // 任何設定就成立。使用者沒設定過的東西也該保護得到。
+        if focus.password_field {
+            return Exclusion::Blocked("password field focused".to_string());
+        }
+
         if self.pause_on_screenshare && !app.is_empty() {
             for s in SCREENSHARE_APPS {
                 if app.contains(s) {
@@ -541,7 +548,32 @@ mod tests {
             window_title: Some(title.into()),
             url: url.map(|u| u.into()),
             pid: Some(1),
+            password_field: false,
         }
+    }
+
+    /// 焦點在密碼欄上時，**什麼規則都不必命中**這一幀就該被丟掉。
+    ///
+    /// 這條測試的價值在於它用的是一個**完全無害**的脈絡：記事本、無趣的
+    /// 標題、沒有網址。所有排除規則都不會命中它。如果密碼欄那一條被刪掉
+    /// 或搬到規則後面，這裡就會紅——而在真實世界裡，同一個錯誤的症狀是
+    /// 「她把使用者打密碼的那個畫面錄下來了」，永遠不會有人回報。
+    #[test]
+    fn a_focused_password_field_blocks_even_a_completely_innocent_window() {
+        let privacy = PrivacyConfig::default();
+        let mut focus = focus("notepad.exe", "未命名 - 記事本", None);
+        assert!(
+            !privacy.check(&focus).is_blocked(),
+            "這個脈絡本身應該是可以錄的，否則這條測試證明不了任何事"
+        );
+
+        focus.password_field = true;
+        let reason = privacy.check(&focus);
+        assert!(reason.is_blocked(), "焦點在密碼欄上還照錄");
+        assert!(
+            reason.reason().unwrap().contains("password"),
+            "理由要看得出是密碼欄，不然稽核紀錄講不清楚：{reason:?}"
+        );
     }
 
     #[test]

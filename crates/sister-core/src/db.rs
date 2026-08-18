@@ -976,6 +976,7 @@ mod tests {
                 window_title: Some(title.into()),
                 url: None,
                 pid: Some(42),
+                password_field: false,
             },
         }
     }
@@ -1123,6 +1124,7 @@ mod tests {
                     window_title: Some("Cloudflare DNS 設定".into()),
                     url: Some("https://dash.cloudflare.com/dns".into()),
                     pid: Some(9),
+                    password_field: false,
                 },
             },
         )
