@@ -547,6 +547,28 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
+    /// 秘密遮蔽稽核：標記過幾次、其中有幾次內容其實還躺在資料庫裡。
+    ///
+    /// 第二個數字才是重點。`secret_suspected = 1` 只是一面旗子，而
+    /// DATA_INVENTORY 承諾的是「內容**沒有**落地」——那是一句關於 `text` 欄位
+    /// 的話。旗子插了但字還在，是這個承諾唯一會失敗的方式，而且它不會報錯：
+    /// 錄製摘要照樣印「偵測到 N 次疑似秘密，內容未落地」。
+    ///
+    /// 所以這裡去問資料庫本身，而不是相信寫入時的那個布林值。
+    pub fn redaction_audit(&self) -> Result<RedactionAudit> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(text IS NOT NULL), 0)
+             FROM clipboard_events WHERE secret_suspected = 1",
+            [],
+            |r| {
+                Ok(RedactionAudit {
+                    flagged: r.get(0)?,
+                    leaked: r.get(1)?,
+                })
+            },
+        )?)
+    }
+
     // ---------- 檢索 ----------
 
     /// 全文檢索。trigram 與 unicode61 兩個索引各查一次再合併取最佳分數，
@@ -978,6 +1000,15 @@ pub struct FactRow {
     pub url: Option<String>,
 }
 
+/// 秘密遮蔽的實際結果（見 [`Db::redaction_audit`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RedactionAudit {
+    /// 被判定為疑似秘密的剪貼簿事件數。
+    pub flagged: i64,
+    /// 其中內容**仍然留在資料庫裡**的筆數。任何大於 0 的值都是遮蔽失效。
+    pub leaked: i64,
+}
+
 /// 一條排除規則生效過的紀錄（見 [`Db::exclusion_audit`]）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExclusionAudit {
@@ -1357,6 +1388,55 @@ mod tests {
         let st = db.stats().expect("stats");
         assert_eq!(st.input_windows, 1);
         assert_eq!(st.system_events, 1);
+    }
+
+    /// 遮蔽稽核問的是資料庫，不是旗子。
+    ///
+    /// 「內容沒有落地」是這份文件裡最強的一句承諾，而它唯一的失敗方式是
+    /// 旗子插了、字還在——那種失敗不會報錯，錄製摘要照樣印「內容未落地」。
+    /// 這個測試就是把那種狀態直接做出來，確認稽核看得見。
+    #[test]
+    fn a_redacted_clipboard_row_that_still_holds_its_text_is_reported_as_leaked() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+
+        // 正常的：判定為秘密，內容真的沒寫進去
+        db.insert_clipboard(
+            s,
+            &ClipboardEvent {
+                ts: 100,
+                kind: ClipboardKind::Text,
+                text: None,
+                byte_len: 40,
+                truncated: false,
+                secret_suspected: true,
+                source_app: Some("1password".into()),
+            },
+        )
+        .expect("insert redacted");
+
+        let clean = db.redaction_audit().expect("audit");
+        assert_eq!(clean.flagged, 1);
+        assert_eq!(clean.leaked, 0, "內容確實沒落地時不該報警");
+
+        // 故障的：旗子插了，字還在
+        db.insert_clipboard(
+            s,
+            &ClipboardEvent {
+                ts: 200,
+                kind: ClipboardKind::Text,
+                text: Some("AKIAIOSFODNN7EXAMPLE".into()),
+                byte_len: 20,
+                truncated: false,
+                secret_suspected: true,
+                source_app: Some("terminal".into()),
+            },
+        )
+        .expect("insert leaky");
+
+        let leaky = db.redaction_audit().expect("audit");
+        assert_eq!(leaky.flagged, 2);
+        assert_eq!(leaky.leaked, 1, "旗子插了但字還在，稽核沒看見");
     }
 
     /// 錄製結束之後，還叫得回來「哪條規則擋掉了什麼、擋了幾次」。

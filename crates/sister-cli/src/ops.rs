@@ -504,6 +504,7 @@ pub mod stats {
         // 為同一件事寫了規則（不到 60 秒不外推）並且有測試守著，是這裡沒跟上。
         let per_day = (span_days >= 0.5).then(|| disk_total as f64 / span_days);
         let audit = db.exclusion_audit()?;
+        let redaction = db.redaction_audit()?;
 
         if json {
             println!(
@@ -516,6 +517,11 @@ pub mod stats {
                     "sessions": s.sessions, "db_bytes": s.db_bytes,
                     "image_bytes": s.image_bytes, "span_days": span_days,
                     "bytes_per_day": per_day,  // null = 資料還不夠久，不外推
+                    "redaction": {
+                        "flagged": redaction.flagged,
+                        // > 0 就是遮蔽沒生效——那不是統計數字，是故障
+                        "leaked": redaction.leaked,
+                    },
                     "exclusions": audit.iter().map(|a| serde_json::json!({
                         "reason": a.reason, "episodes": a.episodes,
                         "first_ts": a.first_ts, "last_ts": a.last_ts,
@@ -581,6 +587,25 @@ pub mod stats {
                     fmt::one_line(&a.reason, 46)
                 );
                 println!("                    {when}");
+            }
+        }
+
+        // 秘密遮蔽。問的不是「旗子插了幾次」，是「插了旗子的那幾列，字還在不在」。
+        // 前者是我們寫入時的自我宣稱，後者是資料庫此刻的實際狀態。
+        if redaction.flagged == 0 {
+            println!("  遮蔽      沒有任何剪貼簿內容被判定為疑似秘密");
+        } else {
+            println!(
+                "  遮蔽      {} 次剪貼簿內容被判定為疑似秘密",
+                redaction.flagged
+            );
+            if redaction.leaked > 0 {
+                println!(
+                    "            ⚠ 其中 {} 次內容**仍然留在資料庫裡**——遮蔽沒生效",
+                    redaction.leaked
+                );
+            } else {
+                println!("            這幾列的 text 現在都是空的（當場查的，不是相信旗子）");
             }
         }
         println!();
