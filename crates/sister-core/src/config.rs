@@ -89,16 +89,27 @@ impl Default for PrivacyConfig {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+            // 一律用「出現在網址任何位置」的子字串規則，不要寫成
+            // `*://*.bank.com/*` 這種按結構對齊的樣式：只要少一個 www、
+            // 或關鍵字落在網域而不是路徑，那種寫法就會整條失效——
+            // 而使用者永遠不會知道自己的網銀畫面其實一直被錄著。
             excluded_urls: [
-                "*://*.onlinebanking.*/*",
-                "*://onlinebanking.*/*",
-                "*://*/*netbank*",
-                "*://*.cathaybk.com.tw/*",
-                "*://*.esunbank.com.tw/*",
-                "*://*.ctbcbank.com/*",
-                "*://accounts.google.com/*",
-                "*://login.microsoftonline.com/*",
+                "*onlinebanking*",
+                "*netbank*",
+                "*ebank*",
+                "*/ib/*",
+                "*cathaybk.com*",
+                "*esunbank.com*",
+                "*ctbcbank.com*",
+                "*bot.com.tw*",
+                "*taishinbank.com*",
+                "*firstbank.com.tw*",
+                "*megabank.com.tw*",
+                "*accounts.google.com*",
+                "*login.microsoftonline.com*",
                 "*password*",
+                "*/signin*",
+                "*/login*",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -138,6 +149,12 @@ impl Default for RetentionConfig {
 }
 
 /// 螢幕分享/會議 app 的識別字（旁人畫面防線）。
+///
+/// 只收「開著就等於畫面在被分享或正在看別人畫面」的 app。
+/// Slack 與 Discord 刻意不在此列：它們也能分享畫面，但那是偶爾的模式，
+/// 而它們平時是主要的工作與對話場所。光憑 app 名稱分不出模式，
+/// 把它們列進來等於讓整個工作日最重要的對話永遠不被記得——
+/// 那個代價比防到的風險大得多。
 const SCREENSHARE_APPS: &[&str] = &[
     "zoom",
     "teams",
@@ -145,13 +162,11 @@ const SCREENSHARE_APPS: &[&str] = &[
     "webex",
     "gotomeeting",
     "bluejeans",
-    "discord",
     "obs",
     "obs64",
     "streamlabs",
-    "meet",
+    "google meet",
     "skype",
-    "slack",
     "anydesk",
     "teamviewer",
 ];
@@ -421,5 +436,75 @@ mod tests {
         );
         assert!(cfg.privacy.redact_clipboard_secrets);
         assert_eq!(cfg.retention.frames_days, 30);
+    }
+
+    #[test]
+    fn banking_urls_are_blocked_whatever_shape_the_host_takes() {
+        // 迴歸測試：原本的規則寫成 `*://*/*netbank*`，把關鍵字綁在路徑上，
+        // 於是 https://netbank.example.com/transfer 一路被錄了下來。
+        // 規則必須是「出現在網址任何位置」，不能依賴網址的結構。
+        let p = PrivacyConfig::default();
+        for url in [
+            "https://netbank.example.com/transfer",
+            "https://www.netbank.example.com/transfer",
+            "https://example.com/netbank/transfer",
+            "https://cathaybk.com.tw/transfer",
+            "https://www.cathaybk.com.tw/net/transfer",
+            "https://ebank.megabank.com.tw/",
+            "https://accounts.google.com/signin/v2",
+            "https://app.example.com/login?next=/",
+        ] {
+            assert!(
+                p.check(&focus("chrome.exe", "Bank", Some(url)))
+                    .is_blocked(),
+                "must block {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_urls_still_get_through() {
+        // 排除規則太寬會讓她變成瞎子，一樣是 bug
+        let p = PrivacyConfig::default();
+        for url in [
+            "https://github.com/teddashh/AI-Sister",
+            "https://bill.cht.com.tw/query",
+            "https://docs.rs/rusqlite/latest/rusqlite/",
+            "https://news.ycombinator.com/item?id=1",
+        ] {
+            assert!(
+                !p.check(&focus("chrome.exe", "ok", Some(url))).is_blocked(),
+                "must allow {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_apps_are_not_treated_as_screen_sharing() {
+        // 迴歸測試：slack 曾在螢幕分享清單裡，於是整個工作日最重要的
+        // 對話永遠不會被記得。分不出「正在分享」就不該整個 app 封殺。
+        let p = PrivacyConfig::default();
+        for app in ["slack.exe", "discord.exe", "Slack"] {
+            assert!(
+                !p.check(&focus(app, "#general", None)).is_blocked(),
+                "{app} must be recorded"
+            );
+        }
+    }
+
+    #[test]
+    fn real_meeting_apps_still_pause_capture() {
+        let p = PrivacyConfig::default();
+        for app in [
+            "Zoom.exe",
+            "ms-teams.exe",
+            "webex",
+            "obs64.exe",
+            "TeamViewer",
+        ] {
+            let v = p.check(&focus(app, "Meeting", None));
+            assert!(v.is_blocked(), "{app} must pause capture");
+            assert!(v.reason().unwrap_or_default().contains("screenshare"));
+        }
     }
 }
