@@ -672,6 +672,33 @@ mod tests {
         }
     }
 
+    /// `plausible_url` **擋不住**使用者正在打的字——這條釘的是它的極限，
+    /// 不是它的能力。
+    ///
+    /// 真正擋住「打到一半的位址列」的是 `url_from` 裡那道
+    /// `CurrentHasKeyboardFocus` 閘門。`plausible_url` 只濾掉有空白的
+    /// 提示語，而一串沒有空白、又帶點的字——在位址列裡搜的 email、
+    /// 內網主機、打錯的網域——會一路通過，存進 `frames.url`。
+    ///
+    /// 所以這裡刻意斷言它們**會通過**。哪天有人覺得「反正有
+    /// `plausible_url` 把關」而把那道焦點閘門拿掉，這條測試會告訴他
+    /// 把關的從來不是這裡。那道閘門沒有辦法用單元測試驗（它要一個活的
+    /// COM 元素），所以它的重要性只能寫在這裡。
+    #[test]
+    fn plausible_url_is_not_a_substitute_for_the_keyboard_focus_gate() {
+        for typed in [
+            "john.smith@company.com", // 在位址列裡搜一個 email
+            "192.168.1.50",           // 內網主機
+            "cathaybk.com",           // 打到一半的網域
+        ] {
+            assert_eq!(
+                plausible_url(typed).as_deref(),
+                Some(typed),
+                "這個字串被擋下來了，代表這條測試的前提變了——請重讀 url_from"
+            );
+        }
+    }
+
     /// 真實的位址列內容——包括 Chromium **縮寫過**的那種形狀。
     #[test]
     fn real_address_bar_values_survive() {
