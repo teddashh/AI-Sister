@@ -163,6 +163,33 @@ impl Uia {
         self.unknown_streak >= MAX_UNKNOWN_STREAK
     }
 
+    /// 記一次密碼欄問答的結果，維護那個連續失敗計數。
+    ///
+    /// 這段本來長在 `ask()` 中間。搬出來的唯一理由是**它以前沒有辦法被
+    /// 測**：`ask()` 要一條活的 COM 工作執行緒，於是這個「隱私保護會在
+    /// 第 5 次之後把自己關掉」的狀態機，一條測試都沒有。
+    ///
+    /// 而它關掉的東西不是一個功能，是一條擋畫面的規則。關掉之後不會有
+    /// 錯誤、不會有例外，只是從那一刻起密碼欄不再擋任何東西。
+    fn note_password_reading(&mut self, seen: Option<bool>) {
+        match seen {
+            // 問得出來就歸零。機器好起來了，保護就該回來——
+            // 這是刻意的：一次成功的問答就足以證明這條路是通的。
+            Some(_) => self.unknown_streak = 0,
+            None => {
+                self.unknown_streak += 1;
+                // `==` 不是 `>=`：只在跨過那條線的**那一次**講，
+                // 之後每一幀都喊一次只會變成沒有人看的雜訊。
+                if self.unknown_streak == MAX_UNKNOWN_STREAK {
+                    tracing::warn!(
+                        "連續 {MAX_UNKNOWN_STREAK} 次問不出焦點是否在密碼欄上；\
+                         停止用它擋畫面，否則瀏覽器裡會什麼都記不住"
+                    );
+                }
+            }
+        }
+    }
+
     /// UIA 這個東西在這台機器上叫不叫得動。
     ///
     /// 只建一次 COM 物件就丟掉，**不碰任何視窗**——所以它不會卡在別人的
@@ -223,18 +250,7 @@ impl Uia {
         match rx.recv_timeout(ASK_BUDGET) {
             Ok(mut reading) => {
                 self.abandons = 0;
-                match reading.password_focused {
-                    Some(_) => self.unknown_streak = 0,
-                    None => {
-                        self.unknown_streak += 1;
-                        if self.unknown_streak == MAX_UNKNOWN_STREAK {
-                            tracing::warn!(
-                                "連續 {MAX_UNKNOWN_STREAK} 次問不出焦點是否在密碼欄上；\
-                                 停止用它擋畫面，否則瀏覽器裡會什麼都記不住"
-                            );
-                        }
-                    }
-                }
+                self.note_password_reading(reading.password_focused);
                 if want_url {
                     self.walked = Some(key);
                     self.cached_url = reading.url.clone();
@@ -483,6 +499,56 @@ mod tests {
             }
             .should_skip_frame()
         );
+    }
+
+    /// 一條會把自己關掉的隱私規則，關掉的那一刻必須是可預測的。
+    ///
+    /// `should_skip_frame` 在「不知道」的時候擋畫面，那是對的。但如果
+    /// **每一次**都不知道，擋住每一幀就等於「她在瀏覽器裡什麼都記不住」，
+    /// 而原因藏在一個沒有人會看的地方。所以第 5 次之後改成宣告做不到。
+    ///
+    /// 這個取捨本身沒問題，問題是它在這條測試之前**一條測試都沒有**——
+    /// 而它管的是一條擋畫面的規則什麼時候停止生效。
+    #[test]
+    fn the_password_guard_gives_up_only_after_a_real_streak() {
+        let mut uia = Uia::new();
+        assert!(!uia.password_check_broken(), "一開始不該是壞的");
+
+        // 差一次就到。這裡還在「保守」的那一段，保護仍然生效。
+        for i in 1..MAX_UNKNOWN_STREAK {
+            uia.note_password_reading(None);
+            assert!(
+                !uia.password_check_broken(),
+                "第 {i} 次問不出來就放棄了，門檻是 {MAX_UNKNOWN_STREAK}"
+            );
+        }
+
+        uia.note_password_reading(None);
+        assert!(
+            uia.password_check_broken(),
+            "連續 {MAX_UNKNOWN_STREAK} 次之後該宣告做不到"
+        );
+    }
+
+    /// 一次問得出來的答案就把保護叫回來。
+    ///
+    /// 這是刻意的：連續失敗代表這條路不通，而一次成功就證明它通了。
+    /// 沒有這一條的話，一台偶爾抽風的機器會在第 5 次之後**永久**失去
+    /// 密碼欄保護，而畫面上完全看不出來。
+    #[test]
+    fn one_good_answer_brings_the_password_guard_back() {
+        let mut uia = Uia::new();
+        for _ in 0..MAX_UNKNOWN_STREAK {
+            uia.note_password_reading(None);
+        }
+        assert!(uia.password_check_broken());
+
+        uia.note_password_reading(Some(false));
+        assert!(!uia.password_check_broken(), "問得出來之後保護該回來");
+
+        // 而且是真的歸零，不是減一——否則下一次失敗就又壞掉。
+        uia.note_password_reading(None);
+        assert!(!uia.password_check_broken(), "歸零之後不該一次失敗就再壞掉");
     }
 
     /// 位址列在「還沒輸入」時是提示語，不是網址。那種字串進了
