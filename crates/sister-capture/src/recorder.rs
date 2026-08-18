@@ -341,8 +341,16 @@ impl<B: Backend> Recorder<B> {
         } else {
             self.backend.idle_ms()
         };
+        // 時鐘往回跳（NTP 校時、使用者改時間）會讓 `ts - last_look` 變負。
+        // 用 `saturating_sub` 夾成 0 的話，「距離上次看過了 0 毫秒」永遠
+        // 小於天花板，而 `last_look_ts` 又只在真的看的時候才更新——她會
+        // **從此再也不看螢幕**，而且 tick 照跑、CPU 漂亮、沒有任何錯誤。
+        // 這是這個專案最典型的失效形狀，所以往回跳就直接把基準丟掉。
+        if self.last_look_ts.is_some_and(|prev| ts < prev) {
+            self.last_look_ts = None;
+        }
         if let (Some(idle), Some(last_look)) = (idle_signal, self.last_look_ts) {
-            let since_look = ts.saturating_sub(last_look);
+            let since_look = ts - last_look;
             // idle >= since_look 的意思是：從上次看螢幕到現在，沒有任何輸入。
             if idle as i64 >= since_look && since_look < MAX_BLIND_MS {
                 self.stats.skipped_idle += 1;
@@ -866,6 +874,64 @@ mod tests {
         // 第三個 tick 換了 app。時間還遠在天花板之內，也還是沒有人動。
         assert!(!matches!(rec.tick(800).unwrap(), Tick::Idle));
         assert!(looks.get() > baseline, "脈絡變了就得睜眼，別等到 5 秒");
+    }
+
+    /// 時鐘往回跳不可以讓她從此閉眼。
+    ///
+    /// `ts - last_look` 變負、被夾成 0，於是「距離上次看過了 0 毫秒」永遠
+    /// 小於天花板；而 `last_look_ts` 只在真的看的時候更新，所以那個 0 再也
+    /// 不會變大。症狀是她從此不再看螢幕——而 tick 照跑、CPU 漂亮、沒有
+    /// 任何錯誤。同一種形狀在畫面檔節流那裡也發生過一次。
+    #[test]
+    fn a_clock_that_jumps_backwards_does_not_blind_her_forever() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct CountingScreen(Rc<Cell<u32>>);
+        impl crate::traits::ScreenSource for CountingScreen {
+            fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+                self.0.set(self.0.get() + 1);
+                Ok(Some(RawFrame::from_rgba(ts, 0, 8, 8, vec![9u8; 8 * 8 * 4])))
+            }
+        }
+        struct NeverTouched;
+        impl crate::traits::InputSource for NeverTouched {
+            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputMetrics>> {
+                Ok(None)
+            }
+            fn idle_ms(&mut self) -> Option<u64> {
+                Some(60 * 60 * 1000)
+            }
+        }
+
+        let looks = Rc::new(Cell::new(0));
+        let backend = crate::traits::CompositeBackend {
+            name: "backwards".into(),
+            screen: CountingScreen(looks.clone()),
+            focus: crate::traits::NullFocus,
+            clipboard: crate::traits::NullClipboard,
+            input: NeverTouched,
+            ocr: crate::traits::NullOcr,
+        };
+        let mut rec = Recorder::new(
+            backend,
+            Db::open_in_memory().unwrap(),
+            Config::default(),
+            None,
+        )
+        .unwrap();
+
+        rec.tick(1_000_000).unwrap();
+        let baseline = looks.get();
+
+        // 時鐘退了一小時。往後每個 tick 的 `ts` 都比 `last_look` 小。
+        for ts in [1_000_000 - 3_600_000, 1_000_000 - 3_600_000 + 400] {
+            rec.tick(ts).unwrap();
+        }
+        assert!(
+            looks.get() > baseline,
+            "時鐘往回跳之後她再也沒看過螢幕——而摘要上一切正常"
+        );
     }
 
     /// 答不出閒置時間的平台，行為必須和以前一模一樣。
