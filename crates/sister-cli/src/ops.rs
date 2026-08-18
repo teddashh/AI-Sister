@@ -542,13 +542,24 @@ pub mod doctor {
                 ),
                 Ok(Some(frame)) => {
                     let (w, h) = (frame.width, frame.height);
+                    // 「讀不出字」和「圖上本來就沒字」在報告裡長得一模一樣。
+                    // 亮度範圍把它們分開：全黑的擷取 lo == hi。
+                    let contrast = match frame.luma_span() {
+                        Some((lo, hi)) if lo == hi => {
+                            format!(
+                                "；而且整張圖只有一個顏色（亮度 {lo}），這是一次失敗的擷取，不是一張沒有字的畫面"
+                            )
+                        }
+                        Some((lo, hi)) => format!("；畫面亮度 {lo}–{hi}"),
+                        None => String::new(),
+                    };
                     match ocr.recognize(&frame) {
                         Ok(lines) if lines.is_empty() => (
                             false,
                             "讀你現在的螢幕",
                             format!(
                                 "{w}×{h} → 0 行。錄製會照跑、畫面會留下，\
-                                 但搜尋永遠是空的"
+                                 但搜尋永遠是空的{contrast}"
                             ),
                         ),
                         Ok(lines) => {
@@ -559,7 +570,11 @@ pub mod doctor {
                                 format!("{w}×{h} → {} 行 {}", texts.len(), sample(&texts)),
                             )
                         }
-                        Err(e) => (false, "讀你現在的螢幕", format!("{w}×{h} 辨識失敗：{e:#}")),
+                        Err(e) => (
+                            false,
+                            "讀你現在的螢幕",
+                            format!("{w}×{h} 辨識失敗：{e:#}{contrast}"),
+                        ),
                     }
                 }
             };

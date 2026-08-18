@@ -43,6 +43,29 @@ impl RawFrame {
     pub fn pixel_count(&self) -> usize {
         (self.width as usize).saturating_mul(self.height as usize)
     }
+
+    /// 這張畫面上最暗與最亮的像素（灰階近似）。`None` = 沒有像素。
+    ///
+    /// 存在的理由是要分辨兩件長得一模一樣的事：**「OCR 讀不出字」** 與
+    /// **「這張圖上本來就沒有字」**。一張擷取失敗而全黑的畫面，在尺寸、
+    /// 位元組數、甚至 dhash 上都跟正常畫面沒有明顯差別，而 OCR 對它的
+    /// 回答同樣是「零行」——於是兩種病因在報告裡完全無法區分。
+    ///
+    /// `span.0 == span.1` 就代表整張圖是同一個顏色，那不是一張畫面，
+    /// 是一次失敗的擷取。
+    pub fn luma_span(&self) -> Option<(u8, u8)> {
+        let rgba = self.rgba.as_deref()?;
+        // 取樣就夠了：要回答的是「有沒有內容」，不是精確的直方圖。
+        // 質數步長避免和螢幕上的規則圖樣（格線、掃描線）共振。
+        let (mut lo, mut hi) = (255u8, 0u8);
+        for px in rgba.chunks_exact(4).step_by(97) {
+            // 近似的亮度：整數權重，不需要浮點數
+            let y = ((px[0] as u32 * 77 + px[1] as u32 * 150 + px[2] as u32 * 29) >> 8) as u8;
+            lo = lo.min(y);
+            hi = hi.max(y);
+        }
+        (lo <= hi).then_some((lo, hi))
+    }
 }
 
 /// 螢幕來源。
@@ -217,6 +240,44 @@ mod tests {
         // 反過來（左亮右暗）就會有位元被設起來
         let light_to_dark = build(&|x| if x < w / 2 { 255 } else { 0 });
         assert_ne!(RawFrame::from_rgba(0, 0, w, h, light_to_dark).dhash, 0);
+    }
+
+    /// 一次失敗的擷取（整張同色）必須跟一張沒有字的畫面分得出來。
+    ///
+    /// 上面那條測試剛好示範了為什麼不能靠 dhash：由暗到亮的漸層和純色
+    /// 一樣雜湊成 0。dhash 是設計來判斷「變了沒」的，不是「有沒有內容」。
+    #[test]
+    fn a_blank_capture_is_distinguishable_from_a_real_screen() {
+        let (w, h) = (64u32, 64u32);
+        let n = (w * h) as usize;
+
+        let black = RawFrame::from_rgba(0, 0, w, h, vec![0u8; n * 4]);
+        let (lo, hi) = black.luma_span().expect("有像素");
+        assert_eq!(lo, hi, "全黑的擷取必須是單一亮度");
+
+        let mut pixels = Vec::with_capacity(n * 4);
+        for i in 0..n {
+            let c = (i % 251) as u8;
+            pixels.extend_from_slice(&[c, c, c, 255]);
+        }
+        let (lo, hi) = RawFrame::from_rgba(0, 0, w, h, pixels)
+            .luma_span()
+            .expect("有像素");
+        assert!(hi - lo > 32, "有內容的畫面亮度該有範圍，實際 {lo}–{hi}");
+
+        // 沒有像素的幀（replay、text-only）不該假裝答得出來
+        assert!(
+            RawFrame {
+                ts: 0,
+                monitor: 0,
+                width: 4,
+                height: 4,
+                rgba: None,
+                dhash: 0,
+            }
+            .luma_span()
+            .is_none()
+        );
     }
 
     #[test]
