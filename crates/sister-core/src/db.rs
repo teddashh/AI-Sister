@@ -1526,6 +1526,53 @@ mod tests {
         );
     }
 
+    /// `doctor` 印出來的那個「有多少行字在窗外」要跟掃描實際看得到的一致。
+    ///
+    /// 兩邊各自算一次 cutoff 的話，改了其中一個就會開始說謊——而說的謊是
+    /// 「你查得到」，那是這個專案最不想要的方向。
+    #[test]
+    fn the_number_doctor_reports_matches_what_the_scan_can_actually_reach() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+
+        assert_eq!(
+            db.text_outside_scan_window().expect("empty"),
+            (0, 0),
+            "空資料庫不該報出任何窗外的東西"
+        );
+
+        let now = 1_700_000_000_000i64;
+        let inside = now - (LIKE_SCAN_DAYS - 1) * 86_400_000;
+        let outside = now - (LIKE_SCAN_DAYS + 1) * 86_400_000;
+        for (ts, marker) in [(outside, "舊"), (inside, "新"), (now, "今")] {
+            db.insert_frame(
+                s,
+                &frame_with_text(
+                    ts,
+                    "chrome.exe",
+                    "客服系統",
+                    &[&format!("{marker}客服專線紀錄")],
+                ),
+                None,
+                0,
+            )
+            .expect("insert");
+        }
+
+        let (out, total) = db.text_outside_scan_window().expect("audit");
+        assert_eq!(total, 3);
+        assert_eq!(out, 1, "只有第 {} 天前的那列在窗外", LIKE_SCAN_DAYS + 1);
+
+        // 而且它要跟掃描真的看得到的東西對得起來：報了 1 行在窗外，
+        // 掃描就該只交出另外 2 行。
+        let reachable = db.search("客服", 20).expect("search").len();
+        assert_eq!(
+            reachable as i64,
+            total - out,
+            "doctor 說窗外有 {out} 行，掃描卻交出 {reachable} 行——兩邊的 cutoff 已經不一樣了"
+        );
+    }
+
     /// 遮蔽稽核問的是資料庫，不是旗子。
     ///
     /// 「內容沒有落地」是這份文件裡最強的一句承諾，而它唯一的失敗方式是
