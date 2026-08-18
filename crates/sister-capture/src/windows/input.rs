@@ -111,7 +111,16 @@ impl InputSource for WindowsInput {
         // 這一段原本不存在，於是 recorder 每個 tick（400ms）叫一次就寫一列，
         // 而 `input_window_secs = 10` 從來沒有人讀。打字時是一秒 2.5 列，
         // 不是十秒一列——DATA_INVENTORY 上那句「預設每 10 秒一列」曾經是錯的。
-        if ts.saturating_sub(self.window_start) < self.window_ms {
+        //
+        // 時鐘往回跳的話 `ts - window_start` 會變負。夾成 0 的話它永遠小於
+        // 視窗長度，而 `window_start` 只在出了一列之後才前進——於是**打字
+        // 節奏這一路訊號從此完全停止**，而錄製摘要上一個字都不會提。
+        // 往回跳就把視窗接到現在重開，最多損失一段沒出完的計數。
+        if ts < self.window_start {
+            self.window_start = ts;
+            return Ok(None);
+        }
+        if ts - self.window_start < self.window_ms {
             return Ok(None);
         }
 
@@ -330,6 +339,27 @@ mod tests {
             .expect("視窗滿了就該出列");
         assert_eq!(m.keystrokes, 9, "視窗中間累積的輸入不能被丟掉");
         assert_eq!((m.ts_start, m.ts_end), (0, 10_000));
+    }
+
+    /// 時鐘往回跳不可以讓節奏訊號從此停止。
+    ///
+    /// `ts - window_start` 變負、夾成 0，於是永遠小於視窗長度；而
+    /// `window_start` 只在出了一列之後才前進。症狀是 `input_metrics`
+    /// 從此一列都不再寫，而且沒有任何地方會講。
+    #[test]
+    fn a_clock_that_jumps_backwards_does_not_silence_the_rhythm_forever() {
+        KEYSTROKES.store(5, Relaxed);
+
+        let mut input = WindowsInput {
+            window_start: 1_000_000,
+            window_ms: 10_000,
+        };
+        // 退了一小時。這一次不出列是對的（視窗重開），但基準必須跟著退。
+        assert!(input.drain(1_000_000 - 3_600_000).unwrap().is_none());
+
+        // 從新基準往後過了一整個視窗，就該出列了。
+        let m = input.drain(1_000_000 - 3_600_000 + 10_000).unwrap();
+        assert!(m.is_some(), "時鐘往回跳之後節奏訊號就再也沒出現過");
     }
 
     #[test]
