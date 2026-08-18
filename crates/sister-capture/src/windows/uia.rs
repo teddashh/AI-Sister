@@ -588,9 +588,8 @@ mod tests {
         // 還沒到門檻：仍然給得出一幀，而且那一幀是「不知道」→ 擋住。
         for i in 1..MAX_ABANDONS {
             let reading = uia.note_abandoned_thread();
-            let reading = reading.unwrap_or_else(|| {
-                panic!("第 {i} 次就投降了，門檻是 {MAX_ABANDONS}")
-            });
+            let reading =
+                reading.unwrap_or_else(|| panic!("第 {i} 次就投降了，門檻是 {MAX_ABANDONS}"));
             assert!(
                 reading.should_skip_frame(),
                 "問不出來的時候要擋掉這一幀，不是放它過去"

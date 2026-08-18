@@ -25,27 +25,7 @@ use windows::core::PWSTR;
 
 use crate::traits::FocusSource;
 
-/// 會叫 UIA 的瀏覽器。
-///
-/// 比對的是 `app_id`（小寫的執行檔名），用**子字串**——`chrome` 同時涵蓋
-/// `chrome.exe` 與各種 Chromium 分支的命名，而漏掉一個瀏覽器的代價是
-/// 那個瀏覽器的網銀規則整組失效（THREAT_MODEL 安靜失效 #2 就是這個形狀）。
-const BROWSERS: &[&str] = &[
-    "chrome",
-    "msedge",
-    "firefox",
-    "brave",
-    "vivaldi",
-    "opera",
-    "chromium",
-    "arc",
-    "zen",
-    "librewolf",
-    "waterfox",
-    "floorp",
-    "thorium",
-    "iexplore",
-];
+use crate::browsers::is_browser;
 
 pub struct WindowsFocus {
     uia: crate::windows::uia::Uia,
@@ -82,9 +62,8 @@ impl FocusSource for WindowsFocus {
         // 都是一次可能卡住、而且叫不回來的跨程序往返，對一個整天在跑的
         // 背景程式來說，「一天裡絕大多數時間根本沒有這個風險」本身就是
         // 一項功能。代價是非瀏覽器的密碼欄我們看不到（DATA_INVENTORY
-        // 「已知缺口」有記）。
-        let app = snapshot.app_key();
-        if !BROWSERS.iter().any(|b| app.contains(b)) {
+        // 「已知缺口」有記）。清單與比對規則見 [`crate::browsers`]。
+        if !is_browser(&snapshot.app_key()) {
             return Ok(snapshot);
         }
 

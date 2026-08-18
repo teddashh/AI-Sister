@@ -30,6 +30,13 @@ if ! rustup target list --installed | grep -qx "$TARGET"; then
     rustup target add "$TARGET"
 fi
 
+# fmt 不分平台，放在這裡的理由是：`windows/` 底下的程式碼是最容易在
+# 「本機全綠」之後直接推上去的一批——本機根本編不到它，而跑完這支腳本的
+# 手感就是「我檢查過了」。實際踩過一次：uia.rs 新增的測試沒排版好，
+# 本機 clippy 與 test 全綠，CI 的 Linux job 卡在 Format。
+echo "▶ cargo fmt --check"
+cargo fmt --all --check
+
 echo "▶ cargo check --target $TARGET"
 cargo check --target "$TARGET" --workspace --no-default-features --all-targets
 
