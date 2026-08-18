@@ -115,7 +115,7 @@ pub fn backend(config: &Config) -> Result<impl Backend + use<>> {
         screen: screen::WindowsScreen::new(),
         focus: focus::WindowsFocus::new(),
         clipboard: clipboard::WindowsClipboard::new(),
-        input: input::WindowsInput::start(now_ms()),
+        input: input::WindowsInput::start(now_ms(), config.capture.input_window_secs),
         ocr: ocr::WindowsOcr::new(&config.capture.ocr_languages),
     })
 }

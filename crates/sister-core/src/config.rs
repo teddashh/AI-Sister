@@ -24,9 +24,7 @@ pub struct Config {
 pub struct CaptureConfig {
     /// 總開關。false = 她閉著眼睛（tray 的「看別的地方」）。
     pub enabled: bool,
-    /// idle 時的補拍上限（秒）。事件驅動為主，這個只是保底心跳。
-    pub heartbeat_secs: u64,
-    /// 事件觸發後的最小擷取間隔（毫秒），避免快速切窗時暴衝。
+    /// 每隔多久探一次螢幕（毫秒）。
     pub min_interval_ms: u64,
     /// dHash 判定「同一畫面」的 Hamming 門檻。
     pub dedup_threshold: u32,
@@ -76,7 +74,6 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            heartbeat_secs: 8,
             min_interval_ms: 400,
             dedup_threshold: crate::dedup::DEFAULT_THRESHOLD,
             max_long_edge: 1568,

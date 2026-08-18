@@ -594,7 +594,8 @@ pub mod doctor {
         // 不宣稱，直接裝一次。以前 doctor 永遠印「輸入 hook 沒裝上」，
         // 因為它根本沒去裝——那是一則恆真的假警報，而假警報會連坐旁邊
         // 那則真的警告一起被忽略。hook 只數次數不看內容，裝一次很便宜。
-        let _ = WindowsInput::start(sister_core::now_ms());
+        // doctor 只想知道 hook 裝不裝得上，聚合視窗多長無關緊要
+        let _ = WindowsInput::start(sister_core::now_ms(), config.capture.input_window_secs);
         let input_hooks = match WindowsInput::state() {
             HookState::Active => Some(true),
             // NotStarted 在上一行之後不可能發生；真發生了也是「沒裝上」

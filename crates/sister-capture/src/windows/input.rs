@@ -70,13 +70,18 @@ const BURST_GAP_MS: u64 = 2_000;
 
 pub struct WindowsInput {
     window_start: Millis,
+    /// 一列涵蓋多久。見 `CaptureConfig::input_window_secs`。
+    window_ms: i64,
 }
 
 impl WindowsInput {
     /// 裝上 hook 並開始累積。失敗不致命——沒有節奏訊號比沒有記憶好。
-    pub fn start(now: Millis) -> Self {
+    pub fn start(now: Millis, window_secs: u64) -> Self {
         install_hooks();
-        Self { window_start: now }
+        Self {
+            window_start: now,
+            window_ms: (window_secs as i64) * 1000,
+        }
     }
 
     pub fn state() -> HookState {
@@ -96,6 +101,16 @@ impl WindowsInput {
 
 impl InputSource for WindowsInput {
     fn drain(&mut self, ts: Millis) -> Result<Option<InputMetrics>> {
+        // 視窗還沒滿就先繼續累積。**這個 early return 一定要在 swap 之前**：
+        // 先把計數器清掉再判斷要不要出一列，等於把那一段的輸入丟掉。
+        //
+        // 這一段原本不存在，於是 recorder 每個 tick（400ms）叫一次就寫一列，
+        // 而 `input_window_secs = 10` 從來沒有人讀。打字時是一秒 2.5 列，
+        // 不是十秒一列——DATA_INVENTORY 上那句「預設每 10 秒一列」曾經是錯的。
+        if ts.saturating_sub(self.window_start) < self.window_ms {
+            return Ok(None);
+        }
+
         let start = self.window_start;
         self.window_start = ts;
 
@@ -246,8 +261,51 @@ mod tests {
         CLICKS.store(0, Relaxed);
         SCROLL.store(0, Relaxed);
         MOUSE_PX.store(0, Relaxed);
-        let mut input = WindowsInput { window_start: 0 };
+        // window_ms = 0 讓視窗這一關不參與判定，這條測的是「安靜」本身
+        let mut input = WindowsInput {
+            window_start: 0,
+            window_ms: 0,
+        };
         assert!(input.drain(1000).expect("no error").is_none());
+    }
+
+    /// **視窗沒滿之前不出列，而且累積的輸入不可以被丟掉。**
+    ///
+    /// `input_window_secs` 本來是個沒有人讀的設定：recorder 每 400ms 叫一次
+    /// drain，它就每 400ms 寫一列，打字時一秒 2.5 列——而設定檔上寫著 10 秒、
+    /// DATA_INVENTORY 上也寫著「預設每 10 秒一列」。
+    ///
+    /// 這條同時盯著那個 early return 的**位置**：擺到 swap 後面的話，視窗
+    /// 沒滿的那幾次會把計數器清掉，於是使用者打的字被靜靜地扔了。
+    #[test]
+    fn input_is_accumulated_until_the_window_closes_not_dropped() {
+        KEYSTROKES.store(0, Relaxed);
+        CLICKS.store(0, Relaxed);
+        SCROLL.store(0, Relaxed);
+        MOUSE_PX.store(0, Relaxed);
+        BURSTS.store(0, Relaxed);
+
+        let mut input = WindowsInput {
+            window_start: 0,
+            window_ms: 10_000,
+        };
+
+        // 視窗中間打了字，但還沒滿 10 秒
+        KEYSTROKES.store(5, Relaxed);
+        assert!(
+            input.drain(400).expect("no error").is_none(),
+            "視窗沒滿不該出列"
+        );
+        KEYSTROKES.store(9, Relaxed); // 又多打了幾個
+        assert!(input.drain(800).expect("no error").is_none());
+
+        // 視窗滿了，這時候才出一列，而且要含全部的按鍵數
+        let m = input
+            .drain(10_000)
+            .expect("no error")
+            .expect("視窗滿了就該出列");
+        assert_eq!(m.keystrokes, 9, "視窗中間累積的輸入不能被丟掉");
+        assert_eq!((m.ts_start, m.ts_end), (0, 10_000));
     }
 
     #[test]
@@ -258,7 +316,10 @@ mod tests {
         MOUSE_PX.store(450, Relaxed);
         BURSTS.store(1, Relaxed);
 
-        let mut input = WindowsInput { window_start: 1000 };
+        let mut input = WindowsInput {
+            window_start: 1000,
+            window_ms: 10_000,
+        };
         let m = input
             .drain(11_000)
             .expect("no error")
@@ -280,6 +341,7 @@ mod tests {
         KEYSTROKES.store(1, Relaxed);
         let mut input = WindowsInput {
             window_start: 5_000,
+            window_ms: 1_000,
         };
         let m = input.drain(6_000).expect("no error").expect("some metrics");
         assert!(m.idle_ms <= 1_000, "idle {} > window", m.idle_ms);
