@@ -882,6 +882,43 @@ mod tests {
     }
 
     #[test]
+    fn a_misspelled_key_is_rejected_instead_of_silently_ignored() {
+        // 這裡真正保護的不是「已經刪掉的欄位」，而是**打錯字的隱私規則**。
+        // 少了 `deny_unknown_fields`，`excluded_app` 會被 serde 安靜地丟掉，
+        // 於是使用者手上有一條讀起來完全正確、卻永遠不會命中的排除規則——
+        // 他以為銀行網頁沒被錄，其實從第一天就在錄。
+        //
+        // 寧可開不起來。開不起來會被看見，而一條不命中的規則不會。
+        let typos = [
+            (
+                "[privacy]\nexcluded_app = [\"1password\"]\n",
+                "excluded_app",
+            ),
+            ("[capture]\nstore_image = false\n", "store_image"),
+            // 曾經存在、後來刪掉的欄位（理由見 `RetentionConfig` 的說明）。
+            // 舊設定檔會被指名擋下，而不是繼續調一個沒人在讀的數字。
+            ("[retention]\nthumbs_days = 7\n", "thumbs_days"),
+            (
+                "[retention]\nmax_disk_gb_per_day = 5\n",
+                "max_disk_gb_per_day",
+            ),
+            // 連區塊名稱打錯都要擋——那是 `Config` 自己那一層。
+            ("[privacyy]\nexcluded_apps = []\n", "privacyy"),
+        ];
+        for (text, offending) in typos {
+            let Err(err) = toml::from_str::<Config>(text) else {
+                panic!("`{offending}` 應該要讓設定檔開不起來，而不是被安靜忽略");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains(offending),
+                "錯誤訊息必須指名是哪個 key 出問題，否則使用者第一個念頭\
+                 就是把 deny_unknown_fields 拿掉：{msg}"
+            );
+        }
+    }
+
+    #[test]
     fn banking_urls_are_blocked_whatever_shape_the_host_takes() {
         // 迴歸測試：原本的規則寫成 `*://*/*netbank*`，把關鍵字綁在路徑上，
         // 於是 https://netbank.example.com/transfer 一路被錄了下來。
