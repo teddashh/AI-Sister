@@ -109,6 +109,15 @@ enum Command {
         dry_run: bool,
     },
 
+    /// 叫她閉眼睛。正在跑的 `record` 下一個 tick 就會停下來。
+    ///
+    /// 暫停**不會自己過期**——她會一直停到有人 `sister resume`（或在字母人
+    /// 上按一下）為止。這是刻意的：一個會自己醒來的暫停等於沒有暫停。
+    Pause,
+
+    /// 解除暫停。
+    Resume,
+
     /// 環境檢查：這台機器能不能好好跑
     Doctor,
 }
@@ -160,6 +169,8 @@ fn main() -> Result<()> {
         } => ops::facts::run(&data_dir, kind.as_deref(), search.as_deref(), limit, json),
         Command::Stats { json } => ops::stats::run(&data_dir, json),
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config, dry_run),
+        Command::Pause => ops::pause::run(&data_dir, true),
+        Command::Resume => ops::pause::run(&data_dir, false),
         Command::Doctor => ops::doctor::run(&data_dir, &config, cli.config.clone()),
     }
 }

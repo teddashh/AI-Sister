@@ -20,6 +20,9 @@
          的事，不像 Electron 要另外開一層 chrome。 -->
     <header class="dragbar" data-tauri-drag-region>
       <span class="brand" data-tauri-drag-region>AI-Sister</span>
+      <!-- 暫停排在最前面。她整個產品的前提是「你隨時停得掉」，那顆鍵就不該
+           藏在設定裡——它跟置頂、收起來是同一級的東西。 -->
+      <button class="control" id="pause" type="button" title="暫停記錄">⏸</button>
       <button class="control" id="pin" type="button" title="保持在最上層">●</button>
       <button class="control" id="hide" type="button" title="收到系統匣">−</button>
     </header>

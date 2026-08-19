@@ -68,6 +68,39 @@ fn report_exclusions(stats: &sister_capture::RecorderStats) {
     }
 }
 
+pub mod pause {
+    use super::*;
+
+    /// `sister pause` / `sister resume`。
+    ///
+    /// 存在的理由不只是「沒有 GUI 的時候也能停」：它讓「暫停」這件事在一台
+    /// 無頭機器上就驗得完（旗標寫了沒、`record` 有沒有真的停），不必等到有人
+    /// 在 Windows 上開得起字母人。
+    pub fn run(data_dir: &Path, paused: bool) -> Result<()> {
+        let before = sister_core::pause::is_paused(data_dir);
+        sister_core::pause::set_paused(data_dir, paused, sister_core::now_ms())
+            .with_context(|| format!("寫不進 {}", data_dir.display()))?;
+
+        // 「本來就是這樣」和「剛剛被我改掉」要分得出來。前者常常代表使用者
+        // 記錯了自己上次按了什麼，而那正是需要講清楚的時刻。
+        match (before, paused) {
+            (false, true) => println!(
+                "⏸ 已暫停。正在跑的 `sister record` 會在下一個 tick 停下來，\
+                 而且**不會自己恢復**——要她繼續請跑 `sister resume`。"
+            ),
+            (true, true) => {
+                let since = sister_core::pause::paused_since(data_dir)
+                    .map(|ts| format!("（從 {} 起）", crate::fmt::timestamp(ts)))
+                    .unwrap_or_default();
+                println!("⏸ 本來就在暫停中{since}，沒有變動。");
+            }
+            (true, false) => println!("▶ 已解除暫停。她從下一個 tick 開始重新記錄。"),
+            (false, false) => println!("▶ 本來就沒有暫停，沒有變動。"),
+        }
+        Ok(())
+    }
+}
+
 pub mod prune {
     use super::*;
     use sister_core::config::Config;
@@ -505,6 +538,7 @@ pub mod stats {
         let per_day = (span_days >= 0.5).then(|| disk_total as f64 / span_days);
         let audit = db.exclusion_audit()?;
         let redaction = db.redaction_audit()?;
+        let pauses = db.pause_audit()?;
 
         if json {
             println!(
@@ -526,6 +560,13 @@ pub mod stats {
                         "reason": a.reason, "episodes": a.episodes,
                         "first_ts": a.first_ts, "last_ts": a.last_ts,
                     })).collect::<Vec<_>>(),
+                    "pauses": {
+                        "episodes": pauses.episodes,
+                        // 只含已結束的那幾段；`truncated > 0` 時這是下限
+                        "total_ms": pauses.total_ms,
+                        "open_since": pauses.open_since,
+                        "truncated": pauses.truncated,
+                    },
                     // 這三個訊號在 Phase 0 沒有讀者，所以也沒有回歸保護：
                     // 哪天 recorder 不再寫 focus_events，`stats` 照樣印一個
                     // 很小的數字，沒有一個測試會紅。`doctor` 會講，但 doctor
@@ -595,6 +636,32 @@ pub mod stats {
                     fmt::one_line(&a.reason, 46)
                 );
                 println!("                    {when}");
+            }
+        }
+
+        // 暫停稽核。和排除同一個道理，只是這次擋下擷取的是使用者自己。
+        // 「我那天到底有沒有記得按暫停」是他事後唯一問得出口的問題，而錄製
+        // 結束之後只有資料庫答得出來。
+        if pauses.episodes == 0 {
+            println!("  暫停      從來沒有被暫停過");
+        } else {
+            println!(
+                "  暫停      {} 段，已結束的加起來 {}",
+                pauses.episodes,
+                fmt::duration_ms(pauses.total_ms)
+            );
+            if let Some(since) = pauses.open_since {
+                println!(
+                    "            最後一段還沒結束（{} 起）——她現在就是閉著眼睛的",
+                    fmt::timestamp(since)
+                );
+            }
+            // 這一行讓上面那個時間是「下限」這件事看得見，而不是靜靜地少算。
+            if pauses.truncated > 0 {
+                println!(
+                    "            其中 {} 段的開頭已被保留期刪掉，長度算不出來",
+                    pauses.truncated
+                );
             }
         }
 
@@ -1126,6 +1193,24 @@ pub mod doctor {
         }
 
         println!("\n隱私");
+        // 排在最前面，因為它壓過底下每一條：暫停的時候，那些規則生不生效
+        // 都無所謂——她根本沒在看。
+        //
+        // 而且這一行是**唯一**會告訴使用者「你上禮拜按的暫停還開著」的地方。
+        // 暫停不會自己過期（見 `sister_core::pause`），所以那條路很真實，而
+        // 它的症狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
+        if sister_core::pause::is_paused(data_dir) {
+            let since = sister_core::pause::paused_since(data_dir)
+                .map(|ts| format!("從 {} 起", crate::fmt::timestamp(ts)))
+                .unwrap_or_else(|| "不知道從什麼時候開始".to_string());
+            mark(
+                "⏸",
+                "現在有沒有在看",
+                &format!("**暫停中**（{since}）。這段期間什麼都不會被記錄"),
+            );
+        } else {
+            line(true, "現在有沒有在看", "沒有暫停");
+        }
         // 「9 條規則 ✓」是 THREAT_MODEL 明文禁止的那種寫法：規則的**數量**
         // 從來不是問題，規則**會不會命中**才是。這些規則比對的是前景 app
         // 名稱，所以讀不到名稱的時候它們一條都不生效——而數量照樣是 9。
@@ -1424,7 +1509,9 @@ pub mod replay {
                 }
                 Tick::Excluded { reason } => println!("  {offset:>7} ms  排除：{reason}"),
                 Tick::NoScreen => println!("  {offset:>7} ms  沒有畫面"),
-                Tick::Duplicate { .. } | Tick::Disabled | Tick::Idle => {}
+                // 重播不看暫停旗標——腳本要能重跑出同一份結果，而旗標是
+                // 執行當下的環境狀態。所以 `Paused` 在這條路上到不了。
+                Tick::Duplicate { .. } | Tick::Disabled | Tick::Paused | Tick::Idle => {}
             }
             offset += interval_ms;
         }
@@ -1538,6 +1625,23 @@ pub mod record {
                  什麼都不會記錄。改成 true 才會真的開始錄。"
             );
         }
+        // 暫停是**不會自己過期**的（見 `pause` 模組），所以「上禮拜按了暫停、
+        // 這禮拜開起來發現整週都沒錄」是一條真實的路。開場就要講，而且要講
+        // 從什麼時候開始——不然使用者只會看到一個永遠是 0 的摘要。
+        if sister_core::pause::is_paused(data_dir) {
+            match sister_core::pause::paused_since(data_dir) {
+                Some(ts) => println!(
+                    "⚠  目前是暫停狀態（從 {} 起），不會記錄任何東西。\
+                     在字母人上按一下暫停鍵解除，或刪掉 {}。",
+                    crate::fmt::timestamp(ts),
+                    sister_core::pause::flag_path(data_dir).display()
+                ),
+                None => println!(
+                    "⚠  目前是暫停狀態，不會記錄任何東西。刪掉 {} 可解除。",
+                    sister_core::pause::flag_path(data_dir).display()
+                ),
+            }
+        }
         // doctor 會挑出「寫了也不會命中」的網址規則，但一個只跑 record 的人
         // 永遠看不到那份清單——而那正是把網銀畫面錄一整年的那種規則。
         for (rule, why) in sister_core::config::suspicious_url_rules(&config.privacy.excluded_urls)
@@ -1606,7 +1710,24 @@ pub mod record {
                 break;
             }
 
-            match rec.tick(sister_core::now_ms()) {
+            // 暫停鍵在**另一個行程**上（字母人），所以唯一的辦法是每個 tick
+            // 去問一次那個旗標檔。一次 `stat` 是微秒等級，相對於一個 tick
+            // 裡最便宜的一步都還小兩個數量級——不值得為它做快取。
+            let now = sister_core::now_ms();
+            match rec.set_paused(sister_core::pause::is_paused(data_dir), now) {
+                Ok(true) if rec.is_paused() => println!("  ⏸ 已暫停——她不看了，直到你解除。"),
+                Ok(true) => println!("  ▶ 已解除暫停。"),
+                Ok(false) => {}
+                // 事件寫不進去就不能宣稱已經暫停：使用者會以為停了，實際上
+                // 下一行 tick 照錄。寧可整個 tick 跳過。
+                Err(e) => {
+                    tracing::warn!("暫停狀態切換失敗：{e:#}");
+                    std::thread::sleep(interval);
+                    continue;
+                }
+            }
+
+            match rec.tick(now) {
                 // 單次 tick 失敗不該終止 session：抓不到畫面的原因多半是
                 // 暫時的（切換使用者、顯示器休眠），下一秒就好了
                 Err(e) => tracing::warn!("tick failed: {e:#}"),
@@ -1637,23 +1758,30 @@ pub mod record {
 
             if last_report.elapsed() >= Duration::from_secs(60) {
                 footprint.tick();
-                let s = rec.stats();
-                println!(
-                    "  … {} tick：保留 {}、重複 {}、排除 {}、讀到 {} 行字{}",
-                    s.ticks,
-                    s.kept,
-                    s.duplicates,
-                    s.excluded,
-                    s.ocr_blocks,
-                    match (footprint.cpu_percent(), footprint.peak_rss_bytes()) {
-                        (Some(cpu), Some(rss)) => format!(
-                            "；CPU {cpu:.1}%、RAM 峰值 {}",
-                            crate::fmt::bytes(rss as i64)
-                        ),
-                        _ => String::new(),
-                    }
-                );
                 last_report = Instant::now();
+                // 暫停時如果照原樣印那四個數字，讀起來就是「一切正常，只是
+                // 這一分鐘沒有新東西」——那正是暫停最危險的失效模式：
+                // 使用者以為她還在錄。
+                if rec.is_paused() {
+                    println!("  ⏸ 仍在暫停中，這一分鐘沒有記錄任何東西。");
+                } else {
+                    let s = rec.stats();
+                    println!(
+                        "  … {} tick：保留 {}、重複 {}、排除 {}、讀到 {} 行字{}",
+                        s.ticks,
+                        s.kept,
+                        s.duplicates,
+                        s.excluded,
+                        s.ocr_blocks,
+                        match (footprint.cpu_percent(), footprint.peak_rss_bytes()) {
+                            (Some(cpu), Some(rss)) => format!(
+                                "；CPU {cpu:.1}%、RAM 峰值 {}",
+                                crate::fmt::bytes(rss as i64)
+                            ),
+                            _ => String::new(),
+                        }
+                    );
+                }
             }
 
             std::thread::sleep(interval);

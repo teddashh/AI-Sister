@@ -32,6 +32,9 @@ const PET_H: i32 = 560;
 struct Shell {
     state: Mutex<PetState>,
     state_path: PathBuf,
+    /// 資料目錄。`None` = 這台機器上問不出使用者的 data dir，那時候暫停鍵
+    /// 只能誠實地失敗——一顆按了沒反應、卻假裝有反應的暫停鍵最糟。
+    data_dir: Option<PathBuf>,
     /// 資料庫連線。**開得很懶**：她可以在完全沒有資料的機器上開起來，
     /// 使用者按下第一個問題之前不必碰硬碟。
     db: Mutex<Option<sister_core::db::Db>>,
@@ -73,6 +76,53 @@ fn toggle_pin(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> bool {
     shell.persist();
     pinned
 }
+
+/// 她現在有沒有在看。
+///
+/// 每次都去讀磁碟，**不快取在這個行程裡**：按下暫停的可能是系統匣、可能是
+/// 上一次開機、也可能是使用者自己去刪了那個檔案。這個視窗只是一面鏡子，
+/// 真相在 data dir 裡。
+#[tauri::command]
+fn pause_state(shell: tauri::State<'_, Shell>) -> bool {
+    match &shell.data_dir {
+        Some(dir) => sister_core::pause::is_paused(dir),
+        // 問不出資料目錄 = 不知道她在做什麼。按照 `pause` 模組的規則，
+        // 不確定就報暫停——寧可顯示得比實際保守。
+        None => true,
+    }
+}
+
+#[tauri::command]
+fn toggle_pause(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> Result<bool, String> {
+    let dir = shell
+        .data_dir
+        .as_ref()
+        .ok_or_else(|| "找不到資料目錄，暫停鍵沒有作用".to_string())?;
+    let next = !sister_core::pause::is_paused(dir);
+    sister_core::pause::set_paused(dir, next, sister_core::now_ms()).map_err(|e| e.to_string())?;
+    announce_pause(&app, next);
+    Ok(next)
+}
+
+/// 把新的暫停狀態同時送到視窗和系統匣。
+///
+/// 兩個地方都要更新，因為兩個地方都能觸發它——只更新自己那一邊的話，
+/// 從系統匣暫停之後，視窗裡的字母人會繼續一臉「我在聽」。
+fn announce_pause(app: &tauri::AppHandle, paused: bool) {
+    use tauri::Emitter;
+    let _ = app.emit("pause-changed", paused);
+    if let Some(item) = app.try_state::<PauseItem>() {
+        let _ = item.0.set_text(pause_label(paused));
+    }
+}
+
+fn pause_label(paused: bool) -> &'static str {
+    if paused { "繼續記錄" } else { "暫停記錄" }
+}
+
+/// 系統匣裡的那一顆暫停。存起來是為了改它的字——選單上一個永遠寫著
+/// 「暫停記錄」的項目，在已經暫停的時候會讓人再按一次，然後把它打開。
+struct PauseItem(MenuItem<tauri::Wry>);
 
 #[tauri::command]
 fn hide_to_tray(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) {
@@ -228,7 +278,9 @@ fn main() {
         )
         .init();
 
-    let state_path = sister_core::config::Config::default_data_dir()
+    let data_dir = sister_core::config::Config::default_data_dir();
+    let state_path = data_dir
+        .clone()
         .unwrap_or_else(std::env::temp_dir)
         .join("pet-window.json");
 
@@ -236,6 +288,7 @@ fn main() {
         .manage(Shell {
             state: Mutex::new(bounds::load(&state_path).unwrap_or_default()),
             state_path,
+            data_dir,
             db: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
@@ -243,7 +296,9 @@ fn main() {
             hide_to_tray,
             ask,
             open_frame,
-            frame_image
+            frame_image,
+            pause_state,
+            toggle_pause
         ])
         .setup(|app| {
             let win = app
@@ -304,9 +359,23 @@ fn main() {
             let _ = win.show();
 
             // ---- 系統匣 ----
+            // 暫停放在系統匣，是因為視窗收起來的時候它是唯一按得到的地方——
+            // 而「我現在不想被看」最常發生的時機，正是她不在畫面上的時候。
+            //
+            // 還缺一個全域熱鍵（PHASES.md Phase 1 那條「pause 快捷鍵」）。
+            // 那要多一個 plugin，等設定頁一起做。
+            let paused_now = pause_state(app.state::<Shell>());
             let show_item = MenuItem::with_id(app, "show", "顯示 AI-Sister", true, None::<&str>)?;
+            let pause_item = MenuItem::with_id(
+                app,
+                "pause",
+                pause_label(paused_now),
+                true,
+                None::<&str>,
+            )?;
             let quit_item = MenuItem::with_id(app, "quit", "結束", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let menu = Menu::with_items(app, &[&show_item, &pause_item, &quit_item])?;
+            app.manage(PauseItem(pause_item));
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("icon").clone())
@@ -318,6 +387,13 @@ fn main() {
                         if let Some(win) = app.get_webview_window(PET) {
                             let _ = win.show();
                             let _ = win.set_focus();
+                        }
+                    }
+                    "pause" => {
+                        // 失敗要看得見。一顆按了什麼都沒發生的暫停鍵，
+                        // 使用者只會以為自己按到了。
+                        if let Err(e) = toggle_pause(app.clone(), app.state::<Shell>()) {
+                            tracing::error!("暫停切換失敗：{e}");
                         }
                     }
                     "quit" => {

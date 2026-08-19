@@ -28,8 +28,11 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// 一次 tick 的結果。呼叫端據此決定要不要記錄、要不要退避。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tick {
-    /// 總開關關閉——她閉著眼睛。
+    /// 總開關關閉——她閉著眼睛。設定檔說的，重開才會變。
     Disabled,
+    /// 使用者按了暫停。和 `Disabled` 差在這是**當下**、可以隨時解除的，
+    /// 而且進出各留一筆 system event，所以資料裡那個空洞解釋得出來。
+    Paused,
     /// 被排除規則擋下。畫面沒有被抓取。
     Excluded { reason: String },
     /// 這一刻沒有可用畫面（鎖屏、顯示器休眠）。
@@ -137,6 +140,10 @@ pub struct Recorder<B: Backend> {
     /// 上一次的排除理由。只有在理由改變時才寫 system event，
     /// 否則被排除的一小時會產生上千筆一模一樣的紀錄。
     last_exclusion: Option<String>,
+    /// 使用者按下的暫停。由呼叫端每個 tick 餵進來（見 `set_paused`），
+    /// **不是** recorder 自己去讀檔案——這一層讀了檔案，replay 就不再是
+    /// 確定性的了，而確定性是這個迴圈唯一的測試手段。
+    paused: bool,
     /// 畫面檔的根目錄。`None` = text-only 模式。
     image_dir: Option<PathBuf>,
     /// 上一次**真的寫出**畫面檔的時刻。見 `image_min_interval_ms`。
@@ -196,6 +203,7 @@ impl<B: Backend> Recorder<B> {
             last_frame_id: None,
             last_focus: None,
             last_exclusion: None,
+            paused: false,
             image_dir,
             last_image_ts: None,
             last_look_ts: None,
@@ -235,6 +243,45 @@ impl<B: Backend> Recorder<B> {
         &self.backend
     }
 
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// 餵進「使用者現在有沒有按暫停」。呼叫端每個 tick 呼叫一次即可——
+    /// 沒有變化時什麼都不做，所以它可以無腦地一直呼叫。
+    ///
+    /// 只有**轉換**才寫事件，理由和排除那邊一樣：暫停三小時不該產生上萬筆
+    /// 一模一樣的紀錄。但那兩筆轉換非寫不可——沒有它們，資料裡的空洞和
+    /// 「那段時間什麼都沒發生」在事後完全分不出來，而這兩件事的意思差很遠。
+    ///
+    /// 回傳「這一次有沒有真的改變狀態」，讓呼叫端決定要不要對使用者說一句。
+    pub fn set_paused(&mut self, paused: bool, ts: Millis) -> Result<bool> {
+        if self.paused == paused {
+            return Ok(false);
+        }
+        self.paused = paused;
+        self.db.insert_system(
+            self.session_id,
+            &SystemEvent {
+                ts,
+                kind: if paused {
+                    SystemKind::CapturePaused
+                } else {
+                    SystemKind::CaptureResumed
+                },
+                detail: None,
+            },
+        )?;
+        if paused {
+            // 暫停期間畫面沒被看過，所以解除之後的第一張必須當成全新的。
+            // 少了這兩行，使用者暫停時換掉整個畫面、回來以後那張新畫面會被
+            // 判定成「和上一張一樣」而整個消失。
+            self.deduper.reset();
+            self.last_frame_id = None;
+        }
+        Ok(true)
+    }
+
     /// 收尾：標記 session 結束。
     pub fn finish(&mut self) -> Result<()> {
         let ts = sister_core::now_ms();
@@ -267,6 +314,20 @@ impl<B: Backend> Recorder<B> {
 
         if !self.config.capture.enabled {
             return Ok(Tick::Disabled);
+        }
+
+        if self.paused {
+            // 和排除同一個理由，而且更嚴重：使用者是**故意**在這段時間裡去複製
+            // 一個他不想被記住的東西。水位不推過去的話，他一解除暫停，那個東西
+            // 就在下一個 tick 被撈進來——暫停等於只是延後了洩漏。
+            //
+            // `skip` 不讀內容，只把水位推過去，所以這一行讓她更看不到、
+            // 不是更看得到。
+            self.backend.skip_clipboard(ts);
+            // 排除那邊會繼續累積輸入節奏（節奏不含內容，斷了會在訊號上開洞）。
+            // 這裡**不**累積：排除講的是「這個畫面不能看」，暫停講的是
+            // 「現在不要記錄我」——後者連沒有內容的節奏都不該留下。
+            return Ok(Tick::Paused);
         }
 
         // 1) 先看脈絡。這一步很便宜，而且是排除判定的依據。
@@ -733,6 +794,88 @@ mod tests {
         let spy = spy.borrow();
         assert!(spy.polled.is_empty(), "排除期間不該讀剪貼簿內容");
         assert_eq!(spy.skipped, vec![1_000], "但一定要把水位推過去");
+    }
+
+    /// 暫停期間也要推剪貼簿水位，理由和排除完全一樣。
+    ///
+    /// 而且這裡更嚴重：使用者按暫停，往往就是**為了**去複製一個他不想被記住
+    /// 的東西。只是「不讀」的話，他一解除暫停，那個東西就在下一個 tick 被撈
+    /// 進來——一個只會延後洩漏的暫停鍵，比沒有暫停鍵更糟，因為他信了它。
+    #[test]
+    fn pausing_skips_the_clipboard_instead_of_merely_not_polling_it() {
+        use crate::traits::{CompositeBackend, NullFocus, NullInput, NullOcr, NullScreen};
+
+        let spy = std::rc::Rc::new(std::cell::RefCell::new(SpyClipboard::default()));
+        let backend = CompositeBackend {
+            name: "spy".into(),
+            screen: NullScreen,
+            focus: NullFocus,
+            clipboard: spy.clone(),
+            input: NullInput,
+            ocr: NullOcr,
+        };
+        let mut rec = Recorder::new(
+            backend,
+            Db::open_in_memory().unwrap(),
+            Config::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(rec.set_paused(true, 500).unwrap(), "第一次應該真的改變狀態");
+        assert_eq!(rec.tick(1_000).unwrap(), Tick::Paused);
+
+        let spy = spy.borrow();
+        assert!(spy.polled.is_empty(), "暫停期間不該讀剪貼簿內容");
+        assert_eq!(spy.skipped, vec![1_000], "但一定要把水位推過去");
+    }
+
+    /// 暫停與解除各留一筆事件——不然事後看不出「那三小時是暫停」還是
+    /// 「那三小時什麼都沒發生」。這兩件事的意思差很遠。
+    ///
+    /// 同時釘住「只有轉換才寫」：暫停三小時如果每個 tick 寫一筆，
+    /// 那張表會被灌進上萬筆一模一樣的紀錄。
+    #[test]
+    fn a_gap_in_the_data_says_why_it_is_there() {
+        let scenario = Scenario {
+            name: "pause".into(),
+            steps: vec![Step::default()],
+        };
+        let mut rec = Recorder::new(
+            crate::replay::ReplayBackend::new(scenario),
+            Db::open_in_memory().unwrap(),
+            Config::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(rec.set_paused(true, 1_000).unwrap());
+        for ts in [1_100, 1_200, 1_300] {
+            assert_eq!(rec.tick(ts).unwrap(), Tick::Paused);
+            // 一直餵同一個值也不該再寫事件
+            assert!(!rec.set_paused(true, ts).unwrap());
+        }
+        assert!(rec.set_paused(false, 2_000).unwrap());
+        assert!(!rec.set_paused(false, 2_100).unwrap());
+
+        let pauses: Vec<(String, i64)> = {
+            let conn = rec.db().conn();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT kind, ts FROM system_events \
+                     WHERE kind IN ('pause', 'resume') ORDER BY id",
+                )
+                .expect("prepare");
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("query");
+            rows.flatten().collect()
+        };
+        assert_eq!(
+            pauses,
+            vec![("pause".to_string(), 1_000), ("resume".to_string(), 2_000)],
+            "只有兩次轉換，各一筆，時戳是按下去的那一刻"
+        );
     }
 
     /// 沒有人動的時候不看螢幕——但**不准無限期不看**。

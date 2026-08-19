@@ -4,8 +4,11 @@
 //
 // 需要型別的時候再加 tsc，那是改一個檔案的事；現在還不需要。
 
-/** 她的三個狀態。`paused` 是承諾的一部分，不是裝飾——見 styles.css。 */
-const STATES = Object.freeze(["idle", "thinking", "paused"]);
+/**
+ * 她**正在做什麼**。注意 `paused` 不在這裡：它是另一個維度（見下面的
+ * `paused`），因為她可以「暫停中、同時正在想一個問題的答案」。
+ */
+const STATES = Object.freeze(["idle", "thinking"]);
 
 const STATE_LINES = Object.freeze({
   idle: "在聽",
@@ -19,6 +22,7 @@ const askInput = document.querySelector("[data-ask-input]");
 const askSend = document.querySelector("[data-ask-send]");
 const pinButton = document.querySelector("#pin");
 const hideButton = document.querySelector("#hide");
+const pauseButton = document.querySelector("#pause");
 
 /**
  * Tauri 的 IPC。**在瀏覽器裡打開時是 null**，而那是刻意支援的：字母人整個
@@ -29,15 +33,50 @@ const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
 
 // ---------- 狀態 ----------
 
+/**
+ * 兩個獨立的東西，不是三選一：
+ *
+ * - `state` 是她**正在做什麼**（在聽／想一下）。
+ * - `paused` 是她**有沒有在看**，而且真相不在這個行程裡，是 data dir 裡的
+ *   一個檔案（見 sister-core 的 `pause` 模組）。系統匣、上一次開機、甚至
+ *   使用者自己去刪檔案，都能改變它。
+ *
+ * 混成一個變數的話會出現一個很難發現的 bug：暫停中問一句話 → 進 thinking →
+ * 答完回 idle → **暫停的樣子不見了，但她其實還在暫停**。
+ */
 let state = "idle";
+let paused = false;
+
+function paint() {
+  // 暫停壓過一切。她沒在看的時候，畫面上絕不可以有一格看起來像在看。
+  const shown = paused ? "paused" : state;
+  avatar.dataset.state = shown;
+
+  // 暫停時仍然答得出問題——停的是「記錄」，不是「記憶」。所以 thinking
+  // 要講出來，只是講在文字上，不動那個灰掉的身體。
+  const line =
+    paused && state === "thinking" ? "想一下…（仍在暫停）" : STATE_LINES[shown];
+  stateLine.textContent = line;
+  // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。
+  avatar.setAttribute("aria-label", `AI-Sister：${line}`);
+}
 
 function setState(next) {
   if (!STATES.includes(next)) return;
   state = next;
-  avatar.dataset.state = next;
-  stateLine.textContent = STATE_LINES[next];
-  // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。
-  avatar.setAttribute("aria-label", `AI-Sister：${STATE_LINES[next]}`);
+  paint();
+}
+
+function setPaused(next) {
+  paused = next === true;
+  if (pauseButton) {
+    pauseButton.textContent = paused ? "▶" : "⏸";
+    pauseButton.title = paused ? "繼續記錄" : "暫停記錄";
+    // 「按下去了」= 暫停中。CSS 會把沒按下的那顆調淡，所以暫停時它最亮——
+    // 這正是我們要的：不正常的狀態要吵。
+    pauseButton.setAttribute("aria-pressed", String(paused));
+  }
+  paint();
 }
 
 // ---------- 動畫閘門 ----------
@@ -94,6 +133,28 @@ pinButton?.addEventListener("click", async () => {
 hideButton?.addEventListener("click", () => {
   void invoke?.("hide_to_tray");
 });
+
+pauseButton?.addEventListener("click", async () => {
+  if (invoke === null) {
+    setPaused(!paused);
+    return;
+  }
+  try {
+    setPaused(await invoke("toggle_pause"));
+  } catch (err) {
+    // 切不動就**不要**改畫面。顯示成已暫停、實際上還在錄，是這個產品能犯的
+    // 最嚴重的一種謊；寧可看起來沒反應，然後把原因寫出來。
+    stateLine.textContent = String(err?.message ?? err);
+  }
+});
+
+/**
+ * 系統匣上也有同一顆暫停鍵，所以狀態可能從**這個視窗以外**改變。
+ * 沒有這一段的話，從系統匣暫停之後，字母人會繼續一臉「我在聽」。
+ */
+globalThis.__TAURI__?.event
+  ?.listen?.("pause-changed", (event) => setPaused(event.payload))
+  ?.catch?.(() => {});
 
 // ---------- 答案 ----------
 
@@ -232,7 +293,20 @@ const params = new URLSearchParams(globalThis.location.search);
 seedSwayPhase();
 updateMotionGate();
 paintPin();
-setState(params.get("state") ?? "idle");
+
+// `?state=paused` 走的是**和產品一樣的那條路**（設 `paused` 旗標），不是另外
+// 搬一個長得像暫停的樣子出來。這一點是被截圖抓到的：第一版讓它去設 `state`，
+// 於是截出來的圖裡字母人是灰的、但拖曳條上的暫停鍵還是「⏸」——而截圖是這台
+// 機器上唯一看得到 UI 的方式，一個走假路的開發開關會讓它騙我。
+const wanted = params.get("state") ?? "idle";
+setPaused(wanted === "paused");
+setState(wanted === "paused" ? "idle" : wanted);
+
+// 開場先問一次磁碟。暫停**不會自己過期**，所以「上禮拜按了暫停」是一條真實
+// 的路——開起來就該是灰的，而不是先亮一下再變灰。
+if (invoke !== null) {
+  invoke("pause_state").then(setPaused, () => {});
+}
 
 if (params.get("hits") === "demo") {
   renderHits([

@@ -28,6 +28,26 @@ pub fn relative(ts: Millis) -> String {
     }
 }
 
+/// 一段時間有多長。
+///
+/// 進位到分鐘就不再顯示秒：「暫停了 3 小時 12 分 07 秒」裡那個秒數沒有人
+/// 需要，只會讓真正重要的「3 小時」變得比較難讀。
+pub fn duration_ms(ms: Millis) -> String {
+    let secs = (ms / 1000).max(0);
+    match secs {
+        0..=59 => format!("{secs} 秒"),
+        60..=3599 => format!("{} 分鐘", secs / 60),
+        _ => {
+            let (h, m) = (secs / 3600, (secs % 3600) / 60);
+            if m == 0 {
+                format!("{h} 小時")
+            } else {
+                format!("{h} 小時 {m} 分")
+            }
+        }
+    }
+}
+
 /// 人類看得懂的位元組數。
 pub fn bytes(n: i64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -85,6 +105,18 @@ pub fn context_line(app: Option<&str>, title: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durations_round_down_to_the_unit_that_matters() {
+        assert_eq!(duration_ms(0), "0 秒");
+        assert_eq!(duration_ms(59_999), "59 秒");
+        assert_eq!(duration_ms(60_000), "1 分鐘");
+        assert_eq!(duration_ms(3_599_000), "59 分鐘");
+        assert_eq!(duration_ms(3_600_000), "1 小時");
+        assert_eq!(duration_ms(3_600_000 + 12 * 60_000 + 7_000), "1 小時 12 分");
+        // 負數不該印出「-1 秒」這種東西。時戳倒退是資料壞了，不是一段負的時間。
+        assert_eq!(duration_ms(-5_000), "0 秒");
+    }
 
     #[test]
     fn bytes_scales() {
