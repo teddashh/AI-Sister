@@ -457,16 +457,15 @@ fn apply_hotkey(app: &tauri::AppHandle, wanted: &str) -> HotkeyView {
         };
     }
 
-    let handle = app.clone();
     let reason = shortcuts
-        .on_shortcut(wanted.as_str(), move |app, _shortcut, event| {
+        .on_shortcut(wanted.as_str(), |app, _shortcut, event| {
             // 只認**按下**。少了這一行，按一次會進來兩次（按下 + 放開），
             // 於是暫停立刻被自己取消掉——一顆看起來完全沒反應的熱鍵。
             if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
                 return;
             }
             match toggle_pause(app.clone(), app.state::<Shell>()) {
-                Ok(paused) => announce_hotkey(&handle, paused),
+                Ok(paused) => announce_hotkey(app, paused),
                 Err(e) => tracing::error!("熱鍵暫停失敗：{e}"),
             }
         })
