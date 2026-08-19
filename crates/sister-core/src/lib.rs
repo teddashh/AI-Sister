@@ -20,6 +20,7 @@ pub mod dedup;
 pub mod facts;
 pub mod model;
 pub mod pause;
+pub mod question;
 pub mod redact;
 pub mod retention;
 

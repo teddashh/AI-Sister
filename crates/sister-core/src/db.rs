@@ -966,6 +966,60 @@ impl Db {
         Ok(hits)
     }
 
+    /// 她最後看到的那幾件事，新的在前。
+    ///
+    /// 「剛剛發生什麼事」問的是時間，不是字（見 [`crate::question`]）。這一支
+    /// 就是那種問題的答案：不比對任何東西，只是把最新的幾列拿出來。
+    ///
+    /// **刻意不設時間下限。** 上一次錄是三天前的話，答案就是三天前那幾件事，
+    /// 而每一列都掛著時間戳——他看得出來那不是「剛剛」。反過來若砍在「一小時
+    /// 內」，同一台機器會回一片空白，而空白讀起來是「她什麼都沒記到」。這和
+    /// [`Self::search_like`] 把界線壓在資料庫最新一列、而不是 `now()` 上，是
+    /// 同一個決定。
+    ///
+    /// 連著重複的字要收起來：畫面不動的時候同一句話會被寫進好幾列，照抄的話
+    /// 「最近十件事」會變成同一句話講十遍。
+    pub fn recent(&self, limit: usize) -> Result<Vec<SearchHit>> {
+        const OVERFETCH: usize = 12;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, source_kind, frame_id, app_id, window_title, url, text
+             FROM text_chunks ORDER BY ts DESC, id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(
+            params![(limit.saturating_mul(OVERFETCH).max(OVERFETCH)) as i64],
+            |row| {
+                let kind: String = row.get(2)?;
+                let text: String = row.get(7)?;
+                Ok(SearchHit {
+                    chunk_id: row.get(0)?,
+                    ts: row.get(1)?,
+                    source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                    frame_id: row.get(3)?,
+                    app_id: row.get(4)?,
+                    window_title: row.get(5)?,
+                    url: row.get(6)?,
+                    snippet: text.chars().take(60).collect(),
+                    text,
+                    // 時間問題沒有相關性可言。分數留 0，排序完全由 ts 決定。
+                    score: 0.0,
+                })
+            },
+        )?;
+
+        let mut hits: Vec<SearchHit> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for hit in rows.flatten() {
+            if !seen.insert(hit.text.clone()) {
+                continue;
+            }
+            hits.push(hit);
+            if hits.len() >= limit {
+                break;
+            }
+        }
+        Ok(hits)
+    }
+
     /// bigram 索引查詢。片段自己產生——`text_fts_bi` 裡存的是切好的雙字，
     /// 拿它的 `snippet()` 會回一串「客服 服專 專線」，那不是使用者要看的東西。
     ///
@@ -1937,6 +1991,60 @@ mod tests {
             let r = db.search(q, 10);
             assert!(r.is_ok(), "query {q:?} must not error: {:?}", r.err());
         }
+    }
+
+    /// 「剛剛發生什麼事」不能靠比對那七個字。這一支回的是最新的幾列，
+    /// 新的在前，而且照樣掛著出處。
+    #[test]
+    fn recent_answers_with_the_newest_things_first() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for (ts, line) in [
+            (1_000, "早上的信"),
+            (2_000, "中午的單子"),
+            (3_000, "剛開的網頁"),
+        ] {
+            let f = frame_with_text(ts, "chrome.exe", "視窗", &[line]);
+            db.insert_frame(s, &f, Some("/tmp/x.webp"), 1)
+                .expect("insert");
+        }
+
+        let hits = db.recent(2).expect("recent");
+        assert_eq!(hits.len(), 2, "要幾件就給幾件");
+        assert!(hits[0].text.contains("剛開的網頁"), "最新的排最前面");
+        assert!(hits[1].text.contains("中午的單子"));
+        assert!(hits[0].frame_id.is_some(), "時間問題的答案一樣要指得回去");
+
+        // 反面：這個問題走搜尋是答不出來的——那正是它要存在的理由。
+        assert!(
+            db.search("剛剛發生什麼事", 10).expect("search").is_empty(),
+            "螢幕上沒出現過這七個字，比對字就只會空手而回"
+        );
+    }
+
+    /// 畫面不動的時候同一句話會被寫進好幾列。照抄的話「最近十件事」會變成
+    /// 同一句話講十遍——那看起來像她壞掉了，而不是像她很專心。
+    #[test]
+    fn recent_collapses_a_screen_that_did_not_change() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for ts in [1_000, 2_000, 3_000, 4_000] {
+            let f = frame_with_text(ts, "code.exe", "editor", &["一直沒變的那一行"]);
+            db.insert_frame(s, &f, None, 1).expect("insert");
+        }
+        let g = frame_with_text(5_000, "chrome.exe", "視窗", &["換了一件事"]);
+        db.insert_frame(s, &g, None, 1).expect("insert");
+
+        let hits = db.recent(10).expect("recent");
+        assert_eq!(hits.len(), 2, "四列一模一樣的字只算一件事");
+        assert!(hits[0].text.contains("換了一件事"));
+    }
+
+    /// 一台還沒錄過任何東西的機器上，這一支要安靜地回空的，不是報錯。
+    #[test]
+    fn recent_on_an_empty_database_is_just_empty() {
+        let db = test_db();
+        assert!(db.recent(10).expect("recent must not error").is_empty());
     }
 
     #[test]

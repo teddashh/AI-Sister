@@ -139,6 +139,13 @@ fn hide_to_tray(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) {
 /// 得走這裡**。在這之前只有 `ask` 會開：於是先點開時間軸、還沒問過任何問題的
 /// 那條路上，看圖那支會回「資料庫還沒開」——一句只有寫程式的人看得懂、而且
 /// 根本不是真正原因的錯誤訊息。多一個入口就多一條這種路。
+///
+/// **叫得動這裡的命令一律要標 `#[tauri::command(async)]`。** Tauri 的同步命令
+/// 跑在主執行緒上，而這一支的第一次呼叫可能要幾分鐘：`Db::open` 會把還沒跑過
+/// 的 migration 跑完，其中 003 要把整張 `text_chunks` 讀出來重算 bigram。主
+/// 執行緒卡住的時候整個殼都跟著卡——暫停鍵、系統匣、連拖曳都沒反應，而畫面
+/// 停在「想一下…」上，看起來就只是她想很久。這是一個真的發生過的當機畫面，
+/// 不是理論。
 fn with_db<T>(
     shell: &tauri::State<'_, Shell>,
     f: impl FnOnce(&sister_core::db::Db) -> Result<T, String>,
@@ -168,26 +175,55 @@ fn with_db_mut<T>(
     f(slot.as_mut().expect("with_db opened it"))
 }
 
-#[tauri::command]
-fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Vec<Hit>, String> {
+/// 一次回答。
+///
+/// `kind` 不是給程式判斷用的，是**要講給他聽的**：他打了「剛剛發生什麼事」，
+/// 而她回的東西跟那七個字一個都不像——不說清楚「我把它當成時間問題了」，看起來
+/// 就只是她答非所問。
+///
+/// 判斷放在 core（[`sister_core::question`]），不在這裡也不在畫面上。`sister
+/// query` 和這一頁必須對同一句話給同一種答案，各抄一份遲早會變成兩種行為。
+#[derive(Serialize)]
+struct Answer {
+    kind: &'static str,
+    hits: Vec<Hit>,
+}
+
+#[tauri::command(async)]
+fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, String> {
+    use sister_core::question::Shape;
     let question = question.trim().to_string();
     if question.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Answer {
+            kind: "keywords",
+            hits: Vec::new(),
+        });
     }
+    let shape = sister_core::question::shape(&question);
     with_db(&shell, |db| {
-        let hits = db.search(&question, 20).map_err(|e| e.to_string())?;
-        Ok(hits
-            .into_iter()
-            .map(|h| Hit {
-                ts: h.ts,
-                text: h.text,
-                snippet: h.snippet,
-                app: h.app_id,
-                title: h.window_title,
-                url: h.url,
-                frame_id: h.frame_id,
-            })
-            .collect())
+        let hits = match shape {
+            Shape::Recent => db.recent(20),
+            Shape::Keywords => db.search(&question, 20),
+        }
+        .map_err(|e| e.to_string())?;
+        Ok(Answer {
+            kind: match shape {
+                Shape::Recent => "recent",
+                Shape::Keywords => "keywords",
+            },
+            hits: hits
+                .into_iter()
+                .map(|h| Hit {
+                    ts: h.ts,
+                    text: h.text,
+                    snippet: h.snippet,
+                    app: h.app_id,
+                    title: h.window_title,
+                    url: h.url,
+                    frame_id: h.frame_id,
+                })
+                .collect(),
+        })
     })
 }
 
@@ -209,7 +245,7 @@ struct Day {
 /// 收到之後仍然夾一次。合法範圍是 UTC−12 到 UTC+14，超出去的值只可能來自
 /// 前端的 bug，而一個離譜的偏移量會把「一天」切在莫名其妙的地方，然後看起來
 /// 只是資料很怪。
-#[tauri::command]
+#[tauri::command(async)]
 fn timeline_days(tz_offset_ms: i64, shell: tauri::State<'_, Shell>) -> Result<Vec<Day>, String> {
     const H: i64 = 3_600_000;
     let tz = tz_offset_ms.clamp(-12 * H, 14 * H);
@@ -259,7 +295,7 @@ struct DayView {
 }
 
 /// 一天裡她看到的東西。
-#[tauri::command]
+#[tauri::command(async)]
 fn timeline_moments(
     from_ts: i64,
     to_ts: i64,
@@ -383,7 +419,7 @@ fn lint_url_rules(rules: Vec<String>) -> Vec<(String, String)> {
 ///
 /// 圖用 data URL 送過去而不是開一個檔案協定：少一個要設 scope 的表面，
 /// 而且「哪些檔案讀得到」的答案就變成「只有這一行指到的那一張」。
-#[tauri::command]
+#[tauri::command(async)]
 fn frame_image(frame_id: i64, shell: tauri::State<'_, Shell>) -> Result<FrameView, String> {
     with_db(&shell, |db| {
         let ctx = db
@@ -686,7 +722,7 @@ impl From<sister_core::retention::PruneReport> for Erasure {
 }
 
 /// 忘掉這一段會刪掉什麼。一句 DELETE 都沒有。
-#[tauri::command]
+#[tauri::command(async)]
 fn forget_preview(
     from_ts: i64,
     to_ts: i64,
@@ -705,7 +741,7 @@ fn forget_preview(
 /// 禮貌，不是這裡的前提——這一支不管有沒有人預覽過都會照做，因為「一定要先
 /// 預覽」的規則放在畫面上就等於沒有規則。真正的防線在 core：區間反過來的話
 /// 一列都不動。
-#[tauri::command]
+#[tauri::command(async)]
 fn forget_range(
     from_ts: i64,
     to_ts: i64,
@@ -921,6 +957,27 @@ fn main() {
                 state.y = place.y;
             }
             let _ = win.show();
+
+            // ---- 先去把資料庫打開 ----
+            //
+            // 不等人問問題才開。第一次開可能要跑 migration，而 003 要把整張
+            // `text_chunks` 讀出來重算 bigram——升級上來的資料庫愈大愈久。那段
+            // 時間如果是掛在「他剛剛按下 Enter」上，畫面就會停在「想一下…」，
+            // 而他無從分辨那是她在想、還是她死了。
+            //
+            // 開不起來**不在這裡報錯**：她本來就該在一台什麼都還沒錄過的機器上
+            // 站得住。真正要講的那句話（「還沒有任何記憶——先跑 sister record」）
+            // 留給他真的問問題的時候講，那時候他才需要知道。
+            let warm = app.handle().clone();
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                match with_db(&warm.state::<Shell>(), |_| Ok(())) {
+                    Ok(()) => {
+                        tracing::info!("資料庫開好了（{} ms）", started.elapsed().as_millis());
+                    }
+                    Err(e) => tracing::info!("資料庫先不開：{e}"),
+                }
+            });
 
             // ---- 全域暫停熱鍵 ----
             //

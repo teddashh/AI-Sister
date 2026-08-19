@@ -171,6 +171,21 @@ jobs:
           grep -q '"frame_id"' out.json \
             || { echo "::error::答案沒有附出處"; exit 1; }
 
+          # 「剛剛發生什麼事」——這個產品的招牌問題，而它問的是時間不是字。
+          # 拿那七個字去比對永遠只會空手而回（螢幕上不會出現這七個字），
+          # 所以要斷言的是她**換了一條路**回答，而且真的答得出東西。
+          $S --data-dir ./smoke query 剛剛發生什麼事 --json > recent.json
+          cat recent.json
+          grep -q '"shape": "recent"' recent.json \
+            || { echo "::error::「剛剛發生什麼事」被當成關鍵字去比對了"; exit 1; }
+          grep -q '"chunk_id"' recent.json \
+            || { echo "::error::問時間問到一片空白，資料庫裡明明有東西"; exit 1; }
+
+          # 反面同樣重要：有內容的問題不可以被時間那條路吃掉。少了這一條，
+          # 把整份 filter 放寬到「什麼都算虛字」也照樣過。
+          $S --data-dir ./smoke query 電話 --json | grep -q '"shape": "keywords"' \
+            || { echo "::error::「電話」不是時間問題，卻走了 recent"; exit 1; }
+
       # 上面那一段走的是 replay，也就是**真正的擷取迴圈一行都沒被執行過**。
       # alpha.4 三個缺陷全部長在那條路上：抓圖、去重、寫檔、報告。它們在
       # Linux 上跑得好好的，在 Ted 的機器上一起壞掉，而中間沒有任何一關。

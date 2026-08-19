@@ -354,15 +354,28 @@ pub mod query {
         );
         let db = open_existing(data_dir)?;
 
+        // 「剛剛發生什麼事」問的是時間，不是字。規則在 core，和字母人共用同一
+        // 份——兩邊各判各的，同一句話遲早會在兩個地方得到兩種答案。
+        use sister_core::question::Shape;
+        let shape = sister_core::question::shape(text);
+
         // 計時涵蓋兩條路徑：使用者感受到的是整個回答的延遲，不是單一次查詢。
         let started = std::time::Instant::now();
-        let answers = answers(&db, text, limit)?;
-        let hits = db.search(text, limit)?;
+        let (answers, hits) = match shape {
+            // L1 的事實是「這個值是什麼」，回答不了「剛剛」。硬跑一次只會
+            // 拿電話號碼去回答一個沒有人問號碼的問題。
+            Shape::Recent => (Vec::new(), db.recent(limit)?),
+            Shape::Keywords => (answers(&db, text, limit)?, db.search(text, limit)?),
+        };
         let elapsed = started.elapsed();
 
         if json {
             let out = serde_json::json!({
                 "query": text,
+                // 寫腳本的人要分得出這一份是比對來的還是時間來的：`recent`
+                // 的 hits 和 query 裡的字沒有任何關係，當成搜尋結果去解讀
+                // 會得到完全錯的結論。
+                "shape": match shape { Shape::Recent => "recent", Shape::Keywords => "keywords" },
                 "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
                 // 撈滿上限＝被切掉了。機器讀的那一份更要講：寫腳本的人
                 // 看不到終端機上的那個「+」，會直接把長度當成總數。
@@ -388,19 +401,33 @@ pub mod query {
         // `20 筆原文` 和「一共就這 20 筆」是兩件事，而畫面上長得一模一樣。
         // 撈滿上限就代表**被切掉了**，說出來使用者才知道還有第二頁。
         let more = |n: usize| if n >= limit { "+" } else { "" };
-        println!(
-            "🔍 「{text}」 {}{} 筆答案、{}{} 筆原文，{:.1} ms{}",
-            answers.len(),
-            more(answers.len()),
-            hits.len(),
-            more(hits.len()),
-            elapsed.as_secs_f64() * 1000.0,
-            if answers.len() >= limit || hits.len() >= limit {
-                format!("（+ 代表撈滿 {limit} 筆就停了，用 --limit 看更多）")
-            } else {
-                String::new()
+
+        // 底下這幾筆跟他打的字一個都對不上，所以要先講為什麼。少了這一句，
+        // 「剛剛發生什麼事」會得到一串不相干的東西，看起來就是答非所問。
+        if shape == Shape::Recent {
+            println!(
+                "🕘 「{text}」問的是時間，不是字——沒有比對，這是最後看到的 {} 件事，{:.1} ms",
+                hits.len(),
+                elapsed.as_secs_f64() * 1000.0
+            );
+            if hits.is_empty() {
+                println!("\n  什麼都還沒看到——先跑 `sister record`。");
             }
-        );
+        } else {
+            println!(
+                "🔍 「{text}」 {}{} 筆答案、{}{} 筆原文，{:.1} ms{}",
+                answers.len(),
+                more(answers.len()),
+                hits.len(),
+                more(hits.len()),
+                elapsed.as_secs_f64() * 1000.0,
+                if answers.len() >= limit || hits.len() >= limit {
+                    format!("（+ 代表撈滿 {limit} 筆就停了，用 --limit 看更多）")
+                } else {
+                    String::new()
+                }
+            );
+        }
 
         if !answers.is_empty() {
             println!();

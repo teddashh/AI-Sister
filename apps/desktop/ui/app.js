@@ -204,13 +204,34 @@ function when(ts) {
   )}:${pad(d.getMinutes())}`;
 }
 
-function renderHits(hits) {
+/**
+ * @param hits 一筆一筆的答案。
+ * @param kind `"keywords"`（比對字找到的）或 `"recent"`（他問的是時間）。
+ *   這個字是後端給的，不是這裡判斷的——同一句話在 `sister query` 和這一頁
+ *   必須得到同一種答案，所以規則只有一份，在 sister-core 的 `question`。
+ */
+function renderHits(hits, kind) {
   hitList.replaceChildren();
+
+  // 他打了「剛剛發生什麼事」，而底下這幾筆跟那七個字一個都對不上。不先講
+  // 一句「我把它當成時間問題了」，看起來就只是她答非所問。
+  if (kind === "recent" && hits.length > 0) {
+    const note = document.createElement("li");
+    note.className = "hits-note";
+    note.textContent = "你問的是「剛剛」，所以我沒有去比對字——這是我最後看到的幾件事：";
+    hitList.append(note);
+  }
 
   if (hits.length === 0) {
     const empty = document.createElement("li");
     empty.className = "hits-empty";
-    empty.textContent = "這件事我沒看到過。";
+    // 「我沒看過這件事」和「我什麼都還沒看過」是兩件不同的事。問時間卻空手
+    // 而回，唯一的解釋是她根本還沒錄過東西——那時候該講的是下一步，不是
+    // 「查無此資料」。
+    empty.textContent =
+      kind === "recent"
+        ? "我什麼都還沒看到——要先跑 sister record 我才記得住。"
+        : "這件事我沒看到過。";
     hitList.append(empty);
   }
 
@@ -269,25 +290,51 @@ function renderHits(hits) {
   document.body.classList.add("has-hits");
 }
 
+/**
+ * 慢到這個秒數還沒回來，就得換一句話講。
+ *
+ * 「想一下…」不動地停在那裡，跟她整個卡死長得一模一樣——這正是她第一次跑在
+ * 真 Windows 上時發生的事：第一個問題觸發了資料庫升級（要把整張表重算一次
+ * bigram），畫面就停在「想一下…」，看不出是還在跑還是死了。那個成因已經修掉
+ * 了（命令離開了主執行緒，而且開機就先去開資料庫），但「久到沒話講」這件事
+ * 本身仍然要有出口。
+ */
+const SLOW_MS = 4000;
+
 async function ask() {
   const question = askInput.value.trim();
   if (question === "") return;
 
   setState("thinking");
+  const slow = setTimeout(() => {
+    if (state === "thinking") {
+      stateLine.textContent = "還在翻…（第一次打開資料庫要先整理索引）";
+    }
+  }, SLOW_MS);
+
   try {
     if (invoke === null) throw new Error("這一頁不是在 AI-Sister 裡打開的");
-    renderHits(await invoke("ask", { question }));
+    const answer = await invoke("ask", { question });
+    renderHits(answer.hits, answer.kind);
     setState("idle");
+    // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
+    askInput.value = "";
   } catch (err) {
     // 失敗要說出是什麼失敗。「沒有結果」跟「還沒錄過任何東西」跟「資料庫
     // 打不開」是三件不同的事，混成一句「查不到」等於把問題藏起來。
     setState("idle");
     stateLine.textContent = String(err?.message ?? err);
+  } finally {
+    clearTimeout(slow);
   }
 }
 
 askSend?.addEventListener("click", () => void ask());
 askInput?.addEventListener("keydown", (event) => {
+  // 選字中的 Enter 是「就選這個字」，不是「問出去」。注音打「剛剛發生什麼事」
+  // 一路上會按好幾次 Enter，少了這一行，第一次選字就把半句話送出去了。
+  // `keyCode === 229` 是舊的那條路，有些 IME 只給得出這個。
+  if (event.isComposing || event.keyCode === 229) return;
   if (event.key === "Enter") void ask();
 });
 
@@ -318,24 +365,65 @@ if (invoke !== null) {
 }
 
 if (params.get("hits") === "demo") {
-  renderHits([
-    {
-      ts: Date.now() - 2 * 3600 * 1000,
-      snippet: "中華電信 [客服]專線 0800-080-123 帳單問題請按 2",
-      text: "",
-      app: "chrome.exe",
-      title: "帳單查詢",
-      url: "https://example.com/bill",
-      frame_id: 41,
-    },
-    {
-      ts: Date.now() - 3 * 86400 * 1000,
-      snippet: "轉接 [客服]，等候時間約 4 分鐘",
-      text: "",
-      app: "Teams.exe",
-      title: "通話中",
-      url: null,
-      frame_id: null,
-    },
-  ]);
+  renderHits(
+    [
+      {
+        ts: Date.now() - 2 * 3600 * 1000,
+        snippet: "中華電信 [客服]專線 0800-080-123 帳單問題請按 2",
+        text: "",
+        app: "chrome.exe",
+        title: "帳單查詢",
+        url: "https://example.com/bill",
+        frame_id: 41,
+      },
+      {
+        ts: Date.now() - 3 * 86400 * 1000,
+        snippet: "轉接 [客服]，等候時間約 4 分鐘",
+        text: "",
+        app: "Teams.exe",
+        title: "通話中",
+        url: null,
+        frame_id: null,
+      },
+    ],
+    "keywords",
+  );
+}
+
+// `?hits=recent` 是「剛剛發生什麼事」那條路的版面。分開一個開關而不是共用
+// 上面那組假資料，是因為要看的正是**兩者長得不一樣**：時間問題多了一句說明，
+// 而且答案裡不會有任何一個被標起來的字。
+if (params.get("hits") === "recent") {
+  renderHits(
+    [
+      {
+        ts: Date.now() - 4 * 60 * 1000,
+        snippet: "docker compose up -d 正在啟動 3 個容器",
+        text: "",
+        app: "WindowsTerminal.exe",
+        title: "pwsh",
+        url: null,
+        frame_id: 88,
+      },
+      {
+        ts: Date.now() - 11 * 60 * 1000,
+        snippet: "第 2 季預算表 — 行銷 NT$412,000",
+        text: "",
+        app: "EXCEL.EXE",
+        title: "budget-q2.xlsx",
+        url: null,
+        frame_id: 87,
+      },
+      {
+        ts: Date.now() - 26 * 60 * 1000,
+        snippet: "會議改到下午三點，會議室 B",
+        text: "",
+        app: "Teams.exe",
+        title: "行銷部",
+        url: null,
+        frame_id: null,
+      },
+    ],
+    "recent",
+  );
 }

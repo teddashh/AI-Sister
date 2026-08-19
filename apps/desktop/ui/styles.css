@@ -303,6 +303,21 @@ body.has-hits .stage {
   width: 100%;
 }
 
+/*
+ * `hidden` 要真的藏起來。
+ *
+ * `[hidden]` 的 `display: none` 來自瀏覽器預設樣式表，權重輸給上面那條
+ * `.hits { display: flex }`——所以還沒問過任何問題的時候，這個空的 `<ul>`
+ * 照樣是個 flex 容器，而且 `flex: 1` 讓它把下面整片空間都吃掉。字母人因此
+ * 被擠到上面三分之一，底下留一大塊空白，看起來像畫面沒載完。
+ *
+ * 這是從 Ted 那台 Windows 的截圖上看出來的，而這台開發機用同一份 CSS
+ * 截出了同一張圖——版面的 bug 不需要 Tauri 才驗得到。
+ */
+.hits[hidden] {
+  display: none;
+}
+
 .hit {
   background: rgb(255 255 255 / 55%);
   border-left: 3px solid var(--letter-accent);
@@ -362,6 +377,17 @@ body.has-hits .stage {
   opacity: 0.6;
   padding: 12px 4px;
   text-align: center;
+}
+
+/* 「我把它當成時間問題了」。要看得出來這一行不是答案本身——它沒有出處，
+   也點不開，所以不能長得像下面那幾張卡片。 */
+.hits-note {
+  border-left: 2px solid var(--letter-accent);
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 0 0 8px;
+  opacity: 0.75;
+  padding: 2px 0 2px 8px;
 }
 
 /* ---------- 輸入 ---------- */
