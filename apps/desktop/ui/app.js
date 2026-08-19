@@ -336,7 +336,7 @@ function when(ts) {
  *   這個字是後端給的，不是這裡判斷的——同一句話在 `sister query` 和這一頁
  *   必須得到同一種答案，所以規則只有一份，在 sister-core 的 `question`。
  */
-function renderHits(hits, kind) {
+function renderHits(hits, kind, queryId = null) {
   hitList.replaceChildren();
 
   // 他打了「剛剛發生什麼事」，而底下這幾筆跟那七個字一個都對不上。不先講
@@ -361,7 +361,7 @@ function renderHits(hits, kind) {
     hitList.append(empty);
   }
 
-  for (const hit of hits) {
+  for (const [rank, hit] of hits.entries()) {
     const li = document.createElement("li");
     li.className = "hit";
 
@@ -398,7 +398,22 @@ function renderHits(hits, kind) {
       li.classList.add("openable");
       li.tabIndex = 0;
       li.title = "點開看當時的畫面";
-      const open = () => void invoke?.("open_frame", { frameId: hit.frame_id });
+      const open = () => {
+        void invoke?.("open_frame", { frameId: hit.frame_id });
+        // 他點下去的那一刻，等於幫這一題標了正解——而 `rank` 說出排序把它放
+        // 在第幾個。那是檢索品質唯一不必人工標註就拿得到的訊號（PHASES.md
+        // Phase 2 的題庫要 ≥ 30 題來自這裡）。
+        //
+        // 失敗完全不理：他要的是那張畫面。一個因為記不了統計而不肯開圖的
+        // 產品，把手段當成了目的。
+        if (queryId !== null && queryId !== undefined) {
+          void invoke?.("log_click", {
+            queryId,
+            chunkId: hit.chunk_id,
+            rank,
+          })?.catch?.(() => {});
+        }
+      };
       li.addEventListener("click", open);
       li.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -453,7 +468,7 @@ async function ask() {
     const answer = await invoke("ask", { question });
     // 這一份過期了。畫面歸還在跑的那一次管，這裡連 idle 都不要設。
     if (mine !== asking) return;
-    renderHits(answer.hits, answer.kind);
+    renderHits(answer.hits, answer.kind, answer.query_id);
     setState("idle");
     // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
     askInput.value = "";

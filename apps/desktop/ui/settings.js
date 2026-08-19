@@ -9,6 +9,7 @@ const el = {
   titles: document.querySelector("[data-titles]"),
   screenshare: document.querySelector("[data-screenshare]"),
   redact: document.querySelector("[data-redact]"),
+  querylog: document.querySelector("[data-querylog]"),
   framesDays: document.querySelector("[data-frames-days]"),
   textDays: document.querySelector("[data-text-days]"),
   lint: document.querySelector("[data-lint]"),
@@ -204,6 +205,7 @@ function apply(s) {
   el.titles.value = s.excluded_titles.join("\n");
   el.screenshare.checked = s.pause_on_screenshare;
   el.redact.checked = s.redact_clipboard_secrets;
+  el.querylog.checked = s.query_log;
   el.framesDays.value = s.frames_days;
   el.textDays.value = s.text_days;
 }
@@ -243,6 +245,7 @@ function demo(variant) {
     excluded_titles: ["*password*", "*信用卡*"],
     pause_on_screenshare: true,
     redact_clipboard_secrets: true,
+    query_log: true,
     frames_days: 30,
     text_days: 365,
   });
@@ -290,6 +293,7 @@ async function save() {
         excluded_titles: toLines(el.titles.value),
         pause_on_screenshare: el.screenshare.checked,
         redact_clipboard_secrets: el.redact.checked,
+        query_log: el.querylog.checked,
         frames_days: days(el.framesDays, "畫面"),
         text_days: days(el.textDays, "文字"),
         // `path` 不送。要寫到哪個檔案由 Rust 那邊算，不是這一頁說了算。

@@ -114,6 +114,15 @@ pub struct PrivacyConfig {
     pub pause_on_screenshare: bool,
     /// 剪貼簿疑似秘密時不落地內容。
     pub redact_clipboard_secrets: bool,
+    /// 把**你打進搜尋框的問題**記下來（本機，見 `Db::log_query`）。
+    ///
+    /// 預設開，因為 PHASES.md Phase 2 的退場條件直接吃它的產物（「題庫 ≥ 100
+    /// 題，其中 ≥ 30 題來自真實 query log」），而那種東西補建不回來——沒有人
+    /// 記得住自己上禮拜是用什麼字問的，偏偏真實的用詞正是它唯一的價值。
+    ///
+    /// 有這個開關，是因為這一欄和其他每一欄不一樣：其他的都是她**觀察**到的
+    /// 東西，這一欄是他**主動打進去**的字。他有權利說不要。
+    pub query_log: bool,
 }
 
 impl Default for PrivacyConfig {
@@ -167,6 +176,7 @@ impl Default for PrivacyConfig {
                 .collect(),
             pause_on_screenshare: true,
             redact_clipboard_secrets: true,
+            query_log: true,
         }
     }
 }

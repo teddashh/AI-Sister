@@ -54,6 +54,8 @@ impl Shell {
 /// 不是假裝沒有這件事。
 #[derive(Serialize)]
 struct Hit {
+    /// 題庫要靠它記下「他點開的是哪一筆」（見 `log_click`）。畫面上不顯示。
+    chunk_id: i64,
     ts: i64,
     text: String,
     snippet: String,
@@ -372,6 +374,11 @@ fn with_db_mut<T>(
 #[derive(Serialize)]
 struct Answer {
     kind: &'static str,
+    /// 這一題在題庫裡的編號。點開出處的時候要掛回來（見 `log_click`）。
+    ///
+    /// `None` = 沒記成功。畫面那一邊要能在沒有編號的情況下照常運作——記不成
+    /// 題庫不該讓一個能回答的問題變成錯誤。
+    query_id: Option<i64>,
     hits: Vec<Hit>,
 }
 
@@ -382,6 +389,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
     if question.is_empty() {
         return Ok(Answer {
             kind: "keywords",
+            query_id: None,
             hits: Vec::new(),
         });
     }
@@ -405,14 +413,41 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             hits.len(),
             started.elapsed().as_millis()
         );
+        // 進題庫。他打的原話在**資料庫**裡，不在記錄檔裡——記錄檔是我會看的
+        // 東西，資料庫是他的。刪得掉（時間軸上那條「忘掉這一段」會一起帶走）、
+        // 過得了期（跟著文字的保留期）。理由與代價寫在 DATA_INVENTORY。
+        //
+        // 記不進去不算失敗：他要的是答案。
+        //
+        // 每次都重讀設定檔，不快取：他剛在設定頁上把那個勾拿掉，下一個問題就
+        // 不該再被記。和暫停旗標同一條紀律——真相在磁碟上，這個行程只是鏡子。
+        // 讀不到設定檔就當成不要記（`unwrap_or(false)`）：不確定的時候少存
+        // 一點，方向和其他每一個 fail-closed 一致。
+        let wanted = config_path()
+            .and_then(|p| sister_core::config::Config::load(&p).map_err(|e| e.to_string()))
+            .map(|c| c.privacy.query_log)
+            .unwrap_or(false);
+        let query_id = wanted
+            .then(|| {
+                db.log_query(&sister_core::db::QueryLogEntry {
+                    ts: sister_core::now_ms(),
+                    question: &question,
+                    shape: shape.name(),
+                    hits: hits.len(),
+                    latency_ms: started.elapsed().as_millis() as i64,
+                    source: "desktop",
+                })
+                .map_err(|e| tracing::warn!("這一題沒記進題庫：{e}"))
+                .ok()
+            })
+            .flatten();
         Ok(Answer {
-            kind: match shape {
-                Shape::Recent => "recent",
-                Shape::Keywords => "keywords",
-            },
+            kind: shape.name(),
+            query_id,
             hits: hits
                 .into_iter()
                 .map(|h| Hit {
+                    chunk_id: h.chunk_id,
                     ts: h.ts,
                     text: h.text,
                     snippet: h.snippet,
@@ -553,6 +588,7 @@ struct Settings {
     excluded_titles: Vec<String>,
     pause_on_screenshare: bool,
     redact_clipboard_secrets: bool,
+    query_log: bool,
     frames_days: u32,
     text_days: u32,
     /// 設定檔實際的位置。給人看的——她說她存到哪，就要指得出來是哪一個檔案。
@@ -578,6 +614,7 @@ fn settings_read() -> Result<Settings, String> {
         excluded_titles: c.privacy.excluded_titles,
         pause_on_screenshare: c.privacy.pause_on_screenshare,
         redact_clipboard_secrets: c.privacy.redact_clipboard_secrets,
+        query_log: c.privacy.query_log,
         frames_days: c.retention.frames_days,
         text_days: c.retention.text_days,
         path: path.display().to_string(),
@@ -596,6 +633,7 @@ fn settings_write(settings: Settings) -> Result<(), String> {
     c.privacy.excluded_titles = settings.excluded_titles;
     c.privacy.pause_on_screenshare = settings.pause_on_screenshare;
     c.privacy.redact_clipboard_secrets = settings.redact_clipboard_secrets;
+    c.privacy.query_log = settings.query_log;
     c.retention.frames_days = settings.frames_days;
     c.retention.text_days = settings.text_days;
     c.save(&path).map_err(|e| e.to_string())
@@ -901,6 +939,9 @@ struct Erasure {
     images: u64,
     image_bytes: u64,
     events: u64,
+    /// 那段時間裡他自己問過的話（題庫）。單獨一項，理由見
+    /// `PruneReport::queries_deleted`。
+    queries: u64,
     /// 刪不掉的檔案。**不吞掉**：那幾張截圖還躺在磁碟上，而使用者以為
     /// 它們已經不在了。
     failed: Vec<String>,
@@ -915,6 +956,7 @@ impl From<sister_core::retention::PruneReport> for Erasure {
             images: r.images_deleted,
             image_bytes: r.image_bytes_freed,
             events: r.events_deleted,
+            queries: r.queries_deleted,
             failed: r.failed,
         }
     }
@@ -987,6 +1029,29 @@ fn open_timeline(app: tauri::AppHandle) -> Result<(), String> {
     .build()
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 他點開了第 `rank` 筆的出處。
+///
+/// 這是檢索品質唯一不需要人工標註就拿得到的訊號：他點下去的那一刻，等於幫那
+/// 一題標了正解，而 `rank` 直接說出排序把它放在第幾個。Phase 2 的題庫要「≥ 30
+/// 題來自真實 query log」，靠的就是這一筆。
+///
+/// 和 [`open_frame`] 分開兩個命令，因為它們的失敗方向不一樣：畫面開不起來要
+/// 讓他知道，記不進題庫不該打斷他正在做的事。畫面那一邊是 fire-and-forget。
+#[tauri::command(async)]
+fn log_click(
+    query_id: i64,
+    chunk_id: i64,
+    rank: usize,
+    shell: tauri::State<'_, Shell>,
+) -> Result<(), String> {
+    with_db(&shell, |db| {
+        db.log_click(query_id, chunk_id, rank).map_err(|e| {
+            tracing::warn!("這一次點擊沒記進題庫：{e}");
+            e.to_string()
+        })
+    })
 }
 
 /// 開一個看圖的視窗。
@@ -1113,6 +1178,7 @@ fn main() {
             hide_to_tray,
             ask,
             open_frame,
+            log_click,
             frame_image,
             pause_state,
             recording_state,

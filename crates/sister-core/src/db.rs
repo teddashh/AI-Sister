@@ -31,7 +31,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE meta (
@@ -209,6 +209,43 @@ CREATE TRIGGER text_chunks_ad AFTER DELETE ON text_chunks BEGIN
 END;
 "#;
 
+/// 題庫。**你問過她什麼**，以及她答對了沒有。
+///
+/// PHASES.md Phase 1 的 scope 有這一條（「Query log 開始累積（本機）：每次提問
+/// ＋點擊了哪個出處＝未來題庫」），而 Phase 2 的退場條件直接吃它的產物：
+/// 「題庫 ≥ 100 題 recall QA，其中 ≥ 30 題來自真實 query log」。這種東西**補
+/// 建不回來**——沒有人記得住自己上禮拜是用什麼字問的，而那正是題庫唯一有價值
+/// 的部分（真實的用詞，不是我坐在這裡想像的用詞）。所以它要在自用的第一天就
+/// 在，不是等到 Phase 2 開工那天。
+///
+/// **0 筆的那些查詢是這裡面最貴的資料。** 找得回來的那些只證明它現在能做什麼；
+/// 找不回來的那些，才是下一版該修的東西。所以查不到也照記，而且記的是原話。
+///
+/// 點擊另外一張表，因為它是**兩件事**：問了什麼、以及哪一筆真的有用。後者是
+/// 檢索品質唯一不需要人工標註就拿得到的訊號——他點下去的那一刻，等於幫那一題
+/// 標了正解。一個問題可以點很多筆，也可以一筆都不點（那本身也是訊號）。
+const MIGRATION_004: &str = r#"
+CREATE TABLE queries (
+  id         INTEGER PRIMARY KEY,
+  ts         INTEGER NOT NULL,
+  question   TEXT NOT NULL,
+  shape      TEXT NOT NULL,
+  hits       INTEGER NOT NULL,
+  latency_ms INTEGER NOT NULL,
+  source     TEXT NOT NULL
+);
+CREATE INDEX idx_query_ts ON queries(ts);
+
+CREATE TABLE query_clicks (
+  id       INTEGER PRIMARY KEY,
+  query_id INTEGER NOT NULL REFERENCES queries(id) ON DELETE CASCADE,
+  chunk_id INTEGER NOT NULL,
+  rank     INTEGER NOT NULL,
+  ts       INTEGER NOT NULL
+);
+CREATE INDEX idx_click_query ON query_clicks(query_id);
+"#;
+
 pub struct Db {
     /// `pub(crate)` 只為了 [`crate::retention`]：清理要跨好幾張表、還要在
     /// 同一個 transaction 裡跑，包成一堆窄 API 反而更難看出它到底刪了什麼。
@@ -293,6 +330,12 @@ impl Db {
             }
             tx.commit()?;
             self.conn.pragma_update(None, "user_version", 3)?;
+        }
+        if version < 4 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(MIGRATION_004).context("migration 004")?;
+            tx.commit()?;
+            self.conn.pragma_update(None, "user_version", 4)?;
         }
         Ok(())
     }
@@ -1020,6 +1063,88 @@ impl Db {
         Ok(hits)
     }
 
+    // ---------- 題庫 ----------
+
+    /// 記下一次提問。回傳那一列的 id——點擊要靠它掛回來。
+    ///
+    /// 查不到的那些**照記**。理由見 [`MIGRATION_004`]：找得回來的那些只證明她
+    /// 現在能做什麼，找不回來的那些才是下一版要修的東西。
+    pub fn log_query(&self, entry: &QueryLogEntry<'_>) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO queries(ts, question, shape, hits, latency_ms, source)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                entry.ts,
+                entry.question,
+                entry.shape,
+                entry.hits as i64,
+                entry.latency_ms,
+                entry.source
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 他點開了第 `rank` 筆的出處。
+    ///
+    /// 這是檢索品質唯一不需要人工標註就拿得到的訊號：點下去的那一刻，等於幫
+    /// 那一題標了正解。`rank` 從 0 起算，因為「他點的是第一筆還是第七筆」正是
+    /// 排序好不好的直接量測。
+    pub fn log_click(&self, query_id: i64, chunk_id: i64, rank: usize) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO query_clicks(query_id, chunk_id, rank, ts) VALUES(?1, ?2, ?3, ?4)",
+            params![query_id, chunk_id, rank as i64, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// 最近問過的幾題，新的在前。
+    pub fn query_log(&self, limit: usize) -> Result<Vec<QueryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT q.id, q.ts, q.question, q.shape, q.hits, q.latency_ms, q.source,
+                    (SELECT COUNT(*) FROM query_clicks c WHERE c.query_id = q.id)
+             FROM queries q ORDER BY q.ts DESC, q.id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(QueryRow {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                question: r.get(2)?,
+                shape: r.get(3)?,
+                hits: r.get(4)?,
+                latency_ms: r.get(5)?,
+                source: r.get(6)?,
+                clicks: r.get(7)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// 題庫現在累積到哪裡了。
+    ///
+    /// `empty` 和 `clicked` 是這裡真正該看的兩個數字：前者是她答不出來的比例，
+    /// 後者是答出來而且**真的有用**的比例。總數只說明他用了多少次。
+    pub fn query_log_stats(&self) -> Result<QueryLogStats> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(hits = 0), 0),
+                    (SELECT COUNT(DISTINCT query_id) FROM query_clicks),
+                    MIN(ts), MAX(ts)
+             FROM queries",
+                [],
+                |r| {
+                    Ok(QueryLogStats {
+                        total: r.get(0)?,
+                        empty: r.get(1)?,
+                        clicked: r.get(2)?,
+                        first_ts: r.get(3)?,
+                        last_ts: r.get(4)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
+
     /// bigram 索引查詢。片段自己產生——`text_fts_bi` 裡存的是切好的雙字，
     /// 拿它的 `snippet()` 會回一串「客服 服專 專線」，那不是使用者要看的東西。
     ///
@@ -1596,6 +1721,50 @@ pub struct FactRow {
     pub url: Option<String>,
 }
 
+/// 要記進題庫的一次提問（見 [`Db::log_query`]）。
+///
+/// 借用而不是持有，因為呼叫端已經有這些字串了，而這一步在使用者按下 Enter 之後
+/// 的那條路上——不值得為了記一筆而多配置幾次記憶體。
+pub struct QueryLogEntry<'a> {
+    pub ts: Millis,
+    /// 他打的**原話**。不做正規化：題庫要的正是真實的用詞。
+    pub question: &'a str,
+    /// `"recent"`／`"keywords"`。走哪條路本身就是一個要驗的判斷
+    /// （見 [`crate::question::shape`]）。
+    pub shape: &'a str,
+    pub hits: usize,
+    pub latency_ms: i64,
+    /// `"desktop"`／`"cli"`。同一個問題從兩個地方問應該給一樣的答案，
+    /// 而分不出來源的話，這件事就查不了。
+    pub source: &'a str,
+}
+
+/// 題庫裡的一列（見 [`Db::query_log`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryRow {
+    pub id: i64,
+    pub ts: Millis,
+    pub question: String,
+    pub shape: String,
+    pub hits: i64,
+    pub latency_ms: i64,
+    pub source: String,
+    /// 這一題有幾個出處被點開過。0 = 她給了答案，但沒有一筆值得點。
+    pub clicks: i64,
+}
+
+/// 題庫的總覽（見 [`Db::query_log_stats`]）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryLogStats {
+    pub total: i64,
+    /// 一筆都沒找到的題數。**這是最該看的那個數字。**
+    pub empty: i64,
+    /// 至少有一個出處被點開的題數。
+    pub clicked: i64,
+    pub first_ts: Option<Millis>,
+    pub last_ts: Option<Millis>,
+}
+
 /// 秘密遮蔽的實際結果（見 [`Db::redaction_audit`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RedactionAudit {
@@ -2073,6 +2242,90 @@ mod tests {
     fn recent_on_an_empty_database_is_just_empty() {
         let db = test_db();
         assert!(db.recent(10).expect("recent must not error").is_empty());
+    }
+
+    fn ask(db: &Db, ts: Millis, question: &str, hits: usize) -> i64 {
+        db.log_query(&QueryLogEntry {
+            ts,
+            question,
+            shape: "keywords",
+            hits,
+            latency_ms: 3,
+            source: "test",
+        })
+        .expect("log_query")
+    }
+
+    /// 一筆都沒找到的那些題目**是題庫裡最貴的資料**。找得回來的那些只證明她
+    /// 現在能做什麼；找不回來的那些，才是下一版該修的東西。少記它們的話，
+    /// 題庫會變成一份「她答得出來的問題」的清單，而那份清單沒有用。
+    #[test]
+    fn a_question_that_found_nothing_is_still_worth_keeping() {
+        let db = test_db();
+        ask(&db, 1_000, "客服電話", 0);
+        let stats = db.query_log_stats().expect("stats");
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.empty, 1, "答不出來的那一題沒被記下來");
+        assert_eq!(db.query_log(10).expect("log")[0].question, "客服電話");
+    }
+
+    /// 點下去＝幫這一題標了正解，而 `rank` 說出排序把它放在第幾個。
+    #[test]
+    fn clicking_a_source_is_the_answer_key() {
+        let db = test_db();
+        let q = ask(&db, 1_000, "帳單", 5);
+        db.log_click(q, 42, 0).expect("click");
+        db.log_click(q, 77, 3).expect("click");
+
+        assert_eq!(db.query_log(10).expect("log")[0].clicks, 2);
+        assert_eq!(
+            db.query_log_stats().expect("stats").clicked,
+            1,
+            "同一題點兩下不算兩題"
+        );
+    }
+
+    /// 一題都沒點，和點了，是兩件不同的事。前者也是訊號：她給了答案，
+    /// 但沒有一筆值得點開。
+    #[test]
+    fn an_unclicked_question_is_not_a_clicked_one() {
+        let db = test_db();
+        ask(&db, 1_000, "沒人點的問題", 5);
+        assert_eq!(db.query_log_stats().expect("stats").clicked, 0);
+    }
+
+    /// 「忘掉那一段時間」如果留下他在那段時間打進搜尋框的字，那句話就是半真的
+    /// ——而螢幕上的東西沒了、他自己打的字還在，是比較糟的那一半。
+    #[test]
+    fn forgetting_a_stretch_of_time_takes_the_questions_too() {
+        let mut db = test_db();
+        ask(&db, 1_000, "要被忘掉的", 1);
+        ask(&db, 9_000, "在範圍外的", 1);
+
+        let preview = db.forget_preview(500, 2_000).expect("preview");
+        assert_eq!(preview.queries_deleted, 1, "預覽沒把題庫算進去");
+
+        let report = db.forget(500, 2_000, None).expect("forget");
+        assert_eq!(report.queries_deleted, 1);
+        let left = db.query_log(10).expect("log");
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].question, "在範圍外的");
+    }
+
+    /// 題目消失，掛在它上面的點擊也要消失。留著的話，`query_clicks` 會累積
+    /// 一堆指向不存在題目的列——那是一份沒有人知道自己還留著的紀錄。
+    #[test]
+    fn forgetting_a_question_takes_its_clicks() {
+        let mut db = test_db();
+        let q = ask(&db, 1_000, "會被忘掉", 2);
+        db.log_click(q, 7, 0).expect("click");
+        db.forget(500, 2_000, None).expect("forget");
+
+        let orphans: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM query_clicks", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(orphans, 0, "題目沒了，點擊卻還掛在那裡");
     }
 
     #[test]

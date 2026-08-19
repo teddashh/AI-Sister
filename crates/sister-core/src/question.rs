@@ -21,6 +21,21 @@ pub enum Shape {
     Recent,
 }
 
+impl Shape {
+    /// 寫出去的時候叫什麼。
+    ///
+    /// 只有這一個地方定義：`sister query --json` 的 `shape` 欄位、字母人的
+    /// `Answer.kind`、題庫的 `queries.shape` 是同一組字串。各寫各的 `match`
+    /// 遲早會有一邊改了字，而分岔之後，Phase 2 拿題庫回頭統計「時間問題到底
+    /// 答得好不好」的時候會靜靜地少算一半。
+    pub fn name(self) -> &'static str {
+        match self {
+            Shape::Keywords => "keywords",
+            Shape::Recent => "recent",
+        }
+    }
+}
+
 /// 「剛剛」。看到其中一個才**可能**是時間問題。
 const RECENT_CJK: &[&str] = &["剛剛", "剛才", "方才", "最近", "剛"];
 const RECENT_ASCII: &[&str] = &["just", "recently", "lately", "now"];

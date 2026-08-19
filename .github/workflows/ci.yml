@@ -186,6 +186,29 @@ jobs:
           $S --data-dir ./smoke query 電話 --json | grep -q '"shape": "keywords"' \
             || { echo "::error::「電話」不是時間問題，卻走了 recent"; exit 1; }
 
+          # 題庫。PHASES.md Phase 2 的退場條件要「≥ 30 題來自真實 query log」，
+          # 而那種東西補建不回來——它得從自用的第一天就在累積。安靜地停止累積
+          # 是它唯一的失效方式，而症狀要幾個月後才看得到，所以這裡當場驗。
+          $S --data-dir ./smoke query 完全不存在的東西zzz > /dev/null
+          $S --data-dir ./smoke queries --json > qlog.json
+          cat qlog.json
+          # 上面總共問了四題（電話、剛剛發生什麼事、電話、這一題）。
+          grep -q '"total": 4' qlog.json \
+            || { echo "::error::問過的題目沒有全部進題庫"; exit 1; }
+          # **答不出來的那些是題庫裡最有價值的。** 只記答得出來的，就變成一份
+          # 「她會的題目」清單，而那份清單沒有任何用處。
+          grep -q '"empty": 1' qlog.json \
+            || { echo "::error::一筆都沒找到的那題沒被記下來"; exit 1; }
+          grep -q '"shape": "recent"' qlog.json \
+            || { echo "::error::題庫沒記下哪一題走了時間那條路"; exit 1; }
+
+          # 關得掉，而且關掉是真的關掉。一個寫在文件與設定頁上、實際不生效的
+          # 開關，比沒有那個開關更糟——他會以為自己關掉了。
+          printf '[privacy]\nquery_log = false\n' > noqlog.toml
+          $S --data-dir ./smoke --config noqlog.toml query 這題不該進題庫 > /dev/null
+          $S --data-dir ./smoke queries --json | grep -q '"total": 4' \
+            || { echo "::error::query_log = false 之後，那一題還是被記下來了"; exit 1; }
+
       # 上面那一段走的是 replay，也就是**真正的擷取迴圈一行都沒被執行過**。
       # alpha.4 三個缺陷全部長在那條路上：抓圖、去重、寫檔、報告。它們在
       # Linux 上跑得好好的，在 Ted 的機器上一起壞掉，而中間沒有任何一關。

@@ -53,6 +53,12 @@ pub struct PruneReport {
     pub facts_deleted: u64,
     /// focus / clipboard / input / system 四張表加總。
     pub events_deleted: u64,
+    /// 題庫裡消失的提問數（見 `Db::log_query`）。`query_clicks` 由 CASCADE 帶走。
+    ///
+    /// 單獨一個欄位而不是併進 `events_deleted`：那一欄裡的東西全是她自己觀察到
+    /// 的，這一欄裡的是**他自己打的字**。「忘掉那一段」如果沒有把他那段時間問
+    /// 過的話一起帶走，那句話就是半真的，而報告上看不出差別。
+    pub queries_deleted: u64,
     /// 刪檔失敗的路徑（權限、檔案正被開著）。**不吞掉**。
     ///
     /// 刪不掉的截圖仍然躺在磁碟上，而使用者以為它已經不在了。這一項要
@@ -140,6 +146,10 @@ impl crate::db::Db {
         ] {
             r.events_deleted += n(sql, text_cut)?;
         }
+        // 題庫也要算進預覽。少了這一行，`sister prune --dry-run` 會說它不碰
+        // 題庫，然後真的跑起來的時候把它刪掉——而預覽存在的全部意義就是
+        // 「真的跑之前先看清楚」。
+        r.queries_deleted = n("SELECT COUNT(*) FROM queries WHERE ts < ?1", text_cut)?;
         // 兩段的圖都會被刪掉，所以用比較舊的那條界線一次算完
         let cut = frame_cut.max(text_cut);
         r.images_deleted = n(
@@ -232,6 +242,12 @@ impl crate::db::Db {
                 tx.execute(sql, [text_cut])
                     .with_context(|| format!("prune {col}"))? as u64;
         }
+        // 題庫跟著文字的保留期走，不跟畫面。它記的是他問過什麼，而那和
+        // 「那天的截圖還在不在」無關——文字都不留了，題目留著也沒有東西可以
+        // 對答案。`query_clicks` 由 CASCADE 帶走。
+        report.queries_deleted += tx
+            .execute("DELETE FROM queries WHERE ts < ?1", [text_cut])
+            .context("prune queries")? as u64;
 
         // ── 第二段：只丟掉圖，留下字（過了 frames_days）──────────────
         let stale: Vec<(i64, String, i64)> = tx
@@ -301,6 +317,7 @@ impl crate::db::Db {
         ] {
             r.events_deleted += n(sql)?;
         }
+        r.queries_deleted = n("SELECT COUNT(*) FROM queries WHERE ts >= ?1 AND ts < ?2")?;
         Ok(r)
     }
 
@@ -402,6 +419,15 @@ impl crate::db::Db {
                 tx.execute(sql, [from_ts, to_ts])
                     .with_context(|| format!("forget {what}"))? as u64;
         }
+        // 他那段時間問過的話也要走。留著的話，「那一段忘掉了」是半真的：
+        // 螢幕上的東西沒了，但他打進搜尋框的字還在——而那些字往往比畫面更
+        // 直接（他不會把不在意的事情打進去）。
+        report.queries_deleted += tx
+            .execute(
+                "DELETE FROM queries WHERE ts >= ?1 AND ts < ?2",
+                [from_ts, to_ts],
+            )
+            .context("forget queries")? as u64;
         tx.commit()?;
 
         Ok(report)
@@ -438,6 +464,44 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// 題庫跟著**文字**的保留期走，不是跟著畫面。
+    ///
+    /// 文字都不留了，題目留著也沒有東西可以對答案——那時候它只剩下「他曾經
+    /// 打過這句話」這一個事實，而那正是這一欄裡最私人的部分。
+    #[test]
+    fn the_question_log_expires_with_the_text() {
+        const DAY: i64 = 24 * 60 * 60 * 1000;
+        let mut db = crate::Db::open_in_memory().expect("db");
+        let now = 1_000 * DAY;
+        for (ts, q) in [
+            (now - 400 * DAY, "很久以前問的"),
+            (now - 10 * DAY, "上禮拜問的"),
+        ] {
+            db.log_query(&crate::db::QueryLogEntry {
+                ts,
+                question: q,
+                shape: "keywords",
+                hits: 1,
+                latency_ms: 1,
+                source: "test",
+            })
+            .expect("log_query");
+        }
+
+        let report = db
+            .prune(
+                now,
+                &RetentionConfig {
+                    frames_days: 30,
+                    text_days: 365,
+                },
+                None,
+            )
+            .expect("prune");
+        assert_eq!(report.queries_deleted, 1, "過期的題目沒被清掉");
+        assert_eq!(db.query_log_stats().expect("stats").total, 1);
     }
 
     #[test]

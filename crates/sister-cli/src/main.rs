@@ -93,6 +93,21 @@ enum Command {
         json: bool,
     },
 
+    /// 你問過她什麼——本機題庫（PHASES.md Phase 2 的評測語料就從這裡長出來）
+    ///
+    /// **一筆都沒找到的那些題目是這裡面最有價值的**：找得回來的只證明她現在
+    /// 能做什麼，找不回來的才是下一版要修的東西。可以用 `privacy.query_log`
+    /// 關掉，關掉之後這裡就不會再累積。
+    Queries {
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+        /// 只看她一筆都沒找到的那些
+        #[arg(long)]
+        empty: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// 她記了多少東西、佔了多少空間
     Stats {
         #[arg(long)]
@@ -181,15 +196,20 @@ fn main() -> Result<()> {
             days_ago,
             start,
         ),
-        Command::Query { text, limit, json } => {
-            ops::query::run(&data_dir, &text.join(" "), limit, json)
-        }
+        Command::Query { text, limit, json } => ops::query::run(
+            &data_dir,
+            &text.join(" "),
+            limit,
+            json,
+            config.privacy.query_log,
+        ),
         Command::Facts {
             kind,
             search,
             limit,
             json,
         } => ops::facts::run(&data_dir, kind.as_deref(), search.as_deref(), limit, json),
+        Command::Queries { limit, empty, json } => ops::queries::run(&data_dir, limit, empty, json),
         Command::Stats { json } => ops::stats::run(&data_dir, json),
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config, dry_run),
         Command::Pause => ops::pause::run(&data_dir, true),

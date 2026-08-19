@@ -92,6 +92,40 @@ pub fn one_line(s: &str, max_chars: usize) -> String {
     format!("{cut}…")
 }
 
+/// 補空白到 `width` 個**終端機欄位**，中文算兩格。
+///
+/// `{:<24}` 補的是位元組，而一個中文字是三個位元組、佔兩欄——所以任何一張
+/// 有中文的表用 `{:<}` 對齊，出來的會是鋸齒狀。
+///
+/// 判斷用一條粗線（CJK 區段 + 全形標點）而不是引 `unicode-width`：這個 crate
+/// 的相依樹是 `scripts/check-no-network.sh` 盯著的資產之一，而這裡對齊錯一欄
+/// 的代價是「有點醜」。
+pub fn pad(s: &str, width: usize) -> String {
+    let used: usize = s.chars().map(|c| if is_wide(c) { 2 } else { 1 }).sum();
+    let mut out = s.to_string();
+    for _ in used..width {
+        out.push(' ');
+    }
+    out
+}
+
+fn is_wide(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x115F      // 韓文字母
+        | 0x2E80..=0x303E    // CJK 部首、注音、全形標點
+        | 0x3041..=0x33FF    // 假名、韓文、CJK 相容
+        | 0x3400..=0x4DBF    // CJK 擴充 A
+        | 0x4E00..=0x9FFF    // CJK 基本區
+        | 0xA000..=0xA4CF    // 彝文
+        | 0xAC00..=0xD7A3    // 韓文音節
+        | 0xF900..=0xFAFF    // CJK 相容表意
+        | 0xFE30..=0xFE6F    // CJK 相容形式
+        | 0xFF00..=0xFF60    // 全形 ASCII
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x3FFFD  // CJK 擴充 B 以後
+    )
+}
+
 /// 出處那一行：app · 視窗標題。
 pub fn context_line(app: Option<&str>, title: Option<&str>) -> String {
     match (app, title) {

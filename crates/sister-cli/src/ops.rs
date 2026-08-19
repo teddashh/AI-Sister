@@ -218,6 +218,92 @@ pub mod pause {
     }
 }
 
+pub mod queries {
+    use super::*;
+
+    /// `sister queries`。
+    ///
+    /// 題庫要看得見，理由和這整支 CLI 一樣：**可稽核**。它是唯一一張存著「他
+    /// 自己打進去的字」的表，而 DATA_INVENTORY 的規則是「有什麼就要看得到
+    /// 什麼」。一份存了東西卻沒有任何辦法讀出來的紀錄，和偷偷存著沒有差別。
+    pub fn run(data_dir: &Path, limit: usize, only_empty: bool, json: bool) -> Result<()> {
+        let db = open_existing(data_dir)?;
+        let stats = db.query_log_stats()?;
+        // 多撈一些再篩：`only_empty` 是在這一層過濾的，直接照 limit 撈的話，
+        // 「最近 20 題裡剛好沒有空的」會印出一片空白，而題庫裡其實有。
+        let rows = db.query_log(if only_empty { limit * 20 } else { limit })?;
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|r| !only_empty || r.hits == 0)
+            .take(limit)
+            .collect();
+
+        if json {
+            let out = serde_json::json!({
+                "total": stats.total,
+                "empty": stats.empty,
+                "clicked": stats.clicked,
+                "queries": rows.iter().map(|r| serde_json::json!({
+                    "id": r.id,
+                    "ts": r.ts,
+                    "question": r.question,
+                    "shape": r.shape,
+                    "hits": r.hits,
+                    "latency_ms": r.latency_ms,
+                    "source": r.source,
+                    "clicks": r.clicks,
+                })).collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            return Ok(());
+        }
+
+        if stats.total == 0 {
+            println!(
+                "題庫是空的。問她幾個問題（`sister query …` 或字母人的搜尋框）就會開始累積。\n\
+                 如果你把 `privacy.query_log` 關掉了，那它永遠會是空的——那也是一個合理的選擇。"
+            );
+            return Ok(());
+        }
+
+        // 這兩個百分比才是重點。總數只說明他用了多少次。
+        println!(
+            "題庫：{} 題，其中 {} 題一筆都沒找到（{:.0}%），{} 題他點開了出處（{:.0}%）",
+            stats.total,
+            stats.empty,
+            100.0 * stats.empty as f64 / stats.total as f64,
+            stats.clicked,
+            100.0 * stats.clicked as f64 / stats.total as f64,
+        );
+        println!();
+        for r in &rows {
+            println!(
+                "  {}  {} {}{}{}",
+                crate::fmt::timestamp(r.ts),
+                crate::fmt::pad(&crate::fmt::one_line(&r.question, 20), 24),
+                if r.hits == 0 {
+                    "一筆都沒有".to_string()
+                } else {
+                    format!("{} 筆", r.hits)
+                },
+                if r.shape == "recent" {
+                    "（時間）"
+                } else {
+                    ""
+                },
+                match r.clicks {
+                    0 => String::new(),
+                    n => format!("，點開了 {n} 個出處"),
+                }
+            );
+        }
+        if rows.is_empty() && only_empty {
+            println!("  最近這些題她都答得出來。");
+        }
+        Ok(())
+    }
+}
+
 pub mod stop {
     use super::*;
 
@@ -315,6 +401,11 @@ pub mod prune {
                 r.chunks_deleted, r.facts_deleted, r.events_deleted
             );
         }
+        // 單獨一行，不併進上面那串。上面那些是她觀察到的東西，這一行是
+        // **他自己打的字**——他有權利當場看到那句話也一起消失了。
+        if r.queries_deleted > 0 {
+            println!("  {verb} {} 題他自己問過的話（題庫）", r.queries_deleted);
+        }
         // 刪不掉的檔案仍然躺在磁碟上，而使用者以為它已經不在了。
         // 這是整份報告裡唯一絕對不能安靜掉的一項。
         for f in &r.failed {
@@ -377,7 +468,13 @@ pub mod query {
         Ok(out)
     }
 
-    pub fn run(data_dir: &Path, text: &str, limit: usize, json: bool) -> Result<()> {
+    pub fn run(
+        data_dir: &Path,
+        text: &str,
+        limit: usize,
+        json: bool,
+        query_log: bool,
+    ) -> Result<()> {
         anyhow::ensure!(
             !text.trim().is_empty(),
             "要查什麼？例如：sister query 客服電話"
@@ -399,13 +496,31 @@ pub mod query {
         };
         let elapsed = started.elapsed();
 
+        // 進題庫。PHASES.md Phase 2 的退場條件要「≥ 30 題來自真實 query log」，
+        // 而那種東西補建不回來——沒有人記得住自己上禮拜是用什麼字問的。
+        //
+        // 記不進去不算失敗：他要的是答案，不是一筆紀錄。但要講一次，不然
+        // 題庫會安靜地停止累積，而唯一的症狀是幾個月後發現它是空的。
+        if query_log
+            && let Err(e) = db.log_query(&sister_core::db::QueryLogEntry {
+                ts: sister_core::now_ms(),
+                question: text,
+                shape: shape.name(),
+                hits: hits.len(),
+                latency_ms: elapsed.as_millis() as i64,
+                source: "cli",
+            })
+        {
+            eprintln!("  ⚠ 這一題沒記進題庫：{e}");
+        }
+
         if json {
             let out = serde_json::json!({
                 "query": text,
                 // 寫腳本的人要分得出這一份是比對來的還是時間來的：`recent`
                 // 的 hits 和 query 裡的字沒有任何關係，當成搜尋結果去解讀
                 // 會得到完全錯的結論。
-                "shape": match shape { Shape::Recent => "recent", Shape::Keywords => "keywords" },
+                "shape": shape.name(),
                 "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
                 // 撈滿上限＝被切掉了。機器讀的那一份更要講：寫腳本的人
                 // 看不到終端機上的那個「+」，會直接把長度當成總數。
