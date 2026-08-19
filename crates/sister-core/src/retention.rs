@@ -103,12 +103,21 @@ pub fn cutoff(now: Millis, days: u32) -> Millis {
 /// 手動清空過 `frames/`、或從一份沒帶 `--with-frames` 的備份還原之後，
 /// 報告會說「刪掉了 120 個畫面檔（1.2 GB）」，而磁碟上一個位元組都沒有
 /// 釋放。只有真的 `remove_file` 成功的那幾列才准記帳。
+///
+/// 回傳的是**刪不掉的那幾條相對路徑**。呼叫端一定要用它：那些檔案還在磁碟上，
+/// 而把它們的資料庫紀錄清掉（`image_path = NULL` 或整列 DELETE）之後，就沒有
+/// 任何東西指向它們了——下一次 prune 的條件是 `image_path IS NOT NULL`，所以
+/// 它們永遠不會再被掃到。那正是這個模組開頭說「先刪檔再刪 DB」要避免的
+/// 「一份沒有人知道它存在的螢幕截圖」，只是換成從一次失敗的刪除長出來的。
+///
+/// 「檔案本來就不在」不算在裡面：那個東西已經消失了，紀錄該跟著走。
 pub(crate) fn delete_files<'a>(
     root: &Path,
     files: impl IntoIterator<Item = (&'a str, i64)>,
     report: &mut PruneReport,
-) {
+) -> BTreeSet<String> {
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut stuck: BTreeSet<String> = BTreeSet::new();
     for (rel, bytes) in files {
         let full = root.join(rel);
         match std::fs::remove_file(&full) {
@@ -123,7 +132,10 @@ pub(crate) fn delete_files<'a>(
             // **也不是**「刪掉了」，而那正是使用者拿來對帳的數字。單獨數一
             // 欄，讓「資料庫說有 120 張、磁碟上一張都沒有」自己講出來。
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => report.missing += 1,
-            Err(e) => report.failed.push(format!("{}: {e}", full.display())),
+            Err(e) => {
+                report.failed.push(format!("{}: {e}", full.display()));
+                stuck.insert(rel.to_string());
+            }
         }
     }
     // 空掉的 YYYY/MM/DD 目錄順手收掉。由深到淺，這樣 DD 空了之後 MM 才會空。
@@ -140,6 +152,38 @@ pub(crate) fn delete_files<'a>(
             }
         }
     }
+    stuck
+}
+
+/// `DELETE FROM frames`，但**跳過 `kept` 裡那幾列**。
+///
+/// `kept` 是圖刪不掉的那幾列（`delete_files` 回傳的那一批）。它們的 PNG 還躺在
+/// 磁碟上，而整列刪掉之後就沒有任何東西指向那個檔案——下一次掃描的條件是
+/// `image_path IS NOT NULL`，所以它永遠不會再被看見。留著那一列，下一輪再試。
+///
+/// `prune` 傳 `from = i64::MIN`（它的條件本來就只有上界），`forget` 傳真的區間。
+fn delete_frames_except(
+    tx: &rusqlite::Transaction<'_>,
+    from_ts: Millis,
+    to_ts: Millis,
+    kept: &[i64],
+) -> Result<u64> {
+    let mut sql = String::from("DELETE FROM frames WHERE ts >= ?1 AND ts < ?2");
+    let mut args: Vec<i64> = vec![from_ts, to_ts];
+    if !kept.is_empty() {
+        sql.push_str(" AND id NOT IN (");
+        for (i, id) in kept.iter().enumerate() {
+            if i > 0 {
+                sql.push(',');
+            }
+            args.push(*id);
+            sql.push_str(&format!("?{}", args.len()));
+        }
+        sql.push(')');
+    }
+    Ok(tx
+        .execute(&sql, rusqlite::params_from_iter(args))
+        .context("delete frames")? as u64)
 }
 
 impl crate::db::Db {
@@ -212,22 +256,36 @@ impl crate::db::Db {
         //
         // 先做這一段，這樣第二段就不會對已經注定要整列刪掉的 frame
         // 做一次多餘的 UPDATE。
-        let doomed: Vec<(String, i64)> = self
+        let doomed: Vec<(i64, String, i64)> = self
             .conn
             .prepare(
-                "SELECT image_path, image_bytes FROM frames \
+                "SELECT id, image_path, image_bytes FROM frames \
                  WHERE ts < ?1 AND image_path IS NOT NULL",
             )?
-            .query_map([text_cut], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map([text_cut], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<std::result::Result<_, _>>()?;
+        // 刪不掉的那幾列**要留著**。整列刪掉的話，那個還躺在磁碟上的 PNG 就
+        // 沒有任何東西指向它了——這一段的條件是 `image_path IS NOT NULL`，所以
+        // 下一次、下下次都掃不到它。模組開頭說「先刪檔再刪 DB」是為了避開
+        // 「一份沒有人知道它存在的螢幕截圖」，而從一次失敗的刪除長出來的，
+        // 是同一個東西。
+        //
+        // 代價是一列 366 天前的紀錄多活一輪（下一次 prune 是 5 分鐘後）。
+        // 兩害相權，這個專案在每一個岔路上都往「壞掉要看得見」那邊倒。
+        let mut kept: Vec<i64> = Vec::new();
         if let Some(root) = image_root {
             // 檔數和位元組都由 `delete_files` 一起記，這樣「刪掉 2 個畫面檔
             // （100 B）」裡的兩個數字一定來自同一批成功的 `remove_file`。
-            delete_files(
+            let stuck = delete_files(
                 root,
-                doomed.iter().map(|(p, b)| (p.as_str(), *b)),
+                doomed.iter().map(|(_, p, b)| (p.as_str(), *b)),
                 &mut report,
             );
+            kept = doomed
+                .iter()
+                .filter(|(_, p, _)| stuck.contains(p))
+                .map(|(id, _, _)| *id)
+                .collect();
         }
 
         let tx = self.conn.transaction()?;
@@ -247,10 +305,9 @@ impl crate::db::Db {
         report.chunks_deleted += tx
             .execute("DELETE FROM text_chunks WHERE ts < ?1", [text_cut])
             .context("prune text_chunks")? as u64;
-        // ocr_blocks 由 frames 的 CASCADE 帶走
-        report.frames_deleted += tx
-            .execute("DELETE FROM frames WHERE ts < ?1", [text_cut])
-            .context("prune frames")? as u64;
+        // ocr_blocks 由 frames 的 CASCADE 帶走。`kept` 是圖刪不掉的那幾列，
+        // 見上面——它們留到下一輪，不然那些 PNG 會變成孤兒。
+        report.frames_deleted += delete_frames_except(&tx, i64::MIN, text_cut, &kept)?;
         for (sql, col) in [
             ("DELETE FROM focus_events WHERE ts < ?1", "focus_events"),
             ("DELETE FROM clipboard_events WHERE ts < ?1", "clipboard"),
@@ -272,12 +329,18 @@ impl crate::db::Db {
             .context("prune queries")? as u64;
 
         // ── 第二段：只丟掉圖，留下字（過了 frames_days）──────────────
+        //
+        // `kept` 要扣掉：那幾列是第一段剛剛刪檔失敗、才被留下來的，而在正常
+        // 設定（`text_days ≥ frames_days`）下它們也一定落在這一段的範圍裡。
+        // 不扣的話，同一個檔案在同一次 prune 裡會被試著刪兩次，`failed` 裡
+        // 同一行也會印兩遍——看起來像兩個問題。一次跑動，一個檔案，一次機會。
         let stale: Vec<(i64, String, i64)> = tx
             .prepare(
                 "SELECT id, image_path, image_bytes FROM frames \
                  WHERE ts < ?1 AND image_path IS NOT NULL",
             )?
             .query_map([frame_cut], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .filter(|row| !matches!(row, Ok((id, _, _)) if kept.contains(id)))
             .collect::<std::result::Result<_, _>>()?;
         tx.commit()?;
 
@@ -289,7 +352,7 @@ impl crate::db::Db {
         // 兩害相權：留著一列指向真實檔案的紀錄，最多是「這一列的圖還沒清掉」，
         // 下次帶著根目錄再跑一次就好；清成 NULL 是不可逆的失憶。
         if let (false, Some(root)) = (stale.is_empty(), image_root) {
-            delete_files(
+            let stuck = delete_files(
                 root,
                 stale.iter().map(|(_, p, b)| (p.as_str(), *b)),
                 &mut report,
@@ -299,8 +362,13 @@ impl crate::db::Db {
                 let mut up = tx.prepare(
                     "UPDATE frames SET image_path = NULL, image_bytes = 0 WHERE id = ?1",
                 )?;
-                for (id, _, _) in &stale {
-                    up.execute([id])?;
+                // **只清刪成功的那幾列。** 上面那整段註解講的是「不給根目錄就
+                // 整段不做」，而刪失敗的那幾列是同一件事的零售版：檔案還在，
+                // 清成 NULL 之後就沒有任何東西指向它，下一次也掃不到。
+                for (id, path, _) in &stale {
+                    if !stuck.contains(path) {
+                        up.execute([id])?;
+                    }
                 }
             }
             tx.commit()?;
@@ -381,20 +449,26 @@ impl crate::db::Db {
         }
 
         // 先刪檔案再改資料庫（模組開頭那條規則）。
-        let doomed: Vec<(String, i64)> = self
+        let doomed: Vec<(i64, String, i64)> = self
             .conn
             .prepare(
-                "SELECT image_path, image_bytes FROM frames \
+                "SELECT id, image_path, image_bytes FROM frames \
                  WHERE ts >= ?1 AND ts < ?2 AND image_path IS NOT NULL",
             )?
-            .query_map([from_ts, to_ts], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map([from_ts, to_ts], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<std::result::Result<_, _>>()?;
+        let mut kept: Vec<i64> = Vec::new();
         if let Some(root) = image_root {
-            delete_files(
+            let stuck = delete_files(
                 root,
-                doomed.iter().map(|(p, b)| (p.as_str(), *b)),
+                doomed.iter().map(|(_, p, b)| (p.as_str(), *b)),
                 &mut report,
             );
+            kept = doomed
+                .iter()
+                .filter(|(_, p, _)| stuck.contains(p))
+                .map(|(id, _, _)| *id)
+                .collect();
         }
 
         let tx = self.conn.transaction()?;
@@ -412,12 +486,10 @@ impl crate::db::Db {
                 [from_ts, to_ts],
             )
             .context("forget text_chunks")? as u64;
-        report.frames_deleted += tx
-            .execute(
-                "DELETE FROM frames WHERE ts >= ?1 AND ts < ?2",
-                [from_ts, to_ts],
-            )
-            .context("forget frames")? as u64;
+        // `kept` 是圖刪不掉的那幾列。整列刪掉的話那張 PNG 就沒人指得到了，
+        // 而他按的是「忘掉」——留著一個他以為已經不存在的檔案，比留著一列
+        // 指向它的紀錄更糟。留下來，下一次再試，而且報告裡看得到。
+        report.frames_deleted += delete_frames_except(&tx, from_ts, to_ts, &kept)?;
         for (sql, what) in [
             (
                 "DELETE FROM focus_events WHERE ts >= ?1 AND ts < ?2",
@@ -718,6 +790,102 @@ mod tests {
         let r2 = db.prune(NOW, &retention, Some(tmp.path())).expect("prune");
         assert!(!stale.exists(), "第二次帶了根目錄，就該真的刪掉");
         assert_eq!(r2.images_deleted, 1, "{r2:?}");
+    }
+
+    /// 把 `rel` 這條路徑做成一個**非空的資料夾**，讓 `remove_file` 一定失敗。
+    ///
+    /// 用 chmod 555 也能擋，但 root 跑測試的時候擋不住（CI 的容器常常是
+    /// root），那會變成一條「在某些機器上靜靜地什麼都沒驗到」的測試——正好是
+    /// 這個 commit 在修的那種謊。`remove_file` 對資料夾則是不管誰跑都會失敗。
+    fn make_undeletable(root: &Path, rel: &str) {
+        let full = root.join(rel);
+        let _ = std::fs::remove_file(&full);
+        std::fs::create_dir_all(&full).expect("mkdir");
+        std::fs::write(full.join("occupied"), b"x").expect("write");
+    }
+
+    /// 一張**刪不掉**的截圖，不可以連紀錄一起消失。
+    ///
+    /// 磁碟滿了、防毒鎖住檔案、外接碟拔掉——`remove_file` 失敗之後，那個
+    /// PNG 還躺在磁碟上。舊的程式碼照樣把整列 DELETE 掉（或把 `image_path`
+    /// 清成 NULL），而下一次掃描的條件是 `image_path IS NOT NULL`，所以它從此
+    /// 不可能再被掃到。⚠ 只會出現那一次，之後每一次 prune、每一次 doctor 都
+    /// 會說「乾淨」——而那張截圖會在磁碟上待到這台電腦報廢。
+    #[test]
+    fn a_screenshot_that_could_not_be_deleted_keeps_the_row_that_points_at_it() {
+        let tmp = Tmp::new("stuck-prune");
+        let (mut db, paths) = seeded(&tmp);
+        // paths[1] 過了 frames_days（只丟圖），paths[2] 過了 text_days（整列走）
+        make_undeletable(tmp.path(), &paths[1]);
+        make_undeletable(tmp.path(), &paths[2]);
+        let retention = RetentionConfig {
+            frames_days: 30,
+            text_days: 365,
+        };
+
+        let r = db.prune(NOW, &retention, Some(tmp.path())).expect("prune");
+
+        assert_eq!(r.failed.len(), 2, "{r:?}");
+        assert_eq!(r.images_deleted, 0, "一個都沒刪成功，就不能記帳");
+        assert_eq!(r.frames_deleted, 0, "刪不掉圖的那一列不可以整列消失");
+
+        for rel in [&paths[1], &paths[2]] {
+            let pointed: i64 = db
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM frames WHERE image_path = ?1",
+                    [rel],
+                    |r| r.get(0),
+                )
+                .expect("query");
+            assert_eq!(pointed, 1, "{rel} 還在磁碟上，指向它的那一列就不能不見");
+        }
+
+        // 而且下一輪真的會再試一次——這就是留著那一列的全部意義
+        for rel in [&paths[1], &paths[2]] {
+            std::fs::remove_dir_all(tmp.path().join(rel)).expect("unblock");
+            std::fs::write(tmp.path().join(rel), vec![0u8; 100]).expect("rewrite png");
+        }
+        let r2 = db.prune(NOW, &retention, Some(tmp.path())).expect("prune");
+        assert!(r2.failed.is_empty(), "{:?}", r2.failed);
+        assert_eq!(r2.images_deleted, 2, "{r2:?}");
+        assert_eq!(r2.frames_deleted, 1, "過了 text_days 的那一列這次要走");
+    }
+
+    /// 他親手按下「忘掉」的那一段裡，刪不掉的圖同樣不可以變成孤兒。
+    ///
+    /// 這裡比保留期更嚴重：保留期只是到期，而他按的是「忘掉」。留下一個
+    /// 他以為已經不存在的檔案，比留下一列指向它的紀錄糟得多——後者至少
+    /// 下一次還刪得到。
+    #[test]
+    fn forgetting_does_not_orphan_a_screenshot_it_could_not_delete() {
+        let tmp = Tmp::new("stuck-forget");
+        let (mut db, paths) = seeded(&tmp);
+        make_undeletable(tmp.path(), &paths[0]);
+
+        let r = db
+            .forget(days_ago(2), days_ago(0), Some(tmp.path()))
+            .expect("forget");
+
+        assert_eq!(r.failed.len(), 1, "{r:?}");
+        assert_eq!(r.frames_deleted, 0, "圖還在，那一列就得留著");
+        let pointed: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM frames WHERE image_path = ?1",
+                [&paths[0]],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(
+            pointed, 1,
+            "沒有人指得到的截圖，正是「忘掉」最不能留下的東西"
+        );
+        // 但字是真的走了：他要的那件事有做到
+        assert!(
+            db.search("昨天", 10).expect("search").is_empty(),
+            "忘掉一段時間就該連字一起走，就算圖卡住了"
+        );
     }
 
     /// FTS 是文字的**另一份副本**。刪 chunk 而索引沒跟著掉，等於資料
