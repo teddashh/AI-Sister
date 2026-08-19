@@ -4237,6 +4237,12 @@ pub mod record {
                 - disk_at_start,
             stats.image_bytes,
             image_budget_mb * 1024 * 1024,
+            // 「一次睜眼多貴」問的就是 grab 這一段：閘門放行之後真的去讀
+            // 螢幕的那一次。`per_call` 已經只除以真的做了事的次數。
+            rec.timings()
+                .grab
+                .per_call()
+                .map(|d| d.as_secs_f64() * 1000.0),
         );
         for line in &lost {
             println!("  ⚠  錄製途中失去的能力：{line}");
@@ -4320,12 +4326,32 @@ pub mod record {
         }
     }
 
+    /// 省電閘門完美運作時，這台機器的 CPU **地板**（百分比）。
+    ///
+    /// `per_look_ms` = 一次睜眼（抓一張圖）的成本。完全沒人碰的一天仍然要每
+    /// `MAX_BLIND_MS` 睜一次眼，因為「沒有輸入」只是「畫面沒變」的一個猜測，
+    /// 不是保證。所以這個數字是這個設計付得起的最低價，而閘門一行都改不動它。
+    ///
+    /// 要它是因為：閘門修好之後很容易把 CPU 那條當成結案了。而 127 ms 一次
+    /// 的話地板是 2.5%——3% 預算的八成半，**而且那是一台沒有人在用的機器**。
+    /// 用起來的時候閘門本來就該開著（有輸入就代表畫面可能變了），所以閘門那
+    /// 條路已經走到底，真正要便宜的是一次睜眼本身。這個函式把那句話從我的
+    /// 推論變成他螢幕上的算術。
+    ///
+    /// `any(windows, test)` 的理由同 [`DiskProjection`]。
+    #[cfg(any(windows, test))]
+    fn idle_floor_pct(per_look_ms: f64) -> f64 {
+        let looks_per_day = 86_400_000.0 / sister_capture::recorder::MAX_BLIND_MS as f64;
+        looks_per_day * per_look_ms / 86_400_000.0 * 100.0
+    }
+
     #[cfg(windows)]
     fn report_footprint(
         f: &sister_capture::footprint::Footprint,
         disk_delta: i64,
         image_bytes: u64,
         image_cap_bytes: u64,
+        per_look_ms: Option<f64>,
     ) {
         /// 超標的就標出來。合格的不標——每一項都掛一個記號等於沒有記號。
         fn over(actual: f64, budget: f64) -> &'static str {
@@ -4341,6 +4367,26 @@ pub mod record {
                     "CPU {cpu:.1}% 超過預算 {BUDGET_CPU_PCT:.0}%（{:.0} 倍）",
                     cpu / BUDGET_CPU_PCT
                 ));
+                // 超標的時候要講清楚省電閘門救不救得了，因為「閘門沒生效」
+                // 是這條路上最像答案的答案，而它只對了一半。
+                if let Some(ms) = per_look_ms.filter(|ms| *ms > 0.0) {
+                    let floor = idle_floor_pct(ms);
+                    let verdict = if floor > BUDGET_CPU_PCT {
+                        "——**已經超過預算了**。閘門修得再好都到不了，\
+                         要便宜的是一次睜眼本身（`sister bench` 會說貴在哪一段）。"
+                    } else if floor > BUDGET_CPU_PCT * 0.7 {
+                        "——佔掉預算的一大半，而那是一台沒有人在用的機器。\
+                         剩下的空間不夠給真的在用的時候，先跑 `sister bench`。"
+                    } else {
+                        "——地板還在預算內，所以這次超標是閘門沒關上，不是抓圖太貴。"
+                    };
+                    breached.push(format!(
+                        "一次睜眼 {ms:.0} ms。就算省電閘門完美，一台**完全沒人碰**的機器\
+                         每 {} 秒還是得睜一次眼，一天 {:.0} 次 = {floor:.1}% CPU{verdict}",
+                        sister_capture::recorder::MAX_BLIND_MS / 1000,
+                        86_400_000.0 / sister_capture::recorder::MAX_BLIND_MS as f64,
+                    ));
+                }
             }
         }
         if let Some(rss) = f.peak_rss_bytes() {
@@ -4658,6 +4704,38 @@ pub mod record {
 
         const MB: f64 = 1024.0 * 1024.0;
         const CAP_250MB: u64 = 250 * 1024 * 1024;
+
+        /// 省電閘門修好**不等於** CPU 那條結案了。
+        ///
+        /// 閘門管的是「沒人碰的時候別看」。可是就算完全沒人碰，每
+        /// `MAX_BLIND_MS` 還是得睜一次眼——沒有輸入只是「畫面沒變」的猜測，
+        /// 不是保證。所以那個頻率乘上一次睜眼的成本，就是這個設計付得起的
+        /// 最低價，而閘門一行都改不動它。
+        ///
+        /// 他那台 2560×1440 一次 127 ms：地板 2.5%，佔掉 3% 預算的八成半，
+        /// **而且那是一台沒有人在用的機器**。CI runner 的 1024×768 一次
+        /// 27 ms：0.5%，還很寬。同一個設計、同一份程式、兩個完全不同的
+        /// 結論——所以這個數字必須用他機器上真的量到的那一個算，不能寫死。
+        #[test]
+        fn a_perfect_idle_gate_still_has_a_floor_and_on_his_machine_it_eats_the_budget() {
+            let his = super::idle_floor_pct(127.0);
+            assert!(
+                (2.3..2.7).contains(&his),
+                "2560×1440 一次 127 ms 的地板應該在 2.5% 上下，算出來是 {his:.2}%"
+            );
+            assert!(his < 3.0, "還沒到「閘門修好也沒用」的地步，但只剩一點點");
+            assert!(
+                his > 3.0 * 0.7,
+                "地板吃掉預算七成以上，這才是 `sister bench` 存在的理由：{his:.2}%"
+            );
+
+            let ci = super::idle_floor_pct(27.0);
+            assert!(
+                ci < 3.0 * 0.7,
+                "CI 那台 1024×768 的地板還很寬（{ci:.2}%）——同一份程式，\
+                 換一台機器結論就翻過來，所以不能寫死"
+            );
+        }
 
         /// 他那次實測的形狀：錄十分鐘，外推出「11.4 GB/天」。
         ///
