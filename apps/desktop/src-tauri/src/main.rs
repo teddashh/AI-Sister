@@ -16,7 +16,7 @@
 //!
 //! 這是唯一一個「因為換了殼所以整段不抄」的地方，其餘行為都照舊。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sister_shell as bounds;
 use sister_shell::{PetState, Rect};
 use std::path::PathBuf;
@@ -169,6 +169,76 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Vec<Hit>, Str
         .collect())
 }
 
+/// 設定頁上看得到、改得動的那幾項。
+///
+/// **刻意只是設定檔的一個子集。** 截圖間隔、去重門檻那些沒有放進來，因為它們
+/// 改了要重開 `record` 才生效（見 `Recorder::set_privacy`）——一個按了儲存卻
+/// 要等重開才生效、而且沒說的欄位，比沒有那個欄位更糟。
+#[derive(Serialize, Deserialize)]
+struct Settings {
+    excluded_apps: Vec<String>,
+    excluded_urls: Vec<String>,
+    excluded_titles: Vec<String>,
+    pause_on_screenshare: bool,
+    redact_clipboard_secrets: bool,
+    frames_days: u32,
+    text_days: u32,
+    /// 設定檔實際的位置。給人看的——她說她存到哪，就要指得出來是哪一個檔案。
+    ///
+    /// **只出不進**：存檔時路徑一律由 `config_path()` 重算，不是相信視窗傳回來
+    /// 的那個字串。一個「要寫到哪個檔案」由前端決定的介面，等於讓那一頁指到
+    /// 任何一個地方去。`default` 讓存檔的 payload 不必回傳它。
+    #[serde(default)]
+    path: String,
+}
+
+fn config_path() -> Result<PathBuf, String> {
+    sister_core::config::Config::default_path().ok_or_else(|| "找不到設定檔路徑".to_string())
+}
+
+#[tauri::command]
+fn settings_read() -> Result<Settings, String> {
+    let path = config_path()?;
+    let c = sister_core::config::Config::load(&path).map_err(|e| e.to_string())?;
+    Ok(Settings {
+        excluded_apps: c.privacy.excluded_apps,
+        excluded_urls: c.privacy.excluded_urls,
+        excluded_titles: c.privacy.excluded_titles,
+        pause_on_screenshare: c.privacy.pause_on_screenshare,
+        redact_clipboard_secrets: c.privacy.redact_clipboard_secrets,
+        frames_days: c.retention.frames_days,
+        text_days: c.retention.text_days,
+        path: path.display().to_string(),
+    })
+}
+
+#[tauri::command]
+fn settings_write(settings: Settings) -> Result<(), String> {
+    let path = config_path()?;
+    // **先讀再改再寫**，不是從空白組一份出來。設定檔裡有這一頁沒有畫出來的
+    // 欄位（截圖間隔、每日畫面額度……），從頭組一份會把它們全部重設成預設值
+    // ——使用者只是改了個保留天數，磁碟預算卻被悄悄換掉了。
+    let mut c = sister_core::config::Config::load(&path).map_err(|e| e.to_string())?;
+    c.privacy.excluded_apps = settings.excluded_apps;
+    c.privacy.excluded_urls = settings.excluded_urls;
+    c.privacy.excluded_titles = settings.excluded_titles;
+    c.privacy.pause_on_screenshare = settings.pause_on_screenshare;
+    c.privacy.redact_clipboard_secrets = settings.redact_clipboard_secrets;
+    c.retention.frames_days = settings.frames_days;
+    c.retention.text_days = settings.text_days;
+    c.save(&path).map_err(|e| e.to_string())
+}
+
+/// 哪幾條網址規則寫了也不會命中。
+///
+/// **這是這一頁最有價值的一格。** 排除規則最糟的失效方式不是漏寫，是寫了一條
+/// 自以為有效的——使用者看著清單上那一行，以為網銀已經擋掉了。同一份判斷
+/// `sister doctor` 和 `record` 都在用，這裡只是把它搬到打字的當下。
+#[tauri::command]
+fn lint_url_rules(rules: Vec<String>) -> Vec<(String, String)> {
+    sister_core::config::suspicious_url_rules(&rules)
+}
+
 /// 那張畫面本身。
 ///
 /// **這是這個產品的重點，不是附加功能。** 她說「你三天前看過這個」的時候，
@@ -204,6 +274,28 @@ fn frame_image(frame_id: i64, shell: tauri::State<'_, Shell>) -> Result<FrameVie
         title: ctx.window_title,
         url: ctx.url,
     })
+}
+
+/// 開設定頁。同一個 label 重複用，所以按兩次不會得到兩個視窗。
+#[tauri::command]
+fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
+    const SETTINGS: &str = "settings";
+    if let Some(win) = app.get_webview_window(SETTINGS) {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        SETTINGS,
+        tauri::WebviewUrl::App("settings.html".into()),
+    )
+    .title("AI-Sister 設定")
+    .inner_size(640.0, 720.0)
+    .min_inner_size(460.0, 420.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 開一個看圖的視窗。
@@ -298,7 +390,11 @@ fn main() {
             open_frame,
             frame_image,
             pause_state,
-            toggle_pause
+            toggle_pause,
+            settings_read,
+            settings_write,
+            lint_url_rules,
+            open_settings
         ])
         .setup(|app| {
             let win = app
@@ -373,8 +469,13 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
+            let settings_item =
+                MenuItem::with_id(app, "settings", "設定…", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "結束", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &pause_item, &quit_item])?;
+            let menu = Menu::with_items(
+                app,
+                &[&show_item, &pause_item, &settings_item, &quit_item],
+            )?;
             app.manage(PauseItem(pause_item));
 
             TrayIconBuilder::new()
@@ -394,6 +495,11 @@ fn main() {
                         // 使用者只會以為自己按到了。
                         if let Err(e) = toggle_pause(app.clone(), app.state::<Shell>()) {
                             tracing::error!("暫停切換失敗：{e}");
+                        }
+                    }
+                    "settings" => {
+                        if let Err(e) = open_settings(app.clone()) {
+                            tracing::error!("設定頁開不起來：{e}");
                         }
                     }
                     "quit" => {

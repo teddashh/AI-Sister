@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <title>AI-Sister 設定</title>
+    <link rel="stylesheet" href="./settings.css" />
+  </head>
+  <body>
+    <main class="sheet">
+      <h1>設定</h1>
+      <p class="path">
+        存到 <code data-path>…</code>
+      </p>
+
+      <!--
+        排除規則排在最前面，因為它是這一頁唯一會影響「她看得到什麼」的東西。
+        保留天數只決定舊資料什麼時候消失——那重要，但沒有這個急。
+      -->
+      <section>
+        <h2>不要看這些 app</h2>
+        <p class="hint">
+          一行一個。比對的是<strong>子字串、不分大小寫</strong>，所以
+          <code>keepassxc</code> 同時涵蓋 <code>keepassxc.exe</code> 和
+          <code>org.keepassxc.keepassxc</code>。要精準比對就自己寫
+          <code>*</code>。
+        </p>
+        <textarea data-apps rows="6" spellcheck="false"></textarea>
+      </section>
+
+      <section>
+        <h2>不要看這些網址</h2>
+        <p class="hint">
+          一行一個 glob，例如 <code>*.bank.com.tw*</code>。
+          <strong>需要瀏覽器網址列讀得到</strong>——<code>sister doctor</code>
+          會當場告訴你這台機器讀不讀得到。
+        </p>
+        <textarea data-urls rows="6" spellcheck="false"></textarea>
+        <!-- 打字的當下就講，而不是等他關掉視窗、以為擋好了才在 doctor 裡發現 -->
+        <ul class="lint" data-lint hidden></ul>
+      </section>
+
+      <section>
+        <h2>不要看標題長這樣的視窗</h2>
+        <p class="hint">一行一個 glob，比對視窗標題（不分大小寫）。</p>
+        <textarea data-titles rows="4" spellcheck="false"></textarea>
+      </section>
+
+      <section>
+        <h2>兩道自動防線</h2>
+        <label class="check">
+          <input type="checkbox" data-screenshare />
+          <span>
+            開會或分享螢幕時自動暫停
+            <em>旁人的畫面不該被記住，而他們沒有同意過任何事</em>
+          </span>
+        </label>
+        <label class="check">
+          <input type="checkbox" data-redact />
+          <span>
+            剪貼簿看起來像密碼時只記「發生過」，不記內容
+            <em>關掉這個，你複製的每一個 token 都會進資料庫</em>
+          </span>
+        </label>
+      </section>
+
+      <section>
+        <h2>留多久</h2>
+        <div class="days">
+          <label>
+            <span>畫面</span>
+            <input type="number" data-frames-days min="0" max="3650" />
+            <em>天後刪掉 PNG，但上面的字留著</em>
+          </label>
+          <label>
+            <span>文字與事實</span>
+            <input type="number" data-text-days min="0" max="3650" />
+            <em>天後整列消失</em>
+          </label>
+        </div>
+        <p class="hint">
+          <strong>0 = 立刻刪</strong>，不是「永遠留著」。
+        </p>
+      </section>
+    </main>
+
+    <footer class="bar">
+      <p class="say" data-say></p>
+      <button class="ghost" data-reload type="button">重讀</button>
+      <button class="primary" data-save type="button">儲存</button>
+    </footer>
+    <script type="module" src="./settings.js"></script>
+  </body>
+</html>

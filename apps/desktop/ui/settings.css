@@ -1,0 +1,225 @@
+/*
+ * 設定頁。和看圖視窗一樣：不透明、不動、不是她。
+ *
+ * 版面上只有一個決定值得寫下來——**每一格底下都有一句話說明它的後果**，
+ * 而不是把說明藏進 tooltip。這一頁的每一個開關都會改變她看得到什麼，而使用者
+ * 只會來這裡一次。一個看不懂後果的隱私開關，等於沒有那個開關。
+ */
+
+:root {
+  --bg: #1e1a26;
+  --fg: #f6ecdf;
+  --accent: #9a5b7a;
+  --field: rgb(246 236 223 / 8%);
+  --warn: #e8a33d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  display: flex;
+  flex-direction: column;
+  font: 13px/1.6 "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+}
+
+.sheet {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 20px 8px;
+}
+
+h1 {
+  font-size: 19px;
+  margin: 0 0 2px;
+}
+
+.path {
+  margin: 0 0 20px;
+  opacity: 0.55;
+}
+
+code {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+section {
+  border-top: 1px solid rgb(246 236 223 / 10%);
+  padding: 14px 0;
+}
+
+h2 {
+  font-size: 14px;
+  margin: 0 0 4px;
+}
+
+.hint {
+  margin: 0 0 8px;
+  opacity: 0.62;
+}
+
+.hint strong {
+  opacity: 0.9;
+}
+
+textarea,
+input[type="number"] {
+  appearance: none;
+  background: var(--field);
+  border: 1px solid rgb(246 236 223 / 14%);
+  border-radius: 8px;
+  color: inherit;
+  font: 12.5px/1.6 "Cascadia Mono", Consolas, monospace;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+textarea {
+  resize: vertical;
+}
+
+textarea:focus-visible,
+input:focus-visible,
+button:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---------- 規則檢查 ---------- */
+
+/*
+ * 這幾行是這一頁最重要的東西，所以它們用警告色，而且就長在輸入框正下方。
+ * 一條寫了也不會命中的排除規則，比沒寫更危險——使用者看著它，以為擋好了。
+ */
+.lint {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.lint li {
+  background: rgb(232 163 61 / 12%);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  padding: 6px 9px;
+}
+
+.lint .rule {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-weight: 600;
+}
+
+.lint .why {
+  display: block;
+  opacity: 0.8;
+}
+
+/* ---------- 開關 ---------- */
+
+.check {
+  align-items: start;
+  display: flex;
+  gap: 9px;
+  margin-bottom: 12px;
+}
+
+.check input {
+  accent-color: var(--accent);
+  height: 16px;
+  margin-top: 3px;
+  width: 16px;
+}
+
+.check em {
+  display: block;
+  font-style: normal;
+  opacity: 0.62;
+}
+
+/* ---------- 天數 ---------- */
+
+.days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.days label {
+  flex: 1 1 200px;
+}
+
+.days span {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.days input {
+  font-variant-numeric: tabular-nums;
+  width: 90px;
+}
+
+.days em {
+  font-style: normal;
+  opacity: 0.62;
+}
+
+/* ---------- 底下那一條 ---------- */
+
+.bar {
+  align-items: center;
+  background: rgb(46 33 64 / 96%);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  padding: 10px 14px;
+}
+
+.say {
+  flex: 1;
+  margin: 0;
+  min-width: 0;
+  opacity: 0.75;
+}
+
+/* 存不進去要看得出來，不是安靜地什麼都沒發生 */
+.say.bad {
+  color: var(--warn);
+  opacity: 1;
+}
+
+button {
+  appearance: none;
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+  font: inherit;
+  padding: 7px 15px;
+}
+
+.ghost {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px rgb(246 236 223 / 22%);
+  color: inherit;
+}
+
+.primary {
+  background: var(--accent);
+  color: var(--fg);
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
