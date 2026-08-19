@@ -56,6 +56,14 @@ pub enum Tick {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecorderStats {
     pub ticks: u64,
+    /// 真的走完一整拍的次數——過了 `capture.enabled` 和暫停這兩道門的。
+    ///
+    /// `ticks` 在那兩道門**之前**就加了，所以一段「8 小時裡暫停了 7 小時」的
+    /// 錄製，72,000 拍裡有 63,000 拍是幾微秒就回來的空轉。拿 `ticks` 當分母
+    /// 算「每 tick 幾 ms」會得到 8 ms，而真的做事的那一拍要 60 ms——差 7.5
+    /// 倍，而且是往「看起來很便宜」的方向差。那個數字唯一的用途就是判斷這
+    /// 個迴圈貴不貴，指錯方向等於沒有。
+    pub working_ticks: u64,
     pub kept: u64,
     pub duplicates: u64,
     pub excluded: u64,
@@ -402,6 +410,9 @@ impl<B: Backend> Recorder<B> {
             // 「現在不要記錄我」——後者連沒有內容的節奏都不該留下。
             return Ok(Tick::Paused);
         }
+        // 過了上面兩道門才算「這一拍真的要做事」。摘要裡的每拍成本和閒置
+        // 比例都拿它當分母——見 `working_ticks`。
+        self.stats.working_ticks += 1;
 
         // 1) 先看脈絡。這一步很便宜，而且是排除判定的依據。
         let t = Instant::now();

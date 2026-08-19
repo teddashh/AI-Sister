@@ -83,7 +83,9 @@ fn open_existing(data_dir: &Path) -> Result<Db> {
 /// ——CPU 直接超支十幾倍，而摘要一個字都不說。
 fn report_idle(stats: &sister_capture::RecorderStats) {
     if stats.skipped_idle > 0 {
-        let pct = stats.skipped_idle as f64 / stats.ticks.max(1) as f64 * 100.0;
+        // 分母是 `working_ticks` 不是 `ticks`：暫停和關閉的空轉拍從來沒問過
+        // 「有人動過嗎」，把它們算進去只會把省下來的比例稀釋掉。
+        let pct = stats.skipped_idle as f64 / stats.working_ticks.max(1) as f64 * 100.0;
         println!(
             "  省下：{} 次沒碰螢幕（{pct:.0}%——那段時間你沒動鍵盤滑鼠；最多每 5 秒仍會看一次）",
             stats.skipped_idle
@@ -96,7 +98,9 @@ fn report_idle(stats: &sister_capture::RecorderStats) {
              \n\x20    每一拍都會真的去讀一次螢幕——真的錄起來的話，CPU 大約是設計值的十幾倍。",
             stats.idle_unknown
         );
-    } else if stats.ticks > 0 {
+    } else if stats.working_ticks > 0 {
+        // 條件是 `working_ticks` 不是 `ticks`：整段被暫停或關閉的錄製，一次
+        // 都沒問過閒置訊號，這裡講什麼都是編的。上面那兩行會說真正的原因。
         println!("  省下：0 次沒碰螢幕（這段時間你一直在動，或每一拍脈絡都變了）");
     }
     if stats.title_clock_ticks > 0 {
@@ -3323,6 +3327,19 @@ pub mod replay {
             Some(sister_capture::frames::frames_root(data_dir))
         };
 
+        // `record` 開場就講這句（見那邊的 `capture.enabled` 判斷），`replay`
+        // 以前完全安靜——而它一樣會寫進真的資料庫、真的 frames/。61 個
+        // `Tick::Disabled` 被吞進 `Duplicate | Paused | Idle` 那一條 arm，於是
+        // 印出來的是「完成：61 tick → 保留 0、重複 0、排除 0、無畫面 0」，
+        // exit 0，和「腳本裡本來就沒東西」長得一模一樣。
+        let disabled = !config.capture.enabled;
+        if disabled {
+            println!(
+                "⚠  capture.enabled = false：接下來每一個 tick 都會直接跳過，\
+                 這次重播不會記錄任何東西。改成 true 才會真的錄。"
+            );
+        }
+
         let backend = ReplayBackend::with_origin(scenario, origin);
         let mut rec = Recorder::new(backend, db, config, image_dir)?;
 
@@ -3356,6 +3373,14 @@ pub mod replay {
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
             s.ticks, s.kept, s.duplicates, s.excluded, s.no_screen
         );
+        if disabled {
+            // 收尾再講一次。開場那句話在 61 行 tick 輸出的上面，捲上去才看得到。
+            println!(
+                "  ⚠  這 {} 個 tick 全部被 capture.enabled = false 跳過了，\
+                 一個字都沒記進去。",
+                s.ticks
+            );
+        }
         report_idle(s);
         report_exclusions(s);
         if s.secrets_redacted > 0 {
@@ -4122,7 +4147,12 @@ pub mod record {
         // 先取最後一次足跡樣本，時間表才拿得到「這段期間燒了多少 CPU」，
         // 而那是把牆上時間和 CPU 分開講的前提。
         footprint.tick();
-        report_timings(rec.timings(), stats.ticks, footprint.cpu_seconds_used());
+        report_timings(
+            rec.timings(),
+            stats.ticks,
+            stats.working_ticks,
+            footprint.cpu_seconds_used(),
+        );
         report_footprint(
             &footprint,
             rec.db()
@@ -4243,6 +4273,38 @@ pub mod record {
                     crate::fmt::bytes(BUDGET_DISK_PER_DAY as i64),
                     per_day / BUDGET_DISK_PER_DAY
                 ));
+                // 超標的時候要指出**是哪一半**，因為那兩半的下一步完全不同，
+                // 而其中一半有天花板、另一半沒有：
+                //
+                //   畫面有 `max_image_mb_per_day`（預設 250 MB），所以它一天
+                //   最多就是那麼多。任何遠大於它的數字，算術上就不可能是圖。
+                //   資料庫沒有任何節流、沒有預算、也沒有自己的計數器。
+                //
+                // 實測那次是 11.4 GB/天，也就是圖的上限的 46 倍——不看這一行
+                // 的話，唯一提到節流的是「另外 N 張只留了字（間隔未到）」，
+                // 而那句話讀起來像是在講省下來的磁碟。
+                let cap = f
+                    .bytes_per_day(image_bytes)
+                    .filter(|_| rest >= 0)
+                    .map(|img| {
+                        if img * 2.0 < per_day {
+                            format!(
+                                "而且大部分不是圖：畫面 {}/天、其他（資料庫、索引、事實）{}/天。\
+                                 畫面那半有天花板（capture.max_image_mb_per_day），另一半沒有。",
+                                crate::fmt::bytes(img as i64),
+                                crate::fmt::bytes((per_day - img) as i64),
+                            )
+                        } else {
+                            format!(
+                                "主要是圖：畫面 {}/天。調小 capture.max_image_mb_per_day \
+                                 或拉長 image_min_interval_ms。",
+                                crate::fmt::bytes(img as i64)
+                            )
+                        }
+                    });
+                if let Some(line) = cap {
+                    breached.push(line);
+                }
             }
         }
         if parts.is_empty() {
@@ -4334,7 +4396,12 @@ pub mod record {
     /// 那行要把 CPU 秒數一起印出來——不然一份拆得很細的耗時表會被讀成
     /// 「CPU 花在哪裡」，而使用者抱怨的明明是後者。
     #[cfg(windows)]
-    fn report_timings(t: &sister_capture::timings::Timings, ticks: u64, cpu_secs: Option<f64>) {
+    fn report_timings(
+        t: &sister_capture::timings::Timings,
+        ticks: u64,
+        working: u64,
+        cpu_secs: Option<f64>,
+    ) {
         let total = t.total();
         if total.is_zero() || ticks == 0 {
             return;
@@ -4347,10 +4414,20 @@ pub mod record {
             Some(c) => format!("；同期間燒掉 {c:.1} 秒 CPU"),
             None => String::new(),
         };
+        // 每拍成本要除以**真的做事的**那些拍。暫停和關閉的空轉拍幾微秒就
+        // 回來，把它們算進分母只會讓這個迴圈看起來比實際便宜——一段暫停了
+        // 七小時的錄製會印出「每 tick 8 ms」，而真的做事的那一拍要 60 ms，
+        // 於是這個數字把調查指向別的地方。
+        let idle_ticks = ticks.saturating_sub(working);
+        let skipped = if idle_ticks > 0 {
+            format!("（其中 {idle_ticks} 拍是暫停或關閉，沒做事）")
+        } else {
+            String::new()
+        };
         println!(
-            "  時間：{ticks} tick 佔了 {:.1} 秒（每 tick {:.0} ms）{cpu}",
+            "  時間：{ticks} tick{skipped} 佔了 {:.1} 秒（做事的每拍 {:.0} ms）{cpu}",
             total.as_secs_f64(),
-            total.as_secs_f64() * 1000.0 / ticks as f64
+            total.as_secs_f64() * 1000.0 / working.max(1) as f64
         );
         // CJK 是雙寬字元，`{:<6}` 只數字元數會對不齊
         let pad = |name: &str| {
