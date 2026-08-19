@@ -204,13 +204,34 @@ pub mod consent {
             };
             println!("\n  {mark} {}", sheet.wording());
             match c.get(sheet) {
-                Some(ts) => println!("      {} 同意", crate::fmt::timestamp(ts)),
+                Some(ts) => {
+                    println!("      {} 同意", crate::fmt::timestamp(ts));
+                    // 簽下去之後，第二張在這一頁上和另外兩張長得一模一樣——
+                    // 而另外兩張簽下去是真的會改變行為。「這一張還沒有東西
+                    // 可以開」那句話只寫在 `without()` 裡，也就是只在**沒簽**
+                    // 的分支印得出來，於是唯一讀不到它的人正好是簽了的那個。
+                    if sheet == Sheet::CloudReading {
+                        println!(
+                            "      （這份程式裡沒有任何連外路徑，所以這一張現在還沒有東西可以開。）"
+                        );
+                    }
+                }
                 None => println!("      {}", sheet.without()),
             }
         }
 
         println!();
-        if c.allows_recording() {
+        if c.allows_recording() && !config.capture.enabled {
+            // 同意書全過、總開關關著。這一行以前會說「她可以錄，而且不留
+            // 截圖——這一張簽了，是設定檔的 store_images 關著」：前半句錯
+            // （她根本不會錄），後半句指錯旗標（`store_images` 開著，關著的
+            // 是 `capture.enabled`）。他照著那句話去改一個沒問題的設定，
+            // 改完還是什麼都沒有。
+            println!(
+                "→ 同意書這一關過了，但**設定檔的 capture.enabled 關著**：`sister record` 會啟動、\n  \
+                 會印出「開始記錄」，然後每一個 tick 直接跳過，什麼都不會記。"
+            );
+        } else if c.allows_recording() {
             // 三個狀態，不是兩個。這一行以前只問同意書，於是簽了第三張、
             // 設定檔卻把 `store_images` 關著的機器上，它會說「會留截圖」
             // ——而硬碟上一張都不會多。同意是**上限**，不是開關。
@@ -2556,6 +2577,52 @@ pub mod doctor {
         Caps::default()
     }
 
+    /// 「同意書／畫面暫存」那一行的字。
+    ///
+    /// 拉成一支函式不是為了短，是為了讓它和 [`frames_kept_words`] 一起被
+    /// 一條測試釘住：同一張報告上這兩行講的是同一件事的兩半（「你准不准」
+    /// 和「實際上會不會發生」），而它們歷史上各自漂了一次。
+    ///
+    /// 三張同意書裡只有這一張的答案要看設定檔——同意是**上限**不是開關，
+    /// 所以「已同意」後面必須接著講設定檔把它擋在哪裡，不然使用者會拿著
+    /// 一個 ✓ 去等一批永遠不會出現的截圖。
+    fn frame_sheet_words(
+        allows: bool,
+        signed: bool,
+        enabled: bool,
+        store_images: bool,
+    ) -> &'static str {
+        match (allows, enabled, store_images) {
+            // 這一行以前只問同意書，於是它說「會把截圖寫到硬碟」，而底下
+            // 「保留畫面檔」那一行說「否（text-only 模式）」——同一張體檢
+            // 報告上兩句互相打臉的話，而看的人沒有辦法知道該信哪一句。
+            // `Consent::keeps_images` 的文件裡記的就是這根釘子。
+            //
+            // 補上 `capture.enabled` 是同一根釘子的第二次：它關著的時候每個
+            // tick 直接回 `Tick::Disabled`，連螢幕都不會碰。少了它，這一行
+            // 會在一台什麼都不錄的機器上印「會把截圖寫到硬碟」。
+            (true, true, true) => "已同意——會把截圖寫到硬碟",
+            (true, true, false) => "已同意，但設定檔的 store_images 關著 → 這台機器現在不會留截圖",
+            (true, false, _) => "已同意，但 capture.enabled 關著 → 她連螢幕都不會看，截圖無從留起",
+            // 「沒簽」和「簽了但條文改版」在這一行以前長得一模一樣，而上面
+            // 「本機記錄」那一行分得出來——同一個檔案的同一種狀態，兩行給
+            // 兩種說法，而使用者會照著比較好懂的那一句去做事。
+            (false, _, _) if signed => "條文改版，舊簽名失效 → 只記螢幕上的字，不留截圖",
+            (false, _, _) => "未同意 → 只記螢幕上的字，不留截圖",
+        }
+    }
+
+    /// 「隱私／保留畫面檔」那一行的字。必須和 `Consent::keeps_images` 同意。
+    fn frames_kept_words(allows: bool, enabled: bool, store_images: bool) -> &'static str {
+        match (allows, enabled, store_images) {
+            (true, true, true) => "是",
+            (true, true, false) => "否（text-only 模式）",
+            (true, false, _) => "否——capture.enabled 關著，這台機器根本不會開始錄",
+            (false, _, true) => "否——設定要留，但第三張同意書沒簽（同意書說了算）",
+            (false, _, false) => "否（沒簽第三張，設定也關著）",
+        }
+    }
+
     /// `loaded` 是 `Result` 而不是 `&Config`，因為**設定檔壞掉也要能跑**。
     ///
     /// 以前這裡收的是已經載好的值，於是 `main` 得先 `load_config(..)?`——
@@ -2620,30 +2687,32 @@ pub mod doctor {
                 "未同意 → `sister record` 會拒絕啟動（`sister consent --grant local-recording`）"
             },
         );
+        let signed_frames = consent
+            .get(sister_core::consent::Sheet::FrameStorage)
+            .is_some();
         line(
             consent.allows_frames(),
             "畫面暫存",
-            if !consent.allows_frames() {
-                "未同意 → 只記螢幕上的字，不留截圖"
-            } else if config.capture.store_images {
-                "已同意——會把截圖寫到硬碟"
-            } else {
-                // 同意是**上限**，不是開關。這一行以前只問同意書，於是它說
-                // 「會把截圖寫到硬碟」，而底下「保留畫面檔」那一行說「否
-                // （text-only 模式）」——同一張體檢報告上兩句互相打臉的話，
-                // 而看的人沒有辦法知道該信哪一句。`Consent::keeps_images` 的
-                // 文件裡記的就是這根釘子。
-                "已同意，但設定檔的 store_images 關著 → 這台機器現在不會留截圖"
-            },
+            frame_sheet_words(
+                consent.allows_frames(),
+                signed_frames,
+                config.capture.enabled,
+                config.capture.store_images,
+            ),
         );
         // 第二張的 ✓ 講的是「沒有東西會離開這台機器」，不是「你同意了」。
         // 寫成 ✗ 會讓人以為少裝了什麼；而句子從否定改成肯定，是為了讓那個
         // 勾勾對應到一個真的成立的好狀態。
+        //
+        // 走 `allows_cloud()` 而不是 `cloud_reading.is_some()`：條文改版之後
+        // 舊簽名整份失效，而這一行以前是三行裡唯一沒問這件事的。
         line(
             true,
             "上雲解讀",
-            if consent.cloud_reading.is_some() {
+            if consent.allows_cloud() {
                 "已同意，但這份程式裡沒有任何連外路徑，所以它還沒有作用"
+            } else if consent.cloud_reading.is_some() {
+                "條文改版，舊簽名失效 → 視同未同意（而且程式裡本來就沒有連外路徑）"
             } else {
                 "沒有任何東西會離開這台機器（未同意，而且程式裡本來就沒有連外路徑）"
             },
@@ -3110,14 +3179,22 @@ pub mod doctor {
         // 問同意書，不是問設定檔。設定檔說的是「我想留圖」，同意書說的是
         // 「可不可以」——上面那一區已經印過第三張沒簽了，這一行要是還印「是」，
         // 同一張報告就自己打自己。
+        //
+        // ✗/✓ 走 `keeps_images`（含 `capture.enabled`），句子以前走一個
+        // 兩元 match（不含）。於是一台 `enabled = false` 的機器上印出來的是
+        //
+        //     ✗ 保留畫面檔     是
+        //
+        // 一行之內符號說不、字說是，而讀的人沒有辦法知道該信哪一邊。同一個
+        // 問題要嘛一個答案，要嘛兩個都不要印。
         line(
             consent.keeps_images(config),
             "保留畫面檔",
-            match (config.capture.store_images, consent.allows_frames()) {
-                (true, true) => "是",
-                (true, false) => "否——設定要留，但第三張同意書沒簽（同意書說了算）",
-                (false, _) => "否（text-only 模式）",
-            },
+            frames_kept_words(
+                consent.allows_frames(),
+                config.capture.enabled,
+                config.capture.store_images,
+            ),
         );
 
         // OCR 語言決定她讀不讀得懂你的螢幕，所以要把**實際挑中的**那個印出來，
@@ -3167,9 +3244,14 @@ pub mod doctor {
         let asked = config.capture.min_interval_ms;
         let used = asked.max(crate::ops::MIN_TICK_MS);
         line(
-            true,
+            config.capture.enabled,
             "多久看一次螢幕",
-            &if used == asked {
+            // 總開關關著的時候答案是「不看」，而不是「50 ms」。印出一個
+            // 節奏等於回答一個沒有人問的問題，還答錯了——這一格問的是
+            // 「她多久看一次」，不是「設定檔裡那個數字是多少」。
+            &if !config.capture.enabled {
+                format!("不看——capture.enabled 關著（設定檔裡寫的是 {used} ms）")
+            } else if used == asked {
                 format!("{used} ms")
             } else {
                 format!(
@@ -3198,8 +3280,25 @@ pub mod doctor {
         }
 
         // 「她會不會記錯」和「她到底有沒有記住」是兩回事，分開報。
-        if !caps.degraded.is_empty() {
+        if !caps.degraded.is_empty() || !config.capture.enabled {
             println!("\n⚠ 看起來正常，但其實記不住東西");
+            // 這一節以前只由 `Capabilities::silently_degraded` 餵，而那一支
+            // 只看得到 OCR。於是 `capture.enabled = false` ——一個關掉之後
+            // 每個 tick 直接回 `Tick::Disabled`、連螢幕都不會碰的旗標——
+            // 在整份 doctor 裡一個字都沒出現過，那台機器拿到的是一張全綠的
+            // 體檢報告。`record` 和 `replay` 都會對著它大聲喊，只有 doctor
+            // 不會，而 doctor 正是 `stats` 叫人來看的那一頁。
+            //
+            // 它排在最前面：底下每一條「讀不讀得到字」都預設她會去看螢幕。
+            if !config.capture.enabled {
+                println!(
+                    "  ✗ 設定檔的 capture.enabled = false：`sister record` 會啟動、會印出「開始記錄」，"
+                );
+                println!(
+                    "     然後每一個 tick 直接跳過。沒有畫面、沒有字、沒有截圖——這份報告上其他"
+                );
+                println!("     每一個 ✓，講的都是一台不會開始的機器。");
+            }
             for w in &caps.degraded {
                 println!("  ✗ {w}");
             }
@@ -3211,7 +3310,17 @@ pub mod doctor {
         println!("\n畫面檔");
         // `store_images = false` 的時候，下面兩條設定一條都不會跑。照樣印
         // 「最快 5 秒一張 ✓」等於在回答一個沒有人問的問題——而且答錯了。
-        if config.capture.store_images {
+        //
+        // `capture.enabled = false` 是同一件事再往外一層：連螢幕都不會碰，
+        // 所以「多久存一張」的答案是「不存」，不是「5 秒」。這一段以前只
+        // 問了內層那個旗標。
+        if !config.capture.enabled {
+            mark(
+                "—",
+                "一張都不存",
+                "capture.enabled = false：她不會去看螢幕，所以沒有東西可以存",
+            );
+        } else if config.capture.store_images {
             line(
                 true,
                 "多久存一張",
@@ -3337,6 +3446,102 @@ pub mod doctor {
         fn a_healthy_config_still_runs_the_whole_check() {
             let dir = crate::ops::tmp::Tmp::new("doctor-ok-config");
             run(&dir.0, Ok(Config::default()), None).expect("正常設定當然要跑得完");
+        }
+
+        /// 八種狀態，一種都不能讓符號和句子講不同的話。
+        ///
+        /// 這條擋的是一個**已經發生過兩次**的東西：`✗` 由
+        /// `Consent::keeps_images`（三個布林）算，句子由旁邊一個手寫的
+        /// match 算，而那個 match 少看一個布林。於是
+        ///
+        /// ```text
+        ///   ✗ 保留畫面檔     是
+        /// ```
+        ///
+        /// 一行之內符號說不、字說是。這種東西每次都是「加一個旗標的時候
+        /// 忘了改另一半」，所以測的不是某一句話長什麼樣（那會一直改），
+        /// 而是**兩半永遠對得起來**——把任何一支的參數少傳一個，或是把
+        /// 「否」寫成「是」，這條就紅。
+        #[test]
+        fn the_mark_and_the_words_never_disagree_about_whether_screenshots_get_written() {
+            for allows in [false, true] {
+                for enabled in [false, true] {
+                    for store in [false, true] {
+                        let mut c = Config::default();
+                        c.capture.enabled = enabled;
+                        c.capture.store_images = store;
+                        let mut consent = sister_core::consent::Consent::default();
+                        if allows {
+                            consent.grant(sister_core::consent::Sheet::FrameStorage, 1);
+                        }
+
+                        let truth = consent.keeps_images(&c);
+                        assert_eq!(
+                            truth,
+                            allows && enabled && store,
+                            "keeps_images 自己就該是這三個布林的 AND"
+                        );
+
+                        let kept = frames_kept_words(allows, enabled, store);
+                        assert_eq!(
+                            truth,
+                            kept.starts_with("是"),
+                            "保留畫面檔：符號說 {truth}，字說「{kept}」\
+                             （allows={allows} enabled={enabled} store={store}）"
+                        );
+
+                        // 上面同意書那一區的 ✓ 問的是另一件事（「你簽了沒」），
+                        // 但那一行的**句子**要負責把設定檔擋在哪裡講出來，
+                        // 不然一個 ✓ 會被讀成「會有截圖」。
+                        let sheet = frame_sheet_words(allows, allows, enabled, store);
+                        assert_eq!(
+                            allows,
+                            sheet.starts_with("已同意"),
+                            "畫面暫存：allows={allows}，字說「{sheet}」"
+                        );
+                        if allows && !truth {
+                            assert!(
+                                sheet.contains('但'),
+                                "簽了卻不會留圖，這一行不能只說「已同意」：「{sheet}」"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        /// 條文改版之後，三張同意書要給同一種答案。
+        ///
+        /// 以前 `上雲解讀` 那一行讀的是 `cloud_reading.is_some()`，少了
+        /// `current()`。於是一個上個月簽完三張的人，會在同一頁上讀到
+        /// 「本機記錄：舊簽名失效」「畫面暫存：未同意」「上雲解讀：已同意」
+        /// ——三行講同一個檔案，三種答案，而說「已同意」的那一張正好是
+        /// 唯一一張猜錯了會讓東西離開這台機器的。
+        #[test]
+        fn a_version_bump_voids_all_three_sheets_and_all_three_lines_say_so() {
+            let mut consent = sister_core::consent::Consent::default();
+            for s in [
+                sister_core::consent::Sheet::LocalRecording,
+                sister_core::consent::Sheet::CloudReading,
+                sister_core::consent::Sheet::FrameStorage,
+            ] {
+                consent.grant(s, 1);
+            }
+            assert!(consent.allows_cloud(), "剛簽完當然算數");
+
+            consent.version = sister_core::consent::VERSION.wrapping_add(1);
+            assert!(!consent.current());
+            assert!(!consent.allows_recording());
+            assert!(!consent.allows_frames());
+            assert!(
+                !consent.allows_cloud(),
+                "第二張不能是三張裡唯一一張不看版本的"
+            );
+
+            // 而且要說得出**為什麼**：「沒簽」和「簽了但失效」的下一步不一樣，
+            // 一個是去簽，一個是去重簽。長得一樣的話兩邊都會卡住。
+            let words = frame_sheet_words(false, true, true, true);
+            assert!(words.contains("改版"), "「{words}」讀起來像從來沒簽過");
         }
     }
 }
