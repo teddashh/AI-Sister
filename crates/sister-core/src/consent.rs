@@ -103,9 +103,15 @@ impl Sheet {
     /// 這幾句是**同時**被終端機和 onboarding 那一頁印出來的，所以裡面不放
     /// 反引號之類只有其中一邊看得懂的記號——在 GUI 上那就只是兩撇雜訊。
     /// 中文裡夾一段拉丁字母本來就跳得出來，不需要再框一次。
+    ///
+    /// 改這幾句**不必**動 [`VERSION`]。他按下去同意的是 [`Self::wording`] 那
+    /// 一句；這裡是我們對後果的描述，寫得更準確不代表他同意的東西變了。反過來
+    /// 要是動了 `wording`，那就是另一句話了，`VERSION` 非加不可。
     pub fn without(self) -> &'static str {
         match self {
-            Sheet::LocalRecording => "沒有這一張，sister record 不會開始錄。",
+            Sheet::LocalRecording => {
+                "沒有這一張，sister record 不會開始錄；正在錄的也會在 5 秒內停下來。"
+            }
             Sheet::CloudReading => {
                 "沒有這一張，她完全在本機跑。（目前這份程式裡沒有任何連外路徑，所以這一張還沒有東西可以開。）"
             }
