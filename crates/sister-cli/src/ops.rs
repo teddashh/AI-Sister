@@ -1669,8 +1669,21 @@ pub mod stats {
         //
         // 畫面那一半不到半天也一樣不外推，理由同上。`None` 的意思是「還答不
         // 出來」，於是底下整句話就不會蓋一個 ✓ 上去。
+        // 「這台機器不留截圖」和「這台機器會留，但這份資料庫裡現在一張都沒有」
+        // 是兩件事，而兩邊的 `image_bytes` 都是 0。
+        //
+        // 前者的每天成本真的是 0，蓋 ✓ 是對的。後者的是**還不知道**——而
+        // 走到後者最常見的路徑，正是一份用超過 `frames_days`（預設 30 天）
+        // 又停了一陣子沒錄的資料庫：圖被保留期清光，分子歸零，分母還是一年。
+        // 這一頁於是拿一個只含文字的速率去蓋 Phase 0 那個 300MB/天的 ✓，
+        // 而那個數字小是因為分子被刪掉了，不是因為她真的只用這麼多。
+        //
+        // 分得出來，因為 stats 手上有 config 也有 data dir。同意書是上限、
+        // 設定是開關，兩個都要問（`keeps_images` 就是這兩件事的 and）。
+        let keeps_images = sister_core::consent::load(data_dir).keeps_images(config);
         let img_rate = match s.image_bytes {
-            0 => Some(0.0),
+            0 if !keeps_images => Some(0.0),
+            0 => None,
             _ if image_days >= 0.5 => Some(s.image_bytes as f64 / image_days),
             _ => None,
         };
@@ -1824,10 +1837,40 @@ pub mod stats {
                 pauses.episodes,
                 fmt::duration_ms(pauses.total_ms)
             );
+            // 「最後一筆 CapturePaused 沒有配到 CaptureResumed」和「她現在
+            // 是暫停的」是**兩件事**，而舊版把前者印成了後者。
+            //
+            // 那兩筆事件是 recorder 寫的，暫停旗標是桌面程式（或 `sister
+            // pause`）寫的，兩者不同行程。錄製當中按暫停、然後關掉 record、
+            // 再解除——解除的時候沒有人在跑 recorder，`CaptureResumed` 就沒
+            // 有人寫。資料庫從此永遠掛著一段沒收尾的暫停，而這一行會永遠
+            // 印「她現在就是閉著眼睛的」，即使她正在錄。
+            //
+            // 現在就是不是暫停，`paused.flag` 當場答得出來（見 `pause.rs`：
+            // 讀不到一律當成暫停）。所以先問旗標，再決定那段沒收尾的紀錄
+            // 該怎麼講。
             if let Some(since) = pauses.open_since {
+                if sister_core::pause::is_paused(data_dir) {
+                    println!(
+                        "            最後一段還沒結束（{} 起）——她現在就是閉著眼睛的",
+                        fmt::timestamp(since)
+                    );
+                } else {
+                    println!(
+                        "            最後一段沒有收尾（{} 起，沒有對應的解除紀錄）",
+                        fmt::timestamp(since)
+                    );
+                    println!(
+                        "            但她現在**沒有**暫停——多半是解除的時候 `sister record` 沒在跑，"
+                    );
+                    println!("            所以沒有人把那一筆寫下來。上面那段時間因此算短了。");
+                }
+            } else if sister_core::pause::is_paused(data_dir) {
+                // 反過來也會發生，而這個方向更值得講：他按了暫停，但那一刻
+                // 沒有 recorder 在跑，所以紀錄裡看不到。下一次 `sister record`
+                // 會開著眼睛啟動然後什麼都不記，而他不知道為什麼。
                 println!(
-                    "            最後一段還沒結束（{} 起）——她現在就是閉著眼睛的",
-                    fmt::timestamp(since)
+                    "            但她現在是暫停的（紀錄裡看不到，因為按下去的時候沒有人在錄）"
                 );
             }
             // 這一行讓上面那個時間是「下限」這件事看得見，而不是靜靜地少算。
@@ -1841,25 +1884,46 @@ pub mod stats {
 
         // 秘密遮蔽。問的不是「旗子插了幾次」，是「插了旗子的那幾列，字還在不在」。
         // 前者是我們寫入時的自我宣稱，後者是資料庫此刻的實際狀態。
-        if !config.privacy.redact_clipboard_secrets {
+        //
+        // 這兩個問題以前串成一條 if / else if / else，於是設定一關，
+        // `leaked` 那句就永遠印不出來。可是 `leaked > 0` 講的是**已經躺在
+        // 資料庫裡的那幾列**：旗子插了、字卻沒被清掉。關掉一個只影響「以後」
+        // 的開關，不會讓那把 API key 消失，只會讓整個產品裡唯一會喊的那個人
+        // 閉嘴——而且是在他剛剛做了一個放寬隱私的動作之後閉嘴。
+        //
+        // 所以先喊故障，再講設定。`--json` 本來就是無條件印 `leaked` 的，
+        // 這一頁只是沒跟上。
+        if redaction.leaked > 0 {
+            println!(
+                "  遮蔽      ⚠ {} 次剪貼簿內容被判定為疑似秘密，而內容**仍然留在資料庫裡**",
+                redaction.leaked
+            );
+            println!("            遮蔽沒生效。`sister forget` 挖得掉，但得先知道它在那裡。");
+            if !config.privacy.redact_clipboard_secrets {
+                println!(
+                    "            （而且 redact_clipboard_secrets 現在是關的：以後複製的東西連旗子都不會插）"
+                );
+            }
+        } else if !config.privacy.redact_clipboard_secrets {
             println!("  遮蔽      **關掉了**（privacy.redact_clipboard_secrets = false）——");
             println!("            沒有人在看剪貼簿裡有沒有 API key，所以這一欄數不出東西來。");
             println!("            數不到不等於沒有：複製過的東西原樣進了資料庫。");
+            // 開過又關掉的那份資料庫，和從來沒開過的那份，這一行不一樣。
+            if redaction.flagged > 0 {
+                println!(
+                    "            （以前開著的時候擋下過 {} 次，那幾列的 text 現在是空的）",
+                    redaction.flagged
+                );
+            }
         } else if redaction.flagged == 0 {
             println!("  遮蔽      這份紀錄裡沒有任何剪貼簿內容被判定為疑似秘密");
         } else {
+            // `leaked > 0` 已經在最上面喊過了，走到這裡的一定是零。
             println!(
                 "  遮蔽      {} 次剪貼簿內容被判定為疑似秘密",
                 redaction.flagged
             );
-            if redaction.leaked > 0 {
-                println!(
-                    "            ⚠ 其中 {} 次內容**仍然留在資料庫裡**——遮蔽沒生效",
-                    redaction.leaked
-                );
-            } else {
-                println!("            這幾列的 text 現在都是空的（當場查的，不是相信旗子）");
-            }
+            println!("            這幾列的 text 現在都是空的（當場查的，不是相信旗子）");
         }
         println!();
         println!(
