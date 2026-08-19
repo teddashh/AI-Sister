@@ -36,6 +36,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sister-core = { path = "../../../crates/sister-core", default-features = false }
 sister-shell = { path = "../../../crates/sister-shell" }
+tauri-plugin-global-shortcut = "2"
 
 [profile.release]
 lto = "thin"

@@ -412,6 +412,119 @@ fn frame_image(frame_id: i64, shell: tauri::State<'_, Shell>) -> Result<FrameVie
     })
 }
 
+// ---------- 全域暫停熱鍵 ----------
+
+/// 熱鍵現在到底有沒有搶到手。
+///
+/// **這個結構存在的唯一理由是「搶不到」這件事會發生。** 全域熱鍵是先搶先贏的：
+/// 同一組 `Ctrl+Alt+P` 可能早就被螢幕錄影軟體、輸入法或另一個常駐程式拿走了，
+/// 而作業系統不會告訴使用者是誰拿走的——它只會讓他按下去、什麼都沒發生。
+///
+/// 對一顆**暫停**鍵來說那是最壞的一種壞法：他以為她停了，她還在錄。所以註冊
+/// 的結果要一路送到設定頁上，寫成一句話，而不是塞進一行只有 `--verbose` 才
+/// 看得到的 log。
+#[derive(Clone, Serialize, Default)]
+struct HotkeyView {
+    /// 設定檔裡寫的那一組。空字串 = 使用者關掉了它。
+    wanted: String,
+    /// 現在真的按得動嗎。
+    registered: bool,
+    /// 沒搶到的話，作業系統或 Tauri 給的原因。
+    reason: Option<String>,
+}
+
+struct Hotkey(Mutex<HotkeyView>);
+
+/// 把設定檔裡那一組換上去，回報結果。
+///
+/// 先 `unregister_all` 再註冊：這一支同時被開機和「設定頁上改了一組」呼叫，
+/// 不先拆掉舊的話，改過三次之後會有三組熱鍵同時活著——其中兩組是他以為自己
+/// 已經取消掉的。
+fn apply_hotkey(app: &tauri::AppHandle, wanted: &str) -> HotkeyView {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let wanted = wanted.trim().to_string();
+    let shortcuts = app.global_shortcut();
+    let _ = shortcuts.unregister_all();
+
+    // 空字串是一個正當的選擇，不是壞掉的設定：全域熱鍵會從所有程式手上把那個
+    // 組合搶走，所以要留一條關掉它的路。這裡不回報 reason，因為沒有失敗。
+    if wanted.is_empty() {
+        return HotkeyView {
+            wanted,
+            registered: false,
+            reason: None,
+        };
+    }
+
+    let handle = app.clone();
+    let reason = shortcuts
+        .on_shortcut(wanted.as_str(), move |app, _shortcut, event| {
+            // 只認**按下**。少了這一行，按一次會進來兩次（按下 + 放開），
+            // 於是暫停立刻被自己取消掉——一顆看起來完全沒反應的熱鍵。
+            if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                return;
+            }
+            match toggle_pause(app.clone(), app.state::<Shell>()) {
+                Ok(paused) => announce_hotkey(&handle, paused),
+                Err(e) => tracing::error!("熱鍵暫停失敗：{e}"),
+            }
+        })
+        .err()
+        .map(|e| e.to_string());
+
+    HotkeyView {
+        wanted,
+        registered: reason.is_none(),
+        reason,
+    }
+}
+
+/// 熱鍵按下去之後，讓他看得到結果。
+///
+/// 系統匣的選單字會變、視窗裡的字母人會變灰，但**兩個他都可能看不到**——熱鍵
+/// 存在的理由正是「她不在畫面上的時候我也想按」。所以停下來的那一下要把她叫
+/// 出來：一個看得到的灰色字母人，就是那句「好，我停了」。
+///
+/// 只在**停**的方向叫，不在恢復的方向叫。停下來按錯了是隱私問題，恢復按錯了
+/// 只是白按一次；而每次切換都彈一個視窗出來，會讓收進系統匣這個動作失去意義。
+fn announce_hotkey(app: &tauri::AppHandle, paused: bool) {
+    if !paused {
+        return;
+    }
+    if let Some(win) = app.get_webview_window(PET) {
+        // 不 `set_focus`：他按下暫停的那一刻，螢幕上多半正有一件他在做的事，
+        // 把游標從那件事上搶走不是幫忙。
+        let _ = win.show();
+    }
+}
+
+#[tauri::command]
+fn hotkey_state(hotkey: tauri::State<'_, Hotkey>) -> HotkeyView {
+    hotkey.0.lock().expect("hotkey").clone()
+}
+
+/// 換一組熱鍵：先真的去搶，搶到了才寫進設定檔。
+///
+/// 順序是刻意的。反過來寫（先存再註冊）的話，一組搶不到的熱鍵會留在設定檔裡，
+/// 下次開機再失敗一次——而使用者早就把那一頁關掉了。
+#[tauri::command]
+fn hotkey_set(
+    app: tauri::AppHandle,
+    combo: String,
+    hotkey: tauri::State<'_, Hotkey>,
+) -> Result<HotkeyView, String> {
+    let view = apply_hotkey(&app, &combo);
+    if view.registered || view.wanted.is_empty() {
+        let path = config_path()?;
+        let mut c = sister_core::config::Config::load(&path).map_err(|e| e.to_string())?;
+        c.shell.pause_shortcut = view.wanted.clone();
+        c.save(&path).map_err(|e| e.to_string())?;
+    }
+    *hotkey.0.lock().expect("hotkey") = view.clone();
+    Ok(view)
+}
+
 /// 開設定頁。同一個 label 重複用，所以按兩次不會得到兩個視窗。
 #[tauri::command]
 fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
@@ -721,12 +834,14 @@ fn main() {
         .join("pet-window.json");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Shell {
             state: Mutex::new(bounds::load(&state_path).unwrap_or_default()),
             state_path,
             data_dir,
             db: Mutex::new(None),
         })
+        .manage(Hotkey(Mutex::new(HotkeyView::default())))
         .invoke_handler(tauri::generate_handler![
             toggle_pin,
             hide_to_tray,
@@ -746,7 +861,9 @@ fn main() {
             forget_range,
             consent_read,
             consent_set,
-            open_onboarding
+            open_onboarding,
+            hotkey_state,
+            hotkey_set
         ])
         .setup(|app| {
             let win = app
@@ -806,12 +923,31 @@ fn main() {
             }
             let _ = win.show();
 
-            // ---- 系統匣 ----
-            // 暫停放在系統匣，是因為視窗收起來的時候它是唯一按得到的地方——
-            // 而「我現在不想被看」最常發生的時機，正是她不在畫面上的時候。
+            // ---- 全域暫停熱鍵 ----
             //
-            // 還缺一個全域熱鍵（PHASES.md Phase 1 那條「pause 快捷鍵」）。
-            // 那要多一個 plugin，等設定頁一起做。
+            // 系統匣那一顆要先看得到圖示、再點開選單；熱鍵是**不用先找到她**的
+            // 那條路，而「我現在不想被看」最常發生的時機，正是她不在畫面上、
+            // 而且你手上正忙著別的事的時候。
+            //
+            // 搶不到不是致命的（系統匣那顆還在），所以這裡不 `?`——但也不能就
+            // 這樣算了：狀態存進 `Hotkey`，設定頁上寫得出「這一組被別人拿走了」。
+            {
+                let wanted = config_path()
+                    .ok()
+                    .and_then(|p| sister_core::config::Config::load(&p).ok())
+                    .unwrap_or_default()
+                    .shell
+                    .pause_shortcut;
+                let view = apply_hotkey(app.handle(), &wanted);
+                if let Some(reason) = &view.reason {
+                    tracing::warn!("暫停熱鍵 {} 註冊不起來：{reason}", view.wanted);
+                }
+                *app.state::<Hotkey>().0.lock().expect("hotkey") = view;
+            }
+
+            // ---- 系統匣 ----
+            // 暫停也放在系統匣，因為熱鍵可能被別的程式搶走，而她收起來的時候
+            // 系統匣是最後一個一定按得到的地方。
             let paused_now = pause_state(app.state::<Shell>());
             let show_item = MenuItem::with_id(app, "show", "顯示 AI-Sister", true, None::<&str>)?;
             let pause_item = MenuItem::with_id(

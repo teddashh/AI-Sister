@@ -68,6 +68,26 @@
       </section>
 
       <section>
+        <h2>暫停熱鍵</h2>
+        <p class="hint">
+          在任何程式裡按下去都能暫停或繼續，不用先找到她。
+          <strong>全域熱鍵是先搶先贏的</strong>——別的常駐程式可能已經佔走了同一組，
+          而作業系統不會講，它只會讓你按了沒反應。所以下面那一行會直說現在搶到了沒。
+        </p>
+        <div class="hotkey">
+          <!--
+            這一格**按下去就生效**，不跟著底下那顆「儲存」走。
+
+            那是刻意的：能不能搶到只有當場試了才知道，而「等你按儲存我再告訴你
+            搶不到」比立刻講糟。所以它自己存自己的。
+          -->
+          <button class="combo" data-combo type="button">…</button>
+          <button class="ghost" data-clear type="button">關掉</button>
+        </div>
+        <p class="state" data-hotkey-say></p>
+      </section>
+
+      <section>
         <h2>留多久</h2>
         <div class="days">
           <label>

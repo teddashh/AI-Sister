@@ -17,6 +17,7 @@ pub struct Config {
     pub capture: CaptureConfig,
     pub privacy: PrivacyConfig,
     pub retention: RetentionConfig,
+    pub shell: ShellConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +194,34 @@ impl Default for RetentionConfig {
         Self {
             frames_days: 30,
             text_days: 365,
+        }
+    }
+}
+
+/// 字母人那一邊的設定。核心的錄製迴圈一個欄位都不讀。
+///
+/// 放在**同一份 TOML** 而不是另開一個檔案：使用者只有一個「設定」的心智模型，
+/// 而設定頁上這幾格是排在保留天數旁邊的。`deny_unknown_fields` 也讓「桌面自己
+/// 偷偷塞一個欄位進去」這條路不存在——要加就加在這裡，看得到。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShellConfig {
+    /// 全域暫停熱鍵，Tauri 的寫法（`Ctrl+Alt+P`、`CommandOrControl+Shift+空白`…）。
+    ///
+    /// **空字串 = 不註冊**，這是一個正當的選擇而不是壞掉的設定：熱鍵是全域的，
+    /// 它會從所有程式手上把那個組合搶走，所以要留一條關掉它的路。
+    ///
+    /// 這裡刻意不驗格式。能不能註冊得起來只有作業系統知道（同一個組合在別台
+    /// 機器上可能被佔走了），所以答案是**註冊當下**回報的，不是這裡猜的。
+    pub pause_shortcut: String,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            // Ctrl+Alt+P：Windows 上 Ctrl+Alt 這一組很少被應用程式自己吃掉，
+            // 而 P 是 pause。這只是預設值——搶不到的時候設定頁會講，改得動。
+            pause_shortcut: "Ctrl+Alt+P".to_string(),
         }
     }
 }
@@ -996,6 +1025,29 @@ mod tests {
         );
         assert!(cfg.privacy.redact_clipboard_secrets);
         assert_eq!(cfg.retention.frames_days, 30);
+    }
+
+    /// `[shell]` 是後來才加的一節，所以每一份已經躺在使用者硬碟上的設定檔都
+    /// 沒有它。少了 `#[serde(default)]`，那些檔案會在升級後整份讀不進來——
+    /// 而讀不進來的後果不是少一個熱鍵，是他所有的排除規則一起失效。
+    #[test]
+    fn a_config_written_before_the_shortcut_existed_still_loads() {
+        let cfg: Config =
+            toml::from_str("[privacy]\nexcluded_apps = [\"keepassxc\"]\n").expect("parse");
+        assert_eq!(cfg.privacy.excluded_apps, ["keepassxc"]);
+        assert_eq!(cfg.shell.pause_shortcut, "Ctrl+Alt+P");
+    }
+
+    /// 空字串是「使用者關掉了熱鍵」，不是「還沒設定」——所以它要能存進去、
+    /// 讀回來還是空的。用 `Option<String>` 或把空字串當成沒填的話，關掉的那
+    /// 個人下次開機會發現熱鍵自己回來了。
+    #[test]
+    fn turning_the_shortcut_off_survives_a_round_trip() {
+        let mut cfg = Config::default();
+        cfg.shell.pause_shortcut = String::new();
+        let text = toml::to_string_pretty(&cfg).expect("serialize");
+        let back: Config = toml::from_str(&text).expect("deserialize");
+        assert_eq!(back.shell.pause_shortcut, "");
     }
 
     #[test]

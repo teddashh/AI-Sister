@@ -148,6 +148,41 @@ button:focus-visible {
   opacity: 0.62;
 }
 
+/* ---------- 暫停熱鍵 ---------- */
+
+.hotkey {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+/* 按鍵組合長得像鍵盤上的鍵，不像一個輸入框——它收的不是字，是按鍵 */
+.combo {
+  background: rgb(246 236 223 / 7%);
+  box-shadow: inset 0 0 0 1px rgb(246 236 223 / 22%);
+  color: inherit;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  min-width: 190px;
+  padding: 9px 15px;
+}
+
+/* 正在等他按。這一格要一眼看得出來現在的鍵盤是被這顆按鈕吃掉的。 */
+.combo.listening {
+  background: rgb(154 91 122 / 22%);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.state {
+  margin: 9px 0 0;
+  opacity: 0.72;
+}
+
+/* 搶不到的時候用警告色。這是這一格唯一真正需要被看見的狀態。 */
+.state.bad {
+  color: var(--warn);
+  opacity: 1;
+}
+
 /* ---------- 天數 ---------- */
 
 .days {
