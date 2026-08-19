@@ -653,8 +653,29 @@ function renderHits(
   blind = null,
   truncated = false,
   factsTruncated = false,
+  searched = null,
 ) {
   hitList.replaceChildren();
+
+  // **她找的字不一定是他打的字。**
+  //
+  // `terms` 會把「剛剛」「那個」剝掉，剝到不足兩個字還會往回退一格——而那一格
+  // 常常退進虛字裡：「剛剛那個板」→「個板」、「剛剛看到的人」→「的人」。
+  //
+  // 兩種完全不同的處境於是印出同一句「我記得的東西裡沒有這件事」：他打的字真的
+  // 沒出現過，跟她根本沒找他打的字。前者他無能為力，後者他只要把那個詞重打一次
+  // 就好。有命中的那一半更難看出來——「的人」在一年份的螢幕文字裡什麼都比得到，
+  // 於是他拿到一串毫不相干的東西，而唯一的解讀是「這東西壞了」。所以這一句擺在
+  // 最上面，兩種結果都蓋得到，而不是只掛在空手的那一邊。
+  //
+  // 後端只在**黏過**的時候送這個欄位（剝掉「剛剛那個」留下「優惠方案」是剝對
+  // 了，每次都報一句只會讓人學會忽略它），所以這裡有值就一定要講。
+  if (searched) {
+    const why = document.createElement("li");
+    why.className = "hits-note";
+    why.textContent = `我拿去比對的是「${searched}」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。`;
+    hitList.append(why);
+  }
 
   // 他打了「剛剛發生什麼事」，而底下這幾筆跟那七個字一個都對不上。不先講
   // 一句「我把它當成時間問題了」，看起來就只是她答非所問。
@@ -839,6 +860,7 @@ async function ask() {
       answer.blind,
       answer.truncated,
       answer.answers_truncated,
+      answer.searched,
     );
     setState("idle");
     // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
@@ -996,6 +1018,10 @@ if (params.get("hits") === "demo") {
     // 而這一頁能驗的只有截圖。★ 那一句和原文那一句講的下一步不一樣。
     true,
     true,
+    // `?glued=的人`：她拿去比對的字是黏出來的，**而且還真的比到東西了**。
+    // 這一半比空手那一半更需要看一眼：一串看起來像正常答案的東西配上一句
+    // 「我找的不是你打的字」，兩者要能同時讀得下去才算對。
+    params.get("glued"),
   );
 }
 
@@ -1185,5 +1211,10 @@ if (params.get("hits") === "none") {
     null,
     [],
     BLIND_DEMOS[params.get("blind") ?? ""] ?? BLIND_DEMOS[""],
+    false,
+    false,
+    // `?glued=個板`：她拿去比對的字是從「剛剛那個板」黏出來的。看得見這一行
+    // 才知道下一步是重打一個詞，而不是去設定頁找一條擋掉它的規則。
+    params.get("glued"),
   );
 }

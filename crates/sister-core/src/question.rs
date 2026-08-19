@@ -183,12 +183,35 @@ pub fn shape(question: &str) -> Shape {
 /// 中心語在後，緊鄰左邊那個字比較可能和它是同一個詞。「剛剛那個事件」會停在
 /// 「事件」，不會退回整句。
 pub fn terms(question: &str) -> &str {
+    terms_with_retreat(question).0
+}
+
+/// 同上，外加**這次有沒有退過邊界**。
+///
+/// 退邊界是這個函式唯一一種「她拿去比對的字不是一個詞」的來源。上面那段文件
+/// 講的是它救回「事件」「看板」「個資」的那一面；它的另一面是同一個動作也會
+/// 黏出不是詞的東西：
+///
+/// ```text
+/// 剛剛那個板     → 個板
+/// 剛剛看到的人   → 的人
+/// 剛剛那個錢     → 個錢
+/// ```
+///
+/// 光看字串分不出這兩種——「個資」和「個板」長得一樣，要有字典才知道前者是
+/// 詞。但**退過**這件事本身是知道的，而它正好圈住了全部的風險：沒退過的時候
+/// 邊界兩端都是實字，她比對的就是他打的那幾個字。
+///
+/// 所以不去猜哪一次退對了，只把退過這件事講出來，讓他自己看一眼。兩種完全
+/// 不同的處境本來會印出同一句「沒有找到」：他打的字真的沒出現過，跟她根本
+/// 沒找他打的字——而後者他只要把那個詞重打一次就好。
+pub fn terms_with_retreat(question: &str) -> (&str, bool) {
     /// 剝完至少要留下這麼多個字，不然就退回去。理由見上面。
     const MIN_CHARS: usize = 2;
 
     let words = words(question);
     let Some(mut lo) = words.iter().position(|&(_, _, r)| r == Role::Content) else {
-        return question.trim();
+        return (question.trim(), false);
     };
     let mut hi = words
         .iter()
@@ -196,16 +219,19 @@ pub fn terms(question: &str) -> &str {
         .expect("有第一個就有最後一個");
 
     let span = |lo: usize, hi: usize| &question[words[lo].0..words[hi].1];
+    let mut retreated = false;
     while span(lo, hi).chars().count() < MIN_CHARS {
         if lo > 0 {
             lo -= 1;
+            retreated = true;
         } else if hi + 1 < words.len() {
             hi += 1;
+            retreated = true;
         } else {
             break; // 整句就這麼短，沒有東西可以退了
         }
     }
-    span(lo, hi)
+    (span(lo, hi), retreated)
 }
 
 /// 在開頭比對得到的最長那個詞，以及它是不是「剛剛」。
@@ -333,6 +359,38 @@ mod tests {
     fn a_one_character_question_is_left_alone() {
         assert_eq!(terms("板"), "板");
         assert_eq!(terms("的"), "的");
+    }
+
+    /// **退邊界救回「事件」的同一個動作，也黏得出「個板」。**
+    ///
+    /// 光看字串分不出來（「個資」是詞、「個板」不是），但退過這件事本身知道
+    /// ——而它正好圈住全部的風險：沒退過就代表兩端都是實字，她比對的就是他
+    /// 打的那幾個字。畫面只在退過的時候多講一句。
+    #[test]
+    fn a_needle_glued_out_of_a_particle_announces_itself() {
+        for (q, needle) in [
+            ("剛剛那個板", "個板"),
+            ("剛剛看到的人", "的人"),
+            ("剛剛那個錢", "個錢"),
+            // 救回來的那幾個也一樣算退過——她確實不是照他打的字去找的。
+            ("剛剛那個事件", "事件"),
+            ("個資", "個資"),
+        ] {
+            let (t, retreated) = terms_with_retreat(q);
+            assert_eq!(t, needle, "{q}");
+            assert!(retreated, "{q} → {t} 是黏出來的，要說得出口");
+        }
+
+        // 沒退過的一律安靜：兩端都是實字，她找的就是他打的。
+        for q in [
+            "剛剛那個優惠方案",
+            "客服專線",
+            "ERR_CONNECTION_REFUSED",
+            "板",
+            "剛剛發生什麼事",
+        ] {
+            assert!(!terms_with_retreat(q).1, "{q} 沒有黏過東西，不該多講一句");
+        }
     }
 
     /// 一句完全沒有虛字的問題不該被動到一個字。
