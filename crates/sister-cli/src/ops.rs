@@ -1120,11 +1120,22 @@ pub mod query {
             // 裡面的真正原因，而報成 0 秒剛好把它藏起來。
             //
             // 開頭被保留期刪掉的那幾段也一樣：算進了段數、沒算進時間。
-            let how_long = if b.paused_open && b.paused_ms == 0 {
+            //
+            // 「最後一段沒收尾」和「她現在閉著眼睛」是兩件事，只有旗標答得出
+            // 後者（見 `BlindSpots::paused_now`）。錄製當中按暫停、關掉
+            // recorder、事後才解除——`CaptureResumed` 沒有人寫，資料庫從此
+            // 永遠掛著一段沒收尾的暫停，而舊版會永遠說她此刻閉著眼睛。
+            let how_long = if b.paused_open && b.paused_now && b.paused_ms == 0 {
                 "而且到現在都還沒解除——她此刻就是閉著眼睛的".to_string()
-            } else if b.paused_open {
+            } else if b.paused_open && b.paused_now {
                 format!(
                     "已結束的加起來 {}，最後一段到現在都還沒解除",
+                    crate::fmt::duration_ms(b.paused_ms)
+                )
+            } else if b.paused_open {
+                format!(
+                    "已結束的加起來 {}，最後一段沒有收尾（她現在沒有暫停，\
+                     多半是解除的時候沒有人在錄），所以這個數字算短了",
                     crate::fmt::duration_ms(b.paused_ms)
                 )
             } else if b.paused_truncated > 0 {
@@ -1140,9 +1151,29 @@ pub mod query {
                 "她也被暫停過 {} 次、{how_long}，那幾段是空的。",
                 b.paused_episodes
             ));
+        } else if b.paused_now {
+            // 紀錄裡看不到、但旗標在。他按下暫停的那一刻沒有人在錄，所以
+            // 沒有任何一筆事件記得這件事——而下一次 `sister record` 會開起來
+            // 然後什麼都不記。這一條比上面那條更需要講。
+            out.push(
+                "而且她**現在是暫停的**（`sister pause --off` 解除）——這樣錄也不會記到東西。"
+                    .to_string(),
+            );
         }
+        // 沒有任何理由的時候只剩一句實話。而「每一段」這三個字要看她這次
+        // 到底翻了多少：只掃了 30 天卻說「每一段」，是把十二分之一講成全部。
         if out.is_empty() {
-            out.push("她記的每一段裡都沒有這個字。".to_string());
+            out.push(if b.scan_horizon_days.is_some() {
+                "她翻過的那幾段裡沒有這個字。".to_string()
+            } else {
+                "她記的每一段裡都沒有這個字。".to_string()
+            });
+        }
+        if let Some(days) = b.scan_horizon_days {
+            out.push(format!(
+                "——但這種查法（產不出相鄰雙字的，例如單獨一個中文字）沒有索引可用，\
+                 只能掃最近 {days} 天，更早的這次沒翻到。多打一個字就走得到索引。"
+            ));
         }
         out
     }
@@ -1314,7 +1345,10 @@ pub mod query {
                 println!("\n沒有找到。");
                 // 這句話以前是「她可能當時沒在看，或那段被排除規則擋掉了」——
                 // 兩個猜測、零個證據，而兩件事她其實都查得到。
-                for line in blind_lines(&sister_core::answer::blind_spots(&db)?) {
+                // 比對用的是 `terms`（剝掉「剛剛」「那個」），所以掃描界線
+                // 也要照 `terms` 判——查 `search` 的是它，不是原句。
+                let asked = sister_core::question::terms(text);
+                for line in blind_lines(&sister_core::answer::blind_spots(&db, data_dir, asked)?) {
                     println!("{line}");
                 }
             }

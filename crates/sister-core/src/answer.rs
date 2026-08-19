@@ -129,18 +129,49 @@ pub struct BlindSpots {
     /// `paused_ms` **不含**這一段——它還在跑，算進去會讓同一顆資料庫每次
     /// 查出來的數字都不一樣。所以只看 `paused_ms` 的表面會說「一共 0 秒」，
     /// 而真相是三天前按下的暫停到現在都沒有解除。
+    ///
+    /// **這個欄位講的是紀錄，不是現在。** 要問「她此刻閉著眼睛沒有」，看
+    /// [`paused_now`](Self::paused_now)。
     pub paused_open: bool,
+    /// 她**此刻**是不是暫停的（`paused.flag` 在不在，見 [`crate::pause`]）。
+    ///
+    /// 和 [`paused_open`](Self::paused_open) 是兩個不同的問題，而兩者可以
+    /// 各自為真：
+    ///
+    /// - `paused_open && !paused_now`：暫停中關掉了 `sister record`，事後才
+    ///   解除。解除那一刻沒有人在跑 recorder，`CaptureResumed` 就沒有人寫，
+    ///   資料庫從此永遠掛著一段沒收尾的暫停。把這個講成「她現在閉著眼睛」，
+    ///   是一則**再也不會消失**的假警報。
+    /// - `!paused_open && paused_now`：反過來，按下暫停的那一刻沒有人在錄，
+    ///   所以紀錄裡看不到。而下一次 `sister record` 會什麼都記不到。
+    ///
+    /// 只有旗標答得出「現在」，只有資料庫答得出「那三個小時」。
+    pub paused_now: bool,
     /// 有幾段暫停的開頭已經被保留期刪掉，只剩 `resume`。
     ///
     /// 這幾段算進了 `paused_episodes` 卻**沒有**算進 `paused_ms`，所以
     /// `paused_ms > 0` 時它是下限而不是精確值。
     pub paused_truncated: i64,
+    /// 這一題她只看了最近幾天。`None` = 看完了整顆資料庫。
+    ///
+    /// 見 [`Db::scan_horizon_days`]：產不出相鄰雙字的查詢（最常見的是一個字
+    /// 的中文）只剩掃描可走，而掃描夾在 30 天內——那和 `text_days` 預設的
+    /// 365 天差 12 倍。少了這個欄位，「她記的每一段裡都沒有這個字」會把
+    /// 十二分之一的資料講成全部。
+    pub scan_horizon_days: Option<i64>,
 }
 
 impl BlindSpots {
     /// 有沒有任何一個查得到的理由。`false` = 她真的記了，而裡面就是沒有。
+    ///
+    /// 「她此刻是暫停的」和「這一題只掃了 30 天」都算理由：前者是他下一步該
+    /// 做什麼，後者是這句「沒有」到底涵蓋了多少。
     pub fn any(&self) -> bool {
-        self.chunks == 0 || !self.excluded.is_empty() || self.paused_episodes > 0
+        self.chunks == 0
+            || !self.excluded.is_empty()
+            || self.paused_episodes > 0
+            || self.paused_now
+            || self.scan_horizon_days.is_some()
     }
 }
 
@@ -149,7 +180,13 @@ impl BlindSpots {
 /// 範圍是整顆資料庫而不是某個時間窗：她不知道使用者心裡想的是哪一段，而把
 /// 「上禮拜二下午」猜錯之後給出的理由，比不給理由更糟。所以講的是「她記過的
 /// 這段期間裡」，而每一條都附得出時間讓人自己去對。
-pub fn blind_spots(db: &Db) -> anyhow::Result<BlindSpots> {
+///
+/// 要 `data_dir` 和 `query`，是因為有兩個理由資料庫自己答不出來：她**此刻**
+/// 是不是暫停的（那在一個檔案裡，見 [`BlindSpots::paused_now`]），以及這一題
+/// 有沒有走到那條只看 30 天的掃描（那取決於問了什麼字，見
+/// [`BlindSpots::scan_horizon_days`]）。兩個都放在這裡判，是為了不讓終端機和
+/// 字母人各判一次——同一句話在兩個地方得到兩種答案，是這個專案反覆踩到的坑。
+pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::Result<BlindSpots> {
     let stats = db.stats()?;
     let pauses = db.pause_audit()?;
     Ok(BlindSpots {
@@ -164,7 +201,9 @@ pub fn blind_spots(db: &Db) -> anyhow::Result<BlindSpots> {
         paused_episodes: pauses.episodes,
         paused_ms: pauses.total_ms,
         paused_open: pauses.open_since.is_some(),
+        paused_now: crate::pause::is_paused(data_dir),
         paused_truncated: pauses.truncated,
+        scan_horizon_days: db.scan_horizon_days(query)?,
     })
 }
 
@@ -173,11 +212,18 @@ mod tests {
     use super::*;
     use crate::model::{FocusSnapshot, FrameCapture, SystemEvent, SystemKind};
 
+    /// 這一組測的是資料庫答得出來的那幾條，不是暫停旗標。給一個一定不存在的
+    /// 資料目錄：`is_paused` 對「連父目錄都不在」回的是 `Ok(false)`，於是
+    /// `paused_now` 是 false，不會干擾底下的判斷。要驗旗標的那一條自己建目錄。
+    fn nowhere() -> &'static std::path::Path {
+        std::path::Path::new("/sister-tests-no-such-dir")
+    }
+
     /// 一顆全新的資料庫上，「沒找到」只有一個理由，而它不是「我沒看過那件事」。
     #[test]
     fn a_database_that_never_recorded_says_so_instead_of_denying_it() {
         let db = Db::open_in_memory().expect("db");
-        let b = blind_spots(&db).expect("blind");
+        let b = blind_spots(&db, nowhere(), "電話").expect("blind");
         assert_eq!(b.chunks, 0);
         assert_eq!(b.frames, 0, "她連看都還沒看過");
         assert_eq!(b.sessions, 0, "連一場錄製都還沒開過");
@@ -226,13 +272,13 @@ mod tests {
         )
         .expect("insert");
         assert!(
-            blind_spots(&db).expect("blind").chunks > 0,
+            blind_spots(&db, nowhere(), "電話").expect("blind").chunks > 0,
             "先確定真的記到了"
         );
 
         db.forget(0, 2_000, None).expect("forget");
 
-        let b = blind_spots(&db).expect("blind");
+        let b = blind_spots(&db, nowhere(), "電話").expect("blind");
         assert_eq!((b.chunks, b.frames), (0, 0), "他要求的：什麼都不剩");
         assert_eq!(b.sessions, 1, "但「她錄過」這件事還在");
     }
@@ -275,7 +321,7 @@ mod tests {
             )
             .expect("insert");
         }
-        let b = blind_spots(&db).expect("blind");
+        let b = blind_spots(&db, nowhere(), "電話").expect("blind");
         assert_eq!(b.chunks, 0, "一個字都沒有");
         assert_eq!(b.frames, 3, "但她確實看過三張");
         assert!(b.any());
@@ -305,7 +351,7 @@ mod tests {
             .expect("system event");
         }
 
-        let b = blind_spots(&db).expect("blind");
+        let b = blind_spots(&db, nowhere(), "電話").expect("blind");
         assert!(b.any());
         // 段數多的排前面——「12 段」比「1 段」更值得他去看
         assert_eq!(
@@ -317,5 +363,138 @@ mod tests {
         );
         assert_eq!(b.paused_episodes, 1);
         assert_eq!(b.paused_ms, 5_000);
+    }
+
+    /// 自建暫存目錄。不引 `tempfile` 的理由見 `retention.rs`。
+    struct Tmp(std::path::PathBuf);
+    impl Tmp {
+        fn new(name: &str) -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "sister-blind-{}-{name}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            Self(dir)
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 資料庫裡掛著一段沒收尾的暫停，**而她現在並沒有閉著眼睛**。
+    ///
+    /// 走到這裡的路很平常：錄製當中按暫停 → 關掉 `sister record` → 隔天才
+    /// 解除。解除的那一刻沒有人在跑 recorder，`CaptureResumed` 就沒有人寫，
+    /// 那一段從此永遠配不到對。把它講成「她此刻就是閉著眼睛的」，是一則
+    /// 再也不會消失的假警報——而假警報會連坐旁邊那則真的一起被忽略。
+    #[test]
+    fn a_pause_nobody_closed_is_not_the_same_as_being_blind_right_now() {
+        let tmp = Tmp::new("dangling");
+        let mut db = Db::open_in_memory().expect("db");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        db.insert_system(
+            s,
+            &SystemEvent {
+                ts: 4_000,
+                kind: SystemKind::CapturePaused,
+                detail: None,
+            },
+        )
+        .expect("pause");
+        // 旗標**不在**：他早就解除了，只是解除的時候沒有人在錄。
+        assert!(!crate::pause::is_paused(&tmp.0), "這條測試的前提");
+
+        let b = blind_spots(&db, &tmp.0, "電話").expect("blind");
+        assert!(b.paused_open, "紀錄裡那一段確實沒收尾");
+        assert!(
+            !b.paused_now,
+            "但旗標不在——說她現在閉著眼睛就是一句永遠不會過期的假話"
+        );
+    }
+
+    /// 反過來：旗標在，紀錄裡卻一個字都沒有。
+    ///
+    /// 他在沒有 recorder 在跑的時候按下暫停，所以沒有任何一筆事件記得這件事。
+    /// 而下一次 `sister record` 會開起來、然後什麼都不記——這一條比上一條更
+    /// 需要講出來，因為它講的是**接下來**會發生什麼。
+    #[test]
+    fn the_flag_is_on_even_though_no_recorder_ever_wrote_it_down() {
+        let tmp = Tmp::new("flag-only");
+        crate::pause::set_paused(&tmp.0, true, 1_234).expect("按下暫停");
+        let db = Db::open_in_memory().expect("db");
+
+        let b = blind_spots(&db, &tmp.0, "電話").expect("blind");
+        assert!(!b.paused_open, "紀錄裡沒有這件事");
+        assert_eq!(b.paused_episodes, 0);
+        assert!(b.paused_now, "但她現在就是暫停的");
+        assert!(b.any(), "而這是一個他可以馬上動手處理的理由");
+    }
+
+    /// 一個字的查詢只翻得到最近 30 天，而 `text_days` 預設 365。
+    ///
+    /// 差 12 倍。少了這一條，用滿一年的人查一個字查不到，得到的是「她記的
+    /// 每一段裡都沒有這個字」——那句話把十二分之一講成了全部。
+    ///
+    /// 界線本身怎麼算，由 `db.rs` 那條測試守著；這裡守的是它有沒有一路
+    /// 接到「為什麼沒找到」這份清單上。
+    #[test]
+    fn a_single_character_question_carries_its_thirty_day_horizon() {
+        let mut db = Db::open_in_memory().expect("db");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let day = 86_400_000i64;
+        // 跨度 200 天：遠遠超過掃描的 30 天窗。
+        for (i, ts) in [1_000i64, 1_000 + 200 * day].into_iter().enumerate() {
+            db.insert_frame(
+                s,
+                &FrameCapture {
+                    ts,
+                    monitor: 0,
+                    width: 1920,
+                    height: 1080,
+                    dhash: 0xBEEF_0000 + i as u64,
+                    image: None,
+                    image_ext: "webp",
+                    ocr: vec![crate::model::OcrBlock {
+                        text: format!("第{i}段 客服專線 0800"),
+                        x: 0,
+                        y: 0,
+                        w: 400,
+                        h: 18,
+                        confidence: 0.95,
+                    }],
+                    focus: FocusSnapshot {
+                        app_id: Some("chrome.exe".into()),
+                        app_name: Some("Chrome".into()),
+                        window_title: Some("客服系統".into()),
+                        url: None,
+                        pid: Some(42),
+                        password_field: false,
+                    },
+                },
+                None,
+                0,
+            )
+            .expect("insert");
+        }
+
+        let b = blind_spots(&db, nowhere(), "錢").expect("blind");
+        assert_eq!(
+            b.scan_horizon_days,
+            Some(30),
+            "單一個中文字產不出相鄰雙字，只剩那條夾在 30 天內的掃描"
+        );
+        assert!(b.any(), "「我只翻了三十天」本身就是一個查得到的理由");
+
+        let two = blind_spots(&db, nowhere(), "客服").expect("blind");
+        assert_eq!(
+            two.scan_horizon_days, None,
+            "兩個字走得到 bigram 索引，沒有時間界線——這時候不該多講一句"
+        );
     }
 }

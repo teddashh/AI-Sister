@@ -1298,6 +1298,38 @@ impl Db {
         Ok((hits, all_readable && produced < candidates))
     }
 
+    /// 這一題「沒找到」的時候，她其實**看了多遠**。
+    ///
+    /// `None` = 三個索引裡有一個蓋得住這一題，而索引沒有時間界線：看完了整顆
+    /// 資料庫，「沒有」就是真的沒有。
+    ///
+    /// `Some(days)` = 這一題只剩 [`Self::search_like`] 的掃描可走（產不出相鄰
+    /// 雙字的查詢——最常見的是**一個字**的中文），而掃描為了不讓成本跟著使用
+    /// 時間長大，夾在最新一列往回 `days` 天內。
+    ///
+    /// 存在的理由：`retention.text_days` 預設 365，這裡是 30。用滿一年的人查
+    /// 一個字查不到，得到的答案是「她記的每一段裡都沒有這個字」——那句話把
+    /// **十二分之一**的資料講成了全部。「我找不到」和「我沒去找」是兩件事，
+    /// 而只有這一支分得出來。
+    ///
+    /// 資料庫本身還不到 `days` 天的時候一樣回 `None`：掃描確實看完了全部，
+    /// 這時候再加一句免責聲明只是雜訊。
+    pub fn scan_horizon_days(&self, query: &str) -> Result<Option<i64>> {
+        if bigram_query(query).is_some() {
+            return Ok(None);
+        }
+        let span: Option<(Option<i64>, Option<i64>)> = self
+            .conn
+            .query_row("SELECT MIN(ts), MAX(ts) FROM text_chunks", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        let Some((Some(oldest), Some(newest))) = span else {
+            return Ok(None);
+        };
+        Ok((newest - oldest > LIKE_SCAN_DAYS * 86_400_000).then_some(LIKE_SCAN_DAYS))
+    }
+
     /// 子字串掃描後援。分數固定為 `LIKE_SCORE`，永遠排在 FTS 命中之後。
     fn search_like(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let terms: Vec<String> = query
@@ -3464,6 +3496,65 @@ mod tests {
         let coords = audit.iter().find(|a| a.name == "文字座標").expect("座標");
         assert_eq!(coords.rows, 0);
         assert!(!coords.broken, "空的表不該被說成壞掉");
+    }
+
+    /// 「我找不到」和「我沒去找」在同一句話裡長得一模一樣。
+    ///
+    /// 一個字的查詢產不出相鄰雙字，走不到 bigram，只剩 `search_like` 的掃描
+    /// ——而掃描夾在 30 天內。`retention.text_days` 預設 365。差 12 倍，而查
+    /// 不到的時候她說的是「她記的每一段裡都沒有這個字」。
+    ///
+    /// [`Db::scan_horizon_days`] 就是為了讓那句話講得出「哪幾段」而存在的。
+    #[test]
+    fn one_character_only_reaches_thirty_days_and_says_so() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let now = 1_700_000_000_000i64;
+
+        // 還沒有任何文字的時候，沒有界線可講——講了就是憑空發明一個限制。
+        assert_eq!(db.scan_horizon_days("錢").expect("horizon"), None);
+
+        for ts in [now - 300 * 86_400_000, now] {
+            db.insert_frame(
+                s,
+                &frame_with_text(ts, "chrome.exe", "客服系統", &["客服專線紀錄"]),
+                None,
+                0,
+            )
+            .expect("insert");
+        }
+
+        assert_eq!(
+            db.scan_horizon_days("錢").expect("horizon"),
+            Some(LIKE_SCAN_DAYS),
+            "一個字只剩掃描，而掃描沒看 30 天以前的東西"
+        );
+        assert_eq!(
+            db.scan_horizon_days("客服").expect("horizon"),
+            None,
+            "兩個字走 bigram，沒有時間界線"
+        );
+        assert_eq!(
+            db.scan_horizon_days("報告").expect("horizon"),
+            None,
+            "查不到的兩字詞也一樣：走得到索引就是真的翻完了"
+        );
+
+        // 資料庫本身還不到 30 天：掃描確實看完了全部，這時候多一句免責
+        // 聲明只是雜訊——而雜訊會讓真的那一句被忽略。
+        let mut short = test_db();
+        let s2 = short.start_session("test", "0.0.1").expect("session");
+        for ts in [now - 2 * 86_400_000, now] {
+            short
+                .insert_frame(
+                    s2,
+                    &frame_with_text(ts, "chrome.exe", "客服系統", &["客服專線紀錄"]),
+                    None,
+                    0,
+                )
+                .expect("insert");
+        }
+        assert_eq!(short.scan_horizon_days("錢").expect("horizon"), None);
     }
 
     /// 兩個字的中文詞**不再有時間界線**。

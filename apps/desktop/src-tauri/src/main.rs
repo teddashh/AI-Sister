@@ -594,7 +594,15 @@ struct Blind {
     /// [`sister_core::answer::BlindSpots::paused_open`]。
     paused_ms: i64,
     paused_open: bool,
+    /// 她**此刻**閉著眼睛沒有。和 `paused_open` 是兩件事：那一個講的是
+    /// 資料庫裡最後一筆暫停有沒有配到解除，而暫停中關掉 recorder、事後才
+    /// 解除的人，會永遠掛著一筆配不到的——見
+    /// [`sister_core::answer::BlindSpots::paused_now`]。
+    paused_now: bool,
     paused_truncated: i64,
+    /// 這一題只翻了最近幾天。`null` = 整顆資料庫都翻過了。見
+    /// [`sister_core::answer::BlindSpots::scan_horizon_days`]。
+    scan_horizon_days: Option<i64>,
 }
 
 /// 一筆 ★ 答案。
@@ -706,7 +714,18 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         // 只有兩手空空的時候才去問。有答案的話這幾個 COUNT 是白跑的，而這條
         // 路上使用者正等著看畫面。
         let blind = if facts.is_empty() && hits.is_empty() {
-            let b = sister_core::answer::blind_spots(db).map_err(|e| format!("{e:#}"))?;
+            // 比對用的是 `terms`，掃描界線也照 `terms` 判——理由和
+            // `sister query` 那邊同一條。
+            let asked = sister_core::question::terms(&question);
+            // 不給空路徑當退路：`pause::is_paused` 的規矩是「問不出來就當成
+            // 暫停」，而 `Path::new("")` 會讓它去工作目錄找一個不存在的旗標、
+            // 然後回一個很有把握的「沒有暫停」。寧可這一段沒有理由可講。
+            let dir = shell
+                .data_dir
+                .as_deref()
+                .ok_or_else(|| "找不到資料目錄".to_string())?;
+            let b =
+                sister_core::answer::blind_spots(db, dir, asked).map_err(|e| format!("{e:#}"))?;
             Some(Blind {
                 chunks: b.chunks,
                 frames: b.frames,
@@ -715,7 +734,9 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 paused_episodes: b.paused_episodes,
                 paused_ms: b.paused_ms,
                 paused_open: b.paused_open,
+                paused_now: b.paused_now,
                 paused_truncated: b.paused_truncated,
+                scan_horizon_days: b.scan_horizon_days,
             })
         } else {
             None

@@ -572,12 +572,35 @@ function blindLines(blind) {
   }
   if (blind.paused_episodes > 0) {
     // 這裡本來就不印時間，所以躲過了 `paused_ms` 那個「一共 0 秒」的坑。
-    // 但「還沒解除」是另一回事：那不是過去式，是**現在**——他問的東西如果
-    // 是暫停之後發生的，她根本沒有機會看到。和 `blind_lines`（ops.rs）同一條。
+    //
+    // 但「最後那一段沒收尾」和「我現在閉著眼睛」是兩件事，而這裡以前把前者
+    // 印成了後者。暫停中關掉 recorder、事後才解除的人，`CaptureResumed` 沒有
+    // 人寫，資料庫從此永遠掛著一段配不到對的——於是這句話變成一則再也不會
+    // 消失的假警報。只有旗標（`paused_now`）答得出「現在」。
+    if (blind.paused_open && blind.paused_now) {
+      out.push(
+        `我也被暫停過 ${blind.paused_episodes} 次，而且最後那一次到現在都還沒解除——我此刻就是閉著眼睛的。`,
+      );
+    } else if (blind.paused_open) {
+      out.push(
+        `我也被暫停過 ${blind.paused_episodes} 次。最後那一段沒有收尾（我現在沒有暫停，多半是解除的時候沒有人在錄），所以那幾段其實比記下來的更長。`,
+      );
+    } else {
+      out.push(`我也被暫停過 ${blind.paused_episodes} 次，那幾段是空的。`);
+    }
+  } else if (blind.paused_now) {
+    // 反過來：旗標在，紀錄裡卻什麼都沒有——他按下暫停的那一刻沒有人在錄。
+    // 這一條比上面那條更需要講，因為它講的是**接下來**：再錄也記不到東西。
+    // 這一頁是 `textContent`，不是 markdown——`**粗體**` 會原樣印出星號。
+    // 強調用字本身，不用符號。
+    out.push("而且我現在是暫停的（右上角那顆鍵）——這樣繼續錄也不會記到東西。");
+  }
+  // 「我找不到」和「我沒去找」是兩件事。一個字的問題產不出相鄰雙字、走不到
+  // 索引，只剩那條夾在 30 天內的掃描——而保留期預設 365 天。見
+  // `BlindSpots::scan_horizon_days`。
+  if (blind.scan_horizon_days) {
     out.push(
-      blind.paused_open
-        ? `我也被暫停過 ${blind.paused_episodes} 次，而且最後那一次到現在都還沒解除——我此刻就是閉著眼睛的。`
-        : `我也被暫停過 ${blind.paused_episodes} 次，那幾段是空的。`,
+      `——不過這種問法（單獨一個字）我沒有索引可用，只翻得動最近 ${blind.scan_horizon_days} 天，更早的這次沒翻到。多打一個字我就找得比較遠。`,
     );
   }
   return out;
@@ -675,10 +698,15 @@ function renderHits(
     // 「我最後看到的是：」同一條紀律）。那個差別不是措辭：東西可能就在螢幕
     // 上，只是被排除規則擋掉、被暫停跳過，或者 OCR 沒讀出來——最後這一種
     // 她連數都數不出來，所以下面那幾行理由永遠不會是完整的。
+    //
+    // 「我記得的東西」這幾個字也要看她這次到底翻了多少：只翻了 30 天卻說
+    // 「我記得的東西」，是把十二分之一講成全部（見 `scan_horizon_days`）。
     empty.textContent =
       kind === "recent"
         ? "我什麼都還沒看到——要先跑 sister record 我才記得住。"
-        : "我記得的東西裡沒有這件事。";
+        : blind?.scan_horizon_days
+          ? "我翻過的那幾段裡沒有這件事。"
+          : "我記得的東西裡沒有這件事。";
     hitList.append(empty);
 
     // 後端只給事實（排除過幾段、暫停過幾次），句子在這裡組。
@@ -970,8 +998,15 @@ if (params.get("hits") === "recent") {
 
 // `?hits=none` 是兩手空空那一版。要看的是「我沒看到過」底下那幾句——它們是
 // 這個畫面上唯一會讓他知道「東西可能在，只是我不准看」的地方。
-if (params.get("hits") === "none") {
-  renderHits([], "keywords", null, [], {
+//
+// `&blind=` 切幾個講法不同的處境。每一個都是後端真的送得出來的組合，而它們
+// 以前有好幾個長得一模一樣：
+//   dangling  紀錄裡掛著一段沒收尾的暫停，但她現在沒有暫停
+//   flag      反過來，旗標在、紀錄裡什麼都沒有
+//   scan      一個字的問題，只翻得動 30 天
+//   blocked   一段字都沒有，而原因是暫停／排除，不是「被忘掉了」
+const BLIND_DEMOS = {
+  "": {
     chunks: 8421,
     excluded: [
       ["excluded url", 12],
@@ -979,8 +1014,50 @@ if (params.get("hits") === "none") {
     ],
     paused_episodes: 2,
     paused_ms: 4 * 3600 * 1000,
-    // 最後一段還沒解除：這一版要看的就是那句「我此刻就是閉著眼睛的」。
     paused_open: true,
+    paused_now: true,
     paused_truncated: 0,
-  });
+  },
+  dangling: {
+    chunks: 8421,
+    excluded: [],
+    paused_episodes: 2,
+    paused_ms: 4 * 3600 * 1000,
+    paused_open: true,
+    paused_now: false,
+    paused_truncated: 0,
+  },
+  flag: {
+    chunks: 8421,
+    excluded: [],
+    paused_episodes: 0,
+    paused_ms: 0,
+    paused_open: false,
+    paused_now: true,
+    paused_truncated: 0,
+  },
+  scan: {
+    chunks: 8421,
+    excluded: [],
+    paused_episodes: 0,
+    paused_ms: 0,
+    paused_open: false,
+    paused_now: false,
+    paused_truncated: 0,
+    scan_horizon_days: 30,
+  },
+  blocked: {
+    chunks: 0,
+    frames: 0,
+    sessions: 3,
+    excluded: [["excluded app: keepassxc", 3]],
+    paused_episodes: 1,
+    paused_ms: 3600 * 1000,
+    paused_open: false,
+    paused_now: false,
+    paused_truncated: 0,
+  },
+};
+if (params.get("hits") === "none") {
+  renderHits([], "keywords", null, [], BLIND_DEMOS[params.get("blind") ?? ""] ?? BLIND_DEMOS[""]);
 }
