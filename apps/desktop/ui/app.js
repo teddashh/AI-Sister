@@ -14,6 +14,7 @@ const STATE_LINES = Object.freeze({
   idle: "在聽",
   thinking: "想一下…",
   paused: "已暫停，沒有在看",
+  asleep: "沒有人在記錄——先跑 sister record",
 });
 
 const avatar = document.querySelector("[data-avatar]");
@@ -48,15 +49,36 @@ const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
 let state = "idle";
 let paused = false;
 
+/**
+ * 現在到底有沒有人在錄。**這和 `paused` 是兩件事。**
+ *
+ * `sister record` 是另一個執行檔。沒有人把它跑起來的時候，暫停旗標是乾淨的
+ * ——於是這個視窗以前會顯示「在聽」，而她其實什麼都沒在看。那是這個產品唯一
+ * 不能說的那種謊：他照著那三個字相信她記得住今天，然後某天問「剛剛發生
+ * 什麼事」，得到一片空白，然後以為是搜尋壞了。
+ *
+ * 兩件事要分開講，因為**下一步不一樣**：暫停要按「繼續」，沒在錄要去開
+ * recorder。混成一句「她沒在看」等於把解法藏起來。
+ *
+ * 初值是 `true`：後端那一支已經是「不確定就回沒在錄」，這裡的初值只是第一次
+ * 問到答案之前的那幾毫秒要畫什麼。開場閃一下「沒有人在記錄」比閃一下「在聽」
+ * 更容易嚇到人，而它們一樣快就會被真正的答案蓋掉。
+ */
+let recording = true;
+
 function paint() {
-  // 暫停壓過一切。她沒在看的時候，畫面上絕不可以有一格看起來像在看。
-  const shown = paused ? "paused" : state;
+  // 順序就是嚴重程度。她沒在看的時候，畫面上絕不可以有一格看起來像在看，
+  // 而「被你叫停」要壓過「根本沒人開她」——前者是他做的決定，後者只是狀態。
+  const shown = paused ? "paused" : recording ? state : "asleep";
   avatar.dataset.state = shown;
 
   // 暫停時仍然答得出問題——停的是「記錄」，不是「記憶」。所以 thinking
-  // 要講出來，只是講在文字上，不動那個灰掉的身體。
+  // 要講出來，只是講在文字上，不動那個灰掉的身體。沒在錄的時候同理：
+  // 她答得出以前記下來的東西。
   const line =
-    paused && state === "thinking" ? "想一下…（仍在暫停）" : STATE_LINES[shown];
+    state === "thinking" && shown !== "thinking"
+      ? `想一下…（${shown === "paused" ? "仍在暫停" : "但沒有人在記錄"}）`
+      : STATE_LINES[shown];
   stateLine.textContent = line;
   // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。
   avatar.setAttribute("aria-label", `AI-Sister：${line}`);
@@ -80,6 +102,38 @@ function setPaused(next) {
   paint();
 }
 
+function setRecording(next) {
+  recording = next === true;
+  paint();
+}
+
+/**
+ * 有沒有人在錄，隨時可能變——他會在另一個終端機視窗裡把 `sister record`
+ * 開起來或按 Ctrl+C。所以要一直問，而且**問的節奏要跟得上心跳**
+ * （`heartbeat::BEAT_EVERY_MS` 是 5 秒）。
+ *
+ * 視窗看不到的時候不問。一個整天掛在角落的東西，在沒有人看的時候還每 5 秒
+ * 醒來一次，就是 Phase 0 那份 CPU 預算的漏洞——和動畫閘門同一條紀律。
+ */
+const RECORDING_POLL_MS = 5000;
+let pollTimer = null;
+
+function pollRecording() {
+  if (invoke === null) return;
+  invoke("recording_state").then(setRecording, () => {});
+}
+
+function updatePollGate() {
+  const visible = document.visibilityState === "visible";
+  if (visible && pollTimer === null) {
+    pollRecording();
+    pollTimer = setInterval(pollRecording, RECORDING_POLL_MS);
+  } else if (!visible && pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
 // ---------- 動畫閘門 ----------
 
 const reducedMotion = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)");
@@ -97,6 +151,7 @@ function updateMotionGate() {
 }
 
 document.addEventListener("visibilitychange", updateMotionGate);
+document.addEventListener("visibilitychange", updatePollGate);
 reducedMotion?.addEventListener?.("change", updateMotionGate);
 
 // ---------- 相位 ----------
@@ -369,13 +424,21 @@ paintPin();
 // 機器上唯一看得到 UI 的方式，一個走假路的開發開關會讓它騙我。
 const wanted = params.get("state") ?? "idle";
 setPaused(wanted === "paused");
-setState(wanted === "paused" ? "idle" : wanted);
+// `?state=asleep`：沒有人在跑 `sister record`。和上面同一條紀律——走真正的
+// 那個旗標，不另外搬一個長得像的樣子出來。
+setRecording(wanted !== "asleep");
+setState(wanted === "paused" || wanted === "asleep" ? "idle" : wanted);
 
 // 開場先問一次磁碟。暫停**不會自己過期**，所以「上禮拜按了暫停」是一條真實
 // 的路——開起來就該是灰的，而不是先亮一下再變灰。
 if (invoke !== null) {
   invoke("pause_state").then(setPaused, () => {});
 }
+
+// 有沒有人在錄要一直問下去，不是問一次就算了：他隨時可能在另一個終端機
+// 裡把 recorder 開起來或按 Ctrl+C，而這個視窗是他判斷「她到底有沒有在看」
+// 的唯一依據。
+updatePollGate();
 
 if (params.get("hits") === "demo") {
   renderHits(

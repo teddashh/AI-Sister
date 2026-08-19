@@ -92,6 +92,26 @@ fn pause_state(shell: tauri::State<'_, Shell>) -> bool {
     }
 }
 
+/// 現在到底有沒有人在錄。
+///
+/// 這和暫停是**兩個不同的問題**，而字母人以前只問得出後者：暫停鍵沒被按下
+/// 的時候它就顯示「在聽」——即使根本沒有人把 `sister record` 跑起來。那是這個
+/// 產品唯一不能說的那種謊：使用者照著那三個字相信她記得住今天，然後某天問
+/// 「剛剛發生什麼事」，得到一片空白。
+///
+/// 判斷靠 recorder 每 5 秒蓋一次的時戳（見 [`sister_core::heartbeat`]），
+/// 不靠 `sessions.ended_at`——那一列在 recorder 當掉的時候永遠停在 NULL。
+#[tauri::command]
+fn recording_state(shell: tauri::State<'_, Shell>) -> bool {
+    match &shell.data_dir {
+        Some(dir) => sister_core::heartbeat::is_recording(dir, sister_core::now_ms()),
+        // 問不出資料目錄的時候，`pause_state` 回報「暫停」是為了少錄；
+        // 這裡回報「沒在錄」是為了少吹牛。同一個方向：不確定就往
+        // 「她做得比較少」那邊倒。
+        None => false,
+    }
+}
+
 #[tauri::command]
 fn toggle_pause(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> Result<bool, String> {
     let dir = shell
@@ -924,6 +944,7 @@ fn main() {
             open_frame,
             frame_image,
             pause_state,
+            recording_state,
             toggle_pause,
             settings_read,
             settings_write,

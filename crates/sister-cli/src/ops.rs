@@ -2057,6 +2057,12 @@ pub mod record {
         // 同意書用同一個節拍。它不看 mtime，所以自己一個計時器。
         const CONSENT_EVERY: Duration = Duration::from_secs(5);
         let mut last_consent_check = Instant::now();
+        // 心跳。字母人是另一個行程，它沒有別的辦法知道「現在到底有沒有人在
+        // 錄」——`sessions.ended_at` 在當掉的時候永遠停在 NULL，而閒置時
+        // 資料庫本來就會好一陣子沒有新資料。開始之前先蓋一次，不然字母人
+        // 要等到第一個 5 秒過完才看得到她起來了。
+        let _ = sister_core::heartbeat::beat(data_dir, sister_core::now_ms());
+        let mut last_beat = Instant::now();
         // 保留期也吃熱重載（設定頁的 TTL 那一欄），所以它不能再是 `let`。
         let mut retention = retention;
 
@@ -2157,6 +2163,17 @@ pub mod record {
             // 不做 mtime 去抖：這個檔案是幾百個位元組，而 `consent::load` 的
             // 失敗方向是「當作沒簽」。少一層快取就少一種「檔案已經變了、我還
             // 拿著舊答案」的可能。
+            // 「我還活著」。**暫停中也要蓋**——暫停是她閉著眼睛，不是她走了，
+            // 而字母人要分得出這兩件事：一個要按「繼續」，一個要去開 recorder。
+            if last_beat.elapsed().as_millis() as i64 >= sister_core::heartbeat::BEAT_EVERY_MS {
+                last_beat = Instant::now();
+                if let Err(e) = sister_core::heartbeat::beat(data_dir, sister_core::now_ms()) {
+                    // 蓋不動不值得停止錄製——真正的工作還在做。但要講一次，
+                    // 因為字母人從現在起會說「沒有人在記錄」，而那是錯的。
+                    eprintln!("  ⚠ 心跳寫不進去（字母人會以為沒有人在錄）：{e}");
+                }
+            }
+
             if last_consent_check.elapsed() >= CONSENT_EVERY {
                 last_consent_check = Instant::now();
                 let consent = sister_core::consent::load(data_dir);
@@ -2232,6 +2249,12 @@ pub mod record {
 
             std::thread::sleep(interval);
         }
+
+        // 走人之前先把心跳收掉。留給 16 秒的逾時去猜的話，那段時間裡字母人
+        // 會說她還在錄，而她已經走了——**說她還在錄卻沒在錄**，是這兩個狀態
+        // 裡比較危險的那一個。放在 `finish()` 之前，因為那一步會寫資料庫，
+        // 可能失敗，而失敗不該讓一個錯的「還在錄」留在磁碟上。
+        sister_core::heartbeat::stop(data_dir);
 
         let stats = rec.stats().clone();
         // 收工前問一次「這段路上掉了什麼」。`doctor` 只看得到開機那一瞬間，

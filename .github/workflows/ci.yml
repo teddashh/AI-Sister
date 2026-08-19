@@ -223,9 +223,41 @@ jobs:
           grep -q 'sister consent --grant local-recording' refused.txt \
             || { echo "::error::她拒絕了，卻沒告訴使用者下一步該打什麼"; exit 1; }
 
-          # 導向管線時 Rust 直接寫 UTF-8 位元組（不走 WriteConsoleW），
-          # 所以這裡可以拿中文當關鍵字——讀不到就當成失敗，不要靜靜放過。
-          $S --data-dir ./loop record --duration 8 2>&1 | tee rec.txt
+          # 心跳。字母人靠這個檔案分辨「她在錄」和「根本沒有人開她」——
+          # 少了它，暫停旗標乾淨的時候它就顯示「在聽」，而那是這個產品唯一
+          # 不能說的謊。
+          #
+          # 這裡驗的是**檔案真的隨著行程生滅**：跑起來要出現，結束要自己
+          # 收掉。單元測試餵的是假時戳，證明得了逾時邏輯，卻證明不了
+          # recorder 有沒有真的去蓋、以及收工那一步有沒有真的執行到。
+          # 導向檔案時 Rust 直接寫 UTF-8 位元組（不走 WriteConsoleW），所以
+          # 底下那幾條可以拿中文當關鍵字——讀不到就當成失敗，不要靜靜放過。
+          #
+          # 不走 `| tee`：那樣 `$!` 拿到的是 tee 的 PID，出錯時 kill 不掉真正
+          # 在錄的那個行程。輸出改成錄完再印。
+          BEAT=./loop/recording.beat
+          rm -f "$BEAT"
+          $S --data-dir ./loop record --duration 20 > rec.txt 2>&1 &
+          REC=$!
+
+          sleep 5
+          [ -f "$BEAT" ] || {
+            echo "::error::錄製中卻沒有心跳——字母人會說「沒有人在記錄」"
+            kill $REC 2>/dev/null || true; exit 1; }
+
+          # 蓋的必須是**現在**，不是開機時寫一次就不管了。等過一個
+          # BEAT_EVERY_MS 再讀，兩次一樣就代表它只寫過那一次——而那種心跳
+          # 會在第 16 秒讓字母人宣告她死了，即使她好好的。
+          FIRST=$(cat "$BEAT")
+          sleep 7
+          [ "$(cat "$BEAT")" != "$FIRST" ] || {
+            echo "::error::心跳蓋了一次就不動了——16 秒後字母人會以為她死了"
+            kill $REC 2>/dev/null || true; exit 1; }
+
+          wait $REC
+          cat rec.txt
+          [ ! -f "$BEAT" ] \
+            || { echo "::error::錄完了心跳還在——字母人會說她還在錄，而她已經走了"; exit 1; }
 
           grep -q '時間：' rec.txt \
             || { echo "::error::錄完了卻沒印出時間表——CPU 又變成一個沒有下一步的數字"; exit 1; }

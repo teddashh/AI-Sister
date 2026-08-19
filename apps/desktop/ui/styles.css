@@ -254,6 +254,32 @@ body {
   position: relative;
 }
 
+/*
+ * asleep：**沒有人在跑 `sister record`。**
+ *
+ * 和 paused 是兩件事，所以長得不一樣。以前這一格根本不存在——暫停旗標乾淨
+ * 的時候她就顯示「在聽」，即使根本沒有任何人把 recorder 開起來。那是這個
+ * 產品唯一不能說的那種謊。
+ *
+ * 差別要落在**下一步**上：paused 是他做的決定（那一槓就是他按下去的手勢），
+ * 要按「繼續」；asleep 只是沒人開她，要去開 recorder。所以這裡去彩度、停動畫
+ * ——她確實沒在看——但**不畫那一槓**，而且比 paused 亮一點：她沒有被關掉，
+ * 只是還沒開始。
+ */
+.avatar[data-state="asleep"] .face {
+  animation: none;
+  filter: grayscale(1);
+  opacity: 0.72;
+  rotate: 0deg;
+}
+
+/* 狀態點空心。和 thinking 的空心環不同：這裡沒有那圈 accent 色，
+   因為那個環的意思是「她正在忙」。 */
+.avatar[data-state="asleep"] .face::after {
+  background: var(--letter-bg);
+  box-shadow: none;
+}
+
 /* ---------- 答案 ---------- */
 
 /*

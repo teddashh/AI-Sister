@@ -18,6 +18,7 @@ pub mod consent;
 pub mod db;
 pub mod dedup;
 pub mod facts;
+pub mod heartbeat;
 pub mod model;
 pub mod pause;
 pub mod question;
