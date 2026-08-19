@@ -285,11 +285,36 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// 底下每一條都在動同一組**行程層級**的計數器（`KEYSTROKES` 那幾個
+    /// static），而 `cargo test` 預設是多執行緒。
+    ///
+    /// 兩條同時跑的時候，一條的 `drain` 會用 `swap(0)` 把另一條剛 `store`
+    /// 進去的數字取走；被害的那條看到的是「視窗滿了卻沒出列」，而 `drain`
+    /// 在計數器全 0 時本來就回 `None`。錯誤訊息會指著一個根本沒壞的
+    /// early return。
+    ///
+    /// 這在 CI 上真的發生過，而且它擋掉的不只是一次測試——Release 那一步接
+    /// 在測試後面，所以那一版的 exe 直接沒有產出。一條每 n 次紅一次的測試，
+    /// 最後的下場是被人習慣性地重跑，而它哪天講了真話也不會有人相信。
+    ///
+    /// 這是測試的問題，不是 `drain` 的問題：那幾個 static 是 Win32 hook 的
+    /// callback 唯一能寫進去的地方（回呼函式沒有 `self`），改成可注入的話，
+    /// 被測的就不再是真的跑在機器上的那條路了。
+    static COUNTERS: Mutex<()> = Mutex::new(());
+
+    /// 中毒了照樣往下走：前一條 panic 過的意思是它已經報告過自己了，不需要
+    /// 讓後面每一條都跟著死一次、還死在一個看不懂的地方。
+    fn exclusive() -> MutexGuard<'static, ()> {
+        COUNTERS.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// 沒有任何輸入時不該寫一列全 0 的紀錄：idle 是用「沒有列」表達的，
     /// 一秒一列空紀錄會把資料庫塞滿沒有資訊的東西。
     #[test]
     fn silence_produces_no_row() {
+        let _lock = exclusive();
         KEYSTROKES.store(0, Relaxed);
         CLICKS.store(0, Relaxed);
         SCROLL.store(0, Relaxed);
@@ -312,6 +337,7 @@ mod tests {
     /// 沒滿的那幾次會把計數器清掉，於是使用者打的字被靜靜地扔了。
     #[test]
     fn input_is_accumulated_until_the_window_closes_not_dropped() {
+        let _lock = exclusive();
         KEYSTROKES.store(0, Relaxed);
         CLICKS.store(0, Relaxed);
         SCROLL.store(0, Relaxed);
@@ -348,6 +374,7 @@ mod tests {
     /// 從此一列都不再寫，而且沒有任何地方會講。
     #[test]
     fn a_clock_that_jumps_backwards_does_not_silence_the_rhythm_forever() {
+        let _lock = exclusive();
         KEYSTROKES.store(5, Relaxed);
 
         let mut input = WindowsInput {
@@ -364,6 +391,7 @@ mod tests {
 
     #[test]
     fn drain_takes_the_counters_and_resets_them() {
+        let _lock = exclusive();
         KEYSTROKES.store(7, Relaxed);
         CLICKS.store(2, Relaxed);
         SCROLL.store(3, Relaxed);
@@ -390,6 +418,7 @@ mod tests {
 
     #[test]
     fn idle_never_exceeds_the_window() {
+        let _lock = exclusive();
         // idle 比視窗還長是沒有意義的：這個視窗才十秒，不可能閒置一小時
         LAST_INPUT_TICK.store(0, Relaxed);
         KEYSTROKES.store(1, Relaxed);
