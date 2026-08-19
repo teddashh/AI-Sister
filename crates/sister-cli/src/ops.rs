@@ -70,6 +70,40 @@ fn open_existing(data_dir: &Path) -> Result<Db> {
 ///
 /// 印出來的理由字串和寫進 `system_events` 的是同一串，所以看到什麼就能
 /// 拿什麼去資料庫裡查。
+/// 整拍炸掉了幾次（`None` = 一次都沒有）。
+///
+/// 錄製迴圈把單次 tick 的錯誤吞成一行 `tracing::warn!` 就繼續跑，而那個決定
+/// 是對的：抓不到畫面多半是暫時的（切使用者、螢幕休眠），下一秒就好了。錯
+/// 的是那行 warn **是唯一的紀錄**，而它躺在 `%APPDATA%` 深處的 `record.log`
+/// 裡——會去翻那個檔案的人已經知道出事了。
+///
+/// 沒有這一行的話，一場每一拍都炸掉的錄製和一場「你今天只是沒開電腦」印出
+/// 同樣五個零。`ocr_failures`、`image_failures` 早就各自有計數也各自有一句
+/// 話，理由逐字相同——這一條只是把同一條規則補在最大的那個洞上。
+///
+/// 「全部」和「偶爾幾次」要分得開：前者是她這段時間什麼都沒記住，後者是
+/// 正常的雜訊。分界用 `working_ticks`（過了 `capture.enabled` 和暫停那兩道
+/// 門的拍數），因為空轉的拍本來就不會失敗，算進去只會把比例稀釋掉。
+fn tick_failures_line(stats: &sister_capture::RecorderStats) -> Option<String> {
+    let n = stats.tick_failures;
+    if n == 0 {
+        return None;
+    }
+    // 一句原文遠比一個數字有用。`last_*_error` 那兩個欄位同一個理由。
+    let why = match &stats.last_tick_error {
+        Some(e) => format!("最後一次是：{e}"),
+        None => "但沒有留下原因（這是 bug）".to_string(),
+    };
+    Some(if n >= stats.working_ticks && stats.working_ticks > 0 {
+        format!("  ⚠  這 {n} 拍**每一拍都失敗了**——她這段時間什麼都沒記住。{why}")
+    } else {
+        format!(
+            "  ⚠  {n} 拍失敗（共 {} 拍做過事）。{why}",
+            stats.working_ticks
+        )
+    })
+}
+
 /// 把「她有多少時間是閉著眼睛的」講出來。
 ///
 /// 這個數字不講就是 bug。省電和停止工作在帳面上長得一模一樣：tick 照跑、
@@ -81,27 +115,46 @@ fn open_existing(data_dir: &Path) -> Result<Db> {
 /// 因為這裡直接 `return`）：他真的整天都在打字、這台機器答不出閒置訊號、
 /// 標題一直在跳所以閘門根本沒被問到。後面兩個是**閘門從第一秒起就沒生效**
 /// ——CPU 直接超支十幾倍，而摘要一個字都不說。
-fn report_idle(stats: &sister_capture::RecorderStats) {
+fn idle_line(stats: &sister_capture::RecorderStats) -> Option<String> {
     if stats.skipped_idle > 0 {
         // 分母是 `working_ticks` 不是 `ticks`：暫停和關閉的空轉拍從來沒問過
         // 「有人動過嗎」，把它們算進去只會把省下來的比例稀釋掉。
         let pct = stats.skipped_idle as f64 / stats.working_ticks.max(1) as f64 * 100.0;
-        println!(
+        Some(format!(
             "  省下：{} 次沒碰螢幕（{pct:.0}%——那段時間你沒動鍵盤滑鼠；最多每 5 秒仍會看一次）",
             stats.skipped_idle
-        );
+        ))
     } else if stats.idle_unknown > 0 {
         // 不說「這台機器」：`replay` 走的是腳本後端，它本來就沒有閒置訊號，
         // 而這一行在兩個地方都會印。說「擷取後端」兩邊都是真的。
-        println!(
+        Some(format!(
             "  ⚠  省電閘門一次都沒生效：問了 {} 次「有人動過嗎」，這個擷取後端一次都答不出來。\
              \n\x20    每一拍都會真的去讀一次螢幕——真的錄起來的話，CPU 大約是設計值的十幾倍。",
             stats.idle_unknown
-        );
-    } else if stats.working_ticks > 0 {
-        // 條件是 `working_ticks` 不是 `ticks`：整段被暫停或關閉的錄製，一次
-        // 都沒問過閒置訊號，這裡講什麼都是編的。上面那兩行會說真正的原因。
-        println!("  省下：0 次沒碰螢幕（這段時間你一直在動，或每一拍脈絡都變了）");
+        ))
+    } else if stats.idle_asked > 0 {
+        // 條件是 `idle_asked` 不是 `working_ticks`。這一行是一句**關於使用者
+        // 的斷言**（「你一直在動」），所以它得有依據，而依據只有一個：那一拍
+        // 真的走到了閘門。
+        //
+        // `working_ticks` 在 tick 的第 0 步就加了，閘門在第 5 步。被排除規則
+        // 擋掉的、以及在第 3～4 步 `?` 出去的，統統沒走到那裡。於是一場「資
+        // 料庫寫不進去、每一拍都炸掉」的錄製，摘要印的是
+        //
+        //     完成：7200 tick → 保留 0、重複 0、排除 0、無畫面 0
+        //     省下：0 次沒碰螢幕（這段時間你一直在動，或每一拍脈絡都變了）
+        //
+        // 五個零加一句她編出來的解釋，而那是整份摘要裡唯一一句解釋。
+        // 真正的原因在 `tick_failures_line`。
+        Some("  省下：0 次沒碰螢幕（這段時間你一直在動，或每一拍脈絡都變了）".to_string())
+    } else {
+        None
+    }
+}
+
+fn report_idle(stats: &sister_capture::RecorderStats) {
+    if let Some(line) = idle_line(stats) {
+        println!("{line}");
     }
     if stats.title_clock_ticks > 0 {
         println!(
@@ -127,6 +180,62 @@ fn report_exclusions(stats: &sister_capture::RecorderStats) {
             "  ⚠  這一整段沒有留下任何畫面，全部被上面的規則擋掉了。\
              如果那不是你要的，改 config 的 privacy 那一段。"
         );
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    /// 一場「每一拍都炸掉」的錄製，摘要必須說得出這件事，而且**不准**
+    /// 順口替使用者作證。
+    ///
+    /// 這兩件事是同一個 bug 的兩面。舊的摘要印的是
+    ///
+    ///     完成：7200 tick → 保留 0、重複 0、排除 0、無畫面 0
+    ///     省下：0 次沒碰螢幕（這段時間你一直在動，或每一拍脈絡都變了）
+    ///
+    /// 五個零，和「今天沒開電腦」逐字相同；唯一多出來的那句話還是編的
+    /// ——那一拍在第 4 步就 `?` 出去了，省電閘門在第 5 步，根本沒被問到。
+    /// 所以：⚠ 要出現，「你一直在動」要消失。
+    #[test]
+    fn a_recording_that_failed_every_tick_says_so_instead_of_vouching_for_him() {
+        let mut s = sister_capture::RecorderStats {
+            working_ticks: 7_200,
+            tick_failures: 7_200,
+            last_tick_error: Some("insert frame: database is locked".into()),
+            ..Default::default()
+        };
+        // 閘門在第 5 步，這一場一次都沒走到——`idle_asked` 維持 0。
+
+        let warn = tick_failures_line(&s).expect("整拍都炸掉了，一定要有一行");
+        assert!(warn.contains("每一拍都失敗了"), "{warn}");
+        assert!(warn.contains("database is locked"), "要帶原文：{warn}");
+        assert_eq!(idle_line(&s), None, "閘門沒被問到就不准解釋為什麼省下 0 次");
+
+        // 對照組：閘門真的問到了、而他真的一直在動——那句話這時才有依據。
+        s.tick_failures = 0;
+        s.last_tick_error = None;
+        s.idle_asked = 7_200;
+        assert_eq!(tick_failures_line(&s), None);
+        assert!(
+            idle_line(&s).is_some_and(|l| l.contains("你一直在動")),
+            "問到了閘門、一次都沒省下，就是他真的一直在動"
+        );
+    }
+
+    /// 偶爾炸幾拍是雜訊，不是「她什麼都沒記住」——兩句話不能混用。
+    #[test]
+    fn a_few_failed_ticks_do_not_get_the_end_of_the_world_sentence() {
+        let s = sister_capture::RecorderStats {
+            working_ticks: 7_200,
+            tick_failures: 3,
+            last_tick_error: Some("grab: 螢幕鎖定".into()),
+            ..Default::default()
+        };
+        let warn = tick_failures_line(&s).expect("三拍也要說");
+        assert!(warn.contains("3 拍失敗（共 7200 拍做過事）"), "{warn}");
+        assert!(!warn.contains("每一拍都失敗了"), "{warn}");
     }
 }
 
@@ -4026,6 +4135,10 @@ pub mod replay {
                 s.ticks
             );
         }
+        // 排在最前面：一場整拍都在炸的錄製，底下每一行都在描述一個空集合。
+        if let Some(line) = tick_failures_line(s) {
+            println!("{line}");
+        }
         report_idle(s);
         report_exclusions(s);
         if s.secrets_redacted > 0 {
@@ -4792,6 +4905,10 @@ pub mod record {
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
             stats.ticks, stats.kept, stats.duplicates, stats.excluded, stats.no_screen
         );
+        // 排在最前面：一場整拍都在炸的錄製，底下每一行都在描述一個空集合。
+        if let Some(line) = tick_failures_line(&stats) {
+            println!("{line}");
+        }
         report_idle(&stats);
         report_exclusions(&stats);
         report_ocr(&stats, config_ocr, rec.stores_images());

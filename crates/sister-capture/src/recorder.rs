@@ -84,6 +84,18 @@ pub struct RecorderStats {
     /// 從摘要的其他任何一個數字上都看不出來——省電和停止工作在帳面上長得
     /// 一模一樣，正是 alpha.4 那種「✓ 但什麼都沒產出」的失效形狀。
     pub skipped_idle: u64,
+    /// 這一拍**走到了省電閘門**的次數。
+    ///
+    /// 摘要裡那句「省下：0 次沒碰螢幕（這段時間你一直在動，或每一拍脈絡都
+    /// 變了）」需要它。那句話以前的條件是 `working_ticks > 0`，而閘門在
+    /// tick 的第 5 步——被排除擋掉的、以及在第 3 到第 4 步就 `?` 出去的，
+    /// 統統沒走到那裡。於是一場「資料庫寫不進去、每一拍都炸掉」的錄製，
+    /// 摘要主動解釋說「這段時間你一直在動」——一句它沒有任何依據的話，
+    /// 而且是那份摘要裡唯一的解釋。
+    ///
+    /// 脈絡變了那一種也算「問到了」：那時候不問 `idle_ms` 是因為答案已經
+    /// 確定（睜眼），而那正是那句話後半段「或每一拍脈絡都變了」講的事。
+    pub idle_asked: u64,
     /// 問了「有人動過嗎」但這台機器答不出來的次數。
     ///
     /// 沒有這個數字的話，`skipped_idle == 0` 有三種完全不同的意思，而它們
@@ -138,6 +150,27 @@ pub struct RecorderStats {
     /// 只印前者的話，兩者看起來一模一樣。實測踩過：12 張畫面、0 行文字、
     /// 摘要一片祥和，要等到搜尋永遠是空的才會發現。
     pub ocr_blocks: u64,
+    /// **整拍**失敗了幾次（`tick` 帶著 `Err` 離開）。
+    ///
+    /// 錄製迴圈把單次 tick 的錯誤吞成一行 `tracing::warn!` 就繼續跑，理由是
+    /// 對的：抓不到畫面多半是暫時的（切使用者、螢幕休眠），下一秒就好了。
+    /// 錯的是**沒有留計數**——而 `record.log` 在 `%APPDATA%` 深處，會去翻它
+    /// 的人已經知道出事了。
+    ///
+    /// 沒有這個數字的話，一場每一拍都炸掉的錄製印出來是
+    ///
+    /// ```text
+    /// 完成：7200 tick → 保留 0、重複 0、排除 0、無畫面 0
+    /// 省下：0 次沒碰螢幕（這段時間你一直在動，或每一拍脈絡都變了）
+    /// ```
+    ///
+    /// ——和一場「腳本裡本來就沒東西」一模一樣的五個數字，加上一句主動編出
+    /// 來的解釋。而 `ocr_failures`、`image_failures` 早就各自有計數，理由
+    /// 逐字相同：吞掉錯誤可以，不留計數不行。這一條是那條規則上最大的漏洞
+    /// ——它蓋住的不是一種訊號，是整拍。
+    pub tick_failures: u64,
+    /// 最後一次整拍失敗的原因。一句原文遠比一個數字有用。
+    pub last_tick_error: Option<String>,
     /// OCR 失敗了幾次。
     ///
     /// OCR 壞掉不該讓錄製停擺——畫面與脈絡還是值得留下來。但它也絕對不能
@@ -405,10 +438,21 @@ impl<B: Backend> Recorder<B> {
     /// 這一層只做一件事：量整個 tick 有多久。它必須包住**每一條**離開的
     /// 路徑（含被排除、沒畫面、以及 `?` 帶出去的錯誤），否則「沒歸因到的
     /// 時間」那個數字會偏向好看的方向——而那個數字唯一的用途就是抓自己說謊。
+    ///
+    /// 整拍失敗也在這裡記帳（見 [`RecorderStats::tick_failures`]）。**記在這
+    /// 裡而不是呼叫端**：呼叫端有兩個（`record` 的迴圈、`replay`），而一個
+    /// 要每個呼叫端記得去加的計數器，就是這個專案一路在修的那種「安靜地不
+    /// 生效」——第三個呼叫端長出來的那天不會有人記得，而症狀是摘要少講一
+    /// 件事，沒有任何測試會紅。
     pub fn tick(&mut self, ts: Millis) -> Result<Tick> {
         let t = Instant::now();
         let out = self.tick_inner(ts);
         self.timings.tick.record(t.elapsed());
+        if let Err(e) = &out {
+            self.stats.tick_failures += 1;
+            // `{e:#}` 帶上整條 anyhow context 鏈，和 OCR / 存圖那兩個一樣。
+            self.stats.last_tick_error = Some(format!("{e:#}"));
+        }
         out
     }
 
@@ -503,6 +547,9 @@ impl<B: Backend> Recorder<B> {
         //    換了視窗、換了分頁、標題變了 → 畫面幾乎不可能沒變，直接睜眼。
         //    這一條不是為了效能，是為了收窄那個 5 秒的盲區：通知搶焦點、
         //    安裝程式跳出來這類事情不需要任何輸入，但都會動到脈絡。
+        // 走到這裡就算「閘門問到了」。摘要那句「你一直在動」只有在這個數字
+        // 大於 0 的時候才有依據——見 `RecorderStats::idle_asked`。
+        self.stats.idle_asked += 1;
         let idle_signal = if context_changed {
             None
         } else {
@@ -977,6 +1024,64 @@ mod tests {
         let spy = spy.borrow();
         assert!(spy.polled.is_empty(), "暫停期間不該讀剪貼簿內容");
         assert_eq!(spy.skipped, vec![1_000], "但一定要把水位推過去");
+    }
+
+    /// 整拍炸掉必須留下數字，而且**不能假裝閘門問過了**。
+    ///
+    /// 錄製迴圈把 tick 的錯誤吞成一行 `tracing::warn!`。那個決定是對的，
+    /// 但在它之外一個計數器都沒有的話，一場「每一拍都失敗」的錄製印出來
+    /// 和「今天沒開電腦」一模一樣：五個零。這裡用一個永遠壞掉的剪貼簿
+    /// 來造那一場——它炸在第 4 步，也就是省電閘門（第 5 步）之前。
+    ///
+    /// 所以這個測試同時釘住兩件事：`tick_failures` 有在數（在 `tick()`
+    /// 裡數，不是在呼叫端），以及 `idle_asked` **沒有**被數到。後者是
+    /// 摘要那句「這段時間你一直在動」的唯一依據——`working_ticks` 在第 0
+    /// 步就加了，拿它當依據等於憑空替使用者作證。
+    #[test]
+    fn a_tick_that_blows_up_every_time_leaves_a_number_and_no_alibi() {
+        use crate::traits::{CompositeBackend, NullFocus, NullInput, NullOcr, NullScreen};
+
+        struct BrokenClipboard;
+        impl crate::traits::ClipboardSource for BrokenClipboard {
+            fn poll(&mut self, _ts: Millis) -> Result<Option<ClipboardEvent>> {
+                anyhow::bail!("剪貼簿被別的程式鎖住了")
+            }
+        }
+
+        let backend = CompositeBackend {
+            name: "broken".into(),
+            screen: NullScreen,
+            focus: NullFocus,
+            clipboard: BrokenClipboard,
+            input: NullInput,
+            ocr: NullOcr,
+        };
+        let mut rec = Recorder::new(
+            backend,
+            Db::open_in_memory().unwrap(),
+            Config::default(),
+            None,
+        )
+        .unwrap();
+
+        for ts in [1_000, 2_000, 3_000] {
+            assert!(rec.tick(ts).is_err(), "{ts} 這一拍應該炸掉");
+        }
+
+        let s = rec.stats();
+        assert_eq!(s.working_ticks, 3, "三拍都過了 enabled/暫停那兩道門");
+        assert_eq!(s.tick_failures, 3, "三拍都得算進失敗");
+        assert!(
+            s.last_tick_error
+                .as_deref()
+                .is_some_and(|e| e.contains("剪貼簿被別的程式鎖住了")),
+            "要留下原文，不是只留一個數字：{:?}",
+            s.last_tick_error
+        );
+        assert_eq!(
+            s.idle_asked, 0,
+            "閘門在第 5 步，一次都沒走到——摘要不准說「你一直在動」"
+        );
     }
 
     /// 暫停與解除各留一筆事件——不然事後看不出「那三小時是暫停」還是
