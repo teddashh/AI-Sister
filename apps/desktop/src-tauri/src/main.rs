@@ -930,6 +930,13 @@ struct HotkeyView {
     registered: bool,
     /// 沒搶到的話，作業系統或 Tauri 給的原因。
     reason: Option<String>,
+    /// 剛剛試了、但沒搶到的那一組。[`wanted`](Self::wanted) 已經退回上一組。
+    ///
+    /// 存在的理由是 [`apply_hotkey`] 會先 `unregister_all()`。搶不到的時候
+    /// 如果就這樣結束，**連本來好好的那一組也一起沒了**——而畫面上還顯示著
+    /// 一組既沒註冊也沒寫進設定檔的組合，下次開機又默默變回舊的那個。
+    /// 使用者看到的只有「剛剛試的那組沒成功」，完全不知道暫停鍵從此失效。
+    rejected: Option<String>,
 }
 
 struct Hotkey(Mutex<HotkeyView>);
@@ -953,6 +960,7 @@ fn apply_hotkey(app: &tauri::AppHandle, wanted: &str) -> HotkeyView {
             wanted,
             registered: false,
             reason: None,
+            rejected: None,
         };
     }
 
@@ -975,6 +983,7 @@ fn apply_hotkey(app: &tauri::AppHandle, wanted: &str) -> HotkeyView {
         wanted,
         registered: reason.is_none(),
         reason,
+        rejected: None,
     }
 }
 
@@ -1006,19 +1015,36 @@ fn hotkey_state(hotkey: tauri::State<'_, Hotkey>) -> HotkeyView {
 ///
 /// 順序是刻意的。反過來寫（先存再註冊）的話，一組搶不到的熱鍵會留在設定檔裡，
 /// 下次開機再失敗一次——而使用者早就把那一頁關掉了。
+///
+/// **搶不到的時候要把舊的那組裝回去。** [`apply_hotkey`] 開頭就
+/// `unregister_all()` 了，所以「試了一組被別人佔走的組合」以前的後果是連本來
+/// 好好的那一組也一起消失：`Ctrl+Alt+P` 本來按得動，他試了一次 `Ctrl+Alt+S`
+/// ——從那一刻起暫停熱鍵完全失效，設定頁顯示一組設定檔裡不存在的組合，下次
+/// 開機又默默變回 `Ctrl+Alt+P`。而畫面上那句話讓他以為只有剛剛試的那組沒成功。
+///
+/// 對一顆暫停鍵來說那是最壞的一種壞法：他以為她停了，她還在錄。
 #[tauri::command]
 fn hotkey_set(
     app: tauri::AppHandle,
     combo: String,
     hotkey: tauri::State<'_, Hotkey>,
 ) -> Result<HotkeyView, String> {
+    let previous = hotkey.0.lock().expect("hotkey").wanted.clone();
     let view = apply_hotkey(&app, &combo);
-    if view.registered || view.wanted.is_empty() {
+    let view = if view.registered || view.wanted.is_empty() {
         let path = config_path()?;
         let mut c = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
         c.shell.pause_shortcut = view.wanted.clone();
         c.save(&path).map_err(|e| format!("{e:#}"))?;
-    }
+        view
+    } else {
+        // 設定檔沒動過，所以退回去的一定是設定檔裡那一組。`rejected` 帶著他
+        // 剛剛打的那個組合，讓那句話講得出「你試的那組沒搶到，還在用舊的」。
+        HotkeyView {
+            rejected: Some(view.wanted),
+            ..apply_hotkey(&app, &previous)
+        }
+    };
     *hotkey.0.lock().expect("hotkey") = view.clone();
     Ok(view)
 }

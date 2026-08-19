@@ -126,9 +126,19 @@ function paintHotkey(view) {
   el.combo.textContent =
     view.wanted === "" ? "沒有設" : pretty(view.wanted);
 
-  const bad = view.wanted !== "" && !view.registered;
+  const bad = view.rejected != null || (view.wanted !== "" && !view.registered);
   el.hotkeySay.classList.toggle("bad", bad);
-  if (view.wanted === "") {
+  // 剛剛試的那組被別人佔走了。後端已經把舊的那組裝回去了——講清楚「你試的
+  // 那組沒成功、現在還在用哪一組」，不然他會以為暫停鍵從此不見了（以前**真的**
+  // 會不見：`apply_hotkey` 先 `unregister_all()`，失敗就什麼都沒裝回去）。
+  if (view.rejected != null) {
+    const now = view.registered
+      ? `還在用 ${pretty(view.wanted)}，那一組按得動。`
+      : view.wanted === ""
+        ? "熱鍵本來就是關掉的，維持原狀。"
+        : `而舊的那組 ${pretty(view.wanted)} 現在也搶不到（${view.reason ?? "原因不明"}）——改用系統匣裡的暫停。`;
+    el.hotkeySay.textContent = `${pretty(view.rejected)} 搶不到，多半是別的程式先拿走了。${now}`;
+  } else if (view.wanted === "") {
     el.hotkeySay.textContent =
       "熱鍵是關掉的。暫停還在系統匣選單和字母人身上，只是要先找到她。";
   } else if (view.registered) {
