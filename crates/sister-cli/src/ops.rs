@@ -2085,6 +2085,33 @@ pub mod stats {
             fmt::bytes(s.db_bytes),
             fmt::bytes(s.image_bytes)
         );
+        // 「畫面檔」那個數字是資料庫加出來的（`SUM(image_bytes)`），不是去
+        // 量硬碟。保留期清圖的時候會把那一欄一起歸零，所以平常兩者對得上。
+        //
+        // 對不上的那一種很具體：`sister export`（沒加 `--with-frames`）之後，
+        // 對著那個匯出目錄跑 stats。資料庫整份帶走了、圖一張都沒帶，於是這
+        // 一行說「畫面檔 1.2 GB」，而那個資料夾裡是空的——正好是他打開這一頁
+        // 想確認的那件事。
+        //
+        // 不逐檔去驗（那是十萬次 stat，而 stats 要快）。只看 `frames/` 這個
+        // 根目錄在不在、空不空：一次 `read_dir`，答得出這個唯一夠糟的情況。
+        if s.image_bytes > 0 {
+            let root = Config::frames_dir(data_dir);
+            let empty = match std::fs::read_dir(&root) {
+                Ok(mut it) => it.next().is_none(),
+                // 讀不到就不猜。權限不足的時候喊「圖不見了」是製造假警報。
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            };
+            if empty {
+                println!(
+                    "            ⚠ 但 {} 是空的（或不在）——上面那個數字是資料庫加出來的，",
+                    root.display()
+                );
+                println!(
+                    "            不是去量硬碟。沒帶 `--with-frames` 的匯出就長這樣：字都在，圖沒來。"
+                );
+            }
+        }
         // Phase 0 的退出條件之一：每天 < 300MB
         let budget = 300 * 1024 * 1024;
         match per_day {
