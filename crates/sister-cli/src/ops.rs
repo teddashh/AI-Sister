@@ -942,6 +942,17 @@ pub mod query {
                 // 的 hits 和 query 裡的字沒有任何關係，當成搜尋結果去解讀
                 // 會得到完全錯的結論。
                 "shape": shape.name(),
+                // 她實際拿去比對的字。`shape` 說了走哪條路，這一欄說的是
+                // 那條路上她到底找了什麼——alpha.19 之後這兩者會不一樣：
+                // 「剛剛那個優惠方案」剝成「優惠方案」才找得到。
+                //
+                // 終端機那一份是靠人看出來的（答案就在眼前），機器讀的這份
+                // 沒有那個機會。而題庫正是 Phase 2 評測語料的來源，一份寫著
+                // 「這題 0 筆」卻說不出她找了什麼的紀錄，事後沒有人查得動。
+                "terms": match shape {
+                    Shape::Recent => serde_json::Value::Null,
+                    Shape::Keywords => sister_core::question::terms(text).into(),
+                },
                 "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
                 // 撈滿上限＝被切掉了。機器讀的那一份更要講：寫腳本的人
                 // 看不到終端機上的那個「+」，會直接把長度當成總數。
