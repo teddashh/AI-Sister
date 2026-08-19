@@ -2991,6 +2991,32 @@ pub mod record {
         }
     }
 
+    /// 這個資料目錄上已經有人在錄了嗎。有的話就 `Err`。
+    ///
+    /// 和 `gate` 一樣拆成獨立函式、一樣不放 `#[cfg(windows)]`：一道只有目標
+    /// 平台才執行得到的閘門，等於一道沒有被執行過的閘門。
+    fn already_recording(data_dir: &Path) -> Result<()> {
+        let now = sister_core::now_ms();
+        if !sister_core::heartbeat::is_recording(data_dir, now) {
+            return Ok(());
+        }
+        // 講得出「多久以前」，那個人才判斷得出這是不是自己剛剛開的那一個。
+        let ago = sister_core::heartbeat::last_beat(data_dir)
+            .map(|ts| format!("最後一次心跳是 {} 秒前", (now - ts).max(0) / 1000))
+            .unwrap_or_else(|| "而且它剛剛還在動".to_string());
+        anyhow::bail!(
+            "已經有一個 sister record 在這個資料目錄上跑了（{ago}）。\n\n\
+             兩個一起錄會對同一顆資料庫各寫一份，而唯一看得出來的症狀是\n\
+             磁碟用得比講好的快一倍——所以這裡直接擋下來。\n\n\
+             要換手的話先請那一個收工：\n    \
+             sister stop\n\n\
+             如果你確定那個行程已經死了，等 {} 秒它的心跳就會自己過期。\n\
+             （心跳檔：{}）\n",
+            sister_core::heartbeat::STALE_AFTER_MS / 1000,
+            sister_core::heartbeat::beat_path(data_dir).display()
+        );
+    }
+
     /// 同意書那道閘門。過不了就 `Err`，過得了就回一份**可能被降級過**的設定。
     ///
     /// 拆成獨立函式而不是寫在 `run` 裡，是為了讓它在這台 Linux 開發機上跑得到
@@ -3084,6 +3110,15 @@ pub mod record {
         // 同意書擋在平台檢查**前面**。沒有同意就不該錄，這件事和這台機器有
         // 沒有擷取後端無關；而且放後面的話，這道閘門在非 Windows 上永遠碰不到。
         let config = gate(data_dir, config)?;
+
+        // **一個資料目錄只准一個 recorder。** 這道閘門以前只長在字母人那一邊
+        // ——所以從字母人按兩次會被擋，但開兩個終端機各打一次 `sister record`
+        // 不會。兩個行程對同一顆資料庫各錄一份，唯一看得出來的症狀是磁碟用得
+        // 比講好的快一倍，而使用者會以為是保留期壞了。
+        //
+        // 敢直接擋是因為心跳自己會過期：一個當掉的 recorder 留下的時戳
+        // 16 秒後就不算數，所以這裡不會把人鎖在門外。
+        already_recording(data_dir)?;
 
         #[cfg(not(windows))]
         {
@@ -3899,7 +3934,7 @@ pub mod record {
     }
     #[cfg(test)]
     mod record_tests {
-        use super::{BootBeat, ConfigWatch};
+        use super::{BootBeat, ConfigWatch, already_recording};
         use crate::ops::tmp::Tmp;
         use sister_core::config::Config;
         use sister_core::consent::{Consent, Sheet};
@@ -3923,6 +3958,55 @@ pub mod record {
                 "開機的第一瞬間就要看得見她在起來"
             );
             drop(boot);
+        }
+
+        #[test]
+        fn two_terminals_do_not_get_two_recorders_on_one_database() {
+            // 字母人那一邊早就擋了，但 `sister record` 自己沒有——所以開兩個
+            // 終端機各打一次就成立。兩個行程對同一顆資料庫各錄一份，唯一的
+            // 症狀是磁碟用得比講好的快一倍，而使用者會以為是保留期壞了。
+            let dir = Tmp::new("two-recorders");
+            already_recording(&dir.0).expect("沒有人在錄的時候要放行");
+            let _first = BootBeat::start(&dir.0);
+            let err = already_recording(&dir.0).expect_err("第二個要被擋下來");
+            let said = format!("{err}");
+            // 擋下來還要講得出下一步是什麼。一句「不行」會讓人去刪資料庫。
+            assert!(said.contains("sister stop"), "要指路：{said}");
+            assert!(said.contains("秒"), "要講得出多久以前／等多久：{said}");
+        }
+
+        #[test]
+        fn the_second_recorder_is_stopped_by_run_itself_not_just_by_the_helper() {
+            // 上一條測的是那個判斷；這一條測**它真的被叫到了**。少了這一行，
+            // 閘門會是一支寫得很好、卻沒有人呼叫的函式——那是這個專案獵的
+            // 另一種 bug：讀起來很對，一輩子命中不了任何東西。
+            //
+            // 在 Linux 上 `run` 走完同意書之後會抱怨「這個平台還沒有擷取
+            // 後端」。所以斷言不是「有沒有錯」，是**錯的是哪一件**。
+            let dir = Tmp::new("run-guard");
+            let mut c = Consent::default();
+            c.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &c).expect("save");
+            let _first = BootBeat::start(&dir.0);
+
+            let err = super::run(&dir.0, Config::default(), None, None)
+                .expect_err("已經有人在錄，第二個不該起得來");
+            let said = format!("{err}");
+            assert!(
+                said.contains("已經有一個 sister record"),
+                "擋下來的該是那道閘門，不是平台檢查：{said}"
+            );
+        }
+
+        #[test]
+        fn a_dead_recorder_does_not_lock_the_door_forever() {
+            // 敢直接擋，靠的是心跳自己會過期。它不會過期的話，一次當機就等於
+            // 從此錄不了——而那個人手上只有一句「已經有一個在跑了」，指著一個
+            // 早就不存在的行程。
+            let dir = Tmp::new("stale-lock");
+            let long_ago = sister_core::now_ms() - sister_core::heartbeat::STALE_AFTER_MS - 1;
+            sister_core::heartbeat::beat(&dir.0, long_ago).expect("beat");
+            already_recording(&dir.0).expect("過期的心跳不算有人在錄");
         }
 
         #[test]
