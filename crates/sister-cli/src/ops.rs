@@ -1971,15 +1971,24 @@ pub mod doctor {
         }
 
         println!("\n保留期");
+        // 0 天不是「永遠留著」，是「立刻刪」——那是 SPEC §11.1 的「0 天 = 只留
+        // OCR 文字」。這兩件事在數字上長得一樣，而它們是相反的意思，所以在這裡
+        // 就講清楚，不要讓人自己去猜哪一種。
         line(
             true,
             "畫面",
-            &format!("{} 天（到期只刪圖，字留著）", config.retention.frames_days),
+            &match config.retention.frames_days {
+                0 => "0 天＝寫下去就刪，等於只留字".to_string(),
+                n => format!("{n} 天（到期只刪圖，字留著）"),
+            },
         );
         line(
             true,
             "文字與事實",
-            &format!("{} 天（到期整列消失）", config.retention.text_days),
+            &match config.retention.text_days {
+                0 => "0 天＝寫下去就刪，她等於什麼都不會記得".to_string(),
+                n => format!("{n} 天（到期整列消失）"),
+            },
         );
         // 這兩個數字以前是**純粹的宣稱**——設定檔裡寫著 30 天，而沒有任何
         // 一行程式碼會刪掉任何東西。同樣不宣稱、直接示範：現在就去問資料庫
