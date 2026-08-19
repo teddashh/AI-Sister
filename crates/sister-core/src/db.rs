@@ -721,14 +721,27 @@ impl Db {
     /// 被保留期刪掉（只知道它在 `to` 之前）；`to` 是 None 表示到這顆資料庫的
     /// 最後一刻都還在暫停。回傳的是**真實**區間，沒有裁到窗內——呼叫端要畫的話
     /// 自己裁，但至少它知道這一段其實更長。
+    ///
+    /// **掃描也不停在 `to_ts`。** 這句話上一版只對 `from` 那一端成立：SQL 裡
+    /// 有一條 `ts < ?1`，於是一段星期五 18:00 按下、星期一 09:00 才解除的暫停，
+    /// 在看星期五的時候那筆 `resume` 落在窗外被篩掉，回的是 `to: None`——
+    /// 而 `to: None` 在時間軸上印的是「之後沒有再解除」。那是一句關於**接下來
+    /// 所有時間**的話，從一份刻意裁到午夜的資料裡講出來，而且和真正「到現在
+    /// 都還沒解除」長得一模一樣。
+    ///
+    /// 證據不只是推論：`timeline.js` 裡有一條專門處理 `p.to > dayEnd` 的分支
+    /// （「跨過午夜；這一天裡佔了 X」），而它**到不了**——任何 `ts > dayEnd`
+    /// 的 `resume` 正好就是那句 SQL 篩掉的那些。畫面早就知道該講哪一句，只是
+    /// 資料永遠不會長成那個形狀。
+    ///
+    /// 拿掉上界不會變貴：`pause`／`resume` 是人按出來的，一天幾筆，而這一支
+    /// 本來就沒有下界（見上一段），整條掃描的量級不變。
     pub fn pause_spans(&self, from_ts: Millis, to_ts: Millis) -> Result<Vec<PauseSpan>> {
         let mut stmt = self.conn.prepare(
             "SELECT kind, ts FROM system_events
-             WHERE kind IN ('pause', 'resume') AND ts < ?1 ORDER BY ts, id",
+             WHERE kind IN ('pause', 'resume') ORDER BY ts, id",
         )?;
-        let rows = stmt.query_map([to_ts], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Millis>(1)?))
-        })?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Millis>(1)?)))?;
 
         let mut all: Vec<PauseSpan> = Vec::new();
         let mut open: Option<Millis> = None;
@@ -752,7 +765,10 @@ impl Db {
 
         // 留下和 [from_ts, to_ts) 有交集的。未知的那一端當作無限遠——不知道
         // 何時開始的那一段，寧可多畫一條也不要讓一片空白沒人解釋。
-        all.retain(|s| s.to.is_none_or(|t| t > from_ts));
+        //
+        // 上界的篩選以前是 SQL 做的（順便就把跨窗的 `resume` 一起吃掉了），
+        // 現在移到這裡：篩的是**整段**在不在窗外，不是那一筆事件在不在窗內。
+        all.retain(|s| s.to.is_none_or(|t| t > from_ts) && s.from.is_none_or(|f| f < to_ts));
         Ok(all)
     }
 
@@ -3409,6 +3425,81 @@ mod tests {
         // 而且回的是**真實**起點（昨天晚上），不是被裁到今天午夜——
         // 使用者要看得出來這一段其實從昨天就開始了。
         assert!(today[0].from.expect("known start") < 3 * DAY);
+    }
+
+    /// 星期一才解除的那一下，在星期五那一頁上不能變成「之後沒有再解除」。
+    ///
+    /// 上一版的 SQL 有 `AND ts < ?1`，於是那筆 `resume` 落在窗外被篩掉，
+    /// 這一段回的是 `to: None`——而時間軸把 `to: None` 印成「之後沒有再解除」，
+    /// 一句關於接下來所有時間的話，從一份刻意裁到午夜的資料裡講出來，還和
+    /// 真正「到現在都還沒解除」長得一模一樣。
+    ///
+    /// `to` 要是**真值**，畫面才選得到那句「跨過午夜」——那條分支寫在
+    /// `timeline.js` 裡，而在這行 SQL 改掉之前它一次都執行不到。
+    #[test]
+    fn a_pause_released_on_monday_is_not_a_pause_that_was_never_released() {
+        const DAY: Millis = 86_400_000;
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let mut put = |kind, ts| {
+            db.insert_system(
+                s,
+                &SystemEvent {
+                    ts,
+                    kind,
+                    detail: None,
+                },
+            )
+            .expect("insert");
+        };
+
+        // 星期五 18:00 按下，星期一 09:00 解除。
+        let pressed = 5 * DAY + 64_800_000;
+        let released = 8 * DAY + 32_400_000;
+        put(SystemKind::CapturePaused, pressed);
+        put(SystemKind::CaptureResumed, released);
+
+        let friday = db.pause_spans(5 * DAY, 6 * DAY).expect("spans");
+        assert_eq!(
+            friday,
+            vec![PauseSpan {
+                from: Some(pressed),
+                to: Some(released),
+            }],
+            "解除的時刻在窗外，但它存在——回 None 會讓畫面說「之後沒有再解除」"
+        );
+        assert!(
+            friday[0].to.expect("known end") > 6 * DAY,
+            "畫面靠這個比較選出「跨過午夜」那句話"
+        );
+
+        // 而真的沒解除的那一段，還是要回 None——不然這條測試等於把兩種狀態
+        // 一起壓成「總是有結尾」，換一個方向說同一個謊。
+        let mut db2 = test_db();
+        let s2 = db2.start_session("test", "0.0.1").expect("session");
+        db2.insert_system(
+            s2,
+            &SystemEvent {
+                ts: pressed,
+                kind: SystemKind::CapturePaused,
+                detail: None,
+            },
+        )
+        .expect("insert");
+        assert_eq!(
+            db2.pause_spans(5 * DAY, 6 * DAY).expect("spans"),
+            vec![PauseSpan {
+                from: Some(pressed),
+                to: None,
+            }],
+        );
+
+        // 整段都在窗**之後**的，一樣不該出現在星期五那一頁上。上界的篩選
+        // 從 SQL 搬到了 retain，這一條盯著它沒有跟著消失。
+        assert!(
+            db.pause_spans(3 * DAY, 4 * DAY).expect("spans").is_empty(),
+            "星期三沒有暫停過"
+        );
     }
 
     /// 開頭被保留期刪掉的那一段，寧可多畫一條也不要讓空白沒人解釋。

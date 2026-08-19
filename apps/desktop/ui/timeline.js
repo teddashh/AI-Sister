@@ -102,13 +102,19 @@ function build(view, dayStart, now) {
   const rows = [];
   let cursor = dayStart;
   for (const e of entries) {
+    // 空白檢查對兩種 entry 都要做。以前只有 moment 那一支有，於是最後一筆
+    // 09:12、下午 14:00 才按下暫停的話，中間那四小時四十八分一列都沒有——
+    // 清單直接從 09:12 跳到 14:00。時間戳看得到，所以這不是一句假話，但它
+    // 違反這個檔案自己那條「每一段空白都必須有名字」，而且讀的人會把整段
+    // 空白算到那個暫停頭上，也就是把她**還在跑**的四小時算成她閉著眼。
+    const at = e.pause ? e.pause.start : e.at;
+    if (at - cursor >= QUIET) {
+      rows.push({ kind: "quiet", start: cursor, end: at });
+    }
     if (e.pause) {
       rows.push({ kind: "pause", ...e.pause });
       cursor = Math.max(cursor, e.pause.end);
       continue;
-    }
-    if (e.at - cursor >= QUIET) {
-      rows.push({ kind: "quiet", start: cursor, end: e.at });
     }
     rows.push({ kind: "moment", m: e.moment });
     cursor = Math.max(cursor, e.at);
@@ -116,7 +122,21 @@ function build(view, dayStart, now) {
 
   // 這一天已經過完了，最後那段空白也要交代。今天的話不畫——剩下的時間
   // 不是「沒有紀錄」，是還沒發生，而那兩件事看起來一樣就糟了。
-  if (dayEnd <= now && dayEnd - cursor >= QUIET) {
+  //
+  // 被切掉的那一天也不畫，理由一樣：那一段不是「沒有新的東西進來」，是
+  // 「我沒有送過來」。後端是**由早到晚**排序之後取前 800 筆，所以被切掉
+  // 的永遠是尾巴——一個 4213 筆的忙日會停在 13:47，然後底下印
+  //
+  //     13:47　接下來 10 小時 13 分沒有新的東西進來
+  //           可能是離開了，也可能是畫面一直沒變
+  //
+  // 那十個小時裡她記了三千多筆。這一列是這個檔案用來**替空白命名**的機制
+  // （見開頭那句「每一段空白都必須有名字」），而這裡給了一個假名字，和真的
+  // 「她在跑，只是畫面沒變」長得一模一樣。標題那行的「只顯示前 800 筆」
+  // 救不了它：那句話在最上面，這一列在最下面，而人是照著最靠近的那句讀的。
+  if (view.truncated) {
+    rows.push({ kind: "cut", start: cursor, end: dayEnd });
+  } else if (dayEnd <= now && dayEnd - cursor >= QUIET) {
     rows.push({ kind: "quiet", start: cursor, end: dayEnd });
   }
   return rows;
@@ -223,15 +243,23 @@ function gapRow(row, dayStart) {
   const [head, tail] =
     row.kind === "pause"
       ? pauseWords(row, dayStart)
-      : [
-          // 「接下來」這三個字是必要的。左邊那格印的是這段空白的**開始**時間，
-          // 而它通常和上一筆同一分鐘——不說出方向的話，畫面上會出現兩列
-          // 09:12，讀的人得自己猜第二列指的是往前還是往後。
-          `接下來 ${lasted(row.end - row.start)} 沒有新的東西進來`,
-          // 這句是重點。一樣的畫面會被去重掉，所以「沒有新的一筆」
-          // **不等於**她沒在跑——不講清楚的話這條線看起來像故障。
-          "可能是離開了，也可能是畫面一直沒變",
-        ];
+      : row.kind === "cut"
+        ? [
+            // 這一列的全部意義是「底下這段空白不是我造成的」。它取代了
+            // 一句以前印在這裡的假話（「接下來 10 小時沒有新的東西進來」），
+            // 而那句話和真的沒東西長得一模一樣。
+            `這一天還沒完，剩下的 ${lasted(row.end - row.start)} 我沒有送過來`,
+            `一次只讀前 ${LIMIT} 筆——不是那段時間沒有東西`,
+          ]
+        : [
+            // 「接下來」這三個字是必要的。左邊那格印的是這段空白的**開始**時間，
+            // 而它通常和上一筆同一分鐘——不說出方向的話，畫面上會出現兩列
+            // 09:12，讀的人得自己猜第二列指的是往前還是往後。
+            `接下來 ${lasted(row.end - row.start)} 沒有新的東西進來`,
+            // 這句是重點。一樣的畫面會被去重掉，所以「沒有新的一筆」
+            // **不等於**她沒在跑——不講清楚的話這條線看起來像故障。
+            "可能是離開了，也可能是畫面一直沒變",
+          ];
   what.textContent = `${head}　`;
   const em = document.createElement("em");
   em.textContent = tail;
@@ -520,7 +548,7 @@ async function load(keep = null) {
  * 正是最需要親眼看過的東西。所以這裡換掉的是 `invoke`，`load` / `openDay` /
  * `forget` 走的仍然是產品那一條路，連刪完之後重讀清單都是真的。
  */
-function fakeBackend() {
+function fakeBackend(mode = "1") {
   const day = Date.UTC(2026, 7, 17) - tzOffsetMs();
   const at = (h, m) => day + h * 3_600_000 + m * 60_000;
   const on = (d, h, m) => at(h, m) - d * DAY;
@@ -577,9 +605,14 @@ function fakeBackend() {
     },
   ];
   // 第一段是前一天晚上按的（from 落在 dayStart 之前），第二段是當天中午按的。
+  // `cross` 換掉第二段：晚上按下、明天早上才解除——那是 `pauseWords` 裡唯一
+  // 一條在後端修好之前選不到的分支。時間挑在最後一筆（16:40）之後，不然這一頁
+  // 會同時畫出「她被暫停」和暫停期間的紀錄，看起來像另一個 bug。
   let pauses = [
     { from: day - 3 * 3_600_000, to: at(9, 12) },
-    { from: at(10, 30), to: at(14, 30) },
+    mode === "cross"
+      ? { from: at(17, 0), to: at(33, 0) }
+      : { from: at(10, 30), to: at(14, 30) },
   ];
   const inRange = (m, a, b) => m.ts >= a && m.ts < b;
   const hit = (a, b) => moments.filter((m) => inRange(m, a, b));
@@ -618,7 +651,7 @@ function fakeBackend() {
               (p.to ?? Infinity) > arg.fromTs &&
               (p.from ?? -Infinity) < arg.toTs,
           ),
-          truncated: false,
+          truncated: mode === "cut",
         };
       case "forget_preview":
       case "forget_range": {
@@ -661,8 +694,14 @@ function fakeBackend() {
   };
 }
 
-if (new URLSearchParams(globalThis.location.search).get("demo") === "1") {
-  invoke = fakeBackend();
+// `1` 是平常那一天；`cut` 是被 LIMIT 切掉的那一天；`cross` 是那段解除時刻
+// 落在明天的暫停。後兩個各自對應一條在這之前**畫不出來**的列——`cut` 那一列
+// 以前印的是「接下來 N 小時沒有新的東西進來」（假的），`cross` 那一句
+// （「跨過午夜」）則是寫在 `pauseWords` 裡但永遠選不到，因為後端的 SQL 把
+// 那筆 resume 篩掉了。開發機開不起 Tauri，看不到就等於沒做過。
+const demo = new URLSearchParams(globalThis.location.search).get("demo");
+if (demo === "1" || demo === "cut" || demo === "cross") {
+  invoke = fakeBackend(demo);
   // 「現在」推到這一天之後，好讓收尾那段空白也畫出來——16:40 之後的七個
   // 小時是這一頁最容易被漏掉的一塊，看不到就等於沒做過。
   Date.now = () => Date.UTC(2026, 7, 19);

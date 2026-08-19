@@ -251,6 +251,21 @@ h2 {
   border-left-style: dashed;
 }
 
+/*
+ * 被 LIMIT 切掉的那一段。**不能**用 `.quiet` 那個 0.4 的透明度：這一列說的
+ * 是「底下那幾個小時我沒送過來」，而 `.quiet` 說的是「那幾個小時真的沒東西」
+ * ——兩句話的意思相反，長得一樣的話這一列就白加了。用和標題那句
+ * 「只顯示前 800 筆」同一個警告色，因為它們講的是同一件事的兩端。
+ */
+.cut .body {
+  border-left-color: var(--warn);
+  border-left-style: dotted;
+}
+
+.cut .what {
+  color: var(--warn);
+}
+
 .what {
   margin: 0;
 }
