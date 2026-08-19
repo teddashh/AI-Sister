@@ -499,6 +499,34 @@ impl Config {
         Ok(cfg)
     }
 
+    /// **錄製中**重新讀設定檔。和 [`load`](Self::load) 回答的不是同一個問題。
+    ///
+    /// `load` 對「檔案不存在」回傳預設值，而那在**開機**時是對的：沒有設定檔
+    /// 本來就跑預設。錄製途中照做就是一次隱私事故——
+    ///
+    /// 一個「先刪再寫」的編輯器（vim 的 `backupcopy=no`、VS Code 的原子存檔、
+    /// 以及每一個 `mv new old`）只要被輪詢夾中一次，使用者整份 blocklist 就
+    /// 被換成比它寬鬆的預設值，而畫面上只印一行「排除 0 個 app」。她會繼續
+    /// 錄，錄的是他明確講過不要錄的那些東西。
+    ///
+    /// 所以這一支有三種答案，其中兩種都是「別動」。要回到預設值請寫一個空的
+    /// 設定檔——那是一個看得見的動作。
+    ///
+    /// 規則放在 core 而不是留在 `windows_record` 那個迴圈裡，因為那個迴圈只
+    /// 在 Windows 上編譯，開發機和 CI 都跑不到它。一條沒有人驗得到的隱私
+    /// 規則，和沒有那條規則差別不大。
+    pub fn reload(path: &Path) -> Reload {
+        // 存在性和讀取分兩步，因為它們該講的話不一樣：「檔案不見了」要提醒他
+        // 真想回預設值就放一個空檔，「讀不出來」要把 TOML 的錯印出來。
+        if !path.exists() {
+            return Reload::Missing;
+        }
+        match Self::load(path) {
+            Ok(fresh) => Reload::Fresh(Box::new(fresh)),
+            Err(e) => Reload::Broken(format!("{e:#}")),
+        }
+    }
+
     /// 寫回設定檔。
     ///
     /// 出門也檢查一次，用的是 `load` 那同一條規則：設定頁存下一份自己讀不
@@ -512,6 +540,23 @@ impl Config {
         std::fs::write(path, toml::to_string_pretty(self)?)?;
         Ok(())
     }
+}
+
+/// [`Config::reload`] 的三種答案。**兩種都是「別動」**。
+///
+/// 沒有第四種「回到預設值」。預設值比任何一份使用者自訂的 blocklist 都寬鬆，
+/// 所以任何「我看不懂，那就用預設吧」的路徑，都是一條把保護悄悄拿掉的路徑。
+#[derive(Debug)]
+pub enum Reload {
+    /// 讀到了新的一份，換上去。
+    ///
+    /// `Box` 是因為 `Config` 比另外兩個變體大得多，不裝箱的話整個 enum 都得
+    /// 跟著它變大（clippy 的 `large_enum_variant` 會念）。
+    Fresh(Box<Config>),
+    /// 檔案不在。**不是**「請用預設值」——多半是編輯器正在先刪再寫。
+    Missing,
+    /// 讀得到但解不開（TOML 壞了、或保留天數是 0）。維持原樣，把錯講出來。
+    Broken(String),
 }
 
 impl RetentionConfig {
@@ -889,6 +934,83 @@ mod tests {
             Config::load(&path).expect("讀得回來").retention.text_days,
             36500
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 錄製途中設定檔不見了，**不等於**「請用預設值」。
+    ///
+    /// 這是每一個原子存檔編輯器的正常寫法（vim 的 `backupcopy=no`、VS Code、
+    /// 每一個 `mv new old`）：舊檔先消失，新檔隔幾毫秒才出現。5 秒輪詢一次的
+    /// 迴圈總有一天會夾中那個縫。如果那一刻回的是預設值，使用者親手排除的
+    /// 那幾個 app 就在他不知情的狀況下解除封鎖——而畫面上只會多印一行
+    /// 「排除 0 個 app」，看起來像是他自己剛剛改的。
+    ///
+    /// 所以這裡不驗「回傳了什麼設定」，而是驗**它根本沒有交出任何一份設定**：
+    /// `Missing` 和 `Broken` 都不帶 `Config`，呼叫端想拿也拿不到。
+    #[test]
+    fn a_config_file_that_vanished_mid_write_must_not_hand_back_the_permissive_defaults() {
+        let path = std::env::temp_dir().join(format!("sister-reload-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        // 他排除了一個預設名單上沒有的 app——這正是會被預設值洗掉的那種規則。
+        let mut mine = Config::default();
+        mine.privacy.excluded_apps.push("thunderbird".into());
+        mine.save(&path).expect("存得進去");
+        let Reload::Fresh(fresh) = Config::reload(&path) else {
+            panic!("好好的一份檔案要讀得回來");
+        };
+        assert!(
+            fresh
+                .privacy
+                .excluded_apps
+                .iter()
+                .any(|a| a == "thunderbird")
+        );
+
+        // 編輯器把它刪掉了，新的還沒寫出來。
+        std::fs::remove_file(&path).expect("remove");
+        assert!(
+            matches!(Config::reload(&path), Reload::Missing),
+            "檔案不見了要說不見了，不能當成「請用預設值」"
+        );
+        // 對照組：同一條路徑走 `load` 會拿到預設值——那在開機時是對的，
+        // 在這裡就是把 thunderbird 那條規則悄悄拿掉。
+        assert!(
+            Config::load(&path)
+                .expect("load 不當作錯")
+                .privacy
+                .excluded_apps
+                != mine.privacy.excluded_apps,
+            "如果 load 也不回預設值了，這條規則就沒有存在的必要，刪掉這個測試"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// TOML 打錯字、或保留天數寫成 0，一樣是「別動」。
+    ///
+    /// 後面那個特別要緊：`retention.text_days = 0` 的意思是「下一次整理就全部
+    /// 刪掉」。它過不了 [`RetentionConfig::check`]，所以連 `Fresh` 都拿不到——
+    /// 一個打錯的數字不該在錄製途中被靜靜換上去。
+    #[test]
+    fn a_broken_config_keeps_the_old_one_and_says_why() {
+        let path =
+            std::env::temp_dir().join(format!("sister-reload-bad-{}.toml", std::process::id()));
+
+        for (bad, want) in [
+            ("[privacy\nexcluded_apps = []\n", "TOML 解不開"),
+            ("[retention]\ntext_days = 0\nframes_days = 30\n", "0 天"),
+        ] {
+            std::fs::write(&path, bad).expect("write");
+            let Reload::Broken(why) = Config::reload(&path) else {
+                panic!("{want}的時候不該交出一份設定：{bad:?}");
+            };
+            assert!(
+                !why.trim().is_empty(),
+                "「別動」要附上原因，不然畫面上是一行空白"
+            );
+        }
+
         let _ = std::fs::remove_file(&path);
     }
 

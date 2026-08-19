@@ -3894,54 +3894,48 @@ pub mod record {
             {
                 last_config_check = Instant::now();
                 if config_watch.changed(path) {
-                    // 檔案不見了**不算**「請用預設值」。
-                    //
-                    // `Config::load` 對不存在的路徑會回傳預設值，那在開機時是
-                    // 對的（沒有設定檔本來就跑預設）。但在這裡照做的話，一個
-                    // 「先刪再寫」的編輯器只要被這 5 秒的輪詢夾中一次，使用者
-                    // 整份 blocklist 就被換成比它寬鬆的預設值——而畫面上只會
-                    // 印一行「排除 0 個 app」。要回預設值請寫一個空的設定檔。
-                    if !path.exists() {
-                        println!(
+                    // 三種答案裡有兩種是「別動」，而那條規則住在 core
+                    // （`Config::reload`），因為這個迴圈只在 Windows 上編譯——
+                    // 開發機和 CI 都跑不進來，寫在這裡等於沒有人驗得到。
+                    use sister_core::config::Reload;
+                    match Config::reload(path) {
+                        Reload::Fresh(fresh) => {
+                            println!(
+                                "  ⟳ 設定檔換了：排除 {} 個 app、{} 條網址；\
+                                 保留期 畫面 {} 天、文字 {} 天",
+                                fresh.privacy.excluded_apps.len(),
+                                fresh.privacy.excluded_urls.len(),
+                                fresh.retention.frames_days,
+                                fresh.retention.text_days
+                            );
+                            // 新規則裡「寫了也不會命中」的那幾條要當場講。
+                            // 這是使用者最可能剛剛打錯字的那一刻。
+                            for (rule, why) in sister_core::config::suspicious_url_rules(
+                                &fresh.privacy.excluded_urls,
+                            ) {
+                                println!("    ⚠  這條寫了也不會命中：{rule} — {why}");
+                            }
+                            retention = fresh.retention.clone();
+                            // `capture.store_images` 以前不在這裡，於是它凍在
+                            // 開機那一刻——設定頁上關掉截圖、`doctor` 照著磁碟
+                            // 上那一份說「text-only 模式」，而這個迴圈還在一張
+                            // 一張寫。真正動手的是下面那道 `recheck`（同意書仍
+                            // 然是上限），這裡只負責把他寫下的意思送過去，並且
+                            // 叫它別等下一個節拍。
+                            if wants_images_by_config != fresh.capture.store_images {
+                                wants_images_by_config = fresh.capture.store_images;
+                                consent_dirty = true;
+                            }
+                            rec.set_privacy(fresh.privacy);
+                        }
+                        Reload::Missing => println!(
                             "  ⚠  設定檔不見了（{}）。**繼續用舊的那一份**——\
                              真要回到預設值請放一個空的設定檔。",
                             path.display()
-                        );
-                    } else {
-                        match Config::load(path) {
-                            Ok(fresh) => {
-                                println!(
-                                    "  ⟳ 設定檔換了：排除 {} 個 app、{} 條網址；\
-                                     保留期 畫面 {} 天、文字 {} 天",
-                                    fresh.privacy.excluded_apps.len(),
-                                    fresh.privacy.excluded_urls.len(),
-                                    fresh.retention.frames_days,
-                                    fresh.retention.text_days
-                                );
-                                // 新規則裡「寫了也不會命中」的那幾條要當場講。
-                                // 這是使用者最可能剛剛打錯字的那一刻。
-                                for (rule, why) in sister_core::config::suspicious_url_rules(
-                                    &fresh.privacy.excluded_urls,
-                                ) {
-                                    println!("    ⚠  這條寫了也不會命中：{rule} — {why}");
-                                }
-                                retention = fresh.retention.clone();
-                                // `capture.store_images` 以前不在這裡，於是它
-                                // 凍在開機那一刻——設定頁上關掉截圖、`doctor`
-                                // 照著磁碟上那一份說「text-only 模式」，而這個
-                                // 迴圈還在一張一張寫。真正動手的是下面那道
-                                // `recheck`（同意書仍然是上限），這裡只負責把
-                                // 他寫下的意思送過去，並且叫它別等下一個節拍。
-                                if wants_images_by_config != fresh.capture.store_images {
-                                    wants_images_by_config = fresh.capture.store_images;
-                                    consent_dirty = true;
-                                }
-                                rec.set_privacy(fresh.privacy);
-                            }
-                            Err(e) => println!(
-                                "  ⚠  設定檔讀不出來，**繼續用舊的那一份**（不是預設值）：{e:#}"
-                            ),
-                        }
+                        ),
+                        Reload::Broken(why) => println!(
+                            "  ⚠  設定檔讀不出來，**繼續用舊的那一份**（不是預設值）：{why}"
+                        ),
                     }
                 }
             }
