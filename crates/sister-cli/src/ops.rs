@@ -561,9 +561,8 @@ pub mod export {
         if with_frames {
             let (n, bytes) = copy_frames(&src_frames, &Config::frames_dir(to))?;
             println!(
-                "  ✓ frames/     {}（{} 個畫面檔）",
-                crate::fmt::bytes(bytes as i64),
-                n
+                "{}",
+                frames_line(n, bytes, s.frames_with_image as u64, &src_frames)
             );
         } else {
             println!("  ⏸ frames/     沒帶。出處點開來看到的那些畫面留在原地——加 `--with-frames`",);
@@ -595,6 +594,33 @@ pub mod export {
              丟進雲端同步資料夾，她記得的東西就跟著上去了。"
         );
         Ok(())
+    }
+
+    /// `frames/` 那一行。`copied` 是剛剛複製過去的檔案數，`claimed` 是資料庫
+    /// 裡有幾列說自己有圖。
+    ///
+    /// 「0 個畫面檔」單獨印出來是一句真話，但它回答不了他心裡真正那一題：
+    /// **是本來就沒有，還是我剛剛弄丟了？** 這兩件事對備份來說天差地遠，而
+    /// 資料庫知道答案。所以三種情況要長得不一樣，尤其少了的那一種——那時候
+    /// 前面不該掛一個 ✓。
+    fn frames_line(copied: u64, bytes: u64, claimed: u64, src: &Path) -> String {
+        if copied < claimed {
+            format!(
+                "  ✗ frames/     {}（{copied} 個畫面檔，但資料庫裡有 {claimed} 列說自己有圖）\n\
+                 \x20    少了 {} 張。可能是有人手動刪過 frames，也可能是這次沒複製完——\n\
+                 \x20    來源在 {}，比對得出來。",
+                crate::fmt::bytes(bytes as i64),
+                claimed - copied,
+                src.display()
+            )
+        } else if copied == 0 {
+            "  ✓ frames/     一個檔都沒有——這份記憶本來就只有字，沒有畫面可以帶".into()
+        } else {
+            format!(
+                "  ✓ frames/     {}（{copied} 個畫面檔）",
+                crate::fmt::bytes(bytes as i64)
+            )
+        }
     }
 
     /// 匯出到資料目錄裡面是不行的。
@@ -681,6 +707,41 @@ pub mod export {
                     "{ok} 不在資料目錄裡面"
                 );
             }
+        }
+
+        /// 「0 個畫面檔」有兩種意思，而它們對一份備份來說天差地遠。
+        #[test]
+        fn zero_pictures_because_there_were_none_reads_differently_from_zero_because_they_are_gone()
+        {
+            let src = Path::new("/tmp/sister-x/data/frames");
+
+            // 只記字的那份記憶：資料庫也說沒有圖，那就沒有壞掉。
+            let none_to_take = frames_line(0, 0, 0, src);
+            assert!(none_to_take.starts_with("  ✓"), "{none_to_take}");
+            assert!(none_to_take.contains("本來就只有字"), "{none_to_take}");
+
+            // 資料庫說有 120 張，硬碟上一張都沒複製到。同樣是「0 個畫面檔」，
+            // 但這一次他手上那份備份是缺的，而他要能當場看出來。
+            let gone = frames_line(0, 0, 120, src);
+            assert!(gone.starts_with("  ✗"), "少了東西不該掛 ✓：{gone}");
+            assert!(gone.contains("120"), "要講資料庫說有幾張：{gone}");
+            assert!(gone.contains("少了 120 張"), "要講差多少：{gone}");
+            assert!(
+                gone.contains("/tmp/sister-x/data/frames"),
+                "要講去哪裡比對：{gone}"
+            );
+
+            // 少一部分也是少。
+            let partial = frames_line(118, 4096, 120, src);
+            assert!(partial.starts_with("  ✗"), "{partial}");
+            assert!(partial.contains("少了 2 張"), "{partial}");
+
+            // 全部帶到了就安靜地報數。多出來的（有人往 frames\ 丟過別的檔）
+            // 不算少，也不值得為它多講一句。
+            let all = frames_line(120, 1_048_576, 120, src);
+            assert!(all.starts_with("  ✓"), "{all}");
+            assert!(all.contains("120 個畫面檔"), "{all}");
+            assert!(frames_line(121, 1_048_576, 120, src).starts_with("  ✓"));
         }
     }
 }
