@@ -168,14 +168,44 @@ pub fn shape(question: &str) -> Shape {
 /// 一個內容詞都不剩的時候回**原句**，不是空字串。那多半是「發生什麼事」這種
 /// 整句都是虛字的問法，而她能做的最不意外的事就是照著他打的字去找——和這個
 /// 模組其他地方一樣，看不懂就退回今天的行為。
+///
+/// ## 剝到只剩一個中文字，就是剝過頭了
+///
+/// 虛字清單裡有一堆**單字**（「事」「看」「到」「個」「有」），而中文的雙字詞
+/// 常常正好由一個虛字加一個實字組成。於是「事件」會被剝成「件」、「看板」剝成
+/// 「板」、「個資」剝成「資」——每一個都是把他問的東西換成另一個東西。
+///
+/// 而且那不只是精確度變差：一個中文字在這個 schema 底下**沒有索引可用**
+/// （trigram 要 3 個字、bigram 要 2 個字，見 [`crate::db`] 開頭），所以它會
+/// 一路掉到全表掃描，然後掃回一堆不相干的東西。一個字的查詢不是查詢，是掃描。
+///
+/// 所以剝完不足兩個字的時候，把邊界往回退——**先退左邊**：中文的修飾語在前、
+/// 中心語在後，緊鄰左邊那個字比較可能和它是同一個詞。「剛剛那個事件」會停在
+/// 「事件」，不會退回整句。
 pub fn terms(question: &str) -> &str {
+    /// 剝完至少要留下這麼多個字，不然就退回去。理由見上面。
+    const MIN_CHARS: usize = 2;
+
     let words = words(question);
-    let first = words.iter().find(|&&(_, _, r)| r == Role::Content);
-    let last = words.iter().rev().find(|&&(_, _, r)| r == Role::Content);
-    match (first, last) {
-        (Some(&(start, _, _)), Some(&(_, end, _))) => &question[start..end],
-        _ => question.trim(),
+    let Some(mut lo) = words.iter().position(|&(_, _, r)| r == Role::Content) else {
+        return question.trim();
+    };
+    let mut hi = words
+        .iter()
+        .rposition(|&(_, _, r)| r == Role::Content)
+        .expect("有第一個就有最後一個");
+
+    let span = |lo: usize, hi: usize| &question[words[lo].0..words[hi].1];
+    while span(lo, hi).chars().count() < MIN_CHARS {
+        if lo > 0 {
+            lo -= 1;
+        } else if hi + 1 < words.len() {
+            hi += 1;
+        } else {
+            break; // 整句就這麼短，沒有東西可以退了
+        }
     }
+    span(lo, hi)
 }
 
 /// 在開頭比對得到的最長那個詞，以及它是不是「剛剛」。
@@ -282,6 +312,27 @@ mod tests {
     fn the_middle_is_left_exactly_as_he_typed_it() {
         assert_eq!(terms("剛剛 chrome 上那個網址"), "chrome 上那個網址");
         assert_eq!(terms("錯誤訊息，還有那個網址"), "錯誤訊息，還有那個網址");
+    }
+
+    /// 虛字清單裡有一堆單字，而中文的雙字詞常常正好是一個虛字加一個實字。
+    /// 照字面剝的話「事件」會變成「件」——那不只是精確度差一點，一個中文字
+    /// 在這個 schema 底下沒有索引可用，會一路掉到全表掃描再撈回一堆不相干
+    /// 的東西。剝到不足兩個字就往回退。
+    #[test]
+    fn stripping_must_not_eat_half_of_a_two_character_word() {
+        assert_eq!(terms("事件"), "事件");
+        assert_eq!(terms("看板"), "看板");
+        assert_eq!(terms("個資"), "個資");
+        // 退到夠用就停，不是退回整句——「剛剛」還是不該進去比對。
+        assert_eq!(terms("剛剛那個事件"), "事件");
+        assert_eq!(terms("剛剛的事件"), "事件");
+    }
+
+    /// 整句就只有一個字的時候沒有東西可以退，照原樣送出去。
+    #[test]
+    fn a_one_character_question_is_left_alone() {
+        assert_eq!(terms("板"), "板");
+        assert_eq!(terms("的"), "的");
     }
 
     /// 一句完全沒有虛字的問題不該被動到一個字。
