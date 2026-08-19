@@ -1200,10 +1200,38 @@ fn hotkey_set(
     let previous = hotkey.0.lock().expect("hotkey").wanted.clone();
     let view = apply_hotkey(&app, &combo);
     let view = if view.registered || view.wanted.is_empty() {
-        let path = config_path()?;
-        let mut c = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
-        c.shell.pause_shortcut = view.wanted.clone();
-        c.save(&path).map_err(|e| format!("{e:#}"))?;
+        let persist = || -> Result<(), String> {
+            let path = config_path()?;
+            let mut c = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
+            c.shell.pause_shortcut = view.wanted.clone();
+            c.save(&path).map_err(|e| format!("{e:#}"))
+        };
+        // 存不進去的時候**不可以直接 `?` 出去**。那三行以前是裸的 `?`，於是
+        // 新的那組已經真的搶下來了（`apply_hotkey` 開頭就 `unregister_all()`），
+        // 而底下那行「把結果寫回 state」永遠跑不到——`hotkey_state` 從此回報
+        // 舊的那組 `registered: true`，設定頁照著印「搶到了。現在按 Ctrl+Alt+P
+        // 都會暫停或繼續」。真正會暫停的是他剛剛試的那一組，P 是死的。下次
+        // 開機又從設定檔讀回 P，所以這個分歧不留下任何痕跡。
+        //
+        // 而且這是那顆**暫停**鍵。上面那段註解說這一格最壞的壞法是「他以為
+        // 她停了，她還在錄」——這條路正好走到那裡。
+        //
+        // 什麼時候會走到這裡：設定檔壞掉（手寫的 retention = 0）、防毒或
+        // OneDrive 鎖著 config.toml、磁碟滿。
+        if let Err(e) = persist() {
+            let restored = apply_hotkey(&app, &previous);
+            let still = if restored.registered {
+                format!("還在用 {}。", restored.wanted)
+            } else if restored.wanted.is_empty() {
+                "熱鍵本來就是關掉的，維持原狀。".to_string()
+            } else {
+                "而舊的那組現在也搶不到了——改用系統匣裡的暫停。".to_string()
+            };
+            *hotkey.0.lock().expect("hotkey") = restored;
+            return Err(format!(
+                "搶到了，但存不進設定檔，所以退回原來那一組。{still}\n{e}"
+            ));
+        }
         view
     } else {
         // 設定檔沒動過，所以退回去的一定是設定檔裡那一組。`rejected` 帶著他

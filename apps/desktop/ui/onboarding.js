@@ -93,6 +93,15 @@ function paint(view) {
     // 真正在錄的是另一個執行檔。第一次打開的人如果以為勾完就在錄了，他會
     // 等上一整天，然後發現什麼都沒有。所以這一句要指出下一步是什麼。
     say(`簽好了。接下來跑 sister record 她才會開始，${frames(view)}`);
+  } else if (view.sheets[0]?.granted_at != null) {
+    // **第三種狀態。** 他簽過了，只是條文後來改版。以前這裡和「從來沒勾過」
+    // 走同一條分支，於是卡片上寫著「2026年8月13日 同意過，但條文後來改版
+    // 了」，三吋以下的這一行寫著「第一張沒勾」——同一個畫面上互相打臉。
+    // CLI 早就有這第三句（`ops.rs` 的 consent 那一段）。
+    say(
+      "第一張你簽過，但條文後來改版了，要再確認一次才算數——" +
+        "在那之前 sister record 不會開始錄。",
+    );
   } else {
     // 這一句要講「現在的後果」，不是催他去按。
     say("第一張沒勾，sister record 不會開始錄；正在錄的也會停下來。");
@@ -123,17 +132,31 @@ async function set(key, granted) {
     // 存不進去就**不要**改畫面。顯示成已同意、實際上沒寫進檔案，是這一頁
     // 唯一一種真正嚴重的錯——`sister record` 讀的是那個檔案，不是這個畫面。
     say(String(err?.message ?? err), true);
-    await load();
+    // `load()` 會呼叫 `paint()`，而 `paint()` 一定會 `say(...)`——所以上面那
+    // 行紅字會被立刻蓋成一句平靜的「第一張沒勾」，而且連 `bad` 都被清掉。
+    // 使用者看到的是：勾勾彈回去，配一句告訴他「你還沒同意」。他可以按到
+    // 天亮。狀態修好了、訊息毀了，等於只做了一半。
+    await load({ keepSay: true });
   }
 }
 
-async function load() {
+/**
+ * 重讀同意書並重畫。
+ *
+ * `keepSay` 是給「寫失敗之後要把畫面轉回真實狀態」那條路用的：卡片要修正，
+ * 但底下那行錯誤訊息**不能**被 `paint()` 的例行敘述蓋掉。
+ */
+async function load({ keepSay = false } = {}) {
   if (invoke === null) {
     say("這一頁不是在 AI-Sister 裡打開的，勾了不會存到任何地方。", true);
     return;
   }
+  const before = keepSay
+    ? { text: el.say.textContent, bad: el.say.classList.contains("bad") }
+    : null;
   try {
     paint(await invoke("consent_read"));
+    if (before) say(before.text, before.bad);
   } catch (err) {
     say(String(err?.message ?? err), true);
   }
@@ -207,6 +230,14 @@ if (demo !== null) {
     // 按下去之後才長得出來的那兩句話，只有從這裡才看得到。`shot.mjs` 收
     // selector，所以它們是截得到的——一個只驗初始畫面的工具，會讓人以為
     // 沒截到的那一半是好的。
+    // `?demo=readonly`：同意書寫不進去（唯讀磁碟、磁碟滿、防毒鎖住
+    // consent.toml）。這個 demo 存在的理由是它以前**看起來完全正常**——
+    // 紅字被 `load()` 的重畫立刻蓋成一句平靜的「第一張沒勾」。
+    if (cmd === "consent_set" && demo === "readonly") {
+      throw new Error(
+        "寫不進 consent.toml：拒絕存取（os error 5）。她的同意狀態沒有改變。",
+      );
+    }
     if (cmd === "consent_set") {
       const view = demoView(true, store);
       const reset = demo === "stale";

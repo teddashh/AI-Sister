@@ -14,6 +14,7 @@ const el = {
   textDays: document.querySelector("[data-text-days]"),
   lint: document.querySelector("[data-lint]"),
   health: document.querySelector("[data-health]"),
+  unreadable: document.querySelector("[data-unreadable]"),
   combo: document.querySelector("[data-combo]"),
   clearCombo: document.querySelector("[data-clear]"),
   hotkeySay: document.querySelector("[data-hotkey-say]"),
@@ -102,9 +103,23 @@ async function refreshHealth(urls) {
   try {
     paintHealth(await invoke("privacy_health", { urls }), urls.length > 0);
   } catch {
-    // 問不到就不講。空著總比掰一句「都生效」好。
-    el.health.hidden = true;
+    paintHealthUnaskable(urls.length > 0);
   }
+}
+
+/**
+ * 「問不到」不可以印成空白。
+ *
+ * 空白在這一格就是「都生效」（見 `paintHealth` 最後那兩行），也就是這一頁
+ * 最重要的那句警告，在唯一該出現的那一刻消失。以前這裡是 `hidden = true`。
+ */
+function paintHealthUnaskable(hasRules) {
+  if (!el.health) return;
+  el.health.classList.add("unknown");
+  el.health.textContent =
+    "問不出這幾條規則會不會生效（設定或能力報告讀不出來）。" +
+    "底下那幾條可能一條都沒在擋——sister doctor 問得到同一份答案。";
+  el.health.hidden = !hasRules;
 }
 
 function paintHealth(health, hasRules) {
@@ -130,11 +145,21 @@ function paintHealth(health, hasRules) {
   el.health.hidden = health.broken.length === 0;
 }
 
-/** `MM-DD HH:MM`。年份對「上一次測是什麼時候」這句話沒有用。 */
+/**
+ * `MM-DD HH:MM`，跨年的話補上年份。
+ *
+ * 以前不印年份，理由是「年份對『上一次測是什麼時候』這句話沒有用」——但
+ * `capabilities.rs` 在同一份 repo 裡寫的正好相反：一份三個禮拜前的報告和
+ * 今天早上那份可信度不同，**不要替他決定「夠新了」**。去年 8/19 測的和
+ * 今天早上測的長得一模一樣，而中間隔著一整年的瀏覽器和 Windows 更新。
+ */
 function when(ts) {
   const d = new Date(ts);
   const two = (n) => String(n).padStart(2, "0");
-  return `${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+  const stamp = `${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+  return d.getFullYear() === new Date().getFullYear()
+    ? stamp
+    : `${d.getFullYear()}-${stamp}`;
 }
 
 // ---------- 暫停熱鍵 ----------
@@ -273,6 +298,48 @@ function apply(s) {
   el.textDays.value = s.text_days;
 }
 
+/**
+ * 讀不出設定檔的時候，把整張表關掉。
+ *
+ * 不是為了防呆——`days()` 本來就會在空欄位上擋下儲存。是為了不說謊：一張
+ * 空白的排除清單和兩顆沒打勾的防線，讀起來是一個明確的斷言（「你什麼都沒
+ * 擋」），而它是假的。灰掉 + 換掉 placeholder 之後，那張表不再宣稱任何事。
+ */
+function setUnreadable(on) {
+  for (const node of [
+    el.apps,
+    el.urls,
+    el.titles,
+    el.screenshare,
+    el.redact,
+    el.querylog,
+    el.framesDays,
+    el.textDays,
+    el.save,
+  ]) {
+    if (node) node.disabled = on;
+  }
+  for (const box of [el.apps, el.urls, el.titles]) {
+    if (!box) continue;
+    if (on) {
+      box.value = "";
+      box.placeholder =
+        "讀不出設定檔——正在跑的記錄用的還是舊的那一份，這裡顯示不了它。";
+    } else {
+      box.placeholder = "";
+    }
+  }
+  if (on) el.path.textContent = "讀不出來";
+  if (el.unreadable) {
+    // 這裡是 textContent，不是 markdown——寫 `**…**` 只會印出星號。
+    el.unreadable.textContent =
+      "讀不出設定檔，所以這一頁上的每一格都不算數：底下的空白和沒打勾，" +
+      "不代表那些規則沒生效。正在跑的記錄用的是它上次讀成功的那一份，" +
+      "排除規則和兩道防線都還在擋。修好底下那行錯誤再回來。";
+    el.unreadable.hidden = !on;
+  }
+}
+
 async function load() {
   if (invoke === null) {
     say("這一頁不是在 AI-Sister 裡打開的，改了不會存到任何地方。", true);
@@ -280,9 +347,18 @@ async function load() {
   }
   try {
     apply(await invoke("settings_read"));
+    setUnreadable(false);
     say("");
     await relint();
   } catch (err) {
+    // `apply` 在 `await` 之後才跑，所以讀失敗的時候**一個欄位都沒被寫過**，
+    // 畫面上留著 settings.html 的預設值：三個空的排除框、兩顆沒打勾的防線。
+    // 而那正好是「什麼都沒擋、兩道防線都關了」長的樣子。
+    //
+    // 真正在跑的 recorder 這時候用的是舊的那一份（見 `Config::reload`），
+    // 九條 app、十六條網址、兩道防線全部照常生效。畫面和事實完全相反，
+    // 而唯一的線索是底下那條 bar 上的 TOML 錯誤。
+    setUnreadable(true);
     say(String(err?.message ?? err), true);
   }
   // 熱鍵分開讀：它問的不是設定檔裡寫什麼，是**現在真的搶到了沒**——那個答案
@@ -301,6 +377,17 @@ async function load() {
  * 熱鍵那一格有兩種畫面，而「搶不到」才是這一格存在的理由，所以它也要被看過。
  */
 function demo(variant) {
+  // 設定檔讀不出來的那一頁（`?demo=broken`）。這是最需要被眼睛看過的一種：
+  // 它以前長得跟「你什麼都沒擋、兩道防線都關了」一模一樣。
+  if (variant === "broken") {
+    setUnreadable(true);
+    say(
+      "讀不出設定檔：retention.frames_days 不能是 0。0 在有些工具裡是「不限制」，但在這裡它的意思是「下一次整理就把畫面檔全部刪掉」。",
+      true,
+    );
+    paintHealthUnaskable(true);
+    return;
+  }
   apply({
     path: "C:\\Users\\ted\\AppData\\Roaming\\ted-h\\AI-Sister\\config\\config.toml",
     excluded_apps: ["keepassxc", "1password", "bitwarden", "authy"],
