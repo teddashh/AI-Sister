@@ -72,7 +72,7 @@ enum Command {
     Query {
         /// 要找的字
         text: Vec<String>,
-        #[arg(short, long, default_value_t = 10)]
+        #[arg(short, long, default_value_t = 10, value_parser = at_least_one)]
         limit: usize,
         /// 輸出 JSON
         #[arg(long)]
@@ -88,7 +88,7 @@ enum Command {
         /// 在原文或正規化值裡做子字串比對
         #[arg(short, long)]
         search: Option<String>,
-        #[arg(short, long, default_value_t = 20)]
+        #[arg(short, long, default_value_t = 20, value_parser = at_least_one)]
         limit: usize,
         #[arg(long)]
         json: bool,
@@ -100,7 +100,7 @@ enum Command {
     /// 能做什麼，找不回來的才是下一版要修的東西。可以用 `privacy.query_log`
     /// 關掉，關掉之後這裡就不會再累積。
     Queries {
-        #[arg(short, long, default_value_t = 20)]
+        #[arg(short, long, default_value_t = 20, value_parser = at_least_one)]
         limit: usize,
         /// 只看她一筆都沒找到的那些
         #[arg(long)]
@@ -287,4 +287,43 @@ fn resolve_data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
 /// 同一顆檔案，所以那個檔名只能有一個地方說了算。這裡只是轉手。
 pub fn db_path(data_dir: &std::path::Path) -> PathBuf {
     Config::db_path(data_dir)
+}
+
+/// `--limit 0` 要當場被拒絕。
+///
+/// 因為它會讓每一個指令都說謊，而且說的是最要命的那種謊：
+///
+/// ```text
+/// $ sister facts --limit 0
+/// 這份記憶裡還沒有任何事實——她還沒錄過，或……      ← 其實有 9 筆
+/// $ sister query 電話 --limit 0
+/// 沒有找到。
+/// 不過你自己的排除規則擋掉過東西……                  ← 還幫他想了個錯的理由
+/// ```
+///
+/// 每個空答案畫面都是照著「查得到 vs 查不到」寫的，沒有一個想過「你要的就是
+/// 零筆」。與其在三個地方各補一個 `if limit == 0`（同一條規則寫三份，這個專案
+/// 已經栽在這上面很多次），不如讓它根本進不來——零筆的請求沒有任何合理用途。
+fn at_least_one(s: &str) -> std::result::Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(0) => Err("0 問不出東西來。要「全部」的話給一個大一點的數字。".into()),
+        Ok(n) => Ok(n),
+        Err(e) => Err(format!("{s} 不是一個筆數：{e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asking_for_zero_rows_is_refused_not_answered_with_an_empty_screen() {
+        let e = at_least_one("0").expect_err("0 要被拒絕");
+        assert!(e.contains("全部"), "要告訴他想要什麼該怎麼打：{e}");
+
+        assert_eq!(at_least_one("1"), Ok(1));
+        assert_eq!(at_least_one("20"), Ok(20));
+        assert!(at_least_one("-1").is_err(), "負數不是筆數");
+        assert!(at_least_one("很多").is_err(), "不是數字就不是數字");
+    }
 }
