@@ -325,6 +325,15 @@ function armReset() {
     : `忘掉 ${hhmm.format(range.from)}–${hhmm.format(range.to - 60_000)}`;
 }
 
+/**
+ * 這一段刪下去會帶走什麼，一項一項列。
+ *
+ * 題庫（`queries`）以前漏了——後端一直有這個欄位，`forget` 也一直真的把它
+ * 刪掉，只有這裡沒讀。代價是：她停止記錄之後他還在問問題（那是設計，她靠
+ * 記憶回答），那段時間選下去，`bits` 是空的，畫面說「這一段本來就是空的，
+ * 沒有東西可以忘」——然後刪掉他那幾題。**紀錄裡唯一一張存著他自己打的字的
+ * 表，是唯一一張沒被列出來的。**
+ */
 function scale(e) {
   const bits = [];
   if (e.chunks > 0) bits.push(`${e.chunks} 段文字`);
@@ -333,6 +342,7 @@ function scale(e) {
     bits.push(`${e.images} 張畫面（${Math.round(e.image_bytes / 104_857.6) / 10} MB）`);
   }
   if (e.events > 0) bits.push(`${e.events} 筆事件`);
+  if (e.queries > 0) bits.push(`${e.queries} 題你問過的話`);
   return bits;
 }
 

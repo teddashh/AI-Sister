@@ -218,9 +218,26 @@ wakeButton?.addEventListener("click", startRecording);
 const RECORDING_POLL_MS = 5000;
 let pollTimer = null;
 
+/**
+ * 「有沒有在錄」和「有沒有被暫停」要一起問。
+ *
+ * 暫停旗標以前只在開場問一次，之後只靠 `pause-changed` 事件更新——而那個
+ * 事件**只有這個行程自己按下去的時候才會發**。旗標是磁碟上的一個檔案，另外
+ * 有三個人會動它：`sister pause`、`sister resume`，還有 recorder 自己印出來
+ * 的那句「或刪掉 …\paused.flag」。
+ *
+ * 所以在終端機裡 `sister resume` 之後，她其實已經在錄了，而字母人會一直灰著
+ * 說「已暫停，沒有在看」。更糟的是那顆 ▶：`toggle_pause` 讀的是磁碟，所以按
+ * 下「繼續記錄」實際上是把她**暫停**——而畫面本來就畫成暫停的樣子，按完什麼
+ * 都不會變。旁邊那句註解說得很清楚：顯示成已暫停、實際上還在錄，是這個產品
+ * 能犯的最嚴重的一種謊。反過來這一種同樣是它。
+ *
+ * 磁碟上的旗標是真相，這個視窗只是鏡子——和 `ask` 每次重讀設定檔同一條紀律。
+ */
 function pollRecording() {
   if (invoke === null) return;
   invoke("recording_state").then(setRecording, () => {});
+  invoke("pause_state").then(setPaused, () => {});
 }
 
 /**
@@ -470,7 +487,13 @@ function blindLines(blind) {
   const out = [];
   if (blind.excluded?.length) {
     const why = blind.excluded.map(([reason, n]) => `${reason} ${n} 段`).join("、");
-    out.push(`不過你自己的排除規則擋掉過東西（${why}）——在那裡面的我本來就不會知道。`);
+    // 同一張稽核表裡還躺著兩道**自動**防線（`screenshare app:` 和
+    // `password field focused`），那兩種他沒有寫過任何規則。講成他寫的，
+    // 他會去三張排除清單裡找一條不存在的規則。理由字串帶著前綴，讓它自己說。
+    // 和 `blind_lines`（ops.rs）同一句話。
+    const his = blind.excluded.some(([reason]) => reason.startsWith("excluded "));
+    const whose = his ? "你的排除規則（和自動防線）" : "自動防線";
+    out.push(`不過${whose}擋掉過東西（${why}）——在那裡面的我本來就不會知道。`);
   }
   if (blind.paused_episodes > 0) {
     out.push(`我也被暫停過 ${blind.paused_episodes} 次，那幾段是空的。`);
@@ -596,7 +619,10 @@ function renderHits(
     more.className = "hits-note hits-more";
     // 反引號和角括號留給終端機。這一頁的規矩是直接寫 `sister record`
     // 那樣的裸指令（onboarding 和時間軸都是這樣寫的）。
-    more.textContent = "這裡最多列 20 筆，底下還有——sister query --limit 100 看得到全部。";
+    // 「看得到全部」是講不出口的：後端只知道「超過 20 筆」，沒有人數過總共
+    // 幾筆。而 sister query 自己會印「100+ 筆（撈滿 100 筆就停了）」——一句
+    // 剛剛才安慰過他「這樣就看得到全部了」的話，被下一個畫面當場打臉。
+    more.textContent = "這裡最多列 20 筆，底下還有——sister query --limit 100 看得到更多。";
     hitList.append(more);
   }
 
@@ -697,6 +723,9 @@ setState(wanted === "paused" || wanted === "asleep" ? "idle" : wanted);
 
 // 開場先問一次磁碟。暫停**不會自己過期**，所以「上禮拜按了暫停」是一條真實
 // 的路——開起來就該是灰的，而不是先亮一下再變灰。
+//
+// 之後由 `pollRecording` 每 5 秒接手（它同時問這兩件事）。這一行留著是因為
+// 視窗如果一開始就縮在系統匣裡，那個輪詢是不跑的。
 if (invoke !== null) {
   invoke("pause_state").then(setPaused, () => {});
 }

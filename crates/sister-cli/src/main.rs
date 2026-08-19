@@ -248,7 +248,7 @@ fn main() -> Result<()> {
             json,
         } => ops::facts::run(&data_dir, kind.as_deref(), search.as_deref(), limit, json),
         Command::Queries { limit, empty, json } => ops::queries::run(&data_dir, limit, empty, json),
-        Command::Stats { json } => ops::stats::run(&data_dir, json),
+        Command::Stats { json } => ops::stats::run(&data_dir, &config, json),
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config, dry_run),
         Command::Export { to, with_frames } => ops::export::run(&data_dir, &to, with_frames),
         Command::Forget { last, yes } => ops::forget::run(&data_dir, &last, yes),

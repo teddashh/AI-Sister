@@ -614,7 +614,9 @@ pub mod export {
                 src.display()
             )
         } else if copied == 0 {
-            "  ✓ frames/     一個檔都沒有——這份記憶本來就只有字，沒有畫面可以帶".into()
+            // 「本來就只有字」是一句關於歷史的話，而這裡看到的只有此刻的資料庫。
+            // 圖過了 `frames_days` 被清掉的那一份也長這樣，而那些圖存在過。
+            "  ✓ frames/     一個檔都沒有——資料庫裡沒有任何一列說自己有圖，沒有畫面可以帶".into()
         } else {
             format!(
                 "  ✓ frames/     {}（{copied} 個畫面檔）",
@@ -718,7 +720,16 @@ pub mod export {
             // 只記字的那份記憶：資料庫也說沒有圖，那就沒有壞掉。
             let none_to_take = frames_line(0, 0, 0, src);
             assert!(none_to_take.starts_with("  ✓"), "{none_to_take}");
-            assert!(none_to_take.contains("本來就只有字"), "{none_to_take}");
+            // 講的是**現在資料庫裡有什麼**，不是「這份記憶本來就只有字」——
+            // 圖過了保留期被清掉的那一份也長這樣，而那些圖存在過。
+            assert!(
+                none_to_take.contains("沒有任何一列說自己有圖"),
+                "{none_to_take}"
+            );
+            assert!(
+                !none_to_take.contains("本來就"),
+                "不要講一句關於歷史的話：{none_to_take}"
+            );
 
             // 資料庫說有 120 張，硬碟上一張都沒複製到。同樣是「0 個畫面檔」，
             // 但這一次他手上那份備份是缺的，而他要能當場看出來。
@@ -922,8 +933,19 @@ pub mod query {
                 .join("、");
             // 一行就好。一個用了三個月的資料庫幾乎一定有排除紀錄，所以這句話
             // 會很常出現——講成三行的東西，第二次就沒有人在看了。
+            //
+            // 不寫死「你自己的規則」：同一張稽核表裡還躺著兩道**自動**防線
+            // （`screenshare app:` 和 `password field focused`），那兩種他沒
+            // 有寫過任何規則。講成他寫的，他會去三張排除清單裡找一條不存在的
+            // 規則。理由字串本來就帶著前綴，讓它自己說。
+            let his_own = b.excluded.iter().any(|(r, _)| r.starts_with("excluded "));
+            let whose = if his_own {
+                "你的排除規則（和自動防線）"
+            } else {
+                "自動防線"
+            };
             out.push(format!(
-                "不過你自己的排除規則擋掉過東西（{why}）——要找的如果在那裡面，她本來就不會知道。"
+                "不過{whose}擋掉過東西（{why}）——要找的如果在那裡面，她本來就不會知道。"
             ));
         }
         if b.paused_episodes > 0 {
@@ -1437,8 +1459,16 @@ pub mod facts {
 pub mod stats {
     use super::*;
     use crate::fmt;
+    use sister_core::config::Config;
 
-    pub fn run(data_dir: &Path, json: bool) -> Result<()> {
+    /// 要 `Config` 是為了底下那一行「遮蔽」。
+    ///
+    /// `redaction_audit` 數的是「插了旗子的有幾列」，而**旗子只有在
+    /// `privacy.redact_clipboard_secrets` 開著的時候才會插**。關掉之後那個
+    /// 計數永遠是 0，於是這一頁會印出和一份乾淨資料庫一模一樣的句子——
+    /// 而真相正好相反：那把 API key 就原封不動躺在 `clipboard_events` 裡。
+    /// 這是整個產品裡讀反了代價最高的一句話，不能只靠資料庫猜。
+    pub fn run(data_dir: &Path, config: &Config, json: bool) -> Result<()> {
         let db = open_existing(data_dir)?;
         let s = db.stats()?;
 
@@ -1517,15 +1547,25 @@ pub mod stats {
             let ratio = s.frames_collapsed as f64 / (s.frames + s.frames_collapsed) as f64;
             println!("            去重擋掉了 {:.0}% 的畫面", ratio * 100.0);
         }
-        // 「4 張保留」配上底下的「畫面檔 0 B」看起來像壞了，其實是第三張同意書
-        // 沒簽——她照樣一幀一幀地記，只是只記上面的字。分不出「隱私模式在生效」
-        // 和「寫圖寫失敗」的報告，會讓人去修一個沒壞的東西。
+        // 「4 張保留」配上底下的「畫面檔 0 B」看起來像壞了，其實多半不是。
         // 全部都有圖的時候不講：那是預期，多一行只是雜訊。
+        //
+        // 但這裡**不講是為什麼**。`frames_with_image == 0` 底下躺著三件事：
+        // 第三張同意書沒簽（只記字）、圖過了 `frames_days` 被清掉了（預設 30
+        // 天，用超過一個月的人都會走到）、以及寫圖真的失敗。以前這裡寫的是
+        // 「一張圖都沒留（只記了上面的字）」——那是第一種的說法，而它在第二種
+        // 情況下是一句關於歷史的假話：那些圖存在過。
+        //
+        // stats 手上只有資料庫，沒有 config，三者分不出來。分得出來的是
+        // `sister doctor`（它讀得到同意書和設定），所以把人指過去。
         if s.frames > 0 && s.frames_with_image < s.frames {
             let how = if s.frames_with_image == 0 {
-                "一張圖都沒留（只記了上面的字）".to_string()
+                "現在一張圖都沒有，只剩上面的字（為什麼：`sister doctor`）".to_string()
             } else {
-                format!("其中 {} 張留了圖，其餘只記了上面的字", s.frames_with_image)
+                format!(
+                    "其中 {} 張現在還有圖，其餘只剩上面的字",
+                    s.frames_with_image
+                )
             };
             println!("            {how}");
         }
@@ -1604,7 +1644,11 @@ pub mod stats {
 
         // 秘密遮蔽。問的不是「旗子插了幾次」，是「插了旗子的那幾列，字還在不在」。
         // 前者是我們寫入時的自我宣稱，後者是資料庫此刻的實際狀態。
-        if redaction.flagged == 0 {
+        if !config.privacy.redact_clipboard_secrets {
+            println!("  遮蔽      **關掉了**（privacy.redact_clipboard_secrets = false）——");
+            println!("            沒有人在看剪貼簿裡有沒有 API key，所以這一欄數不出東西來。");
+            println!("            數不到不等於沒有：複製過的東西原樣進了資料庫。");
+        } else if redaction.flagged == 0 {
             println!("  遮蔽      這份紀錄裡沒有任何剪貼簿內容被判定為疑似秘密");
         } else {
             println!(
