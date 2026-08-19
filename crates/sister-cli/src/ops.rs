@@ -1198,18 +1198,25 @@ pub mod query {
 
         // 計時涵蓋兩條路徑：使用者感受到的是整個回答的延遲，不是單一次查詢。
         let started = std::time::Instant::now();
-        let (answers, hits) = match shape {
+        // 多要一筆。「剛好 20 筆」和「撈滿 20 筆就停了」是兩件事，而只看
+        // `hits.len() >= limit` 分不出來——正好 20 筆的那一次會被印上一個 `+`
+        // 和一句「用 --limit 看更多」，然後他去翻一頁不存在的東西。★ 那一半
+        // 早就是撈 `limit + 1` 了（`Answers::truncated`），字母人那邊也是
+        // （`HITS + 1`），只有這裡還在猜。
+        let (answers, mut hits) = match shape {
             // L1 的事實是「這個值是什麼」，回答不了「剛剛」。硬跑一次只會
             // 拿電話號碼去回答一個沒有人問號碼的問題。
-            Shape::Recent => (Default::default(), db.recent(limit)?),
+            Shape::Recent => (Default::default(), db.recent(limit + 1)?),
             // 比對用 `terms`（剝掉頭尾的「剛剛」「那個」），★ 答案用原句：
             // `kinds_for_query` 是在整句話裡找「電話」這種說法，剝字只會少看
             // 到東西，不會多看到。
             Shape::Keywords => (
                 answers(&db, text, limit)?,
-                db.search(sister_core::question::terms(text), limit)?,
+                db.search(sister_core::question::terms(text), limit + 1)?,
             ),
         };
+        let hits_truncated = hits.len() > limit;
+        hits.truncate(limit);
         let (answers, answers_truncated) = (answers.items, answers.truncated);
         let elapsed = started.elapsed();
 
@@ -1260,7 +1267,7 @@ pub mod query {
                 "limit": limit,
                 // ★ 那一半靠 `Answers::truncated`（撈了 limit+1 筆才知道），
                 // 原文那一半還是靠「撈滿上限」判斷。
-                "truncated": answers_truncated || hits.len() >= limit,
+                "truncated": answers_truncated || hits_truncated,
                 "answers": answers.iter().map(|a| serde_json::json!({
                     "kind": a.latest.kind, "value": a.latest.normalized, "raw": a.latest.raw,
                     "sightings": a.sightings, "ts": a.latest.ts,
@@ -1280,7 +1287,7 @@ pub mod query {
 
         // `20 筆原文` 和「一共就這 20 筆」是兩件事，而畫面上長得一模一樣。
         // 撈滿上限就代表**被切掉了**，說出來使用者才知道還有第二頁。
-        let more = |n: usize| if n >= limit { "+" } else { "" };
+        let more = |t: bool| if t { "+" } else { "" };
 
         // 底下這幾筆跟他打的字一個都對不上，所以要先講為什麼。少了這一句，
         // 「剛剛發生什麼事」會得到一串不相干的東西，看起來就是答非所問。
@@ -1302,9 +1309,9 @@ pub mod query {
                 // 「剛好 limit 筆」不會被誤標成「還有更多」。
                 if answers_truncated { "+" } else { "" },
                 hits.len(),
-                more(hits.len()),
+                more(hits_truncated),
                 elapsed.as_secs_f64() * 1000.0,
-                if answers_truncated || hits.len() >= limit {
+                if answers_truncated || hits_truncated {
                     format!("（+ 代表撈滿 {limit} 筆就停了，用 --limit 看更多）")
                 } else {
                     String::new()
@@ -1640,13 +1647,19 @@ pub mod facts {
         let kind = canonical_kind(kind)?;
 
         let db = open_existing(data_dir)?;
-        let rows = match search {
-            Some(s) => db.facts_search(kind, s, limit)?,
+        // 多要一筆。「剛好 200 筆」和「撈滿 200 筆就停了」是兩件事，而只看
+        // `rows.len() >= limit` 分不出來：正好 200 筆的那一次會被告知「後面
+        // 還有」，然後他加大 `--limit` 再跑一次，拿到同樣的 200 筆。
+        // `query` 和字母人那兩條路早就是這樣撈的，只有這裡還在猜。
+        let mut rows = match search {
+            Some(s) => db.facts_search(kind, s, limit + 1)?,
             None => match kind {
-                Some(k) => db.facts_by_kind(k, limit)?,
-                None => db.facts_search(None, "", limit)?,
+                Some(k) => db.facts_by_kind(k, limit + 1)?,
+                None => db.facts_search(None, "", limit + 1)?,
             },
         };
+        let truncated = rows.len() > limit;
+        rows.truncate(limit);
 
         if json {
             // 這裡以前直接印一個裸陣列。裸陣列講不出「後面還有」——
@@ -1654,7 +1667,7 @@ pub mod facts {
             // 包一層信封，把上限和有沒有被切掉講明白。
             let out = serde_json::json!({
                 "limit": limit,
-                "truncated": rows.len() >= limit,
+                "truncated": truncated,
                 "facts": rows.iter().map(|f| serde_json::json!({
                     "kind": f.kind, "raw": f.raw, "normalized": f.normalized,
                     "ts": f.ts, "source": f.source_kind,
@@ -1685,7 +1698,7 @@ pub mod facts {
         }
         // 撈滿上限就是被切掉了。`{n} 筆事實` 和「一共就這 n 筆」在畫面上
         // 長得一模一樣，而使用者會拿後者去下結論。
-        let more = if rows.len() >= limit {
+        let more = if truncated {
             format!("（撈滿 {limit} 筆就停了，用 --limit 看更多）")
         } else {
             String::new()
