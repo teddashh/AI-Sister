@@ -684,8 +684,8 @@ pub mod export {
     ) -> String {
         if missing > 0 {
             format!(
-                "  ✗ frames/     {}（複製了 {copied} 個檔，但資料庫裡有 {missing} 列的圖\n\
-                 \x20    在目的地打不開，例如 {}）\n\
+                "  ✗ frames/     {}（複製了 {copied} 個檔，但少了 {missing} 張）\n\
+                 \x20    資料庫裡有 {missing} 列的圖在這份匯出裡打不開，例如 {}。\n\
                  \x20    數量看起來夠不代表對得上——一邊錄一邊匯出的時候 frames/ 還在長。\n\
                  \x20    來源在 {}，可以再跑一次。",
                 crate::fmt::bytes(bytes as i64),
