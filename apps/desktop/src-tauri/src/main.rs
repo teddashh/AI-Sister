@@ -577,9 +577,16 @@ struct Answer {
 /// 事實，句子由這一頁自己組——終端機和字母人的講法不一樣，根據是同一份。
 #[derive(Serialize)]
 struct Blind {
-    /// 她一共記過幾段文字。`0` **不等於**「還沒開始記」——見
-    /// [`sister_core::answer::BlindSpots::chunks`]，要配 `frames` 看。
+    /// 她一共記過幾段文字。`0` **不等於**「還沒開始記」，也**不等於**
+    /// 「OCR 沒讀到東西」——見 [`sister_core::answer::BlindSpots::chunks`]。
     chunks: i64,
+    /// 留了畫面卻一行字都沒讀出來。
+    ///
+    /// 送一個**布林**而不是 `ocr_blocks` 的數字：門檻（幾張畫面才算數）是
+    /// 核心那邊的判斷，兩邊各寫一次的話遲早有一邊改了另一邊沒改，而這一句
+    /// 正好是這個專案已知的主要故障形狀唯一會被講出口的地方。見
+    /// [`sister_core::answer::BlindSpots::ocr_is_dead`]。
+    ocr_is_dead: bool,
     /// 她一共留下幾張畫面。`chunks == 0 && frames > 0` = 她看了，
     /// 但一個字都沒讀出來（讀字那一段斷了）。
     frames: i64,
@@ -732,6 +739,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 sister_core::answer::blind_spots(db, dir, asked).map_err(|e| format!("{e:#}"))?;
             Some(Blind {
                 chunks: b.chunks,
+                ocr_is_dead: b.ocr_is_dead(),
                 frames: b.frames,
                 sessions: b.sessions,
                 excluded: b.excluded,

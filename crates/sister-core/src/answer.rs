@@ -96,16 +96,29 @@ pub struct Answers {
 pub struct BlindSpots {
     /// 她一共記過幾段文字。
     ///
-    /// `0` **不等於**「她還沒開始記」。文字只有在 OCR 讀出東西的時候才寫，
-    /// 所以 `capture.ocr = false`（設定得起來，doctor 會說「OCR 已關閉」），
-    /// 或者 OCR 裝了卻讀不到東西——**這個專案已知的主要故障形狀**——的時候，
-    /// 錄了一整天、幾千張畫面，這個數字照樣是 0。要分開這兩件事得配
-    /// [`frames`](Self::frames) 一起看。
+    /// `0` **不等於**「她還沒開始記」，但它也**不是**「OCR 沒讀到東西」——
+    /// 這一欄數的是整張 `text_chunks`，而 `Db::insert_focus` 每次換視窗就順手
+    /// 寫進去一列視窗標題、一列網址（那兩種完全不經過 OCR）。要問讀字那一段
+    /// 是不是斷的，看 [`ocr_blocks`](Self::ocr_blocks)。
     pub chunks: i64,
+    /// OCR 一共讀出幾行字（`ocr_blocks` 那張表）。
+    ///
+    /// **這一欄是後來補的，而它補的是一個「已經寫好卻永遠不會執行」的分支。**
+    ///
+    /// 「她看過 N 張畫面，但一個字都沒讀出來」——這個專案已知的主要故障形狀，
+    /// 而且是唯一一個「錄製照跑、畫面照留、搜尋永遠是空的」的形狀——本來掛在
+    /// `chunks == 0 && frames > 0` 底下。可是一台 OCR 全死的機器上 `chunks`
+    /// 不是 0：視窗標題和網址照樣一直寫進去。於是那台機器走到的是最後那一句
+    /// 「她記的每一段裡都沒有這個字」，和一台一切正常、那件事真的沒發生過的
+    /// 機器一模一樣，而正確的下一步（`sister doctor`）從來沒有被講出口。
+    ///
+    /// 那個分支唯一到得了的地方是測試，因為測試直接呼叫 `insert_frame` 而從不
+    /// 呼叫 `insert_focus`——它守著一個真的 recorder 產生不出來的狀態。
+    pub ocr_blocks: i64,
     /// 她一共留下幾張畫面（保留幀，不含被去重折疊掉的）。
     ///
-    /// 存在的理由只有一個：`chunks == 0 && frames > 0` 的意思是**她看了，但
-    /// 一個字都沒讀出來**。那和「她還沒開始記」是相反的處境，而叫一個 OCR
+    /// 存在的理由只有一個：`ocr_blocks == 0 && frames > 0` 的意思是**她看了，
+    /// 但一個字都沒讀出來**。那和「她還沒開始記」是相反的處境，而叫一個 OCR
     /// 壞掉的人「先跑 `sister record`」，只會讓他再錄一天空的。
     pub frames: i64,
     /// 她一共開過幾場錄製。
@@ -175,12 +188,28 @@ pub struct BlindSpots {
 }
 
 impl BlindSpots {
+    /// 留了畫面卻一行字都沒讀出來——**讀字那一段是斷的**。
+    ///
+    /// 門檻不是 `frames > 0`：一台剛開始錄、螢幕上正好沒有字的機器（桌布、
+    /// 全螢幕影片）會在頭幾秒踩到那個條件，而那是一則假警報。留下來的畫面
+    /// 是**去重過**的，也就是十張代表十次螢幕真的變過；十次全都一個字都沒有
+    /// 的工作日不存在。
+    ///
+    /// 反過來的錯（該喊沒喊）代價高得多：他會以為她只是記性不好，然後不用了。
+    /// 所以門檻壓得低，而那句話本身也只是叫他去跑 `doctor`——那支指令會當場
+    /// 做一次真的 OCR，答得出是哪一種。
+    pub fn ocr_is_dead(&self) -> bool {
+        const ENOUGH_TO_BE_SURE: i64 = 10;
+        self.ocr_blocks == 0 && self.frames >= ENOUGH_TO_BE_SURE
+    }
+
     /// 有沒有任何一個查得到的理由。`false` = 她真的記了，而裡面就是沒有。
     ///
     /// 「她此刻是暫停的」和「這一題只掃了 30 天」都算理由：前者是他下一步該
     /// 做什麼，後者是這句「沒有」到底涵蓋了多少。
     pub fn any(&self) -> bool {
         self.chunks == 0
+            || self.ocr_is_dead()
             || !self.excluded.is_empty()
             || self.paused_episodes > 0
             || self.paused_now
@@ -204,6 +233,7 @@ pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::
     let pauses = db.pause_audit()?;
     Ok(BlindSpots {
         chunks: stats.chunks,
+        ocr_blocks: stats.ocr_blocks,
         frames: stats.frames,
         sessions: stats.sessions,
         excluded: db
@@ -339,6 +369,108 @@ mod tests {
         assert_eq!(b.chunks, 0, "一個字都沒有");
         assert_eq!(b.frames, 3, "但她確實看過三張");
         assert!(b.any());
+    }
+
+    /// **上面那條測試守著一個真的 recorder 產生不出來的狀態。**
+    ///
+    /// 它只呼叫 `insert_frame`，從不呼叫 `insert_focus`。可是真的 recorder
+    /// 每次換視窗都會叫後者，而後者順手把視窗標題和網址寫進 `text_chunks`
+    /// ——兩種都不經過 OCR。於是一台 OCR 全死的機器上 `chunks` 不是 0，
+    /// 「她看過 N 張畫面，但一個字都沒讀出來」那一支永遠到不了。
+    ///
+    /// 那台機器拿到的是最後一句「她記的每一段裡都沒有這個字」，和一台一切
+    /// 正常、那件事真的沒發生過的機器一模一樣。而它是**唯一**一種「錄製照
+    /// 跑、畫面照留、搜尋永遠是空的」的壞法，也就是使用者最不可能自己看出來
+    /// 的那一種。
+    #[test]
+    fn a_machine_whose_ocr_is_dead_still_writes_window_titles_and_that_hid_the_whole_diagnosis() {
+        let mut db = Db::open_in_memory().expect("db");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let focus = FocusSnapshot {
+            app_id: Some("chrome.exe".into()),
+            app_name: Some("Chrome".into()),
+            window_title: Some("網路銀行".into()),
+            url: None,
+            pid: Some(42),
+            password_field: false,
+        };
+        // 十二張畫面、一行字都沒讀出來（`ocr` 空的），外加真的 recorder 一定
+        // 會寫的那幾筆 focus。
+        for i in 0..12i64 {
+            db.insert_frame(
+                s,
+                &FrameCapture {
+                    ts: 1_000 + i * 1_000,
+                    monitor: 0,
+                    width: 1920,
+                    height: 1080,
+                    dhash: 0xDEAD_0000 + i as u64,
+                    image: None,
+                    image_ext: "webp",
+                    ocr: Vec::new(),
+                    focus: focus.clone(),
+                },
+                Some("/tmp/x.webp"),
+                1024,
+            )
+            .expect("insert");
+            db.insert_focus(
+                s,
+                &crate::model::FocusEvent {
+                    ts: 1_000 + i * 1_000,
+                    kind: crate::model::FocusKind::TitleChange,
+                    snapshot: FocusSnapshot {
+                        window_title: Some(format!("網路銀行 — 分頁 {i}")),
+                        ..focus.clone()
+                    },
+                },
+            )
+            .expect("focus");
+        }
+
+        let b = blind_spots(&db, nowhere(), "電話").expect("blind");
+        assert!(
+            b.chunks > 0,
+            "視窗標題照樣進得去 text_chunks——這正是舊條件失效的原因"
+        );
+        assert_eq!(b.ocr_blocks, 0, "而 OCR 一行都沒讀出來");
+        assert!(
+            b.ocr_is_dead(),
+            "這台機器唯一的正確診斷，一定要說得出口：{b:?}"
+        );
+        assert!(b.any(), "說得出口，畫面上才會有那一行");
+    }
+
+    /// 剛按下開始記錄、螢幕上正好沒有字的那幾秒，不可以被指控 OCR 壞了。
+    ///
+    /// 一則假警報會叫他去跑 `doctor`，然後 `doctor` 會說一切正常——而下一次
+    /// 真的壞掉的時候，他已經學會忽略這句話了。
+    #[test]
+    fn three_blank_screens_are_not_enough_to_accuse_the_engine() {
+        let mut db = Db::open_in_memory().expect("db");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for i in 0..3i64 {
+            db.insert_frame(
+                s,
+                &FrameCapture {
+                    ts: 1_000 + i * 1_000,
+                    monitor: 0,
+                    width: 1920,
+                    height: 1080,
+                    dhash: 0xBEEF_0000 + i as u64,
+                    image: None,
+                    image_ext: "webp",
+                    ocr: Vec::new(),
+                    focus: FocusSnapshot::default(),
+                },
+                None,
+                0,
+            )
+            .expect("insert");
+        }
+        let b = blind_spots(&db, nowhere(), "電話").expect("blind");
+        assert_eq!(b.ocr_blocks, 0);
+        assert!(!b.ocr_is_dead(), "三張畫面上剛好都沒有字是正常的");
     }
 
     /// 她記了，但那段時間他自己叫她別看。這才是那句「這件事我沒看到過」最

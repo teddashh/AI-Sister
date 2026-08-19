@@ -1146,6 +1146,23 @@ pub mod query {
     /// 她記了，而裡面就是沒有。那句話沒有安慰的成分，但它是真的。
     fn blind_lines(b: &sister_core::answer::BlindSpots) -> Vec<String> {
         let mut out = Vec::new();
+        // 讀字斷掉要**單獨先問**，不能掛在 `chunks == 0` 底下。
+        //
+        // 那一支本來寫在下面那個 `if` 裡，於是它守的是「她一段字都沒有，而且
+        // 看過畫面」。可是 OCR 全死的機器上 `chunks` 不是 0——`insert_focus`
+        // 每次換視窗就寫一列視窗標題、一列網址進 `text_chunks`，兩種都不經過
+        // OCR。真正壞掉的那台機器於是掉到最後那句「她記的每一段裡都沒有這個
+        // 字」，和一台一切正常的機器一模一樣，而正確的下一步從來沒被講出口。
+        //
+        // 提早收工的理由和舊版一樣：畫面明明留下來了，暫停和排除都解釋不了
+        // 「這幾張畫面裡沒有字」，多講只會把人帶偏。
+        if b.ocr_is_dead() {
+            out.push(format!(
+                "她看過 {} 張畫面，但一個字都沒讀出來——讀字那一段是斷的，跑 `sister doctor` 看是哪一種。",
+                b.frames
+            ));
+            return out;
+        }
         if b.chunks == 0 {
             // 「一段字都沒有」有兩種，而它們的下一步是相反的。
             //
@@ -1167,8 +1184,11 @@ pub mod query {
             // 原因講出來，所以這裡改成不 return，讓它們接著講。
             let blocked = b.paused_episodes > 0 || !b.excluded.is_empty();
             out.push(if b.frames > 0 {
+                // 上面那道 `ocr_is_dead()` 已經把「夠多張畫面、一行字都沒有」
+                // 那一種攔走了，所以走到這裡的是張數還太少的時候。三張畫面上
+                // 剛好都沒有字是完全正常的事——這裡不指控 OCR。
                 format!(
-                    "她看過 {} 張畫面，但一個字都沒讀出來——讀字那一段是斷的，跑 `sister doctor` 看是哪一種。",
+                    "她留下了 {} 張畫面，但還沒有任何一段字——多半是才剛開始。",
                     b.frames
                 )
             } else if b.sessions > 0 && blocked {
@@ -1189,11 +1209,9 @@ pub mod query {
             } else {
                 "她還沒記過任何東西——先跑 `sister record`。".to_string()
             });
-            // OCR 斷掉是另一回事：畫面明明留下來了，暫停和排除都解釋不了
-            // 「這幾張畫面裡沒有字」。只有這一條提早收工。
-            if b.frames > 0 {
-                return out;
-            }
+            // 這裡不再提早收工。以前 `frames > 0` 會直接 return，因為那時候它
+            // 確定是 OCR 斷了；現在那個確定的情況在函式最上面就 return 掉了，
+            // 剩下的是「才剛開始」——而排除規則和暫停照樣可能是真正的原因。
         }
         if !b.excluded.is_empty() {
             // 排除是**他自己設的**規則，所以這句話不是道歉，是提醒他去哪裡找。
@@ -1817,6 +1835,40 @@ pub mod query {
                 !lines.contains("暫停"),
                 "暫停解釋不了「這幾張畫面上沒有字」，多講只會把人帶偏：{lines}"
             );
+
+            // **而真的壞掉的那台機器 `chunks` 不是 0。** 上面那一組是測試自己
+            // 造出來的：只寫 frame、不寫 focus。真的 recorder 每次換視窗都會
+            // 把視窗標題寫進 `text_chunks`，所以 OCR 全死的機器長的是這樣——
+            // 而舊版的條件掛在 `chunks == 0` 底下，這一句永遠說不出口。
+            let ocr_dead_on_a_real_machine = BlindSpots {
+                chunks: 3_000, // 全是視窗標題
+                ocr_blocks: 0,
+                frames: 40_000,
+                sessions: 8,
+                ..Default::default()
+            };
+            let lines = blind_lines(&ocr_dead_on_a_real_machine).join("\n");
+            assert!(
+                lines.contains("讀字"),
+                "這台機器唯一的正確診斷，一定要說得出口：{lines}"
+            );
+        }
+
+        /// 剛開始的那幾秒不可以被指控 OCR 壞了——那句話會叫他去跑一次
+        /// `doctor`，而 `doctor` 會說一切正常。下一次真的壞掉的時候，他已經
+        /// 學會忽略這句話了。
+        #[test]
+        fn a_few_blank_screens_do_not_earn_an_accusation() {
+            let just_started = BlindSpots {
+                chunks: 0,
+                ocr_blocks: 0,
+                frames: 3,
+                sessions: 1,
+                ..Default::default()
+            };
+            let lines = blind_lines(&just_started).join("\n");
+            assert!(!lines.contains("讀字"), "三張畫面還不夠指控引擎：{lines}");
+            assert!(lines.contains("剛開始"), "但要講出真正的處境：{lines}");
         }
 
         /// 「我找不到」和「我沒去找」不可以是同一句話。

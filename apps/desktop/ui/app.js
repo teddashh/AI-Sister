@@ -536,23 +536,32 @@ function sourceLine(item, li, queryId, rank) {
 function blindLines(blind) {
   if (!blind) return [];
   const out = [];
+  // 讀字斷掉要**單獨先問**，不能掛在 chunks === 0 底下。
+  //
+  // 那一支本來寫在下面那個 if 裡，於是它守的是「一段字都沒有，而且看過畫面」。
+  // 可是 OCR 全死的機器上 chunks 不是 0：`insert_focus` 每次換視窗就寫一列
+  // 視窗標題、一列網址進 text_chunks，兩種都不經過 OCR。真正壞掉的那台機器
+  // 於是掉到最後那句「我記得的東西裡沒有這件事」，和一台一切正常、那件事真的
+  // 沒發生過的機器一模一樣——而這是這個專案已知的主要故障形狀。
+  //
+  // 提早收工的理由和舊版一樣：畫面明明留下來了，暫停和排除都解釋不了「這幾張
+  // 畫面上沒有字」。門檻（幾張畫面才算數）在 Rust 那邊，這裡只讀結論。
+  if (blind.ocr_is_dead) {
+    return [`（我看過 ${blind.frames} 張畫面，但一個字都沒讀出來——讀字那一段是斷的。）`];
+  }
   if (blind.chunks === 0) {
-    // 「一段字都沒有」有兩種，而它們的下一步是相反的。看過畫面卻一個字都
-    // 沒讀出來，代表讀字那一段斷了（關掉了、或者裝了讀不到）——那是這個
-    // 專案已知的主要故障形狀。和 `blind_lines`（ops.rs）同一條分法。
-    //
-    // 「連畫面都沒有」則有**四種**，而這裡以前只講得出一種：從頭暫停到尾
+    // 「連畫面都沒有」有**四種**，而這裡以前只講得出一種：從頭暫停到尾
     // 的那一小時、被一條排除規則整段擋掉的那一小時，走到的都是同樣這組
     // 數字，然後被告知「被忘掉了，或是過了保留期」——四個裡唯一假的那個，
     // 也是唯一一個會讓他以為東西被刪了的。底下 excluded / paused 兩段本來
     // 就會講出真正的原因，所以這裡不再提早 return。
     const blocked = blind.paused_episodes > 0 || blind.excluded?.length > 0;
     if (blind.frames > 0) {
-      // OCR 斷掉是另一回事：畫面明明留下來了，暫停和排除都解釋不了
-      // 「這幾張畫面上沒有字」。只有這一條提早收工。
-      return [`（我看過 ${blind.frames} 張畫面，但一個字都沒讀出來——讀字那一段是斷的。）`];
-    }
-    if (blind.sessions > 0 && blocked) {
+      // 上面那道 ocr_is_dead 已經把「夠多張畫面、一行字都沒有」攔走了，所以
+      // 走到這裡的是張數還太少的時候。三張畫面上剛好都沒有字是完全正常的事
+      // ——這裡不指控 OCR。
+      out.push(`（我留下了 ${blind.frames} 張畫面，但還沒有任何一段字——多半是才剛開始。）`);
+    } else if (blind.sessions > 0 && blocked) {
       out.push("（我錄過，但那段時間一張畫面都沒留下來——底下是我查得出來的原因。）");
     } else if (blind.sessions > 0 && blind.recording_now) {
       // 她**正在**錄。「被忘掉了，或是過了保留期」少了一種可能，而且正好是
@@ -1110,8 +1119,27 @@ const BLIND_DEMOS = {
   },
   blind: {
     chunks: 0,
+    ocr_is_dead: true,
     frames: 12000,
     sessions: 3,
+    excluded: [],
+    paused_episodes: 0,
+    paused_ms: 0,
+    paused_open: false,
+    paused_now: false,
+    paused_truncated: 0,
+  },
+  // **真的壞掉的那台機器長這樣，而上面那個 `blind` 長不出來。**
+  //
+  // `chunks` 不是 0：`insert_focus` 每次換視窗就寫一列視窗標題進 text_chunks，
+  // 一行 OCR 都沒有也照寫。所以 OCR 全死的機器上，舊版那個 `chunks === 0` 的
+  // 條件永遠不成立，這一行永遠不會出現——而它是那台機器唯一的正確診斷。
+  // 這個開關存在的理由就是那兩種要用眼睛比過。
+  ocrdead: {
+    chunks: 3000,
+    ocr_is_dead: true,
+    frames: 40000,
+    sessions: 8,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,
