@@ -1711,6 +1711,49 @@ mod tests {
         .expect("recorder")
     }
 
+    /// `frames.image_path` 存的是**相對**路徑，而且要接得回真的那個檔。
+    ///
+    /// 這條線釘的不是實作細節，是一份契約。整個 `frames/` 目錄要能整包搬走、
+    /// 整包備份、換一台機器接回去，所以那一欄不可以是絕對路徑；代價是**每一個
+    /// 讀它的人都得先接上根目錄**，而漏掉的那個人不會拿到錯誤——他會拿到
+    /// 「檔案不存在」，然後照實印出「圖不見了」。
+    ///
+    /// 字母人的 `frame_image` 就是這樣漏掉的：`fs::read("2026/08/19/….png")`
+    /// 拿行程的工作目錄當根，也就是他按下捷徑的那個資料夾。每一次點出處都說
+    /// 圖不見了，而圖好端端地躺在磁碟上。`db.rs` 裡那個 fixture 存的是
+    /// `/tmp/x.webp`——一個絕對路徑，所以型別上看起來一切正常。
+    #[test]
+    fn the_stored_path_is_relative_to_the_frames_root_not_to_anywhere_else() {
+        let tmp = Tmp::new("relative");
+        let mut r = image_recorder(Config::default(), tmp.0.clone());
+        assert!(matches!(r.tick(0).expect("tick"), Tick::Kept { .. }));
+
+        let stored: String = r
+            .db()
+            .conn()
+            .query_row(
+                "SELECT image_path FROM frames WHERE image_path IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("一張圖都沒寫出來");
+
+        let path = std::path::Path::new(&stored);
+        assert!(
+            path.is_relative(),
+            "存的是絕對路徑（{stored}）——那份 frames/ 就搬不走了"
+        );
+        assert!(
+            !path.exists(),
+            "{stored} 從工作目錄就打得開，這條測試等於沒驗到"
+        );
+        assert!(
+            tmp.0.join(&stored).is_file(),
+            "接上根目錄之後要打得開：{}",
+            tmp.0.join(&stored).display()
+        );
+    }
+
     /// **少存圖，但一個字都不能少。**
     ///
     /// 磁碟預算幾乎全部花在 PNG 上，而 PNG 是唯一可以少存卻不會少記住東西

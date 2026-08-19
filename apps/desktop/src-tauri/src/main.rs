@@ -1011,6 +1011,18 @@ fn lint_url_rules(rules: Vec<String>) -> Vec<(String, String)> {
 /// 而且「哪些檔案讀得到」的答案就變成「只有這一行指到的那一張」。
 #[tauri::command(async)]
 fn frame_image(frame_id: i64, shell: tauri::State<'_, Shell>) -> Result<FrameView, String> {
+    // `frames.image_path` 存的是**相對**路徑（`2026/08/19/0-….png`），因為整個
+    // `frames/` 目錄要能整包搬走、整包備份。所以讀它之前一定要接上根目錄。
+    //
+    // 少了這一段的時候，`fs::read` 拿行程的工作目錄當根——那是他按下捷徑的
+    // 那個資料夾，永遠不會是資料目錄。於是**每一次**點出處都得到「圖不見了」，
+    // 而那張圖好端端地躺在磁碟上。這一支的文件第一行寫著「這是這個產品的重點，
+    // 不是附加功能」，而它從來沒有成功過一次。
+    let root = shell
+        .data_dir
+        .as_deref()
+        .map(sister_core::config::Config::frames_dir)
+        .ok_or_else(|| "找不到資料目錄，讀不到那張畫面".to_string())?;
     with_db(&shell, |db| {
         let ctx = db
             .frame_context(frame_id)
@@ -1023,12 +1035,16 @@ fn frame_image(frame_id: i64, shell: tauri::State<'_, Shell>) -> Result<FrameVie
         // 不說是哪一種原因：這裡看到的只有一個 NULL，而 NULL 底下躺著四件
         // 事（只記字、截圖節流、每日額度、保留期到了）。挑一個講出來有四分
         // 之三的機會是錯的。
-        let path = ctx
+        let rel = ctx
             .image_path
             .ok_or_else(|| "這一筆沒有留下畫面，只有文字".to_string())?;
-        let bytes = std::fs::read(&path).map_err(|_| format!("圖不見了：{path}"))?;
+        let path = root.join(&rel);
+        // 路徑要印出來，而且是**接好根目錄之後**的那一條。使用者拿它去檔案總管
+        // 貼上就知道到底有沒有那個檔——這是他唯一能自己驗證這句話的辦法。
+        let bytes = std::fs::read(&path)
+            .map_err(|e| format!("圖不見了：{}（{e}）", path.display()))?;
 
-        let ext = std::path::Path::new(&path)
+        let ext = std::path::Path::new(&rel)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("webp");
