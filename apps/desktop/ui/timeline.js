@@ -376,6 +376,11 @@ function scale(e) {
   }
   if (e.events > 0) bits.push(`${e.events} 筆事件`);
   if (e.queries > 0) bits.push(`${e.queries} 題你問過的話`);
+  // 「那一場錄製」本身。它不帶內容，帶的是時間——「那天下午 13:02 到 17:44
+  // 她在錄」。少了這一行，一段只剩那一列的時間刪下去，`bits` 是空的，畫面
+  // 會說「這一段本來就是空的，沒有東西可以忘」——然後刪掉那份他在電腦前的
+  // 紀錄。和上面題庫、畫面紀錄那兩段是同一個故事，第三次。
+  if (e.sessions > 0) bits.push(`${e.sessions} 場錄製的紀錄`);
   return bits;
 }
 
@@ -520,9 +525,12 @@ async function load(keep = null) {
       // 而按下「忘掉這一整天」之後看到的正是這個畫面，它會叫他去跑一個他
       // 剛剛才故意清空的東西（甚至是一個正在跑的東西）。
       //
-      // `sessions` 那張表永遠不會被刪，所以「她有沒有錄過」問得出來。
-      const ran = await invoke("last_recording_end").catch(() => null);
-      if (ran) {
+      // 問的是 `meta` 裡那個位元，不是 `sessions` 有沒有列。那張表現在會
+      // 跟著它記下來的東西一起消失（保留期和「忘掉」都刪），所以「上一場是
+      // 什麼時候」在整顆資料庫被清空之後是 `null` ——而那正是這一行最需要
+      // 答對的時候。
+      const ever = await invoke("has_ever_recorded").catch(() => false);
+      if (ever) {
         el.railSay.textContent = "現在一天都沒有了。";
         say("她錄過——這些紀錄是被忘掉的，或是過了保留期。再錄一段就會有新的。");
       } else {

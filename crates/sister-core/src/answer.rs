@@ -121,14 +121,23 @@ pub struct BlindSpots {
     /// 但一個字都沒讀出來**。那和「她還沒開始記」是相反的處境，而叫一個 OCR
     /// 壞掉的人「先跑 `sister record`」，只會讓他再錄一天空的。
     pub frames: i64,
-    /// 她一共開過幾場錄製。
+    /// 她**曾經**開始記過東西嗎。
     ///
-    /// `sessions` 這張表**不在任何保留期或 `forget` 的射程內**，所以它是
-    /// 「她到底有沒有錄過」唯一還算得準的證據。`chunks == 0 && frames == 0`
-    /// 配上 `sessions > 0`，講的是「錄過，但那些東西被忘掉了／過期了」——
-    /// 而按下「忘掉這一整天」之後看到的正是這個組合。這時候叫他「先跑
-    /// `sister record`」，是在叫他重做一件他剛剛才故意做掉的事。
-    pub sessions: i64,
+    /// `chunks == 0 && frames == 0` 配上這個 `true`，講的是「錄過，但那些東西
+    /// 被忘掉了／過期了」——而按下「忘掉這一整天」之後看到的正是這個組合。
+    /// 這時候叫他「先跑 `sister record`」，是在叫他重做一件他剛剛才故意做掉
+    /// 的事。
+    ///
+    /// 以前這裡是 `sessions: i64`，一個「她一共開過幾場」的計數，理由是那張表
+    /// 不在任何保留期或 `forget` 的射程內。那個理由現在反過來了：那張表**進了**
+    /// 射程（見 `retention::delete_empty_sessions`），因為留著的那幾列說的是
+    /// 「那天 13:02 到 17:44 她在錄」，而他按的是忘掉。所以需要的那一個位元
+    /// 搬到 `meta` 裡去了——見 [`Db::ever_recorded`](crate::db::Db::ever_recorded)。
+    ///
+    /// 而且沒有任何一個讀者用得到那個計數：三個表面問的都是 `> 0`。一個只會
+    /// 被拿來比 0 的數字，本來就該是布林——留著數字，讀的人遲早會拿它去講
+    /// 「你錄過 87 場」，而那句話從那一刻起就開始腐爛。
+    pub ever_recorded: bool,
     /// 排除規則生效過的（理由, 段數）。**段不是張**——見
     /// [`Db::exclusion_audit`](crate::db::Db::exclusion_audit)。
     pub excluded: Vec<(String, i64)>,
@@ -176,9 +185,9 @@ pub struct BlindSpots {
     ///
     /// 只在「一段字都沒有」那組句子裡用得到，而它在那裡分開的是兩件事：
     ///
-    /// - 她**沒**在錄、`sessions > 0`、什麼都不剩 → 「被忘掉了，或是過了保留期」。
+    /// - 她**沒**在錄、錄過、什麼都不剩 → 「被忘掉了，或是過了保留期」。
     ///   沒有東西會再進來，所以那句話是完整的。
-    /// - 她**正在**錄、`sessions > 0`、什麼都不剩 → 那句話少了一種可能，而且
+    /// - 她**正在**錄、錄過、什麼都不剩 → 那句話少了一種可能，而且
     ///   正好是最常見的那一種：他三秒前才按下「開始記錄」。第一次用的人問的
     ///   第一個問題就落在這裡，然後被告知他的紀錄被忘掉了或過期了。
     ///
@@ -235,7 +244,7 @@ pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::
         chunks: stats.chunks,
         ocr_blocks: stats.ocr_blocks,
         frames: stats.frames,
-        sessions: stats.sessions,
+        ever_recorded: db.ever_recorded()?,
         excluded: db
             .exclusion_audit()?
             .into_iter()
@@ -270,16 +279,20 @@ mod tests {
         let b = blind_spots(&db, nowhere(), "電話").expect("blind");
         assert_eq!(b.chunks, 0);
         assert_eq!(b.frames, 0, "她連看都還沒看過");
-        assert_eq!(b.sessions, 0, "連一場錄製都還沒開過");
+        assert!(!b.ever_recorded, "連一場錄製都還沒開過");
         assert!(b.any(), "「我還沒開始記」本身就是一個查得到的理由");
     }
 
     /// **錄過，然後他自己把它忘掉了。**
     ///
     /// `sister forget --last 7d --yes` 或按下「忘掉這一整天」之後，三個計數器
-    /// 全部歸零——和一顆全新的資料庫長得一模一樣。差別在 `sessions`：那張表
-    /// 不在任何保留期或 `forget` 的射程內。少了這一欄，畫面會叫他「先跑
-    /// `sister record`」，也就是重做一件他剛剛才故意做掉的事。
+    /// 全部歸零——和一顆全新的資料庫長得一模一樣。差別在 `ever_recorded`。
+    /// 少了它，畫面會叫他「先跑 `sister record`」，也就是重做一件他剛剛才
+    /// 故意做掉的事。
+    ///
+    /// 這一條以前是靠「`sessions` 那張表誰都不刪」成立的，而那正是它的問題：
+    /// 留著的那一列說的是「那天 13:02 到 17:44 她在錄」。所以現在那張表也
+    /// 一起走（`assert` 在下面），只有那一個位元留在 `meta` 裡。
     #[test]
     fn a_memory_he_erased_is_not_a_memory_she_never_had() {
         let mut db = Db::open_in_memory().expect("db");
@@ -324,7 +337,24 @@ mod tests {
 
         let b = blind_spots(&db, nowhere(), "電話").expect("blind");
         assert_eq!((b.chunks, b.frames), (0, 0), "他要求的：什麼都不剩");
-        assert_eq!(b.sessions, 1, "但「她錄過」這件事還在");
+        assert!(b.ever_recorded, "但「她錄過」這件事還在");
+        // 她**還在錄**（這一場沒有 `ended_at`），所以那一列現在動不得：接下來
+        // 每一拍都還要指著它。這不是漏網，是 `delete_empty_sessions` 那道守衛。
+        assert_eq!(db.stats().expect("stats").sessions, 1, "正在錄的那一場留著");
+
+        // 他按停止。那一刻那一場第一次真的可以被判定，而它是空的。
+        db.end_session(s).expect("end");
+        assert_eq!(
+            db.stats().expect("stats").sessions,
+            0,
+            "紀錄本身要跟著消失——留著它就等於留著一份「他那天在電腦前四小時」的證明"
+        );
+        assert!(
+            blind_spots(&db, nowhere(), "電話")
+                .expect("blind")
+                .ever_recorded,
+            "而那之後「她錄過」這件事還是要答得出來——不然畫面會叫他重跑一次 record"
+        );
     }
 
     /// **錄了一整天，一個字都沒讀出來。**
@@ -566,7 +596,7 @@ mod tests {
 
     /// 她三秒前才按下「開始記錄」，不該被告知他的紀錄被忘掉了。
     ///
-    /// `sessions > 0 && chunks == 0` 有兩種：資料被清掉了，或者這一場才剛
+    /// `ever_recorded && chunks == 0` 有兩種：資料被清掉了，或者這一場才剛
     /// 開始、第一段字還沒寫進去。以前兩種都印「被忘掉了，或是過了保留期」
     /// ——而第一次用的人問的第一個問題正好落在這裡。
     ///
@@ -580,7 +610,7 @@ mod tests {
 
         let cold = blind_spots(&db, &tmp.0, "電話").expect("blind");
         assert_eq!(cold.chunks, 0);
-        assert!(cold.sessions > 0);
+        assert!(cold.ever_recorded);
         assert!(
             !cold.recording_now,
             "沒有心跳檔——沒有人在錄，那句「被忘掉了」是完整的"

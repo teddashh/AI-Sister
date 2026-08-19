@@ -18,6 +18,9 @@
 //!   「三個月前那通客服電話」還查得到，只是點不開當時的截圖。
 //! - 過了 `text_days`：整列連同文字、事實、FTS 索引一起消失。
 //!
+//! 一場錄製的紀錄（`sessions`）跟著它記下來的東西走：最後一列消失的時候，
+//! 那一列也走。見 [`delete_empty_sessions`]。
+//!
 //! ## 順序：先刪檔案，再改資料庫
 //!
 //! 中途死掉的話，兩種殘骸的性質完全不同：
@@ -70,6 +73,11 @@ pub struct PruneReport {
     /// 的，這一欄裡的是**他自己打的字**。「忘掉那一段」如果沒有把他那段時間問
     /// 過的話一起帶走，那句話就是半真的，而報告上看不出差別。
     pub queries_deleted: u64,
+    /// 整場消失的錄製紀錄數（`sessions` 那張表）。見 [`delete_empty_sessions`]。
+    ///
+    /// 它不是「那段時間裡她錄了幾場」——是**這一次之後，一列都不剩的那幾場**。
+    /// 一場橫跨邊界的錄製不會算進來，因為窗外那一半還在。
+    pub sessions_deleted: u64,
     /// 刪檔失敗的路徑（權限、檔案正被開著）。**不吞掉**。
     ///
     /// 刪不掉的截圖仍然躺在磁碟上，而使用者以為它已經不在了。這一項要
@@ -212,6 +220,109 @@ fn delete_frames_except(
         .context("delete frames")? as u64)
 }
 
+/// 帶著 `session_id` 的那七張表。
+///
+/// 寫成一份清單而不是七句 SQL：漏掉一張的下場是一列被判定成「空的」然後刪掉，
+/// 而它其實還有東西指著——外鍵是 `ON` 的，所以那會變成一次整批 rollback。
+/// 新增一張帶 `session_id` 的表卻忘了加進來，也是同一個下場（會很吵，這是對的）。
+const SESSION_CHILDREN: [&str; 7] = [
+    "frames",
+    "focus_events",
+    "clipboard_events",
+    "input_metrics",
+    "system_events",
+    "text_chunks",
+    "facts",
+];
+
+/// **一場錄製的紀錄，活得剛好和它記下來的東西一樣久。**
+///
+/// `sessions` 這張表以前誰都不刪。於是 `forget` 那句「那段時間裡的每一張表都
+/// 清乾淨」是假的：留下來的那一列帶著 `started_at`、`ended_at`、`app_version`、
+/// `platform`——「那天下午 13:02 到 17:44 她在錄，Windows，alpha.21」。他忘掉
+/// 的是那段時間裡的畫面和文字，而留下來的，是一張他當天坐在電腦前四小時
+/// 四十二分的證明。保留期那邊一樣：過了 `text_days`，整列該消失的東西全消失
+/// 了，只有這張表繼續按年累積。
+///
+/// 判斷條件不是時間窗，是**還有沒有人指著它**：
+///
+/// * 呼叫端剛剛才把窗內的東西刪光，所以「一列都不剩」＝「這一場的東西都不在了」。
+/// * 圖刪不掉而被留下來的那幾列（見 [`delete_frames_except`] 的 `kept`）會擋住
+///   它的那一場——那是對的，那一場確實還有東西在磁碟上。
+/// * 橫跨邊界的那一場也會被擋住，因為窗外那一半還在。
+/// * 外鍵是 `ON` 的，所以判斷錯了不會安靜地留下孤兒：SQLite 會直接拒絕。
+///
+/// 兩個活著的例外（`only` 是 `None` 的時候）：
+///
+/// * `ended_at IS NULL` 且是最新的那一場 → **可能正是現在正在錄的這一場**
+///   （`prune` 每五分鐘在錄製迴圈裡自己跑一次，而剛開始的那幾拍它是空的）。
+///   刪掉它，接下來每一列的 `session_id` 都會指向一個不存在的東西。
+/// * `ended_at IS NULL` 但不是最新的那一場 → 那是被砍掉／當掉的一場，
+///   沒有人會再回來寫它。留著它等於留下一列永遠不會過期的紀錄。
+///
+/// `only` 限定一場（[`crate::db::Db::end_session`] 用），`None` 掃全部。
+pub(crate) fn delete_empty_sessions(
+    tx: &rusqlite::Transaction<'_>,
+    only: Option<i64>,
+) -> Result<u64> {
+    let empty = SESSION_CHILDREN
+        .iter()
+        .map(|t| format!("NOT EXISTS(SELECT 1 FROM {t} WHERE session_id = sessions.id)"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    // 限定一場的時候，那道「不准碰還開著的那一場」的守衛就多餘了——呼叫端
+    // 剛剛才把 `ended_at` 填上。留著它反而會擋掉那一場（它同時也是 MAX(id)）。
+    let guard = match only {
+        Some(_) => "id = ?1",
+        None => "(ended_at IS NOT NULL OR id < (SELECT MAX(id) FROM sessions))",
+    };
+    let sql = format!("DELETE FROM sessions WHERE {guard} AND {empty}");
+    Ok(match only {
+        Some(id) => tx.execute(&sql, [id]),
+        None => tx.execute(&sql, []),
+    }
+    .context("delete empty sessions")? as u64)
+}
+
+/// 上面那一支**會**刪掉幾列——如果 `[from_ts, to_ts)` 裡的東西現在全不見了的話。
+///
+/// 預覽和真的跑必須講同一個數字，而預覽一列都不能動，所以條件要換一種寫法：
+/// 「這一場剩下的東西，是不是全都落在那個窗裡」。同一個 `ts` 條件，只是反過來
+/// 問——窗外還有東西的那一場，等一下也不會被刪。
+///
+/// `input_metrics` 那張表用 `ts_end` / `ts_start`，而且 `forget` 收的是**重疊**
+/// 而不是包含（見 [`crate::db::Db::forget`] 的邊界那一段）。這裡照抄那個條件，
+/// 不然一段跨過邊界的輸入統計會讓兩支的答案差一列。
+fn count_empty_sessions(
+    conn: &rusqlite::Connection,
+    from_ts: Millis,
+    to_ts: Millis,
+) -> Result<u64> {
+    let gone = |t: &str| match t {
+        "input_metrics" => "NOT EXISTS(SELECT 1 FROM input_metrics WHERE session_id = sessions.id \
+             AND NOT (ts_end > ?1 AND ts_start < ?2))"
+            .to_string(),
+        _ => format!(
+            "NOT EXISTS(SELECT 1 FROM {t} WHERE session_id = sessions.id \
+             AND NOT (ts >= ?1 AND ts < ?2))"
+        ),
+    };
+    let empty = SESSION_CHILDREN
+        .iter()
+        .map(|t| gone(t))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    Ok(conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM sessions \
+             WHERE (ended_at IS NOT NULL OR id < (SELECT MAX(id) FROM sessions)) \
+             AND {empty}"
+        ),
+        [from_ts, to_ts],
+        |r| r.get::<_, i64>(0),
+    )? as u64)
+}
+
 impl crate::db::Db {
     /// 現在跑一次清理**會**刪掉什麼。只有 SELECT 和 stat，不動任何東西。
     ///
@@ -258,6 +369,9 @@ impl crate::db::Db {
         // 題庫，然後真的跑起來的時候把它刪掉——而預覽存在的全部意義就是
         // 「真的跑之前先看清楚」。
         r.queries_deleted = n("SELECT COUNT(*) FROM queries WHERE ts < ?1", text_cut)?;
+        // 那幾場錄製本身。`i64::MIN` 當下界，和 `prune` 真的跑時傳給
+        // `delete_frames_except` 的一樣——它的條件本來就只有上界。
+        r.sessions_deleted = count_empty_sessions(&self.conn, i64::MIN, text_cut)?;
         // 兩段的圖都會被刪掉，所以用比較舊的那條界線一次算完
         let cut = frame_cut.max(text_cut);
         if let Some(root) = image_root {
@@ -371,6 +485,10 @@ impl crate::db::Db {
         report.queries_deleted += tx
             .execute("DELETE FROM queries WHERE ts < ?1", [text_cut])
             .context("prune queries")? as u64;
+        // **最後一步，在同一個 transaction 裡。**上面每一句 DELETE 都跑完了，
+        // 所以「一列都不剩」現在才問得準。順序反過來的話，這一支看到的是還沒
+        // 被清空的子表，一場都刪不掉——而且不會有人發現，因為 0 是個合理的數字。
+        report.sessions_deleted += delete_empty_sessions(&tx, None)?;
 
         // ── 第二段：只丟掉圖，留下字（過了 frames_days）──────────────
         //
@@ -471,6 +589,7 @@ impl crate::db::Db {
             r.events_deleted += n(sql)?;
         }
         r.queries_deleted = n("SELECT COUNT(*) FROM queries WHERE ts >= ?1 AND ts < ?2")?;
+        r.sessions_deleted = count_empty_sessions(&self.conn, from_ts, to_ts)?;
         Ok(r)
     }
 
@@ -484,6 +603,10 @@ impl crate::db::Db {
     /// 使用者親手選一段時間按下忘掉的時候，前提正好相反。留下 OCR 出來的字
     /// 而只刪掉圖，是把他說的那句話理解成他沒說過的另一句——而且他多半不會
     /// 再檢查一次。所以這裡只有一段：那段時間裡的每一張表都清乾淨。
+    ///
+    /// **包括 `sessions`。**那句話寫在這裡很久，而那張表以前誰都不刪：留下來
+    /// 的那一列說的是「那天 13:02 到 17:44 她在錄」。條件不是時間窗而是「還有
+    /// 沒有人指著它」，見 [`delete_empty_sessions`]。
     ///
     /// ## 邊界
     ///
@@ -586,6 +709,9 @@ impl crate::db::Db {
                 [from_ts, to_ts],
             )
             .context("forget queries")? as u64;
+        // 那幾場錄製本身。這一句就是「每一張表都清乾淨」那句話裡以前唯一
+        // 沒被清到的那張表——理由見 [`delete_empty_sessions`]。
+        report.sessions_deleted += delete_empty_sessions(&tx, None)?;
         tx.commit()?;
 
         Ok(report)
@@ -986,6 +1112,92 @@ mod tests {
         assert!(
             db.search("昨天", 10).expect("search").is_empty(),
             "忘掉一段時間就該連字一起走，就算圖卡住了"
+        );
+    }
+
+    /// **忘掉那一段，那一場錄製本身也要走。**
+    ///
+    /// `sessions` 那張表以前誰都不刪，而 `forget` 的說明從第一天起就寫著「那段
+    /// 時間裡的每一張表都清乾淨」。留下來的那一列帶著 `started_at` / `ended_at`
+    /// ——也就是一份「他那天下午坐在電腦前四個多小時」的紀錄，而他剛剛才按過
+    /// 忘掉。畫面上一個字都沒有了，時間還在。
+    #[test]
+    fn forgetting_an_afternoon_takes_the_recording_itself_with_it() {
+        let tmp = Tmp::new("forget-session");
+        let (mut db, _) = seeded(&tmp);
+        db.end_session(1).expect("end");
+        assert_eq!(db.stats().expect("stats").sessions, 1, "先確定有那一列");
+
+        let r = db
+            .forget(days_ago(500), days_ago(0), Some(tmp.path()))
+            .expect("forget");
+
+        assert_eq!(r.sessions_deleted, 1, "{r:?}");
+        assert_eq!(
+            db.stats().expect("stats").sessions,
+            0,
+            "「每一張表」以前漏掉的就是這一張"
+        );
+    }
+
+    /// **只忘掉一半的那一場，那一列要留著。**
+    ///
+    /// 判斷條件不是「這一場的開始時間落在窗裡」，是「還有沒有人指著它」。
+    /// 拿時間去判的話，一場橫跨午夜的錄製會在他忘掉前半天的時候整列消失，
+    /// 而後半天的畫面還在——那些畫面從此屬於一場不存在的錄製。
+    #[test]
+    fn a_recording_that_only_half_vanished_keeps_its_row() {
+        let tmp = Tmp::new("forget-half");
+        let (mut db, _) = seeded(&tmp);
+        db.end_session(1).expect("end");
+
+        // `seeded` 放了三張：1 天前、60 天前、400 天前。只忘掉最舊的那一張。
+        let r = db
+            .forget(days_ago(500), days_ago(100), Some(tmp.path()))
+            .expect("forget");
+
+        assert_eq!(r.frames_deleted, 1, "先確定真的忘掉了一張");
+        assert_eq!(r.sessions_deleted, 0, "{r:?}");
+        assert_eq!(
+            db.stats().expect("stats").sessions,
+            1,
+            "剩下兩張畫面還指著這一場，它不能消失"
+        );
+    }
+
+    /// 過了保留期的那幾場也一樣走。**而預覽和真的跑要講同一個數字。**
+    ///
+    /// 預覽是那個決定要不要按下去的畫面（見 `prune_preview` 的說明），而它
+    /// 走的是另一套 SQL——「窗外還有沒有東西」而不是「刪完之後還剩沒剩」。
+    /// 兩套條件寫成兩個樣子，遲早會給出兩個答案。
+    #[test]
+    fn an_expired_recording_vanishes_and_the_preview_said_so_first() {
+        let mut db = Db::open_in_memory().expect("db");
+        // 兩場：一場整場過期，一場橫跨界線。
+        let old = db.start_session("test", "0.0.1").expect("session");
+        db.insert_frame(old, &frame(days_ago(400), "一年多前"), None, 0)
+            .expect("insert");
+        db.end_session(old).expect("end");
+        let straddling = db.start_session("test", "0.0.1").expect("session");
+        for age in [400, 1] {
+            db.insert_frame(straddling, &frame(days_ago(age), "橫跨"), None, 0)
+                .expect("insert");
+        }
+        db.end_session(straddling).expect("end");
+
+        let retention = RetentionConfig {
+            frames_days: 30,
+            text_days: 365,
+        };
+        let preview = db.prune_preview(NOW, &retention, None).expect("preview");
+        let real = db.prune(NOW, &retention, None).expect("prune");
+
+        assert_eq!(preview.sessions_deleted, 1, "{preview:?}");
+        assert_eq!(real.sessions_deleted, preview.sessions_deleted, "{real:?}");
+        assert_eq!(
+            db.stats().expect("stats").sessions,
+            1,
+            "橫跨界線的那一場還有東西在，它得留著"
         );
     }
 

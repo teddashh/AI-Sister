@@ -377,18 +377,82 @@ impl Db {
     // ---------- sessions ----------
 
     pub fn start_session(&mut self, platform: &str, app_version: &str) -> Result<i64> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "INSERT INTO sessions(started_at, app_version, platform) VALUES(?1, ?2, ?3)",
             params![now_ms(), app_version, platform],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        // **在下一句 INSERT 之前拿。** `last_insert_rowid` 講的是這個連線上最後
+        // 一次插入，而底下那句 `meta` 也是一次插入——晚一行拿到的是 `meta` 的
+        // rowid，於是這一場的 id 會指到一個不存在的 session，接下來每一列都撞
+        // 外鍵。（測試當場就抓到了，因為外鍵是 `ON` 的。）
+        let id = tx.last_insert_rowid();
+        // 同一個 transaction 裡按下這個旗標。理由見 [`Db::ever_recorded`]：
+        // `sessions` 那幾列現在會跟著保留期和 `sister forget` 一起消失，而
+        // 「她到底有沒有開始記過東西」這個問題**必須**在那之後還答得出來。
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('ever_recorded', '1')",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(id)
     }
 
+    /// 這台機器上，有沒有**曾經**開始過一場錄製。
+    ///
+    /// 一個布林，不是一個數字，也不是一個時戳——這是刻意的。
+    ///
+    /// 唯一的讀者是「沒找到」那幾句話（見 [`crate::answer::BlindSpots`]）：
+    /// 一顆全新的資料庫要說「我還沒開始記——按右上角那顆開始記錄」，而一顆
+    /// **他自己剛清空**的資料庫絕對不可以說同一句話，那是叫他重做一件他刻意
+    /// 做掉的事。以前這件事是靠「`sessions` 那張表誰都不刪」撐著的，於是
+    /// `forget` 那句「那段時間裡的每一張表都清乾淨」是假的：那張表留著
+    /// `started_at` / `ended_at` / `app_version` / `platform`——也就是
+    /// 「那天下午 13:02 到 17:44 她在錄」。他忘掉的是那段時間裡的畫面，
+    /// 而留下來的是一張他當時坐在電腦前四小時四十二分的證明。
+    ///
+    /// 所以那張表現在會被刪（見 `retention::delete_empty_sessions`），而
+    /// 真正被需要的那一個位元搬到這裡：**沒有時間、沒有長度、沒有版本**，
+    /// 重建不出任何東西。
+    ///
+    /// 舊資料庫沒有這個 key，所以「有 session 就算數」是退路——不然升上來的
+    /// 那一刻，一台錄了半年的機器會說自己從來沒開始過。
+    pub fn ever_recorded(&self) -> Result<bool> {
+        let flagged: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'ever_recorded')",
+            [],
+            |r| r.get(0),
+        )?;
+        if flagged {
+            return Ok(true);
+        }
+        Ok(self
+            .conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM sessions)", [], |r| r.get(0))?)
+    }
+
+    /// 收工。順手把**空的那幾場**清掉。
+    ///
+    /// 那一句掃描不是為了省空間（一列 sessions 幾十個位元組），是為了關掉一個
+    /// 時間窗：`retention::delete_empty_sessions` 不會碰還開著的那一場，因為
+    /// `prune` 每五分鐘在錄製迴圈裡自己跑一次，而正在錄的那一場剛開始時本來
+    /// 就是空的。於是「錄到一半按下『忘掉這一整天』」之後，那一場的紀錄要等到
+    /// **下一次**錄製開始五分鐘後才會消失——中間他關掉了程式、看了一眼資料庫，
+    /// 看到的是一列說著「今天 13:02 到 17:44 她在錄」的紀錄，而他剛剛才按過忘掉。
+    ///
+    /// 這裡是那一場停止的那一刻，也是它第一次真的可以被判定的那一刻。
+    ///
+    /// **只掃這一場，不順便掃別人。** 全掃會把「開機沒幾秒就當掉、一列都沒寫
+    /// 成」的那幾場一起掃走，而那幾場正是 [`crash_audit`](Self::crash_audit)
+    /// 存在的理由——一次乾淨的停止不該把一次當機的證據帶走。
     pub fn end_session(&mut self, session_id: i64) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
             params![now_ms(), session_id],
         )?;
+        crate::retention::delete_empty_sessions(&tx, Some(session_id))?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -2400,6 +2464,13 @@ pub struct DbStats {
     pub clipboard_events: i64,
     pub input_windows: i64,
     pub system_events: i64,
+    /// **還留著東西的**那幾場錄製。
+    ///
+    /// 不是「這台機器一共錄過幾場」。一場錄製的紀錄活得剛好和它記下來的東西
+    /// 一樣久（見 `retention::delete_empty_sessions`），所以這個數字和這一頁
+    /// 上其他每一個數字描述的是同一個集合。以前它數的是整張表——那張表誰都
+    /// 不刪——於是一顆剛被 `sister forget` 清空的資料庫會印出「工作階段 412」
+    /// 配上一片空白的其他每一行，而那 412 場裡一場的東西都不在了。
     pub sessions: i64,
     /// `text_chunks` 的時間範圍。`retention.text_days` 管的是這一對。
     pub first_ts: Option<Millis>,
@@ -3257,10 +3328,16 @@ mod tests {
 
     /// **「那一版還沒在記為什麼停」和「記了、後來被清掉」是兩件事。**
     ///
-    /// `sessions` 這張表誰都不刪，`system_events` 保留期和 `sister forget`
-    /// 都刪。所以一場好好結束的錄製，過一陣子之後 `reason` 會自己變成
-    /// `None`——而 doctor 那一行的全部意義就是分辨「你按了停止」/「她當掉了」/
-    /// 「同意書被撤回」，把原因報成「舊版執行檔」是把帳算到錯的地方。
+    /// `system_events` 保留期和 `sister forget` 都刪，所以一場錄製的 `reason`
+    /// 會自己變成 `None`——而 doctor 那一行的全部意義就是分辨「你按了停止」/
+    /// 「她當掉了」/「同意書被撤回」，把原因報成「舊版執行檔」是把帳算到錯的
+    /// 地方。
+    ///
+    /// 這一場**橫跨**那個被忘掉的區間：中午那張畫面留著（`ts = 5_000`），只有
+    /// 早上那則 `session_end` 被蓋掉。以前這個測試不需要那張畫面，因為
+    /// `sessions` 那張表誰都不刪；現在一列都不剩的那一場會整個消失，所以
+    /// 「還留著、但理由不見了」要真的長成它在現實裡的樣子——他忘掉的是一天
+    /// 裡的某一段，不是整場。
     #[test]
     fn a_reason_that_was_pruned_is_not_a_reason_that_was_never_written() {
         let mut db = test_db();
@@ -3274,6 +3351,8 @@ mod tests {
             },
         )
         .expect("session_end");
+        db.insert_frame(s, &frame_with_text(5_000, "a", "b", &["中午"]), None, 0)
+            .expect("survives");
         db.end_session(s).expect("end");
 
         let before = db.last_session().expect("last").expect("有一場");
@@ -3684,6 +3763,15 @@ mod tests {
         let mut db = test_db();
 
         let clean = db.start_session("test", "0.0.1").expect("session");
+        // 這一場要真的記到東西。一列都沒留下的錄製，收尾的時候整場都會消失
+        // （見 `end_session`），而這條測試問的是當機不是空場。
+        db.insert_frame(
+            clean,
+            &frame_with_text(1_000, "a", "b", &["有東西"]),
+            None,
+            0,
+        )
+        .expect("insert");
         db.end_session(clean).expect("end");
         let (all, unfinished, last) = db.crash_audit().expect("audit");
         assert_eq!((all, unfinished, last), (1, 0, None), "收好尾的不該算當機");

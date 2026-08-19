@@ -561,16 +561,16 @@ function blindLines(blind) {
       // 走到這裡的是張數還太少的時候。三張畫面上剛好都沒有字是完全正常的事
       // ——這裡不指控 OCR。
       out.push(`（我留下了 ${blind.frames} 張畫面，但還沒有任何一段字——多半是才剛開始。）`);
-    } else if (blind.sessions > 0 && blocked) {
+    } else if (blind.ever_recorded && blocked) {
       out.push("（我錄過，但那段時間一張畫面都沒留下來——底下是我查得出來的原因。）");
-    } else if (blind.sessions > 0 && blind.recording_now) {
+    } else if (blind.ever_recorded && blind.recording_now) {
       // 她**正在**錄。「被忘掉了，或是過了保留期」少了一種可能，而且正好是
       // 最常見的那一種：他三秒前才按下「開始記錄」。第一次用的人問的第一個
       // 問題就落在這裡，然後被告知他的紀錄被忘掉了。
       //
       // 不挑一邊：清空過的資料庫上她照樣可能正在錄，那時候兩件事都成立。
       out.push("（我正開著，但手上一段字都沒有——可能是剛開始，也可能是之前的被忘掉了或過期了。）");
-    } else if (blind.sessions > 0) {
+    } else if (blind.ever_recorded) {
       out.push("（我錄過，但現在什麼都不剩了——被忘掉了，或是過了保留期。）");
     } else {
       // 下一步只掛在這一條上。它是四種空手裡唯一一種「去按開始記錄」真的
@@ -1120,7 +1120,7 @@ const BLIND_DEMOS = {
   forgotten: {
     chunks: 0,
     frames: 0,
-    sessions: 3,
+    ever_recorded: true,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,
@@ -1128,13 +1128,13 @@ const BLIND_DEMOS = {
     paused_now: false,
     paused_truncated: 0,
   },
-  // 同樣是 sessions > 0、chunks == 0，只差在她**正在**錄。以前這兩種印同一
+  // 同樣是「她錄過」、chunks == 0，只差在她**正在**錄。以前這兩種印同一
   // 句「被忘掉了，或是過了保留期」，而第二種最常見的成因是他三秒前才按下
   // 「開始記錄」。
   juststarted: {
     chunks: 0,
     frames: 0,
-    sessions: 1,
+    ever_recorded: true,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,
@@ -1147,7 +1147,7 @@ const BLIND_DEMOS = {
     chunks: 0,
     ocr_is_dead: true,
     frames: 12000,
-    sessions: 3,
+    ever_recorded: true,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,
@@ -1165,7 +1165,7 @@ const BLIND_DEMOS = {
     chunks: 3000,
     ocr_is_dead: true,
     frames: 40000,
-    sessions: 8,
+    ever_recorded: true,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,
@@ -1176,7 +1176,7 @@ const BLIND_DEMOS = {
   fresh: {
     chunks: 0,
     frames: 0,
-    sessions: 0,
+    ever_recorded: false,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,
@@ -1187,7 +1187,7 @@ const BLIND_DEMOS = {
   blocked: {
     chunks: 0,
     frames: 0,
-    sessions: 3,
+    ever_recorded: true,
     excluded: [["excluded app: keepassxc", 3]],
     paused_episodes: 1,
     paused_ms: 3600 * 1000,

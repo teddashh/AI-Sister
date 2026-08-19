@@ -703,6 +703,15 @@ pub mod prune {
         if r.queries_deleted > 0 {
             println!("  {verb} {} 題你自己問過的話（題庫）", r.queries_deleted);
         }
+        // 也單獨一行。它刪的不是內容，是「那天 13:02 到 17:44 她在錄」——
+        // 一份沒有任何內容、卻證明他那段時間坐在電腦前的紀錄。那張表以前
+        // 誰都不刪，而 `forget` 的說明從第一天起就寫著「每一張表都清乾淨」。
+        if r.sessions_deleted > 0 {
+            println!(
+                "  {verb} {} 場錄製的紀錄本身（那幾場已經一列都不剩了）",
+                r.sessions_deleted
+            );
+        }
         // 刪不掉的檔案仍然躺在磁碟上，而使用者以為它已經不在了。
         // 這是整份報告裡唯一絕對不能安靜掉的一項。
         for f in &r.failed {
@@ -1380,9 +1389,9 @@ pub mod query {
                     "她留下了 {} 張畫面，但還沒有任何一段字——多半是才剛開始。",
                     b.frames
                 )
-            } else if b.sessions > 0 && blocked {
+            } else if b.ever_recorded && blocked {
                 "她錄過，但那段時間一張畫面都沒留下來——底下是查得出來的原因。".to_string()
-            } else if b.sessions > 0 && b.recording_now {
+            } else if b.ever_recorded && b.recording_now {
                 // 她**正在**錄。那句「被忘掉了，或是過了保留期」少了一種可能，
                 // 而且正好是最常見的那一種：他三秒前才把 recorder 開起來。
                 // 第一次用的人問的第一個問題就落在這裡，然後被告知他的紀錄
@@ -1392,7 +1401,7 @@ pub mod query {
                 // 都成立。把可能性列出來，不要替他選一個。
                 "她正開著，但手上一段字都沒有——可能是剛開始，也可能是之前的被忘掉了或過期了。"
                     .to_string()
-            } else if b.sessions > 0 {
+            } else if b.ever_recorded {
                 "她錄過，但現在資料庫裡是空的——被 `sister forget` 忘掉了，或是過了保留期。"
                     .to_string()
             } else {
@@ -1983,7 +1992,7 @@ pub mod query {
             let recorded_then_erased = BlindSpots {
                 chunks: 0,
                 frames: 0,
-                sessions: 3,
+                ever_recorded: true,
                 ..Default::default()
             };
             let lines = blind_lines(&recorded_then_erased).join("\n");
@@ -2055,7 +2064,7 @@ pub mod query {
                 chunks: 3_000, // 全是視窗標題
                 ocr_blocks: 0,
                 frames: 40_000,
-                sessions: 8,
+                ever_recorded: true,
                 ..Default::default()
             };
             let lines = blind_lines(&ocr_dead_on_a_real_machine).join("\n");
@@ -2074,7 +2083,7 @@ pub mod query {
                 chunks: 0,
                 ocr_blocks: 0,
                 frames: 3,
-                sessions: 1,
+                ever_recorded: true,
                 ..Default::default()
             };
             let lines = blind_lines(&just_started).join("\n");

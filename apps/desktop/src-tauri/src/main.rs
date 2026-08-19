@@ -217,6 +217,21 @@ fn last_recording_end(shell: tauri::State<'_, Shell>) -> Option<LastRun> {
     .flatten()
 }
 
+/// 她**曾經**開始記過東西嗎。
+///
+/// 和 [`last_recording_end`] 分開，因為那一支答的是「上一場長什麼樣」，而
+/// 一場錄製的紀錄現在會跟著它記下來的東西一起消失（見
+/// `retention::delete_empty_sessions`）。時間軸以前拿它當「她錄過嗎」用，
+/// 於是一個把整顆資料庫忘光的人會拿到「她還沒記得任何東西。跑 sister record
+/// 之後再回來看。」——叫他重做一件他剛剛才故意做掉的事。
+///
+/// 這一支問的是 `meta` 裡那個位元：沒有時間、沒有長度，忘不掉也重建不出東西。
+#[tauri::command(async)]
+fn has_ever_recorded(shell: tauri::State<'_, Shell>) -> bool {
+    with_db(&shell, |db| db.ever_recorded().map_err(|e| format!("{e:#}")))
+        .unwrap_or(false)
+}
+
 /// 上一場錄製（見 [`last_recording_end`]）。
 #[derive(Serialize)]
 struct LastRun {
@@ -608,9 +623,9 @@ struct Blind {
     /// 她一共留下幾張畫面。`chunks == 0 && frames > 0` = 她看了，
     /// 但一個字都沒讀出來（讀字那一段斷了）。
     frames: i64,
-    /// 她一共開過幾場錄製。兩個 0 配上 `sessions > 0` = 錄過、但被忘掉了，
-    /// 不是還沒開始——見 [`sister_core::answer::BlindSpots::sessions`]。
-    sessions: i64,
+    /// 她**曾經**開始記過東西嗎。兩個 0 配上 `true` = 錄過、但被忘掉了，
+    /// 不是還沒開始——見 [`sister_core::answer::BlindSpots::ever_recorded`]。
+    ever_recorded: bool,
     /// 排除規則生效過的（理由, 段數）。段不是張。
     excluded: Vec<(String, i64)>,
     paused_episodes: i64,
@@ -760,7 +775,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 chunks: b.chunks,
                 ocr_is_dead: b.ocr_is_dead(),
                 frames: b.frames,
-                sessions: b.sessions,
+                ever_recorded: b.ever_recorded,
                 excluded: b.excluded,
                 paused_episodes: b.paused_episodes,
                 paused_ms: b.paused_ms,
@@ -1534,6 +1549,12 @@ struct Erasure {
     /// 那段時間裡他自己問過的話（題庫）。單獨一項，理由見
     /// `PruneReport::queries_deleted`。
     queries: u64,
+    /// 那段時間結束之後**一列都不剩**的那幾場錄製。
+    ///
+    /// 刪的不是內容，是「那天 13:02 到 17:44 她在錄」——一份沒有任何內容、
+    /// 卻證明他那段時間坐在電腦前的紀錄。那張表以前誰都不刪，而這一頁那顆
+    /// 按鈕上寫的是「忘掉」。見 `retention::delete_empty_sessions`。
+    sessions: u64,
     /// 刪不掉的檔案。**不吞掉**：那幾張截圖還躺在磁碟上，而使用者以為
     /// 它們已經不在了。
     failed: Vec<String>,
@@ -1555,6 +1576,7 @@ impl From<sister_core::retention::PruneReport> for Erasure {
             image_bytes: r.image_bytes_freed,
             events: r.events_deleted,
             queries: r.queries_deleted,
+            sessions: r.sessions_deleted,
             failed: r.failed,
             missing: r.missing,
         }
@@ -1796,6 +1818,7 @@ fn main() {
             stop_recording,
             recorder_log_tail,
             last_recording_end,
+            has_ever_recorded,
             toggle_pause,
             settings_read,
             settings_write,
