@@ -26,6 +26,31 @@ pub enum FactKind {
 }
 
 impl FactKind {
+    /// 全部的類別，一份。
+    ///
+    /// 以前這個清單被手抄過三份：`as_str`、`from_str_kind`，還有 CLI 上
+    /// `--kind` 那行說明文字。前兩份至少還編得出錯，第三份不會——加一類事實
+    /// 而忘了改它，使用者看到的就是一份少一項的選單。現在後兩者都從這裡長。
+    pub const ALL: [FactKind; 8] = [
+        FactKind::Money,
+        FactKind::Phone,
+        FactKind::Url,
+        FactKind::Email,
+        FactKind::FilePath,
+        FactKind::ErrorCode,
+        FactKind::IdLike,
+        FactKind::DateTimeMention,
+    ];
+
+    /// 給人看的清單，用在說明文字和錯誤訊息裡。
+    pub fn names(sep: &str) -> String {
+        FactKind::ALL
+            .into_iter()
+            .map(FactKind::as_str)
+            .collect::<Vec<_>>()
+            .join(sep)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             FactKind::Money => "money",
@@ -40,17 +65,7 @@ impl FactKind {
     }
 
     pub fn from_str_kind(s: &str) -> Option<Self> {
-        Some(match s {
-            "money" => FactKind::Money,
-            "phone" => FactKind::Phone,
-            "url" => FactKind::Url,
-            "email" => FactKind::Email,
-            "file_path" => FactKind::FilePath,
-            "error_code" => FactKind::ErrorCode,
-            "id_like" => FactKind::IdLike,
-            "datetime" => FactKind::DateTimeMention,
-            _ => return None,
-        })
+        FactKind::ALL.into_iter().find(|k| k.as_str() == s)
     }
 
     /// 重疊時誰贏。數字小的優先——格式越明確、誤判越低的排越前面。
@@ -65,6 +80,26 @@ impl FactKind {
             FactKind::Phone => 6,
             FactKind::IdLike => 7,
         }
+    }
+}
+
+/// 打錯的類別要當場被拒絕，不能靜靜地回零筆。
+///
+/// `sister facts -k monney` 以前印的是「沒有符合的事實。」——和「你的記憶裡
+/// 真的沒有金額」一字不差。使用者會拿後者去下結論，而他手上其實有一整年的
+/// 帳單。這和空答案那條是同一個病：**查不到**和**問錯了**在畫面上長一樣。
+///
+/// 跟同意書那邊 (`consent::Sheet`) 同一個寫法、同一種語氣，因為那是這個專案
+/// 已經決定過的形狀：講出打錯的是哪個字，附上可用的清單。
+impl std::str::FromStr for FactKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        // 連字號和底線都收：`file-path` 和 `file_path` 之間的差別不值得
+        // 讓人以為這個功能壞了。
+        let want = s.trim().to_ascii_lowercase().replace('-', "_");
+        FactKind::from_str_kind(&want)
+            .ok_or_else(|| format!("沒有這一類事實：{s}（可用的是 {}）", FactKind::names("、")))
     }
 }
 
@@ -1505,5 +1540,55 @@ mod tests {
         let t2 = "ORDER13450X";
         let start2 = t2.find("13450").expect("digits");
         assert!(!ascii_word_boundary(t2, start2, start2 + 5));
+    }
+
+    #[test]
+    fn every_kind_is_in_the_one_list() {
+        // 底下這個 match 是故意寫成窮舉的：新增一個變體時它會編不過，而它就在
+        // `ALL` 旁邊——那一刻就是去補 `ALL` 的時候。少補的後果不會編不過，
+        // 只會讓 `--kind` 的說明少一項、而那一項照樣查得到，沒人會發現。
+        for k in FactKind::ALL {
+            match k {
+                FactKind::Money
+                | FactKind::Phone
+                | FactKind::Url
+                | FactKind::Email
+                | FactKind::FilePath
+                | FactKind::ErrorCode
+                | FactKind::IdLike
+                | FactKind::DateTimeMention => {}
+            }
+            // 每一個都認得自己的名字，來回一趟要回到原點。
+            assert_eq!(FactKind::from_str_kind(k.as_str()), Some(k));
+        }
+
+        let mut names: Vec<_> = FactKind::ALL.into_iter().map(FactKind::as_str).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "兩個類別共用一個名字，其中一個查不到");
+    }
+
+    #[test]
+    fn a_kind_that_does_not_exist_is_refused_not_answered_with_silence() {
+        // 這是重點：打錯字**不可以**長得像「你沒有這一類事實」。
+        let e = "monney"
+            .parse::<FactKind>()
+            .expect_err("打錯的類別要被拒絕");
+        assert!(e.contains("monney"), "要講出他打錯的是哪個字：{e}");
+        assert!(e.contains("money"), "要附上可用的清單：{e}");
+
+        // 清單是長出來的，不是抄的——每一類都要出現在錯誤訊息裡。
+        for k in FactKind::ALL {
+            assert!(e.contains(k.as_str()), "{} 不在清單裡：{e}", k.as_str());
+        }
+    }
+
+    #[test]
+    fn the_two_ways_of_writing_file_path_both_work() {
+        // `file-path` 和 `file_path` 之間的差別不值得讓人以為功能壞了。
+        assert_eq!("file-path".parse::<FactKind>(), Ok(FactKind::FilePath));
+        assert_eq!("FILE_PATH".parse::<FactKind>(), Ok(FactKind::FilePath));
+        assert_eq!("  phone  ".parse::<FactKind>(), Ok(FactKind::Phone));
     }
 }

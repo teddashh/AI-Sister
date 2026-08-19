@@ -81,8 +81,9 @@ enum Command {
 
     /// 查 L1 事實（金額、電話、日期……）
     Facts {
-        /// 只看某一類：money / phone / url / email / file_path / error_code / id_like / datetime
-        #[arg(short, long)]
+        // 清單從 FactKind::ALL 長出來，不手抄。手抄的那份不會編不過，它只會
+        // 在加了一類事實之後，安靜地變成一份少一項的選單。
+        #[arg(short, long, help = format!("只看某一類：{}", sister_core::facts::FactKind::names(" / ")))]
         kind: Option<String>,
         /// 在原文或正規化值裡做子字串比對
         #[arg(short, long)]

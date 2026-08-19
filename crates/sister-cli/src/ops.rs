@@ -1221,6 +1221,17 @@ pub mod facts {
         limit: usize,
         json: bool,
     ) -> Result<()> {
+        // **打錯的類別在這裡就要死掉，不能一路帶進 SQL。** `-k monney` 進得了
+        // 查詢、比對不到任何一列、然後印「沒有符合的事實。」——和「你真的沒有
+        // 這一類事實」同一句話。他會相信後者。
+        //
+        // 而且要往下傳的是**正規化之後**的名字，不是他打的那串字。`FromStr`
+        // 收 `file-path`，資料庫裡存的卻是 `file_path`——只驗不換，等於把
+        // 剛擋掉的那個病換一個入口再放進來一次（這一版寫壞過一次，就是這樣）。
+        //
+        // 先驗再開資料庫：一個打錯的參數不該還去碰他的檔案。
+        let kind = canonical_kind(kind)?;
+
         let db = open_existing(data_dir)?;
         let rows = match search {
             Some(s) => db.facts_search(kind, s, limit)?,
@@ -1248,7 +1259,21 @@ pub mod facts {
         }
 
         if rows.is_empty() {
-            println!("沒有符合的事實。");
+            // 空答案要把條件唸回來。給了兩個條件而只印「沒有符合的事實」，
+            // 他得自己拆一次才知道是哪一邊空的——而多數時候他會拆錯邊，
+            // 以為「這台機器沒抓到電話」，其實是那個關鍵字沒出現過。
+            println!(
+                "{}",
+                match (kind, search) {
+                    (Some(k), Some(s)) =>
+                        format!("這份記憶裡沒有 {k} 這一類、而且含有「{s}」的事實。"),
+                    (Some(k), None) => format!("這份記憶裡沒有 {k} 這一類的事實。"),
+                    (None, Some(s)) => format!("這份記憶裡沒有含有「{s}」的事實。"),
+                    (None, None) =>
+                        "這份記憶裡還沒有任何事實——她還沒錄過，或錄到的畫面上沒有抄得下來的東西。"
+                            .into(),
+                }
+            );
             return Ok(());
         }
         // 撈滿上限就是被切掉了。`{n} 筆事實` 和「一共就這 n 筆」在畫面上
@@ -1273,6 +1298,49 @@ pub mod facts {
             );
         }
         Ok(())
+    }
+
+    /// 他打的字 → 資料庫裡真正存的那個名字。
+    ///
+    /// 兩件事一起做是有理由的：**只驗不換**，等於把剛擋掉的那個病換一個入口
+    /// 再放進來一次。`FromStr` 收 `file-path`（因為 `file_path` 打成連字號
+    /// 而被拒絕只會讓人以為功能壞了），但資料庫那一欄存的是 `file_path`——
+    /// 驗過了卻把原字串丟進 SQL，結果又是零筆加一句「你沒有這一類事實」。
+    /// 這一版真的寫壞過一次，所以它現在是一個有名字、驗得到的函式。
+    fn canonical_kind(kind: Option<&str>) -> Result<Option<&'static str>> {
+        kind.map(|k| {
+            k.parse::<sister_core::facts::FactKind>()
+                .map(|k| k.as_str())
+                .map_err(|e| anyhow::anyhow!(e))
+        })
+        .transpose()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn what_he_types_becomes_what_the_database_stores() {
+            for typed in ["file-path", "file_path", "FILE_PATH", " file-path "] {
+                assert_eq!(
+                    canonical_kind(Some(typed)).expect("這幾個都該過"),
+                    Some("file_path"),
+                    "{typed} 沒有被換成資料庫裡的名字——查出來會是零筆"
+                );
+            }
+        }
+
+        #[test]
+        fn a_typo_does_not_reach_the_database() {
+            let e = canonical_kind(Some("monney")).expect_err("打錯的要在這裡就死掉");
+            assert!(e.to_string().contains("money"), "要附上清單：{e}");
+        }
+
+        #[test]
+        fn no_filter_stays_no_filter() {
+            assert_eq!(canonical_kind(None).expect("沒給就是沒給"), None);
+        }
     }
 }
 
