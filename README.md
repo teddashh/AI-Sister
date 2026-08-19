@@ -7,11 +7,21 @@
 > forgets, an event-driven brain that can admit it's wrong, and a letter-person
 > who knows when to stay quiet. Raw screen data never leaves your machine.
 
-**Status: Phase 0，Windows alpha 可以下載來跑**
+**Status: Phase 0 收尾、Phase 1 開工，Windows alpha 可以下載來跑**
 （[Releases](https://github.com/teddashh/AI-Sister/releases)）。
 
 跑得起來的是最底下那一層：看畫面、讀字、抓出電話與金額之類的事實、存進 SQLite、搜得回來。
 **這一層一個模型呼叫都沒有**，全部是程式在抄寫。L2/L3（會推論的那個腦）還沒開始。
+
+Release 裡有**兩個**執行檔，分工是「一個記、一個問」：
+
+| | 做什麼 |
+|---|---|
+| `sister.exe` | 記。`record` 錄、`doctor` 自我檢查、`query` 在終端機查 |
+| `sister-desktop.exe` | 問。桌面角落那個字母人：搜尋框 + 出處，點得開當時那張畫面 |
+
+字母人**沒有任何圖檔**——整個角色是一個字加幾條 CSS，連應用程式圖示都是把
+同一份 CSS 渲染出來的。所以她離線、可縮放，而且沒有任何一張圖的授權需要解釋。
 
 先跑 `sister doctor`——它不會宣稱任何東西，只會當場示範給你看：能不能讀到你現在的網址、
 OCR 引擎讀不讀得出內建那張圖上的字、哪幾條隱私規則現在其實不生效。
