@@ -1435,6 +1435,28 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
+    /// 每一列說自己有圖的那條**相對路徑**（相對於 `frames/`）。
+    ///
+    /// 給 `sister export` 逐一確認那些檔案真的躺在目的地用的。數量對得起來
+    /// 不代表對得上：她一邊錄一邊匯出的時候，`frames/` 會長出比資料庫那個
+    /// 快照更多的檔案，於是「複製了 121 個、資料庫說有 120 列」看起來是滿的
+    /// ——而那 120 列裡少掉的那一張，被兩張新的蓋過去了。備份最不該有的
+    /// 就是這種「看起來滿的」。
+    ///
+    /// 用 callback 而不是回一個 `Vec`：十萬列的資料庫不必為了數幾個檔案先
+    /// 在記憶體裡攤平三 MB 的字串。
+    pub fn for_each_image_path(&self, mut f: impl FnMut(&str)) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT image_path FROM frames WHERE image_path IS NOT NULL")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let rel: String = row.get(0)?;
+            f(&rel);
+        }
+        Ok(())
+    }
+
     /// 這幾個 frame 裡，**真的有圖可以打開**的是哪些。
     ///
     /// `text_chunks.frame_id` 講的是「這段字是從哪一幀抄下來的」，那是出處，

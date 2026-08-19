@@ -599,10 +599,36 @@ pub mod export {
         // 和一份少了最後一小時的備份是同一種錯。
         let src_frames = Config::frames_dir(data_dir);
         if with_frames {
-            let (n, bytes) = copy_frames(&src_frames, &Config::frames_dir(to))?;
+            let dst_frames = Config::frames_dir(to);
+            let (n, bytes) = copy_frames(&src_frames, &dst_frames)?;
+            // 數量比對不夠。她一邊錄一邊匯出（README 就是這樣教的，而且有一條
+            // 測試守著那個情境）的時候，`frames/` 會長出比資料庫那個快照更新的
+            // 檔案——於是「複製了 121 個、資料庫說有 120 列」看起來是滿的，
+            // 而那 120 列裡真的少掉的那一張被兩張新的遮住了。所以逐條去對。
+            //
+            // 問的是**匯出檔**（不是來源）：這一行要回答的是「他手上這份備份
+            // 自己說得通嗎」，而他將來還原的就是這一份。理由和上面那段
+            // 「數字要從匯出檔身上讀」同一條。
+            let mut missing = 0u64;
+            let mut first_missing = None;
+            exported.for_each_image_path(|rel| {
+                if !dst_frames.join(rel).is_file() {
+                    missing += 1;
+                    if first_missing.is_none() {
+                        first_missing = Some(rel.to_string());
+                    }
+                }
+            })?;
             println!(
                 "{}",
-                frames_line(n, bytes, s.frames_with_image as u64, &src_frames)
+                frames_line(
+                    n,
+                    bytes,
+                    s.frames_with_image as u64,
+                    missing,
+                    first_missing.as_deref(),
+                    &src_frames
+                )
             );
         } else {
             println!("  ⏸ frames/     沒帶。出處點開來看到的那些畫面留在原地——加 `--with-frames`",);
@@ -637,14 +663,36 @@ pub mod export {
     }
 
     /// `frames/` 那一行。`copied` 是剛剛複製過去的檔案數，`claimed` 是資料庫
-    /// 裡有幾列說自己有圖。
+    /// 裡有幾列說自己有圖，`missing` 是**逐條去對之後**目的地真的打不開的那
+    /// 幾條（`example` 是其中第一條，講給他看的）。
     ///
     /// 「0 個畫面檔」單獨印出來是一句真話，但它回答不了他心裡真正那一題：
     /// **是本來就沒有，還是我剛剛弄丟了？** 這兩件事對備份來說天差地遠，而
     /// 資料庫知道答案。所以三種情況要長得不一樣，尤其少了的那一種——那時候
     /// 前面不該掛一個 ✓。
-    fn frames_line(copied: u64, bytes: u64, claimed: u64, src: &Path) -> String {
-        if copied < claimed {
+    ///
+    /// `missing` 是後來補的，因為只比數量會被**多出來的檔案遮住**：她一邊錄
+    /// 一邊匯出的時候 `frames/` 一直在長，而 `claimed` 是幾秒前那個快照。
+    /// 「121 ≥ 120」於是掛上一個 ✓，即使那 120 條裡有一條根本沒過去。
+    fn frames_line(
+        copied: u64,
+        bytes: u64,
+        claimed: u64,
+        missing: u64,
+        example: Option<&str>,
+        src: &Path,
+    ) -> String {
+        if missing > 0 {
+            format!(
+                "  ✗ frames/     {}（複製了 {copied} 個檔，但資料庫裡有 {missing} 列的圖\n\
+                 \x20    在目的地打不開，例如 {}）\n\
+                 \x20    數量看起來夠不代表對得上——一邊錄一邊匯出的時候 frames/ 還在長。\n\
+                 \x20    來源在 {}，可以再跑一次。",
+                crate::fmt::bytes(bytes as i64),
+                example.unwrap_or("（沒記下是哪一條）"),
+                src.display()
+            )
+        } else if copied < claimed {
             format!(
                 "  ✗ frames/     {}（{copied} 個畫面檔，但資料庫裡有 {claimed} 列說自己有圖）\n\
                  \x20    少了 {} 張。可能是有人手動刪過 frames，也可能是這次沒複製完——\n\
@@ -758,7 +806,7 @@ pub mod export {
             let src = Path::new("/tmp/sister-x/data/frames");
 
             // 只記字的那份記憶：資料庫也說沒有圖，那就沒有壞掉。
-            let none_to_take = frames_line(0, 0, 0, src);
+            let none_to_take = frames_line(0, 0, 0, 0, None, src);
             assert!(none_to_take.starts_with("  ✓"), "{none_to_take}");
             // 講的是**現在資料庫裡有什麼**，不是「這份記憶本來就只有字」——
             // 圖過了保留期被清掉的那一份也長這樣，而那些圖存在過。
@@ -773,7 +821,7 @@ pub mod export {
 
             // 資料庫說有 120 張，硬碟上一張都沒複製到。同樣是「0 個畫面檔」，
             // 但這一次他手上那份備份是缺的，而他要能當場看出來。
-            let gone = frames_line(0, 0, 120, src);
+            let gone = frames_line(0, 0, 120, 0, None, src);
             assert!(gone.starts_with("  ✗"), "少了東西不該掛 ✓：{gone}");
             assert!(gone.contains("120"), "要講資料庫說有幾張：{gone}");
             assert!(gone.contains("少了 120 張"), "要講差多少：{gone}");
@@ -783,16 +831,41 @@ pub mod export {
             );
 
             // 少一部分也是少。
-            let partial = frames_line(118, 4096, 120, src);
+            let partial = frames_line(118, 4096, 120, 0, None, src);
             assert!(partial.starts_with("  ✗"), "{partial}");
             assert!(partial.contains("少了 2 張"), "{partial}");
 
             // 全部帶到了就安靜地報數。多出來的（有人往 frames\ 丟過別的檔）
             // 不算少，也不值得為它多講一句。
-            let all = frames_line(120, 1_048_576, 120, src);
+            let all = frames_line(120, 1_048_576, 120, 0, None, src);
             assert!(all.starts_with("  ✓"), "{all}");
             assert!(all.contains("120 個畫面檔"), "{all}");
-            assert!(frames_line(121, 1_048_576, 120, src).starts_with("  ✓"));
+            assert!(frames_line(121, 1_048_576, 120, 0, None, src).starts_with("  ✓"));
+        }
+
+        /// **多出來的檔案會把少掉的那一張遮住。**
+        ///
+        /// 她一邊錄一邊匯出——README 就是這樣教的，而且 `db.rs` 有一條測試
+        /// 專門守著那個情境。匯出開始的那一秒資料庫說有 120 列，複製走到
+        /// 一半 recorder 又寫了三張新的，於是複製到 121 個檔。
+        ///
+        /// 只比數量的話 `121 >= 120`，掛一個 ✓。可是那 120 列裡有一張真的
+        /// 沒過去（防毒攔了、路徑太長、磁碟滿了），而他手上這份備份缺了它。
+        /// 一份自稱完整的備份，是最壞的那一種壞掉。
+        #[test]
+        fn a_surplus_of_new_files_must_not_hide_a_screenshot_that_did_not_make_it() {
+            let src = Path::new("/tmp/sister-x/data/frames");
+
+            let masked = frames_line(121, 1_048_576, 120, 1, Some("2026/08/19/0-abc.png"), src);
+            assert!(
+                masked.starts_with("  ✗"),
+                "數量夠不代表對得上，這裡不能掛 ✓：{masked}"
+            );
+            assert!(masked.contains("1 列"), "要講有幾條打不開：{masked}");
+            assert!(
+                masked.contains("2026/08/19/0-abc.png"),
+                "要講出是哪一條，他才驗得下去：{masked}"
+            );
         }
     }
 }
