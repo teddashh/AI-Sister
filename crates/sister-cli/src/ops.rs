@@ -1948,6 +1948,18 @@ pub mod doctor {
         /// 不是「沒試過」——doctor 現在會真的裝一次（見 [`caps`]）。
         input_hooks: Option<bool>,
         ocr: bool,
+        /// 這台機器上**問過**了沒有。
+        ///
+        /// `#[cfg(not(windows))]` 那半邊回的是 `Caps::default()`，而
+        /// default 的 `ocr_language` 是 `None`、`ocr_available` 是空的——
+        /// 和「Windows 上真的問了，答案是一個語言包都沒裝」一模一樣。
+        /// 那兩件事的下一步是相反的（一個是去 Windows 設定裝語言，一個是
+        /// 換一台機器），所以印出來不能長一樣。
+        ///
+        /// 這條線 300 行前的 `capabilities::write` 旁邊就寫過了：那半邊的
+        /// default 是「這個平台問不出來」，不是「問了，答案是做不到」。
+        /// 少了這個欄位，讀出來的那一頁就正好犯了它自己記下來的錯。
+        ocr_probed: bool,
         ocr_language: Option<String>,
         ocr_available: Vec<String>,
         /// **實測**出來的檢查列：(過了沒, 標籤, 說明)。
@@ -2176,6 +2188,7 @@ pub mod doctor {
             focus_probe,
             input_hooks,
             ocr: c.ocr,
+            ocr_probed: true,
             ocr_language: c.ocr_language.clone(),
             ocr_available: c.ocr_languages_available.clone(),
             ocr_probes: probes,
@@ -2715,6 +2728,17 @@ pub mod doctor {
         println!("\n讀字");
         if !config.capture.ocr {
             line(false, "OCR", "已關閉（畫面會留下，但上面的字不會進資料庫）");
+        } else if !caps.ocr_probed {
+            // 這個平台沒有 OCR 後端可以問。以前這裡照樣走下面那條路，於是
+            // 在 Linux 上印出「無：這台機器沒有安裝任何 OCR 語言」——那是
+            // 一句關於 Windows 語言包的話，講給一台不裝 Windows 語言包的
+            // 機器聽。開發機每跑一次 doctor 就看一次，久了就學會忽略它，
+            // 而真的在 Windows 上少裝語言包的時候，長得一模一樣。
+            mark(
+                "?",
+                "OCR 語言",
+                &format!("問不到：{} 上沒有擷取後端", std::env::consts::OS),
+            );
         } else {
             line(
                 caps.ocr,
