@@ -521,6 +521,7 @@ pub mod export {
         if !path.exists() {
             anyhow::bail!("{} 裡沒有資料庫，沒有東西可以匯出", data_dir.display());
         }
+        refuse_to_export_into_itself(data_dir, to)?;
         let db = Db::open(&path).with_context(|| format!("open {}", path.display()))?;
 
         std::fs::create_dir_all(to).with_context(|| format!("建立 {}", to.display()))?;
@@ -565,6 +566,38 @@ pub mod export {
         Ok(())
     }
 
+    /// 匯出到資料目錄裡面是不行的。
+    ///
+    /// 最兇的那個寫法是 `--to <資料目錄>/frames/backup --with-frames`：
+    /// `copy_frames` 一邊走 `frames/`、一邊在 `frames/` 底下長出新的目錄，
+    /// 於是它一直往下複製自己。實測會蓋出兩百多層才停——**停下來的原因是檔名
+    /// 太長（ENAMETOOLONG），不是我們攔住了它**，而那之前它已經在他的資料
+    /// 目錄裡留下一堆垃圾。
+    ///
+    /// 但攔的理由不需要那麼技術性：**放在被備份的東西裡面的備份不是備份。**
+    /// 那顆硬碟壞掉的時候兩份一起走，而那正是備份要處理的情況。
+    ///
+    /// 用 `std::path::absolute` 不用 `canonicalize`：目的地還不存在，
+    /// `canonicalize` 會直接失敗。代價是 `..` 不會被化簡，所以
+    /// `--to <資料目錄>/../<資料目錄>/frames/x` 這種寫法躲得過——它躲過的
+    /// 方向是「以為不在裡面」，而那要靠刻意去繞。
+    fn refuse_to_export_into_itself(data_dir: &Path, to: &Path) -> Result<()> {
+        let (data, dest) = (
+            std::path::absolute(data_dir).with_context(|| format!("{}", data_dir.display()))?,
+            std::path::absolute(to).with_context(|| format!("{}", to.display()))?,
+        );
+        if dest.starts_with(&data) {
+            anyhow::bail!(
+                "不能匯出到 {} —— 那在資料目錄（{}）裡面。\n\
+                 放在被備份的東西裡面的備份不是備份：那顆硬碟壞掉的時候兩份一起走。\n\
+                 （而且 `--with-frames` 會在複製途中一直往下複製自己。）",
+                to.display(),
+                data_dir.display()
+            );
+        }
+        Ok(())
+    }
+
     /// 一層一層複製畫面檔。回傳 (檔案數, 位元組)。
     ///
     /// 畫面檔寫完就不再改，所以邊錄邊複製是安全的——不像資料庫。
@@ -589,6 +622,35 @@ pub mod export {
             }
         }
         Ok((n, bytes))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// `--to <資料目錄>/frames/backup --with-frames` 會讓複製一直往下複製
+        /// 自己，實測蓋出兩百多層才被檔名長度擋住。但攔它的理由更簡單：放在被
+        /// 備份的東西裡面的備份不是備份。
+        #[test]
+        fn a_backup_inside_the_thing_it_backs_up_is_refused() {
+            let data = Path::new("/tmp/sister-x/data");
+            for bad in [
+                "/tmp/sister-x/data",
+                "/tmp/sister-x/data/frames/backup",
+                "/tmp/sister-x/data/backup",
+            ] {
+                assert!(
+                    refuse_to_export_into_itself(data, Path::new(bad)).is_err(),
+                    "{bad} 在資料目錄裡面"
+                );
+            }
+            for ok in ["/tmp/sister-x/backup", "/tmp/elsewhere", "/tmp/sister-x"] {
+                assert!(
+                    refuse_to_export_into_itself(data, Path::new(ok)).is_ok(),
+                    "{ok} 不在資料目錄裡面"
+                );
+            }
+        }
     }
 }
 
