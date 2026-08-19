@@ -466,9 +466,15 @@ struct Answer {
     /// （見 [`DayView::truncated`]）。她這裡以前什麼都沒說：捲到底就是底了，
     /// 而「她只記得這些」正是他會下的結論。
     ///
-    /// 只講原文那一半。★ 答案上限 10 筆，是**去重後的不同值**——同一個問題有
-    /// 十個不同答案的時候，問題出在問法，不是在少給了第十一個。
+    /// 只講原文那一半。★ 那一半在 [`answers_truncated`](Self::answers_truncated)。
     truncated: bool,
+    /// ★ 答案也被切掉了。
+    ///
+    /// 這裡以前的說法是「上限 10 筆是**去重後的不同值**——同一個問題有十個
+    /// 不同答案的時候，問題出在問法，不是在少給了第十一個」。那句話讀起來
+    /// 很有道理，但它把「她只知道這十個」和「她知道更多、只是沒送過來」壓成
+    /// 同一個畫面——而這正是隔壁那一欄存在的全部理由。
+    answers_truncated: bool,
     /// 一筆都沒找到的時候，她**查得到**的那幾個理由。兩邊都有東西時是 `None`
     /// ——沒答不出來就沒有什麼好解釋的，而且那幾個查詢不必白跑。
     ///
@@ -536,6 +542,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             // 空字串不是「問了但沒找到」，是根本沒問。
             blind: None,
             truncated: false,
+            answers_truncated: false,
         });
     }
     let shape = sister_core::question::shape(&question);
@@ -545,11 +552,12 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         // 只會拿電話號碼去回答一個沒有人問號碼的問題——和 `sister query`
         // 同一條分法。
         let facts = match shape {
-            Shape::Recent => Vec::new(),
+            Shape::Recent => Default::default(),
             Shape::Keywords => {
                 sister_core::answer::answers(db, &question, 10).map_err(|e| format!("{e:#}"))?
             }
         };
+        let (facts, facts_truncated) = (facts.items, facts.truncated);
         // 多要一筆，用來判斷「還有沒有」。少了這一步就只能猜——而猜錯的方向
         // 是「剛好滿 20 筆」被當成剛好結束。時間軸那邊同一個寫法。
         const HITS: usize = 20;
@@ -638,6 +646,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             query_id,
             blind,
             truncated,
+            answers_truncated: facts_truncated,
             answers: facts
                 .into_iter()
                 .map(|a| Fact {

@@ -535,7 +535,9 @@ function blindLines(blind) {
  * @param facts L1 直接答得出來的那幾筆（★）。排在原文前面，因為那才是他問
  *   的東西本身：問「電話」要的是號碼，不是一段剛好提到電話的字。
  * @param blind 兩手空空時，她查得到的那幾個理由（後端給事實，句子在這裡組）。
- * @param truncated 底下還有，只是沒送過來。捲到底那一句要靠它。
+ * @param truncated 原文底下還有，只是沒送過來。捲到底那一句要靠它。
+ * @param factsTruncated ★ 那一半也被切掉了。分開一個參數是因為兩邊的下一步
+ *   不一樣：原文要 `--limit`，★ 十個不同的答案代表問法太寬。
  */
 function renderHits(
   hits,
@@ -544,6 +546,7 @@ function renderHits(
   facts = [],
   blind = null,
   truncated = false,
+  factsTruncated = false,
 ) {
   hitList.replaceChildren();
 
@@ -592,6 +595,16 @@ function renderHits(
 
     li.append(sourceLine(fact, li, queryId, rank));
     hitList.append(li);
+  }
+
+  // ★ 那一半也會被切掉，而這裡以前什麼都沒說。理由曾經寫成「十個不同答案
+  // 代表問題出在問法」——那句話對，但它把「她只知道這十個」和「她知道更多、
+  // 只是沒送過來」壓成同一個畫面，而那正是隔壁那一句存在的全部理由。
+  if (factsTruncated) {
+    const more = document.createElement("li");
+    more.className = "hits-note hits-more";
+    more.textContent = "還有別的答案沒列出來——問得再具體一點，或用 sister facts 看全部。";
+    hitList.append(more);
   }
 
   if (hits.length === 0 && facts.length === 0) {
@@ -700,6 +713,7 @@ async function ask() {
       answer.answers,
       answer.blind,
       answer.truncated,
+      answer.answers_truncated,
     );
     setState("idle");
     // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
@@ -837,8 +851,9 @@ if (params.get("hits") === "demo") {
       },
     ],
     null,
-    // 捲到底那一句也要看得到。假資料裡不放這一種，就等於少驗一種情況——
-    // 而這一頁能驗的只有截圖。
+    // 捲到底那兩句也要看得到。假資料裡不放這一種，就等於少驗一種情況——
+    // 而這一頁能驗的只有截圖。★ 那一句和原文那一句講的下一步不一樣。
+    true,
     true,
   );
 }

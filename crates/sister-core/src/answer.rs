@@ -24,44 +24,63 @@ pub struct Answer {
 
 /// 依使用者的問法查 L1 事實。認不出問的是哪一類就回空集合——不要亂猜一堆
 /// 事實塞給他。
-pub fn answers(db: &Db, query: &str, limit: usize) -> anyhow::Result<Vec<Answer>> {
-    let mut rows = Vec::new();
-    for kind in crate::facts::kinds_for_query(query) {
-        rows.extend(db.facts_by_kind(kind.as_str(), limit * 4)?);
-    }
-
+///
+/// 回傳的筆數會**超過** `limit` 一筆代表被切掉了（見 [`Answers::truncated`]）。
+pub fn answers(db: &Db, query: &str, limit: usize) -> anyhow::Result<Answers> {
     // 同一個號碼在三個畫面出現過，是同一個答案、三次目擊——不是三個答案。
     // 併成一筆並保留最近一次的出處，因為使用者要追的是「最後看到它的地方」。
-    let mut order: Vec<String> = Vec::new();
+    //
+    // 併和數都在 SQL 裡做（`fact_sightings`）。以前是抓最近 40 列回來在
+    // 記憶體裡數，於是「看過 200 次」會被講成「看過 40 次」，而一頁吐出 40
+    // 個新號碼的時候，一年來每週都看到的那個號碼會整個掉出窗外。
+    //
+    // 多要一筆，這樣「剛好 limit 筆」和「被切掉了」分得開。
     let mut merged: HashMap<String, Answer> = HashMap::new();
-    for row in rows {
-        match merged.get_mut(&row.normalized) {
-            Some(a) => {
-                a.sightings += 1;
-                if row.ts > a.latest.ts {
-                    a.latest = row;
+    for kind in crate::facts::kinds_for_query(query) {
+        // 一句問話可以命中兩種 kind（「多少錢」→ money 和 percent），而同一
+        // 個正規化字串理論上不會跨 kind 重複。真的重複的話取比較新的那一筆，
+        // 次數相加——這比讓其中一邊安靜地覆蓋掉另一邊誠實。
+        for (row, sightings) in db.fact_sightings(kind.as_str(), limit + 1)? {
+            match merged.get_mut(&row.normalized) {
+                Some(a) => {
+                    a.sightings += sightings as usize;
+                    if row.ts > a.latest.ts {
+                        a.latest = row;
+                    }
                 }
-            }
-            None => {
-                order.push(row.normalized.clone());
-                merged.insert(
-                    row.normalized.clone(),
-                    Answer {
-                        latest: row,
-                        sightings: 1,
-                    },
-                );
+                None => {
+                    merged.insert(
+                        row.normalized.clone(),
+                        Answer {
+                            latest: row,
+                            sightings: sightings as usize,
+                        },
+                    );
+                }
             }
         }
     }
 
-    let mut out: Vec<Answer> = order
-        .into_iter()
-        .filter_map(|k| merged.remove(&k))
-        .collect();
+    let mut out: Vec<Answer> = merged.into_values().collect();
     out.sort_by_key(|a| std::cmp::Reverse(a.latest.ts));
+    let truncated = out.len() > limit;
     out.truncate(limit);
-    Ok(out)
+    Ok(Answers {
+        items: out,
+        truncated,
+    })
+}
+
+/// [`answers`] 的結果，加上「是不是還有更多」。
+///
+/// `truncated` 單獨一個欄位而不是讓呼叫端自己比長度：「剛好 10 筆」和「第
+/// 11 個不同的答案被切掉了」在畫面上長得一模一樣，而後者的意思是她其實還
+/// 知道別的。同一條紀律已經在原文那一半（`hits` 的「底下還有」）做過一次，
+/// ★ 那一半當時漏掉了。
+#[derive(Debug, Clone, Default)]
+pub struct Answers {
+    pub items: Vec<Answer>,
+    pub truncated: bool,
 }
 
 /// 一筆都沒找到的時候，她**查得到**的那幾個理由。

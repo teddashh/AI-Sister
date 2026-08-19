@@ -1040,7 +1040,7 @@ pub mod query {
         let (answers, hits) = match shape {
             // L1 的事實是「這個值是什麼」，回答不了「剛剛」。硬跑一次只會
             // 拿電話號碼去回答一個沒有人問號碼的問題。
-            Shape::Recent => (Vec::new(), db.recent(limit)?),
+            Shape::Recent => (Default::default(), db.recent(limit)?),
             // 比對用 `terms`（剝掉頭尾的「剛剛」「那個」），★ 答案用原句：
             // `kinds_for_query` 是在整句話裡找「電話」這種說法，剝字只會少看
             // 到東西，不會多看到。
@@ -1049,6 +1049,7 @@ pub mod query {
                 db.search(sister_core::question::terms(text), limit)?,
             ),
         };
+        let (answers, answers_truncated) = (answers.items, answers.truncated);
         let elapsed = started.elapsed();
 
         // 進題庫。PHASES.md Phase 2 的退場條件要「≥ 30 題來自真實 query log」，
@@ -1096,7 +1097,9 @@ pub mod query {
                 // 撈滿上限＝被切掉了。機器讀的那一份更要講：寫腳本的人
                 // 看不到終端機上的那個「+」，會直接把長度當成總數。
                 "limit": limit,
-                "truncated": answers.len() >= limit || hits.len() >= limit,
+                // ★ 那一半靠 `Answers::truncated`（撈了 limit+1 筆才知道），
+                // 原文那一半還是靠「撈滿上限」判斷。
+                "truncated": answers_truncated || hits.len() >= limit,
                 "answers": answers.iter().map(|a| serde_json::json!({
                     "kind": a.latest.kind, "value": a.latest.normalized, "raw": a.latest.raw,
                     "sightings": a.sightings, "ts": a.latest.ts,
@@ -1134,11 +1137,13 @@ pub mod query {
             println!(
                 "🔍 「{text}」 {}{} 筆答案、{}{} 筆原文，{:.1} ms{}",
                 answers.len(),
-                more(answers.len()),
+                // ★ 那一半知道得比較確定：`answers` 多撈了一筆才切，所以
+                // 「剛好 limit 筆」不會被誤標成「還有更多」。
+                if answers_truncated { "+" } else { "" },
                 hits.len(),
                 more(hits.len()),
                 elapsed.as_secs_f64() * 1000.0,
-                if answers.len() >= limit || hits.len() >= limit {
+                if answers_truncated || hits.len() >= limit {
                     format!("（+ 代表撈滿 {limit} 筆就停了，用 --limit 看更多）")
                 } else {
                     String::new()
@@ -1264,9 +1269,11 @@ pub mod query {
         fn repeated_sightings_collapse_into_one_answer() {
             let db = seeded();
             let out = answers(&db, "電話", 10).unwrap();
-            assert_eq!(out.len(), 2, "兩支不同號碼 → 兩個答案");
+            assert_eq!(out.items.len(), 2, "兩支不同號碼 → 兩個答案");
+            assert!(!out.truncated, "只有兩個，沒有被切掉");
 
             let repeated = out
+                .items
                 .iter()
                 .find(|a| a.latest.normalized == "+886800080123")
                 .unwrap();
@@ -1275,11 +1282,65 @@ pub mod query {
             assert_eq!(repeated.latest.app_id.as_deref(), Some("slack.exe"));
         }
 
+        /// **「看過 N 次」數的要是他看過幾次，不是最近一個窗子裡有幾次。**
+        ///
+        /// 舊版抓最近 `limit * 4` 列回來，在**那 40 列的窗子裡**數重複，於是：
+        ///
+        /// * 一年內看過 200 次的號碼，最多講得出「看過 40 次」；
+        /// * 更糟的是某一頁一次吐出 40 個新號碼——他媽媽的那支（一年來每週都
+        ///   看到）整個掉出窗外，★ 清單裡沒有它，然後 fallback 會說「我記得的
+        ///   東西裡沒有這件事」，對一個在資料庫裡出現幾百次的值。
+        ///
+        /// 而畫面上那句話的用途正是「1 次和 12 次是強度不同的答案」。
+        #[test]
+        fn sightings_counts_every_time_he_saw_it_not_just_the_recent_window() {
+            let mut db = Db::open_in_memory().unwrap();
+            let sid = db.start_session("test", "0").unwrap();
+            // 那支號碼一年來看過 60 次——超過舊版 10 * 4 = 40 的窗子。
+            for i in 0..60 {
+                db.insert_frame(
+                    sid,
+                    &frame(1_000 + i, "chrome.exe", "打 0800-080-123"),
+                    None,
+                    0,
+                )
+                .unwrap();
+            }
+            // 中間某一頁一次吐出 45 支新號碼。舊版的窗子到這裡就滿了。
+            for i in 0..45 {
+                let text = format!("聯絡 09{:08}", 10_000_000 + i);
+                db.insert_frame(sid, &frame(100_000 + i, "chrome.exe", &text), None, 0)
+                    .unwrap();
+            }
+            // 昨天又看到那支號碼一次（第 61 次）。這一筆讓它排進最新的前幾名，
+            // 於是它一定會出現在答案裡——舊版也會，只是次數會講成 1。
+            db.insert_frame(
+                sid,
+                &frame(200_000, "chrome.exe", "打 0800-080-123"),
+                None,
+                0,
+            )
+            .unwrap();
+
+            let out = answers(&db, "電話", 10).unwrap();
+            let old = out
+                .items
+                .iter()
+                .find(|a| a.latest.normalized == "+886800080123")
+                .expect("最新那一筆就是它，一定在答案裡");
+            assert_eq!(old.sightings, 61, "看過 61 次就是 61 次，不是窗子裡的 1 次");
+            assert!(out.truncated, "45 支新號碼還在底下，不能裝作沒有");
+        }
+
         #[test]
         fn answers_are_newest_first() {
             let db = seeded();
             let out = answers(&db, "電話", 10).unwrap();
-            assert!(out.windows(2).all(|w| w[0].latest.ts >= w[1].latest.ts));
+            assert!(
+                out.items
+                    .windows(2)
+                    .all(|w| w[0].latest.ts >= w[1].latest.ts)
+            );
         }
 
         /// 這是本專案存在的理由之一：畫面上寫「專線」，使用者問「電話」。
@@ -1291,7 +1352,10 @@ pub mod query {
                 db.search("電話", 10).unwrap().is_empty(),
                 "螢幕上沒有「電話」二字"
             );
-            assert!(!answers(&db, "電話", 10).unwrap().is_empty(), "但答得出來");
+            assert!(
+                !answers(&db, "電話", 10).unwrap().items.is_empty(),
+                "但答得出來"
+            );
         }
 
         /// 上一條的直接後果，而題庫第一次上線就記反了：`search` 是 0 筆、
@@ -1360,21 +1424,31 @@ pub mod query {
         fn different_wording_selects_a_different_kind() {
             let db = seeded();
             let money = answers(&db, "帳單多少錢", 10).unwrap();
-            assert_eq!(money.len(), 1);
-            assert_eq!(money[0].latest.normalized, "TWD:13450");
+            assert_eq!(money.items.len(), 1);
+            assert_eq!(money.items[0].latest.normalized, "TWD:13450");
         }
 
         /// 詞彙表認不出來時回空集合，不要亂猜一堆事實塞給使用者。
         #[test]
         fn unrecognised_wording_answers_nothing() {
             let db = seeded();
-            assert!(answers(&db, "天氣如何", 10).unwrap().is_empty());
+            let none = answers(&db, "天氣如何", 10).unwrap();
+            assert!(none.items.is_empty());
+            assert!(!none.truncated, "沒有東西可以切");
         }
 
+        /// 切到上限**要說出來**。「剛好 1 筆」和「還有第二個答案」在畫面上
+        /// 長得一模一樣，而後者的意思是她其實還知道別的。
         #[test]
-        fn limit_is_respected() {
+        fn limit_is_respected_and_the_cut_is_visible() {
             let db = seeded();
-            assert_eq!(answers(&db, "電話", 1).unwrap().len(), 1);
+            let one = answers(&db, "電話", 1).unwrap();
+            assert_eq!(one.items.len(), 1);
+            assert!(one.truncated, "seeded() 有兩支號碼，切掉了一支");
+
+            let both = answers(&db, "電話", 2).unwrap();
+            assert_eq!(both.items.len(), 2);
+            assert!(!both.truncated, "剛好兩個，不是被切掉");
         }
     }
 }

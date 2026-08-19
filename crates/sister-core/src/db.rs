@@ -1372,7 +1372,40 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
-    /// 依 typed fact 直查（「帳單多少錢」「電話幾號」走這條，不經全文檢索）。
+    /// 每個**不同的值**一列：最近一次的出處，加上它一共被看見過幾次。
+    ///
+    /// 存在的理由是 [`facts_by_kind`](Self::facts_by_kind) 給不出第二個數字。
+    /// `answer::answers` 以前的做法是抓最近 40 列回來、在**那 40 列的窗子裡**
+    /// 數重複，於是：
+    ///
+    /// * 一年內看過 200 次的號碼，最多只講得出「看過 40 次」——而畫面上那句
+    ///   「看過 N 次」的用途正是「1 次和 12 次是強度不同的答案」。
+    /// * 更糟的是某一頁一次吐出 40 個新的電話事實：他媽媽的號碼（一年來每週
+    ///   都看到）根本不在窗子裡，★ 清單沒有它，然後 fallback 說「我記得的
+    ///   東西裡沒有這件事」——對一個在資料庫裡出現幾百次的值。
+    ///
+    /// `LIMIT` 在 `GROUP BY` **之後**才切，所以切掉的是「第 11 個不同的答案」，
+    /// 不是「第 41 筆目擊」。非聚合欄取自 `MAX(ts)` 那一列，靠的是 SQLite
+    /// 對 min/max 的 bare column 特例（3.7.11 起有文件保證）。
+    pub fn fact_sightings(&self, kind: &str, limit: usize) -> Result<Vec<(FactRow, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, kind, raw, normalized, source_kind,
+                    chunk_id, frame_id, app_id, window_title, url,
+                    COUNT(*), MAX(ts)
+             FROM facts WHERE kind = ?1
+             GROUP BY normalized
+             ORDER BY ts DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![kind, limit as i64], |row| {
+            Ok((map_fact_row(row)?, row.get::<_, i64>(11)?))
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// 依 typed fact 直查（`sister facts --kind` 走這條）。
+    ///
+    /// **一列就是一次目擊**，同一個號碼看過三次就是三列。要「每個值一列 +
+    /// 它被看過幾次」請用 [`fact_sightings`](Self::fact_sightings)。
     pub fn facts_by_kind(&self, kind: &str, limit: usize) -> Result<Vec<FactRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, ts, kind, raw, normalized, source_kind,
