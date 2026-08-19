@@ -62,7 +62,21 @@ def main() -> None:
         fail("stats --json 裡沒有 signals——空殼偵測的機器可讀路徑不見了")
 
     for s in signals:
-        if s["broken"]:
+        # 這個欄位以前叫 `broken`（一個布林），後來換成三態的 `verdict`
+        # （alive / broken / too_early），因為「還不知道」和「壞了」壓成同一個
+        # 布林之後，一顆曾經正常過的資料庫永遠翻不成 ✗。**而這一行沒有跟著改**：
+        # 於是這支腳本從那天起每次都 KeyError，CI 紅了三個版本，Release job
+        # 一直被跳過——alpha.29 和 alpha.30 因此沒有任何人下載得到。
+        #
+        # 所以現在缺欄位要當成一句話講清楚，不是一個 traceback：這支腳本的
+        # 工作就是在「那個欄位改名了」的那一天說人話。
+        verdict = s.get("verdict")
+        if verdict is None:
+            fail(
+                f"訊號「{s['name']}」沒有 verdict 欄位——`stats --json` 的形狀改了，"
+                "而這支腳本還在問一個已經不存在的問題"
+            )
+        if verdict == "broken":
             fail(
                 f"訊號「{s['name']}」有 {s['rows']} 列，但沒有一列有內容。"
                 "這是「寫了一堆空殼」的形狀，不是「使用者很安靜」"
@@ -74,6 +88,14 @@ def main() -> None:
             fail(
                 f"訊號「{s['name']}」一列都沒有。bill-lookup 有換視窗、有打字、"
                 "也有 OCR 文字——三種訊號都該留下東西"
+            )
+        # `too_early`（有列、但有內容的列還不夠多到能下判斷）在使用者的機器上
+        # 是誠實的答案，在這裡不是：兩份腳本加起來一定攢得夠。停在這個狀態
+        # 代表門檻或寫入端有一邊變了。
+        if verdict == "too_early":
+            fail(
+                f"訊號「{s['name']}」有 {s['rows']} 列卻還在說「還不知道」。"
+                "兩份 replay 腳本攢得出足夠的證據，停在這裡代表門檻或寫入端動過了"
             )
 
     print(
