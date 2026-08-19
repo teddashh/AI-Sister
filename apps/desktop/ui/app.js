@@ -483,7 +483,14 @@ function sourceLine(item, li, queryId, rank) {
  */
 function blindLines(blind) {
   if (!blind) return [];
-  if (blind.chunks === 0) return ["（我到現在還沒記過任何東西。）"];
+  if (blind.chunks === 0) {
+    // 「一段字都沒有」有兩種，而它們的下一步是相反的。看過畫面卻一個字都
+    // 沒讀出來，代表讀字那一段斷了（關掉了、或者裝了讀不到）——那是這個
+    // 專案已知的主要故障形狀。和 `blind_lines`（ops.rs）同一條分法。
+    return blind.frames > 0
+      ? [`（我看過 ${blind.frames} 張畫面，但一個字都沒讀出來——讀字那一段是斷的。）`]
+      : ["（我到現在還沒記過任何東西。）"];
+  }
   const out = [];
   if (blind.excluded?.length) {
     const why = blind.excluded.map(([reason, n]) => `${reason} ${n} 段`).join("、");

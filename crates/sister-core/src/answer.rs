@@ -75,8 +75,20 @@ pub fn answers(db: &Db, query: &str, limit: usize) -> anyhow::Result<Vec<Answer>
 /// 同一條紀律見這個模組開頭。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BlindSpots {
-    /// 她一共記過幾段文字。`0` = 她根本還沒開始記，那時候該講的是下一步。
+    /// 她一共記過幾段文字。
+    ///
+    /// `0` **不等於**「她還沒開始記」。文字只有在 OCR 讀出東西的時候才寫，
+    /// 所以 `capture.ocr = false`（設定得起來，doctor 會說「OCR 已關閉」），
+    /// 或者 OCR 裝了卻讀不到東西——**這個專案已知的主要故障形狀**——的時候，
+    /// 錄了一整天、幾千張畫面，這個數字照樣是 0。要分開這兩件事得配
+    /// [`frames`](Self::frames) 一起看。
     pub chunks: i64,
+    /// 她一共留下幾張畫面（保留幀，不含被去重折疊掉的）。
+    ///
+    /// 存在的理由只有一個：`chunks == 0 && frames > 0` 的意思是**她看了，但
+    /// 一個字都沒讀出來**。那和「她還沒開始記」是相反的處境，而叫一個 OCR
+    /// 壞掉的人「先跑 `sister record`」，只會讓他再錄一天空的。
+    pub frames: i64,
     /// 排除規則生效過的（理由, 段數）。**段不是張**——見
     /// [`Db::exclusion_audit`](crate::db::Db::exclusion_audit)。
     pub excluded: Vec<(String, i64)>,
@@ -104,6 +116,7 @@ pub fn blind_spots(db: &Db) -> anyhow::Result<BlindSpots> {
     let pauses = db.pause_audit()?;
     Ok(BlindSpots {
         chunks: stats.chunks,
+        frames: stats.frames,
         excluded: db
             .exclusion_audit()?
             .into_iter()
@@ -117,7 +130,7 @@ pub fn blind_spots(db: &Db) -> anyhow::Result<BlindSpots> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{SystemEvent, SystemKind};
+    use crate::model::{FocusSnapshot, FrameCapture, SystemEvent, SystemKind};
 
     /// 一顆全新的資料庫上，「沒找到」只有一個理由，而它不是「我沒看過那件事」。
     #[test]
@@ -125,7 +138,52 @@ mod tests {
         let db = Db::open_in_memory().expect("db");
         let b = blind_spots(&db).expect("blind");
         assert_eq!(b.chunks, 0);
+        assert_eq!(b.frames, 0, "她連看都還沒看過");
         assert!(b.any(), "「我還沒開始記」本身就是一個查得到的理由");
+    }
+
+    /// **錄了一整天，一個字都沒讀出來。**
+    ///
+    /// 這是這個專案已知的主要故障形狀（OCR 裝得起來但讀不到東西），也是
+    /// `capture.ocr = false` 的正常樣子。`chunks` 兩種情況都是 0，所以只看
+    /// 它的話，兩個表面都會說「她還沒記過任何東西——先跑 `sister record`」
+    /// ——叫一個 OCR 壞掉的人再錄一天空的。
+    #[test]
+    fn watched_all_day_and_read_nothing_is_not_the_same_as_never_started() {
+        let mut db = Db::open_in_memory().expect("db");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        // 有畫面、沒有文字（`ocr` 是空的）：正是 OCR 讀不到東西時寫進去的
+        // 樣子。dhash 每張都不同，不然會被去重折疊掉。
+        for (i, ts) in [1_000, 2_000, 3_000].into_iter().enumerate() {
+            db.insert_frame(
+                s,
+                &FrameCapture {
+                    ts,
+                    monitor: 0,
+                    width: 1920,
+                    height: 1080,
+                    dhash: 0xDEAD_0000 + i as u64,
+                    image: None,
+                    image_ext: "webp",
+                    ocr: Vec::new(),
+                    focus: FocusSnapshot {
+                        app_id: Some("chrome.exe".into()),
+                        app_name: Some("Chrome".into()),
+                        window_title: Some("網路銀行".into()),
+                        url: None,
+                        pid: Some(42),
+                        password_field: false,
+                    },
+                },
+                Some("/tmp/x.webp"),
+                1024,
+            )
+            .expect("insert");
+        }
+        let b = blind_spots(&db).expect("blind");
+        assert_eq!(b.chunks, 0, "一個字都沒有");
+        assert_eq!(b.frames, 3, "但她確實看過三張");
+        assert!(b.any());
     }
 
     /// 她記了，但那段時間他自己叫她別看。這才是那句「這件事我沒看到過」最

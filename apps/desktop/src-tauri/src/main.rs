@@ -474,8 +474,12 @@ struct Answer {
 /// 事實，句子由這一頁自己組——終端機和字母人的講法不一樣，根據是同一份。
 #[derive(Serialize)]
 struct Blind {
-    /// 她一共記過幾段文字。`0` = 根本還沒開始記。
+    /// 她一共記過幾段文字。`0` **不等於**「還沒開始記」——見
+    /// [`sister_core::answer::BlindSpots::chunks`]，要配 `frames` 看。
     chunks: i64,
+    /// 她一共留下幾張畫面。`chunks == 0 && frames > 0` = 她看了，
+    /// 但一個字都沒讀出來（讀字那一段斷了）。
+    frames: i64,
     /// 排除規則生效過的（理由, 段數）。段不是張。
     excluded: Vec<(String, i64)>,
     paused_episodes: i64,
@@ -592,6 +596,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             let b = sister_core::answer::blind_spots(db).map_err(|e| format!("{e:#}"))?;
             Some(Blind {
                 chunks: b.chunks,
+                frames: b.frames,
                 excluded: b.excluded,
                 paused_episodes: b.paused_episodes,
                 paused_ms: b.paused_ms,

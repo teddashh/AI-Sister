@@ -920,7 +920,19 @@ pub mod query {
     /// 她記了，而裡面就是沒有。那句話沒有安慰的成分，但它是真的。
     fn blind_lines(b: &sister_core::answer::BlindSpots) -> Vec<String> {
         if b.chunks == 0 {
-            return vec!["她還沒記過任何東西——先跑 `sister record`。".to_string()];
+            // 「一段字都沒有」有兩種，而它們的下一步是相反的。
+            //
+            // 她看過畫面卻一個字都沒讀出來，代表 OCR 這一段是斷的（關掉了、
+            // 或者裝了讀不到）——那是這個專案已知的主要故障形狀。這時候叫他
+            // 「先跑 `sister record`」，只會讓他再錄一天空的。
+            return vec![if b.frames > 0 {
+                format!(
+                    "她看過 {} 張畫面，但一個字都沒讀出來——讀字那一段是斷的，跑 `sister doctor` 看是哪一種。",
+                    b.frames
+                )
+            } else {
+                "她還沒記過任何東西——先跑 `sister record`。".to_string()
+            }];
         }
         let mut out = Vec::new();
         if !b.excluded.is_empty() {
@@ -1070,9 +1082,10 @@ pub mod query {
                 hits.len(),
                 elapsed.as_secs_f64() * 1000.0
             );
-            if hits.is_empty() {
-                println!("\n  什麼都還沒看到——先跑 `sister record`。");
-            }
+            // 空手的時候不在這裡講話。下面那個 `hits.is_empty()` 已經會印
+            // 「沒有找到。」加上 `blind_lines`，這裡再印一次就是同一件事講兩
+            // 遍——而它以前印的是「什麼都還沒看到——先跑 `sister record`」，
+            // 和底下那幾行講的還是不同的故事。
         } else {
             println!(
                 "🔍 「{text}」 {}{} 筆答案、{}{} 筆原文，{:.1} ms{}",
