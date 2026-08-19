@@ -1,6 +1,6 @@
 [package]
 name = "sister-desktop"
-version = "0.1.0-alpha.16"
+version = "0.1.0-alpha.17"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/teddashh/AI-Sister"
