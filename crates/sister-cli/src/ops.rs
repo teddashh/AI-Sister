@@ -528,8 +528,18 @@ pub mod export {
         let dest_db = Config::db_path(to);
         db.export_to(&dest_db)?;
         let db_bytes = std::fs::metadata(&dest_db).map(|m| m.len()).unwrap_or(0);
+        drop(db);
 
-        let s = db.stats()?;
+        // **數字要從匯出檔身上讀，不是從來源。** 從來源讀比較快也比較順手，
+        // 但那樣印出來的是「我想匯出的東西」，不是「他手上這份裡有什麼」——
+        // 而這兩者不一樣的那一天，正是他最需要知道的那一天。
+        //
+        // 順手也就把匯出檔開起來讀過一次了：一份打不開的備份會在這裡當場失敗，
+        // 而不是等到他真的需要它的時候。這和 `doctor` 那條「不宣稱，當場示範」
+        // 是同一件事。
+        let exported = Db::open(&dest_db)
+            .with_context(|| format!("匯出寫完了，但打不開：{}", dest_db.display()))?;
+        let s = exported.stats()?;
         println!("匯出到 {}", to.display());
         println!(
             "  ✓ sister.db   {}（{} 列畫面、{} 段文字、{} 個事實、{} 題你問過的話）",
@@ -537,7 +547,7 @@ pub mod export {
             s.frames,
             s.chunks,
             s.facts,
-            db.query_log_stats().map(|q| q.total).unwrap_or(0),
+            exported.query_log_stats().map(|q| q.total).unwrap_or(0),
         );
 
         // 畫面檔在資料庫外面，而它們通常比資料庫大好幾個數量級。預設不帶，
