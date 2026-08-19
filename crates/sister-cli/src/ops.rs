@@ -280,6 +280,12 @@ pub mod queries {
                 "total": stats.total,
                 "empty": stats.empty,
                 "clicked": stats.clicked,
+                // Phase 1 的「檢索 < 100ms」要能被腳本讀走，不然那條退場條件
+                // 只能靠人去看終端機。
+                "p50_ms": stats.p50_ms,
+                "p95_ms": stats.p95_ms,
+                "slow": stats.slow,
+                "budget_ms": sister_core::db::RETRIEVAL_BUDGET_MS,
                 "queries": rows.iter().map(|r| serde_json::json!({
                     "id": r.id,
                     "ts": r.ts,
@@ -312,6 +318,25 @@ pub mod queries {
             stats.clicked,
             100.0 * stats.clicked as f64 / stats.total as f64,
         );
+        // PHASES.md Phase 1 的退場條件之一是「檢索 < 100ms」，而在這一行之前
+        // 沒有任何東西量得出來——每一題花了幾毫秒從第一天就存著，只是沒有人
+        // 讀。中位數說平常有多快，p95 說最糟的時候有多糟；平均值兩個都答不了，
+        // 一次 4 秒的卡頓會把一整年拉成一個從沒發生過的數字。
+        let budget = sister_core::db::RETRIEVAL_BUDGET_MS;
+        let over = match stats.slow {
+            0 => format!("（門檻 {budget} ms，沒有一題超過）"),
+            n => format!("——**{n} 題超過 {budget} ms 的門檻**"),
+        };
+        // 存的是整數毫秒，所以「全部都是 0」的意思是每一題都在 1 ms 以內。
+        // 照樣印「一半在 0 ms 以內」是對的數字配一句蠢話。
+        if stats.p95_ms == 0 {
+            println!("延遲：每一題都在 1 ms 以內{over}");
+        } else {
+            println!(
+                "延遲：一半在 {} ms 以內，最慢的 5% 從 {} ms 起{over}",
+                stats.p50_ms, stats.p95_ms
+            );
+        }
         println!();
         for r in &rows {
             println!(

@@ -1155,24 +1155,47 @@ impl Db {
     /// `empty` 和 `clicked` 是這裡真正該看的兩個數字：前者是她答不出來的比例，
     /// 後者是答出來而且**真的有用**的比例。總數只說明他用了多少次。
     pub fn query_log_stats(&self) -> Result<QueryLogStats> {
-        self.conn
-            .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(hits = 0), 0),
+        let mut stats = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(hits = 0), 0),
                     (SELECT COUNT(DISTINCT query_id) FROM query_clicks),
-                    MIN(ts), MAX(ts)
+                    MIN(ts), MAX(ts),
+                    COALESCE(SUM(latency_ms > ?1), 0)
              FROM queries",
-                [],
-                |r| {
-                    Ok(QueryLogStats {
-                        total: r.get(0)?,
-                        empty: r.get(1)?,
-                        clicked: r.get(2)?,
-                        first_ts: r.get(3)?,
-                        last_ts: r.get(4)?,
-                    })
-                },
-            )
-            .map_err(Into::into)
+            params![RETRIEVAL_BUDGET_MS],
+            |r| {
+                Ok(QueryLogStats {
+                    total: r.get(0)?,
+                    empty: r.get(1)?,
+                    clicked: r.get(2)?,
+                    first_ts: r.get(3)?,
+                    last_ts: r.get(4)?,
+                    slow: r.get(5)?,
+                    p50_ms: 0,
+                    p95_ms: 0,
+                })
+            },
+        )?;
+        // 中位數要的是「平常有多快」，p95 要的是「最糟的時候有多糟」。平均值
+        // 兩個都答不了：一次 4 秒的 migration 會把一整年的平均拉成一個不曾
+        // 發生過的數字。
+        //
+        // 用 OFFSET 而不是把整欄撈進記憶體。索引在 `ts` 上、不在 `latency_ms`
+        // 上，所以這是一次排序——但這條路只在使用者跑 `sister queries` 或
+        // `doctor` 時走到，不在按下 Enter 的那條路上。
+        if stats.total > 0 {
+            stats.p50_ms = self.latency_at(stats.total * 50 / 100)?;
+            stats.p95_ms = self.latency_at(stats.total * 95 / 100)?;
+        }
+        Ok(stats)
+    }
+
+    /// 依延遲排序後的第 `nth` 筆（從 0 起算）。
+    fn latency_at(&self, nth: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT latency_ms FROM queries ORDER BY latency_ms LIMIT 1 OFFSET ?1",
+            params![nth.max(0)],
+            |r| r.get(0),
+        )?)
     }
 
     /// bigram 索引查詢。片段自己產生——`text_fts_bi` 裡存的是切好的雙字，
@@ -1803,6 +1826,13 @@ pub struct LastSession {
     pub reason: Option<String>,
 }
 
+/// 檢索延遲的預算，毫秒。
+///
+/// 來自 PHASES.md Phase 1 的退場條件「檢索 < 100ms」。那條檢查框在這之前
+/// 沒有任何東西量得出來——而題庫從第一天起就在存每一題花了幾毫秒，只是
+/// 沒有人讀。**一個沒有人讀的數字，等於沒有那個數字。**
+pub const RETRIEVAL_BUDGET_MS: i64 = 100;
+
 /// 題庫的總覽（見 [`Db::query_log_stats`]）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueryLogStats {
@@ -1813,6 +1843,14 @@ pub struct QueryLogStats {
     pub clicked: i64,
     pub first_ts: Option<Millis>,
     pub last_ts: Option<Millis>,
+    /// 超過 [`RETRIEVAL_BUDGET_MS`] 的題數。
+    pub slow: i64,
+    /// 延遲的中位數，毫秒。「平常有多快」。
+    pub p50_ms: i64,
+    /// 最慢的 5% 從哪裡開始，毫秒。「最糟的時候有多糟」。
+    ///
+    /// 中位數會把偶爾一次 4 秒的卡頓藏起來，而那一次正是使用者記得的那一次。
+    pub p95_ms: i64,
 }
 
 /// 秘密遮蔽的實際結果（見 [`Db::redaction_audit`]）。
@@ -2304,6 +2342,43 @@ mod tests {
             source: "test",
         })
         .expect("log_query")
+    }
+
+    /// PHASES.md Phase 1 有一條「檢索 < 100ms」，而在這之前沒有任何東西量得
+    /// 出來——每一題花了幾毫秒從第一天就存著，只是沒有人讀。
+    ///
+    /// 這裡驗的是**平均值答不了這個問題**：19 題很快、1 題 4 秒，平均 203 ms
+    /// 是一個從來沒有發生過的數字，而它同時掩蓋了「平常很快」和「有一次很慢」
+    /// 這兩件真的該知道的事。
+    #[test]
+    fn one_slow_question_must_not_hide_behind_the_average() {
+        let db = test_db();
+        for i in 0..19 {
+            db.log_query(&QueryLogEntry {
+                ts: 1_000 + i,
+                question: "電話",
+                shape: "keywords",
+                hits: 1,
+                latency_ms: 10,
+                source: "test",
+            })
+            .expect("log");
+        }
+        db.log_query(&QueryLogEntry {
+            ts: 2_000,
+            question: "電話",
+            shape: "keywords",
+            hits: 1,
+            latency_ms: 4_000,
+            source: "test",
+        })
+        .expect("log");
+
+        let s = db.query_log_stats().expect("stats");
+        assert_eq!(s.total, 20);
+        assert_eq!(s.p50_ms, 10, "平常很快");
+        assert_eq!(s.p95_ms, 4_000, "但最糟的那一次很慢，而它藏不住");
+        assert_eq!(s.slow, 1, "超過門檻的題數要數得出來");
     }
 
     /// 一筆都沒找到的那些題目**是題庫裡最貴的資料**。找得回來的那些只證明她
