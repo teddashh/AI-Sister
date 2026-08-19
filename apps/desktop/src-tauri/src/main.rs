@@ -145,7 +145,7 @@ fn last_recording_end(shell: tauri::State<'_, Shell>) -> Option<LastRun> {
     with_db(&shell, |db| {
         Ok(db
             .last_session()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))?
             .map(|s| LastRun {
                 started_at: s.started_at,
                 ended_at: s.ended_at,
@@ -210,7 +210,11 @@ fn recorder_path() -> Result<PathBuf, String> {
     let dir = me
         .parent()
         .ok_or_else(|| "問不出自己在哪個資料夾".to_string())?;
-    let name = if cfg!(windows) { "sister.exe" } else { "sister" };
+    let name = if cfg!(windows) {
+        "sister.exe"
+    } else {
+        "sister"
+    };
     let path = dir.join(name);
     match path.try_exists() {
         Ok(true) => Ok(path),
@@ -296,7 +300,7 @@ fn stop_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
         .data_dir
         .as_ref()
         .ok_or_else(|| "找不到資料目錄，停不了".to_string())?;
-    sister_core::control::request_stop(dir).map_err(|e| e.to_string())?;
+    sister_core::control::request_stop(dir).map_err(|e| format!("{e:#}"))?;
     tracing::info!("請 recorder 收工");
     Ok(())
 }
@@ -332,7 +336,8 @@ fn toggle_pause(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> Result
         .as_ref()
         .ok_or_else(|| "找不到資料目錄，暫停鍵沒有作用".to_string())?;
     let next = !sister_core::pause::is_paused(dir);
-    sister_core::pause::set_paused(dir, next, sister_core::now_ms()).map_err(|e| e.to_string())?;
+    sister_core::pause::set_paused(dir, next, sister_core::now_ms())
+        .map_err(|e| format!("{e:#}"))?;
     announce_pause(&app, next);
     Ok(next)
 }
@@ -350,7 +355,11 @@ fn announce_pause(app: &tauri::AppHandle, paused: bool) {
 }
 
 fn pause_label(paused: bool) -> &'static str {
-    if paused { "繼續記錄" } else { "暫停記錄" }
+    if paused {
+        "繼續記錄"
+    } else {
+        "暫停記錄"
+    }
 }
 
 /// 系統匣裡的那一顆暫停。存起來是為了改它的字——選單上一個永遠寫著
@@ -393,7 +402,11 @@ fn with_db<T>(
         if !path.exists() {
             return Err("還沒有任何記憶——先跑 `sister record`".to_string());
         }
-        *slot = Some(sister_core::db::Db::open(&path).map_err(|e| e.to_string())?);
+        // `{e:#}` 而不是 `to_string()`：anyhow 的 `to_string()` 只給最外面那
+        // 一層 context，這裡就是「open C:\…\sister.db」——一句廢話。真正寫給
+        // 他看的那幾行（例如「這份資料庫比這個執行檔新」）躺在底下。這一頁
+        // 上 26 個 `map_err` 全部同一個理由。
+        *slot = Some(sister_core::db::Db::open(&path).map_err(|e| format!("{e:#}"))?);
     }
     f(slot.as_ref().expect("just opened"))
 }
@@ -508,7 +521,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         let facts = match shape {
             Shape::Recent => Vec::new(),
             Shape::Keywords => {
-                sister_core::answer::answers(db, &question, 10).map_err(|e| e.to_string())?
+                sister_core::answer::answers(db, &question, 10).map_err(|e| format!("{e:#}"))?
             }
         };
         // 多要一筆，用來判斷「還有沒有」。少了這一步就只能猜——而猜錯的方向
@@ -520,7 +533,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             // 理由和 `sister query` 那邊同一條，寫在那裡。
             Shape::Keywords => db.search(sister_core::question::terms(&question), HITS + 1),
         }
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{e:#}"))?;
         let truncated = hits.len() > HITS;
         hits.truncate(HITS);
         // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
@@ -547,7 +560,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         // 讀不到設定檔就當成不要記（`unwrap_or(false)`）：不確定的時候少存
         // 一點，方向和其他每一個 fail-closed 一致。
         let wanted = config_path()
-            .and_then(|p| sister_core::config::Config::load(&p).map_err(|e| e.to_string()))
+            .and_then(|p| sister_core::config::Config::load(&p).map_err(|e| format!("{e:#}")))
             .map(|c| c.privacy.query_log)
             .unwrap_or(false);
         let query_id = wanted
@@ -569,7 +582,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         // 只有兩手空空的時候才去問。有答案的話這幾個 COUNT 是白跑的，而這條
         // 路上使用者正等著看畫面。
         let blind = if facts.is_empty() && hits.is_empty() {
-            let b = sister_core::answer::blind_spots(db).map_err(|e| e.to_string())?;
+            let b = sister_core::answer::blind_spots(db).map_err(|e| format!("{e:#}"))?;
             Some(Blind {
                 chunks: b.chunks,
                 excluded: b.excluded,
@@ -588,7 +601,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 .filter_map(|h| h.frame_id)
                 .chain(facts.iter().filter_map(|a| a.latest.frame_id))
                 .collect();
-            db.frames_with_image(&ids).map_err(|e| e.to_string())?
+            db.frames_with_image(&ids).map_err(|e| format!("{e:#}"))?
         };
         Ok(Answer {
             kind: shape.name(),
@@ -651,7 +664,7 @@ fn timeline_days(tz_offset_ms: i64, shell: tauri::State<'_, Shell>) -> Result<Ve
     with_db(&shell, |db| {
         Ok(db
             .days_with_data(tz)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))?
             .into_iter()
             .map(|d| Day {
                 start_ts: d.start_ts,
@@ -709,13 +722,13 @@ fn timeline_moments(
         // 是「剛好滿 limit 筆」被當成剛好結束。
         let mut rows = db
             .timeline(from_ts, to_ts, limit + 1)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("{e:#}"))?;
         let truncated = rows.len() > limit;
         rows.truncate(limit);
 
         let pauses = db
             .pause_spans(from_ts, to_ts)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))?
             .into_iter()
             .map(|s| Gap {
                 from: s.from,
@@ -726,7 +739,7 @@ fn timeline_moments(
         // 同 `ask`：來源一直都在，照片不一定。點得開的才給鑰匙。
         let openable = {
             let ids: Vec<i64> = rows.iter().filter_map(|m| m.frame_id).collect();
-            db.frames_with_image(&ids).map_err(|e| e.to_string())?
+            db.frames_with_image(&ids).map_err(|e| format!("{e:#}"))?
         };
         Ok(DayView {
             moments: rows
@@ -777,7 +790,7 @@ fn config_path() -> Result<PathBuf, String> {
 #[tauri::command]
 fn settings_read() -> Result<Settings, String> {
     let path = config_path()?;
-    let c = sister_core::config::Config::load(&path).map_err(|e| e.to_string())?;
+    let c = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
     Ok(Settings {
         excluded_apps: c.privacy.excluded_apps,
         excluded_urls: c.privacy.excluded_urls,
@@ -797,7 +810,7 @@ fn settings_write(settings: Settings) -> Result<(), String> {
     // **先讀再改再寫**，不是從空白組一份出來。設定檔裡有這一頁沒有畫出來的
     // 欄位（截圖間隔、每日畫面額度……），從頭組一份會把它們全部重設成預設值
     // ——使用者只是改了個保留天數，磁碟預算卻被悄悄換掉了。
-    let mut c = sister_core::config::Config::load(&path).map_err(|e| e.to_string())?;
+    let mut c = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
     c.privacy.excluded_apps = settings.excluded_apps;
     c.privacy.excluded_urls = settings.excluded_urls;
     c.privacy.excluded_titles = settings.excluded_titles;
@@ -806,7 +819,7 @@ fn settings_write(settings: Settings) -> Result<(), String> {
     c.privacy.query_log = settings.query_log;
     c.retention.frames_days = settings.frames_days;
     c.retention.text_days = settings.text_days;
-    c.save(&path).map_err(|e| e.to_string())
+    c.save(&path).map_err(|e| format!("{e:#}"))
 }
 
 /// 哪幾條網址規則寫了也不會命中。
@@ -831,7 +844,7 @@ fn frame_image(frame_id: i64, shell: tauri::State<'_, Shell>) -> Result<FrameVie
     with_db(&shell, |db| {
         let ctx = db
             .frame_context(frame_id)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))?
             .ok_or_else(|| "找不到這張畫面".to_string())?;
 
         // 「有這一筆但沒有圖」是**正常**的，不是錯誤。差別要講清楚，不然
@@ -963,9 +976,9 @@ fn hotkey_set(
     let view = apply_hotkey(&app, &combo);
     if view.registered || view.wanted.is_empty() {
         let path = config_path()?;
-        let mut c = sister_core::config::Config::load(&path).map_err(|e| e.to_string())?;
+        let mut c = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
         c.shell.pause_shortcut = view.wanted.clone();
-        c.save(&path).map_err(|e| e.to_string())?;
+        c.save(&path).map_err(|e| format!("{e:#}"))?;
     }
     *hotkey.0.lock().expect("hotkey") = view.clone();
     Ok(view)
@@ -989,7 +1002,7 @@ fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
     .inner_size(640.0, 720.0)
     .min_inner_size(460.0, 420.0)
     .build()
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("{e:#}"))?;
     Ok(())
 }
 
@@ -1078,7 +1091,7 @@ fn consent_set(
     } else {
         c.revoke(sheet);
     }
-    sister_core::consent::save(dir, &c).map_err(|e| e.to_string())?;
+    sister_core::consent::save(dir, &c).map_err(|e| format!("{e:#}"))?;
     Ok(consent_view(dir))
 }
 
@@ -1100,7 +1113,7 @@ fn open_onboarding(app: tauri::AppHandle) -> Result<(), String> {
     .inner_size(620.0, 720.0)
     .min_inner_size(460.0, 480.0)
     .build()
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("{e:#}"))?;
     Ok(())
 }
 
@@ -1146,7 +1159,7 @@ fn forget_preview(
     with_db(&shell, |db| {
         db.forget_preview(from_ts, to_ts)
             .map(Erasure::from)
-            .map_err(|e| e.to_string())
+            .map_err(|e| format!("{e:#}"))
     })
 }
 
@@ -1173,7 +1186,7 @@ fn forget_range(
     with_db_mut(&shell, |db| {
         db.forget(from_ts, to_ts, Some(&frames))
             .map(Erasure::from)
-            .map_err(|e| e.to_string())
+            .map_err(|e| format!("{e:#}"))
     })
 }
 
@@ -1201,7 +1214,7 @@ fn open_timeline(app: tauri::AppHandle) -> Result<(), String> {
     .inner_size(980.0, 720.0)
     .min_inner_size(560.0, 420.0)
     .build()
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("{e:#}"))?;
     Ok(())
 }
 
@@ -1252,7 +1265,7 @@ fn open_frame(app: tauri::AppHandle, frame_id: i64) -> Result<(), String> {
         .inner_size(1100.0, 720.0)
         .min_inner_size(480.0, 320.0)
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{e:#}"))?;
     Ok(())
 }
 
@@ -1487,13 +1500,8 @@ fn main() {
             // 系統匣是最後一個一定按得到的地方。
             let paused_now = pause_state(app.state::<Shell>());
             let show_item = MenuItem::with_id(app, "show", "顯示 AI-Sister", true, None::<&str>)?;
-            let pause_item = MenuItem::with_id(
-                app,
-                "pause",
-                pause_label(paused_now),
-                true,
-                None::<&str>,
-            )?;
+            let pause_item =
+                MenuItem::with_id(app, "pause", pause_label(paused_now), true, None::<&str>)?;
             // 開始／停止和暫停是兩件事，所以是兩顆。暫停是「先別看，但留在
             // 這裡」，停止是「今天到此為止」——把停止做成「一直暫停」會留下
             // 一個永遠在跑卻永遠不做事的行程，而他在工作管理員裡看得到它。
@@ -1506,8 +1514,7 @@ fn main() {
             )?;
             let timeline_item =
                 MenuItem::with_id(app, "timeline", "她記得的每一天…", true, None::<&str>)?;
-            let settings_item =
-                MenuItem::with_id(app, "settings", "設定…", true, None::<&str>)?;
+            let settings_item = MenuItem::with_id(app, "settings", "設定…", true, None::<&str>)?;
             let consent_item =
                 MenuItem::with_id(app, "consent", "三張同意書…", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(
