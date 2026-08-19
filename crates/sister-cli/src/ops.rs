@@ -4171,6 +4171,7 @@ pub mod record {
                 .unwrap_or(0)
                 - disk_at_start,
             stats.image_bytes,
+            image_budget_mb * 1024 * 1024,
         );
         for line in &lost {
             println!("  ⚠  錄製途中失去的能力：{line}");
@@ -4200,11 +4201,66 @@ pub mod record {
     #[cfg(windows)]
     const BUDGET_DISK_PER_DAY: f64 = 300.0 * 1024.0 * 1024.0;
 
+    /// 磁碟外推的三個數字，圖那一半已經夾在它自己的天花板上。
+    ///
+    /// **外推不可以穿過自己的天花板。** `bytes_per_day` 做的是「這段的速率
+    /// × 86400」，而圖那一半跑不到 86400 秒就會自己停：`max_image_mb_per_day`
+    /// 是一道真的門，額度在開機時從資料庫的 `image_bytes_since(今天)` 補回來
+    /// ——重開也不會歸零，所以它真的是一天的上限，不是一次執行的上限。
+    ///
+    /// 不夾的話，一段十分鐘的爆量會外推成「11.4 GB/天」：算術上正確，而那
+    /// 一天實際上不可能發生。更糟的是接在後面的建議「調小
+    /// `max_image_mb_per_day`」——那個上限根本碰不到，調它不會讓任何數字變小。
+    /// 這正是這個專案的招牌失效方式：每一行都對，合起來說謊。
+    ///
+    /// 不是 `#[cfg(windows)]` 而是 `any(windows, test)`：`report_footprint`
+    /// 整個是 Windows 限定的，而這段算術是它唯一會算錯的地方。跟著一起
+    /// 關在 Windows 門後的話，開發機一次都跑不到，也就沒有任何一個回退
+    /// 測試驗得了它——上面那個 11.4 GB 的錯就是這樣活下來的。
+    #[cfg(any(windows, test))]
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct DiskProjection {
+        /// 一天總量，圖那一半已經夾過。
+        per_day: f64,
+        /// 圖那一半，夾過。`None` = 這段有東西被刪掉，拆不開。
+        images: Option<f64>,
+        /// 圖那一半，沒夾。和 `images` 不同就代表門會關。
+        images_raw: Option<f64>,
+    }
+
+    #[cfg(any(windows, test))]
+    impl DiskProjection {
+        /// `cap_bytes` = 0 代表不設限（和 `max_image_mb_per_day = 0` 同義）。
+        fn clamp(raw_total: f64, raw_images: Option<f64>, cap_bytes: u64) -> Self {
+            let images = raw_images.map(|img| match cap_bytes {
+                0 => img,
+                cap => img.min(cap as f64),
+            });
+            // 圖被夾掉多少，總量就跟著少多少——其他那一半沒有天花板，原樣留著。
+            let per_day = match (raw_images, images) {
+                (Some(raw), Some(capped)) => raw_total - (raw - capped),
+                _ => raw_total,
+            };
+            Self {
+                per_day,
+                images,
+                images_raw: raw_images,
+            }
+        }
+
+        /// 一天的圖額度照這段的速度撐多久（秒）。`None` = 沒被夾住。
+        fn budget_lasts_secs(&self) -> Option<f64> {
+            let (raw, capped) = (self.images_raw?, self.images?);
+            (raw > capped && capped > 0.0).then(|| capped / raw * 86_400.0)
+        }
+    }
+
     #[cfg(windows)]
     fn report_footprint(
         f: &sister_capture::footprint::Footprint,
         disk_delta: i64,
         image_bytes: u64,
+        image_cap_bytes: u64,
     ) {
         /// 超標的就標出來。合格的不標——每一項都掛一個記號等於沒有記號。
         fn over(actual: f64, budget: f64) -> &'static str {
@@ -4249,12 +4305,19 @@ pub mod record {
                 "磁碟 這段量不出來（淨少了 {}——清理和寫入混在一起，減出來的數字沒有意義）",
                 crate::fmt::bytes(-disk_delta)
             ));
-        } else if let Some(per_day) = f.bytes_per_day(disk_delta as u64) {
+        } else if let Some(raw_per_day) = f.bytes_per_day(disk_delta as u64) {
             // 圖與資料庫要分開講。合成一個數字的話，「磁碟 11.4 GB/天」
             // 沒辦法回答唯一有用的那個問題——該去縮圖，還是該去縮索引。
             // 實測那次就是這樣：一個很嚇人、但指不出方向的數字。
             let grew = disk_delta;
             let rest = grew - image_bytes as i64;
+
+            let proj = DiskProjection::clamp(
+                raw_per_day,
+                f.bytes_per_day(image_bytes).filter(|_| rest >= 0),
+                image_cap_bytes,
+            );
+            let (per_day, img_raw, img_capped) = (proj.per_day, proj.images_raw, proj.images);
             // 減出負數代表這段期間有東西被刪掉了（錄到一半觸發保留期清理，
             // 或另一支 sister 在跑）。這時候「畫面 X、其他 -3 MB」是**算術
             // 上正確、意義上胡說**的一行——寧可承認拆不開。
@@ -4293,28 +4356,44 @@ pub mod record {
                 // 實測那次是 11.4 GB/天，也就是圖的上限的 46 倍——不看這一行
                 // 的話，唯一提到節流的是「另外 N 張只留了字（間隔未到）」，
                 // 而那句話讀起來像是在講省下來的磁碟。
-                let cap = f
-                    .bytes_per_day(image_bytes)
-                    .filter(|_| rest >= 0)
-                    .map(|img| {
-                        if img * 2.0 < per_day {
-                            format!(
-                                "而且大部分不是圖：畫面 {}/天、其他（資料庫、索引、事實）{}/天。\
-                                 畫面那半有天花板（capture.max_image_mb_per_day），另一半沒有。",
-                                crate::fmt::bytes(img as i64),
-                                crate::fmt::bytes((per_day - img) as i64),
-                            )
-                        } else {
-                            format!(
-                                "主要是圖：畫面 {}/天。調小 capture.max_image_mb_per_day \
-                                 或拉長 image_min_interval_ms。",
-                                crate::fmt::bytes(img as i64)
-                            )
-                        }
-                    });
+                let cap = img_capped.map(|img| {
+                    if img * 2.0 < per_day {
+                        format!(
+                            "而且大部分不是圖：畫面 {}/天、其他（資料庫、索引、事實）{}/天。\
+                             畫面那半有天花板（capture.max_image_mb_per_day），另一半沒有。",
+                            crate::fmt::bytes(img as i64),
+                            crate::fmt::bytes((per_day - img) as i64),
+                        )
+                    } else {
+                        format!(
+                            "主要是圖：畫面 {}/天。調小 capture.max_image_mb_per_day \
+                             或拉長 image_min_interval_ms。",
+                            crate::fmt::bytes(img as i64)
+                        )
+                    }
+                });
                 if let Some(line) = cap {
                     breached.push(line);
                 }
+            }
+            // 夾到了就要說出來，而且**和有沒有超磁碟預算無關**。
+            //
+            // 被夾住的意思是：她今天會在某個時刻把圖的額度寫滿，然後從那一刻
+            // 起只留字。那是一次會靜靜發生的降級——時間軸後半段點開來沒有畫面
+            // ——而使用者唯一能看到的線索，本來只有一個已經被夾好、看起來很
+            // 乖的 250 MB/天。與其讓那個數字獨自去說謊，不如把「幾分鐘後就滿」
+            // 直接印出來。
+            if let (Some(secs), Some(raw), Some(capped)) =
+                (proj.budget_lasts_secs(), img_raw, img_capped)
+            {
+                breached.push(format!(
+                        "這段寫圖的速度相當於 {}/天，是上限（capture.max_image_mb_per_day）的 {:.0} 倍。\
+                         照這個速度，一天的圖額度大約 {} 就寫滿，之後她整天只留字、不留畫面——\
+                         上面那個磁碟數字已經按這道門夾過了，看起來乖是因為門會關，不是因為她寫得少。",
+                        crate::fmt::bytes(raw as i64),
+                        raw / capped,
+                        crate::fmt::duration_ms((secs * 1000.0) as i64),
+                    ));
             }
         }
         if parts.is_empty() {
@@ -4506,11 +4585,94 @@ pub mod record {
     }
     #[cfg(test)]
     mod record_tests {
-        use super::{BootBeat, ConfigWatch, already_recording};
+        use super::{BootBeat, ConfigWatch, DiskProjection, already_recording};
         use crate::ops::tmp::Tmp;
         use sister_core::config::Config;
         use sister_core::consent::{Consent, Sheet};
         use sister_core::heartbeat;
+
+        const MB: f64 = 1024.0 * 1024.0;
+        const CAP_250MB: u64 = 250 * 1024 * 1024;
+
+        /// 他那次實測的形狀：錄十分鐘，外推出「11.4 GB/天」。
+        ///
+        /// 那個數字算術上正確、事實上不可能——圖那一半寫到 250 MB 就會撞上
+        /// `max_image_mb_per_day` 那道門停下來。不夾的話，報告會用一個永遠
+        /// 不會發生的數字宣告 Phase 0 的磁碟預算爆掉 38 倍，然後建議他去調
+        /// 一個根本碰不到的上限。
+        #[test]
+        fn a_ten_minute_burst_must_not_be_extrapolated_through_its_own_ceiling() {
+            // 十分鐘寫了 79 MB 的圖 + 2 MB 的資料庫，外推成一天
+            let images = 79.0 * MB * 144.0; // 11.4 GB/天
+            let rest = 2.0 * MB * 144.0; // 288 MB/天
+            let p = DiskProjection::clamp(images + rest, Some(images), CAP_250MB);
+
+            assert_eq!(p.images, Some(CAP_250MB as f64), "圖那一半要被門夾住");
+            assert!(
+                p.per_day < 600.0 * MB,
+                "夾過的一天總量應該是 250MB 的圖 + 288MB 的其他，不是 11.4 GB：{}",
+                p.per_day
+            );
+            // 而且被夾掉的只有圖：其他那一半沒有天花板，一個位元組都不准動。
+            assert!(
+                (p.per_day - (CAP_250MB as f64 + rest)).abs() < 1.0,
+                "其他那一半被動到了：{}",
+                p.per_day
+            );
+        }
+
+        /// 夾住這件事本身要說出來，而且要說得出「什麼時候關門」。
+        ///
+        /// 夾完之後那個數字看起來很乖（250 MB/天，預算內），可是它乖的原因
+        /// 是門會關——今天某個時刻之後她只留字、不留畫面。那是一次會靜靜
+        /// 發生的降級，只看夾過的數字完全看不出來。
+        #[test]
+        fn hitting_the_ceiling_can_say_when_the_door_shuts() {
+            let images = 11.4 * 1024.0 * MB; // 11.4 GB/天
+            let p = DiskProjection::clamp(images, Some(images), CAP_250MB);
+            let secs = p.budget_lasts_secs().expect("被夾住就要答得出來");
+            // 250MB ÷ 11.4GB/天 ≈ 一天的 2.1%，約 30 分鐘
+            assert!(
+                (25.0 * 60.0..40.0 * 60.0).contains(&secs),
+                "半小時上下才對，算出來是 {:.0} 分鐘",
+                secs / 60.0
+            );
+        }
+
+        /// 沒撞到門就不要亂夾，也不要多印一句警告。
+        #[test]
+        fn a_quiet_day_is_left_exactly_as_measured() {
+            let images = 40.0 * MB;
+            let p = DiskProjection::clamp(images + 10.0 * MB, Some(images), CAP_250MB);
+            assert_eq!(p.images, Some(images));
+            assert_eq!(p.per_day, images + 10.0 * MB);
+            assert_eq!(
+                p.budget_lasts_secs(),
+                None,
+                "沒夾住就沒有「幾點關門」這回事"
+            );
+        }
+
+        /// `max_image_mb_per_day = 0` 在設定裡的意思是**不設限**，不是「一張都不寫」。
+        ///
+        /// 把 0 當成上限的話，每一次外推都會被夾成 0，報告會宣布她不佔磁碟。
+        #[test]
+        fn zero_means_no_ceiling_not_a_ceiling_of_zero() {
+            let images = 11.4 * 1024.0 * MB;
+            let p = DiskProjection::clamp(images, Some(images), 0);
+            assert_eq!(p.images, Some(images), "0 = 不設限");
+            assert_eq!(p.per_day, images);
+            assert_eq!(p.budget_lasts_secs(), None);
+        }
+
+        /// 拆不開的時候（這段有東西被刪掉）不要假裝拆得開。
+        #[test]
+        fn a_span_that_also_deleted_things_stays_unsplit() {
+            let p = DiskProjection::clamp(500.0 * MB, None, CAP_250MB);
+            assert_eq!(p.images, None);
+            assert_eq!(p.per_day, 500.0 * MB, "拆不開就不准動總量");
+            assert_eq!(p.budget_lasts_secs(), None);
+        }
 
         /// 正在開機的 recorder：**佔著**這個資料目錄，但**還沒在錄**。
         ///
