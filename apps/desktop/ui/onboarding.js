@@ -71,10 +71,13 @@ function paint(view) {
   el.path.textContent = view.path;
   el.cards.replaceChildren(...view.sheets.map(card));
   if (view.allows_recording) {
+    // 「她可以開始記錄了」讀起來像**已經**開始了，而這一頁只負責同意——
+    // 真正在錄的是另一個執行檔。第一次打開的人如果以為勾完就在錄了，他會
+    // 等上一整天，然後發現什麼都沒有。所以這一句要指出下一步是什麼。
     say(
       view.allows_frames
-        ? "她可以開始記錄了，而且會留截圖。"
-        : "她可以開始記錄了。只記螢幕上的字，不留截圖。",
+        ? "簽好了。接下來跑 sister record 她才會開始，而且會留截圖。"
+        : "簽好了。接下來跑 sister record 她才會開始，只記螢幕上的字、不留截圖。",
     );
   } else {
     // 這一句要講「現在的後果」，不是催他去按。
