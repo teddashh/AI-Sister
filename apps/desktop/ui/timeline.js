@@ -338,6 +338,11 @@ function scale(e) {
   const bits = [];
   if (e.chunks > 0) bits.push(`${e.chunks} 段文字`);
   if (e.facts > 0) bits.push(`${e.facts} 個事實`);
+  // 沒有截圖的那幾列也是紀錄。text-only 模式下、或圖已經過了保留期之後，
+  // `images` 是 0，而那幾列裡還留著時間、dHash 和當時的視窗標題——`forget`
+  // 一直都真的把它們刪掉，只有這裡沒讀。和上面那段題庫的故事是同一個，
+  // 只是隔壁一欄。
+  if (e.frames > 0) bits.push(`${e.frames} 列畫面紀錄`);
   if (e.images > 0) {
     bits.push(`${e.images} 張畫面（${Math.round(e.image_bytes / 104_857.6) / 10} MB）`);
   }
@@ -387,8 +392,15 @@ async function forget() {
     if (e.failed.length > 0) {
       // 刪不掉的截圖還躺在磁碟上，而他以為它不在了。這句要蓋過成功那句。
       tell(`有 ${e.failed.length} 個畫面檔刪不掉：${e.failed[0]}`, true);
+    } else if (done.length === 0) {
+      tell("沒有東西被刪掉。");
     } else {
-      tell(done.length === 0 ? "沒有東西被刪掉。" : `刪掉了 ${done.join("、")}。`);
+      // 資料庫說有圖、磁碟上找不到那個檔。預覽剛剛才說「12 張畫面
+      // （1.8 MB）」，結果卻一張都沒提——不講的話那個落差沒有人解釋，而
+      // 那正是他拿來對帳的兩個數字。不是 ⚠：東西確實不在了。
+      const gone =
+        e.missing > 0 ? `（另外 ${e.missing} 列說自己有圖，但那個檔早就不在磁碟上了）` : "";
+      tell(`刪掉了 ${done.join("、")}。${gone}`);
     }
   } catch (err) {
     tell(String(err?.message ?? err), true);
@@ -611,7 +623,17 @@ function fakeBackend() {
       case "forget_preview":
       case "forget_range": {
         const gone = hit(arg.fromTs, arg.toTs);
-        const images = gone.filter((m) => m.frame_id !== null);
+        const withImage = gone.filter((m) => m.frame_id !== null);
+        // 假裝每 3 張裡有 1 張的檔案早就被人手動清掉了：資料庫還指著它，磁碟
+        // 上沒有。預覽看不出來（它只會數資料庫），真的刪下去才發現——而那個
+        // 落差就是 `missing` 存在的理由。假後端不模擬的話，那一句話沒有任何
+        // 辦法在這台機器上被看見。
+        //
+        // 模數要小。第一版寫 `i % 7`，而 demo 那一天只有三張圖，於是它永遠是
+        // 0——一個「跑過了、什麼都沒驗到」的假後端，正好是它自己要防的東西。
+        const vanished = (m, i) => cmd === "forget_range" && i % 3 === 2;
+        const images = withImage.filter((m, i) => !vanished(m, i));
+        const missing = withImage.length - images.length;
         if (cmd === "forget_range") {
           moments = moments.filter((m) => !inRange(m, arg.fromTs, arg.toTs));
           pauses = pauses.filter(
@@ -625,7 +647,12 @@ function fakeBackend() {
           images: images.length,
           image_bytes: images.length * 148_000,
           events: gone.length * 3,
+          // 後端一直有這一欄，`scale()` 上面那段註解講的就是它漏掉的那次
+          // ——而假後端到現在都還沒給，所以修好之後那一行在這台機器上還是
+          // 看不到。同一根釘子的第三個位置。
+          queries: Math.ceil(gone.length / 4),
           failed: [],
+          missing,
         };
       }
       default:

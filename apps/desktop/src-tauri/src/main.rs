@@ -1358,6 +1358,12 @@ struct Erasure {
     /// 刪不掉的檔案。**不吞掉**：那幾張截圖還躺在磁碟上，而使用者以為
     /// 它們已經不在了。
     failed: Vec<String>,
+    /// 資料庫說有圖、磁碟上找不到那個檔。
+    ///
+    /// 不是失敗（東西確實不在了），但**也不是刪掉了**。少了這一欄，預覽說
+    /// 「12 張畫面（1.8 MB）」而結果一張都沒提，中間那個落差沒有人解釋——
+    /// 而那正是他拿來對帳的兩個數字。CLI 早就有這一行。
+    missing: u64,
 }
 
 impl From<sister_core::retention::PruneReport> for Erasure {
@@ -1371,6 +1377,7 @@ impl From<sister_core::retention::PruneReport> for Erasure {
             events: r.events_deleted,
             queries: r.queries_deleted,
             failed: r.failed,
+            missing: r.missing,
         }
     }
 }
