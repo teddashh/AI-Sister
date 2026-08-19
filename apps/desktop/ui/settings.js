@@ -14,6 +14,8 @@ const el = {
   textDays: document.querySelector("[data-text-days]"),
   lint: document.querySelector("[data-lint]"),
   health: document.querySelector("[data-health]"),
+  captureOff: document.querySelector("[data-capture-off]"),
+  machine: document.querySelector("[data-machine]"),
   unreadable: document.querySelector("[data-unreadable]"),
   combo: document.querySelector("[data-combo]"),
   clearCombo: document.querySelector("[data-clear]"),
@@ -120,10 +122,56 @@ function paintHealthUnaskable(hasRules) {
     "問不出這幾條規則會不會生效（設定或能力報告讀不出來）。" +
     "底下那幾條可能一條都沒在擋——sister doctor 問得到同一份答案。";
   el.health.hidden = !hasRules;
+  // 問不到就什麼都不知道，包括總開關和輸入 hook。留著上一次的答案會讓那兩格
+  // 變成「現在的狀況」，而它們可能是十分鐘前的。
+  if (el.captureOff) el.captureOff.hidden = true;
+  if (el.machine) el.machine.hidden = true;
+}
+
+/**
+ * 總開關關著：這一整頁在描述一台不存在的機器。
+ *
+ * `capture.enabled = false` 的時候底下每一格照樣說「這幾條規則會生效」——而
+ * 那句話沒有意義，因為沒有任何畫面進來。它和一台一切正常的機器在畫面上長得
+ * 一模一樣。`sister doctor` 早就把這件事當成頭條（「看起來正常，但其實記不住
+ * 東西」），而這一頁才是他真正在改設定的地方。
+ */
+function paintCaptureOff(off) {
+  if (!el.captureOff) return;
+  el.captureOff.classList.toggle("bad", off);
+  el.captureOff.textContent = off
+    ? "設定檔裡 [capture] enabled = false：她連開始都不會開始。" +
+      "底下這幾條規則現在一條都不會被用到——不是因為壞掉，是因為根本沒有畫面進來。" +
+      "把那一行改成 true（或刪掉）她才會真的錄。"
+    : "";
+  el.captureOff.hidden = !off;
+}
+
+/**
+ * 不屬於底下任何一格的能力缺口。目前只有輸入 hook。
+ *
+ * 它以前和網址規則那幾句話擠在同一格裡，而那一格就在網址輸入框正下方——
+ * 一個 hook 裝不上的人，讀到的是「我有一條網址規則寫壞了」。
+ */
+function paintMachine(lines) {
+  if (!el.machine) return;
+  el.machine.classList.toggle("bad", lines.length > 0);
+  el.machine.textContent = lines.join("\n");
+  el.machine.hidden = lines.length === 0;
 }
 
 function paintHealth(health, hasRules) {
   if (!el.health) return;
+  // 先把不屬於這一格的兩件事送去它們該去的地方。**在 `at === null` 那條早退
+  // 路徑之前**：一台從沒錄過的機器，總開關可能就是關著的，而那正是他最該
+  // 知道的時候——他還在設定，還沒按下開始。
+  paintCaptureOff(health.capture_off === true);
+  paintMachine(
+    (health.broken ?? [])
+      .filter((b) => b.about !== "url_rules")
+      .map((b) => b.message),
+  );
+  const urlRules = (health.broken ?? []).filter((b) => b.about === "url_rules");
   // **三種狀態，不是兩種。** 「沒有報告」和「都生效」以前會長得一樣，而那
   // 正是這一格要修的那種安靜——一個從沒錄過的人看到一片乾淨，會以為門關好了。
   //
@@ -154,10 +202,10 @@ function paintHealth(health, hasRules) {
   // 「一切正常」什麼都不說。現在 recorder 錄製途中每分鐘蓋一次，所以這個時戳
   // 講的是「這份報告描述的是哪一刻」——而它離現在多遠，讀的人自己判斷。
   el.health.textContent =
-    health.broken.length === 0
+    urlRules.length === 0
       ? ""
-      : `${health.broken.join("\n")}（${when(health.at)} 的狀況）`;
-  el.health.hidden = health.broken.length === 0;
+      : `${urlRules.map((b) => b.message).join("\n")}（${when(health.at)} 的狀況）`;
+  el.health.hidden = urlRules.length === 0;
 }
 
 /**
@@ -219,8 +267,24 @@ function paintHotkey(view) {
   el.combo.textContent =
     view.wanted === "" ? "沒有設" : pretty(view.wanted);
 
-  const bad = view.rejected != null || (view.wanted !== "" && !view.registered);
+  const bad =
+    view.rejected != null ||
+    view.config_unreadable != null ||
+    (view.wanted !== "" && !view.registered);
   el.hotkeySay.classList.toggle("bad", bad);
+  // **這一條排在最前面。** 開機讀不出設定檔的時候，底下每一句話講的都是
+  // 內建預設值那一組——而它們全都是肯定句（「搶到了。現在按 Ctrl+Alt+P…」）。
+  // 他設的是 Ctrl+Alt+S，按下去沒有反應，而這一頁指著另一組說沒問題。
+  //
+  // 對一顆暫停鍵來說那是最壞的一種壞法：他以為她停了，她還在錄。
+  if (view.config_unreadable != null) {
+    el.hotkeySay.textContent =
+      `開機時讀不出設定檔，所以現在用的是內建預設的那一組${
+        view.wanted === "" ? "" : `（${pretty(view.wanted)}）`
+      }，不是你設的。` +
+      `你設的那一組現在按下去不會有任何反應。修好設定檔再重開一次她：\n${view.config_unreadable}`;
+    return;
+  }
   // 剛剛試的那組被別人佔走了。後端已經把舊的那組裝回去了——講清楚「你試的
   // 那組沒成功、現在還在用哪一組」，不然他會以為暫停鍵從此不見了（以前**真的**
   // 會不見：`apply_hotkey` 先 `unregister_all()`，失敗就什麼都沒裝回去）。
@@ -382,7 +446,9 @@ async function load() {
 }
 
 /**
- * 開發用：`settings.html?demo=1`，以及 `?demo=taken`（熱鍵被別的程式佔走）。
+ * 開發用：`settings.html?demo=1`，以及 `?demo=taken`（熱鍵被別的程式佔走）、
+ * `?demo=off`（`capture.enabled = false`）、`?demo=nohotkey`（開機讀不出設定檔，
+ * 於是熱鍵是內建預設值那一組，不是他設的）。
  *
  * 和 app.js 的 `?state=` 同一個理由——這台開發機開不起 Tauri 視窗，而這一頁
  * 有一堆版面（七個區塊、警告清單、底下那條）需要真的看過。**它走的是和產品
@@ -428,12 +494,24 @@ function demo(variant) {
   // 「還不知道」會被當成「有問題」，而那一頁上真正的警告就貶值了。
   paintHealth(
     variant === "unknown"
-      ? { broken: [], at: null }
+      ? { broken: [], at: null, capture_off: false }
       : {
           broken: [
-            "沒有 UIA 網址擷取：3 條 excluded_urls 規則（網銀、登入頁）目前不會生效，瀏覽器畫面只靠視窗標題規則過濾",
+            {
+              about: "url_rules",
+              message:
+                "沒有 UIA 網址擷取：3 條 excluded_urls 規則（網銀、登入頁）目前不會生效，瀏覽器畫面只靠視窗標題規則過濾",
+            },
+            // 這一則故意混在同一份回答裡：它**不可以**出現在網址輸入框底下。
+            // 那個位置以前讓一句和網址無關的話，看起來像在指著他剛打的三行。
+            {
+              about: "input_hook",
+              message: "輸入 hook 裝不上：節奏訊號這個 session 會是空的",
+            },
           ],
           at: Date.now() - 3 * 3600 * 1000,
+          // 總開關那一句要被眼睛看過：它是這一頁上唯一一句「這一整頁都不算數」。
+          capture_off: variant === "off",
         },
     true,
   );
@@ -443,8 +521,23 @@ function demo(variant) {
           wanted: "Ctrl+Alt+KeyP",
           registered: false,
           reason: "RegisterEventHotKey failed",
+          config_unreadable: null,
         }
-      : { wanted: "Ctrl+Alt+KeyP", registered: true, reason: null },
+      : variant === "nohotkey"
+        ? {
+            // 開機讀不出設定檔 → 用的是內建預設值那一組，而他設的是別的。
+            wanted: "Ctrl+Alt+KeyP",
+            registered: true,
+            reason: null,
+            config_unreadable:
+              "retention.frames_days 不能是 0：0 的意思是「下一次整理就把畫面檔全部刪掉」",
+          }
+        : {
+            wanted: "Ctrl+Alt+KeyP",
+            registered: true,
+            reason: null,
+            config_unreadable: null,
+          },
   );
   say("這是 demo 版面，沒有讀任何真的設定。");
 }
@@ -474,7 +567,7 @@ async function save() {
   if (invoke === null) return;
   el.save.disabled = true;
   try {
-    await invoke("settings_write", {
+    const outcome = await invoke("settings_write", {
       settings: {
         excluded_apps: toLines(el.apps.value),
         excluded_urls: toLines(el.urls.value),
@@ -487,9 +580,18 @@ async function save() {
         // `path` 不送。要寫到哪個檔案由 Rust 那邊算，不是這一頁說了算。
       },
     });
-    // 「存好了」還不夠。使用者要知道的是「她現在照這份跑了沒」——
-    // 而答案是「最多 5 秒」，因為錄製那邊是輪詢設定檔的。
-    say("存好了。正在跑的 record 會在 5 秒內換上這一份。");
+    // 「存好了」還不夠。使用者要知道的是「她現在照這份跑了沒」——而那句話
+    // 以前寫死是「正在跑的 record 會在 5 秒內換上這一份」，帶著一個沒被檢查
+    // 的前提：**真的有一個 record 在跑**。一個剛裝好、還沒按過「開始記錄」的
+    // 人，看到的是一句承諾一件不會發生的事的話；而一個以為她在錄、實際上那個
+    // 行程幾分鐘前就掛了的人，看到的是一句替那件事背書的話。
+    //
+    // 兩句都是真的，差別只在有沒有人在錄——所以去問心跳，不要用猜的。
+    say(
+      outcome?.recording === true
+        ? "存好了。正在跑的 record 會在 5 秒內換上這一份。"
+        : "存好了——不過現在沒有人在錄，所以這一份要等你按下「開始記錄」才會生效。",
+    );
     // 存進去的是剪過空白、丟過空行的版本，畫面要跟著變成那個樣子，
     // 不然他看到的和檔案裡的是兩份東西。
     await load();

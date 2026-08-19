@@ -87,7 +87,7 @@ impl Capabilities {
     pub fn broken_privacy_rules(
         &self,
         privacy: &sister_core::config::PrivacyConfig,
-    ) -> Vec<String> {
+    ) -> Vec<sister_core::capabilities::Broken> {
         self.report().broken_privacy_rules(privacy)
     }
 
@@ -171,7 +171,7 @@ mod tests {
         };
         let broken = caps.broken_privacy_rules(&Config::default().privacy);
         assert!(
-            broken.iter().any(|w| w.contains("excluded_urls")),
+            broken.iter().any(|w| w.message.contains("excluded_urls")),
             "沒有把失效的網址規則講出來：{broken:?}"
         );
     }

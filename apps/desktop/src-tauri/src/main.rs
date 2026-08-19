@@ -999,8 +999,26 @@ fn settings_read() -> Result<Settings, String> {
     })
 }
 
+/// 存完之後，「她什麼時候會照這份跑」的答案。
+///
+/// 存好之後那句話以前寫死是「正在跑的 record 會在 5 秒內換上這一份」。那句
+/// 話有一個沒被檢查的前提：**真的有一個 record 在跑**。一個剛裝好、還沒按過
+/// 「開始記錄」的人，看到的是一句承諾一件不會發生的事的話——他改完排除規則，
+/// 以為門從此關著，然後才去按開始（那時候倒是真的生效了），或者根本不去按。
+///
+/// 而更難看的是反過來：他**以為**她在錄（工作管理員裡有那個行程、系統匣有
+/// 圖示），實際上那個行程幾分鐘前就掛了。這句話會替那件事背書。
+#[derive(Serialize)]
+struct WriteOutcome {
+    /// 現在真的有人在錄嗎（心跳）。決定那句話怎麼講。
+    recording: bool,
+}
+
 #[tauri::command]
-fn settings_write(settings: Settings) -> Result<(), String> {
+fn settings_write(
+    settings: Settings,
+    shell: tauri::State<'_, Shell>,
+) -> Result<WriteOutcome, String> {
     let path = config_path()?;
     // **先讀再改再寫**，不是從空白組一份出來。設定檔裡有這一頁沒有畫出來的
     // 欄位（截圖間隔、每日畫面額度……），從頭組一份會把它們全部重設成預設值
@@ -1014,7 +1032,13 @@ fn settings_write(settings: Settings) -> Result<(), String> {
     c.privacy.query_log = settings.query_log;
     c.retention.frames_days = settings.frames_days;
     c.retention.text_days = settings.text_days;
-    c.save(&path).map_err(|e| format!("{e:#}"))
+    c.save(&path).map_err(|e| format!("{e:#}"))?;
+    // 存成功之後才問。反過來的話，一個存不進去的檔案會拿到一句「5 秒內換上」。
+    Ok(WriteOutcome {
+        recording: shell.data_dir.as_ref().is_some_and(|dir| {
+            sister_core::heartbeat::is_recording(dir, sister_core::now_ms())
+        }),
+    })
 }
 
 /// 這台機器上，這幾條規則到底生不生效。
@@ -1028,10 +1052,24 @@ fn settings_write(settings: Settings) -> Result<(), String> {
 #[derive(Serialize)]
 struct PrivacyHealth {
     /// 現在這份設定裡，有哪幾件事其實沒在做。空的 = 都生效。
-    broken: Vec<String>,
+    ///
+    /// 每一則都帶著 `about`，因為它們該掛在這一頁上**不同的區塊**底下——
+    /// 見 [`sister_core::capabilities::About`]。
+    broken: Vec<sister_core::capabilities::Broken>,
     /// 報告是什麼時候探的。`None` = **還沒有報告**（沒錄過、或那個檔案被刪
     /// 了）——那和「都生效」是兩件事，畫面上不准長得一樣。
     at: Option<i64>,
+    /// `capture.enabled = false`：她連開始都不會開始。
+    ///
+    /// 這一格問的是「這幾條規則生不生效」，而總開關關著的時候那個問題沒有
+    /// 意義——**一條都不會被用到，因為根本沒有畫面進來**。而它在畫面上和
+    /// 「一切正常」長得一模一樣：規則清單是綠的、這一格是空的。使用者以為
+    /// 他設好了一台會記錄、而且會避開網銀的機器；他有的是一台什麼都不記的。
+    ///
+    /// 這個欄位不能塞進 `broken`：那個清單講的是「你以為關上的門其實開著」，
+    /// 而這件事的方向剛好相反（整棟房子是空的）。混在一起會讓那幾句話變成
+    /// 一堆語氣一樣、輕重不分的字。
+    capture_off: bool,
 }
 
 #[tauri::command]
@@ -1042,6 +1080,7 @@ fn privacy_health(urls: Vec<String>, shell: tauri::State<'_, Shell>) -> Result<P
     // `lint_url_rules` 同一條紀律。他正在打第一條的時候就該知道它不會生效；
     // 等他按了儲存才講晚了一步，而那一步裡他已經相信門關上了。
     config.privacy.excluded_urls = urls;
+    let capture_off = !config.capture.enabled;
     let report = shell
         .data_dir
         .as_ref()
@@ -1050,10 +1089,12 @@ fn privacy_health(urls: Vec<String>, shell: tauri::State<'_, Shell>) -> Result<P
         Some(r) => PrivacyHealth {
             broken: r.broken_privacy_rules(&config.privacy),
             at: Some(r.at),
+            capture_off,
         },
         None => PrivacyHealth {
             broken: Vec::new(),
             at: None,
+            capture_off,
         },
     })
 }
@@ -1150,6 +1191,17 @@ struct HotkeyView {
     /// 一組既沒註冊也沒寫進設定檔的組合，下次開機又默默變回舊的那個。
     /// 使用者看到的只有「剛剛試的那組沒成功」，完全不知道暫停鍵從此失效。
     rejected: Option<String>,
+    /// 開機時讀不出設定檔，所以 [`wanted`](Self::wanted) 是**內建預設值**，
+    /// 不是他設的那一組。帶著讀失敗的原因。
+    ///
+    /// 開機那段以前是 `Config::load(&p).ok().unwrap_or_default()`——一個
+    /// 手寫壞掉的 `config.toml`（或被 OneDrive 鎖住、磁碟滿）會讓他設的
+    /// `Ctrl+Alt+S` 安靜地變成內建的那一組。症狀是：他按 S 沒有反應，而
+    /// 設定頁指著另一組說「搶到了」，兩邊都不提設定檔。
+    ///
+    /// 對一顆**暫停**鍵來說這是最壞的一種壞法，和 [`hotkey_set`] 那段註解
+    /// 講的是同一件事：他以為她停了，她還在錄。
+    config_unreadable: Option<String>,
 }
 
 struct Hotkey(Mutex<HotkeyView>);
@@ -1174,6 +1226,10 @@ fn apply_hotkey(app: &tauri::AppHandle, wanted: &str) -> HotkeyView {
             registered: false,
             reason: None,
             rejected: None,
+            // 這一支只負責「去搶那一組」。設定檔讀不讀得出來是呼叫端的事，
+            // 而唯一問得到的呼叫端是開機那一段——`hotkey_set` 走到這裡的時候
+            // 設定檔剛剛才讀成功過。
+            config_unreadable: None,
         };
     }
 
@@ -1197,6 +1253,7 @@ fn apply_hotkey(app: &tauri::AppHandle, wanted: &str) -> HotkeyView {
         registered: reason.is_none(),
         reason,
         rejected: None,
+        config_unreadable: None,
     }
 }
 
@@ -1843,14 +1900,27 @@ fn main() {
             //
             // 搶不到不是致命的（系統匣那顆還在），所以這裡不 `?`——但也不能就
             // 這樣算了：狀態存進 `Hotkey`，設定頁上寫得出「這一組被別人拿走了」。
+            //
+            // **讀不出設定檔的時候不可以安靜地換一組。** 這裡以前是
+            // `Config::load(&p).ok().unwrap_or_default()`——一個手寫壞掉的
+            // `config.toml`（或被防毒／OneDrive 鎖著、磁碟滿）會讓他設的
+            // `Ctrl+Alt+S` 變成內建的那一組。症狀是他按 S 沒有反應，而設定頁
+            // 指著另一組說「搶到了」。這一頁上別的地方早就在對付這種事
+            // （`setUnreadable`、`Config::reload` 的「繼續用舊的那一份」），
+            // 只有這條路上的那個 `.ok()` 把原因整個吞掉了。
             {
-                let wanted = config_path()
-                    .ok()
-                    .and_then(|p| sister_core::config::Config::load(&p).ok())
+                let loaded = config_path().and_then(|p| {
+                    sister_core::config::Config::load(&p).map_err(|e| format!("{e:#}"))
+                });
+                let config_unreadable = loaded.as_ref().err().cloned();
+                let wanted = loaded
                     .unwrap_or_default()
                     .shell
                     .pause_shortcut;
-                let view = apply_hotkey(app.handle(), &wanted);
+                let view = HotkeyView {
+                    config_unreadable,
+                    ..apply_hotkey(app.handle(), &wanted)
+                };
                 // 成功也要留一行。「搶到了」和「這段程式根本沒跑到」在一份
                 // 只記失敗的記錄檔裡長得一模一樣，而那正是他按了熱鍵沒反應時
                 // 唯一想分辨的兩件事。

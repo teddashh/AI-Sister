@@ -2812,8 +2812,9 @@ pub mod doctor {
                 .unwrap_or_default()
             {
                 println!(
-                    "  ⚠  正在錄的那個行程說：{line}\n\
-                     \x20    （底下那次 UIA 實測是這裡新開的一份，它答得出來不代表她答得出來）"
+                    "  ⚠  正在錄的那個行程說：{}\n\
+                     \x20    （底下那次 UIA 實測是這裡新開的一份，它答得出來不代表她答得出來）",
+                    line.message
                 );
             }
         } else if let Err(e) = sister_core::capabilities::write(data_dir, &c.report()) {
@@ -2990,7 +2991,14 @@ pub mod doctor {
             ocr_language: c.ocr_language.clone(),
             ocr_available: c.ocr_languages_available.clone(),
             ocr_probes: probes,
-            broken_privacy: c.broken_privacy_rules(&config.privacy),
+            // 終端機沒有「排除網址那一格」和「輸入節奏那一格」的分別，
+            // 所以 `about` 在這裡用不到——一行一行印就是了。分格是設定頁
+            // 的需要（見 `capabilities::About`）。
+            broken_privacy: c
+                .broken_privacy_rules(&config.privacy)
+                .into_iter()
+                .map(|b| b.message)
+                .collect(),
             degraded: c.silently_degraded(config),
         }
     }
@@ -4556,7 +4564,7 @@ pub mod record {
             eprintln!("⚠  寫不出能力報告（設定頁會說「還不知道」）：{e:#}");
         }
         for warning in caps.broken_privacy_rules(&config.privacy) {
-            println!("⚠  {warning}");
+            println!("⚠  {}", warning.message);
         }
         for warning in caps.silently_degraded(&config) {
             println!("⚠  {warning}");
@@ -5014,7 +5022,7 @@ pub mod record {
                 .map(|d| d.as_secs_f64() * 1000.0),
         );
         for line in &lost {
-            println!("  ⚠  錄製途中失去的能力：{line}");
+            println!("  ⚠  錄製途中失去的能力：{}", line.message);
         }
         Ok(())
     }
