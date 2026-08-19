@@ -1232,6 +1232,12 @@ struct ConsentView {
     /// 讀不出來就是 `None`，不是猜一個預設值：預設是 true，猜錯的方向正好是
     /// 「答應了一件不會發生的事」。
     store_images: Option<bool>,
+    /// 剛剛那一下**順手把另外兩張的簽署時間清掉了**（條文改版）。
+    ///
+    /// `consent_read` 永遠是 false——只有真的動手的那一下才會是 true。CLI 對
+    /// 這件事會印一行 ⚠，這一頁以前完全安靜：他勾了一張，另外兩張的「2026 年
+    /// 7 月 2 日同意過」就這樣從畫面上消失，沒有人告訴他為什麼。
+    reset_by_version: bool,
     sheets: Vec<SheetView>,
 }
 
@@ -1248,9 +1254,14 @@ fn consent_dir<'r>(shell: &tauri::State<'r, Shell>) -> Result<&'r std::path::Pat
 }
 
 fn consent_view(dir: &std::path::Path) -> ConsentView {
+    consent_view_after(dir, false)
+}
+
+fn consent_view_after(dir: &std::path::Path, reset_by_version: bool) -> ConsentView {
     use sister_core::consent::Sheet;
     let c = sister_core::consent::load(dir);
     ConsentView {
+        reset_by_version,
         path: sister_core::consent::path(dir).display().to_string(),
         current: c.current(),
         allows_recording: c.allows_recording(),
@@ -1293,6 +1304,11 @@ fn consent_set(
     let mut c = sister_core::consent::load(dir);
     // 條文改版之後，舊的那幾張不能跟著新的一起被存成「現在這一版簽的」。
     // 和 CLI 那邊同一個決定：整份清掉，只留他這次真的按下去的。
+    //
+    // **而且要講出來。** CLI 對這件事印一行 ⚠，這一頁以前完全安靜——他勾了
+    // 一張，另外兩張的「2026 年 7 月 2 日同意過」就從畫面上消失了，看起來像
+    // 這個程式把他的紀錄弄丟了。
+    let reset_by_version = !c.current() && c != sister_core::consent::Consent::default();
     if !c.current() {
         c = sister_core::consent::Consent::default();
     }
@@ -1302,7 +1318,7 @@ fn consent_set(
         c.revoke(sheet);
     }
     sister_core::consent::save(dir, &c).map_err(|e| format!("{e:#}"))?;
-    Ok(consent_view(dir))
+    Ok(consent_view_after(dir, reset_by_version))
 }
 
 /// 開同意書那一頁。同一個 label 重複用。

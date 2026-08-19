@@ -102,7 +102,23 @@ function paint(view) {
 async function set(key, granted) {
   if (invoke === null) return;
   try {
-    paint(await invoke("consent_set", { key, granted }));
+    const view = await invoke("consent_set", { key, granted });
+    paint(view);
+    // 底下兩句會蓋掉 `paint` 剛寫的那一行，因為它們講的是**剛剛那一下做了
+    // 什麼**，而那比「現在的狀態是什麼」更急：狀態他看得到（勾勾就在那裡），
+    // 後果他看不到。
+    if (view.reset_by_version) {
+      // CLI 對這件事印一行 ⚠，這一頁以前完全安靜——他勾了一張，另外兩張的
+      // 「2026 年 7 月 2 日同意過」就從畫面上消失了，像是紀錄被弄丟了。
+      say("條文改版了，之前簽的那幾張不再算數，現在只留下你剛剛按的這一張。另外兩張要重新確認。");
+    } else if (key === "frame-storage" && !granted) {
+      // 撤掉這一張只擋**新的**截圖。不講的話，「不留截圖」讀起來像「截圖沒
+      // 了」——而他要去翻 frames/ 才會發現不是。錄製迴圈撤回時也講同一句話。
+      say(
+        "從現在起她不會再寫新的截圖。先前已經寫下的不會因為這個動作消失" +
+          "——要清掉請用時間軸的「忘掉這一段」，或跑 sister prune。",
+      );
+    }
   } catch (err) {
     // 存不進去就**不要**改畫面。顯示成已同意、實際上沒寫進檔案，是這一頁
     // 唯一一種真正嚴重的錯——`sister record` 讀的是那個檔案，不是這個畫面。
@@ -163,6 +179,7 @@ function demoView(current, storeImages = true) {
     allows_recording: current,
     allows_frames: current,
     store_images: storeImages,
+    reset_by_version: false,
     sheets: DEMO.keys.map((key, i) => ({
       key,
       wording: DEMO.wording[i],
@@ -185,11 +202,28 @@ if (demo !== null) {
   // 狀態永遠沒有被看過。（第一版就是這樣寫的，截圖當場抓到。）
   const STORE = { off: false, unknown: null };
   const store = Object.hasOwn(STORE, demo) ? STORE[demo] : true;
-  invoke = async (cmd) => {
-    if (cmd !== "consent_read" && cmd !== "consent_set") {
-      throw new Error(`demo 沒有實作 ${cmd}`);
+  invoke = async (cmd, args) => {
+    if (cmd === "consent_read") return demoView(demo !== "stale", store);
+    // 按下去之後才長得出來的那兩句話，只有從這裡才看得到。`shot.mjs` 收
+    // selector，所以它們是截得到的——一個只驗初始畫面的工具，會讓人以為
+    // 沒截到的那一半是好的。
+    if (cmd === "consent_set") {
+      const view = demoView(true, store);
+      const reset = demo === "stale";
+      // 假資料也要照著他按的那一下改。不改的話畫面上會出現一個真實世界不
+      // 可能的組合（勾勾還在、底下卻說她不會再留截圖），而這一頁上一次差
+      // 點被當成「驗過了」，就是因為一張這樣的假畫面。
+      for (const s of view.sheets) {
+        const mine = s.key === args.key;
+        const on = mine ? args.granted : !reset && s.effective;
+        s.effective = on;
+        s.granted_at = on ? (mine ? Date.UTC(2026, 7, 19, 9, 0) : s.granted_at) : null;
+      }
+      view.allows_recording = view.sheets[0].effective;
+      view.allows_frames = view.sheets[2].effective;
+      return { ...view, reset_by_version: reset };
     }
-    return demoView(demo !== "stale", store);
+    throw new Error(`demo 沒有實作 ${cmd}`);
   };
 }
 void load();
