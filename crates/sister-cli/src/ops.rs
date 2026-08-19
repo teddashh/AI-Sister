@@ -498,6 +498,127 @@ pub mod prune {
     }
 }
 
+/// 「剛剛那段當作沒發生過。」
+///
+/// 這個子命令是補一個**已經被承諾出去的東西**。CLI 自己的說明第一句就寫著
+/// 「讓你查得到、看得見出處、刪得掉」，PRIVACY.md 的〈停用不等於刪除〉寫著
+/// 「已經記下來的還在，要另外刪」，而 `sister doctor` 更直接：關掉題庫的時候
+/// 它會說「以前記的 N 題還在，`sister forget` 帶得走」——那個指令當時**並不
+/// 存在**。刪除的實作一直都在（`Db::forget`），只是唯一的入口是字母人的
+/// 時間軸，也就是一個在這台開發機上開不起來的視窗。
+///
+/// 一句「要另外刪」配上一個不存在的指令，比不提刪除更糟：他會以為自己刪過了。
+pub mod forget {
+    use super::*;
+    use sister_core::Millis;
+
+    /// `30m`／`2h`／`7d` → 毫秒。
+    ///
+    /// **單位不可以省。** 「`--last 30`」看起來像 30 分鐘，也一樣像 30 天，
+    /// 而猜錯的那一邊是一次刪掉一個月的記憶。這個指令沒有回收桶。
+    fn parse_span(s: &str) -> Result<Millis> {
+        const MIN: Millis = 60_000;
+        let s = s.trim();
+        let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+        let n: i64 = num
+            .parse()
+            .ok()
+            .filter(|n| *n > 0)
+            .with_context(|| format!("看不懂「{s}」——要像 `30m`、`2h`、`7d` 這樣寫"))?;
+        let mult = match unit {
+            "m" | "min" => MIN,
+            "h" | "hr" => 60 * MIN,
+            "d" | "day" => 24 * 60 * MIN,
+            "" => anyhow::bail!("「{s}」少了單位。`{s}m` 是 {s} 分鐘、`{s}d` 是 {s} 天，差很多"),
+            other => anyhow::bail!("看不懂單位「{other}」——只認得 m（分）、h（時）、d（天）"),
+        };
+        n.checked_mul(mult)
+            .with_context(|| format!("「{s}」太長了"))
+    }
+
+    pub fn run(data_dir: &Path, last: &str, yes: bool) -> Result<()> {
+        let span = parse_span(last)?;
+        let now = sister_core::now_ms();
+        let (from, to) = (now - span, now);
+
+        // `query` 那邊查不到資料庫要報錯（他以為自己有資料），這裡不用：
+        // 「沒有東西可以忘」是一個成功的結果。同一個 helper 套在兩種語意上
+        // 會弄錯其中一個——`prune` 那邊有同一段註解。
+        let path = crate::db_path(data_dir);
+        if !path.exists() {
+            println!("  還沒有資料庫（{}），沒有東西可以忘。", path.display());
+            return Ok(());
+        }
+        let mut db = Db::open(&path).with_context(|| format!("open {}", path.display()))?;
+
+        // 把區間用他看得懂的方式講一次。「最近 2 小時」到底是哪兩個時間點，
+        // 只有在按下去之前看到才有意義。
+        println!(
+            "要忘掉的是 {} 到 {}（{}）。",
+            crate::fmt::timestamp(from),
+            crate::fmt::timestamp(to),
+            crate::fmt::duration_ms(span)
+        );
+
+        let report = db.forget_preview(from, to)?;
+        if report.is_empty() {
+            println!("  那段時間裡她什麼都沒記到，不用忘。");
+            return Ok(());
+        }
+
+        if !yes {
+            prune::print_report(&report, true);
+            println!(
+                "\n這是預覽，一個位元組都沒動。真的要忘掉就再跑一次，加上 `--yes`：\n  \
+                 sister forget --last {last} --yes\n\
+                 **沒有回收桶，也沒有復原。**"
+            );
+            return Ok(());
+        }
+
+        let report = db.forget(from, to, Some(&prune::frames_dir(data_dir)))?;
+        prune::print_report(&report, false);
+
+        // 刪完才講，因為這句話不是「你要不要繼續」，是「你剛剛刪掉的東西
+        // 下一秒可能又被記起來」。她還在錄的時候，剛剛那個畫面還在螢幕上。
+        if sister_core::heartbeat::is_recording(data_dir, now) {
+            println!(
+                "\n⚠  她還在錄。如果剛才那個東西現在還在螢幕上，下一個 tick 就會再被記一次\n   \
+                 ——先 `sister pause`，處理完再 `sister resume`。"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_units_it_understands() {
+            assert_eq!(parse_span("30m").expect("30m"), 30 * 60_000);
+            assert_eq!(parse_span("2h").expect("2h"), 2 * 3_600_000);
+            assert_eq!(parse_span("7d").expect("7d"), 7 * 86_400_000);
+            assert_eq!(parse_span(" 1d ").expect("空白"), 86_400_000);
+        }
+
+        /// 一個沒有單位的數字是這個指令最危險的輸入：猜錯一邊就是一次
+        /// 不可逆的失憶。所以不猜。
+        #[test]
+        fn a_bare_number_is_refused_not_guessed() {
+            let e = parse_span("30").expect_err("沒有單位就不該過");
+            assert!(e.to_string().contains("少了單位"), "{e}");
+        }
+
+        #[test]
+        fn nonsense_does_not_turn_into_a_deletion() {
+            for s in ["", "h", "0h", "-3d", "abc", "2w", "2 h"] {
+                assert!(parse_span(s).is_err(), "{s:?} 不該被讀成一段時間");
+            }
+        }
+    }
+}
+
 pub mod query {
     use super::*;
     use crate::fmt;
@@ -1787,8 +1908,12 @@ pub mod doctor {
             (false, true) => mark(
                 "⏸",
                 "你問過她什麼",
+                // 指令要指得到真的存在的東西，而且要連代價一起講。`forget`
+                // 刪的是**一段時間**，不是一張表——他想清掉的是題庫，但那段
+                // 時間裡的字、事實、畫面會一起走。少講後半句，他會按下去才發現。
                 &format!(
-                    "**不記了**（privacy.query_log = false）。以前記的 {} 題還在，`sister forget` 帶得走",
+                    "**不記了**（privacy.query_log = false）。以前記的 {} 題還在——\
+                     `sister forget --last 30d` 帶得走，但那會連同那 30 天的其他記憶一起忘掉",
                     qlog.total
                 ),
             ),

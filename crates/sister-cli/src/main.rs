@@ -124,6 +124,25 @@ enum Command {
         dry_run: bool,
     },
 
+    /// 忘掉最近一段時間——當作那段時間沒發生過。
+    ///
+    /// 和 `prune` 不一樣：`prune` 刪的是保留期已經答應要刪的東西，這個刪的是
+    /// 他本來想留、現在改變主意的東西。所以預設**只看不刪**，真的要動要加
+    /// `--yes`；`prune` 反過來，預設就做。兩個預設不同不是不一致，是因為搞錯
+    /// 的後果不一樣。
+    ///
+    /// 沒有回收桶，也沒有復原。那段時間裡的字、事實、畫面檔、事件、連他自己
+    /// 問過的話，全部一起走。
+    Forget {
+        /// 往回算多久：`30m`、`2h`、`7d`。**單位不可以省。**
+        #[arg(long, value_name = "多久")]
+        last: String,
+
+        /// 真的刪。不加就只是預覽。
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// 叫她閉眼睛。正在跑的 `record` 下一個 tick 就會停下來。
     ///
     /// 暫停**不會自己過期**——她會一直停到有人 `sister resume`（或在字母人
@@ -212,6 +231,7 @@ fn main() -> Result<()> {
         Command::Queries { limit, empty, json } => ops::queries::run(&data_dir, limit, empty, json),
         Command::Stats { json } => ops::stats::run(&data_dir, json),
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config, dry_run),
+        Command::Forget { last, yes } => ops::forget::run(&data_dir, &last, yes),
         Command::Pause => ops::pause::run(&data_dir, true),
         Command::Resume => ops::pause::run(&data_dir, false),
         Command::Stop => ops::stop::run(&data_dir),
