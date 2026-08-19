@@ -1778,14 +1778,21 @@ pub mod query {
             }
         }
 
+        const DAY: i64 = 86_400_000;
+
         /// 同一支號碼出現在三個畫面，是一個答案被看見三次，不是三個答案。
+        ///
+        /// 三個畫面隔了三天：`sightings` 數的是**段**，同一次坐著看三百張畫面
+        /// 仍然只算一次（見 `Db::SAME_SITTING_MS`）。這幾個時戳原本是
+        /// 1000/2000/3000 毫秒——那是「一列＝一次」那個年代寫的，而那正是
+        /// 這一版要修掉的東西。
         fn seeded() -> Db {
             let mut db = Db::open_in_memory().unwrap();
             let sid = db.start_session("test", "0").unwrap();
             for (ts, app, text) in [
-                (1_000, "chrome.exe", "客服專線 0800-080-123"),
-                (2_000, "slack.exe", "打 0800-080-123 就好"),
-                (3_000, "chrome.exe", "手機 0912-345-678，帳單 NT$13,450"),
+                (DAY, "chrome.exe", "客服專線 0800-080-123"),
+                (2 * DAY, "slack.exe", "打 0800-080-123 就好"),
+                (3 * DAY, "chrome.exe", "手機 0912-345-678，帳單 NT$13,450"),
             ] {
                 db.insert_frame(sid, &frame(ts, app, text), None, 0)
                     .unwrap();
@@ -1824,11 +1831,11 @@ pub mod query {
         fn sightings_counts_every_time_he_saw_it_not_just_the_recent_window() {
             let mut db = Db::open_in_memory().unwrap();
             let sid = db.start_session("test", "0").unwrap();
-            // 那支號碼一年來看過 60 次——超過舊版 10 * 4 = 40 的窗子。
+            // 那支號碼一年來看過 60 次，一天一次——超過舊版 10 * 4 = 40 的窗子。
             for i in 0..60 {
                 db.insert_frame(
                     sid,
-                    &frame(1_000 + i, "chrome.exe", "打 0800-080-123"),
+                    &frame(DAY + i * DAY, "chrome.exe", "打 0800-080-123"),
                     None,
                     0,
                 )
@@ -1837,14 +1844,14 @@ pub mod query {
             // 中間某一頁一次吐出 45 支新號碼。舊版的窗子到這裡就滿了。
             for i in 0..45 {
                 let text = format!("聯絡 09{:08}", 10_000_000 + i);
-                db.insert_frame(sid, &frame(100_000 + i, "chrome.exe", &text), None, 0)
+                db.insert_frame(sid, &frame(100 * DAY + i, "chrome.exe", &text), None, 0)
                     .unwrap();
             }
-            // 昨天又看到那支號碼一次（第 61 次）。這一筆讓它排進最新的前幾名，
+            // 後來又看到那支號碼一次（第 61 次）。這一筆讓它排進最新的前幾名，
             // 於是它一定會出現在答案裡——舊版也會，只是次數會講成 1。
             db.insert_frame(
                 sid,
-                &frame(200_000, "chrome.exe", "打 0800-080-123"),
+                &frame(200 * DAY, "chrome.exe", "打 0800-080-123"),
                 None,
                 0,
             )
@@ -1858,6 +1865,65 @@ pub mod query {
                 .expect("最新那一筆就是它，一定在答案裡");
             assert_eq!(old.sightings, 61, "看過 61 次就是 61 次，不是窗子裡的 1 次");
             assert!(out.truncated, "45 支新號碼還在底下，不能裝作沒有");
+        }
+
+        /// **看了二十分鐘沒關掉，是看過一次。**
+        ///
+        /// 上一條把窗子拿掉了，但數的還是**列**——而一列是一張留下來的畫面。
+        /// 螢幕上只要有東西在動（旁邊的聊天室、跑著的影片、捲一下網頁），
+        /// 每一拍就多一張畫面，釘在側邊欄一動也不動的那支號碼就多算一次。
+        /// 於是「看過 N 次」量到的其實是**螢幕上其他地方動得多勤**，而畫面上
+        /// 那句話的用途是「1 次和 12 次是強度不同的答案」——它現在會把一次
+        /// 二十分鐘的閒晃講成 300 次，蓋過那支他真的每週都看到的號碼。
+        #[test]
+        fn a_number_he_never_looked_away_from_was_seen_once() {
+            let mut db = Db::open_in_memory().unwrap();
+            let sid = db.start_session("test", "0").unwrap();
+            // 一次坐著二十分鐘：每 4 秒一張畫面，號碼一直在那裡沒動。
+            for i in 0..300 {
+                db.insert_frame(
+                    sid,
+                    &frame(DAY + i * 4_000, "slack.exe", "打 0800-080-123"),
+                    None,
+                    0,
+                )
+                .unwrap();
+            }
+            let seen = |db: &Db| answers(db, "電話", 10).unwrap().items[0].sightings;
+            assert_eq!(seen(&db), 1, "他就看了一次，只是沒關掉");
+
+            // 隔一週再遇到一次，那才是第二次。
+            db.insert_frame(
+                sid,
+                &frame(8 * DAY, "chrome.exe", "打 0800-080-123"),
+                None,
+                0,
+            )
+            .unwrap();
+            assert_eq!(seen(&db), 2);
+
+            // 邊界：走開的時間**剛好**到門檻就算另一次，差一毫秒就還是同一次。
+            // 沒有這兩條，一個「差不多就好」的比較（`>` 寫成 `>=`、或者拿
+            // 平均值去分段）改下去不會有任何測試紅。
+            let just_under = 8 * DAY + sister_core::db::Db::SAME_SITTING_MS - 1;
+            db.insert_frame(
+                sid,
+                &frame(just_under, "chrome.exe", "打 0800-080-123"),
+                None,
+                0,
+            )
+            .unwrap();
+            assert_eq!(seen(&db), 2, "還沒滿十分鐘，算同一次");
+
+            let just_over = just_under + sister_core::db::Db::SAME_SITTING_MS;
+            db.insert_frame(
+                sid,
+                &frame(just_over, "chrome.exe", "打 0800-080-123"),
+                None,
+                0,
+            )
+            .unwrap();
+            assert_eq!(seen(&db), 3, "隔滿十分鐘就是另一次");
         }
 
         #[test]

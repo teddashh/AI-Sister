@@ -1567,7 +1567,19 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
-    /// 每個**不同的值**一列：最近一次的出處，加上它一共被看見過幾次。
+    /// 隔多久再看到，才算**另一次**看到。
+    ///
+    /// 沒有這道間隔，「看過 N 次」數的是列數，而一列是一張留下來的畫面——於是
+    /// 那個數字量到的其實是**螢幕上其他地方動得多勤**：號碼釘在側邊欄不動，
+    /// 旁邊的聊天室每來一則訊息就換一張畫面，那支號碼就多算一次。他坐在那裡
+    /// 的那二十分鐘會被講成「看過 300 次」，而他只是看了一次沒關掉。
+    ///
+    /// 十分鐘：這是「走開一下、切去別的視窗、回來」的長度。比它短的空檔還是
+    /// 同一次坐著，比它長的才算他又遇到了一次。和 `exclusion_audit`
+    /// 「在 keepassxc 裡待了十分鐘＝一列」同一個單位——那張表也是存段不存張。
+    pub const SAME_SITTING_MS: Millis = 10 * 60 * 1000;
+
+    /// 每個**不同的值**一列：最近一次的出處，加上他**遇到過它幾次**。
     ///
     /// 存在的理由是 [`facts_by_kind`](Self::facts_by_kind) 給不出第二個數字。
     /// `answer::answers` 以前的做法是抓最近 40 列回來、在**那 40 列的窗子裡**
@@ -1579,19 +1591,54 @@ impl Db {
     ///   都看到）根本不在窗子裡，★ 清單沒有它，然後 fallback 說「我記得的
     ///   東西裡沒有這件事」——對一個在資料庫裡出現幾百次的值。
     ///
+    /// 那次修法把窗子拿掉了，但數的仍然是**列**——而一列是一張留下來的畫面，
+    /// 不是他遇到那件事的一次。同一支號碼在同一個下午被數了三百次，和真的
+    /// 在三百個不同的日子看到，在畫面上印出來一模一樣。所以現在數的是**段**：
+    /// 中間空了 [`SAME_SITTING_MS`](Self::SAME_SITTING_MS) 以上才開新的一段。
+    ///
     /// `LIMIT` 在 `GROUP BY` **之後**才切，所以切掉的是「第 11 個不同的答案」，
     /// 不是「第 41 筆目擊」。非聚合欄取自 `MAX(ts)` 那一列，靠的是 SQLite
     /// 對 min/max 的 bare column 特例（3.7.11 起有文件保證）。
     pub fn fact_sightings(&self, kind: &str, limit: usize) -> Result<Vec<(FactRow, i64)>> {
+        // **先挑出那 10 個值，再去數它們的段。** 反過來寫（整個 kind 全表跑
+        // 窗函數、最後才 `LIMIT 10`）答案一模一樣，而且短很多——但它會替 490
+        // 個永遠不會被印出來的值算段，中間那個 `WINDOW` 還得先把整批列照
+        // (normalized, ts) 排過一次。20 萬列 phone、500 個不同的值、release
+        // build 的開發機上量到的：**242 ms 對 47 ms**（照舊只數列數是 67）。
+        // `RETRIEVAL_BUDGET_MS` 是 100，所以短的那一版是不能寫的。
+        //
+        // 這個數字沒有變成一條測試：一年份的語料要灌十秒，而貼著實測值的
+        // 時間門檻在比開發機慢一倍的 CI 上只會變成一條大家想辦法調高的線
+        // （同 `search_latency.rs` 的 `CAPPED_CEILING_MS`）。留在這裡是要讓
+        // 下一個想把這段 CTE「化簡掉」的人先讀到它。
+        //
+        // 每一列先問自己「我是不是一段的開頭」——前一次目擊隔了夠久，或者
+        // 我就是第一次。`LAG` 回 NULL 的時候減出來也是 NULL，而 `NULL >= x`
+        // 是 NULL 不是真，所以第一列非得自己講明不可，不然每個值都少算一次。
         let mut stmt = self.conn.prepare(
-            "SELECT id, ts, kind, raw, normalized, source_kind,
+            "WITH answered AS (
+               SELECT normalized AS value, MAX(ts) AS last_ts
+               FROM facts WHERE kind = ?1
+               GROUP BY normalized
+               ORDER BY last_ts DESC LIMIT ?3
+             )
+             SELECT id, ts, kind, raw, normalized, source_kind,
                     chunk_id, frame_id, app_id, window_title, url,
-                    COUNT(*), MAX(ts)
-             FROM facts WHERE kind = ?1
+                    SUM(opens_a_sitting), MAX(ts)
+             FROM (
+               SELECT f.id, f.ts, f.kind, f.raw, f.normalized, f.source_kind,
+                      f.chunk_id, f.frame_id, f.app_id, f.window_title, f.url,
+                      CASE WHEN LAG(f.ts) OVER seen IS NULL
+                             OR f.ts - LAG(f.ts) OVER seen >= ?2
+                           THEN 1 ELSE 0 END AS opens_a_sitting
+               FROM facts f JOIN answered ON f.normalized = answered.value
+               WHERE f.kind = ?1
+               WINDOW seen AS (PARTITION BY f.normalized ORDER BY f.ts)
+             )
              GROUP BY normalized
-             ORDER BY ts DESC LIMIT ?2",
+             ORDER BY ts DESC",
         )?;
-        let rows = stmt.query_map(params![kind, limit as i64], |row| {
+        let rows = stmt.query_map(params![kind, Self::SAME_SITTING_MS, limit as i64], |row| {
             Ok((map_fact_row(row)?, row.get::<_, i64>(11)?))
         })?;
         Ok(rows.flatten().collect())
@@ -1599,8 +1646,10 @@ impl Db {
 
     /// 依 typed fact 直查（`sister facts --kind` 走這條）。
     ///
-    /// **一列就是一次目擊**，同一個號碼看過三次就是三列。要「每個值一列 +
-    /// 它被看過幾次」請用 [`fact_sightings`](Self::fact_sightings)。
+    /// **一列就是一張留下來的畫面**，同一個號碼出現在三張畫面上就是三列——
+    /// 而那三張很可能是同一分鐘裡的三拍。要「每個值一列 + 他遇到過幾次」請用
+    /// [`fact_sightings`](Self::fact_sightings)，那邊會把同一次坐著看留下的
+    /// 那幾百列併成一次。
     pub fn facts_by_kind(&self, kind: &str, limit: usize) -> Result<Vec<FactRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, ts, kind, raw, normalized, source_kind,

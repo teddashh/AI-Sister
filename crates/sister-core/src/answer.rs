@@ -18,7 +18,10 @@ use crate::db::{Db, FactRow};
 #[derive(Debug, Clone)]
 pub struct Answer {
     pub latest: FactRow,
-    /// 這個值一共被看見過幾次。3 次目擊是同一個答案，不是三個答案。
+    /// 他**遇到過這個值幾次**。3 次目擊是同一個答案，不是三個答案。
+    ///
+    /// 是次數不是列數：一列是一張留下來的畫面，而一個沒關掉的視窗每一拍就
+    /// 留一張。中間隔了 `Db::SAME_SITTING_MS` 以上才算另一次。
     pub sightings: usize,
 }
 
@@ -33,6 +36,9 @@ pub fn answers(db: &Db, query: &str, limit: usize) -> anyhow::Result<Answers> {
     // 併和數都在 SQL 裡做（`fact_sightings`）。以前是抓最近 40 列回來在
     // 記憶體裡數，於是「看過 200 次」會被講成「看過 40 次」，而一頁吐出 40
     // 個新號碼的時候，一年來每週都看到的那個號碼會整個掉出窗外。
+    //
+    // 那邊數的也不是列：盯著同一個視窗二十分鐘會留下三百張畫面，而他只是
+    // 看了一次沒關掉。見 `Db::SAME_SITTING_MS`。
     //
     // 多要一筆，這樣「剛好 limit 筆」和「被切掉了」分得開。
     let mut merged: HashMap<String, Answer> = HashMap::new();
