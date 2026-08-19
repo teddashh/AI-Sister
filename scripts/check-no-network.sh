@@ -89,7 +89,11 @@ echo "▶ 檢查原始碼裡有沒有 socket"
 # 名字，這一步就從此永遠是綠的——而它守的是 THREAT_MODEL 對遠端攻擊者宣稱的
 # 免疫。grep 的 1 是「沒找到」（要的結果），2 以上才是它自己出事。
 rc=0
-sockets=$(grep -rnE '\b(TcpListener|UdpSocket|TcpStream|std::net::)' crates/ apps/ --include='*.rs') || rc=$?
+# `tokio::net` 那幾個名字不在上面那組裡：`TcpSocket`、`UnixStream`、
+# `UnixListener`，還有兩支「還沒連但正在查去哪連」的——`lookup_host` 和
+# `to_socket_addrs`。它們一個 crate 都不用多（tokio 已經在樹上了），而擋的
+# 是同一句承諾。
+sockets=$(grep -rnE '\b(TcpListener|TcpStream|TcpSocket|UdpSocket|UnixStream|UnixListener|lookup_host|to_socket_addrs|std::net::)' crates/ apps/ --include='*.rs') || rc=$?
 if [ "$rc" -gt 1 ]; then
     echo "✗ 掃 socket 的那一步自己失敗了（grep 退出碼 $rc）——這不是「沒找到」。"
     echo "  在修好之前，「沒有監聽埠」這句話沒有任何東西守著。"
