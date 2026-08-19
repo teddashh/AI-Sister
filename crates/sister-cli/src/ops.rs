@@ -1628,6 +1628,89 @@ pub mod query {
             assert_eq!(both.items.len(), 2);
             assert!(!both.truncated, "剛好兩個，不是被切掉");
         }
+
+        use sister_core::answer::BlindSpots;
+
+        /// 「她錄過但現在是空的」有四種走法，而只有一種是「被刪掉了」。
+        ///
+        /// 這一條守的是**句子**那一層。核心那邊（`answer.rs`）守的是欄位有沒有
+        /// 查出來，可是舊版的錯不在查——四個理由都在 `BlindSpots` 裡好好躺著，
+        /// 是這裡看到 `chunks == 0` 就 return，把它們丟掉了。壞掉的是組句子的
+        /// 那幾行，測試就要打在那幾行上。
+        #[test]
+        fn nothing_was_captured_and_she_names_the_reason_that_is_actually_true() {
+            let recorded_then_erased = BlindSpots {
+                chunks: 0,
+                frames: 0,
+                sessions: 3,
+                ..Default::default()
+            };
+            let lines = blind_lines(&recorded_then_erased).join("\n");
+            assert!(
+                lines.contains("forget") || lines.contains("保留期"),
+                "什麼都沒擋，那就真的只剩這一個理由：{lines}"
+            );
+
+            // 同樣三個數字，但那段時間她是閉著眼睛的。這一次「被忘掉了」是假話。
+            let paused_throughout = BlindSpots {
+                paused_episodes: 1,
+                paused_ms: 3_600_000,
+                ..recorded_then_erased.clone()
+            };
+            let lines = blind_lines(&paused_throughout).join("\n");
+            assert!(
+                !lines.contains("forget") && !lines.contains("保留期"),
+                "他什麼都沒刪過，不可以說東西被刪了：{lines}"
+            );
+            assert!(lines.contains("暫停"), "真正的理由要講出來：{lines}");
+
+            // 排除規則整段擋掉也一樣。
+            let blocked_by_a_rule = BlindSpots {
+                excluded: vec![("excluded app: keepassxc".into(), 2)],
+                ..recorded_then_erased.clone()
+            };
+            let lines = blind_lines(&blocked_by_a_rule).join("\n");
+            assert!(
+                !lines.contains("forget") && !lines.contains("保留期"),
+                "被規則擋掉不等於被刪掉：{lines}"
+            );
+            assert!(lines.contains("keepassxc"), "要指得出是哪一條規則：{lines}");
+
+            // OCR 斷掉是另一回事：畫面留下來了，暫停和排除都解釋不了它。
+            let ocr_is_broken = BlindSpots {
+                frames: 120,
+                paused_episodes: 1,
+                ..recorded_then_erased.clone()
+            };
+            let lines = blind_lines(&ocr_is_broken).join("\n");
+            assert!(lines.contains("讀字"), "要指向 OCR：{lines}");
+            assert!(
+                !lines.contains("暫停"),
+                "暫停解釋不了「這幾張畫面上沒有字」，多講只會把人帶偏：{lines}"
+            );
+        }
+
+        /// 「我找不到」和「我沒去找」不可以是同一句話。
+        #[test]
+        fn a_thirty_day_scan_does_not_get_to_say_every_single_segment() {
+            let looked_everywhere = BlindSpots {
+                chunks: 8421,
+                ..Default::default()
+            };
+            let lines = blind_lines(&looked_everywhere).join("\n");
+            assert!(lines.contains("每一段"), "翻完了就可以這樣講：{lines}");
+
+            let only_thirty_days = BlindSpots {
+                scan_horizon_days: Some(30),
+                ..looked_everywhere
+            };
+            let lines = blind_lines(&only_thirty_days).join("\n");
+            assert!(
+                !lines.contains("每一段"),
+                "只翻了三十天，「每一段」是把十二分之一講成全部：{lines}"
+            );
+            assert!(lines.contains("30 天"), "界線要講出來：{lines}");
+        }
     }
 }
 
