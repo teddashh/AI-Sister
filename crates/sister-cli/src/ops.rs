@@ -76,15 +76,36 @@ fn open_existing(data_dir: &Path) -> Result<Db> {
 /// 沒有錯誤、CPU 很漂亮，而畫面上完全看不出來她其實有 87% 的時間沒看螢幕。
 /// 那正是 alpha.4 那種「✓ 但什麼都沒產出」的失效形狀，只是這次是我們自己
 /// 刻意造出來的——所以更該說。
+///
+/// 而 `skipped_idle == 0` 有三種意思，以前它們印出來一模一樣（一片空白，
+/// 因為這裡直接 `return`）：他真的整天都在打字、這台機器答不出閒置訊號、
+/// 標題一直在跳所以閘門根本沒被問到。後面兩個是**閘門從第一秒起就沒生效**
+/// ——CPU 直接超支十幾倍，而摘要一個字都不說。
 fn report_idle(stats: &sister_capture::RecorderStats) {
-    if stats.skipped_idle == 0 {
-        return;
+    if stats.skipped_idle > 0 {
+        let pct = stats.skipped_idle as f64 / stats.ticks.max(1) as f64 * 100.0;
+        println!(
+            "  省下：{} 次沒碰螢幕（{pct:.0}%——那段時間你沒動鍵盤滑鼠；最多每 5 秒仍會看一次）",
+            stats.skipped_idle
+        );
+    } else if stats.idle_unknown > 0 {
+        // 不說「這台機器」：`replay` 走的是腳本後端，它本來就沒有閒置訊號，
+        // 而這一行在兩個地方都會印。說「擷取後端」兩邊都是真的。
+        println!(
+            "  ⚠  省電閘門一次都沒生效：問了 {} 次「有人動過嗎」，這個擷取後端一次都答不出來。\
+             \n\x20    每一拍都會真的去讀一次螢幕——真的錄起來的話，CPU 大約是設計值的十幾倍。",
+            stats.idle_unknown
+        );
+    } else if stats.ticks > 0 {
+        println!("  省下：0 次沒碰螢幕（這段時間你一直在動，或每一拍脈絡都變了）");
     }
-    let pct = stats.skipped_idle as f64 / stats.ticks.max(1) as f64 * 100.0;
-    println!(
-        "  省下：{} 次沒碰螢幕（{pct:.0}%——那段時間你沒動鍵盤滑鼠；最多每 5 秒仍會看一次）",
-        stats.skipped_idle
-    );
+    if stats.title_clock_ticks > 0 {
+        println!(
+            "  忽略：{} 次標題跳動（那個視窗的標題是時鐘——進度、未讀數、跑動的 log。\
+             跟著它睜眼的話，省電閘門會整天關著）",
+            stats.title_clock_ticks
+        );
+    }
 }
 
 fn report_exclusions(stats: &sister_capture::RecorderStats) {
@@ -4160,11 +4181,24 @@ pub mod record {
                 ));
             }
         }
-        if let Some(per_day) = f.bytes_per_day(disk_delta.max(0) as u64) {
+        if disk_delta < 0 {
+            // 淨少了：錄到一半觸發保留期清理（`PRUNE_EVERY` 是 6 小時，所以
+            // 任何一段長一點的錄製都會遇到），或者另一支 sister 也在寫。
+            //
+            // 這裡以前是 `disk_delta.max(0)`，於是它印成「磁碟 0 B/天」——
+            // 而 `over(0.0, …)` 回傳空字串、`breached` 也不會多一條，所以
+            // 那一行看起來是**通過預算**。一個沒量到的數字長得和一個漂亮的
+            // 數字一模一樣，就出現在我們正在調查的那個預算上，旁邊還配著
+            // 一個 CPU 的 ⚠ 讓它更像是真的過了。
+            parts.push(format!(
+                "磁碟 這段量不出來（淨少了 {}——清理和寫入混在一起，減出來的數字沒有意義）",
+                crate::fmt::bytes(-disk_delta)
+            ));
+        } else if let Some(per_day) = f.bytes_per_day(disk_delta as u64) {
             // 圖與資料庫要分開講。合成一個數字的話，「磁碟 11.4 GB/天」
             // 沒辦法回答唯一有用的那個問題——該去縮圖，還是該去縮索引。
             // 實測那次就是這樣：一個很嚇人、但指不出方向的數字。
-            let grew = disk_delta.max(0);
+            let grew = disk_delta;
             let rest = grew - image_bytes as i64;
             // 減出負數代表這段期間有東西被刪掉了（錄到一半觸發保留期清理，
             // 或另一支 sister 在跑）。這時候「畫面 X、其他 -3 MB」是**算術

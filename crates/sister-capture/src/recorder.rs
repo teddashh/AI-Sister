@@ -76,6 +76,19 @@ pub struct RecorderStats {
     /// 從摘要的其他任何一個數字上都看不出來——省電和停止工作在帳面上長得
     /// 一模一樣，正是 alpha.4 那種「✓ 但什麼都沒產出」的失效形狀。
     pub skipped_idle: u64,
+    /// 問了「有人動過嗎」但這台機器答不出來的次數。
+    ///
+    /// 沒有這個數字的話，`skipped_idle == 0` 有三種完全不同的意思，而它們
+    /// 印出來一模一樣：他真的整天都在打字、這個平台根本沒有閒置訊號、
+    /// 閘門被別的東西關掉了。中間那個是**閘門永遠不會生效**，也就是 CPU
+    /// 預算從第一秒起就超支，而摘要上一個字都不會提。
+    pub idle_unknown: u64,
+    /// 標題在變、但那個標題是時鐘，所以沒有記成脈絡變化的次數。
+    ///
+    /// 見 `TITLE_CLOCK_MIN_TICKS`。這個數字要印出來，因為它同時解釋兩件
+    /// 使用者會覺得奇怪的事：時間軸上那個視窗少了很多列，以及 CPU 為什麼
+    /// 突然從 27% 掉下來。
+    pub title_clock_ticks: u64,
     pub clipboard_events: u64,
     pub secrets_redacted: u64,
     pub focus_events: u64,
@@ -128,6 +141,17 @@ pub struct RecorderStats {
 /// 27 ms 一次計算，閒著的時候大約是 0.5% CPU。
 const MAX_BLIND_MS: i64 = 5_000;
 
+/// 要看過幾拍，才有資格說「這個視窗的標題是一個時鐘」。
+///
+/// 「標題變了 ⇒ 畫面幾乎一定變了」對**一次**標題變化是對的。對一個每拍都
+/// 在變的標題就完全相反：那不是事件，是時鐘，而它會把上面那個省錢的閘門
+/// 永久關掉——`context_changed` 每拍都是 `true`，`idle_ms()` 一次都問不到，
+/// 她整天睜著眼睛，一天 216,000 次全解析度抓圖。
+///
+/// 這個數字要夠大，大到「一半」有統計意義；又要夠小，小到幾秒內就判得出
+/// 來。預設 400 ms 一拍的話，12 拍大約是 4.8 秒。
+const TITLE_CLOCK_MIN_TICKS: u32 = 12;
+
 pub struct Recorder<B: Backend> {
     backend: B,
     db: Db,
@@ -137,6 +161,15 @@ pub struct Recorder<B: Backend> {
     /// 最後一張被保留的幀，重複時往它身上加計數。
     last_frame_id: Option<i64>,
     last_focus: Option<FocusSnapshot>,
+    /// 目前這個視窗拿到焦點之後過了幾拍，以及其中幾拍標題變了。
+    ///
+    /// 兩個一起看才答得出「這個標題是事件還是時鐘」。只數連續次數不夠：
+    /// 一個一秒跳一次的時鐘配 400 ms 的 tick，連續次數永遠停在 1，而閘門
+    /// 已經有 40% 的時間被關掉了。換成比例就抓得到。
+    ///
+    /// 兩個都在換 app 或換網址時歸零——那時候標題本來就該變，不算churn。
+    focus_ticks: u32,
+    title_changes: u32,
     /// 上一次的排除理由。只有在理由改變時才寫 system event，
     /// 否則被排除的一小時會產生上千筆一模一樣的紀錄。
     last_exclusion: Option<String>,
@@ -202,6 +235,8 @@ impl<B: Backend> Recorder<B> {
             session_id,
             last_frame_id: None,
             last_focus: None,
+            focus_ticks: 0,
+            title_changes: 0,
             last_exclusion: None,
             paused: false,
             image_dir,
@@ -438,7 +473,11 @@ impl<B: Backend> Recorder<B> {
         let idle_signal = if context_changed {
             None
         } else {
-            self.backend.idle_ms()
+            let asked = self.backend.idle_ms();
+            if asked.is_none() {
+                self.stats.idle_unknown += 1;
+            }
+            asked
         };
         // 時鐘往回跳（NTP 校時、使用者改時間）會讓 `ts - last_look` 變負。
         // 用 `saturating_sub` 夾成 0 的話，「距離上次看過了 0 毫秒」永遠
@@ -684,9 +723,25 @@ impl<B: Backend> Recorder<B> {
         }
     }
 
+    /// 這個視窗的標題到底是「事件」還是「時鐘」。
+    ///
+    /// 拿到焦點之後夠久了，而且有一半以上的拍子標題都在變 → 它是時鐘。
+    /// 時鐘走一格不代表畫面上發生了什麼事，所以它不該把省電閘門關掉，也
+    /// 不該在 `focus_events` 裡留下一列。
+    ///
+    /// 會這樣的東西比想像中多：跑 build 的 Windows Terminal、播放器的
+    /// 進度、`(3) Slack` 的未讀數、VS Code 的 ●、下載百分比。任何一個
+    /// 開著就足以讓她整天不閉眼。
+    fn title_is_a_clock(&self) -> bool {
+        self.focus_ticks >= TITLE_CLOCK_MIN_TICKS && self.title_changes * 2 >= self.focus_ticks
+    }
+
     /// 回傳「脈絡有沒有變」。呼叫端拿它決定要不要睜眼看螢幕：換了視窗、
     /// 換了分頁、標題變了，畫面幾乎不可能沒變。
+    ///
+    /// 「標題變了」那一條有例外，見 [`title_is_a_clock`](Self::title_is_a_clock)。
     fn record_focus_if_changed(&mut self, ts: Millis, focus: &FocusSnapshot) -> Result<bool> {
+        self.focus_ticks = self.focus_ticks.saturating_add(1);
         let kind = match &self.last_focus {
             None => FocusKind::Focus,
             Some(prev) if prev.app_id != focus.app_id => FocusKind::Focus,
@@ -696,6 +751,23 @@ impl<B: Backend> Recorder<B> {
         };
         if focus.app_id.is_none() && focus.window_title.is_none() && focus.url.is_none() {
             return Ok(false);
+        }
+        if matches!(kind, FocusKind::TitleChange) {
+            self.title_changes = self.title_changes.saturating_add(1);
+            if self.title_is_a_clock() {
+                // 標題還是要跟上（不然下一拍會拿它和三小時前的比），但這一
+                // 格不寫進資料庫、也不算脈絡變化。判定會自己解除：時鐘停了
+                // 之後 `focus_ticks` 繼續長而 `title_changes` 不長，比例掉
+                // 到一半以下，下一次真的改標題就照常記。
+                self.last_focus = Some(focus.clone());
+                self.stats.title_clock_ticks += 1;
+                return Ok(false);
+            }
+        } else {
+            // 換了 app 或換了網址：重新開始數。新視窗的標題該不該信，
+            // 和上一個視窗是不是時鐘沒有關係。
+            self.focus_ticks = 1;
+            self.title_changes = 0;
         }
         self.db.insert_focus(
             self.session_id,
@@ -1055,6 +1127,118 @@ mod tests {
         // 第三個 tick 換了 app。時間還遠在天花板之內，也還是沒有人動。
         assert!(!matches!(rec.tick(800).unwrap(), Tick::Idle));
         assert!(looks.get() > baseline, "脈絡變了就得睜眼，別等到 5 秒");
+    }
+
+    /// 一個會走的時鐘不算「脈絡變了」。
+    ///
+    /// 上面那條規則（標題變了就睜眼）對**一次**標題變化是對的，對一個每拍
+    /// 都在變的標題就整個反過來：`context_changed` 永遠是 `true`，
+    /// `idle_ms()` 一次都問不到，省電閘門從第一秒起就是關的。
+    ///
+    /// 這不是假想的。跑 build 的 Windows Terminal、播放器的進度、
+    /// `(3) Slack` 的未讀數、VS Code 的 ●、下載百分比——開著任何一個就夠。
+    /// 2560×1440 一次抓圖約 127 ms，閘門開著是 17,280 次/天（2.5% CPU），
+    /// 關著是 216,000 次/天（31.7%）。實測 27.1%。
+    ///
+    /// 所以這裡兩件事一起釘：時鐘不准把閘門關掉，而**第一次**標題變化仍然
+    /// 要睜眼——少釘後面那一半的話，這個修法就等於把上面那條規則刪掉。
+    #[test]
+    fn a_ticking_clock_in_the_title_bar_must_not_hold_her_eyes_open_all_day() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct CountingScreen(Rc<Cell<u32>>);
+        impl crate::traits::ScreenSource for CountingScreen {
+            fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
+                self.0.set(self.0.get() + 1);
+                // 每次都給不一樣的畫面，免得去重把差異吃掉——這個測試量的是
+                // 「碰了幾次螢幕」，不是「留了幾張」。
+                Ok(Some(RawFrame::from_rgba(
+                    ts,
+                    0,
+                    8,
+                    8,
+                    vec![(ts % 251) as u8; 8 * 8 * 4],
+                )))
+            }
+        }
+        struct NeverTouched;
+        impl crate::traits::InputSource for NeverTouched {
+            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputMetrics>> {
+                Ok(None)
+            }
+            fn idle_ms(&mut self) -> Option<u64> {
+                Some(60 * 60 * 1000) // 一小時沒動過
+            }
+        }
+        /// 同一個視窗，標題每一拍都不一樣——就是一個在跑的 build。
+        struct BuildingTerminal(u32);
+        impl crate::traits::FocusSource for BuildingTerminal {
+            fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
+                self.0 += 1;
+                Ok(FocusSnapshot {
+                    app_id: Some("windowsterminal.exe".into()),
+                    window_title: Some(format!("cargo build — {}s", self.0)),
+                    ..Default::default()
+                })
+            }
+        }
+
+        let looks = Rc::new(Cell::new(0));
+        let backend = crate::traits::CompositeBackend {
+            name: "clock".into(),
+            screen: CountingScreen(looks.clone()),
+            focus: BuildingTerminal(0),
+            clipboard: crate::traits::NullClipboard,
+            input: NeverTouched,
+            ocr: crate::traits::NullOcr,
+        };
+        let mut rec = Recorder::new(
+            backend,
+            Db::open_in_memory().unwrap(),
+            Config::default(),
+            None,
+        )
+        .unwrap();
+
+        // 前幾拍還看不出來這是時鐘，所以標題一變就睜眼——那條規則沒有被
+        // 刪掉，只是加了條件。
+        rec.tick(0).unwrap();
+        let after_first = looks.get();
+        rec.tick(400).unwrap();
+        assert!(
+            looks.get() > after_first,
+            "還沒判定成時鐘之前，標題變了仍然要睜眼（收窄 5 秒盲區那一條）"
+        );
+
+        const TICKS: u32 = 100;
+        for i in 2..TICKS {
+            rec.tick(i as i64 * 400).unwrap();
+        }
+
+        // 40 秒、100 拍。閘門開著的話只有 MAX_BLIND_MS 那幾次眨眼要付錢。
+        assert!(
+            looks.get() < TICKS / 3,
+            "標題是時鐘卻碰了 {} 次螢幕（共 {TICKS} 拍）——省電閘門被關掉了",
+            looks.get()
+        );
+        assert!(rec.stats().skipped_idle > 0, "閘門要真的擋下東西");
+        assert!(
+            rec.stats().title_clock_ticks > 0,
+            "省下來的原因要說得出口，不然它和「他整天沒動」長得一樣"
+        );
+
+        // 資料庫那一半：一天 216,000 列 `(3) Slack → (4) Slack` 會把時間軸
+        // 淹掉，而那些列一列都沒有回答任何問題。
+        let rows: i64 = rec
+            .db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM focus_events", [], |r| r.get(0))
+            .expect("count");
+        assert!(
+            rows < (TICKS / 3) as i64,
+            "時鐘走了 {TICKS} 格就寫了 {rows} 列 focus"
+        );
     }
 
     /// 時鐘往回跳不可以讓她從此閉眼。
