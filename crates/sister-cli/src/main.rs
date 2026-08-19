@@ -118,6 +118,13 @@ enum Command {
     /// 解除暫停。
     Resume,
 
+    /// 請正在跑的 `record` 收工。
+    ///
+    /// 和 `pause` 不一樣：暫停是「先別看，但留在這裡」，這個是「今天到此為止」
+    /// ——那個行程會結束。乾淨地收尾（寫完 session、收掉心跳），所以下一個
+    /// tick 才會停，不是立刻。
+    Stop,
+
     /// 三張同意書：現在簽了哪幾張、沒簽會怎樣。
     ///
     /// 不帶參數就是印出目前的狀態。**第一張沒簽，`sister record` 不會開始錄。**
@@ -187,6 +194,7 @@ fn main() -> Result<()> {
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config, dry_run),
         Command::Pause => ops::pause::run(&data_dir, true),
         Command::Resume => ops::pause::run(&data_dir, false),
+        Command::Stop => ops::stop::run(&data_dir),
         Command::Consent {
             grant,
             revoke,

@@ -280,6 +280,43 @@ jobs:
             exit 1
           fi
 
+          # 「開始記錄／停止記錄」。字母人上那顆按鈕在 runner 上按不到，但它
+          # 按下去做的事就是這一行做的事——寫一個檔案。這裡驗的是 recorder
+          # 真的會去讀它，而且**乾淨地**收工：心跳收掉、請求吃掉。
+          #
+          # 沒有這一段的話，整套開始／停止只有一個入口，而那個入口在一個沒有
+          # 人測得到的 GUI 按鈕後面。
+          rm -f ./loop/stop.request
+          $S --data-dir ./loop record --duration 120 > stopped.txt 2>&1 &
+          REC=$!
+          # 等她真的起來再叫停。太早寫的話，那個請求會被 recorder 開場那一次
+          # `clear_stop` 吃掉——而那正是它該做的事，只是會讓這條測試變成偽陰性。
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ -f "$BEAT" ] && break
+            sleep 1
+          done
+          [ -f "$BEAT" ] || {
+            echo "::error::第二場錄製沒有起來，停止測不了"
+            kill $REC 2>/dev/null || true; exit 1; }
+
+          # 量的是「它到底有沒有讀那個檔案」，不是它多快——120 秒的 duration
+          # 對 30 秒的門檻有 4 倍餘裕，換一台慢的機器不會翻面。
+          START=$SECONDS
+          $S --data-dir ./loop stop
+          wait $REC
+          ELAPSED=$(( SECONDS - START ))
+          cat stopped.txt
+          [ "$ELAPSED" -lt 30 ] \
+            || { echo "::error::按了停止，她又錄了 ${ELAPSED} 秒——那顆按鈕按了等於沒按"; exit 1; }
+          grep -q '收到停止的請求' stopped.txt \
+            || { echo "::error::她停了，卻沒說是誰叫她停的"; exit 1; }
+          [ ! -f "$BEAT" ] \
+            || { echo "::error::被叫停之後心跳還在——字母人會說她還在錄"; exit 1; }
+          # 沒被吃掉的話，下一場錄製會在第一個 tick 就自己結束，而畫面上唯一
+          # 看得到的是她閃了一下就不見了。
+          [ ! -f ./loop/stop.request ] \
+            || { echo "::error::停止請求沒被消費掉——下一場錄製一開始就會自己結束"; exit 1; }
+
       - name: Upload sister.exe
         uses: actions/upload-artifact@v4
         with:

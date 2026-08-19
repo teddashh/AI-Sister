@@ -155,6 +155,45 @@ body {
   letter-spacing: 0.08em;
   margin: 0;
   opacity: 0.6;
+  /* 起不來的時候，這裡會放 record.log 的最後幾行——那是真的有換行的東西，
+   * 擠成一長條就等於沒印。`pre-line` 保留 \n 但仍然摺疊多餘空白。 */
+  text-align: center;
+  white-space: pre-line;
+}
+
+/*
+ * 「開始記錄」。只在沒有人在錄的時候出現（見 app.js 的 `paint`）。
+ *
+ * 做成實心而不是像 header 那幾顆一樣淡：它出現的時刻，畫面上其他東西全是
+ * 灰的——她自己也是灰的——而這是那個畫面裡**唯一該按的東西**。
+ */
+.wake {
+  background: var(--letter-accent);
+  border: 0;
+  border-radius: 999px;
+  color: var(--letter-bg);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  margin-top: 4px;
+  padding: 6px 16px;
+}
+
+.wake:hover {
+  filter: brightness(1.12);
+}
+
+.wake:focus-visible {
+  outline: 2px solid var(--letter-accent);
+  outline-offset: 2px;
+}
+
+/* `[hidden]` 的 display:none 來自 UA 樣式表，會輸給任何作者規則。這裡的
+ * `.wake` 沒有設 display，所以目前還贏得了——但 `.hits` 就是這樣破的
+ * （見檔案下方），寫在這裡是為了不要再破第二次。 */
+.wake[hidden] {
+  display: none;
 }
 
 /* ---------- 三個狀態 ---------- */

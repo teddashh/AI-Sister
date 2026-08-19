@@ -39,6 +39,12 @@
         </span>
       </div>
       <p class="state-line" data-state-line>在聽</p>
+      <!--
+        只在「沒有人在記錄」的時候出現。她已經說得出那句話了，但說完之後
+        使用者唯一的下一步是開一個終端機打指令——而 Phase 1 的退場條件是
+        自用 7 天。把那一步放在她講那句話的正下方。
+      -->
+      <button class="wake" data-wake type="button" hidden>開始記錄</button>
       <!-- 每一筆答案都掛著出處。沒有出處的那一行不會出現在這裡。 -->
       <ul class="hits" data-hits hidden></ul>
     </main>

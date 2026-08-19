@@ -14,7 +14,7 @@ const STATE_LINES = Object.freeze({
   idle: "在聽",
   thinking: "想一下…",
   paused: "已暫停，沒有在看",
-  asleep: "沒有人在記錄——先跑 sister record",
+  asleep: "沒有人在記錄，她今天不會記得任何事",
 });
 
 const avatar = document.querySelector("[data-avatar]");
@@ -25,6 +25,7 @@ const pinButton = document.querySelector("#pin");
 const hideButton = document.querySelector("#hide");
 const pauseButton = document.querySelector("#pause");
 const timelineButton = document.querySelector("#timeline");
+const wakeButton = document.querySelector("[data-wake]");
 
 /**
  * Tauri 的 IPC。**在瀏覽器裡打開時是 null**，而那是刻意支援的：字母人整個
@@ -66,6 +67,15 @@ let paused = false;
  */
 let recording = true;
 
+/**
+ * 按了「開始記錄」之後、她真的開始之前的那一段。
+ *
+ * 這一段可能要好幾秒：另一個行程要載入、開資料庫、跑 migration。這期間畫面上
+ * 不能還寫著「沒有人在記錄」配一顆按得下去的按鈕——他會再按一次，然後就有兩個
+ * recorder 各錄一份，而唯一看得出來的症狀是磁碟用得比講好的快一倍。
+ */
+let starting = false;
+
 function paint() {
   // 順序就是嚴重程度。她沒在看的時候，畫面上絕不可以有一格看起來像在看，
   // 而「被你叫停」要壓過「根本沒人開她」——前者是他做的決定，後者只是狀態。
@@ -75,13 +85,20 @@ function paint() {
   // 暫停時仍然答得出問題——停的是「記錄」，不是「記憶」。所以 thinking
   // 要講出來，只是講在文字上，不動那個灰掉的身體。沒在錄的時候同理：
   // 她答得出以前記下來的東西。
-  const line =
-    state === "thinking" && shown !== "thinking"
+  const line = starting
+    ? "正在把她叫起來…"
+    : state === "thinking" && shown !== "thinking"
       ? `想一下…（${shown === "paused" ? "仍在暫停" : "但沒有人在記錄"}）`
       : STATE_LINES[shown];
   stateLine.textContent = line;
   // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。
   avatar.setAttribute("aria-label", `AI-Sister：${line}`);
+
+  if (wakeButton) {
+    // 只在真的沒人在錄的時候出現。暫停中不出現——那時候的下一步是按 ▶，
+    // 而不是再開一個 recorder（那會變成兩個行程各錄一份）。
+    wakeButton.hidden = shown !== "asleep" || starting;
+  }
 }
 
 function setState(next) {
@@ -104,8 +121,62 @@ function setPaused(next) {
 
 function setRecording(next) {
   recording = next === true;
+  // 她自己起來了（或是從別的地方被開起來的），那個「正在叫她」的等待就結束了。
+  if (recording) starting = false;
   paint();
 }
+
+/**
+ * 等她把第一個心跳蓋出來。
+ *
+ * 心跳是 5 秒一次，但 recorder **在進迴圈之前就會先蓋一次**，所以正常情況下
+ * 一秒內就看得到。用 400 ms 去問是因為這一段有人正盯著看；上限 25 秒是留給
+ * 第一次開資料庫要跑 migration 的那一次（bigram 回填在大的資料庫上要幾秒）。
+ */
+const WAKE_POLL_MS = 400;
+const WAKE_TIMEOUT_MS = 25000;
+
+async function startRecording() {
+  if (invoke === null || starting) return;
+  starting = true;
+  paint();
+  try {
+    await invoke("start_recording");
+  } catch (err) {
+    // 同意書沒簽、找不到 sister.exe、已經有一個在跑——這三句都是後端寫好的
+    // 完整句子，直接放上去。
+    starting = false;
+    paint();
+    stateLine.textContent = String(err?.message ?? err);
+    return;
+  }
+  const deadline = Date.now() + WAKE_TIMEOUT_MS;
+  while (starting && Date.now() < deadline) {
+    await new Promise((done) => setTimeout(done, WAKE_POLL_MS));
+    // `setRecording(true)` 會把 `starting` 關掉，迴圈自己就結束了。
+    try {
+      setRecording(await invoke("recording_state"));
+    } catch {
+      // 問不到就下一輪再問。這裡不該因為一次 IPC 失敗就宣告她沒起來。
+    }
+  }
+  if (!starting) return;
+  // 起不來。理由已經寫在 record.log 裡了，而那個檔案在 %APPDATA% 深處——
+  // 一個看著沒反應的按鈕的人不會去翻它，所以直接端過來。
+  starting = false;
+  paint();
+  let why = "";
+  try {
+    why = await invoke("recorder_log_tail");
+  } catch {
+    // 連記錄檔都讀不到，那就只剩下面那句話。
+  }
+  stateLine.textContent = why
+    ? `她沒有起來。record.log 最後說：\n${why}`
+    : "她沒有起來，而且沒有留下任何理由（看看 record.log）";
+}
+
+wakeButton?.addEventListener("click", startRecording);
 
 /**
  * 有沒有人在錄，隨時可能變——他會在另一個終端機視窗裡把 `sister record`

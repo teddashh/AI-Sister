@@ -102,14 +102,160 @@ fn pause_state(shell: tauri::State<'_, Shell>) -> bool {
 /// 判斷靠 recorder 每 5 秒蓋一次的時戳（見 [`sister_core::heartbeat`]），
 /// 不靠 `sessions.ended_at`——那一列在 recorder 當掉的時候永遠停在 NULL。
 #[tauri::command]
-fn recording_state(shell: tauri::State<'_, Shell>) -> bool {
-    match &shell.data_dir {
+fn recording_state(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> bool {
+    let now = match &shell.data_dir {
         Some(dir) => sister_core::heartbeat::is_recording(dir, sister_core::now_ms()),
         // 問不出資料目錄的時候，`pause_state` 回報「暫停」是為了少錄；
         // 這裡回報「沒在錄」是為了少吹牛。同一個方向：不確定就往
         // 「她做得比較少」那邊倒。
         None => false,
+    };
+    // 順手把系統匣那一顆的字改對。recorder 是**另一個行程**，它可能被 Ctrl+C、
+    // 被關掉主控台、被當掉——沒有任何事件會通知這裡。而畫面本來就每 5 秒問一次
+    // 這個問題，那就是這個行程唯一會定期得知真相的時刻；不搭這班車的話，就得
+    // 為了一行選單文字另外養一個計時器。
+    if let Some(item) = app.try_state::<RecordItem>() {
+        let _ = item.0.set_text(record_label(now));
     }
+    now
+}
+
+fn record_label(recording: bool) -> &'static str {
+    if recording {
+        "停止記錄"
+    } else {
+        "開始記錄"
+    }
+}
+
+/// 系統匣裡的那一顆開始／停止。理由和 [`PauseItem`] 一樣：一個永遠寫著同一句
+/// 話的切換項目，會讓人按出他沒想要的那個方向。
+struct RecordItem(MenuItem<tauri::Wry>);
+
+/// `sister.exe` 在哪裡。
+///
+/// 和 `sister-desktop.exe` 同一個資料夾——release 的 zip 裡兩個檔案就是一起
+/// 解出來的。**不去 `PATH` 裡找**：使用者多半沒把它加進去，而在 `PATH` 上撿到
+/// 另一個版本的 sister（舊的 alpha、別的資料目錄）比找不到更糟——那會是一場
+/// 沒有人知道自己在跑哪個版本的錄製。
+fn recorder_path() -> Result<PathBuf, String> {
+    let me = std::env::current_exe().map_err(|e| format!("問不出自己在哪裡：{e}"))?;
+    let dir = me
+        .parent()
+        .ok_or_else(|| "問不出自己在哪個資料夾".to_string())?;
+    let name = if cfg!(windows) { "sister.exe" } else { "sister" };
+    let path = dir.join(name);
+    match path.try_exists() {
+        Ok(true) => Ok(path),
+        _ => Err(format!(
+            "找不到 {name}——它應該和 sister-desktop 放在同一個資料夾（{}）",
+            dir.display()
+        )),
+    }
+}
+
+/// 把 recorder 跑起來。
+///
+/// 字母人在上一版學會了說「沒有人在記錄」，但說完之後使用者唯一的下一步是
+/// 開一個終端機、找到 `sister.exe`、打一行指令。而 Phase 1 的退場條件是
+/// 「自用 7 天」——一個每天早上都要開終端機的東西撐不到第七天，那條退場
+/// 條件就永遠量不到。
+///
+/// 用**另一個行程**而不是把錄製迴圈搬進來，是刻意的：擷取那條路會長時間佔著
+/// CPU、會碰 UIA、會 OCR，而它當掉的時候不該把使用者的問答視窗一起帶走。
+/// 「一個記、一個問」本來就是這兩個執行檔的分工。
+#[tauri::command(async)]
+fn start_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
+    let dir = shell
+        .data_dir
+        .as_ref()
+        .ok_or_else(|| "找不到資料目錄，開不起來".to_string())?;
+    if sister_core::heartbeat::is_recording(dir, sister_core::now_ms()) {
+        // 不是錯誤，但也不能安靜地再開一個：兩個 recorder 會各自錄一份，
+        // 而使用者只會看到磁碟用得比講好的快一倍。
+        return Err("已經有一個 sister record 在跑了".into());
+    }
+    // 同意書那道閘門在 `sister record` 裡面，而我們等一下就要把它的視窗藏起來
+    // ——它印出來的拒絕理由**沒有人看得到**。在這裡先問一次同一個問題，那句
+    // 話才有地方顯示；不然按下去的結果是「閃一下，然後什麼都沒發生」。
+    if !sister_core::consent::load(dir).allows_recording() {
+        return Err("第一張同意書還沒簽——她不會開始記錄。點 ⚙ 進設定簽好再回來".into());
+    }
+    let exe = recorder_path()?;
+    // 上一次在沒有 recorder 的時候按下的「停止」會留在磁碟上，而那會讓這一場
+    // 在第一個 tick 就自己結束。recorder 自己也清一次（見 `control::clear_stop`），
+    // 這裡再清是因為下一行就是 spawn——清的成本是一次 unlink，漏掉的代價是
+    // 「按了沒反應」。
+    sister_core::control::clear_stop(dir);
+
+    // 它的 stdout 沒有終端機可以去。丟掉的話，「為什麼她開了三秒就不見了」
+    // 永遠問不出答案——和 desktop.log 同一個理由、同一個作法。
+    let out = start_log_at(dir, "record.log").ok_or_else(|| "寫不出 record.log".to_string())?;
+    let err = out
+        .try_clone()
+        .map_err(|e| format!("寫不出 record.log：{e}"))?;
+
+    let mut cmd = std::process::Command::new(&exe);
+    // 明講 `--data-dir` 而不是讓它自己算：兩邊各算一次的話，有一天它們會算出
+    // 不一樣的答案，而症狀是「她說她在錄，但問什麼都查不到」。
+    cmd.arg("--data-dir")
+        .arg(dir)
+        .arg("record")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(out))
+        .stderr(std::process::Stdio::from(err));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW。少了它，每次按「開始記錄」都會彈出一個黑色主控台
+        // ——而那個視窗被關掉就等於 recorder 被殺掉，使用者不會知道那兩件事
+        // 是同一件事。
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.spawn()
+        .map_err(|e| format!("{} 起不來：{e}", exe.display()))?;
+    tracing::info!("把 recorder 開起來了：{}", exe.display());
+    Ok(())
+}
+
+/// 請 recorder 收工。
+///
+/// 寫一個檔案，不去 kill 那個行程——理由寫在 [`sister_core::control`]：
+/// `TerminateProcess` 會讓她死在半路，留下一筆永遠不會結束的 session
+/// 和一個還在說「我在錄」的心跳檔。
+#[tauri::command]
+fn stop_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
+    let dir = shell
+        .data_dir
+        .as_ref()
+        .ok_or_else(|| "找不到資料目錄，停不了".to_string())?;
+    sister_core::control::request_stop(dir).map_err(|e| e.to_string())?;
+    tracing::info!("請 recorder 收工");
+    Ok(())
+}
+
+/// recorder 最後說的那幾句話。
+///
+/// 按了「開始記錄」卻沒有起來的時候，理由已經寫在 `record.log` 裡了——但那個
+/// 檔案在 `%APPDATA%` 深處，而正在看著一個沒反應的按鈕的人不會去翻它。把最後
+/// 幾行直接端到畫面上，「按了沒反應」才會變成一句看得懂的話。
+#[tauri::command(async)]
+fn recorder_log_tail(shell: tauri::State<'_, Shell>) -> String {
+    const LINES: usize = 6;
+    let Some(dir) = shell.data_dir.as_ref() else {
+        return String::new();
+    };
+    let Ok(text) = std::fs::read_to_string(dir.join("record.log")) else {
+        return String::new();
+    };
+    let tail: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .rev()
+        .take(LINES)
+        .collect();
+    tail.into_iter().rev().collect::<Vec<_>>().join("\n")
 }
 
 #[tauri::command]
@@ -897,12 +1043,17 @@ fn monitors_of(win: &tauri::WebviewWindow) -> Vec<Rect> {
 /// 這一條是從一張截圖上學到的：她卡住了，而我沒有任何辦法知道她卡在哪裡。
 /// 一個讀不到的診斷，和沒有診斷是同一件事。
 fn start_log(data_dir: Option<&PathBuf>) -> Option<std::fs::File> {
-    let dir = data_dir?;
+    start_log_at(data_dir?, "desktop.log")
+}
+
+/// 開一份新的記錄檔，並把上一輪的留成 `.1`。
+///
+/// 留一份是因為：當掉之後要看的正是**當掉那一輪**寫了什麼，而他為了找記錄檔
+/// 一定得先把她重開——直接覆蓋的話，唯一有用的那一份就沒了。
+fn start_log_at(dir: &std::path::Path, name: &str) -> Option<std::fs::File> {
     std::fs::create_dir_all(dir).ok()?;
-    let path = dir.join("desktop.log");
-    // 上一輪的留一份。當掉之後要看的正是**當掉那一輪**寫了什麼，而他為了
-    // 找記錄檔一定得先把她重開——直接覆蓋的話，唯一有用的那一份就沒了。
-    let _ = std::fs::rename(&path, dir.join("desktop.log.1"));
+    let path = dir.join(name);
+    let _ = std::fs::rename(&path, dir.join(format!("{name}.1")));
     std::fs::File::create(&path).ok()
 }
 
@@ -945,6 +1096,9 @@ fn main() {
             frame_image,
             pause_state,
             recording_state,
+            start_recording,
+            stop_recording,
+            recorder_log_tail,
             toggle_pause,
             settings_read,
             settings_write,
@@ -1079,6 +1233,16 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
+            // 開始／停止和暫停是兩件事，所以是兩顆。暫停是「先別看，但留在
+            // 這裡」，停止是「今天到此為止」——把停止做成「一直暫停」會留下
+            // 一個永遠在跑卻永遠不做事的行程，而他在工作管理員裡看得到它。
+            let record_item = MenuItem::with_id(
+                app,
+                "record",
+                record_label(recording_state(app.handle().clone(), app.state::<Shell>())),
+                true,
+                None::<&str>,
+            )?;
             let timeline_item =
                 MenuItem::with_id(app, "timeline", "她記得的每一天…", true, None::<&str>)?;
             let settings_item =
@@ -1090,6 +1254,7 @@ fn main() {
                 app,
                 &[
                     &show_item,
+                    &record_item,
                     &pause_item,
                     &timeline_item,
                     &settings_item,
@@ -1098,6 +1263,7 @@ fn main() {
                 ],
             )?;
             app.manage(PauseItem(pause_item));
+            app.manage(RecordItem(record_item));
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("icon").clone())
@@ -1116,6 +1282,28 @@ fn main() {
                         // 使用者只會以為自己按到了。
                         if let Err(e) = toggle_pause(app.clone(), app.state::<Shell>()) {
                             tracing::error!("暫停切換失敗：{e}");
+                        }
+                    }
+                    "record" => {
+                        // 讀當下的真相再做相反的事，不看選單上那行字——那行字
+                        // 最多可能舊了 5 秒（見 `recording_state`），而在那 5 秒
+                        // 裡按下去的人，想要的是他**看到的狀態**的相反。
+                        let shell = app.state::<Shell>();
+                        let on = recording_state(app.clone(), shell.clone());
+                        let done = if on {
+                            stop_recording(shell.clone())
+                        } else {
+                            start_recording(shell.clone())
+                        };
+                        match done {
+                            // 立刻改字，不等下一次輪詢——按了之後那一顆要當場
+                            // 看起來不一樣，不然他會再按一次。
+                            Ok(()) => {
+                                if let Some(item) = app.try_state::<RecordItem>() {
+                                    let _ = item.0.set_text(record_label(!on));
+                                }
+                            }
+                            Err(e) => tracing::error!("開始／停止記錄失敗：{e}"),
                         }
                     }
                     "timeline" => {

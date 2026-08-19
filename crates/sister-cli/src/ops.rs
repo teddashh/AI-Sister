@@ -218,6 +218,36 @@ pub mod pause {
     }
 }
 
+pub mod stop {
+    use super::*;
+
+    /// `sister stop`。
+    ///
+    /// 存在的理由和 `pause` 一樣：讓「請她收工」這條路在一台無頭機器上就驗得完
+    /// ——CI 開得起 `sister record`，但開不起字母人。少了這個子命令，開始／停止
+    /// 那整套機制唯一的入口會在一個沒有人測得到的 GUI 按鈕後面。
+    pub fn run(data_dir: &Path) -> Result<()> {
+        // 先問有沒有人在。沒有人在的時候仍然照寫——`record` 起來的時候會先清掉
+        // 這個檔案，所以留著不會咬人——但要講出來，不然「我按了停止，可是它還
+        // 在錄」和「我按了停止，本來就沒有東西在錄」看起來一模一樣。
+        let running = sister_core::heartbeat::is_recording(data_dir, sister_core::now_ms());
+        sister_core::control::request_stop(data_dir)
+            .with_context(|| format!("寫不進 {}", data_dir.display()))?;
+        if running {
+            println!(
+                "■ 已經請她收工。正在跑的 `sister record` 會在下一個 tick 把 session \
+                 寫完再結束。"
+            );
+        } else {
+            println!(
+                "■ 目前沒有任何 `sister record` 在跑（心跳是停的）。停止的請求還是\
+                 留下來了，但下一次開始記錄的時候會先把它清掉，不會影響到那一場。"
+            );
+        }
+        Ok(())
+    }
+}
+
 pub mod prune {
     use super::*;
     use sister_core::config::Config;
@@ -2076,6 +2106,10 @@ pub mod record {
         // 要等到第一個 5 秒過完才看得到她起來了。
         let _ = sister_core::heartbeat::beat(data_dir, sister_core::now_ms());
         let mut last_beat = Instant::now();
+        // 有人在沒有 recorder 在跑的時候按了「停止」，那個請求會留在磁碟上。
+        // 不先清掉的話，這一場會在第一個 tick 就自己結束——而畫面上唯一看得到
+        // 的是她閃了一下就不見了。
+        sister_core::control::clear_stop(data_dir);
         // 保留期也吃熱重載（設定頁的 TTL 那一欄），所以它不能再是 `let`。
         let mut retention = retention;
 
@@ -2084,6 +2118,13 @@ pub mod record {
             if let Some(d) = deadline
                 && Instant::now() >= d
             {
+                break;
+            }
+
+            // 字母人（或別的什麼人）按了「停止」。跟暫停用同一個節拍去問，因為
+            // 它們是同一種東西：一次 `stat`，而按下去的那個人正看著螢幕等它生效。
+            if sister_core::control::take_stop(data_dir) {
+                println!("  ■ 收到停止的請求，這就收工。");
                 break;
             }
 

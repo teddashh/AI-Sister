@@ -15,6 +15,7 @@
 
 pub mod config;
 pub mod consent;
+pub mod control;
 pub mod db;
 pub mod dedup;
 pub mod facts;
