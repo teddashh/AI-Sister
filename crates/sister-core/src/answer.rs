@@ -63,3 +63,106 @@ pub fn answers(db: &Db, query: &str, limit: usize) -> anyhow::Result<Vec<Answer>
     out.truncate(limit);
     Ok(out)
 }
+
+/// 一筆都沒找到的時候，她**查得到**的那幾個理由。
+///
+/// 原本那句話是「她可能當時沒在看，或那段被排除規則擋掉了」——兩個猜測、零個
+/// 證據，而兩件事她其實都答得出來：排除稽核和暫停稽核都在資料庫裡，`sister
+/// stats` 早就在印了。字母人那邊更糟，它講的是「這件事我沒看到過」，一句斷言
+/// ——而正確答案可能是「你自己叫我不要看那個網站」。
+///
+/// 這裡只回**事實**，不回句子：終端機和字母人的講法不一樣，但根據要是同一份。
+/// 同一條紀律見這個模組開頭。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlindSpots {
+    /// 她一共記過幾段文字。`0` = 她根本還沒開始記，那時候該講的是下一步。
+    pub chunks: i64,
+    /// 排除規則生效過的（理由, 段數）。**段不是張**——見
+    /// [`Db::exclusion_audit`](crate::db::Db::exclusion_audit)。
+    pub excluded: Vec<(String, i64)>,
+    /// 暫停過幾段。
+    pub paused_episodes: i64,
+    /// 暫停一共多久。有一段配不起來的時候這個數字會偏小，
+    /// 見 [`Db::pause_audit`](crate::db::Db::pause_audit)。
+    pub paused_ms: i64,
+}
+
+impl BlindSpots {
+    /// 有沒有任何一個查得到的理由。`false` = 她真的記了，而裡面就是沒有。
+    pub fn any(&self) -> bool {
+        self.chunks == 0 || !self.excluded.is_empty() || self.paused_episodes > 0
+    }
+}
+
+/// 查出 [`BlindSpots`]。
+///
+/// 範圍是整顆資料庫而不是某個時間窗：她不知道使用者心裡想的是哪一段，而把
+/// 「上禮拜二下午」猜錯之後給出的理由，比不給理由更糟。所以講的是「她記過的
+/// 這段期間裡」，而每一條都附得出時間讓人自己去對。
+pub fn blind_spots(db: &Db) -> anyhow::Result<BlindSpots> {
+    let stats = db.stats()?;
+    let pauses = db.pause_audit()?;
+    Ok(BlindSpots {
+        chunks: stats.chunks,
+        excluded: db
+            .exclusion_audit()?
+            .into_iter()
+            .map(|e| (e.reason, e.episodes))
+            .collect(),
+        paused_episodes: pauses.episodes,
+        paused_ms: pauses.total_ms,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{SystemEvent, SystemKind};
+
+    /// 一顆全新的資料庫上，「沒找到」只有一個理由，而它不是「我沒看過那件事」。
+    #[test]
+    fn a_database_that_never_recorded_says_so_instead_of_denying_it() {
+        let db = Db::open_in_memory().expect("db");
+        let b = blind_spots(&db).expect("blind");
+        assert_eq!(b.chunks, 0);
+        assert!(b.any(), "「我還沒開始記」本身就是一個查得到的理由");
+    }
+
+    /// 她記了，但那段時間他自己叫她別看。這才是那句「這件事我沒看到過」最
+    /// 可能說錯話的場合——東西在，只是她不准看。
+    #[test]
+    fn the_rules_he_wrote_himself_are_a_reason_she_can_actually_point_at() {
+        let mut db = Db::open_in_memory().expect("db");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for (kind, detail, ts) in [
+            (SystemKind::Excluded, Some("excluded url"), 1_000),
+            (SystemKind::Excluded, Some("excluded url"), 2_000),
+            (SystemKind::Excluded, Some("excluded app: keepassxc"), 3_000),
+            (SystemKind::CapturePaused, None, 4_000),
+            (SystemKind::CaptureResumed, None, 9_000),
+        ] {
+            db.insert_system(
+                s,
+                &SystemEvent {
+                    ts,
+                    kind,
+                    detail: detail.map(str::to_string),
+                },
+            )
+            .expect("system event");
+        }
+
+        let b = blind_spots(&db).expect("blind");
+        assert!(b.any());
+        // 段數多的排前面——「12 段」比「1 段」更值得他去看
+        assert_eq!(
+            b.excluded,
+            vec![
+                ("excluded url".to_string(), 2),
+                ("excluded app: keepassxc".to_string(), 1),
+            ]
+        );
+        assert_eq!(b.paused_episodes, 1);
+        assert_eq!(b.paused_ms, 5_000);
+    }
+}

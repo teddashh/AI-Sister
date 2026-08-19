@@ -489,6 +489,17 @@ body.has-hits .stage {
   text-align: center;
 }
 
+/* 「我沒看到過」底下那幾句「但也可能是因為……」。比那句話再淡一階：它們是
+   註腳，不是答案；但也不能淡到看不見——這是整個畫面上唯一會讓他知道
+   「東西可能在，只是我不准看」的地方。 */
+.hits-why {
+  font-size: 11.5px;
+  line-height: 1.6;
+  opacity: 0.5;
+  padding: 0 10px 6px;
+  text-align: center;
+}
+
 /* 「我把它當成時間問題了」。要看得出來這一行不是答案本身——它沒有出處，
    也點不開，所以不能長得像下面那幾張卡片。 */
 .hits-note {

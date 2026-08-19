@@ -482,6 +482,43 @@ pub mod query {
     // ★ 那一層住在 core，字母人用的是同一份（見 `sister_core::answer`）。
     use sister_core::answer::answers;
 
+    /// 把「一筆都沒找到」的那幾個查得到的理由講成人話。
+    ///
+    /// 順序是有意的：她還沒開始記，就沒有第二句好講；記了才輪得到「你自己叫我
+    /// 別看那個」和「那段時間我閉著眼」。全部都不成立的時候只剩一句實話——
+    /// 她記了，而裡面就是沒有。那句話沒有安慰的成分，但它是真的。
+    fn blind_lines(b: &sister_core::answer::BlindSpots) -> Vec<String> {
+        if b.chunks == 0 {
+            return vec!["她還沒記過任何東西——先跑 `sister record`。".to_string()];
+        }
+        let mut out = Vec::new();
+        if !b.excluded.is_empty() {
+            // 排除是**他自己設的**規則，所以這句話不是道歉，是提醒他去哪裡找。
+            let why = b
+                .excluded
+                .iter()
+                .map(|(reason, n)| format!("{reason} {n} 段"))
+                .collect::<Vec<_>>()
+                .join("、");
+            // 一行就好。一個用了三個月的資料庫幾乎一定有排除紀錄，所以這句話
+            // 會很常出現——講成三行的東西，第二次就沒有人在看了。
+            out.push(format!(
+                "不過你自己的排除規則擋掉過東西（{why}）——要找的如果在那裡面，她本來就不會知道。"
+            ));
+        }
+        if b.paused_episodes > 0 {
+            out.push(format!(
+                "她也被暫停過 {} 次、一共 {}，那幾段是空的。",
+                b.paused_episodes,
+                crate::fmt::duration_ms(b.paused_ms)
+            ));
+        }
+        if out.is_empty() {
+            out.push("她記的每一段裡都沒有這個字。".to_string());
+        }
+        out
+    }
+
     pub fn run(
         data_dir: &Path,
         text: &str,
@@ -623,7 +660,12 @@ pub mod query {
 
         if hits.is_empty() {
             if answers.is_empty() {
-                println!("\n沒有找到。她可能當時沒在看，或那段被排除規則擋掉了。");
+                println!("\n沒有找到。");
+                // 這句話以前是「她可能當時沒在看，或那段被排除規則擋掉了」——
+                // 兩個猜測、零個證據，而兩件事她其實都查得到。
+                for line in blind_lines(&sister_core::answer::blind_spots(&db)?) {
+                    println!("{line}");
+                }
             }
             return Ok(());
         }

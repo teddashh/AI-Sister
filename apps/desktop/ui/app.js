@@ -456,14 +456,37 @@ function sourceLine(item, li, queryId, rank) {
 }
 
 /**
+ * 一筆都沒找到的時候，除了「我沒看過」還講得出什麼。
+ *
+ * 全部靠查得到的東西：排除稽核、暫停稽核、她到底記過幾段字。猜的一律不講——
+ * 「可能是那時候沒在看吧」對他沒有任何用處，而且有一半機率是假的。
+ *
+ * 她還沒開始記的時候只講那一件事：後面兩句在那個情況下都是廢話。
+ */
+function blindLines(blind) {
+  if (!blind) return [];
+  if (blind.chunks === 0) return ["（我到現在還沒記過任何東西。）"];
+  const out = [];
+  if (blind.excluded?.length) {
+    const why = blind.excluded.map(([reason, n]) => `${reason} ${n} 段`).join("、");
+    out.push(`不過你自己的排除規則擋掉過東西（${why}）——在那裡面的我本來就不會知道。`);
+  }
+  if (blind.paused_episodes > 0) {
+    out.push(`我也被暫停過 ${blind.paused_episodes} 次，那幾段是空的。`);
+  }
+  return out;
+}
+
+/**
  * @param hits 一筆一筆的原文。
  * @param kind `"keywords"`（比對字找到的）或 `"recent"`（他問的是時間）。
  *   這個字是後端給的，不是這裡判斷的——同一句話在 `sister query` 和這一頁
  *   必須得到同一種答案，所以規則只有一份，在 sister-core 的 `question`。
  * @param facts L1 直接答得出來的那幾筆（★）。排在原文前面，因為那才是他問
  *   的東西本身：問「電話」要的是號碼，不是一段剛好提到電話的字。
+ * @param blind 兩手空空時，她查得到的那幾個理由（後端給事實，句子在這裡組）。
  */
-function renderHits(hits, kind, queryId = null, facts = []) {
+function renderHits(hits, kind, queryId = null, facts = [], blind = null) {
   hitList.replaceChildren();
 
   // 他打了「剛剛發生什麼事」，而底下這幾筆跟那七個字一個都對不上。不先講
@@ -524,6 +547,15 @@ function renderHits(hits, kind, queryId = null, facts = []) {
         ? "我什麼都還沒看到——要先跑 sister record 我才記得住。"
         : "這件事我沒看到過。";
     hitList.append(empty);
+
+    // 上面那句是斷言，而正確答案可能是「你自己叫我不要看那個網站」。
+    // 後端只給事實（排除過幾段、暫停過幾次），句子在這裡組。
+    for (const line of blindLines(blind)) {
+      const li = document.createElement("li");
+      li.className = "hits-why";
+      li.textContent = line;
+      hitList.append(li);
+    }
   }
 
   for (const [i, hit] of hits.entries()) {
@@ -582,7 +614,7 @@ async function ask() {
     const answer = await invoke("ask", { question });
     // 這一份過期了。畫面歸還在跑的那一次管，這裡連 idle 都不要設。
     if (mine !== asking) return;
-    renderHits(answer.hits, answer.kind, answer.query_id, answer.answers);
+    renderHits(answer.hits, answer.kind, answer.query_id, answer.answers, answer.blind);
     setState("idle");
     // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
     askInput.value = "";
@@ -754,4 +786,18 @@ if (params.get("hits") === "recent") {
     ],
     "recent",
   );
+}
+
+// `?hits=none` 是兩手空空那一版。要看的是「我沒看到過」底下那幾句——它們是
+// 這個畫面上唯一會讓他知道「東西可能在，只是我不准看」的地方。
+if (params.get("hits") === "none") {
+  renderHits([], "keywords", null, [], {
+    chunks: 8421,
+    excluded: [
+      ["excluded url", 12],
+      ["excluded app: keepassxc", 3],
+    ],
+    paused_episodes: 2,
+    paused_ms: 4 * 3600 * 1000,
+  });
 }

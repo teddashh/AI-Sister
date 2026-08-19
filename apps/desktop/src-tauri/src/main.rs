@@ -430,6 +430,24 @@ struct Answer {
     /// （「答對我自己都忘掉的東西」）也是拿她量的。
     answers: Vec<Fact>,
     hits: Vec<Hit>,
+    /// 一筆都沒找到的時候，她**查得到**的那幾個理由。兩邊都有東西時是 `None`
+    /// ——沒答不出來就沒有什麼好解釋的，而且那幾個查詢不必白跑。
+    ///
+    /// 她原本說的是「這件事我沒看到過」，一句斷言；而正確答案可能是「你自己
+    /// 叫我不要看那個網站」。SPEC §8.2 的語氣規範講的就是這個。
+    blind: Option<Blind>,
+}
+
+/// [`Answer::blind`] 的內容。核心那份（`sister_core::answer::BlindSpots`）只回
+/// 事實，句子由這一頁自己組——終端機和字母人的講法不一樣，根據是同一份。
+#[derive(Serialize)]
+struct Blind {
+    /// 她一共記過幾段文字。`0` = 根本還沒開始記。
+    chunks: i64,
+    /// 排除規則生效過的（理由, 段數）。段不是張。
+    excluded: Vec<(String, i64)>,
+    paused_episodes: i64,
+    paused_ms: i64,
 }
 
 /// 一筆 ★ 答案。
@@ -464,6 +482,8 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             query_id: None,
             answers: Vec::new(),
             hits: Vec::new(),
+            // 空字串不是「問了但沒找到」，是根本沒問。
+            blind: None,
         });
     }
     let shape = sister_core::question::shape(&question);
@@ -526,9 +546,23 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 .ok()
             })
             .flatten();
+        // 只有兩手空空的時候才去問。有答案的話這幾個 COUNT 是白跑的，而這條
+        // 路上使用者正等著看畫面。
+        let blind = if facts.is_empty() && hits.is_empty() {
+            let b = sister_core::answer::blind_spots(db).map_err(|e| e.to_string())?;
+            Some(Blind {
+                chunks: b.chunks,
+                excluded: b.excluded,
+                paused_episodes: b.paused_episodes,
+                paused_ms: b.paused_ms,
+            })
+        } else {
+            None
+        };
         Ok(Answer {
             kind: shape.name(),
             query_id,
+            blind,
             answers: facts
                 .into_iter()
                 .map(|a| Fact {

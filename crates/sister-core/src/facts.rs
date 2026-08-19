@@ -169,12 +169,21 @@ pub fn kinds_for_query(query: &str) -> Vec<FactKind> {
         ("手機", FactKind::Phone),
         ("專線", FactKind::Phone),
         ("號碼", FactKind::Phone),
+        // 底下這幾條是拿真的問題去問她問出來的，不是坐在這裡想出來的：
+        // 「門號」和「我要繳多少」原本各是零筆答案，而那兩個東西就在螢幕上
+        // （「門號 0912-345-678」「本期應繳金額 NT$13,450」）。
+        ("門號", FactKind::Phone), // 台灣講手機就是講這兩個字，帳單上也印這個
+        ("分機", FactKind::Phone),
         ("phone", FactKind::Phone),
         ("tel", FactKind::Phone),
         ("金額", FactKind::Money),
         ("價格", FactKind::Money),
         ("價錢", FactKind::Money),
         ("多少錢", FactKind::Money),
+        // 「多少」自己太泛（多少人、多少次），配上動詞才問得出錢。
+        ("繳多少", FactKind::Money),
+        ("付多少", FactKind::Money),
+        ("欠多少", FactKind::Money),
         ("費用", FactKind::Money),
         ("帳單", FactKind::Money),
         ("繳費", FactKind::Money),
@@ -1077,6 +1086,11 @@ mod tests {
             kinds_for_query("那個 error code"),
             vec![FactKind::ErrorCode]
         );
+        // 拿真的問題去問她之後補的兩條。之前各是零筆答案，而東西就在螢幕上。
+        assert_eq!(kinds_for_query("門號"), vec![FactKind::Phone]);
+        assert_eq!(kinds_for_query("我要繳多少"), vec![FactKind::Money]);
+        // 「多少」自己不算——問「多少人」不是在問錢
+        assert!(kinds_for_query("那場會議來了多少人").is_empty());
         // 認不出來就回空的，不猜
         assert!(kinds_for_query("我昨天在幹嘛").is_empty());
         assert!(kinds_for_query("").is_empty());
