@@ -288,6 +288,25 @@ impl Db {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap_or(0);
 
+        // **比我新的資料庫要擋下來。**
+        //
+        // 底下每一段都是 `if version < N`，所以一個 schema 5 的資料庫餵給只
+        // 認得 4 的執行檔，會一段都不跑、乾乾淨淨地回 Ok——然後拿舊的 SQL 去
+        // 讀寫一個結構已經變了的檔案。讀到的東西可能少一半，寫進去的可能
+        // 繞過新的觸發器（FTS 索引就是這樣壞的），而畫面上什麼都不會說。
+        //
+        // 這不是假想：alpha 一版一版發，他機器上同時躺著好幾個 `sister.exe`，
+        // 而它們長得一模一樣。點錯一個的代價不該是靜靜地把記憶寫壞。
+        //
+        // 往回相容是有的（舊資料庫會被升上來），往前沒有——所以這裡只能停。
+        if version > SCHEMA_VERSION {
+            anyhow::bail!(
+                "這份資料庫是比較新的版本（schema {version}），這個執行檔只認得到 {SCHEMA_VERSION}。\n\
+                 舊的執行檔硬開下去讀得到的東西會少、寫進去的可能繞過新的索引，而且不會有人告訴你。\n\
+                 請改用新版的 sister（Releases 上最新那一版），或指一個別的 `--data-dir`。"
+            );
+        }
+
         // 一級一級走，每一級蓋自己的版號。
         //
         // 這裡本來是「跑完 001 就蓋成 SCHEMA_VERSION」。那樣寫的話，002 若在
@@ -2100,6 +2119,43 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// 他機器上同時躺著好幾個長得一模一樣的 `sister.exe`。點錯一個的代價
+    /// 不該是靜靜地把記憶寫壞——而在加這道擋之前，正是這樣：每一段
+    /// migration 都是 `if version < N`，所以未來的資料庫會一段都不跑、
+    /// 乾乾淨淨地回 Ok，然後被舊的 SQL 讀寫。
+    #[test]
+    fn a_database_from_a_newer_version_is_refused_not_quietly_half_read() {
+        let tmp = TmpDir::new("newer-schema");
+        let path = tmp.join("sister.db");
+
+        // 先開一次，讓它長成這一版的樣子。
+        Db::open(&path).expect("這一版開得起來");
+
+        // 然後假裝未來某一版又加了一段 migration。
+        {
+            let c = rusqlite::Connection::open(&path).expect("open");
+            c.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                .expect("bump");
+        }
+
+        // `{:#}` 而不是 `to_string()`：`Db::open` 外面包了一層 context，
+        // 只讀最外層會拿到「run migrations」，看不到真正那句話。
+        let err = match Db::open(&path) {
+            Ok(_) => panic!("比我新的資料庫被放進來了"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            err.contains(&(SCHEMA_VERSION + 1).to_string()),
+            "要講出它是第幾版：{err}"
+        );
+        assert!(err.contains("新版的 sister"), "要講出他該做什麼：{err}");
+
+        // 擋的只有「比我新」這一邊。往回相容照舊：一個還沒有版號的空檔案
+        // （user_version = 0，也就是每一個全新使用者）要一路升到最新。
+        let fresh = Db::open(&tmp.join("fresh.db")).expect("新的開得起來");
+        assert_eq!(fresh.schema_version().expect("version"), SCHEMA_VERSION);
     }
 
     /// **這一條就是 PRIVACY.md 那句「整份記憶就是一個 `sister.db` 檔」的反例。**

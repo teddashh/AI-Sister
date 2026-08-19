@@ -2018,7 +2018,31 @@ pub mod doctor {
         line(true, "SQLite", &probe.sqlite_version());
 
         // 開著不關：底下「保留期」那一段還要拿它去問「現在有多少已過期」。
-        let db = db_file.exists().then(|| Db::open(&db_file)).transpose()?;
+        //
+        // **打不開不能是 `?`。** doctor 正是他在「有東西不對勁」的時候會跑的
+        // 那一個指令，而 `?` 會讓它印到一半就死掉，只留下一句 `run migrations`
+        // ——真正的理由（例如「這份資料庫比這個執行檔新」）被吞在 context
+        // 底下，而他要的正是那一句。開不起來就報出來，然後把剩下的印完：
+        // 底下每一段本來就都處理得了「沒有資料庫」。
+        //
+        // 底下每一段的「沒有資料庫」以前都印同一句「還沒有資料庫」。但
+        // **「還沒開始錄」和「有記憶，只是這個執行檔打不開它」是相反的兩件
+        // 事**——後者他手上是有東西的，講成沒有等於在他最慌的那一刻再騙他
+        // 一次。所以理由帶著走。
+        let (db, no_db) = match db_file.exists().then(|| Db::open(&db_file)) {
+            Some(Ok(d)) => (Some(d), "還沒有資料庫"),
+            Some(Err(e)) => {
+                // 這句話裡有換行（`bail!` 就是那樣寫的），而 `mark` 只縮排第
+                // 一行。續行補齊到同一欄，不然報告會在最重要的那一段散掉。
+                line(
+                    false,
+                    "資料庫",
+                    &format!("打不開：{e:#}").replace('\n', "\n                     "),
+                );
+                (None, "資料庫打不開（見上面那一行），不是沒有")
+            }
+            None => (None, "還沒有資料庫"),
+        };
 
         // **問使用者那一顆，不是問一顆現做的。** 舊版查的是上面那個
         // in-memory probe，於是它證明的是「這份程式碼建得出索引」，
@@ -2052,7 +2076,7 @@ pub mod doctor {
                 "?",
                 "FTS5 雙索引",
                 &format!(
-                    "還沒有資料庫；這份程式碼建得出來（{}/2），等你錄過再驗一次",
+                    "{no_db}；這份程式碼建得出來（{}/2），等你錄過再驗一次",
                     fts_of(&probe)
                 ),
             ),
@@ -2083,7 +2107,7 @@ pub mod doctor {
                     );
                 }
             }
-            None => mark("?", "兩個字的中文", "還沒有資料庫"),
+            None => mark("?", "兩個字的中文", no_db),
         }
         if let Some(db) = &db {
             // 兩個數字並排印出來、讓讀者自己比對，是把判斷丟給人。
@@ -2249,8 +2273,17 @@ pub mod doctor {
             .as_ref()
             .and_then(|d| d.query_log_stats().ok())
             .unwrap_or_default();
-        match (config.privacy.query_log, qlog.total > 0) {
-            (true, true) => line(
+        //
+        // 第一個欄位是「這張表問得到嗎」。少了它，資料庫打不開的時候
+        // `unwrap_or_default()` 會給出一個 0，然後這裡掛著 ✓ 說「還沒問過任何
+        // 問題」——那是他一整年的題庫，而畫面上寫著沒有。
+        match (db.is_some(), config.privacy.query_log, qlog.total > 0) {
+            (false, on, _) => mark(
+                "?",
+                "你問過她什麼",
+                &format!("{no_db}（設定是{}）", if on { "要記" } else { "不記" }),
+            ),
+            (_, true, true) => line(
                 true,
                 "你問過她什麼",
                 &format!(
@@ -2266,8 +2299,8 @@ pub mod doctor {
                     }
                 ),
             ),
-            (true, false) => line(true, "你問過她什麼", "記著（還沒問過任何問題）"),
-            (false, true) => mark(
+            (_, true, false) => line(true, "你問過她什麼", "記著（還沒問過任何問題）"),
+            (_, false, true) => mark(
                 "⏸",
                 "你問過她什麼",
                 // 指令要指得到真的存在的東西，而且要連代價一起講。`forget`
@@ -2279,7 +2312,7 @@ pub mod doctor {
                     qlog.total
                 ),
             ),
-            (false, false) => mark("⏸", "你問過她什麼", "不記（privacy.query_log = false）"),
+            (_, false, false) => mark("⏸", "你問過她什麼", "不記（privacy.query_log = false）"),
         }
         // 「9 條規則 ✓」是 THREAT_MODEL 明文禁止的那種寫法：規則的**數量**
         // 從來不是問題，規則**會不會命中**才是。這些規則比對的是前景 app
@@ -2531,7 +2564,7 @@ pub mod doctor {
                 &format!("{imgs} 個畫面檔、{rows} 列紀錄。跑 `sister prune` 讓它們消失"),
             ),
             Some(Err(e)) => line(false, "現在有多少已過期", &format!("問不出來：{e:#}")),
-            None => mark("?", "現在有多少已過期", "還沒有資料庫"),
+            None => mark("?", "現在有多少已過期", no_db),
         }
         Ok(())
     }
