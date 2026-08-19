@@ -136,6 +136,34 @@ pub fn read(data_dir: &Path) -> Option<Report> {
 /// 瀏覽器」的那一天第一個小時內就會講，夠長到不會被切過去看一眼就切走觸發。
 const ENOUGH_BROWSER_TICKS: u64 = 20;
 
+/// 這一則話該掛在設定頁的**哪一格**底下。
+///
+/// 一則警告掛錯地方等於沒講。「輸入 hook 裝不上」出現在「排除的網址」那一格
+/// 底下的時候，讀起來像是在講他那幾條網址規則出了什麼事——而它講的是另一件
+/// 事（節奏訊號這一場會是空的），屬於另一格。
+///
+/// 為什麼是一個型別而不是一串字：分格的判斷只要沒有跟著句子一起送出去，
+/// 設定頁就只能自己猜，而它唯一猜得動的辦法是 `message.includes("hook")`。
+/// 那一天句子改一個字，那一則就靜靜地掛回錯的地方，而沒有任何測試會紅。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum About {
+    /// 「排除的網址」那一格：`excluded_urls`，以及瀏覽器裡的密碼欄遮蔽。
+    UrlRules,
+    /// 「輸入節奏」那一格。
+    InputHook,
+}
+
+/// 一條失效的隱私規則：給人讀的那一句，加上它該掛在哪一格。
+///
+/// 終端機沒有「格」，所以 `doctor` 和 `record` 只印 [`Self::message`]
+/// （見 `ops.rs`）——`about` 是設定頁的需要。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Broken {
+    pub about: About,
+    pub message: String,
+}
+
 impl Report {
     /// 因為能力缺席而**失效的隱私規則**，拿現在這一份設定重算。
     ///
@@ -146,9 +174,10 @@ impl Report {
     /// **這裡是那幾句話唯一的出處。** 設定頁和 `record` 收工時印的是同一份
     /// ——同一個判斷寫兩個地方，遲早會變成兩句不一樣的話，而使用者會相信
     /// 比較好聽的那一句。
-    pub fn broken_privacy_rules(&self, privacy: &PrivacyConfig) -> Vec<String> {
+    pub fn broken_privacy_rules(&self, privacy: &PrivacyConfig) -> Vec<Broken> {
         let rules = privacy.excluded_urls.len();
         let mut out = Vec::new();
+        let mut push = |about, message: String| out.push(Broken { about, message });
         // 三種壞法，一條路上的三個點，所以 `else if`：全部印出來只會稀釋掉
         // 真正要看的那一則。由重到輕——路上死掉最急，因為它有一個「從那之後」。
         if self.url_capture.gave_up {
@@ -156,38 +185,53 @@ impl Report {
             // `password_check_broken` 上——那個旗標數的是「問了問不出來」，
             // 投降之後根本不會再問。所以那件事得由這一句帶著講，不能等
             // 底下那則。
-            out.push(format!(
-                "UIA 在錄製途中卡住太多次已放棄：**從那一刻起讀不到網址**，\
-                 {rules} 條 excluded_urls 規則不再生效（網銀、登入頁可能被錄了進去），\
-                 瀏覽器裡的密碼欄也不再擋畫面。\
-                 這是永久的，重開 sister record 才會再試一次"
-            ));
+            push(
+                About::UrlRules,
+                format!(
+                    "UIA 在錄製途中卡住太多次已放棄：**從那一刻起讀不到網址**，\
+                     {rules} 條 excluded_urls 規則不再生效（網銀、登入頁可能被錄了進去），\
+                     瀏覽器裡的密碼欄也不再擋畫面。\
+                     這是永久的，重開 sister record 才會再試一次"
+                ),
+            );
         } else if !self.url && rules > 0 {
-            out.push(format!(
-                "沒有 UIA 網址擷取：{rules} 條 excluded_urls 規則（網銀、登入頁）\
-                 目前不會生效，瀏覽器畫面只靠視窗標題規則過濾"
-            ));
+            push(
+                About::UrlRules,
+                format!(
+                    "沒有 UIA 網址擷取：{rules} 條 excluded_urls 規則（網銀、登入頁）\
+                     目前不會生效，瀏覽器畫面只靠視窗標題規則過濾"
+                ),
+            );
         } else if rules > 0 && self.url_reads == 0 && self.browser_ticks >= ENOUGH_BROWSER_TICKS {
             // `url = true` 只代表 COM 物件造得出來。這一條是那句話和「讀得到
             // 位址列」之間的距離，而它整個是安靜的：doctor 全綠、摘要全綠。
-            out.push(format!(
-                "UIA 起得來，但這一場在瀏覽器視窗上停了 {} 拍、\
-                 **一個網址都沒讀到**：你那 {rules} 條 excluded_urls 到現在\
-                 一次都沒擋過東西，瀏覽器畫面只靠視窗標題規則過濾",
-                self.browser_ticks
-            ));
+            push(
+                About::UrlRules,
+                format!(
+                    "UIA 起得來，但這一場在瀏覽器視窗上停了 {} 拍、\
+                     **一個網址都沒讀到**：你那 {rules} 條 excluded_urls 到現在\
+                     一次都沒擋過東西，瀏覽器畫面只靠視窗標題規則過濾",
+                    self.browser_ticks
+                ),
+            );
         }
         // `!gave_up`：投降之後這道保護早就沒了，而上面那一則已經講過。
         // 兩則講同一個原因只會稀釋掉真正要看的那一則。
         if self.url_capture.password_check_broken && !self.url_capture.gave_up {
-            out.push(
+            push(
+                // 密碼欄遮蔽和 `excluded_urls` 擋的不是同一件事，但它們在設定頁
+                // 上是同一格（都在講「瀏覽器裡的東西怎麼被擋掉」）。
+                About::UrlRules,
                 "問不出焦點是不是在密碼欄上（連續失敗），已停止用它擋畫面：\
                  瀏覽器裡的密碼欄現在只靠圓點遮蔽保護"
                     .into(),
             );
         }
         if self.input_hook_failed {
-            out.push("輸入 hook 裝不上：節奏訊號這個 session 會是空的".into());
+            push(
+                About::InputHook,
+                "輸入 hook 裝不上：節奏訊號這個 session 會是空的".into(),
+            );
         }
         out
     }
@@ -248,7 +292,11 @@ mod tests {
         );
         let said = blind.broken_privacy_rules(&with_rules(1));
         assert_eq!(said.len(), 1, "剛打的這一條要被判出來：{said:?}");
-        assert!(said[0].contains("1 條"), "要數得出幾條：{}", said[0]);
+        assert!(
+            said[0].message.contains("1 條"),
+            "要數得出幾條：{}",
+            said[0].message
+        );
     }
 
     #[test]
@@ -274,8 +322,16 @@ mod tests {
         };
         let said = blind.broken_privacy_rules(&with_rules(16));
         assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].contains("一個網址都沒讀到"), "{}", said[0]);
-        assert!(said[0].contains("16 條"), "要數得出幾條：{}", said[0]);
+        assert!(
+            said[0].message.contains("一個網址都沒讀到"),
+            "{}",
+            said[0].message
+        );
+        assert!(
+            said[0].message.contains("16 條"),
+            "要數得出幾條：{}",
+            said[0].message
+        );
     }
 
     /// 但「他今天還沒開過瀏覽器」不算證據。
@@ -316,13 +372,17 @@ mod tests {
         };
         let said = died.broken_privacy_rules(&with_rules(16));
         assert_eq!(said.len(), 1, "只講最急的那一則：{said:?}");
-        assert!(said[0].contains("從那一刻起"), "{}", said[0]);
-        assert!(said[0].contains("16 條"), "{}", said[0]);
+        assert!(
+            said[0].message.contains("從那一刻起"),
+            "{}",
+            said[0].message
+        );
+        assert!(said[0].message.contains("16 條"), "{}", said[0].message);
         // 密碼欄那道保護跟著一起沒了，而 `password_check_broken` 那個旗標
         // 數的是「問了問不出來」——投降之後根本不會再問，所以它是 false。
         // 這句話不由它帶的話，那件事就沒有人會講。
         assert!(!died.url_capture.password_check_broken);
-        assert!(said[0].contains("密碼欄"), "{}", said[0]);
+        assert!(said[0].message.contains("密碼欄"), "{}", said[0].message);
 
         // 三種壞法在同一條路上，所以只講一則。全部印出來只會稀釋掉真正
         // 要看的那一則——而這裡最該看的是「有一個從那之後」。
@@ -352,7 +412,36 @@ mod tests {
         // 是產品本來就答應他的。
         let said = no_shield.broken_privacy_rules(&with_rules(0));
         assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].contains("密碼欄"), "{}", said[0]);
+        assert!(said[0].message.contains("密碼欄"), "{}", said[0].message);
+    }
+
+    /// 輸入 hook 那一句不准被歸到「排除的網址」底下。
+    ///
+    /// 設定頁把這幾則話分兩格掛（`settings.js` 按 `about` 分流）。而分格的
+    /// 判斷只要沒有跟著句子一起送出去，那一頁就只剩下猜——`includes("hook")`
+    /// 之類的，然後句子改一個字就靜靜地掛回錯的地方。掛錯的那一則讀起來像
+    /// 是在說他那幾條網址規則出了事，而它講的是另一件事。
+    #[test]
+    fn the_input_hook_line_does_not_get_filed_under_the_url_rules() {
+        let no_hook = Report {
+            input_hook_failed: true,
+            ..able()
+        };
+        let said = no_hook.broken_privacy_rules(&with_rules(16));
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].about, About::InputHook, "{said:?}");
+
+        // 兩件事同時壞的時候要分成兩則、掛兩格——不是併成一段話塞在其中一格。
+        let both = Report {
+            url: false,
+            ..no_hook
+        };
+        let said = both.broken_privacy_rules(&with_rules(16));
+        assert_eq!(
+            said.iter().map(|b| b.about).collect::<Vec<_>>(),
+            vec![About::UrlRules, About::InputHook],
+            "{said:?}"
+        );
     }
 
     /// 舊版寫下的報告要照樣讀得出來。
