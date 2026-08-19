@@ -186,6 +186,28 @@ jobs:
         run: |
           set -euo pipefail
           S=./target/release/sister.exe
+
+          # 這道閘門擋下來過**這一步自己**：alpha.14 加了同意書之後，CI 第一次
+          # 跑就在這裡失敗，錯誤訊息是「還沒有人同意讓她記錄這台機器的螢幕」。
+          # 那不是 bug，那是它在真的 Windows 上生效的第一個證據。
+          #
+          # 所以這裡補簽，而**不是**給 CI 開一條繞過去的後門：一個只有使用者
+          # 會碰到、CI 永遠碰不到的閘門，等於一個沒有被測過的閘門。
+          $S --data-dir ./loop consent \
+            --grant local-recording --grant frame-storage 2>&1 | tee consent.txt
+          grep -q '✓' consent.txt \
+            || { echo "::error::簽了同意書，狀態卻沒有變成已簽"; exit 1; }
+
+          # 沒簽的時候她**必須**拒絕啟動。這一條和上一條是同一道閘門的兩面，
+          # 而只驗「簽了會動」的話，一個永遠回 true 的 `allows_recording`
+          # 也會全綠。
+          if $S --data-dir ./ungranted record --duration 2 > refused.txt 2>&1; then
+            echo "::error::沒有任何一張同意書，她卻照樣開始錄了"
+            exit 1
+          fi
+          grep -q 'sister consent --grant local-recording' refused.txt \
+            || { echo "::error::她拒絕了，卻沒告訴使用者下一步該打什麼"; exit 1; }
+
           # 導向管線時 Rust 直接寫 UTF-8 位元組（不走 WriteConsoleW），
           # 所以這裡可以拿中文當關鍵字——讀不到就當成失敗，不要靜靜放過。
           $S --data-dir ./loop record --duration 8 2>&1 | tee rec.txt

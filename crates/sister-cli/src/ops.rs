@@ -1795,19 +1795,65 @@ pub mod record {
         Ok(config)
     }
 
+    /// 錄到一半，同意書變了要做什麼。
+    ///
+    /// 抽成一支純函式**不是為了整潔**：它原本長在錄製迴圈裡，而那個迴圈需要
+    /// 一個真的擷取後端才跑得起來——也就是說在這台開發機上永遠測不到，在
+    /// Windows 上也只能靠手動點。一道測不到的隱私閘門，和沒有那道閘門的差別
+    /// 只在文件上。
+    // 用它的那個迴圈在 `#[cfg(windows)]` 裡，所以在這台開發機上「沒有人呼叫」
+    // ——但測試呼叫得到，而那正是抽出來的目的。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum Recheck {
+        /// 什麼都沒變。
+        Same,
+        /// 第一張被撤回了：停。
+        Stop,
+        /// 第三張變了：換成留圖（true）或只留字（false）。
+        Images(bool),
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn recheck(consent: &sister_core::consent::Consent, wants: bool, storing: bool) -> Recheck {
+        // 第一張先看。它被撤回的時候，第三張是什麼已經不重要了。
+        if !consent.allows_recording() {
+            return Recheck::Stop;
+        }
+        let should = wants && consent.allows_frames();
+        if should == storing {
+            return Recheck::Same;
+        }
+        Recheck::Images(should)
+    }
+
     pub fn run(
         data_dir: &Path,
         config: Config,
         config_path: Option<PathBuf>,
         duration: Option<u64>,
     ) -> Result<()> {
+        // 使用者在設定檔裡自己寫的那個意思，**還沒有被同意書修改過**。
+        //
+        // 第三張中途簽回來的時候要靠它才知道「他本來就想留圖」。拿 `gate` 改過
+        // 的那一份來問，答案永遠是「不要」——因為開機時沒簽，它就已經被按成
+        // false 了，於是「撤回得掉、簽回來卻要重開」，而使用者分不出這兩件事
+        // 有什麼不同。
+        let wants_images_by_config = config.capture.store_images;
+
         // 同意書擋在平台檢查**前面**。沒有同意就不該錄，這件事和這台機器有
         // 沒有擷取後端無關；而且放後面的話，這道閘門在非 Windows 上永遠碰不到。
         let config = gate(data_dir, config)?;
 
         #[cfg(not(windows))]
         {
-            let _ = (data_dir, config, config_path, duration);
+            let _ = (
+                data_dir,
+                config,
+                config_path,
+                duration,
+                wants_images_by_config,
+            );
             anyhow::bail!(
                 "這個平台（{}）還沒有擷取後端。\n\n\
                  Phase 0 的目標平台是 Windows；核心與錄製迴圈本身是平台無關的，\n\
@@ -1818,7 +1864,13 @@ pub mod record {
         }
         #[cfg(windows)]
         {
-            windows_record(data_dir, config, config_path, duration)
+            windows_record(
+                data_dir,
+                config,
+                config_path,
+                duration,
+                wants_images_by_config,
+            )
         }
     }
 
@@ -1854,6 +1906,9 @@ pub mod record {
         config: Config,
         config_path: Option<PathBuf>,
         duration: Option<u64>,
+        // 設定檔原本寫的「要不要留圖」。傳進來而不是讀 `config.capture`，
+        // 因為那一份已經被 `gate` 按照同意書改過了——見 `run` 那邊的說明。
+        wants_images_by_config: bool,
     ) -> Result<()> {
         use sister_capture::windows::{self, Capabilities};
         use sister_capture::{Recorder, Tick};
@@ -1930,12 +1985,14 @@ pub mod record {
             Err(e) => println!("⚠  保留期清理失敗，過期的資料還在：{e:#}"),
         }
 
-        let images = config.capture.store_images.then(|| data_dir.join("frames"));
+        // 用上面算好的 `frames_root`，不是再 `join("frames")` 一次。同一個路徑
+        // 在這個函式裡現在有三個用途（開錄、定期清理、第三張同意書中途切換），
+        // 各自算一遍的話，只要有一次拼錯，症狀就是「她寫圖寫到 A、清理清 B」。
+        let images = config.capture.store_images.then(|| frames_root.clone());
         let interval =
             Duration::from_millis(config.capture.min_interval_ms.max(crate::ops::MIN_TICK_MS));
         // config 等一下會被 Recorder 吃掉，但收尾的摘要與定期清理還需要這幾項
         let config_ocr = config.capture.ocr;
-        let config_store_images = config.capture.store_images;
         let image_budget_mb = config.capture.max_image_mb_per_day;
         let retention = config.retention.clone();
         let prune_images = frames_root.clone();
@@ -1970,6 +2027,9 @@ pub mod record {
         let watched = config_path.clone().or_else(Config::default_path);
         let mut config_watch = ConfigWatch::new(watched.as_deref());
         let mut last_config_check = Instant::now();
+        // 同意書用同一個節拍。它不看 mtime，所以自己一個計時器。
+        const CONSENT_EVERY: Duration = Duration::from_secs(5);
+        let mut last_consent_check = Instant::now();
         // 保留期也吃熱重載（設定頁的 TTL 那一欄），所以它不能再是 `let`。
         let mut retention = retention;
 
@@ -2062,6 +2122,44 @@ pub mod record {
                 }
             }
 
+            // 同意書也吃熱重載，而且它比設定檔更不能等。PRIVACY.md 上寫的是
+            // 「各自獨立、各自隨時撤得掉」——只在開機時讀一次的話，那句話真正
+            // 的意思是「下次重開的時候才撤得掉」，而剛按下撤回的那個人，正是
+            // 最不該被要求等待的那一個。
+            //
+            // 不做 mtime 去抖：這個檔案是幾百個位元組，而 `consent::load` 的
+            // 失敗方向是「當作沒簽」。少一層快取就少一種「檔案已經變了、我還
+            // 拿著舊答案」的可能。
+            if last_consent_check.elapsed() >= CONSENT_EVERY {
+                last_consent_check = Instant::now();
+                let consent = sister_core::consent::load(data_dir);
+                match recheck(&consent, wants_images_by_config, rec.stores_images()) {
+                    Recheck::Same => {}
+                    // 撤回不是暫停。暫停是「先別看」，撤回是「我收回那句話」
+                    // ——所以這裡停的是整場錄製，和開機時那道閘門對稱。當成
+                    // 暫停處理的話，稽核紀錄上會留下一筆理由是假的 pause。
+                    Recheck::Stop => {
+                        println!(
+                            "\n⏹ 第一張同意書被撤回了，錄製到此為止。\n  \
+                             要再開始請跑：sister consent --grant local-recording"
+                        );
+                        break;
+                    }
+                    Recheck::Images(true) => {
+                        println!("  ⟳ 第三張同意書簽回來了：從這一刻起會留截圖。");
+                        rec.set_image_dir(Some(frames_root.clone()));
+                    }
+                    Recheck::Images(false) => {
+                        println!(
+                            "  ⟳ 第三張同意書被撤回了：從這一刻起只記螢幕上的字，\
+                             不會再寫任何截圖。（先前寫下的那些還在，要清掉請用\
+                             時間軸的「忘掉這一段」或 sister prune。）"
+                        );
+                        rec.set_image_dir(None);
+                    }
+                }
+            }
+
             if last_prune.elapsed() >= PRUNE_EVERY {
                 last_prune = Instant::now();
                 match rec
@@ -2121,7 +2219,10 @@ pub mod record {
         report_idle(&stats);
         report_exclusions(&stats);
         report_ocr(&stats, config_ocr);
-        report_images(&stats, rec.timings(), image_budget_mb, config_store_images);
+        // 問 recorder 而不是問開機時的設定：第三張同意書中途可能被撤回或簽回來，
+        // 而這一段的用途是「她剛剛到底有沒有在寫圖」。拿開機時那份來答，會在
+        // 使用者中途撤回之後喊「保留了 12 張畫面卻一張圖都沒寫」的假警報。
+        report_images(&stats, rec.timings(), image_budget_mb, rec.stores_images());
         // 先取最後一次足跡樣本，時間表才拿得到「這段期間燒了多少 CPU」，
         // 而那是把牆上時間和 CPU 分開講的前提。
         footprint.tick();
@@ -2549,6 +2650,75 @@ pub mod record {
 
             let err = super::gate(&dir.0, Config::default()).expect_err("該被擋下來");
             assert!(err.to_string().contains("改版"), "{err}");
+        }
+
+        // ---------- 錄到一半撤回 ----------
+        //
+        // PRIVACY.md 寫的是「各自獨立、各自隨時撤得掉」。只在開機時讀一次的
+        // 話，那句話真正的意思是「下次重開的時候才撤得掉」——而按下撤回的
+        // 那個人，正是最不該被要求等待的那一個。
+
+        use super::{Recheck, recheck};
+
+        fn signed(sheets: &[Sheet]) -> Consent {
+            let mut c = Consent::default();
+            for s in sheets {
+                c.grant(*s, 1);
+            }
+            c
+        }
+
+        #[test]
+        fn revoking_the_first_sheet_stops_a_recording_already_in_progress() {
+            let c = signed(&[]);
+            assert_eq!(recheck(&c, true, true), Recheck::Stop);
+            assert_eq!(
+                recheck(&c, false, false),
+                Recheck::Stop,
+                "本來就沒在寫圖也一樣要停：停的是整場，不是截圖那一半"
+            );
+        }
+
+        #[test]
+        fn revoking_the_screenshot_sheet_only_stops_the_pictures() {
+            let c = signed(&[Sheet::LocalRecording]);
+            assert_eq!(recheck(&c, true, true), Recheck::Images(false));
+        }
+
+        /// 撤得回來、也要簽得回去。
+        ///
+        /// 這條抓的是一個真的差點做錯的實作：開機時第三張沒簽，`gate` 會把
+        /// `store_images` 按成 false；如果中途拿那份被改過的設定去問「他想不想
+        /// 留圖」，答案永遠是不想——於是撤回是即時的、簽回來卻要重開，而使用者
+        /// 分不出這兩件事有什麼不同。所以問的必須是**設定檔原本的**那個意思。
+        #[test]
+        fn signing_the_screenshot_sheet_mid_run_starts_the_pictures_again() {
+            let c = signed(&[Sheet::LocalRecording, Sheet::FrameStorage]);
+            assert_eq!(recheck(&c, true, false), Recheck::Images(true));
+        }
+
+        /// 同意書說可以，但設定檔說不要——那就是不要。
+        /// 同意是**上限**，不是開關：簽了不代表使用者現在就想留圖。
+        #[test]
+        fn consent_never_turns_on_something_the_config_turned_off() {
+            let c = signed(&[Sheet::LocalRecording, Sheet::FrameStorage]);
+            assert_eq!(recheck(&c, false, false), Recheck::Same);
+        }
+
+        #[test]
+        fn nothing_changed_means_nothing_happens() {
+            let c = signed(&[Sheet::LocalRecording, Sheet::FrameStorage]);
+            assert_eq!(recheck(&c, true, true), Recheck::Same);
+            let c = signed(&[Sheet::LocalRecording]);
+            assert_eq!(recheck(&c, true, false), Recheck::Same);
+        }
+
+        /// 條文改版 = 三張一起失效，所以它和「撤回第一張」走同一條路。
+        #[test]
+        fn a_wording_change_mid_run_stops_her_too() {
+            let mut c = signed(&[Sheet::LocalRecording, Sheet::FrameStorage]);
+            c.version = sister_core::consent::VERSION + 1;
+            assert_eq!(recheck(&c, true, true), Recheck::Stop);
         }
     }
 }

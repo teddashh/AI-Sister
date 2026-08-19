@@ -264,6 +264,23 @@ impl<B: Backend> Recorder<B> {
         self.last_exclusion = None;
     }
 
+    /// 中途改成只留字（或改回來）。
+    ///
+    /// 這是第三張同意書的落點。它跟上面那幾項「改了要重開」的設定不一樣，
+    /// 因為撤回同意的人不能等到下次重開——PRIVACY.md 上寫的是「隨時撤得掉」。
+    ///
+    /// 換成 `None` 只是**不再寫新的圖**；已經寫在磁碟上的那些不歸這裡管
+    /// （那是保留期和「忘掉某一段」的工作）。中途換不會弄髒任何累積狀態：
+    /// 每日額度照樣往上加，因為它算的是今天寫出去多少位元組，而不寫就是不加。
+    pub fn set_image_dir(&mut self, dir: Option<PathBuf>) {
+        self.image_dir = dir;
+    }
+
+    /// 她現在會不會把圖寫下來。
+    pub fn stores_images(&self) -> bool {
+        self.image_dir.is_some()
+    }
+
     /// 餵進「使用者現在有沒有按暫停」。呼叫端每個 tick 呼叫一次即可——
     /// 沒有變化時什麼都不做，所以它可以無腦地一直呼叫。
     ///
