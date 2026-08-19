@@ -46,7 +46,17 @@ function card(sheet) {
 
   const without = document.createElement("span");
   without.className = "without";
-  without.textContent = sheet.without;
+  // 第二張勾下去之後，這一行還在講「沒有這一張會怎樣」——一句寫給沒勾的人
+  // 的話，印在一個勾好的框裡。它括號裡確實帶著「這一張還沒有東西可以開」，
+  // 所以不算假；但那是**否定句的附註**，而讀的人剛做的是肯定的動作，而且
+  // 另外兩張勾下去是真的會改變行為。同一種外觀、同一個時戳、同一句結構，
+  // 三張裡有一張其實什麼都沒發生。
+  //
+  // 換句話，不是多一句：多一句會和括號裡那半句幾乎一字不差地重複。
+  without.textContent =
+    sheet.key === "cloud-reading" && sheet.effective
+      ? "勾了也還沒有作用：這份程式裡沒有任何連外路徑，她仍然完全在本機跑。"
+      : sheet.without;
 
   body.append(wording, without);
 
@@ -96,11 +106,30 @@ function paint(view) {
       "簽好了，但設定檔的 capture.enabled 是 false：sister record 跑起來" +
         "也會每一拍直接跳過，一個字都不會記。改成 true 才會真的開始。",
     );
+  } else if (view.allows_recording && view.capture_enabled === null) {
+    // `null` 不是 `false`：它表示後端連設定檔都讀不出來（TOML 語法錯，或
+    // `retention` 填了 `check()` 過不了的值）。而 `sister record` 走的是同一支
+    // `Config::load`，它會在門口就退出——她不會開始。
+    //
+    // 這個狀態被建模在型別裡、寫了九行文件、穿過 IPC、`frames()` 裡還有專屬
+    // 的一句，然後在**寫標題的這一支**掉進了下面那條「簽好了。接下來…她才會
+    // 開始」。畫面上唯一的保留意見只涵蓋「會不會留截圖」，而真正的後果是
+    // 一個字都不會有。他從這一頁走掉，二十五秒後才有機會在 record.log 裡讀到
+    // 原因——前提是他想得到去看。
+    say(
+      "簽好了，但設定檔讀不出來（多半是 TOML 打錯字，或 retention 填了不合法的值）：" +
+        "在修好之前她不會開始錄。設定頁上會說是哪裡壞了。",
+      true,
+    );
   } else if (view.allows_recording) {
     // 「她可以開始記錄了」讀起來像**已經**開始了，而這一頁只負責同意——
     // 真正在錄的是另一個執行檔。第一次打開的人如果以為勾完就在錄了，他會
     // 等上一整天，然後發現什麼都沒有。所以這一句要指出下一步是什麼。
-    say(`簽好了。接下來跑 sister record 她才會開始，${frames(view)}`);
+    //
+    // 下一步是**按鈕**，不是指令。她那個小視窗右上角有一顆「開始記錄」，
+    // 系統匣裡也有一個。叫一個只裝了視窗版的人去開終端機打 `sister record`，
+    // 是在描述一個更早的版本——而那個版本的下一步他做不到。
+    say(`簽好了。按下面那顆「好」回到她那邊，按「開始記錄」她就開始，${frames(view)}`);
   } else if (view.sheets[0]?.granted_at != null) {
     // **第三種狀態。** 他簽過了，只是條文後來改版。以前這裡和「從來沒勾過」
     // 走同一條分支，於是卡片上寫著「2026年8月13日 同意過，但條文後來改版
@@ -208,15 +237,22 @@ const DEMO = {
   keys: ["local-recording", "cloud-reading", "frame-storage"],
 };
 
-function demoView(current, storeImages = true) {
-  const at = [Date.UTC(2026, 7, 14, 2, 31), null, Date.UTC(2026, 6, 2, 9, 5)];
+function demoView(current, storeImages = true, mode = "1") {
+  const at = [
+    Date.UTC(2026, 7, 14, 2, 31),
+    // 第二張平常是沒勾的。`?demo=cloud` 把它勾起來——那是唯一看得到「這一張
+    // 現在還沒有東西可以開」那句話的辦法，而它正是勾下去之後才需要講的。
+    mode === "cloud" ? Date.UTC(2026, 7, 14, 2, 32) : null,
+    Date.UTC(2026, 6, 2, 9, 5),
+  ];
   return {
     path: DEMO.path,
     current,
     allows_recording: current,
     allows_frames: current,
     store_images: storeImages,
-    capture_enabled: true,
+    // `?demo=broken`：設定檔讀不出來。`null` 不是 `false`——她連開始都不會。
+    capture_enabled: mode === "broken" ? null : true,
     reset_by_version: false,
     sheets: DEMO.keys.map((key, i) => ({
       key,
@@ -241,7 +277,7 @@ if (demo !== null) {
   const STORE = { off: false, unknown: null };
   const store = Object.hasOwn(STORE, demo) ? STORE[demo] : true;
   invoke = async (cmd, args) => {
-    if (cmd === "consent_read") return demoView(demo !== "stale", store);
+    if (cmd === "consent_read") return demoView(demo !== "stale", store, demo);
     // 按下去之後才長得出來的那兩句話，只有從這裡才看得到。`shot.mjs` 收
     // selector，所以它們是截得到的——一個只驗初始畫面的工具，會讓人以為
     // 沒截到的那一半是好的。
@@ -254,7 +290,7 @@ if (demo !== null) {
       );
     }
     if (cmd === "consent_set") {
-      const view = demoView(true, store);
+      const view = demoView(true, store, demo);
       const reset = demo === "stale";
       // 假資料也要照著他按的那一下改。不改的話畫面上會出現一個真實世界不
       // 可能的組合（勾勾還在、底下卻說她不會再留截圖），而這一頁上一次差

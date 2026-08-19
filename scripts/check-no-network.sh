@@ -39,6 +39,7 @@ FORBIDDEN='^(reqwest|ureq|hyper|curl|isahc|attohttpc|surf|minreq|ehttp|awc|http-
 MANIFESTS=("Cargo.toml" "apps/desktop/src-tauri/Cargo.toml")
 
 fail=0
+skipped=""
 for manifest in "${MANIFESTS[@]}"; do
     who=$([ "$manifest" = "Cargo.toml" ] && echo "sister.exe" || echo "sister-desktop.exe")
     for target in "" "x86_64-pc-windows-msvc"; do
@@ -52,6 +53,12 @@ for manifest in "${MANIFESTS[@]}"; do
             # 沒裝這個 target 就跳過，不要讓開發機因此卡住
             rustup target list --installed | grep -qx "$target" || {
                 echo "▶ $who / $label：未安裝 target，略過"
+                # 略過要記下來。最後那一行以前不管跳過幾個都照印
+                # 「✓ 出貨的相依樹裡沒有 HTTP client」——一句關於一棵沒有被
+                # 看過的樹的話，而這個產品只出 Windows 執行檔。CI 有裝
+                # target，所以它只騙得到開發機上的人；但那個人正是會照著這個
+                # 勾勾決定「可以推了」的人。
+                skipped="$skipped $who/$label"
                 continue
             }
         fi
@@ -97,8 +104,51 @@ if [ -n "$sockets" ]; then
     fail=1
 fi
 
+# 上面兩段只看 Rust。`--include='*.rs'` 這幾個字讓字母人的**畫面那一半**整個
+# 在這支腳本的視線之外：`fetch()`、`new WebSocket()`、`new Image().src = "https://…"`、
+# 一個 `<img src="https://…">`——每一個都能把螢幕上的字送出去，一個 crate 都不用多。
+#
+# 執行期擋住它們的是 CSP，而 CSP 在這個 repo 裡是**手抄六份**的（`tauri.conf.json`
+# 一份，五個 HTML 各一份 `<meta>`）。從其中一份刪掉 `connect-src`、或把
+# `default-src` 放寬，CI 全綠。照這個 repo 自己那條「一條規則寫在 N 個地方就會
+# 有一邊忘了改」的規矩，那是這半邊最大的一塊沒人守的地方。
+echo "▶ 檢查畫面那一半有沒有連外"
+rc=0
+web=$(grep -rnE '\b(fetch|XMLHttpRequest|WebSocket|EventSource|navigator\.sendBeacon|importScripts)\s*\(|\bsrc\s*=\s*.https?://|\bhref\s*=\s*.https?://' \
+    apps/desktop/ui --include='*.js' --include='*.html') || rc=$?
+if [ "$rc" -gt 1 ]; then
+    echo "✗ 掃畫面的那一步自己失敗了（grep 退出碼 $rc）——這不是「沒找到」。"
+    fail=1
+fi
+if [ -n "$web" ]; then
+    echo "✗ 畫面那一半出現了連外的東西："
+    echo "$web" | sed 's/^/    /'
+    echo
+    echo "  這一頁和後端說話只走 Tauri 的 ipc:。真的需要別的路，先去改 PRIVACY.md。"
+    fail=1
+fi
+
+# CSP 是上面那條的執行期後盾，所以它自己也要有人守。只釘兩件事：來源預設全關、
+# 出去的路只有 ipc——其餘（`img-src` 要不要 `data:` / `asset:`）各頁本來就該不一樣，
+# 釘死了只會逼人去改這支腳本。
+echo "▶ 檢查 CSP 還在不在"
+for f in apps/desktop/ui/*.html apps/desktop/src-tauri/tauri.conf.json; do
+    for rule in "default-src 'none'" "connect-src ipc:"; do
+        grep -qF "$rule" "$f" || {
+            echo "✗ $f 少了 CSP 的「$rule」"
+            echo "  少了它，上面那一段 grep 就是這條路上唯一的東西——而它只讀得懂"
+            echo "  寫死在原始碼裡的網址。"
+            fail=1
+        }
+    done
+done
+
 if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-echo "✓ 出貨的相依樹裡沒有 HTTP client 也沒有推論引擎，原始碼裡沒有 socket"
+if [ -n "$skipped" ]; then
+    echo "⚠ 有東西沒檢查到（未安裝 target）：$skipped"
+    echo "  底下這句話只涵蓋真的跑過的那幾棵樹。出貨的是 Windows 執行檔。"
+fi
+echo "✓ 出貨的相依樹裡沒有 HTTP client 也沒有推論引擎，原始碼和畫面裡沒有連外的路"
