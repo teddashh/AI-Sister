@@ -155,6 +155,32 @@ pub(crate) fn delete_files<'a>(
     stuck
 }
 
+/// 同一批檔案，但**只看不動**——預覽那一半的記帳。
+///
+/// 和 [`delete_files`] 是同一個問題的兩半，所以記帳規則要一模一樣：只有真的
+/// 躺在磁碟上的那幾個才准算進 `images_deleted` / `image_bytes_freed`，資料庫
+/// 說有圖而檔案不在的算 `missing`。
+///
+/// 位元組數一樣取資料庫那一欄，不是 stat 出來的大小——這樣「預覽說會放出
+/// X」和「跑完說放出了 X」在檔案沒變的情況下是同一個數字。預覽存在的全部
+/// 意義就是這個等號。
+pub(crate) fn count_files<'a>(
+    root: &Path,
+    files: impl IntoIterator<Item = (&'a str, i64)>,
+    report: &mut PruneReport,
+) {
+    for (rel, bytes) in files {
+        // stat 不出來（權限、路徑壞掉）當成「還在」。說它不見了是這裡唯一
+        // 會騙人的方向：那等於替使用者宣告一張截圖已經消失，而它其實還在。
+        if root.join(rel).try_exists().unwrap_or(true) {
+            report.images_deleted += 1;
+            report.image_bytes_freed += bytes.max(0) as u64;
+        } else {
+            report.missing += 1;
+        }
+    }
+}
+
 /// `DELETE FROM frames`，但**跳過 `kept` 裡那幾列**。
 ///
 /// `kept` 是圖刪不掉的那幾列（`delete_files` 回傳的那一批）。它們的 PNG 還躺在
@@ -187,12 +213,28 @@ fn delete_frames_except(
 }
 
 impl crate::db::Db {
-    /// 現在跑一次清理**會**刪掉什麼。只有 SELECT，不動任何東西。
+    /// 現在跑一次清理**會**刪掉什麼。只有 SELECT 和 stat，不動任何東西。
     ///
     /// 刻意寫成獨立的函式而不是給 [`prune`](Self::prune) 加一個 `dry_run`
     /// 旗標：旗標會被忘記檢查，而這裡忘記檢查的後果是把使用者的資料
     /// 刪掉。這個函式裡沒有任何一句 DELETE，所以它不可能刪錯東西。
-    pub fn prune_preview(&self, now: Millis, retention: &RetentionConfig) -> Result<PruneReport> {
+    ///
+    /// `image_root` 的意思和 [`prune`](Self::prune) 那邊**逐字相同**，而且要
+    /// 傳一樣的值——這裡答的是「等一下那一支會做什麼」，參數不一樣就是在
+    /// 預覽另一件事。`None` 代表這次完全不碰畫面檔，所以畫面那兩欄是 0。
+    ///
+    /// 以前這裡不收這個參數，於是它照著資料庫的 `image_bytes` 算出一個
+    /// 「會放出 1.2 GB」——而手動清空過 `frames/`、或從一份沒帶 `--with-frames`
+    /// 的備份還原之後，那 1.2 GB 一個位元組都放不出來。真的跑那一支早就
+    /// 只認 `remove_file` 成功的那幾個（見 [`delete_files`]），把差額記在
+    /// `missing`；預覽是唯一還在照資料庫講話的地方，而它正是那個**決定要不要
+    /// 刪**的畫面。
+    pub fn prune_preview(
+        &self,
+        now: Millis,
+        retention: &RetentionConfig,
+        image_root: Option<&Path>,
+    ) -> Result<PruneReport> {
         let text_cut = cutoff(now, retention.text_days);
         let frame_cut = cutoff(now, retention.frames_days);
         let n = |sql: &str, cut: Millis| -> Result<u64> {
@@ -218,15 +260,17 @@ impl crate::db::Db {
         r.queries_deleted = n("SELECT COUNT(*) FROM queries WHERE ts < ?1", text_cut)?;
         // 兩段的圖都會被刪掉，所以用比較舊的那條界線一次算完
         let cut = frame_cut.max(text_cut);
-        r.images_deleted = n(
-            "SELECT COUNT(*) FROM frames WHERE ts < ?1 AND image_path IS NOT NULL",
-            cut,
-        )?;
-        r.image_bytes_freed = self.conn.query_row(
-            "SELECT COALESCE(SUM(image_bytes),0) FROM frames WHERE ts < ?1 AND image_path IS NOT NULL",
-            [cut],
-            |r| r.get::<_, i64>(0),
-        )? as u64;
+        if let Some(root) = image_root {
+            let doomed: Vec<(String, i64)> = self
+                .conn
+                .prepare(
+                    "SELECT image_path, image_bytes FROM frames \
+                     WHERE ts < ?1 AND image_path IS NOT NULL",
+                )?
+                .query_map([cut], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            count_files(root, doomed.iter().map(|(p, b)| (p.as_str(), *b)), &mut r);
+        }
         Ok(r)
     }
 
@@ -377,11 +421,22 @@ impl crate::db::Db {
         Ok(report)
     }
 
-    /// 選一段時間，**當作沒發生過**——會刪掉什麼。只有 SELECT。
+    /// 選一段時間，**當作沒發生過**——會刪掉什麼。只有 SELECT 和 stat。
     ///
     /// 和 `prune_preview` 同一個理由存在：使用者按下「忘掉」之前，要先看見
     /// 代價。這一段沒有回收桶、沒有復原。
-    pub fn forget_preview(&self, from_ts: Millis, to_ts: Millis) -> Result<PruneReport> {
+    ///
+    /// 也和它同一個理由收 `image_root`，而且這裡更嚴重一點：`prune` 是每五
+    /// 分鐘自己跑一次的背景動作，這一支是他**盯著那幾個數字按下去**的。那
+    /// 幾個數字裡的「會放出 1.2 GB」如果是照資料庫算的，一顆手動清空過
+    /// `frames/` 的機器上一個位元組都放不出來——而他按下去的理由可能正是
+    /// 那 1.2 GB。傳一樣的 `image_root` 給 [`forget`](Self::forget)。
+    pub fn forget_preview(
+        &self,
+        from_ts: Millis,
+        to_ts: Millis,
+        image_root: Option<&Path>,
+    ) -> Result<PruneReport> {
         if from_ts >= to_ts {
             return Ok(PruneReport::default());
         }
@@ -394,12 +449,19 @@ impl crate::db::Db {
             chunks_deleted: n("SELECT COUNT(*) FROM text_chunks WHERE ts >= ?1 AND ts < ?2")?,
             facts_deleted: n("SELECT COUNT(*) FROM facts WHERE ts >= ?1 AND ts < ?2")?,
             frames_deleted: n("SELECT COUNT(*) FROM frames WHERE ts >= ?1 AND ts < ?2")?,
-            images_deleted: n("SELECT COUNT(*) FROM frames \
-                 WHERE ts >= ?1 AND ts < ?2 AND image_path IS NOT NULL")?,
-            image_bytes_freed: n("SELECT COALESCE(SUM(image_bytes),0) FROM frames \
-                 WHERE ts >= ?1 AND ts < ?2 AND image_path IS NOT NULL")?,
             ..Default::default()
         };
+        if let Some(root) = image_root {
+            let doomed: Vec<(String, i64)> = self
+                .conn
+                .prepare(
+                    "SELECT image_path, image_bytes FROM frames \
+                     WHERE ts >= ?1 AND ts < ?2 AND image_path IS NOT NULL",
+                )?
+                .query_map([from_ts, to_ts], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            count_files(root, doomed.iter().map(|(p, b)| (p.as_str(), *b)), &mut r);
+        }
         for sql in [
             "SELECT COUNT(*) FROM focus_events WHERE ts >= ?1 AND ts < ?2",
             "SELECT COUNT(*) FROM clipboard_events WHERE ts >= ?1 AND ts < ?2",
@@ -989,7 +1051,9 @@ mod tests {
             text_days: 365,
         };
 
-        let preview = db.prune_preview(NOW, &retention).expect("preview");
+        let preview = db
+            .prune_preview(NOW, &retention, Some(tmp.path()))
+            .expect("preview");
         // 預告完之後資料必須一個都沒少
         assert_eq!(db.stats().expect("stats").frames, 3);
 
@@ -998,6 +1062,43 @@ mod tests {
         // `facts_deleted`，而那正是唯一對不起來的一欄：CASCADE 先把事實
         // 帶走，於是 DELETE 的 rowcount 是 0，報告印出「刪掉了 0 個事實」
         // ——東西真的不見了，數字卻是假的。挑著比的測試看不到自己沒挑的。
+        assert_eq!(preview, actual, "預告和實際必須一模一樣");
+    }
+
+    /// **預覽不可以答應一個放不出來的空間。**
+    ///
+    /// `frames/` 被手動清空過、或者從一份沒帶 `--with-frames` 的備份還原
+    /// 之後，資料庫還記得每一列有圖、有多大。真的跑那一支早就只認
+    /// `remove_file` 成功的那幾個，差額記在 `missing`；預覽以前照著資料庫
+    /// 的 `image_bytes` 算，於是它說「會刪掉 3 個畫面檔（300 B）」，而跑
+    /// 完之後是「刪掉了 0 個畫面檔」——那 300 B 一個位元組都放不出來。
+    ///
+    /// 兩支現在走同一套記帳（`count_files` / `delete_files`），所以那個
+    /// 等號在檔案不見的時候也成立。
+    #[test]
+    fn a_preview_does_not_promise_space_that_no_longer_exists_on_disk() {
+        let tmp = Tmp::new("preview-ghosts");
+        let (mut db, paths) = seeded(&tmp);
+        // 他自己去清了 frames/。資料庫完全不知道這件事。
+        for rel in &paths {
+            std::fs::remove_file(tmp.path().join(rel)).expect("rm");
+        }
+        let retention = RetentionConfig {
+            frames_days: 30,
+            text_days: 365,
+        };
+
+        let preview = db
+            .prune_preview(NOW, &retention, Some(tmp.path()))
+            .expect("preview");
+        assert_eq!(
+            (preview.images_deleted, preview.image_bytes_freed),
+            (0, 0),
+            "磁碟上一張都沒有，不可以答應放得出空間"
+        );
+        assert!(preview.missing > 0, "差額要講出來，不是安靜地變成 0");
+
+        let actual = db.prune(NOW, &retention, Some(tmp.path())).expect("prune");
         assert_eq!(preview, actual, "預告和實際必須一模一樣");
     }
 
@@ -1086,14 +1187,14 @@ mod tests {
         let at = days_ago(60);
 
         assert_eq!(
-            db.forget_preview(at - 1_000, at)
+            db.forget_preview(at - 1_000, at, Some(tmp.path()))
                 .expect("preview")
                 .frames_deleted,
             0,
             "右邊界是開的：到 `at` 為止不含 `at` 本身"
         );
         assert_eq!(
-            db.forget_preview(at, at + 1)
+            db.forget_preview(at, at + 1, Some(tmp.path()))
                 .expect("preview")
                 .frames_deleted,
             1,
@@ -1110,7 +1211,9 @@ mod tests {
         let (mut db, _) = seeded(&tmp);
         let (from, to) = (days_ago(61), NOW);
 
-        let preview = db.forget_preview(from, to).expect("preview");
+        let preview = db
+            .forget_preview(from, to, Some(tmp.path()))
+            .expect("preview");
         assert_eq!(db.stats().expect("stats").frames, 3, "預告不准動到東西");
 
         let actual = db.forget(from, to, Some(tmp.path())).expect("forget");

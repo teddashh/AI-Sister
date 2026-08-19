@@ -379,6 +379,20 @@ function scale(e) {
   return bits;
 }
 
+/**
+ * 資料庫說有圖、磁碟上找不到那個檔的那幾列。
+ *
+ * 預覽和事後都要講**同一句**。以前只有事後那一句有它，而預覽那邊照著資料庫
+ * 算，所以「會刪掉 12 張畫面（1.8 MB）」後面接的是「刪掉了 0 張」——他按下
+ * 那顆不可逆的按鈕的理由，正是那 1.8 MB。後端兩支現在走同一套記帳，這裡就
+ * 沒有理由只講一半：預覽說得出 0 張，也就說得出那 12 列去哪了。
+ *
+ * 不是 ⚠：東西確實不在了，隱私上沒有缺口。但他拿這個數字對帳。
+ */
+function ghosts(e) {
+  return e.missing > 0 ? `（另外 ${e.missing} 列說自己有圖，但那個檔早就不在磁碟上了）` : "";
+}
+
 async function forget() {
   const range = chosen();
   if (range === null || invoke === null) return;
@@ -392,6 +406,8 @@ async function forget() {
       });
       const bits = scale(e);
       if (bits.length === 0) {
+        // 圖檔全都不在了、而那一段只有那幾列 frame 的話，`bits` 還是有
+        // 「N 列畫面紀錄」，所以走不到這裡。真的走到這裡就是真的空的。
         tell("這一段本來就是空的，沒有東西可以忘。");
         armReset();
         return;
@@ -401,7 +417,7 @@ async function forget() {
       el.forget.textContent = "確定刪掉";
       el.forget.disabled = false;
       // 「不可復原」要和數字擺在同一句話裡。分成兩行的話，看的人會看數字。
-      tell(`會刪掉 ${bits.join("、")}——不可復原。`, true);
+      tell(`會刪掉 ${bits.join("、")}——不可復原。${ghosts(e)}`, true);
       return;
     }
 
@@ -423,12 +439,7 @@ async function forget() {
     } else if (done.length === 0) {
       tell("沒有東西被刪掉。");
     } else {
-      // 資料庫說有圖、磁碟上找不到那個檔。預覽剛剛才說「12 張畫面
-      // （1.8 MB）」，結果卻一張都沒提——不講的話那個落差沒有人解釋，而
-      // 那正是他拿來對帳的兩個數字。不是 ⚠：東西確實不在了。
-      const gone =
-        e.missing > 0 ? `（另外 ${e.missing} 列說自己有圖，但那個檔早就不在磁碟上了）` : "";
-      tell(`刪掉了 ${done.join("、")}。${gone}`);
+      tell(`刪掉了 ${done.join("、")}。${ghosts(e)}`);
     }
   } catch (err) {
     tell(String(err?.message ?? err), true);
@@ -658,13 +669,19 @@ function fakeBackend(mode = "1") {
         const gone = hit(arg.fromTs, arg.toTs);
         const withImage = gone.filter((m) => m.frame_id !== null);
         // 假裝每 3 張裡有 1 張的檔案早就被人手動清掉了：資料庫還指著它，磁碟
-        // 上沒有。預覽看不出來（它只會數資料庫），真的刪下去才發現——而那個
-        // 落差就是 `missing` 存在的理由。假後端不模擬的話，那一句話沒有任何
-        // 辦法在這台機器上被看見。
+        // 上沒有。假後端不模擬的話，`missing` 那一句話沒有任何辦法在這台機器
+        // 上被看見。
+        //
+        // **兩支都要看得見。**這裡本來寫 `cmd === "forget_range"`，理由是
+        // 「預覽看不出來，它只會數資料庫」——那句話當時是真的，而它正是
+        // core 那邊剛修掉的 bug：預覽照著 `image_bytes` 答應了一個放不出來
+        // 的空間，而他按下那顆不可逆的按鈕的理由就是那個數字。現在兩支都去
+        // stat 一次（`count_files` / `delete_files`），假後端跟著改，不然這
+        // 一頁示範的還是舊的那個謊。
         //
         // 模數要小。第一版寫 `i % 7`，而 demo 那一天只有三張圖，於是它永遠是
         // 0——一個「跑過了、什麼都沒驗到」的假後端，正好是它自己要防的東西。
-        const vanished = (m, i) => cmd === "forget_range" && i % 3 === 2;
+        const vanished = (m, i) => i % 3 === 2;
         const images = withImage.filter((m, i) => !vanished(m, i));
         const missing = withImage.length - images.length;
         if (cmd === "forget_range") {

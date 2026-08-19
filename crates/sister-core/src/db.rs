@@ -2981,7 +2981,8 @@ mod tests {
         ask(&db, 1_000, "要被忘掉的", 1);
         ask(&db, 9_000, "在範圍外的", 1);
 
-        let preview = db.forget_preview(500, 2_000).expect("preview");
+        // `None` 和底下那一支 `forget` 一樣：這一條測的是題庫，不是畫面檔。
+        let preview = db.forget_preview(500, 2_000, None).expect("preview");
         assert_eq!(preview.queries_deleted, 1, "預覽沒把題庫算進去");
 
         let report = db.forget(500, 2_000, None).expect("forget");

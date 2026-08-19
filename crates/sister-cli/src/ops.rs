@@ -511,13 +511,46 @@ pub mod prune {
         let now = sister_core::now_ms();
 
         if dry_run {
-            let report = db.prune_preview(now, r)?;
+            let report = db.prune_preview(now, r, Some(&frames_dir(data_dir)))?;
             print_report(&report, true);
             return Ok(());
         }
         let report = db.prune(now, r, Some(&frames_dir(data_dir)))?;
         print_report(&report, false);
         Ok(())
+    }
+
+    /// 資料庫說有圖、磁碟上找不到那個檔的那幾列（`None` = 沒有這種列）。
+    ///
+    /// 以前這幾列會被算成「刪掉了」，連大小都照著資料庫的欄位加進去——手動
+    /// 清空過 `frames/`、或從一份沒帶 `--with-frames` 的備份還原之後，報告會
+    /// 說「刪掉了 120 個畫面檔（1.2 GB）」，而磁碟上一個位元組都沒有釋放。
+    ///
+    /// 不是 ⚠：東西確實不在了，隱私上沒有缺口。但他拿這個數字對帳，而
+    /// 「120」和「0」對他的意思完全不一樣。
+    ///
+    /// **預覽也要印。**這一句以前掛著 `!preview`，理由是「預覽那一支不知道
+    /// 檔案在不在」——那是真的，因為它照著資料庫算。可是預覽正是那個**決定
+    /// 要不要刪**的畫面：他看到「會放出 1.2 GB」才按下去，然後拿到一句
+    /// 「刪掉了 0 個畫面檔」。兩支現在走同一套記帳（`count_files` 和
+    /// `delete_files`），所以這一句在兩邊都說得出口。
+    ///
+    /// 但**不是同一句**：預覽那一版不可以說資料庫「已經跟著更新」——它一列
+    /// 都沒動。時態錯的安慰話和沒講一樣糟。
+    fn ghost_rows_line(missing: u64, preview: bool) -> Option<String> {
+        (missing > 0).then(|| {
+            format!(
+                "  ? 另外 {missing} 列說自己有圖，但那個檔{}不在磁碟上了——\
+                 \n    可能是有人手動清過 frames/，也可能是從一份沒帶畫面的備份還原的。\
+                 \n    （{}）",
+                if preview { "現在就已經" } else { "已經" },
+                if preview {
+                    "所以那幾列放不出任何空間；資料庫會在真的刪的時候跟著更新"
+                } else {
+                    "資料庫已經跟著更新，不會再指向它們"
+                }
+            )
+        })
     }
 
     /// 刪掉的東西要一項一項講出來。
@@ -537,20 +570,9 @@ pub mod prune {
                 crate::fmt::bytes(r.image_bytes_freed as i64)
             );
         }
-        // 資料庫說有圖、磁碟上找不到那個檔。以前這幾列會被算成「刪掉了」，
-        // 連大小都照著資料庫的欄位加進去——手動清空過 `frames/`、或從一份
-        // 沒帶 `--with-frames` 的備份還原之後，報告會說「刪掉了 120 個畫面檔
-        // （1.2 GB）」，而磁碟上一個位元組都沒有釋放。
-        //
-        // 不是 ⚠：東西確實不在了，隱私上沒有缺口。但他拿這個數字對帳，
-        // 而「120」和「0」對他的意思完全不一樣。
-        if !preview && r.missing > 0 {
-            println!(
-                "  ? 另外 {} 列說自己有圖，但那個檔已經不在磁碟上了——\
-                 \n    可能是有人手動清過 frames/，也可能是從一份沒帶畫面的備份還原的。\
-                 \n    （資料庫已經跟著更新，不會再指向它們）",
-                r.missing
-            );
+        // 句子在 `ghost_rows_line`（那裡才驗得到預覽和事後不是同一句）。
+        if let Some(line) = ghost_rows_line(r.missing, preview) {
+            println!("{line}");
         }
         if r.frames_deleted > 0 {
             println!(
@@ -584,6 +606,43 @@ pub mod prune {
                 "     （指向它們的紀錄先留著，不然就沒有人找得到那些檔案了。\
                  \n     下一輪會再試一次；一直失敗的話多半是防毒或權限擋住了）"
             );
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// **預覽也要講那幾列幽靈，但不可以用事後那句話講。**
+        ///
+        /// 這一句以前只在真的刪完之後才印，理由是預覽照著資料庫算、看不出檔案
+        /// 在不在——那正是這一輪修掉的東西。現在兩支都去 stat 一次，所以預覽
+        /// 說得出「會刪掉 0 個畫面檔」，也就欠一句「那 120 列去哪了」。
+        ///
+        /// 但事後那一版說的是「資料庫已經跟著更新」，而預覽一列都沒動。
+        /// 直接共用同一句，等於在一個什麼都還沒發生的畫面上報告完成式。
+        #[test]
+        fn a_preview_owns_up_to_the_ghost_rows_without_claiming_it_fixed_them() {
+            let previewed = ghost_rows_line(120, true).expect("有 120 列就要講");
+            assert!(previewed.contains("120"), "{previewed}");
+            assert!(
+                previewed.contains("放不出任何空間"),
+                "他看的就是空間那個數字：{previewed}"
+            );
+            assert!(
+                !previewed.contains("已經跟著更新"),
+                "預覽一列都沒動，不准用完成式：{previewed}"
+            );
+
+            let after = ghost_rows_line(120, false).expect("有 120 列就要講");
+            assert!(after.contains("已經跟著更新"), "{after}");
+
+            for preview in [true, false] {
+                assert!(
+                    ghost_rows_line(0, preview).is_none(),
+                    "一列都沒有的時候不要生出一句話來"
+                );
+            }
         }
     }
 }
@@ -1056,7 +1115,7 @@ pub mod forget {
         // 「什麼都沒記到」以前直接 return，所以那句警告在**最需要它的那一次**
         // 反而不會出現：她一個 tick 一個 tick 寫，他剛剛做的那件事很可能還沒
         // 落進資料庫。那時候「不用忘」讀起來像「你沒事」，而三秒後就有事了。
-        let report = db.forget_preview(from, to)?;
+        let report = db.forget_preview(from, to, Some(&prune::frames_dir(data_dir)))?;
         if report.is_empty() {
             println!("  那段時間裡她什麼都沒記到，不用忘。");
             if recording {
@@ -3612,10 +3671,13 @@ pub mod doctor {
         // 計數器都是 0 → doctor 說「沒有——都還在保留期內」，然後下一句
         // `sister prune` 印出「刪掉了 0 段文字、0 個事實、37 筆事件」。
         // 這一行的存在意義就是「不宣稱，直接示範」，所以它得看完整份。
-        match db
-            .as_ref()
-            .map(|d| d.prune_preview(sister_core::now_ms(), &config.retention))
-        {
+        match db.as_ref().map(|d| {
+            d.prune_preview(
+                sister_core::now_ms(),
+                &config.retention,
+                Some(&prune::frames_dir(data_dir)),
+            )
+        }) {
             Some(Ok(r)) if r.is_empty() => line(true, "現在有多少已過期", "沒有——都還在保留期內"),
             Some(Ok(r)) => {
                 let what = [

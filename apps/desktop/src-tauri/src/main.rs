@@ -1505,14 +1505,24 @@ impl From<sister_core::retention::PruneReport> for Erasure {
 }
 
 /// 忘掉這一段會刪掉什麼。一句 DELETE 都沒有。
+///
+/// 畫面檔的根目錄拿不到就整支拒絕，理由和 `forget_range` **正好相反但一樣硬**：
+/// 那邊是不能假裝刪掉了，這邊是不能假裝放得出空間。退成 `None` 的話這一支會
+/// 回報「0 個畫面檔」，而真的按下去會刪掉幾百張——一份把代價說小的預覽，比
+/// 沒有預覽更糟。
 #[tauri::command(async)]
 fn forget_preview(
     from_ts: i64,
     to_ts: i64,
     shell: tauri::State<'_, Shell>,
 ) -> Result<Erasure, String> {
+    let dir = shell
+        .data_dir
+        .as_ref()
+        .ok_or_else(|| "找不到資料目錄，算不出這一段會刪掉多少東西".to_string())?;
+    let frames = sister_core::config::Config::frames_dir(dir);
     with_db(&shell, |db| {
-        db.forget_preview(from_ts, to_ts)
+        db.forget_preview(from_ts, to_ts, Some(&frames))
             .map(Erasure::from)
             .map_err(|e| format!("{e:#}"))
     })
