@@ -89,6 +89,14 @@ pub struct BlindSpots {
     /// 一個字都沒讀出來**。那和「她還沒開始記」是相反的處境，而叫一個 OCR
     /// 壞掉的人「先跑 `sister record`」，只會讓他再錄一天空的。
     pub frames: i64,
+    /// 她一共開過幾場錄製。
+    ///
+    /// `sessions` 這張表**不在任何保留期或 `forget` 的射程內**，所以它是
+    /// 「她到底有沒有錄過」唯一還算得準的證據。`chunks == 0 && frames == 0`
+    /// 配上 `sessions > 0`，講的是「錄過，但那些東西被忘掉了／過期了」——
+    /// 而按下「忘掉這一整天」之後看到的正是這個組合。這時候叫他「先跑
+    /// `sister record`」，是在叫他重做一件他剛剛才故意做掉的事。
+    pub sessions: i64,
     /// 排除規則生效過的（理由, 段數）。**段不是張**——見
     /// [`Db::exclusion_audit`](crate::db::Db::exclusion_audit)。
     pub excluded: Vec<(String, i64)>,
@@ -97,6 +105,17 @@ pub struct BlindSpots {
     /// 暫停一共多久。有一段配不起來的時候這個數字會偏小，
     /// 見 [`Db::pause_audit`](crate::db::Db::pause_audit)。
     pub paused_ms: i64,
+    /// 最後一段暫停還沒結束（現在仍在暫停，或上次錄製在暫停中結束）。
+    ///
+    /// `paused_ms` **不含**這一段——它還在跑，算進去會讓同一顆資料庫每次
+    /// 查出來的數字都不一樣。所以只看 `paused_ms` 的表面會說「一共 0 秒」，
+    /// 而真相是三天前按下的暫停到現在都沒有解除。
+    pub paused_open: bool,
+    /// 有幾段暫停的開頭已經被保留期刪掉，只剩 `resume`。
+    ///
+    /// 這幾段算進了 `paused_episodes` 卻**沒有**算進 `paused_ms`，所以
+    /// `paused_ms > 0` 時它是下限而不是精確值。
+    pub paused_truncated: i64,
 }
 
 impl BlindSpots {
@@ -117,6 +136,7 @@ pub fn blind_spots(db: &Db) -> anyhow::Result<BlindSpots> {
     Ok(BlindSpots {
         chunks: stats.chunks,
         frames: stats.frames,
+        sessions: stats.sessions,
         excluded: db
             .exclusion_audit()?
             .into_iter()
@@ -124,6 +144,8 @@ pub fn blind_spots(db: &Db) -> anyhow::Result<BlindSpots> {
             .collect(),
         paused_episodes: pauses.episodes,
         paused_ms: pauses.total_ms,
+        paused_open: pauses.open_since.is_some(),
+        paused_truncated: pauses.truncated,
     })
 }
 
@@ -139,7 +161,61 @@ mod tests {
         let b = blind_spots(&db).expect("blind");
         assert_eq!(b.chunks, 0);
         assert_eq!(b.frames, 0, "她連看都還沒看過");
+        assert_eq!(b.sessions, 0, "連一場錄製都還沒開過");
         assert!(b.any(), "「我還沒開始記」本身就是一個查得到的理由");
+    }
+
+    /// **錄過，然後他自己把它忘掉了。**
+    ///
+    /// `sister forget --last 7d --yes` 或按下「忘掉這一整天」之後，三個計數器
+    /// 全部歸零——和一顆全新的資料庫長得一模一樣。差別在 `sessions`：那張表
+    /// 不在任何保留期或 `forget` 的射程內。少了這一欄，畫面會叫他「先跑
+    /// `sister record`」，也就是重做一件他剛剛才故意做掉的事。
+    #[test]
+    fn a_memory_he_erased_is_not_a_memory_she_never_had() {
+        let mut db = Db::open_in_memory().expect("db");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        db.insert_frame(
+            s,
+            &FrameCapture {
+                ts: 1_000,
+                monitor: 0,
+                width: 1920,
+                height: 1080,
+                dhash: 0xF00D,
+                image: None,
+                image_ext: "webp",
+                ocr: vec![crate::model::OcrBlock {
+                    text: "客服專線 0800-080-123".into(),
+                    x: 0,
+                    y: 0,
+                    w: 400,
+                    h: 18,
+                    confidence: 0.95,
+                }],
+                focus: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    app_name: Some("Chrome".into()),
+                    window_title: Some("帳單查詢".into()),
+                    url: None,
+                    pid: Some(42),
+                    password_field: false,
+                },
+            },
+            None,
+            0,
+        )
+        .expect("insert");
+        assert!(
+            blind_spots(&db).expect("blind").chunks > 0,
+            "先確定真的記到了"
+        );
+
+        db.forget(0, 2_000, None).expect("forget");
+
+        let b = blind_spots(&db).expect("blind");
+        assert_eq!((b.chunks, b.frames), (0, 0), "他要求的：什麼都不剩");
+        assert_eq!(b.sessions, 1, "但「她錄過」這件事還在");
     }
 
     /// **錄了一整天，一個字都沒讀出來。**

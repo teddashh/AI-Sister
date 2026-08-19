@@ -153,6 +153,11 @@ fn last_recording_end(shell: tauri::State<'_, Shell>) -> Option<LastRun> {
                     .reason
                     .as_deref()
                     .map(|r| sister_core::model::EndReason::describe(r).to_string()),
+                // 沒有理由**而且**那一場的事件全被清掉了：理由本來很可能寫過
+                // ，是後來被保留期或 `sister forget` 帶走的。畫面上要講成
+                // 「查不出來了」，不是「那時候還沒在記」——見
+                // `LastSession::events_left`。
+                why_gone: s.reason.is_none() && s.events_left == 0,
             }))
     })
     .ok()
@@ -166,8 +171,10 @@ struct LastRun {
     /// `None` = 沒有好好結束。問這支命令的前提是「現在沒有心跳」，所以
     /// `Db::last_session` 上那個「還是它正在跑」的歧義在這裡已經被排除了。
     ended_at: Option<i64>,
-    /// 已經翻成人話的理由。`None` = alpha.17 以前寫下的紀錄，那時候還沒在記。
+    /// 已經翻成人話的理由。`None` 有兩種意思，靠 [`why_gone`](Self::why_gone) 分。
     why: Option<String>,
+    /// `why` 是 `None` 的原因是**紀錄被清掉了**，不是那一版沒在記。
+    why_gone: bool,
 }
 
 fn record_label(recording: bool) -> &'static str {
@@ -480,10 +487,18 @@ struct Blind {
     /// 她一共留下幾張畫面。`chunks == 0 && frames > 0` = 她看了，
     /// 但一個字都沒讀出來（讀字那一段斷了）。
     frames: i64,
+    /// 她一共開過幾場錄製。兩個 0 配上 `sessions > 0` = 錄過、但被忘掉了，
+    /// 不是還沒開始——見 [`sister_core::answer::BlindSpots::sessions`]。
+    sessions: i64,
     /// 排除規則生效過的（理由, 段數）。段不是張。
     excluded: Vec<(String, i64)>,
     paused_episodes: i64,
+    /// **只含已結束的那幾段。**`0` 配上 `paused_open` 的意思是「三天前按下去
+    /// 到現在都沒解除」，不是「暫停了一瞬間」——見
+    /// [`sister_core::answer::BlindSpots::paused_open`]。
     paused_ms: i64,
+    paused_open: bool,
+    paused_truncated: i64,
 }
 
 /// 一筆 ★ 答案。
@@ -597,9 +612,12 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             Some(Blind {
                 chunks: b.chunks,
                 frames: b.frames,
+                sessions: b.sessions,
                 excluded: b.excluded,
                 paused_episodes: b.paused_episodes,
                 paused_ms: b.paused_ms,
+                paused_open: b.paused_open,
+                paused_truncated: b.paused_truncated,
             })
         } else {
             None

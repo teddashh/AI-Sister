@@ -464,8 +464,20 @@ async function load(keep = null) {
     if (days.length === 0) {
       el.days.replaceChildren();
       el.moments.replaceChildren();
-      el.railSay.textContent = "她還沒記得任何東西。";
-      say("跑 sister record 之後再回來看。");
+      // 「一天都沒有」有兩種，而它們的下一步是相反的。這裡數的是**還活著
+      // 的**列數，分不出「從來沒錄過」和「錄了、然後被忘掉／過保留期」——
+      // 而按下「忘掉這一整天」之後看到的正是這個畫面，它會叫他去跑一個他
+      // 剛剛才故意清空的東西（甚至是一個正在跑的東西）。
+      //
+      // `sessions` 那張表永遠不會被刪，所以「她有沒有錄過」問得出來。
+      const ran = await invoke("last_recording_end").catch(() => null);
+      if (ran) {
+        el.railSay.textContent = "現在一天都沒有了。";
+        say("她錄過——這些紀錄是被忘掉的，或是過了保留期。再錄一段就會有新的。");
+      } else {
+        el.railSay.textContent = "她還沒記得任何東西。";
+        say("跑 sister record 之後再回來看。");
+      }
       current = null;
       armReset();
       return;

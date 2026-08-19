@@ -474,6 +474,21 @@ pub mod prune {
                 crate::fmt::bytes(r.image_bytes_freed as i64)
             );
         }
+        // 資料庫說有圖、磁碟上找不到那個檔。以前這幾列會被算成「刪掉了」，
+        // 連大小都照著資料庫的欄位加進去——手動清空過 `frames/`、或從一份
+        // 沒帶 `--with-frames` 的備份還原之後，報告會說「刪掉了 120 個畫面檔
+        // （1.2 GB）」，而磁碟上一個位元組都沒有釋放。
+        //
+        // 不是 ⚠：東西確實不在了，隱私上沒有缺口。但他拿這個數字對帳，
+        // 而「120」和「0」對他的意思完全不一樣。
+        if !preview && r.missing > 0 {
+            println!(
+                "  ? 另外 {} 列說自己有圖，但那個檔已經不在磁碟上了——\
+                 \n    可能是有人手動清過 frames/，也可能是從一份沒帶畫面的備份還原的。\
+                 \n    （資料庫已經跟著更新，不會再指向它們）",
+                r.missing
+            );
+        }
         if r.frames_deleted > 0 {
             println!(
                 "  {verb} {} 列畫面紀錄、{} 段文字、{} 個事實、{} 筆事件",
@@ -925,11 +940,19 @@ pub mod query {
             // 她看過畫面卻一個字都沒讀出來，代表 OCR 這一段是斷的（關掉了、
             // 或者裝了讀不到）——那是這個專案已知的主要故障形狀。這時候叫他
             // 「先跑 `sister record`」，只會讓他再錄一天空的。
+            //
+            // 而「連畫面都沒有」也還有兩種：她從來沒錄過，或者錄過的東西被
+            // `sister forget` 忘掉了／過了保留期。`sessions` 那張表不在任何
+            // 保留期的射程內，所以這件事問得出來——問不清楚就會叫他重做一件
+            // 他剛剛才故意做掉的事。
             return vec![if b.frames > 0 {
                 format!(
                     "她看過 {} 張畫面，但一個字都沒讀出來——讀字那一段是斷的，跑 `sister doctor` 看是哪一種。",
                     b.frames
                 )
+            } else if b.sessions > 0 {
+                "她錄過，但現在資料庫裡是空的——被 `sister forget` 忘掉了，或是過了保留期。"
+                    .to_string()
             } else {
                 "她還沒記過任何東西——先跑 `sister record`。".to_string()
             }];
@@ -961,10 +984,31 @@ pub mod query {
             ));
         }
         if b.paused_episodes > 0 {
+            // 時間只有在 pause 配得到 resume 的時候才累加，所以「一共 0 秒」
+            // 有兩種意思：真的只暫停了一瞬間，或者三天前那次暫停到現在都沒
+            // 解除（暫停不會自己過期，那是設計）。後者才是他要找的東西不在
+            // 裡面的真正原因，而報成 0 秒剛好把它藏起來。
+            //
+            // 開頭被保留期刪掉的那幾段也一樣：算進了段數、沒算進時間。
+            let how_long = if b.paused_open && b.paused_ms == 0 {
+                "而且到現在都還沒解除——她此刻就是閉著眼睛的".to_string()
+            } else if b.paused_open {
+                format!(
+                    "已結束的加起來 {}，最後一段到現在都還沒解除",
+                    crate::fmt::duration_ms(b.paused_ms)
+                )
+            } else if b.paused_truncated > 0 {
+                format!(
+                    "算得出來的加起來 {}（有 {} 段的開頭已被保留期刪掉，長度算不出來）",
+                    crate::fmt::duration_ms(b.paused_ms),
+                    b.paused_truncated
+                )
+            } else {
+                format!("一共 {}", crate::fmt::duration_ms(b.paused_ms))
+            };
             out.push(format!(
-                "她也被暫停過 {} 次、一共 {}，那幾段是空的。",
-                b.paused_episodes,
-                crate::fmt::duration_ms(b.paused_ms)
+                "她也被暫停過 {} 次、{how_long}，那幾段是空的。",
+                b.paused_episodes
             ));
         }
         if out.is_empty() {
@@ -1485,10 +1529,18 @@ pub mod stats {
         let db = open_existing(data_dir)?;
         let s = db.stats()?;
 
-        let span_days = match (s.first_ts, s.last_ts) {
+        let days_between = |a: Option<i64>, b: Option<i64>| match (a, b) {
             (Some(a), Some(b)) if b > a => (b - a) as f64 / 86_400_000.0,
             _ => 0.0,
         };
+        let span_days = days_between(s.first_ts, s.last_ts);
+        // 畫面自己的跨度。**不能用 `span_days`**：那一對時間來自
+        // `text_chunks`（`retention.text_days` 管，預設 365 天），而
+        // `image_bytes` 只涵蓋還留著畫面檔的那幾列（`frames_days`，預設
+        // 30 天）。用滿一年之後兩者差 12 倍，而分子小分母大，印出來的
+        // 「每天約」會小成十二分之一——那正好是 Phase 0 退出條件的判決，
+        // 錯的方向是「看起來過了」。見 `DbStats::image_first_ts`。
+        let image_days = days_between(s.image_first_ts, s.image_last_ts);
         let disk_total = s.db_bytes + s.image_bytes;
         // 不到半天就不外推。`None` = 「還答不出來」，不是 0，也不是「就是這麼多」。
         //
@@ -1496,7 +1548,21 @@ pub mod stats {
         // 上去：錄兩小時長了 200MB，它會印「每天約 200.0 MB ✓」，而真實速率
         // 是 2.4 GB/天——超標八倍卻長得像通過。隔壁的 `footprint.rs` 早就
         // 為同一件事寫了規則（不到 60 秒不外推）並且有測試守著，是這裡沒跟上。
-        let per_day = (span_days >= 0.5).then(|| disk_total as f64 / span_days);
+        //
+        // 兩半各除以**自己的**跨度再相加，而不是把總量除以文字的跨度。
+        // 兩個保留期各管一半，所以那兩個分母本來就不是同一個數字。
+        //
+        // 畫面那一半不到半天也一樣不外推，理由同上。`None` 的意思是「還答不
+        // 出來」，於是底下整句話就不會蓋一個 ✓ 上去。
+        let img_rate = match s.image_bytes {
+            0 => Some(0.0),
+            _ if image_days >= 0.5 => Some(s.image_bytes as f64 / image_days),
+            _ => None,
+        };
+        let per_day = match (span_days >= 0.5, img_rate) {
+            (true, Some(i)) => Some(s.db_bytes as f64 / span_days + i),
+            _ => None,
+        };
         let audit = db.exclusion_audit()?;
         let redaction = db.redaction_audit()?;
         let pauses = db.pause_audit()?;
@@ -1512,6 +1578,9 @@ pub mod stats {
                     "input_windows": s.input_windows, "system_events": s.system_events,
                     "sessions": s.sessions, "db_bytes": s.db_bytes,
                     "image_bytes": s.image_bytes, "span_days": span_days,
+                    // 畫面自己的跨度。和 `span_days` 不一樣是正常的——
+                    // 兩個保留期各管一半，見 `DbStats::image_first_ts`。
+                    "image_span_days": image_days,
                     "bytes_per_day": per_day,  // null = 資料還不夠久，不外推
                     "redaction": {
                         "flagged": redaction.flagged,
@@ -1686,15 +1755,36 @@ pub mod stats {
         // Phase 0 的退出條件之一：每天 < 300MB
         let budget = 300 * 1024 * 1024;
         match per_day {
-            Some(p) => println!(
-                "  每天約    {} {}  （Phase 0 預算 300 MB/天）",
-                fmt::bytes(p as i64),
-                if p as i64 <= budget { "✓" } else { "✗" }
-            ),
-            None => println!(
+            Some(p) => {
+                println!(
+                    "  每天約    {} {}  （Phase 0 預算 300 MB/天）",
+                    fmt::bytes(p as i64),
+                    if p as i64 <= budget { "✓" } else { "✗" }
+                );
+                // 兩個分母差得夠多就講出來。少了這一句，一份用滿一年的
+                // 資料庫會印出一個看起來很小的數字，而它小是因為畫面早就
+                // 被保留期清掉了，不是因為她真的只用這麼多。
+                if s.image_bytes > 0 && image_days + 1.0 < span_days {
+                    println!(
+                        "            （文字有 {:.0} 天、畫面只剩 {:.0} 天——保留期不一樣，\
+                         \n              所以這兩半是各算各的天數再相加，不是總量除以 {:.0}）",
+                        span_days, image_days, span_days
+                    );
+                }
+            }
+            None if span_days < 0.5 => println!(
                 "  每天約    還不知道（只錄了 {:.1} 小時，不到半天不外推）\
                  \n            目前一共 {}。要驗 Phase 0 的 300 MB/天，得先錄滿一天。",
                 span_days * 24.0,
+                fmt::bytes(disk_total)
+            ),
+            // 文字夠久、畫面不夠：多半是剛簽第三張同意書，或者保留期剛把舊圖
+            // 清光。整句不外推——把畫面當成 0 加進去，會蓋出一個假的 ✓。
+            None => println!(
+                "  每天約    還不知道（文字有 {:.0} 天，但還留著圖的只有 {:.1} 小時）\
+                 \n            目前一共 {}。畫面那一半得再錄滿半天才算得出來。",
+                span_days,
+                image_days * 24.0,
                 fmt::bytes(disk_total)
             ),
         }
@@ -2242,15 +2332,34 @@ pub mod doctor {
                             sister_core::model::EndReason::describe(r)
                         ),
                     ),
-                    // 有收尾時間、卻沒有理由：alpha.17 以前寫下的紀錄。不是
-                    // 錯誤，只是那個版本答不出來——說出「那時候還沒有在記」，
-                    // 比留一個看起來像故障的空白好。
+                    // 有收尾時間、卻沒有理由。這裡以前一律怪到「那一版還沒有
+                    // 在記」頭上，而那句話有一半機率是冤枉的：`sessions` 這張
+                    // 表永遠不會被刪，`system_events` 會（保留期和 `sister
+                    // forget` 都刪）。上一場比 `text_days` 還舊、或者
+                    // `sister forget --last 2d` 剛好蓋過去，理由就會憑空消失。
+                    //
+                    // 分得出來的證據是「那一場還剩幾筆事件」：一筆都不剩，
+                    // 就是整場被清掉了，不是那一版沒寫。
+                    (Some(t), None) if last.events_left == 0 => mark(
+                        "?",
+                        "上一次錄製",
+                        &format!(
+                            "{since} 開始，{} 結束——理由查不出來了\n\
+                             \x20                    （那一場的事件紀錄已經被清掉：\
+                             保留期，或 `sister forget` 蓋到那段時間）",
+                            fmt::timestamp(t)
+                        ),
+                    ),
+                    // 事件還在、就是沒有 `session_end`：alpha.17 以前寫下的
+                    // 紀錄。不是錯誤，只是那個版本答不出來——說出「那時候還沒
+                    // 有在記」，比留一個看起來像故障的空白好。
                     (Some(t), None) => mark(
                         "?",
                         "上一次錄製",
                         &format!(
-                            "{since} 開始，{} 結束（那一版還沒有在記為什麼停）",
-                            fmt::timestamp(t)
+                            "{since} 開始，{} 結束（{} 那一版還沒有在記為什麼停）",
+                            fmt::timestamp(t),
+                            last.app_version
                         ),
                     ),
                     (None, _) => mark(
@@ -2610,16 +2719,37 @@ pub mod doctor {
         // 這兩個數字以前是**純粹的宣稱**——設定檔裡寫著 30 天，而沒有任何
         // 一行程式碼會刪掉任何東西。同樣不宣稱、直接示範：現在就去問資料庫
         // 「這一刻有多少東西已經過期」。`?` 代表還沒有資料庫可以問。
-        match db.as_ref().map(|d| {
-            d.prune_preview(sister_core::now_ms(), &config.retention)
-                .map(|r| (r.images_deleted, r.frames_deleted))
-        }) {
-            Some(Ok((0, 0))) => line(true, "現在有多少已過期", "沒有——都還在保留期內"),
-            Some(Ok((imgs, rows))) => mark(
-                "?",
-                "現在有多少已過期",
-                &format!("{imgs} 個畫面檔、{rows} 列紀錄。跑 `sister prune` 讓它們消失"),
-            ),
+        //
+        // `prune_preview` 回六個計數器，這裡以前只看兩個。一段全部被排除規則
+        // 擋掉（不寫 frame 列、只留下 system_events）而過了期的日子，兩個
+        // 計數器都是 0 → doctor 說「沒有——都還在保留期內」，然後下一句
+        // `sister prune` 印出「刪掉了 0 段文字、0 個事實、37 筆事件」。
+        // 這一行的存在意義就是「不宣稱，直接示範」，所以它得看完整份。
+        match db
+            .as_ref()
+            .map(|d| d.prune_preview(sister_core::now_ms(), &config.retention))
+        {
+            Some(Ok(r)) if r.is_empty() => line(true, "現在有多少已過期", "沒有——都還在保留期內"),
+            Some(Ok(r)) => {
+                let what = [
+                    (r.images_deleted, "個畫面檔"),
+                    (r.frames_deleted, "列畫面紀錄"),
+                    (r.chunks_deleted, "段文字"),
+                    (r.facts_deleted, "個事實"),
+                    (r.events_deleted, "筆事件"),
+                    (r.queries_deleted, "題你問過的話"),
+                ]
+                .iter()
+                .filter(|(n, _)| *n > 0)
+                .map(|(n, unit)| format!("{n} {unit}"))
+                .collect::<Vec<_>>()
+                .join("、");
+                mark(
+                    "?",
+                    "現在有多少已過期",
+                    &format!("{what}。跑 `sister prune` 讓它們消失"),
+                )
+            }
             Some(Err(e)) => line(false, "現在有多少已過期", &format!("問不出來：{e:#}")),
             None => mark("?", "現在有多少已過期", no_db),
         }

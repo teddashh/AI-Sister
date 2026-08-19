@@ -836,10 +836,14 @@ impl Db {
     /// 欄位都給出去，讓看得到心跳的那一層去分辨。
     pub fn last_session(&self) -> Result<Option<LastSession>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.started_at, s.ended_at,
+            "SELECT s.started_at, s.ended_at, s.app_version,
                     (SELECT e.detail FROM system_events e
                       WHERE e.session_id = s.id AND e.kind = 'session_end'
-                      ORDER BY e.id DESC LIMIT 1)
+                      ORDER BY e.id DESC LIMIT 1),
+                    -- 那一場還留著幾筆事件。`reason` 是 NULL 的時候，這個
+                    -- 數字分得出「那一版沒在記」和「記了、後來被清掉」——
+                    -- 見 `LastSession::events_left`。
+                    (SELECT COUNT(*) FROM system_events e WHERE e.session_id = s.id)
              FROM sessions s ORDER BY s.id DESC LIMIT 1",
         )?;
         let row = stmt
@@ -847,7 +851,9 @@ impl Db {
                 Ok(LastSession {
                     started_at: r.get(0)?,
                     ended_at: r.get(1)?,
-                    reason: r.get(2)?,
+                    app_version: r.get(2)?,
+                    reason: r.get(3)?,
+                    events_left: r.get(4)?,
                 })
             })
             .optional()?;
@@ -1588,6 +1594,25 @@ impl Db {
                     r.get::<_, Option<i64>>(0)
                 })
                 .unwrap_or(None),
+            // `image_path IS NOT NULL` 而不是全部的 frames：畫面被保留期
+            // 清掉之後那一列還在（時間、標題、字都留著），但 `image_bytes`
+            // 已經歸零，把它算進範圍會再一次讓分母比分子長。
+            image_first_ts: self
+                .conn
+                .query_row(
+                    "SELECT MIN(ts) FROM frames WHERE image_path IS NOT NULL",
+                    [],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .unwrap_or(None),
+            image_last_ts: self
+                .conn
+                .query_row(
+                    "SELECT MAX(ts) FROM frames WHERE image_path IS NOT NULL",
+                    [],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .unwrap_or(None),
             db_bytes: {
                 let page_count: i64 = self
                     .conn
@@ -1917,6 +1942,22 @@ pub struct LastSession {
     /// 應該原樣印出去（[`crate::model::EndReason::describe`] 就是這樣做的），
     /// 不是被當成「沒有理由」吞掉。
     pub reason: Option<String>,
+    /// 錄那一場的執行檔版本。`sessions.app_version`。
+    pub app_version: String,
+    /// 那一場**還留著**幾筆 `system_events`。
+    ///
+    /// [`reason`](Self::reason) 是 `None` 的時候，這個數字是唯一分得出兩件事
+    /// 的證據：`sessions` 這張表永遠不會被刪，但 `system_events` 會（保留期
+    /// 和 `sister forget` 都刪）。所以「沒有理由」有兩種——
+    ///
+    /// * `events_left > 0`：那一場的事件還在，就是沒有 `session_end`。
+    ///   那一版執行檔（alpha.17 以前）真的沒有在記為什麼停。
+    /// * `events_left == 0`：整場的事件都不見了。理由本來很可能寫了，是
+    ///   後來被清掉的——說成「那一版還沒有在記」是把帳算到錯的地方。
+    ///
+    /// 而這一行的全部意義就是分辨「你按了停止」/「她當掉了」/「同意書被
+    /// 撤回」，所以它特別不該把原因報成一個假的「那時候還沒這功能」。
+    pub events_left: i64,
 }
 
 /// 檢索延遲的預算，毫秒。
@@ -2082,8 +2123,21 @@ pub struct DbStats {
     pub input_windows: i64,
     pub system_events: i64,
     pub sessions: i64,
+    /// `text_chunks` 的時間範圍。`retention.text_days` 管的是這一對。
     pub first_ts: Option<Millis>,
     pub last_ts: Option<Millis>,
+    /// **還留著畫面檔的那幾列**的時間範圍。`retention.frames_days` 管這一對。
+    ///
+    /// 和 [`first_ts`](Self::first_ts) 分開，是因為 [`image_bytes`](Self::image_bytes)
+    /// 只涵蓋這一段：畫面被清掉的時候，那一列的 `image_bytes` 會一起歸零
+    /// （見 `retention.rs` 的 `UPDATE frames SET image_path = NULL, image_bytes = 0`）。
+    ///
+    /// 預設兩個保留期不一樣（文字 365 天、畫面 30 天），所以用滿一年之後
+    /// 拿 `image_bytes` 去除以 `first_ts..last_ts`，是**三十天的分子配一年
+    /// 的分母**——每天的用量會印成實際的十二分之一。那個數字是 Phase 0 退出
+    /// 條件（< 300 MB/天）的判決，而錯的方向剛好是「看起來過了」。
+    pub image_first_ts: Option<Millis>,
+    pub image_last_ts: Option<Millis>,
     pub db_bytes: i64,
 }
 
@@ -2842,6 +2896,82 @@ mod tests {
             "一千四百個假 id 裡只有一個是真的、而且有圖"
         );
         assert!(openable.contains(&has_pic), "那一個不能因為排在最後就掉了");
+    }
+
+    /// **畫面的跨度和文字的跨度不是同一個數字。**
+    ///
+    /// `image_bytes` 只涵蓋還留著檔案的那幾列（`retention.frames_days`，預設
+    /// 30 天），`first_ts`/`last_ts` 跟著 `text_chunks` 走（`text_days`，預設
+    /// 365 天）。拿前者去除以後者，是三十天的分子配一年的分母——而 `sister
+    /// stats` 那句「每天約 47.0 MB ✓」正是 Phase 0 退出條件的判決，錯的方向
+    /// 剛好是「看起來過了」。
+    #[test]
+    fn the_pictures_and_the_words_do_not_cover_the_same_days() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        const DAY: Millis = 86_400_000;
+
+        // 一年前那一幀：字還在，圖已經被保留期清掉（`image_path` NULL、
+        // `image_bytes` 歸零，見 `retention.rs`）。
+        db.insert_frame(s, &frame_with_text(DAY, "a", "b", &["很久以前"]), None, 0)
+            .expect("old");
+        // 昨天那一幀：圖還在。
+        db.insert_frame(
+            s,
+            &frame_with_text(DAY * 365, "a", "b", &["昨天"]),
+            Some("/tmp/new.webp"),
+            10_000_000,
+        )
+        .expect("new");
+
+        let st = db.stats().expect("stats");
+        assert_eq!(
+            (st.first_ts, st.last_ts),
+            (Some(DAY), Some(DAY * 365)),
+            "文字橫跨一年"
+        );
+        assert_eq!(
+            (st.image_first_ts, st.image_last_ts),
+            (Some(DAY * 365), Some(DAY * 365)),
+            "但還留著圖的只有最後那一天——分母不能拿文字那個一年來用"
+        );
+    }
+
+    /// **「那一版還沒在記為什麼停」和「記了、後來被清掉」是兩件事。**
+    ///
+    /// `sessions` 這張表誰都不刪，`system_events` 保留期和 `sister forget`
+    /// 都刪。所以一場好好結束的錄製，過一陣子之後 `reason` 會自己變成
+    /// `None`——而 doctor 那一行的全部意義就是分辨「你按了停止」/「她當掉了」/
+    /// 「同意書被撤回」，把原因報成「舊版執行檔」是把帳算到錯的地方。
+    #[test]
+    fn a_reason_that_was_pruned_is_not_a_reason_that_was_never_written() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.1.0-alpha.21").expect("session");
+        db.insert_system(
+            s,
+            &SystemEvent {
+                ts: 1_000,
+                kind: SystemKind::SessionEnd,
+                detail: Some("user_stop".into()),
+            },
+        )
+        .expect("session_end");
+        db.end_session(s).expect("end");
+
+        let before = db.last_session().expect("last").expect("有一場");
+        assert_eq!(before.reason.as_deref(), Some("user_stop"));
+        assert_eq!(before.app_version, "0.1.0-alpha.21");
+        assert!(before.events_left > 0);
+
+        // `sister forget` 蓋過那段時間——理由跟著事件一起走了。
+        db.forget(0, 2_000, None).expect("forget");
+
+        let after = db.last_session().expect("last").expect("那一列還在");
+        assert_eq!(after.reason, None, "理由不見了");
+        assert_eq!(
+            after.events_left, 0,
+            "而且整場的事件都不剩——這才是它不見的原因，不是那一版沒寫"
+        );
     }
 
     #[test]

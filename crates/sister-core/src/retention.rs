@@ -41,10 +41,21 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// 一次清理做掉了什麼。每一項都是「真的發生了」的數字，不是預估。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PruneReport {
-    /// 刪掉的 PNG 檔數（frame 那一列還在，文字也還在）。
+    /// **真的從磁碟上刪掉**的畫面檔數（frame 那一列還在，文字也還在）。
+    ///
+    /// 資料庫說有幾列帶圖是一回事，`remove_file` 成功幾次是另一回事——
+    /// 兩者對不起來的差額在 [`missing`](Self::missing)。
     pub images_deleted: u64,
-    /// 上面那些檔案一共多大。
+    /// 上面那些檔案一共多大。**只算刪成功的那幾個。**
     pub image_bytes_freed: u64,
+    /// 資料庫說有圖、磁碟上卻找不到那個檔的列數。
+    ///
+    /// 不是失敗（隱私上目標已達成，東西確實不在了），但也**不是**
+    /// 「這次清掉的」。手動清空過 `frames/`、或從一份沒帶 `--with-frames`
+    /// 的備份還原之後，這個數字會等於資料庫以為自己有的全部畫面——而
+    /// 沒有這一欄的時候，那個情況和「順利刪掉 120 個檔、釋放 1.2 GB」
+    /// 在報告上長得一模一樣。
+    pub missing: u64,
     /// 整列消失的 frame 數。
     pub frames_deleted: u64,
     /// 連帶消失的可搜尋文字段落數。
@@ -82,25 +93,36 @@ pub fn cutoff(now: Millis, days: u32) -> Millis {
     now - (days as i64) * DAY_MS
 }
 
-/// 要刪掉的檔案，以及刪完之後的下場。
+/// 要刪掉的檔案（相對路徑 + 資料庫記的大小），以及刪完之後的下場。
 ///
 /// 拆成獨立函式是為了讓「檔案系統那一半」可以在沒有資料庫的情況下測到。
+///
+/// **記帳也在這裡做，不在呼叫端。**三個呼叫端以前各自寫一次
+/// 「`len` 減掉新增的 `failed` 就是刪掉的數量」，然後把**每一列**的
+/// `image_bytes` 都加進 `image_bytes_freed`——包括那些檔案根本不在的列。
+/// 手動清空過 `frames/`、或從一份沒帶 `--with-frames` 的備份還原之後，
+/// 報告會說「刪掉了 120 個畫面檔（1.2 GB）」，而磁碟上一個位元組都沒有
+/// 釋放。只有真的 `remove_file` 成功的那幾列才准記帳。
 pub(crate) fn delete_files<'a>(
     root: &Path,
-    rels: impl IntoIterator<Item = &'a str>,
+    files: impl IntoIterator<Item = (&'a str, i64)>,
     report: &mut PruneReport,
 ) {
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
-    for rel in rels {
+    for (rel, bytes) in files {
         let full = root.join(rel);
         match std::fs::remove_file(&full) {
             Ok(()) => {
+                report.images_deleted += 1;
+                report.image_bytes_freed += bytes.max(0) as u64;
                 if let Some(p) = full.parent() {
                     dirs.insert(p.to_path_buf());
                 }
             }
-            // 檔案本來就不在 = 目標已達成。不算失敗，也不值得吵。
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // 檔案本來就不在。隱私上目標已達成，所以不是 `failed`——但它
+            // **也不是**「刪掉了」，而那正是使用者拿來對帳的數字。單獨數一
+            // 欄，讓「資料庫說有 120 張、磁碟上一張都沒有」自己講出來。
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => report.missing += 1,
             Err(e) => report.failed.push(format!("{}: {e}", full.display())),
         }
     }
@@ -199,13 +221,13 @@ impl crate::db::Db {
             .query_map([text_cut], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<std::result::Result<_, _>>()?;
         if let Some(root) = image_root {
-            let before = report.failed.len();
-            delete_files(root, doomed.iter().map(|(p, _)| p.as_str()), &mut report);
-            report.images_deleted += (doomed.len() - (report.failed.len() - before)) as u64;
-            // 這一段的位元組以前沒算進去，於是「刪掉 2 個畫面檔（100 B）」
-            // 裡的檔案數和大小來自不同的兩段。一份自己對不起來的報告，
-            // 比沒有報告更難用。
-            report.image_bytes_freed += doomed.iter().map(|(_, b)| *b as u64).sum::<u64>();
+            // 檔數和位元組都由 `delete_files` 一起記，這樣「刪掉 2 個畫面檔
+            // （100 B）」裡的兩個數字一定來自同一批成功的 `remove_file`。
+            delete_files(
+                root,
+                doomed.iter().map(|(p, b)| (p.as_str(), *b)),
+                &mut report,
+            );
         }
 
         let tx = self.conn.transaction()?;
@@ -267,10 +289,11 @@ impl crate::db::Db {
         // 兩害相權：留著一列指向真實檔案的紀錄，最多是「這一列的圖還沒清掉」，
         // 下次帶著根目錄再跑一次就好；清成 NULL 是不可逆的失憶。
         if let (false, Some(root)) = (stale.is_empty(), image_root) {
-            let before = report.failed.len();
-            delete_files(root, stale.iter().map(|(_, p, _)| p.as_str()), &mut report);
-            report.images_deleted += (stale.len() - (report.failed.len() - before)) as u64;
-            report.image_bytes_freed += stale.iter().map(|(_, _, b)| *b as u64).sum::<u64>();
+            delete_files(
+                root,
+                stale.iter().map(|(_, p, b)| (p.as_str(), *b)),
+                &mut report,
+            );
             let tx = self.conn.transaction()?;
             {
                 let mut up = tx.prepare(
@@ -367,10 +390,11 @@ impl crate::db::Db {
             .query_map([from_ts, to_ts], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<std::result::Result<_, _>>()?;
         if let Some(root) = image_root {
-            let before = report.failed.len();
-            delete_files(root, doomed.iter().map(|(p, _)| p.as_str()), &mut report);
-            report.images_deleted += (doomed.len() - (report.failed.len() - before)) as u64;
-            report.image_bytes_freed += doomed.iter().map(|(_, b)| *b as u64).sum::<u64>();
+            delete_files(
+                root,
+                doomed.iter().map(|(p, b)| (p.as_str(), *b)),
+                &mut report,
+            );
         }
 
         let tx = self.conn.transaction()?;
@@ -513,12 +537,25 @@ mod tests {
         assert_eq!(cutoff(DAY_MS * 10, 3), DAY_MS * 7);
     }
 
+    /// 檔案不在，不算失敗——但**也不算刪掉了**。
+    ///
+    /// 這兩件事以前擠在同一個計數器裡：手動清空過 `frames/`、或從一份沒帶
+    /// `--with-frames` 的備份還原之後，報告會照著資料庫的列數說「刪掉了
+    /// 120 個畫面檔（1.2 GB）」，而磁碟上一個位元組都沒有釋放，連一個 ⚠
+    /// 都不會出現。
     #[test]
-    fn a_missing_file_is_success_not_failure() {
+    fn a_missing_file_is_not_a_failure_but_it_is_not_a_deletion_either() {
         let dir = Tmp::new("missing");
         let mut report = PruneReport::default();
-        delete_files(dir.path(), ["2020/01/01/nope.png"], &mut report);
+        delete_files(
+            dir.path(),
+            [("2020/01/01/nope.png", 1_200_000)],
+            &mut report,
+        );
         assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.images_deleted, 0, "沒有刪到任何檔案");
+        assert_eq!(report.image_bytes_freed, 0, "磁碟上一個位元組都沒有釋放");
+        assert_eq!(report.missing, 1, "但資料庫確實有一列以為自己有圖");
     }
 
     #[test]
@@ -529,9 +566,10 @@ mod tests {
         std::fs::write(deep.join("a.png"), b"x").expect("write");
 
         let mut report = PruneReport::default();
-        delete_files(dir.path(), ["2026/08/18/a.png"], &mut report);
+        delete_files(dir.path(), [("2026/08/18/a.png", 1)], &mut report);
 
         assert!(report.failed.is_empty());
+        assert_eq!((report.images_deleted, report.image_bytes_freed), (1, 1));
         assert!(!dir.path().join("2026").exists(), "空掉的日期目錄該收掉");
         assert!(dir.path().exists(), "根目錄不能被連坐刪掉");
     }
@@ -766,7 +804,7 @@ mod tests {
         std::fs::write(deep.join("b.png"), b"y").expect("write");
 
         let mut report = PruneReport::default();
-        delete_files(dir.path(), ["2026/08/18/a.png"], &mut report);
+        delete_files(dir.path(), [("2026/08/18/a.png", 1)], &mut report);
 
         assert!(deep.join("b.png").exists(), "還沒到期的畫面不能被連坐刪掉");
     }

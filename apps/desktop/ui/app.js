@@ -14,7 +14,11 @@ const STATE_LINES = Object.freeze({
   idle: "在聽",
   thinking: "想一下…",
   paused: "已暫停，沒有在看",
-  asleep: "沒有人在記錄，她今天不會記得任何事",
+  // 「她今天不會記得任何事」是一句這一頁證明不了的話：這裡手上只有「現在
+  // 沒有人在錄」。早上錄了四小時、中午按停的話，那四小時她記得清清楚楚——
+  // 而底下的 `asleepDetail()` 正好會印著「上一次 12:00 停的：你按了停止」，
+  // 自己打自己。改成只講從現在起，那句話對每一種過去都成立。
+  asleep: "沒有人在記錄——從現在起發生的事，她不會知道",
 });
 
 const avatar = document.querySelector("[data-avatar]");
@@ -92,8 +96,11 @@ function asleepDetail() {
   if (lastRun.ended_at === null || lastRun.ended_at === undefined) {
     return `上一次從 ${at(lastRun.started_at)} 開始，沒有好好結束`;
   }
-  return lastRun.why
-    ? `上一次 ${at(lastRun.ended_at)} 停的：${lastRun.why}`
+  if (lastRun.why) return `上一次 ${at(lastRun.ended_at)} 停的：${lastRun.why}`;
+  // 沒有理由有兩種：那一版還沒在記，或者記了、後來被保留期／`sister forget`
+  // 清掉。後者要說「查不出來了」——把它講成沉默，等於默認前者。
+  return lastRun.why_gone
+    ? `上一次 ${at(lastRun.ended_at)} 停的（為什麼停已經跟著那段紀錄一起被清掉了）`
     : `上一次 ${at(lastRun.ended_at)} 停的`;
 }
 
@@ -487,8 +494,13 @@ function blindLines(blind) {
     // 「一段字都沒有」有兩種，而它們的下一步是相反的。看過畫面卻一個字都
     // 沒讀出來，代表讀字那一段斷了（關掉了、或者裝了讀不到）——那是這個
     // 專案已知的主要故障形狀。和 `blind_lines`（ops.rs）同一條分法。
-    return blind.frames > 0
-      ? [`（我看過 ${blind.frames} 張畫面，但一個字都沒讀出來——讀字那一段是斷的。）`]
+    // 「連畫面都沒有」也還有兩種：從來沒錄過，或者錄過的東西被忘掉了／
+    // 過了保留期。`sessions` 不在任何保留期的射程內，所以問得出來。
+    if (blind.frames > 0) {
+      return [`（我看過 ${blind.frames} 張畫面，但一個字都沒讀出來——讀字那一段是斷的。）`];
+    }
+    return blind.sessions > 0
+      ? ["（我錄過，但現在什麼都不剩了——被忘掉了，或是過了保留期。）"]
       : ["（我到現在還沒記過任何東西。）"];
   }
   const out = [];
@@ -503,7 +515,14 @@ function blindLines(blind) {
     out.push(`不過${whose}擋掉過東西（${why}）——在那裡面的我本來就不會知道。`);
   }
   if (blind.paused_episodes > 0) {
-    out.push(`我也被暫停過 ${blind.paused_episodes} 次，那幾段是空的。`);
+    // 這裡本來就不印時間，所以躲過了 `paused_ms` 那個「一共 0 秒」的坑。
+    // 但「還沒解除」是另一回事：那不是過去式，是**現在**——他問的東西如果
+    // 是暫停之後發生的，她根本沒有機會看到。和 `blind_lines`（ops.rs）同一條。
+    out.push(
+      blind.paused_open
+        ? `我也被暫停過 ${blind.paused_episodes} 次，而且最後那一次到現在都還沒解除——我此刻就是閉著眼睛的。`
+        : `我也被暫停過 ${blind.paused_episodes} 次，那幾段是空的。`,
+    );
   }
   return out;
 }
@@ -873,5 +892,8 @@ if (params.get("hits") === "none") {
     ],
     paused_episodes: 2,
     paused_ms: 4 * 3600 * 1000,
+    // 最後一段還沒解除：這一版要看的就是那句「我此刻就是閉著眼睛的」。
+    paused_open: true,
+    paused_truncated: 0,
   });
 }
