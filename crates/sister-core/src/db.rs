@@ -1315,7 +1315,7 @@ impl Db {
     /// 資料庫本身還不到 `days` 天的時候一樣回 `None`：掃描確實看完了全部，
     /// 這時候再加一句免責聲明只是雜訊。
     pub fn scan_horizon_days(&self, query: &str) -> Result<Option<i64>> {
-        if bigram_query(query).is_some() {
+        if covered_by_index(query) {
             return Ok(None);
         }
         // 分成兩句，不是一句 `SELECT MIN(ts), MAX(ts)`。SQLite 只對**單獨**
@@ -1909,6 +1909,44 @@ fn cjk_bigrams(text: &str) -> String {
 ///
 /// `None` = 這個查詢用不上 bigram 索引（沒有任何長度 ≥2 的 CJK 詞），
 /// 那就別去問它，直接走原本的路。
+/// 三個索引裡有沒有**任何一個看得到這一題**（不管找不找得到東西）。
+///
+/// 這一支在的理由是一則假警報。`scan_horizon_days` 以前問的是
+/// `bigram_query(query).is_some()`，而那一支對**任何沒有相鄰 CJK 雙字的
+/// 查詢**都回 `None`——包括每一個純英數的查詢。於是一顆存滿一年的資料庫，
+/// 查 `ERR_CONNECTION_REFUSED` 查不到，答案是
+///
+/// ```text
+/// 沒有找到。
+/// 她翻過的那幾段裡沒有這個字。
+/// ——但這種查法…沒有索引可用，只能掃最近 30 天…多打一個字就走得到索引。
+/// ```
+///
+/// 三句話，三個錯。trigram 索引（`text_fts`）蓋整張表、沒有時間界線，這一題
+/// 它是**全部 365 天都看過了**的；那個「沒有」是完整的、可以信的。而那句
+/// 「多打一個字」對一個 21 個字元的錯誤碼不是建議，是雜訊。
+///
+/// 這是那個欄位當初要修的東西的**反面**：一個真的、完整的「找不到」被降級
+/// 成「我只讀了十二分之一」。而使用者對這兩句話的反應完全相反——一句是
+/// 「那就是沒發生」，一句是「再翻遠一點」。
+///
+/// 判準跟著 `search` 那段派工走：
+///
+/// - trigram 比的是子字串，但每個詞要 ≥3 個字元。`fts_query` 用 `AND` 串詞，
+///   所以只要有一個詞太短，整個 MATCH 就是空的——「每一個詞都夠長」才算數。
+/// - bigram（[`cjk_bigrams`]）蓋長度 ≥2 的中文詞。
+/// - 兩個都不行才落到 [`Db::search_like`]，而那條路夾在 [`LIKE_SCAN_DAYS`] 天內。
+///
+/// `text_fts_uni`（unicode61）刻意不算：它比的是**整個詞**，所以「80」找得到
+/// 一個單獨的 `80`，卻找不到藏在 `0800` 裡的那個——而後者正是他會來問的那種。
+/// 少算它會讓她偶爾多講一句「更早的沒翻到」，多算它會讓她把一次半盲說成看完
+/// 了。這兩種錯的代價不對稱。
+fn covered_by_index(query: &str) -> bool {
+    let mut terms = query.split_whitespace().peekable();
+    let trigram = terms.peek().is_some() && terms.all(|t| t.chars().count() >= 3);
+    trigram || bigram_query(query).is_some()
+}
+
 fn bigram_query(query: &str) -> Option<String> {
     let parts: Vec<String> = query
         .split_whitespace()

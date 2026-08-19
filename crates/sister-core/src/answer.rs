@@ -496,5 +496,29 @@ mod tests {
             two.scan_horizon_days, None,
             "兩個字走得到 bigram 索引，沒有時間界線——這時候不該多講一句"
         );
+
+        // 這一條擋的是上面那個欄位的**反面**：一次真的、完整的「沒有」被
+        // 降級成「我只讀了十二分之一」。判斷式以前是
+        // `bigram_query(query).is_some()`，而純英數的查詢一個相鄰 CJK 雙字
+        // 都產不出來——於是每一個錯誤碼、檔名、網址片段的查詢都會附上一句
+        // 「只能掃最近 30 天」，而 trigram 索引明明蓋了整張表。使用者對這
+        // 兩句話的反應是相反的：一句是「那就是沒發生」，一句是「再翻遠一點」。
+        for q in ["ERR_CONNECTION_REFUSED", "invoice.pdf", "0800"] {
+            let b = blind_spots(&db, nowhere(), q).expect("blind");
+            assert_eq!(
+                b.scan_horizon_days, None,
+                "「{q}」由 trigram 蓋著整張表，那個「沒有」是完整的"
+            );
+        }
+
+        // 但真的短到索引比不出來的，還是要說。兩個以內的英數和一個中文字
+        // 同一條路：整個詞比得到（unicode61），藏在別的詞裡面的比不到，而
+        // 後者只掃得動 30 天。
+        let short = blind_spots(&db, nowhere(), "80").expect("blind");
+        assert_eq!(
+            short.scan_horizon_days,
+            Some(30),
+            "兩個字元的英數 trigram 比不出來（`80` 藏在 `0800` 裡就是這種）"
+        );
     }
 }
