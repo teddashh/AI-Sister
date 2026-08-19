@@ -3281,6 +3281,71 @@ pub mod doctor {
     }
 }
 
+/// 一次擷取到底貴在哪一段。
+///
+/// 這一段本來只活在 `screen.rs` 的 `#[cfg(test)]` 裡。而唯一有那台
+/// 2560×1440 機器的人手上只有一個下載來的 exe——一個只有 `cargo test`
+/// 碰得到的量尺，對他等於不存在，於是 #18 卡在「我推測是 GetDIBits」。
+/// 量尺要跟著產品出貨。
+pub mod bench {
+    use super::*;
+
+    #[cfg(windows)]
+    pub fn run(rounds: u32) -> Result<()> {
+        let rows = sister_capture::windows::screen::bench_grab(rounds);
+        if rows.is_empty() {
+            println!(
+                "量不到：現在抓不到畫面（鎖屏、沒有互動桌面，或前景視窗不在任何一台螢幕上）。"
+            );
+            println!("解鎖之後在一般的桌面 session 裡再跑一次。");
+            return Ok(());
+        }
+        let (w, h) = (rows[0].width, rows[0].height);
+        println!("原生 {w}x{h}，每種抓法 {rounds} 次（另有一輪熱身不計時）：\n");
+        println!("  抓法                    建立    BitBlt  GetDIBits    合計");
+        for r in &rows {
+            println!(
+                "  {:<20}{:7.1}{:9.1}{:10.1}{:9.1} ms",
+                r.label,
+                r.make_ms,
+                r.blt_ms,
+                r.dib_ms,
+                r.total_ms()
+            );
+        }
+        // 每一段各自通往完全不同的下一步，所以要講怎麼讀——一張沒有讀法的
+        // 表，會被讀成「有數字了」然後放著。
+        println!(
+            "\n怎麼讀（{} 像素，同樣大小的 memcpy 約 1.5 ms）：",
+            w as i64 * h as i64
+        );
+        println!(
+            "  建立最大      → 每一拍新建再刪掉一張 {:.1} MB 的 bitmap 太貴，改成快取重用。",
+            (w as f64 * h as f64 * 4.0) / 1024.0 / 1024.0
+        );
+        println!(
+            "  BitBlt 最大   → 跟顯示驅動要畫面的過路費。如果「純 SRCCOPY」明顯比\n\
+             \x20                 「含 CAPTUREBLT」便宜，那個旗標就是在付一筆 Win8 之後\n\
+             \x20                 已經免費的錢（桌面 DC 本來就含分層視窗）。兩者一樣貴的話\n\
+             \x20                 GDI 這條路到頭了，只有 DXGI Desktop Duplication 救得了。"
+        );
+        println!(
+            "  GetDIBits 最大 → device-dependent bitmap 的轉格式讀回。改成\n\
+             \x20                 CreateDIBSection，讓 BitBlt 直接寫進我們自己的記憶體，\n\
+             \x20                 這一段整個消失。"
+        );
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    pub fn run(_rounds: u32) -> Result<()> {
+        // 不是「這台機器很慢」，是「這台機器沒有這條路可以量」。兩者長得
+        // 一樣的話，開發機上跑一次會得到一張空表然後被當成「都是 0，很好」。
+        println!("這個平台沒有 GDI 擷取後端，沒有東西可以量。這條路目前只有 Windows。");
+        Ok(())
+    }
+}
+
 pub mod replay {
     use super::*;
     use sister_capture::{Recorder, ReplayBackend, Scenario, Tick};

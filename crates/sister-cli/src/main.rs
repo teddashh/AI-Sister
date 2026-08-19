@@ -194,6 +194,20 @@ enum Command {
 
     /// 環境檢查：這台機器能不能好好跑
     Doctor,
+
+    /// 這台機器抓一張畫面要多久，以及那些時間花在哪
+    ///
+    /// `doctor` 問的是「能不能」，這個問的是「多貴」。實測一次擷取 127 ms
+    /// ——除以 3.7M 像素是 34 ns/像素，而同樣 14.7 MB 的 memcpy 只要 1.5 ms。
+    /// 那不是搬運，是有人在逐像素做事。這張表把一次擷取拆成建立 GDI 物件、
+    /// BitBlt、GetDIBits 三段，一次只換一個變因，好知道要往哪裡改。
+    ///
+    /// 它不寫資料庫，也不留任何畫面——只是重複抓同一個畫面然後量時間。
+    Bench {
+        /// 每種抓法量幾次（另有一輪熱身不計時）
+        #[arg(long, default_value_t = 8)]
+        rounds: u32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -261,6 +275,7 @@ fn main() -> Result<()> {
             json,
         } => ops::consent::run(&data_dir, &config, &grant, &revoke, json),
         Command::Doctor => ops::doctor::run(&data_dir, &config, cli.config.clone()),
+        Command::Bench { rounds } => ops::bench::run(rounds),
     }
 }
 

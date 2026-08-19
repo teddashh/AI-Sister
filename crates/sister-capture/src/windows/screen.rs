@@ -331,6 +331,181 @@ unsafe fn read_pixels(mem: HDC, bmp: HBITMAP, w: u32, h: u32) -> Result<Vec<u8>>
     }
 }
 
+/// 一種抓法量出來的三段耗時（毫秒／次）。
+#[derive(Debug, Clone)]
+pub struct BenchRow {
+    pub label: String,
+    pub width: i32,
+    pub height: i32,
+    /// 建立 GDI 物件（DC + bitmap）
+    pub make_ms: f64,
+    /// `BitBlt`：跟顯示驅動要畫面的過路費
+    pub blt_ms: f64,
+    /// `GetDIBits`：把 device-dependent bitmap 轉格式搬回系統記憶體
+    pub dib_ms: f64,
+}
+
+impl BenchRow {
+    pub fn total_ms(&self) -> f64 {
+        self.make_ms + self.blt_ms + self.dib_ms
+    }
+}
+
+/// 原生解析度下，**一次只換一個變因**的 2×2。
+///
+/// 這是 #18 的量尺，所以它是產品的一部分，不是測試裡的一段。他手上只有
+/// 一個下載來的 exe——一個只有 `cargo test` 碰得到的量尺，對唯一有那台
+/// 機器的人來說等於不存在。
+///
+/// 一次擷取 127 ms，除以 3.7M 像素是 34 ns/像素，而同樣 14.7 MB 的
+/// `memcpy` 只要 1.5 ms。GDI 慢了快兩個數量級——那不是搬運，是有人在逐
+/// 像素做事。這張表要回答的就是「誰」：
+///
+///   建立      每一拍新建再刪掉一張 14.7MB 的 bitmap → 貴就快取
+///   BitBlt    `CAPTUREBLT` 會逼 DWM 多 flush 一次合成，而 Win8 之後桌面
+///             DC 本來就含分層視窗 → 可能在付一筆已經免費的錢
+///   GetDIBits device-dependent bitmap 的轉格式讀回 → 貴就換
+///             `CreateDIBSection`，讓 BitBlt 直接寫進我們自己的記憶體
+///
+/// 抓不到畫面（鎖屏、session 0）回空的 `Vec`——那不是失敗，是這台機器現在
+/// 沒有可量的東西。
+pub fn bench_grab(rounds: u32) -> Vec<BenchRow> {
+    use std::time::{Duration, Instant};
+
+    let rounds = rounds.max(1);
+    let mut rows = Vec::new();
+    if session_locked() {
+        return rows;
+    }
+    let Some((_, full)) = focused_monitor(unsafe { GetForegroundWindow() }) else {
+        return rows;
+    };
+    let (w, h) = (full.right - full.left, full.bottom - full.top);
+    if w <= 0 || h <= 0 {
+        return rows;
+    }
+    let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+
+    unsafe {
+        let screen = GetDC(None);
+        if screen.is_invalid() {
+            return rows;
+        }
+        // 重用那一組在計時之外只建一次
+        let kept_mem = CreateCompatibleDC(Some(screen));
+        let kept_bmp = CreateCompatibleBitmap(screen, w, h);
+        for (flag_name, rop) in [
+            ("含 CAPTUREBLT", SRCCOPY | CAPTUREBLT),
+            ("純 SRCCOPY", SRCCOPY),
+        ] {
+            for (reuse_name, reuse) in [("每拍新建", false), ("重用 GDI", true)] {
+                let (mut make, mut blt, mut dib) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+                let mut ok = true;
+                // 第 0 輪是熱身，不計時
+                for round in 0..=rounds {
+                    let t = Instant::now();
+                    let (mem, bmp) = if reuse {
+                        (kept_mem, kept_bmp)
+                    } else {
+                        (
+                            CreateCompatibleDC(Some(screen)),
+                            CreateCompatibleBitmap(screen, w, h),
+                        )
+                    };
+                    let made = t.elapsed();
+                    let got = bench_one(screen, (mem, bmp), full, (w, h), rop, &mut buf[..]);
+                    if !reuse {
+                        let _ = DeleteObject(HGDIOBJ(bmp.0));
+                        let _ = DeleteDC(mem);
+                    }
+                    match got {
+                        Some((a, b)) if round > 0 => {
+                            make += made;
+                            blt += a;
+                            dib += b;
+                        }
+                        Some(_) => {}
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                let per = |d: Duration| d.as_secs_f64() * 1000.0 / rounds as f64;
+                if ok {
+                    rows.push(BenchRow {
+                        label: format!("{flag_name} / {reuse_name}"),
+                        width: w,
+                        height: h,
+                        make_ms: per(make),
+                        blt_ms: per(blt),
+                        dib_ms: per(dib),
+                    });
+                }
+            }
+        }
+        if !kept_bmp.is_invalid() {
+            let _ = DeleteObject(HGDIOBJ(kept_bmp.0));
+        }
+        if !kept_mem.is_invalid() {
+            let _ = DeleteDC(kept_mem);
+        }
+        ReleaseDC(None, screen);
+    }
+    rows
+}
+
+/// 一次擷取，把 `BitBlt` 和 `GetDIBits` 的時間分開。
+///
+/// # Safety
+/// `buf` 至少要有 `w * h * 4` 個位元組，`mem`/`bmp` 要是有效的 GDI 物件。
+unsafe fn bench_one(
+    screen: HDC,
+    (mem, bmp): (HDC, HBITMAP),
+    rect: RECT,
+    (w, h): (i32, i32),
+    rop: windows::Win32::Graphics::Gdi::ROP_CODE,
+    buf: &mut [u8],
+) -> Option<(std::time::Duration, std::time::Duration)> {
+    use std::time::Instant;
+    unsafe {
+        let old = SelectObject(mem, HGDIOBJ(bmp.0));
+        let t = Instant::now();
+        let ok = BitBlt(mem, 0, 0, w, h, Some(screen), rect.left, rect.top, rop).is_ok();
+        let blt = t.elapsed();
+        // GetDIBits 的文件要求 bitmap 不可以還選在某個 DC 裡
+        SelectObject(mem, old);
+        if !ok {
+            return None;
+        }
+
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let t = Instant::now();
+        let scanned = GetDIBits(
+            mem,
+            bmp,
+            0,
+            h as u32,
+            Some(buf.as_mut_ptr().cast()),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        let dib = t.elapsed();
+        (scanned != 0).then_some((blt, dib))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{RawFrame, fit};
@@ -372,13 +547,8 @@ mod tests {
     /// 每一幀都會被判成「新的」，去重整個失效，而症狀是磁碟爆掉。
     #[test]
     fn how_expensive_is_each_way_of_grabbing_this_screen() {
-        use super::{
-            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-            HBITMAP, HDC, HGDIOBJ, OCR_LONG_EDGE, RECT, ReleaseDC, SRCCOPY, SelectObject,
-            WindowsScreen,
-        };
+        use super::{OCR_LONG_EDGE, WindowsScreen};
         use std::time::Instant;
-        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
         const ROUNDS: u32 = 8;
         let mut s = WindowsScreen::new();
@@ -449,148 +619,24 @@ mod tests {
         // 這裡本來有兩列：「中央一小塊 / 不縮放」和「中央一小塊 / 重用 DC」。
         // 前者走 `blit`（`SRCCOPY | CAPTUREBLT`），後者是手寫的**裸 SRCCOPY**。
         // 兩個變因一起換了，於是那個差值裡混著 CAPTUREBLT 的錢，卻被當成
-        // 「GDI 物件手續費」讀。而模組開頭那句「擷取的錢花在讀來源、不在寫
-        // 目的地」正是從這組數字長出來的——一個被污染的對照組，會給出一個
-        // 長得跟真的一模一樣的結論。這和報告那邊的毛病是同一個：每一列都是
-        // 真的量到的，擺在一起才說謊。
+        // 「GDI 物件手續費」讀。一個被污染的對照組，會給出一個長得跟真的
+        // 一模一樣的結論。
         //
-        // 這一版是 2×2，而且用**原生解析度**——那是產品每一拍真的在做的事，
-        // 256×256 那一塊回答不了「127 ms 從哪來」。三個數字分開報，因為它們
-        // 各自通往完全不同的下一步：
-        //
-        //   建立      → 每一拍新建/刪掉一張 14.7MB 的 bitmap。貴的話就快取。
-        //   BitBlt    → 跟顯示驅動要畫面的過路費。CAPTUREBLT 會讓 DWM 額外
-        //               flush 一次合成，Win8 以後桌面 DC 本來就含分層視窗，
-        //               所以那個旗標可能是在付一筆已經免費的錢。
-        //   GetDIBits → 把 device-dependent bitmap 轉格式搬回系統記憶體。
-        //               貴的話答案是 CreateDIBSection：BitBlt 直接寫進一塊
-        //               我們自己的記憶體，這一步整個不存在。
-        if let Some((_, full)) = super::focused_monitor(unsafe { GetForegroundWindow() }) {
-            /// 一次擷取，把 BitBlt 和 GetDIBits 的時間分開。
-            ///
-            /// # Safety
-            /// `buf` 至少要有 `w * h * 4` 個位元組。
-            unsafe fn split(
-                screen: HDC,
-                (mem, bmp): (HDC, HBITMAP),
-                rect: RECT,
-                (w, h): (i32, i32),
-                rop: windows::Win32::Graphics::Gdi::ROP_CODE,
-                buf: &mut [u8],
-            ) -> Option<(std::time::Duration, std::time::Duration)> {
-                unsafe {
-                    let old = SelectObject(mem, HGDIOBJ(bmp.0));
-                    let t = Instant::now();
-                    let ok =
-                        BitBlt(mem, 0, 0, w, h, Some(screen), rect.left, rect.top, rop).is_ok();
-                    let blt = t.elapsed();
-                    // GetDIBits 的文件要求 bitmap 不可以還選在某個 DC 裡
-                    SelectObject(mem, old);
-                    if !ok {
-                        return None;
-                    }
-
-                    let mut info = super::BITMAPINFO {
-                        bmiHeader: super::BITMAPINFOHEADER {
-                            biSize: std::mem::size_of::<super::BITMAPINFOHEADER>() as u32,
-                            biWidth: w,
-                            biHeight: -h,
-                            biPlanes: 1,
-                            biBitCount: 32,
-                            biCompression: super::BI_RGB.0,
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    };
-                    let t = Instant::now();
-                    let scanned = super::GetDIBits(
-                        mem,
-                        bmp,
-                        0,
-                        h as u32,
-                        Some(buf.as_mut_ptr().cast()),
-                        &mut info,
-                        super::DIB_RGB_COLORS,
-                    );
-                    let dib = t.elapsed();
-                    (scanned != 0).then_some((blt, dib))
-                }
-            }
-
-            let (w, h) = (full.right - full.left, full.bottom - full.top);
-            let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
-            println!("原生 {w}x{h}，一次只換一個變因（各 {ROUNDS} 次，已熱身）：");
-
-            unsafe {
-                let screen = GetDC(None);
-                if !screen.is_invalid() {
-                    // 重用那一組在計時之外只建一次
-                    let kept_mem = CreateCompatibleDC(Some(screen));
-                    let kept_bmp = CreateCompatibleBitmap(screen, w, h);
-                    for (flag_name, rop) in [
-                        ("含 CAPTUREBLT", SRCCOPY | super::CAPTUREBLT),
-                        ("純 SRCCOPY  ", SRCCOPY),
-                    ] {
-                        for (reuse_name, reuse) in [("每拍新建", false), ("重用 GDI", true)] {
-                            let mut make = std::time::Duration::ZERO;
-                            let mut blt = std::time::Duration::ZERO;
-                            let mut dib = std::time::Duration::ZERO;
-                            let mut ok = true;
-                            // 熱身一輪不計時，再跑 ROUNDS 輪
-                            for round in 0..=ROUNDS {
-                                let t = Instant::now();
-                                let (mem, bmp) = if reuse {
-                                    (kept_mem, kept_bmp)
-                                } else {
-                                    (
-                                        CreateCompatibleDC(Some(screen)),
-                                        CreateCompatibleBitmap(screen, w, h),
-                                    )
-                                };
-                                let made = t.elapsed();
-                                let got =
-                                    split(screen, (mem, bmp), full, (w, h), rop, &mut buf[..]);
-                                if !reuse {
-                                    let _ = DeleteObject(HGDIOBJ(bmp.0));
-                                    let _ = DeleteDC(mem);
-                                }
-                                match got {
-                                    Some((a, b)) if round > 0 => {
-                                        make += made;
-                                        blt += a;
-                                        dib += b;
-                                    }
-                                    Some(_) => {}
-                                    None => {
-                                        ok = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            let per =
-                                |d: std::time::Duration| d.as_secs_f64() * 1000.0 / ROUNDS as f64;
-                            if ok {
-                                println!(
-                                    "  {flag_name} / {reuse_name}\t建立 {:5.1}\tBitBlt {:6.1}\tGetDIBits {:6.1}\t合計 {:6.1} ms",
-                                    per(make),
-                                    per(blt),
-                                    per(dib),
-                                    per(make + blt + dib),
-                                );
-                            } else {
-                                println!("  {flag_name} / {reuse_name}\t中途失敗，這一列作廢");
-                            }
-                        }
-                    }
-                    if !kept_bmp.is_invalid() {
-                        let _ = DeleteObject(HGDIOBJ(kept_bmp.0));
-                    }
-                    if !kept_mem.is_invalid() {
-                        let _ = DeleteDC(kept_mem);
-                    }
-                    ReleaseDC(None, screen);
-                }
-            }
+        // 現在那張表是 `bench_grab`，而且**在產品裡**（`sister bench`）——
+        // 唯一有那台 2560×1440 機器的人手上只有一個下載來的 exe，一個只有
+        // `cargo test` 碰得到的量尺對他等於不存在。這裡直接叫它，不重寫一份：
+        // 測試印的數字和他貼回來的數字，必須是同一段程式跑出來的。
+        for r in super::bench_grab(ROUNDS) {
+            println!(
+                "  {}\t{}x{}\t建立 {:5.1}\tBitBlt {:6.1}\tGetDIBits {:6.1}\t合計 {:6.1} ms",
+                r.label,
+                r.width,
+                r.height,
+                r.make_ms,
+                r.blt_ms,
+                r.dib_ms,
+                r.total_ms()
+            );
         }
 
         // 這裡真的下斷言，而且斷言的是一件**會安靜地壞掉**的事。
