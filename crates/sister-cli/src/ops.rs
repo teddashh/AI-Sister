@@ -916,6 +916,7 @@ pub mod stats {
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "frames": s.frames, "frames_collapsed": s.frames_collapsed,
+                    "frames_with_image": s.frames_with_image,
                     "ocr_blocks": s.ocr_blocks, "chunks": s.chunks, "facts": s.facts,
                     "focus_events": s.focus_events, "clipboard_events": s.clipboard_events,
                     "input_windows": s.input_windows, "system_events": s.system_events,
@@ -968,6 +969,18 @@ pub mod stats {
         if s.frames + s.frames_collapsed > 0 {
             let ratio = s.frames_collapsed as f64 / (s.frames + s.frames_collapsed) as f64;
             println!("            去重擋掉了 {:.0}% 的畫面", ratio * 100.0);
+        }
+        // 「4 張保留」配上底下的「畫面檔 0 B」看起來像壞了，其實是第三張同意書
+        // 沒簽——她照樣一幀一幀地記，只是只記上面的字。分不出「隱私模式在生效」
+        // 和「寫圖寫失敗」的報告，會讓人去修一個沒壞的東西。
+        // 全部都有圖的時候不講：那是預期，多一行只是雜訊。
+        if s.frames > 0 && s.frames_with_image < s.frames {
+            let how = if s.frames_with_image == 0 {
+                "一張圖都沒留（只記了上面的字）".to_string()
+            } else {
+                format!("其中 {} 張留了圖，其餘只記了上面的字", s.frames_with_image)
+            };
+            println!("            {how}");
         }
         println!(
             "  文字      {} 段（{} 個 OCR 區塊）",

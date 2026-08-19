@@ -1483,6 +1483,7 @@ impl Db {
         Ok(DbStats {
             frames: count("SELECT COUNT(*) FROM frames")?,
             frames_collapsed: count("SELECT COALESCE(SUM(dup_run),0) FROM frames")?,
+            frames_with_image: count("SELECT COUNT(*) FROM frames WHERE image_path IS NOT NULL")?,
             image_bytes: count("SELECT COALESCE(SUM(image_bytes),0) FROM frames")?,
             ocr_blocks: count("SELECT COUNT(*) FROM ocr_blocks")?,
             chunks: count("SELECT COUNT(*) FROM text_chunks")?,
@@ -1964,6 +1965,14 @@ pub struct DbStats {
     pub frames: i64,
     /// 被去重折疊掉的幀數——這個數字越大，代表去重省下越多。
     pub frames_collapsed: i64,
+    /// [`frames`](Self::frames) 裡真的有一張圖躺在硬碟上的那幾筆。
+    ///
+    /// 兩個數字不一樣是**正常的**，不是壞掉：第三張同意書沒簽（或者
+    /// `store_images = false`）的時候她照樣一幀一幀地記，只是只記上面的字。
+    /// 少了這個欄位，「4 張保留」配上「畫面檔 0 B」看起來就像一個 bug，而它
+    /// 其實是使用者自己選的隱私模式正在生效——分不出這兩件事的報告，會讓人
+    /// 去修一個沒有壞的東西，或者放過一個真的壞了的。
+    pub frames_with_image: i64,
     pub image_bytes: i64,
     pub ocr_blocks: i64,
     pub chunks: i64,
@@ -2467,6 +2476,28 @@ mod tests {
         let st = db.stats().expect("stats");
         assert_eq!(st.frames, 1, "duplicates must not create rows");
         assert_eq!(st.frames_collapsed, 5, "but they must be counted");
+    }
+
+    /// 第三張同意書沒簽的時候她照樣一幀一幀地記，只是不留圖。足跡報告要分得出
+    /// 「使用者選了不留圖」和「圖寫失敗了」——不然「3 張保留」配上「畫面檔 0 B」
+    /// 看起來就是一個 bug，而它其實是隱私模式在生效。
+    #[test]
+    fn a_frame_she_remembered_without_a_picture_still_counts_as_a_frame() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+
+        for (i, text) in ["只記字的", "也是只記字的"].iter().enumerate() {
+            let f = frame_with_text(i as i64 + 1, "a", "b", &[text]);
+            db.insert_frame(s, &f, None, 0).expect("insert");
+        }
+        let kept = frame_with_text(3, "a", "b", &["這張留了圖"]);
+        db.insert_frame(s, &kept, Some("/tmp/kept.webp"), 4096)
+            .expect("insert");
+
+        let st = db.stats().expect("stats");
+        assert_eq!(st.frames, 3, "沒留圖的那兩張也是她記過的東西");
+        assert_eq!(st.frames_with_image, 1, "但硬碟上只有一張");
+        assert_eq!(st.image_bytes, 4096);
     }
 
     #[test]
