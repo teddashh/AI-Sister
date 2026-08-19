@@ -1118,6 +1118,60 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// 哪幾天她其實有在看，各記了多少。
+    ///
+    /// 時間軸的第一個問題永遠是「哪幾天有東西」。沒有這一支，日期選擇器只能
+    /// 讓使用者一天一天點過去猜——而她可能整整兩週都沒開機。
+    ///
+    /// **切天用的是本機時區的偏移量，不是 UTC。**「昨天」對使用者而言是他睡覺
+    /// 那條線分開的，不是格林威治的。偏移量由呼叫端傳進來，因為 core 這一層
+    /// 刻意不認識「使用者在哪個時區」這件事。
+    pub fn days_with_data(&self, tz_offset_ms: i64) -> Result<Vec<DaySummary>> {
+        const DAY_MS: i64 = 86_400_000;
+        let mut stmt = self.conn.prepare(
+            "SELECT (ts + ?1) / ?2 AS day, COUNT(*), MIN(ts), MAX(ts)
+             FROM text_chunks GROUP BY day ORDER BY day DESC",
+        )?;
+        let rows = stmt.query_map(params![tz_offset_ms, DAY_MS], |r| {
+            let day: i64 = r.get(0)?;
+            Ok(DaySummary {
+                // 換算回這一天在**本機**的午夜（epoch 毫秒）。前端拿它直接餵
+                // `new Date()` 就會顯示對的日期。
+                start_ts: day * DAY_MS - tz_offset_ms,
+                chunks: r.get(1)?,
+                first_ts: r.get(2)?,
+                last_ts: r.get(3)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// 一段時間裡她看到的東西，依時間排序。
+    ///
+    /// 主體是 `text_chunks` 而不是 `frames`，這是個刻意的選擇：文字保留 365 天、
+    /// 畫面 30 天，所以超過 30 天的那些日子裡 `frames` 是空的，而她**確實**還
+    /// 記得那幾天的東西。拿 frames 當主體的時間軸，會讓一個月前的自己看起來
+    /// 像不存在。`frame_id` 可以是 `None`，那就是「字還在、圖過期了」。
+    pub fn timeline(&self, from_ts: Millis, to_ts: Millis, limit: usize) -> Result<Vec<Moment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ts, app_id, window_title, url, text, frame_id
+             FROM text_chunks
+             WHERE ts >= ?1 AND ts < ?2
+             ORDER BY ts LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts, limit as i64], |r| {
+            Ok(Moment {
+                ts: r.get(0)?,
+                app: r.get(1)?,
+                title: r.get(2)?,
+                url: r.get(3)?,
+                text: r.get(4)?,
+                frame_id: r.get(5)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
     /// `ts` 之後寫出去的畫面檔一共多少位元組。
     ///
     /// 用途是讓「每天畫面上限」在**重開之後仍然成立**。少了這一步，那個
@@ -1482,6 +1536,29 @@ pub struct ExclusionAudit {
     /// 第一段與最後一段**開始**的時間。段的結束沒有被記錄。
     pub first_ts: Millis,
     pub last_ts: Millis,
+}
+
+/// 某一天她記了多少。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaySummary {
+    /// 這一天在**本機時區**的午夜，epoch 毫秒。
+    pub start_ts: Millis,
+    pub chunks: i64,
+    /// 這一天最早／最晚的那一筆。用來畫「她那天從幾點看到幾點」。
+    pub first_ts: Millis,
+    pub last_ts: Millis,
+}
+
+/// 時間軸上的一格。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moment {
+    pub ts: Millis,
+    pub app: Option<String>,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub text: String,
+    /// `None` = 字還在，但那張圖已經過了保留期。
+    pub frame_id: Option<i64>,
 }
 
 /// 她被使用者叫去閉眼的紀錄。
@@ -1905,6 +1982,82 @@ mod tests {
             !phones.is_empty(),
             "phone fact must be findable by substring"
         );
+    }
+
+    /// 直接塞一筆文字。時間軸只讀 `text_chunks`，所以測它不必先造一張畫面
+    /// ——而「沒有畫面也要看得到」正是下面那條測試的重點。
+    fn put_chunk(db: &Db, session_id: i64, ts: Millis, text: &str) {
+        db.conn()
+            .execute(
+                "INSERT INTO text_chunks(ts, session_id, source_kind, text)
+                 VALUES(?1, ?2, 'ocr', ?3)",
+                params![ts, session_id, text],
+            )
+            .expect("insert chunk");
+    }
+
+    /// 一天從哪裡開始，由**使用者住在哪**決定，不是格林威治。
+    ///
+    /// 這條看起來像在測算術，實際上釘的是一個會讓整條時間軸錯位的東西：
+    /// 台北是 UTC+8，所以本地時間 2 月 2 日早上 7 點，換成 UTC 是 2 月 1 日
+    /// 23 點。用 UTC 切天的話，那筆記錄會被放進「昨天」——而使用者記得的是
+    /// 今天早上發生的事。
+    #[test]
+    fn a_day_starts_where_the_user_lives_not_at_greenwich() {
+        const H: i64 = 3_600_000;
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+
+        // 台北時間 2024-02-02 07:00 = UTC 2024-02-01 23:00
+        let taipei_morning = 1_706_828_400_000;
+        put_chunk(&db, s, taipei_morning, "早上看到的東西");
+
+        const DAY: i64 = 24 * H;
+        let utc = db.days_with_data(0).expect("days");
+        let taipei = db.days_with_data(8 * H).expect("days");
+        assert_eq!(utc.len(), 1);
+        assert_eq!(taipei.len(), 1);
+
+        // 兩邊回的都是「那一天的午夜」，只是量的是不同時區的午夜。
+        assert_eq!(utc[0].start_ts % DAY, 0, "UTC 的午夜就是整數天");
+        assert_eq!(
+            (taipei[0].start_ts + 8 * H) % DAY,
+            0,
+            "台北的午夜要加回偏移量才落在整數天上"
+        );
+        // 這才是重點：同一筆資料，在台北屬於**隔一天**。
+        assert_eq!(
+            (taipei[0].start_ts + 8 * H) / DAY - utc[0].start_ts / DAY,
+            1,
+            "本地時間的 2/2 早上，在 UTC 是 2/1 晚上"
+        );
+        assert_eq!(taipei[0].chunks, 1);
+        assert_eq!(taipei[0].first_ts, taipei_morning);
+    }
+
+    /// 時間軸要看得到「字還在、圖沒了」的那些日子。
+    ///
+    /// 文字留 365 天、畫面留 30 天，所以一個月以前的每一格都長這樣。如果
+    /// 時間軸是以 `frames` 為主體做的，那些日子會整片空白——她其實記得，
+    /// 只是那張圖過期了。
+    #[test]
+    fn the_timeline_still_has_days_whose_screenshots_are_long_gone() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        put_chunk(&db, s, 6_000, "後來那件事");
+        put_chunk(&db, s, 5_000, "兩個月前那封信");
+
+        let moments = db.timeline(0, 10_000, 50).expect("timeline");
+        assert_eq!(moments.len(), 2);
+        assert_eq!(moments[0].ts, 5_000, "依時間排序，不是依插入順序");
+        assert!(
+            moments.iter().all(|m| m.frame_id.is_none()),
+            "沒有圖不是錯誤，是保留期的正常結果"
+        );
+
+        // 左閉右開：查 [0, 5_000) 不該把 5_000 那一筆算進來，否則按天翻頁時
+        // 每一天的第一筆都會在前一天再出現一次。
+        assert!(db.timeline(0, 5_000, 50).expect("timeline").is_empty());
     }
 
     /// 暫停稽核要答得出三種配不起來的情況，而不是靜靜地少算一段。
