@@ -97,6 +97,15 @@
       來自**真實提問**的題庫，不是另外跑一份 benchmark——那條路只會量到我
       挑出來的問題。成句目前沒有東西可量（還沒有任何 LLM 路徑）。
 - [ ] 全離線模式（同意書 2 全關）走完全部主流程。
+      終端機那一半走完了（乾淨資料目錄 → `consent` 三張全空 → `record` 被擋掉
+      並且回非零 → 簽第一張 → `replay` → `query`／`facts`／`queries`／`stats` →
+      `prune --dry-run` → `pause` → `doctor` → `resume`）。走的過程抓到兩個
+      「兩行各自正確、擺在一起在騙人」的缺口：doctor 的保留畫面檔、stats 的
+      畫面張數對畫面檔大小。字母人那幾頁（同意書、設定、時間軸兩段式刪除）在
+      `?demo=1` 的無頭瀏覽器裡驗過版面與狀態轉換。
+      **還缺的是真 Tauri 視窗上的那一遍**——那要在 Windows 上做，見驗收清單。
+      另外「離線」在這裡不是一個模式而是唯一的狀態：程式裡沒有連外路徑，
+      `check-no-network.sh` 每次 push 都在證明這件事。
 - [x] clone → 跑起來 < 10 分鐘（含 README quickstart 實測）。
       **實測 33 秒**（乾淨 `CARGO_HOME`：clone → 抓 108 MB 相依 → release build
       32 秒 → replay → 第一個 ★ 答案。16 核開發機；runner 約 2.1 倍）。這一條
