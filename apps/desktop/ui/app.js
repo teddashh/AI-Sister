@@ -769,6 +769,14 @@ async function ask() {
     // 打不開」是三件不同的事，混成一句「查不到」等於把問題藏起來。
     setState("idle");
     stateLine.textContent = String(err?.message ?? err);
+    // 上一題的答案要先撤掉。這一句以前不在，於是問了第二題而它壞掉的時候，
+    // 畫面上是：新的問題還在輸入框裡、**舊的那一題的答案原封不動躺在下面**、
+    // 角落一行小小的錯誤訊息。他讀到的是一份對不上題目的答案，而她連自己
+    // 答錯了都不知道——這比一片空白糟得多。
+    const failed = document.createElement("li");
+    failed.className = "hits-empty";
+    failed.textContent = "這一題我沒答成——底下原本那幾筆是上一題的，先收起來了。";
+    hitList.replaceChildren(failed);
   } finally {
     clearTimeout(slow);
   }
