@@ -89,6 +89,12 @@
 - 三張同意書 onboarding（SPEC §11.1）+ 設定頁（blocklist 編輯、TTL、pause 快捷鍵）。
 - BYOK（secret-vault/OS keychain）+ Ollama 偵測——潤句用。
 - Query log 開始累積（本機）：每次提問 + 點擊了哪個出處 = 未來題庫。
+- 刪除與匯出的**終端機那一半**（原本只有字母人上的時間軸有）：`sister forget
+  --last 2h`（兩段式，預設只看不刪）、`sister export --to <目錄>`。後者本來排在
+  SPEC §11.8，提前做是因為它修的是一個已經在騙人的句子——PRIVACY.md 寫著
+  「整份記憶就是一個 `sister.db` 檔」，而在 WAL 模式下、她還在錄的時候，照那句
+  話複製出來的備份會安靜地少掉最後一段。`doctor` 也一直在叫人跑一個不存在的
+  `sister forget`。承諾要對得上做出來的東西，這兩條都不能等。
 
 **Exit criteria**
 - [ ] **第一週魔法時刻**：自用 7 天內 ≥ 3 次「答對我自己都忘掉的東西」（記錄實例）。
