@@ -310,6 +310,18 @@ body.has-hits .stage {
   padding: 7px 9px;
 }
 
+/* 點得開的那些要看得出來點得開；點不開的（圖過了保留期）就不要假裝。 */
+.hit.openable {
+  cursor: pointer;
+}
+
+.hit.openable:hover,
+.hit.openable:focus-visible {
+  background: rgb(255 255 255 / 85%);
+  border-left-color: var(--letter-fg);
+  outline: none;
+}
+
 .hit-text {
   font-size: 12.5px;
   margin: 0 0 4px;

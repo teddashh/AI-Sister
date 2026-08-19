@@ -176,6 +176,19 @@ function renderHits(hits) {
       gone.className = "no-frame";
       gone.textContent = "畫面已過保留期";
       source.append(gone);
+    } else {
+      // 有圖的才點得開。「看起來能點但點了沒反應」比「看得出來不能點」差。
+      li.classList.add("openable");
+      li.tabIndex = 0;
+      li.title = "點開看當時的畫面";
+      const open = () => void invoke?.("open_frame", { frameId: hit.frame_id });
+      li.addEventListener("click", open);
+      li.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          open();
+        }
+      });
     }
 
     li.append(source);

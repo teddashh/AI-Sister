@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "字母人視窗能做的事。清單是白名單，沒列到的一律不准。",
-  "windows": ["pet"],
+  "windows": ["pet", "frame"],
   "permissions": ["core:default"]
 }

@@ -119,6 +119,80 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Vec<Hit>, Str
         .collect())
 }
 
+/// 那張畫面本身。
+///
+/// **這是這個產品的重點，不是附加功能。** 她說「你三天前看過這個」的時候，
+/// 使用者要能當場翻回去看——不然那句話跟任何一個會唬爛的東西沒有差別。
+///
+/// 圖用 data URL 送過去而不是開一個檔案協定：少一個要設 scope 的表面，
+/// 而且「哪些檔案讀得到」的答案就變成「只有這一行指到的那一張」。
+#[tauri::command]
+fn frame_image(frame_id: i64, shell: tauri::State<'_, Shell>) -> Result<FrameView, String> {
+    let slot = shell.db.lock().map_err(|_| "資料庫鎖壞了".to_string())?;
+    let db = slot.as_ref().ok_or_else(|| "資料庫還沒開".to_string())?;
+
+    let ctx = db
+        .frame_context(frame_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "找不到這張畫面".to_string())?;
+
+    // 文字保留 365 天、畫面 30 天，所以「有這一筆但圖沒了」是**正常**的，
+    // 不是錯誤。差別要講清楚，不然使用者會以為程式壞了。
+    let path = ctx
+        .image_path
+        .ok_or_else(|| "這張畫面已經過了保留期，只有文字留下來".to_string())?;
+    let bytes = std::fs::read(&path).map_err(|_| format!("圖不見了：{path}"))?;
+
+    let ext = std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("webp");
+    Ok(FrameView {
+        data_url: format!("data:image/{ext};base64,{}", sister_shell::base64(&bytes)),
+        ts: ctx.ts,
+        app: ctx.app_id,
+        title: ctx.window_title,
+        url: ctx.url,
+    })
+}
+
+/// 開一個看圖的視窗。
+///
+/// 為什麼是另一個視窗：字母人只有 340 像素寬，一張 2560×1440 的畫面縮進去
+/// 是一片糊——「點開看當時畫面」看不清楚就等於沒做。
+///
+/// 同一個 label 重複用，所以連點五筆結果不會得到五個視窗；已經開著就換一張
+/// 圖並拉到前面。
+#[tauri::command]
+fn open_frame(app: tauri::AppHandle, frame_id: i64) -> Result<(), String> {
+    const VIEWER: &str = "frame";
+    let target = format!("frame.html?id={frame_id}");
+
+    if let Some(win) = app.get_webview_window(VIEWER) {
+        let _ = win.eval(format!("window.location.replace('{target}')"));
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+
+    tauri::WebviewWindowBuilder::new(&app, VIEWER, tauri::WebviewUrl::App(target.into()))
+        .title("當時的畫面")
+        .inner_size(1100.0, 720.0)
+        .min_inner_size(480.0, 320.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct FrameView {
+    data_url: String,
+    ts: i64,
+    app: Option<String>,
+    title: Option<String>,
+    url: Option<String>,
+}
+
 /// 把視窗現在的位置記進記憶體（不寫檔）。
 ///
 /// 拖曳的時候 `Moved` 每幾毫秒就來一次，每次都寫硬碟是拿一個常駐程式去
@@ -164,7 +238,13 @@ fn main() {
             state_path,
             db: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![toggle_pin, hide_to_tray, ask])
+        .invoke_handler(tauri::generate_handler![
+            toggle_pin,
+            hide_to_tray,
+            ask,
+            open_frame,
+            frame_image
+        ])
         .setup(|app| {
             let win = app
                 .get_webview_window(PET)

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <title>當時的畫面</title>
+    <link rel="stylesheet" href="./frame.css" />
+  </head>
+  <body>
+    <!--
+      為什麼這是**另一個視窗**而不是字母人裡的一層覆蓋：她只有 340 像素寬，
+      而一張 2560×1440 的螢幕縮到那個寬度是一片糊。「點開看當時畫面」如果
+      看不清楚，那條退場條件就等於沒做。
+    -->
+    <header class="bar">
+      <span class="when" data-when>…</span>
+      <span class="where" data-where></span>
+    </header>
+    <main class="sheet">
+      <img class="shot" data-shot alt="當時的螢幕畫面" hidden />
+      <p class="trouble" data-trouble hidden></p>
+    </main>
+    <script type="module" src="./frame.js"></script>
+  </body>
+</html>

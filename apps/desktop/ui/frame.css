@@ -1,0 +1,73 @@
+/* 看圖的視窗。跟字母人共用配色，但這裡沒有透明、沒有動畫——
+   使用者是來看一張圖的，不是來看她的。 */
+
+:root {
+  --letter-bg: #f6ecdf;
+  --letter-fg: #2e2140;
+  --letter-accent: #9a5b7a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #1e1a26;
+  color: var(--letter-bg);
+  display: flex;
+  flex-direction: column;
+  font: 13px/1.5 "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+}
+
+.bar {
+  align-items: baseline;
+  background: rgb(46 33 64 / 96%);
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 9px 14px;
+}
+
+.when {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.where {
+  opacity: 0.7;
+  overflow-wrap: anywhere;
+}
+
+.sheet {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  min-height: 0;
+  padding: 12px;
+}
+
+/*
+ * 整張塞進視窗，不裁切。看記憶的時候「旁邊還有什麼」往往就是重點——
+ * 她記得的不只是那行字，是那行字當時待在哪裡。
+ */
+.shot {
+  border-radius: 4px;
+  box-shadow: 0 8px 30px rgb(0 0 0 / 45%);
+  max-height: 100%;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.trouble {
+  max-width: 34em;
+  opacity: 0.8;
+  text-align: center;
+}

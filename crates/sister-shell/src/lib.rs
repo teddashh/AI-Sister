@@ -135,6 +135,35 @@ pub fn first_run_corner(win_w: i32, win_h: i32, primary: Rect) -> (i32, i32) {
     )
 }
 
+/// 把畫面檔變成 `data:` URL 用的 base64。
+///
+/// 自己寫而不是拉一個 crate：只用在這一個地方，而且是標準裡最短的那種編碼。
+/// 但它放在**這個** crate 而不是桌面程式裡，理由跟 [`is_reachable`] 一樣——
+/// 桌面那邊的測試在 Linux 上一行都跑不到，而一個沒有測試的手寫 base64 是
+/// 那種「看起來對、在某個長度上錯掉」的東西。補位那段就有分支：長度除以 3
+/// 餘 1 補兩個 `=`、餘 2 補一個。
+pub fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = u32::from_be_bytes([
+            0,
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 0x3F] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// 讀。**任何一種壞掉都回 `None`**——壞掉的設定檔不該讓她開不起來，
 /// 大不了回到右下角重新開始。
 pub fn load(path: &Path) -> Option<PetState> {
@@ -255,6 +284,36 @@ mod tests {
     fn no_screens_at_all_is_not_a_crash() {
         let w = win(100, 100);
         assert_eq!(nudge_onto(w, &[]), w);
+    }
+
+    /// RFC 4648 的向量。三種餘數各一條——補位是這段唯一有分支的地方，
+    /// 而一個只在「長度剛好整除 3」時正確的 base64 會讓某些畫面開不起來，
+    /// 其他的都好好的。那種 bug 最難從症狀反推。
+    #[test]
+    fn base64_matches_the_standard_vectors() {
+        for (raw, want) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(raw.as_bytes()), want, "輸入 {raw:?}");
+        }
+    }
+
+    /// 畫面檔是二進位，不是文字。WebP 的檔頭就有 0x00 與高位元組。
+    #[test]
+    fn base64_survives_bytes_that_are_not_text() {
+        assert_eq!(base64(&[0x00, 0xFF, 0x80]), "AP+A");
+        assert_eq!(base64(&[0xFF; 4]), "/////w==");
+        // 長度是 4/3 進位到 4 的倍數，任何長度都成立。
+        for len in 0..64usize {
+            let encoded = base64(&vec![0xABu8; len]);
+            assert_eq!(encoded.len(), len.div_ceil(3) * 4, "長度 {len}");
+        }
     }
 
     #[test]
