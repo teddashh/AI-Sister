@@ -1732,6 +1732,12 @@ pub struct QueryLogEntry<'a> {
     /// `"recent"`／`"keywords"`。走哪條路本身就是一個要驗的判斷
     /// （見 [`crate::question::shape`]）。
     pub shape: &'a str,
+    /// 她一共**給了他幾筆東西**——不是 [`Db::search`] 回了幾筆。
+    ///
+    /// CLI 的答案有兩層：★ 事實（L1）和原文（全文比對）。`sister query 電話`
+    /// 的號碼來自前者，後者是 0 筆；只數後者的話，這個產品最典型的一次成功
+    /// 會被記成「一筆都沒找到」。這個欄位唯一的用途是分辨她答不答得出來，
+    /// 所以它數的是使用者看到了什麼。
     pub hits: usize,
     pub latency_ms: i64,
     /// `"desktop"`／`"cli"`。同一個問題從兩個地方問應該給一樣的答案，

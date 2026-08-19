@@ -12,6 +12,44 @@ use sister_core::db::Db;
 /// 一個調了不生效的旋鈕，比一個沒有這個旋鈕更糟。
 pub(crate) const MIN_TICK_MS: u64 = 200;
 
+/// 測試用的暫存目錄。自己刻，不引 `tempfile`——理由見
+/// `scripts/check-no-network.sh`：出貨的相依樹上每多一個 crate，那份稽核
+/// 就多一份要人讀的東西，而這個結構只有九行。
+#[cfg(test)]
+pub(crate) mod tmp {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    pub struct Tmp(pub PathBuf);
+
+    impl Tmp {
+        pub fn new(name: &str) -> Self {
+            static N: AtomicU32 = AtomicU32::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "sister-{}-{name}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            Self(dir)
+        }
+
+        /// 寫一份設定檔進去，回傳它的路徑。
+        pub fn file(&self, body: &str) -> PathBuf {
+            let p = self.0.join("config.toml");
+            std::fs::write(&p, body).expect("write");
+            p
+        }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
 /// 開啟既有資料庫。查詢類命令不該憑空造一顆空的資料庫出來——
 /// 那會讓「我明明錄了東西」變成「查無資料」的無聲錯誤。
 fn open_existing(data_dir: &Path) -> Result<Db> {
@@ -268,7 +306,7 @@ pub mod queries {
 
         // 這兩個百分比才是重點。總數只說明他用了多少次。
         println!(
-            "題庫：{} 題，其中 {} 題一筆都沒找到（{:.0}%），{} 題他點開了出處（{:.0}%）",
+            "題庫：{} 題，其中 {} 題一筆都沒找到（{:.0}%），{} 題你點開了出處（{:.0}%）",
             stats.total,
             stats.empty,
             100.0 * stats.empty as f64 / stats.total as f64,
@@ -506,7 +544,12 @@ pub mod query {
                 ts: sister_core::now_ms(),
                 question: text,
                 shape: shape.name(),
-                hits: hits.len(),
+                // ★ 答案和原文一起數。只數 `hits` 的那一版把 `sister query
+                // 電話` 記成「一筆都沒找到」——電話號碼是從 L1 事實那一欄
+                // 來的，全文比對確實是 0 筆，而那正是這個產品最典型的一次
+                // 成功。題庫裡最有價值的是「她答不出來」的那些題，所以這個
+                // 數字必須數他**看到了什麼**，不是內部走了哪一條路。
+                hits: answers.len() + hits.len(),
                 latency_ms: elapsed.as_millis() as i64,
                 source: "cli",
             })
@@ -715,6 +758,68 @@ pub mod query {
                 "螢幕上沒有「電話」二字"
             );
             assert!(!answers(&db, "電話", 10).unwrap().is_empty(), "但答得出來");
+        }
+
+        /// 上一條的直接後果，而題庫第一次上線就記反了：`search` 是 0 筆、
+        /// ★ 答案有兩筆，於是**這個產品最典型的一次成功**被記成「一筆都
+        /// 沒找到」。題庫的用處全在「她答不出來的是哪些題」，混進答得出來
+        /// 的之後那份清單就沒有意義了。
+        ///
+        /// 這一條走完整條路（磁碟上的資料庫、`run`、再讀回來），因為錯的
+        /// 不是任何一個函式，是接線。
+        #[test]
+        fn a_question_she_answered_is_not_a_question_she_failed() {
+            let dir = crate::ops::tmp::Tmp::new("qlog");
+            let path = crate::db_path(&dir.0);
+            {
+                let mut db = Db::open(&path).unwrap();
+                let sid = db.start_session("test", "0").unwrap();
+                db.insert_frame(
+                    sid,
+                    &frame(1_000, "chrome.exe", "客服專線 0800-080-123"),
+                    None,
+                    0,
+                )
+                .unwrap();
+            }
+
+            run(&dir.0, "電話", 10, false, true).unwrap();
+
+            let db = Db::open(&path).unwrap();
+            let rows = db.query_log(10).unwrap();
+            assert_eq!(rows.len(), 1, "問過的話要進題庫");
+            assert_eq!(rows[0].question, "電話");
+            assert!(rows[0].hits > 0, "★ 答案也是答案");
+            assert_eq!(
+                db.query_log_stats().unwrap().empty,
+                0,
+                "她答出來了，就不算答不出來"
+            );
+        }
+
+        /// 反面：真的一個字都沒對上的那些題**一定要留下來**。只記答得出來
+        /// 的，題庫就退化成一份「她會的題目」清單，而那份清單沒有用處。
+        #[test]
+        fn the_question_she_missed_is_the_one_worth_keeping() {
+            let dir = crate::ops::tmp::Tmp::new("qlog-miss");
+            let path = crate::db_path(&dir.0);
+            {
+                let mut db = Db::open(&path).unwrap();
+                let sid = db.start_session("test", "0").unwrap();
+                db.insert_frame(
+                    sid,
+                    &frame(1_000, "chrome.exe", "客服專線 0800-080-123"),
+                    None,
+                    0,
+                )
+                .unwrap();
+            }
+
+            run(&dir.0, "完全不存在的東西zzz", 10, false, true).unwrap();
+
+            let db = Db::open(&path).unwrap();
+            let stats = db.query_log_stats().unwrap();
+            assert_eq!((stats.total, stats.empty), (1, 1));
         }
 
         #[test]
@@ -1014,7 +1119,10 @@ pub mod doctor {
     /// 上一版 `✓ OCR 語言` 的錯法），畫成 ✗ 則是製造一則使用者每次都會
     /// 看到、於是很快就學會忽略的假警報。所以給它自己的符號。
     fn mark(sym: &str, label: &str, detail: &str) {
-        println!("  {sym} {label:<22} {detail}");
+        // `{label:<22}` 補的是**位元組**，而這一頁的標籤幾乎都是中文：
+        // 「本機記錄」佔 12 個位元組、8 個字寬，「現在有沒有在看」佔 21 個
+        // 位元組、14 個字寬——同一份補白讓兩行的說明差了 6 格。
+        println!("  {sym} {} {detail}", fmt::pad(label, 16));
     }
 
     /// doctor 要用到的能力摘要。平台差異只收在這一個地方。
@@ -1553,6 +1661,36 @@ pub mod doctor {
                 "現在有沒有在看",
                 "沒有暫停，但也沒有任何 sister record 在跑（還沒開始的話，這是正常的）",
             );
+        }
+        // 題庫是整個資料庫裡唯一一張存著**你自己打進去的字**的表，所以它得
+        // 出現在這一頁上。doctor 的工作是把真相攤開，而一張存了東西、卻沒有
+        // 任何地方提起的表，跟偷偷存著沒有差別。
+        //
+        // 開關和已經存下來的內容要分兩句講：關掉之後舊的仍然在。少了後半句，
+        // 「我關掉了」會被讀成「那些也一起沒了」。
+        let qlog = db
+            .as_ref()
+            .and_then(|d| d.query_log_stats().ok())
+            .unwrap_or_default();
+        match (config.privacy.query_log, qlog.total > 0) {
+            (true, true) => line(
+                true,
+                "你問過她什麼",
+                &format!(
+                    "記著，已經 {} 題（{} 題她答不出來、{} 題你點開了出處）",
+                    qlog.total, qlog.empty, qlog.clicked
+                ),
+            ),
+            (true, false) => line(true, "你問過她什麼", "記著（還沒問過任何問題）"),
+            (false, true) => mark(
+                "⏸",
+                "你問過她什麼",
+                &format!(
+                    "**不記了**（privacy.query_log = false）。以前記的 {} 題還在，`sister forget` 帶得走",
+                    qlog.total
+                ),
+            ),
+            (false, false) => mark("⏸", "你問過她什麼", "不記（privacy.query_log = false）"),
         }
         // 「9 條規則 ✓」是 THREAT_MODEL 明文禁止的那種寫法：規則的**數量**
         // 從來不是問題，規則**會不會命中**才是。這些規則比對的是前景 app
@@ -2730,35 +2868,9 @@ pub mod record {
     #[cfg(test)]
     mod record_tests {
         use super::ConfigWatch;
+        use crate::ops::tmp::Tmp;
         use sister_core::config::Config;
         use sister_core::consent::{Consent, Sheet};
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        /// 和 `sister-core` 那邊同一套自建暫存目錄，不引 `tempfile`。
-        struct Tmp(std::path::PathBuf);
-        impl Tmp {
-            fn new(name: &str) -> Self {
-                static N: AtomicU32 = AtomicU32::new(0);
-                let dir = std::env::temp_dir().join(format!(
-                    "sister-watch-{}-{name}-{}",
-                    std::process::id(),
-                    N.fetch_add(1, Ordering::Relaxed)
-                ));
-                let _ = std::fs::remove_dir_all(&dir);
-                std::fs::create_dir_all(&dir).expect("create temp dir");
-                Self(dir)
-            }
-            fn file(&self, body: &str) -> std::path::PathBuf {
-                let p = self.0.join("config.toml");
-                std::fs::write(&p, body).expect("write");
-                p
-            }
-        }
-        impl Drop for Tmp {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
 
         #[test]
         fn a_file_nobody_touched_does_not_look_touched() {
