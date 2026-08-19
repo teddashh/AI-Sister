@@ -1159,9 +1159,10 @@ impl Db {
             "SELECT COUNT(*), COALESCE(SUM(hits = 0), 0),
                     (SELECT COUNT(DISTINCT query_id) FROM query_clicks),
                     MIN(ts), MAX(ts),
-                    COALESCE(SUM(latency_ms > ?1), 0)
+                    COALESCE(SUM(latency_ms > ?1), 0),
+                    COALESCE(SUM(source = ?2), 0)
              FROM queries",
-            params![RETRIEVAL_BUDGET_MS],
+            params![RETRIEVAL_BUDGET_MS, SOURCE_DESKTOP],
             |r| {
                 Ok(QueryLogStats {
                     total: r.get(0)?,
@@ -1170,6 +1171,7 @@ impl Db {
                     first_ts: r.get(3)?,
                     last_ts: r.get(4)?,
                     slow: r.get(5)?,
+                    clickable: r.get(6)?,
                     p50_ms: 0,
                     p95_ms: 0,
                 })
@@ -1794,10 +1796,19 @@ pub struct QueryLogEntry<'a> {
     /// 所以它數的是使用者看到了什麼。
     pub hits: usize,
     pub latency_ms: i64,
-    /// `"desktop"`／`"cli"`。同一個問題從兩個地方問應該給一樣的答案，
-    /// 而分不出來源的話，這件事就查不了。
+    /// [`SOURCE_DESKTOP`]／[`SOURCE_CLI`]。同一個問題從兩個地方問應該給一樣的
+    /// 答案，而分不出來源的話，這件事就查不了。
     pub source: &'a str,
 }
+
+/// 字母人。**出處點得動的只有這裡。**
+///
+/// 是常數不是字面值，因為現在有東西在讀它了（[`QueryLogStats::clickable`]），
+/// 而寫的那一邊在另一個 crate 裡。打錯一個字不會編不過，只會讓那一題安靜地
+/// 落到分母外面。
+pub const SOURCE_DESKTOP: &str = "desktop";
+/// 終端機。沒有出處可以點。
+pub const SOURCE_CLI: &str = "cli";
 
 /// 題庫裡的一列（見 [`Db::query_log`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1842,6 +1853,14 @@ pub struct QueryLogStats {
     pub empty: i64,
     /// 至少有一個出處被點開的題數。
     pub clicked: i64,
+    /// 其中**點得動出處**的題數——也就是從字母人問的那幾題。
+    ///
+    /// [`Self::clicked`] 的分母只能是這個數字，不能是 [`Self::total`]。終端機
+    /// 上沒有出處可以點，所以每一題從終端機問的問題都會讓那個百分比往下掉，
+    /// 而掉出來的「0%」講的是介面，不是檢索品質。開發的時候 `sister query`
+    /// 跑幾十次是常態，於是這個數字結構性地永遠是 0——一個永遠是 0 的指標
+    /// 不會有人再看第二眼，而它本來是檢索品質唯一不用人工標註的訊號。
+    pub clickable: i64,
     pub first_ts: Option<Millis>,
     pub last_ts: Option<Millis>,
     /// 超過 [`RETRIEVAL_BUDGET_MS`] 的題數。
@@ -2455,6 +2474,46 @@ mod tests {
             1,
             "同一題點兩下不算兩題"
         );
+    }
+
+    /// 「點開出處」的分母只能是**點得動出處的那些題**。
+    ///
+    /// 終端機上沒有出處可以點，所以每一題 `sister query` 都會把那個比例往下
+    /// 拉——而開發的時候跑幾十次是常態。分母用總題數的話，這個指標結構性地
+    /// 永遠趨近 0%，然後就沒有人再看它第二眼；而它本來是檢索品質唯一不用人工
+    /// 標註就拿得到的訊號。
+    #[test]
+    fn the_terminal_has_no_sources_to_click_so_it_does_not_belong_in_the_denominator() {
+        let db = test_db();
+        for i in 0..9 {
+            db.log_query(&QueryLogEntry {
+                ts: 1_000 + i,
+                question: "電話",
+                shape: "keywords",
+                hits: 1,
+                latency_ms: 1,
+                source: SOURCE_CLI,
+            })
+            .expect("log");
+        }
+        let q = db
+            .log_query(&QueryLogEntry {
+                ts: 2_000,
+                question: "帳單",
+                shape: "keywords",
+                hits: 3,
+                latency_ms: 1,
+                source: SOURCE_DESKTOP,
+            })
+            .expect("log");
+        db.log_click(q, 42, 0).expect("click");
+
+        let s = db.query_log_stats().expect("stats");
+        assert_eq!(s.total, 10);
+        assert_eq!(s.clicked, 1);
+        assert_eq!(s.clickable, 1, "十題裡只有一題點得動出處");
+        // 1/10 = 10% 讀起來像「她九成的答案都沒用」；1/1 才是真的發生過的事。
+        assert_eq!(100 * s.clicked / s.clickable, 100);
     }
 
     /// 一題都沒點，和點了，是兩件不同的事。前者也是訊號：她給了答案，

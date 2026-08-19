@@ -542,7 +542,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                     // 見 `QueryLogEntry::hits`。
                     hits: facts.len() + hits.len(),
                     latency_ms: started.elapsed().as_millis() as i64,
-                    source: "desktop",
+                    source: sister_core::db::SOURCE_DESKTOP,
                 })
                 .map_err(|e| tracing::warn!("這一題沒記進題庫：{e}"))
                 .ok()

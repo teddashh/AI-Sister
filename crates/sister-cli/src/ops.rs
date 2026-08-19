@@ -280,6 +280,8 @@ pub mod queries {
                 "total": stats.total,
                 "empty": stats.empty,
                 "clicked": stats.clicked,
+                // `clicked` 的分母。用 `total` 算比例是錯的——見 QueryLogStats。
+                "clickable": stats.clickable,
                 // Phase 1 的「檢索 < 100ms」要能被腳本讀走，不然那條退場條件
                 // 只能靠人去看終端機。
                 "p50_ms": stats.p50_ms,
@@ -309,14 +311,28 @@ pub mod queries {
             return Ok(());
         }
 
-        // 這兩個百分比才是重點。總數只說明他用了多少次。
+        // 「一筆都沒找到」的比例是重點。總數只說明他用了多少次。
         println!(
-            "題庫：{} 題，其中 {} 題一筆都沒找到（{:.0}%），{} 題你點開了出處（{:.0}%）",
+            "題庫：{} 題，其中 {} 題一筆都沒找到（{:.0}%）",
             stats.total,
             stats.empty,
             100.0 * stats.empty as f64 / stats.total as f64,
-            stats.clicked,
-            100.0 * stats.clicked as f64 / stats.total as f64,
+        );
+        // 點開出處是檢索品質唯一不用人工標註就拿得到的訊號——但**只有字母人
+        // 那邊點得動**。分母用總題數的話，開發時跑幾十次 `sister query` 就會
+        // 把它壓成一個結構性的 0%，而那個 0% 講的是介面，不是她答得好不好。
+        println!(
+            "{}",
+            match stats.clickable {
+                0 => "出處：還沒有從字母人問過（終端機沒有出處可以點，所以這裡看不出答案有沒有用）"
+                    .to_string(),
+                n => format!(
+                    "出處：從字母人問過 {} 題，其中 {} 題你點開了出處（{:.0}%）",
+                    n,
+                    stats.clicked,
+                    100.0 * stats.clicked as f64 / n as f64,
+                ),
+            }
         );
         // PHASES.md Phase 1 的退場條件之一是「檢索 < 100ms」，而在這一行之前
         // 沒有任何東西量得出來——每一題花了幾毫秒從第一天就存著，只是沒有人
@@ -576,7 +592,7 @@ pub mod query {
                 // 數字必須數他**看到了什麼**，不是內部走了哪一條路。
                 hits: answers.len() + hits.len(),
                 latency_ms: elapsed.as_millis() as i64,
-                source: "cli",
+                source: sister_core::db::SOURCE_CLI,
             })
         {
             eprintln!("  ⚠ 這一題沒記進題庫：{e}");
@@ -1755,8 +1771,16 @@ pub mod doctor {
                 true,
                 "你問過她什麼",
                 &format!(
-                    "記著，已經 {} 題（{} 題她答不出來、{} 題你點開了出處）",
-                    qlog.total, qlog.empty, qlog.clicked
+                    "記著，已經 {} 題（{} 題她答不出來、{}）",
+                    qlog.total,
+                    qlog.empty,
+                    // 出處只有字母人那邊點得動。不講來源的話，「0 題你點開了
+                    // 出處」會被讀成「她的答案沒一次有用」——而真相可能只是
+                    // 這些題全是從終端機問的。
+                    match qlog.clickable {
+                        0 => "還沒有從字母人問過".to_string(),
+                        n => format!("字母人那邊 {}/{} 題點開了出處", qlog.clicked, n),
+                    }
                 ),
             ),
             (true, false) => line(true, "你問過她什麼", "記著（還沒問過任何問題）"),
