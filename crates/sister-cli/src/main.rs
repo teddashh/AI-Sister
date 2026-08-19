@@ -142,7 +142,9 @@ fn main() -> Result<()> {
     let data_dir = resolve_data_dir(cli.data_dir.clone())?;
 
     match cli.command {
-        Command::Record { duration } => ops::record::run(&data_dir, config, duration),
+        Command::Record { duration } => {
+            ops::record::run(&data_dir, config, cli.config.clone(), duration)
+        }
         Command::Replay {
             scenario,
             interval_ms,

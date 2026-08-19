@@ -1547,10 +1547,60 @@ pub mod record {
         }
     }
 
-    pub fn run(data_dir: &Path, config: Config, duration: Option<u64>) -> Result<()> {
+    /// 盯著設定檔有沒有被改過。
+    ///
+    /// 為什麼需要它：設定只在開機時讀一次，所以一個開著 `record` 三天的人
+    /// 中途加一條排除規則，**那條規則三天內都不會生效**——而且不會有任何
+    /// 一行字提到。他會以為網銀已經被擋掉了。
+    ///
+    /// 看的是 mtime **加上檔案大小**。只看 mtime 的話，同一秒內存兩次的編輯
+    /// 有機會被漏掉（很多檔案系統的 mtime 解析度就是一秒）；大小補得住絕大
+    /// 多數的漏網之魚，而且不用去讀整個檔案算雜湊。補不住的情況（同一秒、
+    /// 同樣大小、內容不同）留在這裡講清楚，因為它真的存在。
+    ///
+    /// **故意不放在 `#[cfg(windows)]` 裡面**，雖然只有 Windows 的錄製迴圈會用
+    /// 它。理由和 `sister-shell` 這個 crate 存在的理由是同一個：這是純邏輯，
+    /// 而這台開發機是 Linux——放進 cfg 裡就等於它的測試永遠不會執行。
+    #[derive(Default)]
+    #[cfg_attr(not(windows), allow(dead_code))]
+    struct ConfigWatch {
+        stamp: Option<(std::time::SystemTime, u64)>,
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    impl ConfigWatch {
+        fn new(path: Option<&Path>) -> Self {
+            Self {
+                stamp: path.and_then(Self::read_stamp),
+            }
+        }
+
+        fn read_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+            let meta = std::fs::metadata(path).ok()?;
+            Some((meta.modified().ok()?, meta.len()))
+        }
+
+        /// 檔案動過了嗎。**檔案從有變沒有也算動過**——那通常是使用者刪掉了
+        /// 設定檔，而那代表「回到預設值」，是一個真的狀態變化。
+        fn changed(&mut self, path: &Path) -> bool {
+            let now = Self::read_stamp(path);
+            if now == self.stamp {
+                return false;
+            }
+            self.stamp = now;
+            true
+        }
+    }
+
+    pub fn run(
+        data_dir: &Path,
+        config: Config,
+        config_path: Option<PathBuf>,
+        duration: Option<u64>,
+    ) -> Result<()> {
         #[cfg(not(windows))]
         {
-            let _ = (data_dir, config, duration);
+            let _ = (data_dir, config, config_path, duration);
             anyhow::bail!(
                 "這個平台（{}）還沒有擷取後端。\n\n\
                  Phase 0 的目標平台是 Windows；核心與錄製迴圈本身是平台無關的，\n\
@@ -1561,7 +1611,7 @@ pub mod record {
         }
         #[cfg(windows)]
         {
-            windows_record(data_dir, config, duration)
+            windows_record(data_dir, config, config_path, duration)
         }
     }
 
@@ -1592,7 +1642,12 @@ pub mod record {
     }
 
     #[cfg(windows)]
-    fn windows_record(data_dir: &Path, config: Config, duration: Option<u64>) -> Result<()> {
+    fn windows_record(
+        data_dir: &Path,
+        config: Config,
+        config_path: Option<PathBuf>,
+        duration: Option<u64>,
+    ) -> Result<()> {
         use sister_capture::windows::{self, Capabilities};
         use sister_capture::{Recorder, Tick};
         use std::sync::atomic::Ordering;
@@ -1702,6 +1757,15 @@ pub mod record {
         const PRUNE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
         let mut last_prune = Instant::now();
 
+        // 設定檔熱重載。5 秒一次是因為它的使用情境是「我剛剛在設定頁按了儲存」
+        // ——那個人正看著螢幕等它生效。一次 `stat` 的成本在這個間隔下是零。
+        const CONFIG_EVERY: Duration = Duration::from_secs(5);
+        let watched = config_path.clone().or_else(Config::default_path);
+        let mut config_watch = ConfigWatch::new(watched.as_deref());
+        let mut last_config_check = Instant::now();
+        // 保留期也吃熱重載（設定頁的 TTL 那一欄），所以它不能再是 `let`。
+        let mut retention = retention;
+
         let mut last_report = Instant::now();
         while !STOP.load(Ordering::SeqCst) {
             if let Some(d) = deadline
@@ -1739,6 +1803,56 @@ pub mod record {
                     tracing::debug!("frame #{frame_id}：{ocr_blocks} 段文字、{facts} 個事實");
                 }
                 Ok(_) => {}
+            }
+
+            // 設定改了就當場換上。**讀不出來就維持原樣，絕不退回預設值**——
+            // 預設值比任何一份使用者自訂的 blocklist 都寬鬆，所以一個打錯的
+            // TOML 會安靜地把排除規則全部拿掉。那是這裡唯一不能犯的錯。
+            if let Some(path) = watched.as_deref()
+                && last_config_check.elapsed() >= CONFIG_EVERY
+            {
+                last_config_check = Instant::now();
+                if config_watch.changed(path) {
+                    // 檔案不見了**不算**「請用預設值」。
+                    //
+                    // `Config::load` 對不存在的路徑會回傳預設值，那在開機時是
+                    // 對的（沒有設定檔本來就跑預設）。但在這裡照做的話，一個
+                    // 「先刪再寫」的編輯器只要被這 5 秒的輪詢夾中一次，使用者
+                    // 整份 blocklist 就被換成比它寬鬆的預設值——而畫面上只會
+                    // 印一行「排除 0 個 app」。要回預設值請寫一個空的設定檔。
+                    if !path.exists() {
+                        println!(
+                            "  ⚠  設定檔不見了（{}）。**繼續用舊的那一份**——\
+                             真要回到預設值請放一個空的設定檔。",
+                            path.display()
+                        );
+                    } else {
+                        match Config::load(path) {
+                            Ok(fresh) => {
+                                println!(
+                                    "  ⟳ 設定檔換了：排除 {} 個 app、{} 條網址；\
+                                     保留期 畫面 {} 天、文字 {} 天",
+                                    fresh.privacy.excluded_apps.len(),
+                                    fresh.privacy.excluded_urls.len(),
+                                    fresh.retention.frames_days,
+                                    fresh.retention.text_days
+                                );
+                                // 新規則裡「寫了也不會命中」的那幾條要當場講。
+                                // 這是使用者最可能剛剛打錯字的那一刻。
+                                for (rule, why) in sister_core::config::suspicious_url_rules(
+                                    &fresh.privacy.excluded_urls,
+                                ) {
+                                    println!("    ⚠  這條寫了也不會命中：{rule} — {why}");
+                                }
+                                retention = fresh.retention.clone();
+                                rec.set_privacy(fresh.privacy);
+                            }
+                            Err(e) => println!(
+                                "  ⚠  設定檔讀不出來，**繼續用舊的那一份**（不是預設值）：{e:#}"
+                            ),
+                        }
+                    }
+                }
             }
 
             if last_prune.elapsed() >= PRUNE_EVERY {
@@ -2084,6 +2198,82 @@ pub mod record {
                  跑 `sister doctor` 看是引擎讀不出字，還是讀不到你這台螢幕。",
                 stats.kept
             );
+        }
+    }
+    #[cfg(test)]
+    mod watch_tests {
+        use super::ConfigWatch;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        /// 和 `sister-core` 那邊同一套自建暫存目錄，不引 `tempfile`。
+        struct Tmp(std::path::PathBuf);
+        impl Tmp {
+            fn new(name: &str) -> Self {
+                static N: AtomicU32 = AtomicU32::new(0);
+                let dir = std::env::temp_dir().join(format!(
+                    "sister-watch-{}-{name}-{}",
+                    std::process::id(),
+                    N.fetch_add(1, Ordering::Relaxed)
+                ));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).expect("create temp dir");
+                Self(dir)
+            }
+            fn file(&self, body: &str) -> std::path::PathBuf {
+                let p = self.0.join("config.toml");
+                std::fs::write(&p, body).expect("write");
+                p
+            }
+        }
+        impl Drop for Tmp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        #[test]
+        fn a_file_nobody_touched_does_not_look_touched() {
+            // 這條顧的是成本：回報「改了」會讓錄製迴圈重讀並重印一行字。
+            // 每 5 秒都誤報一次的話，那行字就變成雜訊，真的改動反而看不見。
+            let dir = Tmp::new("quiet");
+            let path = dir.file("[capture]\nenabled = true\n");
+            let mut w = ConfigWatch::new(Some(&path));
+            assert!(!w.changed(&path));
+            assert!(!w.changed(&path));
+        }
+
+        #[test]
+        fn editing_the_blocklist_registers() {
+            let dir = Tmp::new("edited");
+            let path = dir.file("[privacy]\nexcluded_apps = []\n");
+            let mut w = ConfigWatch::new(Some(&path));
+            dir.file("[privacy]\nexcluded_apps = [\"keepassxc\", \"1password\"]\n");
+            assert!(w.changed(&path), "檔案變長了，一定要看得出來");
+            assert!(!w.changed(&path), "看過一次之後就不該再報一次");
+        }
+
+        #[test]
+        fn deleting_the_config_counts_as_a_change() {
+            // 刪掉設定檔 = 回到預設值，那是一個真的狀態變化，不是「沒事發生」。
+            let dir = Tmp::new("deleted");
+            let path = dir.file("[privacy]\nexcluded_apps = [\"keepassxc\"]\n");
+            let mut w = ConfigWatch::new(Some(&path));
+            std::fs::remove_file(&path).expect("remove");
+            assert!(w.changed(&path));
+            assert!(!w.changed(&path), "已經不存在了，不該每次都報");
+        }
+
+        #[test]
+        fn a_config_that_never_existed_stays_quiet() {
+            // 沒有設定檔是正常狀態（用預設值跑）。它不該每 5 秒喊一次。
+            let dir = Tmp::new("absent");
+            let path = dir.0.join("config.toml");
+            let mut w = ConfigWatch::new(Some(&path));
+            assert!(!w.changed(&path));
+
+            // 但**新建**一個要看得出來——那正是第一次跑設定頁儲存的那一刻。
+            dir.file("[privacy]\nexcluded_apps = []\n");
+            assert!(w.changed(&path));
         }
     }
 }
