@@ -677,7 +677,7 @@ pub mod export {
                 )
             );
         } else {
-            println!("  ⏸ frames/     沒帶。出處點開來看到的那些畫面留在原地——加 `--with-frames`",);
+            println!("{}", frames_skipped_line(s.frames_with_image as u64));
         }
 
         // 匯出的目錄就是一個資料目錄，所以「還原」不需要任何工具。這一行
@@ -755,6 +755,31 @@ pub mod export {
             format!(
                 "  ✓ frames/     {}（{copied} 個畫面檔）",
                 crate::fmt::bytes(bytes as i64)
+            )
+        }
+    }
+
+    /// 沒加 `--with-frames` 的那一行。`claimed` 是資料庫裡有幾列說自己有圖。
+    ///
+    /// 舊版只有一句：「出處點開來看到的那些畫面留在原地——加 `--with-frames`」。
+    /// 它在一台 text-only 的機器上（第三張同意書沒簽），或者一顆圖全都過了
+    /// `frames_days` 的資料庫上，是**假的**——留在原地的是零張。而它上面兩行
+    /// 才剛印過「52000 列畫面」，於是那句話讀起來像「五萬兩千張截圖沒帶走」。
+    ///
+    /// 更糟的是它指的那顆旋鈕。他照著加上 `--with-frames` 再跑一次，複製到的
+    /// 是零個檔——一句叫他去按一個改不了結果的開關的建議。
+    ///
+    /// 兄弟分支 [`frames_line`] 早就分成三種了，而且有一條測試叫
+    /// `zero_pictures_because_there_were_none_reads_differently_from_zero_because_they_are_gone`
+    /// 專門守那個區別。這一支只是沒被套用到。
+    fn frames_skipped_line(claimed: u64) -> String {
+        if claimed == 0 {
+            // 和 `frames_line` 的 `copied == 0` 那一支說同一件事、留同一個保留：
+            // 「本來就只有字」是一句關於歷史的話，而這裡看得到的只有此刻。
+            "  ⏸ frames/     沒帶，但也沒有東西可以帶——資料庫裡沒有任何一列說自己有圖".into()
+        } else {
+            format!(
+                "  ⏸ frames/     沒帶。出處點開來看到的那 {claimed} 張畫面留在原地——加 `--with-frames`"
             )
         }
     }
@@ -911,6 +936,32 @@ pub mod export {
             assert!(
                 masked.contains("2026/08/19/0-abc.png"),
                 "要講出是哪一條，他才驗得下去：{masked}"
+            );
+        }
+
+        /// 沒帶走的那一行也要分得開「留在原地」和「本來就沒有」。
+        ///
+        /// 上面那一條測的是 `--with-frames` 那半邊，而同一個區別在**預設**
+        /// 那半邊漏掉了——預設才是大部分人跑的那一條。
+        #[test]
+        fn nothing_left_behind_is_not_the_same_as_screenshots_left_behind() {
+            // text-only 的機器，或者圖全過了保留期。留在原地的是零張。
+            let nothing = frames_skipped_line(0);
+            assert!(
+                !nothing.contains("留在原地"),
+                "零張畫面不可以說「留在原地」：{nothing}"
+            );
+            assert!(
+                !nothing.contains("--with-frames"),
+                "那顆旋鈕改不了這個結果，不要叫他去按：{nothing}"
+            );
+
+            // 真的有圖沒帶走：講得出幾張，旋鈕也真的有用。
+            let left = frames_skipped_line(52_000);
+            assert!(left.contains("52000"), "要講幾張：{left}");
+            assert!(
+                left.contains("--with-frames"),
+                "這時候那顆旋鈕才有用：{left}"
             );
         }
     }
@@ -2301,6 +2352,24 @@ pub mod stats {
             ),
             // 文字夠久、畫面不夠：多半是剛簽第三張同意書，或者保留期剛把舊圖
             // 清光。整句不外推——把畫面當成 0 加進去，會蓋出一個假的 ✓。
+            //
+            // 但「畫面不夠」有兩種，而舊版把它們印成同一句。
+            //
+            // 一份圖全被保留期清光的資料庫（用超過 `frames_days` 又停了一陣子
+            // 沒錄）手上是**零列**有圖，於是 `image_days` 是對一個空集合做出來
+            // 的 0.0——印成「還留著圖的只有 0.0 小時」，讀起來像量到的一段很短
+            // 的時間。跟在後面那句「再錄滿半天才算得出來」在這裡是對的（再錄
+            // 就會有），可是同一句話在**每一次寫圖都失敗**的機器上（磁碟滿、
+            // 資料夾被鎖）也一字不差地出現，而那台機器再錄一年也不會有。
+            //
+            // 所以零列就直說零列，不要拿 0.0 小時充當一個測量值。
+            None if s.image_bytes == 0 => println!(
+                "  每天約    還不知道（文字有 {:.0} 天，但現在一張圖都沒留著）\
+                 \n            目前一共 {}。可能是剛開始存圖，也可能是舊的過了 frames_days\
+                 \n            被清掉了，或者每一次存圖都失敗——`sister doctor` 分得出來。",
+                span_days,
+                fmt::bytes(disk_total)
+            ),
             None => println!(
                 "  每天約    還不知道（文字有 {:.0} 天，但還留著圖的只有 {:.1} 小時）\
                  \n            目前一共 {}。畫面那一半得再錄滿半天才算得出來。",
@@ -4511,7 +4580,7 @@ pub mod record {
         );
         report_idle(&stats);
         report_exclusions(&stats);
-        report_ocr(&stats, config_ocr);
+        report_ocr(&stats, config_ocr, rec.stores_images());
         // 問 recorder 而不是問開機時的設定：第三張同意書中途可能被撤回或簽回來，
         // 而這一段的用途是「她剛剛到底有沒有在寫圖」。拿開機時那份來答，會在
         // 使用者中途撤回之後喊「保留了 12 張畫面卻一張圖都沒寫」的假警報。
@@ -4850,7 +4919,11 @@ pub mod record {
             }
             return;
         }
-        if written == 0 && stats.images_throttled == 0 && stats.images_over_budget == 0 {
+        if written == 0
+            && stats.images_throttled == 0
+            && stats.images_over_budget == 0
+            && stats.image_failures == 0
+        {
             return;
         }
         let mut line = format!(
@@ -4871,11 +4944,38 @@ pub mod record {
         }
         println!("{line}");
 
+        // **寫成功過就不講失敗，是把「後來壞掉了」整段藏起來。** 上面那個
+        // `written == 0` 的分支只涵蓋「從頭到尾一張都沒寫成」；磁碟寫滿了、
+        // 防毒或 OneDrive 中途鎖住 `frames/` 的那一種，是先成功 500 張再連續
+        // 失敗 5000 次，而 `written > 0` 讓那 5000 次連同 `last_image_error`
+        // 一起被丟掉。`report_ocr` 的失敗是無條件印的，這裡沒有理由不一樣。
+        if stats.image_failures > 0 {
+            println!(
+                "  ⚠  另外 {} 次想存圖卻失敗了——那幾個時刻只剩下字。",
+                stats.image_failures
+            );
+            if let Some(e) = &stats.last_image_error {
+                println!("        最後一次的原因：{e}");
+            }
+        }
+
         // 這一句要單獨佔一行、而且要講得像一件事，不是像一個統計欄位。
         if stats.images_over_budget > 0 {
             println!(
-                "  ⚠  今天的畫面額度（{budget_mb} MB）用完了，之後的 {} 張只留了字。\
+                "  ⚠  {}的畫面額度（{budget_mb} MB）用完了，{}{} 張只留了字。\
                  文字與搜尋不受影響；要留更多圖就調大 capture.max_image_mb_per_day",
+                // 「今天」在一場跨了五天的 session 上是假的，而開著不關正是
+                // 這個產品的預設用法。見 `RecorderStats::images_over_budget_days`。
+                if stats.images_over_budget_days > 1 {
+                    format!("這 {} 天每天", stats.images_over_budget_days)
+                } else {
+                    "今天".to_string()
+                },
+                if stats.images_over_budget_days > 1 {
+                    "一共 "
+                } else {
+                    "之後的 "
+                },
                 stats.images_over_budget
             );
         }
@@ -4965,10 +5065,34 @@ pub mod record {
     ///
     /// 保留了幾張畫面是**容量**，讀到了幾行字才是**記憶**。只印前者，等於
     /// 讓一個安靜的失敗長期偽裝成成功——那正是這個專案最主要的失敗形狀。
+    /// 讀字關掉的時候，括號裡那句話。
+    ///
+    /// 「畫面留下了」在 text-only 模式下是假的，而那兩個開關**各自獨立**——
+    /// `consent::downgrade` 只碰 `store_images`，從來不碰 `ocr`，所以兩個都關
+    /// 是走得到的：設定檔關掉 ocr，加上只簽了第一張同意書（也就是
+    /// `sister consent --grant local-recording` 那條預設的路）。
+    ///
+    /// 那是最糟的一次說謊：這一整段是使用者判斷「剛剛那幾個小時到底留下了
+    /// 什麼」的唯一地方，而在這個組合下整份摘要**只有這一句**提到畫面
+    /// （`report_images` 在一張都沒寫的時候整段不印），偏偏它說有。開機時是
+    /// 印過一句「第三張沒簽，只記螢幕上的字」，但那是幾千行 tick 以前的事。
+    ///
+    /// 拆出來、而且在測試建置下也編得到：`report_ocr` 只在 Windows 上存在，
+    /// 而一句只有目標平台才驗得到的話，等於一句沒有被驗過的話。同一個理由
+    /// 和同一個 `any(windows, test)` 見 [`idle_floor_pct`]。
+    #[cfg(any(windows, test))]
+    fn ocr_off_words(stores_images: bool) -> &'static str {
+        if stores_images {
+            "畫面留下了，但上面的字沒有進資料庫"
+        } else {
+            "而這一次也沒有留畫面——這段時間等於什麼都沒記下來"
+        }
+    }
+
     #[cfg(windows)]
-    fn report_ocr(stats: &sister_capture::RecorderStats, ocr_enabled: bool) {
+    fn report_ocr(stats: &sister_capture::RecorderStats, ocr_enabled: bool, stores_images: bool) {
         if !ocr_enabled {
-            println!("  讀字：已關閉（畫面留下了，但上面的字沒有進資料庫）");
+            println!("  讀字：已關閉（{}）", ocr_off_words(stores_images));
             return;
         }
         println!(
@@ -4993,7 +5117,7 @@ pub mod record {
     }
     #[cfg(test)]
     mod record_tests {
-        use super::{BootBeat, ConfigWatch, DiskProjection, already_recording};
+        use super::{BootBeat, ConfigWatch, DiskProjection, already_recording, ocr_off_words};
         use crate::ops::tmp::Tmp;
         use sister_core::config::Config;
         use sister_core::consent::{Consent, Sheet};
@@ -5001,6 +5125,25 @@ pub mod record {
 
         const MB: f64 = 1024.0 * 1024.0;
         const CAP_250MB: u64 = 250 * 1024 * 1024;
+
+        /// 讀字關掉、圖也沒在寫的那一場，摘要裡唯一提到畫面的那句話說有留。
+        ///
+        /// 兩個開關獨立（`downgrade` 只碰 `store_images`），所以這個組合走得到，
+        /// 而且它正好是預設路徑：設定檔關掉 ocr ＋ 只簽第一張同意書。
+        #[test]
+        fn a_session_that_saved_nothing_does_not_get_to_say_the_pictures_are_kept() {
+            let text_only = ocr_off_words(false);
+            assert!(
+                !text_only.contains("畫面留下了"),
+                "一張都沒寫，不可以說畫面留下了：{text_only}"
+            );
+            assert!(
+                text_only.contains("沒有留畫面"),
+                "要講出真正的處境，不是含糊帶過：{text_only}"
+            );
+            // 另一半不可以跟著壞掉：圖有在寫的時候，那句話本來就是對的。
+            assert!(ocr_off_words(true).contains("畫面留下了"));
+        }
 
         /// 省電閘門修好**不等於** CPU 那條結案了。
         ///

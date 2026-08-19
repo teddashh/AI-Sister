@@ -114,6 +114,16 @@ pub struct RecorderStats {
     /// 那是一句必須說出口的話，否則使用者只會發現下午的記憶莫名其妙比
     /// 上午差，而找不到任何解釋。
     pub images_over_budget: u64,
+    /// 上面那個數字**橫跨了幾天**。
+    ///
+    /// 跨日只把 `image_bytes_today` 歸零，`images_over_budget` 是整場的累計。
+    /// 於是一場連錄五天、每天都撞到上限的 session，摘要會說「**今天**的畫面
+    /// 額度用完了，之後的 4200 張只留了字」——那個 4200 是五天的總數，而
+    /// 「今天」是假的。這個產品的預設用法就是開著不關，所以那不是邊角情況。
+    ///
+    /// 數的是**撞到上限的那幾天**，不是 session 活過幾天：沒撞到的那幾天不
+    /// 該被算進一句在講額度的話裡。
+    pub images_over_budget_days: u64,
     /// 想存圖卻失敗了幾次（磁碟滿、資料夾沒權限、路徑被佔用）。
     ///
     /// 和 `ocr_failures` 同一個理由：吞掉錯誤可以，不留計數不行。少了它，
@@ -205,6 +215,8 @@ pub struct Recorder<B: Backend> {
     image_day: i64,
     /// 今天已經寫出去多少畫面位元組。見 `max_image_mb_per_day`。
     image_bytes_today: u64,
+    /// 最後一次撞到每日上限是哪一天。見 `RecorderStats::images_over_budget_days`。
+    over_budget_day: Option<i64>,
     stats: RecorderStats,
     timings: crate::timings::Timings,
 }
@@ -261,6 +273,7 @@ impl<B: Backend> Recorder<B> {
             last_look_ts: None,
             image_day,
             image_bytes_today,
+            over_budget_day: None,
             stats: RecorderStats::default(),
             timings: Default::default(),
         })
@@ -692,6 +705,12 @@ impl<B: Backend> Recorder<B> {
         let budget = self.config.capture.max_image_mb_per_day * 1024 * 1024;
         if budget > 0 && self.image_bytes_today >= budget {
             self.stats.images_over_budget += 1;
+            // 這一天是不是第一次撞到。見 `images_over_budget_days`：少了它，
+            // 五天的總數會被摘要講成「今天」的。
+            if self.over_budget_day != Some(day) {
+                self.over_budget_day = Some(day);
+                self.stats.images_over_budget_days += 1;
+            }
             return Ok((None, 0));
         }
 
@@ -2099,6 +2118,44 @@ mod tests {
         r.tick(86_400_000 + 1_000).expect("tick");
         assert_eq!(r.stats().images_over_budget, 1, "新的一天不該再被擋");
         assert_eq!(count_pngs(&tmp.0), 2);
+    }
+
+    /// 撞到上限的次數跨天累加，而摘要那句話說的是「**今天**」。
+    ///
+    /// 開著不關就是這個產品的預設用法，所以一場 session 橫跨好幾天不是邊角
+    /// 情況。少了天數，一個連錄五天、每天都爆額度的人會讀到「今天之後的
+    /// 4200 張只留了字」——那個數字是五天的，而他會拿它去判斷今天發生了
+    /// 什麼事。
+    #[test]
+    fn a_five_day_session_does_not_get_to_call_five_days_of_overflow_today() {
+        let tmp = Tmp::new("budget-days");
+        let mut config = Config::default();
+        config.capture.image_min_interval_ms = 0;
+        config.capture.max_image_mb_per_day = 1;
+
+        let mut r = image_recorder(config, tmp.0.clone());
+        const DAY: i64 = 86_400_000;
+
+        // 第一天撞兩次。（先 tick 一次讓跨日歸零跑掉，再把額度灌滿——和上面
+        // 那條測試同一個手法。）
+        r.tick(1_000).expect("tick");
+        r.image_bytes_today = 2 * 1024 * 1024;
+        r.tick(2_000).expect("tick");
+        r.tick(3_000).expect("tick");
+        assert_eq!(r.stats().images_over_budget, 2);
+        assert_eq!(r.stats().images_over_budget_days, 1, "同一天只算一天");
+
+        // 第二天：額度歸零，寫得出去，不該被算進「撞到上限的那幾天」。
+        r.tick(DAY + 1_000).expect("tick");
+        assert_eq!(r.stats().images_over_budget, 2, "新的一天不該再被擋");
+        assert_eq!(r.stats().images_over_budget_days, 1, "沒撞到的那天不算");
+
+        // 第三天又撞到。
+        r.tick(2 * DAY + 1_000).expect("tick");
+        r.image_bytes_today = 2 * 1024 * 1024;
+        r.tick(2 * DAY + 2_000).expect("tick");
+        assert_eq!(r.stats().images_over_budget, 3);
+        assert_eq!(r.stats().images_over_budget_days, 2);
     }
 
     /// 節流是**時間**間隔，不是「每 N 張存一張」。
