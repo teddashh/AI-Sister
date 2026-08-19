@@ -103,6 +103,20 @@ pub struct RecorderStats {
     /// 閘門被別的東西關掉了。中間那個是**閘門永遠不會生效**，也就是 CPU
     /// 預算從第一秒起就超支，而摘要上一個字都不會提。
     pub idle_unknown: u64,
+    /// 焦點停在**瀏覽器視窗**上的拍數（見 [`crate::browsers::is_browser`]）。
+    ///
+    /// 這是 [`Self::url_reads`] 的分母，也是那句話的證據門檻。單獨看沒有用；
+    /// 它存在的唯一理由是讓「一個網址都沒讀到」這件事有辦法被判斷——一個
+    /// 今天還沒開過瀏覽器的人，讀到 0 個網址什麼都不代表。
+    pub browser_ticks: u64,
+    /// 其中真的拿到網址的拍數。
+    ///
+    /// `capabilities` 那份報告的 `url` 只回答「UIA 的 COM 物件造得出來」，
+    /// 而那和「讀得到位址列」之間差著一整台機器。兩者的差距整個是安靜的：
+    /// 造得出來、`doctor` 全綠、設定頁一片乾淨，而位址列一次都沒讀到
+    /// ——於是那台機器把使用者的網銀錄了一整天，他寫的每一條 `excluded_urls`
+    /// 一次都沒擋過東西。這個數字是那件事唯一的證據。
+    pub url_reads: u64,
     /// 標題在變、但那個標題是時鐘，所以沒有記成脈絡變化的次數。
     ///
     /// 見 `TITLE_CLOCK_MIN_TICKS`。這個數字要印出來，因為它同時解釋兩件
@@ -355,6 +369,16 @@ impl<B: Backend> Recorder<B> {
     /// recorder 自己累積的狀態（deduper、每日額度、剪貼簿水位），中途換掉會
     /// 生出一堆說不清楚的邊界情況——而它們改錯的後果是「錄得比較醜」，
     /// 不是「錄到了不該錄的東西」。優先權差很遠。
+    /// 現在真的在用的那一份隱私規則。
+    ///
+    /// 有 [`Self::set_privacy`] 就得有這個：收工的摘要要講「你那幾條規則失效
+    /// 了」，而規則數必須來自**現在**這一份。拿開機時那一份去數的話，中途在
+    /// 設定頁上新加的規則不會被算進去——而一個人剛加完規則、正想確認它有沒有
+    /// 生效，就是最需要那句話說對的時刻。
+    pub fn privacy(&self) -> &sister_core::config::PrivacyConfig {
+        &self.config.privacy
+    }
+
     pub fn set_privacy(&mut self, privacy: sister_core::config::PrivacyConfig) {
         self.config.privacy = privacy;
         // 規則換了，「上一次的排除理由」就不能再拿來去抖：舊的理由字串可能
@@ -484,6 +508,16 @@ impl<B: Backend> Recorder<B> {
         let t = Instant::now();
         let focus = self.backend.focus_snapshot(ts).unwrap_or_default();
         self.timings.focus.record(t.elapsed());
+
+        // 網址擷取到底有沒有在運作，只有這裡看得到。數在排除判定**之前**：
+        // 一個被 `excluded_apps` 擋掉的瀏覽器同樣證明了 UIA 讀不讀得到，
+        // 而且往下走的路上這個 snapshot 就不見了。
+        if crate::browsers::is_browser(&focus.app_key()) {
+            self.stats.browser_ticks += 1;
+            if focus.url.is_some() {
+                self.stats.url_reads += 1;
+            }
+        }
 
         // 2) 排除判定 —— 必須在任何截圖之前
         let exclusion = self.config.privacy.check(&focus);
@@ -1024,6 +1058,75 @@ mod tests {
         let spy = spy.borrow();
         assert!(spy.polled.is_empty(), "暫停期間不該讀剪貼簿內容");
         assert_eq!(spy.skipped, vec![1_000], "但一定要把水位推過去");
+    }
+
+    /// 一台讀不到位址列的機器，要數得出自己讀不到。
+    ///
+    /// `capabilities` 那份報告的 `url` 只回答「UIA 的 COM 物件造得出來」。
+    /// 造得出來、`doctor` 全綠、設定頁一片乾淨，而位址列從頭到尾一次都沒讀到
+    /// ——瀏覽器用系統管理員身分跑、無障礙介面沒開、UIA 樹換了形狀，任何一種
+    /// 都會走到這裡。那台機器把使用者的網銀錄了一整天，他寫的每一條
+    /// `excluded_urls` 一次都沒擋過東西，而每一個畫面都說一切正常。
+    ///
+    /// 這裡釘的是那件事唯一的證據：分子分母各自數對，而且**被排除的瀏覽器
+    /// 也要算**——它同樣證明了 UIA 讀不讀得到，而排除判定在下一步就把這個
+    /// snapshot 帶走了。
+    #[test]
+    fn a_browser_that_never_yields_a_url_is_counted_as_such() {
+        use crate::traits::{CompositeBackend, NullClipboard, NullInput, NullOcr, NullScreen};
+
+        /// 每一拍換一種前景視窗：瀏覽器有網址、瀏覽器沒網址、
+        /// 被排除的瀏覽器、根本不是瀏覽器。
+        struct Rotating(usize);
+        impl crate::traits::FocusSource for Rotating {
+            fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
+                let i = self.0;
+                self.0 += 1;
+                Ok(match i % 4 {
+                    0 => FocusSnapshot {
+                        app_id: Some("chrome.exe".into()),
+                        url: Some("https://example.com/".into()),
+                        ..Default::default()
+                    },
+                    1 => FocusSnapshot {
+                        app_id: Some("firefox.exe".into()),
+                        url: None,
+                        ..Default::default()
+                    },
+                    2 => FocusSnapshot {
+                        // 被 `excluded_apps` 擋掉，但它還是一個瀏覽器
+                        app_id: Some("brave.exe".into()),
+                        url: None,
+                        ..Default::default()
+                    },
+                    _ => FocusSnapshot {
+                        app_id: Some("code.exe".into()),
+                        url: None,
+                        ..Default::default()
+                    },
+                })
+            }
+        }
+
+        let mut config = Config::default();
+        config.privacy.excluded_apps = vec!["brave".into()];
+        let backend = CompositeBackend {
+            name: "rotating".into(),
+            screen: NullScreen,
+            focus: Rotating(0),
+            clipboard: NullClipboard,
+            input: NullInput,
+            ocr: NullOcr,
+        };
+        let mut rec = Recorder::new(backend, Db::open_in_memory().unwrap(), config, None).unwrap();
+
+        for i in 0..12 {
+            rec.tick(1_000 + i * 1_000).expect("tick");
+        }
+
+        let s = rec.stats();
+        assert_eq!(s.browser_ticks, 9, "12 拍裡有 9 拍是瀏覽器（含被排除的）");
+        assert_eq!(s.url_reads, 3, "其中只有 chrome 那 3 拍真的拿到網址");
     }
 
     /// 整拍炸掉必須留下數字，而且**不能假裝閘門問過了**。

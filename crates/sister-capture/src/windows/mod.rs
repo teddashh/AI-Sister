@@ -59,6 +59,11 @@ impl Capabilities {
     ///
     /// 只帶原始事實過去，不帶結論——設定頁要拿它和**現在**的規則清單重算，
     /// 不然「上一場錄製開始時他還沒寫那條規則」會讓那一頁永遠沉默。
+    ///
+    /// 這一份是**開機探測**：`url_capture`、`browser_ticks`、`url_reads` 三個
+    /// 都留在預設值，因為這一刻還沒有任何一場錄製發生過。錄製途中由
+    /// `record` 迴圈反覆蓋掉（見 `sister_core::capabilities::write`），
+    /// 那才是這個檔案不再凍在開機那一刻的地方。
     pub fn report(&self) -> sister_core::capabilities::Report {
         sister_core::capabilities::Report {
             at: now_ms(),
@@ -66,6 +71,7 @@ impl Capabilities {
             // 只有「試過而且失敗」才算失效。還沒試過不是問題，`record` 起來時
             // 才會裝——在那之前吵，吵的是一件還沒發生的事。
             input_hook_failed: self.input == input::HookState::Failed,
+            ..Default::default()
         }
     }
 
@@ -78,8 +84,11 @@ impl Capabilities {
     /// 判斷本身住在 [`sister_core::capabilities::Report`]：設定頁那個行程
     /// 沒有這裡的相依，卻要講出一模一樣的那句話。同一份判斷兩個地方寫，
     /// 遲早會變成兩句不一樣的話——而使用者會相信比較好聽的那一句。
-    pub fn broken_privacy_rules(&self, config: &Config) -> Vec<String> {
-        self.report().broken_privacy_rules(config)
+    pub fn broken_privacy_rules(
+        &self,
+        privacy: &sister_core::config::PrivacyConfig,
+    ) -> Vec<String> {
+        self.report().broken_privacy_rules(privacy)
     }
 
     /// 看起來在運作、實際上不會有結果的地方。
@@ -160,7 +169,7 @@ mod tests {
             url: false,
             ..fully_capable()
         };
-        let broken = caps.broken_privacy_rules(&Config::default());
+        let broken = caps.broken_privacy_rules(&Config::default().privacy);
         assert!(
             broken.iter().any(|w| w.contains("excluded_urls")),
             "沒有把失效的網址規則講出來：{broken:?}"
@@ -170,7 +179,11 @@ mod tests {
     #[test]
     fn a_fully_capable_backend_reports_nothing_broken() {
         let config = Config::default();
-        assert!(fully_capable().broken_privacy_rules(&config).is_empty());
+        assert!(
+            fully_capable()
+                .broken_privacy_rules(&config.privacy)
+                .is_empty()
+        );
         assert!(fully_capable().silently_degraded(&config).is_empty());
     }
 

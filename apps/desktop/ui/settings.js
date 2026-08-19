@@ -149,10 +149,14 @@ function paintHealth(health, hasRules) {
     return;
   }
   el.health.classList.remove("unknown");
+  // 「開始記錄的時候測到的」以前寫在這裡，而那句話本身就是那個 bug：這個檔案
+  // 開機寫一次就凍住，於是 UIA 半路投降之後的那幾小時，這一頁拿著一份開機時的
+  // 「一切正常」什麼都不說。現在 recorder 錄製途中每分鐘蓋一次，所以這個時戳
+  // 講的是「這份報告描述的是哪一刻」——而它離現在多遠，讀的人自己判斷。
   el.health.textContent =
     health.broken.length === 0
       ? ""
-      : `${health.broken.join("\n")}（${when(health.at)} 開始記錄的時候測到的）`;
+      : `${health.broken.join("\n")}（${when(health.at)} 的狀況）`;
   el.health.hidden = health.broken.length === 0;
 }
 

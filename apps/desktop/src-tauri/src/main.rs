@@ -1048,7 +1048,7 @@ fn privacy_health(urls: Vec<String>, shell: tauri::State<'_, Shell>) -> Result<P
         .and_then(|dir| sister_core::capabilities::read(dir));
     Ok(match report {
         Some(r) => PrivacyHealth {
-            broken: r.broken_privacy_rules(&config),
+            broken: r.broken_privacy_rules(&config.privacy),
             at: Some(r.at),
         },
         None => PrivacyHealth {

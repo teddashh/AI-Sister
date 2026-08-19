@@ -2793,7 +2793,30 @@ pub mod doctor {
         // 只有這裡寫，`#[cfg(not(windows))]` 那半邊不寫：那邊的 `Caps::default()`
         // 是「這個平台問不出來」，不是「問了，答案是做不到」。把前者寫成後者，
         // 就是這整個模組在對付的那種謊。
-        if let Err(e) = sister_core::capabilities::write(data_dir, &c.report()) {
+        //
+        // **有人在錄的時候不寫。** `c.report()` 是一份開機探測，它的
+        // `url_capture` / `browser_ticks` / `url_reads` 全是預設值——也就是
+        // 「這一場什麼都還沒發生」。正在跑的那個 recorder 每分鐘寫進去的那份
+        // 帶著真的證據（UIA 半路投降了、位址列一個都沒讀到），拿這份蓋掉它，
+        // 等於把一則真的警告換成一片乾淨。而「覺得怪怪的所以跑一下 doctor」
+        // 正是那件事最會發生的時候。
+        //
+        // 而且要**把那個行程講的話唸出來**。底下 `url_probe` 那一段是拿一份
+        // 全新的 `WindowsFocus` 去問的，也就是一個**全新的 UIA**——正在錄的
+        // 那個行程手上那份可能早就投降了，而兩份是不同的物件。doctor 於是會
+        // 對著一台網銀正在被錄進去的機器印一個 ✓。這一行是那件事唯一的出口。
+        if sister_core::heartbeat::is_recording(data_dir, sister_core::now_ms()) {
+            println!("  （她正在錄，能力報告交給那個行程寫——這裡不蓋掉它。）");
+            for line in sister_core::capabilities::read(data_dir)
+                .map(|r| r.broken_privacy_rules(&config.privacy))
+                .unwrap_or_default()
+            {
+                println!(
+                    "  ⚠  正在錄的那個行程說：{line}\n\
+                     \x20    （底下那次 UIA 實測是這裡新開的一份，它答得出來不代表她答得出來）"
+                );
+            }
+        } else if let Err(e) = sister_core::capabilities::write(data_dir, &c.report()) {
             eprintln!("⚠  寫不出能力報告（設定頁會說「還不知道」）：{e:#}");
         }
         let mut probes = Vec::new();
@@ -2967,7 +2990,7 @@ pub mod doctor {
             ocr_language: c.ocr_language.clone(),
             ocr_available: c.ocr_languages_available.clone(),
             ocr_probes: probes,
-            broken_privacy: c.broken_privacy_rules(config),
+            broken_privacy: c.broken_privacy_rules(&config.privacy),
             degraded: c.silently_degraded(config),
         }
     }
@@ -4532,7 +4555,7 @@ pub mod record {
         if let Err(e) = sister_core::capabilities::write(data_dir, &caps.report()) {
             eprintln!("⚠  寫不出能力報告（設定頁會說「還不知道」）：{e:#}");
         }
-        for warning in caps.broken_privacy_rules(&config) {
+        for warning in caps.broken_privacy_rules(&config.privacy) {
             println!("⚠  {warning}");
         }
         for warning in caps.silently_degraded(&config) {
@@ -4626,6 +4649,34 @@ pub mod record {
         // 不會累積出一整天的過期資料，夠疏到不會變成足跡本身的一部分。
         const PRUNE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
         let mut last_prune = Instant::now();
+
+        // 能力報告也一樣不能只在開機時寫一次，而且理由更硬：UIA 卡三次之後
+        // 就**永久**投降，從那一刻起 `excluded_urls` 一條都不生效——沒有錯誤、
+        // 沒有例外，只是網銀跟登入頁開始被錄進去。以前唯一問過這件事的是收工
+        // 時的一行 `println!`，印進沒有人會開的 `record.log`；而使用者是在設定
+        // 頁上打那些規則的，那一頁拿著一份開機時的「一切正常」，一句話都不說。
+        //
+        // 一分鐘一次：這個檔案兩百多個位元組，寫一次是一次 write + 一次 rename。
+        // 對一個要開一整天的迴圈來說成本是零，而使用者能忍受的「我的網銀規則
+        // 什麼時候壞掉的」誤差，一分鐘綽綽有餘。
+        const CAPS_EVERY: Duration = Duration::from_secs(60);
+        let mut last_caps = Instant::now();
+        // 開機那一份已經寫過了（上面），但它沒有這一場的證據。這個閉包是
+        // 「開機探測 + 這一場路上發生的事」的唯一組法——收工時也用同一個，
+        // 不然兩邊會慢慢長成兩份不一樣的報告。
+        //
+        // `..caps.report()` 帶的是開機那幾欄，而它自己會蓋上現在的時間戳
+        // ——這個檔案上的 `at` 講的是「這份報告描述的是哪一刻」，不是
+        // 「開機是什麼時候」。設定頁那句話就是照著它寫的。
+        let caps_report = |s: &sister_capture::RecorderStats,
+                           live: sister_core::capabilities::UrlCapture| {
+            sister_core::capabilities::Report {
+                url_capture: live,
+                browser_ticks: s.browser_ticks,
+                url_reads: s.url_reads,
+                ..caps.report()
+            }
+        };
 
         // 設定檔熱重載。5 秒一次是因為它的使用情境是「我剛剛在設定頁按了儲存」
         // ——那個人正看著螢幕等它生效。一次 `stat` 的成本在這個間隔下是零。
@@ -4778,6 +4829,19 @@ pub mod record {
                 }
             }
 
+            // 能力報告：見 `CAPS_EVERY`。寫不出來**不重試也不吵**——這一行的
+            // 失敗方向是設定頁上那句警告晚一分鐘出現，而它一分鐘後就會再試
+            // 一次。在這裡 `eprintln!` 的話，一顆磁碟滿了的機器會每分鐘吐一行
+            // 到 `record.log` 裡，把真正的原因埋掉。
+            if last_caps.elapsed() >= CAPS_EVERY {
+                last_caps = Instant::now();
+                let report = caps_report(
+                    rec.stats(),
+                    sister_capture::Backend::url_capture(rec.backend()),
+                );
+                let _ = sister_core::capabilities::write(data_dir, &report);
+            }
+
             if consent_dirty || last_consent_check.elapsed() >= CONSENT_EVERY {
                 let by_config = std::mem::take(&mut consent_dirty);
                 last_consent_check = Instant::now();
@@ -4898,8 +4962,16 @@ pub mod record {
         let stats = rec.stats().clone();
         // 收工前問一次「這段路上掉了什麼」。`doctor` 只看得到開機那一瞬間，
         // 而 UIA 會在半路上永久投降——那之後 excluded_urls 一條都不生效，
-        // 卻沒有任何地方會講。見 `Backend::degradations`。
-        let lost = sister_capture::Backend::degradations(rec.backend());
+        // 卻沒有任何地方會講。見 `Backend::url_capture`。
+        //
+        // 最後再蓋一次報告：迴圈那個一分鐘的節拍剛好可以錯過最後一分鐘，
+        // 而「最後一分鐘才壞掉」和「壞了一整天」對設定頁是同一件事。
+        let final_report = caps_report(&stats, sister_capture::Backend::url_capture(rec.backend()));
+        let _ = sister_core::capabilities::write(data_dir, &final_report);
+        // 句子只有一個出處（`capabilities::Report`）。這裡和設定頁印的是同一
+        // 份，拿的也是同一份規則清單——`rec.privacy()` 是熱重載之後的那一份，
+        // 不是開機時那一份，不然中途新加的規則不會被算進「幾條失效了」。
+        let lost = final_report.broken_privacy_rules(rec.privacy());
         rec.finish(end_reason)?;
         println!(
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",

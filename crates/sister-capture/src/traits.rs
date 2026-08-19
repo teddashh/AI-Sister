@@ -83,9 +83,9 @@ pub trait ScreenSource {
 pub trait FocusSource {
     fn snapshot(&mut self, ts: Millis) -> Result<FocusSnapshot>;
 
-    /// 見 [`Backend::degradations`]。
-    fn degradations(&self) -> Vec<String> {
-        Vec::new()
+    /// 見 [`Backend::url_capture`]。
+    fn url_capture(&self) -> sister_core::capabilities::UrlCapture {
+        Default::default()
     }
 }
 
@@ -149,7 +149,7 @@ pub trait Backend {
     }
     fn recognize(&mut self, frame: &RawFrame) -> Result<Vec<OcrBlock>>;
 
-    /// 這段錄製中途**壞掉**的能力，一句一則人話。
+    /// 這段錄製中途**壞掉**的能力，原始事實。
     ///
     /// `sister doctor` 只看得到開機那一瞬間。但能力是會在半路上掉的：UIA
     /// 卡三次之後就永久投降，而它一投降，`excluded_urls` 整組規則從那一刻起
@@ -157,10 +157,14 @@ pub trait Backend {
     /// 全被錄了進去。那是這個專案最不能接受的失效方式（THREAT_MODEL
     /// 「安靜地不生效」）。
     ///
-    /// 所以收工前問一次。預設空的：沒有東西掉，就不要製造雜訊——一則
-    /// 恆真的警告會讓整個警告區塊被學會忽略。
-    fn degradations(&self) -> Vec<String> {
-        Vec::new()
+    /// **回布林不回句子。** 以前這裡回的是寫好的警告字串，於是同一個判斷在
+    /// 這裡和 `capabilities::Report::broken_privacy_rules` 各寫了一份，而那兩
+    /// 份是給不同畫面看的（終端機／設定頁）。同一件事兩句話，遲早會走散，
+    /// 而使用者會相信比較好聽的那一句。現在句子只有一個出處，這裡只送事實。
+    ///
+    /// 預設全 `false`：沒有 UIA 的平台不會半路掉這兩樣。
+    fn url_capture(&self) -> sister_core::capabilities::UrlCapture {
+        Default::default()
     }
 }
 
@@ -194,10 +198,10 @@ where
     fn focus_snapshot(&mut self, ts: Millis) -> Result<FocusSnapshot> {
         self.focus.snapshot(ts)
     }
-    fn degradations(&self) -> Vec<String> {
+    fn url_capture(&self) -> sister_core::capabilities::UrlCapture {
         // 目前只有 focus 那一支會半路掉能力（UIA）。其他來源要嘛一開始就
         // 不在，要嘛一直都在，那些由 `Capabilities` 在開機時講完。
-        self.focus.degradations()
+        self.focus.url_capture()
     }
     fn poll_clipboard(&mut self, ts: Millis) -> Result<Option<ClipboardEvent>> {
         self.clipboard.poll(ts)
@@ -358,8 +362,11 @@ mod tests {
             fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
                 Ok(FocusSnapshot::default())
             }
-            fn degradations(&self) -> Vec<String> {
-                vec!["UIA 投降了".into()]
+            fn url_capture(&self) -> sister_core::capabilities::UrlCapture {
+                sister_core::capabilities::UrlCapture {
+                    gave_up: true,
+                    password_check_broken: false,
+                }
             }
         }
 
@@ -371,7 +378,7 @@ mod tests {
             input: NullInput,
             ocr: NullOcr,
         };
-        assert_eq!(Backend::degradations(&backend), vec!["UIA 投降了"]);
+        assert!(Backend::url_capture(&backend).gave_up);
 
         // 而沒掉東西的時候必須完全安靜：一則恆真的警告會讓整個警告區塊
         // 被學會忽略，包括旁邊那則是真的
@@ -383,6 +390,9 @@ mod tests {
             input: NullInput,
             ocr: NullOcr,
         };
-        assert!(Backend::degradations(&healthy).is_empty());
+        assert_eq!(
+            Backend::url_capture(&healthy),
+            sister_core::capabilities::UrlCapture::default()
+        );
     }
 }
