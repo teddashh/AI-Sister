@@ -133,13 +133,16 @@ fn hide_to_tray(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) {
     shell.persist();
 }
 
-#[tauri::command]
-fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Vec<Hit>, String> {
-    let question = question.trim().to_string();
-    if question.is_empty() {
-        return Ok(Vec::new());
-    }
-
+/// 借用那顆資料庫，需要的話當場開。
+///
+/// 開得很懶（她可以在完全沒有資料的機器上啟動），但**每一支要讀資料的命令都
+/// 得走這裡**。在這之前只有 `ask` 會開：於是先點開時間軸、還沒問過任何問題的
+/// 那條路上，看圖那支會回「資料庫還沒開」——一句只有寫程式的人看得懂、而且
+/// 根本不是真正原因的錯誤訊息。多一個入口就多一條這種路。
+fn with_db<T>(
+    shell: &tauri::State<'_, Shell>,
+    f: impl FnOnce(&sister_core::db::Db) -> Result<T, String>,
+) -> Result<T, String> {
     let mut slot = shell.db.lock().map_err(|_| "資料庫鎖壞了".to_string())?;
     if slot.is_none() {
         let dir = sister_core::config::Config::default_data_dir()
@@ -152,21 +155,155 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Vec<Hit>, Str
         }
         *slot = Some(sister_core::db::Db::open(&path).map_err(|e| e.to_string())?);
     }
-    let db = slot.as_ref().expect("just opened");
+    f(slot.as_ref().expect("just opened"))
+}
 
-    let hits = db.search(&question, 20).map_err(|e| e.to_string())?;
-    Ok(hits
-        .into_iter()
-        .map(|h| Hit {
-            ts: h.ts,
-            text: h.text,
-            snippet: h.snippet,
-            app: h.app_id,
-            title: h.window_title,
-            url: h.url,
-            frame_id: h.frame_id,
+/// 同上，但拿得到可變借用。刪東西的那兩支要用這個。
+fn with_db_mut<T>(
+    shell: &tauri::State<'_, Shell>,
+    f: impl FnOnce(&mut sister_core::db::Db) -> Result<T, String>,
+) -> Result<T, String> {
+    with_db(shell, |_| Ok(()))?;
+    let mut slot = shell.db.lock().map_err(|_| "資料庫鎖壞了".to_string())?;
+    f(slot.as_mut().expect("with_db opened it"))
+}
+
+#[tauri::command]
+fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Vec<Hit>, String> {
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Ok(Vec::new());
+    }
+    with_db(&shell, |db| {
+        let hits = db.search(&question, 20).map_err(|e| e.to_string())?;
+        Ok(hits
+            .into_iter()
+            .map(|h| Hit {
+                ts: h.ts,
+                text: h.text,
+                snippet: h.snippet,
+                app: h.app_id,
+                title: h.window_title,
+                url: h.url,
+                frame_id: h.frame_id,
+            })
+            .collect())
+    })
+}
+
+/// 時間軸上的一天。
+#[derive(Serialize)]
+struct Day {
+    start_ts: i64,
+    chunks: i64,
+    first_ts: i64,
+    last_ts: i64,
+}
+
+/// 哪幾天她其實有在看。
+///
+/// `tz_offset_ms` 由視窗傳進來（`-new Date().getTimezoneOffset() * 60000`），
+/// 不是在 Rust 這邊算的：core 刻意不認識時區，而畫面本來就要用同一個偏移量把
+/// 日期印出來——兩邊各算一次遲早會在日光節約時間那天對不起來。
+///
+/// 收到之後仍然夾一次。合法範圍是 UTC−12 到 UTC+14，超出去的值只可能來自
+/// 前端的 bug，而一個離譜的偏移量會把「一天」切在莫名其妙的地方，然後看起來
+/// 只是資料很怪。
+#[tauri::command]
+fn timeline_days(tz_offset_ms: i64, shell: tauri::State<'_, Shell>) -> Result<Vec<Day>, String> {
+    const H: i64 = 3_600_000;
+    let tz = tz_offset_ms.clamp(-12 * H, 14 * H);
+    with_db(&shell, |db| {
+        Ok(db
+            .days_with_data(tz)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|d| Day {
+                start_ts: d.start_ts,
+                chunks: d.chunks,
+                first_ts: d.first_ts,
+                last_ts: d.last_ts,
+            })
+            .collect())
+    })
+}
+
+/// 時間軸上的一格。
+#[derive(Serialize)]
+struct Moment {
+    ts: i64,
+    app: Option<String>,
+    title: Option<String>,
+    url: Option<String>,
+    text: String,
+    /// `None` = 字還在，但那張圖已經過了保留期。
+    frame_id: Option<i64>,
+}
+
+/// 她閉眼的一段。兩端都可以是 `None`，見 [`sister_core::db::PauseSpan`]。
+#[derive(Serialize)]
+struct Gap {
+    from: Option<i64>,
+    to: Option<i64>,
+}
+
+/// 一天的內容。
+#[derive(Serialize)]
+struct DayView {
+    moments: Vec<Moment>,
+    /// 這一天她被關掉的那幾段。**沒有這個欄位的時間軸會說謊**：一片空白到底
+    /// 是他去開會了，還是她被按了暫停，在畫面上長得一模一樣。
+    pauses: Vec<Gap>,
+    /// 這一天還有更多沒送過來。安靜地截斷會讓一整天看起來比實際短。
+    truncated: bool,
+}
+
+/// 一天裡她看到的東西。
+#[tauri::command]
+fn timeline_moments(
+    from_ts: i64,
+    to_ts: i64,
+    limit: usize,
+    shell: tauri::State<'_, Shell>,
+) -> Result<DayView, String> {
+    // 上限再夾一次：前端要多少就給多少的話，一個算錯的日期範圍會把一整年
+    // 的文字塞進 webview，然後那個視窗就沒了。
+    let limit = limit.clamp(1, 2_000);
+    with_db(&shell, |db| {
+        // 多要一筆，用來判斷「還有沒有」。少了這一步就只能猜——而猜錯的方向
+        // 是「剛好滿 limit 筆」被當成剛好結束。
+        let mut rows = db
+            .timeline(from_ts, to_ts, limit + 1)
+            .map_err(|e| e.to_string())?;
+        let truncated = rows.len() > limit;
+        rows.truncate(limit);
+
+        let pauses = db
+            .pause_spans(from_ts, to_ts)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|s| Gap {
+                from: s.from,
+                to: s.to,
+            })
+            .collect();
+
+        Ok(DayView {
+            moments: rows
+                .into_iter()
+                .map(|m| Moment {
+                    ts: m.ts,
+                    app: m.app,
+                    title: m.title,
+                    url: m.url,
+                    text: m.text,
+                    frame_id: m.frame_id,
+                })
+                .collect(),
+            pauses,
+            truncated,
         })
-        .collect())
+    })
 }
 
 /// 設定頁上看得到、改得動的那幾項。
@@ -248,31 +385,30 @@ fn lint_url_rules(rules: Vec<String>) -> Vec<(String, String)> {
 /// 而且「哪些檔案讀得到」的答案就變成「只有這一行指到的那一張」。
 #[tauri::command]
 fn frame_image(frame_id: i64, shell: tauri::State<'_, Shell>) -> Result<FrameView, String> {
-    let slot = shell.db.lock().map_err(|_| "資料庫鎖壞了".to_string())?;
-    let db = slot.as_ref().ok_or_else(|| "資料庫還沒開".to_string())?;
+    with_db(&shell, |db| {
+        let ctx = db
+            .frame_context(frame_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "找不到這張畫面".to_string())?;
 
-    let ctx = db
-        .frame_context(frame_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "找不到這張畫面".to_string())?;
+        // 文字保留 365 天、畫面 30 天，所以「有這一筆但圖沒了」是**正常**的，
+        // 不是錯誤。差別要講清楚，不然使用者會以為程式壞了。
+        let path = ctx
+            .image_path
+            .ok_or_else(|| "這張畫面已經過了保留期，只有文字留下來".to_string())?;
+        let bytes = std::fs::read(&path).map_err(|_| format!("圖不見了：{path}"))?;
 
-    // 文字保留 365 天、畫面 30 天，所以「有這一筆但圖沒了」是**正常**的，
-    // 不是錯誤。差別要講清楚，不然使用者會以為程式壞了。
-    let path = ctx
-        .image_path
-        .ok_or_else(|| "這張畫面已經過了保留期，只有文字留下來".to_string())?;
-    let bytes = std::fs::read(&path).map_err(|_| format!("圖不見了：{path}"))?;
-
-    let ext = std::path::Path::new(&path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("webp");
-    Ok(FrameView {
-        data_url: format!("data:image/{ext};base64,{}", sister_shell::base64(&bytes)),
-        ts: ctx.ts,
-        app: ctx.app_id,
-        title: ctx.window_title,
-        url: ctx.url,
+        let ext = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("webp");
+        Ok(FrameView {
+            data_url: format!("data:image/{ext};base64,{}", sister_shell::base64(&bytes)),
+            ts: ctx.ts,
+            app: ctx.app_id,
+            title: ctx.window_title,
+            url: ctx.url,
+        })
     })
 }
 
@@ -293,6 +429,103 @@ fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
     .title("AI-Sister 設定")
     .inner_size(640.0, 720.0)
     .min_inner_size(460.0, 420.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 一次刪除的規模。給人看的，所以欄位名是中文語意上的那幾個東西。
+#[derive(Serialize)]
+struct Erasure {
+    chunks: u64,
+    facts: u64,
+    frames: u64,
+    images: u64,
+    image_bytes: u64,
+    events: u64,
+    /// 刪不掉的檔案。**不吞掉**：那幾張截圖還躺在磁碟上，而使用者以為
+    /// 它們已經不在了。
+    failed: Vec<String>,
+}
+
+impl From<sister_core::retention::PruneReport> for Erasure {
+    fn from(r: sister_core::retention::PruneReport) -> Self {
+        Self {
+            chunks: r.chunks_deleted,
+            facts: r.facts_deleted,
+            frames: r.frames_deleted,
+            images: r.images_deleted,
+            image_bytes: r.image_bytes_freed,
+            events: r.events_deleted,
+            failed: r.failed,
+        }
+    }
+}
+
+/// 忘掉這一段會刪掉什麼。一句 DELETE 都沒有。
+#[tauri::command]
+fn forget_preview(
+    from_ts: i64,
+    to_ts: i64,
+    shell: tauri::State<'_, Shell>,
+) -> Result<Erasure, String> {
+    with_db(&shell, |db| {
+        db.forget_preview(from_ts, to_ts)
+            .map(Erasure::from)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// 真的刪。**沒有回收桶，沒有復原。**
+///
+/// 前端會先叫一次 `forget_preview` 把數字擺在使用者眼前，但那個順序是前端的
+/// 禮貌，不是這裡的前提——這一支不管有沒有人預覽過都會照做，因為「一定要先
+/// 預覽」的規則放在畫面上就等於沒有規則。真正的防線在 core：區間反過來的話
+/// 一列都不動。
+#[tauri::command]
+fn forget_range(
+    from_ts: i64,
+    to_ts: i64,
+    shell: tauri::State<'_, Shell>,
+) -> Result<Erasure, String> {
+    // 畫面檔的根目錄拿不到就整支拒絕，**不要**退成 `None` 硬幹。
+    // `None` 的意思是「只刪資料庫、不碰檔案」，那會回報一份漂亮的成功，
+    // 而那段時間的截圖一張不少地留在磁碟上。
+    let dir = shell
+        .data_dir
+        .as_ref()
+        .ok_or_else(|| "找不到資料目錄，不能保證截圖真的會被刪掉".to_string())?;
+    let frames = sister_core::config::Config::frames_dir(dir);
+    with_db_mut(&shell, |db| {
+        db.forget(from_ts, to_ts, Some(&frames))
+            .map(Erasure::from)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// 開時間軸。
+///
+/// 為什麼要一個視窗而不是塞進字母人：搜尋回答的是「我記得的那件事在哪」，
+/// 時間軸回答的是**「她到底記了什麼」**——後者是使用者決定要不要信任她的
+/// 依據，而 340 像素寬的欄位撐不起「翻過一整天」這件事。
+///
+/// 同一個 label 重複用，所以按兩次不會得到兩個視窗。
+#[tauri::command]
+fn open_timeline(app: tauri::AppHandle) -> Result<(), String> {
+    const TIMELINE: &str = "timeline";
+    if let Some(win) = app.get_webview_window(TIMELINE) {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        TIMELINE,
+        tauri::WebviewUrl::App("timeline.html".into()),
+    )
+    .title("她記得的每一天")
+    .inner_size(980.0, 720.0)
+    .min_inner_size(560.0, 420.0)
     .build()
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -394,7 +627,12 @@ fn main() {
             settings_read,
             settings_write,
             lint_url_rules,
-            open_settings
+            open_settings,
+            open_timeline,
+            timeline_days,
+            timeline_moments,
+            forget_preview,
+            forget_range
         ])
         .setup(|app| {
             let win = app
@@ -469,12 +707,20 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
+            let timeline_item =
+                MenuItem::with_id(app, "timeline", "她記得的每一天…", true, None::<&str>)?;
             let settings_item =
                 MenuItem::with_id(app, "settings", "設定…", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "結束", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
-                &[&show_item, &pause_item, &settings_item, &quit_item],
+                &[
+                    &show_item,
+                    &pause_item,
+                    &timeline_item,
+                    &settings_item,
+                    &quit_item,
+                ],
             )?;
             app.manage(PauseItem(pause_item));
 
@@ -495,6 +741,11 @@ fn main() {
                         // 使用者只會以為自己按到了。
                         if let Err(e) = toggle_pause(app.clone(), app.state::<Shell>()) {
                             tracing::error!("暫停切換失敗：{e}");
+                        }
+                    }
+                    "timeline" => {
+                        if let Err(e) = open_timeline(app.clone()) {
+                            tracing::error!("時間軸開不起來：{e}");
                         }
                     }
                     "settings" => {

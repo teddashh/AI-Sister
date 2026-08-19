@@ -426,6 +426,17 @@ impl Config {
         data_dir.join("sister.db")
     }
 
+    /// 畫面檔的根目錄。
+    ///
+    /// 和上面那一則是同一個教訓的第二次。這個算式本來只寫在 `sister-cli` 的
+    /// `prune` 裡，而現在桌面那邊也要刪畫面檔了（時間軸的「忘掉這一段」）。
+    /// 兩邊各自 `join` 一次的話，症狀是**資料庫清乾淨了、截圖還躺在磁碟上**
+    /// ——而且畫面會顯示成功，因為那幾列確實不見了。一個宣稱刪除卻沒刪的
+    /// 功能，比沒有那個功能危險得多。
+    pub fn frames_dir(data_dir: &Path) -> PathBuf {
+        data_dir.join("frames")
+    }
+
     /// 讀取設定；檔案不存在則回傳預設值（不自動寫檔）。
     pub fn load(path: &Path) -> anyhow::Result<Config> {
         if !path.exists() {

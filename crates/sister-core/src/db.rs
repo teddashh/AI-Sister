@@ -644,6 +644,56 @@ impl Db {
         Ok(audit)
     }
 
+    /// 這段時間裡她閉眼的每一段，給時間軸用。
+    ///
+    /// `pause_audit` 回的是總計，時間軸要的是**位置**：某一天下午三點到五點
+    /// 什麼都沒有，是他去開會了，還是她被關掉了？兩者在時間軸上長得一模一樣，
+    /// 而只有其中一種是使用者需要知道的。一個不說明自己空白處的時間軸，會讓
+    /// 使用者以為她漏記——然後對整份紀錄失去信任。
+    ///
+    /// **掃描不從 `from_ts` 開始。** 一段昨天按下、到現在都沒解除的暫停，它的
+    /// `pause` 事件落在窗外，可是它蓋住的正是這個窗的**全部**。只看窗內事件的
+    /// 話，那一天會回一個空陣列，也就是「這天沒暫停過」——最糟的那種答案。
+    ///
+    /// 兩端都可以是 `None`，意思不同：`from` 是 None 表示開頭那筆 `pause` 已經
+    /// 被保留期刪掉（只知道它在 `to` 之前）；`to` 是 None 表示到這顆資料庫的
+    /// 最後一刻都還在暫停。回傳的是**真實**區間，沒有裁到窗內——呼叫端要畫的話
+    /// 自己裁，但至少它知道這一段其實更長。
+    pub fn pause_spans(&self, from_ts: Millis, to_ts: Millis) -> Result<Vec<PauseSpan>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT kind, ts FROM system_events
+             WHERE kind IN ('pause', 'resume') AND ts < ?1 ORDER BY ts, id",
+        )?;
+        let rows = stmt.query_map([to_ts], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Millis>(1)?))
+        })?;
+
+        let mut all: Vec<PauseSpan> = Vec::new();
+        let mut open: Option<Millis> = None;
+        for (kind, ts) in rows.flatten() {
+            match kind.as_str() {
+                // 和 `pause_audit` 同一條規則：連兩筆 pause 時留第一筆。
+                "pause" if open.is_none() => open = Some(ts),
+                "resume" => all.push(PauseSpan {
+                    from: open.take(),
+                    to: Some(ts),
+                }),
+                _ => {}
+            }
+        }
+        if let Some(start) = open {
+            all.push(PauseSpan {
+                from: Some(start),
+                to: None,
+            });
+        }
+
+        // 留下和 [from_ts, to_ts) 有交集的。未知的那一端當作無限遠——不知道
+        // 何時開始的那一段，寧可多畫一條也不要讓一片空白沒人解釋。
+        all.retain(|s| s.to.is_none_or(|t| t > from_ts));
+        Ok(all)
+    }
+
     /// 秘密遮蔽稽核：標記過幾次、其中有幾次內容其實還躺在資料庫裡。
     ///
     /// 第二個數字才是重點。`secret_suspected = 1` 只是一面旗子，而
@@ -1561,6 +1611,15 @@ pub struct Moment {
     pub frame_id: Option<i64>,
 }
 
+/// 時間軸上她閉眼的一段（見 [`Db::pause_spans`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PauseSpan {
+    /// `None` = 開頭那筆 `pause` 被保留期刪掉了，只知道它在 `to` 之前。
+    pub from: Option<Millis>,
+    /// `None` = 到這顆資料庫的最後一刻都還在暫停。
+    pub to: Option<Millis>,
+}
+
 /// 她被使用者叫去閉眼的紀錄。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PauseAudit {
@@ -2100,6 +2159,77 @@ mod tests {
     fn a_database_that_was_never_paused_says_so_plainly() {
         let db = test_db();
         assert_eq!(db.pause_audit().expect("audit"), PauseAudit::default());
+    }
+
+    /// 時間軸問「今天」，答案裡要有那段昨天按下、今天還沒解除的暫停。
+    ///
+    /// 這是 `pause_spans` 唯一難的地方。那一段的 `pause` 事件在窗外，只查窗內
+    /// 事件的寫法會回一個空陣列，於是今天一整天的空白沒有人解釋——而空白的
+    /// 原因正好是使用者自己按下去的那一下。
+    #[test]
+    fn a_pause_from_yesterday_still_explains_todays_blank_screen() {
+        const DAY: Millis = 86_400_000;
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let mut put = |kind, ts| {
+            db.insert_system(
+                s,
+                &SystemEvent {
+                    ts,
+                    kind,
+                    detail: None,
+                },
+            )
+            .expect("insert");
+        };
+
+        // 前天午睡：整段都在「今天」之前，不該出現在今天的時間軸上。
+        put(SystemKind::CapturePaused, DAY);
+        put(SystemKind::CaptureResumed, DAY + 3_600_000);
+        // 昨天晚上按下去，一路沒解除。
+        put(SystemKind::CapturePaused, 2 * DAY + 79_200_000);
+
+        let today = db.pause_spans(3 * DAY, 4 * DAY).expect("spans");
+        assert_eq!(
+            today,
+            vec![PauseSpan {
+                from: Some(2 * DAY + 79_200_000),
+                to: None,
+            }],
+            "跨夜那一段要留下，前天那一段要濾掉"
+        );
+
+        // 而且回的是**真實**起點（昨天晚上），不是被裁到今天午夜——
+        // 使用者要看得出來這一段其實從昨天就開始了。
+        assert!(today[0].from.expect("known start") < 3 * DAY);
+    }
+
+    /// 開頭被保留期刪掉的那一段，寧可多畫一條也不要讓空白沒人解釋。
+    #[test]
+    fn a_pause_whose_beginning_was_pruned_is_still_drawn() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        db.insert_system(
+            s,
+            &SystemEvent {
+                ts: 5_000,
+                kind: SystemKind::CaptureResumed,
+                detail: None,
+            },
+        )
+        .expect("insert");
+
+        let spans = db.pause_spans(0, 10_000).expect("spans");
+        assert_eq!(
+            spans,
+            vec![PauseSpan {
+                from: None,
+                to: Some(5_000)
+            }],
+            "不知道何時開始，但確實蓋住了這段窗的開頭"
+        );
+        // 解除之後的窗完全不受影響。
+        assert!(db.pause_spans(5_000, 10_000).expect("spans").is_empty());
     }
 
     #[test]

@@ -23,6 +23,7 @@ const askSend = document.querySelector("[data-ask-send]");
 const pinButton = document.querySelector("#pin");
 const hideButton = document.querySelector("#hide");
 const pauseButton = document.querySelector("#pause");
+const timelineButton = document.querySelector("#timeline");
 
 /**
  * Tauri 的 IPC。**在瀏覽器裡打開時是 null**，而那是刻意支援的：字母人整個
@@ -132,6 +133,14 @@ pinButton?.addEventListener("click", async () => {
 
 hideButton?.addEventListener("click", () => {
   void invoke?.("hide_to_tray");
+});
+
+timelineButton?.addEventListener("click", async () => {
+  try {
+    await invoke?.("open_timeline");
+  } catch (err) {
+    stateLine.textContent = String(err?.message ?? err);
+  }
 });
 
 pauseButton?.addEventListener("click", async () => {

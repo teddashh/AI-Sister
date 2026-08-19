@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <title>她記得的每一天</title>
+    <link rel="stylesheet" href="./timeline.css" />
+  </head>
+  <body>
+    <!--
+      左邊是「哪幾天」，右邊是「那天什麼」。
+
+      左邊那一欄不是導覽列，是這一頁的第一個答案：使用者想知道的第一件事
+      通常是「她到底有沒有在跑」，而一個中間空了十天的清單當場就回答了。
+    -->
+    <aside class="rail">
+      <h1>她記得的每一天</h1>
+      <ol class="days" data-days></ol>
+      <p class="rail-say" data-rail-say></p>
+    </aside>
+
+    <main class="day">
+      <header class="day-head">
+        <h2 data-day-title>—</h2>
+        <p class="day-sub" data-day-sub></p>
+      </header>
+      <ol class="moments" data-moments></ol>
+
+      <!--
+        刪除鍵長在時間軸上，不是設定頁裡。他要忘掉某一段的那一刻，正是他
+        剛剛看見那一段的那一刻——把這顆鍵放到別的地方，等於要他把時間抄下來
+        再走去另一個視窗重打一次。
+
+        兩段式：第一下只是問「這會刪掉什麼」，第二下才真的刪。按鈕上永遠寫著
+        它接下來會做的那件事，包含確切的時間範圍。
+      -->
+      <footer class="bar">
+        <label class="span">
+          從
+          <input type="time" data-from />
+        </label>
+        <label class="span">
+          到
+          <input type="time" data-to />
+        </label>
+        <p class="say" data-say></p>
+        <button class="ghost" data-forget type="button">忘掉這一整天</button>
+      </footer>
+    </main>
+
+    <script type="module" src="./timeline.js"></script>
+  </body>
+</html>

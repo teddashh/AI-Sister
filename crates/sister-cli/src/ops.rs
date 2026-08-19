@@ -106,9 +106,10 @@ pub mod prune {
     use sister_core::config::Config;
     use sister_core::retention::PruneReport;
 
-    /// 畫面檔的根目錄。和 `record` 用的是同一個算式。
+    /// 畫面檔的根目錄。**算式在 core**，這裡只是轉一手——字母人那邊的
+    /// 「忘掉這一段」也要刪同一批檔案，兩個執行檔各拼一次遲早會指到不同地方。
     pub fn frames_dir(data_dir: &Path) -> std::path::PathBuf {
-        data_dir.join("frames")
+        Config::frames_dir(data_dir)
     }
 
     pub fn run(data_dir: &Path, config: &Config, dry_run: bool) -> Result<()> {

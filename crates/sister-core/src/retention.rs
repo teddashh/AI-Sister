@@ -269,6 +269,143 @@ impl crate::db::Db {
 
         Ok(report)
     }
+
+    /// 選一段時間，**當作沒發生過**——會刪掉什麼。只有 SELECT。
+    ///
+    /// 和 `prune_preview` 同一個理由存在：使用者按下「忘掉」之前，要先看見
+    /// 代價。這一段沒有回收桶、沒有復原。
+    pub fn forget_preview(&self, from_ts: Millis, to_ts: Millis) -> Result<PruneReport> {
+        if from_ts >= to_ts {
+            return Ok(PruneReport::default());
+        }
+        let n = |sql: &str| -> Result<u64> {
+            Ok(self
+                .conn
+                .query_row(sql, [from_ts, to_ts], |r| r.get::<_, i64>(0))? as u64)
+        };
+        let mut r = PruneReport {
+            chunks_deleted: n("SELECT COUNT(*) FROM text_chunks WHERE ts >= ?1 AND ts < ?2")?,
+            facts_deleted: n("SELECT COUNT(*) FROM facts WHERE ts >= ?1 AND ts < ?2")?,
+            frames_deleted: n("SELECT COUNT(*) FROM frames WHERE ts >= ?1 AND ts < ?2")?,
+            images_deleted: n("SELECT COUNT(*) FROM frames \
+                 WHERE ts >= ?1 AND ts < ?2 AND image_path IS NOT NULL")?,
+            image_bytes_freed: n("SELECT COALESCE(SUM(image_bytes),0) FROM frames \
+                 WHERE ts >= ?1 AND ts < ?2 AND image_path IS NOT NULL")?,
+            ..Default::default()
+        };
+        for sql in [
+            "SELECT COUNT(*) FROM focus_events WHERE ts >= ?1 AND ts < ?2",
+            "SELECT COUNT(*) FROM clipboard_events WHERE ts >= ?1 AND ts < ?2",
+            "SELECT COUNT(*) FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2",
+            "SELECT COUNT(*) FROM system_events WHERE ts >= ?1 AND ts < ?2",
+        ] {
+            r.events_deleted += n(sql)?;
+        }
+        Ok(r)
+    }
+
+    /// 把 `[from_ts, to_ts)` 這一段整個忘掉。
+    ///
+    /// ## 為什麼這裡**沒有**兩段式
+    ///
+    /// 保留期是兩段的：先丟圖、留字，過更久才整列消失。那個設計的前提是
+    /// 「使用者還想記得這件事，只是不需要那張圖了」。
+    ///
+    /// 使用者親手選一段時間按下忘掉的時候，前提正好相反。留下 OCR 出來的字
+    /// 而只刪掉圖，是把他說的那句話理解成他沒說過的另一句——而且他多半不會
+    /// 再檢查一次。所以這裡只有一段：那段時間裡的每一張表都清乾淨。
+    ///
+    /// ## 邊界
+    ///
+    /// 左閉右開，和 `timeline` 同一套，所以按天連著忘不會漏掉或重複那一毫秒。
+    /// `input_metrics` 例外，用的是**重疊**（`ts_end > from AND ts_start < to`）
+    /// 而不是包含：一段跨過邊界的輸入節奏統計，裡面有一部分屬於他要忘掉的
+    /// 那段時間。忘記的時候往多刪一格倒，和保留期往少刪一格倒的方向相反，
+    /// 因為兩邊搞錯的後果不一樣。
+    ///
+    /// `image_root` 是 `None` 就完全不碰畫面檔：**連 `image_path` 都不清**，
+    /// 理由和 `prune` 那邊一模一樣——清成 NULL 會讓那些檔案永遠沒人指得到。
+    /// 但這裡的 `None` 幾乎一定是呼叫端的錯誤，所以整段跳過、報告裡的
+    /// `images_deleted` 會是 0，讓它自己看起來不對勁。
+    pub fn forget(
+        &mut self,
+        from_ts: Millis,
+        to_ts: Millis,
+        image_root: Option<&Path>,
+    ) -> Result<PruneReport> {
+        let mut report = PruneReport::default();
+        // 空的或反過來的區間什麼都不做。一個 `to < from` 的請求如果被當成
+        // 「全刪」，那就是一次不可逆的失憶，而它的來源只是某處算錯了日期。
+        if from_ts >= to_ts {
+            return Ok(report);
+        }
+
+        // 先刪檔案再改資料庫（模組開頭那條規則）。
+        let doomed: Vec<(String, i64)> = self
+            .conn
+            .prepare(
+                "SELECT image_path, image_bytes FROM frames \
+                 WHERE ts >= ?1 AND ts < ?2 AND image_path IS NOT NULL",
+            )?
+            .query_map([from_ts, to_ts], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        if let Some(root) = image_root {
+            let before = report.failed.len();
+            delete_files(root, doomed.iter().map(|(p, _)| p.as_str()), &mut report);
+            report.images_deleted += (doomed.len() - (report.failed.len() - before)) as u64;
+            report.image_bytes_freed += doomed.iter().map(|(_, b)| *b as u64).sum::<u64>();
+        }
+
+        let tx = self.conn.transaction()?;
+        // facts 在 text_chunks 之前，理由見 `prune`：反過來的話 CASCADE 會
+        // 先把事實帶走，rowcount 變成一個假的零。
+        report.facts_deleted += tx
+            .execute(
+                "DELETE FROM facts WHERE ts >= ?1 AND ts < ?2",
+                [from_ts, to_ts],
+            )
+            .context("forget facts")? as u64;
+        report.chunks_deleted += tx
+            .execute(
+                "DELETE FROM text_chunks WHERE ts >= ?1 AND ts < ?2",
+                [from_ts, to_ts],
+            )
+            .context("forget text_chunks")? as u64;
+        report.frames_deleted += tx
+            .execute(
+                "DELETE FROM frames WHERE ts >= ?1 AND ts < ?2",
+                [from_ts, to_ts],
+            )
+            .context("forget frames")? as u64;
+        for (sql, what) in [
+            (
+                "DELETE FROM focus_events WHERE ts >= ?1 AND ts < ?2",
+                "focus_events",
+            ),
+            (
+                "DELETE FROM clipboard_events WHERE ts >= ?1 AND ts < ?2",
+                "clipboard",
+            ),
+            (
+                "DELETE FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2",
+                "input_metrics",
+            ),
+            // 暫停紀錄也一起走。這會讓稽核出現孤兒 resume，而
+            // `pause_audit` / `pause_spans` 本來就要面對那種情況（保留期
+            // 也會這樣刪）——它們會說「這一段算不出長度」，不會少算一段。
+            (
+                "DELETE FROM system_events WHERE ts >= ?1 AND ts < ?2",
+                "system_events",
+            ),
+        ] {
+            report.events_deleted +=
+                tx.execute(sql, [from_ts, to_ts])
+                    .with_context(|| format!("forget {what}"))? as u64;
+        }
+        tx.commit()?;
+
+        Ok(report)
+    }
 }
 
 #[cfg(test)]
@@ -568,5 +705,108 @@ mod tests {
         delete_files(dir.path(), ["2026/08/18/a.png"], &mut report);
 
         assert!(deep.join("b.png").exists(), "還沒到期的畫面不能被連坐刪掉");
+    }
+
+    // ── 手動忘記一段時間 ────────────────────────────────────────────
+
+    /// 他親手選一段時間按下忘掉的時候，**字也要一起消失**。
+    ///
+    /// 保留期是兩段式的（先丟圖、留字），而這裡刻意不是——同一顆資料庫、
+    /// 同一批資料，兩條路徑要有不同的行為，所以值得一條測試釘住。留下 OCR
+    /// 出來的字只刪圖，是把「當作沒發生過」執行成「把證據縮小一點」，而且
+    /// 他不會再檢查第二次。
+    #[test]
+    fn forgetting_a_range_takes_the_words_too_not_just_the_pictures() {
+        let tmp = Tmp::new("forget-words");
+        let (mut db, paths) = seeded(&tmp);
+
+        let r = db
+            .forget(days_ago(61), days_ago(59), Some(tmp.path()))
+            .expect("forget");
+
+        assert!(
+            !tmp.path().join(&paths[1]).exists(),
+            "選中那一段的畫面必須從磁碟上消失"
+        );
+        assert!(
+            db.search("兩個月前", 10).expect("search").is_empty(),
+            "**字也要不見**——這正是 forget 和 prune 不一樣的地方"
+        );
+
+        // 隔壁兩天完全不受影響。一個會多刪的忘記鍵，比沒有更可怕。
+        assert!(tmp.path().join(&paths[0]).exists());
+        assert!(!db.search("昨天", 10).expect("search").is_empty());
+        assert!(!db.search("一年多前", 10).expect("search").is_empty());
+
+        assert_eq!(r.frames_deleted, 1, "{r:?}");
+        assert_eq!(r.images_deleted, 1, "{r:?}");
+        assert!(r.chunks_deleted >= 1, "{r:?}");
+        assert!(r.failed.is_empty(), "{:?}", r.failed);
+    }
+
+    /// 反過來的區間什麼都不刪。
+    ///
+    /// 這條守的不是使用者，是呼叫端算錯日期的那一天。一個 `to < from` 的
+    /// 請求若被當成「條件永遠成立」，就是一次不可逆的全刪——沒有回收桶、
+    /// 沒有復原，而觸發它的只是某處把兩個參數寫反了。
+    #[test]
+    fn a_backwards_range_forgets_nothing() {
+        let tmp = Tmp::new("forget-backwards");
+        let (mut db, paths) = seeded(&tmp);
+
+        let r = db
+            .forget(NOW, days_ago(400), Some(tmp.path()))
+            .expect("forget");
+
+        assert!(r.is_empty(), "{r:?}");
+        assert_eq!(db.stats().expect("stats").frames, 3, "一列都不能少");
+        for p in &paths {
+            assert!(tmp.path().join(p).exists(), "{p} 不該被碰");
+        }
+    }
+
+    /// 左閉右開，和 `timeline` 同一套。
+    ///
+    /// 這是「一天一天往前忘」能不能安全連著按的前提：右邊界是閉的話，
+    /// 每天的最後一毫秒會被刪兩次（無害）；左邊界是開的話，兩天中間會
+    /// 留下一筆永遠刪不掉的紀錄——而使用者以為那兩天都清乾淨了。
+    #[test]
+    fn the_forget_range_is_left_closed_right_open_like_the_timeline() {
+        let tmp = Tmp::new("forget-edges");
+        let (db, _) = seeded(&tmp);
+        let at = days_ago(60);
+
+        assert_eq!(
+            db.forget_preview(at - 1_000, at)
+                .expect("preview")
+                .frames_deleted,
+            0,
+            "右邊界是開的：到 `at` 為止不含 `at` 本身"
+        );
+        assert_eq!(
+            db.forget_preview(at, at + 1)
+                .expect("preview")
+                .frames_deleted,
+            1,
+            "左邊界是閉的：從 `at` 開始含 `at`"
+        );
+    }
+
+    /// 預告和實際必須一模一樣——和 prune 那條同一個理由。
+    ///
+    /// 這一條比 prune 那邊更要緊：他看到的數字是他按下不可逆按鈕的依據。
+    #[test]
+    fn the_preview_promises_exactly_what_forgetting_actually_removes() {
+        let tmp = Tmp::new("forget-preview");
+        let (mut db, _) = seeded(&tmp);
+        let (from, to) = (days_ago(61), NOW);
+
+        let preview = db.forget_preview(from, to).expect("preview");
+        assert_eq!(db.stats().expect("stats").frames, 3, "預告不准動到東西");
+
+        let actual = db.forget(from, to, Some(tmp.path())).expect("forget");
+        // 整個 struct 一次比，不要一欄一欄挑——挑著比的測試看不到自己沒挑的。
+        assert_eq!(preview, actual, "預告和實際必須一模一樣");
+        assert!(!preview.is_empty(), "這個區間本來就該有東西");
     }
 }
