@@ -96,10 +96,37 @@ LLM 只在「把十幾筆結果講成一句人話」時被呼叫一次（可完�
 | Microsoft Recall | opt-in、<10% Win11 機型合格、2026-04 仍被 TotalRecall Reloaded 打穿、至今無 master 開關 | 「宣稱本機」不夠——要**可驗證**的加密、審計與 kill switch |
 | Rewind / Limitless | 2025-12-05 被 Meta 收購、12-19 強制停錄、domain 已被搶註 | **closed product 退場 = 你的記憶滅絕** → 開源 + 開放資料格式是結構性信任優勢 |
 | Screenpipe | 2026-06-10 從 MIT 改自訂商業授權（禁商用/禁嵌入/禁競品） | 讓出「本類別唯一真開源」的位子；只當架構參考（它自承 10% CPU / 4GB RAM / 15GB/月——我們的資源預算是它 1/3 以下） |
-| Everywhere | v0.8.x 活躍、BUSL 1.1、快捷鍵召喚型、Strategy Engine 主動性仍未出貨 | 不同賽道（當下 vs 整天）；MCP interop 可以，程式碼不可用 |
+| Everywhere | v0.8.x 活躍、BUSL 1.1、快捷鍵召喚型、Strategy Engine 主動性仍未出貨 | 不同賽道（當下 vs 整天）；MCP interop 可以，**程式碼不可用**（見下方〔定案〕） |
 | OpenAI Pulse | 2026-08 被砍 | **主動性是墳場**——雲端淺脈絡的主動 = 垃圾訊息；我們的主動是本機證據門檻 + 每日預算，另一種動物 |
 | Littlebird / Highlight / Cluely | $11M / $40M A 輪 / 信譽受損但活著 | 全部 cloud-first 閉源——把「local-first + 可驗證」讓給了我們 |
 | 各家桌面 Copilot（ChatGPT 桌面、Claude Cowork、Gemini on Windows） | 全部是 on-demand 看螢幕 | 巨頭拿走了「當下」，沒人做「24/7 本機記憶 + 稀有主動」 |
+
+**「讀過再自己寫」的界線**〔定案〕：可以，但理由不是「產品不一樣」。
+
+BUSL 1.1 管的是**對 Licensed Work（他們的程式碼）的使用**，不管「讀」，也不管
+「與它對話」。所以讀原始碼學招合法、MCP/API interop 合法——這一點
+`research/landscape.md` §4 已逐字查證過 LICENSE 原文。
+
+但「畢竟是不一樣的產品」這句話**對我們特別不成立**，剛好是反過來的：Sylinko 的
+Additional Use Grant 把 Competing Use 定義成「作為替代品在商業上提供、以商業
+形式提供功能近似的服務」，而 ambient 螢幕助理正是我們在做的事。別人可能落在
+Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Date 轉 Apache 2.0
+之前都沒有。所以我們要守的線比一般專案更前面，不是更後面。
+
+而且真正的風險不是被告，是一個 issue 寫著「這是抄 Everywhere 的」。這個 repo
+的目的是累積名聲，那種指控就算不成立也已經達到效果了。
+
+操作規則（照這個做就不會有事）：
+1. **要什麼**：只拿「哪些 Windows 資源值得擷取、代價多大」——那是關於
+   Windows 的**事實**，事實不受著作權保護，本來就抄不到。
+2. **怎麼寫**：看過之後把結論寫成筆記，**關掉他們的原始碼再動手**。從筆記寫，
+   不要從 buffer 寫。「我重打過一遍」在法律上不是抗辯。
+3. **不准帶走**：命名、常數、模組切法、函式分解順序、註解、測試資料。這些是
+   expression，不是 idea——結構一模一樣的重寫仍然是 derivative work。
+4. **記出處**：訊號來源在 DATA_INVENTORY 註明是從哪學來的。有標註的相似叫
+   致敬，沒標註的相似叫抄襲，差別只在有沒有寫下來。
+5. 純粹是 OS 的東西（UIA property ID、COM 介面名、event 常數）引 Microsoft
+   文件，不要引他們——那本來就不是他們的。
 
 **Gap 陳述（2026-08）**：市場上沒有任何玩家同時具備
 真開源授權 × local-first × 硬隱私 × 24/7 螢幕記憶 × 便宜的主動觸發 × 陪伴角色。
