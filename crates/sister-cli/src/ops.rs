@@ -1,7 +1,6 @@
 //! 各個子命令的實作。
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use sister_core::db::Db;
@@ -455,56 +454,8 @@ pub mod prune {
 pub mod query {
     use super::*;
     use crate::fmt;
-    use sister_core::db::FactRow;
-
-    /// 每個答案：一個正規化後的值，加上它被看見過的所有位置。
-    struct Answer {
-        latest: FactRow,
-        sightings: usize,
-    }
-
-    /// 螢幕上寫的是「客服**專線**」，使用者問的是「電話」——全文檢索永遠接不起
-    /// 這兩個詞，但 L1 早就把那串數字標成 `phone` 了。這裡就是把使用者的說法
-    /// 接到事實型別上，然後直接回答。純查表、零模型。
-    fn answers(db: &Db, query: &str, limit: usize) -> Result<Vec<Answer>> {
-        let mut rows = Vec::new();
-        for kind in sister_core::facts::kinds_for_query(query) {
-            rows.extend(db.facts_by_kind(kind.as_str(), limit * 4)?);
-        }
-
-        // 同一個號碼在三個畫面出現過，是同一個答案、三次目擊——不是三個答案。
-        // 併成一筆並保留最近一次的出處，因為使用者要追的是「最後看到它的地方」。
-        let mut order: Vec<String> = Vec::new();
-        let mut merged: HashMap<String, Answer> = HashMap::new();
-        for row in rows {
-            match merged.get_mut(&row.normalized) {
-                Some(a) => {
-                    a.sightings += 1;
-                    if row.ts > a.latest.ts {
-                        a.latest = row;
-                    }
-                }
-                None => {
-                    order.push(row.normalized.clone());
-                    merged.insert(
-                        row.normalized.clone(),
-                        Answer {
-                            latest: row,
-                            sightings: 1,
-                        },
-                    );
-                }
-            }
-        }
-
-        let mut out: Vec<Answer> = order
-            .into_iter()
-            .filter_map(|k| merged.remove(&k))
-            .collect();
-        out.sort_by_key(|a| std::cmp::Reverse(a.latest.ts));
-        out.truncate(limit);
-        Ok(out)
-    }
+    // ★ 那一層住在 core，字母人用的是同一份（見 `sister_core::answer`）。
+    use sister_core::answer::answers;
 
     pub fn run(
         data_dir: &Path,

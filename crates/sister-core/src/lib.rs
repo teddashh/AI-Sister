@@ -13,6 +13,7 @@
 //!
 //! 「抄寫歸程式，意圖歸模型」——這個 crate 目前為止全是抄寫。
 
+pub mod answer;
 pub mod config;
 pub mod consent;
 pub mod control;

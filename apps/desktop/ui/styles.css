@@ -437,6 +437,51 @@ body.has-hits .stage {
   opacity: 0.8;
 }
 
+/* ★ 那幾筆。他問「電話」要的是號碼本身，不是一段剛好提到電話的字——所以
+   這一列要看得出來是**答案**，不是又一筆搜尋結果：值放大、邊框加深。
+
+   刻意不加驚嘆號或顏色警示：她沒有在保證這是對的，只是說「我看到過這個」。
+   出處那一行跟原文共用同一份樣式，理由一樣——長得不同會讓人以為其中一種
+   比較可信。 */
+.hit.fact {
+  background: rgb(255 255 255 / 78%);
+  border-left-color: var(--letter-fg);
+}
+
+.fact-value {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 15px;
+  font-weight: 600;
+  gap: 8px;
+  margin: 0 0 3px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* 和 `sister query` 印的那顆 ★ 同一個記號。字級和邊框已經分出了層次，但只有
+   層次的話，那兩列讀起來仍然像「格式不太一樣的搜尋結果」——這顆星說的是
+   「這是答案」。放在 `::before` 而不是文字裡：選起來複製到的要是號碼本身。 */
+.fact-value::before {
+  color: var(--letter-fg);
+  content: "★";
+  font-size: 11px;
+  opacity: 0.55;
+}
+
+.fact-seen {
+  font-size: 10.5px;
+  font-weight: 400;
+  opacity: 0.6;
+}
+
+/* 螢幕上原本長的樣子。它是佐證，不是答案，所以比值小一階。 */
+.fact-raw {
+  font-size: 11.5px;
+  opacity: 0.75;
+}
+
 .hits-empty {
   font-size: 12px;
   opacity: 0.6;

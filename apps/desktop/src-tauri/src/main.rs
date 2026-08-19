@@ -379,7 +379,36 @@ struct Answer {
     /// `None` = 沒記成功。畫面那一邊要能在沒有編號的情況下照常運作——記不成
     /// 題庫不該讓一個能回答的問題變成錯誤。
     query_id: Option<i64>,
+    /// L1 直接答得出來的那幾筆，排在原文前面。
+    ///
+    /// 這一層以前只長在 `sister query` 裡：於是同一句「電話」，終端機回得出
+    /// 號碼、她只會說找不到——螢幕上寫的是「客服**專線**」，全文比對永遠接不
+    /// 起那兩個詞。而她才是他每天真的會用的那一個，Phase 1 的退場條件
+    /// （「答對我自己都忘掉的東西」）也是拿她量的。
+    answers: Vec<Fact>,
     hits: Vec<Hit>,
+}
+
+/// 一筆 ★ 答案。
+#[derive(Serialize)]
+struct Fact {
+    /// 正規化後的值——`+886800080123`，不是螢幕上那串 `0800-080-123`。
+    value: String,
+    /// 螢幕上真正長的樣子。兩個都給：正規化後的值認得出來，原文才認得出**場景**。
+    ///
+    /// 也是 `value` 難讀時的救生索：金額正規化成 `TWD:13450`，而他記得的是
+    /// 這一行裡的「帳單 NT$13,450」。
+    raw: String,
+    /// 看過幾次。1 次和 12 次是不同強度的答案，而她自己不做判斷，只把數字講出來。
+    sightings: usize,
+    ts: i64,
+    /// 這個值是從哪一段字抽出來的。點開出處時要掛回題庫（見 `log_click`）。
+    /// `None` 的那些照樣點得開，只是那一下不會被記成正解。
+    chunk_id: Option<i64>,
+    frame_id: Option<i64>,
+    app: Option<String>,
+    title: Option<String>,
+    url: Option<String>,
 }
 
 #[tauri::command(async)]
@@ -390,12 +419,22 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         return Ok(Answer {
             kind: "keywords",
             query_id: None,
+            answers: Vec::new(),
             hits: Vec::new(),
         });
     }
     let shape = sister_core::question::shape(&question);
     let started = std::time::Instant::now();
     with_db(&shell, |db| {
+        // L1 的事實是「這個值是什麼」，回答不了「剛剛」。時間問題硬跑一次
+        // 只會拿電話號碼去回答一個沒有人問號碼的問題——和 `sister query`
+        // 同一條分法。
+        let facts = match shape {
+            Shape::Recent => Vec::new(),
+            Shape::Keywords => {
+                sister_core::answer::answers(db, &question, 10).map_err(|e| e.to_string())?
+            }
+        };
         let hits = match shape {
             Shape::Recent => db.recent(20),
             Shape::Keywords => db.search(&question, 20),
@@ -404,12 +443,13 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
         // 足以回答「她是不是又卡住了」，而問題本身是他的東西，不是我的。
         tracing::info!(
-            "問了一次（{}）：{} 筆，{} ms",
+            "問了一次（{}）：{} 個答案、{} 筆原文，{} ms",
             if shape == Shape::Recent {
                 "時間"
             } else {
                 "關鍵字"
             },
+            facts.len(),
             hits.len(),
             started.elapsed().as_millis()
         );
@@ -433,7 +473,9 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                     ts: sister_core::now_ms(),
                     question: &question,
                     shape: shape.name(),
-                    hits: hits.len(),
+                    // ★ 答案也算——她給了他東西就不是「答不出來」。
+                    // 見 `QueryLogEntry::hits`。
+                    hits: facts.len() + hits.len(),
                     latency_ms: started.elapsed().as_millis() as i64,
                     source: "desktop",
                 })
@@ -444,6 +486,20 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         Ok(Answer {
             kind: shape.name(),
             query_id,
+            answers: facts
+                .into_iter()
+                .map(|a| Fact {
+                    value: a.latest.normalized,
+                    raw: a.latest.raw,
+                    sightings: a.sightings,
+                    ts: a.latest.ts,
+                    chunk_id: a.latest.chunk_id,
+                    frame_id: a.latest.frame_id,
+                    app: a.latest.app_id,
+                    title: a.latest.window_title,
+                    url: a.latest.url,
+                })
+                .collect(),
             hits: hits
                 .into_iter()
                 .map(|h| Hit {

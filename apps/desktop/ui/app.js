@@ -331,12 +331,85 @@ function when(ts) {
 }
 
 /**
- * @param hits 一筆一筆的答案。
+ * 出處那一行：時間、在哪個 app、哪個視窗、哪個網址，以及點不點得開。
+ *
+ * ★ 答案和原文共用同一份——她說的每一句都要指得回去，而「答案的出處長得跟
+ * 原文的出處不一樣」只會讓人以為其中一種比較可信。
+ *
+ * @param li 那一列本身。點得開的時候要在它身上掛 class 和事件。
+ * @param rank 這一筆在畫面上排第幾（從 0 起算）。
+ */
+function sourceLine(item, li, queryId, rank) {
+  const source = document.createElement("p");
+  source.className = "hit-source";
+
+  const time = document.createElement("span");
+  time.className = "when";
+  time.textContent = when(item.ts);
+  source.append(time);
+
+  for (const part of [item.app, item.title, item.url]) {
+    if (!part) continue;
+    const span = document.createElement("span");
+    span.textContent = part;
+    source.append(span);
+  }
+
+  // 文字保留 365 天、畫面 30 天，所以「字還在但圖沒了」是正常狀態。
+  // 那時候要直說，不是留一個點不開的連結。
+  if (item.frame_id === null || item.frame_id === undefined) {
+    const gone = document.createElement("span");
+    gone.className = "no-frame";
+    gone.textContent = "畫面已過保留期";
+    source.append(gone);
+    return source;
+  }
+
+  // 有圖的才點得開。「看起來能點但點了沒反應」比「看得出來不能點」差。
+  li.classList.add("openable");
+  li.tabIndex = 0;
+  li.title = "點開看當時的畫面";
+  const open = () => {
+    void invoke?.("open_frame", { frameId: item.frame_id });
+    // 他點下去的那一刻，等於幫這一題標了正解——而 `rank` 說出排序把它放
+    // 在第幾個。那是檢索品質唯一不必人工標註就拿得到的訊號（PHASES.md
+    // Phase 2 的題庫要 ≥ 30 題來自這裡）。
+    //
+    // 失敗完全不理：他要的是那張畫面。一個因為記不了統計而不肯開圖的
+    // 產品，把手段當成了目的。
+    // 沒有題號、或這一筆說不出自己是從哪一段字來的，就只開圖不記帳。
+    if (
+      queryId !== null &&
+      queryId !== undefined &&
+      item.chunk_id !== null &&
+      item.chunk_id !== undefined
+    ) {
+      void invoke?.("log_click", {
+        queryId,
+        chunkId: item.chunk_id,
+        rank,
+      })?.catch?.(() => {});
+    }
+  };
+  li.addEventListener("click", open);
+  li.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open();
+    }
+  });
+  return source;
+}
+
+/**
+ * @param hits 一筆一筆的原文。
  * @param kind `"keywords"`（比對字找到的）或 `"recent"`（他問的是時間）。
  *   這個字是後端給的，不是這裡判斷的——同一句話在 `sister query` 和這一頁
  *   必須得到同一種答案，所以規則只有一份，在 sister-core 的 `question`。
+ * @param facts L1 直接答得出來的那幾筆（★）。排在原文前面，因為那才是他問
+ *   的東西本身：問「電話」要的是號碼，不是一段剛好提到電話的字。
  */
-function renderHits(hits, kind, queryId = null) {
+function renderHits(hits, kind, queryId = null, facts = []) {
   hitList.replaceChildren();
 
   // 他打了「剛剛發生什麼事」，而底下這幾筆跟那七個字一個都對不上。不先講
@@ -348,7 +421,34 @@ function renderHits(hits, kind, queryId = null) {
     hitList.append(note);
   }
 
-  if (hits.length === 0) {
+  for (const [rank, fact] of facts.entries()) {
+    const li = document.createElement("li");
+    li.className = "hit fact";
+
+    const value = document.createElement("p");
+    value.className = "fact-value";
+    value.textContent = fact.value;
+    // 1 次和 12 次是強度不同的答案。她自己不下判斷，只把數字講出來。
+    if (fact.sightings > 1) {
+      const seen = document.createElement("span");
+      seen.className = "fact-seen";
+      seen.textContent = `看過 ${fact.sightings} 次`;
+      value.append(seen);
+    }
+    li.append(value);
+
+    // 正規化後的值認得出來，原文才認得出**場景**——`+886800080123` 是機器
+    // 要的，`客服專線 0800-080-123` 才是他記得的那一行。兩個都給。
+    const raw = document.createElement("p");
+    raw.className = "hit-text fact-raw";
+    raw.textContent = fact.raw;
+    li.append(raw);
+
+    li.append(sourceLine(fact, li, queryId, rank));
+    hitList.append(li);
+  }
+
+  if (hits.length === 0 && facts.length === 0) {
     const empty = document.createElement("li");
     empty.className = "hits-empty";
     // 「我沒看過這件事」和「我什麼都還沒看過」是兩件不同的事。問時間卻空手
@@ -361,7 +461,7 @@ function renderHits(hits, kind, queryId = null) {
     hitList.append(empty);
   }
 
-  for (const [rank, hit] of hits.entries()) {
+  for (const [i, hit] of hits.entries()) {
     const li = document.createElement("li");
     li.className = "hit";
 
@@ -370,60 +470,9 @@ function renderHits(hits, kind, queryId = null) {
     renderSnippet(text, hit.snippet || hit.text);
     li.append(text);
 
-    // 出處。她說的每一句都要指得回去——沒有這一行就只是另一個會唬爛的東西。
-    const source = document.createElement("p");
-    source.className = "hit-source";
-
-    const time = document.createElement("span");
-    time.className = "when";
-    time.textContent = when(hit.ts);
-    source.append(time);
-
-    for (const part of [hit.app, hit.title, hit.url]) {
-      if (!part) continue;
-      const span = document.createElement("span");
-      span.textContent = part;
-      source.append(span);
-    }
-
-    // 文字保留 365 天、畫面 30 天，所以「字還在但圖沒了」是正常狀態。
-    // 那時候要直說，不是留一個點不開的連結。
-    if (hit.frame_id === null || hit.frame_id === undefined) {
-      const gone = document.createElement("span");
-      gone.className = "no-frame";
-      gone.textContent = "畫面已過保留期";
-      source.append(gone);
-    } else {
-      // 有圖的才點得開。「看起來能點但點了沒反應」比「看得出來不能點」差。
-      li.classList.add("openable");
-      li.tabIndex = 0;
-      li.title = "點開看當時的畫面";
-      const open = () => {
-        void invoke?.("open_frame", { frameId: hit.frame_id });
-        // 他點下去的那一刻，等於幫這一題標了正解——而 `rank` 說出排序把它放
-        // 在第幾個。那是檢索品質唯一不必人工標註就拿得到的訊號（PHASES.md
-        // Phase 2 的題庫要 ≥ 30 題來自這裡）。
-        //
-        // 失敗完全不理：他要的是那張畫面。一個因為記不了統計而不肯開圖的
-        // 產品，把手段當成了目的。
-        if (queryId !== null && queryId !== undefined) {
-          void invoke?.("log_click", {
-            queryId,
-            chunkId: hit.chunk_id,
-            rank,
-          })?.catch?.(() => {});
-        }
-      };
-      li.addEventListener("click", open);
-      li.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          open();
-        }
-      });
-    }
-
-    li.append(source);
+    // ★ 那幾筆排在上面，所以原文的第 0 筆在畫面上其實是第 facts.length 筆。
+    // rank 要說的是**他在清單上往下看了多遠**，不是它在哪一個陣列裡的位置。
+    li.append(sourceLine(hit, li, queryId, facts.length + i));
     hitList.append(li);
   }
 
@@ -468,7 +517,7 @@ async function ask() {
     const answer = await invoke("ask", { question });
     // 這一份過期了。畫面歸還在跑的那一次管，這裡連 idle 都不要設。
     if (mine !== asking) return;
-    renderHits(answer.hits, answer.kind, answer.query_id);
+    renderHits(answer.hits, answer.kind, answer.query_id, answer.answers);
     setState("idle");
     // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
     askInput.value = "";
@@ -549,6 +598,33 @@ if (params.get("hits") === "demo") {
       },
     ],
     "keywords",
+    null,
+    // ★ 那一層。這正是 `sister query 電話` 一直答得出、而她以前答不出來的
+    // 東西：螢幕上寫的是「客服**專線**」，比對「電話」兩個字永遠接不起來。
+    [
+      {
+        value: "+886800080123",
+        raw: "客服專線 0800-080-123",
+        sightings: 3,
+        ts: Date.now() - 2 * 3600 * 1000,
+        chunk_id: 12,
+        frame_id: 41,
+        app: "chrome.exe",
+        title: "帳單查詢",
+        url: "https://example.com/bill",
+      },
+      {
+        value: "+886912345678",
+        raw: "手機 0912-345-678",
+        sightings: 1,
+        ts: Date.now() - 5 * 86400 * 1000,
+        chunk_id: 9,
+        frame_id: null,
+        app: "Teams.exe",
+        title: "通話中",
+        url: null,
+      },
+    ],
   );
 }
 
