@@ -38,6 +38,13 @@ struct Shell {
     /// 資料庫連線。**開得很懶**：她可以在完全沒有資料的機器上開起來，
     /// 使用者按下第一個問題之前不必碰硬碟。
     db: Mutex<Option<sister_core::db::Db>>,
+    /// 這個視窗自己開起來的那個 recorder（`None` = 沒開過／已經走了）。
+    ///
+    /// 「已經有一個在跑了嗎」以前只問心跳，而心跳是 recorder **開機做完之後**
+    /// 才蓋的——於是那段開機時間裡它對這道閘門是隱形的，第二下就穿過去了。
+    /// 心跳那一頭已經補好（見 `ops::BootBeat`），但那是靠時間差贏的；握著這個
+    /// 把手就不必賭：行程還活著就是還活著，跟它寫沒寫檔案無關。
+    spawned: Mutex<Option<std::process::Child>>,
 }
 
 impl Shell {
@@ -253,6 +260,22 @@ fn start_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
         // 而使用者只會看到磁碟用得比講好的快一倍。
         return Err("已經有一個 sister record 在跑了".into());
     }
+    // 心跳還沒出現，不代表沒有人在起來。上一下按出去的那個行程可能正卡在
+    // `Db::open` 的 migration 上——它還沒蓋出第一個心跳，所以上面那道閘門
+    // 看不見它。**問行程，不要問它寫的檔案**：這是唯一一條不用賭時間差的路。
+    {
+        let mut spawned = shell.spawned.lock().expect("spawned recorder");
+        match spawned.as_mut().map(std::process::Child::try_wait) {
+            // 還在跑（`Ok(None)` = 沒退出）。
+            Some(Ok(None)) => {
+                return Err("上一次按的那個還在起來——第一次開資料庫要重建索引，\
+                            大的資料庫可能要幾分鐘。再等一下"
+                    .into());
+            }
+            // 已經走了，或者連問都問不到（handle 壞了）。清掉再開新的。
+            _ => *spawned = None,
+        }
+    }
     // 同意書那道閘門在 `sister record` 裡面，而我們等一下就要把它的視窗藏起來
     // ——它印出來的拒絕理由**沒有人看得到**。在這裡先問一次同一個問題，那句
     // 話才有地方顯示；不然按下去的結果是「閃一下，然後什麼都沒發生」。
@@ -297,8 +320,13 @@ fn start_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
         // 是同一件事。
         cmd.creation_flags(0x0800_0000);
     }
-    cmd.spawn()
+    let child = cmd
+        .spawn()
         .map_err(|e| format!("{} 起不來：{e}", exe.display()))?;
+    // 握著它。不握的話，下一下按進來的時候我們只剩心跳可以問，而開機那幾分鐘
+    // 心跳還不在。順便：`Child` 被 drop 不會殺掉行程，所以她活得比這個視窗久
+    // ——那是刻意的，`stop_recording` 用的是檔案而不是 kill。
+    *shell.spawned.lock().expect("spawned recorder") = Some(child);
     tracing::info!("把 recorder 開起來了：{}", exe.display());
     Ok(())
 }
@@ -324,23 +352,39 @@ fn stop_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
 /// 按了「開始記錄」卻沒有起來的時候，理由已經寫在 `record.log` 裡了——但那個
 /// 檔案在 `%APPDATA%` 深處，而正在看著一個沒反應的按鈕的人不會去翻它。把最後
 /// 幾行直接端到畫面上，「按了沒反應」才會變成一句看得懂的話。
+/// `record.log` 是**按下去的那一刻**才建的，而建之前 [`start_log_at`] 會把上
+/// 一輪改名成 `.1`。所以「按了沒起來、再按一次」的第二下，唯一寫著原因的那一份
+/// 已經變成 `.1`，新開的那一份是空的——以前這裡只讀新的那一份，於是畫面說
+/// 「沒有留下任何理由」，而理由就躺在它旁邊。
 #[tauri::command(async)]
 fn recorder_log_tail(shell: tauri::State<'_, Shell>) -> String {
     const LINES: usize = 6;
     let Some(dir) = shell.data_dir.as_ref() else {
         return String::new();
     };
-    let Ok(text) = std::fs::read_to_string(dir.join("record.log")) else {
-        return String::new();
+    let tail = |name: &str| -> String {
+        let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
+            return String::new();
+        };
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .rev()
+            .take(LINES)
+            .collect();
+        lines.into_iter().rev().collect::<Vec<_>>().join("\n")
     };
-    let tail: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .rev()
-        .take(LINES)
-        .collect();
-    tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+    let now = tail("record.log");
+    if !now.is_empty() {
+        return now;
+    }
+    match tail("record.log.1").as_str() {
+        "" => String::new(),
+        // 講明白這是哪一輪的。不講的話，兩輪前的一句錯誤會被讀成「她剛剛就是
+        // 這樣死的」——而那兩件事要做的處置不一樣。
+        before => format!("（這一輪還沒寫出東西，以下是上一輪的 record.log）\n{before}"),
+    }
 }
 
 #[tauri::command]
@@ -1423,6 +1467,7 @@ fn main() {
             state_path,
             data_dir,
             db: Mutex::new(None),
+            spawned: Mutex::new(None),
         })
         .manage(Hotkey(Mutex::new(HotkeyView::default())))
         .invoke_handler(tauri::generate_handler![

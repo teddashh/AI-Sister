@@ -89,6 +89,16 @@ let starting = false;
  */
 let lastRun = null;
 
+/**
+ * 上一次叫她起來、等到逾時都還沒看到心跳（`null` = 沒發生過，或後來好了）。
+ *
+ * 這一句以前是直接寫進 `stateLine.textContent` 的，而 5 秒後的下一輪輪詢會
+ * 呼叫 `paint()` 把它蓋回「沒有人在記錄」——**唯一說得出原因的那一句，活不到
+ * 他讀完**，剩下的畫面和「他根本沒按過」長得一模一樣。所以它得是狀態，跟著
+ * 每一次重畫一起出現，直到她真的起來為止。
+ */
+let wakeFailed = null;
+
 /** 灰掉那一刻要說的第二句話。她在錄的時候不講——那是現在式，不是回顧。 */
 function asleepDetail() {
   if (lastRun === null) return "";
@@ -120,7 +130,11 @@ function paint() {
       : STATE_LINES[shown];
   // 灰掉的時候多講一句「上一次是什麼時候、為什麼停的」。換行不換句：那是
   // 同一件事的後半段，而 `.state-line` 的 `pre-line` 讓它自己排。
-  const detail = !starting && shown === "asleep" ? asleepDetail() : "";
+  //
+  // 剛剛才叫不起來的話，那一句蓋過「上一次是什麼時候停的」——他現在要處理的
+  // 是眼前這一次沒起來，不是上禮拜那一場怎麼收的。
+  const detail =
+    !starting && shown === "asleep" ? (wakeFailed ?? asleepDetail()) : "";
   stateLine.textContent = detail === "" ? line : `${line}\n${detail}`;
   // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。
   avatar.setAttribute("aria-label", `AI-Sister：${line}`);
@@ -153,8 +167,12 @@ function setPaused(next) {
 function setRecording(next) {
   const was = recording;
   recording = next === true;
-  // 她自己起來了（或是從別的地方被開起來的），那個「正在叫她」的等待就結束了。
-  if (recording) starting = false;
+  // 她自己起來了（或是從別的地方被開起來的），那個「正在叫她」的等待就結束了，
+  // 而「上一次叫不起來」也就過期了——她現在人在這裡，那句話再留著只會嚇人。
+  if (recording) {
+    starting = false;
+    wakeFailed = null;
+  }
   // 剛剛才停下來：現在才有一場「上一次」可以講，而它跟開場時讀到的那一場
   // 不是同一場。停了才問，因為在錄的時候問到的會是**這一場**（沒有收尾），
   // 而畫面會把它讀成「她當掉了」。
@@ -165,9 +183,14 @@ function setRecording(next) {
 /**
  * 等她把第一個心跳蓋出來。
  *
- * 心跳是 5 秒一次，但 recorder **在進迴圈之前就會先蓋一次**，所以正常情況下
- * 一秒內就看得到。用 400 ms 去問是因為這一段有人正盯著看；上限 25 秒是留給
- * 第一次開資料庫要跑 migration 的那一次（bigram 回填在大的資料庫上要幾秒）。
+ * 心跳是 5 秒一次，但 recorder **在開資料庫之前就先蓋一次**（`ops::BootBeat`），
+ * 所以正常情況下一秒內就看得到——包括那顆存了一年文字、migration 要跑好幾分鐘
+ * 的資料庫。用 400 ms 去問是因為這一段有人正盯著看。
+ *
+ * 25 秒到了不代表她起不來，只代表**這 25 秒裡沒有心跳**。以前那句「她沒有
+ * 起來」是一個猜測，而它會連著一顆放回來的按鈕一起出現——他再按一下，第二個
+ * `sister record` 就打同一顆資料庫。所以逾時只換句話：說我看到什麼，別說她
+ * 怎麼了。真的起來了，那 5 秒一輪的輪詢會接住。
  */
 const WAKE_POLL_MS = 400;
 const WAKE_TIMEOUT_MS = 25000;
@@ -175,6 +198,8 @@ const WAKE_TIMEOUT_MS = 25000;
 async function startRecording() {
   if (invoke === null || starting) return;
   starting = true;
+  // 這一次的結果還沒出來，上一次的判斷就不算數了。
+  wakeFailed = null;
   paint();
   try {
     await invoke("start_recording");
@@ -197,19 +222,21 @@ async function startRecording() {
     }
   }
   if (!starting) return;
-  // 起不來。理由已經寫在 record.log 裡了，而那個檔案在 %APPDATA% 深處——
-  // 一個看著沒反應的按鈕的人不會去翻它，所以直接端過來。
-  starting = false;
-  paint();
+  // 逾時了。如果她中途死了，理由已經寫在 record.log 裡——而那個檔案在
+  // %APPDATA% 深處，一個看著沒反應的按鈕的人不會去翻它，所以直接端過來。
   let why = "";
   try {
     why = await invoke("recorder_log_tail");
   } catch {
     // 連記錄檔都讀不到，那就只剩下面那句話。
   }
-  stateLine.textContent = why
-    ? `她沒有起來。record.log 最後說：\n${why}`
-    : "她沒有起來，而且沒有留下任何理由（看看 record.log）";
+  const waited = Math.round(WAKE_TIMEOUT_MS / 1000);
+  wakeFailed = why
+    ? `等了 ${waited} 秒還沒有心跳。record.log 最後說：\n${why}`
+    : `等了 ${waited} 秒還沒有心跳，record.log 也還是空的。` +
+      "她可能還在起來——再等一下，或去看那個檔案";
+  starting = false;
+  paint();
 }
 
 wakeButton?.addEventListener("click", startRecording);

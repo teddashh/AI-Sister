@@ -3129,6 +3129,95 @@ pub mod record {
         let _ = unsafe { SetConsoleCtrlHandler(Some(handler), true) };
     }
 
+    /// 開機那一段的心跳。
+    ///
+    /// 從 `Db::open` 到主迴圈第一次 `beat` 中間可能隔著好幾分鐘（見
+    /// `windows_record` 裡的說明）。這個守衛替那段空窗蓋心跳，好讓
+    /// `is_recording` 看得見一個「正在起來」的 recorder，而不是看見一片空白
+    /// 然後放行第二個。
+    ///
+    /// 交棒之後這條執行緒就停了，心跳改由主迴圈自己蓋——**心跳要跟著那個真的
+    /// 在做事的迴圈**，不然一個迴圈已經卡死的行程會永遠說自己在錄。
+    ///
+    /// 只有 `windows_record` 用得到它，但這裡**不加 `#[cfg(windows)]`**：它管的
+    /// 是三個檔案動作，和平台無關，而唯一會回歸的方式（開機那一下沒蓋、或失敗
+    /// 之後沒收）在這台開發機上測得到。加了 cfg 就要等到 Windows 才發現。
+    // 代價是非 Windows 的正式編譯裡沒有人用它（用它的 `windows_record` 掛著
+    // `cfg(windows)`），所以那邊得把 dead_code 關掉。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    struct BootBeat {
+        alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+        dir: PathBuf,
+        handed_off: bool,
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    impl BootBeat {
+        fn start(data_dir: &Path) -> Self {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::time::{Duration, Instant};
+
+            let dir = data_dir.to_path_buf();
+            // 第一下蓋在呼叫者這條執行緒上，不是丟給新執行緒去蓋：呼叫的人回
+            // 去之後下一行就是 `Db::open`，中間不該留一段「心跳還沒出現」的
+            // 空窗——那正是要補的洞。
+            let _ = sister_core::heartbeat::beat(&dir, sister_core::now_ms());
+            let alive = std::sync::Arc::new(AtomicBool::new(true));
+            let thread = std::thread::spawn({
+                let alive = alive.clone();
+                let dir = dir.clone();
+                move || {
+                    let every = Duration::from_millis(sister_core::heartbeat::BEAT_EVERY_MS as u64);
+                    let mut last = Instant::now();
+                    // 睡小段而不是睡滿一個間隔：交棒或失敗之後這條執行緒要在
+                    // 零點幾秒內收乾淨，`Drop` 才不會卡著等它。
+                    while alive.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(200));
+                        if last.elapsed() >= every {
+                            let _ = sister_core::heartbeat::beat(&dir, sister_core::now_ms());
+                            last = Instant::now();
+                        }
+                    }
+                }
+            });
+            Self {
+                alive,
+                thread: Some(thread),
+                dir,
+                handed_off: false,
+            }
+        }
+
+        /// 主迴圈接手。之後 drop 不會再把心跳收掉——那是還在跑的 recorder 的
+        /// 心跳，不是這個守衛的。
+        fn hand_off(&mut self) {
+            self.handed_off = true;
+            self.stop_thread();
+        }
+
+        fn stop_thread(&mut self) {
+            self.alive.store(false, std::sync::atomic::Ordering::SeqCst);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    impl Drop for BootBeat {
+        fn drop(&mut self) {
+            // 先把執行緒等停，再決定要不要收心跳。不等的話它有機會在 `stop`
+            // 之後又蓋一次，於是磁碟上留下一個沒有人在跑的新鮮心跳——正好是
+            // 這整段想避免的東西。
+            self.stop_thread();
+            if !self.handed_off {
+                // 沒交棒就走了（`Db::open` 炸了之類）：這次開機沒成功，把心跳
+                // 收掉，不然接下來 16 秒字母人會說她在錄。
+                sister_core::heartbeat::stop(&self.dir);
+            }
+        }
+    }
+
     #[cfg(windows)]
     fn windows_record(
         data_dir: &Path,
@@ -3147,6 +3236,17 @@ pub mod record {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create {}", data_dir.display()))?;
 
+        // **開機也要有心跳。** 底下這一段（`Db::open` 的 migration、能力探測、
+        // 開場那次 prune）在一顆存了一年文字的資料庫上可能要跑好幾分鐘——
+        // migration 003 要把整張 `text_chunks` 重讀一次重建 bigram 索引。而
+        // 第一次 `heartbeat::beat` 排在那全部之後，所以**正在開機的 recorder
+        // 對 `is_recording` 是隱形的**。
+        //
+        // 後果不是畫面難看：字母人等 25 秒之後說「她沒有起來」並把喚醒鈕放
+        // 回來，第二下穿過那道 `is_recording` 閘門（recorder 沒有 lock file，
+        // 也沒有 single instance），於是兩個 `sister record` 打同一顆資料庫。
+        // 唯一的症狀是磁碟用得比講好的快一倍。
+        let mut boot = BootBeat::start(data_dir);
         let mut db = Db::open(&crate::db_path(data_dir))?;
         // **先建後端、再問能力。** 反過來的話，「輸入 hook 裝上了沒」永遠
         // 是在 hook 還沒裝之前問的，於是永遠回報失敗——一則恆假的警告。
@@ -3261,8 +3361,10 @@ pub mod record {
         let mut last_consent_check = Instant::now();
         // 心跳。字母人是另一個行程，它沒有別的辦法知道「現在到底有沒有人在
         // 錄」——`sessions.ended_at` 在當掉的時候永遠停在 NULL，而閒置時
-        // 資料庫本來就會好一陣子沒有新資料。開始之前先蓋一次，不然字母人
-        // 要等到第一個 5 秒過完才看得到她起來了。
+        // 資料庫本來就會好一陣子沒有新資料。開機那一段由 `BootBeat` 蓋著，
+        // 這裡把它接過來：交棒之後那個執行緒就停了，心跳從此跟著這個迴圈走
+        // ——一個蓋得動心跳但迴圈已經卡死的行程，不該還在說自己在錄。
+        boot.hand_off();
         let _ = sister_core::heartbeat::beat(data_dir, sister_core::now_ms());
         let mut last_beat = Instant::now();
         // 有人在沒有 recorder 在跑的時候按了「停止」，那個請求會留在磁碟上。
@@ -3779,10 +3881,58 @@ pub mod record {
     }
     #[cfg(test)]
     mod record_tests {
-        use super::ConfigWatch;
+        use super::{BootBeat, ConfigWatch};
         use crate::ops::tmp::Tmp;
         use sister_core::config::Config;
         use sister_core::consent::{Consent, Sheet};
+        use sister_core::heartbeat;
+
+        #[test]
+        fn a_recorder_that_is_still_opening_the_database_is_already_visible() {
+            // 這一條顧的是「第二個 recorder」。開機那一段（migration、能力探測、
+            // 開場那次 prune）在大的資料庫上要好幾分鐘，而以前第一次心跳排在
+            // 那全部之後——那幾分鐘裡她對 `is_recording` 是隱形的，字母人於是
+            // 放行第二個 `sister record` 打同一顆資料庫。
+            let dir = Tmp::new("boot-beat");
+            assert!(
+                !heartbeat::is_recording(&dir.0, sister_core::now_ms()),
+                "還沒開始，不該有心跳"
+            );
+            let boot = BootBeat::start(&dir.0);
+            // 立刻，不是等第一個 5 秒間隔——那個間隔正是要補的洞。
+            assert!(
+                heartbeat::is_recording(&dir.0, sister_core::now_ms()),
+                "開機的第一瞬間就要看得見她在起來"
+            );
+            drop(boot);
+        }
+
+        #[test]
+        fn a_boot_that_died_does_not_leave_a_heartbeat_behind() {
+            // `Db::open` 炸掉之後 `windows_record` 直接 `?` 出去。那時候磁碟上
+            // 留著一個剛蓋的心跳，而接下來 16 秒（`STALE_AFTER_MS`）裡字母人會
+            // 說她在錄——說她在錄卻沒在錄，是這兩個狀態裡比較危險的那一個。
+            let dir = Tmp::new("boot-died");
+            drop(BootBeat::start(&dir.0));
+            assert!(
+                !heartbeat::is_recording(&dir.0, sister_core::now_ms()),
+                "沒交棒就走了＝這次開機沒成功，心跳要收掉"
+            );
+        }
+
+        #[test]
+        fn handing_off_leaves_the_heartbeat_for_the_loop_that_took_over() {
+            // 反過來也要成立：交棒之後這個守衛收工，但心跳是**還在跑的那個
+            // 迴圈**的，不能跟著一起被清掉——清掉的話她剛起來就自己說沒在錄。
+            let dir = Tmp::new("boot-handoff");
+            let mut boot = BootBeat::start(&dir.0);
+            boot.hand_off();
+            drop(boot);
+            assert!(
+                heartbeat::is_recording(&dir.0, sister_core::now_ms()),
+                "交棒之後心跳歸主迴圈管，守衛不准動它"
+            );
+        }
 
         #[test]
         fn a_file_nobody_touched_does_not_look_touched() {
