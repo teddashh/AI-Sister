@@ -3,17 +3,22 @@
 //! 憲法（SPEC §0）：這裡的資料 append-only、不經 LLM、不可改寫。
 //! 一顆加密的 SQLite 檔裝下全部——備份、加密、刪除都只有一個對象。
 //!
-//! 檢索走 FTS5 雙索引（SPEC §15）：
+//! 檢索走 FTS5 三索引（SPEC §15）：
 //! - `text_fts`（trigram）：CJK 子字串比對的主力，繁中天然支援、免字典。
 //!   比不了少於 3 個字的東西——這是 trigram 的定義，不是設定問題。
 //! - `text_fts_uni`（unicode61）：補英文整詞（`dns` 這種短英文詞它答得出來，
 //!   trigram 反而不行）。
+//! - `text_fts_bi`（schema 3）：存切好的**相鄰雙字**，補兩個字的中文。
 //!
-//! 這段註解本來寫著 unicode61「補 <3 字的查詢」。**那句話對中文是假的**：
-//! unicode61 不是逐字切 CJK 的，它把「客服專線」整串當成**一個** token，
-//! 所以 `MATCH "客服"` 是 0 筆。兩個字的中文詞——也就是中文裡最常見的詞長
-//! ——在這裡沒有任何索引可用，只剩 [`Db::search_like`] 的掃描。
-//! 見 `LIKE_SCAN_DAYS` 與 DATA_INVENTORY 的已知缺口第 8 條。
+//! 為什麼要第三個索引：這段註解本來寫著 unicode61「補 <3 字的查詢」。
+//! **那句話對中文是假的**——unicode61 不是逐字切 CJK 的，它把「客服專線」
+//! 整串當成**一個** token，所以 `MATCH "客服"` 是 0 筆。兩個字的中文詞
+//! ——也就是中文裡最常見的詞長——因此沒有任何索引可用，只剩
+//! [`Db::search_like`] 的掃描：45 天語料 224 ms，而且為了不讓成本跟著使用
+//! 時間長大，只好夾在 `LIKE_SCAN_DAYS` 天內。加上 bigram 之後是 0.1 ms、
+//! 沒有時間界線，代價是資料庫大 29%。
+//!
+//! 掃描這條路沒有拆掉：**一個字**的查詢產不出相鄰雙字，那條仍然走掃描。
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -26,7 +31,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE meta (
@@ -188,6 +193,22 @@ const MIGRATION_002: &str = r#"
 ALTER TABLE facts DROP COLUMN confidence;
 "#;
 
+/// 兩個字的中文詞的索引。見 [`cjk_bigrams`]。
+///
+/// 刪除掛在 trigger 上（照 rowid 刪，不需要重算 bigram），新增則在
+/// `insert_chunk_tx` 裡明寫——那樣就不必為了 trigger 去註冊一個
+/// 「每條連線都必須存在、否則寫入直接失敗」的自訂 SQL 函式。
+const MIGRATION_003: &str = r#"
+CREATE VIRTUAL TABLE text_fts_bi USING fts5(text, tokenize='unicode61');
+
+DROP TRIGGER text_chunks_ad;
+CREATE TRIGGER text_chunks_ad AFTER DELETE ON text_chunks BEGIN
+  INSERT INTO text_fts(text_fts, rowid, text) VALUES('delete', old.id, old.text);
+  INSERT INTO text_fts_uni(text_fts_uni, rowid, text) VALUES('delete', old.id, old.text);
+  DELETE FROM text_fts_bi WHERE rowid = old.id;
+END;
+"#;
+
 pub struct Db {
     /// `pub(crate)` 只為了 [`crate::retention`]：清理要跨好幾張表、還要在
     /// 同一個 transaction 裡跑，包成一堆窄 API 反而更難看出它到底刪了什麼。
@@ -251,6 +272,27 @@ impl Db {
             tx.execute_batch(MIGRATION_002).context("migration 002")?;
             tx.commit()?;
             self.conn.pragma_update(None, "user_version", 2)?;
+        }
+        if version < 3 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(MIGRATION_003).context("migration 003")?;
+            // 回填舊資料。bigram 要在 Rust 這邊算，所以這段不能寫進 SQL——
+            // 少了它，升級上來的資料庫會有一個空索引，然後兩個字的中文查詢
+            // 悄悄地只查得到升級之後的東西。
+            {
+                let mut read = tx.prepare("SELECT id, text FROM text_chunks")?;
+                let mut write =
+                    tx.prepare("INSERT INTO text_fts_bi(rowid, text) VALUES(?1, ?2)")?;
+                let mut rows = read.query([])?;
+                while let Some(row) = rows.next()? {
+                    let grams = cjk_bigrams(&row.get::<_, String>(1)?);
+                    if !grams.is_empty() {
+                        write.execute(params![row.get::<_, i64>(0)?, grams])?;
+                    }
+                }
+            }
+            tx.commit()?;
+            self.conn.pragma_update(None, "user_version", 3)?;
         }
         Ok(())
     }
@@ -577,33 +619,24 @@ impl Db {
         )?)
     }
 
-    /// 有多少行字落在 LIKE 掃描的窗外——也就是兩個字的中文查詢碰不到的部分。
+    /// bigram 索引蓋到了多少行字。回傳 `(已進索引, 有 CJK 的總行數)`。
     ///
-    /// 回傳 `(窗外, 全部)`。這是給 `doctor` 用的：與其宣稱「兩個字的中文只
-    /// 找得回 30 天」，不如當場告訴使用者他自己的資料庫裡有多少行字已經在
-    /// 那條線的外面。
-    pub fn text_outside_scan_window(&self) -> Result<(i64, i64)> {
-        let total: i64 = self
+    /// 這個數字存在的理由是 migration 003 要**回填**舊資料。回填如果沒跑到
+    /// （舊版本開過這顆資料庫、或當初中途失敗），兩個字的中文查詢會安靜地
+    /// 只查得到升級之後錄的東西——沒有錯誤、沒有例外，只是舊的東西再也叫
+    /// 不出來。所以 `doctor` 把兩個數字並排印出來，讓它自己講。
+    pub fn bigram_coverage(&self) -> Result<(i64, i64)> {
+        let indexed: i64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM text_chunks", [], |r| r.get(0))?;
-        if total == 0 {
-            return Ok((0, 0));
-        }
-        let newest: i64 = self
-            .conn
-            .query_row("SELECT MAX(ts) FROM text_chunks", [], |r| r.get(0))?;
-        let cutoff = newest - LIKE_SCAN_DAYS * 86_400_000;
-        let outside: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM text_chunks WHERE ts < ?1",
-            params![cutoff],
+            .query_row("SELECT COUNT(*) FROM text_fts_bi", [], |r| r.get(0))
+            .unwrap_or(0);
+        let with_cjk: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM text_chunks
+             WHERE text GLOB '*[一-鿿]*' OR text GLOB '*[㐀-䶿]*'",
+            [],
             |r| r.get(0),
         )?;
-        Ok((outside, total))
-    }
-
-    /// 掃描窗口有多少天。`doctor` 要講出這個數字，不能自己另外寫一個。
-    pub const fn like_scan_days() -> i64 {
-        LIKE_SCAN_DAYS
+        Ok((indexed, with_cjk))
     }
 
     /// 有幾段錄製沒有正常收尾——也就是 Phase 0 那句「零當機」的實作。
@@ -794,7 +827,30 @@ impl Db {
         // （中間試過 `hits.len() < limit`，更糟：查得到但結果少於一頁的查詢
         // ——也就是「找一件很少見的事」，這個產品的主要用途——通通變成全表
         // 掃描。量到 103.8 ms。改條件之前先量，不然只是把成本搬個位置。）
-        if hits.is_empty() {
+        // 兩個字的中文詞掉在 trigram 與 unicode61 中間那個縫裡。先問 bigram
+        // 索引（見 [`cjk_bigrams`]），問得到就不必掃全表——退場條件那句
+        // `sister query 電話` 走的正是這條路。
+        let mut bigram_saw_everything = false;
+        if hits.is_empty()
+            && let Some(bq) = bigram_query(query)
+        {
+            let (found, exhausted) = self.search_bigram(&bq, query, limit)?;
+            bigram_saw_everything = exhausted;
+            for hit in found {
+                if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(hit.chunk_id) {
+                    e.insert(hits.len());
+                    hits.push(hit);
+                }
+            }
+        }
+
+        // 索引全都答不出來才掃全表。這條路仍然留著：bigram 只蓋 CJK，
+        // 而且只蓋長度 ≥2 的詞。
+        //
+        // 但 bigram **把整個候選集看完了**還是空的，那就是真的沒有——回填是
+        // 在同一個 transaction 裡做完的（見 `migrate`），所以索引不會落後於
+        // 資料。這時再掃一次全表只是把「查無此資料」這個答案賣得比較貴。
+        if hits.is_empty() && !bigram_saw_everything {
             for hit in self.search_like(query, limit)? {
                 if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(hit.chunk_id) {
                     e.insert(hits.len());
@@ -811,6 +867,79 @@ impl Db {
         });
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    /// bigram 索引查詢。片段自己產生——`text_fts_bi` 裡存的是切好的雙字，
+    /// 拿它的 `snippet()` 會回一串「客服 服專 專線」，那不是使用者要看的東西。
+    ///
+    /// **bigram 只是粗篩，會有偽陽性**，所以拿回來的每一列都要用真正的字串
+    /// 再篩一次。兩種偽陽性都是真的會發生的：
+    ///   - 三個字以上的詞被拆成重疊的雙字（「客服部」→「客服」AND「服部」），
+    ///     於是「客服中心的服部先生」兩個雙字都中，卻沒有「客服部」；
+    ///   - [`bigram_query`] 直接丟掉非 CJK 的詞，所以查「客服 hello」時，
+    ///     `hello` 這個條件在索引這一層根本不存在。
+    ///
+    /// 回傳的 `bool` 是「候選集有沒有整個看完」。看完了、篩完還是空的，就代表
+    /// 真的沒有這個東西，不必再掃全表——查一個不存在的字串因此從 96.7 ms
+    /// 降到 0.1 ms。沒看完就不敢說死，讓 LIKE 掃描去補。
+    fn search_bigram(
+        &self,
+        match_expr: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<(Vec<SearchHit>, bool)> {
+        let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        let first = query.split_whitespace().next().unwrap_or_default();
+        // 粗篩會混進偽陽性，所以多要一些候選再篩。
+        let candidates = limit.saturating_mul(BIGRAM_OVERFETCH).max(BIGRAM_OVERFETCH);
+        let sql = "SELECT c.id, c.ts, c.source_kind, c.frame_id, c.app_id, c.window_title, c.url,
+                          c.text, bm25(text_fts_bi)
+                   FROM text_fts_bi JOIN text_chunks c ON c.id = text_fts_bi.rowid
+                   WHERE text_fts_bi MATCH ?1
+                   ORDER BY bm25(text_fts_bi)
+                   LIMIT ?2";
+
+        let mut stmt = match self.conn.prepare(sql) {
+            Ok(s) => s,
+            Err(_) => return Ok((Vec::new(), false)),
+        };
+        let rows = stmt.query_map(params![match_expr, candidates as i64], |row| {
+            let kind: String = row.get(2)?;
+            let text: String = row.get(7)?;
+            Ok(SearchHit {
+                chunk_id: row.get(0)?,
+                ts: row.get(1)?,
+                source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                frame_id: row.get(3)?,
+                app_id: row.get(4)?,
+                window_title: row.get(5)?,
+                url: row.get(6)?,
+                snippet: make_snippet(&text, first),
+                text,
+                score: -row.get::<_, f64>(8)?,
+            })
+        });
+        let Ok(rows) = rows else {
+            return Ok((Vec::new(), false));
+        };
+
+        let mut produced = 0usize;
+        let mut all_readable = true;
+        let mut hits = Vec::new();
+        for row in rows {
+            produced += 1;
+            let Ok(hit) = row else {
+                // 讀不出來的列無法判斷它到底中不中，那就不能說「看完了」。
+                all_readable = false;
+                continue;
+            };
+            let hay = hit.text.to_lowercase();
+            if terms.iter().all(|t| hay.contains(t.as_str())) {
+                hits.push(hit);
+            }
+        }
+        hits.truncate(limit);
+        Ok((hits, all_readable && produced < candidates))
     }
 
     /// 子字串掃描後援。分數固定為 `LIKE_SCORE`，永遠排在 FTS 命中之後。
@@ -1050,7 +1179,19 @@ fn insert_chunk_tx(
             text
         ],
     )?;
-    Ok(tx.last_insert_rowid())
+    let id = tx.last_insert_rowid();
+
+    // bigram 索引在 Rust 這邊寫，不掛 trigger——掛 trigger 就得註冊一個
+    // 自訂 SQL 函式，而那個函式一旦在某條連線上沒註冊到，寫入會直接失敗。
+    // 刪除那半仍然走 trigger（照 rowid 刪，不需要重算）。
+    let grams = cjk_bigrams(text);
+    if !grams.is_empty() {
+        tx.execute(
+            "INSERT INTO text_fts_bi(rowid, text) VALUES(?1, ?2)",
+            params![id, grams],
+        )?;
+    }
+    Ok(id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1108,9 +1249,77 @@ fn insert_facts_tx(
 /// DATA_INVENTORY 的已知缺口，而不是靠沒有人去量它來維持體面。
 pub(crate) const LIKE_SCAN_DAYS: i64 = 30;
 
+/// bigram 粗篩要多拿幾倍的候選再用真字串篩。倍率決定「篩掉偽陽性之後還能
+/// 湊滿一頁」的把握有多大——太小會漏掉排在偽陽性後面的真命中，太大則是白
+/// 讀。8 是「一頁 20 筆要 160 筆候選」，在 45 天語料上仍是 0.1 ms 級。
+const BIGRAM_OVERFETCH: usize = 8;
+
 /// LIKE 後援命中的固定分數。負值確保它永遠排在任何 FTS 命中之後——
 /// 它證明「有這段文字」，但不宣稱相關性。
 const LIKE_SCORE: f64 = -1.0;
+
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3400..=0x4DBF      // 擴充 A
+        | 0x4E00..=0x9FFF    // 基本區
+        | 0xF900..=0xFAFF    // 相容表意文字
+        | 0x20000..=0x2FA1F  // 擴充 B 之後
+    )
+}
+
+/// 把 CJK 連續段切成重疊的雙字：「客服專線」→「客服 服專 專線」。
+///
+/// 兩個字的中文詞在 trigram 與 unicode61 之間有個縫：trigram 比不了 <3 字，
+/// unicode61 又把整串 CJK 當成**一個** token。而中文最常見的查詢正好是兩個字
+/// ——Phase 0 的退場條件寫的就是 `sister query 電話`。這個函式產生的字串
+/// 存進 `text_fts_bi`，那個縫才有索引。
+///
+/// 非 CJK 完全跳過：英文與數字本來就有 unicode61 和 trigram 蓋著，
+/// 再切一次只是把索引撐大。
+fn cjk_bigrams(text: &str) -> String {
+    let mut out = String::new();
+    let mut run: Vec<char> = Vec::new();
+
+    fn flush(run: &mut Vec<char>, out: &mut String) {
+        for pair in run.windows(2) {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push(pair[0]);
+            out.push(pair[1]);
+        }
+        run.clear();
+    }
+
+    for c in text.chars() {
+        if is_cjk(c) {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+/// 查詢字串 → bigram 索引的 MATCH 運算式。
+///
+/// `None` = 這個查詢用不上 bigram 索引（沒有任何長度 ≥2 的 CJK 詞），
+/// 那就別去問它，直接走原本的路。
+fn bigram_query(query: &str) -> Option<String> {
+    let parts: Vec<String> = query
+        .split_whitespace()
+        .map(cjk_bigrams)
+        .filter(|g| !g.is_empty())
+        .map(|g| {
+            g.split(' ')
+                .map(|gram| format!("\"{gram}\""))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" AND "))
+}
 
 /// 手工產生命中片段，格式與 FTS5 的 `snippet()` 一致（`[` `]` 標記、`…` 省略）。
 fn make_snippet(text: &str, needle: &str) -> String {
@@ -1343,7 +1552,7 @@ mod tests {
 
         let db = Db::init(conn).expect("upgrade");
 
-        assert_eq!(db.schema_version().expect("version"), 2);
+        assert_eq!(db.schema_version().expect("version"), SCHEMA_VERSION);
         let rows = db.facts_by_kind("phone", 10).expect("facts survive");
         assert_eq!(rows.len(), 1, "升級把舊事實弄丟了");
         assert_eq!(rows[0].raw, "0800-000-123");
@@ -1422,6 +1631,78 @@ mod tests {
             .expect("frame exists");
         assert_eq!(ctx.image_path.as_deref(), Some("/tmp/x.webp"));
         assert_eq!(ctx.window_title.as_deref(), Some("帳單查詢"));
+    }
+
+    /// bigram 是粗篩：「客服部」被拆成「客服」AND「服部」，而這句話兩個
+    /// 雙字都有——卻沒有「客服部」這三個字。粗篩必須被真字串擋下來，否則
+    /// 她會拿一段沒有人問的話當證據。
+    #[test]
+    fn a_sentence_that_owns_both_halves_is_not_a_match_for_the_whole_word() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let f = frame_with_text(
+            1_000,
+            "chrome.exe",
+            "通訊錄",
+            &["客服中心的服部先生今天請假"],
+        );
+        db.insert_frame(s, &f, None, 1).expect("insert");
+
+        assert!(
+            db.search("客服部", 10).expect("search").is_empty(),
+            "「客服中心的服部先生」同時有「客服」和「服部」，但沒有「客服部」"
+        );
+        // 反面：真的有這三個字的時候還是查得到，否則上面那條只是把功能關掉。
+        let g = frame_with_text(2_000, "chrome.exe", "分機表", &["客服部 分機 201"]);
+        db.insert_frame(s, &g, None, 2).expect("insert");
+        assert_eq!(db.search("客服部", 10).expect("search").len(), 1);
+    }
+
+    /// `bigram_query` 只看得懂 CJK，會把 `hello` 這種詞整個丟掉。如果不用
+    /// 真字串再篩一次，查「客服 hello」就會退化成查「客服」。
+    #[test]
+    fn the_english_half_of_a_mixed_query_still_has_to_hold() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let f = frame_with_text(1_000, "chrome.exe", "工單", &["客服 回覆 已結案"]);
+        db.insert_frame(s, &f, None, 1).expect("insert");
+
+        assert!(
+            db.search("客服 hello", 10).expect("search").is_empty(),
+            "bigram 只驗得了「客服」，`hello` 這個條件不能就這樣消失"
+        );
+
+        let g = frame_with_text(2_000, "chrome.exe", "工單", &["客服 hello world"]);
+        db.insert_frame(s, &g, None, 2).expect("insert");
+        let hits = db.search("客服 hello", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].text.contains("hello"));
+    }
+
+    /// 查一個不存在的字串時，bigram 把候選集整個看完了（0 列），那就是真的
+    /// 沒有——不必再掃一次全表。這條測試釘的是「不要退回 LIKE」，因為那正是
+    /// 45 天語料上 96.7 ms 的來源。
+    #[test]
+    fn a_confident_miss_does_not_pay_for_a_full_scan() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let f = frame_with_text(1_000, "chrome.exe", "帳單", &["本期應繳金額"]);
+        db.insert_frame(s, &f, None, 1).expect("insert");
+
+        assert!(db.search("客服專線", 10).expect("search").is_empty());
+
+        // LIKE 掃描只看得到最近 `LIKE_SCAN_DAYS` 天；bigram 沒有這個窗。
+        // 把唯一一筆資料放到窗外，如果答案仍然正確，就證明答案不是 LIKE 給的。
+        let old = 1_000 - (LIKE_SCAN_DAYS + 5) * 86_400_000;
+        let mut db2 = test_db();
+        let s2 = db2.start_session("test", "0.0.1").expect("session");
+        let g = frame_with_text(old, "chrome.exe", "帳單", &["客服專線 0800"]);
+        db2.insert_frame(s2, &g, None, 1).expect("insert");
+        assert_eq!(
+            db2.search("客服專線", 10).expect("search").len(),
+            1,
+            "bigram 應該直接答得出來，而不是靠掃描——掃描根本看不到窗外那天"
+        );
     }
 
     #[test]
@@ -1724,26 +2005,31 @@ mod tests {
         assert!(!coords.broken, "空的表不該被說成壞掉");
     }
 
-    /// 掃描的界線是**行為**，不是一個比較快的數字。
+    /// 兩個字的中文詞**不再有時間界線**。
     ///
-    /// 界線唯一的效果就是「看不到更舊的東西」。用時間去驗它是脆的——CI 的
-    /// 機器比開發機慢一倍，一個 150 ms 的天花板就會因為機器慢而變紅，然後
-    /// 大家開始把天花板往上調，直到它不再代表任何事。
+    /// 這條測試以前叫 `the_like_scan_does_not_look_past_its_window`，斷言的
+    /// 正好相反：第 31 天前的那列**查不到**。那是實話，但那個實話是個缺陷——
+    /// trigram 比不了 <3 字、unicode61 把整串 CJK 當一個 token，所以「客服」
+    /// 只剩全表掃描，而掃描的成本跟使用時間成正比，只好用 30 天封住。
     ///
-    /// 所以界線在這裡用它的**後果**來驗：窗外的那一列查不到，窗內的查得到。
-    /// 快不快留給 tests/search_latency.rs，那邊只擋災難級的回歸。
+    /// schema 3 的 bigram 索引把那個縫補起來了，所以界線該消失——
+    /// 而「消失」要有人驗，不然它會安靜地變回來。
     #[test]
-    fn the_like_scan_does_not_look_past_its_window() {
+    fn a_two_character_chinese_word_reaches_past_the_old_scan_window() {
         let mut db = test_db();
         let s = db.start_session("test", "0.0.1").expect("session");
 
-        // 「兩個字的中文」是唯一會走到掃描的那條路：trigram 比不了 <3 字，
-        // 而 unicode61 把整串 CJK 當一個 token。
         let now = 1_700_000_000_000i64;
         let inside = now - (LIKE_SCAN_DAYS - 1) * 86_400_000;
         let outside = now - (LIKE_SCAN_DAYS + 1) * 86_400_000;
+        let ancient = now - 300 * 86_400_000;
 
-        for (ts, marker) in [(outside, "舊"), (inside, "新"), (now, "今")] {
+        for (ts, marker) in [
+            (ancient, "古"),
+            (outside, "舊"),
+            (inside, "新"),
+            (now, "今"),
+        ] {
             db.insert_frame(
                 s,
                 &frame_with_text(
@@ -1761,42 +2047,36 @@ mod tests {
         let hits = db.search("客服", 20).expect("search");
         let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
 
-        assert!(
-            texts.iter().any(|t| t.starts_with('今')),
-            "窗內最新的那列查不到，界線把該找的也擋掉了：{texts:?}"
-        );
-        assert!(
-            texts.iter().any(|t| t.starts_with('新')),
-            "窗內第 {} 天的那列查不到：{texts:?}",
-            LIKE_SCAN_DAYS - 1
-        );
-        assert!(
-            !texts.iter().any(|t| t.starts_with('舊')),
-            "第 {} 天前的那列被查到了——界線沒有生效，掃描成本會一直跟著\n\
-             使用時間長大，而且不會有任何錯誤訊息：{texts:?}",
-            LIKE_SCAN_DAYS + 1
-        );
+        for marker in ['今', '新', '舊', '古'] {
+            assert!(
+                texts.iter().any(|t| t.starts_with(marker)),
+                "「{marker}」那一列查不到——兩個字的中文又掉回時間界線裡了：{texts:?}"
+            );
+        }
     }
 
-    /// `doctor` 印出來的那個「有多少行字在窗外」要跟掃描實際看得到的一致。
+    /// `doctor` 報的覆蓋率要跟搜尋真的找得到的東西一致。
     ///
-    /// 兩邊各自算一次 cutoff 的話，改了其中一個就會開始說謊——而說的謊是
-    /// 「你查得到」，那是這個專案最不想要的方向。
+    /// migration 003 要回填舊資料。回填漏掉的話，`doctor` 仍然可以印一個
+    /// 漂亮的數字，而舊資料再也叫不出來——這裡把兩邊綁在一起：報幾行進了
+    /// 索引，就要真的查得到幾行。
     #[test]
-    fn the_number_doctor_reports_matches_what_the_scan_can_actually_reach() {
+    fn the_coverage_doctor_reports_matches_what_search_can_actually_reach() {
         let mut db = test_db();
         let s = db.start_session("test", "0.0.1").expect("session");
 
         assert_eq!(
-            db.text_outside_scan_window().expect("empty"),
+            db.bigram_coverage().expect("empty"),
             (0, 0),
-            "空資料庫不該報出任何窗外的東西"
+            "空資料庫不該報出任何覆蓋率"
         );
 
         let now = 1_700_000_000_000i64;
-        let inside = now - (LIKE_SCAN_DAYS - 1) * 86_400_000;
-        let outside = now - (LIKE_SCAN_DAYS + 1) * 86_400_000;
-        for (ts, marker) in [(outside, "舊"), (inside, "新"), (now, "今")] {
+        for (ts, marker) in [
+            (now - 300 * 86_400_000, "古"),
+            (now - 40 * 86_400_000, "舊"),
+            (now, "今"),
+        ] {
             db.insert_frame(
                 s,
                 &frame_with_text(
@@ -1811,17 +2091,14 @@ mod tests {
             .expect("insert");
         }
 
-        let (out, total) = db.text_outside_scan_window().expect("audit");
-        assert_eq!(total, 3);
-        assert_eq!(out, 1, "只有第 {} 天前的那列在窗外", LIKE_SCAN_DAYS + 1);
+        let (indexed, with_cjk) = db.bigram_coverage().expect("coverage");
+        assert_eq!(with_cjk, 3, "三列都有中文");
+        assert_eq!(indexed, 3, "三列都該進索引");
 
-        // 而且它要跟掃描真的看得到的東西對得起來：報了 1 行在窗外，
-        // 掃描就該只交出另外 2 行。
         let reachable = db.search("客服", 20).expect("search").len();
         assert_eq!(
-            reachable as i64,
-            total - out,
-            "doctor 說窗外有 {out} 行，掃描卻交出 {reachable} 行——兩邊的 cutoff 已經不一樣了"
+            reachable as i64, with_cjk,
+            "doctor 說 {indexed} 行進了索引，搜尋卻只交出 {reachable} 行"
         );
     }
 

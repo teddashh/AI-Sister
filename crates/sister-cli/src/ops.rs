@@ -1011,28 +1011,26 @@ pub mod doctor {
             ),
         }
 
-        // 兩個字的中文詞沒有索引可用。與其在文件裡宣稱「只找得回 30 天」，
-        // 不如當場告訴他**他自己的資料庫**有多少行字已經在那條線外面。
-        let days = Db::like_scan_days();
+        // 兩個字的中文詞現在有 bigram 索引（schema 3）。這裡不宣稱「有索引」，
+        // 而是把回填的覆蓋率印出來——回填沒跑到的話，舊資料會安靜地叫不出來。
         match &db {
             Some(d) => {
-                let (outside, total) = d.text_outside_scan_window()?;
-                if total == 0 {
-                    mark("?", "兩個字的中文", "資料庫是空的，等你錄過再驗一次");
-                } else if outside == 0 {
+                let (indexed, with_cjk) = d.bigram_coverage()?;
+                if with_cjk == 0 {
+                    mark("?", "兩個字的中文", "資料庫裡還沒有中文，等你錄過再驗一次");
+                } else if indexed >= with_cjk {
                     mark(
                         "✓",
                         "兩個字的中文",
-                        &format!("{total} 行字全都在 {days} 天內，現在查得到全部"),
+                        &format!("{with_cjk} 行中文全都進了索引，多舊的都查得到"),
                     );
                 } else {
-                    let pct = outside as f64 / total as f64 * 100.0;
                     mark(
-                        "!",
+                        "✗",
                         "兩個字的中文",
                         &format!(
-                            "{outside}/{total} 行字（{pct:.0}%）比 {days} 天更舊——\
-                             「帳單」「電話」這種兩個字的詞，在「原文」那一半裡搜不到那些。\
+                            "{indexed}/{with_cjk} 行進了索引——回填沒跑完，\
+                             沒進去的那些用「帳單」「電話」這種兩個字的詞叫不出來。\
                              三個字以上不受影響，L1 抽出來的事實也不受影響",
                         ),
                     );

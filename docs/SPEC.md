@@ -452,7 +452,7 @@ SQLCipher 或 OS-keyring 包裹的 at-rest 加密；一鍵 pause；一鍵 panic 
 | 截圖 | per-OS 原生：`windows-capture` 2.0（WGC）/ `screencapturekit` 8.0 / Linux `ashpd`+PipeWire；原型期可用 `xcap` | 〔定案〕不賭單一跨平台 capture crate |
 | 去重 | `image_hasher` 3.1（dHash 64-bit，螢幕畫面 Hamming ≤4–8 視為同幀）+ Windows DXGI dirty rects + 髒區塊 crop-hash → 只 OCR 髒區塊 | |
 | OCR | macOS：Apple Vision（zh-Hant 一等公民，accurate ~0.3–1.4s/全幅，搭配 OCR gate 只跑 crop）；Windows：**Phase 0 實作改用 `Windows.Media.Ocr`，見 §14.1**；PP-OCRv5 via `oar-ocr` 保留為精準度升級路線；TextRecognizer 鎖 Copilot+ NPU；OneOCR 授權灰色，只做使用者自機 opt-in；Tesseract 僅最後底線 | 搜尋前全半形正規化 + OpenCC 繁簡歸一 |
-| DB | SQLite 3.53（`rusqlite` 0.40，WAL）+ **FTS5 trigram + unicode61 雙索引**（external-content table；trigram 補 CJK 子字串、unicode61 補英文整詞。**兩個字的中文詞兩邊都補不到**——unicode61 把整串 CJK 當一個 token，實測 `MATCH "客服"` 是 0 筆，只剩夾在 30 天內的 LIKE 掃描） | 之後要拼音再上 `simple` tokenizer |
+| DB | SQLite 3.53（`rusqlite` 0.40，WAL）+ **FTS5 trigram + unicode61 + bigram 三索引**（external-content table；trigram 補 CJK 子字串、unicode61 補英文整詞、`text_fts_bi` 補**兩個字的中文**——unicode61 把整串 CJK 當一個 token，`MATCH "客服"` 是 0 筆，schema 3 之前只剩夾在 30 天內的 LIKE 掃描。bigram 是粗篩，命中要拿真字串再驗一次；只剩單字查詢仍走掃描） | 之後要拼音再上 `simple` tokenizer |
 | 向量（選配） | `sqlite-vec` 0.1.9（2026 復活版；256-d int8 MRL，brute-force 在我們規模內互動級） | pre-1.0 格式風險 → 存 model-id+dim，設計成可背景 re-embed |
 | 本地 embedding | `fastembed` 6.0：EmbeddingGemma-300m 首選（量化 <200MB RAM）/ Qwen3-Embedding-0.6B 品質檔 | 批次排到 idle/插電 |
 | 加密 | SQLCipher 4.13（開銷 5–15%）+ `keyring` 4.1（OS keychain 金鑰） | 誠實威脅模型：同使用者 malware 不在防護範圍（userland OSS 做不到 Recall 的 VBS enclave），README 明講 |
