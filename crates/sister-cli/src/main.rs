@@ -226,12 +226,24 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let config = load_config(cli.config.as_deref())?;
     let data_dir = resolve_data_dir(cli.data_dir.clone())?;
+
+    // **在需要的地方才載，不是在門口。**
+    //
+    // 這裡本來是 `let config = load_config(..)?;`，於是一個 TOML 語法錯會讓
+    // **每一個**子命令停在門口，包括那兩個你正是因為出事了才會打開的：
+    // `doctor` 和 `bench`。而它們兩個一個只需要看這台機器的能力、一個根本
+    // 不讀設定檔。用設定檔把設定檔的診斷工具擋掉，是在最需要它的那一刻把它
+    // 關掉。
+    //
+    // 其餘子命令照舊「壞掉就停」，而且理由沒有變：它們會照著那份設定去動
+    // 使用者的資料（保留期、排除規則、要不要存圖），拿預設值去做那些事比
+    // 停下來危險得多。
+    let config = || load_config(cli.config.as_deref());
 
     match cli.command {
         Command::Record { duration } => {
-            ops::record::run(&data_dir, config, cli.config.clone(), duration)
+            ops::record::run(&data_dir, config()?, cli.config.clone(), duration)
         }
         Command::Replay {
             scenario,
@@ -241,7 +253,7 @@ fn main() -> Result<()> {
             start,
         } => ops::replay::run(
             &data_dir,
-            config,
+            config()?,
             &scenario,
             interval_ms,
             dry_run,
@@ -253,7 +265,7 @@ fn main() -> Result<()> {
             &text.join(" "),
             limit,
             json,
-            config.privacy.query_log,
+            config()?.privacy.query_log,
         ),
         Command::Facts {
             kind,
@@ -262,8 +274,8 @@ fn main() -> Result<()> {
             json,
         } => ops::facts::run(&data_dir, kind.as_deref(), search.as_deref(), limit, json),
         Command::Queries { limit, empty, json } => ops::queries::run(&data_dir, limit, empty, json),
-        Command::Stats { json } => ops::stats::run(&data_dir, &config, json),
-        Command::Prune { dry_run } => ops::prune::run(&data_dir, &config, dry_run),
+        Command::Stats { json } => ops::stats::run(&data_dir, &config()?, json),
+        Command::Prune { dry_run } => ops::prune::run(&data_dir, &config()?, dry_run),
         Command::Export { to, with_frames } => ops::export::run(&data_dir, &to, with_frames),
         Command::Forget { last, yes } => ops::forget::run(&data_dir, &last, yes),
         Command::Pause => ops::pause::run(&data_dir, true),
@@ -273,8 +285,8 @@ fn main() -> Result<()> {
             grant,
             revoke,
             json,
-        } => ops::consent::run(&data_dir, &config, &grant, &revoke, json),
-        Command::Doctor => ops::doctor::run(&data_dir, &config, cli.config.clone()),
+        } => ops::consent::run(&data_dir, &config()?, &grant, &revoke, json),
+        Command::Doctor => ops::doctor::run(&data_dir, config(), cli.config.clone()),
         Command::Bench { rounds } => ops::bench::run(rounds),
     }
 }

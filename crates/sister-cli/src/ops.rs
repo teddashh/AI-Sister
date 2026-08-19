@@ -2556,8 +2556,35 @@ pub mod doctor {
         Caps::default()
     }
 
-    pub fn run(data_dir: &Path, config: &Config, config_path: Option<PathBuf>) -> Result<()> {
+    /// `loaded` 是 `Result` 而不是 `&Config`，因為**設定檔壞掉也要能跑**。
+    ///
+    /// 以前這裡收的是已經載好的值，於是 `main` 得先 `load_config(..)?`——
+    /// 一個 TOML 語法錯就讓 `sister doctor` 整個停在門口，只吐一行解析錯誤。
+    /// 而他打開 doctor 正是因為有東西壞了，「設定檔壞了」就是其中一種：用
+    /// 它自己要診斷的東西把它擋在門外，等於在最需要它的那一刻把它關掉。
+    /// OCR 讀不讀得到字、抓不抓得到網址、同意書簽了沒——這些跟那份設定檔
+    /// 一點關係都沒有，卻一起消失了。
+    ///
+    /// 但也不能安靜地改用預設值跑：底下「排除的 app 9 條規則」會被讀成他
+    /// 自己寫的那 9 條（實際上是內建的，他寫的 30 條一條都沒載進來），而他
+    /// 看完就走了。這正是 `load_config` 當初拒絕的那個情境。
+    ///
+    /// 所以兩件事都要：**照跑，而且在最上面說清楚底下的設定值都是預設值。**
+    /// 字母人的設定頁這一版修的是同一件事（讀不出來就整頁灰掉並說原因，而
+    /// 不是白畫面），這裡是它在終端機這一邊的另一半。
+    pub fn run(
+        data_dir: &Path,
+        loaded: Result<Config>,
+        config_path: Option<PathBuf>,
+    ) -> Result<()> {
         println!("🩺 AI-Sister 環境檢查\n");
+        let broken = loaded.as_ref().err().map(|e| format!("{e:#}"));
+        let config = &loaded.unwrap_or_default();
+        if let Some(why) = &broken {
+            println!("⚠  設定檔讀不出來，所以底下每一個跟設定有關的數字都是**內建預設值**，");
+            println!("   不是你寫的那一份。修好它之前，那幾行不能拿來判斷你的規則有沒有生效。");
+            println!("   原因：{why}\n");
+        }
         let caps = caps(data_dir, config);
 
         println!("環境");
@@ -2643,16 +2670,19 @@ pub mod doctor {
         // 「用預設值」——而底下的保留期天數明明是他自訂的那一份。
         // doctor 是出事時唯一的稽核面，這一行不能指錯地方。
         match config_path.or_else(Config::default_path) {
+            // 「不存在」和「存在但讀不出來」是兩件很不一樣的事，而兩邊底下
+            // 印的都是預設值。長得一樣的話，一個打錯了 TOML 的人會以為他根本
+            // 沒建過設定檔，然後再建一個新的。
             Some(p) => line(
-                true,
+                broken.is_none(),
                 "設定檔",
                 &format!(
                     "{}{}",
                     p.display(),
-                    if p.exists() {
-                        ""
-                    } else {
-                        "（不存在，用預設值）"
+                    match (&broken, p.exists()) {
+                        (Some(_), _) => "（讀不出來，底下是預設值）",
+                        (None, false) => "（不存在，用預設值）",
+                        (None, true) => "",
                     }
                 ),
             ),
@@ -3278,6 +3308,36 @@ pub mod doctor {
             None => mark("?", "現在有多少已過期", no_db),
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod doctor_tests {
+        use super::*;
+
+        /// 設定檔壞掉的時候，doctor 還是要把整份檢查跑完。
+        ///
+        /// 以前 `main` 在門口就 `load_config(..)?`，所以一個 TOML 語法錯會讓
+        /// `sister doctor` 只吐一行解析錯誤然後結束——而他打開 doctor 正是因為
+        /// 有東西壞了。OCR 讀不讀得到字、抓不抓得到網址、同意書簽了沒，這些跟
+        /// 那份設定檔一點關係都沒有，卻一起消失了。
+        ///
+        /// 釘的是「回 Ok」而不是輸出的字：輸出會一直改，而這條要擋的是「它
+        /// 早退了」。
+        #[test]
+        fn a_broken_config_does_not_shut_the_door_on_the_tool_you_opened_because_things_are_broken()
+        {
+            let dir = crate::ops::tmp::Tmp::new("doctor-broken-config");
+            let broken = Err(anyhow::anyhow!("TOML parse error at line 1"));
+            run(&dir.0, broken, Some(dir.0.join("config.toml")))
+                .expect("設定檔壞掉不可以讓整份環境檢查停在門口");
+        }
+
+        /// 設定檔好好的那條路也要走一次，不然上面那條可能只是「錯誤路徑能跑」。
+        #[test]
+        fn a_healthy_config_still_runs_the_whole_check() {
+            let dir = crate::ops::tmp::Tmp::new("doctor-ok-config");
+            run(&dir.0, Ok(Config::default()), None).expect("正常設定當然要跑得完");
+        }
     }
 }
 
