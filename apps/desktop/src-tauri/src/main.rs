@@ -117,6 +117,9 @@ fn recording_state(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> boo
     if let Some(item) = app.try_state::<RecordItem>() {
         let _ = item.0.set_text(record_label(now));
     }
+    if let Some(item) = app.try_state::<QuitItem>() {
+        let _ = item.0.set_text(quit_label(now));
+    }
     now
 }
 
@@ -128,9 +131,26 @@ fn record_label(recording: bool) -> &'static str {
     }
 }
 
+/// 「結束」在正在錄的時候要把後果講出來。
+///
+/// 結束會**連 recorder 一起停**（見系統匣的 `"quit"`）。不停的話，他關掉的是
+/// 唯一看得見的那個視窗，而螢幕還在被記錄——那是上一版剛修掉的那個謊反過來
+/// 講一次，而反過來的這一版更糟：前者是少記了，後者是在他以為已經關掉之後
+/// 繼續記。
+fn quit_label(recording: bool) -> &'static str {
+    if recording {
+        "結束（記錄也會停）"
+    } else {
+        "結束"
+    }
+}
+
 /// 系統匣裡的那一顆開始／停止。理由和 [`PauseItem`] 一樣：一個永遠寫著同一句
 /// 話的切換項目，會讓人按出他沒想要的那個方向。
 struct RecordItem(MenuItem<tauri::Wry>);
+
+/// 系統匣裡的「結束」。存起來的理由見 [`quit_label`]。
+struct QuitItem(MenuItem<tauri::Wry>);
 
 /// `sister.exe` 在哪裡。
 ///
@@ -1249,7 +1269,13 @@ fn main() {
                 MenuItem::with_id(app, "settings", "設定…", true, None::<&str>)?;
             let consent_item =
                 MenuItem::with_id(app, "consent", "三張同意書…", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "結束", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(
+                app,
+                "quit",
+                quit_label(recording_state(app.handle().clone(), app.state::<Shell>())),
+                true,
+                None::<&str>,
+            )?;
             let menu = Menu::with_items(
                 app,
                 &[
@@ -1264,6 +1290,7 @@ fn main() {
             )?;
             app.manage(PauseItem(pause_item));
             app.manage(RecordItem(record_item));
+            app.manage(QuitItem(quit_item));
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("icon").clone())
@@ -1322,7 +1349,21 @@ fn main() {
                         }
                     }
                     "quit" => {
-                        app.state::<Shell>().persist();
+                        let shell = app.state::<Shell>();
+                        // 走人之前把 recorder 也叫停。留著的話，他關掉的是唯一
+                        // 看得見的那個視窗，而螢幕還在被記錄——他會以為自己
+                        // 已經關掉了。這比「她其實沒在錄卻說在聽」更糟：那個是
+                        // 少記了，這個是在他以為關掉之後繼續記。
+                        //
+                        // 不管那場 recorder 是不是這裡開起來的，都停。要在兩種
+                        // 錯之間選一個的話，「停掉一個終端機裡的 record，而那個
+                        // 終端機會印出是誰叫它停的」，比「安靜地繼續錄」好。
+                        if recording_state(app.clone(), shell.clone())
+                            && let Err(e) = stop_recording(shell.clone())
+                        {
+                            tracing::error!("結束時停不掉 recorder：{e}");
+                        }
+                        shell.persist();
                         app.exit(0);
                     }
                     _ => {}
