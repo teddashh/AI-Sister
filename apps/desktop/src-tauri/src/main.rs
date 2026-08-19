@@ -301,7 +301,7 @@ fn start_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
         .data_dir
         .as_ref()
         .ok_or_else(|| "找不到資料目錄，開不起來".to_string())?;
-    if sister_core::heartbeat::is_recording(dir, sister_core::now_ms()) {
+    if sister_core::heartbeat::is_occupied(dir, sister_core::now_ms()) {
         // 不是錯誤，但也不能安靜地再開一個：兩個 recorder 會各自錄一份，
         // 而使用者只會看到磁碟用得比講好的快一倍。
         return Err("已經有一個 sister record 在跑了".into());

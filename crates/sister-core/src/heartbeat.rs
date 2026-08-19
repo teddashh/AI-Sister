@@ -44,14 +44,51 @@ pub fn beat_path(data_dir: &Path) -> PathBuf {
     data_dir.join(BEAT)
 }
 
+/// 心跳的主人現在在做什麼。
+///
+/// 這個檔案要同時回答兩個**不一樣**的問題，而以前只有一個答案：
+///
+/// - 「這個資料目錄有人佔著嗎」——`record` 拿它擋第二個 recorder。開機那幾
+///   分鐘（大顆資料庫的 migration 會跑很久）**算佔著**，不然第二下按鈕會穿
+///   過去，兩個 recorder 各錄一份。
+/// - 「她現在在錄嗎」——字母人那顆指示燈、系統匣、`doctor` 拿它講話。開機
+///   那幾分鐘**不算在錄**：她一個字都還沒記，而使用者正照著那三個字相信
+///   「她記得住今天」。
+///
+/// 一個述詞同時回答這兩題，就一定有一邊是錯的。而修好「有沒有人佔著」的那
+/// 一版，剛好把「她在錄嗎」弄壞了——這正是模組開頭說的那種、這個產品唯一
+/// 不能說的謊。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// 行程起來了，但還沒開始錄（多半卡在 `Db::open` 的 migration）。
+    Booting,
+    /// 主迴圈在跑，她真的在記東西。
+    Recording,
+}
+
 /// 蓋一次時戳。recorder 每 [`BEAT_EVERY_MS`] 呼叫一次。
 ///
 /// 先寫暫存檔再 rename，否則讀的人有機會讀到寫到一半的半行數字。那不會壞掉
 /// （解析失敗就當成沒在錄），但會讓字母人無緣無故閃一下。
 pub fn beat(data_dir: &Path, ts: Millis) -> Result<()> {
+    write_beat(data_dir, ts, Phase::Recording)
+}
+
+/// 開機那一段蓋的心跳。見 [`Phase`]。
+pub fn beat_booting(data_dir: &Path, ts: Millis) -> Result<()> {
+    write_beat(data_dir, ts, Phase::Booting)
+}
+
+fn write_beat(data_dir: &Path, ts: Millis, phase: Phase) -> Result<()> {
     let path = beat_path(data_dir);
     let tmp = path.with_extension("beat.tmp");
-    std::fs::write(&tmp, ts.to_string()).with_context(|| format!("write {}", tmp.display()))?;
+    // 錄製中就寫一個裸數字，和舊版一模一樣——舊的心跳檔（和舊的 recorder）
+    // 讀起來仍然是「在錄」，那也是對的：會寫這個檔案的舊版都在主迴圈裡。
+    let body = match phase {
+        Phase::Recording => ts.to_string(),
+        Phase::Booting => format!("{ts} boot"),
+    };
+    std::fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).with_context(|| format!("rename to {}", path.display()))?;
     Ok(())
 }
@@ -63,27 +100,51 @@ pub fn stop(data_dir: &Path) {
     let _ = std::fs::remove_file(beat_path(data_dir).with_extension("beat.tmp"));
 }
 
-/// 最後一次心跳的時戳。`None` = 檔案不在、讀不到、或內容不是數字。
-pub fn last_beat(data_dir: &Path) -> Option<Millis> {
-    std::fs::read_to_string(beat_path(data_dir))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+fn read_beat(data_dir: &Path) -> Option<(Millis, Phase)> {
+    let raw = std::fs::read_to_string(beat_path(data_dir)).ok()?;
+    let mut fields = raw.split_whitespace();
+    let ts: Millis = fields.next()?.parse().ok()?;
+    // 認不得的第二欄當成「在錄」而不是丟掉整行：未來多寫一個欄位的版本，
+    // 不該讓舊版讀成「沒有人在錄」然後放行第二個 recorder。
+    let phase = match fields.next() {
+        Some("boot") => Phase::Booting,
+        _ => Phase::Recording,
+    };
+    Some((ts, phase))
 }
 
-/// 現在有沒有人在錄。
+/// 最後一次心跳的時戳。`None` = 檔案不在、讀不到、或內容不是數字。
+pub fn last_beat(data_dir: &Path) -> Option<Millis> {
+    read_beat(data_dir).map(|(ts, _)| ts)
+}
+
+/// 現在這個資料目錄的狀態。`None` = 沒有人在。
 ///
 /// `now` 由呼叫端給，因為時間在這個 crate 裡一律是參數（測試要能演「三分鐘
 /// 前的心跳」，不能等三分鐘）。
 ///
 /// 未來的時戳一樣算活的：使用者調過時鐘、或者兩個行程對時差了幾百毫秒，都
 /// 不該被讀成「她死了」。
+pub fn phase(data_dir: &Path, now: Millis) -> Option<Phase> {
+    let (beat, phase) = read_beat(data_dir)?;
+    (now - beat < STALE_AFTER_MS).then_some(phase)
+}
+
+/// 她現在**在錄嗎**。正在開機的 recorder 回 `false`：她一個字都還沒記。
+///
+/// 給那幾個會對使用者講一句話的地方用（字母人的指示燈、系統匣、`doctor`）。
+/// 要擋第二個 recorder 請用 [`is_occupied`]。
 pub fn is_recording(data_dir: &Path, now: Millis) -> bool {
-    match last_beat(data_dir) {
-        Some(beat) => now - beat < STALE_AFTER_MS,
-        None => false,
-    }
+    phase(data_dir, now) == Some(Phase::Recording)
+}
+
+/// 這個資料目錄**有人佔著嗎**。正在開機的也算。
+///
+/// 給那幾個「要不要再開一個」的判斷用。開機那幾分鐘算佔著，否則第二下按鈕
+/// 會穿過去，兩個 recorder 各錄一份，而使用者只會發現磁碟用得比講好的快
+/// 一倍。
+pub fn is_occupied(data_dir: &Path, now: Millis) -> bool {
+    phase(data_dir, now).is_some()
 }
 
 #[cfg(test)]

@@ -432,7 +432,7 @@ pub mod stop {
         // 先問有沒有人在。沒有人在的時候仍然照寫——`record` 起來的時候會先清掉
         // 這個檔案，所以留著不會咬人——但要講出來，不然「我按了停止，可是它還
         // 在錄」和「我按了停止，本來就沒有東西在錄」看起來一模一樣。
-        let running = sister_core::heartbeat::is_recording(data_dir, sister_core::now_ms());
+        let running = sister_core::heartbeat::is_occupied(data_dir, sister_core::now_ms());
         sister_core::control::request_stop(data_dir)
             .with_context(|| format!("寫不進 {}", data_dir.display()))?;
         if running {
@@ -975,7 +975,7 @@ pub mod forget {
         //
         // 所以這句話要在**預覽**那一段就講：那才是他還能先去按暫停的時刻。
         // 刪完之後再講就只是一句「你剛剛白做了」。
-        let recording = sister_core::heartbeat::is_recording(data_dir, now);
+        let recording = sister_core::heartbeat::is_occupied(data_dir, now);
 
         // 「什麼都沒記到」以前直接 return，所以那句警告在**最需要它的那一次**
         // 反而不會出現：她一個 tick 一個 tick 寫，他剛剛做的那件事很可能還沒
@@ -2908,8 +2908,22 @@ pub mod doctor {
                 "現在有沒有在看",
                 &format!("**暫停中**（{since}）。這段期間什麼都不會被記錄"),
             );
-        } else if sister_core::heartbeat::is_recording(data_dir, sister_core::now_ms()) {
-            line(true, "現在有沒有在看", "有一個 sister record 正在跑");
+        } else if let Some(phase) = sister_core::heartbeat::phase(data_dir, sister_core::now_ms()) {
+            // 「正在起來」不可以印成「正在跑」。一顆一年份的資料庫，
+            // migration 003 重建 bigram 索引可以跑好幾分鐘，而那幾分鐘裡她
+            // 一個字都沒記——使用者照著那句話去做一件他想被記住的事，之後
+            // 問「剛剛發生什麼事」會拿到一片空白。
+            match phase {
+                sister_core::heartbeat::Phase::Recording => {
+                    line(true, "現在有沒有在看", "有一個 sister record 正在跑")
+                }
+                sister_core::heartbeat::Phase::Booting => mark(
+                    "…",
+                    "現在有沒有在看",
+                    "有一個 sister record **正在起來**（多半在開資料庫）。\
+                     還沒開始記東西，等它印出第一行再做要被記住的事",
+                ),
+            }
         } else {
             // 「沒有暫停」以前就印到這裡為止，而那句話讀起來是「她在看」——
             // 和字母人那句「在聽」是同一個謊。沒有暫停**不等於**有人在錄：
@@ -3418,7 +3432,7 @@ pub mod record {
     /// 平台才執行得到的閘門，等於一道沒有被執行過的閘門。
     fn already_recording(data_dir: &Path) -> Result<()> {
         let now = sister_core::now_ms();
-        if !sister_core::heartbeat::is_recording(data_dir, now) {
+        if !sister_core::heartbeat::is_occupied(data_dir, now) {
             return Ok(());
         }
         // 講得出「多久以前」，那個人才判斷得出這是不是自己剛剛開的那一個。
@@ -3629,7 +3643,7 @@ pub mod record {
             // 第一下蓋在呼叫者這條執行緒上，不是丟給新執行緒去蓋：呼叫的人回
             // 去之後下一行就是 `Db::open`，中間不該留一段「心跳還沒出現」的
             // 空窗——那正是要補的洞。
-            let _ = sister_core::heartbeat::beat(&dir, sister_core::now_ms());
+            let _ = sister_core::heartbeat::beat_booting(&dir, sister_core::now_ms());
             let alive = std::sync::Arc::new(AtomicBool::new(true));
             let thread = std::thread::spawn({
                 let alive = alive.clone();
@@ -3642,7 +3656,8 @@ pub mod record {
                     while alive.load(Ordering::SeqCst) {
                         std::thread::sleep(Duration::from_millis(200));
                         if last.elapsed() >= every {
-                            let _ = sister_core::heartbeat::beat(&dir, sister_core::now_ms());
+                            let _ =
+                                sister_core::heartbeat::beat_booting(&dir, sister_core::now_ms());
                             last = Instant::now();
                         }
                     }
@@ -4410,23 +4425,57 @@ pub mod record {
         use sister_core::consent::{Consent, Sheet};
         use sister_core::heartbeat;
 
+        /// 正在開機的 recorder：**佔著**這個資料目錄，但**還沒在錄**。
+        ///
+        /// 這兩件事以前是同一個述詞。顧「第二個 recorder」的那一版把開機
+        /// 算成在錄——開機那一段（migration、能力探測、開場那次 prune）在
+        /// 一顆一年份的資料庫上要好幾分鐘，而字母人整段時間顯示「在聽」。
+        /// 使用者照著那三個字去做他想被記住的事，之後問「剛剛發生什麼事」
+        /// 拿到一片空白。那是 `heartbeat` 模組開頭說的、這個產品唯一不能
+        /// 說的那種謊。
         #[test]
-        fn a_recorder_that_is_still_opening_the_database_is_already_visible() {
-            // 這一條顧的是「第二個 recorder」。開機那一段（migration、能力探測、
-            // 開場那次 prune）在大的資料庫上要好幾分鐘，而以前第一次心跳排在
-            // 那全部之後——那幾分鐘裡她對 `is_recording` 是隱形的，字母人於是
-            // 放行第二個 `sister record` 打同一顆資料庫。
+        fn a_recorder_that_is_still_opening_the_database_occupies_but_does_not_record() {
             let dir = Tmp::new("boot-beat");
-            assert!(
-                !heartbeat::is_recording(&dir.0, sister_core::now_ms()),
-                "還沒開始，不該有心跳"
-            );
+            let now = sister_core::now_ms;
+            assert!(!heartbeat::is_occupied(&dir.0, now()), "還沒開始，沒有心跳");
+            assert!(!heartbeat::is_recording(&dir.0, now()));
+
             let boot = BootBeat::start(&dir.0);
             // 立刻，不是等第一個 5 秒間隔——那個間隔正是要補的洞。
             assert!(
-                heartbeat::is_recording(&dir.0, sister_core::now_ms()),
-                "開機的第一瞬間就要看得見她在起來"
+                heartbeat::is_occupied(&dir.0, now()),
+                "開機的第一瞬間就要擋得住第二個 recorder"
             );
+            assert!(
+                !heartbeat::is_recording(&dir.0, now()),
+                "她一個字都還沒記，指示燈不准說「在聽」"
+            );
+            assert_eq!(
+                heartbeat::phase(&dir.0, now()),
+                Some(heartbeat::Phase::Booting)
+            );
+            drop(boot);
+        }
+
+        /// 主迴圈接手之後，同一個檔案要改口說「在錄」。
+        ///
+        /// 少了這一條，上面那個修法就會把指示燈**永遠**釘在「沒在錄」——
+        /// 一個一樣糟、而且方向相反的謊。
+        #[test]
+        fn once_the_loop_takes_over_the_same_file_says_she_is_recording() {
+            let dir = Tmp::new("boot-took-over");
+            let now = sister_core::now_ms;
+            let mut boot = BootBeat::start(&dir.0);
+            assert!(!heartbeat::is_recording(&dir.0, now()));
+
+            boot.hand_off();
+            // 交棒之後蓋的第一下由主迴圈負責（`windows_record` 進迴圈前那一行）。
+            heartbeat::beat(&dir.0, now()).expect("beat");
+            assert!(
+                heartbeat::is_recording(&dir.0, now()),
+                "主迴圈在跑了，這時候才可以說在聽"
+            );
+            assert!(heartbeat::is_occupied(&dir.0, now()), "在錄的當然也佔著");
             drop(boot);
         }
 
@@ -4487,7 +4536,7 @@ pub mod record {
             let dir = Tmp::new("boot-died");
             drop(BootBeat::start(&dir.0));
             assert!(
-                !heartbeat::is_recording(&dir.0, sister_core::now_ms()),
+                !heartbeat::is_occupied(&dir.0, sister_core::now_ms()),
                 "沒交棒就走了＝這次開機沒成功，心跳要收掉"
             );
         }
@@ -4495,13 +4544,17 @@ pub mod record {
         #[test]
         fn handing_off_leaves_the_heartbeat_for_the_loop_that_took_over() {
             // 反過來也要成立：交棒之後這個守衛收工，但心跳是**還在跑的那個
-            // 迴圈**的，不能跟著一起被清掉——清掉的話她剛起來就自己說沒在錄。
+            // 迴圈**的，不能跟著一起被清掉——清掉的話第二個 recorder 就會在
+            // 那道閘門上穿過去。
+            //
+            // 問的是「還佔著嗎」而不是「在錄嗎」：主迴圈還沒蓋自己的第一下，
+            // 檔案裡仍然寫著 boot。那個狀態的正確答案就是「佔著、還沒在錄」。
             let dir = Tmp::new("boot-handoff");
             let mut boot = BootBeat::start(&dir.0);
             boot.hand_off();
             drop(boot);
             assert!(
-                heartbeat::is_recording(&dir.0, sister_core::now_ms()),
+                heartbeat::is_occupied(&dir.0, sister_core::now_ms()),
                 "交棒之後心跳歸主迴圈管，守衛不准動它"
             );
         }
