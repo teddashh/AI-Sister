@@ -434,6 +434,117 @@ fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ---------- 三張同意書 ----------
+
+#[derive(Serialize)]
+struct SheetView {
+    key: String,
+    /// 條文本身。**從 core 拿，不在這裡重打一份**——同一句話在 CLI 和視窗上
+    /// 長得不一樣的話，「他到底同意了哪一句」就沒有答案了。
+    wording: String,
+    without: String,
+    granted_at: Option<i64>,
+    /// 現在算不算數。簽過但條文改版了的話，`granted_at` 有值而這裡是 false。
+    effective: bool,
+}
+
+#[derive(Serialize)]
+struct ConsentView {
+    path: String,
+    current: bool,
+    allows_recording: bool,
+    allows_frames: bool,
+    sheets: Vec<SheetView>,
+}
+
+fn consent_dir<'r>(shell: &tauri::State<'r, Shell>) -> Result<&'r std::path::Path, String> {
+    // `inner()` 而不是直接 deref：借的是**受管理的那份 state**（活得和 app 一樣
+    // 久），不是這個 `State` 包裝的區域變數。
+    shell
+        .inner()
+        .data_dir
+        .as_deref()
+        // 問不出資料目錄的時候**不要**猜一個。同意書寫錯地方，等於他按了同意
+        // 而 `sister record` 永遠讀不到——一顆按了沒用、卻顯示成功的按鈕。
+        .ok_or_else(|| "找不到資料目錄，同意書沒有地方可以存".to_string())
+}
+
+fn consent_view(dir: &std::path::Path) -> ConsentView {
+    use sister_core::consent::Sheet;
+    let c = sister_core::consent::load(dir);
+    ConsentView {
+        path: sister_core::consent::path(dir).display().to_string(),
+        current: c.current(),
+        allows_recording: c.allows_recording(),
+        allows_frames: c.allows_frames(),
+        sheets: Sheet::ALL
+            .into_iter()
+            .map(|s| SheetView {
+                key: s.key().to_string(),
+                wording: s.wording().to_string(),
+                without: s.without().to_string(),
+                granted_at: c.get(s),
+                effective: c.current() && c.get(s).is_some(),
+            })
+            .collect(),
+    }
+}
+
+#[tauri::command]
+fn consent_read(shell: tauri::State<'_, Shell>) -> Result<ConsentView, String> {
+    Ok(consent_view(consent_dir(&shell)?))
+}
+
+/// 勾或不勾其中一張。
+///
+/// 一次只動一張，而且每一下都馬上落地——「按了三個勾再按確定」的做法，會在
+/// 他關掉視窗的那一刻讓前兩個勾消失，而他以為都存好了。
+#[tauri::command]
+fn consent_set(
+    key: String,
+    granted: bool,
+    shell: tauri::State<'_, Shell>,
+) -> Result<ConsentView, String> {
+    use std::str::FromStr;
+    let dir = consent_dir(&shell)?;
+    let sheet = sister_core::consent::Sheet::from_str(&key)?;
+    let mut c = sister_core::consent::load(dir);
+    // 條文改版之後，舊的那幾張不能跟著新的一起被存成「現在這一版簽的」。
+    // 和 CLI 那邊同一個決定：整份清掉，只留他這次真的按下去的。
+    if !c.current() {
+        c = sister_core::consent::Consent::default();
+    }
+    if granted {
+        c.grant(sheet, sister_core::now_ms());
+    } else {
+        c.revoke(sheet);
+    }
+    sister_core::consent::save(dir, &c).map_err(|e| e.to_string())?;
+    Ok(consent_view(dir))
+}
+
+/// 開同意書那一頁。同一個 label 重複用。
+#[tauri::command]
+fn open_onboarding(app: tauri::AppHandle) -> Result<(), String> {
+    const ONBOARDING: &str = "onboarding";
+    if let Some(win) = app.get_webview_window(ONBOARDING) {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        ONBOARDING,
+        tauri::WebviewUrl::App("onboarding.html".into()),
+    )
+    .title("三張同意書")
+    .inner_size(620.0, 720.0)
+    .min_inner_size(460.0, 480.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 一次刪除的規模。給人看的，所以欄位名是中文語意上的那幾個東西。
 #[derive(Serialize)]
 struct Erasure {
@@ -632,7 +743,10 @@ fn main() {
             timeline_days,
             timeline_moments,
             forget_preview,
-            forget_range
+            forget_range,
+            consent_read,
+            consent_set,
+            open_onboarding
         ])
         .setup(|app| {
             let win = app
@@ -711,6 +825,8 @@ fn main() {
                 MenuItem::with_id(app, "timeline", "她記得的每一天…", true, None::<&str>)?;
             let settings_item =
                 MenuItem::with_id(app, "settings", "設定…", true, None::<&str>)?;
+            let consent_item =
+                MenuItem::with_id(app, "consent", "三張同意書…", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "結束", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
@@ -719,6 +835,7 @@ fn main() {
                     &pause_item,
                     &timeline_item,
                     &settings_item,
+                    &consent_item,
                     &quit_item,
                 ],
             )?;
@@ -751,6 +868,11 @@ fn main() {
                     "settings" => {
                         if let Err(e) = open_settings(app.clone()) {
                             tracing::error!("設定頁開不起來：{e}");
+                        }
+                    }
+                    "consent" => {
+                        if let Err(e) = open_onboarding(app.clone()) {
+                            tracing::error!("同意書開不起來：{e}");
                         }
                     }
                     "quit" => {
@@ -799,6 +921,22 @@ fn main() {
                 }
                 _ => {}
             });
+
+            // ---- 還沒簽同意書就先問 ----
+            //
+            // 這一支不會擋住字母人，因為她本來就只是**讀**資料庫——沒有同意書
+            // 也讀得到已經存在的東西，而擋掉只會讓一個想來撤回同意的人進不來。
+            // 真正的閘門在 `sister record`（見 `ops::record::gate`）。
+            //
+            // 這裡做的是另一件事：`sister record` 拒絕啟動的時候，那句話印在
+            // 一個他可能根本沒開的終端機裡。字母人是他看得到的那一面。
+            if !consent_read(app.state::<Shell>())
+                .map(|v| v.allows_recording)
+                .unwrap_or(false)
+                && let Err(e) = open_onboarding(app.handle().clone())
+            {
+                tracing::error!("同意書開不起來：{e}");
+            }
 
             Ok(())
         })

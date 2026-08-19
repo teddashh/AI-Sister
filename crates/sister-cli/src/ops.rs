@@ -68,6 +68,123 @@ fn report_exclusions(stats: &sister_capture::RecorderStats) {
     }
 }
 
+pub mod consent {
+    use super::*;
+    use sister_core::consent::{Consent, Sheet};
+    use std::str::FromStr;
+
+    /// `sister consent [--grant …] [--revoke …]`。
+    ///
+    /// 在無頭機器上把整條同意流程走完的入口。字母人上那三張卡片按下去之後
+    /// 改的是**同一個檔案**，所以這裡驗得過的東西，那邊也就驗過了。
+    pub fn run(data_dir: &Path, grant: &[String], revoke: &[String], json: bool) -> Result<()> {
+        let mut c = sister_core::consent::load(data_dir);
+
+        // 先把名字全部解析完再動任何東西。一半成功一半失敗的狀態，會讓
+        // 「我剛剛到底同意了什麼」變成一個沒有答案的問題。
+        let grant: Vec<Sheet> = parse(grant)?;
+        let revoke: Vec<Sheet> = parse(revoke)?;
+        let changing = !grant.is_empty() || !revoke.is_empty();
+
+        if changing {
+            // 條文換版之後，舊簽名不算數（`current()` 會是 false）。這時候
+            // 只要他重簽任何一張，其餘沒重簽的就該當作沒簽——所以整份先清掉，
+            // 而不是讓一份半新半舊的檔案留在磁碟上假裝自己是完整的。
+            if !c.current() && c != Consent::default() {
+                println!("⚠  同意書條文已經改版，之前簽的那幾張不再算數，只保留這次指定的。");
+                c = Consent::default();
+            }
+            let now = sister_core::now_ms();
+            for s in &revoke {
+                c.revoke(*s);
+            }
+            for s in &grant {
+                c.grant(*s, now);
+            }
+            // 撤回全部之後 `version` 還停在舊值沒關係——`allows_*` 看的是
+            // 「有沒有那個時戳」，而三個都 None 的時候答案本來就是不准。
+            sister_core::consent::save(data_dir, &c)?;
+        }
+
+        if json {
+            print_json(data_dir, &c)
+        } else {
+            print_human(data_dir, &c, changing);
+            Ok(())
+        }
+    }
+
+    fn parse(names: &[String]) -> Result<Vec<Sheet>> {
+        names
+            .iter()
+            .map(|n| Sheet::from_str(n).map_err(anyhow::Error::msg))
+            .collect()
+    }
+
+    fn print_human(data_dir: &Path, c: &Consent, changed: bool) {
+        println!(
+            "三張同意書（{}）",
+            sister_core::consent::path(data_dir).display()
+        );
+        for sheet in Sheet::ALL {
+            let mark = match c.get(sheet) {
+                // 簽過、但條文換版了 = 還是不算數，而且要看得出來是哪一種。
+                Some(_) if !c.current() => "⟳",
+                Some(_) => "✓",
+                None => "✗",
+            };
+            println!("\n  {mark} {}", sheet.wording());
+            match c.get(sheet) {
+                Some(ts) => println!("      {} 同意", crate::fmt::timestamp(ts)),
+                None => println!("      {}", sheet.without()),
+            }
+        }
+
+        println!();
+        if c.allows_recording() {
+            let frames = if c.allows_frames() {
+                "會留截圖"
+            } else {
+                "只記螢幕上的字、不留截圖"
+            };
+            println!("→ 她可以錄，而且{frames}。");
+        } else if c.get(Sheet::LocalRecording).is_some() {
+            println!(
+                "→ **她不會開始錄**：條文改版了（現在是第 {} 版），要重簽一次。\n  \
+                 `sister consent --grant local-recording`",
+                sister_core::consent::VERSION
+            );
+        } else {
+            println!(
+                "→ **她不會開始錄。** 要她開始請跑：\n  \
+                 `sister consent --grant local-recording`\n  \
+                 想連截圖一起留就再加 `--grant frame-storage`。"
+            );
+        }
+        if !changed {
+            println!("\n（這次沒有改動任何東西。）");
+        }
+    }
+
+    fn print_json(data_dir: &Path, c: &Consent) -> Result<()> {
+        let out = serde_json::json!({
+            "path": sister_core::consent::path(data_dir).display().to_string(),
+            "version": c.version,
+            "current": c.current(),
+            "allows_recording": c.allows_recording(),
+            "allows_frames": c.allows_frames(),
+            "sheets": Sheet::ALL.iter().map(|s| serde_json::json!({
+                "key": s.key(),
+                "granted_at": c.get(*s),
+                // 「簽過」和「現在算數」是兩件事：條文改版之後前者還是 true。
+                "effective": c.current() && c.get(*s).is_some(),
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        Ok(())
+    }
+}
+
 pub mod pause {
     use super::*;
 
@@ -997,6 +1114,46 @@ pub mod doctor {
             backend.unwrap_or("無（此平台尚未實作；可用 sister replay 驗證管線）"),
         );
 
+        // 同意書排在最前面，因為它是唯一一個「答案是否定的話，底下每一行都
+        // 不重要」的檢查——她根本不會開始錄，OCR 讀不讀得到字就不是問題了。
+        println!("\n同意書");
+        let consent = sister_core::consent::load(data_dir);
+        let signed_local = consent
+            .get(sister_core::consent::Sheet::LocalRecording)
+            .is_some();
+        line(
+            consent.allows_recording(),
+            "本機記錄",
+            if consent.allows_recording() {
+                "已同意——她可以錄"
+            } else if signed_local {
+                "條文改版，舊簽名失效 → `sister record` 會拒絕啟動"
+            } else {
+                "未同意 → `sister record` 會拒絕啟動（`sister consent --grant local-recording`）"
+            },
+        );
+        line(
+            consent.allows_frames(),
+            "畫面暫存",
+            if consent.allows_frames() {
+                "已同意——會把截圖寫到硬碟"
+            } else {
+                "未同意 → 只記螢幕上的字，不留截圖"
+            },
+        );
+        // 第二張的 ✓ 講的是「沒有東西會離開這台機器」，不是「你同意了」。
+        // 寫成 ✗ 會讓人以為少裝了什麼；而句子從否定改成肯定，是為了讓那個
+        // 勾勾對應到一個真的成立的好狀態。
+        line(
+            true,
+            "上雲解讀",
+            if consent.cloud_reading.is_some() {
+                "已同意，但這份程式裡沒有任何連外路徑，所以它還沒有作用"
+            } else {
+                "沒有任何東西會離開這台機器（未同意，而且程式裡本來就沒有連外路徑）"
+            },
+        );
+
         println!("\n位置");
         let db_file = crate::db_path(data_dir);
         line(
@@ -1593,12 +1750,61 @@ pub mod record {
         }
     }
 
+    /// 同意書那道閘門。過不了就 `Err`，過得了就回一份**可能被降級過**的設定。
+    ///
+    /// 拆成獨立函式而不是寫在 `run` 裡，是為了讓它在這台 Linux 開發機上跑得到
+    /// （`run` 的後半段整段 `#[cfg(windows)]`）。一道只有目標平台才執行得到的
+    /// 隱私閘門，等於一道沒有被執行過的閘門。
+    fn gate(data_dir: &Path, mut config: Config) -> Result<Config> {
+        let consent = sister_core::consent::load(data_dir);
+
+        if !consent.allows_recording() {
+            let why = if consent
+                .get(sister_core::consent::Sheet::LocalRecording)
+                .is_some()
+            {
+                format!(
+                    "同意書條文改版了（現在是第 {} 版），之前簽的那一張不再算數。",
+                    sister_core::consent::VERSION
+                )
+            } else {
+                "還沒有人同意讓她記錄這台機器的螢幕。".to_string()
+            };
+            anyhow::bail!(
+                "{why}\n\n  「{}」\n\n\
+                 要她開始記錄，請跑：\n    \
+                 sister consent --grant local-recording\n\n\
+                 想連截圖一起留（否則她只記螢幕上的字）：\n    \
+                 sister consent --grant local-recording --grant frame-storage\n\n\
+                 看目前簽了哪幾張：\n    \
+                 sister consent\n",
+                sister_core::consent::Sheet::LocalRecording.wording()
+            );
+        }
+
+        // 第三張沒簽不是「不能錄」，是「只記字不留圖」（SPEC §11.1 的
+        // 「0 天 = 只留 OCR 文字」）。降級要講出來——安靜地少存一半東西，
+        // 使用者只會以為截圖功能壞了。
+        if !consent.allows_frames() && config.capture.store_images {
+            println!(
+                "  第三張同意書沒簽：這一次只記螢幕上的字，不會寫任何截圖。\n  \
+                 （要留圖請跑 `sister consent --grant frame-storage`）"
+            );
+            config.capture.store_images = false;
+        }
+        Ok(config)
+    }
+
     pub fn run(
         data_dir: &Path,
         config: Config,
         config_path: Option<PathBuf>,
         duration: Option<u64>,
     ) -> Result<()> {
+        // 同意書擋在平台檢查**前面**。沒有同意就不該錄，這件事和這台機器有
+        // 沒有擷取後端無關；而且放後面的話，這道閘門在非 Windows 上永遠碰不到。
+        let config = gate(data_dir, config)?;
+
         #[cfg(not(windows))]
         {
             let _ = (data_dir, config, config_path, duration);
@@ -2202,8 +2408,10 @@ pub mod record {
         }
     }
     #[cfg(test)]
-    mod watch_tests {
+    mod record_tests {
         use super::ConfigWatch;
+        use sister_core::config::Config;
+        use sister_core::consent::{Consent, Sheet};
         use std::sync::atomic::{AtomicU32, Ordering};
 
         /// 和 `sister-core` 那邊同一套自建暫存目錄，不引 `tempfile`。
@@ -2275,6 +2483,72 @@ pub mod record {
             // 但**新建**一個要看得出來——那正是第一次跑設定頁儲存的那一刻。
             dir.file("[privacy]\nexcluded_apps = []\n");
             assert!(w.changed(&path));
+        }
+
+        // ── 同意書那道閘門 ──────────────────────────────────────────
+        //
+        // 這幾條在 Linux 上跑得到，而 `record` 的後半段整段是 #[cfg(windows)]。
+        // 一道只有目標平台才執行得到的隱私閘門，等於一道沒被執行過的閘門。
+
+        /// 沒簽第一張，她連平台檢查都走不到——而且錯誤訊息要講得出下一步。
+        #[test]
+        fn recording_refuses_to_start_without_the_first_signature() {
+            let dir = Tmp::new("gate-none");
+            let err = super::gate(&dir.0, Config::default()).expect_err("該被擋下來");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("sister consent --grant local-recording"),
+                "擋下來還不夠，要說得出怎麼過去：{msg}"
+            );
+        }
+
+        /// 簽了第一張、沒簽第三張 = 照錄，但一張圖都不寫。
+        ///
+        /// 這是三張同意書裡唯一一個「降級而不是拒絕」的路徑（SPEC §11.1 的
+        /// 「0 天 = 只留 OCR 文字」）。做成拒絕會讓一個只是不想留截圖的人
+        /// 完全用不了她。
+        #[test]
+        fn without_the_screenshot_sheet_she_records_words_but_keeps_no_pictures() {
+            let dir = Tmp::new("gate-words");
+            let mut c = Consent::default();
+            c.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &c).expect("save");
+
+            let mut config = Config::default();
+            config.capture.store_images = true;
+            let out = super::gate(&dir.0, config).expect("第一張簽了就該放行");
+            assert!(!out.capture.store_images, "第三張沒簽就不可以寫圖");
+        }
+
+        /// 兩張都簽了才留圖。
+        ///
+        /// 沒有這一條的話，一個「永遠把 store_images 關掉」的閘門也會通過
+        /// 上面那條測試——然後截圖功能就安靜地整個消失了。
+        #[test]
+        fn both_sheets_signed_still_keeps_the_screenshots() {
+            let dir = Tmp::new("gate-both");
+            let mut c = Consent::default();
+            c.grant(Sheet::LocalRecording, 1);
+            c.grant(Sheet::FrameStorage, 1);
+            sister_core::consent::save(&dir.0, &c).expect("save");
+
+            let mut config = Config::default();
+            config.capture.store_images = true;
+            let out = super::gate(&dir.0, config).expect("兩張都簽了");
+            assert!(out.capture.store_images);
+        }
+
+        /// 條文改版之後，舊的簽名擋不住這道閘門。
+        #[test]
+        fn a_signature_on_old_wording_does_not_open_the_gate() {
+            let dir = Tmp::new("gate-stale");
+            let mut c = Consent::default();
+            c.grant(Sheet::LocalRecording, 1);
+            c.version = sister_core::consent::VERSION + 1;
+            sister_core::consent::save(&dir.0, &c).expect("save");
+
+            let err = super::gate(&dir.0, Config::default()).expect_err("該被擋下來");
+            assert!(err.to_string().contains("改版"), "{err}");
         }
     }
 }

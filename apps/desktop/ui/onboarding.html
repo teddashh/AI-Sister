@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <title>三張同意書</title>
+    <link rel="stylesheet" href="./onboarding.css" />
+  </head>
+  <body>
+    <main class="sheet">
+      <h1>在她開始看之前</h1>
+      <p class="lede">
+        三件事，各自獨立、各自可以隨時撤回。<strong>三個都不勾她就什麼都不做</strong
+        >——這一頁不是條款，是三個開關。
+      </p>
+
+      <!--
+        卡片是 JS 從 Rust 那邊拿條文文字生出來的，不是寫死在這裡。
+
+        理由：同一句話在 `sister consent`、`sister doctor` 和這一頁上如果長得
+        不一樣，「他到底同意了哪一句」就沒有答案。條文只有一份，在
+        `sister_core::consent::Sheet::wording()`。
+      -->
+      <ol class="cards" data-cards></ol>
+
+      <p class="where">存到 <code data-path>…</code></p>
+    </main>
+
+    <footer class="bar">
+      <p class="say" data-say></p>
+      <button class="primary" data-done type="button">好</button>
+    </footer>
+    <script type="module" src="./onboarding.js"></script>
+  </body>
+</html>

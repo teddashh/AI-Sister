@@ -454,7 +454,7 @@ async function load(keep = null) {
       el.days.replaceChildren();
       el.moments.replaceChildren();
       el.railSay.textContent = "她還沒記得任何東西。";
-      say("跑 `sister record` 之後再回來看。");
+      say("跑 sister record 之後再回來看。");
       current = null;
       armReset();
       return;

@@ -1,0 +1,167 @@
+/*
+ * 三張同意書。
+ *
+ * 版面上只有一個決定：**每一張卡片上，「沒勾會怎樣」和條文一樣大**。
+ *
+ * 一般的同意頁把後果藏在小字裡，因為它們希望你按下去。這一頁反過來：他要判斷
+ * 的不是那句話漂不漂亮，而是不勾的話他會失去什麼。所以那一行不是灰色小字，
+ * 它就在條文正下方，同樣的字級。
+ */
+
+:root {
+  --bg: #1e1a26;
+  --fg: #f6ecdf;
+  --accent: #9a5b7a;
+  --line: rgb(246 236 223 / 10%);
+  --off: #e8a33d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  display: flex;
+  flex-direction: column;
+  font: 13.5px/1.65 "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+}
+
+.sheet {
+  flex: 1;
+  overflow-y: auto;
+  padding: 26px 24px 8px;
+}
+
+h1 {
+  font-size: 21px;
+  margin: 0 0 6px;
+}
+
+.lede {
+  margin: 0 0 20px;
+  opacity: 0.7;
+}
+
+.lede strong {
+  opacity: 1;
+}
+
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.card {
+  background: rgb(246 236 223 / 4%);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--off);
+  border-radius: 11px;
+  margin-bottom: 12px;
+  padding: 14px 16px;
+}
+
+/* 勾起來的那幾張看得出來，而且是這一頁唯一的強調色 */
+.card.on {
+  background: rgb(154 91 122 / 14%);
+  border-left-color: var(--accent);
+}
+
+.card label {
+  align-items: start;
+  cursor: pointer;
+  display: flex;
+  gap: 11px;
+}
+
+.card input {
+  accent-color: var(--accent);
+  flex: 0 0 auto;
+  height: 17px;
+  margin-top: 4px;
+  width: 17px;
+}
+
+.wording {
+  display: block;
+  font-size: 14.5px;
+}
+
+/* 這一行和條文同一個字級，是這一頁唯一重要的排版決定（見檔案開頭） */
+.without {
+  display: block;
+  margin-top: 3px;
+  opacity: 0.72;
+}
+
+.since {
+  display: block;
+  font-size: 12px;
+  margin-top: 5px;
+  opacity: 0.45;
+}
+
+/* 簽過、但條文改版了 */
+.stale {
+  color: var(--off);
+  opacity: 0.95;
+}
+
+.where {
+  margin: 18px 0 0;
+  opacity: 0.45;
+}
+
+code {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.bar {
+  align-items: center;
+  background: rgb(46 33 64 / 96%);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  padding: 11px 16px;
+}
+
+.say {
+  flex: 1;
+  margin: 0;
+  min-width: 0;
+  opacity: 0.75;
+}
+
+.say.bad {
+  color: var(--off);
+  opacity: 1;
+}
+
+button {
+  appearance: none;
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+  font: inherit;
+  padding: 7px 20px;
+}
+
+.primary {
+  background: var(--accent);
+  color: var(--fg);
+}
+
+button:focus-visible,
+.card input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

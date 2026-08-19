@@ -118,6 +118,20 @@ enum Command {
     /// 解除暫停。
     Resume,
 
+    /// 三張同意書：現在簽了哪幾張、沒簽會怎樣。
+    ///
+    /// 不帶參數就是印出目前的狀態。**第一張沒簽，`sister record` 不會開始錄。**
+    Consent {
+        /// 簽下去。可以重複：`--grant local-recording --grant frame-storage`
+        #[arg(long, value_name = "SHEET")]
+        grant: Vec<String>,
+        /// 撤回。撤回本機記錄之後她就停了。
+        #[arg(long, value_name = "SHEET")]
+        revoke: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// 環境檢查：這台機器能不能好好跑
     Doctor,
 }
@@ -173,6 +187,11 @@ fn main() -> Result<()> {
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config, dry_run),
         Command::Pause => ops::pause::run(&data_dir, true),
         Command::Resume => ops::pause::run(&data_dir, false),
+        Command::Consent {
+            grant,
+            revoke,
+            json,
+        } => ops::consent::run(&data_dir, &grant, &revoke, json),
         Command::Doctor => ops::doctor::run(&data_dir, &config, cli.config.clone()),
     }
 }
