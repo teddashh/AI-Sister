@@ -285,11 +285,18 @@ jobs:
 
             ```
             sister.exe doctor                 # 先看這個：她在這台機器上做得到什麼
+            sister.exe consent --grant local-recording --grant frame-storage
+                                              # 沒簽第一張，下一行會直接拒絕
             sister.exe record --duration 60   # 錄一分鐘（省略 --duration 就錄到 Ctrl-C）
             sister.exe stats                  # 記了多少
             sister.exe query 電話             # 查，每筆都附出處
             sister.exe prune --dry-run        # 保留期現在會刪掉什麼
             ```
+
+            第二行不是形式。**沒簽第一張同意書，`record` 不會開始錄**——不是印個
+            警告然後照錄。少簽第三張（`frame-storage`）她照樣記，但只記螢幕上的
+            字、一張截圖都不寫。`sister.exe consent` 不帶參數就是看現在簽了哪幾張。
+            開字母人（`sister-desktop.exe`）的話它會自己把那一頁跳出來。
 
             資料放在 `%APPDATA%\ted-h\AI-Sister\data\`，刪掉那個資料夾就等於
             全部忘掉。也可以用 `--data-dir .\test` 錄到別的地方，測完直接刪。
@@ -735,8 +742,13 @@ jobs:
             磁碟 11.4 GB/天。最有用的回報就是那三行：
 
             ```
+            sister.exe --data-dir .\test consent --grant local-recording --grant frame-storage
             sister.exe --data-dir .\test record --duration 60
             ```
+
+            （同意書是**跟著 `--data-dir` 走的**，所以錄到別的地方要在那邊也簽
+            一次。那不是麻煩：一份同意書跟著一個資料夾，刪掉資料夾就等於連那份
+            同意一起收回。）
 
             把 `完成：`、`省下：`、`時間：`、`足跡：` 四行整段貼回來就好。
             特別想知道兩件事：`省下：` 那行的百分比（你邊用電腦邊錄的話應該
