@@ -495,14 +495,50 @@ impl Config {
         }
         let text = std::fs::read_to_string(path)?;
         let cfg: Config = toml::from_str(&text)?;
+        cfg.retention.check()?;
         Ok(cfg)
     }
 
+    /// 寫回設定檔。
+    ///
+    /// 出門也檢查一次，用的是 `load` 那同一條規則：設定頁存下一份自己讀不
+    /// 回來的檔案，症狀會是**下一次開機她整個起不來**，而使用者手上只有一句
+    /// 「我剛剛改了保留天數」。擋在寫入之前，錯誤訊息還指得到那個輸入框。
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        self.retention.check()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(path, toml::to_string_pretty(self)?)?;
+        Ok(())
+    }
+}
+
+impl RetentionConfig {
+    /// 保留天數不可以是 0。
+    ///
+    /// 0 在很多工具裡是「不限制」（logrotate、journald 的 `MaxRetentionSec`、
+    /// docker 的 log opts 都是這個意思），而在這裡它代表的正好相反：**下一次
+    /// 整理就把那些東西全部刪掉**。整理在每次 `sister record` 開始時自動跑一
+    /// 次，所以打錯這個數字的代價是「她開始錄的那一刻，之前記得的全部消失」
+    /// ——沒有確認、沒有回收桶、沒有任何一行輸出說發生過這件事。
+    ///
+    /// 兩種讀法都很合理，所以不猜。擋下來，把兩種都講出來，讓他自己選。
+    pub fn check(&self) -> anyhow::Result<()> {
+        for (days, field, what) in [
+            (self.text_days, "text_days", "文字、事實、事件和題庫"),
+            (self.frames_days, "frames_days", "畫面檔"),
+        ] {
+            if days == 0 {
+                anyhow::bail!(
+                    "retention.{field} 不能是 0。\n\
+                     0 在有些工具裡是「不限制」，但在這裡它的意思是「下一次整理就把{what}全部刪掉」\
+                     ——而整理在每次 `sister record` 開始時會自動跑一次。\n\
+                     想留久一點就寫一個大的數字（36500 大約是 100 年）；\
+                     真的想每天清空就寫 1。"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -789,6 +825,71 @@ mod tests {
             app_id: Some(id.into()),
             ..Default::default()
         }
+    }
+
+    /// `0` 在 logrotate、journald、docker 那邊是「不限制」，在這裡是「下一次
+    /// 整理就全部刪掉」。而整理在每次 `sister record` 開始時自動跑——所以照
+    /// 那個習慣寫下去的人，會在她開始錄的那一刻失去全部記憶，畫面上不會有
+    /// 任何一行字提到這件事。兩種讀法都合理，所以擋下來讓他自己選。
+    #[test]
+    fn zero_days_is_refused_because_it_could_mean_either_forever_or_nothing() {
+        for bad in [
+            RetentionConfig {
+                text_days: 0,
+                frames_days: 30,
+            },
+            RetentionConfig {
+                text_days: 365,
+                frames_days: 0,
+            },
+            RetentionConfig {
+                text_days: 0,
+                frames_days: 0,
+            },
+        ] {
+            let err = bad.check().expect_err("0 天要被擋下來").to_string();
+            assert!(err.contains("不限制"), "要講出另一種讀法：{err}");
+            assert!(err.contains("36500"), "要給一個真的能寫的替代值：{err}");
+        }
+
+        // 1 天是合法的——真的有人只想留今天。預設值當然也要過。
+        assert!(
+            RetentionConfig {
+                text_days: 1,
+                frames_days: 1
+            }
+            .check()
+            .is_ok()
+        );
+        assert!(RetentionConfig::default().check().is_ok());
+    }
+
+    /// 讀進來和寫出去用的是同一條規則。少了任何一邊，設定頁都能存下一份
+    /// 自己讀不回來的檔案——而症狀會出現在下一次開機，不是在按下儲存的時候。
+    #[test]
+    fn the_same_rule_guards_both_doors() {
+        // 不引 `tempfile`：這個 crate 的相依樹是 `check-no-network.sh` 盯著的
+        // 資產，和 retention.rs 那邊同一個理由。
+        let path = std::env::temp_dir().join(format!("sister-cfg-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut cfg = Config::default();
+        cfg.retention.text_days = 0;
+        assert!(cfg.save(&path).is_err(), "存不進去");
+        assert!(!path.exists(), "擋下來的時候不該留下半份檔案");
+
+        // 手改檔案那條路也一樣。
+        std::fs::write(&path, "[retention]\ntext_days = 0\nframes_days = 30\n").expect("write");
+        assert!(Config::load(&path).is_err(), "讀不回來");
+
+        // 合法的值兩道門都過得去，而且存進去的讀得回來。
+        cfg.retention.text_days = 36500;
+        cfg.save(&path).expect("存得進去");
+        assert_eq!(
+            Config::load(&path).expect("讀得回來").retention.text_days,
+            36500
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// 這條規則的預設值是裸名字，但三個平台給的識別碼長得都不一樣。

@@ -273,11 +273,19 @@ function demo(variant) {
  * 天數欄位。空的、負的、寫成「三十」的，都不可以變成 0——
  * 因為 0 的意思是**立刻刪**，而一個手滑清空的欄位不該把使用者一年的
  * 文字紀錄按下去。看不懂就退回目前的值，並且說出來。
+ *
+ * 這段註解本來就是這樣寫的，但守衛寫成 `n < 0`——也就是說 0 一路通過，
+ * 存進設定檔，然後在下一次開始錄的時候把全部東西清掉。真正擋住的那一道
+ * 在 `RetentionConfig::check`（存和讀都會過），這裡只是把話講在他還看得到
+ * 那個輸入框的時候。
  */
 function days(input, label) {
   const n = Number.parseInt(input.value, 10);
-  if (!Number.isInteger(n) || n < 0) {
-    throw new Error(`${label}的天數看不懂：「${input.value}」`);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(
+      `${label}的天數要是 1 以上的數字：「${input.value}」。` +
+        `0 在這裡不是「不限制」，是「下一次整理就全部刪掉」——想留久一點請寫大一點（36500 大約是 100 年）。`,
+    );
   }
   return n;
 }
