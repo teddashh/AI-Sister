@@ -2040,6 +2040,34 @@ mod tests {
         assert!(hits[0].text.contains("換了一件事"));
     }
 
+    /// 「剛剛」不可以變成一次全表排序。`idx_chunk_ts` 是 `(ts)`，rowid 隱含在
+    /// 索引尾巴上，所以 `ORDER BY ts DESC, id DESC` 應該直接倒著掃索引就好。
+    ///
+    /// 這條界線很細：把第二個鍵寫成 `id ASC` 就會得到
+    /// `USE TEMP B-TREE FOR LAST TERM OF ORDER BY`——實際試過。一個月的資料上
+    /// 那是幾百毫秒，而每問一次「剛剛」就走一遍，卻不會有任何症狀，只是慢。
+    #[test]
+    fn recent_reads_the_index_backwards_instead_of_sorting_the_table() {
+        let db = test_db();
+        let plan: Vec<String> = db
+            .conn()
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT id, ts, source_kind, frame_id, app_id,
+                 window_title, url, text FROM text_chunks ORDER BY ts DESC, id DESC LIMIT ?1",
+            )
+            .expect("prepare")
+            .query_map([240], |r| r.get::<_, String>(3))
+            .expect("plan")
+            .flatten()
+            .collect();
+        let plan = plan.join(" | ");
+        assert!(
+            !plan.to_uppercase().contains("TEMP B-TREE"),
+            "「剛剛」在排整張表：{plan}"
+        );
+        assert!(plan.contains("idx_chunk_ts"), "沒有用到時間索引：{plan}");
+    }
+
     /// 一台還沒錄過任何東西的機器上，這一支要安靜地回空的，不是報錯。
     #[test]
     fn recent_on_an_empty_database_is_just_empty() {
