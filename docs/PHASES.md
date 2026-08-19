@@ -97,7 +97,12 @@
       來自**真實提問**的題庫，不是另外跑一份 benchmark——那條路只會量到我
       挑出來的問題。成句目前沒有東西可量（還沒有任何 LLM 路徑）。
 - [ ] 全離線模式（同意書 2 全關）走完全部主流程。
-- [ ] clone → 跑起來 < 10 分鐘（含 README quickstart 實測）。
+- [x] clone → 跑起來 < 10 分鐘（含 README quickstart 實測）。
+      **實測 33 秒**（乾淨 `CARGO_HOME`：clone → 抓 108 MB 相依 → release build
+      32 秒 → replay → 第一個 ★ 答案。16 核開發機；runner 約 2.1 倍）。這一條
+      唯一的難處不是第一次量得到，是三個月後它還是對的——所以 CI 每次 push 會
+      把 README 那個 code block **挖出來執行**（`scripts/check-readme-quickstart.sh`），
+      而不是另外維護一份一樣的指令。跑不起來、或跑完沒有那個 ★ 答案，就是紅的。
 - [ ] repo public、Apache-2.0、README 首段 = 三張同意書宣言 + 實測足跡數字。
 
 **明確不做**：主動開口（她只回答，不先說話）、interpreter、承諾表。

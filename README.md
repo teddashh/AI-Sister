@@ -20,6 +20,52 @@ Release 裡有**兩個**執行檔，分工是「一個記、一個問」：
 | `sister.exe` | 記。`record` 錄、`doctor` 自我檢查、`query` 在終端機查、`pause` 叫她閉眼、`consent` 簽或撤同意書 |
 | `sister-desktop.exe` | 問。桌面角落那個字母人：搜尋框 + 出處，點得開當時那張畫面；還有一條時間軸，可以翻、可以刪 |
 
+## 跑起來
+
+**Windows**——[Releases](https://github.com/teddashh/AI-Sister/releases) 下載那兩個
+執行檔，放同一個資料夾（字母人是去隔壁找 `sister.exe` 的）。她要先拿到第一張
+同意書才會動：
+
+```
+sister consent --grant local-recording
+sister doctor
+sister record --duration 60
+```
+
+然後開 `sister-desktop.exe` 問她剛剛那一分鐘發生了什麼，或者直接 `sister query 電話`。
+`doctor` 排在錄之前是有意的：它會當場示範這台機器**現在**讀不讀得到網址、
+OCR 有沒有裝、哪幾條排除規則其實不生效——比錄完 60 秒才發現什麼都沒進去好。
+
+**從原始碼**——Linux/macOS 也跑得起來，只是還沒有擷取後端，所以第一次不能叫她
+錄；改用 repo 裡那份腳本重播一遍（CI 每次 push 走的是同一條路）：
+
+```
+git clone https://github.com/teddashh/AI-Sister.git
+cd AI-Sister
+cargo build --release -p sister-cli
+./target/release/sister --data-dir ./data replay scenarios/bill-lookup.json
+./target/release/sister --data-dir ./data query 電話
+```
+
+最後那行會給你這個：
+
+```
+🔍 「電話」 2 筆答案、0 筆原文，0.3 ms
+
+  ★ +886800080123  「0800-080-123」（看過 2 次）
+    ↳ phone · 2026-08-19 04:37:39 (剛剛) · slack.exe
+  ★ +886912345678  「0912-345-678」
+    ↳ phone · 2026-08-19 04:36:47 (1 分鐘前) · chrome.exe · 中華電信 客戶服務 - 帳單查詢 · frame #1
+```
+
+**clone 到第一個答案實測 33 秒**（乾淨的 `CARGO_HOME`：抓 108 MB 相依 + build 32 秒。
+16 核開發機，GitHub 的 runner 大約是這裡的 2.1 倍）。需要 Rust 1.85 以上——這份
+程式是 edition 2024。整條路上沒有 `sudo`、沒有服務、沒有帳號。
+
+這一步**一個像素都沒讀你的螢幕**，所以它不用簽同意書：`replay` 讀的是 repo 裡那份
+JSON 腳本，沒有任何東西可以同意。要看她在你自己的機器上會做什麼，得走上面那條
+Windows 的路。
+
 問她「**剛剛發生什麼事**」會得到答案，而不是「這件事我沒看到過」。那句話問的是
 時間、不是關鍵字，所以她不會拿那七個字去比對——她直接把最後看到的幾件事列出來，
 每一筆一樣掛著時間與出處，而且會先講一句「我把它當成時間問題了」，你才知道答案

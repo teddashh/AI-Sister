@@ -88,6 +88,15 @@ jobs:
           cargo run -q -p sister-cli -- --data-dir ./ci-audit stats --json > stats.json
           python3 ./scripts/check-audit.py stats.json
 
+      # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
+      # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
+      # 而讀的人只會以為是自己裝錯了。這一步不是另外寫一份一樣的測試（兩份
+      # 還是會分岔），是把 README 裡那個 code block 挖出來執行。
+      - name: The quickstart in the README has to actually run
+        run: |
+          cargo build -q -p sister-cli
+          SISTER=./target/debug/sister ./scripts/check-readme-quickstart.sh
+
       # Windows 那一半在 Linux 上被 cfg 關掉，這裡至少要型別檢查到
       - name: Cross-check the Windows half
         run: ./scripts/check-windows.sh
