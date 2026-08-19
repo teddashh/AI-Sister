@@ -749,6 +749,45 @@ mod tests {
         assert!(!r.is_empty());
     }
 
+    /// 「圖留久一點、字早點清掉」在這個資料結構裡表達不出來——這是證據。
+    ///
+    /// 設定頁把兩格畫成互相獨立的，所以「畫面 3650 天、文字 30 天」是一個
+    /// 使用者按得出來的組合。實際發生的事在下面：第一段按 `text_days` 整列
+    /// 刪，而刪列之前一定得先刪檔（不然磁碟上會留一張沒有指標的截圖），於
+    /// 是 PNG 在第 30 天就消失了，而那一格寫著 3650、旁邊的說明還寫著
+    /// 「天後刪掉 PNG，但上面的字留著」。
+    ///
+    /// `RetentionConfig::check` 現在會擋掉這組數字。這個測試釘住**擋它的
+    /// 理由是真的**——把 check 那一條拿掉的話，走進來的就是這個行為。
+    #[test]
+    fn a_screenshot_cannot_outlive_the_row_that_points_at_it() {
+        let tmp = Tmp::new("inverted");
+        let (mut db, paths) = seeded(&tmp);
+        // 他要的：圖留十年、字只留 30 天。設定頁按得出來，check 會擋。
+        let wished = RetentionConfig {
+            frames_days: 3650,
+            text_days: 30,
+        };
+        assert!(
+            wished.check().is_err(),
+            "這組數字要在寫進檔案之前就被擋下來"
+        );
+
+        // 但萬一它從別的路徑走進來了（舊的設定檔、手改的 TOML），
+        // 真正發生的事是這個：
+        let r = db.prune(NOW, &wished, Some(tmp.path())).expect("prune");
+        assert!(tmp.path().join(&paths[0]).exists(), "昨天的還在");
+        assert!(
+            !tmp.path().join(&paths[1]).exists(),
+            "他寫 3650，PNG 在第 30 天就沒了——實際壽命是 min(兩者)"
+        );
+        assert!(
+            db.search("兩個月前", 10).expect("search").is_empty(),
+            "字也一起走了"
+        );
+        assert_eq!(r.frames_deleted, 2, "{r:?}");
+    }
+
     /// 不給根目錄時，**不可以只把欄位清掉而把檔案留在磁碟上**。
     ///
     /// 清成 NULL 之後就沒有任何東西指向那些檔案，而下一次 prune 的條件是

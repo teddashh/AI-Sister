@@ -560,7 +560,7 @@ pub enum Reload {
 }
 
 impl RetentionConfig {
-    /// 保留天數不可以是 0。
+    /// 保留天數不可以是 0，而且畫面不可以想活得比文字久。
     ///
     /// 0 在很多工具裡是「不限制」（logrotate、journald 的 `MaxRetentionSec`、
     /// docker 的 log opts 都是這個意思），而在這裡它代表的正好相反：**下一次
@@ -583,6 +583,34 @@ impl RetentionConfig {
                      真的想每天清空就寫 1。"
                 );
             }
+        }
+        // 「圖留久一點、字早點清掉」是一個很合理的願望，而且設定頁把這兩格
+        // 畫成互相獨立的——但它在這個資料結構裡**表達不出來**。
+        //
+        // `frames` 那一列就是指向 PNG 的唯一一根指標。整理的第一段（見
+        // `retention.rs` 的「整列消失」）按 `text_days` 把整列刪掉，而刪列
+        // 之前一定要先刪檔，否則磁碟上會留下一張沒有任何東西指得到的螢幕
+        // 截圖——那正是這個專案最不能接受的東西。
+        //
+        // 所以 `frames_days > text_days` 的實際壽命是 `min(兩者)`：PNG 在第
+        // 30 天消失，而設定頁上那一格寫著 3650、旁邊的說明還寫著「天後刪掉
+        // PNG，但上面的字留著」。三個地方講三件事，只有磁碟是對的。
+        //
+        // 擋下來，而不是默默照 min 跑：他要的東西這裡給不了，那就要說。
+        if self.frames_days > self.text_days {
+            anyhow::bail!(
+                "retention.frames_days（{}）不能大於 text_days（{}）。\n\
+                 畫面檔沒有辦法活得比它自己那一列久——那一列就是指向 PNG 的唯一一根指標，\
+                 它被刪掉的時候 PNG 一定得跟著走，不然磁碟上會留下一張沒有任何東西指得到的截圖。\n\
+                 所以這組數字實際上的意思是「兩個都只留 {} 天」。\n\
+                 想讓畫面留 {} 天，就把 text_days 也調到至少 {}；\
+                 想讓字留久、圖早點清掉，那才是 frames_days 要調小。",
+                self.frames_days,
+                self.text_days,
+                self.text_days,
+                self.frames_days,
+                self.frames_days,
+            );
         }
         Ok(())
     }
