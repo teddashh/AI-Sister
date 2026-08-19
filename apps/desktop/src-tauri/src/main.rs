@@ -200,12 +200,25 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         });
     }
     let shape = sister_core::question::shape(&question);
+    let started = std::time::Instant::now();
     with_db(&shell, |db| {
         let hits = match shape {
             Shape::Recent => db.recent(20),
             Shape::Keywords => db.search(&question, 20),
         }
         .map_err(|e| e.to_string())?;
+        // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
+        // 足以回答「她是不是又卡住了」，而問題本身是他的東西，不是我的。
+        tracing::info!(
+            "問了一次（{}）：{} 筆，{} ms",
+            if shape == Shape::Recent {
+                "時間"
+            } else {
+                "關鍵字"
+            },
+            hits.len(),
+            started.elapsed().as_millis()
+        );
         Ok(Answer {
             kind: match shape {
                 Shape::Recent => "recent",
@@ -1022,8 +1035,13 @@ fn main() {
                     .shell
                     .pause_shortcut;
                 let view = apply_hotkey(app.handle(), &wanted);
-                if let Some(reason) = &view.reason {
-                    tracing::warn!("暫停熱鍵 {} 註冊不起來：{reason}", view.wanted);
+                // 成功也要留一行。「搶到了」和「這段程式根本沒跑到」在一份
+                // 只記失敗的記錄檔裡長得一模一樣，而那正是他按了熱鍵沒反應時
+                // 唯一想分辨的兩件事。
+                match &view.reason {
+                    Some(reason) => tracing::warn!("暫停熱鍵 {} 註冊不起來：{reason}", view.wanted),
+                    None if view.wanted.is_empty() => tracing::info!("暫停熱鍵是關掉的"),
+                    None => tracing::info!("暫停熱鍵 {} 搶到了", view.wanted),
                 }
                 *app.state::<Hotkey>().0.lock().expect("hotkey") = view;
             }
