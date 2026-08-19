@@ -1318,13 +1318,22 @@ impl Db {
         if bigram_query(query).is_some() {
             return Ok(None);
         }
-        let span: Option<(Option<i64>, Option<i64>)> = self
-            .conn
-            .query_row("SELECT MIN(ts), MAX(ts) FROM text_chunks", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .optional()?;
-        let Some((Some(oldest), Some(newest))) = span else {
+        // 分成兩句，不是一句 `SELECT MIN(ts), MAX(ts)`。SQLite 只對**單獨**
+        // 一個 min() 或 max() 做那個 O(1) 的索引端點最佳化；兩個放在一起
+        // 就退回 `SCAN ... USING COVERING INDEX`，也就是把一整年的 chunk
+        // 從頭走到尾。而這一支跑在他按下 Enter 之後那條路上。
+        // （`EXPLAIN QUERY PLAN` 當場看得到：SCAN → SEARCH。）
+        let end = |sql: &str| -> Result<Option<i64>> {
+            Ok(self
+                .conn
+                .query_row(sql, [], |r| r.get::<_, Option<i64>>(0))
+                .optional()?
+                .flatten())
+        };
+        let (Some(oldest), Some(newest)) = (
+            end("SELECT MIN(ts) FROM text_chunks")?,
+            end("SELECT MAX(ts) FROM text_chunks")?,
+        ) else {
             return Ok(None);
         };
         Ok((newest - oldest > LIKE_SCAN_DAYS * 86_400_000).then_some(LIKE_SCAN_DAYS))
