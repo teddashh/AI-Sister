@@ -28,30 +28,45 @@ cd "$(dirname "$0")/.."
 # 「抄寫歸程式」那條線本身，不是隱私。
 FORBIDDEN='^(reqwest|ureq|hyper|curl|isahc|attohttpc|surf|minreq|ehttp|awc|http-req|tokio-tungstenite|tungstenite|async-tungstenite|websocket|ort|onnxruntime|onnxruntime-sys|tract-onnx|tract-core|candle-core|candle-nn|candle-transformers|llama-cpp-2|llm|tch|burn|rten|openai-api-rs|async-openai)$'
 
-fail=0
-for target in "" "x86_64-pc-windows-msvc"; do
-    args=(tree --workspace --edges normal --prefix none --no-dedupe --format '{p}')
-    label="host"
-    if [ -n "$target" ]; then
-        args+=(--target "$target")
-        label="$target"
-        # 沒裝這個 target 就跳過，不要讓開發機因此卡住
-        rustup target list --installed | grep -qx "$target" || {
-            echo "▶ $label：未安裝 target，略過"
-            continue
-        }
-    fi
+# 出貨的是**兩個**執行檔，而它們在兩個不同的 workspace 裡：`sister.exe` 在
+# repo 根目錄那個，`sister-desktop.exe` 在 `apps/desktop/src-tauri`（Tauri 要
+# 自己一份 Cargo.lock）。
+#
+# 這一行原本只有 `--workspace`，於是字母人那半邊——外殼、視窗、所有 Tauri
+# plugin——**從來沒有被這支腳本看過**。它是靠「這裡沒有人會加相依」守著的，
+# 而那正是檔案開頭那段話說不該靠的東西。發現的時機是加一個全域熱鍵 plugin
+# 進去、腳本照樣印綠勾的時候。
+MANIFESTS=("Cargo.toml" "apps/desktop/src-tauri/Cargo.toml")
 
-    echo "▶ 檢查出貨相依樹（$label）"
-    hits=$(cargo "${args[@]}" 2>/dev/null | awk '{print $1}' | sort -u | grep -E "$FORBIDDEN" || true)
-    if [ -n "$hits" ]; then
-        echo "✗ 出貨的相依樹裡出現了 HTTP client（$label）："
-        echo "$hits" | sed 's/^/    /'
-        echo
-        echo "  PRIVACY.md 說「程式裡沒有任何對外連線的程式碼路徑」。"
-        echo "  要嘛拿掉這個相依，要嘛去改 PRIVACY.md——但不能兩個都不做。"
-        fail=1
-    fi
+fail=0
+for manifest in "${MANIFESTS[@]}"; do
+    who=$([ "$manifest" = "Cargo.toml" ] && echo "sister.exe" || echo "sister-desktop.exe")
+    for target in "" "x86_64-pc-windows-msvc"; do
+        args=(tree --manifest-path "$manifest" --edges normal --prefix none --no-dedupe --format '{p}')
+        # 根目錄那個是真的 workspace（三個 crate），子目錄那個只有一個 package。
+        [ "$manifest" = "Cargo.toml" ] && args+=(--workspace)
+        label="host"
+        if [ -n "$target" ]; then
+            args+=(--target "$target")
+            label="$target"
+            # 沒裝這個 target 就跳過，不要讓開發機因此卡住
+            rustup target list --installed | grep -qx "$target" || {
+                echo "▶ $who / $label：未安裝 target，略過"
+                continue
+            }
+        fi
+
+        echo "▶ 檢查出貨相依樹（$who / $label）"
+        hits=$(cargo "${args[@]}" 2>/dev/null | awk '{print $1}' | sort -u | grep -E "$FORBIDDEN" || true)
+        if [ -n "$hits" ]; then
+            echo "✗ 出貨的相依樹裡出現了 HTTP client（$who / $label）："
+            echo "$hits" | sed 's/^/    /'
+            echo
+            echo "  PRIVACY.md 說「程式裡沒有任何對外連線的程式碼路徑」。"
+            echo "  要嘛拿掉這個相依，要嘛去改 PRIVACY.md——但不能兩個都不做。"
+            fail=1
+        fi
+    done
 done
 
 # THREAT_MODEL.md 對遠端攻擊者寫的是「結構性免疫：**沒有監聽埠**、沒有輸出
@@ -59,8 +74,20 @@ done
 # std，一個相依都不會多，而那句話從那一刻起就是假的。
 #
 # 這裡看的是原始碼而不是相依樹，因為 std 本來就在相依樹裡。
+# `apps/` 和上面同一個理由：字母人的外殼也是我們自己寫的 Rust。TokenMonster
+# （這個殼抄來的那份配方）當初就是靠一個本機 loopback HTTP gateway 讓畫面跟
+# 後端說話的——這裡刻意沒有走那條路，而這一行是那個決定的看門人。
 echo "▶ 檢查原始碼裡有沒有 socket"
-sockets=$(grep -rnE '\b(TcpListener|UdpSocket|TcpStream|std::net::)' crates/ --include='*.rs' || true)
+# `|| true` 原本吃掉了 grep 的所有非零退出，包括「那個目錄不存在」。目錄改個
+# 名字，這一步就從此永遠是綠的——而它守的是 THREAT_MODEL 對遠端攻擊者宣稱的
+# 免疫。grep 的 1 是「沒找到」（要的結果），2 以上才是它自己出事。
+rc=0
+sockets=$(grep -rnE '\b(TcpListener|UdpSocket|TcpStream|std::net::)' crates/ apps/ --include='*.rs') || rc=$?
+if [ "$rc" -gt 1 ]; then
+    echo "✗ 掃 socket 的那一步自己失敗了（grep 退出碼 $rc）——這不是「沒找到」。"
+    echo "  在修好之前，「沒有監聽埠」這句話沒有任何東西守著。"
+    fail=1
+fi
 if [ -n "$sockets" ]; then
     echo "✗ 原始碼裡出現了 socket："
     echo "$sockets" | sed 's/^/    /'
