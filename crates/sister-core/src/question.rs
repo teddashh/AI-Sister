@@ -11,6 +11,27 @@
 //! 判斷刻意做得很膽小：**看不懂就當成關鍵字。** 把關鍵字問題誤判成時間問題，
 //! 代價是她無視他打的字、改講最近發生的事——那是一個會讓人不再信任她的錯。
 //! 反過來把時間問題當成關鍵字，最差也只是回到今天的行為。
+//!
+//! ## 那張截圖的下一題
+//!
+//! 「剛剛發生什麼事」修好之後，下一句自然是**「剛剛那個優惠方案」**——同時
+//! 帶著時間和內容。這種問題走的是關鍵字那條路（句子裡有他真正想問的東西），
+//! 而那條路上藏著同一個形狀錯誤：拿去比對的是**整句話**。中文沒有空白，
+//! 所以 FTS 那邊會把「剛剛那個優惠方案」當成一整串子字串去找，而沒有人的
+//! 螢幕上會出現這八個字。實測（`scenarios/bill-lookup.json`）：
+//!
+//! | 問題 | 修之前 |
+//! |---|---|
+//! | 優惠方案 | 1 筆原文 |
+//! | 剛剛那個優惠方案 | **0 筆** |
+//! | 繳費期限 | 3 筆答案 + 1 筆原文 |
+//! | 剛剛看到的期限 | 2 筆答案 + **0 筆原文** |
+//!
+//! [`terms`] 就是那個修法：**把頭尾的時間詞和虛字剝掉，中間原樣留著。**
+//! 只剝頭尾是刻意的——中文問句把時間放句首（「剛剛…」）、把疑問詞放句尾
+//! （「…是什麼」），內容夾在中間而且是連著的，剝完還是一段完整的子字串。
+//! 如果連中間的虛字也一起挑掉，「剛剛 chrome 上那個網址」會碎成
+//! `chrome` AND `上` AND `網址` 三段，比原本更找不到。
 
 /// 一個問題該用什麼方式回答。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +68,7 @@ const RECENT_ASCII: &[&str] = &["just", "recently", "lately", "now"];
 const FILLER_CJK: &[&str] = &[
     "發生", "什麼", "甚麼", "事情", "幹嘛", "幹麼", "一下", "剛好", "我", "你", "她", "他", "在",
     "做", "了", "過", "的", "是", "有", "嗎", "呢", "吧", "啊", "喔", "事", "看", "到", "些", "那",
-    "這", "耶", "呀",
+    "這", "耶", "呀", "個",
 ];
 const FILLER_ASCII: &[&str] = &[
     "what", "happened", "happen", "was", "were", "i", "im", "doing", "did", "do", "the", "a", "on",
@@ -55,22 +76,33 @@ const FILLER_ASCII: &[&str] = &[
     "been",
 ];
 
-/// 他在問什麼形狀的問題。
-pub fn shape(question: &str) -> Shape {
-    let q = question.trim();
-    if q.is_empty() {
-        return Shape::Keywords;
-    }
+/// 一個詞在這句話裡扮演什麼角色。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// 「剛剛」。指向時間。
+    Recent,
+    /// 虛字。拿掉不改變他在問什麼。
+    Filler,
+    /// 認不得——那多半就是他真正想問的東西。
+    Content,
+}
 
-    let mut saw_recent = false;
-    let mut rest = q;
+/// 把問題切成一個一個詞，標點和空白直接丟掉。
+///
+/// [`shape`] 和 [`terms`] 都走這一支。兩邊各切一次的話，遲早會有一邊多認得
+/// 一個詞，然後同一句話在「要不要當成時間問題」和「拿哪幾個字去比對」上給出
+/// 對不起來的答案。這根釘子這個 repo 已經踩過五次了（見 `crate::consent`）。
+fn words(question: &str) -> Vec<(usize, usize, Role)> {
+    let mut out = Vec::new();
+    let mut i = 0;
 
-    while !rest.is_empty() {
+    while i < question.len() {
+        let rest = &question[i..];
         let c = rest.chars().next().expect("not empty");
 
         // 標點和空白直接跳過。「剛剛發生什麼事？」和沒有問號的那句是同一句。
         if c.is_whitespace() || (c.is_ascii_punctuation() || is_cjk_punct(c)) {
-            rest = &rest[c.len_utf8()..];
+            i += c.len_utf8();
             continue;
         }
 
@@ -81,30 +113,68 @@ pub fn shape(question: &str) -> Shape {
                 .find(|ch: char| !ch.is_ascii_alphanumeric())
                 .unwrap_or(rest.len());
             let word = rest[..end].to_ascii_lowercase();
-            if RECENT_ASCII.contains(&word.as_str()) {
-                saw_recent = true;
-            } else if !FILLER_ASCII.contains(&word.as_str()) {
-                return Shape::Keywords;
-            }
-            rest = &rest[end..];
+            let role = if RECENT_ASCII.contains(&word.as_str()) {
+                Role::Recent
+            } else if FILLER_ASCII.contains(&word.as_str()) {
+                Role::Filler
+            } else {
+                Role::Content
+            };
+            out.push((i, i + end, role));
+            i += end;
             continue;
         }
 
         // 中文：由長到短試，「剛剛」要贏過「剛」。
         match longest(rest) {
             Some((len, recent)) => {
-                saw_recent |= recent;
-                rest = &rest[len..];
+                out.push((i, i + len, if recent { Role::Recent } else { Role::Filler }));
+                i += len;
             }
-            // 一個認不得的字就夠了。那多半就是他真正想問的東西。
-            None => return Shape::Keywords,
+            // 認不得的中文一個字一個字往前走。連著的幾個字在 `terms` 那邊會
+            // 自己接回一段——中文的內容詞本來就是連著的。
+            None => {
+                out.push((i, i + c.len_utf8(), Role::Content));
+                i += c.len_utf8();
+            }
         }
     }
 
-    if saw_recent {
+    out
+}
+
+/// 他在問什麼形狀的問題。
+pub fn shape(question: &str) -> Shape {
+    let words = words(question);
+    // 只要句子裡還剩下任何一個講得出內容的詞，就走關鍵字——誤判的代價不對稱，
+    // 見模組開頭。
+    if words.iter().any(|&(_, _, r)| r == Role::Content) {
+        return Shape::Keywords;
+    }
+    if words.iter().any(|&(_, _, r)| r == Role::Recent) {
         Shape::Recent
     } else {
         Shape::Keywords
+    }
+}
+
+/// 這句話裡真正該拿去比對螢幕的是哪一段：**從第一個內容詞到最後一個內容詞。**
+///
+/// 頭尾的時間詞和虛字被剝掉，中間原樣留著（含中間的虛字和標點）——理由見模組
+/// 開頭那一節。回傳的是原字串的一段，不是重組出來的新字串：重組會在詞與詞之間
+/// 塞進空白，而空白正是 [`crate::db::fts_query`] 用來斷詞的東西，等於把一段
+/// 連續的中文切成好幾個必須同時出現的條件。
+///
+/// 一個內容詞都不剩的時候回**原句**，不是空字串。那多半是「發生什麼事」這種
+/// 整句都是虛字的問法，而她能做的最不意外的事就是照著他打的字去找——和這個
+/// 模組其他地方一樣，看不懂就退回今天的行為。
+pub fn terms(question: &str) -> &str {
+    let words = words(question);
+    let first = words.iter().find(|&&(_, _, r)| r == Role::Content);
+    let last = words.iter().rev().find(|&&(_, _, r)| r == Role::Content);
+    match (first, last) {
+        (Some(&(start, _, _)), Some(&(_, end, _))) => &question[start..end],
+        _ => question.trim(),
     }
 }
 
@@ -194,5 +264,69 @@ mod tests {
     fn the_longer_token_wins() {
         assert_eq!(shape("剛剛"), Shape::Recent);
         assert_eq!(shape("剛才"), Shape::Recent);
+    }
+
+    /// 這四句是實測出來的（`scenarios/bill-lookup.json`，見模組開頭那張表）。
+    /// 右邊那幾個字單獨拿去問答得出來，加上「剛剛」之後就變成零筆。
+    #[test]
+    fn the_time_word_must_not_end_up_in_what_she_looks_for_on_screen() {
+        assert_eq!(terms("剛剛那個優惠方案"), "優惠方案");
+        assert_eq!(terms("剛剛看到的期限"), "期限");
+        assert_eq!(terms("最近的帳單金額"), "帳單金額");
+        assert_eq!(terms("what just happened to the deploy"), "deploy");
+    }
+
+    /// 只剝頭尾。中間那些虛字留著，因為剝掉會把一段連續的中文切成好幾個
+    /// 必須同時出現的條件——理由見 [`terms`] 的註解。
+    #[test]
+    fn the_middle_is_left_exactly_as_he_typed_it() {
+        assert_eq!(terms("剛剛 chrome 上那個網址"), "chrome 上那個網址");
+        assert_eq!(terms("錯誤訊息，還有那個網址"), "錯誤訊息，還有那個網址");
+    }
+
+    /// 一句完全沒有虛字的問題不該被動到一個字。
+    #[test]
+    fn a_question_made_of_nothing_but_content_comes_back_whole() {
+        for q in ["客服專線", "ERR_CONNECTION_REFUSED", "E0308"] {
+            assert_eq!(terms(q), q);
+        }
+    }
+
+    /// 剝到什麼都不剩的時候回原句，不是空字串：她退回今天的行為，照著他打的
+    /// 字去找。（`Shape::Recent` 那幾句根本不會走到比對那條路，這裡驗的是
+    /// 「發生什麼事」這種沒有時間詞、也沒有內容詞的問法。）
+    #[test]
+    fn stripping_everything_falls_back_to_what_he_typed() {
+        assert_eq!(terms("發生什麼事"), "發生什麼事");
+        assert_eq!(terms("剛剛發生什麼事"), "剛剛發生什麼事");
+        assert_eq!(terms(""), "");
+        assert_eq!(terms("   "), "");
+    }
+
+    /// 尾巴的標點跟著虛字一起走，開頭的也是。
+    #[test]
+    fn punctuation_at_the_edges_does_not_survive() {
+        assert_eq!(terms("剛剛那個優惠方案？"), "優惠方案");
+        assert_eq!(terms("「客服專線」"), "客服專線");
+    }
+
+    /// `terms` 不可以改變 `shape` 的答案——兩支走同一個切詞，這一條就是在釘
+    /// 「以後有人只改其中一邊」。
+    #[test]
+    fn the_two_readings_of_a_question_never_disagree() {
+        for q in [
+            "剛剛發生什麼事",
+            "剛剛那個優惠方案",
+            "客服",
+            "what just happened",
+            "justify",
+            "",
+        ] {
+            let stripped = terms(q);
+            if shape(q) == Shape::Keywords && stripped != q {
+                // 剝完剩下的一定還是關鍵字問題：剝掉的全是虛字和時間詞。
+                assert_eq!(shape(stripped), Shape::Keywords, "{q:?} 剝完變了形狀");
+            }
+        }
     }
 }

@@ -549,7 +549,13 @@ pub mod query {
             // L1 的事實是「這個值是什麼」，回答不了「剛剛」。硬跑一次只會
             // 拿電話號碼去回答一個沒有人問號碼的問題。
             Shape::Recent => (Vec::new(), db.recent(limit)?),
-            Shape::Keywords => (answers(&db, text, limit)?, db.search(text, limit)?),
+            // 比對用 `terms`（剝掉頭尾的「剛剛」「那個」），★ 答案用原句：
+            // `kinds_for_query` 是在整句話裡找「電話」這種說法，剝字只會少看
+            // 到東西，不會多看到。
+            Shape::Keywords => (
+                answers(&db, text, limit)?,
+                db.search(sister_core::question::terms(text), limit)?,
+            ),
         };
         let elapsed = started.elapsed();
 

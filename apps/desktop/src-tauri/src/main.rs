@@ -500,7 +500,9 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         };
         let hits = match shape {
             Shape::Recent => db.recent(20),
-            Shape::Keywords => db.search(&question, 20),
+            // 比對用 `terms`（剝掉頭尾的「剛剛」「那個」），★ 答案用原句——
+            // 理由和 `sister query` 那邊同一條，寫在那裡。
+            Shape::Keywords => db.search(sister_core::question::terms(&question), 20),
         }
         .map_err(|e| e.to_string())?;
         // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字

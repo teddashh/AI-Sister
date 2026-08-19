@@ -2288,6 +2288,44 @@ mod tests {
         );
     }
 
+    /// 那張截圖的下一題：**同時帶時間和內容的問題。**
+    ///
+    /// 這種問題走的是比對那條路（句子裡有他真正想問的東西），而中文沒有空白，
+    /// 所以整句話會被當成一整串子字串去找——「剛剛那個網頁」這六個字誰的螢幕
+    /// 上都不會有。這一條釘的是 [`crate::question::terms`] 和 [`Db::search`]
+    /// 接起來之後的行為，不是任一邊自己的行為：bug 出在中間那個縫。
+    #[test]
+    fn a_question_that_says_both_when_and_what_still_finds_the_what() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let f = frame_with_text(
+            1_000,
+            "chrome.exe",
+            "視窗",
+            &["記得順便問客服有沒有優惠方案"],
+        );
+        db.insert_frame(s, &f, Some("/tmp/x.webp"), 1)
+            .expect("insert");
+
+        assert!(
+            !db.search("優惠方案", 10).expect("search").is_empty(),
+            "單獨問這四個字本來就找得到"
+        );
+        assert!(
+            db.search("剛剛那個優惠方案", 10)
+                .expect("search")
+                .is_empty(),
+            "整句丟進去是找不到的——這正是要修的東西，不是要保留的行為"
+        );
+
+        let terms = crate::question::terms("剛剛那個優惠方案");
+        assert_eq!(terms, "優惠方案");
+        assert!(
+            !db.search(terms, 10).expect("search").is_empty(),
+            "加了「剛剛」不該讓她變成什麼都找不到"
+        );
+    }
+
     /// 畫面不動的時候同一句話會被寫進好幾列。照抄的話「最近十件事」會變成
     /// 同一句話講十遍——那看起來像她壞掉了，而不是像她很專心。
     #[test]
