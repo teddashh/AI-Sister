@@ -1221,7 +1221,17 @@ struct ConsentView {
     path: String,
     current: bool,
     allows_recording: bool,
+    /// 第三張**同意書**的狀態：可不可以留圖。
     allows_frames: bool,
+    /// 設定檔的 `capture.store_images`。`None` = 那個檔案讀不出來。
+    ///
+    /// 同意是**上限**，不是開關：這一張簽了、設定檔卻關著的時候，硬碟上一張
+    /// 截圖都不會多。只看 `allows_frames` 的那一頁會說「而且會留截圖」，而那
+    /// 是一句他要去翻 frames/ 才戳得破的假話。
+    ///
+    /// 讀不出來就是 `None`，不是猜一個預設值：預設是 true，猜錯的方向正好是
+    /// 「答應了一件不會發生的事」。
+    store_images: Option<bool>,
     sheets: Vec<SheetView>,
 }
 
@@ -1245,6 +1255,10 @@ fn consent_view(dir: &std::path::Path) -> ConsentView {
         current: c.current(),
         allows_recording: c.allows_recording(),
         allows_frames: c.allows_frames(),
+        store_images: config_path()
+            .ok()
+            .and_then(|p| sister_core::config::Config::load(&p).ok())
+            .map(|c| c.capture.store_images),
         sheets: Sheet::ALL
             .into_iter()
             .map(|s| SheetView {

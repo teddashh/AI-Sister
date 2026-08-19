@@ -67,6 +67,24 @@ function card(sheet) {
   return li;
 }
 
+/**
+ * 「所以到底會不會留截圖」——四種狀態，不是兩種。
+ *
+ * 這一句以前只看第三張同意書。但同意是**上限**，不是開關：設定檔的
+ * `store_images` 關著的時候，簽了也一張都不會留，而這一頁會照樣說「而且會留
+ * 截圖」——一句他要去翻 frames/ 才戳得破的假話。
+ *
+ * `store_images` 是 `null` 表示後端讀不出設定檔。那不是「關著」，也不是「開
+ * 著」，所以它自己一句：猜錯的方向會是「答應了一件不會發生的事」。
+ */
+function frames(view) {
+  if (!view.allows_frames) return "只記螢幕上的字、不留截圖。";
+  if (view.store_images === true) return "而且會留截圖。";
+  if (view.store_images === false)
+    return "但設定檔的 store_images 關著，所以不會留截圖——這一張你已經簽了。";
+  return "會不會留截圖要看設定檔的 store_images，而現在讀不到那個檔案。";
+}
+
 function paint(view) {
   el.path.textContent = view.path;
   el.cards.replaceChildren(...view.sheets.map(card));
@@ -74,11 +92,7 @@ function paint(view) {
     // 「她可以開始記錄了」讀起來像**已經**開始了，而這一頁只負責同意——
     // 真正在錄的是另一個執行檔。第一次打開的人如果以為勾完就在錄了，他會
     // 等上一整天，然後發現什麼都沒有。所以這一句要指出下一步是什麼。
-    say(
-      view.allows_frames
-        ? "簽好了。接下來跑 sister record 她才會開始，而且會留截圖。"
-        : "簽好了。接下來跑 sister record 她才會開始，只記螢幕上的字、不留截圖。",
-    );
+    say(`簽好了。接下來跑 sister record 她才會開始，${frames(view)}`);
   } else {
     // 這一句要講「現在的後果」，不是催他去按。
     say("第一張沒勾，sister record 不會開始錄；正在錄的也會停下來。");
@@ -141,13 +155,14 @@ const DEMO = {
   keys: ["local-recording", "cloud-reading", "frame-storage"],
 };
 
-function demoView(current) {
+function demoView(current, storeImages = true) {
   const at = [Date.UTC(2026, 7, 14, 2, 31), null, Date.UTC(2026, 6, 2, 9, 5)];
   return {
     path: DEMO.path,
     current,
     allows_recording: current,
     allows_frames: current,
+    store_images: storeImages,
     sheets: DEMO.keys.map((key, i) => ({
       key,
       wording: DEMO.wording[i],
@@ -162,11 +177,19 @@ function demoView(current) {
 
 const demo = new URLSearchParams(globalThis.location.search).get("demo");
 if (demo !== null) {
+  // `?demo=off` / `?demo=unknown`：第三張簽了，但設定檔說不留圖 / 讀不到設定
+  // 檔。這兩種在這台開發機上是看得到那句話的唯一辦法。
+  //
+  // `hasOwn` 而不是 `?? true`：`unknown` 對到的就是 `null`，而 `null ?? true`
+  // 會把它變成 true——那個 demo 會照著「會留截圖」畫，於是這一頁最新的那個
+  // 狀態永遠沒有被看過。（第一版就是這樣寫的，截圖當場抓到。）
+  const STORE = { off: false, unknown: null };
+  const store = Object.hasOwn(STORE, demo) ? STORE[demo] : true;
   invoke = async (cmd) => {
     if (cmd !== "consent_read" && cmd !== "consent_set") {
       throw new Error(`demo 沒有實作 ${cmd}`);
     }
-    return demoView(demo !== "stale");
+    return demoView(demo !== "stale", store);
   };
 }
 void load();

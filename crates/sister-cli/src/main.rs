@@ -259,7 +259,7 @@ fn main() -> Result<()> {
             grant,
             revoke,
             json,
-        } => ops::consent::run(&data_dir, &grant, &revoke, json),
+        } => ops::consent::run(&data_dir, &config, &grant, &revoke, json),
         Command::Doctor => ops::doctor::run(&data_dir, &config, cli.config.clone()),
     }
 }

@@ -107,6 +107,7 @@ fn report_exclusions(stats: &sister_capture::RecorderStats) {
 
 pub mod consent {
     use super::*;
+    use sister_core::config::Config;
     use sister_core::consent::{Consent, Sheet};
     use std::str::FromStr;
 
@@ -114,7 +115,13 @@ pub mod consent {
     ///
     /// 在無頭機器上把整條同意流程走完的入口。字母人上那三張卡片按下去之後
     /// 改的是**同一個檔案**，所以這裡驗得過的東西，那邊也就驗過了。
-    pub fn run(data_dir: &Path, grant: &[String], revoke: &[String], json: bool) -> Result<()> {
+    pub fn run(
+        data_dir: &Path,
+        config: &Config,
+        grant: &[String],
+        revoke: &[String],
+        json: bool,
+    ) -> Result<()> {
         let mut c = sister_core::consent::load(data_dir);
 
         // 先把名字全部解析完再動任何東西。一半成功一半失敗的狀態，會讓
@@ -144,9 +151,9 @@ pub mod consent {
         }
 
         if json {
-            print_json(data_dir, &c)
+            print_json(data_dir, &c, config)
         } else {
-            print_human(data_dir, &c, changing);
+            print_human(data_dir, &c, config, changing);
             Ok(())
         }
     }
@@ -158,7 +165,7 @@ pub mod consent {
             .collect()
     }
 
-    fn print_human(data_dir: &Path, c: &Consent, changed: bool) {
+    fn print_human(data_dir: &Path, c: &Consent, config: &Config, changed: bool) {
         println!(
             "三張同意書（{}）",
             sister_core::consent::path(data_dir).display()
@@ -179,8 +186,13 @@ pub mod consent {
 
         println!();
         if c.allows_recording() {
-            let frames = if c.allows_frames() {
+            // 三個狀態，不是兩個。這一行以前只問同意書，於是簽了第三張、
+            // 設定檔卻把 `store_images` 關著的機器上，它會說「會留截圖」
+            // ——而硬碟上一張都不會多。同意是**上限**，不是開關。
+            let frames = if c.keeps_images(config) {
                 "會留截圖"
+            } else if c.allows_frames() {
+                "不留截圖——這一張簽了，是設定檔的 store_images 關著"
             } else {
                 "只記螢幕上的字、不留截圖"
             };
@@ -203,13 +215,18 @@ pub mod consent {
         }
     }
 
-    fn print_json(data_dir: &Path, c: &Consent) -> Result<()> {
+    fn print_json(data_dir: &Path, c: &Consent, config: &Config) -> Result<()> {
         let out = serde_json::json!({
             "path": sister_core::consent::path(data_dir).display().to_string(),
             "version": c.version,
             "current": c.current(),
             "allows_recording": c.allows_recording(),
+            // `allows_frames` 是同意書說「可以」，`keeps_images` 是硬碟上**真的**
+            // 會多出檔案。設定檔關著 `store_images` 的時候這兩個不一樣，而拿
+            // 前者去畫 UI 的人會畫錯——所以兩個都給，名字也講清楚是哪一個。
             "allows_frames": c.allows_frames(),
+            "keeps_images": c.keeps_images(config),
+            "config_store_images": config.capture.store_images,
             "sheets": Sheet::ALL.iter().map(|s| serde_json::json!({
                 "key": s.key(),
                 "granted_at": c.get(*s),
@@ -2197,10 +2214,17 @@ pub mod doctor {
         line(
             consent.allows_frames(),
             "畫面暫存",
-            if consent.allows_frames() {
+            if !consent.allows_frames() {
+                "未同意 → 只記螢幕上的字，不留截圖"
+            } else if config.capture.store_images {
                 "已同意——會把截圖寫到硬碟"
             } else {
-                "未同意 → 只記螢幕上的字，不留截圖"
+                // 同意是**上限**，不是開關。這一行以前只問同意書，於是它說
+                // 「會把截圖寫到硬碟」，而底下「保留畫面檔」那一行說「否
+                // （text-only 模式）」——同一張體檢報告上兩句互相打臉的話，
+                // 而看的人沒有辦法知道該信哪一句。`Consent::keeps_images` 的
+                // 文件裡記的就是這根釘子。
+                "已同意，但設定檔的 store_images 關著 → 這台機器現在不會留截圖"
             },
         );
         // 第二張的 ✓ 講的是「沒有東西會離開這台機器」，不是「你同意了」。
