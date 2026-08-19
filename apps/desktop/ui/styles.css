@@ -1,0 +1,416 @@
+/*
+ * 字母人。**沒有任何圖檔**——整個角色是一個字 + 幾條 CSS。
+ *
+ * 這不是省事，是授權上的唯一安全路徑：TokenMonster 那批 891 張 WebP 的
+ * 權利來源是私下的書面授權，不在任何 repo 裡，所以一張都不能帶過來
+ * （見 PRODUCT §6 的「讀過再自己寫」）。一個純 CSS 的角色沒有這個問題，
+ * 而且離線、可縮放、改色只要換三個變數。
+ *
+ * 動畫走兩個獨立通道：`transform` 負責呼吸（上下），`rotate` 負責搖晃。
+ * 分開是因為同一個 `transform` 上疊兩段 keyframes 會互相覆蓋，得手動把
+ * 兩者乘起來——分通道之後瀏覽器自己合成。
+ */
+
+:root {
+  /* 這三個顏色是角色的全部外觀。換一組就是換一個人。 */
+  --letter-bg: #f6ecdf;
+  --letter-fg: #2e2140;
+  --letter-accent: #9a5b7a;
+
+  --chrome: rgb(46 33 64 / 94%);
+  --chrome-fg: #f6ecdf;
+  --radius: 16px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/*
+ * 透明視窗的關鍵。少了這行，Tauri 的 `transparent: true` 只會換來一個
+ * 白色方塊——視窗是透明的，但頁面自己不是。
+ */
+html,
+body {
+  background: transparent;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  color: var(--letter-fg);
+  display: flex;
+  flex-direction: column;
+  font: 14px/1.5 "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* ---------- 拖曳條 ---------- */
+
+.dragbar {
+  align-items: center;
+  background: var(--chrome);
+  border-radius: var(--radius) var(--radius) 0 0;
+  color: var(--chrome-fg);
+  display: flex;
+  flex: 0 0 32px;
+  gap: 4px;
+  padding: 0 6px;
+}
+
+.brand {
+  flex: 1;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+
+.control {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  height: 24px;
+  line-height: 1;
+  min-width: 26px;
+  padding: 0 6px;
+}
+
+.control:hover {
+  background: rgb(246 236 223 / 16%);
+}
+
+.control[aria-pressed="false"] {
+  opacity: 0.45;
+}
+
+/* ---------- 舞台 ---------- */
+
+.stage {
+  align-items: center;
+  background: rgb(246 236 223 / 92%);
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 14px;
+  justify-content: center;
+  padding: 18px;
+}
+
+.avatar {
+  display: grid;
+  height: 132px;
+  place-items: center;
+  width: 132px;
+}
+
+/*
+ * 身體：一張圓角卡片，右下有一道實心投影當「厚度」。那道投影是這個角色
+ * 看起來像一個物件而不是一個 div 的全部原因。
+ */
+.face {
+  align-items: center;
+  background: var(--letter-bg);
+  border: 4px solid var(--letter-fg);
+  border-radius: 26px;
+  box-shadow:
+    inset 0 -12px 0 rgb(46 33 64 / 6%),
+    0 8px 0 var(--letter-fg),
+    0 16px 26px rgb(46 33 64 / 18%);
+  display: flex;
+  height: 108px;
+  justify-content: center;
+  position: relative;
+  width: 108px;
+}
+
+.glyph {
+  font-size: 52px;
+  font-weight: 900;
+  line-height: 1;
+  /* 字身的視覺重心比字框中心低，扣回來才會真的在中間。 */
+  transform: translateY(-2px);
+}
+
+/* 右上那顆點：她現在是什麼狀態，一眼看得出來。 */
+.face::after {
+  background: var(--letter-accent);
+  border: 3px solid var(--letter-fg);
+  border-radius: 999px;
+  content: "";
+  height: 18px;
+  position: absolute;
+  right: -7px;
+  top: -7px;
+  width: 18px;
+}
+
+.state-line {
+  color: var(--letter-fg);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  margin: 0;
+  opacity: 0.6;
+}
+
+/* ---------- 三個狀態 ---------- */
+
+/*
+ * idle：呼吸 + 搖晃。兩段動畫分屬 transform 與 rotate 兩個通道。
+ * 相位由 `--sway-delay` 給負值，所以載入的瞬間就已經在動畫中間，
+ * 不會每次開視窗都從同一個姿勢開始。
+ */
+.motion .avatar[data-state="idle"] .face {
+  animation:
+    breathe 4.6s ease-in-out infinite,
+    sway 5.8s ease-in-out var(--sway-delay, -1200ms) infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(0, -6px, 0) scale(1.015);
+  }
+}
+
+@keyframes sway {
+  0%,
+  100% {
+    rotate: -2.2deg;
+  }
+  50% {
+    rotate: 2.2deg;
+  }
+}
+
+/*
+ * thinking：呼吸變快，狀態點從實心變成空心環。
+ *
+ * 那個環不是多餘的。第一版只有「呼吸快一點 + 點在閃」，兩者都是動畫——
+ * 而動畫在 `prefers-reduced-motion` 之下整組關掉，於是對一個關掉動態效果的
+ * 使用者來說，idle 和 thinking 長得一模一樣。截圖並排看才發現：靜止畫面裡
+ * 這兩格是同一張圖。狀態差異必須有一個不靠動畫的版本。
+ */
+.avatar[data-state="thinking"] .face::after {
+  background: var(--letter-bg);
+  box-shadow: inset 0 0 0 4px var(--letter-accent);
+}
+
+.motion .avatar[data-state="thinking"] .face {
+  animation: breathe 1.1s ease-in-out infinite;
+}
+
+.motion .avatar[data-state="thinking"] .face::after {
+  animation: blink 1.1s ease-in-out infinite;
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/*
+ * paused：**必須一眼看得出來她沒在錄。**
+ *
+ * 這一格不是裝飾。整個產品的承諾是「你隨時停得掉」，而一個停不掉、或者
+ * 停了看不出來的暫停，跟沒有暫停是同一件事。所以這裡同時動了四樣東西：
+ * 去彩度、降透明、停止所有動畫、狀態點從實心變成空心加一條槓。
+ * 任何一樣單獨都可能被誤讀成「畫面卡住」。
+ */
+.avatar[data-state="paused"] .face {
+  animation: none;
+  filter: grayscale(1);
+  opacity: 0.55;
+  rotate: 0deg;
+}
+
+.avatar[data-state="paused"] .face::after {
+  background: var(--letter-bg);
+}
+
+.avatar[data-state="paused"]::after {
+  background: var(--letter-fg);
+  border-radius: 2px;
+  content: "";
+  height: 4px;
+  position: absolute;
+  transform: translate(46px, -46px) rotate(-45deg);
+  width: 26px;
+}
+
+.avatar {
+  position: relative;
+}
+
+/* ---------- 答案 ---------- */
+
+/*
+ * 有答案的時候她讓位：字母人縮小、往上，清單佔滿剩下的地方。
+ * 她不會消失——使用者要看得出來是誰在回答，而且下一句還要對著她問。
+ */
+body.has-hits .avatar {
+  height: 64px;
+  width: 64px;
+}
+
+body.has-hits .face {
+  border-radius: 14px;
+  border-width: 3px;
+  box-shadow: 0 4px 0 var(--letter-fg);
+  height: 56px;
+  width: 56px;
+}
+
+body.has-hits .glyph {
+  font-size: 28px;
+}
+
+body.has-hits .face::after {
+  height: 12px;
+  right: -5px;
+  top: -5px;
+  width: 12px;
+}
+
+body.has-hits .stage {
+  gap: 8px;
+  justify-content: flex-start;
+  padding: 12px 10px;
+}
+
+.hits {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0;
+  width: 100%;
+}
+
+.hit {
+  background: rgb(255 255 255 / 55%);
+  border-left: 3px solid var(--letter-accent);
+  border-radius: 8px;
+  padding: 7px 9px;
+}
+
+.hit-text {
+  font-size: 12.5px;
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.hit mark {
+  background: rgb(154 91 122 / 28%);
+  border-radius: 3px;
+  color: inherit;
+  padding: 0 1px;
+}
+
+/* 出處那一行。**這一行是這個產品存在的理由**，所以它跟內文一樣清楚，
+   不是灰掉的註腳。 */
+.hit-source {
+  color: var(--letter-fg);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  gap: 6px;
+  margin: 0;
+  opacity: 0.72;
+}
+
+.hit-source .when {
+  font-variant-numeric: tabular-nums;
+}
+
+.hit-source .no-frame {
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.hits-empty {
+  font-size: 12px;
+  opacity: 0.6;
+  padding: 12px 4px;
+  text-align: center;
+}
+
+/* ---------- 輸入 ---------- */
+
+.ask {
+  background: var(--chrome);
+  border-radius: 0 0 var(--radius) var(--radius);
+  display: flex;
+  flex: 0 0 46px;
+  gap: 6px;
+  padding: 7px;
+}
+
+.ask-input {
+  appearance: none;
+  background: rgb(246 236 223 / 12%);
+  border: 0;
+  border-radius: 10px;
+  color: var(--chrome-fg);
+  flex: 1;
+  font: inherit;
+  min-width: 0;
+  padding: 0 10px;
+  user-select: text;
+}
+
+.ask-input::placeholder {
+  color: rgb(246 236 223 / 45%);
+}
+
+.ask-input:focus-visible,
+.control:focus-visible,
+.ask-send:focus-visible {
+  outline: 2px solid var(--letter-accent);
+  outline-offset: 1px;
+}
+
+.ask-send {
+  appearance: none;
+  background: var(--letter-accent);
+  border: 0;
+  border-radius: 10px;
+  color: var(--chrome-fg);
+  cursor: pointer;
+  font: inherit;
+  width: 34px;
+}
+
+.ask-send:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+/*
+ * 沒有 `.motion` 就沒有任何動畫。這個 class 由 app.js 依
+ * `prefers-reduced-motion` 與分頁是否可見來掛/拿掉——把開關放在一個地方，
+ * 而不是讓每一段 keyframes 自己去查媒體查詢。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .motion .face,
+  .motion .face::after {
+    animation: none !important;
+  }
+}

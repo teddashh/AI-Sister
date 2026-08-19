@@ -1,6 +1,8 @@
 node_modules/
 target/
 dist/
+# Tauri 的 build script 每次自己重生這份權限 schema
+apps/desktop/src-tauri/gen/
 .DS_Store
 *.log
 .env

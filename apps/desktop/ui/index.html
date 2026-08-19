@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      連線一律不准。這個視窗永遠只讀本機檔案與 Tauri 的 IPC——沒有 CDN、
+      沒有字型、沒有 analytics。CSP 寫在這裡而不只是 tauri.conf.json，是為了
+      讓「她不連外」這句話在使用者按 Ctrl+U 的時候自己看得到。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <title>AI-Sister</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- 拖曳條。Tauri 只有一個 webview，所以拖曳是 `data-tauri-drag-region`
+         的事，不像 Electron 要另外開一層 chrome。 -->
+    <header class="dragbar" data-tauri-drag-region>
+      <span class="brand" data-tauri-drag-region>AI-Sister</span>
+      <button class="control" id="pin" type="button" title="保持在最上層">●</button>
+      <button class="control" id="hide" type="button" title="收到系統匣">−</button>
+    </header>
+
+    <main class="stage">
+      <div class="avatar" data-avatar aria-live="polite">
+        <span class="face">
+          <span class="glyph">S</span>
+        </span>
+      </div>
+      <p class="state-line" data-state-line>在聽</p>
+      <!-- 每一筆答案都掛著出處。沒有出處的那一行不會出現在這裡。 -->
+      <ul class="hits" data-hits hidden></ul>
+    </main>
+
+    <footer class="ask">
+      <input
+        class="ask-input"
+        data-ask-input
+        type="text"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="問我一件事…"
+      />
+      <button class="ask-send" data-ask-send type="button" title="問">→</button>
+    </footer>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -183,7 +183,8 @@ fn resolve_data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
         .context("cannot determine a data directory; pass --data-dir")
 }
 
-/// 資料庫檔案的位置。整份記憶就這一顆檔案——備份、加密、刪除都只有一個對象。
+/// 資料庫檔案的位置。真正的決定在 [`Config::db_path`]——桌面視窗也要開
+/// 同一顆檔案，所以那個檔名只能有一個地方說了算。這裡只是轉手。
 pub fn db_path(data_dir: &std::path::Path) -> PathBuf {
-    data_dir.join("sister.db")
+    Config::db_path(data_dir)
 }

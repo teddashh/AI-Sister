@@ -1,0 +1,43 @@
+[package]
+name = "sister-desktop"
+version = "0.1.0-alpha.11"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/teddashh/AI-Sister"
+authors = ["Ted Huang <ted@ted-h.com>"]
+description = "AI-Sister 的桌面外殼：一個字母人"
+publish = false
+
+# **自己一個 workspace，故意的。**
+#
+# 開發機是 Linux，而 Tauri 在 Linux 上要 webkit2gtk 才編得起來——這台機器
+# 沒有，也沒有 sudo 可以裝。如果這個 crate 掛在根 workspace 底下，
+# `cargo test --workspace` 會連它一起編，然後整個開發迴圈就在一個
+# 「反正也不會在這台機器上跑」的東西上卡死。
+#
+# 分開之後：根 workspace 照舊在 Linux 上跑全部測試，這個 crate 只在
+# Windows（CI 與 Ted 的機器）上編。代價是 sister-core 會被編兩次。
+[workspace]
+
+[features]
+default = ["bundled-sqlite"]
+# 見 sister-core 的同名 feature：關掉它才能從 Linux 對 Windows `cargo check`。
+bundled-sqlite = ["sister-core/bundled-sqlite"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sister-core = { path = "../../../crates/sister-core", default-features = false }
+sister-shell = { path = "../../../crates/sister-shell" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

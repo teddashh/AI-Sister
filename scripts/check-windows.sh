@@ -43,4 +43,26 @@ cargo check --target "$TARGET" --workspace --no-default-features --all-targets
 echo "▶ cargo clippy --target $TARGET"
 cargo clippy --target "$TARGET" --workspace --no-default-features --all-targets -- -D warnings
 
+# 桌面外殼是**另一個 workspace**（理由見它的 Cargo.toml：Tauri 在 Linux 上要
+# webkit2gtk，這台機器沒有、也沒有 sudo 可以裝），所以上面的 `--workspace`
+# 完全碰不到它。而它是這個 repo 裡最需要這支腳本的一塊——本機根本跑不起來。
+#
+# 那個假的 llvm-rc 是為了讓 Tauri 的 build script 過得去，見 fake-llvm-rc.py。
+# 它只影響資源檔（執行檔的圖示），而 check 與 clippy 都不連結。
+DESKTOP=apps/desktop/src-tauri
+if [[ -d "$DESKTOP" ]]; then
+    shim="$(mktemp -d)"
+    trap 'rm -rf "$shim"' EXIT
+    if ! command -v llvm-rc >/dev/null 2>&1; then
+        ln -s "$PWD/scripts/fake-llvm-rc.py" "$shim/llvm-rc"
+    fi
+
+    echo "▶ cargo check --target $TARGET（字母人）"
+    (cd "$DESKTOP" && PATH="$shim:$PATH" cargo check --target "$TARGET" --no-default-features)
+
+    echo "▶ cargo clippy --target $TARGET（字母人）"
+    (cd "$DESKTOP" && PATH="$shim:$PATH" \
+        cargo clippy --target "$TARGET" --no-default-features -- -D warnings)
+fi
+
 echo "✓ Windows 端編譯與 lint 都過了（行為仍需在 Windows 上驗證）"

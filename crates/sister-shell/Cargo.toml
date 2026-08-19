@@ -1,0 +1,13 @@
+[package]
+name = "sister-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "字母人視窗的擺放規則（純幾何，不依賴任何視窗系統）"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

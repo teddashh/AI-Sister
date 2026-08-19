@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AI-Sister",
+  "version": "0.1.0-alpha.11",
+  "identifier": "com.ted-h.ai-sister",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "pet",
+        "title": "AI-Sister",
+        "width": 340,
+        "height": 560,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "copyright": "Copyright (c) Ted Huang",
+    "shortDescription": "一個住在你螢幕角落的字母人",
+    "longDescription": "AI-Sister 桌面外殼：本機記憶的搜尋框與字母人。不連外。"
+  }
+}

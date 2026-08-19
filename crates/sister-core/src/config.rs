@@ -415,6 +415,17 @@ impl Config {
             .map(|d| d.data_dir().to_path_buf())
     }
 
+    /// 資料庫檔案的位置。整份記憶就這一顆檔案——備份、加密、刪除都只有
+    /// 一個對象。
+    ///
+    /// 這個決定本來寫在 `sister-cli` 的 `main.rs` 上。那時候只有一個執行檔，
+    /// 「檔名叫什麼」由誰決定無所謂。桌面視窗出現之後就不是了：兩個執行檔
+    /// 各自拼一次 `data_dir.join(...)`，哪天有人改了其中一個，症狀會是
+    /// **她突然什麼都不記得**——而且兩邊各自都沒錯，只是打開了不同的檔案。
+    pub fn db_path(data_dir: &Path) -> PathBuf {
+        data_dir.join("sister.db")
+    }
+
     /// 讀取設定；檔案不存在則回傳預設值（不自動寫檔）。
     pub fn load(path: &Path) -> anyhow::Result<Config> {
         if !path.exists() {

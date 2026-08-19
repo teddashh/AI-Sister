@@ -219,6 +219,24 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # 字母人是**另一個 workspace**（Tauri 在 Linux 上要 webkit2gtk，開發機
+      # 沒有也裝不了——理由寫在它的 Cargo.toml），所以上面每一個 `--workspace`
+      # 都碰不到它。**這裡是它第一次被真的編譯**：開發機那邊只驗得到型別，
+      # 連圖示能不能嵌進執行檔都是用一個假的 llvm-rc 混過去的。
+      - name: 字母人 — lint and build
+        working-directory: apps/desktop/src-tauri
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo build --release
+
+      - name: Upload ai-sister.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-sister-desktop-x64
+          path: apps/desktop/src-tauri/target/release/sister-desktop.exe
+          if-no-files-found: error
+          retention-days: 30
+
   # 打 tag 才發 release，這樣才有一個不用登入就能下載的連結。
   release:
     name: Release
@@ -231,9 +249,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: sister-windows-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai-sister-desktop-x64
       - uses: softprops/action-gh-release@v2
         with:
-          files: sister.exe
+          files: |
+            sister.exe
+            sister-desktop.exe
           generate_release_notes: true
           body: |
             單一執行檔，不需要安裝，沒有任何外掛 DLL 或模型檔。
