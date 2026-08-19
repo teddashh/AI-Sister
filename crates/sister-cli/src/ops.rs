@@ -1787,13 +1787,16 @@ pub mod doctor {
                 "關閉（API key 會落地）"
             },
         );
+        // 問同意書，不是問設定檔。設定檔說的是「我想留圖」，同意書說的是
+        // 「可不可以」——上面那一區已經印過第三張沒簽了，這一行要是還印「是」，
+        // 同一張報告就自己打自己。
         line(
-            config.capture.store_images,
+            consent.keeps_images(config),
             "保留畫面檔",
-            if config.capture.store_images {
-                "是"
-            } else {
-                "否（text-only 模式）"
+            match (config.capture.store_images, consent.allows_frames()) {
+                (true, true) => "是",
+                (true, false) => "否——設定要留，但第三張同意書沒簽（同意書說了算）",
+                (false, _) => "否（text-only 模式）",
             },
         );
 
@@ -2121,12 +2124,11 @@ pub mod record {
         // 第三張沒簽不是「不能錄」，是「只記字不留圖」（SPEC §11.1 的
         // 「0 天 = 只留 OCR 文字」）。降級要講出來——安靜地少存一半東西，
         // 使用者只會以為截圖功能壞了。
-        if !consent.allows_frames() && config.capture.store_images {
+        if consent.downgrade(&mut config) {
             println!(
                 "  第三張同意書沒簽：這一次只記螢幕上的字，不會寫任何截圖。\n  \
                  （要留圖請跑 `sister consent --grant frame-storage`）"
             );
-            config.capture.store_images = false;
         }
         Ok(config)
     }

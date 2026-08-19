@@ -187,6 +187,32 @@ impl Consent {
     pub fn allows_frames(&self) -> bool {
         self.current() && self.frame_storage.is_some()
     }
+
+    /// 這份設定跑起來，硬碟上**真的**會多出截圖嗎。
+    ///
+    /// 設定檔說的是「我想要留圖」，同意書說的是「可不可以」，而只有後者算數。
+    /// 這條規則本來只寫在 `record` 開錄前那道閘門裡，於是 `sister doctor` 讀的
+    /// 是設定檔原值——同一張體檢報告上，同意書那一區印「畫面暫存：未同意 →
+    /// 只記螢幕上的字，不留截圖」，隱私那一區印「保留畫面檔：是」。兩行講的是
+    /// 同一件事，而其中一行是錯的。
+    ///
+    /// 這是這個 repo 第四次踩到同一根釘子（前三次是 `question::shape`、
+    /// `Config::db_path`、`answer`）：一條規則寫在兩個地方，遲早有一邊忘了改。
+    /// 體檢報告尤其不能有第二份——它存在的唯一理由就是講出真的會發生的事。
+    pub fn keeps_images(&self, config: &crate::config::Config) -> bool {
+        config.capture.store_images && self.allows_frames()
+    }
+
+    /// 把設定改成[實際會發生的事](Self::keeps_images)，回傳有沒有真的改到。
+    ///
+    /// 回傳值是給呼叫端「要不要講出來」用的：安靜地少存一半東西，使用者只會
+    /// 以為截圖功能壞了。
+    pub fn downgrade(&self, config: &mut crate::config::Config) -> bool {
+        let keep = self.keeps_images(config);
+        let changed = config.capture.store_images != keep;
+        config.capture.store_images = keep;
+        changed
+    }
 }
 
 pub fn path(data_dir: &Path) -> PathBuf {
@@ -332,5 +358,48 @@ mod tests {
             Sheet::FrameStorage
         );
         assert!(Sheet::from_str("everything").is_err());
+    }
+
+    /// 設定檔說要留圖、第三張沒簽——`record` 會降級成只記字，而體檢報告以前
+    /// 讀的是設定檔原值，於是同一張報告上一區說「不留截圖」、另一區說「是」。
+    /// 兩個問句現在只有一個答案。
+    #[test]
+    fn the_config_can_ask_for_frames_but_the_sheet_decides() {
+        let mut config = crate::config::Config::default();
+        assert!(config.capture.store_images, "預設是想留圖的");
+
+        let unsigned = Consent::default();
+        assert!(!unsigned.keeps_images(&config), "沒簽就是不會留");
+        assert!(unsigned.downgrade(&mut config), "而且要講出來");
+        assert!(!config.capture.store_images);
+
+        // 已經降級過的設定不會再回報一次——講第二次就變成雜訊。
+        assert!(!unsigned.downgrade(&mut config));
+
+        let mut signed = Consent::default();
+        signed.grant(Sheet::FrameStorage, 1);
+        let mut wants = crate::config::Config::default();
+        assert!(signed.keeps_images(&wants));
+        assert!(!signed.downgrade(&mut wants), "簽了就不該被動到");
+        assert!(wants.capture.store_images);
+
+        // 反過來也一樣：簽了同意書不代表使用者想留圖。同意是允許，不是要求。
+        let mut text_only = crate::config::Config::default();
+        text_only.capture.store_images = false;
+        assert!(!signed.keeps_images(&text_only));
+        assert!(!signed.downgrade(&mut text_only));
+    }
+
+    /// 條文改版之後舊簽名失效，留圖也要跟著停——`allows_frames` 已經管了版本，
+    /// 這裡是釘住「降級這條路真的有走過那個檢查」。
+    #[test]
+    fn an_outdated_signature_stops_the_screenshots_too() {
+        let mut stale = Consent::default();
+        stale.grant(Sheet::FrameStorage, 1);
+        stale.version = VERSION + 1;
+
+        let mut config = crate::config::Config::default();
+        assert!(!stale.keeps_images(&config));
+        assert!(stale.downgrade(&mut config));
     }
 }
