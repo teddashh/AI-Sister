@@ -409,12 +409,13 @@ function sourceLine(item, li, queryId, rank) {
     source.append(span);
   }
 
-  // 文字保留 365 天、畫面 30 天，所以「字還在但圖沒了」是正常狀態。
-  // 那時候要直說，不是留一個點不開的連結。
+  // 「字還在但沒有畫面」是正常狀態，不是壞掉：只簽了第一張同意書（只記字）、
+  // 截圖節流、每日額度用完、或者圖過了保留期（文字 365 天、畫面 30 天）。
+  // 這裡分不出是哪一種，所以就不猜——說得出口的只有「沒有」。
   if (item.frame_id === null || item.frame_id === undefined) {
     const gone = document.createElement("span");
     gone.className = "no-frame";
-    gone.textContent = "畫面已過保留期";
+    gone.textContent = "沒有留下畫面";
     source.append(gone);
     return source;
   }

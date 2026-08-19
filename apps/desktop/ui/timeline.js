@@ -186,10 +186,11 @@ function momentRow(m) {
   body.append(text);
 
   if (m.frame_id === null) {
-    // 文字留 365 天、畫面 30 天，所以這是正常狀態，不是壞掉。
+    // 正常狀態，不是壞掉——原因有好幾種（只記字、節流、額度、保留期），
+    // 這裡分不出是哪一種。理由同 app.js 那一段。
     const gone = document.createElement("p");
     gone.className = "gone";
-    gone.textContent = "畫面已經過了保留期，只剩這些字";
+    gone.textContent = "這一筆沒有留下畫面，只剩這些字";
     body.append(gone);
   } else {
     const see = document.createElement("button");
@@ -512,7 +513,7 @@ function fakeBackend() {
       app: "chrome.exe",
       title: "健保署 — 就醫紀錄查詢",
       url: "nhi.gov.tw/records",
-      text: "（這一筆只剩文字，示範圖已經過保留期的樣子）",
+      text: "（這一筆只剩文字，示範沒有畫面可以點的樣子）",
       frame_id: null,
     },
     {

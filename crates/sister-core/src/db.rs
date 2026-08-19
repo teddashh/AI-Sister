@@ -1377,6 +1377,44 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
+    /// 這幾個 frame 裡，**真的有圖可以打開**的是哪些。
+    ///
+    /// `text_chunks.frame_id` 講的是「這段字是從哪一幀抄下來的」，那是出處，
+    /// 一直都有。它回答不了「那一幀有沒有留下照片」——而畫面上那個「點開看
+    /// 當時的畫面」問的是後者。
+    ///
+    /// 兩者以前被當成同一件事，於是：
+    ///
+    /// - 只簽第一張同意書（只記字、不留圖）的時候，`image_path` 全是 NULL，
+    ///   但每一個出處都長得可以點。**那是這個模式的每一筆，不是零星幾筆。**
+    /// - 截圖節流和每日額度用完時也一樣：字進去了，圖沒存。
+    ///
+    /// 不改 search 那幾條 SQL：那是有 100ms 預算的熱路徑，而每加一個 JOIN
+    /// 就多一次 query plan 的賭注。畫完一份答案才問一次，一次問完全部。
+    pub fn frames_with_image(&self, ids: &[i64]) -> Result<std::collections::HashSet<i64>> {
+        let mut out = std::collections::HashSet::new();
+        // 一次問完是對的，但「一次」有上限：SQLite 綁定參數的天花板是 32766，
+        // 而時間軸一天可以送 2000 個 id 進來。切段不是效能調校，是**別在某個
+        // 很長的一天整個炸掉**——那天的每個出處都會退回「不能點」。
+        for batch in ids.chunks(500) {
+            // id 是我們自己資料庫來的整數，不是使用者輸入；照樣用參數綁定，
+            // 因為「這次是安全的」這種理由會被下一個人抄走。
+            let holes = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql =
+                format!("SELECT id FROM frames WHERE image_path IS NOT NULL AND id IN ({holes})");
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(batch), |row| {
+                row.get::<_, i64>(0)
+            })?;
+            for r in rows {
+                out.insert(r?);
+            }
+        }
+        Ok(out)
+    }
+
     /// 一張幀的完整脈絡（點開出處時用）。
     pub fn frame_context(&self, frame_id: i64) -> Result<Option<FrameContext>> {
         self.conn
@@ -2691,6 +2729,63 @@ mod tests {
         assert_eq!(st.frames, 3, "沒留圖的那兩張也是她記過的東西");
         assert_eq!(st.frames_with_image, 1, "但硬碟上只有一張");
         assert_eq!(st.image_bytes, 4096);
+    }
+
+    /// 「這段字從哪一幀來的」和「那一幀有沒有照片」是兩個問題。
+    ///
+    /// 畫面上那個「點開看當時的畫面」問的是後者，而它以前讀的是前者——於是
+    /// 只簽第一張同意書（只記字、不留圖）的時候，**每一個**出處都長得可以點，
+    /// 點下去才說「已經過了保留期」。那一張圖從來沒有存在過，沒有什麼過期。
+    #[test]
+    fn a_source_you_can_click_is_not_the_same_as_a_source_you_can_see() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+
+        let (no_pic, _, _) = db
+            .insert_frame(s, &frame_with_text(1, "a", "b", &["只記了字"]), None, 0)
+            .expect("insert");
+        let (has_pic, _, _) = db
+            .insert_frame(
+                s,
+                &frame_with_text(2, "a", "b", &["這張留了圖"]),
+                Some("/tmp/kept.webp"),
+                4096,
+            )
+            .expect("insert");
+
+        // 兩幀都是正當的出處——文字都在，兩個 id 也都是真的。
+        let openable = db
+            .frames_with_image(&[no_pic, has_pic])
+            .expect("frames_with_image");
+        assert!(openable.contains(&has_pic), "有圖的那張要點得開");
+        assert!(
+            !openable.contains(&no_pic),
+            "沒圖的那張不該點得開——它的字還在，但沒有畫面可以給他看"
+        );
+
+        // 沒問就不要去查資料庫。答案畫面常常一張圖都沒有。
+        assert!(
+            db.frames_with_image(&[]).expect("empty").is_empty(),
+            "空清單要直接回空的"
+        );
+        // 不存在的 id 不算有圖，也不該炸。
+        assert!(
+            !db.frames_with_image(&[9_999_999])
+                .expect("missing id")
+                .contains(&9_999_999)
+        );
+
+        // 時間軸一次可以送 2000 個 id 進來，超過一條 `IN` 塞得下的量。切了段
+        // 之後每一段的答案都要併回同一份，不能只剩最後一段。
+        let mut many: Vec<i64> = (900_000..901_400).collect();
+        many.push(has_pic);
+        let openable = db.frames_with_image(&many).expect("a very long day");
+        assert_eq!(
+            openable.len(),
+            1,
+            "一千四百個假 id 裡只有一個是真的、而且有圖"
+        );
+        assert!(openable.contains(&has_pic), "那一個不能因為排在最後就掉了");
     }
 
     #[test]

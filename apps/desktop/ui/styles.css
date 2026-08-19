@@ -390,7 +390,7 @@ body.has-hits .stage {
   padding: 7px 9px;
 }
 
-/* 點得開的那些要看得出來點得開；點不開的（圖過了保留期）就不要假裝。 */
+/* 點得開的那些要看得出來點得開；沒有畫面的那些就不要假裝。 */
 .hit.openable {
   cursor: pointer;
 }

@@ -49,9 +49,11 @@ impl Shell {
 
 /// 一筆答案。這是她說話的全部形狀——**每一筆都帶出處**。
 ///
-/// `frame_id` 是「點開看當時那張畫面」的鑰匙。它可以是 `None`（文字保留期比
-/// 畫面長，舊的字還在但圖已經清掉了），而那時候 UI 要顯示「圖已過期」，
-/// 不是假裝沒有這件事。
+/// `frame_id` 是「點開看當時那張畫面」的鑰匙，而**這裡的它已經不只是來源**：
+/// 資料庫那一欄只講「這段字抄自哪一幀」，送到畫面上之前會過一次
+/// [`sister_core::db::Db::frames_with_image`]，沒有照片的一律變回 `None`。
+/// 所以 `Some` 就是點得開，`None` 就是點不開——只記字、截圖節流、額度用完、
+/// 過了保留期，通通收在同一個 `None` 底下。
 #[derive(Serialize)]
 struct Hit {
     /// 題庫要靠它記下「他點開的是哪一筆」（見 `log_click`）。畫面上不顯示。
@@ -577,6 +579,17 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         } else {
             None
         };
+        // 出處的 `frame_id` 一路上都只回答「這段字抄自哪一幀」——那是來源，
+        // 一直都在。畫面上那個「點開看當時的畫面」問的卻是另一件事：那一幀
+        // 有沒有留下照片。整份答案畫完問一次，沒有照片的就把鑰匙收回去。
+        let openable = {
+            let ids: Vec<i64> = hits
+                .iter()
+                .filter_map(|h| h.frame_id)
+                .chain(facts.iter().filter_map(|a| a.latest.frame_id))
+                .collect();
+            db.frames_with_image(&ids).map_err(|e| e.to_string())?
+        };
         Ok(Answer {
             kind: shape.name(),
             query_id,
@@ -590,7 +603,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                     sightings: a.sightings,
                     ts: a.latest.ts,
                     chunk_id: a.latest.chunk_id,
-                    frame_id: a.latest.frame_id,
+                    frame_id: a.latest.frame_id.filter(|id| openable.contains(id)),
                     app: a.latest.app_id,
                     title: a.latest.window_title,
                     url: a.latest.url,
@@ -606,7 +619,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                     app: h.app_id,
                     title: h.window_title,
                     url: h.url,
-                    frame_id: h.frame_id,
+                    frame_id: h.frame_id.filter(|id| openable.contains(id)),
                 })
                 .collect(),
         })
@@ -658,7 +671,7 @@ struct Moment {
     title: Option<String>,
     url: Option<String>,
     text: String,
-    /// `None` = 字還在，但那張圖已經過了保留期。
+    /// `None` = 字還在，但沒有畫面可以給他看。同 [`Hit::frame_id`]。
     frame_id: Option<i64>,
 }
 
@@ -710,6 +723,11 @@ fn timeline_moments(
             })
             .collect();
 
+        // 同 `ask`：來源一直都在，照片不一定。點得開的才給鑰匙。
+        let openable = {
+            let ids: Vec<i64> = rows.iter().filter_map(|m| m.frame_id).collect();
+            db.frames_with_image(&ids).map_err(|e| e.to_string())?
+        };
         Ok(DayView {
             moments: rows
                 .into_iter()
@@ -719,7 +737,7 @@ fn timeline_moments(
                     title: m.title,
                     url: m.url,
                     text: m.text,
-                    frame_id: m.frame_id,
+                    frame_id: m.frame_id.filter(|id| openable.contains(id)),
                 })
                 .collect(),
             pauses,
@@ -816,11 +834,15 @@ fn frame_image(frame_id: i64, shell: tauri::State<'_, Shell>) -> Result<FrameVie
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "找不到這張畫面".to_string())?;
 
-        // 文字保留 365 天、畫面 30 天，所以「有這一筆但圖沒了」是**正常**的，
-        // 不是錯誤。差別要講清楚，不然使用者會以為程式壞了。
+        // 「有這一筆但沒有圖」是**正常**的，不是錯誤。差別要講清楚，不然
+        // 使用者會以為程式壞了。
+        //
+        // 不說是哪一種原因：這裡看到的只有一個 NULL，而 NULL 底下躺著四件
+        // 事（只記字、截圖節流、每日額度、保留期到了）。挑一個講出來有四分
+        // 之三的機會是錯的。
         let path = ctx
             .image_path
-            .ok_or_else(|| "這張畫面已經過了保留期，只有文字留下來".to_string())?;
+            .ok_or_else(|| "這一筆沒有留下畫面，只有文字".to_string())?;
         let bytes = std::fs::read(&path).map_err(|_| format!("圖不見了：{path}"))?;
 
         let ext = std::path::Path::new(&path)
