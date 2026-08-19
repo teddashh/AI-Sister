@@ -485,8 +485,16 @@ function blindLines(blind) {
  * @param facts L1 直接答得出來的那幾筆（★）。排在原文前面，因為那才是他問
  *   的東西本身：問「電話」要的是號碼，不是一段剛好提到電話的字。
  * @param blind 兩手空空時，她查得到的那幾個理由（後端給事實，句子在這裡組）。
+ * @param truncated 底下還有，只是沒送過來。捲到底那一句要靠它。
  */
-function renderHits(hits, kind, queryId = null, facts = [], blind = null) {
+function renderHits(
+  hits,
+  kind,
+  queryId = null,
+  facts = [],
+  blind = null,
+  truncated = false,
+) {
   hitList.replaceChildren();
 
   // 他打了「剛剛發生什麼事」，而底下這幾筆跟那七個字一個都對不上。不先講
@@ -578,6 +586,19 @@ function renderHits(hits, kind, queryId = null, facts = [], blind = null) {
     hitList.append(li);
   }
 
+  // 捲到底之後那一句。少了它，「底下沒有了」和「她只記得這些」長得一模一樣
+  // ——而後者是他會下的結論，因為這個視窗就是拿來問她記得什麼的。
+  //
+  // 講得出下一步才有意義：她這裡沒有第二頁，`sister query` 有 `--limit`。
+  if (truncated) {
+    const more = document.createElement("li");
+    more.className = "hits-note hits-more";
+    // 反引號和角括號留給終端機。這一頁的規矩是直接寫 `sister record`
+    // 那樣的裸指令（onboarding 和時間軸都是這樣寫的）。
+    more.textContent = "這裡最多列 20 筆，底下還有——sister query --limit 100 看得到全部。";
+    hitList.append(more);
+  }
+
   hitList.hidden = false;
   document.body.classList.add("has-hits");
 }
@@ -619,7 +640,14 @@ async function ask() {
     const answer = await invoke("ask", { question });
     // 這一份過期了。畫面歸還在跑的那一次管，這裡連 idle 都不要設。
     if (mine !== asking) return;
-    renderHits(answer.hits, answer.kind, answer.query_id, answer.answers, answer.blind);
+    renderHits(
+      answer.hits,
+      answer.kind,
+      answer.query_id,
+      answer.answers,
+      answer.blind,
+      answer.truncated,
+    );
     setState("idle");
     // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
     askInput.value = "";
@@ -752,6 +780,10 @@ if (params.get("hits") === "demo") {
         url: null,
       },
     ],
+    null,
+    // 捲到底那一句也要看得到。假資料裡不放這一種，就等於少驗一種情況——
+    // 而這一頁能驗的只有截圖。
+    true,
   );
 }
 

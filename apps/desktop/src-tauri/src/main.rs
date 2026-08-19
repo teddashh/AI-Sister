@@ -430,6 +430,16 @@ struct Answer {
     /// （「答對我自己都忘掉的東西」）也是拿她量的。
     answers: Vec<Fact>,
     hits: Vec<Hit>,
+    /// 底下還有，只是沒送過來。
+    ///
+    /// `20 筆` 和「一共就這 20 筆」在畫面上長得一模一樣——終端機那邊為了這件
+    /// 事在數字後面印一個 `+`，時間軸為了同一件事多撈一筆來判斷
+    /// （見 [`DayView::truncated`]）。她這裡以前什麼都沒說：捲到底就是底了，
+    /// 而「她只記得這些」正是他會下的結論。
+    ///
+    /// 只講原文那一半。★ 答案上限 10 筆，是**去重後的不同值**——同一個問題有
+    /// 十個不同答案的時候，問題出在問法，不是在少給了第十一個。
+    truncated: bool,
     /// 一筆都沒找到的時候，她**查得到**的那幾個理由。兩邊都有東西時是 `None`
     /// ——沒答不出來就沒有什麼好解釋的，而且那幾個查詢不必白跑。
     ///
@@ -484,6 +494,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             hits: Vec::new(),
             // 空字串不是「問了但沒找到」，是根本沒問。
             blind: None,
+            truncated: false,
         });
     }
     let shape = sister_core::question::shape(&question);
@@ -498,13 +509,18 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 sister_core::answer::answers(db, &question, 10).map_err(|e| e.to_string())?
             }
         };
-        let hits = match shape {
-            Shape::Recent => db.recent(20),
+        // 多要一筆，用來判斷「還有沒有」。少了這一步就只能猜——而猜錯的方向
+        // 是「剛好滿 20 筆」被當成剛好結束。時間軸那邊同一個寫法。
+        const HITS: usize = 20;
+        let mut hits = match shape {
+            Shape::Recent => db.recent(HITS + 1),
             // 比對用 `terms`（剝掉頭尾的「剛剛」「那個」），★ 答案用原句——
             // 理由和 `sister query` 那邊同一條，寫在那裡。
-            Shape::Keywords => db.search(sister_core::question::terms(&question), 20),
+            Shape::Keywords => db.search(sister_core::question::terms(&question), HITS + 1),
         }
         .map_err(|e| e.to_string())?;
+        let truncated = hits.len() > HITS;
+        hits.truncate(HITS);
         // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
         // 足以回答「她是不是又卡住了」，而問題本身是他的東西，不是我的。
         tracing::info!(
@@ -565,6 +581,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             kind: shape.name(),
             query_id,
             blind,
+            truncated,
             answers: facts
                 .into_iter()
                 .map(|a| Fact {

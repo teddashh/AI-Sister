@@ -511,6 +511,17 @@ body.has-hits .stage {
   padding: 2px 0 2px 8px;
 }
 
+/* 捲到底那一句。`.hits-note` 那條左邊的粗線是給開頭那一句用的（「我把它
+   當成時間問題了」——先講再給答案）；這一句在最下面，長成一樣會看起來
+   像下面還有一段。它要像句收尾的小字，不像個標題。 */
+.hits-more {
+  border-left: none;
+  margin: 6px 0 0;
+  opacity: 0.45;
+  padding: 6px 10px 2px;
+  text-align: center;
+}
+
 /* ---------- 輸入 ---------- */
 
 .ask {
