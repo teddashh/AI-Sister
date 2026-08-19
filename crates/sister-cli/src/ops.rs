@@ -2269,7 +2269,15 @@ pub mod stats {
                     // 要有人去跑——一個要有人記得去跑的檢查，遲早沒人跑。
                     "signals": db.signal_audit()?.iter().map(|a| serde_json::json!({
                         "name": a.name, "rows": a.rows,
-                        "populated": a.populated, "broken": a.broken,
+                        "populated": a.populated,
+                        // 三種下場，不是一個布林：`too_early` 以前和 `alive`
+                        // 一樣是 `broken: false`，於是「驗過了」和「還看不出
+                        // 來」在機器讀的那一份裡也是同一個值。
+                        "verdict": a.verdict.as_str(),
+                        // 數字描述的是最後一場，不是全表。少了這一欄，讀
+                        // 這份 JSON 的人（包括未來的我）會把 `rows` 當成
+                        // 這顆資料庫的總量，而那正是舊版真正在數的東西。
+                        "scope_started_at": a.scope_started_at,
                     })).collect::<Vec<_>>(),
                 }))?
             );
@@ -2568,6 +2576,7 @@ pub mod doctor {
     use super::*;
     use crate::fmt;
     use sister_core::config::Config;
+    use sister_core::db::SignalVerdict;
 
     fn line(ok: bool, label: &str, detail: &str) {
         mark(if ok { "✓" } else { "✗" }, label, detail);
@@ -3257,23 +3266,43 @@ pub mod doctor {
             // 這三個訊號（焦點、輸入節奏、文字座標）在 Phase 0 沒有任何讀者，
             // 它們是 Phase 1 之後才要用的原料。沒人讀不是問題，**沒人讀所以
             // 沒人驗**才是：真的壞掉的那一天，這裡是唯一會講話的地方。
+            // 數字講的是**最後那一場**，不是這顆資料庫的一輩子。掃全表的
+            // 那一版在一顆用過三個月的資料庫上永遠翻不成 ✗（見
+            // `signal_audit` 的文件），而這一行要讓那個界線看得見——否則
+            // 「12 列」讀起來像全部，而他上禮拜二壞掉的那一場藏在裡面。
             for a in db.signal_audit()? {
-                if a.rows == 0 {
-                    // 沒有列 ≠ 壞掉。可能只是這台機器沒有那個能力（replay
-                    // 讀不到 pid），或還沒錄到。不知道就說不知道。
-                    mark("?", a.name, "還沒有資料");
-                } else if a.broken {
-                    mark(
-                        "✗",
-                        a.name,
-                        &format!("{} 列，但沒有一列有內容——{}", a.rows, a.note),
-                    );
-                } else {
-                    line(
+                let when = match a.scope_started_at {
+                    Some(ts) => format!("上一場（{} 起）", crate::fmt::timestamp(ts)),
+                    None => "還沒有任何一場".to_string(),
+                };
+                // 三種，不是兩種。「驗過了，是好的」和「資料還太少，看不出來」
+                // 以前都印 ✓——那正是這一整節要抓的形狀，出現在抓它的工具上。
+                match a.verdict {
+                    SignalVerdict::Alive => line(
                         true,
                         a.name,
-                        &format!("{} 列，{} {}", a.rows, a.populated, a.populated_label),
-                    );
+                        &format!(
+                            "{when} {} 列，{} {}",
+                            a.rows, a.populated, a.populated_label
+                        ),
+                    ),
+                    SignalVerdict::Broken => mark(
+                        "✗",
+                        a.name,
+                        &format!("{when} {} 列，但沒有一列有內容——{}", a.rows, a.note),
+                    ),
+                    // 沒有列 ≠ 壞掉。可能只是這台機器沒有那個能力（replay
+                    // 讀不到 pid），或還沒錄到。不知道就說不知道。
+                    SignalVerdict::TooEarly if a.rows == 0 => {
+                        mark("?", a.name, &format!("{when}裡沒有這種資料"))
+                    }
+                    // 有列、都是空的，但還不夠多。她三秒前才開始的樣子，和
+                    // 真的壞掉的樣子，在這個列數上長得一模一樣——所以不猜。
+                    SignalVerdict::TooEarly => mark(
+                        "?",
+                        a.name,
+                        &format!("{when}只有 {} 列、而且都是空的——還看不出來", a.rows),
+                    ),
                 }
             }
         }

@@ -892,24 +892,93 @@ impl Db {
     /// 自相矛盾」，而不是「這個數字看起來很小」。使用者只是安靜地坐著不動，
     /// 也會讓數字很小——那種情況下報警，就是我在 `check-audit.py` 剛修掉的
     /// 那個錯誤的鏡像。
+    ///
+    /// ## 為什麼只看最後一場
+    ///
+    /// 這三句 SQL 本來是掃全表的，於是它們答的是「這台機器**曾經**好過嗎」。
+    /// 而 doctor 問的是現在式。一顆跑過三個月的資料庫裡，`named`、`active`、
+    /// `distinct` 全都遠大於 0，所以那三個 `broken` **永遠是 false**——
+    /// UIA 上禮拜二被一次 Windows 更新弄壞的機器，這裡照樣印三個 ✓，而
+    /// 這裡是唯一會講這件事的地方。一條翻不成 ✗ 的檢查讀起來像涵蓋，
+    /// 實際上是一格空白。
+    ///
+    /// 換成「最後一場」而不是「最近 N 小時」，是因為那是他心裡的單位：他跑
+    /// `sister record`、停掉、跑 `sister doctor`，問的就是剛才那一場。而且它
+    /// 不需要挑一個魔術數字。代價是一場長達一整天的錄製，中途壞掉的話這裡
+    /// 仍然看得到前半段的好資料——下一場就會抓到。
+    ///
+    /// 沒有任何一場（全新的資料目錄）：三個都是 0 列，`scope_started_at` 是
+    /// `None`。那不是壞掉，是還沒開始。
     pub fn signal_audit(&self) -> Result<Vec<SignalAudit>> {
+        /// 全是空殼的列要有這麼多，才算證據而不是巧合。
+        ///
+        /// 縮到一場之後就需要這個下限：`sister record` 開起來的頭三秒，
+        /// 一列 `app_id` 是 NULL 的焦點事件完全可能只是第一次讀還沒成功。
+        /// 舊版靠的是全表的量體，換成一場就把那個保護一起丟了。
+        ///
+        /// 三個訊號共用一個數字，因為它們的問題形狀一樣：**連續十列都是
+        /// 空的**。換了十次視窗一次都不知道是哪個 app、十個窗口一個動作都
+        /// 沒有卻照樣寫了列、十個文字方框疊在同一個高度——沒有一種是巧合
+        /// 做得出來的。門檻壓低的理由和 `BlindSpots::ocr_is_dead` 一樣：
+        /// 假警報的代價是他多看一眼，該喊沒喊的代價是他一直不知道。
+        const ENOUGH_TO_BE_SURE: i64 = 10;
+
+        // 最後一場。`sessions` 的 id 是遞增的，所以最大的那個就是最新的
+        // ——不用 `started_at`，那一欄是系統時鐘，改過時間就會亂排。
+        let session: Option<(i64, Millis)> = self
+            .conn
+            .query_row(
+                "SELECT id, started_at FROM sessions ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (id, started_at) = match session {
+            Some((id, at)) => (id, Some(at)),
+            // 一場都沒有。三個訊號一律 0 列——底下每一句 SQL 都會這樣回答，
+            // 但先寫出來比較清楚：這裡的 0 是「還沒開始」，不是「壞了」。
+            None => (i64::MIN, None),
+        };
         let mut out = Vec::new();
+        // 「這個訊號是活的」由每個訊號自己答（`alive`），不在這裡統一套一條
+        // 規則：三個 `populated` 數的不是同一種東西（兩個是列數，一個是**幾個
+        // 不同的高度**，全壞的樣子是 1 而不是 0）。把三個數字塞進同一個判斷式，
+        // 正是 `populated_label` 那個欄位當初存在的理由——那次是印的時候安錯
+        // 名字，這次會是判斷的時候。
+        //
+        // 下限只有一個，而且只在這裡套：`alive` 是「看到證據了」，`rows` 夠不夠
+        // 是「找過了沒」，兩件事分開問才有第三種答案（`TooEarly`）。
+        let mut push = |name, rows: i64, populated, populated_label, alive: bool, note| {
+            out.push(SignalAudit {
+                name,
+                rows,
+                populated,
+                populated_label,
+                verdict: match (alive, rows >= ENOUGH_TO_BE_SURE) {
+                    (true, _) => SignalVerdict::Alive,
+                    (false, true) => SignalVerdict::Broken,
+                    (false, false) => SignalVerdict::TooEarly,
+                },
+                note,
+                scope_started_at: started_at,
+            });
+        };
 
         // 焦點事件：有列、卻沒有任何一列知道那是哪個 app。
         // 一段「不知道是哪個程式」的焦點事件不含任何資訊，那不是安靜，是壞了。
         let (focus, named): (i64, i64) = self.conn.query_row(
-            "SELECT COUNT(*), COUNT(app_id) FROM focus_events",
-            [],
+            "SELECT COUNT(*), COUNT(app_id) FROM focus_events WHERE session_id = ?1",
+            [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        out.push(SignalAudit {
-            name: "視窗焦點",
-            rows: focus,
-            populated: named,
-            populated_label: "列知道自己是哪個 app",
-            broken: focus > 0 && named == 0,
-            note: "每段焦點事件應該知道自己是哪個 app",
-        });
+        push(
+            "視窗焦點",
+            focus,
+            named,
+            "列知道自己是哪個 app",
+            named > 0,
+            "每段焦點事件應該知道自己是哪個 app",
+        );
 
         // 打字節奏：有列、卻每一個計數器都是 0。
         // 擷取端在「這個窗口什麼都沒發生」時**根本不會寫列**（見
@@ -917,35 +986,40 @@ impl Db {
         // 不代表使用者沒動。
         let (input, active): (i64, i64) = self.conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(keystrokes + clicks + mouse_px + scroll_ticks > 0), 0)
-             FROM input_metrics",
-            [],
+             FROM input_metrics WHERE session_id = ?1",
+            [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        out.push(SignalAudit {
-            name: "輸入節奏",
-            rows: input,
-            populated: active,
-            populated_label: "列真的有動作",
-            broken: input > 0 && active == 0,
-            note: "沒有動靜的窗口本來就不該寫列，所以全 0 的列是壞的不是閒的",
-        });
+        push(
+            "輸入節奏",
+            input,
+            active,
+            "列真的有動作",
+            active > 0,
+            "沒有動靜的窗口本來就不該寫列，所以全 0 的列是壞的不是閒的",
+        );
 
         // 文字方框的座標：有列、卻全部疊在同一個位置。
         // 這是「以後要在畫面上把那行字圈起來」唯一的依據，而它壞掉的樣子
         // 是所有字都在 (0,0)——搜尋照樣全中，沒有任何地方會報錯。
+        //
+        // `ocr_blocks` 自己沒有 `session_id`，得繞 `frames` 一手。
         let (blocks, distinct): (i64, i64) = self.conn.query_row(
-            "SELECT COUNT(*), COUNT(DISTINCT y) FROM ocr_blocks",
-            [],
+            "SELECT COUNT(*), COUNT(DISTINCT o.y) FROM ocr_blocks o \
+             JOIN frames f ON f.id = o.frame_id WHERE f.session_id = ?1",
+            [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        out.push(SignalAudit {
-            name: "文字座標",
-            rows: blocks,
-            populated: distinct,
-            populated_label: "個不同的高度",
-            broken: blocks > 1 && distinct <= 1,
-            note: "一整張畫面的字不會全部在同一個高度",
-        });
+        // 這一個活著的樣子是 `distinct > 1`，不是 `> 0`：全部疊在 (0,0)
+        // 也還是**一個**高度。門檻共用，「活著長什麼樣」不共用。
+        push(
+            "文字座標",
+            blocks,
+            distinct,
+            "個不同的高度",
+            distinct > 1,
+            "一整張畫面的字不會全部在同一個高度",
+        );
 
         Ok(out)
     }
@@ -2169,6 +2243,40 @@ pub struct RedactionAudit {
     pub leaked: i64,
 }
 
+/// 一個訊號的三種下場。**三種，不是兩種。**
+///
+/// 這裡本來是一個 `broken: bool`，於是「驗過了，是好的」和「資料還太少，看
+/// 不出來」印出同一個 ✓。那正是這個稽核自己要抓的形狀，出現在抓它的那支
+/// 工具上：一台剛開機三秒的機器，兩列焦點事件都不知道自己是哪個 app，
+/// doctor 說一切正常——而三分鐘後它會說同一句話，那時候是真的。
+///
+/// 下限（`ENOUGH_TO_BE_SURE`）是在縮到「最後一場」之後才需要的：舊版掃全表，
+/// 靠的是幾個月的量體，而那個量體正是它永遠翻不成 ✗ 的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalVerdict {
+    /// 有內容，這個訊號是活的。
+    Alive,
+    /// 攢夠了列、而一列都沒有內容：這個狀態自相矛盾，不是「使用者很安靜」。
+    ///
+    /// 刻意不用「populated 佔比很低」當條件。低佔比在真實使用中隨時會發生
+    /// （整個下午都在看影片、沒碰鍵盤），拿它報警等於製造一個大家學會忽略的
+    /// 警告。這裡只認**不可能同時成立**的組合。
+    Broken,
+    /// 一列有內容的都沒有，但列數還沒攢到下限。不知道就說不知道。
+    TooEarly,
+}
+
+impl SignalVerdict {
+    /// 給 `--json` 用的名字。畫面那幾句話不從這裡長出來——那是各介面自己的事。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Alive => "alive",
+            Self::Broken => "broken",
+            Self::TooEarly => "too_early",
+        }
+    }
+}
+
 /// 一種存下來的訊號，現在到底是有內容還是空殼（見 [`Db::signal_audit`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignalAudit {
@@ -2185,14 +2293,19 @@ pub struct SignalAudit {
     /// 被安上了第三個的名字——跟排除稽核那次把「段」說成「張」是同一個錯誤，
     /// 隔了幾天又犯一次，所以這次把單位釘在資料旁邊而不是印的時候現編。
     pub populated_label: &'static str,
-    /// `rows > 0` 而 `populated == 0`：這個狀態自相矛盾，不是「使用者很安靜」。
-    ///
-    /// 刻意不用「populated 佔比很低」當條件。低佔比在真實使用中隨時會發生
-    /// （整個下午都在看影片、沒碰鍵盤），拿它報警等於製造一個大家學會忽略的
-    /// 警告。這裡只認**不可能同時成立**的組合。
-    pub broken: bool,
+    /// 這個訊號現在到底是好的、壞的，還是**還說不準**。
+    pub verdict: SignalVerdict,
     /// 為什麼那個組合不可能——警告要能解釋自己。
     pub note: &'static str,
+    /// 上面那幾個數字描述的是**哪一段**：最後一場錄製的起點。
+    ///
+    /// `None` = 她一場都還沒錄過。
+    ///
+    /// 這一欄要跟著數字走，因為沒有它的話畫面說不出「12 列」是剛才那一場的
+    /// 還是三個月前的——而這三個判斷的全部意義就是「現在」。舊版掃全表，
+    /// 於是那三個 ✓ 講的是「這台機器**曾經**好過」，在一顆用了三個月的資料庫
+    /// 上永遠翻不成 ✗。詳見 [`Db::signal_audit`]。
+    pub scope_started_at: Option<Millis>,
 }
 
 /// 一條排除規則生效過的紀錄（見 [`Db::exclusion_audit`]）。
@@ -3632,7 +3745,12 @@ mod tests {
         .expect("insert focus");
 
         for a in db.signal_audit().expect("audit") {
-            assert!(!a.broken, "{} 只是安靜，不該被說成壞掉", a.name);
+            assert_ne!(
+                a.verdict,
+                SignalVerdict::Broken,
+                "{} 只是安靜，不該被說成壞掉",
+                a.name
+            );
         }
     }
 
@@ -3644,7 +3762,10 @@ mod tests {
 
         // 擷取端在「什麼都沒發生」時根本不該寫列（見 windows/input.rs 的
         // 早退）。所以一列全 0 代表那道閘門壞了，不是使用者很安靜。
-        for i in 0..5 {
+        //
+        // 十列是門檻（`ENOUGH_TO_BE_SURE`）。縮到「最後一場」之後就需要下限
+        // ——開機頭三秒的一兩列還不算證據。
+        for i in 0..12 {
             db.insert_input(
                 s,
                 &InputMetrics {
@@ -3663,21 +3784,27 @@ mod tests {
         }
 
         // 焦點事件不知道自己是哪個 app——這種列不含任何資訊。
-        db.insert_focus(
-            s,
-            &FocusEvent {
-                ts: 0,
-                kind: FocusKind::Focus,
-                snapshot: FocusSnapshot::default(),
-            },
-        )
-        .expect("insert focus");
+        for ts in 0..12 {
+            db.insert_focus(
+                s,
+                &FocusEvent {
+                    ts,
+                    kind: FocusKind::Focus,
+                    snapshot: FocusSnapshot::default(),
+                },
+            )
+            .expect("insert focus");
+        }
 
         let audit = db.signal_audit().expect("audit");
-        let broken: Vec<_> = audit.iter().filter(|a| a.broken).map(|a| a.name).collect();
+        let broken: Vec<_> = audit
+            .iter()
+            .filter(|a| a.verdict == SignalVerdict::Broken)
+            .map(|a| a.name)
+            .collect();
         assert!(
             broken.contains(&"輸入節奏"),
-            "五列全 0 的輸入沒被抓到：{audit:?}"
+            "十二列全 0 的輸入沒被抓到：{audit:?}"
         );
         assert!(
             broken.contains(&"視窗焦點"),
@@ -3688,7 +3815,71 @@ mod tests {
         // 兩者的差別由 `rows` 講，不是由 `broken` 講。
         let coords = audit.iter().find(|a| a.name == "文字座標").expect("座標");
         assert_eq!(coords.rows, 0);
-        assert!(!coords.broken, "空的表不該被說成壞掉");
+        assert_eq!(
+            coords.verdict,
+            SignalVerdict::TooEarly,
+            "空的表不是壞掉，也不是驗過了——是還看不出來"
+        );
+    }
+
+    /// **一顆曾經正常過的資料庫，會永遠說自己是好的。**
+    ///
+    /// 這三句 SQL 本來掃全表，所以它們答的是「這台機器曾經好過嗎」。他用了
+    /// 三個月、上禮拜二一次 Windows 更新把 UIA 弄壞了——`named` 還是那三個
+    /// 月份的幾萬列，`broken` 永遠是 false，doctor 印三個 ✓。而 doctor 是
+    /// 唯一會講這件事的地方（那三張表在 Phase 0 沒有任何讀者）。
+    ///
+    /// 一條翻不成 ✗ 的檢查不是「還沒抓到」，是一格假的涵蓋。
+    #[test]
+    fn a_machine_that_used_to_work_does_not_get_to_coast_on_its_good_months() {
+        let mut db = test_db();
+
+        // 三個月的好日子。
+        let good = db.start_session("test", "0.0.1").expect("session");
+        for ts in 0..40 {
+            db.insert_focus(
+                good,
+                &FocusEvent {
+                    ts,
+                    kind: FocusKind::Focus,
+                    snapshot: FocusSnapshot {
+                        app_id: Some("chrome.exe".into()),
+                        ..FocusSnapshot::default()
+                    },
+                },
+            )
+            .expect("insert focus");
+        }
+        let before = db.signal_audit().expect("audit");
+        let focus = |v: &[SignalAudit]| *v.iter().find(|a| a.name == "視窗焦點").expect("焦點");
+        assert_eq!(focus(&before).verdict, SignalVerdict::Alive, "這一場是好的");
+
+        // 然後 UIA 壞了。她照樣在錄，照樣寫列，只是每一列都不知道自己是誰。
+        db.end_session(good).expect("end");
+        let broke = db.start_session("test", "0.0.1").expect("session");
+        for ts in 100..112 {
+            db.insert_focus(
+                broke,
+                &FocusEvent {
+                    ts,
+                    kind: FocusKind::Focus,
+                    snapshot: FocusSnapshot::default(),
+                },
+            )
+            .expect("insert focus");
+        }
+
+        let after = focus(&db.signal_audit().expect("audit"));
+        assert_eq!(
+            after.verdict,
+            SignalVerdict::Broken,
+            "上一場十二列都不知道自己是哪個 app，而前三個月的好資料把它蓋掉了：{after:?}"
+        );
+        assert_eq!(after.rows, 12, "數字要描述那一場，不是這顆資料庫的一輩子");
+        assert!(
+            after.scope_started_at.is_some(),
+            "「12 列」是哪一段的，畫面要說得出來"
+        );
     }
 
     /// 「我找不到」和「我沒去找」在同一句話裡長得一模一樣。
