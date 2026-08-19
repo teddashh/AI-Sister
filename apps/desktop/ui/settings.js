@@ -131,9 +131,20 @@ function paintHealth(health, hasRules) {
   // 生效」，而他還沒寫。空輸入框底下掛一句警告只會變成背景雜訊。
   if (health.at === null || health.at === undefined) {
     el.health.classList.add("unknown");
+    // 不寫死「還沒有人跑過記錄」。`capabilities::read` 對三件事都回 `None`
+    // ——沒有這個檔、讀不出來、或內容不是我們寫的那個形狀——而它的註解說得
+    // 很清楚：對讀的人來說那只是一句「還不知道」。還有第四種：字母人和
+    // `sister record --data-dir X` 指到不同的資料夾，那台機器**天天在錄**，
+    // 而「第一次開始記錄之後回來看這裡」那句話永遠不會成真。
+    //
+    // `.health` 是 `white-space: pre-line`，所以下面那個 `\n` 是真的斷行。
+    // 需要它：不斷的話 `--data-dir` 會落在行尾被拆成「--」和「data-dir」，
+    // 而這一頁的破折號全寫成「——」，於是行尾那個「--」讀起來像標點，整句
+    // 裡唯一可行動的那一半就消失了。
     el.health.textContent =
-      "還沒有人在這台機器上跑過記錄，所以還不知道這幾條會不會生效——" +
-      "第一次開始記錄之後回來看這裡。";
+      "還不知道這幾條會不會生效——這個資料夾裡沒有能力報告。\n" +
+      "跑過一次 sister record 之後就會有。已經跑過卻還是這樣的話，" +
+      "多半是它寫到別的 --data-dir 去了。";
     el.health.hidden = !hasRules;
     return;
   }

@@ -1718,7 +1718,22 @@ impl Db {
                     .conn
                     .pragma_query_value(None, "page_size", |r| r.get(0))
                     .unwrap_or(0);
-                page_count * page_size
+                // `page_count × page_size` 只是**主檔**，不含 `-wal`。而我們
+                // 開的是 WAL 模式，WAL 正好是「一邊錄一邊長」的那一半：
+                // checkpoint 之間寫進去的東西全在裡面。少算它，每一個磁碟數字
+                // 都偏小，而那個數字是 Phase 0 退出條件的判決——偏的方向剛好
+                // 是「看起來過了」。
+                //
+                // 路徑從 `PRAGMA database_list` 的第三欄拿。記憶體資料庫回空
+                // 字串，那時候本來就沒有 WAL 檔可以量。
+                let wal = self
+                    .conn
+                    .query_row("PRAGMA database_list", [], |r| r.get::<_, String>(2))
+                    .ok()
+                    .filter(|p| !p.is_empty())
+                    .and_then(|p| std::fs::metadata(format!("{p}-wal")).ok())
+                    .map_or(0, |m| m.len() as i64);
+                page_count * page_size + wal
             },
         })
     }
@@ -2269,6 +2284,45 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// 「資料庫佔多少」要含 `-wal`。
+    ///
+    /// `page_count × page_size` 只量主檔，而我們跑的是 WAL 模式——checkpoint
+    /// 之間新寫的東西全在 `-wal` 裡，也就是「一邊錄一邊長」的正是那一半。
+    /// 少算它，足跡那一行每一個磁碟數字都偏小，而那個數字是 Phase 0 退出
+    /// 條件（< 300 MB/天）的判決，偏的方向剛好是「看起來過了」。
+    #[test]
+    fn the_disk_number_counts_the_wal_because_that_is_the_half_that_grows() {
+        let tmp = TmpDir::new("wal-bytes");
+        let path = tmp.join("sister.db");
+        let mut db = Db::open(&path).expect("open");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        // 寫到 WAL 真的長出東西為止。這裡不 checkpoint——正在錄的那台機器
+        // 也不會，而這個數字要回答的就是「她現在佔了多少」。
+        for i in 0..400 {
+            db.insert_frame(
+                s,
+                &frame_with_text(i * 1_000, "Chrome", "帳單", &["王先生打電話來說帳單的事"]),
+                None,
+                0,
+            )
+            .expect("insert");
+        }
+
+        let wal =
+            std::fs::metadata(format!("{}-wal", path.display())).map_or(0, |m| m.len() as i64);
+        assert!(
+            wal > 0,
+            "這個測試要有 WAL 才有意義（寫太少或被 checkpoint 了）"
+        );
+
+        let main = std::fs::metadata(&path).expect("main").len() as i64;
+        let counted = db.stats().expect("stats").db_bytes;
+        assert!(
+            counted >= main + wal,
+            "只算了主檔 {main}，漏掉 WAL 的 {wal}（回報 {counted}）"
+        );
     }
 
     /// 他機器上同時躺著好幾個長得一模一樣的 `sister.exe`。點錯一個的代價

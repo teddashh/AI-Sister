@@ -4090,8 +4090,18 @@ pub mod record {
                 }
             }
 
+            // 每一拍量一次，不是每分鐘一次。`peak_rss` 這個名字承諾的是峰值，
+            // 而一分鐘取一次樣的話，任何短於一分鐘的尖峰都和取平均一樣看不
+            // 見——2560×1440 的一次抓圖握著 14.7 MB 的 RGBA 加 GDI bitmap 加
+            // 縮圖緩衝，只有幾十毫秒，也就是取樣週期的 0.007%。
+            //
+            // 成本：`sample()` 是一次 /proc 讀取（Linux）或兩個 Win32 呼叫
+            // （Windows），比這個迴圈每拍都付的剪貼簿輪詢還便宜。CPU 那邊不
+            // 受影響——它是拿 `first` 和 `latest` 兩個累計值相減算的，多量
+            // 幾次只會讓 `latest` 更新。
+            footprint.tick();
+
             if last_report.elapsed() >= Duration::from_secs(60) {
-                footprint.tick();
                 last_report = Instant::now();
                 // 暫停時如果照原樣印那四個數字，讀起來就是「一切正常，只是
                 // 這一分鐘沒有新東西」——那正是暫停最危險的失效模式：
