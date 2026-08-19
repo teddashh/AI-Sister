@@ -1048,6 +1048,7 @@ pub mod query {
     /// 別看那個」和「那段時間我閉著眼」。全部都不成立的時候只剩一句實話——
     /// 她記了，而裡面就是沒有。那句話沒有安慰的成分，但它是真的。
     fn blind_lines(b: &sister_core::answer::BlindSpots) -> Vec<String> {
+        let mut out = Vec::new();
         if b.chunks == 0 {
             // 「一段字都沒有」有兩種，而它們的下一步是相反的。
             //
@@ -1059,19 +1060,34 @@ pub mod query {
             // `sister forget` 忘掉了／過了保留期。`sessions` 那張表不在任何
             // 保留期的射程內，所以這件事問得出來——問不清楚就會叫他重做一件
             // 他剛剛才故意做掉的事。
-            return vec![if b.frames > 0 {
+            //
+            // ——但**不是兩種，是四種**，而舊版在這裡直接 return，把手上另外
+            // 兩張稽核表丟掉了。從頭暫停到尾的那一小時、或者被一條排除規則
+            // 整段擋掉的那一小時，走到的都是同一組數字（chunks=0、frames=0、
+            // sessions>0），而它們得到的是「被 `sister forget` 忘掉了」。
+            // 那是四種原因裡唯一一個假的，也是唯一一個會讓他以為東西被刪了
+            // 的。底下 `excluded` 和 `paused_episodes` 兩段本來就會把真正的
+            // 原因講出來，所以這裡改成不 return，讓它們接著講。
+            let blocked = b.paused_episodes > 0 || !b.excluded.is_empty();
+            out.push(if b.frames > 0 {
                 format!(
                     "她看過 {} 張畫面，但一個字都沒讀出來——讀字那一段是斷的，跑 `sister doctor` 看是哪一種。",
                     b.frames
                 )
+            } else if b.sessions > 0 && blocked {
+                "她錄過，但那段時間一張畫面都沒留下來——底下是查得出來的原因。".to_string()
             } else if b.sessions > 0 {
                 "她錄過，但現在資料庫裡是空的——被 `sister forget` 忘掉了，或是過了保留期。"
                     .to_string()
             } else {
                 "她還沒記過任何東西——先跑 `sister record`。".to_string()
-            }];
+            });
+            // OCR 斷掉是另一回事：畫面明明留下來了，暫停和排除都解釋不了
+            // 「這幾張畫面裡沒有字」。只有這一條提早收工。
+            if b.frames > 0 {
+                return out;
+            }
         }
-        let mut out = Vec::new();
         if !b.excluded.is_empty() {
             // 排除是**他自己設的**規則，所以這句話不是道歉，是提醒他去哪裡找。
             let why = b

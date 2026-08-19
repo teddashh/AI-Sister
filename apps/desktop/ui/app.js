@@ -535,20 +535,31 @@ function sourceLine(item, li, queryId, rank) {
  */
 function blindLines(blind) {
   if (!blind) return [];
+  const out = [];
   if (blind.chunks === 0) {
     // 「一段字都沒有」有兩種，而它們的下一步是相反的。看過畫面卻一個字都
     // 沒讀出來，代表讀字那一段斷了（關掉了、或者裝了讀不到）——那是這個
     // 專案已知的主要故障形狀。和 `blind_lines`（ops.rs）同一條分法。
-    // 「連畫面都沒有」也還有兩種：從來沒錄過，或者錄過的東西被忘掉了／
-    // 過了保留期。`sessions` 不在任何保留期的射程內，所以問得出來。
+    //
+    // 「連畫面都沒有」則有**四種**，而這裡以前只講得出一種：從頭暫停到尾
+    // 的那一小時、被一條排除規則整段擋掉的那一小時，走到的都是同樣這組
+    // 數字，然後被告知「被忘掉了，或是過了保留期」——四個裡唯一假的那個，
+    // 也是唯一一個會讓他以為東西被刪了的。底下 excluded / paused 兩段本來
+    // 就會講出真正的原因，所以這裡不再提早 return。
+    const blocked = blind.paused_episodes > 0 || blind.excluded?.length > 0;
     if (blind.frames > 0) {
+      // OCR 斷掉是另一回事：畫面明明留下來了，暫停和排除都解釋不了
+      // 「這幾張畫面上沒有字」。只有這一條提早收工。
       return [`（我看過 ${blind.frames} 張畫面，但一個字都沒讀出來——讀字那一段是斷的。）`];
     }
-    return blind.sessions > 0
-      ? ["（我錄過，但現在什麼都不剩了——被忘掉了，或是過了保留期。）"]
-      : ["（我到現在還沒記過任何東西。）"];
+    if (blind.sessions > 0 && blocked) {
+      out.push("（我錄過，但那段時間一張畫面都沒留下來——底下是我查得出來的原因。）");
+    } else if (blind.sessions > 0) {
+      out.push("（我錄過，但現在什麼都不剩了——被忘掉了，或是過了保留期。）");
+    } else {
+      out.push("（我到現在還沒記過任何東西。）");
+    }
   }
-  const out = [];
   if (blind.excluded?.length) {
     const why = blind.excluded.map(([reason, n]) => `${reason} ${n} 段`).join("、");
     // 同一張稽核表裡還躺著兩道**自動**防線（`screenshare app:` 和
