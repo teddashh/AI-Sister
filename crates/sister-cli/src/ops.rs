@@ -3280,7 +3280,12 @@ pub mod record {
         duration: Option<u64>,
         // 設定檔原本寫的「要不要留圖」。傳進來而不是讀 `config.capture`，
         // 因為那一份已經被 `gate` 按照同意書改過了——見 `run` 那邊的說明。
-        wants_images_by_config: bool,
+        //
+        // `mut`：它也吃熱重載。凍在這裡的話，錄到一半把 `store_images` 關掉完全
+        // 沒有作用，而 `sister doctor` 讀的是磁碟上那一份，會照著新設定說
+        // 「保留畫面檔 ✗ 否（text-only 模式）」——他關掉了截圖、工具說關掉了，
+        // 而她還在一張一張寫。
+        mut wants_images_by_config: bool,
     ) -> Result<()> {
         use sister_capture::windows::{self, Capabilities};
         use sister_capture::{Recorder, Tick};
@@ -3420,6 +3425,9 @@ pub mod record {
         // 同意書用同一個節拍。它不看 mtime，所以自己一個計時器。
         const CONSENT_EVERY: Duration = Duration::from_secs(5);
         let mut last_consent_check = Instant::now();
+        // 設定檔剛換掉 `store_images`：別等下一個節拍。同意書和設定檔是同一道
+        // 閘門的兩半（`recheck`），所以「設定改了」也是它的觸發條件之一。
+        let mut consent_dirty = false;
         // 心跳。字母人是另一個行程，它沒有別的辦法知道「現在到底有沒有人在
         // 錄」——`sessions.ended_at` 在當掉的時候永遠停在 NULL，而閒置時
         // 資料庫本來就會好一陣子沒有新資料。開機那一段由 `BootBeat` 蓋著，
@@ -3526,6 +3534,16 @@ pub mod record {
                                     println!("    ⚠  這條寫了也不會命中：{rule} — {why}");
                                 }
                                 retention = fresh.retention.clone();
+                                // `capture.store_images` 以前不在這裡，於是它
+                                // 凍在開機那一刻——設定頁上關掉截圖、`doctor`
+                                // 照著磁碟上那一份說「text-only 模式」，而這個
+                                // 迴圈還在一張一張寫。真正動手的是下面那道
+                                // `recheck`（同意書仍然是上限），這裡只負責把
+                                // 他寫下的意思送過去，並且叫它別等下一個節拍。
+                                if wants_images_by_config != fresh.capture.store_images {
+                                    wants_images_by_config = fresh.capture.store_images;
+                                    consent_dirty = true;
+                                }
                                 rec.set_privacy(fresh.privacy);
                             }
                             Err(e) => println!(
@@ -3555,10 +3573,23 @@ pub mod record {
                 }
             }
 
-            if last_consent_check.elapsed() >= CONSENT_EVERY {
+            if consent_dirty || last_consent_check.elapsed() >= CONSENT_EVERY {
+                let by_config = std::mem::take(&mut consent_dirty);
                 last_consent_check = Instant::now();
                 let consent = sister_core::consent::load(data_dir);
                 match recheck(&consent, wants_images_by_config, rec.stores_images()) {
+                    // 他剛剛改了 `store_images`，而實際行為沒有跟著變 = 另一個
+                    // 條件在擋。安靜掉的話，他會以為那一行寫了就生效了——而這是
+                    // 一句只要他不去翻 frames/ 就永遠不會被戳破的話。
+                    Recheck::Same if by_config => println!(
+                        "  ⟳ 設定檔的 store_images 改了，但實際行為沒變：{}",
+                        if wants_images_by_config {
+                            "第三張同意書沒簽，所以還是只記字。\
+                             （要留圖請跑 `sister consent --grant frame-storage`）"
+                        } else {
+                            "第三張同意書本來就沒簽，這一輪本來就沒在留圖。"
+                        }
+                    ),
                     Recheck::Same => {}
                     // 撤回不是暫停。暫停是「先別看」，撤回是「我收回那句話」
                     // ——所以這裡停的是整場錄製，和開機時那道閘門對稱。當成
@@ -3571,13 +3602,24 @@ pub mod record {
                         end_reason = sister_core::model::EndReason::ConsentRevoked;
                         break;
                     }
+                    // 底下兩句以前一律說「第三張同意書」，因為那時候只有同意書
+                    // 動得了它。現在設定檔也動得了，而說錯的話他會去撤一張已經
+                    // 撤過的同意書、或去改一個根本沒關的設定。
+                    //
+                    // 講的是**現在這兩個條件長什麼樣**，不是猜剛剛動的是哪一個
+                    // ——後者需要記住上一輪的值，而那是一份會和事實漂開的副本。
                     Recheck::Images(true) => {
-                        println!("  ⟳ 第三張同意書簽回來了：從這一刻起會留截圖。");
+                        println!("  ⟳ 設定檔和第三張同意書現在都說要留圖：從這一刻起會留截圖。");
                         rec.set_image_dir(Some(frames_root.clone()));
                     }
                     Recheck::Images(false) => {
+                        let why = if !consent.allows_frames() {
+                            "第三張同意書被撤回了"
+                        } else {
+                            "設定檔把 store_images 關掉了"
+                        };
                         println!(
-                            "  ⟳ 第三張同意書被撤回了：從這一刻起只記螢幕上的字，\
+                            "  ⟳ {why}：從這一刻起只記螢幕上的字，\
                              不會再寫任何截圖。（先前寫下的那些還在，要清掉請用\
                              時間軸的「忘掉這一段」或 sister prune。）"
                         );
