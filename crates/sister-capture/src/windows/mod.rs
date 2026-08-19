@@ -55,26 +55,31 @@ impl Capabilities {
         }
     }
 
+    /// 寫給另一個行程看的那一份。見 [`sister_core::capabilities`]。
+    ///
+    /// 只帶原始事實過去，不帶結論——設定頁要拿它和**現在**的規則清單重算，
+    /// 不然「上一場錄製開始時他還沒寫那條規則」會讓那一頁永遠沉默。
+    pub fn report(&self) -> sister_core::capabilities::Report {
+        sister_core::capabilities::Report {
+            at: now_ms(),
+            url: self.url,
+            // 只有「試過而且失敗」才算失效。還沒試過不是問題，`record` 起來時
+            // 才會裝——在那之前吵，吵的是一件還沒發生的事。
+            input_hook_failed: self.input == input::HookState::Failed,
+        }
+    }
+
     /// 因為能力缺席而**失效的隱私規則**。
     ///
     /// 和一般的功能缺口分開講：使用者可以接受「還不會 OCR」，但她必須知道
     /// 「你設定的網銀排除規則現在一條都不會生效」。這種事不能只寫在
     /// release note 裡。
+    ///
+    /// 判斷本身住在 [`sister_core::capabilities::Report`]：設定頁那個行程
+    /// 沒有這裡的相依，卻要講出一模一樣的那句話。同一份判斷兩個地方寫，
+    /// 遲早會變成兩句不一樣的話——而使用者會相信比較好聽的那一句。
     pub fn broken_privacy_rules(&self, config: &Config) -> Vec<String> {
-        let mut out = Vec::new();
-        if !self.url && !config.privacy.excluded_urls.is_empty() {
-            out.push(format!(
-                "沒有 UIA 網址擷取：{} 條 excluded_urls 規則（網銀、登入頁）\
-                 目前不會生效，瀏覽器畫面只靠視窗標題規則過濾",
-                config.privacy.excluded_urls.len()
-            ));
-        }
-        // 只有「試過而且失敗」才算失效。還沒試過不是問題，`record` 起來時
-        // 才會裝——在那之前吵，吵的是一件還沒發生的事。
-        if self.input == input::HookState::Failed {
-            out.push("輸入 hook 裝不上：節奏訊號這個 session 會是空的".into());
-        }
-        out
+        self.report().broken_privacy_rules(config)
     }
 
     /// 看起來在運作、實際上不會有結果的地方。

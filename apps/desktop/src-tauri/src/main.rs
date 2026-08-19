@@ -951,6 +951,47 @@ fn settings_write(settings: Settings) -> Result<(), String> {
     c.save(&path).map_err(|e| format!("{e:#}"))
 }
 
+/// 這台機器上，這幾條規則到底生不生效。
+///
+/// [`lint_url_rules`] 檢查的是**一條規則自己**寫得對不對。這一支檢查的是另一
+/// 件事：整組規則會不會因為機器讀不到網址而**一條都不生效**。兩者都通過的
+/// 使用者，看到的是一份綠色的清單和一個以為關上了的門。
+///
+/// 探測是 recorder 做的（只有它有 UIA），所以這裡讀的是它留下來的報告，而且
+/// 拿現在這一刻的設定重算——見 [`sister_core::capabilities`]。
+#[derive(Serialize)]
+struct PrivacyHealth {
+    /// 現在這份設定裡，有哪幾件事其實沒在做。空的 = 都生效。
+    broken: Vec<String>,
+    /// 報告是什麼時候探的。`None` = **還沒有報告**（沒錄過、或那個檔案被刪
+    /// 了）——那和「都生效」是兩件事，畫面上不准長得一樣。
+    at: Option<i64>,
+}
+
+#[tauri::command]
+fn privacy_health(urls: Vec<String>, shell: tauri::State<'_, Shell>) -> Result<PrivacyHealth, String> {
+    let path = config_path()?;
+    let mut config = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
+    // 拿**輸入框裡現在這一刻**的規則去問，不是設定檔裡存好的那一份——和
+    // `lint_url_rules` 同一條紀律。他正在打第一條的時候就該知道它不會生效；
+    // 等他按了儲存才講晚了一步，而那一步裡他已經相信門關上了。
+    config.privacy.excluded_urls = urls;
+    let report = shell
+        .data_dir
+        .as_ref()
+        .and_then(|dir| sister_core::capabilities::read(dir));
+    Ok(match report {
+        Some(r) => PrivacyHealth {
+            broken: r.broken_privacy_rules(&config),
+            at: Some(r.at),
+        },
+        None => PrivacyHealth {
+            broken: Vec::new(),
+            at: None,
+        },
+    })
+}
+
 /// 哪幾條網址規則寫了也不會命中。
 ///
 /// **這是這一頁最有價值的一格。** 排除規則最糟的失效方式不是漏寫，是寫了一條
@@ -1533,6 +1574,7 @@ fn main() {
             settings_read,
             settings_write,
             lint_url_rules,
+            privacy_health,
             open_settings,
             open_timeline,
             timeline_days,

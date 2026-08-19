@@ -13,6 +13,7 @@ const el = {
   framesDays: document.querySelector("[data-frames-days]"),
   textDays: document.querySelector("[data-text-days]"),
   lint: document.querySelector("[data-lint]"),
+  health: document.querySelector("[data-health]"),
   combo: document.querySelector("[data-combo]"),
   clearCombo: document.querySelector("[data-clear]"),
   hotkeySay: document.querySelector("[data-hotkey-say]"),
@@ -49,6 +50,7 @@ function toLines(text) {
  */
 async function relint() {
   const rules = toLines(el.urls.value);
+  await refreshHealth(rules);
   if (invoke === null || rules.length === 0) {
     el.lint.hidden = true;
     return;
@@ -83,6 +85,57 @@ el.urls?.addEventListener("input", () => {
   clearTimeout(lintTimer);
   lintTimer = setTimeout(() => void relint(), 250);
 });
+
+/**
+ * 整組規則到底生不生效。
+ *
+ * `relint()` 檢查的是**某一條**寫錯了；這一條檢查的是這台機器讀不到瀏覽器
+ * 網址，於是**一條都不生效**——而那在每一條規則都寫得完美的時候照樣成立。
+ * 以前唯一知道這件事的人是 recorder，它把那句話印進 `record.log`；使用者是
+ * 在這一頁上打那些規則的，那句話該出現在這裡。
+ *
+ * 判斷在 Rust 那邊（`capabilities::Report::broken_privacy_rules`），和
+ * `sister doctor`、`record` 用的是同一份。
+ */
+async function refreshHealth(urls) {
+  if (invoke === null || !el.health) return;
+  try {
+    paintHealth(await invoke("privacy_health", { urls }), urls.length > 0);
+  } catch {
+    // 問不到就不講。空著總比掰一句「都生效」好。
+    el.health.hidden = true;
+  }
+}
+
+function paintHealth(health, hasRules) {
+  if (!el.health) return;
+  // **三種狀態，不是兩種。** 「沒有報告」和「都生效」以前會長得一樣，而那
+  // 正是這一格要修的那種安靜——一個從沒錄過的人看到一片乾淨，會以為門關好了。
+  //
+  // 一條規則都還沒寫的時候不講「還不知道」：那句話問的是「你寫的這幾條會不會
+  // 生效」，而他還沒寫。空輸入框底下掛一句警告只會變成背景雜訊。
+  if (health.at === null || health.at === undefined) {
+    el.health.classList.add("unknown");
+    el.health.textContent =
+      "還沒有人在這台機器上跑過記錄，所以還不知道這幾條會不會生效——" +
+      "第一次開始記錄之後回來看這裡。";
+    el.health.hidden = !hasRules;
+    return;
+  }
+  el.health.classList.remove("unknown");
+  el.health.textContent =
+    health.broken.length === 0
+      ? ""
+      : `${health.broken.join("\n")}（${when(health.at)} 開始記錄的時候測到的）`;
+  el.health.hidden = health.broken.length === 0;
+}
+
+/** `MM-DD HH:MM`。年份對「上一次測是什麼時候」這句話沒有用。 */
+function when(ts) {
+  const d = new Date(ts);
+  const two = (n) => String(n).padStart(2, "0");
+  return `${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
 
 // ---------- 暫停熱鍵 ----------
 
@@ -267,6 +320,17 @@ function demo(variant) {
       "規則比對的是網址本身，開頭帶 https:// 的話多數瀏覽器讀回來的字串對不上；去掉通訊協定寫成 mail.google.com/* 才會命中",
     ],
   ]);
+  // 這一格是這一頁上最嚴重的一句話（整組排除規則不生效），所以 demo 版面
+  // 一定要看得到它——版面沒被眼睛看過的警告，等於還沒寫。
+  paintHealth(
+    {
+      broken: [
+        "沒有 UIA 網址擷取：3 條 excluded_urls 規則（網銀、登入頁）目前不會生效，瀏覽器畫面只靠視窗標題規則過濾",
+      ],
+      at: Date.now() - 3 * 3600 * 1000,
+    },
+    true,
+  );
   paintHotkey(
     variant === "taken"
       ? {

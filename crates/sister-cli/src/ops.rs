@@ -3255,6 +3255,13 @@ pub mod record {
         // 缺席的能力會讓某些排除規則整組失效，或讓她其實什麼都沒記住。
         // 這兩件事都要在開始錄之前講，不是藏在 doctor 裡等使用者自己去發現。
         let caps = Capabilities::current(&config);
+        // 留一份給設定頁。底下那幾行 `⚠` 印在 stdout——而字母人開起來的
+        // recorder，stdout 是 `record.log`，一個沒有人會開的檔案。使用者是在
+        // 設定頁上打那些排除規則的，所以那一頁才是這句話該出現的地方。
+        // 寫不出來不擋錄製：少一行警告，比少一場記錄好。
+        if let Err(e) = sister_core::capabilities::write(data_dir, &caps.report()) {
+            eprintln!("⚠  寫不出能力報告（設定頁會說「還不知道」）：{e:#}");
+        }
         for warning in caps.broken_privacy_rules(&config) {
             println!("⚠  {warning}");
         }

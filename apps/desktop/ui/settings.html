@@ -35,11 +35,16 @@
         <h2>不要看這些網址</h2>
         <p class="hint">
           一行一個 glob，例如 <code>*.bank.com.tw*</code>。
-          <strong>需要瀏覽器網址列讀得到</strong>——<code>sister doctor</code>
-          會當場告訴你這台機器讀不讀得到。
+          <strong>需要瀏覽器網址列讀得到</strong>——這台機器讀不讀得到，
+          底下那一行會直接講。
         </p>
         <textarea data-urls rows="6" spellcheck="false"></textarea>
-        <!-- 打字的當下就講，而不是等他關掉視窗、以為擋好了才在 doctor 裡發現 -->
+        <!--
+          兩種失效，兩個位置。`data-lint` 講的是**某一條**寫錯了；`data-health`
+          講的是這台機器讀不到網址，於是**整組**一條都不生效——後者一條規則
+          都沒寫錯的時候照樣成立，所以不能混在同一個清單裡。
+        -->
+        <p class="health" data-health hidden></p>
         <ul class="lint" data-lint hidden></ul>
       </section>
 

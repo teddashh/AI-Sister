@@ -126,6 +126,28 @@ button:focus-visible {
   opacity: 0.8;
 }
 
+/*
+ * 「整組不生效」比「某一條寫錯」嚴重一級，所以它在清單上面、而且整塊都是
+ * 警告色。一條規則寫錯是少擋一個網站；整組不生效是那扇門根本沒有裝。
+ */
+.health {
+  background: rgb(232 163 61 / 12%);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  color: var(--warn);
+  margin: 8px 0 0;
+  padding: 6px 9px;
+  white-space: pre-line;
+}
+
+/* 「還不知道」不是警告——她只是還沒在這台機器上錄過。用灰的講。 */
+.health.unknown {
+  background: none;
+  border-left-color: currentcolor;
+  color: inherit;
+  opacity: 0.62;
+}
+
 /* ---------- 開關 ---------- */
 
 .check {
