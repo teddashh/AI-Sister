@@ -124,6 +124,24 @@ enum Command {
         dry_run: bool,
     },
 
+    /// 把記憶整份帶走（SPEC §11.8 資料主權）。
+    ///
+    /// **不要自己複製 `sister.db`。** 資料庫跑在 WAL 模式，她正在錄的時候，
+    /// 最近寫進去的東西還躺在旁邊的 `sister.db-wal` 裡——只複製主檔的備份會
+    /// 安靜地少掉最後那一段，而你會在真的需要它的那天才發現。
+    ///
+    /// 匯出的目的地就是一個資料目錄，不是另一種格式：
+    /// `sister --data-dir <匯出的目錄> query 電話` 直接問得到。
+    Export {
+        /// 匯出到哪個目錄。裡面已經有 `sister.db` 就拒絕，不覆蓋。
+        #[arg(long, value_name = "目錄")]
+        to: PathBuf,
+
+        /// 連畫面檔一起帶走。它們通常比資料庫大好幾個數量級，先看 `sister stats`。
+        #[arg(long)]
+        with_frames: bool,
+    },
+
     /// 忘掉最近一段時間——當作那段時間沒發生過。
     ///
     /// 和 `prune` 不一樣：`prune` 刪的是保留期已經答應要刪的東西，這個刪的是
@@ -231,6 +249,7 @@ fn main() -> Result<()> {
         Command::Queries { limit, empty, json } => ops::queries::run(&data_dir, limit, empty, json),
         Command::Stats { json } => ops::stats::run(&data_dir, json),
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config, dry_run),
+        Command::Export { to, with_frames } => ops::export::run(&data_dir, &to, with_frames),
         Command::Forget { last, yes } => ops::forget::run(&data_dir, &last, yes),
         Command::Pause => ops::pause::run(&data_dir, true),
         Command::Resume => ops::pause::run(&data_dir, false),

@@ -150,6 +150,14 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 - [ ] 天數那一排長得出來，空白段落分得出「暫停」和「沒有新東西」。
 - [ ] 兩段式刪除：第一下先報「會刪掉多少」，第二下才真的刪。
 - [ ] 刪完之後 `frames\` 資料夾**真的變小**，DB 的列數也真的少了。
+- [ ] 終端機那條路（alpha.19 新的，Windows 上第一次跑）：
+      `sister forget --last 10m` 要先印出會刪掉什麼、**一個位元組都不動**，
+      加 `--yes` 才真的刪。`--last 30`（沒有單位）要被拒絕。
+      她還在錄的時候刪，收尾要提醒你先 `sister pause`。
+- [ ] `sister export --to %USERPROFILE%\sister-backup --with-frames`，然後
+      `sister --data-dir %USERPROFILE%\sister-backup query 電話` **要問得到**。
+      這一步在 Windows 上特別值得驗：路徑分隔符號和 `VACUUM INTO` 的參數
+      在這裡第一次碰面。**邊錄邊匯出**也要試一次——那正是它存在的理由。
 
 ## 9. 題庫
 

@@ -498,6 +498,100 @@ pub mod prune {
     }
 }
 
+/// 把記憶整份帶走。
+///
+/// SPEC §11.8（資料主權）寫著「`sister export` 全量匯出……就算本專案死了，
+/// 你的記憶還是你的」，而那個指令不存在。PRIVACY.md 給的替代說法是「整份記憶
+/// 就是一個 `sister.db` 檔加一個 `frames/` 目錄」——**那句話在她正在錄的時候
+/// 是錯的。** 資料庫跑在 WAL 模式，最近寫進去的東西還躺在旁邊的
+/// `sister.db-wal` 裡；照那句話去複製一個檔案，備份會安靜地少掉最後那一段。
+///
+/// 而「安靜地少掉最近那一段」是備份最不該有的失效模式：他要等到真的需要那份
+/// 備份的那一天才會發現。
+///
+/// 匯出的目的地**就是一個資料目錄**——不是另一種格式，是同一種。所以「還原」
+/// 這個動作不需要任何工具：`sister --data-dir <匯出的目錄> query …` 直接就問
+/// 得到。一個要靠原廠程式才讀得回來的匯出檔，不算資料主權。
+pub mod export {
+    use super::*;
+    use sister_core::config::Config;
+
+    pub fn run(data_dir: &Path, to: &Path, with_frames: bool) -> Result<()> {
+        let path = crate::db_path(data_dir);
+        if !path.exists() {
+            anyhow::bail!("{} 裡沒有資料庫，沒有東西可以匯出", data_dir.display());
+        }
+        let db = Db::open(&path).with_context(|| format!("open {}", path.display()))?;
+
+        std::fs::create_dir_all(to).with_context(|| format!("建立 {}", to.display()))?;
+        let dest_db = Config::db_path(to);
+        db.export_to(&dest_db)?;
+        let db_bytes = std::fs::metadata(&dest_db).map(|m| m.len()).unwrap_or(0);
+
+        let s = db.stats()?;
+        println!("匯出到 {}", to.display());
+        println!(
+            "  ✓ sister.db   {}（{} 列畫面、{} 段文字、{} 個事實、{} 題你問過的話）",
+            crate::fmt::bytes(db_bytes as i64),
+            s.frames,
+            s.chunks,
+            s.facts,
+            db.query_log_stats().map(|q| q.total).unwrap_or(0),
+        );
+
+        // 畫面檔在資料庫外面，而它們通常比資料庫大好幾個數量級。預設不帶，
+        // 但**一定要講**帶了沒——一份自稱「全量」卻少了幾 GB 截圖的匯出，
+        // 和一份少了最後一小時的備份是同一種錯。
+        let src_frames = Config::frames_dir(data_dir);
+        if with_frames {
+            let (n, bytes) = copy_frames(&src_frames, &Config::frames_dir(to))?;
+            println!(
+                "  ✓ frames/     {}（{} 個畫面檔）",
+                crate::fmt::bytes(bytes as i64),
+                n
+            );
+        } else {
+            println!("  ⏸ frames/     沒帶。出處點開來看到的那些畫面留在原地——加 `--with-frames`",);
+        }
+
+        // 匯出的目錄就是一個資料目錄，所以「還原」不需要任何工具。這一行
+        // 是整個指令的重點：他能自己驗證那份匯出是活的。
+        println!("\n這個目錄本身就是一個資料目錄，直接問得到：");
+        println!("  sister --data-dir {} query 電話", to.display());
+        println!(
+            "沒帶走的是 consent.toml（三張同意書的簽名）和 config.toml（設定）——\n\
+             那兩份是這台機器的設定，不是你的記憶。"
+        );
+        Ok(())
+    }
+
+    /// 一層一層複製畫面檔。回傳 (檔案數, 位元組)。
+    ///
+    /// 畫面檔寫完就不再改，所以邊錄邊複製是安全的——不像資料庫。
+    fn copy_frames(src: &Path, dest: &Path) -> Result<(u64, u64)> {
+        if !src.exists() {
+            return Ok((0, 0));
+        }
+        let mut n = 0;
+        let mut bytes = 0;
+        std::fs::create_dir_all(dest).with_context(|| format!("建立 {}", dest.display()))?;
+        for entry in std::fs::read_dir(src).with_context(|| format!("讀 {}", src.display()))? {
+            let entry = entry?;
+            let (from, to) = (entry.path(), dest.join(entry.file_name()));
+            if entry.file_type()?.is_dir() {
+                let (sub_n, sub_bytes) = copy_frames(&from, &to)?;
+                n += sub_n;
+                bytes += sub_bytes;
+            } else {
+                bytes += std::fs::copy(&from, &to)
+                    .with_context(|| format!("複製 {}", from.display()))?;
+                n += 1;
+            }
+        }
+        Ok((n, bytes))
+    }
+}
+
 /// 「剛剛那段當作沒發生過。」
 ///
 /// 這個子命令是補一個**已經被承諾出去的東西**。CLI 自己的說明第一句就寫著

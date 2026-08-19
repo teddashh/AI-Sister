@@ -1477,6 +1477,30 @@ impl Db {
         Ok(n.max(0) as u64)
     }
 
+    /// 把整個資料庫寫進另一個檔案——**一致的快照，即使她正在錄。**
+    ///
+    /// 為什麼不是叫使用者去複製 `sister.db`：這個資料庫跑在 WAL 模式，最近
+    /// 寫進去的東西還躺在旁邊的 `sister.db-wal` 裡。只複製主檔的話，備份會
+    /// **安靜地少掉最後那一段記憶**——而那正是備份最不該有的失效模式：他要
+    /// 等到真的需要那份備份的那一天，才會發現最近那幾小時不見了。
+    ///
+    /// `VACUUM INTO` 在一個交易裡把整份內容重寫出去，WAL 裡的東西一起進去，
+    /// 而且不需要停止正在寫入的那個行程。順便把檔案壓實（刪過東西之後
+    /// SQLite 不會自己還空間），所以匯出檔通常比原檔小——這不是漏了東西。
+    ///
+    /// 目的檔已經存在就失敗，不覆蓋。SQLite 自己就是這個行為，而它剛好是對的：
+    /// 一次打錯路徑的匯出不該蓋掉上一份備份。
+    pub fn export_to(&self, dest: &Path) -> Result<()> {
+        if dest.exists() {
+            anyhow::bail!("{} 已經存在——匯出不覆蓋既有檔案", dest.display());
+        }
+        // 路徑走參數，不是字串拼接：檔名裡的引號會變成一段 SQL。
+        self.conn
+            .execute("VACUUM INTO ?1", params![dest.to_string_lossy()])
+            .with_context(|| format!("VACUUM INTO {}", dest.display()))?;
+        Ok(())
+    }
+
     /// 足跡統計——直接對應 Phase 0 的 exit criteria。
     pub fn stats(&self) -> Result<DbStats> {
         let count = |sql: &str| -> Result<i64> {
@@ -2013,6 +2037,78 @@ mod tests {
 
     fn test_db() -> Db {
         Db::open_in_memory().expect("open in-memory db")
+    }
+
+    /// 匯出要驗的東西在磁碟上（WAL 是檔案的行為），所以這幾個測試不能用
+    /// in-memory。
+    struct TmpDir(std::path::PathBuf);
+    impl TmpDir {
+        fn new(name: &str) -> Self {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "sister-db-{}-{name}-{}",
+                std::process::id(),
+                N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            Self(dir)
+        }
+        fn join(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// **這一條就是 PRIVACY.md 那句「整份記憶就是一個 `sister.db` 檔」的反例。**
+    ///
+    /// 資料庫跑在 WAL 模式，所以她還在錄的時候，最近寫進去的東西躺在旁邊的
+    /// `sister.db-wal` 裡。照那句話去複製一個檔案，備份會**安靜地少掉最後那
+    /// 一段記憶**——而他要等到真的需要那份備份的那一天才會發現。
+    ///
+    /// 下面那個 `naive` 就是那個錯誤的備份。它不是在測 SQLite，它是在釘住
+    /// 「為什麼要有 `sister export`」這件事：哪天這一半不再成立了，
+    /// PRIVACY.md 那一段就可以改了，而這條測試會先講。
+    #[test]
+    fn a_backup_taken_while_she_is_still_recording_must_not_lose_the_last_hour() {
+        let tmp = TmpDir::new("export");
+        let live = tmp.join("sister.db");
+        let mut db = Db::open(&live).expect("open");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let f = frame_with_text(1_000, "chrome.exe", "視窗", &["客服專線 0800-080-123"]);
+        db.insert_frame(s, &f, Some("/tmp/x.webp"), 1)
+            .expect("insert");
+
+        // 錄製中的行程沒有關掉資料庫——這正是他會去按下備份的那個時刻。
+        let naive = tmp.join("naive.db");
+        std::fs::copy(&live, &naive).expect("複製主檔");
+        assert!(
+            Db::open(&naive)
+                .expect("open naive")
+                .search("客服專線", 10)
+                .expect("search")
+                .is_empty(),
+            "只複製 sister.db 就撈得到的話，PRIVACY.md 那一段可以改了"
+        );
+
+        let exported = tmp.join("export.db");
+        db.export_to(&exported).expect("export");
+        assert_eq!(
+            Db::open(&exported)
+                .expect("open exported")
+                .search("客服專線", 10)
+                .expect("search")
+                .len(),
+            1,
+            "匯出要包含還在 WAL 裡的那一段"
+        );
+
+        // 打錯路徑的一次匯出不該蓋掉上一份備份。
+        assert!(db.export_to(&exported).is_err(), "不覆蓋既有檔案");
     }
 
     fn frame_with_text(ts: Millis, app: &str, title: &str, lines: &[&str]) -> FrameCapture {
