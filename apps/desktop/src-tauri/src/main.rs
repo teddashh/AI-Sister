@@ -1297,6 +1297,15 @@ struct ConsentView {
     /// 讀不出來就是 `None`，不是猜一個預設值：預設是 true，猜錯的方向正好是
     /// 「答應了一件不會發生的事」。
     store_images: Option<bool>,
+    /// 設定檔的 `capture.enabled`——那個總開關。`None` = 檔案讀不出來。
+    ///
+    /// 它關著的時候每個 tick 直接回 `Tick::Disabled`，連螢幕都不會碰。而這一
+    /// 頁簽完名的最後一句話是「接下來跑 sister record 她才會開始，而且會留
+    /// 截圖」——**兩個子句都錯**，而他要等上一整天才會發現。
+    ///
+    /// 和 `store_images` 分開送，因為那兩件事要講的話不一樣：一個是「她根本
+    /// 不會開始」，一個是「她會開始，但只記字」。
+    capture_enabled: Option<bool>,
     /// 剛剛那一下**順手把另外兩張的簽署時間清掉了**（條文改版）。
     ///
     /// `consent_read` 永遠是 false——只有真的動手的那一下才會是 true。CLI 對
@@ -1325,16 +1334,19 @@ fn consent_view(dir: &std::path::Path) -> ConsentView {
 fn consent_view_after(dir: &std::path::Path, reset_by_version: bool) -> ConsentView {
     use sister_core::consent::Sheet;
     let c = sister_core::consent::load(dir);
+    // 只讀一次設定檔。分兩次讀的話，兩個欄位有機會來自不同的兩份內容
+    // ——他正好在這中間存檔的話，畫面上會出現一個檔案裡沒有的組合。
+    let config = config_path()
+        .ok()
+        .and_then(|p| sister_core::config::Config::load(&p).ok());
     ConsentView {
         reset_by_version,
         path: sister_core::consent::path(dir).display().to_string(),
         current: c.current(),
         allows_recording: c.allows_recording(),
         allows_frames: c.allows_frames(),
-        store_images: config_path()
-            .ok()
-            .and_then(|p| sister_core::config::Config::load(&p).ok())
-            .map(|c| c.capture.store_images),
+        store_images: config.as_ref().map(|c| c.capture.store_images),
+        capture_enabled: config.as_ref().map(|c| c.capture.enabled),
         sheets: Sheet::ALL
             .into_iter()
             .map(|s| SheetView {

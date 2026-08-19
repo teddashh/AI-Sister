@@ -88,7 +88,15 @@ function frames(view) {
 function paint(view) {
   el.path.textContent = view.path;
   el.cards.replaceChildren(...view.sheets.map(card));
-  if (view.allows_recording) {
+  if (view.allows_recording && view.capture_enabled === false) {
+    // 總開關關著。這一句要**排在留不留圖前面**：那個判斷回答的是「會不會
+    // 多出截圖」，而這裡的答案是連字都不會有。以前這兩件事只有一句話，
+    // 而那句話說的是「她才會開始，而且會留截圖」——兩個子句都錯。
+    say(
+      "簽好了，但設定檔的 capture.enabled 是 false：sister record 跑起來" +
+        "也會每一拍直接跳過，一個字都不會記。改成 true 才會真的開始。",
+    );
+  } else if (view.allows_recording) {
     // 「她可以開始記錄了」讀起來像**已經**開始了，而這一頁只負責同意——
     // 真正在錄的是另一個執行檔。第一次打開的人如果以為勾完就在錄了，他會
     // 等上一整天，然後發現什麼都沒有。所以這一句要指出下一步是什麼。
@@ -202,6 +210,7 @@ function demoView(current, storeImages = true) {
     allows_recording: current,
     allows_frames: current,
     store_images: storeImages,
+    capture_enabled: true,
     reset_by_version: false,
     sheets: DEMO.keys.map((key, i) => ({
       key,

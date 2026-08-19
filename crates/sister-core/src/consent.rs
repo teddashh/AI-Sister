@@ -199,8 +199,14 @@ impl Consent {
     /// 這是這個 repo 第四次踩到同一根釘子（前三次是 `question::shape`、
     /// `Config::db_path`、`answer`）：一條規則寫在兩個地方，遲早有一邊忘了改。
     /// 體檢報告尤其不能有第二份——它存在的唯一理由就是講出真的會發生的事。
+    ///
+    /// `capture.enabled` 也算一票，而且是最外面那一票：它關著的時候每個 tick
+    /// 直接回 `Tick::Disabled`，連螢幕都不會碰。少了它，一台
+    /// `enabled = false` 的機器上，同意書那一頁會說「接下來跑 sister record
+    /// 她才會開始，而且會留截圖」——兩個子句都錯，而它是使用者剛簽完名時
+    /// 讀到的最後一句話。
     pub fn keeps_images(&self, config: &crate::config::Config) -> bool {
-        config.capture.store_images && self.allows_frames()
+        config.capture.enabled && config.capture.store_images && self.allows_frames()
     }
 
     /// 把設定改成[實際會發生的事](Self::keeps_images)，回傳有沒有真的改到。
@@ -208,7 +214,11 @@ impl Consent {
     /// 回傳值是給呼叫端「要不要講出來」用的：安靜地少存一半東西，使用者只會
     /// 以為截圖功能壞了。
     pub fn downgrade(&self, config: &mut crate::config::Config) -> bool {
-        let keep = self.keeps_images(config);
+        // 這裡**故意不是** `keeps_images`，雖然兩支長得很像。這一支問的是
+        // 「同意書准不准」，而 `capture.enabled` 不是同意書的事：總開關關著
+        // 的時候把 `store_images` 也一起改掉，呼叫端就會印出「第三張同意書
+        // 沒簽」——而他可能簽得好好的，真正的原因是另一件事，另有一句話講。
+        let keep = config.capture.store_images && self.allows_frames();
         let changed = config.capture.store_images != keep;
         config.capture.store_images = keep;
         changed
@@ -388,6 +398,35 @@ mod tests {
         text_only.capture.store_images = false;
         assert!(!signed.keeps_images(&text_only));
         assert!(!signed.downgrade(&mut text_only));
+    }
+
+    /// 總開關關著的時候不會有截圖，而**那不是同意書的鍋**。
+    ///
+    /// `keeps_images` 問的是「硬碟上真的會多出截圖嗎」，所以它要算
+    /// `capture.enabled` 那一票——關著的話每個 tick 直接回 `Tick::Disabled`，
+    /// 連螢幕都不會碰。少了它，同意書那一頁會在一台 `enabled = false` 的機器
+    /// 上說「接下來跑 sister record 她才會開始，而且會留截圖」，兩個子句都錯。
+    ///
+    /// `downgrade` 問的是另一題（同意書准不准），所以它**不算**那一票。兩支
+    /// 用同一個算式的話，總開關關著就會印出「第三張同意書沒簽」——而他可能
+    /// 簽得好好的，真正的原因另有一句話在講。
+    #[test]
+    fn the_master_switch_counts_for_what_lands_on_disk_but_not_for_whose_fault_it_is() {
+        let mut signed = Consent::default();
+        signed.grant(Sheet::FrameStorage, 1);
+
+        let mut off = crate::config::Config::default();
+        off.capture.enabled = false;
+        assert!(off.capture.store_images, "他要的是留圖");
+        assert!(
+            !signed.keeps_images(&off),
+            "總開關關著，硬碟上不會多出任何一張截圖"
+        );
+        assert!(
+            !signed.downgrade(&mut off),
+            "但這不是同意書擋的，不准借同意書的嘴講出來"
+        );
+        assert!(off.capture.store_images, "他的偏好也不該被改掉");
     }
 
     /// 條文改版之後舊簽名失效，留圖也要跟著停——`allows_frames` 已經管了版本，
