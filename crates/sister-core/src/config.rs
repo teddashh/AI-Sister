@@ -1130,10 +1130,51 @@ mod tests {
             "https://bill.cht.com.tw/query",
             "https://docs.rs/rusqlite/latest/rusqlite/",
             "https://news.ycombinator.com/item?id=1",
+            // 底下這幾條是照著 `ordinary_apps_still_get_recorded` 的教訓補的：
+            // 那份名單本來只有五個，兩個真的 bug 就從缺口走過去。網址這邊
+            // 本來也只有上面四條，而它們一條都沒碰到 `*password*` / `*/login*`
+            // ——也就是預設規則裡最寬的那兩條，從來沒有人量過它們掃到誰。
+            "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers",
+            "https://crates.io/crates/rusqlite",
+            "https://mail.google.com/mail/u/0/#inbox",
+            "https://calendar.google.com/calendar/u/0/r",
+            "https://docs.google.com/document/d/abc/edit",
+            "https://en.wikipedia.org/wiki/Online_banking",
+            "https://zh.wikipedia.org/wiki/密碼學",
         ] {
             assert!(
                 !p.check(&focus("chrome.exe", "ok", Some(url))).is_blocked(),
                 "must allow {url}"
+            );
+        }
+    }
+
+    /// 量過之後，這四個是**現在真的擋掉了**的，而它們一個秘密都沒有。
+    ///
+    /// 寫成斷言而不是註解，因為「知道它會這樣」和「它改了會有人發現」是兩件
+    /// 事。`*password*` 是一條字串比對，它掃過的是他一整天讀過的每一個網址
+    /// ——而他正在寫的就是一個跟登入、憑證有關的產品，這幾頁是他的日常。
+    ///
+    /// 症狀和 `obs` 命中 Obsidian 一模一樣：那一頁上她什麼都記不住，而畫面上
+    /// 只有一行沒有解釋的 `excluded url`。
+    ///
+    /// **沒有直接把規則改窄。** 這是公開文件裡寫過的隱私預設值，而漏擋的方向
+    /// 是把密碼錄進去——要動它得先講清楚換來什麼，那是產品決定，不是修 bug。
+    /// 這個測試在的意義是：那個決定做出來的時候，這裡會紅，而不是沒有人發現。
+    #[test]
+    fn the_price_the_default_url_rules_currently_charge() {
+        let p = PrivacyConfig::default();
+        for url in [
+            "https://docs.djangoproject.com/en/5.0/topics/auth/passwords/",
+            "https://stackoverflow.com/questions/12345/how-to-hash-a-password",
+            "https://nextjs.org/docs/app/building-your-application/authentication/login",
+            // 密碼管理員的**官網**。金庫是桌面程式，`excluded_apps` 早就擋了；
+            // 這裡擋掉的只是它的定價頁。
+            "https://1password.com/pricing",
+        ] {
+            assert!(
+                p.check(&focus("chrome.exe", "ok", Some(url))).is_blocked(),
+                "{url} 現在擋不住了——規則改窄是好事，但這張現況照片要跟著更新"
             );
         }
     }
