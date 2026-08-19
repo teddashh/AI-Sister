@@ -873,12 +873,6 @@ pub mod forget {
             );
         }
 
-        let report = db.forget_preview(from, to)?;
-        if report.is_empty() {
-            println!("  那段時間裡她什麼都沒記到，不用忘。");
-            return Ok(());
-        }
-
         // 她還在錄的話，這個指令做不到他以為的那件事，而且有兩個理由：
         //
         // 1. 忘掉的右界是「現在」，但下一個 tick 幾毫秒後就到——他最想忘掉的
@@ -888,6 +882,21 @@ pub mod forget {
         // 所以這句話要在**預覽**那一段就講：那才是他還能先去按暫停的時刻。
         // 刪完之後再講就只是一句「你剛剛白做了」。
         let recording = sister_core::heartbeat::is_recording(data_dir, now);
+
+        // 「什麼都沒記到」以前直接 return，所以那句警告在**最需要它的那一次**
+        // 反而不會出現：她一個 tick 一個 tick 寫，他剛剛做的那件事很可能還沒
+        // 落進資料庫。那時候「不用忘」讀起來像「你沒事」，而三秒後就有事了。
+        let report = db.forget_preview(from, to)?;
+        if report.is_empty() {
+            println!("  那段時間裡她什麼都沒記到，不用忘。");
+            if recording {
+                println!(
+                    "\n⚠  **但她現在還在錄。** 剛剛那一段可能只是還沒寫進資料庫——\n   \
+                     真的想清掉就先 `sister pause`，過一下再跑一次這個指令。"
+                );
+            }
+            return Ok(());
+        }
 
         if !yes {
             prune::print_report(&report, true);
