@@ -660,8 +660,25 @@ pub mod forget {
             return Ok(());
         }
 
+        // 她還在錄的話，這個指令做不到他以為的那件事，而且有兩個理由：
+        //
+        // 1. 忘掉的右界是「現在」，但下一個 tick 幾毫秒後就到——他最想忘掉的
+        //    那一幀，很可能正好落在這一刀後面。
+        // 2. 就算刀切得準，那個畫面通常還在螢幕上，下一秒又被記一次。
+        //
+        // 所以這句話要在**預覽**那一段就講：那才是他還能先去按暫停的時刻。
+        // 刪完之後再講就只是一句「你剛剛白做了」。
+        let recording = sister_core::heartbeat::is_recording(data_dir, now);
+
         if !yes {
             prune::print_report(&report, true);
+            if recording {
+                println!(
+                    "\n⚠  **她現在還在錄。** 先 `sister pause` 再刪——不然你最想忘掉的\n   \
+                     那一幀可能正好在這一刀後面被寫進去，而且那個畫面多半還在螢幕上，\n   \
+                     下一個 tick 就又被記一次。處理完再 `sister resume`。"
+                );
+            }
             println!(
                 "\n這是預覽，一個位元組都沒動。真的要忘掉就再跑一次，加上 `--yes`：\n  \
                  sister forget --last {last} --yes\n\
@@ -673,12 +690,10 @@ pub mod forget {
         let report = db.forget(from, to, Some(&prune::frames_dir(data_dir)))?;
         prune::print_report(&report, false);
 
-        // 刪完才講，因為這句話不是「你要不要繼續」，是「你剛剛刪掉的東西
-        // 下一秒可能又被記起來」。她還在錄的時候，剛剛那個畫面還在螢幕上。
-        if sister_core::heartbeat::is_recording(data_dir, now) {
+        if recording {
             println!(
-                "\n⚠  她還在錄。如果剛才那個東西現在還在螢幕上，下一個 tick 就會再被記一次\n   \
-                 ——先 `sister pause`，處理完再 `sister resume`。"
+                "\n⚠  她剛才一直在錄，所以這一刀之後寫進去的東西還在——包含你可能\n   \
+                 最想忘掉的最後那一幀。先 `sister pause`，再跑一次這個指令。"
             );
         }
         Ok(())
