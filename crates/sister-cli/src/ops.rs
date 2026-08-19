@@ -1974,6 +1974,17 @@ pub mod stats {
         // 結束之後只有資料庫答得出來。
         if pauses.episodes == 0 {
             println!("  暫停      這份紀錄裡沒有暫停過");
+            // 但「紀錄裡沒有」不等於「現在沒有」。他在沒有 recorder 在跑的
+            // 時候按下暫停，沒有任何一筆事件記得這件事——而下一次 `sister
+            // record` 會開起來然後什麼都不記，他手上只有這一行可以看。
+            if sister_core::pause::is_paused(data_dir) {
+                println!(
+                    "            但她**現在是暫停的**（按下去的時候沒有人在錄，所以紀錄裡看不到）"
+                );
+                println!(
+                    "            `sister resume` 解除。不解除的話，接下來錄的每一分鐘都是空的。"
+                );
+            }
         } else {
             println!(
                 "  暫停      {} 段，已結束的加起來 {}",
