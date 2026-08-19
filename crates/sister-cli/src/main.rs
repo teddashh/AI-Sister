@@ -266,6 +266,20 @@ fn main() -> Result<()> {
 
 fn load_config(explicit: Option<&std::path::Path>) -> Result<Config> {
     match explicit {
+        // 他親手打了這個路徑，那它不存在就是打錯了，不是「請用預設值」。
+        //
+        // `Config::load` 對不存在的檔案回傳預設值——那對**預設位置**是對的
+        // （沒有設定檔本來就跑預設）。但照搬到這裡，`sister --config
+        // ~/sister.toml doctor` 會安安靜靜地印出一整頁預設值，而他正是打開
+        // doctor 來確認那份設定有沒有生效的。最糟的是排除規則那三行：他看到
+        // 「排除的 app 9 條規則」就走了，那 9 條是內建的，他自己寫的那 30 條
+        // 一條都沒載進來。
+        //
+        // 錄製迴圈那邊早就防過同一件事（設定檔中途不見了不算請用預設值），
+        // 這裡是它的開機版本。
+        Some(p) if !p.exists() => {
+            anyhow::bail!("找不到設定檔：{}", p.display())
+        }
         Some(p) => Config::load(p).with_context(|| format!("load config {}", p.display())),
         None => match Config::default_path() {
             // 沒有設定檔是正常狀態，用預設值——預設值本來就該是安全的

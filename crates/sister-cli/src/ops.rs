@@ -740,12 +740,26 @@ pub mod forget {
 
         // 把區間用他看得懂的方式講一次。「最近 2 小時」到底是哪兩個時間點，
         // 只有在按下去之前看到才有意義。
-        println!(
-            "要忘掉的是 {} 到 {}（{}）。",
-            crate::fmt::timestamp(from),
-            crate::fmt::timestamp(to),
-            crate::fmt::duration_ms(span)
-        );
+        //
+        // 而「看得懂」是這一行的全部意義。`--last 99999999d` 會把起點推到 1970
+        // 年以前，這一行就印出 `ts:-8638212780293712`——那正是他要拿來決定按不
+        // 按下去的那一行。功能上沒壞（往前刪到底就是刪光），壞的是他讀不到自己
+        // 正要做什麼。夾在 0 之後也不印那個日期：`1969-12-31` 一樣看不懂，而且
+        // 它想講的其實是「全部」，那就直接講「全部」。
+        let from = from.max(0);
+        if from == 0 {
+            println!(
+                "要忘掉的是**全部**，直到 {}——這個長度往回超過了她開始記錄的那一天。",
+                crate::fmt::timestamp(to)
+            );
+        } else {
+            println!(
+                "要忘掉的是 {} 到 {}（{}）。",
+                crate::fmt::timestamp(from),
+                crate::fmt::timestamp(to),
+                crate::fmt::duration_ms(span)
+            );
+        }
 
         let report = db.forget_preview(from, to)?;
         if report.is_empty() {
