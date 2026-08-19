@@ -319,11 +319,23 @@ impl PrivacyConfig {
             }
         }
 
+        // **講出是哪一條規則。** 上面兩個分支都把 app 名字寫進理由裡，這兩個
+        // 以前只寫 `excluded url` / `excluded window title`——於是 `sister stats`
+        // 事後只答得出「excluded url 擋了 812 段」，答不出那 812 段裡有 780 段
+        // 是 `*password*` 吃掉的技術文件。
+        //
+        // 這正是那條規則的代價可以隱形這麼久的原因：稽核紀錄的工作就是讓排除
+        // 看得見（DATA_INVENTORY 的原話是「沒有它，使用者無法驗證排除真的生效
+        // 了」），而它漏掉了唯一能讓人採取行動的那個欄位。
+        //
+        // 寫進去的是**他自己設定檔裡的那一行**，不是網址、也不是標題——規則是
+        // 他寫的，網址才是螢幕上的東西。這條界線就是這裡可以寫、上面不能寫
+        // 整串網址的理由。
         if let Some(url) = focus.url.as_deref() {
             let url_lc = url.to_ascii_lowercase();
             for pat in &self.excluded_urls {
                 if glob_match(&pat.to_ascii_lowercase(), &url_lc) {
-                    return Exclusion::Blocked("excluded url".to_string());
+                    return Exclusion::Blocked(format!("excluded url: {pat}"));
                 }
             }
         }
@@ -332,7 +344,7 @@ impl PrivacyConfig {
             let title_lc = title.to_ascii_lowercase();
             for pat in &self.excluded_titles {
                 if glob_match(&pat.to_ascii_lowercase(), &title_lc) {
-                    return Exclusion::Blocked("excluded window title".to_string());
+                    return Exclusion::Blocked(format!("excluded window title: {pat}"));
                 }
             }
         }
@@ -969,7 +981,29 @@ mod tests {
             Some("https://www.cathaybk.com.tw/net/transfer"),
         ));
         assert!(v.is_blocked());
-        assert_eq!(v.reason(), Some("excluded url"));
+        // 是哪一條規則擋的要寫進理由裡。少了它，`sister stats` 事後只答得出
+        // 「excluded url 擋了 N 段」——而使用者要採取行動需要的正是這一格。
+        assert_eq!(v.reason(), Some("excluded url: *cathaybk.com*"));
+    }
+
+    /// 稽核理由裡可以有他自己寫的規則，**不可以**有螢幕上的東西。
+    #[test]
+    fn the_audit_reason_names_the_rule_not_the_page() {
+        let p = PrivacyConfig::default();
+        let v = p.check(&focus(
+            "chrome.exe",
+            "Cathay Bank — 轉帳 NT$50,000 給 王小明",
+            Some("https://www.cathaybk.com.tw/net/transfer?acct=1234567890"),
+        ));
+        let reason = v.reason().expect("要被擋下來");
+        assert!(reason.contains("*cathaybk.com*"), "要講出規則：{reason}");
+        for secret in ["transfer", "1234567890", "王小明", "50,000"] {
+            assert!(
+                !reason.contains(secret),
+                "理由裡出現了螢幕上的東西「{secret}」：{reason}——\
+                 這一列是稽核紀錄，它躲得過所有排除規則，不能拿來夾帶內容"
+            );
+        }
     }
 
     #[test]
