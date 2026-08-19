@@ -180,6 +180,52 @@ impl SystemKind {
     }
 }
 
+/// 一場錄製為什麼結束。
+///
+/// 「她停了」和「她**為什麼**停了」是兩個問題，而以前只答得出第一個：
+/// `session_end` 的 `detail` 一律是 `None`，於是「你按了停止」「時間到了」
+/// 「同意書被撤回」在磁碟上長得一模一樣。三件事的下一步完全不同——第一件
+/// 什麼都不用做，第三件是「她從現在起什麼都不會記」。
+///
+/// 沒有 `Crashed`：當掉的那一場**寫不了任何東西**。它的樣子是
+/// `sessions.ended_at` 留在 `NULL`（見 [`crate::db::Db::last_session`]），
+/// 而一個由當掉的行程自己宣告的「我當掉了」本來就不存在。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndReason {
+    /// `--duration` 跑完了。
+    Duration,
+    /// 有人按了停止（字母人上的那一顆、系統匣、或 `sister stop`）。
+    Requested,
+    /// Ctrl-C。
+    Interrupted,
+    /// 第一張同意書在半路上被撤回。
+    ConsentRevoked,
+}
+
+impl EndReason {
+    /// 存進 `system_events.detail` 的字串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EndReason::Duration => "duration",
+            EndReason::Requested => "requested",
+            EndReason::Interrupted => "interrupted",
+            EndReason::ConsentRevoked => "consent-revoked",
+        }
+    }
+
+    /// 講給人聽的那一句。存的是上面那組字串而不是這一句：文案會改，而改了
+    /// 之後舊的紀錄不該變成讀不懂的東西。
+    pub fn describe(text: &str) -> &str {
+        match text {
+            "duration" => "錄滿了你指定的時間",
+            "requested" => "你按了停止",
+            "interrupted" => "在終端機按了 Ctrl-C",
+            "consent-revoked" => "第一張同意書被撤回",
+            other => other,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemEvent {
     pub ts: Millis,

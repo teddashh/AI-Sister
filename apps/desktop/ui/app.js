@@ -76,6 +76,27 @@ let recording = true;
  */
 let starting = false;
 
+/**
+ * 上一場錄製是什麼時候、為什麼結束的（`null` = 還不知道／她沒錄過）。
+ *
+ * 「沒有人在記錄」後面永遠跟著同一個問題：那她是什麼時候停的？沒有這一句的
+ * 話，同一句灰字既可能是「你十分鐘前自己按了停止」，也可能是「她昨天半夜
+ * 當掉了，你今天一整天都不在」——而只有後者需要你做什麼。
+ */
+let lastRun = null;
+
+/** 灰掉那一刻要說的第二句話。她在錄的時候不講——那是現在式，不是回顧。 */
+function asleepDetail() {
+  if (lastRun === null) return "";
+  const at = (ts) => when(ts).slice(5); // 年份對這句話沒有用
+  if (lastRun.ended_at === null || lastRun.ended_at === undefined) {
+    return `上一次從 ${at(lastRun.started_at)} 開始，沒有好好結束`;
+  }
+  return lastRun.why
+    ? `上一次 ${at(lastRun.ended_at)} 停的：${lastRun.why}`
+    : `上一次 ${at(lastRun.ended_at)} 停的`;
+}
+
 function paint() {
   // 順序就是嚴重程度。她沒在看的時候，畫面上絕不可以有一格看起來像在看，
   // 而「被你叫停」要壓過「根本沒人開她」——前者是他做的決定，後者只是狀態。
@@ -90,7 +111,10 @@ function paint() {
     : state === "thinking" && shown !== "thinking"
       ? `想一下…（${shown === "paused" ? "仍在暫停" : "但沒有人在記錄"}）`
       : STATE_LINES[shown];
-  stateLine.textContent = line;
+  // 灰掉的時候多講一句「上一次是什麼時候、為什麼停的」。換行不換句：那是
+  // 同一件事的後半段，而 `.state-line` 的 `pre-line` 讓它自己排。
+  const detail = !starting && shown === "asleep" ? asleepDetail() : "";
+  stateLine.textContent = detail === "" ? line : `${line}\n${detail}`;
   // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。
   avatar.setAttribute("aria-label", `AI-Sister：${line}`);
 
@@ -120,9 +144,14 @@ function setPaused(next) {
 }
 
 function setRecording(next) {
+  const was = recording;
   recording = next === true;
   // 她自己起來了（或是從別的地方被開起來的），那個「正在叫她」的等待就結束了。
   if (recording) starting = false;
+  // 剛剛才停下來：現在才有一場「上一次」可以講，而它跟開場時讀到的那一場
+  // 不是同一場。停了才問，因為在錄的時候問到的會是**這一場**（沒有收尾），
+  // 而畫面會把它讀成「她當掉了」。
+  if (was && !recording) refreshLastRun();
   paint();
 }
 
@@ -192,6 +221,24 @@ let pollTimer = null;
 function pollRecording() {
   if (invoke === null) return;
   invoke("recording_state").then(setRecording, () => {});
+}
+
+/**
+ * 去問「上一場是怎麼結束的」。
+ *
+ * 只在她從「有在錄」掉到「沒在錄」的那一刻問，外加開場問一次——不是每 5 秒
+ * 問一次。這是一個**不會再變**的事實（下一次改變的時候她已經在錄了，那時候
+ * 這句話不會被顯示），而每一次呼叫都要開資料庫查一次。
+ */
+function refreshLastRun() {
+  if (invoke === null) return;
+  invoke("last_recording_end").then(
+    (run) => {
+      lastRun = run ?? null;
+      paint();
+    },
+    () => {},
+  );
 }
 
 function updatePollGate() {
@@ -574,6 +621,31 @@ if (invoke !== null) {
 // 裡把 recorder 開起來或按 Ctrl+C，而這個視窗是他判斷「她到底有沒有在看」
 // 的唯一依據。
 updatePollGate();
+
+// 開場也問一次「上一場是怎麼結束的」：最常見的情況是他早上打開電腦、看到
+// 灰掉的她，而昨晚那一場是怎麼結束的正是這時候要回答的問題。
+//
+// 排在 `updatePollGate()` 後面：那一行會同步問一次 `recording_state`，所以
+// 現在正在錄的話，畫面已經不是灰的了，這一句根本不會被顯示。
+refreshLastRun();
+
+// `?asleep=stopped` / `?asleep=crashed`：那句灰字底下的第二行。這台機器開不起
+// Tauri，而「她昨晚當掉了」和「你自己按了停止」長得該不一樣——那是要用眼睛看的。
+if (params.get("asleep") === "stopped") {
+  lastRun = {
+    started_at: Date.now() - 4 * 3600 * 1000,
+    ended_at: Date.now() - 90 * 60 * 1000,
+    why: "你按了停止",
+  };
+  paint();
+} else if (params.get("asleep") === "crashed") {
+  lastRun = {
+    started_at: Date.now() - 19 * 3600 * 1000,
+    ended_at: null,
+    why: null,
+  };
+  paint();
+}
 
 if (params.get("hits") === "demo") {
   renderHits(

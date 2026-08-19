@@ -14,8 +14,8 @@ use sister_core::config::Config;
 use sister_core::db::Db;
 use sister_core::dedup::{Deduper, FrameVerdict};
 use sister_core::model::{
-    ClipboardEvent, FocusEvent, FocusKind, FocusSnapshot, FrameCapture, Millis, SystemEvent,
-    SystemKind,
+    ClipboardEvent, EndReason, FocusEvent, FocusKind, FocusSnapshot, FrameCapture, Millis,
+    SystemEvent, SystemKind,
 };
 use sister_core::redact;
 
@@ -316,15 +316,19 @@ impl<B: Backend> Recorder<B> {
         Ok(true)
     }
 
-    /// 收尾：標記 session 結束。
-    pub fn finish(&mut self) -> Result<()> {
+    /// 收尾：標記 session 結束，並且記下**為什麼**。
+    ///
+    /// 理由是必填的參數，不是 `Option`：這一步只有四條路走得到（見
+    /// [`EndReason`]），而讓呼叫端有辦法說「不知道」，等於保證某一條路上
+    /// 遲早會沒有人填。
+    pub fn finish(&mut self, reason: EndReason) -> Result<()> {
         let ts = sister_core::now_ms();
         self.db.insert_system(
             self.session_id,
             &SystemEvent {
                 ts,
                 kind: SystemKind::SessionEnd,
-                detail: None,
+                detail: Some(reason.as_str().to_string()),
             },
         )?;
         self.db.end_session(self.session_id)?;
@@ -2173,7 +2177,7 @@ mod tests {
     fn session_lifecycle_is_recorded() {
         let mut r = recorder(vec![step(0, "chrome.exe", "x", &["y"])], Config::default());
         r.tick(0).expect("tick");
-        r.finish().expect("finish");
+        r.finish(EndReason::Requested).expect("finish");
 
         let ended: Option<i64> = r
             .db()
@@ -2193,6 +2197,30 @@ mod tests {
             rows.flatten().collect()
         };
         assert_eq!(kinds, vec!["session_start", "session_end"]);
+    }
+
+    /// 「她停了」和「她為什麼停了」是兩個問題。以前只答得出第一個：不管是
+    /// 按了停止、時間到、還是同意書被撤回，`session_end` 都長得一模一樣。
+    #[test]
+    fn a_recording_that_stopped_can_say_why() {
+        let mut r = recorder(vec![step(0, "chrome.exe", "x", &["y"])], Config::default());
+        r.tick(0).expect("tick");
+        r.finish(EndReason::ConsentRevoked).expect("finish");
+
+        let last = r.db().last_session().expect("last").expect("有一場");
+        assert!(last.ended_at.is_some(), "好好收尾了");
+        assert_eq!(last.reason.as_deref(), Some("consent-revoked"));
+    }
+
+    /// 沒有收尾的那一場說不出理由——**它本來就寫不了任何東西**。這裡要驗的
+    /// 是那時候讀出來的東西長什麼樣：`ended_at` 是 `None`，而不是某個猜出來
+    /// 的預設值。
+    #[test]
+    fn a_recording_that_died_says_nothing() {
+        let r = recorder(vec![step(0, "chrome.exe", "x", &["y"])], Config::default());
+        let last = r.db().last_session().expect("last").expect("有一場");
+        assert_eq!(last.ended_at, None);
+        assert_eq!(last.reason, None);
     }
 
     #[test]

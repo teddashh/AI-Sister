@@ -805,6 +805,36 @@ impl Db {
         )?)
     }
 
+    /// 最後一場錄製：什麼時候開始、有沒有好好結束、以及**為什麼**結束。
+    ///
+    /// 「現在沒有人在錄」是心跳回答的問題（[`crate::heartbeat`]），而那一句
+    /// 話後面永遠跟著同一個問題：那她是什麼時候停的、為什麼？以前答不出來
+    /// ——`session_end` 的 `detail` 一律是 `None`，所以「你按了停止」和
+    /// 「她當掉了」在磁碟上長得一模一樣，而這兩件事的下一步差很多。
+    ///
+    /// `ended_at` 是 `None` 就是**沒有好好結束**：不是當掉，就是另一個終端機
+    /// 現在正在錄（[`Db::crash_audit`] 上的同一個歧義）。這裡一樣不猜，兩個
+    /// 欄位都給出去，讓看得到心跳的那一層去分辨。
+    pub fn last_session(&self) -> Result<Option<LastSession>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.started_at, s.ended_at,
+                    (SELECT e.detail FROM system_events e
+                      WHERE e.session_id = s.id AND e.kind = 'session_end'
+                      ORDER BY e.id DESC LIMIT 1)
+             FROM sessions s ORDER BY s.id DESC LIMIT 1",
+        )?;
+        let row = stmt
+            .query_row([], |r| {
+                Ok(LastSession {
+                    started_at: r.get(0)?,
+                    ended_at: r.get(1)?,
+                    reason: r.get(2)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
     /// 那三張「只寫不讀」的表，裡面到底有沒有東西。
     ///
     /// `ocr_blocks` 的座標、`focus_events`、`input_metrics` 整整三張表，
@@ -1757,6 +1787,20 @@ pub struct QueryRow {
     pub source: String,
     /// 這一題有幾個出處被點開過。0 = 她給了答案，但沒有一筆值得點。
     pub clicks: i64,
+}
+
+/// 最後一場錄製（見 [`Db::last_session`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastSession {
+    pub started_at: Millis,
+    /// `None` = 沒有好好結束：當掉、被砍，或者**現在正在錄**。
+    pub ended_at: Option<Millis>,
+    /// [`crate::model::EndReason::as_str`] 存下來的那個字串。
+    ///
+    /// 存字串而不是 enum：舊版本寫下的紀錄要讀得出來，而一個讀不懂的理由
+    /// 應該原樣印出去（[`crate::model::EndReason::describe`] 就是這樣做的），
+    /// 不是被當成「沒有理由」吞掉。
+    pub reason: Option<String>,
 }
 
 /// 題庫的總覽（見 [`Db::query_log_stats`]）。

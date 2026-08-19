@@ -345,6 +345,13 @@ jobs:
           [ ! -f ./loop/stop.request ] \
             || { echo "::error::停止請求沒被消費掉——下一場錄製一開始就會自己結束"; exit 1; }
 
+          # 那一行字印在終端機上就消失了。**磁碟上也要記得**：明天早上打開
+          # 字母人，「沒有人在記錄」底下那句話就是從這裡來的，而「你自己按了
+          # 停止」和「她半夜當掉了」需要的下一步完全不同。
+          $S --data-dir ./loop doctor > stopdoctor.txt 2>&1
+          grep -q '你按了停止' stopdoctor.txt \
+            || { echo "::error::錄製結束了，但資料庫說不出是為什麼"; cat stopdoctor.txt; exit 1; }
+
       - name: Upload sister.exe
         uses: actions/upload-artifact@v4
         with:

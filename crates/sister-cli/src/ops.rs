@@ -1554,6 +1554,41 @@ pub mod doctor {
                 ),
             }
 
+            // 「她停了」後面永遠跟著同一個問題：什麼時候、為什麼。上面那一列
+            // 只數得出「有幾段沒收尾」，答不了「上一段是怎麼結束的」——而這兩
+            // 件事的下一步差很多：按了停止什麼都不用做，同意書被撤回的話她從
+            // 現在起什麼都不會記。
+            if let Some(last) = db.last_session()? {
+                let since = fmt::timestamp(last.started_at);
+                match (last.ended_at, last.reason.as_deref()) {
+                    (Some(t), Some(r)) => line(
+                        true,
+                        "上一次錄製",
+                        &format!(
+                            "{since} 開始，{} 結束——{}",
+                            fmt::timestamp(t),
+                            sister_core::model::EndReason::describe(r)
+                        ),
+                    ),
+                    // 有收尾時間、卻沒有理由：alpha.17 以前寫下的紀錄。不是
+                    // 錯誤，只是那個版本答不出來——說出「那時候還沒有在記」，
+                    // 比留一個看起來像故障的空白好。
+                    (Some(t), None) => mark(
+                        "?",
+                        "上一次錄製",
+                        &format!(
+                            "{since} 開始，{} 結束（那一版還沒有在記為什麼停）",
+                            fmt::timestamp(t)
+                        ),
+                    ),
+                    (None, _) => mark(
+                        "?",
+                        "上一次錄製",
+                        &format!("{since} 開始，沒有收尾——不是當掉，就是它現在還在跑"),
+                    ),
+                }
+            }
+
             // 上面那一列擋的是「一個字都沒有」。它擋不住的是**有一堆列、
             // 每一列都是空殼**——`COUNT(*)` 對這兩種故障的回答一模一樣。
             //
@@ -1947,7 +1982,9 @@ pub mod replay {
             }
             offset += interval_ms;
         }
-        rec.finish()?;
+        // 重播一定是跑完整份腳本才結束的：沒有人按得了停止，也沒有 Ctrl-C
+        // 以外的出口。`--days-ago` 這種參數改的是時間戳，不是長度。
+        rec.finish(sister_core::model::EndReason::Duration)?;
 
         let s = rec.stats();
         println!(
@@ -2318,10 +2355,14 @@ pub mod record {
         let mut retention = retention;
 
         let mut last_report = Instant::now();
+        // 為什麼停的。預設是 Ctrl-C，因為 `while` 那個條件是唯一一條不經過
+        // 任何 `break` 的出口——那條路上沒有地方可以設定它。
+        let mut end_reason = sister_core::model::EndReason::Interrupted;
         while !STOP.load(Ordering::SeqCst) {
             if let Some(d) = deadline
                 && Instant::now() >= d
             {
+                end_reason = sister_core::model::EndReason::Duration;
                 break;
             }
 
@@ -2329,6 +2370,7 @@ pub mod record {
             // 它們是同一種東西：一次 `stat`，而按下去的那個人正看著螢幕等它生效。
             if sister_core::control::take_stop(data_dir) {
                 println!("  ■ 收到停止的請求，這就收工。");
+                end_reason = sister_core::model::EndReason::Requested;
                 break;
             }
 
@@ -2445,6 +2487,7 @@ pub mod record {
                             "\n⏹ 第一張同意書被撤回了，錄製到此為止。\n  \
                              要再開始請跑：sister consent --grant local-recording"
                         );
+                        end_reason = sister_core::model::EndReason::ConsentRevoked;
                         break;
                     }
                     Recheck::Images(true) => {
@@ -2519,7 +2562,7 @@ pub mod record {
         // 而 UIA 會在半路上永久投降——那之後 excluded_urls 一條都不生效，
         // 卻沒有任何地方會講。見 `Backend::degradations`。
         let lost = sister_capture::Backend::degradations(rec.backend());
-        rec.finish()?;
+        rec.finish(end_reason)?;
         println!(
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
             stats.ticks, stats.kept, stats.duplicates, stats.excluded, stats.no_screen

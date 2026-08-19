@@ -125,6 +125,49 @@ fn recording_state(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> boo
     now
 }
 
+/// 上一場錄製是什麼時候、為什麼結束的。
+///
+/// 「沒有人在記錄」永遠帶著下一個問題：那她是什麼時候停的、為什麼停的。
+/// 答不出來的話，那句灰字讀起來就像故障——而「你自己按了停止」和「同意書
+/// 被撤回」的下一步完全不同。
+///
+/// 只在她沒在錄的時候問（見畫面那一邊）：正在錄的時候，最後一場就是這一場，
+/// 而它還沒有結束。
+///
+/// 時戳直接給出去，不在這裡排版：時區是畫面那一邊的東西，而它已經有一個
+/// `when()` 在用同一種格式印出處了（時間軸那條 `tz_offset_ms` 是同一條紀律）。
+#[tauri::command(async)]
+fn last_recording_end(shell: tauri::State<'_, Shell>) -> Option<LastRun> {
+    // 資料庫還沒有／打不開的時候回 `None`。那句灰字自己站得住，這裡不該為了
+    // 補一行字而把「她還沒錄過任何東西」講成一個錯誤。
+    with_db(&shell, |db| {
+        Ok(db
+            .last_session()
+            .map_err(|e| e.to_string())?
+            .map(|s| LastRun {
+                started_at: s.started_at,
+                ended_at: s.ended_at,
+                why: s
+                    .reason
+                    .as_deref()
+                    .map(|r| sister_core::model::EndReason::describe(r).to_string()),
+            }))
+    })
+    .ok()
+    .flatten()
+}
+
+/// 上一場錄製（見 [`last_recording_end`]）。
+#[derive(Serialize)]
+struct LastRun {
+    started_at: i64,
+    /// `None` = 沒有好好結束。問這支命令的前提是「現在沒有心跳」，所以
+    /// `Db::last_session` 上那個「還是它正在跑」的歧義在這裡已經被排除了。
+    ended_at: Option<i64>,
+    /// 已經翻成人話的理由。`None` = alpha.17 以前寫下的紀錄，那時候還沒在記。
+    why: Option<String>,
+}
+
 fn record_label(recording: bool) -> &'static str {
     if recording {
         "停止記錄"
@@ -1241,6 +1284,7 @@ fn main() {
             start_recording,
             stop_recording,
             recorder_log_tail,
+            last_recording_end,
             toggle_pause,
             settings_read,
             settings_write,

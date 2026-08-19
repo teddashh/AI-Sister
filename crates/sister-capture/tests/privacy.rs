@@ -134,7 +134,8 @@ fn run_minefield(name: &str) -> Run {
             Err(e) => panic!("tick {ts} failed: {e:#}"),
         }
     }
-    rec.finish().expect("finish");
+    rec.finish(sister_core::model::EndReason::Duration)
+        .expect("finish");
     let stats = rec.stats().clone();
     // 收掉連線，讓 WAL 落回主檔
     drop(rec.into_db());
