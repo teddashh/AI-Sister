@@ -603,6 +603,10 @@ struct Blind {
     /// 這一題只翻了最近幾天。`null` = 整顆資料庫都翻過了。見
     /// [`sister_core::answer::BlindSpots::scan_horizon_days`]。
     scan_horizon_days: Option<i64>,
+    /// 現在有沒有人在錄。只在「一段字都沒有」那組句子裡用得到，而它在那裡
+    /// 分開的是「被忘掉了／過期了」和「她三秒前才開起來」——見
+    /// [`sister_core::answer::BlindSpots::recording_now`]。
+    recording_now: bool,
 }
 
 /// 一筆 ★ 答案。
@@ -737,6 +741,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 paused_now: b.paused_now,
                 paused_truncated: b.paused_truncated,
                 scan_horizon_days: b.scan_horizon_days,
+                recording_now: b.recording_now,
             })
         } else {
             None

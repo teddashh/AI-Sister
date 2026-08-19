@@ -159,6 +159,19 @@ pub struct BlindSpots {
     /// 365 天差 12 倍。少了這個欄位，「她記的每一段裡都沒有這個字」會把
     /// 十二分之一的資料講成全部。
     pub scan_horizon_days: Option<i64>,
+    /// 現在有沒有人在錄（[`crate::heartbeat`] 的心跳還新鮮）。
+    ///
+    /// 只在「一段字都沒有」那組句子裡用得到，而它在那裡分開的是兩件事：
+    ///
+    /// - 她**沒**在錄、`sessions > 0`、什麼都不剩 → 「被忘掉了，或是過了保留期」。
+    ///   沒有東西會再進來，所以那句話是完整的。
+    /// - 她**正在**錄、`sessions > 0`、什麼都不剩 → 那句話少了一種可能，而且
+    ///   正好是最常見的那一種：他三秒前才按下「開始記錄」。第一次用的人問的
+    ///   第一個問題就落在這裡，然後被告知他的紀錄被忘掉了或過期了。
+    ///
+    /// 放在這裡而不是各自判：終端機和字母人共用這一份，而「同一句話在兩個
+    /// 地方得到兩種答案」是這個專案反覆踩到的坑。
+    pub recording_now: bool,
 }
 
 impl BlindSpots {
@@ -204,6 +217,7 @@ pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::
         paused_now: crate::pause::is_paused(data_dir),
         paused_truncated: pauses.truncated,
         scan_horizon_days: db.scan_horizon_days(query)?,
+        recording_now: crate::heartbeat::is_recording(data_dir, crate::now_ms()),
     })
 }
 
@@ -415,6 +429,47 @@ mod tests {
         assert!(
             !b.paused_now,
             "但旗標不在——說她現在閉著眼睛就是一句永遠不會過期的假話"
+        );
+    }
+
+    /// 她三秒前才按下「開始記錄」，不該被告知他的紀錄被忘掉了。
+    ///
+    /// `sessions > 0 && chunks == 0` 有兩種：資料被清掉了，或者這一場才剛
+    /// 開始、第一段字還沒寫進去。以前兩種都印「被忘掉了，或是過了保留期」
+    /// ——而第一次用的人問的第一個問題正好落在這裡。
+    ///
+    /// 判斷放在 `BlindSpots` 而不是各自算：這句話終端機和字母人各印一份，
+    /// 而「同一句話在兩個地方得到兩種答案」是這個專案反覆踩到的坑。
+    #[test]
+    fn a_recorder_that_just_started_has_not_forgotten_anything() {
+        let tmp = Tmp::new("just-started");
+        let mut db = Db::open_in_memory().expect("db");
+        db.start_session("test", "0.0.1").expect("session");
+
+        let cold = blind_spots(&db, &tmp.0, "電話").expect("blind");
+        assert_eq!(cold.chunks, 0);
+        assert!(cold.sessions > 0);
+        assert!(
+            !cold.recording_now,
+            "沒有心跳檔——沒有人在錄，那句「被忘掉了」是完整的"
+        );
+
+        // 心跳寫下去（`Phase::Recording`，不是 booting——開機中的她一個字都
+        // 還沒記，那和「錄了但什麼都沒有」是兩回事）。
+        crate::heartbeat::beat(&tmp.0, crate::now_ms()).expect("beat");
+        let hot = blind_spots(&db, &tmp.0, "電話").expect("blind");
+        assert!(
+            hot.recording_now,
+            "她正開著，那句話就少了一種可能——而那是最常見的那一種"
+        );
+
+        // 開機中的不算。她還沒開始記，講「我正開著但手上沒東西」會讓他以為
+        // 已經在跑了。
+        crate::heartbeat::beat_booting(&tmp.0, crate::now_ms()).expect("booting");
+        assert!(
+            !blind_spots(&db, &tmp.0, "電話")
+                .expect("blind")
+                .recording_now
         );
     }
 

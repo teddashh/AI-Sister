@@ -1122,6 +1122,16 @@ pub mod query {
                 )
             } else if b.sessions > 0 && blocked {
                 "她錄過，但那段時間一張畫面都沒留下來——底下是查得出來的原因。".to_string()
+            } else if b.sessions > 0 && b.recording_now {
+                // 她**正在**錄。那句「被忘掉了，或是過了保留期」少了一種可能，
+                // 而且正好是最常見的那一種：他三秒前才把 recorder 開起來。
+                // 第一次用的人問的第一個問題就落在這裡，然後被告知他的紀錄
+                // 被忘掉了。
+                //
+                // 不挑一邊：清空過的資料庫上她照樣可能正在錄，那時候兩件事
+                // 都成立。把可能性列出來，不要替他選一個。
+                "她正開著，但手上一段字都沒有——可能是剛開始，也可能是之前的被忘掉了或過期了。"
+                    .to_string()
             } else if b.sessions > 0 {
                 "她錄過，但現在資料庫裡是空的——被 `sister forget` 忘掉了，或是過了保留期。"
                     .to_string()
@@ -1700,6 +1710,23 @@ pub mod query {
             assert!(
                 lines.contains("forget") || lines.contains("保留期"),
                 "什麼都沒擋，那就真的只剩這一個理由：{lines}"
+            );
+
+            // 同樣三個數字，但她**正開著**。這一次「被忘掉了或過期了」不是假的，
+            // 是不完整——少的那一種正好是最常見的那一種：他三秒前才按下開始。
+            // 第一次用的人問的第一個問題就落在這裡。
+            let just_started = BlindSpots {
+                recording_now: true,
+                ..recorded_then_erased.clone()
+            };
+            let lines = blind_lines(&just_started).join("\n");
+            assert!(
+                lines.contains("剛開始"),
+                "她三秒前才開始，這個可能性一定要在句子裡：{lines}"
+            );
+            assert!(
+                lines.contains("忘掉") || lines.contains("過期"),
+                "清空過的資料庫上她照樣可能正在錄，另一邊不可以被砍掉：{lines}"
             );
 
             // 同樣三個數字，但那段時間她是閉著眼睛的。這一次「被忘掉了」是假話。

@@ -554,6 +554,13 @@ function blindLines(blind) {
     }
     if (blind.sessions > 0 && blocked) {
       out.push("（我錄過，但那段時間一張畫面都沒留下來——底下是我查得出來的原因。）");
+    } else if (blind.sessions > 0 && blind.recording_now) {
+      // 她**正在**錄。「被忘掉了，或是過了保留期」少了一種可能，而且正好是
+      // 最常見的那一種：他三秒前才按下「開始記錄」。第一次用的人問的第一個
+      // 問題就落在這裡，然後被告知他的紀錄被忘掉了。
+      //
+      // 不挑一邊：清空過的資料庫上她照樣可能正在錄，那時候兩件事都成立。
+      out.push("（我正開著，但手上一段字都沒有——可能是剛開始，也可能是之前的被忘掉了或過期了。）");
     } else if (blind.sessions > 0) {
       out.push("（我錄過，但現在什麼都不剩了——被忘掉了，或是過了保留期。）");
     } else {
@@ -1071,6 +1078,58 @@ const BLIND_DEMOS = {
     paused_truncated: 0,
     scan_horizon_days: 30,
   },
+  // 底下三個配 `&kind=recent` 用：問「剛剛發生什麼事」而空手的三種處境。
+  // 標題那一行以前寫死成「我什麼都還沒看到——要先跑 sister record 我才記得
+  // 住」，於是前兩種讀起來是上下兩行互相打臉。這三個開關存在的理由就是那
+  // 三行要用眼睛比過。
+  forgotten: {
+    chunks: 0,
+    frames: 0,
+    sessions: 3,
+    excluded: [],
+    paused_episodes: 0,
+    paused_ms: 0,
+    paused_open: false,
+    paused_now: false,
+    paused_truncated: 0,
+  },
+  // 同樣是 sessions > 0、chunks == 0，只差在她**正在**錄。以前這兩種印同一
+  // 句「被忘掉了，或是過了保留期」，而第二種最常見的成因是他三秒前才按下
+  // 「開始記錄」。
+  juststarted: {
+    chunks: 0,
+    frames: 0,
+    sessions: 1,
+    excluded: [],
+    paused_episodes: 0,
+    paused_ms: 0,
+    paused_open: false,
+    paused_now: false,
+    paused_truncated: 0,
+    recording_now: true,
+  },
+  blind: {
+    chunks: 0,
+    frames: 12000,
+    sessions: 3,
+    excluded: [],
+    paused_episodes: 0,
+    paused_ms: 0,
+    paused_open: false,
+    paused_now: false,
+    paused_truncated: 0,
+  },
+  fresh: {
+    chunks: 0,
+    frames: 0,
+    sessions: 0,
+    excluded: [],
+    paused_episodes: 0,
+    paused_ms: 0,
+    paused_open: false,
+    paused_now: false,
+    paused_truncated: 0,
+  },
   blocked: {
     chunks: 0,
     frames: 0,
@@ -1084,5 +1143,19 @@ const BLIND_DEMOS = {
   },
 };
 if (params.get("hits") === "none") {
-  renderHits([], "keywords", null, [], BLIND_DEMOS[params.get("blind") ?? ""] ?? BLIND_DEMOS[""]);
+  // `&kind=recent`：同一組空手資料，但問的是時間而不是字。這兩種的**標題**
+  // 不一樣，而以前不一樣的方式是錯的——時間那一條寫死了「我什麼都還沒看到
+  // ——要先跑 sister record 我才記得住」，於是配上 `&blind=forgotten` 讀起來是
+  //
+  //     我什麼都還沒看到——要先跑 sister record 我才記得住。
+  //     （我錄過，但現在什麼都不剩了——被忘掉了，或是過了保留期。）
+  //
+  // 上下兩行互相打臉。要用眼睛比的就是這個。
+  renderHits(
+    [],
+    params.get("kind") === "recent" ? "recent" : "keywords",
+    null,
+    [],
+    BLIND_DEMOS[params.get("blind") ?? ""] ?? BLIND_DEMOS[""],
+  );
 }
