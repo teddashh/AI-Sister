@@ -854,15 +854,42 @@ fn monitors_of(win: &tauri::WebviewWindow) -> Vec<Rect> {
         .collect()
 }
 
-fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "sister_desktop=info".into()),
-        )
-        .init();
+/// 這一份記錄裡**沒有任何一個字來自螢幕**。
+///
+/// 只有這個殼自己的事：熱鍵搶到了沒、視窗開不開得起來、資料庫花了幾毫秒打開。
+/// 之所以要寫成檔案，是因為 release build 沒有主控台（見檔案最上面的
+/// `windows_subsystem`）——`tracing::error!("同意書開不起來：{e}")` 這種唯一
+/// 講得出原因的話，在唯一會出貨的平台上是講給空氣聽的。
+///
+/// 這一條是從一張截圖上學到的：她卡住了，而我沒有任何辦法知道她卡在哪裡。
+/// 一個讀不到的診斷，和沒有診斷是同一件事。
+fn start_log(data_dir: Option<&PathBuf>) -> Option<std::fs::File> {
+    let dir = data_dir?;
+    std::fs::create_dir_all(dir).ok()?;
+    let path = dir.join("desktop.log");
+    // 上一輪的留一份。當掉之後要看的正是**當掉那一輪**寫了什麼，而他為了
+    // 找記錄檔一定得先把她重開——直接覆蓋的話，唯一有用的那一份就沒了。
+    let _ = std::fs::rename(&path, dir.join("desktop.log.1"));
+    std::fs::File::create(&path).ok()
+}
 
+fn main() {
     let data_dir = sister_core::config::Config::default_data_dir();
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "sister_desktop=info".into());
+    match start_log(data_dir.as_ref()) {
+        // 檔案裡不要 ANSI 跳脫碼，記事本打開會是一片亂碼。
+        Some(file) => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(Mutex::new(file))
+            .init(),
+        // 連資料目錄都問不出來就退回 stdout。開發時（有主控台）仍然看得到，
+        // 出貨時看不到——但那個情況下她本來也幾乎做不了任何事。
+        None => tracing_subscriber::fmt().with_env_filter(filter).init(),
+    }
+    tracing::info!("AI-Sister {} 起來了", env!("CARGO_PKG_VERSION"));
     let state_path = data_dir
         .clone()
         .unwrap_or_else(std::env::temp_dir)
