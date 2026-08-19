@@ -78,6 +78,25 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 - [ ] 開一下**開始功能表**：排除理由裡不該出現「password field focused」洗版，
       UIA 也不該去戳它（`arc` 以前會命中 `searchapp.exe`，同樣 alpha.11 修的）。
 - [ ] 前景放一個**登入頁**：這時候「password field focused」**應該**出現。
+- [ ] **這一項要你判斷，不是要你回報壞掉。** 正常用一天之後跑 `sister stats`，
+      看「排除」那一段。alpha.20 起每一列會講出是哪一條規則擋的
+      （`excluded url: *password*`），以前只寫 `excluded url`。
+
+      預設規則裡最寬的是 `*password*` 和 `*/login*`，它們是**字串比對**，掃
+      過的是你一整天讀過的每一個網址。開發機上量到這四個會被擋掉，而它們一個
+      秘密都沒有：
+
+      ```
+      docs.djangoproject.com/en/5.0/topics/auth/passwords/
+      stackoverflow.com/questions/…/how-to-hash-a-password
+      nextjs.org/docs/…/authentication/login
+      1password.com/pricing
+      ```
+
+      症狀和 Obsidian 那次一樣：那幾頁上她什麼都記不住。**但這次不是 bug，是
+      取捨**——漏擋的方向是把密碼錄進去，所以預設寬是選出來的。你自己那一天的
+      數字才是真的答案：`*password*` 擋了幾段？那幾段你捨得嗎？
+      捨不得就從設定頁把那一條刪掉或改窄，這是你的機器。
 
 ## 4. 字母人這個視窗
 
