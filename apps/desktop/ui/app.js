@@ -475,6 +475,17 @@ function renderHits(hits, kind, queryId = null, facts = []) {
     hitList.append(note);
   }
 
+  // SPEC §8.2 的語氣規範：「我最後看到的是…」，不准講成斷言。★ 那幾筆最需要
+  // 這一句——一個孤零零的號碼看起來像一句「這就是答案」，而她知道的只有
+  // 「我在某個時間點的螢幕上看過它」。問「昨天的金額」而她給的是今天那筆的
+  // 時候，這一行就是那個差別。
+  if (facts.length > 0) {
+    const note = document.createElement("li");
+    note.className = "hits-note";
+    note.textContent = "我最後看到的是：";
+    hitList.append(note);
+  }
+
   for (const [rank, fact] of facts.entries()) {
     const li = document.createElement("li");
     li.className = "hit fact";
