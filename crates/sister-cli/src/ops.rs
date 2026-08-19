@@ -1940,7 +1940,7 @@ pub mod doctor {
     }
 
     #[cfg(windows)]
-    fn caps(config: &Config) -> Caps {
+    fn caps(data_dir: &Path, config: &Config) -> Caps {
         use sister_capture::traits::{Ocr, ScreenSource};
         use sister_capture::windows::input::{HookState, WindowsInput};
         use sister_capture::windows::{Capabilities, ocr::WindowsOcr, screen::WindowsScreen};
@@ -1957,6 +1957,17 @@ pub mod doctor {
         };
 
         let c = Capabilities::current(config);
+        // 順手留一份給設定頁。README 的 quickstart 第一句就是「跑一次 doctor」，
+        // 而在那之前設定頁只答得出「還不知道」——一個剛裝好、正在填排除規則的
+        // 人，正是最需要知道「這台機器讀不到網址」的那個人。寫的是和 `record`
+        // 一模一樣的那一份（`caps.report()`），不是另一種定義。
+        //
+        // 只有這裡寫，`#[cfg(not(windows))]` 那半邊不寫：那邊的 `Caps::default()`
+        // 是「這個平台問不出來」，不是「問了，答案是做不到」。把前者寫成後者，
+        // 就是這整個模組在對付的那種謊。
+        if let Err(e) = sister_core::capabilities::write(data_dir, &c.report()) {
+            eprintln!("⚠  寫不出能力報告（設定頁會說「還不知道」）：{e:#}");
+        }
         let mut probes = Vec::new();
         let url_probe;
         let focus_probe;
@@ -2133,14 +2144,14 @@ pub mod doctor {
     }
 
     #[cfg(not(windows))]
-    fn caps(config: &Config) -> Caps {
-        let _ = config;
+    fn caps(data_dir: &Path, config: &Config) -> Caps {
+        let _ = (data_dir, config);
         Caps::default()
     }
 
     pub fn run(data_dir: &Path, config: &Config, config_path: Option<PathBuf>) -> Result<()> {
         println!("🩺 AI-Sister 環境檢查\n");
-        let caps = caps(config);
+        let caps = caps(data_dir, config);
 
         println!("環境");
         line(
