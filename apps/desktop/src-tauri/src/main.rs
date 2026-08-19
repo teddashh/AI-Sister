@@ -121,18 +121,64 @@ fn recording_state(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> boo
         // 「她做得比較少」那邊倒。
         None => false,
     };
-    // 順手把系統匣那一顆的字改對。recorder 是**另一個行程**，它可能被 Ctrl+C、
-    // 被關掉主控台、被當掉——沒有任何事件會通知這裡。而畫面本來就每 5 秒問一次
-    // 這個問題，那就是這個行程唯一會定期得知真相的時刻；不搭這班車的話，就得
-    // 為了一行選單文字另外養一個計時器。
-    if let Some(item) = app.try_state::<RecordItem>() {
-        let _ = item.0.set_text(record_label(now));
-    }
-    if let Some(item) = app.try_state::<QuitItem>() {
-        let _ = item.0.set_text(quit_label(now));
-    }
+    // 順手把系統匣那兩顆的字改對——手上已經有答案了，不必再讀一次磁碟。這不是
+    // 唯一的刷新時機（見 [`refresh_tray`]），是最即時的那一個：視窗開著的時候，
+    // 選單和字母人講的是同一秒的事。
+    set_record_labels(&app, now);
     now
 }
+
+/// 系統匣那三行字：全部重新去問一次磁碟。
+///
+/// 三個項目講的都是「她現在在幹嘛」，而三個都會過期：
+///
+/// * 「開始記錄／停止記錄」和「結束（記錄也會停）」以前只在 [`recording_state`]
+///   被呼叫時才刷，而那是**畫面**每 5 秒問一次的——`visibilitychange` 一關就
+///   停（見 `app.js` 的 `updatePollGate`）。也就是說**視窗一收進系統匣，系統匣
+///   的字就凍住了**，而那正是它變成唯一介面的那一刻。收起來之後 recorder 被
+///   Ctrl+C 掉，選單還寫著「結束（記錄也會停）」——他讀到的是「她在錄」。
+/// * 「暫停記錄／繼續記錄」過期得更早：它只在 [`announce_pause`] 裡改，而那
+///   只有**這個行程自己**按下去才會走到。終端機裡一句 `sister pause` 之後，
+///   選單永遠寫著「暫停記錄」，按下去等於把她放出來。
+///
+/// 所以刷新得由這一端自己排（見 `main` 裡那條 [`TRAY_REFRESH`]），不是搭畫面
+/// 的便車——搭便車的東西會在那個人走掉的時候一起停。
+fn refresh_tray(app: &tauri::AppHandle) {
+    let Some(shell) = app.try_state::<Shell>() else {
+        return;
+    };
+    let (recording, paused) = match &shell.data_dir {
+        Some(dir) => (
+            sister_core::heartbeat::is_recording(dir, sister_core::now_ms()),
+            sister_core::pause::is_paused(dir),
+        ),
+        // 問不出資料目錄的時候，和 `recording_state` / `pause_state` 倒向同一邊：
+        // 不確定就往「她做得比較少」那邊講。
+        None => (false, true),
+    };
+    set_record_labels(app, recording);
+    if let Some(item) = app.try_state::<PauseItem>() {
+        let _ = item.0.set_text(pause_label(paused));
+    }
+}
+
+/// 「開始／停止記錄」和「結束」那兩行字。分出來是因為 [`recording_state`] 手上
+/// 已經有答案了，不必為了改字再讀一次磁碟。
+fn set_record_labels(app: &tauri::AppHandle, recording: bool) {
+    if let Some(item) = app.try_state::<RecordItem>() {
+        let _ = item.0.set_text(record_label(recording));
+    }
+    if let Some(item) = app.try_state::<QuitItem>() {
+        let _ = item.0.set_text(quit_label(recording));
+    }
+}
+
+/// 系統匣刷字的節奏。
+///
+/// 跟著心跳走（`heartbeat::BEAT_EVERY_MS` 是 5 秒）。更慢的話，「她剛剛當掉了」
+/// 和「選單還在說她活著」之間會有一段看得到的空窗。成本是每 5 秒兩個小檔案的
+/// 讀取——和畫面開著時本來就在做的事一樣，只是現在收起來也做。
+const TRAY_REFRESH: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// 上一場錄製是什麼時候、為什麼結束的。
 ///
@@ -1688,7 +1734,22 @@ fn main() {
                                     let _ = item.0.set_text(record_label(!on));
                                 }
                             }
-                            Err(e) => tracing::error!("開始／停止記錄失敗：{e}"),
+                            Err(e) => {
+                                tracing::error!("開始／停止記錄失敗：{e}");
+                                // 系統匣選單上沒有一格能放字。只寫進記錄檔的話，
+                                // 按下去的後果是**什麼都沒發生**——而 `e` 是一句
+                                // 寫好的完整中文（同意書沒簽、找不到 sister.exe、
+                                // 已經有一個在跑），只是躺在他不會開的檔案裡。
+                                //
+                                // 先把視窗叫出來再送：收在系統匣的時候，那邊沒有
+                                // 人在聽，這句話會掉在地上。
+                                if let Some(win) = app.get_webview_window(PET) {
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                                use tauri::Emitter;
+                                let _ = app.emit("recorder-failed", e);
+                            }
                         }
                     }
                     "timeline" => {
@@ -1744,6 +1805,27 @@ fn main() {
                     }
                 })
                 .build(app)?;
+
+            // ---- 系統匣的字自己刷 ----
+            //
+            // 理由寫在 `refresh_tray`：那三行字以前是搭畫面輪詢的便車更新的，
+            // 而畫面收進系統匣就不問了——正好是系統匣變成唯一介面的那一刻。
+            let ticker = app.handle().clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(TRAY_REFRESH);
+                    // 選單是 UI，回主執行緒去動。這一步失敗只有一個原因：事件
+                    // 迴圈已經走了。那就跟著收工，不要留一條對著死掉的 app
+                    // handle 每 5 秒喊一次的執行緒。
+                    let on_main = ticker.clone();
+                    if ticker
+                        .run_on_main_thread(move || refresh_tray(&on_main))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
 
             // ---- 關閉 = 收起來，不是結束 ----
             let handle = app.handle().clone();

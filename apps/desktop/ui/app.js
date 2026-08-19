@@ -396,6 +396,24 @@ globalThis.__TAURI__?.event
   ?.listen?.("pause-changed", (event) => setPaused(event.payload))
   ?.catch?.(() => {});
 
+/**
+ * 從系統匣按「開始記錄」失敗的時候，那句原因沒有地方可以寫。
+ *
+ * 同意書沒簽、找不到 `sister.exe`、已經有一個在跑——三句都是後端寫好的完整
+ * 中文，而系統匣選單上沒有一格能放字。以前它們只進 `desktop.log`：按下去的
+ * 後果是**什麼都沒發生**，而唯一說得出原因的那句話在一個他不會開的檔案裡。
+ *
+ * 借的是「叫不起來」那條路（[`wakeFailed`]）——對他來說是同一件事：她沒起來，
+ * 這是為什麼。後端會順手把視窗叫出來，不然這句話還是沒有人看得到。
+ */
+globalThis.__TAURI__?.event
+  ?.listen?.("recorder-failed", (event) => {
+    wakeFailed = String(event.payload ?? "");
+    starting = false;
+    paint();
+  })
+  ?.catch?.(() => {});
+
 // ---------- 答案 ----------
 
 const hitList = document.querySelector("[data-hits]");
@@ -824,6 +842,14 @@ if (params.get("asleep") === "stopped") {
     ended_at: null,
     why: null,
   };
+  paint();
+} else if (params.get("asleep") === "nobeat") {
+  // 叫了、逾時了、還是沒有心跳。這一句要活得比一次輪詢久（以前它被下一個
+  // `paint()` 蓋掉），而它換行、比另外兩句長——版面撐不撐得住要用眼睛看。
+  wakeFailed =
+    "等了 25 秒還沒有心跳。record.log 最後說：\n" +
+    "（這一輪還沒寫出東西，以下是上一輪的 record.log）\n" +
+    "第一張同意書還沒簽——她不會開始記錄。";
   paint();
 }
 
