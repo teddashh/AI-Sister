@@ -301,10 +301,20 @@ function renderHits(hits, kind) {
  */
 const SLOW_MS = 4000;
 
+/**
+ * 最後一次發問的編號。**只有最新的那一份答案算數。**
+ *
+ * 慢的時候人會多按幾次 Enter，而兩次查詢回來的順序不保證跟送出去的一樣——
+ * 先送的後回，畫面上就會留著舊問題的答案，配著新問題的輸入框。那種錯不會
+ * 有任何症狀，只是她答錯了，而他不會知道。
+ */
+let asking = 0;
+
 async function ask() {
   const question = askInput.value.trim();
   if (question === "") return;
 
+  const mine = ++asking;
   setState("thinking");
   const slow = setTimeout(() => {
     if (state === "thinking") {
@@ -315,11 +325,14 @@ async function ask() {
   try {
     if (invoke === null) throw new Error("這一頁不是在 AI-Sister 裡打開的");
     const answer = await invoke("ask", { question });
+    // 這一份過期了。畫面歸還在跑的那一次管，這裡連 idle 都不要設。
+    if (mine !== asking) return;
     renderHits(answer.hits, answer.kind);
     setState("idle");
     // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
     askInput.value = "";
   } catch (err) {
+    if (mine !== asking) return;
     // 失敗要說出是什麼失敗。「沒有結果」跟「還沒錄過任何東西」跟「資料庫
     // 打不開」是三件不同的事，混成一句「查不到」等於把問題藏起來。
     setState("idle");
