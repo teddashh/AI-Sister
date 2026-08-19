@@ -230,12 +230,19 @@ function pollRecording() {
  * 問一次。這是一個**不會再變**的事實（下一次改變的時候她已經在錄了，那時候
  * 這句話不會被顯示），而每一次呼叫都要開資料庫查一次。
  */
-function refreshLastRun() {
+function refreshLastRun(retry = true) {
   if (invoke === null) return;
   invoke("last_recording_end").then(
     (run) => {
       lastRun = run ?? null;
       paint();
+      // recorder **先收心跳、再寫收尾**（那個順序是對的：寫資料庫可能失敗，
+      // 而失敗不該讓一個錯的「她還在錄」留在磁碟上）。所以有一個很窄的窗口，
+      // 我們會在收尾寫進去之前就問到——而答案會是「沒有好好結束」，也就是
+      // 說她當掉了。那是一句嚇人的話，不能用猜的。再問一次。
+      if (retry && lastRun !== null && (lastRun.ended_at ?? null) === null) {
+        setTimeout(() => refreshLastRun(false), 1500);
+      }
     },
     () => {},
   );
