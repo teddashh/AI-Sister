@@ -277,9 +277,57 @@ pub enum Emptiness {
     /// 過」，他知道自己刪過，那句話只是多餘；把沒存過的說成「被忘掉了」，是
     /// 指控。所以往這邊倒。
     Barren,
+    /// [`Barren`](Self::Barren) 的另一半：她**此刻正佔著這個資料目錄**，而一
+    /// 列內容都還沒落地。
+    ///
+    /// 兩者的下一步是相反的：一個要他去看設定，一個要他**再等一下**。而它們
+    /// 之間有一整個灰帶——第一拍還沒跑完的 recorder、每一拍都在錯的
+    /// recorder、開起來就被砍掉的 recorder——三種都長成這個樣子，所以這句話
+    /// 只講看得見的那一件事（她正開著、還沒有東西），把「是哪一種」留給
+    /// `sister doctor`。
+    ///
+    /// 這一種也是被 `Barren` 吃掉的，而 `Barren` 是我上一版**修出來**的：修
+    /// 「兩種 0 長得一樣」的手段是多問一個位元，而多問的那個位元自己又蓋住了
+    /// 一組。字母人那邊早就分對了（`blind_lines` 的 `recording_now` 問在
+    /// `!ever_stored` 前面），CLI 這三頁沒跟上——`Emptiness::of` 收不到
+    /// `data_dir`，於是它結構上就問不出這一題。
+    Live,
 }
 
 impl Emptiness {
+    /// 五種全部。**這一節的測試靠它站著**：「N 種 0 的下一步都不一樣，不可以
+    /// 共用一句話」那兩個迴圈遍歷的就是這個陣列。
+    ///
+    /// 以前它們寫的是 `[Fresh, Blocked, Erased]` 這種字面量，而**陣列字面量不
+    /// 會因為 enum 多一種變體而編不過**——`Barren` 加進來的那一版，那兩個迴圈
+    /// 還停在三種。守著「不可以兩種處境共用一句話」的那條測試，剛好漏掉的就是
+    /// 那次新加的那一種。同 [`crate::ops::Emptiness`] 底下每一個 `match` 都不
+    /// 寫 `_`，是同一根釘子。
+    ///
+    /// `#[cfg(test)]`：產品那邊沒有人要遍歷五種（每一頁都是一個 `match`），所
+    /// 以留著只會是一個 `dead_code`。代價是「多一種變體就編不過」只在
+    /// `cargo test` 那一趟成立——而 CI 兩趟都跑。
+    #[cfg(test)]
+    pub const ALL: [Self; 5] = {
+        // 這支函式只有一個用途：多一種變體的時候讓底下那一列在這裡編不過。
+        const fn _every_one_of_them(e: Emptiness) -> u8 {
+            match e {
+                Emptiness::Fresh => 0,
+                Emptiness::Blocked => 1,
+                Emptiness::Erased => 2,
+                Emptiness::Barren => 3,
+                Emptiness::Live => 4,
+            }
+        }
+        [
+            Self::Fresh,
+            Self::Blocked,
+            Self::Erased,
+            Self::Barren,
+            Self::Live,
+        ]
+    };
+
     /// 資料庫自己回答這是哪一種。
     ///
     /// `Erased` 問在最前面，因為它的條件最強（`nothing_recorded_left()` 要求
@@ -297,13 +345,21 @@ impl Emptiness {
     /// [`Emptiness::Barren`]。而 `ever_recorded` 自己的註解早就寫著它答不出這
     /// 一題（「旗標在 `start_session` 就翻成 1，第一張畫面之前」），我照樣拿
     /// 它去答了一次。
-    pub fn of(db: &Db, s: &sister_core::db::DbStats) -> Result<Self> {
+    ///
+    /// **`occupied` 要從呼叫端進來，因為資料庫答不出「她現在在不在」。**
+    /// `heartbeat::is_occupied`，不是 `is_recording`：正在開機的 recorder 也
+    /// 佔著這個目錄，而那時候「再等一下」正是對的話。三個呼叫端手上本來就有
+    /// `data_dir`（而且同一頁上別的地方早就在問這個問題了），所以這不是多要
+    /// 一份資料，是把一份已經在手上的資料接進來——上一版沒接，於是這支函式
+    /// 結構上就答不出 [`Live`](Self::Live)。
+    pub fn of(db: &Db, s: &sister_core::db::DbStats, occupied: bool) -> Result<Self> {
         if s.nothing_recorded_left() && db.ever_recorded()? {
-            return Ok(if db.ever_stored()? {
-                Self::Erased
-            } else {
-                Self::Barren
-            });
+            if db.ever_stored()? {
+                // 存過又清光了：她此刻在不在都不改變「東西被拿走了」這件事，
+                // 所以這一種不分。
+                return Ok(Self::Erased);
+            }
+            return Ok(if occupied { Self::Live } else { Self::Barren });
         }
         Ok(
             if !db.exclusion_audit()?.is_empty() || db.pause_audit()?.episodes > 0 {
@@ -1639,6 +1695,16 @@ pub mod query {
                 )
             } else if b.ever_recorded && blocked {
                 "她錄過，但那段時間一張畫面都沒留下來——底下是查得出來的原因。".to_string()
+            } else if b.recording_now && !b.ever_stored {
+                // **「她正開著」和「一列都沒存過」同時成立的那一格。** 底下那
+                // 句攤開三種可能，而其中一種在這台機器上是**不可能**的：一列
+                // 都沒進來過，就沒有東西可以被忘掉或過期。
+                //
+                // 這一格是上一版**自己造出來的**：`recording_now` 問在
+                // `!ever_stored` 前面，於是後者永遠輪不到一台正在錄的機器，而
+                // 前者那句話裡帶著一則它證得出來是假的指控。攤開可能性也要先
+                // 把不可能的那幾種扣掉——不然「攤開」就只是換一種猜法。
+                "她正開著，可是到現在一列內容都還沒落地——多半是剛開始，再等一下。".to_string()
             } else if b.ever_recorded && b.recording_now {
                 // 她**正在**錄。那句「被忘掉了，或是過了保留期」少了一種可能，
                 // 而且正好是最常見的那一種：他三秒前才把 recorder 開起來。
@@ -2363,6 +2429,31 @@ pub mod query {
                 "清空過的資料庫上她照樣可能正在錄，另一邊不可以被砍掉：{lines}"
             );
 
+            // **她正開著，而且一列都沒存過。** 上面那句攤開三種可能，而其中
+            // 一種在這台機器上證得出來是假的：一列都沒進來過，就沒有東西可以
+            // 被忘掉。這一格是上一版自己造出來的——`recording_now` 問在
+            // `!ever_stored` 前面，於是後者永遠輪不到一台正在錄的機器。
+            let just_started_and_never_stored = BlindSpots {
+                ever_stored: false,
+                ..just_started.clone()
+            };
+            let lines = blind_lines(&just_started_and_never_stored).join("\n");
+            assert!(
+                !lines.contains("忘掉")
+                    && !lines.contains("過期")
+                    && !lines.contains("forget")
+                    && !lines.contains("保留期"),
+                "一列都沒進來過，就沒有東西被忘掉——攤開可能性不等於可以攤開不可能的：{lines}"
+            );
+            assert!(
+                lines.contains("剛開始"),
+                "她三秒前才開始，這件事還是要講：{lines}"
+            );
+            assert!(
+                !lines.contains("capture.enabled"),
+                "她正開著，不要把她送去改一個沒問題的設定：{lines}"
+            );
+
             // 同樣三個數字，但那段時間她是閉著眼睛的。這一次「被忘掉了」是假話。
             let paused_throughout = BlindSpots {
                 paused_episodes: 1,
@@ -2529,6 +2620,13 @@ pub mod facts {
                 "這份記憶裡沒有任何事實——她錄過，但一個字都沒真的存進來過\
                  （多半是 `capture.enabled = false`，`sister doctor` 會說）。"
             }
+            // 同一組數字，相反的下一步：上面那句要他去改設定，這句要他**再
+            // 等一下**。她三秒前才被開起來，而上一版對她說「多半是
+            // `capture.enabled = false`」。
+            Emptiness::Live => {
+                "這份記憶裡還沒有任何事實——她正開著，可是到現在一列內容都還沒\
+                 落地（剛開始的話再等一下，一直是這樣就跑一次 `sister doctor`）。"
+            }
             Emptiness::Fresh => "這份記憶裡還沒有任何事實——她還沒錄過。",
         }
         .to_string()
@@ -2607,7 +2705,11 @@ pub mod facts {
                     // 所以「剛把一整天忘掉」也走到這裡。
                     (None, None) => {
                         let s = db.stats()?;
-                        no_facts_line(s.frames, s.chunks, Emptiness::of(&db, &s)?)
+                        // 「一列都沒進來過」還要再分一次：她**現在**在不在。
+                        // 這一頁手上有 `data_dir`，所以這一題問得出來。
+                        let occupied =
+                            sister_core::heartbeat::is_occupied(data_dir, sister_core::now_ms());
+                        no_facts_line(s.frames, s.chunks, Emptiness::of(&db, &s, occupied)?)
                     }
                 }
             );
@@ -2705,7 +2807,7 @@ pub mod facts {
             }
             // 三種 `Emptiness` 一個字都不准動——她這裡不空，就沒有「為什麼空」
             // 這個問題。
-            for e in [Emptiness::Fresh, Emptiness::Blocked, Emptiness::Erased] {
+            for e in Emptiness::ALL {
                 assert_eq!(no_facts_line(2, 6, e), said);
             }
 
@@ -2716,14 +2818,20 @@ pub mod facts {
 
             // 兩個都 0，才輪到「為什麼」——而三種各自一句。
             let said = |e| no_facts_line(0, 0, e);
-            let all = [
-                said(Emptiness::Fresh),
-                said(Emptiness::Blocked),
-                said(Emptiness::Erased),
-            ];
+            // **走 `Emptiness::ALL`，不要寫陣列字面量。** 字面量不會因為 enum
+            // 多一種變體而編不過，而上一版 `Barren` 加進來的時候，這裡還停在
+            // 三種——守著「不可以兩種處境共用一句話」的測試，剛好漏掉的就是那
+            // 次新加的那一種。
+            let all = Emptiness::ALL.map(said);
             for (i, a) in all.iter().enumerate() {
-                for b in &all[i + 1..] {
-                    assert_ne!(a, b, "三種 0 的下一步都不一樣，不可以共用一句話");
+                for (j, b) in all.iter().enumerate().skip(i + 1) {
+                    assert_ne!(
+                        a,
+                        b,
+                        "{:?} 和 {:?} 的下一步不一樣，不可以共用一句話",
+                        Emptiness::ALL[i],
+                        Emptiness::ALL[j]
+                    );
                 }
             }
             assert!(all[0].contains("還沒錄過"), "{}", all[0]);
@@ -2903,6 +3011,9 @@ pub mod stats {
         }
 
         println!("📊 AI-Sister 足跡\n");
+        // 一頁上兩個地方要問「她現在在不在」（底下的 ⚠ 和 `sessions_line`），
+        // 而它們必須是同一個答案——分兩次問的話，中間她可以剛好收工。
+        let occupied = sister_core::heartbeat::is_occupied(data_dir, sister_core::now_ms());
         // **整頁都是 0 的時候，要先講這是哪一種 0。**
         //
         // 一顆剛裝好的資料庫和一顆剛被 `forget --last 24h` 清空的資料庫，這一頁
@@ -2929,7 +3040,7 @@ pub mod stats {
         // 過**。走 `Emptiness` 而不是自己問 `ever_recorded`——這一行以前自己
         // 問，於是一台 `capture.enabled = false` 的機器（她跑完、一個字都沒
         // 記到、`forget` 從來沒被執行過）被這個 ⚠ 告知東西被忘掉了。
-        match Emptiness::of(&db, &s)? {
+        match Emptiness::of(&db, &s, occupied)? {
             Emptiness::Erased => println!(
                 "  ⚠  她**錄過**，而她記下來的東西現在一列都不剩——被 \
                  `sister forget` 忘掉了，或是過了保留期。\n     \
@@ -2945,6 +3056,13 @@ pub mod stats {
                  先看 `capture.enabled`（`sister doctor` 會直接說），\
                  底下那些 0 講的是現在這顆資料庫。\n"
             ),
+            // 這一句不提設定，因為她此刻正開著——上面那句會把一個剛按下開始
+            // 記錄的人，送去改一個沒問題的設定。
+            Emptiness::Live => println!(
+                "  ⚠  她**正開著**，可是到現在一列內容都還沒落地。\n     \
+                 剛開始的話再等一下；一直是這樣就跑一次 `sister doctor`。\
+                 底下那些 0 講的是現在這顆資料庫。\n"
+            ),
             Emptiness::Blocked | Emptiness::Fresh => {}
         }
         if let (Some(a), Some(b)) = (s.first_ts, s.last_ts) {
@@ -2958,13 +3076,7 @@ pub mod stats {
         // 整句在 `sessions_line`——數字和那個但書要嘛一起印，要嘛一起不印。
         // 拆成「印數字」加「如果……再印一句」的話，那個 `if` 就落在呼叫端，而
         // 這一批 bug 七次有七次犯在呼叫端。
-        println!(
-            "{}",
-            sessions_line(
-                &s,
-                sister_core::heartbeat::is_occupied(data_dir, sister_core::now_ms())
-            )
-        );
+        println!("{}", sessions_line(&s, occupied));
         println!(
             "  畫面      {} 張保留，{} 張因重複被折疊",
             s.frames, s.frames_collapsed
@@ -3413,6 +3525,8 @@ pub mod doctor {
                     "!",
                     format!("{detail}——她錄過，但一個字都沒存進來（先看 `capture.enabled`）"),
                 ),
+                // `!` 是「有東西不對」，而她才剛開始的話沒有東西不對。
+                Emptiness::Live => ("?", format!("{detail}——她此刻正在錄，到現在還沒有一列落地")),
                 Emptiness::Fresh => ("?", format!("{detail}（還沒有任何內容）")),
             },
             // 「0 張畫面 · 0 段文字 ✓」是這個專案一路在修的那個災難本身
@@ -3435,32 +3549,43 @@ pub mod doctor {
     fn crash_verdict(
         all: i64,
         unfinished: i64,
-        ever: bool,
-        stored: bool,
+        empty: Emptiness,
         last_crash: Option<sister_core::model::Millis>,
     ) -> (&'static str, String) {
         match (all, unfinished) {
-            // **「分母沒了」也有兩種，而底下那一條只講得出其中一種。**
+            // **「分母沒了」不是一種，是四種**，而上一版只講得出其中一種。
             //
-            // 一場什麼都沒存到的錄製收工時會把自己那一列刪掉，所以一台
-            // `capture.enabled = false` 的機器走到的也是 `(0, _) && ever`
-            // ——然後被告知那幾場的紀錄「不在了」，一個沒發生過的刪除。
-            // 這一條要問在底下那一條前面：它的條件比較強。
-            (0, _) if ever && !stored => (
+            // 一場什麼都沒存到的錄製收工時會把自己那一列刪掉，所以
+            // `capture.enabled = false` 的機器、和此刻才剛被開起來的
+            // recorder，走到的都是 `(0, _)`——然後兩個都被告知那幾場的紀錄
+            // 「不在了」，一個沒發生過的刪除。
+            //
+            // 兩個布林（`ever` + `stored`）換成 [`Emptiness`] 本人，是因為
+            // 那兩個布林在呼叫端拼裝，而拼錯不會有人紅——這一批 bug 十次有
+            // 十次犯在呼叫端。
+            (0, _) => (
                 "?",
-                "她錄過，但一個字都沒存進來，那幾場沒有留下紀錄——先看 `capture.enabled`"
-                    .to_string(),
+                match empty {
+                    Emptiness::Barren => {
+                        "她錄過，但一個字都沒存進來，那幾場沒有留下紀錄——先看 `capture.enabled`"
+                    }
+                    Emptiness::Live => "她此刻正在錄，還沒有東西落地，所以還沒有一場算得出來",
+                    // 一場都不剩**不等於**沒錄過。`sessions` 那張表會跟著它
+                    // 自己那幾列一起被 `forget` 和保留期帶走
+                    // （`retention::delete_empty_sessions`），所以清空過的資
+                    // 料庫上這裡是 0——而「還沒錄過」對一個五分鐘前才刪掉一
+                    // 整天的人是假的。分母沒了就說分母沒了，不要順便宣布一個
+                    // 沒有證據的「零當機」。
+                    //
+                    // `Blocked` 跟著走同一句：它代表這顆資料庫裡有稽核紀錄
+                    // （所以她確實錄過），而那幾場的殼卻不在了。
+                    Emptiness::Erased | Emptiness::Blocked => {
+                        "那幾場的紀錄已經不在了（`forget` 或保留期），現在算不出來"
+                    }
+                    Emptiness::Fresh => "還沒錄過",
+                }
+                .to_string(),
             ),
-            // 一場都不剩**不等於**沒錄過。`sessions` 那張表現在會跟著它自己
-            // 那幾列一起被 `forget` 和保留期帶走（`retention::delete_empty_
-            // sessions`），所以清空過的資料庫上這裡是 0——而「還沒錄過」對
-            // 一個五分鐘前才刪掉一整天的人是假的。分母沒了就說分母沒了，
-            // 不要順便宣布一個沒有證據的「零當機」。
-            (0, _) if ever => (
-                "?",
-                "那幾場的紀錄已經不在了（`forget` 或保留期），現在算不出來".to_string(),
-            ),
-            (0, _) => ("?", "還沒錄過".to_string()),
             (n, 0) => ("✓", format!("{n} 段錄製全部正常收尾")),
             (n, u) => (
                 // 不畫 ✗。此刻另一個終端機正在錄的話，那一段也沒有
@@ -3533,6 +3658,7 @@ pub mod doctor {
                     "一段字都沒有，所以沒有中文可以驗——那段時間被規則擋掉或暫停了"
                 }
                 Emptiness::Barren => "一段字都沒有，所以沒有中文可以驗——她錄過，但一個字都沒存進來",
+                Emptiness::Live => "一段字都沒有，所以沒有中文可以驗——她此刻正在錄，還沒有東西落地",
                 Emptiness::Fresh => "資料庫裡還沒有中文，等你錄過再驗一次",
             }
             .to_string(),
@@ -3609,16 +3735,33 @@ pub mod doctor {
 
     /// 三個訊號稽核裡的一列。和上面兩支同一個理由：符號和句子一起算。
     ///
-    /// `ever` 在這裡只管一件事——**沒有最後一場的時候，那是哪一種沒有**。
+    /// `empty` 在這裡只管一件事——**沒有最後一場的時候，那是哪一種沒有**。
     /// `signal_audit` 的範圍是 `sessions` 的最後一列，而那張表會跟著它記下來
     /// 的東西一起消失（`retention::delete_empty_sessions`）。清空過的資料庫上
     /// 「零當機」那一列說「那幾場的紀錄已經不在了」，而這三列以前說「還沒有
     /// 任何一場」——**同一份報告，四行之隔，兩句互相打臉**。
-    fn signal_line(a: &sister_core::db::SignalAudit, ever: bool) -> (&'static str, String) {
-        if a.scope_started_at.is_none() && ever {
+    ///
+    /// 而修那一次的時候我只餵了一個 `ever`，於是這三列變成**四行之隔、兩句
+    /// 互相打臉的另一種**：`capture.enabled = false` 那台機器上，一行之上寫
+    /// 「那幾場沒有留下紀錄」，這三行寫「那幾場的紀錄**不在了**」——它一次
+    /// 都沒刪過東西。收 [`Emptiness`] 而不是收一個布林，就是為了讓「這是哪
+    /// 一種沒有」只有一個答案，而且是上面那一列用的同一個。
+    fn signal_line(a: &sister_core::db::SignalAudit, empty: Emptiness) -> (&'static str, String) {
+        if a.scope_started_at.is_none() {
             // 沒有範圍就沒有分母，底下三種判決一句都套不上去（`rows` 必然是
-            // 0，也就必然是 `TooEarly`）。只講那件唯一還說得出口的事。
-            return ("?", "那幾場的紀錄不在了，現在沒有範圍可以驗".to_string());
+            // 0，也就必然是 `TooEarly`）。只講那件唯一還說得出口的事——而
+            // 「那件事」有四種。
+            let why = match empty {
+                Emptiness::Erased | Emptiness::Blocked => "那幾場的紀錄不在了",
+                Emptiness::Barren => "那幾場一列內容都沒留下",
+                Emptiness::Live => "她此刻正在錄，還沒有東西落地",
+                // 真的還沒有任何一場。這一句底下那個 `when` 也講得出來，
+                // 讓它去講，不要在這裡多一句。
+                Emptiness::Fresh => "",
+            };
+            if !why.is_empty() {
+                return ("?", format!("{why}，現在沒有範圍可以驗"));
+            }
         }
         let when = match a.scope_started_at {
             Some(ts) => format!("上一場（{} 起）", crate::fmt::timestamp(ts)),
@@ -4152,6 +4295,12 @@ pub mod doctor {
         // **「還沒開始錄」和「有記憶，只是這個執行檔打不開它」是相反的兩件
         // 事**——後者他手上是有東西的，講成沒有等於在他最慌的那一刻再騙他
         // 一次。所以理由帶著走。
+        // 底下有三列要分「她跑過、什麼都沒存到」和「她**正在**跑、還沒存到」
+        // ——同一份報告裡它們必須是同一個答案，所以只問一次。
+        // `is_occupied` 而不是 `is_recording`：正在開機的 recorder 也佔著這個
+        // 目錄，而那時候「再等一下」正是對的話。
+        let occupied = sister_core::heartbeat::is_occupied(data_dir, sister_core::now_ms());
+
         let (db, no_db) = match db_file.exists().then(|| Db::open(&db_file)) {
             Some(Ok(d)) => (Some(d), "還沒有資料庫"),
             Some(Err(e)) => {
@@ -4212,7 +4361,7 @@ pub mod doctor {
                 let (indexed, with_cjk) = d.bigram_coverage()?;
                 let s = d.stats()?;
                 let (sym, said) =
-                    bigram_verdict(indexed, with_cjk, s.chunks, Emptiness::of(d, &s)?);
+                    bigram_verdict(indexed, with_cjk, s.chunks, Emptiness::of(d, &s, occupied)?);
                 mark(sym, "兩個字的中文", &said);
             }
             None => mark("?", "兩個字的中文", no_db),
@@ -4239,18 +4388,15 @@ pub mod doctor {
                 s.chunks,
                 fmt::bytes(s.db_bytes + s.image_bytes)
             );
-            let ever = db.ever_recorded()?;
-            let (sym, said) = recorded_verdict(s.frames, s.chunks, Emptiness::of(db, &s)?, &detail);
+            // **同一頁上的四列，要問同一個問題同一次。** 上一版這裡是
+            // `ever_recorded` + `ever_stored` 兩個布林，各列各自拼裝——於是
+            // 「已記錄」那一列改對了、四行之下的「視窗焦點」還在講另一個故事。
+            let empty = Emptiness::of(db, &s, occupied)?;
+            let (sym, said) = recorded_verdict(s.frames, s.chunks, empty, &detail);
             mark(sym, "已記錄", &said);
 
             let (all_sessions, unfinished, last_crash) = db.crash_audit()?;
-            let (sym, said) = crash_verdict(
-                all_sessions,
-                unfinished,
-                ever,
-                db.ever_stored()?,
-                last_crash,
-            );
+            let (sym, said) = crash_verdict(all_sessions, unfinished, empty, last_crash);
             mark(sym, "零當機", &said);
 
             // 「她停了」後面永遠跟著同一個問題：什麼時候、為什麼。上面那一列
@@ -4326,7 +4472,7 @@ pub mod doctor {
                 // 了」，這三列說「還沒有任何一場」——**同一份報告，四行之隔，
                 // 兩句互相打臉**。而這兩句正是 `recorded_verdict` /
                 // `crash_verdict` 被拆出來要防的那個形狀，只是它們管不到這裡。
-                let (sym, said) = signal_line(&a, ever);
+                let (sym, said) = signal_line(&a, empty);
                 mark(sym, a.name, &said);
             }
         }
@@ -4789,8 +4935,8 @@ pub mod doctor {
             // 兩邊都還是「不知道」而不是打勾——空的就是空的。
             assert_eq!((never_sym, erased_sym), ("?", "?"));
 
-            let (never_sym, never) = crash_verdict(0, 0, false, false, None);
-            let (erased_sym, erased) = crash_verdict(0, 0, true, true, None);
+            let (never_sym, never) = crash_verdict(0, 0, Emptiness::Fresh, None);
+            let (erased_sym, erased) = crash_verdict(0, 0, Emptiness::Erased, None);
             assert_ne!(never, erased, "「還沒錄過」對清空過的資料庫是假話");
             assert!(
                 never.contains("還沒錄過"),
@@ -4807,7 +4953,7 @@ pub mod doctor {
             // 一場什麼都沒存到的錄製收工時會刪掉自己那一列，所以這裡也是
             // `(0, _) && ever`——而「紀錄已經不在了」在這台機器上是指控。
             // 少了這一條，把那一支拿掉只有 CI 那顆 fixture 抓得到。
-            let (barren_sym, barren) = crash_verdict(0, 0, true, false, None);
+            let (barren_sym, barren) = crash_verdict(0, 0, Emptiness::Barren, None);
             assert!(
                 !barren.contains("不在了") && !barren.contains("forget"),
                 "他一次都沒刪過東西：{barren}"
@@ -4819,14 +4965,29 @@ pub mod doctor {
             assert_ne!(barren, erased, "「被拿走了」和「沒進來過」不是同一句話");
             assert_eq!(barren_sym, "?", "照樣算不出當機率");
 
-            // 而 `ever` 只准在分母是 0 的時候說話。錄過的資料庫上照樣要數得
-            // 出來，不可以整列被那個旗標蓋掉。
-            for ever in [false, true] {
-                for stored in [false, true] {
-                    assert_eq!(crash_verdict(7, 0, ever, stored, None).0, "✓");
-                }
+            // **第四種：她此刻正在錄，還沒有東西落地。** `Barren` 那句要他
+            // 去改設定，而她三秒前才被開起來——那台機器上沒有東西需要改。
+            let (live_sym, live) = crash_verdict(0, 0, Emptiness::Live, None);
+            assert!(
+                !live.contains("不在了") && !live.contains("forget"),
+                "她剛開始錄，沒有東西被刪過：{live}"
+            );
+            assert!(
+                !live.contains("capture.enabled"),
+                "不要把一個剛按下開始記錄的人送去改一個沒問題的設定：{live}"
+            );
+            assert_ne!(
+                live, barren,
+                "「跑完了什麼都沒存到」和「才剛開始」不是同一句話"
+            );
+            assert_eq!(live_sym, "?");
+
+            // 而 `empty` 只准在分母是 0 的時候說話。錄過的資料庫上照樣要數得
+            // 出來，不可以整列被那個判斷蓋掉。
+            for e in Emptiness::ALL {
+                assert_eq!(crash_verdict(7, 0, e, None).0, "✓");
             }
-            for e in [Emptiness::Fresh, Emptiness::Blocked, Emptiness::Erased] {
+            for e in Emptiness::ALL {
                 assert_eq!(recorded_verdict(9, 4, e, d), ("✓", d.to_string()));
                 assert_eq!(recorded_verdict(9, 0, e, d).0, "✗");
             }
@@ -4857,14 +5018,20 @@ pub mod doctor {
             );
             // 三種各自一句，兩兩不同。任何兩種撞在一起，就是又有一組不同的
             // 情況被印成同一行。
-            let all = [
-                said(Emptiness::Fresh),
-                said(Emptiness::Blocked),
-                said(Emptiness::Erased),
-            ];
+            // **走 `Emptiness::ALL`，不要寫陣列字面量。** 字面量不會因為 enum
+            // 多一種變體而編不過，而上一版 `Barren` 加進來的時候，這裡還停在
+            // 三種——守著「不可以兩種處境共用一句話」的測試，剛好漏掉的就是那
+            // 次新加的那一種。
+            let all = Emptiness::ALL.map(said);
             for (i, a) in all.iter().enumerate() {
-                for b in &all[i + 1..] {
-                    assert_ne!(a, b, "三種 0 的下一步都不一樣，不可以共用一句話");
+                for (j, b) in all.iter().enumerate().skip(i + 1) {
+                    assert_ne!(
+                        a,
+                        b,
+                        "{:?} 和 {:?} 的下一步不一樣，不可以共用一句話",
+                        Emptiness::ALL[i],
+                        Emptiness::ALL[j]
+                    );
                 }
             }
         }
@@ -4893,8 +5060,8 @@ pub mod doctor {
                 scope_started_at: None,
             };
 
-            let (_, said) = signal_line(&erased, true);
-            let (_, crash) = crash_verdict(0, 0, true, true, None);
+            let (_, said) = signal_line(&erased, Emptiness::Erased);
+            let (_, crash) = crash_verdict(0, 0, Emptiness::Erased, None);
             assert!(
                 !said.contains("還沒有任何一場"),
                 "上面那一列剛說完紀錄被帶走了，這一列不可以說她沒錄過：{said}"
@@ -4909,14 +5076,36 @@ pub mod doctor {
                 "同一張表的同一個 0，兩列要指向同一個解釋：\n  {crash}\n  {said}"
             );
 
-            // 真的沒錄過的那一台照舊。`ever` 只准在這一格說話。
-            let (_, fresh) = signal_line(&erased, false);
+            // **而這一條上一版只釘住了 `Erased` 那一格。** `capture.enabled =
+            // false` 那台機器走到的是 `Barren`，於是一行之上寫「那幾場沒有留
+            // 下紀錄」、這三行寫「那幾場的紀錄**不在了**」——同一份報告，四行
+            // 之隔，兩句互相打臉的**另一種**，而它一次都沒刪過東西。
+            //
+            // 所以四種各釘一次：這一列不可以說出上面那一列否認掉的事。
+            for (e, forbidden) in [
+                (Emptiness::Barren, "不在了"),
+                (Emptiness::Live, "不在了"),
+                (Emptiness::Fresh, "不在了"),
+            ] {
+                let (_, said) = signal_line(&erased, e);
+                let (_, crash) = crash_verdict(0, 0, e, None);
+                assert!(
+                    !crash.contains(forbidden),
+                    "前提壞了——這一格的「零當機」本來就不該提「{forbidden}」：{crash}"
+                );
+                assert!(
+                    !said.contains(forbidden),
+                    "{e:?}：上面那一列說沒有東西被拿走，這一列不可以說有：{said}"
+                );
+            }
+            // 真的沒錄過的那一台照舊。
+            let (_, fresh) = signal_line(&erased, Emptiness::Fresh);
             assert!(
                 fresh.contains("還沒有任何一場"),
                 "全新的機器上這句話還是對的：{fresh}"
             );
 
-            // 有範圍的時候 `ever` 一個字都不准動——三種判決都要照原樣講。
+            // 有範圍的時候 `empty` 一個字都不准動——三種判決都要照原樣講。
             let alive = SignalAudit {
                 rows: 12,
                 populated: 12,
@@ -4924,8 +5113,8 @@ pub mod doctor {
                 scope_started_at: Some(1_700_000_000_000),
                 ..erased
             };
-            for ever in [false, true] {
-                let (sym, said) = signal_line(&alive, ever);
+            for e in Emptiness::ALL {
+                let (sym, said) = signal_line(&alive, e);
                 assert_eq!(sym, "✓");
                 assert!(said.contains("12 列") && said.contains("上一場"), "{said}");
             }
@@ -4941,7 +5130,7 @@ pub mod doctor {
 
             let mut db = Db::open_in_memory().expect("db");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats")).expect("of"),
+                Emptiness::of(&db, &db.stats().expect("stats"), false).expect("of"),
                 Emptiness::Fresh,
                 "剛開的資料庫"
             );
@@ -4957,7 +5146,7 @@ pub mod doctor {
             )
             .expect("blocked");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats")).expect("of"),
+                Emptiness::of(&db, &db.stats().expect("stats"), false).expect("of"),
                 Emptiness::Blocked,
                 "她錄了，是規則擋掉的——證據就在這顆資料庫裡"
             );
@@ -4966,7 +5155,7 @@ pub mod doctor {
             db.forget(0, 2_000, None).expect("forget");
             db.end_session(s).expect("end");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats")).expect("of"),
+                Emptiness::of(&db, &db.stats().expect("stats"), false).expect("of"),
                 Emptiness::Erased,
                 "這時候才輪到「被 forget 忘掉了」"
             );
@@ -5006,9 +5195,17 @@ pub mod doctor {
                 "前提：它走的是和「清空過」同一條路：{stats:?}"
             );
             assert_eq!(
-                Emptiness::of(&db, &stats).expect("of"),
+                Emptiness::of(&db, &stats, false).expect("of"),
                 Emptiness::Barren,
                 "他一次都沒刪過東西，不可以說東西被刪了"
+            );
+            // **同一顆資料庫，她正開著的時候是另一種。** `Barren` 那幾句要他
+            // 去看 `capture.enabled`，而一個三秒前才按下開始記錄的人，機器上
+            // 沒有東西需要改——那台機器要的是「再等一下」。
+            assert_eq!(
+                Emptiness::of(&db, &stats, true).expect("of"),
+                Emptiness::Live,
+                "她此刻正佔著這個目錄，不是「跑完了什麼都沒存到」"
             );
 
             // 反面：同一顆資料庫，只要真的存過一列，清空之後就回得到 `Erased`。
@@ -5025,7 +5222,7 @@ pub mod doctor {
             db.forget(0, 3_000, None).expect("forget");
             db.end_session(s).expect("end");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats")).expect("of"),
+                Emptiness::of(&db, &db.stats().expect("stats"), false).expect("of"),
                 Emptiness::Erased,
                 "存過就是存過——那個位元撐得過 forget"
             );
@@ -5062,14 +5259,20 @@ pub mod doctor {
 
             // 真的一段字都不剩，才輪到「為什麼」——而三種的下一步都不一樣。
             let said = |e| bigram_verdict(0, 0, 0, e).1;
-            let all = [
-                said(Emptiness::Fresh),
-                said(Emptiness::Blocked),
-                said(Emptiness::Erased),
-            ];
+            // **走 `Emptiness::ALL`，不要寫陣列字面量。** 字面量不會因為 enum
+            // 多一種變體而編不過，而上一版 `Barren` 加進來的時候，這裡還停在
+            // 三種——守著「不可以兩種處境共用一句話」的測試，剛好漏掉的就是那
+            // 次新加的那一種。
+            let all = Emptiness::ALL.map(said);
             for (i, a) in all.iter().enumerate() {
-                for b in &all[i + 1..] {
-                    assert_ne!(a, b, "三種 0 不可以共用一句話");
+                for (j, b) in all.iter().enumerate().skip(i + 1) {
+                    assert_ne!(
+                        a,
+                        b,
+                        "{:?} 和 {:?} 的下一步不一樣，不可以共用一句話",
+                        Emptiness::ALL[i],
+                        Emptiness::ALL[j]
+                    );
                 }
             }
             assert!(
@@ -5079,7 +5282,7 @@ pub mod doctor {
             );
 
             // 有中文的時候 `Emptiness` 一個字都不准動：覆蓋率就是覆蓋率。
-            for e in [Emptiness::Fresh, Emptiness::Blocked, Emptiness::Erased] {
+            for e in Emptiness::ALL {
                 assert_eq!(bigram_verdict(12, 12, 40, e).0, "✓");
                 assert_eq!(bigram_verdict(3, 12, 40, e).0, "✗");
                 assert!(bigram_verdict(3, 12, 40, e).1.contains("3/12"));

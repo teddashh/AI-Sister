@@ -563,6 +563,15 @@ function blindLines(blind) {
       out.push(`（我留下了 ${blind.frames} 張畫面，但還沒有任何一段字——多半是才剛開始。）`);
     } else if (blind.ever_recorded && blocked) {
       out.push("（我錄過，但那段時間一張畫面都沒留下來——底下是我查得出來的原因。）");
+    } else if (blind.recording_now && !blind.ever_stored) {
+      // **「我正開著」和「一列都沒存過」同時成立的那一格。** 底下那句攤開三
+      // 種可能，而其中一種在這台機器上證得出來是假的：一列都沒進來過，就沒有
+      // 東西可以被忘掉或過期。
+      //
+      // 這一格是上一版自己造出來的：`recording_now` 問在 `!ever_stored` 前
+      // 面，於是後者永遠輪不到一台正在錄的機器，而前者那句話裡帶著一則它證得
+      // 出來是假的指控。攤開可能性也要先把不可能的那幾種扣掉。
+      out.push("（我正開著，可是到現在一列內容都還沒落地——多半是剛開始，再等一下。）");
     } else if (blind.ever_recorded && blind.recording_now) {
       // 她**正在**錄。「被忘掉了，或是過了保留期」少了一種可能，而且正好是
       // 最常見的那一種：他三秒前才按下「開始記錄」。第一次用的人問的第一個
@@ -1080,6 +1089,10 @@ if (params.get("hits") === "recent") {
 //   forgotten 錄過、存過、被忘掉了
 //   nulldata  錄過、**沒存過**，而 forget 從來沒被執行過。和上面那個在
 //             資料庫上長得一樣，講出來的話必須相反
+//   juststarted 沒存過，而且她**此刻正開著**——`nulldata` 那句「先看設定
+//             頁」在這台機器上是誤導，這裡要的是「再等一下」
+//   erasedlive 存過、被忘掉了，而她此刻正開著。這一種的兩個可能性都成立，
+//             所以那句話要**兩個都講**（上一種只准講一個）
 const BLIND_DEMOS = {
   "": {
     chunks: 8421,
@@ -1163,6 +1176,23 @@ const BLIND_DEMOS = {
     frames: 0,
     ever_recorded: true,
     ever_stored: false,
+    excluded: [],
+    paused_episodes: 0,
+    paused_ms: 0,
+    paused_open: false,
+    paused_now: false,
+    paused_truncated: 0,
+    recording_now: true,
+  },
+  // 和 `juststarted` 只差一個 `ever_stored`，而那一個字換掉整句話：她存過
+  // 東西、被忘掉了、而且此刻正開著——兩種可能性同時成立，所以那句話兩邊都
+  // 要講。上一版這兩顆共用同一句，於是「可能是之前的被忘掉了」被講給一台
+  // 從來沒存過任何東西的機器聽。
+  erasedlive: {
+    chunks: 0,
+    frames: 0,
+    ever_recorded: true,
+    ever_stored: true,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,

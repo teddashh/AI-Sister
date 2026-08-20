@@ -312,7 +312,12 @@ jobs:
             # 是 `過了保留期` 不是 `保留期`：`doctor` 上那一整段的標題就叫
             # 「保留期」，而它在每一台機器上都印。抓字串要抓到**那句話**，
             # 抓到那個詞就是在抓一個永遠成立的東西。
-            LIE='forget|過了保留期|已經不在了|一列都不剩|忘掉'
+            #
+            # 是 `不在了` 不是 `已經不在了`。那個「已經」讓這一條**錯過了
+            # doctor 上的三列訊號稽核**：它們寫的是「那幾場的紀錄不在了」，
+            # 逐字比對差兩個字，於是那三列在這台機器上指控了一個沒發生過的
+            # 刪除，而這一步是綠的。多兩個字就是多一個出口。
+            LIE='forget|過了保留期|不在了|一列都不剩|忘掉'
             if grep -qE "$LIE" "$x"; then
               echo "::error::[什麼都沒存過] $x 指控了一個沒發生過的刪除"
               grep -nE "$LIE" "$x"
@@ -324,6 +329,62 @@ jobs:
           # 而「她錄過」照樣要講得出來——往回倒成「還沒錄過」是另一種假話。
           grep -qE '她(\*\*)?錄過' null-stats.txt \
             || { echo '::error::[什麼都沒存過] 她確實跑過一場，不可以說成還沒錄過'; exit 1; }
+
+          # **第六顆：一列都沒存過，而她此刻正開著。**
+          #
+          # 上面那一顆是「跑完了、收工了、什麼都沒存到」，下一步是去改設定；
+          # 這一顆是「三秒前才按下開始記錄」，下一步是**再等一下**。上一版把
+          # 兩者印成同一句，於是一個剛開始用的人被送去改一個沒問題的設定——
+          # 而 `Emptiness::of` 收不到 `data_dir`，結構上就問不出這一題。
+          #
+          # 心跳檔要現寫（16 秒就過期），所以這一顆造得出來、也只造得出這一
+          # 顆：`replay` 永遠會一路跑到收尾。缺的又是 fixture。
+          L="$B --data-dir ./ci-live"
+          cp -r ./ci-nulldata ./ci-live
+          python3 - <<'EOF'
+          import sqlite3, time
+          now = int(time.time() * 1000)
+          c = sqlite3.connect('./ci-live/sister.db')
+          sid = c.execute(
+              "INSERT INTO sessions(started_at, app_version, platform)"
+              " VALUES (?, 'ci', 'linux/replay')", (now,)).lastrowid
+          c.execute(
+              "INSERT INTO system_events(session_id, ts, kind, detail)"
+              " VALUES (?, ?, 'session_start', NULL)", (sid, now))
+          c.commit()
+          # 心跳的第二欄不是 'boot'，所以讀成「正在錄」。
+          open('./ci-live/recording.beat', 'w').write(str(now))
+          EOF
+          $L stats > live-stats.txt
+          $L doctor > live-doctor.txt
+          $L facts > live-facts.txt
+          $L query 電話 > live-query.txt
+          for x in live-stats.txt live-doctor.txt live-facts.txt live-query.txt; do
+            # 同一組指控。她三秒前才開始，一列內容都沒進來過——沒有東西可以
+            # 被忘掉，也沒有東西可以過期。
+            if grep -qE "$LIE" "$x"; then
+              echo "::error::[她正開著] $x 指控了一個沒發生過的刪除"
+              grep -nE "$LIE" "$x"
+              exit 1
+            fi
+            # 而**這一顆**不准出現 `capture.enabled`：上面那顆的下一步在這顆
+            # 是誤導。正反成對——只寫「不准指控」的話，整段功能被刪掉也是綠的。
+            if grep -q 'capture.enabled' "$x"; then
+              echo "::error::[她正開著] $x 把一個剛按下開始記錄的人送去改設定"
+              grep -n 'capture.enabled' "$x"
+              exit 1
+            fi
+            grep -qE '正開著|正在錄|剛開始' "$x" \
+              || { echo "::error::[她正開著] $x 沒講出她此刻正在錄"; cat "$x"; exit 1; }
+          done
+          # 而兩顆之間必須真的不一樣。逐字相同的話上面每一條都還是綠的
+          # ——那正是這一整節在抓的形狀。
+          for pair in stats doctor facts query; do
+            if diff -q "null-$pair.txt" "live-$pair.txt" > /dev/null; then
+              echo "::error::[她正開著] $pair 在兩台機器上逐字相同"
+              exit 1
+            fi
+          done
 
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
