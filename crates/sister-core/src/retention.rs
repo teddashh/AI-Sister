@@ -268,7 +268,12 @@ pub(crate) fn delete_empty_sessions(
 ) -> Result<u64> {
     let empty = SESSION_CHILDREN
         .iter()
-        .map(|t| format!("NOT EXISTS(SELECT 1 FROM {t} WHERE session_id = sessions.id)"))
+        .map(|t| {
+            format!(
+                "NOT EXISTS(SELECT 1 FROM {t} WHERE session_id = sessions.id{})",
+                content_only(t)
+            )
+        })
         .collect::<Vec<_>>()
         .join(" AND ");
     // 限定一場的時候，那道「不准碰還開著的那一場」的守衛就多餘了——呼叫端
@@ -277,12 +282,50 @@ pub(crate) fn delete_empty_sessions(
         Some(_) => "id = ?1",
         None => "(ended_at IS NOT NULL OR id < (SELECT MAX(id) FROM sessions))",
     };
+    // 先把標籤帶走，`sessions` 那一刀才刪得掉——外鍵是 `ON` 的。這兩句用的是
+    // 同一組 `guard AND empty`，所以第一句刪掉的一定是第二句要刪的那幾場；
+    // 而 `empty` 本來就不看標籤，第一句跑完那幾場照樣被選中。
+    let marks = format!(
+        "DELETE FROM system_events WHERE kind IN {} \
+         AND session_id IN (SELECT id FROM sessions WHERE {guard} AND {empty})",
+        crate::model::SystemKind::session_marks_sql()
+    );
     let sql = format!("DELETE FROM sessions WHERE {guard} AND {empty}");
     Ok(match only {
-        Some(id) => tx.execute(&sql, [id]),
-        None => tx.execute(&sql, []),
+        Some(id) => {
+            tx.execute(&marks, [id]).context("delete session marks")?;
+            tx.execute(&sql, [id])
+        }
+        None => {
+            tx.execute(&marks, []).context("delete session marks")?;
+            tx.execute(&sql, [])
+        }
     }
     .context("delete empty sessions")? as u64)
+}
+
+/// 那張表裡，哪幾列算是**她記下來的東西**。
+///
+/// 只有 `system_events` 需要挑：`session_start` / `session_end` 是那場錄製自己
+/// 的標籤，不是她記的東西（見 [`crate::model::SystemKind::is_session_mark`]）。
+/// 其餘六張表整張都算。
+///
+/// 沒有這一句的時候，上面那支清掃在**產品裡從來沒有刪掉過任何一列**：
+/// `Recorder::finish` **先**寫 `SessionEnd` **再**呼叫 `end_session`，於是它自
+/// 己剛剛寫的那一列讓那一場「不空」。十條測試全綠，因為它們都拿
+/// `Db::start_session` 直接造 session——那種 session 產品做不出來。
+///
+/// 抽成一個函式而不是在兩支 SQL 裡各補一次 `AND kind NOT IN (…)`：補一次漏一
+/// 次的話，預覽和真的刪就會講不同的數字，而那正是 `preview_matches_prune` 那
+/// 條測試在防的東西。
+fn content_only(table: &str) -> String {
+    match table {
+        "system_events" => format!(
+            " AND kind NOT IN {}",
+            crate::model::SystemKind::session_marks_sql()
+        ),
+        _ => String::new(),
+    }
 }
 
 /// 上面那一支**會**刪掉幾列——如果 `[from_ts, to_ts)` 裡的東西現在全不見了的話。
@@ -303,9 +346,12 @@ fn count_empty_sessions(
         "input_metrics" => "NOT EXISTS(SELECT 1 FROM input_metrics WHERE session_id = sessions.id \
              AND NOT (ts_end > ?1 AND ts_start < ?2))"
             .to_string(),
+        // `content_only` 要和上面那一支用同一句話，否則預覽會替一場「只剩下自
+        // 己那兩列標籤」的錄製回報 0，而真的跑會刪掉 1。
         _ => format!(
-            "NOT EXISTS(SELECT 1 FROM {t} WHERE session_id = sessions.id \
-             AND NOT (ts >= ?1 AND ts < ?2))"
+            "NOT EXISTS(SELECT 1 FROM {t} WHERE session_id = sessions.id{} \
+             AND NOT (ts >= ?1 AND ts < ?2))",
+            content_only(t)
         ),
     };
     let empty = SESSION_CHILDREN
@@ -1261,6 +1307,151 @@ mod tests {
         let s = db.stats().expect("stats");
         assert_eq!(s.sessions, 1, "剩下的是正在錄的那一場，不是那個殼");
         assert!(!s.nothing_recorded_left(), "而這一場有東西");
+    }
+
+    /// **錄到一半按下「忘掉這一整天」，那一場收工的時候要跟著走。**
+    ///
+    /// 這是 `forget` 對「她正在錄」那一支答應的下場（`session_shell_why` 的
+    /// 「等她收工的時候，那一場如果還是一列都不剩，那一列就會跟著走」），而它
+    /// 有整整一個版本是假的：[`crate::db::Db::end_session`] 掃得到的條件是「這
+    /// 一場一列都不剩」，可是 `Recorder::finish` **先**寫一列 `SessionEnd`
+    /// **再**呼叫它——它自己剛剛寫的那一列讓那一場「不空」。那道清掃在產品裡
+    /// 從來沒有刪掉過任何一列。
+    ///
+    /// 為什麼十條測試全綠：它們都拿 `Db::start_session` 直接造 session，而那種
+    /// session 沒有 `SessionStart`／`SessionEnd`——**產品做不出那種 session**。
+    /// 所以這條測試照抄 `Recorder::new` / `finish` 真的做的事，一列標籤都不省。
+    #[test]
+    fn a_session_erased_mid_recording_goes_away_when_the_recorder_finishes() {
+        use crate::model::{SystemEvent, SystemKind};
+        let mut db = Db::open_in_memory().expect("db");
+
+        // ① `Recorder::new`：開一場，然後**立刻**寫一列 `session_start`。
+        let live = db.start_session("test", "0.0.1").expect("session");
+        db.insert_system(
+            live,
+            &SystemEvent {
+                ts: days_ago(1),
+                kind: SystemKind::SessionStart,
+                detail: None,
+            },
+        )
+        .expect("start mark");
+        db.insert_frame(live, &frame(days_ago(1), "帳單"), None, 0)
+            .expect("insert");
+
+        // ② 錄到一半他按下「忘掉這一整天」。窗內的東西全走了，連那列
+        //    `session_start` 也是——可是那一場還開著，守衛不准碰它。
+        db.forget(days_ago(500), days_ago(0), None).expect("forget");
+        let s = db.stats().expect("stats");
+        assert_eq!(s.sessions, 1, "那一場還在，因為她還在錄");
+        assert!(
+            s.nothing_recorded_left(),
+            "而她記下來的東西一列都不剩：{s:?}"
+        );
+
+        // ③ `Recorder::finish`：**先**寫 `session_end`（帶著「為什麼停」），
+        //    **再**呼叫 `end_session`。順序反過來寫的話這條測試就白寫了。
+        db.insert_system(
+            live,
+            &SystemEvent {
+                ts: days_ago(0),
+                kind: SystemKind::SessionEnd,
+                detail: Some("requested".into()),
+            },
+        )
+        .expect("end mark");
+        db.end_session(live).expect("end");
+
+        let s = db.stats().expect("stats");
+        assert_eq!(s.sessions, 0, "收工了，那一列要跟著走：{s:?}");
+        assert_eq!(s.system_events, 0, "那兩列標籤也要跟著走，不能留成孤兒");
+    }
+
+    /// 反面：她真的記了東西的那一場，收工之後**留下來**。
+    ///
+    /// 少了這條，把上面那個判斷寫成「一律刪掉」也一樣綠，而那會把他昨天一整天
+    /// 的紀錄連同容器一起丟掉。
+    #[test]
+    fn a_session_that_recorded_something_survives_its_own_finish() {
+        use crate::model::{SystemEvent, SystemKind};
+        let mut db = Db::open_in_memory().expect("db");
+        let live = db.start_session("test", "0.0.1").expect("session");
+        db.insert_system(
+            live,
+            &SystemEvent {
+                ts: days_ago(1),
+                kind: SystemKind::SessionStart,
+                detail: None,
+            },
+        )
+        .expect("start mark");
+        db.insert_frame(live, &frame(days_ago(1), "帳單"), None, 0)
+            .expect("insert");
+        db.insert_system(
+            live,
+            &SystemEvent {
+                ts: days_ago(0),
+                kind: SystemKind::SessionEnd,
+                detail: Some("requested".into()),
+            },
+        )
+        .expect("end mark");
+        db.end_session(live).expect("end");
+
+        let s = db.stats().expect("stats");
+        assert_eq!(s.sessions, 1, "這一場有東西，容器要留著");
+        assert_eq!(s.system_events, 2, "標籤也留著");
+        assert!(!s.nothing_recorded_left());
+    }
+
+    /// **一列「被規則擋掉」不是標籤。**
+    ///
+    /// 一場全程被 `excluded_apps` 蓋掉的錄製，`frames` / `text_chunks` 都是 0，
+    /// 剩下的只有一整排 `excluded` 稽核——那是他那天真的發生過的事，而且是這份
+    /// 紀錄裡最該留下來的一種證據（「她看到了，而且照規則沒記」）。把
+    /// `system_events` 整張表都當成標籤扣掉的話，那一場會被當成空的刪掉，而
+    /// `stats` 會說「她記下來的東西一列都不剩」——兩句都是假的。
+    #[test]
+    fn an_exclusion_audit_is_not_a_session_mark() {
+        use crate::model::{SystemEvent, SystemKind};
+        let mut db = Db::open_in_memory().expect("db");
+        let s1 = db.start_session("test", "0.0.1").expect("session");
+        db.insert_system(
+            s1,
+            &SystemEvent {
+                ts: days_ago(1),
+                kind: SystemKind::SessionStart,
+                detail: None,
+            },
+        )
+        .expect("start mark");
+        db.insert_system(
+            s1,
+            &SystemEvent {
+                ts: days_ago(1),
+                kind: SystemKind::Excluded,
+                detail: Some("keepassxc.exe".into()),
+            },
+        )
+        .expect("excluded");
+        db.insert_system(
+            s1,
+            &SystemEvent {
+                ts: days_ago(0),
+                kind: SystemKind::SessionEnd,
+                detail: Some("requested".into()),
+            },
+        )
+        .expect("end mark");
+        db.end_session(s1).expect("end");
+
+        let s = db.stats().expect("stats");
+        assert_eq!(s.sessions, 1, "那一場擋掉了東西，不是空的：{s:?}");
+        assert!(
+            !s.nothing_recorded_left(),
+            "「被規則擋掉」是內容，不是容器上的標籤：{s:?}"
+        );
     }
 
     /// FTS 是文字的**另一份副本**。刪 chunk 而索引沒跟著掉，等於資料

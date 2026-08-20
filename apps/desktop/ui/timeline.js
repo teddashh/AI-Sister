@@ -743,6 +743,16 @@ function fakeBackend(mode = "1") {
         const vanished = (m, i) => i % 3 === 2;
         const images = withImage.filter((m, i) => !vanished(m, i));
         const missing = withImage.length - images.length;
+        // **刪完之後還剩幾筆。** 兩支都要在動手之前算，因為真後端的
+        // `count_empty_sessions`（預覽）和 `delete_empty_sessions`（真的刪）
+        // 用的是同一個條件，而且有一條測試釘著它們回同一個數字。這裡本來是
+        // `cmd === "forget_range" && moments.length === 0`——`moments` 那時候
+        // 已經被下面那一行改過了，於是預覽永遠說「會刪掉 1 場錄製的紀錄」，
+        // 接著真的刪的時候說「留著 1 場」。一個真後端做不出來的組合，長在
+        // 一顆不可逆的按鈕的第一段上。
+        const left = moments.filter(
+          (m) => !inRange(m, arg.fromTs, arg.toTs),
+        ).length;
         if (cmd === "forget_range") {
           moments = moments.filter((m) => !inRange(m, arg.fromTs, arg.toTs));
           pauses = pauses.filter(
@@ -770,11 +780,11 @@ function fakeBackend(mode = "1") {
           //
           // 這兩行在開發機上唯一看得到的地方就是這裡——Tauri 起不來，真後端
           // 的那個狀態要一台 Windows 加一次當機才生得出來。
-          sessions: cmd === "forget_range" && moments.length === 0 ? 0 : 1,
+          sessions: left === 0 ? 0 : 1,
           sessions_left:
             cmd === "forget_preview"
               ? null // 預覽不動任何東西，沒有「刪完之後」可言。不是 0。
-              : moments.length === 0
+              : left === 0
                 ? 1
                 : 0,
           // 真後端問的是 `heartbeat::is_occupied`——一個心跳檔，這裡沒有。

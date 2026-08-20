@@ -302,10 +302,18 @@ impl Emptiness {
 /// 錄，而那時候那一列是活的。方向要往「不敢說死」倒——把一場活的錄製講成當機
 /// 是這兩句話裡唯一會嚇到人的錯。
 ///
-/// 第二句是量出來的，不是推出來的（見 `retention.rs` 的
-/// `the_shell_a_crash_left_behind_survives_the_next_recordings_startup_prune`）：
-/// `record` 的開機清理跑在 `start_session` **之前**（`ops.rs` 那一段），所以
-/// 那一刀砍不到這一列——它那時候還是最新的一列。
+/// **第二句是量出來的，不是推出來的。** 兩支各有一條照抄產品呼叫順序的測試在
+/// `retention.rs` 裡釘著，而兩句都曾經因為「照著守衛的條件用推的」而是假話：
+///
+/// * 「當掉」那一支 →
+///   `the_shell_a_crash_left_behind_survives_the_next_recordings_startup_prune`。
+///   `record` 的開機清理跑在 `start_session` **之前**，所以那一刀砍不到這一列
+///   ——它那時候還是最新的一列。
+/// * 「正在錄」那一支 →
+///   `a_session_erased_mid_recording_goes_away_when_the_recorder_finishes`。
+///   `Recorder::finish` **先**寫一列 `SessionEnd` **再**呼叫 `end_session`，於是
+///   它自己剛剛寫的那一列讓那一場「不空」——那道清掃在產品裡從來沒有刪掉過任何
+///   一列。現在 `delete_empty_sessions` 不把那兩列標籤當成內容，這句話才是真的。
 fn session_shell_why(occupied: bool) -> (&'static str, &'static str) {
     if occupied {
         (
@@ -2686,6 +2694,27 @@ pub mod stats {
         }
     }
 
+    /// 「事件」整行——理由和 [`sessions_line`] 一模一樣，只是換一張表。
+    ///
+    /// `system_events` 裡有兩種列講的是**那場錄製本身**（開始／結束），不是她
+    /// 記下來的東西。一顆剛被清空的資料庫上，她一開始錄，「系統」那個位置就會
+    /// 冒出一個 1——而正上方那個 ⚠ 才剛說完「一列都不剩」。兩句都是真的，湊在
+    /// 同一頁上就是這個專案一路在修的那種謊。
+    ///
+    /// 條件是「剩下的每一列都是標籤」，不是「有標籤」：她真的記了東西的時候
+    /// 這一行照樣是乾淨的一個數字，因為那時候那個但書是假的。
+    fn events_line(s: &sister_core::db::DbStats) -> String {
+        let head = format!(
+            "  事件      焦點 {} · 剪貼簿 {} · 輸入 {} · 系統 {}",
+            s.focus_events, s.clipboard_events, s.input_windows, s.system_events
+        );
+        if s.system_events > 0 && s.system_events == s.session_marks {
+            format!("{head}（都是那幾場錄製自己的開始／結束）")
+        } else {
+            head
+        }
+    }
+
     /// 要 `Config` 是為了底下那一行「遮蔽」。
     ///
     /// `redaction_audit` 數的是「插了旗子的有幾列」，而**旗子只有在
@@ -2893,10 +2922,7 @@ pub mod stats {
             s.chunks, s.ocr_blocks
         );
         println!("  事實      {}", s.facts);
-        println!(
-            "  事件      焦點 {} · 剪貼簿 {} · 輸入 {} · 系統 {}",
-            s.focus_events, s.clipboard_events, s.input_windows, s.system_events
-        );
+        println!("{}", events_line(&s));
         println!();
 
         // 排除稽核。這一段的重點不是「有幾條規則」——那是設定檔，doctor 會念。
@@ -3208,6 +3234,46 @@ pub mod stats {
 
             // 一列都沒有的時候也不准講——沒有殼可以講。
             assert_eq!(sessions_line(&DbStats::default(), false), "  工作階段  0");
+        }
+
+        /// **「系統 1」和上面那個 ⚠ 不可以同時只講一半。**
+        ///
+        /// 清空之後她再開始錄，`Recorder::new` 寫的那一列 `session_start` 會讓
+        /// 這一行冒出一個 1，而正上方那個 ⚠ 才剛說完「她記下來的東西一列都不
+        /// 剩」。兩句各自都是真的。
+        #[test]
+        fn the_only_system_event_left_says_what_it_is() {
+            let just_started = DbStats {
+                sessions: 1,
+                system_events: 1,
+                session_marks: 1,
+                ..Default::default()
+            };
+            let line = events_line(&just_started);
+            assert!(line.contains("系統 1"), "數字還是要印：{line}");
+            assert!(
+                line.contains("開始／結束"),
+                "那個 1 是那場錄製自己的標籤，這一行得說出來：{line}"
+            );
+
+            // 她真的記到東西的那一刻，但書就得消失——那時候「系統 3」講的是
+            // 鎖定、睡眠、被規則擋掉那幾種，是他那天真的發生過的事。
+            let recording = DbStats {
+                sessions: 1,
+                system_events: 3,
+                session_marks: 1,
+                frames: 12,
+                ..Default::default()
+            };
+            let line = events_line(&recording);
+            assert!(!line.contains("開始／結束"), "{line}");
+            assert_eq!(line, "  事件      焦點 0 · 剪貼簿 0 · 輸入 0 · 系統 3");
+
+            // 一列都沒有的時候也不准講。
+            assert_eq!(
+                events_line(&DbStats::default()),
+                "  事件      焦點 0 · 剪貼簿 0 · 輸入 0 · 系統 0"
+            );
         }
     }
 }

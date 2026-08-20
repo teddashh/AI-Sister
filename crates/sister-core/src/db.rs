@@ -1897,6 +1897,10 @@ impl Db {
             clipboard_events: count("SELECT COUNT(*) FROM clipboard_events")?,
             input_windows: count("SELECT COUNT(*) FROM input_metrics")?,
             system_events: count("SELECT COUNT(*) FROM system_events")?,
+            session_marks: count(&format!(
+                "SELECT COUNT(*) FROM system_events WHERE kind IN {}",
+                crate::model::SystemKind::session_marks_sql()
+            ))?,
             sessions: count("SELECT COUNT(*) FROM sessions")?,
             queries: count("SELECT COUNT(*) FROM queries")?,
             first_ts: self
@@ -2530,7 +2534,22 @@ pub struct DbStats {
     pub focus_events: i64,
     pub clipboard_events: i64,
     pub input_windows: i64,
+    /// `system_events` **整張表**，含那場錄製自己的開始／結束那兩列。
+    ///
+    /// 保持「整張表」不變是刻意的：這個欄位有好幾個讀的人（`stats` 的
+    /// 「系統 N」、匯出、足跡），把它的意思偷偷換成「扣掉標籤之後的」，每一
+    /// 個讀的人都會跟著變意思，而解構那道 E0027 只擋得住**新欄位**，擋不住
+    /// 一個舊欄位改了定義。要問「她記下來的還剩不剩」的人請減掉
+    /// [`session_marks`](Self::session_marks)。
     pub system_events: i64,
+    /// 上面那個數字裡，有幾列講的是**那場錄製本身**（`session_start` /
+    /// `session_end`，見 [`SystemKind::is_session_mark`]）。
+    ///
+    /// 存在的唯一理由是 [`nothing_recorded_left`](Self::nothing_recorded_left)
+    /// 減得出來。她**下一次開始錄**寫的那一列 `session_start`，本來足以讓那個
+    /// 述詞翻成 false——他一秒前才親手清空的一整天，被一列開場標籤否認掉。
+    /// 和 `queries` 同一種錯：**這張表會在清空之後長出來**。
+    pub session_marks: i64,
     /// **還留著東西的**那幾場錄製——**外加最後那一場，如果它沒有正常收尾。**
     ///
     /// 不是「這台機器一共錄過幾場」。一場錄製的紀錄基本上活得和它記下來的東西
@@ -2586,23 +2605,28 @@ impl DbStats {
     /// `input_windows` 和整份排除稽核都好好地印在同一頁上——那句話於是印在
     /// 一頁有數字的東西上面，還順便說那些東西是被 `forget` 刪掉的。
     ///
-    /// **「她記下來的東西」這幾個字是整支函式最重要的部分**，而它砍掉兩張表：
-    /// `queries`（他打的字）和 `sessions`（裝東西的殼）。兩次都是同一課，而我
-    /// 兩次都是先寫錯才學會的：
+    /// **「她記下來的東西」這幾個字是整支函式最重要的部分**，而它砍掉兩張表
+    /// 加一種列：`queries`（他打的字）、`sessions`（裝東西的殼）、以及
+    /// `system_events` 裡那場錄製自己的開始／結束。三次都是同一課，而我三次都
+    /// 是先寫錯才學會的：
     ///
     /// - `queries` 會在清空**之後**長出來。`forget` 完接著問一句「真的沒了
     ///   嗎」就有一列。
     /// - `sessions` 會**撐過**清空。`delete_empty_sessions` 不准碰
     ///   `ended_at IS NULL AND id = MAX(id)` 的那一列，而那正是當掉的那一場。
+    /// - `session_start` / `session_end` **兩樣都會**。清空之後她再開始錄，
+    ///   `Recorder::new` 第一件事就是寫一列 `session_start`；而 `finish` 寫的
+    ///   那列 `session_end` 是在整場都被忘掉之後才落地的。
     ///
-    /// 兩種下場一模一樣：這個述詞翻成 false，[`crate::db`] 外面那個 `Emptiness`
+    /// 三種下場一模一樣：這個述詞翻成 false，[`crate::db`] 外面那個 `Emptiness`
     /// 讓開 `Erased`、接到最寬的 `Fresh`，於是 `stats` 的 ⚠ 整段消失、`doctor`
     /// 說「（還沒有任何內容）」、`facts` 說「她還沒錄過」——他一秒前才親手刪
     /// 掉的一整天，被一列跟內容無關的東西否認了。
     ///
     /// **所以往這裡加一個計數器之前要問兩題**（解構會逼你至少看它一眼）：
     /// 這張表會不會在刪除**之後**長出來？會不會**撐過**刪除？兩題有一題是
-    /// 「會」，它就不屬於「她記下來的東西」。
+    /// 「會」，它就不屬於「她記下來的東西」。而第三次那一課是：**同一張表裡
+    /// 的列不見得是同一種東西**，所以問題要問到列的層次，不是表的層次。
     ///
     /// 「這顆資料庫裡一列都不剩」那句假話不是靠這裡修的，是靠呼叫端把話講準：
     /// 它說的是**她記下來的東西**沒了，不是這個檔案是空的。
@@ -2622,6 +2646,10 @@ impl DbStats {
             clipboard_events,
             input_windows,
             system_events,
+            // **不算**，理由見 `session_marks` 欄位自己的註解：那兩列是容器上
+            // 的標籤。底下的比較是 `system_events == session_marks`——「剩下的
+            // 每一列都是標籤」——而不是 `system_events == 0`。
+            session_marks,
             // **不算。** 一場錄製是個**容器**，不是她記下來的東西——裡面的
             // 東西全走了以後，剩下的那個殼不該讓「還剩不剩」答成「還剩」。
             //
@@ -2661,7 +2689,12 @@ impl DbStats {
             && *focus_events == 0
             && *clipboard_events == 0
             && *input_windows == 0
-            && *system_events == 0
+            // 「剩下的每一列都是那場錄製自己的標籤」。寫成減法
+            // （`system_events - session_marks == 0`）也一樣，但等號讀起來就是
+            // 這句話本身。`Excluded`、`CapturePaused`、`Lock` 那幾種不是標籤，
+            // 所以只要還有一列，這裡就是 false——那是對的：她那時候看到了東西
+            // 而且照規則沒記，那是這份紀錄裡最該留下來的一種證據。
+            && *system_events == *session_marks
     }
 
     /// **`sessions` 上還站著的那幾列，全都是空殼。**
@@ -3492,6 +3525,68 @@ mod tests {
             st.only_session_shells_left(),
             "那一列還在，而且是個殼——`forget`、`stats`、時間軸都要說得出這件事"
         );
+    }
+
+    /// **他清空之後，她再開始錄的第一毫秒。**
+    ///
+    /// `Recorder::new` 的第一件事就是寫一列 `session_start`。那一列曾經足以讓
+    /// 這個述詞翻成 false——於是 `Emptiness` 讓開 `Erased`、接到最寬的 `Fresh`，
+    /// `facts` 說「她還沒錄過」、`doctor` 說「還沒有任何內容」、`stats` 上那個
+    /// ⚠ 整個不見。他一秒前才親手刪掉的一整天，被一列開場標籤否認掉。
+    ///
+    /// 和 `queries` 那次一模一樣：**這張表會在清空之後長出來**。差別只在這次
+    /// 是同一張表裡的**某幾種列**，所以問題要問到列的層次。
+    ///
+    /// 這條測試守的是 `system_events == session_marks` 那個比較。少了它，把它
+    /// 寫回 `system_events == 0` 一樣綠——上面那條 `..._goes_away_when_the_
+    /// recorder_finishes` 抓不到，因為那裡 `forget` 連標籤都一起帶走了。
+    #[test]
+    fn the_first_row_of_the_next_recording_does_not_undo_the_erasure() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let f = frame_with_text(1_000, "chrome.exe", "帳單", &["本期應繳 NT$1,234"]);
+        db.insert_frame(s, &f, None, 0).expect("insert");
+        db.end_session(s).expect("end");
+        db.forget(0, 2_000, None).expect("forget");
+        let st = db.stats().expect("stats");
+        assert_eq!(st.sessions, 0, "乾淨收尾的那一場整個走了——這是基準");
+        assert!(st.nothing_recorded_left());
+
+        // 她又開始錄了。`Recorder::new`：`start_session` 然後 `SessionStart`。
+        let next = db.start_session("test", "0.0.1").expect("session");
+        db.insert_system(
+            next,
+            &SystemEvent {
+                ts: 9_000,
+                kind: SystemKind::SessionStart,
+                detail: None,
+            },
+        )
+        .expect("mark");
+
+        let st = db.stats().expect("stats");
+        assert_eq!(st.system_events, 1, "那一列真的在——這是這條要守的前提");
+        assert_eq!(st.session_marks, 1, "而它是一個標籤，不是她記下來的東西");
+        assert!(
+            st.nothing_recorded_left(),
+            "他刪掉的那一整天不可以被一列開場標籤否認掉：{st:?}"
+        );
+        assert!(
+            st.only_session_shells_left(),
+            "剛開始錄、還沒記到東西的那一場也是個殼：{st:?}"
+        );
+
+        // 而她真的記到第一筆的那一刻，這一切就結束了。
+        db.insert_frame(
+            next,
+            &frame_with_text(9_500, "a", "b", &["新的東西"]),
+            None,
+            0,
+        )
+        .expect("insert");
+        let st = db.stats().expect("stats");
+        assert!(!st.nothing_recorded_left(), "{st:?}");
+        assert!(!st.only_session_shells_left(), "{st:?}");
     }
 
     /// 反面：她**還記著東西**的那一場，不是殼。

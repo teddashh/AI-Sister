@@ -165,6 +165,68 @@ pub enum SystemKind {
 }
 
 impl SystemKind {
+    /// 每一種。`session_marks_sql` 從這裡長出來，所以少列一種就是少扣一種。
+    /// 有 `all_lists_every_kind` 這條測試釘住（新增一種會讓它編不過）。
+    pub const ALL: [SystemKind; 9] = [
+        SystemKind::Lock,
+        SystemKind::Unlock,
+        SystemKind::Sleep,
+        SystemKind::Wake,
+        SystemKind::CapturePaused,
+        SystemKind::CaptureResumed,
+        SystemKind::Excluded,
+        SystemKind::SessionStart,
+        SystemKind::SessionEnd,
+    ];
+
+    /// **這一列講的是那場錄製本身，不是他那天發生了什麼。**
+    ///
+    /// `Recorder::new` 開場寫一列 `SessionStart`、`finish` 收尾寫一列
+    /// `SessionEnd`。兩列都不是她「記下來的東西」——它們是那個容器上的標籤，
+    /// 和 `sessions` 那一列是同一種東西。所以凡是在問「她記下來的還剩不剩」
+    /// 的地方都要把它們扣掉。其餘七種（鎖定、睡眠、暫停、被規則擋掉……）講
+    /// 的是他那天真的發生過的事，要算。
+    ///
+    /// 少了這個區分會出兩件事，而兩件都出過：
+    ///
+    /// - `forget` 清光一整天之後，她**下一次開始錄**寫的那一列 `SessionStart`
+    ///   就足以讓 `DbStats::nothing_recorded_left()` 翻成 false，於是
+    ///   `Emptiness` 讓開 `Erased`、接到最寬的 `Fresh`——`facts` 說「她還沒錄
+    ///   過」、`doctor` 說「還沒有任何內容」、`stats` 上那個 ⚠ 整個不見。他一
+    ///   秒前才親手刪掉的一整天，被一列開場標籤否認了。
+    /// - `retention::delete_empty_sessions` 永遠找不到一場空的錄製：`finish`
+    ///   **先**寫 `SessionEnd` **再**呼叫 `end_session`，於是它自己剛剛寫的那
+    ///   一列讓那一場「不空」。那道清掃在產品裡從來沒有刪掉過任何一列，而
+    ///   `forget` 那句「等她收工的時候那一列就會跟著走」是照著它寫的。
+    ///
+    /// `match` 不寫 `_`：多一種 `SystemKind` 就編不過，而不是安靜地被歸成
+    /// 「她記下來的東西」。
+    pub const fn is_session_mark(self) -> bool {
+        match self {
+            SystemKind::SessionStart | SystemKind::SessionEnd => true,
+            SystemKind::Lock
+            | SystemKind::Unlock
+            | SystemKind::Sleep
+            | SystemKind::Wake
+            | SystemKind::CapturePaused
+            | SystemKind::CaptureResumed
+            | SystemKind::Excluded => false,
+        }
+    }
+
+    /// 給 SQL 用的 `IN (…)` 內容，從 [`Self::is_session_mark`] 長出來。
+    ///
+    /// 手寫一份字串常數的話，`as_str` 改一個字就會有一支 SQL 安靜地不再命中
+    /// 任何列——症狀是上面那兩句謊話回來，而沒有任何東西編不過。
+    pub fn session_marks_sql() -> String {
+        let marks: Vec<_> = Self::ALL
+            .iter()
+            .filter(|k| k.is_session_mark())
+            .map(|k| format!("'{}'", k.as_str()))
+            .collect();
+        format!("({})", marks.join(","))
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             SystemKind::Lock => "lock",
@@ -393,5 +455,49 @@ mod tests {
             assert_eq!(SourceKind::from_str_kind(k.as_str()), Some(k));
         }
         assert_eq!(SourceKind::from_str_kind("nope"), None);
+    }
+
+    /// `ALL` 少列一種，`session_marks_sql` 就會少扣一種——而那是一支照樣跑得
+    /// 完的 SQL，沒有任何東西會編不過。
+    ///
+    /// 底下那個 `match` 沒有 `_`：**多一種 `SystemKind`，這條測試就編不過**，
+    /// 於是加變體的人一定會走到這裡。這是這個檔案裡唯一一個把「別忘了」變成
+    /// 編譯錯誤的辦法（`DbStats` 那邊用的是解構的 E0027，同一招）。
+    #[test]
+    fn all_lists_every_kind() {
+        fn index(k: SystemKind) -> usize {
+            match k {
+                SystemKind::Lock => 0,
+                SystemKind::Unlock => 1,
+                SystemKind::Sleep => 2,
+                SystemKind::Wake => 3,
+                SystemKind::CapturePaused => 4,
+                SystemKind::CaptureResumed => 5,
+                SystemKind::Excluded => 6,
+                SystemKind::SessionStart => 7,
+                SystemKind::SessionEnd => 8,
+            }
+        }
+        for (i, k) in SystemKind::ALL.iter().enumerate() {
+            assert_eq!(index(*k), i, "ALL 的第 {i} 個是 {k:?}，順序或內容對不上");
+        }
+    }
+
+    /// SQL 那一串是從 `as_str` 長出來的，不是另外手寫的一份。
+    #[test]
+    fn session_marks_sql_is_built_from_as_str() {
+        let sql = SystemKind::session_marks_sql();
+        for k in SystemKind::ALL {
+            let quoted = format!("'{}'", k.as_str());
+            assert_eq!(
+                sql.contains(&quoted),
+                k.is_session_mark(),
+                "{k:?} 在 {sql} 裡的有無，和 is_session_mark 對不上",
+            );
+        }
+        // 「他那天發生了什麼」那幾種一個都不可以在裡面——`Excluded` 尤其：
+        // 那一列是「她看到了、而且照規則沒記」，是這份紀錄裡最需要留下來的
+        // 一種證據。
+        assert!(!sql.contains("'excluded'"), "{sql}");
     }
 }

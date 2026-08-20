@@ -247,6 +247,47 @@ jobs:
           grep -q '留著 1 場錄製的紀錄本身' live-forget.txt \
             || { echo "::error::forget 什麼都沒刪的那條路又把那一列藏起來了"; exit 1; }
 
+          # fixture 4：**他清空之後，她又開始錄的第一毫秒。**
+          #
+          # `Recorder::new` 的第一件事就是寫一列 `session_start`。上面三顆資料
+          # 庫全都到不了這個狀態：`replay` 一定會一路寫到收尾，所以「有一列
+          # `session_start`、而且**只有**那一列」在 CI 上一次都沒出現過。而那
+          # 一列曾經足以讓 `nothing_recorded_left()` 翻成 false——`facts` 說
+          # 「她還沒錄過」、`doctor` 說「還沒有任何內容」、`stats` 上那個 ⚠ 整
+          # 個不見。`check` 的每一條斷言本來就會抓到它；缺的一直是這顆資料庫。
+          # （第三次了：`queries`、`sessions`、現在是那兩列標籤。）
+          D="$B --data-dir ./ci-restarted"
+          cp -r ./ci-erased ./ci-restarted
+          python3 - <<'EOF'
+          import sqlite3
+          c = sqlite3.connect('./ci-restarted/sister.db')
+          sid = c.execute(
+              "INSERT INTO sessions(started_at, app_version, platform)"
+              " VALUES (strftime('%s','now')*1000, 'ci', 'linux/replay')"
+          ).lastrowid
+          c.execute(
+              "INSERT INTO system_events(session_id, ts, kind, detail)"
+              " VALUES (?, strftime('%s','now')*1000, 'session_start', NULL)", (sid,))
+          c.commit()
+          n = c.execute("SELECT COUNT(*) FROM system_events").fetchone()[0]
+          assert n == 1, f'這顆資料庫該只有那一列開場標籤，實際上有 {n} 列'
+          EOF
+          check ./ci-restarted "清空之後她又開始錄"
+          # 那個 1 要說出它是什麼。`stats` 上「事件……系統 1」站在 ⚠ 說完
+          # 「一列都不剩」的正下方——兩句都是真的，湊在一起就是這一步在抓的謊。
+          grep -q '系統 1（都是那幾場錄製自己的開始／結束）' s.txt \
+            || { echo "::error::那個「系統 1」沒說出它是那場錄製自己的標籤"; exit 1; }
+          # 反面：一顆**沒有被清空過**的資料庫，這一行不准有但書，⚠ 也不准出現。
+          # 少了這條，把那個但書寫成無條件的、或把整個 `Emptiness` 寫死成
+          # `Erased`，上面每一條都照樣綠。
+          E="$B --data-dir ./ci-normal"
+          $E replay scenarios/bill-lookup.json --interval-ms 500 > /dev/null
+          $E stats > normal-stats.txt
+          if grep -qE '開始／結束|空殼|一列都不剩' normal-stats.txt; then
+            echo '::error::這一顆好好地錄著，不該印任何「被清空過」的但書'
+            exit 1
+          fi
+
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
       # 而讀的人只會以為是自己裝錯了。這一步不是另外寫一份一樣的測試（兩份
