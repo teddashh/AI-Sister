@@ -73,6 +73,13 @@ jobs:
       - name: The pet must be able to say why something failed — and still be saying it 5s later
         run: node ./scripts/check-pet-says-why.mjs
 
+      # 那顆「忘掉這一段」是這整個程式裡唯一一個不可逆的動作，而它是兩段式的。
+      # 帶狀態的按鈕只有兩種壞法，兩種都很安靜：停在紅色的「確定刪掉」（下一下
+      # 刪掉他沒看過的一段），或刪完之後停在灰的（重讀清單失敗，而解開它的
+      # `armReset` 只掛在讀成功那條路上）。
+      - name: The one irreversible button must never be left in the wrong half of its two-step
+        run: node ./scripts/check-timeline-forget.mjs
+
       # 「三天前那通電話 100ms 內查得回來」是 Phase 0 的退場條件之一，而在
       # 這一步存在之前，它唯一的實作是一行註解。
       #

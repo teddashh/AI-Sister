@@ -29,80 +29,13 @@
  *   會暫停都問不到。
  */
 
-import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { fakeEl, loader, read } from "./fake-dom.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui");
 const SRC = process.argv[2] ?? join(UI, "settings.js");
-
-// settings.js 沒有 import/export，Node 會把它當 CJS 載入，而 CJS 的 require
-// cache 只認檔名——`?v=1` 這種 query 繞不開它。所以每個 case 把原始碼原封不動
-// 抄到一個新檔名底下再載入，才拿得到乾淨的 module instance。
-const SOURCE = readFileSync(SRC, "utf8");
-const TMP = mkdtempSync(join(tmpdir(), "sister-ui-"));
-
-function fakeEl() {
-  const el = {
-    _text: "",
-    value: "",
-    checked: false,
-    disabled: false,
-    placeholder: "",
-    hidden: false,
-    children: [],
-    handlers: {},
-    classList: {
-      _s: new Set(),
-      add(...c) {
-        c.forEach((x) => this._s.add(x));
-      },
-      remove(...c) {
-        c.forEach((x) => this._s.delete(x));
-      },
-      toggle(c, on) {
-        if (on) this._s.add(c);
-        else this._s.delete(c);
-      },
-      contains(c) {
-        return this._s.has(c);
-      },
-    },
-    addEventListener(ev, fn) {
-      (this.handlers[ev] ??= []).push(fn);
-    },
-    removeEventListener() {},
-    append(...kids) {
-      this.children.push(...kids);
-    },
-    appendChild(k) {
-      this.children.push(k);
-      return k;
-    },
-    replaceChildren(...kids) {
-      this.children = kids;
-    },
-    setAttribute() {},
-    removeAttribute() {},
-    focus() {},
-    querySelector() {
-      return null;
-    },
-    querySelectorAll() {
-      return [];
-    },
-  };
-  Object.defineProperty(el, "textContent", {
-    get() {
-      return this._text;
-    },
-    set(v) {
-      this._text = String(v);
-    },
-  });
-  return el;
-}
+const boot = loader(read(SRC));
 
 const BASE = {
   path: "C:\\Users\\ted\\AppData\\Roaming\\sister\\config.toml",
@@ -133,7 +66,6 @@ const HOTKEY = {
 };
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
-let instances = 0;
 
 async function open({ config = BASE, onRead, onWrite, onHotkeySet, hotkey = HOTKEY } = {}) {
   const nodes = new Map();
@@ -187,9 +119,7 @@ async function open({ config = BASE, onRead, onWrite, onHotkeySet, hotkey = HOTK
     },
   };
 
-  const copy = join(TMP, `settings-${++instances}.js`);
-  writeFileSync(copy, SOURCE);
-  await import(pathToFileURL(copy).href);
+  await boot();
   await tick();
   return {
     node,

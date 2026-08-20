@@ -664,6 +664,14 @@ async function load(keep = null) {
     await openDay(days[i], el.days.querySelectorAll("button")[i]);
   } catch (err) {
     el.railSay.textContent = String(err?.message ?? err);
+    // 右邊那一整片還停在上一次讀成功的樣子。**刪完之後呼叫的就是這一支**
+    // （見 `forget` 的第二下），所以這條路上會同時出現「刪掉了 3 段文字」
+    // 和一份還完整列著那 3 段的畫面——他會以為刪除沒有生效，然後再按一次。
+    say("讀不到新的清單，右邊列的是上一次讀到的那一份。重開這個視窗再看一次。", true);
+    // 那顆按鈕停在 `forget` 開頭設下的 `disabled = true`。回到 `openDay` 才會
+    // 有人把它解開，而這條路走不到那裡——於是這一頁上唯一一顆能刪東西的鍵
+    // 從此按不動，唯一的線索是左邊那行錯誤。
+    armReset();
   }
 }
 

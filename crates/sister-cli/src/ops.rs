@@ -7750,7 +7750,16 @@ pub mod record {
         // 份，拿的也是同一份規則清單——`rec.privacy()` 是熱重載之後的那一份，
         // 不是開機時那一份，不然中途新加的規則不會被算進「幾條失效了」。
         let lost = final_report.broken_privacy_rules(rec.privacy());
-        rec.finish(end_reason)?;
+        // **先收下這個結果，不要在這裡 `?` 出去。**
+        //
+        // `finish()` 要寫兩列進資料庫（session_end 事件、`end_session`），所以
+        // 它會在磁碟滿、資料庫被鎖、檔案被防毒抓走的時候失敗——而那些正好是
+        // 底下這整段摘要**最有用**的時候：保留了幾張、排除了幾次、OCR 活著沒、
+        // 磁碟吃了多少，還有那幾行「錄製途中失去的能力」。
+        //
+        // 裸的 `?` 讓它們一行都印不出來。他錄了一整天，最後看到的只有一句
+        // `database is locked`——而那一天到底錄到了什麼，沒有第二個地方可以問。
+        let finished = rec.finish(end_reason);
         println!(
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
             stats.ticks, stats.kept, stats.duplicates, stats.excluded, stats.no_screen
@@ -7794,6 +7803,14 @@ pub mod record {
         for line in &lost {
             println!("  ⚠  錄製途中失去的能力：{}", line.message);
         }
+        // 話講完了才把錯誤帶出去。多一句是因為這個失敗有一個看不見的後果：
+        // 沒有 `end_session` 的那一場，之後每一個地方都會把它算成「當機」
+        // （見 `Db::last_session` 那段）。他明天打開設定頁會看到一句「上一次
+        // 錄製沒有正常結束」，而剛剛的收工是好好的——錯的是這一行。
+        if finished.is_err() {
+            println!("\n上面那些是真的，但這一場在資料庫裡沒有收乾淨——之後她會把它算成一次當機。");
+        }
+        finished?;
         Ok(())
     }
 

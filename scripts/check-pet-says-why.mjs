@@ -21,103 +21,21 @@
  * `setPaused` → `paint()`），和輪詢走的是同一條，只是不必真的等五秒。
  */
 
-import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { fakeEl, hiddenIn, loader, read } from "./fake-dom.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui");
 const SRC = process.argv[2] ?? join(UI, "app.js");
-
-// app.js 沒有 import/export，Node 當 CJS 載入，而 CJS 的 cache 只認檔名。
-// 每個 case 抄一份新檔名才拿得到乾淨的 module instance。
-const SOURCE = readFileSync(SRC, "utf8");
-const TMP = mkdtempSync(join(tmpdir(), "sister-pet-"));
-
-function fakeEl() {
-  const el = {
-    _text: "",
-    value: "",
-    checked: false,
-    disabled: false,
-    hidden: false,
-    title: "",
-    dataset: {},
-    style: { setProperty() {}, removeProperty() {} },
-    children: [],
-    handlers: {},
-    classList: {
-      _s: new Set(),
-      add(...c) {
-        c.forEach((x) => this._s.add(x));
-      },
-      remove(...c) {
-        c.forEach((x) => this._s.delete(x));
-      },
-      toggle(c, on) {
-        if (on) this._s.add(c);
-        else this._s.delete(c);
-      },
-      contains(c) {
-        return this._s.has(c);
-      },
-    },
-    addEventListener(ev, fn) {
-      (this.handlers[ev] ??= []).push(fn);
-    },
-    removeEventListener() {},
-    append(...kids) {
-      this.children.push(...kids);
-    },
-    appendChild(k) {
-      this.children.push(k);
-      return k;
-    },
-    replaceChildren(...kids) {
-      this.children = kids;
-    },
-    setAttribute() {},
-    removeAttribute() {},
-    focus() {},
-    scrollIntoView() {},
-    querySelector() {
-      return null;
-    },
-    querySelectorAll() {
-      return [];
-    },
-  };
-  Object.defineProperty(el, "textContent", {
-    get() {
-      return this._text;
-    },
-    set(v) {
-      this._text = String(v);
-    },
-  });
-  return el;
-}
+const boot = loader(read(SRC));
 
 /*
- * 開場的 `hidden` 要跟 index.html 一樣，不能跟著假 DOM 的預設值走。
- *
- * 這一段是被打臉逼出來的：`[data-hits]` 在 HTML 上寫著 `hidden`，而
- * `fakeEl()` 的預設是 `false`——照預設值寫的那一版測試，在**真的壞掉的**
- * app.js 上照樣綠。一個假 DOM 只要有一個欄位比真的寬鬆，它守的那條線就是
- * 假的。
+ * 開場的 `hidden` 要跟 index.html 一樣，不能跟著假 DOM 的預設值走。詳細的
+ * 理由在 fake-dom.mjs 的 `hiddenIn`——簡短版是：第一版寫死 false，於是這
+ * 幾條測試在**真的壞掉的** app.js 上照樣綠。
  */
-const HTML = readFileSync(join(UI, "index.html"), "utf8");
-
-function tagOf(sel) {
-  const attr = sel.startsWith("#") ? `id="${sel.slice(1)}"` : sel.replace(/[[\]]/g, "");
-  const m = HTML.match(new RegExp(`<[^>]*${attr.replace(/[.*+?^${}()|]/g, "\\$&")}[^>]*>`));
-  return m?.[0] ?? null;
-}
-
-function hiddenInHtml(sel) {
-  const tag = tagOf(sel);
-  return tag !== null && /\shidden(\s|>|=)/.test(tag);
-}
+const HTML = read(join(UI, "index.html"));
+const hiddenInHtml = (sel) => hiddenIn(HTML, sel);
 
 // 前提本身也要驗一次。哪天 index.html 把那個 `hidden` 拿掉，這幾條測試會
 // 悄悄變成「驗一個不存在的問題」——寧可在這裡就吵。
@@ -127,7 +45,6 @@ if (!hiddenInHtml("[data-hits]")) {
 }
 
 const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
-let instances = 0;
 
 /**
  * 開一次字母人。`invoke` 收一張 `{ 指令: 回傳值或會丟出來的 Error }` 表；
@@ -180,9 +97,7 @@ async function open(table = {}) {
     },
   };
 
-  const copy = join(TMP, `app-${++instances}.js`);
-  writeFileSync(copy, SOURCE);
-  await import(pathToFileURL(copy).href);
+  await boot();
   await tick();
   return {
     node,
