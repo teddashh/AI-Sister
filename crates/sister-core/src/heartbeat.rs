@@ -107,10 +107,23 @@ fn write_beat(data_dir: &Path, ts: Millis, phase: Phase) -> Result<()> {
 /// 「過期」那條路，答案變回正確的「沒有人在錄」。真正的收工時間放在第三欄，
 /// 新版讀得到，舊版看都不會看。
 ///
-/// 寫不進去（磁碟滿、權限）就退回舊行為把檔案刪掉：那樣「檔案不在」的意思會
-/// 再度變糊，但比留下一個新鮮的心跳說她還在錄好——後者是那句不能說的謊。
+/// 寫不進去（磁碟滿、權限）的退路是**把檔案截成 0 位元組**，不是刪掉它。
+///
+/// 這一段第一版寫的是刪掉，理由是「比留下一個新鮮的心跳說她還在錄好」。那句
+/// 話是對的，但刪掉不是唯一比它好的選項，而它剛好把這整個改動的目的拆掉：
+/// 「檔案不在」就是 [`safe_to_kill_spawn`] 唯一放行的那一種。磁碟滿的時候
+/// `stop` 走這條退路，字母人那一頭就讀到 `NeverStarted`、放行落刀，而她正卡在
+/// `rec.finish()` 寫 `end_session`——**正是這個改動要防的那一刀，從錯誤路徑上
+/// 走回來了**。而且磁碟滿對一個整天在錄螢幕的東西不是假想狀況。
+///
+/// 截成 0 位元組同時滿足兩邊：`read_record` 讀不到第一欄 → [`Presence::Unreadable`]
+/// →「沒有人在錄」（不吹牛）而且「有人來過」（不落刀）。它也比寫入更可能成功
+/// ——truncate 不需要配置新的區塊。真的連截都截不動才刪，那時候已經沒有第三條
+/// 路了。
 pub fn stop(data_dir: &Path, at: Millis) {
-    if write_raw(data_dir, &format!("0 stopped {at}")).is_err() {
+    if write_raw(data_dir, &format!("0 stopped {at}")).is_err()
+        && std::fs::File::create(beat_path(data_dir)).is_err()
+    {
         let _ = std::fs::remove_file(beat_path(data_dir));
     }
     // 寫成功的話 rename 已經把它吃掉了；寫失敗的話這裡收掉那半個檔。
@@ -474,9 +487,18 @@ mod tests {
         // ——墓碑寫成功也是「沒在錄」——所以拿它當斷言等於沒有斷言。
         assert_eq!(
             presence(&t.0, 1_000_002),
-            Presence::NeverStarted,
-            "寧可退回舊的模糊，也不要留一個說她在錄的新鮮心跳"
+            Presence::Unreadable,
+            "退路要留一個「有人來過但說不出是誰」，不是「從來沒有人來過」"
         );
+        // 而這才是重點：退路**不可以把刀遞出去**。第一版這裡是 `remove_file`，
+        // 於是磁碟滿的時候字母人讀到 `NeverStarted` 就放行落刀，而她正卡在
+        // `rec.finish()` 寫 `end_session`——這個改動要防的那一刀，從錯誤路徑
+        // 上走回來了。
+        assert!(
+            !safe_to_kill_spawn(&t.0, 999_999, 1_000_002),
+            "寫不出墓碑不等於沒有人來過，不可以因此放行落刀"
+        );
+        assert!(!is_recording(&t.0, 1_000_002), "但也不可以說她還在錄");
     }
 
     /// 使用者調了時鐘，或者兩個行程對時差了一點。往未來偏不可以被讀成
