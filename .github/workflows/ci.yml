@@ -529,6 +529,77 @@ jobs:
             exit 1
           fi
 
+          # ── fixture 8：**從舊版升上來的那一顆，數不到升級之前被清掉的那幾場。** ──
+          #
+          # migration 006 的回填只數得到**還在的列**，所以那個計數器是一個下
+          # 限，不是一個量到的數。它於是要按一個旗標，而句子從此不准說「全
+          # 部」——「回填出來的數字是一個猜測穿著數字的衣服」。
+          #
+          # 這一整條路上一版只有單元測試走過：CI 這一步從來沒有一顆資料庫的
+          # `user_version` 小於現在的版本，於是**那句話從來沒有被真的執行檔印
+          # 出來過**。舊資料庫造得出來：把觸發器拿掉、把兩個計數器刪掉、版號
+          # 壓回 5——那逐欄就是 alpha.33 留下來的樣子。
+          U="$B --data-dir ./ci-upgrade"
+          cp -r ./ci-normal ./ci-upgrade
+          python3 - <<'EOF'
+          import sqlite3
+          c = sqlite3.connect('./ci-upgrade/sister.db')
+          assert c.execute("SELECT COUNT(*) FROM meta WHERE key='ever_recorded'").fetchone()[0] == 1, \
+              'ever_recorded 不在，那 floor 那個條件本來就不會成立——這顆 fixture 沒驗到東西'
+          for (n,) in c.execute(
+                  "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'sessions_%'"):
+              c.execute(f'DROP TRIGGER {n}')
+          c.execute("DELETE FROM meta WHERE key IN "
+                    "('sessions_started','sessions_ended','session_counts_floor')")
+          # 再補一場當掉的，讓升上來之後有東西可以數。
+          c.execute("INSERT INTO sessions(started_at, app_version, platform)"
+                    " VALUES (strftime('%s','now')*1000 - 600000, 'alpha.33', 'linux')")
+          c.execute('PRAGMA user_version = 5')
+          c.commit()
+          EOF
+          $U doctor > upgrade.txt
+          python3 -c "
+          import sqlite3, sys
+          c = sqlite3.connect('./ci-upgrade/sister.db')
+          v = c.execute('PRAGMA user_version').fetchone()[0]
+          m = dict(c.execute(\"SELECT key, value FROM meta WHERE key LIKE 'session%'\"))
+          bad = []
+          if v != 6: bad.append(f'user_version={v}')
+          if m.get('session_counts_floor') != '1': bad.append('沒有按下 floor 旗標')
+          if (m.get('sessions_started'), m.get('sessions_ended')) != ('2', '1'):
+              bad.append(f'回填數字不對：{m}')
+          if bad: print('::error::[升上來的] ' + '；'.join(bad)); sys.exit(1)"
+          grep -qE '零當機.*升上來那天' upgrade.txt \
+            || { echo "::error::[升上來的] 那個數字是回填的，句子卻說得像量到的"; grep 零當機 upgrade.txt; exit 1; }
+          # 反面：全新的那一顆不准講這句。它的數字是精確的，多一句範圍聲明就是
+          # 替一個沒有的問題道歉——而一句每台機器上都有的但書，很快就沒有人讀。
+          if $B --data-dir ./ci-normal doctor | grep -q '升上來那天'; then
+            echo "::error::[升上來的] 全新的資料庫也在替一個沒發生的升級道歉"
+            exit 1
+          fi
+          # **旗標自己也有一個坑**：migration 重跑（版號蓋到一半被砍、然後自我
+          # 修復）不可以替一顆數得準的資料庫貼上「我數不準」。所以它要問「計數
+          # 器在不在」才按——這一條把那個問題釘住，兩個方向各跑一次。
+          python3 -c "
+          import sqlite3
+          for d in ('./ci-upgrade', './ci-normal'):
+              c = sqlite3.connect(d + '/sister.db'); c.execute('PRAGMA user_version = 5'); c.commit()"
+          $U doctor > upgrade-again.txt
+          $B --data-dir ./ci-normal doctor > normal-again.txt
+          # 只比那兩列。整份報告拿去 `diff` 會被「已記錄 188.1 KB → 176.1 KB」
+          # 這種東西弄紅——WAL 什麼時候 checkpoint 不是這顆 fixture 在問的事，
+          # 而一條會因為無關的事情變紅的斷言，最後一定會被人放寬到失效。
+          for x in upgrade.txt upgrade-again.txt; do
+            grep -E '零當機|上一次錄製' "$x" > "$x.two"
+          done
+          diff -q upgrade.txt.two upgrade-again.txt.two > /dev/null \
+            || { echo "::error::[升上來的] migration 重跑之後那兩列改口了"; diff upgrade.txt.two upgrade-again.txt.two; exit 1; }
+          if grep -q '升上來那天' normal-again.txt; then
+            echo "::error::[升上來的] migration 重跑替一顆數得準的資料庫貼上了「我數不準」"
+            grep 零當機 normal-again.txt
+            exit 1
+          fi
+
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
       # 而讀的人只會以為是自己裝錯了。這一步不是另外寫一份一樣的測試（兩份
