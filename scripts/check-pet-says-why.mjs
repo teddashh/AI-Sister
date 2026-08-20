@@ -116,8 +116,13 @@ function blind(over = {}) {
 /**
  * 開一次字母人。`invoke` 收一張 `{ 指令: 回傳值或會丟出來的 Error }` 表；
  * 沒列到的指令回 `null`。函式值會被呼叫（要延遲、要丟例外的用這個）。
+ *
+ * `search` 是網址上那串 `?…`。**那幾條 demo 路徑不是裝飾。** 這台機器開不起
+ * Tauri，所以 `?asleep=nobeat` 那幾條是這幾格畫面唯一長得出來的地方——他真的
+ * 是照著那個網址用眼睛看版面的。以前這裡寫死 `""`，等於整條 demo 路徑沒有
+ * 任何測試走過。
  */
-async function open(table = {}) {
+async function open(table = {}, { search = "" } = {}) {
   // `domOf` 只生得出 index.html 上真的有的東西——見 fake-dom.mjs 開頭那段。
   const node = domOf(HTML);
   const listeners = new Map();
@@ -129,7 +134,7 @@ async function open(table = {}) {
     // 被畫出來——測試會綠，但綠的理由是它根本沒走到那裡。
     visibilityState: "visible",
   });
-  globalThis.location = { search: "" };
+  globalThis.location = { search };
   globalThis.addEventListener = () => {};
   globalThis.removeEventListener = () => {};
   globalThis.matchMedia = () => ({ matches: false, addEventListener() {} });
@@ -699,6 +704,30 @@ console.log("㉕ `notice` 只有那兩個具名函式寫得進去");
   check(`而且真的掃到了（${writes.length} 句）`, writes.length >= 5, writes.length);
   const setters = src.match(/^function noticeAbout\w+\(/gm) ?? [];
   check("那兩個具名函式也還在", setters.length === 2, setters);
+}
+
+console.log("㉗ `?asleep=nobeat` 這條 demo 路徑，在 booting 上也不可以被推開");
+{
+  // 他在**這台機器**上看這幾格畫面只有一條路：那幾個 `?…` 網址。Tauri 開不
+  // 起來，所以「等了 25 秒還沒有心跳」那句話長什麼樣、換行撐不撐得住版面，
+  // 是靠那條路用眼睛看的。而那條路以前一次測試都沒走過（`location.search`
+  // 在這支腳本裡是寫死的 `""`）。
+  //
+  // 這一條驗的是它和 ㉓ 的交叉：`?state=booting` 讓她停在「正在開資料庫」，
+  // 而 `?asleep=nobeat` 那句話講的正是她起不來。兩個湊在一起的時候，那句話
+  // 前面不可以冒出「這是另一件事」——那會讓他在一台**真的沒起來**的機器上，
+  // 讀到一句叫他別在意的話。
+  const p = await open(
+    { recording_state: "booting" },
+    { search: "?state=booting&asleep=nobeat" },
+  );
+  check("前提：她停在正在開資料庫", p.line().includes("正在開資料庫"), p.line());
+  check("那句話要在", p.line().includes("等了 25 秒還沒有心跳"), p.line());
+  const detail = p.line().split("\n").slice(1).join("\n");
+  check("不可以被推開成「另一件事」", !detail.includes("另一件事"), detail);
+  // 這條 demo 路徑餵的是三行字。少一行就代表 app.js 那邊被改短了，而它撐不撐
+  // 得住版面正是他要看的東西——「有出現」不等於「整段都在」。
+  check("三行都還在", detail.split("\n").length === 3, detail.split("\n").length);
 }
 
 console.log("");
