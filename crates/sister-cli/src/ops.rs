@@ -2849,6 +2849,40 @@ pub mod doctor {
         println!("  {sym} {} {detail}", fmt::pad(label, 16));
     }
 
+    /// 「畫面 0、文字 0」的**三種**來源。
+    ///
+    /// 這個型別存在的理由，是這一頁上同一組數字曾經被講成同一件事。三種的
+    /// 下一步完全不同：`Fresh` 要他去按開始錄，`Blocked` 要他去看那幾條規則，
+    /// `Erased` 是他五分鐘前才親手做的事、不需要任何下一步。
+    ///
+    /// 順序有意義——`Blocked` 排在 `Erased` 前面。一顆清空過的資料庫上
+    /// `nothing_left()` 為真，那時候連稽核紀錄都沒了，所以兩者不會同時成立；
+    /// 但一顆「刪掉了昨天、今天全被擋掉」的資料庫兩件事都真，而他現在該看的
+    /// 是規則。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Emptiness {
+        /// 從來沒錄過，或錄了但還沒輪到第一張。
+        Fresh,
+        /// 錄了，被排除規則擋掉或被暫停——證據還在這顆資料庫裡。
+        Blocked,
+        /// 錄過，而現在一列都不剩：`forget` 或保留期。
+        Erased,
+    }
+
+    impl Emptiness {
+        /// 資料庫自己回答這是哪一種。三個問題的順序就是上面那個順序。
+        fn of(db: &Db, s: &sister_core::db::DbStats) -> Result<Self> {
+            if !db.exclusion_audit()?.is_empty() || db.pause_audit()?.episodes > 0 {
+                return Ok(Self::Blocked);
+            }
+            Ok(if s.nothing_left() && db.ever_recorded()? {
+                Self::Erased
+            } else {
+                Self::Fresh
+            })
+        }
+    }
+
     /// 「已記錄」那一列的符號和句子，**一起**算出來。
     ///
     /// 拆成函式是因為這一列的兩半（畫 `?` 還是 `✓`、後面接哪一句）以前是兩段
@@ -2857,7 +2891,7 @@ pub mod doctor {
     fn recorded_verdict(
         frames: i64,
         chunks: i64,
-        ever: bool,
+        empty: Emptiness,
         detail: &str,
     ) -> (&'static str, String) {
         match (frames, chunks) {
@@ -2865,11 +2899,22 @@ pub mod doctor {
             // 而它們的下一步剛好相反：前者要他去按開始錄，後者他剛剛才親手把
             // 東西刪掉。這個位元活在 `meta` 裡，`forget` 和 `prune` 都不碰它
             // （見 `Db::ever_recorded`）。
-            (0, 0) if ever => (
-                "?",
-                format!("{detail}——錄過，但現在一列都不剩（`forget` 或保留期）"),
-            ),
-            (0, 0) => ("?", format!("{detail}（還沒有任何內容）")),
+            //
+            // 但「畫面 0、文字 0」**不等於**「一列都不剩」：一場全程被排除規則
+            // 擋掉（或全程暫停）的錄製走到的也是 (0, 0)，而那顆資料庫裡有工作
+            // 階段、有事件、有一整段排除稽核。那時候說「被 forget 忘掉了」是
+            // 假的，而且指錯方向——他該去看的是那幾條規則。
+            (0, 0) => match empty {
+                Emptiness::Erased => (
+                    "?",
+                    format!("{detail}——錄過，但現在一列都不剩（`forget` 或保留期）"),
+                ),
+                Emptiness::Blocked => (
+                    "?",
+                    format!("{detail}——她錄了，但那段時間被規則擋掉或暫停了（見底下「隱私」）"),
+                ),
+                Emptiness::Fresh => ("?", format!("{detail}（還沒有任何內容）")),
+            },
             // 「0 張畫面 · 0 段文字 ✓」是這個專案一路在修的那個災難本身
             // ——錄了一整天、資料庫在長大、一個字都沒進去。有資料庫卻沒
             // 內容不該是打勾。
@@ -3526,7 +3571,27 @@ pub mod doctor {
             Some(d) => {
                 let (indexed, with_cjk) = d.bigram_coverage()?;
                 if with_cjk == 0 {
-                    mark("?", "兩個字的中文", "資料庫裡還沒有中文，等你錄過再驗一次");
+                    // 前半句是對的（它講的是現在這顆資料庫），後半句不一定：
+                    // `text_chunks` 是 `forget` 和保留期都清的表，所以「等你
+                    // 錄過」對一個剛把一整天忘掉的人，是叫他重做一件他刻意
+                    // 做掉的事。
+                    //
+                    // 但只有**真的一列都不剩**才敢這樣講。有字、只是都沒有
+                    // 中文的時候，「被忘掉了」是假的——而這正是這一批修改
+                    // 自己犯過的錯（見 `Emptiness`）。
+                    mark(
+                        "?",
+                        "兩個字的中文",
+                        match Emptiness::of(d, &d.stats()?)? {
+                            Emptiness::Erased => {
+                                "資料庫裡現在沒有中文可以驗——她錄過，那些字被忘掉了或過了保留期"
+                            }
+                            Emptiness::Blocked => {
+                                "資料庫裡沒有中文可以驗——那段時間被規則擋掉或暫停了"
+                            }
+                            Emptiness::Fresh => "資料庫裡還沒有中文，等你錄過再驗一次",
+                        },
+                    );
                 } else if indexed >= with_cjk {
                     mark(
                         "✓",
@@ -3570,7 +3635,7 @@ pub mod doctor {
                 fmt::bytes(s.db_bytes + s.image_bytes)
             );
             let ever = db.ever_recorded()?;
-            let (sym, said) = recorded_verdict(s.frames, s.chunks, ever, &detail);
+            let (sym, said) = recorded_verdict(s.frames, s.chunks, Emptiness::of(db, &s)?, &detail);
             mark(sym, "已記錄", &said);
 
             let (all_sessions, unfinished, last_crash) = db.crash_audit()?;
@@ -4118,8 +4183,8 @@ pub mod doctor {
         fn an_erased_database_and_a_brand_new_one_do_not_get_the_same_two_lines() {
             let d = "0 張畫面 · 0 段文字 · 176.0 KB";
 
-            let (never_sym, never) = recorded_verdict(0, 0, false, d);
-            let (erased_sym, erased) = recorded_verdict(0, 0, true, d);
+            let (never_sym, never) = recorded_verdict(0, 0, Emptiness::Fresh, d);
+            let (erased_sym, erased) = recorded_verdict(0, 0, Emptiness::Erased, d);
             assert_ne!(
                 never, erased,
                 "同樣是 0，刪過的和沒錄過的不可以拿到同一句話"
@@ -4152,8 +4217,47 @@ pub mod doctor {
             // 出來，不可以整列被那個旗標蓋掉。
             for ever in [false, true] {
                 assert_eq!(crash_verdict(7, 0, ever, None).0, "✓");
-                assert_eq!(recorded_verdict(9, 4, ever, d), ("✓", d.to_string()));
-                assert_eq!(recorded_verdict(9, 0, ever, d).0, "✗");
+            }
+            for e in [Emptiness::Fresh, Emptiness::Blocked, Emptiness::Erased] {
+                assert_eq!(recorded_verdict(9, 4, e, d), ("✓", d.to_string()));
+                assert_eq!(recorded_verdict(9, 0, e, d).0, "✗");
+            }
+        }
+
+        /// **第三種 0：她錄了，而那段時間被規則整段擋掉了。**
+        ///
+        /// 這一條守的是這批修改**自己犯過**的錯。第一版把「畫面 0、文字 0」
+        /// 直接當成「被 `forget` 刪光了」，於是一場全程踏在 keepassxc 上的錄製
+        /// 拿到的是「錄過，但現在一列都不剩（`forget` 或保留期）」——而那顆
+        /// 資料庫裡有工作階段、有事件、有一整段排除稽核，一個位元組都沒被刪。
+        ///
+        /// 指錯方向的代價很具體：真正該做的下一步是去看那幾條規則，而那句話
+        /// 告訴他東西已經沒了、沒什麼好看的。
+        #[test]
+        fn a_recording_the_rules_ate_is_not_a_recording_he_deleted() {
+            let d = "0 張畫面 · 0 段文字 · 168.0 KB";
+            let said = |e| recorded_verdict(0, 0, e, d).1;
+
+            let blocked = said(Emptiness::Blocked);
+            assert!(
+                !blocked.contains("forget") && !blocked.contains("保留期"),
+                "沒有人刪過任何東西，規則擋掉的不可以說成他刪掉的：{blocked}"
+            );
+            assert!(
+                blocked.contains("規則") || blocked.contains("暫停"),
+                "而該看的地方要指出來——他下一步就是去改那幾條：{blocked}"
+            );
+            // 三種各自一句，兩兩不同。任何兩種撞在一起，就是又有一組不同的
+            // 情況被印成同一行。
+            let all = [
+                said(Emptiness::Fresh),
+                said(Emptiness::Blocked),
+                said(Emptiness::Erased),
+            ];
+            for (i, a) in all.iter().enumerate() {
+                for b in &all[i + 1..] {
+                    assert_ne!(a, b, "三種 0 的下一步都不一樣，不可以共用一句話");
+                }
             }
         }
 
@@ -4217,6 +4321,47 @@ pub mod doctor {
                 assert_eq!(sym, "✓");
                 assert!(said.contains("12 列") && said.contains("上一場"), "{said}");
             }
+        }
+
+        /// 上面兩條測的是「拿到 `Emptiness` 之後講什麼」。這一條測的是**資料庫
+        /// 自己分不分得出來**——而那正是變異實驗裡唯一活下來的縫：把
+        /// `Emptiness::of` 開頭那道排除／暫停的問題拿掉，兩條單元測試都還是綠
+        /// 的，而真的跑一次 `doctor` 會說「（還沒有任何內容）」。
+        #[test]
+        fn the_database_itself_can_tell_which_kind_of_empty_it_is() {
+            use sister_core::model::{SystemEvent, SystemKind};
+
+            let mut db = Db::open_in_memory().expect("db");
+            assert_eq!(
+                Emptiness::of(&db, &db.stats().expect("stats")).expect("of"),
+                Emptiness::Fresh,
+                "剛開的資料庫"
+            );
+
+            let s = db.start_session("test", "0").expect("session");
+            db.insert_system(
+                s,
+                &SystemEvent {
+                    ts: 1_000,
+                    kind: SystemKind::Excluded,
+                    detail: Some("excluded app: keepassxc".into()),
+                },
+            )
+            .expect("blocked");
+            assert_eq!(
+                Emptiness::of(&db, &db.stats().expect("stats")).expect("of"),
+                Emptiness::Blocked,
+                "她錄了，是規則擋掉的——證據就在這顆資料庫裡"
+            );
+
+            // 忘掉一切之後，那份證據也走了，剩下的只有 meta 裡那一個位元。
+            db.forget(0, 2_000, None).expect("forget");
+            db.end_session(s).expect("end");
+            assert_eq!(
+                Emptiness::of(&db, &db.stats().expect("stats")).expect("of"),
+                Emptiness::Erased,
+                "這時候才輪到「被 forget 忘掉了」"
+            );
         }
 
         /// 設定檔好好的那條路也要走一次，不然上面那條可能只是「錯誤路徑能跑」。
