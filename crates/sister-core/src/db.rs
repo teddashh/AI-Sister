@@ -402,10 +402,19 @@ impl Db {
     ///
     /// 一個布林，不是一個數字，也不是一個時戳——這是刻意的。
     ///
-    /// 唯一的讀者是「沒找到」那幾句話（見 [`crate::answer::BlindSpots`]）：
-    /// 一顆全新的資料庫要說「我還沒開始記——按右上角那顆開始記錄」，而一顆
-    /// **他自己剛清空**的資料庫絕對不可以說同一句話，那是叫他重做一件他刻意
-    /// 做掉的事。以前這件事是靠「`sessions` 那張表誰都不刪」撐著的，於是
+    /// 讀者是每一句會在「什麼都沒有」的時候開口的話——[`crate::answer::BlindSpots`]
+    /// 是第一個，現在還有 `sister stats` 那行 ⚠、`doctor` 的「已記錄」「零當機」
+    /// 「你問過她什麼」、`facts` / `queries` 的空手句，以及 `ops::Emptiness`（它
+    /// 把這個位元和排除稽核湊成三種 0）。一顆全新的資料庫要說「我還沒開始記
+    /// ——按右上角那顆開始記錄」，而一顆**他自己剛清空**的資料庫絕對不可以說
+    /// 同一句話，那是叫他重做一件他刻意做掉的事。
+    ///
+    /// 它答得出「她錄過」，答**不**出「這張表曾經有列」——旗標在
+    /// `start_session` 就翻成 1，第一張畫面之前。拿它去代表後者，就會在一顆
+    /// 從來沒刪過任何東西的資料庫上宣布東西被刪了（`facts` 和「兩個字的中文」
+    /// 都各自犯過一次）。
+    ///
+    /// 以前這件事是靠「`sessions` 那張表誰都不刪」撐著的，於是
     /// `forget` 那句「那段時間裡的每一張表都清乾淨」是假的：那張表留著
     /// `started_at` / `ended_at` / `app_version` / `platform`——也就是
     /// 「那天下午 13:02 到 17:44 她在錄」。他忘掉的是那段時間裡的畫面，
@@ -1886,6 +1895,7 @@ impl Db {
             input_windows: count("SELECT COUNT(*) FROM input_metrics")?,
             system_events: count("SELECT COUNT(*) FROM system_events")?,
             sessions: count("SELECT COUNT(*) FROM sessions")?,
+            queries: count("SELECT COUNT(*) FROM queries")?,
             first_ts: self
                 .conn
                 .query_row("SELECT MIN(ts) FROM text_chunks", [], |r| {
@@ -2526,6 +2536,14 @@ pub struct DbStats {
     /// 不刪——於是一顆剛被 `sister forget` 清空的資料庫會印出「工作階段 412」
     /// 配上一片空白的其他每一行，而那 412 場裡一場的東西都不在了。
     pub sessions: i64,
+    /// 他問過幾題（`queries`）。
+    ///
+    /// 這一頁不印它——`sister queries` 是它的家。放在這裡是因為
+    /// [`nothing_left`](Self::nothing_left) 需要它：`queries` 是**整個資料庫裡
+    /// 唯一一張存著他自己打進去的字**的表，而它以前不在這個結構裡，所以那句
+    /// 「這顆資料庫裡一列都不剩」在他的搜尋紀錄還躺著的時候照樣印得出來。
+    /// 那個漏洞不是漏一個欄位，是漏一張表——解構的編譯期保護抓不到。
+    pub queries: i64,
     /// `text_chunks` 的時間範圍。`retention.text_days` 管的是這一對。
     pub first_ts: Option<Millis>,
     pub last_ts: Option<Millis>,
@@ -2569,6 +2587,7 @@ impl DbStats {
             input_windows,
             system_events,
             sessions,
+            queries,
             // 底下這些不是「有幾件事發生過」：
             // - `image_bytes` 是大小，而且一列都不剩的時候它必然是 0
             // - 兩對時戳是範圍，沒有列就沒有範圍
@@ -2596,6 +2615,7 @@ impl DbStats {
             && *input_windows == 0
             && *system_events == 0
             && *sessions == 0
+            && *queries == 0
     }
 }
 
@@ -3343,6 +3363,24 @@ mod tests {
             "清空之後才算一列都不剩"
         );
         assert!(db.ever_recorded().expect("ever"), "而她錄過這件事還在");
+
+        // **他自己打進去的字也是一列。** `queries` 這張表以前不在 `DbStats`
+        // 裡，所以「這顆資料庫裡一列都不剩」在他的搜尋紀錄還躺在磁碟上的時候
+        // 照樣印得出來。漏的不是一個欄位、是一整張表，而解構那套編譯期保護
+        // 只擋得住前者。
+        db.log_query(&QueryLogEntry {
+            ts: 3_000,
+            question: "帳單",
+            shape: "keywords",
+            hits: 0,
+            latency_ms: 1,
+            source: "cli",
+        })
+        .expect("log");
+        assert!(
+            !db.stats().expect("stats").nothing_left(),
+            "他問過的話還在磁碟上，這時候說「一列都不剩」是假的"
+        );
     }
 
     #[test]

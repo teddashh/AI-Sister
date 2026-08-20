@@ -239,6 +239,51 @@ mod summary_tests {
     }
 }
 
+/// 「這顆資料庫裡沒有東西」的**三種**來源。
+///
+/// 這個型別存在的理由，是同一組 0 曾經被三個地方各自講成同一件事，而三種的
+/// 下一步完全不同：`Fresh` 要他去按開始錄，`Blocked` 要他去看那幾條規則，
+/// `Erased` 是他五分鐘前才親手做的、不需要任何下一步。
+///
+/// **它只回答「為什麼是空的」，不回答「空不空」。** 呼叫端要自己先確定手上
+/// 真的是 0 再問它——問錯的下場長這樣：`兩個字的中文` 那一列拿 `with_cjk == 0`
+/// 去問，於是一台跑英文、順手擋了 keepassxc 的機器被告知「沒有中文可以驗，
+/// 那段時間被規則擋掉了」，而它的 6 段英文好好地躺在兩行之上的 ✓ 裡。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Emptiness {
+    /// 從來沒錄過，或錄了但還沒輪到第一列。
+    Fresh,
+    /// 這顆資料庫裡有擋掉／暫停的紀錄可以解釋這個 0——證據還在，指過去。
+    ///
+    /// 它**不宣稱那是唯一的原因**：`forget --last 24h` 刪的是一段時間，前天
+    /// 那幾列排除稽核會活下來，於是「昨天被擋光、今天被忘掉」兩件事同時成立。
+    /// 那時候該先看的還是那幾條規則（它們確實擋過東西），只是這句話不可以
+    /// 反過來說成「沒有人刪過任何東西」。
+    Blocked,
+    /// 錄過，而現在**一列都不剩**：`forget` 或保留期。
+    Erased,
+}
+
+impl Emptiness {
+    /// 資料庫自己回答這是哪一種。
+    ///
+    /// `Erased` 問在最前面，因為它的條件最強（`nothing_left()` 要求每一個
+    /// 計數器都是 0，包含稽核紀錄自己那幾列）。條件最強的先問，才不會被一個
+    /// 條件比較寬的答案蓋掉。
+    pub fn of(db: &Db, s: &sister_core::db::DbStats) -> Result<Self> {
+        if s.nothing_left() && db.ever_recorded()? {
+            return Ok(Self::Erased);
+        }
+        Ok(
+            if !db.exclusion_audit()?.is_empty() || db.pause_audit()?.episodes > 0 {
+                Self::Blocked
+            } else {
+                Self::Fresh
+            },
+        )
+    }
+}
+
 pub mod consent {
     use super::*;
     use sister_core::config::Config;
@@ -2309,13 +2354,27 @@ pub mod facts {
                     // 保留期都會清（`retention.rs` 兩邊都有 `DELETE FROM
                     // facts`），而 `facts.chunk_id` 還是 ON DELETE CASCADE。
                     // 剛把一整天忘掉的人拿到的是「她還沒錄過」。
-                    (None, None) if db.ever_recorded()? =>
-                        "這份記憶裡沒有任何事實了——她錄過，那些東西被 `sister forget` \
-                         忘掉了，或是過了保留期。"
-                            .into(),
-                    (None, None) =>
-                        "這份記憶裡還沒有任何事實——她還沒錄過，或錄到的畫面上沒有抄得下來的東西。"
-                            .into(),
+                    //
+                    // 問 `Emptiness` 而不是 `ever_recorded()`：那個位元在
+                    // `start_session` 就翻成 1（第一張畫面之前），它說的是
+                    // 「開過一場錄製」，不是「這張表曾經有列」。單看它的第一版
+                    // 於是在一顆**從來沒刪過任何東西**的資料庫上說東西被刪了
+                    // ——`replay scenarios/secret-copy.json` 就走到：6 段文字、
+                    // 0 個事實，因為那幾張畫面上沒有抄得下來的東西。那正是被
+                    // 蓋掉的那一句話在講的情況。
+                    (None, None) => match Emptiness::of(&db, &db.stats()?)? {
+                        Emptiness::Erased =>
+                            "這份記憶裡沒有任何事實了——她錄過，那些東西被 `sister forget` \
+                             忘掉了，或是過了保留期。"
+                                .into(),
+                        Emptiness::Blocked =>
+                            "這份記憶裡沒有任何事實——她錄過，而那段時間被排除規則擋掉或\
+                             暫停了（`sister stats` 底下的排除稽核會列出來）。"
+                                .into(),
+                        Emptiness::Fresh =>
+                            "這份記憶裡還沒有任何事實——她還沒錄過，或錄到的畫面上沒有抄得下來的東西。"
+                                .into(),
+                    },
                 }
             );
             return Ok(());
@@ -2465,11 +2524,14 @@ pub mod stats {
                     "focus_events": s.focus_events, "clipboard_events": s.clipboard_events,
                     "input_windows": s.input_windows, "system_events": s.system_events,
                     "sessions": s.sessions,
-                    // 上面每一個計數器都可能是 0，而 0 有兩種：從來沒錄過，
-                    // 或者錄過、被 `forget` 和保留期帶走了。人看的那一頁底下
-                    // 有一行 ⚠ 在講這件事；讀 JSON 的（`check-audit.py`、
-                    // 未來的儀表板）沒有那一行可以讀，只能自己從一堆 0 猜，
-                    // 而那正是猜不出來的東西。
+                    // 上面每一個計數器都可能是 0，而 0 有三種（見 `Emptiness`）：
+                    // 從來沒錄過、錄過但那段時間全被規則擋掉、錄過而被 `forget`
+                    // 和保留期帶走了。人看的那一頁底下有一行 ⚠ 在講這件事；讀
+                    // JSON 的（`check-audit.py`、未來的儀表板）沒有那一行可以
+                    // 讀，只能自己從一堆 0 猜，而那正是猜不出來的東西。
+                    //
+                    // 這一欄只砍掉第三種。第二種要靠底下的 `exclusions` /
+                    // `pauses` 自己判——它們本來就在同一份 JSON 裡。
                     "ever_recorded": db.ever_recorded()?,
                     "db_bytes": s.db_bytes,
                     "image_bytes": s.image_bytes, "span_days": span_days,
@@ -2849,40 +2911,6 @@ pub mod doctor {
         println!("  {sym} {} {detail}", fmt::pad(label, 16));
     }
 
-    /// 「畫面 0、文字 0」的**三種**來源。
-    ///
-    /// 這個型別存在的理由，是這一頁上同一組數字曾經被講成同一件事。三種的
-    /// 下一步完全不同：`Fresh` 要他去按開始錄，`Blocked` 要他去看那幾條規則，
-    /// `Erased` 是他五分鐘前才親手做的事、不需要任何下一步。
-    ///
-    /// 順序有意義——`Blocked` 排在 `Erased` 前面。一顆清空過的資料庫上
-    /// `nothing_left()` 為真，那時候連稽核紀錄都沒了，所以兩者不會同時成立；
-    /// 但一顆「刪掉了昨天、今天全被擋掉」的資料庫兩件事都真，而他現在該看的
-    /// 是規則。
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Emptiness {
-        /// 從來沒錄過，或錄了但還沒輪到第一張。
-        Fresh,
-        /// 錄了，被排除規則擋掉或被暫停——證據還在這顆資料庫裡。
-        Blocked,
-        /// 錄過，而現在一列都不剩：`forget` 或保留期。
-        Erased,
-    }
-
-    impl Emptiness {
-        /// 資料庫自己回答這是哪一種。三個問題的順序就是上面那個順序。
-        fn of(db: &Db, s: &sister_core::db::DbStats) -> Result<Self> {
-            if !db.exclusion_audit()?.is_empty() || db.pause_audit()?.episodes > 0 {
-                return Ok(Self::Blocked);
-            }
-            Ok(if s.nothing_left() && db.ever_recorded()? {
-                Self::Erased
-            } else {
-                Self::Fresh
-            })
-        }
-    }
-
     /// 「已記錄」那一列的符號和句子，**一起**算出來。
     ///
     /// 拆成函式是因為這一列的兩半（畫 `?` 還是 `✓`、後面接哪一句）以前是兩段
@@ -2964,6 +2992,133 @@ pub mod doctor {
                         .unwrap_or_default()
                 ),
             ),
+        }
+    }
+
+    /// 「兩個字的中文」那一列。
+    ///
+    /// **`with_cjk == 0` 不是「這顆資料庫是空的」**，而這一列上一版把兩者當成
+    /// 同一件事：直接拿 `with_cjk == 0` 去問 [`Emptiness`]，於是一台跑英文、
+    /// 順手擋了 keepassxc 的機器讀到「沒有中文可以驗——那段時間被規則擋掉
+    /// 了」，而它的 6 段英文好好地躺在兩行之上的 ✓ 裡。
+    ///
+    /// 所以那道「先確定真的一段字都沒有」的閘門寫在這支函式**裡面**。放在呼叫
+    /// 端的話它就是下一個沒有人測得到的判斷——這一批修改到目前為止，每一個死
+    /// 在呼叫端的判斷都是靠人眼發現的。
+    fn bigram_verdict(
+        indexed: i64,
+        with_cjk: i64,
+        chunks: i64,
+        empty: Emptiness,
+    ) -> (&'static str, String) {
+        if with_cjk > 0 {
+            return if indexed >= with_cjk {
+                (
+                    "✓",
+                    format!("{with_cjk} 行中文全都進了索引，多舊的都查得到"),
+                )
+            } else {
+                (
+                    "✗",
+                    format!(
+                        "{indexed}/{with_cjk} 行進了索引——回填沒跑完，\
+                         沒進去的那些用「帳單」「電話」這種兩個字的詞叫不出來。\
+                         三個字以上不受影響，L1 抽出來的事實也不受影響",
+                    ),
+                )
+            };
+        }
+        // 一個中文詞都沒有。最平凡的原因是她記了一整天英文——那時候「為什麼
+        // 是空的」根本不是問題，因為她這裡不空。
+        if chunks > 0 {
+            return (
+                "?",
+                format!("她記的 {chunks} 段字裡一個中文詞都沒有，這個索引還沒被用到"),
+            );
+        }
+        // 到這裡才是真的一段字都不剩，「為什麼」也才有意義。`text_chunks` 是
+        // `forget` 和保留期都清的表，所以「等你錄過再驗一次」對一個剛把一整天
+        // 忘掉的人，是叫他重做一件他刻意做掉的事——那句話只對其中一種成立。
+        (
+            "?",
+            match empty {
+                Emptiness::Erased => {
+                    "一段字都不剩，所以沒有中文可以驗——她錄過，那些字被忘掉了或過了保留期"
+                }
+                Emptiness::Blocked => {
+                    "一段字都沒有，所以沒有中文可以驗——那段時間被規則擋掉或暫停了"
+                }
+                Emptiness::Fresh => "資料庫裡還沒有中文，等你錄過再驗一次",
+            }
+            .to_string(),
+        )
+    }
+
+    /// 「你問過她什麼」那一列。
+    ///
+    /// `has_db` 是「這張表問得到嗎」。少了它，資料庫打不開的時候
+    /// `unwrap_or_default()` 會給出一個 0，然後這裡掛著 ✓ 說「還沒問過任何
+    /// 問題」——那是他一整年的題庫，而畫面上寫著沒有。
+    ///
+    /// `ever` 只在 `total == 0` 那一格說話，理由和 `sister queries` 那一頁一
+    /// 樣：`forget` 和保留期都會把題庫帶走，所以那個 0 不夠格斷言「還沒問
+    /// 過」。而它也只能砍掉一種可能——`ever_recorded` 答得出「她錄過」，答
+    /// **不**出「他問過」（一個天天在錄、從來沒用過搜尋框的人也是這個 0），
+    /// 所以錄過的時候就把可能性攤開，不要替他選一個。
+    fn query_log_verdict(
+        has_db: bool,
+        on: bool,
+        ever: bool,
+        q: &sister_core::db::QueryLogStats,
+    ) -> (&'static str, String) {
+        match (has_db, on, q.total > 0) {
+            (false, on, _) => (
+                "?",
+                format!("（設定是{}）", if on { "要記" } else { "不記" }),
+            ),
+            (_, true, true) => (
+                "✓",
+                format!(
+                    "記著，已經 {} 題（{} 題她答不出來、{}）",
+                    q.total,
+                    q.empty,
+                    // 出處只有字母人那邊點得動。不講來源的話，「0 題你點開了
+                    // 出處」會被讀成「她的答案沒一次有用」——而真相可能只是
+                    // 這些題全是從終端機問的。
+                    match q.clickable {
+                        0 => "還沒有從字母人問過".to_string(),
+                        n => format!("字母人那邊 {}/{} 題點開了出處", q.clicked, n),
+                    }
+                ),
+            ),
+            // 錄過的機器上，這一句退回**只講現在**：題庫是空的，沒了。
+            //
+            // 三種可能不在這裡攤開，是刻意的。他天天在錄、從來沒用過搜尋框
+            // 的話（這個專案自己就是），把「可能被 `forget` 忘掉了」印在每一
+            // 次 doctor 上，就是一則他每次都會看到、於是很快就學會忽略的假
+            // 警報——正是這個檔案上面 `mark` 那段在講的東西。攤開的地方是
+            // `sister queries`，那一頁是他為了這件事才打開的。
+            (_, true, false) if ever => (
+                "✓",
+                "記著，但題庫現在一題都沒有（`sister queries` 會把可能的原因列出來）".to_string(),
+            ),
+            // 她沒錄過的話，`forget` 和保留期都不可能帶走過任何東西——這時候
+            // 「還沒問過」是完整的，而且它比上面那句有用：它在說下一步。
+            (_, true, false) => ("✓", "記著（還沒問過任何問題）".to_string()),
+            (_, false, true) => (
+                "⏸",
+                // 指令要指得到真的存在的東西，而且要連代價一起講。`forget`
+                // 刪的是**一段時間**，不是一張表——他想清掉的是題庫，但那段
+                // 時間裡的字、事實、畫面會一起走。少講後半句，他會按下去才發現。
+                format!(
+                    "**不記了**（privacy.query_log = false）。以前記的 {} 題還在——\
+                     `sister forget --last 30d` 帶得走，但那會連同那 30 天的其他記憶一起忘掉",
+                    q.total
+                ),
+            ),
+            // 這一格不提「還沒問過」：關著的時候那張表本來就不會長，講不出
+            // 也不需要講他問過幾題。
+            (_, false, false) => ("⏸", "不記（privacy.query_log = false）".to_string()),
         }
     }
 
@@ -3570,45 +3725,10 @@ pub mod doctor {
         match &db {
             Some(d) => {
                 let (indexed, with_cjk) = d.bigram_coverage()?;
-                if with_cjk == 0 {
-                    // 前半句是對的（它講的是現在這顆資料庫），後半句不一定：
-                    // `text_chunks` 是 `forget` 和保留期都清的表，所以「等你
-                    // 錄過」對一個剛把一整天忘掉的人，是叫他重做一件他刻意
-                    // 做掉的事。
-                    //
-                    // 但只有**真的一列都不剩**才敢這樣講。有字、只是都沒有
-                    // 中文的時候，「被忘掉了」是假的——而這正是這一批修改
-                    // 自己犯過的錯（見 `Emptiness`）。
-                    mark(
-                        "?",
-                        "兩個字的中文",
-                        match Emptiness::of(d, &d.stats()?)? {
-                            Emptiness::Erased => {
-                                "資料庫裡現在沒有中文可以驗——她錄過，那些字被忘掉了或過了保留期"
-                            }
-                            Emptiness::Blocked => {
-                                "資料庫裡沒有中文可以驗——那段時間被規則擋掉或暫停了"
-                            }
-                            Emptiness::Fresh => "資料庫裡還沒有中文，等你錄過再驗一次",
-                        },
-                    );
-                } else if indexed >= with_cjk {
-                    mark(
-                        "✓",
-                        "兩個字的中文",
-                        &format!("{with_cjk} 行中文全都進了索引，多舊的都查得到"),
-                    );
-                } else {
-                    mark(
-                        "✗",
-                        "兩個字的中文",
-                        &format!(
-                            "{indexed}/{with_cjk} 行進了索引——回填沒跑完，\
-                             沒進去的那些用「帳單」「電話」這種兩個字的詞叫不出來。\
-                             三個字以上不受影響，L1 抽出來的事實也不受影響",
-                        ),
-                    );
-                }
+                let s = d.stats()?;
+                let (sym, said) =
+                    bigram_verdict(indexed, with_cjk, s.chunks, Emptiness::of(d, &s)?);
+                mark(sym, "兩個字的中文", &said);
             }
             None => mark("?", "兩個字的中文", no_db),
         }
@@ -3776,47 +3896,25 @@ pub mod doctor {
             .as_ref()
             .and_then(|d| d.query_log_stats().ok())
             .unwrap_or_default();
-        //
-        // 第一個欄位是「這張表問得到嗎」。少了它，資料庫打不開的時候
-        // `unwrap_or_default()` 會給出一個 0，然後這裡掛著 ✓ 說「還沒問過任何
-        // 問題」——那是他一整年的題庫，而畫面上寫著沒有。
-        match (db.is_some(), config.privacy.query_log, qlog.total > 0) {
-            (false, on, _) => mark(
-                "?",
-                "你問過她什麼",
-                &format!("{no_db}（設定是{}）", if on { "要記" } else { "不記" }),
-            ),
-            (_, true, true) => line(
-                true,
-                "你問過她什麼",
-                &format!(
-                    "記著，已經 {} 題（{} 題她答不出來、{}）",
-                    qlog.total,
-                    qlog.empty,
-                    // 出處只有字母人那邊點得動。不講來源的話，「0 題你點開了
-                    // 出處」會被讀成「她的答案沒一次有用」——而真相可能只是
-                    // 這些題全是從終端機問的。
-                    match qlog.clickable {
-                        0 => "還沒有從字母人問過".to_string(),
-                        n => format!("字母人那邊 {}/{} 題點開了出處", qlog.clicked, n),
-                    }
-                ),
-            ),
-            (_, true, false) => line(true, "你問過她什麼", "記著（還沒問過任何問題）"),
-            (_, false, true) => mark(
-                "⏸",
-                "你問過她什麼",
-                // 指令要指得到真的存在的東西，而且要連代價一起講。`forget`
-                // 刪的是**一段時間**，不是一張表——他想清掉的是題庫，但那段
-                // 時間裡的字、事實、畫面會一起走。少講後半句，他會按下去才發現。
-                &format!(
-                    "**不記了**（privacy.query_log = false）。以前記的 {} 題還在——\
-                     `sister forget --last 30d` 帶得走，但那會連同那 30 天的其他記憶一起忘掉",
-                    qlog.total
-                ),
-            ),
-            (_, false, false) => mark("⏸", "你問過她什麼", "不記（privacy.query_log = false）"),
-        }
+        // 「還沒問過任何問題」是一句**斷言**，而 `total == 0` 撐不起它：`forget`
+        // 和保留期都會把題庫帶走（`sister queries` 那一頁已經把三種可能攤開
+        // 了）。兩個 surface 讀的是同一顆資料庫，不可以一邊列出「可能被忘掉
+        // 了」、一邊掛著 ✓ 說那件事沒發生過。
+        let ever = db
+            .as_ref()
+            .map(|d| d.ever_recorded())
+            .transpose()?
+            .unwrap_or(false);
+        let (sym, said) = query_log_verdict(db.is_some(), config.privacy.query_log, ever, &qlog);
+        mark(
+            sym,
+            "你問過她什麼",
+            &if db.is_some() {
+                said
+            } else {
+                format!("{no_db}{said}")
+            },
+        );
         // 「9 條規則 ✓」是 THREAT_MODEL 明文禁止的那種寫法：規則的**數量**
         // 從來不是問題，規則**會不會命中**才是。這些規則比對的是前景 app
         // 名稱，所以讀不到名稱的時候它們一條都不生效——而數量照樣是 9。
@@ -4362,6 +4460,110 @@ pub mod doctor {
                 Emptiness::Erased,
                 "這時候才輪到「被 forget 忘掉了」"
             );
+        }
+
+        /// **這台機器上沒有中文，不代表這台機器上沒有東西。**
+        ///
+        /// 上一版拿 `with_cjk == 0` 直接去問 `Emptiness`，於是一台跑英文、順手
+        /// 擋了 keepassxc 的機器，doctor 長這樣：
+        ///
+        /// ```text
+        ///   ? 兩個字的中文   資料庫裡沒有中文可以驗——那段時間被規則擋掉或暫停了
+        ///   ✓ 已記錄         2 張畫面 · 6 段文字 · 168.0 KB
+        /// ```
+        ///
+        /// 兩行之隔、同一顆資料庫：沒有任何跟中文有關的東西被擋掉，那裡就是
+        /// 沒有中文。這是這一批修改**自己犯的第三次**同一個錯，而前兩次都是
+        /// 把判斷留在呼叫端、沒有任何測試碰得到——所以這條測的是那道閘門。
+        #[test]
+        fn an_english_only_machine_is_not_told_the_rules_ate_its_chinese() {
+            // 6 段字、一個中文詞都沒有，而這台機器上排除規則真的命中過。
+            let (sym, said) = bigram_verdict(0, 0, 6, Emptiness::Blocked);
+            assert_eq!(sym, "?", "沒有中文可以驗不是失敗，但也不是打勾");
+            assert!(said.contains("6 段"), "她記了多少字要講出來：{said}");
+            for lie in ["規則", "暫停", "忘掉", "保留期"] {
+                assert!(
+                    !said.contains(lie),
+                    "那 6 段字好好地在資料庫裡，不可以說被「{lie}」帶走了：{said}"
+                );
+            }
+            // 同一件事對「被清空」也成立：清空過、但後來又記了英文的機器，
+            // 這一列講的還是英文。
+            assert_eq!(bigram_verdict(0, 0, 6, Emptiness::Erased).1, said);
+
+            // 真的一段字都不剩，才輪到「為什麼」——而三種的下一步都不一樣。
+            let said = |e| bigram_verdict(0, 0, 0, e).1;
+            let all = [
+                said(Emptiness::Fresh),
+                said(Emptiness::Blocked),
+                said(Emptiness::Erased),
+            ];
+            for (i, a) in all.iter().enumerate() {
+                for b in &all[i + 1..] {
+                    assert_ne!(a, b, "三種 0 不可以共用一句話");
+                }
+            }
+            assert!(
+                !all[0].contains("忘掉") && !all[0].contains("保留期"),
+                "全新的機器上不可以暗示他刪過東西：{}",
+                all[0]
+            );
+
+            // 有中文的時候 `Emptiness` 一個字都不准動：覆蓋率就是覆蓋率。
+            for e in [Emptiness::Fresh, Emptiness::Blocked, Emptiness::Erased] {
+                assert_eq!(bigram_verdict(12, 12, 40, e).0, "✓");
+                assert_eq!(bigram_verdict(3, 12, 40, e).0, "✗");
+                assert!(bigram_verdict(3, 12, 40, e).1.contains("3/12"));
+            }
+        }
+
+        /// **一個 surface 把刪除列出來，另一個掛著綠勾說那件事沒發生過。**
+        ///
+        /// `replay` → `sister query 帳單` → `sister forget --last 24h --yes`
+        /// （`forget` 自己會說「刪掉了 1 題你自己問過的話」）之後：
+        ///
+        /// ```text
+        ///   sister queries → 題庫是空的。…也可能是問過的那幾題被 `sister forget` 忘掉了
+        ///   sister doctor  → ✓ 你問過她什麼   記著（還沒問過任何問題）
+        /// ```
+        #[test]
+        fn doctor_does_not_green_check_a_question_log_that_forget_took() {
+            let none = sister_core::db::QueryLogStats::default();
+            let erased = query_log_verdict(true, true, true, &none).1;
+            let fresh = query_log_verdict(true, true, false, &none).1;
+            // 差別在**語氣**：一邊是「還沒問過」這句斷言，一邊退回只講現在。
+            assert_ne!(erased, fresh, "同樣是 0，錄過的和沒錄過的講的不是同一件事");
+            assert!(
+                !erased.contains("還沒問過"),
+                "他問過的那幾題可能剛被帶走，這裡不可以斷言那沒發生過：{erased}"
+            );
+            assert!(
+                erased.contains("queries"),
+                "不攤開就要指得出攤開的地方在哪：{erased}"
+            );
+            assert!(
+                fresh.contains("還沒問過"),
+                "她沒錄過就不可能被忘掉，那時候這句話是完整的，不必打折：{fresh}"
+            );
+
+            // `ever` 只准在 total == 0 那一格說話。
+            let some = sister_core::db::QueryLogStats {
+                total: 7,
+                empty: 2,
+                ..Default::default()
+            };
+            assert_eq!(
+                query_log_verdict(true, true, false, &some),
+                query_log_verdict(true, true, true, &some),
+                "題庫裡有東西的時候，那個旗標不該改變任何一個字"
+            );
+
+            // 資料庫打不開的時候，`unwrap_or_default()` 給的 0 什麼都不代表。
+            for ever in [false, true] {
+                let (sym, said) = query_log_verdict(false, true, ever, &none);
+                assert_eq!(sym, "?", "問不到的東西不可以打勾");
+                assert!(!said.contains("還沒問過"), "那可能是他一整年的題庫：{said}");
+            }
         }
 
         /// 設定檔好好的那條路也要走一次，不然上面那條可能只是「錯誤路徑能跑」。

@@ -88,6 +88,55 @@ jobs:
           cargo run -q -p sister-cli -- --data-dir ./ci-audit stats --json > stats.json
           python3 ./scripts/check-audit.py stats.json
 
+      # 一顆**他自己清空過**的資料庫，在每一個 surface 上都不可以長得像從來
+      # 沒錄過。那兩件事的下一步剛好相反：一個要他去按開始錄，另一個他五分鐘
+      # 前才親手把東西刪掉。
+      #
+      # 這一步守的是**呼叫端**。判斷本身（`recorded_verdict`、`crash_verdict`、
+      # `Emptiness::of`、`DbStats::nothing_left`）都有單元測試，而這一批修改
+      # 前後犯了三次同一個錯，三次都在「CLI 有沒有叫對那支函式」這一層——
+      # 單元測試一條都沒紅過。和上面那一步同一個理由。
+      #
+      # 正面斷言（要出現的字）和反面斷言（不可以出現的字）成對寫：只有反面
+      # 的話，整段功能被刪掉也是綠的。
+      - name: An erased database must not look like one that never recorded
+        run: |
+          set -euo pipefail
+          S="cargo run -q -p sister-cli -- --data-dir ./ci-erased"
+          $S replay scenarios/bill-lookup.json --interval-ms 500 > /dev/null
+          $S query 帳單 > /dev/null
+          $S forget --last 24h --yes | tee forget.txt
+          grep -q '題庫' forget.txt \
+            || { echo "::error::forget 沒有帶走題庫——底下那幾條就沒有在驗它們要驗的東西"; exit 1; }
+
+          $S stats > erased-stats.txt
+          $S doctor > erased-doctor.txt
+          $S facts > erased-facts.txt
+          $S queries > erased-queries.txt
+
+          for f in erased-stats.txt erased-facts.txt erased-queries.txt; do
+            grep -q '錄過' "$f" \
+              || { echo "::error::$f 沒說出「她錄過」——清空過的資料庫又長得像全新的了"; exit 1; }
+          done
+          grep -qE '不在了|一列都不剩' erased-doctor.txt \
+            || { echo "::error::doctor 沒說出那幾場的紀錄去哪了"; exit 1; }
+
+          # 這幾句只對一台從來沒錄過的機器成立。
+          #
+          # 用 `if grep`，不是 `grep && { exit 1; }`：後者在**沒中**的時候
+          # 整條 `&&` 串回 1，`set -e` 會把它當成整步失敗——也就是程式對的
+          # 時候紅、錯的時候綠。`if` 的條件位置不受 `set -e` 管。
+          for bad in '還沒錄過' '（還沒有任何內容）' '還沒問過任何問題' '等你錄過再驗一次'; do
+            if grep -q "$bad" erased-doctor.txt; then
+              echo "::error::doctor 對一顆他親手清空的資料庫說了「$bad」"
+              exit 1
+            fi
+          done
+          if grep -q '問她幾個問題' erased-queries.txt; then
+            echo "::error::queries 叫他去重做一件他刻意做掉的事"
+            exit 1
+          fi
+
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
       # 而讀的人只會以為是自己裝錯了。這一步不是另外寫一份一樣的測試（兩份
