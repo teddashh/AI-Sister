@@ -274,11 +274,27 @@ CREATE INDEX IF NOT EXISTS idx_click_query ON query_clicks(query_id);
 /// [`crate::model::SystemKind::session_marks_sql`] 長出來，和
 /// `nothing_recorded_left` / `delete_empty_sessions` 是同一份。
 ///
-/// **回填只認現貨。** 升上來的舊資料庫如果現在有內容，就是 1；如果現在是空
-/// 的，這裡**不猜**——那顆資料庫到底是被清空過還是從來沒存進去過，檔案裡沒
-/// 有任何一個位元答得出來，而這整個 bug 就是「拿一個答不出來的位元去回答」。
-/// 猜錯的兩個方向不對稱：把清空過的說成「沒存過」，他知道自己刪過，那句話只
-/// 是多餘；把沒存過的說成「被忘掉了」，是指控一件沒發生的事。所以空的就留空。
+/// **回填只認現貨。** 升上來的舊資料庫如果現在有內容，就是 `'1'`——量到的。
+///
+/// 現在是空的、而她**錄過**的那一顆答不出來：被清空過還是從來沒存進去過，檔
+/// 案裡沒有任何一個位元分得出來，而這整個 bug 就是「拿一個答不出來的位元去回
+/// 答」。所以那一顆寫 `'assumed-at-upgrade'`——不是答案，是一張「這一格是升級
+/// 那天補的，不是量到的」的標籤。
+///
+/// 為什麼標籤而不是留空：留空的話它會讀成 `Barren`，而那台機器在 alpha.32 上
+/// 讀的是「被 `sister forget` 忘掉了」。**升級不可以改寫一句關於他的資料的舊
+/// 話**——他昨天刪掉一整天，今天升級，然後被告知「一列內容都沒存進來過，先看
+/// `capture.enabled`」。那不只是多餘，那是**換了一個診斷、換了一個下一步**，
+/// 而那個下一步指向一個他機器上根本沒問題的設定。
+///
+/// 代價是相反那一種（alpha.32 上就是 `capture.enabled = false` 的機器）繼續讀
+/// 到舊的那句話。它照樣是假的——但它是**alpha.32 本來就在說的那句假話**，而
+/// 不是這一版新造的。新的位元只對它親眼看見的那幾場說話。
+///
+/// 真的一場都沒錄過的那一顆什麼都不寫：它不是「答不出來」，它是「沒有問題」。
+///
+/// 標籤會自己過期：觸發器比的是 `value = '1'`，所以第一列真的落地時它會被覆蓋
+/// 成量到的那個 1。
 fn migration_005() -> String {
     let mut sql = String::new();
     for (table, when) in CONTENT_TABLES {
@@ -290,7 +306,7 @@ fn migration_005() -> String {
         });
         sql.push_str(&format!(
             "CREATE TRIGGER IF NOT EXISTS {table}_ever_stored AFTER INSERT ON {table}\n  \
-             WHEN NOT EXISTS(SELECT 1 FROM meta WHERE key = 'ever_stored'){extra}\n\
+             WHEN NOT EXISTS(SELECT 1 FROM meta WHERE key = 'ever_stored' AND value = '1'){extra}\n\
              BEGIN\n  \
              INSERT OR REPLACE INTO meta(key, value) VALUES('ever_stored', '1');\n\
              END;\n"
@@ -307,6 +323,14 @@ fn migration_005() -> String {
             .collect::<Vec<_>>()
             .join(" OR ")
     ));
+    // 答不出來的那一顆：她錄過，而現在一列都不剩。上面那一句沒寫成 `'1'` 才
+    // 輪得到這一句（`WHERE NOT EXISTS`），順序不能顛倒。
+    sql.push_str(
+        "INSERT OR REPLACE INTO meta(key, value) \
+         SELECT 'ever_stored', 'assumed-at-upgrade' \
+         WHERE EXISTS(SELECT 1 FROM meta WHERE key = 'ever_recorded') \
+           AND NOT EXISTS(SELECT 1 FROM meta WHERE key = 'ever_stored');\n",
+    );
     sql.replace("{marks}", &crate::model::SystemKind::session_marks_sql())
 }
 
@@ -627,9 +651,11 @@ impl Db {
     /// 元答得出來，見 [`migration_005`]）。它只答一題：這顆資料庫裡有沒有落過
     /// 地的內容。
     ///
-    /// 沒有這個 key 的兩種資料庫：真的沒存過的，和 alpha.33 以前就已經被清空
-    /// 的（升級那一刻現貨是空的，回填不猜）。兩種都會走到
-    /// `Emptiness::Barren`——見那裡對「猜錯的兩個方向不對稱」的說明。
+    /// 沒有這個 key 的，是**這一版之後**才真的一列都沒存過的機器。alpha.33
+    /// 以前就已經空著升上來的那一顆有 key、值是 `assumed-at-upgrade`——它是一
+    /// 張標籤不是一個答案，理由見 [`migration_005`]。這裡不分那兩種值：**這支
+    /// 函式回的是「要不要對他說東西被拿走了」**，而升級那天的機器要照 alpha.32
+    /// 說過的話繼續說。
     pub fn ever_stored(&self) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'ever_stored')",
@@ -3154,14 +3180,20 @@ mod tests {
         );
     }
 
-    /// 升上來的舊資料庫：現在有內容就按下旗標，現在是空的就**留空**。
+    /// 升上來的舊資料庫有三種，而它們拿到的東西必須不一樣。
     ///
-    /// 兩個方向一起斷言，因為 005 的回填只要寫成
-    /// `WHERE EXISTS(SELECT 1 FROM meta WHERE key='ever_recorded')`，第一半照樣
-    /// 綠——然後每一顆 alpha.32 清空過的資料庫都會被宣布「被 forget 忘掉了」，
-    /// 包括那些其實一個字都沒存過的。回填不猜，理由見 [`migration_005`]。
+    /// 有現貨 → `'1'`，量到的。
+    /// 錄過而現在空的 → `'assumed-at-upgrade'`，一張「這一格是升級那天補的」
+    /// 的標籤：那顆資料庫答不出它到底存過沒有，而**升級不可以改寫一句關於他
+    /// 的資料的舊話**——他昨天刪掉一整天，今天升級，然後被換了一個診斷、換了
+    /// 一個下一步。
+    /// 一場都沒錄過 → 什麼都不寫。它不是答不出來，它是沒有問題。
+    ///
+    /// 三種一起斷言，因為只寫其中一條的話另外兩條可以無聲地一起垮：回填寫成
+    /// 無條件的 `'1'`，第一、二條照樣綠，而第三條那顆全新的資料庫會被宣布
+    /// 「被 forget 忘掉了」。
     #[test]
-    fn an_upgraded_database_only_gets_the_flag_if_it_still_holds_something() {
+    fn an_upgraded_database_gets_a_measurement_a_label_or_nothing() {
         let with_content = {
             let conn = Connection::open_in_memory().expect("open");
             conn.execute_batch(MIGRATION_001).expect("v1 schema");
@@ -3192,8 +3224,55 @@ mod tests {
         };
         assert!(emptied.ever_recorded().expect("ever"));
         assert!(
-            !emptied.ever_stored().expect("stored"),
-            "這顆資料庫答不出它到底存過沒有，而 migration 不可以替它編一個答案"
+            emptied.ever_stored().expect("stored"),
+            "他在 alpha.32 上刪掉了一整天。升級不可以把那句話改成「一列都沒存過，\
+             先看 capture.enabled」——那是換了一個診斷"
+        );
+        let label: String = emptied
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'ever_stored'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("label");
+        assert_eq!(
+            label, "assumed-at-upgrade",
+            "而它必須看得出來是補的，不是量到的"
+        );
+
+        // 標籤會自己過期：第一列真的落地時，觸發器把它覆蓋成量到的那個 1。
+        // 觸發器的 `WHEN` 只要寫成 `NOT EXISTS(key='ever_stored')`（不比值），
+        // 這顆資料庫就會永遠掛著那張標籤。
+        emptied
+            .conn
+            .execute(
+                "INSERT INTO frames(ts, width, height, dhash) VALUES(9,1,1,0)",
+                [],
+            )
+            .expect("real content");
+        let label: String = emptied
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'ever_stored'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("label");
+        assert_eq!(label, "1", "真的存到東西之後，那一格要變成量到的");
+
+        // **第三種：一場都沒錄過的那一顆。** 它沒有 `ever_recorded`，所以那張
+        // 標籤一個字都不准寫——寫了的話全新的機器會被告知東西被忘掉了。
+        let virgin = {
+            let conn = Connection::open_in_memory().expect("open");
+            conn.execute_batch(MIGRATION_001).expect("v1 schema");
+            conn.pragma_update(None, "user_version", 1).expect("stamp");
+            Db::init(conn).expect("upgrade")
+        };
+        assert!(!virgin.ever_recorded().expect("ever"));
+        assert!(
+            !virgin.ever_stored().expect("stored"),
+            "她一場都沒錄過，這裡沒有什麼答不出來的"
         );
     }
 
