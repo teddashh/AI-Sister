@@ -165,6 +165,31 @@ pub struct Broken {
 }
 
 impl Report {
+    /// 這份報告裡有沒有**只有錄製途中才問得到**的東西。
+    ///
+    /// 分成兩半是因為這個型別裝著兩種時間性完全不同的事實：
+    ///
+    /// * `url`、`input_hook_failed` 是**探測**——任何人任何時候重問一次都拿得
+    ///   到同一個答案。
+    /// * 這裡數的這四個是**歷史**。`gave_up` 記的是「UIA 在上一場的某一刻卡住
+    ///   太多次，從那之後位址列一個字都讀不到」；那件事發生在一個已經結束的
+    ///   行程裡，用一份全新的 UIA 去問**永遠問不出來**——新的那份是好的。
+    ///
+    /// 而 `doctor` 手上只有探測那一半。它拿 `Caps::current()` 蓋一次檔，等於
+    /// 把上面那四個全部歸零：一則「你的網銀從昨天下午三點開始被錄進去了」的
+    /// 警告，被換成一份時戳是五分鐘前、全部乾淨的報告——而 [`Self::at`] 那段
+    /// 註解說得很清楚，時戳存在的意義就是讓讀的人拿它判斷可信度。愈新的愈可
+    /// 信，於是那份假的比真的更有說服力。
+    ///
+    /// 使用者的動線正好是最壞的那條：覺得怪怪的 → 跑一次 `doctor` → 打開設定
+    /// 頁。他親手刪掉了自己要找的那份證據。
+    ///
+    /// 所以**這份報告屬於錄製的那一場**，`doctor` 只在沒有東西可以弄丟的時候
+    /// 才去蓋它。這一支就是「有沒有東西可以弄丟」。
+    pub fn has_session_evidence(&self) -> bool {
+        self.url_capture != UrlCapture::default() || self.browser_ticks > 0 || self.url_reads > 0
+    }
+
     /// 因為能力缺席而**失效的隱私規則**，拿現在這一份設定重算。
     ///
     /// 和一般的功能缺口分開講：使用者可以接受「還不會 OCR」，但他必須知道
@@ -499,5 +524,72 @@ mod tests {
         assert_eq!((back.browser_ticks, back.url_reads), (300, 7));
         // 暫存檔要收乾淨，不然 data dir 裡會慢慢長出一堆 .json.tmp。
         assert!(!path(&dir.0).with_extension("json.tmp").exists());
+    }
+
+    /// 一份只有開機探測的報告，`doctor` 蓋掉它不會弄丟任何東西。
+    ///
+    /// 這一半要成立，`doctor` 才還能在一台剛裝好的機器上把探測結果餵給設定頁
+    /// ——README 的 quickstart 第一句就是「跑一次 doctor」。
+    #[test]
+    fn a_report_with_only_boot_probes_has_nothing_doctor_cannot_redo() {
+        assert!(!Report::default().has_session_evidence());
+        // 這兩個是探測，重問一次就有——不算證據。
+        assert!(
+            !Report {
+                at: 1,
+                url: true,
+                input_hook_failed: true,
+                ..Default::default()
+            }
+            .has_session_evidence()
+        );
+    }
+
+    /// 而這四個只有那一場問得到，蓋掉就沒了。
+    #[test]
+    fn the_four_things_only_that_session_could_have_seen_are_evidence() {
+        // 最重的那一則：從投降那一刻起，excluded_urls 一條都不生效。用一份
+        // 全新的 UIA 去問永遠問不出來——新的那份是好的。
+        let gave_up = Report {
+            url_capture: UrlCapture {
+                gave_up: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(gave_up.has_session_evidence());
+        assert!(
+            !gave_up
+                .broken_privacy_rules(&PrivacyConfig::default())
+                .is_empty(),
+            "投降那一則本身就是 doctor 會蓋掉的東西——它得先講得出來"
+        );
+
+        assert!(
+            Report {
+                url_capture: UrlCapture {
+                    password_check_broken: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+            .has_session_evidence()
+        );
+        // 分母和分子都算數。`browser_ticks` 撐著「一個網址都沒讀到」那一則的
+        // 證據門檻，歸零之後那一則就再也講不出來了。
+        assert!(
+            Report {
+                browser_ticks: 1,
+                ..Default::default()
+            }
+            .has_session_evidence()
+        );
+        assert!(
+            Report {
+                url_reads: 1,
+                ..Default::default()
+            }
+            .has_session_evidence()
+        );
     }
 }

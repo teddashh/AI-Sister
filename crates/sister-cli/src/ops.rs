@@ -4485,14 +4485,51 @@ pub mod doctor {
         // 全新的 `WindowsFocus` 去問的，也就是一個**全新的 UIA**——正在錄的
         // 那個行程手上那份可能早就投降了，而兩份是不同的物件。doctor 於是會
         // 對著一台網銀正在被錄進去的機器印一個 ✓。這一行是那件事唯一的出口。
-        if sister_core::heartbeat::is_recording(data_dir, sister_core::now_ms()) {
-            println!("  （她正在錄，能力報告交給那個行程寫——這裡不蓋掉它。）");
-            for line in sister_core::capabilities::read(data_dir)
+        //
+        // **「她停了」不等於「可以蓋了」。** 上一版這道閘門只問 `is_recording`，
+        // 於是有兩種情況會漏掉，而兩種都會弄丟同一樣東西：
+        //
+        // 1. 她**正在起來**。心跳是 `Booting`，`is_recording` 回 false，於是
+        //    doctor 在她開資料庫的那幾分鐘蓋掉上一場的報告——而她開完之後自己
+        //    也要寫一份，這兩個寫手還會互相蓋。
+        // 2. 她**已經收工**了。這是最常見的那一條：覺得怪怪的 → 按停止 →
+        //    跑 doctor → 打開設定頁。而報告裡那幾個欄位（`gave_up`、
+        //    `browser_ticks`、`url_reads`）記的是**已經結束的那一場**路上發生
+        //    的事，doctor 手上這份全新的 UIA 永遠問不出來（見
+        //    `Report::has_session_evidence`）。
+        //
+        // 所以判斷的是「有沒有東西可以弄丟」，不是「她在不在」。
+        let previous = sister_core::capabilities::read(data_dir);
+        let phase = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
+        let keeper = match phase {
+            Some(sister_core::heartbeat::Phase::Recording) => {
+                Some("她正在錄，能力報告交給那個行程寫")
+            }
+            Some(sister_core::heartbeat::Phase::Booting) => {
+                Some("她正在起來，等她開完自己會寫一份")
+            }
+            None if previous.as_ref().is_some_and(|r| r.has_session_evidence()) => {
+                Some("上一場路上發生的事只有那一場問得到，這裡問不出來")
+            }
+            None => None,
+        };
+        if let Some(why) = keeper {
+            println!("  （{why}——這裡不蓋掉它。）");
+            let whose = if phase == Some(sister_core::heartbeat::Phase::Recording) {
+                "正在錄的那個行程說"
+            } else {
+                // 開機中的那一個還沒寫過任何東西，讀到的是**上一場**留下的。
+                // 把它說成「正在錄的那個行程說」會讓他去停一個沒有在做那件事
+                // 的行程。
+                "上一場留下的報告說"
+            };
+            for line in previous
+                .as_ref()
                 .map(|r| r.broken_privacy_rules(&config.privacy))
                 .unwrap_or_default()
             {
                 println!(
-                    "  ⚠  正在錄的那個行程說：{}\n\
+                    "  ⚠  {whose}：{}\n\
                      \x20    （底下那次 UIA 實測是這裡新開的一份，它答得出來不代表她答得出來）",
                     line.message
                 );
