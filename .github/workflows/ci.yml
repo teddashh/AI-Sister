@@ -1343,6 +1343,13 @@ jobs:
           files: |
             sister.exe
             sister-desktop.exe
+          # 預設是 false，也就是**上面兩行有一行對不到檔案的時候，它會照樣發
+          # 一個少一半的 release，而且是綠的**。現在真正擋著這件事的是上游那
+          # 兩個 `download-artifact`（artifact 不在就會紅）加上兩個
+          # `if-no-files-found: error`——三層裡有兩層在別的 job 上，而這一步
+          # 自己不會說話。一個發出去了、少一個執行檔、conclusion 寫著
+          # success 的 release，正是這個 repo 一路在修的那種東西。
+          fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
             單一執行檔，不需要安裝，沒有任何外掛 DLL 或模型檔。
