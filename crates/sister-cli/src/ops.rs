@@ -460,6 +460,10 @@ pub mod queries {
                 "p95_ms": stats.p95_ms,
                 "slow": stats.slow,
                 "budget_ms": sister_core::db::RETRIEVAL_BUDGET_MS,
+                // `total: 0` 有三種（沒問過、query_log 關著、被忘掉了）。這一
+                // 欄只砍掉第三種：她沒錄過的話就不可能被忘掉。人看的那一句是
+                // 同一條線。
+                "ever_recorded": db.ever_recorded()?,
                 "queries": rows.iter().map(|r| serde_json::json!({
                     "id": r.id,
                     "ts": r.ts,
@@ -476,9 +480,31 @@ pub mod queries {
         }
 
         if stats.total == 0 {
+            // 兩個原因不夠，有第三個。`queries` 是 `forget` **刻意**要帶走的
+            // 一張表（`retention.rs` 那邊的理由寫得很清楚：他打進搜尋框的字往
+            // 往比畫面更直接），保留期也照 `text_days` 清。而這張表存的是他自
+            // 己打的字——一個剛把搜尋紀錄刪掉的人，最不該收到的一句話就是
+            // 「問她幾個問題就會開始累積」。
+            //
+            // 但不宣布是哪一種。`ever_recorded` 答得出「她錄過」，答不出「他
+            // 問過」——一個天天在錄、從來沒用過搜尋框的人（這個專案自己就是），
+            // 拿到「你問過的那些題被忘掉了」一樣是假話。而要答得出來就得再留
+            // 一個位元，那是拿一份「他問過問題」的殘骸去換一句更漂亮的話。
+            //
+            // 所以照這個 repo 一路的規矩：不知道就把可能性攤開，不要替他選一
+            // 個（見字母人那句「可能是剛開始，也可能是之前的被忘掉了或過期
+            // 了」）。她沒錄過的話「被忘掉」不可能成立，那時候原本那兩句是完
+            // 整的——所以只有錄過才多講第三種。
             println!(
-                "題庫是空的。問她幾個問題（`sister query …` 或字母人的搜尋框）就會開始累積。\n\
-                 如果你把 `privacy.query_log` 關掉了，那它永遠會是空的——那也是一個合理的選擇。"
+                "{}",
+                if db.ever_recorded()? {
+                    "題庫是空的。可能是還沒問過她任何問題（`sister query …` 或字母人的\
+                     搜尋框），可能是 `privacy.query_log` 關著，也可能是問過的那幾題被 \
+                     `sister forget` 忘掉了、或過了保留期——她錄過，所以這三種都還在檯面上。"
+                } else {
+                    "題庫是空的。問她幾個問題（`sister query …` 或字母人的搜尋框）就會開始累積。\n\
+                     如果你把 `privacy.query_log` 關掉了，那它永遠會是空的——那也是一個合理的選擇。"
+                }
             );
             return Ok(());
         }
@@ -2253,6 +2279,9 @@ pub mod facts {
             let out = serde_json::json!({
                 "limit": limit,
                 "truncated": truncated,
+                // 空陣列有兩種，而讀 JSON 的沒有那一句人話可以讀。和
+                // `stats --json` 是同一個欄位、同一個理由。
+                "ever_recorded": db.ever_recorded()?,
                 "facts": rows.iter().map(|f| serde_json::json!({
                     "kind": f.kind, "raw": f.raw, "normalized": f.normalized,
                     "ts": f.ts, "source": f.source_kind,
@@ -2274,6 +2303,16 @@ pub mod facts {
                         format!("這份記憶裡沒有 {k} 這一類、而且含有「{s}」的事實。"),
                     (Some(k), None) => format!("這份記憶裡沒有 {k} 這一類的事實。"),
                     (None, Some(s)) => format!("這份記憶裡沒有含有「{s}」的事實。"),
+                    // 上面三句都自己帶著條件，所以它們講的必然是「這份記憶
+                    // 裡」。這一句沒有條件可以帶，於是它去猜原因——而它列的
+                    // 兩個原因裡沒有真正的第三個：`facts` 這張表 `forget` 和
+                    // 保留期都會清（`retention.rs` 兩邊都有 `DELETE FROM
+                    // facts`），而 `facts.chunk_id` 還是 ON DELETE CASCADE。
+                    // 剛把一整天忘掉的人拿到的是「她還沒錄過」。
+                    (None, None) if db.ever_recorded()? =>
+                        "這份記憶裡沒有任何事實了——她錄過，那些東西被 `sister forget` \
+                         忘掉了，或是過了保留期。"
+                            .into(),
                     (None, None) =>
                         "這份記憶裡還沒有任何事實——她還沒錄過，或錄到的畫面上沒有抄得下來的東西。"
                             .into(),
@@ -2485,11 +2524,19 @@ pub mod stats {
         // 說「這台機器上什麼都沒發生過」，對一個五分鐘前才親手刪掉一整天的人。
         //
         // 那一天他的排除規則**擋過兩段**。刪掉的是證據，不是歷史。
-        if s.frames == 0 && s.chunks == 0 && db.ever_recorded()? {
+        //
+        // 問 `nothing_left()` 而不是 `frames == 0 && chunks == 0`：後者是這句話
+        // 的第一版，而它自己就是同一個 bug。一場全程被排除規則擋掉的錄製也是
+        // 畫面 0、文字 0，可是那一頁上有「工作階段 1」「輸入 6」「系統 7」和
+        // 一整段排除稽核——這一行於是印在一頁有數字的東西上面，還把「規則擋掉
+        // 的」說成「你刪掉的」。兩句都是假的，而它們解釋的是**完全相反**的下
+        // 一步：一個要他去改 config，一個要他知道東西真的沒了。
+        if s.nothing_left() && db.ever_recorded()? {
             println!(
-                "  ⚠  底下每一個數字都是 0，但她**錄過**——那些東西被 \
+                "  ⚠  她**錄過**，而現在這顆資料庫裡一列都不剩——被 \
                  `sister forget` 忘掉了，或是過了保留期。\n     \
-                 「沒有發生過」那幾句講的是現在這顆資料庫，不是那幾天。\n"
+                 底下那些 0、還有「沒有發生過」那幾句，講的是現在這顆資料庫，\
+                 不是那幾天。\n"
             );
         }
         if let (Some(a), Some(b)) = (s.first_ts, s.last_ts) {
@@ -2871,6 +2918,49 @@ pub mod doctor {
                         .map(|t| format!("（最後一次 {}）", fmt::timestamp(t)))
                         .unwrap_or_default()
                 ),
+            ),
+        }
+    }
+
+    /// 三個訊號稽核裡的一列。和上面兩支同一個理由：符號和句子一起算。
+    ///
+    /// `ever` 在這裡只管一件事——**沒有最後一場的時候，那是哪一種沒有**。
+    /// `signal_audit` 的範圍是 `sessions` 的最後一列，而那張表會跟著它記下來
+    /// 的東西一起消失（`retention::delete_empty_sessions`）。清空過的資料庫上
+    /// 「零當機」那一列說「那幾場的紀錄已經不在了」，而這三列以前說「還沒有
+    /// 任何一場」——**同一份報告，四行之隔，兩句互相打臉**。
+    fn signal_line(a: &sister_core::db::SignalAudit, ever: bool) -> (&'static str, String) {
+        if a.scope_started_at.is_none() && ever {
+            // 沒有範圍就沒有分母，底下三種判決一句都套不上去（`rows` 必然是
+            // 0，也就必然是 `TooEarly`）。只講那件唯一還說得出口的事。
+            return ("?", "那幾場的紀錄不在了，現在沒有範圍可以驗".to_string());
+        }
+        let when = match a.scope_started_at {
+            Some(ts) => format!("上一場（{} 起）", crate::fmt::timestamp(ts)),
+            None => "還沒有任何一場".to_string(),
+        };
+        // 三種，不是兩種。「驗過了，是好的」和「資料還太少，看不出來」
+        // 以前都印 ✓——那正是這一整節要抓的形狀，出現在抓它的工具上。
+        match a.verdict {
+            SignalVerdict::Alive => (
+                "✓",
+                format!(
+                    "{when} {} 列，{} {}",
+                    a.rows, a.populated, a.populated_label
+                ),
+            ),
+            SignalVerdict::Broken => (
+                "✗",
+                format!("{when} {} 列，但沒有一列有內容——{}", a.rows, a.note),
+            ),
+            // 沒有列 ≠ 壞掉。可能只是這台機器沒有那個能力（replay
+            // 讀不到 pid），或還沒錄到。不知道就說不知道。
+            SignalVerdict::TooEarly if a.rows == 0 => ("?", format!("{when}裡沒有這種資料")),
+            // 有列、都是空的，但還不夠多。她三秒前才開始的樣子，和
+            // 真的壞掉的樣子，在這個列數上長得一模一樣——所以不猜。
+            SignalVerdict::TooEarly => (
+                "?",
+                format!("{when}只有 {} 列、而且都是空的——還看不出來", a.rows),
             ),
         }
     }
@@ -3552,39 +3642,16 @@ pub mod doctor {
             // `signal_audit` 的文件），而這一行要讓那個界線看得見——否則
             // 「12 列」讀起來像全部，而他上禮拜二壞掉的那一場藏在裡面。
             for a in db.signal_audit()? {
-                let when = match a.scope_started_at {
-                    Some(ts) => format!("上一場（{} 起）", crate::fmt::timestamp(ts)),
-                    None => "還沒有任何一場".to_string(),
-                };
-                // 三種，不是兩種。「驗過了，是好的」和「資料還太少，看不出來」
-                // 以前都印 ✓——那正是這一整節要抓的形狀，出現在抓它的工具上。
-                match a.verdict {
-                    SignalVerdict::Alive => line(
-                        true,
-                        a.name,
-                        &format!(
-                            "{when} {} 列，{} {}",
-                            a.rows, a.populated, a.populated_label
-                        ),
-                    ),
-                    SignalVerdict::Broken => mark(
-                        "✗",
-                        a.name,
-                        &format!("{when} {} 列，但沒有一列有內容——{}", a.rows, a.note),
-                    ),
-                    // 沒有列 ≠ 壞掉。可能只是這台機器沒有那個能力（replay
-                    // 讀不到 pid），或還沒錄到。不知道就說不知道。
-                    SignalVerdict::TooEarly if a.rows == 0 => {
-                        mark("?", a.name, &format!("{when}裡沒有這種資料"))
-                    }
-                    // 有列、都是空的，但還不夠多。她三秒前才開始的樣子，和
-                    // 真的壞掉的樣子，在這個列數上長得一模一樣——所以不猜。
-                    SignalVerdict::TooEarly => mark(
-                        "?",
-                        a.name,
-                        &format!("{when}只有 {} 列、而且都是空的——還看不出來", a.rows),
-                    ),
-                }
+                // 「沒有最後一場」在同一份報告的上面四行已經有答案了。
+                //
+                // `signal_audit` 的範圍是 `sessions` 的最後一列，而那張表現在
+                // 會跟著它記下來的東西一起消失（`delete_empty_sessions`）。所以
+                // 清空過的資料庫上，「零當機」那一列說「那幾場的紀錄已經不在
+                // 了」，這三列說「還沒有任何一場」——**同一份報告，四行之隔，
+                // 兩句互相打臉**。而這兩句正是 `recorded_verdict` /
+                // `crash_verdict` 被拆出來要防的那個形狀，只是它們管不到這裡。
+                let (sym, said) = signal_line(&a, ever);
+                mark(sym, a.name, &said);
             }
         }
 
@@ -4087,6 +4154,68 @@ pub mod doctor {
                 assert_eq!(crash_verdict(7, 0, ever, None).0, "✓");
                 assert_eq!(recorded_verdict(9, 4, ever, d), ("✓", d.to_string()));
                 assert_eq!(recorded_verdict(9, 0, ever, d).0, "✗");
+            }
+        }
+
+        /// **同一份報告，四行之隔，兩句互相打臉。**
+        ///
+        /// 「零當機」修好之後，清空過的資料庫上這份 doctor 是這樣的：
+        ///
+        /// ```text
+        ///   ? 零當機     那幾場的紀錄已經不在了（`forget` 或保留期），現在算不出來
+        ///   ? 視窗焦點   還沒有任何一場裡沒有這種資料
+        /// ```
+        ///
+        /// 兩列讀的是同一張 `sessions` 表的同一個 0。修一半比不修更難發現，
+        /// 因為上面那一列看起來已經處理過了。
+        #[test]
+        fn the_signal_rows_do_not_contradict_the_crash_row_four_lines_above_them() {
+            use sister_core::db::{SignalAudit, SignalVerdict};
+            let erased = SignalAudit {
+                name: "視窗焦點",
+                rows: 0,
+                populated: 0,
+                populated_label: "列知道自己是哪個 app",
+                verdict: SignalVerdict::TooEarly,
+                note: "",
+                scope_started_at: None,
+            };
+
+            let (_, said) = signal_line(&erased, true);
+            let (_, crash) = crash_verdict(0, 0, true, None);
+            assert!(
+                !said.contains("還沒有任何一場"),
+                "上面那一列剛說完紀錄被帶走了，這一列不可以說她沒錄過：{said}"
+            );
+            assert!(
+                said.contains("不在了"),
+                "說得出「算不出來」就說得出為什麼算不出來：{said}"
+            );
+            // 兩列講的是同一件事，用詞不必一樣，但不可以互相否定。
+            assert!(
+                crash.contains("不在了") && said.contains("不在了"),
+                "同一張表的同一個 0，兩列要指向同一個解釋：\n  {crash}\n  {said}"
+            );
+
+            // 真的沒錄過的那一台照舊。`ever` 只准在這一格說話。
+            let (_, fresh) = signal_line(&erased, false);
+            assert!(
+                fresh.contains("還沒有任何一場"),
+                "全新的機器上這句話還是對的：{fresh}"
+            );
+
+            // 有範圍的時候 `ever` 一個字都不准動——三種判決都要照原樣講。
+            let alive = SignalAudit {
+                rows: 12,
+                populated: 12,
+                verdict: SignalVerdict::Alive,
+                scope_started_at: Some(1_700_000_000_000),
+                ..erased
+            };
+            for ever in [false, true] {
+                let (sym, said) = signal_line(&alive, ever);
+                assert_eq!(sym, "✓");
+                assert!(said.contains("12 列") && said.contains("上一場"), "{said}");
             }
         }
 

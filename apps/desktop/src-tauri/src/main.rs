@@ -195,6 +195,11 @@ const TRAY_REFRESH: std::time::Duration = std::time::Duration::from_secs(5);
 fn last_recording_end(shell: tauri::State<'_, Shell>) -> Option<LastRun> {
     // 資料庫還沒有／打不開的時候回 `None`。那句灰字自己站得住，這裡不該為了
     // 補一行字而把「她還沒錄過任何東西」講成一個錯誤。
+    //
+    // `None` 現在還有第三種來源：他把整段時間忘掉了，那幾場的紀錄跟著走了
+    // （`retention::delete_empty_sessions`）。畫面那邊照樣只是少講一句
+    // 「上一次幾點停的」——少講不等於講錯，而「她錄過」那件事有
+    // [`has_ever_recorded`] 專門在答，時間軸就是拿它畫那一頁的。
     with_db(&shell, |db| {
         Ok(db
             .last_session()

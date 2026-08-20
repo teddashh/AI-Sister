@@ -971,8 +971,13 @@ impl Db {
     /// 不需要挑一個魔術數字。代價是一場長達一整天的錄製，中途壞掉的話這裡
     /// 仍然看得到前半段的好資料——下一場就會抓到。
     ///
-    /// 沒有任何一場（全新的資料目錄）：三個都是 0 列，`scope_started_at` 是
-    /// `None`。那不是壞掉，是還沒開始。
+    /// 沒有任何一場：三個都是 0 列，`scope_started_at` 是 `None`。那不是壞掉。
+    ///
+    /// 但也**不一定**是「還沒開始」——`sessions` 現在會跟著它記下來的東西一起
+    /// 消失（[`crate::retention`] 的 `delete_empty_sessions`），所以一顆被
+    /// `sister forget` 清空的資料庫走到的是同一個 `None`。這裡分不出來，也不
+    /// 該分：這一支只負責數最後一場的列數。要分的是印字的那一邊，它手上有
+    /// [`Db::ever_recorded`]（`doctor` 就是這樣接的）。
     pub fn signal_audit(&self) -> Result<Vec<SignalAudit>> {
         /// 全是空殼的列要有這麼多，才算證據而不是巧合。
         ///
@@ -2539,6 +2544,61 @@ pub struct DbStats {
     pub db_bytes: i64,
 }
 
+impl DbStats {
+    /// 這顆資料庫裡**一列都不剩**。
+    ///
+    /// 「有沒有東西」和「有沒有畫面」是兩件事，而 `sister stats` 上那句
+    /// 「底下每一個數字都是 0」曾經只問了後者。一場全程被排除規則擋掉的錄製
+    /// 走到的是 `frames == 0 && chunks == 0`，而它的 `system_events`、
+    /// `input_windows` 和整份排除稽核都好好地印在同一頁上——那句話於是印在
+    /// 一頁有數字的東西上面，還順便說那些東西是被 `forget` 刪掉的。
+    ///
+    /// 用**解構**而不是一串 `self.x == 0 &&`：這裡漏掉一個欄位的下場就是上面
+    /// 那一段，而漏掉的方式是「後來有人加了一個計數器」。解構之後 `DbStats`
+    /// 多一個欄位、這裡沒跟上的話，編譯就不會過。
+    pub fn nothing_left(&self) -> bool {
+        let Self {
+            frames,
+            frames_collapsed,
+            frames_with_image,
+            ocr_blocks,
+            chunks,
+            facts,
+            focus_events,
+            clipboard_events,
+            input_windows,
+            system_events,
+            sessions,
+            // 底下這些不是「有幾件事發生過」：
+            // - `image_bytes` 是大小，而且一列都不剩的時候它必然是 0
+            // - 兩對時戳是範圍，沒有列就沒有範圍
+            // - `db_bytes` **清空之後照樣不是 0**（schema、索引、WAL 都還在），
+            //   拿它當「有沒有東西」問，答案永遠是「有」
+            image_bytes: _,
+            first_ts: _,
+            last_ts: _,
+            image_first_ts: _,
+            image_last_ts: _,
+            db_bytes: _,
+        } = self;
+        // 排除稽核和暫停稽核都是 `system_events` 的列，遮蔽稽核數的是
+        // `clipboard_events` 的列（見 `exclusion_audit` / `pause_audit` /
+        // `redaction_audit` 的 SQL），所以那三份不用另外問——它們的分母
+        // 已經在這裡面了。
+        *frames == 0
+            && *frames_collapsed == 0
+            && *frames_with_image == 0
+            && *ocr_blocks == 0
+            && *chunks == 0
+            && *facts == 0
+            && *focus_events == 0
+            && *clipboard_events == 0
+            && *input_windows == 0
+            && *system_events == 0
+            && *sessions == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3239,6 +3299,50 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM query_clicks", [], |r| r.get(0))
             .expect("count");
         assert_eq!(orphans, 0, "題目沒了，點擊卻還掛在那裡");
+    }
+
+    /// **一場全程被排除規則擋掉的錄製，不是一顆空的資料庫。**
+    ///
+    /// `sister stats` 上那句「她錄過，而現在這顆資料庫裡一列都不剩」第一版問的
+    /// 是 `frames == 0 && chunks == 0`，而那個條件在這一場上也成立：keepassxc
+    /// 在前景一整段，一張畫面都沒留。可是那一頁上有「工作階段 1」「輸入 6」
+    /// 「系統 7」和一整段排除稽核——於是那句話印在一頁有數字的東西上面，還把
+    /// 「規則擋掉的」說成「你刪掉的」。兩句都是假的，而它們的下一步剛好相反：
+    /// 一個要他去改 config，一個要他知道東西真的沒了。
+    #[test]
+    fn a_recording_the_rules_blocked_end_to_end_is_not_an_empty_database() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        // 她開了、看了、什麼都沒留下來——因為規則擋著。
+        db.insert_system(
+            s,
+            &SystemEvent {
+                ts: 1_000,
+                kind: SystemKind::Excluded,
+                detail: Some("excluded app: keepassxc".into()),
+            },
+        )
+        .expect("blocked");
+
+        let st = db.stats().expect("stats");
+        assert_eq!((st.frames, st.chunks), (0, 0), "畫面和文字真的都是 0");
+        assert!(
+            !st.nothing_left(),
+            "但那一頁上有工作階段、有系統事件、有一整段排除稽核——不是「一列都不剩」"
+        );
+        assert!(
+            !db.exclusion_audit().expect("audit").is_empty(),
+            "而擋過這件事本身就是那一頁最重要的內容"
+        );
+
+        // 對照：真的一列都不剩。
+        db.forget(0, 2_000, None).expect("forget");
+        db.end_session(s).expect("end");
+        assert!(
+            db.stats().expect("stats").nothing_left(),
+            "清空之後才算一列都不剩"
+        );
+        assert!(db.ever_recorded().expect("ever"), "而她錄過這件事還在");
     }
 
     #[test]
