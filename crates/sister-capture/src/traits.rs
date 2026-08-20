@@ -58,7 +58,7 @@ impl RawFrame {
         // 取樣就夠了：要回答的是「有沒有內容」，不是精確的直方圖。
         // 質數步長避免和螢幕上的規則圖樣（格線、掃描線）共振。
         let (mut lo, mut hi) = (255u8, 0u8);
-        for px in rgba.chunks_exact(4).step_by(97) {
+        for px in rgba.as_chunks::<4>().0.iter().step_by(97) {
             // 近似的亮度：整數權重，不需要浮點數
             let y = ((px[0] as u32 * 77 + px[1] as u32 * 150 + px[2] as u32 * 29) >> 8) as u8;
             lo = lo.min(y);

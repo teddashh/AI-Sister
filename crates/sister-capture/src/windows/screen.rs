@@ -323,6 +323,15 @@ unsafe fn read_pixels(mem: HDC, bmp: HBITMAP, w: u32, h: u32) -> Result<Vec<u8>>
         }
 
         // GDI 給的是 BGRX，我們要 RGBA
+        //
+        // clippy 1.98 想把這一行換成 `as_chunks_mut::<4>()`。**這一輪不換**，
+        // 而且只有這一個地方不換（同一個 lint 的另外五處都改了）。這個迴圈長在
+        // `read_pixels` 裡，是 #18 那份「CPU 27.1%，九倍預算」的基準量到的那一
+        // 段；`as_chunks` 會讓最佳化器拿到編譯期已知的長度，多半會把這個 swizzle
+        // 向量化——那正是我們想要的，但它得**被量到**，不能夾在一次 lint 清理裡
+        // 悄悄進去，否則他下次跑 `sister bench` 得到的數字和已經記錄的那一份不再
+        // 是同一段程式碼。等 #18 那份實測回來就把這兩行拿掉，順便量它值多少。
+        #[allow(clippy::chunks_exact_to_as_chunks)]
         for px in buf.chunks_exact_mut(4) {
             px.swap(0, 2);
             px[3] = 255;
@@ -654,7 +663,9 @@ mod tests {
                 return 0;
             };
             let (lo, hi) = px
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .fold((255u8, 0u8), |(lo, hi), p| (lo.min(p[0]), hi.max(p[0])));
             hi - lo
         };

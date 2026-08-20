@@ -247,7 +247,7 @@ impl Ocr for WindowsOcr {
         // 在 premultiplied 的解讀下整張圖會被當成全透明，OCR 就什麼都讀不到。
         self.bgra.clear();
         self.bgra.reserve(needed);
-        for px in rgba[..needed].chunks_exact(4) {
+        for px in rgba[..needed].as_chunks::<4>().0.iter() {
             self.bgra.extend_from_slice(&[px[2], px[1], px[0], 255]);
         }
 

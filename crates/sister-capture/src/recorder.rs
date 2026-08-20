@@ -1568,7 +1568,7 @@ mod tests {
         fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
             self.0 = self.0.wrapping_add(1);
             let mut px = vec![255u8; 64 * 64 * 4];
-            for (i, p) in px.chunks_exact_mut(4).enumerate() {
+            for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let v = ((i as u32 * 7 + self.0 * 40) % 256) as u8;
                 (p[0], p[1], p[2]) = (v, v, v);
             }
@@ -1666,7 +1666,7 @@ mod tests {
     /// 灰階漸層。同一個 `seed` 一定算出同一個 dhash，換 seed 就會變。
     fn pattern(w: u32, h: u32, seed: u32) -> Vec<u8> {
         let mut px = vec![255u8; (w * h * 4) as usize];
-        for (i, p) in px.chunks_exact_mut(4).enumerate() {
+        for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let v = ((i as u32 * 7 + seed * 40) % 256) as u8;
             (p[0], p[1], p[2]) = (v, v, v);
         }
