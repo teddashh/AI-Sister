@@ -150,9 +150,49 @@ enum Record {
     Tombstone { at: Option<Millis> },
 }
 
+/// 那個檔案這一次讀出了什麼。**三種答案，全部來自同一次 syscall。**
+///
+/// 這裡不回 `Option<String>`，因為「沒讀到」有兩種，而它們在
+/// [`safe_to_kill_spawn`] 上是**相反**的答案。
+///
+/// 第一版是回 `Option`，然後在 [`presence`] 裡補一句 `beat_path().exists()` 把
+/// 兩種分開。那是**兩次獨立的查找**，而 `Path::exists()` 的文件寫得很清楚：它
+/// 把任何 metadata 失敗都回成 `false`，不只是 `NotFound`。於是「權限拿不到」
+/// ——那個資料目錄一時 stat 不動的時候，也就是**最說不準**的那一種——兩次查
+/// 找會各自說一句真話（「我讀不到」「我 stat 不到」）而湊出一句假的：
+/// `NeverStarted`，[`safe_to_kill_spawn`] 唯一放行的那一種。她錄了一整天，字母
+/// 人按「結束」，刀就落下去了。
+///
+/// 從真的那一半推不夠，要從**同一個**真的那一半推：`read_to_string` 那一次
+/// 已經知道答案了（`ErrorKind`），上一版只是把它丟掉。
+enum Raw {
+    /// 檔案真的不在（而且我們確定：`NotFound`）。
+    Missing,
+    /// 讀不到，原因不是「不在」——權限、路徑上有一段不是資料夾、I/O 錯誤。
+    /// **說不準有沒有人來過。**
+    Unreadable,
+    Text(String),
+}
+
+fn read_raw(data_dir: &Path) -> Raw {
+    match std::fs::read_to_string(beat_path(data_dir)) {
+        Ok(s) => Raw::Text(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Raw::Missing,
+        Err(_) => Raw::Unreadable,
+    }
+}
+
 /// `None` 有兩種原因，而**這一層分不出來**——見 [`Presence`]，那裡分得出。
 fn read_record(data_dir: &Path) -> Option<Record> {
-    let raw = std::fs::read_to_string(beat_path(data_dir)).ok()?;
+    match read_raw(data_dir) {
+        Raw::Text(s) => parse_record(&s),
+        Raw::Missing | Raw::Unreadable => None,
+    }
+}
+
+/// 那一行字是什麼意思。純函式：不碰磁碟，所以「讀不到」和「讀到了看不懂」
+/// 是兩個問題，在兩個地方回答。
+fn parse_record(raw: &str) -> Option<Record> {
     let mut fields = raw.split_whitespace();
     let ts: Millis = fields.next()?.parse().ok()?;
     // 認不得的第二欄當成「在錄」而不是丟掉整行：未來多寫一個欄位的版本，
@@ -197,9 +237,16 @@ pub enum Presence {
 /// `now` 由呼叫端給，因為時間在這個 crate 裡一律是參數（測試要能演「三分鐘
 /// 前的心跳」，不能等三分鐘）。
 pub fn presence(data_dir: &Path, now: Millis) -> Presence {
-    match read_record(data_dir) {
-        None if beat_path(data_dir).exists() => Presence::Unreadable,
-        None => Presence::NeverStarted,
+    // 一次查找，三種答案。**不要在這裡補第二次 stat 去分辨前兩種**——那一版
+    // 把「權限拿不到」餵成了 `NeverStarted`，理由寫在 [`Raw`] 上面。
+    let raw = match read_raw(data_dir) {
+        Raw::Missing => return Presence::NeverStarted,
+        Raw::Unreadable => return Presence::Unreadable,
+        Raw::Text(s) => s,
+    };
+    match parse_record(&raw) {
+        // 讀到了，但看不懂（寫到一半斷電）。有人來過。
+        None => Presence::Unreadable,
         Some(Record::Tombstone { at }) => Presence::Stopped { at },
         // 未來的時戳一樣算活的：使用者調過時鐘、或者兩個行程對時差了幾百毫秒，
         // 都不該被讀成「她死了」。
@@ -395,6 +442,53 @@ mod tests {
         for dir in [&never.0, &broken.0, &stopped.0, &dead.0] {
             assert!(!is_recording(dir, 1_000_000 + STALE_AFTER_MS));
         }
+    }
+
+    /// **「我 stat 不到那個資料夾」不是「沒有人來過」。**
+    ///
+    /// 上一版的 `presence` 在 `read_to_string` 回 `None` 之後補一句
+    /// `beat_path().exists()` 去分辨兩種「沒讀到」。那句話在權限拿不到的時候
+    /// 回 `false`（`Path::exists` 的文件就是這樣寫的），於是最說不準的那一種
+    /// 掉進 `NeverStarted`——`safe_to_kill_spawn` 唯一放行的那一種。
+    ///
+    /// 這條測試**先量前提再斷言結論**：資料夾關掉之後，`read_to_string` 要真
+    /// 的失敗、而且失敗的原因不是 `NotFound`。前提不成立（例如用 root 跑）的
+    /// 話就直接紅，不要靜靜跳過——一條「在這台機器上什麼都沒驗到」的綠燈，比
+    /// 沒有這條測試更糟。
+    #[cfg(unix)]
+    #[test]
+    fn a_data_dir_we_cannot_even_stat_is_not_a_data_dir_nobody_has_used() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let t = Tmp::new("p-locked");
+        beat(&t.0, 1_000_000).expect("beat");
+
+        let shut = |mode| {
+            std::fs::set_permissions(&t.0, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        };
+        shut(0o000);
+        // 關著的時候把要問的都問完，再開回去——斷言失敗會 panic，而一個 0o000
+        // 的資料夾會讓 `TempDir` 的 `Drop` 清不掉，測試失敗就變成留一地垃圾。
+        let err = std::fs::read_to_string(beat_path(&t.0)).map(|_| ()).err();
+        let seen = presence(&t.0, 1_000_000);
+        let knife = safe_to_kill_spawn(&t.0, 999_000, 1_000_000);
+        shut(0o755);
+
+        let kind = err.map(|e| e.kind());
+        assert!(
+            kind.is_some_and(|k| k != std::io::ErrorKind::NotFound),
+            "前提沒成立：資料夾關掉之後還讀得到（或說它不在）。\
+             這條測試要非 root 才驗得到東西，實際讀到的是 {kind:?}"
+        );
+        assert_eq!(
+            seen,
+            Presence::Unreadable,
+            "說不準的時候要說「說不準」，不是「沒有人來過」"
+        );
+        assert!(
+            !knife,
+            "她可能正在錄，而這一刀是照著「這裡從來沒有人跑過」下的"
+        );
     }
 
     /// 墓碑**不會過期**。她收工了就是收工了，隔一年開機還是收工——過期是心跳

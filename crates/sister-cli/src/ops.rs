@@ -7365,7 +7365,25 @@ pub mod record {
 
     #[cfg_attr(not(windows), allow(dead_code))]
     impl BootBeat {
-        fn start(data_dir: &Path) -> Self {
+        /// **蓋不上第一拍就不要回來。**
+        ///
+        /// `safe_to_kill_spawn` 的整條命，靠的是「心跳蓋在 `Db::open` 之前」。
+        /// 上一版把那一拍寫成 `let _ =`，於是那條不變式講的是**順序**（真的）
+        /// 而不是**效果**（假的）：寫失敗的時候呼叫端照樣往下走進 `Db::open`，
+        /// 而磁碟上留著的是**上一場**的狀態——乾淨收工的墓碑、當掉的過期心
+        /// 跳、全新安裝的空目錄，三種全部滿足 `at < spawned_at`，三種全部放行
+        /// 落刀。補蓋的那條執行緒要等滿一個 `BEAT_EVERY_MS`，所以那個瞎掉的
+        /// 窗口是**五秒**，不是幾微秒。
+        ///
+        /// 所以這裡重試，重試不成就讓 `record` 開不起來。這不是把小事鬧大：
+        /// `recording.beat` 和 `sister.db` 躺在同一個資料夾裡，一秒之內連
+        /// 三十個位元組都放不進去的地方，等一下也放不下一顆資料庫。與其開進
+        /// 一個注定失敗的 `Db::open`、順便把那把刀的綠燈一起交出去，不如當場
+        /// 講清楚。
+        ///
+        /// 一秒是個判斷，不是量出來的：短到使用者不會覺得卡，長到足夠讓防毒
+        /// 軟體放開一個三十位元組的檔案。真的是磁碟滿了的話，等多久都一樣。
+        fn start(data_dir: &Path) -> Result<Self> {
             use std::sync::atomic::{AtomicBool, Ordering};
             use std::time::{Duration, Instant};
 
@@ -7386,7 +7404,29 @@ pub mod record {
             // 第一下蓋在呼叫者這條執行緒上，不是丟給新執行緒去蓋：呼叫的人回
             // 去之後下一行就是 `Db::open`，中間不該留一段「心跳還沒出現」的
             // 空窗——那正是要補的洞。
-            let _ = sister_core::heartbeat::beat_booting(&dir, sister_core::now_ms());
+            let mut last_err = None;
+            for attempt in 0..10 {
+                if attempt > 0 {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                match sister_core::heartbeat::beat_booting(&dir, sister_core::now_ms()) {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            if let Some(e) = last_err {
+                return Err(e).with_context(|| {
+                    format!(
+                        "開不起來：{} 這個資料夾一秒之內連一行心跳都寫不進去。\
+                         硬碟滿了，或者那個資料夾不給寫——資料庫也在同一個資料夾裡，\
+                         所以先把它弄好再開始錄",
+                        dir.display()
+                    )
+                });
+            }
             let alive = std::sync::Arc::new(AtomicBool::new(true));
             let thread = std::thread::spawn({
                 let alive = alive.clone();
@@ -7406,12 +7446,12 @@ pub mod record {
                     }
                 }
             });
-            Self {
+            Ok(Self {
                 alive,
                 thread: Some(thread),
                 dir,
                 handed_off: false,
-            }
+            })
         }
 
         /// 主迴圈接手。之後 drop 不會再把心跳收掉——那是還在跑的 recorder 的
@@ -7489,7 +7529,7 @@ pub mod record {
         // 回來，第二下穿過那道 `is_recording` 閘門（recorder 沒有 lock file，
         // 也沒有 single instance），於是兩個 `sister record` 打同一顆資料庫。
         // 唯一的症狀是磁碟用得比講好的快一倍。
-        let mut boot = BootBeat::start(data_dir);
+        let mut boot = BootBeat::start(data_dir)?;
         let mut db = Db::open(&crate::db_path(data_dir))?;
         // **先建後端、再問能力。** 反過來的話，「輸入 hook 裝上了沒」永遠
         // 是在 hook 還沒裝之前問的，於是永遠回報失敗——一則恆假的警告。
@@ -8670,7 +8710,7 @@ pub mod record {
             assert!(!heartbeat::is_occupied(&dir.0, now()), "還沒開始，沒有心跳");
             assert!(!heartbeat::is_recording(&dir.0, now()));
 
-            let boot = BootBeat::start(&dir.0);
+            let boot = BootBeat::start(&dir.0).expect("開機心跳");
             // 立刻，不是等第一個 5 秒間隔——那個間隔正是要補的洞。
             assert!(
                 heartbeat::is_occupied(&dir.0, now()),
@@ -8687,6 +8727,50 @@ pub mod record {
             drop(boot);
         }
 
+        /// **蓋不上第一拍就不准往下走。**
+        ///
+        /// `heartbeat::safe_to_kill_spawn` 的整條命是「心跳蓋在 `Db::open` 之
+        /// 前」。上一版那一拍是 `let _ =`：寫失敗照樣回來，呼叫端下一行就開資
+        /// 料庫，而磁碟上留著的是**上一場**的狀態——那三種（乾淨的墓碑、當掉
+        /// 的過期心跳、全新的空目錄）全部放行落刀。所以那條不變式講的是順序，
+        /// 不是效果。
+        ///
+        /// 這一條同時釘住兩件事：寫不進去要回 `Err`，而且**磁碟上不可以留下
+        /// 一個看起來像「有人正在開機」的檔案**——那會讓下一個 recorder 以為
+        /// 這裡有人佔著。
+        #[cfg(unix)]
+        #[test]
+        fn a_boot_beat_that_cannot_be_stamped_stops_the_recording_instead_of_lying() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = Tmp::new("boot-unwritable");
+            let shut = |mode| {
+                std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(mode))
+                    .expect("chmod");
+            };
+            shut(0o500); // 讀得到、進得去，但寫不進去
+            let probe = std::fs::write(dir.0.join("probe"), b"x");
+            let started = BootBeat::start(&dir.0);
+            let after = heartbeat::presence(&dir.0, sister_core::now_ms());
+            shut(0o755);
+
+            assert!(
+                probe.is_err(),
+                "前提沒成立：這個資料夾還寫得進去（用 root 跑的話這條測試什麼都驗不到）"
+            );
+            let err = started.err().expect("寫不進心跳就不該回來");
+            let said = format!("{err:#}");
+            assert!(
+                said.contains(&dir.0.display().to_string()),
+                "講不出是哪個資料夾寫不進去的話，這句話沒有下一步：{said}"
+            );
+            assert_eq!(
+                after,
+                heartbeat::Presence::NeverStarted,
+                "第一拍蓋不上就不該在磁碟上留下任何東西"
+            );
+        }
+
         /// 主迴圈接手之後，同一個檔案要改口說「在錄」。
         ///
         /// 少了這一條，上面那個修法就會把指示燈**永遠**釘在「沒在錄」——
@@ -8695,7 +8779,7 @@ pub mod record {
         fn once_the_loop_takes_over_the_same_file_says_she_is_recording() {
             let dir = Tmp::new("boot-took-over");
             let now = sister_core::now_ms;
-            let mut boot = BootBeat::start(&dir.0);
+            let mut boot = BootBeat::start(&dir.0).expect("開機心跳");
             assert!(!heartbeat::is_recording(&dir.0, now()));
 
             boot.hand_off();
@@ -8716,7 +8800,7 @@ pub mod record {
             // 症狀是磁碟用得比講好的快一倍，而使用者會以為是保留期壞了。
             let dir = Tmp::new("two-recorders");
             already_recording(&dir.0).expect("沒有人在錄的時候要放行");
-            let _first = BootBeat::start(&dir.0);
+            let _first = BootBeat::start(&dir.0).expect("開機心跳");
             let err = already_recording(&dir.0).expect_err("第二個要被擋下來");
             let said = format!("{err}");
             // 擋下來還要講得出下一步是什麼。一句「不行」會讓人去刪資料庫。
@@ -8736,7 +8820,7 @@ pub mod record {
             let mut c = Consent::default();
             c.grant(Sheet::LocalRecording, 1);
             sister_core::consent::save(&dir.0, &c).expect("save");
-            let _first = BootBeat::start(&dir.0);
+            let _first = BootBeat::start(&dir.0).expect("開機心跳");
 
             let err = super::run(&dir.0, Config::default(), None, None)
                 .expect_err("已經有人在錄，第二個不該起得來");
@@ -8764,7 +8848,7 @@ pub mod record {
             // 留著一個剛蓋的心跳，而接下來 16 秒（`STALE_AFTER_MS`）裡字母人會
             // 說她在錄——說她在錄卻沒在錄，是這兩個狀態裡比較危險的那一個。
             let dir = Tmp::new("boot-died");
-            drop(BootBeat::start(&dir.0));
+            drop(BootBeat::start(&dir.0).expect("開機心跳"));
             assert!(
                 !heartbeat::is_occupied(&dir.0, sister_core::now_ms()),
                 "沒交棒就走了＝這次開機沒成功，心跳要收掉"
@@ -8780,7 +8864,7 @@ pub mod record {
             // 問的是「還佔著嗎」而不是「在錄嗎」：主迴圈還沒蓋自己的第一下，
             // 檔案裡仍然寫著 boot。那個狀態的正確答案就是「佔著、還沒在錄」。
             let dir = Tmp::new("boot-handoff");
-            let mut boot = BootBeat::start(&dir.0);
+            let mut boot = BootBeat::start(&dir.0).expect("開機心跳");
             boot.hand_off();
             drop(boot);
             assert!(
@@ -8798,7 +8882,7 @@ pub mod record {
         #[test]
         fn a_stop_pressed_while_she_opens_the_database_still_stops_her() {
             let dir = Tmp::new("stop-during-boot");
-            let mut boot = BootBeat::start(&dir.0);
+            let mut boot = BootBeat::start(&dir.0).expect("開機心跳");
             sister_core::control::request_stop(&dir.0).expect("request");
             boot.hand_off();
             assert!(
@@ -8816,7 +8900,7 @@ pub mod record {
         fn a_stop_left_over_from_before_she_started_does_not_kill_this_run() {
             let dir = Tmp::new("stop-before-boot");
             sister_core::control::request_stop(&dir.0).expect("request");
-            let mut boot = BootBeat::start(&dir.0);
+            let mut boot = BootBeat::start(&dir.0).expect("開機心跳");
             boot.hand_off();
             assert!(
                 !sister_core::control::take_stop(&dir.0),
