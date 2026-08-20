@@ -611,6 +611,96 @@ console.log("㉒ 反面：她現在沒有暫停的時候，不可以憑空多一
   check("但不可以說她現在是暫停的", !said.includes("我現在是暫停的"), said);
 }
 
+console.log("㉓ `booting` 那幾分鐘從系統匣按下去，回來那句話**就是**在講她");
+{
+  // ⑲ 那個修法的反面，而且是危險的那一面。alpha.41 的第一版拿「她正在起來」
+  // 當「所以這句話一定不是在講她」的證據，然後在 `booting` 整段時間裡對每一句
+  // `recorder-failed` 貼上「這是另一件事：」。那個推論在這裡是**反的**：
+  //
+  //   · `booting` 的時候 `recording_state` 不是 `"none"`；
+  //   · 系統匣那顆 handler 讀真相不讀標籤（`main.rs`：`let on = recording_state
+  //     (...) != "none"`），所以它送的是 `stop_recording`；
+  //   · 於是 `booting` 期間唯一送得出 `recorder-failed` 的路**就是停不掉**
+  //     （`main.rs` 那一行是全 repo 唯一的 emitter）。
+  //
+  // 也就是說：那個前綴在這一格 100% 是假的，而它推開的是唯一一句「你按的停止
+  // 沒有生效」。上面那行還寫著「這期間還沒開始記」——兩句合起來讀成「她好好
+  // 的，另外有個檔案權限問題」，他走開，她開完資料庫錄一整天。
+  const STOP_FAILED =
+    "write C:\\Users\\ted\\AppData\\Roaming\\ted-h\\AI-Sister\\data\\stop.request: Access is denied. (os error 5)";
+  const p = await open({ recording_state: "booting" });
+  check("前提：她正在開資料庫", p.line().includes("正在開資料庫"), p.line());
+  await p.fromOutside("recorder-failed", STOP_FAILED);
+  check("那句話要在", p.line().includes("Access is denied"), p.line());
+  // **前提要在事後再驗一次。** 少了這一條，任何一個把 `booting` 弄丟的改動都
+  // 會讓底下那句「沒有前綴」為了錯的理由過關——不是 booting 了，本來就不加。
+  check("而且她還在 booting（不然下面那條等於沒驗）", p.line().includes("正在開資料庫"), p.line());
+  const detail = p.line().split("\n")[1] ?? "";
+  check("不可以被推開成「另一件事」——他按的停止沒生效，那正是在講她", !detail.includes("另一件事"), detail);
+}
+
+console.log("㉔ 叫她起來的中途又從系統匣按了一次，不可以當場宣告她沒起來");
+{
+  // 他按了「叫她起來」，沒耐心，又從系統匣按一次「開始記錄」。那一刻心跳還沒
+  // 蓋出來，`recording_state` 還是 `"none"`，所以那一顆走 `start_recording`、
+  // 撞上 `spawned.try_wait()` 回 `Ok(None)`，回一句「還在起來，再等一下」。
+  //
+  // `recorder-failed` 那個 listener 以前無條件 `starting = false`，於是：
+  //
+  //     沒有人在記錄——從現在起發生的事，她不會知道
+  //     上一次按的那個還在起來——…再等一下
+  //
+  // 兩行都是真的，而它們直接互相矛盾。而且「叫她起來」那顆會跟著跳回來，他再
+  // 按一次拿到同一句話——正是 `booting` 三態當初要消滅的那個迴圈。
+  const STILL = "上一次按的那個還在起來——第一次開資料庫要重建索引，大的資料庫可能要幾分鐘。再等一下";
+  const p = await open({
+    recording_state: "none",
+    start_recording: () => Promise.resolve(null),
+  });
+  await p.click("[data-wake]");
+  check("前提：她正在起來", p.line().includes("正在把她叫起來"), p.line());
+  await p.fromOutside("recorder-failed", STILL);
+  check("那句話要在", p.line().includes("再等一下"), p.line());
+  check("而上面那行不可以翻成「沒有人在記錄」", p.line().includes("正在把她叫起來"), p.line());
+  check("「叫她起來」那顆也不可以跳回來", p.node("[data-wake]").hidden === true, p.node("[data-wake]").hidden);
+  // 這一句**就是**在講她（系統匣送的不是 start 就是 stop），所以不加前綴。
+  const detail = p.line().split("\n")[1] ?? "";
+  check("而且它不是「另一件事」", !detail.includes("另一件事"), detail);
+}
+
+console.log("㉖ 她好好地在錄的時候，那句前綴是純噪音——不可以出現");
+{
+  // 前綴存在的唯一理由，是「上面那行講的是一個**還沒完成的轉換**，所以底下
+  // 那行會被讀成它的原因」。她已經在錄了的時候上面那行是「在聽」，沒有因果
+  // 可以誤讀；而一句到處都貼的「這是另一件事」，會在真正需要它的那一格失去
+  // 分量。少了這一條，`(starting || booting) && !aboutHer` 砍成 `!aboutHer`
+  // 全綠——這是 ㉓/㉔ 寫完之後跑突變才發現的洞。
+  const OOPS = "資料庫打不開：database is locked";
+  const p = await open({ recording_state: "recording", ask: new Error(OOPS) });
+  await p.type("剛剛發生什麼事");
+  check("前提：她在錄，不是正在起來", p.line().startsWith("在聽"), p.line());
+  check("那句錯誤要在", p.line().includes(OOPS), p.line());
+  check("但不加前綴", !p.line().includes("另一件事"), p.line());
+}
+
+console.log("㉕ `notice` 只有那兩個具名函式寫得進去");
+{
+  // `paint()` 讀的是 `notice.text` / `notice.aboutHer`。哪天有人寫回一句裸字串
+  // （這一頁沒有型別可以擋，而 alpha.41 之前那七個寫入點全是裸字串），畫面上
+  // 會是「undefined」——沒有例外、沒有紅字，只有一格看起來像壞掉的字。
+  //
+  // 更重要的是**語意**那一半：新的寫入點不經過那兩個函式，就等於沒有人回答過
+  // 「這句話在講誰」，而 `paint()` 會替它猜——那正是這一輪修掉的東西。
+  const src = read(join(UI, "app.js"));
+  const writes = [...src.matchAll(/^\s*notice = (.+)$/gm)].map((m) => m[1].trim());
+  const stray = writes.filter((w) => w !== "null;" && !w.startsWith("{ text:"));
+  check("每一句 notice = 不是 null 就是那兩個函式裡的物件", stray.length === 0, stray);
+  // 活體：正規表示式挑不到東西的話上面那條永遠綠，而它守的線是一格空白。
+  check(`而且真的掃到了（${writes.length} 句）`, writes.length >= 5, writes.length);
+  const setters = src.match(/^function noticeAbout\w+\(/gm) ?? [];
+  check("那兩個具名函式也還在", setters.length === 2, setters);
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——字母人上有話說不出口，或說了活不過下一次輪詢。`);

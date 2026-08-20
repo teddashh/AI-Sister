@@ -137,8 +137,51 @@ let lastRun = null;
  * 任何一句 `notice` 都會貼在「正在把她叫起來…」底下，讀起來就是她起不來的
  * 原因。收欄位收掉的是「誰蓋掉誰」，蓋不掉的是「兩句話並排會被讀成因果」。
  * 那一半修在 `paint()` 裡：她正在起來的時候，那一行要自己帶主詞。
+ *
+ * **而主詞不可以用狀態去猜。** alpha.41 那一版寫的是
+ * `starting || booting ? "這是另一件事：" + notice : notice`，也就是拿「她正在
+ * 起來」當「所以這句話一定不是在講她」的證據。那個推論是假的，而且假在**最
+ * 危險的方向**：`booting` 那幾分鐘他從系統匣按下去，`recording_state` 不是
+ * `"none"`，所以那一顆送的是 `stop_recording`（`main.rs` 的 handler 讀真相不讀
+ * 標籤）——於是 `booting` 期間唯一送得出 `recorder-failed` 的路**就是停不掉**：
+ *
+ *     她起來了，正在開資料庫…（大的記憶要等一下，這期間還沒開始記）
+ *     這是另一件事：write …\stop.request: Access is denied. (os error 5)
+ *
+ * 他按的停止沒有生效，她開完資料庫就會開始錄一整天。而那行前綴宣告「跟上面
+ * 無關」，把唯一一句「你那一下沒有生效」推開——上面那行還寫著「這期間還沒開始
+ * 記」。兩句合起來是「她好好的，另外有個檔案權限問題」，他於是走開。
+ *
+ * 所以主詞由**寫的人**帶，不由讀的人猜：[`noticeAboutHer`] 和
+ * [`noticeAboutSomethingElse`]。這不是把 alpha.40 收掉的那個欄位加回來——那次
+ * 兩個欄位餵**同一行字**，誰蓋掉誰沒有人定義過；這裡是一行字加上一個「它在講
+ * 誰」，而且沒有第三種選擇：`notice` 只有那兩個函式寫得進去。
+ *
+ * 不確定的那一邊往「在講她」倒（＝不加前綴）。兩個方向的代價不對稱：少了前綴
+ * 他會多按一次「叫她起來」，多了前綴他會**放著一台正在錄的機器走開**。
  */
 let notice = null;
+
+/**
+ * 這句話在講她：她起不來、停不掉、不會開始。
+ *
+ * 她正在起來的時候**不加**前綴——這一句就是在解釋上面那一行，兩句並排讀成
+ * 因果是對的。
+ */
+function noticeAboutHer(text) {
+  notice = { text: String(text ?? ""), aboutHer: true };
+}
+
+/**
+ * 這句話在講他**同時**做的別的事：問一題、按暫停、開時間軸。
+ *
+ * 這三個是唯一會在她起來的那 25 秒（`booting` 更久）裡寫字進來、而且真的和她
+ * 起不起得來無關的來源。而那正是他最可能去問問題的那 25 秒——畫面剛剛叫他
+ * 等一下。
+ */
+function noticeAboutSomethingElse(text) {
+  notice = { text: String(text ?? ""), aboutHer: false };
+}
 
 /**
  * 從這個視窗以外發生了一件事，所以他上一下按了什麼沒成那句話到此為止。
@@ -235,11 +278,6 @@ function paint() {
   //     正在把她叫起來…
   //     資料庫打不開
   //
-  // 而在這兩個狀態下 `notice` **必然不是在講她**：三個會寫「叫不起來」的地方
-  // （`startRecording` 的 catch、25 秒逾時、`recorder-failed`）每一個都在
-  // `paint()` 之前先把 `starting` 關掉。剩下寫得進來的只有他同時做的別的事
-  // ——問一題、按暫停、開時間軸。
-  //
   // 而這正是他最可能去問問題的那 25 秒：畫面剛剛叫他等一下。更糟的是那一題
   // 失敗的原因（她正在開那顆一年份的資料庫）和她還沒起來的原因是同一個，所以
   // 那兩句話讀起來會像同一件事——他於是去修一顆沒有壞的資料庫，而她其實
@@ -248,21 +286,19 @@ function paint() {
   // 上一版只補了 `await` 那一瞬間（catch 那條路），而**這 25 秒是同一個 bug
   // 比較大的那一半**，那時候還寫著「已經修好了」。
   //
-  // 想過而且刻意不改的兩件事，寫在這裡免得下一次又被「修」回去：
+  // **「是不是在講她」由寫的人帶進來，這裡不猜。** alpha.41 那一版在這裡寫
+  // `starting || booting`，而那個推論在 `booting` 那幾分鐘是反的——那一段的
+  // 完整重現寫在 [`notice`] 上面。這裡只讀 `aboutHer`。
   //
-  // 一、`booting` 的時候從系統匣按「開始記錄」，`recorder-failed` 會帶回「已經
-  //     有一個 sister record 在跑了」，配上「她起來了，正在開資料庫…」——這一
-  //     組即使沒有前綴也讀得通，所以前綴在這一格是多餘的。留著是因為它**不會
-  //     讓他做錯事**（他讀完的結論仍然是「她正在起來，我那一下是多按的」），
-  //     而拿掉它就得再分一次「這一句是不是在講她」——那正是 alpha.40 收掉的
-  //     那個欄位。**在高傷害的那一格對，在低傷害的那一格多餘**，是對的取捨。
-  // 二、前綴不寫成「剛剛那一下：」，雖然那才是 [`notice`] 的定義。因為他**剛剛
-  //     那一下正好就是按了「叫她起來」**，那五個字會被讀成在講那一下——在唯一
-  //     需要它的狀態下最模糊。「另一件事」講的是關係（跟上面那句無關），不是
-  //     時序，所以它在那一格說得清楚。
+  // 前綴不寫成「剛剛那一下：」，雖然那才是 [`notice`] 的定義。因為他**剛剛那
+  // 一下正好就是按了「叫她起來」**，那五個字會被讀成在講那一下——在唯一需要它
+  // 的狀態下最模糊。「另一件事」講的是關係（跟上面那句無關），不是時序。
   let detail = "";
   if (notice !== null) {
-    detail = starting || booting ? `這是另一件事：${notice}` : notice;
+    detail =
+      (starting || booting) && !notice.aboutHer
+        ? `這是另一件事：${notice.text}`
+        : notice.text;
   } else if (!starting && !booting && shown === "asleep") {
     detail = asleepDetail();
   }
@@ -371,7 +407,7 @@ async function startRecording() {
     // 直接指派（而不是「只有在還空著的時候才寫」）：上面開頭是清過的，但那次
     // 清距離這裡隔著一整段 `await`，中間他問一題失敗就會再填一句進去。這一句
     // 才是他此刻在等的答案。
-    notice = String(err?.message ?? err);
+    noticeAboutHer(err?.message ?? err);
     starting = false;
     paint();
     return;
@@ -396,10 +432,12 @@ async function startRecording() {
     // 連記錄檔都讀不到，那就只剩下面那句話。
   }
   const waited = Math.round(WAKE_TIMEOUT_MS / 1000);
-  notice = why
-    ? `等了 ${waited} 秒還沒有心跳。record.log 最後說：\n${why}`
-    : `等了 ${waited} 秒還沒有心跳，record.log 也還是空的。` +
-      "她可能還在起來——再等一下，或去看那個檔案";
+  noticeAboutHer(
+    why
+      ? `等了 ${waited} 秒還沒有心跳。record.log 最後說：\n${why}`
+      : `等了 ${waited} 秒還沒有心跳，record.log 也還是空的。` +
+          "她可能還在起來——再等一下，或去看那個檔案",
+  );
   starting = false;
   paint();
 }
@@ -537,7 +575,9 @@ timelineButton?.addEventListener("click", async () => {
     await invoke?.("open_timeline");
     paint();
   } catch (err) {
-    notice = String(err?.message ?? err);
+    // 時間軸開不起來和她起不起得來是兩件事——她正在起來的時候這一句要自己
+    // 帶主詞，不然會被讀成「她就是因為這個沒起來」。
+    noticeAboutSomethingElse(err?.message ?? err);
     paint();
   }
 });
@@ -557,7 +597,7 @@ pauseButton?.addEventListener("click", async () => {
     // 「寫出來」要寫進 `notice`：直接寫那一格的話，下一輪輪詢（5 秒內，而且
     // 這顆按鈕本身不會重設那個計時器，所以可能是 0 秒）會把它蓋掉，留下的
     // 剛好只有前半句「看起來沒反應」。
-    notice = String(err?.message ?? err);
+    noticeAboutSomethingElse(err?.message ?? err);
     paint();
   }
 });
@@ -591,8 +631,26 @@ globalThis.__TAURI__?.event
 globalThis.__TAURI__?.event
   ?.listen?.("recorder-failed", (event) => {
     // 直接指派就把上一句蓋掉了：一句早上留下的話不可以擋住這一句。
-    notice = String(event.payload ?? "");
-    starting = false;
+    //
+    // **這一句必然是在講她。** 系統匣那一顆送出去的不是 start 就是 stop
+    // （`main.rs` 的 handler 讀 `recording_state` 決定方向，不讀選單上那行
+    // 字），所以每一句都在回答「她會不會開始／她停下來了沒」。
+    noticeAboutHer(event.payload);
+    // **這裡以前還會 `starting = false`，而那一下是在說謊。** 他按了「叫她
+    // 起來」、等不及又從系統匣按了一次：那一刻心跳還沒蓋出來，
+    // `recording_state` 還是 `"none"`，所以那一顆走 `start_recording`、撞上
+    // `spawned.try_wait()` 回 `Ok(None)`，回一句「上一次按的那個還在起來
+    // ——…再等一下」。第一次那個 wake **還在飛**，而這一行把它記成沒了：
+    //
+    //     沒有人在記錄——從現在起發生的事，她不會知道
+    //     上一次按的那個還在起來——第一次開資料庫要重建索引…再等一下
+    //
+    // 兩行都是真的，而它們直接互相矛盾。附帶那顆「叫她起來」會跟著跳回來，
+    // 他再按一次拿到同一句話——正是 `booting` 那個三態當初要消滅的迴圈。
+    //
+    // `starting` 的生死歸 wake 自己那一圈管：心跳出現（`setRecording`）、
+    // spawn 被 reject（catch）、25 秒到了（逾時）。從系統匣按壞的另外一下，
+    // 不是那三件事裡的任何一件。
     paint();
   })
   ?.catch?.(() => {});
@@ -1102,7 +1160,10 @@ async function ask() {
     //
     // 進 `notice`，不是直接寫那一格：直接寫的話這句話 5 秒內會被輪詢換成
     // 「在聽」，而那三件事就又混成同一片沉默了。
-    notice = String(err?.message ?? err);
+    //
+    // 她正在起來的那 25 秒（`booting` 更久）他最可能問問題，而這一題失敗的
+    // 原因和她還沒起來的原因是同一顆資料庫——所以這一句一定要自己帶主詞。
+    noticeAboutSomethingElse(err?.message ?? err);
     setState("idle");
     // 上一題的答案要先撤掉。這一句以前不在，於是問了第二題而它壞掉的時候，
     // 畫面上是：新的問題還在輸入框裡、**舊的那一題的答案原封不動躺在下面**、
@@ -1219,10 +1280,11 @@ if (params.get("asleep") === "stopped") {
 } else if (params.get("asleep") === "nobeat") {
   // 叫了、逾時了、還是沒有心跳。這一句要活得比一次輪詢久（以前它被下一個
   // `paint()` 蓋掉），而它換行、比另外兩句長——版面撐不撐得住要用眼睛看。
-  notice =
+  noticeAboutHer(
     "等了 25 秒還沒有心跳。record.log 最後說：\n" +
-    "（這一輪還沒寫出東西，以下是上一輪的 record.log）\n" +
-    "第一張同意書還沒簽——她不會開始記錄。";
+      "（這一輪還沒寫出東西，以下是上一輪的 record.log）\n" +
+      "第一張同意書還沒簽——她不會開始記錄。",
+  );
   paint();
 }
 
