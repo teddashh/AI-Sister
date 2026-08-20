@@ -241,6 +241,23 @@ fn has_ever_recorded(shell: tauri::State<'_, Shell>) -> bool {
         .unwrap_or(false)
 }
 
+/// 她有沒有**真的存下來過一列內容**。
+///
+/// 上面那一支答不出這一題，而時間軸那一頁需要的正是這一題：它拿
+/// `has_ever_recorded` 當「這些紀錄是被忘掉的」的根據，可是那個旗標在
+/// `start_session` 就翻成 true，**第一張畫面之前**。於是一台
+/// `capture.enabled = false` 的機器——她跑完、一個字都沒記到、`sister forget`
+/// 從來沒有被執行過——會在那一頁上讀到「這些紀錄是被忘掉的，或是過了保留
+/// 期」。那是指控一件沒發生的事。
+///
+/// 兩支分開而不是合成一個結構回去：`has_ever_recorded` 已經有呼叫端和假後端
+/// 在用，而這兩個位元各自都有單獨成立的意思。見
+/// [`sister_core::db::Db::ever_stored`]。
+#[tauri::command(async)]
+fn has_ever_stored(shell: tauri::State<'_, Shell>) -> bool {
+    with_db(&shell, |db| db.ever_stored().map_err(|e| format!("{e:#}"))).unwrap_or(false)
+}
+
 /// 上一場錄製（見 [`last_recording_end`]）。
 #[derive(Serialize)]
 struct LastRun {
@@ -1875,6 +1892,7 @@ fn main() {
             recorder_log_tail,
             last_recording_end,
             has_ever_recorded,
+            has_ever_stored,
             toggle_pause,
             settings_read,
             settings_write,

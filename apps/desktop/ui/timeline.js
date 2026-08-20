@@ -569,8 +569,17 @@ async function load(keep = null) {
       // `forget`（`delete_empty_sessions` 不准碰還沒收尾的最新一列，因為那
       // 可能是此刻正在錄的那一場）。拿它當「她錄過嗎」的話，同一顆被清空的
       // 資料庫會因為「上一場有沒有當掉」給出兩種答案。那個位元不會。
+      //
+      // 兩個位元，三種空。上面那一個人答不出中間那一種——它在 `start_session`
+      // 就翻成 true，**第一張畫面之前**。於是一台 `capture.enabled = false` 的
+      // 機器（跑完、一個字都沒記到、`sister forget` 從來沒被執行過）會在這一頁
+      // 上被告知它的紀錄「是被忘掉的」，一則指控，而且把下一步指到相反的方向。
       const ever = await invoke("has_ever_recorded").catch(() => false);
-      if (ever) {
+      const stored = await invoke("has_ever_stored").catch(() => false);
+      if (ever && !stored) {
+        el.railSay.textContent = "一天都沒有。";
+        say("她錄過，但一列內容都沒存進來過——先到設定頁看「開始記錄」那一段。");
+      } else if (ever) {
         el.railSay.textContent = "現在一天都沒有了。";
         say("她錄過——這些紀錄是被忘掉的，或是過了保留期。再錄一段就會有新的。");
       } else {
@@ -663,6 +672,11 @@ function fakeBackend(mode = "1") {
       frame_id: null,
     },
   ];
+  // `nulldata` 演的是「她跑過，一列內容都沒存進來過」，所以這裡真的要空——
+  // 帶著三天資料去演一頁空白，演的就不是那一頁。
+  if (mode === "nulldata") {
+    moments = [];
+  }
   // 第一段是前一天晚上按的（from 落在 dayStart 之前），第二段是當天中午按的。
   // `cross` 換掉第二段：晚上按下、明天早上才解除——那是 `pauseWords` 裡唯一
   // 一條在後端修好之前選不到的分支。時間挑在最後一筆（16:40）之後，不然這一頁
@@ -691,6 +705,14 @@ function fakeBackend(mode = "1") {
       // 另一邊（真的沒錄過）是一台全新機器，那一句不會出錯也沒什麼好演的。
       case "has_ever_recorded":
         return true;
+      // **同一句話的第三種走法，而它以前也演不出來。**
+      //
+      // `?demo=nulldata`：她跑過，一列內容都沒存進來過（`capture.enabled =
+      // false`）。少了這一條，`.catch(() => false)` 會讓每一個 demo 都走進
+      // 「她錄過但沒存過」那一支——把上面那句「被忘掉了」整個藏起來。
+      // 兩邊都要看得見，才知道它們講的是相反的下一步。
+      case "has_ever_stored":
+        return demo !== "nulldata";
       // 從自己手上的資料算出「哪幾天有東西」，而不是另外寫死一份清單。
       // 寫死的那一版會在刪掉之後對不起來——左邊說 1281 筆、右邊一片空白，
       // 而那正是這個 demo 應該替我抓到的那種錯。
@@ -802,14 +824,22 @@ function fakeBackend(mode = "1") {
 }
 
 // `1` 是平常那一天；`cut` 是被 LIMIT 切掉的那一天；`cross` 是那段解除時刻
-// 落在明天的暫停；`live` 是「清空之後那一列空殼，是因為她正在錄」。四個各自
+// 落在明天的暫停；`live` 是「清空之後那一列空殼，是因為她正在錄」；
+// `nulldata` 是「她跑過，可是一列內容都沒存進來過」——那一頁和「你把東西都
+// 忘掉了」以前逐字相同，而它們的下一步剛好相反。五個各自
 // 對應一條在這之前**畫不出來**的列——`cut` 那一列以前印的是「接下來 N 小時
 // 沒有新的東西進來」（假的），`cross` 那一句（「跨過午夜」）則是寫在
 // `pauseWords` 裡但永遠選不到，因為後端的 SQL 把那筆 resume 篩掉了，而
 // `leftover` 那兩支要一台 Windows 加一次當機才分得出來。
 // 開發機開不起 Tauri，看不到就等於沒做過。
 const demo = new URLSearchParams(globalThis.location.search).get("demo");
-if (demo === "1" || demo === "cut" || demo === "cross" || demo === "live") {
+if (
+  demo === "1" ||
+  demo === "cut" ||
+  demo === "cross" ||
+  demo === "live" ||
+  demo === "nulldata"
+) {
   invoke = fakeBackend(demo);
   // 「現在」推到這一天之後，好讓收尾那段空白也畫出來——16:40 之後的七個
   // 小時是這一頁最容易被漏掉的一塊，看不到就等於沒做過。
