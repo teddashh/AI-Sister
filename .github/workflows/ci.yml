@@ -88,6 +88,17 @@ jobs:
       - name: What the consent checkboxes say must be what is in the file
         run: node ./scripts/check-consent-sticks.mjs
 
+      # 「當時的畫面」是這個產品唯一一個查證的介面：她說「你三天前看過這個」，
+      # 他點下去看到的就是那一頁。所以那一頁的表頭只能替它真的顯示出來的那張圖
+      # 說話，而 alpha.39 之前它有三種替別的東西背書的方式：出處三格全是 NULL
+      # 就留一片空白（鎖定畫面、UAC 那層黑底就是三格全空，而圖照樣留下來了）；
+      # 半截的 PNG 解碼失敗只換來一個破圖圖示，配著一行言之鑿鑿的時間和出處
+      # （解碼是非同步的，`show()` 的 try/catch 接不到）；網址上沒有 id 的時候
+      # `Number(null)` 是 0，於是它去問第 0 張，把「這個連結建錯了」講成
+      # 「找不到這張畫面」。
+      - name: The frame viewer's header must only vouch for the picture it actually showed
+        run: node ./scripts/check-frame-source.mjs
+
       # 「三天前那通電話 100ms 內查得回來」是 Phase 0 的退場條件之一，而在
       # 這一步存在之前，它唯一的實作是一行註解。
       #

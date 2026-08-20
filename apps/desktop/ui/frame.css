@@ -45,6 +45,13 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* 「沒有留下是哪個視窗」是這一頁在說話，不是某個視窗的標題。斜體是唯一
+   能讓這兩件事在同一格裡分得開的東西。 */
+.where.unknown {
+  font-style: italic;
+  opacity: 0.5;
+}
+
 .sheet {
   align-items: center;
   display: flex;
