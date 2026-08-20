@@ -31,7 +31,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -334,6 +334,106 @@ fn migration_005() -> String {
     sql.replace("{marks}", &crate::model::SystemKind::session_marks_sql())
 }
 
+/// 「零當機」數的是**活下來的那幾場**，不是**跑過的那幾場**。
+///
+/// `crash_audit` 一直是 `SELECT COUNT(*) FROM sessions`，而 `sessions` 那張表從
+/// alpha.30（[`crate::retention::delete_empty_sessions`]）開始會刪自己的列：一場
+/// 「一列內容都沒存到」的錄製，收工的時候連紀錄本身一起走。那是對的，那一列是
+/// 「他當天下午 13:02 到 17:44 在電腦前」的證明，#52 要求它消失。
+///
+/// 代價是這個：**最該被算進去的那一種當機，剛好就是會把自己的證據刪掉的那一
+/// 種**。開起來、還沒讀到第一張畫面就死掉——那一場沒有內容，於是下一次
+/// `prune` 掃到它、刪掉它，`crash_audit` 的分子和分母同時少一。實測（六場：
+/// 一場正常＋五場開機即死）：
+///
+/// ```text
+/// prune 之前   6 段錄製裡有 5 段沒有正常收尾
+/// prune 之後   2 段錄製裡有 1 段沒有正常收尾
+/// ```
+///
+/// 訊號是**反的**：她死得越早，紀錄讀起來越乾淨，而一台卡在開機當機迴圈裡的
+/// 機器會收斂到「零當機 ✓」。Phase 0 的退場條件是「連續 7 天自我錄製、零當
+/// 機」，所以這一格不是裝飾。
+///
+/// 留著那幾列不是選項（那是 #52 剛拿掉的東西）。所以數字要**撐過那幾列**：兩
+/// 個單調的計數器寫在 `meta`，跟 `ever_recorded` / `ever_stored` 同一種東西
+/// ——沒有時間、沒有長度、沒有版本，重建不出任何一場錄製，只答得出「她開過幾
+/// 次」和「她好好收尾過幾次」。差額就是沒有回來的那幾場。
+///
+/// 寫在**觸發器**裡而不是寫在 `start_session` / `end_session` 裡，理由和
+/// [`migration_005`] 一樣：呼叫端會漏，而這一批 bug 十次有十次犯在呼叫端。
+/// 這裡的觸發器一場錄製才跑一次（不是一列內容一次），所以 005 那邊要斤斤計較
+/// 的 0.26 µs/列在這裡不存在。
+///
+/// # 三個觸發器，不是兩個
+///
+/// 第三個是 `AFTER INSERT ... WHEN NEW.ended_at IS NOT NULL`。今天沒有人這樣
+/// 寫（[`Db::start_session`] 是唯一的 INSERT，而它不填 `ended_at`），但哪天有
+/// 人補了一場已經結束的錄製進去，少了它就會憑空長出一次當機——而那個假的當機
+/// 讀起來跟真的一模一樣。
+///
+/// # 升級那天的數字是一個下限
+///
+/// 回填只數得到**還在的那幾列**。一顆跑了三個月、被 `prune` 掃過幾十次的資料
+/// 庫，升上來的那一刻真實數字已經不可考。所以回填的同時按下 `session_counts_floor`
+/// ——那一顆的句子要說「至少」。這是 alpha.33 那條規矩的同一條：**回填出來的
+/// 數字是一個猜測穿著數字的衣服**，要嘛講清楚，要嘛不要講。
+///
+/// 全新的資料庫不按那個旗標：`ever_recorded` 是 `start_session` 才寫的，所以
+/// 沒有那個 key 就代表這顆資料庫是這一版之後才出生的，它的 0 是精確的 0。
+fn migration_006() -> String {
+    // `INSERT ... ON CONFLICT DO UPDATE` 而不是 `INSERT OR REPLACE`：後者在
+    // 這裡會把計數器歸零，因為 REPLACE 用的是新的那一列的值。
+    let bump = |key: &str| {
+        format!(
+            "INSERT INTO meta(key, value) VALUES('{key}', '1')\n    \
+             ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);"
+        )
+    };
+    let mut sql = format!(
+        "CREATE TRIGGER IF NOT EXISTS sessions_started_count AFTER INSERT ON sessions\n\
+         BEGIN\n  {}\nEND;\n\
+         CREATE TRIGGER IF NOT EXISTS sessions_ended_count AFTER UPDATE OF ended_at ON sessions\n  \
+         WHEN OLD.ended_at IS NULL AND NEW.ended_at IS NOT NULL\n\
+         BEGIN\n  {}\nEND;\n\
+         CREATE TRIGGER IF NOT EXISTS sessions_born_ended_count AFTER INSERT ON sessions\n  \
+         WHEN NEW.ended_at IS NOT NULL\n\
+         BEGIN\n  {}\nEND;\n",
+        bump("sessions_started"),
+        bump("sessions_ended"),
+        bump("sessions_ended"),
+    );
+    // **旗標要按在計數器之前，而且要問計數器在不在。** 這一段重跑的時候
+    // （版號蓋到一半被砍、然後自我修復）計數器已經是真的了，那時候再按一次
+    // 旗標，就是替一顆數得準的資料庫貼上「我數不準」——一句由修法自己造出來
+    // 的假話。順序顛倒的話這個條件永遠是 false，看起來還很正常。
+    sql.push_str(
+        "INSERT INTO meta(key, value) SELECT 'session_counts_floor', '1' \
+         WHERE EXISTS(SELECT 1 FROM meta WHERE key = 'ever_recorded') \
+           AND NOT EXISTS(SELECT 1 FROM meta WHERE key = 'sessions_started') \
+           AND NOT EXISTS(SELECT 1 FROM meta WHERE key = 'session_counts_floor');\n",
+    );
+    // 回填。`WHERE NOT EXISTS` 讓這一段重跑不會把真的計數蓋回去——001-004 那
+    // 個「跑到一半被砍」的窗口在這一段上一樣開著。
+    //
+    // 聚合寫成子查詢而不是 `... FROM sessions WHERE <guard>`：後者的 `WHERE`
+    // 會先濾掉列再 `COUNT(*)`，於是守衛不成立的時候它回的不是「沒有這一列」，
+    // 是「一列，值 0」——那正好會把計數器歸零。
+    for (key, from) in [
+        ("sessions_started", "SELECT COUNT(*) FROM sessions"),
+        (
+            "sessions_ended",
+            "SELECT COUNT(*) FROM sessions WHERE ended_at IS NOT NULL",
+        ),
+    ] {
+        sql.push_str(&format!(
+            "INSERT INTO meta(key, value) SELECT '{key}', CAST(({from}) AS TEXT) \
+             WHERE NOT EXISTS(SELECT 1 FROM meta WHERE key = '{key}');\n"
+        ));
+    }
+    sql
+}
+
 /// 「她記下來的東西」放在哪幾張表——以及哪幾列不算。
 ///
 /// 這份名單要和 [`DbStats::nothing_recorded_left`] 對得起來：那邊說「一列都不
@@ -543,6 +643,7 @@ impl Db {
             }
             4 => tx.execute_batch(MIGRATION_004)?,
             5 => tx.execute_batch(&migration_005())?,
+            6 => tx.execute_batch(&migration_006())?,
             // `SCHEMA_VERSION` 加上去了、這裡沒跟上，就會在**第一次真的升級**
             // 的時候炸出來，而不是安安靜靜地少跑一段。
             n => anyhow::bail!("schema {n} 沒有對應的 migration——SCHEMA_VERSION 加了但沒補這一段"),
@@ -1121,20 +1222,45 @@ impl Db {
     /// **使用者要自己記得有沒有當過**。那不是一個退場條件，那是一個印象。
     /// 資料庫一直都知道答案，只是沒有人問過它。
     ///
-    /// 回傳 `(全部, 沒收尾的, 最後一次沒收尾的時間)`。
-    ///
     /// **有一個沒有被解決的歧義寫在這裡而不是被藏起來**：如果此刻另一個終端
     /// 機正在錄，那一段的 `ended_at` 也是 NULL，看起來跟當機一樣。可以靠存
     /// PID 再去問作業系統那個 PID 還在不在來分辨，但那是一條跨平台的、而且
-    /// 會因為 PID 重用而給出錯誤答案的路。所以這裡不猜——呼叫端負責把這個
-    /// 可能性講出來，而不是安靜地報一個可能是錯的數字。
-    pub fn crash_audit(&self) -> Result<(i64, i64, Option<Millis>)> {
-        Ok(self.conn.query_row(
+    /// 會因為 PID 重用而給出錯誤答案的路。所以這裡不猜——[`CrashAudit::crashed`]
+    /// 收一個 `occupied` 進去，那是心跳答得出來的同一題。
+    ///
+    /// 這一支以前只讀 `sessions` 那張表，於是它答的是「活下來的那幾場」。
+    /// 兩組數字從此一起回去：計數器（撐得過刪列）和列（帶得出時間）。
+    /// 理由整段寫在 [`migration_006`]。
+    pub fn crash_audit(&self) -> Result<CrashAudit> {
+        let (rows, rows_unfinished, last_crash) = self.conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(ended_at IS NULL), 0), MAX(CASE WHEN ended_at IS NULL THEN started_at END)
              FROM sessions",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?)
+        )?;
+        // 計數器是 schema 6 才有的。`migrate` 跑完才拿得到 `Db`，所以走到這裡
+        // 一定有——除非哪天有人在 `migrate` 之前呼叫它。`COALESCE` 讓那種情況
+        // 讀到 0，而 0 配上還在的列會讓 `traceless()` 變負數然後被夾成 0，
+        // 也就是「退回上一版的行為」，不是一個假的當機。
+        let counter = |key: &str| -> Result<i64> {
+            Ok(self.conn.query_row(
+                "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?1), 0)",
+                [key],
+                |r| r.get(0),
+            )?)
+        };
+        Ok(CrashAudit {
+            started: counter("sessions_started")?,
+            ended: counter("sessions_ended")?,
+            rows,
+            rows_unfinished,
+            last_crash,
+            floor: self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'session_counts_floor')",
+                [],
+                |r| r.get(0),
+            )?,
+        })
     }
 
     /// 最後一場錄製：什麼時候開始、有沒有好好結束、以及**為什麼**結束。
@@ -2523,6 +2649,62 @@ pub struct QueryRow {
     pub source: String,
     /// 這一題有幾個出處被點開過。0 = 她給了答案，但沒有一筆值得點。
     pub clicks: i64,
+}
+
+/// 「零當機」那一格的兩組數字（見 [`Db::crash_audit`]、[`migration_006`]）。
+///
+/// 兩組，因為它們各自答得出對方答不出的一半：
+///
+/// * `started` / `ended` 是 `meta` 裡的計數器，**撐得過那幾列被刪掉**，
+///   所以「開機就死」那一種當機逃不掉。代價是它們沒有時間。
+/// * `rows` / `rows_unfinished` / `last_crash` 是 `sessions` 那張表，
+///   **帶得出時間**，代價是被 `forget`、保留期、和空場清除掃過。
+///
+/// 把它們接起來的是差額：`started - rows` 是**一場紀錄都沒留下的那幾場**，
+/// 而那個數字大於 0 本身就是一句話——她跑過，然後那幾場什麼都沒留下。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrashAudit {
+    /// 她開過幾場。單調，`forget` 和保留期都不碰。
+    pub started: i64,
+    /// 她好好收尾過幾場。
+    pub ended: i64,
+    /// 還留著紀錄的有幾場。
+    pub rows: i64,
+    /// 還留著紀錄、而且沒有 `ended_at` 的有幾場。
+    pub rows_unfinished: i64,
+    /// 還留著紀錄的那幾場裡，最後一場沒收尾的是什麼時候開始的。
+    ///
+    /// 沒有留下紀錄的那幾場**沒有時間可以報**，而且是故意的：一個「她那天
+    /// 幾點幾分當過」的時間戳，正是 `delete_empty_sessions` 刪掉那一列要拿掉
+    /// 的東西。數字撐過清空是可以的，時間不行。
+    pub last_crash: Option<Millis>,
+    /// `started` / `ended` 是不是只是一個下限（升級那天回填的，見
+    /// [`migration_006`]）。
+    pub floor: bool,
+}
+
+impl CrashAudit {
+    /// 沒有回來的那幾場。
+    ///
+    /// `occupied` 是「現在有沒有 recorder 佔著這個資料目錄」
+    /// （[`crate::heartbeat::is_occupied`]）——正在錄的那一場也還沒有
+    /// `ended_at`，長得跟當機一模一樣，而心跳分得出來。以前這一格分不出來，
+    /// 所以句子只能把兩種可能並排講出來。
+    ///
+    /// 夾在 0：她**剛剛**開起來、心跳檔寫了、`sessions` 那一列還沒 INSERT 的
+    /// 那幾百毫秒裡，`started - ended - 1` 是 -1。那不是一次當機，那是一個
+    /// 還沒開始的開始。
+    pub fn crashed(&self, occupied: bool) -> i64 {
+        (self.started - self.ended - i64::from(occupied)).max(0)
+    }
+
+    /// 跑過、而且**一列紀錄都沒留下**的那幾場。
+    ///
+    /// 大於 0 的兩種讀法，這裡分不出來，句子也不會假裝分得出來：那幾場什麼
+    /// 都沒存到（`capture.enabled = false`、開機即死），或者他按過 `forget`。
+    pub fn traceless(&self) -> i64 {
+        (self.started - self.rows).max(0)
+    }
 }
 
 /// 最後一場錄製（見 [`Db::last_session`]）。
@@ -3996,7 +4178,7 @@ mod tests {
         assert_eq!(st.sessions, 1, "那一列真的還在——這正是這條要守的前提");
         assert_eq!((st.frames, st.chunks, st.facts), (0, 0, 0), "而東西全走了");
         assert_eq!(
-            db.crash_audit().expect("crash").1,
+            db.crash_audit().expect("crash").rows_unfinished,
             1,
             "它得留著，`零當機` 那一列就是靠它才數得出當機"
         );
@@ -4858,15 +5040,248 @@ mod tests {
         )
         .expect("insert");
         db.end_session(clean).expect("end");
-        let (all, unfinished, last) = db.crash_audit().expect("audit");
-        assert_eq!((all, unfinished, last), (1, 0, None), "收好尾的不該算當機");
+        let a = db.crash_audit().expect("audit");
+        assert_eq!(
+            (a.started, a.ended, a.rows, a.rows_unfinished, a.last_crash),
+            (1, 1, 1, 0, None),
+            "收好尾的不該算當機"
+        );
+        assert_eq!(a.crashed(false), 0);
+        assert!(!a.floor, "全新的資料庫沒有被刪掉的過去，它的數字是精確的");
+
+        // **她剛剛才被開起來的那幾百毫秒**：心跳檔已經寫了（`is_occupied` 看
+        // 得到），而 `sessions` 那一列還沒 INSERT。`started - ended - 1` 在這
+        // 裡是 -1，那不是一次當機，那是一個還沒開始的開始。
+        assert_eq!(a.crashed(true), 0, "負的當機數是一個數不出來的東西");
 
         // 開了就不收尾——程序被殺、當機、拔電，都長這樣。
         db.start_session("test", "0.0.1").expect("session");
-        let (all, unfinished, last) = db.crash_audit().expect("audit");
-        assert_eq!(all, 2);
-        assert_eq!(unfinished, 1, "沒收尾的那一段沒有被算到");
-        assert!(last.is_some(), "沒收尾的話要講得出是什麼時候");
+        let a = db.crash_audit().expect("audit");
+        assert_eq!((a.started, a.ended), (2, 1));
+        assert_eq!(a.rows_unfinished, 1, "沒收尾的那一段沒有被算到");
+        assert!(a.last_crash.is_some(), "沒收尾的話要講得出是什麼時候");
+        assert_eq!(a.crashed(false), 1);
+
+        // **而她此刻正在錄的話，那一段長得一模一樣。** 心跳是唯一分得出來的
+        // 東西，所以那一題由呼叫端傳進來，不由這裡猜。
+        assert_eq!(a.crashed(true), 0, "正在錄的那一場不是一次當機");
+    }
+
+    /// 計數器只准數**事件**，不准數 SQL 語句。
+    ///
+    /// 兩道守衛，今天兩道都沒有人會撞到——`end_session` 一場只寫一次
+    /// `ended_at`，而 `start_session` 是唯一的 INSERT 且不填 `ended_at`。所以
+    /// 少了它們沒有任何現有的測試會紅，而**這種守衛正是後來會被某個看起來很
+    /// 無害的改動撞上的那一種**。
+    ///
+    /// 兩邊壞掉的方向剛好相反，而危險的是同一邊：
+    ///
+    /// * `ended` 多加一次 → `crashed()` 變負數 → 被夾成 0 → **一次真的當機
+    ///   被蓋成 ✓**。
+    /// * 生下來就帶 `ended_at` 的那一列沒被數到 → **憑空長出一次當機**。
+    ///
+    /// 憑空長出來的 ✓ 比憑空長出來的 ✗ 難發現得多，因為沒有人會去查一個好
+    /// 消息。
+    #[test]
+    fn the_counters_count_recordings_not_update_statements() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        db.insert_frame(s, &frame_with_text(now_ms(), "a", "b", &["有"]), None, 0)
+            .expect("insert");
+        db.end_session(s).expect("end");
+        let base = db.crash_audit().expect("audit");
+        assert_eq!((base.started, base.ended), (1, 1));
+
+        // 「改一下收尾時間」——一句看起來無害的 UPDATE。
+        db.conn
+            .execute("UPDATE sessions SET ended_at = ended_at + 1", [])
+            .expect("再寫一次收尾時間");
+        assert_eq!(
+            db.crash_audit().expect("audit").ended,
+            base.ended,
+            "同一場收尾兩次還是一場"
+        );
+
+        // 「補一場已經結束的錄製」——一句看起來無害的 INSERT。
+        db.conn
+            .execute(
+                "INSERT INTO sessions(started_at, ended_at, app_version, platform) \
+                 VALUES(1, 2, 'test', 'test')",
+                [],
+            )
+            .expect("補一場已經結束的錄製");
+        let after = db.crash_audit().expect("audit");
+        assert_eq!(
+            (after.started, after.ended),
+            (base.started + 1, base.ended + 1),
+            "生下來就結束的那一場，兩邊都要跟著動"
+        );
+        assert_eq!(after.crashed(false), 0, "它好好結束了，不是一次當機");
+    }
+
+    /// **最該被算進去的那一種當機，剛好就是會把自己的證據刪掉的那一種。**
+    ///
+    /// 「開起來、還沒讀到第一張畫面就死掉」的那一場沒有內容，於是下一次
+    /// `prune` 連它的紀錄一起刪掉（`retention::delete_empty_sessions`，那是
+    /// #52 要的行為，那一列是「他那天下午在電腦前」的證明）。分子和分母同時
+    /// 少一，於是她死得越早，`零當機` 那一格讀起來越乾淨——一台卡在開機當機
+    /// 迴圈裡的機器會收斂到 ✓。
+    ///
+    /// 實測過的原始數字（六場：一場正常＋五場開機即死）：`prune` 之前是
+    /// 「6 段裡有 5 段沒收尾」，之後是「2 段裡有 1 段」。
+    #[test]
+    fn a_crash_that_stored_nothing_still_counts_after_its_row_is_swept() {
+        let mut db = test_db();
+
+        // 一場好的，讓資料庫不是空的。**時間要用現在**：`frame_with_text(1_000,
+        // ..)` 那個時間是 1970 年，`prune` 會因為過了保留期把整列刪掉，於是這
+        // 一場也變成空的、也被掃走——而那樣一來 `traceless()` 和
+        // `started - ended` 剛好會相等，這條測試就變成「兩個都對才過」而不是
+        // 「只有對的那個才過」。M-C 那個突變活下來，活的就是這裡。
+        let good = db.start_session("test", "0.0.1").expect("session");
+        db.insert_frame(
+            good,
+            &frame_with_text(now_ms(), "a", "b", &["有東西"]),
+            None,
+            0,
+        )
+        .expect("insert");
+        db.end_session(good).expect("end");
+
+        // 五場「開起來就死在第一張畫面之前」。
+        for _ in 0..5 {
+            db.start_session("test", "0.0.1").expect("session");
+        }
+
+        let before = db.crash_audit().expect("audit");
+        assert_eq!(before.rows, 6, "掃之前六列都在");
+        assert_eq!(before.crashed(false), 5);
+
+        // `prune` 掃過。空的那幾場的紀錄本身消失——最新的那一場留著，因為
+        // 它可能正是現在正在錄的那一場。
+        db.prune(now_ms(), &crate::config::RetentionConfig::default(), None)
+            .expect("prune");
+
+        let after = db.crash_audit().expect("audit");
+        assert!(
+            after.rows < before.rows,
+            "前提沒了這條就沒有意義：那幾列真的要被掃掉（{} → {}）",
+            before.rows,
+            after.rows
+        );
+        assert_eq!(
+            after.crashed(false),
+            5,
+            "五次當機不可以因為它們什麼都沒存到就消失"
+        );
+        assert_eq!(after.rows, 2, "有內容的那一場和最新的那一場都要留著");
+        assert_eq!(
+            after.traceless(),
+            before.rows - after.rows,
+            "被掃掉幾列，就有幾場沒有留下紀錄"
+        );
+        assert_ne!(
+            after.traceless(),
+            after.crashed(false),
+            "這兩個數字要真的分開：相等的話，把其中一個寫成另一個也照樣會過"
+        );
+        // 時間只涵蓋還留著紀錄的那幾場，而且是故意的：一個「她那天幾點幾分
+        // 當過」的時間戳正是那一列被刪掉要拿掉的東西。
+        assert!(
+            after.rows_unfinished < after.crashed(false),
+            "報得出時間的比真的當機的少，句子要講得出這件事"
+        );
+    }
+
+    /// 升級那天回填的數字是一個**下限**，而它要說得出自己是下限。
+    ///
+    /// 一顆跑了三個月、被 `prune` 掃過幾十次的資料庫，升上來的那一刻真實的
+    /// 「開過幾場」已經不可考。回填只數得到還在的列。alpha.33 那條規矩的同一
+    /// 條：回填出來的數字是一個猜測穿著數字的衣服。
+    #[test]
+    fn an_upgraded_database_does_not_get_to_speak_for_the_sessions_it_cannot_see() {
+        let path = migrate_tmp("floor").join("sister.db");
+        {
+            // schema 5 的樣子：有紀錄、有 `ever_recorded`，沒有計數器。
+            let mut db = Db::open(&path).expect("open");
+            let s = db.start_session("test", "0.0.1").expect("session");
+            db.insert_frame(s, &frame_with_text(1_000, "a", "b", &["有"]), None, 0)
+                .expect("insert");
+            db.end_session(s).expect("end");
+        }
+        {
+            let conn = Connection::open(&path).expect("raw");
+            conn.execute_batch(
+                "DROP TRIGGER sessions_started_count;
+                 DROP TRIGGER sessions_ended_count;
+                 DROP TRIGGER sessions_born_ended_count;
+                 DELETE FROM meta WHERE key LIKE 'session%';",
+            )
+            .expect("回到 schema 5 的樣子");
+            conn.pragma_update(None, "user_version", 5).expect("stamp");
+        }
+
+        let db = Db::open(&path).expect("reopen");
+        let a = db.crash_audit().expect("audit");
+        assert!(
+            a.floor,
+            "升上來的那一顆不知道自己被刪過幾場，它就不可以說『全部』"
+        );
+        assert_eq!((a.started, a.ended), (1, 1), "數得到的那一場照樣要數到");
+        assert_eq!(a.crashed(false), 0);
+
+        // 全新的那一顆不按那個旗標——它的 0 是精確的 0。
+        assert!(
+            !Db::open(&migrate_tmp("floor-fresh").join("sister.db"))
+                .expect("fresh")
+                .crash_audit()
+                .expect("audit")
+                .floor
+        );
+
+        // 而**升級之後**開的那幾場照樣是精確的：旗標只描述回填的那一段。
+        let mut db = db;
+        db.start_session("test", "0.0.1").expect("session");
+        assert_eq!(db.crash_audit().expect("audit").crashed(false), 1);
+        drop(db);
+
+        // **這一段重跑一次，不可以替一顆數得準的資料庫貼上「我數不準」。**
+        //
+        // 版號蓋到一半被砍（alpha.32 那個一毫秒的窗口，`kill -9` 掃 189 次中
+        // 1 次）然後自我修復，走的就是這條路：006 的批次已經跑完、計數器已經
+        // 是真的，版號還停在 5。旗標那一句要問得出這件事——問不出來的話，這個
+        // 假話是**修法自己造出來的**，而那正是這一批 bug 前後犯了三次的形狀。
+        let counters = |p: &std::path::Path| -> (i64, i64) {
+            let c = Connection::open(p).expect("raw");
+            let g = |k: &str| {
+                c.query_row(
+                    "SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?1",
+                    [k],
+                    |r| r.get::<_, i64>(0),
+                )
+                .expect(k)
+            };
+            (g("sessions_started"), g("sessions_ended"))
+        };
+        let exact = migrate_tmp("floor-rerun").join("sister.db");
+        {
+            let mut fresh = Db::open(&exact).expect("fresh");
+            let s = fresh.start_session("test", "0.0.1").expect("session");
+            fresh.end_session(s).expect("end");
+            fresh.start_session("test", "0.0.1").expect("session");
+        }
+        let was = counters(&exact);
+        Connection::open(&exact)
+            .expect("raw")
+            .pragma_update(None, "user_version", 5)
+            .expect("把版號走回去，結構留在新的");
+
+        let again = Db::open(&exact).expect("self-heal");
+        assert_eq!(counters(&exact), was, "重跑不可以把真的計數蓋掉");
+        assert!(
+            !again.crash_audit().expect("audit").floor,
+            "它一場都沒漏數過，不准說自己漏數了"
+        );
     }
 
     /// 空殼跟安靜長得不一樣，這個檢查必須認得出差別。

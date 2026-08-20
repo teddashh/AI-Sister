@@ -393,6 +393,70 @@ jobs:
             fi
           done
 
+          # ── fixture 6：**開機就死的那五次，把自己的證據一起帶走了。** ──
+          #
+          # 「零當機」數的是 `sessions` 那張表，而那張表從 alpha.30 開始會刪
+          # 自己的列：一場「一列內容都沒存到」的錄製，收工時連紀錄一起走
+          # （那是 #52 要的，那一列是「他那天下午在電腦前」的證明）。於是最該
+          # 被算進去的那一種當機——開起來、還沒讀到第一張畫面就死掉——剛好就是
+          # 會把自己刪掉的那一種。分子和分母同時少一，**她死得越早，這一格讀
+          # 起來越乾淨**，而一台卡在開機當機迴圈裡的機器會收斂到 ✓。
+          #
+          # 這一顆是 doctor 唯一驗得到的形狀：計數器和列必須在 `prune` 那一刀
+          # 前後說同一件事。單元測試釘得住數字，釘不住印出來的那兩行句子。
+          C="$B --data-dir ./ci-crashloop"
+          $C replay scenarios/bill-lookup.json --interval-ms 500 > /dev/null
+          python3 - <<'EOF'
+          import sqlite3, time
+          now = int(time.time() * 1000)
+          c = sqlite3.connect('./ci-crashloop/sister.db')
+          # 五場「開起來就死在第一張畫面之前」。時間往前排，免得跟上面那場好
+          # 的搶「最新的那一場」——`delete_empty_sessions` 會放過最新的那一列
+          # （它可能正在錄），那樣就只掃得掉四場，這個 fixture 的數字會對不上。
+          for k in range(5):
+              t = now - (600_000 - k * 1000)
+              sid = c.execute(
+                  "INSERT INTO sessions(started_at, app_version, platform)"
+                  " VALUES (?, 'ci', 'linux/replay')", (t,)).lastrowid
+              c.execute(
+                  "INSERT INTO system_events(session_id, ts, kind, detail)"
+                  " VALUES (?, ?, 'session_start', NULL)", (sid, t))
+          c.commit()
+          EOF
+          $C doctor > crash-before.txt
+          $C prune > /dev/null
+          $C doctor > crash-after.txt
+          # 前提：那幾列真的要被掃掉。掃不掉的話下面幾條在驗一個不存在的狀態。
+          python3 -c "
+          import sqlite3, sys
+          n = sqlite3.connect('./ci-crashloop/sister.db').execute(
+              'SELECT COUNT(*) FROM sessions').fetchone()[0]
+          sys.exit(0 if n < 6 else 1)" \
+            || { echo "::error::[開機就死] 那幾列沒被掃掉——這個 fixture 沒驗到它要驗的東西"; exit 1; }
+          # **同一個數字要撐過那一刀。** 掃之前說 5 段沒回來，掃之後還是 5 段。
+          for x in crash-before.txt crash-after.txt; do
+            grep -qE '零當機.*有 5 段沒有回來' "$x" \
+              || { echo "::error::[開機就死] $x 的當機數跟著紀錄一起被刪掉了"; grep 零當機 "$x"; exit 1; }
+            # 一台開機當機五次的機器不准拿到打勾。
+            if grep -qE '零當機 +✓' "$x"; then
+              echo "::error::[開機就死] $x 對一台當機五次的機器畫了 ✓"; exit 1
+            fi
+          done
+          # 掃完之後報得出時間的只剩一場，那句話就不可以再講成全部。同理
+          # 「上一次錄製」指的是**還留著紀錄的**那一場，不是真的最後一場。
+          for want in '連紀錄都沒留下' '還留著紀錄的最後一場'; do
+            grep -q "$want" crash-after.txt \
+              || { echo "::error::[開機就死] 掃完之後沒說出「$want」"; cat crash-after.txt; exit 1; }
+          done
+          # 反面：掃之前一列都沒少，那兩句補充就不准出現——不然它們會變成每台
+          # 機器上都有的裝飾，然後沒有人再讀它。
+          for bad in '連紀錄都沒留下' '還留著紀錄的最後一場'; do
+            if grep -q "$bad" crash-before.txt; then
+              echo "::error::[開機就死] 六列都還在，crash-before 卻說有東西不見了：$bad"
+              exit 1
+            fi
+          done
+
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
       # 而讀的人只會以為是自己裝錯了。這一步不是另外寫一份一樣的測試（兩份
