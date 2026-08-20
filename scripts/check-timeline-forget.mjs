@@ -19,10 +19,11 @@
 
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fakeEl, loader, read } from "./fake-dom.mjs";
+import { domOf, fakeEl, loader, read, watchNonsense } from "./fake-dom.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui");
 const SRC = process.argv[2] ?? join(UI, "timeline.js");
+const HTML = read(join(UI, "timeline.html"));
 const boot = loader(read(SRC));
 
 const DAY = 86_400_000;
@@ -34,17 +35,43 @@ const DAYS = [
   { start_ts: D1, chunks: 40, first_ts: D1 + 3_600_000, last_ts: D1 + 36_000_000 },
 ];
 const MOMENTS = { moments: [], pauses: [], truncated: false };
-const PREVIEW = { chunks: 3, facts: 2, frames: 5, images: 5, queries: 0, failed: [], bytes: 0 };
+
+/**
+ * `Erasure` 的形狀，照 main.rs 那個 struct **一欄一欄**抄的。
+ *
+ * 第一版只寫了它「看起來會用到」的那幾欄，而且把 `image_bytes` 寫成 `bytes`。
+ * 於是畫面上印出「5 張畫面（NaN MB）」，而那條斷言問的是「這句話裡有沒有
+ * 『刪掉了』」——綠的。`missing`、`sessions`、`sessions_left`、`shell_beat`
+ * 整個沒送，所以 `ghosts()` 和 `leftover()`（`timeline.js` 裡花最多字論證的
+ * 那一段）從頭到尾一行都沒跑過。
+ *
+ * 少抄一欄不會有人報錯，這就是為什麼要照著抄，而不是照著「用得到的」抄。
+ */
+function erasure(over = {}) {
+  return {
+    chunks: 3,
+    facts: 2,
+    frames: 5,
+    images: 5,
+    image_bytes: 5 * 148_000,
+    events: 4,
+    queries: 0,
+    sessions: 0,
+    failed: [],
+    missing: 0,
+    // 預覽算不出「刪完之後」——`null` 是「沒問過」，不是 0。
+    sessions_left: null,
+    shell_beat: "gone",
+    ...over,
+  };
+}
+const PREVIEW = erasure();
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
 /** `table` 是 `{ 指令: 值 / Error / 函式 }`；沒列到的照預設回。 */
 async function open(table = {}) {
-  const nodes = new Map();
-  const node = (sel) => {
-    if (!nodes.has(sel)) nodes.set(sel, fakeEl());
-    return nodes.get(sel);
-  };
+  const node = domOf(HTML);
   const calls = [];
 
   globalThis.document = {
@@ -62,7 +89,8 @@ async function open(table = {}) {
     timeline_days: DAYS,
     timeline_moments: MOMENTS,
     forget_preview: PREVIEW,
-    forget_range: PREVIEW,
+    // 真的刪完那次才答得出「刪完之後還剩什麼」。
+    forget_range: erasure({ sessions_left: 0 }),
     has_ever_recorded: true,
     has_ever_stored: true,
   };
@@ -78,6 +106,7 @@ async function open(table = {}) {
     },
   };
 
+  const nonsense = watchNonsense();
   await boot();
   await tick();
   const forget = node("[data-forget]");
@@ -85,6 +114,7 @@ async function open(table = {}) {
     node,
     calls,
     forget,
+    nonsense,
     label: () => forget.textContent,
     armed: () => forget.className === "danger",
     say: () => node("[data-say]").textContent,
@@ -133,6 +163,10 @@ console.log("① 兩段式：第一下只問，第二下才刪");
   check("第二下才真的刪", p.calls.includes("forget_range"), p.calls);
   check("刪完退回預覽那一段", !p.armed(), p.forget.className);
   check("而且說得出刪掉了什麼", p.say().includes("刪掉了"), p.say());
+  // 這一條抓的是**這支測試自己**：`bytes` / `image_bytes` 抄錯一個字的時候，
+  // 上面那句照樣有「刪掉了」，只是那句話裡多了一個「NaN MB」。
+  check("那句話裡沒有 NaN / undefined", p.nonsense().length === 0, p.nonsense());
+  check("MB 是算得出來的數字", /（0\.7 MB）/.test(p.say()), p.say());
 }
 
 console.log("② 換一天要退回第一段");
@@ -186,6 +220,47 @@ console.log("④ 刪成功了，但刪完那次重讀清單炸了");
     p.sub().includes("上一次讀到"),
     p.sub(),
   );
+}
+
+console.log("⑤ 開頁就讀不到清單——右邊根本沒有「上一次讀到的那一份」");
+{
+  // ④ 驗的是 `forget()` 那個呼叫端。這一條驗**更常走到的**那個：檔案最底下的
+  // `void load()`。同一句話在這兩條路上不能是同一句。
+  const p = await open({
+    timeline_days: new Error("讀不到日期清單：database is locked"),
+  });
+  check("左邊那行是原因", p.node("[data-rail-say]").textContent.includes("locked"), p.node("[data-rail-say]").textContent);
+  check(
+    "不可以說「右邊列的是上一次讀到的那一份」——右邊一筆都沒有",
+    !p.sub().includes("上一次讀到"),
+    p.sub(),
+  );
+  check("要說得出這一頁現在是空的", p.sub().includes("空的"), p.sub());
+  check("右邊真的是空的", p.node("[data-moments]").childElementCount === 0, p.node("[data-moments]").childElementCount);
+}
+
+console.log("⑥ 那份預覽要對得起帳：說不見的、說留下來的，各講各的");
+{
+  // 這三欄是 `timeline.js` 裡花最多字論證的那一段，而在這一版之前，這支測試
+  // 一欄都沒送過——`ghosts()` 和 `leftover()` 從頭到尾沒跑過一行。
+  const p = await open({
+    forget_preview: erasure({ missing: 12 }),
+    forget_range: erasure({ missing: 12, sessions: 2, sessions_left: 1, shell_beat: "booting" }),
+  });
+  await p.press();
+  check("預覽就說得出那 12 列的圖早就不在磁碟上", p.say().includes("12 列"), p.say());
+  await p.press();
+  check("刪完那句也講同一件事", p.say().includes("12 列"), p.say());
+  check("「錄製的紀錄」自己算一項", p.say().includes("2 場錄製的紀錄"), p.say());
+  // `shell_beat` 三種的下一步不一樣，而它上一版是一個布林——分不出來的時候
+  // 那句話會變成「她正在錄，**或**正在開機」，而開機那幾分鐘裡它是假的。
+  check("留下來那一列說得出是誰的", p.say().includes("正在起來"), p.say());
+  check(
+    "而且不可以說成「她此刻正在錄」——那一列不是它的",
+    !p.say().includes("她此刻正在錄"),
+    p.say(),
+  );
+  check("整段話裡沒有 NaN / undefined", p.nonsense().length === 0, p.nonsense());
 }
 
 console.log("");

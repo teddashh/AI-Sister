@@ -24,7 +24,7 @@
 
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fakeEl, hiddenIn, loader, read } from "./fake-dom.mjs";
+import { domOf, fakeDocument, fakeEl, hiddenIn, loader, read, watchNonsense } from "./fake-dom.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui");
 const SRC = process.argv[2] ?? join(UI, "frame.js");
@@ -87,20 +87,13 @@ function fakeImg(decodes) {
 }
 
 async function open({ search = "?id=57", view = frameView(), fail = null, decodes = () => true } = {}) {
-  const nodes = new Map();
   const asked = [];
-  const node = (sel) => {
-    if (!nodes.has(sel)) {
-      const el = sel === "[data-shot]" ? fakeImg(decodes) : fakeEl();
-      // **只在生出來的時候套一次。** 每次查詢都套的話，這個查詢函式會把畫面
-      // 洗回開場狀態——而斷言正是透過它讀畫面的，於是每一條都在看開場。
-      el.hidden = hiddenIn(HTML, sel);
-      nodes.set(sel, el);
-    }
-    return nodes.get(sel);
-  };
+  // 開場的 `hidden` 從 frame.html 讀、HTML 上沒有的選擇器當場算前提不成立，
+  // 兩條都在 `domOf` 裡。這一頁多要一件事：那個 `<img>` 要**decode 得起來或
+  // 不起來**，所以把生元素的那一步換掉。
+  const node = domOf(HTML, (sel) => (sel === "[data-shot]" ? fakeImg(decodes) : fakeEl()));
 
-  globalThis.document = { querySelector: node, querySelectorAll: () => [], body: fakeEl() };
+  globalThis.document = fakeDocument(node);
   globalThis.location = { search };
   globalThis.__TAURI__ = {
     core: {
@@ -112,10 +105,12 @@ async function open({ search = "?id=57", view = frameView(), fail = null, decode
     },
   };
 
+  const nonsense = watchNonsense();
   await boot();
   await tick();
   return {
     asked,
+    nonsense,
     when: () => node("[data-when]").textContent,
     where: () => node("[data-where]").textContent,
     unknown: () => node("[data-where]").classList.contains("unknown"),
@@ -132,6 +127,10 @@ console.log("① 一般狀態：圖、時間、出處都在");
   check("時間寫出來了", p.when() !== "", p.when());
   check("出處三段都在", p.where() === "chrome.exe — 帳單查詢 — https://example.com/bill", p.where());
   check("而且不是那句「沒有留下」", !p.unknown(), p.unknown());
+  // `frameView()` 少抄 `ts` 的時候，`when()` 那幾個 `getFullYear()` 全是 `NaN`，
+  // 時間那一格印出「NaN-NaN-NaN NaN:NaN」——而上面那條斷言問的是 `!== ""`，
+  // 綠的。見 fake-dom.mjs 的 `watchNonsense`。
+  check("表頭上沒有 NaN / undefined", p.nonsense().length === 0, p.nonsense());
 }
 
 console.log("② 圖留下了，但當時問不出是哪個視窗（鎖定畫面、UAC）");

@@ -130,6 +130,33 @@ let wakeFailed = null;
 let notice = null;
 
 /**
+ * 從這個視窗以外發生了一件事，所以他上一下按了什麼沒成那句話到此為止。
+ *
+ * [`notice`] 講的是「他手指剛剛按下去的那一下」，所以它的死期是**下一件事發生**
+ * ——不是五秒後（那是 alpha.38 修掉的那個 bug），也不是永遠。四個按下去的地方
+ * 本來就自己清，漏掉的是**從這個視窗以外**發生的那幾件：系統匣的開始記錄、
+ * 系統匣的暫停、她自己停掉。那幾件在這裡是事件不是點擊，所以沒有人替它們清。
+ *
+ * 漏掉的代價有兩種，兩種都是「每一行都是真的，湊起來在說謊」：
+ *
+ * 一、`paint()` 讀的是 `notice ?? (wakeFailed ?? asleepDetail())`。早上九點問問題
+ *     失敗留下的那句「資料庫打不開」，會把九點五分從系統匣按開始記錄失敗的那句
+ *     「第一張同意書還沒簽」**整個擋掉**——而 `recorder-failed` 那個 listener 的
+ *     註解自己寫著，它存在的唯一理由就是這句話沒有別的地方可去。後端還特地把
+ *     視窗叫到他面前，讓他看一句早上的舊話。
+ *
+ * 二、他在視窗裡按暫停，切不動（「找不到資料目錄，暫停鍵沒有作用」）；再從系統
+ *     匣按暫停，成功了。畫面於是是「已暫停，沒有在看／找不到資料目錄，暫停鍵
+ *     沒有作用」——兩行都曾經是真的，讀起來是「暫停鍵壞了」，而她正暫停著。
+ *
+ * 只在狀態**真的變了**的時候清：那五秒一次的輪詢每次都用同一個值呼叫
+ * `setPaused`／`setRecording`，跟著清的話就變回 alpha.38 那個 bug 了。
+ */
+function overtakenByEvents() {
+  notice = null;
+}
+
+/**
  * 這一題翻很久了（`null` = 沒有／已經回來了）。見 [`SLOW_MS`]。
  *
  * 一樣是被 `paint()` 蓋掉的那一種：它以前直接寫 `stateLine.textContent`，於是
@@ -214,7 +241,12 @@ function setState(next) {
 }
 
 function setPaused(next) {
+  const was = paused;
   paused = next === true;
+  // 從系統匣（或熱鍵）切過來的那一下，也算「下一件事發生了」。見
+  // [`overtakenByEvents`]——這一格漏掉的時候，「暫停鍵沒有作用」會掛在
+  // 一個已經暫停了的字母人底下。
+  if (was !== paused) overtakenByEvents();
   if (pauseButton) {
     pauseButton.textContent = paused ? "▶" : "⏸";
     pauseButton.title = paused ? "繼續記錄" : "暫停記錄";
@@ -233,8 +265,12 @@ function setPaused(next) {
  */
 function setRecording(next) {
   const was = recording;
+  const wasBooting = booting;
   recording = next === "recording";
   booting = next === "booting";
+  // 她從別的地方被開起來、或是自己停掉了：一樣是「下一件事發生了」。見
+  // [`overtakenByEvents`]。
+  if (was !== recording || wasBooting !== booting) overtakenByEvents();
   // 她起來了（或是從別的地方被開起來的），那個「正在叫她」的等待就結束了，
   // 而「上一次叫不起來」也就過期了——她現在人在這裡，那句話再留著只會嚇人。
   //
@@ -500,6 +536,10 @@ globalThis.__TAURI__?.event
  */
 globalThis.__TAURI__?.event
   ?.listen?.("recorder-failed", (event) => {
+    // **先把上一句清掉。** `paint()` 讀的是 `notice ?? (wakeFailed ?? …)`，所以
+    // 少了這一行，一句早上留下的 `notice` 會把這句話整個擋住——而後端剛剛才特地
+    // 把視窗叫到他面前，就是為了讓他看這一句。見 [`overtakenByEvents`]。
+    overtakenByEvents();
     wakeFailed = String(event.payload ?? "");
     starting = false;
     paint();
@@ -509,6 +549,14 @@ globalThis.__TAURI__?.event
 // ---------- 答案 ----------
 
 const hitList = document.querySelector("[data-hits]");
+
+/**
+ * 底下那個 `<ul>` 現在裝的是不是**一份答案**（而不是一句錯誤，或者什麼都沒有）。
+ *
+ * 只有一個讀者：問題答不成的時候那句「底下原本那幾筆是上一題的，先收起來了」。
+ * 那後半句是在描述它剛剛做掉的事，而那件事不一定發生過——見 [`ask`] 的 catch。
+ */
+let showingAnswer = false;
 
 /**
  * 把 FTS 的片段標記（`[` `]`）變成 `<mark>`。
@@ -925,6 +973,7 @@ function renderHits(
 
   hitList.hidden = false;
   document.body.classList.add("has-hits");
+  showingAnswer = true;
 }
 
 /**
@@ -957,7 +1006,12 @@ async function ask() {
   slowNote = null;
   setState("thinking");
   const slow = setTimeout(() => {
-    if (state === "thinking") {
+    // **`state === "thinking"` 不夠。** 他多按了幾次 Enter 的話，第一題的計時器
+    // 會在第二題送出之後才響，而那時候 `state` 還是 `thinking`（是**第二題**
+    // 的）——於是一句「還在翻…（第一次打開資料庫要先整理索引）」蓋在一個
+    // 一百毫秒前才送出去的問題上。底下那個 `finally` 為了同一件事已經多問了
+    // 一次 `mine === asking`；這裡是它漏掉的兄弟。
+    if (mine === asking && state === "thinking") {
       slowNote = "還在翻…（第一次打開資料庫要先整理索引）";
       paint();
     }
@@ -996,8 +1050,15 @@ async function ask() {
     // 答錯了都不知道——這比一片空白糟得多。
     const failed = document.createElement("li");
     failed.className = "hits-empty";
-    failed.textContent = "這一題我沒答成——底下原本那幾筆是上一題的，先收起來了。";
+    // 後半句是在描述**它剛剛做掉的事**，而那件事不一定發生過。第一次問問題的
+    // 人底下從來沒有東西；連著失敗第二次的人底下躺的是上一次的同一句錯誤。
+    // 兩種都被請去看一個不存在的東西——而底下那段註解自己寫著這條路「專挑新
+    // 使用者」，也就是說這一句在它最重要的那台機器上永遠是假的。
+    failed.textContent = showingAnswer
+      ? "這一題我沒答成——底下原本那幾筆是上一題的，先收起來了。"
+      : "這一題我沒答成。";
     hitList.replaceChildren(failed);
+    showingAnswer = false;
     // **那個 `<ul>` 開場是 hidden 的**（`index.html` 上寫死，`styles.css` 還
     // 補了一條 `.hits[hidden] { display: none }`），而唯一會拿掉它的是
     // `renderHits`。少了下面這兩行，第一題就失敗的人**什麼都看不到**：這一句

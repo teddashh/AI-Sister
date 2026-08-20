@@ -20,10 +20,11 @@
 
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fakeEl, loader, read } from "./fake-dom.mjs";
+import { domOf, fakeDocument, loader, read, watchNonsense } from "./fake-dom.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui");
 const SRC = process.argv[2] ?? join(UI, "onboarding.js");
+const HTML = read(join(UI, "onboarding.html"));
 const boot = loader(read(SRC));
 
 const KEYS = ["local-recording", "cloud-reading", "frame-storage"];
@@ -51,20 +52,12 @@ function view(granted = [true, false, true]) {
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
 async function open({ onRead, onSet } = {}) {
-  const nodes = new Map();
-  const node = (sel) => {
-    if (!nodes.has(sel)) nodes.set(sel, fakeEl());
-    return nodes.get(sel);
-  };
+  // 開場的 `hidden` 照 onboarding.html、HTML 上沒有的選擇器當場算前提不成立。
+  // 自己寫 `nodes.get(sel) ?? fakeEl()` 的版本會替一顆被刪掉的按鈕生一個出來。
+  const node = domOf(HTML);
   let state = [true, false, true];
 
-  globalThis.document = {
-    querySelector: node,
-    querySelectorAll: () => [],
-    createElement: (tag) => fakeEl(tag),
-    addEventListener() {},
-    body: fakeEl(),
-  };
+  globalThis.document = fakeDocument(node);
   globalThis.location = { search: "" };
   globalThis.addEventListener = () => {};
   globalThis.removeEventListener = () => {};
@@ -87,10 +80,12 @@ async function open({ onRead, onSet } = {}) {
     window: { getCurrentWindow: () => ({ close() {} }) },
   };
 
+  const nonsense = watchNonsense();
   await boot();
   await tick();
   return {
     node,
+    nonsense,
     disk: () => state,
     say: () => node("[data-say]").textContent,
     bad: () => node("[data-say]").classList.contains("bad"),
@@ -124,6 +119,9 @@ console.log("① 一般狀態：勾勾照著檔案畫");
   const p = await open();
   const boxes = p.boxes();
   check("三張都在", boxes.length === 3, boxes.length);
+  // `view()` 少抄 main.rs 那邊一欄的時候，卡片上那句話會印出 undefined，
+  // 而底下每一條問的都是勾勾的狀態——全綠。見 fake-dom.mjs 的 `watchNonsense`。
+  check("卡片上沒有 NaN / undefined", p.nonsense().length === 0, p.nonsense());
   check(
     "勾的狀態和檔案一致",
     boxes.map((b) => b.checked).join() === p.disk().join(),

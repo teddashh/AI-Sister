@@ -23,7 +23,7 @@
 
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fakeEl, hiddenIn, loader, read } from "./fake-dom.mjs";
+import { domOf, fakeDocument, hiddenIn, loader, read, watchNonsense } from "./fake-dom.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui");
 const SRC = process.argv[2] ?? join(UI, "app.js");
@@ -47,34 +47,88 @@ if (!hiddenInHtml("[data-hits]")) {
 const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * `Answer` 的形狀，照 main.rs 那個 struct 抄的。
+ *
+ * 第一版寫的是 `{ hits: [], kind: "none", answers: [], blind: [], searched: [] }`
+ * ——三個欄位的型別是錯的，而且 `"none"` 不是真的 kind（只有 `"keywords"` 和
+ * `"recent"`）。`searched` 真的是 `Option<String>`，而 `[]` 在 JS 裡是 truthy，
+ * 所以產品當場印出「我拿去比對的是「」——那是從你打的字黏出來的，不是一個
+ * 詞」：一句只在她黏出非詞的時候才該出現的話，被一個空陣列叫了出來。沒有一條
+ * 斷言問過它。
+ */
+function answer(over = {}) {
+  return {
+    kind: "keywords",
+    searched: null,
+    query_id: 7,
+    answers: [],
+    hits: [],
+    truncated: false,
+    answers_truncated: false,
+    blind: null,
+    ...over,
+  };
+}
+
+/**
+ * 一筆命中，照 main.rs 的 `Hit` 抄的。
+ *
+ * 到這一版為止沒有一個 case 送過真的命中（全是 `hits: []`），所以
+ * `renderSnippet` 一次都沒跑過——而它第一行就在用 `document.createTextNode`，
+ * 那是假 DOM 一直沒有的東西。少了它那個 TypeError 被 `ask()` 的 catch 接住，
+ * 「答成了」於是走進「答不成」那條路。見 fake-dom.mjs 的 `fakeDocument`。
+ */
+function hit(over = {}) {
+  return {
+    chunk_id: 31,
+    ts: 1_755_000_000_000,
+    text: "客服專線 0800-080-123",
+    snippet: "客服[專線] 0800-080-123",
+    app: "chrome.exe",
+    title: "帳單查詢",
+    url: "https://example.com/bill",
+    frame_id: null,
+    ...over,
+  };
+}
+
+/** `Blind` 的形狀，同上。後端只在一筆都沒找到的時候送。 */
+function blind(over = {}) {
+  return {
+    chunks: 0,
+    ocr_is_dead: false,
+    frames: 0,
+    ever_recorded: false,
+    ever_stored: false,
+    excluded: [],
+    paused_episodes: 0,
+    paused_ms: 0,
+    paused_open: false,
+    paused_now: false,
+    paused_truncated: 0,
+    scan_horizon_days: null,
+    recording_now: false,
+    booting_now: false,
+    ...over,
+  };
+}
+
+/**
  * 開一次字母人。`invoke` 收一張 `{ 指令: 回傳值或會丟出來的 Error }` 表；
  * 沒列到的指令回 `null`。函式值會被呼叫（要延遲、要丟例外的用這個）。
  */
 async function open(table = {}) {
-  const nodes = new Map();
-  const node = (sel) => {
-    if (!nodes.has(sel)) {
-      const el = fakeEl();
-      el.hidden = hiddenInHtml(sel);
-      nodes.set(sel, el);
-    }
-    return nodes.get(sel);
-  };
+  // `domOf` 只生得出 index.html 上真的有的東西——見 fake-dom.mjs 開頭那段。
+  const node = domOf(HTML);
   const listeners = new Map();
 
-  globalThis.document = {
-    querySelector: node,
-    querySelectorAll: () => [],
-    createElement: () => fakeEl(),
-    addEventListener() {},
-    body: fakeEl(),
-    documentElement: fakeEl(),
+  globalThis.document = fakeDocument(node, {
     // **要是 visible。** 開場那一段對 `recording` 寫死的是 `"recording"`，
     // 只有 `updatePollGate()` 看到視窗是開著的才會去問一次磁碟；hidden 的話
     // 這一頁會停在「她在錄」，而灰掉那條路上的話（`wakeFailed`）就永遠不會
     // 被畫出來——測試會綠，但綠的理由是它根本沒走到那裡。
     visibilityState: "visible",
-  };
+  });
   globalThis.location = { search: "" };
   globalThis.addEventListener = () => {};
   globalThis.removeEventListener = () => {};
@@ -97,12 +151,22 @@ async function open(table = {}) {
     },
   };
 
+  const nonsense = watchNonsense();
   await boot();
   await tick();
   return {
     node,
+    nonsense,
     line: () => node("[data-state-line]").textContent,
     hits: () => node("[data-hits]"),
+    hitTexts: () => node("[data-hits]").children.map((c) => c.textContent),
+    /** 從這個視窗**以外**發生的事：系統匣的按鈕、熱鍵、她自己停掉。 */
+    async fromOutside(name, payload) {
+      const cb = listeners.get(name);
+      if (!cb) throw new Error(`沒有人在聽 ${name}——這條測試的前提沒了`);
+      cb({ payload });
+      await tick();
+    },
     async click(sel) {
       for (const fn of node(sel).handlers.click ?? []) fn();
       await tick();
@@ -174,7 +238,7 @@ console.log("③ 這一題翻很久（SLOW_MS）");
 {
   const p = await open({
     // 5 秒才回，比 SLOW_MS（4 秒）久。
-    ask: () => new Promise((r) => setTimeout(() => r({ hits: [], kind: "none" }), 5000)),
+    ask: () => new Promise((r) => setTimeout(() => r(answer()), 5000)),
     recording_state: "recording",
   });
   void p.type("三天前那通電話");
@@ -214,13 +278,110 @@ console.log("⑥ 下一個動作要蓋掉上一次那句話");
 {
   const p = await open({
     toggle_pause: new Error("找不到資料目錄，暫停鍵沒有作用"),
-    ask: { hits: [], kind: "none", answers: [], blind: [], searched: [] },
+    ask: answer(),
     recording_state: "recording",
   });
   await p.click("#pause");
   check("先有那句話", p.line().includes("暫停鍵沒有作用"), p.line());
   await p.type("剛剛發生什麼事");
   check("問了下一題就不該再掛著", !p.line().includes("暫停鍵沒有作用"), p.line());
+}
+
+console.log("⑦ 早上那句舊的，不可以擋住系統匣剛剛那句新的");
+{
+  // `paint()` 讀的是 `notice ?? (wakeFailed ?? asleepDetail())`。九點問問題失敗
+  // 留下 `notice`，九點五分從系統匣按開始記錄失敗 → `recorder-failed`。後端還
+  // 特地把視窗叫到他面前，而他看到的是早上那句。
+  const p = await open({
+    ask: new Error("資料庫打不開：database is locked"),
+    recording_state: "none",
+  });
+  await p.type("剛剛發生什麼事");
+  check("先有早上那句", p.line().includes("database is locked"), p.line());
+  await p.fromOutside("recorder-failed", CONSENT);
+  check("系統匣那句要看得到", p.line().includes("同意書"), p.line());
+  check("而且早上那句要讓開", !p.line().includes("database is locked"), p.line());
+}
+
+console.log("⑧ 從系統匣暫停成功之後，「暫停鍵沒有作用」不可以還掛著");
+{
+  const p = await open({
+    toggle_pause: new Error("找不到資料目錄，暫停鍵沒有作用"),
+    recording_state: "recording",
+  });
+  await p.click("#pause");
+  check("先有那句", p.line().includes("暫停鍵沒有作用"), p.line());
+  await p.fromOutside("pause-changed", true);
+  check("她真的暫停了", p.line().includes("已暫停"), p.line());
+  // 兩行都曾經是真的，湊起來在說「暫停鍵壞了」——而她正暫停著。
+  check("那句「沒有作用」要跟著走", !p.line().includes("沒有作用"), p.line());
+}
+
+console.log("⑨ 第一次問問題就失敗的人，底下沒有「上一題」");
+{
+  const p = await open({
+    ask: new Error("資料庫打不開：database is locked"),
+    recording_state: "recording",
+  });
+  await p.type("三天前那通電話");
+  check("有說沒答成", p.hitTexts().some((t) => t.includes("沒答成")), p.hitTexts());
+  check(
+    "但不可以說「底下原本那幾筆是上一題的」——他底下從來沒有東西",
+    !p.hitTexts().some((t) => t.includes("上一題")),
+    p.hitTexts(),
+  );
+}
+
+console.log("⑩ 答成過一次之後再失敗，才輪得到那句「先收起來了」");
+{
+  let fail = false;
+  const p = await open({
+    ask: () => {
+      if (fail) throw new Error("資料庫打不開：database is locked");
+      return answer({ hits: [hit()] });
+    },
+    recording_state: "recording",
+  });
+  await p.type("電話");
+  check("先答成一次", p.hits().hidden === false, p.hitTexts());
+  fail = true;
+  await p.type("電話");
+  check("這次說得出「上一題」", p.hitTexts().some((t) => t.includes("上一題")), p.hitTexts());
+}
+
+console.log("⑪ 上一題的「還在翻…」不可以蓋到半秒前才送出的新題目上");
+{
+  // 時間軸（SLOW_MS = 4000）：
+  //   t=0     第一題送出，永遠不回來
+  //   t=3800  第二題送出（第一題還掛著，`state` 一直是 thinking）
+  //   t=4000  **第一題**的計時器響。`state === "thinking"` 是真的——那是第二題的。
+  //   t=4300  看畫面：第二題才半秒大，不可以說「第一次打開資料庫要先整理索引」
+  const p = await open({
+    ask: (arg) =>
+      arg.question === "第一題"
+        ? new Promise(() => {})
+        : new Promise((r) => setTimeout(() => r(answer()), 2200)),
+    recording_state: "recording",
+  });
+  void p.type("第一題");
+  await tick(3800);
+  void p.type("第二題");
+  await tick(500);
+  check("還在想第二題", p.line().includes("想一下") || p.line().includes("在聽"), p.line());
+  check("而且沒被上一題的計時器蓋掉", !p.line().includes("還在翻"), p.line());
+}
+
+console.log("⑫ 整場下來，畫面上沒有出現過 NaN / undefined");
+{
+  const p = await open({
+    ask: answer({ blind: blind({ ever_recorded: true, frames: 12, chunks: 0 }) }),
+    recording_state: "recording",
+  });
+  await p.type("三天前那通電話");
+  // 假的 `blind` 少抄一欄的時候，那幾句「為什麼答不出來」會印出 undefined，
+  // 而上面每一條斷言都不會發現——它們問的都是別的句子。
+  check("那幾句「為什麼」是完整的", p.nonsense().length === 0, p.nonsense());
+  check("而且真的說了為什麼", p.hitTexts().some((t) => t.includes("12 張畫面")), p.hitTexts());
 }
 
 console.log("");

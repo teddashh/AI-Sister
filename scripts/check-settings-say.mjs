@@ -31,10 +31,11 @@
 
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fakeEl, loader, read } from "./fake-dom.mjs";
+import { domOf, fakeDocument, loader, read, watchNonsense } from "./fake-dom.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui");
 const SRC = process.argv[2] ?? join(UI, "settings.js");
+const HTML = read(join(UI, "settings.html"));
 const boot = loader(read(SRC));
 
 const BASE = {
@@ -68,18 +69,12 @@ const HOTKEY = {
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
 async function open({ config = BASE, onRead, onWrite, onHotkeySet, hotkey = HOTKEY } = {}) {
-  const nodes = new Map();
-  const node = (sel) => {
-    if (!nodes.has(sel)) nodes.set(sel, fakeEl());
-    return nodes.get(sel);
-  };
-  globalThis.document = {
-    querySelector: node,
-    querySelectorAll: () => [],
-    createElement: () => fakeEl(),
-    addEventListener() {},
-    body: fakeEl(),
-  };
+  // **`domOf` 而不是「要什麼就生什麼」。** 上一版任何選擇器都回一個新的
+  // `fakeEl()`，於是⑧那條守著「儲存被灰掉的時候『重新讀取』還按得動」的斷言，
+  // 在那顆按鈕被從 settings.html 刪掉、或者被加上 disabled 的時候照樣是綠的
+  // ——而它是那一頁唯一的出口。假 DOM 比真的寬鬆一格，它守的那條線就是假的。
+  const node = domOf(HTML);
+  globalThis.document = fakeDocument(node);
   globalThis.location = { search: "" };
   // 那顆按鍵監聽掛在 window 上，不是掛在那一格上（理由見 settings.js：捕捉
   // 模式底下要吃掉 Tab / Enter，不然瀏覽器會先拿去換焦點）。所以要在這裡接。
@@ -119,11 +114,13 @@ async function open({ config = BASE, onRead, onWrite, onHotkeySet, hotkey = HOTK
     },
   };
 
+  const nonsense = watchNonsense();
   await boot();
   await tick();
   return {
     node,
     writes,
+    nonsense,
     say: () => node("[data-say]").textContent,
     bad: () => node("[data-say]").classList.contains("bad"),
     /**
@@ -181,6 +178,9 @@ console.log("① 題庫本來開著，關掉按儲存");
   check("說了「存好了」", p.say().includes("存好了"), p.say());
   check("說了「先前記下的那些不會消失」", p.say().includes(KEPT), p.say());
   check("是兩行，不是黏成一長條", p.say().split("\n").length === 2, p.say());
+  // 假設定檔少抄一欄的時候，那幾個天數欄位會印出 undefined，而上面每一條
+  // 斷言都不會發現——它們問的都是別的句子。見 fake-dom.mjs 的 `watchNonsense`。
+  check("畫面上沒有出現過 NaN / undefined", p.nonsense().length === 0, p.nonsense());
 
   // 存完 `load()` 會把 `queryLogWas` 換成剛存進去的那一份，所以第二次按下去
   // 沒有人「剛剛關掉」任何東西。少了這一條，那句話會變成每次儲存都出現的
@@ -320,6 +320,30 @@ console.log("⑩ 換熱鍵，這次成功");
   await p.pressCombo({ key: "s", code: "KeyS", ctrlKey: true, altKey: true });
   check("那一格換成新的那一組", p.combo() === "Ctrl + Alt + S", p.combo());
   check("說了搶到了", p.hotkeySay().includes("搶到了"), p.hotkeySay());
+}
+
+console.log("⑪ 存不進去，而且退回去的那一組現在也搶不到了");
+{
+  // `hotkey_set` 那條路上第三種分支：`!restored.registered && !wanted.is_empty()`。
+  // 這一格照樣印那一組，而那一組現在**沒有人在聽**——看起來像在說謊。
+  //
+  // 不是。這一格答的是「暫停鍵設成哪一組」（設定檔沒被改動，答案就是舊的那一
+  // 組），而「它現在搶不搶得到」是底下那一句的工作，`paintHotkey` 對同一種
+  // 情況也是這樣分工的（`view.registered ? … : …`，那一格照印）。
+  //
+  // 這一條把那個分工釘住：兩件事都要說得出口，而且要是紅的。少了任何一半，
+  // 這一格就變成一句「按這個會暫停」的斷言。
+  const p = await open({
+    onHotkeySet: () => {
+      throw new Error(
+        "搶到了，但存不進設定檔，所以退回原來那一組。而舊的那組現在也搶不到了——改用系統匣裡的暫停。\n拒絕存取",
+      );
+    },
+  });
+  await p.pressCombo({ key: "s", code: "KeyS", ctrlKey: true, altKey: true });
+  check("那一格還是答得出「設成哪一組」", p.combo() === "Ctrl + Alt + P", p.combo());
+  check("而底下那句要說它現在搶不到", p.hotkeySay().includes("也搶不到了"), p.hotkeySay());
+  check("而且是紅的", p.node("[data-hotkey-say]").classList.contains("bad"), p.hotkeySay());
 }
 
 console.log("");
