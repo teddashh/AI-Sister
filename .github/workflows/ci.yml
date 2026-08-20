@@ -235,6 +235,25 @@ jobs:
           EOF
           $C forget --last 24h --yes > live-forget.txt
           $C stats > live-stats.txt
+          # **同一顆資料庫、同一列，差別只有那個心跳檔——那一列要跟著改口。**
+          # 上一版這裡只問 `forget` 和 `stats`，於是 doctor 的「上一次錄製」在
+          # 「有人佔著」那一半從來沒有被真的執行檔驗過（`d.txt` 是幾行之前、
+          # 還沒有心跳的時候印的）。翻不過去的那一半就是一格空白。
+          $C doctor > crashed-live-doctor.txt
+          grep -qE '上一次錄製.*她現在還在跑' crashed-live-doctor.txt \
+            || { echo "::error::有 recorder 佔著這個目錄，doctor 卻說不出她還在跑"; grep -A1 上一次錄製 crashed-live-doctor.txt; exit 1; }
+          if grep -qE '上一次錄製.*當掉' crashed-live-doctor.txt; then
+            echo "::error::有 recorder 佔著這個目錄，doctor 卻說她當掉了"
+            grep -A1 上一次錄製 crashed-live-doctor.txt
+            exit 1
+          fi
+          # 而那一行真的要跟剛才不一樣。兩份逐字相同的話，上面那兩條可以靠一
+          # 句寫死的話同時綠——這一整節在抓的就是這個形狀。
+          if diff <(grep 上一次錄製 d.txt) <(grep 上一次錄製 crashed-live-doctor.txt) > /dev/null; then
+            echo "::error::心跳出現前後，「上一次錄製」印的是同一句話"
+            grep 上一次錄製 d.txt
+            exit 1
+          fi
           for x in live-forget.txt live-stats.txt; do
             grep -q '此刻有人佔著這個資料目錄' "$x" \
               || { echo "::error::有 recorder 佔著這個目錄，$x 卻沒這麼說"; exit 1; }
@@ -385,10 +404,19 @@ jobs:
           # 上跟一次當機逐字相同**。這一顆是最小的那個形狀：一場好好收完的、
           # 加上此刻正開著的一場。心跳分得出來，而分得出來就要說出來——那個數
           # 字扣掉了一場，不講的話他自己數得出來對不上。
-          if grep -qE '零當機 +✗' live-doctor.txt; then
+          #
+          # 符號印在標籤**前面**（`  ✗ 零當機   …`）。這一條寫過一版
+          # `'零當機 +✗'`，逐字永遠不中——一條翻不成紅的反面斷言讀起來像涵
+          # 蓋，實際上是一格空白，而那正好是這一整節在抓的形狀，出現在抓它的
+          # 工具上（第二次了，見 `signal_audit` 的註解）。
+          if grep -qE '✗ +零當機' live-doctor.txt; then
             echo "::error::[她正開著] 把此刻正在錄的那一場算成了一次當機"
             grep 零當機 live-doctor.txt; exit 1
           fi
+          # 而正面那一半要確定它真的印得出 ✓——不然上面那條可以靠「這一列整個
+          # 不見」也綠。
+          grep -qE '✓ +零當機' live-doctor.txt \
+            || { echo "::error::[她正開著] 一場好好收完的加上正在錄的一場，那是零當機"; grep 零當機 live-doctor.txt; exit 1; }
           grep -qE '零當機.*沒有算進去' live-doctor.txt \
             || { echo "::error::[她正開著] 扣掉了正在錄的那一場卻不說"; grep 零當機 live-doctor.txt; exit 1; }
           # **`sister queries` 刻意不在這個迴圈裡。** 那一頁把三種可能攤開講
@@ -451,8 +479,9 @@ jobs:
           for x in crash-before.txt crash-after.txt; do
             grep -qE '零當機.*有 5 段沒有回來' "$x" \
               || { echo "::error::[開機就死] $x 的當機數跟著紀錄一起被刪掉了"; grep 零當機 "$x"; exit 1; }
-            # 一台開機當機五次的機器不准拿到打勾。
-            if grep -qE '零當機 +✓' "$x"; then
+            # 一台開機當機五次的機器不准拿到打勾。（符號在標籤**前面**——寫
+            # 成 `'零當機 +✓'` 的那一版逐字永遠不中。）
+            if grep -qE '✓ +零當機' "$x"; then
               echo "::error::[開機就死] $x 對一台當機五次的機器畫了 ✓"; exit 1
             fi
           done
@@ -628,6 +657,151 @@ jobs:
           if line.index('升上來那天') > line.index('現在正在錄'):
               print('::error::[升上來又正開著] 範圍聲明黏到一句沒有數字的話上面了：'
                     + line.strip()); sys.exit(1)"
+
+          # ── fixture 9：**她正在開機，而最新那一列是上一次當機的殼。** ──
+          #
+          # `BootBeat` 一寫下心跳，`Db::open` 才開始跑（一顆大的資料庫要幾分
+          # 鐘），所以那段時間裡「有人佔著這個目錄」是真的、「她那一列在資料庫
+          # 裡」是假的。上面每一顆 fixture 的心跳第二欄都不是 `boot`——**這個
+          # 狀態在 CI 上一次都沒出現過**，而它印出來的是這樣：
+          #
+          #     ✗ 零當機     3 段錄製裡有 2 段沒有回來（最後一次 02:43:02）
+          #     ? 上一次錄製 02:43:03 開始，沒有收尾——她現在還在跑
+          #
+          # 分母扣掉了一場不存在的錄製（她的列還沒進來），而那一列明明是上一
+          # 次當機留下來的殼，卻被說成「她現在還在跑」。兩個布林湊不出三種答
+          # 案，所以 `crash_audit` 收的是 `Phase` 本人。
+          W="$B --data-dir ./ci-booting"
+          cp -r ./ci-normal ./ci-booting
+          python3 - <<'EOF'
+          import sqlite3, time, pathlib
+          now = int(time.time() * 1000)
+          c = sqlite3.connect('./ci-booting/sister.db')
+          # 十分鐘前當掉的那一場。觸發器會把 `sessions_started` 加一而不加
+          # `sessions_ended`——那就是一次真的當機在計數器上的樣子。
+          c.execute("INSERT INTO sessions(started_at, app_version, platform)"
+                    " VALUES (?, 'ci', 'linux')", (now - 600_000,))
+          c.commit()
+          # 第二欄是 `boot`：有人佔著，但她還在開資料庫，列還沒 INSERT。
+          pathlib.Path('./ci-booting/recording.beat').write_text(f'{now} boot')
+          EOF
+          $W doctor > booting.txt
+          # 那一次當機不可以因為她正在開機就消失。分母是 2，當機數是 1。
+          grep -qE '零當機.*2 段錄製裡有 1 段沒有回來' booting.txt \
+            || { echo "::error::[開機中] 開機把上一次當機扣掉了"; grep 零當機 booting.txt; exit 1; }
+          # 而且不准說「扣掉了」——沒有東西可以扣，她的列還沒進來。
+          if grep -qE '零當機.*沒有算進去' booting.txt; then
+            echo "::error::[開機中] 宣告扣掉了一場還不存在的錄製"
+            grep 零當機 booting.txt; exit 1
+          fi
+          # 「有人佔著」和「這一列是他的」是兩題，而兩句話都有人印錯過。
+          grep -qE '上一次錄製.*她當掉了' booting.txt \
+            || { echo "::error::[開機中] 上一次當機的殼被說成她現在還在跑"; grep -A1 上一次錄製 booting.txt; exit 1; }
+          grep -qE '上一次錄製.*正在起來' booting.txt \
+            || { echo "::error::[開機中] 明明看得到一個 recorder 正在起來，卻說沒有"; grep -A1 上一次錄製 booting.txt; exit 1; }
+          for bad in '她現在還在跑' '沒有任何 recorder'; do
+            if grep -E '上一次錄製' booting.txt | grep -q "$bad"; then
+              echo "::error::[開機中] 「$bad」在開機那一段是假的"
+              grep 上一次錄製 booting.txt; exit 1
+            fi
+          done
+          # 那三列數的是**上一次**那一場（她這一場還沒有任何列），所以稱呼不
+          # 准跟著心跳改。
+          if grep -E '視窗焦點|輸入節奏|文字座標' booting.txt | grep -q '這一場'; then
+            echo "::error::[開機中] 她的列還沒進來，那三列數的不可能是「這一場」"
+            grep -E '視窗焦點|輸入節奏|文字座標' booting.txt; exit 1
+          fi
+          # **兩種心跳要真的分得開。** 同一顆資料庫，只把第二欄的 `boot` 拿
+          # 掉（＝她的列進來了、開始錄了），那兩列必須改口：當機那一場被扣
+          # 掉、「上一次」變成她自己。少了這一半，把 `Phase` 判斷寫成
+          # `beat.is_some()` 一樣綠。
+          python3 - <<'EOF'
+          import pathlib, time
+          pathlib.Path('./ci-booting/recording.beat').write_text(
+              str(int(time.time() * 1000)))
+          EOF
+          $W doctor > booting-recording.txt
+          grep -qE '零當機.*沒有算進去' booting-recording.txt \
+            || { echo "::error::[開機中→在錄] 她的列進來了卻沒有從分母扣掉"; grep 零當機 booting-recording.txt; exit 1; }
+          grep -qE '上一次錄製.*她現在還在跑' booting-recording.txt \
+            || { echo "::error::[開機中→在錄] 心跳說在錄，那一列卻還說是當掉的"; grep -A1 上一次錄製 booting-recording.txt; exit 1; }
+          for pair in 零當機 上一次錄製; do
+            if diff <(grep $pair booting.txt) <(grep $pair booting-recording.txt) > /dev/null; then
+              echo "::error::[開機中→在錄] 「$pair」對兩種心跳印出同一句話"
+              grep $pair booting.txt; exit 1
+            fi
+          done
+
+          # ── fixture 10：**她正在錄人生第一場，而東西已經落地了。** ──
+          #
+          # `ci-live` 站的是隔壁那一格：它從 `ci-nulldata` 複製過來，
+          # `capture.enabled = false`，所以一列內容都沒有——`Emptiness` 讀到的
+          # 是 `Barren`。這一顆有內容，讀到的是 `Erased`，而 `crash_audit` 把
+          # 正在錄的那一場從 `started` 扣掉之後那個 0 就掉進「分母沒了」那一
+          # 段：
+          #
+          #     ✓ 已記錄     4 張畫面 · 9 段文字 · 172.0 KB
+          #     ? 零當機     那幾場的紀錄已經不在了（`forget` 或保留期），現在算不出來
+          #     ? 上一次錄製 02:52:51 開始，沒有收尾——她現在還在跑
+          #
+          # 一台從來沒刪過東西的機器被指控刪過東西，夾在「4 張畫面」和「她現
+          # 在還在跑」中間。**扣掉一個數字就是替那個數字的 0 造一個新的意思。**
+          F="$B --data-dir ./ci-firstlive"
+          $F replay scenarios/bill-lookup.json --interval-ms 500 > /dev/null
+          python3 - <<'EOF'
+          import sqlite3, time, pathlib
+          c = sqlite3.connect('./ci-firstlive/sister.db')
+          # 唯一那一場改成「還在跑」。計數器要跟著回到 0，因為那一場的
+          # `session_end` 從來沒發生過——手改的話兩邊要一起改，不然造出來的是
+          # 一顆真實世界到不了的資料庫。
+          c.execute('UPDATE sessions SET ended_at = NULL')
+          c.execute("UPDATE meta SET value = '0' WHERE key = 'sessions_ended'")
+          c.commit()
+          pathlib.Path('./ci-firstlive/recording.beat').write_text(
+              str(int(time.time() * 1000)))
+          EOF
+          $F stats > first-stats.txt
+          $F doctor > first-doctor.txt
+          $F facts > first-facts.txt
+          $F query 電話 > first-query.txt
+          for x in first-stats.txt first-doctor.txt first-facts.txt first-query.txt; do
+            # 同一組指控。她三秒前才開始人生第一場，`forget` 一次都沒跑過。
+            if grep -qE "$LIE" "$x"; then
+              echo "::error::[第一場正在錄] $x 指控了一個沒發生過的刪除"
+              grep -nE "$LIE" "$x"
+              exit 1
+            fi
+          done
+          grep -qE '✓ +零當機' first-doctor.txt \
+            || { echo "::error::[第一場正在錄] 在她之前沒有別的，那是真的零當機"; grep 零當機 first-doctor.txt; exit 1; }
+          grep -qE '零當機.*第一場' first-doctor.txt \
+            || { echo "::error::[第一場正在錄] 沒說出這是她的第一場"; grep 零當機 first-doctor.txt; exit 1; }
+          # 而那三列數的正好是被扣掉的那一場。叫它「上一場」的話，問「那幾段
+          # 錄製裡哪一場是上一場」，答案是都不是。
+          if grep -E '視窗焦點|輸入節奏|文字座標' first-doctor.txt | grep -q '上一場'; then
+            echo "::error::[第一場正在錄] 那三列把此刻正在錄的那一場叫成「上一場」"
+            grep -E '視窗焦點|輸入節奏|文字座標' first-doctor.txt; exit 1
+          fi
+          grep -E '視窗焦點' first-doctor.txt | grep -q '這一場' \
+            || { echo "::error::[第一場正在錄] 正反成對：也要說得出那是「這一場」"; grep 視窗焦點 first-doctor.txt; exit 1; }
+          # 讀 JSON 的那一邊也要答得出同一題——那一份以前只有 `scope_started_at`，
+          # 而一個時間戳說不出那一場結束了沒有。
+          $F stats --json > first-stats.json
+          python3 -c "
+          import json, sys
+          sig = json.load(open('first-stats.json'))['signals']
+          if not sig: print('::error::[第一場正在錄] JSON 裡沒有 signals'); sys.exit(1)
+          bad = [s['name'] for s in sig if not s.get('scope_is_live')]
+          if bad:
+              print('::error::[第一場正在錄] JSON 說那一場不是活的：' + '、'.join(bad))
+              sys.exit(1)"
+          # 反面：她停了之後，同一顆資料庫上那三列要回到「上一場」。
+          rm -f ./ci-firstlive/recording.beat
+          $F doctor > first-stopped.txt
+          if grep -E '視窗焦點|輸入節奏|文字座標' first-stopped.txt | grep -q '這一場'; then
+            echo "::error::[第一場停了] 沒有心跳了，那三列還說她在錄"
+            grep -E '視窗焦點|輸入節奏|文字座標' first-stopped.txt; exit 1
+          fi
 
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，

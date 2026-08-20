@@ -2896,6 +2896,14 @@ pub mod stats {
     pub fn run(data_dir: &Path, config: &Config, json: bool) -> Result<()> {
         let db = open_existing(data_dir)?;
         let s = db.stats()?;
+        // 一頁上三個地方要問「她現在在不在」（底下的 ⚠、`sessions_line`、
+        // 還有 `signal_audit` 的「這一場／上一場」），而它們必須是同一個答案
+        // ——分幾次問的話，中間她可以剛好收工。
+        //
+        // 讀在 `json` 那個分支**之前**，因為那份 JSON 也在回答同一題：它印
+        // 的 `scope_started_at` 以前沒有任何欄位說得出那一場是不是還在錄。
+        let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
+        let occupied = beat.is_some();
 
         let days_between = |a: Option<i64>, b: Option<i64>| match (a, b) {
             (Some(a), Some(b)) if b > a => (b - a) as f64 / 86_400_000.0,
@@ -2994,7 +3002,7 @@ pub mod stats {
                     // 哪天 recorder 不再寫 focus_events，`stats` 照樣印一個
                     // 很小的數字，沒有一個測試會紅。`doctor` 會講，但 doctor
                     // 要有人去跑——一個要有人記得去跑的檢查，遲早沒人跑。
-                    "signals": db.signal_audit()?.iter().map(|a| serde_json::json!({
+                    "signals": db.signal_audit(beat)?.iter().map(|a| serde_json::json!({
                         "name": a.name, "rows": a.rows,
                         "populated": a.populated,
                         // 三種下場，不是一個布林：`too_early` 以前和 `alive`
@@ -3005,6 +3013,12 @@ pub mod stats {
                         // 這份 JSON 的人（包括未來的我）會把 `rows` 當成
                         // 這顆資料庫的總量，而那正是舊版真正在數的東西。
                         "scope_started_at": a.scope_started_at,
+                        // 而那一場**可能還在錄**：這幾個數字是一份還在長的東西
+                        // 的中途快照。人看的那一頁靠「這一場／上一場」講這件事
+                        // （`signal_line`）；讀 JSON 的以前只能猜，而 doctor 的
+                        // 分母正好把那一場扣掉了——同一份報告裡兩個相鄰的數字
+                        // 描述兩個不相交的集合，就是這批 bug 的形狀。
+                        "scope_is_live": a.scope_is_live,
                     })).collect::<Vec<_>>(),
                 }))?
             );
@@ -3012,9 +3026,6 @@ pub mod stats {
         }
 
         println!("📊 AI-Sister 足跡\n");
-        // 一頁上兩個地方要問「她現在在不在」（底下的 ⚠ 和 `sessions_line`），
-        // 而它們必須是同一個答案——分兩次問的話，中間她可以剛好收工。
-        let occupied = sister_core::heartbeat::is_occupied(data_dir, sister_core::now_ms());
         // **整頁都是 0 的時候，要先講這是哪一種 0。**
         //
         // 一顆剛裝好的資料庫和一顆剛被 `forget --last 24h` 清空的資料庫，這一頁
@@ -3562,12 +3573,47 @@ pub mod doctor {
     /// [`sister_core::db::Db::crash_audit`] 之後，這裡連那個布林都拿不到，
     /// 也就沒有東西可以只扣一半。`a.live` 只用來講「扣掉了」。
     fn crash_verdict(a: &sister_core::db::CrashAudit, empty: Emptiness) -> (&'static str, String) {
+        // **她正在錄的是第一場。** `started` 已經把她扣掉了，所以這裡的 0 是
+        // 「在她之前沒有別的」，不是「計數器答不出來」——而底下那一段把兩者
+        // 當成同一件事。少了這一格，一台全新的機器在她的第一次錄製期間（前
+        // 幾張畫面已經落地）印出來的是：
+        //
+        // ```text
+        // ✓ 已記錄     4 張畫面 · 9 段文字
+        // ? 零當機     那幾場的紀錄已經不在了（`forget` 或保留期），現在算不出來
+        // ? 上一次錄製 02:52:51 開始，沒有收尾——她現在還在跑
+        // ```
+        //
+        // 一台從來沒刪過東西的機器被指控刪過東西，夾在「4 張畫面」和「她現在
+        // 還在跑」中間。**扣掉一個數字就是替那個數字的 0 造一個新的意思**，
+        // 而 `> 0` 這一行是上一版留下來的、沒有被重讀的那一行。
+        //
+        // `ended == 0` 是這句話自己的前提，不是多餘的保險：「在這之前沒有錄
+        // 過」和「有一場好好地收尾過」不可能同時成立。真的資料庫走不到那個組
+        // 合（`ended <= started`，而 `started` 只扣掉正在錄的那一場），手改過
+        // 的可以——而少了這一格，那顆手改過的會被告知她正在錄人生第一場。不
+        // 寫這個條件就是替一句話宣告一個它自己沒有檢查的前提。
+        if a.live && a.started == 0 && a.ended == 0 {
+            return if a.floor {
+                // 升上來那天一列都不剩，所以「在她之前沒有別的」是猜的。
+                (
+                    "?",
+                    "她現在正在錄。升上來那天一場紀錄都沒剩，所以在那之前有沒有當過，算不出來"
+                        .to_string(),
+                )
+            } else {
+                (
+                    "✓",
+                    "她正在錄第一場——在這之前沒有錄過，所以還沒有當機可以數".to_string(),
+                )
+            };
+        }
         // 計數器答得出來的時候就讓它答——它才是撐得過刪列的那一組數字。
         //
-        // `started == 0` 有兩種：這一版之後才出生、而且真的沒開過的資料庫
-        // （精確的 0），和升級那天列已經被掃光的資料庫（回填只數得到還在的
-        // 列，所以也是 0）。兩種都得往下走 `Emptiness`——它分得出來，而這裡
-        // 分不出來。
+        // 走到這裡的 `started == 0` 有兩種：這一版之後才出生、而且真的沒開過
+        // 的資料庫（精確的 0），和升級那天列已經被掃光的資料庫（回填只數得到
+        // 還在的列，所以也是 0）。兩種都得往下走 `Emptiness`——它分得出來，
+        // 而這裡分不出來。
         if a.started > 0 {
             // **升上來的那一顆數不到升級之前被清掉的那幾場**，而 ✓ 那一句
             // （「全部正常收尾」）正是在對那個看不見的集合下斷言——這一格自己
@@ -3752,14 +3798,26 @@ pub mod doctor {
             ),
             // 這一頁手上有心跳，所以「不是當掉，就是它現在還在跑」那個「或」
             // 不用留給他猜。
+            //
+            // **三種，不是兩種。** 開機那一段（可以長達幾分鐘）裡，這一列是
+            // 上一次當機留下來的殼，而同時真的有一個 recorder 正在起來——
+            // 「她現在還在跑」是錯的（那不是這一列），「現在沒有任何 recorder
+            // 佔著這個資料目錄」也是錯的（有）。兩句話都有人印過。
             (None, _) => (
                 "?",
                 format!(
                     "{since} 開始，沒有收尾——{}",
-                    if a.live {
-                        "她現在還在跑"
-                    } else {
-                        "她當掉了（現在沒有任何 recorder 佔著這個資料目錄）"
+                    match (a.live, a.beat) {
+                        (true, _) => "她現在還在跑".to_string(),
+                        (false, Some(sister_core::heartbeat::Phase::Booting)) =>
+                            "她當掉了。現在有一個 sister record 正在起來，那一場的紀錄還沒進來"
+                                .to_string(),
+                        // 心跳說在錄、而這一列不是它的：`forget` 剛好把它那一
+                        // 列帶走之類的角落。不猜原因，只講看得到的。
+                        (false, Some(sister_core::heartbeat::Phase::Recording)) =>
+                            "她當掉了。現在有一個 sister record 在跑，但這一列不是它的".to_string(),
+                        (false, None) =>
+                            "她當掉了（現在沒有任何 recorder 佔著這個資料目錄）".to_string(),
                     }
                 ),
             ),
@@ -3942,9 +4000,21 @@ pub mod doctor {
                 return ("?", format!("{why}，現在沒有範圍可以驗"));
             }
         }
-        let when = match a.scope_started_at {
-            Some(ts) => format!("上一場（{} 起）", crate::fmt::timestamp(ts)),
-            None => "還沒有任何一場".to_string(),
+        // **「上一場」在她還在錄的時候是假的，而且是同一份報告裡的第二種假。**
+        // 四行之上那一列（[`crash_verdict`]）的分母把正在錄的那一場扣掉了，於
+        // 是「2 段錄製全部正常收尾」底下接著三行「上一場（02:45:42 起）」——問
+        // 那 2 場裡哪一場是上一場，答案是都不是。那一場既不在分母裡，也還沒
+        // 結束。
+        //
+        // 這個位元不在這裡算（`a.scope_is_live` 是 `signal_audit` 交出來的），
+        // 理由和 `crash_audit` 收 `beat` 一樣：算在印字的地方，就會只餵給一起
+        // 印出來的其中一個數字。
+        let when = match (a.scope_started_at, a.scope_is_live) {
+            (Some(ts), true) => format!("這一場（{} 起，還在錄）", crate::fmt::timestamp(ts)),
+            (Some(ts), false) => format!("上一場（{} 起）", crate::fmt::timestamp(ts)),
+            // 她正在開機的時候走的也是這裡：心跳在，但她那一列還沒 INSERT，
+            // 所以「最後一場」是上一次留下來的那一場，或者一場都沒有。
+            (None, _) => "還沒有任何一場".to_string(),
         };
         // 三種，不是兩種。「驗過了，是好的」和「資料還太少，看不出來」
         // 以前都印 ✓——那正是這一整節要抓的形狀，出現在抓它的工具上。
@@ -4478,7 +4548,18 @@ pub mod doctor {
         // ——同一份報告裡它們必須是同一個答案，所以只問一次。
         // `is_occupied` 而不是 `is_recording`：正在開機的 recorder 也佔著這個
         // 目錄，而那時候「再等一下」正是對的話。
-        let occupied = sister_core::heartbeat::is_occupied(data_dir, sister_core::now_ms());
+        //
+        // **而「零當機」要問的是另一題**，所以它拿的是另一個位元。那一列要扣
+        // 掉「她現在正在錄的那一場」，而那道扣除只有在**她的那一列已經進資料
+        // 庫**之後才成立。開機那一段（`Phase::Booting`，可以長達幾分鐘）裡
+        // `is_occupied` 是 true 而她的列還沒有——那時候扣掉的會是上一次當機留
+        // 下來的殼。兩個問題兩個位元，不要共用一個。
+        //
+        // 心跳**只讀一次**。`is_occupied` 再讀一次的話，兩次讀之間她可以從
+        // `Booting` 跳到 `Recording`，於是同一份報告的上半和下半描述兩個不同
+        // 的瞬間——一份自相矛盾的報告，而且重跑一次就不見了。
+        let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
+        let occupied = beat.is_some();
 
         let (db, no_db) = match db_file.exists().then(|| Db::open(&db_file)) {
             Some(Ok(d)) => (Some(d), "還沒有資料庫"),
@@ -4574,7 +4655,7 @@ pub mod doctor {
             let (sym, said) = recorded_verdict(s.frames, s.chunks, empty, &detail);
             mark(sym, "已記錄", &said);
 
-            let audit = db.crash_audit(occupied)?;
+            let audit = db.crash_audit(beat)?;
             let (sym, said) = crash_verdict(&audit, empty);
             mark(sym, "零當機", &said);
 
@@ -4597,7 +4678,7 @@ pub mod doctor {
             // 那一版在一顆用過三個月的資料庫上永遠翻不成 ✗（見
             // `signal_audit` 的文件），而這一行要讓那個界線看得見——否則
             // 「12 列」讀起來像全部，而他上禮拜二壞掉的那一場藏在裡面。
-            for a in db.signal_audit()? {
+            for a in db.signal_audit(beat)? {
                 // 「沒有最後一場」在同一份報告的上面四行已經有答案了。
                 //
                 // `signal_audit` 的範圍是 `sessions` 的最後一列，而那張表現在
@@ -5059,6 +5140,9 @@ pub mod doctor {
                 // `live: true` 上去——而且上面那四個數字**要先扣好**，因為
                 // 真的那一支就是這樣交出來的。
                 live: false,
+                // 「有沒有人佔著這個資料目錄」是另一題，預設沒有。要驗
+                // 「她正在開機」那幾格的自己蓋 `Some(Phase::Booting)` 上去。
+                beat: None,
                 floor: false,
             }
         }
@@ -5367,6 +5451,153 @@ pub mod doctor {
             }
         }
 
+        /// **開機那幾分鐘，「有人佔著」和「她的列在不在」是相反的兩件事。**
+        ///
+        /// `BootBeat` 一起來就開始寫心跳，然後 `Db::open` 在一顆大的資料庫上
+        /// 可以跑幾分鐘——那段時間裡心跳說「有」、而 `sessions` 最新那一列還
+        /// 是上一次當機留下來的殼。上一版只有一個布林，於是這一格印出「她現
+        /// 在還在跑」，指著三天前那一場當機的開始時間。
+        ///
+        /// 兩個布林湊不出三種答案，所以帶回來的是 [`Phase`] 本人。
+        ///
+        /// [`Phase`]: sister_core::heartbeat::Phase
+        #[test]
+        fn while_she_is_booting_the_crashed_row_is_not_her() {
+            use sister_core::heartbeat::Phase;
+            let crashed = sister_core::db::LastSession {
+                started_at: 1_700_000_000_000,
+                ended_at: None,
+                reason: None,
+                app_version: "test".into(),
+                events_left: 3,
+            };
+            // 開機中：心跳在（`Booting`），但她那一列還沒 INSERT，所以
+            // `crash_audit` 一個數字都沒扣——`live` 是 false。
+            let booting = sister_core::db::CrashAudit {
+                beat: Some(Phase::Booting),
+                ..audit(3, 2, 3, 1)
+            };
+            let (sym, said) = last_session_verdict(&crashed, &booting);
+            assert_eq!(sym, "?");
+            assert!(
+                said.contains("她當掉了"),
+                "手上這一列是上一次當機的殼，不是正在起來的那一個：{said}"
+            );
+            assert!(
+                !said.contains("她現在還在跑"),
+                "「有人佔著資料目錄」不等於「這一列是他的」：{said}"
+            );
+            assert!(
+                said.contains("正在起來"),
+                "而那個正在起來的 recorder 看得到，不要說成「沒有任何 recorder」：{said}"
+            );
+            assert!(
+                !said.contains("沒有任何 recorder"),
+                "上一版兩句話都印過，這一句在開機中是假的：{said}"
+            );
+
+            // 三種心跳三句話，兩兩不同。任何兩種撞在一起就是又有一組不同的
+            // 情況被印成同一行——這批 bug 的形狀。
+            let says = |a: sister_core::db::CrashAudit| last_session_verdict(&crashed, &a).1;
+            let three = [
+                says(sister_core::db::CrashAudit {
+                    live: true,
+                    beat: Some(Phase::Recording),
+                    ..audit(3, 2, 3, 1)
+                }),
+                says(booting),
+                says(sister_core::db::CrashAudit {
+                    beat: Some(Phase::Recording),
+                    ..audit(3, 2, 3, 1)
+                }),
+                says(audit(3, 2, 3, 1)),
+            ];
+            for (i, a) in three.iter().enumerate() {
+                for b in &three[i + 1..] {
+                    assert_ne!(a, b, "四種情況要有四句話");
+                }
+            }
+        }
+
+        /// **她正在錄的那一場是第一場——而扣掉之後的 0 被讀成「分母沒了」。**
+        ///
+        /// `crash_audit` 把正在錄的那一場從 `started` 扣掉，所以一台全新機器
+        /// 在她第一次錄製期間的 `started` 是 0。那個 0 走進底下那段
+        /// `Emptiness` 判斷，而畫面已經落地（`Live` 走不到，`Erased` 才是它讀
+        /// 到的），於是一台從來沒刪過東西的機器被告知「那幾場的紀錄已經不在
+        /// 了（`forget` 或保留期）」。
+        ///
+        /// **扣掉一個數字就是替那個數字的 0 造一個新的意思。** 第十次之後每一
+        /// 次都是這樣來的。
+        #[test]
+        fn her_first_recording_is_not_a_database_someone_emptied() {
+            for empty in [
+                Emptiness::Erased,
+                Emptiness::Blocked,
+                Emptiness::Live,
+                Emptiness::Fresh,
+                Emptiness::Barren,
+            ] {
+                let (sym, said) = crash_verdict(
+                    &sister_core::db::CrashAudit {
+                        live: true,
+                        beat: Some(sister_core::heartbeat::Phase::Recording),
+                        ..audit(0, 0, 0, 0)
+                    },
+                    empty,
+                );
+                assert_eq!(sym, "✓", "在她之前沒有別的，那是真的零當機：{said}");
+                assert!(
+                    !said.contains("forget") && !said.contains("保留期"),
+                    "沒有人刪過任何東西：{said}"
+                );
+                assert!(
+                    !said.contains("算不出來"),
+                    "算得出來——扣掉的那一場是她自己：{said}"
+                );
+                assert!(said.contains("第一場"), "{said}");
+            }
+
+            // 但升上來的那一顆真的答不出來：回填只數得到還在的列，升上來那天
+            // 一列都不剩的話，「在她之前沒有別的」是猜的。
+            let (sym, said) = crash_verdict(
+                &sister_core::db::CrashAudit {
+                    live: true,
+                    beat: Some(sister_core::heartbeat::Phase::Recording),
+                    floor: true,
+                    ..audit(0, 0, 0, 0)
+                },
+                Emptiness::Erased,
+            );
+            assert_eq!(sym, "?", "{said}");
+            assert!(
+                said.contains("升上來那天") && said.contains("算不出來"),
+                "{said}"
+            );
+
+            // 沒有人在錄的那一顆不准走這條捷徑——它的 0 就是舊的那四種。
+            let (sym, said) = crash_verdict(&audit(0, 0, 0, 0), Emptiness::Erased);
+            assert_eq!(sym, "?", "{said}");
+            assert!(!said.contains("第一場"), "{said}");
+
+            // 而「收過一次尾」和「在這之前沒有錄過」不可能同時是真的。真的資
+            // 料庫走不到這個組合，手改過的可以——那顆不准被告知她正在錄人生第
+            // 一場。
+            let (sym, said) = crash_verdict(
+                &sister_core::db::CrashAudit {
+                    live: true,
+                    beat: Some(sister_core::heartbeat::Phase::Recording),
+                    ..audit(0, 1, 0, 0)
+                },
+                Emptiness::Erased,
+            );
+            assert_eq!(sym, "?", "{said}");
+            assert!(
+                !said.contains("第一場"),
+                "有一場收過尾，這就不是第一場：{said}"
+            );
+        }
+
         /// **第三種 0：她錄了，而那段時間被規則整段擋掉了。**
         ///
         /// 這一條守的是這批修改**自己犯過**的錯。第一版把「畫面 0、文字 0」
@@ -5438,6 +5669,7 @@ pub mod doctor {
                 verdict: SignalVerdict::TooEarly,
                 note: "",
                 scope_started_at: None,
+                scope_is_live: false,
             };
 
             let (_, said) = signal_line(&erased, Emptiness::Erased);
@@ -5498,6 +5730,94 @@ pub mod doctor {
                 assert_eq!(sym, "✓");
                 assert!(said.contains("12 列") && said.contains("上一場"), "{said}");
             }
+        }
+
+        /// **「上一場」在她還在錄的時候，指的是一場不存在的錄製。**
+        ///
+        /// 同一份 doctor：
+        ///
+        /// ```text
+        ///   ✓ 零當機     2 段錄製全部正常收尾。現在正在錄的那一場沒有算進去
+        ///   ✓ 視窗焦點   上一場（02:45:42 起） 31 列，31 列知道自己是哪個 app
+        /// ```
+        ///
+        /// 02:45:42 就是被扣掉的那一場。問「那 2 場裡哪一場是上一場」，答案是
+        /// 都不是——它既不在分母裡，也還沒結束。兩行各自都對，貼在一起指向一
+        /// 個空集合，第十七次。
+        ///
+        /// 位元算在 [`sister_core::db::Db::signal_audit`] 裡（規則 24），所以
+        /// 這一條測的是「拿到之後有沒有講出來」。
+        #[test]
+        fn while_she_is_recording_those_three_rows_are_this_session_not_the_last_one() {
+            use sister_core::db::{SignalAudit, SignalVerdict};
+            let running = SignalAudit {
+                name: "視窗焦點",
+                rows: 31,
+                populated: 31,
+                populated_label: "列知道自己是哪個 app",
+                verdict: SignalVerdict::Alive,
+                note: "",
+                scope_started_at: Some(1_700_000_000_000),
+                scope_is_live: true,
+            };
+            let (_, said) = signal_line(&running, Emptiness::Live);
+            assert!(
+                !said.contains("上一場"),
+                "她還在錄，這幾個數字就是這一場的：{said}"
+            );
+            assert!(
+                said.contains("這一場") && said.contains("還在錄"),
+                "而且要講出來——不然那個時間讀起來像一場已經結束的：{said}"
+            );
+            assert!(said.contains("31 列"), "數字照舊：{said}");
+
+            // 四種判決都要跟著換稱呼。少一種就是留一格空白給下一次。
+            for v in [
+                SignalVerdict::Alive,
+                SignalVerdict::Broken,
+                SignalVerdict::TooEarly,
+            ] {
+                for rows in [0, 31] {
+                    let (_, said) = signal_line(
+                        &SignalAudit {
+                            verdict: v,
+                            rows,
+                            ..running
+                        },
+                        Emptiness::Live,
+                    );
+                    assert!(!said.contains("上一場"), "{v:?}/{rows}：{said}");
+                }
+            }
+
+            // 而同一份報告上面那一列的分母正好把這一場扣掉了。兩句話要讀得起
+            // 來：一句說「沒有算進去」，另一句說「那一場就是這一場」。
+            let (_, crash) = crash_verdict(
+                &sister_core::db::CrashAudit {
+                    live: true,
+                    beat: Some(sister_core::heartbeat::Phase::Recording),
+                    ..audit(2, 2, 2, 0)
+                },
+                Emptiness::Live,
+            );
+            assert!(crash.contains("沒有算進去"), "{crash}");
+            assert!(
+                !crash.contains("上一場") && !said.contains("沒有算進去"),
+                "兩列各講各的一半，不要互相蓋台：\n  {crash}\n  {said}"
+            );
+
+            // 她停了之後同一顆資料庫、同一列，回到「上一場」。
+            let (_, stopped) = signal_line(
+                &SignalAudit {
+                    scope_is_live: false,
+                    ..running
+                },
+                Emptiness::Erased,
+            );
+            assert!(
+                stopped.contains("上一場") && !stopped.contains("還在錄"),
+                "{stopped}"
+            );
         }
 
         /// 上面兩條測的是「拿到 `Emptiness` 之後講什麼」。這一條測的是**資料庫

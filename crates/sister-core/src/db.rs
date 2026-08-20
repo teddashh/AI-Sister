@@ -1244,13 +1244,20 @@ impl Db {
     /// 機正在錄，那一段的 `ended_at` 也是 NULL，看起來跟當機一樣。可以靠存
     /// PID 再去問作業系統那個 PID 還在不在來分辨，但那是一條跨平台的、而且
     /// 會因為 PID 重用而給出錯誤答案的路。心跳檔答得出同一題，所以
-    /// `occupied` 從呼叫端收進來——**而且是收在這裡，不是收在句子那一層**。
+    /// 心跳整顆從呼叫端收進來——**而且是收在這裡，不是收在句子那一層**。
+    ///
+    /// 收的是 [`crate::heartbeat::phase`] 的回傳值，不是一個布林。「有沒有人
+    /// 佔著這個目錄」和「**她的那一列已經在資料庫裡了嗎**」是兩題，答案分別
+    /// 是 `beat.is_some()` 和 `beat == Some(Recording)`，而中間那個
+    /// `Some(Booting)` 兩題的答案相反——那正是這一整支函式最容易錯的地方。
+    /// 兩個布林在呼叫端拼裝就是下一次拼錯，所以收原始的那一顆，兩個答案都在
+    /// 這裡算完（[`CrashAudit::live`] 和 [`CrashAudit::beat`]）。
     ///
     /// 這一支以前只讀 `sessions` 那張表，於是它答的是「活下來的那幾場」。
     /// 兩組數字從此一起回去：計數器（撐得過刪列）和列（帶得出時間）。
     /// 理由整段寫在 [`migration_006`]。
     ///
-    /// # 為什麼 `occupied` 收在這裡
+    /// # 為什麼那個位元收在這裡
     ///
     /// 上一版收在 `crash_verdict(a, occupied, empty)`，而那一層只把它扣進
     /// **一個**數字（`crashed`）。同一格要印出來的另外三個——分母、拆帳用的
@@ -1270,13 +1277,25 @@ impl Db {
     ///
     /// 所以扣除寫在這裡，一次扣完，回去的每一個欄位都已經不含她。呼叫端沒有
     /// 東西可以拼錯——它連那個布林都拿不到。
-    pub fn crash_audit(&self, occupied: bool) -> Result<CrashAudit> {
+    pub fn crash_audit(&self, beat: Option<crate::heartbeat::Phase>) -> Result<CrashAudit> {
         // **她的那一列在不在**，決定她佔不佔一個位置。心跳寫了、而
         // `sessions` 那一列還沒 INSERT 的那幾百毫秒裡，她在下面一個數字都不
         // 佔——那時候扣掉她，扣掉的會是別人的一次當機。
         //
         // 認得出她的是 `id = MAX(id)`：正在錄的那一場永遠是最新的一列
         // （`delete_empty_sessions` 放過 `MAX(id)` 也是為了同一件事）。
+        //
+        // **只有這一條還不夠，而上一版以為夠了。** `ended_at IS NULL` 的最新
+        // 那一列有兩種：她的，和**上一場當掉留下來的殼**。後者在開機那一段時
+        // 間裡就坐在 `MAX(id)` 上——`BootBeat::start` 先寫心跳，`Db::open` 和
+        // 開機那次 `prune` 才跑（一顆存了一年的資料庫上要好幾分鐘），
+        // `start_session` 最後才 INSERT。於是那幾分鐘裡「有人佔著」是真的、
+        // 「最新那一列沒收尾」也是真的，而它們指的不是同一場：那道扣除會把
+        // **上一次當機**扣掉，然後在下一行說那次當機「現在還在跑」。
+        //
+        // 分得出來的是心跳的 phase，不是 `is_occupied`：`Phase::Recording` 是
+        // 主迴圈寫的，而 `start_session` 在主迴圈之前，所以那一拍在的時候她的
+        // 列一定已經進去了。`Phase::Booting` 就是上面那幾分鐘。
         let newest_open: bool = self
             .conn
             .query_row(
@@ -1286,7 +1305,7 @@ impl Db {
             )
             .optional()?
             .unwrap_or(false);
-        let live = occupied && newest_open;
+        let live = beat == Some(crate::heartbeat::Phase::Recording) && newest_open;
         // 一句 SQL 把她從三個數字裡一起扣掉——分開扣就是分開扣錯。
         let (rows, rows_unfinished, last_crash) = self.conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(ended_at IS NULL), 0), MAX(CASE WHEN ended_at IS NULL THEN started_at END)
@@ -1315,6 +1334,7 @@ impl Db {
             rows_unfinished,
             last_crash,
             live,
+            beat,
             floor: self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'session_counts_floor')",
                 [],
@@ -1397,7 +1417,17 @@ impl Db {
     /// `sister forget` 清空的資料庫走到的是同一個 `None`。這裡分不出來，也不
     /// 該分：這一支只負責數最後一場的列數。要分的是印字的那一邊，它手上有
     /// [`Db::ever_recorded`]（`doctor` 就是這樣接的）。
-    pub fn signal_audit(&self) -> Result<Vec<SignalAudit>> {
+    ///
+    /// ## 為什麼收 `beat`
+    ///
+    /// 因為「最後一場」有兩種，而印出來的字不一樣：她已經停了（那是**上一
+    /// 場**），或者她此刻正在錄（那是**這一場**）。差別不是修辭——同一份報告
+    /// 上面那一列（[`Db::crash_audit`]）把正在錄的那一場從分母裡扣掉了，所以
+    /// 「2 段錄製」和底下三行的「上一場」指的是兩個不相交的集合。
+    ///
+    /// 和 `crash_audit` 一樣，那個位元要在**產生數字的地方**算完：一個新位元
+    /// 只餵給一起印出來的其中一個數字，就會生出 N 個描述 N 個不同集合的數字。
+    pub fn signal_audit(&self, beat: Option<crate::heartbeat::Phase>) -> Result<Vec<SignalAudit>> {
         /// 全是空殼的列要有這麼多，才算證據而不是巧合。
         ///
         /// 縮到一場之後就需要這個下限：`sister record` 開起來的頭三秒，
@@ -1413,20 +1443,24 @@ impl Db {
 
         // 最後一場。`sessions` 的 id 是遞增的，所以最大的那個就是最新的
         // ——不用 `started_at`，那一欄是系統時鐘，改過時間就會亂排。
-        let session: Option<(i64, Millis)> = self
+        let session: Option<(i64, Millis, bool)> = self
             .conn
             .query_row(
-                "SELECT id, started_at FROM sessions ORDER BY id DESC LIMIT 1",
+                "SELECT id, started_at, ended_at IS NULL FROM sessions ORDER BY id DESC LIMIT 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let (id, started_at) = match session {
-            Some((id, at)) => (id, Some(at)),
+        let (id, started_at, open) = match session {
+            Some((id, at, open)) => (id, Some(at), open),
             // 一場都沒有。三個訊號一律 0 列——底下每一句 SQL 都會這樣回答，
             // 但先寫出來比較清楚：這裡的 0 是「還沒開始」，不是「壞了」。
-            None => (i64::MIN, None),
+            None => (i64::MIN, None, false),
         };
+        // 和 `crash_audit` 的 `live` 逐字同一條：心跳說**在錄**（不是在開機），
+        // 而且最新那一列還沒收尾。少了任何一半，開機那幾分鐘裡上一次當機留下
+        // 來的殼就會被說成「這一場，還在錄」。
+        let scope_is_live = beat == Some(crate::heartbeat::Phase::Recording) && open;
         let mut out = Vec::new();
         // 「這個訊號是活的」由每個訊號自己答（`alive`），不在這裡統一套一條
         // 規則：三個 `populated` 數的不是同一種東西（兩個是列數，一個是**幾個
@@ -1449,6 +1483,7 @@ impl Db {
                 },
                 note,
                 scope_started_at: started_at,
+                scope_is_live,
             });
         };
 
@@ -2745,9 +2780,17 @@ pub struct CrashAudit {
     /// 此刻真的有一場在錄，**而且它的那一列已經在資料庫裡**。
     ///
     /// 上面每一個數字都已經把她扣掉了，這個欄位只剩一個用途：讓句子講出「扣
-    /// 掉了」。心跳在、列還沒進去的那幾百毫秒是 `false`——那時候她一個位置都
+    /// 掉了」。心跳在、列還沒進去的那幾分鐘是 `false`——那時候她一個位置都
     /// 不佔，扣掉她會扣掉別人的一次當機。
     pub live: bool,
+    /// 心跳原封不動。
+    ///
+    /// `live` 是「她的那一列在不在」，這一顆是「有沒有人佔著這個目錄」——開機
+    /// 那一段兩者相反，而**兩句話都有人要印**：「零當機」要扣的是前者，「上
+    /// 一次錄製」要講的是後者（那一列是當掉的，可是現在真的有一個 recorder
+    /// 正在起來）。少了這一顆，那一列只能在「她現在還在跑」和「現在沒有任何
+    /// recorder 佔著這個資料目錄」之間挑一句，而開機那幾分鐘兩句都是假的。
+    pub beat: Option<crate::heartbeat::Phase>,
     /// `started` / `ended` 是不是只是一個下限（升級那天回填的，見
     /// [`migration_006`]）。
     pub floor: bool,
@@ -2911,6 +2954,16 @@ pub struct SignalAudit {
     /// 於是那三個 ✓ 講的是「這台機器**曾經**好過」，在一顆用了三個月的資料庫
     /// 上永遠翻不成 ✗。詳見 [`Db::signal_audit`]。
     pub scope_started_at: Option<Millis>,
+    /// 那一段**就是現在正在錄的這一場**。
+    ///
+    /// 同一份 doctor 報告裡，「零當機」那一列的分母把正在錄的那一場扣掉了
+    /// （見 [`CrashAudit`]），而這三列數的正好是被扣掉的那一場——然後叫它
+    /// 「上一場」。問「那 2 場裡哪一場是上一場」，答案是「都不是」。
+    ///
+    /// 這個位元算在這裡、不算在印字的那一邊，是因為算在那邊就會變成「一個
+    /// 新位元只餵給一起印出來的其中一個數字」——這批 bug 從第十次開始每一
+    /// 次都是這個形狀。
+    pub scope_is_live: bool,
 }
 
 /// 一條排除規則生效過的紀錄（見 [`Db::exclusion_audit`]）。
@@ -4245,7 +4298,7 @@ mod tests {
         assert_eq!(st.sessions, 1, "那一列真的還在——這正是這條要守的前提");
         assert_eq!((st.frames, st.chunks, st.facts), (0, 0, 0), "而東西全走了");
         assert_eq!(
-            db.crash_audit(false).expect("crash").rows_unfinished,
+            db.crash_audit(None).expect("crash").rows_unfinished,
             1,
             "它得留著，`零當機` 那一列就是靠它才數得出當機"
         );
@@ -5107,7 +5160,7 @@ mod tests {
         )
         .expect("insert");
         db.end_session(clean).expect("end");
-        let a = db.crash_audit(false).expect("audit");
+        let a = db.crash_audit(None).expect("audit");
         assert_eq!(
             (a.started, a.ended, a.rows, a.rows_unfinished, a.last_crash),
             (1, 1, 1, 0, None),
@@ -5121,7 +5174,9 @@ mod tests {
         // 那一列是收好尾的，扣掉它會讓一場正常收尾的錄製從分母裡消失，而
         // `started - ended - 1` 會變成 -1：那不是一次當機，那是一個還沒開始
         // 的開始。
-        let warming = db.crash_audit(true).expect("audit");
+        let warming = db
+            .crash_audit(Some(crate::heartbeat::Phase::Recording))
+            .expect("audit");
         assert!(!warming.live, "沒有一列可以扣，就不准說「扣掉了」");
         assert_eq!(
             (warming.started, warming.ended, warming.rows),
@@ -5132,7 +5187,7 @@ mod tests {
 
         // 開了就不收尾——程序被殺、當機、拔電，都長這樣。
         db.start_session("test", "0.0.1").expect("session");
-        let a = db.crash_audit(false).expect("audit");
+        let a = db.crash_audit(None).expect("audit");
         assert_eq!((a.started, a.ended), (2, 1));
         assert_eq!(a.rows_unfinished, 1, "沒收尾的那一段沒有被算到");
         assert!(a.last_crash.is_some(), "沒收尾的話要講得出是什麼時候");
@@ -5143,7 +5198,9 @@ mod tests {
         // 扣**，不是只扣當機數。上一版只扣了當機數，於是同一份報告先說「現在
         // 正在錄的那一場沒有算進去」，再把那一場的開始時間當成最後一次當機報
         // 出來，兩行相隔十公分。
-        let live = db.crash_audit(true).expect("audit");
+        let live = db
+            .crash_audit(Some(crate::heartbeat::Phase::Recording))
+            .expect("audit");
         assert!(live.live, "最新那一列沒收尾、而且心跳在，那就是她");
         assert_eq!(live.crashed(), 0, "正在錄的那一場不是一次當機");
         assert_eq!(
@@ -5156,6 +5213,39 @@ mod tests {
             ),
             (1, 1, 1, 0, None),
             "扣就整個扣掉：分母、還留著的列、最後一次的時間，一個都不准留著她"
+        );
+
+        // **而這才是那道閘門真正要擋的東西。** 上面那一格（`warming`）看起來
+        // 在驗開機那一段，其實不是：它前面那一場是**收好尾的**，所以
+        // `newest_open` 自己就是 false，那道閘門拿掉照樣綠。真正的開機那一段
+        // 長這樣——上一場**當掉了**（`ended_at IS NULL` 坐在 `MAX(id)` 上），
+        // 而她此刻正在起來、列還沒進去。
+        //
+        // 順序是產品裡的順序：`BootBeat::start` 寫心跳 → `Db::open`（一顆存了
+        // 一年的資料庫，migration 要跑好幾分鐘）→ 開機那次 `prune` → 最後才
+        // `start_session`。這幾分鐘裡「有人佔著」和「最新那一列沒收尾」兩件事
+        // 都是真的，而它們**指的不是同一場**。
+        let booting = db
+            .crash_audit(Some(crate::heartbeat::Phase::Booting))
+            .expect("audit");
+        assert!(
+            !booting.live,
+            "開機那一段，最新那一列是上一次當機的殼，不是她"
+        );
+        assert_eq!(
+            (booting.started, booting.ended, booting.rows_unfinished),
+            (2, 1, 1),
+            "扣掉的會是別人的一次當機"
+        );
+        assert_eq!(booting.crashed(), 1, "那一次當機不會因為她開機而消失");
+        assert_eq!(
+            booting.last_crash, a.last_crash,
+            "而且時間還在——上一版把這個時間當成「她現在還在跑」的那一場"
+        );
+        assert_eq!(
+            booting.beat,
+            Some(crate::heartbeat::Phase::Booting),
+            "「有人佔著」和「她的列在不在」是兩題，兩個答案都要帶回去"
         );
     }
 
@@ -5181,7 +5271,7 @@ mod tests {
         db.insert_frame(s, &frame_with_text(now_ms(), "a", "b", &["有"]), None, 0)
             .expect("insert");
         db.end_session(s).expect("end");
-        let base = db.crash_audit(false).expect("audit");
+        let base = db.crash_audit(None).expect("audit");
         assert_eq!((base.started, base.ended), (1, 1));
 
         // 「改一下收尾時間」——一句看起來無害的 UPDATE。
@@ -5189,7 +5279,7 @@ mod tests {
             .execute("UPDATE sessions SET ended_at = ended_at + 1", [])
             .expect("再寫一次收尾時間");
         assert_eq!(
-            db.crash_audit(false).expect("audit").ended,
+            db.crash_audit(None).expect("audit").ended,
             base.ended,
             "同一場收尾兩次還是一場"
         );
@@ -5202,7 +5292,7 @@ mod tests {
                 [],
             )
             .expect("補一場已經結束的錄製");
-        let after = db.crash_audit(false).expect("audit");
+        let after = db.crash_audit(None).expect("audit");
         assert_eq!(
             (after.started, after.ended),
             (base.started + 1, base.ended + 1),
@@ -5245,7 +5335,7 @@ mod tests {
             db.start_session("test", "0.0.1").expect("session");
         }
 
-        let before = db.crash_audit(false).expect("audit");
+        let before = db.crash_audit(None).expect("audit");
         assert_eq!(before.rows, 6, "掃之前六列都在");
         assert_eq!(before.crashed(), 5);
 
@@ -5254,7 +5344,7 @@ mod tests {
         db.prune(now_ms(), &crate::config::RetentionConfig::default(), None)
             .expect("prune");
 
-        let after = db.crash_audit(false).expect("audit");
+        let after = db.crash_audit(None).expect("audit");
         assert!(
             after.rows < before.rows,
             "前提沒了這條就沒有意義：那幾列真的要被掃掉（{} → {}）",
@@ -5314,7 +5404,7 @@ mod tests {
         }
 
         let db = Db::open(&path).expect("reopen");
-        let a = db.crash_audit(false).expect("audit");
+        let a = db.crash_audit(None).expect("audit");
         assert!(
             a.floor,
             "升上來的那一顆不知道自己被刪過幾場，它就不可以說『全部』"
@@ -5326,7 +5416,7 @@ mod tests {
         assert!(
             !Db::open(&migrate_tmp("floor-fresh").join("sister.db"))
                 .expect("fresh")
-                .crash_audit(false)
+                .crash_audit(None)
                 .expect("audit")
                 .floor
         );
@@ -5334,7 +5424,7 @@ mod tests {
         // 而**升級之後**開的那幾場照樣是精確的：旗標只描述回填的那一段。
         let mut db = db;
         db.start_session("test", "0.0.1").expect("session");
-        assert_eq!(db.crash_audit(false).expect("audit").crashed(), 1);
+        assert_eq!(db.crash_audit(None).expect("audit").crashed(), 1);
         drop(db);
 
         // **這一段重跑一次，不可以替一顆數得準的資料庫貼上「我數不準」。**
@@ -5371,7 +5461,7 @@ mod tests {
         let again = Db::open(&exact).expect("self-heal");
         assert_eq!(counters(&exact), was, "重跑不可以把真的計數蓋掉");
         assert!(
-            !again.crash_audit(false).expect("audit").floor,
+            !again.crash_audit(None).expect("audit").floor,
             "它一場都沒漏數過，不准說自己漏數了"
         );
     }
@@ -5424,7 +5514,7 @@ mod tests {
         )
         .expect("insert focus");
 
-        for a in db.signal_audit().expect("audit") {
+        for a in db.signal_audit(None).expect("audit") {
             assert_ne!(
                 a.verdict,
                 SignalVerdict::Broken,
@@ -5476,7 +5566,7 @@ mod tests {
             .expect("insert focus");
         }
 
-        let audit = db.signal_audit().expect("audit");
+        let audit = db.signal_audit(None).expect("audit");
         let broken: Vec<_> = audit
             .iter()
             .filter(|a| a.verdict == SignalVerdict::Broken)
@@ -5530,7 +5620,7 @@ mod tests {
             )
             .expect("insert focus");
         }
-        let before = db.signal_audit().expect("audit");
+        let before = db.signal_audit(None).expect("audit");
         let focus = |v: &[SignalAudit]| *v.iter().find(|a| a.name == "視窗焦點").expect("焦點");
         assert_eq!(focus(&before).verdict, SignalVerdict::Alive, "這一場是好的");
 
@@ -5549,7 +5639,7 @@ mod tests {
             .expect("insert focus");
         }
 
-        let after = focus(&db.signal_audit().expect("audit"));
+        let after = focus(&db.signal_audit(None).expect("audit"));
         assert_eq!(
             after.verdict,
             SignalVerdict::Broken,
@@ -5559,6 +5649,56 @@ mod tests {
         assert!(
             after.scope_started_at.is_some(),
             "「12 列」是哪一段的，畫面要說得出來"
+        );
+    }
+
+    /// **「上一場」在她還在錄的時候是假的，而那不是修辭問題。**
+    ///
+    /// 同一份 doctor 上，[`Db::crash_audit`] 的分母把正在錄的那一場扣掉了，
+    /// 而這三列數的正好是被扣掉的那一場——然後叫它「上一場」。問「那 2 場裡
+    /// 哪一場是上一場」，答案是都不是。
+    ///
+    /// 兩半都要問，跟 `crash_audit` 的 `live` 逐字同一條：心跳說**在錄**，而
+    /// 且最新那一列還沒收尾。開機那幾分鐘裡心跳在、她那一列還沒 INSERT，那
+    /// 一列是上一次當機留下來的殼——把它叫成「這一場，還在錄」，就是把當機說
+    /// 成正常。
+    #[test]
+    fn the_session_those_rows_describe_knows_whether_it_is_still_running() {
+        use crate::heartbeat::Phase;
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        db.insert_focus(
+            s,
+            &FocusEvent {
+                ts: 1,
+                kind: FocusKind::Focus,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    ..FocusSnapshot::default()
+                },
+            },
+        )
+        .expect("insert focus");
+
+        fn live(db: &Db, beat: Option<Phase>) -> bool {
+            db.signal_audit(beat).expect("audit")[0].scope_is_live
+        }
+        assert!(
+            live(&db, Some(Phase::Recording)),
+            "她在錄，這一場就是這一場"
+        );
+        assert!(
+            !live(&db, Some(Phase::Booting)),
+            "開機那一段：心跳在，但她那一列還沒進來——這一列是別人的"
+        );
+        assert!(!live(&db, None), "沒有心跳就沒有人在錄");
+
+        // 收尾之後，同一顆心跳（另一個終端機正在錄、而它的列還沒進來）也不
+        // 可以把這一列說成活的。兩半各擋一種。
+        db.end_session(s).expect("end");
+        assert!(
+            !live(&db, Some(Phase::Recording)),
+            "這一列已經收尾了，不管誰佔著資料目錄"
         );
     }
 
