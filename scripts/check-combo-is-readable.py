@@ -34,9 +34,32 @@ workspace，只跑 `cargo check` 和 `clippy`，從來沒有 `cargo test` 過。
 Python 讓前兩個不存在（讀整個檔案、找不到路徑就當場出錯），第三個靠「先把包好
 的那幾個拔掉，再看還剩什麼」。
 
-**這支腳本守不住的那一半，寫在這裡。** 隔天的對抗式稽核指出，第一版的 Python
-還有四個洞，三個已經補掉（見 `mask` 和底下畫面那一段的註解），剩下這一個補不
-掉：
+**這支腳本守不住的那一半，寫在這裡。**
+
+上一版這一段寫的是「第一版的 Python 還有四個洞，三個已經補掉，剩下這一個補不
+掉」，然後只列了 `.clone()` 那一個。**那個數字是假的**：隔天的第二輪稽核在同
+一支腳本上又示範了五個，其中三個是那一輪修法自己造出來的。所以這一段改成一份
+清單，而不是一個數字——數字會過期，而過期的數字讀起來像保證。
+
+alpha.42 補掉的（每一條都有實測的重現，見 `mask()` 和底下兩段的註解）：
+
+  · 生字串那道保險只認 `r#+"`，沒有 `#` 的 `r"…\\"` 整支漏掉 → 引號奇偶性翻轉
+    → 一個一定會紅的違規**一個字都沒印**
+  · Rust 的 `'"'`（字元字面量）同樣開一個假字串
+  · JS 的 `/["]/`（正規表示式字面量）同樣開一個假字串
+  · `view["wanted"]`、`function raw(v){return v.wanted}` + `raw(view)`
+    ——白名單認的是 `view.` 那幾個字，這兩種都不長那樣
+  · `notpretty(view.wanted)`：`before.endswith("pretty(")` 對任何名字結尾是
+    `pretty` 的函式都放行
+  · `tracing::` 那道豁免保護不了任何東西，但賣得出免死金牌（同一行前面塞一句
+    `tracing::debug!("x")` 就好）
+  · CJK 那道過濾漏掉「把句子拆成兩次 `push_str`」
+
+而且 `mask()` 現在會**驗自己的輸出**（見那段 canary）：抹過的字串裡面只該剩
+空白。這一條的用處不在於它認得哪幾種語法，而在於它不必認得——下一種沒想到的
+寫法會撞牆，不會安靜地放行。
+
+**還開著的：**
 
     let w = restored.wanted.clone();
     format!("還在用 {w}。")
@@ -46,6 +69,9 @@ Rust 這邊沒辦法像畫面那邊一樣改用白名單——`.clone()` / `.is_
 `rejected: Some(view.wanted)` 三種合法用法都要放行，而 `.clone()` 正是這個洞
 走的那一條。真正堵得住的只有一個 `Combo` newtype（讓生字串根本 `Display` 不
 出來），而那是一次跨 crate 的改動。
+
+還有：只掃那兩份 Rust 檔和 `settings.js`。第四個地方開始碰那兩個欄位的時候，
+這支腳本不會知道。
 
 **寫在這裡是因為「看起來被守住了」比「知道沒被守住」危險。** 這一批修改自己
 就犯過同一件事：把一整類問題標成修好了，而它比較大的那一半還開著。
@@ -60,7 +86,6 @@ ROOT = Path(__file__).resolve().parent.parent
 # 那個 accelerator 欄位的兩個名字。`wanted` 是現在設成哪一組，`rejected` 是剛剛
 # 試了但沒搶到的那一組——兩個都是生的。
 FIELDS = re.compile(r"\.(wanted|rejected)\b")
-CJK = re.compile(r"[一-鿿]")
 
 failed = []
 
@@ -84,7 +109,20 @@ def read(rel):
     return path.read_text(encoding="utf-8")
 
 
-def mask(source, rel, quotes='"'):
+# Rust 的生字串：`r"…"`、`r#"…"#`、`br"…"`。裡面沒有跳脫字元，收尾是引號後面
+# 接同樣多的 `#`。
+RAW = re.compile(r'(?:b|c|rb|br)?r(#*)"')
+# Rust 的字元字面量。`'a'`、`'\n'`、`'"'`。生命週期（`'a` 後面沒有收尾的單引號）
+# 配不上這個式子，所以照原樣走過去。
+CHAR = re.compile(r"'(?:\\.|[^'\\\n])'")
+# JS 的正規表示式字面量。`[...]` 裡面的 `/` 不是收尾。
+JS_RE = re.compile(r"/(?![*/])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n\[])+/[dgimsuvy]*")
+# `/` 前面是這些的時候，它是正規表示式的開頭，不是除號。
+JS_RE_AFTER = set("(,=:[!&|?{};+-*%^~<>") | {""}
+JS_RE_WORDS = {"return", "typeof", "case", "in", "of", "do", "else", "void", "yield", "await", "new"}
+
+
+def mask(source, rel, lang="rust"):
     """把每一段字串和註解的**內容**換成同長度的空白，換行留著。
 
     **同長度**是重點：換完之後每一個位移都還對得回原檔，所以行號是真的。
@@ -97,17 +135,28 @@ def mask(source, rel, quotes='"'):
     `:)`、或「（見下）」寫成半形），就會被當成呼叫的結尾，那一句後面剩下的
     整段逃掉。實測 `format!("還在用 {}。 :)", restored.wanted)` 在這之前是綠的。
 
-    生字串（`r"…"` / `r#"…"#`）這裡讀不了，遇到就當場算輸，不是猜。一個讀錯
-    的掃描器會安靜地放行，而那正是這支腳本在抓的東西。
+    **上一版對生字串是「遇到就當場算輸」，而那道保險只認 `r#+"`。** `#` 至少
+    要一個，所以沒有 `#` 的那種——`r"C:\\Users\\ted\\AppData\\"`，Windows 路徑
+    最自然的寫法——整支漏掉：結尾那個 `\\"` 被當成跳脫字元，字串沒收掉，整個檔案
+    的引號奇偶性從那裡翻轉，後面每一句真的字串變成「程式碼」、每一段程式碼變成
+    「字串」。實測一個一定會紅的違規變成**綠的，一個字都沒印**。而 docstring
+    上一行自己寫著「一個讀錯的掃描器會安靜地放行，而那正是這支腳本在抓的東西」
+    ——只實作了一半，漏掉的那一半就是「安靜地放行」。
+
+    這一輪的判斷是：**不能靠死**。這顆 repo 裡 `r"…"` 有 43 處、`'"'` 有 3 處，
+    死在上面就是一支對著正確的程式碼喊紅的閘門，而那種閘門會被關掉。所以三種
+    都真的讀懂：生字串（含 `b`/`c` 前綴、任意個 `#`）、Rust 的字元字面量（和
+    生命週期分得開）、JS 的正規表示式字面量（`/["]/` 那個 `"` 以前會開一個假
+    字串）。
+
+    讀懂之後還要**自己驗一次**，見底下那段 canary：抹完的字串裡面只該剩空白，
+    剩下別的就代表剛剛吞掉了一段程式碼。這是「假的那一半要從真的那一半推出來」
+    ——不然下一種沒想到的寫法還是會安靜地放行。
     """
-    if re.search(r'\br#+"', source):
-        die(
-            f'{rel} 裡有生字串（r#"…"#），這支腳本讀不了',
-            "在把它教會之前，別讓它裝作看得懂——它會安靜地放行。",
-        )
-        return None
+    quotes = '"' if lang == "rust" else "\"'`"
     out = list(source)
     i, n = 0, len(source)
+    holes = []  # `${…}` 那幾段是**刻意**不抹的，canary 要跳過它們
 
     def wipe(j):
         if out[j] != "\n":
@@ -127,6 +176,46 @@ def mask(source, rel, quotes='"'):
                 wipe(i)
                 i += 1
             i += 2
+        elif (
+            lang == "rust"
+            and c in "brc"
+            and (i == 0 or not (source[i - 1].isalnum() or source[i - 1] == "_"))
+            and RAW.match(source, i)
+        ):
+            m = RAW.match(source, i)
+            close = '"' + m.group(1)
+            end = source.find(close, m.end())
+            if end == -1:
+                die(f"{rel} 裡有一個生字串收不掉（{close!r} 找不到）", "讀不完就別裝作讀懂了。")
+                return None
+            for j in range(m.end(), end):
+                wipe(j)
+            i = end + len(close)
+        elif lang == "rust" and c == "'" and CHAR.match(source, i):
+            m = CHAR.match(source, i)
+            for j in range(i + 1, m.end() - 1):
+                wipe(j)
+            i = m.end()
+        elif lang == "js" and c == "/" and two not in ("//", "/*") and JS_RE.match(source, i):
+            # 除號還是正規表示式，看**前一個有意義的字元**。註解已經在上面被抹成
+            # 空白了，所以往回跳空白就是往回跳註解。
+            k = i - 1
+            while k >= 0 and out[k] in " \t\n":
+                k -= 1
+            prev = out[k] if k >= 0 else ""
+            word = ""
+            if prev.isalnum() or prev in "_$":
+                e = k + 1
+                while k >= 0 and (out[k].isalnum() or out[k] in "_$"):
+                    k -= 1
+                word = "".join(out[k + 1 : e])
+            if prev in JS_RE_AFTER or word in JS_RE_WORDS:
+                m = JS_RE.match(source, i)
+                for j in range(i + 1, m.end() - 1):
+                    wipe(j)
+                i = m.end()
+            else:
+                i += 1
         elif c in quotes:
             close, i = c, i + 1
             while i < n:
@@ -146,7 +235,7 @@ def mask(source, rel, quotes='"'):
                 # 「閘門翻不成紅」這一種。Rust 那半截沒有這個問題：`format!` 的
                 # 參數本來就在引號外面。
                 if close == "`" and source[i : i + 2] == "${":
-                    depth, i = 0, i
+                    depth, hole = 0, i
                     while i < n:
                         if source[i] == "{":
                             depth += 1
@@ -156,13 +245,38 @@ def mask(source, rel, quotes='"'):
                                 i += 1
                                 break
                         i += 1
+                    holes.append((hole, i))
                     continue
                 wipe(i)
                 i += 1
             i += 1
         else:
             i += 1
-    return "".join(out)
+    masked = "".join(out)
+
+    # ── canary ────────────────────────────────────────────────────────
+    #
+    # 抹完之後，每一對引號中間**只該剩空白**——內容都被 wipe 掉了。中間還留著
+    # 字，就代表剛才某個地方沒收好，把一整段**程式碼**當成字串吞了進去。那正是
+    # 生字串那個洞的形狀，而它的後果是「一個一定會紅的違規，一個字都沒印」。
+    #
+    # 這一條的意義不在於它認得哪幾種寫法，而在於**它不必認得**：下一種沒想到的
+    # 語法一樣會在這裡撞牆，而不是安靜地放行。
+    #
+    # `${…}` 那幾段是刻意留著的（裡面是程式碼，欄位就藏在那裡），所以跳過。
+    for m in re.finditer(r'"[^"]*"', masked):
+        if any(a <= m.start() < b for a, b in holes):
+            continue
+        if m.group(0)[1:-1].strip():
+            line = masked.count("\n", 0, m.start()) + 1
+            die(
+                f"{rel}:{line} 這支腳本把一段程式碼當成字串吞掉了",
+                " ".join(m.group(0).split())[:120],
+                "抹過的字串裡面只該剩空白。剩下別的就是剛剛某個字面量沒收好，",
+                "而它的後果是真的違規安靜地變綠——先把 mask() 教會再說。",
+            )
+            return None
+    return masked
 
 
 def calls(source, scan, names):
@@ -210,22 +324,33 @@ for rel in ["apps/desktop/src-tauri/src/main.rs", "crates/sister-shell/src/lib.r
     src = read(rel)
     if src is None:
         continue
-    scan = mask(src, rel)
+    scan = mask(src, rel, "rust")
     if scan is None:
         continue
     macros = ["format!", "write!", "writeln!", "push_str"]
     for line, start, call, bare in calls(src, scan, macros):
-        if not CJK.search(call):
-            continue
-        # 日誌巨集自己就長成 `format!` 的樣子，用**它前面那一截**認出來。
+        # **這裡以前有兩道豁免，兩道都拿掉了。** 兩道都量過：拿掉之後這顆 repo
+        # 上一條誤報都沒有，也就是說它們**當時保護的東西是零**，而它們各自賣得
+        # 出一張免死金牌。一道保護不了任何東西、又擋得住閘門的例外，只會往一個
+        # 方向動。
         #
-        # 這裡以前還問了 `"tracing::" in call`，而那是一個豁免權賣給任何人的洞：
-        # 句子本身寫著 `tracing::` 就免死。實測
-        # `format!("還在用 {}。（tracing:: 也記了一份）", restored.wanted)` 是綠的。
-        # 現在只看前綴，而且看的是抹掉字串之後的 `scan`——句子裡的字買不到豁免。
-        head = scan[:start].rsplit("\n", 1)[-1]
-        if "tracing::" in head:
-            continue
+        # 一、`if "tracing::" in head`。本意是「日誌是給開發者看的，開發者要的
+        #     正是生的 accelerator」，但 `tracing::warn!` 這種巨集根本配不上
+        #     `macros` 那張表，所以它從來沒有真的赦免過任何一行。而它擋得住的
+        #     是：同一行前面隨手寫一句 `tracing::debug!("x");`，後面那個
+        #     `format!("…{}", restored.wanted)` 當場變綠（實測）。上一版的註解
+        #     還寫著「句子裡的字買不到豁免」——買不到的只有**句子裡**那一種，
+        #     行首那一種照樣買得到。
+        # 二、`if not CJK.search(call)`。本意是「只看給人看的話」，而它漏掉的是
+        #     把句子拆成兩半：
+        #         s.push_str("暫停熱鍵現在是 ");
+        #         s.push_str(&view.wanted);      ← 這一句沒有中文，直接跳過
+        #     湊起來還是那句叫他去按 KeyP 的話。中文在不在**這一次呼叫**裡，
+        #     和那個字串最後會不會走到畫面上，是兩件事。
+        #
+        # 開發者真的要生的那一份的話，用 `tracing::` 的巨集——它們不在上面那張
+        # 表裡，本來就不會走到這裡。
+        #
         # **先把包好的那幾個拔掉**，剩下的才是漏網的。整行 `grep -v` 會被一句話
         # 裡正確的那一半赦免掉另一半。看 `bare`（字串已抹）而不是 `call`：句子
         # 裡寫著 `pretty_combo(` 幾個字不可以當成真的呼叫過。
@@ -271,7 +396,7 @@ if js is not None:
         die("settings.js 裡沒有 pretty() 了", "下面那一圈從此沒有東西可以認。")
     # 註解和字串一起抹掉，長度和換行都留著——**行號因此是真的**。上一版把註解
     # 整段刪掉再 `enumerate`，於是每一則違規報出來的行號都偏了幾十行。
-    body = mask(js, JS, quotes="\"'`")
+    body = mask(js, JS, "js")
     if body is None:
         body = ""
 
@@ -286,9 +411,15 @@ if js is not None:
         return before, after
 
     CMP = re.compile(r"[!=]=+$")
+    # `before` 是一個 60 字的窗，而 `endswith("pretty(")` 對 `notpretty(` /
+    # `xpretty(` 一律放行——任何名字結尾是 `pretty` 的函式都買得到豁免（實測
+    # `${notpretty(view.wanted)}` 是綠的）。改成從**整份檔案**回頭看，而且要求
+    # `pretty` 前面不是識別字元：窗切在半路的時候，`notpretty(` 會被截成
+    # `pretty(`，那是同一個洞換一個入口。
+    WRAP = re.compile(r"(?:^|[^\w$.])pretty\s*\(\s*$")
     for m in re.finditer(r"view\.(wanted|rejected)\b", body):
         before, after = around(m.start(), m.end())
-        wrapped = before.endswith("pretty(") or before.endswith("pretty (")
+        wrapped = WRAP.search(body[: m.start()]) is not None
         # 收尾那個逗號要放過：formatter 拆多行的時候會自己加一個
         # （`pretty(\n  view.wanted,\n)`）。不放過的話，這道閘門會在
         # **正確**的寫法上翻紅——一支在對的程式碼上紅的閘門會被關掉。
@@ -305,21 +436,33 @@ if js is not None:
             "包一層 pretty(…)。要是真的需要生的那一份，先想清楚它會不會走到畫面上。",
         )
 
-    # 白名單認的是 `view.` 這幾個字，所以把它拆開就繞過去了。這兩種都實測綠過：
-    #     const { wanted } = view;   →  之後插值 `${wanted}`
-    #     const v = view;            →  之後 `v.wanted`
-    # 那個欄位只有一個合法的拿法，所以直接把「換一個名字拿」整個禁掉。
-    for pat, why in (
-        (r"\{[^{}]*\b(wanted|rejected)\b[^{}]*\}\s*=\s*view\b", "解構出來就沒有 `view.` 了"),
-        (r"\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*view\s*[;,\n]", "換個名字拿也一樣"),
-    ):
-        for m in re.finditer(pat, body):
-            line = body.count("\n", 0, m.start()) + 1
-            die(
-                f"settings.js:{line} 把 view 拆開拿，繞過了上面那道白名單",
-                js.split("\n")[line - 1].strip()[:160],
-                f"{why}——那兩個欄位只有一個合法的拿法：pretty(view.wanted)。",
-            )
+    # 白名單認的是 `view.` 這幾個字，所以把它拆開就繞過去了。
+    #
+    # 上一版禁的是**兩種寫法**（解構、`const x = view`），而要禁的是**一件事**：
+    # 把那個物件從 `view.` 這個形狀裡帶走。稽核當場示範了兩條漏的：
+    #
+    #     view["wanted"]                     ← 中括號；而且 `"wanted"` 已經被抹成空白
+    #     function raw(v){return v.wanted;}  ← 換一個**參數**名，不是換變數名
+    #     ${raw(view)}
+    #
+    # 所以改成一條，而且是正面表列：**`view` 後面永遠要接一個 `.`**。唯一的
+    # 例外是它自己的參數宣告。這一顆物件在 settings.js 裡只活在 `paintHotkey`
+    # 裡面，每一個用法都是 `view.<欄位>`，所以這條規則沒有第二種合法情形——
+    # 真的需要別的拿法，就是應該被看見的時候。
+    DECL = "function paintHotkey("
+    for m in re.finditer(r"\bview\b", body):
+        if body[: m.start()].endswith(DECL):
+            continue
+        tail = body[m.end() :].lstrip()
+        if tail.startswith("."):
+            continue
+        line = body.count("\n", 0, m.start()) + 1
+        die(
+            f"settings.js:{line} 把 view 從 `view.` 這個形狀裡帶走了",
+            js.split("\n")[line - 1].strip()[:160],
+            "解構、中括號、傳給另一個函式——三種都讓上面那道白名單認不出來。",
+            "那兩個欄位只有一個合法的拿法：pretty(view.wanted)。",
+        )
 
 print()
 if failed:
