@@ -135,7 +135,24 @@ function build(view, dayStart, now) {
   // 「她在跑，只是畫面沒變」長得一模一樣。標題那行的「只顯示前 800 筆」
   // 救不了它：那句話在最上面，這一列在最下面，而人是照著最靠近的那句讀的。
   if (view.truncated) {
-    rows.push({ kind: "cut", start: cursor, end: dayEnd });
+    // 尾巴要切在**現在**，不是午夜。今天 13:47 被切掉的話，13:47 到午夜是
+    // 10 小時 13 分，可是其中只有到現在為止的那 13 分鐘可能藏著沒送過來的
+    // 東西——剩下的十個小時還沒發生。而底下那句「不是那段時間沒有東西」會
+    // 把那十個小時一起指控成「有東西，我沒給你」，於是他去找一個翻頁的方法，
+    // 想把幾千筆根本不存在的紀錄叫出來。
+    //
+    // 這就是下面那條 `quiet` 分支上 `dayEnd <= now` 在守的同一件事（上面那段
+    // 註解自己寫著「今天的話不畫——剩下的時間不是『沒有紀錄』，是還沒發生，
+    // 而那兩件事看起來一樣就糟了」）。兩條分支，只守了一條。
+    const end = Math.min(dayEnd, now);
+    // `end <= cursor` 也還是要畫：`truncated` 是後端說的，代表真的有東西沒送
+    // 過來，只是它和最後一筆落在同一分鐘。那時候不講長度，但不能不講。
+    rows.push({
+      kind: "cut",
+      start: cursor,
+      end: Math.max(end, cursor),
+      unfinished: end < dayEnd,
+    });
   } else if (dayEnd <= now && dayEnd - cursor >= QUIET) {
     rows.push({ kind: "quiet", start: cursor, end: dayEnd });
   }
@@ -146,7 +163,14 @@ function build(view, dayStart, now) {
 function pauseWords(p, dayStart) {
   let head;
   if (p.from === null) {
-    head = "她那時候是關著的（按下去那一筆已經過了保留期）";
+    // 兩種原因做得出同一個孤兒 resume，而這裡分不出是哪一種：保留期掃掉了那天
+    // 的 `system_events`，或者他自己對那段時間按過「忘掉這一段」。`retention.rs`
+    // 的 forget 明講它會留下這個形狀（見那裡 739-742 行的註解）。
+    //
+    // 只講保留期的代價不是「少講一句」，是**指控錯對象**：一個十分鐘前才自己
+    // 按下忘掉的人，會以為是保留期在吃他的紀錄，於是跑去把 text_days 調長——
+    // 一個和真正原因相反的下一步。這一頁 601 行的空狀態早就是兩種一起講的。
+    head = "她那時候是關著的（按下去那一筆被忘掉了，或是過了保留期）";
   } else if (p.from < dayStart) {
     // 不能寫「還在暫停中」：這一段可能早上就解除了，只是**開始**在昨天。
     head = "延續前一天按下的暫停";
@@ -161,9 +185,24 @@ function pauseWords(p, dayStart) {
   let tail;
   if (p.to === null) {
     tail = "之後沒有再解除";
+  } else if (p.from === null) {
+    // 起點不見的時候 `p.start` 是 `p.from ?? dayStart` **湊**出來的，不是他按
+    // 下去的時間。掉進最底下那個 `持續 ${...}` 會拿午夜當起點：09:30 按、11:00
+    // 解除的那一段印出來是「持續 11 小時」——一個看起來精確、而且大了七倍的
+    // 數字。上面那句「只要真正的兩端有任何一端在窗外，就得說出來」講的正是這
+    // 件事，而「不知道在哪」比「在窗外」更不能拿來算。
+    //
+    // 這個 null 是想過的：底下那條 `p.from < dayStart` 本來寫著
+    // `p.from !== null &&`。想過之後讓它掉進 else，比沒想過更難看見——所以現在
+    // null 自己一條分支，`p.from` 是不是 null 只在這裡問一次。
+    //
+    // 「算不出長度」這五個字照抄 `retention.rs:742` 的契約：那裡說刪掉
+    // system_events 會做出孤兒 resume，而消費端「會說『這一段算不出長度』，
+    // 不會少算一段」。`pause_audit` 用 `truncated` 守住了，這一頁沒有。
+    tail = `解除在 ${hhmm.format(p.to)}，但按下去那一筆不見了，算不出長度`;
   } else if (p.to > dayEnd) {
     tail = `跨過午夜；這一天裡佔了 ${lasted(p.end - p.start)}`;
-  } else if (p.from !== null && p.from < dayStart) {
+  } else if (p.from < dayStart) {
     tail = `這一天裡佔了 ${lasted(p.end - p.start)}`;
   } else {
     tail = `持續 ${lasted(p.end - p.start)}`;
@@ -248,7 +287,15 @@ function gapRow(row, dayStart) {
             // 這一列的全部意義是「底下這段空白不是我造成的」。它取代了
             // 一句以前印在這裡的假話（「接下來 10 小時沒有新的東西進來」），
             // 而那句話和真的沒東西長得一模一樣。
-            `這一天還沒完，剩下的 ${lasted(row.end - row.start)} 我沒有送過來`,
+            //
+            // 「這一天還沒完」對過完的那一天是假的，而它印出來的長度一路算到
+            // 午夜——今天看的時候，那個長度裡有大半是還沒發生的時間。所以現在
+            // 分兩種說法，長度也由 `build` 切在 `now`。
+            row.end > row.start
+              ? row.unfinished
+                ? `到現在為止還有 ${lasted(row.end - row.start)} 我沒有送過來`
+                : `這一天剩下的 ${lasted(row.end - row.start)} 我沒有送過來`
+              : "這之後還有沒送過來的，只是它和上一筆同一分鐘",
             `一次只讀前 ${LIMIT} 筆——不是那段時間沒有東西`,
           ]
         : [
