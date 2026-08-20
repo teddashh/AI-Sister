@@ -268,7 +268,7 @@ console.log("⑤ 開頁就讀不到清單——右邊根本沒有「上一次讀
     !p.sub().includes("上一次讀到"),
     p.sub(),
   );
-  check("要說得出這一頁現在是空的", p.sub().includes("空的"), p.sub());
+  check("要說得出右邊沒有東西可以指", p.sub().includes("沒有一份"), p.sub());
   check("右邊真的是空的", p.node("[data-moments]").childElementCount === 0, p.node("[data-moments]").childElementCount);
 }
 
@@ -322,7 +322,18 @@ console.log("⑦ 那一天本來就是空的，重讀又失敗——右邊沒有
     !p.sub().includes("上一次讀到"),
     p.sub(),
   );
-  check("要說得出這一頁現在是空的", p.sub().includes("空的"), p.sub());
+  check("要說得出右邊沒有東西可以指", p.sub().includes("沒有一份"), p.sub());
+  // **這三條是這一格真正的重點。** 這一句以前寫著「這一頁現在是空的」，而它是
+  // 照著⑤（開頁就失敗，整頁真的空著）寫的。這一格不是那一格：左邊三天好好列
+  // 著、標題還在、右邊還有那條填充列。每一行都是真的，湊起來說整頁是空的——
+  // 而他剛按完一顆不可逆的按鈕，讀到的會是「刪掉的比我選的多」。
+  check("左邊那幾天還好好列著", p.node("[data-days]").childElementCount === DAYS.length, p.node("[data-days]").childElementCount);
+  check("標題也還在", p.node("[data-day-title]").textContent !== "", p.node("[data-day-title]").textContent);
+  check(
+    "所以那一句不可以說整頁是空的",
+    !p.sub().includes("這一頁現在是空的"),
+    p.sub(),
+  );
 }
 
 console.log("⑧ 換到另一天讀失敗（右邊被清空了），接著重讀清單也失敗");
@@ -352,6 +363,11 @@ console.log("⑧ 換到另一天讀失敗（右邊被清空了），接著重讀
     !p.sub().includes("上一次讀到"),
     p.sub(),
   );
+  // **只斷言「沒說 A」是不夠的**，那樣 B 講什麼都沒有人看。這一格和⑦一樣：
+  // 左邊那三天還在，所以另一句也不可以說整頁空了。
+  check("要說得出右邊沒有東西可以指", p.sub().includes("沒有一份"), p.sub());
+  check("左邊那幾天還好好列著", p.node("[data-days]").childElementCount === DAYS.length, p.node("[data-days]").childElementCount);
+  check("所以那一句不可以說整頁是空的", !p.sub().includes("這一頁現在是空的"), p.sub());
 }
 
 console.log("");

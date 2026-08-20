@@ -130,6 +130,13 @@ let lastRun = null;
  * 兩個欄位餵同一行字，就是在替「誰先誰後」造一個沒有人會去想的規則。收成一個
  * 之後規則只剩一條：**最後寫的人贏**，而清掉它的是下一件事（見
  * [`overtakenByEvents`]），不是五秒。
+ *
+ * **但收成一個欄位並沒有解掉二。** 上面那段只描述了 `start_recording` 被
+ * reject 的那一瞬間，而那是這個 bug 比較小的一半：真正長的是它 **resolve**
+ * 之後——`starting` 最久真 25 秒，`booting` 更是好幾分鐘——而那整段時間裡
+ * 任何一句 `notice` 都會貼在「正在把她叫起來…」底下，讀起來就是她起不來的
+ * 原因。收欄位收掉的是「誰蓋掉誰」，蓋不掉的是「兩句話並排會被讀成因果」。
+ * 那一半修在 `paint()` 裡：她正在起來的時候，那一行要自己帶主詞。
  */
 let notice = null;
 
@@ -220,8 +227,32 @@ function paint() {
   // 只有灰著的時候有意義。**以前 `wakeFailed` 也被掃進這道閘門底下**，於是一句
   // 從系統匣按「停止記錄」失敗的原因，在她正在錄的時候一個字都不顯示。見
   // [`notice`] 上面那段。
-  const detail =
-    notice ?? (!starting && !booting && shown === "asleep" ? asleepDetail() : "");
+  //
+  // **她正在起來的時候，底下那一行要自己補一個主詞。** `starting` / `booting`
+  // 的時候上面那句講的是「她走到哪了」，而底下那一行沒有主詞——兩行並排，唯一
+  // 讀得出來的意思是「她起不來，因為 X」：
+  //
+  //     正在把她叫起來…
+  //     資料庫打不開
+  //
+  // 而在這兩個狀態下 `notice` **必然不是在講她**：三個會寫「叫不起來」的地方
+  // （`startRecording` 的 catch、25 秒逾時、`recorder-failed`）每一個都在
+  // `paint()` 之前先把 `starting` 關掉。剩下寫得進來的只有他同時做的別的事
+  // ——問一題、按暫停、開時間軸。
+  //
+  // 而這正是他最可能去問問題的那 25 秒：畫面剛剛叫他等一下。更糟的是那一題
+  // 失敗的原因（她正在開那顆一年份的資料庫）和她還沒起來的原因是同一個，所以
+  // 那兩句話讀起來會像同一件事——他於是去修一顆沒有壞的資料庫，而她其實
+  // 好好地正在起來。
+  //
+  // 上一版只補了 `await` 那一瞬間（catch 那條路），而**這 25 秒是同一個 bug
+  // 比較大的那一半**，那時候還寫著「已經修好了」。
+  let detail = "";
+  if (notice !== null) {
+    detail = starting || booting ? `這是另一件事：${notice}` : notice;
+  } else if (!starting && !booting && shown === "asleep") {
+    detail = asleepDetail();
+  }
   stateLine.textContent = detail === "" ? line : `${line}\n${detail}`;
   // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。
   avatar.setAttribute("aria-label", `AI-Sister：${line}`);

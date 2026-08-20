@@ -499,6 +499,66 @@ console.log("⑱ 答成過、然後連著失敗兩次——第二次底下躺的
   );
 }
 
+console.log("⑲ 她**真的正在起來**的那 25 秒裡問了一題失敗，那一行要自己帶主詞");
+{
+  // ⑭ 驗的是 `start_recording` **被 reject** 的那條路，而那是這個 bug 比較小的
+  // 一半：`await` 那一瞬間過去就結束了。真正長的是它 **resolve** 之後——
+  // `starting` 會一路真到輪詢看見 recording 為止，最久 25 秒（`WAKE_TIMEOUT_MS`）。
+  // 而那正是他最可能去問一題的 25 秒，因為畫面剛剛叫他等一下。
+  //
+  //     正在把她叫起來…
+  //     資料庫打不開：database is locked
+  //
+  // 兩行都是真的。湊起來只讀得出一個意思——她起不來，因為資料庫打不開——而
+  // 她其實好好地正在起來，那顆資料庫也沒有壞：那一題會失敗，就是因為她正在
+  // 開它。他於是去修一顆沒有壞的東西。
+  // 兩個狀態都要驗。`booting` 那一半**更長**——他那顆一年份的資料庫要開好幾
+  // 分鐘（app.js 自己的註解就是這樣寫的），比 `starting` 的 25 秒長得多。少
+  // 掉它，`starting || booting` 砍成 `starting` 會全綠。
+  const OOPS = "資料庫打不開：database is locked";
+  //
+  // **`booting` 那一格不可以按「叫她起來」。** 第一版按了，於是那一格 `starting`
+  // 也是真的，而 `line` 先看 `booting`——標題長得一模一樣，前提斷言就這樣為了
+  // 錯的理由過關。抓到它的是 `starting || booting` 砍成 `starting` 之後**全綠**。
+  // 真實情況本來就不必按：她會 booting，是因為系統匣或上一場把 recorder 開起
+  // 來了，而他在那幾分鐘裡問了一題。
+  for (const [what, state, head, wake] of [
+    ["還在叫（25 秒）", "none", "正在把她叫起來", true],
+    ["心跳看到了、資料庫還在開（好幾分鐘）", "booting", "正在開資料庫", false],
+  ]) {
+    console.log(`  — ${what}`);
+    const p = await open({
+      // 從頭到尾停在同一個狀態：她起得來，只是還沒起完。這就是那段窗。
+      recording_state: state,
+      start_recording: () => Promise.resolve(null),
+      ask: new Error(OOPS),
+    });
+    if (wake) await p.click("[data-wake]");
+    check("前提：她正在起來", p.line().includes(head), p.line());
+    await p.type("剛剛發生什麼事");
+    check("那句錯誤要在", p.line().includes(OOPS), p.line());
+    // **只斷言「沒說 X」是不夠的**——那一行整個消失也會綠，而那是另一個 bug。
+    // 要問的是它有沒有**變成另一句話**：底下那一行不可以就是那句錯誤本身。
+    const detail = p.line().split("\n")[1] ?? "";
+    check("但它不可以就這樣貼在底下", detail !== OOPS, detail);
+    check("要看得出來是另一件事", detail.includes("另一件事"), detail);
+  }
+}
+
+console.log("⑳ 反面：她灰著、而且真的是叫不起來的時候，那一行不可以說「另一件事」");
+{
+  // ⑲ 的修法最容易做成「一律加前綴」，那就在另一個方向上說謊：這一次那句話
+  // **就是**在講她為什麼沒起來，前綴會把唯一那條線索推開。三個會寫「叫不起
+  // 來」的地方都先關掉 `starting` 才重畫，⑲ 那條路靠的就是這件事——這一條驗
+  // 的是它還成立。
+  const p = await open({ start_recording: new Error(CONSENT), recording_state: "none" });
+  await p.click("[data-wake]");
+  // 前提就是那件讓 ⑲ 成立的事：寫「叫不起來」的人先關掉了 `starting`。
+  check("已經不是「正在把她叫起來」了", !p.line().includes("正在把她叫起來"), p.line());
+  check("同意書那句在", p.line().includes("同意書"), p.line());
+  check("而且它就是在講她——不可以推開", !p.line().includes("另一件事"), p.line());
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——字母人上有話說不出口，或說了活不過下一次輪詢。`);
