@@ -67,12 +67,24 @@ pub struct PruneReport {
     pub facts_deleted: u64,
     /// focus / clipboard / input / system 四張表加總。
     pub events_deleted: u64,
-    /// 題庫裡消失的提問數（見 `Db::log_query`）。`query_clicks` 由 CASCADE 帶走。
+    /// 題庫裡消失的提問數（見 `Db::log_query`）。`query_clicks` 和 `query_marks`
+    /// 由 CASCADE 帶走。
     ///
     /// 單獨一個欄位而不是併進 `events_deleted`：那一欄裡的東西全是她自己觀察到
     /// 的，這一欄裡的是**他自己打的字**。「忘掉那一段」如果沒有把他那段時間問
     /// 過的話一起帶走，那句話就是半真的，而報告上看不出差別。
     pub queries_deleted: u64,
+    /// 跟著消失的「★ 我本來已經忘了」數（`query_marks`，見 `MIGRATION_007`）。
+    ///
+    /// **又切一欄出來，理由比上面那一欄更硬。** `queries_deleted` 裡的東西還
+    /// 補得回來——他再問一次就有了；這一欄裡的補不回來，那是他看到答案那一刻
+    /// 腦袋裡的狀態，而且它是 Phase 1 第一條退場條件唯一的證據。
+    ///
+    /// 它也是這份報告裡**唯一由他親手按出來**的東西。`prune` 還是在錄製迴圈
+    /// 裡自己跑的——他可以在完全沒動手的情況下把那幾次弄不見。預覽存在的全部
+    /// 意義就是「真的跑之前先看清楚」，而一份不提它的預覽，看清楚的正好不是
+    /// 最該看清楚的那一格。
+    pub marks_deleted: u64,
     /// 整場消失的錄製紀錄數（`sessions` 那張表）。見 [`delete_empty_sessions`]。
     ///
     /// 它不是「那段時間裡她錄了幾場」——是**這一次之後，一列都不剩的那幾場**。
@@ -416,6 +428,13 @@ impl crate::db::Db {
         // 題庫，然後真的跑起來的時候把它刪掉——而預覽存在的全部意義就是
         // 「真的跑之前先看清楚」。
         r.queries_deleted = n("SELECT COUNT(*) FROM queries WHERE ts < ?1", text_cut)?;
+        // 跟著走的那幾個 ★。見 `PruneReport::marks_deleted`：這是預覽裡唯一
+        // 補不回來的一格，而 `prune` 不必他動手就會跑。
+        r.marks_deleted = n(
+            "SELECT COUNT(*) FROM query_marks m JOIN queries q ON q.id = m.query_id \
+             WHERE q.ts < ?1",
+            text_cut,
+        )?;
         // 那幾場錄製本身。`i64::MIN` 當下界，和 `prune` 真的跑時傳給
         // `delete_frames_except` 的一樣——它的條件本來就只有上界。
         r.sessions_deleted = count_empty_sessions(&self.conn, i64::MIN, text_cut)?;
@@ -528,7 +547,16 @@ impl crate::db::Db {
         }
         // 題庫跟著文字的保留期走，不跟畫面。它記的是他問過什麼，而那和
         // 「那天的截圖還在不在」無關——文字都不留了，題目留著也沒有東西可以
-        // 對答案。`query_clicks` 由 CASCADE 帶走。
+        // 對答案。`query_clicks` 和 `query_marks` 由 CASCADE 帶走。
+        //
+        // 標記要**先數再刪**：CASCADE 帶走的列不會算進 `execute` 的回傳值，
+        // 所以刪完再問就永遠是 0。而這一欄是這份報告裡唯一補不回來的東西。
+        report.marks_deleted += tx.query_row(
+            "SELECT COUNT(*) FROM query_marks m JOIN queries q ON q.id = m.query_id \
+             WHERE q.ts < ?1",
+            [text_cut],
+            |r| r.get::<_, i64>(0),
+        )? as u64;
         report.queries_deleted += tx
             .execute("DELETE FROM queries WHERE ts < ?1", [text_cut])
             .context("prune queries")? as u64;
@@ -636,6 +664,11 @@ impl crate::db::Db {
             r.events_deleted += n(sql)?;
         }
         r.queries_deleted = n("SELECT COUNT(*) FROM queries WHERE ts >= ?1 AND ts < ?2")?;
+        // 跟著走的那幾個 ★。見 `PruneReport::marks_deleted`。
+        r.marks_deleted = n(
+            "SELECT COUNT(*) FROM query_marks m JOIN queries q ON q.id = m.query_id \
+             WHERE q.ts >= ?1 AND q.ts < ?2",
+        )?;
         r.sessions_deleted = count_empty_sessions(&self.conn, from_ts, to_ts)?;
         Ok(r)
     }
@@ -750,6 +783,13 @@ impl crate::db::Db {
         // 他那段時間問過的話也要走。留著的話，「那一段忘掉了」是半真的：
         // 螢幕上的東西沒了，但他打進搜尋框的字還在——而那些字往往比畫面更
         // 直接（他不會把不在意的事情打進去）。
+        // 先數再刪：CASCADE 帶走的列不會算進 `execute` 的回傳值。
+        report.marks_deleted += tx.query_row(
+            "SELECT COUNT(*) FROM query_marks m JOIN queries q ON q.id = m.query_id \
+             WHERE q.ts >= ?1 AND q.ts < ?2",
+            [from_ts, to_ts],
+            |r| r.get::<_, i64>(0),
+        )? as u64;
         report.queries_deleted += tx
             .execute(
                 "DELETE FROM queries WHERE ts >= ?1 AND ts < ?2",
@@ -1685,5 +1725,58 @@ mod tests {
         // 整個 struct 一次比，不要一欄一欄挑——挑著比的測試看不到自己沒挑的。
         assert_eq!(preview, actual, "預告和實際必須一模一樣");
         assert!(!preview.is_empty(), "這個區間本來就該有東西");
+    }
+
+    /// **那幾個 ★ 要出現在預覽上，而且數對。**
+    ///
+    /// 上面那兩條「預告和實際一模一樣」是整個 struct 一次比的，照理說新的欄位
+    /// 自動就被蓋到了——**但 `seeded()` 一題都沒問過**，所以 `queries_deleted`
+    /// 和 `marks_deleted` 在那幾條裡兩邊都是 0，比了等於沒比。一個因為兩邊都
+    /// 空所以會過的斷言，和一個真的驗到東西的斷言長得一模一樣。
+    ///
+    /// 這一條把那兩格餵成非零。順便釘住 CASCADE 那個坑：標記是被外鍵帶走的，
+    /// 不會算進 `DELETE FROM queries` 的回傳值，所以刪完再數永遠是 0。
+    #[test]
+    fn the_preview_counts_the_marks_that_are_about_to_go_with_them() {
+        use crate::db::{QueryLogEntry, SOURCE_CLI};
+        let tmp = Tmp::new("forget-marks");
+        let (mut db, _) = seeded(&tmp);
+        let (from, to) = (days_ago(61), NOW);
+
+        // 兩題在窗裡（其中一題標起來），一題在窗外（也標起來，不准被算到）。
+        let ask = |age: i64, q: &str| {
+            db.log_query(&QueryLogEntry {
+                ts: days_ago(age),
+                question: q,
+                shape: "keywords",
+                hits: 1,
+                latency_ms: 1,
+                source: SOURCE_CLI,
+            })
+            .expect("log")
+        };
+        let inside = ask(30, "窗裡標起來的");
+        ask(31, "窗裡沒標的");
+        let outside = ask(400, "窗外標起來的");
+        for id in [inside, outside] {
+            db.mark_query(id, true).expect("mark");
+        }
+
+        let preview = db
+            .forget_preview(from, to, Some(tmp.path()))
+            .expect("preview");
+        assert_eq!(preview.queries_deleted, 2, "{preview:?}");
+        assert_eq!(
+            preview.marks_deleted, 1,
+            "窗外那一個被算進來了：{preview:?}"
+        );
+
+        let actual = db.forget(from, to, Some(tmp.path())).expect("forget");
+        assert_eq!(preview, actual, "預告和實際必須一模一樣");
+        assert_eq!(
+            db.query_log_stats().expect("stats").marked,
+            1,
+            "窗外那一個標記被一起帶走了"
+        );
     }
 }

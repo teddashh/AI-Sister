@@ -1869,10 +1869,15 @@ fn log_click(
 #[tauri::command(async)]
 fn mark_query(query_id: i64, marked: bool, shell: tauri::State<'_, Shell>) -> Result<bool, String> {
     with_db(&shell, |db| {
-        db.mark_query(query_id, marked).map_err(|e| {
-            tracing::warn!("這一次標記沒記進題庫：{e}");
-            format!("{e:#}")
-        })
+        db.mark_query(query_id, marked)
+            // 這裡只要 `marked`——那顆按鈕問的是「現在該畫成什麼樣子」。
+            // `changed`（這一次有沒有真的動到）是終端機才需要分辨的事：那邊
+            // 打得出一個他自己想錯的題號，這邊的 id 是剛剛那一次回答帶下來的。
+            .map(|o| o.marked)
+            .map_err(|e| {
+                tracing::warn!("這一次標記沒記進題庫：{e}");
+                format!("{e:#}")
+            })
     })
 }
 

@@ -791,6 +791,20 @@ impl Db {
             .query_row("SELECT EXISTS(SELECT 1 FROM sessions)", [], |r| r.get(0))?)
     }
 
+    /// 這台機器上，他有沒有**曾經**按過一次「這一題我本來已經忘了」。
+    ///
+    /// 和 [`QueryLogStats::marked`]（現在還剩幾個）是兩題。標記掛在 `queries`
+    /// 底下，`forget` 和保留期都會連著帶走——所以「0 個標記」有兩種意思，而
+    /// 它們的下一步相反：沒按過的人要知道那個按鈕在哪，按過三次然後把那段時
+    /// 間忘掉的人，最不該收到的就是一句「去按按看」。
+    pub fn ever_marked(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'ever_marked')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// 這台機器上，有沒有**曾經真的存下來過一列內容**。
     ///
     /// [`Db::ever_recorded`] 答的是「她有沒有開始過一場錄製」，而那兩題差一台
@@ -1804,34 +1818,55 @@ impl Db {
 
     /// 他說「這一題我本來已經忘了」（或者收回那句話）。
     ///
-    /// 回傳**這張表現在的狀態**，不是「有沒有動到」：兩邊的呼叫端要印的都是
-    /// 「現在標著／現在沒標」，而按兩次同一個開關的人要看到同一句話。
-    ///
     /// 沒有這一題就是錯誤，不是靜靜地成功。`query_id` 是從題庫撈出來的，撈不
     /// 到只有兩種可能——他打錯號碼，或者那一題剛被 `forget` 帶走——而兩種都要
     /// 讓他知道。（外鍵擋得住 `INSERT` 那半邊，擋不住 `DELETE`：刪一列不存在
     /// 的東西在 SQL 裡是完全合法的 0 列。所以先問，不靠外鍵。）
-    pub fn mark_query(&self, query_id: i64, marked: bool) -> Result<bool> {
+    ///
+    /// 回傳兩件事，因為**兩個呼叫端要問的不是同一個問題**。上一版只回一個
+    /// `marked`——而那個 `marked` 就是傳進來的參數原封不動送回去，於是「真的
+    /// 收回了一個標記」和「這一題本來就沒標」印出一模一樣的
+    /// 「○ 收回了，這一題不再算在裡面」。打錯一個號碼的人會看到成功，而他那
+    /// 個標記還掛在別的題上、還算在退場條件裡。`EXISTS` 那一關只擋掉「號碼不
+    /// 存在」，擋不掉「號碼存在但本來就沒標」——而 `sister queries` 現在就把
+    /// `#N` 印在旁邊，後者才是比較常打錯的那一種。
+    pub fn mark_query(&self, query_id: i64, marked: bool) -> Result<MarkOutcome> {
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM queries WHERE id = ?1)",
             params![query_id],
             |r| r.get(0),
         )?;
         anyhow::ensure!(exists, "題庫裡沒有第 {query_id} 題");
-        if marked {
+        let touched = if marked {
             // `OR IGNORE`：重按不換時間。標記的時間是他**第一次**認出來那一
-            // 刻，而那正是這一格的全部內容。
-            self.conn.execute(
+            // 刻，而那正是這一格的全部內容。所以「插進去了」正好等於「這是第
+            // 一次」——重按會回 0 列。
+            let n = self.conn.execute(
                 "INSERT OR IGNORE INTO query_marks(query_id, ts) VALUES(?1, ?2)",
                 params![query_id, now_ms()],
             )?;
+            // **他按過沒有，和現在還剩幾個，是兩件事。** 標記掛在 `queries` 底
+            // 下，`forget` 和保留期都會連著帶走——於是一個按過三次、然後把那段
+            // 時間忘掉的人，會拿到一句「還沒有標記過任何一次，去按吧」。和
+            // `ever_recorded` / `ever_stored` 同一種旗標，也同一個理由。
+            //
+            // 這個旗標不需要回填也不會騙人：標記這個功能還沒有發過任何一版，
+            // 所以世界上不存在「有標記但沒有旗標」的資料庫。
+            self.conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('ever_marked', '1')",
+                [],
+            )?;
+            n
         } else {
             self.conn.execute(
                 "DELETE FROM query_marks WHERE query_id = ?1",
                 params![query_id],
-            )?;
-        }
-        Ok(marked)
+            )?
+        };
+        Ok(MarkOutcome {
+            marked,
+            changed: touched > 0,
+        })
     }
 
     /// 第 `id` 題。沒有那一題就是 `None`。
@@ -1865,27 +1900,27 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
-    /// 他標記過的那幾題，新的在前——**帶著實例本身**。
+    /// 他標記過的那幾題，**他問的時候**新的在前——帶著實例本身。
     ///
     /// 退場條件寫的是「≥ 3 次（記錄實例）」，所以光有一個計數是不夠的：那句
     /// 「記錄實例」要求得出示那幾題長什麼樣。這裡不套 7 天的窗，也不判斷條件
     /// 過了沒——把有時間的實例攤出來，那一格由人去讀。一個會自己宣布「退場條件
     /// ✓」的工具，只是把印象換成一個看起來像數字的印象。
-    pub fn marked_queries(&self, limit: usize) -> Result<Vec<MarkedQuery>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT q.id, q.ts, q.question, q.hits, m.ts
-             FROM query_marks m JOIN queries q ON q.id = m.query_id
-             ORDER BY m.ts DESC, q.id DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |r| {
-            Ok(MarkedQuery {
-                id: r.get(0)?,
-                asked_ts: r.get(1)?,
-                question: r.get(2)?,
-                hits: r.get(3)?,
-                marked_ts: r.get(4)?,
-            })
-        })?;
+    ///
+    /// 排序照 `q.ts`（她答對的時候）而不是 `m.ts`（他按下去的時候），因為
+    /// **`limit` 砍掉的必須是離那七天最遠的那幾列**。退場條件數的是使用的七
+    /// 天（見 [`QueryRow::marked_ts`] 上面那段），照按下去的時間排的話，一個
+    /// 禮拜後才回頭補標的舊題會排到最前面，把真正落在那七天裡的實例擠掉。
+    /// 印出來的第一欄也是 `q.ts`——照 A 排序卻把 B 印在前面，讀起來會像沒排過。
+    ///
+    /// 和 [`Db::query_log`] 共用同一句 `SELECT`（[`query_log_sql`]），所以清單
+    /// 上的每一列就是題庫裡的那一列，不是另外拼出來的一個相似的東西。
+    pub fn marked_queries(&self, limit: usize) -> Result<Vec<QueryRow>> {
+        let mut stmt = self.conn.prepare(&query_log_sql(
+            MARKED_PREDICATE,
+            "ORDER BY q.ts DESC, q.id DESC LIMIT ?1",
+        ))?;
+        let rows = stmt.query_map(params![limit as i64], read_query_row)?;
         Ok(rows.flatten().collect())
     }
 
@@ -1894,30 +1929,34 @@ impl Db {
     /// `empty` 和 `clicked` 是這裡真正該看的兩個數字：前者是她答不出來的比例，
     /// 後者是答出來而且**真的有用**的比例。總數只說明他用了多少次。
     pub fn query_log_stats(&self) -> Result<QueryLogStats> {
-        let mut stats = self.conn.query_row(
+        // 「幾次魔法時刻」數的是**清單上會出現的那幾題**，所以它和
+        // [`Db::marked_queries`] 共用 [`MARKED_PREDICATE`]，不是自己再數一次
+        // `query_marks`。理由寫在那個常數上面：兩份數法就是兩個會對不上的答案。
+        let sql = format!(
             "SELECT COUNT(*), COALESCE(SUM(hits = 0), 0),
                     (SELECT COUNT(DISTINCT query_id) FROM query_clicks),
                     MIN(ts), MAX(ts),
                     COALESCE(SUM(latency_ms > ?1), 0),
                     COALESCE(SUM(source = ?2), 0),
-                    (SELECT COUNT(*) FROM query_marks)
-             FROM queries",
-            params![RETRIEVAL_BUDGET_MS, SOURCE_DESKTOP],
-            |r| {
-                Ok(QueryLogStats {
-                    total: r.get(0)?,
-                    empty: r.get(1)?,
-                    clicked: r.get(2)?,
-                    first_ts: r.get(3)?,
-                    last_ts: r.get(4)?,
-                    slow: r.get(5)?,
-                    clickable: r.get(6)?,
-                    p50_ms: 0,
-                    p95_ms: 0,
-                    marked: r.get(7)?,
-                })
-            },
-        )?;
+                    COALESCE(SUM({MARKED_PREDICATE}), 0)
+             FROM queries q"
+        );
+        let mut stats =
+            self.conn
+                .query_row(&sql, params![RETRIEVAL_BUDGET_MS, SOURCE_DESKTOP], |r| {
+                    Ok(QueryLogStats {
+                        total: r.get(0)?,
+                        empty: r.get(1)?,
+                        clicked: r.get(2)?,
+                        first_ts: r.get(3)?,
+                        last_ts: r.get(4)?,
+                        slow: r.get(5)?,
+                        clickable: r.get(6)?,
+                        p50_ms: 0,
+                        p95_ms: 0,
+                        marked: r.get(7)?,
+                    })
+                })?;
         // 中位數要的是「平常有多快」，p95 要的是「最糟的時候有多糟」。平均值
         // 兩個都答不了：一次 4 秒的 migration 會把一整年的平均拉成一個不曾
         // 發生過的數字。
@@ -2847,21 +2886,44 @@ pub struct QueryRow {
     pub source: String,
     /// 這一題有幾個出處被點開過。0 = 她給了答案，但沒有一筆值得點。
     pub clicks: i64,
-    /// 他自己按過「這一題我本來已經忘了」（見 [`MIGRATION_007`]）。
+    /// 他自己按下「這一題我本來已經忘了」的**那一刻**；沒按過就是 `None`
+    /// （見 [`MIGRATION_007`]）。
     ///
     /// **和 `clicks` 是兩件事，不准互相代表。** 點開出處說的是「我去看了證
     /// 據」，這一格說的是「我本來不知道」——前者在她答錯的時候最常發生。
-    pub marked: bool,
+    ///
+    /// 存時間而不是存一個 `bool`，是因為上一版**同一件事有兩個代表**：`bool`
+    /// 走 `EXISTS`，時間走另一句 `JOIN`，於是「幾次」和「哪幾題」各自去問了一
+    /// 次資料庫，答得出兩個不一樣的數字。少一個欄位就少一次對不上的機會——
+    /// 「有沒有標」現在是 [`QueryRow::marked`]，從同一格算出來的。
+    pub marked_ts: Option<Millis>,
 }
 
-/// [`Db::query_log`] 和 [`Db::query_by_id`] 共用的那一句 `SELECT`。
+impl QueryRow {
+    /// 他標記過這一題沒有。就是 `marked_ts.is_some()`——不是另一個獨立的答案。
+    pub fn marked(&self) -> bool {
+        self.marked_ts.is_some()
+    }
+}
+
+/// 「他標記過的那幾題」在 SQL 裡的唯一定義。
 ///
-/// 一份，不是兩份。這裡的欄位順序是 [`read_query_row`] 的契約，兩個一起改。
+/// 計數（[`QueryLogStats::marked`]）和清單（[`Db::marked_queries`]）都從這裡
+/// 長出來。上一版計數是 `COUNT(*) FROM query_marks`（不 join），清單是
+/// `query_marks JOIN queries`（inner join）——一列孤兒標記就讓「★ 魔法時刻：
+/// 1 次」配著一張空清單，而那句「撈不回題目就讓它炸」的保險因為 inner join
+/// 早就濾掉了它，永遠不會響。
+const MARKED_PREDICATE: &str = "EXISTS(SELECT 1 FROM query_marks m WHERE m.query_id = q.id)";
+
+/// [`Db::query_log`]、[`Db::query_by_id`]、[`Db::marked_queries`] 共用的那一句
+/// `SELECT`。
+///
+/// 一份，不是三份。這裡的欄位順序是 [`read_query_row`] 的契約，兩個一起改。
 fn query_log_sql(whr: &str, tail: &str) -> String {
     format!(
         "SELECT q.id, q.ts, q.question, q.shape, q.hits, q.latency_ms, q.source,
                 (SELECT COUNT(*) FROM query_clicks c WHERE c.query_id = q.id),
-                EXISTS(SELECT 1 FROM query_marks m WHERE m.query_id = q.id)
+                (SELECT m.ts FROM query_marks m WHERE m.query_id = q.id)
          FROM queries q WHERE {whr} {tail}"
     )
 }
@@ -2877,22 +2939,21 @@ fn read_query_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<QueryRow> {
         latency_ms: r.get(5)?,
         source: r.get(6)?,
         clicks: r.get(7)?,
-        marked: r.get(8)?,
+        marked_ts: r.get(8)?,
     })
 }
 
-/// 一次魔法時刻（見 [`Db::marked_queries`]、[`MIGRATION_007`]）。
+/// [`Db::mark_query`] 做完之後的兩件事。
 ///
-/// 兩個時間都留著，因為它們答的不是同一題：`asked_ts` 是她答對的時候，
-/// `marked_ts` 是他認出那件事的時候。退場條件的「7 天內」數的是前者——那七天
-/// 是**使用**的七天；後者只是說他隔了多久才按下去。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MarkedQuery {
-    pub id: i64,
-    pub asked_ts: Millis,
-    pub question: String,
-    pub hits: i64,
-    pub marked_ts: Millis,
+/// 分成兩格，因為兩個呼叫端問的不是同一題：字母人那顆按鈕要的是「現在該畫成
+/// 什麼樣子」（`marked`），而終端機要的是「剛剛到底有沒有發生事情」
+/// （`changed`）——後者少了就會對著一個沒標過的題號說「收回了」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkOutcome {
+    /// 這一題現在標著沒有。等於傳進去的那個參數——呼叫成功就代表狀態已經是它。
+    pub marked: bool,
+    /// 這一次有沒有真的動到那張表。重按同一個方向是 `false`。
+    pub changed: bool,
 }
 
 /// 「零當機」那一格的兩組數字（見 [`Db::crash_audit`]、[`migration_006`]）。
@@ -4363,29 +4424,74 @@ mod tests {
 
     /// 標記是個開關：按下去、收回來、再按一次，讀回來的都是**現在**的狀態。
     ///
-    /// 回傳值一併釘住：呼叫端拿它去印那句話，所以它不可以是「有沒有動到」。
-    /// 按第二次的人和按第一次的人要看到同一句「標好了」。
+    /// 回傳的兩格各釘一半，因為兩個呼叫端問的不是同一題。`marked` 是現在的狀
+    /// 態，按第二次和按第一次一樣——字母人那顆按鈕照它上色。`changed` 是這一次
+    /// 有沒有真的動到東西。
+    ///
+    /// 上一版只有前者，而且它就是傳進去的參數送回來：於是「真的收回了一個標
+    /// 記」和「這一題本來就沒標」印出一模一樣的「○ 收回了」。`EXISTS` 那道關
+    /// 只擋掉「號碼不存在」，擋不掉「號碼存在但本來就沒標」——而 `sister
+    /// queries` 現在把 `#N` 印在旁邊，後者才是比較常打錯的那一種。
     #[test]
     fn a_mark_is_a_switch_not_a_counter() {
         let db = test_db();
         let q = ask(&db, 1_000, "我早就忘了的那件事", 2);
-        assert!(!db.query_log(1).expect("log")[0].marked, "一開始不該標著");
+        assert!(!db.query_log(1).expect("log")[0].marked(), "一開始不該標著");
 
-        assert!(db.mark_query(q, true).expect("mark"));
-        assert!(
-            db.mark_query(q, true).expect("再按一次"),
-            "重按要回同一個狀態"
-        );
-        assert!(db.query_log(1).expect("log")[0].marked);
+        let first = db.mark_query(q, true).expect("mark");
+        assert!(first.marked && first.changed, "第一次按下去是有動到的");
+        let again = db.mark_query(q, true).expect("再按一次");
+        assert!(again.marked, "重按要回同一個狀態");
+        assert!(!again.changed, "重按沒有動到任何東西");
+        assert!(db.query_log(1).expect("log")[0].marked());
         assert_eq!(
             db.query_log_stats().expect("stats").marked,
             1,
             "重按不該變成兩題"
         );
 
-        assert!(!db.mark_query(q, false).expect("unmark"));
-        assert!(!db.query_log(1).expect("log")[0].marked);
+        let off = db.mark_query(q, false).expect("unmark");
+        assert!(!off.marked && off.changed, "這一次真的收回了一個標記");
+        let off_again = db.mark_query(q, false).expect("再收一次");
+        assert!(!off_again.marked, "還是沒標");
+        assert!(
+            !off_again.changed,
+            "本來就沒標的題再收一次，不可以講得像收回了一個標記"
+        );
+        assert!(!db.query_log(1).expect("log")[0].marked());
         assert_eq!(db.query_log_stats().expect("stats").marked, 0);
+    }
+
+    /// **「幾次」和「哪幾題」要從同一個地方算出來。**
+    ///
+    /// 上一版計數是 `COUNT(*) FROM query_marks`（不 join），清單是
+    /// `query_marks JOIN queries`（inner join）。一列孤兒標記——外鍵關著的時候
+    /// 手動改資料庫就造得出來——會讓「★ 魔法時刻：1 次」配著一張空清單，而
+    /// `ops.rs` 那句「撈不回題目就讓它炸」的保險，因為 inner join 早就把它濾掉
+    /// 了，永遠不會響。這正是這個 repo 已經寫進規則、然後又犯過一次的那一條：
+    /// 兩次獨立的查找會指到不同的東西。
+    #[test]
+    fn the_count_and_the_list_are_the_same_question_asked_once() {
+        let db = test_db();
+        let q = ask(&db, 1_000, "真的有這一題", 1);
+        db.mark_query(q, true).expect("mark");
+
+        // 外鍵關掉才造得出孤兒——那正是「有人動了資料庫」的情境。
+        db.conn
+            .pragma_update(None, "foreign_keys", false)
+            .expect("fk off");
+        db.conn
+            .execute("INSERT INTO query_marks(query_id, ts) VALUES(999, 1)", [])
+            .expect("orphan");
+        db.conn
+            .pragma_update(None, "foreign_keys", true)
+            .expect("fk on");
+
+        assert_eq!(
+            db.query_log_stats().expect("stats").marked as usize,
+            db.marked_queries(100).expect("marked").len(),
+            "數出來的次數和列得出來的實例對不上"
+        );
     }
 
     /// **重按不會把時間往前推。**
@@ -4411,7 +4517,7 @@ mod tests {
 
         assert_eq!(
             db.marked_queries(1).expect("marked")[0].marked_ts,
-            FIRST,
+            Some(FIRST),
             "重按把「第一次認出來」的時間蓋掉了"
         );
     }
@@ -4461,8 +4567,8 @@ mod tests {
 
     /// 退場條件寫的是「記錄實例」，所以拿得出來的不能只有一個數字。
     ///
-    /// 兩個時間都要在：她答對的那一刻（`asked_ts`，「七天內」數的是它），和他
-    /// 認出來的那一刻（`marked_ts`，排序照它——最近想起來的排前面）。
+    /// 兩個時間都要在：她答對的那一刻（`ts`，「七天內」數的是它），和他認出來
+    /// 的那一刻（`marked_ts`）。
     #[test]
     fn the_instances_come_back_with_both_of_their_timestamps() {
         let db = test_db();
@@ -4473,15 +4579,77 @@ mod tests {
 
         let marked = db.marked_queries(10).expect("marked");
         assert_eq!(marked.len(), 2);
-        // 標記時間都是 `now_ms()`，測試裡兩題同一毫秒是常態——所以只斷言集合，
-        // 順序那一半由 `marked_ts DESC, id DESC` 的 `id` 決勝負來保證。
-        assert_eq!(marked[0].id, b, "同一毫秒標的，後面那一題排前面");
+        assert_eq!(marked[0].id, b, "她比較晚答對的那一題排前面");
         for m in &marked {
-            assert_eq!(m.asked_ts, if m.id == a { 1_000 } else { 2_000 });
-            assert!(m.marked_ts > 0, "標記自己的時間沒寫進去");
+            assert_eq!(m.ts, if m.id == a { 1_000 } else { 2_000 });
+            assert!(
+                m.marked_ts.expect("標記自己的時間沒寫進去") > 0,
+                "標記時間要是真的時間"
+            );
             assert!(m.question.contains("神奇"));
         }
         assert_eq!(marked.iter().find(|m| m.id == b).expect("b").hits, 5);
+    }
+
+    /// **`limit` 砍掉的必須是離那七天最遠的那幾列。**
+    ///
+    /// 排序照 `q.ts`（她答對的時候）而不是 `m.ts`（他按下去的時候）。一個禮拜
+    /// 後才回頭補標的舊題，「按下去的時間」是最新的——照 `m.ts` 排它會站到第一
+    /// 個，然後把真正落在那七天裡的實例擠出 `limit` 外面。退場條件數的是使用的
+    /// 七天，不是回想的七天。
+    #[test]
+    fn the_limit_cuts_the_oldest_question_not_the_oldest_press() {
+        let db = test_db();
+        let old = ask(&db, 1_000, "很久以前問的", 1);
+        let recent = ask(&db, 9_000, "這禮拜問的", 1);
+        // 讓「按下去的時間」和「問的時間」剛好相反：舊題後來才補標。
+        db.mark_query(recent, true).expect("mark recent");
+        db.mark_query(old, true).expect("mark old");
+        for (q, ts) in [(recent, 100), (old, 200)] {
+            db.conn
+                .execute(
+                    "UPDATE query_marks SET ts = ?2 WHERE query_id = ?1",
+                    params![q, ts],
+                )
+                .expect("backdate");
+        }
+
+        let one = db.marked_queries(1).expect("marked");
+        assert_eq!(one.len(), 1);
+        assert_eq!(
+            one[0].id, recent,
+            "limit 砍掉的該是她比較早答對的那一題，不是比較早被按的那一題"
+        );
+    }
+
+    /// **`ever_marked` 的兩面都要釘住，而 `false` 那一面比較貴。**
+    ///
+    /// 這個旗標存在的理由是把「他從來沒按過」和「他按過、現在一格都不剩」分
+    /// 開，而只釘 `true` 那一面的話，一個永遠回 `true` 的實作也是綠的——然後
+    /// 一台剛裝好、一次都沒按過的機器會被告知「你按過，但現在一個都不剩」，
+    /// 也就是指控一場沒發生過的刪除。那正是 `scripts/check-erased-db.sh` 花
+    /// 九百多行在抓的那種話，而 `sister queries` 不在那支腳本的迴圈裡。
+    ///
+    /// 所以這一條從**沒按過**開始走：開一顆、問一題、確認它還是 `false`。
+    #[test]
+    fn a_machine_where_nobody_pressed_must_not_claim_he_did() {
+        let db = test_db();
+        let q = ask(&db, 1_000, "問過但沒按", 2);
+        assert!(
+            !db.ever_marked().expect("ever_marked"),
+            "一次都沒按過，這一格不可以是 true"
+        );
+
+        db.mark_query(q, true).expect("mark");
+        assert!(db.ever_marked().expect("ever_marked"), "按了就要記得");
+
+        // 收回不會把它翻回去——那正是它和 `marked` 的差別，也是它唯一的用處。
+        db.mark_query(q, false).expect("undo");
+        assert_eq!(db.query_log_stats().expect("stats").marked, 0);
+        assert!(
+            db.ever_marked().expect("ever_marked"),
+            "收回的是標記，不是「他按過」這件事"
+        );
     }
 
     /// 忘掉那一段時間，掛在那幾題上的標記要跟著走。
@@ -4531,9 +4699,9 @@ mod tests {
         let log = db.query_log(10).expect("log");
         let row = |id: i64| log.iter().find(|r| r.id == id).expect("在清單上");
         assert_eq!(row(clicked).clicks, 1);
-        assert!(!row(clicked).marked, "點開不會自己變成標記");
+        assert!(!row(clicked).marked(), "點開不會自己變成標記");
         assert_eq!(row(magic).clicks, 0, "標記不會自己變成點擊");
-        assert!(row(magic).marked, "標了的那一題在清單上沒有標記");
+        assert!(row(magic).marked(), "標了的那一題在清單上沒有標記");
     }
 
     /// **一場全程被排除規則擋掉的錄製，不是一顆空的資料庫。**

@@ -673,6 +673,44 @@ pub mod mark {
 
         // 沒給題號就是「剛剛那一題」。**分得出三種**：那個勾關著、沒問過、
         // 打錯號碼。前兩種以前共用一句「先問她一題」。
+        //
+        // 那個勾關著的時候，「剛剛那一題」這個概念本身就不存在了——她照樣答得
+        // 出來，只是一個字都沒留下。所以這一關要擋在**撈之前**，不能只擋在
+        // 「撈不到」的那條岔路上：上一版寫成 `last_query().with_context(…)`，
+        // 於是題庫裡只要還躺著一列關掉那個勾之前的舊題，這句話就整個被跳過，
+        // `sister mark` 會安靜地標到那一題、印一句「記下來了」，然後那一次
+        // 假的魔法時刻就算進退場條件裡。**這一格是補不回來的證據，寧可不記。**
+        // 給了 `--id` 就是另一回事：他指名了一題，那一題也真的在。
+        if !query_log && id.is_none() {
+            // **最後那一句要先看一眼再說。** 它上一版是寫死的，於是一顆題庫空
+            // 空如也的資料庫也會被告知「題庫裡還躺著關掉之前的舊題」，然後被
+            // 指去 `sister queries` 看一個不存在的題號——而下一個指令會當場打
+            // 臉（「題庫是空的」）。錯的方向剛好是最糟的那個：它叫他去做一件
+            // 做不到的事，而做不到的時候他會以為是這個功能壞了。
+            //
+            // 問法就用 `last_query()`：底下那條沒關勾的路問的是同一件事，同一
+            // 個函式。多開一個「有沒有舊題」的查法，就是同一個概念的第二份答
+            // 案，而這個 repo 已經為那件事付過帳。
+            let stale = db.last_query()?;
+            anyhow::bail!(
+                "`privacy.query_log` 是關著的，所以你剛剛問的那一題一個字都沒有留下來——\
+                 標記是掛在題目上的，沒有題目就沒有地方掛。\n\
+                 要記這一格的話，把那個勾打開（設定頁的「你問過她什麼」），\
+                 從下一題開始才留得住。\n{}",
+                match stale {
+                    Some(q) => format!(
+                        "（題庫裡還躺著關掉之前的舊題，最近的一題是 #{} 「{}」。\
+                         要標的是那裡面的某一題的話，`sister queries` 看題號，\
+                         再 `sister mark --id N`。）",
+                        q.id,
+                        crate::fmt::one_line(&q.question, 40)
+                    ),
+                    None =>
+                        "（題庫是空的，關掉之前的舊題也一題都沒有，所以現在沒有任何一題標得到。）"
+                            .to_string(),
+                }
+            );
+        }
         let row = match id {
             Some(id) => db.query_by_id(id)?.with_context(|| {
                 format!(
@@ -681,40 +719,49 @@ pub mod mark {
                 )
             })?,
             None => db.last_query()?.with_context(|| {
-                if query_log {
-                    "還沒有任何一題可以標記。先問她一題（`sister query …` 或字母人的搜尋框），\
-                     標記是掛在題目上的。"
-                        .to_string()
-                } else {
-                    // 這一種**講得出是哪一種**（設定檔就在手上），所以不攤可能性。
-                    "`privacy.query_log` 是關著的，所以你問過的那些題一個都沒有留下來——\
-                     標記是掛在題目上的，沒有題目就沒有地方掛。\n\
-                     要記這一格的話，把那個勾打開（設定頁的「你問過她什麼」），\
-                     從下一題開始才留得住。"
-                        .to_string()
-                }
+                "還沒有任何一題可以標記。先問她一題（`sister query …` 或字母人的搜尋框），\
+                 標記是掛在題目上的。"
+                    .to_string()
             })?,
         };
 
-        let now = db.mark_query(row.id, marked)?;
-        // **印出那一題本身。** 不帶題號的那條路標到的是「最近那一題」，而他心
-        // 裡的「剛剛那一題」不一定是同一個——中間從字母人問過一題就分岔了。
-        // 一句光禿禿的「標好了」在那個情況下是對的字配著錯的事。
-        if now {
-            println!(
-                "★ #{} 「{}」——記下來了：這一題你本來已經忘了。",
-                row.id,
-                crate::fmt::one_line(&row.question, 40)
-            );
-            println!("  標錯了的話：sister mark --undo --id {}", row.id);
-        } else {
-            println!(
-                "○ #{} 「{}」——收回了，這一題不再算在裡面。",
-                row.id,
-                crate::fmt::one_line(&row.question, 40)
-            );
+        for line in mark_lines(row.id, &row.question, db.mark_query(row.id, marked)?) {
+            println!("{line}");
         }
         Ok(())
+    }
+
+    /// 標記完講的那一兩句話。
+    ///
+    /// **印出那一題本身。** 不帶題號的那條路標到的是「最近那一題」，而他心裡
+    /// 的「剛剛那一題」不一定是同一個——中間從字母人問過一題就分岔了。一句光禿
+    /// 禿的「標好了」在那個情況下是對的字配著錯的事。
+    ///
+    /// **四種，不是兩種。** `changed` 那一半同樣是「兩個狀態印同一句話」：
+    /// `--undo` 一個**存在但本來就沒標**的題號，上一版和真的收回一個標記印得
+    /// 一模一樣。而那正是比較常打錯的那一種——`sister queries` 就把 `#N` 印在
+    /// 旁邊——打錯的人會看到成功，然後不再回頭查，他真正的那個標記還掛在別的
+    /// 題上、還算在退場條件裡。
+    ///
+    /// 是個回傳字串的函式而不是一串 `println!`，因為這四句話是這個子命令**唯
+    /// 一**的產出：印出去就沒有人驗得到它們互相分得開。
+    fn mark_lines(id: i64, question: &str, out: sister_core::db::MarkOutcome) -> Vec<String> {
+        let q = crate::fmt::one_line(question, 40);
+        match (out.marked, out.changed) {
+            (true, true) => vec![
+                format!("★ #{id} 「{q}」——記下來了：這一題你本來已經忘了。"),
+                format!("  標錯了的話：sister mark --undo --id {id}"),
+            ],
+            (true, false) => vec![
+                format!("★ #{id} 「{q}」——這一題你本來就標著了，沒有再算一次。"),
+                format!("  收回的話：sister mark --undo --id {id}"),
+            ],
+            (false, true) => vec![format!("○ #{id} 「{q}」——收回了，這一題不再算在裡面。")],
+            (false, false) => vec![
+                format!("○ #{id} 「{q}」——這一題本來就沒有標記，沒有東西可以收回。"),
+                "  標記在哪幾題：sister queries --marked".to_string(),
+            ],
+        }
     }
 
     #[cfg(test)]
@@ -829,9 +876,126 @@ pub mod mark {
             let db = Db::open(&crate::db_path(&t.0)).expect("open");
             let log = db.query_log(10).expect("log");
             let by_id = |id: i64| log.iter().find(|r| r.id == id).expect("在清單上");
-            assert!(by_id(ids[0]).marked, "標了的那一題在清單上沒有標記");
-            assert!(!by_id(ids[1]).marked, "沒標的那一題被標起來了");
+            assert!(by_id(ids[0]).marked(), "標了的那一題在清單上沒有標記");
+            assert!(!by_id(ids[1]).marked(), "沒標的那一題被標起來了");
             assert_eq!(db.query_log_stats().expect("stats").marked, 1);
+        }
+
+        /// **那個勾關著、而題庫裡還躺著舊題的時候，不准標到那一題。**
+        ///
+        /// 上一版的防呆寫在 `last_query().with_context(…)` 裡，只有**空**題庫
+        /// 走得到。於是一個關掉那個勾、問了一整天的人跑 `sister mark`，會拿到
+        /// 一句「★ #1「昨天那一題」——記下來了」：對的字，錯的題，而那一次假的
+        /// 魔法時刻就算進 Phase 1 的第一條退場條件裡。
+        ///
+        /// 這一格是補不回來的證據，寧可不記。給了 `--id` 是另一回事——他指名
+        /// 了一題，那一題也真的在，所以那條路照走。
+        #[test]
+        fn a_switched_off_log_must_not_hand_him_yesterdays_question() {
+            let t = crate::ops::tmp::Tmp::new("mark-log-off-stale");
+            let ids = asked(&t.0, &["關掉那個勾之前問的"]);
+
+            let err = run(&t.0, None, true, false).expect_err("不可以標到舊的那一題");
+            let err = err.to_string();
+            assert!(err.contains("query_log"), "要講出是哪個開關：{err}");
+            // **這一條要斷在會變的那一半上。** 上一版斷的是 `err.contains("--id")`，
+            // 而那句話是寫死的常數——一顆空題庫也照樣印得出來，於是這個斷言在
+            // 「舊題還在」和「一題都沒有」兩種情形下都是綠的，量到的是零。
+            // 底下那條空題庫的測試現在釘著反面，兩條一起才分得出綠和紅。
+            assert!(
+                err.contains("關掉之前的舊題，最近的一題是") && err.contains("關掉那個勾之前問的"),
+                "舊題還在，要講得出是哪一題：{err}"
+            );
+
+            let db = Db::open(&crate::db_path(&t.0)).expect("open");
+            assert_eq!(
+                db.query_log_stats().expect("stats").marked,
+                0,
+                "什麼都不該被標起來"
+            );
+
+            // 指名的那一條照走：他自己講出是哪一題，就不是「剛剛那一題」了。
+            run(&t.0, Some(ids[0]), true, false).expect("指名的標得到");
+            assert_eq!(db.query_log_stats().expect("stats").marked, 1);
+        }
+
+        /// **題庫空的時候，同一句話不可以宣布有舊題躺在那裡。**
+        ///
+        /// 上一條的錯誤訊息最後那一句是寫死的：「題庫裡還躺著關掉之前的舊題…
+        /// `sister queries` 看題號」。一顆一題都沒問過、而 `query_log` 關著的
+        /// 資料庫照樣拿得到它——然後他去跑 `sister queries`，得到「題庫是空
+        /// 的」。前一句叫他去做的事，後一句說做不到。
+        ///
+        /// 這兩條測試是一對：上面那條釘「有舊題就要講出是哪一題」，這條釘
+        /// 「沒有就不准說有」。少了任何一條，那句話都可以退回成一個常數。
+        #[test]
+        fn an_empty_log_must_not_be_told_old_questions_are_waiting() {
+            let t = crate::ops::tmp::Tmp::new("mark-log-off-empty");
+            // 開一顆有資料庫、但一題都沒問過的：`asked` 一列都不給。
+            asked(&t.0, &[]);
+
+            let err = run(&t.0, None, true, false)
+                .expect_err("那個勾關著就不該標得成")
+                .to_string();
+            assert!(err.contains("query_log"), "要講出是哪個開關：{err}");
+            assert!(
+                !err.contains("還躺著"),
+                "一題都沒有，不可以說題庫裡還躺著舊題：{err}"
+            );
+            assert!(err.contains("題庫是空的"), "要講出真正的狀況：{err}");
+        }
+
+        /// **收回一個本來就沒標的題號，不可以講得像收回了一個標記。**
+        ///
+        /// `#N` 現在印在 `sister queries` 上，所以打錯號碼是走得到的——而打錯
+        /// 的人拿到一句「○ 收回了」之後就不會再查，他真正的那個標記還掛在別的
+        /// 題上、還算在退場條件裡。兩句話一模一樣，下一步相反。
+        #[test]
+        fn taking_back_a_mark_that_was_never_there_says_so() {
+            use sister_core::db::MarkOutcome;
+            let said = |marked, changed| {
+                mark_lines(7, "打錯的那一題", MarkOutcome { marked, changed }).join("\n")
+            };
+
+            let real = said(false, true);
+            let noop = said(false, false);
+            assert_ne!(real, noop, "真的收回和沒東西可收回印出一模一樣的話");
+            assert!(
+                noop.contains("本來就沒有標記"),
+                "要講出這一題本來就沒標：{noop}"
+            );
+            assert!(
+                real.contains("收回了，這一題不再算在裡面"),
+                "真的收回了要講出來：{real}"
+            );
+
+            // 標的那一邊同理：重按一次不是「又記了一次」。
+            let fresh = said(true, true);
+            let again = said(true, false);
+            assert_ne!(fresh, again, "第一次標和重按印出一模一樣的話");
+            assert!(again.contains("本來就標著"), "重按要講出來：{again}");
+
+            // 四種都講得出是哪一題——那是這幾句話存在的第一個理由。
+            for s in [&real, &noop, &fresh, &again] {
+                assert!(s.contains("#7") && s.contains("打錯的那一題"), "{s}");
+            }
+        }
+
+        /// 打錯號碼收回的那一次，不可以動到真的那一個標記。
+        #[test]
+        fn undoing_the_wrong_number_leaves_the_real_mark_alone() {
+            let t = crate::ops::tmp::Tmp::new("mark-undo-wrong");
+            let ids = asked(&t.0, &["標起來的", "沒標的"]);
+            run(&t.0, Some(ids[0]), true, true).expect("mark");
+            run(&t.0, Some(ids[1]), false, true).expect("undo 一個沒標的");
+
+            let db = Db::open(&crate::db_path(&t.0)).expect("open");
+            assert_eq!(
+                db.query_log_stats().expect("stats").marked,
+                1,
+                "打錯號碼不該動到真的那一個"
+            );
+            assert_eq!(db.marked_queries(10).expect("marked")[0].id, ids[0]);
         }
     }
 }
@@ -893,6 +1057,9 @@ pub mod queries {
         };
 
         if json {
+            // 撈一次就好。同一句查詢問三遍是「兩次獨立的查找會指到不同的東西」
+            // 的溫床——中間有東西寫進去，數字和清單就對不上了。
+            let instances = db.marked_queries(limit)?;
             let out = serde_json::json!({
                 "total": stats.total,
                 "empty": stats.empty,
@@ -914,9 +1081,21 @@ pub mod queries {
                 // 換成一個長得像數字的印象。實例帶著時間攤在這裡，那一格由人
                 // 去讀。
                 "marked": stats.marked,
-                "marked_instances": db.marked_queries(limit)?.iter().map(|m| serde_json::json!({
+                // `marked: 0` 有兩種：他從來沒按過，和他按過但現在一格都不剩
+                // （自己 `--undo` 收回、或那幾題被 `forget`／保留期帶走）。對
+                // 這條退場條件來說那是兩件完全不同的事——前者是還沒開始量，
+                // 後者是量過的東西掉了、而且補不回來。人看的那一行早就分開講
+                // 了；`--json` 少了這一格的話，腳本只看得到同一個 0。
+                //
+                // 和 `ever_recorded` / `ever_stored` 同一個形狀，理由也同一個。
+                "ever_marked": db.ever_marked()?,
+                // `marked` 是全部，`marked_instances` 最多只有 `limit` 列——所以
+                // 一併出這一格，讓腳本自己看得出手上那幾列是不是全部。少了它，
+                // 一份 `--limit 5` 的輸出和一份真的只有 5 次的輸出長得一模一樣。
+                "marked_instances_truncated": (stats.marked as usize) > instances.len(),
+                "marked_instances": instances.iter().map(|m| serde_json::json!({
                     "id": m.id,
-                    "asked_ts": m.asked_ts,
+                    "asked_ts": m.ts,
                     "marked_ts": m.marked_ts,
                     "question": m.question,
                     "hits": m.hits,
@@ -936,7 +1115,7 @@ pub mod queries {
                     "latency_ms": r.latency_ms,
                     "source": r.source,
                     "clicks": r.clicks,
-                    "marked": r.marked,
+                    "marked": r.marked(),
                 })).collect::<Vec<_>>(),
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
@@ -952,16 +1131,32 @@ pub mod queries {
             //
             // 但不宣布是哪一種。`ever_recorded` 答得出「她錄過」，答不出「他
             // 問過」——一個天天在錄、從來沒用過搜尋框的人（這個專案自己就是），
-            // 拿到「你問過的那些題被忘掉了」一樣是假話。而要答得出來就得再留
-            // 一個位元，那是拿一份「他問過問題」的殘骸去換一句更漂亮的話。
+            // 拿到「你問過的那些題被忘掉了」一樣是假話。
             //
             // 所以照這個 repo 一路的規矩：不知道就把可能性攤開，不要替他選一
             // 個（見字母人那句「可能是剛開始，也可能是之前的被忘掉了或過期
             // 了」）。她沒錄過的話「被忘掉」不可能成立，那時候原本那兩句是完
             // 整的——所以只有錄過才多講第三種。
+            //
+            // **而 `ever_marked` 答得出「他問過」。** 上一版這裡寫著「要答得出
+            // 來就得再留一個位元，那是拿一份殘骸去換一句更漂亮的話」——而那個
+            // 位元後來為了另一件事（★ 的兩種零）留下來了，帳已經付過。標記只
+            // 掛得上一題真的問過的題目，所以它翻成 1 就代表他問過。
+            //
+            // 這一格剛好是整個功能最要緊的那一種空：`forget`／保留期把題庫整
+            // 個帶走的時候，Phase 1 第一條退場條件的證據跟著沒了。而上一版在
+            // 這條路上一個字都不提標記（★ 那一段在 `stats.total == 0` 的
+            // return 底下，根本輪不到），還把「還沒問過她任何問題」列成第一個
+            // 可能——一個它手上這個位元剛剛否掉的可能。
             println!(
                 "{}",
-                if db.ever_recorded()? {
+                if db.ever_marked()? {
+                    "題庫是空的，但不是因為你還沒問過她：你問過，而且在裡面按過至少一次\
+                     「★ 我本來已經忘了」。那幾題現在不在了——刪得掉題目的只有 \
+                     `sister forget` 和保留期，所以是這兩件事其中之一。\n\
+                     標記也一個都不剩，而那一格補不回來：它記的是你看到答案那一刻腦袋裡的\
+                     狀態，事後補不出來。Phase 1 那條退場條件要是靠那幾次在算的，得從頭再數。"
+                } else if db.ever_recorded()? {
                     "題庫是空的。可能是還沒問過她任何問題（`sister query …` 或字母人的\
                      搜尋框），可能是 `privacy.query_log` 關著，也可能是問過的那幾題被 \
                      `sister forget` 忘掉了、或過了保留期——她錄過，所以這三種都還在檯面上。"
@@ -1022,14 +1217,32 @@ pub mod queries {
         // 所以 0 在這裡不代表壞掉，它有兩種意思（他沒按過／她真的沒神奇過），
         // 而這兩種分不出來。分不出來就不要替他選一個——照這個 repo 一路的規矩，
         // 把可能性攤開，順便講出那個按鈕在哪裡。
+        //
+        // **但有第三種，而它分得出來。** 標記掛在 `queries` 底下，`forget` 和
+        // 保留期都會連著帶走（`prune` 還是在錄製迴圈裡自己跑的，不必他動手）。
+        // 一個按過三次、然後把那段時間忘掉的人，收到「去按按看」是這個 repo
+        // 一路在修的那種話。`ever_marked` 剛好只答得出這一題。
         println!(
             "{}",
-            match stats.marked {
-                0 => "★ 魔法時刻：還沒有標記過任何一次。\n  \
+            match (stats.marked, db.ever_marked()?) {
+                // **這裡不准說是哪一種。** `ever_marked` 只答得出「他按過」，
+                // 答不出「後來是誰拿掉的」：他自己 `--undo` 收回的，和那幾題被
+                // `forget`／保留期帶走的，在這張表上長得一模一樣。
+                //
+                // 第一版寫成「跟著那幾題一起被忘掉了」——而驗收清單上就有一步
+                // 是叫他按一次再收回來，那一步走完會當場拿到這句話，然後被告知
+                // 他的資料被刪掉了。修一個「兩種零」的時候造出第三種，是這個
+                // repo 犯過最多次的一件事。
+                (0, true) => "★ 魔法時刻：你按過，但現在一個都不剩。\n  \
+                              （你自己收回的話，這樣就對了。如果不是——那幾題被 \
+                              `sister forget` 帶走、或是過了保留期，標記跟著走了，\
+                              而這一格補不回來。）"
+                    .to_string(),
+                (0, false) => "★ 魔法時刻：還沒有標記過任何一次。\n  \
                       （她答對了一件你早就忘掉的事的時候，`sister mark` 記下來——\
                       那是 Phase 1 退場條件唯一的量法，而一個禮拜之後補不回來。）"
                     .to_string(),
-                n => format!(
+                (n, _) => format!(
                     "★ 魔法時刻：{n} 次（你自己標的）。`sister queries --marked` 看是哪幾題"
                 ),
             }
@@ -1059,7 +1272,7 @@ pub mod queries {
                 },
                 // 點擊和標記各印各的。併成一句「有用」的話，這兩個訊號就再也
                 // 分不出來了——而它們講的是相反的事（見 `MIGRATION_007`）。
-                if r.marked {
+                if r.marked() {
                     "  ★ 你本來已經忘了"
                 } else {
                     ""
@@ -1067,26 +1280,45 @@ pub mod queries {
             );
         }
         if only_marked {
-            // **0 有兩種，而表頭只講得出其中一種。** 一次都沒標過的時候表頭剛
-            // 剛才講完（不重複講一次）；有標記、卻被 `--empty` 濾光的時候，一
-            // 片空白配著一句「魔法時刻：3 次」是自相矛盾的——那三次都找得到東
-            // 西，所以它們不會出現在「一筆都沒找到」的清單上。
-            if rows.is_empty() && stats.marked > 0 {
-                println!(
-                    "  你標記過的那 {} 次沒有一次是空手回來的，所以配上 --empty 就什麼都不剩。",
-                    stats.marked
-                );
-            }
             // 撈到的比題庫裡的少 = limit 卡住了。這是這個 repo 的規矩：**被切掉
-            // 就要講**，不然一份被截斷的清單讀起來就是「全部」。
-            if (fetched as i64) < stats.marked {
+            // 就要講**，不然一份被截斷的清單讀起來就是「全部」。先算，因為底下
+            // 那句話的主詞範圍要靠它。
+            let truncated = (fetched as i64) < stats.marked;
+            if truncated {
                 println!(
                     "  （只列出最近 {fetched} 次，總共 {} 次——要看全部請把 --limit 調大。）",
                     stats.marked
                 );
             }
+            // **0 有兩種，而表頭只講得出其中一種。** 一次都沒標過的時候表頭剛
+            // 剛才講完（不重複講一次）；有標記、卻被 `--empty` 濾光的時候，一
+            // 片空白配著一句「魔法時刻：3 次」是自相矛盾的——那三次都找得到東
+            // 西，所以它們不會出現在「一筆都沒找到」的清單上。
+            //
+            // 主詞只能是**真的看過的那幾列**。上一版拿 `stats.marked` 當主詞，
+            // 而證據只有 `limit` 撈到的那幾列：3 個標記、空手的那一次標得最早、
+            // `--limit 2`，於是它一邊說「沒有一次是空手回來的」，一邊在上一行
+            // 叫他把 limit 調大——而調大之後那一列就出現了。兩句話的下一步還
+            // 剛好相反：一句叫他別看了，一句叫他再看一次。
+            if rows.is_empty() && only_empty && fetched > 0 {
+                if truncated {
+                    println!(
+                        "  剛剛看的那 {fetched} 次裡沒有空手的——更早的還沒看到，\
+                         要看的話 --limit 調大一點。"
+                    );
+                } else {
+                    println!(
+                        "  你標記過的那 {fetched} 次沒有一次是空手回來的，所以配上 --empty 就什麼都不剩。"
+                    );
+                }
+            }
         }
-        if rows.is_empty() && only_empty {
+        // `--marked` **不走那個窗**（它從 `query_marks` 直接撈，撈到的就是全
+        // 部），所以底下這一整段對它是假的：它會拿「最近 N 題」去描述一個根本
+        // 沒開過的範圍，說那些空手的題「比這個範圍更早」（可能反而更新），然後
+        // 叫他把 --limit 調大——而調到多大都不會出現，因為那幾題根本沒被標。
+        // 真正的下一步是把 `--marked` 拿掉，而那句話沒有人說得出來。
+        if rows.is_empty() && only_empty && !only_marked {
             // 上面那一行「多撈一些再篩」自己承認了這是一個**窗**，而這句話以前
             // 講得像整份題庫：`stats.empty` 有 1,200 題、但一題都不落在最近那幾
             // 百列裡的時候，印出來的和「她真的每一題都找得到東西」一模一樣。
@@ -1277,6 +1509,19 @@ pub mod prune {
         // 「你」，只有這一句在旁邊講他。）
         if r.queries_deleted > 0 {
             println!("  {verb} {} 題你自己問過的話（題庫）", r.queries_deleted);
+        }
+        // 又單獨一行，而且**排在題庫那一行後面貼著它**：它是那一行的一部分被
+        // 帶走的東西，不是另一類資料。
+        //
+        // 為什麼值得自己一行：這份報告上的每一樣東西他都補得回來——畫面可以再
+        // 錄，題目可以再問一次——只有這一格不行。那是他看到答案那一刻腦袋裡的
+        // 狀態，也是 Phase 1 第一條退場條件唯一的證據。而 `prune` 是在錄製迴圈
+        // 裡自己跑的：他可以在完全沒動手的情況下把那幾次弄不見。
+        if r.marks_deleted > 0 {
+            println!(
+                "  {verb} {} 次「★ 我本來已經忘了」——這一格補不回來",
+                r.marks_deleted
+            );
         }
         // 也單獨一行。它刪的不是內容，是「那天 13:02 到 17:44 她在錄」——
         // 一份沒有任何內容、卻證明他那段時間坐在電腦前的紀錄。那張表以前
