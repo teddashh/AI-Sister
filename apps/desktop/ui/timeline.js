@@ -410,10 +410,24 @@ function ghosts(e) {
  * 同一句話。
  *
  * `sessions_left` 是 `null` 代表**沒問過**（預覽算不出「刪完之後」），不是 0。
+ *
+ * `shell_is_live` 和它一起讀完（後端算的是 `heartbeat::is_occupied`），所以
+ * 這裡不必印「當掉了，**或是**她此刻正在錄」——分得出來還印一個「或」，是把
+ * 自己的懶惰講成他的功課。兩種的下一步也不一樣，所以兩句話分開寫。
+ *
+ * 「下次開始錄就會清掉」是假的，不要寫回去：`record` 的開機清理跑在新的一場
+ * 開始**之前**，那時候這一列還是最新的一列，正好是守衛保護的那一列。整場錄製
+ * 期間它都還在。見 `retention.rs` 那條照著真實順序寫的測試。
  */
 function leftover(e) {
   if (!e.sessions_left) return "";
-  return `（留著 ${e.sessions_left} 場錄製的紀錄本身：那一場沒有正常收尾——當掉了，或是她此刻正在錄——裡面一列都不剩。下次開始錄的時候它會跟著清掉。）`;
+  const what = e.shell_is_live
+    ? "此刻有人佔著這個資料目錄（她正在錄，或正在開機）"
+    : "她當掉了（現在沒有任何 recorder 佔著這個資料目錄）";
+  const then = e.shell_is_live
+    ? "等她收工的時候，那一場如果還是一列都不剩，那一列就會跟著走。"
+    : "她再開始錄之後，那一列就不再是最新的一列，接下來任何一次清理都會把它帶走。";
+  return `（留著 ${e.sessions_left} 場錄製的紀錄本身：${what}，裡面一列都不剩。${then}）`;
 }
 
 async function forget() {
@@ -763,6 +777,12 @@ function fakeBackend(mode = "1") {
               : moments.length === 0
                 ? 1
                 : 0,
+          // 真後端問的是 `heartbeat::is_occupied`——一個心跳檔，這裡沒有。
+          // 所以照 `cut` / `cross` 的老規矩開一個 mode：`live` 那一支演的是
+          // 「她此刻正在錄」，其餘演的是「她當掉了」。兩句話的下一步不一樣
+          // （一個等她收工，一個等她再開始錄），只演得出一支就等於另一支
+          // 沒被人看過。
+          shell_is_live: mode === "live",
         };
       }
       default:
@@ -772,12 +792,14 @@ function fakeBackend(mode = "1") {
 }
 
 // `1` 是平常那一天；`cut` 是被 LIMIT 切掉的那一天；`cross` 是那段解除時刻
-// 落在明天的暫停。後兩個各自對應一條在這之前**畫不出來**的列——`cut` 那一列
-// 以前印的是「接下來 N 小時沒有新的東西進來」（假的），`cross` 那一句
-// （「跨過午夜」）則是寫在 `pauseWords` 裡但永遠選不到，因為後端的 SQL 把
-// 那筆 resume 篩掉了。開發機開不起 Tauri，看不到就等於沒做過。
+// 落在明天的暫停；`live` 是「清空之後那一列空殼，是因為她正在錄」。四個各自
+// 對應一條在這之前**畫不出來**的列——`cut` 那一列以前印的是「接下來 N 小時
+// 沒有新的東西進來」（假的），`cross` 那一句（「跨過午夜」）則是寫在
+// `pauseWords` 裡但永遠選不到，因為後端的 SQL 把那筆 resume 篩掉了，而
+// `leftover` 那兩支要一台 Windows 加一次當機才分得出來。
+// 開發機開不起 Tauri，看不到就等於沒做過。
 const demo = new URLSearchParams(globalThis.location.search).get("demo");
-if (demo === "1" || demo === "cut" || demo === "cross") {
+if (demo === "1" || demo === "cut" || demo === "cross" || demo === "live") {
   invoke = fakeBackend(demo);
   // 「現在」推到這一天之後，好讓收尾那段空白也畫出來——16:40 之後的七個
   // 小時是這一頁最容易被漏掉的一塊，看不到就等於沒做過。

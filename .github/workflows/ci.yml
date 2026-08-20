@@ -205,6 +205,48 @@ jobs:
             exit 1
           fi
 
+          # **那一列留著有兩種原因，而下一步剛好相反。** 她當掉了的話，要她
+          # 「再開始錄」那一列才不再是最新的一列；她正在錄的話，要等她「收
+          # 工」。上面那幾條 `空殼` / `留著 1 場` 兩種都會綠，所以把分支寫死
+          # 成任何一邊都驗不出來——而這幾行以前印的正是「當掉了，**或是**她
+          # 此刻正在錄」，一句把自己的懶惰講成他的功課的話。
+          grep -q '她當掉了' crashed-forget.txt \
+            || { echo "::error::沒有 recorder 佔著這個目錄，forget 卻沒說那一場是當掉的"; exit 1; }
+          if grep -q '正在錄' crashed-forget.txt; then
+            echo "::error::沒有任何 recorder 在跑，forget 卻說她可能正在錄"
+            exit 1
+          fi
+
+          # 同一顆資料庫，另一句話——差別只有那個心跳檔。心跳就是一個裡面寫
+          # 著毫秒數的檔案（`heartbeat::BEAT`），所以這個狀態做得出來，和上面
+          # 那顆「當掉的」用的是同一招：要驗的是那個狀態，那就把它做出來。
+          #
+          # 時戳寫在一小時**之後**：未來的時戳一律算活的（那條是給調過時鐘的
+          # 機器用的），於是這幾行和 runner 有多慢完全無關。拿 `STALE_AFTER_MS`
+          # 那 16 秒去賭幾次 process spawn，就是把 CI 綁在秒數上。
+          python3 - <<'EOF'
+          import time, pathlib
+          pathlib.Path('./ci-crashed/recording.beat').write_text(
+              str(int(time.time() * 1000) + 3_600_000))
+          EOF
+          $C forget --last 24h --yes > live-forget.txt
+          $C stats > live-stats.txt
+          for x in live-forget.txt live-stats.txt; do
+            grep -q '此刻有人佔著這個資料目錄' "$x" \
+              || { echo "::error::有 recorder 佔著這個目錄，$x 卻沒這麼說"; exit 1; }
+            if grep -q '當掉' "$x"; then
+              echo "::error::有 recorder 佔著這個目錄，$x 卻說她當掉了"
+              exit 1
+            fi
+          done
+          # 這一刀沒有東西可以刪（上面那一刀已經清乾淨了），走的是「那段時間
+          # 裡她什麼都沒記到，不用忘」那條提早收工的路。那條路以前**完全不提**
+          # 那一列——而那一列的 `started_at` 就落在他選的那段時間裡。
+          grep -q '那段時間裡她什麼都沒記到' live-forget.txt \
+            || { echo "::error::這個 fixture 沒走到提早收工那條路，底下那條就沒在驗它要驗的東西"; exit 1; }
+          grep -q '留著 1 場錄製的紀錄本身' live-forget.txt \
+            || { echo "::error::forget 什麼都沒刪的那條路又把那一列藏起來了"; exit 1; }
+
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
       # 而讀的人只會以為是自己裝錯了。這一步不是另外寫一份一樣的測試（兩份

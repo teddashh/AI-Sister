@@ -255,7 +255,8 @@ const SESSION_CHILDREN: [&str; 7] = [
 /// 兩個活著的例外（`only` 是 `None` 的時候）：
 ///
 /// * `ended_at IS NULL` 且是最新的那一場 → **可能正是現在正在錄的這一場**
-///   （`prune` 每五分鐘在錄製迴圈裡自己跑一次，而剛開始的那幾拍它是空的）。
+///   （`prune` 在錄製迴圈裡自己會跑——開錄時一次，之後每六小時——而剛開始的
+///   那幾拍它是空的）。
 ///   刪掉它，接下來每一列的 `session_id` 都會指向一個不存在的東西。
 /// * `ended_at IS NULL` 但不是最新的那一場 → 那是被砍掉／當掉的一場，
 ///   沒有人會再回來寫它。留著它等於留下一列永遠不會過期的紀錄。
@@ -1201,18 +1202,23 @@ mod tests {
         );
     }
 
-    /// **當掉的那一場留下的空殼，要等到下一場開始才走得掉。**
+    /// **當掉留下的那個空殼，撐得過下一場錄製的開機清理。**
     ///
-    /// `sister forget` 現在會當場把這一列講出來（`ops.rs` 的
-    /// `session_shell_note`），而那句話裡有一個承諾：「下次她再開始錄，那一列
-    /// 就不再是最新的一列，開錄時自動跑的那次 `sister prune` 會把它帶走。」
+    /// `sister forget` 會當場把這一列講出來（`ops.rs` 的
+    /// `session_shell_note`），而那句話得說對它什麼時候會走。上一版寫的是
+    /// 「開錄時自動跑的那次 `sister prune` 會把它帶走」——**假的**，而且假得
+    /// 很難看：`record` 的開機清理跑在 `Recorder::new`（也就是
+    /// `start_session`）**之前**。那一刻它還是 `MAX(id)`，正好是守衛保護的那
+    /// 一列。所有 prune 裡面，開機那一次是唯一保證砍不到它的。
     ///
-    /// 那句話是這裡的守衛推導出來的，不是量出來的——所以要有一條把它釘住。
-    /// 上一版寫的是「下次她正常收工的時候就會跟著走」，那是假的：
-    /// [`crate::db::Db::end_session`] 只掃**它自己那一場**（`Some(id)`），碰不
-    /// 到別人留下的殼。一句關於「你的資料什麼時候會消失」的假話，比不講還糟。
+    /// 更前一版寫的是「下次她正常收工的時候就會跟著走」，也是假的：
+    /// [`crate::db::Db::end_session`] 只掃**它自己那一場**（`Some(id)`）。
+    ///
+    /// 兩次都是同一種錯：照著守衛的條件**推**出一個順序，而沒有照著產品真正
+    /// 執行的順序**跑**一次。所以這條測試照抄 `record` 的順序——先 prune，再
+    /// `start_session`。
     #[test]
-    fn the_shell_a_crash_left_behind_goes_on_the_next_recording() {
+    fn the_shell_a_crash_left_behind_survives_the_next_recordings_startup_prune() {
         let mut db = Db::open_in_memory().expect("db");
         let crashed = db.start_session("test", "0.0.1").expect("session");
         db.insert_frame(crashed, &frame(days_ago(1), "帳單"), None, 0)
@@ -1229,19 +1235,27 @@ mod tests {
             frames_days: 30,
             text_days: 365,
         };
-        // 它還是最新的一列，所以這一次不准動它：這時候它和「此刻正在錄的那
-        // 一場」在資料庫裡分不出來，而刪掉一個活著的錄製會扯斷外鍵。
-        db.prune(NOW, &retention, None).expect("prune");
+        // ① 開機清理。`record` 就是在這個位置跑它——**在** `start_session`
+        // 之前。那一刻殼還是最新的一列，守衛不准碰。
+        let r = db.prune(NOW, &retention, None).expect("prune");
         assert_eq!(
-            db.stats().expect("stats").sessions,
-            1,
-            "還是最新的一列的時候不准碰——那可能是正在錄的那一場"
+            r.sessions_deleted, 0,
+            "開機那一次砍不到它：它還是最新的一列（那可能是正在錄的那一場）"
         );
 
-        // 下一場開始了，它就不再是 `MAX(id)`——承諾在這裡兌現。
+        // ② `Recorder::new` → `start_session`。殼從這一刻起不再是 `MAX(id)`，
+        // 但開機清理已經跑完了。
         let live = db.start_session("test", "0.0.1").expect("session");
         db.insert_frame(live, &frame(days_ago(0), "現在"), None, 0)
             .expect("insert");
+        assert_eq!(
+            db.stats().expect("stats").sessions,
+            2,
+            "**整場錄製期間他都會看到 2**——這就是那句話原本答應要消失的東西"
+        );
+
+        // ③ 接下來**任何一次**清理才帶得走它：錄製迴圈裡六小時一次的那個、
+        // 他自己跑的 `sister prune`、或下一次 `forget`。
         let r = db.prune(NOW, &retention, None).expect("prune");
         assert_eq!(r.sessions_deleted, 1, "{r:?}");
         let s = db.stats().expect("stats");

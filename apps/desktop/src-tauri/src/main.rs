@@ -1583,6 +1583,15 @@ struct Erasure {
     /// 兩種意思寫成同一個 0 的話，這裡就變成它自己要修的那個 bug——`Some(0)`
     /// 是「沒有東西留下來」，`None` 是「這一趟沒有問這個問題」。
     sessions_left: Option<u64>,
+    /// 留下來的那一列是**活的**還是**當掉的**（`heartbeat::is_occupied`）。
+    ///
+    /// 只有 `sessions_left > 0` 的時候有意義，所以它和上面那一欄要在同一個
+    /// `if` 裡讀完——分開讀就會有人拿一個沒問過的布林值去講一句斷言。
+    ///
+    /// 有這一欄，畫面就不必印「當掉了，**或是**她此刻正在錄」。用
+    /// `is_occupied` 而不是 `is_recording`：正在開機的 recorder 也佔著這個目
+    /// 錄，而把一場活的錄製講成當機是這兩句話裡唯一會嚇到人的錯。
+    shell_is_live: bool,
 }
 
 impl From<sister_core::retention::PruneReport> for Erasure {
@@ -1601,6 +1610,7 @@ impl From<sister_core::retention::PruneReport> for Erasure {
             // 這一支只看得到「刪掉了什麼」。留下什麼要再問一次資料庫，所以
             // 預設是「沒問」，由 `forget_range` 補上。
             sessions_left: None,
+            shell_is_live: false,
         }
     }
 }
@@ -1649,6 +1659,8 @@ fn forget_range(
         .as_ref()
         .ok_or_else(|| "找不到資料目錄，不能保證截圖真的會被刪掉".to_string())?;
     let frames = sister_core::config::Config::frames_dir(dir);
+    // 在借出資料庫之前問，因為它讀的是磁碟上的心跳檔，不是資料庫。
+    let live = sister_core::heartbeat::is_occupied(dir, sister_core::now_ms());
     with_db_mut(&shell, |db| {
         let report = db
             .forget(from_ts, to_ts, Some(&frames))
@@ -1665,6 +1677,8 @@ fn forget_range(
         };
         Ok(Erasure {
             sessions_left: Some(left),
+            // 分得出來就不要印「或」。CLI 那邊同一個判斷（`session_shell_why`）。
+            shell_is_live: left > 0 && live,
             ..Erasure::from(report)
         })
     })
