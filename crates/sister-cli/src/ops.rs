@@ -267,11 +267,17 @@ pub enum Emptiness {
 impl Emptiness {
     /// 資料庫自己回答這是哪一種。
     ///
-    /// `Erased` 問在最前面，因為它的條件最強（`nothing_left()` 要求每一個
-    /// 計數器都是 0，包含稽核紀錄自己那幾列）。條件最強的先問，才不會被一個
-    /// 條件比較寬的答案蓋掉。
+    /// `Erased` 問在最前面，因為它的條件最強（`nothing_recorded_left()` 要求
+    /// 每一個計數器都是 0，包含稽核紀錄自己那幾列）。條件最強的先問，才不會被
+    /// 一個條件比較寬的答案蓋掉。
+    ///
+    /// 但「條件最強」在這裡也是一個陷阱，而我踩過：往那個述詞多塞一張表，就是
+    /// 把 `Erased` 收窄一次，而它讓開之後接的是**最寬**的那個答案 `Fresh`——
+    /// 「她還沒錄過」。`queries` 曾經被算進去，於是 `forget` 完問一句「真的沒
+    /// 了嗎」，整個刪除就從三個畫面上消失了。改那個述詞以前先問：新加的這張表
+    /// 會不會在清空**之後**長出來？
     pub fn of(db: &Db, s: &sister_core::db::DbStats) -> Result<Self> {
-        if s.nothing_left() && db.ever_recorded()? {
+        if s.nothing_recorded_left() && db.ever_recorded()? {
             return Ok(Self::Erased);
         }
         Ok(
@@ -506,8 +512,9 @@ pub mod queries {
                 "slow": stats.slow,
                 "budget_ms": sister_core::db::RETRIEVAL_BUDGET_MS,
                 // `total: 0` 有三種（沒問過、query_log 關著、被忘掉了）。這一
-                // 欄只砍掉第三種：她沒錄過的話就不可能被忘掉。人看的那一句是
-                // 同一條線。
+                // 欄只在它是 `false` 的時候砍得掉第三種：她沒錄過的話就不可能
+                // 被忘掉。反過來不成立——`true` 只是說她錄過，不是說他問過。
+                // 人看的那一句走的是同一條線，一樣不替他選一個。
                 "ever_recorded": db.ever_recorded()?,
                 "queries": rows.iter().map(|r| serde_json::json!({
                     "id": r.id,
@@ -2284,6 +2291,44 @@ pub mod facts {
     use super::*;
     use crate::fmt;
 
+    /// `sister facts` 什麼條件都沒給、卻一列都撈不到的時候，講哪一句。
+    ///
+    /// **`facts == 0` 不是「這顆資料庫是空的」**，而這一句上一版把兩者當成同
+    /// 一件事：直接拿它去問 [`Emptiness`]。於是一台預設設定的機器——`keepassxc`
+    /// 本來就在 `excluded_apps` 裡——只要那個密碼管理員在螢幕上出現過一次，
+    /// 就會讀到「她錄過，而那段時間被排除規則擋掉或暫停了」，而她那 6 段字好
+    /// 好地躺在 `sister stats` 上。被擋掉的是一個密碼視窗，不是他的事實。
+    ///
+    /// 所以先問她到底記到了什麼，再談「為什麼是空的」。三種都是不同的下一步：
+    /// 有字沒事實是抽取的問題，有畫面沒字是讀字那一段斷了，兩個都 0 才輪到
+    /// `Emptiness`。這道閘門寫在函式**裡面**，理由見 `doctor::bigram_verdict`。
+    fn no_facts_line(frames: i64, chunks: i64, empty: Emptiness) -> String {
+        if chunks > 0 {
+            return format!(
+                "這份記憶裡沒有任何事實——她記了 {chunks} 段字，\
+                 但那些字裡沒有她抄得下來的東西（電話、金額、日期這一類）。"
+            );
+        }
+        if frames > 0 {
+            return format!(
+                "這份記憶裡沒有任何事實——她留下了 {frames} 張畫面，\
+                 但一個字都沒讀出來（`sister doctor` 的「已記錄」那一列會說得更清楚）。"
+            );
+        }
+        match empty {
+            Emptiness::Erased => {
+                "這份記憶裡沒有任何事實了——她錄過，那些東西被 `sister forget` \
+                 忘掉了，或是過了保留期。"
+            }
+            Emptiness::Blocked => {
+                "這份記憶裡沒有任何事實——她錄過，而那段時間被排除規則擋掉或\
+                 暫停了（`sister stats` 底下的排除稽核會列出來）。"
+            }
+            Emptiness::Fresh => "這份記憶裡還沒有任何事實——她還沒錄過。",
+        }
+        .to_string()
+    }
+
     pub fn run(
         data_dir: &Path,
         kind: Option<&str>,
@@ -2349,32 +2394,15 @@ pub mod facts {
                     (Some(k), None) => format!("這份記憶裡沒有 {k} 這一類的事實。"),
                     (None, Some(s)) => format!("這份記憶裡沒有含有「{s}」的事實。"),
                     // 上面三句都自己帶著條件，所以它們講的必然是「這份記憶
-                    // 裡」。這一句沒有條件可以帶，於是它去猜原因——而它列的
-                    // 兩個原因裡沒有真正的第三個：`facts` 這張表 `forget` 和
+                    // 裡」。這一句沒有條件可以帶，於是它得去講原因——而原因
+                    // 有四種，見 `no_facts_line`。`facts` 這張表 `forget` 和
                     // 保留期都會清（`retention.rs` 兩邊都有 `DELETE FROM
-                    // facts`），而 `facts.chunk_id` 還是 ON DELETE CASCADE。
-                    // 剛把一整天忘掉的人拿到的是「她還沒錄過」。
-                    //
-                    // 問 `Emptiness` 而不是 `ever_recorded()`：那個位元在
-                    // `start_session` 就翻成 1（第一張畫面之前），它說的是
-                    // 「開過一場錄製」，不是「這張表曾經有列」。單看它的第一版
-                    // 於是在一顆**從來沒刪過任何東西**的資料庫上說東西被刪了
-                    // ——`replay scenarios/secret-copy.json` 就走到：6 段文字、
-                    // 0 個事實，因為那幾張畫面上沒有抄得下來的東西。那正是被
-                    // 蓋掉的那一句話在講的情況。
-                    (None, None) => match Emptiness::of(&db, &db.stats()?)? {
-                        Emptiness::Erased =>
-                            "這份記憶裡沒有任何事實了——她錄過，那些東西被 `sister forget` \
-                             忘掉了，或是過了保留期。"
-                                .into(),
-                        Emptiness::Blocked =>
-                            "這份記憶裡沒有任何事實——她錄過，而那段時間被排除規則擋掉或\
-                             暫停了（`sister stats` 底下的排除稽核會列出來）。"
-                                .into(),
-                        Emptiness::Fresh =>
-                            "這份記憶裡還沒有任何事實——她還沒錄過，或錄到的畫面上沒有抄得下來的東西。"
-                                .into(),
-                    },
+                    // facts`），而 `facts.chunk_id` 還是 ON DELETE CASCADE，
+                    // 所以「剛把一整天忘掉」也走到這裡。
+                    (None, None) => {
+                        let s = db.stats()?;
+                        no_facts_line(s.frames, s.chunks, Emptiness::of(&db, &s)?)
+                    }
                 }
             );
             return Ok(());
@@ -2443,6 +2471,57 @@ pub mod facts {
         #[test]
         fn no_filter_stays_no_filter() {
             assert_eq!(canonical_kind(None).expect("沒給就是沒給"), None);
+        }
+
+        /// **她記了一整天，只是那些字裡沒有電話號碼。**
+        ///
+        /// 上一版拿 `facts == 0` 直接去問 `Emptiness`，而預設設定裡就有
+        /// `keepassxc`。所以一台開過密碼管理員的機器讀到：
+        ///
+        /// ```text
+        ///   $ sister facts
+        ///   這份記憶裡沒有任何事實——她錄過，而那段時間被排除規則擋掉或暫停了。
+        ///   $ sister stats
+        ///   文字      6 段（4 個 OCR 區塊）
+        /// ```
+        ///
+        /// 被擋掉的是一個密碼視窗，不是他的事實。`Emptiness` 只回答「為什麼是
+        /// 空的」，而這一句手上那個 0 根本不是「空的」那個 0。
+        #[test]
+        fn text_she_kept_is_not_a_recording_the_rules_ate() {
+            let said = no_facts_line(2, 6, Emptiness::Blocked);
+            assert!(said.contains("6 段"), "她記了多少字要講出來：{said}");
+            for lie in ["擋掉", "暫停", "忘掉", "保留期", "還沒錄過"] {
+                assert!(
+                    !said.contains(lie),
+                    "那 6 段字好好地在資料庫裡，不可以說被「{lie}」：{said}"
+                );
+            }
+            // 三種 `Emptiness` 一個字都不准動——她這裡不空，就沒有「為什麼空」
+            // 這個問題。
+            for e in [Emptiness::Fresh, Emptiness::Blocked, Emptiness::Erased] {
+                assert_eq!(no_facts_line(2, 6, e), said);
+            }
+
+            // 有畫面、沒有字：讀字那一段斷了，而那也不是「還沒錄過」。
+            let ocr_dead = no_facts_line(9, 0, Emptiness::Fresh);
+            assert!(ocr_dead.contains("9 張"), "{ocr_dead}");
+            assert!(!ocr_dead.contains("還沒錄過"), "她錄了 9 張：{ocr_dead}");
+
+            // 兩個都 0，才輪到「為什麼」——而三種各自一句。
+            let said = |e| no_facts_line(0, 0, e);
+            let all = [
+                said(Emptiness::Fresh),
+                said(Emptiness::Blocked),
+                said(Emptiness::Erased),
+            ];
+            for (i, a) in all.iter().enumerate() {
+                for b in &all[i + 1..] {
+                    assert_ne!(a, b, "三種 0 的下一步都不一樣，不可以共用一句話");
+                }
+            }
+            assert!(all[0].contains("還沒錄過"), "{}", all[0]);
+            assert!(all[2].contains("forget"), "{}", all[2]);
         }
     }
 }
@@ -2587,15 +2666,20 @@ pub mod stats {
         //
         // 那一天他的排除規則**擋過兩段**。刪掉的是證據，不是歷史。
         //
-        // 問 `nothing_left()` 而不是 `frames == 0 && chunks == 0`：後者是這句話
-        // 的第一版，而它自己就是同一個 bug。一場全程被排除規則擋掉的錄製也是
-        // 畫面 0、文字 0，可是那一頁上有「工作階段 1」「輸入 6」「系統 7」和
-        // 一整段排除稽核——這一行於是印在一頁有數字的東西上面，還把「規則擋掉
-        // 的」說成「你刪掉的」。兩句都是假的，而它們解釋的是**完全相反**的下
+        // 問 `nothing_recorded_left()` 而不是 `frames == 0 && chunks == 0`：後者
+        // 是這句話的第一版，而它自己就是同一個 bug。一場全程被排除規則擋掉的錄
+        // 製也是畫面 0、文字 0，可是那一頁上有「工作階段 1」「輸入 6」「系統 7」
+        // 和一整段排除稽核——這一行於是印在一頁有數字的東西上面，還把「規則擋
+        // 掉的」說成「你刪掉的」。兩句都是假的，而它們解釋的是**完全相反**的下
         // 一步：一個要他去改 config，一個要他知道東西真的沒了。
-        if s.nothing_left() && db.ever_recorded()? {
+        //
+        // 而這句話講的是**她記下來的東西**，不是「這個檔案是空的」。中間那一版
+        // 寫成後者，於是得把他打進搜尋框的字也算成「一列」——`forget` 完接著問
+        // 一句「真的沒了嗎」就有一列，這個 ⚠ 就整段消失了。話講準，那張表就不
+        // 必進那個述詞（見 `DbStats::nothing_recorded_left`）。
+        if s.nothing_recorded_left() && db.ever_recorded()? {
             println!(
-                "  ⚠  她**錄過**，而現在這顆資料庫裡一列都不剩——被 \
+                "  ⚠  她**錄過**，而她記下來的東西現在一列都不剩——被 \
                  `sister forget` 忘掉了，或是過了保留期。\n     \
                  底下那些 0、還有「沒有發生過」那幾句，講的是現在這顆資料庫，\
                  不是那幾天。\n"
@@ -2925,8 +3009,8 @@ pub mod doctor {
         match (frames, chunks) {
             // 「一個字都還沒進來」和「進來過，被你刪掉了」在這一行上長得一樣，
             // 而它們的下一步剛好相反：前者要他去按開始錄，後者他剛剛才親手把
-            // 東西刪掉。這個位元活在 `meta` 裡，`forget` 和 `prune` 都不碰它
-            // （見 `Db::ever_recorded`）。
+            // 東西刪掉。分得出來是因為 `Emptiness` 底下那個位元活在 `meta` 裡，
+            // `forget` 和 `prune` 都不碰它（見 `Db::ever_recorded`）。
             //
             // 但「畫面 0、文字 0」**不等於**「一列都不剩」：一場全程被排除規則
             // 擋掉（或全程暫停）的錄製走到的也是 (0, 0)，而那顆資料庫裡有工作

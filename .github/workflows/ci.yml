@@ -93,12 +93,18 @@ jobs:
       # 前才親手把東西刪掉。
       #
       # 這一步守的是**呼叫端**。判斷本身（`recorded_verdict`、`crash_verdict`、
-      # `Emptiness::of`、`DbStats::nothing_left`）都有單元測試，而這一批修改
-      # 前後犯了三次同一個錯，三次都在「CLI 有沒有叫對那支函式」這一層——
-      # 單元測試一條都沒紅過。和上面那一步同一個理由。
+      # `Emptiness::of`、`DbStats::nothing_recorded_left`）都有單元測試，而這
+      # 一批修改前後犯了五次同一個錯，五次都在「CLI 有沒有叫對那支函式、餵它
+      # 哪個 0」這一層——單元測試一條都沒紅過。和上面那一步同一個理由。
+      #
+      # **刪完之後要再問一句話。** 「真的沒了嗎」是刪完最自然的下一個指令，而
+      # 它會在 `queries` 留一列。有一版把那張表算進「一列都不剩」，於是這一問
+      # 就讓 `stats` 的 ⚠ 整段消失、`doctor` 說「還沒有任何內容」、`facts` 說
+      # 「她還沒錄過」。上一版的這一步在 forget **之前**問，剛好錯過。
       #
       # 正面斷言（要出現的字）和反面斷言（不可以出現的字）成對寫：只有反面
-      # 的話，整段功能被刪掉也是綠的。
+      # 的話，整段功能被刪掉也是綠的。正面那幾條要挑**不會被反面那句包住**的
+      # 字串——`錄過` 是 `還沒錄過` 的子字串，用它等於沒驗。
       - name: An erased database must not look like one that never recorded
         run: |
           set -euo pipefail
@@ -109,17 +115,34 @@ jobs:
           grep -q '題庫' forget.txt \
             || { echo "::error::forget 沒有帶走題庫——底下那幾條就沒有在驗它們要驗的東西"; exit 1; }
 
+          # `queries` 要趁題庫還空著的時候看——底下那一問會讓它印出列表，
+          # 那時候驗的就不是這一句了。
+          # `她(\*\*)?錄過`：`stats` 那一行是 `她**錄過**`（markdown 粗體），
+          # 而 `她錄過` 這個literal 對它沒中。中間那個 `**` 要放進來，`還沒`
+          # 不可以——`她還沒錄過` 正是這幾條要抓的東西。
+          $S queries > erased-queries.txt
+          grep -qE '她(\*\*)?錄過' erased-queries.txt \
+            || { echo "::error::queries 沒說出她錄過——那三種可能又剩下兩種了"; exit 1; }
+          if grep -q '問她幾個問題' erased-queries.txt; then
+            echo "::error::queries 叫他去重做一件他刻意做掉的事"
+            exit 1
+          fi
+
+          # 刪完的下一句話。見上面第二段——這一行就是那個回歸。
+          $S query 真的沒了嗎 > /dev/null
+
           $S stats > erased-stats.txt
           $S doctor > erased-doctor.txt
           $S facts > erased-facts.txt
-          $S queries > erased-queries.txt
 
-          for f in erased-stats.txt erased-facts.txt erased-queries.txt; do
-            grep -q '錄過' "$f" \
+          for f in erased-stats.txt erased-facts.txt; do
+            grep -qE '她(\*\*)?錄過' "$f" \
               || { echo "::error::$f 沒說出「她錄過」——清空過的資料庫又長得像全新的了"; exit 1; }
           done
-          grep -qE '不在了|一列都不剩' erased-doctor.txt \
-            || { echo "::error::doctor 沒說出那幾場的紀錄去哪了"; exit 1; }
+          # 指名那一列。`不在了` 光是「零當機」和三個訊號稽核就有（那幾列讀的
+          # 是原始的 `ever`），所以不指名的話，「已記錄」整列壞掉它照樣綠。
+          grep -q '已記錄.*一列都不剩' erased-doctor.txt \
+            || { echo "::error::doctor 的「已記錄」沒說出她記的東西去哪了"; exit 1; }
 
           # 這幾句只對一台從來沒錄過的機器成立。
           #
@@ -127,15 +150,13 @@ jobs:
           # 整條 `&&` 串回 1，`set -e` 會把它當成整步失敗——也就是程式對的
           # 時候紅、錯的時候綠。`if` 的條件位置不受 `set -e` 管。
           for bad in '還沒錄過' '（還沒有任何內容）' '還沒問過任何問題' '等你錄過再驗一次'; do
-            if grep -q "$bad" erased-doctor.txt; then
-              echo "::error::doctor 對一顆他親手清空的資料庫說了「$bad」"
-              exit 1
-            fi
+            for f in erased-doctor.txt erased-facts.txt erased-stats.txt; do
+              if grep -q "$bad" "$f"; then
+                echo "::error::$f 對一顆他親手清空的資料庫說了「$bad」"
+                exit 1
+              fi
+            done
           done
-          if grep -q '問她幾個問題' erased-queries.txt; then
-            echo "::error::queries 叫他去重做一件他刻意做掉的事"
-            exit 1
-          fi
 
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
