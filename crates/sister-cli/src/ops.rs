@@ -816,22 +816,32 @@ pub mod stop {
     /// ——CI 開得起 `sister record`，但開不起字母人。少了這個子命令，開始／停止
     /// 那整套機制唯一的入口會在一個沒有人測得到的 GUI 按鈕後面。
     pub fn run(data_dir: &Path) -> Result<()> {
-        // 先問有沒有人在。沒有人在的時候仍然照寫——`record` 起來的時候會先清掉
-        // 這個檔案，所以留著不會咬人——但要講出來，不然「我按了停止，可是它還
-        // 在錄」和「我按了停止，本來就沒有東西在錄」看起來一模一樣。
-        let running = sister_core::heartbeat::is_occupied(data_dir, sister_core::now_ms());
+        // 先問有沒有人在。沒有人在的時候仍然照寫——下一個起來的 recorder 會先
+        // 清掉這個檔案（`BootBeat::start`），所以留著不會咬人——但要講出來，
+        // 不然「我按了停止，可是它還在錄」和「我按了停止，本來就沒有東西在
+        // 錄」看起來一模一樣。
+        //
+        // **問 `phase` 不是 `is_occupied`。** 上一版問「有沒有人佔著」，於是
+        // 開機那幾分鐘印的是「正在跑的 `sister record` 會在下一個 tick 把
+        // session 寫完再結束」——那時候既沒有 session 也沒有 tick，主迴圈根本
+        // 還沒開始。三種狀態，三句話。
+        let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
         sister_core::control::request_stop(data_dir)
             .with_context(|| format!("寫不進 {}", data_dir.display()))?;
-        if running {
-            println!(
+        match beat {
+            Some(sister_core::heartbeat::Phase::Recording) => println!(
                 "■ 已經請她收工。正在跑的 `sister record` 會在下一個 tick 把 session \
                  寫完再結束。"
-            );
-        } else {
-            println!(
+            ),
+            Some(sister_core::heartbeat::Phase::Booting) => println!(
+                "■ 已經請她收工。她現在還在開資料庫（第一次開一顆大的要重建索引，\
+                 可能要幾分鐘），主迴圈還沒開始——這個請求會留著，等她開完就直接\
+                 收工，一個字都不會記。"
+            ),
+            None => println!(
                 "■ 目前沒有任何 `sister record` 在跑（心跳是停的）。停止的請求還是\
                  留下來了，但下一次開始記錄的時候會先把它清掉，不會影響到那一場。"
-            );
+            ),
         }
         Ok(())
     }
@@ -7004,6 +7014,19 @@ pub mod record {
             use std::time::{Duration, Instant};
 
             let dir = data_dir.to_path_buf();
+            // **舊的停止請求在這裡清掉，不在主迴圈那一邊。**
+            //
+            // `stop.request` 是一個沒有時戳的檔案，它在不在就是全部的協定
+            // （見 `control` 模組）。於是同一個位元要回答兩個問題：「這是我
+            // 起來之前留下的嗎（丟掉）」還是「這是衝著我來的嗎（照做）」。
+            // 分得開它們的**只有時間**——清理排在開機窗打開之前，之後寫進來
+            // 的每一個請求就都是衝著這一場來的。
+            //
+            // 上一版清在 `Db::open` **之後**，於是整段開機是一個洞：他按下
+            // 停止，`sister stop` 看得見這個守衛剛蓋的心跳、回一句「已經請
+            // 她收工」，然後她開完資料庫、把那個請求刪掉、錄一整天。那顆一
+            // 年份的資料庫要開好幾分鐘，所以這個洞不是理論上的。
+            sister_core::control::clear_stop(&dir);
             // 第一下蓋在呼叫者這條執行緒上，不是丟給新執行緒去蓋：呼叫的人回
             // 去之後下一行就是 `Db::open`，中間不該留一段「心跳還沒出現」的
             // 空窗——那正是要補的洞。
@@ -7256,10 +7279,10 @@ pub mod record {
         boot.hand_off();
         let _ = sister_core::heartbeat::beat(data_dir, sister_core::now_ms());
         let mut last_beat = Instant::now();
-        // 有人在沒有 recorder 在跑的時候按了「停止」，那個請求會留在磁碟上。
-        // 不先清掉的話，這一場會在第一個 tick 就自己結束——而畫面上唯一看得到
-        // 的是她閃了一下就不見了。
-        sister_core::control::clear_stop(data_dir);
+        // 舊的停止請求**已經清掉了**，清在 `BootBeat::start` 裡——開機窗打開
+        // 的那一刻，不是這裡。清在這裡的話，他在開機那幾分鐘按的停止會被自己
+        // 刪掉；理由寫在那支函式上面。
+        //
         // 保留期也吃熱重載（設定頁的 TTL 那一欄），所以它不能再是 `let`。
         let mut retention = retention;
 
@@ -8349,6 +8372,41 @@ pub mod record {
             assert!(
                 heartbeat::is_occupied(&dir.0, sister_core::now_ms()),
                 "交棒之後心跳歸主迴圈管，守衛不准動它"
+            );
+        }
+
+        /// 開機那幾分鐘按下去的「停止」，不可以被她自己刪掉。
+        ///
+        /// 順序照抄 `windows_record`：開機窗打開 → `Db::open`（一顆一年份的
+        /// 資料庫要好幾分鐘）→ 交棒 → 主迴圈第一次 `take_stop`。他就是在中間
+        /// 那一段按下去的，而 `sister stop` 那時候看得見這個守衛蓋的心跳，所以
+        /// 它回的是「已經請她收工」。那句話得是真的。
+        #[test]
+        fn a_stop_pressed_while_she_opens_the_database_still_stops_her() {
+            let dir = Tmp::new("stop-during-boot");
+            let mut boot = BootBeat::start(&dir.0);
+            sister_core::control::request_stop(&dir.0).expect("request");
+            boot.hand_off();
+            assert!(
+                sister_core::control::take_stop(&dir.0),
+                "開機那幾分鐘按的停止，等她開完就要生效"
+            );
+        }
+
+        /// 反面：**沒有人在跑**的時候留下來的那一個，仍然不可以殺掉下一場。
+        ///
+        /// 這兩條只差 `request_stop` 站在 `BootBeat::start` 的哪一邊——那個先
+        /// 後就是唯一分得開「我起來之前留下的」和「衝著我來的」的東西
+        /// （`stop.request` 裡沒有時戳）。少了這一條，把清理整個拿掉也是綠的。
+        #[test]
+        fn a_stop_left_over_from_before_she_started_does_not_kill_this_run() {
+            let dir = Tmp::new("stop-before-boot");
+            sister_core::control::request_stop(&dir.0).expect("request");
+            let mut boot = BootBeat::start(&dir.0);
+            boot.hand_off();
+            assert!(
+                !sister_core::control::take_stop(&dir.0),
+                "起來之前留下的請求要清掉，不然她一開始就自己結束、而畫面上只看到閃一下"
             );
         }
 

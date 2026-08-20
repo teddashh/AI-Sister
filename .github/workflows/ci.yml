@@ -980,6 +980,42 @@ jobs:
           grep -E '現在有沒有在看' live-doctor.txt | grep -q '正在跑' \
             || { echo "::error::[她正開著] 她真的在錄，那一列要說「正在跑」"; grep 現在有沒有在看 live-doctor.txt; exit 1; }
 
+          # `sister stop` 也有三種狀態，而它只需要一個心跳檔——不必資料庫，所以
+          # 三顆現造。上一版它問的是 `is_occupied`，於是開機那幾分鐘印的是「會在
+          # 下一個 tick 把 session 寫完再結束」：那時候既沒有 session 也沒有
+          # tick。而且那個請求接下來會被她自己刪掉（清理排在 `Db::open` 之後）
+          # ——**兩個畫面都說收到了，然後她錄一整天**。
+          for kind in live boot none; do
+            d="./ci-stop-$kind"; mkdir -p "$d"
+            case "$kind" in
+              live) python3 -c "import time;open('$d/recording.beat','w').write(str(int(time.time()*1000)))" ;;
+              boot) python3 -c "import time;open('$d/recording.beat','w').write(f'{int(time.time()*1000)} boot')" ;;
+              none) rm -f "$d/recording.beat" ;;
+            esac
+            $B --data-dir "$d" stop > "stop-$kind.txt"
+            # 三種下場都要真的把請求寫下去。少了這一條，一句「已經請她收工」
+            # 可以完全不做事還是綠的。
+            test -f "$d/stop.request" \
+              || { echo "::error::[stop/$kind] 話說了，請求沒寫下去"; cat "stop-$kind.txt"; exit 1; }
+          done
+          grep -q '還在開資料庫' stop-boot.txt \
+            || { echo "::error::[stop/開機中] 沒說出她還在開資料庫"; cat stop-boot.txt; exit 1; }
+          if grep -q '下一個 tick' stop-boot.txt; then
+            echo "::error::[stop/開機中] 主迴圈還沒開始，沒有「下一個 tick」也沒有 session"
+            cat stop-boot.txt; exit 1
+          fi
+          # 正反成對：她真的在錄的那一顆上，同一句話要換成另外一句。
+          grep -q '下一個 tick' stop-live.txt \
+            || { echo "::error::[stop/她正開著] 主迴圈在跑，收工就在下一個 tick"; cat stop-live.txt; exit 1; }
+          if grep -q '還在開資料庫' stop-live.txt; then
+            echo "::error::[stop/她正開著] 她早就開完了"; cat stop-live.txt; exit 1
+          fi
+          grep -q '目前沒有任何' stop-none.txt \
+            || { echo "::error::[stop/沒有人在] 沒有人在跑，不可以講得像攔下了誰"; cat stop-none.txt; exit 1; }
+          if grep -q '已經請她收工' stop-none.txt; then
+            echo "::error::[stop/沒有人在] 沒有人可以收工"; cat stop-none.txt; exit 1
+          fi
+
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
       # 而讀的人只會以為是自己裝錯了。這一步不是另外寫一份一樣的測試（兩份

@@ -58,6 +58,16 @@ pub fn take_stop(data_dir: &Path) -> bool {
 }
 
 /// 開始之前先把舊的請求清掉。見 [`request_stop`] 的說明。
+///
+/// **「開始之前」是指開機的第一行，不是 `Db::open` 之後。** 這個檔案裡沒有時
+/// 戳，所以「這是我起來之前留下的」和「這是衝著我來的」是同一個位元——分得開
+/// 它們的只有這一次清理站在哪裡。清晚了，那段開機時間就變成一個洞：他按下停
+/// 止、`sister stop` 看得見開機心跳、回一句「已經請她收工」，然後她開完資料庫
+/// 把請求刪掉，錄一整天。一顆存了一年文字的資料庫要開好幾分鐘，那個洞不小。
+///
+/// 呼叫的地方只有兩個，兩個都在 spawn／開機窗**之前**：`sister record` 那邊是
+/// `BootBeat::start` 的第一行（心跳都還沒蓋），字母人那邊是 `start_recording`
+/// 裡 `Command::spawn` 的前一行。
 pub fn clear_stop(data_dir: &Path) {
     let _ = std::fs::remove_file(stop_path(data_dir));
 }

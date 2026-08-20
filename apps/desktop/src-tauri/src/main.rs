@@ -406,9 +406,14 @@ fn start_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
     }
     let exe = recorder_path()?;
     // 上一次在沒有 recorder 的時候按下的「停止」會留在磁碟上，而那會讓這一場
-    // 在第一個 tick 就自己結束。recorder 自己也清一次（見 `control::clear_stop`），
-    // 這裡再清是因為下一行就是 spawn——清的成本是一次 unlink，漏掉的代價是
-    // 「按了沒反應」。
+    // 在第一個 tick 就自己結束。recorder 自己也清一次（在 `BootBeat::start`
+    // 裡，開機窗打開的那一刻——**不是**在 `Db::open` 之後；那一版會把他在開機
+    // 那幾分鐘按的停止刪掉），這裡再清是因為下一行就是 spawn——清的成本是一次
+    // unlink，漏掉的代價是「按了沒反應」。
+    //
+    // 兩次清理中間夾著一次 spawn，那是幾毫秒的窗；在那之內按停止仍然會被吃
+    // 掉。和以前那個「一顆一年份的資料庫要開好幾分鐘」的窗差了五個數量級，
+    // 而且那幾毫秒裡畫面上還寫著「正在叫她起來」，沒有停止鍵。
     sister_core::control::clear_stop(dir);
 
     // 它的 stdout 沒有終端機可以去。丟掉的話，「為什麼她開了三秒就不見了」
