@@ -1033,6 +1033,19 @@ jobs:
   windows:
     name: Windows — test and build
     runs-on: windows-latest
+    # 這是一份**簽名**，見 `windows_ocr.rs` 的 `skip_without_chinese`：這台
+    # runner 裝不上 zh-TW OCR 語言包，所以「讀不出中文」在這裡是講好的缺席，
+    # 不是壞掉。沒簽名的機器——開發機、Ted 的 Windows——少了中文就會紅，因為
+    # 在那些機器上這確實是壞的。
+    #
+    # **簽在 job 上而不是某一步上**，因為那支測試有兩個入口（`cargo test
+    # --workspace` 和底下專門那一步），只簽一邊的話另一邊會紅。第一版就是這樣
+    # 紅的：兩個地方跑同一支測試，而我只在其中一個地方講了話。
+    #
+    # 有裝中文的時候這個變數不生效——`skip_without_chinese` 先看語言，是中文就
+    # 直接驗，不看簽名。它豁免的只有「缺席」這一件事。
+    env:
+      SISTER_OCR_ZH_ABSENT: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -1080,12 +1093,6 @@ jobs:
       # 這台機器上裝了哪些 OCR 語言、以及中文到底有沒有被逐字切開。
       - name: OCR — really run it on real Windows
         shell: bash
-        env:
-          # 這個變數是一份**簽名**：見 `skip_without_chinese`。runner 裝不上
-          # zh-TW OCR（上一步從來沒成功過），所以在這台機器上「讀不出中文」是
-          # 講好的缺席，不是壞掉。簽在這裡而不是寫死在測試裡，是因為別的機器
-          # ——開發機、Ted 的 Windows——少了中文就該紅。
-          SISTER_OCR_ZH_ABSENT: "1"
         run: |
           set -o pipefail
           cargo test -p sister-capture --test windows_ocr -- --nocapture 2>&1 | tee ocr.log
