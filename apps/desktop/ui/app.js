@@ -114,6 +114,31 @@ let lastRun = null;
  */
 let wakeFailed = null;
 
+/**
+ * 剛剛按的那一下為什麼沒成（`null` = 沒有這回事）。
+ *
+ * 和 [`wakeFailed`] 同一個理由，只是它管的是別的按鈕：問問題、暫停、打開時間
+ * 軸。這三條路以前都直接寫 `stateLine.textContent`，而 `pollRecording` 每 5 秒
+ * 會呼叫兩次 `paint()`（`setRecording` 和 `setPaused` 各一次），`paint()` 又
+ * 無條件覆寫那一格——**所以那三句話的壽命是 0 到 5 秒，而且不由它們自己決定**。
+ * 暫停那一條的註解說得最清楚：「寧可看起來沒反應，然後把原因寫出來」。輪詢
+ * 一到，只剩下前半句。
+ *
+ * 它蓋過 `wakeFailed` 和 `asleepDetail()`：那兩句講的是上一場錄製，這一句講
+ * 的是他手指剛剛按下去的那一下。下一個動作開始的時候清掉。
+ */
+let notice = null;
+
+/**
+ * 這一題翻很久了（`null` = 沒有／已經回來了）。見 [`SLOW_MS`]。
+ *
+ * 一樣是被 `paint()` 蓋掉的那一種：它以前直接寫 `stateLine.textContent`，於是
+ * 「還在翻…」在畫面上閃一下就被輪詢換回「想一下…」——而「想一下…」不動地停
+ * 在那裡，正是這一句話當初要修的那個畫面。修法變成看起來像 glitch，比不修
+ * 更糟。
+ */
+let slowNote = null;
+
 /** 灰掉那一刻要說的第二句話。她在錄的時候不講——那是現在式，不是回顧。 */
 function asleepDetail() {
   if (lastRun === null) return "";
@@ -141,22 +166,33 @@ function paint() {
   // 「正在起來」排在 `starting` 前面：兩個都是「還沒開始錄」，但這一個是**看
   // 到心跳**才說的，而且說得出她卡在哪裡。他那顆一年份的資料庫要開好幾分鐘，
   // 一句「正在把她叫起來…」在第三分鐘讀起來像當掉了。
+  //
+  // `slowNote` 插在「想一下…」前面而不是接在後面：它要換掉的就是那三個字。
+  // 只在 `state === "thinking"` 的時候看它——`ask()` 回來會把它清成 null，
+  // 但清跟重畫之間仍然有順序問題，多這一個條件就不必去猜那個順序。
   const line = booting
     ? "她起來了，正在開資料庫…（大的記憶要等一下，這期間還沒開始記）"
     : starting
       ? "正在把她叫起來…"
-      : state === "thinking" && shown !== "thinking"
-        ? `想一下…（${shown === "paused" ? "仍在暫停" : "但沒有人在記錄"}）`
-        : STATE_LINES[shown];
+      : state === "thinking" && slowNote !== null
+        ? slowNote
+        : state === "thinking" && shown !== "thinking"
+          ? `想一下…（${shown === "paused" ? "仍在暫停" : "但沒有人在記錄"}）`
+          : STATE_LINES[shown];
   // 灰掉的時候多講一句「上一次是什麼時候、為什麼停的」。換行不換句：那是
   // 同一件事的後半段，而 `.state-line` 的 `pre-line` 讓它自己排。
   //
   // 剛剛才叫不起來的話，那一句蓋過「上一次是什麼時候停的」——他現在要處理的
   // 是眼前這一次沒起來，不是上禮拜那一場怎麼收的。
+  //
+  // `notice` 排在最前面，而且**不看現在是哪一個狀態**：他剛按的那一下沒成，
+  // 那句話在她正在錄、正在暫停、還是灰著的時候都一樣該出現。後面那兩句只在
+  // 灰著的時候有意義（它們講的是上一場錄製）。
   const detail =
-    !starting && !booting && shown === "asleep"
+    notice ??
+    (!starting && !booting && shown === "asleep"
       ? (wakeFailed ?? asleepDetail())
-      : "";
+      : "");
   stateLine.textContent = detail === "" ? line : `${line}\n${detail}`;
   // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。
   avatar.setAttribute("aria-label", `AI-Sister：${line}`);
@@ -240,15 +276,22 @@ async function startRecording() {
   starting = true;
   // 這一次的結果還沒出來，上一次的判斷就不算數了。
   wakeFailed = null;
+  notice = null;
   paint();
   try {
     await invoke("start_recording");
   } catch (err) {
     // 同意書沒簽、找不到 sister.exe、已經有一個在跑——這三句都是後端寫好的
     // 完整句子，直接放上去。
+    //
+    // **放進 `wakeFailed`，不是直接寫那一格。** 底下那條逾時路徑早就是這樣
+    // 寫的，系統匣那條（`recorder-failed`）也是；只有這裡還在直接寫，於是
+    // 5 秒後的輪詢把它蓋回「沒有人在記錄」、還順手把「開始記錄」那顆按鈕
+    // 放回來——畫面和他根本沒按過逐像素相同。`wakeFailed` 那個欄位上面的
+    // 註解講的就是這件事，而這一條是它漏掉的那個收件人。
+    wakeFailed = String(err?.message ?? err);
     starting = false;
     paint();
-    stateLine.textContent = String(err?.message ?? err);
     return;
   }
   const deadline = Date.now() + WAKE_TIMEOUT_MS;
@@ -407,14 +450,18 @@ hideButton?.addEventListener("click", () => {
 });
 
 timelineButton?.addEventListener("click", async () => {
+  notice = null;
   try {
     await invoke?.("open_timeline");
+    paint();
   } catch (err) {
-    stateLine.textContent = String(err?.message ?? err);
+    notice = String(err?.message ?? err);
+    paint();
   }
 });
 
 pauseButton?.addEventListener("click", async () => {
+  notice = null;
   if (invoke === null) {
     setPaused(!paused);
     return;
@@ -424,7 +471,12 @@ pauseButton?.addEventListener("click", async () => {
   } catch (err) {
     // 切不動就**不要**改畫面。顯示成已暫停、實際上還在錄，是這個產品能犯的
     // 最嚴重的一種謊；寧可看起來沒反應，然後把原因寫出來。
-    stateLine.textContent = String(err?.message ?? err);
+    //
+    // 「寫出來」要寫進 `notice`：直接寫那一格的話，下一輪輪詢（5 秒內，而且
+    // 這顆按鈕本身不會重設那個計時器，所以可能是 0 秒）會把它蓋掉，留下的
+    // 剛好只有前半句「看起來沒反應」。
+    notice = String(err?.message ?? err);
+    paint();
   }
 });
 
@@ -900,10 +952,14 @@ async function ask() {
   if (question === "") return;
 
   const mine = ++asking;
+  // 新的一題蓋掉上一次那句「為什麼沒成」——他已經在做下一件事了。
+  notice = null;
+  slowNote = null;
   setState("thinking");
   const slow = setTimeout(() => {
     if (state === "thinking") {
-      stateLine.textContent = "還在翻…（第一次打開資料庫要先整理索引）";
+      slowNote = "還在翻…（第一次打開資料庫要先整理索引）";
+      paint();
     }
   }, SLOW_MS);
 
@@ -929,8 +985,11 @@ async function ask() {
     if (mine !== asking) return;
     // 失敗要說出是什麼失敗。「沒有結果」跟「還沒錄過任何東西」跟「資料庫
     // 打不開」是三件不同的事，混成一句「查不到」等於把問題藏起來。
+    //
+    // 進 `notice`，不是直接寫那一格：直接寫的話這句話 5 秒內會被輪詢換成
+    // 「在聽」，而那三件事就又混成同一片沉默了。
+    notice = String(err?.message ?? err);
     setState("idle");
-    stateLine.textContent = String(err?.message ?? err);
     // 上一題的答案要先撤掉。這一句以前不在，於是問了第二題而它壞掉的時候，
     // 畫面上是：新的問題還在輸入框裡、**舊的那一題的答案原封不動躺在下面**、
     // 角落一行小小的錯誤訊息。他讀到的是一份對不上題目的答案，而她連自己
@@ -939,8 +998,23 @@ async function ask() {
     failed.className = "hits-empty";
     failed.textContent = "這一題我沒答成——底下原本那幾筆是上一題的，先收起來了。";
     hitList.replaceChildren(failed);
+    // **那個 `<ul>` 開場是 hidden 的**（`index.html` 上寫死，`styles.css` 還
+    // 補了一條 `.hits[hidden] { display: none }`），而唯一會拿掉它的是
+    // `renderHits`。少了下面這兩行，第一題就失敗的人**什麼都看不到**：這一句
+    // 塞進一個 `display: none` 的容器裡，狀態那一行也只是一句錯誤訊息。
+    // 也就是說這條路對「資料庫打不開」的新機器完全沉默——而那正是它要講話的
+    // 那一台。答成過一次之後才會自己好，所以它專挑新使用者。
+    hitList.hidden = false;
+    document.body.classList.add("has-hits");
   } finally {
     clearTimeout(slow);
+    // **過期的那一份不准動畫面，包括這裡。** 他多按了幾次 Enter、先送的後回，
+    // 那一次走到這裡的時候還在跑的是別題——清掉的會是**那一題**的「還在翻…」。
+    // `asking` 那個編號存在的理由就是這個，上面兩條路都問過了，這一條也要問。
+    if (mine === asking) {
+      slowNote = null;
+      paint();
+    }
   }
 }
 

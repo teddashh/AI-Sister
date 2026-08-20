@@ -62,6 +62,13 @@ jobs:
       - name: The settings page must say something when the button works
         run: node ./scripts/check-settings-say.mjs
 
+      # 同一族的另一半：字母人上那幾句「為什麼沒成」的壽命。那一格每五秒被
+      # 輪詢無條件重畫一次，所以「按了說不出原因」和「說了三秒後自己消失」
+      # 在畫面上長得一模一樣——都是沉默。alpha.38 之前這樣的有六處，其中兩處
+      # 的原始碼註解自己就在描述這個 bug。
+      - name: The pet must be able to say why something failed — and still be saying it 5s later
+        run: node ./scripts/check-pet-says-why.mjs
+
       # 「三天前那通電話 100ms 內查得回來」是 Phase 0 的退場條件之一，而在
       # 這一步存在之前，它唯一的實作是一行註解。
       #
