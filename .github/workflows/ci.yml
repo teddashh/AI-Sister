@@ -1052,8 +1052,14 @@ jobs:
       #
       # 只在打 tag 或手動觸發時跑：`Add-WindowsCapability` 要跟 Windows Update
       # 要一份 FOD，實測會掛在那裡超過 20 分鐘（很可能被 runner 的網路擋掉）。
-      # 每次 push 都付這個代價不值得，但每次發版驗一次值得。
+      # 每次 push 都付這個代價不值得，發版的時候值得試一下。
       # timeout + continue-on-error 是為了讓它最壞情況只是浪費幾分鐘，不會卡死。
+      #
+      # **但它到今天為止一次都沒成功過**（八分鐘的 timeout 每次都吃滿）。
+      # `continue-on-error` 會讓這一步在摘要上回報 success，所以這裡先講清楚：
+      # 這一步是「試試看」，不是「驗過了」。真的驗到中文沒有的話，下一步會掛一
+      # 個黃色 annotation 在 run 摘要上，而唯一問得到真實答案的地方是 Ted 那台
+      # 真的裝了中文的 Windows（docs/WINDOWS-CHECKLIST.md）。
       - name: Install Traditional Chinese OCR language pack
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         continue-on-error: true
@@ -1073,7 +1079,23 @@ jobs:
       # 換成實測。--nocapture 是為了讓辨識結果直接印在 log 裡：CI 記錄的是
       # 這台機器上裝了哪些 OCR 語言、以及中文到底有沒有被逐字切開。
       - name: OCR — really run it on real Windows
-        run: cargo test -p sister-capture --test windows_ocr -- --nocapture
+        shell: bash
+        env:
+          # 這個變數是一份**簽名**：見 `skip_without_chinese`。runner 裝不上
+          # zh-TW OCR（上一步從來沒成功過），所以在這台機器上「讀不出中文」是
+          # 講好的缺席，不是壞掉。簽在這裡而不是寫死在測試裡，是因為別的機器
+          # ——開發機、Ted 的 Windows——少了中文就該紅。
+          SISTER_OCR_ZH_ABSENT: "1"
+        run: |
+          set -o pipefail
+          cargo test -p sister-capture --test windows_ocr -- --nocapture 2>&1 | tee ocr.log
+          # 測試綠了不代表中文驗到了——那正是這一段存在的理由。從 log 裡撈那
+          # 個記號，把兩種結果變成 run 摘要上兩種看得見的顏色。
+          if grep -q 'SISTER-OCR-ZH: VERIFIED' ocr.log; then
+            echo "::notice title=中文 OCR 這一輪真的驗到了::語言包裝起來了，「中文會不會被逐字切開」有真實答案"
+          else
+            echo "::warning title=中文 OCR 這一輪沒有被驗證::這台 runner 沒有 zh-TW OCR 語言包。英文那條管線驗過了，但「中文會不會被逐字切開」這一題這一輪沒有答案——那是這個產品的主要語言。真實答案只在實機上：docs/WINDOWS-CHECKLIST.md"
+          fi
 
       # 抓圖的耗時只能在真的 Windows 上量。--nocapture 讓那張表進 CI log，
       # 換一種抓法就換一組數字——這是目前唯一不靠 Ted 的機器就拿得到

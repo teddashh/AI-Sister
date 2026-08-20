@@ -98,6 +98,39 @@ fn ocr_runs_at_all_from_an_unpackaged_exe() {
     }
 }
 
+/// 這台機器沒有**中文** OCR 的時候要不要讓測試紅。
+///
+/// 上一版在這裡 `eprintln!` 一行 ⚠ 就 `return`，而 libtest 對這種 return 印的
+/// 是 `ok`。於是「驗過了中文」和「這台機器讀不出中文」在測試報告上長得一模一
+/// 樣——而中文是這個產品的主要語言，這整支檔案的第二個存在理由就是它。
+/// alpha.35 就是這樣帶著一句沒發生過的驗證發出去的。
+///
+/// 但也不能照抄 [`skip_without_ocr`] 那個 `assert!(CI.is_err())`：GitHub 的
+/// windows runner 裝不上 `Language.OCR~~~zh-TW`（那一步跑滿八分鐘還沒好，見
+/// ci.yml），那樣 CI 會永遠紅，而永遠紅的燈跟沒有燈是同一個東西。
+///
+/// 所以改成**要簽名**：想跳過中文，環境裡必須有 `SISTER_OCR_ZH_ABSENT=1`。
+/// ci.yml 簽了一次，旁邊寫著為什麼；而任何沒簽的機器——包括開發機和 Ted 的
+/// Windows——少了中文就是紅的，因為在那些機器上這確實是壞的。
+///
+/// 另外印一行給機器讀的記號。跳過與否是 CI log 裡唯一分得出這兩種結果的字，
+/// 而那一步會拿它去掛 GitHub 的 annotation：發版那一輪到底有沒有驗到中文，
+/// 要能在 run 摘要最上面看到，不是埋在三千行 log 裡。
+fn skip_without_chinese(lang: &str) -> bool {
+    if lang.starts_with("zh") {
+        println!("SISTER-OCR-ZH: VERIFIED lang={lang}");
+        return false;
+    }
+    let msg = format!("這台機器的 OCR 語言是 {lang}，不是中文");
+    assert!(
+        std::env::var("SISTER_OCR_ZH_ABSENT").as_deref() == Ok("1"),
+        "{msg}——中文是這個產品的主要語言，讀不出來就是壞了。\
+         真的要跳過的話設 SISTER_OCR_ZH_ABSENT=1，並且在設的地方寫出為什麼"
+    );
+    println!("SISTER-OCR-ZH: SKIPPED lang={lang}");
+    true
+}
+
 /// 中文那一題：組回來的字裡，詞不可以被空白切開。
 ///
 /// 這條斷言不管 Windows 有沒有逐字切都成立，而且兩種情況它都擋得住：
@@ -112,10 +145,7 @@ fn chinese_comes_back_as_words_not_scattered_characters() {
     let Some(lang) = status.chosen.as_deref() else {
         return;
     };
-    if !lang.starts_with("zh") {
-        // 這是 GitHub runner 的常態：只裝了英文。中文讀不出來不是我們的 bug，
-        // 但也絕對不能假裝驗過了。
-        eprintln!("⚠ 跳過中文驗證：這台機器的 OCR 語言是 {lang}，不是中文");
+    if skip_without_chinese(lang) {
         return;
     }
 
