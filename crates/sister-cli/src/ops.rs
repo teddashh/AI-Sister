@@ -260,8 +260,23 @@ pub enum Emptiness {
     /// 那時候該先看的還是那幾條規則（它們確實擋過東西），只是這句話不可以
     /// 反過來說成「沒有人刪過任何東西」。
     Blocked,
-    /// 錄過，而現在**一列都不剩**：`forget` 或保留期。
+    /// 錄過、**存過東西**，而現在一列都不剩：`forget` 或保留期。
     Erased,
+    /// 她跑過，可是這顆資料庫**從來沒有一列內容落地**。
+    ///
+    /// 最常見的一種：`capture.enabled = false`。她開場、跑完、收工，
+    /// `ever_recorded` 一路是 true，而 `sister forget` 從來沒被執行過。
+    ///
+    /// 這一種以前不存在，它是被 `Erased` 吃掉的——三個畫面同時告訴他「被
+    /// `sister forget` 忘掉了，或是過了保留期」，而他一次都沒刪過東西。那句
+    /// 話指控了一件沒發生的事，而且把下一步指到相反的方向：該看的是
+    /// `capture.enabled`，不是保留期。
+    ///
+    /// alpha.33 以前就被清空的資料庫也會落在這裡（升級那一刻現貨是空的，
+    /// migration 005 的回填不猜）。兩個方向不對稱：把清空過的說成「沒存
+    /// 過」，他知道自己刪過，那句話只是多餘；把沒存過的說成「被忘掉了」，是
+    /// 指控。所以往這邊倒。
+    Barren,
 }
 
 impl Emptiness {
@@ -276,9 +291,19 @@ impl Emptiness {
     /// 「她還沒錄過」。`queries` 曾經被算進去，於是 `forget` 完問一句「真的沒
     /// 了嗎」，整個刪除就從三個畫面上消失了。改那個述詞以前先問：新加的這張表
     /// 會不會在清空**之後**長出來？
+    ///
+    /// **`ever_recorded` 和 `ever_stored` 是兩題，這裡兩題都要問。** 只問前面
+    /// 那一題的時候，一台 `capture.enabled = false` 的機器會走進 `Erased`——見
+    /// [`Emptiness::Barren`]。而 `ever_recorded` 自己的註解早就寫著它答不出這
+    /// 一題（「旗標在 `start_session` 就翻成 1，第一張畫面之前」），我照樣拿
+    /// 它去答了一次。
     pub fn of(db: &Db, s: &sister_core::db::DbStats) -> Result<Self> {
         if s.nothing_recorded_left() && db.ever_recorded()? {
-            return Ok(Self::Erased);
+            return Ok(if db.ever_stored()? {
+                Self::Erased
+            } else {
+                Self::Barren
+            });
         }
         Ok(
             if !db.exclusion_audit()?.is_empty() || db.pause_audit()?.episodes > 0 {
@@ -555,6 +580,7 @@ pub mod queries {
                 // 被忘掉。反過來不成立——`true` 只是說她錄過，不是說他問過。
                 // 人看的那一句走的是同一條線，一樣不替他選一個。
                 "ever_recorded": db.ever_recorded()?,
+                "ever_stored": db.ever_stored()?,
                 "queries": rows.iter().map(|r| serde_json::json!({
                     "id": r.id,
                     "ts": r.ts,
@@ -1623,6 +1649,13 @@ pub mod query {
                 // 都成立。把可能性列出來，不要替他選一個。
                 "她正開著，但手上一段字都沒有——可能是剛開始，也可能是之前的被忘掉了或過期了。"
                     .to_string()
+            } else if b.ever_recorded && !b.ever_stored {
+                // 她跑過，而一列內容都沒進來過。底下那句「被忘掉了」在這台
+                // 機器上是**指控一件沒發生的事**——他一次都沒刪過東西，該看
+                // 的是 `capture.enabled`。兩種 0 分得出來是因為 `ever_stored`
+                // 活在 `meta` 裡，而觸發器保證它只在真的落地時才按下去。
+                "她錄過，但一列內容都沒存進來過——先看 `capture.enabled`（`sister doctor` 會直接說）。"
+                    .to_string()
             } else if b.ever_recorded {
                 "她錄過，但現在資料庫裡是空的——被 `sister forget` 忘掉了，或是過了保留期。"
                     .to_string()
@@ -2281,12 +2314,36 @@ pub mod query {
                 chunks: 0,
                 frames: 0,
                 ever_recorded: true,
+                // **這一個 `true` 是這個 fixture 的一半。** 少了它，同一組數字
+                // 講的是底下 `nothing_ever_landed` 那台機器——而「被忘掉了」是
+                // 那台機器上唯一一句假話。`..Default::default()` 讓它靜靜地變成
+                // false 過一次，而這條測試當場就翻紅了。
+                ever_stored: true,
                 ..Default::default()
             };
             let lines = blind_lines(&recorded_then_erased).join("\n");
             assert!(
                 lines.contains("forget") || lines.contains("保留期"),
                 "什麼都沒擋，那就真的只剩這一個理由：{lines}"
+            );
+
+            // **同樣三個數字，而 `forget` 從來沒被執行過。**
+            //
+            // `capture.enabled = false` 的那台機器：她開場、跑完、收工，一列
+            // 內容都沒進來過。以前這裡走到的是上面那一句，一句指控——他一次
+            // 都沒刪過東西，而該看的是 `capture.enabled`。
+            let nothing_ever_landed = BlindSpots {
+                ever_stored: false,
+                ..recorded_then_erased.clone()
+            };
+            let lines = blind_lines(&nothing_ever_landed).join("\n");
+            assert!(
+                !lines.contains("forget") && !lines.contains("保留期") && !lines.contains("忘掉"),
+                "他什麼都沒刪過，不可以說東西被刪了：{lines}"
+            );
+            assert!(
+                lines.contains("capture.enabled"),
+                "真正的下一步要講出來：{lines}"
             );
 
             // 同樣三個數字，但她**正開著**。這一次「被忘掉了或過期了」不是假的，
@@ -2468,6 +2525,10 @@ pub mod facts {
                 "這份記憶裡沒有任何事實——她錄過，而那段時間被排除規則擋掉或\
                  暫停了（`sister stats` 底下的排除稽核會列出來）。"
             }
+            Emptiness::Barren => {
+                "這份記憶裡沒有任何事實——她錄過，但一個字都沒真的存進來過\
+                 （多半是 `capture.enabled = false`，`sister doctor` 會說）。"
+            }
             Emptiness::Fresh => "這份記憶裡還沒有任何事實——她還沒錄過。",
         }
         .to_string()
@@ -2516,6 +2577,7 @@ pub mod facts {
                 // 空陣列有兩種，而讀 JSON 的沒有那一句人話可以讀。和
                 // `stats --json` 是同一個欄位、同一個理由。
                 "ever_recorded": db.ever_recorded()?,
+                "ever_stored": db.ever_stored()?,
                 "facts": rows.iter().map(|f| serde_json::json!({
                     "kind": f.kind, "raw": f.raw, "normalized": f.normalized,
                     "ts": f.ts, "source": f.source_kind,
@@ -2796,6 +2858,7 @@ pub mod stats {
                     // 這一欄只砍掉第三種。第二種要靠底下的 `exclusions` /
                     // `pauses` 自己判——它們本來就在同一份 JSON 裡。
                     "ever_recorded": db.ever_recorded()?,
+                    "ever_stored": db.ever_stored()?,
                     "db_bytes": s.db_bytes,
                     "image_bytes": s.image_bytes, "span_days": span_days,
                     // 畫面自己的跨度。和 `span_days` 不一樣是正常的——
@@ -2861,13 +2924,28 @@ pub mod stats {
         // 寫成後者，於是得把他打進搜尋框的字也算成「一列」——`forget` 完接著問
         // 一句「真的沒了嗎」就有一列，這個 ⚠ 就整段消失了。話講準，那張表就不
         // 必進那個述詞（見 `DbStats::nothing_recorded_left`）。
-        if s.nothing_recorded_left() && db.ever_recorded()? {
-            println!(
+        //
+        // 而「一列都不剩」還要再分一次：**東西被拿走了**，和**東西從來沒進來
+        // 過**。走 `Emptiness` 而不是自己問 `ever_recorded`——這一行以前自己
+        // 問，於是一台 `capture.enabled = false` 的機器（她跑完、一個字都沒
+        // 記到、`forget` 從來沒被執行過）被這個 ⚠ 告知東西被忘掉了。
+        match Emptiness::of(&db, &s)? {
+            Emptiness::Erased => println!(
                 "  ⚠  她**錄過**，而她記下來的東西現在一列都不剩——被 \
                  `sister forget` 忘掉了，或是過了保留期。\n     \
                  底下那些 0、還有「沒有發生過」那幾句，講的是現在這顆資料庫，\
                  不是那幾天。\n"
-            );
+            ),
+            // 這句話**不去提**刪除，連否認都不提。「沒有東西被忘掉」讀起來
+            // 是在回答一個他還沒問的問題，而那個問題本來就是上一版自己嚇出
+            // 來的。而且那個「忘掉」讓 CI 那道「這一頁不准出現任何一句指控」
+            // 分不出否認和指控——一句需要例外的斷言，守不住東西。
+            Emptiness::Barren => println!(
+                "  ⚠  她**錄過**，可是一列內容都沒有存進來過。\n     \
+                 先看 `capture.enabled`（`sister doctor` 會直接說），\
+                 底下那些 0 講的是現在這顆資料庫。\n"
+            ),
+            Emptiness::Blocked | Emptiness::Fresh => {}
         }
         if let (Some(a), Some(b)) = (s.first_ts, s.last_ts) {
             println!(
@@ -3331,6 +3409,10 @@ pub mod doctor {
                     "?",
                     format!("{detail}——她錄了，但那段時間被規則擋掉或暫停了（見底下「隱私」）"),
                 ),
+                Emptiness::Barren => (
+                    "!",
+                    format!("{detail}——她錄過，但一個字都沒存進來（先看 `capture.enabled`）"),
+                ),
                 Emptiness::Fresh => ("?", format!("{detail}（還沒有任何內容）")),
             },
             // 「0 張畫面 · 0 段文字 ✓」是這個專案一路在修的那個災難本身
@@ -3354,9 +3436,21 @@ pub mod doctor {
         all: i64,
         unfinished: i64,
         ever: bool,
+        stored: bool,
         last_crash: Option<sister_core::model::Millis>,
     ) -> (&'static str, String) {
         match (all, unfinished) {
+            // **「分母沒了」也有兩種，而底下那一條只講得出其中一種。**
+            //
+            // 一場什麼都沒存到的錄製收工時會把自己那一列刪掉，所以一台
+            // `capture.enabled = false` 的機器走到的也是 `(0, _) && ever`
+            // ——然後被告知那幾場的紀錄「不在了」，一個沒發生過的刪除。
+            // 這一條要問在底下那一條前面：它的條件比較強。
+            (0, _) if ever && !stored => (
+                "?",
+                "她錄過，但一個字都沒存進來，那幾場沒有留下紀錄——先看 `capture.enabled`"
+                    .to_string(),
+            ),
             // 一場都不剩**不等於**沒錄過。`sessions` 那張表現在會跟著它自己
             // 那幾列一起被 `forget` 和保留期帶走（`retention::delete_empty_
             // sessions`），所以清空過的資料庫上這裡是 0——而「還沒錄過」對
@@ -3438,6 +3532,7 @@ pub mod doctor {
                 Emptiness::Blocked => {
                     "一段字都沒有，所以沒有中文可以驗——那段時間被規則擋掉或暫停了"
                 }
+                Emptiness::Barren => "一段字都沒有，所以沒有中文可以驗——她錄過，但一個字都沒存進來",
                 Emptiness::Fresh => "資料庫裡還沒有中文，等你錄過再驗一次",
             }
             .to_string(),
@@ -4149,7 +4244,13 @@ pub mod doctor {
             mark(sym, "已記錄", &said);
 
             let (all_sessions, unfinished, last_crash) = db.crash_audit()?;
-            let (sym, said) = crash_verdict(all_sessions, unfinished, ever, last_crash);
+            let (sym, said) = crash_verdict(
+                all_sessions,
+                unfinished,
+                ever,
+                db.ever_stored()?,
+                last_crash,
+            );
             mark(sym, "零當機", &said);
 
             // 「她停了」後面永遠跟著同一個問題：什麼時候、為什麼。上面那一列
@@ -4688,8 +4789,8 @@ pub mod doctor {
             // 兩邊都還是「不知道」而不是打勾——空的就是空的。
             assert_eq!((never_sym, erased_sym), ("?", "?"));
 
-            let (never_sym, never) = crash_verdict(0, 0, false, None);
-            let (erased_sym, erased) = crash_verdict(0, 0, true, None);
+            let (never_sym, never) = crash_verdict(0, 0, false, false, None);
+            let (erased_sym, erased) = crash_verdict(0, 0, true, true, None);
             assert_ne!(never, erased, "「還沒錄過」對清空過的資料庫是假話");
             assert!(
                 never.contains("還沒錄過"),
@@ -4701,10 +4802,29 @@ pub mod doctor {
             );
             assert_eq!((never_sym, erased_sym), ("?", "?"), "兩邊都算不出當機率");
 
+            // **分母是 0 的第三種：她跑過，但一個字都沒存到。**
+            //
+            // 一場什麼都沒存到的錄製收工時會刪掉自己那一列，所以這裡也是
+            // `(0, _) && ever`——而「紀錄已經不在了」在這台機器上是指控。
+            // 少了這一條，把那一支拿掉只有 CI 那顆 fixture 抓得到。
+            let (barren_sym, barren) = crash_verdict(0, 0, true, false, None);
+            assert!(
+                !barren.contains("不在了") && !barren.contains("forget"),
+                "他一次都沒刪過東西：{barren}"
+            );
+            assert!(
+                barren.contains("capture.enabled"),
+                "真正的下一步要講出來：{barren}"
+            );
+            assert_ne!(barren, erased, "「被拿走了」和「沒進來過」不是同一句話");
+            assert_eq!(barren_sym, "?", "照樣算不出當機率");
+
             // 而 `ever` 只准在分母是 0 的時候說話。錄過的資料庫上照樣要數得
             // 出來，不可以整列被那個旗標蓋掉。
             for ever in [false, true] {
-                assert_eq!(crash_verdict(7, 0, ever, None).0, "✓");
+                for stored in [false, true] {
+                    assert_eq!(crash_verdict(7, 0, ever, stored, None).0, "✓");
+                }
             }
             for e in [Emptiness::Fresh, Emptiness::Blocked, Emptiness::Erased] {
                 assert_eq!(recorded_verdict(9, 4, e, d), ("✓", d.to_string()));
@@ -4774,7 +4894,7 @@ pub mod doctor {
             };
 
             let (_, said) = signal_line(&erased, true);
-            let (_, crash) = crash_verdict(0, 0, true, None);
+            let (_, crash) = crash_verdict(0, 0, true, true, None);
             assert!(
                 !said.contains("還沒有任何一場"),
                 "上面那一列剛說完紀錄被帶走了，這一列不可以說她沒錄過：{said}"
@@ -4849,6 +4969,65 @@ pub mod doctor {
                 Emptiness::of(&db, &db.stats().expect("stats")).expect("of"),
                 Emptiness::Erased,
                 "這時候才輪到「被 forget 忘掉了」"
+            );
+        }
+
+        /// **而一顆從來沒存進去過東西的資料庫，長得和上面最後那一步一模一樣。**
+        ///
+        /// `sessions 0 / system_events 0 / frames 0`、`ever_recorded = 1`——
+        /// 逐位元和「清空過」相同，只差 `meta` 裡多不多一個 key。這一條守的就
+        /// 是那一個 key：拿掉它，`Emptiness::of` 會在一台 `capture.enabled =
+        /// false`、`forget` 從來沒被執行過的機器上回 `Erased`，而上面那條測試
+        /// 照樣全綠——它餵的每一顆資料庫都真的存過東西。
+        #[test]
+        fn a_database_that_never_stored_anything_is_not_an_erased_one() {
+            use sister_core::model::{SystemEvent, SystemKind};
+
+            let mut db = Db::open_in_memory().expect("db");
+            // `Recorder::new` 的第一個動作，然後 `finish` 的最後一個動作。
+            // 中間一列內容都沒有，因為 `capture.enabled = false`。
+            let s = db.start_session("test", "0").expect("session");
+            for kind in [SystemKind::SessionStart, SystemKind::SessionEnd] {
+                db.insert_system(
+                    s,
+                    &SystemEvent {
+                        ts: 1_000,
+                        kind,
+                        detail: None,
+                    },
+                )
+                .expect("mark");
+            }
+            db.end_session(s).expect("end");
+
+            let stats = db.stats().expect("stats");
+            assert!(
+                stats.nothing_recorded_left() && db.ever_recorded().expect("ever"),
+                "前提：它走的是和「清空過」同一條路：{stats:?}"
+            );
+            assert_eq!(
+                Emptiness::of(&db, &stats).expect("of"),
+                Emptiness::Barren,
+                "他一次都沒刪過東西，不可以說東西被刪了"
+            );
+
+            // 反面：同一顆資料庫，只要真的存過一列，清空之後就回得到 `Erased`。
+            let s = db.start_session("test", "0").expect("session");
+            db.insert_system(
+                s,
+                &SystemEvent {
+                    ts: 2_000,
+                    kind: SystemKind::Lock,
+                    detail: None,
+                },
+            )
+            .expect("content");
+            db.forget(0, 3_000, None).expect("forget");
+            db.end_session(s).expect("end");
+            assert_eq!(
+                Emptiness::of(&db, &db.stats().expect("stats")).expect("of"),
+                Emptiness::Erased,
+                "存過就是存過——那個位元撐得過 forget"
             );
         }
 

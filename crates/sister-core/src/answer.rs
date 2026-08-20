@@ -144,6 +144,15 @@ pub struct BlindSpots {
     /// 被拿來比 0 的數字，本來就該是布林——留著數字，讀的人遲早會拿它去講
     /// 「你錄過 87 場」，而那句話從那一刻起就開始腐爛。
     pub ever_recorded: bool,
+    /// 她有沒有**真的存下來過一列內容**——見
+    /// [`Db::ever_stored`](crate::db::Db::ever_stored)。
+    ///
+    /// 上面那個位元少答一題，而那一題正好是這裡最需要的：`ever_recorded &&
+    /// chunks == 0 && frames == 0` 有兩種，「被忘掉了」和「從來沒進來過」，
+    /// 而它們的下一步剛好相反——一個是接受東西沒了，一個是去看
+    /// `capture.enabled`。少了這個位元，一台什麼都沒記到的機器會被告知它的
+    /// 東西被刪掉了。
+    pub ever_stored: bool,
     /// 排除規則生效過的（理由, 段數）。**段不是張**——見
     /// [`Db::exclusion_audit`](crate::db::Db::exclusion_audit)。
     pub excluded: Vec<(String, i64)>,
@@ -251,6 +260,7 @@ pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::
         ocr_blocks: stats.ocr_blocks,
         frames: stats.frames,
         ever_recorded: db.ever_recorded()?,
+        ever_stored: db.ever_stored()?,
         excluded: db
             .exclusion_audit()?
             .into_iter()

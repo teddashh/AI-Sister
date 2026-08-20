@@ -31,7 +31,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE meta (
@@ -246,6 +246,84 @@ CREATE TABLE query_clicks (
 CREATE INDEX idx_click_query ON query_clicks(query_id);
 "#;
 
+/// `ever_stored`：**她有沒有真的存下來過一列內容。**
+///
+/// `ever_recorded` 答不出這一題，而它自己的註解早就寫著答不出來（見
+/// [`Db::ever_recorded`]：「旗標在 `start_session` 就翻成 1，第一張畫面之
+/// 前」）。我照樣拿它去代表這一題，於是一台 `capture.enabled = false` 的機器
+/// ——她跑完、一個字都沒記到、`forget` 從來沒被執行過——在 `stats`、`facts`、
+/// `doctor` 三個地方被告知「被 `sister forget` 忘掉了，或是過了保留期」。
+///
+/// **這個旗標刻意不是 Rust 寫的。** 每一次「加一個計數器／加一個旗標」的修
+/// 法，我都犯在呼叫端：六個 insert 函式，漏掉一個就是漏掉一種內容，而測試會
+/// 全綠——因為漏掉的那一種沒有 fixture。觸發器把那六個呼叫端變成零個：SQL
+/// 那一層看得到每一次 INSERT，繞不過去，`replay`、`record`、migration 回填、
+/// 還有測試裡手寫的 `INSERT` 全部一視同仁。
+///
+/// `WHEN NOT EXISTS(...)` 是為了熱路徑：每一拍都在寫 `frames` 和
+/// `text_chunks`，不能每一列都去改一次 `meta`。旗標按下去以後，剩下的每一次
+/// INSERT 只多付一次兩列表上的主鍵探測。
+///
+/// `system_events` 那一條多一個 `WHEN NEW.kind NOT IN (...)`：`session_start`
+/// 是 `Recorder::new` 的第一個動作，拿它當「存下來過內容」就等於沒修。名單從
+/// [`crate::model::SystemKind::session_marks_sql`] 長出來，和
+/// `nothing_recorded_left` / `delete_empty_sessions` 是同一份。
+///
+/// **回填只認現貨。** 升上來的舊資料庫如果現在有內容，就是 1；如果現在是空
+/// 的，這裡**不猜**——那顆資料庫到底是被清空過還是從來沒存進去過，檔案裡沒
+/// 有任何一個位元答得出來，而這整個 bug 就是「拿一個答不出來的位元去回答」。
+/// 猜錯的兩個方向不對稱：把清空過的說成「沒存過」，他知道自己刪過，那句話只
+/// 是多餘；把沒存過的說成「被忘掉了」，是指控一件沒發生的事。所以空的就留空。
+fn migration_005() -> String {
+    let mut sql = String::new();
+    for (table, when) in CONTENT_TABLES {
+        // 觸發器裡的欄位一定要掛 `NEW.`，回填的 `SELECT` 裡一定不能掛——同一
+        // 句述詞兩種寫法。所以名單上只留一份，`{q}` 在這裡各自展開，免得兩份
+        // 名單哪天只改了一邊。
+        let extra = when.map_or(String::new(), |w| {
+            format!(" AND {}", w.replace("{q}", "NEW."))
+        });
+        sql.push_str(&format!(
+            "CREATE TRIGGER {table}_ever_stored AFTER INSERT ON {table}\n  \
+             WHEN NOT EXISTS(SELECT 1 FROM meta WHERE key = 'ever_stored'){extra}\n\
+             BEGIN\n  \
+             INSERT OR REPLACE INTO meta(key, value) VALUES('ever_stored', '1');\n\
+             END;\n"
+        ));
+    }
+    sql.push_str(&format!(
+        "INSERT OR REPLACE INTO meta(key, value) SELECT 'ever_stored', '1' WHERE {};\n",
+        CONTENT_TABLES
+            .iter()
+            .map(|(t, w)| match w {
+                Some(w) => format!("EXISTS(SELECT 1 FROM {t} WHERE {})", w.replace("{q}", "")),
+                None => format!("EXISTS(SELECT 1 FROM {t})"),
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    ));
+    sql.replace("{marks}", &crate::model::SystemKind::session_marks_sql())
+}
+
+/// 「她記下來的東西」放在哪幾張表——以及哪幾列不算。
+///
+/// 這份名單要和 [`DbStats::nothing_recorded_left`] 對得起來：那邊說「一列都不
+/// 剩」的時候，這邊必須是「一列都沒進來過」的同一組表。對不起來的話，一顆資
+/// 料庫可以同時「什麼都不剩」和「從來沒存過」——那正是這個旗標要拆開的兩種 0
+/// 又黏回去了。`ever_stored_covers_everything_nothing_recorded_left_counts`
+/// 這條測試把兩份名單釘在一起。
+///
+/// `facts` 和 `ocr_blocks` 不在名單上：它們是 `frames` / `text_chunks` 長出來
+/// 的，沒有母體就不會有它們，而母體那兩張已經在名單上了。
+const CONTENT_TABLES: &[(&str, Option<&str>)] = &[
+    ("frames", None),
+    ("text_chunks", None),
+    ("focus_events", None),
+    ("clipboard_events", None),
+    ("input_metrics", None),
+    ("system_events", Some("{q}kind NOT IN {marks}")),
+];
+
 pub struct Db {
     /// `pub(crate)` 只為了 [`crate::retention`]：清理要跨好幾張表、還要在
     /// 同一個 transaction 裡跑，包成一堆窄 API 反而更難看出它到底刪了什麼。
@@ -356,6 +434,13 @@ impl Db {
             tx.commit()?;
             self.conn.pragma_update(None, "user_version", 4)?;
         }
+        if version < 5 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(&migration_005())
+                .context("migration 005")?;
+            tx.commit()?;
+            self.conn.pragma_update(None, "user_version", 5)?;
+        }
         Ok(())
     }
 
@@ -441,6 +526,32 @@ impl Db {
         Ok(self
             .conn
             .query_row("SELECT EXISTS(SELECT 1 FROM sessions)", [], |r| r.get(0))?)
+    }
+
+    /// 這台機器上，有沒有**曾經真的存下來過一列內容**。
+    ///
+    /// [`Db::ever_recorded`] 答的是「她有沒有開始過一場錄製」，而那兩題差一台
+    /// `capture.enabled = false` 的機器：她跑完了、一個字都沒進資料庫、
+    /// `sister forget` 從來沒被執行過。拿 `ever_recorded` 去回答這一題的下場是
+    /// 三個畫面同時宣布「被 `sister forget` 忘掉了，或是過了保留期」。
+    ///
+    /// 和 `ever_recorded` 一樣是**單調**的：`forget` 和保留期都不碰它，所以
+    /// 「她存過東西」這件事撐得過清空——`Erased` 這個答案就是靠它站著的。
+    ///
+    /// 也和 `ever_recorded` 一樣**答不出**「現在還剩不剩」（那是
+    /// [`DbStats::nothing_recorded_left`]）、答不出「他刪過東西」（沒有任何位
+    /// 元答得出來，見 [`migration_005`]）。它只答一題：這顆資料庫裡有沒有落過
+    /// 地的內容。
+    ///
+    /// 沒有這個 key 的兩種資料庫：真的沒存過的，和 alpha.33 以前就已經被清空
+    /// 的（升級那一刻現貨是空的，回填不猜）。兩種都會走到
+    /// `Emptiness::Barren`——見那裡對「猜錯的兩個方向不對稱」的說明。
+    pub fn ever_stored(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'ever_stored')",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     /// 收工。順手把**空的那幾場**清掉。
@@ -2959,6 +3070,49 @@ mod tests {
         );
     }
 
+    /// 升上來的舊資料庫：現在有內容就按下旗標，現在是空的就**留空**。
+    ///
+    /// 兩個方向一起斷言，因為 005 的回填只要寫成
+    /// `WHERE EXISTS(SELECT 1 FROM meta WHERE key='ever_recorded')`，第一半照樣
+    /// 綠——然後每一顆 alpha.32 清空過的資料庫都會被宣布「被 forget 忘掉了」，
+    /// 包括那些其實一個字都沒存過的。回填不猜，理由見 [`migration_005`]。
+    #[test]
+    fn an_upgraded_database_only_gets_the_flag_if_it_still_holds_something() {
+        let with_content = {
+            let conn = Connection::open_in_memory().expect("open");
+            conn.execute_batch(MIGRATION_001).expect("v1 schema");
+            conn.execute(
+                "INSERT INTO frames(ts, width, height, dhash) VALUES(1,1,1,0)",
+                [],
+            )
+            .expect("v1 frame");
+            conn.pragma_update(None, "user_version", 1).expect("stamp");
+            Db::init(conn).expect("upgrade")
+        };
+        assert!(
+            with_content.ever_stored().expect("stored"),
+            "現貨就在那裡，這不是猜的"
+        );
+
+        let emptied = {
+            let conn = Connection::open_in_memory().expect("open");
+            conn.execute_batch(MIGRATION_001).expect("v1 schema");
+            // 他在 alpha.32 上按過忘掉：內容沒了，`ever_recorded` 還在。
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES('ever_recorded', '1')",
+                [],
+            )
+            .expect("v1 flag");
+            conn.pragma_update(None, "user_version", 1).expect("stamp");
+            Db::init(conn).expect("upgrade")
+        };
+        assert!(emptied.ever_recorded().expect("ever"));
+        assert!(
+            !emptied.ever_stored().expect("stored"),
+            "這顆資料庫答不出它到底存過沒有，而 migration 不可以替它編一個答案"
+        );
+    }
+
     #[test]
     fn fts5_trigram_and_unicode61_are_both_available() {
         // 若 bundled SQLite 缺 FTS5 或 trigram，建表就會失敗——這個測試是保險絲
@@ -3587,6 +3741,119 @@ mod tests {
         let st = db.stats().expect("stats");
         assert!(!st.nothing_recorded_left(), "{st:?}");
         assert!(!st.only_session_shells_left(), "{st:?}");
+    }
+
+    /// 一場**什麼都沒存到**的錄製，不可以把 `ever_stored` 按下去。
+    ///
+    /// 這是 `capture.enabled = false` 那台機器：她跑完了、`start_session` 和兩
+    /// 列 `session_*` 都寫了、一個字都沒進資料庫，而 `sister forget` 從來沒被
+    /// 執行過。`ever_recorded` 在這裡是 true——那正是它答不出這一題的原因。
+    #[test]
+    fn a_recording_that_stored_nothing_leaves_the_flag_down() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for kind in [SystemKind::SessionStart, SystemKind::SessionEnd] {
+            db.insert_system(
+                s,
+                &SystemEvent {
+                    ts: 1_000,
+                    kind,
+                    detail: None,
+                },
+            )
+            .expect("mark");
+        }
+        db.end_session(s).expect("end");
+
+        assert!(db.ever_recorded().expect("ever"), "她確實跑過一場");
+        assert!(
+            !db.ever_stored().expect("stored"),
+            "可是一列內容都沒落地——這顆資料庫沒有東西可以被忘掉"
+        );
+    }
+
+    /// 而 `Excluded` 那種列**是**內容：她真的記下了「這一刻被規則擋掉」。
+    #[test]
+    fn an_exclusion_audit_row_is_content_and_flips_the_flag() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        db.insert_system(
+            s,
+            &SystemEvent {
+                ts: 1_000,
+                kind: SystemKind::Excluded,
+                detail: Some("bank.example".into()),
+            },
+        )
+        .expect("audit");
+        assert!(db.ever_stored().expect("stored"));
+    }
+
+    /// 每一張算進 `nothing_recorded_left` 的表，都要按得下這個旗標。
+    ///
+    /// 兩份名單對不起來的下場，是一顆資料庫同時「什麼都不剩」和「從來沒存
+    /// 過」——也就是這個旗標本來要拆開的那兩種 0 又黏回去了。這裡不是用反射
+    /// 對名單，是**每一張表各餵一列**：漏掉的那一種永遠是沒有 fixture 的那一
+    /// 種，所以名單長出新的一張表時，這條會在 `assert_eq!` 那行先炸給你看。
+    #[test]
+    fn every_content_table_flips_the_flag() {
+        let rows: &[(&str, &str)] = &[
+            (
+                "frames",
+                "INSERT INTO frames(ts, width, height, dhash) VALUES(1,1,1,0)",
+            ),
+            (
+                "text_chunks",
+                "INSERT INTO text_chunks(ts, source_kind, text) VALUES(1,'ocr','x')",
+            ),
+            (
+                "focus_events",
+                "INSERT INTO focus_events(ts, kind, app_id) VALUES(1,'switch','a')",
+            ),
+            (
+                "clipboard_events",
+                "INSERT INTO clipboard_events(ts, kind, byte_len) VALUES(1,'copy',3)",
+            ),
+            (
+                "input_metrics",
+                "INSERT INTO input_metrics(ts_start, ts_end) VALUES(1,2)",
+            ),
+            (
+                "system_events",
+                "INSERT INTO system_events(ts, kind) VALUES(1,'lock')",
+            ),
+        ];
+        assert_eq!(
+            rows.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            CONTENT_TABLES.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            "名單上多了一張表，就要在這裡多一列 fixture"
+        );
+        for (table, sql) in rows {
+            let db = test_db();
+            assert!(
+                !db.ever_stored().expect("stored"),
+                "{table}：起點要是乾淨的"
+            );
+            db.conn.execute(sql, []).expect(table);
+            assert!(db.ever_stored().expect("stored"), "{table} 沒把旗標按下去");
+        }
+    }
+
+    /// 旗標撐得過清空——`Erased` 那個答案就是靠它站著的。
+    #[test]
+    fn forgetting_everything_does_not_take_the_flag_with_it() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let f = frame_with_text(1_000, "chrome.exe", "帳單", &["本期應繳 NT$1,234"]);
+        db.insert_frame(s, &f, None, 0).expect("insert");
+        db.end_session(s).expect("end");
+        db.forget(0, 2_000, None).expect("forget");
+
+        assert!(db.stats().expect("stats").nothing_recorded_left());
+        assert!(
+            db.ever_stored().expect("stored"),
+            "東西沒了，但「她存過東西」這件事必須留著——不然清空長得像沒錄過"
+        );
     }
 
     /// 反面：她**還記著東西**的那一場，不是殼。

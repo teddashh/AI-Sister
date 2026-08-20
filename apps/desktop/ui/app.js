@@ -570,6 +570,11 @@ function blindLines(blind) {
       //
       // 不挑一邊：清空過的資料庫上她照樣可能正在錄，那時候兩件事都成立。
       out.push("（我正開著，但手上一段字都沒有——可能是剛開始，也可能是之前的被忘掉了或過期了。）");
+    } else if (blind.ever_recorded && !blind.ever_stored) {
+      // 我跑過，而一列內容都沒進來過。底下那句「被忘掉了」在這台機器上是
+      // 指控一件沒發生的事——他一次都沒刪過東西。四種空手變五種，而這第五
+      // 種以前是被「被忘掉了」吃掉的。
+      out.push("（我錄過，但一列內容都沒存進來過——先看設定頁的「開始記錄」那一段，`sister doctor` 會直接說。）");
     } else if (blind.ever_recorded) {
       out.push("（我錄過，但現在什麼都不剩了——被忘掉了，或是過了保留期。）");
     } else {
@@ -1072,6 +1077,9 @@ if (params.get("hits") === "recent") {
 //   flag      反過來，旗標在、紀錄裡什麼都沒有
 //   scan      一個字的問題，只翻得動 30 天
 //   blocked   一段字都沒有，而原因是暫停／排除，不是「被忘掉了」
+//   forgotten 錄過、存過、被忘掉了
+//   nulldata  錄過、**沒存過**，而 forget 從來沒被執行過。和上面那個在
+//             資料庫上長得一樣，講出來的話必須相反
 const BLIND_DEMOS = {
   "": {
     chunks: 8421,
@@ -1121,6 +1129,25 @@ const BLIND_DEMOS = {
     chunks: 0,
     frames: 0,
     ever_recorded: true,
+    ever_stored: true,
+    excluded: [],
+    paused_episodes: 0,
+    paused_ms: 0,
+    paused_open: false,
+    paused_now: false,
+    paused_truncated: 0,
+  },
+  // **和上面那個在資料庫上長得一模一樣，而它們的下一步剛好相反。**
+  //
+  // `capture.enabled = false` 的那台機器：她開場、跑完、收工，一列內容都沒
+  // 進來過，`sister forget` 從來沒被執行過。差別只有 `ever_stored`，而那個
+  // 位元以前不存在——於是這一種讀到的是上面那一句「被忘掉了」，一句關於他
+  // 的東西被刪掉的假話。這兩行要用眼睛比過。
+  nulldata: {
+    chunks: 0,
+    frames: 0,
+    ever_recorded: true,
+    ever_stored: false,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,
@@ -1135,6 +1162,7 @@ const BLIND_DEMOS = {
     chunks: 0,
     frames: 0,
     ever_recorded: true,
+    ever_stored: false,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,
@@ -1148,6 +1176,7 @@ const BLIND_DEMOS = {
     ocr_is_dead: true,
     frames: 12000,
     ever_recorded: true,
+    ever_stored: true,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,
@@ -1166,6 +1195,7 @@ const BLIND_DEMOS = {
     ocr_is_dead: true,
     frames: 40000,
     ever_recorded: true,
+    ever_stored: true,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,
@@ -1177,6 +1207,7 @@ const BLIND_DEMOS = {
     chunks: 0,
     frames: 0,
     ever_recorded: false,
+    ever_stored: false,
     excluded: [],
     paused_episodes: 0,
     paused_ms: 0,
@@ -1188,6 +1219,7 @@ const BLIND_DEMOS = {
     chunks: 0,
     frames: 0,
     ever_recorded: true,
+    ever_stored: true,
     excluded: [["excluded app: keepassxc", 3]],
     paused_episodes: 1,
     paused_ms: 3600 * 1000,

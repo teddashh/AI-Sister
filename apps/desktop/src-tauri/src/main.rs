@@ -635,6 +635,11 @@ struct Blind {
     /// 她**曾經**開始記過東西嗎。兩個 0 配上 `true` = 錄過、但被忘掉了，
     /// 不是還沒開始——見 [`sister_core::answer::BlindSpots::ever_recorded`]。
     ever_recorded: bool,
+    /// 她有沒有**真的存下來過一列內容**。上面那個位元在 `start_session` 就
+    /// 翻成 true，第一張畫面之前——所以一台 `capture.enabled = false` 的機器
+    /// 兩個 0 也配得到 `ever_recorded: true`，然後被告知東西被忘掉了。見
+    /// [`sister_core::answer::BlindSpots::ever_stored`]。
+    ever_stored: bool,
     /// 排除規則生效過的（理由, 段數）。段不是張。
     excluded: Vec<(String, i64)>,
     paused_episodes: i64,
@@ -788,6 +793,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 ocr_is_dead: b.ocr_is_dead(),
                 frames: b.frames,
                 ever_recorded: b.ever_recorded,
+                ever_stored: b.ever_stored,
                 excluded: b.excluded,
                 paused_episodes: b.paused_episodes,
                 paused_ms: b.paused_ms,

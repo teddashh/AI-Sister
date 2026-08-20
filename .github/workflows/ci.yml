@@ -288,6 +288,43 @@ jobs:
             exit 1
           fi
 
+          # **第五顆：一個字都沒存進去過，而 `forget` 從來沒被執行過。**
+          #
+          # 上面四顆全都真的存過東西，所以「`nothing_recorded_left()` 是真的、
+          # 而沒有任何東西被刪掉」這個狀態一顆都走不到——於是 `Emptiness` 把它
+          # 歸進 `Erased`，三個畫面同時說東西被 `sister forget` 忘掉了，而他一
+          # 次都沒刪過。這是**上面那幾條斷言自己修出來的洞**：把 `session_end`
+          # 從「還剩什麼」裡扣掉，順手也扣掉了這一種僅剩的證據。缺的還是
+          # fixture。
+          printf '[capture]\nenabled = false\n' > ci-off.toml
+          N="$B --data-dir ./ci-nulldata"
+          $N --config ci-off.toml replay scenarios/bill-lookup.json --interval-ms 500 > /dev/null
+          $N stats > null-stats.txt
+          $N doctor > null-doctor.txt
+          $N facts > null-facts.txt
+          # `query` 也在名單上：那一句空手話走的是 `BlindSpots`，和上面三個
+          # 各自的判斷是**不同的程式碼**——而它是他最常看到的那一個。
+          $N query 電話 > null-query.txt
+          for x in null-stats.txt null-doctor.txt null-facts.txt null-query.txt; do
+            # 每一句都是一則指控，而這台機器上沒有任何一個刪除發生過。
+            # `一列都不剩` 也不行——東西不是「不剩」，是從來沒進來過。
+            #
+            # 是 `過了保留期` 不是 `保留期`：`doctor` 上那一整段的標題就叫
+            # 「保留期」，而它在每一台機器上都印。抓字串要抓到**那句話**，
+            # 抓到那個詞就是在抓一個永遠成立的東西。
+            LIE='forget|過了保留期|已經不在了|一列都不剩|忘掉'
+            if grep -qE "$LIE" "$x"; then
+              echo "::error::[什麼都沒存過] $x 指控了一個沒發生過的刪除"
+              grep -nE "$LIE" "$x"
+              exit 1
+            fi
+            grep -q 'capture.enabled' "$x" \
+              || { echo "::error::[什麼都沒存過] $x 沒指出真正的下一步"; cat "$x"; exit 1; }
+          done
+          # 而「她錄過」照樣要講得出來——往回倒成「還沒錄過」是另一種假話。
+          grep -qE '她(\*\*)?錄過' null-stats.txt \
+            || { echo '::error::[什麼都沒存過] 她確實跑過一場，不可以說成還沒錄過'; exit 1; }
+
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
       # 而讀的人只會以為是自己裝錯了。這一步不是另外寫一份一樣的測試（兩份
