@@ -825,6 +825,16 @@ pub mod stop {
         // 開機那幾分鐘印的是「正在跑的 `sister record` 會在下一個 tick 把
         // session 寫完再結束」——那時候既沒有 session 也沒有 tick，主迴圈根本
         // 還沒開始。三種狀態，三句話。
+        //
+        // **而這兩行的順序是有負載的：先讀心跳，再寫請求。** 反過來寫的話，中間
+        // 那一瞬間 recorder 可能剛好收到請求、收工、`heartbeat::stop` 把
+        // `recording.beat` 刪掉——於是我們回頭一問，得到 `None`，印出「目前沒有
+        // 任何 `sister record` 在跑」，而我們剛剛才成功停掉一場。他下一步會去做
+        // 的事（再按一次、或者去工作管理員找）全部建立在那句話上。
+        //
+        // 這個順序沒有測試擋得住（那個競爭窗要用執行緒去搶，而搶得贏是機率問
+        // 題，搶不贏就是一支偽綠的測試）。擋著它的只有這一段字——所以它寫在這
+        // 裡，不在 commit message 裡。
         let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
         sister_core::control::request_stop(data_dir)
             .with_context(|| format!("寫不進 {}", data_dir.display()))?;
@@ -1468,8 +1478,26 @@ pub mod forget {
 
     pub fn run(data_dir: &Path, last: &str, yes: bool) -> Result<()> {
         let span = parse_span(last)?;
-        let now = sister_core::now_ms();
-        let (from, to) = (now - span, now);
+
+        // **這個「現在」只屬於刪除區間，所以它在這個大括號裡就死掉。**
+        //
+        // 區間的右界該錨在**他開口的那一秒**——他打 `--last 2h` 的意思是「從我
+        // 按下去往回兩小時」，不是「從資料庫開完往回兩小時」。所以這裡取一次。
+        //
+        // 而下面還有第二個問題要問時間：心跳還新鮮嗎。那一題問的是**此刻**，
+        // 兩題中間隔著一個 `Db::open`——一顆被硬砍掉的資料庫要跑 WAL 回復、一顆
+        // 剛升級的要跑 migration，都可以是幾十秒到幾分鐘。拿這個舊的時戳去減，
+        // 差值會偏小，於是一顆早就停掉的心跳被判成活的，`--yes` 前那句最重的話
+        // （「她剛才一直在錄，所以這一刀之後寫進去的東西還在」）就變成對一組不
+        // 存在的列下斷言。
+        //
+        // 一個變數回答兩個問題，就是這個 repo 一路在修的那件事。這裡沒有測試擋
+        // 得住它（`Db::open` 要花多久沒辦法在測試裡注入），所以改用大括號擋：
+        // `asked_at` 出了這一段就不存在，下面想重用它會編不過。
+        let (from, to) = {
+            let asked_at = sister_core::now_ms();
+            (asked_at - span, asked_at)
+        };
 
         // `query` 那邊查不到資料庫要報錯（他以為自己有資料），這裡不用：
         // 「沒有東西可以忘」是一個成功的結果。同一個 helper 套在兩種語意上
@@ -1523,7 +1551,10 @@ pub mod forget {
         // 三種心跳三句話，而**下一步都一樣**（先 `sister pause`）：開機中的那一
         // 個再過幾秒就開始記，而他最想忘掉的那個畫面多半還在螢幕上。理由一樣要
         // 講對——一句理由錯了的正確建議，下一次他就不信了。
-        let beat = sister_core::heartbeat::phase(data_dir, now);
+        //
+        // **這裡重新問一次「現在」**，不是重用上面算區間用的那個。理由寫在
+        // `let (from, to)` 那一段：中間隔著一個可以跑好幾分鐘的 `Db::open`。
+        let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
         let recording = beat == Some(sister_core::heartbeat::Phase::Recording);
         let booting = beat == Some(sister_core::heartbeat::Phase::Booting);
 
