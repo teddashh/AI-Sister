@@ -36,7 +36,8 @@ function card(sheet) {
   const box = document.createElement("input");
   box.type = "checkbox";
   box.checked = sheet.effective;
-  box.addEventListener("change", () => void set(sheet.key, box.checked));
+  // 把 `box` 也交出去：寫失敗的時候要有人把它翻回來，理由見 `set` 的 catch。
+  box.addEventListener("change", () => void set(sheet.key, box.checked, box));
 
   const body = document.createElement("span");
 
@@ -145,7 +146,7 @@ function paint(view) {
   }
 }
 
-async function set(key, granted) {
+async function set(key, granted, box = null) {
   if (invoke === null) return;
   try {
     const view = await invoke("consent_set", { key, granted });
@@ -174,6 +175,20 @@ async function set(key, granted) {
   } catch (err) {
     // 存不進去就**不要**改畫面。顯示成已同意、實際上沒寫進檔案，是這一頁
     // 唯一一種真正嚴重的錯——`sister record` 讀的是那個檔案，不是這個畫面。
+    //
+    // **勾勾要在這裡翻回來，不能只靠底下那個 `load()`。** 那是一顆原生的
+    // `<input type="checkbox">`：`change` 事件走到這裡的時候，瀏覽器早就把
+    // 它翻過去了。而 `load()` 讀的是同一個檔案、同一顆磁碟、同一個鎖——寫
+    // 不進去的時候它多半也讀不出來，那條路上 `paint()` 根本不會跑，勾勾就
+    // 停在他剛剛按的樣子。畫面說已同意，檔案裡什麼都沒有。
+    //
+    // 反方向更糟：他把第三張**取消**勾選來停掉截圖，寫失敗、讀也失敗，勾勾
+    // 留在取消的樣子——而她繼續寫圖。他關掉這一頁就不會再回來看了。
+    //
+    // 翻回去要用的是「他按之前的值」，那個我們自己知道（`!granted`），不必
+    // 去問磁碟。讀得回來的話 `load()` 會用檔案裡那一份蓋掉整批卡片，這一行
+    // 就只是中間狀態。
+    if (box) box.checked = !granted;
     say(String(err?.message ?? err), true);
     // `load()` 會呼叫 `paint()`，而 `paint()` 一定會 `say(...)`——所以上面那
     // 行紅字會被立刻蓋成一句平靜的「第一張沒勾」，而且連 `bad` 都被清掉。
@@ -201,6 +216,21 @@ async function load({ keepSay = false } = {}) {
     paint(await invoke("consent_read"));
     if (before) say(before.text, before.bad);
   } catch (err) {
+    // 讀也失敗的時候，畫面上該留哪一句？**留寫的那一句。**
+    //
+    // 兩個失敗多半是同一個原因（同一個檔案），而他能動的只有寫的那一件：
+    // 「你剛剛那一下沒有存進去」。換成「讀不出同意書」的話，聽起來像顯示
+    // 問題——他會以為勾勾是對的、只是畫面沒更新，而那正好是這一頁最不能
+    // 讓他相信的一件事。
+    //
+    // 第二行講的是這一刻真正的處境：這一頁上的勾勾現在誰也不代表。
+    if (before) {
+      say(
+        `${before.text}\n而且現在連同意書本身都讀不出來，所以這一頁上的勾勾不保證是檔案裡的樣子。`,
+        true,
+      );
+      return;
+    }
     say(String(err?.message ?? err), true);
   }
 }
