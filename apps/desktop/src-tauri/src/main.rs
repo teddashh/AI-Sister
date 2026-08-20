@@ -44,7 +44,18 @@ struct Shell {
     /// 才蓋的——於是那段開機時間裡它對這道閘門是隱形的，第二下就穿過去了。
     /// 心跳那一頭已經補好（見 `ops::BootBeat`），但那是靠時間差贏的；握著這個
     /// 把手就不必賭：行程還活著就是還活著，跟它寫沒寫檔案無關。
-    spawned: Mutex<Option<std::process::Child>>,
+    spawned: Mutex<Option<Spawned>>,
+}
+
+/// 我們自己開起來的那個 recorder，**加上它是什麼時候被開起來的**。
+struct Spawned {
+    child: std::process::Child,
+    /// spawn 之前那一刻的牆上時間。
+    ///
+    /// 「結束」那道落刀的閘門靠它分辨心跳檔上那一行是**上一場留下的**還是
+    /// **我這個 child 剛寫的**——見 [`sister_core::heartbeat::safe_to_kill_spawn`]。
+    /// 一台錄過東西的機器上那個檔案永遠都在，所以分得出來的只有時戳。
+    at: sister_core::Millis,
 }
 
 impl Shell {
@@ -380,7 +391,7 @@ fn start_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
     // 看不見它。**問行程，不要問它寫的檔案**：這是唯一一條不用賭時間差的路。
     {
         let mut spawned = shell.spawned.lock().expect("spawned recorder");
-        match spawned.as_mut().map(std::process::Child::try_wait) {
+        match spawned.as_mut().map(|s| s.child.try_wait()) {
             // 還在跑（`Ok(None)` = 沒退出）。
             Some(Ok(None)) => {
                 return Err("上一次按的那個還在起來——第一次開資料庫要重建索引，\
@@ -440,13 +451,18 @@ fn start_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
         // 是同一件事。
         cmd.creation_flags(0x0800_0000);
     }
+    // **在 spawn 之前讀鐘。** 讀在後面的話，child 有機會在這兩行之間就蓋出第
+    // 一拍，於是那一拍的時戳比 `at` 還小，而「結束」那道閘門會把它讀成「上一
+    // 場留下的」然後放行落刀——她已經開著資料庫了。往前讀最壞只是多不敢砍幾
+    // 毫秒；往後讀最壞是砍掉一場正在錄的。
+    let at = sister_core::now_ms();
     let child = cmd
         .spawn()
         .map_err(|e| format!("{} 起不來：{e}", exe.display()))?;
     // 握著它。不握的話，下一下按進來的時候我們只剩心跳可以問，而開機那幾分鐘
     // 心跳還不在。順便：`Child` 被 drop 不會殺掉行程，所以她活得比這個視窗久
     // ——那是刻意的，`stop_recording` 用的是檔案而不是 kill。
-    *shell.spawned.lock().expect("spawned recorder") = Some(child);
+    *shell.spawned.lock().expect("spawned recorder") = Some(Spawned { child, at });
     tracing::info!("把 recorder 開起來了：{}", exe.display());
     Ok(())
 }
@@ -2274,42 +2290,55 @@ fn main() {
                         // 那個修法帶來的副作用，而那個修法是對的。所以還要問一次
                         // 行程。
                         //
-                        // **這裡以前會 kill，那是錯的，已經拿掉了。**
+                        // 光靠那個檔案還漏一格：`clear_stop` 是 `BootBeat::start`
+                        // 的第一行，所以只要她已經蓋過一拍，這個請求就不會被她自
+                        // 己擦掉；漏掉的是 spawn 回來到她跑到那第一行之間那幾毫秒
+                        // ——child 會把我們剛寫的請求擦掉，然後留一個還在錄的孤
+                        // 兒。那是 #63 的洞。
                         //
-                        // 拿掉的理由不是「殺行程很危險」這種泛泛之論，是那個判斷
-                        // 式問錯了問題。它寫的是 `beat == "none"`，而它想問的是
-                        // 「她還沒走到 `Db::open`，所以磁碟上沒有東西會被我砍
-                        // 壞」。這兩句之間靠一條不變式接起來：心跳蓋在 `Db::open`
-                        // **之前**（`BootBeat::start` 在 `ops.rs` 那一行），所以
-                        // 「沒有心跳」本來確實蘊涵「還沒開資料庫」。
+                        // 補它要落刀，而落刀從來不是問「她在錄嗎」，是問「她還沒
+                        // 走到 `Db::open`，所以磁碟上沒有東西會被我砍壞嗎」。這兩
+                        // 句之間靠一條不變式接起來：**心跳蓋在 `Db::open` 之前**。
                         //
-                        // 那條不變式是斷的，因為 `heartbeat::stop()` 收工的時候
-                        // **把檔案刪掉**。於是 `none` 同時是三件事：
+                        // 上一版把那個問題寫成 `beat == "none"`，而那句話同時是三
+                        // 件事——她還沒起來（可以砍）、她正在乾淨收工（`stop` 寫
+                        // 在 `rec.finish()` 之前）、她好好的只是這一拍慢了 16 秒。
+                        // 後兩種落刀的代價是 `end_session` 永遠是 NULL，於是
+                        // `doctor` 說「她當掉了」——她沒當掉，是我砍的。而第二種
+                        // 只要按「停止記錄」再按「結束」就會發生，那兩顆按鈕在同
+                        // 一張選單上，中間隔 0.4 秒。所以那一版被整個拿掉了。
                         //
-                        //   1. 她還沒起來        ← 只有這個可以殺
-                        //   2. 她正在乾淨收工——`ops.rs:7722` 刪心跳，`:7737` 的
-                        //      `rec.finish()` 才寫 `end_session`，中間隔著一次能力
-                        //      報告的寫檔
-                        //   3. 她好好的，只是這一拍慢了 16 秒（那次六小時一輪的
-                        //      `prune` 要刪掉磁碟上成千上萬個檔；休眠喚醒也算）
+                        // 現在 `heartbeat::stop` 留墓碑而不是刪檔，這三件事在
+                        // `Presence` 上是三個不同的值，閘門搬進
+                        // `heartbeat::safe_to_kill_spawn`（那裡有測試，這裡沒有）。
+                        // 它只放行一種：**這個資料目錄上沒有任何東西是在我 spawn
+                        // 之後寫下的**。
                         //
-                        // 2 和 3 落刀的代價，正好是 `control` 開頭那段話列出來的：
-                        // `end_session` 永遠是 NULL，於是 `doctor` 說「她當掉了」、
-                        // `stats` 把那一場標成空殼——她沒當掉，是我砍的。而 2 只要
-                        // 按「停止記錄」再按「結束」就會發生，那兩顆按鈕在同一張
-                        // 選單上，中間隔 0.4 秒。
-                        //
-                        // 上面那句 `stop_recording`（無條件寫 `stop.request`）仍然
-                        // 收得掉絕大部分情況：`clear_stop` 是 `BootBeat::start` 的
-                        // 第一行，蓋在心跳**之前**，所以只要她已經蓋過一拍，這個
-                        // 請求就不會被她自己擦掉。漏掉的只剩 spawn 回來到她跑到第
-                        // 一行之間那幾毫秒——那是 #63 本來要收的洞，而它會留一個
-                        // 還在錄的孤兒，不會弄壞任何東西。用「可能砍掉一場正在收
-                        // 尾的錄製」去換它，換反了。
-                        //
-                        // 真的要補那幾毫秒，得先讓「檔案不在」重新只有一個意思
-                        // （收工留個離場記號，而不是刪檔）——那是另一件事，開了
-                        // 一條 task。
+                        // 只砍我們自己 spawn 的那個 handle，不照 PID 去找：別人在
+                        // 終端機裡開的那一場不歸這個視窗管。
+                        if let Some(dir) = shell.data_dir.as_deref() {
+                            let mut spawned = shell.spawned.lock().expect("spawned recorder");
+                            if let Some(s) = spawned.as_mut()
+                                && matches!(s.child.try_wait(), Ok(None))
+                                && sister_core::heartbeat::safe_to_kill_spawn(
+                                    dir,
+                                    s.at,
+                                    sister_core::now_ms(),
+                                )
+                            {
+                                match s.child.kill() {
+                                    Ok(()) => {
+                                        tracing::info!(
+                                            "剛 spawn 出來還沒開資料庫，直接收掉：pid {}",
+                                            s.child.id()
+                                        );
+                                        // 收屍，不然她變 zombie 掛在我們身上。
+                                        let _ = s.child.wait();
+                                    }
+                                    Err(e) => tracing::error!("收不掉剛 spawn 的 recorder：{e}"),
+                                }
+                            }
+                        }
                         shell.persist();
                         app.exit(0);
                     }

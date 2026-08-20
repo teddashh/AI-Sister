@@ -80,54 +80,178 @@ pub fn beat_booting(data_dir: &Path, ts: Millis) -> Result<()> {
 }
 
 fn write_beat(data_dir: &Path, ts: Millis, phase: Phase) -> Result<()> {
-    let path = beat_path(data_dir);
-    let tmp = path.with_extension("beat.tmp");
     // 錄製中就寫一個裸數字，和舊版一模一樣——舊的心跳檔（和舊的 recorder）
     // 讀起來仍然是「在錄」，那也是對的：會寫這個檔案的舊版都在主迴圈裡。
-    let body = match phase {
-        Phase::Recording => ts.to_string(),
-        Phase::Booting => format!("{ts} boot"),
-    };
+    write_raw(
+        data_dir,
+        &match phase {
+            Phase::Recording => ts.to_string(),
+            Phase::Booting => format!("{ts} boot"),
+        },
+    )
+}
+
+/// 收工。**乾淨結束的時候要自己講一聲**，不要留給逾時去猜——那 16 秒裡字母人
+/// 會說她還在錄，而她已經走了。
+///
+/// 以前這裡是 `remove_file`，於是「檔案不在」同時是三件事：她還沒起來、她正在
+/// 乾淨收工、她好好的只是這一拍慢了。三件事的下一步不一樣，而其中一件曾經被
+/// 拿去守一個破壞性動作（字母人按「結束」的時候 kill 掉 recorder，見
+/// `apps/desktop/src-tauri/src/main.rs` 那段長註解）。留下一塊墓碑之後，**檔案
+/// 不在只剩一個意思：這個資料目錄從來沒有人跑過 recorder。**
+///
+/// 墓碑的時戳寫 `0`，這是**故意的**，而且是這個改動唯一微妙的地方：舊版的
+/// `read_beat` 認不得的第二欄一律當成 `Recording`（那條 forward-compat 本身是
+/// 對的，見下面），所以一個舊的 `sister.exe` 讀到這塊墓碑會說「她在錄」——正是
+/// 這個模組開頭寫的、這個產品唯一不能說的那種謊。時戳寫 0 之後，舊版走的是
+/// 「過期」那條路，答案變回正確的「沒有人在錄」。真正的收工時間放在第三欄，
+/// 新版讀得到，舊版看都不會看。
+///
+/// 寫不進去（磁碟滿、權限）就退回舊行為把檔案刪掉：那樣「檔案不在」的意思會
+/// 再度變糊，但比留下一個新鮮的心跳說她還在錄好——後者是那句不能說的謊。
+pub fn stop(data_dir: &Path, at: Millis) {
+    if write_raw(data_dir, &format!("0 stopped {at}")).is_err() {
+        let _ = std::fs::remove_file(beat_path(data_dir));
+    }
+    // 寫成功的話 rename 已經把它吃掉了；寫失敗的話這裡收掉那半個檔。
+    let _ = std::fs::remove_file(beat_path(data_dir).with_extension("beat.tmp"));
+}
+
+fn write_raw(data_dir: &Path, body: &str) -> Result<()> {
+    let path = beat_path(data_dir);
+    let tmp = path.with_extension("beat.tmp");
     std::fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).with_context(|| format!("rename to {}", path.display()))?;
     Ok(())
 }
 
-/// 收工。**乾淨結束的時候要自己清掉**，不要留給逾時去猜——那 16 秒裡字母人
-/// 會說她還在錄，而她已經走了。
-pub fn stop(data_dir: &Path) {
-    let _ = std::fs::remove_file(beat_path(data_dir));
-    let _ = std::fs::remove_file(beat_path(data_dir).with_extension("beat.tmp"));
+/// 檔案裡那一行說什麼——**還沒和「現在」比過**。
+///
+/// 拆成兩層是刻意的：「那一行寫了什麼」和「所以她現在是什麼狀態」是兩個問題，
+/// 而過期只跟第二個有關。墓碑不會過期（她收工了就是收工了，過一年還是收工），
+/// 心跳會。
+enum Record {
+    /// 一次心跳：那個時刻她活著，而且在這個階段。
+    Beat(Millis, Phase),
+    /// 一塊墓碑：她收工了。`at` 是收工時間；`None` 代表寫墓碑的版本沒寫第三欄。
+    Tombstone { at: Option<Millis> },
 }
 
-fn read_beat(data_dir: &Path) -> Option<(Millis, Phase)> {
+/// `None` 有兩種原因，而**這一層分不出來**——見 [`Presence`]，那裡分得出。
+fn read_record(data_dir: &Path) -> Option<Record> {
     let raw = std::fs::read_to_string(beat_path(data_dir)).ok()?;
     let mut fields = raw.split_whitespace();
     let ts: Millis = fields.next()?.parse().ok()?;
     // 認不得的第二欄當成「在錄」而不是丟掉整行：未來多寫一個欄位的版本，
     // 不該讓舊版讀成「沒有人在錄」然後放行第二個 recorder。
-    let phase = match fields.next() {
-        Some("boot") => Phase::Booting,
-        _ => Phase::Recording,
-    };
-    Some((ts, phase))
+    //
+    // `stopped` 是這條規則的第一個客人，而它**不靠**這一欄被舊版讀懂——舊版
+    // 讀不懂它，只會讀成 `Recording`。靠的是時戳寫 0，見 [`stop`]。
+    match fields.next() {
+        Some("boot") => Some(Record::Beat(ts, Phase::Booting)),
+        Some("stopped") => Some(Record::Tombstone {
+            at: fields.next().and_then(|s| s.parse().ok()),
+        }),
+        _ => Some(Record::Beat(ts, Phase::Recording)),
+    }
 }
 
-/// 最後一次心跳的時戳。`None` = 檔案不在、讀不到、或內容不是數字。
+/// 這個資料目錄現在到底是什麼狀況。**五種，而「檔案不在」只剩一個意思。**
+///
+/// [`phase`] 把後面四種都壓成 `None`，那對「要不要對使用者說她在錄」是對的
+/// 答案，而且是三十幾個呼叫端要的那一個。這裡分得比較細，給那些**下一步不一樣**
+/// 的地方用——尤其是任何想動手殺行程的地方（見 `main.rs` 那段長註解：`none`
+/// 曾經同時是三件事，而只有其中一件可以落刀）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// 檔案不在。這個資料目錄**從來沒有人跑過 recorder**——只有這一個意思。
+    NeverStarted,
+    /// 檔案在，但讀不懂（寫到一半斷電）。**有人來過**，只是說不出他是誰。
+    /// 和 `NeverStarted` 分開，因為「沒有人來過」是唯一可以放心落刀的那一種。
+    Unreadable,
+    /// 心跳是新鮮的，她活著，而且在這個階段。
+    Live(Phase),
+    /// 她自己講了收工（[`stop`] 留下的墓碑）。不會過期。
+    Stopped { at: Option<Millis> },
+    /// 心跳停在那裡過期了——當掉、被 kill、整台關機，或者這一拍慢了 16 秒
+    /// （六小時一輪的 `prune` 在刪成千上萬個檔，休眠喚醒也算）。
+    /// **後面那一種還活著**，所以這不是「她死了」，是「她沒回話」。
+    Stalled { at: Millis, phase: Phase },
+}
+
+/// 現在這個資料目錄的狀況。見 [`Presence`]。
+///
+/// `now` 由呼叫端給，因為時間在這個 crate 裡一律是參數（測試要能演「三分鐘
+/// 前的心跳」，不能等三分鐘）。
+pub fn presence(data_dir: &Path, now: Millis) -> Presence {
+    match read_record(data_dir) {
+        None if beat_path(data_dir).exists() => Presence::Unreadable,
+        None => Presence::NeverStarted,
+        Some(Record::Tombstone { at }) => Presence::Stopped { at },
+        // 未來的時戳一樣算活的：使用者調過時鐘、或者兩個行程對時差了幾百毫秒，
+        // 都不該被讀成「她死了」。
+        Some(Record::Beat(ts, phase)) if now - ts < STALE_AFTER_MS => Presence::Live(phase),
+        Some(Record::Beat(ts, phase)) => Presence::Stalled { at: ts, phase },
+    }
+}
+
+/// 最後一次心跳的時戳。`None` = 檔案不在、讀不到、或者那是一塊墓碑。
+///
+/// 墓碑回 `None` 是對的：那不是一次心跳，而這支函式的呼叫端拿它去講「最後一次
+/// 心跳是幾秒前」。收工時間要用 [`presence`] 拿。
 pub fn last_beat(data_dir: &Path) -> Option<Millis> {
-    read_beat(data_dir).map(|(ts, _)| ts)
+    match read_record(data_dir)? {
+        Record::Beat(ts, _) => Some(ts),
+        Record::Tombstone { .. } => None,
+    }
 }
 
 /// 現在這個資料目錄的狀態。`None` = 沒有人在。
 ///
-/// `now` 由呼叫端給，因為時間在這個 crate 裡一律是參數（測試要能演「三分鐘
-/// 前的心跳」，不能等三分鐘）。
-///
-/// 未來的時戳一樣算活的：使用者調過時鐘、或者兩個行程對時差了幾百毫秒，都
-/// 不該被讀成「她死了」。
+/// **把 [`Presence`] 五種壓成兩種**：只有新鮮的心跳算「有人在」。收工了、
+/// 過期了、讀不懂、從來沒跑過——對「要不要說她在錄」來說都是同一個答案，而且
+/// 是安全的那個答案（少吹牛，見模組開頭）。要分它們請用 [`presence`]。
 pub fn phase(data_dir: &Path, now: Millis) -> Option<Phase> {
-    let (beat, phase) = read_beat(data_dir)?;
-    (now - beat < STALE_AFTER_MS).then_some(phase)
+    match presence(data_dir, now) {
+        Presence::Live(p) => Some(p),
+        _ => None,
+    }
+}
+
+/// 我在 `spawned_at` 那一刻 spawn 出去的那個 recorder，**還沒碰到資料庫嗎**。
+///
+/// 這支函式只有一個呼叫端、只回答一個問題：字母人按「結束」的時候，那個剛被
+/// spawn 出來、還沒蓋過任何心跳的 child，可不可以直接 kill 掉。
+///
+/// 它靠的不變式只有一條：**心跳蓋在 `Db::open` 之前**（`ops::BootBeat::start`
+/// 是開機的第一段，早於任何開檔）。所以「這個資料目錄上沒有任何東西是在我
+/// spawn 之後寫下的」蘊涵「我那個 child 還沒走到 `Db::open`」，而那正是落刀
+/// 唯一安全的時刻。**改動 `BootBeat::start` 的位置就是在動這條不變式。**
+///
+/// 為什麼要比時戳、而不是「檔案在不在」：一台錄過東西的機器上那個檔案**永遠
+/// 都在**（不是墓碑就是過期的心跳），所以「不在」在那台機器上根本不會發生。
+/// 分得出「上一場留下的」和「我這個 child 剛寫的」的，只有時戳。
+///
+/// 每一種說不準的情況都回 `false`。這裡和模組開頭那條「不確定就往少的那邊倒」
+/// **方向相反**，因為守的是一個破壞性動作：那邊少倒是少講一句話，這邊少倒是
+/// 少砍一刀。同一句「不確定」，在這裡的安全方向是不要動手。
+pub fn safe_to_kill_spawn(data_dir: &Path, spawned_at: Millis, now: Millis) -> bool {
+    match presence(data_dir, now) {
+        // 從來沒有人在這個資料目錄跑過 recorder。**只有這一種是乾淨的。**
+        Presence::NeverStarted => true,
+        // 檔案在但讀不懂——說不出那半行是誰寫的，也就說不出是不是我這個 child。
+        Presence::Unreadable => false,
+        // 她已經蓋過心跳了，那就是走過 `Db::open` 了。
+        Presence::Live(_) => false,
+        // 墓碑比我 spawn 還早 = 上一場留下的，跟我這個 child 無關。
+        // 比我晚 = **她正在收尾**（`heartbeat::stop` 寫在 `rec.finish()` 之前，
+        // 中間隔著一次能力報告的寫檔），這一刀會讓 `end_session` 永遠是 NULL。
+        // 沒有第三欄的舊墓碑說不出是哪一種，所以不動手。
+        Presence::Stopped { at } => at.is_some_and(|at| at < spawned_at),
+        // 同理：比我早的過期心跳是上一場的屍體；比我晚的是我這個 child 蓋的，
+        // 它只是這一拍慢了（prune 在刪幾萬個檔、休眠喚醒），而她開著資料庫。
+        Presence::Stalled { at, .. } => at < spawned_at,
+    }
 }
 
 /// 她現在**在錄嗎**。正在開機的 recorder 回 `false`：她一個字都還沒記。
@@ -198,8 +322,161 @@ mod tests {
     fn stopping_cleanly_takes_effect_immediately() {
         let t = Tmp::new("stop");
         beat(&t.0, 1_000_000).expect("beat");
-        stop(&t.0);
+        stop(&t.0, 1_000_001);
         assert!(!is_recording(&t.0, 1_000_000));
+    }
+
+    /// **收工之後她要能再開一次。** 墓碑是留給「檔案不在是什麼意思」看的，不是
+    /// 一把鎖——如果它算「有人佔著」，那 `record` 從今天起再也起不來，而這條路
+    /// 上唯一的症狀是使用者按下開始、什麼都沒發生。
+    #[test]
+    fn a_tombstone_does_not_hold_the_door_shut() {
+        let t = Tmp::new("restart");
+        beat(&t.0, 1_000_000).expect("beat");
+        stop(&t.0, 1_000_001);
+        assert!(!is_occupied(&t.0, 1_000_002), "墓碑不可以擋住下一次開始");
+        beat_booting(&t.0, 2_000_000).expect("boot again");
+        assert!(is_occupied(&t.0, 2_000_000), "蓋得掉墓碑才叫再開一次");
+        beat(&t.0, 2_000_100).expect("beat again");
+        assert!(is_recording(&t.0, 2_000_100));
+    }
+
+    /// 「檔案不在」現在**只剩一個意思**——這是 #66 的全部內容。四種狀況以前
+    /// 有三種長成同一個 `None`，而其中一種曾經被拿去守一個 kill。
+    #[test]
+    fn the_four_ways_of_nobody_are_four_different_answers() {
+        let never = Tmp::new("p-never");
+        assert_eq!(presence(&never.0, 1_000_000), Presence::NeverStarted);
+
+        let broken = Tmp::new("p-broken");
+        std::fs::write(beat_path(&broken.0), "not a number").expect("write");
+        assert_eq!(
+            presence(&broken.0, 1_000_000),
+            Presence::Unreadable,
+            "有人來過但話沒說完，不等於沒有人來過"
+        );
+
+        let stopped = Tmp::new("p-stopped");
+        beat(&stopped.0, 1_000_000).expect("beat");
+        stop(&stopped.0, 1_000_500);
+        assert_eq!(
+            presence(&stopped.0, 1_000_600),
+            Presence::Stopped {
+                at: Some(1_000_500)
+            },
+            "收工時間要是真的那一個"
+        );
+
+        let dead = Tmp::new("p-dead");
+        beat(&dead.0, 1_000_000).expect("beat");
+        assert_eq!(
+            presence(&dead.0, 1_000_000 + STALE_AFTER_MS),
+            Presence::Stalled {
+                at: 1_000_000,
+                phase: Phase::Recording
+            },
+            "沒回話的時候要說得出她最後一次講話是什麼時候"
+        );
+
+        // 而這四種對「要不要跟使用者說她在錄」是同一個答案。
+        for dir in [&never.0, &broken.0, &stopped.0, &dead.0] {
+            assert!(!is_recording(dir, 1_000_000 + STALE_AFTER_MS));
+        }
+    }
+
+    /// 墓碑**不會過期**。她收工了就是收工了，隔一年開機還是收工——過期是心跳
+    /// 才有的性質。這一條掉了的話，`Stopped` 會在 16 秒後變成 `Stalled`
+    /// （「她當掉了」），於是那個 kill 又拿回一個它不該拿到的綠燈。
+    #[test]
+    fn a_tombstone_never_goes_stale() {
+        let t = Tmp::new("tomb-age");
+        stop(&t.0, 1_000_000);
+        assert_eq!(
+            presence(&t.0, 1_000_000 + 365 * 24 * 3_600_000),
+            Presence::Stopped {
+                at: Some(1_000_000)
+            }
+        );
+    }
+
+    /// 墓碑不是一次心跳。這支函式的呼叫端拿它去講「最後一次心跳是幾秒前」，
+    /// 而 `0` 會變成「五十六年前」。
+    #[test]
+    fn a_tombstone_is_not_a_beat() {
+        let t = Tmp::new("tomb-beat");
+        beat(&t.0, 1_000_000).expect("beat");
+        assert_eq!(last_beat(&t.0), Some(1_000_000));
+        stop(&t.0, 1_000_001);
+        assert_eq!(last_beat(&t.0), None);
+    }
+
+    /// **一個舊的 `sister.exe` 讀到這塊墓碑，不可以說她在錄。**
+    ///
+    /// 這是整個改動唯一微妙的地方，所以這裡不寫「我相信舊版會怎樣」，而是把
+    /// alpha.41 那版 `read_beat` 原樣抄過來跑一次。它認不得 `stopped`，會走
+    /// 「不認得的第二欄 = Recording」那條 forward-compat；救回正確答案的是時
+    /// 戳那個 `0`，它讓舊版走過期那條路。
+    ///
+    /// 這條紅掉的時候不要改這個測試——改 [`stop`] 寫出去的那一行。
+    #[test]
+    fn an_old_exe_reading_this_tombstone_still_says_nobody_is_recording() {
+        // ↓↓↓ alpha.41 `heartbeat.rs` 的 `read_beat` + `phase`，一字不改。
+        fn old_read_beat(data_dir: &Path) -> Option<(Millis, Phase)> {
+            let raw = std::fs::read_to_string(beat_path(data_dir)).ok()?;
+            let mut fields = raw.split_whitespace();
+            let ts: Millis = fields.next()?.parse().ok()?;
+            let phase = match fields.next() {
+                Some("boot") => Phase::Booting,
+                _ => Phase::Recording,
+            };
+            Some((ts, phase))
+        }
+        fn old_phase(data_dir: &Path, now: Millis) -> Option<Phase> {
+            let (beat, phase) = old_read_beat(data_dir)?;
+            (now - beat < STALE_AFTER_MS).then_some(phase)
+        }
+        // ↑↑↑
+
+        let t = Tmp::new("old-reader");
+        let now = crate::now_ms();
+        stop(&t.0, now);
+
+        // 前提：舊版真的讀得到這個檔、而且真的認不得 `stopped`——不然下面那句
+        // 綠燈是「檔案根本沒被讀到」冒充的。
+        let (ts, phase) = old_read_beat(&t.0).expect("舊版要讀得到這個檔");
+        assert_eq!(phase, Phase::Recording, "前提：舊版把 `stopped` 讀成在錄");
+        assert_eq!(ts, 0, "救回答案的是這個 0");
+
+        assert_eq!(old_phase(&t.0, now), None, "舊版不可以說她在錄");
+
+        // 這個手法的**立足點**寫成斷言，不寫成註解。舊版說「她在錄」的條件是
+        // `now - 0 < STALE_AFTER_MS`，所以只要那台機器的時鐘走過 1970 年的第
+        // 16 秒，它就說不出那句話。時鐘真的歸零的話沒有任何一種墓碑救得了它
+        // ——往未來寫也不行，舊版把未來當活的。那一格記在這裡，不假裝它不存在。
+        assert_eq!(old_phase(&t.0, STALE_AFTER_MS), None, "第一個安全的時刻");
+        assert_eq!(
+            old_phase(&t.0, STALE_AFTER_MS - 1),
+            Some(Phase::Recording),
+            "而這是它救不了的那一格：時鐘停在 1970-01-01T00:00:15Z"
+        );
+    }
+
+    /// 寫不進去（磁碟滿、權限）就退回舊行為。「檔案不在」的意思會再度變糊，
+    /// 但比留下一個新鮮的心跳說她還在錄好。
+    #[test]
+    fn a_tombstone_that_cannot_be_written_falls_back_to_deleting() {
+        let t = Tmp::new("tomb-fail");
+        beat(&t.0, 1_000_000).expect("beat");
+        // 把 tmp 檔的位置佔成一個目錄：`std::fs::write` 一定失敗。
+        std::fs::create_dir_all(beat_path(&t.0).with_extension("beat.tmp")).expect("mkdir");
+        stop(&t.0, 1_000_001);
+        // 斷言要挑一句**只有退路走得出來**的話。`!is_recording` 兩條路都成立
+        // ——墓碑寫成功也是「沒在錄」——所以拿它當斷言等於沒有斷言。
+        assert_eq!(
+            presence(&t.0, 1_000_002),
+            Presence::NeverStarted,
+            "寧可退回舊的模糊，也不要留一個說她在錄的新鮮心跳"
+        );
     }
 
     /// 使用者調了時鐘，或者兩個行程對時差了一點。往未來偏不可以被讀成
@@ -217,6 +494,70 @@ mod tests {
         let t = Tmp::new("corrupt");
         std::fs::write(beat_path(&t.0), "not a number").expect("write");
         assert!(!is_recording(&t.0, 1_000_000));
+    }
+
+    /// 落刀的閘門。**每一種說不準的都不可以放行**——這裡放行一次的代價是
+    /// 一場錄製的 `end_session` 永遠是 NULL，然後 `doctor` 說「她當掉了」。
+    #[test]
+    fn the_only_moment_the_knife_is_safe_is_before_she_opened_the_db() {
+        const SPAWN: Millis = 5_000_000;
+        let now = SPAWN + 500;
+
+        // 全新的機器：這個資料目錄從來沒有人跑過。這是唯一乾淨的那一種。
+        let never = Tmp::new("k-never");
+        assert!(safe_to_kill_spawn(&never.0, SPAWN, now));
+
+        // 昨天錄過、乾淨收工過的機器。檔案**在**，而且是墓碑——`NeverStarted`
+        // 在這台機器上永遠不會再出現，所以分得出來的只有時戳。
+        let yesterday = Tmp::new("k-yesterday");
+        stop(&yesterday.0, SPAWN - 86_400_000);
+        assert!(
+            safe_to_kill_spawn(&yesterday.0, SPAWN, now),
+            "昨天那塊墓碑不可以擋住今天這一刀"
+        );
+
+        // 她**正在收尾**：墓碑比我 spawn 還新。`stop` 寫在 `rec.finish()` 之
+        // 前，這一刀會讓 `end_session` 永遠是 NULL。這是最容易踩到的一種——
+        // 「停止記錄」和「結束」在同一張選單上，中間隔 0.4 秒。
+        let winding_down = Tmp::new("k-winding");
+        stop(&winding_down.0, SPAWN + 400);
+        assert!(!safe_to_kill_spawn(&winding_down.0, SPAWN, now));
+
+        // 沒有第三欄的舊墓碑：說不出是上一種還是上上一種，所以不動手。
+        let old_tomb = Tmp::new("k-oldtomb");
+        std::fs::write(beat_path(&old_tomb.0), "0 stopped").expect("write");
+        assert_eq!(presence(&old_tomb.0, now), Presence::Stopped { at: None });
+        assert!(!safe_to_kill_spawn(&old_tomb.0, SPAWN, now));
+
+        // 她蓋過心跳了 = 她走過 `Db::open` 了。開機那一拍也算。
+        for (name, write) in [
+            ("k-live", beat as fn(&Path, Millis) -> Result<()>),
+            ("k-boot", beat_booting),
+        ] {
+            let t = Tmp::new(name);
+            write(&t.0, SPAWN + 100).expect("beat");
+            assert!(!safe_to_kill_spawn(&t.0, SPAWN, now), "{name}");
+        }
+
+        // 我這個 child 蓋過一拍就卡住了（prune 在刪幾萬個檔、休眠喚醒）。
+        // 她沒死，她開著資料庫。
+        let mine_stalled = Tmp::new("k-mine-stalled");
+        beat(&mine_stalled.0, SPAWN + 100).expect("beat");
+        assert!(!safe_to_kill_spawn(
+            &mine_stalled.0,
+            SPAWN,
+            SPAWN + 100 + STALE_AFTER_MS
+        ));
+
+        // 上一場的屍體（沒收工就當掉）。比我早，跟我這個 child 無關。
+        let old_corpse = Tmp::new("k-corpse");
+        beat(&old_corpse.0, SPAWN - 3_600_000).expect("beat");
+        assert!(safe_to_kill_spawn(&old_corpse.0, SPAWN, now));
+
+        // 寫到一半斷電。說不出那半行是誰寫的，就不要動手。
+        let broken = Tmp::new("k-broken");
+        std::fs::write(beat_path(&broken.0), "not a number").expect("write");
+        assert!(!safe_to_kill_spawn(&broken.0, SPAWN, now));
     }
 
     /// 蓋第二次要蓋得掉第一次。少了這一條，心跳只會活 16 秒。

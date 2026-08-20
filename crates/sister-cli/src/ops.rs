@@ -7437,9 +7437,9 @@ pub mod record {
             // 這整段想避免的東西。
             self.stop_thread();
             if !self.handed_off {
-                // 沒交棒就走了（`Db::open` 炸了之類）：這次開機沒成功，把心跳
-                // 收掉，不然接下來 16 秒字母人會說她在錄。
-                sister_core::heartbeat::stop(&self.dir);
+                // 沒交棒就走了（`Db::open` 炸了之類）：這次開機沒成功，蓋一塊
+                // 墓碑，不然接下來 16 秒字母人會說她在錄。
+                sister_core::heartbeat::stop(&self.dir, sister_core::now_ms());
             }
         }
     }
@@ -7935,7 +7935,7 @@ pub mod record {
         // 會說她還在錄，而她已經走了——**說她還在錄卻沒在錄**，是這兩個狀態
         // 裡比較危險的那一個。放在 `finish()` 之前，因為那一步會寫資料庫，
         // 可能失敗，而失敗不該讓一個錯的「還在錄」留在磁碟上。
-        sister_core::heartbeat::stop(data_dir);
+        sister_core::heartbeat::stop(data_dir, sister_core::now_ms());
 
         let stats = rec.stats().clone();
         // 收工前問一次「這段路上掉了什麼」。`doctor` 只看得到開機那一瞬間，
