@@ -216,6 +216,10 @@ jobs:
             echo "::error::沒有任何 recorder 在跑，forget 卻說她可能正在錄"
             exit 1
           fi
+          # `doctor` 的「上一次錄製」是同一題的另一個 surface，而它上一版沒有
+          # 人問。`d.txt` 還是上面那次 `check ./ci-crashed` 留下來的。
+          grep -qE '上一次錄製.*她當掉了' d.txt \
+            || { echo "::error::沒有 recorder 佔著這個目錄，doctor 卻沒說那一場是當掉的"; grep -A1 上一次錄製 d.txt; exit 1; }
 
           # 同一顆資料庫，另一句話——差別只有那個心跳檔。心跳就是一個裡面寫
           # 著毫秒數的檔案（`heartbeat::BEAT`），所以這個狀態做得出來，和上面
@@ -377,6 +381,16 @@ jobs:
             grep -qE '正開著|正在錄|剛開始' "$x" \
               || { echo "::error::[她正開著] $x 沒講出她此刻正在錄"; cat "$x"; exit 1; }
           done
+          # 「零當機」看的是同一批列，而**正在錄的那一場沒有 `ended_at`，在磁碟
+          # 上跟一次當機逐字相同**。這一顆是最小的那個形狀：一場好好收完的、
+          # 加上此刻正開著的一場。心跳分得出來，而分得出來就要說出來——那個數
+          # 字扣掉了一場，不講的話他自己數得出來對不上。
+          if grep -qE '零當機 +✗' live-doctor.txt; then
+            echo "::error::[她正開著] 把此刻正在錄的那一場算成了一次當機"
+            grep 零當機 live-doctor.txt; exit 1
+          fi
+          grep -qE '零當機.*沒有算進去' live-doctor.txt \
+            || { echo "::error::[她正開著] 扣掉了正在錄的那一場卻不說"; grep 零當機 live-doctor.txt; exit 1; }
           # **`sister queries` 刻意不在這個迴圈裡。** 那一頁把三種可能攤開講
           # （還沒問過／`query_log` 關著／問過的被忘掉了），而那三種在這台機器
           # 上都還成立——`ever_stored` 答的是「她存過內容沒有」，答不出「他問
@@ -456,6 +470,64 @@ jobs:
               exit 1
             fi
           done
+
+          # ── fixture 7：**當機過的那台機器，此刻正開著。** ──
+          #
+          # 上面兩顆各站一半：`ci-live` 造得出心跳卻從不看「零當機」那一行，
+          # `ci-crashloop` 看那一行卻從不寫心跳。交叉的那一格沒有人站著，而那
+          # 一格正是這批 bug 第十四次犯的地方——正在錄的那一場從當機數裡扣掉
+          # 了，卻沒有從分母、從「還留著紀錄的最後一次」那個時間裡扣掉。印出
+          # 來是這樣：
+          #
+          #     ✗ 零當機     3 段錄製裡有 1 段沒有回來（最後一次 08-20 02:22）
+          #     ? 上一次錄製 2026-08-20 02:22:01 開始，沒有收尾——她現在還在跑
+          #
+          # 每一行單獨看都對。兩行放在一起，她「當機」的時間就是她「現在還在
+          # 跑」的那一場的開始時間，而真正那次當機在三天前。
+          V="$B --data-dir ./ci-livecrash"
+          cp -r ./ci-crashloop ./ci-livecrash
+          python3 - <<'EOF'
+          import sqlite3, time
+          now = int(time.time() * 1000)
+          c = sqlite3.connect('./ci-livecrash/sister.db')
+          # 這一列要拿到 MAX(id)，它才是「正在錄的那一場」。上面那幾場當機的
+          # 時間都在十分鐘前，所以兩個時間戳一定不同秒——這條測試靠那個差別。
+          sid = c.execute(
+              "INSERT INTO sessions(started_at, app_version, platform)"
+              " VALUES (?, 'ci', 'linux/replay')", (now,)).lastrowid
+          c.execute(
+              "INSERT INTO system_events(session_id, ts, kind, detail)"
+              " VALUES (?, ?, 'session_start', NULL)", (sid, now))
+          c.commit()
+          open('./ci-livecrash/recording.beat', 'w').write(str(now))
+          EOF
+          $V doctor > livecrash.txt
+          # 當機數不准跟著她一起長。掃完之後計數器記得的是 5 段沒回來，多開
+          # 一場正在錄的不會變成 6。
+          grep -qE '零當機.*有 5 段沒有回來' livecrash.txt \
+            || { echo "::error::[當機過又正開著] 正在錄的那一場被算成了一次當機"; grep 零當機 livecrash.txt; exit 1; }
+          grep -qE '零當機.*沒有算進去' livecrash.txt \
+            || { echo "::error::[當機過又正開著] 扣掉了正在錄的那一場卻不說"; grep 零當機 livecrash.txt; exit 1; }
+          # **這一條是那個 bug 本人。** 兩行各自抓出時間戳，一樣就是錯的：
+          # 「最後一次當機」講的不可以是此刻正在錄的這一場。
+          T='[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}'
+          when_crash=$(grep 零當機 livecrash.txt | grep -oE "$T" | head -1)
+          when_live=$(grep 上一次錄製 livecrash.txt | grep -oE "$T" | head -1)
+          [ -n "$when_crash" ] && [ -n "$when_live" ] \
+            || { echo "::error::[當機過又正開著] 兩行至少要各報得出一個時間"; cat livecrash.txt; exit 1; }
+          if [ "$when_crash" = "$when_live" ]; then
+            echo "::error::[當機過又正開著] 她「當機」的時間就是她現在正在跑的那一場：$when_crash"
+            grep -E '零當機|上一次錄製' livecrash.txt
+            exit 1
+          fi
+          # 而她現在還在跑的時候，「上一次」不是一個近似值——那一列就在手上。
+          grep -qE '上一次錄製.*她現在還在跑' livecrash.txt \
+            || { echo "::error::[當機過又正開著] 心跳在手上卻說不出她還在跑"; grep -A1 上一次錄製 livecrash.txt; exit 1; }
+          if grep -A1 上一次錄製 livecrash.txt | grep -q '不一定是最後一次'; then
+            echo "::error::[當機過又正開著] 那一列就是最後一次，不要替一個看得見的事實道歉"
+            grep -A1 上一次錄製 livecrash.txt
+            exit 1
+          fi
 
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，

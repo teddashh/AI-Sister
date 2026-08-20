@@ -3553,11 +3553,15 @@ pub mod doctor {
     /// 面就死掉」的錄製沒有內容，於是下一次 `prune` 連它的紀錄一起刪掉，分子
     /// 和分母同時少一——她死得越早，這一格讀起來越乾淨。整段理由在
     /// [`sister_core::db::migration_006`] 的註解裡，那裡也有實測。
-    fn crash_verdict(
-        a: &sister_core::db::CrashAudit,
-        occupied: bool,
-        empty: Emptiness,
-    ) -> (&'static str, String) {
+    ///
+    /// # 這一支為什麼不收 `occupied`
+    ///
+    /// 上一版收了，然後只把它扣進 `a.crashed(occupied)`——分母、`rows_unfinished`、
+    /// `last_crash` 三個一起印出來的數字全都還含著正在錄的那一場，於是同一行
+    /// 先說「那一場沒有算進去」再報出那一場的開始時間當作當機時間。扣除搬進
+    /// [`sister_core::db::Db::crash_audit`] 之後，這裡連那個布林都拿不到，
+    /// 也就沒有東西可以只扣一半。`a.live` 只用來講「扣掉了」。
+    fn crash_verdict(a: &sister_core::db::CrashAudit, empty: Emptiness) -> (&'static str, String) {
         // 計數器答得出來的時候就讓它答——它才是撐得過刪列的那一組數字。
         //
         // `started == 0` 有兩種：這一版之後才出生、而且真的沒開過的資料庫
@@ -3569,27 +3573,47 @@ pub mod doctor {
             // （「全部正常收尾」）正是在對那個看不見的集合下斷言——這一格自己
             // 就是這批 bug 的形狀：句子沒錯，範圍錯了。同一句補在兩條路上，
             // 因為 ✗ 那邊少報的是當機數，✓ 那邊少報的是「有沒有當過」。
+            //
+            // 寫成條件句不是定指。第一版寫「升上來之前**被清掉的那幾場**不在
+            // 這個數字裡」，而那台機器可能一場都沒被清過——那句話替它宣告了一
+            // 場沒發生的刪除，和第十三次同一個形狀，只是換了一組字所以躲過了
+            // CI 那條 `LIE` pattern。migration 本來就不可能知道有沒有被刪過。
             let scope = if a.floor {
-                "（升上來之前被清掉的那幾場不在這個數字裡）"
+                "（這個數字是升上來那天數到的；升級之前如果有錄製被清掉，不在裡面）"
             } else {
                 ""
             };
-            let crashed = a.crashed(occupied);
+            // 正在錄的那一場已經在 `crash_audit` 裡從每一個數字扣掉了。這一句
+            // 只是把「扣掉了」講出來——兩條路都要講，`✓` 那條上一版漏了，於是
+            // 它印在「她現在還在跑」的正上方說「2 段全部正常收尾」。
+            let live = if a.live {
+                "。現在正在錄的那一場沒有算進去"
+            } else {
+                ""
+            };
+            let crashed = a.crashed();
             if crashed == 0 {
-                return ("✓", format!("{} 段錄製全部正常收尾{scope}", a.started));
+                return (
+                    "✓",
+                    format!("{} 段錄製全部正常收尾{live}{scope}", a.started),
+                );
             }
             return (
                 // 這裡以前畫的是 `!`，因為「另一個終端機正在錄」和「當掉了」
-                // 在磁碟上長得一模一樣。心跳分得出來（`occupied`），所以那個
-                // 理由沒了——而一條永遠翻不成 ✗ 的檢查讀起來像涵蓋，實際上是
-                // 一格空白（#49 就是這個形狀）。
+                // 在磁碟上長得一模一樣。心跳分得出來，所以那個理由沒了——而一
+                // 條永遠翻不成 ✗ 的檢查讀起來像涵蓋，實際上是一格空白（#49
+                // 就是這個形狀）。
                 "✗",
                 format!(
-                    "{} 段錄製裡有 {crashed} 段沒有回來{}——當機、關機、拔電{}{scope}",
+                    "{} 段錄製裡有 {crashed} 段沒有回來{}——當機、關機、拔電{live}{scope}",
                     a.started,
                     // 沒有留下紀錄的那幾場報不出時間，而且是故意的：一個
                     // 「她那天幾點幾分當過」的時間戳，正是那一列被刪掉要拿掉
                     // 的東西。所以這裡的時間只涵蓋還留著紀錄的那幾場。
+                    //
+                    // 兩邊都不含正在錄的那一場，所以這個減法對得起來。上一版
+                    // `crashed` 扣過而 `rows_unfinished` 沒扣，於是同一個量在
+                    // 相隔兩行的地方印出 3 和 4。
                     match (a.last_crash, crashed > a.rows_unfinished) {
                         (Some(t), false) => format!("（最後一次 {}）", fmt::timestamp(t)),
                         (Some(t), true) => format!(
@@ -3602,11 +3626,6 @@ pub mod doctor {
                         // 的地方。
                         (None, _) => "（那幾場連紀錄都沒留下，所以報不出時間）".to_string(),
                     },
-                    if occupied {
-                        "。現在正在錄的那一場沒有算進去"
-                    } else {
-                        ""
-                    }
                 ),
             );
         }
@@ -3660,6 +3679,97 @@ pub mod doctor {
                 ),
             ),
         }
+    }
+
+    /// 「上一次錄製」那一列：什麼時候、怎麼結束的。
+    ///
+    /// 上面那一列（[`crash_verdict`]）只數得出「有幾段沒收尾」，答不了「上一段
+    /// 是怎麼結束的」——而這兩件事的下一步差很多：按了停止什麼都不用做，同意書
+    /// 被撤回的話她從現在起什麼都不會記。
+    ///
+    /// # 為什麼四個分支和後面那句補充要綁在一起
+    ///
+    /// 四個分支以前各自 `mark`／`line` 一次，於是後面那句補充要補四遍——而這一
+    /// 批 bug 十次有十次犯在呼叫端。符號和句子一起算出來、印只印一次。
+    ///
+    /// 而且那句補充和「她現在還在跑」是**同一個布林的兩面**：`a.live` 為真的時
+    /// 候，手上這一列就是正在錄的那一場（[`sister_core::db::Db::last_session`]
+    /// 和 [`sister_core::db::Db::crash_audit`] 都取 `MAX(id)`），它確定是最後一
+    /// 次。分開問就會分開錯：上一版一句問 `occupied`、一句只問 `traceless() >
+    /// 0`，於是同一格先說「她現在還在跑」，再說「這個時間不一定是最後一次」。
+    fn last_session_verdict(
+        last: &sister_core::db::LastSession,
+        a: &sister_core::db::CrashAudit,
+    ) -> (&'static str, String) {
+        let since = fmt::timestamp(last.started_at);
+        let (sym, mut said) = match (last.ended_at, last.reason.as_deref()) {
+            (Some(t), Some(r)) => (
+                "✓",
+                format!(
+                    "{since} 開始，{} 結束——{}",
+                    fmt::timestamp(t),
+                    sister_core::model::EndReason::describe(r)
+                ),
+            ),
+            // 有收尾時間、卻沒有理由。這裡以前一律怪到「那一版還沒有在記」頭
+            // 上，而那句話有一半機率是冤枉的：`sessions` 這張表永遠不會被刪，
+            // `system_events` 會（保留期和 `sister forget` 都刪）。上一場比
+            // `text_days` 還舊、或者 `sister forget --last 2d` 剛好蓋過去，理
+            // 由就會憑空消失。
+            //
+            // 分得出來的證據是「那一場還剩幾筆事件」：一筆都不剩，就是整場被
+            // 清掉了，不是那一版沒寫。
+            (Some(t), None) if last.events_left == 0 => (
+                "?",
+                format!(
+                    "{since} 開始，{} 結束——理由查不出來了\n\
+                     \x20                    （那一場的事件紀錄已經被清掉：\
+                     保留期，或 `sister forget` 蓋到那段時間）",
+                    fmt::timestamp(t)
+                ),
+            ),
+            // 事件還在、就是沒有 `session_end`：alpha.17 以前寫下的紀錄。不是
+            // 錯誤，只是那個版本答不出來——說出「那時候還沒有在記」，比留一個
+            // 看起來像故障的空白好。
+            (Some(t), None) => (
+                "?",
+                format!(
+                    "{since} 開始，{} 結束（{} 那一版還沒有在記為什麼停）",
+                    fmt::timestamp(t),
+                    last.app_version
+                ),
+            ),
+            // 這一頁手上有心跳，所以「不是當掉，就是它現在還在跑」那個「或」
+            // 不用留給他猜。
+            (None, _) => (
+                "?",
+                format!(
+                    "{since} 開始，沒有收尾——{}",
+                    if a.live {
+                        "她現在還在跑"
+                    } else {
+                        "她當掉了（現在沒有任何 recorder 佔著這個資料目錄）"
+                    }
+                ),
+            ),
+        };
+        // **「上一次」是一個承諾，而這裡拿得到的是「還留著紀錄的上一次」。**
+        // 一場什麼都沒存到的錄製收工時連紀錄一起走（`delete_empty_sessions`），
+        // 所以真的最後那一場可能根本不在這張表裡——而這一列會若無其事地指著更
+        // 早的那一場，講一個過期的時間。開機即死的迴圈裡，那個時間可以是三天前。
+        if !a.live && a.traceless() > 0 {
+            // **不准在這裡猜原因。** 第一版寫的是「沒存到東西，或被 `forget`
+            // 帶走了」，而 CI 那顆 `ci-live`（`capture.enabled = false` 然後她
+            // 又開起來）當場紅了：那台機器一次都沒刪過東西，而這一句遞給他兩
+            // 個原因、其中一個是一場沒發生過的刪除。這一列要講的只是**這個時
+            // 間不一定是最後一次**，原因是另一列的事。
+            said.push_str(&format!(
+                "\n\x20                    （這是還留著紀錄的最後一場；\
+                 另外 {} 場沒有留下紀錄，所以這個時間不一定是最後一次）",
+                a.traceless()
+            ));
+        }
+        (sym, said)
     }
 
     /// 「兩個字的中文」那一列。
@@ -4453,8 +4563,8 @@ pub mod doctor {
             let (sym, said) = recorded_verdict(s.frames, s.chunks, empty, &detail);
             mark(sym, "已記錄", &said);
 
-            let audit = db.crash_audit()?;
-            let (sym, said) = crash_verdict(&audit, occupied, empty);
+            let audit = db.crash_audit(occupied)?;
+            let (sym, said) = crash_verdict(&audit, empty);
             mark(sym, "零當機", &said);
 
             // 「她停了」後面永遠跟著同一個問題：什麼時候、為什麼。上面那一列
@@ -4462,79 +4572,7 @@ pub mod doctor {
             // 件事的下一步差很多：按了停止什麼都不用做，同意書被撤回的話她從
             // 現在起什麼都不會記。
             if let Some(last) = db.last_session()? {
-                let since = fmt::timestamp(last.started_at);
-                // 四個分支以前各自 `mark`／`line` 一次，於是後面那句補充要補
-                // 四遍——而這一批 bug 十次有十次犯在呼叫端。符號和句子一起
-                // 算出來（`recorded_verdict` 拆出去就是為了這個），印只印一次。
-                let (sym, mut said) = match (last.ended_at, last.reason.as_deref()) {
-                    (Some(t), Some(r)) => (
-                        "✓",
-                        format!(
-                            "{since} 開始，{} 結束——{}",
-                            fmt::timestamp(t),
-                            sister_core::model::EndReason::describe(r)
-                        ),
-                    ),
-                    // 有收尾時間、卻沒有理由。這裡以前一律怪到「那一版還沒有
-                    // 在記」頭上，而那句話有一半機率是冤枉的：`sessions` 這張
-                    // 表永遠不會被刪，`system_events` 會（保留期和 `sister
-                    // forget` 都刪）。上一場比 `text_days` 還舊、或者
-                    // `sister forget --last 2d` 剛好蓋過去，理由就會憑空消失。
-                    //
-                    // 分得出來的證據是「那一場還剩幾筆事件」：一筆都不剩，
-                    // 就是整場被清掉了，不是那一版沒寫。
-                    (Some(t), None) if last.events_left == 0 => (
-                        "?",
-                        format!(
-                            "{since} 開始，{} 結束——理由查不出來了\n\
-                             \x20                    （那一場的事件紀錄已經被清掉：\
-                             保留期，或 `sister forget` 蓋到那段時間）",
-                            fmt::timestamp(t)
-                        ),
-                    ),
-                    // 事件還在、就是沒有 `session_end`：alpha.17 以前寫下的
-                    // 紀錄。不是錯誤，只是那個版本答不出來——說出「那時候還沒
-                    // 有在記」，比留一個看起來像故障的空白好。
-                    (Some(t), None) => (
-                        "?",
-                        format!(
-                            "{since} 開始，{} 結束（{} 那一版還沒有在記為什麼停）",
-                            fmt::timestamp(t),
-                            last.app_version
-                        ),
-                    ),
-                    // 這一頁手上有心跳，所以「不是當掉，就是它現在還在跑」那個
-                    // 「或」不用留給他猜——`occupied` 就是那一題的答案。
-                    (None, _) => (
-                        "?",
-                        format!(
-                            "{since} 開始，沒有收尾——{}",
-                            if occupied {
-                                "她現在還在跑"
-                            } else {
-                                "她當掉了（現在沒有任何 recorder 佔著這個資料目錄）"
-                            }
-                        ),
-                    ),
-                };
-                // **「上一次」是一個承諾，而這裡拿得到的是「還留著紀錄的上一
-                // 次」。** 一場什麼都沒存到的錄製收工時連紀錄一起走
-                // （`delete_empty_sessions`），所以真的最後那一場可能根本不在
-                // 這張表裡——而這一列會若無其事地指著更早的那一場，講一個過期
-                // 的時間。開機即死的迴圈裡，那個時間可以是三天前。
-                if audit.traceless() > 0 {
-                    // **不准在這裡猜原因。** 第一版寫的是「沒存到東西，或被
-                    // `forget` 帶走了」，而 CI 那顆 `ci-live`（`capture.enabled
-                    // = false` 然後她又開起來）當場紅了：那台機器一次都沒刪過
-                    // 東西，而這一句遞給他兩個原因、其中一個是一場沒發生過的
-                    // 刪除。這一列要講的只是**這個時間不一定是最後一次**，
-                    // 原因是另一列的事。
-                    said.push_str(&format!(
-                        "\n\x20                    （這是還留著紀錄的最後一場；\
-                         另外 {} 場沒有留下紀錄，所以這個時間不一定是最後一次）",
-                        audit.traceless()
-                    ));
-                }
+                let (sym, said) = last_session_verdict(&last, &audit);
                 mark(sym, "上一次錄製", &said);
             }
 
@@ -5006,6 +5044,10 @@ pub mod doctor {
                 rows,
                 rows_unfinished,
                 last_crash: None,
+                // 預設沒有人在錄。要驗「扣掉了要說扣掉了」的那幾格自己蓋
+                // `live: true` 上去——而且上面那四個數字**要先扣好**，因為
+                // 真的那一支就是這樣交出來的。
+                live: false,
                 floor: false,
             }
         }
@@ -5041,8 +5083,8 @@ pub mod doctor {
             // 兩邊都還是「不知道」而不是打勾——空的就是空的。
             assert_eq!((never_sym, erased_sym), ("?", "?"));
 
-            let (never_sym, never) = crash_verdict(&audit(0, 0, 0, 0), false, Emptiness::Fresh);
-            let (erased_sym, erased) = crash_verdict(&audit(0, 0, 0, 0), false, Emptiness::Erased);
+            let (never_sym, never) = crash_verdict(&audit(0, 0, 0, 0), Emptiness::Fresh);
+            let (erased_sym, erased) = crash_verdict(&audit(0, 0, 0, 0), Emptiness::Erased);
             assert_ne!(never, erased, "「還沒錄過」對清空過的資料庫是假話");
             assert!(
                 never.contains("還沒錄過"),
@@ -5059,7 +5101,7 @@ pub mod doctor {
             // 一場什麼都沒存到的錄製收工時會刪掉自己那一列，所以這裡也是
             // `(0, _) && ever`——而「紀錄已經不在了」在這台機器上是指控。
             // 少了這一條，把那一支拿掉只有 CI 那顆 fixture 抓得到。
-            let (barren_sym, barren) = crash_verdict(&audit(0, 0, 0, 0), false, Emptiness::Barren);
+            let (barren_sym, barren) = crash_verdict(&audit(0, 0, 0, 0), Emptiness::Barren);
             assert!(
                 !barren.contains("不在了") && !barren.contains("forget"),
                 "他一次都沒刪過東西：{barren}"
@@ -5073,7 +5115,7 @@ pub mod doctor {
 
             // **第四種：她此刻正在錄，還沒有東西落地。** `Barren` 那句要他
             // 去改設定，而她三秒前才被開起來——那台機器上沒有東西需要改。
-            let (live_sym, live) = crash_verdict(&audit(0, 0, 0, 0), false, Emptiness::Live);
+            let (live_sym, live) = crash_verdict(&audit(0, 0, 0, 0), Emptiness::Live);
             assert!(
                 !live.contains("不在了") && !live.contains("forget"),
                 "她剛開始錄，沒有東西被刪過：{live}"
@@ -5091,7 +5133,7 @@ pub mod doctor {
             // 而 `empty` 只准在分母是 0 的時候說話。錄過的資料庫上照樣要數得
             // 出來，不可以整列被那個判斷蓋掉。
             for e in Emptiness::ALL {
-                assert_eq!(crash_verdict(&audit(7, 7, 7, 0), false, e).0, "✓");
+                assert_eq!(crash_verdict(&audit(7, 7, 7, 0), e).0, "✓");
             }
             for e in Emptiness::ALL {
                 assert_eq!(recorded_verdict(9, 4, e, d), ("✓", d.to_string()));
@@ -5114,7 +5156,7 @@ pub mod doctor {
         #[test]
         fn the_crashes_that_left_no_record_are_still_in_the_sentence() {
             // 掃過之後：計數器記得六場、五場沒回來，而列只剩兩條。
-            let (sym, said) = crash_verdict(&audit(6, 1, 2, 1), false, Emptiness::Live);
+            let (sym, said) = crash_verdict(&audit(6, 1, 2, 1), Emptiness::Live);
             assert_eq!(sym, "✗", "五次當機不可以畫成一個問號");
             assert!(said.contains('6') && said.contains('5'), "數字要對：{said}");
             assert!(
@@ -5129,7 +5171,6 @@ pub mod doctor {
                     last_crash: Some(1_000),
                     ..audit(6, 1, 2, 1)
                 },
-                false,
                 Emptiness::Live,
             )
             .1;
@@ -5143,7 +5184,7 @@ pub mod doctor {
             );
 
             // 一場紀錄都沒留下的極端：她開機就死了五次，全被掃掉。
-            let none_left = crash_verdict(&audit(5, 0, 0, 0), false, Emptiness::Barren).1;
+            let none_left = crash_verdict(&audit(5, 0, 0, 0), Emptiness::Barren).1;
             assert!(
                 none_left.contains("連紀錄都沒留下"),
                 "沒有時間就說沒有時間，不要留一段空白：{none_left}"
@@ -5153,53 +5194,143 @@ pub mod doctor {
                 "分母沒了的那句話不適用——這裡數得出來：{none_left}"
             );
 
-            // **正在錄的那一場不是一次當機。** 它也沒有 `ended_at`，磁碟上長得
-            // 一模一樣，而心跳分得出來。
-            let live = crash_verdict(&audit(3, 2, 3, 1), true, Emptiness::Live);
+            // **正在錄的那一場不是一次當機**，而那個扣除發生在
+            // `Db::crash_audit` 裡——這一支收到的每個數字都已經扣好了。所以這
+            // 幾格驗的是剩下的那半件事：**扣掉了就要說扣掉了**。不說的話，開
+            // 著四場的機器只看得到 3，而他數得出來自己開過幾次。
+            //
+            // 同一顆磁碟、同一組列，差別只在有沒有心跳：
+            let live = crash_verdict(
+                &sister_core::db::CrashAudit {
+                    live: true,
+                    ..audit(3, 3, 3, 0)
+                },
+                Emptiness::Live,
+            );
             assert_eq!(live.0, "✓", "唯一沒收尾的那一場正開著：{}", live.1);
-            let dead = crash_verdict(&audit(3, 2, 3, 1), false, Emptiness::Live);
+            let dead = crash_verdict(&audit(4, 3, 4, 1), Emptiness::Live);
             assert_eq!(dead.0, "✗", "沒有人佔著，那就是當掉了：{}", dead.1);
-            assert_ne!(live.1, dead.1);
             assert!(
-                crash_verdict(&audit(4, 2, 4, 2), true, Emptiness::Live)
-                    .1
-                    .contains("沒有算進去"),
+                live.1.contains("沒有算進去"),
+                "少報的那一場要交代，不然 4 段錄製印出 3：{}",
+                live.1
+            );
+            assert!(
+                !dead.1.contains("沒有算進去"),
+                "沒有東西被扣掉的時候多這一句，是替一個沒有的問題道歉：{}",
+                dead.1
+            );
+            // ✗ 那一條上一版也漏過同一句：`crashed` 扣了，分母沒扣。
+            assert!(
+                crash_verdict(
+                    &sister_core::db::CrashAudit {
+                        live: true,
+                        ..audit(4, 2, 4, 2)
+                    },
+                    Emptiness::Live
+                )
+                .1
+                .contains("沒有算進去"),
                 "扣掉一場就要說扣掉了，不然那個數字對不起來"
             );
 
             // **升上來的那一顆數不到升級之前被清掉的那幾場**，所以它不可以說
             // 「全部」。這一格自己就是這批 bug 的形狀：句子沒錯，範圍錯了。
-            let floored = |started, ended, occupied| {
+            let floored = |started, ended| {
                 crash_verdict(
                     &sister_core::db::CrashAudit {
                         floor: true,
                         ..audit(started, ended, started, started - ended)
                     },
-                    occupied,
                     Emptiness::Live,
                 )
             };
-            let clean = floored(6, 6, false);
+            let clean = floored(6, 6);
             assert_eq!(clean.0, "✓");
             assert!(
-                clean.1.contains("升上來之前"),
+                clean.1.contains("升上來那天"),
                 "看不見的那幾場裡有沒有當機，它不知道：{}",
                 clean.1
             );
             assert!(
-                floored(6, 4, false).1.contains("升上來之前"),
+                floored(6, 4).1.contains("升上來那天"),
                 "✗ 那邊少報的是當機數，同一句話一樣要補"
             );
             // 而全新的那一顆不准講這句——它的數字是精確的，多一句範圍聲明
             // 就是替一個沒有的問題道歉。
-            for occupied in [true, false] {
+            for live in [true, false] {
                 for (s, e) in [(6, 6), (6, 4)] {
                     assert!(
-                        !crash_verdict(&audit(s, e, s, s - e), occupied, Emptiness::Live)
-                            .1
-                            .contains("升上來之前")
+                        !crash_verdict(
+                            &sister_core::db::CrashAudit {
+                                live,
+                                ..audit(s, e, s, s - e)
+                            },
+                            Emptiness::Live
+                        )
+                        .1
+                        .contains("升上來那天")
                     );
                 }
+            }
+        }
+
+        /// **她現在還在跑的時候，「上一次」不是一個近似值。**
+        ///
+        /// 兩個條件同時成立的那一格：有幾場當機連紀錄都沒留下（所以這一列
+        /// 平常要聲明「這個時間不一定是最後一次」），而她此刻正在錄（所以手
+        /// 上這一列就是最後一次，那句聲明是假的）。
+        ///
+        /// CI 那兩顆 fixture 各站一半——`ci-live` 造得出心跳卻不看這一列，
+        /// `ci-crashloop` 看這一列卻從不寫心跳，交叉的那一格沒有人站著。這
+        /// 條測試站那一格。
+        #[test]
+        fn while_she_is_still_running_the_last_recording_is_not_an_estimate() {
+            let running = sister_core::db::LastSession {
+                started_at: 1_700_000_000_000,
+                ended_at: None,
+                reason: None,
+                app_version: "test".into(),
+                events_left: 3,
+            };
+            // 六場開過、一場收好尾、只剩一列還看得到——四場當機連紀錄都沒
+            // 留下。加上正在錄的那一場（已經從每個數字裡扣掉了）。
+            let live = sister_core::db::CrashAudit {
+                live: true,
+                ..audit(6, 1, 1, 0)
+            };
+            let (sym, said) = last_session_verdict(&running, &live);
+            assert_eq!(sym, "?");
+            assert!(said.contains("她現在還在跑"), "{said}");
+            assert!(
+                !said.contains("不一定是最後一次"),
+                "那一列就在手上，替一個看得見的事實道歉：{said}"
+            );
+
+            // 同一顆資料庫、同一列，心跳沒了：她當掉了，而這個時間確實只是
+            // 「還留著紀錄的最後一場」。
+            let dead = audit(7, 1, 2, 1);
+            let (sym, said) = last_session_verdict(&running, &dead);
+            assert_eq!(sym, "?");
+            assert!(said.contains("她當掉了"), "{said}");
+            assert!(
+                said.contains("不一定是最後一次") && said.contains('5'),
+                "五場沒留下紀錄，這個時間就不是最後一次：{said}"
+            );
+
+            // 收好尾的那一列不受影響——`live` 兩邊都不准讓它變成「還在跑」。
+            let ended = sister_core::db::LastSession {
+                ended_at: Some(1_700_000_060_000),
+                reason: Some("user_stop".into()),
+                ..running.clone()
+            };
+            for a in [&live, &dead] {
+                let (sym, said) = last_session_verdict(&ended, a);
+                assert_eq!(sym, "✓", "{said}");
+                assert!(
+                    !said.contains("還在跑") && !said.contains("當掉了"),
+                    "{said}"
+                );
             }
         }
 
@@ -5277,7 +5408,7 @@ pub mod doctor {
             };
 
             let (_, said) = signal_line(&erased, Emptiness::Erased);
-            let (_, crash) = crash_verdict(&audit(0, 0, 0, 0), false, Emptiness::Erased);
+            let (_, crash) = crash_verdict(&audit(0, 0, 0, 0), Emptiness::Erased);
             assert!(
                 !said.contains("還沒有任何一場"),
                 "上面那一列剛說完紀錄被帶走了，這一列不可以說她沒錄過：{said}"
@@ -5304,7 +5435,7 @@ pub mod doctor {
                 (Emptiness::Fresh, "不在了"),
             ] {
                 let (_, said) = signal_line(&erased, e);
-                let (_, crash) = crash_verdict(&audit(0, 0, 0, 0), false, e);
+                let (_, crash) = crash_verdict(&audit(0, 0, 0, 0), e);
                 assert!(
                     !crash.contains(forbidden),
                     "前提壞了——這一格的「零當機」本來就不該提「{forbidden}」：{crash}"
