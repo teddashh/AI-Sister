@@ -116,10 +116,17 @@ fi
 # 一份，五個 HTML 各一份 `<meta>`）。從其中一份刪掉 `connect-src`、或把
 # `default-src` 放寬，CI 全綠。照這個 repo 自己那條「一條規則寫在 N 個地方就會
 # 有一邊忘了改」的規矩，那是這半邊最大的一塊沒人守的地方。
+#
+# `--include` 那份清單自己也會漏。`apps/desktop/ui` 底下是 5 個 js、5 個 html、
+# **5 個 css**，而 css 那五個一直在這支腳本的視線之外——正是上面那段話在講的
+# 同一種漏法，只是換一個副檔名。CSS 送得出去東西：`background: url(https://…)`、
+# `@import url(https://…)`、`@font-face { src: url(https://…) }`。而且就算把
+# `*.css` 加進去，上面那幾個 `src=` / `href=` 的樣式一個都對不上 CSS 的寫法，
+# 所以樣式也要跟著加——**副檔名和樣式要一起補，只補一半等於沒補**。
 echo "▶ 檢查畫面那一半有沒有連外"
 rc=0
-web=$(grep -rnE '\b(fetch|XMLHttpRequest|WebSocket|EventSource|navigator\.sendBeacon|importScripts)\s*\(|\bsrc\s*=\s*.https?://|\bhref\s*=\s*.https?://' \
-    apps/desktop/ui --include='*.js' --include='*.html') || rc=$?
+web=$(grep -rnE '\b(fetch|XMLHttpRequest|WebSocket|EventSource|navigator\.sendBeacon|importScripts)\s*\(|\bsrc\s*=\s*.https?://|\bhref\s*=\s*.https?://|url\(\s*.?\s*(https?:)?//|@import\s+.?\s*(https?:)?//' \
+    apps/desktop/ui --include='*.js' --include='*.html' --include='*.css') || rc=$?
 if [ "$rc" -gt 1 ]; then
     echo "✗ 掃畫面的那一步自己失敗了（grep 退出碼 $rc）——這不是「沒找到」。"
     fail=1
@@ -145,6 +152,23 @@ for f in apps/desktop/ui/*.html apps/desktop/src-tauri/tauri.conf.json; do
             fail=1
         }
     done
+
+    # 上面那一圈找的是「`default-src 'none'` 這幾個字還在不在」，而 `default-src`
+    # **只在一個 directive 缺席的時候**才輪得到它。有人在 `img-src` 後面加一個
+    # `https://fonts.gstatic.com`，那幾個字一個都沒少，上面兩條照樣過——而這一頁
+    # 已經有一條出去的路了。字在、話是假的，跟這個 repo 一路在修的是同一件事。
+    #
+    # 所以這裡不去釘每個 directive 該長什麼樣（那才會逼人每加一頁就來改這支
+    # 腳本，也就是上面那段註解在避開的事），只釘一件事：**整條 CSP 裡不准出現
+    # 遠端來源**。`'self'` / `data:` / `asset:` / `ipc:` 想怎麼排都行。
+    csp=$(grep -hE "default-src" "$f") || csp=''
+    remote=$(printf '%s' "$csp" | grep -oE "(https?:)?//[^ ;\"']*" | grep -vFx 'http://ipc.localhost') || remote=''
+    if [ -n "$remote" ]; then
+        echo "✗ $f 的 CSP 裡放進了遠端來源：$(printf '%s' "$remote" | tr '\n' ' ')"
+        echo "  default-src 'none' 還在，所以上面兩條是綠的——但這一頁現在連得出去了。"
+        echo "  真的需要它，先去改 PRIVACY.md，再回來改這裡。"
+        fail=1
+    fi
 done
 
 if [ "$fail" -ne 0 ]; then
