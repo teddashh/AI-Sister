@@ -293,11 +293,29 @@ pub enum Emptiness {
     /// `!ever_stored` 前面），CLI 這三頁沒跟上——`Emptiness::of` 收不到
     /// `data_dir`，於是它結構上就問不出這一題。
     Live,
+    /// [`Live`](Self::Live) 的另一半：有一個 recorder **正在起來**，而它還沒
+    /// 開始錄。
+    ///
+    /// `BootBeat` 一寫下心跳，`Db::open` 才開始跑——一顆存了一年的資料庫要好
+    /// 幾分鐘。那幾分鐘裡「有人佔著這個目錄」是真的、「她正在錄」是假的，而
+    /// 上一版把 `heartbeat::phase` 壓成 `beat.is_some()` 餵進來，於是這四頁一
+    /// 起說「她此刻正在錄，還沒有東西落地」，而同一份 doctor 底下兩行寫著
+    /// 「有一個 sister record **正在起來**……還沒開始記東西」。
+    ///
+    /// **這一種是上一版修「開機不算在錄」自己造出來的。** 那一版把 `Phase` 帶
+    /// 進了 `crash_audit` 和 `signal_audit`，卻讓隔壁的 `Emptiness` 留在那個被
+    /// 證明不夠用的布林上——修好一對雙胞胎的同時，讓它和鄰居變成新的一對。
+    /// 一個位元進來之後，要去看這一整頁上還有誰在描述同一件事。
+    ///
+    /// 下一步和 [`Live`](Self::Live) 一樣是「再等一下」，但講的不是同一件事：
+    /// `Live` 的 recorder 已經在跑、每一拍都可能是壞的（所以那句話把「是哪一
+    /// 種」推給 doctor），這一種**連第一拍都還沒開始**，沒有任何東西可以是壞的。
+    Booting,
 }
 
 impl Emptiness {
-    /// 五種全部。**這一節的測試靠它站著**：「N 種 0 的下一步都不一樣，不可以
-    /// 共用一句話」那兩個迴圈遍歷的就是這個陣列。
+    /// 六種全部。**這一節的測試靠它站著**：「N 種 0 的下一步都不一樣，不可以
+    /// 共用一句話」那幾個迴圈遍歷的就是這個陣列。
     ///
     /// 以前它們寫的是 `[Fresh, Blocked, Erased]` 這種字面量，而**陣列字面量不
     /// 會因為 enum 多一種變體而編不過**——`Barren` 加進來的那一版，那兩個迴圈
@@ -309,7 +327,7 @@ impl Emptiness {
     /// 以留著只會是一個 `dead_code`。代價是「多一種變體就編不過」只在
     /// `cargo test` 那一趟成立——而 CI 兩趟都跑。
     #[cfg(test)]
-    pub const ALL: [Self; 5] = {
+    pub const ALL: [Self; 6] = {
         // 這支函式只有一個用途：多一種變體的時候讓底下那一列在這裡編不過。
         const fn _every_one_of_them(e: Emptiness) -> u8 {
             match e {
@@ -318,6 +336,7 @@ impl Emptiness {
                 Emptiness::Erased => 2,
                 Emptiness::Barren => 3,
                 Emptiness::Live => 4,
+                Emptiness::Booting => 5,
             }
         }
         [
@@ -326,6 +345,7 @@ impl Emptiness {
             Self::Erased,
             Self::Barren,
             Self::Live,
+            Self::Booting,
         ]
     };
 
@@ -347,20 +367,35 @@ impl Emptiness {
     /// 一題（「旗標在 `start_session` 就翻成 1，第一張畫面之前」），我照樣拿
     /// 它去答了一次。
     ///
-    /// **`occupied` 要從呼叫端進來，因為資料庫答不出「她現在在不在」。**
-    /// `heartbeat::is_occupied`，不是 `is_recording`：正在開機的 recorder 也
-    /// 佔著這個目錄，而那時候「再等一下」正是對的話。三個呼叫端手上本來就有
-    /// `data_dir`（而且同一頁上別的地方早就在問這個問題了），所以這不是多要
-    /// 一份資料，是把一份已經在手上的資料接進來——上一版沒接，於是這支函式
-    /// 結構上就答不出 [`Live`](Self::Live)。
-    pub fn of(db: &Db, s: &sister_core::db::DbStats, occupied: bool) -> Result<Self> {
+    /// **心跳要從呼叫端進來，因為資料庫答不出「她現在在不在」。** 三個呼叫端
+    /// 手上本來就有 `data_dir`（而且同一頁上別的地方早就在問這個問題了），所
+    /// 以這不是多要一份資料，是把一份已經在手上的資料接進來——上一版沒接，於
+    /// 是這支函式結構上就答不出 [`Live`](Self::Live)。
+    ///
+    /// **收的是 [`Phase`] 本人，不是一個布林。** 上一版收 `is_occupied`，理由
+    /// 寫成「正在開機的 recorder 也佔著這個目錄，而那時候『再等一下』正是對的
+    /// 話」——下一步猜對了，句子卻錯了：那四頁印的是「她**此刻正在錄**」，而
+    /// 同一份 doctor 底下兩行寫著「有一個 sister record **正在起來**……還沒開
+    /// 始記東西」。同一頁，兩句互相打臉，第十八次。
+    ///
+    /// [`Phase`]: sister_core::heartbeat::Phase
+    pub fn of(
+        db: &Db,
+        s: &sister_core::db::DbStats,
+        beat: Option<sister_core::heartbeat::Phase>,
+    ) -> Result<Self> {
+        use sister_core::heartbeat::Phase;
         if s.nothing_recorded_left() && db.ever_recorded()? {
             if db.ever_stored()? {
                 // 存過又清光了：她此刻在不在都不改變「東西被拿走了」這件事，
                 // 所以這一種不分。
                 return Ok(Self::Erased);
             }
-            return Ok(if occupied { Self::Live } else { Self::Barren });
+            return Ok(match beat {
+                Some(Phase::Recording) => Self::Live,
+                Some(Phase::Booting) => Self::Booting,
+                None => Self::Barren,
+            });
         }
         Ok(
             if !db.exclusion_audit()?.is_empty() || db.pause_audit()?.episodes > 0 {
@@ -1716,6 +1751,17 @@ pub mod query {
                 // 都成立。把可能性列出來，不要替他選一個。
                 "她正開著，但手上一段字都沒有——可能是剛開始，也可能是之前的被忘掉了或過期了。"
                     .to_string()
+            } else if b.booting_now {
+                // **開機那幾分鐘。** `recording_now` 在這裡是 false（她一拍都
+                // 還沒跑），所以這一格以前掉到底下那兩句：一台什麼都還沒開始
+                // 的機器被送去看 `capture.enabled`，或被告知東西被忘掉了。而
+                // 同一個資料目錄上 `sister facts` 說的是「再等一下」——兩個指
+                // 令，相反的下一步。
+                //
+                // 排在 `ever_stored` / `ever_recorded` 那幾條**前面**，因為
+                // 它們講的是過去，而他問這一題的時候在等現在。
+                "有一個 sister record 正在起來（多半在開資料庫），還沒開始記東西——再等一下。"
+                    .to_string()
             } else if b.ever_recorded && !b.ever_stored {
                 // 她跑過，而一列內容都沒進來過。底下那句「被忘掉了」在這台
                 // 機器上是**指控一件沒發生的事**——他一次都沒刪過東西，該看
@@ -2628,6 +2674,12 @@ pub mod facts {
                 "這份記憶裡還沒有任何事實——她正開著，可是到現在一列內容都還沒\
                  落地（剛開始的話再等一下，一直是這樣就跑一次 `sister doctor`）。"
             }
+            // 而「正在起來」連第一拍都還沒跑，所以「一直是這樣就去看 doctor」
+            // 那半句在這裡是多餘的：現在還沒有任何東西可以是壞的。
+            Emptiness::Booting => {
+                "這份記憶裡還沒有任何事實——有一個 sister record 正在起來\
+                 （多半在開資料庫），還沒開始記東西。再等一下。"
+            }
             Emptiness::Fresh => "這份記憶裡還沒有任何事實——她還沒錄過。",
         }
         .to_string()
@@ -2707,10 +2759,11 @@ pub mod facts {
                     (None, None) => {
                         let s = db.stats()?;
                         // 「一列都沒進來過」還要再分一次：她**現在**在不在。
-                        // 這一頁手上有 `data_dir`，所以這一題問得出來。
-                        let occupied =
-                            sister_core::heartbeat::is_occupied(data_dir, sister_core::now_ms());
-                        no_facts_line(s.frames, s.chunks, Emptiness::of(&db, &s, occupied)?)
+                        // 這一頁手上有 `data_dir`，所以這一題問得出來——而且
+                        // 問的是 `phase` 不是 `is_occupied`，「正在起來」和
+                        // 「正在錄」是兩句不同的話。
+                        let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
+                        no_facts_line(s.frames, s.chunks, Emptiness::of(&db, &s, beat)?)
                     }
                 }
             );
@@ -2837,6 +2890,15 @@ pub mod facts {
             }
             assert!(all[0].contains("還沒錄過"), "{}", all[0]);
             assert!(all[2].contains("forget"), "{}", all[2]);
+            // `Live`（4）和 `Booting`（5）是相反的兩件事，而它們的下一步都不是
+            // 「去改設定」——`Barren`（3）才是。開機那一段裡她連第一拍都還沒
+            // 跑，所以連「一直是這樣就跑 doctor」都還太早：他只要再等一下。
+            assert!(all[4].contains("她正開著"), "{}", all[4]);
+            assert!(
+                all[5].contains("正在起來") && !all[5].contains("capture.enabled"),
+                "{}",
+                all[5]
+            );
         }
     }
 }
@@ -3052,7 +3114,7 @@ pub mod stats {
         // 過**。走 `Emptiness` 而不是自己問 `ever_recorded`——這一行以前自己
         // 問，於是一台 `capture.enabled = false` 的機器（她跑完、一個字都沒
         // 記到、`forget` 從來沒被執行過）被這個 ⚠ 告知東西被忘掉了。
-        match Emptiness::of(&db, &s, occupied)? {
+        match Emptiness::of(&db, &s, beat)? {
             Emptiness::Erased => println!(
                 "  ⚠  她**錄過**，而她記下來的東西現在一列都不剩——被 \
                  `sister forget` 忘掉了，或是過了保留期。\n     \
@@ -3074,6 +3136,14 @@ pub mod stats {
                 "  ⚠  她**正開著**，可是到現在一列內容都還沒落地。\n     \
                  剛開始的話再等一下；一直是這樣就跑一次 `sister doctor`。\
                  底下那些 0 講的是現在這顆資料庫。\n"
+            ),
+            // 上面那一句說「她正開著」，這一句不能跟著說——`Db::open` 在一顆
+            // 存了一年的資料庫上要跑好幾分鐘，那幾分鐘裡她一拍都還沒跑。
+            // 「一直是這樣就跑 doctor」也拿掉：現在沒有任何東西可以是壞的。
+            Emptiness::Booting => println!(
+                "  ⚠  有一個 sister record **正在起來**（多半在開資料庫），\
+                 還沒開始記東西。\n     \
+                 底下那些 0 講的是現在這顆資料庫，不含它等一下要記的東西。\n"
             ),
             Emptiness::Blocked | Emptiness::Fresh => {}
         }
@@ -3503,6 +3573,64 @@ pub mod doctor {
         println!("  {sym} {} {detail}", fmt::pad(label, 16));
     }
 
+    /// 「現在有沒有在看」那一列的符號和句子。
+    ///
+    /// **這一支拿不到 `data_dir`，而那是它存在的理由。** 上一版這段程式長在
+    /// `doctor::run` 裡，於是它伸手又讀了一次心跳——而這一頁最上面已經讀過一
+    /// 次了。兩次讀之間她可以從 `Booting` 跳到 `Recording`、心跳可以過期、
+    /// `heartbeat::stop` 可以把檔案刪掉，於是同一份報告上「上一次錄製」說
+    /// 「她現在還在跑」，八行之下這一列說「沒有任何 sister record 在跑」。
+    /// 實測撞得到（把心跳檔反覆建立／刪除，六次 doctor 裡出現三次），而在那
+    /// 台 `Db::open` 要跑好幾分鐘的機器上，這兩行之間隔的就是那幾分鐘。
+    ///
+    /// 那種錯**測不到**：它是一場競賽，重跑一次就不見了，而突變測試（把這裡
+    /// 改回自己讀一次）兩道 gate 都殺不掉——CI 上那個心跳檔在兩次讀之間不會
+    /// 變。所以守它的不是測試，是型別：這支函式手上沒有路徑，寫不出第二次
+    /// 讀。同 `recorded_verdict` / `crash_verdict`，把判斷搬進一支收「已經量
+    /// 好的東西」的函式。
+    ///
+    /// `paused` 是 `Some(從什麼時候起)`＝暫停中。它排在最前面，因為它壓過其他
+    /// 每一種：暫停的時候有沒有 recorder 佔著都無所謂，她根本沒在看。
+    fn watching_verdict(
+        paused: Option<String>,
+        beat: Option<sister_core::heartbeat::Phase>,
+    ) -> (&'static str, String) {
+        use sister_core::heartbeat::Phase;
+        // 這一行是**唯一**會告訴使用者「你上禮拜按的暫停還開著」的地方。暫停
+        // 不會自己過期（見 `sister_core::pause`），所以那條路很真實，而它的症
+        // 狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
+        if let Some(since) = paused {
+            return (
+                "⏸",
+                format!("**暫停中**（{since}）。這段期間什麼都不會被記錄"),
+            );
+        }
+        match beat {
+            Some(Phase::Recording) => ("✓", "有一個 sister record 正在跑".to_string()),
+            // 「正在起來」不可以印成「正在跑」。一顆一年份的資料庫，migration
+            // 003 重建 bigram 索引可以跑好幾分鐘，而那幾分鐘裡她一個字都沒記
+            // ——使用者照著那句話去做一件他想被記住的事，之後問「剛剛發生什麼
+            // 事」會拿到一片空白。
+            Some(Phase::Booting) => (
+                "…",
+                "有一個 sister record **正在起來**（多半在開資料庫）。\
+                 還沒開始記東西，等它印出第一行再做要被記住的事"
+                    .to_string(),
+            ),
+            // 「沒有暫停」以前就印到這裡為止，而那句話讀起來是「她在看」——和
+            // 字母人那句「在聽」是同一個謊。沒有暫停**不等於**有人在錄：
+            // `sister record` 是另一個行程，沒有人開它的時候旗標一樣是乾淨的。
+            //
+            // 但這裡不能畫 ✗。doctor 最常見的用法就是「開始之前先檢查一下」，
+            // 那時候沒有人在錄是**正常的**——畫成失敗就是一則每次都會出現、於
+            // 是很快就被學會忽略的假警報，正是這個檔案上面幾行在講的那種。
+            None => (
+                "?",
+                "沒有暫停，但也沒有任何 sister record 在跑（還沒開始的話，這是正常的）".to_string(),
+            ),
+        }
+    }
+
     /// 「已記錄」那一列的符號和句子，**一起**算出來。
     ///
     /// 拆成函式是因為這一列的兩半（畫 `?` 還是 `✓`、後面接哪一句）以前是兩段
@@ -3539,6 +3667,10 @@ pub mod doctor {
                 ),
                 // `!` 是「有東西不對」，而她才剛開始的話沒有東西不對。
                 Emptiness::Live => ("?", format!("{detail}——她此刻正在錄，到現在還沒有一列落地")),
+                Emptiness::Booting => (
+                    "?",
+                    format!("{detail}——有一個 sister record 正在起來，還沒開始記東西"),
+                ),
                 Emptiness::Fresh => ("?", format!("{detail}（還沒有任何內容）")),
             },
             // 「0 張畫面 · 0 段文字 ✓」是這個專案一路在修的那個災難本身
@@ -3704,6 +3836,11 @@ pub mod doctor {
                         "她錄過，但一個字都沒存進來，那幾場沒有留下紀錄——先看 `capture.enabled`"
                     }
                     Emptiness::Live => "她此刻正在錄，還沒有東西落地，所以還沒有一場算得出來",
+                    // 她連第一拍都還沒開始，所以這裡沒有「還沒算出來」的東
+                    // 西——是還沒有東西可以算。
+                    Emptiness::Booting => {
+                        "有一個 sister record 正在起來，還沒開始記東西，所以還沒有一場算得出來"
+                    }
                     // 一場都不剩**不等於**沒錄過。`sessions` 那張表會跟著它
                     // 自己那幾列一起被 `forget` 和保留期帶走
                     // （`retention::delete_empty_sessions`），所以清空過的資
@@ -3896,6 +4033,9 @@ pub mod doctor {
                 }
                 Emptiness::Barren => "一段字都沒有，所以沒有中文可以驗——她錄過，但一個字都沒存進來",
                 Emptiness::Live => "一段字都沒有，所以沒有中文可以驗——她此刻正在錄，還沒有東西落地",
+                Emptiness::Booting => {
+                    "一段字都沒有，所以沒有中文可以驗——有一個 sister record 正在起來，還沒開始記東西"
+                }
                 Emptiness::Fresh => "資料庫裡還沒有中文，等你錄過再驗一次",
             }
             .to_string(),
@@ -3992,6 +4132,7 @@ pub mod doctor {
                 Emptiness::Erased | Emptiness::Blocked => "那幾場的紀錄不在了",
                 Emptiness::Barren => "那幾場一列內容都沒留下",
                 Emptiness::Live => "她此刻正在錄，還沒有東西落地",
+                Emptiness::Booting => "有一個 sister record 正在起來，還沒開始記東西",
                 // 真的還沒有任何一場。這一句底下那個 `when` 也講得出來，
                 // 讓它去講，不要在這裡多一句。
                 Emptiness::Fresh => "",
@@ -4544,22 +4685,26 @@ pub mod doctor {
         // **「還沒開始錄」和「有記憶，只是這個執行檔打不開它」是相反的兩件
         // 事**——後者他手上是有東西的，講成沒有等於在他最慌的那一刻再騙他
         // 一次。所以理由帶著走。
-        // 底下有三列要分「她跑過、什麼都沒存到」和「她**正在**跑、還沒存到」
-        // ——同一份報告裡它們必須是同一個答案，所以只問一次。
-        // `is_occupied` 而不是 `is_recording`：正在開機的 recorder 也佔著這個
-        // 目錄，而那時候「再等一下」正是對的話。
+        // 底下有好幾列要分「她跑過、什麼都沒存到」「她**正在錄**、還沒存到」和
+        // 「她**正在起來**、還沒開始記」——同一份報告裡它們必須是同一個答案，
+        // 所以只問一次，而且底下每一個要問的人拿到的都是 [`Phase`] 本人。
         //
-        // **而「零當機」要問的是另一題**，所以它拿的是另一個位元。那一列要扣
-        // 掉「她現在正在錄的那一場」，而那道扣除只有在**她的那一列已經進資料
-        // 庫**之後才成立。開機那一段（`Phase::Booting`，可以長達幾分鐘）裡
-        // `is_occupied` 是 true 而她的列還沒有——那時候扣掉的會是上一次當機留
-        // 下來的殼。兩個問題兩個位元，不要共用一個。
+        // **不要在這裡把它壓成布林。** 上一版壓成 `occupied = beat.is_some()`
+        // 再發下去，於是「已記錄」那一列在開機那幾分鐘說「她此刻正在錄，到現在
+        // 還沒有一列落地」，兩列之後「上一次錄製」說「她當掉了，現在有一個
+        // sister record 正在起來」——同一份報告裡她同時在錄和還沒在錄。一個布
+        // 林湊不出三種答案，而少掉的那一種永遠是「正在來、還沒好」。
         //
-        // 心跳**只讀一次**。`is_occupied` 再讀一次的話，兩次讀之間她可以從
-        // `Booting` 跳到 `Recording`，於是同一份報告的上半和下半描述兩個不同
-        // 的瞬間——一份自相矛盾的報告，而且重跑一次就不見了。
+        // 「零當機」要問的又是另一題：那一列要扣掉「她現在正在錄的那一場」，而
+        // 那道扣除只有在**她的那一列已經進資料庫**之後才成立。開機那一段
+        // （`Phase::Booting`，`Db::open` 在一顆一年份的資料庫上可以跑好幾分鐘）
+        // 裡目錄是有人佔著的，她的列卻還沒有——那時候扣掉的會是上一次當機留下
+        // 來的殼。收 `Phase` 就分得出來，收布林就分不出來。
+        //
+        // 心跳**只讀一次**。再讀一次的話，兩次讀之間她可以從 `Booting` 跳到
+        // `Recording`，於是同一份報告的上半和下半描述兩個不同的瞬間——一份自相
+        // 矛盾的報告，而且重跑一次就不見了。
         let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
-        let occupied = beat.is_some();
 
         let (db, no_db) = match db_file.exists().then(|| Db::open(&db_file)) {
             Some(Ok(d)) => (Some(d), "還沒有資料庫"),
@@ -4621,7 +4766,7 @@ pub mod doctor {
                 let (indexed, with_cjk) = d.bigram_coverage()?;
                 let s = d.stats()?;
                 let (sym, said) =
-                    bigram_verdict(indexed, with_cjk, s.chunks, Emptiness::of(d, &s, occupied)?);
+                    bigram_verdict(indexed, with_cjk, s.chunks, Emptiness::of(d, &s, beat)?);
                 mark(sym, "兩個字的中文", &said);
             }
             None => mark("?", "兩個字的中文", no_db),
@@ -4651,7 +4796,7 @@ pub mod doctor {
             // **同一頁上的四列，要問同一個問題同一次。** 上一版這裡是
             // `ever_recorded` + `ever_stored` 兩個布林，各列各自拼裝——於是
             // 「已記錄」那一列改對了、四行之下的「視窗焦點」還在講另一個故事。
-            let empty = Emptiness::of(db, &s, occupied)?;
+            let empty = Emptiness::of(db, &s, beat)?;
             let (sym, said) = recorded_verdict(s.frames, s.chunks, empty, &detail);
             mark(sym, "已記錄", &said);
 
@@ -4699,45 +4844,13 @@ pub mod doctor {
         // 而且這一行是**唯一**會告訴使用者「你上禮拜按的暫停還開著」的地方。
         // 暫停不會自己過期（見 `sister_core::pause`），所以那條路很真實，而
         // 它的症狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
-        if sister_core::pause::is_paused(data_dir) {
-            let since = sister_core::pause::paused_since(data_dir)
+        let paused = sister_core::pause::is_paused(data_dir).then(|| {
+            sister_core::pause::paused_since(data_dir)
                 .map(|ts| format!("從 {} 起", crate::fmt::timestamp(ts)))
-                .unwrap_or_else(|| "不知道從什麼時候開始".to_string());
-            mark(
-                "⏸",
-                "現在有沒有在看",
-                &format!("**暫停中**（{since}）。這段期間什麼都不會被記錄"),
-            );
-        } else if let Some(phase) = sister_core::heartbeat::phase(data_dir, sister_core::now_ms()) {
-            // 「正在起來」不可以印成「正在跑」。一顆一年份的資料庫，
-            // migration 003 重建 bigram 索引可以跑好幾分鐘，而那幾分鐘裡她
-            // 一個字都沒記——使用者照著那句話去做一件他想被記住的事，之後
-            // 問「剛剛發生什麼事」會拿到一片空白。
-            match phase {
-                sister_core::heartbeat::Phase::Recording => {
-                    line(true, "現在有沒有在看", "有一個 sister record 正在跑")
-                }
-                sister_core::heartbeat::Phase::Booting => mark(
-                    "…",
-                    "現在有沒有在看",
-                    "有一個 sister record **正在起來**（多半在開資料庫）。\
-                     還沒開始記東西，等它印出第一行再做要被記住的事",
-                ),
-            }
-        } else {
-            // 「沒有暫停」以前就印到這裡為止，而那句話讀起來是「她在看」——
-            // 和字母人那句「在聽」是同一個謊。沒有暫停**不等於**有人在錄：
-            // `sister record` 是另一個行程，沒有人開它的時候旗標一樣是乾淨的。
-            //
-            // 但這裡不能畫 ✗。doctor 最常見的用法就是「開始之前先檢查一下」，
-            // 那時候沒有人在錄是**正常的**——畫成失敗就是一則每次都會出現、
-            // 於是很快就被學會忽略的假警報，正是這個檔案上面幾行在講的那種。
-            mark(
-                "?",
-                "現在有沒有在看",
-                "沒有暫停，但也沒有任何 sister record 在跑（還沒開始的話，這是正常的）",
-            );
-        }
+                .unwrap_or_else(|| "不知道從什麼時候開始".to_string())
+        });
+        let (sym, said) = watching_verdict(paused, beat);
+        mark(sym, "現在有沒有在看", &said);
         // 題庫是整個資料庫裡唯一一張存著**你自己打進去的字**的表，所以它得
         // 出現在這一頁上。doctor 的工作是把真相攤開，而一張存了東西、卻沒有
         // 任何地方提起的表，跟偷偷存著沒有差別。
@@ -5519,6 +5632,133 @@ pub mod doctor {
             }
         }
 
+        /// 「現在有沒有在看」有四種答案，而它們兩兩不同。
+        ///
+        /// 這一條和 [`watching_verdict`] 那段註解是一組：那支函式被拆出來不是
+        /// 為了好看，是為了讓「在這裡再讀一次心跳」寫不出來（它手上沒有路
+        /// 徑）。拆出來之後順手把四種答案釘住——`Booting` 是這一版才有的第四
+        /// 種，而它以前是被 `Recording` 那一句吃掉的。
+        #[test]
+        fn there_are_four_answers_to_whether_she_is_watching_right_now() {
+            use sister_core::heartbeat::Phase;
+            let all = [
+                watching_verdict(Some("從 08-20 03:00 起".into()), None),
+                // 暫停壓過心跳：她佔著這個目錄，可是什麼都不會被記錄。少了這
+                // 一格，一個按著暫停的人會看到「有一個 sister record 正在跑」
+                // 然後以為自己被記著。
+                watching_verdict(Some("從 08-20 03:00 起".into()), Some(Phase::Recording)),
+                watching_verdict(None, Some(Phase::Recording)),
+                watching_verdict(None, Some(Phase::Booting)),
+                watching_verdict(None, None),
+            ];
+            assert_eq!(all[0], all[1], "暫停中就是暫停中，心跳不改變這一句");
+            assert_eq!(all[0].0, "⏸");
+            assert_eq!(all[2].0, "✓");
+            assert_eq!(all[3].0, "…", "「正在起來」不是 ✓——她一個字都還沒記");
+            assert_eq!(all[4].0, "?", "沒人在錄是正常的，不可以畫成失敗");
+            let four = [&all[0], &all[2], &all[3], &all[4]];
+            for (i, a) in four.iter().enumerate() {
+                for b in &four[i + 1..] {
+                    assert_ne!(a.1, b.1, "四種處境要有四句話");
+                }
+            }
+            assert!(
+                !all[3].1.contains("正在跑"),
+                "「正在起來」印成「正在跑」，他就會照著那句話去做一件想被記住的事：{}",
+                all[3].1
+            );
+        }
+
+        /// **同一份報告的四列，在開機那幾分鐘要說同一件事。**
+        ///
+        /// 上一版 `doctor` 把心跳壓成 `occupied = beat.is_some()` 再發給
+        /// [`Emptiness::of`]，於是開機中的機器印出來的是：
+        ///
+        /// ```text
+        /// ? 已記錄     0 張畫面 · 0 段文字——她此刻正在錄，到現在還沒有一列落地
+        /// ? 兩個字的中文 一段字都沒有……——她此刻正在錄，還沒有東西落地
+        /// ? 零當機     她此刻正在錄，還沒有東西落地，所以還沒有一場算得出來
+        /// ? 上一次錄製 …… 她當掉了。現在有一個 sister record 正在起來
+        /// ```
+        ///
+        /// 前三列說她在錄，第四列說她還沒開始——四行之內自相矛盾。`crashed`
+        /// 那一列早就收 [`Phase`] 本人所以是對的，另外三列收的是那個被壓扁的
+        /// 布林。**一個布林湊不出三種答案，而少掉的那一種永遠是「正在來、還
+        /// 沒好」。**
+        ///
+        /// 這一條把那三列一起釘住：`Booting` 底下沒有任何一列可以宣稱她正在
+        /// 錄，也沒有任何一列可以宣稱有東西被刪過。
+        ///
+        /// [`Phase`]: sister_core::heartbeat::Phase
+        #[test]
+        fn while_she_is_booting_no_row_may_say_she_is_recording() {
+            use sister_core::db::{SignalAudit, SignalVerdict};
+            let d = "0 張畫面 · 0 段文字 · 168.0 KB";
+            let signal = SignalAudit {
+                name: "視窗焦點",
+                rows: 0,
+                populated: 0,
+                populated_label: "列知道自己是哪個 app",
+                verdict: SignalVerdict::TooEarly,
+                note: "",
+                scope_started_at: None,
+                scope_is_live: false,
+            };
+
+            // doctor 上每一列會拿 `Emptiness` 去講話的地方，一個都不能漏。
+            let rows = [
+                recorded_verdict(0, 0, Emptiness::Booting, d),
+                crash_verdict(
+                    &sister_core::db::CrashAudit {
+                        beat: Some(sister_core::heartbeat::Phase::Booting),
+                        ..audit(0, 0, 0, 0)
+                    },
+                    Emptiness::Booting,
+                ),
+                bigram_verdict(0, 0, 0, Emptiness::Booting),
+                signal_line(&signal, Emptiness::Booting),
+            ];
+            for (_, said) in &rows {
+                assert!(
+                    !said.contains("正在錄"),
+                    "她還在開資料庫，第一拍都還沒跑：{said}"
+                );
+                assert!(
+                    said.contains("正在起來"),
+                    "而那個 recorder 看得到，說得出他在等什麼：{said}"
+                );
+                for lie in ["forget", "保留期", "不在了", "capture.enabled"] {
+                    assert!(
+                        !said.contains(lie),
+                        "沒有人刪過東西，也沒有設定需要改——他要的是再等一下：{said}"
+                    );
+                }
+            }
+
+            // 而 `Live` 那一組四列全部相反：她真的在錄。少了這半邊，把上面四
+            // 句都改成「正在起來」也是綠的——而那會在她真的在錄的時候騙他。
+            let live = [
+                recorded_verdict(0, 0, Emptiness::Live, d),
+                crash_verdict(
+                    &sister_core::db::CrashAudit {
+                        live: true,
+                        beat: Some(sister_core::heartbeat::Phase::Recording),
+                        ..audit(3, 2, 3, 1)
+                    },
+                    Emptiness::Live,
+                ),
+                bigram_verdict(0, 0, 0, Emptiness::Live),
+                signal_line(&signal, Emptiness::Live),
+            ];
+            for (i, (_, said)) in live.iter().enumerate() {
+                assert!(said.contains("正在錄"), "她真的在錄：{said}");
+                assert_ne!(
+                    said, &rows[i].1,
+                    "「正在錄」和「正在起來」是相反的兩件事，不可以共用一句話"
+                );
+            }
+        }
+
         /// **她正在錄的那一場是第一場——而扣掉之後的 0 被讀成「分母沒了」。**
         ///
         /// `crash_audit` 把正在錄的那一場從 `started` 扣掉，所以一台全新機器
@@ -5531,13 +5771,10 @@ pub mod doctor {
         /// 次都是這樣來的。
         #[test]
         fn her_first_recording_is_not_a_database_someone_emptied() {
-            for empty in [
-                Emptiness::Erased,
-                Emptiness::Blocked,
-                Emptiness::Live,
-                Emptiness::Fresh,
-                Emptiness::Barren,
-            ] {
+            // **走 `Emptiness::ALL`，不要寫陣列字面量。** 上一版寫死五個，
+            // 於是 `Booting` 加進來的那天這條測試對它一個字都沒問——而
+            // 「她正在錄第一場」這一格本來就該蓋過底下每一種 `Emptiness`。
+            for empty in Emptiness::ALL {
                 let (sym, said) = crash_verdict(
                     &sister_core::db::CrashAudit {
                         live: true,
@@ -5830,7 +6067,7 @@ pub mod doctor {
 
             let mut db = Db::open_in_memory().expect("db");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats"), false).expect("of"),
+                Emptiness::of(&db, &db.stats().expect("stats"), None).expect("of"),
                 Emptiness::Fresh,
                 "剛開的資料庫"
             );
@@ -5846,7 +6083,7 @@ pub mod doctor {
             )
             .expect("blocked");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats"), false).expect("of"),
+                Emptiness::of(&db, &db.stats().expect("stats"), None).expect("of"),
                 Emptiness::Blocked,
                 "她錄了，是規則擋掉的——證據就在這顆資料庫裡"
             );
@@ -5855,7 +6092,7 @@ pub mod doctor {
             db.forget(0, 2_000, None).expect("forget");
             db.end_session(s).expect("end");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats"), false).expect("of"),
+                Emptiness::of(&db, &db.stats().expect("stats"), None).expect("of"),
                 Emptiness::Erased,
                 "這時候才輪到「被 forget 忘掉了」"
             );
@@ -5895,7 +6132,7 @@ pub mod doctor {
                 "前提：它走的是和「清空過」同一條路：{stats:?}"
             );
             assert_eq!(
-                Emptiness::of(&db, &stats, false).expect("of"),
+                Emptiness::of(&db, &stats, None).expect("of"),
                 Emptiness::Barren,
                 "他一次都沒刪過東西，不可以說東西被刪了"
             );
@@ -5903,9 +6140,20 @@ pub mod doctor {
             // 去看 `capture.enabled`，而一個三秒前才按下開始記錄的人，機器上
             // 沒有東西需要改——那台機器要的是「再等一下」。
             assert_eq!(
-                Emptiness::of(&db, &stats, true).expect("of"),
+                Emptiness::of(&db, &stats, Some(sister_core::heartbeat::Phase::Recording))
+                    .expect("of"),
                 Emptiness::Live,
                 "她此刻正佔著這個目錄，不是「跑完了什麼都沒存到」"
+            );
+            // **而「正在起來」是第三種，不是上面兩種之一。** 上一版這裡收的是
+            // 一個布林（`beat.is_some()`），於是開機那幾分鐘走進 `Live`，報告
+            // 上印出「她此刻正在錄，到現在還沒有一列落地」——她還沒開始錄。一
+            // 個布林湊不出三種答案，而少掉的那一種永遠是「正在來、還沒好」。
+            assert_eq!(
+                Emptiness::of(&db, &stats, Some(sister_core::heartbeat::Phase::Booting))
+                    .expect("of"),
+                Emptiness::Booting,
+                "她在開資料庫，還沒開始記——既不是「正在錄」也不是「跑完沒存到」"
             );
 
             // 反面：同一顆資料庫，只要真的存過一列，清空之後就回得到 `Erased`。
@@ -5922,7 +6170,7 @@ pub mod doctor {
             db.forget(0, 3_000, None).expect("forget");
             db.end_session(s).expect("end");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats"), false).expect("of"),
+                Emptiness::of(&db, &db.stats().expect("stats"), None).expect("of"),
                 Emptiness::Erased,
                 "存過就是存過——那個位元撐得過 forget"
             );

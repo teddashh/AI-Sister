@@ -209,6 +209,17 @@ pub struct BlindSpots {
     /// 放在這裡而不是各自判：終端機和字母人共用這一份，而「同一句話在兩個
     /// 地方得到兩種答案」是這個專案反覆踩到的坑。
     pub recording_now: bool,
+    /// 有一個 recorder **正在起來**，而它還沒開始錄。
+    ///
+    /// 和 [`recording_now`](Self::recording_now) 是同一次
+    /// [`crate::heartbeat::phase`] 讀出來的兩半，所以兩個永遠不會同時為真——
+    /// 分兩次讀就會，而那時候兩句話會描述兩個不同的瞬間。
+    ///
+    /// 少了這一格，開機那幾分鐘（`Db::open` 在一顆一年份的資料庫上要跑好幾
+    /// 分鐘）`recording_now` 是 false，於是那組句子掉到最後面，把一個什麼都
+    /// 還沒開始的 recorder 說成「先看 `capture.enabled`」——而同一個資料目錄
+    /// 上 `sister facts` 說的是「再等一下」。兩個指令，相反的下一步。
+    pub booting_now: bool,
 }
 
 impl BlindSpots {
@@ -255,6 +266,10 @@ impl BlindSpots {
 pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::Result<BlindSpots> {
     let stats = db.stats()?;
     let pauses = db.pause_audit()?;
+    // **心跳只讀一次。** 底下那兩個布林是同一次讀的兩半，所以它們不可能同時
+    // 為真，也不可能同時為假而其實有人在。分兩次讀的話，兩次之間她可以從
+    // `Booting` 跳到 `Recording`——同一句話的兩個前提描述兩個不同的瞬間。
+    let beat = crate::heartbeat::phase(data_dir, crate::now_ms());
     Ok(BlindSpots {
         chunks: stats.chunks,
         ocr_blocks: stats.ocr_blocks,
@@ -272,7 +287,8 @@ pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::
         paused_now: crate::pause::is_paused(data_dir),
         paused_truncated: pauses.truncated,
         scan_horizon_days: db.scan_horizon_days(query)?,
-        recording_now: crate::heartbeat::is_recording(data_dir, crate::now_ms()),
+        recording_now: beat == Some(crate::heartbeat::Phase::Recording),
+        booting_now: beat == Some(crate::heartbeat::Phase::Booting),
     })
 }
 
@@ -631,6 +647,7 @@ mod tests {
             !cold.recording_now,
             "沒有心跳檔——沒有人在錄，那句「被忘掉了」是完整的"
         );
+        assert!(!cold.booting_now, "也沒有人在起來");
 
         // 心跳寫下去（`Phase::Recording`，不是 booting——開機中的她一個字都
         // 還沒記，那和「錄了但什麼都沒有」是兩回事）。
@@ -640,15 +657,26 @@ mod tests {
             hot.recording_now,
             "她正開著，那句話就少了一種可能——而那是最常見的那一種"
         );
+        assert!(!hot.booting_now, "她已經起來了");
 
         // 開機中的不算。她還沒開始記，講「我正開著但手上沒東西」會讓他以為
         // 已經在跑了。
         crate::heartbeat::beat_booting(&tmp.0, crate::now_ms()).expect("booting");
+        let booting = blind_spots(&db, &tmp.0, "電話").expect("blind");
+        assert!(!booting.recording_now);
+        // **而「不在錄」不等於「沒有人在」。** 只發一個 `recording_now` 出去
+        // 的話，開機那幾分鐘和一台根本沒開 recorder 的機器在字母人和終端機上
+        // 逐位元相同——於是他被送去看 `capture.enabled`，而他要的只是再等一
+        // 下。一個布林湊不出三種答案，少掉的那一種永遠是「正在來、還沒好」。
         assert!(
-            !blind_spots(&db, &tmp.0, "電話")
-                .expect("blind")
-                .recording_now
+            booting.booting_now,
+            "她佔著這個目錄、正在開資料庫——那和「沒有人在」是兩回事"
         );
+        // 三種狀態，兩個位元，而 (true, true) 不在裡面：同一份報告不可以說她
+        // 同時在錄和還沒開始錄。
+        for b in [&cold, &hot, &booting] {
+            assert!(!(b.recording_now && b.booting_now), "兩個位元不可以同時亮");
+        }
     }
 
     /// 反過來：旗標在，紀錄裡卻一個字都沒有。

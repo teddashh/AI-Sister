@@ -428,8 +428,21 @@ jobs:
           #
           # 而兩顆之間必須真的不一樣。逐字相同的話上面每一條都還是綠的
           # ——那正是這一整節在抓的形狀。
+          #
+          # **先正規化，不然這一條永遠不會紅。** 每一份輸出裡都印著資料目錄
+          # （`✓ 資料目錄  ./ci-nulldata`），而兩顆 fixture 的目錄名本來就不一
+          # 樣——`diff` 於是永遠說「有差」，不管那幾句話有沒有分開。`query` 那
+          # 一份還多印一個毫秒數。這一條從寫下來的那天起就是一格空白，也就是這
+          # 整節在抓的形狀本人，第三次出現在抓它的工具上（前兩次見 `signal_
+          # audit` 的註解和 `'零當機 +✗'`）。驗過：把 `./ci-*` 和毫秒抹掉之
+          # 後，一顆沒有心跳的 `ci-nulldata` 複本和 `null-doctor.txt` 逐字相
+          # 同，這一條當場紅。
+          same() { diff -q \
+            <(sed -E 's#\./ci-[a-z]+#DIR#g; s/[0-9]+(\.[0-9]+)? ms/T ms/g' "$1") \
+            <(sed -E 's#\./ci-[a-z]+#DIR#g; s/[0-9]+(\.[0-9]+)? ms/T ms/g' "$2") \
+            > /dev/null; }
           for pair in stats doctor facts query; do
-            if diff -q "null-$pair.txt" "live-$pair.txt" > /dev/null; then
+            if same "null-$pair.txt" "live-$pair.txt"; then
               echo "::error::[她正開著] $pair 在兩台機器上逐字相同"
               exit 1
             fi
@@ -802,6 +815,95 @@ jobs:
             echo "::error::[第一場停了] 沒有心跳了，那三列還說她在錄"
             grep -E '視窗焦點|輸入節奏|文字座標' first-stopped.txt; exit 1
           fi
+
+          # ── fixture 11：**一列都沒存過，而一個 recorder 正在起來。** ──
+          #
+          # 第五顆（`ci-nulldata`：跑完了、什麼都沒存到 → 下一步是改設定）和第
+          # 六顆（`ci-live`：此刻正在錄 → 下一步是再等一下）中間還有第三格：心
+          # 跳在、第二欄是 `boot`，她還在開資料庫（`Db::open` 在一顆一年份的資
+          # 料庫上要跑好幾分鐘）。fixture 9 站的是「資料庫裡有東西」那一半，這
+          # 一顆站的是「空的」那一半——而那正是把心跳壓成布林的地方。上一版
+          # `doctor` 收到的是 `occupied = beat.is_some()`，於是這一格走進「她正
+          # 在錄」，同一份報告印出：
+          #
+          #     ? 已記錄     0 張畫面 · 0 段文字——她此刻正在錄，到現在還沒有一列落地
+          #     ? 上一次錄製 …… 她當掉了。現在有一個 sister record 正在起來
+          #
+          # 前一句說她在錄，四行之後說她還沒開始。**一個布林湊不出三種答案，而
+          # 少掉的那一種永遠是「正在來、還沒好」。** 三個畫面各自判斷，所以四個
+          # 指令都要問。
+          P="$B --data-dir ./ci-bootlive"
+          cp -r ./ci-nulldata ./ci-bootlive
+          python3 - <<'EOF'
+          import pathlib, time
+          # 心跳寫下去了，她的 session 列還沒 INSERT——`Db::open` 還在跑。這一
+          # 顆和第五顆在資料庫上逐位元相同，差別只有這個檔案的第二欄。
+          pathlib.Path('./ci-bootlive/recording.beat').write_text(
+              f'{int(time.time() * 1000)} boot')
+          EOF
+          $P stats > boot-stats.txt
+          $P doctor > boot-doctor.txt
+          $P facts > boot-facts.txt
+          $P query 電話 > boot-query.txt
+          for x in boot-stats.txt boot-doctor.txt boot-facts.txt boot-query.txt; do
+            # 同一組指控。一列都沒進來過，就沒有東西可以被忘掉或過期。
+            if grep -qE "$LIE" "$x"; then
+              echo "::error::[正在起來] $x 指控了一個沒發生過的刪除"
+              grep -nE "$LIE" "$x"; exit 1
+            fi
+            # 第五顆的下一步在這一格是誤導：他機器上沒有設定要改，他在等那個
+            # 正在起來的 recorder。
+            if grep -q 'capture.enabled' "$x"; then
+              echo "::error::[正在起來] $x 把一個正在等 recorder 起來的人送去改設定"
+              grep -n 'capture.enabled' "$x"; exit 1
+            fi
+            # 第六顆的那句話在這一格是假的：她一拍都還沒跑。
+            if grep -q '正在錄' "$x"; then
+              echo "::error::[正在起來] $x 說她在錄，而她還在開資料庫"
+              grep -n '正在錄' "$x"; exit 1
+            fi
+            # 正反成對——只寫「不准說」的話，整段功能被刪掉也是綠的。
+            grep -q '正在起來' "$x" \
+              || { echo "::error::[正在起來] $x 沒說出他在等什麼"; cat "$x"; exit 1; }
+          done
+          # 而三顆之間必須真的不一樣。和第五顆逐字相同＝那個 `boot` 完全沒被
+          # 讀到；和第六顆逐字相同＝三種狀態又被壓回兩種。`same` 會先把資料目
+          # 錄名和毫秒數抹掉——理由見上面第六顆那一段。
+          for pair in stats doctor facts query; do
+            for other in null live; do
+              if same "$other-$pair.txt" "boot-$pair.txt"; then
+                echo "::error::[正在起來] $pair 和 $other 逐字相同"
+                exit 1
+              fi
+            done
+          done
+          # 「零當機」那一列讀的是另一組數字（計數器，撐得過那一場自己把列刪
+          # 掉），而開機中的她一個數字都不准扣——她的列還不存在。
+          grep -qE '✓ +零當機' boot-doctor.txt \
+            || { echo "::error::[正在起來] 上一場好好收完了，那是零當機"; grep 零當機 boot-doctor.txt; exit 1; }
+          if grep -qE '零當機.*沒有算進去' boot-doctor.txt; then
+            echo "::error::[正在起來] 宣告扣掉了一場還不存在的錄製"
+            grep 零當機 boot-doctor.txt; exit 1
+          fi
+          # 「現在有沒有在看」是這一頁上唯一直接回答「她此刻在幹嘛」的一列，
+          # 而它以前自己再讀一次心跳（於是同一份報告的上半和下半可以描述兩個
+          # 不同的瞬間）。上面那個迴圈抓的是整份檔案，這一列被別人的「正在起
+          # 來」蓋過去——要單獨釘。三種心跳三句話，這裡釘兩種。
+          if grep -E '現在有沒有在看' boot-doctor.txt | grep -q '正在跑'; then
+            echo "::error::[正在起來] 「正在起來」印成「正在跑」，他會照著那句話去做一件想被記住的事"
+            grep 現在有沒有在看 boot-doctor.txt; exit 1
+          fi
+          grep -E '現在有沒有在看' boot-doctor.txt | grep -q '正在起來' \
+            || { echo "::error::[正在起來] 那一列沒說出她還在開資料庫"; grep 現在有沒有在看 boot-doctor.txt; exit 1; }
+          # 符號也要分得開：`…`（還沒好）不是 `✓`（好了）。符號印在標籤**前
+          # 面**（見 `signal_audit` 的註解），這兩條都當場對著真的輸出驗過。
+          grep -qE '… +現在有沒有在看' boot-doctor.txt \
+            || { echo "::error::[正在起來] 「正在起來」畫成了打勾"; grep 現在有沒有在看 boot-doctor.txt; exit 1; }
+          # 正反成對：她真的在錄的那一顆上，同一列要說「正在跑」而且是 ✓。
+          grep -qE '✓ +現在有沒有在看' live-doctor.txt \
+            || { echo "::error::[她正開著] 她真的在錄，那一列要是打勾"; grep 現在有沒有在看 live-doctor.txt; exit 1; }
+          grep -E '現在有沒有在看' live-doctor.txt | grep -q '正在跑' \
+            || { echo "::error::[她正開著] 她真的在錄，那一列要說「正在跑」"; grep 現在有沒有在看 live-doctor.txt; exit 1; }
 
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，

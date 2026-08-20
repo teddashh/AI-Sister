@@ -678,6 +678,13 @@ struct Blind {
     /// 分開的是「被忘掉了／過期了」和「她三秒前才開起來」——見
     /// [`sister_core::answer::BlindSpots::recording_now`]。
     recording_now: bool,
+    /// 有一個 recorder **正在起來**，還沒開始錄。和上面那個是同一次心跳讀出
+    /// 來的兩半，永遠不會同時為真——見
+    /// [`sister_core::answer::BlindSpots::booting_now`]。
+    ///
+    /// 少了這一格，開機那幾分鐘字母人會說「先看設定頁的『開始記錄』那一段」，
+    /// 對一個什麼都還沒開始的 recorder。
+    booting_now: bool,
 }
 
 /// 一筆 ★ 答案。
@@ -819,6 +826,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 paused_truncated: b.paused_truncated,
                 scan_horizon_days: b.scan_horizon_days,
                 recording_now: b.recording_now,
+                booting_now: b.booting_now,
             })
         } else {
             None
