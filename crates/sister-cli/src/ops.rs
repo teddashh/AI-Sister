@@ -4447,6 +4447,54 @@ pub mod doctor {
         format!("「{s}」")
     }
 
+    /// doctor 不蓋掉那份能力報告的理由，加上底下那幾則警告是誰講的。
+    #[cfg(any(windows, test))]
+    pub(crate) struct Keeper {
+        pub why: &'static str,
+        pub whose: &'static str,
+    }
+
+    /// doctor 該不該蓋掉 `capabilities.json`。`Some` = 不要蓋。
+    ///
+    /// **這一支刻意沒有 `#[cfg(windows)]`**，雖然唯一的呼叫端（[`caps`]）有。
+    /// 判斷錯掉的代價是「一則真的隱私警告被換成一片乾淨」，而那種東西不可以
+    /// 只活在一個開發機編不到、CI 也沒有任何測試踩得到的分支裡——那正是這個
+    /// repo 一路在修的形狀，只是換成長在建置設定上。抽出來之後 Linux 那顆
+    /// runner 每次 push 都驗一次。
+    ///
+    /// `any(windows, test)` 而不是 `allow(dead_code)`：Linux 上的 `sister`
+    /// **執行檔**確實沒有人呼叫它（唯一的呼叫端是 `#[cfg(windows)]`），那是
+    /// 真的死碼，不該被消音；Linux 上的**測試**用得到，所以它在那裡活著。
+    /// 一句 `allow` 會把這兩件事一起蓋掉，連以後真的變成死碼那天也一起。
+    #[cfg(any(windows, test))]
+    pub(crate) fn keep_capabilities(
+        phase: Option<sister_core::heartbeat::Phase>,
+        previous: Option<&sister_core::capabilities::Report>,
+    ) -> Option<Keeper> {
+        use sister_core::heartbeat::Phase;
+        // 先問完再 match：塞進 guard 裡會長到 rustfmt 得把它拆成三行，而那三行
+        // 讀起來會比它要講的事複雜。
+        let has_evidence =
+            previous.is_some_and(sister_core::capabilities::Report::has_session_evidence);
+        match phase {
+            Some(Phase::Recording) => Some(Keeper {
+                why: "她正在錄，能力報告交給那個行程寫",
+                whose: "正在錄的那個行程說",
+            }),
+            // 開機中的那一個還沒寫過任何東西，讀到的是**上一場**留下的。把它
+            // 說成「正在錄的那個行程說」會讓他去停一個沒有在做那件事的行程。
+            Some(Phase::Booting) => Some(Keeper {
+                why: "她正在起來，等她開完自己會寫一份",
+                whose: "上一場留下的報告說",
+            }),
+            None if has_evidence => Some(Keeper {
+                why: "上一場路上發生的事只有那一場問得到，這裡問不出來",
+                whose: "上一場留下的報告說",
+            }),
+            None => None,
+        }
+    }
+
     #[cfg(windows)]
     fn caps(data_dir: &Path, config: &Config) -> Caps {
         use sister_capture::traits::{Ocr, ScreenSource};
@@ -4501,28 +4549,8 @@ pub mod doctor {
         // 所以判斷的是「有沒有東西可以弄丟」，不是「她在不在」。
         let previous = sister_core::capabilities::read(data_dir);
         let phase = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
-        let keeper = match phase {
-            Some(sister_core::heartbeat::Phase::Recording) => {
-                Some("她正在錄，能力報告交給那個行程寫")
-            }
-            Some(sister_core::heartbeat::Phase::Booting) => {
-                Some("她正在起來，等她開完自己會寫一份")
-            }
-            None if previous.as_ref().is_some_and(|r| r.has_session_evidence()) => {
-                Some("上一場路上發生的事只有那一場問得到，這裡問不出來")
-            }
-            None => None,
-        };
-        if let Some(why) = keeper {
+        if let Some(Keeper { why, whose }) = keep_capabilities(phase, previous.as_ref()) {
             println!("  （{why}——這裡不蓋掉它。）");
-            let whose = if phase == Some(sister_core::heartbeat::Phase::Recording) {
-                "正在錄的那個行程說"
-            } else {
-                // 開機中的那一個還沒寫過任何東西，讀到的是**上一場**留下的。
-                // 把它說成「正在錄的那個行程說」會讓他去停一個沒有在做那件事
-                // 的行程。
-                "上一場留下的報告說"
-            };
             for line in previous
                 .as_ref()
                 .map(|r| r.broken_privacy_rules(&config.privacy))
@@ -5451,6 +5479,91 @@ pub mod doctor {
     #[cfg(test)]
     mod doctor_tests {
         use super::*;
+        use sister_core::capabilities::{Report, UrlCapture};
+        use sister_core::heartbeat::Phase;
+
+        /// 一台剛裝好、還沒錄過的機器上，doctor 要寫得進去。
+        ///
+        /// README quickstart 第一句就是「跑一次 doctor」，而在那之前設定頁只
+        /// 答得出「還不知道」——一個正在填排除規則的新使用者，正是最需要知道
+        /// 「這台機器讀不到網址」的那個人。護著證據不可以把這條路一起關掉。
+        #[test]
+        fn a_machine_with_nothing_to_lose_still_gets_its_report_written() {
+            assert!(keep_capabilities(None, None).is_none());
+            assert!(keep_capabilities(None, Some(&Report::default())).is_none());
+            // 只有開機探測、沒有歷史——一樣沒有東西可以弄丟。
+            let probes_only = Report {
+                at: 1,
+                url: true,
+                input_hook_failed: true,
+                ..Default::default()
+            };
+            assert!(keep_capabilities(None, Some(&probes_only)).is_none());
+        }
+
+        /// 她收工之後，那一場路上發生的事仍然只有那一場問得到。
+        ///
+        /// 這是使用者動線裡最壞的一條，也是上一版唯一漏掉的那一條：覺得怪怪的
+        /// → 按停止 → 跑 doctor → 打開設定頁。上一版的閘門問的是
+        /// `is_recording`，於是這裡回 false，doctor 蓋掉——他親手刪掉了自己要
+        /// 找的東西。
+        #[test]
+        fn a_finished_session_still_owns_what_only_it_could_have_seen() {
+            let gave_up = Report {
+                url_capture: UrlCapture {
+                    gave_up: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let k = keep_capabilities(None, Some(&gave_up)).expect("心跳停了不代表可以蓋");
+            assert_eq!(k.whose, "上一場留下的報告說");
+        }
+
+        /// 開機那幾分鐘也不行，而且那幾則話不可以說成是她講的。
+        ///
+        /// `Booting` 的時候她一個字都還沒寫，讀到的是上一場留下的。說成「正在
+        /// 錄的那個行程說」會讓他去停一個沒有在做那件事的行程。
+        #[test]
+        fn while_she_is_opening_the_database_the_warnings_are_last_sessions() {
+            let k = keep_capabilities(Some(Phase::Booting), None).expect("開機中不可以蓋");
+            assert_eq!(k.whose, "上一場留下的報告說");
+            let k = keep_capabilities(Some(Phase::Recording), None).expect("正在錄不可以蓋");
+            assert_eq!(k.whose, "正在錄的那個行程說");
+        }
+
+        /// 三種不蓋的理由，要是三句不一樣的話。
+        ///
+        /// 它們回答的是同一個問題——「為什麼設定頁上這一份沒有跟著更新」——而
+        /// 使用者會拿那句話決定下一步：正在錄的那個要去按停止才問得到新的，
+        /// 正在起來的再等幾分鐘就有，已經收工的那一份是歷史、不會再變了。三句
+        /// 壓成一句，那三個下一步就沒有分別了。這是 `stop`、`forget`、`stats`
+        /// 那幾處同一條規則的第四個現場。
+        #[test]
+        fn three_reasons_not_to_overwrite_are_three_different_sentences() {
+            let evidence = Report {
+                url_capture: UrlCapture {
+                    gave_up: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let kept = [
+                keep_capabilities(Some(Phase::Recording), None),
+                keep_capabilities(Some(Phase::Booting), None),
+                keep_capabilities(None, Some(&evidence)),
+            ];
+            let whys: Vec<&str> = kept
+                .iter()
+                .map(|k| k.as_ref().expect("這三種都不可以蓋").why)
+                .collect();
+            assert!(whys.iter().all(|w| !w.is_empty()), "理由不可以是空的");
+            for (i, a) in whys.iter().enumerate() {
+                for b in &whys[i + 1..] {
+                    assert_ne!(a, b, "三種狀態要三句話，這兩個一樣：{a}");
+                }
+            }
+        }
 
         /// 設定檔壞掉的時候，doctor 還是要把整份檢查跑完。
         ///
