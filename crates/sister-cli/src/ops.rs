@@ -1955,52 +1955,77 @@ pub mod query {
                 "不過{whose}擋掉過東西（{why}）——要找的如果在那裡面，她本來就不會知道。"
             ));
         }
+        // 「她以前暫停過幾段」和「她**現在**閉不閉得了眼」是兩件事，而 alpha.40
+        // 為止它們共用一條 if/else 鏈——`paused_now` 只在 `paused_episodes == 0`
+        // 的那條 else 裡說得出話（那條 else 的註解自己還寫著「這一條比上面那條
+        // 更需要講」，然後坐在會被上面那條擋掉的位置上）。
+        //
+        // 於是這台機器：錄的時候暫停又解除過一次、後來在沒有人在錄的時候又按
+        // 了一次暫停——`query` 只說
+        //
+        //     她也被暫停過 1 次、一共 5 分鐘，那幾段是空的。
+        //
+        // 過去式，話說完了。而 `sister stats` 在**同一個資料目錄**上說「但她現
+        // 在是暫停的」。兩個指令、相反的結論，而他讀完 query 會去按開始記錄，
+        // 然後錄一整天的空白。
+        //
+        // 所以底下是兩個獨立的 `if`，各自決定自己要不要出現。
         if b.paused_episodes > 0 {
-            // 時間只有在 pause 配得到 resume 的時候才累加，所以「一共 0 秒」
-            // 有兩種意思：真的只暫停了一瞬間，或者三天前那次暫停到現在都沒
-            // 解除（暫停不會自己過期，那是設計）。後者才是他要找的東西不在
-            // 裡面的真正原因，而報成 0 秒剛好把它藏起來。
+            // 這個數字算短的原因有**兩個**，而且互相獨立：最後一段還沒收尾、
+            // 開頭被保留期刪掉的那幾段算不出長度。舊版把它們排成 if/else，於是
+            // 一顆兩種都有的資料庫永遠說不出後者（`paused_truncated` 那條在
+            // `paused_open` 為真的時候到不了）。兩個都要說得出口。
             //
-            // 開頭被保留期刪掉的那幾段也一樣：算進了段數、沒算進時間。
-            //
-            // 「最後一段沒收尾」和「她現在閉著眼睛」是兩件事，只有旗標答得出
-            // 後者（見 `BlindSpots::paused_now`）。錄製當中按暫停、關掉
-            // recorder、事後才解除——`CaptureResumed` 沒有人寫，資料庫從此
-            // 永遠掛著一段沒收尾的暫停，而舊版會永遠說她此刻閉著眼睛。
-            let how_long = if b.paused_open && b.paused_now && b.paused_ms == 0 {
-                "而且到現在都還沒解除——她此刻就是閉著眼睛的".to_string()
-            } else if b.paused_open && b.paused_now {
-                format!(
-                    "已結束的加起來 {}，最後一段到現在都還沒解除",
-                    crate::fmt::duration_ms(b.paused_ms)
-                )
-            } else if b.paused_open {
-                format!(
-                    "已結束的加起來 {}，最後一段沒有收尾（她現在沒有暫停，\
-                     多半是解除的時候沒有人在錄），所以這個數字算短了",
-                    crate::fmt::duration_ms(b.paused_ms)
-                )
-            } else if b.paused_truncated > 0 {
-                format!(
-                    "算得出來的加起來 {}（有 {} 段的開頭已被保留期刪掉，長度算不出來）",
-                    crate::fmt::duration_ms(b.paused_ms),
-                    b.paused_truncated
-                )
-            } else {
-                format!("一共 {}", crate::fmt::duration_ms(b.paused_ms))
+            // 每一條都寫成短短的名詞片語，不帶自己的括號——整串等一下會被塞進
+            // 一對括號裡，再套一層就變成括號中的括號，沒有人讀得下去。
+            // 「為什麼沒收尾」那段解釋留在 `sister stats`，那一格有空間展開。
+            let mut why_short: Vec<String> = Vec::new();
+            if b.paused_open {
+                // 「沒收尾」有兩種，而它們的原因相反：她**現在**還停著（那一段
+                // 本來就還在跑），或者解除的時候沒有人在錄（所以沒有人寫下那一
+                // 筆）。寫死其中一句，另一半就是假話。
+                why_short.push(if b.paused_now {
+                    "最後一段到現在都還沒解除".to_string()
+                } else {
+                    "最後一段沒有收尾".to_string()
+                });
+            }
+            if b.paused_truncated > 0 {
+                why_short.push(format!("有 {} 段的開頭已被保留期刪掉", b.paused_truncated));
+            }
+            // 時間只有在 pause 配得到 resume 的時候才累加。所以「一共 0 秒」有
+            // 兩種意思：真的只停了一瞬間，和**一段都還沒結束、根本無從加起**。
+            // 只有在真的加得出東西的時候才報那個數字。
+            let how_long = match (b.paused_ms, why_short.is_empty()) {
+                (0, false) => format!("長度還算不出來（{}）", why_short.join("、")),
+                (ms, true) => format!("一共 {}", crate::fmt::duration_ms(ms)),
+                (ms, false) => format!(
+                    "算得出來的加起來 {}（{}，所以這個數字算短了）",
+                    crate::fmt::duration_ms(ms),
+                    why_short.join("、")
+                ),
             };
             out.push(format!(
                 "她也被暫停過 {} 次、{how_long}，那幾段是空的。",
                 b.paused_episodes
             ));
-        } else if b.paused_now {
-            // 紀錄裡看不到、但旗標在。他按下暫停的那一刻沒有人在錄，所以
-            // 沒有任何一筆事件記得這件事——而下一次 `sister record` 會開起來
-            // 然後什麼都不記。這一條比上面那條更需要講。
-            out.push(
-                "而且她**現在是暫停的**（`sister pause --off` 解除）——這樣錄也不會記到東西。"
-                    .to_string(),
-            );
+        }
+        if b.paused_now {
+            // 只有旗標答得出「現在」（見 `BlindSpots::paused_now`）。錄製當中按
+            // 暫停、關掉 recorder、事後才解除——`CaptureResumed` 沒有人寫，資料
+            // 庫從此永遠掛著一段沒收尾的暫停，所以 `paused_open` 不是「現在」。
+            //
+            // 這一句講的是**接下來**：他下一次按開始記錄，會開起來然後什麼都不
+            // 記。所以它比上面那句重要，而且和上面那句同時成立。
+            //
+            // 指令要指得到。舊版寫的是 `sister pause --off`——`sister pause` 一
+            // 個旗標都沒有，照著打會拿到 usage error（exit 2）。全 repo 只有那
+            // 一處這樣寫，另外五處都是對的 `sister resume`。他當時正瞎著，而她
+            // 給的唯一一條路走不通。
+            let lead = if out.is_empty() { "她" } else { "而且她" };
+            out.push(format!(
+                "{lead}**現在是暫停的**（`sister resume` 解除）——這樣錄也不會記到東西。"
+            ));
         }
         // 沒有任何理由的時候只剩一句實話。而「每一段」這三個字要看她這次
         // 到底翻了多少：只掃了 30 天卻說「每一段」，是把十二分之一講成全部。
@@ -2262,6 +2287,122 @@ pub mod query {
             println!("    {src}\n");
         }
         Ok(())
+    }
+
+    /// 「她現在瞎著」和「她以前暫停過」是兩件事，而 alpha.40 為止它們共用一條
+    /// if/else 鏈。
+    ///
+    /// 這幾條在寫出來之前是**一條都沒有**的：我把 `paused_now` 從 else 搬出來、
+    /// 重寫整個 `how_long`、改掉一個不存在的指令——`cargo test --workspace` 448
+    /// 條全綠，一條都沒紅。沒有紅的原因不是修法安全，是這幾個分支從來沒有人測。
+    #[cfg(test)]
+    mod pause_sentence_tests {
+        use super::*;
+        use sister_core::answer::BlindSpots;
+
+        fn lines(b: BlindSpots) -> String {
+            blind_lines(&b).join("\n")
+        }
+
+        /// 錄的時候暫停又解除過一次，後來在沒有人在錄的時候又按了一次暫停。
+        ///
+        /// 舊版只說得出上面那句過去式的（`paused_now` 掛在 `else if` 裡，被
+        /// `paused_episodes > 0` 擋掉），而 `sister stats` 在**同一顆資料庫**上
+        /// 說「但她現在是暫停的」。兩個指令、相反的結論，而他讀完 query 那句
+        /// 會去按開始記錄，然後錄一整天的空白。
+        #[test]
+        fn a_past_pause_may_not_swallow_the_present_one() {
+            let out = lines(BlindSpots {
+                chunks: 10,
+                ever_recorded: true,
+                ever_stored: true,
+                paused_episodes: 1,
+                paused_ms: 300_000,
+                paused_now: true,
+                ..Default::default()
+            });
+            assert!(out.contains("暫停過 1 次"), "以前那幾段還是要講：{out}");
+            assert!(
+                out.contains("現在是暫停的"),
+                "而現在瞎著才是要命的那一句：{out}"
+            );
+        }
+
+        /// 反面：她**現在沒有**暫停的時候，不可以憑空多一句說她瞎著。
+        #[test]
+        fn a_past_pause_alone_says_nothing_about_now() {
+            let out = lines(BlindSpots {
+                chunks: 10,
+                ever_recorded: true,
+                ever_stored: true,
+                paused_episodes: 1,
+                paused_ms: 300_000,
+                paused_now: false,
+                ..Default::default()
+            });
+            assert!(out.contains("暫停過 1 次"), "{out}");
+            assert!(
+                !out.contains("現在是暫停的"),
+                "她沒有暫停，不可以這樣說：{out}"
+            );
+        }
+
+        /// 她唯一給的那條路要走得通。舊版寫的是 `sister pause --off`——
+        /// `sister pause` 一個旗標都沒有，照著打會拿到 usage error（exit 2）。
+        /// 他當時正瞎著，而那是整段文字裡唯一一句可以動手的。
+        #[test]
+        fn the_only_remedy_names_a_command_that_exists() {
+            let out = lines(BlindSpots {
+                chunks: 10,
+                ever_recorded: true,
+                ever_stored: true,
+                paused_now: true,
+                ..Default::default()
+            });
+            assert!(out.contains("sister resume"), "{out}");
+            assert!(!out.contains("pause --off"), "那個旗標不存在：{out}");
+        }
+
+        /// 這個數字算短的原因有兩個，而且互相獨立。舊版把它們排成 if/else，
+        /// 於是「開頭被保留期刪掉」那條在 `paused_open` 為真時永遠到不了——
+        /// 一顆兩種都有的資料庫，只聽得到其中一個。
+        #[test]
+        fn both_reasons_the_total_is_short_get_said() {
+            let out = lines(BlindSpots {
+                chunks: 10,
+                ever_recorded: true,
+                ever_stored: true,
+                paused_episodes: 3,
+                paused_ms: 300_000,
+                paused_open: true,
+                paused_truncated: 1,
+                ..Default::default()
+            });
+            assert!(out.contains("最後一段沒有收尾"), "{out}");
+            assert!(
+                out.contains("開頭已被保留期刪掉"),
+                "這一條以前到不了：{out}"
+            );
+            assert!(out.contains("算短了"), "{out}");
+        }
+
+        /// 「一段都還沒結束」不可以印成「已結束的加起來 0 秒」——那是替一個
+        /// 空集合報一個數字。
+        #[test]
+        fn a_total_of_zero_is_not_reported_as_a_measurement() {
+            let out = lines(BlindSpots {
+                chunks: 10,
+                ever_recorded: true,
+                ever_stored: true,
+                paused_episodes: 1,
+                paused_ms: 0,
+                paused_open: true,
+                paused_now: true,
+                ..Default::default()
+            });
+            assert!(out.contains("長度還算不出來"), "{out}");
+            assert!(!out.contains("0 秒"), "一段都沒結束，不可以報 0 秒：{out}");
+        }
     }
 
     #[cfg(test)]

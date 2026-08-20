@@ -559,6 +559,58 @@ console.log("⑳ 反面：她灰著、而且真的是叫不起來的時候，那
   check("而且它就是在講她——不可以推開", !p.line().includes("另一件事"), p.line());
 }
 
+console.log("㉑ 她以前暫停過，不可以把「我現在就是瞎的」那句話吃掉");
+{
+  // `renderBlind` 裡「我現在是暫停的」掛在 `else if (blind.paused_now)`，所以
+  // 只有一段暫停紀錄都沒有的時候才說得出口。錄的時候暫停又解除過一次、後來
+  // 在沒有人在錄的時候又按了一次暫停的人，讀到的是
+  //
+  //     我也被暫停過 1 次，那幾段是空的。
+  //
+  // 過去式，話說完了。而他此刻是瞎的——下一次按開始記錄會錄一整天的空白。
+  // `ops.rs` 的 `blind_lines` 是同一個 bug（那邊那條 else 的註解自己寫著
+  // 「這一條比上面那條更需要講」，然後坐在會被擋掉的位置上）。
+  const p = await open({
+    recording_state: "recording",
+    ask: answer({
+      blind: blind({
+        ever_recorded: true,
+        ever_stored: true,
+        chunks: 10,
+        paused_episodes: 1,
+        paused_ms: 300_000,
+        paused_now: true,
+      }),
+    }),
+  });
+  await p.type("上禮拜那通電話");
+  const said = p.hitTexts().join("\n");
+  check("以前那幾段還是要講", said.includes("被暫停過 1 次"), said);
+  check("而現在瞎著才是要命的那一句", said.includes("我現在是暫停的"), said);
+  check("沒有 undefined 混進去", p.nonsense().length === 0, p.nonsense());
+}
+
+console.log("㉒ 反面：她現在沒有暫停的時候，不可以憑空多一句說她瞎著");
+{
+  const p = await open({
+    recording_state: "recording",
+    ask: answer({
+      blind: blind({
+        ever_recorded: true,
+        ever_stored: true,
+        chunks: 10,
+        paused_episodes: 1,
+        paused_ms: 300_000,
+        paused_now: false,
+      }),
+    }),
+  });
+  await p.type("上禮拜那通電話");
+  const said = p.hitTexts().join("\n");
+  check("以前那幾段要講", said.includes("被暫停過 1 次"), said);
+  check("但不可以說她現在是暫停的", !said.includes("我現在是暫停的"), said);
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——字母人上有話說不出口，或說了活不過下一次輪詢。`);
