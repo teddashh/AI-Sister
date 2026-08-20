@@ -398,7 +398,17 @@ async function reloadHotkey() {
 
 // ---------- 讀 / 寫 ----------
 
+/**
+ * 這一頁攤開的時候，題庫那顆勾是勾著的嗎。
+ *
+ * 存的時候要拿它比一次：「剛剛關掉」和「本來就關著」對使用者是兩件事，而只有
+ * 前者需要一句「先前記下的那些不會跟著消失」。存完 `load()` 會再蓋一次，所以
+ * 下一次比的是新的基準。
+ */
+let queryLogWas = null;
+
 function apply(s) {
+  queryLogWas = s.query_log;
   el.path.textContent = s.path;
   el.apps.value = s.excluded_apps.join("\n");
   el.urls.value = s.excluded_urls.join("\n");
@@ -651,12 +661,25 @@ async function save() {
     // 而這一頁給了他一條走不通的路。
     //
     // 認不得的值走「沒有人在錄」那一句：三句裡只有它不會替一件沒發生的事背書。
-    say(
+    const watching =
       outcome?.watching === "recording"
         ? "存好了。正在跑的 record 會在 5 秒內換上這一份。"
         : outcome?.watching === "booting"
           ? "存好了。有一個 sister record 正在起來（多半在開資料庫）——它一開始錄就會換上這一份，不必再按「開始記錄」。"
-          : "存好了——不過現在沒有人在錄，所以這一份要等你按下「開始記錄」才會生效。",
+          : "存好了——不過現在沒有人在錄，所以這一份要等你按下「開始記錄」才會生效。";
+    // 把題庫關掉只擋**新的**問題。不講的話，「不要記下我問過的問題」讀起來像
+    // 「那些問題沒了」——而 `queries` 是這整顆資料庫裡唯一一張存著**他自己打
+    // 進去的字**的表（`settings.html` 那一格自己就這樣寫），所以它剛好是最容
+    // 易被誤以為「我剛剛清掉了」的一張。
+    //
+    // 隔壁那一頁早就有一模一樣的句子：撤掉截圖同意書的時候，`onboarding.js`
+    // 說「先前已經寫下的不會因為這個動作消失——要清掉請用時間軸的『忘掉這一
+    // 段』，或跑 sister prune」。同一種動作、同一種誤解，這一頁少了那一句。
+    const justTurnedOff = queryLogWas === true && el.querylog.checked === false;
+    say(
+      justTurnedOff
+        ? `${watching}\n從現在起她不會再記你問過的問題。先前記下的那些不會因為這個動作消失——要清掉請用時間軸的「忘掉這一段」，或等文字保留期到。`
+        : watching,
     );
     // 存進去的是剪過空白、丟過空行的版本，畫面要跟著變成那個樣子，
     // 不然他看到的和檔案裡的是兩份東西。
