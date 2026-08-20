@@ -384,6 +384,121 @@ console.log("⑫ 整場下來，畫面上沒有出現過 NaN / undefined");
   check("而且真的說了為什麼", p.hitTexts().some((t) => t.includes("12 張畫面")), p.hitTexts());
 }
 
+console.log("⑬ 她正在錄，從系統匣按「停止記錄」失敗——那句話要看得到");
+{
+  // 系統匣那一格是**開關**（`main.rs` 的 `record_label`），所以 `recorder-failed`
+  // 也會帶著「停不了」回來，而那一刻她正在錄。以前這句話走的是「叫不起來」那條
+  // 路，而那條路在 `paint()` 裡被一道 `shown === "asleep"` 的閘門擋著——後端特地
+  // `win.show()` + `set_focus()` 把視窗叫到他面前，然後那一格一個字都沒多。
+  const p = await open({ recording_state: "recording" });
+  check("先確認她真的在錄", p.line().includes("在聽"), p.line());
+  await p.fromOutside("recorder-failed", "找不到資料目錄，停不了");
+  check("那句話要出現在畫面上", p.line().includes("停不了"), p.line());
+  // 反面：她在錄的時候不可以順便把狀態講成灰的。
+  check("而且上面那行還是「她在錄」", p.line().includes("在聽"), p.line());
+}
+
+console.log("⑭ 叫她起來那幾秒中間問了一題失敗，真正的原因要贏");
+{
+  // `startRecording` 開頭清過一次，但那次清距離 `catch` 隔著一整段 `await`。
+  // 中間他問一題、失敗了，於是接下來那句「第一張同意書還沒簽」被擋住——兩行
+  // 都是真的，湊起來是「她沒起來，因為資料庫打不開」，而他會去查一顆好好的
+  // 資料庫。真正的原因在右鍵選單裡，一下就簽得掉。
+  const p = await open({
+    recording_state: "none",
+    start_recording: () =>
+      new Promise((_, reject) => setTimeout(() => reject(new Error(CONSENT)), 700)),
+    ask: new Error("資料庫打不開：database is locked"),
+  });
+  void p.click("[data-wake]");
+  await tick(100);
+  await p.type("剛剛發生什麼事");
+  check("中間那句先在", p.line().includes("database is locked"), p.line());
+  await tick(900);
+  check("同意書那句要贏", p.line().includes("同意書"), p.line());
+  check("而且中間那句要讓開", !p.line().includes("locked"), p.line());
+}
+
+console.log("⑮ 她開完資料庫的那一刻，「還在開資料庫，暫停鍵沒有作用」要走");
+{
+  // 這一條驗的是 `setRecording` 裡那一行 `overtakenByEvents()`——它是三個呼叫端
+  // 裡唯一沒有測試的一個（拿掉它，五支閘門全綠）。
+  //
+  // 留著的話畫面是「在聽／她還在開資料庫，暫停鍵現在沒有作用」：上面那行剛說
+  // 她開完了，下面那句說她還在開。兩行直接互相矛盾。
+  let beats = 0;
+  const p = await open({
+    // 開場問一次（ 那一行是同步問的），之後 5 秒一輪。
+    // 所以第一次答 booting，第二次——也就是第一輪輪詢——答 recording。
+    recording_state: () => (++beats > 1 ? "recording" : "booting"),
+    toggle_pause: new Error("她還在開資料庫，暫停鍵現在沒有作用"),
+  });
+  check("開場是正在起來", p.line().includes("正在開資料庫"), p.line());
+  await p.click("#pause");
+  check("先有那句", p.line().includes("暫停鍵現在沒有作用"), p.line());
+  await tick(5400);
+  check("她開完了", p.line().includes("在聽"), p.line());
+  check("那句「還在開資料庫」要跟著走", !p.line().includes("還在開資料庫"), p.line());
+}
+
+console.log("⑯ 反面：狀態沒變的那幾輪輪詢，那句話不可以自己消失");
+{
+  // ⑮ 的修法很容易做成「每次輪詢都清」，那就變回 alpha.38 那個「五句話壽命
+  // 0 到 5 秒」的 bug。這兩條要一起看才有意義。
+  const p = await open({
+    recording_state: "recording",
+    toggle_pause: new Error("找不到資料目錄，暫停鍵沒有作用"),
+  });
+  await p.click("#pause");
+  check("先有那句", p.line().includes("沒有作用"), p.line());
+  await tick(5400);
+  check("兩輪輪詢過後它還在", p.line().includes("沒有作用"), p.line());
+}
+
+console.log("⑰ 上一題空手而回，下一題失敗的時候不可以說「底下原本那幾筆」");
+{
+  // 底下躺的是「我記得的東西裡沒有這件事。」加幾行理由——一筆都沒有。而空手
+  // 而回正是他最可能連著問第二次的那一種結果。
+  let n = 0;
+  const p = await open({
+    ask: () => (++n === 1 ? answer({ hits: [], facts: [] }) : Promise.reject(new Error("讀不到"))),
+    recording_state: "recording",
+  });
+  await p.type("三天前那通電話");
+  check("第一題真的空手", p.hitTexts().some((t) => t.includes("沒有這件事")), p.hitTexts());
+  await p.type("再問一次");
+  check("有說沒答成", p.hitTexts().some((t) => t.includes("沒答成")), p.hitTexts());
+  check(
+    "但底下從來沒有「那幾筆」可以收",
+    !p.hitTexts().some((t) => t.includes("上一題")),
+    p.hitTexts(),
+  );
+}
+
+console.log("⑱ 答成過、然後連著失敗兩次——第二次底下躺的是同一句錯誤，不是「上一題」");
+{
+  // 順序要**先答成一次**：`showingAnswer` 的初始值就是 false，所以從一張新的
+  // 頁面連失敗兩次是驗不到東西的（那是 ⑰ 那條路）。要先讓它變成 true，才問
+  // 得出「失敗那一次有沒有把它放回去」——守的是 `ask()` 的 catch 裡那一行
+  // `showingAnswer = false`。
+  let n = 0;
+  const p = await open({
+    ask: () => (++n === 1 ? answer({ hits: [hit()] }) : Promise.reject(new Error("讀不到"))),
+    recording_state: "recording",
+  });
+  await p.type("第一題");
+  check("第一題真的列出東西", p.hitTexts().some((t) => t.includes("客服")), p.hitTexts());
+  await p.type("第二題");
+  check("第二題說得出「上一題」", p.hitTexts().some((t) => t.includes("上一題")), p.hitTexts());
+  await p.type("第三題");
+  check("兩次都說沒答成", p.hitTexts().some((t) => t.includes("沒答成")), p.hitTexts());
+  check(
+    "但第三次底下躺的是同一句錯誤，不是上一題的答案",
+    !p.hitTexts().some((t) => t.includes("上一題")),
+    p.hitTexts(),
+  );
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——字母人上有話說不出口，或說了活不過下一次輪詢。`);

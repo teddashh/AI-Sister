@@ -105,27 +105,31 @@ let starting = false;
 let lastRun = null;
 
 /**
- * 上一次叫她起來、等到逾時都還沒看到心跳（`null` = 沒發生過，或後來好了）。
+ * 剛剛那一下為什麼沒成（`null` = 沒有這回事）。
  *
- * 這一句以前是直接寫進 `stateLine.textContent` 的，而 5 秒後的下一輪輪詢會
- * 呼叫 `paint()` 把它蓋回「沒有人在記錄」——**唯一說得出原因的那一句，活不到
- * 他讀完**，剩下的畫面和「他根本沒按過」長得一模一樣。所以它得是狀態，跟著
- * 每一次重畫一起出現，直到她真的起來為止。
- */
-let wakeFailed = null;
-
-/**
- * 剛剛按的那一下為什麼沒成（`null` = 沒有這回事）。
- *
- * 和 [`wakeFailed`] 同一個理由，只是它管的是別的按鈕：問問題、暫停、打開時間
- * 軸。這三條路以前都直接寫 `stateLine.textContent`，而 `pollRecording` 每 5 秒
+ * 這幾句話以前是直接寫進 `stateLine.textContent` 的，而 `pollRecording` 每 5 秒
  * 會呼叫兩次 `paint()`（`setRecording` 和 `setPaused` 各一次），`paint()` 又
- * 無條件覆寫那一格——**所以那三句話的壽命是 0 到 5 秒，而且不由它們自己決定**。
+ * 無條件覆寫那一格——**所以它們的壽命是 0 到 5 秒，而且不由它們自己決定**。
  * 暫停那一條的註解說得最清楚：「寧可看起來沒反應，然後把原因寫出來」。輪詢
- * 一到，只剩下前半句。
+ * 一到，只剩下前半句。所以它得是狀態，跟著每一次重畫一起出現。
  *
- * 它蓋過 `wakeFailed` 和 `asleepDetail()`：那兩句講的是上一場錄製，這一句講
- * 的是他手指剛剛按下去的那一下。下一個動作開始的時候清掉。
+ * **這裡以前是兩個欄位。** `wakeFailed`（叫不起來）和 `notice`（問問題、暫停、
+ * 時間軸），而 `paint()` 讀的是 `notice ?? (只有灰著的時候 ? wakeFailed : "")`
+ * ——一個固定的優先序，加上一道只讓其中一個出得了聲的閘門。兩邊都咬人：
+ *
+ * 一、系統匣那一格是**開關**（見 `main.rs` 的 `record_label`），所以
+ *     `recorder-failed` 也會帶著「停不了」回來——而那一刻她正在錄，`wakeFailed`
+ *     在那個狀態下根本不顯示。後端特地 `win.show()` + `set_focus()` 把視窗叫到
+ *     他面前，然後那一格一個字都沒多。
+ *
+ * 二、反過來：`startRecording` 那幾秒 `await` 中間他問了一題、失敗了，那句
+ *     `notice` 會把接下來那句「第一張同意書還沒簽」擋掉。**兩行都是真的，湊
+ *     起來說的是「她沒起來，因為資料庫打不開」**——而他會去查一顆好好的資料庫，
+ *     真正的原因在右鍵選單裡，一下就簽得掉。
+ *
+ * 兩個欄位餵同一行字，就是在替「誰先誰後」造一個沒有人會去想的規則。收成一個
+ * 之後規則只剩一條：**最後寫的人贏**，而清掉它的是下一件事（見
+ * [`overtakenByEvents`]），不是五秒。
  */
 let notice = null;
 
@@ -137,20 +141,17 @@ let notice = null;
  * 本來就自己清，漏掉的是**從這個視窗以外**發生的那幾件：系統匣的開始記錄、
  * 系統匣的暫停、她自己停掉。那幾件在這裡是事件不是點擊，所以沒有人替它們清。
  *
- * 漏掉的代價有兩種，兩種都是「每一行都是真的，湊起來在說謊」：
- *
- * 一、`paint()` 讀的是 `notice ?? (wakeFailed ?? asleepDetail())`。早上九點問問題
- *     失敗留下的那句「資料庫打不開」，會把九點五分從系統匣按開始記錄失敗的那句
- *     「第一張同意書還沒簽」**整個擋掉**——而 `recorder-failed` 那個 listener 的
- *     註解自己寫著，它存在的唯一理由就是這句話沒有別的地方可去。後端還特地把
- *     視窗叫到他面前，讓他看一句早上的舊話。
- *
- * 二、他在視窗裡按暫停，切不動（「找不到資料目錄，暫停鍵沒有作用」）；再從系統
- *     匣按暫停，成功了。畫面於是是「已暫停，沒有在看／找不到資料目錄，暫停鍵
- *     沒有作用」——兩行都曾經是真的，讀起來是「暫停鍵壞了」，而她正暫停著。
+ * 漏掉的代價：他在視窗裡按暫停，切不動（「找不到資料目錄，暫停鍵沒有作用」）；
+ * 再從系統匣按暫停，成功了。畫面於是是「已暫停，沒有在看／找不到資料目錄，
+ * 暫停鍵沒有作用」——兩行都曾經是真的，讀起來是「暫停鍵壞了」，而她正暫停著。
  *
  * 只在狀態**真的變了**的時候清：那五秒一次的輪詢每次都用同一個值呼叫
  * `setPaused`／`setRecording`，跟著清的話就變回 alpha.38 那個 bug 了。
+ *
+ * 反過來那一半（狀態真的變了、而那句話留著）也要清，理由不同：留著的話它會和
+ * 上面那行**直接互相矛盾**。「她起來了，正在開資料庫…／她還在開資料庫，暫停鍵
+ * 現在沒有作用」是一致的；開完之後上面那行換成「在聽」，下面那句就變成一句
+ * 當場被打臉的話。
  */
 function overtakenByEvents() {
   notice = null;
@@ -213,13 +214,14 @@ function paint() {
   // 是眼前這一次沒起來，不是上禮拜那一場怎麼收的。
   //
   // `notice` 排在最前面，而且**不看現在是哪一個狀態**：他剛按的那一下沒成，
-  // 那句話在她正在錄、正在暫停、還是灰著的時候都一樣該出現。後面那兩句只在
-  // 灰著的時候有意義（它們講的是上一場錄製）。
+  // 那句話在她正在錄、正在暫停、還是灰著的時候都一樣該出現。
+  //
+  // 那道 `shown === "asleep"` 的閘門只管 `asleepDetail()`——它講的是上一場錄製，
+  // 只有灰著的時候有意義。**以前 `wakeFailed` 也被掃進這道閘門底下**，於是一句
+  // 從系統匣按「停止記錄」失敗的原因，在她正在錄的時候一個字都不顯示。見
+  // [`notice`] 上面那段。
   const detail =
-    notice ??
-    (!starting && !booting && shown === "asleep"
-      ? (wakeFailed ?? asleepDetail())
-      : "");
+    notice ?? (!starting && !booting && shown === "asleep" ? asleepDetail() : "");
   stateLine.textContent = detail === "" ? line : `${line}\n${detail}`;
   // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。
   avatar.setAttribute("aria-label", `AI-Sister：${line}`);
@@ -277,10 +279,7 @@ function setRecording(next) {
   // **`booting` 也算數。** 上一版只認 `recording`，於是那 25 秒的等待在一顆
   // 開得慢的資料庫上一定走到逾時那一句「還沒有心跳」——而心跳就在磁碟上，是
   // 這一支自己看不見它。
-  if (recording || booting) {
-    starting = false;
-    wakeFailed = null;
-  }
+  if (recording || booting) starting = false;
   // 剛剛才停下來：現在才有一場「上一次」可以講，而它跟開場時讀到的那一場
   // 不是同一場。停了才問，因為在錄的時候問到的會是**這一場**（沒有收尾），
   // 而畫面會把它讀成「她當掉了」。
@@ -311,7 +310,6 @@ async function startRecording() {
   if (invoke === null || starting) return;
   starting = true;
   // 這一次的結果還沒出來，上一次的判斷就不算數了。
-  wakeFailed = null;
   notice = null;
   paint();
   try {
@@ -320,12 +318,16 @@ async function startRecording() {
     // 同意書沒簽、找不到 sister.exe、已經有一個在跑——這三句都是後端寫好的
     // 完整句子，直接放上去。
     //
-    // **放進 `wakeFailed`，不是直接寫那一格。** 底下那條逾時路徑早就是這樣
-    // 寫的，系統匣那條（`recorder-failed`）也是；只有這裡還在直接寫，於是
-    // 5 秒後的輪詢把它蓋回「沒有人在記錄」、還順手把「開始記錄」那顆按鈕
-    // 放回來——畫面和他根本沒按過逐像素相同。`wakeFailed` 那個欄位上面的
-    // 註解講的就是這件事，而這一條是它漏掉的那個收件人。
-    wakeFailed = String(err?.message ?? err);
+    // **放進 `notice`，不是直接寫那一格。** 底下那條逾時路徑早就是這樣寫的，
+    // 系統匣那條（`recorder-failed`）也是；只有這裡還在直接寫，於是 5 秒後的
+    // 輪詢把它蓋回「沒有人在記錄」、還順手把「開始記錄」那顆按鈕放回來——畫面
+    // 和他根本沒按過逐像素相同。[`notice`] 那個欄位上面的註解講的就是這件事，
+    // 而這一條是它漏掉的那個收件人。
+    //
+    // 直接指派（而不是「只有在還空著的時候才寫」）：上面開頭是清過的，但那次
+    // 清距離這裡隔著一整段 `await`，中間他問一題失敗就會再填一句進去。這一句
+    // 才是他此刻在等的答案。
+    notice = String(err?.message ?? err);
     starting = false;
     paint();
     return;
@@ -350,7 +352,7 @@ async function startRecording() {
     // 連記錄檔都讀不到，那就只剩下面那句話。
   }
   const waited = Math.round(WAKE_TIMEOUT_MS / 1000);
-  wakeFailed = why
+  notice = why
     ? `等了 ${waited} 秒還沒有心跳。record.log 最後說：\n${why}`
     : `等了 ${waited} 秒還沒有心跳，record.log 也還是空的。` +
       "她可能還在起來——再等一下，或去看那個檔案";
@@ -531,16 +533,21 @@ globalThis.__TAURI__?.event
  * 中文，而系統匣選單上沒有一格能放字。以前它們只進 `desktop.log`：按下去的
  * 後果是**什麼都沒發生**，而唯一說得出原因的那句話在一個他不會開的檔案裡。
  *
- * 借的是「叫不起來」那條路（[`wakeFailed`]）——對他來說是同一件事：她沒起來，
- * 這是為什麼。後端會順手把視窗叫出來，不然這句話還是沒有人看得到。
+ * 寫進 [`notice`]，因為那是**每一個狀態下都出得了聲**的那一格。
+ *
+ * 這裡以前借的是「叫不起來」那條路（`wakeFailed`），理由寫著「對他來說是同一
+ * 件事：她沒起來，這是為什麼」。那句話是假的：系統匣那一格是**開關**（見
+ * `main.rs` 的 `record_label`），她在錄的時候按下去送的是 `stop_recording`，
+ * 所以這裡也會收到「找不到資料目錄，停不了」——而那一刻 `wakeFailed` 在
+ * `paint()` 那道 `shown === "asleep"` 閘門後面，一個字都不顯示。後端剛剛才特地
+ * `win.show()` + `set_focus()` 把視窗叫到他面前，然後那一格什麼都沒多。
+ *
+ * 一段解釋為什麼可以不分的註解，就是那裡沒分過。
  */
 globalThis.__TAURI__?.event
   ?.listen?.("recorder-failed", (event) => {
-    // **先把上一句清掉。** `paint()` 讀的是 `notice ?? (wakeFailed ?? …)`，所以
-    // 少了這一行，一句早上留下的 `notice` 會把這句話整個擋住——而後端剛剛才特地
-    // 把視窗叫到他面前，就是為了讓他看這一句。見 [`overtakenByEvents`]。
-    overtakenByEvents();
-    wakeFailed = String(event.payload ?? "");
+    // 直接指派就把上一句蓋掉了：一句早上留下的話不可以擋住這一句。
+    notice = String(event.payload ?? "");
     starting = false;
     paint();
   })
@@ -973,7 +980,11 @@ function renderHits(
 
   hitList.hidden = false;
   document.body.classList.add("has-hits");
-  showingAnswer = true;
+  // **不是無條件 `true`。** [`showingAnswer`] 的唯一讀者是那句「底下原本那幾筆
+  // 是上一題的」，而空手而回的那一次底下躺的是「我記得的東西裡沒有這件事。」
+  // 加上幾行理由——一筆都沒有。寫死 `true` 的話，下一題失敗會請他去看幾筆
+  // 不存在的東西，而**空手而回正是他最可能連問第二次的那一種結果**。
+  showingAnswer = hits.length > 0 || facts.length > 0;
 }
 
 /**
@@ -1159,7 +1170,7 @@ if (params.get("asleep") === "stopped") {
 } else if (params.get("asleep") === "nobeat") {
   // 叫了、逾時了、還是沒有心跳。這一句要活得比一次輪詢久（以前它被下一個
   // `paint()` 蓋掉），而它換行、比另外兩句長——版面撐不撐得住要用眼睛看。
-  wakeFailed =
+  notice =
     "等了 25 秒還沒有心跳。record.log 最後說：\n" +
     "（這一輪還沒寫出東西，以下是上一輪的 record.log）\n" +
     "第一張同意書還沒簽——她不會開始記錄。";

@@ -77,6 +77,10 @@ export function fakeEl(tag = "div") {
       this.children = kids;
     },
     setAttribute(name, v) {
+      // `aria-label` 是**只有讀螢幕的人收得到**的那一份文字（`paint()` 每次都寫
+      // 一次）。少了這一行，一個 `NaN` 只會出現在那一份上，而畫面上看不到——
+      // 唯一一個沒有人回報得了的錯。
+      note(this.tag, v);
       this.dataset[name] = String(v);
     },
     removeAttribute(name) {
@@ -85,7 +89,9 @@ export function fakeEl(tag = "div") {
     focus() {},
     scrollIntoView() {},
     get childElementCount() {
-      return this.children.length;
+      // 真的 DOM **不數文字節點**（那是 `childNodes.length`）。`fakeText` 生出來
+      // 的是 `#text`，而 `renderSnippet` 每一筆命中都會塞好幾個進去。
+      return this.children.filter((k) => k.tag !== "#text").length;
     },
     /** 只認得 `"button"` 這種標籤選擇器，而且是**遞迴**的——`querySelectorAll` 本來就是。 */
     querySelectorAll(sel) {
@@ -103,6 +109,19 @@ export function fakeEl(tag = "div") {
       return this.querySelectorAll(sel)[0] ?? null;
     },
   };
+  // 這幾個也會走到人的眼睛前面：`title` 是滑鼠停著的提示，`value` 和
+  // `placeholder` 是輸入框裡的字。`textContent` 一個人守不住那條線。
+  for (const prop of ["title", "value", "placeholder"]) {
+    let held = el[prop];
+    Object.defineProperty(el, prop, {
+      configurable: true,
+      get: () => held,
+      set(v) {
+        note(el.tag, v);
+        held = v;
+      },
+    });
+  }
   Object.defineProperty(el, "textContent", {
     configurable: true,
     get() {
@@ -112,7 +131,7 @@ export function fakeEl(tag = "div") {
     },
     set(v) {
       const text = String(v);
-      if (NONSENSE.test(text)) nonsense.push(`<${this.tag}> ${text}`);
+      note(this.tag, text);
       // 指派 `textContent` 會**清掉所有子節點**。以前只換那一段字，於是一個
       // 重畫過的容器在測試裡還掛著上一次的孩子。
       this.children = [];
@@ -166,16 +185,45 @@ export function fakeDocument(querySelector, extra = {}) {
 const NONSENSE = /NaN|undefined|\[object Object\]/;
 let nonsense = [];
 
-/** 把計數歸零，回傳一個「到目前為止畫面上出現過的胡言亂語」的取用函式。 */
-export function watchNonsense() {
-  nonsense = [];
-  return () => nonsense;
+/** 每一次寫進畫面的字都要經過這裡。加新的 setter 就記得也叫它一次。 */
+function note(tag, value) {
+  const text = String(value);
+  if (NONSENSE.test(text)) nonsense.push(`<${tag}> ${text}`);
 }
 
-/** 那個選擇器在這份 HTML 上指到的那個標籤（含屬性），沒有就是 `null`。 */
+/**
+ * 開始盯著這一頁，回傳一個「到目前為止畫面上出現過的胡言亂語」的取用函式。
+ *
+ * 回的是**這一頁自己那一份**，不是那個模組層變數的別名。上一版兩者是同一個
+ * 陣列，於是下一次 `open()` 會把上一頁的證據一起清掉——而每一個 module
+ * instance 都還留著自己那顆 5 秒輪詢，隨時可能往裡面再寫東西。一個會被別人
+ * 清空的證物袋，和沒有證物袋差不多。
+ */
+export function watchNonsense() {
+  const mine = [];
+  nonsense = mine;
+  return () => mine;
+}
+
+/**
+ * 那個選擇器在這份 HTML 上指到的那個標籤（含屬性），沒有就是 `null`。
+ *
+ * 兩件事上一版是錯的，兩件都只在「哪天剛好撞上」才會咬人，而它們咬的是這幾支
+ * 測試的**前提**（開場的 `hidden` 跟真的一不一樣、那個元素在不在）：
+ *
+ * - **註解裡的也算數。** 一段被 `<!-- -->` 包起來的舊版標記照樣會被找到，
+ *   於是假 DOM 拿一個瀏覽器根本不會生出來的元素當前提。
+ * - **前綴撞在一起。** `[data-say]` 會match到 `<p data-say-more hidden>`，
+ *   而那是另一個元素、另一個開場狀態。現在這份 HTML 上剛好沒有這種名字
+ *   （驗過），但這條規則不該靠「剛好」。
+ */
 function tagFor(html, sel) {
+  const clean = html.replace(/<!--[\s\S]*?-->/g, "");
   const attr = sel.startsWith("#") ? `id="${sel.slice(1)}"` : sel.replace(/[[\]]/g, "");
-  const m = html.match(new RegExp(`<[^>]*${attr.replace(/[.*+?^${}()|]/g, "\\$&")}[^>]*>`));
+  const quoted = attr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // 後面要接屬性的結尾（空白、`=`、`>`、引號），才不會把 `data-say` 認成
+  // `data-say-more` 的前半截。
+  const m = clean.match(new RegExp(`<[^>]*${quoted}(?=[\\s=>"'])[^>]*>`));
   return m === null ? null : m[0];
 }
 

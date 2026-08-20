@@ -19,7 +19,7 @@
 
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { domOf, fakeEl, loader, read, watchNonsense } from "./fake-dom.mjs";
+import { domOf, fakeDocument, loader, read, watchNonsense } from "./fake-dom.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui");
 const SRC = process.argv[2] ?? join(UI, "timeline.js");
@@ -34,7 +34,35 @@ const DAYS = [
   { start_ts: D1 + DAY, chunks: 12, first_ts: D1 + DAY + 3_600_000, last_ts: D1 + DAY + 7_200_000 },
   { start_ts: D1, chunks: 40, first_ts: D1 + 3_600_000, last_ts: D1 + 36_000_000 },
 ];
-const MOMENTS = { moments: [], pauses: [], truncated: false };
+/**
+ * 一列真的紀錄，照 main.rs 的 `Moment` 一欄一欄抄的。
+ *
+ * 這一版之前 `MOMENTS` 是 `{ moments: [], … }`——**一列都沒有**。於是 ④ 那條
+ * 「有講右邊那一份是舊的（不然「刪掉了 3 段」配上一份還列著那 3 段的畫面）」
+ * 是綠的，而它站著的畫面上根本沒有那 3 段：`build()` 對空的那一天也會補一列
+ * 「接下來 24 小時沒有新的東西進來」，`childElementCount` 於是是 1。
+ * **那條斷言命名的處境，一次都沒有被造出來過。**
+ */
+function moment(over = {}) {
+  return {
+    ts: D1 + 3_600_000,
+    app: "chrome.exe",
+    title: "帳單查詢",
+    url: "https://example.com/bill",
+    text: "中華電信客服專線 0800-080-123",
+    frame_id: 57,
+    ...over,
+  };
+}
+
+const MOMENTS = {
+  moments: [moment(), moment({ ts: D1 + 7_200_000, title: "繳費紀錄" })],
+  pauses: [],
+  truncated: false,
+};
+
+/** 讀成功、但那一天是空的。`build()` 照樣會補一列填空用的灰字。 */
+const EMPTY_DAY = { moments: [], pauses: [], truncated: false };
 
 /**
  * `Erasure` 的形狀，照 main.rs 那個 struct **一欄一欄**抄的。
@@ -74,13 +102,9 @@ async function open(table = {}) {
   const node = domOf(HTML);
   const calls = [];
 
-  globalThis.document = {
-    querySelector: node,
-    querySelectorAll: () => [],
-    createElement: (tag) => fakeEl(tag),
-    addEventListener() {},
-    body: fakeEl(),
-  };
+  // 和另外四支共用同一個假 `document`。五份手抄本的意思是下一次只會有一份被
+  // 修好——`createTextNode` 就是那樣漏掉的，見 fake-dom.mjs 的 `fakeDocument`。
+  globalThis.document = fakeDocument(node);
   globalThis.location = { search: "" };
   globalThis.addEventListener = () => {};
   globalThis.removeEventListener = () => {};
@@ -118,6 +142,8 @@ async function open(table = {}) {
     label: () => forget.textContent,
     armed: () => forget.className === "danger",
     say: () => node("[data-say]").textContent,
+    /** 右邊那一片現在列出來的每一列。 */
+    rows: () => node("[data-moments]").children.map((c) => c.textContent),
     sub: () => node("[data-day-sub]").textContent,
     /** 按那顆鍵。回傳「按得動嗎」——真的瀏覽器不會把 click 送給灰掉的按鈕。 */
     async press() {
@@ -215,6 +241,13 @@ console.log("④ 刪成功了，但刪完那次重讀清單炸了");
   check("那顆鍵沒有從此按不動", p.forget.disabled === false, `disabled=${p.forget.disabled}`);
   check("而且退回了預覽那一段", !p.armed(), p.forget.className);
   check("再按一次真的按得動", await p.press(), "按不下去");
+  // **先證明那個處境真的成立。** 這條斷言命名的畫面是「右邊還完整列著那幾段」，
+  // 而它上一版站在一個一列紀錄都沒有的畫面上（見 `moment()` 上面那段）。
+  check(
+    "右邊真的還列著那幾段",
+    p.rows().some((t) => t.includes("客服專線")),
+    p.rows(),
+  );
   check(
     "有講右邊那一份是舊的（不然「刪掉了 3 段」配上一份還列著那 3 段的畫面）",
     p.sub().includes("上一次讀到"),
@@ -261,6 +294,64 @@ console.log("⑥ 那份預覽要對得起帳：說不見的、說留下來的，
     p.say(),
   );
   check("整段話裡沒有 NaN / undefined", p.nonsense().length === 0, p.nonsense());
+}
+
+console.log("⑦ 那一天本來就是空的，重讀又失敗——右邊沒有「那一份」可以指");
+{
+  // ④ 和 ⑤ 中間還有一格：讀**成功**了，但那一天什麼都沒有。畫面上留下的是
+  // `build()` 補的一列「接下來 24 小時沒有新的東西進來」，或者「這一天沒有
+  // 東西。」——兩種都不是清單。
+  //
+  // 這一格是 `childElementCount > 0` 那個問法唯一會答錯的地方，而它答錯的方向
+  // 正是這一批在修的：請他去看一個不存在的東西。
+  let reads = 0;
+  const p = await open({
+    timeline_moments: EMPTY_DAY,
+    timeline_days: () => {
+      if (++reads > 1) throw new Error("讀不到日期清單：database is locked");
+      return DAYS;
+    },
+  });
+  check("先確認右邊只有填空用的那一列", p.rows().length <= 1, p.rows());
+  check("而且那一列不是紀錄", !p.rows().some((t) => t.includes("客服專線")), p.rows());
+  await p.press();
+  await p.press();
+  check("真的刪了", p.calls.includes("forget_range"), p.calls);
+  check(
+    "不可以說「右邊列的是上一次讀到的那一份」——右邊沒有一份清單",
+    !p.sub().includes("上一次讀到"),
+    p.sub(),
+  );
+  check("要說得出這一頁現在是空的", p.sub().includes("空的"), p.sub());
+}
+
+console.log("⑧ 換到另一天讀失敗（右邊被清空了），接著重讀清單也失敗");
+{
+  // 承 ⑦：右邊變空的還有第二條路——`openDay` 自己那個 catch。它 `replaceChildren()`
+  // 把右邊清光，而那時候 `listing` 還停在上一天的 true。守的是 `openDay` 的
+  // catch 裡那一行 `listing = false`。
+  let days = 0;
+  let moments = 0;
+  const p = await open({
+    timeline_days: () => {
+      if (++days > 1) throw new Error("讀不到日期清單：database is locked");
+      return DAYS;
+    },
+    timeline_moments: () => {
+      if (++moments > 1) throw new Error("讀不到這一天：database is locked");
+      return MOMENTS;
+    },
+  });
+  check("第一天真的列出東西", p.rows().some((t) => t.includes("客服專線")), p.rows());
+  await p.pickDay(1);
+  check("換過去那一天讀失敗，右邊被清光了", p.rows().length === 0, p.rows());
+  await p.press();
+  await p.press();
+  check(
+    "不可以說「右邊列的是上一次讀到的那一份」——它剛剛才被清光",
+    !p.sub().includes("上一次讀到"),
+    p.sub(),
+  );
 }
 
 console.log("");

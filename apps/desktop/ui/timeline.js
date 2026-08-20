@@ -35,6 +35,21 @@ const el = {
 /** 現在攤開的是哪一天。忘掉那顆鍵要用它換算時間範圍。 */
 let current = null;
 
+/**
+ * 右邊那一片現在列的，是不是某一天**真的讀出來的東西**。
+ *
+ * 只有一個讀者：`load()` 讀不到清單的時候那句「右邊列的是上一次讀到的那一份」。
+ * 那句話是為了「刪完之後重讀失敗」寫的——那條路上右邊確實還完整停在刪之前的
+ * 樣子，而畫面同時寫著「刪掉了 3 段文字」，他會以為刪除沒有生效。
+ *
+ * **這裡以前問的是 `el.moments.childElementCount > 0`。** 那個數字答的是「有沒有
+ * 任何一個節點」，不是「有沒有讀到東西」：`build()` 對**空的那一天**也會補一列
+ * 「接下來 24 小時沒有新的東西進來」，一天都沒有的時候還有一列「這一天沒有
+ * 東西。」——兩種都讓那個數字變成 1，於是那句「右邊列的是上一次讀到的那一份」
+ * 指著一列填空用的灰字。這一格因此要跟著資料走，不跟著 DOM 走。
+ */
+let listing = false;
+
 // 日期一律用視窗自己的時區算，Rust 那邊拿到的也是同一個偏移量——
 // 兩邊各自判斷「今天是哪天」的話，日光節約時間那天會對不起來。
 const tzOffsetMs = () => -new Date().getTimezoneOffset() * 60_000;
@@ -328,6 +343,8 @@ function paint(view, day, now) {
   if (view.truncated) bits.push(`只顯示前 ${LIMIT} 筆`);
   say(bits.join("・"), view.truncated);
 
+  // 這一天真的有東西可以列嗎。`rows` 不能拿來問——它連空的那一天都有一列。
+  listing = view.moments.length > 0 || view.pauses.length > 0;
   el.moments.replaceChildren();
   const rows = build(view, day.start_ts, now);
   for (const row of rows) {
@@ -579,6 +596,7 @@ async function openDay(day, button) {
     paint(view, day, Date.now());
   } catch (err) {
     el.moments.replaceChildren();
+    listing = false;
     say(String(err?.message ?? err), true);
   }
 }
@@ -675,7 +693,7 @@ async function load(keep = null) {
     //     不存在的東西，而「重開這個視窗再看一次」只會把同一個失敗的查詢再跑
     //     一遍。一句只在其中一個呼叫端成立的話，等於在另一個呼叫端說謊。
     say(
-      el.moments.childElementCount > 0
+      listing
         ? "讀不到新的清單，右邊列的是上一次讀到的那一份。重開這個視窗再看一次。"
         : "一份清單都讀不出來，這一頁現在是空的——左邊那行是原因。多半是她正在寫，等一下再開一次。",
       true,
