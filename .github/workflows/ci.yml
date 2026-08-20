@@ -124,6 +124,18 @@ jobs:
       - name: Every path the docs point at has to point at something
         run: python3 ./scripts/check-docs-point-somewhere.py
 
+      # 上一步管路徑，這一步管**話**。同一份清單、同一種壞法：他照著找一句
+      # 「那一格要說 X」，而 X 已經不在程式裡了。上面那支是因為五行路徑寫錯
+      # 才長出來的，長出來的當天又抓到兩句我自己編的產品文案——一句「她說不動
+      # ——你還沒簽第一張同意書」（程式真正說的是「第一張同意書還沒簽——她不會
+      # 開始記錄。……」），一句「這段時間裡沒有東西」（真的是 `timeline.js` 的
+      # 「現在一天都沒有了。」）。
+      #
+      # 只看「這一行有宣告動詞」的引號：全掃的話 167 個候選裡有 41% 是散文轉
+      # 述，那會變成一台誤報機器然後被關掉——而關掉之後它守的那條線是一格空白。
+      - name: Every sentence the checklist quotes has to be one she can say
+        run: python3 ./scripts/check-checklist-quotes-exist.py
+
       # 「三天前那通電話 100ms 內查得回來」是 Phase 0 的退場條件之一，而在
       # 這一步存在之前，它唯一的實作是一行註解。
       #
