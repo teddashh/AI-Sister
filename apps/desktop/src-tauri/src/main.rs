@@ -1173,6 +1173,13 @@ struct PrivacyHealth {
     /// 而這件事的方向剛好相反（整棟房子是空的）。混在一起會讓那幾句話變成
     /// 一堆語氣一樣、輕重不分的字。
     capture_off: bool,
+    /// 那幾條規則**驗過了沒有**。`None` = 根本沒有報告（由 `at` 那一格回答）。
+    ///
+    /// 同樣不能塞進 `broken`，同樣是因為方向不同：那個清單講「門開著」，這裡
+    /// 講「我還不知道門關了沒」。而**「不知道」在這一頁上一直長得像「沒問
+    /// 題」**——`broken` 是空的、這一格就是空白，而這一頁自己寫著「空白在這
+    /// 一格就是『都生效』」。見 [`sister_core::capabilities::UrlRules`]。
+    url_rules: Option<sister_core::capabilities::UrlRules>,
 }
 
 #[tauri::command]
@@ -1193,11 +1200,13 @@ fn privacy_health(urls: Vec<String>, shell: tauri::State<'_, Shell>) -> Result<P
             broken: r.broken_privacy_rules(&config.privacy),
             at: Some(r.at),
             capture_off,
+            url_rules: Some(r.url_rules_verdict(&config.privacy)),
         },
         None => PrivacyHealth {
             broken: Vec::new(),
             at: None,
             capture_off,
+            url_rules: None,
         },
     })
 }

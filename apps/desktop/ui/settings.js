@@ -196,16 +196,49 @@ function paintHealth(health, hasRules) {
     el.health.hidden = !hasRules;
     return;
   }
-  el.health.classList.remove("unknown");
+  el.health.classList.remove("unknown", "ok");
   // 「開始記錄的時候測到的」以前寫在這裡，而那句話本身就是那個 bug：這個檔案
   // 開機寫一次就凍住，於是 UIA 半路投降之後的那幾小時，這一頁拿著一份開機時的
   // 「一切正常」什麼都不說。現在 recorder 錄製途中每分鐘蓋一次，所以這個時戳
   // 講的是「這份報告描述的是哪一刻」——而它離現在多遠，讀的人自己判斷。
-  el.health.textContent =
-    urlRules.length === 0
-      ? ""
-      : `${urlRules.map((b) => b.message).join("\n")}（${when(health.at)} 的狀況）`;
-  el.health.hidden = urlRules.length === 0;
+  //
+  // **時戳掛在每一句上，包括好消息。** 以前只有失敗那一句帶時間，而底下 `when`
+  // 那段註解自己論證過為什麼不行：「去年 8/19 測的和今天早上測的長得一模一
+  // 樣，而中間隔著一整年的瀏覽器和 Windows 更新」。
+  if (urlRules.length > 0) {
+    el.health.textContent = `${urlRules.map((b) => b.message).join("\n")}（${when(health.at)} 的狀況）`;
+    el.health.hidden = false;
+    return;
+  }
+
+  // 到這裡 `broken` 裡沒有網址那一格的話——而那**不等於「都生效」**，儘管這一
+  // 頁上面自己寫著「空白在這一格就是『都生效』」。`broken_privacy_rules` 最後
+  // 那一格要求 `browser_ticks >= 20` 才敢講話，門檻沒到就什麼都不 push；於是
+  // 「UIA 真的讀得到網址」和「UIA 起得來但一次都沒讀到過」印同一片空白，而後
+  // 者是 `capabilities.rs` 叫做「這一整條線最常見的壞法」的那一台——那個人
+  // 現在就在這一頁上打 `*.bank.com.tw*`，然後去網銀。
+  const verdict = health.url_rules ?? { kind: "none" };
+  if (verdict.kind === "unproven") {
+    el.health.classList.add("unknown");
+    el.health.textContent =
+      `還不知道這幾條會不會生效：上一場在瀏覽器視窗上只停了 ${verdict.ticks} 拍` +
+      `（要 ${verdict.need} 拍才問得出來），一個網址都還沒讀到過。\n` +
+      `多用一下瀏覽器再回來看這裡。（${when(health.at)} 的狀況）`;
+    el.health.hidden = !hasRules;
+    return;
+  }
+  if (verdict.kind === "working") {
+    el.health.classList.add("ok");
+    el.health.textContent =
+      `這幾條生效中：上一場讀到 ${verdict.reads} 個網址，` +
+      `所以規則有東西可以比對。（${when(health.at)} 的狀況）`;
+    el.health.hidden = false;
+    return;
+  }
+  // `none`（一條規則都沒寫）。這一格問的是「你寫的這幾條會不會生效」，沒寫
+  // 就沒有那個問題——空輸入框底下掛一句話只會變成背景雜訊。
+  el.health.textContent = "";
+  el.health.hidden = true;
 }
 
 /**
@@ -450,6 +483,12 @@ async function load() {
  * `?demo=off`（`capture.enabled = false`）、`?demo=nohotkey`（開機讀不出設定檔，
  * 於是熱鍵是內建預設值那一組，不是他設的）。
  *
+ * 健康那一格自己有四張臉，**要並排看過**：`1`（橘色，整組規則不生效）、
+ * `unknown`（灰，這個資料夾沒有能力報告）、`unproven`（灰，UIA 起得來但瀏覽器
+ * 用得還不夠多，問不出來）、`working`（綠，上一場真的讀到過網址）。後面兩張
+ * 在這之前一張都畫不出來——`broken` 是空的，這一格就整個藏起來，於是三台不同
+ * 的機器共用同一片空白。分不開就等於沒修，所以這四張要一次看完。
+ *
  * 和 app.js 的 `?state=` 同一個理由——這台開發機開不起 Tauri 視窗，而這一頁
  * 有一堆版面（七個區塊、警告清單、底下那條）需要真的看過。**它走的是和產品
  * 一樣的 `apply()`、`paintLint()` 與 `paintHotkey()`**，不是另外畫一份長得像
@@ -492,27 +531,44 @@ function demo(variant) {
   // 一定要看得到它——版面沒被眼睛看過的警告，等於還沒寫。`?demo=unknown` 是
   // 另外那一半：一台還沒錄過的機器。那句話要**看起來明顯比較不吵**，不然
   // 「還不知道」會被當成「有問題」，而那一頁上真正的警告就貶值了。
+  // `?demo=unproven` 和 `?demo=working` 是這一格的另外兩張臉，而它們在這之前
+  // **同一張都畫不出來**：`broken` 是空的，這一格就整個藏起來。三台不同的機器
+  // 一片相同的空白，其中一台把使用者的網銀錄了一整天。
+  //
+  // 這兩張要並排看過一次才算數：`unproven` 必須明顯比 `working` 不確定，而
+  // 兩張都必須和上面那則真警告（橘色）分得開。三個都用灰的話，等於沒修。
+  const verdicts = {
+    unproven: { kind: "unproven", ticks: 6, need: 20 },
+    working: { kind: "working", reads: 412 },
+  };
   paintHealth(
     variant === "unknown"
       ? { broken: [], at: null, capture_off: false }
-      : {
-          broken: [
-            {
-              about: "url_rules",
-              message:
-                "沒有 UIA 網址擷取：3 條 excluded_urls 規則（網銀、登入頁）目前不會生效，瀏覽器畫面只靠視窗標題規則過濾",
-            },
-            // 這一則故意混在同一份回答裡：它**不可以**出現在網址輸入框底下。
-            // 那個位置以前讓一句和網址無關的話，看起來像在指著他剛打的三行。
-            {
-              about: "input_hook",
-              message: "輸入 hook 裝不上：節奏訊號這個 session 會是空的",
-            },
-          ],
-          at: Date.now() - 3 * 3600 * 1000,
-          // 總開關那一句要被眼睛看過：它是這一頁上唯一一句「這一整頁都不算數」。
-          capture_off: variant === "off",
-        },
+      : verdicts[variant]
+        ? {
+            broken: [],
+            at: Date.now() - 40 * 60 * 1000,
+            capture_off: false,
+            url_rules: verdicts[variant],
+          }
+        : {
+            broken: [
+              {
+                about: "url_rules",
+                message:
+                  "沒有 UIA 網址擷取：3 條 excluded_urls 規則（網銀、登入頁）目前不會生效，瀏覽器畫面只靠視窗標題規則過濾",
+              },
+              // 這一則故意混在同一份回答裡：它**不可以**出現在網址輸入框底下。
+              // 那個位置以前讓一句和網址無關的話，看起來像在指著他剛打的三行。
+              {
+                about: "input_hook",
+                message: "輸入 hook 裝不上：節奏訊號這個 session 會是空的",
+              },
+            ],
+            at: Date.now() - 3 * 3600 * 1000,
+            // 總開關那一句要被眼睛看過：它是這一頁上唯一一句「這一整頁都不算數」。
+            capture_off: variant === "off",
+          },
     true,
   );
   paintHotkey(

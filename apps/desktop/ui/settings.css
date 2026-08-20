@@ -12,6 +12,9 @@
   --accent: #9a5b7a;
   --field: rgb(246 236 223 / 8%);
   --warn: #e8a33d;
+  /* 深底上讀得清楚的綠。只給「這件事驗過了」用——不是給「沒有壞消息」用，
+     那兩件事在這一頁上分開之前就是同一片空白。 */
+  --ok: #86b97a;
 }
 
 * {
@@ -146,6 +149,18 @@ button:focus-visible {
   border-left-color: currentcolor;
   color: inherit;
   opacity: 0.62;
+}
+
+/* 「驗過了，有效」要有自己的樣子。
+   它以前根本不畫——`broken` 是空的，這一格就藏起來，而這一頁自己寫著「空白
+   在這一格就是『都生效』」。於是「真的讀得到網址」和「一次都還沒讀到過」在
+   畫面上逐像素相同，而後者是 `capabilities.rs` 叫做「這一整條線最常見的壞
+   法」的那一台。灰色（`.unknown`）是留給「還不知道」的，所以這裡不能共用
+   ——共用就等於沒修。 */
+.health.ok {
+  background: rgb(90 140 95 / 10%);
+  border-left-color: var(--ok);
+  color: var(--ok);
 }
 
 /* ---------- 開關 ---------- */

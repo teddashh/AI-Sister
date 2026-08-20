@@ -260,6 +260,68 @@ impl Report {
         }
         out
     }
+
+    /// 那幾條網址規則**驗過了沒有**——和 [`Self::broken_privacy_rules`] 是不同
+    /// 的問題，所以是不同的回傳值。
+    ///
+    /// 為什麼要分開：上面那條 `else if` 鏈的最後一格要求
+    /// `browser_ticks >= ENOUGH_BROWSER_TICKS`，門檻沒到就**什麼都不 push**。
+    /// 那道門檻是對的（一個今天還沒開過瀏覽器的人，「一個網址都沒讀到」什麼都
+    /// 證明不了），錯的是「門檻沒到」被印成**沒有判決**，而設定頁把沒有判決畫
+    /// 成一片乾淨——而那一頁自己寫著「空白在這一格就是『都生效』」。
+    ///
+    /// 於是三台完全不同的機器印同一片空白：真的讀得到網址的、UIA 起得來但一次
+    /// 都沒讀到過的（[`Self::url_reads`] 那段註解叫它「這一整條線最常見的壞
+    /// 法」）、以及報告是十一個月前寫的。第二台那個人正在那一頁上打
+    /// `*.bank.com.tw*`，然後去網銀。
+    ///
+    /// 和 `capture_off` 不塞進 `broken` 同一個理由：那個清單講的是「你以為關上
+    /// 的門其實開著」，而這裡講的是「我還不知道那扇門關了沒」——方向是第三種，
+    /// 混進去只會讓那幾句話輕重不分。
+    pub fn url_rules_verdict(&self, privacy: &PrivacyConfig) -> UrlRules {
+        let rules = privacy.excluded_urls.len();
+        if rules == 0 {
+            return UrlRules::None;
+        }
+        // 上面那三格任何一格有話講，這裡就閉嘴：同一件事講兩次，讀的人會以為
+        // 是兩件事。
+        if self.url_capture.gave_up || !self.url {
+            return UrlRules::Broken;
+        }
+        if self.url_reads > 0 {
+            return UrlRules::Working {
+                reads: self.url_reads,
+            };
+        }
+        if self.browser_ticks >= ENOUGH_BROWSER_TICKS {
+            // 這一格 `broken_privacy_rules` 已經講了（「停了 N 拍、一個網址都
+            // 沒讀到」）。
+            return UrlRules::Broken;
+        }
+        UrlRules::Unproven {
+            ticks: self.browser_ticks,
+            need: ENOUGH_BROWSER_TICKS,
+        }
+    }
+}
+
+/// 「你那幾條 excluded_urls 到底有沒有在擋東西」的三種答案。
+///
+/// 三種，不是兩種：**「驗過了，有效」和「還沒驗過」不可以長得一樣。** 這是
+/// `db::signal_audit` 那個三態 `Verdict` 的同一條規矩——那裡本來是一個
+/// `broken: bool`，於是「驗過了，是好的」和「資料還太少，看不出來」印出同一
+/// 個 ✓。這一格當時沒跟上。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UrlRules {
+    /// 一條規則都沒有——這一格沒有問題要回答。
+    None,
+    /// 這一場真的讀到過網址，所以那幾條規則有機會生效。
+    Working { reads: u64 },
+    /// **還沒有證據**：瀏覽器用得還不夠多，問不出來。不是「沒問題」。
+    Unproven { ticks: u64, need: u64 },
+    /// [`Report::broken_privacy_rules`] 那邊已經有話講了，這裡不要再講一次。
+    Broken,
 }
 
 #[cfg(test)]
@@ -299,6 +361,131 @@ mod tests {
             excluded_urls: (0..n).map(|i| format!("*bank{i}*")).collect(),
             ..Default::default()
         }
+    }
+
+    /// 這一條是這個 enum 存在的全部理由：**三台機器，三種答案。**
+    ///
+    /// 以前 `broken_privacy_rules` 對第二台什麼都不 push，而設定頁自己寫著
+    /// 「空白在這一格就是『都生效』」——於是「驗過了，有效」和「還沒驗過」
+    /// 在那一頁上逐像素相同，而第二台正是 `url_reads` 那段註解叫做「這一整條
+    /// 線最常見的壞法」的那一台。
+    #[test]
+    fn proven_and_never_proven_do_not_look_the_same() {
+        let rules = with_rules(3);
+        let proven = able();
+        let never = Report {
+            url_reads: 0,
+            browser_ticks: 2,
+            ..able()
+        };
+        let blind = Report {
+            url: false,
+            ..able()
+        };
+
+        assert_eq!(
+            proven.url_rules_verdict(&rules),
+            UrlRules::Working { reads: 480 }
+        );
+        assert_eq!(
+            never.url_rules_verdict(&rules),
+            UrlRules::Unproven {
+                ticks: 2,
+                need: ENOUGH_BROWSER_TICKS
+            }
+        );
+        assert_eq!(blind.url_rules_verdict(&rules), UrlRules::Broken);
+
+        // 三個都不一樣才算數——少了這一句，一支「永遠回 Broken」的實作也會過
+        // 上面那三條裡的一條。
+        assert_ne!(
+            proven.url_rules_verdict(&rules),
+            never.url_rules_verdict(&rules)
+        );
+        assert_ne!(
+            never.url_rules_verdict(&rules),
+            blind.url_rules_verdict(&rules)
+        );
+
+        // 而「還沒驗過」那一台，`broken` 仍然是空的：那個清單講的是「你以為
+        // 關上的門其實開著」，這件事是第三種方向。兩邊要各自成立。
+        assert!(never.broken_privacy_rules(&rules).is_empty());
+    }
+
+    /// 門檻兩側各一次。差一拍就從「還不知道」翻成一則指控，所以那一刀要落在
+    /// 寫下來的那個數字上，不是它附近。
+    #[test]
+    fn the_threshold_is_where_it_says_it_is() {
+        let rules = with_rules(1);
+        let at = |ticks| {
+            Report {
+                url_reads: 0,
+                browser_ticks: ticks,
+                ..able()
+            }
+            .url_rules_verdict(&rules)
+        };
+        assert_eq!(
+            at(ENOUGH_BROWSER_TICKS - 1),
+            UrlRules::Unproven {
+                ticks: ENOUGH_BROWSER_TICKS - 1,
+                need: ENOUGH_BROWSER_TICKS
+            }
+        );
+        // 到了門檻，話由 `broken_privacy_rules` 那一則講（「停了 N 拍、一個網址
+        // 都沒讀到」），這裡就閉嘴——同一件事講兩次，讀的人會以為是兩件事。
+        assert_eq!(at(ENOUGH_BROWSER_TICKS), UrlRules::Broken);
+        assert!(
+            !Report {
+                url_reads: 0,
+                browser_ticks: ENOUGH_BROWSER_TICKS,
+                ..able()
+            }
+            .broken_privacy_rules(&rules)
+            .is_empty(),
+            "門檻到了就一定要有人講話，不能兩邊都閉嘴"
+        );
+    }
+
+    /// 一條規則都沒有的時候不要講話。這一格是「你那幾條規則有沒有在擋東西」，
+    /// 沒有規則就沒有那個問題——而一則答非所問的訊息會讓整區被學會忽略。
+    #[test]
+    fn with_no_rules_there_is_no_question_to_answer() {
+        // `with_rules(0)` 而不是 `PrivacyConfig::default()`——預設值本來就帶著
+        // 幾條規則（網銀、登入頁），拿它當「沒有規則」會測到別的東西。
+        let none = with_rules(0);
+        for r in [
+            able(),
+            Report {
+                url_reads: 0,
+                browser_ticks: 1,
+                ..able()
+            },
+            Report {
+                url: false,
+                ..able()
+            },
+        ] {
+            assert_eq!(r.url_rules_verdict(&none), UrlRules::None);
+        }
+    }
+
+    /// 半路投降的那一台歸 `Broken`，不歸「還沒驗過」——它的 `url_reads` 可能是
+    /// 0（投降得早），而那個 0 的意思和「瀏覽器用得不夠多」完全相反：一個是
+    /// 問不出來，一個是**已經確定壞了**。
+    #[test]
+    fn giving_up_midway_is_not_the_same_as_not_knowing_yet() {
+        let rules = with_rules(2);
+        let gave_up = Report {
+            url_reads: 0,
+            browser_ticks: 1,
+            url_capture: UrlCapture {
+                gave_up: true,
+                ..UrlCapture::default()
+            },
+            ..able()
+        };
+        assert_eq!(gave_up.url_rules_verdict(&rules), UrlRules::Broken);
     }
 
     #[test]
