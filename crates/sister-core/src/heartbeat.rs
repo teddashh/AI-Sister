@@ -134,7 +134,16 @@ fn write_raw(data_dir: &Path, body: &str) -> Result<()> {
     let path = beat_path(data_dir);
     let tmp = path.with_extension("beat.tmp");
     std::fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("rename to {}", path.display()))?;
+    // rename 失敗就把那半個檔收掉。它沒有人讀（`beat_path` 指的是另一個名
+    // 字），所以留著不會說謊——但 rename 失敗最常見的原因是磁碟滿，而一個
+    // 躺在那裡的 tmp 正好讓**下一次**也寫不進去。`stop` 那條退路早就在收
+    // 它了，這裡是同一件事的來源端。
+    if let Err(e) =
+        std::fs::rename(&tmp, &path).with_context(|| format!("rename to {}", path.display()))
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(())
 }
 
