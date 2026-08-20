@@ -5540,6 +5540,15 @@ pub mod doctor {
         ///
         /// `Booting` 的時候她一個字都還沒寫，讀到的是上一場留下的。說成「正在
         /// 錄的那個行程說」會讓他去停一個沒有在做那件事的行程。
+        ///
+        /// **這句話有一個它自己驗不到的前提**：開機那幾分鐘裡真的沒有人寫過
+        /// 那個檔。而 alpha.38 為止是有的——`windows_record` 探測完能力就馬上
+        /// 蓋一份上去，於是這一行說的「上一場留下的」指著一份幾秒前才被這個
+        /// 行程寫掉、乾淨的、時戳很新的報告。那次的修法是把那個寫入挪到
+        /// `boot.hand_off()` 之後（那裡有整段說明），不是改這句話。
+        ///
+        /// 這種前提放在測試裡驗不了，只能寫在這裡讓下一個人看到——那個寫入
+        /// 一挪回去，這一行就又變成謊話，而沒有任何東西會紅。
         #[test]
         fn while_she_is_opening_the_database_the_warnings_are_last_sessions() {
             let k = keep_capabilities(Some(Phase::Booting), None).expect("開機中不可以蓋");
@@ -7196,6 +7205,15 @@ pub mod record {
     /// 之後沒收）在這台開發機上測得到。加了 cfg 就要等到 Windows 才發現。
     // 代價是非 Windows 的正式編譯裡沒有人用它（用它的 `windows_record` 掛著
     // `cfg(windows)`），所以那邊得把 dead_code 關掉。
+    /// 交棒的憑據：拿得到它，就代表心跳已經從開機守衛換到主迴圈了。
+    ///
+    /// 存在的理由是**順序**。開機那份能力報告不可以在開機那段寫（整段理由在
+    /// 呼叫它的那一行旁邊），而一句註解擋不住下一次搬動——這一族的 bug 已經
+    /// 犯過二十幾次，每一次都是「兩行各自都對，湊起來在說謊」。所以讓那個寫
+    /// 入拿一個只有 [`BootBeat::hand_off`] 生得出來的東西：搬回上面去就編不過。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    struct HandedOff;
+
     #[cfg_attr(not(windows), allow(dead_code))]
     struct BootBeat {
         alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -7257,9 +7275,10 @@ pub mod record {
 
         /// 主迴圈接手。之後 drop 不會再把心跳收掉——那是還在跑的 recorder 的
         /// 心跳，不是這個守衛的。
-        fn hand_off(&mut self) {
+        fn hand_off(&mut self) -> HandedOff {
             self.handed_off = true;
             self.stop_thread();
+            HandedOff
         }
 
         fn stop_thread(&mut self) {
@@ -7281,6 +7300,18 @@ pub mod record {
                 // 收掉，不然接下來 16 秒字母人會說她在錄。
                 sister_core::heartbeat::stop(&self.dir);
             }
+        }
+    }
+
+    /// 把開機那份能力報告落地。**只有交棒之後叫得動**（見 [`HandedOff`]）。
+    #[cfg(windows)]
+    fn write_boot_report(
+        _: &HandedOff,
+        data_dir: &Path,
+        report: &sister_core::capabilities::Report,
+    ) {
+        if let Err(e) = sister_core::capabilities::write(data_dir, report) {
+            eprintln!("⚠  寫不出能力報告（設定頁會說「還不知道」）：{e:#}");
         }
     }
 
@@ -7326,13 +7357,8 @@ pub mod record {
         // 缺席的能力會讓某些排除規則整組失效，或讓她其實什麼都沒記住。
         // 這兩件事都要在開始錄之前講，不是藏在 doctor 裡等使用者自己去發現。
         let caps = Capabilities::current(&config);
-        // 留一份給設定頁。底下那幾行 `⚠` 印在 stdout——而字母人開起來的
-        // recorder，stdout 是 `record.log`，一個沒有人會開的檔案。使用者是在
-        // 設定頁上打那些排除規則的，所以那一頁才是這句話該出現的地方。
-        // 寫不出來不擋錄製：少一行警告，比少一場記錄好。
-        if let Err(e) = sister_core::capabilities::write(data_dir, &caps.report()) {
-            eprintln!("⚠  寫不出能力報告（設定頁會說「還不知道」）：{e:#}");
-        }
+        // **這裡不寫能力報告。** 它排在底下 `boot.hand_off()` 之後，理由寫在
+        // 那裡——這個順序是有意義的，不是誰順手擺的。
         for warning in caps.broken_privacy_rules(&config.privacy) {
             println!("⚠  {}", warning.message);
         }
@@ -7439,7 +7465,7 @@ pub mod record {
         // 什麼時候壞掉的」誤差，一分鐘綽綽有餘。
         const CAPS_EVERY: Duration = Duration::from_secs(60);
         let mut last_caps = Instant::now();
-        // 開機那一份已經寫過了（上面），但它沒有這一場的證據。這個閉包是
+        // 開機那一份在交棒之後才寫（見那裡），而它沒有這一場的證據。這個閉包是
         // 「開機探測 + 這一場路上發生的事」的唯一組法——收工時也用同一個，
         // 不然兩邊會慢慢長成兩份不一樣的報告。
         //
@@ -7473,9 +7499,42 @@ pub mod record {
         // 資料庫本來就會好一陣子沒有新資料。開機那一段由 `BootBeat` 蓋著，
         // 這裡把它接過來：交棒之後那個執行緒就停了，心跳從此跟著這個迴圈走
         // ——一個蓋得動心跳但迴圈已經卡死的行程，不該還在說自己在錄。
-        boot.hand_off();
+        let handed_off = boot.hand_off();
         let _ = sister_core::heartbeat::beat(data_dir, sister_core::now_ms());
         let mut last_beat = Instant::now();
+
+        // 開機那份能力報告寫在這裡，**不是**在上面探測完的那一刻。
+        //
+        // 那份報告只有開機探測，沒有任何一場的證據（`has_session_evidence`
+        // 是 false），而它蓋掉的那一份可能有——「UIA 在昨天下午三點卡住太多
+        // 次，從那之後位址列一個字都讀不到」這種事，只有跑過那一場的行程知道，
+        // 拿一份全新的 UIA 去問永遠問不出來（見 `Report::has_session_evidence`
+        // 那整段）。
+        //
+        // 那一段是為了擋 `doctor` 寫的，而 `doctor` 是使用者偶爾跑一次的東西。
+        // 這裡是**每次開機都會跑**的那一個，它從來沒有經過那道閘門。
+        //
+        // 而且時間點正好最壞：`Db::open` 在一顆大資料庫上要跑好幾分鐘，那幾
+        // 分鐘裡心跳是 `Booting`，於是設定頁和 doctor 都會照著
+        // `keep_capabilities` 說「上一場留下的報告說」——指著一份這個行程幾秒
+        // 前才蓋上去的、乾淨的、時戳很新的報告。兩句話各自都對，湊起來是替一
+        // 件沒發生的事背書。
+        //
+        // 挪到交棒之後，那三句話就都回到真的：開機中讀到的**真的**是上一場
+        // 留下的，而從這一行開始心跳是 `Recording`，這份報告**真的**是正在錄
+        // 的那個行程寫的。
+        //
+        // 為什麼還是要寫這一份（而不是等 60 秒後第一次 `CAPS_EVERY`）：底下
+        // 那幾行 `⚠` 印在 stdout，而字母人開起來的 recorder，stdout 是
+        // `record.log`——一個沒有人會開的檔案。使用者是在設定頁上打那些排除
+        // 規則的，所以那一頁才是這句話該出現的地方。
+        //
+        // 寫不出來不擋錄製：少一行警告，比少一場記錄好。
+        //
+        // 那個 `handed_off` 不是裝飾：它是 `hand_off()` 唯一的產物，而這一行
+        // 要用到它。把這段搬回上面去就編不過——一句註解擋不住下一次搬動，
+        // 一個型別可以。
+        write_boot_report(&handed_off, data_dir, &caps.report());
         // 舊的停止請求**已經清掉了**，清在 `BootBeat::start` 裡——開機窗打開
         // 的那一刻，不是這裡。清在這裡的話，他在開機那幾分鐘按的停止會被自己
         // 刪掉；理由寫在那支函式上面。
