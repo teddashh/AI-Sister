@@ -116,18 +116,71 @@ fn ocr_runs_at_all_from_an_unpackaged_exe() {
 /// 另外印一行給機器讀的記號。跳過與否是 CI log 裡唯一分得出這兩種結果的字，
 /// 而那一步會拿它去掛 GitHub 的 annotation：發版那一輪到底有沒有驗到中文，
 /// 要能在 run 摘要最上面看到，不是埋在三千行 log 裡。
-fn skip_without_chinese(lang: &str) -> bool {
+///
+/// **「沒挑到中文」有兩種原因，而它們要的下一步剛好相反。** 上一版只看
+/// `chosen`，於是兩種都印同一行、CI 也都掛同一則「這台 runner 沒有 zh-TW
+/// 語言包」：
+///
+/// - 這台機器**真的沒有**繁中 OCR → runner 的限制，是講好的缺席。
+/// - 裝了、我們卻沒挑到 → **`pick_engine` 壞了**，而那是會出貨的東西。
+///   `PREFERRED` 只認 `zh-Hant-TW` 和 `zh-Hant` 兩個字串；Windows 哪天回
+///   `zh-TW` 或 `zh-HK`，我們就會安靜地退回英文，然後把滿螢幕的中文讀成
+///   空白。那台機器上「中文搜尋永遠是空的」，而唯一的 annotation 說的是
+///   「這台機器沒裝語言包」——一句會讓人去裝一個已經裝好的東西的話。
+///
+/// 第二種**不准跳過**，簽了名也不行：那個簽名宣稱的是「這台機器沒有中文
+/// OCR」，而在這種機器上那句話是假的。
+fn skip_without_chinese(status: &OcrStatus, lang: &str) -> bool {
     if lang.starts_with("zh") {
         println!("SISTER-OCR-ZH: VERIFIED lang={lang}");
         return false;
     }
+    let zh: Vec<&str> = status
+        .available
+        .iter()
+        .filter(|l| l.starts_with("zh"))
+        .map(String::as_str)
+        .collect();
+    // 繁中：Windows 正常回 `zh-Hant-TW`，但別的寫法也算——這裡認得太窄，
+    // 正好是這一段要抓的那個 bug 的形狀。
+    let hant: Vec<&str> = zh
+        .iter()
+        .copied()
+        .filter(|l| {
+            l.starts_with("zh-Hant") || matches!(*l, "zh-TW" | "zh-HK" | "zh-MO" | "zh-Hant")
+        })
+        .collect();
+    assert!(
+        hant.is_empty(),
+        "這台機器上有繁中 OCR（{hant:?}），我們卻挑了 {lang}——壞的是 \
+         `pick_engine`／`PREFERRED`，不是這台機器。已安裝：{:?}。\
+         這一種不准用 SISTER_OCR_ZH_ABSENT 跳過：那個簽名說的是\
+         「這台機器沒有中文 OCR」，而在這裡那句話是假的",
+        status.available
+    );
     let msg = format!("這台機器的 OCR 語言是 {lang}，不是中文");
     assert!(
         std::env::var("SISTER_OCR_ZH_ABSENT").as_deref() == Ok("1"),
-        "{msg}——中文是這個產品的主要語言，讀不出來就是壞了。\
-         真的要跳過的話設 SISTER_OCR_ZH_ABSENT=1，並且在設的地方寫出為什麼"
+        "{msg}（已安裝：{:?}）——中文是這個產品的主要語言，讀不出來就是壞了。\
+         真的要跳過的話設 SISTER_OCR_ZH_ABSENT=1，並且在設的地方寫出為什麼",
+        status.available
     );
-    println!("SISTER-OCR-ZH: SKIPPED lang={lang}");
+    // `zh=` 帶出去給 CI 那一步掛 annotation 用。少了它，「一個中文 OCR 都沒
+    // 有」和「只有簡中、我們要的是繁中」在 run 摘要上是同一句話，而後者要做
+    // 的事（裝 Language.OCR~~~zh-TW）和前者不一樣。
+    println!(
+        "SISTER-OCR-ZH: SKIPPED lang={lang} zh={} available={}",
+        if zh.is_empty() {
+            "none".to_string()
+        } else {
+            zh.join(",")
+        },
+        if status.available.is_empty() {
+            "none".to_string()
+        } else {
+            status.available.join(",")
+        }
+    );
     true
 }
 
@@ -145,7 +198,7 @@ fn chinese_comes_back_as_words_not_scattered_characters() {
     let Some(lang) = status.chosen.as_deref() else {
         return;
     };
-    if skip_without_chinese(lang) {
+    if skip_without_chinese(&status, lang) {
         return;
     }
 

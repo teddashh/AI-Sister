@@ -99,20 +99,31 @@ impl OcrStatus {
     /// 錄製正常、`stats` 正常、資料庫也在長大——只有搜尋永遠是空的。
     ///
     /// 語言包可以在「設定 → 語言 → 選用功能 → 光學字元辨識」裝。
+    ///
+    /// **最後那句「去裝一個」不可以無條件講。** 這個結構手上有 `available`，
+    /// 而「挑中的不是中文」有兩種原因：真的沒裝，或者裝了、`pick_engine` 沒
+    /// 挑到（`PREFERRED` 只認 `zh-Hant-TW`／`zh-Hant` 兩個字串）。第二種機器
+    /// 上，叫他去裝一個他已經裝好的東西，只會讓他在設定裡繞半小時，然後認定
+    /// 這句話是錯的——而它其實在指著一個真的壞掉的東西，只是指錯方向。
     pub fn cjk_gap(&self) -> Option<String> {
         let chosen = self.chosen.as_ref()?;
         if chosen.starts_with("zh") || chosen.starts_with("ja") || chosen.starts_with("ko") {
             return None;
         }
+        let installed = if self.available.is_empty() {
+            "（無）".to_string()
+        } else {
+            self.available.join("、")
+        };
+        let next = if self.available.iter().any(|l| l.starts_with("zh")) {
+            "這台機器**已經有**中文辨識器了，是她沒挑到它——請把這一行連同上面\
+             那串已安裝語言回報給我們，這是程式的問題，不是你的設定"
+        } else {
+            "請到「設定 → 語言 → 選用功能」加裝中文的光學字元辨識"
+        };
         Some(format!(
             "OCR 語言是 {chosen}，不是中文：螢幕上的中文會讀不出來，\
-             搜尋中文將永遠是空的。已安裝的語言：{}。\
-             請到「設定 → 語言 → 選用功能」加裝中文的光學字元辨識",
-            if self.available.is_empty() {
-                "（無）".to_string()
-            } else {
-                self.available.join("、")
-            }
+             搜尋中文將永遠是空的。已安裝的語言：{installed}。{next}"
         ))
     }
 }
@@ -346,4 +357,57 @@ fn available_languages() -> Vec<String> {
 fn init_apartment() {
     use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
     let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(chosen: &str, available: &[&str]) -> OcrStatus {
+        OcrStatus {
+            available: available.iter().map(|s| s.to_string()).collect(),
+            chosen: Some(chosen.to_string()),
+        }
+    }
+
+    /// 「去裝一個」和「你已經有了，是她沒挑到」不可以是同一句話。
+    ///
+    /// 兩台機器的下一步完全相反：一台要開 Windows 的選用功能，另一台開了也
+    /// 沒用——他會在設定裡繞半小時，找到那個已經裝好的東西，然後認定這句話
+    /// 是錯的。而它其實在指著一個真的壞掉的東西（`pick_engine`），只是指錯
+    /// 方向。這個結構手上一直有 `available`，上一版只是沒去看。
+    #[test]
+    fn telling_him_to_install_it_only_makes_sense_when_it_is_not_installed() {
+        let missing = status("en-US", &["en-US"]).cjk_gap().unwrap();
+        assert!(missing.contains("選用功能"), "{missing}");
+        assert!(!missing.contains("已經有"), "{missing}");
+
+        let present = status("en-US", &["en-US", "zh-Hant-TW"]).cjk_gap().unwrap();
+        assert!(present.contains("已經有"), "{present}");
+        assert!(
+            !present.contains("選用功能"),
+            "叫他去裝一個他已經裝好的東西：{present}"
+        );
+
+        assert_ne!(missing, present);
+    }
+
+    /// 挑中中文就沒有這個問題——這一格不該對一台好的機器講話。
+    #[test]
+    fn a_machine_that_reads_chinese_has_nothing_to_say_here() {
+        assert!(status("zh-Hant-TW", &["zh-Hant-TW"]).cjk_gap().is_none());
+        assert!(status("ja", &["ja"]).cjk_gap().is_none());
+        // 完全沒有 OCR 是另一件事（`chosen` 是 None），由別的地方講。
+        assert!(OcrStatus::default().cjk_gap().is_none());
+    }
+
+    /// 已安裝清單要真的印出來。它是這句話裡唯一可以被拿去回報的東西。
+    #[test]
+    fn the_installed_list_is_the_only_actionable_half() {
+        let s = status("en-US", &["en-US", "zh-Hans-CN"]).cjk_gap().unwrap();
+        assert!(s.contains("zh-Hans-CN"), "{s}");
+        // 有簡中、沒繁中：一樣是「已經有中文辨識器了」那一種。`PREFERRED`
+        // 只認繁中，所以這台機器上她確實挑不到——而那件事回報得出來。
+        assert!(s.contains("已經有"), "{s}");
+    }
 }

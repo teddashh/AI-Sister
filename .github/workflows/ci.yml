@@ -1108,11 +1108,24 @@ jobs:
           set -o pipefail
           cargo test -p sister-capture --test windows_ocr -- --nocapture 2>&1 | tee ocr.log
           # 測試綠了不代表中文驗到了——那正是這一段存在的理由。從 log 裡撈那
-          # 個記號，把兩種結果變成 run 摘要上兩種看得見的顏色。
+          # 個記號，把幾種結果變成 run 摘要上看得見的顏色。
+          #
+          # **「沒驗到」那一則以前只有一種說法**：「這台 runner 沒有 zh-TW OCR
+          # 語言包」。而測試那邊當時只看得到「挑中了哪一個」，看不到「裝了哪些」
+          # ——於是那句話是猜的。它猜錯的那一種（裝了、我們沒挑到）現在由
+          # `windows_ocr.rs` 直接讓測試紅，走不到這裡；剩下這裡要分的是「一個
+          # 中文 OCR 都沒有」和「有中文、但不是繁中」，因為那兩種要做的事不同。
           if grep -q 'SISTER-OCR-ZH: VERIFIED' ocr.log; then
             echo "::notice title=中文 OCR 這一輪真的驗到了::語言包裝起來了，「中文會不會被逐字切開」有真實答案"
           else
-            echo "::warning title=中文 OCR 這一輪沒有被驗證::這台 runner 沒有 zh-TW OCR 語言包。英文那條管線驗過了，但「中文會不會被逐字切開」這一題這一輪沒有答案——那是這個產品的主要語言。真實答案只在實機上：docs/WINDOWS-CHECKLIST.md"
+            zh=$(sed -n 's/.*SISTER-OCR-ZH: SKIPPED .*[[:space:]]zh=\([^ ]*\).*/\1/p' ocr.log | head -1)
+            avail=$(sed -n 's/.*SISTER-OCR-ZH: SKIPPED .*[[:space:]]available=\([^ ]*\).*/\1/p' ocr.log | head -1)
+            case "$zh" in
+              ''|none)
+                echo "::warning title=中文 OCR 這一輪沒有被驗證::這台 runner 一個中文 OCR 語言都沒有（已安裝：${avail:-未知}）。英文那條管線驗過了，但「中文會不會被逐字切開」這一題這一輪沒有答案——那是這個產品的主要語言。真實答案只在實機上：docs/WINDOWS-CHECKLIST.md" ;;
+              *)
+                echo "::warning title=中文 OCR 這一輪沒有被驗證（而且這台 runner 有中文）::這台 runner 有 ${zh}，但沒有我們要的繁中 OCR（已安裝：${avail:-未知}）。簡中的辨識器讀繁中會掉字，所以這不算驗過。「中文會不會被逐字切開」這一輪一樣沒有答案：docs/WINDOWS-CHECKLIST.md" ;;
+            esac
           fi
 
       # 抓圖的耗時只能在真的 Windows 上量。--nocapture 讓那張表進 CI log，
