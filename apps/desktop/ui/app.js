@@ -908,6 +908,70 @@ function blindLines(blind) {
 }
 
 /**
+ * 答案底下那一個開關：「這一題我本來已經忘了」。
+ *
+ * PHASES.md Phase 1 的**第一條**退場條件是「自用 7 天內 ≥ 3 次答對我自己都忘掉
+ * 的東西」，而那件事只有他知道。題庫記得住他問了什麼、她給了幾筆、他點開了哪
+ * 一個出處——記不住他當時知不知道那個答案。
+ *
+ * **點開出處不是它。** 那件事最常發生在她答錯、或他在查核的時候。
+ *
+ * 而它補不回來：那是他看到答案那一刻腦袋裡的狀態，一個禮拜之後回頭翻題庫翻不
+ * 出來。所以它是一個當下按的按鈕，不是一份事後的問卷——長得小、就在答案底下、
+ * 按一下就好、按錯了再按一下收回。
+ *
+ * 失敗要說出來，這一點和 [`sourceLine`] 裡的 `log_click` 相反：那邊他要的是那
+ * 張畫面，記不記得到帳是次要的；這邊他要的**就是**記這一筆。畫面裝作記進去了
+ * 而其實沒有，等於在退場條件的證據上說謊——所以按鈕先不變，回來了才變。
+ */
+function markLine(queryId) {
+  const li = document.createElement("li");
+  li.className = "hits-note hits-mark";
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "mark-toggle";
+  // 開發用：`?hits=demo&marked=1` 直接看按下去之後長什麼樣。**兩個狀態都要
+  // 看得到版面**——按下去那一個字比較長、還多一顆星，而這一頁只有 340 像素
+  // 寬。沒有這個開關的話，無頭瀏覽器那一遍只驗得到其中一半。
+  let marked = new URLSearchParams(location.search).get("marked") === "1";
+
+  const paintButton = () => {
+    button.textContent = marked ? "★ 記下來了：這件事你本來已經忘了" : "這件事我本來已經忘了";
+    button.classList.toggle("on", marked);
+    button.title = marked ? "再按一次收回" : "她答對了一件你早就忘掉的事？按一下記下來";
+    button.setAttribute("aria-pressed", String(marked));
+  };
+  paintButton();
+
+  button.addEventListener("click", async () => {
+    const want = !marked;
+    // 連按的時候不要送出兩筆互相打架的請求。回來之前先關起來。
+    button.disabled = true;
+    try {
+      // 在瀏覽器裡打開這一頁的時候要**講出來**，不是安靜地什麼都不做——那正
+      // 是 `ask()` 對同一件事的做法。一顆按了沒反應的按鈕，和一顆按了有記進
+      // 去的按鈕，在畫面上長得一模一樣。
+      if (invoke === null) throw new Error("這一頁不是在 AI-Sister 裡打開的");
+      // 後端回的是**這張表現在的狀態**，不是「有沒有動到」——所以照它畫，
+      // 不要照 `want` 畫。兩個視窗開著同一顆資料庫的時候那是同一件事。
+      marked = await invoke("mark_query", { queryId, marked: want });
+      paintButton();
+    } catch (err) {
+      // 沒成就不要改樣子。加上一句話，不然「我按了，它沒反應」和「我按了，
+      // 它記下來了」在畫面上一模一樣——而這一格正是拿來當證據的。
+      noticeAboutSomethingElse(`這一次標記沒記進去：${err?.message ?? err}`);
+      paint();
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  li.append(button);
+  return li;
+}
+
+/**
  * @param hits 一筆一筆的原文。
  * @param kind `"keywords"`（比對字找到的）或 `"recent"`（他問的是時間）。
  *   這個字是後端給的，不是這裡判斷的——同一句話在 `sister query` 和這一頁
@@ -1083,6 +1147,28 @@ function renderHits(
     // 剛剛才安慰過他「這樣就看得到全部了」的話，被下一個畫面當場打臉。
     more.textContent = "這裡最多列 20 筆，底下還有——sister query --limit 100 看得到更多。";
     hitList.append(more);
+  }
+
+  // 「這一題我本來已經忘了」。**只在她真的給了東西的時候才出現**——一份空手
+  // 而回的答案沒有什麼好標的，而一個掛在「我沒看過這件事」底下的「我早就忘了」
+  // 按鈕，記下來的會是一次失敗。
+  if (hits.length > 0 || facts.length > 0) {
+    // 沒有題號就標不了，而**這件事要講出來**。以前 `query_id` 是 `null` 只代
+    // 表「這次點擊不會記帳」——看不見也無所謂。現在它代表那顆按鈕整個不見，
+    // 而那顆按鈕是 Phase 1 第一條退場條件唯一的量法：安靜地少一個禮拜的證據，
+    // 沒有人會發現。
+    //
+    // 兩種原因（那個勾關著／剛剛寫不進資料庫）在這一頁分不出來——後端只送得
+    // 出一個 `null`——所以照這個 repo 的規矩，把可能性攤開，不要替他選一個。
+    if (queryId === null || queryId === undefined) {
+      const why = document.createElement("li");
+      why.className = "hits-note hits-more";
+      why.textContent =
+        "（這一題沒進題庫，所以「我本來已經忘了」標不了：可能是設定裡「你問過她什麼」關著，也可能是剛剛寫不進資料庫。）";
+      hitList.append(why);
+    } else {
+      hitList.append(markLine(queryId));
+    }
   }
 
   hitList.hidden = false;
@@ -1311,7 +1397,10 @@ if (params.get("hits") === "demo") {
       },
     ],
     "keywords",
-    null,
+    // 假的題號。**不是 `null`**：`null` 的意思是「這一份答案沒有掛在題庫上」，
+    // 而那會把底下那顆「這件事我本來已經忘了」整個藏起來——於是這一頁唯一驗得
+    // 到版面的路徑，剛好驗不到最新加上去的那一格。配 `&marked=1` 看按下去之後。
+    77,
     // ★ 那一層。這正是 `sister query 電話` 一直答得出、而她以前答不出來的
     // 東西：螢幕上寫的是「客服**專線**」，比對「電話」兩個字永遠接不起來。
     [

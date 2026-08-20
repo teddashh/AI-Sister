@@ -522,6 +522,46 @@ body.has-hits .stage {
   text-align: center;
 }
 
+/* 「這件事我本來已經忘了」。在答案最底下，所以和 `.hits-more` 一樣不要那條
+   左邊的粗線——那條線是給開頭那一句用的。它是一個按鈕，但**不能長得像主要
+   動作**：這一頁的主角是答案，這一格是他偶爾按一次的東西。 */
+.hits-mark {
+  border-left: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.mark-toggle {
+  background: none;
+  border: 1px solid var(--letter-accent);
+  border-radius: 999px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  opacity: 0.55;
+  padding: 3px 10px;
+  transition: opacity 0.12s ease;
+}
+
+.mark-toggle:hover,
+.mark-toggle:focus-visible {
+  opacity: 0.9;
+}
+
+/* 按下去之後要**看得出來已經按過**，不然他會不確定自己按到了沒，然後再按
+   一次——而再按一次是收回。 */
+.mark-toggle.on {
+  background: var(--letter-accent);
+  color: var(--letter-bg);
+  opacity: 1;
+}
+
+.mark-toggle:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
 /* ---------- 輸入 ---------- */
 
 .ask {

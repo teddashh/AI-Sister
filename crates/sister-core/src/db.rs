@@ -31,7 +31,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 7;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -434,6 +434,41 @@ fn migration_006() -> String {
     sql
 }
 
+/// 「這一題我本來已經忘了」——他自己按下去的那一個位元。
+///
+/// PHASES.md Phase 1 的**第一條**退場條件是「自用 7 天內 ≥ 3 次『答對我自己都
+/// 忘掉的東西』（記錄實例）」，而在這張表之前沒有任何東西記得住那個實例。
+///
+/// **點擊不是它。** `query_clicks` 記的是「我點開了證據」，那件事最常發生在她
+/// 答錯、或他在查核的時候——跟「她神奇」剛好反過來。`sister queries` 上那句
+/// 「其中 M 題你點開了出處」離這條退場條件只有一行遠，卻在講另一件事，所以這
+/// 兩個訊號一定要分開存、分開印。
+///
+/// **而它補不回來。** 「我本來已經忘了」是他看到答案那一刻腦袋裡的狀態；一個
+/// 禮拜後回頭翻題庫，翻得出他問過什麼，翻不出他當時知不知道。PHASES.md 自己在
+/// 「零當機」那條寫過同一句話：「那是印象，不是條件」。所以這張表要在那七天
+/// **開始之前**就在。
+///
+/// # 為什麼是一張表，不是 `queries` 上的一欄
+///
+/// 1. 加一欄要 `ALTER TABLE`，而 SQLite 沒有 `ADD COLUMN IF NOT EXISTS`——這一
+///    整批 migration 的規矩是重跑不能弄壞東西（見 [`migration_005`] 上面那兩
+///    題），`CREATE TABLE IF NOT EXISTS` 免費拿到那件事。
+/// 2. 標記是**有時間的**：他可以問完隔一分鐘才想起來「欸這個我早忘了」。一欄
+///    布林存不下那個時間，而「7 天內 3 次」數的就是時間。
+/// 3. 列在不在就是開關本身，收回 = `DELETE`。一欄要多一個「0 和 NULL 差在
+///    哪」的問題，而那正好是這個 repo 反覆在修的那一種。
+///
+/// `ON DELETE CASCADE` 讓 `forget` 和 `prune` 不必知道這張表存在：題目走了，
+/// 掛在它上面的標記跟著走（`PRAGMA foreign_keys=ON` 在 [`Db::init`]，而
+/// `a_forgotten_question_takes_its_mark_with_it` 在證明它真的生效）。
+const MIGRATION_007: &str = r#"
+CREATE TABLE IF NOT EXISTS query_marks (
+  query_id INTEGER PRIMARY KEY REFERENCES queries(id) ON DELETE CASCADE,
+  ts       INTEGER NOT NULL
+);
+"#;
+
 /// 「她記下來的東西」放在哪幾張表——以及哪幾列不算。
 ///
 /// 這份名單要和 [`DbStats::nothing_recorded_left`] 對得起來：那邊說「一列都不
@@ -644,6 +679,7 @@ impl Db {
             4 => tx.execute_batch(MIGRATION_004)?,
             5 => tx.execute_batch(&migration_005())?,
             6 => tx.execute_batch(&migration_006())?,
+            7 => tx.execute_batch(MIGRATION_007)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -1766,23 +1802,88 @@ impl Db {
         Ok(())
     }
 
+    /// 他說「這一題我本來已經忘了」（或者收回那句話）。
+    ///
+    /// 回傳**這張表現在的狀態**，不是「有沒有動到」：兩邊的呼叫端要印的都是
+    /// 「現在標著／現在沒標」，而按兩次同一個開關的人要看到同一句話。
+    ///
+    /// 沒有這一題就是錯誤，不是靜靜地成功。`query_id` 是從題庫撈出來的，撈不
+    /// 到只有兩種可能——他打錯號碼，或者那一題剛被 `forget` 帶走——而兩種都要
+    /// 讓他知道。（外鍵擋得住 `INSERT` 那半邊，擋不住 `DELETE`：刪一列不存在
+    /// 的東西在 SQL 裡是完全合法的 0 列。所以先問，不靠外鍵。）
+    pub fn mark_query(&self, query_id: i64, marked: bool) -> Result<bool> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM queries WHERE id = ?1)",
+            params![query_id],
+            |r| r.get(0),
+        )?;
+        anyhow::ensure!(exists, "題庫裡沒有第 {query_id} 題");
+        if marked {
+            // `OR IGNORE`：重按不換時間。標記的時間是他**第一次**認出來那一
+            // 刻，而那正是這一格的全部內容。
+            self.conn.execute(
+                "INSERT OR IGNORE INTO query_marks(query_id, ts) VALUES(?1, ?2)",
+                params![query_id, now_ms()],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM query_marks WHERE query_id = ?1",
+                params![query_id],
+            )?;
+        }
+        Ok(marked)
+    }
+
+    /// 第 `id` 題。沒有那一題就是 `None`。
+    ///
+    /// 和 [`Db::query_log`] 共用同一句 `SELECT`，因為兩邊回的是同一個東西——
+    /// 各寫一次的話，`marked` 這一欄哪天只加在其中一邊，而兩個畫面都會說自己
+    /// 對。（這個 repo 已經犯過一次「兩次獨立的查找會指到不同的東西」。）
+    pub fn query_by_id(&self, id: i64) -> Result<Option<QueryRow>> {
+        let mut stmt = self.conn.prepare(&query_log_sql("q.id = ?1", "LIMIT 1"))?;
+        let mut rows = stmt.query_map(params![id], read_query_row)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// 最後問過的那一題的編號。沒問過就是 `None`。
+    ///
+    /// `sister mark` 預設標的是它：他剛剛才看到那個答案，而「剛剛那一題」是他
+    /// 唯一不用去查號碼就講得出來的東西。排序和 [`Db::query_log`] 同一組
+    /// （`ts DESC, id DESC`）——同一秒問了兩題的時候，兩邊要指到同一列，不然
+    /// 「清單上第一列」和「`mark` 標到的那一列」會是不同的東西。
+    pub fn last_query(&self) -> Result<Option<QueryRow>> {
+        Ok(self.query_log(1)?.into_iter().next())
+    }
+
     /// 最近問過的幾題，新的在前。
     pub fn query_log(&self, limit: usize) -> Result<Vec<QueryRow>> {
+        let mut stmt = self.conn.prepare(&query_log_sql(
+            "1",
+            "ORDER BY q.ts DESC, q.id DESC LIMIT ?1",
+        ))?;
+        let rows = stmt.query_map(params![limit as i64], read_query_row)?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// 他標記過的那幾題，新的在前——**帶著實例本身**。
+    ///
+    /// 退場條件寫的是「≥ 3 次（記錄實例）」，所以光有一個計數是不夠的：那句
+    /// 「記錄實例」要求得出示那幾題長什麼樣。這裡不套 7 天的窗，也不判斷條件
+    /// 過了沒——把有時間的實例攤出來，那一格由人去讀。一個會自己宣布「退場條件
+    /// ✓」的工具，只是把印象換成一個看起來像數字的印象。
+    pub fn marked_queries(&self, limit: usize) -> Result<Vec<MarkedQuery>> {
         let mut stmt = self.conn.prepare(
-            "SELECT q.id, q.ts, q.question, q.shape, q.hits, q.latency_ms, q.source,
-                    (SELECT COUNT(*) FROM query_clicks c WHERE c.query_id = q.id)
-             FROM queries q ORDER BY q.ts DESC, q.id DESC LIMIT ?1",
+            "SELECT q.id, q.ts, q.question, q.hits, m.ts
+             FROM query_marks m JOIN queries q ON q.id = m.query_id
+             ORDER BY m.ts DESC, q.id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |r| {
-            Ok(QueryRow {
+            Ok(MarkedQuery {
                 id: r.get(0)?,
-                ts: r.get(1)?,
+                asked_ts: r.get(1)?,
                 question: r.get(2)?,
-                shape: r.get(3)?,
-                hits: r.get(4)?,
-                latency_ms: r.get(5)?,
-                source: r.get(6)?,
-                clicks: r.get(7)?,
+                hits: r.get(3)?,
+                marked_ts: r.get(4)?,
             })
         })?;
         Ok(rows.flatten().collect())
@@ -1798,7 +1899,8 @@ impl Db {
                     (SELECT COUNT(DISTINCT query_id) FROM query_clicks),
                     MIN(ts), MAX(ts),
                     COALESCE(SUM(latency_ms > ?1), 0),
-                    COALESCE(SUM(source = ?2), 0)
+                    COALESCE(SUM(source = ?2), 0),
+                    (SELECT COUNT(*) FROM query_marks)
              FROM queries",
             params![RETRIEVAL_BUDGET_MS, SOURCE_DESKTOP],
             |r| {
@@ -1812,6 +1914,7 @@ impl Db {
                     clickable: r.get(6)?,
                     p50_ms: 0,
                     p95_ms: 0,
+                    marked: r.get(7)?,
                 })
             },
         )?;
@@ -2744,6 +2847,52 @@ pub struct QueryRow {
     pub source: String,
     /// 這一題有幾個出處被點開過。0 = 她給了答案，但沒有一筆值得點。
     pub clicks: i64,
+    /// 他自己按過「這一題我本來已經忘了」（見 [`MIGRATION_007`]）。
+    ///
+    /// **和 `clicks` 是兩件事，不准互相代表。** 點開出處說的是「我去看了證
+    /// 據」，這一格說的是「我本來不知道」——前者在她答錯的時候最常發生。
+    pub marked: bool,
+}
+
+/// [`Db::query_log`] 和 [`Db::query_by_id`] 共用的那一句 `SELECT`。
+///
+/// 一份，不是兩份。這裡的欄位順序是 [`read_query_row`] 的契約，兩個一起改。
+fn query_log_sql(whr: &str, tail: &str) -> String {
+    format!(
+        "SELECT q.id, q.ts, q.question, q.shape, q.hits, q.latency_ms, q.source,
+                (SELECT COUNT(*) FROM query_clicks c WHERE c.query_id = q.id),
+                EXISTS(SELECT 1 FROM query_marks m WHERE m.query_id = q.id)
+         FROM queries q WHERE {whr} {tail}"
+    )
+}
+
+/// [`query_log_sql`] 那九欄的讀法。
+fn read_query_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<QueryRow> {
+    Ok(QueryRow {
+        id: r.get(0)?,
+        ts: r.get(1)?,
+        question: r.get(2)?,
+        shape: r.get(3)?,
+        hits: r.get(4)?,
+        latency_ms: r.get(5)?,
+        source: r.get(6)?,
+        clicks: r.get(7)?,
+        marked: r.get(8)?,
+    })
+}
+
+/// 一次魔法時刻（見 [`Db::marked_queries`]、[`MIGRATION_007`]）。
+///
+/// 兩個時間都留著，因為它們答的不是同一題：`asked_ts` 是她答對的時候，
+/// `marked_ts` 是他認出那件事的時候。退場條件的「7 天內」數的是前者——那七天
+/// 是**使用**的七天；後者只是說他隔了多久才按下去。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkedQuery {
+    pub id: i64,
+    pub asked_ts: Millis,
+    pub question: String,
+    pub hits: i64,
+    pub marked_ts: Millis,
 }
 
 /// 「零當機」那一格的兩組數字（見 [`Db::crash_audit`]、[`migration_006`]）。
@@ -2880,6 +3029,13 @@ pub struct QueryLogStats {
     ///
     /// 中位數會把偶爾一次 4 秒的卡頓藏起來，而那一次正是使用者記得的那一次。
     pub p95_ms: i64,
+    /// 他自己標記成「這一題我本來已經忘了」的題數（見 [`MIGRATION_007`]）。
+    ///
+    /// PHASES.md Phase 1 的第一條退場條件量的就是它。**這是整份總覽裡唯一一個
+    /// 不是量出來的數字**——其他每一格都是她自己觀察到的，這一格是他按下去的。
+    /// 所以它也是唯一一個「0」不代表壞掉的：他可能沒按過，也可能她真的沒神奇
+    /// 過，而這兩件事這裡分不出來，句子也就不准替他選一個。
+    pub marked: i64,
 }
 
 /// 秘密遮蔽的實際結果（見 [`Db::redaction_audit`]）。
@@ -4205,6 +4361,181 @@ mod tests {
         assert_eq!(orphans, 0, "題目沒了，點擊卻還掛在那裡");
     }
 
+    /// 標記是個開關：按下去、收回來、再按一次，讀回來的都是**現在**的狀態。
+    ///
+    /// 回傳值一併釘住：呼叫端拿它去印那句話，所以它不可以是「有沒有動到」。
+    /// 按第二次的人和按第一次的人要看到同一句「標好了」。
+    #[test]
+    fn a_mark_is_a_switch_not_a_counter() {
+        let db = test_db();
+        let q = ask(&db, 1_000, "我早就忘了的那件事", 2);
+        assert!(!db.query_log(1).expect("log")[0].marked, "一開始不該標著");
+
+        assert!(db.mark_query(q, true).expect("mark"));
+        assert!(
+            db.mark_query(q, true).expect("再按一次"),
+            "重按要回同一個狀態"
+        );
+        assert!(db.query_log(1).expect("log")[0].marked);
+        assert_eq!(
+            db.query_log_stats().expect("stats").marked,
+            1,
+            "重按不該變成兩題"
+        );
+
+        assert!(!db.mark_query(q, false).expect("unmark"));
+        assert!(!db.query_log(1).expect("log")[0].marked);
+        assert_eq!(db.query_log_stats().expect("stats").marked, 0);
+    }
+
+    /// **重按不會把時間往前推。**
+    ///
+    /// `mark_query` 上寫著「標記的時間是他第一次認出來那一刻」，而撐著那句話的
+    /// 只有 `INSERT OR IGNORE` 裡那三個字母——改成 `OR REPLACE` 之後，每按一次
+    /// 就把時間蓋成現在，而上面那句註解會原封不動地留著說謊。（這個 repo 已經
+    /// 犯過一次「閘門文件裡寫的不變式是沒有人在執行的」。）
+    ///
+    /// 兩次 `now_ms()` 在測試裡常常同一毫秒，所以中間直接把時間改老，讓「有沒
+    /// 有被蓋掉」變成一個看得見的差別。
+    #[test]
+    fn pressing_it_again_does_not_move_the_moment_he_first_recognised_it() {
+        let db = test_db();
+        let q = ask(&db, 1_000, "第一次就認出來了", 1);
+        db.mark_query(q, true).expect("mark");
+
+        const FIRST: Millis = 42;
+        db.conn
+            .execute("UPDATE query_marks SET ts = ?1", params![FIRST])
+            .expect("backdate");
+        db.mark_query(q, true).expect("再按一次");
+
+        assert_eq!(
+            db.marked_queries(1).expect("marked")[0].marked_ts,
+            FIRST,
+            "重按把「第一次認出來」的時間蓋掉了"
+        );
+    }
+
+    /// **標一題不存在的，要炸。**
+    ///
+    /// 外鍵只擋得住 `INSERT` 那半邊；`DELETE FROM query_marks WHERE query_id = 999`
+    /// 在 SQL 裡是完全合法的「刪了 0 列」。少了那道 `EXISTS` 檢查，`sister mark
+    /// --undo --id 999` 會回一句「收回了」——而他打錯號碼、或者那一題剛被
+    /// `forget` 帶走，兩種都會拿到那句話。
+    #[test]
+    fn marking_a_question_that_is_not_there_is_an_error_both_ways() {
+        let db = test_db();
+        ask(&db, 1_000, "真的有這一題", 1);
+        for on in [true, false] {
+            let err = db.mark_query(999, on).expect_err("不存在的題號要炸");
+            assert!(
+                err.to_string().contains("999"),
+                "錯誤訊息要講出是哪一個題號：{err}"
+            );
+        }
+    }
+
+    /// 「剛剛那一題」在題庫的第一列上，而 `sister mark` 不帶參數標的就是它。
+    ///
+    /// 兩邊各自寫一次 `ORDER BY` 的話，同一秒問完兩題（那正是連按 Enter 的
+    /// 人）就會分岔：清單上第一列是 A，`mark` 標到的是 B，而兩個畫面都說自己
+    /// 對。這一條把它們釘在一起。
+    #[test]
+    fn the_last_question_is_the_one_at_the_top_of_the_log() {
+        let db = test_db();
+        // 同一個 ts，靠 id 決勝負——`ts DESC, id DESC` 兩邊都要是同一句。
+        ask(&db, 1_000, "先問的", 1);
+        let second = ask(&db, 1_000, "後問的", 1);
+
+        let last = db.last_query().expect("last").expect("有問過");
+        assert_eq!(last.id, second);
+        assert_eq!(last.id, db.query_log(1).expect("log")[0].id);
+        assert_eq!(last.question, "後問的");
+    }
+
+    /// 沒問過的時候 `last_query` 是 `None`，不是第 0 題。
+    #[test]
+    fn a_log_with_nothing_in_it_has_no_last_question() {
+        assert!(test_db().last_query().expect("last").is_none());
+    }
+
+    /// 退場條件寫的是「記錄實例」，所以拿得出來的不能只有一個數字。
+    ///
+    /// 兩個時間都要在：她答對的那一刻（`asked_ts`，「七天內」數的是它），和他
+    /// 認出來的那一刻（`marked_ts`，排序照它——最近想起來的排前面）。
+    #[test]
+    fn the_instances_come_back_with_both_of_their_timestamps() {
+        let db = test_db();
+        let a = ask(&db, 1_000, "第一次神奇", 2);
+        let b = ask(&db, 2_000, "第二次神奇", 5);
+        db.mark_query(a, true).expect("mark a");
+        db.mark_query(b, true).expect("mark b");
+
+        let marked = db.marked_queries(10).expect("marked");
+        assert_eq!(marked.len(), 2);
+        // 標記時間都是 `now_ms()`，測試裡兩題同一毫秒是常態——所以只斷言集合，
+        // 順序那一半由 `marked_ts DESC, id DESC` 的 `id` 決勝負來保證。
+        assert_eq!(marked[0].id, b, "同一毫秒標的，後面那一題排前面");
+        for m in &marked {
+            assert_eq!(m.asked_ts, if m.id == a { 1_000 } else { 2_000 });
+            assert!(m.marked_ts > 0, "標記自己的時間沒寫進去");
+            assert!(m.question.contains("神奇"));
+        }
+        assert_eq!(marked.iter().find(|m| m.id == b).expect("b").hits, 5);
+    }
+
+    /// 忘掉那一段時間，掛在那幾題上的標記要跟著走。
+    ///
+    /// 這裡靠的是 `ON DELETE CASCADE` + `PRAGMA foreign_keys=ON`，而那個 pragma
+    /// 是在 [`Db::init`] 裡設的——不是 schema 的一部分，是連線的一部分。哪天有
+    /// 人開了一條沒設它的連線，這一條會紅在「標記還在」。
+    #[test]
+    fn a_forgotten_question_takes_its_mark_with_it() {
+        let mut db = test_db();
+        let q = ask(&db, 1_000, "會被忘掉", 2);
+        db.mark_query(q, true).expect("mark");
+        db.forget(500, 2_000, None).expect("forget");
+
+        let orphans: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM query_marks", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(orphans, 0, "題目沒了，標記卻還掛在那裡");
+        assert_eq!(db.query_log_stats().expect("stats").marked, 0);
+    }
+
+    /// **點開出處不等於「我本來已經忘了」。**
+    ///
+    /// 這兩個訊號在 `sister queries` 上是相鄰的兩行，而它們講的是相反的事：
+    /// 點開證據最常發生在她答錯、或他在查核的時候。任何一天有人為了「少一張
+    /// 表」把它們併在一起，這一條會紅。
+    #[test]
+    fn a_click_is_not_a_magic_moment() {
+        let db = test_db();
+        let clicked = ask(&db, 1_000, "我點開去查核的", 3);
+        let magic = ask(&db, 2_000, "我本來已經忘了的", 1);
+        db.log_click(clicked, 7, 0).expect("click");
+        db.mark_query(magic, true).expect("mark");
+
+        let s = db.query_log_stats().expect("stats");
+        assert_eq!(s.clicked, 1);
+        assert_eq!(s.marked, 1);
+        let marked = db.marked_queries(10).expect("marked");
+        assert_eq!(marked.len(), 1);
+        assert_eq!(marked[0].id, magic, "被標記的是那一題，不是被點開的那一題");
+
+        // **兩欄都要斷言，而且要往相反的方向。** 只寫「被點開的那一題沒有被標
+        // 記」的話，一個把 `marked` 讀成永遠 `false` 的改法會讓這一條全綠——而
+        // 那正是這條測試要擋的東西的另一半（實測過：那個突變殺得掉隔壁三條，
+        // 殺不掉這一條）。
+        let log = db.query_log(10).expect("log");
+        let row = |id: i64| log.iter().find(|r| r.id == id).expect("在清單上");
+        assert_eq!(row(clicked).clicks, 1);
+        assert!(!row(clicked).marked, "點開不會自己變成標記");
+        assert_eq!(row(magic).clicks, 0, "標記不會自己變成點擊");
+        assert!(row(magic).marked, "標了的那一題在清單上沒有標記");
+    }
+
     /// **一場全程被排除規則擋掉的錄製，不是一顆空的資料庫。**
     ///
     /// `sister stats` 上那句「她錄過，而現在這顆資料庫裡一列都不剩」第一版問的
@@ -4494,6 +4825,7 @@ mod tests {
             ("facts", "text_chunks 長出來的，母體已經在名單上"),
             ("queries", "他打的字，而且會在清空之後才長出來"),
             ("query_clicks", "同上，掛在 queries 底下"),
+            ("query_marks", "他按的那個位元，一樣掛在 queries 底下"),
             ("text_fts", "text_chunks 的索引"),
             ("text_fts_uni", "text_chunks 的索引"),
             ("text_fts_bi", "text_chunks 的索引"),

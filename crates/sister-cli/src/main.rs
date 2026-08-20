@@ -105,8 +105,31 @@ enum Command {
         /// 只看她一筆都沒找到的那些
         #[arg(long)]
         empty: bool,
+        /// 只看你標記過「我本來已經忘了」的那些
+        #[arg(long)]
+        marked: bool,
         #[arg(long)]
         json: bool,
+    },
+
+    /// 「這一題我本來已經忘了」——標記一次她真的幫上忙的時刻
+    ///
+    /// PHASES.md Phase 1 的第一條退場條件是「自用 7 天內 ≥ 3 次答對我自己都忘
+    /// 掉的東西」，而那件事**只有你知道**：題庫記得住你問了什麼、她給了幾筆、
+    /// 你點開了哪一個出處，記不住你當時知不知道那個答案。點開出處也不是它——
+    /// 那件事最常發生在她答錯、或你在查核的時候。
+    ///
+    /// 一個禮拜之後回頭補不了：那是你看到答案那一刻腦袋裡的狀態。所以它是一個
+    /// 當下按的按鈕，不是一份事後的問卷。
+    ///
+    /// 不帶參數就是標記你**剛剛問的那一題**。標錯了就 `--undo`。
+    Mark {
+        /// 標哪一題（`sister queries` 每一列開頭那個 `#N`）。不給就是最近那一題
+        #[arg(long, value_name = "題號")]
+        id: Option<i64>,
+        /// 收回這個標記
+        #[arg(long)]
+        undo: bool,
     },
 
     /// 她記了多少東西、佔了多少空間
@@ -273,7 +296,15 @@ fn main() -> Result<()> {
             limit,
             json,
         } => ops::facts::run(&data_dir, kind.as_deref(), search.as_deref(), limit, json),
-        Command::Queries { limit, empty, json } => ops::queries::run(&data_dir, limit, empty, json),
+        Command::Queries {
+            limit,
+            empty,
+            marked,
+            json,
+        } => ops::queries::run(&data_dir, limit, empty, marked, json),
+        Command::Mark { id, undo } => {
+            ops::mark::run(&data_dir, id, !undo, config()?.privacy.query_log)
+        }
         Command::Stats { json } => ops::stats::run(&data_dir, &config()?, json),
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config()?, dry_run),
         Command::Export { to, with_frames } => ops::export::run(&data_dir, &to, with_frames),

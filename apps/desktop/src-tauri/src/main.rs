@@ -1858,6 +1858,24 @@ fn log_click(
     })
 }
 
+/// 他說「這一題我本來已經忘了」（或者收回那句話）。
+///
+/// PHASES.md Phase 1 的第一條退場條件是「自用 7 天內 ≥ 3 次答對我自己都忘掉的
+/// 東西」，而那件事只有他知道——題庫裡沒有任何一欄答得出來。
+///
+/// **和 [`log_click`] 的失敗處理相反。** 點擊是 fire-and-forget：他要的是那張
+/// 畫面，記不記得到帳是次要的。這裡他要的**就是**記這一筆——記不進去而畫面裝
+/// 作記進去了，等於在退場條件的證據上說謊。所以錯誤要回到畫面上。
+#[tauri::command(async)]
+fn mark_query(query_id: i64, marked: bool, shell: tauri::State<'_, Shell>) -> Result<bool, String> {
+    with_db(&shell, |db| {
+        db.mark_query(query_id, marked).map_err(|e| {
+            tracing::warn!("這一次標記沒記進題庫：{e}");
+            format!("{e:#}")
+        })
+    })
+}
+
 /// 開一個看圖的視窗。
 ///
 /// 為什麼是另一個視窗：字母人只有 340 像素寬，一張 2560×1440 的畫面縮進去
@@ -1984,6 +2002,7 @@ fn main() {
             ask,
             open_frame,
             log_click,
+            mark_query,
             frame_image,
             pause_state,
             recording_state,
