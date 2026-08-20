@@ -290,24 +290,6 @@ impl Emptiness {
     }
 }
 
-/// **清空之後還站在 `sessions` 那張表上的那幾列，全都是空殼。**
-///
-/// `retention::delete_empty_sessions` 不准碰 `ended_at IS NULL AND id = MAX(id)`
-/// 的那一列——那可能是此刻正在錄的那一場，刪掉它，接下來每一列的 `session_id`
-/// 都會指向一個不存在的東西。而**當掉的那一場**長得一模一樣，所以它也留下來
-/// 了：一列沒有正常收尾、裡面一個東西都不剩的紀錄。
-///
-/// 條件只要兩句：她記下來的東西一列都不剩，而那張表還有列。有東西的那一場會
-/// 讓前半句是假的，所以這時候剩下的每一列都必然是空殼——不必再去問一次
-/// `ended_at`。
-///
-/// 為什麼要講出來：不講的話，`stats` 上就會有一個「工作階段 1」站在一整排 0
-/// 旁邊，而正上方那個 ⚠ 剛說完「她記下來的東西現在一列都不剩」。那個 1 是這
-/// 一頁上唯一一個和旁邊每個數字說相反話的數字，而它其實只是個殼。
-fn only_session_shells_left(s: &sister_core::db::DbStats) -> bool {
-    s.sessions > 0 && s.nothing_recorded_left()
-}
-
 /// 那一列為什麼還在——**兩種可能**，而兩邊要嘛都給，要嘛都不給。
 ///
 /// 標點留給呼叫端（一個要括號、一個要破折號），這裡只管那組可能性：只講「當
@@ -1265,10 +1247,10 @@ pub mod forget {
 
     /// 刪完之後，`sessions` 那張表上還剩什麼——沒有的話回 `None`。
     ///
-    /// 見 [`only_session_shells_left`]。這一句只在「窗裡的東西被刪光、而那張表
+    /// 見 [`sister_core::db::DbStats::only_session_shells_left`]。這一句只在「窗裡的東西被刪光、而那張表
     /// 還有列」的時候出現，也就是那一場沒有正常收尾（當掉，或她此刻正在錄）。
     fn session_shell_note(s: &sister_core::db::DbStats) -> Option<String> {
-        only_session_shells_left(s).then(|| {
+        s.only_session_shells_left().then(|| {
             format!(
                 "  留著 {} 場錄製的紀錄本身：那一場沒有正常收尾（{}），裡面一列都不剩。\n     \
                  `sister stats` 的「工作階段」會是這個數字。**下次她再開始錄**，那一列就\
@@ -2620,11 +2602,12 @@ pub mod stats {
 
     /// 「工作階段」整行——**數字和那個但書綁在一起**。
     ///
-    /// 見 [`only_session_shells_left`]：清空之後還站著的那幾列全是空殼，而這一
+    /// 見 [`sister_core::db::DbStats::only_session_shells_left`]：清空之後還站著的
+    /// 那幾列全是空殼，而這一
     /// 頁上其他每一個數字都是 0。少了但書，這個 1 讀起來就像「她還記得那一
     /// 場」，而正上方那個 ⚠ 才剛說完一列都不剩。
     fn sessions_line(s: &sister_core::db::DbStats) -> String {
-        if only_session_shells_left(s) {
+        if s.only_session_shells_left() {
             format!(
                 "  工作階段  {}（空殼：那一場沒有正常收尾——{}）",
                 s.sessions,

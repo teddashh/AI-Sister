@@ -2663,6 +2663,25 @@ impl DbStats {
             && *input_windows == 0
             && *system_events == 0
     }
+
+    /// **`sessions` 上還站著的那幾列，全都是空殼。**
+    ///
+    /// [`retention::delete_empty_sessions`](crate::retention) 不准碰
+    /// `ended_at IS NULL AND id = MAX(id)` 的那一列——那可能是此刻正在錄的那一
+    /// 場，刪掉它，接下來每一列的 `session_id` 都會指向一個不存在的東西。而
+    /// **當掉的那一場**長得一模一樣，所以它也留下來了：一列沒有正常收尾、裡面
+    /// 一個東西都不剩的紀錄。
+    ///
+    /// 條件只要兩句：她記下來的東西一列都不剩，而那張表還有列。有東西的那一場
+    /// 會讓前半句是假的，所以這時候剩下的每一列都必然是空殼——不必再去問一次
+    /// `ended_at`（也問不到，[`DbStats`] 上沒有那一欄）。
+    ///
+    /// 住在這裡而不是在某個 surface 裡，是因為講這句話的地方不只一個：`sister
+    /// forget` 刪完那一行、`sister stats` 的「工作階段」、字母人時間軸上那份
+    /// 刪除結果。同一個判斷抄三次，遲早會有一份先被改到。
+    pub fn only_session_shells_left(&self) -> bool {
+        self.sessions > 0 && self.nothing_recorded_left()
+    }
 }
 
 #[cfg(test)]
@@ -3468,6 +3487,32 @@ mod tests {
             st.nothing_recorded_left(),
             "但一個空殼不是她記下來的東西——留著它不可以讓那一整天看起來沒被刪過"
         );
+        // 刪不掉就要講得出來。三個 surface 靠這一句決定要不要多講一行。
+        assert!(
+            st.only_session_shells_left(),
+            "那一列還在，而且是個殼——`forget`、`stats`、時間軸都要說得出這件事"
+        );
+    }
+
+    /// 反面：她**還記著東西**的那一場，不是殼。
+    ///
+    /// 少了這一條，把那個述詞寫成 `sessions > 0` 也一樣綠——然後每一顆正常的
+    /// 資料庫都會被標上「空殼」，而那是一句關於「你的東西還在不在」的假話。
+    #[test]
+    fn a_session_that_still_holds_something_is_not_a_shell() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let f = frame_with_text(1_000, "chrome.exe", "帳單", &["本期應繳 NT$1,234"]);
+        db.insert_frame(s, &f, None, 0).expect("insert");
+
+        let st = db.stats().expect("stats");
+        assert_eq!(st.sessions, 1);
+        assert!(!st.only_session_shells_left(), "她記著東西，那一場不是殼");
+
+        // 一列都沒有的時候也不是——沒有殼可以講。
+        let empty = test_db().stats().expect("stats");
+        assert_eq!(empty.sessions, 0);
+        assert!(!empty.only_session_shells_left());
     }
 
     #[test]

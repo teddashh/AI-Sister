@@ -230,6 +230,10 @@ fn last_recording_end(shell: tauri::State<'_, Shell>) -> Option<LastRun> {
 /// 於是一個把整顆資料庫忘光的人會拿到「她還沒記得任何東西。跑 sister record
 /// 之後再回來看。」——叫他重做一件他剛剛才故意做掉的事。
 ///
+/// 反過來也不能拿它當「她錄過嗎」：最後一場**當掉**的話，那一列撐得過
+/// `forget`（那道守衛不准碰還沒收尾的最新一列，因為那可能是此刻正在錄的那一
+/// 場），於是同一顆被清空的資料庫會因為「上一場有沒有當掉」給出兩種答案。
+///
 /// 這一支問的是 `meta` 裡那個位元：沒有時間、沒有長度，忘不掉也重建不出東西。
 #[tauri::command(async)]
 fn has_ever_recorded(shell: tauri::State<'_, Shell>) -> bool {
@@ -1572,6 +1576,13 @@ struct Erasure {
     /// 「12 張畫面（1.8 MB）」而結果一張都沒提，中間那個落差沒有人解釋——
     /// 而那正是他拿來對帳的兩個數字。CLI 早就有這一行。
     missing: u64,
+    /// 刪完之後**沒被帶走**的那幾列 `sessions`——見
+    /// [`DbStats::only_session_shells_left`](sister_core::db::DbStats::only_session_shells_left)。
+    ///
+    /// `None` 不是 0：預覽算不出這個（它一列都不動，沒有「刪完之後」可言）。
+    /// 兩種意思寫成同一個 0 的話，這裡就變成它自己要修的那個 bug——`Some(0)`
+    /// 是「沒有東西留下來」，`None` 是「這一趟沒有問這個問題」。
+    sessions_left: Option<u64>,
 }
 
 impl From<sister_core::retention::PruneReport> for Erasure {
@@ -1587,6 +1598,9 @@ impl From<sister_core::retention::PruneReport> for Erasure {
             sessions: r.sessions_deleted,
             failed: r.failed,
             missing: r.missing,
+            // 這一支只看得到「刪掉了什麼」。留下什麼要再問一次資料庫，所以
+            // 預設是「沒問」，由 `forget_range` 補上。
+            sessions_left: None,
         }
     }
 }
@@ -1636,9 +1650,23 @@ fn forget_range(
         .ok_or_else(|| "找不到資料目錄，不能保證截圖真的會被刪掉".to_string())?;
     let frames = sister_core::config::Config::frames_dir(dir);
     with_db_mut(&shell, |db| {
-        db.forget(from_ts, to_ts, Some(&frames))
-            .map(Erasure::from)
-            .map_err(|e| format!("{e:#}"))
+        let report = db
+            .forget(from_ts, to_ts, Some(&frames))
+            .map_err(|err| format!("{err:#}"))?;
+        // **沒被帶走的那一列也要講。** 上一場當掉的話，那一列 `sessions` 撐得
+        // 過這一刀（守衛不准碰還沒收尾的最新一列，因為那可能是此刻正在錄的那
+        // 一場）。少了這一欄，這一頁只列得出刪掉的東西，他要到別的地方才會撞
+        // 見一個「1 場錄製」站在一整排 0 旁邊。CLI 那邊是同一句話。
+        let stats = db.stats().map_err(|err| format!("{err:#}"))?;
+        let left = if stats.only_session_shells_left() {
+            stats.sessions as u64
+        } else {
+            0
+        };
+        Ok(Erasure {
+            sessions_left: Some(left),
+            ..Erasure::from(report)
+        })
     })
 }
 

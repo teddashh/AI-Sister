@@ -398,6 +398,24 @@ function ghosts(e) {
   return e.missing > 0 ? `（另外 ${e.missing} 列說自己有圖，但那個檔早就不在磁碟上了）` : "";
 }
 
+/**
+ * 刪完之後**沒被帶走**的那幾列 `sessions`。
+ *
+ * 上一場當掉的話，那一列撐得過這一刀：守衛不准碰還沒收尾的最新一列，因為那
+ * 可能是此刻正在錄的那一場，刪掉它會讓接下來每一筆紀錄指向一個不存在的東西。
+ * 而當掉的那一場長得一模一樣。
+ *
+ * 少了這一句，這一頁只列得出刪掉的東西——他會在別的地方撞見一個「1 場錄製」
+ * 站在一整排 0 旁邊，而那時候沒有東西把它接回這一刀。`sister forget` 那邊是
+ * 同一句話。
+ *
+ * `sessions_left` 是 `null` 代表**沒問過**（預覽算不出「刪完之後」），不是 0。
+ */
+function leftover(e) {
+  if (!e.sessions_left) return "";
+  return `（留著 ${e.sessions_left} 場錄製的紀錄本身：那一場沒有正常收尾——當掉了，或是她此刻正在錄——裡面一列都不剩。下次開始錄的時候它會跟著清掉。）`;
+}
+
 async function forget() {
   const range = chosen();
   if (range === null || invoke === null) return;
@@ -442,9 +460,12 @@ async function forget() {
       // 刪不掉的截圖還躺在磁碟上，而他以為它不在了。這句要蓋過成功那句。
       tell(`有 ${e.failed.length} 個畫面檔刪不掉：${e.failed[0]}`, true);
     } else if (done.length === 0) {
-      tell("沒有東西被刪掉。");
+      // 這裡也要接 `leftover(e)`：一段只剩下那一列空殼的時間刪下去，`done`
+      // 是空的（守衛不准碰它），而畫面說「沒有東西被刪掉」——那一列還在，
+      // 卻沒有任何一句話提到它。
+      tell(`沒有東西被刪掉。${leftover(e)}`);
     } else {
-      tell(`刪掉了 ${done.join("、")}。${ghosts(e)}`);
+      tell(`刪掉了 ${done.join("、")}。${ghosts(e)}${leftover(e)}`);
     }
   } catch (err) {
     tell(String(err?.message ?? err), true);
@@ -529,6 +550,11 @@ async function load(keep = null) {
       // 跟著它記下來的東西一起消失（保留期和「忘掉」都刪），所以「上一場是
       // 什麼時候」在整顆資料庫被清空之後是 `null` ——而那正是這一行最需要
       // 答對的時候。
+      //
+      // 而且 `sessions` 也不是每次都乾淨：最後一場當掉的話，那一列撐得過
+      // `forget`（`delete_empty_sessions` 不准碰還沒收尾的最新一列，因為那
+      // 可能是此刻正在錄的那一場）。拿它當「她錄過嗎」的話，同一顆被清空的
+      // 資料庫會因為「上一場有沒有當掉」給出兩種答案。那個位元不會。
       const ever = await invoke("has_ever_recorded").catch(() => false);
       if (ever) {
         el.railSay.textContent = "現在一天都沒有了。";
@@ -711,6 +737,21 @@ function fakeBackend(mode = "1") {
           queries: Math.ceil(gone.length / 4),
           failed: [],
           missing,
+          // 「那一場錄製」本身，以及**沒被帶走的那一列**。
+          //
+          // 刪到整份 demo 一個 moment 都不剩的時候，模擬的是「最後一場當掉
+          // 了」：那一列撐得過這一刀（`delete_empty_sessions` 不准碰還沒收尾
+          // 的最新一列），於是刪掉 0 場、留下 1 場。刪一半的時候相反。
+          //
+          // 這兩行在開發機上唯一看得到的地方就是這裡——Tauri 起不來，真後端
+          // 的那個狀態要一台 Windows 加一次當機才生得出來。
+          sessions: cmd === "forget_range" && moments.length === 0 ? 0 : 1,
+          sessions_left:
+            cmd === "forget_preview"
+              ? null // 預覽不動任何東西，沒有「刪完之後」可言。不是 0。
+              : moments.length === 0
+                ? 1
+                : 0,
         };
       }
       default:
