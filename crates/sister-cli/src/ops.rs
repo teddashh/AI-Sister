@@ -290,6 +290,33 @@ impl Emptiness {
     }
 }
 
+/// **清空之後還站在 `sessions` 那張表上的那幾列，全都是空殼。**
+///
+/// `retention::delete_empty_sessions` 不准碰 `ended_at IS NULL AND id = MAX(id)`
+/// 的那一列——那可能是此刻正在錄的那一場，刪掉它，接下來每一列的 `session_id`
+/// 都會指向一個不存在的東西。而**當掉的那一場**長得一模一樣，所以它也留下來
+/// 了：一列沒有正常收尾、裡面一個東西都不剩的紀錄。
+///
+/// 條件只要兩句：她記下來的東西一列都不剩，而那張表還有列。有東西的那一場會
+/// 讓前半句是假的，所以這時候剩下的每一列都必然是空殼——不必再去問一次
+/// `ended_at`。
+///
+/// 為什麼要講出來：不講的話，`stats` 上就會有一個「工作階段 1」站在一整排 0
+/// 旁邊，而正上方那個 ⚠ 剛說完「她記下來的東西現在一列都不剩」。那個 1 是這
+/// 一頁上唯一一個和旁邊每個數字說相反話的數字，而它其實只是個殼。
+fn only_session_shells_left(s: &sister_core::db::DbStats) -> bool {
+    s.sessions > 0 && s.nothing_recorded_left()
+}
+
+/// 那一列為什麼還在——**兩種可能**，而兩邊要嘛都給，要嘛都不給。
+///
+/// 標點留給呼叫端（一個要括號、一個要破折號），這裡只管那組可能性：只講「當
+/// 掉了」會讓一個正在錄的人以為自己剛剛掛掉，只講「正在錄」會讓一個沒在錄的
+/// 人去找一個不存在的行程。他分得出自己是哪一種，這幾行分不出來。
+fn session_shell_why() -> &'static str {
+    "當掉了，或是她此刻正在錄"
+}
+
 pub mod consent {
     use super::*;
     use sister_core::config::Config;
@@ -1236,6 +1263,22 @@ pub mod forget {
     use super::*;
     use sister_core::Millis;
 
+    /// 刪完之後，`sessions` 那張表上還剩什麼——沒有的話回 `None`。
+    ///
+    /// 見 [`only_session_shells_left`]。這一句只在「窗裡的東西被刪光、而那張表
+    /// 還有列」的時候出現，也就是那一場沒有正常收尾（當掉，或她此刻正在錄）。
+    fn session_shell_note(s: &sister_core::db::DbStats) -> Option<String> {
+        only_session_shells_left(s).then(|| {
+            format!(
+                "  留著 {} 場錄製的紀錄本身：那一場沒有正常收尾（{}），裡面一列都不剩。\n     \
+                 `sister stats` 的「工作階段」會是這個數字。**下次她再開始錄**，那一列就\
+                 不再是最新的一列，開錄時自動跑的那次 `sister prune` 會把它帶走。",
+                s.sessions,
+                session_shell_why()
+            )
+        })
+    }
+
     /// `30m`／`2h`／`7d` → 毫秒。
     ///
     /// **單位不可以省。** 「`--last 30`」看起來像 30 分鐘，也一樣像 30 天，
@@ -1349,6 +1392,17 @@ pub mod forget {
 
         let report = db.forget(from, to, Some(&prune::frames_dir(data_dir)))?;
         prune::print_report(&report, false);
+        // **沒被帶走的那一列，也要當場說。** 報告只講刪掉了什麼，於是「那一場
+        // 當掉了所以留下來」這件事在這裡是靜音的——他下一次跑 `sister stats`
+        // 才會看到一個「工作階段 1」站在一整排 0 旁邊，而那時候沒有任何東西
+        // 把它接回這一刀。
+        //
+        // 預覽那邊不必配一句：`count_empty_sessions` 帶著同一道守衛（見
+        // `retention.rs` 的 `delete_empty_sessions`），所以它從頭到尾就沒有
+        // 答應過要刪這一列。這裡補的是「答應之外還剩什麼」。
+        if let Some(line) = session_shell_note(&db.stats()?) {
+            println!("{line}");
+        }
 
         if recording {
             println!(
@@ -1384,6 +1438,39 @@ pub mod forget {
             for s in ["", "h", "0h", "-3d", "abc", "2w", "2 h"] {
                 assert!(parse_span(s).is_err(), "{s:?} 不該被讀成一段時間");
             }
+        }
+
+        /// **報告只講刪掉了什麼，於是「沒刪掉的那一列」是靜音的。**
+        ///
+        /// 最後一場當掉的話，`forget` 把窗裡的東西全帶走，卻印不出任何一句和
+        /// 那一列有關的話——他要到下一次 `sister stats` 才看到「工作階段 1」，
+        /// 而那時候已經沒有東西把它接回這一刀了。
+        #[test]
+        fn a_session_row_that_survives_the_erasure_is_disclosed_on_the_spot() {
+            let note = session_shell_note(&sister_core::db::DbStats {
+                sessions: 1,
+                ..Default::default()
+            })
+            .expect("留下來就要說");
+            assert!(note.contains('1'), "{note}");
+            assert!(
+                note.contains("工作階段"),
+                "要接得回 `stats` 上那一行：{note}"
+            );
+
+            // 東西還在的時候沒有這一句：那一場不是殼，它本來就該留著。
+            assert!(
+                session_shell_note(&sister_core::db::DbStats {
+                    sessions: 1,
+                    chunks: 6,
+                    ..Default::default()
+                })
+                .is_none(),
+                "她還記著 6 段字，那一場不是空殼"
+            );
+            // 整張表空了也沒有這一句——`delete_empty_sessions` 帶走了，
+            // 而報告裡「刪掉了 N 場錄製的紀錄本身」那一行才是講它的。
+            assert!(session_shell_note(&sister_core::db::DbStats::default()).is_none());
         }
     }
 }
@@ -2531,6 +2618,23 @@ pub mod stats {
     use crate::fmt;
     use sister_core::config::Config;
 
+    /// 「工作階段」整行——**數字和那個但書綁在一起**。
+    ///
+    /// 見 [`only_session_shells_left`]：清空之後還站著的那幾列全是空殼，而這一
+    /// 頁上其他每一個數字都是 0。少了但書，這個 1 讀起來就像「她還記得那一
+    /// 場」，而正上方那個 ⚠ 才剛說完一列都不剩。
+    fn sessions_line(s: &sister_core::db::DbStats) -> String {
+        if only_session_shells_left(s) {
+            format!(
+                "  工作階段  {}（空殼：那一場沒有正常收尾——{}）",
+                s.sessions,
+                session_shell_why()
+            )
+        } else {
+            format!("  工作階段  {}", s.sessions)
+        }
+    }
+
     /// 要 `Config` 是為了底下那一行「遮蔽」。
     ///
     /// `redaction_audit` 數的是「插了旗子的有幾列」，而**旗子只有在
@@ -2693,7 +2797,10 @@ pub mod stats {
                 span_days
             );
         }
-        println!("  工作階段  {}", s.sessions);
+        // 整句在 `sessions_line`——數字和那個但書要嘛一起印，要嘛一起不印。
+        // 拆成「印數字」加「如果……再印一句」的話，那個 `if` 就落在呼叫端，而
+        // 這一批 bug 六次有六次犯在呼叫端。
+        println!("{}", sessions_line(&s));
         println!(
             "  畫面      {} 張保留，{} 張因重複被折疊",
             s.frames, s.frames_collapsed
@@ -2969,6 +3076,66 @@ pub mod stats {
             ),
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use sister_core::db::DbStats;
+
+        /// **一整排 0 旁邊那個 1。**
+        ///
+        /// 他跑完 `sister forget --last 24h --yes`，而最後一場錄製當掉過
+        /// （`ended_at IS NULL` 而且是最新的一場）。`delete_empty_sessions` 不
+        /// 准碰那一列，於是這一頁長成：
+        ///
+        /// ```text
+        ///   ⚠  她**錄過**，而她記下來的東西現在一列都不剩
+        ///   工作階段  1
+        ///   畫面      0 張保留，0 張因重複被折疊
+        ///   文字      0 段
+        /// ```
+        ///
+        /// 那個 1 是這一頁上唯一一個不是 0 的數字，讀起來像「有一場還在」。
+        #[test]
+        fn the_session_that_outlived_an_erasure_is_marked_as_a_shell() {
+            let erased = DbStats {
+                sessions: 1,
+                ..Default::default()
+            };
+            let line = sessions_line(&erased);
+            assert!(line.contains('1'), "數字還是要印：{line}");
+            assert!(
+                line.contains("空殼"),
+                "清空之後剩下的那一列是個殼，這一行得說出來：{line}"
+            );
+            assert!(
+                line.contains("正在錄") && line.contains("當掉"),
+                "兩種可能都要給——他分得出自己是哪一種，這一頁分不出來：{line}"
+            );
+
+            // 而她真的記著東西的時候，這個但書一個字都不准出現：那會把一場
+            // 好好的錄製講成一個殼。
+            for has in [
+                DbStats {
+                    sessions: 1,
+                    chunks: 6,
+                    ..Default::default()
+                },
+                DbStats {
+                    sessions: 2,
+                    frames: 1,
+                    ..Default::default()
+                },
+            ] {
+                let line = sessions_line(&has);
+                assert!(!line.contains("空殼"), "她記著東西：{line}");
+                assert_eq!(line, format!("  工作階段  {}", has.sessions));
+            }
+
+            // 一列都沒有的時候也不准講——沒有殼可以講。
+            assert_eq!(sessions_line(&DbStats::default()), "  工作階段  0");
+        }
     }
 }
 

@@ -1201,6 +1201,54 @@ mod tests {
         );
     }
 
+    /// **當掉的那一場留下的空殼，要等到下一場開始才走得掉。**
+    ///
+    /// `sister forget` 現在會當場把這一列講出來（`ops.rs` 的
+    /// `session_shell_note`），而那句話裡有一個承諾：「下次她再開始錄，那一列
+    /// 就不再是最新的一列，開錄時自動跑的那次 `sister prune` 會把它帶走。」
+    ///
+    /// 那句話是這裡的守衛推導出來的，不是量出來的——所以要有一條把它釘住。
+    /// 上一版寫的是「下次她正常收工的時候就會跟著走」，那是假的：
+    /// [`crate::db::Db::end_session`] 只掃**它自己那一場**（`Some(id)`），碰不
+    /// 到別人留下的殼。一句關於「你的資料什麼時候會消失」的假話，比不講還糟。
+    #[test]
+    fn the_shell_a_crash_left_behind_goes_on_the_next_recording() {
+        let mut db = Db::open_in_memory().expect("db");
+        let crashed = db.start_session("test", "0.0.1").expect("session");
+        db.insert_frame(crashed, &frame(days_ago(1), "帳單"), None, 0)
+            .expect("insert");
+        // 當掉：`end_session` 沒有被呼叫過，`ended_at` 空著。
+        db.forget(days_ago(500), days_ago(0), None).expect("forget");
+        assert_eq!(
+            db.stats().expect("stats").sessions,
+            1,
+            "先確定那個殼真的還在——不然底下驗的是別件事"
+        );
+
+        let retention = RetentionConfig {
+            frames_days: 30,
+            text_days: 365,
+        };
+        // 它還是最新的一列，所以這一次不准動它：這時候它和「此刻正在錄的那
+        // 一場」在資料庫裡分不出來，而刪掉一個活著的錄製會扯斷外鍵。
+        db.prune(NOW, &retention, None).expect("prune");
+        assert_eq!(
+            db.stats().expect("stats").sessions,
+            1,
+            "還是最新的一列的時候不准碰——那可能是正在錄的那一場"
+        );
+
+        // 下一場開始了，它就不再是 `MAX(id)`——承諾在這裡兌現。
+        let live = db.start_session("test", "0.0.1").expect("session");
+        db.insert_frame(live, &frame(days_ago(0), "現在"), None, 0)
+            .expect("insert");
+        let r = db.prune(NOW, &retention, None).expect("prune");
+        assert_eq!(r.sessions_deleted, 1, "{r:?}");
+        let s = db.stats().expect("stats");
+        assert_eq!(s.sessions, 1, "剩下的是正在錄的那一場，不是那個殼");
+        assert!(!s.nothing_recorded_left(), "而這一場有東西");
+    }
+
     /// FTS 是文字的**另一份副本**。刪 chunk 而索引沒跟著掉，等於資料
     /// 明明已經「刪掉」卻還搜得到——一個看起來像鬧鬼的隱私漏洞。
     #[test]

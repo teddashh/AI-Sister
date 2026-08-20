@@ -108,55 +108,102 @@ jobs:
       - name: An erased database must not look like one that never recorded
         run: |
           set -euo pipefail
-          S="cargo run -q -p sister-cli -- --data-dir ./ci-erased"
-          $S replay scenarios/bill-lookup.json --interval-ms 500 > /dev/null
-          $S query 帳單 > /dev/null
-          $S forget --last 24h --yes | tee forget.txt
+          cargo build -q -p sister-cli
+          B=./target/debug/sister
+
+          # **斷言寫一次，資料庫餵好幾顆。** 漏掉的從來不是斷言，是**沒有一顆
+          # 資料庫走到那個狀態**：上一版這幾條全都對，但它只造得出「乾淨收尾
+          # 之後清空」那一種，而 `sessions` 那個 bug 只在「當掉之後清空」才長
+          # 出來。新的漏法要加的是底下的 fixture，不是這裡。
+          check() {
+            local dir="$1" what="$2"
+            $B --data-dir "$dir" stats  > s.txt
+            $B --data-dir "$dir" doctor > d.txt
+            $B --data-dir "$dir" facts  > f.txt
+            # `她(\*\*)?錄過`：`stats` 那一行是 `她**錄過**`（markdown 粗體），
+            # `她錄過` 這個 literal 對它沒中。中間那個 `**` 要放進來，`還沒`
+            # 不可以——`她還沒錄過` 正是這幾條要抓的東西。
+            for x in s.txt f.txt; do
+              grep -qE '她(\*\*)?錄過' "$x" \
+                || { echo "::error::[$what] $x 沒說出「她錄過」——清空過的資料庫又長得像全新的了"; exit 1; }
+            done
+            # 指名那一列。`不在了` 光是「零當機」和三個訊號稽核就有（那幾列讀
+            # 的是原始的 `ever`），不指名的話「已記錄」整列壞掉它照樣綠。
+            grep -q '已記錄.*一列都不剩' d.txt \
+              || { echo "::error::[$what] doctor 的「已記錄」沒說出她記的東西去哪了"; exit 1; }
+            # 這幾句只對一台從來沒錄過的機器成立。
+            #
+            # 用 `if grep`，不是 `grep && { exit 1; }`：後者在**沒中**的時候
+            # 整條 `&&` 串回 1，`set -e` 會把它當成整步失敗——也就是程式對的
+            # 時候紅、錯的時候綠。`if` 的條件位置不受 `set -e` 管。
+            for bad in '還沒錄過' '（還沒有任何內容）' '還沒問過任何問題' '等你錄過再驗一次'; do
+              for x in d.txt f.txt s.txt; do
+                if grep -q "$bad" "$x"; then
+                  echo "::error::[$what] $x 對一顆他親手清空的資料庫說了「$bad」"
+                  exit 1
+                fi
+              done
+            done
+          }
+
+          # fixture 1：乾淨收尾之後清空，然後**再問一句話**。
+          # 「真的沒了嗎」是刪完最自然的下一個指令，而它會在 `queries` 留一列。
+          A="$B --data-dir ./ci-erased"
+          $A replay scenarios/bill-lookup.json --interval-ms 500 > /dev/null
+          $A query 帳單 > /dev/null
+          $A forget --last 24h --yes | tee forget.txt
           grep -q '題庫' forget.txt \
             || { echo "::error::forget 沒有帶走題庫——底下那幾條就沒有在驗它們要驗的東西"; exit 1; }
-
-          # `queries` 要趁題庫還空著的時候看——底下那一問會讓它印出列表，
-          # 那時候驗的就不是這一句了。
-          # `她(\*\*)?錄過`：`stats` 那一行是 `她**錄過**`（markdown 粗體），
-          # 而 `她錄過` 這個literal 對它沒中。中間那個 `**` 要放進來，`還沒`
-          # 不可以——`她還沒錄過` 正是這幾條要抓的東西。
-          $S queries > erased-queries.txt
+          # `queries` 要趁題庫還空著的時候看——底下那一問會讓它印出列表。
+          $A queries > erased-queries.txt
           grep -qE '她(\*\*)?錄過' erased-queries.txt \
             || { echo "::error::queries 沒說出她錄過——那三種可能又剩下兩種了"; exit 1; }
           if grep -q '問她幾個問題' erased-queries.txt; then
             echo "::error::queries 叫他去重做一件他刻意做掉的事"
             exit 1
           fi
+          $A query 真的沒了嗎 > /dev/null
+          check ./ci-erased "清空之後又問了一句"
 
-          # 刪完的下一句話。見上面第二段——這一行就是那個回歸。
-          $S query 真的沒了嗎 > /dev/null
-
-          $S stats > erased-stats.txt
-          $S doctor > erased-doctor.txt
-          $S facts > erased-facts.txt
-
-          for f in erased-stats.txt erased-facts.txt; do
-            grep -qE '她(\*\*)?錄過' "$f" \
-              || { echo "::error::$f 沒說出「她錄過」——清空過的資料庫又長得像全新的了"; exit 1; }
-          done
-          # 指名那一列。`不在了` 光是「零當機」和三個訊號稽核就有（那幾列讀的
-          # 是原始的 `ever`），所以不指名的話，「已記錄」整列壞掉它照樣綠。
-          grep -q '已記錄.*一列都不剩' erased-doctor.txt \
-            || { echo "::error::doctor 的「已記錄」沒說出她記的東西去哪了"; exit 1; }
-
-          # 這幾句只對一台從來沒錄過的機器成立。
+          # fixture 2：**當掉**之後清空。`delete_empty_sessions` 不准碰
+          # `ended_at IS NULL AND id = MAX(id)` 的那一列——那可能是此刻正在錄
+          # 的那一場，刪掉它會把一個活著的 recorder 的外鍵扯斷。而**當掉**的
+          # 那一場長得一模一樣，所以它撐得過 `forget`，`sessions` 就成了一個
+          # 「清空之後還是 1」的計數器。
           #
-          # 用 `if grep`，不是 `grep && { exit 1; }`：後者在**沒中**的時候
-          # 整條 `&&` 串回 1，`set -e` 會把它當成整步失敗——也就是程式對的
-          # 時候紅、錯的時候綠。`if` 的條件位置不受 `set -e` 管。
-          for bad in '還沒錄過' '（還沒有任何內容）' '還沒問過任何問題' '等你錄過再驗一次'; do
-            for f in erased-doctor.txt erased-facts.txt erased-stats.txt; do
-              if grep -q "$bad" "$f"; then
-                echo "::error::$f 對一顆他親手清空的資料庫說了「$bad」"
-                exit 1
-              fi
-            done
-          done
+          # 那一列直接改成沒收尾：`replay` 一定乾淨收尾，`record` 要平台擷取
+          # 後端（CI 上沒有），而拿 `timeout` 砍時間就是把 CI 綁在秒數上。要驗
+          # 的是**那個狀態**，那就把那個狀態做出來。
+          C="$B --data-dir ./ci-crashed"
+          $C replay scenarios/bill-lookup.json --interval-ms 500 > /dev/null
+          python3 - <<'EOF'
+          import sqlite3
+          c = sqlite3.connect('./ci-crashed/sister.db')
+          n = c.execute(
+              'UPDATE sessions SET ended_at = NULL WHERE id = (SELECT MAX(id) FROM sessions)'
+          ).rowcount
+          c.commit()
+          assert n == 1, f'沒有工作階段可以弄成當掉的樣子（改到 {n} 列）'
+          EOF
+          $C forget --last 24h --yes > crashed-forget.txt
+          $C stats | grep -q '工作階段  *[1-9]' \
+            || { echo "::error::那一列沒有留下來——這個 fixture 沒驗到它要驗的東西"; exit 1; }
+          check ./ci-crashed "當掉之後清空"
+
+          # 留下來的那一列要**當場**講，不是等他下次跑 `stats` 才自己發現一個
+          # 「工作階段 1」站在一整排 0 旁邊。
+          grep -q '留著 1 場錄製的紀錄本身' crashed-forget.txt \
+            || { echo "::error::forget 沒說出那一列留下來了"; exit 1; }
+          grep -q '空殼' s.txt \
+            || { echo "::error::stats 上那個 1 沒有標成空殼——它是這一頁唯一一個不是 0 的數字"; exit 1; }
+          # 反面：乾淨收尾的那一顆不可以也印「空殼」。少了這條，把那個但書寫成
+          # 無條件的也一樣綠。（`s.txt` 被 `check` 蓋掉了，重印一次。）
+          if $B --data-dir ./ci-erased stats | grep -q '空殼'; then
+            # 單引號：雙引號裡的反引號會被當成指令替換跑掉（上一版在這裡把
+            # `timeout` 跑了一次，錯誤訊息裡多出一段 usage）。
+            echo '::error::那一場好好地收尾了，sessions 那一列也真的被刪掉了，不該有空殼'
+            exit 1
+          fi
 
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
