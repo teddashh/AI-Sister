@@ -2261,44 +2261,42 @@ fn main() {
                         // 那個修法帶來的副作用，而那個修法是對的。所以還要問一次
                         // 行程。
                         //
-                        // 心跳先問完再拿鎖：`recording_state` 現在不碰 `spawned`，
-                        // 但它會去動系統匣，而在鎖裡面呼叫一支會亂跑的函式是下一
-                        // 個人的陷阱。
-                        let beat = recording_state(app.clone(), shell.clone());
-                        {
-                            let mut spawned = shell.spawned.lock().expect("spawned recorder");
-                            let starting_up = beat == "none"
-                                && matches!(
-                                    spawned.as_mut().map(std::process::Child::try_wait),
-                                    Some(Ok(None))
-                                );
-                            // `take` 而不是 `as_mut`：handle 直接搬出來，省掉
-                            // 「殺完再把欄位設回 None」那一步——那一步要在
-                            // `child` 還借著 `spawned` 的時候寫回 `*spawned`。
-                            if starting_up && let Some(mut child) = spawned.take() {
-                                // **這裡可以殺，別處不行。** `control` 那份註解
-                                // 說不要 `TerminateProcess`，理由是會留下一筆永
-                                // 遠不會結束的 session 和一個還在說「我在錄」的
-                                // 心跳。那兩樣東西在這一段都還不存在：一拍都沒
-                                // 寫出來，就表示 `BootBeat::start` 還沒跑完，而
-                                // `Db::open` 排在它後面——沒有開著的資料庫、沒有
-                                // session 列、沒有寫到一半的 WAL。
-                                //
-                                // 剩下的競爭是 try_wait 和 kill 中間它剛好衝進
-                                // `Db::open`。那一刀落在 migration 中間，而
-                                // migration 每一段都是冪等的（#58），WAL 本來就
-                                // 是為了硬砍而存在的——下一次開得起來。
-                                match child.kill() {
-                                    Ok(()) => {
-                                        tracing::info!(
-                                            "結束時砍掉還在起來的 recorder（它還沒開始寫）"
-                                        );
-                                        let _ = child.wait();
-                                    }
-                                    Err(e) => tracing::error!("砍不掉還在起來的 recorder：{e}"),
-                                }
-                            }
-                        }
+                        // **這裡以前會 kill，那是錯的，已經拿掉了。**
+                        //
+                        // 拿掉的理由不是「殺行程很危險」這種泛泛之論，是那個判斷
+                        // 式問錯了問題。它寫的是 `beat == "none"`，而它想問的是
+                        // 「她還沒走到 `Db::open`，所以磁碟上沒有東西會被我砍
+                        // 壞」。這兩句之間靠一條不變式接起來：心跳蓋在 `Db::open`
+                        // **之前**（`BootBeat::start` 在 `ops.rs` 那一行），所以
+                        // 「沒有心跳」本來確實蘊涵「還沒開資料庫」。
+                        //
+                        // 那條不變式是斷的，因為 `heartbeat::stop()` 收工的時候
+                        // **把檔案刪掉**。於是 `none` 同時是三件事：
+                        //
+                        //   1. 她還沒起來        ← 只有這個可以殺
+                        //   2. 她正在乾淨收工——`ops.rs:7722` 刪心跳，`:7737` 的
+                        //      `rec.finish()` 才寫 `end_session`，中間隔著一次能力
+                        //      報告的寫檔
+                        //   3. 她好好的，只是這一拍慢了 16 秒（那次六小時一輪的
+                        //      `prune` 要刪掉磁碟上成千上萬個檔；休眠喚醒也算）
+                        //
+                        // 2 和 3 落刀的代價，正好是 `control` 開頭那段話列出來的：
+                        // `end_session` 永遠是 NULL，於是 `doctor` 說「她當掉了」、
+                        // `stats` 把那一場標成空殼——她沒當掉，是我砍的。而 2 只要
+                        // 按「停止記錄」再按「結束」就會發生，那兩顆按鈕在同一張
+                        // 選單上，中間隔 0.4 秒。
+                        //
+                        // 上面那句 `stop_recording`（無條件寫 `stop.request`）仍然
+                        // 收得掉絕大部分情況：`clear_stop` 是 `BootBeat::start` 的
+                        // 第一行，蓋在心跳**之前**，所以只要她已經蓋過一拍，這個
+                        // 請求就不會被她自己擦掉。漏掉的只剩 spawn 回來到她跑到第
+                        // 一行之間那幾毫秒——那是 #63 本來要收的洞，而它會留一個
+                        // 還在錄的孤兒，不會弄壞任何東西。用「可能砍掉一場正在收
+                        // 尾的錄製」去換它，換反了。
+                        //
+                        // 真的要補那幾毫秒，得先讓「檔案不在」重新只有一個意思
+                        // （收工留個離場記號，而不是刪檔）——那是另一件事，開了
+                        // 一條 task。
                         shell.persist();
                         app.exit(0);
                     }
