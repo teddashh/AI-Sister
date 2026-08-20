@@ -34,12 +34,12 @@ use crate::model::{
 pub const SCHEMA_VERSION: i32 = 5;
 
 const MIGRATION_001: &str = r#"
-CREATE TABLE meta (
+CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
 
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
   id          INTEGER PRIMARY KEY,
   started_at  INTEGER NOT NULL,
   ended_at    INTEGER,
@@ -49,7 +49,7 @@ CREATE TABLE sessions (
 );
 
 -- L0：畫面。image_path 為 NULL 代表 text-only 保留模式。
-CREATE TABLE frames (
+CREATE TABLE IF NOT EXISTS frames (
   id           INTEGER PRIMARY KEY,
   ts           INTEGER NOT NULL,
   session_id   INTEGER REFERENCES sessions(id),
@@ -64,19 +64,19 @@ CREATE TABLE frames (
   window_title TEXT,
   url          TEXT
 );
-CREATE INDEX idx_frames_ts ON frames(ts);
+CREATE INDEX IF NOT EXISTS idx_frames_ts ON frames(ts);
 
 -- L0：OCR 區塊幾何。文字本身另存 text_chunks 供檢索。
-CREATE TABLE ocr_blocks (
+CREATE TABLE IF NOT EXISTS ocr_blocks (
   id         INTEGER PRIMARY KEY,
   frame_id   INTEGER NOT NULL REFERENCES frames(id) ON DELETE CASCADE,
   text       TEXT NOT NULL,
   x INTEGER, y INTEGER, w INTEGER, h INTEGER,
   confidence REAL
 );
-CREATE INDEX idx_ocr_frame ON ocr_blocks(frame_id);
+CREATE INDEX IF NOT EXISTS idx_ocr_frame ON ocr_blocks(frame_id);
 
-CREATE TABLE focus_events (
+CREATE TABLE IF NOT EXISTS focus_events (
   id           INTEGER PRIMARY KEY,
   ts           INTEGER NOT NULL,
   session_id   INTEGER REFERENCES sessions(id),
@@ -87,9 +87,9 @@ CREATE TABLE focus_events (
   url          TEXT,
   pid          INTEGER
 );
-CREATE INDEX idx_focus_ts ON focus_events(ts);
+CREATE INDEX IF NOT EXISTS idx_focus_ts ON focus_events(ts);
 
-CREATE TABLE clipboard_events (
+CREATE TABLE IF NOT EXISTS clipboard_events (
   id               INTEGER PRIMARY KEY,
   ts               INTEGER NOT NULL,
   session_id       INTEGER REFERENCES sessions(id),
@@ -100,10 +100,10 @@ CREATE TABLE clipboard_events (
   secret_suspected INTEGER NOT NULL DEFAULT 0,
   source_app       TEXT
 );
-CREATE INDEX idx_clip_ts ON clipboard_events(ts);
+CREATE INDEX IF NOT EXISTS idx_clip_ts ON clipboard_events(ts);
 
 -- L0：輸入動態。永遠不含按鍵內容，只有節奏與計數。
-CREATE TABLE input_metrics (
+CREATE TABLE IF NOT EXISTS input_metrics (
   id              INTEGER PRIMARY KEY,
   ts_start        INTEGER NOT NULL,
   ts_end          INTEGER NOT NULL,
@@ -116,19 +116,19 @@ CREATE TABLE input_metrics (
   idle_ms         INTEGER NOT NULL DEFAULT 0,
   typing_bursts   INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX idx_input_ts ON input_metrics(ts_start);
+CREATE INDEX IF NOT EXISTS idx_input_ts ON input_metrics(ts_start);
 
-CREATE TABLE system_events (
+CREATE TABLE IF NOT EXISTS system_events (
   id         INTEGER PRIMARY KEY,
   ts         INTEGER NOT NULL,
   session_id INTEGER REFERENCES sessions(id),
   kind       TEXT NOT NULL,
   detail     TEXT
 );
-CREATE INDEX idx_sys_ts ON system_events(ts);
+CREATE INDEX IF NOT EXISTS idx_sys_ts ON system_events(ts);
 
 -- 統一文字層：所有可檢索文字的單一入口（FTS 的 external content）。
-CREATE TABLE text_chunks (
+CREATE TABLE IF NOT EXISTS text_chunks (
   id           INTEGER PRIMARY KEY,
   ts           INTEGER NOT NULL,
   session_id   INTEGER REFERENCES sessions(id),
@@ -140,27 +140,27 @@ CREATE TABLE text_chunks (
   url          TEXT,
   text         TEXT NOT NULL
 );
-CREATE INDEX idx_chunk_ts ON text_chunks(ts);
-CREATE INDEX idx_chunk_frame ON text_chunks(frame_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_ts ON text_chunks(ts);
+CREATE INDEX IF NOT EXISTS idx_chunk_frame ON text_chunks(frame_id);
 
-CREATE VIRTUAL TABLE text_fts USING fts5(
+CREATE VIRTUAL TABLE IF NOT EXISTS text_fts USING fts5(
   text, content='text_chunks', content_rowid='id', tokenize='trigram'
 );
-CREATE VIRTUAL TABLE text_fts_uni USING fts5(
+CREATE VIRTUAL TABLE IF NOT EXISTS text_fts_uni USING fts5(
   text, content='text_chunks', content_rowid='id', tokenize='unicode61'
 );
 
-CREATE TRIGGER text_chunks_ai AFTER INSERT ON text_chunks BEGIN
+CREATE TRIGGER IF NOT EXISTS text_chunks_ai AFTER INSERT ON text_chunks BEGIN
   INSERT INTO text_fts(rowid, text) VALUES (new.id, new.text);
   INSERT INTO text_fts_uni(rowid, text) VALUES (new.id, new.text);
 END;
-CREATE TRIGGER text_chunks_ad AFTER DELETE ON text_chunks BEGIN
+CREATE TRIGGER IF NOT EXISTS text_chunks_ad AFTER DELETE ON text_chunks BEGIN
   INSERT INTO text_fts(text_fts, rowid, text) VALUES('delete', old.id, old.text);
   INSERT INTO text_fts_uni(text_fts_uni, rowid, text) VALUES('delete', old.id, old.text);
 END;
 
 -- L1：程式抽出的 typed facts。零 LLM、零幻覺。
-CREATE TABLE facts (
+CREATE TABLE IF NOT EXISTS facts (
   id           INTEGER PRIMARY KEY,
   ts           INTEGER NOT NULL,
   session_id   INTEGER REFERENCES sessions(id),
@@ -177,9 +177,9 @@ CREATE TABLE facts (
   byte_start   INTEGER,
   byte_end     INTEGER
 );
-CREATE INDEX idx_facts_kind_ts ON facts(kind, ts);
-CREATE INDEX idx_facts_norm ON facts(normalized);
-CREATE INDEX idx_facts_ts ON facts(ts);
+CREATE INDEX IF NOT EXISTS idx_facts_kind_ts ON facts(kind, ts);
+CREATE INDEX IF NOT EXISTS idx_facts_norm ON facts(normalized);
+CREATE INDEX IF NOT EXISTS idx_facts_ts ON facts(ts);
 "#;
 
 /// 拿掉 `facts.confidence`。
@@ -199,10 +199,10 @@ ALTER TABLE facts DROP COLUMN confidence;
 /// `insert_chunk_tx` 裡明寫——那樣就不必為了 trigger 去註冊一個
 /// 「每條連線都必須存在、否則寫入直接失敗」的自訂 SQL 函式。
 const MIGRATION_003: &str = r#"
-CREATE VIRTUAL TABLE text_fts_bi USING fts5(text, tokenize='unicode61');
+CREATE VIRTUAL TABLE IF NOT EXISTS text_fts_bi USING fts5(text, tokenize='unicode61');
 
-DROP TRIGGER text_chunks_ad;
-CREATE TRIGGER text_chunks_ad AFTER DELETE ON text_chunks BEGIN
+DROP TRIGGER IF EXISTS text_chunks_ad;
+CREATE TRIGGER IF NOT EXISTS text_chunks_ad AFTER DELETE ON text_chunks BEGIN
   INSERT INTO text_fts(text_fts, rowid, text) VALUES('delete', old.id, old.text);
   INSERT INTO text_fts_uni(text_fts_uni, rowid, text) VALUES('delete', old.id, old.text);
   DELETE FROM text_fts_bi WHERE rowid = old.id;
@@ -225,7 +225,7 @@ END;
 /// 檢索品質唯一不需要人工標註就拿得到的訊號——他點下去的那一刻，等於幫那一題
 /// 標了正解。一個問題可以點很多筆，也可以一筆都不點（那本身也是訊號）。
 const MIGRATION_004: &str = r#"
-CREATE TABLE queries (
+CREATE TABLE IF NOT EXISTS queries (
   id         INTEGER PRIMARY KEY,
   ts         INTEGER NOT NULL,
   question   TEXT NOT NULL,
@@ -234,16 +234,16 @@ CREATE TABLE queries (
   latency_ms INTEGER NOT NULL,
   source     TEXT NOT NULL
 );
-CREATE INDEX idx_query_ts ON queries(ts);
+CREATE INDEX IF NOT EXISTS idx_query_ts ON queries(ts);
 
-CREATE TABLE query_clicks (
+CREATE TABLE IF NOT EXISTS query_clicks (
   id       INTEGER PRIMARY KEY,
   query_id INTEGER NOT NULL REFERENCES queries(id) ON DELETE CASCADE,
   chunk_id INTEGER NOT NULL,
   rank     INTEGER NOT NULL,
   ts       INTEGER NOT NULL
 );
-CREATE INDEX idx_click_query ON query_clicks(query_id);
+CREATE INDEX IF NOT EXISTS idx_click_query ON query_clicks(query_id);
 "#;
 
 /// `ever_stored`：**她有沒有真的存下來過一列內容。**
@@ -262,7 +262,12 @@ CREATE INDEX idx_click_query ON query_clicks(query_id);
 ///
 /// `WHEN NOT EXISTS(...)` 是為了熱路徑：每一拍都在寫 `frames` 和
 /// `text_chunks`，不能每一列都去改一次 `meta`。旗標按下去以後，剩下的每一次
-/// INSERT 只多付一次兩列表上的主鍵探測。
+/// INSERT 就只剩那道 `WHEN` 要付。
+///
+/// **量過，不是估的**：20 萬列純 INSERT 的 microbenchmark 上 +40~45%，換算
+/// 約 0.26 µs/列。比例嚇人是因為分母只有一次 INSERT；她一秒鐘寫個位數列，
+/// 所以絕對值是零。但這裡本來寫的是「只多付一次主鍵探測」，那句話讀起來像
+/// 免費的——寫下一個觸發器的人會照抄，而下一個觸發器可能在一條真的熱的路上。
 ///
 /// `system_events` 那一條多一個 `WHEN NEW.kind NOT IN (...)`：`session_start`
 /// 是 `Recorder::new` 的第一個動作，拿它當「存下來過內容」就等於沒修。名單從
@@ -284,7 +289,7 @@ fn migration_005() -> String {
             format!(" AND {}", w.replace("{q}", "NEW."))
         });
         sql.push_str(&format!(
-            "CREATE TRIGGER {table}_ever_stored AFTER INSERT ON {table}\n  \
+            "CREATE TRIGGER IF NOT EXISTS {table}_ever_stored AFTER INSERT ON {table}\n  \
              WHEN NOT EXISTS(SELECT 1 FROM meta WHERE key = 'ever_stored'){extra}\n\
              BEGIN\n  \
              INSERT OR REPLACE INTO meta(key, value) VALUES('ever_stored', '1');\n\
@@ -310,8 +315,12 @@ fn migration_005() -> String {
 /// 這份名單要和 [`DbStats::nothing_recorded_left`] 對得起來：那邊說「一列都不
 /// 剩」的時候，這邊必須是「一列都沒進來過」的同一組表。對不起來的話，一顆資
 /// 料庫可以同時「什麼都不剩」和「從來沒存過」——那正是這個旗標要拆開的兩種 0
-/// 又黏回去了。`ever_stored_covers_everything_nothing_recorded_left_counts`
-/// 這條測試把兩份名單釘在一起。
+/// 又黏回去了。
+///
+/// 釘住它的是 `every_table_in_the_schema_is_answered_for`：那條測試的名單是從
+/// `sqlite_master` 讀出來的，不是手寫的，所以 schema 長出一張新表就一定要有人
+/// 回答「它算不算內容」。（自己比自己的那種寫法抓得到「加錯」，抓不到「漏
+/// 加」，而漏加才是這裡會出事的方向。）
 ///
 /// `facts` 和 `ocr_blocks` 不在名單上：它們是 `frames` / `text_chunks` 長出來
 /// 的，沒有母體就不會有它們，而母體那兩張已經在名單上了。
@@ -379,10 +388,21 @@ impl Db {
         // 往回相容是有的（舊資料庫會被升上來），往前沒有——所以這裡只能停。
         if version > SCHEMA_VERSION {
             anyhow::bail!(
-                "這份資料庫是比較新的版本（schema {version}），這個執行檔只認得到 {SCHEMA_VERSION}。\n\
+                // 版號說得出「哪一顆資料庫」和「差幾版」，說不出**手上這個執行
+                // 檔是哪一個**——而他桌面上躺著五個長得一模一樣的 `sister.exe`，
+                // 「請改用新版」對著五個一樣的圖示是一句沒有下一步的話。
+                "這份資料庫是比較新的版本（schema {version}），而你現在跑的這個 sister 是 {}，只認得到 schema {SCHEMA_VERSION}。\n\
                  舊的執行檔硬開下去讀得到的東西會少、寫進去的可能繞過新的索引，而且不會有人告訴你。\n\
-                 請改用新版的 sister（Releases 上最新那一版），或指一個別的 `--data-dir`。"
+                 請改用新版的 sister（Releases 上最新那一版），或指一個別的 `--data-dir`。",
+                env!("CARGO_PKG_VERSION")
             );
+        }
+
+        // 已經是最新的就一步都不走。**這一行也是不去搶寫鎖的那一行**：底下每
+        // 一段都會拿 `BEGIN IMMEDIATE`，而 `stats` / `query` 這些唯讀指令每天
+        // 要開好幾次資料庫，沒有理由為了一段不會跑的 migration 去鎖檔案。
+        if version == SCHEMA_VERSION {
+            return Ok(());
         }
 
         // 一級一級走，每一級蓋自己的版號。
@@ -391,29 +411,101 @@ impl Db {
         // 半路失敗（舊版 SQLite 不支援 DROP COLUMN 之類），資料庫已經被蓋成
         // 「最新」了——下次開機它不會重試，只會安安靜靜地少跑了一段。
         // 每段各蓋各的，失敗就停在上一段，下次自己接著跑。
-        if version < 1 {
-            let tx = self.conn.transaction()?;
-            tx.execute_batch(MIGRATION_001).context("migration 001")?;
-            tx.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES('created_at', ?1)",
-                params![now_ms().to_string()],
-            )?;
-            tx.commit()?;
-            self.conn.pragma_update(None, "user_version", 1)?;
+        for step in (version + 1)..=SCHEMA_VERSION {
+            self.migrate_step(step)
+                .with_context(|| format!("migration {step:03}"))?;
         }
-        if version < 2 {
-            let tx = self.conn.transaction()?;
-            tx.execute_batch(MIGRATION_002).context("migration 002")?;
-            tx.commit()?;
-            self.conn.pragma_update(None, "user_version", 2)?;
+        Ok(())
+    }
+
+    /// 跑**一段** migration，而且是**整段一起落地或整段都不落地**。
+    ///
+    /// 兩件事都靠這一個 transaction，而它們以前各壞各的：
+    ///
+    /// **一、版號要和它描述的結構一起 commit。** 以前是 `tx.commit()` 之後才
+    /// `pragma_update`，中間有大約一毫秒。程序在那一毫秒裡被砍掉（`kill -9`、
+    /// 拔電、Windows 更新重開），檔案裡就是「結構是新的、版號說是舊的」——
+    /// 下次開機它會**再跑一次同一段**，撞上 `table meta already exists` /
+    /// `trigger frames_ever_stored already exists`，然後**這顆資料庫再也打不
+    /// 開了**。沒有 `sister repair`，逃生路只有手動 sqlite3、刪掉他的記憶、
+    /// 或退回舊版執行檔——而最後那一條正是上面那道前向相容閘門在防的事。
+    /// 用真的執行檔掃 SIGKILL 的時機，189 次裡中了 1 次。
+    ///
+    /// `PRAGMA user_version` 是**進 transaction 的**（rollback 會把它退回
+    /// 去），所以把它搬進來不用多付任何東西——見
+    /// `the_version_stamp_rolls_back_with_the_schema_it_describes`。
+    ///
+    /// **但這一段只擋得住以後。** 那個狀態已經在外面了：001–004 是這樣發出去
+    /// 的，他機器上那顆資料庫可能現在就是。所以**每一段都還要能重跑**——
+    /// `IF NOT EXISTS`、`DROP COLUMN` 前面自己問一次、bigram 回填前先清空。
+    /// 這一條才是有測試守得住的那一條
+    /// （`a_version_stamp_older_than_its_schema_does_not_brick_the_file`，版號
+    /// 一路退到 0 掃一遍）。而冪等有它自己的陷阱：它讓「重跑」從**炸掉**變成
+    /// **安靜地跑完**，於是 001 那句 `created_at` 會把她的生日蓋成今天——見那
+    /// 一行的 `OR IGNORE`。**把撞牆變安靜，就是把下一個錯藏起來。**
+    ///
+    /// **二、兩個 sister 同時升級同一顆資料庫。** `BEGIN IMMEDIATE` 在這裡拿
+    /// 的是寫鎖，而版號要在**拿到鎖之後**再讀一次：兩邊在門外都讀到 4、都決
+    /// 定要跑 005，先進去的那個跑完並蓋成 5，後進去的重讀一次就看到 5，直接
+    /// 讓開（`the_sister_who_loses_the_race_steps_aside_instead_of_crashing`）。
+    /// 真的開兩個行程跑，40 次裡 38 次死在 `already exists`。
+    /// `busy_timeout` 救不了這個，那不是鎖等不到，是兩邊都覺得自己該跑。
+    ///
+    /// 上面那個冪等補上之後，這道重讀拿掉也不會有測試紅——輸的那一邊會把整段
+    /// 白跑一次然後安然無恙。**留著是因為「白跑一次」不等於「沒事」**：003 那
+    /// 段回填會把整個 bigram 索引砍掉重建，而另一條連線可能正在查它。
+    ///
+    /// 而這件事**不是** `record` 的心跳擋得住的：`stats`、`query`、`facts`、
+    /// `prune`、`export` 和桌面版的 `with_db` 全都直接 `Db::open`，沒有任何
+    /// 跨程序的協調。升級後第一次啟動、他一邊按開始記錄一邊打一句問題，走到
+    /// 的就是這裡。
+    fn migrate_step(&mut self, step: i32) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // **拿到寫鎖之後才算數的那一次讀。** 門外那一次是拿來決定要不要排隊的，
+        // 這一次是拿來決定要不要做事的。
+        let now: i32 = tx
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap_or(0);
+        if now >= step {
+            return Ok(());
         }
-        if version < 3 {
-            let tx = self.conn.transaction()?;
-            tx.execute_batch(MIGRATION_003).context("migration 003")?;
-            // 回填舊資料。bigram 要在 Rust 這邊算，所以這段不能寫進 SQL——
-            // 少了它，升級上來的資料庫會有一個空索引，然後兩個字的中文查詢
-            // 悄悄地只查得到升級之後的東西。
-            {
+        match step {
+            1 => {
+                tx.execute_batch(MIGRATION_001)?;
+                // `OR IGNORE`，不是 `OR REPLACE`。**上面那幾行冪等把這一行的錯
+                // 變安靜了**：以前重跑 001 會撞 `table meta already exists` 而
+                // 停在那裡，現在它一路跑得完，然後把「她從哪一天開始記」蓋成今
+                // 天。一顆修好了、卻謊報自己生日的資料庫，比一顆打不開的還糟。
+                tx.execute(
+                    "INSERT OR IGNORE INTO meta(key, value) VALUES('created_at', ?1)",
+                    params![now_ms().to_string()],
+                )?;
+            }
+            2 => {
+                // 這一段沒有 `IF NOT EXISTS` 可用——`DROP COLUMN` 沒有那個寫
+                // 法。所以自己問一次：欄位已經不在就整段讓開。少了這一問，一顆
+                // 「002 跑完了、版號還停在 1」的資料庫會撞 `no such column` 而
+                // 且**再也打不開**。
+                let still_there: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('facts') WHERE name = 'confidence'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if still_there > 0 {
+                    tx.execute_batch(MIGRATION_002)?;
+                }
+            }
+            3 => {
+                tx.execute_batch(MIGRATION_003)?;
+                // 重跑的時候索引裡已經有東西了（見上面那段冪等的理由），而
+                // fts5 不吃重複的 rowid。先清空——這張表這一段才剛建，正常那
+                // 次它本來就是空的。
+                tx.execute_batch("DELETE FROM text_fts_bi;")?;
+                // 回填舊資料。bigram 要在 Rust 這邊算，所以這段不能寫進 SQL——
+                // 少了它，升級上來的資料庫會有一個空索引，然後兩個字的中文查詢
+                // 悄悄地只查得到升級之後的東西。
                 let mut read = tx.prepare("SELECT id, text FROM text_chunks")?;
                 let mut write =
                     tx.prepare("INSERT INTO text_fts_bi(rowid, text) VALUES(?1, ?2)")?;
@@ -425,22 +517,14 @@ impl Db {
                     }
                 }
             }
-            tx.commit()?;
-            self.conn.pragma_update(None, "user_version", 3)?;
+            4 => tx.execute_batch(MIGRATION_004)?,
+            5 => tx.execute_batch(&migration_005())?,
+            // `SCHEMA_VERSION` 加上去了、這裡沒跟上，就會在**第一次真的升級**
+            // 的時候炸出來，而不是安安靜靜地少跑一段。
+            n => anyhow::bail!("schema {n} 沒有對應的 migration——SCHEMA_VERSION 加了但沒補這一段"),
         }
-        if version < 4 {
-            let tx = self.conn.transaction()?;
-            tx.execute_batch(MIGRATION_004).context("migration 004")?;
-            tx.commit()?;
-            self.conn.pragma_update(None, "user_version", 4)?;
-        }
-        if version < 5 {
-            let tx = self.conn.transaction()?;
-            tx.execute_batch(&migration_005())
-                .context("migration 005")?;
-            tx.commit()?;
-            self.conn.pragma_update(None, "user_version", 5)?;
-        }
+        tx.pragma_update(None, "user_version", step)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3113,6 +3197,173 @@ mod tests {
         );
     }
 
+    /// **版號和它描述的結構，要嘛一起落地要嘛一起不落地。**
+    ///
+    /// 以前 `pragma_update` 在 `tx.commit()` **後面**，中間大約一毫秒。程序在
+    /// 那裡被砍掉，檔案裡就是「結構是新的、版號是舊的」——下次開機再跑一次同
+    /// 一段，撞 `already exists`，然後那顆資料庫再也打不開。用真的執行檔掃
+    /// SIGKILL 的時機，189 次裡中了 1 次。
+    ///
+    /// 這裡不砍程序，直接證明那個修法**靠的那個性質**：`PRAGMA user_version`
+    /// 是進 transaction 的。它要是不進，搬進去就沒有意義。
+    ///
+    /// **這一條守不住那個修法本身。** 我把 `pragma_update` 搬回 `commit()` 後
+    /// 面，整套測試照樣全綠——因為要看見差別就得真的在那一毫秒裡被砍掉。守得住
+    /// 的是下面那條：讓那一毫秒的產物**不再致命**。
+    #[test]
+    fn the_version_stamp_rolls_back_with_the_schema_it_describes() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch("BEGIN; CREATE TABLE probe(x); PRAGMA user_version = 99;")
+            .expect("half a migration");
+        let inside: i32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .expect("read");
+        assert_eq!(inside, 99, "transaction 裡要看得到");
+
+        conn.execute_batch("ROLLBACK;").expect("die here");
+        let after: i32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .expect("read");
+        assert_eq!(
+            after, 0,
+            "版號沒跟著退回去的話，下次開機會重跑一段已經跑完的 migration"
+        );
+        let table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'probe'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read");
+        assert_eq!(table, 0, "而結構也要跟著退——兩者必須同進同退");
+    }
+
+    /// 不引 `tempfile`——這個 crate 的相依樹是 `check-no-network.sh` 盯著的資
+    /// 產，能不長就不長。同 `retention::tests::Tmp`。
+    fn migrate_tmp(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("sister-migrate-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// **「結構是新的、版號是舊的」不可以是一顆打不開的資料庫。**
+    ///
+    /// 那個狀態是真的做得出來的，而且已經在外面了：alpha.32 以前 `commit()` 和
+    /// 蓋版號中間有大約一毫秒，程序在那裡被砍掉（`kill -9`、拔電、Windows 更新
+    /// 重開）就留下它。用真的執行檔掃 SIGKILL 的時機，189 次裡中了 1 次。
+    ///
+    /// 上面那個 transaction 只擋得住**以後**。這一條擋的是**已經發生過**的：
+    /// 每一段 migration 重跑一次都要是 no-op。撞上去的話是
+    /// `table queries already exists` / `no such column: confidence`，然後那顆
+    /// 資料庫**每一次開都失敗，永遠**——沒有 `sister repair`，逃生路只有退回舊
+    /// 版執行檔，而那正是前向相容閘門在防的事。
+    ///
+    /// 版號一路退到 0 掃一遍，所以新加一段 migration 忘了寫冪等，這裡會紅。
+    #[test]
+    fn a_version_stamp_older_than_its_schema_does_not_brick_the_file() {
+        let dir = migrate_tmp("brick");
+        for stamp in 0..SCHEMA_VERSION {
+            let path = dir.join(format!("back-to-{stamp}.db"));
+            {
+                let mut db = Db::open(&path).expect("build a current one");
+                db.conn
+                    .execute(
+                        "INSERT OR REPLACE INTO meta(key, value) VALUES('created_at', '1')",
+                        [],
+                    )
+                    .expect("生日");
+                let sid = db.start_session("test", "0").expect("session");
+                // 要有一段中文：003 的 bigram 回填得有東西可以重跑，不然那一段
+                // 重跑起來剛好是空的，什麼都證明不了。
+                db.conn
+                    .execute(
+                        "INSERT INTO text_chunks(ts, session_id, source_kind, text)
+                         VALUES(1, ?1, 'ocr', '電話號碼')",
+                        params![sid],
+                    )
+                    .expect("seed");
+                // bigram 是 Rust 那邊寫的（`insert_chunk_tx`），觸發器不管它，
+                // 所以這裡照抄產品的第二步——不然版號退到 4 的那幾輪索引本來
+                // 就是空的，下面那條斷言什麼都證明不了。
+                let id = db.conn.last_insert_rowid();
+                db.conn
+                    .execute(
+                        "INSERT INTO text_fts_bi(rowid, text) VALUES(?1, ?2)",
+                        params![id, cjk_bigrams("電話號碼")],
+                    )
+                    .expect("seed bigrams");
+                // 這一行就是那一毫秒：結構全在，版號被留在後面。
+                db.conn
+                    .pragma_update(None, "user_version", stamp)
+                    .expect("退回去");
+            }
+
+            let db = Db::open(&path)
+                .unwrap_or_else(|e| panic!("版號停在 {stamp} 的資料庫再也打不開了：{e:#}"));
+            assert_eq!(
+                db.schema_version().expect("version"),
+                SCHEMA_VERSION,
+                "版號停在 {stamp}"
+            );
+            // 重跑一輪不可以把索引寫成兩份——`text_fts_bi` 是唯一一張要在
+            // Rust 這邊回填的表，重複的 rowid 會直接炸。
+            let bi: i64 = db
+                .conn
+                .query_row("SELECT COUNT(*) FROM text_fts_bi", [], |r| r.get(0))
+                .expect("count");
+            assert_eq!(bi, 1, "版號停在 {stamp}：bigram 索引被回填了兩次");
+            assert!(
+                db.ever_stored().expect("stored"),
+                "版號停在 {stamp}：現貨還在，旗標不可以掉"
+            );
+            // 冪等最容易安靜地弄壞的那一格：001 重跑一次，「她從哪一天開始
+            // 記」就被蓋成今天。撞不開的資料庫看得見，這個看不見。
+            let born: String = db
+                .conn
+                .query_row("SELECT value FROM meta WHERE key = 'created_at'", [], |r| {
+                    r.get(0)
+                })
+                .expect("生日");
+            assert_eq!(born, "1", "版號停在 {stamp}：她的生日被改掉了");
+        }
+    }
+
+    /// 兩個 sister 同時升級同一顆資料庫，只有一個該做事，而**兩個都要活著**。
+    ///
+    /// 門外那一次 `user_version` 兩邊都讀到舊的，所以兩邊都會決定要跑。分勝負
+    /// 的是 `BEGIN IMMEDIATE` **之後**的重讀：少了它，後進去的那個拿著一份過期
+    /// 的判斷硬跑，撞 `already exists`（真的開兩個行程跑，40 次裡 38 次）。
+    ///
+    /// 這裡不賭時序：輸的那一邊的處境就是「手上這個 step 的判斷是門外讀到的，
+    /// 而檔案已經被別人推上去了」，直接把 `migrate_step(5)` 餵給一顆已經是 5 的
+    /// 檔案就是它。
+    #[test]
+    fn the_sister_who_loses_the_race_steps_aside_instead_of_crashing() {
+        let path = migrate_tmp("race").join("sister.db");
+        let winner = Db::open(&path).expect("winner");
+        assert_eq!(winner.schema_version().expect("v"), SCHEMA_VERSION);
+
+        let mut loser = Db {
+            conn: Connection::open(&path).expect("second connection"),
+        };
+        loser
+            .migrate_step(SCHEMA_VERSION)
+            .expect("後到的那個要讓開——它撞上的是自己人剛建好的東西");
+        assert_eq!(loser.schema_version().expect("v"), SCHEMA_VERSION);
+
+        // 而且只建了一份觸發器，不是兩份。
+        let n: i64 = winner
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE '%_ever_stored'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(n as usize, CONTENT_TABLES.len());
+    }
+
     #[test]
     fn fts5_trigram_and_unicode61_are_both_available() {
         // 若 bundled SQLite 缺 FTS5 或 trigram，建表就會失敗——這個測試是保險絲
@@ -3795,6 +4046,10 @@ mod tests {
     /// 過」——也就是這個旗標本來要拆開的那兩種 0 又黏回去了。這裡不是用反射
     /// 對名單，是**每一張表各餵一列**：漏掉的那一種永遠是沒有 fixture 的那一
     /// 種，所以名單長出新的一張表時，這條會在 `assert_eq!` 那行先炸給你看。
+    ///
+    /// 但它拿 `CONTENT_TABLES` 比的是**自己**，所以它抓得到「名單上多了一
+    /// 張」，抓不到「schema 多了一張而名單沒跟上」——而漏加才是會出事的那個方
+    /// 向。那一邊由 `every_table_in_the_schema_is_answered_for` 守。
     #[test]
     fn every_content_table_flips_the_flag() {
         let rows: &[(&str, &str)] = &[
@@ -3836,6 +4091,72 @@ mod tests {
             );
             db.conn.execute(sql, []).expect(table);
             assert!(db.ever_stored().expect("stored"), "{table} 沒把旗標按下去");
+        }
+    }
+
+    /// **schema 裡的每一張表，都要有人回答「它算不算她記下來的東西」。**
+    ///
+    /// 上面那條的名單是手寫的，而且拿 `CONTENT_TABLES` 跟自己比——它抓得到多
+    /// 加，抓不到漏加。漏加才是會出事的方向：一張新的內容表進了 schema、進了
+    /// `nothing_recorded_left`，沒進 `CONTENT_TABLES`，那顆資料庫就會同時是
+    /// 「什麼都不剩」和「從來沒存過」，於是清空又長得像沒錄過。
+    ///
+    /// 所以這裡的名單**從 `sqlite_master` 讀出來**。加一張表就一定要來這裡回
+    /// 答一次，回答不了的話這條紅在「你多了一張沒歸類的表」那行。
+    #[test]
+    fn every_table_in_the_schema_is_answered_for() {
+        /// 不是內容的那些，一張一張說出理由——沒有 `_ =>` 可以蒙混過去。
+        const NOT_CONTENT: &[(&str, &str)] = &[
+            ("meta", "旗標本身，不是內容"),
+            ("sessions", "容器，撐得過清空——見 `nothing_recorded_left`"),
+            ("ocr_blocks", "frames 長出來的，母體已經在名單上"),
+            ("facts", "text_chunks 長出來的，母體已經在名單上"),
+            ("queries", "他打的字，而且會在清空之後才長出來"),
+            ("query_clicks", "同上，掛在 queries 底下"),
+            ("text_fts", "text_chunks 的索引"),
+            ("text_fts_uni", "text_chunks 的索引"),
+            ("text_fts_bi", "text_chunks 的索引"),
+        ];
+
+        let db = test_db();
+        let mut stmt = db
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .expect("prepare");
+        let tables: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            // fts5 自己的影子表（`_data` / `_idx` / `_content` / `_docsize` /
+            // `_config`）不是 schema 的一部分，是那三張索引的內臟。
+            .filter(|t| {
+                !t.ends_with("_data")
+                    && !t.ends_with("_idx")
+                    && !t.ends_with("_content")
+                    && !t.ends_with("_docsize")
+                    && !t.ends_with("_config")
+            })
+            .collect();
+
+        for table in &tables {
+            let is_content = CONTENT_TABLES.iter().any(|(t, _)| t == table);
+            let excused = NOT_CONTENT.iter().any(|(t, _)| t == table);
+            assert!(
+                is_content ^ excused,
+                "`{table}` 沒有人回答它算不算內容（或兩邊都算了）。\
+                 算的話加進 `CONTENT_TABLES`，不算的話加進這裡的 `NOT_CONTENT` 並寫下理由"
+            );
+        }
+        // 反面：名單上寫著、schema 裡卻沒有的表，是抄漏的重新命名。
+        let named = CONTENT_TABLES
+            .iter()
+            .map(|(t, _)| *t)
+            .chain(NOT_CONTENT.iter().map(|(t, _)| *t));
+        for t in named {
+            assert!(
+                tables.iter().any(|x| x == t),
+                "`{t}` 在名單上，schema 裡沒有這張表"
+            );
         }
     }
 
