@@ -600,6 +600,35 @@ jobs:
             exit 1
           fi
 
+          # **兩句補充貼在一起的時候，順序自己會說話。** 升上來的那一顆補一句
+          # 範圍聲明，正在錄的那一台補一句扣除聲明，而「這裡的數字」如果排在
+          # 「現在正在錄的那一場沒有算進去」後面，最近的先行詞就變成一句根本
+          # 沒有數字的話。兩句各自都是真的。
+          #
+          # 這一格單元測試釘得住位置，釘不住「真的執行檔會不會把兩句一起印出
+          # 來」——而那個 bug 就是在真的執行檔印出來之後才看見的。
+          python3 - <<'EOF'
+          import sqlite3, time, pathlib
+          now = int(time.time() * 1000)
+          c = sqlite3.connect('./ci-upgrade/sister.db')
+          c.execute("INSERT INTO sessions(started_at, app_version, platform)"
+                    " VALUES (?, 'ci', 'linux')", (now,))
+          c.commit()
+          pathlib.Path('./ci-upgrade/recording.beat').write_text(str(now))
+          EOF
+          $U doctor > upgrade-live.txt
+          python3 -c "
+          import sys
+          line = [l for l in open('upgrade-live.txt') if '零當機' in l]
+          if not line: print('::error::[升上來又正開著] 沒有零當機那一列'); sys.exit(1)
+          line = line[0]
+          for want in ('升上來那天', '現在正在錄'):
+              if want not in line:
+                  print(f'::error::[升上來又正開著] 兩句補充少了「{want}」：{line.strip()}'); sys.exit(1)
+          if line.index('升上來那天') > line.index('現在正在錄'):
+              print('::error::[升上來又正開著] 範圍聲明黏到一句沒有數字的話上面了：'
+                    + line.strip()); sys.exit(1)"
+
       # README 上那段 quickstart 是一個陌生人和這個 repo 的第一次接觸，而它
       # 不會跟著程式一起編譯失敗——旗標改名、scenario 換檔名，它就靜靜地爛掉，
       # 而讀的人只會以為是自己裝錯了。這一步不是另外寫一份一樣的測試（兩份
