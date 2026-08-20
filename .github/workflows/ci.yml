@@ -59,6 +59,10 @@ jobs:
       # 開發機也開不起 Tauri 視窗，於是「這一格說了什麼」整類錯全部堆到
       # Ted 那台 Windows 上用眼睛抓。這一條抓得到的那一種，不必等到他那邊。
       # 它載入的是 ui/settings.js **原檔**，不是一份抄過來的邏輯。
+      #
+      # 後來多守兩件同一族的：讀不回設定檔的時候那一頁會清空並灰掉自己（對的），
+      # 但 `finally` 又把儲存鍵點回來——再按一下就把三份排除規則寫成空的。以及
+      # 換熱鍵失敗時那一格停在「按下你要的那一組…」，而已經沒有人在聽。
       - name: The settings page must say something when the button works
         run: node ./scripts/check-settings-say.mjs
 

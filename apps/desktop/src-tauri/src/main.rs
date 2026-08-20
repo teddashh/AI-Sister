@@ -1393,6 +1393,7 @@ fn hotkey_state(hotkey: tauri::State<'_, Hotkey>) -> HotkeyView {
     hotkey.0.lock().expect("hotkey").clone()
 }
 
+
 /// 換一組熱鍵：先真的去搶，搶到了才寫進設定檔。
 ///
 /// 順序是刻意的。反過來寫（先存再註冊）的話，一組搶不到的熱鍵會留在設定檔裡，
@@ -1434,8 +1435,11 @@ fn hotkey_set(
         // OneDrive 鎖著 config.toml、磁碟滿。
         if let Err(e) = persist() {
             let restored = apply_hotkey(&app, &previous);
+            // `pretty_combo` 而不是原樣印：這一整串是塞進 `Err(String)` 直接
+            // 上畫面的，設定頁不會替它排版。原樣印出來是「還在用 Ctrl+Alt+KeyP」
+            // ——而鍵盤上沒有一顆鍵叫 KeyP。他要照著這句話去按的。
             let still = if restored.registered {
-                format!("還在用 {}。", restored.wanted)
+                format!("還在用 {}。", sister_shell::pretty_combo(&restored.wanted))
             } else if restored.wanted.is_empty() {
                 "熱鍵本來就是關掉的，維持原狀。".to_string()
             } else {

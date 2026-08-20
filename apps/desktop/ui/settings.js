@@ -295,11 +295,33 @@ function pretty(combo) {
 
 let capturing = false;
 
+/**
+ * 那一格上一次**確定是真的**寫的是什麼。
+ *
+ * 存在的理由是捕捉模式：按下那一格之後它變成「按下你要的那一組…」，而那句話
+ * 是一句**承諾**——我在聽。只有 `paintHotkey` 有資格把它換掉。問題是通往
+ * `paintHotkey` 的路會失敗，而失敗的那條路以前只寫底下那行說明、不碰這一格：
+ * 於是它永遠停在「按下你要的那一組…」，而 `capturing` 已經是 false。他再怎麼
+ * 按鍵盤都不會有事發生，畫面卻一直說在等他按。
+ *
+ * 更糟的是那一格是**唯一**寫著暫停鍵是哪一組的地方。卡在那句話上等於他連
+ * 「現在按哪一顆會暫停」都問不到——而後端在那條路上已經把舊的那組裝回去了，
+ * 答案是知道的，只是沒有人把它畫回去。
+ */
+let comboShown = null;
+
+/** 把那一格退回上一次確定為真的內容。不知道就說不知道，不要留著那句承諾。 */
+function restoreCombo() {
+  capturing = false;
+  el.combo.classList.remove("listening");
+  el.combo.textContent = comboShown ?? "讀不出來";
+}
+
 function paintHotkey(view) {
   capturing = false;
   el.combo.classList.remove("listening");
-  el.combo.textContent =
-    view.wanted === "" ? "沒有設" : pretty(view.wanted);
+  comboShown = view.wanted === "" ? "沒有設" : pretty(view.wanted);
+  el.combo.textContent = comboShown;
 
   const bad =
     view.rejected != null ||
@@ -345,8 +367,14 @@ async function setCombo(combo) {
   try {
     paintHotkey(await invoke("hotkey_set", { combo }));
   } catch (err) {
-    capturing = false;
-    el.combo.classList.remove("listening");
+    // **不要在這裡呼叫 `reloadHotkey()`。** 它成功的話會走 `paintHotkey`，
+    // 而那件事會把底下這句錯誤蓋掉——換成一句肯定句（「搶到了。現在按…」）。
+    // 那正是這一頁上剛修掉的那一族：每一行都是真的，湊起來在說謊。
+    //
+    // 要的只是把那一格退回去。後端在這條路上已經把舊的那組裝回去了
+    // （見 `hotkey_set` 的 `persist()` 失敗分支），所以 `comboShown` 就是
+    // 現在真的在生效的那一組。
+    restoreCombo();
     el.hotkeySay.classList.add("bad");
     el.hotkeySay.textContent = String(err?.message ?? err);
   }
@@ -390,8 +418,11 @@ async function reloadHotkey() {
   try {
     paintHotkey(await invoke("hotkey_state"));
   } catch (err) {
-    capturing = false;
-    el.combo.classList.remove("listening");
+    // Esc 取消也走這裡（見上面那個 keydown）。那時候那一格上寫的是
+    // 「按下你要的那一組…」，而這條路問不到現在是哪一組——退回上一次
+    // 確定為真的那個，問不到就說「讀不出來」。留著那句承諾是最壞的：
+    // 沒有人在聽，而畫面說在聽。
+    restoreCombo();
     el.hotkeySay.classList.add("bad");
     el.hotkeySay.textContent = String(err?.message ?? err);
   }
@@ -428,7 +459,18 @@ function apply(s) {
  * 空白的排除清單和兩顆沒打勾的防線，讀起來是一個明確的斷言（「你什麼都沒
  * 擋」），而它是假的。灰掉 + 換掉 placeholder 之後，那張表不再宣稱任何事。
  */
+/**
+ * 現在這張表是不是「不算數」的狀態。
+ *
+ * 存在的理由是 `save()` 的 `finally`：它無條件把儲存鍵點亮，而這正好會拆掉
+ * `setUnreadable(true)` 剛做的事。那個 `finally` 本來是對的（按鈕在存的期間
+ * 灰掉，存完不管成敗都要能再按），它只是不知道自己中間可能經過一個**清空
+ * 整張表**的分支。
+ */
+let unreadable = false;
+
 function setUnreadable(on) {
+  unreadable = on;
   for (const node of [
     el.apps,
     el.urls,
@@ -712,7 +754,17 @@ async function save() {
   } catch (err) {
     say(String(err?.message ?? err), true);
   } finally {
-    el.save.disabled = false;
+    // **只有在這張表還算數的時候才把按鈕點回來。** 中間那個 `load()` 可能走
+    // 進 `setUnreadable(true)`，而那件事會清空三個排除框並灰掉整張表。這一行
+    // 無條件寫 `false` 的時候，畫面會變成「規則全空、儲存鍵亮著」——他再按
+    // 一次，`[]` 就寫進 excluded_apps / urls / titles，九條 app、十六條網址
+    // 靜靜消失。`days()` 攔不住：那兩個天數欄位沒被清掉，照樣是合法的數字。
+    //
+    // 兩行各自都對：按鈕存完要能再按，讀不回來要把表關掉。湊起來，這一頁的
+    // 錯誤處理會刪掉他的隱私規則。
+    //
+    // 出路是那顆「重新讀取」——它不在停用名單裡，讀成功就會 `setUnreadable(false)`。
+    if (!unreadable) el.save.disabled = false;
   }
 }
 

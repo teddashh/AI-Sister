@@ -164,6 +164,32 @@ pub fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// `Ctrl+Alt+KeyP` → `Ctrl + Alt + P`。存的是前者，給人看的是後者。
+///
+/// 為什麼在這裡而不是在 `main.rs`：跟 [`base64`] 同一個理由。桌面那個 crate
+/// 在這台機器上編不起來，所以放在那邊的測試**一行都跑不到**——CI 也一樣，
+/// 它對字母人只跑 `cargo check` 與 `clippy`，沒有 `cargo test`。一個永遠不會
+/// 執行的測試比沒有測試更糟，因為它看起來像有人在顧。
+///
+/// 而這件事不需要一個真的視窗系統才回答得了（那是這個 crate 開頭那段講的
+/// 判準），它是一個字串問題。
+///
+/// 設定頁的 JS 有一份一樣的，理由是那一頁的每一句話都由它自己排版；這一份
+/// 存在是因為 `hotkey_set` 那條錯誤路徑把組合鍵**塞進 `Err(String)` 裡**，
+/// 而那串字是原封不動印到畫面上的——沒有人會替它再排一次。
+pub fn pretty_combo(combo: &str) -> String {
+    combo
+        .split('+')
+        .map(|token| {
+            ["Key", "Digit"]
+                .iter()
+                .find_map(|p| token.strip_prefix(p).filter(|r| r.chars().count() == 1))
+                .unwrap_or(token)
+        })
+        .collect::<Vec<_>>()
+        .join(" + ")
+}
+
 /// 讀。**任何一種壞掉都回 `None`**——壞掉的設定檔不該讓她開不起來，
 /// 大不了回到右下角重新開始。
 pub fn load(path: &Path) -> Option<PetState> {
@@ -334,5 +360,26 @@ mod tests {
         assert_eq!(load(&path), Some(state));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_key_named_keyp_does_not_exist_on_anyones_keyboard() {
+        assert_eq!(pretty_combo("Ctrl+Alt+KeyP"), "Ctrl + Alt + P");
+        assert_eq!(pretty_combo("Ctrl+Shift+Digit4"), "Ctrl + Shift + 4");
+
+        // 只吃掉「前綴 + 剛好一個字」的那一種。`Key` 是 KeyboardEvent.code
+        // 的前綴，不是一個可以到處砍的字串——F 那一排、方向鍵、Home/End
+        // 本來就長那樣，砍了會變成別的鍵。
+        for whole in ["Ctrl+Alt+F5", "Ctrl+Alt+ArrowUp", "Ctrl+Alt+Home"] {
+            assert_eq!(
+                pretty_combo(whole),
+                whole.replace('+', " + "),
+                "{whole} 不該被動到"
+            );
+        }
+        assert_eq!(pretty_combo("Ctrl+Alt+Keyboard"), "Ctrl + Alt + Keyboard");
+
+        // 「沒有設」在別處是空字串，不是這裡的事——但它不可以炸。
+        assert_eq!(pretty_combo(""), "");
     }
 }
