@@ -134,10 +134,14 @@ fn write_raw(data_dir: &Path, body: &str) -> Result<()> {
     let path = beat_path(data_dir);
     let tmp = path.with_extension("beat.tmp");
     std::fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
-    // rename 失敗就把那半個檔收掉。它沒有人讀（`beat_path` 指的是另一個名
-    // 字），所以留著不會說謊——但 rename 失敗最常見的原因是磁碟滿，而一個
-    // 躺在那裡的 tmp 正好讓**下一次**也寫不進去。`stop` 那條退路早就在收
-    // 它了，這裡是同一件事的來源端。
+    // rename 失敗就把那個檔收掉。它沒有人讀（`beat_path` 指的是另一個名字），
+    // 所以留著不會說謊；收掉是因為那時候它是**一份完整的、內容正確的心跳**，
+    // 只是名字不對——把它留在資料目錄裡等著給下一個人誤會，不如當場清掉。
+    //
+    // **這裡不是磁碟滿那條路。** 磁碟滿的時候上面那行 `fs::write` 就先失敗
+    // 了，根本走不到 rename；而且下一次 `fs::write` 會 truncate，留著的 tmp
+    // 不會讓它寫不進去。走到這一行的是 rename 自己失敗——Windows 上多半是
+    // 防毒或索引服務正壓著目的檔。
     if let Err(e) =
         std::fs::rename(&tmp, &path).with_context(|| format!("rename to {}", path.display()))
     {
@@ -228,8 +232,18 @@ fn parse_record(raw: &str) -> Option<Record> {
 pub enum Presence {
     /// 檔案不在。這個資料目錄**從來沒有人跑過 recorder**——只有這一個意思。
     NeverStarted,
-    /// 檔案在，但讀不懂（寫到一半斷電）。**有人來過**，只是說不出他是誰。
-    /// 和 `NeverStarted` 分開，因為「沒有人來過」是唯一可以放心落刀的那一種。
+    /// **問不出答案。** 兩種：讀到了但看不懂（寫到一半斷電），或者連讀都讀不
+    /// 到而原因不是「不在」（權限、路徑上有一段不是資料夾、I/O 錯誤）。
+    ///
+    /// 這兩種在「有沒有人來過」上**答案不一樣**——第一種是有，第二種是不知
+    /// 道——所以這裡不講那句話，只講它們共同的那一件事：**說不準**。上一版
+    /// 這行寫的是「有人來過」，那時候唯一的入口是 `exists() == true`；後來
+    /// [`Raw::Unreadable`] 也走進來，那句話就有一半的輸入是假的。守著落刀的
+    /// 那道閘門讀的正是這一格，而上一輪它出的事就是「文件寫著程式已經沒有的
+    /// 性質」。
+    ///
+    /// 和 `NeverStarted` 分開，因為「確定沒有人來過」是唯一可以放心落刀的那
+    /// 一種，而「說不準」不是。
     Unreadable,
     /// 心跳是新鮮的，她活著，而且在這個階段。
     Live(Phase),
