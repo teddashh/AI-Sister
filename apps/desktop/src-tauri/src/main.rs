@@ -2235,10 +2235,69 @@ fn main() {
                         // 嗎」，於是他在那幾分鐘按「結束」，視窗關了，而那個還
                         // 在開資料庫的行程留在工作管理員裡，幾分鐘後開始錄——
                         // 這一段註解上面兩行講的正是這件事。
-                        if recording_state(app.clone(), shell.clone()) != "none"
-                            && let Err(e) = stop_recording(shell.clone())
-                        {
+                        //
+                        // **而「正在起來」還有更早的一段，那一段連心跳都還沒
+                        // 有。** `recording_state` 讀的是 `recording.beat`；從
+                        // `cmd.spawn()` 回來到 child 在 `BootBeat::start` 寫下
+                        // 第一拍之間，那個檔案根本不存在，於是這裡讀到 "none"。
+                        // 平常是幾毫秒，但第一次安裝之後 Defender 要掃一顆
+                        // 6.7 MB 的新 exe，可以是好幾秒——正好是新使用者最會亂
+                        // 按的那一刻。`start_recording` 早就解過同一個缺口了
+                        // （「問行程，不要問它寫的檔案」），只有這裡沒跟上。
+                        //
+                        // 所以先寫檔、再問行程，兩件事都做。
+                        //
+                        // 檔案無條件寫。以前只在 `!= "none"` 的時候寫，但要停的
+                        // 正是那個讀不到心跳的——那個判斷式和要救的情況是相反
+                        // 的。沒人在跑的時候多留一個 `stop.request` 不會傷到下一
+                        // 場：`BootBeat::start` 開機第一行就清掉它，而全 repo 只
+                        // 有錄製迴圈的 `take_stop` 讀這個檔，沒有任何畫面會因為
+                        // 它躺在那裡而說錯話。
+                        if let Err(e) = stop_recording(shell.clone()) {
                             tracing::error!("結束時停不掉 recorder：{e}");
+                        }
+                        // 但光是檔案不夠。child 自己的 `clear_stop` 就排在它開機
+                        // 的第一行，我們剛寫的這一個很可能被它擦掉——這正是 #61
+                        // 那個修法帶來的副作用，而那個修法是對的。所以還要問一次
+                        // 行程。
+                        //
+                        // 心跳先問完再拿鎖：`recording_state` 現在不碰 `spawned`，
+                        // 但它會去動系統匣，而在鎖裡面呼叫一支會亂跑的函式是下一
+                        // 個人的陷阱。
+                        let beat = recording_state(app.clone(), shell.clone());
+                        {
+                            let mut spawned = shell.spawned.lock().expect("spawned recorder");
+                            let starting_up = beat == "none"
+                                && matches!(
+                                    spawned.as_mut().map(std::process::Child::try_wait),
+                                    Some(Ok(None))
+                                );
+                            // `take` 而不是 `as_mut`：handle 直接搬出來，省掉
+                            // 「殺完再把欄位設回 None」那一步——那一步要在
+                            // `child` 還借著 `spawned` 的時候寫回 `*spawned`。
+                            if starting_up && let Some(mut child) = spawned.take() {
+                                // **這裡可以殺，別處不行。** `control` 那份註解
+                                // 說不要 `TerminateProcess`，理由是會留下一筆永
+                                // 遠不會結束的 session 和一個還在說「我在錄」的
+                                // 心跳。那兩樣東西在這一段都還不存在：一拍都沒
+                                // 寫出來，就表示 `BootBeat::start` 還沒跑完，而
+                                // `Db::open` 排在它後面——沒有開著的資料庫、沒有
+                                // session 列、沒有寫到一半的 WAL。
+                                //
+                                // 剩下的競爭是 try_wait 和 kill 中間它剛好衝進
+                                // `Db::open`。那一刀落在 migration 中間，而
+                                // migration 每一段都是冪等的（#58），WAL 本來就
+                                // 是為了硬砍而存在的——下一次開得起來。
+                                match child.kill() {
+                                    Ok(()) => {
+                                        tracing::info!(
+                                            "結束時砍掉還在起來的 recorder（它還沒開始寫）"
+                                        );
+                                        let _ = child.wait();
+                                    }
+                                    Err(e) => tracing::error!("砍不掉還在起來的 recorder：{e}"),
+                                }
+                            }
                         }
                         shell.persist();
                         app.exit(0);
