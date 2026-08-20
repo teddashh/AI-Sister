@@ -254,13 +254,19 @@ jobs:
             grep 上一次錄製 d.txt
             exit 1
           fi
+          # 這兩條要的是「**她正在錄**」，不是「有人佔著這個資料目錄」。上一版
+          # 抓的正是後面那句話，而那句話是這一整批 bug 的形狀本人：開機那幾分
+          # 鐘目錄也有人佔著，而那時候那一列不是她的，是上一次當機留下來的殼。
+          # 一句同時涵蓋兩種相反處境的話，抓它的斷言也就同時放過兩種。
           for x in live-forget.txt live-stats.txt; do
-            grep -q '此刻有人佔著這個資料目錄' "$x" \
-              || { echo "::error::有 recorder 佔著這個目錄，$x 卻沒這麼說"; exit 1; }
-            if grep -q '當掉' "$x"; then
-              echo "::error::有 recorder 佔著這個目錄，$x 卻說她當掉了"
-              exit 1
-            fi
+            grep -q '她此刻正在錄' "$x" \
+              || { echo "::error::她此刻正在錄，$x 卻沒這麼說"; grep -n 工作階段 "$x"; exit 1; }
+            for wrong in 當掉 正在起來; do
+              if grep -q "$wrong" "$x"; then
+                echo "::error::她此刻正在錄，$x 卻說「$wrong」"
+                grep -n "$wrong" "$x"; exit 1
+              fi
+            done
           done
           # 這一刀沒有東西可以刪（上面那一刀已經清乾淨了），走的是「那段時間
           # 裡她什麼都沒記到，不用忘」那條提早收工的路。那條路以前**完全不提**
@@ -378,6 +384,11 @@ jobs:
           # 心跳的第二欄不是 'boot'，所以讀成「正在錄」。
           open('./ci-live/recording.beat', 'w').write(str(now))
           EOF
+          # **第十一顆是這一顆逐位元的複本**，只有心跳檔的第二欄多一個字。造在
+          # 這裡而不是那一節裡，是因為底下那四個 `$L` 指令會動到這顆資料庫
+          # （`query` 會往題庫寫一列），複製要趕在那之前。它自己的心跳等到那一
+          # 節再寫——這個檔案 16 秒就過期。
+          cp -r ./ci-live ./ci-bootlive
           $L stats > live-stats.txt
           $L doctor > live-doctor.txt
           $L facts > live-facts.txt
@@ -832,12 +843,17 @@ jobs:
           # 前一句說她在錄，四行之後說她還沒開始。**一個布林湊不出三種答案，而
           # 少掉的那一種永遠是「正在來、還沒好」。** 三個畫面各自判斷，所以四個
           # 指令都要問。
+          #
+          # 這一顆是第六顆**逐位元的複本**（在那四個 `$L` 指令動它之前複製走
+          # 的），只有心跳檔的第二欄多一個 `boot`。同一批位元組要說出相反的
+          # 話，而那一列 `ended_at IS NULL` 的 session 在兩顆上的意思剛好相反：
+          # 第六顆上那是**她自己**，這一顆上那是**上一次當機留下來的殼**——她那
+          # 一列還沒 INSERT（`BootBeat::start` 先寫心跳，`start_session` 最後才
+          # 跑）。分得出來的只有心跳的第二欄。
           P="$B --data-dir ./ci-bootlive"
-          cp -r ./ci-nulldata ./ci-bootlive
           python3 - <<'EOF'
           import pathlib, time
-          # 心跳寫下去了，她的 session 列還沒 INSERT——`Db::open` 還在跑。這一
-          # 顆和第五顆在資料庫上逐位元相同，差別只有這個檔案的第二欄。
+          # 現寫：這個檔案 16 秒就過期，複製過來的那一份早就死了。
           pathlib.Path('./ci-bootlive/recording.beat').write_text(
               f'{int(time.time() * 1000)} boot')
           EOF
@@ -877,14 +893,73 @@ jobs:
               fi
             done
           done
-          # 「零當機」那一列讀的是另一組數字（計數器，撐得過那一場自己把列刪
-          # 掉），而開機中的她一個數字都不准扣——她的列還不存在。
-          grep -qE '✓ +零當機' boot-doctor.txt \
-            || { echo "::error::[正在起來] 上一場好好收完了，那是零當機"; grep 零當機 boot-doctor.txt; exit 1; }
+          # **同一列 `ended_at IS NULL`，兩顆上是相反的兩件事。**
+          #
+          # `crash_audit` 會把「她此刻正在錄的那一場」從三個數字裡扣掉，而那道
+          # 扣除認人靠的是 `id = MAX(id)`。開機那幾分鐘裡坐在 `MAX(id)` 上的不
+          # 是她，是上一次當機留下來的殼——扣掉它，就是把一次真的當機宣告成
+          # 「她現在正在錄」。第六顆上那一列該被扣掉（✓ 零當機，而且要講出扣
+          # 了），這一顆上不准扣（✗ 零當機，1 段沒有回來，而且不准講扣除）。
+          #
+          # 上一版這三條釘在一顆 `sessions` 空的複本上：`newest_open` 永遠是
+          # false，於是 `live` 對任何心跳都是 false，`✓` 和「沒有算進去」兩條
+          # 都翻不成紅——一格空白，第四次出現在抓它的工具上。實測過：把
+          # `crash_audit` 那一行改成 `beat.is_some() && newest_open`，這一顆會
+          # 印出「✓ 零當機 1 段錄製全部正常收尾。現在正在錄的那一場沒有算進
+          # 去」，正上方兩列才說她還在開資料庫。
+          grep -qE '✗ +零當機' boot-doctor.txt \
+            || { echo "::error::[正在起來] 上一次當機被算成了她此刻正在錄的那一場"; grep 零當機 boot-doctor.txt; exit 1; }
+          grep -E '零當機' boot-doctor.txt | grep -q '1 段沒有回來' \
+            || { echo "::error::[正在起來] 那一次當機沒有被數進去"; grep 零當機 boot-doctor.txt; exit 1; }
           if grep -qE '零當機.*沒有算進去' boot-doctor.txt; then
             echo "::error::[正在起來] 宣告扣掉了一場還不存在的錄製"
             grep 零當機 boot-doctor.txt; exit 1
           fi
+          # 而 stats 上那一列空殼要說同一件事。整份檔案的「正在起來」被上面那
+          # 個 ⚠ 蓋過去了，所以這一列要單獨釘——它走的是 `session_shell_why`，
+          # 和 doctor 那兩列不同一條路（上一版它收的正是 `beat.is_some()`）。
+          grep -E '工作階段' boot-stats.txt | grep -q '正在起來' \
+            || { echo "::error::[正在起來] 那個空殼沒說出他在等什麼"; grep 工作階段 boot-stats.txt; exit 1; }
+          grep -E '工作階段' boot-stats.txt | grep -q '當掉' \
+            || { echo "::error::[正在起來] 那個空殼是上一次當機留下來的，不是她的"; grep 工作階段 boot-stats.txt; exit 1; }
+          # 正反成對：同一份位元組、同一列，第六顆上要說相反的話。
+          grep -E '工作階段' live-stats.txt | grep -q '正在錄' \
+            || { echo "::error::[她正開著] 那一列是她自己的，不是當機留下來的殼"; grep 工作階段 live-stats.txt; exit 1; }
+          if grep -E '工作階段' live-stats.txt | grep -q '當掉'; then
+            echo "::error::[她正開著] 把她此刻正在錄的那一場說成當掉了"
+            grep 工作階段 live-stats.txt; exit 1
+          fi
+          # `forget` 是第五個 surface，而它是他**按下不可逆的按鈕之前**讀的那
+          # 一頁。「她現在還在錄，先 pause」在這一格是假的（她一列都還沒寫），
+          # 而下一步剛好一樣——所以錯的不是建議，是理由，而他會照著理由決定要
+          # 不要相信這一頁。fixture 3 釘了「她正在錄」那一半（`live-forget.txt`）。
+          # 這裡是預覽那條路，一個位元組都不會動。
+          $P forget --last 24h > boot-forget.txt
+          grep -q '正在起來' boot-forget.txt \
+            || { echo "::error::[正在起來] forget 沒說出那個 recorder 還沒開始記"; cat boot-forget.txt; exit 1; }
+          if grep -qE '她現在還在錄|她剛才一直在錄' boot-forget.txt; then
+            echo "::error::[正在起來] forget 說她在錄，而她還在開資料庫"
+            grep -nE '她現在還在錄|她剛才一直在錄' boot-forget.txt; exit 1
+          fi
+          # 再切真的那一刀。這是**唯一**印得出「留著 1 場錄製的紀錄本身」整句
+          # 話的地方（預覽那條路走不到它，`stats` 那一列只取前半句），而那一句
+          # 的後半段是「什麼時候會走」——三種心跳三個下場，而這一格等的是**別
+          # 人**開始錄，不是她收工。少了這一條，把這裡的下一步換成活的那一格，
+          # unit 和 ci 雙雙活下來（實測過）。這一顆用完了，可以動它。
+          $P forget --last 24h --yes > boot-erased.txt
+          grep -q '留著 1 場錄製的紀錄本身' boot-erased.txt \
+            || { echo "::error::[正在起來] 沒被帶走的那一列沒有被講出來"; cat boot-erased.txt; exit 1; }
+          grep -q '等它開始錄' boot-erased.txt \
+            || { echo "::error::[正在起來] 那一列等的是那個 recorder 開始錄，不是她收工"; grep 留著 boot-erased.txt; exit 1; }
+          if grep -q '收工' boot-erased.txt; then
+            echo "::error::[正在起來] 那一列不是她的，她收工不會帶走它"
+            grep -n 收工 boot-erased.txt; exit 1
+          fi
+          # 正反成對：她真的在錄的那一顆上，同一句話要說相反的下一步。
+          # `live-forget.txt` 是 fixture 3 那一刀（`ci-crashed`，心跳寫在一小時
+          # 之後），上面那個迴圈已經釘過它說「她此刻正在錄」。
+          grep -q '收工' live-forget.txt \
+            || { echo "::error::[她正開著] 那一列是她的，等的就是她收工"; grep 留著 live-forget.txt; exit 1; }
           # 「現在有沒有在看」是這一頁上唯一直接回答「她此刻在幹嘛」的一列，
           # 而它以前自己再讀一次心跳（於是同一份報告的上半和下半可以描述兩個
           # 不同的瞬間）。上面那個迴圈抓的是整份檔案，這一列被別人的「正在起

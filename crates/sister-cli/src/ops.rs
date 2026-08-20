@@ -415,9 +415,17 @@ impl Emptiness {
 /// `heartbeat::is_occupied`，`stats` 手上也有 `data_dir`。一個分得出來的地方
 /// 印一個「或」，是把自己的懶惰講成使用者的功課。
 ///
-/// 用 `is_occupied` 而不是 `is_recording`：正在開機的 recorder 也佔著這個目
-/// 錄，而那時候那一列是活的。方向要往「不敢說死」倒——把一場活的錄製講成當機
-/// 是這兩句話裡唯一會嚇到人的錯。
+/// **收 [`Phase`] 本人，不是一個布林。** 上一版收 `occupied = beat.is_some()`，
+/// 於是開機那幾分鐘印的是「此刻有人佔著這個資料目錄（她正在錄，或正在開機）」
+/// ——那個「或」正是上一段罵過的東西，而且它在 `stats` 上和同一秒的 `doctor`
+/// 打架：doctor 說「她當掉了。現在有一個 sister record 正在起來」，stats 說那
+/// 一列還開著是因為有人佔著。**開機那幾分鐘她那一列還沒 INSERT**，所以手上這
+/// 一列是上一次當機留下來的殼，不是佔著目錄的那一個。三種心跳三句話。
+///
+/// 方向要往「不敢說死」倒——把一場活的錄製講成當機是這幾句話裡唯一會嚇到人的
+/// 錯，所以只有 `Recording` 那一格敢說「她正在錄」。
+///
+/// [`Phase`]: sister_core::heartbeat::Phase
 ///
 /// **第二句是量出來的，不是推出來的。** 兩支各有一條照抄產品呼叫順序的測試在
 /// `retention.rs` 裡釘著，而兩句都曾經因為「照著守衛的條件用推的」而是假話：
@@ -431,18 +439,28 @@ impl Emptiness {
 ///   `Recorder::finish` **先**寫一列 `SessionEnd` **再**呼叫 `end_session`，於是
 ///   它自己剛剛寫的那一列讓那一場「不空」——那道清掃在產品裡從來沒有刪掉過任何
 ///   一列。現在 `delete_empty_sessions` 不把那兩列標籤當成內容，這句話才是真的。
-fn session_shell_why(occupied: bool) -> (&'static str, &'static str) {
-    if occupied {
-        (
-            "那一場還沒收尾——此刻有人佔著這個資料目錄（她正在錄，或正在開機）",
+fn session_shell_why(beat: Option<sister_core::heartbeat::Phase>) -> (&'static str, &'static str) {
+    use sister_core::heartbeat::Phase;
+    match beat {
+        Some(Phase::Recording) => (
+            "那一場還沒收尾——她此刻正在錄",
             "等她收工的時候，那一場如果還是一列都不剩，那一列就會跟著走。",
-        )
-    } else {
-        (
+        ),
+        // 她的列還沒進來，所以手上這一列不可能是她的。「什麼時候會走」那一句
+        // 因此跟著當機那一格走，只是等待變短了：正在起來的那一個一開始錄，這
+        // 一列就不再是最新的一列。
+        // 三句話都要接得上呼叫端那個「，裡面一列都不剩。」（見
+        // [`forget::session_shell_note`]），所以這一句不能在中間收一個句號
+        // ——收了的話「裡面」的先行詞會變成正在起來的那一個。
+        Some(Phase::Booting) => (
+            "那一場沒有正常收尾——她當掉了；現在有一個 sister record 正在起來，但這一列不是它的",
+            "等它開始錄，這一列就不再是最新的一列，接下來任何一次清理都會把它帶走。",
+        ),
+        None => (
             "那一場沒有正常收尾——她當掉了（現在沒有任何 recorder 佔著這個資料目錄）",
             "她**再開始錄之後**，那一列就不再是最新的一列，接下來任何一次清理都會把它\
              帶走——想馬上清掉的話，開始錄之後跑一次 `sister prune`。",
-        )
+        ),
     }
 }
 
@@ -1398,11 +1416,14 @@ pub mod forget {
     /// 見 [`sister_core::db::DbStats::only_session_shells_left`]。這一句只在
     /// 「窗裡的東西被刪光、而那張表還有列」的時候出現。
     ///
-    /// `occupied` 來自 `heartbeat::is_occupied`，決定那一列是**當掉的**還是
-    /// **活的**，以及它什麼時候會走——見 [`session_shell_why`]。
-    fn session_shell_note(s: &sister_core::db::DbStats, occupied: bool) -> Option<String> {
+    /// `beat` 來自 `heartbeat::phase`，決定那一列是**當掉的**還是**活的**，以及
+    /// 它什麼時候會走——見 [`session_shell_why`]。
+    fn session_shell_note(
+        s: &sister_core::db::DbStats,
+        beat: Option<sister_core::heartbeat::Phase>,
+    ) -> Option<String> {
         s.only_session_shells_left().then(|| {
-            let (why, then) = session_shell_why(occupied);
+            let (why, then) = session_shell_why(beat);
             format!(
                 "  留著 {} 場錄製的紀錄本身：{}，裡面一列都不剩。\n     \
                  `sister stats` 的「工作階段」會是這個數字。{then}",
@@ -1481,7 +1502,20 @@ pub mod forget {
         //
         // 所以這句話要在**預覽**那一段就講：那才是他還能先去按暫停的時刻。
         // 刪完之後再講就只是一句「你剛剛白做了」。
-        let recording = sister_core::heartbeat::is_occupied(data_dir, now);
+        //
+        // **問的是 `phase` 不是 `is_occupied`。** 上一版拿「有沒有人佔著」去印
+        // 「她現在還在錄」，而 `heartbeat` 那份註解早就寫著這兩題不可以共用一個
+        // 述詞。開機那幾分鐘（`Db::open` 在一顆一年份的資料庫上要跑好幾分鐘）她
+        // 一列都還沒寫，於是 `--yes` 那一句「她剛才一直在錄，所以這一刀之後寫進
+        // 去的東西還在」是在對一組**不存在的列**下斷言——而同一秒的 `doctor` 說
+        // 「有一個 sister record 正在起來……還沒開始記東西」。
+        //
+        // 三種心跳三句話，而**下一步都一樣**（先 `sister pause`）：開機中的那一
+        // 個再過幾秒就開始記，而他最想忘掉的那個畫面多半還在螢幕上。理由一樣要
+        // 講對——一句理由錯了的正確建議，下一次他就不信了。
+        let beat = sister_core::heartbeat::phase(data_dir, now);
+        let recording = beat == Some(sister_core::heartbeat::Phase::Recording);
+        let booting = beat == Some(sister_core::heartbeat::Phase::Booting);
 
         // 「什麼都沒記到」以前直接 return，所以那句警告在**最需要它的那一次**
         // 反而不會出現：她一個 tick 一個 tick 寫，他剛剛做的那件事很可能還沒
@@ -1497,13 +1531,19 @@ pub mod forget {
             // 再跑一次 `forget` 確認，和刪完問一句「真的沒了嗎」一樣自然，而
             // 那正是這一批 bug 的第五次。時間軸那邊同一個分支已經接上了
             // （`timeline.js` 的「沒有東西被刪掉」），這裡當時漏了。
-            if let Some(line) = session_shell_note(&db.stats()?, recording) {
+            if let Some(line) = session_shell_note(&db.stats()?, beat) {
                 println!("{line}");
             }
             if recording {
                 println!(
                     "\n⚠  **但她現在還在錄。** 剛剛那一段可能只是還沒寫進資料庫——\n   \
                      真的想清掉就先 `sister pause`，過一下再跑一次這個指令。"
+                );
+            } else if booting {
+                println!(
+                    "\n⚠  **有一個 sister record 正在起來**（多半在開資料庫），還沒開始記\n   \
+                     東西——所以剛剛那一段真的沒有被記到。但它馬上就要開始記了：\n   \
+                     真的不想被記就先 `sister pause`。"
                 );
             }
             return Ok(());
@@ -1516,6 +1556,12 @@ pub mod forget {
                     "\n⚠  **她現在還在錄。** 先 `sister pause` 再刪——不然你最想忘掉的\n   \
                      那一幀可能正好在這一刀後面被寫進去，而且那個畫面多半還在螢幕上，\n   \
                      下一個 tick 就又被記一次。處理完再 `sister resume`。"
+                );
+            } else if booting {
+                println!(
+                    "\n⚠  **有一個 sister record 正在起來**（多半在開資料庫）。它還沒開始\n   \
+                     記，但你按下 `--yes` 的時候多半已經開始了——而你最想忘掉的那個畫面\n   \
+                     多半還在螢幕上。先 `sister pause` 再刪，處理完再 `sister resume`。"
                 );
             }
             // `--last` 是從**跑的那一刻**往回算，而 `--yes` 那一次是另一個
@@ -1544,10 +1590,10 @@ pub mod forget {
         // `retention.rs` 的 `delete_empty_sessions`），所以它從頭到尾就沒有
         // 答應過要刪這一列。這裡補的是「答應之外還剩什麼」。
         //
-        // `recording` 是上面那一段算好的（`heartbeat::is_occupied`）。有它，這
-        // 一句就不必印「當掉了，或是她此刻正在錄」——底下四行才剛用同一個
-        // 布林值斷言「她剛才一直在錄」。
-        if let Some(line) = session_shell_note(&db.stats()?, recording) {
+        // `beat` 是上面那一段讀好的（`heartbeat::phase`）。有它，這一句就不必
+        // 印「當掉了，或是她此刻正在錄」——底下四行才剛用同一份心跳斷言「她剛
+        // 才一直在錄」。
+        if let Some(line) = session_shell_note(&db.stats()?, beat) {
             println!("{line}");
         }
 
@@ -1555,6 +1601,15 @@ pub mod forget {
             println!(
                 "\n⚠  她剛才一直在錄，所以這一刀之後寫進去的東西還在——包含你可能\n   \
                  最想忘掉的最後那一幀。先 `sister pause`，再跑一次這個指令。"
+            );
+        } else if booting {
+            // **不可以說「她剛才一直在錄」。** 開機那一段她一列都沒寫，所以這一
+            // 刀後面沒有東西——那句話會對著一組不存在的列下斷言。但下一步一樣：
+            // 它正要開始。
+            println!(
+                "\n⚠  這一刀切在那個 sister record 開始記之前，所以刪掉的是舊的。\n   \
+                 但它正在起來，馬上就要開始記了——而你最想忘掉的那個畫面多半還在\n   \
+                 螢幕上。先 `sister pause`。"
             );
         }
         Ok(())
@@ -1598,7 +1653,8 @@ pub mod forget {
                 sessions: 1,
                 ..Default::default()
             };
-            let note = session_shell_note(&shell, false).expect("留下來就要說");
+            use sister_core::heartbeat::Phase;
+            let note = session_shell_note(&shell, None).expect("留下來就要說");
             assert!(note.contains('1'), "{note}");
             assert!(
                 note.contains("工作階段"),
@@ -1619,15 +1675,55 @@ pub mod forget {
             );
             assert!(note.contains("當掉"), "沒有人佔著，那就是當掉了：{note}");
 
-            // 有人佔著的時候：那一列是活的，下場也不一樣（收工時 `end_session`
-            // 自己會掃它）。不可以說她當掉了。
-            let live = session_shell_note(&shell, true).expect("留下來就要說");
-            assert!(!live.contains("當掉"), "她此刻正佔著這個目錄：{live}");
+            // 她**正在錄**的時候：那一列是活的，下場也不一樣（收工時
+            // `end_session` 自己會掃它）。不可以說她當掉了。
+            let live = session_shell_note(&shell, Some(Phase::Recording)).expect("留下來就要說");
+            assert!(!live.contains("當掉"), "她此刻正在錄：{live}");
             assert!(live.contains("收工"), "活的那一列走的是另一條路：{live}");
-            assert_ne!(note, live, "兩種狀態的下一步不一樣，不可以共用一句話");
+
+            // **而「正在起來」那一格跟當機走，不跟活的走。** 開機那幾分鐘她那
+            // 一列還沒 INSERT，所以手上這一列不可能是她的——上一版收
+            // `occupied = beat.is_some()`，於是這裡印「此刻有人佔著這個資料目錄
+            // （她正在錄，或正在開機）」，而同一秒的 `doctor` 說那是上一次當機
+            // 留下來的殼。
+            let booting = session_shell_note(&shell, Some(Phase::Booting)).expect("留下來就要說");
+            assert!(
+                booting.contains("當掉"),
+                "那一列不是正在起來的那一個：{booting}"
+            );
+            assert!(
+                booting.contains("正在起來"),
+                "而那個 recorder 看得到，等待也比較短：{booting}"
+            );
+            assert!(
+                !booting.contains("正在錄"),
+                "她還在開資料庫，一列都還沒寫：{booting}"
+            );
+            // **後半句也要釘。** 三句話各有一個「什麼時候會走」，而它們不是同
+            // 一件事：活的那一列等她收工，這一列等**別人**開始錄。上一版只釘了
+            // 前半句（`why`），於是把這裡的 `then` 換成活的那一格照樣全綠——
+            // `sessions_line` 只取 `why`，而 CI 走的是 `forget` 的預覽那條路，
+            // 根本印不到這一句。突變測試當場活下來（M33），unit 和 ci 雙雙。
+            assert!(
+                booting.contains("等它開始錄"),
+                "等的是那個正在起來的 recorder，不是她：{booting}"
+            );
+            assert!(
+                !booting.contains("收工"),
+                "那一列不是她的，她收工不會帶走它：{booting}"
+            );
+
+            // 三種心跳三句話，兩兩不同。任何兩種撞在一起，就是又有一組不同的
+            // 處境被印成同一行。
+            let three = [&note, &live, &booting];
+            for (i, a) in three.iter().enumerate() {
+                for b in &three[i + 1..] {
+                    assert_ne!(a, b, "三種狀態的下一步不一樣，不可以共用一句話");
+                }
+            }
 
             // 東西還在的時候沒有這一句：那一場不是殼，它本來就該留著。
-            for occupied in [false, true] {
+            for beat in [None, Some(Phase::Booting), Some(Phase::Recording)] {
                 assert!(
                     session_shell_note(
                         &sister_core::db::DbStats {
@@ -1635,16 +1731,14 @@ pub mod forget {
                             chunks: 6,
                             ..Default::default()
                         },
-                        occupied
+                        beat
                     )
                     .is_none(),
                     "她還記著 6 段字，那一場不是空殼"
                 );
                 // 整張表空了也沒有這一句——`delete_empty_sessions` 帶走了，
                 // 而報告裡「刪掉了 N 場錄製的紀錄本身」那一行才是講它的。
-                assert!(
-                    session_shell_note(&sister_core::db::DbStats::default(), occupied).is_none()
-                );
+                assert!(session_shell_note(&sister_core::db::DbStats::default(), beat).is_none());
             }
         }
     }
@@ -2501,6 +2595,39 @@ pub mod query {
                 "她正開著，不要把她送去改一個沒問題的設定：{lines}"
             );
 
+            // **她正在起來。** `recording_now` 在這幾分鐘是 false（她一拍都還
+            // 沒跑），所以上面那兩格都輪不到，而底下那兩句一個把他送去改
+            // `capture.enabled`、一個說東西被忘掉了——同一秒的 `sister facts`
+            // 說的是「再等一下」。兩個指令，相反的下一步。
+            //
+            // 一顆一年份的資料庫 `Db::open` 要跑好幾分鐘，所以這不是幾百毫秒
+            // 的窄縫，是他每天早上都會問到的那一段。
+            for stored in [false, true] {
+                let booting = BlindSpots {
+                    recording_now: false,
+                    booting_now: true,
+                    ever_stored: stored,
+                    ..recorded_then_erased.clone()
+                };
+                let lines = blind_lines(&booting).join("\n");
+                assert!(
+                    lines.contains("正在起來"),
+                    "他在等一個看得見的東西，這一句就是那個東西：{lines}"
+                );
+                assert!(
+                    !lines.contains("capture.enabled"),
+                    "沒有設定要改，他只要等：{lines}"
+                );
+                assert!(
+                    !lines.contains("正開著") && !lines.contains("正在錄"),
+                    "她還在開資料庫，一拍都還沒跑：{lines}"
+                );
+                assert!(
+                    !lines.contains("忘掉") && !lines.contains("保留期"),
+                    "他一次都沒刪過東西：{lines}"
+                );
+            }
+
             // 同樣三個數字，但那段時間她是閉著眼睛的。這一次「被忘掉了」是假話。
             let paused_throughout = BlindSpots {
                 paused_episodes: 1,
@@ -2914,13 +3041,19 @@ pub mod stats {
     /// 著的那幾列全是空殼，而這一頁上其他每一個數字都是 0。少了但書，這個 1
     /// 讀起來就像「她還記得那一場」，而正上方那個 ⚠ 才剛說完一列都不剩。
     ///
-    /// `occupied` 來自 `heartbeat::is_occupied`——這一頁手上有 `data_dir`，所
-    /// 以它分得出那一列是當掉的還是活的，不必印一個「或」。
-    fn sessions_line(s: &sister_core::db::DbStats, occupied: bool) -> String {
+    /// `beat` 來自 `heartbeat::phase`——這一頁手上有 `data_dir`，所以它分得出
+    /// 那一列是當掉的還是活的，不必印一個「或」。**收 `Phase` 不收布林**：上
+    /// 一版這一頁自己壓成 `beat.is_some()`，於是同一份 `stats` 上面那個 ⚠ 說
+    /// 「有一個 sister record 正在起來」、三行之下這一列說那一場開著是因為
+    /// 「她正在錄，或正在開機」——而且同一秒的 `doctor` 說那一列是當機的殼。
+    fn sessions_line(
+        s: &sister_core::db::DbStats,
+        beat: Option<sister_core::heartbeat::Phase>,
+    ) -> String {
         if s.only_session_shells_left() {
             // 只取「為什麼」。「什麼時候會走」留給 `forget`：那裡是他剛按下不
             // 可逆的按鈕、正在等一句交代的時刻，而這裡是一份足跡清單。
-            let (why, _) = session_shell_why(occupied);
+            let (why, _) = session_shell_why(beat);
             format!("  工作階段  {}（空殼：{}）", s.sessions, why)
         } else {
             format!("  工作階段  {}", s.sessions)
@@ -2964,8 +3097,18 @@ pub mod stats {
         //
         // 讀在 `json` 那個分支**之前**，因為那份 JSON 也在回答同一題：它印
         // 的 `scope_started_at` 以前沒有任何欄位說得出那一場是不是還在錄。
+        //
+        // **底下每一個問它的人拿到的都是 [`Phase`] 本人。** 上一版這裡多一行
+        // `let occupied = beat.is_some();`，然後把那個布林發給 `sessions_line`
+        // ——於是開機那幾分鐘，這一頁上面那個 ⚠ 說「有一個 sister record 正在
+        // 起來」，三行之下那一列說那一場開著是因為「此刻有人佔著這個資料目錄
+        // （她正在錄，或正在開機）」，而同一秒的 `doctor` 說那一列是上一次當機
+        // 留下來的殼。同一份修改，同一個檔案，同一頁——`doctor` 那邊改了、這邊
+        // 沒有。**修完一個「布林湊不出三種答案」，要 grep 這一頁上還有誰收那個
+        // 布林。**
+        //
+        // [`Phase`]: sister_core::heartbeat::Phase
         let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
-        let occupied = beat.is_some();
 
         let days_between = |a: Option<i64>, b: Option<i64>| match (a, b) {
             (Some(a), Some(b)) if b > a => (b - a) as f64 / 86_400_000.0,
@@ -3158,7 +3301,7 @@ pub mod stats {
         // 整句在 `sessions_line`——數字和那個但書要嘛一起印，要嘛一起不印。
         // 拆成「印數字」加「如果……再印一句」的話，那個 `if` 就落在呼叫端，而
         // 這一批 bug 七次有七次犯在呼叫端。
-        println!("{}", sessions_line(&s, occupied));
+        println!("{}", sessions_line(&s, beat));
         println!(
             "  畫面      {} 張保留，{} 張因重複被折疊",
             s.frames, s.frames_collapsed
@@ -3458,7 +3601,8 @@ pub mod stats {
                 sessions: 1,
                 ..Default::default()
             };
-            let line = sessions_line(&erased, false);
+            use sister_core::heartbeat::Phase;
+            let line = sessions_line(&erased, None);
             assert!(line.contains('1'), "數字還是要印：{line}");
             assert!(
                 line.contains("空殼"),
@@ -3474,14 +3618,30 @@ pub mod stats {
                 "沒有 recorder 佔著這個目錄，不可以說她可能正在錄：{line}"
             );
 
-            // 反過來：有人佔著的時候不准說她當機——這是這兩句話裡唯一會嚇到
+            // 反過來：她真的在錄的時候不准說她當機——這是這幾句話裡唯一會嚇到
             // 人的錯。
-            let live = sessions_line(&erased, true);
+            let live = sessions_line(&erased, Some(Phase::Recording));
             assert!(live.contains("空殼"), "{live}");
             assert!(
                 !live.contains("當掉"),
-                "她此刻正佔著這個目錄，不可以說她當掉了：{live}"
+                "她此刻正在錄，不可以說她當掉了：{live}"
             );
+
+            // **而「正在起來」跟當機走。** 她那一列要等 `Db::open` 回來才
+            // INSERT，所以開機那幾分鐘手上這一列一定是上一次留下來的殼——上一
+            // 版這裡收 `occupied = beat.is_some()`，於是這一列印「她正在錄，或
+            // 正在開機」，而同一份報告上面那個 ⚠ 說「有一個 sister record 正在
+            // 起來」。
+            let booting = sessions_line(&erased, Some(Phase::Booting));
+            assert!(booting.contains("空殼"), "{booting}");
+            assert!(booting.contains("當掉"), "那一列不是她的：{booting}");
+            assert!(
+                !booting.contains("正在錄"),
+                "她還在開資料庫，一列都還沒寫：{booting}"
+            );
+            for (a, b) in [(&line, &live), (&line, &booting), (&live, &booting)] {
+                assert_ne!(a, b, "三種心跳三個下場，不可以共用一句話");
+            }
 
             // 而她真的記著東西的時候，這個但書一個字都不准出現：那會把一場
             // 好好的錄製講成一個殼。
@@ -3497,15 +3657,15 @@ pub mod stats {
                     ..Default::default()
                 },
             ] {
-                for occupied in [false, true] {
-                    let line = sessions_line(&has, occupied);
+                for beat in [None, Some(Phase::Booting), Some(Phase::Recording)] {
+                    let line = sessions_line(&has, beat);
                     assert!(!line.contains("空殼"), "她記著東西：{line}");
                     assert_eq!(line, format!("  工作階段  {}", has.sessions));
                 }
             }
 
             // 一列都沒有的時候也不准講——沒有殼可以講。
-            assert_eq!(sessions_line(&DbStats::default(), false), "  工作階段  0");
+            assert_eq!(sessions_line(&DbStats::default(), None), "  工作階段  0");
         }
 
         /// **「系統 1」和上面那個 ⚠ 不可以同時只講一半。**

@@ -112,20 +112,42 @@ fn pause_state(shell: tauri::State<'_, Shell>) -> bool {
 ///
 /// 判斷靠 recorder 每 5 秒蓋一次的時戳（見 [`sister_core::heartbeat`]），
 /// 不靠 `sessions.ended_at`——那一列在 recorder 當掉的時候永遠停在 NULL。
+///
+/// # 為什麼回三個字串
+///
+/// 上一版回 `is_recording` 那個布林，而**它把「正在起來」歸進「沒有人在
+/// 錄」**——於是 `app.js` 那個等她起來的迴圈（`startRecording`）在一顆一年份
+/// 的資料庫上一定逾時：`Db::open` 要跑好幾分鐘，那 25 秒裡 `is_recording` 從
+/// 頭到尾是 false，畫面說「等了 25 秒還沒有心跳」。**而心跳從第一秒就在**
+/// （`ops::BootBeat` 在開資料庫之前先蓋一次），那段註解自己也是這樣寫的。
+/// 同一顆按鈕在系統匣上更難看：那邊看到 false 就去 `start_recording`，而那一
+/// 支的第一道閘門是 `is_occupied`——按下去只會回一句「已經有一個 sister
+/// record 在跑了」。
+///
+/// 「她在錄嗎」和「有人佔著這個目錄嗎」是兩個問題（`heartbeat.rs` 開頭那段就
+/// 是在講這件事），而一個布林只答得出一個。
 #[tauri::command]
-fn recording_state(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> bool {
-    let now = match &shell.data_dir {
-        Some(dir) => sister_core::heartbeat::is_recording(dir, sister_core::now_ms()),
+fn recording_state(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> String {
+    let now = match shell
+        .data_dir
+        .as_ref()
+        .and_then(|dir| sister_core::heartbeat::phase(dir, sister_core::now_ms()))
+    {
+        Some(sister_core::heartbeat::Phase::Recording) => "recording",
+        Some(sister_core::heartbeat::Phase::Booting) => "booting",
         // 問不出資料目錄的時候，`pause_state` 回報「暫停」是為了少錄；
         // 這裡回報「沒在錄」是為了少吹牛。同一個方向：不確定就往
         // 「她做得比較少」那邊倒。
-        None => false,
+        None => "none",
     };
     // 順手把系統匣那兩顆的字改對——手上已經有答案了，不必再讀一次磁碟。這不是
     // 唯一的刷新時機（見 [`refresh_tray`]），是最即時的那一個：視窗開著的時候，
     // 選單和字母人講的是同一秒的事。
-    set_record_labels(&app, now);
-    now
+    //
+    // 那兩行字問的是「按下去會發生什麼」，不是「她在錄嗎」——正在起來的那一個
+    // 也停得掉，也會被「結束」帶走，所以兩種都算佔著。
+    set_record_labels(&app, now != "none");
+    now.to_string()
 }
 
 /// 系統匣那三行字：全部重新去問一次磁碟。
@@ -147,16 +169,18 @@ fn refresh_tray(app: &tauri::AppHandle) {
     let Some(shell) = app.try_state::<Shell>() else {
         return;
     };
-    let (recording, paused) = match &shell.data_dir {
+    let (occupied, paused) = match &shell.data_dir {
         Some(dir) => (
-            sister_core::heartbeat::is_recording(dir, sister_core::now_ms()),
+            // `is_occupied` 不是 `is_recording`：這兩行字問的是「按下去會發生
+            // 什麼」。理由在 [`recording_state`] 上面。
+            sister_core::heartbeat::is_occupied(dir, sister_core::now_ms()),
             sister_core::pause::is_paused(dir),
         ),
         // 問不出資料目錄的時候，和 `recording_state` / `pause_state` 倒向同一邊：
         // 不確定就往「她做得比較少」那邊講。
         None => (false, true),
     };
-    set_record_labels(app, recording);
+    set_record_labels(app, occupied);
     if let Some(item) = app.try_state::<PauseItem>() {
         let _ = item.0.set_text(pause_label(paused));
     }
@@ -164,12 +188,16 @@ fn refresh_tray(app: &tauri::AppHandle) {
 
 /// 「開始／停止記錄」和「結束」那兩行字。分出來是因為 [`recording_state`] 手上
 /// 已經有答案了，不必為了改字再讀一次磁碟。
-fn set_record_labels(app: &tauri::AppHandle, recording: bool) {
+///
+/// 收的是**佔不佔著這個目錄**，不是「在不在錄」：正在起來的那一個停得掉，也會
+/// 被「結束」帶走，而寫著「開始記錄」的那一顆在那幾分鐘按下去只會回一句「已經
+/// 有一個 sister record 在跑了」。
+fn set_record_labels(app: &tauri::AppHandle, occupied: bool) {
     if let Some(item) = app.try_state::<RecordItem>() {
-        let _ = item.0.set_text(record_label(recording));
+        let _ = item.0.set_text(record_label(occupied));
     }
     if let Some(item) = app.try_state::<QuitItem>() {
-        let _ = item.0.set_text(quit_label(recording));
+        let _ = item.0.set_text(quit_label(occupied));
     }
 }
 
@@ -1068,8 +1096,14 @@ fn settings_read() -> Result<Settings, String> {
 /// 圖示），實際上那個行程幾分鐘前就掛了。這句話會替那件事背書。
 #[derive(Serialize)]
 struct WriteOutcome {
-    /// 現在真的有人在錄嗎（心跳）。決定那句話怎麼講。
-    recording: bool,
+    /// 心跳現在說什麼：`"recording"`／`"booting"`／`"none"`。決定那句話怎麼講。
+    ///
+    /// **三個值，不是一個布林。** 上一版是 `recording: bool`（`is_recording`），
+    /// 於是開機那幾分鐘這一頁說「現在沒有人在錄，所以這一份要等你按下**開始
+    /// 記錄**才會生效」——而那顆按鈕在那幾分鐘按下去只會回一句「已經有一個
+    /// sister record 在跑了」（見 [`start_recording`] 那道 `is_occupied` 閘
+    /// 門）。一句在他剛改完排除規則的那一刻、指著一條走不通的路的話。
+    watching: &'static str,
 }
 
 #[tauri::command]
@@ -1093,9 +1127,15 @@ fn settings_write(
     c.save(&path).map_err(|e| format!("{e:#}"))?;
     // 存成功之後才問。反過來的話，一個存不進去的檔案會拿到一句「5 秒內換上」。
     Ok(WriteOutcome {
-        recording: shell.data_dir.as_ref().is_some_and(|dir| {
-            sister_core::heartbeat::is_recording(dir, sister_core::now_ms())
-        }),
+        watching: match shell
+            .data_dir
+            .as_ref()
+            .and_then(|dir| sister_core::heartbeat::phase(dir, sister_core::now_ms()))
+        {
+            Some(sister_core::heartbeat::Phase::Recording) => "recording",
+            Some(sister_core::heartbeat::Phase::Booting) => "booting",
+            None => "none",
+        },
     })
 }
 
@@ -1614,15 +1654,26 @@ struct Erasure {
     /// 兩種意思寫成同一個 0 的話，這裡就變成它自己要修的那個 bug——`Some(0)`
     /// 是「沒有東西留下來」，`None` 是「這一趟沒有問這個問題」。
     sessions_left: Option<u64>,
-    /// 留下來的那一列是**活的**還是**當掉的**（`heartbeat::is_occupied`）。
+    /// 留下來的那一列是誰的：`"live"`（她此刻正在錄）、`"booting"`（有一個
+    /// recorder 正在起來，那一列不是它的）、`"gone"`（沒有人在，她當掉了）。
     ///
     /// 只有 `sessions_left > 0` 的時候有意義，所以它和上面那一欄要在同一個
-    /// `if` 裡讀完——分開讀就會有人拿一個沒問過的布林值去講一句斷言。
+    /// `if` 裡讀完——分開讀就會有人拿一個沒問過的值去講一句斷言。
     ///
-    /// 有這一欄，畫面就不必印「當掉了，**或是**她此刻正在錄」。用
-    /// `is_occupied` 而不是 `is_recording`：正在開機的 recorder 也佔著這個目
-    /// 錄，而把一場活的錄製講成當機是這兩句話裡唯一會嚇到人的錯。
-    shell_is_live: bool,
+    /// # 為什麼是三個字串，不是一個布林
+    ///
+    /// 上一版是 `shell_is_live: bool`，算的是 `heartbeat::is_occupied`，而註解
+    /// 把那個選擇寫成有理由的（「正在開機的 recorder 也佔著這個目錄」）。於是
+    /// 畫面印的是「此刻有人佔著這個資料目錄（**她正在錄，或正在開機**）」——那
+    /// 個「或」正是這個 repo 一路在刪的東西，而且它在開機那幾分鐘是**假的**：
+    /// `BootBeat::start` 先寫心跳，`start_session` 最後才 INSERT，所以那幾分鐘
+    /// 裡手上這一列一定是**上一次當機留下來的殼**，不是佔著目錄的那一個。三種
+    /// 心跳三句話，而一個布林湊不出三種答案。CLI 那邊是同一個判斷
+    /// （`session_shell_why` 收 `Option<Phase>`）。
+    ///
+    /// 一個欄位三個值，不是兩個布林：兩個布林拼得出「又在錄又在開機」這種不存
+    /// 在的組合，而拼錯的那一次不會有人紅。
+    shell_beat: &'static str,
 }
 
 impl From<sister_core::retention::PruneReport> for Erasure {
@@ -1641,7 +1692,7 @@ impl From<sister_core::retention::PruneReport> for Erasure {
             // 這一支只看得到「刪掉了什麼」。留下什麼要再問一次資料庫，所以
             // 預設是「沒問」，由 `forget_range` 補上。
             sessions_left: None,
-            shell_is_live: false,
+            shell_beat: "gone",
         }
     }
 }
@@ -1690,8 +1741,13 @@ fn forget_range(
         .as_ref()
         .ok_or_else(|| "找不到資料目錄，不能保證截圖真的會被刪掉".to_string())?;
     let frames = sister_core::config::Config::frames_dir(dir);
-    // 在借出資料庫之前問，因為它讀的是磁碟上的心跳檔，不是資料庫。
-    let live = sister_core::heartbeat::is_occupied(dir, sister_core::now_ms());
+    // 在借出資料庫之前問，因為它讀的是磁碟上的心跳檔，不是資料庫。**問
+    // `phase` 不問 `is_occupied`**：理由在 `Erasure::shell_beat` 上面。
+    let beat = match sister_core::heartbeat::phase(dir, sister_core::now_ms()) {
+        Some(sister_core::heartbeat::Phase::Recording) => "live",
+        Some(sister_core::heartbeat::Phase::Booting) => "booting",
+        None => "gone",
+    };
     with_db_mut(&shell, |db| {
         let report = db
             .forget(from_ts, to_ts, Some(&frames))
@@ -1709,7 +1765,9 @@ fn forget_range(
         Ok(Erasure {
             sessions_left: Some(left),
             // 分得出來就不要印「或」。CLI 那邊同一個判斷（`session_shell_why`）。
-            shell_is_live: left > 0 && live,
+            // 沒有留下來的列就沒有這個問題——那時候這一欄不准講一個沒問過的
+            // 答案，所以跟著 `From` 的預設走。
+            shell_beat: if left > 0 { beat } else { "gone" },
             ..Erasure::from(report)
         })
     })
@@ -2047,10 +2105,15 @@ fn main() {
             // 開始／停止和暫停是兩件事，所以是兩顆。暫停是「先別看，但留在
             // 這裡」，停止是「今天到此為止」——把停止做成「一直暫停」會留下
             // 一個永遠在跑卻永遠不做事的行程，而他在工作管理員裡看得到它。
+            //
+            // 這兩行字問的是「按下去會發生什麼」，所以看的是**有沒有人佔著**
+            // ——理由在 [`set_record_labels`] 上面。
+            let occupied_now =
+                recording_state(app.handle().clone(), app.state::<Shell>()) != "none";
             let record_item = MenuItem::with_id(
                 app,
                 "record",
-                record_label(recording_state(app.handle().clone(), app.state::<Shell>())),
+                record_label(occupied_now),
                 true,
                 None::<&str>,
             )?;
@@ -2059,13 +2122,8 @@ fn main() {
             let settings_item = MenuItem::with_id(app, "settings", "設定…", true, None::<&str>)?;
             let consent_item =
                 MenuItem::with_id(app, "consent", "三張同意書…", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(
-                app,
-                "quit",
-                quit_label(recording_state(app.handle().clone(), app.state::<Shell>())),
-                true,
-                None::<&str>,
-            )?;
+            let quit_item =
+                MenuItem::with_id(app, "quit", quit_label(occupied_now), true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
                 &[
@@ -2106,7 +2164,11 @@ fn main() {
                         // 最多可能舊了 5 秒（見 `recording_state`），而在那 5 秒
                         // 裡按下去的人，想要的是他**看到的狀態**的相反。
                         let shell = app.state::<Shell>();
-                        let on = recording_state(app.clone(), shell.clone());
+                        // 「有人佔著」才是這一顆的問題，不是「她在錄嗎」：正在
+                        // 起來的那幾分鐘走 `start_recording` 只會撞上它自己那道
+                        // `is_occupied` 閘門，回一句「已經有一個在跑了」——而他
+                        // 按的是一顆寫著「開始記錄」的按鈕。
+                        let on = recording_state(app.clone(), shell.clone()) != "none";
                         let done = if on {
                             stop_recording(shell.clone())
                         } else {
@@ -2163,7 +2225,12 @@ fn main() {
                         // 不管那場 recorder 是不是這裡開起來的，都停。要在兩種
                         // 錯之間選一個的話，「停掉一個終端機裡的 record，而那個
                         // 終端機會印出是誰叫它停的」，比「安靜地繼續錄」好。
-                        if recording_state(app.clone(), shell.clone())
+                        //
+                        // **正在起來的那一個也要停。** 上一版問的是「她在錄
+                        // 嗎」，於是他在那幾分鐘按「結束」，視窗關了，而那個還
+                        // 在開資料庫的行程留在工作管理員裡，幾分鐘後開始錄——
+                        // 這一段註解上面兩行講的正是這件事。
+                        if recording_state(app.clone(), shell.clone()) != "none"
                             && let Err(e) = stop_recording(shell.clone())
                         {
                             tracing::error!("結束時停不掉 recorder：{e}");

@@ -72,11 +72,26 @@ let paused = false;
 let recording = true;
 
 /**
+ * 有一個 `sister record` 起來了，但它還在開資料庫（心跳的第二欄是 `boot`）。
+ *
+ * **這是第三種，不是「沒有人在錄」的一種。** `recording_state` 上一版回的是
+ * 一個布林（`is_recording`），而它把這幾分鐘歸進 false，於是：底下那個等她起
+ * 來的迴圈等滿 25 秒然後說「還沒有心跳」（心跳從第一秒就在），那顆「叫她起
+ * 來」的按鈕跟著放回來，而他再按一次只會拿到一句「已經有一個 sister record
+ * 在跑了」。一顆存了一年的資料庫 `Db::open` 要跑好幾分鐘，所以那不是罕見的
+ * 幾百毫秒，是他每天早上都會看到的那一段。
+ */
+let booting = false;
+
+/**
  * 按了「開始記錄」之後、她真的開始之前的那一段。
  *
  * 這一段可能要好幾秒：另一個行程要載入、開資料庫、跑 migration。這期間畫面上
  * 不能還寫著「沒有人在記錄」配一顆按得下去的按鈕——他會再按一次，然後就有兩個
  * recorder 各錄一份，而唯一看得出來的症狀是磁碟用得比講好的快一倍。
+ *
+ * 心跳一出現這個就關掉，接手的是 `booting`／`recording`——那兩個是**看到的**，
+ * 這一個是**猜的**（我按了，所以她大概在起來）。
  */
 let starting = false;
 
@@ -123,18 +138,25 @@ function paint() {
   // 暫停時仍然答得出問題——停的是「記錄」，不是「記憶」。所以 thinking
   // 要講出來，只是講在文字上，不動那個灰掉的身體。沒在錄的時候同理：
   // 她答得出以前記下來的東西。
-  const line = starting
-    ? "正在把她叫起來…"
-    : state === "thinking" && shown !== "thinking"
-      ? `想一下…（${shown === "paused" ? "仍在暫停" : "但沒有人在記錄"}）`
-      : STATE_LINES[shown];
+  // 「正在起來」排在 `starting` 前面：兩個都是「還沒開始錄」，但這一個是**看
+  // 到心跳**才說的，而且說得出她卡在哪裡。他那顆一年份的資料庫要開好幾分鐘，
+  // 一句「正在把她叫起來…」在第三分鐘讀起來像當掉了。
+  const line = booting
+    ? "她起來了，正在開資料庫…（大的記憶要等一下，這期間還沒開始記）"
+    : starting
+      ? "正在把她叫起來…"
+      : state === "thinking" && shown !== "thinking"
+        ? `想一下…（${shown === "paused" ? "仍在暫停" : "但沒有人在記錄"}）`
+        : STATE_LINES[shown];
   // 灰掉的時候多講一句「上一次是什麼時候、為什麼停的」。換行不換句：那是
   // 同一件事的後半段，而 `.state-line` 的 `pre-line` 讓它自己排。
   //
   // 剛剛才叫不起來的話，那一句蓋過「上一次是什麼時候停的」——他現在要處理的
   // 是眼前這一次沒起來，不是上禮拜那一場怎麼收的。
   const detail =
-    !starting && shown === "asleep" ? (wakeFailed ?? asleepDetail()) : "";
+    !starting && !booting && shown === "asleep"
+      ? (wakeFailed ?? asleepDetail())
+      : "";
   stateLine.textContent = detail === "" ? line : `${line}\n${detail}`;
   // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。
   avatar.setAttribute("aria-label", `AI-Sister：${line}`);
@@ -142,7 +164,10 @@ function paint() {
   if (wakeButton) {
     // 只在真的沒人在錄的時候出現。暫停中不出現——那時候的下一步是按 ▶，
     // 而不是再開一個 recorder（那會變成兩個行程各錄一份）。
-    wakeButton.hidden = shown !== "asleep" || starting;
+    //
+    // `booting` 也不出現，而且理由是同一個：那幾分鐘目錄已經有人佔著，按下去
+    // 撞的是 `start_recording` 那道 `is_occupied` 閘門。
+    wakeButton.hidden = shown !== "asleep" || starting || booting;
   }
 }
 
@@ -164,12 +189,23 @@ function setPaused(next) {
   paint();
 }
 
+/**
+ * 心跳說什麼：`"recording"`／`"booting"`／`"none"`（見後端的 `recording_state`）。
+ *
+ * **收三個字串，不是一個布林。** 認不得的值一律當成「沒有人在錄」——三種裡
+ * 只有它不會替一件沒發生的事背書。
+ */
 function setRecording(next) {
   const was = recording;
-  recording = next === true;
-  // 她自己起來了（或是從別的地方被開起來的），那個「正在叫她」的等待就結束了，
+  recording = next === "recording";
+  booting = next === "booting";
+  // 她起來了（或是從別的地方被開起來的），那個「正在叫她」的等待就結束了，
   // 而「上一次叫不起來」也就過期了——她現在人在這裡，那句話再留著只會嚇人。
-  if (recording) {
+  //
+  // **`booting` 也算數。** 上一版只認 `recording`，於是那 25 秒的等待在一顆
+  // 開得慢的資料庫上一定走到逾時那一句「還沒有心跳」——而心跳就在磁碟上，是
+  // 這一支自己看不見它。
+  if (recording || booting) {
     starting = false;
     wakeFailed = null;
   }
@@ -191,6 +227,10 @@ function setRecording(next) {
  * 起來」是一個猜測，而它會連著一顆放回來的按鈕一起出現——他再按一下，第二個
  * `sister record` 就打同一顆資料庫。所以逾時只換句話：說我看到什麼，別說她
  * 怎麼了。真的起來了，那 5 秒一輪的輪詢會接住。
+ *
+ * 而上面那段承諾要到這一版才是真的：`recording_state` 以前回 `is_recording`，
+ * 把那個開機心跳過濾掉了，於是這個迴圈在一顆一年份的資料庫上**每一次**都走到
+ * 逾時——一句「等了 25 秒還沒有心跳」，印在一個從第一秒就在的心跳旁邊。
  */
 const WAKE_POLL_MS = 400;
 const WAKE_TIMEOUT_MS = 25000;
@@ -931,10 +971,18 @@ paintPin();
 // 機器上唯一看得到 UI 的方式，一個走假路的開發開關會讓它騙我。
 const wanted = params.get("state") ?? "idle";
 setPaused(wanted === "paused");
-// `?state=asleep`：沒有人在跑 `sister record`。和上面同一條紀律——走真正的
-// 那個旗標，不另外搬一個長得像的樣子出來。
-setRecording(wanted !== "asleep");
-setState(wanted === "paused" || wanted === "asleep" ? "idle" : wanted);
+// `?state=asleep`：沒有人在跑 `sister record`。`?state=booting`：有一個起來
+// 了，但還在開資料庫——那一格畫面上不是「沒有人在記錄」（那句話配著一顆按下
+// 去會失敗的按鈕），而他那顆一年份的資料庫每天早上都會停在這裡好幾分鐘。
+// 和上面同一條紀律——走真正的那個旗標，不另外搬一個長得像的樣子出來。
+setRecording(
+  wanted === "asleep" ? "none" : wanted === "booting" ? "booting" : "recording",
+);
+setState(
+  wanted === "paused" || wanted === "asleep" || wanted === "booting"
+    ? "idle"
+    : wanted,
+);
 
 // 開場先問一次磁碟。暫停**不會自己過期**，所以「上禮拜按了暫停」是一條真實
 // 的路——開起來就該是灰的，而不是先亮一下再變灰。
