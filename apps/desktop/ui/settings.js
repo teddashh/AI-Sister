@@ -112,8 +112,9 @@ async function refreshHealth(urls) {
 /**
  * 「問不到」不可以印成空白。
  *
- * 空白在這一格就是「都生效」（見 `paintHealth` 最後那兩行），也就是這一頁
- * 最重要的那句警告，在唯一該出現的那一刻消失。以前這裡是 `hidden = true`。
+ * `paintHealth` 每一條路都會講一句話，所以空白在這一格只剩一個意思：**你一條
+ * 規則都沒寫**，沒有那個問題要回答。他明明寫了、我們只是問不到答案的時候印
+ * 空白，等於替一個沒問出口的問題填一個「沒事」。以前這裡是 `hidden = true`。
  */
 function paintHealthUnaskable(hasRules) {
   if (!el.health) return;
@@ -212,7 +213,7 @@ function paintHealth(health, hasRules) {
   }
 
   // 到這裡 `broken` 裡沒有網址那一格的話——而那**不等於「都生效」**，儘管這一
-  // 頁上面自己寫著「空白在這一格就是『都生效』」。`broken_privacy_rules` 最後
+  // 頁到 alpha.37 為止就是這樣印的。`broken_privacy_rules` 最後
   // 那一格要求 `browser_ticks >= 20` 才敢講話，門檻沒到就什麼都不 push；於是
   // 「UIA 真的讀得到網址」和「UIA 起得來但一次都沒讀到過」印同一片空白，而後
   // 者是 `capabilities.rs` 叫做「這一整條線最常見的壞法」的那一台——那個人
@@ -462,16 +463,27 @@ function setUnreadable(on) {
   }
 }
 
+/**
+ * 讀一份新的畫上去。回傳「讀出來了沒」。
+ *
+ * 那個回傳值是給 `save()` 用的，而它是必要的：這個函式成功的時候會 `say("")`
+ * ——那件事本身是對的（重新讀一份，就不該留著上一件事的結果掛在那裡），但
+ * `save()` 存完會呼叫它，於是「存好了」講完幾毫秒就被抹成空白。兩行各自都對，
+ * 湊起來這一頁在**成功**的時候永遠沉默，只有失敗才說話（`catch` 走不到這裡）。
+ * 對按下按鈕的人來說，沉默就是「按了沒反應」。
+ */
 async function load() {
   if (invoke === null) {
     say("這一頁不是在 AI-Sister 裡打開的，改了不會存到任何地方。", true);
-    return;
+    return false;
   }
+  let ok = false;
   try {
     apply(await invoke("settings_read"));
     setUnreadable(false);
     say("");
     await relint();
+    ok = true;
   } catch (err) {
     // `apply` 在 `await` 之後才跑，所以讀失敗的時候**一個欄位都沒被寫過**，
     // 畫面上留著 settings.html 的預設值：三個空的排除框、兩顆沒打勾的防線。
@@ -486,6 +498,7 @@ async function load() {
   // 熱鍵分開讀：它問的不是設定檔裡寫什麼，是**現在真的搶到了沒**——那個答案
   // 只有已經跑起來的那支程式知道。設定讀失敗也不該讓這一格空著。
   await reloadHotkey();
+  return ok;
 }
 
 /**
@@ -675,15 +688,27 @@ async function save() {
     // 隔壁那一頁早就有一模一樣的句子：撤掉截圖同意書的時候，`onboarding.js`
     // 說「先前已經寫下的不會因為這個動作消失——要清掉請用時間軸的『忘掉這一
     // 段』，或跑 sister prune」。同一種動作、同一種誤解，這一頁少了那一句。
+    //
+    // **在 `load()` 之前算完**：它會把 `el.querylog.checked` 和 `queryLogWas`
+    // 一起換成剛存進去的那一份，那之後這個比較永遠是 false。
     const justTurnedOff = queryLogWas === true && el.querylog.checked === false;
-    say(
-      justTurnedOff
-        ? `${watching}\n從現在起她不會再記你問過的問題。先前記下的那些不會因為這個動作消失——要清掉請用時間軸的「忘掉這一段」，或等文字保留期到。`
-        : watching,
-    );
+    const message = justTurnedOff
+      ? `${watching}\n從現在起她不會再記你問過的問題。先前記下的那些不會因為這個動作消失——要清掉請用時間軸的「忘掉這一段」，或等文字保留期到。`
+      : watching;
     // 存進去的是剪過空白、丟過空行的版本，畫面要跟著變成那個樣子，
     // 不然他看到的和檔案裡的是兩份東西。
-    await load();
+    //
+    // **先讀回來，再講話。** 反過來的話這句話活不過幾毫秒——`load()` 成功的
+    // 路徑上有一行 `say("")`，而那一行是對的（見它的註解）。這一頁從出生到
+    // alpha.37 為止，每一句「存好了」都是這樣被自己抹掉的：存壞了會說話，
+    // 存好了什麼都不說，而對按下按鈕的人來說沉默就是「按了沒反應」。
+    //
+    // 讀不回來就**不要**蓋掉 `load()` 剛印上去的那則錯誤。寫進去了、再讀出來
+    // 卻讀不出來，多半是我們剛剛寫壞了那個檔——那件事比「存好了」急，而且
+    // 「存好了」在那個當下已經不是一句完整的真話。
+    if (await load()) {
+      say(message);
+    }
   } catch (err) {
     say(String(err?.message ?? err), true);
   } finally {
