@@ -7,6 +7,29 @@ apps/desktop/src-tauri/gen/
 *.log
 .env
 
+# 在本機重跑 ci.yml 那一大段（「An erased database must not look like one that
+# never recorded」）造出來的 fixture 和輸出。那支腳本跑完會自己清掉——但**中途
+# 紅掉就會留在原地**，而下一次 `git add -A` 會把一顆測試資料庫掃進一個 public
+# repo。清理只走成功那條路，這幾行顧的是失敗那條。
+/ci-*
+/boot-*.txt
+/live-*.txt
+/null-*.txt
+/first-*.txt
+/first-stats.json
+/crash-*.txt
+/crashed-*.txt
+/erased-*.txt
+/normal-*.txt
+/upgrade*.txt*
+/stop-*.txt
+/booting*.txt
+/livecrash.txt
+/forget.txt
+/d.txt
+/f.txt
+/s.txt
+
 # 私下 roundtable 辯論的逐字萃取 — 設計源頭，不公開
 research/extracts/
 # 自有 repo 的內部盤點（含資產授權待確認事項）— 不公開
