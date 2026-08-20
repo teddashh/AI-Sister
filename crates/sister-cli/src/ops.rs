@@ -2425,7 +2425,14 @@ pub mod stats {
                     "ocr_blocks": s.ocr_blocks, "chunks": s.chunks, "facts": s.facts,
                     "focus_events": s.focus_events, "clipboard_events": s.clipboard_events,
                     "input_windows": s.input_windows, "system_events": s.system_events,
-                    "sessions": s.sessions, "db_bytes": s.db_bytes,
+                    "sessions": s.sessions,
+                    // 上面每一個計數器都可能是 0，而 0 有兩種：從來沒錄過，
+                    // 或者錄過、被 `forget` 和保留期帶走了。人看的那一頁底下
+                    // 有一行 ⚠ 在講這件事；讀 JSON 的（`check-audit.py`、
+                    // 未來的儀表板）沒有那一行可以讀，只能自己從一堆 0 猜，
+                    // 而那正是猜不出來的東西。
+                    "ever_recorded": db.ever_recorded()?,
+                    "db_bytes": s.db_bytes,
                     "image_bytes": s.image_bytes, "span_days": span_days,
                     // 畫面自己的跨度。和 `span_days` 不一樣是正常的——
                     // 兩個保留期各管一半，見 `DbStats::image_first_ts`。
@@ -2469,6 +2476,22 @@ pub mod stats {
         }
 
         println!("📊 AI-Sister 足跡\n");
+        // **整頁都是 0 的時候，要先講這是哪一種 0。**
+        //
+        // 一顆剛裝好的資料庫和一顆剛被 `forget --last 24h` 清空的資料庫，這一頁
+        // 上逐字相同：畫面 0、文字 0、事實 0，然後底下三行說「這份紀錄裡沒有任
+        // 何一段擷取被隱私規則擋下來 / 沒有暫停過 / 沒有任何剪貼簿內容被判定為
+        // 疑似秘密」。每一句都是真的——講的是現在這顆資料庫——而湊起來那一頁在
+        // 說「這台機器上什麼都沒發生過」，對一個五分鐘前才親手刪掉一整天的人。
+        //
+        // 那一天他的排除規則**擋過兩段**。刪掉的是證據，不是歷史。
+        if s.frames == 0 && s.chunks == 0 && db.ever_recorded()? {
+            println!(
+                "  ⚠  底下每一個數字都是 0，但她**錄過**——那些東西被 \
+                 `sister forget` 忘掉了，或是過了保留期。\n     \
+                 「沒有發生過」那幾句講的是現在這顆資料庫，不是那幾天。\n"
+            );
+        }
         if let (Some(a), Some(b)) = (s.first_ts, s.last_ts) {
             println!(
                 "  期間      {} → {}  （{:.1} 天）",
@@ -2777,6 +2800,79 @@ pub mod doctor {
         // 「本機記錄」佔 12 個位元組、8 個字寬，「現在有沒有在看」佔 21 個
         // 位元組、14 個字寬——同一份補白讓兩行的說明差了 6 格。
         println!("  {sym} {} {detail}", fmt::pad(label, 16));
+    }
+
+    /// 「已記錄」那一列的符號和句子，**一起**算出來。
+    ///
+    /// 拆成函式是因為這一列的兩半（畫 `?` 還是 `✓`、後面接哪一句）以前是兩段
+    /// 各自寫的 match，而這個 repo 已經被那個形狀咬過：符號說一件事、句子說
+    /// 另一件事。同一個 match 出來的東西不可能對不起來。
+    fn recorded_verdict(
+        frames: i64,
+        chunks: i64,
+        ever: bool,
+        detail: &str,
+    ) -> (&'static str, String) {
+        match (frames, chunks) {
+            // 「一個字都還沒進來」和「進來過，被你刪掉了」在這一行上長得一樣，
+            // 而它們的下一步剛好相反：前者要他去按開始錄，後者他剛剛才親手把
+            // 東西刪掉。這個位元活在 `meta` 裡，`forget` 和 `prune` 都不碰它
+            // （見 `Db::ever_recorded`）。
+            (0, 0) if ever => (
+                "?",
+                format!("{detail}——錄過，但現在一列都不剩（`forget` 或保留期）"),
+            ),
+            (0, 0) => ("?", format!("{detail}（還沒有任何內容）")),
+            // 「0 張畫面 · 0 段文字 ✓」是這個專案一路在修的那個災難本身
+            // ——錄了一整天、資料庫在長大、一個字都沒進去。有資料庫卻沒
+            // 內容不該是打勾。
+            (_, 0) => (
+                "✗",
+                format!("{detail}——有畫面卻一個字都沒有，OCR 沒讀到東西"),
+            ),
+            _ => ("✓", detail.to_string()),
+        }
+    }
+
+    /// 「零當機」那一列的符號和句子。
+    ///
+    /// Phase 0 的退場條件是「連續 7 天自我錄製、零當機」，而在這之前那句話的
+    /// 驗證方式是使用者自己記得有沒有當過。資料庫一直知道答案：Ctrl-C 走的是
+    /// 正常收尾，所以沒有 `ended_at` 的那幾段，剩下的解釋只有被殺、當機、
+    /// 關機、拔電。
+    fn crash_verdict(
+        all: i64,
+        unfinished: i64,
+        ever: bool,
+        last_crash: Option<sister_core::model::Millis>,
+    ) -> (&'static str, String) {
+        match (all, unfinished) {
+            // 一場都不剩**不等於**沒錄過。`sessions` 那張表現在會跟著它自己
+            // 那幾列一起被 `forget` 和保留期帶走（`retention::delete_empty_
+            // sessions`），所以清空過的資料庫上這裡是 0——而「還沒錄過」對
+            // 一個五分鐘前才刪掉一整天的人是假的。分母沒了就說分母沒了，
+            // 不要順便宣布一個沒有證據的「零當機」。
+            (0, _) if ever => (
+                "?",
+                "那幾場的紀錄已經不在了（`forget` 或保留期），現在算不出來".to_string(),
+            ),
+            (0, _) => ("?", "還沒錄過".to_string()),
+            (n, 0) => ("✓", format!("{n} 段錄製全部正常收尾")),
+            (n, u) => (
+                // 不畫 ✗。此刻另一個終端機正在錄的話，那一段也沒有
+                // `ended_at`，長得跟當機一模一樣——而我沒有一條不會
+                // 因為 PID 重用而說謊的路可以分辨。不知道就說不知道，
+                // 不要為了讓輸出好看而猜一個。
+                "!",
+                format!(
+                    "{n} 段錄製裡有 {u} 段沒有正常收尾{}——當機、關機、拔電，\
+                     或者現在正有另一個 sister 在錄",
+                    last_crash
+                        .map(|t| format!("（最後一次 {}）", fmt::timestamp(t)))
+                        .unwrap_or_default()
+                ),
+            ),
+        }
     }
 
     /// doctor 要用到的能力摘要。平台差異只收在這一個地方。
@@ -3377,49 +3473,19 @@ pub mod doctor {
                 },
             );
             let s = db.stats()?;
-            // 「0 張畫面 · 0 段文字 ✓」是這個專案一路在修的那個災難本身
-            // ——錄了一整天、資料庫在長大、一個字都沒進去。有資料庫卻沒
-            // 內容不該是打勾。
             let detail = format!(
                 "{} 張畫面 · {} 段文字 · {}",
                 s.frames,
                 s.chunks,
                 fmt::bytes(s.db_bytes + s.image_bytes)
             );
-            match (s.frames, s.chunks) {
-                (0, 0) => mark("?", "已記錄", &format!("{detail}（還沒有任何內容）")),
-                (_, 0) => mark(
-                    "✗",
-                    "已記錄",
-                    &format!("{detail}——有畫面卻一個字都沒有，OCR 沒讀到東西"),
-                ),
-                _ => line(true, "已記錄", &detail),
-            }
+            let ever = db.ever_recorded()?;
+            let (sym, said) = recorded_verdict(s.frames, s.chunks, ever, &detail);
+            mark(sym, "已記錄", &said);
 
-            // Phase 0 的退場條件是「連續 7 天自我錄製、零當機」，而在這
-            // 之前那句話的驗證方式是使用者自己記得有沒有當過。資料庫一直
-            // 知道答案：Ctrl-C 走的是正常收尾，所以沒有 `ended_at` 的那幾
-            // 段，剩下的解釋只有被殺、當機、關機、拔電。
             let (all_sessions, unfinished, last_crash) = db.crash_audit()?;
-            match (all_sessions, unfinished) {
-                (0, _) => mark("?", "零當機", "還沒錄過"),
-                (n, 0) => line(true, "零當機", &format!("{n} 段錄製全部正常收尾")),
-                (n, u) => mark(
-                    // 不畫 ✗。此刻另一個終端機正在錄的話，那一段也沒有
-                    // `ended_at`，長得跟當機一模一樣——而我沒有一條不會
-                    // 因為 PID 重用而說謊的路可以分辨。不知道就說不知道，
-                    // 不要為了讓輸出好看而猜一個。
-                    "!",
-                    "零當機",
-                    &format!(
-                        "{n} 段錄製裡有 {u} 段沒有正常收尾{}——當機、關機、拔電，\
-                         或者現在正有另一個 sister 在錄",
-                        last_crash
-                            .map(|t| format!("（最後一次 {}）", fmt::timestamp(t)))
-                            .unwrap_or_default()
-                    ),
-                ),
-            }
+            let (sym, said) = crash_verdict(all_sessions, unfinished, ever, last_crash);
+            mark(sym, "零當機", &said);
 
             // 「她停了」後面永遠跟著同一個問題：什麼時候、為什麼。上面那一列
             // 只數得出「有幾段沒收尾」，答不了「上一段是怎麼結束的」——而這兩
@@ -3969,6 +4035,59 @@ pub mod doctor {
             let broken = Err(anyhow::anyhow!("TOML parse error at line 1"));
             run(&dir.0, broken, Some(dir.0.join("config.toml")))
                 .expect("設定檔壞掉不可以讓整份環境檢查停在門口");
+        }
+
+        /// **一顆全是 0 的資料庫有兩種，而 doctor 這兩列以前只認得其中一種。**
+        ///
+        /// `sister forget --last 24h --yes` 跑完之後，`frames`、`chunks`、
+        /// `sessions` 全是 0——和一顆剛裝好、從來沒錄過的資料庫逐字相同。舊版
+        /// 這兩列於是說「（還沒有任何內容）」和「還沒錄過」，對一個五分鐘前
+        /// 才親手刪掉一整天的人。第二列還是 #52 打進來的回歸：在 `sessions`
+        /// 那張表開始跟著保留期一起被清掉之前，`crash_audit` 的 0 真的只代表
+        /// 沒錄過。
+        ///
+        /// 釘的是**分岔**本身：同樣三個數字、`ever` 一翻，兩列都得換句話講。
+        #[test]
+        fn an_erased_database_and_a_brand_new_one_do_not_get_the_same_two_lines() {
+            let d = "0 張畫面 · 0 段文字 · 176.0 KB";
+
+            let (never_sym, never) = recorded_verdict(0, 0, false, d);
+            let (erased_sym, erased) = recorded_verdict(0, 0, true, d);
+            assert_ne!(
+                never, erased,
+                "同樣是 0，刪過的和沒錄過的不可以拿到同一句話"
+            );
+            assert!(
+                erased.contains("forget") || erased.contains("保留期"),
+                "他刪掉的是證據不是歷史，這一句要說得出東西去哪了：{erased}"
+            );
+            assert!(
+                !never.contains("forget") && !never.contains("保留期"),
+                "從來沒錄過的機器上不可以暗示他刪過東西：{never}"
+            );
+            // 兩邊都還是「不知道」而不是打勾——空的就是空的。
+            assert_eq!((never_sym, erased_sym), ("?", "?"));
+
+            let (never_sym, never) = crash_verdict(0, 0, false, None);
+            let (erased_sym, erased) = crash_verdict(0, 0, true, None);
+            assert_ne!(never, erased, "「還沒錄過」對清空過的資料庫是假話");
+            assert!(
+                never.contains("還沒錄過"),
+                "真的沒錄過的時候還是要講得出來：{never}"
+            );
+            assert!(
+                !erased.contains("還沒錄過"),
+                "他錄過，只是那幾場的紀錄被帶走了：{erased}"
+            );
+            assert_eq!((never_sym, erased_sym), ("?", "?"), "兩邊都算不出當機率");
+
+            // 而 `ever` 只准在分母是 0 的時候說話。錄過的資料庫上照樣要數得
+            // 出來，不可以整列被那個旗標蓋掉。
+            for ever in [false, true] {
+                assert_eq!(crash_verdict(7, 0, ever, None).0, "✓");
+                assert_eq!(recorded_verdict(9, 4, ever, d), ("✓", d.to_string()));
+                assert_eq!(recorded_verdict(9, 0, ever, d).0, "✗");
+            }
         }
 
         /// 設定檔好好的那條路也要走一次，不然上面那條可能只是「錯誤路徑能跑」。
