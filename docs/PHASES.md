@@ -99,7 +99,15 @@
   離線/無 key 模式 = 結構化結果列表，功能完整。
 - 時間軸瀏覽器 v0：按天捲動、縮圖 + OCR 摘錄、框選區間刪除（cascade）。
 - 三張同意書 onboarding（SPEC §11.1）+ 設定頁（blocklist 編輯、TTL、pause 快捷鍵）。
-- BYOK（secret-vault/OS keychain）+ Ollama 偵測——潤句用。
+- ~~BYOK（secret-vault/OS keychain）+ Ollama 偵測——潤句用。~~
+  **2026-08-21 移出 Phase 1。** 這一項排在這裡是基於一個錯的假設：以為「本機優先」
+  代表連模型也要在本機。負責人講清楚了——**在本機的是截圖，語言模型當然在雲端**。
+  而且第一批使用者手上已經有 claude code / codex / grok / gemini cli 了，本地模型
+  （Ollama）是之後的事。所以 L2/L3 那個腦要接的第一個東西不是 HTTP client，是
+  **使用者已經裝好、已經登入、已經在付錢的那支 CLI**。
+  這也順帶解掉了原本以為存在的衝突：走 CLI 就不需要把 HTTP client 拉進相依樹，
+  `check-no-network.sh` 不用開例外。（真正要重寫措辭的是別的地方：出去的是 OCR
+  抽出來的**字**，不是畫面——那是同意書 2 的事，等 L2/L3 開工再一起講清楚。）
 - Query log 開始累積（本機）：每次提問 + 點擊了哪個出處 = 未來題庫。再加一個
   他自己按的位元（`sister mark` / 答案底下那顆「這件事我本來已經忘了」）——那是
   底下第一條退場條件唯一的量法，理由寫在那裡。
