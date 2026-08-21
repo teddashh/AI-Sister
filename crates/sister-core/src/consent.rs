@@ -110,7 +110,7 @@ impl Sheet {
     pub fn without(self) -> &'static str {
         match self {
             Sheet::LocalRecording => {
-                "沒有這一張，sister record 不會開始錄；正在錄的也會在 5 秒內停下來。"
+                "沒有這一張，sister record 不會開始錄；錄到一半撤回，正在跑的 record 每 5 秒重讀同意書，最多再錄 5 秒加一拍；capture.min_interval_ms 超過 5 秒時，主要會等那一拍。"
             }
             Sheet::CloudReading => {
                 "沒有這一張，她完全在本機跑。（目前這份程式裡沒有任何連外路徑，所以這一張還沒有東西可以開。）"
@@ -389,6 +389,16 @@ mod tests {
             Sheet::FrameStorage
         );
         assert!(Sheet::from_str("everything").is_err());
+    }
+
+    #[test]
+    fn revoking_local_recording_names_both_the_consent_clock_and_tick() {
+        let consequence = Sheet::LocalRecording.without();
+        assert!(consequence.contains("每 5 秒重讀同意書"));
+        assert!(consequence.contains("最多再錄 5 秒加一拍"));
+        assert!(consequence.contains("min_interval_ms 超過 5 秒時，主要會等那一拍"));
+        assert!(!consequence.contains("下一個 tick 停下來"));
+        assert!(!consequence.contains("5 秒內停下來"));
     }
 
     /// 設定檔說要留圖、第三張沒簽——`record` 會降級成只記字，而體檢報告以前

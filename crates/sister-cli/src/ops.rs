@@ -8557,6 +8557,7 @@ pub mod record {
         );
         report_footprint(
             &footprint,
+            stats.last_frame_size,
             rec.db()
                 .stats()
                 .map(|s| s.db_bytes + s.image_bytes)
@@ -8680,9 +8681,22 @@ pub mod record {
         looks_per_day * per_look_ms / 86_400_000.0 * 100.0
     }
 
+    /// 足跡回報必須自己帶著量測條件走。沒有畫面時明講量不到，不能讓 `0×0`
+    /// 同時表示「真的解析度是零」和「這場沒抓到畫面」。負載則不是程式能從
+    /// 畫面推知的事，留一個明確待填欄位，讓貼回來的人不能只貼漂亮的數字。
+    #[cfg(any(windows, test))]
+    fn footprint_context(version: &str, frame_size: Option<(u32, u32)>) -> String {
+        let screen = match frame_size {
+            Some((width, height)) => format!("最後一次抓到的畫面 {width}×{height}"),
+            None => "螢幕解析度量不到（這場沒有成功抓到畫面）".to_string(),
+        };
+        format!("版本 sister {version}；{screen}；負載：程式量不到，貼回時請註明當時在做什麼")
+    }
+
     #[cfg(windows)]
     fn report_footprint(
         f: &sister_capture::footprint::Footprint,
+        frame_size: Option<(u32, u32)>,
         disk_delta: i64,
         image_bytes: u64,
         image_cap_bytes: u64,
@@ -8693,6 +8707,10 @@ pub mod record {
             if actual > budget { "⚠ " } else { "" }
         }
 
+        println!(
+            "  條件：{}",
+            footprint_context(env!("CARGO_PKG_VERSION"), frame_size)
+        );
         let mut parts = Vec::new();
         let mut breached = Vec::new();
         if let Some(cpu) = f.cpu_percent() {
@@ -9086,7 +9104,10 @@ pub mod record {
     }
     #[cfg(test)]
     mod record_tests {
-        use super::{BootBeat, ConfigWatch, DiskProjection, already_recording, ocr_off_words};
+        use super::{
+            BootBeat, ConfigWatch, DiskProjection, already_recording, footprint_context,
+            ocr_off_words,
+        };
         use crate::ops::tmp::Tmp;
         use sister_core::config::Config;
         use sister_core::consent::{Consent, Sheet};
@@ -9215,6 +9236,21 @@ pub mod record {
             assert_eq!(p.images, Some(images), "0 = 不設限");
             assert_eq!(p.per_day, images);
             assert_eq!(p.budget_lasts_secs(), None);
+        }
+
+        #[test]
+        fn footprint_context_names_the_version_and_measured_frame_size() {
+            assert_eq!(
+                footprint_context("0.1.0-alpha.43", Some((2560, 1440))),
+                "版本 sister 0.1.0-alpha.43；最後一次抓到的畫面 2560×1440；負載：程式量不到，貼回時請註明當時在做什麼"
+            );
+        }
+
+        #[test]
+        fn footprint_context_does_not_turn_a_missing_screen_into_zero() {
+            let line = footprint_context("0.1.0-alpha.43", None);
+            assert!(line.contains("螢幕解析度量不到（這場沒有成功抓到畫面）"));
+            assert!(!line.contains("0×0"));
         }
 
         /// 拆不開的時候（這段有東西被刪掉）不要假裝拆得開。

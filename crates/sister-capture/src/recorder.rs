@@ -56,6 +56,9 @@ pub enum Tick {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecorderStats {
     pub ticks: u64,
+    /// 最後一次真的從擷取後端拿到的畫面尺寸。`None` 不是 `0×0`：代表這一場
+    /// 沒有成功抓到任何畫面，所以解析度量不到。
+    pub last_frame_size: Option<(u32, u32)>,
     /// 真的走完一整拍的次數——過了 `capture.enabled` 和暫停這兩道門的。
     ///
     /// `ticks` 在那兩道門**之前**就加了，所以一段「8 小時裡暫停了 7 小時」的
@@ -640,6 +643,7 @@ impl<B: Backend> Recorder<B> {
             }
             Err(e) => return Err(e),
         };
+        self.stats.last_frame_size = Some((frame.width, frame.height));
 
         match self.deduper.check(frame.dhash) {
             FrameVerdict::Duplicate { run } => {
@@ -1840,6 +1844,11 @@ mod tests {
                 1 => assert_eq!(r.tick(0).expect("鎖屏不是錯誤"), Tick::NoScreen),
                 _ => assert!(r.tick(0).is_err(), "抓圖失敗要往上報，不能吞掉"),
             }
+            assert_eq!(
+                r.stats().last_frame_size,
+                None,
+                "抓不到畫面就沒有解析度，不能拿 0×0 代替"
+            );
 
             // 同一個畫面回來了。它從來沒被存過，所以必須是新的。
             mode.set(0);
@@ -1847,6 +1856,7 @@ mod tests {
                 matches!(r.tick(1_000).expect("tick"), Tick::Kept { .. }),
                 "抓不到的第 {failure} 種：沒存成的那一張不能把後面真的那一張擋掉"
             );
+            assert_eq!(r.stats().last_frame_size, Some(FULL));
         }
     }
 

@@ -176,6 +176,10 @@
       把 README 那個 code block **挖出來執行**（`scripts/check-readme-quickstart.sh`），
       而不是另外維護一份一樣的指令。跑不起來、或跑完沒有那個 ★ 答案，就是紅的。
 - [ ] repo public、Apache-2.0、README 首段 = 三張同意書宣言 + 實測足跡數字。
+      repo public 與 Apache-2.0 已成立，README 首段也已公開三張同意書各自「沒簽會怎樣、
+      簽了能碰什麼」。足跡這一半仍未成立：CPU、RAM、磁碟都沒有可信的現況實測值。
+      要打勾，還差照 `docs/WINDOWS-CHECKLIST.md` 跑 `sister bench`，再用平常的解析度
+      錄 60 秒並貼回收尾摘要。
 
 **明確不做**：主動開口（她只回答，不先說話）、interpreter、承諾表。
 

@@ -33,6 +33,11 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # 核心同意文案在 core，與 onboarding 的三份開發示範逐字比對；撤回週期則從 ops.rs 的 CONSENT_EVERY 抽出秒數，
+      # 再逐一比對五份使用者看得到的文案，避免畫面、說明與真正執行的契約各說各話。
+      - name: Consent copies and withdrawal timing must match the program
+        run: python3 ./scripts/check-consent-copy.py
+
       # 敏感排除是 Phase 0 的 exit criteria，值得單獨、顯眼地跑一次
       - name: Privacy — sensitive content must never reach disk
         run: cargo test -p sister-capture --test privacy -- --nocapture
@@ -606,6 +611,10 @@ jobs:
           grep -q '畫面：寫了 [1-9]' rec.txt || {
             echo "::error::上一場一張畫面都沒存，這條測試的前提沒了——一場什麼都沒存到的錄製收工時會把自己那一列刪掉，最後一條就永遠讀不到停止的理由"
             exit 1; }
+          # `條件：` 的尺寸必須來自這一場 recorder 的實際 stats。純函式測試只驗
+          # 得到手寫 tuple；這裡守呼叫端，避免 last_frame_size 接成 None 後仍全綠。
+          grep -Eq '條件：.*[0-9]+×[0-9]+' rec.txt \
+            || { echo "::error::實錄收尾的條件行沒有畫面寬×高——last_frame_size 接線可能已斷"; exit 1; }
           BEFORE=$(frame_count)
           [ "$BEFORE" -gt 0 ] || {
             echo "::error::上一場說它寫了畫面，$FRAMES 卻是空的——這個路徑指錯了，底下那個迴圈驗不到任何東西"
@@ -1185,11 +1194,11 @@ jobs:
             「100ms 內查得回來」現在是量過的**一半通過**（見上），
             兩個字的中文只找得回 30 天。
 
-            上面所有的數字都來自 CI 那台 1024×768 的虛擬機。**2560×1440 的
-            真機還沒有量過**，而 alpha.4 在你機器上量到的是 CPU 27.1%、
-            磁碟 11.4 GB/天。最有用的回報就是那三行：
+            CPU、RAM、磁碟目前都沒有可信的現況實測值。最有用的回報就是先跑
+            `sister bench`，再用平常的解析度錄 60 秒：
 
             ```
+            sister.exe bench
             sister.exe --data-dir .\test consent --grant local-recording --grant frame-storage
             sister.exe --data-dir .\test record --duration 60
             ```
@@ -1198,7 +1207,9 @@ jobs:
             一次。那不是麻煩：一份同意書跟著一個資料夾，刪掉資料夾就等於連那份
             同意一起收回。）
 
-            把 `完成：`、`省下：`、`時間：`、`足跡：` 四行整段貼回來就好。
+            把 `完成：`、`省下：`、`時間：`、`條件：`、`足跡：` 整段貼回來，
+            並註明這 60 秒是在閒置、打字、播放影片，或做別的事。`條件：` 會
+            自己帶版本與最後一次抓到的畫面尺寸；抓不到時會明講量不到。
             特別想知道兩件事：`省下：` 那行的百分比（你邊用電腦邊錄的話應該
             會低很多），以及 `其他` 那一項有沒有掛 ⚠（掛了就代表最貴的東西
             根本沒被量到，上面的排名是假的）。
