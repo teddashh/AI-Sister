@@ -35,3 +35,6 @@ research/extracts/
 # 自有 repo 的內部盤點（含資產授權待確認事項）— 不公開
 research/ted-repos-dna.md
 /target
+
+# 交接給 codex 的暫存：上一輪跑完但沒 commit 的 patch + 接手計畫
+.handoff/
