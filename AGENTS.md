@@ -5,7 +5,7 @@
 腦（L2/L3）接的是使用者自己已經裝好的 CLI agent，不是內建的 HTTP client。
 
 先讀 `docs/PHASES.md`（路線圖，退場條件就是驗收條件）、`docs/SPEC.md`、`docs/PRODUCT.md`。
-**現在該做什麼看 `.handoff/PLAN.md`**（不在 git 裡，在工作目錄）。
+**現在該做什麼看 .handoff/PLAN.md**（刻意不進 git，只在工作目錄裡）。
 
 ---
 
@@ -64,7 +64,8 @@
    （`footprint_context`、`disk_footprint_report`、`ocr_table` 都這樣做，突變確實被抓到）。
 
 2. **改到這幾個地方，commit 前一定要跑 `./scripts/check-windows.sh`**：
-   任何 `#[cfg(windows)]`、`crates/sister-capture/src/windows/`、`tests/windows_ocr.rs`、
+   任何 `#[cfg(windows)]`、`crates/sister-capture/src/windows/`、
+   `crates/sister-capture/tests/windows_ocr.rs`、
    `apps/desktop/`。開發機的 `cargo` 編不到那半邊，只有這支腳本編得到。
 
 3. **`apps/desktop/src-tauri/Cargo.lock` 會被 `check-windows.sh` 弄髒。**
@@ -78,7 +79,8 @@
 
 6. **Prettier 沒有在 CI 跑，而且已經有 11 個 UI 檔案過不了。不要順手重排版。**
 
-7. **`research/extracts/` 和 `research/ted-repos-dna.md` 是刻意不公開的**（`.gitignore` 裡）。
+7. **research/extracts/ 和 research/ted-repos-dna.md 是刻意不公開的**（`.gitignore` 裡，
+   所以 clone 下來不會有——不要以為是誰刪掉了）。
    這是 public repo（`teddashh/AI-Sister`）。不要把它們推上去，也不要引用裡面的逐字內容。
 
 8. **切完 tag 要確認 release job 真的把 exe 發出去了。**
@@ -115,7 +117,7 @@ alpha.44，Ted 的真 Windows，1920×1080，錄 60 秒（82 拍）：
 **CPU 的 82% 是 OCR 一個人的**（8 次呼叫 × 2798.1 ms = 22.39 秒）。**抓圖只有 14%**
 （54 次 × 70.4 ms = 3.80 秒）。
 
-- **槓桿在 `crates/sister-capture/src/windows/screen.rs:89` 的 `OCR_LONG_EDGE = 4096`**——
+- **槓桿在 `crates/sister-capture/src/windows/screen.rs` 的 `OCR_LONG_EDGE = 4096`**——
   1920×1080 一個像素都沒縮，OCR 吃的是原生整張。
 - **算術**：3% CPU = 一天 2592 CPU 秒 ÷ 2.8 秒 = **一天只夠睜眼 926 次（每 93 秒一次）**。
   所以要嘛 OCR 便宜五倍，要嘛她看得少很多。
@@ -135,5 +137,5 @@ alpha.44，Ted 的真 Windows，1920×1080，錄 60 秒（82 拍）：
 繁體中文、直述、不客套、**不要承諾程式沒有在做的事**。
 `README.md:4`：「95% 的時間安靜，該說話的時候才說話——說的每一句都能點開證據。」
 
-`docs/PHASES.md:184` 寫著 Phase 1 **明確不做**：主動開口（她只回答，不先說話）、
+`docs/PHASES.md` 的 Phase 1 那節寫著**明確不做**：主動開口（她只回答，不先說話）、
 interpreter、承諾表。有人拿「虛擬女友／會主動講話的數位人」當參考的時候，那是反方向。
