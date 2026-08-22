@@ -7850,6 +7850,11 @@ pub mod record {
             pub(super) fn bytes(self) -> u64 {
                 self.0
             }
+
+            #[cfg(test)]
+            pub(super) fn from_raw_bytes(bytes: u64) -> Self {
+                Self(bytes)
+            }
         }
 
         /// 每日圖片額度換算後的 bytes。
@@ -7881,10 +7886,10 @@ pub mod record {
         }
     }
 
-    #[cfg(any(windows, test))]
-    use record_meanings::{ImageBudgetBytes, TickCounts};
     #[cfg(windows)]
-    use record_meanings::{ImageBytesWritten, OcrEnabled};
+    use record_meanings::OcrEnabled;
+    #[cfg(any(windows, test))]
+    use record_meanings::{ImageBudgetBytes, ImageBytesWritten, TickCounts};
 
     use record_meanings::{StoringImages, WantsImages};
 
@@ -8751,20 +8756,14 @@ pub mod record {
         );
         report_footprint(
             &footprint,
-            stats.last_frame_size,
+            &stats,
+            rec.timings(),
             rec.db()
                 .stats()
                 .map(|s| s.db_bytes + s.image_bytes)
                 .unwrap_or(0)
                 - disk_at_start,
-            ImageBytesWritten::from_stats(&stats),
-            ImageBudgetBytes::from_mb(image_budget_mb),
-            // 「一次睜眼多貴」問的就是 grab 這一段：閘門放行之後真的去讀
-            // 螢幕的那一次。`per_call` 已經只除以真的做了事的次數。
-            rec.timings()
-                .grab
-                .per_call()
-                .map(|d| d.as_secs_f64() * 1000.0),
+            image_budget_mb,
         );
         for line in &lost {
             println!("  ⚠  錄製途中失去的能力：{}", line.message);
@@ -8795,11 +8794,11 @@ pub mod record {
     /// 實測那次是 CPU 27.1%、磁碟 11.4 GB/天，而摘要照樣平鋪直敘地印出來，
     /// 沒有任何一個字說「這超標九倍」——要靠讀的人自己記得預算是多少，
     /// 再自己心算。她應該自己講。
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     const BUDGET_CPU_PCT: f64 = 3.0;
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     const BUDGET_RSS_BYTES: u64 = 400 * 1024 * 1024;
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     const BUDGET_DISK_PER_DAY: f64 = 300.0 * 1024.0 * 1024.0;
 
     /// 磁碟外推的三個數字，圖那一半已經夾在它自己的天花板上。
@@ -8887,37 +8886,107 @@ pub mod record {
         format!("版本 sister {version}；{screen}；負載：程式量不到，貼回時請註明當時在做什麼")
     }
 
-    #[cfg(windows)]
-    fn report_footprint(
-        f: &sister_capture::footprint::Footprint,
+    /// CPU 平均值的百分比。獨立型別讓它和一次睜眼的毫秒數對調時直接編譯失敗。
+    #[cfg(any(windows, test))]
+    #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+    struct CpuPercent(f64);
+
+    /// 一次睜眼的毫秒數。獨立型別擋住兩個相鄰 `Option<f64>` 接反仍能編譯的手滑。
+    #[cfg(any(windows, test))]
+    #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+    struct PerLookMs(f64);
+
+    /// 這一場量到的所有數字。相同 primitive、不同意思的欄位各自包成 newtype，
+    /// 對調會是型別錯誤；同型別 getter 接錯則由
+    /// `measure_wires_stats_timings_and_scalars_to_their_fields` 釘住。
+    #[cfg(any(windows, test))]
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct FootprintMeasured {
+        /// 最後一次抓到的畫面大小。`None` = 這場一張都沒抓到（不是 0×0）。
         frame_size: Option<(u32, u32)>,
-        disk_delta: i64,
+        /// 這段期間的平均 CPU。`None` = 量不到或還不夠久。
+        cpu_percent: Option<CpuPercent>,
+        /// 期間內看過的最大 RSS。`None` = 量不到。
+        peak_rss_bytes: Option<u64>,
+        /// 一次睜眼（抓一張圖）多少毫秒。`None` = 這場沒抓過。
+        per_look_ms: Option<PerLookMs>,
+        disk: DiskMeasured,
+    }
+
+    /// 磁碟那三個數字。全部是**這段期間的實測位元組**，不是速率——
+    /// 換算成「一天」是 `footprint_lines` 的 `per_day` 參數的事。
+    #[cfg(any(windows, test))]
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct DiskMeasured {
+        /// 這段期間磁碟淨長了多少。**可能是負的**：保留期清理跑過
+        /// （`PRUNE_EVERY` 六小時一次），或另一支 sister 也在寫同一顆資料庫。
+        delta_bytes: i64,
+        /// 這段期間寫進去的圖。
         image_bytes: ImageBytesWritten,
+        /// 一天的圖額度（`capture.max_image_mb_per_day` × MB）。`0` = 不設限。
         image_cap_bytes: ImageBudgetBytes,
-        per_look_ms: Option<f64>,
-    ) {
+        /// 這一場期間，每日圖上限是否至少關過一次門。來自
+        /// `RecorderStats::images_over_budget > 0`，**不等於今天已經用完**：這個
+        /// 計數器會跨日累加。這裡只拿它收起已被事實推翻的未來式關門預測；要分辨
+        /// 關門的是哪一天，是十行前 `report_images` 的工作。
+        image_budget_closed_this_session: bool,
+    }
+
+    /// 把量到的數字排成她要印的那幾行。回傳整塊（含開頭那行「條件：」），
+    /// 用 `\n` 分行、結尾不留換行。
+    ///
+    /// `per_day` 是「這段期間的 N 個位元組相當於一天幾個位元組」的換算，
+    /// **由呼叫端傳進來**：`Footprint::bytes_per_day` 的分母是
+    /// `Instant::now()` 起算的牆上時間，測試沒有辦法讓它「已經過了 60 秒」。
+    /// 傳函式而不是傳兩個算好的 `Option<f64>`，是因為那兩個算好的值型別一樣、
+    /// 位置相鄰，對調的話編得過（上一版就是這樣印出負數的每天用量）；傳一個
+    /// 函式進來，「總量的速率」和「圖的速率」就都在這個函式裡算，呼叫端接不錯。
+    ///
+    /// `per_day` 回 `None` = 這段太短，不外推（見 `Footprint::bytes_per_day`
+    /// 的「< 60 秒不回答」）。那時候整個磁碟那一段要**消失**，不可以印 `0`。
+    ///
+    /// `any(windows, test)` 而不是 `windows`：整個 `report_footprint` 是
+    /// Windows 限定的，而它裡面每一個 ⚠ 判斷在開發機上一次都跑不到。
+    /// 對抗式稽核在這一段做了 22 次改壞，17 次四道閘門全綠。
+    #[cfg(any(windows, test))]
+    fn footprint_lines(m: &FootprintMeasured, per_day: impl Fn(u64) -> Option<f64>) -> String {
+        let FootprintMeasured {
+            frame_size,
+            cpu_percent,
+            peak_rss_bytes,
+            per_look_ms,
+            disk:
+                DiskMeasured {
+                    delta_bytes: disk_delta,
+                    image_bytes,
+                    image_cap_bytes,
+                    image_budget_closed_this_session,
+                },
+        } = *m;
         /// 超標的就標出來。合格的不標——每一項都掛一個記號等於沒有記號。
         fn mark(over_budget: bool) -> &'static str {
             if over_budget { "⚠ " } else { "" }
         }
 
-        println!(
+        let mut lines = vec![format!(
             "  條件：{}",
             footprint_context(env!("CARGO_PKG_VERSION"), frame_size)
-        );
+        )];
         let mut parts = Vec::new();
         let mut breached = Vec::new();
-        if let Some(cpu) = f.cpu_percent() {
+        let mut phase_zero_budget_breached = false;
+        if let Some(CpuPercent(cpu)) = cpu_percent {
             let cpu_over = cpu > BUDGET_CPU_PCT;
             parts.push(format!("{}CPU 平均 {cpu:.1}%", mark(cpu_over)));
             if cpu_over {
+                phase_zero_budget_breached = true;
                 breached.push(format!(
                     "CPU {cpu:.1}% 超過預算 {BUDGET_CPU_PCT:.0}%（{:.0} 倍）",
                     cpu / BUDGET_CPU_PCT
                 ));
                 // 超標的時候要講清楚省電閘門救不救得了，因為「閘門沒生效」
                 // 是這條路上最像答案的答案，而它只對了一半。
-                if let Some(ms) = per_look_ms.filter(|ms| *ms > 0.0) {
+                if let Some(PerLookMs(ms)) = per_look_ms.filter(|ms| ms.0 > 0.0) {
                     let floor = idle_floor_pct(ms);
                     let verdict = if floor > BUDGET_CPU_PCT {
                         "——**已經超過預算了**。閘門修得再好都到不了，\
@@ -8937,7 +9006,7 @@ pub mod record {
                 }
             }
         }
-        if let Some(rss) = f.peak_rss_bytes() {
+        if let Some(rss) = peak_rss_bytes {
             let rss_over = rss > BUDGET_RSS_BYTES;
             parts.push(format!(
                 "{}RAM 峰值 {}",
@@ -8945,6 +9014,7 @@ pub mod record {
                 crate::fmt::bytes(rss as i64)
             ));
             if rss_over {
+                phase_zero_budget_breached = true;
                 breached.push(format!(
                     "RAM {} 超過預算 {}",
                     crate::fmt::bytes(rss as i64),
@@ -8965,7 +9035,7 @@ pub mod record {
                 "磁碟 這段量不出來（淨少了 {}——清理和寫入混在一起，減出來的數字沒有意義）",
                 crate::fmt::bytes(-disk_delta)
             ));
-        } else if let Some(raw_per_day) = f.bytes_per_day(disk_delta as u64) {
+        } else if let Some(raw_per_day) = per_day(disk_delta as u64) {
             // 圖與資料庫要分開講。合成一個數字的話，「磁碟 11.4 GB/天」
             // 沒辦法回答唯一有用的那個問題——該去縮圖，還是該去縮索引。
             // 實測那次就是這樣：一個很嚇人、但指不出方向的數字。
@@ -8975,7 +9045,7 @@ pub mod record {
 
             let proj = DiskProjection::clamp(
                 raw_per_day,
-                f.bytes_per_day(image_bytes).filter(|_| rest >= 0),
+                per_day(image_bytes).filter(|_| rest >= 0),
                 image_cap_bytes,
             );
             let (per_day, img_raw, img_capped) = (proj.per_day, proj.images_raw, proj.images);
@@ -9002,6 +9072,7 @@ pub mod record {
                 crate::fmt::bytes(per_day as i64),
             ));
             if disk_over {
+                phase_zero_budget_breached = true;
                 breached.push(format!(
                     "磁碟 {}/天 超過預算 {}/天（{:.0} 倍）",
                     crate::fmt::bytes(per_day as i64),
@@ -9019,18 +9090,21 @@ pub mod record {
                 // 的話，唯一提到節流的是「另外 N 張只留了字（間隔未到）」，
                 // 而那句話讀起來像是在講省下來的磁碟。
                 let cap = img_capped.map(|img| {
+                    let image_rate = if img_raw != img_capped {
+                        format!("{}/天（上限，已夾）", crate::fmt::bytes(img as i64))
+                    } else {
+                        format!("{}/天", crate::fmt::bytes(img as i64))
+                    };
                     if img * 2.0 < per_day {
                         format!(
-                            "而且大部分不是圖：畫面 {}/天、其他（資料庫、索引、事實）{}/天。\
+                            "而且大部分不是圖：畫面 {image_rate}、其他（資料庫、索引、事實）{}/天。\
                              畫面那半有天花板（capture.max_image_mb_per_day），另一半沒有。",
-                            crate::fmt::bytes(img as i64),
                             crate::fmt::bytes((per_day - img) as i64),
                         )
                     } else {
                         format!(
-                            "主要是圖：畫面 {}/天。調小 capture.max_image_mb_per_day \
+                            "主要是圖：畫面 {image_rate}。調小 capture.max_image_mb_per_day \
                              或拉長 image_min_interval_ms。",
-                            crate::fmt::bytes(img as i64)
                         )
                     }
                 });
@@ -9040,37 +9114,111 @@ pub mod record {
             }
             // 夾到了就要說出來，而且**和有沒有超磁碟預算無關**。
             //
-            // 被夾住的意思是：她今天會在某個時刻把圖的額度寫滿，然後從那一刻
-            // 起只留字。那是一次會靜靜發生的降級——時間軸後半段點開來沒有畫面
+            // 被夾住的意思是：照這段速度，每日圖額度會在某個時刻寫滿，然後從
+            // 那一刻起只留字。那是一次會靜靜發生的降級——時間軸後半段點開來沒有畫面
             // ——而使用者唯一能看到的線索，本來只有一個已經被夾好、看起來很
             // 乖的 250 MB/天。與其讓那個數字獨自去說謊，不如把「幾分鐘後就滿」
             // 直接印出來。
             if let (Some(secs), Some(raw), Some(capped)) =
                 (proj.budget_lasts_secs(), img_raw, img_capped)
             {
+                let budget_consequence = if image_budget_closed_this_session {
+                    "這一場期間圖額度已經關過門；詳情見上面的圖額度摘要——".to_string()
+                } else {
+                    format!(
+                        "照這個速度，一天的圖額度大約 {} 就寫滿，之後她整天只留字、不留畫面——",
+                        crate::fmt::duration_ms((secs * 1000.0) as i64),
+                    )
+                };
                 breached.push(format!(
                         "這段寫圖的速度相當於 {}/天，是上限（capture.max_image_mb_per_day）的 {:.0} 倍。\
-                         照這個速度，一天的圖額度大約 {} 就寫滿，之後她整天只留字、不留畫面——\
+                         {budget_consequence}\
                          上面那個磁碟數字已經按這道門夾過了，看起來乖是因為門會關，不是因為她寫得少。",
                         crate::fmt::bytes(raw as i64),
                         raw / capped,
-                        crate::fmt::duration_ms((secs * 1000.0) as i64),
                     ));
             }
         }
         if parts.is_empty() {
-            return;
+            return lines.join("\n");
         }
-        println!("  足跡：{}", parts.join("、"));
+        lines.push(format!("  足跡：{}", parts.join("、")));
         for line in &breached {
-            println!("  ⚠  {line}");
+            lines.push(format!("  ⚠  {line}"));
         }
-        if !breached.is_empty() {
-            println!(
+        if phase_zero_budget_breached {
+            lines.push(
                 "        （Phase 0 的驗收條件見 docs/PHASES.md。\
                  短時間的錄製外推一整天本來就會偏高，真正算數的是整天的實測）"
+                    .to_string(),
             );
         }
+        lines.join("\n")
+    }
+
+    #[cfg(any(windows, test))]
+    impl FootprintMeasured {
+        /// 把這一場的量測接成一份 `FootprintMeasured`。
+        ///
+        /// 這個函式存在的唯一理由是**接線要測得到**。接線留在 Windows 薄殼時，
+        /// `cpu_percent()` 換成同型別的 `cpu_seconds_used()`，以及 CPU 百分比和一次
+        /// 睜眼毫秒數對調，都曾讓四道閘門全綠，最後卻把健康的 2.5% 說成 15%。
+        /// 現在 Linux 會編到這裡，測試也直接核對每一條來源。
+        fn measure(
+            f: &sister_capture::footprint::Footprint,
+            stats: &sister_capture::RecorderStats,
+            timings: &sister_capture::timings::Timings,
+            disk_delta_bytes: i64,
+            image_budget_mb: u64,
+        ) -> Self {
+            Self {
+                frame_size: stats.last_frame_size,
+                cpu_percent: f.cpu_percent().map(CpuPercent),
+                peak_rss_bytes: f.peak_rss_bytes(),
+                // 「一次睜眼多貴」問的就是 grab 這一段：閘門放行之後真的去讀
+                // 螢幕的那一次。`per_call` 已經只除以真的做了事的次數。
+                per_look_ms: timings
+                    .grab
+                    .per_call()
+                    .map(|d| PerLookMs(d.as_secs_f64() * 1000.0)),
+                disk: DiskMeasured {
+                    delta_bytes: disk_delta_bytes,
+                    image_bytes: ImageBytesWritten::from_stats(stats),
+                    image_cap_bytes: ImageBudgetBytes::from_mb(image_budget_mb),
+                    image_budget_closed_this_session: stats.images_over_budget > 0,
+                },
+            }
+        }
+
+        /// 這一份量測要印出來的整塊字（`report_footprint` 印的就是它）。
+        ///
+        /// 這是 `measure()`／`report()` 這一層唯一還沒被 Linux 測試蓋住的接線：
+        /// 傳給 `footprint_lines` 的必須是 `|bytes| f.bytes_per_day(bytes)`。真的
+        /// `Footprint` 未滿 60 秒一律回 `None`，測試沒辦法把它養到門檻外，所以把
+        /// `bytes` 改成 `0` 仍會全綠；實機超過 60 秒後，後果是整段誤印成
+        /// 「磁碟 0 B/天（這段實際長了 0 B：畫面 0 B、其他 0 B）」、不帶 ⚠，
+        /// 也不會有任何建議。
+        fn report(&self, f: &sister_capture::footprint::Footprint) -> String {
+            footprint_lines(self, |bytes| f.bytes_per_day(bytes))
+        }
+    }
+
+    /// Windows 這一層只負責印字；所有來源到欄位的接線都在 `measure()`，
+    /// 因而 Linux 的測試也會編譯並核對。五個輸入的型別彼此不同，位置參數
+    /// 對調會直接編譯失敗；同型別 getter 接錯則由 `measure()` 的測試守住。
+    #[cfg(windows)]
+    fn report_footprint(
+        f: &sister_capture::footprint::Footprint,
+        stats: &sister_capture::RecorderStats,
+        timings: &sister_capture::timings::Timings,
+        disk_delta_bytes: i64,
+        image_budget_mb: u64,
+    ) {
+        println!(
+            "{}",
+            FootprintMeasured::measure(f, stats, timings, disk_delta_bytes, image_budget_mb)
+                .report(f)
+        );
     }
 
     /// 畫面檔寫了幾張、跳過幾張。
@@ -9309,8 +9457,9 @@ pub mod record {
     mod record_tests {
         use super::record_meanings::{ImageBytesWritten, OcrEnabled};
         use super::{
-            BootBeat, ConfigWatch, DiskProjection, ImageBudgetBytes, StoringImages, TickCounts,
-            WantsImages, already_recording, footprint_context, ocr_off_words,
+            BootBeat, ConfigWatch, CpuPercent, DiskMeasured, DiskProjection, FootprintMeasured,
+            ImageBudgetBytes, PerLookMs, StoringImages, TickCounts, WantsImages, already_recording,
+            footprint_context, footprint_lines, ocr_off_words,
         };
         use crate::ops::tmp::Tmp;
         use sister_core::config::Config;
@@ -9318,7 +9467,17 @@ pub mod record {
         use sister_core::heartbeat;
 
         const MB: f64 = 1024.0 * 1024.0;
+        const MB_I: i64 = 1024 * 1024;
+        const MB_U: u64 = 1024 * 1024;
         const CAP_250MB: u64 = 250 * 1024 * 1024;
+
+        fn written_bytes(bytes: u64) -> ImageBytesWritten {
+            ImageBytesWritten::from_raw_bytes(bytes)
+        }
+
+        fn budget_bytes(bytes: u64) -> ImageBudgetBytes {
+            ImageBudgetBytes::from_raw_bytes(bytes)
+        }
 
         #[test]
         fn tick_counts_keep_total_and_working_stats_in_their_own_fields() {
@@ -9401,6 +9560,812 @@ pub mod record {
         fn the_disk_budget_shown_to_the_user_keeps_megabytes_and_unlimited_zero_honest() {
             assert_eq!(ImageBudgetBytes::from_mb(250).bytes(), 262_144_000);
             assert_eq!(ImageBudgetBytes::from_mb(0).bytes(), 0);
+        }
+
+        /// 一場什麼都沒量到的錄製。測試用 `..nothing_measured()` 疊上自己要的那幾項。
+        /// **具名不是排版偏好**：`image_bytes` 和 `image_cap_bytes` 都是 `u64`，
+        /// 做成位置參數的話對調編得過——那正是這一整段程式碼被抽出來的原因，
+        /// 測試自己不可以再造一個。
+        fn nothing_measured() -> FootprintMeasured {
+            FootprintMeasured {
+                frame_size: Some((2560, 1440)),
+                cpu_percent: None,
+                peak_rss_bytes: None,
+                per_look_ms: None,
+                disk: DiskMeasured {
+                    delta_bytes: 0,
+                    image_bytes: written_bytes(0),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+            }
+        }
+
+        fn ten_minute_day(bytes: u64) -> Option<f64> {
+            Some(bytes as f64 / 600.0 * 86_400.0)
+        }
+
+        /// 1. `over()` 必須同時標出三種超標，也不能把三種合格誤標成超標。
+        #[test]
+        fn footprint_marks_every_breach_and_no_passing_budget() {
+            let over = FootprintMeasured {
+                cpu_percent: Some(CpuPercent(27.1)),
+                peak_rss_bytes: Some(401 * MB_U),
+                disk: DiskMeasured {
+                    delta_bytes: 3584 * MB_I,
+                    image_bytes: written_bytes(200 * MB_U),
+                    image_cap_bytes: budget_bytes(CAP_250MB),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&over, |bytes| Some(bytes as f64));
+            for warning in [
+                "⚠ CPU 平均 27.1%",
+                "⚠ RAM 峰值 401.0 MB",
+                "⚠ 磁碟 3.5 GB/天",
+            ] {
+                assert!(out.contains(warning), "三種超標都必須直接帶 ⚠：{out}");
+            }
+            for warning in [
+                "CPU 27.1% 超過預算 3%（9 倍）",
+                "RAM 401.0 MB 超過預算 400.0 MB",
+                "磁碟 3.5 GB/天 超過預算 300.0 MB/天（12 倍）",
+            ] {
+                assert!(out.contains(warning), "超標原因必須整句說清楚：{out}");
+            }
+            assert!(
+                out.contains("docs/PHASES.md"),
+                "有超標時必須附 Phase 0 註腳：{out}"
+            );
+
+            let passing = FootprintMeasured {
+                cpu_percent: Some(CpuPercent(2.0)),
+                peak_rss_bytes: Some(399 * MB_U),
+                disk: DiskMeasured {
+                    delta_bytes: MB_I,
+                    image_bytes: written_bytes(0),
+                    image_cap_bytes: budget_bytes(CAP_250MB),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&passing, ten_minute_day);
+            assert!(!out.contains('⚠'), "全部合格時不該有任何警告：{out}");
+            assert!(
+                !out.contains("docs/PHASES.md"),
+                "全部合格時不該附超標註腳：{out}"
+            );
+        }
+
+        /// 2. 圖比淨成長多代表拆不開；圖速率不能拿去把總量扣成負數。
+        #[test]
+        fn deleted_bytes_do_not_create_a_negative_daily_projection() {
+            let m = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 4 * MB_I,
+                    image_bytes: written_bytes(40 * MB_U),
+                    image_cap_bytes: budget_bytes(CAP_250MB),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&m, ten_minute_day);
+            assert!(out.contains("磁碟 576.0 MB/天"), "總量照實外推：{out}");
+            assert!(!out.contains("磁碟 -"), "磁碟速率不可以是負的：{out}");
+            assert!(
+                !out.contains("-5173673984 B"),
+                "負的位元組數不可以復活：{out}"
+            );
+        }
+
+        /// 3、5. 十分鐘爆量必須夾在圖額度上，並明講關門的倍數與時間；
+        /// 沒撞門的反例則兩件事都不該發生。
+        #[test]
+        fn projection_clamps_its_ceiling_and_explains_when_it_will_close() {
+            let burst = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 81 * MB_I,
+                    image_bytes: written_bytes(79 * MB_U),
+                    image_cap_bytes: budget_bytes(CAP_250MB),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&burst, ten_minute_day);
+            assert!(
+                out.contains("538.0 MB/天"),
+                "圖額度夾過後才是可能發生的總量：{out}"
+            );
+            assert!(
+                !out.contains("11.4 GB/天"),
+                "不可以外推穿過自己的天花板：{out}"
+            );
+            assert!(
+                out.contains("這段寫圖的速度") && out.contains("46 倍") && out.contains("31 分鐘"),
+                "撞門要講出倍數與大約何時寫滿：{out}"
+            );
+
+            let quiet = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 2 * MB_I,
+                    image_bytes: written_bytes(MB_U),
+                    image_cap_bytes: budget_bytes(CAP_250MB),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&quiet, ten_minute_day);
+            assert!(
+                !out.contains("這段寫圖的速度"),
+                "沒撞門不該聲稱額度會寫滿：{out}"
+            );
+            assert!(
+                !out.contains("538.0 MB/天"),
+                "反例不該被夾成爆量場景的數字：{out}"
+            );
+        }
+
+        /// 4. 超標時必須按圖所佔比例指出真正該處理的那一半。
+        #[test]
+        fn disk_advice_distinguishes_images_from_everything_else() {
+            let mostly_other = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 4 * 1024 * MB_I,
+                    image_bytes: written_bytes(200 * MB_U),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&mostly_other, |bytes| Some(bytes as f64));
+            assert!(
+                out.contains(
+                    "而且大部分不是圖：畫面 200.0 MB/天、其他（資料庫、索引、事實）3.8 GB/天。畫面那半有天花板（capture.max_image_mb_per_day），另一半沒有。"
+                ),
+                "圖只佔一小半時要指向其他資料：{out}"
+            );
+            assert!(
+                !out.contains("主要是圖"),
+                "圖只佔一小半不能反過來歸因：{out}"
+            );
+
+            let mostly_images = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 400 * MB_I,
+                    image_bytes: written_bytes(350 * MB_U),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&mostly_images, |bytes| Some(bytes as f64));
+            assert!(
+                out.contains(
+                    "主要是圖：畫面 350.0 MB/天。調小 capture.max_image_mb_per_day 或拉長 image_min_interval_ms。"
+                ),
+                "圖佔絕大部分時要指向圖：{out}"
+            );
+            assert!(
+                !out.contains("而且大部分不是圖"),
+                "圖佔絕大部分不能歸因給其他資料：{out}"
+            );
+        }
+
+        /// 6. 有刪除時承認拆不開；沒有刪除時才列出畫面與其他。
+        #[test]
+        fn disk_breakdown_only_splits_when_the_subtraction_is_meaningful() {
+            let deleted = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 4 * MB_I,
+                    image_bytes: written_bytes(40 * MB_U),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&deleted, ten_minute_day);
+            assert!(
+                out.contains("但同時也有東西被刪掉，拆不開"),
+                "負的其餘空間必須承認拆不開：{out}"
+            );
+            assert!(!out.contains("：畫面"), "拆不開時不能印假的分類：{out}");
+
+            let clean = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 40 * MB_I,
+                    image_bytes: written_bytes(4 * MB_U),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&clean, ten_minute_day);
+            assert!(
+                out.contains("這段實際長了 40.0 MB：畫面 4.0 MB、其他 36.0 MB"),
+                "能拆時要把兩半都列出來：{out}"
+            );
+            assert!(!out.contains("拆不開"), "沒有刪除時不該說拆不開：{out}");
+        }
+
+        /// 7. 淨減少要把負號解讀成方向，不能再把負號印進數量。
+        #[test]
+        fn a_net_decrease_is_reported_as_a_positive_magnitude() {
+            let shrank = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: -4 * MB_I,
+                    image_bytes: written_bytes(0),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&shrank, |_| None);
+            assert!(
+                out.contains(
+                    "磁碟 這段量不出來（淨少了 4.0 MB——清理和寫入混在一起，減出來的數字沒有意義）"
+                ),
+                "淨減少的量要用正的大小表示：{out}"
+            );
+            assert!(!out.contains("/天"), "淨減少的這場不准出現每天用量：{out}");
+            assert!(!out.contains("-4194304"), "不該洩漏負的原始位元組數：{out}");
+            assert!(!out.contains("淨少了 -"), "方向已由『淨少了』表達：{out}");
+
+            let grew = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 4 * MB_I,
+                    image_bytes: written_bytes(0),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&grew, ten_minute_day);
+            assert!(
+                !out.contains("量不出來"),
+                "正成長可以外推時不該走淨減少分支：{out}"
+            );
+        }
+
+        /// 8. 不到 60 秒時下游整段不印磁碟；同一份數字量得出速率時才印。
+        #[test]
+        fn missing_daily_rate_hides_the_entire_disk_section() {
+            let m = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 4 * MB_I,
+                    image_bytes: written_bytes(MB_U),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&m, |_| None);
+            assert!(!out.contains("磁碟"), "不能把沒量到偽裝成磁碟數字：{out}");
+            assert!(!out.contains("0 B/天"), "沒量到不是零：{out}");
+
+            let out = footprint_lines(&m, ten_minute_day);
+            assert!(
+                out.contains("磁碟"),
+                "同樣數字有速率後就要出現磁碟段：{out}"
+            );
+        }
+
+        /// 9. 這是一個真的零和一個沒量到的零長得一樣的地方，這一輪只釘住
+        ///    現況、沒有改它。
+        #[test]
+        fn a_measured_zero_stays_a_passing_zero() {
+            let m = nothing_measured();
+            let out = footprint_lines(&m, |_| Some(0.0));
+            assert!(
+                out.contains("磁碟 0 B/天（這段實際長了 0 B：畫面 0 B、其他 0 B）"),
+                "真的零目前就是這樣顯示：{out}"
+            );
+            assert!(!out.contains('⚠'), "真的零目前視為通過預算：{out}");
+        }
+
+        /// 10. 所有量測都缺席時，只留下不可省略的條件行。
+        #[test]
+        fn an_empty_footprint_has_only_its_context_line() {
+            let m = FootprintMeasured {
+                frame_size: None,
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&m, |_| None);
+            assert!(out.starts_with("  條件："), "第一行必須是條件：{out}");
+            assert_eq!(out.lines().count(), 1, "只能有條件這一行：{out}");
+            assert!(!out.contains("足跡："), "空集合不印足跡：{out}");
+            assert!(!out.contains('⚠'), "空集合不印警告：{out}");
+        }
+
+        /// 11. CPU 超標時，省電閘門的三個判詞都由實測地板決定。
+        #[test]
+        fn cpu_breach_uses_the_matching_idle_floor_verdict() {
+            let cases = [
+                (
+                    127.0,
+                    "佔掉預算的一大半",
+                    ["閘門沒關上，不是抓圖太貴", "已經超過預算了"],
+                ),
+                (
+                    27.0,
+                    "閘門沒關上，不是抓圖太貴",
+                    ["佔掉預算的一大半", "已經超過預算了"],
+                ),
+                (
+                    200.0,
+                    "已經超過預算了",
+                    ["佔掉預算的一大半", "閘門沒關上，不是抓圖太貴"],
+                ),
+            ];
+            for (ms, wanted, rejected) in cases {
+                let m = FootprintMeasured {
+                    cpu_percent: Some(CpuPercent(4.0)),
+                    per_look_ms: Some(PerLookMs(ms)),
+                    ..nothing_measured()
+                };
+                let out = footprint_lines(&m, |_| None);
+                if ms == 127.0 {
+                    assert!(
+                        out.contains("一次睜眼 127 ms"),
+                        "實測成本必須接進說明：{out}"
+                    );
+                }
+                assert!(out.contains(wanted), "{ms} ms 應選中「{wanted}」：{out}");
+                for wrong in rejected {
+                    assert!(!out.contains(wrong), "{ms} ms 不該選中「{wrong}」：{out}");
+                }
+            }
+        }
+
+        #[test]
+        fn a_zero_per_look_cost_is_missing_not_a_measured_floor() {
+            let m = FootprintMeasured {
+                cpu_percent: Some(CpuPercent(4.0)),
+                per_look_ms: Some(PerLookMs(0.0)),
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&m, |_| None);
+            for unmeasured_claim in [
+                "一次睜眼",
+                "佔掉預算的一大半",
+                "閘門沒關上，不是抓圖太貴",
+                "已經超過預算了",
+            ] {
+                assert!(
+                    !out.contains(unmeasured_claim),
+                    "0 ms 沒量到時不可以下地板判詞「{unmeasured_claim}」：{out}"
+                );
+            }
+        }
+
+        #[test]
+        fn footprint_lines_passes_the_measured_frame_size_to_its_context() {
+            let measured = footprint_lines(&nothing_measured(), |_| None);
+            assert!(
+                measured.contains("最後一次抓到的畫面 2560×1440"),
+                "量到的解析度必須接進條件行：{measured}"
+            );
+
+            let missing = FootprintMeasured {
+                frame_size: None,
+                ..nothing_measured()
+            };
+            let missing = footprint_lines(&missing, |_| None);
+            assert!(
+                missing.contains("螢幕解析度量不到"),
+                "缺席要照實說：{missing}"
+            );
+            assert!(
+                !missing.contains("2560"),
+                "缺席不能沿用測試底稿的解析度：{missing}"
+            );
+        }
+
+        /// `stats`、`timings` 與兩個純量必須各自接進正確欄位。
+        #[test]
+        fn measure_wires_stats_timings_and_scalars_to_their_fields() {
+            let stats = sister_capture::RecorderStats {
+                last_frame_size: Some((3840, 2160)),
+                image_bytes: 7 * MB_U,
+                images_over_budget: 3,
+                ..Default::default()
+            };
+            let mut timings = sister_capture::timings::Timings::default();
+            timings.grab.calls = 4;
+            timings.grab.total = std::time::Duration::from_millis(508);
+            timings.store.calls = 4;
+            timings.store.total = std::time::Duration::from_millis(12);
+            assert_ne!(
+                timings.grab.per_call(),
+                timings.store.per_call(),
+                "grab 和 store 若設成一樣，這條測試就分不出接錯"
+            );
+
+            let f = sister_capture::footprint::Footprint::new();
+            let m = FootprintMeasured::measure(&f, &stats, &timings, -37, 250);
+            assert_eq!(m.frame_size, Some((3840, 2160)));
+            assert_eq!(
+                m.cpu_percent,
+                f.cpu_percent().map(CpuPercent),
+                "CPU 那一格接的是 Footprint，不是 grab 的睜眼成本（127 ms 在這裡會變成 127.0%）"
+            );
+            assert_eq!(m.per_look_ms, Some(PerLookMs(127.0)));
+            assert_eq!(m.disk.image_bytes.bytes(), 7 * MB_U);
+            assert_eq!(m.disk.image_cap_bytes.bytes(), 250 * 1024 * 1024);
+            assert!(m.disk.image_budget_closed_this_session);
+            assert_eq!(m.disk.delta_bytes, -37);
+        }
+
+        /// CPU 欄位必須接平均百分比，不能接成這場累積用掉的 CPU 秒數。
+        #[test]
+        fn measure_uses_cpu_percent_instead_of_cpu_seconds_used() {
+            let f = sister_capture::footprint::Footprint::new();
+            let from_percent = f.cpu_percent();
+            let from_seconds = f.cpu_seconds_used();
+            // 前提：這兩個 getter 現在答得不一樣。相同的話這條測試分不出接錯，
+            // 要當場紅掉而不是靜靜地通過。
+            assert_ne!(
+                from_percent, from_seconds,
+                "兩個 getter 必須先有可辨識的輸出，這條接線測試才算數"
+            );
+            let stats = sister_capture::RecorderStats::default();
+            let timings = sister_capture::timings::Timings::default();
+            let m = FootprintMeasured::measure(&f, &stats, &timings, 0, 0);
+            assert!(!m.disk.image_budget_closed_this_session);
+            assert_eq!(
+                m.cpu_percent,
+                from_percent.map(CpuPercent),
+                "CPU 欄位必須原樣接 cpu_percent()"
+            );
+            assert_eq!(
+                m.peak_rss_bytes,
+                f.peak_rss_bytes(),
+                "RSS 欄位必須原樣接 peak_rss_bytes()"
+            );
+        }
+
+        /// `report()` 要交出整塊足跡字；未滿 60 秒時磁碟段必須整段消失。
+        ///
+        /// `|bytes| f.bytes_per_day(bytes)` 裡把 `bytes` 換成 `0`，Linux 上仍會因
+        /// 60 秒門檻而兩邊都回 `None`；這條只釘住「太短時整段消失」，不宣稱
+        /// 擋得住那個改壞。
+        #[test]
+        fn report_returns_the_whole_block_and_hides_short_disk_projection() {
+            let f = sister_capture::footprint::Footprint::new();
+            let m = FootprintMeasured {
+                frame_size: None,
+                disk: DiskMeasured {
+                    delta_bytes: MB_I,
+                    image_bytes: written_bytes(0),
+                    image_cap_bytes: budget_bytes(CAP_250MB),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = m.report(&f);
+            assert_eq!(
+                out,
+                format!(
+                    "  條件：版本 sister {}；螢幕解析度量不到（這場沒有成功抓到畫面）；負載：程式量不到，貼回時請註明當時在做什麼",
+                    env!("CARGO_PKG_VERSION")
+                )
+            );
+        }
+
+        /// 整塊黃金輸出釘住行序、分隔、警告前綴、CPU 地板算術與註腳縮排。
+        #[test]
+        fn all_budgets_breached_match_the_whole_golden_block() {
+            let m = FootprintMeasured {
+                cpu_percent: Some(CpuPercent(4.0)),
+                peak_rss_bytes: Some(401 * MB_U),
+                per_look_ms: Some(PerLookMs(127.0)),
+                disk: DiskMeasured {
+                    delta_bytes: 400 * MB_I,
+                    image_bytes: written_bytes(350 * MB_U),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&m, |bytes| Some(bytes as f64));
+            assert_eq!(
+                out,
+                format!(
+                    concat!(
+                        "  條件：版本 sister {}；最後一次抓到的畫面 2560×1440；負載：程式量不到，貼回時請註明當時在做什麼\n",
+                        "  足跡：⚠ CPU 平均 4.0%、⚠ RAM 峰值 401.0 MB、⚠ 磁碟 400.0 MB/天（這段實際長了 400.0 MB：畫面 350.0 MB、其他 50.0 MB）\n",
+                        "  ⚠  CPU 4.0% 超過預算 3%（1 倍）\n",
+                        "  ⚠  一次睜眼 127 ms。就算省電閘門完美，一台**完全沒人碰**的機器每 5 秒還是得睜一次眼，一天 17280 次 = 2.5% CPU——佔掉預算的一大半，而那是一台沒有人在用的機器。剩下的空間不夠給真的在用的時候，先跑 `sister bench`。\n",
+                        "  ⚠  RAM 401.0 MB 超過預算 400.0 MB\n",
+                        "  ⚠  磁碟 400.0 MB/天 超過預算 300.0 MB/天（1 倍）\n",
+                        "  ⚠  主要是圖：畫面 350.0 MB/天。調小 capture.max_image_mb_per_day 或拉長 image_min_interval_ms。\n",
+                        "        （Phase 0 的驗收條件見 docs/PHASES.md。短時間的錄製外推一整天本來就會偏高，真正算數的是整天的實測）"
+                    ),
+                    env!("CARGO_PKG_VERSION")
+                )
+            );
+        }
+
+        /// 三項都合格的整塊黃金輸出不得混入警告、說明或 Phase 0 註腳。
+        #[test]
+        fn all_budgets_passing_match_the_whole_golden_block() {
+            let m = FootprintMeasured {
+                cpu_percent: Some(CpuPercent(2.0)),
+                peak_rss_bytes: Some(399 * MB_U),
+                disk: DiskMeasured {
+                    delta_bytes: MB_I,
+                    image_bytes: written_bytes(0),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&m, |bytes| Some(bytes as f64));
+            assert_eq!(
+                out,
+                format!(
+                    concat!(
+                        "  條件：版本 sister {}；最後一次抓到的畫面 2560×1440；負載：程式量不到，貼回時請註明當時在做什麼\n",
+                        "  足跡：CPU 平均 2.0%、RAM 峰值 399.0 MB、磁碟 1.0 MB/天（這段實際長了 1.0 MB：畫面 0 B、其他 1.0 MB）"
+                    ),
+                    env!("CARGO_PKG_VERSION")
+                )
+            );
+        }
+
+        /// 三個 `over()` 與三個 breach 判斷都必須同守嚴格 `>`：等於合格，
+        /// 各自多一格才同時出現摘要警告、說明與 Phase 0 註腳。
+        #[test]
+        fn exact_budget_passes_and_one_step_over_breaches_on_both_surfaces() {
+            let exact = FootprintMeasured {
+                cpu_percent: Some(CpuPercent(3.0)),
+                peak_rss_bytes: Some(400 * MB_U),
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&exact, |bytes| {
+                (bytes == 0).then_some(300.0 * 1024.0 * 1024.0)
+            });
+            assert!(!out.contains('⚠'), "剛好等於三項預算仍然合格：{out}");
+            assert!(!out.contains("docs/PHASES.md"), "合格不附註腳：{out}");
+
+            let above = FootprintMeasured {
+                cpu_percent: Some(CpuPercent(3.1)),
+                peak_rss_bytes: Some(400 * MB_U + 1),
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&above, |bytes| {
+                (bytes == 0).then_some(300.0 * 1024.0 * 1024.0 + 1.0)
+            });
+            for needle in ["⚠ CPU 平均", "⚠ RAM 峰值", "⚠ 磁碟", "docs/PHASES.md"] {
+                assert!(
+                    out.contains(needle),
+                    "多一格就必須越過「{needle}」那道門：{out}"
+                );
+            }
+            for needle in [
+                "CPU 3.1% 超過預算",
+                "RAM 400.0 MB 超過預算",
+                "磁碟 300.0 MB/天 超過預算",
+            ] {
+                assert!(
+                    out.contains(needle),
+                    "摘要與說明必須一致越界「{needle}」：{out}"
+                );
+            }
+        }
+
+        /// CPU、RAM、磁碟各自超標都要有 Phase 0 註腳；只有圖額度建議則沒有。
+        #[test]
+        fn each_phase_zero_breach_and_image_ceiling_advice_choose_the_right_footnote() {
+            let capped_but_passing = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 2 * 1024 * MB_I,
+                    image_bytes: written_bytes(2 * 1024 * MB_U),
+                    image_cap_bytes: budget_bytes(CAP_250MB),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&capped_but_passing, ten_minute_day);
+            assert!(
+                out.contains("這段寫圖的速度"),
+                "撞圖額度的建議仍要保留：{out}"
+            );
+            assert!(
+                !out.contains("docs/PHASES.md"),
+                "磁碟合格不能掛超標註腳：{out}"
+            );
+
+            let individual_breaches = [
+                (
+                    "CPU",
+                    FootprintMeasured {
+                        cpu_percent: Some(CpuPercent(3.1)),
+                        ..nothing_measured()
+                    },
+                ),
+                (
+                    "RAM",
+                    FootprintMeasured {
+                        peak_rss_bytes: Some(400 * MB_U + 1),
+                        ..nothing_measured()
+                    },
+                ),
+            ];
+            for (budget, measured) in individual_breaches {
+                let out = footprint_lines(&measured, |_| None);
+                assert!(
+                    out.contains("docs/PHASES.md"),
+                    "只有 {budget} 超標也必須附註腳：{out}"
+                );
+            }
+
+            let disk_breached = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 2 * 1024 * MB_I + 4 * MB_I,
+                    image_bytes: written_bytes(2 * 1024 * MB_U),
+                    image_cap_bytes: budget_bytes(CAP_250MB),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&disk_breached, ten_minute_day);
+            assert!(
+                out.contains("磁碟 826.0 MB/天 超過預算"),
+                "其他資料超標要有說明：{out}"
+            );
+            assert!(
+                out.contains("docs/PHASES.md"),
+                "磁碟真的超標才附註腳：{out}"
+            );
+        }
+
+        /// 額度在這一場還沒關過門才預測時間；已關過門就指回上面的摘要。
+        #[test]
+        fn spent_image_budget_uses_past_tense_instead_of_predicting_another_close() {
+            let mut m = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 81 * MB_I,
+                    image_bytes: written_bytes(79 * MB_U),
+                    image_cap_bytes: budget_bytes(CAP_250MB),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&m, ten_minute_day);
+            assert!(
+                out.contains("一天的圖額度大約 31 分鐘 就寫滿"),
+                "未撞門維持原句：{out}"
+            );
+
+            m.disk.image_budget_closed_this_session = true;
+            let out = footprint_lines(&m, ten_minute_day);
+            assert!(
+                out.contains("這一場期間圖額度已經關過門；詳情見上面的圖額度摘要"),
+                "已撞門要指回上面的摘要：{out}"
+            );
+            assert!(
+                !out.contains("今天"),
+                "這個計數器不能判定今天是否撞門：{out}"
+            );
+            assert!(!out.contains("就寫滿"), "已撞門不能再預測未來關門：{out}");
+            assert!(
+                out.contains("上面那個磁碟數字已經按這道門夾過了"),
+                "仍須解釋磁碟數字：{out}"
+            );
+        }
+
+        /// 歸因只在圖量嚴格少於總量一半時翻到「大部分不是圖」。
+        #[test]
+        fn disk_attribution_straddles_the_two_to_one_boundary() {
+            let m = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 400 * MB_I,
+                    image_bytes: written_bytes(200 * MB_U),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let image = 200.0 * MB;
+            let below = footprint_lines(&m, |bytes| {
+                Some(if bytes == 200 * MB_U {
+                    image
+                } else {
+                    image * 2.0 - 1.0
+                })
+            });
+            assert!(
+                below.contains("主要是圖"),
+                "兩倍門檻少一點仍歸給圖：{below}"
+            );
+            assert!(
+                !below.contains("大部分不是圖"),
+                "門檻下不能提前翻面：{below}"
+            );
+
+            let above = footprint_lines(&m, |bytes| {
+                Some(if bytes == 200 * MB_U {
+                    image
+                } else {
+                    image * 2.0 + 1.0
+                })
+            });
+            assert!(
+                above.contains("大部分不是圖"),
+                "兩倍門檻多一點就歸給其他：{above}"
+            );
+            assert!(!above.contains("主要是圖"), "門檻上不能留在另一面：{above}");
+        }
+
+        /// 105 ms 與 150 ms 兩道 CPU 地板分界的兩側必須指向相反下一步。
+        #[test]
+        fn cpu_idle_floor_verdicts_straddle_both_decision_boundaries() {
+            let cases = [
+                (104.9, "閘門沒關上，不是抓圖太貴"),
+                (105.1, "佔掉預算的一大半"),
+                (149.9, "佔掉預算的一大半"),
+                (150.1, "已經超過預算了"),
+            ];
+            for (ms, verdict) in cases {
+                let m = FootprintMeasured {
+                    cpu_percent: Some(CpuPercent(4.0)),
+                    per_look_ms: Some(PerLookMs(ms)),
+                    ..nothing_measured()
+                };
+                let out = footprint_lines(&m, |_| None);
+                assert!(
+                    out.contains(verdict),
+                    "{ms} ms 應落在「{verdict}」這面：{out}"
+                );
+            }
+        }
+
+        /// 被夾的圖速率要在歸因數字旁標明上限；未夾時既有兩句一字不變。
+        #[test]
+        fn clamped_image_rate_is_labeled_but_uncapped_wording_stays_unchanged() {
+            let capped = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 60 * MB_I,
+                    image_bytes: written_bytes(40 * MB_U),
+                    image_cap_bytes: budget_bytes(CAP_250MB),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&capped, ten_minute_day);
+            assert!(
+                out.contains("畫面 250.0 MB/天（上限，已夾）"),
+                "夾過的數字要就地揭露：{out}"
+            );
+
+            let capped_primary = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 500 * MB_I,
+                    image_bytes: written_bytes(400 * MB_U),
+                    image_cap_bytes: budget_bytes(CAP_250MB),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&capped_primary, |bytes| Some(bytes as f64));
+            assert!(
+                out.contains("主要是圖：畫面 250.0 MB/天（上限，已夾）"),
+                "主要是圖那句也要把 clamp 標在數字旁：{out}"
+            );
+
+            let uncapped = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: 400 * MB_I,
+                    image_bytes: written_bytes(350 * MB_U),
+                    image_cap_bytes: budget_bytes(0),
+                    image_budget_closed_this_session: false,
+                },
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&uncapped, |bytes| Some(bytes as f64));
+            assert!(out.contains("主要是圖：畫面 350.0 MB/天。調小 capture.max_image_mb_per_day 或拉長 image_min_interval_ms。"), "沒夾過維持原句：{out}");
+            assert!(!out.contains("上限，已夾"), "沒夾過不能貼標記：{out}");
         }
 
         /// 讀字關掉、圖也沒在寫的那一場，摘要裡唯一提到畫面的那句話說有留。
