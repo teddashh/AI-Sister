@@ -7704,12 +7704,197 @@ pub mod record {
         );
     }
 
-    /// 同意書那道閘門。過不了就 `Err`，過得了就回一份**可能被降級過**的設定。
+    mod record_meanings {
+        use sister_core::config::Config;
+
+        /// 設定檔原本寫的「要不要留圖」，尚未被同意書修改。
+        ///
+        /// tuple 欄位留在這個子 module 裡；父 module 直接寫 `WantsImages(bool)`
+        /// 會得到 E0423，只能走有來源名稱的建構子。開機值由 `gate` 在降級前
+        /// 建好；熱重載建構子只接受 `Config::reload` 剛從磁碟讀出、沒有經過
+        /// `gate` / `consent::downgrade` 的那一份設定。
+        ///
+        /// 開機建構子有 Linux 也會跑的雙向閨門測試，專門把它和
+        /// `ocr` / `enabled` 分開；熱重載建構子仍只在 `#[cfg(windows)]`
+        /// 被編譯，`check-windows.sh` 不會執行它的斷言。
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[cfg_attr(not(windows), allow(dead_code))]
+        pub(super) struct WantsImages(bool);
+
+        #[cfg_attr(not(windows), allow(dead_code))]
+        impl WantsImages {
+            pub(super) fn before_consent_downgrade(config: &Config) -> Self {
+                Self(config.capture.store_images)
+            }
+
+            #[cfg(windows)]
+            pub(super) fn from_reloaded_config(config: &Config) -> Self {
+                Self(config.capture.store_images)
+            }
+
+            pub(super) fn enabled(self) -> bool {
+                self.0
+            }
+
+            #[cfg(test)]
+            pub(super) fn from_raw(value: bool) -> Self {
+                Self(value)
+            }
+        }
+
+        /// Recorder 這一刻實際是否正在寫圖。
+        ///
+        /// tuple 欄位留在這個子 module 裡；父 module 直接拿裸 `bool` 建構會
+        /// 得到 E0423，只能走 recorder 來源的建構子。
+        ///
+        /// 這擋不住本 module 內讀錯 recorder 狀態或取反；正式建構子只在
+        /// `#[cfg(windows)]` 被呼叫，而 `check-windows.sh` 只編譯、不執行斷言。
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[cfg_attr(not(windows), allow(dead_code))]
+        pub(super) struct StoringImages(bool);
+
+        #[cfg_attr(not(windows), allow(dead_code))]
+        impl StoringImages {
+            #[cfg(windows)]
+            pub(super) fn from_recorder<B: sister_capture::Backend>(
+                rec: &sister_capture::Recorder<B>,
+            ) -> Self {
+                Self(rec.stores_images())
+            }
+
+            pub(super) fn enabled(self) -> bool {
+                self.0
+            }
+
+            #[cfg(test)]
+            pub(super) fn from_raw(value: bool) -> Self {
+                Self(value)
+            }
+        }
+
+        /// 設定檔裡的 OCR 開關。
+        ///
+        /// tuple 欄位留在這個子 module 裡；父 module 直接拿 recorder 的裸
+        /// `bool` 建構會得到 E0423，只能走 Config 來源的建構子。
+        ///
+        /// 建構子有 Linux 也會跑的雙向測試，每個方向都讓 `ocr`
+        /// 和其他 capture 開關相反，守住摘要不會誤報讀字已關閉。
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[cfg_attr(not(windows), allow(dead_code))]
+        pub(super) struct OcrEnabled(bool);
+
+        #[cfg_attr(not(windows), allow(dead_code))]
+        impl OcrEnabled {
+            pub(super) fn from_config(config: &Config) -> Self {
+                Self(config.capture.ocr)
+            }
+
+            pub(super) fn enabled(self) -> bool {
+                self.0
+            }
+        }
+
+        /// Recorder 統計中的總拍數與實際做事拍數。
+        ///
+        /// 欄位留在這個子 module 裡；父 module 寫 `TickCounts { .. }` 會得到
+        /// E0451，只能走統計來源的建構子。建構子內的欄位對應仍可能寫錯，
+        /// 但有 Linux 也會跑的測試守住；`check-windows.sh` 本身只編譯。
+        #[cfg(any(windows, test))]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub(super) struct TickCounts {
+            total: u64,
+            working: u64,
+        }
+
+        #[cfg(any(windows, test))]
+        impl TickCounts {
+            pub(super) fn from_stats(stats: &sister_capture::RecorderStats) -> Self {
+                Self {
+                    total: stats.ticks,
+                    working: stats.working_ticks,
+                }
+            }
+
+            pub(super) fn total(self) -> u64 {
+                self.total
+            }
+
+            pub(super) fn working(self) -> u64 {
+                self.working
+            }
+
+            pub(super) fn idle(self) -> u64 {
+                self.total.saturating_sub(self.working)
+            }
+        }
+
+        /// 這一場實際寫掉的圖片 bytes。
+        ///
+        /// tuple 欄位留在這個子 module 裡；父 module 直接拿額度的裸 `u64`
+        /// 建構會得到 E0423，只能走 RecorderStats 來源的建構子。
+        ///
+        /// 建構子有 Linux 也會跑的測試，fixture 把每個 `u64`
+        /// 統計欄位設成不同值，守住摘要拿到的是真正圖片 bytes。
+        #[cfg(any(windows, test))]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[cfg_attr(not(windows), allow(dead_code))]
+        pub(super) struct ImageBytesWritten(u64);
+
+        #[cfg(any(windows, test))]
+        #[cfg_attr(not(windows), allow(dead_code))]
+        impl ImageBytesWritten {
+            pub(super) fn from_stats(stats: &sister_capture::RecorderStats) -> Self {
+                Self(stats.image_bytes)
+            }
+
+            pub(super) fn bytes(self) -> u64 {
+                self.0
+            }
+        }
+
+        /// 每日圖片額度換算後的 bytes。
+        ///
+        /// tuple 欄位留在這個子 module 裡；父 module 直接建構會得到 E0423，
+        /// 而產物與 [`ImageBytesWritten`] 不同型，對調兩個引數會得到 E0308。
+        /// `from_mb` 仍接受裸 `u64`，所以擋不住傳入語意錯誤但同型的 MB 數值；
+        /// 但 MB 到 bytes 的換算與「0 代表不設限」都有 Linux 會跑的寫死值斷言。
+        #[cfg(any(windows, test))]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[cfg_attr(not(windows), allow(dead_code))]
+        pub(super) struct ImageBudgetBytes(u64);
+
+        #[cfg(any(windows, test))]
+        #[cfg_attr(not(windows), allow(dead_code))]
+        impl ImageBudgetBytes {
+            pub(super) fn from_mb(mb: u64) -> Self {
+                Self(mb * 1024 * 1024)
+            }
+
+            pub(super) fn bytes(self) -> u64 {
+                self.0
+            }
+
+            #[cfg(test)]
+            pub(super) fn from_raw_bytes(bytes: u64) -> Self {
+                Self(bytes)
+            }
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    use record_meanings::{ImageBudgetBytes, TickCounts};
+    #[cfg(windows)]
+    use record_meanings::{ImageBytesWritten, OcrEnabled};
+
+    use record_meanings::{StoringImages, WantsImages};
+
+    /// 同意書那道閘門。過不了就 `Err`，過得了就回一份**可能被降級過**的設定，
+    /// 以及設定檔原本寫的留圖意願。
     ///
     /// 拆成獨立函式而不是寫在 `run` 裡，是為了讓它在這台 Linux 開發機上跑得到
     /// （`run` 的後半段整段 `#[cfg(windows)]`）。一道只有目標平台才執行得到的
     /// 隱私閘門，等於一道沒有被執行過的閘門。
-    fn gate(data_dir: &Path, mut config: Config) -> Result<Config> {
+    fn gate(data_dir: &Path, mut config: Config) -> Result<(Config, WantsImages)> {
         let consent = sister_core::consent::load(data_dir);
 
         if !consent.allows_recording() {
@@ -7736,6 +7921,14 @@ pub mod record {
             );
         }
 
+        // 使用者在設定檔裡自己寫的那個意思，**還沒有被同意書修改過**。
+        //
+        // 第三張中途簽回來的時候要靠它才知道「他本來就想留圖」。若等下面的
+        // downgrade 做完才問，答案永遠是「不要」——因為開機時沒簽，它已經
+        // 被按成 false，於是「撤回得掉、簽回來卻要重開」，而使用者分不出這
+        // 兩件事有什麼不同。
+        let wants_images_by_config = WantsImages::before_consent_downgrade(&config);
+
         // 第三張沒簽不是「不能錄」，是「只記字不留圖」（SPEC §11.1 的
         // 「0 天 = 只留 OCR 文字」）。降級要講出來——安靜地少存一半東西，
         // 使用者只會以為截圖功能壞了。
@@ -7745,7 +7938,7 @@ pub mod record {
                  （要留圖請跑 `sister consent --grant frame-storage`）"
             );
         }
-        Ok(config)
+        Ok((config, wants_images_by_config))
     }
 
     /// 錄到一半，同意書變了要做什麼。
@@ -7768,13 +7961,17 @@ pub mod record {
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn recheck(consent: &sister_core::consent::Consent, wants: bool, storing: bool) -> Recheck {
+    fn recheck(
+        consent: &sister_core::consent::Consent,
+        wants: WantsImages,
+        storing: StoringImages,
+    ) -> Recheck {
         // 第一張先看。它被撤回的時候，第三張是什麼已經不重要了。
         if !consent.allows_recording() {
             return Recheck::Stop;
         }
-        let should = wants && consent.allows_frames();
-        if should == storing {
+        let should = wants.enabled() && consent.allows_frames();
+        if should == storing.enabled() {
             return Recheck::Same;
         }
         Recheck::Images(should)
@@ -7786,17 +7983,9 @@ pub mod record {
         config_path: Option<PathBuf>,
         duration: Option<u64>,
     ) -> Result<()> {
-        // 使用者在設定檔裡自己寫的那個意思，**還沒有被同意書修改過**。
-        //
-        // 第三張中途簽回來的時候要靠它才知道「他本來就想留圖」。拿 `gate` 改過
-        // 的那一份來問，答案永遠是「不要」——因為開機時沒簽，它就已經被按成
-        // false 了，於是「撤回得掉、簽回來卻要重開」，而使用者分不出這兩件事
-        // 有什麼不同。
-        let wants_images_by_config = config.capture.store_images;
-
         // 同意書擋在平台檢查**前面**。沒有同意就不該錄，這件事和這台機器有
         // 沒有擷取後端無關；而且放後面的話，這道閘門在非 Windows 上永遠碰不到。
-        let config = gate(data_dir, config)?;
+        let (config, wants_images_by_config) = gate(data_dir, config)?;
 
         // **一個資料目錄只准一個 recorder。** 這道閘門以前只長在字母人那一邊
         // ——所以從字母人按兩次會被擋，但開兩個終端機各打一次 `sister record`
@@ -8040,7 +8229,7 @@ pub mod record {
         // 沒有作用，而 `sister doctor` 讀的是磁碟上那一份，會照著新設定說
         // 「保留畫面檔 ✗ 否（text-only 模式）」——他關掉了截圖、工具說關掉了，
         // 而她還在一張一張寫。
-        mut wants_images_by_config: bool,
+        mut wants_images_by_config: WantsImages,
     ) -> Result<()> {
         use sister_capture::windows::{self, Capabilities};
         use sister_capture::{Recorder, Tick};
@@ -8137,7 +8326,7 @@ pub mod record {
         let interval =
             Duration::from_millis(config.capture.min_interval_ms.max(crate::ops::MIN_TICK_MS));
         // config 等一下會被 Recorder 吃掉，但收尾的摘要與定期清理還需要這幾項
-        let config_ocr = config.capture.ocr;
+        let config_ocr = OcrEnabled::from_config(&config);
         let image_budget_mb = config.capture.max_image_mb_per_day;
         let retention = config.retention.clone();
         let prune_images = frames_root.clone();
@@ -8341,8 +8530,9 @@ pub mod record {
                             // 一張寫。真正動手的是下面那道 `recheck`（同意書仍
                             // 然是上限），這裡只負責把他寫下的意思送過去，並且
                             // 叫它別等下一個節拍。
-                            if wants_images_by_config != fresh.capture.store_images {
-                                wants_images_by_config = fresh.capture.store_images;
+                            let fresh_wants_images = WantsImages::from_reloaded_config(&fresh);
+                            if wants_images_by_config != fresh_wants_images {
+                                wants_images_by_config = fresh_wants_images;
                                 consent_dirty = true;
                             }
                             rec.set_privacy(fresh.privacy);
@@ -8395,13 +8585,17 @@ pub mod record {
                 let by_config = std::mem::take(&mut consent_dirty);
                 last_consent_check = Instant::now();
                 let consent = sister_core::consent::load(data_dir);
-                match recheck(&consent, wants_images_by_config, rec.stores_images()) {
+                match recheck(
+                    &consent,
+                    wants_images_by_config,
+                    StoringImages::from_recorder(&rec),
+                ) {
                     // 他剛剛改了 `store_images`，而實際行為沒有跟著變 = 另一個
                     // 條件在擋。安靜掉的話，他會以為那一行寫了就生效了——而這是
                     // 一句只要他不去翻 frames/ 就永遠不會被戳破的話。
                     Recheck::Same if by_config => println!(
                         "  ⟳ 設定檔的 store_images 改了，但實際行為沒變：{}",
-                        if wants_images_by_config {
+                        if wants_images_by_config.enabled() {
                             "第三張同意書沒簽，所以還是只記字。\
                              （要留圖請跑 `sister consent --grant frame-storage`）"
                         } else {
@@ -8541,18 +8735,18 @@ pub mod record {
         }
         report_idle(&stats);
         report_exclusions(&stats);
-        report_ocr(&stats, config_ocr, rec.stores_images());
+        let storing_images = StoringImages::from_recorder(&rec);
+        report_ocr(&stats, config_ocr, storing_images);
         // 問 recorder 而不是問開機時的設定：第三張同意書中途可能被撤回或簽回來，
         // 而這一段的用途是「她剛剛到底有沒有在寫圖」。拿開機時那份來答，會在
         // 使用者中途撤回之後喊「保留了 12 張畫面卻一張圖都沒寫」的假警報。
-        report_images(&stats, rec.timings(), image_budget_mb, rec.stores_images());
+        report_images(&stats, rec.timings(), image_budget_mb, storing_images);
         // 先取最後一次足跡樣本，時間表才拿得到「這段期間燒了多少 CPU」，
         // 而那是把牆上時間和 CPU 分開講的前提。
         footprint.tick();
         report_timings(
             rec.timings(),
-            stats.ticks,
-            stats.working_ticks,
+            TickCounts::from_stats(&stats),
             footprint.cpu_seconds_used(),
         );
         report_footprint(
@@ -8563,8 +8757,8 @@ pub mod record {
                 .map(|s| s.db_bytes + s.image_bytes)
                 .unwrap_or(0)
                 - disk_at_start,
-            stats.image_bytes,
-            image_budget_mb * 1024 * 1024,
+            ImageBytesWritten::from_stats(&stats),
+            ImageBudgetBytes::from_mb(image_budget_mb),
             // 「一次睜眼多貴」問的就是 grab 這一段：閘門放行之後真的去讀
             // 螢幕的那一次。`per_call` 已經只除以真的做了事的次數。
             rec.timings()
@@ -8638,8 +8832,8 @@ pub mod record {
     #[cfg(any(windows, test))]
     impl DiskProjection {
         /// `cap_bytes` = 0 代表不設限（和 `max_image_mb_per_day = 0` 同義）。
-        fn clamp(raw_total: f64, raw_images: Option<f64>, cap_bytes: u64) -> Self {
-            let images = raw_images.map(|img| match cap_bytes {
+        fn clamp(raw_total: f64, raw_images: Option<f64>, cap_bytes: ImageBudgetBytes) -> Self {
+            let images = raw_images.map(|img| match cap_bytes.bytes() {
                 0 => img,
                 cap => img.min(cap as f64),
             });
@@ -8698,13 +8892,13 @@ pub mod record {
         f: &sister_capture::footprint::Footprint,
         frame_size: Option<(u32, u32)>,
         disk_delta: i64,
-        image_bytes: u64,
-        image_cap_bytes: u64,
+        image_bytes: ImageBytesWritten,
+        image_cap_bytes: ImageBudgetBytes,
         per_look_ms: Option<f64>,
     ) {
         /// 超標的就標出來。合格的不標——每一項都掛一個記號等於沒有記號。
-        fn over(actual: f64, budget: f64) -> &'static str {
-            if actual > budget { "⚠ " } else { "" }
+        fn mark(over_budget: bool) -> &'static str {
+            if over_budget { "⚠ " } else { "" }
         }
 
         println!(
@@ -8714,8 +8908,9 @@ pub mod record {
         let mut parts = Vec::new();
         let mut breached = Vec::new();
         if let Some(cpu) = f.cpu_percent() {
-            parts.push(format!("{}CPU 平均 {cpu:.1}%", over(cpu, BUDGET_CPU_PCT)));
-            if cpu > BUDGET_CPU_PCT {
+            let cpu_over = cpu > BUDGET_CPU_PCT;
+            parts.push(format!("{}CPU 平均 {cpu:.1}%", mark(cpu_over)));
+            if cpu_over {
                 breached.push(format!(
                     "CPU {cpu:.1}% 超過預算 {BUDGET_CPU_PCT:.0}%（{:.0} 倍）",
                     cpu / BUDGET_CPU_PCT
@@ -8743,12 +8938,13 @@ pub mod record {
             }
         }
         if let Some(rss) = f.peak_rss_bytes() {
+            let rss_over = rss > BUDGET_RSS_BYTES;
             parts.push(format!(
                 "{}RAM 峰值 {}",
-                over(rss as f64, BUDGET_RSS_BYTES as f64),
+                mark(rss_over),
                 crate::fmt::bytes(rss as i64)
             ));
-            if rss > BUDGET_RSS_BYTES {
+            if rss_over {
                 breached.push(format!(
                     "RAM {} 超過預算 {}",
                     crate::fmt::bytes(rss as i64),
@@ -8774,6 +8970,7 @@ pub mod record {
             // 沒辦法回答唯一有用的那個問題——該去縮圖，還是該去縮索引。
             // 實測那次就是這樣：一個很嚇人、但指不出方向的數字。
             let grew = disk_delta;
+            let image_bytes = image_bytes.bytes();
             let rest = grew - image_bytes as i64;
 
             let proj = DiskProjection::clamp(
@@ -8798,12 +8995,13 @@ pub mod record {
                     crate::fmt::bytes(rest)
                 )
             };
+            let disk_over = per_day > BUDGET_DISK_PER_DAY;
             parts.push(format!(
                 "{}磁碟 {}/天（{breakdown}）",
-                over(per_day, BUDGET_DISK_PER_DAY),
+                mark(disk_over),
                 crate::fmt::bytes(per_day as i64),
             ));
-            if per_day > BUDGET_DISK_PER_DAY {
+            if disk_over {
                 breached.push(format!(
                     "磁碟 {}/天 超過預算 {}/天（{:.0} 倍）",
                     crate::fmt::bytes(per_day as i64),
@@ -8884,14 +9082,14 @@ pub mod record {
         stats: &sister_capture::RecorderStats,
         timings: &sister_capture::timings::Timings,
         budget_mb: u64,
-        store_images: bool,
+        store_images: StoringImages,
     ) {
         let written = timings.store.calls;
 
         // 「保留了 12 張畫面、磁碟上一張圖都沒有」原本會讓這一整段消失，
         // 因為每個計數剛好都是 0。那正好是最需要說話的時候：資料夾沒權限、
         // 磁碟滿了、路徑被佔用，症狀全都長這樣。
-        if written == 0 && stats.kept > 0 && store_images {
+        if written == 0 && stats.kept > 0 && store_images.enabled() {
             println!(
                 "  ⚠  畫面：保留了 {} 張，但一張圖都沒有寫成{}",
                 stats.kept,
@@ -8982,10 +9180,11 @@ pub mod record {
     #[cfg(windows)]
     fn report_timings(
         t: &sister_capture::timings::Timings,
-        ticks: u64,
-        working: u64,
+        counts: TickCounts,
         cpu_secs: Option<f64>,
     ) {
+        let ticks = counts.total();
+        let working = counts.working();
         let total = t.total();
         if total.is_zero() || ticks == 0 {
             return;
@@ -9002,7 +9201,7 @@ pub mod record {
         // 回來，把它們算進分母只會讓這個迴圈看起來比實際便宜——一段暫停了
         // 七小時的錄製會印出「每 tick 8 ms」，而真的做事的那一拍要 60 ms，
         // 於是這個數字把調查指向別的地方。
-        let idle_ticks = ticks.saturating_sub(working);
+        let idle_ticks = counts.idle();
         let skipped = if idle_ticks > 0 {
             format!("（其中 {idle_ticks} 拍是暫停或關閉，沒做事）")
         } else {
@@ -9068,8 +9267,8 @@ pub mod record {
     /// 而一句只有目標平台才驗得到的話，等於一句沒有被驗過的話。同一個理由
     /// 和同一個 `any(windows, test)` 見 [`idle_floor_pct`]。
     #[cfg(any(windows, test))]
-    fn ocr_off_words(stores_images: bool) -> &'static str {
-        if stores_images {
+    fn ocr_off_words(stores_images: StoringImages) -> &'static str {
+        if stores_images.enabled() {
             "畫面留下了，但上面的字沒有進資料庫"
         } else {
             "而這一次也沒有留畫面——這段時間等於什麼都沒記下來"
@@ -9077,8 +9276,12 @@ pub mod record {
     }
 
     #[cfg(windows)]
-    fn report_ocr(stats: &sister_capture::RecorderStats, ocr_enabled: bool, stores_images: bool) {
-        if !ocr_enabled {
+    fn report_ocr(
+        stats: &sister_capture::RecorderStats,
+        ocr_enabled: OcrEnabled,
+        stores_images: StoringImages,
+    ) {
+        if !ocr_enabled.enabled() {
             println!("  讀字：已關閉（{}）", ocr_off_words(stores_images));
             return;
         }
@@ -9104,9 +9307,10 @@ pub mod record {
     }
     #[cfg(test)]
     mod record_tests {
+        use super::record_meanings::{ImageBytesWritten, OcrEnabled};
         use super::{
-            BootBeat, ConfigWatch, DiskProjection, already_recording, footprint_context,
-            ocr_off_words,
+            BootBeat, ConfigWatch, DiskProjection, ImageBudgetBytes, StoringImages, TickCounts,
+            WantsImages, already_recording, footprint_context, ocr_off_words,
         };
         use crate::ops::tmp::Tmp;
         use sister_core::config::Config;
@@ -9116,13 +9320,96 @@ pub mod record {
         const MB: f64 = 1024.0 * 1024.0;
         const CAP_250MB: u64 = 250 * 1024 * 1024;
 
+        #[test]
+        fn tick_counts_keep_total_and_working_stats_in_their_own_fields() {
+            let stats = sister_capture::RecorderStats {
+                ticks: 100,
+                working_ticks: 7,
+                ..Default::default()
+            };
+            let counts = TickCounts::from_stats(&stats);
+            assert_eq!(counts.total(), 100);
+            assert_eq!(counts.working(), 7);
+        }
+
+        #[test]
+        fn idle_tick_count_saturates_when_broken_stats_claim_more_work_than_ticks() {
+            let stats = sister_capture::RecorderStats {
+                ticks: 100,
+                working_ticks: 7,
+                ..Default::default()
+            };
+            assert_eq!(TickCounts::from_stats(&stats).idle(), 93);
+
+            let broken = sister_capture::RecorderStats {
+                ticks: 7,
+                working_ticks: 100,
+                ..Default::default()
+            };
+            assert_eq!(TickCounts::from_stats(&broken).idle(), 0);
+        }
+
+        /// OCR 其實開著時不能因為留圖或擷取關閉，就騙使用者說讀字已關閉。
+        #[test]
+        fn the_summary_does_not_lie_about_whether_reading_words_is_enabled() {
+            let mut config = Config::default();
+            config.capture.ocr = true;
+            config.capture.store_images = false;
+            config.capture.enabled = false;
+            assert!(OcrEnabled::from_config(&config).enabled());
+
+            config.capture.ocr = false;
+            config.capture.store_images = true;
+            config.capture.enabled = true;
+            assert!(!OcrEnabled::from_config(&config).enabled());
+        }
+
+        /// 收尾摘要不能把留下幾張圖當成寫了幾個 bytes。
+        #[test]
+        fn the_summary_reports_image_bytes_instead_of_an_unrelated_counter() {
+            let stats = sister_capture::RecorderStats {
+                ticks: 1,
+                working_ticks: 2,
+                kept: 3,
+                duplicates: 4,
+                excluded: 5,
+                no_screen: 6,
+                skipped_idle: 7,
+                idle_asked: 8,
+                idle_unknown: 9,
+                browser_ticks: 10,
+                url_reads: 11,
+                title_clock_ticks: 12,
+                clipboard_events: 13,
+                secrets_redacted: 14,
+                focus_events: 15,
+                image_bytes: 16,
+                images_throttled: 17,
+                images_over_budget: 18,
+                images_over_budget_days: 19,
+                image_failures: 20,
+                ocr_blocks: 21,
+                tick_failures: 22,
+                ocr_failures: 23,
+                ..Default::default()
+            };
+            assert_eq!(ImageBytesWritten::from_stats(&stats).bytes(), 16);
+        }
+
+        /// 收尾摘要的圖片磁碟預算不能少算 1024 倍，而 0 要保留「不設限」的意思。
+        #[test]
+        fn the_disk_budget_shown_to_the_user_keeps_megabytes_and_unlimited_zero_honest() {
+            assert_eq!(ImageBudgetBytes::from_mb(250).bytes(), 262_144_000);
+            assert_eq!(ImageBudgetBytes::from_mb(0).bytes(), 0);
+        }
+
         /// 讀字關掉、圖也沒在寫的那一場，摘要裡唯一提到畫面的那句話說有留。
         ///
         /// 兩個開關獨立（`downgrade` 只碰 `store_images`），所以這個組合走得到，
         /// 而且它正好是預設路徑：設定檔關掉 ocr ＋ 只簽第一張同意書。
         #[test]
         fn a_session_that_saved_nothing_does_not_get_to_say_the_pictures_are_kept() {
-            let text_only = ocr_off_words(false);
+            let text_only = ocr_off_words(StoringImages::from_raw(false));
             assert!(
                 !text_only.contains("畫面留下了"),
                 "一張都沒寫，不可以說畫面留下了：{text_only}"
@@ -9132,7 +9419,7 @@ pub mod record {
                 "要講出真正的處境，不是含糊帶過：{text_only}"
             );
             // 另一半不可以跟著壞掉：圖有在寫的時候，那句話本來就是對的。
-            assert!(ocr_off_words(true).contains("畫面留下了"));
+            assert!(ocr_off_words(StoringImages::from_raw(true)).contains("畫面留下了"));
         }
 
         /// 省電閘門修好**不等於** CPU 那條結案了。
@@ -9178,7 +9465,11 @@ pub mod record {
             // 十分鐘寫了 79 MB 的圖 + 2 MB 的資料庫，外推成一天
             let images = 79.0 * MB * 144.0; // 11.4 GB/天
             let rest = 2.0 * MB * 144.0; // 288 MB/天
-            let p = DiskProjection::clamp(images + rest, Some(images), CAP_250MB);
+            let p = DiskProjection::clamp(
+                images + rest,
+                Some(images),
+                ImageBudgetBytes::from_raw_bytes(CAP_250MB),
+            );
 
             assert_eq!(p.images, Some(CAP_250MB as f64), "圖那一半要被門夾住");
             assert!(
@@ -9202,7 +9493,11 @@ pub mod record {
         #[test]
         fn hitting_the_ceiling_can_say_when_the_door_shuts() {
             let images = 11.4 * 1024.0 * MB; // 11.4 GB/天
-            let p = DiskProjection::clamp(images, Some(images), CAP_250MB);
+            let p = DiskProjection::clamp(
+                images,
+                Some(images),
+                ImageBudgetBytes::from_raw_bytes(CAP_250MB),
+            );
             let secs = p.budget_lasts_secs().expect("被夾住就要答得出來");
             // 250MB ÷ 11.4GB/天 ≈ 一天的 2.1%，約 30 分鐘
             assert!(
@@ -9216,7 +9511,11 @@ pub mod record {
         #[test]
         fn a_quiet_day_is_left_exactly_as_measured() {
             let images = 40.0 * MB;
-            let p = DiskProjection::clamp(images + 10.0 * MB, Some(images), CAP_250MB);
+            let p = DiskProjection::clamp(
+                images + 10.0 * MB,
+                Some(images),
+                ImageBudgetBytes::from_raw_bytes(CAP_250MB),
+            );
             assert_eq!(p.images, Some(images));
             assert_eq!(p.per_day, images + 10.0 * MB);
             assert_eq!(
@@ -9232,7 +9531,8 @@ pub mod record {
         #[test]
         fn zero_means_no_ceiling_not_a_ceiling_of_zero() {
             let images = 11.4 * 1024.0 * MB;
-            let p = DiskProjection::clamp(images, Some(images), 0);
+            let p =
+                DiskProjection::clamp(images, Some(images), ImageBudgetBytes::from_raw_bytes(0));
             assert_eq!(p.images, Some(images), "0 = 不設限");
             assert_eq!(p.per_day, images);
             assert_eq!(p.budget_lasts_secs(), None);
@@ -9256,7 +9556,11 @@ pub mod record {
         /// 拆不開的時候（這段有東西被刪掉）不要假裝拆得開。
         #[test]
         fn a_span_that_also_deleted_things_stays_unsplit() {
-            let p = DiskProjection::clamp(500.0 * MB, None, CAP_250MB);
+            let p = DiskProjection::clamp(
+                500.0 * MB,
+                None,
+                ImageBudgetBytes::from_raw_bytes(CAP_250MB),
+            );
             assert_eq!(p.images, None);
             assert_eq!(p.per_day, 500.0 * MB, "拆不開就不准動總量");
             assert_eq!(p.budget_lasts_secs(), None);
@@ -9551,8 +9855,56 @@ pub mod record {
 
             let mut config = Config::default();
             config.capture.store_images = true;
-            let out = super::gate(&dir.0, config).expect("第一張簽了就該放行");
+            let (out, _) = super::gate(&dir.0, config).expect("第一張簽了就該放行");
             assert!(!out.capture.store_images, "第三張沒簽就不可以寫圖");
+        }
+
+        /// 撤得回來、也要簽得回去：降級後仍要留著設定檔原本的意思。
+        ///
+        /// 第三張開機時沒簽，執行用的 Config 必須立刻關掉留圖；但中途簽回
+        /// 第三張時，唯一能回答「使用者原本想不想留圖」的是降級前的值。
+        /// 兩個答案必須由同一次 `gate` 一起交出來，不能讓呼叫端事後猜。
+        #[test]
+        fn pictures_can_be_revoked_and_signed_back_without_restarting() {
+            let dir = Tmp::new("gate-sign-back");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("save");
+
+            let mut config = Config::default();
+            config.capture.store_images = true;
+            config.capture.ocr = false;
+            config.capture.enabled = false;
+            let (downgraded, wants_images) =
+                super::gate(&dir.0, config).expect("第一張簽了就該放行");
+
+            assert!(!downgraded.capture.store_images, "第三張沒簽就不可以寫圖");
+            assert!(
+                wants_images.enabled(),
+                "中途簽回第三張時仍要知道設定檔原本要求留圖"
+            );
+
+            let dir = Tmp::new("gate-signed-but-disabled");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            consent.grant(Sheet::FrameStorage, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("save");
+
+            let mut config = Config::default();
+            config.capture.store_images = false;
+            config.capture.ocr = true;
+            config.capture.enabled = true;
+            let (unchanged, wants_images) =
+                super::gate(&dir.0, config).expect("三張都簽了就該放行");
+
+            assert!(
+                !unchanged.capture.store_images,
+                "同意是上限，不能打開設定關掉的留圖"
+            );
+            assert!(
+                !wants_images.enabled(),
+                "三張都簽了也不代表使用者現在想留圖"
+            );
         }
 
         /// 兩張都簽了才留圖。
@@ -9569,7 +9921,7 @@ pub mod record {
 
             let mut config = Config::default();
             config.capture.store_images = true;
-            let out = super::gate(&dir.0, config).expect("兩張都簽了");
+            let (out, _) = super::gate(&dir.0, config).expect("兩張都簽了");
             assert!(out.capture.store_images);
         }
 
@@ -9605,9 +9957,20 @@ pub mod record {
         #[test]
         fn revoking_the_first_sheet_stops_a_recording_already_in_progress() {
             let c = signed(&[]);
-            assert_eq!(recheck(&c, true, true), Recheck::Stop);
             assert_eq!(
-                recheck(&c, false, false),
+                recheck(
+                    &c,
+                    WantsImages::from_raw(true),
+                    StoringImages::from_raw(true),
+                ),
+                Recheck::Stop
+            );
+            assert_eq!(
+                recheck(
+                    &c,
+                    WantsImages::from_raw(false),
+                    StoringImages::from_raw(false),
+                ),
                 Recheck::Stop,
                 "本來就沒在寫圖也一樣要停：停的是整場，不是截圖那一半"
             );
@@ -9616,7 +9979,14 @@ pub mod record {
         #[test]
         fn revoking_the_screenshot_sheet_only_stops_the_pictures() {
             let c = signed(&[Sheet::LocalRecording]);
-            assert_eq!(recheck(&c, true, true), Recheck::Images(false));
+            assert_eq!(
+                recheck(
+                    &c,
+                    WantsImages::from_raw(true),
+                    StoringImages::from_raw(true),
+                ),
+                Recheck::Images(false)
+            );
         }
 
         /// 撤得回來、也要簽得回去。
@@ -9628,7 +9998,14 @@ pub mod record {
         #[test]
         fn signing_the_screenshot_sheet_mid_run_starts_the_pictures_again() {
             let c = signed(&[Sheet::LocalRecording, Sheet::FrameStorage]);
-            assert_eq!(recheck(&c, true, false), Recheck::Images(true));
+            assert_eq!(
+                recheck(
+                    &c,
+                    WantsImages::from_raw(true),
+                    StoringImages::from_raw(false),
+                ),
+                Recheck::Images(true)
+            );
         }
 
         /// 同意書說可以，但設定檔說不要——那就是不要。
@@ -9636,15 +10013,53 @@ pub mod record {
         #[test]
         fn consent_never_turns_on_something_the_config_turned_off() {
             let c = signed(&[Sheet::LocalRecording, Sheet::FrameStorage]);
-            assert_eq!(recheck(&c, false, false), Recheck::Same);
+            assert_eq!(
+                recheck(
+                    &c,
+                    WantsImages::from_raw(false),
+                    StoringImages::from_raw(false),
+                ),
+                Recheck::Same
+            );
+        }
+
+        /// 錄到一半把設定檔的 `store_images` 關掉，要當場停止寫圖。
+        ///
+        /// 第一張與第三張仍簽著只代表「可以」；設定檔此刻說不要，就不能讓
+        /// recorder 已在寫圖的舊狀態把它重新打開。
+        #[test]
+        fn turning_off_store_images_mid_run_stops_writing_pictures_immediately() {
+            let c = signed(&[Sheet::LocalRecording, Sheet::FrameStorage]);
+            assert_eq!(
+                recheck(
+                    &c,
+                    WantsImages::from_raw(false),
+                    StoringImages::from_raw(true),
+                ),
+                Recheck::Images(false)
+            );
         }
 
         #[test]
         fn nothing_changed_means_nothing_happens() {
             let c = signed(&[Sheet::LocalRecording, Sheet::FrameStorage]);
-            assert_eq!(recheck(&c, true, true), Recheck::Same);
+            assert_eq!(
+                recheck(
+                    &c,
+                    WantsImages::from_raw(true),
+                    StoringImages::from_raw(true),
+                ),
+                Recheck::Same
+            );
             let c = signed(&[Sheet::LocalRecording]);
-            assert_eq!(recheck(&c, true, false), Recheck::Same);
+            assert_eq!(
+                recheck(
+                    &c,
+                    WantsImages::from_raw(true),
+                    StoringImages::from_raw(false),
+                ),
+                Recheck::Same
+            );
         }
 
         /// 條文改版 = 三張一起失效，所以它和「撤回第一張」走同一條路。
@@ -9652,7 +10067,14 @@ pub mod record {
         fn a_wording_change_mid_run_stops_her_too() {
             let mut c = signed(&[Sheet::LocalRecording, Sheet::FrameStorage]);
             c.version = sister_core::consent::VERSION + 1;
-            assert_eq!(recheck(&c, true, true), Recheck::Stop);
+            assert_eq!(
+                recheck(
+                    &c,
+                    WantsImages::from_raw(true),
+                    StoringImages::from_raw(true),
+                ),
+                Recheck::Stop
+            );
         }
     }
 }
