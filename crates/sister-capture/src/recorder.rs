@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sister_core::config::Config;
 use sister_core::db::Db;
@@ -19,7 +19,7 @@ use sister_core::model::{
 };
 use sister_core::redact;
 
-use crate::traits::{Backend, RawFrame};
+use crate::traits::{Backend, DhashRecheck, OcrAttempt, OcrWork, RawFrame};
 
 /// 一天有多少毫秒。畫面額度以 UTC 天為單位重置，和
 /// `frames::relative_path` 的資料夾分層是同一條線。
@@ -161,12 +161,31 @@ pub struct RecorderStats {
     pub image_failures: u64,
     /// 最後一次存圖失敗的原因。一句原文遠比一個數字有用。
     pub last_image_error: Option<String>,
-    /// OCR 一共讀出幾行字。
+    /// 成功寫進資料庫的 OCR 區塊總數。
     ///
     /// 「保留了 12 張畫面」和「記住了 12 張畫面上的字」是兩回事，而摘要
     /// 只印前者的話，兩者看起來一模一樣。實測踩過：12 張畫面、0 行文字、
     /// 摘要一片祥和，要等到搜尋永遠是空的才會發現。
     pub ocr_blocks: u64,
+    /// 成功交回完整結果的幀裡，有幾幀真的把整張畫面送進 OCR。
+    pub ocr_full_frames: u64,
+    /// 上面那些成功全幅裡，有幾幀是局部路徑沒有把握後退回。
+    pub ocr_full_fallbacks: u64,
+    /// 成功交回完整結果的幀裡，有幾幀只 OCR 變動區域。
+    pub ocr_region_frames: u64,
+    /// 上面那些局部幀總共送了幾塊 crop。
+    pub ocr_regions: u64,
+    /// dHash 原本判成近似重複、gate 也真的試了 crop，但結構證據不足而未採用的幀數。
+    pub ocr_rejected_region_frames: u64,
+    /// 上面那些未採用的幀一共試了幾塊 crop。
+    pub ocr_rejected_regions: u64,
+    /// 成功交回完整結果、且像素沒變而直接沿用已提交文字的幀數。
+    pub ocr_reused_frames: u64,
+    /// 如果每次都全幅，本來會交給 OCR 實作嘗試的像素數。
+    pub ocr_candidate_pixels: u64,
+    /// 實際交給 OCR 實作嘗試的像素數；crop 失敗後又退全幅時，兩筆都算。
+    /// 實作可能在呼叫 OS 引擎前因契約或環境問題拒絕，所以不稱「引擎像素」。
+    pub ocr_input_pixels: u64,
     /// **整拍**失敗了幾次（`tick` 帶著 `Err` 離開）。
     ///
     /// 錄製迴圈把單次 tick 的錯誤吞成一行 `tracing::warn!` 就繼續跑，理由是
@@ -254,6 +273,13 @@ pub struct Recorder<B: Backend> {
     /// **不是** recorder 自己去讀檔案——這一層讀了檔案，replay 就不再是
     /// 確定性的了，而確定性是這個迴圈唯一的測試手段。
     paused: bool,
+    /// 收到 pause request 後，到確定回到非暫停狀態前，剪貼簿中間有一段
+    /// 不可觀察的隱私空洞。進、出兩端都要只推水位不讀內容；尤其 audit DB
+    /// 失敗時，`paused` 本身不會變，不能拿它代替這個狀態。
+    pause_clipboard_gap: bool,
+    /// 排除畫面最後一次 tick 與下一次非排除 tick 之間也可能複製新內容。
+    /// 離開排除時再推一次水位，才不會把那段尾巴撈進資料庫。
+    exclusion_clipboard_gap: bool,
     /// 畫面檔的根目錄。`None` = text-only 模式。
     image_dir: Option<PathBuf>,
     /// 上一次**真的寫出**畫面檔的時刻。見 `image_min_interval_ms`。
@@ -318,6 +344,8 @@ impl<B: Backend> Recorder<B> {
             title_changes: 0,
             last_exclusion: None,
             paused: false,
+            pause_clipboard_gap: false,
+            exclusion_clipboard_gap: false,
             image_dir,
             last_image_ts: None,
             last_look_ts: None,
@@ -415,10 +443,32 @@ impl<B: Backend> Recorder<B> {
     ///
     /// 回傳「這一次有沒有真的改變狀態」，讓呼叫端決定要不要對使用者說一句。
     pub fn set_paused(&mut self, paused: bool, ts: Millis) -> Result<bool> {
+        if !paused && self.pause_clipboard_gap {
+            // 正常 resume 與「pause audit 失敗後立刻取消」都要封住盲區尾端。
+            // 最後一個 paused tick / 第一次 pre-audit skip 之後仍可能又複製秘密；
+            // 在放行下一個正常 tick 前，再把當下 sequence 對齊一次。
+            self.backend.skip_clipboard(ts);
+        }
         if self.paused == paused {
+            if !paused {
+                self.pause_clipboard_gap = false;
+            }
             return Ok(false);
         }
-        self.paused = paused;
+        if paused {
+            // 「想進入暫停」本身就先切斷所有內容水位，不能排在稽核寫入後面。
+            // 若 DB 此刻失敗，record loop 會整拍跳過；使用者又在下一拍前取消
+            // 時，self.paused 仍是 false，不會再走 transition。少了這裡就會把
+            // 暫停前後拼成一張連續畫面，或在下一個正常 tick 撈進盲區裡複製的
+            // 剪貼簿內容。
+            self.deduper.reset();
+            self.last_frame_id = None;
+            self.backend.reset_ocr();
+            self.backend.skip_clipboard(ts);
+            self.pause_clipboard_gap = true;
+        }
+        // 稽核列寫成之後才承認狀態已切換。失敗時 self.paused 留在舊值，外部
+        // 旗標若仍相異，下一拍會重試；若先改它，缺掉的 audit 永遠補不回來。
         self.db.insert_system(
             self.session_id,
             &SystemEvent {
@@ -431,12 +481,9 @@ impl<B: Backend> Recorder<B> {
                 detail: None,
             },
         )?;
-        if paused {
-            // 暫停期間畫面沒被看過，所以解除之後的第一張必須當成全新的。
-            // 少了這兩行，使用者暫停時換掉整個畫面、回來以後那張新畫面會被
-            // 判定成「和上一張一樣」而整個消失。
-            self.deduper.reset();
-            self.last_frame_id = None;
+        self.paused = paused;
+        if !paused {
+            self.pause_clipboard_gap = false;
         }
         Ok(true)
     }
@@ -525,6 +572,14 @@ impl<B: Backend> Recorder<B> {
         // 2) 排除判定 —— 必須在任何截圖之前
         let exclusion = self.config.privacy.check(&focus);
         if let Some(reason) = exclusion.reason() {
+            // 這三步是 privacy gate 本身，必須排在任何可能失敗的稽核寫入前。
+            // 第一次進排除時若 DB 剛好寫不進去，仍然不准跨過這段盲區拼舊 OCR，
+            // 更不准把這裡複製的剪貼簿留給下一個未排除 tick 去讀。
+            self.deduper.reset();
+            self.last_frame_id = None;
+            self.backend.reset_ocr();
+            self.backend.skip_clipboard(ts);
+            self.exclusion_clipboard_gap = true;
             self.stats.excluded += 1;
             *self
                 .stats
@@ -542,17 +597,17 @@ impl<B: Backend> Recorder<B> {
                 )?;
                 self.last_exclusion = Some(reason.to_string());
             }
-            // 排除期間的畫面沒被看過，下一張必須當成全新的
-            self.deduper.reset();
-            self.last_frame_id = None;
-            // 剪貼簿要「跳過」而不是「不看」：她在密碼管理員裡複製的東西
-            // 還躺在剪貼簿上，不把水位推過去，切回瀏覽器的下一秒就撈進來了
-            self.backend.skip_clipboard(ts);
             // 輸入節奏不含任何內容，繼續累積才不會在節奏訊號上開洞
             self.record_input(ts)?;
             return Ok(Tick::Excluded {
                 reason: reason.to_string(),
             });
+        }
+        if self.exclusion_clipboard_gap {
+            // 排除 tick 最後一次 skip 後，使用者仍可能再複製一次才切回普通視窗。
+            // 先在非排除邊界推過那段尾巴，才准下面的 poll 讀內容。
+            self.backend.skip_clipboard(ts);
+            self.exclusion_clipboard_gap = false;
         }
         self.last_exclusion = None;
 
@@ -647,26 +702,101 @@ impl<B: Backend> Recorder<B> {
 
         match self.deduper.check(frame.dhash) {
             FrameVerdict::Duplicate { run } => {
-                self.stats.duplicates += 1;
+                if self.config.capture.ocr {
+                    match self.backend.recheck_ocr_dhash_duplicate(&frame) {
+                        DhashRecheck::Changed(attempt) => {
+                            return self.keep_frame(ts, frame, focus, Some(attempt));
+                        }
+                        DhashRecheck::Duplicate {
+                            gate_elapsed,
+                            work,
+                            rejected_regions,
+                            error,
+                        } => {
+                            self.record_ocr_measurements(
+                                &frame,
+                                rejected_regions.is_some() || error.is_some(),
+                                gate_elapsed,
+                                work,
+                            );
+                            if let Some(regions) = rejected_regions {
+                                self.stats.ocr_rejected_region_frames += 1;
+                                self.stats.ocr_rejected_regions += regions.get();
+                            }
+                            if let Some(e) = error {
+                                self.stats.ocr_failures += 1;
+                                self.stats.last_ocr_error = Some(format!("{e:#}"));
+                                tracing::warn!(
+                                    error = %e,
+                                    "OCR recheck failed; keeping the dHash duplicate"
+                                );
+                            }
+                        }
+                    }
+                }
                 if let Some(id) = self.last_frame_id {
                     self.db.bump_frame_dup(id)?;
                 }
+                // dHash 的判斷本身不提交 run。只有 DB 計數也寫成後，這一拍
+                // 才正式成為重複；changed-region 若升格或 DB 失敗都不必回滾。
+                self.deduper.duplicate();
+                self.stats.duplicates += 1;
                 Ok(Tick::Duplicate { run })
             }
-            FrameVerdict::New => self.keep_frame(ts, frame, focus),
+            FrameVerdict::New => self.keep_frame(ts, frame, focus, None),
         }
     }
 
-    fn keep_frame(&mut self, ts: Millis, frame: RawFrame, focus: FocusSnapshot) -> Result<Tick> {
-        let ocr = if self.config.capture.ocr {
+    fn record_ocr_measurements(
+        &mut self,
+        frame: &RawFrame,
+        full_candidate: bool,
+        gate_elapsed: Option<Duration>,
+        work: Option<OcrWork>,
+    ) {
+        if full_candidate {
+            self.stats.ocr_candidate_pixels = self
+                .stats
+                .ocr_candidate_pixels
+                .saturating_add(u64::from(frame.width) * u64::from(frame.height));
+        }
+        if let Some(elapsed) = gate_elapsed {
+            self.timings.ocr_gate.record(elapsed);
+        }
+        if let Some(work) = work {
+            self.timings.ocr.record_many(work.elapsed(), work.calls());
+            self.stats.ocr_input_pixels = self
+                .stats
+                .ocr_input_pixels
+                .saturating_add(work.input_pixels());
+        }
+    }
+
+    fn keep_frame(
+        &mut self,
+        ts: Millis,
+        frame: RawFrame,
+        focus: FocusSnapshot,
+        prepared_ocr: Option<OcrAttempt>,
+    ) -> Result<Tick> {
+        let (ocr, ocr_committable) = if self.config.capture.ocr {
             // OCR 失敗不擋錄製，但要留下計數——見 `RecorderStats::ocr_failures`
-            let t = Instant::now();
-            let result = self.backend.recognize(&frame);
-            self.timings.ocr.record(t.elapsed());
-            match result {
-                Ok(blocks) => {
-                    self.stats.ocr_blocks += blocks.len() as u64;
-                    blocks
+            let attempt = prepared_ocr.unwrap_or_else(|| self.backend.recognize(&frame));
+            self.record_ocr_measurements(&frame, true, attempt.gate_elapsed, attempt.work);
+            match attempt.outcome {
+                Ok(crate::traits::OcrOutcome::Full { blocks, fallback }) => {
+                    self.stats.ocr_full_frames += 1;
+                    self.stats.ocr_full_fallbacks += u64::from(fallback);
+                    (blocks, true)
+                }
+                Ok(crate::traits::OcrOutcome::Regions { blocks, regions }) => {
+                    self.stats.ocr_region_frames += 1;
+                    self.stats.ocr_regions += regions.get();
+                    (blocks, true)
+                }
+                Ok(crate::traits::OcrOutcome::Reused { blocks }) => {
+                    self.stats.ocr_reused_frames += 1;
+                    (blocks, true)
                 }
                 Err(e) => {
                     self.stats.ocr_failures += 1;
@@ -674,11 +804,12 @@ impl<B: Backend> Recorder<B> {
                     // 使用者回報的會是「OCR 失敗」這種等於沒說的訊息。
                     self.stats.last_ocr_error = Some(format!("{e:#}"));
                     tracing::warn!(error = %e, "OCR failed; keeping the frame without text");
-                    Vec::new()
+                    (Vec::new(), false)
                 }
             }
         } else {
-            Vec::new()
+            debug_assert!(prepared_ocr.is_none());
+            (Vec::new(), false)
         };
 
         let (image_path, image_bytes) = match self.store_image(ts, &frame) {
@@ -724,6 +855,9 @@ impl<B: Backend> Recorder<B> {
                 // 所以它永遠不會被清掉——「畫面 30 天後刪掉」對它是假的，
                 // 而且它還佔著今天的畫面額度。現在就收乾淨。
                 self.discard_image(image_path.as_deref(), image_bytes);
+                if ocr_committable {
+                    self.backend.discard_ocr_frame(&frame);
+                }
                 return Err(e);
             }
         };
@@ -731,6 +865,13 @@ impl<B: Backend> Recorder<B> {
         // 到這裡才推進去重基準：畫面、文字、那一列都已經落地了。
         // 寫不進去時上面那個 `?` 會直接帶著錯誤離開，而基準原封不動——
         // 下一次同一個畫面回來仍然算新的，這正是我們要的。
+        if ocr_committable {
+            self.backend.commit_ocr_frame(&frame);
+        }
+        self.stats.ocr_blocks = self
+            .stats
+            .ocr_blocks
+            .saturating_add(capture.ocr.len() as u64);
         self.deduper.kept(frame.dhash);
         self.last_frame_id = Some(frame_id);
         self.stats.kept += 1;
@@ -967,20 +1108,64 @@ mod tests {
     use crate::replay::{Scenario, Step};
     use sister_core::config::PrivacyConfig;
 
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct OcrLifecycle {
+        recognized: Vec<Millis>,
+        committed: Vec<Millis>,
+        discarded: Vec<Millis>,
+        resets: u64,
+    }
+
+    /// 把 recorder 和 stateful OCR gate 之間的 transaction 接線攤成可斷言的紀錄。
+    struct LifecycleOcr(std::rc::Rc<std::cell::RefCell<OcrLifecycle>>);
+
+    impl crate::traits::RecordingOcr for LifecycleOcr {
+        fn recognize_frame(&mut self, frame: &RawFrame) -> crate::traits::OcrAttempt {
+            self.0.borrow_mut().recognized.push(frame.ts);
+            crate::traits::OcrAttempt::full(frame, || {
+                Ok(vec![sister_core::model::OcrBlock {
+                    text: "可搜尋".into(),
+                    x: 1,
+                    y: 1,
+                    w: 20,
+                    h: 10,
+                    confidence: 1.0,
+                }])
+            })
+        }
+
+        fn commit_frame(&mut self, frame: &RawFrame) {
+            self.0.borrow_mut().committed.push(frame.ts);
+        }
+
+        fn discard_frame(&mut self, frame: &RawFrame) {
+            self.0.borrow_mut().discarded.push(frame.ts);
+        }
+
+        fn reset(&mut self) {
+            self.0.borrow_mut().resets += 1;
+        }
+    }
+
     /// 只記錄「有沒有被叫到」的假剪貼簿，用來驗證排除期間的行為。
     #[derive(Default)]
     struct SpyClipboard {
         polled: Vec<Millis>,
         skipped: Vec<Millis>,
+        trace: Vec<(&'static str, Millis)>,
     }
 
     impl crate::traits::ClipboardSource for std::rc::Rc<std::cell::RefCell<SpyClipboard>> {
         fn poll(&mut self, ts: Millis) -> Result<Option<ClipboardEvent>> {
-            self.borrow_mut().polled.push(ts);
+            let mut spy = self.borrow_mut();
+            spy.polled.push(ts);
+            spy.trace.push(("poll", ts));
             Ok(None)
         }
         fn skip(&mut self, ts: Millis) {
-            self.borrow_mut().skipped.push(ts);
+            let mut spy = self.borrow_mut();
+            spy.skipped.push(ts);
+            spy.trace.push(("skip", ts));
         }
     }
 
@@ -992,9 +1177,10 @@ mod tests {
     /// 這個性質 replay 後端測不出來（它以事件時間為準），所以在這裡釘住。
     #[test]
     fn exclusion_skips_the_clipboard_instead_of_merely_not_polling_it() {
-        use crate::traits::{CompositeBackend, NullInput, NullOcr, NullScreen};
+        use crate::traits::{CompositeBackend, NullInput, NullScreen};
 
         let spy = std::rc::Rc::new(std::cell::RefCell::new(SpyClipboard::default()));
+        let ocr = std::rc::Rc::new(std::cell::RefCell::new(OcrLifecycle::default()));
 
         struct Focus(String);
         impl crate::traits::FocusSource for Focus {
@@ -1015,7 +1201,7 @@ mod tests {
             focus: Focus("keepassxc.exe".into()),
             clipboard: spy.clone(),
             input: NullInput,
-            ocr: NullOcr,
+            ocr: LifecycleOcr(ocr.clone()),
         };
         let mut rec = Recorder::new(backend, Db::open_in_memory().unwrap(), config, None).unwrap();
 
@@ -1028,6 +1214,112 @@ mod tests {
         let spy = spy.borrow();
         assert!(spy.polled.is_empty(), "排除期間不該讀剪貼簿內容");
         assert_eq!(spy.skipped, vec![1_000], "但一定要把水位推過去");
+        assert_eq!(
+            ocr.borrow().resets,
+            1,
+            "排除期間沒看畫面，離開後不准跨過隱私空洞拼舊文字"
+        );
+    }
+
+    /// 最後一個排除 tick 後到切回普通視窗前，仍可能又複製一次秘密。
+    /// 離開邊界必須再推水位，不能只靠排除期間那幾次 skip。
+    #[test]
+    fn leaving_an_excluded_window_closes_the_clipboard_tail_before_polling() {
+        use crate::traits::{CompositeBackend, NullInput, NullScreen};
+
+        struct FocusSequence(std::collections::VecDeque<&'static str>);
+        impl crate::traits::FocusSource for FocusSequence {
+            fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
+                Ok(FocusSnapshot {
+                    app_id: self.0.pop_front().map(str::to_string),
+                    ..Default::default()
+                })
+            }
+        }
+
+        let clipboard = std::rc::Rc::new(std::cell::RefCell::new(SpyClipboard::default()));
+        let mut config = Config::default();
+        config.privacy.excluded_apps = vec!["keepassxc".into()];
+        let backend = CompositeBackend {
+            name: "exclusion-tail".into(),
+            screen: NullScreen,
+            focus: FocusSequence(std::collections::VecDeque::from([
+                "keepassxc.exe",
+                "explorer.exe",
+            ])),
+            clipboard: clipboard.clone(),
+            input: NullInput,
+            ocr: crate::traits::NullOcr,
+        };
+        let mut rec = Recorder::new(backend, Db::open_in_memory().unwrap(), config, None).unwrap();
+
+        assert!(matches!(rec.tick(1_000).unwrap(), Tick::Excluded { .. }));
+        assert_eq!(rec.tick(2_000).unwrap(), Tick::NoScreen);
+        let clipboard = clipboard.borrow();
+        assert_eq!(
+            clipboard.skipped,
+            vec![1_000, 2_000],
+            "離開排除時，先蓋掉最後一次 skip 後才複製的內容"
+        );
+        assert_eq!(
+            clipboard.polled,
+            vec![2_000],
+            "普通 tick 可以 poll，但一定排在尾端 skip 後"
+        );
+        assert_eq!(
+            clipboard.trace,
+            vec![("skip", 1_000), ("skip", 2_000), ("poll", 2_000)],
+            "同一個 tick 的 ordered trace 要證明先封尾、後讀新內容"
+        );
+    }
+
+    /// 稽核列寫不進去也不能讓 privacy gate 後面的動作一起短路。
+    #[test]
+    fn an_exclusion_audit_failure_still_closes_every_private_waterline() {
+        use crate::traits::{CompositeBackend, NullInput, NullScreen};
+
+        struct ExcludedFocus;
+        impl crate::traits::FocusSource for ExcludedFocus {
+            fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
+                Ok(FocusSnapshot {
+                    app_id: Some("keepassxc.exe".into()),
+                    ..Default::default()
+                })
+            }
+        }
+
+        let clipboard = std::rc::Rc::new(std::cell::RefCell::new(SpyClipboard::default()));
+        let ocr = std::rc::Rc::new(std::cell::RefCell::new(OcrLifecycle::default()));
+        let mut config = Config::default();
+        config.privacy.excluded_apps = vec!["keepassxc".into()];
+        let backend = CompositeBackend {
+            name: "privacy-failure".into(),
+            screen: NullScreen,
+            focus: ExcludedFocus,
+            clipboard: clipboard.clone(),
+            input: NullInput,
+            ocr: LifecycleOcr(ocr.clone()),
+        };
+        let mut rec = Recorder::new(backend, Db::open_in_memory().expect("db"), config, None)
+            .expect("recorder");
+        rec.db()
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER fail_exclusion BEFORE INSERT ON system_events
+                 WHEN NEW.kind = 'excluded'
+                 BEGIN SELECT RAISE(ABORT, 'audit disk failure'); END;",
+            )
+            .expect("trigger");
+
+        assert!(rec.tick(1_000).is_err(), "稽核列寫不進去仍要往上報");
+        assert_eq!(ocr.borrow().resets, 1, "舊 OCR baseline 必須先清掉");
+        let clipboard = clipboard.borrow();
+        assert!(clipboard.polled.is_empty(), "排除畫面不准讀剪貼簿");
+        assert_eq!(
+            clipboard.skipped,
+            vec![1_000],
+            "即使稽核 DB 壞掉，秘密剪貼簿的水位仍要推過去"
+        );
     }
 
     /// 暫停期間也要推剪貼簿水位，理由和排除完全一樣。
@@ -1037,16 +1329,17 @@ mod tests {
     /// 進來——一個只會延後洩漏的暫停鍵，比沒有暫停鍵更糟，因為他信了它。
     #[test]
     fn pausing_skips_the_clipboard_instead_of_merely_not_polling_it() {
-        use crate::traits::{CompositeBackend, NullFocus, NullInput, NullOcr, NullScreen};
+        use crate::traits::{CompositeBackend, NullFocus, NullInput, NullScreen};
 
         let spy = std::rc::Rc::new(std::cell::RefCell::new(SpyClipboard::default()));
+        let ocr = std::rc::Rc::new(std::cell::RefCell::new(OcrLifecycle::default()));
         let backend = CompositeBackend {
             name: "spy".into(),
             screen: NullScreen,
             focus: NullFocus,
             clipboard: spy.clone(),
             input: NullInput,
-            ocr: NullOcr,
+            ocr: LifecycleOcr(ocr.clone()),
         };
         let mut rec = Recorder::new(
             backend,
@@ -1059,9 +1352,98 @@ mod tests {
         assert!(rec.set_paused(true, 500).unwrap(), "第一次應該真的改變狀態");
         assert_eq!(rec.tick(1_000).unwrap(), Tick::Paused);
 
-        let spy = spy.borrow();
-        assert!(spy.polled.is_empty(), "暫停期間不該讀剪貼簿內容");
-        assert_eq!(spy.skipped, vec![1_000], "但一定要把水位推過去");
+        {
+            let spy = spy.borrow();
+            assert!(spy.polled.is_empty(), "暫停期間不該讀剪貼簿內容");
+            assert_eq!(
+                spy.skipped,
+                vec![500, 1_000],
+                "pause request 與暫停 tick 都要把水位推過去"
+            );
+        }
+        assert!(rec.set_paused(false, 1_500).unwrap(), "應該真的解除暫停");
+        assert_eq!(
+            spy.borrow().skipped,
+            vec![500, 1_000, 1_500],
+            "解除前要封住最後一個 paused tick 後面的尾巴"
+        );
+        assert_eq!(
+            ocr.borrow().resets,
+            1,
+            "暫停期間的畫面沒看過，解除後要先全幅重建 OCR baseline"
+        );
+    }
+
+    /// pause/resume 稽核和公開狀態是一個 transaction：寫失敗就留在舊狀態，
+    /// 讓下一拍能重試，而不是先改狀態、從此把缺掉的稽核列當成已完成。
+    /// 但只要呼叫端曾經因為 pause request 跳過一拍，畫面 baseline 就得立刻
+    /// 切斷；即使使用者在稽核成功前取消，也不能把盲區前後拼在一起。
+    #[test]
+    fn a_failed_pause_audit_is_retried_before_the_state_changes() {
+        use crate::traits::{CompositeBackend, NullFocus, NullInput, NullScreen};
+
+        let ocr = std::rc::Rc::new(std::cell::RefCell::new(OcrLifecycle::default()));
+        let clipboard = std::rc::Rc::new(std::cell::RefCell::new(SpyClipboard::default()));
+        let backend = CompositeBackend {
+            name: "pause-failure".into(),
+            screen: NullScreen,
+            focus: NullFocus,
+            clipboard: clipboard.clone(),
+            input: NullInput,
+            ocr: LifecycleOcr(ocr.clone()),
+        };
+        let mut rec = Recorder::new(
+            backend,
+            Db::open_in_memory().expect("db"),
+            Config::default(),
+            None,
+        )
+        .expect("recorder");
+        rec.db()
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER fail_pause BEFORE INSERT ON system_events
+                 WHEN NEW.kind = 'pause'
+                 BEGIN SELECT RAISE(ABORT, 'audit disk failure'); END;",
+            )
+            .expect("trigger");
+
+        assert!(rec.set_paused(true, 500).is_err());
+        assert!(!rec.is_paused(), "稽核沒成立，不准把 transition 認成完成");
+        assert_eq!(ocr.borrow().resets, 1, "pause request 先切斷 OCR baseline");
+        assert_eq!(
+            clipboard.borrow().skipped,
+            vec![500],
+            "audit 失敗而整拍跳過，也要先推過秘密剪貼簿的水位"
+        );
+
+        assert!(
+            !rec.set_paused(false, 550).expect("cancel failed pause"),
+            "公開狀態沒切換，取消不該捏造 resume 稽核列"
+        );
+        assert_eq!(
+            ocr.borrow().resets,
+            1,
+            "取消失敗的 pause 也不能把已清掉的 baseline 接回去"
+        );
+        assert_eq!(
+            clipboard.borrow().skipped,
+            vec![500, 550],
+            "取消前要再推一次，才蓋得到第一次 skip 後才複製的內容"
+        );
+
+        rec.db()
+            .conn()
+            .execute_batch("DROP TRIGGER fail_pause;")
+            .expect("drop trigger");
+        assert!(rec.set_paused(true, 600).expect("retry"));
+        assert!(rec.is_paused());
+        assert_eq!(
+            ocr.borrow().resets,
+            2,
+            "新的 pause request 再切斷一次 baseline"
+        );
+        assert_eq!(clipboard.borrow().skipped, vec![500, 550, 600]);
     }
 
     /// 一台讀不到位址列的機器，要數得出自己讀不到。
@@ -1749,6 +2131,134 @@ mod tests {
         );
     }
 
+    /// 9×8 dHash 會刻意把小變化視為同一張；一個新字也可能落在預設門檻內。
+    /// changed-region 若排在它後面又沒有 recheck，局部路徑的單元測試全綠、
+    /// production recorder 卻永遠叫不到它，新增的字也不會進 DB。
+    #[test]
+    fn a_proven_append_inside_the_default_dhash_threshold_reaches_the_database() {
+        use std::collections::VecDeque;
+
+        struct Frames(VecDeque<RawFrame>);
+        impl crate::traits::ScreenSource for Frames {
+            fn grab(&mut self, _ts: Millis) -> Result<Option<RawFrame>> {
+                Ok(self.0.pop_front())
+            }
+        }
+
+        struct ScriptedOcr(VecDeque<Result<Vec<sister_core::model::OcrBlock>>>);
+        impl crate::traits::Ocr for ScriptedOcr {
+            fn recognize(
+                &mut self,
+                _frame: &RawFrame,
+            ) -> Result<Vec<sister_core::model::OcrBlock>> {
+                self.0.pop_front().expect("每次 OCR 都有一份明確結果")
+            }
+        }
+
+        fn text(text: &str, x: i32, y: i32, w: i32) -> sister_core::model::OcrBlock {
+            sister_core::model::OcrBlock {
+                text: text.into(),
+                x,
+                y,
+                w,
+                h: 20,
+                confidence: 1.0,
+            }
+        }
+
+        let a = RawFrame::from_rgba(0, 0, 512, 512, vec![255; 512 * 512 * 4]);
+        let mut changed = vec![255; 512 * 512 * 4];
+        for y in 105..115 {
+            for x in 200..210 {
+                let at = (y * 512 + x) * 4;
+                changed[at..at + 3].fill(0);
+            }
+        }
+        let b = RawFrame::from_rgba(1_000, 0, 512, 512, changed.clone());
+        // 再多一段像素、但 OCR 仍只讀到 ABCD：模擬行尾游標，不准因此全幅。
+        for y in 105..115 {
+            for x in 210..220 {
+                let at = (y * 512 + x) * 4;
+                changed[at..at + 3].fill(0);
+            }
+        }
+        let c = RawFrame::from_rgba(2_000, 0, 512, 512, changed.clone());
+        // 同一個近似變化再拍一次，但這次 OCR 引擎真的失敗：仍不能為它補跑
+        // 全幅，不過摘要必須留下 failure，且不能冒充第二次「局部未採用」。
+        let d = RawFrame::from_rgba(3_000, 0, 512, 512, changed);
+        let threshold = Config::default().capture.dedup_threshold;
+        assert!(
+            sister_core::dedup::hamming(a.dhash, b.dhash) <= threshold,
+            "測試前提：這個新字真的會被預設 dHash 吞掉"
+        );
+        assert!(
+            sister_core::dedup::hamming(b.dhash, c.dhash) <= threshold,
+            "測試前提：游標形狀也在預設 dHash 門檻內"
+        );
+
+        let backend = crate::traits::CompositeBackend {
+            name: "dhash-region-integration".into(),
+            screen: Frames(VecDeque::from([a, b, c, d])),
+            focus: crate::traits::NullFocus,
+            clipboard: crate::traits::NullClipboard,
+            input: crate::traits::NullInput,
+            ocr: crate::ocr_regions::ChangedRegionOcr::new(ScriptedOcr(VecDeque::from([
+                Ok(vec![text("ABC", 100, 100, 100)]),
+                // crop 是 x=36, y=36 起算，所以全域 (100,100) 在局部是 (64,64)。
+                Ok(vec![text("ABCD", 64, 64, 110)]),
+                // 第三張 crop 沒讀到新字：只能列成未採用，不能再叫一次全幅。
+                Ok(vec![text("ABCD", 64, 64, 110)]),
+                Err(anyhow::anyhow!("near-duplicate engine down")),
+            ]))),
+        };
+        let mut recorder = Recorder::new(
+            backend,
+            Db::open_in_memory().expect("db"),
+            Config::default(),
+            None,
+        )
+        .expect("recorder");
+
+        assert!(matches!(
+            recorder.tick(0).expect("baseline"),
+            Tick::Kept { .. }
+        ));
+        assert!(matches!(
+            recorder.tick(1_000).expect("append"),
+            Tick::Kept { ocr_blocks: 1, .. }
+        ));
+        assert_eq!(
+            recorder.tick(2_000).expect("cursor-like change"),
+            Tick::Duplicate { run: 1 }
+        );
+        assert_eq!(
+            recorder
+                .tick(3_000)
+                .expect("engine failure stays duplicate"),
+            Tick::Duplicate { run: 2 }
+        );
+        let stats = recorder.stats();
+        assert_eq!(stats.kept, 2);
+        assert_eq!(stats.duplicates, 2, "第二張升格，後兩張維持重複");
+        assert_eq!(stats.ocr_full_frames, 1);
+        assert_eq!(stats.ocr_region_frames, 1);
+        assert_eq!(stats.ocr_regions, 1);
+        assert_eq!(stats.ocr_rejected_region_frames, 1);
+        assert_eq!(stats.ocr_rejected_regions, 1);
+        assert_eq!(stats.ocr_failures, 1);
+        assert!(
+            stats
+                .last_ocr_error
+                .as_deref()
+                .is_some_and(|error| error.contains("near-duplicate engine down")),
+            "OCR 引擎錯誤要接到 recorder 摘要，不能混成局部結構拒絕"
+        );
+        assert!(
+            !recorder.db().search("ABCD", 10).expect("search").is_empty(),
+            "升格後的完整新文字要真的寫進 DB，不只改一個記憶體計數"
+        );
+    }
+
     /// **一個 tick 只准讀一次螢幕。**
     ///
     /// 這是 CPU 那個數字真正的修法。第一版反過來：每個 tick 讀兩次——
@@ -1996,13 +2506,14 @@ mod tests {
         }
 
         let screen = std::rc::Rc::new(std::cell::Cell::new(1u32));
+        let ocr = std::rc::Rc::new(std::cell::RefCell::new(OcrLifecycle::default()));
         let backend = crate::traits::CompositeBackend {
             name: "held".into(),
             screen: Held(screen.clone()),
             focus: crate::traits::NullFocus,
             clipboard: crate::traits::NullClipboard,
             input: crate::traits::NullInput,
-            ocr: crate::traits::NullOcr,
+            ocr: LifecycleOcr(ocr.clone()),
         };
         let mut r = Recorder::new(backend, db, Config::default(), None).expect("recorder");
 
@@ -2019,6 +2530,21 @@ mod tests {
         assert!(
             matches!(r.tick(2_000).expect("tick"), Tick::Kept { .. }),
             "寫不進去的那一張不能把後面真的那一張擋成重複"
+        );
+        assert_eq!(
+            *ocr.borrow(),
+            OcrLifecycle {
+                recognized: vec![0, 1_000, 2_000],
+                committed: vec![0, 2_000],
+                discarded: vec![1_000],
+                resets: 0,
+            },
+            "OCR baseline 只能跟著真的落 DB 的 frame 前進"
+        );
+        assert_eq!(
+            r.stats().ocr_blocks,
+            2,
+            "DB 失敗那次的文字沒有落地，不能混進『留下幾行』"
         );
     }
 

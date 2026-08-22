@@ -11,6 +11,7 @@ pub mod browsers;
 pub mod footprint;
 pub mod frames;
 pub mod ocr_layout;
+pub mod ocr_regions;
 pub mod recorder;
 
 pub mod replay;
@@ -24,6 +25,7 @@ pub mod windows;
 pub use recorder::{Recorder, RecorderStats, Tick};
 pub use replay::{ReplayBackend, Scenario, Step};
 pub use traits::{
-    Backend, ClipboardSource, CompositeBackend, FocusSource, InputSource, NullClipboard, NullFocus,
-    NullInput, NullOcr, NullScreen, Ocr, RawFrame, ScreenSource,
+    Backend, ClipboardSource, CompositeBackend, DhashRecheck, FocusSource, InputSource,
+    NullClipboard, NullFocus, NullInput, NullOcr, NullScreen, Ocr, OcrAttempt, OcrOutcome, OcrWork,
+    RawFrame, RecordingOcr, ScreenSource,
 };

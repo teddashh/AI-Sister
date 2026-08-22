@@ -68,7 +68,7 @@ OCR/索引 worker 才走 bundled sidecar。capture trait 抽象不變，宿主�
 
 | 訊號 | 方式 | 頻率 | 落地層 |
 |---|---|---|---|
-| 螢幕 frame | OS capture API，降採樣（長邊 ≤1568px）、dHash 去重（畫面沒變不存；Windows 加用 DXGI dirty rects 免費變化偵測） | **事件觸發**（app 切換/點擊/打字停頓/捲動）+ idle 上限 5–10s 補拍 | L0 |
+| 螢幕 frame | Windows Phase 0 用 GDI 擷取（OCR／dHash 工作幀長邊上限 4096px，超過才等比縮小），再做 dHash 去重；真的留圖時另依 `max_long_edge`（預設 1568px）縮成 PNG | 每拍做完後預設等待 400ms；無輸入時可跳過擷取，但最久 5s 補看一次 | L0 |
 | OCR 全文 | 平台原生 OCR（見 §15），只跑「保留下來的」幀 | 隨保留幀 | L0 |
 | 前景 app / 視窗標題 | Win32 / NSWorkspace 事件 | 事件驅動 | L0 |
 | 瀏覽器 URL | UIA（Win）/ AX（macOS）讀址欄；失敗容忍 | 視窗事件時 | L0 |
@@ -83,11 +83,31 @@ OCR/索引 worker 才走 bundled sidecar。capture trait 抽象不變，宿主�
 
 ### 2.2 幀保留與 OCR gate
 
-- dHash 相異度 < 閾值 → 不存（只記「持續中」計數）；
-- 變化幀存 WebP（品質 60）；文字擷取後，幀本身按保留政策降解（§11.4）；
-- **OCR gate**〔定案〕：先做 10–20ms 的文字區域偵測 + 區塊 hash，
-  **只 OCR 變化的 crop，永不整幅連續 OCR**（Vision 設定：accurate-only、
-  zh-Hant 放語言列首位、關 language correction）；
+- dHash 相異度 ≤ 閾值 → 通常不存（只記「持續中」計數）；Windows OCR gate
+  仍會用完整 RGB baseline 定點重驗，只有通過下述結構證據的小字追加能把它升格；
+- 變化幀的文字與脈絡寫進 DB；允許留圖時，畫面另依 `max_long_edge`（預設
+  1568px）降採樣成 PNG，再按保留政策降解（§11.4）；
+- **OCR gate**〔定案；Phase 0 Windows 已落地〕：第一次真的進到 OCR 的保留幀全幅
+  建立閱讀順序、RGB 像素與文字 baseline；之後先對 recorder 已抓到的 `RawFrame`
+  做 64×64 RGB tile FNV-1a，hash 相同仍逐 RGB pixel 確認，再把每個變動 pixel
+  配給唯一一個舊行的 edit envelope。局部成功集合刻意很窄：橫排行首或行尾只有
+  一個連續像素帶，fresh OCR 字串以完整舊字串為 prefix／suffix 且只多一個
+  Unicode scalar，fresh block 外擴 2px 又覆蓋全部變動像素，才按原本 full-OCR 順序放回；
+  **crop 不再做第二次縮圖**。這些是可檢查的結構 heuristic，不宣稱 crop 與全幅
+  OCR 必定逐字相同。Windows 抓圖本身的長邊上限是 4096px，超過時會在進 gate 前
+  先等比縮小。dHash 判成近似重複時，gate 仍用精確 RGB 比較；只有 `Regions`
+  候選會試 crop，stitch 通過才把這幀升格並寫進 DB。stitch 的結構證據不足就
+  維持重複，**不再補跑全幅**，避免閃爍游標每次反而觸發最貴路徑；摘要只把
+  這種完整跑完後的結構拒絕列成「局部未採用」。crop 建立或 OCR 執行真的失敗
+  也維持重複、不補跑全幅，但另計 OCR failure 並保留最後錯誤；實際成本仍算進
+  gate／OCR 時間與嘗試像素。dHash 已判成新畫面時，其他
+  編輯、沒有舊行 owner 的新增文字、整行刪除、一對一覆蓋不成立、像素歸屬不明、
+  螢幕尺寸改變、變動面積過大、crop 空讀或任何局部錯誤才當場退回全幅。全幅重試
+  若成功，仍是成功的全幅 OCR 路徑，摘要另外標出其中幾張是 fallback。完全未變的
+  幀經精確確認後仍維持重複，不另寫一張；「沿用」只保留給兩道判斷不一致的防禦
+  路徑，正常多半是 0。真 Windows 實測後再決定下一層
+  文字區域偵測值不值得做。（Vision 後續設定仍是 accurate-only、zh-Hant 放語言
+  列首位、關 language correction）；
 - 敏感排除（§11.2）發生在**capture 當下**，不是事後刪除。
 
 ### 2.4 macOS 平台憲法（躲不掉的，就做成賣點）
@@ -449,8 +469,8 @@ SQLCipher 或 OS-keyring 包裹的 at-rest 加密；一鍵 pause；一鍵 panic 
 | 元件 | 選型 | 備註 |
 |---|---|---|
 | core daemon | **Rust** 單 binary（Tauri sidecar 形式打包，獨立於 UI 存活） | macOS TCC 權限歸屬 responsible process——sidecar 必須簽進 .app bundle，權限只要一次 |
-| 截圖 | per-OS 原生：`windows-capture` 2.0（WGC）/ `screencapturekit` 8.0 / Linux `ashpd`+PipeWire；原型期可用 `xcap` | 〔定案〕不賭單一跨平台 capture crate |
-| 去重 | `image_hasher` 3.1（dHash 64-bit，螢幕畫面 Hamming ≤4–8 視為同幀）+ Windows DXGI dirty rects + 髒區塊 crop-hash → 只 OCR 髒區塊 | |
+| 截圖 | Windows Phase 0：Win32 GDI（BitBlt／GetDIBits）；後續候選：Windows WGC、macOS ScreenCaptureKit、Linux PipeWire | 目前只有 Windows GDI 已落地 |
+| 去重／OCR gate | 自製 64-bit dHash（預設 Hamming ≤5 視為近似同幀）+ 64×64 RGB tile FNV-1a；Windows Phase 0 的近似重複幀只讓能一對一拼回舊閱讀順序的 crop 升格，其餘維持重複；dHash 新幀的局部證據不足才退回全幅 | 沒有使用 DXGI dirty rects |
 | OCR | macOS：Apple Vision（zh-Hant 一等公民，accurate ~0.3–1.4s/全幅，搭配 OCR gate 只跑 crop）；Windows：**Phase 0 實作改用 `Windows.Media.Ocr`，見 §14.1**；PP-OCRv5 via `oar-ocr` 保留為精準度升級路線；TextRecognizer 鎖 Copilot+ NPU；OneOCR 授權灰色，只做使用者自機 opt-in；Tesseract 僅最後底線 | 搜尋前全半形正規化 + OpenCC 繁簡歸一 |
 | DB | SQLite 3.53（`rusqlite` 0.40，WAL）+ **FTS5 trigram + unicode61 + bigram 三索引**（external-content table；trigram 補 CJK 子字串、unicode61 補英文整詞、`text_fts_bi` 補**兩個字的中文**——unicode61 把整串 CJK 當一個 token，`MATCH "客服"` 是 0 筆，schema 3 之前只剩夾在 30 天內的 LIKE 掃描。bigram 是粗篩，命中要拿真字串再驗一次；只剩單字查詢仍走掃描） | 之後要拼音再上 `simple` tokenizer |
 | 向量（選配） | `sqlite-vec` 0.1.9（2026 復活版；256-d int8 MRL，brute-force 在我們規模內互動級） | pre-1.0 格式風險 → 存 model-id+dim，設計成可背景 re-embed |

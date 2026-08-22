@@ -126,8 +126,9 @@ impl Deduper {
         self.run
     }
 
-    /// 判斷一張新幀。**判定為 `New` 不會更新基準**——那要等它真的存下來，
-    /// 由呼叫端呼叫 [`Deduper::kept`]。
+    /// 判斷一張新幀。**判斷本身不更新任何狀態**——`New` 要等真的存下來才
+    /// 呼叫 [`Deduper::kept`]；`Duplicate` 也要等資料庫計數成功後才呼叫
+    /// [`Deduper::duplicate`]。
     ///
     /// 這兩件事一開始是同一個動作，而那是個會反覆生出同一個 bug 的形狀：
     /// 判定與寫入之間每多一條中途離開的路（螢幕沒了、抓圖失敗、資料庫
@@ -136,16 +137,24 @@ impl Deduper {
     /// 真的那一張擋成「重複」，重複數記到一張**更早**的幀身上。
     ///
     /// 拆開之後兩種疏忽的代價不對稱，而且方向是對的：
-    /// - 忘了呼叫 `kept` → 同一張畫面被存兩次。浪費，但看得見。
-    /// - 忘了退回基準 → 不可能發生了，因為根本沒有推進過。
-    pub fn check(&mut self, hash: u64) -> FrameVerdict {
+    /// - 忘了呼叫 `kept`／`duplicate` → 同一張畫面被再處理或 run 少算。浪費，
+    ///   但看得見。
+    /// - 忘了退回基準／run → 不可能發生了，因為根本沒有先推進。
+    pub fn check(&self, hash: u64) -> FrameVerdict {
         match self.last_kept {
-            Some(prev) if hamming(prev, hash) <= self.threshold => {
-                self.run += 1;
-                FrameVerdict::Duplicate { run: self.run }
-            }
+            Some(prev) if hamming(prev, hash) <= self.threshold => FrameVerdict::Duplicate {
+                run: self.run.saturating_add(1),
+            },
             _ => FrameVerdict::New,
         }
+    }
+
+    /// 呼叫端已經接受這張是重複，而且資料庫的重複計數也真的寫成功。
+    ///
+    /// 和 [`Self::kept`] 一樣分成第二步：changed-region OCR 可能推翻 dHash，
+    /// 資料庫也可能寫失敗；任何一種都不該先把 run 往前推。
+    pub fn duplicate(&mut self) {
+        self.run = self.run.saturating_add(1);
     }
 
     /// 這一張真的存下來了：把基準推到它身上。
@@ -255,8 +264,9 @@ mod tests {
     /// 存下來的那一張才會變成基準。`store` 就是呼叫端的那兩步。
     fn store(d: &mut Deduper, hash: u64) -> FrameVerdict {
         let v = d.check(hash);
-        if v == FrameVerdict::New {
-            d.kept(hash);
+        match v {
+            FrameVerdict::New => d.kept(hash),
+            FrameVerdict::Duplicate { .. } => d.duplicate(),
         }
         v
     }
@@ -338,5 +348,15 @@ mod tests {
         );
         // 而且沒有把重複數算到那張更早的幀身上
         assert_eq!(d.run(), 0);
+    }
+
+    #[test]
+    fn a_duplicate_only_advances_the_run_after_the_caller_accepts_it() {
+        let mut d = Deduper::default();
+        assert_eq!(store(&mut d, 42), FrameVerdict::New);
+        assert_eq!(d.check(42), FrameVerdict::Duplicate { run: 1 });
+        assert_eq!(d.run(), 0, "判斷本身不能先提交狀態");
+        d.duplicate();
+        assert_eq!(d.run(), 1);
     }
 }

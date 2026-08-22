@@ -8105,8 +8105,9 @@ pub mod bench {
             } else {
                 "這次兩列原生沒有觀察到揮發行；".to_string()
             };
-            writeln!(out, "怎麼讀：「{COL_MS}」是一次 OCR 的平均耗時；「{COL_MISSING}」是基準線有、\n\
-                           {indent}這一列沒讀到的行——縮下去真的會賠掉的字；「{COL_EXTRA}」是這一列超過基準線與已知揮發行後仍多出的行。\n\
+            writeln!(out, "怎麼讀：「{COL_MS}」是一次 OCR 的平均耗時；「{COL_MISSING}」是兩次原生都有的完整行字串、\n\
+                           {indent}這一列沒有完全相同命中的行；一字、內部空白或拆併行不同，都可能同時算一行少了、一行多了。\n\
+                           {indent}它量的是穩定完整行，不等於證明同樣數量的字消失；「{COL_EXTRA}」是這一列超過基準線與已知揮發行後仍多出的行。\n\
                            {indent}時鐘、通知等會自己變的行也可能落在「{COL_EXTRA}」；{noise}\n\
                            {indent}縮圖列明顯高過底線時，才值得懷疑是讀錯。「{COL_MISSING}」與「{COL_EXTRA}」要一起看。\n\
                            {indent}「{COL_SIZE}」與「{COL_PIXELS}」說明實際量到哪一列畫面。").unwrap();
@@ -8527,9 +8528,13 @@ pub mod bench {
             assert!(out.contains("原生 A、原生 B 兩列"));
             assert!(out.contains("少了幾行"));
             assert!(out.contains("多了幾行"));
-            assert!(out.contains("縮下去真的會賠掉"));
+            assert!(out.contains("完整行字串"));
+            assert!(out.contains("不等於證明同樣數量的字消失"));
+            assert!(!out.contains("縮下去真的會賠掉"));
             let (with, _, _) = run_groups(vec![vec!["甲"]; 5], 1);
-            assert!(render(&with, None).contains("縮下去真的會賠掉"));
+            let with = render(&with, None);
+            assert!(with.contains("完整行字串"));
+            assert!(!with.contains("縮下去真的會賠掉"));
         }
 
         #[test]
@@ -9100,7 +9105,7 @@ pub mod bench {
             let expected = crate::fmt::display_width(heading_prefix);
             for line in out
                 .lines()
-                .filter(|l| l.contains("這一列沒讀到") || l.contains("時鐘、通知"))
+                .filter(|l| l.contains("這一列沒有完全相同命中") || l.contains("時鐘、通知"))
             {
                 let actual = line.chars().take_while(|c| *c == ' ').count();
                 assert_eq!(actual, expected, "{line:?}\n{out}");
@@ -10320,7 +10325,7 @@ pub mod record {
                 } else {
                     let s = rec.stats();
                     println!(
-                        "  … {} tick：保留 {}、重複 {}、排除 {}、讀到 {} 行字{}",
+                        "  … {} tick：保留 {}、重複 {}、排除 {}、資料庫留下 {} 行字{}",
                         s.ticks,
                         s.kept,
                         s.duplicates,
@@ -11062,6 +11067,56 @@ pub mod record {
         }
     }
 
+    /// changed-region gate 的原始計數變成一句可以核對的話。
+    ///
+    /// 像素比例一定拿實際累計相除，不用「幾個 crop」猜：三個小角落和三張
+    /// 幾乎全幅的圖，crop 數完全一樣，成本卻不是同一件事。
+    #[cfg(any(windows, test))]
+    fn ocr_work_line(stats: &sister_capture::RecorderStats) -> Option<String> {
+        let successful = stats.ocr_full_frames + stats.ocr_region_frames + stats.ocr_reused_frames;
+        if successful == 0
+            && stats.ocr_rejected_region_frames == 0
+            && stats.ocr_candidate_pixels == 0
+        {
+            return None;
+        }
+        let fallback = if stats.ocr_full_fallbacks > 0 {
+            format!("，其中 {} 張是局部沒有把握後退回", stats.ocr_full_fallbacks)
+        } else {
+            String::new()
+        };
+        let rejected = if stats.ocr_rejected_region_frames > 0 {
+            format!(
+                "、局部未採用 {} 張／{} 區",
+                stats.ocr_rejected_region_frames, stats.ocr_rejected_regions
+            )
+        } else {
+            String::new()
+        };
+        let pixels = if stats.ocr_candidate_pixels > 0 {
+            let retry = if stats.ocr_input_pixels > stats.ocr_candidate_pixels {
+                "；失敗後的重試也算，所以可以超過 100%"
+            } else {
+                ""
+            };
+            format!(
+                "；OCR 嘗試收到 {} / 全幅候選 {} 像素（{:.1}%{retry}）",
+                stats.ocr_input_pixels,
+                stats.ocr_candidate_pixels,
+                stats.ocr_input_pixels as f64 / stats.ocr_candidate_pixels as f64 * 100.0
+            )
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "        OCR 路徑：成功全幅 {} 張{fallback}、成功局部 {} 張／{} 區、沿用 {} 張{rejected}{pixels}",
+            stats.ocr_full_frames,
+            stats.ocr_region_frames,
+            stats.ocr_regions,
+            stats.ocr_reused_frames,
+        ))
+    }
+
     #[cfg(windows)]
     fn report_ocr(
         stats: &sister_capture::RecorderStats,
@@ -11073,7 +11128,7 @@ pub mod record {
             return;
         }
         println!(
-            "  讀字：{} 行{}",
+            "  讀字：資料庫留下 {} 行{}",
             stats.ocr_blocks,
             if stats.ocr_failures > 0 {
                 format!("，{} 次失敗", stats.ocr_failures)
@@ -11081,12 +11136,15 @@ pub mod record {
                 String::new()
             }
         );
+        if let Some(line) = ocr_work_line(stats) {
+            println!("{line}");
+        }
         if let Some(e) = &stats.last_ocr_error {
             println!("        最後一次的錯誤：{e}");
         }
         if stats.ocr_blocks == 0 && stats.kept > 0 {
             println!(
-                "  ⚠  保留了 {} 張畫面，但一行字都沒讀到——這些畫面搜不到。\
+                "  ⚠  保留了 {} 張畫面，但資料庫沒有留下任何螢幕文字——這些畫面搜不到。\
                  跑 `sister doctor` 看是引擎讀不出字，還是讀不到你這台螢幕。",
                 stats.kept
             );
@@ -11098,7 +11156,7 @@ pub mod record {
         use super::{
             BootBeat, ConfigWatch, CpuPercent, DiskMeasured, DiskProjection, FootprintMeasured,
             ImageBudgetBytes, PerLookMs, StoringImages, TickCounts, WantsImages, already_recording,
-            footprint_context, footprint_lines, ocr_off_words,
+            footprint_context, footprint_lines, ocr_off_words, ocr_work_line,
         };
         use crate::ops::tmp::Tmp;
         use sister_core::config::Config;
@@ -11160,6 +11218,41 @@ pub mod record {
             config.capture.store_images = true;
             config.capture.enabled = true;
             assert!(!OcrEnabled::from_config(&config).enabled());
+        }
+
+        #[test]
+        fn the_ocr_summary_distinguishes_full_regions_and_reuse_by_measured_pixels() {
+            let stats = sister_capture::RecorderStats {
+                ocr_full_frames: 1,
+                ocr_full_fallbacks: 1,
+                ocr_region_frames: 2,
+                ocr_regions: 3,
+                ocr_reused_frames: 4,
+                ocr_rejected_region_frames: 5,
+                ocr_rejected_regions: 6,
+                ocr_candidate_pixels: 10_000,
+                ocr_input_pixels: 2_500,
+                ..Default::default()
+            };
+            let line = ocr_work_line(&stats).expect("有量到 gate");
+            assert!(line.contains("成功全幅 1 張"), "{line}");
+            assert!(line.contains("成功局部 2 張／3 區"), "{line}");
+            assert!(line.contains("沿用 4 張"), "{line}");
+            assert!(line.contains("局部未採用 5 張／6 區"), "{line}");
+            assert!(line.contains("2500 / 全幅候選 10000"), "{line}");
+            assert!(line.contains("25.0%"), "{line}");
+            assert!(line.contains("退回"), "{line}");
+            assert!(!line.contains("可以超過 100%"), "{line}");
+
+            let retried = sister_capture::RecorderStats {
+                ocr_candidate_pixels: 10_000,
+                ocr_input_pixels: 12_500,
+                ..Default::default()
+            };
+            let retried = ocr_work_line(&retried).expect("失敗後有重試");
+            assert!(retried.contains("125.0%"), "{retried}");
+            assert!(retried.contains("重試也算"), "{retried}");
+            assert!(ocr_work_line(&Default::default()).is_none());
         }
 
         /// 收尾摘要不能把留下幾張圖當成寫了幾個 bytes。

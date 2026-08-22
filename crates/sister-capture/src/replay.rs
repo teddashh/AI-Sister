@@ -252,22 +252,24 @@ impl Backend for ReplayBackend {
         Ok(Some(m))
     }
 
-    fn recognize(&mut self, _frame: &RawFrame) -> Result<Vec<OcrBlock>> {
-        // 腳本裡的文字就是 OCR 的結果；幾何資訊給一個規律的假版面即可
-        Ok(self
-            .current
-            .text
-            .iter()
-            .enumerate()
-            .map(|(i, t)| OcrBlock {
-                text: t.clone(),
-                x: 40,
-                y: 60 + i as i32 * 28,
-                w: 800,
-                h: 24,
-                confidence: 0.99,
-            })
-            .collect())
+    fn recognize(&mut self, frame: &RawFrame) -> crate::traits::OcrAttempt {
+        crate::traits::OcrAttempt::full(frame, || {
+            // 腳本裡的文字就是 OCR 的結果；幾何資訊給一個規律的假版面即可
+            Ok(self
+                .current
+                .text
+                .iter()
+                .enumerate()
+                .map(|(i, t)| OcrBlock {
+                    text: t.clone(),
+                    x: 40,
+                    y: 60 + i as i32 * 28,
+                    w: 800,
+                    h: 24,
+                    confidence: 0.99,
+                })
+                .collect())
+        })
     }
 }
 
@@ -418,7 +420,7 @@ mod tests {
     fn ocr_returns_the_scripted_text_with_plausible_geometry() {
         let mut b = ReplayBackend::new(scenario());
         let f = b.grab_screen(0).expect("grab").expect("frame");
-        let blocks = b.recognize(&f).expect("ocr");
+        let blocks = b.recognize(&f).outcome.expect("ocr").into_blocks();
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, "本期應繳 NT$13,450");
         assert!(blocks[1].y > blocks[0].y, "lines must not overlap");

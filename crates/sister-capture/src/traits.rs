@@ -9,6 +9,8 @@
 
 use anyhow::Result;
 use sister_core::model::{ClipboardEvent, FocusSnapshot, InputMetrics, Millis, OcrBlock};
+use std::num::NonZeroU64;
+use std::time::{Duration, Instant};
 
 /// 平台交出來的一張原始畫面。
 ///
@@ -70,12 +72,12 @@ impl RawFrame {
 
 /// 螢幕來源。
 pub trait ScreenSource {
-    /// 抓一張當下的畫面，**完整解析度**。回 `Ok(None)` 代表這一刻沒有
-    /// 可用畫面（螢幕鎖定、顯示器休眠），不是錯誤。
+    /// 抓一張當下給 OCR／dHash 用的工作幀。回 `Ok(None)` 代表這一刻沒有
+    /// 可用畫面（螢幕鎖定、顯示器休眠），不是錯誤。平台可以設安全尺寸上限；
+    /// Windows 目前是長邊 4096px，低於上限才是原生解析度。
     ///
-    /// 這張是要拿去 OCR 與存檔的，所以像素必須是原生的：縮過的圖上，
-    /// 12px 的字會掉到 7px，Windows 的 OCR 就會把 `Microsoft Teams`
-    /// 讀成 `Micr099ftTeamsTr`——不報錯、不失敗，只是讀錯。
+    /// 這張不可以先套用存檔用的 1568px 縮圖：12px 的字會掉到 7px，Windows
+    /// OCR 會把 `Microsoft Teams` 讀成 `Micr099ftTeamsTr`——不報錯，只是讀錯。
     fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>>;
 }
 
@@ -127,6 +129,187 @@ pub trait Ocr {
     fn recognize(&mut self, frame: &RawFrame) -> Result<Vec<OcrBlock>>;
 }
 
+/// 錄製一幀時，OCR 管線實際採取的路徑。
+///
+/// 這裡不能只回一個 `Vec<OcrBlock>`：全幅讀、局部讀，以及根本沒有呼叫
+/// 引擎卻沿用上一幀的文字，三種情況都可能交出同一組 blocks。把它們壓成
+/// 同一個 Vec，收尾摘要就會把「沒跑」說成「跑了但很快」。
+#[derive(Debug)]
+pub enum OcrOutcome {
+    Full {
+        blocks: Vec<OcrBlock>,
+        /// 局部路徑沒有把握，因而退回全幅。首張正常全幅是 false。
+        fallback: bool,
+    },
+    Regions {
+        /// 完整一幀的文字：變動區是新讀的，未變區來自已提交的上一幀。
+        blocks: Vec<OcrBlock>,
+        regions: NonZeroU64,
+    },
+    Reused {
+        /// 像素沒有任何 RGB 變化，所以這些文字可直接沿用。
+        blocks: Vec<OcrBlock>,
+    },
+}
+
+impl OcrOutcome {
+    pub(crate) fn blocks(&self) -> &[OcrBlock] {
+        match self {
+            Self::Full { blocks, .. } | Self::Regions { blocks, .. } | Self::Reused { blocks } => {
+                blocks
+            }
+        }
+    }
+
+    pub fn into_blocks(self) -> Vec<OcrBlock> {
+        match self {
+            Self::Full { blocks, .. } | Self::Regions { blocks, .. } | Self::Reused { blocks } => {
+                blocks
+            }
+        }
+    }
+}
+
+/// 交給 OCR 實作嘗試的工作量。
+///
+/// `calls` 用 NonZero：有這個 struct 就代表 [`Ocr::recognize`] 真的被叫過，
+/// 不能再讓 `calls = 0` 同時兼任「沒有量到」。實作仍可能在呼叫 OS 引擎前
+/// 因缺語言、尺寸或 buffer 契約而拒絕；所以這不是 WinRT 邊界計數。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcrWork {
+    calls: NonZeroU64,
+    elapsed: Duration,
+    input_pixels: u64,
+}
+
+impl OcrWork {
+    pub(crate) fn new(calls: NonZeroU64, elapsed: Duration, input_pixels: u64) -> Self {
+        Self {
+            calls,
+            elapsed,
+            input_pixels,
+        }
+    }
+
+    pub fn calls(self) -> NonZeroU64 {
+        self.calls
+    }
+
+    pub fn elapsed(self) -> Duration {
+        self.elapsed
+    }
+
+    pub fn input_pixels(self) -> u64 {
+        self.input_pixels
+    }
+}
+
+/// 一次 recorder OCR 嘗試：結果和量測綁在同一個值上，避免接錯集合。
+#[derive(Debug)]
+pub struct OcrAttempt {
+    pub outcome: Result<OcrOutcome>,
+    /// `None` = 這是一個沒有 gate 的 raw OCR；不是「gate 花了 0 ms」。
+    pub gate_elapsed: Option<Duration>,
+    /// `None` = 這次沒有呼叫 OCR 實作；不是「呼叫 0 次」。
+    pub work: Option<OcrWork>,
+}
+
+impl OcrAttempt {
+    /// 把一個 raw OCR 引擎接成 recorder 管線。bench / doctor 仍直接呼叫 raw
+    /// [`Ocr::recognize`]，所以不會不小心量到 changed-region gate。
+    pub fn full(frame: &RawFrame, run: impl FnOnce() -> Result<Vec<OcrBlock>>) -> Self {
+        let started = Instant::now();
+        let result = run();
+        let elapsed = started.elapsed();
+        Self {
+            outcome: result.map(|blocks| OcrOutcome::Full {
+                blocks,
+                fallback: false,
+            }),
+            gate_elapsed: None,
+            work: Some(OcrWork::new(
+                NonZeroU64::MIN,
+                elapsed,
+                u64::from(frame.width) * u64::from(frame.height),
+            )),
+        }
+    }
+
+    pub(crate) fn measured(
+        outcome: Result<OcrOutcome>,
+        gate_elapsed: Duration,
+        work: Option<OcrWork>,
+    ) -> Self {
+        Self {
+            outcome,
+            gate_elapsed: Some(gate_elapsed),
+            work,
+        }
+    }
+}
+
+/// dHash 說「近似重複」之後，stateful OCR gate 的第二個答案。
+///
+/// 9×8 dHash 會刻意吞掉很小的像素變化；單一新字也可能在門檻內。raw OCR
+/// 沒有第二層證據，維持重複即可。changed-region gate 則可以只試那個 crop：
+/// 結構驗過就把這幀升格成新畫面，驗不過仍沿用 dHash，不准為游標閃爍之類
+/// 的小變化退回全幅 OCR。
+#[derive(Debug)]
+pub enum DhashRecheck {
+    Duplicate {
+        /// `None` = 這個 OCR backend 沒有第二層 gate。
+        gate_elapsed: Option<Duration>,
+        /// gate 可能試過 crop 才決定不升格；那些成本不能從摘要消失。
+        work: Option<OcrWork>,
+        /// `Some` = 真的試過這麼多個 region，但結構證據不足，沒有採用。
+        rejected_regions: Option<NonZeroU64>,
+        /// gate 或 raw OCR 真的執行失敗；維持 dHash 重複，但摘要不能把它
+        /// 混成普通的結構拒絕而保持沉默。
+        error: Option<anyhow::Error>,
+    },
+    /// 小變化有足夠證據，不能再讓 dHash 把它當成重複。
+    Changed(OcrAttempt),
+}
+
+impl DhashRecheck {
+    fn unchanged_without_gate() -> Self {
+        Self::Duplicate {
+            gate_elapsed: None,
+            work: None,
+            rejected_regions: None,
+            error: None,
+        }
+    }
+}
+
+/// 只供 recorder 使用的 OCR 管線。
+///
+/// raw [`Ocr`] 自動得到「每幀全幅」的接法；changed-region wrapper 刻意只
+/// 實作這個 trait，因此型別上就不可能被 `sister bench` 當成 raw engine。
+pub trait RecordingOcr {
+    fn recognize_frame(&mut self, frame: &RawFrame) -> OcrAttempt;
+
+    /// dHash 已判成近似重複時，只有握有完整像素 baseline 的 gate 能推翻它。
+    fn recheck_dhash_duplicate(&mut self, _frame: &RawFrame) -> DhashRecheck {
+        DhashRecheck::unchanged_without_gate()
+    }
+
+    /// 只有 frame 與文字真的寫進 DB 後才提交 OCR baseline。
+    fn commit_frame(&mut self, _frame: &RawFrame) {}
+
+    /// DB 寫入失敗；剛才算出的 pending baseline 不成立。
+    fn discard_frame(&mut self, _frame: &RawFrame) {}
+
+    /// 暫停或隱私排除期間沒有看畫面，跨過這個洞後必須重新全幅讀一次。
+    fn reset(&mut self) {}
+}
+
+impl<T: Ocr> RecordingOcr for T {
+    fn recognize_frame(&mut self, frame: &RawFrame) -> OcrAttempt {
+        OcrAttempt::full(frame, || self.recognize(frame))
+    }
+}
+
 /// OCR 引擎拒絕尺寸過大的圖片。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OcrImageTooLarge;
@@ -159,7 +342,13 @@ pub trait Backend {
     fn idle_ms(&mut self) -> Option<u64> {
         None
     }
-    fn recognize(&mut self, frame: &RawFrame) -> Result<Vec<OcrBlock>>;
+    fn recognize(&mut self, frame: &RawFrame) -> OcrAttempt;
+    fn recheck_ocr_dhash_duplicate(&mut self, _frame: &RawFrame) -> DhashRecheck {
+        DhashRecheck::unchanged_without_gate()
+    }
+    fn commit_ocr_frame(&mut self, _frame: &RawFrame) {}
+    fn discard_ocr_frame(&mut self, _frame: &RawFrame) {}
+    fn reset_ocr(&mut self) {}
 
     /// 這段錄製中途**壞掉**的能力，原始事實。
     ///
@@ -199,7 +388,7 @@ where
     F: FocusSource,
     C: ClipboardSource,
     I: InputSource,
-    O: Ocr,
+    O: RecordingOcr,
 {
     fn name(&self) -> &str {
         &self.name
@@ -227,8 +416,20 @@ where
     fn idle_ms(&mut self) -> Option<u64> {
         self.input.idle_ms()
     }
-    fn recognize(&mut self, frame: &RawFrame) -> Result<Vec<OcrBlock>> {
-        self.ocr.recognize(frame)
+    fn recognize(&mut self, frame: &RawFrame) -> OcrAttempt {
+        self.ocr.recognize_frame(frame)
+    }
+    fn recheck_ocr_dhash_duplicate(&mut self, frame: &RawFrame) -> DhashRecheck {
+        self.ocr.recheck_dhash_duplicate(frame)
+    }
+    fn commit_ocr_frame(&mut self, frame: &RawFrame) {
+        self.ocr.commit_frame(frame)
+    }
+    fn discard_ocr_frame(&mut self, frame: &RawFrame) {
+        self.ocr.discard_frame(frame)
+    }
+    fn reset_ocr(&mut self) {
+        self.ocr.reset()
     }
 }
 

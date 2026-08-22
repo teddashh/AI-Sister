@@ -428,6 +428,8 @@ jobs:
         run: |
           set -euo pipefail
           S=./target/release/sister.exe
+          OCR_CONFIG=./ci-ocr.toml
+          printf '[capture]\nocr = true\n' > "$OCR_CONFIG"
 
           # 這道閘門擋下來過**這一步自己**：alpha.14 加了同意書之後，CI 第一次
           # 跑就在這裡失敗，錯誤訊息是「還沒有人同意讓她記錄這台機器的螢幕」。
@@ -464,7 +466,7 @@ jobs:
           # 在錄的那個行程。輸出改成錄完再印。
           BEAT=./loop/recording.beat
           rm -f "$BEAT"
-          $S --data-dir ./loop record --duration 20 > rec.txt 2>&1 &
+          $S --data-dir ./loop --config "$OCR_CONFIG" record --duration 20 > rec.txt 2>&1 &
           REC=$!
 
           sleep 5
@@ -523,8 +525,23 @@ jobs:
           [ "$TOMB_AT" -lt $(( NOW_MS + 1000 )) ] && [ "$TOMB_AT" -gt $(( NOW_MS - 600000 )) ] || {
             echo "::error::墓碑上的收工時間不是剛剛（$TOMB_AT，現在 $NOW_MS±1s）"; exit 1; }
 
+          # 底下的 OCR 斷言都以「至少一張畫面真的走完 recorder」為前提。
+          # 沒先證明這件事，no-screen 會被錯報成 production constructor 接錯。
+          grep -q '畫面：寫了 [1-9]' rec.txt || {
+            echo "::error::上一場一張畫面都沒存，OCR gate 與停止測試都沒有實錄前提"
+            exit 1; }
           grep -q '時間：' rec.txt \
             || { echo "::error::錄完了卻沒印出時間表——CPU 又變成一個沒有下一步的數字"; exit 1; }
+
+          # changed-region 的純邏輯在 Linux 測得到；只有 gate 時間列能守
+          # production constructor。raw WindowsOcr 的 OcrAttempt 沒有 gate_elapsed，
+          # 所以把 windows::backend() 接回 raw OCR 時，這一列一定消失。
+          grep -q 'OCR 閘門' rec.txt \
+            || { echo "::error::有畫面進 OCR，時間表卻沒有 changed-region gate——Windows production backend 可能接回 raw OCR"; exit 1; }
+          # 路徑列守的是 RecorderStats → 收尾摘要的接線；raw OCR 也會印這一列，
+          # 而且 OCR 全失敗時成功數可以全是 0，所以它不是 constructor 的證據。
+          grep -q 'OCR 路徑：' rec.txt \
+            || { echo "::error::錄製摘要漏了 OCR 路徑／像素列——stats 到收尾報告的接線已斷"; exit 1; }
           if grep -q '這段沒歸因到任何階段' rec.txt; then
             echo "::error::時間表解釋不了自己：有一段 CPU 沒有任何階段認領"
             exit 1
@@ -608,9 +625,7 @@ jobs:
           # 的話上（「她沒存東西」——其實是這裡在看空氣）。上一場**剛剛才說**它
           # 寫了幾張，拿那句話當前提：兩邊都說「有」才往下走，只有一邊說「有」
           # 的時候錯的是這支測試，不是產品——而兩種錯要指到兩個不同的下一步。
-          grep -q '畫面：寫了 [1-9]' rec.txt || {
-            echo "::error::上一場一張畫面都沒存，這條測試的前提沒了——一場什麼都沒存到的錄製收工時會把自己那一列刪掉，最後一條就永遠讀不到停止的理由"
-            exit 1; }
+          # 摘要已在上面證明寫過畫面；磁碟也必須有，否則是這裡的 FRAMES 路徑指錯。
           # `條件：` 的尺寸必須來自這一場 recorder 的實際 stats。純函式測試只驗
           # 得到手寫 tuple；這裡守呼叫端，避免 last_frame_size 接成 None 後仍全綠。
           grep -Eq '條件：.*[0-9]+×[0-9]+' rec.txt \
@@ -619,7 +634,7 @@ jobs:
           [ "$BEFORE" -gt 0 ] || {
             echo "::error::上一場說它寫了畫面，$FRAMES 卻是空的——這個路徑指錯了，底下那個迴圈驗不到任何東西"
             exit 1; }
-          $S --data-dir ./loop record --duration 120 > stopped.txt 2>&1 &
+          $S --data-dir ./loop --config "$OCR_CONFIG" record --duration 120 > stopped.txt 2>&1 &
           REC=$!
           for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
             [ "$(frame_count)" -gt "$BEFORE" ] && break
@@ -739,26 +754,38 @@ jobs:
             資料放在 `%APPDATA%\ted-h\AI-Sister\data\`，刪掉那個資料夾就等於
             全部忘掉。也可以用 `--data-dir .\test` 錄到別的地方，測完直接刪。
 
-            ### 這一版：`bench` 多一張 OCR 縮圖表
+            ### 這一版：OCR 只重讀有把握的變動區域
 
-            alpha.45 的 `sister.exe bench` 會接著 GDI 抓圖表，再印一張 OCR 表：
-            原生畫面、縮到 1568、1280、1024，各自列出 OCR 平均耗時、少了幾行、
-            多了幾行。它先抓完同一個靜止畫面的各種尺寸，再開始 OCR；因此量的
-            是縮圖本身的代價，不會把幾十秒後已經變掉的桌面誤算成辨識退步。
+            alpha.45 的 bench 已經回答縮圖不可用：1920×1080 的三個縮圖尺寸，
+            對兩次原生共同的 115 個完整行字串只命中 6、1、0 行。因此 alpha.46
+            沒有再把這台 1920×1080 的 OCR 畫面縮小；第一張保留幀先全幅讀，之後
+            先用 64×64 RGB tile 找變動（hash 相同仍逐 pixel 確認）。連 9×8 dHash
+            判成近似重複的小變化也會進這道定點重驗，免得單一新字在 gate 前就消失。
+            局部成功集合刻意很窄：只收橫排行首／行尾的一個連續像素帶，而且 fresh
+            OCR 必須完整保留舊字串、只多一個 Unicode scalar，2px 證據範圍也要覆蓋
+            全部變動像素，才按原本閱讀順序放回並把那幀升格。長邊超過 4096px 的
+            畫面仍會先受安全上限縮小。
 
-            這張表要回答的是 Phase 0 現在最大的那一筆：alpha.44 的 60 秒實測裡，
-            OCR 佔 CPU 時間 82%，目前 1920×1080 又完全沒有縮。請跑：
+            dHash 已判成新畫面時，其他編輯、沒有舊行 owner 的新增文字、整行刪除、
+            一對一覆蓋不成立、crop 空讀、變動太大、像素歸屬不明或局部 OCR 出錯會
+            當場退回全幅。近似重複幀若 stitch 的結構證據不足就維持重複，絕不因為
+            閃爍游標補跑全幅；摘要會列成「局部未採用」。若 crop 建立或 OCR 執行
+            真的失敗，也維持重複、不補跑全幅，但會另計 OCR failure 並留下錯誤，
+            不會冒充正常的結構拒絕；花掉的時間和像素仍照算。這道門驗
+            的是結構，不宣稱 crop 與全幅 OCR 必定逐字相同；alpha.46 的路徑／像素／
+            CPU 實測就是下一個判決。全幅重試若成功仍列在成功全幅，並標出 fallback。
+            完全未變的畫面維持重複，所以「沿用」正常多半是 0。
+
+            請正常切 app、打字、捲動，錄 60 秒：
 
             ```
-            sister.exe bench
+            sister.exe record --duration 60
             ```
 
-            把兩張表完整貼回來。第二張約多花一分鐘，期間不要動畫面，因為它拿
-            畫面上的字當尺。下一版會從表上選「時間掉最多、字掉最少」的尺寸，
-            不再靠猜測調 `OCR_LONG_EDGE`。
-
-            同一版也把足跡摘要與同意書的 Windows 接線搬進 Linux 測試射程；
-            原本幾個意思不同、型別相同的值，現在接反會直接編譯失敗。
+            把 `完成：` 到 `足跡：` 的收尾整段貼回來；其中 `OCR 路徑：` 會列
+            成功全幅／成功局部／沿用／局部未採用與實際 OCR 嘗試像素；時間表則把
+            `OCR 閘門` 和 `OCR` 實作分開。這組數字才回答 CPU 能不能從 alpha.44
+            的 38.8% 降到 3% 內。
 
             ### 先跑 `doctor`
 
@@ -1243,8 +1270,8 @@ jobs:
 
             ### 錄完的摘要現在說得出「為什麼」
 
-            - `讀字：N 行` — 保留了幾張畫面是**容量**，讀到了幾行字才是**記憶**。
-              `kept > 0` 而讀字 = 0 會直接示警，OCR 失敗也會印出是哪一步壞的。
+            - `讀字：資料庫留下 N 行` — 保留了幾張畫面是**容量**，成功寫進資料庫的
+              文字行數才是**記憶**。有保留幀而 N = 0 會直接示警；OCR 失敗也會印出是哪一步壞的。
             - `排除 N 次：<理由>` — 拆開到每一條規則。一條寬到吃掉一整天的
               規則，症狀本來只是一個沒有解釋的數字。
             - `⚠ 錄製途中失去的能力` — `doctor` 只看得到開機那一瞬間，但 UIA

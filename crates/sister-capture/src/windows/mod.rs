@@ -18,6 +18,7 @@ use anyhow::Result;
 use sister_core::config::Config;
 use sister_core::now_ms;
 
+use crate::ocr_regions::ChangedRegionOcr;
 use crate::traits::{Backend, CompositeBackend};
 
 /// 這台機器上這個後端實際做得到什麼。
@@ -128,7 +129,9 @@ pub fn backend(config: &Config) -> Result<impl Backend + use<>> {
         focus: focus::WindowsFocus::new(),
         clipboard: clipboard::WindowsClipboard::new(),
         input: input::WindowsInput::start(now_ms(), config.capture.input_window_secs),
-        ocr: ocr::WindowsOcr::new(&config.capture.ocr_languages),
+        // bench / doctor 直接用 raw WindowsOcr；只有長時間錄製包 changed-region
+        // gate，兩種量測不會在型別相同的情況下不小心接反。
+        ocr: ChangedRegionOcr::new(ocr::WindowsOcr::new(&config.capture.ocr_languages)),
     })
 }
 

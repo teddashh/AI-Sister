@@ -12,6 +12,7 @@
 //! QueryPerformanceCounter，數十奈秒，一個 tick 取樣六次，對一個每
 //! 400ms 才跑一次的迴圈來說不存在。
 
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 /// 一個階段的累計耗時與呼叫次數。
@@ -28,6 +29,14 @@ pub struct Stage {
 impl Stage {
     pub fn record(&mut self, d: Duration) {
         self.calls += 1;
+        self.total += d;
+    }
+
+    /// 一段時間裡真的包含多次同類呼叫（例如一幀的三個 OCR crop）。
+    ///
+    /// `calls` 是 NonZero，避免「沒呼叫」被接成一筆 0ms 的實測。
+    pub fn record_many(&mut self, d: Duration, calls: NonZeroU64) {
+        self.calls += calls.get();
         self.total += d;
     }
 
@@ -60,6 +69,9 @@ pub struct Timings {
     /// 這裡以前有兩欄（探測、抓圖），因為以前一個 tick 會讀兩次螢幕。
     /// 實測那是白付的：擷取成本由來源像素決定，而兩次讀的是同一個螢幕。
     pub grab: Stage,
+    /// 判斷工作幀哪些區域需要重讀。只有真的有 gate 的平台才會有這一列。
+    pub ocr_gate: Stage,
+    /// OCR 實作的呼叫；局部三塊就是三次，不拿「一幀」冒充一次。
     pub ocr: Stage,
     /// 縮圖 + PNG 編碼 + 寫檔。
     pub store: Stage,
@@ -77,6 +89,7 @@ impl Timings {
             ("剪貼簿", self.clipboard),
             ("輸入", self.input),
             ("抓圖", self.grab),
+            ("OCR 閘門", self.ocr_gate),
             ("OCR", self.ocr),
             ("存檔", self.store),
             ("資料庫", self.db),
@@ -128,6 +141,14 @@ mod tests {
         s.record(Duration::from_millis(20));
         assert_eq!(s.per_call(), Some(Duration::from_millis(15)));
         assert_eq!(s.calls, 2);
+
+        s.record_many(
+            Duration::from_millis(30),
+            NonZeroU64::new(3).expect("three"),
+        );
+        assert_eq!(s.calls, 5);
+        assert_eq!(s.total, Duration::from_millis(60));
+        assert_eq!(s.per_call(), Some(Duration::from_millis(12)));
     }
 
     /// 排名要真的排名，而且沒跑過的階段不該佔用版面。
