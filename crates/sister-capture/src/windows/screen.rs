@@ -78,15 +78,8 @@ use windows::Win32::System::StationsAndDesktops::{
 };
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
+use crate::scale::{OCR_LONG_EDGE, fit};
 use crate::traits::{RawFrame, ScreenSource};
-
-/// 完整解析度抓圖的長邊上限。
-///
-/// 這不是畫質旋鈕，是一道防線，所以刻意寫死而不是開成設定：8K 螢幕一張
-/// RGBA 是 132MB，而 Windows 的 OCR 引擎本身也只吃到 10000 像素。4096
-/// 讓 4K（3840）以下的螢幕全部拿到**原生**像素——也就是絕大多數人——
-/// 更大的才縮，而且縮一半仍然遠好過為了它把每個人都降到 1568。
-const OCR_LONG_EDGE: u32 = 4096;
 
 /// GDI 螢幕來源。一次抓前景視窗所在的那一台螢幕。
 pub struct WindowsScreen {
@@ -119,8 +112,10 @@ impl WindowsScreen {
         }
     }
 
-    /// 兩條路徑的差別只有「縮到多大」與「怎麼縮」。
-    pub(crate) fn capture(&mut self, ts: Millis, long_edge: u32) -> Result<Option<RawFrame>> {
+    /// 兩條路徑的差別只有「縮到多大」與「怎麼縮」。縮圖是在 GDI 裡用
+    /// `StretchBlt` + `HALFTONE` 做掉，和先拿原生圖再用
+    /// `image::imageops::resize` 縮不是同一種縮法，量的時候不能互換。
+    pub fn capture(&mut self, ts: Millis, long_edge: u32) -> Result<Option<RawFrame>> {
         // 鎖定時不擷取。這裡要主動問，不能只靠「拍出來是黑的」——
         // 黑畫面會被當成一張正常的畫面存起來、算 dhash、跑 OCR。
         if session_locked() {
@@ -144,25 +139,26 @@ impl WindowsScreen {
 
         Ok(Some(RawFrame::from_rgba(ts, monitor, dst_w, dst_h, rgba)))
     }
+
+    /// 不搬像素，回答前景視窗所在螢幕的原始大小。
+    pub fn frame_size() -> Option<(u32, u32)> {
+        if session_locked() {
+            return None;
+        }
+        let (_, rect) = focused_monitor(unsafe { GetForegroundWindow() })?;
+        let w = rect.right - rect.left;
+        let h = rect.bottom - rect.top;
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        Some((w as u32, h as u32))
+    }
 }
 
 impl ScreenSource for WindowsScreen {
     fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
         self.capture(ts, OCR_LONG_EDGE)
     }
-}
-
-/// 把 `w×h` 等比縮到長邊不超過 `max`。本來就夠小就原樣返回。
-fn fit(w: u32, h: u32, max: u32) -> (u32, u32) {
-    let long = w.max(h);
-    if long <= max || long == 0 {
-        return (w, h);
-    }
-    let scale = max as f64 / long as f64;
-    (
-        ((w as f64 * scale).round() as u32).max(1),
-        ((h as f64 * scale).round() as u32).max(1),
-    )
 }
 
 /// 工作站是否鎖定。
@@ -517,31 +513,7 @@ unsafe fn bench_one(
 
 #[cfg(test)]
 mod tests {
-    use super::{RawFrame, fit};
-
-    #[test]
-    fn fit_leaves_small_images_alone() {
-        assert_eq!(fit(800, 600, 1568), (800, 600));
-        assert_eq!(fit(1568, 900, 1568), (1568, 900));
-    }
-
-    #[test]
-    fn fit_scales_by_the_long_edge_and_keeps_aspect() {
-        // 4K 橫向
-        assert_eq!(fit(3840, 2160, 1568), (1568, 882));
-        // 直立螢幕：長邊是高度
-        assert_eq!(fit(2160, 3840, 1568), (882, 1568));
-        // 正方形
-        assert_eq!(fit(4000, 4000, 1000), (1000, 1000));
-    }
-
-    #[test]
-    fn fit_never_returns_a_zero_dimension() {
-        // 極端長寬比縮完會讓短邊四捨五入成 0，那會做出一張沒有像素的圖
-        let (w, h) = fit(10_000, 3, 100);
-        assert!(w >= 1 && h >= 1, "got {w}x{h}");
-        assert_eq!(fit(0, 0, 100), (0, 0));
-    }
+    use super::RawFrame;
 
     /// 真的去抓這台機器的螢幕，把每一種抓法的耗時印出來。
     ///

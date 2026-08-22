@@ -127,6 +127,18 @@ pub trait Ocr {
     fn recognize(&mut self, frame: &RawFrame) -> Result<Vec<OcrBlock>>;
 }
 
+/// OCR 引擎拒絕尺寸過大的圖片。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcrImageTooLarge;
+
+impl std::fmt::Display for OcrImageTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("圖片超過 OCR 引擎尺寸上限")
+    }
+}
+
+impl std::error::Error for OcrImageTooLarge {}
+
 /// 一個完整的平台後端：錄製迴圈唯一看得見的東西。
 ///
 /// 刻意用扁平的方法而不是回傳 `&mut dyn XSource`：像 replay 這種

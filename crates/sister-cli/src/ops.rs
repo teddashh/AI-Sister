@@ -7448,8 +7448,736 @@ pub mod doctor {
 pub mod bench {
     use super::*;
 
+    #[cfg(any(windows, test))]
+    use sister_capture::traits::Ocr;
+
+    /// 一張畫面的大小。具名欄位讓寬高在呼叫端對調時不會安靜通過。
+    #[cfg(any(windows, test))]
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct Pixels {
+        w: u32,
+        h: u32,
+    }
+
+    #[cfg(any(windows, test))]
+    impl Pixels {
+        fn long(self) -> u32 {
+            self.w.max(self.h)
+        }
+        fn short(self) -> u32 {
+            self.w.min(self.h)
+        }
+        fn label(self) -> String {
+            format!("{}x{}", self.w, self.h)
+        }
+    }
+
+    /// 一行字出現幾次。集合會把螢幕上重複的「確定」吃掉，讓真的漏字變成零。
+    #[cfg(any(windows, test))]
+    type Lines = std::collections::BTreeMap<String, usize>;
+
+    #[cfg(any(windows, test))]
+    fn lines_of(texts: impl IntoIterator<Item = String>) -> Lines {
+        let mut lines = Lines::new();
+        for text in texts {
+            let text = text.trim();
+            if !text.is_empty() {
+                *lines.entry(text.to_string()).or_default() += 1;
+            }
+        }
+        lines
+    }
+
+    /// 兩次原生都讀到的行。會自己變的時鐘與通知不該拿來當尺。
+    #[cfg(any(windows, test))]
+    #[derive(Default)]
+    struct Baseline(Lines);
+
+    #[cfg(any(windows, test))]
+    impl Baseline {
+        fn from_natives(first: &Lines, second: &Lines) -> Self {
+            Self(
+                first
+                    .iter()
+                    .filter_map(|(line, count)| {
+                        second
+                            .get(line)
+                            .map(|other| (line.clone(), (*count).min(*other)))
+                    })
+                    .collect(),
+            )
+        }
+        fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+        fn total(&self) -> usize {
+            self.0.values().sum()
+        }
+        fn missing_in(&self, row: &Lines) -> usize {
+            self.0
+                .iter()
+                .map(|(line, count)| count.saturating_sub(*row.get(line).unwrap_or(&0)))
+                .sum()
+        }
+        fn extra_in(&self, row: &Lines, volatile: &Lines) -> usize {
+            row.iter()
+                .map(|(line, count)| {
+                    count.saturating_sub(
+                        self.0.get(line).unwrap_or(&0) + volatile.get(line).unwrap_or(&0),
+                    )
+                })
+                .sum()
+        }
+    }
+
+    /// OCR 一次要 2–3 秒；五張 ×（1+3）＝20 次已要一分多鐘，而這整段
+    /// 畫面都不能動。再加只會讓兩次原生隔得更遠、共同基準線更薄。
+    #[cfg(any(windows, test))]
+    const MAX_OCR_ROUNDS: u32 = 3;
+
+    #[cfg(any(windows, test))]
+    #[derive(Clone, Copy)]
+    struct Rounds {
+        requested: Option<u32>,
+        used: u32,
+    }
+
+    #[cfg(any(windows, test))]
+    impl Rounds {
+        fn choose(requested: Option<u32>) -> Self {
+            Self {
+                requested,
+                used: requested.unwrap_or(MAX_OCR_ROUNDS).clamp(1, MAX_OCR_ROUNDS),
+            }
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    enum Shot {
+        Read {
+            size: Pixels,
+            avg_ms: f64,
+            lines: Lines,
+            wobbled: bool,
+        },
+        NoFrame,
+        CaptureFailed(String),
+        OcrFailed {
+            size: Pixels,
+            why: String,
+            too_large: bool,
+        },
+    }
+
+    #[cfg(any(windows, test))]
+    struct Row {
+        label: String,
+        shot: Shot,
+    }
+
+    #[cfg(any(windows, test))]
+    struct Skipped {
+        long_edge: u32,
+        why: String,
+    }
+
+    #[cfg(any(windows, test))]
+    struct OcrTable {
+        screen: ScreenSizes,
+        rounds: Rounds,
+        planned: usize,
+        taken: usize,
+        skipped: Vec<Skipped>,
+        rows: Vec<Row>,
+        baseline: Baseline,
+        volatile_first: usize,
+        volatile_second: usize,
+        volatile: Lines,
+    }
+
+    #[cfg(any(windows, test))]
+    const CANDIDATES: [u32; 3] = [1568, 1280, 1024];
+    #[cfg(any(windows, test))]
+    const COL_SIZE: &str = "尺寸";
+    #[cfg(any(windows, test))]
+    const COL_PIXELS: &str = "像素";
+    #[cfg(any(windows, test))]
+    const COL_MS: &str = "OCR 平均";
+    #[cfg(any(windows, test))]
+    const COL_MISSING: &str = "少了幾行";
+    #[cfg(any(windows, test))]
+    const COL_EXTRA: &str = "多了幾行";
+    #[cfg(any(windows, test))]
+    fn guide_indent() -> String {
+        crate::fmt::pad("", crate::fmt::display_width("怎麼讀："))
+    }
+
+    #[cfg(any(windows, test))]
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct ScreenSizes {
+        native: Pixels,
+        ocr: Pixels,
+    }
+
+    #[cfg(any(windows, test))]
+    impl ScreenSizes {
+        fn from_native(native: Pixels) -> Self {
+            let (w, h) = sister_capture::scale::fit(
+                native.w,
+                native.h,
+                sister_capture::scale::OCR_LONG_EDGE,
+            );
+            Self {
+                native,
+                ocr: Pixels { w, h },
+            }
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    fn plan(screen: ScreenSizes) -> (Vec<u32>, Vec<Skipped>) {
+        let native = screen.ocr;
+        let mut use_edges = Vec::new();
+        let mut skipped = Vec::new();
+        for edge in CANDIDATES {
+            if edge >= native.long() {
+                let measured_long = if screen.native == screen.ocr {
+                    format!("OCR 實際長邊 {}", native.long())
+                } else {
+                    format!(
+                        "OCR 受 {} 上限夾過的長邊 {}",
+                        sister_capture::scale::OCR_LONG_EDGE,
+                        native.long()
+                    )
+                };
+                skipped.push(Skipped {
+                    long_edge: edge,
+                    why: format!("候選長邊 {edge} 不小於 {measured_long}，那不是縮小"),
+                });
+                continue;
+            }
+            let (w, h) = sister_capture::scale::fit(native.w, native.h, edge);
+            let size = Pixels { w, h };
+            if size.short() < sister_capture::scale::OCR_MIN_SHORT_EDGE {
+                let clipped = if screen.native == screen.ocr {
+                    String::new()
+                } else {
+                    format!(
+                        "OCR 原圖已受 {} 長邊上限夾為 {}；",
+                        sister_capture::scale::OCR_LONG_EDGE,
+                        screen.ocr.label()
+                    )
+                };
+                skipped.push(Skipped {
+                    long_edge: edge,
+                    why: format!(
+                        "{clipped}縮完短邊只有 {}，低於 OCR 下限 {}",
+                        size.short(),
+                        sister_capture::scale::OCR_MIN_SHORT_EDGE
+                    ),
+                });
+            } else {
+                use_edges.push(edge);
+            }
+        }
+        (use_edges, skipped)
+    }
+
+    #[cfg(any(windows, test))]
+    trait Shots {
+        fn screen_size(&mut self) -> Option<ScreenSizes>;
+        fn shoot(&mut self, long_edge: u32) -> anyhow::Result<Option<sister_capture::RawFrame>>;
+    }
+
+    #[cfg(any(windows, test))]
+    trait Clock {
+        fn now_ms(&mut self) -> f64;
+    }
+
+    /// 先把所有畫面抓在同一個短時間窗，再開始慢很多的 OCR。代價是同時握著
+    /// 最多兩張全螢幕加三張縮圖 RGBA；1920×1080 的這一組約 28 MB。
+    #[cfg(any(windows, test))]
+    fn measure(
+        shots: &mut impl Shots,
+        ocr: &mut impl Ocr,
+        clock: &mut impl Clock,
+        say: &mut impl FnMut(&str),
+        requested_rounds: Option<u32>,
+    ) -> Option<OcrTable> {
+        let screen = shots.screen_size()?;
+        let native = screen.ocr;
+        let rounds = Rounds::choose(requested_rounds);
+        let (edges, skipped) = plan(screen);
+        let planned = edges.len() + 2;
+        say(&format!(
+            "{}。接下來要抓 {planned} 張，每張 1 次熱身 + {} 次計時的 OCR（共 {} 次），過程中請不要動畫面。",
+            if screen.native == screen.ocr {
+                format!("原生 {}", screen.native.label())
+            } else {
+                format!(
+                    "螢幕原始 {}，OCR 受 {} 長邊上限夾為 {}",
+                    screen.native.label(),
+                    sister_capture::scale::OCR_LONG_EDGE,
+                    screen.ocr.label()
+                )
+            },
+            rounds.used,
+            planned * (1 + rounds.used as usize)
+        ));
+        if !skipped.is_empty() {
+            say(&format!("（{} 個候選被跳過，理由在表裡）", skipped.len()));
+        }
+
+        enum Grab {
+            Frame(sister_capture::RawFrame),
+            None,
+            Failed(String),
+        }
+        let labels_edges = std::iter::once(("原生 A".to_string(), native.long()))
+            .chain(edges.iter().map(|e| (format!("縮到 {e}"), *e)))
+            .chain(std::iter::once(("原生 B".to_string(), native.long())))
+            .collect::<Vec<_>>();
+        let grabs = labels_edges
+            .iter()
+            .map(|(_, edge)| match shots.shoot(*edge) {
+                Ok(Some(frame)) => Grab::Frame(frame),
+                Ok(None) => Grab::None,
+                Err(error) => Grab::Failed(format!("{error:#}")),
+            })
+            .collect::<Vec<_>>();
+
+        let mut rows = Vec::with_capacity(planned);
+        for ((label, _), grab) in labels_edges.into_iter().zip(grabs) {
+            let shot = match grab {
+                Grab::None => Shot::NoFrame,
+                Grab::Failed(why) => Shot::CaptureFailed(why),
+                Grab::Frame(frame) => {
+                    let size = Pixels {
+                        w: frame.width,
+                        h: frame.height,
+                    };
+                    if let Err(error) = ocr.recognize(&frame) {
+                        let too_large = error
+                            .chain()
+                            .any(|cause| cause.is::<sister_capture::traits::OcrImageTooLarge>());
+                        Shot::OcrFailed {
+                            size,
+                            why: format!("{error:#}"),
+                            too_large,
+                        }
+                    } else {
+                        let mut total = 0.0;
+                        let mut readings = Vec::new();
+                        let mut failed = None;
+                        for _ in 0..rounds.used {
+                            let start = clock.now_ms();
+                            match ocr.recognize(&frame) {
+                                Ok(blocks) => {
+                                    total += clock.now_ms() - start;
+                                    readings.push(lines_of(blocks.into_iter().map(|b| b.text)));
+                                }
+                                Err(error) => {
+                                    let too_large = error.chain().any(|cause| {
+                                        cause.is::<sister_capture::traits::OcrImageTooLarge>()
+                                    });
+                                    failed = Some((format!("{error:#}"), too_large));
+                                    break;
+                                }
+                            }
+                        }
+                        match failed {
+                            Some((why, too_large)) => Shot::OcrFailed {
+                                size,
+                                why,
+                                too_large,
+                            },
+                            None => {
+                                // `used == 1` 時只有一次計時讀取，`windows(2)` 為空，
+                                // 因而沒有足夠資料宣稱同一張圖重讀不一致。
+                                let wobbled = readings.windows(2).any(|pair| pair[0] != pair[1]);
+                                Shot::Read {
+                                    size,
+                                    avg_ms: total / rounds.used as f64,
+                                    lines: readings.pop().unwrap_or_default(),
+                                    wobbled,
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            rows.push(Row { label, shot });
+        }
+        let native_lines = |row: &Row| match &row.shot {
+            Shot::Read { lines, .. } => lines.clone(),
+            _ => Lines::new(),
+        };
+        let first = native_lines(&rows[0]);
+        let second = native_lines(rows.last().expect("至少有兩列原生"));
+        let baseline = Baseline::from_natives(&first, &second);
+        let mut volatile = Lines::new();
+        for (line, count) in first.iter().chain(second.iter()) {
+            if !baseline.0.contains_key(line) {
+                volatile
+                    .entry(line.clone())
+                    .and_modify(|seen| *seen = (*seen).max(*count))
+                    .or_insert(*count);
+            }
+        }
+        let volatile_first = first.values().sum::<usize>() - baseline.total();
+        let volatile_second = second.values().sum::<usize>() - baseline.total();
+        let taken = rows
+            .iter()
+            .filter(|row| matches!(row.shot, Shot::Read { .. } | Shot::OcrFailed { .. }))
+            .count();
+        Some(OcrTable {
+            screen,
+            rounds,
+            planned,
+            taken,
+            skipped,
+            rows,
+            baseline,
+            volatile_first,
+            volatile_second,
+            volatile,
+        })
+    }
+
+    #[cfg(any(windows, test))]
+    fn render(table: &OcrTable, language: Option<&str>) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        writeln!(
+            out,
+            "\nOCR 縮圖表（{}）：每種尺寸 1 次熱身不計時 + {} 次計時取平均。\n\
+             \x20\x20上限 {MAX_OCR_ROUNDS}（OCR 一次 2–3 秒，再加會拖長量測，也會讓共同基準線更薄）。",
+            if table.screen.native == table.screen.ocr {
+                format!("原生 {}", table.screen.native.label())
+            } else {
+                format!(
+                    "螢幕原始 {}；OCR 用的大小 {}，長邊上限 {}",
+                    table.screen.native.label(),
+                    table.screen.ocr.label(),
+                    sister_capture::scale::OCR_LONG_EDGE
+                )
+            },
+            table.rounds.used,
+        )
+        .unwrap();
+        if table
+            .rounds
+            .requested
+            .is_some_and(|n| n != table.rounds.used)
+        {
+            writeln!(
+                out,
+                "你給了 --rounds {}，{}到 {}。",
+                table.rounds.requested.unwrap(),
+                if table.rounds.requested.unwrap() < table.rounds.used {
+                    "提"
+                } else {
+                    "壓"
+                },
+                table.rounds.used
+            )
+            .unwrap();
+        }
+        writeln!(
+            out,
+            "OCR 語言：{}",
+            language.unwrap_or("引擎沒有回答語言標籤")
+        )
+        .unwrap();
+        for skipped in &table.skipped {
+            writeln!(out, "跳過縮到 {}：{}。", skipped.long_edge, skipped.why).unwrap();
+        }
+        let accuracy = !table.baseline.is_empty();
+        if accuracy {
+            writeln!(
+                out,
+                "  {}{}{}{}{}",
+                crate::fmt::pad(COL_SIZE, 14),
+                crate::fmt::pad(COL_PIXELS, 14),
+                crate::fmt::pad(COL_MS, 14),
+                crate::fmt::pad(COL_MISSING, 12),
+                COL_EXTRA
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "  {}{}{}",
+                crate::fmt::pad(COL_SIZE, 14),
+                crate::fmt::pad(COL_PIXELS, 14),
+                COL_MS
+            )
+            .unwrap();
+        }
+        for row in &table.rows {
+            let (pixels, ms, missing, extra) = match &row.shot {
+                Shot::Read {
+                    size,
+                    avg_ms,
+                    lines,
+                    ..
+                } => (
+                    size.label(),
+                    format!("{avg_ms:.1} ms"),
+                    table.baseline.missing_in(lines).to_string(),
+                    table.baseline.extra_in(lines, &table.volatile).to_string(),
+                ),
+                Shot::NoFrame => (
+                    "—".into(),
+                    "這一刻沒有畫面".into(),
+                    String::new(),
+                    String::new(),
+                ),
+                Shot::CaptureFailed(why) => (
+                    "—".into(),
+                    format!("抓圖失敗：{why}"),
+                    String::new(),
+                    String::new(),
+                ),
+                Shot::OcrFailed { size, why, .. } => (
+                    size.label(),
+                    format!("OCR 失敗：{why}"),
+                    String::new(),
+                    String::new(),
+                ),
+            };
+            let line = if accuracy {
+                format!(
+                    "  {}{}{}{}{}",
+                    crate::fmt::pad(&row.label, 14),
+                    crate::fmt::pad(&pixels, 14),
+                    crate::fmt::pad(&ms, 14),
+                    crate::fmt::pad(&missing, 12),
+                    extra
+                )
+            } else {
+                format!(
+                    "  {}{}{}",
+                    crate::fmt::pad(&row.label, 14),
+                    crate::fmt::pad(&pixels, 14),
+                    ms
+                )
+            };
+            writeln!(out, "{}", line.trim_end()).unwrap();
+        }
+        if !accuracy {
+            let first = &table.rows.first().expect("至少有原生 A").shot;
+            let second = &table.rows.last().expect("至少有原生 B").shot;
+            if matches!(first, Shot::Read { .. }) && matches!(second, Shot::Read { .. }) {
+                let count = |shot: &Shot| match shot {
+                    Shot::Read { lines, .. } => lines.values().sum::<usize>(),
+                    _ => unreachable!(),
+                };
+                let first_count = count(first);
+                let second_count = count(second);
+                if first_count == 0 && second_count == 0 {
+                    writeln!(
+                        out,
+                        "兩次原生都沒有讀到任何一行字；畫面上可能真的沒有字，也可能引擎讀不出來，\n\
+                                  `sister doctor` 會分得出來。\n\
+                                  所以不印準確度兩欄。"
+                    )
+                    .unwrap();
+                } else if first_count == 0 || second_count == 0 {
+                    writeln!(
+                        out,
+                        "原生 A 讀到 {first_count} 行、原生 B 讀到 {second_count} 行；其中一次原生沒有讀到字，\n\
+                         先用 `sister doctor` 確認引擎能讀字，所以不印準確度兩欄。"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        out,
+                        "原生 A 讀到 {first_count} 行、原生 B 讀到 {second_count} 行，兩邊沒有一行相同；\n\
+                         所以不印準確度兩欄。"
+                    )
+                    .unwrap();
+                }
+            } else {
+                let fact = |label: &str, shot: &Shot| match shot {
+                    Shot::Read { lines, .. } => {
+                        format!("{label} 讀到 {} 行", lines.values().sum::<usize>())
+                    }
+                    Shot::NoFrame => {
+                        format!("{label} 這一刻沒有畫面（請解鎖，並把前景視窗移到螢幕上）")
+                    }
+                    Shot::CaptureFailed(why) => {
+                        format!("{label} 抓圖失敗：{why}（請解鎖，並把前景視窗移到螢幕上）")
+                    }
+                    Shot::OcrFailed { why, too_large, .. } => format!(
+                        "{label} OCR 失敗：{why}{}",
+                        if *too_large {
+                            "（請看引擎上限那則錯誤）"
+                        } else {
+                            ""
+                        }
+                    ),
+                };
+                writeln!(
+                    out,
+                    "{}；{}。\n\
+                     所以沒有共同基準線，不印準確度兩欄。",
+                    fact("原生 A", first),
+                    fact("原生 B", second)
+                )
+                .unwrap();
+            }
+        }
+        writeln!(
+            out,
+            "抓到 {} 張（計畫 {} 張）。",
+            table.taken, table.planned
+        )
+        .unwrap();
+        if table.taken < table.planned {
+            let missing = table
+                .rows
+                .iter()
+                .filter(|r| matches!(r.shot, Shot::NoFrame | Shot::CaptureFailed(_)))
+                .map(|r| r.label.as_str())
+                .collect::<Vec<_>>()
+                .join("、");
+            if !missing.is_empty() {
+                writeln!(out, "沒抓到：{missing}。").unwrap();
+            }
+        }
+        if !table.baseline.is_empty() {
+            writeln!(
+                out,
+                "基準線：兩次原生都讀到的 {} 行。",
+                table.baseline.total()
+            )
+            .unwrap();
+        }
+        if !table.baseline.is_empty() && table.volatile_first + table.volatile_second > 0 {
+            writeln!(
+                out,
+                "另有 {}+{} 行只出現在其中一次（會自己變的東西：時鐘、通知），已排除。",
+                table.volatile_first, table.volatile_second
+            )
+            .unwrap();
+        }
+        let wobbled = table
+            .rows
+            .iter()
+            .filter_map(|r| {
+                matches!(r.shot, Shot::Read { wobbled: true, .. }).then_some(r.label.as_str())
+            })
+            .collect::<Vec<_>>();
+        if !wobbled.is_empty() {
+            writeln!(
+                out,
+                "同一張圖重讀時結果不一致：{}；表裡採最後一次。",
+                wobbled.join("、")
+            )
+            .unwrap();
+        }
+        let indent = guide_indent();
+        if table.planned == 2 {
+            let not_smaller = table.skipped.iter().any(|s| s.why.contains("不是縮小"));
+            let too_short = table
+                .skipped
+                .iter()
+                .any(|s| s.why.contains("低於 OCR 下限"));
+            let reason = match (not_smaller, too_short) {
+                (true, false) => "候選都不小於 OCR 實際大小",
+                (false, true) => "候選縮完的短邊都低於 OCR 下限",
+                (true, true) => "候選不是不夠小，就是縮完短邊低於 OCR 下限",
+                (false, false) => "這次沒有候選可量",
+            };
+            writeln!(
+                out,
+                "為什麼只有兩列：{reason}，所以表裡只有原生 A、原生 B 兩列。"
+            )
+            .unwrap();
+        }
+        if accuracy {
+            let noise = if table.volatile_first + table.volatile_second > 0 {
+                format!(
+                    "上面的「另有 {}+{} 行」是這台機器這次觀察到的揮發雜訊底線；",
+                    table.volatile_first, table.volatile_second
+                )
+            } else {
+                "這次兩列原生沒有觀察到揮發行；".to_string()
+            };
+            writeln!(out, "怎麼讀：「{COL_MS}」是一次 OCR 的平均耗時；「{COL_MISSING}」是基準線有、\n\
+                           {indent}這一列沒讀到的行——縮下去真的會賠掉的字；「{COL_EXTRA}」是這一列超過基準線與已知揮發行後仍多出的行。\n\
+                           {indent}時鐘、通知等會自己變的行也可能落在「{COL_EXTRA}」；{noise}\n\
+                           {indent}縮圖列明顯高過底線時，才值得懷疑是讀錯。「{COL_MISSING}」與「{COL_EXTRA}」要一起看。\n\
+                           {indent}「{COL_SIZE}」與「{COL_PIXELS}」說明實際量到哪一列畫面。").unwrap();
+        } else {
+            writeln!(
+                out,
+                "怎麼讀：「{COL_MS}」是一次 OCR 的平均耗時；這次沒有共同基準線，不能比較準確度。\n\
+                           {indent}「{COL_SIZE}」與「{COL_PIXELS}」說明實際量到哪一列畫面。"
+            )
+            .unwrap();
+        }
+        let timed = table
+            .rows
+            .iter()
+            .filter(|row| matches!(row.shot, Shot::Read { .. }))
+            .count();
+        match timed {
+            0 => {
+                let capture_failed = table.rows.iter().any(|row| {
+                    matches!(row.shot, Shot::NoFrame | Shot::CaptureFailed(_))
+                });
+                let ocr_failed = table
+                    .rows
+                    .iter()
+                    .any(|row| matches!(row.shot, Shot::OcrFailed { .. }));
+                let next = match (capture_failed, ocr_failed) {
+                    (true, false) => "請解鎖、回到一般互動桌面，把前景視窗移到螢幕上後再跑一次。",
+                    (false, true) => "畫面抓得到，但 OCR 每次都失敗；請跑 `sister doctor` 的內建圖自我測試。",
+                    (true, true) => "有些畫面沒抓到，另一些抓到後 OCR 失敗；請先解鎖並把前景視窗移到螢幕上，再跑 `sister doctor` 的內建圖自我測試。",
+                    (false, false) => "這次沒有成功的計時結果。",
+                };
+                writeln!(out, "這張表沒有量到任何毫秒；{next}")
+            }
+            1 => writeln!(out, "這張表只量到一個毫秒數，沒有第二個數字可以比較。"),
+            _ => writeln!(out, "這張表量到 {timed} 個毫秒數，可以比較速度。"),
+        }
+        .unwrap();
+        out
+    }
+
     #[cfg(windows)]
-    pub fn run(rounds: u32) -> Result<()> {
+    struct MonotonicClock(std::time::Instant);
+
+    #[cfg(windows)]
+    impl Clock for MonotonicClock {
+        fn now_ms(&mut self) -> f64 {
+            self.0.elapsed().as_secs_f64() * 1000.0
+        }
+    }
+
+    #[cfg(windows)]
+    impl Shots for sister_capture::windows::screen::WindowsScreen {
+        fn screen_size(&mut self) -> Option<ScreenSizes> {
+            let (w, h) = Self::frame_size()?;
+            Some(ScreenSizes::from_native(Pixels { w, h }))
+        }
+        fn shoot(&mut self, long_edge: u32) -> anyhow::Result<Option<sister_capture::RawFrame>> {
+            self.capture(sister_core::now_ms(), long_edge)
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn run(requested_rounds: Option<u32>) -> Result<()> {
+        const DEFAULT_GDI_ROUNDS: u32 = 8;
+        let rounds = requested_rounds.unwrap_or(DEFAULT_GDI_ROUNDS).max(1);
+        if requested_rounds.is_some_and(|n| n != rounds) {
+            println!(
+                "你給了 --rounds {}，GDI 表改用 {rounds}。",
+                requested_rounds.unwrap()
+            );
+        }
         let rows = sister_capture::windows::screen::bench_grab(rounds);
         if rows.is_empty() {
             println!(
@@ -7492,15 +8220,926 @@ pub mod bench {
              \x20                 CreateDIBSection，讓 BitBlt 直接寫進我們自己的記憶體，\n\
              \x20                 這一段整個消失。"
         );
+        println!("\n以下 OCR 表使用預設語言偏好。");
+        let config = sister_core::config::Config::default();
+        let mut ocr = sister_capture::windows::ocr::WindowsOcr::new(&config.capture.ocr_languages);
+        if !ocr.is_available() {
+            println!("這台機器沒有可用的 OCR 引擎，這張表量不到，跑 `sister doctor` 看是缺什麼。");
+            return Ok(());
+        }
+        let mut screen = sister_capture::windows::screen::WindowsScreen::new();
+        let mut clock = MonotonicClock(std::time::Instant::now());
+        let mut say = |s: &str| println!("{s}");
+        match measure(
+            &mut screen,
+            &mut ocr,
+            &mut clock,
+            &mut say,
+            requested_rounds,
+        ) {
+            Some(table) => println!("{}", render(&table, ocr.language().as_deref())),
+            None => println!("現在抓不到畫面，OCR 縮圖表量不到。"),
+        }
         Ok(())
     }
 
     #[cfg(not(windows))]
-    pub fn run(_rounds: u32) -> Result<()> {
+    pub fn run(_rounds: Option<u32>) -> Result<()> {
         // 不是「這台機器很慢」，是「這台機器沒有這條路可以量」。兩者長得
         // 一樣的話，開發機上跑一次會得到一張空表然後被當成「都是 0，很好」。
         println!("這個平台沒有 GDI 擷取後端，沒有東西可以量。這條路目前只有 Windows。");
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod bench_tests {
+        use super::*;
+        use sister_core::model::OcrBlock;
+        use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+
+        type Events = Rc<RefCell<Vec<String>>>;
+
+        struct FakeShots {
+            screen: Option<ScreenSizes>,
+            replies: VecDeque<anyhow::Result<Option<sister_capture::RawFrame>>>,
+            events: Events,
+        }
+
+        impl Shots for FakeShots {
+            fn screen_size(&mut self) -> Option<ScreenSizes> {
+                self.screen
+            }
+            fn shoot(&mut self, edge: u32) -> anyhow::Result<Option<sister_capture::RawFrame>> {
+                self.events.borrow_mut().push(format!("shoot:{edge}"));
+                self.replies
+                    .pop_front()
+                    .unwrap_or_else(|| Ok(Some(frame(edge))))
+            }
+        }
+
+        enum Reply {
+            Lines(Vec<&'static str>),
+            Fail(&'static str),
+            TooLarge,
+        }
+        struct FakeOcr {
+            replies: VecDeque<Reply>,
+            events: Events,
+        }
+        impl Ocr for FakeOcr {
+            fn recognize(
+                &mut self,
+                _frame: &sister_capture::RawFrame,
+            ) -> anyhow::Result<Vec<OcrBlock>> {
+                self.events.borrow_mut().push("recognize".into());
+                match self
+                    .replies
+                    .pop_front()
+                    .unwrap_or(Reply::Lines(vec!["甲", "乙"]))
+                {
+                    Reply::Lines(lines) => Ok(lines.into_iter().map(block).collect()),
+                    Reply::Fail(why) => anyhow::bail!(why),
+                    Reply::TooLarge => {
+                        Err(anyhow::Error::new(sister_capture::traits::OcrImageTooLarge)
+                            .context("畫面 5120x1440 超過引擎上限 4096"))
+                    }
+                }
+            }
+        }
+        struct FakeClock {
+            now: f64,
+            jumps: VecDeque<f64>,
+        }
+        impl Clock for FakeClock {
+            fn now_ms(&mut self) -> f64 {
+                let answer = self.now;
+                self.now += self.jumps.pop_front().unwrap_or(10.0);
+                answer
+            }
+        }
+
+        fn block(text: &str) -> OcrBlock {
+            OcrBlock {
+                text: text.into(),
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+                confidence: 1.0,
+            }
+        }
+        fn frame(edge: u32) -> sister_capture::RawFrame {
+            sister_capture::RawFrame {
+                ts: 0,
+                monitor: 0,
+                width: edge,
+                height: edge * 9 / 16,
+                rgba: None,
+                dhash: 0,
+            }
+        }
+        fn shots(native: Pixels, events: &Events) -> FakeShots {
+            FakeShots {
+                screen: Some(ScreenSizes::from_native(native)),
+                replies: VecDeque::new(),
+                events: events.clone(),
+            }
+        }
+        fn repeated(groups: Vec<Vec<&'static str>>, rounds: u32) -> VecDeque<Reply> {
+            groups
+                .into_iter()
+                .flat_map(|lines| (0..=rounds).map(move |_| Reply::Lines(lines.clone())))
+                .collect()
+        }
+        fn run_groups(groups: Vec<Vec<&'static str>>, rounds: u32) -> (OcrTable, String, Events) {
+            let events = Events::default();
+            let mut s = shots(Pixels { w: 1920, h: 1080 }, &events);
+            let mut o = FakeOcr {
+                replies: repeated(groups, rounds.clamp(1, MAX_OCR_ROUNDS)),
+                events: events.clone(),
+            };
+            let mut c = FakeClock {
+                now: 0.0,
+                jumps: VecDeque::new(),
+            };
+            let mut said: Vec<String> = Vec::new();
+            let table = measure(
+                &mut s,
+                &mut o,
+                &mut c,
+                &mut |x| said.push(x.to_string()),
+                Some(rounds),
+            )
+            .unwrap();
+            (table, said.join("\n"), events)
+        }
+
+        #[test]
+        fn multiset_accuracy_and_normal_missing_rows_reach_render() {
+            let (table, _, _) = run_groups(
+                vec![
+                    vec!["確定", "確定", "取消"],
+                    vec!["確定", "取消"],
+                    vec!["確定", "確定", "取消"],
+                    vec!["確定", "取消"],
+                    vec!["確定", "確定", "取消"],
+                ],
+                1,
+            );
+            let out = render(&table, Some("zh-Hant"));
+            assert!(
+                out.lines().any(|l| l.contains("縮到 1568")
+                    && l.split_whitespace().rev().take(2).eq(["0", "1"])),
+                "{out}"
+            );
+            assert!(
+                out.lines().any(|l| l.contains("縮到 1280")
+                    && l.split_whitespace().rev().take(2).eq(["0", "0"])),
+                "{out}"
+            );
+        }
+
+        #[test]
+        fn native_multiset_intersection_uses_the_smaller_count_in_render() {
+            let (table, _, _) = run_groups(
+                vec![
+                    vec!["確定", "確定", "取消"],
+                    vec!["確定", "取消"],
+                    vec!["取消"],
+                    vec!["確定", "取消"],
+                    vec!["確定", "取消"],
+                ],
+                1,
+            );
+            let out = render(&table, Some("zh-Hant"));
+            let complete = out.lines().find(|line| line.contains("縮到 1568")).unwrap();
+            assert!(
+                complete.split_whitespace().rev().take(2).eq(["0", "0"]),
+                "{out}"
+            );
+            let missing = out.lines().find(|line| line.contains("縮到 1280")).unwrap();
+            assert!(
+                missing.split_whitespace().rev().take(2).eq(["0", "1"]),
+                "{out}"
+            );
+        }
+
+        #[test]
+        fn volatile_lines_are_excluded_but_stable_runs_do_not_claim_exclusion() {
+            let (table, _, _) = run_groups(
+                vec![
+                    vec!["甲", "12:34"],
+                    vec!["甲"],
+                    vec!["甲"],
+                    vec!["甲"],
+                    vec!["甲", "12:35"],
+                ],
+                1,
+            );
+            let out = render(&table, None);
+            assert!(out.contains("另有 1+1 行"));
+            assert!(
+                out.lines().any(|l| l.contains("縮到 1568")
+                    && l.split_whitespace().rev().take(2).eq(["0", "0"]))
+            );
+            let (stable, _, _) = run_groups(
+                vec![vec!["甲"], vec!["甲"], vec!["甲"], vec!["甲"], vec!["甲"]],
+                1,
+            );
+            assert!(!render(&stable, None).contains("只出現在其中一次"));
+        }
+
+        #[test]
+        fn empty_baseline_hides_accuracy_but_keeps_timing() {
+            let (table, _, _) = run_groups(
+                vec![vec!["甲"], vec!["甲"], vec!["甲"], vec!["甲"], vec!["乙"]],
+                1,
+            );
+            let out = render(&table, None);
+            assert!(!out.contains(COL_MISSING));
+            assert!(!out.contains(COL_EXTRA));
+            assert!(!out.contains("0/0"));
+            assert!(!out.contains("NaN"));
+            assert!(out.contains("10.0 ms"));
+            assert!(out.contains("原生 A 讀到 1 行、原生 B 讀到 1 行"));
+            assert!(!out.contains("基準線："));
+            assert!(!out.contains("只出現在其中一次"));
+            let (nonempty, _, _) = run_groups(vec![vec!["甲"]; 5], 1);
+            assert!(render(&nonempty, None).contains(COL_MISSING));
+        }
+
+        #[test]
+        fn empty_natives_are_distinguished_from_disjoint_natives() {
+            let (empty, _, _) = run_groups(vec![vec![]; 5], 1);
+            let empty_out = render(&empty, None);
+            assert!(
+                empty_out.contains("兩次原生都沒有讀到任何一行字"),
+                "{empty_out}"
+            );
+            assert!(!empty_out.contains("沒有一行相同"), "{empty_out}");
+
+            let (disjoint, _, _) = run_groups(
+                vec![vec!["甲"], vec!["甲"], vec!["甲"], vec!["甲"], vec!["乙"]],
+                1,
+            );
+            let disjoint_out = render(&disjoint, None);
+            assert!(disjoint_out.contains("沒有一行相同"), "{disjoint_out}");
+            assert!(
+                !disjoint_out.contains("兩次原生都沒有讀到任何一行字"),
+                "{disjoint_out}"
+            );
+        }
+
+        #[test]
+        fn all_skipped_changes_reading_guide_and_prints_every_reason() {
+            let events = Events::default();
+            let mut s = shots(Pixels { w: 1024, h: 576 }, &events);
+            let mut o = FakeOcr {
+                replies: repeated(vec![vec!["甲"], vec!["甲"]], 1),
+                events,
+            };
+            let mut c = FakeClock {
+                now: 0.0,
+                jumps: VecDeque::new(),
+            };
+            let mut said: Vec<String> = Vec::new();
+            let t = measure(
+                &mut s,
+                &mut o,
+                &mut c,
+                &mut |x| said.push(x.into()),
+                Some(1),
+            )
+            .unwrap();
+            let out = render(&t, None);
+            assert_eq!(t.rows.len(), 2);
+            assert_eq!(
+                format!("{}\n{out}", said.join("\n"))
+                    .matches("跳過縮到")
+                    .count(),
+                3
+            );
+            assert!(
+                said.iter()
+                    .any(|line| line == "（3 個候選被跳過，理由在表裡）")
+            );
+            assert!(out.contains("候選都不小於 OCR 實際大小"));
+            assert!(out.contains("原生 A、原生 B 兩列"));
+            assert!(out.contains("少了幾行"));
+            assert!(out.contains("多了幾行"));
+            assert!(out.contains("縮下去真的會賠掉"));
+            let (with, _, _) = run_groups(vec![vec!["甲"]; 5], 1);
+            assert!(render(&with, None).contains("縮下去真的會賠掉"));
+        }
+
+        #[test]
+        fn missing_capture_keeps_row_labels_and_real_taken_count() {
+            let events = Events::default();
+            let mut s = shots(Pixels { w: 1920, h: 1080 }, &events);
+            s.replies = VecDeque::from([
+                Ok(Some(frame(1920))),
+                Ok(None),
+                Ok(Some(frame(1280))),
+                Ok(Some(frame(1024))),
+                Ok(Some(frame(1920))),
+            ]);
+            let mut o = FakeOcr {
+                replies: repeated(vec![vec!["甲"]; 4], 1),
+                events,
+            };
+            let mut c = FakeClock {
+                now: 0.0,
+                jumps: VecDeque::new(),
+            };
+            let t = measure(&mut s, &mut o, &mut c, &mut |_| {}, Some(1)).unwrap();
+            let out = render(&t, None);
+            assert!(out.contains("縮到 1568"));
+            assert!(out.contains("縮到 1280"));
+            assert!(
+                !out.lines()
+                    .find(|l| l.contains("縮到 1568"))
+                    .unwrap()
+                    .contains("0.0 ms")
+            );
+            assert!(out.contains("抓到 4 張（計畫 5 張）"));
+            assert!(out.lines().all(|line| line == line.trim_end()), "{out:?}");
+        }
+
+        #[test]
+        fn rounds_average_order_ascii_and_column_constants_are_real_output() {
+            assert_eq!(Rounds::choose(Some(0)).used, 1);
+            assert_eq!(Rounds::choose(Some(2)).used, 2);
+            assert_eq!(Rounds::choose(Some(100)).used, MAX_OCR_ROUNDS);
+            let events = Events::default();
+            let mut s = shots(Pixels { w: 1920, h: 1080 }, &events);
+            let mut o = FakeOcr {
+                replies: repeated(vec![vec!["甲"]; 5], 3),
+                events: events.clone(),
+            };
+            let mut c = FakeClock {
+                now: 0.0,
+                jumps: VecDeque::from([10.0, 10.0, 20.0, 20.0, 30.0, 30.0]),
+            };
+            let mut said: Vec<String> = Vec::new();
+            let t = measure(
+                &mut s,
+                &mut o,
+                &mut c,
+                &mut |x| {
+                    events.borrow_mut().push("say".into());
+                    said.push(x.into())
+                },
+                Some(3),
+            )
+            .unwrap();
+            assert_eq!(
+                match &t.rows[0].shot {
+                    Shot::Read { avg_ms, .. } => *avg_ms,
+                    _ => -1.0,
+                },
+                20.0
+            );
+            let log = events.borrow();
+            let last_shoot = log.iter().rposition(|x| x.starts_with("shoot")).unwrap();
+            let first_ocr = log.iter().position(|x| x == "recognize").unwrap();
+            assert!(
+                log.iter().position(|x| x == "say").unwrap()
+                    < log.iter().position(|x| x.starts_with("shoot")).unwrap()
+            );
+            assert!(last_shoot < first_ocr);
+            assert!(said[0].contains("接下來要抓 5 張"), "{said:?}");
+            assert!(said[0].contains("共 20 次"), "{said:?}");
+            drop(log);
+            let out = render(&t, None);
+            assert!(!out.contains("這次計畫"), "{out}");
+            assert!(!out.contains("共跑 20 次 OCR"), "{out}");
+            assert!(out.contains("1568x882"));
+            assert!(!out.contains('×'));
+            for col in [COL_SIZE, COL_PIXELS, COL_MS, COL_MISSING, COL_EXTRA] {
+                assert!(out.matches(col).count() >= 2, "{col}: {out}");
+            }
+            let capped = OcrTable {
+                rounds: Rounds::choose(Some(100)),
+                ..t
+            };
+            let capped_out = render(&capped, None);
+            assert!(
+                capped_out.contains(&format!("上限 {MAX_OCR_ROUNDS}")),
+                "{capped_out}"
+            );
+            let declared_limit = capped_out
+                .lines()
+                .find_map(|line| {
+                    line.trim_start()
+                        .strip_prefix("上限 ")?
+                        .split_once('（')?
+                        .0
+                        .parse::<u32>()
+                        .ok()
+                })
+                .expect("表頭應宣布 rounds 上限");
+            assert_eq!(declared_limit, capped.rounds.used);
+            assert_eq!(capped.rounds.used, MAX_OCR_ROUNDS);
+            assert!(
+                capped_out.contains(&format!("壓到 {MAX_OCR_ROUNDS}")),
+                "{capped_out}"
+            );
+
+            let events = Events::default();
+            let mut s = shots(Pixels { w: 1100, h: 700 }, &events);
+            let mut o = FakeOcr {
+                replies: repeated(vec![vec!["甲"]; 3], 1),
+                events,
+            };
+            let mut c = FakeClock {
+                now: 0.0,
+                jumps: VecDeque::new(),
+            };
+            let mut reduced: Vec<String> = Vec::new();
+            measure(
+                &mut s,
+                &mut o,
+                &mut c,
+                &mut |line| reduced.push(line.into()),
+                Some(1),
+            )
+            .unwrap();
+            assert!(reduced[0].contains("接下來要抓 3 張"), "{reduced:?}");
+            assert!(reduced[0].contains("共 6 次"), "{reduced:?}");
+            assert!(reduced.iter().any(|line| line.starts_with("（2 個候選")));
+        }
+
+        #[test]
+        fn zero_rounds_and_ocr_failure_take_guarded_paths() {
+            let (zero, _, _) = run_groups(vec![vec!["甲"]; 5], 0);
+            let zero_out = render(&zero, None);
+            assert!(!zero_out.contains("NaN"));
+            assert!(zero_out.contains("你給了 --rounds 0，提到 1"), "{zero_out}");
+            assert!(!zero_out.contains("--rounds 0，壓"), "{zero_out}");
+            let (high, _, _) = run_groups(vec![vec!["甲"]; 5], 100);
+            let high_out = render(&high, None);
+            assert!(
+                high_out.contains(&format!("你給了 --rounds 100，壓到 {MAX_OCR_ROUNDS}")),
+                "{high_out}"
+            );
+            assert!(!high_out.contains("--rounds 100，提"), "{high_out}");
+            let typed = anyhow::Error::new(sister_capture::traits::OcrImageTooLarge)
+                .context("畫面 5120x1440 超過引擎上限 4096");
+            let typed_text = format!("{typed:#}");
+            assert!(!typed_text.contains('['), "{typed_text}");
+            assert!(
+                typed
+                    .chain()
+                    .any(|cause| { cause.is::<sister_capture::traits::OcrImageTooLarge>() })
+            );
+            let events = Events::default();
+            let mut s = shots(Pixels { w: 1024, h: 576 }, &events);
+            let mut o = FakeOcr {
+                replies: VecDeque::from([
+                    Reply::TooLarge,
+                    Reply::Lines(vec!["甲"]),
+                    Reply::Lines(vec!["甲"]),
+                ]),
+                events,
+            };
+            let mut c = FakeClock {
+                now: 0.0,
+                jumps: VecDeque::new(),
+            };
+            let t = measure(&mut s, &mut o, &mut c, &mut |_| {}, Some(1)).unwrap();
+            let out = render(&t, None);
+            assert!(out.contains("OCR 失敗：畫面 5120x1440 超過引擎上限 4096"));
+            assert!(!out.contains('['), "{out}");
+            assert!(
+                !out.lines()
+                    .find(|l| l.contains("原生 A"))
+                    .unwrap()
+                    .contains("ms")
+            );
+            assert!(out.contains("原生 A OCR 失敗：畫面 5120x1440 超過引擎上限 4096"));
+            assert!(out.contains("請看引擎上限那則錯誤"));
+            assert!(!out.contains("沒抓到或 OCR 失敗"));
+            assert!(!out.contains("基準線："));
+        }
+
+        #[test]
+        fn reread_instability_names_only_rows_that_actually_wobble() {
+            let run = |replies: VecDeque<Reply>| {
+                let events = Events::default();
+                let mut s = shots(Pixels { w: 1024, h: 576 }, &events);
+                let mut o = FakeOcr { replies, events };
+                let mut c = FakeClock {
+                    now: 0.0,
+                    jumps: VecDeque::new(),
+                };
+                let table = measure(&mut s, &mut o, &mut c, &mut |_| {}, Some(2)).unwrap();
+                render(&table, None)
+            };
+            let wobbled = run(VecDeque::from([
+                Reply::Lines(vec!["甲"]),
+                Reply::Lines(vec!["甲"]),
+                Reply::Lines(vec!["乙"]),
+                Reply::Lines(vec!["乙"]),
+                Reply::Lines(vec!["乙"]),
+                Reply::Lines(vec!["乙"]),
+            ]));
+            assert!(
+                wobbled.contains("同一張圖重讀時結果不一致：原生 A"),
+                "{wobbled}"
+            );
+            assert!(!wobbled.contains("不一致：原生 B"), "{wobbled}");
+
+            let stable = run(VecDeque::from([
+                Reply::Lines(vec!["甲"]),
+                Reply::Lines(vec!["甲"]),
+                Reply::Lines(vec!["甲"]),
+                Reply::Lines(vec!["甲"]),
+                Reply::Lines(vec!["甲"]),
+                Reply::Lines(vec!["甲"]),
+            ]));
+            assert!(!stable.contains("重讀時結果不一致"), "{stable}");
+        }
+
+        #[test]
+        fn plan_explains_both_skip_classes_and_their_opposites() {
+            let sizes = |pixels| ScreenSizes {
+                native: pixels,
+                ocr: pixels,
+            };
+            let (_, too_large) = plan(sizes(Pixels { w: 1024, h: 576 }));
+            assert!(too_large.iter().any(|s| s.why.contains("不小於 OCR")));
+            let (used, too_short) = plan(sizes(Pixels { w: 1920, h: 10 }));
+            assert!(too_short.iter().any(|s| s.why.contains("低於 OCR 下限")));
+            assert!(used.is_empty());
+            let (used, skipped) = plan(sizes(Pixels { w: 1920, h: 1080 }));
+            assert_eq!(used, CANDIDATES);
+            assert!(skipped.is_empty());
+
+            let (used, skipped) = plan(sizes(Pixels { w: 4000, h: 100 }));
+            assert!(used.is_empty());
+            assert_eq!(skipped.len(), 3);
+            assert!(skipped.iter().all(|s| s.why.contains("縮完短邊")));
+        }
+
+        #[test]
+        fn default_rounds_are_real_and_do_not_accuse_the_user() {
+            let events = Events::default();
+            let mut s = shots(Pixels { w: 1024, h: 576 }, &events);
+            let mut o = FakeOcr {
+                replies: repeated(vec![vec!["甲"], vec!["甲"]], MAX_OCR_ROUNDS),
+                events,
+            };
+            let mut c = FakeClock {
+                now: 0.0,
+                jumps: VecDeque::new(),
+            };
+            let table = measure(&mut s, &mut o, &mut c, &mut |_| {}, None).unwrap();
+            let out = render(&table, None);
+            assert_eq!(table.rounds.used, MAX_OCR_ROUNDS);
+            assert!(!out.contains("你給了 --rounds"), "{out}");
+            assert!(out.contains(&format!("+ {MAX_OCR_ROUNDS} 次計時")), "{out}");
+        }
+
+        #[test]
+        fn language_answer_and_absence_are_both_rendered() {
+            let (table, _, _) = run_groups(vec![vec!["甲"]; 5], 1);
+            let answered = render(&table, Some("zh-Hant-TW"));
+            assert!(answered.contains("OCR 語言：zh-Hant-TW"));
+            assert!(!answered.contains("引擎沒有回答語言標籤"));
+            let absent = render(&table, None);
+            assert!(absent.contains("OCR 語言：引擎沒有回答語言標籤"));
+            assert!(!absent.contains("OCR 語言：zh-Hant-TW"));
+        }
+
+        #[test]
+        fn volatile_clock_values_are_noise_not_unconditional_misreads() {
+            let (table, _, _) = run_groups(
+                vec![
+                    vec!["甲", "12:34"],
+                    vec!["甲", "12:35"],
+                    vec!["甲", "12:36"],
+                    vec!["甲", "12:37"],
+                    vec!["甲", "12:38"],
+                ],
+                1,
+            );
+            let out = render(&table, None);
+            assert!(!out.contains("是讀到了但讀錯"), "{out}");
+            assert!(out.contains("會自己變的行也可能落在「多了幾行」"), "{out}");
+            assert!(out.contains("雜訊底線"), "{out}");
+
+            let (stable, _, _) = run_groups(vec![vec!["甲"]; 5], 1);
+            let stable = render(&stable, None);
+            assert!(!stable.contains("另有 "), "{stable}");
+            assert!(!stable.contains("只出現在其中一次"), "{stable}");
+        }
+
+        #[test]
+        fn capture_failures_and_missing_labels_reach_the_table_and_summary() {
+            let events = Events::default();
+            let mut s = shots(Pixels { w: 1920, h: 1080 }, &events);
+            s.replies = VecDeque::from([
+                Err(anyhow::anyhow!("GetDC 爆掉")),
+                Ok(None),
+                Ok(Some(frame(1280))),
+                Ok(Some(frame(1024))),
+                Ok(Some(frame(1920))),
+            ]);
+            let mut o = FakeOcr {
+                replies: repeated(vec![vec!["甲"]; 3], 1),
+                events,
+            };
+            let mut c = FakeClock {
+                now: 0.0,
+                jumps: VecDeque::new(),
+            };
+            let out = render(
+                &measure(&mut s, &mut o, &mut c, &mut |_| {}, Some(1)).unwrap(),
+                None,
+            );
+            let native = out.lines().find(|l| l.contains("原生 A")).unwrap();
+            assert!(native.contains("抓圖失敗：GetDC 爆掉"), "{out}");
+            assert!(out.contains("沒抓到：原生 A、縮到 1568。"), "{out}");
+        }
+
+        #[test]
+        fn normalization_multisets_and_last_reading_reach_public_output() {
+            let (trimmed, _, _) = run_groups(vec![vec!["  甲  ", "", "   ", "甲"]; 5], 1);
+            assert!(render(&trimmed, None).contains("基準線：兩次原生都讀到的 2 行"));
+
+            let (duplicates, _, _) = run_groups(vec![vec!["確定", "確定", "取消"]; 5], 1);
+            assert!(render(&duplicates, None).contains("基準線：兩次原生都讀到的 3 行"));
+
+            let events = Events::default();
+            let mut s = shots(Pixels { w: 1024, h: 576 }, &events);
+            let mut o = FakeOcr {
+                replies: VecDeque::from([
+                    Reply::Lines(vec!["熱身 A"]),
+                    Reply::Lines(vec!["不同 A"]),
+                    Reply::Lines(vec!["共同"]),
+                    Reply::Lines(vec!["熱身 B"]),
+                    Reply::Lines(vec!["不同 B"]),
+                    Reply::Lines(vec!["共同"]),
+                ]),
+                events,
+            };
+            let mut c = FakeClock {
+                now: 0.0,
+                jumps: VecDeque::new(),
+            };
+            let out = render(
+                &measure(&mut s, &mut o, &mut c, &mut |_| {}, Some(2)).unwrap(),
+                None,
+            );
+            assert!(out.contains("基準線：兩次原生都讀到的 1 行"), "{out}");
+        }
+
+        #[test]
+        fn timing_footer_distinguishes_zero_one_and_many_measurements() {
+            let run = |replies: VecDeque<anyhow::Result<Option<sister_capture::RawFrame>>>,
+                       ocr_replies: VecDeque<Reply>| {
+                let events = Events::default();
+                let mut s = shots(Pixels { w: 1920, h: 1080 }, &events);
+                s.replies = replies;
+                let mut o = FakeOcr {
+                    replies: ocr_replies,
+                    events,
+                };
+                let mut c = FakeClock {
+                    now: 0.0,
+                    jumps: VecDeque::new(),
+                };
+                render(
+                    &measure(&mut s, &mut o, &mut c, &mut |_| {}, Some(1)).unwrap(),
+                    None,
+                )
+            };
+            let none = run((0..5).map(|_| Ok(None)).collect(), VecDeque::new());
+            assert!(none.contains("沒有量到任何毫秒"), "{none}");
+            assert!(none.contains("請解鎖"), "{none}");
+            assert!(!none.contains("sister doctor"), "{none}");
+            assert!(!none.contains("毫秒仍可比較"));
+            let one = run(
+                VecDeque::from([
+                    Ok(Some(frame(1920))),
+                    Ok(None),
+                    Ok(None),
+                    Ok(None),
+                    Ok(None),
+                ]),
+                VecDeque::new(),
+            );
+            assert!(
+                one.contains("只量到一個毫秒數，沒有第二個數字可以比較"),
+                "{one}"
+            );
+            let ocr_only = run(
+                VecDeque::new(),
+                (0..5).map(|_| Reply::Fail("RecognizeAsync 爆掉")).collect(),
+            );
+            assert!(
+                ocr_only.contains("畫面抓得到，但 OCR 每次都失敗"),
+                "{ocr_only}"
+            );
+            assert!(ocr_only.contains("sister doctor"), "{ocr_only}");
+            assert!(!ocr_only.contains("請解鎖"), "{ocr_only}");
+            let mixed = run(
+                VecDeque::from([
+                    Ok(None),
+                    Ok(Some(frame(1568))),
+                    Ok(None),
+                    Ok(Some(frame(1024))),
+                    Ok(None),
+                ]),
+                VecDeque::from([
+                    Reply::Fail("RecognizeAsync 爆掉"),
+                    Reply::Fail("RecognizeAsync 爆掉"),
+                ]),
+            );
+            assert!(mixed.contains("有些畫面沒抓到"), "{mixed}");
+            assert!(mixed.contains("OCR 失敗"), "{mixed}");
+            assert!(mixed.contains("請先解鎖"), "{mixed}");
+            assert!(mixed.contains("sister doctor"), "{mixed}");
+            let many = run(VecDeque::new(), VecDeque::new());
+            assert!(many.contains("量到 5 個毫秒數，可以比較速度"), "{many}");
+        }
+
+        #[test]
+        fn ocr_error_kinds_taken_count_and_fact_lines_are_truthful() {
+            let events = Events::default();
+            let mut s = shots(Pixels { w: 1024, h: 576 }, &events);
+            let mut o = FakeOcr {
+                replies: VecDeque::from([
+                    Reply::Fail("RecognizeAsync: 0x8007000E"),
+                    Reply::Lines(vec!["甲"; 40]),
+                    Reply::Lines(vec!["甲"; 40]),
+                ]),
+                events,
+            };
+            let mut c = FakeClock {
+                now: 0.0,
+                jumps: VecDeque::new(),
+            };
+            let table = measure(&mut s, &mut o, &mut c, &mut |_| {}, Some(1)).unwrap();
+            let out = render(&table, None);
+            assert!(
+                out.lines()
+                    .find(|l| l.contains("原生 A"))
+                    .unwrap()
+                    .contains("OCR 失敗：RecognizeAsync"),
+                "{out}"
+            );
+            assert!(out.contains("原生 B 讀到 40 行"), "{out}");
+            assert!(!out.contains("請看引擎上限那則錯誤"), "{out}");
+            assert_eq!(table.taken, 2);
+            assert!(!out.contains("沒抓到：。"));
+        }
+
+        #[test]
+        fn screen_size_absence_and_native_ocr_order_are_observable() {
+            let events = Events::default();
+            let mut missing = FakeShots {
+                screen: None,
+                replies: VecDeque::new(),
+                events: events.clone(),
+            };
+            let mut o = FakeOcr {
+                replies: VecDeque::new(),
+                events: events.clone(),
+            };
+            let mut c = FakeClock {
+                now: 0.0,
+                jumps: VecDeque::new(),
+            };
+            assert!(measure(&mut missing, &mut o, &mut c, &mut |_| {}, None).is_none());
+
+            let derived = ScreenSizes::from_native(Pixels { w: 5120, h: 1440 });
+            assert_eq!(derived.native, Pixels { w: 5120, h: 1440 });
+            assert_eq!(derived.ocr, Pixels { w: 4096, h: 1152 });
+            assert!(derived.ocr.w <= derived.native.w && derived.ocr.h <= derived.native.h);
+            assert!(derived.ocr.long() <= sister_capture::scale::OCR_LONG_EDGE);
+
+            let mut clipped = FakeShots {
+                screen: Some(derived),
+                replies: VecDeque::new(),
+                events: events.clone(),
+            };
+            let table = measure(&mut clipped, &mut o, &mut c, &mut |_| {}, Some(1)).unwrap();
+            let out = render(&table, None);
+            assert!(out.contains("螢幕原始 5120x1440"), "{out}");
+            assert!(
+                out.contains("OCR 用的大小 4096x1152，長邊上限 4096"),
+                "{out}"
+            );
+            assert!(!out.contains("原生 4096x1152"), "{out}");
+
+            let (_, clipped_skip) = plan(ScreenSizes {
+                native: Pixels { w: 5120, h: 10 },
+                ocr: Pixels { w: 4096, h: 8 },
+            });
+            assert!(
+                clipped_skip
+                    .iter()
+                    .all(|s| s.why.contains("4096") && s.why.contains("上限夾")),
+                "{:?}",
+                clipped_skip.iter().map(|s| &s.why).collect::<Vec<_>>()
+            );
+
+            let (normal, _, _) = run_groups(vec![vec!["甲"]; 5], 1);
+            let normal = render(&normal, None);
+            assert!(normal.contains("OCR 縮圖表（原生 1920x1080）"));
+            assert!(!normal.contains("OCR 用的大小"));
+        }
+
+        #[test]
+        fn asymmetric_volatility_and_duplicate_extras_keep_counts() {
+            let (volatile, _, _) = run_groups(
+                vec![
+                    vec!["甲", "A", "B"],
+                    vec!["甲"],
+                    vec!["甲"],
+                    vec!["甲"],
+                    vec!["甲", "C"],
+                ],
+                1,
+            );
+            assert!(render(&volatile, None).contains("另有 2+1 行"));
+
+            let (extra, _, _) = run_groups(
+                vec![
+                    vec!["甲"],
+                    vec!["甲", "乙", "乙"],
+                    vec!["甲"],
+                    vec!["甲"],
+                    vec!["甲"],
+                ],
+                1,
+            );
+            let out = render(&extra, None);
+            let row = out.lines().find(|l| l.contains("縮到 1568")).unwrap();
+            assert!(row.split_whitespace().last() == Some("2"), "{out}");
+        }
+
+        #[test]
+        fn one_empty_native_is_not_called_disjoint_and_guide_indent_matches() {
+            let (table, _, _) = run_groups(
+                vec![vec![], vec!["甲"], vec!["甲"], vec!["甲"], vec!["甲"]],
+                1,
+            );
+            let out = render(&table, None);
+            assert!(out.contains("其中一次原生沒有讀到字"), "{out}");
+            assert!(!out.contains("兩邊沒有一行相同"), "{out}");
+
+            let (accuracy, _, _) = run_groups(vec![vec!["甲"]; 5], 1);
+            let out = render(&accuracy, None);
+            let heading = out
+                .lines()
+                .find(|line| line.starts_with("怎麼讀："))
+                .expect("輸出裡應有讀法標題");
+            let heading_prefix = heading.split_once('「').unwrap().0;
+            let expected = crate::fmt::display_width(heading_prefix);
+            for line in out
+                .lines()
+                .filter(|l| l.contains("這一列沒讀到") || l.contains("時鐘、通知"))
+            {
+                let actual = line.chars().take_while(|c| *c == ' ').count();
+                assert_eq!(actual, expected, "{line:?}\n{out}");
+            }
+        }
+
+        #[test]
+        fn all_skipped_public_guide_names_too_short_and_mixed_reasons() {
+            let render_size = |pixels: Pixels| {
+                let events = Events::default();
+                let mut s = shots(pixels, &events);
+                let mut o = FakeOcr {
+                    replies: repeated(vec![vec!["甲"], vec!["甲"]], 1),
+                    events,
+                };
+                let mut c = FakeClock {
+                    now: 0.0,
+                    jumps: VecDeque::new(),
+                };
+                render(
+                    &measure(&mut s, &mut o, &mut c, &mut |_| {}, Some(1)).unwrap(),
+                    None,
+                )
+            };
+            let short = render_size(Pixels { w: 1920, h: 10 });
+            assert!(short.contains("候選縮完的短邊都低於 OCR 下限"), "{short}");
+            assert!(!short.contains("沒有比它更小"), "{short}");
+
+            let mixed = render_size(Pixels { w: 1400, h: 43 });
+            assert!(
+                mixed.contains("候選不是不夠小，就是縮完短邊低於 OCR 下限"),
+                "{mixed}"
+            );
+            assert!(mixed.contains("原生 A、原生 B 兩列"), "{mixed}");
+            assert!(
+                mixed.contains("少了幾行") && mixed.contains("多了幾行"),
+                "{mixed}"
+            );
+        }
     }
 }
 

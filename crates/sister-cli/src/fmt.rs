@@ -101,12 +101,17 @@ pub fn one_line(s: &str, max_chars: usize) -> String {
 /// 的相依樹是 `scripts/check-no-network.sh` 盯著的資產之一，而這裡對齊錯一欄
 /// 的代價是「有點醜」。
 pub fn pad(s: &str, width: usize) -> String {
-    let used: usize = s.chars().map(|c| if is_wide(c) { 2 } else { 1 }).sum();
+    let used = display_width(s);
     let mut out = s.to_string();
     for _ in used..width {
         out.push(' ');
     }
     out
+}
+
+/// 一段字在終端機上佔的欄數；和 [`pad`] 使用完全相同的寬字規則。
+pub fn display_width(s: &str) -> usize {
+    s.chars().map(|c| if is_wide(c) { 2 } else { 1 }).sum()
 }
 
 fn is_wide(c: char) -> bool {

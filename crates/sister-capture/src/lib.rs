@@ -14,6 +14,7 @@ pub mod ocr_layout;
 pub mod recorder;
 
 pub mod replay;
+pub mod scale;
 pub mod timings;
 pub mod traits;
 /// Windows 擷取後端。只在 Windows 上編譯。

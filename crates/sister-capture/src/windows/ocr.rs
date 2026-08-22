@@ -44,6 +44,7 @@ use windows::Security::Cryptography::CryptographicBuffer;
 use windows::core::HSTRING;
 
 use crate::ocr_layout::{Word, assemble_line};
+use crate::scale::OCR_MIN_SHORT_EDGE;
 use crate::traits::{Ocr, RawFrame};
 
 /// 這個引擎不回報信心度，所以我們也不假裝有。
@@ -53,12 +54,6 @@ use crate::traits::{Ocr, RawFrame};
 /// 那是會被立刻發現的方向；填 1.0 的話則是一個永遠沒有人會發現的謊。
 /// 照 THREAT_MODEL 的原則，錯要往看得見的那邊錯。
 pub const CONFIDENCE_UNKNOWN: f32 = -1.0;
-
-/// 短邊低於這個值，Windows 的 OCR 會回傳零行而且不報錯。
-///
-/// 官方沒有文件，這個數字來自社群長期的回報（也和 Windows 8.1 前身 API
-/// 文件裡寫死的 40～2600 對得上）。
-const MIN_DIMENSION: u32 = 40;
 
 /// 問不到 `MaxImageDimension` 時的保守退路。
 ///
@@ -233,14 +228,15 @@ impl Ocr for WindowsOcr {
         }
         // 太小的圖引擎會安靜地回傳零行，不會報錯——擋在這裡至少不會被誤會成
         // 「這張畫面上沒有字」
-        if w.min(h) < MIN_DIMENSION {
+        if w.min(h) < OCR_MIN_SHORT_EDGE {
             return Ok(Vec::new());
         }
         if w.max(h) > self.max_dimension {
             // 不要在這裡叫人去調 `capture.max_long_edge`：那個設定只管存檔，
-            // 送進來這裡的是原生解析度的像素（上限是 screen.rs 的
+            // 送進來這裡的是 OCR 擷取解析度的像素（上限是 scale.rs 的
             // `OCR_LONG_EDGE`）。一句指錯地方的建議，比沒有建議更浪費時間。
-            bail!("畫面 {w}x{h} 超過引擎上限 {}", self.max_dimension);
+            return Err(anyhow::Error::new(crate::traits::OcrImageTooLarge)
+                .context(format!("畫面 {w}x{h} 超過引擎上限 {}", self.max_dimension)));
         }
 
         // RGBA → BGRA。順便把 alpha 壓成不透明：來源若留下未定義的 alpha，
