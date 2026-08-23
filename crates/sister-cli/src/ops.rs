@@ -9982,8 +9982,9 @@ pub mod record {
         let mut rec = Recorder::new(backend, db, config, images)?;
 
         install_ctrl_c_handler();
-        // 從這一刻開始算足跡。Phase 0 的驗收條件裡有三個數字，而在這之前
-        // 沒有任何辦法知道它們是多少——一個量不到的預算不是預算，是一句話。
+        // 從這一刻開始算足跡。Phase 0 要留下 CPU／RAM／磁碟三類實測；RAM 與
+        // 磁碟另有阻擋上限。在這之前沒有辦法知道它們是多少——一個量不到的
+        // 數字不是基準，也不是預算。
         let mut footprint = sister_capture::footprint::Footprint::new();
         let disk_at_start = rec
             .db()
@@ -10401,7 +10402,6 @@ pub mod record {
         report_footprint(
             &footprint,
             &stats,
-            rec.timings(),
             rec.db()
                 .stats()
                 .map(|s| s.db_bytes + s.image_bytes)
@@ -10425,8 +10425,10 @@ pub mod record {
 
     /// 她自己佔了多少。
     ///
-    /// Phase 0 的驗收條件裡有三個數字（CPU < 3%、RAM < 400MB、
-    /// 磁碟 < 300MB/天），而在這一段出現之前**沒有任何辦法知道它們是多少**。
+    /// Phase 0 的驗收條件裡還有兩個足跡上限（RAM < 400MB、磁碟 < 300MB/天），
+    /// 而在這一段出現之前**沒有任何辦法知道它們是多少**。CPU 仍然照實量，
+    /// 但 Ted 在 alpha.46 真機量到活躍寫程式 44.0% 後選擇保留記憶密度；
+    /// 2026-08-23 起它不再是 Phase 0 的阻擋門檻，也沒有另造一條 45% 接受線。
     /// 一個量不到的預算不是預算，是一句話——而 README 上遲早要寫這些數字，
     /// 那就必須是她自己量出來的，不是我開工作管理員瞄一眼記下來的。
     ///
@@ -10435,11 +10437,9 @@ pub mod record {
     /// Phase 0 的驗收預算（PHASES.md）。
     ///
     /// 寫在程式裡而不是只寫在文件裡，是因為文件不會在超標的時候出聲。
-    /// 實測那次是 CPU 27.1%、磁碟 11.4 GB/天，而摘要照樣平鋪直敘地印出來，
-    /// 沒有任何一個字說「這超標九倍」——要靠讀的人自己記得預算是多少，
+    /// 實測那次是 RAM 401 MB、磁碟 11.4 GB/天，而摘要照樣平鋪直敘地印出來，
+    /// 沒有任何一個字說「超過哪條仍有效的門」——要靠讀的人自己記得預算，
     /// 再自己心算。她應該自己講。
-    #[cfg(any(windows, test))]
-    const BUDGET_CPU_PCT: f64 = 3.0;
     #[cfg(any(windows, test))]
     const BUDGET_RSS_BYTES: u64 = 400 * 1024 * 1024;
     #[cfg(any(windows, test))]
@@ -10499,25 +10499,6 @@ pub mod record {
         }
     }
 
-    /// 省電閘門完美運作時，這台機器的 CPU **地板**（百分比）。
-    ///
-    /// `per_look_ms` = 一次睜眼（抓一張圖）的成本。完全沒人碰的一天仍然要每
-    /// `MAX_BLIND_MS` 睜一次眼，因為「沒有輸入」只是「畫面沒變」的一個猜測，
-    /// 不是保證。所以這個數字是這個設計付得起的最低價，而閘門一行都改不動它。
-    ///
-    /// 要它是因為：閘門修好之後很容易把 CPU 那條當成結案了。而 127 ms 一次
-    /// 的話地板是 2.5%——3% 預算的八成半，**而且那是一台沒有人在用的機器**。
-    /// 用起來的時候閘門本來就該開著（有輸入就代表畫面可能變了），所以閘門那
-    /// 條路已經走到底，真正要便宜的是一次睜眼本身。這個函式把那句話從我的
-    /// 推論變成他螢幕上的算術。
-    ///
-    /// `any(windows, test)` 的理由同 [`DiskProjection`]。
-    #[cfg(any(windows, test))]
-    fn idle_floor_pct(per_look_ms: f64) -> f64 {
-        let looks_per_day = 86_400_000.0 / sister_capture::recorder::MAX_BLIND_MS as f64;
-        looks_per_day * per_look_ms / 86_400_000.0 * 100.0
-    }
-
     /// 足跡回報必須自己帶著量測條件走。沒有畫面時明講量不到，不能讓 `0×0`
     /// 同時表示「真的解析度是零」和「這場沒抓到畫面」。負載則不是程式能從
     /// 畫面推知的事，留一個明確待填欄位，讓貼回來的人不能只貼漂亮的數字。
@@ -10530,15 +10511,10 @@ pub mod record {
         format!("版本 sister {version}；{screen}；負載：程式量不到，貼回時請註明當時在做什麼")
     }
 
-    /// CPU 平均值的百分比。獨立型別讓它和一次睜眼的毫秒數對調時直接編譯失敗。
+    /// CPU 平均值的百分比。獨立型別讓它和其他 `f64` 接錯時直接編譯失敗。
     #[cfg(any(windows, test))]
     #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
     struct CpuPercent(f64);
-
-    /// 一次睜眼的毫秒數。獨立型別擋住兩個相鄰 `Option<f64>` 接反仍能編譯的手滑。
-    #[cfg(any(windows, test))]
-    #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-    struct PerLookMs(f64);
 
     /// 這一場量到的所有數字。相同 primitive、不同意思的欄位各自包成 newtype，
     /// 對調會是型別錯誤；同型別 getter 接錯則由
@@ -10552,8 +10528,6 @@ pub mod record {
         cpu_percent: Option<CpuPercent>,
         /// 期間內看過的最大 RSS。`None` = 量不到。
         peak_rss_bytes: Option<u64>,
-        /// 一次睜眼（抓一張圖）多少毫秒。`None` = 這場沒抓過。
-        per_look_ms: Option<PerLookMs>,
         disk: DiskMeasured,
     }
 
@@ -10598,7 +10572,6 @@ pub mod record {
             frame_size,
             cpu_percent,
             peak_rss_bytes,
-            per_look_ms,
             disk:
                 DiskMeasured {
                     delta_bytes: disk_delta,
@@ -10620,35 +10593,9 @@ pub mod record {
         let mut breached = Vec::new();
         let mut phase_zero_budget_breached = false;
         if let Some(CpuPercent(cpu)) = cpu_percent {
-            let cpu_over = cpu > BUDGET_CPU_PCT;
-            parts.push(format!("{}CPU 平均 {cpu:.1}%", mark(cpu_over)));
-            if cpu_over {
-                phase_zero_budget_breached = true;
-                breached.push(format!(
-                    "CPU {cpu:.1}% 超過預算 {BUDGET_CPU_PCT:.0}%（{:.0} 倍）",
-                    cpu / BUDGET_CPU_PCT
-                ));
-                // 超標的時候要講清楚省電閘門救不救得了，因為「閘門沒生效」
-                // 是這條路上最像答案的答案，而它只對了一半。
-                if let Some(PerLookMs(ms)) = per_look_ms.filter(|ms| ms.0 > 0.0) {
-                    let floor = idle_floor_pct(ms);
-                    let verdict = if floor > BUDGET_CPU_PCT {
-                        "——**已經超過預算了**。閘門修得再好都到不了，\
-                         要便宜的是一次睜眼本身（`sister bench` 會說貴在哪一段）。"
-                    } else if floor > BUDGET_CPU_PCT * 0.7 {
-                        "——佔掉預算的一大半，而那是一台沒有人在用的機器。\
-                         剩下的空間不夠給真的在用的時候，先跑 `sister bench`。"
-                    } else {
-                        "——地板還在預算內，所以這次超標是閘門沒關上，不是抓圖太貴。"
-                    };
-                    breached.push(format!(
-                        "一次睜眼 {ms:.0} ms。就算省電閘門完美，一台**完全沒人碰**的機器\
-                         每 {} 秒還是得睜一次眼，一天 {:.0} 次 = {floor:.1}% CPU{verdict}",
-                        sister_capture::recorder::MAX_BLIND_MS / 1000,
-                        86_400_000.0 / sister_capture::recorder::MAX_BLIND_MS as f64,
-                    ));
-                }
-            }
+            // CPU 是量測值，不是 Phase 0 判決。不能把 alpha.46 某一種工作負載的
+            // 44.0% 偷換成所有工作負載都適用的 45% 門檻。
+            parts.push(format!("CPU 平均 {cpu:.1}%"));
         }
         if let Some(rss) = peak_rss_bytes {
             let rss_over = rss > BUDGET_RSS_BYTES;
@@ -10805,13 +10752,12 @@ pub mod record {
         /// 把這一場的量測接成一份 `FootprintMeasured`。
         ///
         /// 這個函式存在的唯一理由是**接線要測得到**。接線留在 Windows 薄殼時，
-        /// `cpu_percent()` 換成同型別的 `cpu_seconds_used()`，以及 CPU 百分比和一次
-        /// 睜眼毫秒數對調，都曾讓四道閘門全綠，最後卻把健康的 2.5% 說成 15%。
-        /// 現在 Linux 會編到這裡，測試也直接核對每一條來源。
+        /// `cpu_percent()` 換成同型別的 `cpu_seconds_used()` 曾讓四道閘門全綠，
+        /// 最後卻把累積秒數印成百分比。現在 Linux 會編到這裡，測試也直接核對
+        /// 每一條來源。
         fn measure(
             f: &sister_capture::footprint::Footprint,
             stats: &sister_capture::RecorderStats,
-            timings: &sister_capture::timings::Timings,
             disk_delta_bytes: i64,
             image_budget_mb: u64,
         ) -> Self {
@@ -10819,12 +10765,6 @@ pub mod record {
                 frame_size: stats.last_frame_size,
                 cpu_percent: f.cpu_percent().map(CpuPercent),
                 peak_rss_bytes: f.peak_rss_bytes(),
-                // 「一次睜眼多貴」問的就是 grab 這一段：閘門放行之後真的去讀
-                // 螢幕的那一次。`per_call` 已經只除以真的做了事的次數。
-                per_look_ms: timings
-                    .grab
-                    .per_call()
-                    .map(|d| PerLookMs(d.as_secs_f64() * 1000.0)),
                 disk: DiskMeasured {
                     delta_bytes: disk_delta_bytes,
                     image_bytes: ImageBytesWritten::from_stats(stats),
@@ -10848,20 +10788,18 @@ pub mod record {
     }
 
     /// Windows 這一層只負責印字；所有來源到欄位的接線都在 `measure()`，
-    /// 因而 Linux 的測試也會編譯並核對。五個輸入的型別彼此不同，位置參數
+    /// 因而 Linux 的測試也會編譯並核對。四個輸入的型別彼此不同，位置參數
     /// 對調會直接編譯失敗；同型別 getter 接錯則由 `measure()` 的測試守住。
     #[cfg(windows)]
     fn report_footprint(
         f: &sister_capture::footprint::Footprint,
         stats: &sister_capture::RecorderStats,
-        timings: &sister_capture::timings::Timings,
         disk_delta_bytes: i64,
         image_budget_mb: u64,
     ) {
         println!(
             "{}",
-            FootprintMeasured::measure(f, stats, timings, disk_delta_bytes, image_budget_mb)
-                .report(f)
+            FootprintMeasured::measure(f, stats, disk_delta_bytes, image_budget_mb).report(f)
         );
     }
 
@@ -11057,7 +10995,7 @@ pub mod record {
     ///
     /// 拆出來、而且在測試建置下也編得到：`report_ocr` 只在 Windows 上存在，
     /// 而一句只有目標平台才驗得到的話，等於一句沒有被驗過的話。同一個理由
-    /// 和同一個 `any(windows, test)` 見 [`idle_floor_pct`]。
+    /// 和同一個 `any(windows, test)` 見 [`DiskProjection`]。
     #[cfg(any(windows, test))]
     fn ocr_off_words(stores_images: StoringImages) -> &'static str {
         if stores_images.enabled() {
@@ -11155,7 +11093,7 @@ pub mod record {
         use super::record_meanings::{ImageBytesWritten, OcrEnabled};
         use super::{
             BootBeat, ConfigWatch, CpuPercent, DiskMeasured, DiskProjection, FootprintMeasured,
-            ImageBudgetBytes, PerLookMs, StoringImages, TickCounts, WantsImages, already_recording,
+            ImageBudgetBytes, StoringImages, TickCounts, WantsImages, already_recording,
             footprint_context, footprint_lines, ocr_off_words, ocr_work_line,
         };
         use crate::ops::tmp::Tmp;
@@ -11303,7 +11241,6 @@ pub mod record {
                 frame_size: Some((2560, 1440)),
                 cpu_percent: None,
                 peak_rss_bytes: None,
-                per_look_ms: None,
                 disk: DiskMeasured {
                     delta_bytes: 0,
                     image_bytes: written_bytes(0),
@@ -11317,11 +11254,11 @@ pub mod record {
             Some(bytes as f64 / 600.0 * 86_400.0)
         }
 
-        /// 1. `over()` 必須同時標出三種超標，也不能把三種合格誤標成超標。
+        /// 1. RAM／磁碟超標要標出；CPU 永遠照實量，但不再是 Phase 0 門檻。
         #[test]
         fn footprint_marks_every_breach_and_no_passing_budget() {
             let over = FootprintMeasured {
-                cpu_percent: Some(CpuPercent(27.1)),
+                cpu_percent: Some(CpuPercent(46.0)),
                 peak_rss_bytes: Some(401 * MB_U),
                 disk: DiskMeasured {
                     delta_bytes: 3584 * MB_I,
@@ -11332,15 +11269,15 @@ pub mod record {
                 ..nothing_measured()
             };
             let out = footprint_lines(&over, |bytes| Some(bytes as f64));
-            for warning in [
-                "⚠ CPU 平均 27.1%",
-                "⚠ RAM 峰值 401.0 MB",
-                "⚠ 磁碟 3.5 GB/天",
-            ] {
-                assert!(out.contains(warning), "三種超標都必須直接帶 ⚠：{out}");
+            assert!(out.contains("CPU 平均 46.0%"), "CPU 仍要照實顯示：{out}");
+            assert!(
+                !out.contains("⚠ CPU") && !out.contains("CPU 46.0% 超過預算"),
+                "CPU 不得被偷換成另一條 Phase 0 門檻：{out}"
+            );
+            for warning in ["⚠ RAM 峰值 401.0 MB", "⚠ 磁碟 3.5 GB/天"] {
+                assert!(out.contains(warning), "兩種超標都必須直接帶 ⚠：{out}");
             }
             for warning in [
-                "CPU 27.1% 超過預算 3%（9 倍）",
                 "RAM 401.0 MB 超過預算 400.0 MB",
                 "磁碟 3.5 GB/天 超過預算 300.0 MB/天（12 倍）",
             ] {
@@ -11352,7 +11289,7 @@ pub mod record {
             );
 
             let passing = FootprintMeasured {
-                cpu_percent: Some(CpuPercent(2.0)),
+                cpu_percent: Some(CpuPercent(44.0)),
                 peak_rss_bytes: Some(399 * MB_U),
                 disk: DiskMeasured {
                     delta_bytes: MB_I,
@@ -11609,67 +11546,6 @@ pub mod record {
             assert!(!out.contains('⚠'), "空集合不印警告：{out}");
         }
 
-        /// 11. CPU 超標時，省電閘門的三個判詞都由實測地板決定。
-        #[test]
-        fn cpu_breach_uses_the_matching_idle_floor_verdict() {
-            let cases = [
-                (
-                    127.0,
-                    "佔掉預算的一大半",
-                    ["閘門沒關上，不是抓圖太貴", "已經超過預算了"],
-                ),
-                (
-                    27.0,
-                    "閘門沒關上，不是抓圖太貴",
-                    ["佔掉預算的一大半", "已經超過預算了"],
-                ),
-                (
-                    200.0,
-                    "已經超過預算了",
-                    ["佔掉預算的一大半", "閘門沒關上，不是抓圖太貴"],
-                ),
-            ];
-            for (ms, wanted, rejected) in cases {
-                let m = FootprintMeasured {
-                    cpu_percent: Some(CpuPercent(4.0)),
-                    per_look_ms: Some(PerLookMs(ms)),
-                    ..nothing_measured()
-                };
-                let out = footprint_lines(&m, |_| None);
-                if ms == 127.0 {
-                    assert!(
-                        out.contains("一次睜眼 127 ms"),
-                        "實測成本必須接進說明：{out}"
-                    );
-                }
-                assert!(out.contains(wanted), "{ms} ms 應選中「{wanted}」：{out}");
-                for wrong in rejected {
-                    assert!(!out.contains(wrong), "{ms} ms 不該選中「{wrong}」：{out}");
-                }
-            }
-        }
-
-        #[test]
-        fn a_zero_per_look_cost_is_missing_not_a_measured_floor() {
-            let m = FootprintMeasured {
-                cpu_percent: Some(CpuPercent(4.0)),
-                per_look_ms: Some(PerLookMs(0.0)),
-                ..nothing_measured()
-            };
-            let out = footprint_lines(&m, |_| None);
-            for unmeasured_claim in [
-                "一次睜眼",
-                "佔掉預算的一大半",
-                "閘門沒關上，不是抓圖太貴",
-                "已經超過預算了",
-            ] {
-                assert!(
-                    !out.contains(unmeasured_claim),
-                    "0 ms 沒量到時不可以下地板判詞「{unmeasured_claim}」：{out}"
-                );
-            }
-        }
-
         #[test]
         fn footprint_lines_passes_the_measured_frame_size_to_its_context() {
             let measured = footprint_lines(&nothing_measured(), |_| None);
@@ -11693,35 +11569,23 @@ pub mod record {
             );
         }
 
-        /// `stats`、`timings` 與兩個純量必須各自接進正確欄位。
+        /// `stats`、`Footprint` 與兩個純量必須各自接進正確欄位。
         #[test]
-        fn measure_wires_stats_timings_and_scalars_to_their_fields() {
+        fn measure_wires_stats_footprint_and_scalars_to_their_fields() {
             let stats = sister_capture::RecorderStats {
                 last_frame_size: Some((3840, 2160)),
                 image_bytes: 7 * MB_U,
                 images_over_budget: 3,
                 ..Default::default()
             };
-            let mut timings = sister_capture::timings::Timings::default();
-            timings.grab.calls = 4;
-            timings.grab.total = std::time::Duration::from_millis(508);
-            timings.store.calls = 4;
-            timings.store.total = std::time::Duration::from_millis(12);
-            assert_ne!(
-                timings.grab.per_call(),
-                timings.store.per_call(),
-                "grab 和 store 若設成一樣，這條測試就分不出接錯"
-            );
-
             let f = sister_capture::footprint::Footprint::new();
-            let m = FootprintMeasured::measure(&f, &stats, &timings, -37, 250);
+            let m = FootprintMeasured::measure(&f, &stats, -37, 250);
             assert_eq!(m.frame_size, Some((3840, 2160)));
             assert_eq!(
                 m.cpu_percent,
                 f.cpu_percent().map(CpuPercent),
-                "CPU 那一格接的是 Footprint，不是 grab 的睜眼成本（127 ms 在這裡會變成 127.0%）"
+                "CPU 那一格接的是 Footprint"
             );
-            assert_eq!(m.per_look_ms, Some(PerLookMs(127.0)));
             assert_eq!(m.disk.image_bytes.bytes(), 7 * MB_U);
             assert_eq!(m.disk.image_cap_bytes.bytes(), 250 * 1024 * 1024);
             assert!(m.disk.image_budget_closed_this_session);
@@ -11741,8 +11605,7 @@ pub mod record {
                 "兩個 getter 必須先有可辨識的輸出，這條接線測試才算數"
             );
             let stats = sister_capture::RecorderStats::default();
-            let timings = sister_capture::timings::Timings::default();
-            let m = FootprintMeasured::measure(&f, &stats, &timings, 0, 0);
+            let m = FootprintMeasured::measure(&f, &stats, 0, 0);
             assert!(!m.disk.image_budget_closed_this_session);
             assert_eq!(
                 m.cpu_percent,
@@ -11784,13 +11647,12 @@ pub mod record {
             );
         }
 
-        /// 整塊黃金輸出釘住行序、分隔、警告前綴、CPU 地板算術與註腳縮排。
+        /// 整塊黃金輸出釘住行序、分隔、警告前綴與註腳縮排。
         #[test]
-        fn all_budgets_breached_match_the_whole_golden_block() {
+        fn remaining_budgets_breached_match_the_whole_golden_block() {
             let m = FootprintMeasured {
-                cpu_percent: Some(CpuPercent(4.0)),
+                cpu_percent: Some(CpuPercent(46.0)),
                 peak_rss_bytes: Some(401 * MB_U),
-                per_look_ms: Some(PerLookMs(127.0)),
                 disk: DiskMeasured {
                     delta_bytes: 400 * MB_I,
                     image_bytes: written_bytes(350 * MB_U),
@@ -11805,9 +11667,7 @@ pub mod record {
                 format!(
                     concat!(
                         "  條件：版本 sister {}；最後一次抓到的畫面 2560×1440；負載：程式量不到，貼回時請註明當時在做什麼\n",
-                        "  足跡：⚠ CPU 平均 4.0%、⚠ RAM 峰值 401.0 MB、⚠ 磁碟 400.0 MB/天（這段實際長了 400.0 MB：畫面 350.0 MB、其他 50.0 MB）\n",
-                        "  ⚠  CPU 4.0% 超過預算 3%（1 倍）\n",
-                        "  ⚠  一次睜眼 127 ms。就算省電閘門完美，一台**完全沒人碰**的機器每 5 秒還是得睜一次眼，一天 17280 次 = 2.5% CPU——佔掉預算的一大半，而那是一台沒有人在用的機器。剩下的空間不夠給真的在用的時候，先跑 `sister bench`。\n",
+                        "  足跡：CPU 平均 46.0%、⚠ RAM 峰值 401.0 MB、⚠ 磁碟 400.0 MB/天（這段實際長了 400.0 MB：畫面 350.0 MB、其他 50.0 MB）\n",
                         "  ⚠  RAM 401.0 MB 超過預算 400.0 MB\n",
                         "  ⚠  磁碟 400.0 MB/天 超過預算 300.0 MB/天（1 倍）\n",
                         "  ⚠  主要是圖：畫面 350.0 MB/天。調小 capture.max_image_mb_per_day 或拉長 image_min_interval_ms。\n",
@@ -11818,11 +11678,11 @@ pub mod record {
             );
         }
 
-        /// 三項都合格的整塊黃金輸出不得混入警告、說明或 Phase 0 註腳。
+        /// 兩項門檻都合格的整塊黃金輸出不得混入警告、說明或 Phase 0 註腳。
         #[test]
         fn all_budgets_passing_match_the_whole_golden_block() {
             let m = FootprintMeasured {
-                cpu_percent: Some(CpuPercent(2.0)),
+                cpu_percent: Some(CpuPercent(44.0)),
                 peak_rss_bytes: Some(399 * MB_U),
                 disk: DiskMeasured {
                     delta_bytes: MB_I,
@@ -11838,47 +11698,49 @@ pub mod record {
                 format!(
                     concat!(
                         "  條件：版本 sister {}；最後一次抓到的畫面 2560×1440；負載：程式量不到，貼回時請註明當時在做什麼\n",
-                        "  足跡：CPU 平均 2.0%、RAM 峰值 399.0 MB、磁碟 1.0 MB/天（這段實際長了 1.0 MB：畫面 0 B、其他 1.0 MB）"
+                        "  足跡：CPU 平均 44.0%、RAM 峰值 399.0 MB、磁碟 1.0 MB/天（這段實際長了 1.0 MB：畫面 0 B、其他 1.0 MB）"
                     ),
                     env!("CARGO_PKG_VERSION")
                 )
             );
         }
 
-        /// 三個 `over()` 與三個 breach 判斷都必須同守嚴格 `>`：等於合格，
-        /// 各自多一格才同時出現摘要警告、說明與 Phase 0 註腳。
+        /// RAM／磁碟的 `over()` 與 breach 判斷必須同守嚴格 `>`：等於合格，
+        /// 多一格才同時出現摘要警告、說明與 Phase 0 註腳；CPU 沒有這道門。
         #[test]
         fn exact_budget_passes_and_one_step_over_breaches_on_both_surfaces() {
             let exact = FootprintMeasured {
-                cpu_percent: Some(CpuPercent(3.0)),
+                cpu_percent: Some(CpuPercent(99.0)),
                 peak_rss_bytes: Some(400 * MB_U),
                 ..nothing_measured()
             };
             let out = footprint_lines(&exact, |bytes| {
                 (bytes == 0).then_some(300.0 * 1024.0 * 1024.0)
             });
-            assert!(!out.contains('⚠'), "剛好等於三項預算仍然合格：{out}");
+            assert!(!out.contains('⚠'), "剛好等於兩項預算仍然合格：{out}");
             assert!(!out.contains("docs/PHASES.md"), "合格不附註腳：{out}");
+            assert!(out.contains("CPU 平均 99.0%"), "CPU 高低都只照實量：{out}");
 
             let above = FootprintMeasured {
-                cpu_percent: Some(CpuPercent(3.1)),
+                cpu_percent: Some(CpuPercent(99.0)),
                 peak_rss_bytes: Some(400 * MB_U + 1),
                 ..nothing_measured()
             };
             let out = footprint_lines(&above, |bytes| {
                 (bytes == 0).then_some(300.0 * 1024.0 * 1024.0 + 1.0)
             });
-            for needle in ["⚠ CPU 平均", "⚠ RAM 峰值", "⚠ 磁碟", "docs/PHASES.md"] {
+            for needle in ["⚠ RAM 峰值", "⚠ 磁碟", "docs/PHASES.md"] {
                 assert!(
                     out.contains(needle),
                     "多一格就必須越過「{needle}」那道門：{out}"
                 );
             }
-            for needle in [
-                "CPU 3.1% 超過預算",
-                "RAM 400.0 MB 超過預算",
-                "磁碟 300.0 MB/天 超過預算",
-            ] {
+            assert!(!out.contains("⚠ CPU"), "CPU 不是 Phase 0 門檻：{out}");
+            assert!(
+                !out.contains("CPU 99.0% 超過預算"),
+                "CPU 沒有新造門檻：{out}"
+            );
+            for needle in ["RAM 400.0 MB 超過預算", "磁碟 300.0 MB/天 超過預算"] {
                 assert!(
                     out.contains(needle),
                     "摘要與說明必須一致越界「{needle}」：{out}"
@@ -11886,7 +11748,7 @@ pub mod record {
             }
         }
 
-        /// CPU、RAM、磁碟各自超標都要有 Phase 0 註腳；只有圖額度建議則沒有。
+        /// RAM、磁碟各自超標要有 Phase 0 註腳；CPU 量測與圖額度建議則沒有。
         #[test]
         fn each_phase_zero_breach_and_image_ceiling_advice_choose_the_right_footnote() {
             let capped_but_passing = FootprintMeasured {
@@ -11908,22 +11770,22 @@ pub mod record {
                 "磁碟合格不能掛超標註腳：{out}"
             );
 
-            let individual_breaches = [
-                (
-                    "CPU",
-                    FootprintMeasured {
-                        cpu_percent: Some(CpuPercent(3.1)),
-                        ..nothing_measured()
-                    },
-                ),
-                (
-                    "RAM",
-                    FootprintMeasured {
-                        peak_rss_bytes: Some(400 * MB_U + 1),
-                        ..nothing_measured()
-                    },
-                ),
-            ];
+            let cpu_only = FootprintMeasured {
+                cpu_percent: Some(CpuPercent(99.0)),
+                ..nothing_measured()
+            };
+            let out = footprint_lines(&cpu_only, |_| None);
+            assert!(out.contains("CPU 平均 99.0%"), "CPU 仍要列出：{out}");
+            assert!(!out.contains('⚠'), "CPU 不再觸發 Phase 0 警告：{out}");
+            assert!(!out.contains("docs/PHASES.md"), "CPU 不掛超標註腳：{out}");
+
+            let individual_breaches = [(
+                "RAM",
+                FootprintMeasured {
+                    peak_rss_bytes: Some(400 * MB_U + 1),
+                    ..nothing_measured()
+                },
+            )];
             for (budget, measured) in individual_breaches {
                 let out = footprint_lines(&measured, |_| None);
                 assert!(
@@ -12030,29 +11892,6 @@ pub mod record {
             assert!(!above.contains("主要是圖"), "門檻上不能留在另一面：{above}");
         }
 
-        /// 105 ms 與 150 ms 兩道 CPU 地板分界的兩側必須指向相反下一步。
-        #[test]
-        fn cpu_idle_floor_verdicts_straddle_both_decision_boundaries() {
-            let cases = [
-                (104.9, "閘門沒關上，不是抓圖太貴"),
-                (105.1, "佔掉預算的一大半"),
-                (149.9, "佔掉預算的一大半"),
-                (150.1, "已經超過預算了"),
-            ];
-            for (ms, verdict) in cases {
-                let m = FootprintMeasured {
-                    cpu_percent: Some(CpuPercent(4.0)),
-                    per_look_ms: Some(PerLookMs(ms)),
-                    ..nothing_measured()
-                };
-                let out = footprint_lines(&m, |_| None);
-                assert!(
-                    out.contains(verdict),
-                    "{ms} ms 應落在「{verdict}」這面：{out}"
-                );
-            }
-        }
-
         /// 被夾的圖速率要在歸因數字旁標明上限；未夾時既有兩句一字不變。
         #[test]
         fn clamped_image_rate_is_labeled_but_uncapped_wording_stays_unchanged() {
@@ -12117,38 +11956,6 @@ pub mod record {
             );
             // 另一半不可以跟著壞掉：圖有在寫的時候，那句話本來就是對的。
             assert!(ocr_off_words(StoringImages::from_raw(true)).contains("畫面留下了"));
-        }
-
-        /// 省電閘門修好**不等於** CPU 那條結案了。
-        ///
-        /// 閘門管的是「沒人碰的時候別看」。可是就算完全沒人碰，每
-        /// `MAX_BLIND_MS` 還是得睜一次眼——沒有輸入只是「畫面沒變」的猜測，
-        /// 不是保證。所以那個頻率乘上一次睜眼的成本，就是這個設計付得起的
-        /// 最低價，而閘門一行都改不動它。
-        ///
-        /// 他那台 2560×1440 一次 127 ms：地板 2.5%，佔掉 3% 預算的八成半，
-        /// **而且那是一台沒有人在用的機器**。CI runner 的 1024×768 一次
-        /// 27 ms：0.5%，還很寬。同一個設計、同一份程式、兩個完全不同的
-        /// 結論——所以這個數字必須用他機器上真的量到的那一個算，不能寫死。
-        #[test]
-        fn a_perfect_idle_gate_still_has_a_floor_and_on_his_machine_it_eats_the_budget() {
-            let his = super::idle_floor_pct(127.0);
-            assert!(
-                (2.3..2.7).contains(&his),
-                "2560×1440 一次 127 ms 的地板應該在 2.5% 上下，算出來是 {his:.2}%"
-            );
-            assert!(his < 3.0, "還沒到「閘門修好也沒用」的地步，但只剩一點點");
-            assert!(
-                his > 3.0 * 0.7,
-                "地板吃掉預算七成以上，這才是 `sister bench` 存在的理由：{his:.2}%"
-            );
-
-            let ci = super::idle_floor_pct(27.0);
-            assert!(
-                ci < 3.0 * 0.7,
-                "CI 那台 1024×768 的地板還很寬（{ci:.2}%）——同一份程式，\
-                 換一台機器結論就翻過來，所以不能寫死"
-            );
         }
 
         /// 他那次實測的形狀：錄十分鐘，外推出「11.4 GB/天」。

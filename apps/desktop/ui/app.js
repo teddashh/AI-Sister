@@ -454,7 +454,7 @@ wakeButton?.addEventListener("click", startRecording);
  * （`heartbeat::BEAT_EVERY_MS` 是 5 秒）。
  *
  * 視窗看不到的時候不問。一個整天掛在角落的東西，在沒有人看的時候還每 5 秒
- * 醒來一次，就是 Phase 0 那份 CPU 預算的漏洞——和動畫閘門同一條紀律。
+ * 醒來一次，就是長期 CPU 目標的一筆固定成本——和動畫閘門同一條紀律。
  */
 const RECORDING_POLL_MS = 5000;
 let pollTimer = null;
@@ -525,7 +525,7 @@ const reducedMotion = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)"
  * 所有動畫由 `<html>` 上的一個 class 控制。
  *
  * 視窗被蓋住的時候要停：一個常駐在最上層、整天都在的視窗，如果在沒有人看的
- * 時候還在跑 compositor，那就是 Phase 0 那份 CPU 預算的直接漏洞。
+ * 時候還在跑 compositor，那就是長期 CPU 目標的直接漏洞。
  */
 function updateMotionGate() {
   const allowed =

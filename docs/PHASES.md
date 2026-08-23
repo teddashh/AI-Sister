@@ -31,8 +31,9 @@
 
 ## Phase 0 — 感官與地基（sister-core v0）
 
-**目標**：capture 層在 Ted 自己的機器上跑滿 7 天，證明足跡預算可達成。這一步同時
-產出 replay 語料的錄製器——capture 層本身就是 recorder。
+**目標**：capture 層在 Ted 自己的機器上跑滿 7 天，量出 CPU／RAM 基準並證明
+仍有效的 RAM／磁碟足跡預算可達成。這一步同時產出 replay 語料的錄製器——
+capture 層本身就是 recorder。
 
 **Scope**
 - Rust daemon 骨架：SQLite（WAL）+ migration、loopback API（token 驗證）、
@@ -53,7 +54,12 @@
   使用者自己記不記得當過——那是印象，不是條件。
   （已知歧義：此刻正在錄的那一段也沒有 `ended_at`，那一行會把兩種可能
   都講出來，不猜。）
-- [ ] CPU 平均 < 3%、RAM < 400MB、磁碟 < 300MB/天（實測數字記入 README）。
+- [x] CPU／RAM 真機基準記入 README。alpha.46 在 Ted 的 Windows、1920×1080、
+  活躍切換 workspace 寫程式的 60 秒裡是 CPU 平均 44.0%、RAM 峰值 73.7MB。
+  RAM 通過 < 400MB；Ted 於 2026-08-23 選擇保留觀察密度，CPU 仍照實量，但不再是
+  Phase 0 blocker。SPEC §2.3 的 < 3% 是長期產品目標，不是這一階段的 gate。
+- [ ] 磁碟 < 300MB/天（實測數字記入 README）。alpha.46 的 60 秒實際長了 5.4MB，
+  外推 3.2GB/天；短時外推不是整天實測，成因也還沒歸清，所以這一格仍未通過。
 - [x] `sister query 電話` 能在 < 100ms 撈回三天前畫面上的客服電話，附出處。
   **量過了，四條路都在 1 ms 以內**（`crates/sister-core/tests/search_latency.rs`，
   45 天語料 = 3,110,400 行字，開發機）：三個字以上走 trigram 0.1 ms、整個
@@ -177,9 +183,9 @@
       而不是另外維護一份一樣的指令。跑不起來、或跑完沒有那個 ★ 答案，就是紅的。
 - [ ] repo public、Apache-2.0、README 首段 = 三張同意書宣言 + 實測足跡數字。
       repo public 與 Apache-2.0 已成立，README 首段也已公開三張同意書各自「沒簽會怎樣、
-      簽了能碰什麼」。足跡這一半仍未成立：CPU、RAM、磁碟都沒有可信的現況實測值。
-      要打勾，還差照 `docs/WINDOWS-CHECKLIST.md` 跑 `sister bench`，再用平常的解析度
-      錄 60 秒並貼回收尾摘要。
+      簽了能碰什麼」。CPU／RAM 的真機現況已記入 README：alpha.46 活躍寫程式
+      60 秒是 44.0%／73.7MB，CPU 已由 Ted 接受為 Phase 0 基準，RAM 也通過。
+      足跡還差磁碟：同一場的 3.2GB/天只是 60 秒外推，成因未歸清，也還沒有整天實測。
 
 **明確不做**：主動開口（她只回答，不先說話）、interpreter、承諾表。
 
@@ -331,7 +337,8 @@
 ## 跨階段紀律
 
 1. **每個 phase 合入 = harness 回歸不退步**（P2 起）。
-2. **足跡預算是 release blocker**（每個平台每個版本）。
+2. **長期足跡預算是 release blocker**（每個平台每個版本）；若某個 phase 由負責人
+   明確接受例外，必須把實測工作負載與取捨寫在該 phase，不能暗改成另一條門檻。
 3. **隱私文件與功能同 PR**：動到訊號面的 PR 必須同步改 DATA_INVENTORY.md。
 4. **她的每一句話都有出處**——從第一次開口到 autopilot 報告，無一例外。
 5. **任何「缺一不可」的說法出現時，回去讀 PRODUCT §3 第 8 條。**

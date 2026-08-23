@@ -120,17 +120,22 @@ OCR/索引 worker 才走 bundled sidecar。capture trait 抽象不變，宿主�
   onboarding 流程必須把「重新授權」做成一鍵引導（偵測授權失效 → 角色提示 → 深連到設定），
   不能讓使用者以為她壞了。
 
-### 2.3 資源預算（硬指標，CI 量測）
+### 2.3 資源預算（長期產品硬指標）
 
 | 項目 | 預算 |
 |---|---|
-| CPU | idle ≈0%（事件驅動）；活躍平均 < 3% 單核（capture+dedup <1%，OCR 以 0.1–0.2 有效 fps 攤提；尖峰 < 15%） |
+| CPU | 長期產品目標：idle ≈0%（事件驅動）；活躍平均 < 3% 單核（capture+dedup <1%，OCR 以 0.1–0.2 有效 fps 攤提；尖峰 < 15%） |
 | RAM（core daemon） | 常駐 < 300MB、峰值 < 500MB（embedding 模型 lazy-load） |
 | 磁碟 | 實際預期 < 200MB/天（文字+索引 ~1–5GB/年可永久保留；截圖層 0.03–0.12GB/天，是唯一要 retention 旋鈕的層）；2GB/天為自動降級上限 |
 | 電池（MacBook） | 前台工作日不因本軟體損失 > 5% 續航；**標配「電池模式」**：拉長取樣、OCR/embedding 延後到插電或深夜 idle——Screenpipe 沒做好這塊，是差異化機會 |
 | 全機停擺開關 | tray 一鍵「看別的地方」，狀態視覺可見（角色閉眼） |
 
-（數字依 `research/tech-stack.md` 論證；超標 = release blocker。
+CPU 的 `<3%` 不再是 Phase 0 gate：alpha.46 在 Ted 的真 Windows、1920×1080、
+活躍寫程式 60 秒量到 44.0%，Ted 於 2026-08-23 選擇保留觀察密度並接受這個基準。
+CPU 仍然每場照實量；這個 Phase 0 例外不等於刪掉正式產品的長期目標，也不把
+44.0% 改寫成一條新的通用預算。
+
+（數字依 `research/tech-stack.md` 論證；這張表是長期產品的 release blocker。
 競爭基準：Screenpipe 官方自承 5–10% CPU / 0.5–3GB RAM / 5–20GB/月
 ——我們不錄影不錄音、text-first，量級直接少一個 0。）
 
@@ -503,8 +508,10 @@ capture 從 day 1 走 trait 抽象，三平台介面同形。
    連線的程式碼路徑」——那句話要嘛是真的，要嘛不是。
 2. **`ort` 用 `copy-dylibs` 出貨 `onnxruntime.dll`**（~15MB）加上模型（~20MB），
    使用者要下載的就不再是一個檔案。目前 `sister.exe` 是 2.4MB 的單檔。
-3. **Phase 0 的驗收條件是 CPU < 3%、RAM < 400MB**，而 ONNX Runtime 常駐兩個
-   模型光是 arena 就吃掉大半。這是一個整天都在跑的背景程式。
+3. **實作選型當時，Phase 0 寫下的驗收條件是 CPU < 3%、RAM < 400MB**，而
+   ONNX Runtime 常駐兩個模型光是 arena 就吃掉大半。這是一個整天都在跑的
+   背景程式。這是選型的歷史理由；2026-08-23 起 CPU < 3% 不再是 Phase 0 gate，
+   但 RAM 限制與「整天常駐」的前提沒有改變。
 
 上表列出的兩項反對意見，處理方式如下：
 
