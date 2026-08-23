@@ -22,7 +22,8 @@
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use crate::facts::ExtractedFact;
 use crate::model::{
@@ -492,6 +493,150 @@ const CONTENT_TABLES: &[(&str, Option<&str>)] = &[
     ("system_events", Some("{q}kind NOT IN {marks}")),
 ];
 
+/// SQLite 在磁碟上的三個檔案，各自是一種量測，不能靠位置猜。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SqliteFileKind {
+    Main,
+    Wal,
+    Shm,
+}
+
+/// 某一刻的 SQLite 磁碟配置與實體檔案大小。
+///
+/// `logical_allocated_bytes` / `objects` / `free_bytes` / `residual_bytes`
+/// 是 SQLite 邏輯頁面的同一個口徑；`files` 是檔案系統的另一個口徑，兩組
+/// **不能相加**。記憶體資料庫沒有檔案，所以是 `None`，不是三個假的 0。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbDiskSnapshot {
+    pub logical_allocated_bytes: u64,
+    pub objects: BTreeMap<String, u64>,
+    pub free_bytes: u64,
+    pub residual_bytes: u64,
+    pub catalogued_image_bytes: u64,
+    pub files: Option<BTreeMap<SqliteFileKind, Option<u64>>>,
+    pub journal_mode: String,
+    pub wal_autocheckpoint_pages: u64,
+}
+
+/// 一個 SQLite 實體檔案在兩次快照之間的淨變化。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileDelta {
+    pub delta_bytes: i64,
+    /// 收尾時檔案不存在是 `None`；不能和長度恰好是 0 的檔案混在一起。
+    pub end_bytes: Option<u64>,
+}
+
+/// 兩次 [`DbDiskSnapshot`] 之間的淨變化。
+///
+/// 每一項都有正負號：checkpoint、刪除或頁面重用都可能讓數字往下。物件名取
+/// 兩邊的聯集，所以消失的物件也不會被漏掉。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbDiskDelta {
+    pub logical_allocated_bytes: i64,
+    pub objects: BTreeMap<String, i64>,
+    pub free_bytes: i64,
+    pub residual_bytes: i64,
+    pub catalogued_image_bytes: i64,
+    pub files: Option<BTreeMap<SqliteFileKind, FileDelta>>,
+}
+
+impl DbDiskDelta {
+    pub fn between(before: &DbDiskSnapshot, after: &DbDiskSnapshot) -> Result<Self> {
+        let object_names: BTreeSet<&String> =
+            before.objects.keys().chain(after.objects.keys()).collect();
+        let mut objects = BTreeMap::new();
+        for name in object_names {
+            objects.insert(
+                name.clone(),
+                signed_byte_delta(
+                    before.objects.get(name).copied().unwrap_or(0),
+                    after.objects.get(name).copied().unwrap_or(0),
+                    &format!("SQLite object {name}"),
+                )?,
+            );
+        }
+
+        let files = match (&before.files, &after.files) {
+            (None, None) => None,
+            (Some(before_files), Some(after_files)) => {
+                let kinds: BTreeSet<SqliteFileKind> = before_files
+                    .keys()
+                    .chain(after_files.keys())
+                    .copied()
+                    .collect();
+                let mut deltas = BTreeMap::new();
+                for kind in kinds {
+                    let before_bytes = before_files.get(&kind).copied().flatten().unwrap_or(0);
+                    let end_bytes = after_files.get(&kind).copied().flatten();
+                    deltas.insert(
+                        kind,
+                        FileDelta {
+                            delta_bytes: signed_byte_delta(
+                                before_bytes,
+                                end_bytes.unwrap_or(0),
+                                &format!("SQLite {kind:?} file"),
+                            )?,
+                            end_bytes,
+                        },
+                    );
+                }
+                Some(deltas)
+            }
+            _ => anyhow::bail!("不能比較有檔案和沒有檔案的 SQLite 快照——其中一端不是實體資料庫"),
+        };
+
+        Ok(Self {
+            logical_allocated_bytes: signed_byte_delta(
+                before.logical_allocated_bytes,
+                after.logical_allocated_bytes,
+                "SQLite logical allocation",
+            )?,
+            objects,
+            free_bytes: signed_byte_delta(before.free_bytes, after.free_bytes, "SQLite freelist")?,
+            residual_bytes: signed_byte_delta(
+                before.residual_bytes,
+                after.residual_bytes,
+                "SQLite residual pages",
+            )?,
+            catalogued_image_bytes: signed_byte_delta(
+                before.catalogued_image_bytes,
+                after.catalogued_image_bytes,
+                "catalogued image bytes",
+            )?,
+            files,
+        })
+    }
+}
+
+fn signed_byte_delta(before: u64, after: u64, label: &str) -> Result<i64> {
+    if after >= before {
+        i64::try_from(after - before)
+            .with_context(|| format!("{label} grew by more than i64 can represent"))
+    } else {
+        let magnitude = i64::try_from(before - after)
+            .with_context(|| format!("{label} shrank by more than i64 can represent"))?;
+        Ok(-magnitude)
+    }
+}
+
+fn nonnegative_bytes(value: i64, label: &str) -> Result<u64> {
+    u64::try_from(value).with_context(|| format!("{label} was negative: {value}"))
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn optional_file_len(path: &Path) -> Result<Option<u64>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata.len())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read metadata for {}", path.display())),
+    }
+}
+
 pub struct Db {
     /// `pub(crate)` 只為了 [`crate::retention`]：清理要跨好幾張表、還要在
     /// 同一個 transaction 裡跑，包成一堆窄 API 反而更難看出它到底刪了什麼。
@@ -720,6 +865,131 @@ impl Db {
 
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// 量出 SQLite 此刻的邏輯配置與三個實體檔案大小。
+    ///
+    /// 這裡刻意不跑 checkpoint、`VACUUM`，也不建暫存表：診斷不能為了量測而
+    /// 改變正在量的狀態。`dbstat` 不包含 freelist、pointer-map 和 lock page，
+    /// 所以這三塊分開保留，並要求最後一個位元組都對得回
+    /// `page_count * page_size`；算不攏就回錯，不用飽和減法藏掉它。
+    pub fn disk_snapshot(&self) -> Result<DbDiskSnapshot> {
+        let pragma_bytes = |name: &str, label: &str| -> Result<u64> {
+            let value: i64 = self
+                .conn
+                .pragma_query_value(None, name, |row| row.get(0))
+                .with_context(|| format!("read PRAGMA {name}"))?;
+            nonnegative_bytes(value, label)
+        };
+
+        let page_count = pragma_bytes("page_count", "SQLite page_count")?;
+        let page_size = pragma_bytes("page_size", "SQLite page_size")?;
+        let freelist_count = pragma_bytes("freelist_count", "SQLite freelist_count")?;
+        let logical_allocated_bytes = page_count
+            .checked_mul(page_size)
+            .context("SQLite page_count * page_size overflowed u64")?;
+        let free_bytes = freelist_count
+            .checked_mul(page_size)
+            .context("SQLite freelist_count * page_size overflowed u64")?;
+
+        // Aggregate mode (`1`) 已經把一棵 B-tree 的頁面合成一列；GROUP BY 再把
+        // 同名物件釘成唯一一列。名稱直接沿用 SQLite 的真名，不在這裡手工把
+        // FTS shadow tables 歸組，否則 schema 多一個物件就會靜靜漏算。
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT name, SUM(pgsize)
+                 FROM dbstat('main', 1)
+                 GROUP BY name
+                 ORDER BY name",
+            )
+            .context("prepare SQLite dbstat snapshot")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .context("query SQLite dbstat snapshot")?;
+        let mut objects = BTreeMap::new();
+        for row in rows {
+            let (name, bytes) = row.context("read SQLite dbstat row")?;
+            let bytes = nonnegative_bytes(bytes, &format!("SQLite object {name}"))?;
+            objects.insert(name, bytes);
+        }
+        let object_bytes = objects.values().try_fold(0u64, |sum, bytes| {
+            sum.checked_add(*bytes)
+                .context("SQLite dbstat object bytes overflowed u64")
+        })?;
+        let accounted_bytes = object_bytes
+            .checked_add(free_bytes)
+            .context("SQLite object + freelist bytes overflowed u64")?;
+        let residual_bytes = logical_allocated_bytes
+            .checked_sub(accounted_bytes)
+            .with_context(|| {
+                format!(
+                    "SQLite page accounting is negative: logical {logical_allocated_bytes}, \
+                     objects {object_bytes}, freelist {free_bytes}"
+                )
+            })?;
+
+        let catalogued_image_bytes: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(image_bytes), 0) FROM frames",
+                [],
+                |row| row.get(0),
+            )
+            .context("sum catalogued image bytes")?;
+        let catalogued_image_bytes =
+            nonnegative_bytes(catalogued_image_bytes, "catalogued image bytes")?;
+
+        let journal_mode: String = self
+            .conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .context("read PRAGMA journal_mode")?;
+        let wal_autocheckpoint_pages =
+            pragma_bytes("wal_autocheckpoint", "SQLite wal_autocheckpoint")?;
+
+        let main_path = {
+            let mut statement = self
+                .conn
+                .prepare("PRAGMA database_list")
+                .context("prepare PRAGMA database_list")?;
+            let mut rows = statement.query([]).context("query PRAGMA database_list")?;
+            let mut main = None;
+            while let Some(row) = rows.next().context("read PRAGMA database_list row")? {
+                if row.get::<_, String>(1)? == "main" {
+                    main = Some(row.get::<_, String>(2)?);
+                    break;
+                }
+            }
+            main.context("PRAGMA database_list did not contain main")?
+        };
+
+        // SQLite 用空字串表示 `:memory:`（以及沒有持久檔案的 temporary main）。
+        // 它不是三個 0：這一場根本沒有量實體檔案。
+        let files = if main_path.is_empty() {
+            None
+        } else {
+            let main = PathBuf::from(main_path);
+            let wal = path_with_suffix(&main, "-wal");
+            let shm = path_with_suffix(&main, "-shm");
+            Some(BTreeMap::from([
+                (SqliteFileKind::Main, optional_file_len(&main)?),
+                (SqliteFileKind::Wal, optional_file_len(&wal)?),
+                (SqliteFileKind::Shm, optional_file_len(&shm)?),
+            ]))
+        };
+
+        Ok(DbDiskSnapshot {
+            logical_allocated_bytes,
+            objects,
+            free_bytes,
+            residual_bytes,
+            catalogued_image_bytes,
+            files,
+            journal_mode,
+            wal_autocheckpoint_pages,
+        })
     }
 
     // ---------- sessions ----------
@@ -3489,6 +3759,194 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// `dbstat` 的每一列都是真的還不夠；加總後必須和 SQLite 自己報的配置量
+    /// 一個位元組不差。FTS 的 shadow tables 也要留著真名，否則這次要找的
+    /// 「其他 2.1 MB 到底是哪張表」仍然答不出來。
+    #[test]
+    fn disk_snapshot_names_dbstat_objects_and_balances_every_logical_page() {
+        let tmp = TmpDir::new("disk-objects");
+        let path = tmp.join("sister.db");
+        let mut db = Db::open(&path).expect("open");
+        let session = db.start_session("test", "0.0.1").expect("session");
+        for i in 0..40 {
+            db.insert_frame(
+                session,
+                &frame_with_text(
+                    i * 1_000,
+                    "chrome.exe",
+                    "客服系統",
+                    &[
+                        &format!("第 {i} 筆客服專線紀錄與帳單內容"),
+                        "這一行讓每幀有兩個 OCR block",
+                    ],
+                ),
+                None,
+                if i == 0 { 12_345 } else { 0 },
+            )
+            .expect("insert");
+        }
+
+        let snapshot = db.disk_snapshot().expect("snapshot");
+        for name in [
+            "ocr_blocks",
+            "text_chunks",
+            "text_fts_data",
+            "text_fts_uni_data",
+            "text_fts_bi_data",
+            "idx_ocr_frame",
+            "idx_chunk_ts",
+        ] {
+            assert!(
+                snapshot.objects.get(name).is_some_and(|bytes| *bytes > 0),
+                "dbstat 少了 {name}：{:?}",
+                snapshot.objects.keys().collect::<Vec<_>>()
+            );
+        }
+        let object_bytes: u64 = snapshot.objects.values().sum();
+        assert_eq!(
+            object_bytes + snapshot.free_bytes + snapshot.residual_bytes,
+            snapshot.logical_allocated_bytes,
+            "objects + freelist + residual 必須精確對帳"
+        );
+        assert_eq!(snapshot.catalogued_image_bytes, 12_345);
+        assert_eq!(snapshot.journal_mode, "wal");
+        assert!(snapshot.wal_autocheckpoint_pages > 0);
+    }
+
+    #[test]
+    fn disk_snapshot_measures_main_wal_and_shm_as_three_named_files() {
+        let tmp = TmpDir::new("disk-files");
+        let path = tmp.join("sister.db");
+        let mut db = Db::open(&path).expect("open");
+        let session = db.start_session("test", "0.0.1").expect("session");
+        db.insert_frame(
+            session,
+            &frame_with_text(1, "chrome.exe", "帳單", &["王先生來電談帳單"]),
+            None,
+            0,
+        )
+        .expect("insert");
+
+        let snapshot = db.disk_snapshot().expect("snapshot");
+        let files = snapshot.files.expect("實體 DB 要有檔案量測");
+        let wal_path = path_with_suffix(&path, "-wal");
+        let shm_path = path_with_suffix(&path, "-shm");
+        assert_eq!(
+            files.get(&SqliteFileKind::Main),
+            Some(&optional_file_len(&path).expect("main metadata"))
+        );
+        assert_eq!(
+            files.get(&SqliteFileKind::Wal),
+            Some(&optional_file_len(&wal_path).expect("wal metadata"))
+        );
+        assert_eq!(
+            files.get(&SqliteFileKind::Shm),
+            Some(&optional_file_len(&shm_path).expect("shm metadata"))
+        );
+        assert!(
+            files
+                .get(&SqliteFileKind::Wal)
+                .copied()
+                .flatten()
+                .is_some_and(|bytes| bytes > 0),
+            "測試中的寫入必須真的留在 WAL，否則沒驗到那個檔案"
+        );
+        assert!(
+            files.get(&SqliteFileKind::Shm).copied().flatten().is_some(),
+            "WAL 連線應有 shared-memory 檔"
+        );
+    }
+
+    #[test]
+    fn an_in_memory_disk_snapshot_has_no_files_not_three_zeroes() {
+        let db = test_db();
+        let snapshot = db.disk_snapshot().expect("snapshot");
+        assert_eq!(snapshot.files, None);
+        assert!(snapshot.logical_allocated_bytes > 0, "邏輯頁面仍然量得到");
+        assert_eq!(
+            snapshot.objects.values().sum::<u64>() + snapshot.free_bytes + snapshot.residual_bytes,
+            snapshot.logical_allocated_bytes
+        );
+    }
+
+    #[test]
+    fn disk_delta_uses_union_keys_and_keeps_growth_and_shrinkage_signed() {
+        let before = DbDiskSnapshot {
+            logical_allocated_bytes: 1_000,
+            objects: BTreeMap::from([
+                ("alpha".into(), 100),
+                ("deleted".into(), 50),
+                ("stable".into(), 5),
+            ]),
+            free_bytes: 100,
+            residual_bytes: 20,
+            catalogued_image_bytes: 80,
+            files: Some(BTreeMap::from([
+                (SqliteFileKind::Main, Some(100)),
+                (SqliteFileKind::Wal, None),
+                (SqliteFileKind::Shm, Some(40)),
+            ])),
+            journal_mode: "wal".into(),
+            wal_autocheckpoint_pages: 1_000,
+        };
+        let after = DbDiskSnapshot {
+            logical_allocated_bytes: 900,
+            objects: BTreeMap::from([
+                ("alpha".into(), 70),
+                ("created".into(), 25),
+                ("stable".into(), 5),
+            ]),
+            free_bytes: 60,
+            residual_bytes: 45,
+            catalogued_image_bytes: 120,
+            // 故意不放 SHM key：聯集仍要把收尾消失的檔案報成 -40。
+            files: Some(BTreeMap::from([
+                (SqliteFileKind::Main, Some(80)),
+                (SqliteFileKind::Wal, Some(30)),
+            ])),
+            journal_mode: "wal".into(),
+            wal_autocheckpoint_pages: 1_000,
+        };
+
+        let delta = DbDiskDelta::between(&before, &after).expect("delta");
+        assert_eq!(delta.logical_allocated_bytes, -100);
+        assert_eq!(
+            delta.objects,
+            BTreeMap::from([
+                ("alpha".into(), -30),
+                ("created".into(), 25),
+                ("deleted".into(), -50),
+                ("stable".into(), 0),
+            ])
+        );
+        assert_eq!(delta.free_bytes, -40);
+        assert_eq!(delta.residual_bytes, 25);
+        assert_eq!(delta.catalogued_image_bytes, 40);
+
+        let files = delta.files.expect("file deltas");
+        assert_eq!(
+            files.get(&SqliteFileKind::Main),
+            Some(&FileDelta {
+                delta_bytes: -20,
+                end_bytes: Some(80),
+            })
+        );
+        assert_eq!(
+            files.get(&SqliteFileKind::Wal),
+            Some(&FileDelta {
+                delta_bytes: 30,
+                end_bytes: Some(30),
+            })
+        );
+        assert_eq!(
+            files.get(&SqliteFileKind::Shm),
+            Some(&FileDelta {
+                delta_bytes: -40,
+                end_bytes: None,
+            })
+        );
     }
 
     /// 「資料庫佔多少」要含 `-wal`。

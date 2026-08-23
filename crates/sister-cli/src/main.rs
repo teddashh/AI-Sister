@@ -4,6 +4,8 @@
 //! 她記了什麼、記了多少、以及每一句話的出處（SPEC §11.4）。
 //! 在有 GUI 之前，這裡就是唯一的驗證入口。
 
+#[cfg(any(windows, test))]
+mod disk_attribution;
 mod fmt;
 mod ops;
 

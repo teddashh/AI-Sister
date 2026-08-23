@@ -9982,15 +9982,15 @@ pub mod record {
         let mut rec = Recorder::new(backend, db, config, images)?;
 
         install_ctrl_c_handler();
+        // 磁碟歸因的開場快照排在 Recorder 建好之後：schema／migration／session_start
+        // 都是開機成本，不是這場錄製長出來的資料。失敗留成 Err，收尾照樣繼續；
+        // 一個量不到的開場不能在最後冒充 0 B。
+        let db_disk_at_start = rec.db().disk_snapshot().map_err(|e| format!("{e:#}"));
+        let sidecars_at_start = crate::disk_attribution::sidecar_snapshot(data_dir);
         // 從這一刻開始算足跡。Phase 0 要留下 CPU／RAM／磁碟三類實測；RAM 與
         // 磁碟另有阻擋上限。在這之前沒有辦法知道它們是多少——一個量不到的
         // 數字不是基準，也不是預算。
         let mut footprint = sister_capture::footprint::Footprint::new();
-        let disk_at_start = rec
-            .db()
-            .stats()
-            .map(|s| s.db_bytes + s.image_bytes)
-            .unwrap_or(0);
         let deadline = duration.map(|d| Instant::now() + Duration::from_secs(d));
         println!(
             "● 錄製中（{}），每 {} ms 一次。Ctrl-C 停止。",
@@ -10375,6 +10375,26 @@ pub mod record {
         // 裸的 `?` 讓它們一行都印不出來。他錄了一整天，最後看到的只有一句
         // `database is locked`——而那一天到底錄到了什麼，沒有第二個地方可以問。
         let finished = rec.finish(end_reason);
+
+        // 先凍結足跡，再跑 dbstat 與目錄掃描。歸因本身是診斷成本，不屬於這場
+        // 錄製；若掃完才取樣，CPU 分子停在舊樣本、牆上時間卻繼續走，會把平均
+        // CPU 悄悄壓低。磁碟的收尾快照仍排在 finish() 後，才能包含 session_end。
+        footprint.tick();
+        let footprint_elapsed = FootprintElapsedSecs::from_footprint(&footprint);
+        let footprint_cpu_seconds = footprint.cpu_seconds_used();
+        let mut footprint_measured =
+            FootprintMeasured::measure(&footprint, &stats, None, image_budget_mb);
+        let disk_attribution = crate::disk_attribution::AttributionInput {
+            db_before: db_disk_at_start,
+            db_after: rec.db().disk_snapshot().map_err(|e| format!("{e:#}")),
+            sidecars_before: sidecars_at_start,
+            sidecars_after: crate::disk_attribution::sidecar_snapshot(data_dir),
+            session_image_bytes: stats.image_bytes,
+        };
+        footprint_measured.disk.delta_bytes = disk_attribution.total_delta_bytes().ok();
+        let footprint_report = footprint_measured.report(footprint_elapsed);
+        let disk_attribution_report = crate::disk_attribution::render(&disk_attribution);
+
         println!(
             "\n完成：{} tick → 保留 {}、重複 {}、排除 {}、無畫面 {}",
             stats.ticks, stats.kept, stats.duplicates, stats.excluded, stats.no_screen
@@ -10391,24 +10411,15 @@ pub mod record {
         // 而這一段的用途是「她剛剛到底有沒有在寫圖」。拿開機時那份來答，會在
         // 使用者中途撤回之後喊「保留了 12 張畫面卻一張圖都沒寫」的假警報。
         report_images(&stats, rec.timings(), image_budget_mb, storing_images);
-        // 先取最後一次足跡樣本，時間表才拿得到「這段期間燒了多少 CPU」，
-        // 而那是把牆上時間和 CPU 分開講的前提。
-        footprint.tick();
         report_timings(
             rec.timings(),
             TickCounts::from_stats(&stats),
-            footprint.cpu_seconds_used(),
+            footprint_cpu_seconds,
         );
-        report_footprint(
-            &footprint,
-            &stats,
-            rec.db()
-                .stats()
-                .map(|s| s.db_bytes + s.image_bytes)
-                .unwrap_or(0)
-                - disk_at_start,
-            image_budget_mb,
-        );
+        report_footprint(&footprint_report);
+        for line in disk_attribution_report {
+            println!("{line}");
+        }
         for line in &lost {
             println!("  ⚠  錄製途中失去的能力：{}", line.message);
         }
@@ -10516,6 +10527,19 @@ pub mod record {
     #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
     struct CpuPercent(f64);
 
+    /// 足跡凍結時已經過的牆上秒數。建構子自己問 `Footprint`，不讓 Windows
+    /// 接線層把同樣是 `f64` 的 CPU 秒數塞進每日外推分母。
+    #[cfg(any(windows, test))]
+    #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+    struct FootprintElapsedSecs(f64);
+
+    #[cfg(any(windows, test))]
+    impl FootprintElapsedSecs {
+        fn from_footprint(f: &sister_capture::footprint::Footprint) -> Self {
+            Self(f.elapsed_secs())
+        }
+    }
+
     /// 這一場量到的所有數字。相同 primitive、不同意思的欄位各自包成 newtype，
     /// 對調會是型別錯誤；同型別 getter 接錯則由
     /// `measure_wires_stats_timings_and_scalars_to_their_fields` 釘住。
@@ -10538,7 +10562,9 @@ pub mod record {
     struct DiskMeasured {
         /// 這段期間磁碟淨長了多少。**可能是負的**：保留期清理跑過
         /// （`PRUNE_EVERY` 六小時一次），或另一支 sister 也在寫同一顆資料庫。
-        delta_bytes: i64,
+        /// `None` = 快照或相減量不到；不能拿 `0` 冒充量到了而且沒長。原因由
+        /// 下方磁碟歸因逐項說明，這裡不猜。
+        delta_bytes: Option<i64>,
         /// 這段期間寫進去的圖。
         image_bytes: ImageBytesWritten,
         /// 一天的圖額度（`capture.max_image_mb_per_day` × MB）。`0` = 不設限。
@@ -10613,74 +10639,79 @@ pub mod record {
                 ));
             }
         }
-        if disk_delta < 0 {
-            // 淨少了：錄到一半觸發保留期清理（`PRUNE_EVERY` 是 6 小時，所以
-            // 任何一段長一點的錄製都會遇到），或者另一支 sister 也在寫。
-            //
-            // 這裡以前是 `disk_delta.max(0)`，於是它印成「磁碟 0 B/天」——
-            // 而 `over(0.0, …)` 回傳空字串、`breached` 也不會多一條，所以
-            // 那一行看起來是**通過預算**。一個沒量到的數字長得和一個漂亮的
-            // 數字一模一樣，就出現在我們正在調查的那個預算上，旁邊還配著
-            // 一個 CPU 的 ⚠ 讓它更像是真的過了。
-            parts.push(format!(
-                "磁碟 這段量不出來（淨少了 {}——清理和寫入混在一起，減出來的數字沒有意義）",
-                crate::fmt::bytes(-disk_delta)
-            ));
-        } else if let Some(raw_per_day) = per_day(disk_delta as u64) {
-            // 圖與資料庫要分開講。合成一個數字的話，「磁碟 11.4 GB/天」
-            // 沒辦法回答唯一有用的那個問題——該去縮圖，還是該去縮索引。
-            // 實測那次就是這樣：一個很嚇人、但指不出方向的數字。
-            let grew = disk_delta;
-            let image_bytes = image_bytes.bytes();
-            let rest = grew - image_bytes as i64;
-
-            let proj = DiskProjection::clamp(
-                raw_per_day,
-                per_day(image_bytes).filter(|_| rest >= 0),
-                image_cap_bytes,
-            );
-            let (per_day, img_raw, img_capped) = (proj.per_day, proj.images_raw, proj.images);
-            // 減出負數代表這段期間有東西被刪掉了（錄到一半觸發保留期清理，
-            // 或另一支 sister 在跑）。這時候「畫面 X、其他 -3 MB」是**算術
-            // 上正確、意義上胡說**的一行——寧可承認拆不開。
-            let breakdown = if rest < 0 {
-                format!(
-                    "這段實際長了 {}，但同時也有東西被刪掉，拆不開",
-                    crate::fmt::bytes(grew)
-                )
-            } else {
-                format!(
-                    "這段實際長了 {}：畫面 {}、其他 {}",
-                    crate::fmt::bytes(grew),
-                    crate::fmt::bytes(image_bytes as i64),
-                    crate::fmt::bytes(rest)
-                )
-            };
-            let disk_over = per_day > BUDGET_DISK_PER_DAY;
-            parts.push(format!(
-                "{}磁碟 {}/天（{breakdown}）",
-                mark(disk_over),
-                crate::fmt::bytes(per_day as i64),
-            ));
-            if disk_over {
-                phase_zero_budget_breached = true;
-                breached.push(format!(
-                    "磁碟 {}/天 超過預算 {}/天（{:.0} 倍）",
-                    crate::fmt::bytes(per_day as i64),
-                    crate::fmt::bytes(BUDGET_DISK_PER_DAY as i64),
-                    per_day / BUDGET_DISK_PER_DAY
+        match disk_delta {
+            None => parts.push("磁碟總量量不到（詳見下方磁碟歸因）".to_string()),
+            Some(disk_delta) if disk_delta < 0 => {
+                // 淨少了：錄到一半觸發保留期清理（`PRUNE_EVERY` 是 6 小時，所以
+                // 任何一段長一點的錄製都會遇到），或者另一支 sister 也在寫。
+                //
+                // 這裡以前是 `disk_delta.max(0)`，於是它印成「磁碟 0 B/天」——
+                // 而 `over(0.0, …)` 回傳空字串、`breached` 也不會多一條，所以
+                // 那一行看起來是**通過預算**。一個沒量到的數字長得和一個漂亮的
+                // 數字一模一樣，就出現在我們正在調查的那個預算上，旁邊還配著
+                // 一個 CPU 的 ⚠ 讓它更像是真的過了。
+                parts.push(format!(
+                    "磁碟 這段量不出來（淨少了 {}——清理和寫入混在一起，減出來的數字沒有意義）",
+                    crate::fmt::bytes(-disk_delta)
                 ));
-                // 超標的時候要指出**是哪一半**，因為那兩半的下一步完全不同，
-                // 而其中一半有天花板、另一半沒有：
-                //
-                //   畫面有 `max_image_mb_per_day`（預設 250 MB），所以它一天
-                //   最多就是那麼多。任何遠大於它的數字，算術上就不可能是圖。
-                //   資料庫沒有任何節流、沒有預算、也沒有自己的計數器。
-                //
-                // 實測那次是 11.4 GB/天，也就是圖的上限的 46 倍——不看這一行
-                // 的話，唯一提到節流的是「另外 N 張只留了字（間隔未到）」，
-                // 而那句話讀起來像是在講省下來的磁碟。
-                let cap = img_capped.map(|img| {
+            }
+            Some(disk_delta) => {
+                if let Some(raw_per_day) = per_day(disk_delta as u64) {
+                    // 圖與資料庫要分開講。合成一個數字的話，「磁碟 11.4 GB/天」
+                    // 沒辦法回答唯一有用的那個問題——該去縮圖，還是該去縮索引。
+                    // 實測那次就是這樣：一個很嚇人、但指不出方向的數字。
+                    let grew = disk_delta;
+                    let image_bytes = image_bytes.bytes();
+                    let rest = grew - image_bytes as i64;
+
+                    let proj = DiskProjection::clamp(
+                        raw_per_day,
+                        per_day(image_bytes).filter(|_| rest >= 0),
+                        image_cap_bytes,
+                    );
+                    let (per_day, img_raw, img_capped) =
+                        (proj.per_day, proj.images_raw, proj.images);
+                    // 減出負數代表這段期間有東西被刪掉了（錄到一半觸發保留期清理，
+                    // 或另一支 sister 在跑）。這時候「畫面 X、其他 -3 MB」是**算術
+                    // 上正確、意義上胡說**的一行——寧可承認拆不開。
+                    let breakdown = if rest < 0 {
+                        format!(
+                            "這段實際長了 {}，但同時也有東西被刪掉，拆不開",
+                            crate::fmt::bytes(grew)
+                        )
+                    } else {
+                        format!(
+                            "這段實際長了 {}：畫面 {}、其他 {}",
+                            crate::fmt::bytes(grew),
+                            crate::fmt::bytes(image_bytes as i64),
+                            crate::fmt::bytes(rest)
+                        )
+                    };
+                    let disk_over = per_day > BUDGET_DISK_PER_DAY;
+                    parts.push(format!(
+                        "{}磁碟 {}/天（{breakdown}）",
+                        mark(disk_over),
+                        crate::fmt::bytes(per_day as i64),
+                    ));
+                    if disk_over {
+                        phase_zero_budget_breached = true;
+                        breached.push(format!(
+                            "磁碟 {}/天 超過預算 {}/天（{:.0} 倍）",
+                            crate::fmt::bytes(per_day as i64),
+                            crate::fmt::bytes(BUDGET_DISK_PER_DAY as i64),
+                            per_day / BUDGET_DISK_PER_DAY
+                        ));
+                        // 超標的時候要指出**是哪一半**，因為那兩半的下一步完全不同，
+                        // 而其中一半有天花板、另一半沒有：
+                        //
+                        //   畫面有 `max_image_mb_per_day`（預設 250 MB），所以它一天
+                        //   最多就是那麼多。任何遠大於它的數字，算術上就不可能是圖。
+                        //   資料庫沒有任何節流、沒有預算、也沒有自己的計數器。
+                        //
+                        // 實測那次是 11.4 GB/天，也就是圖的上限的 46 倍——不看這一行
+                        // 的話，唯一提到節流的是「另外 N 張只留了字（間隔未到）」，
+                        // 而那句話讀起來像是在講省下來的磁碟。
+                        let cap = img_capped.map(|img| {
                     let image_rate = if img_raw != img_capped {
                         format!("{}/天（上限，已夾）", crate::fmt::bytes(img as i64))
                     } else {
@@ -10699,35 +10730,37 @@ pub mod record {
                         )
                     }
                 });
-                if let Some(line) = cap {
-                    breached.push(line);
-                }
-            }
-            // 夾到了就要說出來，而且**和有沒有超磁碟預算無關**。
-            //
-            // 被夾住的意思是：照這段速度，每日圖額度會在某個時刻寫滿，然後從
-            // 那一刻起只留字。那是一次會靜靜發生的降級——時間軸後半段點開來沒有畫面
-            // ——而使用者唯一能看到的線索，本來只有一個已經被夾好、看起來很
-            // 乖的 250 MB/天。與其讓那個數字獨自去說謊，不如把「幾分鐘後就滿」
-            // 直接印出來。
-            if let (Some(secs), Some(raw), Some(capped)) =
-                (proj.budget_lasts_secs(), img_raw, img_capped)
-            {
-                let budget_consequence = if image_budget_closed_this_session {
-                    "這一場期間圖額度已經關過門；詳情見上面的圖額度摘要——".to_string()
-                } else {
-                    format!(
-                        "照這個速度，一天的圖額度大約 {} 就寫滿，之後她整天只留字、不留畫面——",
-                        crate::fmt::duration_ms((secs * 1000.0) as i64),
-                    )
-                };
-                breached.push(format!(
+                        if let Some(line) = cap {
+                            breached.push(line);
+                        }
+                    }
+                    // 夾到了就要說出來，而且**和有沒有超磁碟預算無關**。
+                    //
+                    // 被夾住的意思是：照這段速度，每日圖額度會在某個時刻寫滿，然後從
+                    // 那一刻起只留字。那是一次會靜靜發生的降級——時間軸後半段點開來沒有畫面
+                    // ——而使用者唯一能看到的線索，本來只有一個已經被夾好、看起來很
+                    // 乖的 250 MB/天。與其讓那個數字獨自去說謊，不如把「幾分鐘後就滿」
+                    // 直接印出來。
+                    if let (Some(secs), Some(raw), Some(capped)) =
+                        (proj.budget_lasts_secs(), img_raw, img_capped)
+                    {
+                        let budget_consequence = if image_budget_closed_this_session {
+                            "這一場期間圖額度已經關過門；詳情見上面的圖額度摘要——".to_string()
+                        } else {
+                            format!(
+                                "照這個速度，一天的圖額度大約 {} 就寫滿，之後她整天只留字、不留畫面——",
+                                crate::fmt::duration_ms((secs * 1000.0) as i64),
+                            )
+                        };
+                        breached.push(format!(
                         "這段寫圖的速度相當於 {}/天，是上限（capture.max_image_mb_per_day）的 {:.0} 倍。\
                          {budget_consequence}\
                          上面那個磁碟數字已經按這道門夾過了，看起來乖是因為門會關，不是因為她寫得少。",
                         crate::fmt::bytes(raw as i64),
                         raw / capped,
                     ));
+                    }
+                }
             }
         }
         if parts.is_empty() {
@@ -10758,7 +10791,7 @@ pub mod record {
         fn measure(
             f: &sister_capture::footprint::Footprint,
             stats: &sister_capture::RecorderStats,
-            disk_delta_bytes: i64,
+            disk_delta_bytes: Option<i64>,
             image_budget_mb: u64,
         ) -> Self {
             Self {
@@ -10774,33 +10807,25 @@ pub mod record {
             }
         }
 
-        /// 這一份量測要印出來的整塊字（`report_footprint` 印的就是它）。
-        ///
-        /// 這是 `measure()`／`report()` 這一層唯一還沒被 Linux 測試蓋住的接線：
-        /// 傳給 `footprint_lines` 的必須是 `|bytes| f.bytes_per_day(bytes)`。真的
-        /// `Footprint` 未滿 60 秒一律回 `None`，測試沒辦法把它養到門檻外，所以把
-        /// `bytes` 改成 `0` 仍會全綠；實機超過 60 秒後，後果是整段誤印成
-        /// 「磁碟 0 B/天（這段實際長了 0 B：畫面 0 B、其他 0 B）」、不帶 ⚠，
-        /// 也不會有任何建議。
-        fn report(&self, f: &sister_capture::footprint::Footprint) -> String {
-            footprint_lines(self, |bytes| f.bytes_per_day(bytes))
+        /// 這一份量測要印出來的整塊字（`report_footprint` 印的就是它）。分母用
+        /// 凍結時的牆上秒數，收尾的 dbstat／目錄掃描不會改變外推結果。
+        fn report(&self, elapsed: FootprintElapsedSecs) -> String {
+            footprint_lines(self, |bytes| bytes_per_day_at(elapsed, bytes))
         }
     }
 
-    /// Windows 這一層只負責印字；所有來源到欄位的接線都在 `measure()`，
-    /// 因而 Linux 的測試也會編譯並核對。四個輸入的型別彼此不同，位置參數
-    /// 對調會直接編譯失敗；同型別 getter 接錯則由 `measure()` 的測試守住。
+    /// 用已凍結的足跡時間換算每日增長。60 秒以前不外推；`ElapsedSecs` 是
+    /// newtype，呼叫端不能把 CPU 秒數或別的 `f64` 對調進來。
+    #[cfg(any(windows, test))]
+    fn bytes_per_day_at(elapsed: FootprintElapsedSecs, bytes: u64) -> Option<f64> {
+        (elapsed.0 >= 60.0).then(|| bytes as f64 / elapsed.0 * 86_400.0)
+    }
+
+    /// Windows 這一層只負責印已經排好的字；快照、來源接線與每日換算都在
+    /// `any(windows, test)` 的純邏輯裡，Linux 測試能真的執行。
     #[cfg(windows)]
-    fn report_footprint(
-        f: &sister_capture::footprint::Footprint,
-        stats: &sister_capture::RecorderStats,
-        disk_delta_bytes: i64,
-        image_budget_mb: u64,
-    ) {
-        println!(
-            "{}",
-            FootprintMeasured::measure(f, stats, disk_delta_bytes, image_budget_mb).report(f)
-        );
+    fn report_footprint(report: &str) {
+        println!("{report}");
     }
 
     /// 畫面檔寫了幾張、跳過幾張。
@@ -11092,9 +11117,10 @@ pub mod record {
     mod record_tests {
         use super::record_meanings::{ImageBytesWritten, OcrEnabled};
         use super::{
-            BootBeat, ConfigWatch, CpuPercent, DiskMeasured, DiskProjection, FootprintMeasured,
-            ImageBudgetBytes, StoringImages, TickCounts, WantsImages, already_recording,
-            footprint_context, footprint_lines, ocr_off_words, ocr_work_line,
+            BootBeat, ConfigWatch, CpuPercent, DiskMeasured, DiskProjection, FootprintElapsedSecs,
+            FootprintMeasured, ImageBudgetBytes, StoringImages, TickCounts, WantsImages,
+            already_recording, bytes_per_day_at, footprint_context, footprint_lines, ocr_off_words,
+            ocr_work_line,
         };
         use crate::ops::tmp::Tmp;
         use sister_core::config::Config;
@@ -11232,7 +11258,8 @@ pub mod record {
             assert_eq!(ImageBudgetBytes::from_mb(0).bytes(), 0);
         }
 
-        /// 一場什麼都沒量到的錄製。測試用 `..nothing_measured()` 疊上自己要的那幾項。
+        /// CPU／RAM 沒量到、磁碟則真的量到零的基準。測試用
+        /// `..nothing_measured()` 疊上自己要的那幾項。
         /// **具名不是排版偏好**：`image_bytes` 和 `image_cap_bytes` 都是 `u64`，
         /// 做成位置參數的話對調編得過——那正是這一整段程式碼被抽出來的原因，
         /// 測試自己不可以再造一個。
@@ -11242,7 +11269,7 @@ pub mod record {
                 cpu_percent: None,
                 peak_rss_bytes: None,
                 disk: DiskMeasured {
-                    delta_bytes: 0,
+                    delta_bytes: Some(0),
                     image_bytes: written_bytes(0),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,
@@ -11261,7 +11288,7 @@ pub mod record {
                 cpu_percent: Some(CpuPercent(46.0)),
                 peak_rss_bytes: Some(401 * MB_U),
                 disk: DiskMeasured {
-                    delta_bytes: 3584 * MB_I,
+                    delta_bytes: Some(3584 * MB_I),
                     image_bytes: written_bytes(200 * MB_U),
                     image_cap_bytes: budget_bytes(CAP_250MB),
                     image_budget_closed_this_session: false,
@@ -11292,7 +11319,7 @@ pub mod record {
                 cpu_percent: Some(CpuPercent(44.0)),
                 peak_rss_bytes: Some(399 * MB_U),
                 disk: DiskMeasured {
-                    delta_bytes: MB_I,
+                    delta_bytes: Some(MB_I),
                     image_bytes: written_bytes(0),
                     image_cap_bytes: budget_bytes(CAP_250MB),
                     image_budget_closed_this_session: false,
@@ -11312,7 +11339,7 @@ pub mod record {
         fn deleted_bytes_do_not_create_a_negative_daily_projection() {
             let m = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 4 * MB_I,
+                    delta_bytes: Some(4 * MB_I),
                     image_bytes: written_bytes(40 * MB_U),
                     image_cap_bytes: budget_bytes(CAP_250MB),
                     image_budget_closed_this_session: false,
@@ -11334,7 +11361,7 @@ pub mod record {
         fn projection_clamps_its_ceiling_and_explains_when_it_will_close() {
             let burst = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 81 * MB_I,
+                    delta_bytes: Some(81 * MB_I),
                     image_bytes: written_bytes(79 * MB_U),
                     image_cap_bytes: budget_bytes(CAP_250MB),
                     image_budget_closed_this_session: false,
@@ -11357,7 +11384,7 @@ pub mod record {
 
             let quiet = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 2 * MB_I,
+                    delta_bytes: Some(2 * MB_I),
                     image_bytes: written_bytes(MB_U),
                     image_cap_bytes: budget_bytes(CAP_250MB),
                     image_budget_closed_this_session: false,
@@ -11380,7 +11407,7 @@ pub mod record {
         fn disk_advice_distinguishes_images_from_everything_else() {
             let mostly_other = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 4 * 1024 * MB_I,
+                    delta_bytes: Some(4 * 1024 * MB_I),
                     image_bytes: written_bytes(200 * MB_U),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,
@@ -11401,7 +11428,7 @@ pub mod record {
 
             let mostly_images = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 400 * MB_I,
+                    delta_bytes: Some(400 * MB_I),
                     image_bytes: written_bytes(350 * MB_U),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,
@@ -11426,7 +11453,7 @@ pub mod record {
         fn disk_breakdown_only_splits_when_the_subtraction_is_meaningful() {
             let deleted = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 4 * MB_I,
+                    delta_bytes: Some(4 * MB_I),
                     image_bytes: written_bytes(40 * MB_U),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,
@@ -11442,7 +11469,7 @@ pub mod record {
 
             let clean = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 40 * MB_I,
+                    delta_bytes: Some(40 * MB_I),
                     image_bytes: written_bytes(4 * MB_U),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,
@@ -11462,7 +11489,7 @@ pub mod record {
         fn a_net_decrease_is_reported_as_a_positive_magnitude() {
             let shrank = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: -4 * MB_I,
+                    delta_bytes: Some(-4 * MB_I),
                     image_bytes: written_bytes(0),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,
@@ -11482,7 +11509,7 @@ pub mod record {
 
             let grew = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 4 * MB_I,
+                    delta_bytes: Some(4 * MB_I),
                     image_bytes: written_bytes(0),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,
@@ -11501,7 +11528,7 @@ pub mod record {
         fn missing_daily_rate_hides_the_entire_disk_section() {
             let m = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 4 * MB_I,
+                    delta_bytes: Some(4 * MB_I),
                     image_bytes: written_bytes(MB_U),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,
@@ -11519,8 +11546,7 @@ pub mod record {
             );
         }
 
-        /// 9. 這是一個真的零和一個沒量到的零長得一樣的地方，這一輪只釘住
-        ///    現況、沒有改它。
+        /// 9. 真的零要照實顯示；快照失敗則必須是另一句話。
         #[test]
         fn a_measured_zero_stays_a_passing_zero() {
             let m = nothing_measured();
@@ -11530,6 +11556,23 @@ pub mod record {
                 "真的零目前就是這樣顯示：{out}"
             );
             assert!(!out.contains('⚠'), "真的零目前視為通過預算：{out}");
+
+            let missing = FootprintMeasured {
+                disk: DiskMeasured {
+                    delta_bytes: None,
+                    ..m.disk
+                },
+                ..m
+            };
+            let missing = footprint_lines(&missing, |_| Some(0.0));
+            assert!(
+                missing.contains("磁碟總量量不到（詳見下方磁碟歸因）"),
+                "量不到要明講：{missing}"
+            );
+            assert!(
+                !missing.contains("磁碟 0 B/天"),
+                "沒量到不能冒充真的零：{missing}"
+            );
         }
 
         /// 10. 所有量測都缺席時，只留下不可省略的條件行。
@@ -11579,7 +11622,7 @@ pub mod record {
                 ..Default::default()
             };
             let f = sister_capture::footprint::Footprint::new();
-            let m = FootprintMeasured::measure(&f, &stats, -37, 250);
+            let m = FootprintMeasured::measure(&f, &stats, Some(-37), 250);
             assert_eq!(m.frame_size, Some((3840, 2160)));
             assert_eq!(
                 m.cpu_percent,
@@ -11589,7 +11632,7 @@ pub mod record {
             assert_eq!(m.disk.image_bytes.bytes(), 7 * MB_U);
             assert_eq!(m.disk.image_cap_bytes.bytes(), 250 * 1024 * 1024);
             assert!(m.disk.image_budget_closed_this_session);
-            assert_eq!(m.disk.delta_bytes, -37);
+            assert_eq!(m.disk.delta_bytes, Some(-37));
         }
 
         /// CPU 欄位必須接平均百分比，不能接成這場累積用掉的 CPU 秒數。
@@ -11605,7 +11648,7 @@ pub mod record {
                 "兩個 getter 必須先有可辨識的輸出，這條接線測試才算數"
             );
             let stats = sister_capture::RecorderStats::default();
-            let m = FootprintMeasured::measure(&f, &stats, 0, 0);
+            let m = FootprintMeasured::measure(&f, &stats, Some(0), 0);
             assert!(!m.disk.image_budget_closed_this_session);
             assert_eq!(
                 m.cpu_percent,
@@ -11620,30 +11663,40 @@ pub mod record {
         }
 
         /// `report()` 要交出整塊足跡字；未滿 60 秒時磁碟段必須整段消失。
-        ///
-        /// `|bytes| f.bytes_per_day(bytes)` 裡把 `bytes` 換成 `0`，Linux 上仍會因
-        /// 60 秒門檻而兩邊都回 `None`；這條只釘住「太短時整段消失」，不宣稱
-        /// 擋得住那個改壞。
         #[test]
         fn report_returns_the_whole_block_and_hides_short_disk_projection() {
             let f = sister_capture::footprint::Footprint::new();
             let m = FootprintMeasured {
                 frame_size: None,
                 disk: DiskMeasured {
-                    delta_bytes: MB_I,
+                    delta_bytes: Some(MB_I),
                     image_bytes: written_bytes(0),
                     image_cap_bytes: budget_bytes(CAP_250MB),
                     image_budget_closed_this_session: false,
                 },
                 ..nothing_measured()
             };
-            let out = m.report(&f);
+            let out = m.report(FootprintElapsedSecs::from_footprint(&f));
             assert_eq!(
                 out,
                 format!(
                     "  條件：版本 sister {}；螢幕解析度量不到（這場沒有成功抓到畫面）；負載：程式量不到，貼回時請註明當時在做什麼",
                     env!("CARGO_PKG_VERSION")
                 )
+            );
+        }
+
+        /// 每日外推的 60 秒門檻與分母都用凍結值，不會被收尾診斷拖長。
+        #[test]
+        fn frozen_elapsed_time_controls_the_daily_projection() {
+            assert_eq!(bytes_per_day_at(FootprintElapsedSecs(59.999), 60), None);
+            assert_eq!(
+                bytes_per_day_at(FootprintElapsedSecs(60.0), 60),
+                Some(86_400.0)
+            );
+            assert_eq!(
+                bytes_per_day_at(FootprintElapsedSecs(120.0), 60),
+                Some(43_200.0)
             );
         }
 
@@ -11654,7 +11707,7 @@ pub mod record {
                 cpu_percent: Some(CpuPercent(46.0)),
                 peak_rss_bytes: Some(401 * MB_U),
                 disk: DiskMeasured {
-                    delta_bytes: 400 * MB_I,
+                    delta_bytes: Some(400 * MB_I),
                     image_bytes: written_bytes(350 * MB_U),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,
@@ -11685,7 +11738,7 @@ pub mod record {
                 cpu_percent: Some(CpuPercent(44.0)),
                 peak_rss_bytes: Some(399 * MB_U),
                 disk: DiskMeasured {
-                    delta_bytes: MB_I,
+                    delta_bytes: Some(MB_I),
                     image_bytes: written_bytes(0),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,
@@ -11753,7 +11806,7 @@ pub mod record {
         fn each_phase_zero_breach_and_image_ceiling_advice_choose_the_right_footnote() {
             let capped_but_passing = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 2 * 1024 * MB_I,
+                    delta_bytes: Some(2 * 1024 * MB_I),
                     image_bytes: written_bytes(2 * 1024 * MB_U),
                     image_cap_bytes: budget_bytes(CAP_250MB),
                     image_budget_closed_this_session: false,
@@ -11796,7 +11849,7 @@ pub mod record {
 
             let disk_breached = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 2 * 1024 * MB_I + 4 * MB_I,
+                    delta_bytes: Some(2 * 1024 * MB_I + 4 * MB_I),
                     image_bytes: written_bytes(2 * 1024 * MB_U),
                     image_cap_bytes: budget_bytes(CAP_250MB),
                     image_budget_closed_this_session: false,
@@ -11819,7 +11872,7 @@ pub mod record {
         fn spent_image_budget_uses_past_tense_instead_of_predicting_another_close() {
             let mut m = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 81 * MB_I,
+                    delta_bytes: Some(81 * MB_I),
                     image_bytes: written_bytes(79 * MB_U),
                     image_cap_bytes: budget_bytes(CAP_250MB),
                     image_budget_closed_this_session: false,
@@ -11854,7 +11907,7 @@ pub mod record {
         fn disk_attribution_straddles_the_two_to_one_boundary() {
             let m = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 400 * MB_I,
+                    delta_bytes: Some(400 * MB_I),
                     image_bytes: written_bytes(200 * MB_U),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,
@@ -11897,7 +11950,7 @@ pub mod record {
         fn clamped_image_rate_is_labeled_but_uncapped_wording_stays_unchanged() {
             let capped = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 60 * MB_I,
+                    delta_bytes: Some(60 * MB_I),
                     image_bytes: written_bytes(40 * MB_U),
                     image_cap_bytes: budget_bytes(CAP_250MB),
                     image_budget_closed_this_session: false,
@@ -11912,7 +11965,7 @@ pub mod record {
 
             let capped_primary = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 500 * MB_I,
+                    delta_bytes: Some(500 * MB_I),
                     image_bytes: written_bytes(400 * MB_U),
                     image_cap_bytes: budget_bytes(CAP_250MB),
                     image_budget_closed_this_session: false,
@@ -11927,7 +11980,7 @@ pub mod record {
 
             let uncapped = FootprintMeasured {
                 disk: DiskMeasured {
-                    delta_bytes: 400 * MB_I,
+                    delta_bytes: Some(400 * MB_I),
                     image_bytes: written_bytes(350 * MB_U),
                     image_cap_bytes: budget_bytes(0),
                     image_budget_closed_this_session: false,

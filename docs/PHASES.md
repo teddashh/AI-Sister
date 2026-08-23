@@ -60,6 +60,8 @@ capture 層本身就是 recorder。
   Phase 0 blocker。SPEC §2.3 的 < 3% 是長期產品目標，不是這一階段的 gate。
 - [ ] 磁碟 < 300MB/天（實測數字記入 README）。alpha.46 的 60 秒實際長了 5.4MB，
   外推 3.2GB/天；短時外推不是整天實測，成因也還沒歸清，所以這一格仍未通過。
+  alpha.47 已讓錄製收尾分列 SQLite 物件、main／WAL／SHM 與旁檔；等真 Windows
+  回收這份歸因後再改，不先拿 WAL 工作檔的短場淨變化猜一天。
 - [x] `sister query 電話` 能在 < 100ms 撈回三天前畫面上的客服電話，附出處。
   **量過了，四條路都在 1 ms 以內**（`crates/sister-core/tests/search_latency.rs`，
   45 天語料 = 3,110,400 行字，開發機）：三個字以上走 trigram 0.1 ms、整個
