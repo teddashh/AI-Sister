@@ -3,7 +3,7 @@
 //! SQLite 的邏輯配置、main/WAL/SHM 實體檔案，以及資料目錄旁檔是三種不同
 //! 口徑。這裡把它們並排，不把可以各自為真的數字加成一句假結論。
 
-use sister_core::db::{DbDiskDelta, DbDiskSnapshot, FileDelta, SqliteFileKind};
+use sister_core::db::{DbDiskDelta, DbDiskSnapshot, SqliteFileKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -82,20 +82,16 @@ impl AttributionInput {
             .map_err(|error| format!("SQLite 快照無法相減：{error:#}"))
     }
 
-    /// 現行足跡摘要的總量口徑：SQLite 邏輯配置 + WAL 檔長 + 目錄中登記的畫面。
+    /// Phase 0 每日磁碟預算的計帳口徑：SQLite 邏輯配置 + 目錄中登記的畫面。
     ///
-    /// 這是為了讓新歸因能和既有「這段實際長了」逐位元組對帳，不代表 WAL
-    /// 檔長適合外推每天；詳細輸出會把那個限制就地講清楚。
-    pub(crate) fn total_delta_bytes(&self) -> Result<i64, String> {
+    /// WAL 是 checkpoint 之間可重複使用的工作檔。它這一分鐘從 0 長到高水位，
+    /// 不代表下一分鐘、下一天會再永久多出同樣一份；把檔長淨變化乘成每天會把
+    /// 工作空間說成資料成長。實體 WAL 仍在下方逐項回報，只是不進每日外推。
+    pub(crate) fn budget_delta_bytes(&self) -> Result<i64, String> {
         let delta = self.db_delta()?;
-        let wal = sqlite_file_delta(&delta, SqliteFileKind::Wal)?;
         checked_sum(
-            [
-                delta.logical_allocated_bytes,
-                wal.delta_bytes,
-                delta.catalogued_image_bytes,
-            ],
-            "現行磁碟總量",
+            [delta.logical_allocated_bytes, delta.catalogued_image_bytes],
+            "Phase 0 磁碟計帳",
         )
     }
 }
@@ -112,43 +108,31 @@ pub(crate) fn render(input: &AttributionInput) -> Vec<String> {
 }
 
 fn render_sqlite(input: &AttributionInput, delta: &DbDiskDelta, lines: &mut Vec<String>) {
-    let wal = match sqlite_file_delta(delta, SqliteFileKind::Wal) {
-        Ok(wal) => *wal,
-        Err(error) => {
-            lines.push(format!("        SQLite 實體檔案：量不到（{error}）"));
-            return;
-        }
-    };
     let written = match i64::try_from(input.session_image_bytes) {
         Ok(bytes) => bytes,
         Err(_) => {
-            lines.push("        現行「其他」：量不到（這場寫圖量超過 i64）".to_string());
+            lines.push("        足跡「其他」：量不到（這場寫圖量超過 i64）".to_string());
             return;
         }
     };
     let image_account = match delta.catalogued_image_bytes.checked_sub(written) {
         Some(bytes) => bytes,
         None => {
-            lines.push("        現行「其他」：量不到（畫面帳差溢位）".to_string());
+            lines.push("        足跡「其他」：量不到（畫面帳差溢位）".to_string());
             return;
         }
     };
     match checked_sum(
-        [
-            delta.logical_allocated_bytes,
-            wal.delta_bytes,
-            image_account,
-        ],
-        "現行「其他」",
+        [delta.logical_allocated_bytes, image_account],
+        "足跡「其他」",
     ) {
         Ok(other) => lines.push(format!(
-            "        現行「其他」 {} = SQLite 邏輯配置 {} + WAL 檔長 {} + 畫面帳差 {}",
+            "        足跡「其他」 {} = SQLite 邏輯配置 {} + 畫面帳差 {}",
             signed_bytes(other),
             signed_bytes(delta.logical_allocated_bytes),
-            signed_bytes(wal.delta_bytes),
             signed_bytes(image_account),
         )),
-        Err(error) => lines.push(format!("        現行「其他」：量不到（{error}）")),
+        Err(error) => lines.push(format!("        足跡「其他」：量不到（{error}）")),
     }
 
     lines.push(format!(
@@ -224,7 +208,7 @@ fn render_sqlite_files(input: &AttributionInput, delta: &DbDiskDelta, lines: &mu
         ));
     }
     lines.push(
-        "              WAL 是可重用工作檔；檔長淨變化不換算每日增長，checkpoint 門檻也不是硬上限。"
+        "              WAL 是可重用工作檔；上面的足跡總量與「其他」不含 WAL，檔長淨變化不換算每日增長，checkpoint 門檻也不是硬上限。"
             .to_string(),
     );
 }
@@ -305,15 +289,6 @@ fn sidecar_deltas(
                 .map(|delta| (name.clone(), delta))
         })
         .collect()
-}
-
-fn sqlite_file_delta(delta: &DbDiskDelta, kind: SqliteFileKind) -> Result<&FileDelta, String> {
-    delta
-        .files
-        .as_ref()
-        .ok_or_else(|| "這不是實體 SQLite 資料庫，沒有 main/WAL/SHM 檔案量測".to_string())?
-        .get(&kind)
-        .ok_or_else(|| format!("SQLite 快照缺少 {kind:?} 檔案量測"))
 }
 
 fn checked_sum<const N: usize>(values: [i64; N], label: &str) -> Result<i64, String> {
@@ -430,14 +405,12 @@ mod tests {
     }
 
     #[test]
-    fn current_total_and_other_use_the_exact_three_named_terms() {
+    fn phase_zero_total_and_other_exclude_the_reusable_wal_work_file() {
         let input = measured_input();
-        assert_eq!(input.total_delta_bytes(), Ok(1_050));
+        assert_eq!(input.budget_delta_bytes(), Ok(750));
         let out = render(&input).join("\n");
         assert!(
-            out.contains(
-                "現行「其他」 +930 B = SQLite 邏輯配置 +600 B + WAL 檔長 +300 B + 畫面帳差 +30 B"
-            ),
+            out.contains("足跡「其他」 +630 B = SQLite 邏輯配置 +600 B + 畫面帳差 +30 B"),
             "{out}"
         );
         assert!(out.contains("sister.db +100 B（收尾共 1.1 KB）"), "{out}");
@@ -445,8 +418,28 @@ mod tests {
             out.contains("sister.db-wal +300 B（收尾共 500 B）"),
             "{out}"
         );
+        assert!(out.contains("上面的足跡總量與「其他」不含 WAL"), "{out}");
         assert!(out.contains("sister.db-shm 0 B（收尾共 300 B）"), "{out}");
         assert!(!out.contains("/天"), "WAL 歸因不准外推每天：{out}");
+    }
+
+    #[test]
+    fn a_larger_wal_high_water_mark_cannot_change_the_daily_budget_number() {
+        let mut input = measured_input();
+        let before = input.budget_delta_bytes();
+        input
+            .db_after
+            .as_mut()
+            .unwrap()
+            .files
+            .as_mut()
+            .unwrap()
+            .insert(SqliteFileKind::Wal, Some(9_000_000));
+
+        assert_eq!(input.budget_delta_bytes(), before);
+        let out = render(&input).join("\n");
+        assert!(out.contains("sister.db-wal +8.6 MB"), "{out}");
+        assert!(out.contains("足跡「其他」 +630 B"), "{out}");
     }
 
     #[test]
@@ -510,7 +503,7 @@ mod tests {
         let mut failed = measured_input();
         failed.db_before = Err("permission denied".to_string());
         failed.sidecars_after = Err("directory vanished".to_string());
-        assert!(failed.total_delta_bytes().is_err());
+        assert!(failed.budget_delta_bytes().is_err());
         let failed = render(&failed).join("\n");
         assert!(failed.contains("SQLite：量不到"), "{failed}");
         assert!(failed.contains("資料目錄旁檔：量不到"), "{failed}");
@@ -530,9 +523,9 @@ mod tests {
             sidecars_after: Ok(sidecars(&[])),
             session_image_bytes: 0,
         };
-        assert_eq!(zero.total_delta_bytes(), Ok(0));
+        assert_eq!(zero.budget_delta_bytes(), Ok(0));
         let zero = render(&zero).join("\n");
-        assert!(zero.contains("現行「其他」 0 B"), "{zero}");
+        assert!(zero.contains("足跡「其他」 0 B"), "{zero}");
         assert!(zero.contains("0 B（沒有一般檔案淨變化）"), "{zero}");
         assert!(!zero.contains("量不到"), "{zero}");
     }

@@ -10391,7 +10391,7 @@ pub mod record {
             sidecars_after: crate::disk_attribution::sidecar_snapshot(data_dir),
             session_image_bytes: stats.image_bytes,
         };
-        footprint_measured.disk.delta_bytes = disk_attribution.total_delta_bytes().ok();
+        footprint_measured.disk.delta_bytes = disk_attribution.budget_delta_bytes().ok();
         let footprint_report = footprint_measured.report(footprint_elapsed);
         let disk_attribution_report = crate::disk_attribution::render(&disk_attribution);
 
