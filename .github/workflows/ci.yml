@@ -206,6 +206,12 @@ jobs:
           cargo build -q -p sister-cli
           SISTER=./target/debug/sister ./scripts/check-readme-quickstart.sh
 
+      # 單元測試守得到 evaluator 裡的算式，守不到 clap 接線、checked-in fixtures
+      # 和 JSON 輸出仍接在同一條路上。用上一步真的 build 出來的執行檔跑一次：
+      # 分數、題數與 known miss 都由 fixture 決定；延遲只驗有限非負，不鎖 CI 毫秒。
+      - name: The checked-in recall baseline must still produce its published result
+        run: SISTER=./target/debug/sister python3 ./scripts/check-recall-baseline.py
+
       # Windows 那一半在 Linux 上被 cfg 關掉，這裡至少要型別檢查到
       - name: Cross-check the Windows half
         run: ./scripts/check-windows.sh

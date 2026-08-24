@@ -227,6 +227,9 @@ capture 層本身就是 recorder。
   回查率及 CPU／RAM／電池／磁碟要等各自有真的量測來源再填。
 - repo 內建 3 個純合成事件、5 題 QA 的 Reviewed fixture，只用來驗 runner 接線與
   報告形狀；它不是下方 ≥100 題的公開 baseline，也不是代表性品質數字。
+- [x] 合成 fixture 的 CLI regression gate：CI 真的執行 `replay evaluate --json`，
+  鎖定兩個產品 profile 的題數、分數、known miss 與 `null` 契約；延遲只驗真的量到
+  五題且為有限非負數，不把 runner 的毫秒波動寫成門檻。
 - 指標面板（開發者模式頁）+ README benchmark 表自動生成。
 
 **Exit criteria**
