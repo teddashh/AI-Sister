@@ -428,6 +428,19 @@ Reviewed 檔案。題庫 Reviewed 也不會改掉 corpus 自己的 Draft 狀態�
 是純合成的 Reviewed smoke fixture，不含真實工作日資料，也不是一張把其他 Draft
 自動變安全的通行證。
 
+桌面的「評測指標…」預設隱藏，只有 `[shell] developer_mode = true` 且重開桌面殼
+後才出現在系統匣。它不會自己掃資料夾；人從原生選檔器挑中一份 report 後，完整
+JSON 會短暫進入本機 WebView，再經同一行程的 IPC 交給 Rust 嚴格解析。Rust 回給
+頁面保存與渲染的 projection 只有 corpus／題庫狀態與數量、數值參數、各配置的
+aggregate 指標和任一 QA 指標未通過的 1-based 題號。corpus／題庫名稱、fingerprint、
+ranking、自由填寫的題目 id、逐題原問句與 returned values **全部不在 projection**。
+這是顯示邊界，不是假裝 raw report 從未進過 renderer。
+
+這條路的 CSP 和程式都沒有網路輸出，不上傳，也不呼叫模型；頁面不改原檔、不另存
+副本。磁碟上的 report 原檔仍包含題目和檢索文字，也沒有額外加密。任一輸入是 Draft
+時，指標頁會常駐 private Draft 警告；關掉開發者入口、關掉頁面或看到一份去文字
+摘要，都不會把那份原檔變成 Reviewed。
+
 ---
 
 ## 我們怎麼證明，而不是只是宣稱

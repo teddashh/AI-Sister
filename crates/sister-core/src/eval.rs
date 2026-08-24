@@ -498,6 +498,141 @@ pub struct LatencyMetrics {
     pub max_ms: f64,
 }
 
+/// 開發者指標頁可以看的評測報告。
+///
+/// 刻意不是 [`EvalReport`] 的別名：完整報告裡有使用者的問題原話與
+/// 檢索回來的內文。這個專用投影拿掉所有自由字串，只留下面板會畫的
+/// 數值摘要，以及能按 question set 順序找回去的失敗題號。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MetricsView {
+    pub format_version: u32,
+    pub private_draft: bool,
+    pub corpus: MetricsCorpusView,
+    pub question_set: MetricsQuestionSetView,
+    pub parameters: MetricsParametersView,
+    pub configurations: Vec<MetricsConfigurationView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MetricsCorpusView {
+    pub review: ReviewStatus,
+    pub duration_ms: Millis,
+    pub events: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MetricsQuestionSetView {
+    pub review: ReviewStatus,
+    pub questions: usize,
+    pub sources: QuestionSourceCounts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MetricsParametersView {
+    pub k: usize,
+    pub warmups: usize,
+    pub runs: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MetricsConfigurationView {
+    pub name: String,
+    pub recall_at_k: Fraction,
+    pub answer_accuracy: Fraction,
+    pub citation_accuracy: Fraction,
+    pub latency: LatencyMetrics,
+    pub model_calls: usize,
+    pub model_usd_per_day: f64,
+    pub reminder_false_positive_rate: Option<f64>,
+    pub reminder_miss_rate: Option<f64>,
+    pub segmentation_f1: Option<f64>,
+    pub reviewer_lookup_rate: Option<f64>,
+    pub cpu_percent: Option<f64>,
+    pub ram_peak_mb: Option<f64>,
+    pub battery_percent_per_hour: Option<f64>,
+    pub disk_bytes: Option<u64>,
+    /// 1-based question set 順序；不用輸入裡可自由填寫的 id，避免 id 自己裝著原問句。
+    pub failed_question_numbers: Vec<usize>,
+}
+
+/// 讀完整 report JSON，用 strict serde schema 解析後縮成不含自由字串的
+/// 開發者面板 view。
+pub fn metrics_view_from_json(contents: &str) -> Result<MetricsView> {
+    let report: EvalReport =
+        serde_json::from_str(contents).context("parse replay evaluation report JSON")?;
+    metrics_view(&report)
+}
+
+pub fn metrics_view(report: &EvalReport) -> Result<MetricsView> {
+    ensure!(
+        report.format_version == REPORT_VERSION,
+        "eval report format_version {} 不支援（現行是 {}）",
+        report.format_version,
+        REPORT_VERSION
+    );
+
+    Ok(MetricsView {
+        format_version: report.format_version,
+        private_draft: report.corpus.review == ReviewStatus::Draft
+            || report.question_set.review == ReviewStatus::Draft,
+        corpus: MetricsCorpusView {
+            review: report.corpus.review,
+            duration_ms: report.corpus.duration_ms,
+            events: report.corpus.events,
+        },
+        question_set: MetricsQuestionSetView {
+            review: report.question_set.review,
+            questions: report.question_set.questions,
+            sources: report.question_set.sources.clone(),
+        },
+        parameters: MetricsParametersView {
+            k: report.parameters.k,
+            warmups: report.parameters.warmups,
+            runs: report.parameters.runs,
+        },
+        configurations: report
+            .configurations
+            .iter()
+            .enumerate()
+            .map(|(configuration_index, configuration)| {
+                let metrics = &configuration.metrics;
+                MetricsConfigurationView {
+                    name: match configuration.name.as_str() {
+                        "baseline_text" => "baseline_text".to_string(),
+                        "facts" => "facts".to_string(),
+                        _ => format!("configuration-{}", configuration_index + 1),
+                    },
+                    recall_at_k: metrics.recall_at_k.clone(),
+                    answer_accuracy: metrics.answer_accuracy.clone(),
+                    citation_accuracy: metrics.citation_accuracy.clone(),
+                    latency: metrics.latency.clone(),
+                    model_calls: metrics.model_calls,
+                    model_usd_per_day: metrics.model_usd_per_day,
+                    reminder_false_positive_rate: metrics.reminder_false_positive_rate,
+                    reminder_miss_rate: metrics.reminder_miss_rate,
+                    segmentation_f1: metrics.segmentation_f1,
+                    reviewer_lookup_rate: metrics.reviewer_lookup_rate,
+                    cpu_percent: metrics.cpu_percent,
+                    ram_peak_mb: metrics.ram_peak_mb,
+                    battery_percent_per_hour: metrics.battery_percent_per_hour,
+                    disk_bytes: metrics.disk_bytes,
+                    failed_question_numbers: configuration
+                        .questions
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(question_index, question)| {
+                            (!question.answer_correct
+                                || question.recalled == Some(false)
+                                || question.citation_correct == Some(false))
+                            .then_some(question_index + 1)
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+    })
+}
+
 /// 同一份 corpus 自動跑 text baseline 與 +facts。除了 latency，報告只由輸入決定。
 pub fn evaluate(
     corpus: &Corpus,
@@ -1054,6 +1189,74 @@ mod tests {
             assert!(json.contains(&format!("\"{field}\":null")), "{json}");
         }
         assert!(json.contains("\"model_calls\":0"), "{json}");
+    }
+
+    #[test]
+    fn metrics_view_drops_every_free_form_string_and_keeps_failed_question_numbers() {
+        let (corpus, questions) = fixture();
+        let mut report = evaluate(&corpus, &questions, 5, 1).expect("evaluate");
+        report.question_set.review = ReviewStatus::Draft;
+        report.evaluator_version = "PRIVATE TEXT".into();
+        report.corpus.name = "PRIVATE TEXT".into();
+        report.corpus.fingerprint = "PRIVATE TEXT".into();
+        report.question_set.name = "PRIVATE TEXT".into();
+        report.question_set.fingerprint = "PRIVATE TEXT".into();
+        report.parameters.ranking = "PRIVATE TEXT".into();
+        for configuration in &mut report.configurations {
+            configuration.name = "PRIVATE TEXT".into();
+            configuration.questions[0].id = "PRIVATE TEXT".into();
+            configuration.questions[0].question = "PRIVATE TEXT".into();
+            for returned in &mut configuration.questions[0].returned {
+                returned.values = vec!["PRIVATE TEXT".into()];
+            }
+        }
+        // 只壞 citation 也是評測失敗，不能因為 answer_correct 是 true 就消失。
+        report.configurations[0].questions[0].answer_correct = true;
+        report.configurations[0].questions[0].recalled = Some(true);
+        report.configurations[0].questions[0].citation_correct = Some(false);
+
+        let contents = serde_json::to_string(&report).expect("report json");
+        let view = metrics_view_from_json(&contents).expect("metrics view");
+        let json = serde_json::to_string(&view).expect("view json");
+        assert!(view.private_draft);
+        assert_eq!(
+            view.configurations[0].failed_question_numbers,
+            [1],
+            "question number should locate the miss without copying its free-form id"
+        );
+        assert!(!json.contains("PRIVATE TEXT"), "{json}");
+        assert!(!json.contains("returned"), "{json}");
+        assert!(!json.contains("\"question\""), "{json}");
+    }
+
+    #[test]
+    fn metrics_view_keeps_zero_zero_denominator_and_unmeasured_apart() {
+        let (corpus, questions) = fixture();
+        let mut report = evaluate(&corpus, &questions, 5, 1).expect("evaluate");
+        for configuration in &mut report.configurations {
+            for question in &mut configuration.questions {
+                question.recalled = None;
+                question.citation_correct = None;
+            }
+            configuration.metrics.recall_at_k = Fraction::new(0, 0);
+            configuration.metrics.citation_accuracy = Fraction::new(0, 0);
+        }
+
+        let view = metrics_view(&report).expect("metrics view");
+        assert!(
+            !view.private_draft,
+            "Reviewed corpus 和 Reviewed 題庫不能永遠被畫成 private Draft"
+        );
+        let metrics = &view.configurations[0];
+        assert_eq!(metrics.recall_at_k.passed, 0);
+        assert_eq!(metrics.recall_at_k.total, 0);
+        assert_eq!(metrics.recall_at_k.rate, None, "zero denominator is null");
+        assert_eq!(metrics.model_calls, 0, "a measured zero stays numeric");
+        assert_eq!(metrics.model_usd_per_day, 0.0);
+        assert_eq!(
+            metrics.reminder_false_positive_rate, None,
+            "an unmeasured metric stays null"
+        );
     }
 
     #[test]

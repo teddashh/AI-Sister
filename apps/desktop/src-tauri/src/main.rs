@@ -1099,6 +1099,17 @@ fn settings_read() -> Result<Settings, String> {
     })
 }
 
+/// 把 CLI 產生的完整 eval report 縮成開發者指標頁能看的那一層。
+///
+/// 瀏覽器端會讀使用者明確選的檔案，再把內容送進這支 command。這裡
+/// 不收路徑，所以一扇開發頁不會變成可以任意讀本機檔案的介面。
+/// 回傳型別也刻意不含 report 裡任何自由字串；解析失敗也不把原值抄進畫面。
+#[tauri::command(async)]
+fn eval_report_view(contents: String) -> Result<sister_core::eval::MetricsView, String> {
+    sister_core::eval::metrics_view_from_json(&contents)
+        .map_err(|_| "JSON 格式或 eval report 版本不符合這一版 sister".to_string())
+}
+
 /// 存完之後，「她什麼時候會照這份跑」的答案。
 ///
 /// 存好之後那句話以前寫死是「正在跑的 record 會在 5 秒內換上這一份」。那句
@@ -1828,6 +1839,27 @@ fn open_timeline(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 開發者模式才會在系統匣出現的評測摘要頁。
+///
+/// 它不自己跑評測，也不去猜資料目錄；只讀使用者在頁面上明確選中的
+/// `replay evaluate --to` 報告。同一個 label 重複使用，避免開出兩份互相
+/// 不知道對方載了哪個檔案的數字。
+fn open_metrics(app: tauri::AppHandle) -> Result<(), String> {
+    const METRICS: &str = "metrics";
+    if let Some(win) = app.get_webview_window(METRICS) {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(&app, METRICS, tauri::WebviewUrl::App("metrics.html".into()))
+        .title("AI-Sister 開發者指標")
+        .inner_size(1080.0, 720.0)
+        .min_inner_size(720.0, 480.0)
+        .build()
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(())
+}
+
 /// 他點開了第 `rank` 筆的出處。
 ///
 /// 這是檢索品質唯一不需要人工標註就拿得到的訊號：他點下去的那一刻，等於幫那
@@ -2013,6 +2045,7 @@ fn main() {
             toggle_pause,
             settings_read,
             settings_write,
+            eval_report_view,
             lint_url_rules,
             privacy_health,
             open_settings,
@@ -2173,20 +2206,55 @@ fn main() {
             let settings_item = MenuItem::with_id(app, "settings", "設定…", true, None::<&str>)?;
             let consent_item =
                 MenuItem::with_id(app, "consent", "三張同意書…", true, None::<&str>)?;
+            // 開發者入口預設不存在，不是放一顆灰掉的按鈕讓一般使用者猜。
+            // 設定檔讀不懂時也維持隱藏；這個選項只加一扇工具頁，沒有理由在
+            // 不確定時自行打開。改完設定要重開桌面殼，選單才會重建。
+            let developer_mode = config_path()
+                .and_then(|path| {
+                    sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))
+                })
+                .map(|config| config.shell.developer_mode)
+                .unwrap_or(false);
+            let metrics_item = if developer_mode {
+                Some(MenuItem::with_id(
+                    app,
+                    "metrics",
+                    "評測指標…",
+                    true,
+                    None::<&str>,
+                )?)
+            } else {
+                None
+            };
             let quit_item =
                 MenuItem::with_id(app, "quit", quit_label(occupied_now), true, None::<&str>)?;
-            let menu = Menu::with_items(
-                app,
-                &[
-                    &show_item,
-                    &record_item,
-                    &pause_item,
-                    &timeline_item,
-                    &settings_item,
-                    &consent_item,
-                    &quit_item,
-                ],
-            )?;
+            let menu = match &metrics_item {
+                Some(metrics_item) => Menu::with_items(
+                    app,
+                    &[
+                        &show_item,
+                        &record_item,
+                        &pause_item,
+                        &timeline_item,
+                        &settings_item,
+                        &consent_item,
+                        metrics_item,
+                        &quit_item,
+                    ],
+                )?,
+                None => Menu::with_items(
+                    app,
+                    &[
+                        &show_item,
+                        &record_item,
+                        &pause_item,
+                        &timeline_item,
+                        &settings_item,
+                        &consent_item,
+                        &quit_item,
+                    ],
+                )?,
+            };
             app.manage(PauseItem(pause_item));
             app.manage(RecordItem(record_item));
             app.manage(QuitItem(quit_item));
@@ -2264,6 +2332,11 @@ fn main() {
                     "consent" => {
                         if let Err(e) = open_onboarding(app.clone()) {
                             tracing::error!("同意書開不起來：{e}");
+                        }
+                    }
+                    "metrics" => {
+                        if let Err(e) = open_metrics(app.clone()) {
+                            tracing::error!("評測指標開不起來：{e}");
                         }
                     }
                     "quit" => {

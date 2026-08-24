@@ -170,6 +170,44 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 - [ ] 同意書那一頁的「好」按得下去而且真的關得掉窗（這是 ACL 那個修法，
       按不動代表 `capabilities/aux-windows.json` 還是錯的）。
 
+### Phase 2 開發者評測指標頁
+
+**懷疑的是**：開發機驗得到 report 解析與 DOM 狀態，驗不到真 Windows 的系統匣
+是否照設定增減項目，也驗不到原生選檔器實際能不能把檔案交回 WebView。這一段還
+沒有真 Windows 通過紀錄。
+
+- [ ] 桌面讀的設定檔是 `%APPDATA%` 底下的
+      `ted-h\AI-Sister\config\config.toml`。它已有 `[shell]` 時，只在
+      那個區塊加入或修改 `developer_mode`，不要再貼第二個 `[shell]`；區塊不存在
+      時才新增下面這一段。先讓設定檔沒有這項，或明寫以下內容，完整結束再重開
+      `sister-desktop.exe`。右鍵系統匣，**不可以**出現「評測指標…」。
+
+      ```toml
+      [shell]
+      developer_mode = false
+      ```
+
+- [ ] 改成 `developer_mode = true`，再完整結束並重開。這次系統匣要出現
+      「評測指標…」，按下去會開指標頁。這個設定只控制入口，不該開始錄影、跑評測
+      或在資料目錄多寫一個檔案。
+- [ ] 用 Reviewed corpus 與 Reviewed 題庫產生一份新報告；`--to` 不覆寫，所以
+      `report.json` 已存在時先換一個新檔名。
+
+      ```bat
+      .\sister.exe replay evaluate .\workday.sister-replay-draft.json .\workday.sister-questions.json --to .\report.json
+      ```
+
+      從「評測指標…」的原生選檔器選它。畫面要明講 corpus 與題庫都是 Reviewed，
+      題數、來源數、兩個配置、fraction、延遲與 `null` 欄要和 CLI 摘要／JSON 相符；
+      report 裡的 corpus／題庫名稱、fingerprint、ranking、題目 id、原問句與 returned
+      values 都不可以出現在畫面，失敗題只列 1-based 題號。
+- [ ] 再用任一邊仍是 Draft 的輸入產生另一份 report 並載入。頁面要有一直留著的
+      private Draft 警告；切換配置或重畫後也不能消失。它只警告，不可以把 Draft
+      猜成 Reviewed，也不可以改寫原 report。
+- [ ] 最後選一個不是 eval report 的 JSON，或手動刪掉 `report.json` 的一個必要
+      欄位再選。頁面要顯示讀取失敗與原因，不能當成全是 0 的報告、不能沿用上一份
+      Reviewed 數字，也不能讓字母人或系統匣一起當掉。修好檔案後應能重新選取。
+
 ## 5. 開始 / 停止記錄
 
 **懷疑的是**：字母人和 recorder 是兩個行程，靠檔案溝通。那幾個檔案的時序

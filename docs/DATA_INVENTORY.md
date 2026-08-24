@@ -184,6 +184,22 @@ private Draft 時，報告會保留 Draft 狀態並在 CLI 顯示警告；這份
 留在本機，corpus、題庫與報告都人工審查完成前不要分享。輸入是 Reviewed 也只代表
 corpus 已審過，不能替另一份題庫或新產生的報告自動背書。
 
+桌面開發者模式的「評測指標…」不新增任何常駐檔案。它預設隱藏；設定
+`[shell] developer_mode = true` 並重開桌面後，人可以從原生選檔器挑一份既有 report。
+完整 JSON 會短暫進入本機 WebView，再經同一行程 IPC 交給 Rust 依 report schema
+嚴格解析；前端接著保存和渲染的數值 projection 只有：
+
+- report format、corpus／題庫各自的 review、事件／題目數、來源數與 duration，
+  以及 k、warmup、runs。
+- 每個配置的三個 fraction、aggregate latency、模型呼叫／成本、尚未量到仍為
+  `null` 的 footprint／提醒／斷句／回查指標，以及任一 QA 指標未通過的 1-based 題號。
+
+projection **沒有任何來自 report 的自由字串**：corpus／題庫名稱、fingerprint、
+ranking、題目 id、每題 question 與 returned values 都不過這道邊界。這不會改寫
+原 report：頁面不上傳，也不另存磁碟副本，關閉後沒有多一個要清理的檔案。原檔
+依然含上面列出的逐字內容；Draft report 載入後會一直顯示 private Draft 警告，不能
+拿 projection 比較乾淨這件事替原檔通過人工審查。
+
 ---
 
 ## 快速回答

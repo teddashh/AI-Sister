@@ -224,6 +224,11 @@ pub struct ShellConfig {
     /// 這裡刻意不驗格式。能不能註冊得起來只有作業系統知道（同一個組合在別台
     /// 機器上可能被佔走了），所以答案是**註冊當下**回報的，不是這裡猜的。
     pub pause_shortcut: String,
+    /// 是否把只給開發者的評測指標頁放進桌面殼。
+    ///
+    /// 預設關閉：一般使用者不該在系統匣看到一扇要自己選 eval report JSON
+    /// 的門。這個開關只決定頁面入口是否出現，不會讓記錄器多寫任何資料。
+    pub developer_mode: bool,
 }
 
 impl Default for ShellConfig {
@@ -232,6 +237,7 @@ impl Default for ShellConfig {
             // Ctrl+Alt+P：Windows 上 Ctrl+Alt 這一組很少被應用程式自己吃掉，
             // 而 P 是 pause。這只是預設值——搶不到的時候設定頁會講，改得動。
             pause_shortcut: "Ctrl+Alt+P".to_string(),
+            developer_mode: false,
         }
     }
 }
@@ -1331,6 +1337,20 @@ mod tests {
             toml::from_str("[privacy]\nexcluded_apps = [\"keepassxc\"]\n").expect("parse");
         assert_eq!(cfg.privacy.excluded_apps, ["keepassxc"]);
         assert_eq!(cfg.shell.pause_shortcut, "Ctrl+Alt+P");
+        assert!(!cfg.shell.developer_mode);
+    }
+
+    #[test]
+    fn developer_mode_is_explicit_and_survives_a_round_trip() {
+        let old: Config =
+            toml::from_str("[shell]\npause_shortcut = \"Ctrl+Alt+P\"\n").expect("old shell config");
+        assert!(!old.shell.developer_mode);
+
+        let mut enabled = Config::default();
+        enabled.shell.developer_mode = true;
+        let text = toml::to_string_pretty(&enabled).expect("serialize");
+        let back: Config = toml::from_str(&text).expect("deserialize");
+        assert!(back.shell.developer_mode);
     }
 
     /// 空字串是「使用者關掉了熱鍵」，不是「還沒設定」——所以它要能存進去、
@@ -1366,6 +1386,7 @@ mod tests {
                 "[retention]\nmax_disk_gb_per_day = 5\n",
                 "max_disk_gb_per_day",
             ),
+            ("[shell]\ndeveloper_mod = true\n", "developer_mod"),
             // 連區塊名稱打錯都要擋——那是 `Config` 自己那一層。
             ("[privacyy]\nexcluded_apps = []\n", "privacyy"),
         ];

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <title>AI-Sister 開發者指標</title>
+    <link rel="stylesheet" href="./metrics.css" />
+  </head>
+  <body>
+    <main class="sheet">
+      <header class="head">
+        <div>
+          <p class="eyebrow">Developer mode</p>
+          <h1>評測指標</h1>
+          <p class="hint">讀一份 <code>sister replay evaluate --to</code> 產生的 JSON。檔案只送進這個本機程式。</p>
+        </div>
+        <label class="picker">
+          <span>選擇評測報告</span>
+          <input data-file type="file" accept="application/json,.json" />
+        </label>
+      </header>
+
+      <p class="status" data-status>尚未載入</p>
+
+      <!-- Draft 不是一次性的 toast。只要畫面上還是那份報告，這句就一直在。 -->
+      <aside class="private" data-private hidden>
+        ⚠ 這份 report 的 corpus 或題庫仍是 private Draft，裡面的資料尚未完成人工審查；不要分享。
+      </aside>
+
+      <div data-report hidden>
+        <section class="summary" aria-label="評測範圍">
+          <div class="card">
+            <span>Corpus</span>
+            <strong data-corpus></strong>
+            <small data-corpus-meta></small>
+          </div>
+          <div class="card">
+            <span>題庫</span>
+            <strong data-questions></strong>
+            <small data-question-meta></small>
+          </div>
+          <div class="card">
+            <span>跑法</span>
+            <strong data-parameters></strong>
+            <small data-version></small>
+          </div>
+        </section>
+
+        <section>
+          <h2>Recall QA</h2>
+          <p class="hint">Rust 已拿掉 report 裡的自由文字；這裡只列彙總與失敗題號。</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">配置</th>
+                  <th scope="col">找回率@k</th>
+                  <th scope="col">答案正確率</th>
+                  <th scope="col">出處正確率</th>
+                  <th scope="col">延遲 p50 / p95 / max</th>
+                  <th scope="col">模型</th>
+                </tr>
+              </thead>
+              <tbody data-profiles></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section data-failures hidden>
+          <h2>未通過的題號</h2>
+          <p class="hint">依 question set 的 1-based 順序；答案、找回或出處任一指標未通過就列在這裡。</p>
+          <div class="failures" data-failure-list></div>
+        </section>
+
+        <section>
+          <h2>其他產品指標</h2>
+          <p class="hint">報告沒有量到的欄位明講「未量到」，不拿 0 冒充實測。</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">配置</th>
+                  <th scope="col">提醒誤報</th>
+                  <th scope="col">提醒漏報</th>
+                  <th scope="col">斷句 F1</th>
+                  <th scope="col">Reviewer 回查</th>
+                  <th scope="col">CPU</th>
+                  <th scope="col">RAM 峰值</th>
+                  <th scope="col">電池／小時</th>
+                  <th scope="col">磁碟</th>
+                </tr>
+              </thead>
+              <tbody data-other-metrics></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </main>
+    <script type="module" src="./metrics.js"></script>
+  </body>
+</html>

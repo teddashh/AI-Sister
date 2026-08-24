@@ -1,0 +1,228 @@
+/* 開發者指標頁。沿用設定／時間軸的不透明輔助視窗，不替字母人加另一套人格。 */
+
+:root {
+  --bg: #1e1a26;
+  --fg: #f6ecdf;
+  --accent: #9a5b7a;
+  --line: rgb(246 236 223 / 10%);
+  --field: rgb(246 236 223 / 8%);
+  --warn: #e8a33d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.55 "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+}
+
+.sheet {
+  margin: 0 auto;
+  max-width: 1180px;
+  padding: 24px 26px 40px;
+}
+
+.head {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  justify-content: space-between;
+}
+
+.eyebrow {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+h1 {
+  font-size: 22px;
+  margin: 1px 0 2px;
+}
+
+h2 {
+  font-size: 15px;
+  margin: 0 0 5px;
+}
+
+.hint {
+  margin: 0;
+  opacity: 0.62;
+}
+
+code,
+table {
+  font-variant-numeric: tabular-nums;
+}
+
+code {
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+.picker {
+  align-items: center;
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 9px 11px;
+}
+
+.picker span {
+  font-weight: 600;
+}
+
+input[type="file"] {
+  color: inherit;
+  font: inherit;
+  max-width: 360px;
+}
+
+input[type="file"]::file-selector-button {
+  appearance: none;
+  background: var(--accent);
+  border: 0;
+  border-radius: 7px;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  margin-right: 9px;
+  padding: 6px 10px;
+}
+
+input[type="file"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.status {
+  border-top: 1px solid var(--line);
+  margin: 20px 0 0;
+  padding-top: 13px;
+  opacity: 0.65;
+}
+
+.status.bad {
+  color: var(--warn);
+  opacity: 1;
+}
+
+.private {
+  background: rgb(232 163 61 / 12%);
+  border-left: 3px solid var(--warn);
+  border-radius: 7px;
+  color: var(--warn);
+  margin-top: 12px;
+  padding: 9px 11px;
+}
+
+.summary {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 16px;
+}
+
+.card {
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 11px 13px;
+}
+
+.card span,
+.card small {
+  display: block;
+  opacity: 0.58;
+}
+
+.card strong {
+  display: block;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+section:not(.summary) {
+  border-top: 1px solid var(--line);
+  margin-top: 22px;
+  padding-top: 15px;
+}
+
+.table-wrap {
+  margin-top: 9px;
+  overflow-x: auto;
+}
+
+table {
+  border-collapse: collapse;
+  min-width: 850px;
+  width: 100%;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 9px;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+th {
+  font-size: 11.5px;
+  opacity: 0.55;
+}
+
+td:first-child {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-weight: 600;
+}
+
+.failures {
+  display: grid;
+  gap: 7px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-top: 9px;
+}
+
+.failure-group {
+  background: var(--field);
+  border-radius: 7px;
+  padding: 8px 10px;
+}
+
+.failure-group strong,
+.failure-group code {
+  display: block;
+}
+
+.failure-group code {
+  margin-top: 2px;
+  opacity: 0.72;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .sheet {
+    padding: 18px 16px 30px;
+  }
+
+  .summary {
+    grid-template-columns: 1fr;
+  }
+}

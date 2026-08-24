@@ -104,6 +104,12 @@ jobs:
       - name: The frame viewer's header must only vouch for the picture it actually showed
         run: node ./scripts/check-frame-source.mjs
 
+      # 這扇窗只在 Windows 的 developer mode 系統匣裡出現，本機 cargo test
+      # 跑不到接線。直接載入產品 JS，並同時守住 Rust command、選單入口、
+      # Draft 警告與「0／不適用／未量到」沒有被畫成同一個字。
+      - name: Developer metrics must stay wired and keep private text out of the view
+        run: node ./scripts/check-metrics-view.mjs
+
       # 熱鍵在程式裡是 `Ctrl+Alt+KeyP`，而鍵盤上沒有一顆鍵叫 KeyP。給人看之前
       # 要過 `pretty_combo`，而漏掉那一層的每一行都長得完全正常——`format!("還在
       # 用 {}。", restored.wanted)` 編得過、clippy 綠、讀起來也對。

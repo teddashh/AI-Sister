@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "aux-windows",
-  "description": "設定、時間軸、同意書那三扇窗。它們只多一件事：關掉自己。同意書那一頁的「好」是 core:window 的 close，而 core:default 裡並沒有 allow-close——少了這一張，那顆按鈕會安靜地什麼都不做。這幾頁其餘的動作走的是這支程式自己的 command，不受 ACL 管，所以不在這張表上。",
-  "windows": ["settings", "timeline", "onboarding"],
+  "description": "設定、時間軸、同意書、開發者指標那四扇窗。它們只多一件事：關掉自己。同意書那一頁的「好」是 core:window 的 close，而 core:default 裡並沒有 allow-close——少了這一張，那顆按鈕會安靜地什麼都不做。這幾頁其餘的動作走的是這支程式自己的 command，不受 ACL 管，所以不在這張表上。",
+  "windows": ["settings", "timeline", "onboarding", "metrics"],
   "permissions": ["core:window:allow-close"]
 }
