@@ -61,6 +61,30 @@ fn open_existing(data_dir: &Path) -> Result<Db> {
     Db::open(&path).with_context(|| format!("open {}", path.display()))
 }
 
+/// `30m`／`2h`／`7d` → 毫秒。
+///
+/// 匯出與刪除共用同一套寫法，避免同一個 `--last` 在兩個指令裡代表不同時間。
+/// 單位不可以省：`30` 猜成分鐘或天，兩邊都會是一個看似合理的錯誤。
+fn parse_span(s: &str) -> Result<sister_core::Millis> {
+    const MIN: sister_core::Millis = 60_000;
+    let s = s.trim();
+    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: i64 = num
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
+        .with_context(|| format!("看不懂「{s}」——要像 `30m`、`2h`、`7d` 這樣寫"))?;
+    let mult = match unit {
+        "m" | "min" => MIN,
+        "h" | "hr" => 60 * MIN,
+        "d" | "day" => 24 * 60 * MIN,
+        "" => anyhow::bail!("「{s}」少了單位。`{s}m` 是 {s} 分鐘、`{s}d` 是 {s} 天，差很多"),
+        other => anyhow::bail!("看不懂單位「{other}」——只認得 m（分）、h（時）、d（天）"),
+    };
+    n.checked_mul(mult)
+        .with_context(|| format!("「{s}」太長了"))
+}
+
 /// 把「排除 80」拆成「是誰擋的」。
 ///
 /// 摘要上那個數字本身沒有錯，但它回答不了使用者唯一會問的問題。而排除
@@ -1976,7 +2000,6 @@ pub mod export {
 /// 一句「要另外刪」配上一個不存在的指令，比不提刪除更糟：他會以為自己刪過了。
 pub mod forget {
     use super::*;
-    use sister_core::Millis;
 
     /// 刪完之後，`sessions` 那張表上還剩什麼——沒有的話回 `None`。
     ///
@@ -1997,30 +2020,6 @@ pub mod forget {
                 s.sessions, why
             )
         })
-    }
-
-    /// `30m`／`2h`／`7d` → 毫秒。
-    ///
-    /// **單位不可以省。** 「`--last 30`」看起來像 30 分鐘，也一樣像 30 天，
-    /// 而猜錯的那一邊是一次刪掉一個月的記憶。這個指令沒有回收桶。
-    fn parse_span(s: &str) -> Result<Millis> {
-        const MIN: Millis = 60_000;
-        let s = s.trim();
-        let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
-        let n: i64 = num
-            .parse()
-            .ok()
-            .filter(|n| *n > 0)
-            .with_context(|| format!("看不懂「{s}」——要像 `30m`、`2h`、`7d` 這樣寫"))?;
-        let mult = match unit {
-            "m" | "min" => MIN,
-            "h" | "hr" => 60 * MIN,
-            "d" | "day" => 24 * 60 * MIN,
-            "" => anyhow::bail!("「{s}」少了單位。`{s}m` 是 {s} 分鐘、`{s}d` 是 {s} 天，差很多"),
-            other => anyhow::bail!("看不懂單位「{other}」——只認得 m（分）、h（時）、d（天）"),
-        };
-        n.checked_mul(mult)
-            .with_context(|| format!("「{s}」太長了"))
     }
 
     pub fn run(data_dir: &Path, last: &str, yes: bool) -> Result<()> {
@@ -9152,6 +9151,173 @@ pub mod replay {
     use super::*;
     use sister_capture::{Recorder, ReplayBackend, Scenario, Tick};
     use sister_core::config::Config;
+    use sister_core::replay::{Corpus, DraftCorpus, ReviewStatus};
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    /// 真實資料的安全出口：DB API 直接回 [`DraftCorpus`](sister_core::replay::DraftCorpus)，
+    /// 呼叫端碰不到尚未去敏的中間 corpus。
+    pub fn export_corpus(
+        data_dir: &Path,
+        last: &str,
+        output: Option<&Path>,
+        name: Option<&str>,
+    ) -> Result<()> {
+        let span = parse_span(last)?;
+        let to = sister_core::now_ms();
+        let from = to
+            .checked_sub(span)
+            .context("replay 匯出區間超出可表示的時間")?;
+        let name = name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("recent-{}", last.trim()));
+
+        let db = open_existing(data_dir)?;
+        let draft = db.export_replay(&name, from, to)?;
+        let path = output
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| next_draft_path(data_dir));
+        write_new_json(&path, &draft)?;
+
+        let corpus = draft.as_corpus();
+        let redactions = &corpus.redactions;
+        println!(
+            "完成：{} 個事件、{:.1} 秒 → {}",
+            corpus.events.len(),
+            corpus.duration_ms as f64 / 1000.0,
+            path.display()
+        );
+        println!(
+            "  自動去敏 {} 處（金額 {}、電話 {}、email {}、類 ID {}、秘密 {}）",
+            redactions.total(),
+            redactions.money,
+            redactions.phone,
+            redactions.email,
+            redactions.id_like,
+            redactions.secrets
+        );
+        println!("  沒有圖片、圖片路徑或資料庫 row id。");
+        println!(
+            "  ⚠  這是 private Draft（review: draft），只能留在本機；人工逐項審查並改成 reviewed 前不要分享。"
+        );
+        Ok(())
+    }
+
+    pub fn import_corpus(
+        data_dir: &Path,
+        corpus_path: &Path,
+        dry_run: bool,
+        days_ago: f64,
+        start: Option<i64>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            days_ago.is_finite() && days_ago >= 0.0,
+            "--days-ago 必須是大於或等於 0 的有限數字"
+        );
+        let bytes = std::fs::read(corpus_path)
+            .with_context(|| format!("read {}", corpus_path.display()))?;
+        let corpus: Corpus = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse replay corpus {}", corpus_path.display()))?;
+        corpus.validate()?;
+
+        let origin = match start {
+            Some(origin) => origin,
+            None => {
+                let ago = (days_ago * 86_400_000.0).round();
+                anyhow::ensure!(ago <= i64::MAX as f64, "--days-ago 太大，無法換成時間戳");
+                sister_core::now_ms()
+                    .checked_sub(corpus.duration_ms)
+                    .and_then(|now| now.checked_sub(ago as i64))
+                    .context("replay 匯入起點超出可表示的時間")?
+            }
+        };
+        let mut db = if dry_run {
+            Db::open_in_memory()?
+        } else {
+            let path = crate::db_path(data_dir);
+            Db::open(&path).with_context(|| format!("open {}", path.display()))?
+        };
+
+        println!(
+            "▶ 匯入「{}」：{} 個事件、{:.1} 秒{}",
+            corpus.name,
+            corpus.events.len(),
+            corpus.duration_ms as f64 / 1000.0,
+            if dry_run {
+                "（dry-run，不寫入）"
+            } else {
+                ""
+            }
+        );
+        println!("  時間軸起點：{}", crate::fmt::timestamp(origin));
+        if corpus.review == ReviewStatus::Draft {
+            println!(
+                "  ⚠  這份 corpus 還是 private Draft；本機驗證可以，人工審查成 Reviewed 前不要分享。"
+            );
+        }
+
+        let imported = db.import_replay(&corpus, origin)?;
+        println!(
+            "完成：匯入 {} 個事件，其中 {} 張文字畫面；從文字重建 {} 個 L1 事實。",
+            imported.events, imported.frames, imported.facts
+        );
+        if dry_run {
+            println!("  dry-run 已走完整個 DB／FTS／L1 寫入流程，結果隨行程結束丟棄。");
+        }
+        Ok(())
+    }
+
+    fn write_new_json(path: &Path, value: &DraftCorpus) -> Result<()> {
+        let mut bytes = serde_json::to_vec_pretty(value)?;
+        bytes.push(b'\n');
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path).with_context(|| {
+            format!(
+                "建立 {} 失敗（不會覆寫已存在的 replay corpus）",
+                path.display()
+            )
+        })?;
+        if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            // 這一輪用 create_new 建的半截檔不是使用者原本的資料；留下它會讓
+            // 下一次匯出只看到「拒絕覆寫」，也可能被誤認成完整 corpus。
+            let _ = std::fs::remove_file(path);
+            return Err(error).with_context(|| format!("write and sync {}", path.display()));
+        }
+        Ok(())
+    }
+
+    /// 預設檔名不帶真實 epoch；分享 corpus 時，檔名也不該把已相對化的時間補回去。
+    fn next_draft_path(data_dir: &Path) -> PathBuf {
+        let root = data_dir.join("replay-drafts");
+        let first = root.join("replay.sister-replay-draft.json");
+        if !first.exists() {
+            return first;
+        }
+        for n in 2u32.. {
+            let candidate = root.join(format!("replay-{n}.sister-replay-draft.json"));
+            if !candidate.exists() {
+                return candidate;
+            }
+        }
+        unreachable!("u32 檔名已全部存在")
+    }
 
     pub fn run(
         data_dir: &Path,
@@ -9258,6 +9424,119 @@ pub mod replay {
             println!("  偵測到 {} 次疑似秘密，內容未落地。", s.secrets_redacted);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod corpus_tests {
+        use super::*;
+        use sister_core::model::{FocusSnapshot, FrameCapture, OcrBlock};
+
+        fn seed(dir: &Path) -> Result<()> {
+            let mut db = Db::open(&crate::db_path(dir))?;
+            let session = db.start_session("test", "test")?;
+            let ts = sister_core::now_ms() - 1_000;
+            let secret = "ghp_16CharsAtLeastHereOk123";
+            db.insert_frame(
+                session,
+                &FrameCapture {
+                    ts,
+                    monitor: 0,
+                    width: 1920,
+                    height: 1080,
+                    dhash: 42,
+                    image: None,
+                    image_ext: "png",
+                    ocr: vec![OcrBlock {
+                        text: format!(
+                            "一般 replay 文字；客服 0912-345-678；帳單 NT$13,450；信箱 ted@example.com；token={secret}"
+                        ),
+                        x: 1,
+                        y: 2,
+                        w: 300,
+                        h: 40,
+                        confidence: 0.95,
+                    }],
+                    focus: FocusSnapshot {
+                        app_id: Some("terminal.exe".into()),
+                        window_title: Some("一般 replay 視窗".into()),
+                        ..Default::default()
+                    },
+                },
+                Some("C:/private/frames/secret.png"),
+                999,
+            )?;
+            db.end_session(session)?;
+            Ok(())
+        }
+
+        #[test]
+        fn export_is_private_draft_without_source_secrets_or_image_paths() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("replay-export");
+            seed(&tmp.0)?;
+            let output = tmp.0.join("corpus.sister-replay-draft.json");
+            export_corpus(&tmp.0, "1d", Some(&output), Some("測試語料"))?;
+
+            let json = std::fs::read_to_string(&output)?;
+            assert!(json.contains("一般 replay 文字"), "{json}");
+            assert!(json.contains("\"review\": \"draft\""), "{json}");
+            for forbidden in [
+                "0912-345-678",
+                "NT$13,450",
+                "ted@example.com",
+                "ghp_16CharsAtLeastHereOk123",
+                "C:/private/frames/secret.png",
+                "image_path",
+            ] {
+                assert!(!json.contains(forbidden), "洩漏 {forbidden}: {json}");
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn export_refuses_to_overwrite_an_existing_file() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("replay-no-overwrite");
+            seed(&tmp.0)?;
+            let output = tmp.0.join("existing.json");
+            std::fs::write(&output, "keep me")?;
+            assert!(export_corpus(&tmp.0, "1d", Some(&output), None).is_err());
+            assert_eq!(std::fs::read_to_string(output)?, "keep me");
+            Ok(())
+        }
+
+        #[test]
+        fn default_draft_names_do_not_put_real_timestamps_back_in_the_filename() {
+            let tmp = crate::ops::tmp::Tmp::new("replay-default-name");
+            let first = next_draft_path(&tmp.0);
+            assert_eq!(
+                first.file_name().and_then(|name| name.to_str()),
+                Some("replay.sister-replay-draft.json")
+            );
+            std::fs::create_dir_all(first.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&first, "draft").expect("first");
+            let second = next_draft_path(&tmp.0);
+            assert_eq!(
+                second.file_name().and_then(|name| name.to_str()),
+                Some("replay-2.sister-replay-draft.json")
+            );
+        }
+
+        #[test]
+        fn exported_corpus_import_rebuilds_search_and_facts() -> Result<()> {
+            let source = crate::ops::tmp::Tmp::new("replay-source");
+            let target = crate::ops::tmp::Tmp::new("replay-target");
+            seed(&source.0)?;
+            let output = source.0.join("corpus.sister-replay-draft.json");
+            export_corpus(&source.0, "1d", Some(&output), None)?;
+            import_corpus(&target.0, &output, false, 0.0, Some(1_700_000_000_000))?;
+
+            let db = Db::open(&crate::db_path(&target.0))?;
+            assert!(!db.search("一般 replay 文字", 10)?.is_empty());
+            let stats = db.stats()?;
+            assert_eq!(stats.frames, 1);
+            assert!(stats.facts >= 3, "{stats:?}");
+            assert_eq!(stats.frames_with_image, 0);
+            Ok(())
+        }
     }
 }
 

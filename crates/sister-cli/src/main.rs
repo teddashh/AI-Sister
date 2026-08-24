@@ -10,7 +10,7 @@ mod fmt;
 mod ops;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 use sister_core::config::Config;
@@ -41,6 +41,64 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Args)]
+#[command(
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true,
+    subcommand_precedence_over_arg = true
+)]
+struct ReplayArgs {
+    #[command(subcommand)]
+    action: Option<ReplayAction>,
+
+    /// 舊式腳本重播的 JSON 路徑。`replay export/import` 另見子命令。
+    #[arg(value_name = "腳本", required = true)]
+    scenario: Option<PathBuf>,
+
+    /// tick 間隔（毫秒）
+    #[arg(long, default_value_t = 1000)]
+    interval_ms: i64,
+    /// 寫進暫時的記憶體資料庫，不碰真正的資料
+    #[arg(long)]
+    dry_run: bool,
+    /// 把腳本的第 0 秒對應到「幾天前」。預設 0 = 剛剛結束。
+    #[arg(long, default_value_t = 0.0, value_name = "DAYS")]
+    days_ago: f64,
+    /// 直接指定腳本零點的 epoch 毫秒（給評測用，蓋過 --days-ago）
+    #[arg(long, value_name = "EPOCH_MS")]
+    start: Option<i64>,
+}
+
+#[derive(Subcommand)]
+enum ReplayAction {
+    /// 把最近一段真實 L0/L1 記憶打包成去敏的私有 replay 草稿
+    Export {
+        /// 往回匯出多久：30m、2h、7d；預設最近一天
+        #[arg(long, default_value = "24h", value_name = "多久")]
+        last: String,
+        /// 草稿路徑；省略就放進資料目錄的 replay-drafts/
+        #[arg(long, value_name = "檔案")]
+        to: Option<PathBuf>,
+        /// 語料名稱；省略就從時間範圍產生
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// 把 replay 語料匯回本機資料庫，重建搜尋索引與 L1 事實
+    Import {
+        /// replay corpus JSON
+        corpus: PathBuf,
+        /// 只在記憶體資料庫驗證，不碰真正資料
+        #[arg(long)]
+        dry_run: bool,
+        /// 把語料第 0 秒對應到「幾天前」。預設 0 = 剛剛結束。
+        #[arg(long, default_value_t = 0.0, value_name = "DAYS")]
+        days_ago: f64,
+        /// 直接指定語料零點的 epoch 毫秒（蓋過 --days-ago）
+        #[arg(long, value_name = "EPOCH_MS")]
+        start: Option<i64>,
+    },
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// 開始錄製（需要平台擷取後端）
@@ -53,22 +111,7 @@ enum Command {
     /// 重播一份腳本，把結果寫進資料庫
     ///
     /// 這是無頭機器上驗證整條管線的方式，也是 replay 評測的入口。
-    Replay {
-        /// 腳本檔（JSON）
-        scenario: PathBuf,
-        /// tick 間隔（毫秒）
-        #[arg(long, default_value_t = 1000)]
-        interval_ms: i64,
-        /// 寫進暫時的記憶體資料庫，不碰真正的資料
-        #[arg(long)]
-        dry_run: bool,
-        /// 把腳本的第 0 秒對應到「幾天前」。預設 0 = 剛剛結束。
-        #[arg(long, default_value_t = 0.0, value_name = "DAYS")]
-        days_ago: f64,
-        /// 直接指定腳本零點的 epoch 毫秒（給評測用，蓋過 --days-ago）
-        #[arg(long, value_name = "EPOCH_MS")]
-        start: Option<i64>,
-    },
+    Replay(ReplayArgs),
 
     /// 全文檢索。每一筆結果都附上出處。
     Query {
@@ -280,21 +323,26 @@ fn main() -> Result<()> {
         Command::Record { duration } => {
             ops::record::run(&data_dir, config()?, cli.config.clone(), duration)
         }
-        Command::Replay {
-            scenario,
-            interval_ms,
-            dry_run,
-            days_ago,
-            start,
-        } => ops::replay::run(
-            &data_dir,
-            config()?,
-            &scenario,
-            interval_ms,
-            dry_run,
-            days_ago,
-            start,
-        ),
+        Command::Replay(args) => match args.action {
+            Some(ReplayAction::Export { last, to, name }) => {
+                ops::replay::export_corpus(&data_dir, &last, to.as_deref(), name.as_deref())
+            }
+            Some(ReplayAction::Import {
+                corpus,
+                dry_run,
+                days_ago,
+                start,
+            }) => ops::replay::import_corpus(&data_dir, &corpus, dry_run, days_ago, start),
+            None => ops::replay::run(
+                &data_dir,
+                config()?,
+                args.scenario.as_deref().context("缺少 replay 腳本")?,
+                args.interval_ms,
+                args.dry_run,
+                args.days_ago,
+                args.start,
+            ),
+        },
         Command::Query { text, limit, json } => ops::query::run(
             &data_dir,
             &text.join(" "),
@@ -409,5 +457,53 @@ mod tests {
         assert_eq!(at_least_one("20"), Ok(20));
         assert!(at_least_one("-1").is_err(), "負數不是筆數");
         assert!(at_least_one("很多").is_err(), "不是數字就不是數字");
+    }
+
+    #[test]
+    fn replay_keeps_the_old_script_syntax_and_adds_real_export_import_subcommands() {
+        let old = Cli::try_parse_from(["sister", "replay", "scenarios/bill-lookup.json"])
+            .expect("舊 quickstart 不能壞");
+        let Command::Replay(old) = old.command else {
+            panic!("parsed the wrong command")
+        };
+        assert!(old.action.is_none());
+        assert_eq!(
+            old.scenario.as_deref(),
+            Some(std::path::Path::new("scenarios/bill-lookup.json"))
+        );
+
+        let export = Cli::try_parse_from([
+            "sister",
+            "replay",
+            "export",
+            "--last",
+            "2d",
+            "--to",
+            "day.sister-replay-draft.json",
+        ])
+        .expect("export subcommand");
+        let Command::Replay(export) = export.command else {
+            panic!("parsed the wrong command")
+        };
+        assert!(matches!(
+            export.action,
+            Some(ReplayAction::Export { ref last, .. }) if last == "2d"
+        ));
+
+        let import = Cli::try_parse_from([
+            "sister",
+            "replay",
+            "import",
+            "day.sister-replay-draft.json",
+            "--dry-run",
+        ])
+        .expect("import subcommand");
+        let Command::Replay(import) = import.command else {
+            panic!("parsed the wrong command")
+        };
+        assert!(matches!(
+            import.action,
+            Some(ReplayAction::Import { dry_run: true, .. })
+        ));
     }
 }

@@ -202,7 +202,13 @@ capture 層本身就是 recorder。
 **目標**：把所有還在吵的架構問題變成可以跑的數字。這也是開源後最值錢的公開資產。
 
 **Scope**
-- `sister replay export/import`：L0/L1 流打包語料（自動去敏 + 人工審查 gate）。
+- `sister replay export`：把指定時間範圍的真實 L0 流打包成私有 **Draft**。匯出時
+  自動去敏，不帶任何截圖或來源資料／圖片路徑；但自動去敏不會把 Draft 變成可分享
+  的東西。只有人工逐項審查、把 `review` 從 `draft` 標成 `reviewed` 的 **Reviewed**
+  corpus 才可分享。
+- `sister replay import`：Draft 和 Reviewed 都可在本機匯入、驗證；從去敏後的 L0
+  重建全文索引與 L1 事實，不相信匯出機器裡已算好的衍生結果。
+- 現有 `sister replay <scenario.json>` 保留；腳本化埋題和真實工作日走同一條重播管線。
 - 語料庫：Ted 真實工作日 ≥ 2 週 + 腳本化埋題日（植入帳單/電話/通知/中途改目標）。
 - 題庫三源：query log 轉標註、手標 recall QA、承諾集與開口判斷集（該講/不該講時刻）。
 - Runner：同一語料跑多配置（baseline 純 FTS / +facts / 之後的 +interpreter / +reviewer），
@@ -358,7 +364,7 @@ capture 層本身就是 recorder。
 | 主動開口變成煩人 → 第三天被關 | 預算制 + 冷啟動只開高 precision 類 + 有用率 gate | P5 |
 | 記憶歪掉长期化 | 五類強制回查 + 分歧警報 + 兩鍵結案 + cascade 刪除 | P4 |
 | 單人維護死（per-app 地獄） | v1 只用通用 API；per-app 全部推到 P8 plugin | 全程 |
-| 資源足跡超標 → 秒刪 | 預算 = release blocker；對標 Screenpipe 1/3 | P0 起 |
+| 資源足跡超標 → 秒刪 | 數字照實公開；長期仍要回到預算，但目前容量依 Ted 已定例外不擋功能 milestone | P0 起 |
 | Injection 經由螢幕內容 | data-block 紀律 + 動作強制核准 + 測試套件 | P6 |
 | 模型商政策/價格變動 | 雙軌接入 + 本地降級鏈 + 角色→模型可配置 | P4 起 |
 | 巨頭入場 24/7 記憶 | 我們的位子是「可驗證 + 中立 + 可帶走」；見 PRODUCT §6 | — |

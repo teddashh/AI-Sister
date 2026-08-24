@@ -98,6 +98,21 @@ cargo build --release -p sister-cli
 JSON 腳本，沒有任何東西可以同意。要看她在你自己的機器上會做什麼，得走上面那條
 Windows 的路。
 
+舊的 `sister replay scenarios/bill-lookup.json` 語法保留不變。現在也能把自己記下的
+一段真實工作日做成 replay 語料：
+
+```bash
+sister replay export --last 24h --to ./workday.sister-replay-draft.json
+sister replay import ./workday.sister-replay-draft.json --dry-run
+```
+
+`export` 寫的一定是私有 **Draft**：時間改成相對值、文字先自動去敏，而且零截圖、
+零來源資料或圖片路徑。但「自動去敏跑完」不等於「可以分享」：真實螢幕文字裡可能
+還有程式不認得的人名、內部案號與對話，必須由人逐項看過，才把 JSON 的 `review`
+從 `draft` 標成 `reviewed`。只有這種 **Reviewed** corpus 才能分享。
+`import --dry-run` 可以在本機驗證 Draft，用去敏後的 L0 重建搜尋索引和 L1 事實，
+不會因為它尚未 Reviewed 就禁止本機重播。兩個指令都不會上傳任何東西。
+
 問她「**剛剛發生什麼事**」會得到答案，而不是「我記得的東西裡沒有這件事」。那句話
 問的是時間、不是關鍵字，所以她不會拿那七個字去比對——她直接把最後看到的幾件事列
 出來，每一筆一樣掛著時間與出處，而且會先講一句「我把它當成時間問題了」，你才知道

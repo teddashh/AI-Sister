@@ -38,3 +38,8 @@ research/ted-repos-dna.md
 
 # 交接給 codex 的暫存：上一輪跑完但沒 commit 的 patch + 接手計畫
 .handoff/
+
+# 真實工作日匯出的 replay 私有草稿。即使指令在 repo 裡執行、途中失敗，
+# `git add -A` 也不可以把同事／客戶的 OCR 文字送進 public repo。
+*.sister-replay-draft.json
+replay-drafts/

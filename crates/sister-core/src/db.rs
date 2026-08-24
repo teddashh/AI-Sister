@@ -637,6 +637,99 @@ fn optional_file_len(path: &Path) -> Result<Option<u64>> {
     }
 }
 
+/// Replay export 讀的是已經落地的穩定字串；遇到未來版本才認得的值要停，
+/// 不能把它默默歸成某個看似接近的事件。少一種事件的語料仍然是合法 JSON，
+/// 但它已經不是同一段時間軸。
+fn focus_kind_from_db(value: &str) -> Result<crate::model::FocusKind> {
+    use crate::model::FocusKind;
+    match value {
+        "focus" => Ok(FocusKind::Focus),
+        "title" => Ok(FocusKind::TitleChange),
+        "url" => Ok(FocusKind::UrlChange),
+        other => anyhow::bail!("unknown focus event kind in database: {other}"),
+    }
+}
+
+fn clipboard_kind_from_db(value: &str) -> Result<crate::model::ClipboardKind> {
+    use crate::model::ClipboardKind;
+    match value {
+        "text" => Ok(ClipboardKind::Text),
+        "image" => Ok(ClipboardKind::Image),
+        "files" => Ok(ClipboardKind::Files),
+        other => anyhow::bail!("unknown clipboard event kind in database: {other}"),
+    }
+}
+
+fn system_kind_from_db(value: &str) -> Result<crate::model::SystemKind> {
+    use crate::model::SystemKind;
+    match value {
+        "lock" => Ok(SystemKind::Lock),
+        "unlock" => Ok(SystemKind::Unlock),
+        "sleep" => Ok(SystemKind::Sleep),
+        "wake" => Ok(SystemKind::Wake),
+        "pause" => Ok(SystemKind::CapturePaused),
+        "resume" => Ok(SystemKind::CaptureResumed),
+        "excluded" => Ok(SystemKind::Excluded),
+        "session_start" => Ok(SystemKind::SessionStart),
+        "session_end" => Ok(SystemKind::SessionEnd),
+        other => anyhow::bail!("unknown system event kind in database: {other}"),
+    }
+}
+
+fn bool_from_db(value: i64, label: &str) -> Result<bool> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        other => anyhow::bail!("{label} in database was {other}, expected 0 or 1"),
+    }
+}
+
+/// 資料庫裡一張可重播的文字幀。刻意沒有 `image_path` 或像素欄位：replay
+/// corpus 是可人工審查的文字／訊號語料，不是另一份未加密截圖備份。
+struct ReplayFrameRow {
+    ts: Millis,
+    monitor: i32,
+    width: u32,
+    height: u32,
+    dhash: u64,
+    dup_run: u32,
+    focus: FocusSnapshot,
+    ocr: Vec<crate::model::OcrBlock>,
+}
+
+/// 一次 replay import 真正落地的東西。空 corpus 不建立一個假的空 session，
+/// 所以 session id 是 `Option`，不是拿 0 兼差。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayImport {
+    pub session_id: Option<i64>,
+    pub events: usize,
+    pub frames: usize,
+    pub facts: usize,
+}
+
+fn replay_event_rank(event: &crate::replay::Event) -> u8 {
+    match event {
+        crate::replay::Event::System { .. } => 0,
+        crate::replay::Event::Focus { .. } => 1,
+        crate::replay::Event::Clipboard { .. } => 2,
+        crate::replay::Event::Input { .. } => 3,
+        crate::replay::Event::Frame { .. } => 4,
+    }
+}
+
+fn replay_focus_snapshot(focus: &crate::replay::ReplayFocus) -> FocusSnapshot {
+    FocusSnapshot {
+        app_id: focus.app_id.clone(),
+        app_name: focus.app_name.clone(),
+        window_title: focus.window_title.clone(),
+        url: focus.url.clone(),
+        // PID 是這次程序的暫時識別，不是可攜脈絡；password_field 原本就從不
+        // 落地，兩者都不能在 import 時猜一個值。
+        pid: None,
+        password_field: false,
+    }
+}
+
 pub struct Db {
     /// `pub(crate)` 只為了 [`crate::retention`]：清理要跨好幾張表、還要在
     /// 同一個 transaction 裡跑，包成一堆窄 API 反而更難看出它到底刪了什麼。
@@ -995,10 +1088,25 @@ impl Db {
     // ---------- sessions ----------
 
     pub fn start_session(&mut self, platform: &str, app_version: &str) -> Result<i64> {
+        self.start_session_at(platform, app_version, now_ms())
+    }
+
+    /// 建立一場時間由資料本身決定的錄製。
+    ///
+    /// 正常錄製一律走 [`Self::start_session`]，只有 replay import 需要把語料的
+    /// 相對零點接到呼叫端指定的 epoch。把接縫收在這裡，才能讓 session 容器和
+    /// 裡面的每一筆事件落在同一條時間軸上；直接在 import 裡另寫一份 INSERT，
+    /// 很容易只補到 session 列、漏掉 `ever_recorded` 這個同一筆交易裡的承諾。
+    fn start_session_at(
+        &mut self,
+        platform: &str,
+        app_version: &str,
+        started_at: Millis,
+    ) -> Result<i64> {
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO sessions(started_at, app_version, platform) VALUES(?1, ?2, ?3)",
-            params![now_ms(), app_version, platform],
+            params![started_at, app_version, platform],
         )?;
         // **在下一句 INSERT 之前拿。** `last_insert_rowid` 講的是這個連線上最後
         // 一次插入，而底下那句 `meta` 也是一次插入——晚一行拿到的是 `meta` 的
@@ -1118,10 +1226,16 @@ impl Db {
     /// 成」的那幾場一起掃走，而那幾場正是 [`crash_audit`](Self::crash_audit)
     /// 存在的理由——一次乾淨的停止不該把一次當機的證據帶走。
     pub fn end_session(&mut self, session_id: i64) -> Result<()> {
+        self.end_session_at(session_id, now_ms())
+    }
+
+    /// [`Self::start_session_at`] 的收尾端；正常錄製仍由 [`Self::end_session`]
+    /// 取得真實時鐘，replay import 才會指定語料的結尾。
+    fn end_session_at(&mut self, session_id: i64, ended_at: Millis) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
             "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
-            params![now_ms(), session_id],
+            params![ended_at, session_id],
         )?;
         crate::retention::delete_empty_sessions(&tx, Some(session_id))?;
         tx.commit()?;
@@ -2710,6 +2824,410 @@ impl Db {
         Ok(n.max(0) as u64)
     }
 
+    /// 把 `[from, to)` 裡可重播的 L0 訊號匯成已自動去敏的私有草稿。
+    ///
+    /// 這不是 [`Self::export_to`] 的另一個名字：完整備份保留每一個原字和畫面
+    /// 路徑，replay corpus 則刻意沒有任何 pixel、圖片 bytes 或 `image_path`。
+    /// L1 facts 與三份 FTS 索引也不直接搬；import 會從同一批 L0 文字重建，
+    /// 這樣不同版本比較到的是各自真正會產生的結果，不是來源資料庫的舊答案。
+    pub fn export_replay(
+        &self,
+        name: &str,
+        from: Millis,
+        to: Millis,
+    ) -> Result<crate::replay::DraftCorpus> {
+        let duration_ms = to
+            .checked_sub(from)
+            .context("replay export time range overflowed")?;
+        anyhow::ensure!(duration_ms >= 0, "replay export 的結尾早於起點");
+
+        let relative = |ts: Millis, label: &str| -> Result<Millis> {
+            let at = ts
+                .checked_sub(from)
+                .with_context(|| format!("{label} timestamp overflowed replay origin"))?;
+            anyhow::ensure!(
+                (0..=duration_ms).contains(&at),
+                "{label} timestamp {ts} 不在 replay export 範圍內"
+            );
+            Ok(at)
+        };
+
+        let mut events = Vec::new();
+        for frame in self.replay_frame_rows(from, to)? {
+            events.push(crate::replay::Event::Frame {
+                at_ms: relative(frame.ts, "frame")?,
+                monitor: frame.monitor,
+                width: frame.width,
+                height: frame.height,
+                dhash: frame.dhash,
+                dup_run: frame.dup_run,
+                focus: crate::replay::ReplayFocus {
+                    app_id: frame.focus.app_id,
+                    app_name: frame.focus.app_name,
+                    window_title: frame.focus.window_title,
+                    url: frame.focus.url,
+                },
+                ocr: frame.ocr,
+            });
+        }
+
+        let mut statement = self.conn.prepare(
+            "SELECT ts, kind, app_id, app_name, window_title, url
+             FROM focus_events WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
+        )?;
+        let mut rows = statement.query(params![from, to])?;
+        while let Some(row) = rows.next()? {
+            let ts: Millis = row.get(0)?;
+            let kind: String = row.get(1)?;
+            events.push(crate::replay::Event::Focus {
+                at_ms: relative(ts, "focus event")?,
+                kind: focus_kind_from_db(&kind)?,
+                snapshot: crate::replay::ReplayFocus {
+                    app_id: row.get(2)?,
+                    app_name: row.get(3)?,
+                    window_title: row.get(4)?,
+                    url: row.get(5)?,
+                },
+            });
+        }
+        drop(rows);
+        drop(statement);
+
+        let mut statement = self.conn.prepare(
+            "SELECT ts, kind, text, byte_len, truncated, secret_suspected, source_app
+             FROM clipboard_events WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
+        )?;
+        let mut rows = statement.query(params![from, to])?;
+        while let Some(row) = rows.next()? {
+            let ts: Millis = row.get(0)?;
+            let kind: String = row.get(1)?;
+            events.push(crate::replay::Event::Clipboard {
+                at_ms: relative(ts, "clipboard event")?,
+                kind: clipboard_kind_from_db(&kind)?,
+                text: row.get(2)?,
+                byte_len: row.get(3)?,
+                truncated: bool_from_db(row.get(4)?, "clipboard truncated")?,
+                secret_suspected: bool_from_db(row.get(5)?, "clipboard secret_suspected")?,
+                source_app: row.get(6)?,
+            });
+        }
+        drop(rows);
+        drop(statement);
+
+        // 一個輸入視窗只有整段都落在範圍內才帶走。把跨過右界的那一筆截短會
+        // 改寫節奏，照樣帶走則會讓 corpus 自稱的 duration 變成假話。
+        let mut statement = self.conn.prepare(
+            "SELECT ts_start, ts_end, keystrokes, clicks, mouse_px, scroll_ticks,
+                    window_switches, idle_ms, typing_bursts
+             FROM input_metrics
+             WHERE ts_start >= ?1 AND ts_start < ?2 AND ts_end <= ?2
+             ORDER BY ts_start, id",
+        )?;
+        let mut rows = statement.query(params![from, to])?;
+        while let Some(row) = rows.next()? {
+            let start: Millis = row.get(0)?;
+            let end: Millis = row.get(1)?;
+            events.push(crate::replay::Event::Input {
+                at_ms: relative(start, "input event start")?,
+                end_ms: relative(end, "input event end")?,
+                keystrokes: row.get(2)?,
+                clicks: row.get(3)?,
+                mouse_px: row.get(4)?,
+                scroll_ticks: row.get(5)?,
+                window_switches: row.get(6)?,
+                idle_ms: row.get(7)?,
+                typing_bursts: row.get(8)?,
+            });
+        }
+        drop(rows);
+        drop(statement);
+
+        let system_sql = format!(
+            "SELECT ts, kind, detail FROM system_events
+             WHERE ts >= ?1 AND ts < ?2 AND kind NOT IN {}
+             ORDER BY ts, id",
+            crate::model::SystemKind::session_marks_sql()
+        );
+        let mut statement = self.conn.prepare(&system_sql)?;
+        let mut rows = statement.query(params![from, to])?;
+        while let Some(row) = rows.next()? {
+            let ts: Millis = row.get(0)?;
+            let kind: String = row.get(1)?;
+            events.push(crate::replay::Event::System {
+                at_ms: relative(ts, "system event")?,
+                kind: system_kind_from_db(&kind)?,
+                detail: row.get(2)?,
+            });
+        }
+
+        // SQLite 沒有跨表的全域 sequence number。相同毫秒內採 recorder 的
+        // 寫入順序做唯一、穩定的定義；同一類裡 `ORDER BY ... id` 的順序由
+        // stable sort 保留。
+        events.sort_by_key(|event| (event.at_ms(), replay_event_rank(event)));
+        let corpus = crate::replay::Corpus {
+            format_version: crate::replay::FORMAT_VERSION,
+            name: name.to_string(),
+            duration_ms,
+            review: crate::replay::ReviewStatus::Draft,
+            redactions: crate::replay::RedactionSummary::default(),
+            events,
+        };
+        corpus.deidentify()
+    }
+
+    /// 把 replay 語料接到呼叫端指定的 epoch，走正式 insert 路徑重建 L0、L1
+    /// 與 FTS。Draft 可以在本機匯入重播；`Reviewed` 只管能不能分享，不是本機
+    /// 功能的開關。
+    pub fn import_replay(
+        &mut self,
+        corpus: &crate::replay::Corpus,
+        origin: Millis,
+    ) -> Result<ReplayImport> {
+        corpus.validate()?;
+        let ended_at = origin
+            .checked_add(corpus.duration_ms)
+            .context("replay import end timestamp overflowed")?;
+
+        // 所有時間先走完一次 checked_add，任何一筆壞掉都要在建立 session 之前
+        // 失敗。否則「拒絕 malformed corpus」會在資料庫裡留下一場半截錄製。
+        for (index, event) in corpus.events.iter().enumerate() {
+            origin
+                .checked_add(event.at_ms())
+                .with_context(|| format!("replay event #{index} timestamp overflowed"))?;
+            if let crate::replay::Event::Input { end_ms, .. } = event {
+                origin
+                    .checked_add(*end_ms)
+                    .with_context(|| format!("replay input event #{index} end overflowed"))?;
+            }
+            if let crate::replay::Event::Clipboard {
+                text: Some(_),
+                secret_suspected: true,
+                ..
+            } = event
+            {
+                anyhow::bail!("replay clipboard event #{index} 同時帶著 secret_suspected 和內容");
+            }
+        }
+
+        if corpus.events.is_empty() {
+            return Ok(ReplayImport {
+                session_id: None,
+                events: 0,
+                frames: 0,
+                facts: 0,
+            });
+        }
+
+        let session_id = self.start_session_at("replay/import", crate::VERSION, origin)?;
+        self.insert_system(
+            session_id,
+            &SystemEvent {
+                ts: origin,
+                kind: crate::model::SystemKind::SessionStart,
+                detail: None,
+            },
+        )?;
+
+        let mut frames = 0usize;
+        for event in &corpus.events {
+            match event {
+                crate::replay::Event::Frame {
+                    at_ms,
+                    monitor,
+                    width,
+                    height,
+                    dhash,
+                    dup_run,
+                    focus,
+                    ocr,
+                } => {
+                    let ts = origin + *at_ms;
+                    let frame = FrameCapture {
+                        ts,
+                        monitor: *monitor,
+                        width: *width,
+                        height: *height,
+                        dhash: *dhash,
+                        image: None,
+                        image_ext: "webp",
+                        ocr: ocr.clone(),
+                        focus: replay_focus_snapshot(focus),
+                    };
+                    let (frame_id, _, _) = self.insert_frame(session_id, &frame, None, 0)?;
+                    if *dup_run > 0 {
+                        self.conn.execute(
+                            "UPDATE frames SET dup_run = ?1 WHERE id = ?2",
+                            params![i64::from(*dup_run), frame_id],
+                        )?;
+                    }
+                    frames += 1;
+                }
+                crate::replay::Event::Focus {
+                    at_ms,
+                    kind,
+                    snapshot,
+                } => {
+                    self.insert_focus(
+                        session_id,
+                        &FocusEvent {
+                            ts: origin + *at_ms,
+                            kind: *kind,
+                            snapshot: replay_focus_snapshot(snapshot),
+                        },
+                    )?;
+                }
+                crate::replay::Event::Clipboard {
+                    at_ms,
+                    kind,
+                    text,
+                    byte_len,
+                    truncated,
+                    secret_suspected,
+                    source_app,
+                } => {
+                    self.insert_clipboard(
+                        session_id,
+                        &ClipboardEvent {
+                            ts: origin + *at_ms,
+                            kind: *kind,
+                            text: text.clone(),
+                            byte_len: *byte_len,
+                            truncated: *truncated,
+                            secret_suspected: *secret_suspected,
+                            source_app: source_app.clone(),
+                        },
+                    )?;
+                }
+                crate::replay::Event::Input {
+                    at_ms,
+                    end_ms,
+                    keystrokes,
+                    clicks,
+                    mouse_px,
+                    scroll_ticks,
+                    window_switches,
+                    idle_ms,
+                    typing_bursts,
+                } => {
+                    self.insert_input(
+                        session_id,
+                        &InputMetrics {
+                            ts_start: origin + *at_ms,
+                            ts_end: origin + *end_ms,
+                            keystrokes: *keystrokes,
+                            clicks: *clicks,
+                            mouse_px: *mouse_px,
+                            scroll_ticks: *scroll_ticks,
+                            window_switches: *window_switches,
+                            idle_ms: *idle_ms,
+                            typing_bursts: *typing_bursts,
+                        },
+                    )?;
+                }
+                crate::replay::Event::System {
+                    at_ms,
+                    kind,
+                    detail,
+                } => {
+                    self.insert_system(
+                        session_id,
+                        &SystemEvent {
+                            ts: origin + *at_ms,
+                            kind: *kind,
+                            detail: detail.clone(),
+                        },
+                    )?;
+                }
+            }
+        }
+
+        self.insert_system(
+            session_id,
+            &SystemEvent {
+                ts: ended_at,
+                kind: crate::model::SystemKind::SessionEnd,
+                detail: Some("duration".into()),
+            },
+        )?;
+        self.end_session_at(session_id, ended_at)?;
+        // 問這個 session 真正留下的列，不在呼叫端手抄「哪一種 insert 會長
+        // facts」。frame、focus title 和 clipboard text 都可能產生 L1；只累加
+        // `insert_frame` 的回傳值會印出一個每一行都真、總數卻少掉兩條路的數字。
+        let facts: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        Ok(ReplayImport {
+            session_id: Some(session_id),
+            events: corpus.events.len(),
+            frames,
+            facts: usize::try_from(facts).context("imported fact count did not fit usize")?,
+        })
+    }
+
+    fn replay_frame_rows(&self, from: Millis, to: Millis) -> Result<Vec<ReplayFrameRow>> {
+        let mut statement = self.conn.prepare(
+            "SELECT f.id, f.ts, f.monitor, f.width, f.height, f.dhash, f.dup_run,
+                    f.app_id, f.window_title, f.url,
+                    o.id, o.text, o.x, o.y, o.w, o.h, o.confidence
+             FROM frames f LEFT JOIN ocr_blocks o ON o.frame_id = f.id
+             WHERE f.ts >= ?1 AND f.ts < ?2
+             ORDER BY f.ts, f.id, o.id",
+        )?;
+        let mut rows = statement.query(params![from, to])?;
+        let mut out: Vec<ReplayFrameRow> = Vec::new();
+        let mut current_id = None;
+        while let Some(row) = rows.next()? {
+            let frame_id: i64 = row.get(0)?;
+            if current_id != Some(frame_id) {
+                let monitor: i64 = row.get(2)?;
+                let width: i64 = row.get(3)?;
+                let height: i64 = row.get(4)?;
+                let dup_run: i64 = row.get(6)?;
+                out.push(ReplayFrameRow {
+                    ts: row.get(1)?,
+                    monitor: i32::try_from(monitor).context("frame monitor did not fit i32")?,
+                    width: u32::try_from(width).context("frame width did not fit u32")?,
+                    height: u32::try_from(height).context("frame height did not fit u32")?,
+                    // SQLite INTEGER 是 signed；寫入時 `u64 as i64`，讀回要照同一
+                    // 組 bits 還原，不能把負數當壞資料。
+                    dhash: row.get::<_, i64>(5)? as u64,
+                    dup_run: u32::try_from(dup_run).context("frame dup_run did not fit u32")?,
+                    focus: FocusSnapshot {
+                        app_id: row.get(7)?,
+                        app_name: None,
+                        window_title: row.get(8)?,
+                        url: row.get(9)?,
+                        pid: None,
+                        password_field: false,
+                    },
+                    ocr: Vec::new(),
+                });
+                current_id = Some(frame_id);
+            }
+
+            if row.get::<_, Option<i64>>(10)?.is_some() {
+                let x: i64 = row.get(12)?;
+                let y: i64 = row.get(13)?;
+                let w: i64 = row.get(14)?;
+                let h: i64 = row.get(15)?;
+                let confidence: f64 = row.get(16)?;
+                out.last_mut().context("OCR block had no frame")?.ocr.push(
+                    crate::model::OcrBlock {
+                        text: row.get(11)?,
+                        x: i32::try_from(x).context("OCR x did not fit i32")?,
+                        y: i32::try_from(y).context("OCR y did not fit i32")?,
+                        w: i32::try_from(w).context("OCR width did not fit i32")?,
+                        h: i32::try_from(h).context("OCR height did not fit i32")?,
+                        confidence: confidence as f32,
+                    },
+                );
+            }
+        }
+        Ok(out)
+    }
+
     /// 把整個資料庫寫進另一個檔案——**一致的快照，即使她正在錄。**
     ///
     /// 為什麼不是叫使用者去複製 `sister.db`：這個資料庫跑在 WAL 模式，最近
@@ -4070,6 +4588,343 @@ mod tests {
 
         // 打錯路徑的一次匯出不該蓋掉上一份備份。
         assert!(db.export_to(&exported).is_err(), "不覆蓋既有檔案");
+    }
+
+    #[test]
+    fn replay_corpus_round_trips_every_l0_event_and_rebuilds_search_and_facts() {
+        const FROM: Millis = 10_000;
+        const TO: Millis = 11_000;
+        const ORIGIN: Millis = 50_000;
+
+        let mut source = test_db();
+        let schema_before = source.schema_version().expect("source schema");
+        let session = source
+            .start_session_at("windows/test", "alpha.test", FROM)
+            .expect("source session");
+
+        // container marks belong to this database, not to the portable event stream.
+        for (ts, kind) in [
+            (FROM, SystemKind::SessionStart),
+            (TO - 1, SystemKind::SessionEnd),
+        ] {
+            source
+                .insert_system(
+                    session,
+                    &SystemEvent {
+                        ts,
+                        kind,
+                        detail: None,
+                    },
+                )
+                .expect("container mark");
+        }
+
+        let mut frame = frame_with_text(
+            FROM + 100,
+            "code.exe",
+            "replay.rs - AI-Sister",
+            &[
+                "cargo test ERR_REPLAY_IMPORT",
+                "客服 0912-345-678，帳單 NT$13,450",
+            ],
+        );
+        frame.monitor = 2;
+        frame.width = 1600;
+        frame.height = 900;
+        frame.dhash = u64::MAX - 7;
+        frame.focus.url = Some("https://example.test/replay".into());
+        frame.ocr[0] = OcrBlock {
+            text: frame.ocr[0].text.clone(),
+            x: 17,
+            y: 23,
+            w: 640,
+            h: 31,
+            confidence: -1.0,
+        };
+        let (frame_id, _, _) = source
+            .insert_frame(session, &frame, Some("private.webp"), 12_345)
+            .expect("frame");
+        source.bump_frame_dup(frame_id).expect("dup one");
+        source.bump_frame_dup(frame_id).expect("dup two");
+
+        source
+            .insert_focus(
+                session,
+                &FocusEvent {
+                    ts: FROM + 200,
+                    kind: FocusKind::TitleChange,
+                    snapshot: FocusSnapshot {
+                        app_id: Some("terminal.exe".into()),
+                        app_name: Some("Windows Terminal".into()),
+                        window_title: Some("workspace replay ERR_FOCUS_REPLAY".into()),
+                        url: Some("https://example.test/build".into()),
+                        pid: Some(4242),
+                        password_field: false,
+                    },
+                },
+            )
+            .expect("focus");
+        source
+            .insert_clipboard(
+                session,
+                &ClipboardEvent {
+                    ts: FROM + 300,
+                    kind: ClipboardKind::Text,
+                    text: Some("剪貼簿 ERR_CLIPBOARD_REPLAY".into()),
+                    byte_len: 30,
+                    truncated: false,
+                    secret_suspected: false,
+                    source_app: Some("terminal.exe".into()),
+                },
+            )
+            .expect("clipboard");
+        source
+            .insert_input(
+                session,
+                &InputMetrics {
+                    ts_start: FROM + 400,
+                    ts_end: FROM + 450,
+                    keystrokes: 11,
+                    clicks: 12,
+                    mouse_px: 13,
+                    scroll_ticks: 14,
+                    window_switches: 15,
+                    idle_ms: 16,
+                    typing_bursts: 17,
+                },
+            )
+            .expect("input");
+        source
+            .insert_system(
+                session,
+                &SystemEvent {
+                    ts: FROM + 500,
+                    kind: SystemKind::Lock,
+                    detail: Some("workstation locked".into()),
+                },
+            )
+            .expect("system");
+        // `[from, to)` 的右界不可以漏成 inclusive。
+        source
+            .insert_system(
+                session,
+                &SystemEvent {
+                    ts: TO,
+                    kind: SystemKind::Unlock,
+                    detail: Some("outside export".into()),
+                },
+            )
+            .expect("outside event");
+
+        let draft = source
+            .export_replay("真機 replay", FROM, TO)
+            .expect("export replay");
+        assert_eq!(
+            source.schema_version().expect("schema after export"),
+            schema_before,
+            "replay export is not a migration"
+        );
+        let corpus = draft.as_corpus();
+        assert_eq!(corpus.duration_ms, 1_000);
+        assert_eq!(corpus.review, crate::replay::ReviewStatus::Draft);
+        assert_eq!(corpus.events.len(), 5, "one of every portable event kind");
+        assert_eq!(
+            corpus
+                .events
+                .iter()
+                .map(crate::replay::Event::at_ms)
+                .collect::<Vec<_>>(),
+            vec![100, 200, 300, 400, 500]
+        );
+        let crate::replay::Event::Frame {
+            monitor,
+            width,
+            height,
+            dhash,
+            dup_run,
+            focus,
+            ocr,
+            ..
+        } = &corpus.events[0]
+        else {
+            panic!("first event was not the frame")
+        };
+        assert_eq!((*monitor, *width, *height), (2, 1600, 900));
+        assert_eq!(*dhash, u64::MAX - 7);
+        assert_eq!(*dup_run, 2);
+        assert_eq!(focus.app_id.as_deref(), Some("code.exe"));
+        assert_eq!(ocr[0].x, 17);
+        assert_eq!(ocr[0].confidence, -1.0);
+        let encoded = serde_json::to_string(corpus).expect("json");
+        assert!(
+            !encoded.contains("private.webp"),
+            "image path leaked: {encoded}"
+        );
+        assert!(!encoded.contains("0912-345-678"), "phone was not redacted");
+        assert!(!encoded.contains("NT$13,450"), "money was not redacted");
+        assert!(
+            encoded.contains("ERR_REPLAY_IMPORT"),
+            "ordinary evidence vanished"
+        );
+        assert!(
+            !encoded.contains("outside export"),
+            "right boundary was included"
+        );
+
+        let mut imported = test_db();
+        let imported_schema = imported.schema_version().expect("import schema");
+        let report = imported
+            .import_replay(corpus, ORIGIN)
+            .expect("import replay");
+        assert!(report.session_id.is_some());
+        assert_eq!(report.events, 5);
+        assert_eq!(report.frames, 1);
+        assert_eq!(
+            report.facts, 5,
+            "frame、focus title、clipboard 的 L1 都要算進回報：{report:?}"
+        );
+        assert_eq!(
+            imported.schema_version().expect("schema after import"),
+            imported_schema,
+            "replay import is not a migration"
+        );
+
+        let stats = imported.stats().expect("stats");
+        assert_eq!(stats.frames, 1);
+        assert_eq!(stats.frames_collapsed, 2);
+        assert_eq!(
+            stats.frames_with_image, 0,
+            "corpus import must be text-only"
+        );
+        assert_eq!(stats.image_bytes, 0);
+        assert_eq!(stats.focus_events, 1);
+        assert_eq!(stats.clipboard_events, 1);
+        assert_eq!(stats.input_windows, 1);
+        assert_eq!(stats.system_events, 3, "start + lock + end");
+        assert_eq!(stats.session_marks, 2);
+        assert_eq!(stats.facts as usize, report.facts);
+
+        let hits = imported
+            .search("ERR_REPLAY_IMPORT", 10)
+            .expect("search rebuilt FTS");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].ts, ORIGIN + 100);
+        let errors: std::collections::BTreeSet<_> = imported
+            .facts_by_kind("error_code", 10)
+            .expect("rebuilt facts")
+            .into_iter()
+            .map(|fact| fact.raw)
+            .collect();
+        for expected in [
+            "ERR_REPLAY_IMPORT",
+            "ERR_FOCUS_REPLAY",
+            "ERR_CLIPBOARD_REPLAY",
+        ] {
+            assert!(errors.contains(expected), "missing {expected}: {errors:?}");
+        }
+        assert!(
+            !imported
+                .search("ERR_CLIPBOARD_REPLAY", 10)
+                .expect("clipboard FTS")
+                .is_empty(),
+            "clipboard did not take the canonical text-chunk path"
+        );
+
+        let context = imported
+            .frame_context(hits[0].frame_id.expect("frame source"))
+            .expect("context")
+            .expect("frame");
+        assert_eq!(context.image_path, None);
+        assert_eq!(context.dup_run, 2);
+        assert_eq!((context.width, context.height), (1600, 900));
+        let geometry: (i64, i64, i64, i64, f64) = imported
+            .conn
+            .query_row(
+                "SELECT x,y,w,h,confidence FROM ocr_blocks ORDER BY id LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("geometry");
+        assert_eq!(geometry, (17, 23, 640, 31, -1.0));
+        let input: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = imported
+            .conn
+            .query_row(
+                "SELECT ts_start,ts_end,keystrokes,clicks,mouse_px,scroll_ticks,
+                        window_switches,idle_ms,typing_bursts FROM input_metrics",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .expect("input round trip");
+        assert_eq!(
+            input,
+            (ORIGIN + 400, ORIGIN + 450, 11, 12, 13, 14, 15, 16, 17)
+        );
+    }
+
+    #[test]
+    fn malformed_replay_is_rejected_before_any_write_and_empty_corpus_has_no_fake_session() {
+        let mut bad = crate::replay::Corpus {
+            format_version: crate::replay::FORMAT_VERSION,
+            name: "bad-order".into(),
+            duration_ms: 100,
+            review: crate::replay::ReviewStatus::Draft,
+            redactions: crate::replay::RedactionSummary::default(),
+            events: vec![
+                crate::replay::Event::System {
+                    at_ms: 90,
+                    kind: SystemKind::Lock,
+                    detail: None,
+                },
+                crate::replay::Event::System {
+                    at_ms: 10,
+                    kind: SystemKind::Unlock,
+                    detail: None,
+                },
+            ],
+        };
+        let mut db = test_db();
+        assert!(db.import_replay(&bad, 1_000).is_err());
+        let after_bad = db.stats().expect("stats after malformed");
+        assert_eq!(after_bad.sessions, 0);
+        assert_eq!(after_bad.system_events, 0);
+        assert!(!db.ever_recorded().expect("ever recorded"));
+
+        bad.name = "empty".into();
+        bad.events.clear();
+        let report = db.import_replay(&bad, 1_000).expect("empty is valid");
+        assert_eq!(
+            report,
+            ReplayImport {
+                session_id: None,
+                events: 0,
+                frames: 0,
+                facts: 0,
+            }
+        );
+        let after_empty = db.stats().expect("stats after empty");
+        assert_eq!(after_empty.sessions, 0);
+        assert_eq!(after_empty.system_events, 0);
+        assert!(!db.ever_recorded().expect("empty did not record"));
     }
 
     fn frame_with_text(ts: Millis, app: &str, title: &str, lines: &[&str]) -> FrameCapture {

@@ -79,8 +79,15 @@ pub fn looks_like_secret(text: &str) -> Option<SecretKind> {
         }
     }
 
-    // 前綴比對只看每個 whitespace-token 的開頭，避免整段文章誤觸
-    for token in trimmed.split_whitespace() {
+    // 先切掉句子與 URL 裡不可能屬於憑證的分隔符。只用 whitespace
+    // 會漏掉「token=ghp_...」和「；ghp_...」；這兩種才是螢幕和終端
+    // 最常見的長相。連字號、底線、點和 base64 用字保留在候選內。
+    for token in trimmed
+        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '/' | '.')))
+    {
+        if token.is_empty() {
+            continue;
+        }
         for prefix in KEY_PREFIXES {
             if token.len() >= prefix.len() + 8 && token.starts_with(prefix) {
                 return Some(SecretKind::ApiKey);
@@ -88,6 +95,13 @@ pub fn looks_like_secret(text: &str) -> Option<SecretKind> {
         }
         if is_jwt(token) {
             return Some(SecretKind::Jwt);
+        }
+        if token.len() >= 32
+            && token.len() <= 512
+            && looks_random(token)
+            && shannon_entropy_per_char(token) >= 3.6
+        {
+            return Some(SecretKind::HighEntropy);
         }
     }
 
@@ -197,6 +211,14 @@ mod tests {
         // 前綴出現在句子中間也要抓到
         assert_eq!(
             looks_like_secret("export KEY=\nghp_16CharsAtLeastHereOk123"),
+            Some(SecretKind::ApiKey)
+        );
+        assert_eq!(
+            looks_like_secret("我貼的是；ghp_16CharsAtLeastHereOk123"),
+            Some(SecretKind::ApiKey)
+        );
+        assert_eq!(
+            looks_like_secret("https://example.test/?token=ghp_16CharsAtLeastHereOk123"),
             Some(SecretKind::ApiKey)
         );
     }

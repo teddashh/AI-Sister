@@ -26,6 +26,7 @@ pub mod model;
 pub mod pause;
 pub mod question;
 pub mod redact;
+pub mod replay;
 pub mod retention;
 
 pub use config::{CaptureConfig, Config, Exclusion, PrivacyConfig, RetentionConfig};
