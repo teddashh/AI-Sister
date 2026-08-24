@@ -79,6 +79,9 @@ enum ReplayAction {
         /// 草稿路徑；省略就放進資料目錄的 replay-drafts/
         #[arg(long, value_name = "檔案")]
         to: Option<PathBuf>,
+        /// 同一時間窗的 query log 題目草稿（保留原問句，必須人工標註／審查）
+        #[arg(long, value_name = "檔案")]
+        questions_to: Option<PathBuf>,
         /// 語料名稱；省略就從時間範圍產生
         #[arg(long)]
         name: Option<String>,
@@ -343,9 +346,18 @@ fn main() -> Result<()> {
             ops::record::run(&data_dir, config()?, cli.config.clone(), duration)
         }
         Command::Replay(args) => match args.action {
-            Some(ReplayAction::Export { last, to, name }) => {
-                ops::replay::export_corpus(&data_dir, &last, to.as_deref(), name.as_deref())
-            }
+            Some(ReplayAction::Export {
+                last,
+                to,
+                questions_to,
+                name,
+            }) => ops::replay::export_corpus(
+                &data_dir,
+                &last,
+                to.as_deref(),
+                questions_to.as_deref(),
+                name.as_deref(),
+            ),
             Some(ReplayAction::Import {
                 corpus,
                 dry_run,
@@ -507,6 +519,8 @@ mod tests {
             "2d",
             "--to",
             "day.sister-replay-draft.json",
+            "--questions-to",
+            "day.sister-questions-draft.json",
         ])
         .expect("export subcommand");
         let Command::Replay(export) = export.command else {
@@ -514,7 +528,13 @@ mod tests {
         };
         assert!(matches!(
             export.action,
-            Some(ReplayAction::Export { ref last, .. }) if last == "2d"
+            Some(ReplayAction::Export {
+                ref last,
+                ref questions_to,
+                ..
+            }) if last == "2d"
+                && questions_to.as_deref()
+                    == Some(std::path::Path::new("day.sister-questions-draft.json"))
         ));
 
         let import = Cli::try_parse_from([

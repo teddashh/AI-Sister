@@ -113,6 +113,18 @@ sister replay import ./workday.sister-replay-draft.json --dry-run
 `import --dry-run` 可以在本機驗證 Draft，用去敏後的 L0 重建搜尋索引和 L1 事實，
 不會因為它尚未 Reviewed 就禁止本機重播。兩個指令都不會上傳任何東西。
 
+要把同一段時間裡真的問過她的話一起做成待標註題庫，在 export 多給一個輸出檔：
+
+```bash
+sister replay export --last 14d --to ./workday.sister-replay-draft.json \
+  --questions-to ./workday.sister-questions-draft.json
+```
+
+題庫和 corpus 綁同一個指紋，時間只留相對毫秒，不帶資料庫 row id 或真實 epoch。
+每題的 `expected` 都是 `null`：當時回 0 筆、點過出處或按過 ★ 都只算標註提示，
+不會被猜成正解。題目保留你輸入的原話、沒有自動去敏，所以這份檔案是 private
+Draft；人工補成 `answer`／`no_answer` 並審查前，不能拿來評測，也不要分享。
+
 Phase 2 的第一版 runner 也已經可以直接跑：
 
 ```bash

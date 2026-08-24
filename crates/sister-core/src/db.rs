@@ -2287,6 +2287,21 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
+    /// 固定時間窗裡的完整 query log，給 replay 題庫匯出使用。
+    ///
+    /// 和 L0 replay 一樣採 `[from, to)`；舊的在前，讓 portable `query-0001` 不帶
+    /// SQLite row id 也能穩定重建。這裡刻意不設 limit：靜靜截斷會把一份部分
+    /// 題庫寫成看起來完整的檔案。
+    pub fn query_log_between(&self, from: Millis, to: Millis) -> Result<Vec<QueryRow>> {
+        anyhow::ensure!(to >= from, "query log 結束時間早於開始時間");
+        let mut stmt = self.conn.prepare(&query_log_sql(
+            "q.ts >= ?1 AND q.ts < ?2",
+            "ORDER BY q.ts ASC, q.id ASC",
+        ))?;
+        let rows = stmt.query_map(params![from, to], read_query_row)?;
+        Ok(rows.flatten().collect())
+    }
+
     /// 他標記過的那幾題，**他問的時候**新的在前——帶著實例本身。
     ///
     /// 退場條件寫的是「≥ 3 次（記錄實例）」，所以光有一個計數是不夠的：那句
@@ -5636,6 +5651,24 @@ mod tests {
         assert_eq!(stats.total, 1);
         assert_eq!(stats.empty, 1, "答不出來的那一題沒被記下來");
         assert_eq!(db.query_log(10).expect("log")[0].question, "客服電話");
+    }
+
+    #[test]
+    fn replay_question_window_is_half_open_complete_and_stably_oldest_first() {
+        let db = test_db();
+        ask(&db, 999, "before", 1);
+        let first = ask(&db, 1_000, "same", 0);
+        let second = ask(&db, 1_000, "same", 2);
+        let third = ask(&db, 1_999, "last", 1);
+        ask(&db, 2_000, "after", 1);
+
+        let rows = db.query_log_between(1_000, 2_000).expect("window");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![first, second, third]
+        );
+        assert_eq!(rows[0].question, rows[1].question, "重複問法也各留一題");
+        assert!(db.query_log_between(2_000, 1_000).is_err());
     }
 
     /// 點下去＝幫這一題標了正解，而 `rank` 說出排序把它放在第幾個。

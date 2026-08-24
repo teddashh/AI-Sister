@@ -11,6 +11,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::Db;
+use crate::db::QueryRow;
 use crate::facts::extract;
 use crate::model::{Millis, SourceKind};
 use crate::replay::{Corpus, Event, ReviewStatus};
@@ -28,6 +29,8 @@ pub struct QuestionSet {
     pub name: String,
     /// 真實 query log 即使搭配 Reviewed corpus，仍然要自己經過人工審查。
     pub review: ReviewStatus,
+    /// 題目裡的 event_index 只能套在這一份去敏後 corpus 上。
+    pub corpus_fingerprint: String,
     pub questions: Vec<RecallQuestion>,
 }
 
@@ -37,7 +40,24 @@ pub struct RecallQuestion {
     pub id: String,
     pub question: String,
     pub source: QuestionSource,
-    pub expected: ExpectedOutcome,
+    /// query log 匯出時保留相對時間，不帶真實 epoch；手標／埋題可省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_at_ms: Option<Millis>,
+    /// 舊產品當時怎麼回，只是標註提示，不是 ground truth。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<QueryObservation>,
+    /// `null` 是尚未人工標註；絕不把當時 `hits = 0` 猜成 NoAnswer。
+    pub expected: Option<ExpectedOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryObservation {
+    pub shape: String,
+    pub product_results: usize,
+    pub interface: String,
+    pub opened_sources: usize,
+    pub marked_forgotten: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +87,60 @@ pub struct EvidenceRef {
 }
 
 impl QuestionSet {
+    /// 把固定時間窗裡的真實問法變成可人工標註的私有 Draft。
+    pub fn draft_from_query_log(
+        name: &str,
+        corpus: &Corpus,
+        origin: Millis,
+        rows: &[QueryRow],
+    ) -> Result<Self> {
+        corpus.validate()?;
+        ensure!(!name.trim().is_empty(), "question set 缺少名稱");
+        ensure!(!rows.is_empty(), "這段時間裡沒有可匯出的 query log");
+
+        let questions = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let asked_at_ms = row
+                    .ts
+                    .checked_sub(origin)
+                    .with_context(|| format!("query #{} timestamp overflowed", row.id))?;
+                ensure!(
+                    (0..=corpus.duration_ms).contains(&asked_at_ms),
+                    "query #{} 不在 corpus 的時間範圍內",
+                    row.id
+                );
+                Ok(RecallQuestion {
+                    id: format!("query-{:04}", index + 1),
+                    question: row.question.clone(),
+                    source: QuestionSource::QueryLog,
+                    asked_at_ms: Some(asked_at_ms),
+                    observed: Some(QueryObservation {
+                        shape: row.shape.clone(),
+                        product_results: usize::try_from(row.hits)
+                            .with_context(|| format!("query #{} 的 hits 是負數", row.id))?,
+                        interface: row.source.clone(),
+                        opened_sources: usize::try_from(row.clicks)
+                            .with_context(|| format!("query #{} 的 clicks 是負數", row.id))?,
+                        marked_forgotten: row.marked(),
+                    }),
+                    expected: None,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let set = Self {
+            format_version: QUESTION_SET_VERSION,
+            name: name.trim().to_string(),
+            review: ReviewStatus::Draft,
+            corpus_fingerprint: corpus_fingerprint(corpus)?,
+            questions,
+        };
+        set.validate(corpus)?;
+        Ok(set)
+    }
+
     pub fn validate(&self, corpus: &Corpus) -> Result<()> {
         ensure!(
             self.format_version == QUESTION_SET_VERSION,
@@ -76,6 +150,13 @@ impl QuestionSet {
         );
         ensure!(!self.name.trim().is_empty(), "question set 缺少名稱");
         ensure!(!self.questions.is_empty(), "question set 一題都沒有");
+        let expected_fingerprint = corpus_fingerprint(corpus)?;
+        ensure!(
+            self.corpus_fingerprint == expected_fingerprint,
+            "question set 綁定的 corpus fingerprint 不同：檔案是 {}，corpus 是 {}",
+            self.corpus_fingerprint,
+            expected_fingerprint
+        );
 
         let mut ids = BTreeSet::new();
         for (question_index, question) in self.questions.iter().enumerate() {
@@ -94,7 +175,33 @@ impl QuestionSet {
                 question.id
             );
 
-            if let ExpectedOutcome::Answer { any_of, evidence } = &question.expected {
+            if question.source == QuestionSource::QueryLog {
+                let asked_at_ms = question.asked_at_ms.with_context(|| {
+                    format!("query-log question {} 缺少 asked_at_ms", question.id)
+                })?;
+                ensure!(
+                    (0..=corpus.duration_ms).contains(&asked_at_ms),
+                    "query-log question {} 的 asked_at_ms 不在 corpus 裡",
+                    question.id
+                );
+                let observed = question
+                    .observed
+                    .as_ref()
+                    .with_context(|| format!("query-log question {} 缺少 observed", question.id))?;
+                ensure!(
+                    matches!(observed.shape.as_str(), "recent" | "keywords"),
+                    "query-log question {} 的 observed.shape 不認得：{}",
+                    question.id,
+                    observed.shape
+                );
+                ensure!(
+                    !observed.interface.trim().is_empty(),
+                    "query-log question {} 的 observed.interface 是空的",
+                    question.id
+                );
+            }
+
+            if let Some(ExpectedOutcome::Answer { any_of, evidence }) = &question.expected {
                 ensure!(
                     !any_of.is_empty() && any_of.iter().all(|answer| !answer.trim().is_empty()),
                     "question {} 的 answer.any_of 不可為空",
@@ -136,6 +243,13 @@ impl QuestionSet {
                         reference.event_index
                     );
                 }
+            }
+            if self.review == ReviewStatus::Reviewed {
+                ensure!(
+                    question.expected.is_some(),
+                    "Reviewed question set 裡仍有未標註題目：{}",
+                    question.id
+                );
             }
         }
         Ok(())
@@ -305,6 +419,16 @@ pub fn evaluate(
 ) -> Result<EvalReport> {
     corpus.validate()?;
     questions.validate(corpus)?;
+    if let Some(question) = questions
+        .questions
+        .iter()
+        .find(|question| question.expected.is_none())
+    {
+        anyhow::bail!(
+            "question {} 還沒標註 expected；先填 answer/no_answer 才能 evaluate",
+            question.id
+        );
+    }
     ensure!(k > 0, "--k 必須大於 0");
     ensure!(runs > 0, "--runs 必須大於 0");
 
@@ -322,7 +446,7 @@ pub fn evaluate(
             review: corpus.review,
             duration_ms: corpus.duration_ms,
             events: corpus.events.len(),
-            fingerprint: fingerprint(corpus)?,
+            fingerprint: corpus_fingerprint(corpus)?,
         },
         question_set: EvaluatedQuestions {
             name: questions.name.clone(),
@@ -503,7 +627,11 @@ fn returned_items(corpus: &Corpus, retrieval: Retrieval, k: usize) -> Result<Vec
 }
 
 fn grade(question: &RecallQuestion, items: &[ReturnedItem]) -> (bool, Option<bool>, Option<bool>) {
-    match &question.expected {
+    match question
+        .expected
+        .as_ref()
+        .expect("evaluate rejects unlabeled questions before grading")
+    {
         ExpectedOutcome::NoAnswer => (items.is_empty(), None, None),
         ExpectedOutcome::Answer { any_of, evidence } => {
             let expected_events: BTreeSet<_> =
@@ -607,6 +735,27 @@ fn fingerprint(value: &impl Serialize) -> Result<String> {
     Ok(format!("fnv1a64:{hash:016x}"))
 }
 
+pub fn corpus_fingerprint(corpus: &Corpus) -> Result<String> {
+    /// `review` 是人在同一份內容上翻的審查狀態；把它算進去，Draft 題庫會在
+    /// corpus 人工改成 Reviewed 的那一刻無故失效。
+    #[derive(Serialize)]
+    struct Content<'a> {
+        format_version: u32,
+        name: &'a str,
+        duration_ms: Millis,
+        redactions: &'a crate::replay::RedactionSummary,
+        events: &'a [Event],
+    }
+
+    fingerprint(&Content {
+        format_version: corpus.format_version,
+        name: &corpus.name,
+        duration_ms: corpus.duration_ms,
+        redactions: &corpus.redactions,
+        events: &corpus.events,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,21 +810,26 @@ mod tests {
             format_version: QUESTION_SET_VERSION,
             name: "tiny qa".into(),
             review: ReviewStatus::Reviewed,
+            corpus_fingerprint: corpus_fingerprint(&corpus).expect("fingerprint"),
             questions: vec![
                 RecallQuestion {
                     id: "phone".into(),
                     question: "電話是什麼".into(),
                     source: QuestionSource::Planted,
-                    expected: ExpectedOutcome::Answer {
+                    asked_at_ms: None,
+                    observed: None,
+                    expected: Some(ExpectedOutcome::Answer {
                         any_of: vec!["0800-000-123".into(), "+886800000123".into()],
                         evidence: vec![EvidenceRef { event_index: 0 }],
-                    },
+                    }),
                 },
                 RecallQuestion {
                     id: "missing".into(),
                     question: "火星會議連結".into(),
                     source: QuestionSource::HandLabeled,
-                    expected: ExpectedOutcome::NoAnswer,
+                    asked_at_ms: None,
+                    observed: None,
+                    expected: Some(ExpectedOutcome::NoAnswer),
                 },
             ],
         };
@@ -700,10 +854,10 @@ mod tests {
     #[test]
     fn bad_versions_and_evidence_are_rejected_before_a_run() {
         let (corpus, mut questions) = fixture();
-        questions.questions[0].expected = ExpectedOutcome::Answer {
+        questions.questions[0].expected = Some(ExpectedOutcome::Answer {
             any_of: vec!["0800".into()],
             evidence: vec![EvidenceRef { event_index: 99 }],
-        };
+        });
         assert!(questions.validate(&corpus).is_err());
         questions.format_version += 1;
         assert!(questions.validate(&corpus).is_err());
@@ -729,7 +883,9 @@ mod tests {
                 confidence: 1.0,
             }],
         });
-        let ExpectedOutcome::Answer { evidence, .. } = &mut questions.questions[0].expected else {
+        questions.corpus_fingerprint = corpus_fingerprint(&corpus).expect("fingerprint");
+        let Some(ExpectedOutcome::Answer { evidence, .. }) = &mut questions.questions[0].expected
+        else {
             unreachable!()
         };
         evidence.push(EvidenceRef { event_index: 2 });
@@ -738,7 +894,7 @@ mod tests {
 
     #[test]
     fn same_millisecond_ocr_results_only_cite_the_event_with_the_returned_text() {
-        let (mut corpus, questions) = fixture();
+        let (mut corpus, mut questions) = fixture();
         corpus.events.insert(
             1,
             Event::Frame {
@@ -759,6 +915,7 @@ mod tests {
                 }],
             },
         );
+        questions.corpus_fingerprint = corpus_fingerprint(&corpus).expect("fingerprint");
         let report = evaluate(&corpus, &questions, 5, 1).expect("evaluate");
         let phone = &report.configurations[1].questions[0].returned[0];
         assert_eq!(phone.event_indexes, vec![0]);
@@ -787,9 +944,65 @@ mod tests {
     #[test]
     fn a_reviewed_corpus_does_not_review_a_private_question_set_for_free() {
         let (corpus, mut questions) = fixture();
+        let mut draft_corpus = corpus.clone();
+        draft_corpus.review = ReviewStatus::Draft;
+        questions
+            .validate(&draft_corpus)
+            .expect("review flip does not change corpus content fingerprint");
         questions.review = ReviewStatus::Draft;
         let report = evaluate(&corpus, &questions, 5, 1).expect("evaluate");
         assert_eq!(report.corpus.review, ReviewStatus::Reviewed);
         assert_eq!(report.question_set.review, ReviewStatus::Draft);
+    }
+
+    #[test]
+    fn query_log_becomes_an_unlabeled_private_draft_without_guessing_no_answer() {
+        let (corpus, _) = fixture();
+        let rows = vec![
+            QueryRow {
+                id: 41,
+                ts: EVAL_ORIGIN + 100,
+                question: "同一句".into(),
+                shape: "keywords".into(),
+                hits: 0,
+                latency_ms: 2,
+                source: "desktop".into(),
+                clicks: 0,
+                marked_ts: None,
+            },
+            QueryRow {
+                id: 99,
+                ts: EVAL_ORIGIN + 200,
+                question: "同一句".into(),
+                shape: "keywords".into(),
+                hits: 3,
+                latency_ms: 1,
+                source: "cli".into(),
+                clicks: 2,
+                marked_ts: Some(EVAL_ORIGIN + 250),
+            },
+        ];
+        let set = QuestionSet::draft_from_query_log("real words", &corpus, EVAL_ORIGIN, &rows)
+            .expect("draft");
+        assert_eq!(set.review, ReviewStatus::Draft);
+        assert_eq!(set.questions[0].id, "query-0001");
+        assert_eq!(set.questions[1].id, "query-0002");
+        assert_eq!(set.questions[0].question, set.questions[1].question);
+        assert!(
+            set.questions
+                .iter()
+                .all(|question| question.expected.is_none())
+        );
+        assert_eq!(
+            set.questions[0].observed.as_ref().unwrap().product_results,
+            0,
+            "當時空手不是 ground-truth NoAnswer"
+        );
+        assert!(set.questions[1].observed.as_ref().unwrap().marked_forgotten);
+        let error = evaluate(&corpus, &set, 5, 1).unwrap_err().to_string();
+        assert!(
+            error.contains("query-0001") && error.contains("還沒標註"),
+            "{error}"
+        );
     }
 }

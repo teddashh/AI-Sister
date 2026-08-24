@@ -128,13 +128,26 @@ Draft 是純文字 JSON，沒有額外加密；它放到哪裡，就只被那個
 
 ### replay 題庫與評測報告
 
+`sister replay export --last 14d --to <corpus> --questions-to <questions>` 會在匯出
+corpus 的同時，讀本機 `queries`、`query_clicks` 計數與 `query_marks`，把同一個
+`[from, to)` 時間窗的問法依 `(ts, id)` 舊到新排成 private Draft。重複問句仍是
+不同實例；portable id 是 `query-0001` 這種檔內流水號，`asked_at_ms` 是相對時間，
+不帶 SQLite row id 或真實 epoch。輸出檔拒絕覆寫，在 Unix 是 0600；
+`*.sister-questions-draft.json` 也被 gitignore 擋住。
+
+每題的 `observed` 只照實保留當時的 shape、產品回傳筆數、介面、點開出處數與 ★
+標記。這些都不是 ground truth：尤其回 0 筆不能自動變成 NoAnswer。所以匯出時
+`expected` 固定是 `null`，人工要填成 `answer`（含 corpus `event_index`）或
+`no_answer`；沒填完不能 evaluate，逐題審查後才把題庫 `review` 改成 `reviewed`。
+
 `sister replay evaluate <corpus> <questions> [--k K] [--runs N] [--json | --to FILE]`
-讀另一份人工維護的 question-set JSON。題庫自己也有 `review: draft | reviewed`，
-不能借用 corpus 的 Reviewed 狀態；它不會自動從本機 `queries` 表匯出題目。每題明列
-`id`、問題文字、來源（`query_log`、
+讀這份 question-set JSON。題庫自己也有 `review: draft | reviewed`，不能借用
+corpus 的 Reviewed 狀態；每題明列 `id`、問題文字、來源（`query_log`、
 `hand_labeled` 或 `planted`），以及 `answer` 的可接受字串與 corpus `event_index`
 出處，或明列 `no_answer`。因此用真實 query log 做成的題庫本身也是使用者資料，
-要和 corpus 分開人工審查。
+要和 corpus 分開人工審查。匯出器保留問題原話、**不自動去敏**；
+`privacy.query_log = false` 只阻止之後新增，不刪舊題，而已被 `forget`／保留期
+拿掉的題目也不可能由匯出器補回來。
 
 repo 目前簽入的 `scenarios/recall-baseline.corpus.json` 與
 `scenarios/recall-baseline.questions.json` 是純合成 Reviewed fixture：3 個事件、

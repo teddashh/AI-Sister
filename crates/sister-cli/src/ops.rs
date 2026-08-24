@@ -9148,6 +9148,7 @@ pub mod replay {
         data_dir: &Path,
         last: &str,
         output: Option<&Path>,
+        questions_output: Option<&Path>,
         name: Option<&str>,
     ) -> Result<()> {
         let span = parse_span(last)?;
@@ -9166,7 +9167,31 @@ pub mod replay {
         let path = output
             .map(Path::to_path_buf)
             .unwrap_or_else(|| next_draft_path(data_dir));
+
+        let question_set = match questions_output {
+            Some(question_path) => {
+                anyhow::ensure!(
+                    question_path != path,
+                    "corpus 和 question set 不可寫到同一個檔案"
+                );
+                anyhow::ensure!(
+                    !path.exists() && !question_path.exists(),
+                    "輸出檔已存在；不會覆寫既有檔案"
+                );
+                let rows = db.query_log_between(from, to)?;
+                Some(QuestionSet::draft_from_query_log(
+                    &format!("{name}-queries"),
+                    draft.as_corpus(),
+                    from,
+                    &rows,
+                )?)
+            }
+            None => None,
+        };
         write_new_json(&path, &draft)?;
+        if let (Some(question_path), Some(question_set)) = (questions_output, &question_set) {
+            write_new_question_set(question_path, question_set)?;
+        }
 
         let corpus = draft.as_corpus();
         let redactions = &corpus.redactions;
@@ -9189,6 +9214,16 @@ pub mod replay {
         println!(
             "  ⚠  這是 private Draft（review: draft），只能留在本機；人工逐項審查並改成 reviewed 前不要分享。"
         );
+        if let (Some(question_path), Some(question_set)) = (questions_output, question_set) {
+            println!(
+                "  題庫草稿：{} 題 query log → {}",
+                question_set.questions.len(),
+                question_path.display()
+            );
+            println!(
+                "  ⚠  題目保留你輸入的原話、沒有自動去敏；expected 全是 null，人工填成 answer/no_answer 前不能評測。"
+            );
+        }
         Ok(())
     }
 
@@ -9376,6 +9411,10 @@ pub mod replay {
         write_new_bytes(path, serde_json::to_vec_pretty(value)?)
     }
 
+    fn write_new_question_set(path: &Path, value: &QuestionSet) -> Result<()> {
+        write_new_bytes(path, serde_json::to_vec_pretty(value)?)
+    }
+
     fn write_new_bytes(path: &Path, mut bytes: Vec<u8>) -> Result<()> {
         bytes.push(b'\n');
         if let Some(parent) = path
@@ -9393,12 +9432,9 @@ pub mod replay {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(path).with_context(|| {
-            format!(
-                "建立 {} 失敗（不會覆寫已存在的 replay corpus）",
-                path.display()
-            )
-        })?;
+        let mut file = options
+            .open(path)
+            .with_context(|| format!("建立 {} 失敗（不會覆寫已存在的檔案）", path.display()))?;
         if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
             drop(file);
             // 這一輪用 create_new 建的半截檔不是使用者原本的資料；留下它會讓
@@ -9535,6 +9571,7 @@ pub mod replay {
     #[cfg(test)]
     mod corpus_tests {
         use super::*;
+        use sister_core::db::{QueryLogEntry, SOURCE_DESKTOP};
         use sister_core::model::{FocusSnapshot, FrameCapture, OcrBlock};
 
         fn seed(dir: &Path) -> Result<()> {
@@ -9580,7 +9617,7 @@ pub mod replay {
             let tmp = crate::ops::tmp::Tmp::new("replay-export");
             seed(&tmp.0)?;
             let output = tmp.0.join("corpus.sister-replay-draft.json");
-            export_corpus(&tmp.0, "1d", Some(&output), Some("測試語料"))?;
+            export_corpus(&tmp.0, "1d", Some(&output), None, Some("測試語料"))?;
 
             let json = std::fs::read_to_string(&output)?;
             assert!(json.contains("一般 replay 文字"), "{json}");
@@ -9604,8 +9641,100 @@ pub mod replay {
             seed(&tmp.0)?;
             let output = tmp.0.join("existing.json");
             std::fs::write(&output, "keep me")?;
-            assert!(export_corpus(&tmp.0, "1d", Some(&output), None).is_err());
+            assert!(export_corpus(&tmp.0, "1d", Some(&output), None, None).is_err());
             assert_eq!(std::fs::read_to_string(output)?, "keep me");
+            Ok(())
+        }
+
+        #[test]
+        fn corpus_export_can_make_an_unlabeled_query_log_draft_in_the_same_window() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("replay-query-draft");
+            seed(&tmp.0)?;
+            let db = Db::open(&crate::db_path(&tmp.0))?;
+            let now = sister_core::now_ms();
+            let first = db.log_query(&QueryLogEntry {
+                ts: now - 800,
+                question: "PRIVATE_QUERY_WORDS_123 要保留嗎",
+                shape: "keywords",
+                hits: 0,
+                latency_ms: 2,
+                source: SOURCE_DESKTOP,
+            })?;
+            db.log_click(first, 999_999, 0)?;
+            db.mark_query(first, true)?;
+            db.log_query(&QueryLogEntry {
+                ts: now - 700,
+                question: "PRIVATE_QUERY_WORDS_123 要保留嗎",
+                shape: "keywords",
+                hits: 3,
+                latency_ms: 1,
+                source: "cli",
+            })?;
+            drop(db);
+
+            let corpus_path = tmp.0.join("day.sister-replay-draft.json");
+            let questions_path = tmp.0.join("day.sister-questions-draft.json");
+            export_corpus(
+                &tmp.0,
+                "1d",
+                Some(&corpus_path),
+                Some(&questions_path),
+                Some("day"),
+            )?;
+
+            let corpus: Corpus = serde_json::from_slice(&std::fs::read(&corpus_path)?)?;
+            let questions: QuestionSet = serde_json::from_slice(&std::fs::read(&questions_path)?)?;
+            questions.validate(&corpus)?;
+            assert_eq!(questions.review, ReviewStatus::Draft);
+            assert_eq!(questions.questions.len(), 2, "重複問法是兩個真實實例");
+            assert_eq!(questions.questions[0].id, "query-0001");
+            assert_eq!(questions.questions[1].id, "query-0002");
+            assert!(
+                questions
+                    .questions
+                    .iter()
+                    .all(|question| question.expected.is_none())
+            );
+            let observed = questions.questions[0].observed.as_ref().expect("observed");
+            assert_eq!(observed.product_results, 0, "空手不能偷變成 NoAnswer");
+            assert_eq!(observed.opened_sources, 1);
+            assert!(observed.marked_forgotten);
+            assert!(
+                questions.questions[0]
+                    .question
+                    .contains("PRIVATE_QUERY_WORDS_123"),
+                "這一版明講題目原話沒有自動去敏，不能偷偷改成另一個契約"
+            );
+            assert!(sister_core::eval::evaluate(&corpus, &questions, 5, 1).is_err());
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&questions_path)?.permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn asking_for_a_question_draft_with_no_queries_creates_neither_file() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("replay-empty-query-draft");
+            seed(&tmp.0)?;
+            let corpus_path = tmp.0.join("day.sister-replay-draft.json");
+            let questions_path = tmp.0.join("day.sister-questions-draft.json");
+            assert!(
+                export_corpus(
+                    &tmp.0,
+                    "1d",
+                    Some(&corpus_path),
+                    Some(&questions_path),
+                    None,
+                )
+                .is_err()
+            );
+            assert!(!corpus_path.exists() && !questions_path.exists());
             Ok(())
         }
 
@@ -9632,7 +9761,7 @@ pub mod replay {
             let target = crate::ops::tmp::Tmp::new("replay-target");
             seed(&source.0)?;
             let output = source.0.join("corpus.sister-replay-draft.json");
-            export_corpus(&source.0, "1d", Some(&output), None)?;
+            export_corpus(&source.0, "1d", Some(&output), None, None)?;
             import_corpus(&target.0, &output, false, 0.0, Some(1_700_000_000_000))?;
 
             let db = Db::open(&crate::db_path(&target.0))?;

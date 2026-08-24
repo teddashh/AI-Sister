@@ -2,6 +2,7 @@
   "format_version": 1,
   "name": "synthetic-recall-qa",
   "review": "reviewed",
+  "corpus_fingerprint": "fnv1a64:b50c968e052ca82e",
   "questions": [
     {
       "id": "phone-synonym",

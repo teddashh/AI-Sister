@@ -385,6 +385,18 @@ Reviewed 檔案複製到別處，和上面的完整備份一樣，是使用者�
 sister replay evaluate <corpus> <questions> --k 5 --runs 3
 ```
 
+真實 query log 可在同一次 corpus export 變成待標註題庫：
+
+```bash
+sister replay export --last 14d --to <corpus> --questions-to <questions>
+```
+
+這條路只讀本機資料庫、沒有網路；輸出採 0600、拒絕覆寫，並固定是 private
+Draft。它保留使用者輸入的問題原話，**沒有自動去敏，也沒有額外加密**；當時的
+回傳數、點擊與 ★ 只作標註提示，`expected` 是 `null`，不會自動猜成答案。
+question set 綁著去敏後 corpus 的 fingerprint，但仍有自己的 Draft／Reviewed
+狀態，不能借 corpus 的審查結果通關。人工標註與逐題審查前不要分享。
+
 目前的 `baseline_text` 和 `facts` 都只走本機 SQLite 檢索，沒有網路與模型路徑；
 因此這兩個配置的模型呼叫 0、US$0/天是路徑事實。它不代表未來新增的配置也一定是
 0。提醒誤報／漏報、斷句 F1、Reviewer 回查率、CPU、RAM、電池與磁碟目前沒有量測

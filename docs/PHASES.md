@@ -210,7 +210,11 @@ capture 層本身就是 recorder。
   重建全文索引與 L1 事實，不相信匯出機器裡已算好的衍生結果。
 - 現有 `sister replay <scenario.json>` 保留；腳本化埋題和真實工作日走同一條重播管線。
 - 語料庫：Ted 真實工作日 ≥ 2 週 + 腳本化埋題日（植入帳單/電話/通知/中途改目標）。
-- 題庫三源：query log 轉標註、手標 recall QA、承諾集與開口判斷集（該講/不該講時刻）。
+- 題庫三源：
+  - [x] `replay export --questions-to` 把同一時間窗的 query log 轉成綁定 corpus
+    fingerprint 的 private Draft；當時 hits/clicks/mark 只作提示，`expected` 留 `null`
+    等人工標註，不猜 ground truth。
+  - [ ] 手標 recall QA、承諾集與開口判斷集（該講/不該講時刻）。
 - [x] Runner v0：`sister replay evaluate <corpus> <questions>` 在同一份 corpus 上跑
   `baseline_text` 與 `facts`。前者是產品現有的三份 FTS5 索引加必要的有界 LIKE
   fallback；後者再加 L1 typed facts，且 fact 排在文字結果前。現在輸出找回率@k、
