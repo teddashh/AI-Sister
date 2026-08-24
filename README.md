@@ -155,14 +155,28 @@ stdout，`--to` 寫進一個新檔且拒絕覆寫。repo 裡的
 
 兩個配置走的都是真正產品檢索接線。`baseline_text` 是現有文字路徑：三份 FTS5
 索引加上必要時的有界 LIKE fallback，不是只跑一個「純 FTS」查詢；`facts` 在同一
-條文字路徑上加 L1 typed facts，並把 fact 結果排在文字結果前。2026-08-23 以
-release build 在目前 Linux 開發機跑上面那條指令，先暖身 1 輪、再每題計時 3 次，
-實測是：
+條文字路徑上加 L1 typed facts，並把 fact 結果排在文字結果前。下表由實際
+`sister replay evaluate --json` 的穩定欄位自動生成；CI 會重跑同一份 fixture，
+而腳本裡 checked-in 的 regression contract 會鎖住目前接受的分數。若有意接受一組
+新的 baseline，要先查清變動、更新腳本的 `expected_scores`，再跑
+`python3 scripts/check-recall-baseline.py --update-readme` 重生下表：
 
-| 配置 | 找回率@5 | 答案正確率 | 出處正確率 | 延遲 p50 / p95 |
-|---|---:|---:|---:|---:|
-| `baseline_text` | 2/4（50.0%） | 3/5（60.0%） | 2/4（50.0%） | 0.06 / 0.09 ms |
-| `facts` | 4/4（100.0%） | 5/5（100.0%） | 4/4（100.0%） | 0.15 / 0.19 ms |
+<!-- BEGIN GENERATED: recall-benchmark -->
+<!-- 由 scripts/check-recall-baseline.py 生成；不要手改這一段。 -->
+| 配置 | 找回率@5 | 答案正確率 | 出處正確率 | 模型呼叫 | 成本 |
+|---|---:|---:|---:|---:|---:|
+| `baseline_text` | 2/4（50.0%） | 3/5（60.0%） | 2/4（50.0%） | 0 | US$0/天 |
+| `facts` | 4/4（100.0%） | 5/5（100.0%） | 4/4（100.0%） | 0 | US$0/天 |
+<!-- END GENERATED: recall-benchmark -->
+
+延遲會隨機器與 runner 浮動，不放進上面的 CI 比對。以下只是有日期、有環境的
+快照：2026-08-23，在目前 Linux 開發機用 release build，先暖身 1 輪、再每題
+計時 3 次：
+
+| 配置 | 延遲 p50 / p95 |
+|---|---:|
+| `baseline_text` | 0.06 / 0.09 ms |
+| `facts` | 0.15 / 0.19 ms |
 
 題目來源是 query log 0、人工標註 3、腳本埋題 2。兩個配置都沒有模型路徑，所以
 模型呼叫是 0、成本是 US$0/天；提醒誤報／漏報、斷句 F1、Reviewer 回查率、CPU、
@@ -171,6 +185,32 @@ RAM、電池與磁碟還沒量，JSON 報告裡是 `null`，不是 0。延遲只
 Phase 2 baseline，也不能代表真實工作日品質。完整報告會帶回傳文字；corpus 與
 question set 各有自己的 Draft／Reviewed 狀態，任一輸入仍是 private Draft 時，
 報告也仍是私有資料，人工審查前不要分享。
+
+要在桌面看這份報告，先明確打開開發者入口。Windows 上桌面真正讀的是
+`%APPDATA%` 底下的 `ted-h\AI-Sister\config\config.toml`。檔案已有 `[shell]` 時，只在那個
+區塊加入或修改 `developer_mode`，不要再貼第二個 `[shell]`；區塊不存在時才新增
+下面這一段。沒寫這項時等同 `false`，一般使用者的系統匣不會出現它：
+
+```toml
+[shell]
+developer_mode = true
+```
+
+完整結束再重開 `sister-desktop.exe`，系統匣才會多一項「評測指標…」。先用 CLI
+把報告寫成另一個新檔，再從頁面的原生選檔器打開：
+
+```bat
+.\sister.exe replay evaluate .\workday.sister-replay-draft.json .\workday.sister-questions.json --to .\report.json
+```
+
+選檔後，完整 report 文字會短暫進入這個本機 WebView，再由同一行程裡的 Rust
+嚴格解析；頁面實際保存和顯示的是 Rust 回傳的數值 projection。它拿掉 report
+裡全部自由文字，包括 corpus／題庫名稱、fingerprint、逐題原問句、回傳內容與
+自由填寫的題目 id；失敗題改用 question set 的 1-based 題號定位。整條路不連網、
+不上傳，頁面也不另存一份報告。不過磁碟上的
+`report.json` 原檔仍含那些文字；任一輸入是 Draft 時，頁面會一直顯示 private
+Draft 警告，不能因為畫面沒有逐字內容就把原檔拿去分享。這個入口已接線，但真
+Windows 的系統匣、選檔器與三種載入狀態仍列在實機清單，沒有拿 Linux 測試冒充。
 
 問她「**剛剛發生什麼事**」會得到答案，而不是「我記得的東西裡沒有這件事」。那句話
 問的是時間、不是關鍵字，所以她不會拿那七個字去比對——她直接把最後看到的幾件事列

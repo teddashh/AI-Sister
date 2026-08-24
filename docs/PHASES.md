@@ -230,7 +230,14 @@ capture 層本身就是 recorder。
 - [x] 合成 fixture 的 CLI regression gate：CI 真的執行 `replay evaluate --json`，
   鎖定兩個產品 profile 的題數、分數、known miss 與 `null` 契約；延遲只驗真的量到
   五題且為有限非負數，不把 runner 的毫秒波動寫成門檻。
-- 指標面板（開發者模式頁）+ README benchmark 表自動生成。
+- [x] 指標面板 v0：預設不出現在一般桌面；明確開啟 `[shell] developer_mode = true`
+  並重開後，才從系統匣進入。它載入本機 eval report，畫面只保存／渲染 Rust 嚴格
+  解析後的數值 projection；report 裡的名稱、id、fingerprint、原問句與回傳文字
+  都不進畫面，失敗題用 1-based 題號定位。Draft 警告不會被摘要吃掉。
+  真 Windows 的系統匣、原生選檔器與三種載入狀態仍待實機清單確認。
+- [x] README synthetic benchmark 表由真正的 CLI JSON 自動生成並由 CI 比對穩定欄位；
+  latency 另列成有日期／環境的快照，不拿浮動毫秒當 gate。這仍只是 5 題 smoke
+  fixture，不是下方 ≥100 題的公開 baseline。
 
 **Exit criteria**
 - [ ] baseline 數字公開進 README（含成本與足跡）。
