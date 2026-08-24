@@ -123,7 +123,23 @@ sister replay export --last 14d --to ./workday.sister-replay-draft.json \
 題庫和 corpus 綁同一個指紋，時間只留相對毫秒，不帶資料庫 row id 或真實 epoch。
 每題的 `expected` 都是 `null`：當時回 0 筆、點過出處或按過 ★ 都只算標註提示，
 不會被猜成正解。題目保留你輸入的原話、沒有自動去敏，所以這份檔案是 private
-Draft；人工補成 `answer`／`no_answer` 並審查前，不能拿來評測，也不要分享。
+Draft；現在不用手改 JSON，可以在終端把整份題庫走完：
+
+```bash
+sister replay questions status ./workday.sister-replay-draft.json ./workday.sister-questions-draft.json
+sister replay questions annotate ./workday.sister-replay-draft.json ./workday.sister-questions-draft.json \
+  --to ./workday-labeled.sister-questions-draft.json
+sister replay questions review ./workday.sister-replay-draft.json \
+  ./workday-labeled.sister-questions-draft.json --to ./workday.sister-questions.json \
+  --confirm-private-text-reviewed
+```
+
+`annotate` 每題顯示產品真正的 `facts` 檢索候選，也可用 `f 文字` 搜 corpus、
+`e EVENT` 看可作 evidence 的文字；只有人輸入 `a EVENT 答案` 或 `n` 才會落標籤。
+輸出永遠寫到另一個新檔，不改來源、不覆寫既有檔案；進入互動前先確認目的地可寫，
+每完成一題就同步一份仍然合法的 Draft，輸入 `q` 可帶著進度離開。`review` 只有在
+全部標完、fingerprint 與 evidence 都有效，而且人明確確認未去敏的題目原話已審查
+後才會產生 Reviewed 題庫。corpus 與題庫仍各自審查，任何一邊不會替另一邊通關。
 
 Phase 2 的第一版 runner 也已經可以直接跑：
 

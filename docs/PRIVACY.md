@@ -397,6 +397,20 @@ Draft。它保留使用者輸入的問題原話，**沒有自動去敏，也沒�
 question set 綁著去敏後 corpus 的 fingerprint，但仍有自己的 Draft／Reviewed
 狀態，不能借 corpus 的審查結果通關。人工標註與逐題審查前不要分享。
 
+標註器仍是純本機檔案與 SQLite 檢索，沒有網路路徑：
+
+```bash
+sister replay questions annotate <corpus> <questions-draft> --to <labeled-draft>
+sister replay questions review <corpus> <labeled-draft> --to <reviewed-questions> \
+  --confirm-private-text-reviewed
+```
+
+第一條只有在使用者明確進入互動流程後才把題目原話印到終端；產品候選、當時 hits、
+click 與 ★ 永遠只標成提示，不會自動產生 answer/no_answer。兩條都只建立另一個
+新檔，不原地改寫或覆寫來源。第二條的確認旗標不是自動去敏：它表示執行者已逐題
+檢查原問句、答案與 evidence；沒有確認、仍有未標題或 fingerprint 不合都不產生
+Reviewed 檔案。題庫 Reviewed 也不會改掉 corpus 自己的 Draft 狀態。
+
 目前的 `baseline_text` 和 `facts` 都只走本機 SQLite 檢索，沒有網路與模型路徑；
 因此這兩個配置的模型呼叫 0、US$0/天是路徑事實。它不代表未來新增的配置也一定是
 0。提醒誤報／漏報、斷句 F1、Reviewer 回查率、CPU、RAM、電池與磁碟目前沒有量測

@@ -9137,10 +9137,13 @@ pub mod replay {
     use super::*;
     use sister_capture::{Recorder, ReplayBackend, Scenario, Tick};
     use sister_core::config::Config;
-    use sister_core::eval::{EvalReport, Fraction, QuestionSet};
+    use sister_core::eval::{
+        AnnotationPreview, EvalReport, ExpectedOutcome, Fraction, QuestionSet, annotation_previews,
+        evidence_surfaces,
+    };
     use sister_core::replay::{Corpus, DraftCorpus, ReviewStatus};
     use std::fs::OpenOptions;
-    use std::io::Write;
+    use std::io::{BufRead, Seek, SeekFrom, Write};
 
     /// 真實資料的安全出口：DB API 直接回 [`DraftCorpus`](sister_core::replay::DraftCorpus)，
     /// 呼叫端碰不到尚未去敏的中間 corpus。
@@ -9291,14 +9294,90 @@ pub mod replay {
         Ok(())
     }
 
-    pub fn evaluate_corpus(
+    pub fn question_status(corpus_path: &Path, questions_path: &Path) -> Result<()> {
+        let (corpus, questions) = read_corpus_and_questions(corpus_path, questions_path)?;
+        render_question_status(&corpus, &questions);
+        Ok(())
+    }
+
+    pub fn annotate_questions(
         corpus_path: &Path,
         questions_path: &Path,
+        output: &Path,
         k: usize,
-        runs: usize,
-        json: bool,
-        output: Option<&Path>,
+        all: bool,
     ) -> Result<()> {
+        anyhow::ensure!(
+            output != corpus_path && output != questions_path,
+            "--to 必須是另一個新檔案；不會原地改寫 corpus 或題庫"
+        );
+        let (corpus, questions) = read_corpus_and_questions(corpus_path, questions_path)?;
+        anyhow::ensure!(
+            questions.review == ReviewStatus::Draft,
+            "Reviewed question set 不可直接重新標註；請從審查前的 Draft 產生新版"
+        );
+        // 先確認目的地真的建得起來，再讓人花時間逐題標。裡面先放一份合法的
+        // 原始 Draft；之後每完成一題就 checkpoint。在 prompt 等下一個答案時
+        // Ctrl-C，仍然找得到上一題完成後的版本。
+        let mut draft_output = QuestionDraftOutput::reserve(output, &questions)?;
+        let previews = annotation_previews(&corpus, &questions, k)?;
+
+        println!("⚠  這裡會顯示沒有自動去敏的題目原話；只在私下的終端操作。");
+        render_question_status(&corpus, &questions);
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        let (annotated, changed) = annotate_with_io(
+            &corpus,
+            &questions,
+            &previews,
+            all,
+            &mut stdin.lock(),
+            &mut stdout.lock(),
+            &mut |questions| draft_output.checkpoint(questions),
+        )?;
+        if changed == 0 {
+            draft_output.discard()?;
+            println!("沒有新增或更正標註；沒有建立輸出檔。");
+            return Ok(());
+        }
+
+        debug_assert_eq!(draft_output.last_questions, annotated);
+        draft_output.finish();
+        println!("完成：這次寫下 {} 題標註 → {}", changed, output.display());
+        render_question_status(&corpus, &annotated);
+        println!("  仍是 private Draft；全部標完後再跑 `replay questions review`。");
+        Ok(())
+    }
+
+    pub fn review_questions(
+        corpus_path: &Path,
+        questions_path: &Path,
+        output: &Path,
+        confirmed_private_text_reviewed: bool,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            confirmed_private_text_reviewed,
+            "題目原話沒有自動去敏。逐題確認問題、答案與 evidence 都可分享後，重跑並加上 --confirm-private-text-reviewed"
+        );
+        anyhow::ensure!(
+            output != corpus_path && output != questions_path,
+            "--to 必須是另一個新檔案；不會原地改寫 corpus 或題庫"
+        );
+        let (corpus, questions) = read_corpus_and_questions(corpus_path, questions_path)?;
+        let reviewed = questions.reviewed(&corpus)?;
+        write_new_question_set(output, &reviewed)?;
+        println!("完成：Reviewed question set → {}", output.display());
+        println!(
+            "  這代表你已人工確認題目原話、答案與 evidence；corpus 的 {:?} 狀態仍是另一份獨立審查。",
+            corpus.review
+        );
+        Ok(())
+    }
+
+    fn read_corpus_and_questions(
+        corpus_path: &Path,
+        questions_path: &Path,
+    ) -> Result<(Corpus, QuestionSet)> {
         let corpus_bytes = std::fs::read(corpus_path)
             .with_context(|| format!("read {}", corpus_path.display()))?;
         let corpus: Corpus = serde_json::from_slice(&corpus_bytes)
@@ -9307,6 +9386,309 @@ pub mod replay {
             .with_context(|| format!("read {}", questions_path.display()))?;
         let questions: QuestionSet = serde_json::from_slice(&question_bytes)
             .with_context(|| format!("parse question set {}", questions_path.display()))?;
+        corpus.validate()?;
+        questions.validate(&corpus)?;
+        Ok((corpus, questions))
+    }
+
+    fn render_question_status(corpus: &Corpus, questions: &QuestionSet) {
+        let mut answers = 0usize;
+        let mut no_answers = 0usize;
+        let mut unlabeled = 0usize;
+        for question in &questions.questions {
+            match question.expected {
+                Some(ExpectedOutcome::Answer { .. }) => answers += 1,
+                Some(ExpectedOutcome::NoAnswer) => no_answers += 1,
+                None => unlabeled += 1,
+            }
+        }
+        println!(
+            "題庫「{}」（{:?}）：總共 {} 題；answer {}、no_answer {}、未標 {}。",
+            questions.name,
+            questions.review,
+            questions.questions.len(),
+            answers,
+            no_answers,
+            unlabeled
+        );
+        println!(
+            "  綁定 corpus「{}」（{:?}），fingerprint 已核對。",
+            corpus.name, corpus.review
+        );
+    }
+
+    fn annotate_with_io(
+        corpus: &Corpus,
+        questions: &QuestionSet,
+        previews: &[AnnotationPreview],
+        all: bool,
+        input: &mut impl BufRead,
+        output: &mut impl Write,
+        checkpoint: &mut impl FnMut(&QuestionSet) -> Result<()>,
+    ) -> Result<(QuestionSet, usize)> {
+        anyhow::ensure!(
+            previews.len() == questions.questions.len()
+                && previews
+                    .iter()
+                    .zip(&questions.questions)
+                    .all(|(preview, question)| preview.question_id == question.id),
+            "標註提示和題庫的題目沒有一一對上"
+        );
+
+        let selected: Vec<_> = questions
+            .questions
+            .iter()
+            .enumerate()
+            .filter(|(_, question)| all || question.expected.is_none())
+            .map(|(index, _)| index)
+            .collect();
+        if selected.is_empty() {
+            writeln!(output, "全部題目都已有標註；要更正請加 --all。")?;
+            return Ok((questions.clone(), 0));
+        }
+
+        let mut next = questions.clone();
+        let mut changed = 0usize;
+        let mut quit = false;
+        for (position, &index) in selected.iter().enumerate() {
+            if quit {
+                break;
+            }
+            let question = &next.questions[index];
+            writeln!(
+                output,
+                "\n[{}/{}] {}\n問題：{}",
+                position + 1,
+                selected.len(),
+                question.id,
+                question.question
+            )?;
+            if let Some(observed) = &question.observed {
+                writeln!(
+                    output,
+                    "當時產品輸出（只供提示，不是正解）：shape={}、{} 筆、開過 {} 個出處、★={}",
+                    observed.shape,
+                    observed.product_results,
+                    observed.opened_sources,
+                    if observed.marked_forgotten {
+                        "是"
+                    } else {
+                        "否"
+                    }
+                )?;
+            }
+            if let Some(expected) = &question.expected {
+                writeln!(output, "現有標註：{}", expected_summary(expected))?;
+            }
+            render_preview(output, &previews[index])?;
+            writeln!(
+                output,
+                "輸入：a EVENT 答案｜n 沒有答案｜f 文字 搜 evidence｜e EVENT 看 evidence｜s 跳過｜q 存檔離開"
+            )?;
+
+            loop {
+                write!(output, "> ")?;
+                output.flush()?;
+                let mut line = String::new();
+                if input.read_line(&mut line)? == 0 {
+                    quit = true;
+                    break;
+                }
+                let command = line.trim();
+                if command == "q" {
+                    quit = true;
+                    break;
+                }
+                if command == "s" {
+                    break;
+                }
+                if command == "n" {
+                    let replace = next.questions[index].expected.is_some();
+                    next = next.with_no_answer(corpus, &question.id, replace)?;
+                    checkpoint(&next)?;
+                    changed += 1;
+                    break;
+                }
+                if let Some(rest) = command.strip_prefix("a ") {
+                    let Some((event, answer)) = rest.trim().split_once(char::is_whitespace) else {
+                        writeln!(output, "格式是：a EVENT 答案")?;
+                        continue;
+                    };
+                    let Ok(event_index) = event.parse::<usize>() else {
+                        writeln!(output, "EVENT 必須是 corpus 裡的非負整數 index。")?;
+                        continue;
+                    };
+                    let answer = answer.trim();
+                    if answer.is_empty() {
+                        writeln!(output, "答案不可為空。")?;
+                        continue;
+                    }
+                    let replace = next.questions[index].expected.is_some();
+                    match next.with_answer(
+                        corpus,
+                        &question.id,
+                        event_index,
+                        vec![answer.to_string()],
+                        replace,
+                    ) {
+                        Ok(labeled) => {
+                            next = labeled;
+                            checkpoint(&next)?;
+                            changed += 1;
+                            break;
+                        }
+                        Err(error) => {
+                            writeln!(output, "不能存這個標註：{error:#}")?;
+                            continue;
+                        }
+                    }
+                }
+                if let Some(needle) = command.strip_prefix("f ").map(str::trim) {
+                    if needle.is_empty() {
+                        writeln!(output, "格式是：f 要找的文字")?;
+                    } else {
+                        render_evidence_search(output, corpus, needle)?;
+                    }
+                    continue;
+                }
+                if let Some(event) = command.strip_prefix("e ").map(str::trim) {
+                    match event.parse::<usize>() {
+                        Ok(event_index) => render_event_evidence(output, corpus, event_index)?,
+                        Err(_) => writeln!(output, "格式是：e EVENT")?,
+                    }
+                    continue;
+                }
+                writeln!(output, "不認得；請輸入 a、n、f、e、s 或 q。")?;
+            }
+        }
+        Ok((next, changed))
+    }
+
+    fn render_preview(output: &mut impl Write, preview: &AnnotationPreview) -> Result<()> {
+        if preview.returned.is_empty() {
+            writeln!(output, "產品檢索候選：0 筆（這不等於正解是 no_answer）")?;
+            return Ok(());
+        }
+        writeln!(output, "產品檢索候選（只供提示）：")?;
+        for item in &preview.returned {
+            writeln!(
+                output,
+                "  rank {}｜event {}｜{:?}/{}｜+{} ms｜{}",
+                item.rank,
+                item.event_indexes
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                item.channel,
+                item.source_kind,
+                item.at_ms,
+                concise(&item.values.join(" / "), 180)
+            )?;
+        }
+        Ok(())
+    }
+
+    fn render_evidence_search(
+        output: &mut impl Write,
+        corpus: &Corpus,
+        needle: &str,
+    ) -> Result<()> {
+        let needle = needle.to_lowercase();
+        let mut matched = 0usize;
+        for (event_index, event) in corpus.events.iter().enumerate() {
+            let surfaces: Vec<_> = evidence_surfaces(event)
+                .into_iter()
+                .filter(|(_, text)| text.to_lowercase().contains(&needle))
+                .collect();
+            if surfaces.is_empty() {
+                continue;
+            }
+            matched += 1;
+            if matched <= 20 {
+                writeln!(
+                    output,
+                    "  event {}｜{}",
+                    event_index,
+                    concise(
+                        &surfaces
+                            .iter()
+                            .map(|(_, text)| text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" / "),
+                        220
+                    )
+                )?;
+            }
+        }
+        match matched {
+            0 => writeln!(output, "  沒有 evidence surface 含這段文字。")?,
+            1..=20 => writeln!(output, "  找到 {matched} 個 event。")?,
+            _ => writeln!(output, "  找到 {matched} 個 event；只顯示前 20 個。")?,
+        }
+        Ok(())
+    }
+
+    fn render_event_evidence(
+        output: &mut impl Write,
+        corpus: &Corpus,
+        event_index: usize,
+    ) -> Result<()> {
+        let Some(event) = corpus.events.get(event_index) else {
+            writeln!(output, "corpus 沒有 event {event_index}。")?;
+            return Ok(());
+        };
+        let surfaces = evidence_surfaces(event);
+        if surfaces.is_empty() {
+            writeln!(
+                output,
+                "event {event_index} 沒有可作 answer evidence 的文字。"
+            )?;
+            return Ok(());
+        }
+        writeln!(output, "event {event_index} 的 evidence：")?;
+        for (kind, text) in surfaces {
+            writeln!(output, "  {}｜", kind.as_str())?;
+            for line in text.lines() {
+                writeln!(output, "    {line}")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn expected_summary(expected: &ExpectedOutcome) -> String {
+        match expected {
+            ExpectedOutcome::Answer { any_of, evidence } => format!(
+                "answer event {} = {}",
+                evidence
+                    .first()
+                    .map(|reference| reference.event_index.to_string())
+                    .unwrap_or_else(|| "沒填".into()),
+                any_of.join(" / ")
+            ),
+            ExpectedOutcome::NoAnswer => "no_answer".into(),
+        }
+    }
+
+    fn concise(text: &str, limit: usize) -> String {
+        let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one_line.chars().count() <= limit {
+            return one_line;
+        }
+        let mut shortened: String = one_line.chars().take(limit).collect();
+        shortened.push('…');
+        shortened
+    }
+
+    pub fn evaluate_corpus(
+        corpus_path: &Path,
+        questions_path: &Path,
+        k: usize,
+        runs: usize,
+        json: bool,
+        output: Option<&Path>,
+    ) -> Result<()> {
+        let (corpus, questions) = read_corpus_and_questions(corpus_path, questions_path)?;
 
         let report = sister_core::eval::evaluate(&corpus, &questions, k, runs)?;
         if json {
@@ -9415,8 +9797,101 @@ pub mod replay {
         write_new_bytes(path, serde_json::to_vec_pretty(value)?)
     }
 
+    /// 互動標註的目的檔。來源永遠不動；目的地在第一題出現前就以 create-new
+    /// 保留，之後每題都同步成一份可重新讀取的完整 Draft。
+    struct QuestionDraftOutput {
+        path: PathBuf,
+        file: Option<std::fs::File>,
+        last_bytes: Vec<u8>,
+        last_questions: QuestionSet,
+        keep: bool,
+    }
+
+    impl QuestionDraftOutput {
+        fn reserve(path: &Path, questions: &QuestionSet) -> Result<Self> {
+            let file = open_new_file(path)?;
+            let mut output = Self {
+                path: path.to_path_buf(),
+                file: Some(file),
+                last_bytes: Vec::new(),
+                last_questions: questions.clone(),
+                keep: false,
+            };
+            let bytes = question_set_bytes(questions)?;
+            if let Err(error) = output.replace_bytes(&bytes) {
+                return Err(error).with_context(|| format!("write and sync {}", path.display()));
+            }
+            output.last_bytes = bytes;
+            Ok(output)
+        }
+
+        fn checkpoint(&mut self, questions: &QuestionSet) -> Result<()> {
+            let bytes = question_set_bytes(questions)?;
+            if let Err(error) = self.replace_bytes(&bytes) {
+                // 一般 I/O 錯誤還有機會把上一份完整 checkpoint 救回來。若連救回
+                // 都失敗，Drop 會拿掉這顆可能半截的目的檔；來源 Draft 仍完整。
+                if self.replace_bytes(&self.last_bytes.clone()).is_err() {
+                    self.keep = false;
+                }
+                return Err(error).with_context(|| format!("checkpoint {}", self.path.display()));
+            }
+            self.last_bytes = bytes;
+            self.last_questions = questions.clone();
+            self.keep = true;
+            Ok(())
+        }
+
+        fn replace_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            let file = self.file.as_mut().expect("reserved output still open");
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(bytes)?;
+            file.set_len(bytes.len() as u64)?;
+            file.sync_all()
+        }
+
+        fn discard(mut self) -> Result<()> {
+            drop(self.file.take());
+            std::fs::remove_file(&self.path)
+                .with_context(|| format!("remove unused {}", self.path.display()))?;
+            self.keep = true;
+            Ok(())
+        }
+
+        fn finish(mut self) {
+            self.keep = true;
+            drop(self.file.take());
+        }
+    }
+
+    impl Drop for QuestionDraftOutput {
+        fn drop(&mut self) {
+            if !self.keep {
+                drop(self.file.take());
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+
+    fn question_set_bytes(value: &QuestionSet) -> Result<Vec<u8>> {
+        let mut bytes = serde_json::to_vec_pretty(value)?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
     fn write_new_bytes(path: &Path, mut bytes: Vec<u8>) -> Result<()> {
         bytes.push(b'\n');
+        let mut file = open_new_file(path)?;
+        if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            // 這一輪用 create_new 建的半截檔不是使用者原本的資料；留下它會讓
+            // 下一次匯出只看到「拒絕覆寫」，也可能被誤認成完整 corpus。
+            let _ = std::fs::remove_file(path);
+            return Err(error).with_context(|| format!("write and sync {}", path.display()));
+        }
+        Ok(())
+    }
+
+    fn open_new_file(path: &Path) -> Result<std::fs::File> {
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -9432,17 +9907,10 @@ pub mod replay {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options
+        let file = options
             .open(path)
             .with_context(|| format!("建立 {} 失敗（不會覆寫已存在的檔案）", path.display()))?;
-        if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
-            drop(file);
-            // 這一輪用 create_new 建的半截檔不是使用者原本的資料；留下它會讓
-            // 下一次匯出只看到「拒絕覆寫」，也可能被誤認成完整 corpus。
-            let _ = std::fs::remove_file(path);
-            return Err(error).with_context(|| format!("write and sync {}", path.display()));
-        }
-        Ok(())
+        Ok(file)
     }
 
     /// 預設檔名不帶真實 epoch；分享 corpus 時，檔名也不該把已相對化的時間補回去。
@@ -9770,6 +10238,140 @@ pub mod replay {
             assert_eq!(stats.frames, 1);
             assert!(stats.facts >= 3, "{stats:?}");
             assert_eq!(stats.frames_with_image, 0);
+            Ok(())
+        }
+
+        #[test]
+        fn annotator_labels_a_whole_draft_without_trusting_product_hints() -> Result<()> {
+            let corpus: Corpus = serde_json::from_str(include_str!(
+                "../../../scenarios/recall-baseline.corpus.json"
+            ))?;
+            let mut questions: QuestionSet = serde_json::from_str(include_str!(
+                "../../../scenarios/recall-baseline.questions.json"
+            ))?;
+            questions.review = ReviewStatus::Draft;
+            for question in &mut questions.questions {
+                question.expected = None;
+            }
+            let previews = annotation_previews(&corpus, &questions, 5)?;
+            let commands = b"f 0800\ne 0\na 0 0800-000-123\na 0 NT$1,350\na 1 ERR_DEPLOY_42\na 2 release candidate alpha\nn\n";
+            let mut input = std::io::Cursor::new(commands);
+            let mut output = Vec::new();
+            let mut checkpoints = Vec::new();
+            let (labeled, changed) = annotate_with_io(
+                &corpus,
+                &questions,
+                &previews,
+                false,
+                &mut input,
+                &mut output,
+                &mut |questions| {
+                    checkpoints.push(questions.clone());
+                    Ok(())
+                },
+            )?;
+
+            assert_eq!(changed, 5);
+            assert_eq!(checkpoints.len(), 5, "每完成一題就要 checkpoint");
+            assert_eq!(checkpoints.last(), Some(&labeled));
+            assert!(
+                labeled
+                    .questions
+                    .iter()
+                    .all(|question| question.expected.is_some())
+            );
+            assert_eq!(labeled.review, ReviewStatus::Draft);
+            let screen = String::from_utf8(output)?;
+            assert!(
+                screen.contains("event 0") && screen.contains("只供提示"),
+                "{screen}"
+            );
+            assert!(screen.contains("產品檢索候選：0 筆（這不等於正解是 no_answer）"));
+            assert!(questions.questions.iter().all(|q| q.expected.is_none()));
+            Ok(())
+        }
+
+        #[test]
+        fn annotator_reserves_its_destination_and_keeps_each_completed_checkpoint() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("replay-question-checkpoint");
+            let corpus: Corpus = serde_json::from_str(include_str!(
+                "../../../scenarios/recall-baseline.corpus.json"
+            ))?;
+            let mut questions: QuestionSet = serde_json::from_str(include_str!(
+                "../../../scenarios/recall-baseline.questions.json"
+            ))?;
+            questions.review = ReviewStatus::Draft;
+            questions.questions[0].expected = None;
+
+            let existing = tmp.0.join("existing.json");
+            std::fs::write(&existing, "keep me")?;
+            assert!(QuestionDraftOutput::reserve(&existing, &questions).is_err());
+            assert_eq!(std::fs::read_to_string(&existing)?, "keep me");
+
+            let unused = tmp.0.join("unused.json");
+            QuestionDraftOutput::reserve(&unused, &questions)?.discard()?;
+            assert!(!unused.exists(), "零變更正常退出不留一份假成果");
+
+            let checkpoint = tmp.0.join("checkpoint.json");
+            let mut output = QuestionDraftOutput::reserve(&checkpoint, &questions)?;
+            let labeled = questions.with_answer(
+                &corpus,
+                "phone-synonym",
+                0,
+                vec!["0800-000-123".into()],
+                false,
+            )?;
+            output.checkpoint(&labeled)?;
+            drop(output);
+            let saved: QuestionSet = serde_json::from_slice(&std::fs::read(&checkpoint)?)?;
+            assert_eq!(saved, labeled);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&checkpoint)?.permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn review_needs_explicit_privacy_confirmation_and_writes_a_new_file() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("replay-question-review");
+            let corpus_path = tmp.0.join("fixture.corpus.json");
+            let questions_path = tmp.0.join("fixture.questions-draft.json");
+            let reviewed_path = tmp.0.join("fixture.questions.json");
+            std::fs::write(
+                &corpus_path,
+                include_str!("../../../scenarios/recall-baseline.corpus.json"),
+            )?;
+            let mut questions: QuestionSet = serde_json::from_str(include_str!(
+                "../../../scenarios/recall-baseline.questions.json"
+            ))?;
+            questions.review = ReviewStatus::Draft;
+            std::fs::write(&questions_path, serde_json::to_vec_pretty(&questions)?)?;
+
+            assert!(
+                review_questions(&corpus_path, &questions_path, &reviewed_path, false).is_err()
+            );
+            assert!(!reviewed_path.exists());
+            review_questions(&corpus_path, &questions_path, &reviewed_path, true)?;
+            let reviewed: QuestionSet = serde_json::from_slice(&std::fs::read(&reviewed_path)?)?;
+            assert_eq!(reviewed.review, ReviewStatus::Reviewed);
+            assert_eq!(questions.review, ReviewStatus::Draft);
+            assert!(
+                review_questions(&corpus_path, &questions_path, &reviewed_path, true).is_err(),
+                "Reviewed 輸出不可被覆寫"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&reviewed_path)?.permissions().mode() & 0o777,
+                    0o600
+                );
+            }
             Ok(())
         }
 

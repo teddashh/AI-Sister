@@ -140,6 +140,19 @@ corpus 的同時，讀本機 `queries`、`query_clicks` 計數與 `query_marks`�
 `expected` 固定是 `null`，人工要填成 `answer`（含 corpus `event_index`）或
 `no_answer`；沒填完不能 evaluate，逐題審查後才把題庫 `review` 改成 `reviewed`。
 
+`sister replay questions status <corpus> <questions>` 只讀兩份 JSON、核對 fingerprint，
+並印 answer／no_answer／未標的三個實數，不印題目原話。`annotate` 才會在明確的
+互動流程裡顯示原問句、observed 提示與產品 `facts` 檢索候選；`f` 搜尋和 `e` 打開的
+是 validator 同一套 evidence surfaces。它不從候選或 observed 自動套標，只接受人
+輸入的 `a EVENT 答案`／`n`。結果用 `--to` 寫進另一個 create-new、Unix 0600 的
+Draft，來源檔不變，目的地存在就會在互動前拒絕；每完成一題就同步完整 Draft，
+中途 `q` 或之後的終端錯誤仍留得住上一個完成的 checkpoint。零變更正常離開不留檔。
+
+`sister replay questions review` 重新驗完整題庫、corpus fingerprint 與每個 evidence；
+缺任何標註就不建立輸出。它還要求 `--confirm-private-text-reviewed`，由執行者明確
+確認題目原話與答案已人工審查，才另存 `review: reviewed`。這個狀態仍只屬於題庫，
+不會改 corpus 的審查狀態。
+
 `sister replay evaluate <corpus> <questions> [--k K] [--runs N] [--json | --to FILE]`
 讀這份 question-set JSON。題庫自己也有 `review: draft | reviewed`，不能借用
 corpus 的 Reviewed 狀態；每題明列 `id`、問題文字、來源（`query_log`、

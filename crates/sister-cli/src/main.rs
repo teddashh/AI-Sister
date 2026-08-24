@@ -119,6 +119,51 @@ enum ReplayAction {
         #[arg(long, value_name = "檔案", conflicts_with = "json")]
         to: Option<PathBuf>,
     },
+    /// 把 query-log Draft 逐題補成可跑、可審查的 recall 題庫
+    Questions {
+        #[command(subcommand)]
+        action: ReplayQuestionAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReplayQuestionAction {
+    /// 只看已標／未標實數，不印題目原話
+    Status {
+        /// replay corpus JSON
+        corpus: PathBuf,
+        /// recall question-set JSON
+        questions: PathBuf,
+    },
+    /// 在終端逐題標註；候選只是提示，不會自動當成正解
+    Annotate {
+        /// replay corpus JSON
+        corpus: PathBuf,
+        /// 尚未審查的 recall question-set JSON
+        questions: PathBuf,
+        /// 寫入另一個新檔案；不會改寫來源
+        #[arg(long, value_name = "檔案")]
+        to: PathBuf,
+        /// 每題顯示幾筆產品檢索候選
+        #[arg(long, default_value_t = 5, value_parser = at_least_one)]
+        k: usize,
+        /// 連已標過的題目也重新走一遍
+        #[arg(long)]
+        all: bool,
+    },
+    /// 全部標註有效後，把另一份新檔標成 Reviewed
+    Review {
+        /// replay corpus JSON
+        corpus: PathBuf,
+        /// 已經逐題標完的 Draft question set
+        questions: PathBuf,
+        /// Reviewed 輸出；不會改寫 Draft
+        #[arg(long, value_name = "檔案")]
+        to: PathBuf,
+        /// 確認題目原話與答案都已由人檢查，知道它們沒有自動去敏
+        #[arg(long)]
+        confirm_private_text_reviewed: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -372,6 +417,29 @@ fn main() -> Result<()> {
                 json,
                 to,
             }) => ops::replay::evaluate_corpus(&corpus, &questions, k, runs, json, to.as_deref()),
+            Some(ReplayAction::Questions { action }) => match action {
+                ReplayQuestionAction::Status { corpus, questions } => {
+                    ops::replay::question_status(&corpus, &questions)
+                }
+                ReplayQuestionAction::Annotate {
+                    corpus,
+                    questions,
+                    to,
+                    k,
+                    all,
+                } => ops::replay::annotate_questions(&corpus, &questions, &to, k, all),
+                ReplayQuestionAction::Review {
+                    corpus,
+                    questions,
+                    to,
+                    confirm_private_text_reviewed,
+                } => ops::replay::review_questions(
+                    &corpus,
+                    &questions,
+                    &to,
+                    confirm_private_text_reviewed,
+                ),
+            },
             None => ops::replay::run(
                 &data_dir,
                 config()?,
@@ -572,5 +640,72 @@ mod tests {
             evaluate.action,
             Some(ReplayAction::Evaluate { k: 10, runs: 2, .. })
         ));
+
+        let annotate = Cli::try_parse_from([
+            "sister",
+            "replay",
+            "questions",
+            "annotate",
+            "day.corpus.json",
+            "draft.questions.json",
+            "--to",
+            "labeled.questions.json",
+            "--all",
+        ])
+        .expect("interactive annotation subcommand");
+        let Command::Replay(annotate) = annotate.command else {
+            panic!("parsed the wrong command")
+        };
+        assert!(matches!(
+            annotate.action,
+            Some(ReplayAction::Questions {
+                action: ReplayQuestionAction::Annotate {
+                    k: 5,
+                    all: true,
+                    ..
+                }
+            })
+        ));
+
+        let review = Cli::try_parse_from([
+            "sister",
+            "replay",
+            "questions",
+            "review",
+            "day.corpus.json",
+            "labeled.questions.json",
+            "--to",
+            "reviewed.questions.json",
+            "--confirm-private-text-reviewed",
+        ])
+        .expect("review subcommand");
+        let Command::Replay(review) = review.command else {
+            panic!("parsed the wrong command")
+        };
+        assert!(matches!(
+            review.action,
+            Some(ReplayAction::Questions {
+                action: ReplayQuestionAction::Review {
+                    confirm_private_text_reviewed: true,
+                    ..
+                }
+            })
+        ));
+
+        assert!(
+            Cli::try_parse_from([
+                "sister",
+                "replay",
+                "questions",
+                "annotate",
+                "day.corpus.json",
+                "draft.questions.json",
+                "--to",
+                "out.json",
+                "--k",
+                "0",
+            ])
+            .is_err()
+        );
     }
 }

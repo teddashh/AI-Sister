@@ -220,7 +220,7 @@ impl QuestionSet {
                             question.id, reference.event_index
                         )
                     })?;
-                    let surfaces = event_surfaces(event);
+                    let surfaces = evidence_surfaces(event);
                     ensure!(
                         !surfaces.is_empty(),
                         "question {} 的 evidence event #{} 不會產生可檢索文字",
@@ -253,6 +253,85 @@ impl QuestionSet {
             }
         }
         Ok(())
+    }
+
+    /// 回傳一份只改指定題目的 Draft；原本的題庫永遠不會被部分修改。
+    pub fn with_answer(
+        &self,
+        corpus: &Corpus,
+        id: &str,
+        event_index: usize,
+        any_of: Vec<String>,
+        replace: bool,
+    ) -> Result<Self> {
+        self.with_expected(
+            corpus,
+            id,
+            ExpectedOutcome::Answer {
+                any_of,
+                evidence: vec![EvidenceRef { event_index }],
+            },
+            replace,
+        )
+    }
+
+    /// `NoAnswer` 只能由人明確標下；不會從舊產品回傳 0 筆自動推論。
+    pub fn with_no_answer(&self, corpus: &Corpus, id: &str, replace: bool) -> Result<Self> {
+        self.with_expected(corpus, id, ExpectedOutcome::NoAnswer, replace)
+    }
+
+    fn with_expected(
+        &self,
+        corpus: &Corpus,
+        id: &str,
+        expected: ExpectedOutcome,
+        replace: bool,
+    ) -> Result<Self> {
+        self.validate(corpus)?;
+        ensure!(
+            self.review == ReviewStatus::Draft,
+            "Reviewed question set 不可直接改標註；請從審查前的 Draft 產生新版"
+        );
+
+        let mut next = self.clone();
+        let question = next
+            .questions
+            .iter_mut()
+            .find(|question| question.id == id)
+            .with_context(|| format!("question id 不存在：{id}"))?;
+        ensure!(
+            replace || question.expected.is_none(),
+            "question {id} 已經有標註；要更正請明確選擇重新標註"
+        );
+        question.expected = Some(expected);
+        next.validate(corpus)?;
+        Ok(next)
+    }
+
+    /// 全部標完且每個 evidence 都有效，才產生另一份 Reviewed 題庫。
+    pub fn reviewed(&self, corpus: &Corpus) -> Result<Self> {
+        self.validate(corpus)?;
+        ensure!(
+            self.review == ReviewStatus::Draft,
+            "question set 已經是 Reviewed"
+        );
+        let missing: Vec<_> = self
+            .questions
+            .iter()
+            .filter(|question| question.expected.is_none())
+            .map(|question| question.id.as_str())
+            .collect();
+        ensure!(
+            missing.is_empty(),
+            "還有 {} 題沒有標註：{}",
+            missing.len(),
+            missing.join("、")
+        );
+
+        let mut reviewed = self.clone();
+        reviewed.review = ReviewStatus::Reviewed;
+        reviewed.validate(corpus)?;
+        Ok(reviewed)
     }
 
     fn source_counts(&self) -> QuestionSourceCounts {
@@ -352,6 +431,15 @@ pub struct ReturnedItem {
     pub values: Vec<String>,
     /// 以相對時間與來源類型接回可攜 corpus；不輸出 SQLite row id。
     pub event_indexes: Vec<usize>,
+}
+
+/// 標註畫面採用產品真正的 `facts` 檢索路徑所看到的候選；它們只供提示，
+/// 不會自動變成 ground truth。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnnotationPreview {
+    pub question_id: String,
+    pub returned: Vec<ReturnedItem>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,6 +552,31 @@ pub fn evaluate(
         },
         configurations,
     })
+}
+
+/// 一次匯入 corpus，替整份題庫產生標註提示，避免每題重建一次資料庫。
+pub fn annotation_previews(
+    corpus: &Corpus,
+    questions: &QuestionSet,
+    k: usize,
+) -> Result<Vec<AnnotationPreview>> {
+    corpus.validate()?;
+    questions.validate(corpus)?;
+    ensure!(k > 0, "--k 必須大於 0");
+
+    let mut db = Db::open_in_memory()?;
+    db.import_replay(corpus, EVAL_ORIGIN)?;
+    questions
+        .questions
+        .iter()
+        .map(|question| {
+            let retrieval = RetrievalProfile::TextAndFacts.retrieve(&db, &question.question, k)?;
+            Ok(AnnotationPreview {
+                question_id: question.id.clone(),
+                returned: returned_items(corpus, retrieval, k)?,
+            })
+        })
+        .collect()
 }
 
 fn evaluate_profile(
@@ -670,7 +783,7 @@ fn event_supports_item(
     channel: RetrievalChannel,
     values: &[String],
 ) -> bool {
-    event_surfaces(event)
+    evidence_surfaces(event)
         .into_iter()
         .filter(|(kind, _)| *kind == source_kind)
         .any(|(_, surface)| match channel {
@@ -685,7 +798,9 @@ fn event_supports_item(
         })
 }
 
-fn event_surfaces(event: &Event) -> Vec<(SourceKind, String)> {
+/// 這是 `answer.evidence` 真正會驗證的文字面；標註 UI 和 validator 共用，
+/// 避免畫面顯示一種證據、存檔卻按另一套規則拒絕。
+pub fn evidence_surfaces(event: &Event) -> Vec<(SourceKind, String)> {
     match event {
         Event::Frame { ocr, .. } => ocr
             .iter()
@@ -1004,5 +1119,88 @@ mod tests {
             error.contains("query-0001") && error.contains("還沒標註"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn draft_labels_are_explicit_validated_and_transactional() {
+        let (corpus, mut draft) = fixture();
+        draft.review = ReviewStatus::Draft;
+        for question in &mut draft.questions {
+            question.expected = None;
+        }
+        let original = draft.clone();
+
+        assert!(
+            draft
+                .with_answer(&corpus, "phone", 0, vec!["火星".into()], false)
+                .is_err(),
+            "答案不在 evidence 裡不能存"
+        );
+        assert_eq!(draft, original, "失敗的標註不能部分改到來源物件");
+
+        let one = draft
+            .with_answer(&corpus, "phone", 0, vec!["0800-000-123".into()], false)
+            .expect("valid answer");
+        assert!(
+            one.with_no_answer(&corpus, "phone", false).is_err(),
+            "已有標註不能默默被蓋掉"
+        );
+        assert!(matches!(
+            one.with_no_answer(&corpus, "phone", true)
+                .expect("explicit replacement")
+                .questions[0]
+                .expected,
+            Some(ExpectedOutcome::NoAnswer)
+        ));
+        let two = one
+            .with_no_answer(&corpus, "missing", false)
+            .expect("explicit no answer");
+        let reviewed = two.reviewed(&corpus).expect("all labels are valid");
+        assert_eq!(reviewed.review, ReviewStatus::Reviewed);
+        assert_eq!(reviewed.questions[0].expected, two.questions[0].expected);
+    }
+
+    #[test]
+    fn review_refuses_unlabeled_or_mismatched_inputs() {
+        let (corpus, mut draft) = fixture();
+        draft.review = ReviewStatus::Draft;
+        draft.questions[1].expected = None;
+        let error = draft.reviewed(&corpus).unwrap_err().to_string();
+        assert!(
+            error.contains("missing") && error.contains("沒有標註"),
+            "{error}"
+        );
+
+        let mut changed = corpus.clone();
+        let Event::Frame { ocr, .. } = &mut changed.events[0] else {
+            unreachable!()
+        };
+        ocr[0].text.push('！');
+        assert!(
+            draft
+                .with_no_answer(&changed, "missing", false)
+                .unwrap_err()
+                .to_string()
+                .contains("fingerprint")
+        );
+    }
+
+    #[test]
+    fn annotation_preview_uses_the_real_facts_profile_without_labeling() {
+        let (corpus, mut draft) = fixture();
+        draft.review = ReviewStatus::Draft;
+        for question in &mut draft.questions {
+            question.expected = None;
+        }
+        let before = draft.clone();
+        let previews = annotation_previews(&corpus, &draft, 5).expect("previews");
+        assert_eq!(previews.len(), 2);
+        assert_eq!(previews[0].question_id, "phone");
+        assert!(previews[0].returned.iter().any(|item| {
+            item.event_indexes.contains(&0)
+                && item.values.iter().any(|value| value.contains("0800"))
+        }));
+        assert!(previews[1].returned.is_empty());
+        assert_eq!(draft, before, "提示不能順手把結果猜成 ground truth");
     }
 }
