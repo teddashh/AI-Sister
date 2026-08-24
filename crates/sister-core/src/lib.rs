@@ -20,6 +20,7 @@ pub mod consent;
 pub mod control;
 pub mod db;
 pub mod dedup;
+pub mod eval;
 pub mod facts;
 pub mod heartbeat;
 pub mod model;
@@ -28,6 +29,7 @@ pub mod question;
 pub mod redact;
 pub mod replay;
 pub mod retention;
+pub mod retrieval;
 
 pub use config::{CaptureConfig, Config, Exclusion, PrivacyConfig, RetentionConfig};
 pub use db::{Db, DbStats, FactRow, FrameContext, SCHEMA_VERSION};

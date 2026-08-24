@@ -97,6 +97,25 @@ enum ReplayAction {
         #[arg(long, value_name = "EPOCH_MS")]
         start: Option<i64>,
     },
+    /// 在同一份 corpus 上比較 text baseline 與 +facts，產生可重現報告
+    Evaluate {
+        /// replay corpus JSON
+        corpus: PathBuf,
+        /// 人工標註的 recall QA JSON
+        questions: PathBuf,
+        /// 每題最多看前幾筆結果
+        #[arg(long, default_value_t = 5, value_parser = at_least_one)]
+        k: usize,
+        /// 暖身後每題實測幾次延遲
+        #[arg(long, default_value_t = 3, value_parser = at_least_one)]
+        runs: usize,
+        /// 把完整 report JSON 印到 stdout
+        #[arg(long, conflicts_with = "to")]
+        json: bool,
+        /// 把完整 report JSON 寫到新檔案（不覆寫）
+        #[arg(long, value_name = "檔案", conflicts_with = "json")]
+        to: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -333,6 +352,14 @@ fn main() -> Result<()> {
                 days_ago,
                 start,
             }) => ops::replay::import_corpus(&data_dir, &corpus, dry_run, days_ago, start),
+            Some(ReplayAction::Evaluate {
+                corpus,
+                questions,
+                k,
+                runs,
+                json,
+                to,
+            }) => ops::replay::evaluate_corpus(&corpus, &questions, k, runs, json, to.as_deref()),
             None => ops::replay::run(
                 &data_dir,
                 config()?,
@@ -504,6 +531,26 @@ mod tests {
         assert!(matches!(
             import.action,
             Some(ReplayAction::Import { dry_run: true, .. })
+        ));
+
+        let evaluate = Cli::try_parse_from([
+            "sister",
+            "replay",
+            "evaluate",
+            "day.corpus.json",
+            "recall.questions.json",
+            "--k",
+            "10",
+            "--runs",
+            "2",
+        ])
+        .expect("evaluate subcommand");
+        let Command::Replay(evaluate) = evaluate.command else {
+            panic!("parsed the wrong command")
+        };
+        assert!(matches!(
+            evaluate.action,
+            Some(ReplayAction::Evaluate { k: 10, runs: 2, .. })
         ));
     }
 }

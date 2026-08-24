@@ -211,9 +211,15 @@ capture 層本身就是 recorder。
 - 現有 `sister replay <scenario.json>` 保留；腳本化埋題和真實工作日走同一條重播管線。
 - 語料庫：Ted 真實工作日 ≥ 2 週 + 腳本化埋題日（植入帳單/電話/通知/中途改目標）。
 - 題庫三源：query log 轉標註、手標 recall QA、承諾集與開口判斷集（該講/不該講時刻）。
-- Runner：同一語料跑多配置（baseline 純 FTS / +facts / 之後的 +interpreter / +reviewer），
-  輸出指標：找回率@k、答案正確率、出處正確率、延遲、誤/漏提醒率、斷句 F1、
-  回查率、$/天。
+- [x] Runner v0：`sister replay evaluate <corpus> <questions>` 在同一份 corpus 上跑
+  `baseline_text` 與 `facts`。前者是產品現有的三份 FTS5 索引加必要的有界 LIKE
+  fallback；後者再加 L1 typed facts，且 fact 排在文字結果前。現在輸出找回率@k、
+  答案正確率、出處正確率、延遲與兩條路徑確定為 0 的模型呼叫／成本；沒有分母的
+  rate 與尚未量到的指標明確輸出 `null`，不拿 0 冒充。
+- 後續 runner 配置：+interpreter / +reviewer；提醒誤報／漏報、斷句 F1、Reviewer
+  回查率及 CPU／RAM／電池／磁碟要等各自有真的量測來源再填。
+- repo 內建 3 個純合成事件、5 題 QA 的 Reviewed fixture，只用來驗 runner 接線與
+  報告形狀；它不是下方 ≥100 題的公開 baseline，也不是代表性品質數字。
 - 指標面板（開發者模式頁）+ README benchmark 表自動生成。
 
 **Exit criteria**

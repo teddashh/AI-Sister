@@ -2007,7 +2007,7 @@ impl Db {
                         c.text, snippet({table}, 0, '[', ']', '…', 12), bm25({table})
                  FROM {table} JOIN text_chunks c ON c.id = {table}.rowid
                  WHERE {table} MATCH ?1
-                 ORDER BY bm25({table})
+                 ORDER BY bm25({table}), c.ts DESC, c.id ASC
                  LIMIT ?2"
             );
 
@@ -2106,6 +2106,9 @@ impl Db {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(b.ts.cmp(&a.ts))
+                // 同分、同毫秒很常見（一張畫面可以同時長出 title 與 OCR）。少了
+                // 最後這格，SQLite 先吐誰就決定 @k，重跑同一 corpus 會漂。
+                .then(a.chunk_id.cmp(&b.chunk_id))
         });
         hits.truncate(limit);
         Ok(hits)
@@ -2391,7 +2394,7 @@ impl Db {
                           c.text, bm25(text_fts_bi)
                    FROM text_fts_bi JOIN text_chunks c ON c.id = text_fts_bi.rowid
                    WHERE text_fts_bi MATCH ?1
-                   ORDER BY bm25(text_fts_bi)
+                   ORDER BY bm25(text_fts_bi), c.ts DESC, c.id ASC
                    LIMIT ?2";
 
         let mut stmt = match self.conn.prepare(sql) {
@@ -2520,7 +2523,7 @@ impl Db {
         let sql = format!(
             "SELECT id, ts, source_kind, frame_id, app_id, window_title, url, text
              FROM text_chunks WHERE ts >= ?{} AND {conds}
-             ORDER BY ts DESC LIMIT ?{}",
+             ORDER BY ts DESC, id ASC LIMIT ?{}",
             terms.len() + 1,
             terms.len() + 2
         );
@@ -2605,7 +2608,7 @@ impl Db {
                SELECT normalized AS value, MAX(ts) AS last_ts
                FROM facts WHERE kind = ?1
                GROUP BY normalized
-               ORDER BY last_ts DESC LIMIT ?3
+               ORDER BY last_ts DESC, value ASC LIMIT ?3
              )
              SELECT id, ts, kind, raw, normalized, source_kind,
                     chunk_id, frame_id, app_id, window_title, url,

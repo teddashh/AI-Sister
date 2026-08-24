@@ -778,31 +778,24 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             answers_truncated: false,
         });
     }
-    let shape = sister_core::question::shape(&question);
     let started = std::time::Instant::now();
     with_db(&shell, |db| {
-        // L1 的事實是「這個值是什麼」，回答不了「剛剛」。時間問題硬跑一次
-        // 只會拿電話號碼去回答一個沒有人問號碼的問題——和 `sister query`
-        // 同一條分法。
-        let facts = match shape {
-            Shape::Recent => Default::default(),
-            Shape::Keywords => {
-                sister_core::answer::answers(db, &question, 10).map_err(|e| format!("{e:#}"))?
-            }
-        };
-        let (facts, facts_truncated) = (facts.items, facts.truncated);
-        // 多要一筆，用來判斷「還有沒有」。少了這一步就只能猜——而猜錯的方向
-        // 是「剛好滿 20 筆」被當成剛好結束。時間軸那邊同一個寫法。
+        // 和 CLI、replay harness 共用同一條產品接線。字母人原本就是 facts 10
+        // 筆、原文 20 筆，兩個上限各自保留，不為了共用函式偷偷改畫面密度。
+        const FACTS: usize = 10;
         const HITS: usize = 20;
-        let mut hits = match shape {
-            Shape::Recent => db.recent(HITS + 1),
-            // 比對用 `terms`（剝掉頭尾的「剛剛」「那個」），★ 答案用原句——
-            // 理由和 `sister query` 那邊同一條，寫在那裡。
-            Shape::Keywords => db.search(sister_core::question::terms(&question), HITS + 1),
-        }
-        .map_err(|e| format!("{e:#}"))?;
-        let truncated = hits.len() > HITS;
-        hits.truncate(HITS);
+        let retrieval = sister_core::retrieval::RetrievalProfile::TextAndFacts
+            .retrieve_with_limits(
+                db,
+                &question,
+                sister_core::retrieval::RetrievalLimits::new(FACTS, HITS),
+            )
+            .map_err(|e| format!("{e:#}"))?;
+        let shape = retrieval.shape;
+        let facts = retrieval.answers;
+        let facts_truncated = retrieval.answers_truncated;
+        let hits = retrieval.hits;
+        let truncated = retrieval.hits_truncated;
         // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
         // 足以回答「她是不是又卡住了」，而問題本身是他的東西，不是我的。
         tracing::info!(

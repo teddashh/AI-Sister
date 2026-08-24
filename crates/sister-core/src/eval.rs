@@ -1,0 +1,795 @@
+//! Phase 2 replay recall 評測。
+//!
+//! 問題與正解是另一份可人工審查的 JSON，不塞回 corpus。Runner 每個配置都把
+//! 同一份 corpus 匯進一顆新的記憶體資料庫，走 [`crate::retrieval`] 的正式產品
+//! 接線；沒有模型、沒有網路，也不碰使用者真正的資料庫。
+
+use std::collections::BTreeSet;
+use std::time::Instant;
+
+use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
+
+use crate::Db;
+use crate::facts::extract;
+use crate::model::{Millis, SourceKind};
+use crate::replay::{Corpus, Event, ReviewStatus};
+use crate::retrieval::{Retrieval, RetrievalProfile};
+
+pub const QUESTION_SET_VERSION: u32 = 1;
+pub const REPORT_VERSION: u32 = 1;
+const EVAL_ORIGIN: Millis = 1_700_000_000_000;
+const WARMUPS: usize = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionSet {
+    pub format_version: u32,
+    pub name: String,
+    /// 真實 query log 即使搭配 Reviewed corpus，仍然要自己經過人工審查。
+    pub review: ReviewStatus,
+    pub questions: Vec<RecallQuestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecallQuestion {
+    pub id: String,
+    pub question: String,
+    pub source: QuestionSource,
+    pub expected: ExpectedOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionSource {
+    QueryLog,
+    HandLabeled,
+    Planted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExpectedOutcome {
+    Answer {
+        /// 任一字串命中就算答對。可同時列原文與 L1 normalized 值。
+        any_of: Vec<String>,
+        /// v1 每題指定一個 canonical event；存 array index，不存 import-local row id。
+        evidence: Vec<EvidenceRef>,
+    },
+    NoAnswer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceRef {
+    pub event_index: usize,
+}
+
+impl QuestionSet {
+    pub fn validate(&self, corpus: &Corpus) -> Result<()> {
+        ensure!(
+            self.format_version == QUESTION_SET_VERSION,
+            "不支援 question set format_version {}（這版只支援 {}）",
+            self.format_version,
+            QUESTION_SET_VERSION
+        );
+        ensure!(!self.name.trim().is_empty(), "question set 缺少名稱");
+        ensure!(!self.questions.is_empty(), "question set 一題都沒有");
+
+        let mut ids = BTreeSet::new();
+        for (question_index, question) in self.questions.iter().enumerate() {
+            ensure!(
+                !question.id.trim().is_empty(),
+                "question #{question_index} 缺少 id"
+            );
+            ensure!(
+                ids.insert(question.id.as_str()),
+                "question id 重複：{}",
+                question.id
+            );
+            ensure!(
+                !question.question.trim().is_empty(),
+                "question {} 的問題是空的",
+                question.id
+            );
+
+            if let ExpectedOutcome::Answer { any_of, evidence } = &question.expected {
+                ensure!(
+                    !any_of.is_empty() && any_of.iter().all(|answer| !answer.trim().is_empty()),
+                    "question {} 的 answer.any_of 不可為空",
+                    question.id
+                );
+                ensure!(
+                    evidence.len() == 1,
+                    "question {} 的 v1 answer 必須剛好指定一個 canonical evidence event",
+                    question.id,
+                );
+
+                for reference in evidence {
+                    let event = corpus.events.get(reference.event_index).with_context(|| {
+                        format!(
+                            "question {} 指到不存在的 corpus event #{}",
+                            question.id, reference.event_index
+                        )
+                    })?;
+                    let surfaces = event_surfaces(event);
+                    ensure!(
+                        !surfaces.is_empty(),
+                        "question {} 的 evidence event #{} 不會產生可檢索文字",
+                        question.id,
+                        reference.event_index
+                    );
+                    let label_reaches_evidence = surfaces.iter().any(|(_, text)| {
+                        any_of.iter().any(|answer| text_matches(text, answer))
+                            || extract(text).iter().any(|fact| {
+                                any_of.iter().any(|answer| {
+                                    text_matches(&fact.raw, answer)
+                                        || text_matches(&fact.normalized, answer)
+                                })
+                            })
+                    });
+                    ensure!(
+                        label_reaches_evidence,
+                        "question {} 的 any_of 沒有一個出現在 evidence event #{} 裡",
+                        question.id,
+                        reference.event_index
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn source_counts(&self) -> QuestionSourceCounts {
+        let mut counts = QuestionSourceCounts::default();
+        for question in &self.questions {
+            match question.source {
+                QuestionSource::QueryLog => counts.query_log += 1,
+                QuestionSource::HandLabeled => counts.hand_labeled += 1,
+                QuestionSource::Planted => counts.planted += 1,
+            }
+        }
+        counts
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionSourceCounts {
+    pub query_log: usize,
+    pub hand_labeled: usize,
+    pub planted: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvalReport {
+    pub format_version: u32,
+    pub evaluator_version: String,
+    pub corpus: EvaluatedCorpus,
+    pub question_set: EvaluatedQuestions,
+    pub parameters: EvalParameters,
+    pub configurations: Vec<ConfigurationReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluatedCorpus {
+    pub name: String,
+    pub format_version: u32,
+    pub review: ReviewStatus,
+    pub duration_ms: Millis,
+    pub events: usize,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluatedQuestions {
+    pub name: String,
+    pub format_version: u32,
+    pub review: ReviewStatus,
+    pub questions: usize,
+    pub sources: QuestionSourceCounts,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvalParameters {
+    pub k: usize,
+    pub warmups: usize,
+    pub runs: usize,
+    /// facts 在前、文字結果在後；和產品畫面相同。
+    pub ranking: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationReport {
+    pub name: String,
+    pub metrics: EvalMetrics,
+    pub questions: Vec<QuestionResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionResult {
+    pub id: String,
+    pub question: String,
+    pub source: QuestionSource,
+    pub answer_correct: bool,
+    /// NoAnswer 題不屬於 recall/citation 的分母，所以明講 `null`。
+    pub recalled: Option<bool>,
+    pub citation_correct: Option<bool>,
+    pub latency_median_ms: f64,
+    pub returned: Vec<ReturnedItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReturnedItem {
+    pub rank: usize,
+    pub channel: RetrievalChannel,
+    pub at_ms: Millis,
+    pub source_kind: String,
+    /// fact 同時保留 raw / normalized；文字結果只有完整原文。
+    pub values: Vec<String>,
+    /// 以相對時間與來源類型接回可攜 corpus；不輸出 SQLite row id。
+    pub event_indexes: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalChannel {
+    Fact,
+    Text,
+    Recent,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvalMetrics {
+    pub recall_at_k: Fraction,
+    pub answer_accuracy: Fraction,
+    pub citation_accuracy: Fraction,
+    pub latency: LatencyMetrics,
+    /// 兩個現行配置都不呼叫模型；這是由路徑定義得出的 0，不是假裝量過價格。
+    pub model_calls: usize,
+    pub model_usd_per_day: f64,
+    pub reminder_false_positive_rate: Option<f64>,
+    pub reminder_miss_rate: Option<f64>,
+    pub segmentation_f1: Option<f64>,
+    pub reviewer_lookup_rate: Option<f64>,
+    pub cpu_percent: Option<f64>,
+    pub ram_peak_mb: Option<f64>,
+    pub battery_percent_per_hour: Option<f64>,
+    pub disk_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fraction {
+    pub passed: usize,
+    pub total: usize,
+    /// 沒有分母就是 `null`，不是 0%。
+    pub rate: Option<f64>,
+}
+
+impl Fraction {
+    fn new(passed: usize, total: usize) -> Self {
+        Self {
+            passed,
+            total,
+            rate: (total > 0).then_some(passed as f64 / total as f64),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LatencyMetrics {
+    pub samples: usize,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub max_ms: f64,
+}
+
+/// 同一份 corpus 自動跑 text baseline 與 +facts。除了 latency，報告只由輸入決定。
+pub fn evaluate(
+    corpus: &Corpus,
+    questions: &QuestionSet,
+    k: usize,
+    runs: usize,
+) -> Result<EvalReport> {
+    corpus.validate()?;
+    questions.validate(corpus)?;
+    ensure!(k > 0, "--k 必須大於 0");
+    ensure!(runs > 0, "--runs 必須大於 0");
+
+    let mut configurations = Vec::new();
+    for profile in [RetrievalProfile::TextOnly, RetrievalProfile::TextAndFacts] {
+        configurations.push(evaluate_profile(corpus, questions, profile, k, runs)?);
+    }
+
+    Ok(EvalReport {
+        format_version: REPORT_VERSION,
+        evaluator_version: crate::VERSION.to_string(),
+        corpus: EvaluatedCorpus {
+            name: corpus.name.clone(),
+            format_version: corpus.format_version,
+            review: corpus.review,
+            duration_ms: corpus.duration_ms,
+            events: corpus.events.len(),
+            fingerprint: fingerprint(corpus)?,
+        },
+        question_set: EvaluatedQuestions {
+            name: questions.name.clone(),
+            format_version: questions.format_version,
+            review: questions.review,
+            questions: questions.questions.len(),
+            sources: questions.source_counts(),
+            fingerprint: fingerprint(questions)?,
+        },
+        parameters: EvalParameters {
+            k,
+            warmups: WARMUPS,
+            runs,
+            ranking: "facts_then_text".into(),
+        },
+        configurations,
+    })
+}
+
+fn evaluate_profile(
+    corpus: &Corpus,
+    questions: &QuestionSet,
+    profile: RetrievalProfile,
+    k: usize,
+    runs: usize,
+) -> Result<ConfigurationReport> {
+    let mut db = Db::open_in_memory()?;
+    db.import_replay(corpus, EVAL_ORIGIN)?;
+
+    // 整份題庫先暖一輪；不把第一題的冷 cache 優勢送給後面的題目。
+    for question in &questions.questions {
+        profile.retrieve(&db, &question.question, k)?;
+    }
+
+    let mut results = Vec::with_capacity(questions.questions.len());
+    let mut all_latency = Vec::with_capacity(questions.questions.len() * runs);
+    for question in &questions.questions {
+        let mut stable_items: Option<Vec<ReturnedItem>> = None;
+        let mut latencies = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let started = Instant::now();
+            let retrieval = profile.retrieve(&db, &question.question, k)?;
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            latencies.push(elapsed_ms);
+            all_latency.push(elapsed_ms);
+
+            let items = returned_items(corpus, retrieval, k)?;
+            if let Some(before) = &stable_items {
+                ensure!(
+                    *before == items,
+                    "同一題在同一配置裡回了不同排名：{} / {}",
+                    profile.name(),
+                    question.id
+                );
+            } else {
+                stable_items = Some(items);
+            }
+        }
+
+        let items = stable_items.context("evaluation runs produced no result")?;
+        let (answer_correct, recalled, citation_correct) = grade(question, &items);
+        results.push(QuestionResult {
+            id: question.id.clone(),
+            question: question.question.clone(),
+            source: question.source,
+            answer_correct,
+            recalled,
+            citation_correct,
+            latency_median_ms: percentile(&latencies, 0.50),
+            returned: items,
+        });
+    }
+
+    let positive = results
+        .iter()
+        .filter(|result| result.recalled.is_some())
+        .count();
+    let recalled = results
+        .iter()
+        .filter(|result| result.recalled == Some(true))
+        .count();
+    let cited = results
+        .iter()
+        .filter(|result| result.citation_correct == Some(true))
+        .count();
+    let answered = results
+        .iter()
+        .filter(|result| result.answer_correct)
+        .count();
+    let latency = LatencyMetrics {
+        samples: all_latency.len(),
+        p50_ms: percentile(&all_latency, 0.50),
+        p95_ms: percentile(&all_latency, 0.95),
+        max_ms: percentile(&all_latency, 1.0),
+    };
+
+    Ok(ConfigurationReport {
+        name: profile.name().to_string(),
+        metrics: EvalMetrics {
+            recall_at_k: Fraction::new(recalled, positive),
+            answer_accuracy: Fraction::new(answered, results.len()),
+            citation_accuracy: Fraction::new(cited, positive),
+            latency,
+            model_calls: 0,
+            model_usd_per_day: 0.0,
+            reminder_false_positive_rate: None,
+            reminder_miss_rate: None,
+            segmentation_f1: None,
+            reviewer_lookup_rate: None,
+            cpu_percent: None,
+            ram_peak_mb: None,
+            battery_percent_per_hour: None,
+            disk_bytes: None,
+        },
+        questions: results,
+    })
+}
+
+fn returned_items(corpus: &Corpus, retrieval: Retrieval, k: usize) -> Result<Vec<ReturnedItem>> {
+    let mut raw = Vec::new();
+    for answer in retrieval.answers {
+        let kind = SourceKind::from_str_kind(&answer.latest.source_kind)
+            .with_context(|| format!("unknown fact source kind: {}", answer.latest.source_kind))?;
+        raw.push((
+            RetrievalChannel::Fact,
+            answer.latest.ts - EVAL_ORIGIN,
+            kind,
+            vec![answer.latest.raw, answer.latest.normalized],
+        ));
+    }
+    let hit_channel = if retrieval.shape == crate::question::Shape::Recent {
+        RetrievalChannel::Recent
+    } else {
+        RetrievalChannel::Text
+    };
+    for hit in retrieval.hits {
+        raw.push((
+            hit_channel,
+            hit.ts - EVAL_ORIGIN,
+            hit.source_kind,
+            vec![hit.text],
+        ));
+    }
+
+    raw.into_iter()
+        .take(k)
+        .enumerate()
+        .map(|(rank, (channel, at_ms, source_kind, values))| {
+            ensure!(
+                (0..=corpus.duration_ms).contains(&at_ms),
+                "retrieval result timestamp {at_ms} fell outside corpus"
+            );
+            let event_indexes: Vec<_> = corpus
+                .events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| {
+                    (event.at_ms() == at_ms
+                        && event_supports_item(event, source_kind, channel, &values))
+                    .then_some(index)
+                })
+                .collect();
+            ensure!(
+                !event_indexes.is_empty(),
+                "retrieval result at {at_ms}ms ({}) cannot be mapped back to its corpus event",
+                source_kind.as_str()
+            );
+            Ok(ReturnedItem {
+                rank: rank + 1,
+                channel,
+                at_ms,
+                source_kind: source_kind.as_str().to_string(),
+                values,
+                event_indexes,
+            })
+        })
+        .collect()
+}
+
+fn grade(question: &RecallQuestion, items: &[ReturnedItem]) -> (bool, Option<bool>, Option<bool>) {
+    match &question.expected {
+        ExpectedOutcome::NoAnswer => (items.is_empty(), None, None),
+        ExpectedOutcome::Answer { any_of, evidence } => {
+            let expected_events: BTreeSet<_> =
+                evidence.iter().map(|item| item.event_index).collect();
+            let answer = items.iter().any(|item| item_matches(item, any_of));
+            let recall = items.iter().any(|item| {
+                item.event_indexes
+                    .iter()
+                    .any(|index| expected_events.contains(index))
+            });
+            let citation = items.iter().any(|item| {
+                item_matches(item, any_of)
+                    && item
+                        .event_indexes
+                        .iter()
+                        .any(|index| expected_events.contains(index))
+            });
+            (answer, Some(recall), Some(citation))
+        }
+    }
+}
+
+fn item_matches(item: &ReturnedItem, expected: &[String]) -> bool {
+    item.values
+        .iter()
+        .any(|value| expected.iter().any(|answer| text_matches(value, answer)))
+}
+
+fn text_matches(value: &str, expected: &str) -> bool {
+    value.to_lowercase().contains(&expected.to_lowercase())
+}
+
+fn event_supports_item(
+    event: &Event,
+    source_kind: SourceKind,
+    channel: RetrievalChannel,
+    values: &[String],
+) -> bool {
+    event_surfaces(event)
+        .into_iter()
+        .filter(|(kind, _)| *kind == source_kind)
+        .any(|(_, surface)| match channel {
+            RetrievalChannel::Fact => extract(&surface).iter().any(|fact| {
+                values
+                    .iter()
+                    .any(|value| value == &fact.raw || value == &fact.normalized)
+            }),
+            RetrievalChannel::Text | RetrievalChannel::Recent => {
+                values.iter().any(|value| value == &surface)
+            }
+        })
+}
+
+fn event_surfaces(event: &Event) -> Vec<(SourceKind, String)> {
+    match event {
+        Event::Frame { ocr, .. } => ocr
+            .iter()
+            .filter(|block| !block.text.trim().is_empty())
+            .map(|block| (SourceKind::Ocr, block.text.clone()))
+            .collect(),
+        Event::Focus { snapshot, .. } => {
+            let mut out = Vec::new();
+            if let Some(title) = snapshot
+                .window_title
+                .as_ref()
+                .filter(|title| !title.trim().is_empty())
+            {
+                out.push((SourceKind::WindowTitle, title.clone()));
+            }
+            if let Some(url) = snapshot.url.as_ref().filter(|url| !url.trim().is_empty()) {
+                out.push((SourceKind::Url, url.clone()));
+            }
+            out
+        }
+        Event::Clipboard { text, .. } => text
+            .as_ref()
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| vec![(SourceKind::Clipboard, text.clone())])
+            .unwrap_or_default(),
+        Event::Input { .. } | Event::System { .. } => Vec::new(),
+    }
+}
+
+fn percentile(values: &[f64], quantile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rank = (quantile * sorted.len() as f64).ceil().max(1.0) as usize;
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+fn fingerprint(value: &impl Serialize) -> Result<String> {
+    let bytes = serde_json::to_vec(value)?;
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Ok(format!("fnv1a64:{hash:016x}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::OcrBlock;
+    use crate::replay::{FORMAT_VERSION, RedactionSummary, ReplayFocus};
+
+    fn fixture() -> (Corpus, QuestionSet) {
+        let corpus = Corpus {
+            format_version: FORMAT_VERSION,
+            name: "synthetic recall".into(),
+            duration_ms: 2_000,
+            review: ReviewStatus::Reviewed,
+            redactions: RedactionSummary::default(),
+            events: vec![
+                Event::Frame {
+                    at_ms: 500,
+                    monitor: 0,
+                    width: 800,
+                    height: 600,
+                    dhash: 1,
+                    dup_run: 0,
+                    focus: ReplayFocus::default(),
+                    ocr: vec![OcrBlock {
+                        text: "客服專線 0800-000-123".into(),
+                        x: 0,
+                        y: 0,
+                        w: 300,
+                        h: 20,
+                        confidence: 1.0,
+                    }],
+                },
+                Event::Frame {
+                    at_ms: 1_500,
+                    monitor: 0,
+                    width: 800,
+                    height: 600,
+                    dhash: 2,
+                    dup_run: 0,
+                    focus: ReplayFocus::default(),
+                    ocr: vec![OcrBlock {
+                        text: "普通工作筆記".into(),
+                        x: 0,
+                        y: 30,
+                        w: 300,
+                        h: 20,
+                        confidence: 1.0,
+                    }],
+                },
+            ],
+        };
+        let questions = QuestionSet {
+            format_version: QUESTION_SET_VERSION,
+            name: "tiny qa".into(),
+            review: ReviewStatus::Reviewed,
+            questions: vec![
+                RecallQuestion {
+                    id: "phone".into(),
+                    question: "電話是什麼".into(),
+                    source: QuestionSource::Planted,
+                    expected: ExpectedOutcome::Answer {
+                        any_of: vec!["0800-000-123".into(), "+886800000123".into()],
+                        evidence: vec![EvidenceRef { event_index: 0 }],
+                    },
+                },
+                RecallQuestion {
+                    id: "missing".into(),
+                    question: "火星會議連結".into(),
+                    source: QuestionSource::HandLabeled,
+                    expected: ExpectedOutcome::NoAnswer,
+                },
+            ],
+        };
+        (corpus, questions)
+    }
+
+    #[test]
+    fn facts_beats_the_text_baseline_on_a_synonym_and_no_answer_is_scored() {
+        let (corpus, questions) = fixture();
+        let report = evaluate(&corpus, &questions, 5, 1).expect("evaluate");
+        let text = &report.configurations[0];
+        let facts = &report.configurations[1];
+        assert_eq!(text.name, "baseline_text");
+        assert_eq!(text.metrics.answer_accuracy.passed, 1, "only NoAnswer");
+        assert_eq!(text.metrics.recall_at_k.passed, 0);
+        assert_eq!(facts.metrics.answer_accuracy.passed, 2);
+        assert_eq!(facts.metrics.recall_at_k.passed, 1);
+        assert_eq!(facts.metrics.citation_accuracy.passed, 1);
+        assert!(facts.questions[0].returned[0].event_indexes.contains(&0));
+    }
+
+    #[test]
+    fn bad_versions_and_evidence_are_rejected_before_a_run() {
+        let (corpus, mut questions) = fixture();
+        questions.questions[0].expected = ExpectedOutcome::Answer {
+            any_of: vec!["0800".into()],
+            evidence: vec![EvidenceRef { event_index: 99 }],
+        };
+        assert!(questions.validate(&corpus).is_err());
+        questions.format_version += 1;
+        assert!(questions.validate(&corpus).is_err());
+    }
+
+    #[test]
+    fn v1_rejects_multiple_evidence_events_instead_of_overstating_recall() {
+        let (mut corpus, mut questions) = fixture();
+        corpus.events.push(Event::Frame {
+            at_ms: 2_000,
+            monitor: 0,
+            width: 800,
+            height: 600,
+            dhash: 3,
+            dup_run: 0,
+            focus: ReplayFocus::default(),
+            ocr: vec![OcrBlock {
+                text: "客服專線 0800-000-123".into(),
+                x: 0,
+                y: 0,
+                w: 300,
+                h: 20,
+                confidence: 1.0,
+            }],
+        });
+        let ExpectedOutcome::Answer { evidence, .. } = &mut questions.questions[0].expected else {
+            unreachable!()
+        };
+        evidence.push(EvidenceRef { event_index: 2 });
+        assert!(questions.validate(&corpus).is_err());
+    }
+
+    #[test]
+    fn same_millisecond_ocr_results_only_cite_the_event_with_the_returned_text() {
+        let (mut corpus, questions) = fixture();
+        corpus.events.insert(
+            1,
+            Event::Frame {
+                at_ms: 500,
+                monitor: 1,
+                width: 800,
+                height: 600,
+                dhash: 9,
+                dup_run: 0,
+                focus: ReplayFocus::default(),
+                ocr: vec![OcrBlock {
+                    text: "另一個螢幕".into(),
+                    x: 0,
+                    y: 0,
+                    w: 300,
+                    h: 20,
+                    confidence: 1.0,
+                }],
+            },
+        );
+        let report = evaluate(&corpus, &questions, 5, 1).expect("evaluate");
+        let phone = &report.configurations[1].questions[0].returned[0];
+        assert_eq!(phone.event_indexes, vec![0]);
+    }
+
+    #[test]
+    fn metrics_not_measured_by_this_harness_are_null_not_zero() {
+        let (corpus, questions) = fixture();
+        let report = evaluate(&corpus, &questions, 5, 1).expect("evaluate");
+        let json = serde_json::to_string(&report).expect("json");
+        for field in [
+            "reminder_false_positive_rate",
+            "reminder_miss_rate",
+            "segmentation_f1",
+            "reviewer_lookup_rate",
+            "cpu_percent",
+            "ram_peak_mb",
+            "battery_percent_per_hour",
+            "disk_bytes",
+        ] {
+            assert!(json.contains(&format!("\"{field}\":null")), "{json}");
+        }
+        assert!(json.contains("\"model_calls\":0"), "{json}");
+    }
+
+    #[test]
+    fn a_reviewed_corpus_does_not_review_a_private_question_set_for_free() {
+        let (corpus, mut questions) = fixture();
+        questions.review = ReviewStatus::Draft;
+        let report = evaluate(&corpus, &questions, 5, 1).expect("evaluate");
+        assert_eq!(report.corpus.review, ReviewStatus::Reviewed);
+        assert_eq!(report.question_set.review, ReviewStatus::Draft);
+    }
+}

@@ -1,0 +1,53 @@
+{
+  "format_version": 1,
+  "name": "synthetic-recall-qa",
+  "review": "reviewed",
+  "questions": [
+    {
+      "id": "phone-synonym",
+      "question": "客服電話",
+      "source": "planted",
+      "expected": {
+        "outcome": "answer",
+        "any_of": ["0800-000-123", "+886800000123"],
+        "evidence": [{ "event_index": 0 }]
+      }
+    },
+    {
+      "id": "money-synonym",
+      "question": "要繳多少錢",
+      "source": "planted",
+      "expected": {
+        "outcome": "answer",
+        "any_of": ["NT$1,350", "TWD:1350"],
+        "evidence": [{ "event_index": 0 }]
+      }
+    },
+    {
+      "id": "error-exact",
+      "question": "ERR_DEPLOY_42",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": ["ERR_DEPLOY_42"],
+        "evidence": [{ "event_index": 1 }]
+      }
+    },
+    {
+      "id": "english-exact",
+      "question": "release candidate alpha",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": ["release candidate alpha"],
+        "evidence": [{ "event_index": 2 }]
+      }
+    },
+    {
+      "id": "known-miss",
+      "question": "火星會議連結",
+      "source": "hand_labeled",
+      "expected": { "outcome": "no_answer" }
+    }
+  ]
+}

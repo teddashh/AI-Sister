@@ -126,6 +126,38 @@ Draft 是純文字 JSON，沒有額外加密；它放到哪裡，就只被那個
 原本的 `sister replay scenarios/bill-lookup.json` 腳本語法繼續存在，和 corpus import
 同樣都是本機、零連網。
 
+### replay 題庫與評測報告
+
+`sister replay evaluate <corpus> <questions> [--k K] [--runs N] [--json | --to FILE]`
+讀另一份人工維護的 question-set JSON。題庫自己也有 `review: draft | reviewed`，
+不能借用 corpus 的 Reviewed 狀態；它不會自動從本機 `queries` 表匯出題目。每題明列
+`id`、問題文字、來源（`query_log`、
+`hand_labeled` 或 `planted`），以及 `answer` 的可接受字串與 corpus `event_index`
+出處，或明列 `no_answer`。因此用真實 query log 做成的題庫本身也是使用者資料，
+要和 corpus 分開人工審查。
+
+repo 目前簽入的 `scenarios/recall-baseline.corpus.json` 與
+`scenarios/recall-baseline.questions.json` 是純合成 Reviewed fixture：3 個事件、
+5 題，其中 query log 0 題、人工標註 3 題、腳本埋題 2 題。它只守 runner 接線，
+不是使用者資料，也不是 Phase 2 的 ≥100 題公開 baseline。
+
+沒有 `--json` 或 `--to` 時只印人讀摘要，不自動保存完整報告。`--json` 把完整
+report 寫到 stdout；`--to` 寫一個新檔，目的地已存在就拒絕覆寫。完整 report 包含：
+
+- evaluator／輸入格式版本、corpus 與題庫名稱、兩者各自的 review 狀態、參數和兩份輸入指紋。
+- 每題的問題文字、來源、判分、延遲，以及每個回傳項目的 channel、相對時間、
+  source kind、值與 corpus `event_index`。fact 會帶 raw／normalized 值，文字結果
+  會帶完整的去敏後文字。
+- `baseline_text` 和 `facts` 各自的找回率@k、答案／出處正確率、延遲分布；兩條
+  現行路徑確定沒有模型，所以 `model_calls` 與 `model_usd_per_day` 是 0。
+- 尚未量到的提醒誤報／漏報、斷句 F1、Reviewer 回查率、CPU、RAM、電池與磁碟是
+  `null`，不是 0；沒有適用題目的比例也因為沒有分母而是 `null`。
+
+報告會重複題目和檢索回來的文字，所以不因為叫「report」就變成低敏資料。輸入是
+private Draft 時，報告會保留 Draft 狀態並在 CLI 顯示警告；這份 report 一樣只能
+留在本機，corpus、題庫與報告都人工審查完成前不要分享。輸入是 Reviewed 也只代表
+corpus 已審過，不能替另一份題庫或新產生的報告自動背書。
+
 ---
 
 ## 快速回答

@@ -113,6 +113,37 @@ sister replay import ./workday.sister-replay-draft.json --dry-run
 `import --dry-run` 可以在本機驗證 Draft，用去敏後的 L0 重建搜尋索引和 L1 事實，
 不會因為它尚未 Reviewed 就禁止本機重播。兩個指令都不會上傳任何東西。
 
+Phase 2 的第一版 runner 也已經可以直接跑：
+
+```bash
+sister replay evaluate scenarios/recall-baseline.corpus.json scenarios/recall-baseline.questions.json --k 5 --runs 3
+```
+
+完整語法是 `sister replay evaluate <corpus> <questions> [--k K] [--runs N] [--json | --to FILE]`；
+`--k` 預設 5、`--runs` 預設 3。`--json` 把完整報告印到
+stdout，`--to` 寫進一個新檔且拒絕覆寫。repo 裡的
+`scenarios/recall-baseline.corpus.json` 與 `scenarios/recall-baseline.questions.json`
+是 3 個純合成事件、5 題 QA 的 Reviewed smoke fixture，不含真實工作日資料。
+
+兩個配置走的都是真正產品檢索接線。`baseline_text` 是現有文字路徑：三份 FTS5
+索引加上必要時的有界 LIKE fallback，不是只跑一個「純 FTS」查詢；`facts` 在同一
+條文字路徑上加 L1 typed facts，並把 fact 結果排在文字結果前。2026-08-23 以
+release build 在目前 Linux 開發機跑上面那條指令，先暖身 1 輪、再每題計時 3 次，
+實測是：
+
+| 配置 | 找回率@5 | 答案正確率 | 出處正確率 | 延遲 p50 / p95 |
+|---|---:|---:|---:|---:|
+| `baseline_text` | 2/4（50.0%） | 3/5（60.0%） | 2/4（50.0%） | 0.06 / 0.09 ms |
+| `facts` | 4/4（100.0%） | 5/5（100.0%） | 4/4（100.0%） | 0.15 / 0.19 ms |
+
+題目來源是 query log 0、人工標註 3、腳本埋題 2。兩個配置都沒有模型路徑，所以
+模型呼叫是 0、成本是 US$0/天；提醒誤報／漏報、斷句 F1、Reviewer 回查率、CPU、
+RAM、電池與磁碟還沒量，JSON 報告裡是 `null`，不是 0。延遲只代表這台機器這一次
+執行；這組 5 題合成 fixture 是 runner 的可重現 smoke test，不是 ≥100 題的公開
+Phase 2 baseline，也不能代表真實工作日品質。完整報告會帶回傳文字；corpus 與
+question set 各有自己的 Draft／Reviewed 狀態，任一輸入仍是 private Draft 時，
+報告也仍是私有資料，人工審查前不要分享。
+
 問她「**剛剛發生什麼事**」會得到答案，而不是「我記得的東西裡沒有這件事」。那句話
 問的是時間、不是關鍵字，所以她不會拿那七個字去比對——她直接把最後看到的幾件事列
 出來，每一筆一樣掛著時間與出處，而且會先講一句「我把它當成時間問題了」，你才知道

@@ -68,7 +68,16 @@ pub fn answers(db: &Db, query: &str, limit: usize) -> anyhow::Result<Answers> {
     }
 
     let mut out: Vec<Answer> = merged.into_values().collect();
-    out.sort_by_key(|a| std::cmp::Reverse(a.latest.ts));
+    // HashMap 的 iteration order 每次行程都可能不同；只有時間排序時，同一毫秒
+    // 看見的兩個答案會在 @k 邊界隨機換位，replay 報告也就不能重現。
+    out.sort_by(|a, b| {
+        b.latest
+            .ts
+            .cmp(&a.latest.ts)
+            .then(a.latest.kind.cmp(&b.latest.kind))
+            .then(a.latest.normalized.cmp(&b.latest.normalized))
+            .then(a.latest.id.cmp(&b.latest.id))
+    });
     let truncated = out.len() > limit;
     out.truncate(limit);
     Ok(Answers {

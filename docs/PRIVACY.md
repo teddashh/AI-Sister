@@ -379,6 +379,29 @@ sister replay import <匯出時印出的 Draft 路徑> --dry-run
 Reviewed 檔案複製到別處，和上面的完整備份一樣，是使用者明確做的檔案動作；
 它不會悄悄多開一條網路路徑，也不改寫三張同意書的效力。
 
+同一份 corpus 可以在本機跑評測：
+
+```bash
+sister replay evaluate <corpus> <questions> --k 5 --runs 3
+```
+
+目前的 `baseline_text` 和 `facts` 都只走本機 SQLite 檢索，沒有網路與模型路徑；
+因此這兩個配置的模型呼叫 0、US$0/天是路徑事實。它不代表未來新增的配置也一定是
+0。提醒誤報／漏報、斷句 F1、Reviewer 回查率、CPU、RAM、電池與磁碟目前沒有量測
+來源，完整 JSON 裡是 `null`，不是 0。
+
+題庫可能直接放著使用者問過的話，所以 question-set 和 corpus 各有自己的
+`review: draft | reviewed`，一邊 Reviewed 不會替另一邊背書；完整 report 也會放題目、回傳值和 corpus
+`event_index`，其中回傳值可能逐字重複去敏後的螢幕文字。沒有指定輸出選項時只印
+摘要；`--json` 會把完整 report 印到 stdout，`--to <檔案>` 會寫到新檔且拒絕
+覆寫。這些輸出沒有額外加密。
+
+所以 Draft 的界線會跟著評測走：任一輸入是 Draft 都可以在本機 evaluate，但 CLI
+會明說報告仍是私有資料；corpus、題庫與 report 都人工審查完成前不要分享。repo 內建的
+`scenarios/recall-baseline.corpus.json` 與 `scenarios/recall-baseline.questions.json`
+是純合成的 Reviewed smoke fixture，不含真實工作日資料，也不是一張把其他 Draft
+自動變安全的通行證。
+
 ---
 
 ## 我們怎麼證明，而不是只是宣稱

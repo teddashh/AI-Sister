@@ -1,0 +1,90 @@
+{
+  "format_version": 1,
+  "name": "synthetic-recall-baseline",
+  "duration_ms": 2000,
+  "review": "reviewed",
+  "redactions": {
+    "money": 0,
+    "phone": 0,
+    "email": 0,
+    "id_like": 0,
+    "secrets": 0
+  },
+  "events": [
+    {
+      "type": "frame",
+      "at_ms": 200,
+      "monitor": 0,
+      "width": 1280,
+      "height": 720,
+      "dhash": 1,
+      "dup_run": 0,
+      "focus": {
+        "app_id": "browser.exe",
+        "app_name": "Synthetic Browser",
+        "window_title": "電信帳單範例",
+        "url": null
+      },
+      "ocr": [
+        {
+          "text": "電信帳單\n客服專線 0800-000-123\n本期應繳金額 NT$1,350",
+          "x": 20,
+          "y": 30,
+          "w": 620,
+          "h": 120,
+          "confidence": 1.0
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "at_ms": 1000,
+      "monitor": 0,
+      "width": 1280,
+      "height": 720,
+      "dhash": 2,
+      "dup_run": 0,
+      "focus": {
+        "app_id": "terminal.exe",
+        "app_name": "Synthetic Terminal",
+        "window_title": "部署紀錄",
+        "url": null
+      },
+      "ocr": [
+        {
+          "text": "部署失敗 ERR_DEPLOY_42",
+          "x": 20,
+          "y": 30,
+          "w": 520,
+          "h": 30,
+          "confidence": 1.0
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "at_ms": 1800,
+      "monitor": 0,
+      "width": 1280,
+      "height": 720,
+      "dhash": 3,
+      "dup_run": 0,
+      "focus": {
+        "app_id": "editor.exe",
+        "app_name": "Synthetic Editor",
+        "window_title": "release notes",
+        "url": null
+      },
+      "ocr": [
+        {
+          "text": "release candidate alpha is ready",
+          "x": 20,
+          "y": 30,
+          "w": 620,
+          "h": 30,
+          "confidence": 1.0
+        }
+      ]
+    }
+  ]
+}

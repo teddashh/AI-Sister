@@ -2334,7 +2334,8 @@ pub mod forget {
 pub mod query {
     use super::*;
     use crate::fmt;
-    // ★ 那一層住在 core，字母人用的是同一份（見 `sister_core::answer`）。
+    // 下面的定點測試直接問 ★ 那一層；產品接線改走 `retrieval` 共用入口。
+    #[cfg(test)]
     use sister_core::answer::answers;
 
     /// 她拿去比對的字是**黏出來的**的時候要補的那兩行（`None` = 沒黏過，閉嘴）。
@@ -2595,32 +2596,20 @@ pub mod query {
 
         // 「剛剛發生什麼事」問的是時間，不是字。規則在 core，和字母人共用同一
         // 份——兩邊各判各的，同一句話遲早會在兩個地方得到兩種答案。
-        use sister_core::question::Shape;
-        let shape = sister_core::question::shape(text);
-
         // 計時涵蓋兩條路徑：使用者感受到的是整個回答的延遲，不是單一次查詢。
         let started = std::time::Instant::now();
-        // 多要一筆。「剛好 20 筆」和「撈滿 20 筆就停了」是兩件事，而只看
-        // `hits.len() >= limit` 分不出來——正好 20 筆的那一次會被印上一個 `+`
-        // 和一句「用 --limit 看更多」，然後他去翻一頁不存在的東西。★ 那一半
-        // 早就是撈 `limit + 1` 了（`Answers::truncated`），字母人那邊也是
-        // （`HITS + 1`），只有這裡還在猜。
-        let (answers, mut hits) = match shape {
-            // L1 的事實是「這個值是什麼」，回答不了「剛剛」。硬跑一次只會
-            // 拿電話號碼去回答一個沒有人問號碼的問題。
-            Shape::Recent => (Default::default(), db.recent(limit + 1)?),
-            // 比對用 `terms`（剝掉頭尾的「剛剛」「那個」），★ 答案用原句：
-            // `kinds_for_query` 是在整句話裡找「電話」這種說法，剝字只會少看
-            // 到東西，不會多看到。
-            Shape::Keywords => (
-                answers(&db, text, limit)?,
-                db.search(sister_core::question::terms(text), limit + 1)?,
-            ),
-        };
-        let hits_truncated = hits.len() > limit;
-        hits.truncate(limit);
-        let (answers, answers_truncated) = (answers.items, answers.truncated);
+        let retrieval =
+            sister_core::retrieval::RetrievalProfile::TextAndFacts.retrieve(&db, text, limit)?;
         let elapsed = started.elapsed();
+        let sister_core::retrieval::Retrieval {
+            shape,
+            terms,
+            answers,
+            hits,
+            answers_truncated,
+            hits_truncated,
+            ..
+        } = retrieval;
 
         // 進題庫。PHASES.md Phase 2 的退場條件要「≥ 30 題來自真實 query log」，
         // 而那種東西補建不回來——沒有人記得住自己上禮拜是用什麼字問的。
@@ -2659,10 +2648,7 @@ pub mod query {
                 // 終端機那一份是靠人看出來的（答案就在眼前），機器讀的這份
                 // 沒有那個機會。而題庫正是 Phase 2 評測語料的來源，一份寫著
                 // 「這題 0 筆」卻說不出她找了什麼的紀錄，事後沒有人查得動。
-                "terms": match shape {
-                    Shape::Recent => serde_json::Value::Null,
-                    Shape::Keywords => sister_core::question::terms(text).into(),
-                },
+                "terms": terms,
                 "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
                 // 撈滿上限＝被切掉了。機器讀的那一份更要講：寫腳本的人
                 // 看不到終端機上的那個「+」，會直接把長度當成總數。
@@ -2693,7 +2679,7 @@ pub mod query {
 
         // 底下這幾筆跟他打的字一個都對不上，所以要先講為什麼。少了這一句，
         // 「剛剛發生什麼事」會得到一串不相干的東西，看起來就是答非所問。
-        if shape == Shape::Recent {
+        if shape == sister_core::question::Shape::Recent {
             println!(
                 "🕘 「{text}」問的是時間，不是字——沒有比對，這是最後看到的 {} 件事，{:.1} ms",
                 hits.len(),
@@ -9151,6 +9137,7 @@ pub mod replay {
     use super::*;
     use sister_capture::{Recorder, ReplayBackend, Scenario, Tick};
     use sister_core::config::Config;
+    use sister_core::eval::{EvalReport, Fraction, QuestionSet};
     use sister_core::replay::{Corpus, DraftCorpus, ReviewStatus};
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -9269,8 +9256,127 @@ pub mod replay {
         Ok(())
     }
 
+    pub fn evaluate_corpus(
+        corpus_path: &Path,
+        questions_path: &Path,
+        k: usize,
+        runs: usize,
+        json: bool,
+        output: Option<&Path>,
+    ) -> Result<()> {
+        let corpus_bytes = std::fs::read(corpus_path)
+            .with_context(|| format!("read {}", corpus_path.display()))?;
+        let corpus: Corpus = serde_json::from_slice(&corpus_bytes)
+            .with_context(|| format!("parse replay corpus {}", corpus_path.display()))?;
+        let question_bytes = std::fs::read(questions_path)
+            .with_context(|| format!("read {}", questions_path.display()))?;
+        let questions: QuestionSet = serde_json::from_slice(&question_bytes)
+            .with_context(|| format!("parse question set {}", questions_path.display()))?;
+
+        let report = sister_core::eval::evaluate(&corpus, &questions, k, runs)?;
+        if json {
+            warn_private_report(&report);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        if let Some(path) = output {
+            write_new_report(path, &report)?;
+        }
+        render_eval(&report, output);
+        Ok(())
+    }
+
+    fn render_eval(report: &EvalReport, output: Option<&Path>) {
+        let review = match report.corpus.review {
+            ReviewStatus::Draft => "Draft",
+            ReviewStatus::Reviewed => "Reviewed",
+        };
+        let question_review = match report.question_set.review {
+            ReviewStatus::Draft => "Draft",
+            ReviewStatus::Reviewed => "Reviewed",
+        };
+        println!(
+            "評測「{}」：{} 題（{}），corpus「{}」{} 個事件（{}），k={}，每題 {} 次計時",
+            report.question_set.name,
+            report.question_set.questions,
+            question_review,
+            report.corpus.name,
+            report.corpus.events,
+            review,
+            report.parameters.k,
+            report.parameters.runs
+        );
+        let sources = &report.question_set.sources;
+        println!(
+            "  題目來源：query log {}、人工標註 {}、腳本埋題 {}",
+            sources.query_log, sources.hand_labeled, sources.planted
+        );
+        println!(
+            "  輸入指紋：corpus {}；questions {}",
+            report.corpus.fingerprint, report.question_set.fingerprint
+        );
+        println!();
+        println!(
+            "  配置              找回率@k       答案正確率      出處正確率      延遲 p50 / p95"
+        );
+        for config in &report.configurations {
+            println!(
+                "  {:<17} {:<14} {:<15} {:<15} {:>7.2} / {:>7.2} ms",
+                config.name,
+                fraction(&config.metrics.recall_at_k),
+                fraction(&config.metrics.answer_accuracy),
+                fraction(&config.metrics.citation_accuracy),
+                config.metrics.latency.p50_ms,
+                config.metrics.latency.p95_ms,
+            );
+            let failed: Vec<_> = config
+                .questions
+                .iter()
+                .filter(|question| !question.answer_correct)
+                .map(|question| question.id.as_str())
+                .collect();
+            if !failed.is_empty() {
+                println!("    答錯／空手：{}", failed.join("、"));
+            }
+        }
+        println!("  模型：0 calls，US$0/天（這兩個配置都沒有模型路徑）。");
+        println!(
+            "  尚未量到：提醒誤報／漏報、斷句 F1、Reviewer 回查率、CPU／RAM／電池／磁碟；report 裡是 null，不是 0。"
+        );
+        if report.corpus.review == ReviewStatus::Draft
+            || report.question_set.review == ReviewStatus::Draft
+        {
+            println!("  ⚠  corpus 或題庫是 private Draft；報告也含文字，人工審查前不要分享。");
+        }
+        if let Some(path) = output {
+            println!("  完整 JSON：{}", path.display());
+        }
+    }
+
+    fn warn_private_report(report: &EvalReport) {
+        if report.corpus.review == ReviewStatus::Draft
+            || report.question_set.review == ReviewStatus::Draft
+        {
+            eprintln!("⚠ corpus 或題庫是 private Draft；這份 JSON 也只能留在本機。");
+        }
+    }
+
+    fn fraction(value: &Fraction) -> String {
+        match value.rate {
+            Some(rate) => format!("{}/{} ({:.1}%)", value.passed, value.total, rate * 100.0),
+            None => "沒這類題".to_string(),
+        }
+    }
+
     fn write_new_json(path: &Path, value: &DraftCorpus) -> Result<()> {
-        let mut bytes = serde_json::to_vec_pretty(value)?;
+        write_new_bytes(path, serde_json::to_vec_pretty(value)?)
+    }
+
+    fn write_new_report(path: &Path, value: &EvalReport) -> Result<()> {
+        write_new_bytes(path, serde_json::to_vec_pretty(value)?)
+    }
+
+    fn write_new_bytes(path: &Path, mut bytes: Vec<u8>) -> Result<()> {
         bytes.push(b'\n');
         if let Some(parent) = path
             .parent()
@@ -9535,6 +9641,38 @@ pub mod replay {
             assert_eq!(stats.frames, 1);
             assert!(stats.facts >= 3, "{stats:?}");
             assert_eq!(stats.frames_with_image, 0);
+            Ok(())
+        }
+
+        #[test]
+        fn evaluate_writes_the_two_real_profiles_and_nulls_for_unmeasured_metrics() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("replay-evaluate");
+            let corpus = tmp.0.join("fixture.corpus.json");
+            let questions = tmp.0.join("fixture.questions.json");
+            let report = tmp.0.join("fixture.sister-eval-report.json");
+            std::fs::write(
+                &corpus,
+                include_str!("../../../scenarios/recall-baseline.corpus.json"),
+            )?;
+            std::fs::write(
+                &questions,
+                include_str!("../../../scenarios/recall-baseline.questions.json"),
+            )?;
+
+            evaluate_corpus(&corpus, &questions, 5, 1, false, Some(&report))?;
+            let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&report)?)?;
+            assert_eq!(value["configurations"][0]["name"], "baseline_text");
+            assert_eq!(value["configurations"][1]["name"], "facts");
+            assert_eq!(
+                value["configurations"][1]["metrics"]["answer_accuracy"]["passed"],
+                5
+            );
+            assert!(value["configurations"][0]["metrics"]["cpu_percent"].is_null());
+
+            assert!(
+                evaluate_corpus(&corpus, &questions, 5, 1, false, Some(&report)).is_err(),
+                "既有 report 不可被覆寫"
+            );
             Ok(())
         }
     }
