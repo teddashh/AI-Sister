@@ -187,6 +187,9 @@ enum ReplayMomentAction {
         corpus: PathBuf,
         /// moment-set JSON
         moments: PathBuf,
+        /// 把計數與 fingerprint 印成 JSON；不含提醒原文或 why
+        #[arg(long)]
+        json: bool,
     },
     /// 在終端逐個標註；候選只是提示，不會自動當成正解
     Annotate {
@@ -494,9 +497,11 @@ fn main() -> Result<()> {
                 ReplayMomentAction::Draft { corpus, to } => {
                     ops::replay::draft_moments(&corpus, &to)
                 }
-                ReplayMomentAction::Status { corpus, moments } => {
-                    ops::replay::moment_status(&corpus, &moments)
-                }
+                ReplayMomentAction::Status {
+                    corpus,
+                    moments,
+                    json,
+                } => ops::replay::moment_status(&corpus, &moments, json),
                 ReplayMomentAction::Annotate {
                     corpus,
                     moments,
@@ -822,7 +827,27 @@ mod tests {
         assert!(matches!(
             moments_status.action,
             Some(ReplayAction::Moments {
-                action: ReplayMomentAction::Status { .. }
+                action: ReplayMomentAction::Status { json: false, .. }
+            })
+        ));
+
+        let moments_status_json = Cli::try_parse_from([
+            "sister",
+            "replay",
+            "moments",
+            "status",
+            "day.corpus.json",
+            "draft.moments.json",
+            "--json",
+        ])
+        .expect("moments status --json");
+        let Command::Replay(moments_status_json) = moments_status_json.command else {
+            panic!("parsed the wrong command")
+        };
+        assert!(matches!(
+            moments_status_json.action,
+            Some(ReplayAction::Moments {
+                action: ReplayMomentAction::Status { json: true, .. }
             })
         ));
 

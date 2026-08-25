@@ -9426,8 +9426,15 @@ pub mod replay {
         Ok(())
     }
 
-    pub fn moment_status(corpus_path: &Path, moments_path: &Path) -> Result<()> {
+    pub fn moment_status(corpus_path: &Path, moments_path: &Path, json: bool) -> Result<()> {
         let (corpus, moments) = read_corpus_and_moments(corpus_path, moments_path)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&moments.status_view(&corpus))?
+            );
+            return Ok(());
+        }
         render_moment_status(&corpus, &moments);
         Ok(())
     }
@@ -9526,43 +9533,53 @@ pub mod replay {
         output: &mut impl Write,
         checkpoint: &mut impl FnMut(&MomentSet) -> Result<()>,
     ) -> Result<(MomentSet, usize)> {
-        let selected: Vec<_> = moments
+        let selected: Vec<String> = moments
             .moments
             .iter()
-            .enumerate()
-            .filter(|(_, moment)| all || moment.label.is_none())
-            .map(|(index, _)| index)
+            .filter(|moment| all || moment.label.is_none())
+            .map(|moment| moment.id.clone())
             .collect();
-        if selected.is_empty() {
-            writeln!(output, "全部時刻都已有標註；要更正請加 --all。")?;
-            return Ok((moments.clone(), 0));
-        }
-
         let mut next = moments.clone();
         let mut changed = 0usize;
         let mut quit = false;
-        for (position, &index) in selected.iter().enumerate() {
+
+        if selected.is_empty() {
+            writeln!(
+                output,
+                "全部時刻都已有標註；要更正請加 --all。也可以用 add@ 新增機器沒提的時刻。"
+            )?;
+        }
+
+        for (position, moment_id) in selected.iter().enumerate() {
             if quit {
                 break;
             }
-            let moment = &next.moments[index];
+            let (at_ms, candidate, label) = {
+                let Some(moment) = next.moments.iter().find(|moment| moment.id == *moment_id)
+                else {
+                    continue;
+                };
+                (moment.at_ms, moment.candidate, moment.label.clone())
+            };
             writeln!(
                 output,
                 "\n[{}/{}] {}  +{} ms\n候選理由：{}",
                 position + 1,
                 selected.len(),
-                moment.id,
-                moment.at_ms,
-                moment.candidate.describe()
+                moment_id,
+                at_ms,
+                candidate.describe()
             )?;
-            render_moment_evidence(output, corpus, moment)?;
-            match &moment.label {
+            if let Some(moment) = next.moments.iter().find(|moment| moment.id == *moment_id) {
+                render_moment_evidence(output, corpus, moment)?;
+            }
+            match &label {
                 None => writeln!(output, "現有標註：未標")?,
                 Some(label) => writeln!(output, "現有標註：{}", moment_label_summary(label))?,
             }
             writeln!(
                 output,
-                "輸入：c <提醒>｜c@<ms> <提醒>｜s <類別> <原因>｜q <原因>｜skip｜?｜w"
+                "輸入：c <提醒>｜c@<ms> <提醒>｜s <類別> <原因>｜q <原因>｜add@<ms> …｜skip｜?｜w"
             )?;
 
             loop {
@@ -9582,42 +9599,164 @@ pub mod replay {
                     break;
                 }
                 if command == "?" {
-                    writeln!(
-                        output,
-                        "c <提醒內容>           標承諾（沒講時間）\n\
-                         c@<毫秒> <提醒內容>    標帶相對時間的承諾\n\
-                         s <類別> <原因>        標該講；類別：{}（或 a–e）\n\
-                         q <原因>               標不該講\n\
-                         skip                   跳過\n\
-                         w                      存檔離開",
-                        SpeakCategory::names("、")
-                    )?;
+                    write_moment_annotate_help(output)?;
                     continue;
                 }
-                match parse_moment_label(command) {
-                    Ok(Some(label)) => {
-                        let replace = next.moments[index].label.is_some();
-                        match next.with_label(corpus, &moment.id, label, replace) {
-                            Ok(labeled) => {
-                                next = labeled;
-                                checkpoint(&next)?;
-                                changed += 1;
-                                break;
-                            }
-                            Err(error) => {
-                                writeln!(output, "不能存這個標註：{error:#}")?;
-                                continue;
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        writeln!(output, "不認得；請輸入 c、c@、s、q、skip、? 或 w。")?;
-                    }
-                    Err(error) => writeln!(output, "{error}")?,
+                match apply_moment_annotate_command(
+                    &mut next,
+                    corpus,
+                    moment_id,
+                    command,
+                    output,
+                    checkpoint,
+                    &mut changed,
+                )? {
+                    AnnotateOutcome::Labeled => break,
+                    AnnotateOutcome::Continue => {}
                 }
             }
         }
+
+        if !quit {
+            writeln!(output, "輸入 add@<ms> 新增機器沒提的時刻，或 ?／w。")?;
+            loop {
+                write!(output, "> ")?;
+                output.flush()?;
+                let mut line = String::new();
+                if input.read_line(&mut line)? == 0 {
+                    break;
+                }
+                let command = line.trim();
+                if command == "w" {
+                    break;
+                }
+                if command == "?" {
+                    write_moment_annotate_help(output)?;
+                    continue;
+                }
+                if command == "skip" {
+                    writeln!(output, "這裡沒有下一個機器候選；要離開請輸入 w。")?;
+                    continue;
+                }
+                apply_moment_annotate_command(
+                    &mut next,
+                    corpus,
+                    "",
+                    command,
+                    output,
+                    checkpoint,
+                    &mut changed,
+                )?;
+            }
+        }
         Ok((next, changed))
+    }
+
+    enum AnnotateOutcome {
+        Labeled,
+        Continue,
+    }
+
+    fn write_moment_annotate_help(output: &mut impl Write) -> Result<()> {
+        writeln!(
+            output,
+            "c <提醒內容>           標承諾（沒講時間）\n\
+             c@<毫秒> <提醒內容>    標帶相對時間的承諾\n\
+             s <類別> <原因>        標該講；類別：{}（或 a–e）\n\
+             q <原因>               標不該講\n\
+             add@<毫秒> c <提醒>    新增並標承諾（沒講時間）\n\
+             add@<毫秒> c@<due> <提醒>  新增並標帶相對時間的承諾\n\
+             add@<毫秒> s <類別> <原因> 新增並標該講\n\
+             add@<毫秒> q <原因>    新增並標不該講\n\
+             skip                   跳過\n\
+             w                      存檔離開",
+            SpeakCategory::names("、")
+        )?;
+        Ok(())
+    }
+
+    fn apply_moment_annotate_command(
+        next: &mut MomentSet,
+        corpus: &Corpus,
+        current_id: &str,
+        command: &str,
+        output: &mut impl Write,
+        checkpoint: &mut impl FnMut(&MomentSet) -> Result<()>,
+        changed: &mut usize,
+    ) -> Result<AnnotateOutcome> {
+        match parse_add_moment(command) {
+            Ok(Some((at_ms, label))) => {
+                let added_id = next.next_hand_picked_id();
+                match next.with_hand_picked(corpus, at_ms, label) {
+                    Ok(labeled) => {
+                        *next = labeled;
+                        checkpoint(next)?;
+                        *changed += 1;
+                        let added = next
+                            .moments
+                            .iter()
+                            .find(|moment| moment.id == added_id)
+                            .expect("with_hand_picked 剛寫下的 id 必須找得到");
+                        writeln!(
+                            output,
+                            "已加入 {}  +{} ms\n候選理由：{}",
+                            added.id,
+                            added.at_ms,
+                            added.candidate.describe()
+                        )?;
+                        render_hand_picked_attachment(output, corpus, added)?;
+                        if let Some(label) = &added.label {
+                            writeln!(output, "現有標註：{}", moment_label_summary(label))?;
+                        }
+                        return Ok(AnnotateOutcome::Continue);
+                    }
+                    Err(error) => {
+                        writeln!(output, "不能新增這個時刻：{error:#}")?;
+                        return Ok(AnnotateOutcome::Continue);
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                writeln!(output, "{error}")?;
+                return Ok(AnnotateOutcome::Continue);
+            }
+        }
+
+        if current_id.is_empty() {
+            writeln!(output, "不認得；請輸入 add@、? 或 w。")?;
+            return Ok(AnnotateOutcome::Continue);
+        }
+
+        match parse_moment_label(command) {
+            Ok(Some(label)) => {
+                let replace = next
+                    .moments
+                    .iter()
+                    .find(|moment| moment.id == current_id)
+                    .is_some_and(|moment| moment.label.is_some());
+                match next.with_label(corpus, current_id, label, replace) {
+                    Ok(labeled) => {
+                        *next = labeled;
+                        checkpoint(next)?;
+                        *changed += 1;
+                        Ok(AnnotateOutcome::Labeled)
+                    }
+                    Err(error) => {
+                        writeln!(output, "不能存這個標註：{error:#}")?;
+                        Ok(AnnotateOutcome::Continue)
+                    }
+                }
+            }
+            Ok(None) => {
+                writeln!(output, "不認得；請輸入 c、c@、s、q、add@、skip、? 或 w。")?;
+                Ok(AnnotateOutcome::Continue)
+            }
+            Err(error) => {
+                writeln!(output, "{error}")?;
+                Ok(AnnotateOutcome::Continue)
+            }
+        }
     }
 
     fn parse_moment_label(command: &str) -> Result<Option<MomentLabel>, String> {
@@ -9676,6 +9815,29 @@ pub mod replay {
         Ok(None)
     }
 
+    fn parse_add_moment(
+        command: &str,
+    ) -> Result<Option<(sister_core::Millis, MomentLabel)>, String> {
+        let Some(rest) = command.strip_prefix("add@") else {
+            return Ok(None);
+        };
+        let rest = rest.trim();
+        let Some((ms, label_cmd)) = rest.split_once(char::is_whitespace) else {
+            return Err(
+                "格式是：add@<毫秒> c <提醒>｜add@<毫秒> c@<due> <提醒>｜add@<毫秒> s <類別> <原因>｜add@<毫秒> q <原因>"
+                    .into(),
+            );
+        };
+        let at_ms = ms
+            .parse::<sister_core::Millis>()
+            .map_err(|_| format!("add@ 後面的毫秒必須是整數，不是 {ms}"))?;
+        match parse_moment_label(label_cmd.trim()) {
+            Ok(Some(label)) => Ok(Some((at_ms, label))),
+            Ok(None) => Err("add@ 後面要接 c、c@、s 或 q（一步建立並標好，不要只寫時間）".into()),
+            Err(error) => Err(error),
+        }
+    }
+
     fn render_moment_evidence(
         output: &mut impl Write,
         corpus: &Corpus,
@@ -9712,6 +9874,33 @@ pub mod replay {
                 writeln!(output, "  {}｜{}", kind.as_str(), concise(&text, 220))?;
             }
         }
+        Ok(())
+    }
+
+    fn render_hand_picked_attachment(
+        output: &mut impl Write,
+        corpus: &Corpus,
+        moment: &sister_core::moments::LabeledMoment,
+    ) -> Result<()> {
+        let Some(reference) = moment.evidence.first() else {
+            writeln!(output, "沒有掛上 evidence——這不該發生")?;
+            return Ok(());
+        };
+        match corpus.events.get(reference.event_index) {
+            Some(event) => writeln!(
+                output,
+                "掛到 event {}（該 event 的 at_ms={}；時刻 at_ms={}）",
+                reference.event_index,
+                event.at_ms(),
+                moment.at_ms
+            )?,
+            None => writeln!(
+                output,
+                "掛到 event {}，但那個 event 不在 corpus 裡",
+                reference.event_index
+            )?,
+        }
+        render_moment_evidence(output, corpus, moment)?;
         Ok(())
     }
 
@@ -10970,6 +11159,74 @@ pub mod replay {
                 screen.contains("該講類別") || screen.contains("commitment_due"),
                 "{screen}"
             );
+            Ok(())
+        }
+
+        #[test]
+        fn moment_annotator_add_attaches_the_event_it_actually_picked() -> Result<()> {
+            let corpus = moment_fixture();
+            let draft = MomentSet::draft_from_corpus("moment-cli-moments", &corpus)?;
+            let machine_ids: Vec<_> = draft
+                .moments
+                .iter()
+                .map(|moment| moment.id.clone())
+                .collect();
+            let commands = "add@1200 q 正在寫沒有訊號\nw\n";
+            let mut input = std::io::Cursor::new(commands.as_bytes());
+            let mut output = Vec::new();
+            let mut checkpoints = Vec::new();
+            let (labeled, changed) = annotate_moments_with_io(
+                &corpus,
+                &draft,
+                false,
+                &mut input,
+                &mut output,
+                &mut |moments| {
+                    checkpoints.push(moments.clone());
+                    Ok(())
+                },
+            )?;
+            assert_eq!(changed, 1, "add@ 必須算進 changed，才會留檔");
+            assert_eq!(checkpoints.len(), 1);
+            let hand = labeled
+                .moments
+                .iter()
+                .find(|moment| moment.id == "moment-hand-0001")
+                .expect("hand id namespace");
+            assert_eq!(
+                hand.evidence[0].event_index, 0,
+                "1200ms 之前最近的是 event 0（200ms），不是 event 1（1500ms）"
+            );
+            assert!(
+                machine_ids
+                    .iter()
+                    .all(|id| labeled.moments.iter().any(|moment| moment.id == *id))
+            );
+            let screen = String::from_utf8(output)?;
+            assert!(
+                screen.contains("掛到 event 0（該 event 的 at_ms=200；時刻 at_ms=1200）"),
+                "必須印出程式真的挑中的 event，不是「大概是前一個」：{screen}"
+            );
+            assert!(
+                screen.contains("下午5點接她"),
+                "可見表面必須是掛上的那個 event 的 OCR：{screen}"
+            );
+            assert!(!screen.contains("普通工作筆記"), "{screen}");
+
+            let mut input = std::io::Cursor::new("add@0 q 語料還沒開始\nw\n".as_bytes());
+            let mut output = Vec::new();
+            let (still, still_changed) = annotate_moments_with_io(
+                &corpus,
+                &draft,
+                false,
+                &mut input,
+                &mut output,
+                &mut |_| Ok(()),
+            )?;
+            assert_eq!(still_changed, 0);
+            assert_eq!(still.moments.len(), draft.moments.len());
+            let rejected = String::from_utf8(output)?;
+            assert!(rejected.contains("之前一個 event 都沒有"), "{rejected}");
             Ok(())
         }
 

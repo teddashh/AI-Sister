@@ -188,6 +188,34 @@ pub struct MomentSetCounts {
     pub should_stay_quiet: usize,
 }
 
+/// 機器候選與人工加入的分佈。每一格都是數過的，0 表示這種理由一個都沒有。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MomentCandidateCounts {
+    pub datetime_mention: usize,
+    pub notification: usize,
+    pub long_dwell: usize,
+    pub hand_picked: usize,
+}
+
+/// `moments status --json` 的投影。沒有提醒原文、why、也沒有 corpus 原始文字。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MomentSetStatusView {
+    pub format_version: u32,
+    pub name: String,
+    pub review: ReviewStatus,
+    pub corpus: MomentSetCorpusView,
+    pub counts: MomentSetCounts,
+    pub candidates: MomentCandidateCounts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MomentSetCorpusView {
+    pub name: String,
+    pub review: ReviewStatus,
+    pub fingerprint: String,
+}
+
 impl MomentSet {
     /// 掃一遍 corpus，把值得人看一眼的時刻提出來；`label` 一律 `None`。
     pub fn draft_from_corpus(name: &str, corpus: &Corpus) -> Result<Self> {
@@ -374,6 +402,52 @@ impl MomentSet {
         Ok(reviewed)
     }
 
+    /// 一步建立並標好一個人加的時刻。id 走 `moment-hand-NNNN`，不重編機器候選。
+    pub fn with_hand_picked(
+        &self,
+        corpus: &Corpus,
+        at_ms: Millis,
+        label: MomentLabel,
+    ) -> Result<Self> {
+        self.validate(corpus)?;
+        ensure!(
+            self.review == ReviewStatus::Draft,
+            "Reviewed moment set 不可直接改標註；請從審查前的 Draft 產生新版"
+        );
+        ensure!(
+            (0..=corpus.duration_ms).contains(&at_ms),
+            "at_ms={at_ms} 不在這份 corpus 的 0..={} 內",
+            corpus.duration_ms
+        );
+
+        let evidence_index = closest_event_at_or_before(corpus, at_ms).with_context(|| {
+            format!("at_ms={at_ms} 之前一個 event 都沒有；拒絕掛不相干的 evidence")
+        })?;
+
+        let id = next_hand_picked_id(&self.moments);
+        let moment = LabeledMoment {
+            id,
+            at_ms,
+            candidate: CandidateReason::HandPicked,
+            evidence: vec![EvidenceRef {
+                event_index: evidence_index,
+            }],
+            label: Some(label),
+        };
+
+        let mut next = self.clone();
+        let insert_at = next
+            .moments
+            .partition_point(|existing| existing.at_ms <= at_ms);
+        next.moments.insert(insert_at, moment);
+        next.validate(corpus)?;
+        Ok(next)
+    }
+
+    pub fn next_hand_picked_id(&self) -> String {
+        next_hand_picked_id(&self.moments)
+    }
+
     pub fn counts(&self) -> MomentSetCounts {
         let mut counts = MomentSetCounts {
             total: self.moments.len(),
@@ -393,6 +467,35 @@ impl MomentSet {
             }
         }
         counts
+    }
+
+    pub fn candidate_counts(&self) -> MomentCandidateCounts {
+        let mut counts = MomentCandidateCounts::default();
+        for moment in &self.moments {
+            match moment.candidate {
+                CandidateReason::DateTimeMention => counts.datetime_mention += 1,
+                CandidateReason::Notification => counts.notification += 1,
+                CandidateReason::LongDwell => counts.long_dwell += 1,
+                CandidateReason::HandPicked => counts.hand_picked += 1,
+            }
+        }
+        counts
+    }
+
+    /// 給 `moments status --json`：只有計數、名稱、審查狀態與 fingerprint。
+    pub fn status_view(&self, corpus: &Corpus) -> MomentSetStatusView {
+        MomentSetStatusView {
+            format_version: MOMENT_SET_VERSION,
+            name: self.name.clone(),
+            review: self.review,
+            corpus: MomentSetCorpusView {
+                name: corpus.name.clone(),
+                review: corpus.review,
+                fingerprint: self.corpus_fingerprint.clone(),
+            },
+            counts: self.counts(),
+            candidates: self.candidate_counts(),
+        }
     }
 }
 
@@ -555,6 +658,30 @@ fn unlabeled(at_ms: Millis, candidate: CandidateReason, evidence: Vec<usize>) ->
             .collect(),
         label: None,
     }
+}
+
+fn next_hand_picked_id(moments: &[LabeledMoment]) -> String {
+    let mut max = 0u32;
+    for moment in moments {
+        let Some(rest) = moment.id.strip_prefix("moment-hand-") else {
+            continue;
+        };
+        if let Ok(n) = rest.parse::<u32>() {
+            max = max.max(n);
+        }
+    }
+    format!("moment-hand-{:04}", max + 1)
+}
+
+/// 時刻之前（含同一毫秒）最接近的 corpus event。同一毫秒有多筆時取最後一筆。
+fn closest_event_at_or_before(corpus: &Corpus, at_ms: Millis) -> Option<usize> {
+    corpus
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.at_ms() <= at_ms)
+        .max_by_key(|(_, event)| event.at_ms())
+        .map(|(index, _)| index)
 }
 
 #[cfg(test)]
@@ -887,5 +1014,220 @@ mod tests {
         );
         let error = SpeakCategory::from_str("shout").expect_err("typo");
         assert!(error.contains("stuck") && error.contains("a–e"), "{error}");
+    }
+
+    #[test]
+    fn hand_picked_uses_its_own_id_namespace_and_the_closest_prior_event() {
+        let source = datetime_corpus();
+        let draft = MomentSet::draft_from_corpus("hand", &source).expect("draft");
+        let machine_ids: Vec<_> = draft
+            .moments
+            .iter()
+            .map(|moment| moment.id.clone())
+            .collect();
+        assert!(
+            machine_ids
+                .iter()
+                .all(|id| id.starts_with("moment-") && !id.starts_with("moment-hand-")),
+            "機器候選不可佔人工命名空間：{machine_ids:?}"
+        );
+
+        let added = draft
+            .with_hand_picked(
+                &source,
+                1_200,
+                MomentLabel::ShouldStayQuiet {
+                    why: "正在寫，沒有任何訊號".into(),
+                },
+            )
+            .expect("add");
+        let hand = added
+            .moments
+            .iter()
+            .find(|moment| moment.candidate == CandidateReason::HandPicked)
+            .expect("hand picked");
+        assert_eq!(hand.id, "moment-hand-0001");
+        assert_eq!(hand.at_ms, 1_200);
+        assert_eq!(
+            hand.evidence,
+            vec![EvidenceRef { event_index: 0 }],
+            "1_200 之前最近的 event 是 200 的那一幀（index 0），不是 1_500 的那一幀"
+        );
+        assert!(
+            added
+                .moments
+                .windows(2)
+                .all(|pair| pair[0].at_ms <= pair[1].at_ms),
+            "插入後 at_ms 必須非遞減"
+        );
+        for id in &machine_ids {
+            assert!(
+                added.moments.iter().any(|moment| moment.id == *id),
+                "插入不可重編既有機器候選 id：{id} 不見了"
+            );
+        }
+
+        let counts = added.counts();
+        assert_eq!(counts.total, draft.counts().total + 1);
+        assert_eq!(counts.unlabeled, draft.counts().unlabeled);
+        assert_eq!(counts.should_stay_quiet, 1);
+        assert_eq!(added.candidate_counts().hand_picked, 1);
+        assert_eq!(added.candidate_counts().notification, 0);
+    }
+
+    #[test]
+    fn hand_picked_refuses_a_time_with_no_prior_event_instead_of_borrowing_an_unrelated_one() {
+        let source = datetime_corpus();
+        let draft = MomentSet::draft_from_corpus("hand-empty", &source).expect("draft");
+        let error = draft
+            .with_hand_picked(
+                &source,
+                0,
+                MomentLabel::ShouldStayQuiet {
+                    why: "語料還沒開始".into(),
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("之前一個 event 都沒有"), "{error}");
+        assert!(error.contains("不相干"), "{error}");
+        assert_eq!(draft.moments.len(), 1, "失敗不可寫回來源");
+    }
+
+    #[test]
+    fn hand_picked_names_the_inclusive_range_when_at_ms_is_outside_the_corpus() {
+        let source = datetime_corpus();
+        let draft = MomentSet::draft_from_corpus("hand-range", &source).expect("draft");
+        let error = draft
+            .with_hand_picked(
+                &source,
+                source.duration_ms + 1,
+                MomentLabel::ShouldStayQuiet {
+                    why: "超出語料".into(),
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("0..="), "{error}");
+        assert!(error.contains(&source.duration_ms.to_string()), "{error}");
+    }
+
+    #[test]
+    fn baseline_corpus_drafts_datetime_and_dwell_and_zero_notifications() {
+        let source: Corpus = serde_json::from_str(include_str!(
+            "../../../scenarios/moment-baseline.corpus.json"
+        ))
+        .expect("baseline corpus");
+        source.validate().expect("valid corpus");
+        let kinds: Vec<_> = source
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                Event::System { kind, .. } => Some(*kind),
+                _ => None,
+            })
+            .collect();
+        for kind in SystemKind::ALL {
+            if kind.is_session_mark() {
+                continue;
+            }
+            assert!(
+                kinds.contains(&kind),
+                "baseline corpus 必須含 SystemKind::{kind:?}，才能證明它不是通知"
+            );
+        }
+        assert!(
+            kinds.iter().all(|kind| !kind.is_session_mark()),
+            "replay corpus 不准帶 session 邊界；import 會自己建立"
+        );
+
+        let draft = MomentSet::draft_from_corpus("baseline", &source).expect("draft");
+        let candidates = draft.candidate_counts();
+        assert_eq!(candidates.datetime_mention, 2);
+        assert_eq!(candidates.long_dwell, 1);
+        assert_eq!(candidates.notification, 0);
+        assert_eq!(candidates.hand_picked, 0);
+        assert_eq!(draft.counts().unlabeled, draft.counts().total);
+        assert_eq!(draft.counts().should_speak, 0);
+
+        let mut extra = source.clone();
+        extra.events.push(frame(
+            extra.duration_ms,
+            "notes.exe",
+            "deadline",
+            "2026-08-25 截止",
+        ));
+        let bumped = MomentSet::draft_from_corpus("baseline-plus", &extra).expect("draft");
+        assert_eq!(
+            bumped.candidate_counts().datetime_mention,
+            candidates.datetime_mention + 1,
+            "多一幀含日期的畫面，DateTimeMention 要跟著 +1"
+        );
+        assert_eq!(bumped.candidate_counts().notification, 0);
+        assert_eq!(bumped.candidate_counts().long_dwell, 1);
+    }
+
+    #[test]
+    fn baseline_reviewed_fixture_keeps_four_label_kinds_apart() {
+        let source: Corpus = serde_json::from_str(include_str!(
+            "../../../scenarios/moment-baseline.corpus.json"
+        ))
+        .expect("baseline corpus");
+        let reviewed: MomentSet = serde_json::from_str(include_str!(
+            "../../../scenarios/moment-baseline.moments.json"
+        ))
+        .expect("baseline moments");
+        reviewed.validate(&source).expect("reviewed binds corpus");
+        assert_eq!(reviewed.review, ReviewStatus::Reviewed);
+        let counts = reviewed.counts();
+        assert_eq!(counts.unlabeled, 0);
+        assert_eq!(counts.commitments, 2);
+        assert_eq!(counts.commitments_with_due, 1);
+        assert_eq!(counts.should_speak, 1);
+        assert_eq!(counts.should_stay_quiet, 1);
+        let candidates = reviewed.candidate_counts();
+        assert_eq!(candidates.datetime_mention, 2);
+        assert_eq!(candidates.long_dwell, 1);
+        assert_eq!(candidates.notification, 0);
+        assert_eq!(candidates.hand_picked, 1);
+        assert_ne!(
+            counts.unlabeled, counts.should_speak,
+            "已標完的 0 個未標，不可和 1 個該講印成同一個數字的誤會"
+        );
+        let view = serde_json::to_string(&reviewed.status_view(&source)).expect("json");
+        assert!(!view.contains("五點接她"), "{view}");
+        assert!(!view.contains("正在寫合成範例"), "{view}");
+    }
+
+    #[test]
+    fn status_view_has_counts_not_remind_or_why() {
+        let source = datetime_corpus();
+        let draft = MomentSet::draft_from_corpus("status-json", &source).expect("draft");
+        let labeled = draft
+            .with_label(
+                &source,
+                &draft.moments[0].id,
+                MomentLabel::Commitment {
+                    remind: "這句不可以進 JSON".into(),
+                    due_at_ms: None,
+                },
+                false,
+            )
+            .expect("label");
+        let view = labeled.status_view(&source);
+        let json = serde_json::to_string(&view).expect("json");
+        assert!(json.contains("\"unlabeled\""));
+        assert!(json.contains("\"should_speak\""));
+        assert!(json.contains("\"datetime_mention\""));
+        assert!(json.contains("\"hand_picked\""));
+        assert!(
+            !json.contains("這句不可以進 JSON"),
+            "status JSON 帶了提醒原文：{json}"
+        );
+        assert_eq!(view.counts.unlabeled, 0);
+        assert_eq!(view.counts.commitments, 1);
+        assert_eq!(view.candidates.notification, 0);
+        assert_eq!(view.corpus.fingerprint, labeled.corpus_fingerprint);
+        assert_eq!(view.corpus.name, source.name);
     }
 }
