@@ -189,7 +189,7 @@ impl QuestionSet {
                     .as_ref()
                     .with_context(|| format!("query-log question {} 缺少 observed", question.id))?;
                 ensure!(
-                    matches!(observed.shape.as_str(), "recent" | "keywords"),
+                    matches!(observed.shape.as_str(), "recent" | "keywords" | "range"),
                     "query-log question {} 的 observed.shape 不認得：{}",
                     question.id,
                     observed.shape
@@ -394,7 +394,7 @@ pub struct EvalParameters {
     pub k: usize,
     pub warmups: usize,
     pub runs: usize,
-    /// facts 在前、文字結果在後；和產品畫面相同。
+    /// facts 在前、章節其次、文字結果在後。沒有章節的配置這一格是空的。
     pub ranking: String,
 }
 
@@ -426,6 +426,9 @@ pub struct ReturnedItem {
     pub rank: usize,
     pub channel: RetrievalChannel,
     pub at_ms: Millis,
+    /// 章節的核心迄點（半開）。文字／事實沒有範圍，是 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ms: Option<Millis>,
     pub source_kind: String,
     /// fact 同時保留 raw / normalized；文字結果只有完整原文。
     pub values: Vec<String>,
@@ -448,6 +451,8 @@ pub enum RetrievalChannel {
     Fact,
     Text,
     Recent,
+    Range,
+    Session,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -457,7 +462,7 @@ pub struct EvalMetrics {
     pub answer_accuracy: Fraction,
     pub citation_accuracy: Fraction,
     pub latency: LatencyMetrics,
-    /// 兩個現行配置都不呼叫模型；這是由路徑定義得出的 0，不是假裝量過價格。
+    /// 現行配置都不呼叫模型；這是由路徑定義得出的 0，不是假裝量過價格。
     pub model_calls: usize,
     pub model_usd_per_day: f64,
     pub reminder_false_positive_rate: Option<f64>,
@@ -600,6 +605,7 @@ pub fn metrics_view(report: &EvalReport) -> Result<MetricsView> {
                     name: match configuration.name.as_str() {
                         "baseline_text" => "baseline_text".to_string(),
                         "facts" => "facts".to_string(),
+                        "facts_session" => "facts_session".to_string(),
                         _ => format!("configuration-{}", configuration_index + 1),
                     },
                     recall_at_k: metrics.recall_at_k.clone(),
@@ -633,7 +639,7 @@ pub fn metrics_view(report: &EvalReport) -> Result<MetricsView> {
     })
 }
 
-/// 同一份 corpus 自動跑 text baseline 與 +facts。除了 latency，報告只由輸入決定。
+/// 同一份 corpus 自動跑 text baseline、+facts、+facts+session。除了 latency，報告只由輸入決定。
 pub fn evaluate(
     corpus: &Corpus,
     questions: &QuestionSet,
@@ -656,7 +662,11 @@ pub fn evaluate(
     ensure!(runs > 0, "--runs 必須大於 0");
 
     let mut configurations = Vec::new();
-    for profile in [RetrievalProfile::TextOnly, RetrievalProfile::TextAndFacts] {
+    for profile in [
+        RetrievalProfile::TextOnly,
+        RetrievalProfile::TextAndFacts,
+        RetrievalProfile::TextFactsAndSession,
+    ] {
         configurations.push(evaluate_profile(corpus, questions, profile, k, runs)?);
     }
 
@@ -683,7 +693,7 @@ pub fn evaluate(
             k,
             warmups: WARMUPS,
             runs,
-            ranking: "facts_then_text".into(),
+            ranking: "facts_then_session_then_text".into(),
         },
         configurations,
     })
@@ -699,19 +709,48 @@ pub fn annotation_previews(
     questions.validate(corpus)?;
     ensure!(k > 0, "--k 必須大於 0");
 
+    let origin = replay_origin();
     let mut db = Db::open_in_memory()?;
-    db.import_replay(corpus, EVAL_ORIGIN)?;
+    db.import_replay(corpus, origin)?;
     questions
         .questions
         .iter()
         .map(|question| {
-            let retrieval = RetrievalProfile::TextAndFacts.retrieve(&db, &question.question, k)?;
+            let now = query_now(question, origin, corpus.duration_ms);
+            let retrieval = RetrievalProfile::TextAndFacts.retrieve_at(
+                &mut db,
+                &question.question,
+                crate::retrieval::RetrievalLimits::same(k),
+                now,
+            )?;
             Ok(AnnotationPreview {
                 question_id: question.id.clone(),
-                returned: returned_items(corpus, retrieval, k)?,
+                returned: returned_items(corpus, origin, retrieval, k)?,
             })
         })
         .collect()
+}
+
+/// 語料 t=0 對在本地昨天 13:00，讓「昨天下午」在任何時區都能蓋到從 t=0 起的那幾個小時。
+fn replay_origin() -> Millis {
+    use chrono::{Local, TimeZone};
+    let today = Local::now().date_naive();
+    let Some(yesterday) = today.pred_opt() else {
+        return EVAL_ORIGIN;
+    };
+    let Some(naive) = yesterday.and_hms_opt(13, 0, 0) else {
+        return EVAL_ORIGIN;
+    };
+    match Local.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
+            dt.timestamp_millis()
+        }
+        chrono::LocalResult::None => EVAL_ORIGIN,
+    }
+}
+
+fn query_now(question: &RecallQuestion, origin: Millis, duration_ms: Millis) -> Millis {
+    origin + question.asked_at_ms.unwrap_or(duration_ms)
 }
 
 fn evaluate_profile(
@@ -721,12 +760,19 @@ fn evaluate_profile(
     k: usize,
     runs: usize,
 ) -> Result<ConfigurationReport> {
+    let origin = replay_origin();
     let mut db = Db::open_in_memory()?;
-    db.import_replay(corpus, EVAL_ORIGIN)?;
+    db.import_replay(corpus, origin)?;
 
     // 整份題庫先暖一輪；不把第一題的冷 cache 優勢送給後面的題目。
     for question in &questions.questions {
-        profile.retrieve(&db, &question.question, k)?;
+        let now = query_now(question, origin, corpus.duration_ms);
+        profile.retrieve_at(
+            &mut db,
+            &question.question,
+            crate::retrieval::RetrievalLimits::same(k),
+            now,
+        )?;
     }
 
     let mut results = Vec::with_capacity(questions.questions.len());
@@ -734,14 +780,20 @@ fn evaluate_profile(
     for question in &questions.questions {
         let mut stable_items: Option<Vec<ReturnedItem>> = None;
         let mut latencies = Vec::with_capacity(runs);
+        let now = query_now(question, origin, corpus.duration_ms);
         for _ in 0..runs {
             let started = Instant::now();
-            let retrieval = profile.retrieve(&db, &question.question, k)?;
+            let retrieval = profile.retrieve_at(
+                &mut db,
+                &question.question,
+                crate::retrieval::RetrievalLimits::same(k),
+                now,
+            )?;
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             latencies.push(elapsed_ms);
             all_latency.push(elapsed_ms);
 
-            let items = returned_items(corpus, retrieval, k)?;
+            let items = returned_items(corpus, origin, retrieval, k)?;
             if let Some(before) = &stable_items {
                 ensure!(
                     *before == items,
@@ -813,27 +865,59 @@ fn evaluate_profile(
     })
 }
 
-fn returned_items(corpus: &Corpus, retrieval: Retrieval, k: usize) -> Result<Vec<ReturnedItem>> {
+fn returned_items(
+    corpus: &Corpus,
+    origin: Millis,
+    retrieval: Retrieval,
+    k: usize,
+) -> Result<Vec<ReturnedItem>> {
     let mut raw = Vec::new();
     for answer in retrieval.answers {
         let kind = SourceKind::from_str_kind(&answer.latest.source_kind)
             .with_context(|| format!("unknown fact source kind: {}", answer.latest.source_kind))?;
         raw.push((
             RetrievalChannel::Fact,
-            answer.latest.ts - EVAL_ORIGIN,
+            answer.latest.ts - origin,
+            None,
             kind,
             vec![answer.latest.raw, answer.latest.normalized],
         ));
     }
-    let hit_channel = if retrieval.shape == crate::question::Shape::Recent {
-        RetrievalChannel::Recent
-    } else {
-        RetrievalChannel::Text
+    for activity in retrieval.activities {
+        let at_ms = activity.core_started_at - origin;
+        let end_ms = activity.core_ended_at - origin;
+        let mut values = Vec::new();
+        if let Some(title) = activity.title.clone() {
+            values.push(title);
+        }
+        if let Some(app) = activity.app.clone() {
+            values.push(app);
+        }
+        if let Some(host) = activity.host.clone() {
+            values.push(host);
+        }
+        ensure!(
+            !values.is_empty(),
+            "session chapter at {at_ms}ms has no app/title/host to grade"
+        );
+        raw.push((
+            RetrievalChannel::Session,
+            at_ms,
+            Some(end_ms),
+            SourceKind::WindowTitle,
+            values,
+        ));
+    }
+    let hit_channel = match retrieval.shape {
+        crate::question::Shape::Recent => RetrievalChannel::Recent,
+        crate::question::Shape::Range => RetrievalChannel::Range,
+        crate::question::Shape::Keywords => RetrievalChannel::Text,
     };
     for hit in retrieval.hits {
         raw.push((
             hit_channel,
-            hit.ts - EVAL_ORIGIN,
+            hit.ts - origin,
+            None,
             hit.source_kind,
             vec![hit.text],
         ));
@@ -842,30 +926,40 @@ fn returned_items(corpus: &Corpus, retrieval: Retrieval, k: usize) -> Result<Vec
     raw.into_iter()
         .take(k)
         .enumerate()
-        .map(|(rank, (channel, at_ms, source_kind, values))| {
+        .map(|(rank, (channel, at_ms, end_ms, source_kind, values))| {
             ensure!(
                 (0..=corpus.duration_ms).contains(&at_ms),
                 "retrieval result timestamp {at_ms} fell outside corpus"
             );
+            if let Some(end) = end_ms {
+                ensure!(
+                    at_ms <= end && (0..=corpus.duration_ms).contains(&end),
+                    "retrieval result range [{at_ms},{end}) fell outside corpus"
+                );
+            }
             let event_indexes: Vec<_> = corpus
                 .events
                 .iter()
                 .enumerate()
                 .filter_map(|(index, event)| {
-                    (event.at_ms() == at_ms
-                        && event_supports_item(event, source_kind, channel, &values))
-                    .then_some(index)
+                    let time_ok = match end_ms {
+                        Some(end) => event.at_ms() >= at_ms && event.at_ms() < end,
+                        None => event.at_ms() == at_ms,
+                    };
+                    (time_ok && event_supports_item(event, source_kind, channel, &values))
+                        .then_some(index)
                 })
                 .collect();
             ensure!(
                 !event_indexes.is_empty(),
-                "retrieval result at {at_ms}ms ({}) cannot be mapped back to its corpus event",
+                "retrieval result at {at_ms}ms ({channel:?}, {}) cannot be mapped back to its corpus event",
                 source_kind.as_str()
             );
             Ok(ReturnedItem {
                 rank: rank + 1,
                 channel,
                 at_ms,
+                end_ms,
                 source_kind: source_kind.as_str().to_string(),
                 values,
                 event_indexes,
@@ -918,7 +1012,13 @@ fn event_supports_item(
     channel: RetrievalChannel,
     values: &[String],
 ) -> bool {
-    evidence_surfaces(event)
+    let surfaces = evidence_surfaces(event);
+    if channel == RetrievalChannel::Session {
+        // 章節是範圍：涵蓋到的 event 只要有任何可檢索文字就算對得回。
+        // 對不回去要在呼叫端 `ensure!`，這裡不准因為 source_kind 對不上就吞掉。
+        return !surfaces.is_empty();
+    }
+    surfaces
         .into_iter()
         .filter(|(kind, _)| *kind == source_kind)
         .any(|(_, surface)| match channel {
@@ -927,9 +1027,10 @@ fn event_supports_item(
                     .iter()
                     .any(|value| value == &fact.raw || value == &fact.normalized)
             }),
-            RetrievalChannel::Text | RetrievalChannel::Recent => {
+            RetrievalChannel::Text | RetrievalChannel::Recent | RetrievalChannel::Range => {
                 values.iter().any(|value| value == &surface)
             }
+            RetrievalChannel::Session => unreachable!("session 走上面那條"),
         })
 }
 
@@ -1099,6 +1200,8 @@ mod tests {
         assert_eq!(facts.metrics.recall_at_k.passed, 1);
         assert_eq!(facts.metrics.citation_accuracy.passed, 1);
         assert!(facts.questions[0].returned[0].event_indexes.contains(&0));
+        assert_eq!(report.configurations.len(), 3);
+        assert_eq!(report.configurations[2].name, "facts_session");
     }
 
     #[test]

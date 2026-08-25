@@ -715,8 +715,7 @@ struct Answer {
     /// 那段時間切成的活動級段落。`None` 配 `time_range: None` = 沒算過；
     /// `Some([])` 配有範圍 = 算過，切不出段落。兩種不可以合成一個空陣列。
     ///
-    /// 時間軸上的 `Chapter` 仍是分鐘級 `segment`；這裡是答案端，已經把
-    /// 10 分鐘上限切碎的同質段併回去。
+    /// 時間軸和答案端都是活動級。分鐘級 `segment` 在時間軸展開才看得到。
     chapters: Option<Vec<Chapter>>,
 }
 
@@ -854,7 +853,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         // 足以回答「她是不是又卡住了」，而問題本身是他的東西，不是我的。
         tracing::info!(
             "問了一次（{}）：{} 個答案、{} 筆原文，{} ms",
-            if shape == Shape::Recent {
+            if shape == Shape::Recent || shape == Shape::Range {
                 "時間"
             } else {
                 "關鍵字"
@@ -944,7 +943,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             // 而「這兩串字算不算同一句」是這裡才知道的事（`terms` 回的是原句的
             // 一個切片）。`Shape::Recent` 根本沒走比對那條路，所以也不送。
             searched: match shape {
-                Shape::Recent => None,
+                Shape::Recent | Shape::Range => None,
                 Shape::Keywords => {
                     // 只在**黏過**的時候送。剝掉「剛剛那個」留下「優惠方案」是
                     // 剝對了，每次都報一句只會讓人學會忽略它；黏出「個板」才是
@@ -1139,6 +1138,9 @@ struct Chapter {
     /// 核心時長。答案用這個。時間軸不填——那裡的 start_ts／end_ts 含 5 秒 margin。
     #[serde(skip_serializing_if = "Option::is_none")]
     core_ms: Option<i64>,
+    /// 底下的分鐘級段落。活動級才填；答案端不送。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    segments: Option<Vec<Chapter>>,
 }
 
 fn chapter_from_segment(s: sister_core::segment::Segment) -> Chapter {
@@ -1160,26 +1162,63 @@ fn chapter_from_segment(s: sister_core::segment::Segment) -> Chapter {
         edit_id: s.last_edit.map(|e| e.id),
         segment_count: None,
         core_ms: None,
+        segments: None,
     }
 }
 
 /// 答案端的一格。鐘面和時長都用核心時間；`segment_count` 說它是由幾段併成的。
 fn chapter_from_activity(a: sister_core::activity::Activity) -> Chapter {
+    chapter_from_activity_with_nested(a, false)
+}
+
+/// 時間軸上的一格。顯示範圍含 5 秒 margin（好把 moments 裝進去），時長仍用核心。
+fn chapter_from_activity_timeline(a: sister_core::activity::Activity) -> Chapter {
+    chapter_from_activity_with_nested(a, true)
+}
+
+fn chapter_from_activity_with_nested(
+    a: sister_core::activity::Activity,
+    nested: bool,
+) -> Chapter {
     let core_ms = a.core_ms();
+    let last = a.last_edit();
+    let opening = a
+        .segments
+        .first()
+        .map(|s| {
+            s.cut_kinds
+                .iter()
+                .map(|k| k.as_str().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let confidence = a.segments.first().and_then(|s| s.confidence);
+    let (start_ts, end_ts) = if nested {
+        (a.started_at, a.ended_at)
+    } else {
+        (a.core_started_at, a.core_ended_at)
+    };
+    let segments = nested.then(|| {
+        a.segments
+            .into_iter()
+            .map(chapter_from_segment)
+            .collect()
+    });
     Chapter {
-        start_ts: a.core_started_at,
-        end_ts: a.core_ended_at,
+        start_ts,
+        end_ts,
         core_start_ts: a.core_started_at,
         core_end_ts: a.core_ended_at,
         app: a.app,
         title: a.title,
         host: a.host,
-        cut_kinds: Vec::new(),
-        confidence: None,
-        edited: None,
-        edit_id: None,
+        cut_kinds: opening,
+        confidence,
+        edited: last.map(|e| e.kind.as_str().to_string()),
+        edit_id: last.map(|e| e.id),
         segment_count: Some(a.segment_count),
         core_ms: Some(core_ms),
+        segments,
     }
 }
 
@@ -1192,15 +1231,27 @@ fn timeline_chapters(
 ) -> Result<Vec<Chapter>, String> {
     with_db_mut(&shell, |db| {
         Ok(db
-            .chapters_for_range(from_ts, to_ts)
+            .activities_for_range(from_ts, to_ts)
             .map_err(|e| format!("{e:#}"))?
             .into_iter()
-            .map(chapter_from_segment)
+            .map(chapter_from_activity_timeline)
             .collect())
     })
 }
 
+fn timeline_chapters_after_edit(
+    segs: Vec<sister_core::segment::Segment>,
+) -> Vec<Chapter> {
+    sister_core::activity::group(&segs)
+        .into_iter()
+        .map(chapter_from_activity_timeline)
+        .collect()
+}
+
 /// 把相鄰兩段併成一段。立刻回新的章節清單，不用重開視窗。
+///
+/// `left_core_start`／`right_core_start` 仍是分鐘級 segment 的核心起點。
+/// 活動級畫面上「與下一段合併」要傳左件最後一段、右件第一段。
 #[tauri::command(async)]
 fn timeline_merge_chapters(
     left_core_start: i64,
@@ -1210,12 +1261,10 @@ fn timeline_merge_chapters(
     shell: tauri::State<'_, Shell>,
 ) -> Result<Vec<Chapter>, String> {
     with_db_mut(&shell, |db| {
-        Ok(db
-            .merge_chapters(left_core_start, right_core_start, from_ts, to_ts)
-            .map_err(|e| format!("{e:#}"))?
-            .into_iter()
-            .map(chapter_from_segment)
-            .collect())
+        Ok(timeline_chapters_after_edit(
+            db.merge_chapters(left_core_start, right_core_start, from_ts, to_ts)
+                .map_err(|e| format!("{e:#}"))?,
+        ))
     })
 }
 
@@ -1228,12 +1277,10 @@ fn timeline_split_chapter(
     shell: tauri::State<'_, Shell>,
 ) -> Result<Vec<Chapter>, String> {
     with_db_mut(&shell, |db| {
-        Ok(db
-            .split_chapter(at_ts, from_ts, to_ts)
-            .map_err(|e| format!("{e:#}"))?
-            .into_iter()
-            .map(chapter_from_segment)
-            .collect())
+        Ok(timeline_chapters_after_edit(
+            db.split_chapter(at_ts, from_ts, to_ts)
+                .map_err(|e| format!("{e:#}"))?,
+        ))
     })
 }
 
@@ -1246,12 +1293,10 @@ fn timeline_undo_segment_edit(
     shell: tauri::State<'_, Shell>,
 ) -> Result<Vec<Chapter>, String> {
     with_db_mut(&shell, |db| {
-        Ok(db
-            .undo_segment_edit(edit_id, from_ts, to_ts)
-            .map_err(|e| format!("{e:#}"))?
-            .into_iter()
-            .map(chapter_from_segment)
-            .collect())
+        Ok(timeline_chapters_after_edit(
+            db.undo_segment_edit(edit_id, from_ts, to_ts)
+                .map_err(|e| format!("{e:#}"))?,
+        ))
     })
 }
 

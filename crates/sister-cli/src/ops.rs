@@ -1285,7 +1285,7 @@ pub mod queries {
                 } else {
                     format!("{} 筆", r.hits)
                 },
-                if r.shape == "recent" {
+                if r.shape == "recent" || r.shape == "range" {
                     "（時間）"
                 } else {
                     ""
@@ -2651,8 +2651,8 @@ pub mod query {
         // 份——兩邊各判各的，同一句話遲早會在兩個地方得到兩種答案。
         // 計時涵蓋兩條路徑：使用者感受到的是整個回答的延遲，不是單一次查詢。
         let started = std::time::Instant::now();
-        let retrieval =
-            sister_core::retrieval::RetrievalProfile::TextAndFacts.retrieve(&db, text, limit)?;
+        let retrieval = sister_core::retrieval::RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, text, limit)?;
         // 章節在檢索之後另算。不進 retrieval：recall harness 要求每一筆都
         // 對得回單一 `at_ms`，而章節是一個範圍。
         let asked_chapters = db.chapters_for_question(text, sister_core::now_ms())?;
@@ -2752,6 +2752,16 @@ pub mod query {
         if shape == sister_core::question::Shape::Recent {
             println!(
                 "🕘 「{text}」問的是時間，不是字——沒有比對，這是最後看到的 {} 件事，{:.1} ms",
+                hits.len(),
+                elapsed.as_secs_f64() * 1000.0
+            );
+            // 空手的時候不在這裡講話。下面那個 `hits.is_empty()` 已經會印
+            // 「沒有找到。」加上 `blind_lines`，這裡再印一次就是同一件事講兩
+            // 遍——而它以前印的是「什麼都還沒看到——先跑 `sister record`」，
+            // 和底下那幾行講的還是不同的故事。
+        } else if shape == sister_core::question::Shape::Range {
+            println!(
+                "🕘 「{text}」問的是一段日子，不是字——沒有拿時間詞去比對，這是那段時間看到的 {} 件事，{:.1} ms",
                 hits.len(),
                 elapsed.as_secs_f64() * 1000.0
             );
@@ -11165,7 +11175,8 @@ pub mod replay {
         }
 
         #[test]
-        fn evaluate_writes_the_two_real_profiles_and_nulls_for_unmeasured_metrics() -> Result<()> {
+        fn evaluate_writes_the_three_real_profiles_and_nulls_for_unmeasured_metrics() -> Result<()>
+        {
             let tmp = crate::ops::tmp::Tmp::new("replay-evaluate");
             let corpus = tmp.0.join("fixture.corpus.json");
             let questions = tmp.0.join("fixture.questions.json");
@@ -11183,6 +11194,7 @@ pub mod replay {
             let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&report)?)?;
             assert_eq!(value["configurations"][0]["name"], "baseline_text");
             assert_eq!(value["configurations"][1]["name"], "facts");
+            assert_eq!(value["configurations"][2]["name"], "facts_session");
             assert_eq!(
                 value["configurations"][1]["metrics"]["answer_accuracy"]["passed"],
                 5

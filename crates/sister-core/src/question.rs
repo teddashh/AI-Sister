@@ -44,6 +44,9 @@ pub enum Shape {
     Keywords,
     /// 他問的是「最近」。答案來自時間，不是來自比對。
     Recent,
+    /// 他問的是一段日曆時間（「昨天下午」），剩下的字不夠當關鍵字。
+    /// 答案是那段時間裡的紀錄，不是拿「弄」去比對螢幕。
+    Range,
 }
 
 impl Shape {
@@ -57,6 +60,7 @@ impl Shape {
         match self {
             Shape::Keywords => "keywords",
             Shape::Recent => "recent",
+            Shape::Range => "range",
         }
     }
 }
@@ -85,6 +89,8 @@ const FILLER_ASCII: &[&str] = &[
 enum Role {
     /// 「剛剛」。指向時間。
     Recent,
+    /// 「昨天」「下午」。日曆範圍，已經被 [`time_range`] 用掉，不該再進 FTS。
+    Calendar,
     /// 虛字。拿掉不改變他在問什麼。
     Filler,
     /// 認不得——那多半就是他真正想問的東西。
@@ -129,10 +135,10 @@ fn words(question: &str) -> Vec<(usize, usize, Role)> {
             continue;
         }
 
-        // 中文：由長到短試，「剛剛」要贏過「剛」。
+        // 中文：由長到短試，「剛剛」要贏過「剛」，「昨天下午」要贏過單字虛字。
         match longest(rest) {
-            Some((len, recent)) => {
-                out.push((i, i + len, if recent { Role::Recent } else { Role::Filler }));
+            Some((len, role)) => {
+                out.push((i, i + len, role));
                 i += len;
             }
             // 認不得的中文一個字一個字往前走。連著的幾個字在 `terms` 那邊會
@@ -150,16 +156,31 @@ fn words(question: &str) -> Vec<(usize, usize, Role)> {
 /// 他在問什麼形狀的問題。
 pub fn shape(question: &str) -> Shape {
     let words = words(question);
-    // 只要句子裡還剩下任何一個講得出內容的詞，就走關鍵字——誤判的代價不對稱，
-    // 見模組開頭。
-    if words.iter().any(|&(_, _, r)| r == Role::Content) {
+    let content_chars = content_span_chars(question, &words);
+    // 剩下兩個字以上的內容，走關鍵字——誤判的代價不對稱，見模組開頭。
+    // 「我昨天下午在弄什麼」只剩一個「弄」，那不是關鍵字，是在問那段時間。
+    if content_chars >= 2 {
         return Shape::Keywords;
+    }
+    if scan_time_words(question).is_some() {
+        return Shape::Range;
     }
     if words.iter().any(|&(_, _, r)| r == Role::Recent) {
         Shape::Recent
     } else {
         Shape::Keywords
     }
+}
+
+fn content_span_chars(question: &str, words: &[(usize, usize, Role)]) -> usize {
+    let Some(lo) = words.iter().position(|&(_, _, r)| r == Role::Content) else {
+        return 0;
+    };
+    let hi = words
+        .iter()
+        .rposition(|&(_, _, r)| r == Role::Content)
+        .expect("有第一個就有最後一個");
+    question[words[lo].0..words[hi].1].chars().count()
 }
 
 /// 這句話裡真正該拿去比對螢幕的是哪一段：**從第一個內容詞到最後一個內容詞。**
@@ -262,15 +283,25 @@ pub fn terms_with_retreat(question: &str) -> (&str, bool) {
     (terms, retreated && terms != question.trim())
 }
 
-/// 在開頭比對得到的最長那個詞，以及它是不是「剛剛」。
-fn longest(rest: &str) -> Option<(usize, bool)> {
-    let mut best: Option<(usize, bool)> = None;
-    for (list, recent) in [(RECENT_CJK, true), (FILLER_CJK, false)] {
-        for token in list {
-            if rest.starts_with(token) && best.is_none_or(|(len, _)| token.len() > len) {
-                best = Some((token.len(), recent));
-            }
+/// 在開頭比對得到的最長那個詞，以及它的角色。
+fn longest(rest: &str) -> Option<(usize, Role)> {
+    let mut best: Option<(usize, Role)> = None;
+    let mut consider = |token: &str, role: Role| {
+        if rest.starts_with(token) && best.is_none_or(|(len, _)| token.len() > len) {
+            best = Some((token.len(), role));
         }
+    };
+    for (token, _) in DAY_TOKENS {
+        consider(token, Role::Calendar);
+    }
+    for (token, _) in PERIOD_TOKENS {
+        consider(token, Role::Calendar);
+    }
+    for token in RECENT_CJK {
+        consider(token, Role::Recent);
+    }
+    for token in FILLER_CJK {
+        consider(token, Role::Filler);
     }
     best
 }
@@ -758,8 +789,25 @@ mod tests {
         assert_eq!(r.from, hour_on(2026, 8, 25, 12));
         assert_eq!(r.to, hour_on(2026, 8, 25, 18));
         assert!(r.from < r.to);
-        // 和 Shape 正交：這句話仍是關鍵字（有「弄」）。
-        assert_eq!(shape("我昨天下午在弄什麼"), Shape::Keywords);
+        // 「弄」一個字不夠當關鍵字；這句話問的是那段時間。
+        assert_eq!(shape("我昨天下午在弄什麼"), Shape::Range);
+        assert_eq!(terms("我昨天下午在弄什麼"), "在弄");
+        assert_eq!(terms("昨天下午的週報"), "週報");
+        assert_eq!(terms("昨天的電話"), "電話");
+        assert_eq!(shape("昨天下午的週報"), Shape::Keywords);
+        assert_eq!(shape("昨天的電話"), Shape::Keywords);
+    }
+
+    /// 時間詞已經被 `time_range` 用掉，不准再拿去比對螢幕。
+    #[test]
+    fn calendar_words_are_stripped_from_what_she_looks_for() {
+        assert_eq!(terms("上禮拜的會議記錄"), "會議記錄");
+        assert_eq!(terms("昨天看到的期限"), "期限");
+        // 退回邏輯還在：只剩一個實字就往左黏，不要把時間詞黏回來。
+        assert_eq!(terms("昨天那個事件"), "事件");
+        let (t, retreated) = terms_with_retreat("我昨天下午在弄什麼");
+        assert_eq!(t, "在弄");
+        assert!(retreated, "「弄」不足兩字，退過而且不是原句");
     }
 
     #[test]
@@ -850,6 +898,9 @@ mod tests {
         ] {
             assert!(time_range(q, now).is_none(), "{q:?} 不該被解成一段時間");
         }
+        assert_eq!(shape("下午"), Shape::Keywords, "光一個時段不夠成日曆範圍");
+        assert_eq!(shape("昨天"), Shape::Range);
+        assert_eq!(shape("昨天下午"), Shape::Range);
     }
 
     /// 同一句話、兩個 now，答案必須跟著 now 走。這就是 `now` 是參數的理由。
@@ -874,6 +925,8 @@ mod tests {
             "客服",
             "what just happened",
             "justify",
+            "我昨天下午在弄什麼",
+            "昨天下午的週報",
             "",
         ] {
             let stripped = terms(q);

@@ -38,12 +38,22 @@ pub struct Activity {
     /// 答案若要講，講這個數字。不要把「5 個 10 分鐘的 segment」講成她判斷出
     /// 他專注了 50 分鐘——那 50 是安全閥切出來的份數乘上去的。
     pub segment_count: usize,
+    /// 底下的分鐘級段落。合併／切開仍對這一層；這一層是視圖。
+    pub segments: Vec<Segment>,
 }
 
 impl Activity {
     /// 核心時長。相鄰 segment 的 5 秒 margin 重疊不計入。
     pub fn core_ms(&self) -> Millis {
         self.core_ended_at.saturating_sub(self.core_started_at)
+    }
+
+    /// 套用過、還留在這件事上的那一次編輯。沒有就是 `None`。
+    ///
+    /// 人改的是分鐘級邊界。一件活動若含好幾段，取最後碰到的那一筆——
+    /// 撤銷還是對那一筆 `segment_edit.id`。
+    pub fn last_edit(&self) -> Option<crate::segment_edit::AppliedEdit> {
+        self.segments.iter().rev().find_map(|s| s.last_edit)
     }
 }
 
@@ -87,6 +97,7 @@ fn from_segments(segs: &[Segment]) -> Option<Activity> {
         title,
         host,
         segment_count: segs.len(),
+        segments: segs.to_vec(),
     })
 }
 
@@ -491,6 +502,108 @@ mod tests {
             group(&segs).len(),
             2,
             "剛好落在 10 分鐘邊上的 app 變更仍是兩件事"
+        );
+    }
+
+    /// 活動級是視圖：合併／切開寫在分鐘級，聚合必須還能套、還原、不重複套。
+    #[test]
+    fn grouping_after_edits_still_sees_the_manual_boundary() {
+        use crate::segment_edit::{StoredEdit, apply_edits};
+
+        let segs = vec![
+            seg(0, TIME_CAP_MS, "code.exe", "db.rs", Vec::new()),
+            seg(
+                TIME_CAP_MS,
+                2 * TIME_CAP_MS,
+                "code.exe",
+                "db.rs",
+                vec![CutKind::TimeCap],
+            ),
+            seg(
+                2 * TIME_CAP_MS,
+                3 * TIME_CAP_MS,
+                "code.exe",
+                "db.rs",
+                vec![CutKind::TimeCap],
+            ),
+        ];
+        assert_eq!(group(&segs).len(), 1);
+        assert_eq!(group(&segs)[0].segment_count, 3);
+
+        let split = StoredEdit {
+            id: 1,
+            ts: 1,
+            kind: "split".into(),
+            at_ms: Some(TIME_CAP_MS + 5 * 60_000),
+            from_ms: Some(TIME_CAP_MS),
+            to_ms: Some(2 * TIME_CAP_MS),
+            algo_cut_kinds: None,
+            algo_confidence: None,
+            target_id: None,
+        };
+        let after_split = apply_edits(segs.clone(), std::slice::from_ref(&split));
+        let acts = group(&after_split);
+        assert_eq!(acts.len(), 2, "切開是硬邊界，聚合不准黏回去");
+        assert_eq!(acts[0].segments.len() + acts[1].segments.len(), 4);
+        assert!(acts.iter().any(|a| a.last_edit().is_some()));
+
+        let undo = StoredEdit {
+            id: 2,
+            ts: 2,
+            kind: "undo".into(),
+            at_ms: None,
+            from_ms: None,
+            to_ms: None,
+            algo_cut_kinds: None,
+            algo_confidence: None,
+            target_id: Some(1),
+        };
+        let after_undo = apply_edits(segs.clone(), &[split.clone(), undo]);
+        assert_eq!(
+            group(&after_undo).len(),
+            1,
+            "撤銷之後三個 time_cap 再併回一件"
+        );
+
+        // 同一筆編輯再套一次不准變成兩次切開。
+        let twice = apply_edits(segs, &[split.clone(), split]);
+        assert_eq!(group(&twice).len(), 2, "同一刀套兩次仍是兩件，不是切成三件");
+    }
+
+    #[test]
+    fn merging_two_activities_maps_to_the_segment_boundary() {
+        use crate::segment_edit::{StoredEdit, apply_edits};
+
+        let segs = vec![
+            seg(0, TIME_CAP_MS, "code.exe", "db.rs", Vec::new()),
+            seg(
+                TIME_CAP_MS,
+                TIME_CAP_MS + 60_000,
+                "chrome.exe",
+                "docs",
+                vec![CutKind::AppChange],
+            ),
+        ];
+        assert_eq!(group(&segs).len(), 2);
+        let merge = StoredEdit {
+            id: 1,
+            ts: 1,
+            kind: "merge".into(),
+            at_ms: Some(TIME_CAP_MS),
+            from_ms: Some(0),
+            to_ms: Some(TIME_CAP_MS + 60_000),
+            algo_cut_kinds: Some(vec![CutKind::AppChange]),
+            algo_confidence: Some(0.5),
+            target_id: None,
+        };
+        let after = apply_edits(segs, &[merge]);
+        let acts = group(&after);
+        assert_eq!(acts.len(), 1, "合併兩件事對回那道 segment 邊界");
+        assert_eq!(acts[0].segment_count, 1);
+        assert_eq!(
+            acts[0].last_edit().map(|e| e.id),
+            Some(1),
+            "活動上看得到那一筆編輯"
         );
     }
 }

@@ -1,0 +1,134 @@
+{
+  "format_version": 1,
+  "name": "synthetic-session-afternoon",
+  "duration_ms": 6900000,
+  "review": "reviewed",
+  "redactions": {
+    "money": 0,
+    "phone": 0,
+    "email": 0,
+    "id_like": 0,
+    "secrets": 0
+  },
+  "events": [
+    {
+      "type": "focus",
+      "at_ms": 0,
+      "kind": "Focus",
+      "snapshot": {
+        "app_id": "code.exe",
+        "app_name": null,
+        "window_title": "db.rs — AI-Sister",
+        "url": null
+      }
+    },
+    {
+      "type": "frame",
+      "at_ms": 30000,
+      "monitor": 0,
+      "width": 1280,
+      "height": 720,
+      "dhash": 11,
+      "dup_run": 0,
+      "focus": {
+        "app_id": "code.exe",
+        "app_name": null,
+        "window_title": "db.rs — AI-Sister",
+        "url": null
+      },
+      "ocr": [
+        {
+          "text": "pub fn chapters_for_range",
+          "x": 20,
+          "y": 30,
+          "w": 520,
+          "h": 30,
+          "confidence": 1.0
+        }
+      ]
+    },
+    {
+      "type": "focus",
+      "at_ms": 2700000,
+      "kind": "Focus",
+      "snapshot": {
+        "app_id": "chrome.exe",
+        "app_name": null,
+        "window_title": "SQLite user_version 文件",
+        "url": "https://sqlite.org/pragma.html"
+      }
+    },
+    {
+      "type": "frame",
+      "at_ms": 2730000,
+      "monitor": 0,
+      "width": 1280,
+      "height": 720,
+      "dhash": 12,
+      "dup_run": 0,
+      "focus": {
+        "app_id": "chrome.exe",
+        "app_name": null,
+        "window_title": "SQLite user_version 文件",
+        "url": "https://sqlite.org/pragma.html"
+      },
+      "ocr": [
+        {
+          "text": "PRAGMA user_version",
+          "x": 20,
+          "y": 30,
+          "w": 520,
+          "h": 30,
+          "confidence": 1.0
+        }
+      ]
+    },
+    {
+      "type": "focus",
+      "at_ms": 4200000,
+      "kind": "Focus",
+      "snapshot": {
+        "app_id": "notion.exe",
+        "app_name": null,
+        "window_title": "週報",
+        "url": null
+      }
+    },
+    {
+      "type": "frame",
+      "at_ms": 4230000,
+      "monitor": 0,
+      "width": 1280,
+      "height": 720,
+      "dhash": 13,
+      "dup_run": 0,
+      "focus": {
+        "app_id": "notion.exe",
+        "app_name": null,
+        "window_title": "週報",
+        "url": null
+      },
+      "ocr": [
+        {
+          "text": "本週完成時間軸",
+          "x": 20,
+          "y": 30,
+          "w": 520,
+          "h": 30,
+          "confidence": 1.0
+        }
+      ]
+    },
+    {
+      "type": "focus",
+      "at_ms": 6900000,
+      "kind": "Focus",
+      "snapshot": {
+        "app_id": "notion.exe",
+        "app_name": null,
+        "window_title": "週報",
+        "url": null
+      }
+    }
+  ]
+}

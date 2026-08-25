@@ -2234,6 +2234,65 @@ impl Db {
         Ok(hits)
     }
 
+    /// 一段日曆時間裡她記下來的字，舊的在前。
+    ///
+    /// 「我昨天下午在弄什麼」問的是那幾個小時，不是拿「弄」去比對螢幕。
+    /// 連著重複的字收起來，理由和 [`Self::recent`] 一樣。
+    pub fn chunks_in_range(
+        &self,
+        from_ts: Millis,
+        to_ts: Millis,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        if from_ts >= to_ts || limit == 0 {
+            return Ok(Vec::new());
+        }
+        const OVERFETCH: usize = 12;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, source_kind, frame_id, app_id, window_title, url, text
+             FROM text_chunks
+             WHERE ts >= ?1 AND ts < ?2
+             ORDER BY ts ASC, id ASC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                from_ts,
+                to_ts,
+                (limit.saturating_mul(OVERFETCH).max(OVERFETCH)) as i64
+            ],
+            |row| {
+                let kind: String = row.get(2)?;
+                let text: String = row.get(7)?;
+                Ok(SearchHit {
+                    chunk_id: row.get(0)?,
+                    ts: row.get(1)?,
+                    source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                    frame_id: row.get(3)?,
+                    app_id: row.get(4)?,
+                    window_title: row.get(5)?,
+                    url: row.get(6)?,
+                    snippet: text.chars().take(60).collect(),
+                    text,
+                    score: 0.0,
+                })
+            },
+        )?;
+
+        let mut hits: Vec<SearchHit> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for hit in rows.flatten() {
+            if !seen.insert(hit.text.clone()) {
+                continue;
+            }
+            hits.push(hit);
+            if hits.len() >= limit {
+                break;
+            }
+        }
+        Ok(hits)
+    }
+
     // ---------- 題庫 ----------
 
     /// 記下一次提問。回傳那一列的 id——點擊要靠它掛回來。
@@ -3021,6 +3080,16 @@ impl Db {
         };
         let segments = self.chapters_for_range(range.from, range.to)?;
         Ok(Some((range, crate::activity::group(&segments))))
+    }
+
+    /// 時間軸上的一格：活動級。底下的 `segment` 仍是分鐘級，編輯對那一層。
+    pub fn activities_for_range(
+        &mut self,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<Vec<crate::activity::Activity>> {
+        let segments = self.chapters_for_range(from_ts, to_ts)?;
+        Ok(crate::activity::group(&segments))
     }
 
     /// 把相鄰兩段併成一段。寫進 `segment_edit` 再重算當天。
@@ -4178,7 +4247,7 @@ pub struct QueryLogEntry<'a> {
     pub ts: Millis,
     /// 他打的**原話**。不做正規化：題庫要的正是真實的用詞。
     pub question: &'a str,
-    /// `"recent"`／`"keywords"`。走哪條路本身就是一個要驗的判斷
+    /// `"recent"`／`"keywords"`／`"range"`。走哪條路本身就是一個要驗的判斷
     /// （見 [`crate::question::shape`]）。
     pub shape: &'a str,
     /// 她一共**給了他幾筆東西**——不是 [`Db::search`] 回了幾筆。
@@ -5871,6 +5940,61 @@ mod tests {
             count_table(&db, "segment_edit"),
             2,
             "撤銷是多一列，不是刪掉"
+        );
+    }
+
+    /// 時間軸改畫活動級之後，分鐘級的合併／切開／撤銷還是同一套 `segment_edit`。
+    #[test]
+    fn activity_view_applies_and_undoes_segment_edits() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let min = 60_000i64;
+        for e in [
+            focus_at(0, "code.exe", "db.rs", None),
+            focus_at(45 * min, "chrome.exe", "docs", Some("https://sqlite.org/")),
+            focus_at(70 * min, "notion.exe", "週報", None),
+            focus_at(115 * min, "notion.exe", "週報", None),
+        ] {
+            db.insert_focus(s, &e).expect("focus");
+        }
+        let acts = db.activities_for_range(0, 120 * min).expect("activities");
+        assert_eq!(acts.len(), 3, "三件事");
+        assert_eq!(
+            acts.iter().map(|a| a.segment_count).collect::<Vec<_>>(),
+            vec![5, 3, 5]
+        );
+        let segs: usize = acts.iter().map(|a| a.segments.len()).sum();
+        assert_eq!(segs, 13, "展開看得到底下的分鐘級");
+
+        // 合併兩件活動 = 合併左件最後一段和右件第一段。
+        let left = acts[0].segments.last().unwrap().core_started_at;
+        let right = acts[1].segments[0].core_started_at;
+        db.merge_chapters(left, right, 0, 120 * min).expect("merge");
+        let after_merge = db.activities_for_range(0, 120 * min).expect("merged");
+        assert_eq!(after_merge.len(), 2, "兩件活動併成一件");
+        assert!(
+            after_merge[0].last_edit().is_some(),
+            "併過的那一件要掛得回 segment_edit"
+        );
+        assert_eq!(count_table(&db, "segment_edit"), 1, "只寫一列，不重複套");
+
+        let edit_id = after_merge[0].last_edit().unwrap().id;
+        db.undo_segment_edit(edit_id, 0, 120 * min).expect("undo");
+        let after_undo = db.activities_for_range(0, 120 * min).expect("undone");
+        assert_eq!(after_undo.len(), 3, "撤銷回到三件");
+        assert_eq!(count_table(&db, "segment_edit"), 2, "撤銷是多一列");
+
+        // 在第一件活動中間切開：硬邊界，不准黏回去。
+        let host = &after_undo[0];
+        let at = (host.core_started_at + host.core_ended_at) / 2;
+        db.split_chapter(at, 0, 120 * min).expect("split");
+        let after_split = db.activities_for_range(0, 120 * min).expect("split");
+        assert_eq!(after_split.len(), 4, "切開把一件拆成兩件，另外兩件不動");
+        assert!(
+            after_split.iter().any(|a| a
+                .last_edit()
+                .is_some_and(|e| e.kind == crate::segment_edit::EditKind::Split)),
+            "切開要掛在活動上看得到"
         );
     }
 

@@ -262,8 +262,8 @@ capture 層本身就是 recorder。
 
 **Exit criteria**
 - [ ] 斷句邊界 F1 ≥ 0.75（對手標語料；達不到就修訊號，不上 LLM 救）。
-- [ ] 「我昨天下午在弄什麼」可用 session 章節 + facts 回答（仍是檢索式，無生成推理）。
-- [ ] 找回率相對 Phase 2 baseline 提升可量測（+facts+session 配置）。
+- [x] 「我昨天下午在弄什麼」可用 session 章節 + facts 回答（仍是檢索式，無生成推理）。
+- [x] 找回率相對 Phase 2 baseline 提升可量測（+facts+session 配置）。
 
 ---
 

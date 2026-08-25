@@ -372,11 +372,30 @@ function paint(view, day, now, chapters) {
   }
 }
 
-/** 段落標題只講程式真的有的東西：app、標題或 host、長度。 */
+/** 段落標題只講程式真的有的東西：app、標題或 host、核心時長、併了幾段。 */
 function chapterLabel(ch) {
-  const dur = lasted(Math.max(0, ch.end_ts - ch.start_ts));
+  const durMs =
+    typeof ch.core_ms === "number"
+      ? ch.core_ms
+      : Math.max(0, (ch.core_end_ts ?? ch.end_ts) - (ch.core_start_ts ?? ch.start_ts));
+  const dur = lasted(Math.max(0, durMs));
+  const n = ch.segment_count;
+  const howLong = typeof n === "number" && n > 1 ? `${dur}，${n} 段併成` : dur;
   const what = [ch.app, ch.title || ch.host].filter(Boolean).join(" · ");
-  return what ? `${what}　${dur}` : `一段紀錄　${dur}`;
+  return what ? `${what}　${howLong}` : `一段紀錄　${howLong}`;
+}
+
+/** 活動級「與下一段合併」對回分鐘級：左件最後一段、右件第一段。 */
+function mergeCores(ch, next) {
+  const lastOf = (c) => {
+    const segs = Array.isArray(c.segments) && c.segments.length > 0 ? c.segments : [c];
+    return segs[segs.length - 1].core_start_ts;
+  };
+  const firstOf = (c) => {
+    const segs = Array.isArray(c.segments) && c.segments.length > 0 ? c.segments : [c];
+    return segs[0].core_start_ts;
+  };
+  return { left: lastOf(ch), right: firstOf(next) };
 }
 
 function cutWords(ch) {
@@ -496,10 +515,11 @@ function chapterRow(ch, rows, dayStart, next) {
     merge.addEventListener("click", () => {
       const bounds = dayBounds();
       if (bounds === null) return;
+      const cores = mergeCores(ch, next);
       void runChapterEdit(() =>
         invoke("timeline_merge_chapters", {
-          leftCoreStart: ch.core_start_ts,
-          rightCoreStart: next.core_start_ts,
+          leftCoreStart: cores.left,
+          rightCoreStart: cores.right,
           fromTs: bounds.fromTs,
           toTs: bounds.toTs,
         }),
@@ -564,6 +584,16 @@ function chapterRow(ch, rows, dayStart, next) {
   const inner = document.createElement("ol");
   inner.className = "chapter-body";
   inner.hidden = true;
+  const segs = Array.isArray(ch.segments) ? ch.segments : [];
+  if (segs.length > 1) {
+    const note = document.createElement("li");
+    note.className = "chapter-pieces";
+    note.textContent = `由 ${segs.length} 個分鐘級段落併成。合併／切開仍作用在下面這幾段。`;
+    inner.append(note);
+    for (let i = 0; i < segs.length; i++) {
+      inner.append(pieceRow(segs[i], segs[i + 1] ?? null));
+    }
+  }
   if (rows.length === 0) {
     const empty = document.createElement("li");
     empty.className = "empty";
@@ -581,6 +611,68 @@ function chapterRow(ch, rows, dayStart, next) {
   });
 
   li.append(btn, actions, splitRow, inner);
+  return li;
+}
+
+/** 活動底下的分鐘級一段。合併／切開仍作用在這一層。 */
+function pieceRow(seg, next) {
+  const li = document.createElement("li");
+  li.className = "chapter-piece";
+  const label = document.createElement("p");
+  label.className = "chapter-piece-label";
+  const dur = lasted(
+    Math.max(0, (seg.core_end_ts ?? seg.end_ts) - (seg.core_start_ts ?? seg.start_ts)),
+  );
+  const what = [seg.app, seg.title || seg.host].filter(Boolean).join(" · ");
+  label.textContent = `${hhmm.format(seg.core_start_ts ?? seg.start_ts)}–${hhmm.format(seg.core_end_ts ?? seg.end_ts)}　${what || "一段"}　${dur}`;
+  const cut = cutWords(seg);
+  if (cut) {
+    const em = document.createElement("em");
+    em.textContent = `　切在${cut}`;
+    label.append(em);
+  }
+  if (seg.edited === "merge") label.append(chip("你併過的", "edit"));
+  if (seg.edited === "split") label.append(chip("你切開的", "edit"));
+  li.append(label);
+
+  const actions = document.createElement("div");
+  actions.className = "chapter-piece-actions";
+  if (next) {
+    const merge = document.createElement("button");
+    merge.type = "button";
+    merge.textContent = "與下一段合併";
+    merge.addEventListener("click", () => {
+      const bounds = dayBounds();
+      if (bounds === null) return;
+      void runChapterEdit(() =>
+        invoke("timeline_merge_chapters", {
+          leftCoreStart: seg.core_start_ts,
+          rightCoreStart: next.core_start_ts,
+          fromTs: bounds.fromTs,
+          toTs: bounds.toTs,
+        }),
+      );
+    });
+    actions.append(merge);
+  }
+  if (seg.edit_id != null) {
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.textContent = "撤銷這次修改";
+    undo.addEventListener("click", () => {
+      const bounds = dayBounds();
+      if (bounds === null) return;
+      void runChapterEdit(() =>
+        invoke("timeline_undo_segment_edit", {
+          editId: seg.edit_id,
+          fromTs: bounds.fromTs,
+          toTs: bounds.toTs,
+        }),
+      );
+    });
+    actions.append(undo);
+  }
+  if (actions.childElementCount > 0) li.append(actions);
   return li;
 }
 
@@ -1036,50 +1128,137 @@ function fakeBackend(mode = "1") {
   const dayOf = (ts) =>
     Math.floor((ts + tzOffsetMs()) / DAY) * DAY - tzOffsetMs();
 
-  /** 每一天的章節種子 + 編輯紀錄。forget 之後清掉，讓剩下的 moments 重算。 */
+  /** 每一天的分鐘級段落 + 編輯紀錄。forget 之後清掉，讓剩下的 moments 重算。 */
   const chapterDays = new Map();
+  const TEN = 10 * 60_000;
 
-  function seedChapters(fromTs, toTs) {
+  function hostOf(m) {
+    if (!m.url) return null;
+    const host = m.url
+      .replace(/^[a-z]+:\/\//i, "")
+      .split("/")[0]
+      .split(":")[0]
+      .toLowerCase();
+    return host.includes(".") ? host : null;
+  }
+
+  function seedSegments(fromTs, toTs) {
     const ms = hit(fromTs, toTs);
-    const ch = [];
+    const segs = [];
     for (let i = 0; i < ms.length; i++) {
       const m = ms[i];
+      const next = ms[i + 1];
       const start = m.ts;
-      const end = ms[i + 1] ? ms[i + 1].ts : m.ts + 60_000;
-      const host = m.url
-        ? m.url
-            .replace(/^[a-z]+:\/\//i, "")
-            .split("/")[0]
-            .split(":")[0]
-            .toLowerCase()
-        : null;
-      ch.push({
+      let end = next ? next.ts : m.ts + 60_000;
+      const host = hostOf(m);
+      // 主日那筆 Code.exe 拉長成 45 分鐘，示範 10 分鐘上限切碎再併回一件。
+      if (m.app === "Code.exe" && !next) {
+        end = start + 45 * 60_000;
+      } else if (m.app === "Code.exe" && next && next.ts - start > TEN) {
+        end = start + 45 * 60_000;
+      }
+      if (m.app === "Code.exe" && end - start > TEN) {
+        let t = start;
+        let first = true;
+        while (t < end) {
+          const slice = Math.min(TEN, end - t);
+          segs.push({
+            start_ts: t,
+            end_ts: t + slice,
+            core_start_ts: t,
+            core_end_ts: t + slice,
+            core_ms: slice,
+            app: m.app,
+            title: m.title,
+            host,
+            cut_kinds: first ? (segs.length === 0 ? [] : ["app_change"]) : ["time_cap"],
+            confidence: first ? (segs.length === 0 ? null : 0.5) : 0.4,
+            edited: null,
+            edit_id: null,
+          });
+          t += slice;
+          first = false;
+        }
+        continue;
+      }
+      segs.push({
         start_ts: start,
         end_ts: end,
         core_start_ts: start,
         core_end_ts: end,
+        core_ms: end - start,
         app: m.app,
         title: m.title,
-        host: host && host.includes(".") ? host : null,
-        cut_kinds: i === 0 ? [] : ["app_change"],
-        confidence: i === 0 ? null : 0.5,
+        host,
+        cut_kinds: segs.length === 0 ? [] : ["app_change"],
+        confidence: segs.length === 0 ? null : 0.5,
         edited: null,
         edit_id: null,
       });
     }
-    return ch;
+    return segs;
+  }
+
+  function continues(prev, next) {
+    return (
+      next.core_start_ts <= prev.core_end_ts &&
+      Array.isArray(next.cut_kinds) &&
+      next.cut_kinds.length === 1 &&
+      next.cut_kinds[0] === "time_cap"
+    );
+  }
+
+  function groupActivities(segs) {
+    const ranges = [];
+    for (let i = 0; i < segs.length; i++) {
+      if (ranges.length > 0 && continues(segs[ranges[ranges.length - 1][1] - 1], segs[i])) {
+        ranges[ranges.length - 1][1] = i + 1;
+      } else {
+        ranges.push([i, i + 1]);
+      }
+    }
+    return ranges.map(([from, to]) => {
+      const slice = segs.slice(from, to);
+      const first = slice[0];
+      const last = slice[slice.length - 1];
+      const lastEdit = [...slice].reverse().find((s) => s.edit_id != null) ?? null;
+      return {
+        start_ts: first.start_ts,
+        end_ts: last.end_ts,
+        core_start_ts: first.core_start_ts,
+        core_end_ts: last.core_end_ts,
+        core_ms: last.core_end_ts - first.core_start_ts,
+        segment_count: slice.length,
+        app: first.app,
+        title: first.title,
+        host: first.host,
+        cut_kinds: first.cut_kinds,
+        confidence: first.confidence,
+        edited: lastEdit ? lastEdit.edited : null,
+        edit_id: lastEdit ? lastEdit.edit_id : null,
+        segments: slice,
+      };
+    });
   }
 
   function chapterState(fromTs, toTs) {
     if (!chapterDays.has(fromTs)) {
-      const original = seedChapters(fromTs, toTs);
-      chapterDays.set(fromTs, { original, edits: [], nextId: 1 });
+      const original = seedSegments(fromTs, toTs);
+      const edits = [];
+      let nextId = 1;
+      // 主日預先切開一次，好讓畫面上看得到「你切開的」。
+      const code = original.find((s) => s.app === "Code.exe" && s.cut_kinds.includes("time_cap"));
+      if (code) {
+        const at = code.core_start_ts + Math.floor((code.core_end_ts - code.core_start_ts) / 2);
+        edits.push({ id: nextId++, kind: "split", at, undone: false });
+      }
+      chapterDays.set(fromTs, { original, edits, nextId });
     }
     return chapterDays.get(fromTs);
   }
 
-  function replayChapters(state) {
-    let ch = state.original.map((c) => ({
+  function replaySegments(state) {
+    let segs = state.original.map((c) => ({
       ...c,
       edited: null,
       edit_id: null,
@@ -1087,31 +1266,33 @@ function fakeBackend(mode = "1") {
     for (const e of state.edits) {
       if (e.undone) continue;
       if (e.kind === "merge") {
-        const i = ch.findIndex((c) => c.core_start_ts === e.at);
+        const i = segs.findIndex((c) => c.core_start_ts === e.at);
         if (i <= 0) continue;
-        const left = ch[i - 1];
-        const right = ch[i];
+        const left = segs[i - 1];
+        const right = segs[i];
         if (left.core_end_ts !== right.core_start_ts) continue;
-        ch.splice(i - 1, 2, {
+        segs.splice(i - 1, 2, {
           ...left,
           end_ts: right.end_ts,
           core_end_ts: right.core_end_ts,
+          core_ms: right.core_end_ts - left.core_start_ts,
           edited: "merge",
           edit_id: e.id,
         });
       } else if (e.kind === "split") {
-        const i = ch.findIndex(
+        const i = segs.findIndex(
           (c) => c.core_start_ts < e.at && e.at < c.core_end_ts,
         );
         if (i < 0) continue;
-        const orig = ch[i];
-        ch.splice(
+        const orig = segs[i];
+        segs.splice(
           i,
           1,
           {
             ...orig,
             end_ts: e.at,
             core_end_ts: e.at,
+            core_ms: e.at - orig.core_start_ts,
             edited: "split",
             edit_id: e.id,
           },
@@ -1119,6 +1300,7 @@ function fakeBackend(mode = "1") {
             ...orig,
             start_ts: e.at,
             core_start_ts: e.at,
+            core_ms: orig.core_end_ts - e.at,
             cut_kinds: [],
             confidence: null,
             edited: "split",
@@ -1127,7 +1309,11 @@ function fakeBackend(mode = "1") {
         );
       }
     }
-    return ch;
+    return segs;
+  }
+
+  function replayChapters(state) {
+    return groupActivities(replaySegments(state));
   }
 
   return async (cmd, arg) => {
@@ -1189,9 +1375,9 @@ function fakeBackend(mode = "1") {
       }
       case "timeline_merge_chapters": {
         const st = chapterState(arg.fromTs, arg.toTs);
-        const ch = replayChapters(st);
-        const left = ch.find((c) => c.core_start_ts === arg.leftCoreStart);
-        const right = ch.find((c) => c.core_start_ts === arg.rightCoreStart);
+        const segs = replaySegments(st);
+        const left = segs.find((c) => c.core_start_ts === arg.leftCoreStart);
+        const right = segs.find((c) => c.core_start_ts === arg.rightCoreStart);
         if (!left || !right) throw new Error("找不到要合併的那兩段。");
         if (left.core_end_ts !== right.core_start_ts) {
           throw new Error("這兩段現在不是相鄰的，沒有合併。");
@@ -1206,8 +1392,8 @@ function fakeBackend(mode = "1") {
       }
       case "timeline_split_chapter": {
         const st = chapterState(arg.fromTs, arg.toTs);
-        const ch = replayChapters(st);
-        const host = ch.find(
+        const segs = replaySegments(st);
+        const host = segs.find(
           (c) => c.core_start_ts < arg.atTs && arg.atTs < c.core_end_ts,
         );
         if (!host) throw new Error("這個時間不在任何一段的中間，沒有切開。");

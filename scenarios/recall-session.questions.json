@@ -1,0 +1,36 @@
+{
+  "format_version": 1,
+  "name": "synthetic-session-qa",
+  "review": "reviewed",
+  "corpus_fingerprint": "fnv1a64:1c096746d24aac67",
+  "questions": [
+    {
+      "id": "afternoon-what",
+      "question": "我昨天下午在弄什麼",
+      "source": "hand_labeled",
+      "asked_at_ms": 100800000,
+      "expected": {
+        "outcome": "answer",
+        "any_of": ["db.rs — AI-Sister"],
+        "evidence": [{ "event_index": 0 }]
+      }
+    },
+    {
+      "id": "weekly-report",
+      "question": "昨天下午那份週報寫了什麼",
+      "source": "hand_labeled",
+      "asked_at_ms": 100800000,
+      "expected": {
+        "outcome": "answer",
+        "any_of": ["週報"],
+        "evidence": [{ "event_index": 4 }]
+      }
+    },
+    {
+      "id": "known-miss",
+      "question": "火星會議連結",
+      "source": "hand_labeled",
+      "expected": { "outcome": "no_answer" }
+    }
+  ]
+}

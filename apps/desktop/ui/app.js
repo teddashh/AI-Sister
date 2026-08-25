@@ -1039,7 +1039,7 @@ function markLine(queryId) {
 
 /**
  * @param hits 一筆一筆的原文。
- * @param kind `"keywords"`（比對字找到的）或 `"recent"`（他問的是時間）。
+ * @param kind `"keywords"`（比對字找到的）、`"recent"`（剛剛）、或 `"range"`（昨天下午那種日曆範圍）。
  *   這個字是後端給的，不是這裡判斷的——同一句話在 `sister query` 和這一頁
  *   必須得到同一種答案，所以規則只有一份，在 sister-core 的 `question`。
  * @param facts L1 直接答得出來的那幾筆（★）。排在原文前面，因為那才是他問
@@ -1091,6 +1091,12 @@ function renderHits(
     const note = document.createElement("li");
     note.className = "hits-note";
     note.textContent = "你問的是「剛剛」，所以我沒有去比對字——這是我最後看到的幾件事：";
+    hitList.append(note);
+  }
+  if (kind === "range" && hits.length > 0) {
+    const note = document.createElement("li");
+    note.className = "hits-note";
+    note.textContent = "你問的是一段日子，所以我沒有拿時間詞去比對螢幕——這是那段時間看到的事：";
     hitList.append(note);
   }
 
@@ -1199,7 +1205,7 @@ function renderHits(
     // 「我記得的東西」這幾個字也要看她這次到底翻了多少：只翻了 30 天卻說
     // 「我記得的東西」，是把十二分之一講成全部（見 `scan_horizon_days`）。
     empty.textContent =
-      kind === "recent"
+      kind === "recent" || kind === "range"
         ? "我手上一件事都沒有。"
         : blind?.scan_horizon_days
           ? "我翻過的那幾段裡沒有這件事。"

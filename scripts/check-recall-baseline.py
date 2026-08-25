@@ -20,9 +20,17 @@ ROOT = Path(__file__).resolve().parent.parent
 SISTER = os.environ.get("SISTER", str(ROOT / "target/debug/sister"))
 CORPUS = ROOT / "scenarios/recall-baseline.corpus.json"
 QUESTIONS = ROOT / "scenarios/recall-baseline.questions.json"
+SESSION_CORPUS = ROOT / "scenarios/recall-session.corpus.json"
+SESSION_QUESTIONS = ROOT / "scenarios/recall-session.questions.json"
 README = ROOT / "README.md"
 README_START = "<!-- BEGIN GENERATED: recall-benchmark -->"
 README_END = "<!-- END GENERATED: recall-benchmark -->"
+# 第二張表。第一張的 5 題都沒有時間範圍，`facts_session` 在上面和 `facts`
+# 一模一樣——只登第一張的話，README 會讓人以為章節什麼都沒帶來。章節幫得上
+# 忙的是「昨天下午」這種問法，證據要跟著登出來，否則 PHASES.md 那條
+# 「找回率提升可量測」是一句沒有公開憑據的話。
+SESSION_README_START = "<!-- BEGIN GENERATED: recall-session-benchmark -->"
+SESSION_README_END = "<!-- END GENERATED: recall-session-benchmark -->"
 
 failed = []
 
@@ -86,9 +94,9 @@ def format_cost(value):
     return f"US${value:g}/天"
 
 
-def readme_block(report):
+def readme_block(report, start=README_START, end=README_END):
     lines = [
-        README_START,
+        start,
         "<!-- 由 scripts/check-recall-baseline.py 生成；不要手改這一段。 -->",
         "| 配置 | 找回率@5 | 答案正確率 | 出處正確率 | 模型呼叫 | 成本 |",
         "|---|---:|---:|---:|---:|---:|",
@@ -111,53 +119,47 @@ def readme_block(report):
                 format_cost(at(metrics, "model_usd_per_day")),
             )
         )
-    lines.append(README_END)
+    lines.append(end)
     return "\n".join(lines)
 
 
-def sync_readme(report, update):
+def sync_readme(report, update, start=README_START, end=README_END, label="recall"):
     source = README.read_bytes()
-    start_marker = README_START.encode("utf-8")
-    end_marker = README_END.encode("utf-8")
+    start_marker = start.encode("utf-8")
+    end_marker = end.encode("utf-8")
     if source.count(start_marker) != 1 or source.count(end_marker) != 1:
-        die(
-            "README 應恰有一組 recall benchmark 生成標記："
-            f"{README_START} / {README_END}"
-        )
+        die(f"README 應恰有一組 {label} benchmark 生成標記：{start} / {end}")
         return
 
-    start = source.index(start_marker)
-    end_start = source.index(end_marker)
-    if end_start < start:
-        die(
-            "README 的 recall benchmark 生成標記順序反了："
-            f"{README_START} 必須在 {README_END} 前面"
-        )
+    begin_at = source.index(start_marker)
+    end_at = source.index(end_marker)
+    if end_at < begin_at:
+        die(f"README 的 {label} benchmark 生成標記順序反了：{start} 必須在 {end} 前面")
         return
 
-    after_start = start + len(start_marker)
+    after_start = begin_at + len(start_marker)
     if source[after_start : after_start + 2] == b"\r\n":
         newline = "\r\n"
     elif source[after_start : after_start + 1] == b"\n":
         newline = "\n"
     else:
-        die(f"README 的 {README_START} 後面必須直接換行")
+        die(f"README 的 {start} 後面必須直接換行")
         return
 
-    end = end_start + len(end_marker)
-    current = source[start:end]
-    expected = readme_block(report).replace("\n", newline).encode("utf-8")
+    stop_at = end_at + len(end_marker)
+    current = source[begin_at:stop_at]
+    expected = readme_block(report, start, end).replace("\n", newline).encode("utf-8")
     if current == expected:
-        print("✓ README 的 recall 品質／成本表和本次 CLI JSON 一致")
+        print(f"✓ README 的 {label} 品質／成本表和本次 CLI JSON 一致")
         return
 
     if update:
-        README.write_bytes(source[:start] + expected + source[end:])
-        print("✓ 已用本次 CLI JSON 重生 README 的 recall 品質／成本表")
+        README.write_bytes(source[:begin_at] + expected + source[stop_at:])
+        print(f"✓ 已用本次 CLI JSON 重生 README 的 {label} 品質／成本表")
         return
 
     die(
-        "README 的 recall 品質／成本表和本次 CLI JSON 不一致；請跑 "
+        f"README 的 {label} 品質／成本表和本次 CLI JSON 不一致；請跑 "
         "`SISTER=./target/debug/sister python3 "
         "./scripts/check-recall-baseline.py --update-readme` 重生。"
         "這只同步 README，不會改 regression contract；若 CLI 分數是有意接受的新版，"
@@ -165,13 +167,13 @@ def sync_readme(report, update):
     )
 
 
-def run():
+def run(corpus, questions):
     command = [
         SISTER,
         "replay",
         "evaluate",
-        str(CORPUS),
-        str(QUESTIONS),
+        str(corpus),
+        str(questions),
         "--k",
         "5",
         "--runs",
@@ -213,13 +215,78 @@ if len(sys.argv) > 2 or (len(sys.argv) == 2 and sys.argv[1] != "--update-readme"
     raise SystemExit(2)
 update_readme = len(sys.argv) == 2
 
+UNMEASURED = (
+    "reminder_false_positive_rate",
+    "reminder_miss_rate",
+    "segmentation_f1",
+    "reviewer_lookup_rate",
+    "cpu_percent",
+    "ram_peak_mb",
+    "battery_percent_per_hour",
+    "disk_bytes",
+)
+
+
+def check_configurations(report, expected_names, expected_scores, samples, label):
+    configurations = at(report, "configurations")
+    if configurations is None:
+        return
+    expect(
+        [at(config, "name") for config in configurations],
+        expected_names,
+        f"{label} configurations 的順序與名稱",
+    )
+    for config in configurations:
+        name = at(config, "name")
+        if name not in expected_scores:
+            continue
+        metrics = at(config, "metrics")
+        rows = at(config, "questions")
+        if metrics is None or rows is None:
+            continue
+
+        for metric, (passed, total) in expected_scores[name].items():
+            expect_fraction(metrics, metric, passed, total, f"{label}.{name}.{metric}")
+
+        expect(at(metrics, "model_calls"), 0, f"{label}.{name}.model_calls")
+        expect(at(metrics, "model_usd_per_day"), 0.0, f"{label}.{name}.model_usd_per_day")
+        for field in UNMEASURED:
+            expect(at(metrics, field), None, f"{label}.{name}.{field}")
+
+        latency = at(metrics, "latency")
+        if latency is not None:
+            expect(at(latency, "samples"), samples, f"{label}.{name}.latency.samples")
+            for field in ("p50_ms", "p95_ms", "max_ms"):
+                expect_finite_nonnegative(
+                    at(latency, field), f"{label}.{name}.latency.{field}"
+                )
+
+        known_miss = next((row for row in rows if at(row, "id") == "known-miss"), None)
+        if known_miss is None:
+            die(f"{label}.{name} 少了 known-miss 這題")
+        else:
+            expect(at(known_miss, "recalled"), None, f"{label}.{name}.known-miss.recalled")
+            expect(
+                at(known_miss, "citation_correct"),
+                None,
+                f"{label}.{name}.known-miss.citation_correct",
+            )
+            expect(at(known_miss, "returned"), [], f"{label}.{name}.known-miss.returned")
+
+        for row in rows:
+            question_id = at(row, "id")
+            expect_finite_nonnegative(
+                at(row, "latency_median_ms"),
+                f"{label}.{name}.{question_id}.latency_median_ms",
+            )
+
+
 print("▶ 用真正的 sister CLI 跑 synthetic recall baseline")
-report = run()
+report = run(CORPUS, QUESTIONS)
 
 if report is not None:
     corpus = at(report, "corpus")
     questions = at(report, "question_set")
-    configurations = at(report, "configurations")
 
     if corpus is not None:
         expect(at(corpus, "review"), "reviewed", "corpus.review")
@@ -236,84 +303,84 @@ if report is not None:
                 "question_set.sources",
             )
 
-    if configurations is not None:
-        expect(
-            [at(config, "name") for config in configurations],
-            ["baseline_text", "facts"],
-            "configurations 的順序與名稱",
-        )
+    # Phase 2 那 5 題沒有時間範圍，+session 不該偷偷改變分數。
+    expected_scores = {
+        "baseline_text": {
+            "recall_at_k": (2, 4),
+            "answer_accuracy": (3, 5),
+            "citation_accuracy": (2, 4),
+        },
+        "facts": {
+            "recall_at_k": (4, 4),
+            "answer_accuracy": (5, 5),
+            "citation_accuracy": (4, 4),
+        },
+        "facts_session": {
+            "recall_at_k": (4, 4),
+            "answer_accuracy": (5, 5),
+            "citation_accuracy": (4, 4),
+        },
+    }
+    check_configurations(
+        report,
+        ["baseline_text", "facts", "facts_session"],
+        expected_scores,
+        5,
+        "recall-baseline",
+    )
 
-        expected_scores = {
-            "baseline_text": {
-                "recall_at_k": (2, 4),
-                "answer_accuracy": (3, 5),
-                "citation_accuracy": (2, 4),
-            },
-            "facts": {
-                "recall_at_k": (4, 4),
-                "answer_accuracy": (5, 5),
-                "citation_accuracy": (4, 4),
-            },
-        }
-        unmeasured = (
-            "reminder_false_positive_rate",
-            "reminder_miss_rate",
-            "segmentation_f1",
-            "reviewer_lookup_rate",
-            "cpu_percent",
-            "ram_peak_mb",
-            "battery_percent_per_hour",
-            "disk_bytes",
-        )
+print("▶ 用真正的 sister CLI 跑活動級章節 corpus")
+session_report = run(SESSION_CORPUS, SESSION_QUESTIONS)
 
-        for config in configurations:
-            name = at(config, "name")
-            if name not in expected_scores:
-                continue
-            metrics = at(config, "metrics")
-            rows = at(config, "questions")
-            if metrics is None or rows is None:
-                continue
+if session_report is not None:
+    corpus = at(session_report, "corpus")
+    questions = at(session_report, "question_set")
+    if corpus is not None:
+        expect(at(corpus, "review"), "reviewed", "session.corpus.review")
+        expect(at(corpus, "events"), 7, "session.corpus.events")
+        expect(at(corpus, "duration_ms"), 6900000, "session.corpus.duration_ms")
+    if questions is not None:
+        expect(at(questions, "review"), "reviewed", "session.question_set.review")
+        expect(at(questions, "questions"), 3, "session.question_set.questions")
 
-            for metric, (passed, total) in expected_scores[name].items():
-                expect_fraction(metrics, metric, passed, total, f"{name}.{metric}")
-
-            expect(at(metrics, "model_calls"), 0, f"{name}.model_calls")
-            expect(at(metrics, "model_usd_per_day"), 0.0, f"{name}.model_usd_per_day")
-            for field in unmeasured:
-                expect(at(metrics, field), None, f"{name}.{field}")
-
-            latency = at(metrics, "latency")
-            if latency is not None:
-                expect(at(latency, "samples"), 5, f"{name}.latency.samples")
-                for field in ("p50_ms", "p95_ms", "max_ms"):
-                    expect_finite_nonnegative(
-                        at(latency, field), f"{name}.latency.{field}"
-                    )
-
-            known_miss = next(
-                (row for row in rows if at(row, "id") == "known-miss"), None
-            )
-            if known_miss is None:
-                die(f"{name} 少了 known-miss 這題")
-            else:
-                expect(at(known_miss, "recalled"), None, f"{name}.known-miss.recalled")
-                expect(
-                    at(known_miss, "citation_correct"),
-                    None,
-                    f"{name}.known-miss.citation_correct",
-                )
-                expect(at(known_miss, "returned"), [], f"{name}.known-miss.returned")
-
-            for row in rows:
-                question_id = at(row, "id")
-                expect_finite_nonnegative(
-                    at(row, "latency_median_ms"),
-                    f"{name}.{question_id}.latency_median_ms",
-                )
+    # 先釘這組；分數若和預期不同，照腳本自己寫的流程改 expected_scores，
+    # 不准為了讓 +session 贏去動 fixture 或評分邏輯。
+    session_scores = {
+        "baseline_text": {
+            "recall_at_k": (1, 2),
+            "answer_accuracy": (2, 3),
+            "citation_accuracy": (1, 2),
+        },
+        "facts": {
+            "recall_at_k": (1, 2),
+            "answer_accuracy": (2, 3),
+            "citation_accuracy": (1, 2),
+        },
+        "facts_session": {
+            "recall_at_k": (2, 2),
+            "answer_accuracy": (3, 3),
+            "citation_accuracy": (2, 2),
+        },
+    }
+    check_configurations(
+        session_report,
+        ["baseline_text", "facts", "facts_session"],
+        session_scores,
+        3,
+        "recall-session",
+    )
 
 if report is not None and not failed:
     sync_readme(report, update_readme)
+
+if session_report is not None and not failed:
+    sync_readme(
+        session_report,
+        update_readme,
+        SESSION_README_START,
+        SESSION_README_END,
+        "recall-session",
+    )
 
 if failed:
     print(f"\n{len(failed)} 個 replay baseline 契約壞了。", file=sys.stderr)
@@ -324,5 +391,6 @@ if failed:
     )
     raise SystemExit(1)
 
-print("✓ 3 個事件、5 題、兩個產品 profile 的結果都和 baseline 一致")
-print("✓ 延遲有 5 個樣本且都是有限非負數；沒有鎖毫秒門檻")
+print("✓ 3 個事件、5 題、三個產品 profile 的結果都和 baseline 一致")
+print("✓ 活動級章節 corpus：7 個事件、3 題，分數已釘")
+print("✓ 延遲有樣本且都是有限非負數；沒有鎖毫秒門檻")
