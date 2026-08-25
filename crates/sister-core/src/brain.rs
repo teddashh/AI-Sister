@@ -1123,10 +1123,16 @@ mod tests {
         sentinel: &std::path::Path,
     ) -> (String, Vec<String>) {
         let script = dir.join("fake-brain.py");
+        // 兩個方向都走 `.buffer`（bytes），不碰 Python 的文字層：它的編碼預設
+        // 跟著作業系統的字碼頁走，開發機是 UTF-8，Windows 是 ANSI。
+        // alpha.57 就是被 Windows CI 擋在這裡——prompt 和卡片裡都有中文，
+        // `sys.stdout.write` 死在 UnicodeEncodeError，回來是空的 stdout → `BadJson`。
+        // 而 `sys.stdin.read()` 在 cp1252 底下是解碼成亂碼還是直接爆，看的是
+        // 那個字碼頁有沒有未定義的 byte——兩種都不是我們要測的東西。
         std::fs::write(
             &script,
             format!(
-                "import sys, pathlib\nsys.stdin.read()\npathlib.Path(sys.argv[1]).write_text('spawned')\nsys.stdout.write({json:?})\n"
+                "import sys, pathlib\nsys.stdin.buffer.read()\npathlib.Path(sys.argv[1]).write_text('spawned')\nsys.stdout.buffer.write({json:?}.encode('utf-8'))\n"
             ),
         )
         .expect("script");
