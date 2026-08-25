@@ -117,6 +117,24 @@ pub struct Segment {
     pub last_edit: Option<crate::segment_edit::AppliedEdit>,
 }
 
+impl Segment {
+    /// 核心時長。答案裡的分鐘數看這個，不要拿 `started_at`／`ended_at`
+    /// 相減——那兩個各含 5 秒重疊 margin（SPEC §4.1〔定案〕），相鄰段加起來
+    /// 會把邊界算兩次。
+    pub fn core_ms(&self) -> Millis {
+        self.core_ended_at.saturating_sub(self.core_started_at)
+    }
+
+    /// 這一段是不是只被 §4.1 的 10 分鐘上限打開。
+    ///
+    /// 工作集黏合壓得掉 app／host 變更，壓不掉這一刀（見
+    /// `glue_does_not_suppress_time_cap`）。活動級聚合靠它把安全閥切碎的
+    /// 同一件事併回去，包含跨 app 工作集，不必另寫一套工作集判斷。
+    pub fn opened_only_by_time_cap(&self) -> bool {
+        self.cut_kinds.len() == 1 && self.cut_kinds[0] == CutKind::TimeCap
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FocusPoint {
     pub id: i64,

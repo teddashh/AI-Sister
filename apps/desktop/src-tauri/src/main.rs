@@ -710,6 +710,22 @@ struct Answer {
     /// 她原本說的是「這件事我沒看到過」，一句斷言；而正確答案可能是「你自己
     /// 叫我不要看那個網站」。SPEC §8.2 的語氣規範講的就是這個。
     blind: Option<Blind>,
+    /// 問句裡認得出來的日曆範圍。`None` = 這句話沒有時間範圍，沒去算章節。
+    time_range: Option<AskedTimeRange>,
+    /// 那段時間切成的活動級段落。`None` 配 `time_range: None` = 沒算過；
+    /// `Some([])` 配有範圍 = 算過，切不出段落。兩種不可以合成一個空陣列。
+    ///
+    /// 時間軸上的 `Chapter` 仍是分鐘級 `segment`；這裡是答案端，已經把
+    /// 10 分鐘上限切碎的同質段併回去。
+    chapters: Option<Vec<Chapter>>,
+}
+
+/// [`Answer::time_range`]：回述用的是他原話裡的那一段。
+#[derive(Serialize)]
+struct AskedTimeRange {
+    from: i64,
+    to: i64,
+    said: String,
 }
 
 /// [`Answer::blind`] 的內容。核心那份（`sister_core::answer::BlindSpots`）只回
@@ -807,10 +823,14 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             blind: None,
             truncated: false,
             answers_truncated: false,
+            time_range: None,
+            chapters: None,
         });
     }
     let started = std::time::Instant::now();
-    with_db(&shell, |db| {
+    // 章節那一支要寫 `segment`，所以整條改拿可變借用。沒認到時間範圍
+    // 時 `chapters_for_question` 立刻回 `None`，不會重算。
+    with_db_mut(&shell, |db| {
         // 和 CLI、replay harness 共用同一條產品接線。字母人原本就是 facts 10
         // 筆、原文 20 筆，兩個上限各自保留，不為了共用函式偷偷改畫面密度。
         const FACTS: usize = 10;
@@ -827,6 +847,9 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         let facts_truncated = retrieval.answers_truncated;
         let hits = retrieval.hits;
         let truncated = retrieval.hits_truncated;
+        let asked_chapters = db
+            .chapters_for_question(&question, sister_core::now_ms())
+            .map_err(|e| format!("{e:#}"))?;
         // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
         // 足以回答「她是不是又卡住了」，而問題本身是他的東西，不是我的。
         tracing::info!(
@@ -961,6 +984,13 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                     frame_id: h.frame_id.filter(|id| openable.contains(id)),
                 })
                 .collect(),
+            time_range: asked_chapters.as_ref().map(|(r, _)| AskedTimeRange {
+                from: r.from,
+                to: r.to,
+                said: r.said.clone(),
+            }),
+            chapters: asked_chapters
+                .map(|(_, ch)| ch.into_iter().map(chapter_from_activity).collect()),
         })
     })
 }
@@ -1103,6 +1133,12 @@ struct Chapter {
     edited: Option<String>,
     /// 套用過的那一筆 `segment_edit.id`。沒有就是 `None`。
     edit_id: Option<i64>,
+    /// 由幾個分鐘級 segment 併成。時間軸上的一格就是一段，不填。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    segment_count: Option<usize>,
+    /// 核心時長。答案用這個。時間軸不填——那裡的 start_ts／end_ts 含 5 秒 margin。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    core_ms: Option<i64>,
 }
 
 fn chapter_from_segment(s: sister_core::segment::Segment) -> Chapter {
@@ -1122,6 +1158,28 @@ fn chapter_from_segment(s: sister_core::segment::Segment) -> Chapter {
         confidence: s.confidence,
         edited: s.last_edit.map(|e| e.kind.as_str().to_string()),
         edit_id: s.last_edit.map(|e| e.id),
+        segment_count: None,
+        core_ms: None,
+    }
+}
+
+/// 答案端的一格。鐘面和時長都用核心時間；`segment_count` 說它是由幾段併成的。
+fn chapter_from_activity(a: sister_core::activity::Activity) -> Chapter {
+    let core_ms = a.core_ms();
+    Chapter {
+        start_ts: a.core_started_at,
+        end_ts: a.core_ended_at,
+        core_start_ts: a.core_started_at,
+        core_end_ts: a.core_ended_at,
+        app: a.app,
+        title: a.title,
+        host: a.host,
+        cut_kinds: Vec::new(),
+        confidence: None,
+        edited: None,
+        edit_id: None,
+        segment_count: Some(a.segment_count),
+        core_ms: Some(core_ms),
     }
 }
 

@@ -2999,6 +2999,30 @@ impl Db {
         Ok(kept)
     }
 
+    /// 問句帶得了時間範圍才算章節。走重算，不讀舊列：他如果沒開過那天的
+    /// 時間軸，`segment` 表是空的，讀舊列會把「沒算過」印成「沒有章節」。
+    ///
+    /// 回的是活動級（[`crate::activity::Activity`]），不是分鐘級 `segment`。
+    /// 10 分鐘上限切碎的同質段在這裡併回去；`segment` 表仍是切碎的那一版，
+    /// 時間軸與 `segment_edit` 繼續對那一層。
+    ///
+    /// - `None`：這句話沒有時間範圍，**沒去算**。
+    /// - `Some((_, []))`：算過了，那段時間切不出段落。
+    ///
+    /// 兩種不可以合成一個空陣列。一天的事件量遠小於 OCR，問一次重算一次
+    /// 不是熱路徑。
+    pub fn chapters_for_question(
+        &mut self,
+        question: &str,
+        now: Millis,
+    ) -> Result<Option<(crate::question::TimeRange, Vec<crate::activity::Activity>)>> {
+        let Some(range) = crate::question::time_range(question, now) else {
+            return Ok(None);
+        };
+        let segments = self.chapters_for_range(range.from, range.to)?;
+        Ok(Some((range, crate::activity::group(&segments))))
+    }
+
     /// 把相鄰兩段併成一段。寫進 `segment_edit` 再重算當天。
     pub fn merge_chapters(
         &mut self,
@@ -5610,6 +5634,105 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))
             .expect("stored");
         assert_eq!(stored_again, 2, "重算是換掉，不是疊上去");
+    }
+
+    /// 「沒解析到時間範圍」和「解析了、算過、沒有段落」不可以長成同一個
+    /// `None` 或同一個空陣列。
+    #[test]
+    fn chapters_for_a_question_distinguish_unparsed_from_empty() {
+        use chrono::TimeZone;
+        let mut db = test_db();
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 8, 26, 15, 30, 0)
+            .single()
+            .expect("local")
+            .timestamp_millis();
+        assert!(
+            db.chapters_for_question("電話", now).expect("ok").is_none(),
+            "沒有時間範圍就不該去算"
+        );
+
+        let asked = db
+            .chapters_for_question("昨天下午", now)
+            .expect("ok")
+            .expect("認得出昨天下午");
+        assert_eq!(asked.0.said, "昨天下午");
+        assert!(asked.1.is_empty(), "沒有事件，算過是空的，不是沒算過");
+
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let ts = asked.0.from + 60_000;
+        db.insert_focus(s, &focus_at(ts, "code.exe", "db.rs", None))
+            .expect("focus");
+        db.insert_focus(
+            s,
+            &focus_at(
+                ts + 90_000,
+                "chrome.exe",
+                "mail",
+                Some("https://mail.example/"),
+            ),
+        )
+        .expect("focus");
+        let again = db
+            .chapters_for_question("昨天下午", now)
+            .expect("ok")
+            .expect("still parsed");
+        assert!(
+            !again.1.is_empty(),
+            "有焦點事件就該切得出段落，不能還是空的"
+        );
+    }
+
+    /// 答案端拿的是活動級。45+25+45 三分鐘級會被 10 分鐘上限切成 13 段，
+    /// 問句路徑要併回 3 件；`segment` 表仍是 13 列。
+    #[test]
+    fn question_chapters_are_activities_not_time_capped_slices() {
+        use chrono::TimeZone;
+        let mut db = test_db();
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 8, 26, 15, 30, 0)
+            .single()
+            .expect("local")
+            .timestamp_millis();
+        let asked = db
+            .chapters_for_question("昨天下午", now)
+            .expect("ok")
+            .expect("認得出昨天下午");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let t0 = asked.0.from + 2 * 3_600_000;
+        let min = 60_000i64;
+        for e in [
+            focus_at(t0, "code.exe", "db.rs — AI-Sister", None),
+            focus_at(
+                t0 + 45 * min,
+                "chrome.exe",
+                "SQLite user_version 文件",
+                Some("https://sqlite.org/pragma.html"),
+            ),
+            focus_at(t0 + 70 * min, "notion.exe", "週報", None),
+            focus_at(t0 + 115 * min, "notion.exe", "週報", None),
+        ] {
+            db.insert_focus(s, &e).expect("focus");
+        }
+
+        let again = db
+            .chapters_for_question("昨天下午", now)
+            .expect("ok")
+            .expect("still parsed");
+        assert_eq!(again.1.len(), 3, "三件事不該被 10 分鐘上限講成十幾段");
+        assert_eq!(
+            again.1.iter().map(|a| a.segment_count).collect::<Vec<_>>(),
+            vec![5, 3, 5]
+        );
+        assert_eq!(again.1[0].core_ms(), 45 * min);
+        assert_eq!(again.1[1].core_ms(), 25 * min);
+        assert_eq!(again.1[2].core_ms(), 45 * min);
+
+        let stored: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(stored, 13, "聚合不准改 segment 表");
     }
 
     /// 整合者自己加的：合併過的段落必須扛得住整輪 DELETE + 重算。

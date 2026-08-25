@@ -33,6 +33,10 @@
 //! 如果連中間的虛字也一起挑掉，「剛剛 chrome 上那個網址」會碎成
 //! `chrome` AND `上` AND `網址` 三段，比原本更找不到。
 
+use chrono::{Datelike, Local, LocalResult, NaiveDate, TimeZone};
+
+use crate::model::Millis;
+
 /// 一個問題該用什麼方式回答。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
@@ -278,6 +282,234 @@ fn is_cjk_punct(c: char) -> bool {
     )
 }
 
+/// 問句裡認得出來的一段日曆時間。和 [`Shape`] 正交：同一句話可以同時是
+/// 關鍵字問題、又帶著「昨天下午」。
+///
+/// `from`／`to` 是半開區間 `[from, to)`，毫秒。認不出來時呼叫端拿到的是
+/// [`None`]，不是一個 `from == to` 的空範圍——那兩種在畫面上會變成同一句
+/// 「那段時間沒有章節」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeRange {
+    pub from: Millis,
+    pub to: Millis,
+    /// 他原話裡的那一段，例如「昨天下午」。回述必須是他講過的字。
+    pub said: String,
+}
+
+/// 日界與時段用**這台機器的本地時區**（和終端機印出處的時鐘同一套）。
+/// `now` 是 unix millis；同一個數字在不同時區的機器上會解出不同的日界——
+/// 那是對的，因為「昨天」是本地日曆，不是 UTC 日曆。函式裡不呼叫
+/// [`crate::now_ms`]：同一句話在不同時刻會有不同答案，那個時刻必須是呼叫
+/// 端給的，測試才寫得出來。
+///
+/// 時段（半開，本地時鐘；這組邊界是實作選擇，不是規格常數）：
+///
+/// | 詞 | 起 | 迄 |
+/// |---|---|---|
+/// | 凌晨 | 00:00 | 06:00 |
+/// | 早上／上午 | 06:00 | 12:00 |
+/// | 中午 | 11:00 | 14:00 |
+/// | 下午 | 12:00 | 18:00 |
+/// | 傍晚 | 17:00 | 19:00 |
+/// | 晚上 | 18:00 | 24:00 |
+///
+/// 「這禮拜／上禮拜」從週一 00:00 起算（ISO 週）。時段只接到今天／昨天／
+/// 前天；接到禮拜上時那段時段詞不採用——一個禮拜的「下午」不是一個區間。
+///
+/// 認不出來、或本地日曆解不出來，回 [`None`]。不預設今天，不回 `0..0`。
+pub fn time_range(question: &str, now: Millis) -> Option<TimeRange> {
+    let found = scan_time_words(question)?;
+    let now_dt = Local.timestamp_millis_opt(now).single()?;
+    let today = now_dt.date_naive();
+
+    let (from_date, to_date, used_period) = match found.day {
+        DayKind::Today => (today, next_day(today)?, found.period.is_some()),
+        DayKind::Yesterday => {
+            let y = shift_days(today, -1)?;
+            (y, today, found.period.is_some())
+        }
+        DayKind::DayBefore => {
+            let d = shift_days(today, -2)?;
+            let y = shift_days(today, -1)?;
+            (d, y, found.period.is_some())
+        }
+        DayKind::ThisWeek => {
+            let mon = monday_on_or_before(today)?;
+            (mon, shift_days(mon, 7)?, false)
+        }
+        DayKind::LastWeek => {
+            let mon = monday_on_or_before(today)?;
+            (shift_days(mon, -7)?, mon, false)
+        }
+    };
+
+    let (from, to) = if used_period {
+        let (h0, h1) = found.period?.hours();
+        (at_hour(from_date, h0)?, at_hour(from_date, h1)?)
+    } else {
+        (at_hour(from_date, 0)?, at_hour(to_date, 0)?)
+    };
+    if from >= to {
+        return None;
+    }
+
+    let (said_lo, said_hi) = if used_period {
+        let (p0, p1) = found.period_span?;
+        (found.day_span.0.min(p0), found.day_span.1.max(p1))
+    } else {
+        found.day_span
+    };
+    let said = question.get(said_lo..said_hi)?.to_string();
+    if said.is_empty() {
+        return None;
+    }
+    Some(TimeRange { from, to, said })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DayKind {
+    Today,
+    Yesterday,
+    DayBefore,
+    ThisWeek,
+    LastWeek,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Period {
+    Predawn,
+    Morning,
+    Noon,
+    Afternoon,
+    Evening,
+    Night,
+}
+
+impl Period {
+    /// 起迄小時，迄可以是 24（當天結束 = 次日 00:00）。
+    fn hours(self) -> (u32, u32) {
+        match self {
+            Period::Predawn => (0, 6),
+            Period::Morning => (6, 12),
+            Period::Noon => (11, 14),
+            Period::Afternoon => (12, 18),
+            Period::Evening => (17, 19),
+            Period::Night => (18, 24),
+        }
+    }
+}
+
+const DAY_TOKENS: &[(&str, DayKind)] = &[
+    ("這個禮拜", DayKind::ThisWeek),
+    ("上個禮拜", DayKind::LastWeek),
+    ("這禮拜", DayKind::ThisWeek),
+    ("上禮拜", DayKind::LastWeek),
+    ("這週", DayKind::ThisWeek),
+    ("上週", DayKind::LastWeek),
+    ("今天", DayKind::Today),
+    ("昨天", DayKind::Yesterday),
+    ("前天", DayKind::DayBefore),
+];
+
+const PERIOD_TOKENS: &[(&str, Period)] = &[
+    ("早上", Period::Morning),
+    ("上午", Period::Morning),
+    ("中午", Period::Noon),
+    ("下午", Period::Afternoon),
+    ("傍晚", Period::Evening),
+    ("晚上", Period::Night),
+    ("凌晨", Period::Predawn),
+];
+
+struct TimeWords {
+    day: DayKind,
+    day_span: (usize, usize),
+    period: Option<Period>,
+    period_span: Option<(usize, usize)>,
+}
+
+/// 第一個日詞、可選的第一個時段詞。沒有日詞就不是時間範圍。
+fn scan_time_words(question: &str) -> Option<TimeWords> {
+    let mut day = None;
+    let mut period = None;
+    let mut i = 0;
+    while i < question.len() {
+        let rest = &question[i..];
+        let c = rest.chars().next()?;
+        if c.is_whitespace() || c.is_ascii_punctuation() || is_cjk_punct(c) {
+            i += c.len_utf8();
+            continue;
+        }
+        let day_hit = longest_in(rest, DAY_TOKENS);
+        let period_hit = longest_in(rest, PERIOD_TOKENS);
+        if let Some((len, kind)) =
+            day_hit.filter(|&(len, _)| period_hit.is_none_or(|(plen, _)| len >= plen))
+        {
+            if day.is_none() {
+                day = Some((kind, (i, i + len)));
+            }
+            i += len;
+        } else if let Some((len, kind)) = period_hit {
+            if period.is_none() {
+                period = Some((kind, (i, i + len)));
+            }
+            i += len;
+        } else {
+            i += c.len_utf8();
+        }
+    }
+    let (kind, span) = day?;
+    match period {
+        Some((p, pspan)) => Some(TimeWords {
+            day: kind,
+            day_span: span,
+            period: Some(p),
+            period_span: Some(pspan),
+        }),
+        None => Some(TimeWords {
+            day: kind,
+            day_span: span,
+            period: None,
+            period_span: None,
+        }),
+    }
+}
+
+fn longest_in<T: Copy>(rest: &str, table: &[(&str, T)]) -> Option<(usize, T)> {
+    let mut best = None;
+    for (tok, val) in table {
+        if rest.starts_with(tok) && best.is_none_or(|(len, _)| tok.len() > len) {
+            best = Some((tok.len(), *val));
+        }
+    }
+    best
+}
+
+fn shift_days(date: NaiveDate, n: i64) -> Option<NaiveDate> {
+    date.checked_add_signed(chrono::TimeDelta::days(n))
+}
+
+fn next_day(date: NaiveDate) -> Option<NaiveDate> {
+    shift_days(date, 1)
+}
+
+fn monday_on_or_before(date: NaiveDate) -> Option<NaiveDate> {
+    shift_days(date, -(date.weekday().num_days_from_monday() as i64))
+}
+
+fn at_hour(date: NaiveDate, hour: u32) -> Option<Millis> {
+    let (date, hour) = if hour >= 24 {
+        (next_day(date)?, hour - 24)
+    } else {
+        (date, hour)
+    };
+    let naive = date.and_hms_opt(hour, 0, 0)?;
+    match Local.from_local_datetime(&naive) {
+        LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => Some(dt.timestamp_millis()),
+        LocalResult::None => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,6 +734,134 @@ mod tests {
                 "{q:?} 剝出了一段它自己沒有的字：{t:?}——比對就可能反而變少"
             );
         }
+    }
+
+    fn at(year: i32, month: u32, day: u32, hour: u32, min: u32) -> Millis {
+        Local
+            .with_ymd_and_hms(year, month, day, hour, min, 0)
+            .single()
+            .expect("valid local time")
+            .timestamp_millis()
+    }
+
+    fn hour_on(year: i32, month: u32, day: u32, hour: u32) -> Millis {
+        at(year, month, day, hour, 0)
+    }
+
+    /// 招牌那句。認得出「昨天下午」，而且 `said` 是他打的那幾個字。
+    #[test]
+    fn yesterday_afternoon_is_a_clock_range_not_a_shape() {
+        // 2026-08-26 是週三。`now` 定在當天下午，免得測到「今天還沒到下午」。
+        let now = at(2026, 8, 26, 15, 30);
+        let r = time_range("我昨天下午在弄什麼", now).expect("認得出昨天下午");
+        assert_eq!(r.said, "昨天下午");
+        assert_eq!(r.from, hour_on(2026, 8, 25, 12));
+        assert_eq!(r.to, hour_on(2026, 8, 25, 18));
+        assert!(r.from < r.to);
+        // 和 Shape 正交：這句話仍是關鍵字（有「弄」）。
+        assert_eq!(shape("我昨天下午在弄什麼"), Shape::Keywords);
+    }
+
+    #[test]
+    fn the_phrases_people_actually_use() {
+        let now = at(2026, 8, 26, 15, 30);
+        let hit = |q| time_range(q, now).expect(q);
+        assert_eq!(hit("今天早上").said, "今天早上");
+        assert_eq!(hit("今天早上").from, hour_on(2026, 8, 26, 6));
+        assert_eq!(hit("今天早上").to, hour_on(2026, 8, 26, 12));
+        assert_eq!(hit("今天上午").from, hour_on(2026, 8, 26, 6));
+        assert_eq!(hit("前天").said, "前天");
+        assert_eq!(hit("前天").from, hour_on(2026, 8, 24, 0));
+        assert_eq!(hit("前天").to, hour_on(2026, 8, 25, 0));
+        assert_eq!(hit("昨天").said, "昨天");
+        assert_eq!(hit("昨天").from, hour_on(2026, 8, 25, 0));
+        assert_eq!(hit("昨天").to, hour_on(2026, 8, 26, 0));
+        assert_eq!(hit("今天凌晨").from, hour_on(2026, 8, 26, 0));
+        assert_eq!(hit("今天凌晨").to, hour_on(2026, 8, 26, 6));
+        assert_eq!(hit("昨天中午").from, hour_on(2026, 8, 25, 11));
+        assert_eq!(hit("昨天中午").to, hour_on(2026, 8, 25, 14));
+        assert_eq!(hit("昨天傍晚").from, hour_on(2026, 8, 25, 17));
+        assert_eq!(hit("昨天傍晚").to, hour_on(2026, 8, 25, 19));
+        assert_eq!(hit("昨天晚上").from, hour_on(2026, 8, 25, 18));
+        assert_eq!(hit("昨天晚上").to, hour_on(2026, 8, 26, 0));
+    }
+
+    /// 2026-08-26 是週三，這禮拜從週一 24 日起。
+    #[test]
+    fn a_week_starts_monday() {
+        let now = at(2026, 8, 26, 15, 30);
+        let this = time_range("這禮拜", now).expect("這禮拜");
+        assert_eq!(this.said, "這禮拜");
+        assert_eq!(this.from, hour_on(2026, 8, 24, 0));
+        assert_eq!(this.to, hour_on(2026, 8, 31, 0));
+        let last = time_range("上禮拜", now).expect("上禮拜");
+        assert_eq!(last.from, hour_on(2026, 8, 17, 0));
+        assert_eq!(last.to, hour_on(2026, 8, 24, 0));
+        // 較長的寫法：said 是他打的那一串，不是收成「這禮拜」。
+        assert_eq!(time_range("這個禮拜", now).unwrap().said, "這個禮拜");
+        assert_eq!(
+            time_range("這個禮拜", now).unwrap().from,
+            time_range("這禮拜", now).unwrap().from
+        );
+    }
+
+    /// 禮拜加上時段不是一個區間，時段詞不採用。said 只留用到的日詞。
+    #[test]
+    fn a_week_does_not_silently_keep_an_afternoon() {
+        let now = at(2026, 8, 26, 15, 30);
+        let r = time_range("這禮拜下午", now).expect("仍是這禮拜");
+        assert_eq!(r.said, "這禮拜");
+        assert_eq!(r.from, hour_on(2026, 8, 24, 0));
+        assert_eq!(r.to, hour_on(2026, 8, 31, 0));
+    }
+
+    #[test]
+    fn said_is_always_a_slice_of_what_he_typed() {
+        let now = at(2026, 8, 26, 15, 30);
+        for q in [
+            "昨天下午",
+            "我昨天下午在弄什麼",
+            "昨天的下午",
+            "今天早上",
+            "前天",
+            "上個禮拜寫了什麼",
+        ] {
+            let r = time_range(q, now).expect(q);
+            assert!(
+                q.contains(&r.said),
+                "{q:?} 的 said 不是原話的一段：{:?}",
+                r.said
+            );
+        }
+    }
+
+    /// 認不出來就是沒有。不可以回今天、不可以回 0..0。
+    #[test]
+    fn unrecognized_is_none_not_a_zero_range() {
+        let now = at(2026, 8, 26, 15, 30);
+        for q in [
+            "",
+            "電話",
+            "剛剛發生什麼事",
+            "下午",
+            "什麼",
+            "明天",
+            "justify",
+        ] {
+            assert!(time_range(q, now).is_none(), "{q:?} 不該被解成一段時間");
+        }
+    }
+
+    /// 同一句話、兩個 now，答案必須跟著 now 走。這就是 `now` 是參數的理由。
+    #[test]
+    fn the_same_words_on_two_days_are_two_ranges() {
+        let wed = at(2026, 8, 26, 15, 30);
+        let thu = at(2026, 8, 27, 15, 30);
+        let a = time_range("昨天", wed).unwrap();
+        let b = time_range("昨天", thu).unwrap();
+        assert_eq!(a.from, hour_on(2026, 8, 25, 0));
+        assert_eq!(b.from, hour_on(2026, 8, 26, 0));
+        assert_ne!(a.from, b.from);
     }
 
     /// `terms` 不可以改變 `shape` 的答案——兩支走同一個切詞，這一條就是在釘

@@ -2349,6 +2349,59 @@ pub mod query {
     ///
     /// 只在黏過的時候講。剝掉「剛剛那個」留下「優惠方案」是剝對了，每次都報
     /// 一句只會讓人學會忽略它。見 [`sister_core::question::terms_with_retreat`]。
+    /// 時間範圍那一區。只有呼叫端同時握有 `TimeRange` 和算過的章節時才印，
+    /// 所以空清單的意思是「算過、沒有段落」，不是「沒算過」。
+    ///
+    /// 章節是活動級：被 10 分鐘上限切碎的同質段已經併回去。時長用核心時間，
+    /// 鐘面也用核心——margin 起迄在分鐘解析度上會變成「13:59–14:45、45 分鐘」
+    /// 這種對不上的兩句話。
+    fn chapter_lines(
+        range: &sister_core::question::TimeRange,
+        chapters: &[sister_core::activity::Activity],
+    ) -> Vec<String> {
+        let mut out = vec![format!(
+            "你問的是「{}」，那段時間是 {} 到 {}",
+            range.said,
+            fmt::timestamp(range.from),
+            fmt::timestamp(range.to)
+        )];
+        if chapters.is_empty() {
+            // 算過了。不是「沒在錄」，也不是「你沒有紀錄」——那兩句她這一層
+            // 沒查過。
+            out.push("那段時間沒有切得出來的段落。".to_string());
+            return out;
+        }
+        out.push(format!("那段時間分成 {} 段：", chapters.len()));
+        for s in chapters {
+            let dur = fmt::duration_ms(s.core_ms().max(0));
+            let how_long = if s.segment_count > 1 {
+                format!("{dur}，{} 段併成", s.segment_count)
+            } else {
+                dur
+            };
+            let what = match (s.app.as_deref(), s.title.as_deref()) {
+                (Some(a), Some(t)) => format!("{a}  「{t}」"),
+                (Some(a), None) => a.to_string(),
+                (None, Some(t)) => t.to_string(),
+                (None, None) => s.host.clone().unwrap_or_else(|| "一段紀錄".to_string()),
+            };
+            out.push(format!(
+                "  · {}–{}  {what}（{how_long}）",
+                clock(s.core_started_at),
+                clock(s.core_ended_at)
+            ));
+        }
+        out
+    }
+
+    fn clock(ts: sister_core::Millis) -> String {
+        use chrono::{Local, TimeZone};
+        match Local.timestamp_millis_opt(ts).single() {
+            Some(dt) => dt.format("%H:%M").to_string(),
+            None => fmt::timestamp(ts),
+        }
+    }
+
     fn glued_note(text: &str) -> Option<[String; 2]> {
         let (asked, glued) = sister_core::question::terms_with_retreat(text);
         glued.then(|| {
@@ -2592,7 +2645,7 @@ pub mod query {
             !text.trim().is_empty(),
             "要查什麼？例如：sister query 客服電話"
         );
-        let db = open_existing(data_dir)?;
+        let mut db = open_existing(data_dir)?;
 
         // 「剛剛發生什麼事」問的是時間，不是字。規則在 core，和字母人共用同一
         // 份——兩邊各判各的，同一句話遲早會在兩個地方得到兩種答案。
@@ -2600,6 +2653,9 @@ pub mod query {
         let started = std::time::Instant::now();
         let retrieval =
             sister_core::retrieval::RetrievalProfile::TextAndFacts.retrieve(&db, text, limit)?;
+        // 章節在檢索之後另算。不進 retrieval：recall harness 要求每一筆都
+        // 對得回單一 `at_ms`，而章節是一個範圍。
+        let asked_chapters = db.chapters_for_question(text, sister_core::now_ms())?;
         let elapsed = started.elapsed();
         let sister_core::retrieval::Retrieval {
             shape,
@@ -2668,6 +2724,20 @@ pub mod query {
                     "frame_id": h.frame_id, "app_id": h.app_id, "window_title": h.window_title,
                     "url": h.url, "snippet": h.snippet, "score": h.score,
                 })).collect::<Vec<_>>(),
+                // 新鍵。沒認到時間範圍是 `null`，認到但切不出段落是 `[]`——
+                // 兩種零不可以長得一樣。
+                "time_range": asked_chapters.as_ref().map(|(r, _)| serde_json::json!({
+                    "from": r.from, "to": r.to, "said": r.said,
+                })),
+                "chapters": asked_chapters.as_ref().map(|(_, ch)| ch.iter().map(|s| serde_json::json!({
+                    // 答案講的是核心時間。start_ts／end_ts 跟 core_* 同一對數字，
+                    // 不要拿顯示範圍（含 5 秒 margin）去加總。
+                    "start_ts": s.core_started_at, "end_ts": s.core_ended_at,
+                    "core_start_ts": s.core_started_at, "core_end_ts": s.core_ended_at,
+                    "core_ms": s.core_ms(),
+                    "segment_count": s.segment_count,
+                    "app": s.app, "title": s.title, "host": s.host,
+                })).collect::<Vec<_>>()),
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
             return Ok(());
@@ -2729,6 +2799,13 @@ pub mod query {
             }
         }
 
+        if let Some((range, chapters)) = &asked_chapters {
+            println!();
+            for line in chapter_lines(range, chapters) {
+                println!("{line}");
+            }
+        }
+
         if !answers.is_empty() {
             println!();
             // SPEC §8.2 的語氣規範：「我最後看到的是…」，不准講成斷言。
@@ -2765,7 +2842,10 @@ pub mod query {
         }
 
         if hits.is_empty() {
-            if answers.is_empty() {
+            let has_chapters = asked_chapters
+                .as_ref()
+                .is_some_and(|(_, ch)| !ch.is_empty());
+            if answers.is_empty() && !has_chapters {
                 println!("\n沒有找到。");
                 // 這句話以前是「她可能當時沒在看，或那段被排除規則擋掉了」——
                 // 兩個猜測、零個證據，而兩件事她其實都查得到。
@@ -3126,6 +3206,107 @@ pub mod query {
                 !answers(&db, "電話", 10).unwrap().items.is_empty(),
                 "但答得出來"
             );
+        }
+
+        /// 空清單只能出現在「算過」之後。句子不准講成沒在錄、也不准講成沒有紀錄。
+        #[test]
+        fn empty_chapters_do_not_claim_she_was_not_recording() {
+            let range = sister_core::question::TimeRange {
+                from: 1_000,
+                to: 2_000,
+                said: "昨天下午".into(),
+            };
+            let out = chapter_lines(&range, &[]).join("\n");
+            assert!(out.contains("你問的是「昨天下午」"), "{out}");
+            assert!(out.contains("沒有切得出來的段落"), "{out}");
+            assert!(!out.contains("沒在錄"), "沒查過這件事：{out}");
+            assert!(!out.contains("沒有紀錄"), "沒查過這件事：{out}");
+        }
+
+        fn a_segment(
+            core_start: sister_core::Millis,
+            core_end: sister_core::Millis,
+            app: &str,
+            title: &str,
+            kinds: Vec<sister_core::segment::CutKind>,
+        ) -> sister_core::segment::Segment {
+            sister_core::segment::Segment {
+                started_at: core_start.saturating_sub(sister_core::segment::OVERLAP_MARGIN_MS),
+                ended_at: core_end.saturating_add(sister_core::segment::OVERLAP_MARGIN_MS),
+                core_started_at: core_start,
+                core_ended_at: core_end,
+                app: Some(app.into()),
+                title: Some(title.into()),
+                host: None,
+                cut_kinds: kinds,
+                confidence: None,
+                event_ids: sister_core::segment::EventRefs::default(),
+                last_edit: None,
+            }
+        }
+
+        #[test]
+        fn a_chapter_is_the_app_and_title_not_an_interpretation() {
+            let range = sister_core::question::TimeRange {
+                from: 1_000,
+                to: 8_000_000,
+                said: "昨天下午".into(),
+            };
+            let acts = sister_core::activity::group(&[a_segment(
+                1_000,
+                3_600_000 + 1_000,
+                "Code.exe",
+                "db.rs — AI-Sister",
+                vec![],
+            )]);
+            let out = chapter_lines(&range, &acts).join("\n");
+            assert!(out.contains("分成 1 段"), "{out}");
+            assert!(out.contains("Code.exe"), "{out}");
+            assert!(out.contains("db.rs — AI-Sister"), "{out}");
+            assert!(!out.contains("專心寫程式"), "標題就是 app／title：{out}");
+            assert!(!out.contains("段併成"), "一段就不要講併：{out}");
+        }
+
+        /// 5 個被上限切碎的 10 分鐘段，時長是核心 45 分鐘，不是 margin 相加的
+        /// 50 分鐘，也不准講成「專心了 45 分鐘」。
+        #[test]
+        fn grouped_chapters_use_core_duration_and_say_how_many_segments() {
+            let range = sister_core::question::TimeRange {
+                from: 0,
+                to: 3_600_000,
+                said: "昨天下午".into(),
+            };
+            let cap = sister_core::segment::TIME_CAP_MS;
+            let mut segs = Vec::new();
+            for i in 0..4 {
+                let start = i * cap;
+                segs.push(a_segment(
+                    start,
+                    start + cap,
+                    "code.exe",
+                    "db.rs — AI-Sister",
+                    if i == 0 {
+                        vec![]
+                    } else {
+                        vec![sister_core::segment::CutKind::TimeCap]
+                    },
+                ));
+            }
+            segs.push(a_segment(
+                4 * cap,
+                4 * cap + 5 * 60_000,
+                "code.exe",
+                "db.rs — AI-Sister",
+                vec![sister_core::segment::CutKind::TimeCap],
+            ));
+            let acts = sister_core::activity::group(&segs);
+            assert_eq!(acts.len(), 1);
+            let out = chapter_lines(&range, &acts).join("\n");
+            assert!(out.contains("分成 1 段"), "{out}");
+            assert!(out.contains("45 分鐘"), "核心 45 分鐘：{out}");
+            assert!(out.contains("5 段併成"), "要講是併來的：{out}");
+            assert!(!out.contains("50 分鐘"), "不准把 margin 加進去：{out}");
+            assert!(!out.contains("專心"), "沒判斷過專心：{out}");
         }
 
         /// 上一條的直接後果，而題庫第一次上線就記反了：`search` 是 0 筆、

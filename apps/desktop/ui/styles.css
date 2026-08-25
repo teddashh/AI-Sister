@@ -633,3 +633,23 @@ body.has-hits .stage {
     animation: none !important;
   }
 }
+
+/* 問句路徑上的章節。時間軸那一頁的 `.chapter` 在 timeline.css，兩頁不互載。 */
+.hit.chapter {
+  background: rgb(255 255 255 / 62%);
+}
+
+.chapter-when {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  margin: 0 0 2px;
+  opacity: 0.7;
+}
+
+.chapter-what {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}

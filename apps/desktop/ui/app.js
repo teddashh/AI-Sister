@@ -706,6 +706,45 @@ function when(ts) {
   )}:${pad(d.getMinutes())}`;
 }
 
+function clock(ts) {
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 和終端機 `fmt::duration_ms`、時間軸 `lasted` 同一套：無條件捨去。 */
+function lasted(ms) {
+  if (ms < 60_000) return `${Math.floor(ms / 1000)} 秒`;
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)} 分鐘`;
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  return m === 0 ? `${h} 小時` : `${h} 小時 ${m} 分`;
+}
+
+function chapterHit(ch) {
+  const li = document.createElement("li");
+  li.className = "hit chapter";
+  const whenEl = document.createElement("p");
+  whenEl.className = "chapter-when";
+  // 答案講的是核心時間。start_ts／end_ts 在時間軸上含 5 秒 margin，
+  // 相加會把相鄰段的邊界算兩次。
+  const start = ch.core_start_ts ?? ch.start_ts;
+  const end = ch.core_end_ts ?? ch.end_ts;
+  const durMs =
+    typeof ch.core_ms === "number" ? ch.core_ms : Math.max(0, end - start);
+  const dur = lasted(Math.max(0, durMs));
+  const n = ch.segment_count;
+  const howLong =
+    typeof n === "number" && n > 1 ? `${dur}，${n} 段併成` : dur;
+  whenEl.textContent = `${clock(start)}–${clock(end)}　${howLong}`;
+  const what = document.createElement("p");
+  what.className = "chapter-what";
+  const label = [ch.app, ch.title || ch.host].filter(Boolean).join(" · ");
+  what.textContent = label || "一段紀錄";
+  li.append(whenEl, what);
+  return li;
+}
+
 /**
  * 出處那一行：時間、在哪個 app、哪個視窗、哪個網址，以及點不點得開。
  *
@@ -1009,6 +1048,8 @@ function markLine(queryId) {
  * @param truncated 原文底下還有，只是沒送過來。捲到底那一句要靠它。
  * @param factsTruncated ★ 那一半也被切掉了。分開一個參數是因為兩邊的下一步
  *   不一樣：原文要 `--limit`，★ 十個不同的答案代表問法太寬。
+ * @param timeRange 問句裡認得出來的日曆範圍。`null` = 沒有時間範圍，沒去算章節。
+ * @param chapters 那段時間切成的活動級段落。`null` = 沒算過；`[]` = 算過但切不出來。
  */
 function renderHits(
   hits,
@@ -1019,6 +1060,8 @@ function renderHits(
   truncated = false,
   factsTruncated = false,
   searched = null,
+  timeRange = null,
+  chapters = null,
 ) {
   hitList.replaceChildren();
 
@@ -1049,6 +1092,31 @@ function renderHits(
     note.className = "hits-note";
     note.textContent = "你問的是「剛剛」，所以我沒有去比對字——這是我最後看到的幾件事：";
     hitList.append(note);
+  }
+
+  // 日曆範圍是另算的一區。`chapters === null` 時不要說「沒有章節」——那是
+  // 沒算過，和算過但切不出來是兩件事。
+  if (timeRange) {
+    const recap = document.createElement("li");
+    recap.className = "hits-note";
+    recap.textContent = `你問的是「${timeRange.said}」，那段時間是 ${when(timeRange.from)} 到 ${when(timeRange.to)}`;
+    hitList.append(recap);
+    if (Array.isArray(chapters)) {
+      if (chapters.length === 0) {
+        const emptyCh = document.createElement("li");
+        emptyCh.className = "hits-note";
+        emptyCh.textContent = "那段時間沒有切得出來的段落。";
+        hitList.append(emptyCh);
+      } else {
+        const count = document.createElement("li");
+        count.className = "hits-note";
+        count.textContent = `那段時間分成 ${chapters.length} 段：`;
+        hitList.append(count);
+        for (const ch of chapters) {
+          hitList.append(chapterHit(ch));
+        }
+      }
+    }
   }
 
   // SPEC §8.2 的語氣規範：「我最後看到的是…」，不准講成斷言。★ 那幾筆最需要
@@ -1099,7 +1167,9 @@ function renderHits(
     hitList.append(more);
   }
 
-  if (hits.length === 0 && facts.length === 0) {
+  const hasChapters = Array.isArray(chapters) && chapters.length > 0;
+
+  if (hits.length === 0 && facts.length === 0 && !hasChapters) {
     const empty = document.createElement("li");
     empty.className = "hits-empty";
     // 「我沒看過這件事」和「我什麼都還沒看過」是兩件不同的事。
@@ -1179,7 +1249,7 @@ function renderHits(
   // 「這一題我本來已經忘了」。**只在她真的給了東西的時候才出現**——一份空手
   // 而回的答案沒有什麼好標的，而一個掛在「我沒看過這件事」底下的「我早就忘了」
   // 按鈕，記下來的會是一次失敗。
-  if (hits.length > 0 || facts.length > 0) {
+  if (hits.length > 0 || facts.length > 0 || hasChapters) {
     // 沒有題號就標不了，而**這件事要講出來**。以前 `query_id` 是 `null` 只代
     // 表「這次點擊不會記帳」——看不見也無所謂。現在它代表那顆按鈕整個不見，
     // 而那顆按鈕是 Phase 1 第一條退場條件唯一的量法：安靜地少一個禮拜的證據，
@@ -1210,7 +1280,7 @@ function renderHits(
   // 是上一題的」，而空手而回的那一次底下躺的是「我記得的東西裡沒有這件事。」
   // 加上幾行理由——一筆都沒有。寫死 `true` 的話，下一題失敗會請他去看幾筆
   // 不存在的東西，而**空手而回正是他最可能連問第二次的那一種結果**。
-  showingAnswer = hits.length > 0 || facts.length > 0;
+  showingAnswer = hits.length > 0 || facts.length > 0 || hasChapters;
 }
 
 /**
@@ -1273,6 +1343,8 @@ async function ask() {
       answer.truncated,
       answer.answers_truncated,
       answer.searched,
+      answer.time_range,
+      answer.chapters,
     );
     setState("idle");
     // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
@@ -1517,6 +1589,88 @@ if (params.get("hits") === "recent") {
     // 句話本身就是假的（沒有人寫不進資料庫），而這一頁是這台機器上唯一驗得到
     // 版面的路徑。上一次只補了那一邊，這一邊留在原地。
     88,
+  );
+}
+
+// `?hits=chapters`／`?demo=1`：問「昨天下午在弄什麼」那一版。章節在 facts
+// 前面，標題是 app／title，不是一句「你在專心寫程式」。
+if (params.get("hits") === "chapters" || params.get("demo") === "1") {
+  const y = new Date();
+  y.setDate(y.getDate() - 1);
+  y.setHours(12, 0, 0, 0);
+  const from = y.getTime();
+  const at = (h, m) => {
+    const d = new Date(from);
+    d.setHours(h, m, 0, 0);
+    return d.getTime();
+  };
+  renderHits(
+    [
+      {
+        ts: at(15, 40),
+        snippet: "把時間軸接起來了。空白處現在會自己說明原因。",
+        text: "",
+        app: "Notion.exe",
+        title: "週報",
+        url: null,
+        frame_id: 4310,
+      },
+    ],
+    "keywords",
+    91,
+    [
+      {
+        value: "+886800080123",
+        raw: "客服專線 0800-080-123",
+        sightings: 2,
+        ts: at(14, 30),
+        chunk_id: 12,
+        frame_id: 41,
+        app: "chrome.exe",
+        title: "帳單查詢",
+        url: "https://example.com/bill",
+      },
+    ],
+    null,
+    false,
+    false,
+    null,
+    { from, to: at(18, 0), said: "昨天下午" },
+    [
+      {
+        start_ts: at(14, 0),
+        end_ts: at(14, 45),
+        core_start_ts: at(14, 0),
+        core_end_ts: at(14, 45),
+        core_ms: 45 * 60_000,
+        segment_count: 5,
+        app: "code.exe",
+        title: "db.rs — AI-Sister",
+        host: null,
+      },
+      {
+        start_ts: at(14, 45),
+        end_ts: at(15, 10),
+        core_start_ts: at(14, 45),
+        core_end_ts: at(15, 10),
+        core_ms: 25 * 60_000,
+        segment_count: 3,
+        app: "chrome.exe",
+        title: "SQLite user_version 文件",
+        host: "sqlite.org",
+      },
+      {
+        start_ts: at(15, 10),
+        end_ts: at(15, 55),
+        core_start_ts: at(15, 10),
+        core_end_ts: at(15, 55),
+        core_ms: 45 * 60_000,
+        segment_count: 5,
+        app: "notion.exe",
+        title: "週報",
+        host: null,
+      },
+    ],
   );
 }
 
