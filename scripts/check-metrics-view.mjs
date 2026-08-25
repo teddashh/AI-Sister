@@ -151,7 +151,7 @@ check(
 );
 check(
   "評測入口真的開 metrics.html",
-  /fn\s+open_metrics\b[\s\S]*?WebviewUrl::App\("metrics\.html"\.into\(\)\)/.test(MAIN),
+  /fn\s+open_metrics_window\b[\s\S]*?WebviewUrl::App\("metrics\.html"\.into\(\)\)/.test(MAIN),
   undefined,
 );
 check(
@@ -160,8 +160,8 @@ check(
   undefined,
 );
 check(
-  "系統匣事件真的呼叫 open_metrics",
-  /"metrics"\s*=>\s*\{[\s\S]*?open_metrics\(app\.clone\(\)\)/.test(MAIN),
+  "系統匣事件真的從獨立 thread 開 metrics",
+  /"metrics"\s*=>\s*\{?\s*spawn_window\([\s\S]*?app\.clone\(\)[\s\S]*?open_metrics_window/.test(MAIN),
   undefined,
 );
 check(

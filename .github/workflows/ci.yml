@@ -110,6 +110,13 @@ jobs:
       - name: Developer metrics must stay wired and keep private text out of the view
         run: node ./scripts/check-metrics-view.mjs
 
+      # WebView2 在 Windows 上有一條已知的 deadlock：從同步 IPC command
+      # 或 event handler 直接建第二扇 WebView，會留下有標題的白窗，再把整個
+      # desktop 卡成 Not Responding。Linux 和 Windows CI 都沒有點過系統匣，
+      # cargo check 也只證明它編得過；這支直接守五扇輔助視窗的接線形狀。
+      - name: Auxiliary WebViews must never be built from a synchronous Windows handler
+        run: node ./scripts/check-aux-window-threading.mjs
+
       # 熱鍵在程式裡是 `Ctrl+Alt+KeyP`，而鍵盤上沒有一顆鍵叫 KeyP。給人看之前
       # 要過 `pretty_combo`，而漏掉那一層的每一行都長得完全正常——`format!("還在
       # 用 {}。", restored.wanted)` 編得過、clippy 綠、讀起來也對。

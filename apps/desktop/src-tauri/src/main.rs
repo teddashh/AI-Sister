@@ -20,7 +20,10 @@ use serde::{Deserialize, Serialize};
 use sister_shell as bounds;
 use sister_shell::{PetState, Rect};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, PhysicalPosition, WindowEvent};
@@ -28,6 +31,34 @@ use tauri::{Manager, PhysicalPosition, WindowEvent};
 const PET: &str = "pet";
 const PET_W: i32 = 340;
 const PET_H: i32 = 560;
+
+static SETTINGS_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
+static ONBOARDING_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
+static TIMELINE_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
+static METRICS_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
+static FRAME_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
+
+/// 同一扇輔助視窗的非阻塞建立保留。
+///
+/// `get_webview_window(label)` 和 `WebviewWindowBuilder::build()` 不是同一個
+/// 原子操作。tray thread 與 async command 同時連點時，兩邊可能都先看到
+/// `None`，再各建一扇同 label 的窗。第二個入口只要知道第一個正在建就夠了；
+/// 不等待、不再排一份工作。build 成功、失敗或提早 return 都由 Drop 放回來。
+struct WindowOpening(&'static AtomicBool);
+
+impl WindowOpening {
+    fn claim(slot: &'static AtomicBool) -> Option<Self> {
+        slot.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(slot))
+    }
+}
+
+impl Drop for WindowOpening {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 struct Shell {
     state: Mutex<PetState>,
@@ -1483,9 +1514,33 @@ fn hotkey_set(
     Ok(view)
 }
 
-/// 開設定頁。同一個 label 重複用，所以按兩次不會得到兩個視窗。
-#[tauri::command]
-fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
+/// 從同步系統匣 event handler 開一扇 WebView。
+///
+/// Tauri / WebView2 在 Windows 有一條明列的 deadlock：在 event handler
+/// 裡直接 `WebviewWindowBuilder::build` 會卡在 controller callback，只留下
+/// 有標題、全白、`Not Responding` 的原生窗。系統匣 callback 只准走到
+/// 這裡；真正建視窗在獨立 OS thread 裡做。
+fn spawn_window(
+    app: tauri::AppHandle,
+    description: &'static str,
+    open: fn(tauri::AppHandle) -> Result<(), String>,
+) {
+    let _window_thread = std::thread::spawn(move || {
+        if let Err(e) = open(app) {
+            tracing::error!("{description}開不起來：{e}");
+        }
+    });
+}
+
+/// 真正建立設定頁的 internal helper。
+///
+/// Windows WebView2 在 synchronous command 或 event handler 裡直接建
+/// `WebviewWindow` 會 deadlock。這支所以不是 command：IPC 入口由底下
+/// 的 async wrapper 叫，系統匣則一律經 [`spawn_window`]。
+fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(_opening) = WindowOpening::claim(&SETTINGS_WINDOW_OPENING) else {
+        return Ok(());
+    };
     const SETTINGS: &str = "settings";
     if let Some(win) = app.get_webview_window(SETTINGS) {
         let _ = win.show();
@@ -1503,6 +1558,12 @@ fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
     .build()
     .map_err(|e| format!("{e:#}"))?;
     Ok(())
+}
+
+/// 開設定頁。同一個 label 重複用，所以按兩次不會得到兩個視窗。
+#[tauri::command]
+async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
+    open_settings_window(app)
 }
 
 // ---------- 三張同意書 ----------
@@ -1636,9 +1697,12 @@ fn consent_set(
     Ok(consent_view_after(dir, reset_by_version))
 }
 
-/// 開同意書那一頁。同一個 label 重複用。
-#[tauri::command]
-fn open_onboarding(app: tauri::AppHandle) -> Result<(), String> {
+/// 真正建立同意書頁的 internal helper。只准從 async command、
+/// [`spawn_window`] 或 Tauri 明確允許同步建視窗的 setup hook 進來。
+fn open_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(_opening) = WindowOpening::claim(&ONBOARDING_WINDOW_OPENING) else {
+        return Ok(());
+    };
     const ONBOARDING: &str = "onboarding";
     if let Some(win) = app.get_webview_window(ONBOARDING) {
         let _ = win.show();
@@ -1656,6 +1720,12 @@ fn open_onboarding(app: tauri::AppHandle) -> Result<(), String> {
     .build()
     .map_err(|e| format!("{e:#}"))?;
     Ok(())
+}
+
+/// 開同意書那一頁。同一個 label 重複用。
+#[tauri::command]
+async fn open_onboarding(app: tauri::AppHandle) -> Result<(), String> {
+    open_onboarding_window(app)
 }
 
 /// 一次刪除的規模。給人看的，所以欄位名是中文語意上的那幾個東西。
@@ -1818,8 +1888,10 @@ fn forget_range(
 /// 依據，而 340 像素寬的欄位撐不起「翻過一整天」這件事。
 ///
 /// 同一個 label 重複用，所以按兩次不會得到兩個視窗。
-#[tauri::command]
-fn open_timeline(app: tauri::AppHandle) -> Result<(), String> {
+fn open_timeline_window(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(_opening) = WindowOpening::claim(&TIMELINE_WINDOW_OPENING) else {
+        return Ok(());
+    };
     const TIMELINE: &str = "timeline";
     if let Some(win) = app.get_webview_window(TIMELINE) {
         let _ = win.show();
@@ -1839,12 +1911,20 @@ fn open_timeline(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn open_timeline(app: tauri::AppHandle) -> Result<(), String> {
+    open_timeline_window(app)
+}
+
 /// 開發者模式才會在系統匣出現的評測摘要頁。
 ///
 /// 它不自己跑評測，也不去猜資料目錄；只讀使用者在頁面上明確選中的
 /// `replay evaluate --to` 報告。同一個 label 重複使用，避免開出兩份互相
 /// 不知道對方載了哪個檔案的數字。
-fn open_metrics(app: tauri::AppHandle) -> Result<(), String> {
+fn open_metrics_window(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(_opening) = WindowOpening::claim(&METRICS_WINDOW_OPENING) else {
+        return Ok(());
+    };
     const METRICS: &str = "metrics";
     if let Some(win) = app.get_webview_window(METRICS) {
         let _ = win.show();
@@ -1913,8 +1993,10 @@ fn mark_query(query_id: i64, marked: bool, shell: tauri::State<'_, Shell>) -> Re
 ///
 /// 同一個 label 重複用，所以連點五筆結果不會得到五個視窗；已經開著就換一張
 /// 圖並拉到前面。
-#[tauri::command]
-fn open_frame(app: tauri::AppHandle, frame_id: i64) -> Result<(), String> {
+fn open_frame_window(app: tauri::AppHandle, frame_id: i64) -> Result<(), String> {
+    let Some(_opening) = WindowOpening::claim(&FRAME_WINDOW_OPENING) else {
+        return Ok(());
+    };
     const VIEWER: &str = "frame";
     let target = format!("frame.html?id={frame_id}");
 
@@ -1932,6 +2014,11 @@ fn open_frame(app: tauri::AppHandle, frame_id: i64) -> Result<(), String> {
         .build()
         .map_err(|e| format!("{e:#}"))?;
     Ok(())
+}
+
+#[tauri::command]
+async fn open_frame(app: tauri::AppHandle, frame_id: i64) -> Result<(), String> {
+    open_frame_window(app, frame_id)
 }
 
 #[derive(Serialize)]
@@ -2320,24 +2407,16 @@ fn main() {
                         }
                     }
                     "timeline" => {
-                        if let Err(e) = open_timeline(app.clone()) {
-                            tracing::error!("時間軸開不起來：{e}");
-                        }
+                        spawn_window(app.clone(), "時間軸", open_timeline_window);
                     }
                     "settings" => {
-                        if let Err(e) = open_settings(app.clone()) {
-                            tracing::error!("設定頁開不起來：{e}");
-                        }
+                        spawn_window(app.clone(), "設定頁", open_settings_window);
                     }
                     "consent" => {
-                        if let Err(e) = open_onboarding(app.clone()) {
-                            tracing::error!("同意書開不起來：{e}");
-                        }
+                        spawn_window(app.clone(), "同意書", open_onboarding_window);
                     }
                     "metrics" => {
-                        if let Err(e) = open_metrics(app.clone()) {
-                            tracing::error!("評測指標開不起來：{e}");
-                        }
+                        spawn_window(app.clone(), "評測指標", open_metrics_window);
                     }
                     "quit" => {
                         let shell = app.state::<Shell>();
@@ -2507,7 +2586,7 @@ fn main() {
             if !consent_read(app.state::<Shell>())
                 .map(|v| v.allows_recording)
                 .unwrap_or(false)
-                && let Err(e) = open_onboarding(app.handle().clone())
+                && let Err(e) = open_onboarding_window(app.handle().clone())
             {
                 tracing::error!("同意書開不起來：{e}");
             }

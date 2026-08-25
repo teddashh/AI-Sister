@@ -1243,13 +1243,18 @@ async function ask() {
   slowNote = null;
   setState("thinking");
   const slow = setTimeout(() => {
+    // 這個 timer 只量到一件事：這一題已經等了 4 秒。它沒有問資料庫是不是
+    // 第一次開、有沒有 migration，也沒有看索引進度。以前那句「第一次打開
+    // 資料庫要先整理索引」在任何慢查詢都會出現，這次甚至把 WebView2 deadlock
+    // 講成索引。給人看的話只能說程式真的量到的那半。
+    //
     // **`state === "thinking"` 不夠。** 他多按了幾次 Enter 的話，第一題的計時器
     // 會在第二題送出之後才響，而那時候 `state` 還是 `thinking`（是**第二題**
-    // 的）——於是一句「還在翻…（第一次打開資料庫要先整理索引）」蓋在一個
-    // 一百毫秒前才送出去的問題上。底下那個 `finally` 為了同一件事已經多問了
-    // 一次 `mine === asking`；這裡是它漏掉的兄弟。
+    // 的）——於是一句「這一題已經超過 4 秒」蓋在一個一百毫秒前才送出去的
+    // 問題上。底下那個 `finally` 為了同一件事已經多問了一次
+    // `mine === asking`；這裡是它漏掉的兄弟。
     if (mine === asking && state === "thinking") {
-      slowNote = "還在翻…（第一次打開資料庫要先整理索引）";
+      slowNote = "還在翻…（這一題已經超過 4 秒）";
       paint();
     }
   }, SLOW_MS);
