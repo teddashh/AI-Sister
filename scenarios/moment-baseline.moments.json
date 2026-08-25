@@ -1,0 +1,72 @@
+{
+  "format_version": 1,
+  "name": "synthetic-moment-baseline-moments",
+  "review": "reviewed",
+  "corpus_fingerprint": "fnv1a64:3d5e8741cd002e24",
+  "moments": [
+    {
+      "id": "moment-hand-0001",
+      "at_ms": 150000,
+      "candidate": "hand_picked",
+      "evidence": [
+        {
+          "event_index": 8
+        }
+      ],
+      "label": {
+        "label": "should_stay_quiet",
+        "why": "正在寫合成範例，畫面沒有任何該開口的訊號"
+      }
+    },
+    {
+      "id": "moment-0001",
+      "at_ms": 301000,
+      "candidate": "long_dwell",
+      "evidence": [
+        {
+          "event_index": 0
+        },
+        {
+          "event_index": 8
+        },
+        {
+          "event_index": 9
+        }
+      ],
+      "label": {
+        "label": "should_speak",
+        "category": "stuck",
+        "why": "同一個合成檔停留超過五分鐘"
+      }
+    },
+    {
+      "id": "moment-0002",
+      "at_ms": 320000,
+      "candidate": "date_time_mention",
+      "evidence": [
+        {
+          "event_index": 10
+        }
+      ],
+      "label": {
+        "label": "commitment",
+        "remind": "五點接她",
+        "due_at_ms": 3600000
+      }
+    },
+    {
+      "id": "moment-0003",
+      "at_ms": 330000,
+      "candidate": "date_time_mention",
+      "evidence": [
+        {
+          "event_index": 11
+        }
+      ],
+      "label": {
+        "label": "commitment",
+        "remind": "開會"
+      }
+    }
+  ]
+}

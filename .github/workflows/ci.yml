@@ -232,6 +232,14 @@ jobs:
       - name: The checked-in recall baseline must still produce its published result
         run: SISTER=./target/debug/sister python3 ./scripts/check-recall-baseline.py
 
+      # 承諾集／開口判斷集同樣：cargo test 證明候選規則，證明不了 clap、fixture
+      # 路徑和 `moments status --json` 還接在同一條路上。L0 沒有通知事件，所以
+      # 這一步還釘「corpus 裡明明有多種 System 事件，notification 候選仍是 0」。
+      # unlabeled 必須在 Draft／Reviewed 兩份上真的會變，不能和 should_speak 的 0
+      # 印成同一個字。
+      - name: The checked-in moment baseline must still draft the same candidates
+        run: SISTER=./target/debug/sister python3 ./scripts/check-moment-baseline.py
+
       # Windows 那一半在 Linux 上被 cfg 關掉，這裡至少要型別檢查到
       - name: Cross-check the Windows half
         run: ./scripts/check-windows.sh

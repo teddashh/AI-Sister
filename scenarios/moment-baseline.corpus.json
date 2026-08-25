@@ -1,0 +1,182 @@
+{
+  "format_version": 1,
+  "name": "synthetic-moment-baseline",
+  "duration_ms": 360000,
+  "review": "reviewed",
+  "redactions": {
+    "money": 0,
+    "phone": 0,
+    "email": 0,
+    "id_like": 0,
+    "secrets": 0
+  },
+  "events": [
+    {
+      "type": "frame",
+      "at_ms": 1000,
+      "monitor": 0,
+      "width": 1280,
+      "height": 720,
+      "dhash": 1,
+      "dup_run": 0,
+      "focus": {
+        "app_id": "editor.exe",
+        "app_name": "Synthetic Editor",
+        "window_title": "main.rs",
+        "url": null
+      },
+      "ocr": [
+        {
+          "text": "fn main() { 正在寫合成範例",
+          "x": 20,
+          "y": 30,
+          "w": 400,
+          "h": 20,
+          "confidence": 1.0
+        }
+      ]
+    },
+    {
+      "type": "system",
+      "at_ms": 10000,
+      "kind": "Lock",
+      "detail": "LINE 通知：會計師來訊"
+    },
+    {
+      "type": "system",
+      "at_ms": 20000,
+      "kind": "Unlock",
+      "detail": null
+    },
+    {
+      "type": "system",
+      "at_ms": 30000,
+      "kind": "Sleep",
+      "detail": null
+    },
+    {
+      "type": "system",
+      "at_ms": 40000,
+      "kind": "Wake",
+      "detail": null
+    },
+    {
+      "type": "system",
+      "at_ms": 50000,
+      "kind": "CapturePaused",
+      "detail": null
+    },
+    {
+      "type": "system",
+      "at_ms": 60000,
+      "kind": "CaptureResumed",
+      "detail": null
+    },
+    {
+      "type": "system",
+      "at_ms": 70000,
+      "kind": "Excluded",
+      "detail": "excluded url"
+    },
+    {
+      "type": "frame",
+      "at_ms": 140000,
+      "monitor": 0,
+      "width": 1280,
+      "height": 720,
+      "dhash": 2,
+      "dup_run": 0,
+      "focus": {
+        "app_id": "editor.exe",
+        "app_name": "Synthetic Editor",
+        "window_title": "main.rs",
+        "url": null
+      },
+      "ocr": [
+        {
+          "text": "仍在同一個合成檔裡改函式",
+          "x": 20,
+          "y": 30,
+          "w": 400,
+          "h": 20,
+          "confidence": 1.0
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "at_ms": 301000,
+      "monitor": 0,
+      "width": 1280,
+      "height": 720,
+      "dhash": 3,
+      "dup_run": 0,
+      "focus": {
+        "app_id": "editor.exe",
+        "app_name": "Synthetic Editor",
+        "window_title": "main.rs",
+        "url": null
+      },
+      "ocr": [
+        {
+          "text": "synthetic editor still open after five minutes",
+          "x": 20,
+          "y": 30,
+          "w": 520,
+          "h": 20,
+          "confidence": 1.0
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "at_ms": 320000,
+      "monitor": 0,
+      "width": 1280,
+      "height": 720,
+      "dhash": 4,
+      "dup_run": 0,
+      "focus": {
+        "app_id": "chat.exe",
+        "app_name": "Synthetic Chat",
+        "window_title": "LINE",
+        "url": null
+      },
+      "ocr": [
+        {
+          "text": "下午5點接她",
+          "x": 20,
+          "y": 30,
+          "w": 300,
+          "h": 20,
+          "confidence": 1.0
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "at_ms": 330000,
+      "monitor": 0,
+      "width": 1280,
+      "height": 720,
+      "dhash": 5,
+      "dup_run": 0,
+      "focus": {
+        "app_id": "mail.exe",
+        "app_name": "Synthetic Mail",
+        "window_title": "inbox",
+        "url": null
+      },
+      "ocr": [
+        {
+          "text": "明天 17:00 開會",
+          "x": 20,
+          "y": 30,
+          "w": 300,
+          "h": 20,
+          "confidence": 1.0
+        }
+      ]
+    }
+  ]
+}
