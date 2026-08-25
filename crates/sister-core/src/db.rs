@@ -32,7 +32,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 9;
+pub const SCHEMA_VERSION: i32 = 10;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -534,6 +534,58 @@ CREATE TABLE IF NOT EXISTS stuck_signal (
 CREATE INDEX IF NOT EXISTS idx_stuck_start ON stuck_signal(started_at);
 "#;
 
+/// L2 卡片 + 外送紀錄。append-only。
+///
+/// 卡片帶版本鏈（`version` / `supersedes`），Reviewer 之後修訂時再 append
+/// 一列，不准 UPDATE 舊列。
+///
+/// `brain_outbound` **不存送出去的原文**。只記結構和計數。
+const MIGRATION_010: &str = r#"
+CREATE TABLE IF NOT EXISTS l2_card (
+  id                   INTEGER PRIMARY KEY,
+  segment_core_start   INTEGER NOT NULL,
+  segment_ref          TEXT NOT NULL,
+  version              INTEGER NOT NULL,
+  supersedes           INTEGER REFERENCES l2_card(id),
+  activity             TEXT NOT NULL,
+  entities_json        TEXT NOT NULL,
+  continues_json       TEXT,
+  commitments_json     TEXT NOT NULL,
+  model_confidence     REAL NOT NULL,
+  confidence_source    TEXT NOT NULL,
+  evidence_json        TEXT NOT NULL,
+  open_questions_json  TEXT NOT NULL,
+  created_at           INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_l2_segment ON l2_card(segment_core_start, version);
+
+CREATE TABLE IF NOT EXISTS brain_outbound (
+  id                   INTEGER PRIMARY KEY,
+  ts                   INTEGER NOT NULL,
+  day_key              TEXT NOT NULL,
+  command              TEXT NOT NULL,
+  args_json            TEXT NOT NULL,
+  segment_core_start   INTEGER,
+  chars_sent           INTEGER NOT NULL,
+  truncated            INTEGER NOT NULL,
+  redaction_json       TEXT NOT NULL,
+  outcome              TEXT NOT NULL,
+  duration_ms          INTEGER NOT NULL,
+  error                TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_brain_outbound_day ON brain_outbound(day_key);
+CREATE INDEX IF NOT EXISTS idx_brain_outbound_ts ON brain_outbound(ts);
+
+CREATE TABLE IF NOT EXISTS brain_skip (
+  id                   INTEGER PRIMARY KEY,
+  ts                   INTEGER NOT NULL,
+  reason               TEXT NOT NULL,
+  segment_core_start   INTEGER,
+  detail               TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_brain_skip_ts ON brain_skip(ts);
+"#;
+
 /// 「她記下來的東西」放在哪幾張表——以及哪幾列不算。
 ///
 /// 這份名單要和 [`DbStats::nothing_recorded_left`] 對得起來：那邊說「一列都不
@@ -984,6 +1036,7 @@ impl Db {
             7 => tx.execute_batch(MIGRATION_007)?,
             8 => tx.execute_batch(MIGRATION_008)?,
             9 => tx.execute_batch(MIGRATION_009)?,
+            10 => tx.execute_batch(MIGRATION_010)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -3092,6 +3145,244 @@ impl Db {
         Ok(crate::activity::group(&segments))
     }
 
+    pub fn facts_in_range(&self, from_ts: Millis, to_ts: Millis) -> Result<Vec<FactRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, kind, raw, normalized, source_kind,
+                    chunk_id, frame_id, app_id, window_title, url
+             FROM facts WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts], map_fact_row)?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn clipboard_in_range(
+        &self,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<Vec<crate::segment::ClipboardPoint>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, byte_len, source_app FROM clipboard_events
+             WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts], |r| {
+            Ok(crate::segment::ClipboardPoint {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                byte_len: r.get(2)?,
+                source_app: r.get(3)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn stuck_in_range(
+        &self,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<Vec<crate::stuck::StuckSignal>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT started_at, ended_at, app_id, window_title,
+                    dwell_ms, switch_count, error_fact_count
+             FROM stuck_signal
+             WHERE ended_at > ?1 AND started_at < ?2
+             ORDER BY started_at, id",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts], |r| {
+            Ok(crate::stuck::StuckSignal {
+                started_at: r.get(0)?,
+                ended_at: r.get(1)?,
+                app: r.get(2)?,
+                title: r.get(3)?,
+                dwell_ms: r.get(4)?,
+                switch_count: r.get(5)?,
+                error_fact_count: r.get(6)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn frame_exists(&self, id: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM frames WHERE id = ?1)",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn fact_exists(&self, id: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM facts WHERE id = ?1)",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn latest_l2_for_segment(&self, core_started_at: Millis) -> Result<Option<L2CardRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, segment_core_start, segment_ref, version, supersedes,
+                        activity, entities_json, continues_json, commitments_json,
+                        model_confidence, evidence_json, open_questions_json, created_at
+                 FROM l2_card
+                 WHERE segment_core_start = ?1
+                 ORDER BY version DESC, id DESC LIMIT 1",
+                [core_started_at],
+                map_l2_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn latest_l2_before(&self, core_started_at: Millis) -> Result<Option<L2CardRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, segment_core_start, segment_ref, version, supersedes,
+                        activity, entities_json, continues_json, commitments_json,
+                        model_confidence, evidence_json, open_questions_json, created_at
+                 FROM l2_card
+                 WHERE segment_core_start < ?1
+                 ORDER BY segment_core_start DESC, version DESC, id DESC LIMIT 1",
+                [core_started_at],
+                map_l2_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn l2_in_range(&self, from_ts: Millis, to_ts: Millis) -> Result<Vec<L2CardRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, segment_core_start, segment_ref, version, supersedes,
+                    activity, entities_json, continues_json, commitments_json,
+                    model_confidence, evidence_json, open_questions_json, created_at
+             FROM l2_card
+             WHERE segment_core_start >= ?1 AND segment_core_start < ?2
+             ORDER BY segment_core_start, version, id",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts], map_l2_row)?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn insert_l2_card(&mut self, ins: &L2Insert<'_>) -> Result<i64> {
+        let prev = self.latest_l2_for_segment(ins.segment_core_start)?;
+        let version = prev.as_ref().map(|p| p.version + 1).unwrap_or(1);
+        let supersedes = prev.as_ref().map(|p| p.id);
+        self.conn.execute(
+            "INSERT INTO l2_card(
+                segment_core_start, segment_ref, version, supersedes,
+                activity, entities_json, continues_json, commitments_json,
+                model_confidence, confidence_source, evidence_json,
+                open_questions_json, created_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'model',?10,?11,?12)",
+            params![
+                ins.segment_core_start,
+                ins.segment_ref,
+                version,
+                supersedes,
+                ins.activity,
+                ins.entities_json,
+                ins.continues_json,
+                ins.commitments_json,
+                ins.model_confidence,
+                ins.evidence_json,
+                ins.open_questions_json,
+                crate::now_ms(),
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn brain_outbound_count_on(&self, day_key: &str) -> Result<u32> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM brain_outbound WHERE day_key = ?1",
+            [day_key],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u32)
+    }
+
+    pub fn insert_brain_outbound(&mut self, ins: &OutboundInsert<'_>) -> Result<i64> {
+        let args_json = serde_json::to_string(ins.args).context("serialize brain args")?;
+        let redaction_json =
+            serde_json::to_string(&ins.redaction).context("serialize redaction stats")?;
+        self.conn.execute(
+            "INSERT INTO brain_outbound(
+                ts, day_key, command, args_json, segment_core_start,
+                chars_sent, truncated, redaction_json, outcome, duration_ms, error
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                ins.ts,
+                ins.day_key,
+                ins.command,
+                args_json,
+                ins.segment_core_start,
+                ins.chars_sent,
+                ins.truncated as i64,
+                redaction_json,
+                ins.outcome,
+                ins.duration_ms,
+                ins.error,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_brain_outbound(&self, limit: usize) -> Result<Vec<OutboundRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, day_key, command, args_json, segment_core_start,
+                    chars_sent, truncated, redaction_json, outcome, duration_ms, error
+             FROM brain_outbound ORDER BY ts DESC, id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok(OutboundRow {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                day_key: r.get(2)?,
+                command: r.get(3)?,
+                args_json: r.get(4)?,
+                segment_core_start: r.get(5)?,
+                chars_sent: r.get(6)?,
+                truncated: r.get::<_, i64>(7)? != 0,
+                redaction_json: r.get(8)?,
+                outcome: r.get(9)?,
+                duration_ms: r.get(10)?,
+                error: r.get(11)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn list_brain_skip(&self, limit: usize) -> Result<Vec<SkipRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, reason, segment_core_start, detail
+             FROM brain_skip ORDER BY ts DESC, id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok(SkipRow {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                reason: r.get(2)?,
+                segment_core_start: r.get(3)?,
+                detail: r.get(4)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn insert_brain_skip(
+        &mut self,
+        ts: Millis,
+        reason: &str,
+        segment_core_start: Option<Millis>,
+        detail: &str,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO brain_skip(ts, reason, segment_core_start, detail)
+             VALUES(?1,?2,?3,?4)",
+            params![ts, reason, segment_core_start, detail],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
     /// 把相鄰兩段併成一段。寫進 `segment_edit` 再重算當天。
     pub fn merge_chapters(
         &mut self,
@@ -3946,6 +4237,24 @@ impl Db {
     }
 }
 
+fn map_l2_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<L2CardRow> {
+    Ok(L2CardRow {
+        id: row.get(0)?,
+        segment_core_start: row.get(1)?,
+        segment_ref: row.get(2)?,
+        version: row.get(3)?,
+        supersedes: row.get(4)?,
+        activity: row.get(5)?,
+        entities_json: row.get(6)?,
+        continues_json: row.get(7)?,
+        commitments_json: row.get(8)?,
+        model_confidence: row.get(9)?,
+        evidence_json: row.get(10)?,
+        open_questions_json: row.get(11)?,
+        created_at: row.get(12)?,
+    })
+}
+
 fn map_fact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FactRow> {
     Ok(FactRow {
         id: row.get(0)?,
@@ -4237,6 +4546,74 @@ pub struct FactRow {
     pub app_id: Option<String>,
     pub window_title: Option<String>,
     pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct L2CardRow {
+    pub id: i64,
+    pub segment_core_start: Millis,
+    pub segment_ref: String,
+    pub version: i32,
+    pub supersedes: Option<i64>,
+    pub activity: String,
+    pub entities_json: String,
+    pub continues_json: Option<String>,
+    pub commitments_json: String,
+    pub model_confidence: f64,
+    pub evidence_json: String,
+    pub open_questions_json: String,
+    pub created_at: Millis,
+}
+
+pub struct L2Insert<'a> {
+    pub segment_core_start: Millis,
+    pub segment_ref: &'a str,
+    pub activity: &'a str,
+    pub entities_json: String,
+    pub continues_json: Option<String>,
+    pub commitments_json: String,
+    pub model_confidence: f64,
+    pub evidence_json: String,
+    pub open_questions_json: String,
+}
+
+pub struct OutboundInsert<'a> {
+    pub ts: Millis,
+    pub day_key: &'a str,
+    pub command: &'a str,
+    pub args: &'a [String],
+    pub segment_core_start: Option<Millis>,
+    pub chars_sent: i64,
+    pub truncated: bool,
+    pub redaction: crate::deid::RedactionStats,
+    pub outcome: &'a str,
+    pub duration_ms: i64,
+    pub error: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundRow {
+    pub id: i64,
+    pub ts: Millis,
+    pub day_key: String,
+    pub command: String,
+    pub args_json: String,
+    pub segment_core_start: Option<Millis>,
+    pub chars_sent: i64,
+    pub truncated: bool,
+    pub redaction_json: String,
+    pub outcome: String,
+    pub duration_ms: i64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkipRow {
+    pub id: i64,
+    pub ts: Millis,
+    pub reason: String,
+    pub segment_core_start: Option<Millis>,
+    pub detail: String,
 }
 
 /// 要記進題庫的一次提問（見 [`Db::log_query`]）。
@@ -7453,6 +7830,15 @@ mod tests {
             (
                 "stuck_signal",
                 "從 L0/L1 算出來的卡住訊號，不是原件；母體是段落所依的事件與 facts",
+            ),
+            (
+                "l2_card",
+                "模型對一段的假設，不是螢幕上的原件；forget 跟段落一起清",
+            ),
+            ("brain_outbound", "出境稽核：送了什麼結構給誰，不含原文"),
+            (
+                "brain_skip",
+                "為什麼沒送出去（沒簽／沒命令／預算／沒東西），不是內容",
             ),
             ("text_fts", "text_chunks 的索引"),
             ("text_fts_uni", "text_chunks 的索引"),

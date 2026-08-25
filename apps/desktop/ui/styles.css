@@ -653,3 +653,10 @@ body.has-hits .stage {
   overflow-wrap: anywhere;
   user-select: text;
 }
+
+/* L2 假設。時間軸那一頁的完整樣式在 timeline.css。 */
+.guess-mark {
+  font-size: 11px;
+  margin: 0 0 2px;
+  opacity: 0.8;
+}

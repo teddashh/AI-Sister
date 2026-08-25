@@ -18,6 +18,7 @@ pub struct Config {
     pub privacy: PrivacyConfig,
     pub retention: RetentionConfig,
     pub shell: ShellConfig,
+    pub brain: BrainConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +240,65 @@ impl Default for ShellConfig {
             pause_shortcut: "Ctrl+Alt+P".to_string(),
             developer_mode: false,
         }
+    }
+}
+
+/// L2 解釋層。沒設定命令就一次都不呼叫。
+///
+/// 模型接法是 2026-08-21 定案：spawn 使用者已經裝好、已經登入的那支 CLI，
+/// 不是 HTTP client，也不是本機推論引擎。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BrainConfig {
+    /// CLI 可執行檔。空字串 = 沒設定 = 一次都不 spawn。
+    pub command: String,
+    /// 傳給那支 CLI 的參數。prompt 走 stdin，不在這裡。
+    pub args: Vec<String>,
+    /// 每日解釋預算。SPEC §5.1 預設 80。超過即靜默降級。
+    ///
+    /// `0` 的意思是「今天一張都不解釋」，不是「不限制」。
+    pub daily_budget: u32,
+    /// 併發槽數。SPEC §5.3 預設 4、上限 8。
+    pub concurrency: u32,
+    /// 人名遮蔽。SPEC §11.3 預設開。
+    pub redact_names: bool,
+}
+
+impl Default for BrainConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            daily_budget: 80,
+            concurrency: 4,
+            redact_names: true,
+        }
+    }
+}
+
+impl BrainConfig {
+    /// 有設定可執行檔才回 `Some`。空白不算設定。
+    pub fn cli(&self) -> Option<(&str, &[String])> {
+        let cmd = self.command.trim();
+        if cmd.is_empty() {
+            None
+        } else {
+            Some((cmd, &self.args))
+        }
+    }
+
+    pub fn concurrency_slots(&self) -> u32 {
+        self.concurrency
+    }
+
+    pub fn check(&self) -> anyhow::Result<()> {
+        if !(1..=8).contains(&self.concurrency) {
+            anyhow::bail!(
+                "brain.concurrency 必須是 1 到 8（SPEC §5.3），實際是 {}。",
+                self.concurrency
+            );
+        }
+        Ok(())
     }
 }
 
@@ -502,6 +562,7 @@ impl Config {
         let text = std::fs::read_to_string(path)?;
         let cfg: Config = toml::from_str(&text)?;
         cfg.retention.check()?;
+        cfg.brain.check()?;
         Ok(cfg)
     }
 
@@ -540,6 +601,7 @@ impl Config {
     /// 「我剛剛改了保留天數」。擋在寫入之前，錯誤訊息還指得到那個輸入框。
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         self.retention.check()?;
+        self.brain.check()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -910,6 +972,19 @@ mod tests {
     /// 整理就全部刪掉」。而整理在每次 `sister record` 開始時自動跑——所以照
     /// 那個習慣寫下去的人，會在她開始錄的那一刻失去全部記憶，畫面上不會有
     /// 任何一行字提到這件事。兩種讀法都合理，所以擋下來讓他自己選。
+    #[test]
+    fn brain_concurrency_outside_one_to_eight_is_refused() {
+        let mut cfg = Config::default();
+        cfg.brain.concurrency = 0;
+        assert!(cfg.brain.check().is_err());
+        cfg.brain.concurrency = 9;
+        assert!(cfg.brain.check().is_err());
+        cfg.brain.concurrency = 4;
+        assert!(cfg.brain.check().is_ok());
+        assert!(Config::default().brain.cli().is_none(), "預設沒有 CLI");
+        assert!(Config::default().brain.redact_names, "人名遮蔽預設開");
+    }
+
     #[test]
     fn zero_days_is_refused_because_it_could_mean_either_forever_or_nothing() {
         for bad in [

@@ -353,24 +353,32 @@ a 類（顯式時間承諾）**——這兩類是「使用者自己能立刻驗�
 
 ## §10. 模型接入（multi-ai）
 
-- **雙軌**：(a) 訂閱登入——MAT `signin.ts` 模式移植（spawn 官方 CLI 的
-  paste-code/device-code OAuth、trustedHosts、statusProbe、憑證零接觸、
-  managed pinned runtime）；用於對話/深度分析/hands。
-  (b) BYOK API key——secret-vault（OS keychain）模式；用於 interpreter 高頻小呼叫。
-  (c) 本地——Ollama/本地 runtime 自動偵測；隱私最大化模式可全本地跑 interpreter。
+〔2026-08-21 定案〕在本機的是截圖，語言模型在雲端。第一批使用者手上已經有
+claude code / codex / grok / gemini cli。所以 L2/L3 那個腦要接的第一個東西
+**不是 HTTP client，也不是 secret-vault 裡的 API key**，是使用者已經裝好、
+已經登入、已經在付錢的那支 CLI。`sister` 用 `std::process::Command` spawn
+它：prompt 從 stdin 進、JSON 從 stdout 出。`check-no-network.sh` 繼續禁
+`reqwest`／`ureq`／本機推論引擎，沒有例外。
+
+- **這一版落地的**：`[brain] command` + `args`。沒設定就一次都不呼叫。
+- **還沒做的**：(a) 訂閱登入的 OAuth 輔助（MAT `signin.ts`）——使用者自己
+  在那支 CLI 裡登入即可；(b) 本地 Ollama 偵測。兩者都還是 spawn CLI，不是
+  把 HTTP client 拉進相依樹。
 - **角色→模型對映**（可配置，附預設）：interpreter=cheap tier；reviewer=mid tier
   （夜間 batch 半價）；chat=使用者選；hands=使用者訂閱的 coding agent。
-- **降級鏈**：雲端不可用 → 本地模型 → 純檢索模式（1.0 功能永遠活著）。
-- 併發/衝突注意：同 provider CLI session 的 refresh-token 競爭（MAT 已文檔化，
-  啟動間隔 ≥1.5s）；Hermes/Codex 同機 OAuth 衝突經驗適用。
+  實際選哪一個模型，是那支 CLI 自己的事。
+- **降級鏈**：沒簽同意書 2 / 沒設定 CLI / 每日預算用完 → 純檢索模式
+  （1.0 功能永遠活著）。三種原因印三種話。
+- 併發槽數預設 4、上限 8（§5.3）。
 
 ## §11. 隱私與安全（產品的第一賣點，工程上與功能同權重）
 
 ### 11.1 三張同意書〔定案〕（onboarding 三個獨立開關，README 第一段公開承諾）
 
 1. **本機記錄**：我同意在我的硬碟上記錄我的螢幕（可全功能運作，永不聯網）。
-2. **上雲解讀**：我同意把**去識別化後的文字**（永不含 pixel）送到我指定的
-   模型商做解讀（逐 provider 勾選；預設全關 → 1.0 純本機模式）。
+2. **上雲解讀**：我同意把**去識別化後的文字**（OCR 抽出來的字，永不含
+   pixel）交給我在設定裡指定的本機 CLI，由那支程式去做解讀（預設關 →
+   沒簽就一次都不 spawn）。
 3. **畫面暫存**：我同意保留變化幀截圖 N 天（可選 0 天 = 只留 OCR 文字）。
 
 ### 11.2 Capture 時排除（不是事後刪）〔定案〕

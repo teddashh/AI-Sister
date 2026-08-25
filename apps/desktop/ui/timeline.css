@@ -529,3 +529,52 @@ button:disabled {
 .chapter-piece-actions button:hover {
   background: rgb(246 236 223 / 8%);
 }
+
+/* ---------- L2 假設（只加在末尾） ---------- */
+
+.chip.guess {
+  background: rgb(126 162 214 / 22%);
+  color: #c9d8f0;
+}
+
+.guess {
+  list-style: none;
+  margin: 0 4px 10px 58px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgb(126 162 214 / 10%);
+  box-shadow: inset 3px 0 0 #7ea2d6;
+}
+
+.guess-mark {
+  margin: 0 0 4px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: #c9d8f0;
+}
+
+.guess-activity {
+  margin: 0;
+  font-size: 14px;
+  font-style: italic;
+}
+
+.guess-entities,
+.guess-open {
+  margin: 4px 0 0;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.guess-evidence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.guess-fact {
+  opacity: 0.8;
+}

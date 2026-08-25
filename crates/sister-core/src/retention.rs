@@ -574,6 +574,11 @@ impl crate::db::Db {
         .context("prune segment_edit")?;
         tx.execute("DELETE FROM stuck_signal WHERE ended_at < ?1", [text_cut])
             .context("prune stuck_signal")?;
+        tx.execute(
+            "DELETE FROM l2_card WHERE segment_core_start < ?1",
+            [text_cut],
+        )
+        .context("prune l2_card")?;
         // **最後一步，在同一個 transaction 裡。**上面每一句 DELETE 都跑完了，
         // 所以「一列都不剩」現在才問得準。順序反過來的話，這一支看到的是還沒
         // 被清空的子表，一場都刪不掉——而且不會有人發現，因為 0 是個合理的數字。
@@ -829,6 +834,21 @@ impl crate::db::Db {
             [from_ts, to_ts],
         )
         .context("forget stuck_signal")?;
+        tx.execute(
+            "DELETE FROM l2_card WHERE segment_core_start >= ?1 AND segment_core_start < ?2",
+            [from_ts, to_ts],
+        )
+        .context("forget l2_card")?;
+        tx.execute(
+            "DELETE FROM brain_outbound WHERE ts >= ?1 AND ts < ?2",
+            [from_ts, to_ts],
+        )
+        .context("forget brain_outbound")?;
+        tx.execute(
+            "DELETE FROM brain_skip WHERE ts >= ?1 AND ts < ?2",
+            [from_ts, to_ts],
+        )
+        .context("forget brain_skip")?;
         // 那幾場錄製本身。這一句就是「每一張表都清乾淨」那句話裡以前唯一
         // 沒被清到的那張表——理由見 [`delete_empty_sessions`]。
         report.sessions_deleted += delete_empty_sessions(&tx, None)?;

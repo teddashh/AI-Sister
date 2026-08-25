@@ -9,18 +9,22 @@
 //!
 //! - **L0 證據**：[`model`] 的訊號型別 + [`db`] 的 append-only 資料表。不經 LLM。
 //! - **L1 事實**：[`facts`] 的 typed 抽取。純規則、零幻覺、可重跑。
-//! - L2 假設 / L3 狀態：Phase 4 以後才存在。Phase 0 沒有任何模型呼叫。
+//! - L2 假設：[`brain`] 把去敏後的證據交給使用者設定的 CLI，收回一張卡片。
+//! - L3 狀態：還沒做。
 //!
-//! 「抄寫歸程式，意圖歸模型」——這個 crate 目前為止全是抄寫。
+//! 「抄寫歸程式，意圖歸模型」。模型呼叫只走 `std::process::Command`，
+//! 而且要有 [`consent::CloudAllowed`]。
 
 pub mod activity;
 pub mod answer;
+pub mod brain;
 pub mod capabilities;
 pub mod config;
 pub mod consent;
 pub mod control;
 pub mod db;
 pub mod dedup;
+pub mod deid;
 pub mod eval;
 pub mod facts;
 pub mod heartbeat;
@@ -36,7 +40,8 @@ pub mod segment;
 pub mod segment_edit;
 pub mod stuck;
 
-pub use config::{CaptureConfig, Config, Exclusion, PrivacyConfig, RetentionConfig};
+pub use config::{BrainConfig, CaptureConfig, Config, Exclusion, PrivacyConfig, RetentionConfig};
+pub use consent::CloudAllowed;
 pub use db::{Db, DbStats, FactRow, FrameContext, SCHEMA_VERSION};
 pub use dedup::{Deduper, FrameVerdict, dhash_gray, dhash_rgb, hamming};
 pub use facts::{ExtractedFact, FactKind, extract};

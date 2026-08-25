@@ -1,7 +1,7 @@
 //! L0 訊號與 L1 事實的領域型別。
 //!
 //! 憲法（SPEC §0）：這一層的東西**全部由程式寫入**，不經 LLM、不可改寫。
-//! 模型只能碰 L2/L3，而 L2/L3 在 Phase 4 之前根本不存在。
+//! 模型只能碰 L2/L3。L2 走使用者設定的 CLI（[`crate::brain`]），L3 還沒做。
 
 use serde::{Deserialize, Serialize};
 

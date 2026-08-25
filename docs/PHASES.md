@@ -177,8 +177,9 @@ capture 層本身就是 recorder。
       畫面張數對畫面檔大小。字母人那幾頁（同意書、設定、時間軸兩段式刪除）在
       `?demo=1` 的無頭瀏覽器裡驗過版面與狀態轉換。
       **還缺的是真 Tauri 視窗上的那一遍**——那要在 Windows 上做，見驗收清單。
-      另外「離線」在這裡不是一個模式而是唯一的狀態：程式裡沒有連外路徑，
-      `check-no-network.sh` 每次 push 都在證明這件事。
+      另外「離線」是預設：程式裡沒有 HTTP client（`check-no-network.sh` 每次
+      push 都在證明），畫面永不離開這台機器。簽了第二張同意書且設定了 CLI
+      之後，去識別化後的**字**才會交給那支本機行程。
 - [x] clone → 跑起來 < 10 分鐘（含 README quickstart 實測）。
       **實測 33 秒**（乾淨 `CARGO_HOME`：clone → 抓 108 MB 相依 → release build
       32 秒 → replay → 第一個 ★ 答案。16 核開發機；runner 約 2.1 倍）。這一條
@@ -280,7 +281,8 @@ capture 層本身就是 recorder。
 - 記憶瀏覽器：「她現在認為我在幹嘛、根據什麼」即時視圖 + 當場更正；
   承諾表 UI（結案/其他 兩鍵）。
 - 去識別化管線（SPEC §11.3）+ 外送紀錄面板（送了什麼給誰）。
-- 模型接入雙軌：BYOK cheap tier + 訂閱登入（MAT signin.ts 移植）。
+- 模型接入：spawn 使用者已登入的 CLI（2026-08-21 定案；不是 BYOK HTTP、
+  也不是內建推論引擎）。設定在 `[brain] command` / `args`。
 - **A/B gate**：harness 跑 `+interpreter` vs 不跑——照〔定案〕沒贏就保持預設關。
 
 **Exit criteria**

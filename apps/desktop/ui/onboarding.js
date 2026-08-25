@@ -47,16 +47,10 @@ function card(sheet) {
 
   const without = document.createElement("span");
   without.className = "without";
-  // 第二張勾下去之後，這一行還在講「沒有這一張會怎樣」——一句寫給沒勾的人
-  // 的話，印在一個勾好的框裡。它括號裡確實帶著「這一張還沒有東西可以開」，
-  // 所以不算假；但那是**否定句的附註**，而讀的人剛做的是肯定的動作，而且
-  // 另外兩張勾下去是真的會改變行為。同一種外觀、同一個時戳、同一句結構，
-  // 三張裡有一張其實什麼都沒發生。
-  //
-  // 換句話，不是多一句：多一句會和括號裡那半句幾乎一字不差地重複。
+  // 第二張勾下去之後，沒簽那句「一次都不會呼叫」就不該再印在勾好的框裡。
   without.textContent =
     sheet.key === "cloud-reading" && sheet.effective
-      ? "勾了也還沒有作用：這份程式裡沒有任何連外路徑，她仍然完全在本機跑。"
+      ? "勾了之後，去識別化後的字會交給你在設定裡指定的那支 CLI。沒設定命令就一次都不叫。"
       : sheet.without;
 
   body.append(wording, without);
@@ -256,12 +250,12 @@ const DEMO = {
   path: "C:\\Users\\ted\\AppData\\Roaming\\ted-h\\AI-Sister\\data\\consent.toml",
   wording: [
     "我同意在我的硬碟上記錄我的螢幕。",
-    "我同意把去識別化後的文字（永不含畫面）送到我指定的模型商做解讀。",
+    "我同意把去識別化後的文字（OCR 抽出來的字，永不含畫面）交給我在設定裡指定的本機 CLI，由那支程式去做解讀。",
     "我同意保留變化幀的截圖，而不是只留上面的字。",
   ],
   without: [
     "沒有這一張，sister record 不會開始錄；錄到一半撤回，正在跑的 record 每 5 秒重讀同意書，最多再錄 5 秒加一拍；capture.min_interval_ms 超過 5 秒時，主要會等那一拍。",
-    "沒有這一張，她完全在本機跑。（目前這份程式裡沒有任何連外路徑，所以這一張還沒有東西可以開。）",
+    "沒有這一張，她一次都不會呼叫那支 CLI；解釋層保持關閉，只累積本機的畫面與文字。",
     "沒有這一張，她只記螢幕上的字，不留截圖。",
   ],
   keys: ["local-recording", "cloud-reading", "frame-storage"],
@@ -270,8 +264,8 @@ const DEMO = {
 function demoView(current, storeImages = true, mode = "1") {
   const at = [
     Date.UTC(2026, 7, 14, 2, 31),
-    // 第二張平常是沒勾的。`?demo=cloud` 把它勾起來——那是唯一看得到「這一張
-    // 現在還沒有東西可以開」那句話的辦法，而它正是勾下去之後才需要講的。
+    // 第二張平常是沒勾的。`?demo=cloud` 把它勾起來——那是唯一看得到
+    // 「勾了之後字會交給 CLI」那句話的辦法。
     mode === "cloud" ? Date.UTC(2026, 7, 14, 2, 32) : null,
     Date.UTC(2026, 6, 2, 9, 5),
   ];

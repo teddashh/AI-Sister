@@ -1141,6 +1141,9 @@ struct Chapter {
     /// 底下的分鐘級段落。活動級才填；答案端不送。
     #[serde(skip_serializing_if = "Option::is_none")]
     segments: Option<Vec<Chapter>>,
+    /// 這一段上最新的 L2 假設。沒有就是沒有，不是空物件。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    l2: Option<Vec<sister_core::brain::L2View>>,
 }
 
 fn chapter_from_segment(s: sister_core::segment::Segment) -> Chapter {
@@ -1163,6 +1166,7 @@ fn chapter_from_segment(s: sister_core::segment::Segment) -> Chapter {
         segment_count: None,
         core_ms: None,
         segments: None,
+        l2: None,
     }
 }
 
@@ -1219,6 +1223,7 @@ fn chapter_from_activity_with_nested(
         segment_count: Some(a.segment_count),
         core_ms: Some(core_ms),
         segments,
+        l2: None,
     }
 }
 
@@ -1230,21 +1235,55 @@ fn timeline_chapters(
     shell: tauri::State<'_, Shell>,
 ) -> Result<Vec<Chapter>, String> {
     with_db_mut(&shell, |db| {
+        let cards = db.l2_in_range(from_ts, to_ts).map_err(|e| format!("{e:#}"))?;
         Ok(db
             .activities_for_range(from_ts, to_ts)
             .map_err(|e| format!("{e:#}"))?
             .into_iter()
-            .map(chapter_from_activity_timeline)
+            .map(|a| {
+                let mut ch = chapter_from_activity_timeline(a);
+                attach_l2(&mut ch, &cards);
+                ch
+            })
             .collect())
     })
 }
 
+fn attach_l2(ch: &mut Chapter, cards: &[sister_core::db::L2CardRow]) {
+    let mut starts = vec![ch.core_start_ts];
+    if let Some(segs) = &ch.segments {
+        starts.extend(segs.iter().map(|s| s.core_start_ts));
+    }
+    let mut views = Vec::new();
+    for start in starts {
+        if let Some(row) = cards
+            .iter()
+            .filter(|c| c.segment_core_start == start)
+            .max_by_key(|c| (c.version, c.id))
+        {
+            let view = sister_core::brain::view_from_row(row);
+            if !views
+                .iter()
+                .any(|v: &sister_core::brain::L2View| v.segment_ref == view.segment_ref)
+            {
+                views.push(view);
+            }
+        }
+    }
+    ch.l2 = if views.is_empty() { None } else { Some(views) };
+}
+
 fn timeline_chapters_after_edit(
     segs: Vec<sister_core::segment::Segment>,
+    cards: &[sister_core::db::L2CardRow],
 ) -> Vec<Chapter> {
     sister_core::activity::group(&segs)
         .into_iter()
-        .map(chapter_from_activity_timeline)
+        .map(|a| {
+            let mut ch = chapter_from_activity_timeline(a);
+            attach_l2(&mut ch, cards);
+            ch
+        })
         .collect()
 }
 
@@ -1261,10 +1300,11 @@ fn timeline_merge_chapters(
     shell: tauri::State<'_, Shell>,
 ) -> Result<Vec<Chapter>, String> {
     with_db_mut(&shell, |db| {
-        Ok(timeline_chapters_after_edit(
-            db.merge_chapters(left_core_start, right_core_start, from_ts, to_ts)
-                .map_err(|e| format!("{e:#}"))?,
-        ))
+        let segs = db
+            .merge_chapters(left_core_start, right_core_start, from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?;
+        let cards = db.l2_in_range(from_ts, to_ts).map_err(|e| format!("{e:#}"))?;
+        Ok(timeline_chapters_after_edit(segs, &cards))
     })
 }
 
@@ -1277,10 +1317,11 @@ fn timeline_split_chapter(
     shell: tauri::State<'_, Shell>,
 ) -> Result<Vec<Chapter>, String> {
     with_db_mut(&shell, |db| {
-        Ok(timeline_chapters_after_edit(
-            db.split_chapter(at_ts, from_ts, to_ts)
-                .map_err(|e| format!("{e:#}"))?,
-        ))
+        let segs = db
+            .split_chapter(at_ts, from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?;
+        let cards = db.l2_in_range(from_ts, to_ts).map_err(|e| format!("{e:#}"))?;
+        Ok(timeline_chapters_after_edit(segs, &cards))
     })
 }
 
@@ -1293,10 +1334,11 @@ fn timeline_undo_segment_edit(
     shell: tauri::State<'_, Shell>,
 ) -> Result<Vec<Chapter>, String> {
     with_db_mut(&shell, |db| {
-        Ok(timeline_chapters_after_edit(
-            db.undo_segment_edit(edit_id, from_ts, to_ts)
-                .map_err(|e| format!("{e:#}"))?,
-        ))
+        let segs = db
+            .undo_segment_edit(edit_id, from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?;
+        let cards = db.l2_in_range(from_ts, to_ts).map_err(|e| format!("{e:#}"))?;
+        Ok(timeline_chapters_after_edit(segs, &cards))
     })
 }
 

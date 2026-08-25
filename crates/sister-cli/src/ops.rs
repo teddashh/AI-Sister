@@ -569,9 +569,13 @@ pub mod consent {
                     // 可以開」那句話只寫在 `without()` 裡，也就是只在**沒簽**
                     // 的分支印得出來，於是唯一讀不到它的人正好是簽了的那個。
                     if sheet == Sheet::CloudReading {
-                        println!(
-                            "      （這份程式裡沒有任何連外路徑，所以這一張現在還沒有東西可以開。）"
-                        );
+                        if config.brain.cli().is_some() {
+                            println!(
+                                "      去識別化後的字會交給設定裡的那支 CLI（`sister interpret`）。"
+                            );
+                        } else {
+                            println!("      已同意，但還沒設定 [brain] command，一次都不會呼叫。");
+                        }
                     }
                 }
                 None => println!("      {}", sheet.without()),
@@ -629,6 +633,7 @@ pub mod consent {
             // 會多出檔案。設定檔關著 `store_images` 的時候這兩個不一樣，而拿
             // 前者去畫 UI 的人會畫錯——所以兩個都給，名字也講清楚是哪一個。
             "allows_frames": c.allows_frames(),
+            "allows_cloud": c.allows_cloud(),
             "keeps_images": c.keeps_images(config),
             "config_store_images": config.capture.store_images,
             "sheets": Sheet::ALL.iter().map(|s| serde_json::json!({
@@ -639,6 +644,144 @@ pub mod consent {
             })).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
+        Ok(())
+    }
+}
+
+pub mod interpret {
+    use super::*;
+    use sister_core::brain::{self, InterpretInput, OutboundOutcome};
+    use sister_core::config::Config;
+
+    pub fn run(
+        data_dir: &Path,
+        config: &Config,
+        dry_run: bool,
+        last: &str,
+        limit: usize,
+        only_core_start: Option<i64>,
+    ) -> Result<()> {
+        let span = super::parse_span(last)?;
+        let to = sister_core::now_ms();
+        let from = to.saturating_sub(span);
+        let mut db = open_existing(data_dir)?;
+        let consent = sister_core::consent::load(data_dir);
+        let mut input = InterpretInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &config.brain,
+            from_ts: from,
+            to_ts: to,
+            limit,
+            only_core_start,
+        };
+
+        if dry_run {
+            let report = brain::prepare(&mut input)?;
+            print!("{}", brain::format_dry_run(&report));
+            return Ok(());
+        }
+
+        let result = brain::run(&mut input)?;
+        if let Some(skip) = &result.skip {
+            println!("{}", skip.message());
+            return Ok(());
+        }
+        if result.ran.is_empty() {
+            println!("沒有跑任何一段。");
+            return Ok(());
+        }
+        for job in &result.ran {
+            println!("── {} ──", job.segment_ref);
+            println!(
+                "  結局：{}（{} ms）",
+                match job.outcome {
+                    OutboundOutcome::Success => "成功，寫進 L2",
+                    OutboundOutcome::SpawnFailed => "CLI 叫不起來／失敗",
+                    OutboundOutcome::Timeout => "逾時",
+                    OutboundOutcome::BadJson => "拿回的 JSON 不能用，沒寫卡片",
+                },
+                job.duration_ms
+            );
+            if let Some(err) = &job.error {
+                println!("  {err}");
+            }
+            if let Some(card) = &job.card {
+                println!(
+                    "  假設（模型說的，confidence {:.2}）：{}",
+                    card.model_confidence, card.activity
+                );
+                if !card.evidence_refs.is_empty() {
+                    let refs: Vec<_> = card.evidence_refs.iter().map(|r| r.as_str()).collect();
+                    println!("  根據：{}", refs.join("、"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub mod brain {
+    use super::*;
+    use sister_core::deid::RedactionStats;
+
+    pub fn log(data_dir: &Path, limit: usize) -> Result<()> {
+        let db = open_existing(data_dir)?;
+        let outbound = db.list_brain_outbound(limit)?;
+        let skips = db.list_brain_skip(limit)?;
+        if outbound.is_empty() && skips.is_empty() {
+            println!("還沒有外送紀錄，也還沒有降級紀錄。");
+            return Ok(());
+        }
+        if !outbound.is_empty() {
+            println!("外送紀錄（不含原文）\n");
+            for row in &outbound {
+                let args: Vec<String> = serde_json::from_str(&row.args_json).unwrap_or_default();
+                let stats: RedactionStats =
+                    serde_json::from_str(&row.redaction_json).unwrap_or_default();
+                println!(
+                    "{}  {} {}",
+                    crate::fmt::timestamp(row.ts),
+                    row.command,
+                    args.join(" ")
+                );
+                println!(
+                    "    segment={}  {} 字{}  結局 {}  {} ms",
+                    row.segment_core_start
+                        .map(|t| t.to_string())
+                        .unwrap_or_else(|| "（沒有對上段落）".into()),
+                    row.chars_sent,
+                    if row.truncated { "（截斷）" } else { "" },
+                    row.outcome,
+                    row.duration_ms
+                );
+                println!(
+                    "    去敏：金額 {}、電話 {}、email {}、類 ID {}、人名 {}、秘密 {}",
+                    stats.money,
+                    stats.phone,
+                    stats.email,
+                    stats.id_like,
+                    stats.person,
+                    stats.secret
+                );
+                if let Some(err) = &row.error {
+                    println!("    {err}");
+                }
+                println!();
+            }
+        }
+        if !skips.is_empty() {
+            println!("沒送出去的原因\n");
+            for row in &skips {
+                println!(
+                    "{}  [{}]\n    {}",
+                    crate::fmt::timestamp(row.ts),
+                    row.reason,
+                    row.detail.replace('\n', "\n    ")
+                );
+                println!();
+            }
+        }
         Ok(())
     }
 }
@@ -5741,23 +5884,19 @@ pub mod doctor {
                 config.capture.store_images,
             ),
         );
-        // 第二張的 ✓ 講的是「沒有東西會離開這台機器」，不是「你同意了」。
-        // 寫成 ✗ 會讓人以為少裝了什麼；而句子從否定改成肯定，是為了讓那個
-        // 勾勾對應到一個真的成立的好狀態。
-        //
         // 走 `allows_cloud()` 而不是 `cloud_reading.is_some()`：條文改版之後
-        // 舊簽名整份失效，而這一行以前是三行裡唯一沒問這件事的。
-        line(
-            true,
-            "上雲解讀",
-            if consent.allows_cloud() {
-                "已同意，但這份程式裡沒有任何連外路徑，所以它還沒有作用"
-            } else if consent.cloud_reading.is_some() {
-                "條文改版，舊簽名失效 → 視同未同意（而且程式裡本來就沒有連外路徑）"
-            } else {
-                "沒有任何東西會離開這台機器（未同意，而且程式裡本來就沒有連外路徑）"
-            },
-        );
+        // 舊簽名整份失效，而這一格猜錯了是東西送出去了。
+        let cloud_words = if consent.allows_cloud() {
+            match config.brain.cli() {
+                Some((cmd, _)) => format!("已同意——去識別化後的字會交給 `{cmd}`"),
+                None => "已同意，但還沒設定 [brain] command，一次都不會呼叫".to_string(),
+            }
+        } else if consent.cloud_reading.is_some() {
+            "條文改版，舊簽名失效 → 視同未同意，一次都不會呼叫那支 CLI".to_string()
+        } else {
+            "未同意 → 解釋層一次都不會呼叫那支 CLI".to_string()
+        };
+        line(consent.allows_cloud(), "上雲解讀", &cloud_words);
 
         println!("\n位置");
         let db_file = crate::db_path(data_dir);

@@ -220,6 +220,15 @@ enum ReplayMomentAction {
 }
 
 #[derive(Subcommand)]
+enum BrainAction {
+    /// 外送紀錄：什麼時候、送給哪支命令、送了哪個 segment、去敏計數、拿回什麼。不含原文。
+    Log {
+        #[arg(short, long, default_value_t = 20, value_parser = at_least_one)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// 開始錄製（需要平台擷取後端）
     Record {
@@ -374,6 +383,31 @@ enum Command {
     /// ——那個行程會結束。乾淨地收尾（寫完 session、收掉心跳），所以下一個
     /// tick 才會停，不是立刻。
     Stop,
+
+    /// 把最近關閉的段落交給設定的 CLI，收回一張 L2 假設卡片。
+    ///
+    /// `--dry-run` 印出**這一刻真的會送出去的那段字**（去敏後），一個字都不送。
+    /// 沒簽第二張同意書、沒設定 [brain] command、預算用完，三種原因印三種話。
+    Interpret {
+        /// 印出會送出的全文，一個字都不送
+        #[arg(long)]
+        dry_run: bool,
+        /// 往回看多久：`30m`、`2h`、`7d`。預設最近一天
+        #[arg(long, default_value = "24h", value_name = "多久")]
+        last: String,
+        /// 最多處理幾段
+        #[arg(long, default_value_t = 4, value_parser = at_least_one)]
+        limit: usize,
+        /// 指定某一段的 core_started_at（epoch 毫秒）。有的話跳過「值不值得」那一關
+        #[arg(long, value_name = "EPOCH_MS")]
+        at: Option<i64>,
+    },
+
+    /// 解釋層的外送紀錄與降級紀錄
+    Brain {
+        #[command(subcommand)]
+        action: BrainAction,
+    },
 
     /// 三張同意書：現在簽了哪幾張、沒簽會怎樣。
     ///
@@ -563,6 +597,15 @@ fn main() -> Result<()> {
         Command::Pause => ops::pause::run(&data_dir, true),
         Command::Resume => ops::pause::run(&data_dir, false),
         Command::Stop => ops::stop::run(&data_dir),
+        Command::Interpret {
+            dry_run,
+            last,
+            limit,
+            at,
+        } => ops::interpret::run(&data_dir, &config()?, dry_run, &last, limit, at),
+        Command::Brain { action } => match action {
+            BrainAction::Log { limit } => ops::brain::log(&data_dir, limit),
+        },
         Command::Consent {
             grant,
             revoke,

@@ -3,7 +3,7 @@
 //! SPEC §11.1 定的三件事，各自獨立、各自可以撤回：
 //!
 //! 1. **本機記錄**：在這台機器的硬碟上記錄螢幕。
-//! 2. **上雲解讀**：把去識別化後的文字送到指定的模型商。
+//! 2. **上雲解讀**：把去識別化後的文字交給使用者設定的本機 CLI。
 //! 3. **畫面暫存**：保留變化幀的截圖（相對於「只留 OCR 出來的字」）。
 //!
 //! ## 為什麼它會擋住東西
@@ -16,9 +16,9 @@
 //! - 第一張是前提。沒有它就沒有這個產品，所以它是硬擋。
 //! - 第三張是程度。沒有它不代表她不能記事，只代表她**只記字不留圖**——
 //!   而那正是 SPEC 寫的「0 天 = 只留 OCR 文字」。所以它降級，不擋。
-//! - 第二張目前無事可擋：這份程式裡沒有任何 HTTP client（`check-no-network.sh`
-//!   每次 CI 都在證明這件事），所以它現在只是被誠實地記著「沒有簽」。
-//!   哪天真的長出雲端路徑，這一格就是那條路的開關。
+//! - 第二張是出境閘門。沒簽，解釋層一次都不會 `spawn` 那支 CLI。而且它
+//!   不能靠每個呼叫端自己記得加 `if allows_cloud()`——那一扇門要的是
+//!   [`CloudAllowed`]，只有 [`Consent::cloud_permit`] 鑄得出來。
 //!
 //! ## 不確定就是沒同意
 //!
@@ -39,7 +39,10 @@ use std::path::{Path, PathBuf};
 use crate::model::Millis;
 
 /// 目前的條文版本。**改條文就要 +1**，代價是所有人都要重簽一次。
-pub const VERSION: u32 = 1;
+///
+/// 2：第二張從「送到我指定的模型商」改成「交給我設定的本機 CLI」。
+/// 收件人變了，舊簽名涵蓋不了這件事。
+pub const VERSION: u32 = 2;
 
 const FILE: &str = "consent.toml";
 
@@ -55,7 +58,7 @@ pub struct Consent {
     /// 第一張：在我的硬碟上記錄我的螢幕。
     #[serde(default)]
     pub local_recording: Option<Millis>,
-    /// 第二張：把去識別化後的文字送到我指定的模型商。
+    /// 第二張：把去識別化後的文字交給我設定的本機 CLI。
     #[serde(default)]
     pub cloud_reading: Option<Millis>,
     /// 第三張：保留變化幀截圖。
@@ -92,7 +95,7 @@ impl Sheet {
         match self {
             Sheet::LocalRecording => "我同意在我的硬碟上記錄我的螢幕。",
             Sheet::CloudReading => {
-                "我同意把去識別化後的文字（永不含畫面）送到我指定的模型商做解讀。"
+                "我同意把去識別化後的文字（OCR 抽出來的字，永不含畫面）交給我在設定裡指定的本機 CLI，由那支程式去做解讀。"
             }
             Sheet::FrameStorage => "我同意保留變化幀的截圖，而不是只留上面的字。",
         }
@@ -113,7 +116,7 @@ impl Sheet {
                 "沒有這一張，sister record 不會開始錄；錄到一半撤回，正在跑的 record 每 5 秒重讀同意書，最多再錄 5 秒加一拍；capture.min_interval_ms 超過 5 秒時，主要會等那一拍。"
             }
             Sheet::CloudReading => {
-                "沒有這一張，她完全在本機跑。（目前這份程式裡沒有任何連外路徑，所以這一張還沒有東西可以開。）"
+                "沒有這一張，她一次都不會呼叫那支 CLI；解釋層保持關閉，只累積本機的畫面與文字。"
             }
             Sheet::FrameStorage => "沒有這一張，她只記螢幕上的字，不留截圖。",
         }
@@ -188,25 +191,21 @@ impl Consent {
         self.current() && self.frame_storage.is_some()
     }
 
-    /// 東西可以離開這台機器嗎。
+    /// 東西可以離開這台機器嗎。給**顯示**用（doctor、同意書那一頁）。
     ///
-    /// 現在還沒有任何一條路會回 `true` 之後真的送出去（程式裡沒有連外路徑），
-    /// 但這一支**現在**就得存在，因為唯一的讀者已經寫錯了：`sister doctor`
-    /// 讀的是 `cloud_reading.is_some()`，少了 `current()`。於是一個上個月簽
-    /// 完三張、而條文後來改版的人，會在同一頁上看到
-    ///
-    /// ```text
-    /// ✗ 本機記錄   條文改版，舊簽名失效
-    /// ✗ 畫面暫存   未同意
-    /// ✓ 上雲解讀   已同意
-    /// ```
-    ///
-    /// 三行講同一個檔案，三種答案。而這一格是三張裡唯一一張「猜錯的方向
+    /// 真正送出的那一扇門不讀這個 `bool`。它要 [`CloudAllowed`]，只有
+    /// [`Self::cloud_permit`] 鑄得出來。這一格是三張裡唯一一張「猜錯的方向
     /// 不對稱」的：另外兩張猜錯了是少記東西，這張猜錯了是東西送出去了。
-    /// 所以它不能靠每個呼叫端自己記得加 `current()`——[模組開頭](self)寫的
-    /// 「讀不出來就整份視為沒簽」，指的就是連這一格也算進去。
     pub fn allows_cloud(&self) -> bool {
         self.current() && self.cloud_reading.is_some()
+    }
+
+    /// 交出出境憑證。沒簽、條文改版、檔案讀不出來，都是 `None`。
+    ///
+    /// [`crate::brain::spawn_cli`] 的第一個參數就是這個型別。沒走過這裡
+    /// 就 spawn，編不過。
+    pub fn cloud_permit(&self) -> Option<CloudAllowed> {
+        self.allows_cloud().then_some(CloudAllowed(()))
     }
 
     /// 這份設定跑起來，硬碟上**真的**會多出截圖嗎。
@@ -245,6 +244,13 @@ impl Consent {
         changed
     }
 }
+
+/// 只有 [`Consent::cloud_permit`] 鑄得出來的出境憑證。
+///
+/// 不是 `bool`，也不是 `struct CloudAllowed { allowed: bool }`：那種還是
+/// 能填錯。元組結構體、欄位私有，同一模組之外沒有別的路。
+#[derive(Debug, Clone, Copy)]
+pub struct CloudAllowed(());
 
 pub fn path(data_dir: &Path) -> PathBuf {
     data_dir.join(FILE)
@@ -295,6 +301,16 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn unsigned_cloud_sheet_cannot_mint_a_permit() {
+        assert!(Consent::default().cloud_permit().is_none());
+        let mut c = Consent::default();
+        c.grant(Sheet::CloudReading, 1);
+        assert!(c.cloud_permit().is_some());
+        c.version = VERSION + 1;
+        assert!(c.cloud_permit().is_none());
     }
 
     /// 全新的機器上，她不准開始錄。

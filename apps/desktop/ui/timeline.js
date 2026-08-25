@@ -493,6 +493,9 @@ function chapterRow(ch, rows, dayStart, next) {
   } else if (ch.edited === "split") {
     title.append(chip("你切開的", "edit"));
   }
+  if (Array.isArray(ch.l2) && ch.l2.length > 0) {
+    title.append(chip("她猜的", "guess"));
+  }
   const range = document.createElement("p");
   range.className = "chapter-range";
   range.textContent = `${hhmm.format(ch.start_ts)}–${hhmm.format(ch.end_ts)}`;
@@ -584,6 +587,9 @@ function chapterRow(ch, rows, dayStart, next) {
   const inner = document.createElement("ol");
   inner.className = "chapter-body";
   inner.hidden = true;
+  if (Array.isArray(ch.l2) && ch.l2.length > 0) {
+    for (const card of ch.l2) inner.append(guessRow(card));
+  }
   const segs = Array.isArray(ch.segments) ? ch.segments : [];
   if (segs.length > 1) {
     const note = document.createElement("li");
@@ -611,6 +617,60 @@ function chapterRow(ch, rows, dayStart, next) {
   });
 
   li.append(btn, actions, splitRow, inner);
+  return li;
+}
+
+/** 她猜的。長得不能像程式抄下來的 OCR。 */
+function guessRow(card) {
+  const li = document.createElement("li");
+  li.className = "guess";
+  const mark = document.createElement("p");
+  mark.className = "guess-mark";
+  mark.textContent = `她猜的（模型說的信心 ${Number(card.model_confidence).toFixed(2)}，不是量出來的）`;
+  const what = document.createElement("p");
+  what.className = "guess-activity";
+  what.textContent = card.activity ?? "";
+  li.append(mark, what);
+  if (Array.isArray(card.entities) && card.entities.length > 0) {
+    const ents = document.createElement("p");
+    ents.className = "guess-entities";
+    ents.textContent = card.entities
+      .map((e) => `${e.type ?? ""} ${e.name ?? ""}`.trim())
+      .filter(Boolean)
+      .join("、");
+    li.append(ents);
+  }
+  if (Array.isArray(card.evidence) && card.evidence.length > 0) {
+    const ev = document.createElement("div");
+    ev.className = "guess-evidence";
+    const lab = document.createElement("span");
+    lab.textContent = "根據";
+    ev.append(lab);
+    for (const e of card.evidence) {
+      if (e.kind === "frame") {
+        const see = document.createElement("button");
+        see.type = "button";
+        see.className = "see";
+        see.textContent = e.label ?? `畫面 #${e.id}`;
+        see.addEventListener("click", () => {
+          void invoke?.("open_frame", { frameId: e.id });
+        });
+        ev.append(see);
+      } else {
+        const fact = document.createElement("span");
+        fact.className = "guess-fact";
+        fact.textContent = e.label ?? `本機事實 #${e.id}`;
+        ev.append(fact);
+      }
+    }
+    li.append(ev);
+  }
+  if (Array.isArray(card.open_questions) && card.open_questions.length > 0) {
+    const q = document.createElement("p");
+    q.className = "guess-open";
+    q.textContent = `還沒看清：${card.open_questions.join("、")}`;
+    li.append(q);
+  }
   return li;
 }
 
@@ -1237,6 +1297,23 @@ function fakeBackend(mode = "1") {
         edited: lastEdit ? lastEdit.edited : null,
         edit_id: lastEdit ? lastEdit.edit_id : null,
         segments: slice,
+        l2:
+          first.app === "Code.exe"
+            ? [
+                {
+                  segment_ref: `segment:${first.core_start_ts}`,
+                  activity: "在改 sister-core 的斷句測試",
+                  model_confidence: 0.62,
+                  confidence_source: "model",
+                  entities: [{ type: "project", name: "AI-Sister" }],
+                  evidence: [
+                    { kind: "frame", id: 3901, label: "畫面 #3901" },
+                    { kind: "fact", id: 12, label: "本機事實 #12" },
+                  ],
+                  open_questions: ["這次測試有沒有綠"],
+                },
+              ]
+            : null,
       };
     });
   }

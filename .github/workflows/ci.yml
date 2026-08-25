@@ -49,6 +49,12 @@ jobs:
       - name: Privacy — no HTTP client, no inference engine, no socket
         run: ./scripts/check-no-network.sh
 
+      # L2 出境路徑。沒簽同意書 2 就 spawn、送出去的字沒去敏、外送紀錄抄了原文，
+      # 都是「她開始寫使用者剛剛關掉的截圖」同一族的失敗。腳本自己會改壞三行
+      # 確認會紅。
+      - name: Privacy — cloud path needs a permit, redaction, and no raw outbound log
+        run: python3 ./scripts/check-brain-outbound.py
+
       # PRIVACY.md 最強的那一句：「按鍵內容…是從來沒讀過」。它的份量在於
       # 不需要任何人被信任，而在這一步存在之前，守著它的東西是零——沒有
       # 測試、沒有 lint。加一行 `(*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode`
