@@ -117,6 +117,13 @@ jobs:
       - name: Auxiliary WebViews must never be built from a synchronous Windows handler
         run: node ./scripts/check-aux-window-threading.mjs
 
+      # 承諾集／開口判斷集是評測資料，不是行為。cargo test 證明得了模組自己算得對，
+      # 證明不了「它沒有被接到會執行的路徑」「未標沒有跟零混成同一個字」「通知類
+      # 沒有被字串比對冒充」。L0 現在根本沒有通知事件，所以那個判斷必須逐一列出
+      # 每個 SystemKind——用萬用臂就會把將來新增的 kind 悄悄吞成「不是通知」。
+      - name: Moment sets must stay evaluation data and keep unlabeled apart from zero
+        run: node ./scripts/check-moment-set-contract.mjs
+
       # 熱鍵在程式裡是 `Ctrl+Alt+KeyP`，而鍵盤上沒有一顆鍵叫 KeyP。給人看之前
       # 要過 `pretty_combo`，而漏掉那一層的每一行都長得完全正常——`format!("還在
       # 用 {}。", restored.wanted)` 編得過、clippy 綠、讀起來也對。
