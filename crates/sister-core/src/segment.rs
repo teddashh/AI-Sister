@@ -113,6 +113,8 @@ pub struct Segment {
     /// 打開這一段那道邊界的信心。第一段沒有邊界可算，是 `None`。
     pub confidence: Option<f32>,
     pub event_ids: EventRefs,
+    /// 套用過使用者編輯之後才有。演算法自己切的是 `None`。
+    pub last_edit: Option<crate::segment_edit::AppliedEdit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -375,6 +377,7 @@ pub fn segment(stream: &EventStream) -> Vec<Segment> {
                 cut_kinds: opener.as_ref().map(|b| b.kinds.clone()).unwrap_or_default(),
                 confidence: opener.and_then(|b| b.confidence),
                 event_ids,
+                last_edit: None,
             }
         })
         .collect()

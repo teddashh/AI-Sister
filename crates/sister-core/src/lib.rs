@@ -32,6 +32,8 @@ pub mod replay;
 pub mod retention;
 pub mod retrieval;
 pub mod segment;
+pub mod segment_edit;
+pub mod stuck;
 
 pub use config::{CaptureConfig, Config, Exclusion, PrivacyConfig, RetentionConfig};
 pub use db::{Db, DbStats, FactRow, FrameContext, SCHEMA_VERSION};

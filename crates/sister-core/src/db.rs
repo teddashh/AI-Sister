@@ -32,7 +32,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 8;
+pub const SCHEMA_VERSION: i32 = 9;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -497,6 +497,43 @@ CREATE INDEX IF NOT EXISTS idx_segment_core ON segment(core_started_at);
 CREATE INDEX IF NOT EXISTS idx_segment_range ON segment(started_at, ended_at);
 "#;
 
+/// 使用者對段落的合併／切開。append-only。
+///
+/// `segment` 每次打開時間軸都會先刪再插，所以編輯不能寫進那張表——
+/// 寫進去下次打開就沒了。這張表重算不動它；重算完再依 id 順序套上去。
+///
+/// 同時是 SPEC §4.3 的訓練訊號：記動作種類、目標時間、當時演算法的
+/// 邊界與信心、發生時間。不記畫面文字、不記他打的字。
+///
+/// `undo` 是多一列，不 UPDATE 舊列。被撤的那一筆還在，只是套用時跳過。
+const MIGRATION_009: &str = r#"
+CREATE TABLE IF NOT EXISTS segment_edit (
+  id               INTEGER PRIMARY KEY,
+  ts               INTEGER NOT NULL,
+  kind             TEXT NOT NULL,
+  at_ms            INTEGER,
+  from_ms          INTEGER,
+  to_ms            INTEGER,
+  algo_cut_kinds   TEXT,
+  algo_confidence  REAL,
+  target_id        INTEGER REFERENCES segment_edit(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_segment_edit_range ON segment_edit(from_ms, to_ms);
+
+CREATE TABLE IF NOT EXISTS stuck_signal (
+  id                INTEGER PRIMARY KEY,
+  started_at        INTEGER NOT NULL,
+  ended_at          INTEGER NOT NULL,
+  app_id            TEXT,
+  window_title      TEXT,
+  dwell_ms          INTEGER NOT NULL,
+  switch_count      INTEGER NOT NULL,
+  error_fact_count  INTEGER NOT NULL,
+  computed_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stuck_start ON stuck_signal(started_at);
+"#;
+
 /// 「她記下來的東西」放在哪幾張表——以及哪幾列不算。
 ///
 /// 這份名單要和 [`DbStats::nothing_recorded_left`] 對得起來：那邊說「一列都不
@@ -946,6 +983,7 @@ impl Db {
             6 => tx.execute_batch(&migration_006())?,
             7 => tx.execute_batch(MIGRATION_007)?,
             8 => tx.execute_batch(MIGRATION_008)?,
+            9 => tx.execute_batch(MIGRATION_009)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -2938,6 +2976,7 @@ impl Db {
     /// 打開時間軸時叫的那一支：把 `[from, to)` 的段落算一遍寫進 `segment`。
     ///
     /// 每次都重算，不讀舊列。一天的事件量遠小於 OCR，這不是熱路徑。
+    /// 使用者的合併／切開在 `segment_edit`，重算之後套上去，所以不會被吃掉。
     pub fn chapters_for_range(
         &mut self,
         from_ts: Millis,
@@ -2948,12 +2987,284 @@ impl Db {
         }
         let pad = crate::segment::LOOKAROUND_MS;
         let stream = self.segment_events(from_ts.saturating_sub(pad), to_ts.saturating_add(pad))?;
-        let kept: Vec<crate::segment::Segment> = crate::segment::segment(&stream)
+        let raw: Vec<crate::segment::Segment> = crate::segment::segment(&stream)
             .into_iter()
             .filter(|s| s.core_started_at >= from_ts && s.core_started_at < to_ts)
             .collect();
+        // 卡住偵測看的是演算法自己切的活動，不看人改過的章節。
+        self.replace_stuck(from_ts, to_ts, &raw)?;
+        let edits = self.segment_edits_overlapping(from_ts, to_ts)?;
+        let kept = crate::segment_edit::apply_edits(raw, &edits);
         self.replace_segments(from_ts, to_ts, &kept)?;
         Ok(kept)
+    }
+
+    /// 把相鄰兩段併成一段。寫進 `segment_edit` 再重算當天。
+    pub fn merge_chapters(
+        &mut self,
+        left_core_start: Millis,
+        right_core_start: Millis,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<Vec<crate::segment::Segment>> {
+        let current = self.chapters_for_range(from_ts, to_ts)?;
+        let (at, from_ms, to_ms) = {
+            let left = current
+                .iter()
+                .find(|s| s.core_started_at == left_core_start)
+                .ok_or_else(|| anyhow::anyhow!("找不到要合併的左邊那一段。"))?;
+            let right = current
+                .iter()
+                .find(|s| s.core_started_at == right_core_start)
+                .ok_or_else(|| anyhow::anyhow!("找不到要合併的右邊那一段。"))?;
+            anyhow::ensure!(
+                left.core_ended_at == right.core_started_at,
+                "這兩段現在不是相鄰的，沒有合併。"
+            );
+            (
+                right.core_started_at,
+                left.core_started_at,
+                right.core_ended_at,
+            )
+        };
+        let (algo_kinds, algo_conf) = self.algorithm_boundary_at(from_ts, to_ts, at)?;
+        self.insert_segment_edit(
+            "merge",
+            Some(at),
+            Some(from_ms),
+            Some(to_ms),
+            algo_kinds.as_deref(),
+            algo_conf,
+            None,
+        )?;
+        self.chapters_for_range(from_ts, to_ts)
+    }
+
+    /// 在 `at_ms` 把一段切成兩段。切點必須落在某一段的核心裡、而且不是兩端。
+    pub fn split_chapter(
+        &mut self,
+        at_ms: Millis,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<Vec<crate::segment::Segment>> {
+        let current = self.chapters_for_range(from_ts, to_ts)?;
+        let (from_ms, to_ms) = {
+            let host = current
+                .iter()
+                .find(|s| s.core_started_at < at_ms && at_ms < s.core_ended_at);
+            let Some(host) = host else {
+                anyhow::bail!("這個時間不在任何一段的中間，沒有切開。");
+            };
+            (host.core_started_at, host.core_ended_at)
+        };
+        let (algo_kinds, algo_conf) = self.algorithm_boundary_at(from_ts, to_ts, at_ms)?;
+        self.insert_segment_edit(
+            "split",
+            Some(at_ms),
+            Some(from_ms),
+            Some(to_ms),
+            algo_kinds.as_deref(),
+            algo_conf,
+            None,
+        )?;
+        self.chapters_for_range(from_ts, to_ts)
+    }
+
+    /// 撤銷某一筆編輯。多寫一列 `undo`，不改舊列。
+    pub fn undo_segment_edit(
+        &mut self,
+        edit_id: i64,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<Vec<crate::segment::Segment>> {
+        let edits = self.segment_edits_overlapping(from_ts, to_ts)?;
+        let (at_ms, from_ms, to_ms, algo_kinds, algo_conf) = {
+            let target = edits
+                .iter()
+                .find(|e| e.id == edit_id)
+                .ok_or_else(|| anyhow::anyhow!("找不到要撤銷的那次修改。"))?;
+            anyhow::ensure!(
+                target.kind != "undo",
+                "只能撤銷合併或切開，不能撤銷一次撤銷。"
+            );
+            let active: Vec<i64> = crate::segment_edit::active_edits(&edits)
+                .into_iter()
+                .map(|e| e.id)
+                .collect();
+            anyhow::ensure!(active.contains(&edit_id), "那次修改已經撤銷過了。");
+            (
+                target.at_ms,
+                target.from_ms,
+                target.to_ms,
+                target.algo_cut_kinds.clone(),
+                target.algo_confidence,
+            )
+        };
+        self.insert_segment_edit(
+            "undo",
+            at_ms,
+            from_ms,
+            to_ms,
+            algo_kinds.as_deref(),
+            algo_conf,
+            Some(edit_id),
+        )?;
+        self.chapters_for_range(from_ts, to_ts)
+    }
+
+    fn algorithm_boundary_at(
+        &self,
+        from_ts: Millis,
+        to_ts: Millis,
+        at: Millis,
+    ) -> Result<(Option<Vec<crate::segment::CutKind>>, Option<f32>)> {
+        let pad = crate::segment::LOOKAROUND_MS;
+        let stream = self.segment_events(from_ts.saturating_sub(pad), to_ts.saturating_add(pad))?;
+        let raw = crate::segment::segment(&stream);
+        let hit = raw.iter().find(|s| s.core_started_at == at);
+        match hit {
+            Some(s) if !s.cut_kinds.is_empty() => Ok((Some(s.cut_kinds.clone()), s.confidence)),
+            _ => Ok((None, None)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_segment_edit(
+        &mut self,
+        kind: &str,
+        at_ms: Option<Millis>,
+        from_ms: Option<Millis>,
+        to_ms: Option<Millis>,
+        algo_cut_kinds: Option<&[crate::segment::CutKind]>,
+        algo_confidence: Option<f32>,
+        target_id: Option<i64>,
+    ) -> Result<i64> {
+        let kinds = algo_cut_kinds.and_then(|k| {
+            if k.is_empty() {
+                None
+            } else {
+                Some(k.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(","))
+            }
+        });
+        self.conn.execute(
+            "INSERT INTO segment_edit(
+                ts, kind, at_ms, from_ms, to_ms,
+                algo_cut_kinds, algo_confidence, target_id
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                now_ms(),
+                kind,
+                at_ms,
+                from_ms,
+                to_ms,
+                kinds,
+                algo_confidence.map(|c| c as f64),
+                target_id,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    fn segment_edits_overlapping(
+        &self,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<Vec<crate::segment_edit::StoredEdit>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, kind, at_ms, from_ms, to_ms,
+                    algo_cut_kinds, algo_confidence, target_id
+             FROM segment_edit
+             WHERE from_ms < ?2 AND to_ms > ?1
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts], |r| {
+            let kinds: Option<String> = r.get(6)?;
+            Ok(crate::segment_edit::StoredEdit {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                at_ms: r.get(3)?,
+                from_ms: r.get(4)?,
+                to_ms: r.get(5)?,
+                algo_cut_kinds: kinds.as_deref().map(|s| {
+                    s.split(',')
+                        .filter(|p| !p.is_empty())
+                        .filter_map(crate::segment::CutKind::from_str_kind)
+                        .collect()
+                }),
+                algo_confidence: r.get::<_, Option<f64>>(7)?.map(|c| c as f32),
+                target_id: r.get(8)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    fn replace_stuck(
+        &mut self,
+        from_ts: Millis,
+        to_ts: Millis,
+        raw: &[crate::segment::Segment],
+    ) -> Result<()> {
+        let inputs = self.stuck_inputs(from_ts, to_ts)?;
+        let errors = self.stuck_errors(from_ts, to_ts)?;
+        let found = crate::stuck::detect(raw, &inputs, &errors);
+        let computed_at = now_ms();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM stuck_signal WHERE started_at >= ?1 AND started_at < ?2",
+            [from_ts, to_ts],
+        )?;
+        {
+            let mut ins = tx.prepare(
+                "INSERT INTO stuck_signal(
+                    started_at, ended_at, app_id, window_title,
+                    dwell_ms, switch_count, error_fact_count, computed_at
+                 ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            )?;
+            for s in &found {
+                ins.execute(params![
+                    s.started_at,
+                    s.ended_at,
+                    s.app,
+                    s.title,
+                    s.dwell_ms,
+                    s.switch_count,
+                    s.error_fact_count,
+                    computed_at,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn stuck_inputs(&self, from_ts: Millis, to_ts: Millis) -> Result<Vec<crate::stuck::InputSpan>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ts_start, ts_end, window_switches FROM input_metrics
+             WHERE ts_end > ?1 AND ts_start < ?2 ORDER BY ts_start, id",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts], |r| {
+            Ok(crate::stuck::InputSpan {
+                ts_start: r.get(0)?,
+                ts_end: r.get(1)?,
+                window_switches: r.get(2)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    fn stuck_errors(&self, from_ts: Millis, to_ts: Millis) -> Result<Vec<crate::stuck::ErrorHit>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ts, app_id FROM facts
+             WHERE kind = 'error_code' AND ts >= ?1 AND ts < ?2",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts], |r| {
+            Ok(crate::stuck::ErrorHit {
+                ts: r.get(0)?,
+                app: r.get(1)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
     }
 
     fn replace_segments(
@@ -5191,6 +5502,14 @@ mod tests {
             columns_of(&db, "segment").contains(&"core_started_at".to_string()),
             "全新資料庫也要有 segment 表"
         );
+        assert!(
+            columns_of(&db, "segment_edit").contains(&"algo_confidence".to_string()),
+            "全新資料庫也要有 segment_edit 表"
+        );
+        assert!(
+            columns_of(&db, "stuck_signal").contains(&"error_fact_count".to_string()),
+            "全新資料庫也要有 stuck_signal 表"
+        );
     }
 
     /// 已經在跑的資料庫升級上來，事實不能掉，欄位要真的消失。
@@ -5224,11 +5543,20 @@ mod tests {
             columns_of(&db, "segment").contains(&"core_started_at".to_string()),
             "升到 8 之後要有 segment 表"
         );
+        assert!(
+            columns_of(&db, "segment_edit").contains(&"algo_confidence".to_string()),
+            "升到 9 之後要有 segment_edit 表"
+        );
         let n: i64 = db
             .conn
             .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))
             .expect("count");
         assert_eq!(n, 0, "升級不回填段落——還沒打開時間軸就算不該有列");
+        let edits: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM segment_edit", [], |r| r.get(0))
+            .expect("count edits");
+        assert_eq!(edits, 0, "升級不回填編輯");
     }
 
     fn focus_at(ts: Millis, app: &str, title: &str, url: Option<&str>) -> FocusEvent {
@@ -5284,6 +5612,32 @@ mod tests {
         assert_eq!(stored_again, 2, "重算是換掉，不是疊上去");
     }
 
+    /// 整合者自己加的：合併過的段落必須扛得住整輪 DELETE + 重算。
+    #[test]
+    fn a_manual_merge_survives_a_full_recompute() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for e in [
+            focus_at(0, "code.exe", "db.rs", None),
+            focus_at(60_000, "chrome.exe", "mail", Some("https://mail.example/")),
+            focus_at(120_000, "notion.exe", "week", None),
+            focus_at(180_000, "notion.exe", "week", None),
+        ] {
+            db.insert_focus(s, &e).expect("focus");
+        }
+        let before = db.chapters_for_range(0, 300_000).expect("chapters");
+        assert_eq!(before.len(), 3, "三個 app 該切成三段");
+        let boundary = before[1].core_started_at;
+        db.merge_chapters(before[0].core_started_at, boundary, 0, 300_000)
+            .expect("merge");
+        let merged = db.chapters_for_range(0, 300_000).expect("after merge");
+        assert_eq!(merged.len(), 2, "合併後該剩兩段");
+        let reopened = db.chapters_for_range(0, 300_000).expect("reopen");
+        assert_eq!(reopened.len(), 2, "重算之後合併被吃掉了");
+        let third = db.chapters_for_range(0, 300_000).expect("third");
+        assert_eq!(third.len(), 2, "第三次開也要還在");
+    }
+
     #[test]
     fn forgetting_a_range_drops_the_segments_that_overlapped_it() {
         let mut db = test_db();
@@ -5302,6 +5656,230 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))
             .expect("count");
         assert_eq!(n, 0, "重疊到的段落該跟事件一起走");
+    }
+
+    fn count_table(db: &Db, table: &str) -> i64 {
+        db.conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .expect("count")
+    }
+
+    /// 合併寫進另一張表；重算 `segment` 不會把它吃掉。
+    #[test]
+    fn a_merge_survives_recompute() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for e in [
+            focus_at(0, "code.exe", "db.rs", None),
+            focus_at(60_000, "chrome.exe", "mail", Some("https://mail.example/")),
+            focus_at(90_000, "chrome.exe", "mail", Some("https://mail.example/")),
+        ] {
+            db.insert_focus(s, &e).expect("focus");
+        }
+        let first = db.chapters_for_range(0, 200_000).expect("chapters");
+        assert_eq!(first.len(), 2);
+        let merged = db
+            .merge_chapters(
+                first[0].core_started_at,
+                first[1].core_started_at,
+                0,
+                200_000,
+            )
+            .expect("merge");
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].last_edit.map(|e| e.kind),
+            Some(crate::segment_edit::EditKind::Merge)
+        );
+        assert_eq!(count_table(&db, "segment_edit"), 1);
+
+        let again = db.chapters_for_range(0, 200_000).expect("recompute");
+        assert_eq!(again.len(), 1, "重算要把編輯套回去，不能只剩演算法那兩段");
+        assert_eq!(count_table(&db, "segment_edit"), 1, "重算不准動編輯表");
+        let kinds: String = db
+            .conn
+            .query_row("SELECT kind FROM segment_edit", [], |r| r.get(0))
+            .expect("kind");
+        assert_eq!(kinds, "merge");
+        let algo: Option<String> = db
+            .conn
+            .query_row("SELECT algo_cut_kinds FROM segment_edit", [], |r| r.get(0))
+            .expect("algo");
+        assert_eq!(
+            algo.as_deref(),
+            Some("app_change"),
+            "訓練訊號要記得演算法原本切在哪"
+        );
+        let conf: Option<f64> = db
+            .conn
+            .query_row("SELECT algo_confidence FROM segment_edit", [], |r| r.get(0))
+            .expect("conf");
+        assert!(
+            conf.is_some(),
+            "當時演算法的信心值要留下，沒有就該是 NULL 不是 0"
+        );
+    }
+
+    #[test]
+    fn a_split_survives_recompute_and_can_be_undone() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        db.insert_focus(s, &focus_at(0, "code.exe", "db.rs", None))
+            .expect("focus");
+        db.insert_focus(s, &focus_at(90_000, "code.exe", "db.rs", None))
+            .expect("focus");
+        let first = db.chapters_for_range(0, 200_000).expect("chapters");
+        assert_eq!(first.len(), 1);
+        let at = (first[0].core_started_at + first[0].core_ended_at) / 2;
+        let split = db.split_chapter(at, 0, 200_000).expect("split");
+        assert_eq!(split.len(), 2);
+        assert!(split.iter().all(|c| {
+            c.last_edit
+                .is_some_and(|e| e.kind == crate::segment_edit::EditKind::Split)
+        }));
+        let edit_id = split[0].last_edit.unwrap().id;
+        let again = db.chapters_for_range(0, 200_000).expect("recompute");
+        assert_eq!(again.len(), 2, "切開被重算吃掉了");
+
+        let undone = db.undo_segment_edit(edit_id, 0, 200_000).expect("undo");
+        assert_eq!(undone.len(), 1);
+        assert!(undone[0].last_edit.is_none());
+        assert_eq!(
+            count_table(&db, "segment_edit"),
+            2,
+            "撤銷是多一列，不是刪掉"
+        );
+    }
+
+    #[test]
+    fn forgetting_a_range_drops_the_edits_that_overlapped_it() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for e in [
+            focus_at(0, "code.exe", "db.rs", None),
+            focus_at(60_000, "chrome.exe", "mail", Some("https://mail.example/")),
+            focus_at(90_000, "chrome.exe", "mail", Some("https://mail.example/")),
+        ] {
+            db.insert_focus(s, &e).expect("focus");
+        }
+        let first = db.chapters_for_range(0, 200_000).expect("chapters");
+        db.merge_chapters(
+            first[0].core_started_at,
+            first[1].core_started_at,
+            0,
+            200_000,
+        )
+        .expect("merge");
+        assert_eq!(count_table(&db, "segment_edit"), 1);
+        db.forget(50_000, 100_000, None).expect("forget");
+        assert_eq!(
+            count_table(&db, "segment_edit"),
+            0,
+            "事件被忘掉之後，對應的編輯要跟著走"
+        );
+    }
+
+    #[test]
+    fn stuck_signal_is_recorded_only_when_all_three_are_measured() {
+        use crate::model::{InputMetrics, OcrBlock};
+        use crate::stuck::{STUCK_DWELL_MS, STUCK_SWITCH_MIN};
+
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let end = STUCK_DWELL_MS + 10_000;
+        db.insert_focus(s, &focus_at(0, "code.exe", "db.rs", None))
+            .expect("focus");
+        db.insert_focus(s, &focus_at(end, "code.exe", "db.rs", None))
+            .expect("focus");
+        db.insert_input(
+            s,
+            &InputMetrics {
+                ts_start: 0,
+                ts_end: 10_000,
+                window_switches: STUCK_SWITCH_MIN,
+                ..Default::default()
+            },
+        )
+        .expect("input");
+        db.insert_frame(
+            s,
+            &FrameCapture {
+                ts: 30_000,
+                monitor: 0,
+                width: 100,
+                height: 100,
+                dhash: 1,
+                image: None,
+                image_ext: "png",
+                ocr: vec![OcrBlock {
+                    text: "error E0308 mismatched types".into(),
+                    x: 0,
+                    y: 0,
+                    w: 10,
+                    h: 10,
+                    confidence: 0.9,
+                }],
+                focus: FocusSnapshot {
+                    app_id: Some("code.exe".into()),
+                    window_title: Some("db.rs".into()),
+                    ..Default::default()
+                },
+            },
+            None,
+            0,
+        )
+        .expect("frame");
+
+        db.chapters_for_range(0, end + 1).expect("chapters");
+        assert!(
+            count_table(&db, "stuck_signal") >= 1,
+            "三個成分都量到而且過門檻，該記下一次卡住"
+        );
+
+        // 反面：沒有 input_metrics 時不可以拿 0 次切換來充數，也不該寫一列。
+        let mut empty = test_db();
+        let s = empty.start_session("test", "0.0.1").expect("session");
+        empty
+            .insert_focus(s, &focus_at(0, "code.exe", "db.rs", None))
+            .expect("focus");
+        empty
+            .insert_focus(s, &focus_at(end, "code.exe", "db.rs", None))
+            .expect("focus");
+        empty
+            .insert_frame(
+                s,
+                &FrameCapture {
+                    ts: 30_000,
+                    monitor: 0,
+                    width: 100,
+                    height: 100,
+                    dhash: 1,
+                    image: None,
+                    image_ext: "png",
+                    ocr: vec![OcrBlock {
+                        text: "error E0308 mismatched types".into(),
+                        x: 0,
+                        y: 0,
+                        w: 10,
+                        h: 10,
+                        confidence: 0.9,
+                    }],
+                    focus: FocusSnapshot {
+                        app_id: Some("code.exe".into()),
+                        window_title: Some("db.rs".into()),
+                        ..Default::default()
+                    },
+                },
+                None,
+                0,
+            )
+            .expect("frame");
+        empty.chapters_for_range(0, end + 1).expect("chapters");
+        assert_eq!(
+            count_table(&empty, "stuck_signal"),
+            0,
+            "切換沒量到就沒有卡住，不該寫一列 switch_count=0"
+        );
     }
 
     /// 升上來的舊資料庫有三種，而它們拿到的東西必須不一樣。
@@ -6620,6 +7198,14 @@ mod tests {
             (
                 "segment",
                 "從 L0 事件算出來的邊界假設，不是原件；母體是 focus/system/clipboard/input，重算得回來",
+            ),
+            (
+                "segment_edit",
+                "使用者對斷句的結構編輯，不是螢幕上的原件；forget 跟事件一起清",
+            ),
+            (
+                "stuck_signal",
+                "從 L0/L1 算出來的卡住訊號，不是原件；母體是段落所依的事件與 facts",
             ),
             ("text_fts", "text_chunks 的索引"),
             ("text_fts_uni", "text_chunks 的索引"),

@@ -1090,6 +1090,8 @@ fn timeline_moments(
 struct Chapter {
     start_ts: i64,
     end_ts: i64,
+    core_start_ts: i64,
+    core_end_ts: i64,
     app: Option<String>,
     title: Option<String>,
     host: Option<String>,
@@ -1097,6 +1099,30 @@ struct Chapter {
     cut_kinds: Vec<String>,
     /// 沒有邊界可算是 `None`，不是 0.0。
     confidence: Option<f32>,
+    /// 使用者編輯留下的形狀。演算法自己切的是 `None`。
+    edited: Option<String>,
+    /// 套用過的那一筆 `segment_edit.id`。沒有就是 `None`。
+    edit_id: Option<i64>,
+}
+
+fn chapter_from_segment(s: sister_core::segment::Segment) -> Chapter {
+    Chapter {
+        start_ts: s.started_at,
+        end_ts: s.ended_at,
+        core_start_ts: s.core_started_at,
+        core_end_ts: s.core_ended_at,
+        app: s.app,
+        title: s.title,
+        host: s.host,
+        cut_kinds: s
+            .cut_kinds
+            .iter()
+            .map(|k| k.as_str().to_string())
+            .collect(),
+        confidence: s.confidence,
+        edited: s.last_edit.map(|e| e.kind.as_str().to_string()),
+        edit_id: s.last_edit.map(|e| e.id),
+    }
 }
 
 /// 某一天切成的段落。打開時間軸才算，不在錄製那條路上。
@@ -1111,19 +1137,62 @@ fn timeline_chapters(
             .chapters_for_range(from_ts, to_ts)
             .map_err(|e| format!("{e:#}"))?
             .into_iter()
-            .map(|s| Chapter {
-                start_ts: s.started_at,
-                end_ts: s.ended_at,
-                app: s.app,
-                title: s.title,
-                host: s.host,
-                cut_kinds: s
-                    .cut_kinds
-                    .iter()
-                    .map(|k| k.as_str().to_string())
-                    .collect(),
-                confidence: s.confidence,
-            })
+            .map(chapter_from_segment)
+            .collect())
+    })
+}
+
+/// 把相鄰兩段併成一段。立刻回新的章節清單，不用重開視窗。
+#[tauri::command(async)]
+fn timeline_merge_chapters(
+    left_core_start: i64,
+    right_core_start: i64,
+    from_ts: i64,
+    to_ts: i64,
+    shell: tauri::State<'_, Shell>,
+) -> Result<Vec<Chapter>, String> {
+    with_db_mut(&shell, |db| {
+        Ok(db
+            .merge_chapters(left_core_start, right_core_start, from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?
+            .into_iter()
+            .map(chapter_from_segment)
+            .collect())
+    })
+}
+
+/// 在 `at_ts` 把一段切成兩段。
+#[tauri::command(async)]
+fn timeline_split_chapter(
+    at_ts: i64,
+    from_ts: i64,
+    to_ts: i64,
+    shell: tauri::State<'_, Shell>,
+) -> Result<Vec<Chapter>, String> {
+    with_db_mut(&shell, |db| {
+        Ok(db
+            .split_chapter(at_ts, from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?
+            .into_iter()
+            .map(chapter_from_segment)
+            .collect())
+    })
+}
+
+/// 撤銷某一筆合併或切開。多寫一列，不改舊的訓練訊號。
+#[tauri::command(async)]
+fn timeline_undo_segment_edit(
+    edit_id: i64,
+    from_ts: i64,
+    to_ts: i64,
+    shell: tauri::State<'_, Shell>,
+) -> Result<Vec<Chapter>, String> {
+    with_db_mut(&shell, |db| {
+        Ok(db
+            .undo_segment_edit(edit_id, from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?
+            .into_iter()
+            .map(chapter_from_segment)
             .collect())
     })
 }
@@ -2183,6 +2252,9 @@ fn main() {
             timeline_days,
             timeline_moments,
             timeline_chapters,
+            timeline_merge_chapters,
+            timeline_split_chapter,
+            timeline_undo_segment_edit,
             forget_preview,
             forget_range,
             consent_read,

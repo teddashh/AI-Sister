@@ -112,6 +112,7 @@ async function open(table = {}) {
   const DEFAULTS = {
     timeline_days: DAYS,
     timeline_moments: MOMENTS,
+    timeline_chapters: [],
     forget_preview: PREVIEW,
     // 真的刪完那次才答得出「刪完之後還剩什麼」。
     forget_range: erasure({ sessions_left: 0 }),

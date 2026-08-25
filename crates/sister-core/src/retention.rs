@@ -565,6 +565,15 @@ impl crate::db::Db {
         // 打開時間軸會從還在的事件重算。
         tx.execute("DELETE FROM segment WHERE ended_at < ?1", [text_cut])
             .context("prune segment")?;
+        // 對應的編輯和卡住訊號一起走。編輯是訓練訊號，事件不在了就沒東西
+        // 可學；卡住是從同一批 L0/L1 算出來的。不計進報告，理由同 segment。
+        tx.execute(
+            "DELETE FROM segment_edit WHERE to_ms IS NOT NULL AND to_ms < ?1",
+            [text_cut],
+        )
+        .context("prune segment_edit")?;
+        tx.execute("DELETE FROM stuck_signal WHERE ended_at < ?1", [text_cut])
+            .context("prune stuck_signal")?;
         // **最後一步，在同一個 transaction 裡。**上面每一句 DELETE 都跑完了，
         // 所以「一列都不剩」現在才問得準。順序反過來的話，這一支看到的是還沒
         // 被清空的子表，一場都刪不掉——而且不會有人發現，因為 0 是個合理的數字。
@@ -808,6 +817,18 @@ impl crate::db::Db {
             [from_ts, to_ts],
         )
         .context("forget segment")?;
+        // 重疊到的編輯一起走。undo 列帶著同一段 from_ms/to_ms，所以一併刪；
+        // 外鍵 CASCADE 再把漏網的 undo 帶走。
+        tx.execute(
+            "DELETE FROM segment_edit WHERE from_ms < ?2 AND to_ms > ?1",
+            [from_ts, to_ts],
+        )
+        .context("forget segment_edit")?;
+        tx.execute(
+            "DELETE FROM stuck_signal WHERE ended_at > ?1 AND started_at < ?2",
+            [from_ts, to_ts],
+        )
+        .context("forget stuck_signal")?;
         // 那幾場錄製本身。這一句就是「每一張表都清乾淨」那句話裡以前唯一
         // 沒被清到的那張表——理由見 [`delete_empty_sessions`]。
         report.sessions_deleted += delete_empty_sessions(&tx, None)?;
@@ -885,6 +906,75 @@ mod tests {
             .expect("prune");
         assert_eq!(report.queries_deleted, 1, "過期的題目沒被清掉");
         assert_eq!(db.query_log_stats().expect("stats").total, 1);
+    }
+
+    #[test]
+    fn segment_edits_expire_with_the_text() {
+        const DAY: i64 = 24 * 60 * 60 * 1000;
+        let mut db = crate::Db::open_in_memory().expect("db");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        use crate::model::{FocusEvent, FocusKind, FocusSnapshot};
+        let now = 1_000 * DAY;
+        let old = now - 400 * DAY;
+        for (ts, app, title, url) in [
+            (old, "code.exe", "a", None),
+            (
+                old + 60_000,
+                "chrome.exe",
+                "b",
+                Some("https://mail.example/"),
+            ),
+            (
+                old + 90_000,
+                "chrome.exe",
+                "b",
+                Some("https://mail.example/"),
+            ),
+        ] {
+            db.insert_focus(
+                s,
+                &FocusEvent {
+                    ts,
+                    kind: FocusKind::Focus,
+                    snapshot: FocusSnapshot {
+                        app_id: Some(app.into()),
+                        window_title: Some(title.into()),
+                        url: url.map(|u: &str| u.into()),
+                        ..Default::default()
+                    },
+                },
+            )
+            .expect("focus");
+        }
+        let ch = db.chapters_for_range(old, old + 200_000).expect("chapters");
+        assert_eq!(ch.len(), 2, "code → chrome 該切成兩段");
+        db.merge_chapters(
+            ch[0].core_started_at,
+            ch[1].core_started_at,
+            old,
+            old + 200_000,
+        )
+        .expect("merge");
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM segment_edit", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(n, 1);
+
+        db.prune(
+            now,
+            &RetentionConfig {
+                frames_days: 30,
+                text_days: 365,
+            },
+            None,
+        )
+        .expect("prune");
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM segment_edit", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(n, 0, "過期的編輯沒被清掉");
     }
 
     #[test]

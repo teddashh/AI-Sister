@@ -1,7 +1,9 @@
 # DATA_INVENTORY — 她到底存了什麼
 
-> 這份文件描述 **schema v8**（`sister-core` 的 `MIGRATION_001`…`008`）。
+> 這份文件描述 **schema v9**（`sister-core` 的 `MIGRATION_001`…`009`）。
 > v8 加了 `segment`（斷句結果，打開時間軸才算，不在錄製熱路徑上）。
+> v9 加了 `segment_edit`（使用者合併／切開的訓練訊號）和 `stuck_signal`
+> （卡住偵測 v0，只記錄不開口）。兩張都不是錄製熱路徑。
 >
 > 規則：**動到訊號面的 PR 必須同步改這份文件**（PHASES.md §工作紀律 3）。
 > 如果程式碼多存了一個欄位而這裡沒寫，那是 bug，不是文件落後。
@@ -414,7 +416,8 @@ datetime）、`raw`（螢幕原文）、`normalized`，以及回指
 > 順帶把整份表的規矩講清楚，這份文件以前只說了存什麼、沒說存多久：
 > **除了畫面檔（`retention.frames_days`，預設 30 天，到期只丟圖、字留著）
 > 以外，其餘每一張表都跟著 `retention.text_days`。** 包含這張、`queries`
-> 題庫、焦點／剪貼簿／輸入那三張訊號表、以及 `segment`。`sister prune --dry-run` 會
+> 題庫、焦點／剪貼簿／輸入那三張訊號表、以及 `segment`、`segment_edit`、
+> `stuck_signal`。`sister prune --dry-run` 會
 > 當場把「現在會刪掉什麼」印出來，一個位元組都不動。
 
 ### `segment` — 一天切成哪幾段（schema v8）
@@ -435,6 +438,52 @@ datetime）、`raw`（螢幕原文）、`normalized`，以及回指
 
 同一段時間重算是先刪舊列再插入，不 UPDATE。`sister forget` 和保留期會刪掉
 重疊到的列；下一次打開時間軸從還在的事件再算。
+
+使用者在時間軸上合併／切開的結果**不寫這張表**——寫進去下次打開就沒了。
+那份動作在 `segment_edit`。
+
+### `segment_edit` — 你怎麼改她切的段落（schema v9）
+
+時間軸上合併兩段、或在一段中間切開，每一次都追加一列。重算 `segment`
+不會動這張表；打開時間軸時先算演算法的切法，再依 id 把還沒撤銷的編輯
+套上去。所以改過的段落重開還在。
+
+同時是 SPEC §4.3 的訓練訊號：日後調切刀用的是「演算法原本怎麼切、人改
+成怎樣」，不是畫面。
+
+| 欄位 | 內容 |
+|---|---|
+| `ts` | 你按下的時間 |
+| `kind` | `merge` / `split` / `undo`。撤銷是多一列，不改舊列 |
+| `at_ms` | 合併：被拿掉的那道邊界。切開：切點 |
+| `from_ms` / `to_ms` | 這次動作碰到的核心範圍。`forget` 用它判斷重疊 |
+| `algo_cut_kinds` | 當時演算法在 `at_ms` 的切刀。演算法沒切就是 `NULL`，不是空字串 |
+| `algo_confidence` | 當時那道邊界的信心。沒有就是 `NULL`，不是 0 |
+| `target_id` | 只有 `undo`：指向被撤的那一列 |
+
+不記畫面文字、不記你打的字、不記 OCR。`sister forget` 清掉重疊到的事件
+時，對應的編輯跟著走；保留期整段核心都過了才刪。升級不回填：舊資料庫
+升上來這張表是空的。
+
+### `stuck_signal` — 卡住偵測 v0（schema v9）
+
+打開時間軸時從當天的段落算出來，**只記錄、不開口、不提醒**。一列代表
+一次「停留夠長 + 切換夠多次 + 同窗口有 error_code 事實」三個都量到且
+都過門檻。缺任何一個成分就不寫列——沒有 input_metrics 覆蓋的時候不會
+出現 `switch_count = 0` 的一列來假裝量過。
+
+| 欄位 | 內容 |
+|---|---|
+| `started_at` / `ended_at` | 那段活動的核心範圍 |
+| `app_id` / `window_title` | 那一段待最久的前景。沒有就 `NULL` |
+| `dwell_ms` | 停留時長。寫進來的列都有量到 |
+| `switch_count` | 這段期間 `input_metrics.window_switches` 加總。寫進來的列都有量到 |
+| `error_fact_count` | 同窗口、同時段的 `error_code` 事實數。寫進來的列都 ≥ 1 |
+| `computed_at` | 這一次重算的時間 |
+
+門檻（停留 ≥ 3 分鐘、切換 ≥ 6 次）是實作選擇，不是規格常數。重算先刪
+再插，跟 `segment` 同一條路。`forget` / 保留期跟著事件走。這一版時間軸
+上不顯示——它還不是給人看的判斷，只是給下一層用的訊號。
 
 ### `queries` / `query_clicks` / `query_marks` — 你問過她什麼
 

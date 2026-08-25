@@ -417,3 +417,68 @@ button:disabled {
 .chapter-body .row {
   padding-left: 0;
 }
+
+/* ---------- 章節上的合併／切開（只加在末尾，不重排上面的規則） ---------- */
+
+.chapter.edited {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.chapter-title {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip.edit {
+  background: rgb(232 163 61 / 22%);
+  color: var(--warn);
+}
+
+.chapter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 4px 8px 58px;
+}
+
+.chapter-actions button,
+.chapter-split button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px rgb(246 236 223 / 20%);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11.5px;
+  padding: 2px 9px;
+}
+
+.chapter-actions button:hover,
+.chapter-split button:hover {
+  background: rgb(246 236 223 / 8%);
+}
+
+.chapter-split {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  padding: 0 4px 8px 58px;
+}
+
+.chapter-split[hidden] {
+  display: none;
+}
+
+.chapter-split input[type="time"] {
+  background: var(--rail);
+  border: 0;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px rgb(246 236 223 / 20%);
+  color: inherit;
+  font: inherit;
+  padding: 2px 8px;
+}
