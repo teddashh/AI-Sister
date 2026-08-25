@@ -1085,6 +1085,49 @@ fn timeline_moments(
     })
 }
 
+/// 時間軸上的一段。時間是含 5 秒重疊 margin 的顯示範圍。
+#[derive(Serialize)]
+struct Chapter {
+    start_ts: i64,
+    end_ts: i64,
+    app: Option<String>,
+    title: Option<String>,
+    host: Option<String>,
+    /// 打開這一段的切刀。空 = 當天第一段，沒有打開它的切刀。
+    cut_kinds: Vec<String>,
+    /// 沒有邊界可算是 `None`，不是 0.0。
+    confidence: Option<f32>,
+}
+
+/// 某一天切成的段落。打開時間軸才算，不在錄製那條路上。
+#[tauri::command(async)]
+fn timeline_chapters(
+    from_ts: i64,
+    to_ts: i64,
+    shell: tauri::State<'_, Shell>,
+) -> Result<Vec<Chapter>, String> {
+    with_db_mut(&shell, |db| {
+        Ok(db
+            .chapters_for_range(from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?
+            .into_iter()
+            .map(|s| Chapter {
+                start_ts: s.started_at,
+                end_ts: s.ended_at,
+                app: s.app,
+                title: s.title,
+                host: s.host,
+                cut_kinds: s
+                    .cut_kinds
+                    .iter()
+                    .map(|k| k.as_str().to_string())
+                    .collect(),
+                confidence: s.confidence,
+            })
+            .collect())
+    })
+}
+
 /// 設定頁上看得到、改得動的那幾項。
 ///
 /// **刻意只是設定檔的一個子集。** 截圖間隔、去重門檻那些沒有放進來，因為它們
@@ -2139,6 +2182,7 @@ fn main() {
             open_timeline,
             timeline_days,
             timeline_moments,
+            timeline_chapters,
             forget_preview,
             forget_range,
             consent_read,

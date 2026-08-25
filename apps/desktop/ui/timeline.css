@@ -359,3 +359,61 @@ button:disabled {
   cursor: default;
   opacity: 0.4;
 }
+
+/* ---------- 章節（「你今天的一天」） ---------- */
+
+.chapter {
+  border-bottom: 1px solid var(--line);
+  padding: 4px 0;
+}
+
+.chapter-head {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  gap: 14px;
+  padding: 8px 4px;
+  text-align: left;
+  width: 100%;
+}
+
+.chapter-head:hover {
+  background: rgb(246 236 223 / 6%);
+}
+
+.chapter.open .chapter-head {
+  background: rgb(154 91 122 / 18%);
+}
+
+.chapter-meta {
+  min-width: 0;
+}
+
+.chapter-title {
+  margin: 0;
+}
+
+.chapter-range {
+  margin: 0;
+  opacity: 0.55;
+}
+
+.chapter-range em {
+  font-style: normal;
+  opacity: 0.8;
+}
+
+.chapter-body {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 8px 0;
+}
+
+.chapter-body .row {
+  padding-left: 0;
+}

@@ -332,9 +332,13 @@ function gapRow(row, dayStart) {
   return li;
 }
 
-function paint(view, day, now) {
+function paint(view, day, now, chapters) {
   el.title.textContent = longDay.format(day.start_ts);
-  const bits = [`${day.chunks} 筆`];
+  const bits = [];
+  if (Array.isArray(chapters) && chapters.length > 0) {
+    bits.push(`${chapters.length} 段`);
+  }
+  bits.push(`${day.chunks} 筆`);
   if (day.chunks > 0) {
     bits.push(`${hhmm.format(day.first_ts)}–${hhmm.format(day.last_ts)}`);
   }
@@ -347,6 +351,10 @@ function paint(view, day, now) {
   listing = view.moments.length > 0 || view.pauses.length > 0;
   el.moments.replaceChildren();
   const rows = build(view, day.start_ts, now);
+  if (Array.isArray(chapters) && chapters.length > 0) {
+    paintChapters(chapters, rows, day.start_ts);
+    return;
+  }
   for (const row of rows) {
     el.moments.append(
       row.kind === "moment" ? momentRow(row.m) : gapRow(row, day.start_ts),
@@ -358,6 +366,110 @@ function paint(view, day, now) {
     li.textContent = "這一天沒有東西。";
     el.moments.append(li);
   }
+}
+
+/** 段落標題只講程式真的有的東西：app、標題或 host、長度。 */
+function chapterLabel(ch) {
+  const dur = lasted(Math.max(0, ch.end_ts - ch.start_ts));
+  const what = [ch.app, ch.title || ch.host].filter(Boolean).join(" · ");
+  return what ? `${what}　${dur}` : `一段紀錄　${dur}`;
+}
+
+function cutWords(ch) {
+  if (!ch.cut_kinds || ch.cut_kinds.length === 0) return "";
+  const names = {
+    app_change: "前景 app 變更",
+    host_change: "瀏覽器 host 變更",
+    idle_resume: "idle 超過 90 秒後恢復",
+    lock: "螢幕鎖定",
+    unlock: "螢幕解鎖",
+    clipboard_paste: "剪貼簿大段複製後切到另一個 app",
+    time_cap: "滿 10 分鐘",
+  };
+  return ch.cut_kinds.map((k) => names[k] ?? k).join("、");
+}
+
+function rowNode(row, dayStart) {
+  return row.kind === "moment" ? momentRow(row.m) : gapRow(row, dayStart);
+}
+
+function paintChapters(chapters, rows, dayStart) {
+  const buckets = chapters.map(() => []);
+  const rest = [];
+  for (const row of rows) {
+    const t = row.kind === "moment" ? row.m.ts : row.start;
+    const idx = chapters.findIndex((ch) => t >= ch.start_ts && t < ch.end_ts);
+    if (idx >= 0) buckets[idx].push(row);
+    else rest.push(row);
+  }
+  const items = [
+    ...chapters.map((ch, i) => ({ at: ch.start_ts, ch, i })),
+    ...rest.map((row) => ({
+      at: row.kind === "moment" ? row.m.ts : row.start,
+      row,
+    })),
+  ];
+  items.sort((a, b) => a.at - b.at);
+  for (const item of items) {
+    if (item.ch) {
+      el.moments.append(chapterRow(item.ch, buckets[item.i], dayStart));
+    } else {
+      el.moments.append(rowNode(item.row, dayStart));
+    }
+  }
+}
+
+function chapterRow(ch, rows, dayStart) {
+  const li = document.createElement("li");
+  li.className = "chapter";
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "chapter-head";
+  btn.setAttribute("aria-expanded", "false");
+
+  const at = document.createElement("span");
+  at.className = "at";
+  at.textContent = hhmm.format(ch.start_ts);
+
+  const meta = document.createElement("div");
+  meta.className = "chapter-meta";
+  const title = document.createElement("p");
+  title.className = "chapter-title";
+  title.textContent = chapterLabel(ch);
+  const range = document.createElement("p");
+  range.className = "chapter-range";
+  range.textContent = `${hhmm.format(ch.start_ts)}–${hhmm.format(ch.end_ts)}`;
+  const cut = cutWords(ch);
+  if (cut) {
+    const em = document.createElement("em");
+    em.textContent = `　切在${cut}`;
+    range.append(em);
+  }
+  meta.append(title, range);
+  btn.append(at, meta);
+
+  const inner = document.createElement("ol");
+  inner.className = "chapter-body";
+  inner.hidden = true;
+  if (rows.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "empty";
+    empty.textContent = "這一段沒有留下文字。";
+    inner.append(empty);
+  } else {
+    for (const row of rows) inner.append(rowNode(row, dayStart));
+  }
+
+  btn.addEventListener("click", () => {
+    const open = btn.getAttribute("aria-expanded") === "true";
+    btn.setAttribute("aria-expanded", String(!open));
+    li.classList.toggle("open", !open);
+    inner.hidden = open;
+  });
+
+  li.append(btn, inner);
+  return li;
 }
 
 // 一段 OCR 可以有兩千個字。預設收三行，點一下攤開。
@@ -593,7 +705,17 @@ async function openDay(day, button) {
       toTs: day.start_ts + DAY,
       limit: LIMIT,
     });
-    paint(view, day, Date.now());
+    let chapters = [];
+    try {
+      chapters = await invoke("timeline_chapters", {
+        fromTs: day.start_ts,
+        toTs: day.start_ts + DAY,
+      });
+    } catch {
+      // 段落算不出來時右邊仍要能看 moments；forget / 證據點開也不能跟著掛。
+      chapters = [];
+    }
+    paint(view, day, Date.now(), chapters);
   } catch (err) {
     el.moments.replaceChildren();
     listing = false;
@@ -855,6 +977,34 @@ function fakeBackend(mode = "1") {
           ),
           truncated: mode === "cut",
         };
+      case "timeline_chapters": {
+        const ms = hit(arg.fromTs, arg.toTs);
+        const ch = [];
+        for (const m of ms) {
+          const last = ch[ch.length - 1];
+          if (last && last.app === m.app) {
+            last.end_ts = m.ts + 60_000;
+            continue;
+          }
+          const host = m.url
+            ? m.url
+                .replace(/^[a-z]+:\/\//i, "")
+                .split("/")[0]
+                .split(":")[0]
+                .toLowerCase()
+            : null;
+          ch.push({
+            start_ts: m.ts,
+            end_ts: m.ts + 60_000,
+            app: m.app,
+            title: m.title,
+            host: host && host.includes(".") ? host : null,
+            cut_kinds: last ? ["app_change"] : [],
+            confidence: last ? 0.5 : null,
+          });
+        }
+        return ch;
+      }
       case "forget_preview":
       case "forget_range": {
         const gone = hit(arg.fromTs, arg.toTs);

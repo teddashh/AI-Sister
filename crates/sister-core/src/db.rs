@@ -32,7 +32,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 8;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -468,6 +468,33 @@ CREATE TABLE IF NOT EXISTS query_marks (
   query_id INTEGER PRIMARY KEY REFERENCES queries(id) ON DELETE CASCADE,
   ts       INTEGER NOT NULL
 );
+"#;
+
+/// 斷句結果。從 L0 事件算出來的邊界假設，不是她錄下來的原件。
+///
+/// **不在錄製熱路徑上寫。** 開時間軸（或明確呼叫）才批次重算。
+/// 列本身不 UPDATE：同一段時間重算時先刪舊列再插入。事件被忘掉之後
+/// 舊邊界就失效了，留著會讓時間軸繼續講一段已經不存在的活動。
+///
+/// 升級不回填。Ted 機器上那 272 筆舊資料保持原樣，段落等他打開
+/// 時間軸那天再算。空表不是「這一天沒有段落」，是「還沒算過」。
+const MIGRATION_008: &str = r#"
+CREATE TABLE IF NOT EXISTS segment (
+  id              INTEGER PRIMARY KEY,
+  started_at      INTEGER NOT NULL,
+  ended_at        INTEGER NOT NULL,
+  core_started_at INTEGER NOT NULL,
+  core_ended_at   INTEGER NOT NULL,
+  app_id          TEXT,
+  window_title    TEXT,
+  url_host        TEXT,
+  cut_kinds       TEXT,
+  confidence      REAL,
+  event_ids       TEXT NOT NULL,
+  computed_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_segment_core ON segment(core_started_at);
+CREATE INDEX IF NOT EXISTS idx_segment_range ON segment(started_at, ended_at);
 "#;
 
 /// 「她記下來的東西」放在哪幾張表——以及哪幾列不算。
@@ -918,6 +945,7 @@ impl Db {
             5 => tx.execute_batch(&migration_005())?,
             6 => tx.execute_batch(&migration_006())?,
             7 => tx.execute_batch(MIGRATION_007)?,
+            8 => tx.execute_batch(MIGRATION_008)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -2819,6 +2847,166 @@ impl Db {
             })
         })?;
         Ok(rows.flatten().collect())
+    }
+
+    /// 某一段時間裡、斷句需要的 L0 事件。不跑演算法、不寫表。
+    pub fn segment_events(
+        &self,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<crate::segment::EventStream> {
+        let mut focus = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, ts, app_id, app_name, window_title, url
+                 FROM focus_events WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
+            )?;
+            let rows = stmt.query_map(params![from_ts, to_ts], |r| {
+                Ok(crate::segment::FocusPoint {
+                    id: r.get(0)?,
+                    ts: r.get(1)?,
+                    app_id: r.get(2)?,
+                    app_name: r.get(3)?,
+                    window_title: r.get(4)?,
+                    url: r.get(5)?,
+                })
+            })?;
+            focus.extend(rows.flatten());
+        }
+        let mut system = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, ts, kind FROM system_events
+                 WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
+            )?;
+            let rows = stmt.query_map(params![from_ts, to_ts], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Millis>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows.flatten() {
+                let (id, ts, kind) = row;
+                system.push(crate::segment::SystemPoint {
+                    id,
+                    ts,
+                    kind: system_kind_from_db(&kind)?,
+                });
+            }
+        }
+        let mut clipboard = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, ts, byte_len, source_app FROM clipboard_events
+                 WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
+            )?;
+            let rows = stmt.query_map(params![from_ts, to_ts], |r| {
+                Ok(crate::segment::ClipboardPoint {
+                    id: r.get(0)?,
+                    ts: r.get(1)?,
+                    byte_len: r.get(2)?,
+                    source_app: r.get(3)?,
+                })
+            })?;
+            clipboard.extend(rows.flatten());
+        }
+        let mut input = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, ts_start, ts_end, idle_ms FROM input_metrics
+                 WHERE ts_end > ?1 AND ts_start < ?2 ORDER BY ts_start, id",
+            )?;
+            let rows = stmt.query_map(params![from_ts, to_ts], |r| {
+                Ok(crate::segment::InputPoint {
+                    id: r.get(0)?,
+                    ts_start: r.get(1)?,
+                    ts_end: r.get(2)?,
+                    idle_ms: r.get(3)?,
+                })
+            })?;
+            input.extend(rows.flatten());
+        }
+        Ok(crate::segment::EventStream {
+            focus,
+            system,
+            clipboard,
+            input,
+        })
+    }
+
+    /// 打開時間軸時叫的那一支：把 `[from, to)` 的段落算一遍寫進 `segment`。
+    ///
+    /// 每次都重算，不讀舊列。一天的事件量遠小於 OCR，這不是熱路徑。
+    pub fn chapters_for_range(
+        &mut self,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<Vec<crate::segment::Segment>> {
+        if from_ts >= to_ts {
+            return Ok(Vec::new());
+        }
+        let pad = crate::segment::LOOKAROUND_MS;
+        let stream = self.segment_events(from_ts.saturating_sub(pad), to_ts.saturating_add(pad))?;
+        let kept: Vec<crate::segment::Segment> = crate::segment::segment(&stream)
+            .into_iter()
+            .filter(|s| s.core_started_at >= from_ts && s.core_started_at < to_ts)
+            .collect();
+        self.replace_segments(from_ts, to_ts, &kept)?;
+        Ok(kept)
+    }
+
+    fn replace_segments(
+        &mut self,
+        from_ts: Millis,
+        to_ts: Millis,
+        segs: &[crate::segment::Segment],
+    ) -> Result<()> {
+        let computed_at = now_ms();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM segment WHERE core_started_at >= ?1 AND core_started_at < ?2",
+            [from_ts, to_ts],
+        )?;
+        {
+            let mut ins = tx.prepare(
+                "INSERT INTO segment(
+                    started_at, ended_at, core_started_at, core_ended_at,
+                    app_id, window_title, url_host, cut_kinds, confidence,
+                    event_ids, computed_at
+                 ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            )?;
+            for s in segs {
+                let kinds = if s.cut_kinds.is_empty() {
+                    None
+                } else {
+                    Some(
+                        s.cut_kinds
+                            .iter()
+                            .map(|k| k.as_str())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    )
+                };
+                let event_ids =
+                    serde_json::to_string(&s.event_ids).context("serialize segment event_ids")?;
+                ins.execute(params![
+                    s.started_at,
+                    s.ended_at,
+                    s.core_started_at,
+                    s.core_ended_at,
+                    s.app,
+                    s.title,
+                    s.host,
+                    kinds,
+                    s.confidence.map(|c| c as f64),
+                    event_ids,
+                    computed_at,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// `ts` 之後寫出去的畫面檔一共多少位元組。
@@ -4999,6 +5187,10 @@ mod tests {
             !columns_of(&db, "facts").contains(&"confidence".to_string()),
             "版號說跑到最新了，但 002 沒真的跑"
         );
+        assert!(
+            columns_of(&db, "segment").contains(&"core_started_at".to_string()),
+            "全新資料庫也要有 segment 表"
+        );
     }
 
     /// 已經在跑的資料庫升級上來，事實不能掉，欄位要真的消失。
@@ -5028,6 +5220,88 @@ mod tests {
             !columns_of(&db, "facts").contains(&"confidence".to_string()),
             "欄位還在——002 沒跑，但版號已經蓋成 2 了"
         );
+        assert!(
+            columns_of(&db, "segment").contains(&"core_started_at".to_string()),
+            "升到 8 之後要有 segment 表"
+        );
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(n, 0, "升級不回填段落——還沒打開時間軸就算不該有列");
+    }
+
+    fn focus_at(ts: Millis, app: &str, title: &str, url: Option<&str>) -> FocusEvent {
+        FocusEvent {
+            ts,
+            kind: FocusKind::Focus,
+            snapshot: FocusSnapshot {
+                app_id: Some(app.into()),
+                window_title: Some(title.into()),
+                url: url.map(|u| u.into()),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// 斷句在打開時間軸時才算，不在寫入焦點事件時算。
+    #[test]
+    fn chapters_are_computed_on_demand_and_survive_a_second_open() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for e in [
+            focus_at(0, "code.exe", "db.rs", None),
+            focus_at(60_000, "chrome.exe", "mail", Some("https://mail.example/")),
+            focus_at(90_000, "chrome.exe", "mail", Some("https://mail.example/")),
+        ] {
+            db.insert_focus(s, &e).expect("focus");
+        }
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(n, 0, "寫入焦點不該順便斷句");
+
+        let first = db.chapters_for_range(0, 200_000).expect("chapters");
+        assert_eq!(first.len(), 2, "code → chrome 該切成兩段");
+        assert_eq!(first[0].app.as_deref(), Some("code.exe"));
+        assert_eq!(first[1].app.as_deref(), Some("chrome.exe"));
+        assert!(first[0].confidence.is_none());
+        assert!(first[1].confidence.is_some());
+
+        let stored: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))
+            .expect("stored");
+        assert_eq!(stored, 2);
+
+        let second = db.chapters_for_range(0, 200_000).expect("recompute");
+        assert_eq!(second.len(), 2);
+        let stored_again: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))
+            .expect("stored");
+        assert_eq!(stored_again, 2, "重算是換掉，不是疊上去");
+    }
+
+    #[test]
+    fn forgetting_a_range_drops_the_segments_that_overlapped_it() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for e in [
+            focus_at(0, "code.exe", "db.rs", None),
+            focus_at(60_000, "chrome.exe", "mail", Some("https://mail.example/")),
+            focus_at(90_000, "chrome.exe", "mail", Some("https://mail.example/")),
+        ] {
+            db.insert_focus(s, &e).expect("focus");
+        }
+        db.chapters_for_range(0, 200_000).expect("chapters");
+        db.forget(50_000, 100_000, None).expect("forget");
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(n, 0, "重疊到的段落該跟事件一起走");
     }
 
     /// 升上來的舊資料庫有三種，而它們拿到的東西必須不一樣。
@@ -6343,6 +6617,10 @@ mod tests {
             ("queries", "他打的字，而且會在清空之後才長出來"),
             ("query_clicks", "同上，掛在 queries 底下"),
             ("query_marks", "他按的那個位元，一樣掛在 queries 底下"),
+            (
+                "segment",
+                "從 L0 事件算出來的邊界假設，不是原件；母體是 focus/system/clipboard/input，重算得回來",
+            ),
             ("text_fts", "text_chunks 的索引"),
             ("text_fts_uni", "text_chunks 的索引"),
             ("text_fts_bi", "text_chunks 的索引"),

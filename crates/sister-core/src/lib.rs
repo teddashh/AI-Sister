@@ -31,6 +31,7 @@ pub mod redact;
 pub mod replay;
 pub mod retention;
 pub mod retrieval;
+pub mod segment;
 
 pub use config::{CaptureConfig, Config, Exclusion, PrivacyConfig, RetentionConfig};
 pub use db::{Db, DbStats, FactRow, FrameContext, SCHEMA_VERSION};

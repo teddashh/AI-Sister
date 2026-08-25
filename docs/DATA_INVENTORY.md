@@ -1,6 +1,7 @@
 # DATA_INVENTORY — 她到底存了什麼
 
-> 這份文件描述 **schema v4**（`sister-core` 的 `MIGRATION_001`…`004`）。
+> 這份文件描述 **schema v8**（`sister-core` 的 `MIGRATION_001`…`008`）。
+> v8 加了 `segment`（斷句結果，打開時間軸才算，不在錄製熱路徑上）。
 >
 > 規則：**動到訊號面的 PR 必須同步改這份文件**（PHASES.md §工作紀律 3）。
 > 如果程式碼多存了一個欄位而這裡沒寫，那是 bug，不是文件落後。
@@ -413,8 +414,27 @@ datetime）、`raw`（螢幕原文）、`normalized`，以及回指
 > 順帶把整份表的規矩講清楚，這份文件以前只說了存什麼、沒說存多久：
 > **除了畫面檔（`retention.frames_days`，預設 30 天，到期只丟圖、字留著）
 > 以外，其餘每一張表都跟著 `retention.text_days`。** 包含這張、`queries`
-> 題庫、以及焦點／剪貼簿／輸入那三張訊號表。`sister prune --dry-run` 會
+> 題庫、焦點／剪貼簿／輸入那三張訊號表、以及 `segment`。`sister prune --dry-run` 會
 > 當場把「現在會刪掉什麼」印出來，一個位元組都不動。
+
+### `segment` — 一天切成哪幾段（schema v8）
+
+從 L0 事件算出來的邊界假設（SPEC §4.1），不是她錄下來的原件。
+打開時間軸才批次重算，**錄製那一拍不算**。升級不回填：舊資料庫升上來時這張
+表是空的，等打開時間軸那天再算。
+
+| 欄位 | 內容 |
+|---|---|
+| `started_at` / `ended_at` | 顯示範圍，含前後 5 秒重疊 margin |
+| `core_started_at` / `core_ended_at` | 不含 margin 的核心；重算某一天時用核心起點判斷這一段算哪一天的 |
+| `app_id` / `window_title` / `url_host` | 這一段待最久的那個前景。沒有就 `NULL`，不拿別的字來充數 |
+| `cut_kinds` | 打開這一段的切刀（`app_change,host_change` 這種）。第一段是 `NULL`——沒有打開它的切刀，不是空字串 |
+| `confidence` | 那道邊界的信心。第一段是 `NULL`。不是校準過的機率，是「幾個切刀同時成立」算出來的數 |
+| `event_ids` | JSON：這一段用到哪些 focus/system/clipboard/input 的 id |
+| `computed_at` | 這一次重算的時間 |
+
+同一段時間重算是先刪舊列再插入，不 UPDATE。`sister forget` 和保留期會刪掉
+重疊到的列；下一次打開時間軸從還在的事件再算。
 
 ### `queries` / `query_clicks` / `query_marks` — 你問過她什麼
 

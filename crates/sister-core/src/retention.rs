@@ -560,6 +560,11 @@ impl crate::db::Db {
         report.queries_deleted += tx
             .execute("DELETE FROM queries WHERE ts < ?1", [text_cut])
             .context("prune queries")? as u64;
+        // 段落是從事件算出來的。事件走了，舊邊界留著會讓時間軸繼續講
+        // 一段已經不存在的活動。不計進報告：它不是他的記憶原件，下一次
+        // 打開時間軸會從還在的事件重算。
+        tx.execute("DELETE FROM segment WHERE ended_at < ?1", [text_cut])
+            .context("prune segment")?;
         // **最後一步，在同一個 transaction 裡。**上面每一句 DELETE 都跑完了，
         // 所以「一列都不剩」現在才問得準。順序反過來的話，這一支看到的是還沒
         // 被清空的子表，一場都刪不掉——而且不會有人發現，因為 0 是個合理的數字。
@@ -796,6 +801,13 @@ impl crate::db::Db {
                 [from_ts, to_ts],
             )
             .context("forget queries")? as u64;
+        // 重疊到的段落一起走。不計進報告，理由同 prune：它是算出來的，
+        // 打開時間軸會從剩下的事件重算。
+        tx.execute(
+            "DELETE FROM segment WHERE ended_at > ?1 AND started_at < ?2",
+            [from_ts, to_ts],
+        )
+        .context("forget segment")?;
         // 那幾場錄製本身。這一句就是「每一張表都清乾淨」那句話裡以前唯一
         // 沒被清到的那張表——理由見 [`delete_empty_sessions`]。
         report.sessions_deleted += delete_empty_sessions(&tx, None)?;
