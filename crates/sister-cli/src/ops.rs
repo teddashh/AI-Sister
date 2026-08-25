@@ -9141,9 +9141,11 @@ pub mod replay {
         AnnotationPreview, EvalReport, ExpectedOutcome, Fraction, QuestionSet, annotation_previews,
         evidence_surfaces,
     };
+    use sister_core::moments::{ConfirmPrivateTextReviewed, MomentLabel, MomentSet, SpeakCategory};
     use sister_core::replay::{Corpus, DraftCorpus, ReviewStatus};
     use std::fs::OpenOptions;
     use std::io::{BufRead, Seek, SeekFrom, Write};
+    use std::str::FromStr;
 
     /// 真實資料的安全出口：DB API 直接回 [`DraftCorpus`](sister_core::replay::DraftCorpus)，
     /// 呼叫端碰不到尚未去敏的中間 corpus。
@@ -9374,21 +9376,356 @@ pub mod replay {
         Ok(())
     }
 
+    fn read_corpus(path: &Path) -> Result<Corpus> {
+        let corpus_bytes =
+            std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        let corpus: Corpus = serde_json::from_slice(&corpus_bytes)
+            .with_context(|| format!("parse replay corpus {}", path.display()))?;
+        corpus.validate()?;
+        Ok(corpus)
+    }
+
     fn read_corpus_and_questions(
         corpus_path: &Path,
         questions_path: &Path,
     ) -> Result<(Corpus, QuestionSet)> {
-        let corpus_bytes = std::fs::read(corpus_path)
-            .with_context(|| format!("read {}", corpus_path.display()))?;
-        let corpus: Corpus = serde_json::from_slice(&corpus_bytes)
-            .with_context(|| format!("parse replay corpus {}", corpus_path.display()))?;
+        let corpus = read_corpus(corpus_path)?;
         let question_bytes = std::fs::read(questions_path)
             .with_context(|| format!("read {}", questions_path.display()))?;
         let questions: QuestionSet = serde_json::from_slice(&question_bytes)
             .with_context(|| format!("parse question set {}", questions_path.display()))?;
-        corpus.validate()?;
         questions.validate(&corpus)?;
         Ok((corpus, questions))
+    }
+
+    fn read_corpus_and_moments(
+        corpus_path: &Path,
+        moments_path: &Path,
+    ) -> Result<(Corpus, MomentSet)> {
+        let corpus = read_corpus(corpus_path)?;
+        let moment_bytes = std::fs::read(moments_path)
+            .with_context(|| format!("read {}", moments_path.display()))?;
+        let moments: MomentSet = serde_json::from_slice(&moment_bytes)
+            .with_context(|| format!("parse moment set {}", moments_path.display()))?;
+        moments.validate(&corpus)?;
+        Ok((corpus, moments))
+    }
+
+    pub fn draft_moments(corpus_path: &Path, output: &Path) -> Result<()> {
+        anyhow::ensure!(
+            output != corpus_path,
+            "--to 必須是另一個新檔案；不會原地改寫 corpus"
+        );
+        let corpus = read_corpus(corpus_path)?;
+        let name = format!("{}-moments", corpus.name);
+        let set = MomentSet::draft_from_corpus(&name, &corpus)?;
+        write_new_moment_set(output, &set)?;
+        println!("完成：時刻集草稿 → {}", output.display());
+        render_moment_status(&corpus, &set);
+        println!("  仍是 private Draft；標完後再跑 `replay moments review`。");
+        Ok(())
+    }
+
+    pub fn moment_status(corpus_path: &Path, moments_path: &Path) -> Result<()> {
+        let (corpus, moments) = read_corpus_and_moments(corpus_path, moments_path)?;
+        render_moment_status(&corpus, &moments);
+        Ok(())
+    }
+
+    pub fn annotate_moments(
+        corpus_path: &Path,
+        moments_path: &Path,
+        output: &Path,
+        all: bool,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            output != corpus_path && output != moments_path,
+            "--to 必須是另一個新檔案；不會原地改寫 corpus 或時刻集"
+        );
+        let (corpus, moments) = read_corpus_and_moments(corpus_path, moments_path)?;
+        anyhow::ensure!(
+            moments.review == ReviewStatus::Draft,
+            "Reviewed moment set 不可直接重新標註；請從審查前的 Draft 產生新版"
+        );
+        let mut draft_output = MomentDraftOutput::reserve(output, &moments)?;
+        println!("⚠  這裡會顯示沒有自動去敏的畫面文字與標註原話；只在私下的終端操作。");
+        render_moment_status(&corpus, &moments);
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        let (annotated, changed) = annotate_moments_with_io(
+            &corpus,
+            &moments,
+            all,
+            &mut stdin.lock(),
+            &mut stdout.lock(),
+            &mut |moments| draft_output.checkpoint(moments),
+        )?;
+        if changed == 0 {
+            draft_output.discard()?;
+            println!("沒有新增或更正標註；沒有建立輸出檔。");
+            return Ok(());
+        }
+
+        debug_assert_eq!(draft_output.last_moments, annotated);
+        draft_output.finish();
+        println!("完成：這次寫下 {} 個標註 → {}", changed, output.display());
+        render_moment_status(&corpus, &annotated);
+        println!("  仍是 private Draft；全部標完後再跑 `replay moments review`。");
+        Ok(())
+    }
+
+    pub fn review_moments(
+        corpus_path: &Path,
+        moments_path: &Path,
+        output: &Path,
+        confirmed: ConfirmPrivateTextReviewed,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            confirmed.is_confirmed(),
+            "提醒原文與 why 沒有自動去敏。逐個確認承諾、該講／不該講的理由都可分享後，重跑並加上 --confirm-private-text-reviewed"
+        );
+        anyhow::ensure!(
+            output != corpus_path && output != moments_path,
+            "--to 必須是另一個新檔案；不會原地改寫 corpus 或時刻集"
+        );
+        let (corpus, moments) = read_corpus_and_moments(corpus_path, moments_path)?;
+        let reviewed = moments.reviewed(&corpus)?;
+        write_new_moment_set(output, &reviewed)?;
+        println!("完成：Reviewed moment set → {}", output.display());
+        println!(
+            "  這代表你已人工確認提醒原文、why 與 evidence；corpus 的 {:?} 狀態仍是另一份獨立審查。",
+            corpus.review
+        );
+        Ok(())
+    }
+
+    fn render_moment_status(corpus: &Corpus, moments: &MomentSet) {
+        let counts = moments.counts();
+        println!(
+            "時刻集「{}」（{:?}）：總共 {} 個時刻。",
+            moments.name, moments.review, counts.total
+        );
+        println!("  未標：{}", counts.unlabeled);
+        println!(
+            "  已標承諾：{}（其中有講明時間：{}）",
+            counts.commitments, counts.commitments_with_due
+        );
+        println!("  已標該講：{}", counts.should_speak);
+        println!("  已標不該講：{}", counts.should_stay_quiet);
+        println!(
+            "  綁定 corpus「{}」（{:?}），fingerprint 已核對。",
+            corpus.name, corpus.review
+        );
+    }
+
+    fn annotate_moments_with_io(
+        corpus: &Corpus,
+        moments: &MomentSet,
+        all: bool,
+        input: &mut impl BufRead,
+        output: &mut impl Write,
+        checkpoint: &mut impl FnMut(&MomentSet) -> Result<()>,
+    ) -> Result<(MomentSet, usize)> {
+        let selected: Vec<_> = moments
+            .moments
+            .iter()
+            .enumerate()
+            .filter(|(_, moment)| all || moment.label.is_none())
+            .map(|(index, _)| index)
+            .collect();
+        if selected.is_empty() {
+            writeln!(output, "全部時刻都已有標註；要更正請加 --all。")?;
+            return Ok((moments.clone(), 0));
+        }
+
+        let mut next = moments.clone();
+        let mut changed = 0usize;
+        let mut quit = false;
+        for (position, &index) in selected.iter().enumerate() {
+            if quit {
+                break;
+            }
+            let moment = &next.moments[index];
+            writeln!(
+                output,
+                "\n[{}/{}] {}  +{} ms\n候選理由：{}",
+                position + 1,
+                selected.len(),
+                moment.id,
+                moment.at_ms,
+                moment.candidate.describe()
+            )?;
+            render_moment_evidence(output, corpus, moment)?;
+            match &moment.label {
+                None => writeln!(output, "現有標註：未標")?,
+                Some(label) => writeln!(output, "現有標註：{}", moment_label_summary(label))?,
+            }
+            writeln!(
+                output,
+                "輸入：c <提醒>｜c@<ms> <提醒>｜s <類別> <原因>｜q <原因>｜skip｜?｜w"
+            )?;
+
+            loop {
+                write!(output, "> ")?;
+                output.flush()?;
+                let mut line = String::new();
+                if input.read_line(&mut line)? == 0 {
+                    quit = true;
+                    break;
+                }
+                let command = line.trim();
+                if command == "w" {
+                    quit = true;
+                    break;
+                }
+                if command == "skip" {
+                    break;
+                }
+                if command == "?" {
+                    writeln!(
+                        output,
+                        "c <提醒內容>           標承諾（沒講時間）\n\
+                         c@<毫秒> <提醒內容>    標帶相對時間的承諾\n\
+                         s <類別> <原因>        標該講；類別：{}（或 a–e）\n\
+                         q <原因>               標不該講\n\
+                         skip                   跳過\n\
+                         w                      存檔離開",
+                        SpeakCategory::names("、")
+                    )?;
+                    continue;
+                }
+                match parse_moment_label(command) {
+                    Ok(Some(label)) => {
+                        let replace = next.moments[index].label.is_some();
+                        match next.with_label(corpus, &moment.id, label, replace) {
+                            Ok(labeled) => {
+                                next = labeled;
+                                checkpoint(&next)?;
+                                changed += 1;
+                                break;
+                            }
+                            Err(error) => {
+                                writeln!(output, "不能存這個標註：{error:#}")?;
+                                continue;
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        writeln!(output, "不認得；請輸入 c、c@、s、q、skip、? 或 w。")?;
+                    }
+                    Err(error) => writeln!(output, "{error}")?,
+                }
+            }
+        }
+        Ok((next, changed))
+    }
+
+    fn parse_moment_label(command: &str) -> Result<Option<MomentLabel>, String> {
+        if let Some(rest) = command.strip_prefix("c@") {
+            let Some((ms, remind)) = rest.split_once(char::is_whitespace) else {
+                return Err("格式是：c@<毫秒> 提醒內容".into());
+            };
+            let due_at_ms = ms
+                .parse::<sister_core::Millis>()
+                .map_err(|_| format!("c@ 後面的毫秒必須是整數，不是 {ms}"))?;
+            let remind = remind.trim();
+            if remind.is_empty() {
+                return Err("承諾 remind 不可為空。".into());
+            }
+            return Ok(Some(MomentLabel::Commitment {
+                remind: remind.to_string(),
+                due_at_ms: Some(due_at_ms),
+            }));
+        }
+        if let Some(remind) = command.strip_prefix("c ") {
+            let remind = remind.trim();
+            if remind.is_empty() {
+                return Err("承諾 remind 不可為空。".into());
+            }
+            return Ok(Some(MomentLabel::Commitment {
+                remind: remind.to_string(),
+                due_at_ms: None,
+            }));
+        }
+        if let Some(rest) = command.strip_prefix("s ") {
+            let Some((category, why)) = rest.trim().split_once(char::is_whitespace) else {
+                return Err(format!(
+                    "格式是：s <類別> 原因（類別：{}）",
+                    SpeakCategory::names("、")
+                ));
+            };
+            let category = SpeakCategory::from_str(category)?;
+            let why = why.trim();
+            if why.is_empty() {
+                return Err("該講的 why 不可為空。".into());
+            }
+            return Ok(Some(MomentLabel::ShouldSpeak {
+                category,
+                why: why.to_string(),
+            }));
+        }
+        if let Some(why) = command.strip_prefix("q ") {
+            let why = why.trim();
+            if why.is_empty() {
+                return Err("不該講的 why 不可為空。".into());
+            }
+            return Ok(Some(MomentLabel::ShouldStayQuiet {
+                why: why.to_string(),
+            }));
+        }
+        Ok(None)
+    }
+
+    fn render_moment_evidence(
+        output: &mut impl Write,
+        corpus: &Corpus,
+        moment: &sister_core::moments::LabeledMoment,
+    ) -> Result<()> {
+        if moment.evidence.is_empty() {
+            writeln!(output, "沒有 evidence event。")?;
+            return Ok(());
+        }
+        for (shown, reference) in moment.evidence.iter().enumerate() {
+            if shown == 5 {
+                writeln!(
+                    output,
+                    "  …另有 {} 個 evidence event 未列出",
+                    moment.evidence.len() - shown
+                )?;
+                break;
+            }
+            let Some(event) = corpus.events.get(reference.event_index) else {
+                writeln!(
+                    output,
+                    "evidence event {} 不在 corpus 裡",
+                    reference.event_index
+                )?;
+                continue;
+            };
+            let surfaces = evidence_surfaces(event);
+            if surfaces.is_empty() {
+                writeln!(output, "event {} 沒有可見文字表面", reference.event_index)?;
+                continue;
+            }
+            writeln!(output, "event {} 的可見表面：", reference.event_index)?;
+            for (kind, text) in surfaces {
+                writeln!(output, "  {}｜{}", kind.as_str(), concise(&text, 220))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn moment_label_summary(label: &MomentLabel) -> String {
+        match label {
+            MomentLabel::Commitment { remind, due_at_ms } => match due_at_ms {
+                Some(due) => format!("承諾「{remind}」due_at_ms={due}"),
+                None => format!("承諾「{remind}」（沒講時間）"),
+            },
+            MomentLabel::ShouldSpeak { category, why } => {
+                format!("該講 {} — {why}", category.as_str())
+            }
+            MomentLabel::ShouldStayQuiet { why } => format!("不該講 — {why}"),
+        }
     }
 
     fn render_question_status(corpus: &Corpus, questions: &QuestionSet) {
@@ -9797,6 +10134,10 @@ pub mod replay {
         write_new_bytes(path, serde_json::to_vec_pretty(value)?)
     }
 
+    fn write_new_moment_set(path: &Path, value: &MomentSet) -> Result<()> {
+        write_new_bytes(path, serde_json::to_vec_pretty(value)?)
+    }
+
     /// 互動標註的目的檔。來源永遠不動；目的地在第一題出現前就以 create-new
     /// 保留，之後每題都同步成一份可重新讀取的完整 Draft。
     struct QuestionDraftOutput {
@@ -9870,6 +10211,84 @@ pub mod replay {
                 let _ = std::fs::remove_file(&self.path);
             }
         }
+    }
+
+    /// 互動標註時刻集的目的檔。來源永遠不動；零變更正常退出不留一份假成果。
+    struct MomentDraftOutput {
+        path: PathBuf,
+        file: Option<std::fs::File>,
+        last_bytes: Vec<u8>,
+        last_moments: MomentSet,
+        keep: bool,
+    }
+
+    impl MomentDraftOutput {
+        fn reserve(path: &Path, moments: &MomentSet) -> Result<Self> {
+            let file = open_new_file(path)?;
+            let mut output = Self {
+                path: path.to_path_buf(),
+                file: Some(file),
+                last_bytes: Vec::new(),
+                last_moments: moments.clone(),
+                keep: false,
+            };
+            let bytes = moment_set_bytes(moments)?;
+            if let Err(error) = output.replace_bytes(&bytes) {
+                return Err(error).with_context(|| format!("write and sync {}", path.display()));
+            }
+            output.last_bytes = bytes;
+            Ok(output)
+        }
+
+        fn checkpoint(&mut self, moments: &MomentSet) -> Result<()> {
+            let bytes = moment_set_bytes(moments)?;
+            if let Err(error) = self.replace_bytes(&bytes) {
+                if self.replace_bytes(&self.last_bytes.clone()).is_err() {
+                    self.keep = false;
+                }
+                return Err(error).with_context(|| format!("checkpoint {}", self.path.display()));
+            }
+            self.last_bytes = bytes;
+            self.last_moments = moments.clone();
+            self.keep = true;
+            Ok(())
+        }
+
+        fn replace_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            let file = self.file.as_mut().expect("reserved output still open");
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(bytes)?;
+            file.set_len(bytes.len() as u64)?;
+            file.sync_all()
+        }
+
+        fn discard(mut self) -> Result<()> {
+            drop(self.file.take());
+            std::fs::remove_file(&self.path)
+                .with_context(|| format!("remove unused {}", self.path.display()))?;
+            self.keep = true;
+            Ok(())
+        }
+
+        fn finish(mut self) {
+            self.keep = true;
+            drop(self.file.take());
+        }
+    }
+
+    impl Drop for MomentDraftOutput {
+        fn drop(&mut self) {
+            if !self.keep {
+                drop(self.file.take());
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+
+    fn moment_set_bytes(value: &MomentSet) -> Result<Vec<u8>> {
+        let mut bytes = serde_json::to_vec_pretty(value)?;
+        bytes.push(b'\n');
+        Ok(bytes)
     }
 
     fn question_set_bytes(value: &QuestionSet) -> Result<Vec<u8>> {
@@ -10404,6 +10823,199 @@ pub mod replay {
                 evaluate_corpus(&corpus, &questions, 5, 1, false, Some(&report)).is_err(),
                 "既有 report 不可被覆寫"
             );
+            Ok(())
+        }
+
+        fn moment_fixture() -> Corpus {
+            use sister_core::model::OcrBlock;
+            use sister_core::replay::{Event, FORMAT_VERSION, RedactionSummary, ReplayFocus};
+            Corpus {
+                format_version: FORMAT_VERSION,
+                name: "moment-cli".into(),
+                duration_ms: 2_000,
+                review: ReviewStatus::Reviewed,
+                redactions: RedactionSummary::default(),
+                events: vec![
+                    Event::Frame {
+                        at_ms: 200,
+                        monitor: 0,
+                        width: 800,
+                        height: 600,
+                        dhash: 1,
+                        dup_run: 0,
+                        focus: ReplayFocus {
+                            app_id: Some("chat.exe".into()),
+                            window_title: Some("LINE".into()),
+                            ..Default::default()
+                        },
+                        ocr: vec![OcrBlock {
+                            text: "下午5點接她".into(),
+                            x: 0,
+                            y: 0,
+                            w: 300,
+                            h: 20,
+                            confidence: 1.0,
+                        }],
+                    },
+                    Event::Frame {
+                        at_ms: 1_500,
+                        monitor: 0,
+                        width: 800,
+                        height: 600,
+                        dhash: 2,
+                        dup_run: 0,
+                        focus: ReplayFocus {
+                            app_id: Some("editor.exe".into()),
+                            window_title: Some("notes".into()),
+                            ..Default::default()
+                        },
+                        ocr: vec![OcrBlock {
+                            text: "普通工作筆記".into(),
+                            x: 0,
+                            y: 30,
+                            w: 300,
+                            h: 20,
+                            confidence: 1.0,
+                        }],
+                    },
+                ],
+            }
+        }
+
+        #[test]
+        fn moment_draft_refuses_overwrite_and_starts_unlabeled() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("replay-moment-draft");
+            let corpus_path = tmp.0.join("fixture.corpus.json");
+            let moments_path = tmp.0.join("fixture.moments-draft.json");
+            let corpus = moment_fixture();
+            std::fs::write(&corpus_path, serde_json::to_vec_pretty(&corpus)?)?;
+
+            draft_moments(&corpus_path, &moments_path)?;
+            let drafted: MomentSet = serde_json::from_slice(&std::fs::read(&moments_path)?)?;
+            assert_eq!(drafted.review, ReviewStatus::Draft);
+            assert!(drafted.moments.iter().all(|moment| moment.label.is_none()));
+            assert_eq!(drafted.counts().unlabeled, drafted.counts().total);
+            assert_eq!(drafted.counts().should_speak, 0);
+            assert!(draft_moments(&corpus_path, &moments_path).is_err());
+            Ok(())
+        }
+
+        #[test]
+        fn moment_annotator_labels_without_writing_on_zero_changes() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("replay-moment-annotate");
+            let corpus = moment_fixture();
+            let draft = MomentSet::draft_from_corpus("moment-cli-moments", &corpus)?;
+            let commands = b"skip\nw\n";
+            let mut input = std::io::Cursor::new(commands);
+            let mut output = Vec::new();
+            let (labeled, changed) = annotate_moments_with_io(
+                &corpus,
+                &draft,
+                false,
+                &mut input,
+                &mut output,
+                &mut |_| Ok(()),
+            )?;
+            assert_eq!(changed, 0);
+            assert!(labeled.moments.iter().all(|moment| moment.label.is_none()));
+            let screen = String::from_utf8(output)?;
+            assert!(screen.contains("未標"), "{screen}");
+            assert!(screen.contains("畫面 OCR 抽出 DateTimeMention"), "{screen}");
+
+            let unused = tmp.0.join("unused.json");
+            MomentDraftOutput::reserve(&unused, &draft)?.discard()?;
+            assert!(!unused.exists(), "零變更正常退出不留一份假成果");
+            Ok(())
+        }
+
+        #[test]
+        fn moment_annotator_accepts_commitment_speak_and_quiet() -> Result<()> {
+            let corpus = moment_fixture();
+            let draft = MomentSet::draft_from_corpus("moment-cli-moments", &corpus)?;
+            assert!(
+                draft.counts().total >= 1,
+                "fixture 必須真的抽出 DateTimeMention"
+            );
+            let commands = "?\nc@3600000 五點接她\nskip\nskip\nskip\n";
+            let mut input = std::io::Cursor::new(commands.as_bytes());
+            let mut output = Vec::new();
+            let mut checkpoints = Vec::new();
+            let (labeled, changed) = annotate_moments_with_io(
+                &corpus,
+                &draft,
+                false,
+                &mut input,
+                &mut output,
+                &mut |moments| {
+                    checkpoints.push(moments.clone());
+                    Ok(())
+                },
+            )?;
+            assert_eq!(changed, 1);
+            assert_eq!(checkpoints.len(), 1);
+            assert!(matches!(
+                &labeled.moments[0].label,
+                Some(MomentLabel::Commitment {
+                    due_at_ms: Some(3_600_000),
+                    remind,
+                }) if remind == "五點接她"
+            ));
+            assert_eq!(
+                labeled.counts().unlabeled,
+                labeled.counts().total - 1,
+                "其餘時刻若還沒標，未標數量要跟該講 0 分開"
+            );
+            let screen = String::from_utf8(output)?;
+            assert!(
+                screen.contains("該講類別") || screen.contains("commitment_due"),
+                "{screen}"
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn moment_review_needs_explicit_privacy_confirmation() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("replay-moment-review");
+            let corpus_path = tmp.0.join("fixture.corpus.json");
+            let draft_path = tmp.0.join("fixture.moments-draft.json");
+            let reviewed_path = tmp.0.join("fixture.moments.json");
+            let corpus = moment_fixture();
+            std::fs::write(&corpus_path, serde_json::to_vec_pretty(&corpus)?)?;
+            let draft = MomentSet::draft_from_corpus("moment-cli-moments", &corpus)?;
+            let mut labeled = draft.clone();
+            for moment in &draft.moments {
+                labeled = labeled.with_label(
+                    &corpus,
+                    &moment.id,
+                    MomentLabel::ShouldStayQuiet {
+                        why: "現在不該開口".into(),
+                    },
+                    false,
+                )?;
+            }
+            std::fs::write(&draft_path, serde_json::to_vec_pretty(&labeled)?)?;
+
+            assert!(
+                review_moments(
+                    &corpus_path,
+                    &draft_path,
+                    &reviewed_path,
+                    ConfirmPrivateTextReviewed::NOT_CONFIRMED,
+                )
+                .is_err()
+            );
+            assert!(!reviewed_path.exists());
+            review_moments(
+                &corpus_path,
+                &draft_path,
+                &reviewed_path,
+                ConfirmPrivateTextReviewed::CONFIRMED,
+            )?;
+            let reviewed: MomentSet = serde_json::from_slice(&std::fs::read(&reviewed_path)?)?;
+            assert_eq!(reviewed.review, ReviewStatus::Reviewed);
+            assert_eq!(reviewed.counts().unlabeled, 0);
+            assert_eq!(reviewed.counts().should_speak, 0);
+            assert_eq!(reviewed.counts().should_stay_quiet, reviewed.counts().total);
             Ok(())
         }
     }

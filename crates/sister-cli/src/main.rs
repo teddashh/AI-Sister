@@ -124,6 +124,11 @@ enum ReplayAction {
         #[command(subcommand)]
         action: ReplayQuestionAction,
     },
+    /// 承諾集與開口判斷集：該提醒什麼／這一刻該不該講。不會讓產品開口。
+    Moments {
+        #[command(subcommand)]
+        action: ReplayMomentAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -161,6 +166,51 @@ enum ReplayQuestionAction {
         #[arg(long, value_name = "檔案")]
         to: PathBuf,
         /// 確認題目原話與答案都已由人檢查，知道它們沒有自動去敏
+        #[arg(long)]
+        confirm_private_text_reviewed: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReplayMomentAction {
+    /// 掃 corpus，把值得人看一眼的時刻提出來；全部未標
+    Draft {
+        /// replay corpus JSON
+        corpus: PathBuf,
+        /// 寫入新檔案；不會覆寫已存在的檔
+        #[arg(long, value_name = "檔案")]
+        to: PathBuf,
+    },
+    /// 只看已標／未標實數，不印原話
+    Status {
+        /// replay corpus JSON
+        corpus: PathBuf,
+        /// moment-set JSON
+        moments: PathBuf,
+    },
+    /// 在終端逐個標註；候選只是提示，不會自動當成正解
+    Annotate {
+        /// replay corpus JSON
+        corpus: PathBuf,
+        /// 尚未審查的 moment-set JSON
+        moments: PathBuf,
+        /// 寫入另一個新檔案；不會改寫來源
+        #[arg(long, value_name = "檔案")]
+        to: PathBuf,
+        /// 連已標過的時刻也重新走一遍
+        #[arg(long)]
+        all: bool,
+    },
+    /// 全部標註有效後，把另一份新檔標成 Reviewed
+    Review {
+        /// replay corpus JSON
+        corpus: PathBuf,
+        /// 已經逐個標完的 Draft moment set
+        moments: PathBuf,
+        /// Reviewed 輸出；不會改寫 Draft
+        #[arg(long, value_name = "檔案")]
+        to: PathBuf,
+        /// 確認提醒原文與 why 都已由人檢查，知道它們沒有自動去敏
         #[arg(long)]
         confirm_private_text_reviewed: bool,
     },
@@ -440,6 +490,35 @@ fn main() -> Result<()> {
                     confirm_private_text_reviewed,
                 ),
             },
+            Some(ReplayAction::Moments { action }) => match action {
+                ReplayMomentAction::Draft { corpus, to } => {
+                    ops::replay::draft_moments(&corpus, &to)
+                }
+                ReplayMomentAction::Status { corpus, moments } => {
+                    ops::replay::moment_status(&corpus, &moments)
+                }
+                ReplayMomentAction::Annotate {
+                    corpus,
+                    moments,
+                    to,
+                    all,
+                } => ops::replay::annotate_moments(&corpus, &moments, &to, all),
+                ReplayMomentAction::Review {
+                    corpus,
+                    moments,
+                    to,
+                    confirm_private_text_reviewed,
+                } => ops::replay::review_moments(
+                    &corpus,
+                    &moments,
+                    &to,
+                    if confirm_private_text_reviewed {
+                        sister_core::moments::ConfirmPrivateTextReviewed::CONFIRMED
+                    } else {
+                        sister_core::moments::ConfirmPrivateTextReviewed::NOT_CONFIRMED
+                    },
+                ),
+            },
             None => ops::replay::run(
                 &data_dir,
                 config()?,
@@ -707,5 +786,116 @@ mod tests {
             ])
             .is_err()
         );
+
+        let moments_draft = Cli::try_parse_from([
+            "sister",
+            "replay",
+            "moments",
+            "draft",
+            "day.corpus.json",
+            "--to",
+            "draft.moments.json",
+        ])
+        .expect("moments draft subcommand");
+        let Command::Replay(moments_draft) = moments_draft.command else {
+            panic!("parsed the wrong command")
+        };
+        assert!(matches!(
+            moments_draft.action,
+            Some(ReplayAction::Moments {
+                action: ReplayMomentAction::Draft { .. }
+            })
+        ));
+
+        let moments_status = Cli::try_parse_from([
+            "sister",
+            "replay",
+            "moments",
+            "status",
+            "day.corpus.json",
+            "draft.moments.json",
+        ])
+        .expect("moments status subcommand");
+        let Command::Replay(moments_status) = moments_status.command else {
+            panic!("parsed the wrong command")
+        };
+        assert!(matches!(
+            moments_status.action,
+            Some(ReplayAction::Moments {
+                action: ReplayMomentAction::Status { .. }
+            })
+        ));
+
+        let moments_annotate = Cli::try_parse_from([
+            "sister",
+            "replay",
+            "moments",
+            "annotate",
+            "day.corpus.json",
+            "draft.moments.json",
+            "--to",
+            "labeled.moments.json",
+            "--all",
+        ])
+        .expect("moments annotate subcommand");
+        let Command::Replay(moments_annotate) = moments_annotate.command else {
+            panic!("parsed the wrong command")
+        };
+        assert!(matches!(
+            moments_annotate.action,
+            Some(ReplayAction::Moments {
+                action: ReplayMomentAction::Annotate { all: true, .. }
+            })
+        ));
+
+        let moments_review = Cli::try_parse_from([
+            "sister",
+            "replay",
+            "moments",
+            "review",
+            "day.corpus.json",
+            "labeled.moments.json",
+            "--to",
+            "reviewed.moments.json",
+            "--confirm-private-text-reviewed",
+        ])
+        .expect("moments review subcommand");
+        let Command::Replay(moments_review) = moments_review.command else {
+            panic!("parsed the wrong command")
+        };
+        assert!(matches!(
+            moments_review.action,
+            Some(ReplayAction::Moments {
+                action: ReplayMomentAction::Review {
+                    confirm_private_text_reviewed: true,
+                    ..
+                }
+            })
+        ));
+
+        let moments_review_without_flag = Cli::try_parse_from([
+            "sister",
+            "replay",
+            "moments",
+            "review",
+            "day.corpus.json",
+            "labeled.moments.json",
+            "--to",
+            "reviewed.moments.json",
+        ])
+        .expect("flag is opt-in; refusal happens later");
+        let Command::Replay(moments_review_without_flag) = moments_review_without_flag.command
+        else {
+            panic!("parsed the wrong command")
+        };
+        assert!(matches!(
+            moments_review_without_flag.action,
+            Some(ReplayAction::Moments {
+                action: ReplayMomentAction::Review {
+                    confirm_private_text_reviewed: false,
+                    ..
+                }
+            })
+        ));
     }
 }

@@ -217,7 +217,10 @@ capture 層本身就是 recorder。
   - [x] Recall QA 標註器 v0：`replay questions annotate` 一次走完整份 Draft，能看產品
     候選、搜尋／打開 canonical evidence，另存新檔；`review` 只在全部有效且人明確
     確認未去敏原話後產生 Reviewed 題庫。
-  - [ ] 承諾集與開口判斷集（該講/不該講時刻）。
+  - [x] 承諾集與開口判斷集標註器 v0：`replay moments draft` 從 corpus 提出候選時刻
+    （OCR 抽到 DateTimeMention、同一 focus 長停留；通知類現行 `SystemKind` 全部不符，
+    所以提不出來），`annotate`／`review` 走跟題庫同一套 Draft→Reviewed。標註器已經在，
+    **兩份集合本身仍是空的**——要等真實 corpus 標註才算有資料。
 - [x] Runner v0：`sister replay evaluate <corpus> <questions>` 在同一份 corpus 上跑
   `baseline_text` 與 `facts`。前者是產品現有的三份 FTS5 索引加必要的有界 LIKE
   fallback；後者再加 L1 typed facts，且 fact 排在文字結果前。現在輸出找回率@k、

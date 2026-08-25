@@ -24,6 +24,7 @@ pub mod eval;
 pub mod facts;
 pub mod heartbeat;
 pub mod model;
+pub mod moments;
 pub mod pause;
 pub mod question;
 pub mod redact;
