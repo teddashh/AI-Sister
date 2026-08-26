@@ -221,7 +221,7 @@ enum ReplayMomentAction {
 
 #[derive(Subcommand)]
 enum BrainAction {
-    /// 外送紀錄：什麼時候、送給哪支命令、送了哪個 segment、去敏計數、拿回什麼。不含原文。
+    /// 外送紀錄：什麼時候、送給哪支命令、送了哪個 segment、送了多少字、拿回什麼。不含原文。
     Log {
         #[arg(short, long, default_value_t = 20, value_parser = at_least_one)]
         limit: usize,
@@ -386,7 +386,7 @@ enum Command {
 
     /// 把最近關閉的段落交給設定的 CLI，收回一張 L2 假設卡片。
     ///
-    /// `--dry-run` 印出**這一刻真的會送出去的那段字**（去敏後），一個字都不送。
+    /// `--dry-run` 印出**這一刻真的會送出去的那段字**（原文，沒遮），一個字都不送。
     /// 沒簽第二張同意書、沒設定 [brain] command、預算用完，三種原因印三種話。
     Interpret {
         /// 印出會送出的全文，一個字都不送

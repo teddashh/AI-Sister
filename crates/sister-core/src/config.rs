@@ -260,8 +260,6 @@ pub struct BrainConfig {
     pub daily_budget: u32,
     /// 併發槽數。SPEC §5.3 預設 4、上限 8。
     pub concurrency: u32,
-    /// 人名遮蔽。SPEC §11.3 預設開。
-    pub redact_names: bool,
 }
 
 impl Default for BrainConfig {
@@ -271,7 +269,6 @@ impl Default for BrainConfig {
             args: Vec::new(),
             daily_budget: 80,
             concurrency: 4,
-            redact_names: true,
         }
     }
 }
@@ -982,7 +979,6 @@ mod tests {
         cfg.brain.concurrency = 4;
         assert!(cfg.brain.check().is_ok());
         assert!(Config::default().brain.cli().is_none(), "預設沒有 CLI");
-        assert!(Config::default().brain.redact_names, "人名遮蔽預設開");
     }
 
     #[test]

@@ -1,8 +1,13 @@
-//! L2 假設層：把去敏後的證據交給使用者設定的 CLI，收回一張 JSON 卡片。
+//! L2 假設層：把螢幕上的字交給使用者設定的 CLI，收回一張 JSON 卡片。
 //!
 //! 出境路徑是 `std::process::Command`。沒有 HTTP client、沒有本機推論引擎。
-//! spawn 只收 [`crate::consent::CloudAllowed`] 和 [`crate::deid::RedactedText`]：
-//! 沒檢查同意書、或沒去敏，都編不過。
+//! spawn 要 [`crate::consent::CloudAllowed`]，只有同意書 2 鑄得出來——
+//! 沒簽就送，編不過。
+//!
+//! **送出去的是原文，不去敏。** 記憶長期活在本機資料庫裡，而代號是每次呼叫
+//! 重編的，跨段對不起來：`<PERSON_1>` 在這一段和下一段不是同一個人。
+//! 承諾表和 entities 要的正是「王小明」這三個字能對得起來。同意書 2 第 3 版
+//! 講的就是這件事，他按的是那句話。
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -15,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use crate::config::BrainConfig;
 use crate::consent::{CloudAllowed, Consent};
 use crate::db::{Db, FactRow, L2CardRow, L2Insert, OutboundInsert};
-use crate::deid::{PromptHeader, RedactNames, RedactedText, scrub_limited, with_header};
 use crate::model::Millis;
 use crate::model::SearchHit;
 use crate::segment::{CutKind, LARGE_CLIPBOARD_BYTES, Segment};
@@ -123,12 +127,11 @@ impl OutboundOutcome {
 
 /// 真正把字送出程序的那一扇門。
 ///
-/// 第一個參數的型別是 [`CloudAllowed`]：只有 [`Consent::cloud_permit`]
-/// 鑄得出來。第二個是 [`RedactedText`]：只有 [`crate::deid::scrub`] 鑄得出來。
-/// 兩個都沒拿到，這支函式叫不了。
+/// 第一個參數的型別是 [`CloudAllowed`]：只有 [`Consent::cloud_permit`] 鑄得
+/// 出來，所以「沒檢查同意書就送出去」是編不過的，不是靠每個呼叫端自己記得。
 pub fn spawn_cli(
     permit: CloudAllowed,
-    payload: &RedactedText,
+    payload: &str,
     command: &str,
     args: &[String],
 ) -> SpawnOutcome {
@@ -155,7 +158,7 @@ pub fn spawn_cli(
     };
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(payload.as_str().as_bytes());
+        let _ = stdin.write_all(payload.as_bytes());
     }
 
     let mut stdout_pipe = match child.stdout.take() {
@@ -431,7 +434,9 @@ pub struct PreparedJob {
     pub core_ended_at: Millis,
     pub app: Option<String>,
     pub title: Option<String>,
-    pub payload: RedactedText,
+    pub payload: String,
+    /// 證據那一半有沒有被 `MAX_PROMPT_BYTES` 截掉。
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -580,9 +585,8 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
             command: &command,
             args: &args,
             segment_core_start: Some(job.core_started_at),
-            chars_sent: job.payload.chars() as i64,
-            truncated: job.payload.truncated(),
-            redaction: job.payload.stats().clone(),
+            chars_sent: job.payload.chars().count() as i64,
+            truncated: job.truncated,
             outcome: kind.as_str(),
             duration_ms: spawn.duration_ms as i64,
             error: error.as_deref(),
@@ -715,19 +719,16 @@ fn collect_jobs(input: &mut InterpretInput<'_>) -> Result<Vec<PreparedJob>> {
                 .db
                 .chunks_in_range(seg.core_started_at, seg.core_ended_at, MAX_OCR_SNIPPETS)?;
         let (header, evidence) = build_prompt(&seg, &facts, &ocr, prev.as_ref());
-        let body = scrub_limited(
-            &evidence,
-            RedactNames(input.brain.redact_names),
-            Some(MAX_PROMPT_BYTES),
-        );
-        let payload = with_header(&header, body);
+        // 只截證據那一半。說明是契約，截掉了模型就不知道要回什麼形狀。
+        let (evidence, truncated) = crate::redact::truncate_utf8(&evidence, MAX_PROMPT_BYTES);
         jobs.push(PreparedJob {
             segment_ref: segment_ref(seg.core_started_at),
             core_started_at: seg.core_started_at,
             core_ended_at: seg.core_ended_at,
             app: seg.app.clone(),
             title: seg.title.clone(),
-            payload,
+            payload: format!("{header}{evidence}"),
+            truncated,
         });
         if jobs.len() >= cap {
             break;
@@ -742,15 +743,15 @@ fn build_prompt(
     facts: &[FactRow],
     ocr: &[SearchHit],
     prev: Option<&L2CardRow>,
-) -> (PromptHeader, String) {
-    let mut header = PromptHeader::new();
-    header.lit(
-        "你是一個本機記憶的解釋層。根據下面這段去識別化後的證據，產出一張 JSON 卡片。\n\
+) -> (String, String) {
+    let mut header = String::new();
+    header.push_str(
+        "你是一個本機記憶的解釋層。根據下面這段證據，產出一張 JSON 卡片。\n\
          這是假設，不是事實。不確定就降低 confidence，把問題放進 open_questions。\n\
          禁止把猜測寫成確定的事。只輸出一個 JSON 物件，不要 markdown、不要前後解說。\n\n",
     );
-    header.lit("契約：\n");
-    header.lit(
+    header.push_str("契約：\n");
+    header.push_str(
         r#"{
   "segment_ref": "segment:<core_started_at>",
   "activity": "一句話描述他在做什麼",
@@ -763,43 +764,39 @@ fn build_prompt(
 }
 "#,
     );
-    header.lit("\nevidence_refs 只能引用下面列出的 frame: 與 fact:。\n");
-    header.lit("去敏後的 <AMT_1> 這類代號，同一代號代表同一個原值。不要還原、不要發明原值。\n\n");
+    header.push_str("\nevidence_refs 只能引用下面列出的 frame: 與 fact:。\n");
     match prev {
-        // 用 `segment_core_start`（數字）重組，不是直接印 `p.segment_ref`
-        // 那個 `String`：說明這一半只准放程式自己的常數和數字。
         Some(p) => {
-            header
-                .lit("可推翻的他人假設（僅一筆，不是事實，可以忽略或推翻）：\n- segment_ref: segment:")
-                .int(p.segment_core_start)
-                .lit("\n  confidence（模型自己說的）: ")
-                .float(p.model_confidence)
-                .lit("\n\n");
+            header.push_str(
+                "可推翻的他人假設（僅一筆，不是事實，可以忽略或推翻）：\n- segment_ref: segment:",
+            );
+            header.push_str(&p.segment_core_start.to_string());
+            header.push_str("\n  confidence（模型自己說的）: ");
+            header.push_str(&p.model_confidence.to_string());
+            header.push_str("\n\n");
         }
         None => {
-            header.lit("可推翻的他人假設：沒有。這是這一帶的第一張卡片。\n\n");
+            header.push_str("可推翻的他人假設：沒有。這是這一帶的第一張卡片。\n\n");
         }
     }
-    header
-        .lit("本段 segment_ref：segment:")
-        .int(seg.core_started_at)
-        .lit("\n時間：")
-        .int(seg.core_started_at)
-        .lit(" – ")
-        .int(seg.core_ended_at)
-        .lit("（epoch 毫秒）\n");
+    header.push_str("本段 segment_ref：segment:");
+    header.push_str(&seg.core_started_at.to_string());
+    header.push_str("\n時間：");
+    header.push_str(&seg.core_started_at.to_string());
+    header.push_str(" – ");
+    header.push_str(&seg.core_ended_at.to_string());
+    header.push_str("（epoch 毫秒）\n");
     if !seg.cut_kinds.is_empty() {
-        header.lit("打開這一段的切刀：");
+        header.push_str("打開這一段的切刀：");
         for (i, kind) in seg.cut_kinds.iter().enumerate() {
             if i > 0 {
-                header.lit("、");
+                header.push('、');
             }
-            // `CutKind::as_str` 回 `&'static str`，所以進得了 `lit`。
-            header.lit(kind.as_str());
+            header.push_str(kind.as_str());
         }
-        header.lit("\n");
+        header.push('\n');
     }
-    header.lit("\n—— 以下是去敏後的證據 ——\n");
+    header.push_str("\n—— 以下是證據 ——\n");
 
     let mut evidence = String::new();
     if let Some(p) = prev {
@@ -897,22 +894,13 @@ pub fn format_dry_run(report: &DryRun) -> String {
         if !where_.is_empty() {
             out.push_str(&format!("段落：{where_}\n"));
         }
-        let st = job.payload.stats();
-        out.push_str(&format!(
-            "去敏：金額 {}、電話 {}、email {}、類 ID {}、人名 {}、秘密 {}\n",
-            st.money, st.phone, st.email, st.id_like, st.person, st.secret
-        ));
         out.push_str(&format!(
             "截斷：{}（{} 字）\n",
-            if job.payload.truncated() {
-                "是"
-            } else {
-                "否"
-            },
-            job.payload.chars()
+            if job.truncated { "是" } else { "否" },
+            job.payload.chars().count()
         ));
-        out.push_str("\n──── 送出的全文 ────\n");
-        out.push_str(job.payload.as_str());
+        out.push_str("\n──── 送出的全文（原文，沒有遮任何東西）────\n");
+        out.push_str(&job.payload);
         out.push_str("\n──── 完 ────\n");
     }
     out
@@ -976,7 +964,6 @@ mod tests {
     use super::*;
     use crate::consent::{Sheet, VERSION};
     use crate::db::Db;
-    use crate::deid::scrub;
 
     #[test]
     fn parse_rejects_missing_fields_instead_of_inventing_them() {
@@ -1038,12 +1025,11 @@ mod tests {
     }
 
     #[test]
-    fn spawn_requires_redacted_text_and_a_permit() {
+    fn spawn_requires_a_permit() {
         let mut c = Consent::default();
         c.grant(Sheet::CloudReading, 1);
         let permit = c.cloud_permit().expect("signed");
-        let payload = scrub("hello NT$80", RedactNames(false));
-        assert!(payload.as_str().contains("<AMT_1>"));
+        let payload = "hello NT$80".to_string();
 
         let dir = std::env::temp_dir().join(format!("sister-fake-cli-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -1230,13 +1216,12 @@ mod tests {
         assert_eq!(card.model_confidence, 0.55);
         let logs = db.list_brain_outbound(10).expect("log");
         assert_eq!(logs.len(), 1);
-        assert!(!logs[0].redaction_json.contains("13,450"));
         assert!(!logs[0].args_json.contains("13,450"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn dry_run_shows_redacted_text_and_does_not_spawn() {
+    fn dry_run_shows_the_text_and_does_not_spawn() {
         let dir = std::env::temp_dir().join(format!("sister-brain-dry-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let sentinel = dir.join("spawned");
@@ -1263,14 +1248,13 @@ mod tests {
         let report = prepare(&mut input).expect("prepare");
         let text = format_dry_run(&report);
         assert!(text.contains("不會送出去"), "{text}");
+        // dry-run 的用處就是讓他在簽字前**看到真的會送出去的那段字**。
+        // 不去敏，所以金額原封不動印出來——印成 `<AMT_1>` 反而是騙他。
+        assert!(text.contains("13,450"), "dry-run 該印原文金額：{text}");
         assert!(
-            text.contains("這段去識別化") && text.contains("第一張卡片"),
-            "說明被去敏咬爛了：{text}"
+            !text.contains("<AMT_1>"),
+            "已經不去敏了，不該有代號：{text}"
         );
-        assert!(text.contains("<AMT_1>") || text.contains("NT$"), "{text}");
-        if text.contains("<AMT_1>") {
-            assert!(!text.contains("13,450"), "dry-run 印出了原文金額：{text}");
-        }
         assert!(text.contains("沒簽"), "{text}");
         assert!(!sentinel.exists(), "dry-run 卻 spawn 了");
         let _ = fid;

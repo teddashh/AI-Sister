@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""出境路徑的結構性閘門：沒簽同意書 2 編不過、沒去敏編不過、外送紀錄不含原文。
+"""出境路徑的結構性閘門：沒簽同意書 2 編不過，外送紀錄不含原文。
 
-這一版是產品第一次有東西離開這台機器。AGENTS.md 第一節的例外就是為這種事
-留的——同意書／隱私那條路維持對抗式驗證。
+產品第一次有東西離開這台機器。AGENTS.md 第一節的例外就是為這種事留的——
+同意書那條路維持對抗式驗證。
+
+**這裡不守去敏，因為產品不去敏了**（同意書 2 第 3 版）：送出去的是螢幕上的
+原文。記憶長期活在本機資料庫裡，而代號是每次呼叫重編的，跨段對不起來——
+承諾表和 entities 要的正是「王小明」這三個字能對得起來。他同意的就是這件事，
+條文寫得很白。所以這支腳本守的是**他有沒有同意**，不是我們有沒有先遮。
 
 守三件事：
 
 1. `spawn_cli` 的第一個參數是 `CloudAllowed`。這個型別只有
    `Consent::cloud_permit` 鑄得出來（`CloudAllowed(())` 只准出現在
    `consent.rs`）。
-2. `spawn_cli` 的 stdin 只吃 `RedactedText`。這個型別只有 `deid.rs` 的
-   `scrub` / `scrub_limited` 鑄得出來。
-3. `brain_outbound` 那張表沒有原文欄位。
+2. `brain_outbound` 那張表沒有原文欄位——記結構和計數就好，
+   抄一份等於把要保護的東西又存了一次。
+3. `brain.rs` 裡沒有 HTTP / socket：出境只准走 `Command`。
 
 每一條都是「改壞一行就該紅」。腳本末尾的自我檢查確認：把那一行改壞，
 這裡真的會抓到。
@@ -25,7 +30,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CONSENT = ROOT / "crates/sister-core/src/consent.rs"
-DEID = ROOT / "crates/sister-core/src/deid.rs"
 BRAIN = ROOT / "crates/sister-core/src/brain.rs"
 DB = ROOT / "crates/sister-core/src/db.rs"
 
@@ -79,7 +83,7 @@ def check_cloud_allowed(consent: str, brain: str) -> None:
             f"{mints}。鑄造口只能有一個"
         )
 
-    for path in (DEID, BRAIN, DB):
+    for path in (BRAIN, DB):
         src = read(path)
         for n, line in enumerate(src.splitlines(), 1):
             code = line.split("//", 1)[0]
@@ -92,52 +96,6 @@ def check_cloud_allowed(consent: str, brain: str) -> None:
         fail("spawn_cli 的簽章沒有 CloudAllowed——沒簽同意書 2 也能編過")
     if not re.search(r"\b_?permit\s*:\s*CloudAllowed\b", sig):
         fail("spawn_cli 第一個憑證參數不叫 permit: CloudAllowed，閘門對不上")
-
-
-def check_redacted(deid: str, brain: str) -> None:
-    if "pub struct RedactedText" not in deid:
-        fail("deid.rs 沒有 RedactedText")
-    if not re.search(r"text\s*:\s*String", deid):
-        fail("RedactedText 的 text 欄位不見了——去敏結果可能被直接填")
-
-    # 欄位私有才是那道門。實測過：只要把 `text` 開成 `pub`，deid.rs 外面就能
-    # `r.text = "匯 NT$450,000 給王小明".to_string()` 覆蓋掉去敏結果，再交給
-    # spawn_cli 送出去——**而且編得過、閘門全綠**。建構需要每一個欄位都看得見，
-    # 覆寫只需要一個，所以這裡檢查的是每一個欄位，不是能不能建構。
-    body = re.search(r"pub struct RedactedText\s*\{(.*?)\n\}", deid, re.DOTALL)
-    if not body:
-        fail("解析不出 RedactedText 的欄位")
-    for line in body.group(1).splitlines():
-        field = line.strip()
-        if field.startswith("pub "):
-            fail(
-                f"RedactedText 的欄位是公開的（{field.rstrip(',')}）"
-                "——去敏後的字在 deid.rs 外面就能被換掉"
-            )
-    spawn = body_of(brain, "spawn_cli", BRAIN)
-    sig = spawn.split("{", 1)[0]
-    if "RedactedText" not in sig:
-        fail("spawn_cli 的簽章沒有 RedactedText——沒去敏也能送")
-    if "as_bytes()" in spawn and "payload.as_str()" not in spawn:
-        fail("spawn_cli 寫進 stdin 的不是 payload.as_str()——可能送了沒去敏的字")
-
-    # 說明那一半不去敏，靠的是「使用者的字進不來」。`lit` 一旦放寬成 `&str`，
-    # 這個保證會無聲消失：視窗標題塞得進去，而且編得過、測試也不會紅。
-    if "pub struct PromptHeader" not in deid:
-        fail("deid.rs 沒有 PromptHeader——說明那一半又變成裸 String 了")
-    if not re.search(r"fn lit\(&mut self, s: &'static str\)", deid):
-        fail("PromptHeader::lit 不再只收 `&'static str`——螢幕上的字進得了說明")
-    head = body_of(brain, "build_prompt", BRAIN)
-    if "PromptHeader" not in head.split("{", 1)[0]:
-        fail("build_prompt 不再回 PromptHeader——說明那一半沒有型別在守")
-
-    ctors = list(re.finditer(r"RedactedText\s*\{", deid))
-    if not ctors:
-        fail("deid.rs 裡沒有 RedactedText { ... } 的鑄造")
-    for path in (CONSENT, BRAIN, DB):
-        src = read(path)
-        if "RedactedText {" in src or "RedactedText{" in src:
-            fail(f"{path.relative_to(ROOT)} 自己組了一份 RedactedText")
 
 
 def check_outbound_schema(db: str) -> None:
@@ -203,7 +161,6 @@ def self_check() -> None:
     global QUIET
     QUIET = True
     consent = read(CONSENT)
-    deid = read(DEID)
     brain = read(BRAIN)
     db = read(DB)
 
@@ -216,17 +173,6 @@ def self_check() -> None:
         "permit: bool",
         cloud,
         "spawn_cli 改收 bool",
-    )
-
-    def redacted(src: str) -> None:
-        check_redacted(deid, src)
-
-    mutate_and_expect(
-        brain,
-        "payload: &RedactedText",
-        "payload: &str",
-        redacted,
-        "spawn_cli 改收 &str",
     )
 
     def schema(src: str) -> None:
@@ -244,16 +190,14 @@ def self_check() -> None:
 
 def main() -> None:
     consent = read(CONSENT)
-    deid = read(DEID)
     brain = read(BRAIN)
     db = read(DB)
     check_cloud_allowed(consent, brain)
-    check_redacted(deid, brain)
     check_outbound_schema(db)
     check_no_http_in_brain(brain)
     self_check()
     print(
-        "出境路徑：spawn_cli 要 CloudAllowed + RedactedText；"
+        "出境路徑：spawn_cli 要 CloudAllowed；"
         "憑證只在 consent.rs 鑄；brain_outbound 不含原文；"
         "自我檢查改壞三行都會紅"
     )

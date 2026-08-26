@@ -723,7 +723,6 @@ pub mod interpret {
 
 pub mod brain {
     use super::*;
-    use sister_core::deid::RedactionStats;
 
     pub fn log(data_dir: &Path, limit: usize) -> Result<()> {
         let db = open_existing(data_dir)?;
@@ -734,11 +733,9 @@ pub mod brain {
             return Ok(());
         }
         if !outbound.is_empty() {
-            println!("外送紀錄（不含原文）\n");
+            println!("外送紀錄（記結構和計數，不留送出去的原文）\n");
             for row in &outbound {
                 let args: Vec<String> = serde_json::from_str(&row.args_json).unwrap_or_default();
-                let stats: RedactionStats =
-                    serde_json::from_str(&row.redaction_json).unwrap_or_default();
                 println!(
                     "{}  {} {}",
                     crate::fmt::timestamp(row.ts),
@@ -754,15 +751,6 @@ pub mod brain {
                     if row.truncated { "（截斷）" } else { "" },
                     row.outcome,
                     row.duration_ms
-                );
-                println!(
-                    "    去敏：金額 {}、電話 {}、email {}、類 ID {}、人名 {}、秘密 {}",
-                    stats.money,
-                    stats.phone,
-                    stats.email,
-                    stats.id_like,
-                    stats.person,
-                    stats.secret
                 );
                 if let Some(err) = &row.error {
                     println!("    {err}");

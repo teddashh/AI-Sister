@@ -50,7 +50,7 @@ function card(sheet) {
   // 第二張勾下去之後，沒簽那句「一次都不會呼叫」就不該再印在勾好的框裡。
   without.textContent =
     sheet.key === "cloud-reading" && sheet.effective
-      ? "勾了之後，去識別化後的字會交給你在設定裡指定的那支 CLI。沒設定命令就一次都不叫。"
+      ? "勾了之後，螢幕上的字會原封不動交給你在設定裡指定的那支 CLI。沒設定命令就一次都不叫。"
       : sheet.without;
 
   body.append(wording, without);
@@ -250,7 +250,7 @@ const DEMO = {
   path: "C:\\Users\\ted\\AppData\\Roaming\\ted-h\\AI-Sister\\data\\consent.toml",
   wording: [
     "我同意在我的硬碟上記錄我的螢幕。",
-    "我同意把去識別化後的文字（OCR 抽出來的字，永不含畫面）交給我在設定裡指定的本機 CLI，由那支程式去做解讀。",
+    "我同意把螢幕上的文字原文（OCR 抽出來的字，永不含畫面）交給我在設定裡指定的本機 CLI，由那支程式去做解讀。裡面有什麼就送什麼，不會先遮掉。",
     "我同意保留變化幀的截圖，而不是只留上面的字。",
   ],
   without: [

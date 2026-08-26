@@ -32,7 +32,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 11;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -540,6 +540,26 @@ CREATE INDEX IF NOT EXISTS idx_stuck_start ON stuck_signal(started_at);
 /// 一列，不准 UPDATE 舊列。
 ///
 /// `brain_outbound` **不存送出去的原文**。只記結構和計數。
+/// 11：`brain_outbound` 拿掉 `redaction_json`。
+///
+/// 出境不再去敏（同意書 2 第 3 版），所以那一欄只會裝一份全部是 0 的統計——
+/// 一個永遠說「這次換掉了 0 個東西」的欄位，比沒有這個欄位更會騙人。
+///
+/// 寫成函式而不是一句 SQL：遷移會被**重跑**（版號印錯或停在 0 的資料庫會從頭
+/// 走一遍，`a_version_stamp_older_than_its_schema_does_not_brick_the_file`
+/// 守著這件事），而 SQLite 沒有 `DROP COLUMN IF EXISTS`，第二次跑就會炸。
+fn migrate_011(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "SELECT 1 FROM pragma_table_info('brain_outbound') WHERE name = 'redaction_json'",
+    )?;
+    let present = stmt.exists([])?;
+    drop(stmt);
+    if present {
+        tx.execute_batch("ALTER TABLE brain_outbound DROP COLUMN redaction_json;")?;
+    }
+    Ok(())
+}
+
 const MIGRATION_010: &str = r#"
 CREATE TABLE IF NOT EXISTS l2_card (
   id                   INTEGER PRIMARY KEY,
@@ -1037,6 +1057,7 @@ impl Db {
             8 => tx.execute_batch(MIGRATION_008)?,
             9 => tx.execute_batch(MIGRATION_009)?,
             10 => tx.execute_batch(MIGRATION_010)?,
+            11 => migrate_011(&tx)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -3302,13 +3323,11 @@ impl Db {
 
     pub fn insert_brain_outbound(&mut self, ins: &OutboundInsert<'_>) -> Result<i64> {
         let args_json = serde_json::to_string(ins.args).context("serialize brain args")?;
-        let redaction_json =
-            serde_json::to_string(&ins.redaction).context("serialize redaction stats")?;
         self.conn.execute(
             "INSERT INTO brain_outbound(
                 ts, day_key, command, args_json, segment_core_start,
-                chars_sent, truncated, redaction_json, outcome, duration_ms, error
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                chars_sent, truncated, outcome, duration_ms, error
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 ins.ts,
                 ins.day_key,
@@ -3317,7 +3336,6 @@ impl Db {
                 ins.segment_core_start,
                 ins.chars_sent,
                 ins.truncated as i64,
-                redaction_json,
                 ins.outcome,
                 ins.duration_ms,
                 ins.error,
@@ -3329,7 +3347,7 @@ impl Db {
     pub fn list_brain_outbound(&self, limit: usize) -> Result<Vec<OutboundRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, ts, day_key, command, args_json, segment_core_start,
-                    chars_sent, truncated, redaction_json, outcome, duration_ms, error
+                    chars_sent, truncated, outcome, duration_ms, error
              FROM brain_outbound ORDER BY ts DESC, id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit as i64], |r| {
@@ -3342,10 +3360,9 @@ impl Db {
                 segment_core_start: r.get(5)?,
                 chars_sent: r.get(6)?,
                 truncated: r.get::<_, i64>(7)? != 0,
-                redaction_json: r.get(8)?,
-                outcome: r.get(9)?,
-                duration_ms: r.get(10)?,
-                error: r.get(11)?,
+                outcome: r.get(8)?,
+                duration_ms: r.get(9)?,
+                error: r.get(10)?,
             })
         })?;
         Ok(rows.flatten().collect())
@@ -4585,7 +4602,6 @@ pub struct OutboundInsert<'a> {
     pub segment_core_start: Option<Millis>,
     pub chars_sent: i64,
     pub truncated: bool,
-    pub redaction: crate::deid::RedactionStats,
     pub outcome: &'a str,
     pub duration_ms: i64,
     pub error: Option<&'a str>,
@@ -4601,7 +4617,6 @@ pub struct OutboundRow {
     pub segment_core_start: Option<Millis>,
     pub chars_sent: i64,
     pub truncated: bool,
-    pub redaction_json: String,
     pub outcome: String,
     pub duration_ms: i64,
     pub error: Option<String>,

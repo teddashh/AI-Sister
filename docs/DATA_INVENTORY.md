@@ -97,7 +97,7 @@ forward-compat 本身是對的：多寫一個欄位的新版不該讓舊版放�
 那一行印的永遠是真的那一個。）
 
 沒有遙測、沒有帳號。程式裡沒有 HTTP client。簽了第二張同意書且設定了
-`[brain] command` 之後，去識別化文字會交給那支本機 CLI；外送紀錄在
+`[brain] command` 之後，螢幕文字原文會交給那支本機 CLI；外送紀錄在
 `brain_outbound`（結構與計數，不含原文），假設卡片在 `l2_card`。
 
 ---
