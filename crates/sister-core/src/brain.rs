@@ -407,13 +407,9 @@ pub fn worth_interpreting(seg: &Segment, facts: &[FactRow], large_clip: bool, st
     facts.iter().any(|f| f.kind == "error_code")
 }
 
-pub fn local_day_key(ts: Millis) -> Option<String> {
-    chrono::DateTime::from_timestamp_millis(ts).map(|d| {
-        d.with_timezone(&chrono::Local)
-            .format("%Y-%m-%d")
-            .to_string()
-    })
-}
+pub use crate::local_day::{
+    local_day_bounds, local_day_key, next_local_day_key, previous_local_day_key,
+};
 
 /// `--dry-run` 印出來的那一份。一個字都不送。
 #[derive(Debug, Clone)]

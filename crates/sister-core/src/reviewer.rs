@@ -424,22 +424,26 @@ pub fn parse_due_at(hint: &str, evidence_ts: Millis) -> Option<Millis> {
 }
 
 pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
-    let day = brain::local_day_key(input.now).context("算不出今天的日期，不敢審")?;
-    let used = input.db.brain_outbound_count_on_role(&day, "reviewer")?;
+    // `run_day` 是「這一輪是哪一天跑的」（reviewer_run.day_key / 每日預算）。
+    // 日摘要要盤點的是昨天，見下面 Eod 分支的 `summarized_day`。兩個不能共用。
+    let run_day = brain::local_day_key(input.now).context("算不出今天的日期，不敢審")?;
+    let used = input
+        .db
+        .brain_outbound_count_on_role(&run_day, "reviewer")?;
     let limit = input.brain.reviewer_daily_budget;
     let remaining = limit.saturating_sub(used);
 
     if input.consent.cloud_permit().is_none() {
-        record_skip(input, SkipReason::NoConsent, &day, used, limit)?;
+        record_skip(input, SkipReason::NoConsent, &run_day, used, limit)?;
         return Ok(skipped(SkipReason::NoConsent, used, limit));
     }
     if input.brain.cli().is_none() {
-        record_skip(input, SkipReason::NoCommand, &day, used, limit)?;
+        record_skip(input, SkipReason::NoCommand, &run_day, used, limit)?;
         return Ok(skipped(SkipReason::NoCommand, used, limit));
     }
     if remaining == 0 {
         let reason = SkipReason::BudgetExhausted { used, limit };
-        record_skip(input, reason.clone(), &day, used, limit)?;
+        record_skip(input, reason.clone(), &run_day, used, limit)?;
         return Ok(skipped(reason, used, limit));
     }
     if !input.force
@@ -452,20 +456,20 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                 last_ago_ms: ago,
                 min_ms: MIN_INTERVAL_MS,
             };
-            record_skip(input, reason.clone(), &day, used, limit)?;
+            record_skip(input, reason.clone(), &run_day, used, limit)?;
             return Ok(skipped(reason, used, limit));
         }
     }
     if input.kind == ReviewKind::Eod
         && let Some(prev) = input.db.last_reviewer_eod_day()?
-        && prev == day
+        && prev == run_day
         && !input.force
     {
         let reason = SkipReason::Cadence {
             last_ago_ms: 0,
             min_ms: MIN_INTERVAL_MS,
         };
-        record_skip(input, reason.clone(), &day, used, limit)?;
+        record_skip(input, reason.clone(), &run_day, used, limit)?;
         return Ok(skipped(reason, used, limit));
     }
 
@@ -475,7 +479,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         // 這是「看過了、沒有東西」——記成一次真正跑過、候選 0。
         input.db.insert_reviewer_run(&ReviewerRunInsert {
             ts: input.now,
-            day_key: &day,
+            day_key: &run_day,
             kind: input.kind.as_str(),
             skip_reason: None,
             candidate_count: Some(0),
@@ -651,8 +655,12 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         };
         calls += 2;
         budget_left = budget_left.saturating_sub(2);
-        log_outbound(input.db, &day, &command, &args, card, &prompt_a, &spawn_a)?;
-        log_outbound(input.db, &day, &command, &args, card, &prompt_b, &spawn_b)?;
+        log_outbound(
+            input.db, &run_day, &command, &args, card, &prompt_a, &spawn_a,
+        )?;
+        log_outbound(
+            input.db, &run_day, &command, &args, card, &prompt_b, &spawn_b,
+        )?;
 
         let parsed_a = parse_pass(&spawn_a.stdout);
         let parsed_b = parse_pass(&spawn_b.stdout);
@@ -775,14 +783,16 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
     let mut completed = 0u32;
     let mut archived = 0u32;
     if input.kind == ReviewKind::Eod {
+        let summarized_day = brain::previous_local_day_key(input.now)
+            .context("算不出被盤點的那一天，不敢寫日摘要")?;
         completed = mark_done_from_originals(input)?;
         archived = archive_overdue(input.db, input.now)?;
-        write_day_summary(input, &day)?;
+        write_day_summary(input, &summarized_day)?;
     }
 
     let run_id_val = input.db.insert_reviewer_run(&ReviewerRunInsert {
         ts: input.now,
-        day_key: &day,
+        day_key: &run_day,
         kind: input.kind.as_str(),
         skip_reason: None,
         candidate_count: Some(candidates as i64),
@@ -1114,8 +1124,12 @@ pub fn correct_l2(db: &mut Db, segment_core_start: Millis, activity: &str) -> Re
     })
 }
 
-fn write_day_summary(input: &mut ReviewInput<'_>, day: &str) -> Result<()> {
-    let cards = input.db.l2_in_range(input.from_ts, input.to_ts)?;
+fn write_day_summary(input: &mut ReviewInput<'_>, summarized_day: &str) -> Result<()> {
+    // 審閱窗是 36 小時（`mark_done_from_originals` / `archive_overdue` 仍用那扇窗）。
+    // 日摘要只收被盤點那一天的本地日界，不能把星期天晚上和星期二早上混進去。
+    let (from_ts, to_ts) = brain::local_day_bounds(summarized_day)
+        .with_context(|| format!("算不出 {summarized_day} 的本地日界，不敢寫日摘要"))?;
+    let cards = input.db.l2_in_range(from_ts, to_ts)?;
     let mut latest: BTreeMap<Millis, L2CardRow> = BTreeMap::new();
     for row in cards {
         latest.insert(row.segment_core_start, row);
@@ -1133,7 +1147,7 @@ fn write_day_summary(input: &mut ReviewInput<'_>, day: &str) -> Result<()> {
     input.db.insert_day_summary(
         l3_write(),
         &DaySummaryInsert {
-            date: day,
+            date: summarized_day,
             narrative: &narrative,
             session_refs_json: serde_json::to_string(&refs)?,
             stats_json: stats.to_string(),
@@ -1147,7 +1161,9 @@ fn write_day_summary(input: &mut ReviewInput<'_>, day: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::consent::{Sheet, VERSION};
+    use crate::db::DaySummaryGlance;
     use crate::model::{FocusEvent, FocusKind, FocusSnapshot, FrameCapture, OcrBlock};
+    use chrono::{Local, LocalResult, TimeZone};
 
     struct Tmp(std::path::PathBuf);
     impl Tmp {
@@ -1269,6 +1285,13 @@ mod tests {
         let mut c = Consent::default();
         c.grant(Sheet::CloudReading, 1);
         c
+    }
+
+    fn local_ms(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> Option<Millis> {
+        match Local.with_ymd_and_hms(year, month, day, hour, min, sec) {
+            LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => Some(dt.timestamp_millis()),
+            LocalResult::None => None,
+        }
     }
 
     fn write_l2(db: &mut Db, core: Millis, fid: i64, activity: &str, commits: &str) -> i64 {
@@ -1815,5 +1838,87 @@ mod tests {
     fn l3_write_is_only_constructible_here() {
         let _ = l3_write();
         let _unused = VERSION;
+    }
+
+    /// 日終幾乎永遠在跨日之後才跑。摘要的 `date` 是被盤點的那天，不是跑的那天。
+    #[test]
+    fn eod_after_midnight_summarizes_yesterday_not_today() {
+        let tmp = Tmp::new("eod-cross-midnight");
+        let sentinel = tmp.0.join("spawned");
+        let (command, args) = fake_cli(&tmp.0, r#"{"commitments":[]}"#, &sentinel);
+
+        let Some(sunday_evening) = local_ms(2026, 8, 23, 22, 0, 0) else {
+            return;
+        };
+        let Some(monday_morning) = local_ms(2026, 8, 24, 10, 0, 0) else {
+            return;
+        };
+        let Some(monday_afternoon) = local_ms(2026, 8, 24, 16, 0, 0) else {
+            return;
+        };
+        let Some(tuesday_wee) = local_ms(2026, 8, 25, 0, 0, 30) else {
+            return;
+        };
+        let Some(tuesday_eod) = local_ms(2026, 8, 25, 0, 1, 0) else {
+            return;
+        };
+
+        let mut db = Db::open_in_memory().expect("db");
+        let (_sid, fid_sun) = seed(&mut db, sunday_evening, "星期天晚上還在");
+        write_l2(&mut db, sunday_evening, fid_sun, "星期天晚上還在", "[]");
+        let (_sid, fid_am) = seed(&mut db, monday_morning, "星期一早上改測試");
+        write_l2(&mut db, monday_morning, fid_am, "星期一早上改測試", "[]");
+        let (_sid, fid_pm) = seed(&mut db, monday_afternoon, "星期一下午讀 SPEC");
+        write_l2(&mut db, monday_afternoon, fid_pm, "星期一下午讀 SPEC", "[]");
+        let (_sid, fid_tue) = seed(&mut db, tuesday_wee, "星期二凌晨的卡片");
+        write_l2(&mut db, tuesday_wee, fid_tue, "星期二凌晨的卡片", "[]");
+
+        let consent = signed();
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let mut input = ReviewInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &brain,
+            from_ts: tuesday_eod.saturating_sub(36 * 3_600_000),
+            to_ts: tuesday_eod,
+            kind: ReviewKind::Eod,
+            force: false,
+            now: tuesday_eod,
+        };
+        let result = run(&mut input).expect("eod");
+        assert!(result.skip.is_none(), "日終被跳過：{:?}", result.skip);
+        assert!(result.ran);
+
+        let monday = brain::local_day_key(monday_morning).expect("monday");
+        let tuesday = brain::local_day_key(tuesday_eod).expect("tuesday");
+        assert_eq!(monday, "2026-08-24");
+        assert_eq!(tuesday, "2026-08-25");
+
+        match db.day_summary_glance(&monday).unwrap() {
+            DaySummaryGlance::Live { date, clauses, .. } => {
+                assert_eq!(date, monday);
+                let texts: Vec<&str> = clauses.iter().map(|c| c.text.as_str()).collect();
+                assert_eq!(texts, ["星期一早上改測試", "星期一下午讀 SPEC"]);
+            }
+            other => panic!("星期一該是 Live：{other:?}"),
+        }
+        let tuesday_glance = db.day_summary_glance(&tuesday).unwrap();
+        assert!(
+            !matches!(tuesday_glance, DaySummaryGlance::Live { .. }),
+            "星期二不該掛著星期一的摘要：{tuesday_glance:?}"
+        );
+        assert!(
+            matches!(tuesday_glance, DaySummaryGlance::NeverRan { .. }),
+            "星期二自己還沒被盤點：{tuesday_glance:?}"
+        );
+        assert_eq!(
+            db.last_reviewer_eod_day().unwrap().as_deref(),
+            Some(tuesday.as_str()),
+            "run stamp 仍是跑的那天，eod_due 靠這個擋同一天再跑"
+        );
     }
 }

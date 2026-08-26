@@ -13,15 +13,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use chrono::{Local, LocalResult, NaiveDate, TimeZone};
 
 use crate::brain::{self, InterpretInput, OutboundOutcome, SkipReason as BrainSkip};
 use crate::config::{BrainConfig, Config};
 use crate::db::Db;
 use crate::heartbeat;
+use crate::local_day;
 use crate::model::Millis;
 use crate::reviewer::{self, ReviewInput, ReviewKind, SkipReason as ReviewSkip};
 use crate::segment::{LOOKAROUND_MS, TIME_CAP_MS};
+
+pub use crate::local_day::previous_local_day_key;
 
 /// 腦執行緒睡一小段再看旗標。這不是在輪詢資料庫，只是讓
 /// [`Handle::ping`]／收工能在幾十毫秒內被看到。
@@ -222,34 +224,10 @@ pub fn eod_due(
     yesterday_has_l0 && last_eod_day != yesterday
 }
 
-pub fn previous_local_day_key(now: Millis) -> Option<String> {
-    let dt = chrono::DateTime::from_timestamp_millis(now)?.with_timezone(&Local);
-    let prev = dt
-        .date_naive()
-        .checked_sub_signed(chrono::TimeDelta::days(1))?;
-    Some(prev.format("%Y-%m-%d").to_string())
-}
-
-fn local_day_bounds(day_key: &str) -> Option<(Millis, Millis)> {
-    let date = NaiveDate::parse_from_str(day_key, "%Y-%m-%d").ok()?;
-    let start = local_midnight(date)?;
-    let end = local_midnight(date.checked_add_signed(chrono::TimeDelta::days(1))?)?;
-    Some((start, end))
-}
-
-fn local_midnight(date: NaiveDate) -> Option<Millis> {
-    let naive = date.and_hms_opt(0, 0, 0)?;
-    match Local.from_local_datetime(&naive) {
-        LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => Some(dt.timestamp_millis()),
-        LocalResult::None => None,
-    }
-}
-
 fn ms_until_next_local_day(now: Millis) -> Option<Millis> {
     let today = brain::local_day_key(now)?;
-    let date = NaiveDate::parse_from_str(&today, "%Y-%m-%d").ok()?;
-    let next = local_midnight(date.checked_add_signed(chrono::TimeDelta::days(1))?)?;
-    Some(next.saturating_sub(now).max(1))
+    let (_, end) = local_day::local_day_bounds(&today)?;
+    Some(end.saturating_sub(now).max(1))
 }
 
 /// 下一拍鐘該等多久。上限是 10 分鐘（§4.1 時間上限），下限 50ms。
@@ -534,7 +512,7 @@ impl Engine {
         let last_eod = self.db.last_reviewer_eod_day().ok().flatten();
         let yesterday_has_l0 = yesterday
             .as_deref()
-            .and_then(local_day_bounds)
+            .and_then(local_day::local_day_bounds)
             .map(|(from, to)| self.db.has_l0_in_range(from, to).unwrap_or(false))
             .unwrap_or(false);
         if !eod_due(
@@ -740,6 +718,7 @@ mod tests {
     use crate::db::Db;
     use crate::heartbeat;
     use crate::model::{FocusEvent, FocusKind, FocusSnapshot, FrameCapture, OcrBlock};
+    use chrono::{Local, LocalResult, TimeZone};
 
     struct Tmp(PathBuf);
     impl Tmp {

@@ -4152,16 +4152,24 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// 審閱層的日終，對這一天有沒有真的跑完。
+    /// 審閱層的日終，有沒有盤點過這一天。
     ///
-    /// 過濾條件和 [`Self::last_reviewer_eod_day`] 同一套：`kind = 'eod'` 且
-    /// `skip_reason IS NULL`。跳過（沒簽同意書、沒設定 CLI、節奏還沒到）不算
-    /// 跑過——那些列在表裡，但不能拿來當成「她看過、那天沒東西」。
-    pub fn has_reviewer_eod_for_day(&self, day_key: &str) -> Result<bool> {
+    /// `reviewer_run.day_key` 是「這一輪是哪一天跑的」，不是被盤點的那一天。
+    /// 日終只在跨日之後才跑（換日或開機補跑），收的永遠是昨天，所以：
+    ///
+    /// `盤點過 D ⇔ 存在成功的 eod run，其 day_key == D 的隔天`。
+    ///
+    /// 關機三天後開機只會補昨天，更早的日子沒被盤點——這個判準也會回 false。
+    /// 過濾條件其餘和 [`Self::last_reviewer_eod_day`] 同一套：`kind = 'eod'`
+    /// 且 `skip_reason IS NULL`。跳過不算跑過。
+    pub fn has_reviewer_eod_for_day(&self, date: &str) -> Result<bool> {
+        let Some(run_day) = crate::local_day::next_local_day_key(date) else {
+            return Ok(false);
+        };
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM reviewer_run
              WHERE kind = 'eod' AND skip_reason IS NULL AND day_key = ?1",
-            [day_key],
+            [run_day],
             |r| r.get(0),
         )?;
         Ok(n > 0)
@@ -10808,9 +10816,17 @@ mod tests {
         let mut db = test_db();
         let never = db.day_summary_glance("2026-08-17").unwrap();
         let empty = {
-            put_eod(&mut db, "2026-08-18", None);
+            // 日終在 19 跑，盤點的是 18。day_key 是跑的那天，不是被盤點的那天。
+            put_eod(&mut db, "2026-08-19", None);
             db.day_summary_glance("2026-08-18").unwrap()
         };
+        assert!(
+            matches!(
+                db.day_summary_glance("2026-08-19").unwrap(),
+                DaySummaryGlance::NeverRan { .. }
+            ),
+            "跑的那天自己還沒被盤點，不能因為 stamp 在那天就講成她看過"
+        );
         let gone = {
             put_day_summary(&db, "2026-08-19", 1, "", "[]", "{}", Some(50));
             db.day_summary_glance("2026-08-19").unwrap()
@@ -10844,7 +10860,9 @@ mod tests {
     #[test]
     fn a_skipped_eod_is_not_a_ran_eod() {
         let mut db = test_db();
-        put_eod(&mut db, "2026-08-20", Some("no_consent"));
+        // 星期二凌晨跳過；本該盤點的是星期一。skip_reason 必須真的被看到，
+        // 不能只靠「跑的那天 ≠ 被問的那天」混過去。
+        put_eod(&mut db, "2026-08-21", Some("no_consent"));
         assert!(!db.has_reviewer_eod_for_day("2026-08-20").unwrap());
         assert!(matches!(
             db.day_summary_glance("2026-08-20").unwrap(),
@@ -10858,7 +10876,7 @@ mod tests {
         let mut db = test_db();
         db.insert_reviewer_run(&ReviewerRunInsert {
             ts: 1,
-            day_key: "2026-08-21",
+            day_key: "2026-08-22",
             kind: "interval",
             skip_reason: None,
             candidate_count: Some(0),
@@ -10944,6 +10962,24 @@ mod tests {
             parse_day_stats(r#"{"l2":0,"commitments_open":0}"#),
             (Some(0), Some(0))
         );
+    }
+
+    /// 日終 stamp 的是跑的那天。被盤點的是它的前一天，不是任何更早的一天。
+    #[test]
+    fn eod_run_stamp_is_the_morning_after_the_day_it_reviewed() {
+        let mut db = test_db();
+        // 正常隔天跑 / 開機補跑：星期二凌晨的成功 eod 盤點星期一。
+        put_eod(&mut db, "2026-08-25", None);
+        assert!(db.has_reviewer_eod_for_day("2026-08-24").unwrap());
+        assert!(!db.has_reviewer_eod_for_day("2026-08-25").unwrap());
+        // 關機三天後開機：星期一補的是星期天，Friday 沒被盤點。
+        put_eod(&mut db, "2026-08-24", None);
+        assert!(db.has_reviewer_eod_for_day("2026-08-23").unwrap());
+        assert!(
+            !db.has_reviewer_eod_for_day("2026-08-21").unwrap(),
+            "更早的日子不能因為後來某天跑過日終就被講成看過"
+        );
+        assert!(!db.has_reviewer_eod_for_day("2026-08-22").unwrap());
     }
 
     /// 活著的新版蓋掉墓碑舊版時，畫面上是新版，不是「被刪掉了」。
