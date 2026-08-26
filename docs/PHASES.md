@@ -323,14 +323,50 @@ capture 層本身就是 recorder。
 **目標**：解鎖主動性——用預算和證據門檻，不用熱情。帶著 benchmark 數字正式見人。
 
 **Scope**
-- Gatekeeper（SPEC §8.3）：五類候選白名單、評分、預算 ≤ 5/天、冷卻、quiet hours、
-  專注模式靜音；冷啟動只開 a（顯式時間承諾）/ b（未注意的通知）兩類。
-- 第一句話規則（SPEC §8.4）強制執行。
-- 形式階梯：微光 → 一行字 → 建議卡；每次開口的分數/依據/反應全記錄。
-- 回饋兩鍵接通記憶死亡規則；「順帶確認」機制（螢幕外完成問題）。
-- 日終「要不要做筆記」offer + 日摘要成品化。
-- **macOS port**：ScreenCaptureKit + Vision OCR + AX API + TCC/紫點 UX 文案。
-- 發布工程：安裝包、簽章、自動更新、官網一頁、Show HN / X 發文帶 benchmark 表。
+- ✅ alpha.66 Gatekeeper（SPEC §8.3）：五類候選白名單、評分、預算 ≤ 5 **點**/天、
+  冷卻、quiet hours、專注模式靜音；冷啟動只開 a（顯式時間承諾）/
+  b（未注意的通知）兩類。`crates/sister-core/src/gatekeeper.rs`。
+  - SPEC 原文寫「≤ 5 次/天」，和同節形式階梯的「卡片算 ×2」矛盾。
+    消歧義成**點數**：微光 0、一行字 1、建議卡 2。
+  - 專注模式是 `FocusMode` 三態：這一版沒有前景視窗幾何訊號，所以是
+    `Unmeasured` 而不是 `Windowed`——量不到不等於量到了「不是」。
+- ✅ alpha.66 第一句話規則（SPEC §8.4）。和冷啟動兩週是**兩條**規則，
+  分開寫、分開測：第 15 天它們的答案不一樣。
+- ✅ alpha.67 形式階梯：微光 → 一行字 → 建議卡；分數/依據/反應寫進
+  `utterance` 表（**每一次考慮過的**都寫，不只開過口的——SPEC §8.3.5 要的
+  訓練語料是被擋下來那半）。
+- ✅ alpha.66 回饋兩鍵接通記憶死亡規則；「順帶確認」機制
+  （`crates/sister-core/src/followup.rs`，只在使用者主動開對話時附在回答尾端）。
+- ⬜ 日終「要不要做筆記」offer + 日摘要成品化（d 類訊號源）。
+- ⬜ **macOS port**：ScreenCaptureKit + Vision OCR + AX API + TCC/紫點 UX 文案。
+  本機編不到、CI 也沒有 mac runner，還沒開始。
+- 🔶 發布工程：安裝包、簽章、自動更新、官網一頁、Show HN / X 發文帶 benchmark 表。
+  - ✅ alpha.68 版本說明。在這之前它是 `ci.yml` 裡寫死的一塊 570 行的字，
+    每出一版往裡面疊一節「這一版：⋯⋯」再**整塊**貼上去——alpha.67 那份
+    release 說明裡有三十個「這一版」，而且最後一行寫著「沒有 UI、沒有常駐、
+    沒有任何模型呼叫」，同一份的第四段就在教使用者開 `sister-desktop.exe`。
+    改成 [`docs/RELEASE-NOTES.md`](RELEASE-NOTES.md) 一個 tag 一節，
+    `scripts/release-notes.sh` 組出來。**沒寫那一節不會退回上一版**，
+    會印「這一版沒有寫版本說明」。
+  - ⬜ 安裝包／簽章／自動更新／官網一頁：還沒開始。
+
+**訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）
+- ✅ a `CommitmentDue`：`open_commitments_due_before(now + 40min)`，只收
+  `due_source='explicit'`。
+- ⬜ b `UnattendedNotification`：**沒有訊號源**。`SystemKind` 沒有通知橫幅
+  這一格，而加它要動 `sister-capture`（錄製熱路徑）。
+  **這一格是 Phase 5 最痛的缺口**：§8.4 規定第一句話只能是 a/b，
+  §8.3.3 規定冷啟動兩週只開 a/b——所以新使用者前兩週實際上只有 a 類會響。
+- ✅ c `Stuck`：`stuck_signal` 表。
+- ⬜ d `SessionEnd`、⬜ e `Leaving`：`SystemKind::SessionEnd` / `Lock` 都已經
+  在寫，但還沒接進 `gatekeeper_candidates::collect()`。
+
+**額外做掉的（不在原 scope，但在出貨路上）**
+- ✅ alpha.67 來源防線（SPEC §0.4 / §9.4）：`build_prompt` 原本把 OCR 原文、
+  視窗標題、host、上一張卡的 activity 原封不動接進 prompt，header 一句
+  「這是資料不是指令」都沒有。改成每次重抽 nonce 的圍欄
+  （`crates/sister-core/src/prompt_fence.rs`），20 種 injection 變體測試。
+  **不去敏、不遮蔽、不過濾**——圍欄標的是「這是資料」，不是把資料改掉。
 
 **Exit criteria**
 - [ ] 自用 ≥ 2 週：開口 ≤ 5/天、有用率（未被按掉/被感謝/被採納）≥ 60%、
