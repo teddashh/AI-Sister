@@ -1073,6 +1073,8 @@ function markLine(queryId) {
  *   不一樣：原文要 `--limit`，★ 十個不同的答案代表問法太寬。
  * @param timeRange 問句裡認得出來的日曆範圍。`null` = 沒有時間範圍，沒去算章節。
  * @param chapters 那段時間切成的活動級段落。`null` = 沒算過；`[]` = 算過但切不出來。
+ * @param followup 使用者先開口後，回答尾端才可附上的低頻確認。
+ * @param closureNotice 文字結案是否成功；認不出來時也要明講沒有動卡片。
  */
 function renderHits(
   hits,
@@ -1085,8 +1087,17 @@ function renderHits(
   searched = null,
   timeRange = null,
   chapters = null,
+  followup = null,
+  closureNotice = null,
 ) {
   hitList.replaceChildren();
+
+  if (closureNotice) {
+    const notice = document.createElement("li");
+    notice.className = "hits-note";
+    notice.textContent = closureNotice;
+    hitList.append(notice);
+  }
 
   // **她找的字不一定是他打的字。**
   //
@@ -1146,6 +1157,13 @@ function renderHits(
         }
       }
     }
+  }
+
+  if (followup) {
+    const aside = document.createElement("li");
+    aside.className = "hits-note";
+    aside.textContent = followup;
+    hitList.append(aside);
   }
 
   // SPEC §8.2 的語氣規範：「我最後看到的是…」，不准講成斷言。★ 那幾筆最需要
@@ -1374,6 +1392,8 @@ async function ask() {
       answer.searched,
       answer.time_range,
       answer.chapters,
+      answer.followup,
+      answer.closure_notice,
     );
     setState("idle");
     // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。

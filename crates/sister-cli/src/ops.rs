@@ -834,6 +834,7 @@ pub mod interpret {
         let to = sister_core::now_ms();
         let from = to.saturating_sub(span);
         let mut db = open_existing(data_dir)?;
+
         let consent = sister_core::consent::load(data_dir);
         let mut input = InterpretInput {
             db: &mut db,
@@ -3176,6 +3177,22 @@ pub mod query {
         );
         let mut db = open_existing(data_dir)?;
 
+        let now = sister_core::now_ms();
+        let close = sister_core::reviewer::close_from_message(&mut db, text, now)?;
+        let previous = sister_core::reviewer::followup_state(&db)?;
+        let followup =
+            match sister_core::followup::decide(&db.live_commitments()?, now, previous.as_ref()) {
+                sister_core::followup::FollowupDecision::Ask {
+                    commitment_id,
+                    text,
+                } => {
+                    sister_core::reviewer::record_followup(&mut db, commitment_id, now)?;
+                    Some(text)
+                }
+                sister_core::followup::FollowupDecision::NoEligibleCommitment
+                | sister_core::followup::FollowupDecision::CoolingDown { .. } => None,
+            };
+
         // 「剛剛發生什麼事」問的是時間，不是字。規則在 core，和字母人共用同一
         // 份——兩邊各判各的，同一句話遲早會在兩個地方得到兩種答案。
         // 計時涵蓋兩條路徑：使用者感受到的是整個回答的延遲，不是單一次查詢。
@@ -3267,8 +3284,18 @@ pub mod query {
                     "segment_count": s.segment_count,
                     "app": s.app, "title": s.title, "host": s.host,
                 })).collect::<Vec<_>>()),
+                "followup": followup,
+                "closure": match &close {
+                    sister_core::followup::CloseIntent::NotAClosure => "not_a_closure",
+                    sister_core::followup::CloseIntent::Unrecognized => "unrecognized",
+                    sister_core::followup::CloseIntent::Ambiguous { .. } => "ambiguous",
+                    sister_core::followup::CloseIntent::Close { .. } => "closed",
+                },
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
+            if let Some(line) = &followup {
+                println!("\n{line}");
+            }
             return Ok(());
         }
 
@@ -3420,6 +3447,21 @@ pub mod query {
                 src.push_str(&format!(" · {}", fmt::one_line(url, 70)));
             }
             println!("    {src}\n");
+        }
+        match close {
+            sister_core::followup::CloseIntent::Close { .. } => {
+                println!("\n這張記憶已結案，不會再提。")
+            }
+            sister_core::followup::CloseIntent::Unrecognized => {
+                println!("\n我認不出你指哪一張記憶，所以沒有動任何一張。")
+            }
+            sister_core::followup::CloseIntent::Ambiguous { .. } => {
+                println!("\n這句話對得上不只一張記憶，所以沒有動任何一張。")
+            }
+            sister_core::followup::CloseIntent::NotAClosure => {}
+        }
+        if let Some(line) = followup {
+            println!("\n{line}");
         }
         Ok(())
     }
