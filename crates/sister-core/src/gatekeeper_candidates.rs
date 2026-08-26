@@ -329,6 +329,52 @@ mod tests {
         }
     }
 
+    /// 一件二十分鐘後到期的事該不該講，跟那一列被寫過幾次沒有關係。
+    ///
+    /// `open_commitments_due_before` 曾經多一句 `AND updated_at = created_at`
+    /// ——那是 `archive_overdue` 用來分辨「到期後有沒有人碰過」的條件，
+    /// 在**這支**查詢裡問的是另一個問題。它今天剛好篩不掉東西，
+    /// 所以誰都不會發現，直到有人把 `last_evidence_seen_at` 接起來。
+    #[test]
+    fn a_commitment_someone_has_written_to_is_still_announced() {
+        let mut db = crate::db::Db::open_in_memory().unwrap();
+        let now = 1_777_000_000_000;
+        let id = db
+            .insert_commitment(
+                crate::reviewer::test_l3_write(),
+                &crate::db::CommitmentInsert {
+                    text: "把 Cloudflare DNS 改完",
+                    kind: "commitment",
+                    born_from: 1,
+                    evidence_json: "[]".into(),
+                    people_json: "[]".into(),
+                    due_hint: Some("五點"),
+                    due_source: Some("explicit"),
+                    due_at: Some(now + 20 * 60_000),
+                    status: "open",
+                    confidence: 0.9,
+                    allowed_next_step: None,
+                    last_evidence_seen_at: None,
+                    kill_note: None,
+                    now,
+                },
+            )
+            .unwrap();
+        // 有人碰過這一列（`updated_at` 被 bump），但它還是開著、
+        // 還是二十分鐘後到期。
+        db.update_commitment_status(crate::reviewer::test_l3_write(), id, "open", None, now + 1)
+            .unwrap();
+
+        let texts: Vec<String> = super::collect(&db, now)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.category == SpeakCategory::CommitmentDue)
+            .map(|c| c.text)
+            .collect();
+        assert_eq!(texts.len(), 1, "被寫過的那一列不該消失：{texts:?}");
+        assert!(texts[0].contains("Cloudflare DNS"));
+    }
+
     /// 三種「沒有 d 類候選」的理由**要說得出是哪一種**。
     ///
     /// 這一條抓的是一句寫死的說明：它原本無論如何都印「d 類沒有最近 40 分鐘

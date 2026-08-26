@@ -4076,6 +4076,21 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
+    /// 還開著、而且 `cutoff` 之前到期的承諾。守門員的 a 類候選來源。
+    ///
+    /// **這裡曾經多一句 `AND updated_at = created_at`。** 那句話問的是「這一列
+    /// 從建立之後有沒有被寫過」——`archive_overdue` 用它分辨「到期後沒有人碰過
+    /// 」和「有人碰過」（見 `reviewer::ArchiveDecision::InteractionUnknown`），
+    /// 在那裡它是承重的。這支查詢問的是別的問題：**什麼快到期了**。
+    ///
+    /// 今天它剛好篩不掉任何東西：所有會 bump `updated_at` 的寫入不是把
+    /// `status` 改掉就是蓋墓碑，兩者上面兩個條件已經擋掉了。所以它是一句
+    /// 不會報錯、不會紅、也不會有人發現的話——直到有人把
+    /// `last_evidence_seen_at`（那一欄現在一個寫入者都沒有）接起來，
+    /// 那一刻每一件被審閱重新確認過的承諾都會安靜地不再被提醒，
+    /// 而使用者看到的是「她忘了」。
+    ///
+    /// 一件二十分鐘後到期的事該不該講，跟那一列被寫過幾次沒有關係。
     pub fn open_commitments_due_before(&self, cutoff: Millis) -> Result<Vec<CommitmentRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, text, kind, born_from, evidence_json, people_json,
@@ -4085,7 +4100,6 @@ impl Db {
              FROM commitments
              WHERE tombstoned_at IS NULL AND status = 'open'
                AND due_at IS NOT NULL AND due_at < ?1
-               AND updated_at = created_at
              ORDER BY due_at, id",
         )?;
         let rows = stmt.query_map([cutoff], map_commitment_row)?;
