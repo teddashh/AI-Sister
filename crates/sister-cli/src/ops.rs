@@ -5,6 +5,156 @@ use std::path::{Path, PathBuf};
 
 use sister_core::db::Db;
 
+pub mod speak {
+    use super::*;
+    use chrono::{Local, Timelike};
+    use sister_core::gatekeeper::{Candidate, FocusMode, GateInput, Verdict, decide};
+    use sister_core::moments::SpeakCategory;
+
+    pub fn run(
+        data_dir: &Path,
+        config: &sister_core::Config,
+        dry_run: bool,
+        day: Option<&str>,
+    ) -> Result<()> {
+        let db = Db::open(&sister_core::Config::db_path(data_dir))?;
+        let now = sister_core::now_ms();
+        let day_key = match day {
+            Some(day) => {
+                sister_core::local_day::local_day_bounds(day)
+                    .ok_or_else(|| anyhow::anyhow!("看不懂日期 {day:?}，要用 YYYY-MM-DD"))?;
+                day.to_string()
+            }
+            None => sister_core::local_day::local_day_key(now)
+                .ok_or_else(|| anyhow::anyhow!("現在時間無法換成本地日期"))?,
+        };
+        if !dry_run {
+            let spent = db.points_spent_today(&day_key)?;
+            println!(
+                "{day_key}：用了 {spent} 點 / 上限 {} 點",
+                config.gatekeeper.daily_budget_points
+            );
+            for row in db.utterances_on_day(&day_key)? {
+                let decision = match row.decision {
+                    sister_core::db::UtteranceDecision::Spoke { form, cost } => {
+                        format!("開口 {}，{cost} 點", form.as_str())
+                    }
+                    sister_core::db::UtteranceDecision::Held { reason } => {
+                        format!("擋下：{reason}")
+                    }
+                };
+                println!(
+                    "{} {} score={:.3} {} — {}",
+                    row.ts,
+                    row.category.as_str(),
+                    row.score,
+                    decision,
+                    row.text
+                );
+            }
+            return Ok(());
+        }
+
+        let mut candidates = Vec::new();
+        for c in db.open_commitments_due_before(now.saturating_add(40 * 60_000))? {
+            if c.due_source.as_deref() != Some("explicit") {
+                continue;
+            }
+            let evidence: Vec<String> = serde_json::from_str(&c.evidence_json).unwrap_or_default();
+            let mut refs = vec![format!("commitment:{}", c.id)];
+            refs.extend(evidence);
+            candidates.push(Candidate::new(
+                SpeakCategory::CommitmentDue,
+                format!("「{}」的時間快到了。", c.text),
+                refs,
+                0.9,
+                c.confidence,
+                0.9,
+                1.0,
+            )?);
+        }
+        for s in db.stuck_in_range(now.saturating_sub(40 * 60_000), now.saturating_add(1))? {
+            candidates.push(Candidate::new(
+                SpeakCategory::Stuck,
+                format!(
+                    "你似乎卡在{}同一個錯誤。",
+                    s.app
+                        .as_deref()
+                        .map(|app| format!(" {app} 的"))
+                        .unwrap_or_else(|| "".into())
+                ),
+                vec![format!("segment:{}", s.started_at)],
+                0.6,
+                0.8,
+                0.8,
+                0.8,
+            )?);
+        }
+        for category in [
+            SpeakCategory::UnattendedNotification,
+            SpeakCategory::SessionEnd,
+            SpeakCategory::Leaving,
+        ] {
+            println!("{}：這一類目前沒有訊號源。", category.as_str());
+        }
+        if candidates.is_empty() {
+            println!(
+                "現在一句候選都沒有：a 類沒有 40 分鐘內到期的顯式時間承諾，c 類沒有最近 40 分鐘的卡住訊號；b/d/e 類目前沒有訊號源。"
+            );
+            return Ok(());
+        }
+        let presence = sister_core::heartbeat::presence(data_dir, now);
+        // 這一版沒有跨平台的「前景視窗是不是全螢幕」訊號，所以講出來。
+        // 傳 `Windowed` 會是一句沒有人查證過的斷言。
+        println!("專注模式：這一版量不到（沒有前景視窗幾何訊號），所以沒有靜音。");
+        let local = Local::now();
+        let quiet_hours_end = config
+            .gatekeeper
+            .quiet_end_at((local.hour() * 60 + local.minute()) as u16)?;
+        let first = db.first_recording_at()?.unwrap_or(now);
+        let days_since = u32::try_from(now.saturating_sub(first) / 86_400_000).unwrap_or(u32::MAX);
+        let spent = db.points_spent_today(&day_key)?;
+        let ever = db.has_ever_spoken()?;
+        for candidate in candidates {
+            let cooldown_remaining_minutes =
+                db.last_spoke_at(candidate.category)?.and_then(|last| {
+                    let elapsed = now.saturating_sub(last) / 60_000;
+                    (elapsed < i64::from(config.gatekeeper.cooldown_minutes))
+                        .then(|| config.gatekeeper.cooldown_minutes - elapsed as u32)
+                });
+            let input = GateInput {
+                candidate: candidate.clone(),
+                presence,
+                quiet_hours_end: quiet_hours_end.clone(),
+                focus_mode: FocusMode::Unmeasured,
+                days_since_first_recording: days_since,
+                cold_start_days: config.gatekeeper.cold_start_days,
+                has_ever_spoken: ever,
+                cooldown_remaining_minutes,
+                points_spent_today: spent,
+                daily_budget_points: config.gatekeeper.daily_budget_points,
+                min_score: config.gatekeeper.min_score,
+            };
+            let verdict = decide(&input);
+            let line = match &verdict {
+                Verdict::Speak { form, cost } => format!("開口：{}，{cost} 點", form.as_str()),
+                Verdict::Hold(reason) => format!("擋下：{}（{}）", reason.code(), reason.message()),
+            };
+            println!(
+                "{} score={:.3} [impact={:.3} confidence={:.3} timeliness={:.3} evidence_strength={:.3}] {line} — {}",
+                candidate.category.as_str(),
+                candidate.score(),
+                candidate.impact,
+                candidate.confidence,
+                candidate.timeliness,
+                candidate.evidence_strength,
+                candidate.text
+            );
+        }
+        Ok(())
+    }
+}
+
 /// 兩次看螢幕之間的下限。設定檔可以寫得更慢，寫得更快則無效。
 ///
 /// 定在這裡而不是各自 `.max(200)`，是因為 doctor 得印出**實際會用的值**：

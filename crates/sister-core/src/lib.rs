@@ -28,8 +28,9 @@ pub mod db;
 pub mod dedup;
 pub mod eval;
 pub mod facts;
+pub mod gatekeeper;
 pub mod heartbeat;
-mod local_day;
+pub mod local_day;
 pub mod model;
 pub mod moments;
 pub mod pause;
@@ -44,7 +45,9 @@ pub mod segment_edit;
 pub mod stuck;
 pub mod wakeup;
 
-pub use config::{BrainConfig, CaptureConfig, Config, Exclusion, PrivacyConfig, RetentionConfig};
+pub use config::{
+    BrainConfig, CaptureConfig, Config, Exclusion, GatekeeperConfig, PrivacyConfig, RetentionConfig,
+};
 pub use consent::CloudAllowed;
 pub use db::{Db, DbStats, FactRow, FrameContext, SCHEMA_VERSION};
 pub use dedup::{Deduper, FrameVerdict, dhash_gray, dhash_rgb, hamming};

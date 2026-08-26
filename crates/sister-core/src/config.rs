@@ -19,6 +19,83 @@ pub struct Config {
     pub retention: RetentionConfig,
     pub shell: ShellConfig,
     pub brain: BrainConfig,
+    pub gatekeeper: GatekeeperConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GatekeeperConfig {
+    pub daily_budget_points: u32,
+    pub cooldown_minutes: u32,
+    /// `HH:MM-HH:MM`；空字串 = 不設安靜時段，是正當選擇，不是壞設定。
+    pub quiet_hours: String,
+    pub min_score: f64,
+    pub cold_start_days: u32,
+}
+
+impl Default for GatekeeperConfig {
+    fn default() -> Self {
+        Self {
+            daily_budget_points: 5,
+            cooldown_minutes: 120,
+            quiet_hours: "22:00-08:00".into(),
+            min_score: 0.25,
+            cold_start_days: 14,
+        }
+    }
+}
+
+impl GatekeeperConfig {
+    pub fn check(&self) -> anyhow::Result<()> {
+        if !self.min_score.is_finite() || !(0.0..=1.0).contains(&self.min_score) {
+            anyhow::bail!(
+                "gatekeeper.min_score 必須介於 0.0 到 1.0，實際是 {}。",
+                self.min_score
+            );
+        }
+        self.quiet_range()?;
+        Ok(())
+    }
+
+    pub fn quiet_range(&self) -> anyhow::Result<Option<(u16, u16)>> {
+        let raw = self.quiet_hours.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        let Some((start, end)) = raw.split_once('-') else {
+            anyhow::bail!(
+                "gatekeeper.quiet_hours 必須是 HH:MM-HH:MM 或空字串，實際是 {:?}。",
+                self.quiet_hours
+            );
+        };
+        fn minute(value: &str) -> Option<u16> {
+            let (h, m) = value.split_once(':')?;
+            if h.len() != 2 || m.len() != 2 {
+                return None;
+            }
+            let (h, m) = (h.parse::<u16>().ok()?, m.parse::<u16>().ok()?);
+            (h < 24 && m < 60).then_some(h * 60 + m)
+        }
+        match (minute(start), minute(end)) {
+            (Some(start), Some(end)) if start != end => Ok(Some((start, end))),
+            _ => anyhow::bail!(
+                "gatekeeper.quiet_hours 必須是兩個不同的有效時間，實際是 {:?}。",
+                self.quiet_hours
+            ),
+        }
+    }
+
+    pub fn quiet_end_at(&self, local_minute: u16) -> anyhow::Result<Option<String>> {
+        let Some((start, end)) = self.quiet_range()? else {
+            return Ok(None);
+        };
+        let quiet = if start < end {
+            local_minute >= start && local_minute < end
+        } else {
+            local_minute >= start || local_minute < end
+        };
+        Ok(quiet.then(|| format!("{:02}:{:02}", end / 60, end % 60)))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -565,6 +642,7 @@ impl Config {
         let cfg: Config = toml::from_str(&text)?;
         cfg.retention.check()?;
         cfg.brain.check()?;
+        cfg.gatekeeper.check()?;
         Ok(cfg)
     }
 
@@ -604,6 +682,7 @@ impl Config {
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         self.retention.check()?;
         self.brain.check()?;
+        self.gatekeeper.check()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -1022,6 +1101,8 @@ mod tests {
         original.brain.daily_budget = 17;
         original.brain.concurrency = 3;
         original.brain.reviewer_daily_budget = 9;
+        original.gatekeeper.daily_budget_points = 3;
+        original.gatekeeper.cooldown_minutes = 77;
         original.brain.command.clear();
         original.save(&path).expect("存得進去");
 
@@ -1052,6 +1133,14 @@ mod tests {
         assert_eq!(
             back.brain.reviewer_daily_budget, 9,
             "reviewer_daily_budget 被重設了——settings_write 從頭組了一份 BrainConfig"
+        );
+        assert_eq!(
+            back.gatekeeper.daily_budget_points, 3,
+            "設定頁沒有畫 gatekeeper，不能把點數預算重設成 5"
+        );
+        assert_eq!(
+            back.gatekeeper.cooldown_minutes, 77,
+            "設定頁沒有畫 gatekeeper，不能把冷卻重設成 120"
         );
 
         let _ = std::fs::remove_file(&path);

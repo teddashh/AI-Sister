@@ -450,6 +450,16 @@ enum Command {
         json: bool,
     },
 
+    /// 主動開口守門員：預演現在的候選，或查看判決紀錄。
+    Speak {
+        #[arg(long, conflicts_with = "log")]
+        dry_run: bool,
+        #[arg(long, conflicts_with = "dry_run")]
+        log: bool,
+        #[arg(long, requires = "log", value_name = "YYYY-MM-DD")]
+        day: Option<String>,
+    },
+
     /// 三張同意書：現在簽了哪幾張、沒簽會怎樣。
     ///
     /// 不帶參數就是印出目前的狀態。**第一張沒簽，`sister record` 不會開始錄。**
@@ -676,6 +686,12 @@ fn main() -> Result<()> {
             note,
             json,
         } => ops::commitments::run(&data_dir, kill, other, note.as_deref(), json),
+        Command::Speak { dry_run, log, day } => {
+            if !dry_run && !log {
+                anyhow::bail!("sister speak 需要 --dry-run 或 --log");
+            }
+            ops::speak::run(&data_dir, &config()?, dry_run, day.as_deref())
+        }
         Command::Consent {
             grant,
             revoke,

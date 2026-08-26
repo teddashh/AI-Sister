@@ -25,6 +25,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::facts::ExtractedFact;
 use crate::model::{
@@ -33,7 +34,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 12;
+pub const SCHEMA_VERSION: i32 = 13;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -714,6 +715,34 @@ CREATE TABLE IF NOT EXISTS reviewer_divergence (
 CREATE INDEX IF NOT EXISTS idx_divergence_run ON reviewer_divergence(run_id);
 "#;
 
+const MIGRATION_013: &str = r#"
+CREATE TABLE IF NOT EXISTS utterance (
+  id                INTEGER PRIMARY KEY,
+  ts                INTEGER NOT NULL,
+  day_key           TEXT NOT NULL,
+  category          TEXT NOT NULL,
+  text              TEXT NOT NULL,
+  evidence_json     TEXT NOT NULL,
+  impact            REAL NOT NULL,
+  confidence        REAL NOT NULL,
+  timeliness        REAL NOT NULL,
+  evidence_strength REAL NOT NULL,
+  score             REAL NOT NULL,
+  decision          TEXT NOT NULL CHECK(decision IN ('spoke','held')),
+  form              TEXT,
+  cost              INTEGER NOT NULL CHECK(cost >= 0),
+  hold_reason       TEXT,
+  reaction          TEXT,
+  reaction_at       INTEGER,
+  created_at        INTEGER NOT NULL,
+  tombstoned_at     INTEGER,
+  CHECK((decision='spoke' AND form IN ('glimmer','one_line','card') AND hold_reason IS NULL)
+     OR (decision='held' AND form IS NULL AND cost=0 AND hold_reason IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_utterance_day ON utterance(day_key, decision, tombstoned_at);
+CREATE INDEX IF NOT EXISTS idx_utterance_category ON utterance(category, decision, ts, tombstoned_at);
+"#;
+
 const L2_SELECT: &str = "SELECT id, segment_core_start, segment_ref, version, supersedes,
                     activity, entities_json, continues_json, commitments_json,
                     model_confidence, evidence_json, open_questions_json, created_at,
@@ -1218,6 +1247,7 @@ impl Db {
             10 => tx.execute_batch(MIGRATION_010)?,
             11 => migrate_011(&tx)?,
             12 => migrate_012(&tx)?,
+            13 => tx.execute_batch(MIGRATION_013)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -1249,6 +1279,20 @@ impl Db {
         Ok(self
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))?)
+    }
+
+    pub fn first_recording_at(&self) -> Result<Option<Millis>> {
+        let raw: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key='created_at'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        raw.map(|v| {
+            v.parse::<Millis>()
+                .context("meta.created_at 不是 epoch 毫秒")
+        })
+        .transpose()
     }
 
     /// SQLite 執行期版本（doctor 用，trigram 需要 ≥ 3.34）。
@@ -3879,6 +3923,12 @@ impl Db {
                     params![now, id],
                 )?;
                 report.entities += n as u64;
+            } else if let Some(id) = r.strip_prefix("utterance:") {
+                tx.execute(
+                    "UPDATE utterance SET tombstoned_at=?1, text='', evidence_json='[]', reaction=NULL, reaction_at=NULL
+                     WHERE id=?2 AND tombstoned_at IS NULL",
+                    params![now, id],
+                )?;
             }
         }
 
@@ -4017,6 +4067,83 @@ impl Db {
         )?;
         let rows = stmt.query_map([cutoff], map_commitment_row)?;
         Ok(rows.flatten().collect())
+    }
+
+    pub fn points_spent_today(&self, day_key: &str) -> Result<u32> {
+        let points: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(cost),0) FROM utterance WHERE day_key=?1 AND decision='spoke' AND tombstoned_at IS NULL",
+            [day_key], |r| r.get(0))?;
+        u32::try_from(points).context("utterance 點數不是有效的 u32")
+    }
+
+    pub fn last_spoke_at(&self, category: crate::moments::SpeakCategory) -> Result<Option<Millis>> {
+        self.conn.query_row(
+            "SELECT MAX(ts) FROM utterance WHERE category=?1 AND decision='spoke' AND tombstoned_at IS NULL",
+            [category.as_str()], |r| r.get(0)).context("讀取同類最後開口時間")
+    }
+
+    pub fn has_ever_spoken(&self) -> Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM utterance WHERE decision='spoke' AND tombstoned_at IS NULL)",
+            [], |r| r.get(0)).context("讀取第一次開口狀態")
+    }
+
+    pub fn record_utterance(&mut self, ins: &UtteranceInsert<'_>) -> Result<i64> {
+        let evidence_json = serde_json::to_string(&ins.candidate.evidence)?;
+        let (decision, form, cost, hold_reason) = match &ins.verdict {
+            crate::gatekeeper::Verdict::Speak { form, cost } => {
+                if *cost != form.cost() {
+                    anyhow::bail!(
+                        "{} 的 cost 必須是 {}，實際是 {cost}",
+                        form.as_str(),
+                        form.cost()
+                    );
+                }
+                ("spoke", Some(form.as_str()), *cost, None)
+            }
+            crate::gatekeeper::Verdict::Hold(reason) => (
+                "held",
+                None,
+                0,
+                Some(format!("{}: {}", reason.code(), reason.message())),
+            ),
+        };
+        self.conn.execute(
+            "INSERT INTO utterance(ts,day_key,category,text,evidence_json,impact,confidence,timeliness,evidence_strength,score,decision,form,cost,hold_reason,reaction,reaction_at,created_at,tombstoned_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,?1,NULL)",
+            params![ins.ts, ins.day_key, ins.candidate.category.as_str(), ins.candidate.text,
+                evidence_json, ins.candidate.impact, ins.candidate.confidence, ins.candidate.timeliness,
+                ins.candidate.evidence_strength, ins.candidate.score(), decision, form, cost, hold_reason])?;
+        let id = self.conn.last_insert_rowid();
+        for evidence in &ins.candidate.evidence {
+            self.insert_provenance(&format!("utterance:{id}"), evidence)?;
+        }
+        Ok(id)
+    }
+
+    pub fn utterance_by_id(&self, id: i64) -> Result<Option<UtteranceRow>> {
+        self.conn.query_row(
+            "SELECT id,ts,day_key,category,text,evidence_json,impact,confidence,timeliness,evidence_strength,score,decision,form,cost,hold_reason,reaction,reaction_at,created_at,tombstoned_at FROM utterance WHERE id=?1",
+            [id], map_utterance_row).optional().context("讀取 utterance")
+    }
+
+    pub fn utterances_on_day(&self, day_key: &str) -> Result<Vec<UtteranceRow>> {
+        let mut stmt = self.conn.prepare("SELECT id,ts,day_key,category,text,evidence_json,impact,confidence,timeliness,evidence_strength,score,decision,form,cost,hold_reason,reaction,reaction_at,created_at,tombstoned_at FROM utterance WHERE day_key=?1 AND tombstoned_at IS NULL ORDER BY ts,id")?;
+        Ok(stmt
+            .query_map([day_key], map_utterance_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn record_reaction(
+        &mut self,
+        utterance_id: i64,
+        reaction: &str,
+        now: Millis,
+    ) -> Result<u64> {
+        Ok(self.conn.execute(
+            "UPDATE utterance SET reaction=?1,reaction_at=?2 WHERE id=?3 AND tombstoned_at IS NULL",
+            params![reaction, now, utterance_id],
+        )? as u64)
     }
 
     pub fn upsert_entity(
@@ -5821,6 +5948,97 @@ pub struct CommitmentInsert<'a> {
     pub last_evidence_seen_at: Option<Millis>,
     pub kill_note: Option<&'a str>,
     pub now: Millis,
+}
+
+pub struct UtteranceInsert<'a> {
+    pub ts: Millis,
+    pub day_key: &'a str,
+    pub candidate: &'a crate::gatekeeper::Candidate,
+    pub verdict: &'a crate::gatekeeper::Verdict,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UtteranceDecision {
+    Spoke {
+        form: crate::gatekeeper::Form,
+        cost: u32,
+    },
+    Held {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UtteranceRow {
+    pub id: i64,
+    pub ts: Millis,
+    pub day_key: String,
+    pub category: crate::moments::SpeakCategory,
+    pub text: String,
+    pub evidence: Vec<String>,
+    pub impact: f64,
+    pub confidence: f64,
+    pub timeliness: f64,
+    pub evidence_strength: f64,
+    pub score: f64,
+    pub decision: UtteranceDecision,
+    pub reaction: Option<String>,
+    pub reaction_at: Option<Millis>,
+    pub created_at: Millis,
+    pub tombstoned_at: Option<Millis>,
+}
+
+fn map_utterance_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UtteranceRow> {
+    let category_raw: String = row.get(3)?;
+    let category = crate::moments::SpeakCategory::from_str(&category_raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, e.into())
+    })?;
+    let evidence_json: String = row.get(5)?;
+    let evidence = serde_json::from_str(&evidence_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, e.into())
+    })?;
+    let decision_raw: String = row.get(11)?;
+    let form: Option<String> = row.get(12)?;
+    let cost_i64: i64 = row.get(13)?;
+    let hold_reason: Option<String> = row.get(14)?;
+    let invalid = || {
+        rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, format!("utterance decision/form/hold_reason 組合無效：decision={decision_raw:?}, form={form:?}, cost={cost_i64}, hold_reason={hold_reason:?}").into())
+    };
+    let decision = match (decision_raw.as_str(), form.as_deref(), hold_reason.clone()) {
+        ("spoke", Some(form), None) => {
+            let form = match form {
+                "glimmer" => crate::gatekeeper::Form::Glimmer,
+                "one_line" => crate::gatekeeper::Form::OneLine,
+                "card" => crate::gatekeeper::Form::Card,
+                _ => return Err(invalid()),
+            };
+            let cost = u32::try_from(cost_i64).map_err(|_| invalid())?;
+            if cost != form.cost() {
+                return Err(invalid());
+            }
+            UtteranceDecision::Spoke { form, cost }
+        }
+        ("held", None, Some(reason)) if cost_i64 == 0 => UtteranceDecision::Held { reason },
+        _ => return Err(invalid()),
+    };
+    Ok(UtteranceRow {
+        id: row.get(0)?,
+        ts: row.get(1)?,
+        day_key: row.get(2)?,
+        category,
+        text: row.get(4)?,
+        evidence,
+        impact: row.get(6)?,
+        confidence: row.get(7)?,
+        timeliness: row.get(8)?,
+        evidence_strength: row.get(9)?,
+        score: row.get(10)?,
+        decision,
+        reaction: row.get(15)?,
+        reaction_at: row.get(16)?,
+        created_at: row.get(17)?,
+        tombstoned_at: row.get(18)?,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -9375,6 +9593,10 @@ mod tests {
             (
                 "reviewer_divergence",
                 "雙 pass 對不上的那幾筆；分歧是警報，不寫入 L3",
+            ),
+            (
+                "utterance",
+                "守門員從 L3/衍生訊號算出的候選、判決與反應；不是螢幕原件，刪 L0 時沿 provenance tombstone",
             ),
             ("text_fts", "text_chunks 的索引"),
             ("text_fts_uni", "text_chunks 的索引"),
