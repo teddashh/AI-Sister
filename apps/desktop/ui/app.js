@@ -38,6 +38,8 @@ const utteranceClose = document.querySelector("[data-utterance-close]");
 const utteranceOther = document.querySelector("[data-utterance-other]");
 const utteranceResult = document.querySelector("[data-utterance-result]");
 const gateDebug = document.querySelector("[data-gate-debug]");
+const suggestionButton = document.querySelector("[data-utterance-suggestion]");
+const handsLog = document.querySelector("[data-hands-log]");
 
 /**
  * Tauri 的 IPC。**在瀏覽器裡打開時是 null**，而那是刻意支援的：字母人整個
@@ -73,6 +75,10 @@ let activeUtteranceId = null;
 function paintGatekeeper(view) {
   const item = view?.display ?? null;
   const debug = view?.developer ?? null;
+  if (handsLog) {
+    const lines = view?.action_log ?? [];
+    handsLog.textContent = lines.length === 0 ? "還沒有提出過任何動作。" : `行動紀錄\n${lines.join("\n")}`;
+  }
   if (gateDebug) {
     gateDebug.hidden = debug === null;
     if (debug !== null) {
@@ -89,6 +95,8 @@ function paintGatekeeper(view) {
     utterance.hidden = true;
     utteranceActions.hidden = true;
     utteranceEvidence.replaceChildren();
+    suggestionButton.hidden = true;
+    suggestionButton.removeAttribute("data-commitment-id");
     return;
   }
   // 同一句話重畫一次不要把他讀到一半的回條擦掉。
@@ -98,6 +106,16 @@ function paintGatekeeper(view) {
   avatar.classList.add("has-something");
   utteranceResult.textContent = "";
   utteranceEvidence.replaceChildren();
+  if (item.suggestion === null) {
+    suggestionButton.hidden = true;
+    suggestionButton.removeAttribute("data-commitment-id");
+  } else {
+    suggestionButton.textContent = `要我幫你${item.suggestion.label}嗎`;
+    // 帶回去的是「哪一張承諾」，不是「要執行什麼」。要做什麼由 Rust 那邊
+    // 重讀一次資料庫決定——畫面說了不算。
+    suggestionButton.dataset.commitmentId = String(item.suggestion.commitment_id);
+    suggestionButton.hidden = false;
+  }
   for (const evidence of item.evidence ?? []) {
     const chip = document.createElement("button");
     chip.type = "button";
@@ -148,6 +166,17 @@ function reactToGatekeeper(close) {
 
 utteranceClose?.addEventListener("click", () => reactToGatekeeper(true));
 utteranceOther?.addEventListener("click", () => reactToGatekeeper(false));
+suggestionButton?.addEventListener("click", () => {
+  const raw = suggestionButton.dataset.commitmentId;
+  if (invoke === null || raw === undefined) return;
+  const commitmentId = Number(raw);
+  if (!Number.isInteger(commitmentId)) return;
+  suggestionButton.disabled = true;
+  invoke("hands_execute", { commitmentId }).then(
+    (message) => { utteranceResult.textContent = message; },
+    (error) => { utteranceResult.textContent = String(error); },
+  ).finally(() => { suggestionButton.disabled = false; });
+});
 
 /**
  * 現在到底有沒有人在錄。**這和 `paused` 是兩件事。**

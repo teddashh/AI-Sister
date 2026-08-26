@@ -18,6 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 use chrono::{Local, Timelike};
+use sister_core::gatekeeper_candidates::CommitmentRef;
 use sister_shell as bounds;
 use sister_shell::{PetState, Rect};
 use std::path::PathBuf;
@@ -28,6 +29,13 @@ use std::sync::{
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, PhysicalPosition, WindowEvent};
+
+mod hands;
+
+/// 行動紀錄那一欄一次顯示幾列。
+///
+/// 有上限就一定要講出被蓋掉了幾列——安靜地截斷會讀成「總共就這幾件事」。
+const ACTION_LOG_SHOWN: usize = 20;
 
 const PET: &str = "pet";
 const PET_W: i32 = 340;
@@ -129,12 +137,21 @@ struct GateDisplay {
     form: &'static str,
     text: String,
     evidence: Vec<GateEvidence>,
+    suggestion: Option<GateSuggestion>,
+}
+
+#[derive(Serialize)]
+struct GateSuggestion {
+    label: String,
+    /// 畫面按這個 id 回叫，不回叫要執行什麼——見 [`hands_execute`]。
+    commitment_id: i64,
 }
 
 #[derive(Serialize)]
 struct GatekeeperView {
     display: Option<GateDisplay>,
     developer: Option<GatekeeperDeveloper>,
+    action_log: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -288,11 +305,14 @@ fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, St
                 .map_err(|e| format!("{e:#}"))?;
             match verdict {
                 Verdict::Speak { form, cost: _ } => {
+                    let reference = CommitmentRef::from_candidate(candidate.commitment_id);
+                    let suggestion = gate_suggestion(db, &reference, &mut holds)?;
                     display = Some(GateDisplay {
                         utterance_id: id,
                         form: form.as_str(),
                         text: candidate.text,
                         evidence: frame_chips(&candidate.evidence),
+                        suggestion,
                     });
                 }
                 Verdict::Hold(reason) => holds.push(reason.message()),
@@ -307,11 +327,14 @@ fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, St
                     return Err("pending 裡混進了一列 held——濾網壞了".into());
                 }
             };
+            let reference = CommitmentRef::from_evidence(&row.evidence);
+            let suggestion = gate_suggestion(db, &reference, &mut holds)?;
             display = Some(GateDisplay {
                 utterance_id: row.id,
                 form,
                 text: row.text,
                 evidence: frame_chips(&row.evidence),
+                suggestion,
             });
         }
         let developer = if config.shell.developer_mode {
@@ -325,8 +348,76 @@ fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, St
         } else {
             None
         };
-        Ok(GatekeeperView { display, developer })
+        let action_log = match &shell.data_dir {
+            Some(dir) => sister_hands::ActionLog::in_data_dir(dir)
+                .replay()
+                .map(|replay| hands::recent_replay_lines(&replay, ACTION_LOG_SHOWN))
+                .map_err(|e| format!("讀 action log 失敗：{e:#}"))?,
+            None => vec!["這台機器上找不到資料目錄，action log 讀不到。".into()],
+        };
+        Ok(GatekeeperView { display, developer, action_log })
     })
+}
+
+/// 這張卡上要不要放「要我幫你…嗎」那顆按鈕。
+///
+/// 每一種不放按鈕的理由都各自留一句話給開發者模式看。安靜地回 `None` 的只有
+/// 一種：這張卡根本不是在講承諾，那本來就沒有什麼下一步可做。
+fn gate_suggestion(
+    db: &sister_core::db::Db,
+    reference: &CommitmentRef,
+    developer_lines: &mut Vec<String>,
+) -> Result<Option<GateSuggestion>, String> {
+    use sister_hands::commitment_action::{AllowedNextStep, parse_allowed_next_step};
+    if let Some(why) = reference.why_no_button() {
+        developer_lines.push(why);
+    }
+    let CommitmentRef::One(id) = reference else {
+        return Ok(None);
+    };
+    let id = *id;
+    let row = db
+        .commitment_by_id(id)
+        .map_err(|e| format!("讀承諾 #{id} 失敗：{e:#}"))?;
+    // 承諾可以被 `forget` 的血緣 cascade 整列刪掉，而那句話還掛在畫面上。
+    // 這不該讓整個 gatekeeper 面板變成一句錯誤訊息、把她要講的話一起吃掉。
+    let Some(row) = row else {
+        developer_lines.push(format!("這句話指向的承諾 #{id} 已經不在了，所以不放按鈕。"));
+        return Ok(None);
+    };
+    match parse_allowed_next_step(row.allowed_next_step.as_deref()) {
+        AllowedNextStep::Missing => Ok(None),
+        AllowedNextStep::Unparseable { raw, reason } => {
+            developer_lines.push(format!("承諾 #{id} 的下一步讀不懂：{reason}；原文：{raw}"));
+            Ok(None)
+        }
+        AllowedNextStep::Suggestion(button) => Ok(Some(GateSuggestion {
+            label: button.describe(),
+            commitment_id: id,
+        })),
+    }
+}
+
+/// 按下那顆按鈕。
+///
+/// **參數是承諾的 id，不是要執行的動作。** 畫面送回來的字不會被拿去執行——
+/// 要做什麼由這裡重新去資料庫讀一次。差別在於：前者是「畫面說要開這個」，
+/// 後者是「她自己提過要開這個」，而 SPEC §9.7 要的是後者。
+#[tauri::command(async)]
+fn hands_execute(commitment_id: i64, shell: tauri::State<'_, Shell>) -> Result<String, String> {
+    let data_dir = shell
+        .data_dir
+        .as_deref()
+        .ok_or_else(|| "這台機器上找不到資料目錄，沒有動手。".to_string())?;
+    let raw = with_db(&shell, |db| {
+        let row = db
+            .commitment_by_id(commitment_id)
+            .map_err(|e| format!("讀承諾 #{commitment_id} 失敗：{e:#}"))?
+            .ok_or_else(|| format!("承諾 #{commitment_id} 已經不在了，沒有動手。"))?;
+        row.allowed_next_step
+            .ok_or_else(|| format!("承諾 #{commitment_id} 上沒有寫下一步，沒有動手。"))
+    })?;
+    hands::execute_logged(data_dir, &raw, sister_core::now_ms())
 }
 
 /// evidence ref 裡指得到畫面的那幾個，變成可以點開的 chip。
@@ -2995,6 +3086,7 @@ fn main() {
             hotkey_set
             ,gatekeeper_check
             ,gatekeeper_react
+            ,hands_execute
         ])
         .setup(|app| {
             let win = app

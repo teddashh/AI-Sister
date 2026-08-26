@@ -139,7 +139,7 @@ fn commitment_candidate(row: &CommitmentRow) -> anyhow::Result<Option<Candidate>
     let evidence: Vec<String> = serde_json::from_str(&row.evidence_json).unwrap_or_default();
     let mut refs = vec![format!("commitment:{}", row.id)];
     refs.extend(evidence);
-    Candidate::new(
+    let mut candidate = Candidate::new(
         SpeakCategory::CommitmentDue,
         format!("「{}」的時間快到了。", row.text),
         refs,
@@ -147,8 +147,69 @@ fn commitment_candidate(row: &CommitmentRow) -> anyhow::Result<Option<Candidate>
         row.confidence,
         0.9,
         1.0,
-    )
-    .map(Some)
+    )?;
+    candidate.commitment_id = Some(row.id);
+    Ok(Some(candidate))
+}
+
+/// 一張已經存下來的話，evidence 裡指到哪一張承諾卡。
+///
+/// **三個答案，不是兩個。** 「這張卡根本不是在講承諾」和「這張卡同時指到兩張
+/// 承諾、我不猜是哪一張」在畫面上會長得一樣（都沒有按鈕），但只有後者是需要
+/// 有人去看一眼的異常。折成同一個 `None` 的那天，第二種就安靜地消失了。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitmentRef {
+    /// evidence 裡沒有 `commitment:` ——這張卡講的不是承諾。
+    None,
+    One(i64),
+    /// 指到不只一張。**不猜。**
+    Ambiguous {
+        ids: Vec<i64>,
+    },
+}
+
+impl CommitmentRef {
+    /// 只認完整的 `commitment:<i64>` schema，不在文案裡找數字。
+    pub fn from_evidence(evidence: &[String]) -> Self {
+        let ids: Vec<i64> = evidence
+            .iter()
+            .filter_map(|value| {
+                value
+                    .strip_prefix("commitment:")
+                    .and_then(|id| id.parse::<i64>().ok())
+            })
+            .collect();
+        match ids.len() {
+            0 => Self::None,
+            1 => Self::One(ids[0]),
+            _ => Self::Ambiguous { ids },
+        }
+    }
+
+    /// 候選是活的時候，是誰生的它本來就記著，不必從 evidence 反推。
+    pub fn from_candidate(commitment_id: Option<i64>) -> Self {
+        match commitment_id {
+            Some(id) => Self::One(id),
+            None => Self::None,
+        }
+    }
+
+    /// 為什麼這張卡上沒有那顆按鈕——沒什麼好解釋的時候回 `None`。
+    pub fn why_no_button(&self) -> Option<String> {
+        match self {
+            // 這張卡不是在講承諾，本來就不會有下一步可做。
+            Self::None => None,
+            Self::One(_) => None,
+            Self::Ambiguous { ids } => Some(format!(
+                "這句話同時指到 {} 張承諾（{}），不知道按鈕該對哪一張，所以不放按鈕。",
+                ids.len(),
+                ids.iter()
+                    .map(|id| format!("#{id}"))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )),
+        }
+    }
 }
 
 fn stuck_candidate(signal: &StuckSignal) -> anyhow::Result<Candidate> {
@@ -251,8 +312,11 @@ mod tests {
             tombstoned_at: None,
         };
 
-        let explicit = super::commitment_candidate(&row("explicit")).unwrap();
-        assert_eq!(explicit.unwrap().category, SpeakCategory::CommitmentDue);
+        let explicit = super::commitment_candidate(&row("explicit"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(explicit.category, SpeakCategory::CommitmentDue);
+        assert_eq!(explicit.commitment_id, Some(7));
         assert!(
             super::commitment_candidate(&row("inferred"))
                 .unwrap()
@@ -541,5 +605,33 @@ mod tests {
                 .unwrap();
         assert!(candidate.text.contains(&super::spoken_day(&day)));
         assert_ne!(day, crate::local_day::local_day_key(now).unwrap());
+    }
+
+    /// 「不是承諾」和「同時指到兩張承諾」不能是同一個答案。
+    ///
+    /// 兩種在畫面上都是「沒有按鈕」，所以看畫面分不出來。差別在開發者那一欄：
+    /// 只有第二種要留下一句話。折回 `Option<i64>` 的那天，第二種會安靜地消失，
+    /// 而它正是那種需要有人去看一眼的狀況。
+    #[test]
+    fn a_card_naming_two_commitments_is_not_a_card_naming_none() {
+        use super::CommitmentRef;
+        let none = CommitmentRef::from_evidence(&["frame:1".into(), "segment:9".into()]);
+        assert_eq!(none, CommitmentRef::None);
+        assert_eq!(none.why_no_button(), None);
+
+        let one = CommitmentRef::from_evidence(&["commitment:7".into(), "frame:1".into()]);
+        assert_eq!(one, CommitmentRef::One(7));
+        assert_eq!(one.why_no_button(), None);
+
+        let two = CommitmentRef::from_evidence(&["commitment:7".into(), "commitment:8".into()]);
+        assert_eq!(two, CommitmentRef::Ambiguous { ids: vec![7, 8] });
+        let why = two.why_no_button().expect("兩張承諾要留下一句話");
+        assert!(why.contains("#7") && why.contains("#8"), "{why}");
+
+        // `commitment:` 只認完整 schema，不在文案裡撈數字。
+        assert_eq!(
+            CommitmentRef::from_evidence(&["承諾 7 快到了".into(), "commitment:x".into()]),
+            CommitmentRef::None
+        );
     }
 }

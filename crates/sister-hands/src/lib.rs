@@ -1,7 +1,7 @@
 //! Phase 6 的平台無關 hands 邊界。
 //!
-//! 目前只有 `observe` 與必須由按鈕觸發的 `suggest`。後續權限級別刻意不先放進
-//! [`Level`]；真正開 URL、檔案或聚焦視窗的平台接線也由呼叫端實作 [`Executor`]。
+//! 目前有 `observe`、必須由按鈕觸發的 `suggest`，以及受 grant 和逐步核准約束的
+//! `semi-action`。真正開 URL、檔案或聚焦視窗的平台接線由呼叫端實作 [`Executor`]。
 //!
 //! **這個 crate 不依賴 `sister-core`，`sister-core` 也不依賴它。** hands 在
 //! SPEC §9 裡是物理隔離的 sidecar；讓記憶那一層編進行動那一層，是把隔離
@@ -17,18 +17,20 @@ use std::{
 };
 
 pub mod commitment_action;
+pub mod semi_action;
+pub mod target_policy;
 
 /// 權限階梯（SPEC §9.1）。
 ///
-/// **只有兩級。** `semi-action` 和 `takeover` 這一版不放進來：一個永遠走不到
-/// 的 variant 等於在程式碼裡宣布一個還不存在的能力，而下一個人讀到它會以為
-/// 那條路通了。
+/// `takeover` 尚未實作，因此不先放進來。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
     /// 預設。物理上沒有手——[`execute_with`] 在這一級一律拒絕。
     Observe,
     /// 可開 URL／檔案／聚焦視窗，且**僅限使用者點按鈕觸發**。
     Suggest,
+    /// 結構化任務授權 + 綁定具體內容的逐步核准。
+    SemiAction,
 }
 
 /// 只能由 UI 的 suggestion 按鈕 click handler 鑄出的憑證。
@@ -213,6 +215,16 @@ pub enum RefusalReason {
     ObserveHasNoHands,
     /// 落在永不繼承的五類裡，要單獨核准（SPEC §9.2）。
     NeverInherited { class: NeverInherited },
+    /// `semi-action` 必須走會讀 grant 與步級核准的隘口。
+    SemiActionNeedsGrantAndStepApproval,
+    /// grant 的四維 scope 裡有一維不涵蓋這一步（SPEC §9.1）。
+    NotCoveredByGrant {
+        rejection: semi_action::GrantRejection,
+    },
+    /// 手上那張核准票是對**另一步**簽的（SPEC §9.7）。
+    ApprovalWasForAnotherStep {
+        mismatch: semi_action::ApprovalMismatch,
+    },
 }
 
 impl RefusalReason {
@@ -225,6 +237,11 @@ impl RefusalReason {
                 "「{}」不隨任務授權繼承，每一次都要單獨核准——這一步沒有做。",
                 class.name()
             ),
+            Self::SemiActionNeedsGrantAndStepApproval => {
+                "semi-action 需要結構化 grant 和顯示的那一步核准；不可走 suggest 隘口。".to_string()
+            }
+            Self::NotCoveredByGrant { rejection } => rejection.message().to_string(),
+            Self::ApprovalWasForAnotherStep { mismatch } => mismatch.message(),
         }
     }
 }
@@ -264,6 +281,11 @@ pub fn execute_with(
             };
         }
         Level::Suggest => {}
+        Level::SemiAction => {
+            return Outcome::Refused {
+                reason: RefusalReason::SemiActionNeedsGrantAndStepApproval,
+            };
+        }
     }
     // 今天走不到：`suggest` 的三種動作都不在那五類裡。留著是因為下一個人
     // 加第四種動作時，`never_inherited_class` 會**編譯錯誤**逼他回答，
@@ -309,6 +331,23 @@ pub enum ActionEvent {
         at_ms: i64,
         action: ActionSnapshot,
         reason: RefusalReason,
+    },
+    /// 一步做完後的畫面憑據；`None` 明確表示沒有取得，不表示驗證成功。
+    StepFinished {
+        at_ms: i64,
+        step_number: u32,
+        action: ActionSnapshot,
+        evidence: Option<semi_action::ScreenEvidenceRef>,
+    },
+    /// 硬中止不回滾先前步驟，並記錄停在哪與誰喊停。
+    Aborted {
+        at_ms: i64,
+        after_completed_steps: u32,
+        by: semi_action::AbortActor,
+    },
+    Concluded {
+        at_ms: i64,
+        conclusion: semi_action::RunConclusionRecord,
     },
 }
 

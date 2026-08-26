@@ -49,12 +49,14 @@
         <p class="utterance-text" data-utterance-text></p>
         <div class="utterance-evidence" data-utterance-evidence></div>
         <div class="utterance-actions" data-utterance-actions>
+          <button type="button" data-utterance-suggestion hidden></button>
           <button type="button" data-utterance-close>結案</button>
           <button type="button" data-utterance-other>其他</button>
         </div>
         <p class="utterance-result" data-utterance-result></p>
       </section>
       <aside class="gate-debug" data-gate-debug hidden></aside>
+      <aside class="hands-log" data-hands-log aria-label="行動紀錄"></aside>
       <!-- 每一筆答案都掛著出處。沒有出處的那一行不會出現在這裡。 -->
       <ul class="hits" data-hits hidden></ul>
     </main>

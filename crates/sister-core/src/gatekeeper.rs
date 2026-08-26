@@ -24,6 +24,8 @@ pub struct Candidate {
     pub confidence: f64,
     pub timeliness: f64,
     pub evidence_strength: f64,
+    /// 只有承諾到期候選有。讓行動接線不必從顯示文字猜是哪張卡。
+    pub commitment_id: Option<i64>,
 }
 
 impl Candidate {
@@ -55,6 +57,7 @@ impl Candidate {
             confidence,
             timeliness,
             evidence_strength,
+            commitment_id: None,
         })
     }
 

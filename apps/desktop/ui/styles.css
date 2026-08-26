@@ -231,6 +231,11 @@ body {
 .utterance-evidence, .utterance-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .utterance-actions button, .utterance-evidence button { border: 0; border-radius: 999px; cursor: pointer; padding: 5px 9px; }
 .gate-debug { font: 11px/1.5 monospace; opacity: .7; white-space: pre-line; }
+/* 會動手的那顆，和「結案／其他」長得不一樣：按下去是有東西真的會被打開的。 */
+.utterance-actions button[data-utterance-suggestion] { background: #2f6fd0; color: #fff; font-weight: 600; }
+/* `pre-line` 不是裝飾：這一欄是用 `\n` 接起來的，少了它整份紀錄會擠成一行。 */
+.hands-log { display: block; font: 11px/1.5 monospace; opacity: .75; white-space: pre-line; margin-top: 8px; }
+.hands-log:empty { display: none; }
 
 @keyframes breathe {
   0%,

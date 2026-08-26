@@ -39,7 +39,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sister-core = { path = "../../../crates/sister-core", default-features = false }
 sister-shell = { path = "../../../crates/sister-shell" }
+sister-hands = { path = "../../../crates/sister-hands" }
 tauri-plugin-global-shortcut = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 lto = "thin"
