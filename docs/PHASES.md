@@ -289,9 +289,18 @@ capture 層本身就是 recorder。
 **Exit criteria**
 - [ ] `+interpreter+reviewer` 在題庫上答案正確率顯著 > baseline（門檻：+10pt 以上），
       且誤承諾率（幽靈承諾/killed-by-user 比例）< 20%。
-- [ ] 回查率公開量測（Reviewer 實際翻原件的比例）。
+- [x] 回查率公開量測（Reviewer 實際翻原件的比例）。〔alpha.59：`reviewer_run`
+      記 runs/candidates/rechecks，`sister review` 和 `sister brain log` 都印。
+      「沒跑過」「跑了沒有五類候選」「有候選一次都沒回查」是三句不同的話〕
 - [ ] 成本實測 ≤ SPEC §13 預算（預設檔位 < US$15/月換算）。
-- [ ] 刪除 cascade 驗證：刪一段 L0，衍生 L2/L3 全部 tombstone（自動化測試）。
+      〔`eval.rs` 的 `model_calls` / `model_usd_per_day` 目前恆為 0——
+      replay 路徑不呼叫模型，所以今天是誠實的；A/B 接上就必須真的量〕
+- [x] 刪除 cascade 驗證：刪一段 L0，衍生 L2/L3 全部 tombstone（自動化測試）。
+      〔alpha.59：三條測試在 `retention.rs`。墓碑**連內容一起清掉**——
+      只蓋日期的話，查詢看不到而人名和金額還在檔案裡（鐵律 2：L0 刪掉之後
+      那張卡片就是那段內容唯一的載體）。cascade 也殺根，不只殺子代：
+      `migrate_012` 不回填 provenance，只走子代的話升級上來的舊卡片
+      全部變成刪不掉的〕
 - [ ] 兩週自用：日摘要可讀、承諾表 ≥ 70% 是真的（其餘可一鍵結案不煩人）。
 
 **明確不做**：她仍然不主動開口。大腦是沉默的。
