@@ -206,12 +206,15 @@ pub fn day_changed(previous: &str, now: Millis) -> bool {
 
 /// 日終這一輪該不該跑。
 ///
+/// - `last_eod_day`：最近一次成功日終的 run stamp（哪一天跑的），
+///   只用來擋同一天再跑一輪。
+/// - `yesterday_summarized`：昨天有沒有被盤點過。不是昨天有沒有跑過一輪。
 /// - `day_just_changed`：這一場錄製親眼看到 `local_day_key` 變了。
-/// - 否則是補跑：昨天有 L0、而昨天／今天都還沒有成功的日終。
+/// - 否則是補跑：昨天有 L0、而且昨天還沒被盤點過。
 pub fn eod_due(
     today: &str,
-    yesterday: Option<&str>,
     last_eod_day: Option<&str>,
+    yesterday_summarized: bool,
     yesterday_has_l0: bool,
     day_just_changed: bool,
 ) -> bool {
@@ -221,7 +224,7 @@ pub fn eod_due(
     if day_just_changed {
         return true;
     }
-    yesterday_has_l0 && last_eod_day != yesterday
+    yesterday_has_l0 && !yesterday_summarized
 }
 
 fn ms_until_next_local_day(now: Millis) -> Option<Millis> {
@@ -515,10 +518,14 @@ impl Engine {
             .and_then(local_day::local_day_bounds)
             .map(|(from, to)| self.db.has_l0_in_range(from, to).unwrap_or(false))
             .unwrap_or(false);
+        let yesterday_summarized = yesterday
+            .as_deref()
+            .map(|d| self.db.has_reviewer_eod_for_day(d).unwrap_or(false))
+            .unwrap_or(false);
         if !eod_due(
             &today,
-            yesterday.as_deref(),
             last_eod.as_deref(),
+            yesterday_summarized,
             yesterday_has_l0,
             day_just_changed,
         ) {
@@ -715,7 +722,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::consent::{Consent, Sheet};
-    use crate::db::Db;
+    use crate::db::{DaySummaryGlance, Db, L2Author, L2Insert};
     use crate::heartbeat;
     use crate::model::{FocusEvent, FocusKind, FocusSnapshot, FrameCapture, OcrBlock};
     use chrono::{Local, LocalResult, TimeZone};
@@ -834,6 +841,64 @@ mod tests {
         crate::consent::save(dir, &c).expect("consent");
     }
 
+    fn local_ms(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> Option<Millis> {
+        match Local.with_ymd_and_hms(year, month, day, hour, min, sec) {
+            LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => Some(dt.timestamp_millis()),
+            LocalResult::None => None,
+        }
+    }
+
+    /// 那一天有 L0（focus）和一張 L2，日終才寫得出 Live 摘要。
+    fn seed_day_with_card(db: &mut Db, ts: Millis, activity: &str) {
+        let sid = db.start_session("test", "0").expect("session");
+        db.insert_focus(
+            sid,
+            &FocusEvent {
+                ts,
+                kind: FocusKind::Focus,
+                snapshot: FocusSnapshot {
+                    app_id: Some("code.exe".into()),
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("focus");
+        db.insert_l2_card(&L2Insert {
+            segment_core_start: ts,
+            segment_ref: &format!("segment:{ts}"),
+            activity,
+            entities_json: "[]".into(),
+            continues_json: None,
+            commitments_json: "[]".into(),
+            model_confidence: 0.6,
+            evidence_json: "[]".into(),
+            open_questions_json: "[]".into(),
+            author: L2Author::Interpreter,
+        })
+        .expect("l2");
+    }
+
+    fn dummy_reviewer_brain() -> BrainConfig {
+        BrainConfig {
+            command: "python3".into(),
+            args: vec!["-c".into(), "import sys; sys.stdin.buffer.read()".into()],
+            ..Default::default()
+        }
+    }
+
+    fn assert_live_summary(db: &Db, date: &str, activity: &str) {
+        match db.day_summary_glance(date).unwrap() {
+            DaySummaryGlance::Live {
+                date: d, clauses, ..
+            } => {
+                assert_eq!(d, date);
+                let texts: Vec<&str> = clauses.iter().map(|c| c.text.as_str()).collect();
+                assert_eq!(texts, [activity], "{date} 的摘要對不上");
+            }
+            other => panic!("{date} 該是 Live，實際是 {other:?}"),
+        }
+    }
+
     #[test]
     fn silence_sentences_are_not_the_same() {
         let unarmed = format_report(&Report::unarmed());
@@ -917,37 +982,34 @@ mod tests {
 
     #[test]
     fn eod_due_only_when_the_day_ended() {
+        // `yesterday_summarized` 刻意餵 false：不變式成立的時候這一組不會出現
+        // （今天 stamp 的那一輪盤點的就是昨天），所以餵 true 的話最後一行自己
+        //  就是 false，這句話會在 guard 完全沒出力的情況下通過——實測拿掉
+        // `last_eod_day == Some(today)` 那道 guard，十六條 wakeup 測試全綠。
+        // 這道 guard 守的是「不變式破了也不准同一天燒兩次大腦預算」。
         assert!(
-            !eod_due(
-                "2026-08-26",
-                Some("2026-08-25"),
-                Some("2026-08-26"),
-                true,
-                false
-            ),
+            !eod_due("2026-08-26", Some("2026-08-26"), false, true, false),
             "今天已經日終過了還要跑"
         );
         assert!(
-            eod_due("2026-08-26", Some("2026-08-25"), None, true, false),
+            eod_due("2026-08-26", None, false, true, false),
             "昨天有資料、從來沒日終，要補"
         );
         assert!(
-            !eod_due("2026-08-26", Some("2026-08-25"), None, false, false),
+            !eod_due("2026-08-26", None, false, false, false),
             "昨天沒有 L0 卻補跑"
         );
         assert!(
-            eod_due("2026-08-26", Some("2026-08-25"), None, false, true),
+            eod_due("2026-08-26", None, false, false, true),
             "親眼看到換日卻不跑"
         );
         assert!(
-            !eod_due(
-                "2026-08-26",
-                Some("2026-08-25"),
-                Some("2026-08-25"),
-                true,
-                false
-            ),
+            !eod_due("2026-08-26", Some("2026-08-25"), true, true, false),
             "昨天已經日終過了還補"
+        );
+        assert!(
+            eod_due("2026-08-26", Some("2026-08-25"), false, true, false),
+            "昨天有 L0、上一輪 stamp 在昨天（盤點的是前天），昨天自己還沒被盤點"
         );
     }
 
@@ -1381,5 +1443,202 @@ mod tests {
         assert!(text.contains("沒有值得理解的訊號可想"), "{text}");
         assert!(!text.contains("沒想完"), "{text}");
         assert!(text.contains("一次都沒醒"), "{text}");
+    }
+
+    /// 連續三天早上開機、都不跨午夜：每一天都該被盤點到，一天一次。
+    /// 時間是餵進去的，不是真的等到明天。
+    #[test]
+    fn three_weekday_mornings_each_summarize_yesterday() {
+        let tmp = Tmp::new("three-mornings");
+        grant_cloud(&tmp.0);
+        let brain = dummy_reviewer_brain();
+
+        let Some(sunday) = local_ms(2026, 8, 23, 14, 0, 0) else {
+            return;
+        };
+        let Some(monday) = local_ms(2026, 8, 24, 14, 0, 0) else {
+            return;
+        };
+        let Some(tuesday) = local_ms(2026, 8, 25, 14, 0, 0) else {
+            return;
+        };
+        let Some(monday_am) = local_ms(2026, 8, 24, 9, 0, 0) else {
+            return;
+        };
+        let Some(tuesday_am) = local_ms(2026, 8, 25, 9, 0, 0) else {
+            return;
+        };
+        let Some(wednesday_am) = local_ms(2026, 8, 26, 9, 0, 0) else {
+            return;
+        };
+
+        let sun = brain::local_day_key(sunday).expect("sun");
+        let mon = brain::local_day_key(monday).expect("mon");
+        let tue = brain::local_day_key(tuesday).expect("tue");
+        assert_eq!(sun, "2026-08-23");
+        assert_eq!(mon, "2026-08-24");
+        assert_eq!(tue, "2026-08-25");
+
+        {
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            seed_day_with_card(&mut db, sunday, "星期天改測試");
+        }
+        {
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let mut engine =
+                Engine::new(db, tmp.0.clone(), brain.clone(), monday_am).expect("engine");
+            engine.catch_up(monday_am).expect("monday morning");
+            assert!(
+                engine.report.reviewer_eod_runs >= 1,
+                "星期一早上該補星期天：{:?}",
+                engine.report
+            );
+            assert_live_summary(&engine.db, &sun, "星期天改測試");
+        }
+
+        {
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            seed_day_with_card(&mut db, monday, "星期一讀 SPEC");
+        }
+        {
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let mut engine =
+                Engine::new(db, tmp.0.clone(), brain.clone(), tuesday_am).expect("engine");
+            engine.catch_up(tuesday_am).expect("tuesday morning");
+            assert!(
+                engine.report.reviewer_eod_runs >= 1,
+                "星期二早上該補星期一：{:?}",
+                engine.report
+            );
+            assert_live_summary(&engine.db, &mon, "星期一讀 SPEC");
+        }
+
+        {
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            seed_day_with_card(&mut db, tuesday, "星期二寫 RESULT");
+        }
+        {
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let mut engine =
+                Engine::new(db, tmp.0.clone(), brain.clone(), wednesday_am).expect("engine");
+            engine.catch_up(wednesday_am).expect("wednesday morning");
+            assert!(
+                engine.report.reviewer_eod_runs >= 1,
+                "星期三早上該補星期二：{:?}",
+                engine.report
+            );
+            assert_live_summary(&engine.db, &tue, "星期二寫 RESULT");
+        }
+
+        let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+        assert_live_summary(&db, &sun, "星期天改測試");
+        assert_live_summary(&db, &mon, "星期一讀 SPEC");
+        assert_live_summary(&db, &tue, "星期二寫 RESULT");
+    }
+
+    /// 同一天重開錄製兩次，日終不會跑第二次。
+    #[test]
+    fn the_same_morning_does_not_run_eod_twice() {
+        let tmp = Tmp::new("same-morning");
+        grant_cloud(&tmp.0);
+        let brain = dummy_reviewer_brain();
+
+        let Some(sunday) = local_ms(2026, 8, 23, 14, 0, 0) else {
+            return;
+        };
+        let Some(monday_am) = local_ms(2026, 8, 24, 9, 0, 0) else {
+            return;
+        };
+        let sun = brain::local_day_key(sunday).expect("sun");
+        let mon = brain::local_day_key(monday_am).expect("mon");
+        assert_eq!(sun, "2026-08-23");
+        assert_eq!(mon, "2026-08-24");
+
+        {
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            seed_day_with_card(&mut db, sunday, "星期天改測試");
+        }
+        {
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let mut engine =
+                Engine::new(db, tmp.0.clone(), brain.clone(), monday_am).expect("engine");
+            engine.catch_up(monday_am).expect("first boot");
+            assert!(
+                engine.report.reviewer_eod_runs >= 1,
+                "第一次開機該補星期天：{:?}",
+                engine.report
+            );
+            assert_live_summary(&engine.db, &sun, "星期天改測試");
+            assert_eq!(
+                engine.db.last_reviewer_eod_day().unwrap().as_deref(),
+                Some(mon.as_str())
+            );
+        }
+        {
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let mut engine = Engine::new(db, tmp.0.clone(), brain, monday_am).expect("engine");
+            engine.catch_up(monday_am).expect("second boot");
+            assert_eq!(
+                engine.report.reviewer_eod_runs, 0,
+                "同一天再開不該再跑日終：{:?}",
+                engine.report
+            );
+            assert_live_summary(&engine.db, &sun, "星期天改測試");
+            assert_eq!(
+                engine.db.last_reviewer_eod_day().unwrap().as_deref(),
+                Some(mon.as_str())
+            );
+        }
+    }
+
+    /// 關機三天後開機只補昨天。更早的日子仍是 NeverRan。
+    #[test]
+    fn catch_up_after_three_days_off_only_summarizes_yesterday() {
+        let tmp = Tmp::new("three-days-off");
+        grant_cloud(&tmp.0);
+        let brain = dummy_reviewer_brain();
+
+        let Some(friday) = local_ms(2026, 8, 21, 14, 0, 0) else {
+            return;
+        };
+        let Some(saturday) = local_ms(2026, 8, 22, 14, 0, 0) else {
+            return;
+        };
+        let Some(sunday) = local_ms(2026, 8, 23, 14, 0, 0) else {
+            return;
+        };
+        let Some(monday_am) = local_ms(2026, 8, 24, 9, 0, 0) else {
+            return;
+        };
+        let fri = brain::local_day_key(friday).expect("fri");
+        let sat = brain::local_day_key(saturday).expect("sat");
+        let sun = brain::local_day_key(sunday).expect("sun");
+        assert_eq!(fri, "2026-08-21");
+        assert_eq!(sat, "2026-08-22");
+        assert_eq!(sun, "2026-08-23");
+
+        {
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            seed_day_with_card(&mut db, friday, "星期五改測試");
+            seed_day_with_card(&mut db, saturday, "星期六讀 SPEC");
+            seed_day_with_card(&mut db, sunday, "星期天寫 RESULT");
+        }
+        {
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let mut engine = Engine::new(db, tmp.0.clone(), brain, monday_am).expect("engine");
+            engine.catch_up(monday_am).expect("monday morning");
+            assert!(
+                engine.report.reviewer_eod_runs >= 1,
+                "星期一早上該補星期天：{:?}",
+                engine.report
+            );
+            assert_live_summary(&engine.db, &sun, "星期天寫 RESULT");
+            for (date, why) in [(fri.as_str(), "星期五"), (sat.as_str(), "星期六")] {
+                match engine.db.day_summary_glance(date).unwrap() {
+                    DaySummaryGlance::NeverRan { date: d } => assert_eq!(d, date),
+                    other => panic!("{why} 沒被盤點，該是 NeverRan，實際是 {other:?}"),
+                }
+            }
+        }
     }
 }
