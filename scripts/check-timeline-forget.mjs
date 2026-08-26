@@ -85,6 +85,10 @@ function erasure(over = {}) {
     events: 4,
     queries: 0,
     sessions: 0,
+    // 她替他動過的手（alpha.69）。後端這一欄不在資料庫裡，是 `forget_preview`
+    // 和 `forget_range` 各自問 `ActionLog` 補上的——所以它正是最容易在這裡被
+    // 漏抄的那一種。
+    actions: 0,
     failed: [],
     missing: 0,
     // 預覽算不出「刪完之後」——`null` 是「沒問過」，不是 0。
@@ -278,13 +282,24 @@ console.log("⑥ 那份預覽要對得起帳：說不見的、說留下來的，
   // 這三欄是 `timeline.js` 裡花最多字論證的那一段，而在這一版之前，這支測試
   // 一欄都沒送過——`ghosts()` 和 `leftover()` 從頭到尾沒跑過一行。
   const p = await open({
-    forget_preview: erasure({ missing: 12 }),
-    forget_range: erasure({ missing: 12, sessions: 2, sessions_left: 1, shell_beat: "booting" }),
+    forget_preview: erasure({ missing: 12, actions: 3 }),
+    forget_range: erasure({
+      missing: 12,
+      sessions: 2,
+      actions: 3,
+      sessions_left: 1,
+      shell_beat: "booting",
+    }),
   });
   await p.press();
   check("預覽就說得出那 12 列的圖早就不在磁碟上", p.say().includes("12 列"), p.say());
+  // 她替他動過的手是這幾類裡最敏感的一種（完整的網址與檔案路徑），而它到
+  // alpha.69 才第一次有人刪、有人列。「刪掉了卻沒有列出來」是這一支上面那
+  // 三段註解各講過一次的同一件事，這是第四次。
+  check("預覽就講得出那段時間她動過幾次手", p.say().includes("3 件"), p.say());
   await p.press();
   check("刪完那句也講同一件事", p.say().includes("12 列"), p.say());
+  check("刪完也要講她動過的手，不可以只在預覽出現", p.say().includes("3 件"), p.say());
   check("「錄製的紀錄」自己算一項", p.say().includes("2 場錄製的紀錄"), p.say());
   // `shell_beat` 三種的下一步不一樣，而它上一版是一個布林——分不出來的時候
   // 那句話會變成「她正在錄，**或**正在開機」，而開機那幾分鐘裡它是假的。

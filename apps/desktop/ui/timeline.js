@@ -896,6 +896,10 @@ function scale(e) {
   // 會說「這一段本來就是空的，沒有東西可以忘」——然後刪掉那份他在電腦前的
   // 紀錄。和上面題庫、畫面紀錄那兩段是同一個故事，第三次。
   if (e.sessions > 0) bits.push(`${e.sessions} 場錄製的紀錄`);
+  // 她按他的指示動過的手（`action-log.jsonl`，alpha.69）。**同一個故事第四
+  // 次**：一類東西被刪掉了，卻沒有出現在這張清單上。而這一次那類東西是完整
+  // 的網址和檔案路徑——這幾類裡最敏感的一種。
+  if (e.actions > 0) bits.push(`${e.actions} 件她替他動過的手`);
   return bits;
 }
 
@@ -2235,6 +2239,10 @@ function fakeBackend(mode = "1") {
           // ——而假後端到現在都還沒給，所以修好之後那一行在這台機器上還是
           // 看不到。同一根釘子的第三個位置。
           queries: Math.ceil(gone.length / 4),
+          // 她替他動過的手。假後端不給的話，`scale()` 裡新加的那一行在這台
+          // 機器上永遠是 0，也就永遠看不到——上面 `queries` 那段註解講的正是
+          // 這件事。同一根釘子的第四個位置。
+          actions: Math.ceil(gone.length / 5),
           failed: [],
           missing,
           // 「那一場錄製」本身，以及**沒被帶走的那一列**。

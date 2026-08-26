@@ -2689,6 +2689,13 @@ struct Erasure {
     /// 卻證明他那段時間坐在電腦前的紀錄。那張表以前誰都不刪，而這一頁那顆
     /// 按鈕上寫的是「忘掉」。見 `retention::delete_empty_sessions`。
     sessions: u64,
+    /// 那段時間裡她按你的指示動過幾次手（`action-log.jsonl`）。
+    ///
+    /// **這一欄不在資料庫裡**，所以 `From<PruneReport>` 給不出它，兩個呼叫端
+    /// 各自要補。上面那一段講題庫、畫面紀錄、錄製紀錄的註解，講的都是同一個
+    /// 故事：一類東西被刪掉了、卻沒有出現在這張清單上。這是第四次，而這一次
+    /// 那類東西是完整的網址和檔案路徑。
+    actions: u64,
     /// 刪不掉的檔案。**不吞掉**：那幾張截圖還躺在磁碟上，而使用者以為
     /// 它們已經不在了。
     failed: Vec<String>,
@@ -2740,6 +2747,10 @@ impl From<sister_core::retention::PruneReport> for Erasure {
             sessions: r.sessions_deleted,
             failed: r.failed,
             missing: r.missing,
+            // action log 不在資料庫裡，`PruneReport` 看不到它。兩個呼叫端各自
+            // 問一次 `ActionLog`，所以這裡只能是 0——和下面 `sessions_left`
+            // 同一個模式：這一支答不出來的，不要在這裡編一個。
+            actions: 0,
             // 這一支只看得到「刪掉了什麼」。留下什麼要再問一次資料庫，所以
             // 預設是「沒問」，由 `forget_range` 補上。
             sessions_left: None,
@@ -2765,9 +2776,17 @@ fn forget_preview(
         .as_ref()
         .ok_or_else(|| "找不到資料目錄，算不出這一段會刪掉多少東西".to_string())?;
     let frames = sister_core::config::Config::frames_dir(dir);
+    // 預覽也要把她那段時間動過的手算進去。`count_in_range` 和真正刪的那一支
+    // 共用同一份範圍判斷，所以這裡答應的數字就是按下去會消失的數字。
+    let actions = sister_hands::ActionLog::in_data_dir(dir)
+        .count_in_range(from_ts, to_ts)
+        .map_err(|e| format!("{e:#}"))?;
     with_db(&shell, |db| {
         db.forget_preview(from_ts, to_ts, Some(&frames))
-            .map(Erasure::from)
+            .map(|report| Erasure {
+                actions,
+                ..Erasure::from(report)
+            })
             .map_err(|e| format!("{e:#}"))
     })
 }
@@ -2807,7 +2826,7 @@ fn forget_range(
     //
     // 在借資料庫之前先做：這一刀失敗要整個停下來，不能發生「資料庫刪了、
     // 檔案沒刪」而畫面照樣報成功。
-    sister_hands::ActionLog::in_data_dir(dir)
+    let forgotten = sister_hands::ActionLog::in_data_dir(dir)
         .forget_range(from_ts, to_ts)
         .map_err(|err| format!("{err:#}"))?;
     with_db_mut(&shell, |db| {
@@ -2825,6 +2844,11 @@ fn forget_range(
             0
         };
         Ok(Erasure {
+            // 預覽那邊數的是同一種東西（解得開、落在範圍裡的列），所以這兩個
+            // 數字對得起來。讀不懂的那幾列也被刪掉了，但它們不是「她動過的
+            // 手」——把一列壞掉的字算進「你那個下午做了 3 件事」，那個 3 就
+            // 變成沒有人答得出來的數字。
+            actions: forgotten.removed_in_range,
             sessions_left: Some(left),
             // 分得出來就不要印「或」。CLI 那邊同一個判斷（`session_shell_why`）。
             // 沒有留下來的列就沒有這個問題——那時候這一欄不准講一個沒問過的

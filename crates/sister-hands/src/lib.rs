@@ -483,6 +483,34 @@ impl ActionLog {
     /// 讀不出來，沒有人會發現），刪掉它失去的是一列本來就顯示不出內容的字。
     /// 這跟排除規則「一律偏向多擋」是同一個取捨。刪了幾列會分開回報，因為
     /// 「忘掉了 3 列」和「忘掉了 3 列外加 1 列讀不懂的」不是同一句話。
+    /// 那段時間裡她動過幾次手——**不刪任何東西**。
+    ///
+    /// 給「你確定要忘掉嗎」那一頁用的。它和 [`Self::forget_range`] 共用
+    /// [`LineVerdict`]，所以預覽上的數字和按下去真的消失的列數是同一個。
+    ///
+    /// 只數解得開而且落在範圍裡的列。解不開的那幾列 `forget_range` 也會刪掉，
+    /// 但它們不是「她動過的手」——把一列壞掉的字算進「你那個下午做了 3 件事」
+    /// 裡面，那個 3 就變成一個沒有人答得出來的數字。
+    pub fn count_in_range(&self, from_ms: i64, to_ms: i64) -> Result<u64> {
+        let file = match File::open(&self.path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => {
+                return Err(anyhow::Error::from(e))
+                    .with_context(|| format!("開啟 action log 失敗：{}", self.path.display()));
+            }
+        };
+        let mut n = 0;
+        for line in BufReader::new(file).lines() {
+            let line =
+                line.with_context(|| format!("讀 action log 失敗：{}", self.path.display()))?;
+            if matches!(LineVerdict::of(&line, from_ms, to_ms), LineVerdict::InRange) {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     /// **留下來的那幾列一個位元組都不會變。** 這裡不走 [`Self::replay`]——那支
     /// 回的是解析過的 [`ActionEvent`]，把它們重新序列化寫回去，等於用「這一版
     /// 認得的欄位」去重寫每一列。`ActionEvent` 沒有 `deny_unknown_fields`，所以
@@ -510,13 +538,10 @@ impl ActionLog {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<ActionEvent>(&line) {
-                Ok(event) if (from_ms..to_ms).contains(&event.at_ms()) => {
-                    report.removed_in_range += 1;
-                }
-                Ok(_) => kept.push(line),
-                // 解不開就問不出時間，也就證明不了自己在範圍外。見上面那段。
-                Err(_) => report.removed_unreadable += 1,
+            match LineVerdict::of(&line, from_ms, to_ms) {
+                LineVerdict::InRange => report.removed_in_range += 1,
+                LineVerdict::Outside => kept.push(line),
+                LineVerdict::Unreadable => report.removed_unreadable += 1,
             }
         }
         report.kept = kept.len() as u64;
@@ -541,6 +566,31 @@ impl ActionLog {
         std::fs::rename(&tmp, &self.path)
             .with_context(|| format!("換掉 action log 失敗：{}", self.path.display()))?;
         Ok(report)
+    }
+}
+
+/// 一列相對於「要忘掉的那段時間」是什麼身分。
+///
+/// **這是唯一一份判斷。** [`ActionLog::forget_range`] 和
+/// [`ActionLog::count_in_range`] 必須對同一列給同一個答案——預覽答應一個數字、
+/// 按下去刪掉另一個數字，是這個 repo 一路在修的那件事。兩支各寫一次
+/// `serde_json::from_str` 加一次範圍比對，就是等著哪天兩邊的邊界寫得不一樣。
+enum LineVerdict {
+    /// 解得開，而且時間落在 `[from_ms, to_ms)` 裡。
+    InRange,
+    /// 解得開，時間在範圍外。**原字不動留下來。**
+    Outside,
+    /// 解不開 ⇒ 問不出時間 ⇒ 證明不了自己在範圍外。
+    Unreadable,
+}
+
+impl LineVerdict {
+    fn of(line: &str, from_ms: i64, to_ms: i64) -> Self {
+        match serde_json::from_str::<ActionEvent>(line) {
+            Ok(event) if (from_ms..to_ms).contains(&event.at_ms()) => Self::InRange,
+            Ok(_) => Self::Outside,
+            Err(_) => Self::Unreadable,
+        }
     }
 }
 
@@ -868,6 +918,47 @@ mod tests {
         let raw = std::fs::read_to_string(log.path()).unwrap();
         assert!(!raw.contains("secret.example"), "{raw}");
         assert!(raw.contains("keep.example"), "{raw}");
+    }
+
+    /// 預覽答應的數字，和按下去真的消失的列數，必須是同一個。
+    ///
+    /// 「你確定要忘掉嗎」那一頁上寫幾件，就要真的走掉幾件。這一條把同一份
+    /// 檔案先問一次 `count_in_range`、再真的 `forget_range`，兩個數字對起來。
+    #[test]
+    fn what_the_preview_promises_is_what_actually_disappears() {
+        let dir = tmp_dir("forget-preview");
+        let log = ActionLog::in_data_dir(&dir);
+        for ms in [500, 1_500, 2_500, 9_000] {
+            log.append(&ActionEvent::Executed {
+                at_ms: ms,
+                action: ActionSnapshot::OpenUrl {
+                    url: format!("https://x{ms}.example"),
+                },
+                result: ExecutionResult::Succeeded {
+                    detail: "ok".into(),
+                },
+            })
+            .unwrap();
+        }
+        // 讀不懂的那一列會被刪掉，但**不算**在「她動過的手」裡。
+        {
+            use std::io::Write as _;
+            let mut f = OpenOptions::new().append(true).open(log.path()).unwrap();
+            writeln!(f, "{{壞掉的").unwrap();
+        }
+
+        let promised = log.count_in_range(1_000, 3_000).unwrap();
+        assert_eq!(promised, 2, "1_500 和 2_500 這兩列");
+        let report = log.forget_range(1_000, 3_000).unwrap();
+        assert_eq!(
+            report.removed_in_range, promised,
+            "預覽說 {promised} 件，實際走掉 {} 件",
+            report.removed_in_range,
+        );
+        assert_eq!(report.removed_unreadable, 1, "壞掉那列也走了，只是不算手");
+        assert_eq!(report.kept, 2);
+        // 刪完再問一次，範圍裡就沒有東西了。
+        assert_eq!(log.count_in_range(1_000, 3_000).unwrap(), 0);
     }
 
     /// 忘掉星期二，不可以順手改寫星期一。
