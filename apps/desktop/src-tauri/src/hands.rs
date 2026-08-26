@@ -1,5 +1,5 @@
 use sister_hands::semi_action::RunConclusion;
-use sister_hands::target_policy::{validate_file, validate_url};
+use sister_hands::target_policy::{validate_file, validate_url, validate_window_title};
 use sister_hands::{
     ActionEvent, ActionLog, ExecutionResult, Executor, Level, Outcome, Replay, Suggestion,
 };
@@ -108,6 +108,7 @@ fn platform_execute(suggestion: &Suggestion) -> Result<String, String> {
         Suggestion::OpenUrl { url, .. } => { validate_url(url)?; shell_open(std::ffi::OsStr::new(url)) }
         Suggestion::OpenFile { path, .. } => { validate_file(path)?; shell_open(path.as_os_str()) },
         Suggestion::FocusWindow { title, .. } => {
+            validate_window_title(title)?;
             let mut state = (title.as_str(), None);
             unsafe { let _ = EnumWindows(Some(find), LPARAM(&mut state as *mut _ as isize)); }
             let hwnd = state.1.ok_or_else(|| format!("找不到標題含「{title}」的視窗"))?;

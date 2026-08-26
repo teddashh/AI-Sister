@@ -41,6 +41,9 @@ const OPENABLE: &[&str] = &[
 
 pub fn validate_file(path: &Path) -> Result<(), String> {
     let shown = path.to_string_lossy();
+    if shown.trim().is_empty() {
+        return Err("不會開啟：路徑是空的".into());
+    }
     // `\\?\` 和 `\\.\` 也從這裡走：兩者都以 `\\` 開頭，多寫兩個 `starts_with`
     // 只是看起來比較周到，實際上一列都到不了。
     if shown.starts_with(r"\\") {
@@ -63,6 +66,21 @@ pub fn validate_file(path: &Path) -> Result<(), String> {
         Some((_, ext)) if OPENABLE.iter().any(|ok| ext.eq_ignore_ascii_case(ok)) => Ok(()),
         Some((_, ext)) => Err(format!("不會開啟：「.{ext}」不在可開啟的檔案類型清單裡")),
     }
+}
+
+/// 要被叫到前面來的那個視窗，標題認不認得出來。
+///
+/// 平台那一側是 `EnumWindows` + 標題**子字串**比對，比到第一個就停。所以
+/// 空字串會比中畫面上第一個有標題的視窗——她會把一個誰也沒指定的視窗拉到
+/// 前面來，而 action log 上那一列會寫「聚焦視窗：」，後面什麼都沒有。
+///
+/// 這裡只擋得掉「空的」。**兩個視窗標題長得像的時候她仍然可能挑錯一個**，
+/// 那要 `EnumWindows` 那一側改成收集全部再讓人選，不是這一支能解決的。
+pub fn validate_window_title(title: &str) -> Result<(), String> {
+    if title.trim().is_empty() {
+        return Err("不會聚焦：沒有指定視窗標題".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -125,5 +143,18 @@ mod tests {
         ] {
             assert!(validate_file(Path::new(ok)).is_ok(), "{ok} 被擋掉了");
         }
+        // 空路徑到得了 `ShellExecuteW`，而它一列副檔名都沒有。
+        assert!(validate_file(Path::new("")).is_err());
+        assert!(validate_file(Path::new("   ")).is_err());
+    }
+
+    /// 空標題會比中第一個有標題的視窗，那不是「聚焦」，那是隨便抓一個。
+    #[test]
+    fn an_empty_window_title_matches_everything_so_it_matches_nothing() {
+        for bad in ["", "   ", "\t\n"] {
+            let error = validate_window_title(bad).unwrap_err();
+            assert!(error.contains("不會聚焦"), "{bad:?}: {error}");
+        }
+        assert!(validate_window_title("Visual Studio Code").is_ok());
     }
 }
