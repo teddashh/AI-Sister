@@ -2742,10 +2742,12 @@ pub mod watch {
         // `sister interpret` 寫的，其中一句說「超過即靜默降級，只累積 L0/L1」
         // ——對 interpret 是真的，對這裡是假的：這個行程當場就結束，她一眼
         // 都不會看。指路那一行也一樣，要指到 `sister watch --dry-run`。
-        let Some(permit) = consent.cloud_permit() else {
+        // **開跑那一刻的閘門。** 迴圈裡每一輪都會再讀一次（見那裡）——這一張
+        // 票只證明「開跑的時候他簽著」，不證明十分鐘後他還簽著。
+        if consent.cloud_permit().is_none() {
             writeln!(out, "{}", WatchSkip::NoConsent.message())?;
             return Ok(());
-        };
+        }
         let Some((command, args)) = config.brain.cli() else {
             writeln!(out, "{}", WatchSkip::NoCommand.message())?;
             return Ok(());
@@ -2868,6 +2870,24 @@ pub mod watch {
             // 之下，第 59 分 30 秒才跑完的那個編譯，會得到一句「沒有等到」，
             // 而那段字就躺在她自己的資料表裡。
             let expired = now >= deadline;
+
+            // **每一輪重讀一次同意書。**
+            //
+            // 這是這個 repo 明訂的規矩：`docs/PRIVACY.md` 寫著「『隨時』是真的
+            // 隨時，不是『下次重開』」，而 `sister record` 的迴圈每 5 秒重讀一次
+            // 就是為了那句話。`sister interpret` 是一次性的，所以在 alpha.71
+            // 之前，第二張同意書**沒有任何長命的持票人**。
+            //
+            // `watch` 是第一個。開跑時鑄一張票然後抱著它跑八小時的話，他在另一
+            // 個視窗打 `sister consent --revoke cloud-reading`、螢幕上回他
+            // 「沒有這一張，她一次都不會呼叫那支 CLI」（現在式），而這個迴圈
+            // 會在接下來的七小時五十七分裡把螢幕原文送出去兩百多次。
+            //
+            // 讀在**這一輪的最前面**，不是只讀在有字要送的那一臂裡：畫面安靜
+            // 的時候她不會送，但她也不該還醒著——她已經問不了了。
+            let Some(permit) = sister_core::consent::load(data_dir).cloud_permit() else {
+                break WatchEnd::ConsentRevoked { tally };
+            };
 
             let look = match window(last_seen, now) {
                 // 時鐘往回跳了（NTP 校時、睡眠喚醒），這一輪的區間是反的。
@@ -3606,6 +3626,78 @@ pub mod watch {
                 db.brain_outbound_count_on(&day_one).unwrap(),
                 2,
                 "昨天的帳：本來一次，加上午夜前那一輪"
+            );
+        }
+
+        /// **撤回第二張同意書，正在跑的那一場當場停下來。**
+        ///
+        /// `docs/PRIVACY.md`：「『隨時』是真的隨時，不是『下次重開』。」
+        /// `sister record` 每 5 秒重讀一次就是為了那句話；而在 `sister watch`
+        /// 之前，第二張同意書沒有任何長命的持票人（`interpret` 是一次性的）。
+        ///
+        /// 開跑時鑄一張票然後抱著跑八小時的話：他在另一個視窗按下撤回、螢幕
+        /// 上回他「她一次都不會呼叫那支 CLI」（現在式），而這個迴圈在接下來
+        /// 幾個小時裡把螢幕原文送出去兩百多次。
+        ///
+        /// 這條測試量的是**帳上寫了幾列**——撤回之後那幾輪一列都不可以多。
+        #[test]
+        fn revoking_the_second_sheet_stops_the_run_it_is_already_inside() {
+            let (tmp, mut config) = prepared_at("watch-revoke", 95_000, "第一段", true);
+            config.brain.args = vec![
+                "-c".into(),
+                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
+            ];
+            // 每一輪都有新的字可問，所以「沒有多送」不能靠「沒東西可送」蒙混。
+            add_chunk(&tmp.0, 125_000, "第二段");
+            add_chunk(&tmp.0, 155_000, "第三段");
+            let day = sister_core::local_day::local_day_key(100_000).unwrap();
+
+            // 第一輪問完之後，他在另一個視窗把第二張收回去。
+            let dir = tmp.0.clone();
+            let mut round = 0;
+            let mut ticks = [100_000_i64, 100_000, 130_000, 160_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    quiet_for: None,
+                    dry_run: false,
+                    notify: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {
+                    round += 1;
+                    if round == 1 {
+                        let mut consent = sister_core::consent::Consent::default();
+                        consent.revoke(sister_core::consent::Sheet::CloudReading);
+                        sister_core::consent::save(&dir, &consent).expect("revoke");
+                    }
+                },
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+
+            let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+            assert_eq!(
+                db.brain_outbound_count_on(&day).unwrap(),
+                1,
+                "撤回之後她又送了：{text}"
+            );
+            // 而且要講對是哪一件事停下來的。
+            assert!(text.contains("第二張同意書被收回了"), "{text}");
+            assert!(
+                !text.contains("沒有開始盯"),
+                "她盯過了，也問到過一次答案：{text}"
+            );
+            assert!(text.contains("問到答案 1 次"), "{text}");
+            assert!(
+                !text.contains("時間到了，沒有等到"),
+                "停下來的理由不是時間到：{text}"
             );
         }
 

@@ -386,6 +386,15 @@ pub enum WatchEnd {
         last_at: Millis,
         last_app: Option<String>,
     },
+    /// 跑到一半，第二張同意書被撤回了。
+    ///
+    /// **不是 [`WatchSkip::NoConsent`]。** 那一句是「所以我沒有開始盯」；這一句
+    /// 是「我盯過了，問了幾次，現在停下來」——`tally` 裡那幾個數字是真的，而
+    /// 那些外送也真的發生過。兩句話印成同一句，等於把一段已經送出去的歷史講成
+    /// 從來沒發生。
+    ConsentRevoked {
+        tally: Tally,
+    },
 }
 
 impl WatchEnd {
@@ -398,7 +407,10 @@ impl WatchEnd {
             Self::Saw { .. }
             | Self::Deadline { .. }
             | Self::BudgetRanOut { .. }
-            | Self::WentQuiet { .. } => requested,
+            | Self::WentQuiet { .. }
+            // 撤回的人正在鍵盤前面，但**他不見得知道有一場盯梢在跑**——那可能是
+            // 三小時前在另一個視窗開的。他要的是「停下來的時候叫我」，而她停了。
+            | Self::ConsentRevoked { .. } => requested,
         }
     }
 
@@ -437,6 +449,11 @@ impl WatchEnd {
             Self::BudgetRanOut { tally, used, limit } => format!(
                 "{}今天的外送預算先用完了（{used}/{limit}），我沒有再看下去——\
                  這**不是**「沒等到」，是我不知道。",
+                tally.line()
+            ),
+            Self::ConsentRevoked { tally } => format!(
+                "{}第二張同意書被收回了，所以我停在這裡——**這一輪一個字都沒有送出去**。\
+                 這**不是**「沒等到」，是我不再問了。",
                 tally.line()
             ),
             Self::WentQuiet {
@@ -769,6 +786,48 @@ mod tests {
         assert!(
             !said.contains("停下來為止"),
             "她從來沒開始過，哪來的停下來：{said}"
+        );
+    }
+
+    /// **「所以我沒有開始盯」和「我盯過了，現在停下來」是兩句話。**
+    ///
+    /// 撤回收尾借用 `WatchSkip::NoConsent` 那一句的話，一場已經問了大腦十次、
+    /// 十次外送都寫進 `brain_outbound` 的盯梢，會在畫面上被講成從來沒開始過
+    /// ——而他正是為了「到底送出去了什麼」才去按那顆撤回的。
+    #[test]
+    fn a_revoked_sheet_mid_run_is_not_the_same_as_never_having_started() {
+        let tally = Tally {
+            answered: 10,
+            unanswered: 0,
+            blind: 2,
+        };
+        let said = WatchEnd::ConsentRevoked { tally }.message();
+        assert_ne!(said, WatchSkip::NoConsent.message());
+        assert!(
+            !said.contains("沒有開始盯"),
+            "她盯過了，而且問到過十次答案：{said}"
+        );
+        // 那十二輪要如實留在畫面上。
+        assert!(said.contains("問到答案 10 次"), "{said}");
+        // 而且不可以講成一句斷言。
+        assert!(!said.contains("沒有等到"), "{said}");
+    }
+
+    /// **第二張同意書的「沒簽會怎樣」要講出撤回之後多久才停。**
+    ///
+    /// 第一張講了（「每 5 秒重讀同意書」），因為 `sister record` 是它的長命
+    /// 持票人。在 alpha.71 之前第二張**沒有**長命持票人——`interpret` 是一次
+    /// 性的——所以那句話不必講。`sister watch` 是第一個，可以抱著票跑八小時。
+    /// 少了這半句，「她一次都不會呼叫那支 CLI」在撤回那一刻讀起來是現在式，
+    /// 而迴圈還在跑。
+    #[test]
+    fn the_second_sheet_says_how_long_a_revoke_takes_to_bite() {
+        let without = crate::consent::Sheet::CloudReading.without();
+        assert!(without.contains("sister watch"), "{without}");
+        assert!(without.contains("重讀"), "{without}");
+        assert!(
+            without.contains("不會再問"),
+            "撤回之後她還會不會再送一次，這句話沒有回答：{without}"
         );
     }
 

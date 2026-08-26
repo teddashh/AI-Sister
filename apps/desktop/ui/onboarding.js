@@ -255,7 +255,7 @@ const DEMO = {
   ],
   without: [
     "沒有這一張，sister record 不會開始錄；錄到一半撤回，正在跑的 record 每 5 秒重讀同意書，最多再錄 5 秒加一拍；capture.min_interval_ms 超過 5 秒時，主要會等那一拍。",
-    "沒有這一張，她一次都不會呼叫那支 CLI；解釋層保持關閉，只累積本機的畫面與文字。",
+    "沒有這一張，她一次都不會呼叫那支 CLI；解釋層保持關閉，只累積本機的畫面與文字。正在跑的 sister watch 每看一次就重讀一次同意書，撤回之後它下一次看的時候就停下來，不會再問。",
     "沒有這一張，她只記螢幕上的字，不留截圖。",
   ],
   keys: ["local-recording", "cloud-reading", "frame-storage"],
