@@ -20,21 +20,77 @@ pub fn collect(db: &Db, now: Millis) -> anyhow::Result<Vec<Candidate>> {
     for signal in db.stuck_in_range(now.saturating_sub(40 * 60_000), now.saturating_add(1))? {
         out.push(stuck_candidate(&signal)?);
     }
-    // SessionEnd 只是錄製容器收尾（連 60 秒 bench 都會寫），不是一天結束。
-    // 真正能證明「日終」的是成功 ReviewKind::Eod run。40 分鐘是未量過的
-    // 實作選擇；只收最新一列，不重複產生同一輪的 offer。
-    if let Some(run) =
-        db.latest_reviewer_eod_in_range(now.saturating_sub(40 * 60_000), now.saturating_add(1))?
-    {
-        // 這一天要跟寫日摘要的那一邊算出同一天，不然「筆記做好了」會配到
-        // 另一天的 `daysummary:` id。所以不在這裡自己算，叫 reviewer 那份。
-        let day = crate::reviewer::summarized_day(run.ts)
-            .ok_or_else(|| anyhow::anyhow!("算不出 reviewer_run #{} 盤點的是哪一天", run.id))?;
-        if let Some(candidate) = session_end_candidate(run.id, &day, day_note_state(db, &day)?)? {
-            out.push(candidate);
-        }
+    match session_end(db, now)? {
+        DayEnd::Offer(candidate) => out.push(candidate),
+        DayEnd::NoRecentEodRun | DayEnd::NothingToWriteAbout { .. } | DayEnd::Forgotten { .. } => {}
     }
     Ok(out)
+}
+
+/// d 類這一輪的結果。**四種，而其中三種都是「沒有候選」。**
+///
+/// 分開回，不折成 `Option<Candidate>`：預演那一頁要對使用者說明為什麼這一類
+/// 這一輪沒有講話，而三種「沒有」的理由完全不同。折成一個 `None` 的話，
+/// 那句說明只能是一句寫死的猜測——它會在他剛把那天的筆記忘掉之後，
+/// 告訴他「沒有最近的日終盤點」，而盤點一分鐘前才跑完。
+// 沒有 `Eq`：`Candidate` 的四個因子是 `f64`。
+#[derive(Debug, Clone, PartialEq)]
+pub enum DayEnd {
+    /// 最近 40 分鐘沒有成功的日終盤點。
+    NoRecentEodRun,
+    Offer(Candidate),
+    NothingToWriteAbout {
+        day: String,
+    },
+    Forgotten {
+        day: String,
+    },
+}
+
+impl DayEnd {
+    /// 這一輪為什麼沒有 d 類候選。有候選的時候回 `None`。
+    pub fn why_silent(&self) -> Option<String> {
+        match self {
+            Self::Offer(_) => None,
+            Self::NoRecentEodRun => {
+                Some("session_end：最近 40 分鐘沒有跑成功的日終盤點。".to_string())
+            }
+            Self::NothingToWriteAbout { day } => Some(format!(
+                "session_end：{day} 一張 L2 卡都沒有，寫不出筆記，所以不問。"
+            )),
+            Self::Forgotten { day } => Some(format!(
+                "session_end：{day} 的筆記被忘掉了，不提議把它寫回來。"
+            )),
+        }
+    }
+}
+
+/// d 類：日終「要不要做筆記」。
+///
+/// `SystemKind::SessionEnd` **不是**訊號源——那只證明一場錄製容器收尾，
+/// 連 60 秒 bench 都會寫一列。真正能證明「這一天結束了」的是一輪成功的
+/// [`crate::reviewer::ReviewKind::Eod`]。40 分鐘是未量過的實作選擇；
+/// 只收最新一列，不重複產生同一輪的 offer。
+pub fn session_end(db: &Db, now: Millis) -> anyhow::Result<DayEnd> {
+    let Some(run) =
+        db.latest_reviewer_eod_in_range(now.saturating_sub(40 * 60_000), now.saturating_add(1))?
+    else {
+        return Ok(DayEnd::NoRecentEodRun);
+    };
+    // 這一天要跟寫日摘要的那一邊算出同一天，不然「筆記做好了」會配到
+    // 另一天的 `daysummary:` id。所以不在這裡自己算，叫 reviewer 那份。
+    let day = crate::reviewer::summarized_day(run.ts)
+        .ok_or_else(|| anyhow::anyhow!("算不出 reviewer_run #{} 盤點的是哪一天", run.id))?;
+    let state = day_note_state(db, &day)?;
+    Ok(match state {
+        DayNoteState::NothingToWriteAbout => DayEnd::NothingToWriteAbout { day },
+        DayNoteState::Forgotten { .. } => DayEnd::Forgotten { day },
+        DayNoteState::Written { .. } | DayNoteState::Writable => {
+            let candidate = session_end_candidate(run.id, &day, state)?
+                .ok_or_else(|| anyhow::anyhow!("{day} 的筆記狀態說開得了口，卻沒有產出候選"))?;
+            DayEnd::Offer(candidate)
+        }
+    })
 }
 
 /// 被盤點的那一天，筆記現在是什麼狀況。
@@ -271,6 +327,58 @@ mod tests {
                 candidate.text
             );
         }
+    }
+
+    /// 三種「沒有 d 類候選」的理由**要說得出是哪一種**。
+    ///
+    /// 這一條抓的是一句寫死的說明：它原本無論如何都印「d 類沒有最近 40 分鐘
+    /// 的成功日終盤點」，而在他剛把那天的筆記忘掉的時候，盤點一分鐘前才跑完。
+    #[test]
+    fn each_silent_day_end_says_its_own_reason() {
+        use super::DayEnd;
+        let no_run = DayEnd::NoRecentEodRun.why_silent().unwrap();
+        let nothing = DayEnd::NothingToWriteAbout {
+            day: "2026-08-25".into(),
+        }
+        .why_silent()
+        .unwrap();
+        let forgotten = DayEnd::Forgotten {
+            day: "2026-08-25".into(),
+        }
+        .why_silent()
+        .unwrap();
+
+        assert!(no_run.contains("沒有跑成功的日終盤點"));
+        assert!(!no_run.contains("2026-08-25"), "沒有 run 就講不出是哪一天");
+
+        assert!(nothing.contains("2026-08-25"));
+        assert!(nothing.contains("寫不出"));
+        assert!(
+            !nothing.contains("日終盤點"),
+            "盤點跑過了，不可以說沒跑：{nothing}"
+        );
+
+        assert!(forgotten.contains("2026-08-25"));
+        assert!(forgotten.contains("忘掉"));
+        assert!(
+            !forgotten.contains("日終盤點"),
+            "盤點跑過了，不可以說沒跑：{forgotten}"
+        );
+
+        assert_ne!(nothing, forgotten);
+        assert_ne!(no_run, nothing);
+    }
+
+    /// 有候選的時候不可以再印一句「為什麼沒講話」。
+    #[test]
+    fn an_offer_has_nothing_to_explain() {
+        let candidate =
+            super::session_end_candidate(31, "2026-08-25", DayNoteState::Writable).unwrap();
+        assert!(
+            super::DayEnd::Offer(candidate.unwrap())
+                .why_silent()
+                .is_none()
+        );
     }
 
     /// 兩種「沒有摘要」是相反的兩件事，而且**都不該開口**——一個是答應了也

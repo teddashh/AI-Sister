@@ -73,9 +73,17 @@ pub mod speak {
                 println!("{line}");
             }
         }
+        // d 類沉默的理由**不寫死**，跟 `collect()` 問同一支函式。d 有四種
+        // 結果、其中三種都是「沒有候選」，而三個理由完全不同：一句寫死的
+        // 「沒有最近的日終盤點」會在他剛把那天的筆記忘掉之後印出來，
+        // 而盤點一分鐘前才跑完。
+        if let Some(line) = sister_core::gatekeeper_candidates::session_end(&db, now)?.why_silent()
+        {
+            println!("{line}");
+        }
         if candidates.is_empty() {
             println!(
-                "現在一句候選都沒有：a 類沒有 40 分鐘內到期的顯式時間承諾，c 類沒有最近 40 分鐘的卡住訊號，d 類沒有最近 40 分鐘的成功日終盤點；b/e 類目前沒有訊號源。"
+                "現在一句候選都沒有：a 類沒有 40 分鐘內到期的顯式時間承諾，c 類沒有最近 40 分鐘的卡住訊號。d/b/e 三類的狀況見上面幾行。"
             );
             return Ok(());
         }
