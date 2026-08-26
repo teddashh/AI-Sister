@@ -414,15 +414,26 @@ capture 層本身就是 recorder。
   - 永不繼承的五類一個都沒實作，所以守的不是「攔截」是「無法被偷偷加進來」：
     `never_inherited_class` 的 `match` 沒有 `_`，加第四種動作會編譯錯誤。
   - 結局**三種**：`Refused`（沒交給 OS）／`Failed`（交了但失敗）／`Done`。
-- 🔶 接通承諾卡的 `allowed_next_step`（「要我幫你把視窗點開嗎」）：
-  alpha.69 補上平台執行層（`ShellExecuteW` / `EnumWindows`+`SetForegroundWindow`，
+- ✅ alpha.69 接通承諾卡的 `allowed_next_step`（「要我幫你把視窗點開嗎」）：
+  平台執行層（`ShellExecuteW` / `EnumWindows`+`SetForegroundWindow`，
   不經 cmd.exe、不經 PowerShell）、按鈕、以及畫面上的行動紀錄。
   目標政策是**白名單**（http/https；可看的副檔名），放在
   `sister-hands::target_policy` 而不是字母人裡面——CI 對 `apps/desktop` 只跑
   clippy 和 build，寫在那邊的測試一列都不會被執行。
   按鈕回叫帶的是承諾 id 不是動作，要做什麼由後端重讀資料庫（SPEC §9.7）。
-  **還缺 writer**：`commitments.allowed_next_step` 從 schema 建好到現在沒有
-  任何一支程式寫過它，所以這顆按鈕在真實使用中還出不來。
+  - **writer 也在 alpha.69**：在這之前 `commitments.allowed_next_step` 從
+    schema 建好到那天沒有任何一支程式寫過它，所以整條路——按鈕、`Level::Suggest`、
+    `ActionLog`、`target_policy`——在真實使用中一次都跑不到。
+  - **模型只能*指*一筆 L1 fact，不能自己打一串網址**（契約上是
+    `{"fact": 45}`）。`{"action":"open_url","url":…}` 由 Rust 從 `facts.raw`
+    組出來。SPEC §9.4：讓模型自由輸出網址，等於讓螢幕上任何一段文字決定她開什麼。
+  - 「她沒有建議下一步」（安靜）跟三種拒絕（fact 不在／kind 不合／URL 沒有
+    scheme，各留一句看得見的話）分得開。兩個 pass 不同調時掉的是下一步、
+    不是整張承諾。
+  - 寫的人在 `sister-core`、讀的人在 `sister-hands`，中間沒有型別。量過：
+    把讀的那一邊欄位改名、連它自己測試的字面值一起改，兩邊 28 條全綠而按鈕
+    是壞的。`the_next_step_this_crate_writes_is_one_the_hands_crate_can_read_and_will_allow`
+    站在那條縫上（sister-hands 是 sister-core 的 dev-dependency，不進出貨相依樹）。
 - 🔶 `semi-action` 級：平台無關的核心做好了——結構化 grant
   （`Task`/`AllowedApps`/`AllowedActions`/`Expiry`/`StepLimit`）、
   `Grant::covers` 逐維拒絕、內容綁定的 `PresentedStep::approve` → `StepApproval`
