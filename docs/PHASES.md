@@ -274,7 +274,10 @@ capture 層本身就是 recorder。
 
 **Scope**
 - Interpreter 薄層（SPEC §5）：事件驅動喚醒、每日預算 80、strict JSON 卡片、
-  worker pool（預設 4）。
+  worker pool（預設 4）。〔alpha.61 才真的**自己**醒：在那之前 `brain::run` /
+  `reviewer::run` 只有使用者親手打指令才跑，`record` 迴圈裡一次都沒叫過，
+  所以錄一整天打開記憶瀏覽器是空的。現在錄製時起一條慢路徑執行緒，
+  熱路徑只做一次 `AtomicBool` 寫入〕
 - Reviewer（SPEC §6）：15–30min 批次 + 日終盤點、typed card merge、
   五類強制回查、雙 pass 分歧警報、回查率 log。
 - L3：commitments/entities/day_summaries + provenance cascade delete。

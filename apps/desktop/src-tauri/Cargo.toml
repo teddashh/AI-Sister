@@ -1,6 +1,6 @@
 [package]
 name = "sister-desktop"
-version = "0.1.0-alpha.60"
+version = "0.1.0-alpha.61"
 edition = "2024"
 # 和根 workspace 同一個地板，理由見那邊的註解。這是第二個 workspace，繼承不到。
 rust-version = "1.85"
