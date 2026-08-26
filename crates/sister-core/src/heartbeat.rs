@@ -329,10 +329,21 @@ pub fn last_beat(data_dir: &Path) -> Option<Millis> {
 /// 心跳算「有人在」。收工了、過期了、讀不懂、從來沒跑過、**正在想最後一段**
 /// ——對「要不要說她在錄」來說都是同一個答案，而且是安全的那個答案（少吹
 /// 牛，見模組開頭）。想最後一段那一種佔不佔著，請用 [`is_occupied`]。
+///
+/// **沒有 `_`。** 下一種變體編不過，才不會再安靜地掉進「沒在錄」。
 pub fn phase(data_dir: &Path, now: Millis) -> Option<Phase> {
-    match presence(data_dir, now) {
+    phase_of(presence(data_dir, now))
+}
+
+/// [`phase`] 的純函式那一半：同一顆 [`Presence`] 不要讀第二次磁碟。
+pub fn phase_of(p: Presence) -> Option<Phase> {
+    match p {
         Presence::Live(p) => Some(p),
-        _ => None,
+        Presence::NeverStarted
+        | Presence::Unreadable
+        | Presence::Thinking { .. }
+        | Presence::Stopped { .. }
+        | Presence::Stalled { .. } => None,
     }
 }
 
@@ -388,10 +399,18 @@ pub fn is_recording(data_dir: &Path, now: Millis) -> bool {
 /// 一倍。收工那兩分鐘同樣：行程還握著資料庫，第二個 writer 打進來的症狀
 /// 一樣是磁碟用兩倍、而且兩句話對打（畫面說沒在錄，按開始卻說已經有人）。
 pub fn is_occupied(data_dir: &Path, now: Millis) -> bool {
-    matches!(
-        presence(data_dir, now),
-        Presence::Live(_) | Presence::Thinking { .. }
-    )
+    occupied_of(presence(data_dir, now))
+}
+
+/// [`is_occupied`] 的純函式那一半。沒有 `_`：下一種變體編不過。
+pub fn occupied_of(p: Presence) -> bool {
+    match p {
+        Presence::Live(_) | Presence::Thinking { .. } => true,
+        Presence::NeverStarted
+        | Presence::Unreadable
+        | Presence::Stopped { .. }
+        | Presence::Stalled { .. } => false,
+    }
 }
 
 /// 有人佔著的時候，按「開始記錄」該看到的那一句。
@@ -401,7 +420,14 @@ pub fn is_occupied(data_dir: &Path, now: Millis) -> bool {
 /// 不一樣：正在錄的是去按停止，正在起來的是再等一下，想最後一段的是等她
 /// 想完（有上限，上限在句子裡）。
 pub fn occupied_why(data_dir: &Path, now: Millis) -> Option<String> {
-    match presence(data_dir, now) {
+    occupied_why_of(presence(data_dir, now), now)
+}
+
+/// [`occupied_why`] 的純函式那一半。同一顆 [`Presence`] 不要讀第二次磁碟。
+///
+/// 沒有 `_`：下一種變體編不過，才不會再讓「佔著」的新狀態靜靜變成可以再開一個。
+pub fn occupied_why_of(p: Presence, now: Millis) -> Option<String> {
+    match p {
         Presence::Live(Phase::Recording) => Some("已經有一個 sister record 在跑了".into()),
         Presence::Live(Phase::Booting) => {
             Some("已經有一個 sister record 正在起來（多半在開資料庫）。再等一下".into())
@@ -413,7 +439,91 @@ pub fn occupied_why(data_dir: &Path, now: Millis) -> Option<String> {
                  想完就會收工，這期間不要再開一個。"
             ))
         }
-        _ => None,
+        Presence::NeverStarted
+        | Presence::Unreadable
+        | Presence::Stopped { .. }
+        | Presence::Stalled { .. } => None,
+    }
+}
+
+/// 最新那一列 `sessions` **是她的嗎**——正在錄，或錄製已停、還在想最後一段。
+///
+/// 開機那幾分鐘不是：心跳在、列還沒 INSERT，`MAX(id)` 上坐的是上一場的殼。
+/// 沒有 `_`：少列一種，下一次就會把別人的當機扣成她的、或把她的收尾算成當機。
+pub fn session_row_is_hers(p: Presence) -> bool {
+    match p {
+        Presence::Live(Phase::Recording) | Presence::Thinking { .. } => true,
+        Presence::Live(Phase::Booting)
+        | Presence::NeverStarted
+        | Presence::Unreadable
+        | Presence::Stopped { .. }
+        | Presence::Stalled { .. } => false,
+    }
+}
+
+/// 系統匣那顆「開始／停止記錄」按下去該做什麼。
+///
+/// 收的是**佔不佔著**，不是「在不在錄」——但佔著有三種，按下去的下一步不一樣：
+/// 正在錄／正在起來的，寫 `stop.request` 有人讀；想最後一段的，迴圈已經跳出
+/// 去了，再寫一個檔沒有人會讀。一個布林湊不出這三種。
+///
+/// 沒有 `_`。
+pub fn tray_record_action(p: Presence) -> TrayRecordAction {
+    match p {
+        Presence::Live(_) => TrayRecordAction::Stop,
+        Presence::Thinking { .. } => TrayRecordAction::WaitForThinking,
+        Presence::NeverStarted
+        | Presence::Unreadable
+        | Presence::Stopped { .. }
+        | Presence::Stalled { .. } => TrayRecordAction::Start,
+    }
+}
+
+/// 系統匣那顆「開始／停止記錄」該寫什麼字。見 [`tray_record_action`]。
+pub fn tray_record_label(p: Presence) -> &'static str {
+    match tray_record_action(p) {
+        TrayRecordAction::Stop => "停止記錄",
+        TrayRecordAction::WaitForThinking => "還在收尾",
+        TrayRecordAction::Start => "開始記錄",
+    }
+}
+
+/// 系統匣「結束」那一行。想最後一段時記錄已經停了，不要再說「記錄也會停」。
+pub fn tray_quit_label(p: Presence) -> &'static str {
+    match p {
+        Presence::Live(_) => "結束（記錄也會停）",
+        Presence::Thinking { .. } => "結束（還在收尾）",
+        Presence::NeverStarted
+        | Presence::Unreadable
+        | Presence::Stopped { .. }
+        | Presence::Stalled { .. } => "結束",
+    }
+}
+
+/// 系統匣那顆記錄鍵按下去會發生的三件事。見 [`tray_record_action`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayRecordAction {
+    /// 沒人佔著：開一個 recorder。
+    Start,
+    /// 正在錄或正在起來：寫 `stop.request`，迴圈會讀到。
+    Stop,
+    /// 錄製迴圈已經跳出，解釋層還在想最後一段。再寫 `stop.request` 沒人讀。
+    WaitForThinking,
+}
+
+/// 設定頁存完、字母人指示燈、系統匣共用的那四個字。
+///
+/// `"thinking"` 不是 `"none"`：那兩分鐘裡叫他去按「開始記錄」會被擋。
+/// 沒有 `_`。
+pub fn watching_word(p: Presence) -> &'static str {
+    match p {
+        Presence::Live(Phase::Recording) => "recording",
+        Presence::Live(Phase::Booting) => "booting",
+        Presence::Thinking { .. } => "thinking",
+        Presence::NeverStarted
+        | Presence::Unreadable
+        | Presence::Stopped { .. }
+        | Presence::Stalled { .. } => "none",
     }
 }
 
@@ -869,5 +979,76 @@ mod tests {
                 at: Some(1_000_500)
             }
         );
+    }
+
+    /// 系統匣那顆寫著「停止記錄」的時候，按下去要有人讀那個檔。想最後一段
+    /// 沒有人讀——迴圈已經跳出。三種佔著三個下一步，一個布林湊不出來。
+    #[test]
+    fn the_tray_does_not_advertise_a_stop_nobody_will_read() {
+        let rec = Tmp::new("tray-rec");
+        beat(&rec.0, 1_000_000).expect("beat");
+        let boot = Tmp::new("tray-boot");
+        beat_booting(&boot.0, 1_000_000).expect("boot");
+        let think = Tmp::new("tray-think");
+        beat_thinking(&think.0, 1_000_000, 1_240_000).expect("thinking");
+        let none = Tmp::new("tray-none");
+
+        let rec_p = presence(&rec.0, 1_000_000);
+        let boot_p = presence(&boot.0, 1_000_000);
+        let think_p = presence(&think.0, 1_000_000);
+        let none_p = presence(&none.0, 1_000_000);
+
+        assert_eq!(tray_record_action(rec_p), TrayRecordAction::Stop);
+        assert_eq!(tray_record_action(boot_p), TrayRecordAction::Stop);
+        assert_eq!(
+            tray_record_action(think_p),
+            TrayRecordAction::WaitForThinking,
+            "想最後一段再寫 stop.request，沒有人會讀"
+        );
+        assert_eq!(tray_record_action(none_p), TrayRecordAction::Start);
+
+        assert_eq!(tray_record_label(rec_p), "停止記錄");
+        assert_eq!(tray_record_label(boot_p), "停止記錄");
+        assert_eq!(tray_record_label(think_p), "還在收尾");
+        assert_eq!(tray_record_label(none_p), "開始記錄");
+        assert_ne!(
+            tray_record_label(think_p),
+            "停止記錄",
+            "寫著停止、按下去什麼都不發生"
+        );
+        assert_ne!(
+            tray_record_label(think_p),
+            "開始記錄",
+            "寫著開始、按下去會被佔著閘門擋下來"
+        );
+
+        assert_eq!(tray_quit_label(rec_p), "結束（記錄也會停）");
+        assert_eq!(tray_quit_label(think_p), "結束（還在收尾）");
+        assert_eq!(tray_quit_label(none_p), "結束");
+
+        assert_eq!(watching_word(rec_p), "recording");
+        assert_eq!(watching_word(boot_p), "booting");
+        assert_eq!(watching_word(think_p), "thinking");
+        assert_eq!(watching_word(none_p), "none");
+        assert_ne!(
+            watching_word(think_p),
+            "none",
+            "想最後一段壓成 none，設定頁會叫他去按開始"
+        );
+    }
+
+    /// 最新那一列是她的：正在錄，或正在想最後一段。開機不是。
+    #[test]
+    fn an_open_session_row_is_hers_while_recording_or_thinking() {
+        assert!(session_row_is_hers(Presence::Live(Phase::Recording)));
+        assert!(session_row_is_hers(Presence::Thinking { at: 1, until: 2 }));
+        assert!(!session_row_is_hers(Presence::Live(Phase::Booting)));
+        assert!(!session_row_is_hers(Presence::NeverStarted));
+        assert!(!session_row_is_hers(Presence::Stopped { at: None }));
+        assert!(!session_row_is_hers(Presence::Stalled {
+            at: 1,
+            phase: Phase::Recording
+        }));
+        assert!(!session_row_is_hers(Presence::Unreadable));
     }
 }

@@ -396,19 +396,25 @@ impl Emptiness {
     /// 以這不是多要一份資料，是把一份已經在手上的資料接進來——上一版沒接，於
     /// 是這支函式結構上就答不出 [`Live`](Self::Live)。
     ///
-    /// **收的是 [`Phase`] 本人，不是一個布林。** 上一版收 `is_occupied`，理由
-    /// 寫成「正在開機的 recorder 也佔著這個目錄，而那時候『再等一下』正是對的
-    /// 話」——下一步猜對了，句子卻錯了：那四頁印的是「她**此刻正在錄**」，而
-    /// 同一份 doctor 底下兩行寫著「有一個 sister record **正在起來**……還沒開
-    /// 始記東西」。同一頁，兩句互相打臉，第十八次。
+    /// **收的是 [`Presence`] 本人，不是壓扁的 `Option<Phase>`。** 上一版收
+    /// `is_occupied`，理由寫成「正在開機的 recorder 也佔著這個目錄，而那時候
+    /// 『再等一下』正是對的話」——下一步猜對了，句子卻錯了：那四頁印的是「她
+    /// **此刻正在錄**」，而同一份 doctor 底下兩行寫著「有一個 sister record
+    /// **正在起來**……還沒開始記東西」。同一頁，兩句互相打臉，第十八次。
     ///
-    /// [`Phase`]: sister_core::heartbeat::Phase
+    /// 再上一版收 `Option<Phase>`，於是 `Thinking` 掉進 `None` → [`Barren`]：
+    /// 按下停止之後那兩分鐘，空資料庫上這四頁說「多半是 `capture.enabled =
+    /// false`」，而同一份 doctor 六行之隔說行程還在。想最後一段不是一種新的
+    /// 空（東西沒進來的理由還是「她跑過、沒存到」），所以走 [`Barren`]——但
+    /// 要列出來，不能靠 `_`。
+    ///
+    /// [`Presence`]: sister_core::heartbeat::Presence
     pub fn of(
         db: &Db,
         s: &sister_core::db::DbStats,
-        beat: Option<sister_core::heartbeat::Phase>,
+        beat: sister_core::heartbeat::Presence,
     ) -> Result<Self> {
-        use sister_core::heartbeat::Phase;
+        use sister_core::heartbeat::{Phase, Presence};
         if s.nothing_recorded_left() && db.ever_recorded()? {
             if db.ever_stored()? {
                 // 存過又清光了：她此刻在不在都不改變「東西被拿走了」這件事，
@@ -416,9 +422,13 @@ impl Emptiness {
                 return Ok(Self::Erased);
             }
             return Ok(match beat {
-                Some(Phase::Recording) => Self::Live,
-                Some(Phase::Booting) => Self::Booting,
-                None => Self::Barren,
+                Presence::Live(Phase::Recording) => Self::Live,
+                Presence::Live(Phase::Booting) => Self::Booting,
+                Presence::Thinking { .. }
+                | Presence::NeverStarted
+                | Presence::Unreadable
+                | Presence::Stopped { .. }
+                | Presence::Stalled { .. } => Self::Barren,
             });
         }
         Ok(
@@ -463,10 +473,10 @@ impl Emptiness {
 ///   `Recorder::finish` **先**寫一列 `SessionEnd` **再**呼叫 `end_session`，於是
 ///   它自己剛剛寫的那一列讓那一場「不空」——那道清掃在產品裡從來沒有刪掉過任何
 ///   一列。現在 `delete_empty_sessions` 不把那兩列標籤當成內容，這句話才是真的。
-fn session_shell_why(beat: Option<sister_core::heartbeat::Phase>) -> (&'static str, &'static str) {
-    use sister_core::heartbeat::Phase;
+fn session_shell_why(beat: sister_core::heartbeat::Presence) -> (&'static str, &'static str) {
+    use sister_core::heartbeat::{Phase, Presence};
     match beat {
-        Some(Phase::Recording) => (
+        Presence::Live(Phase::Recording) => (
             "那一場還沒收尾——她此刻正在錄",
             "等她收工的時候，那一場如果還是一列都不剩，那一列就會跟著走。",
         ),
@@ -476,11 +486,20 @@ fn session_shell_why(beat: Option<sister_core::heartbeat::Phase>) -> (&'static s
         // 三句話都要接得上呼叫端那個「，裡面一列都不剩。」（見
         // [`forget::session_shell_note`]），所以這一句不能在中間收一個句號
         // ——收了的話「裡面」的先行詞會變成正在起來的那一個。
-        Some(Phase::Booting) => (
+        Presence::Live(Phase::Booting) => (
             "那一場沒有正常收尾——她當掉了；現在有一個 sister record 正在起來，但這一列不是它的",
             "等它開始錄，這一列就不再是最新的一列，接下來任何一次清理都會把它帶走。",
         ),
-        None => (
+        // 按下停止之後那兩分鐘：這一列**是她的**（`finish()` 還沒跑），行程
+        // 還在。說「當掉了」或「沒有任何 recorder 佔著」都是假的。
+        Presence::Thinking { .. } => (
+            "那一場還沒收尾——錄製已停，解釋層還在想最後一段",
+            "想完收工的時候，那一場如果還是一列都不剩，那一列就會跟著走。",
+        ),
+        Presence::NeverStarted
+        | Presence::Unreadable
+        | Presence::Stopped { .. }
+        | Presence::Stalled { .. } => (
             "那一場沒有正常收尾——她當掉了（現在沒有任何 recorder 佔著這個資料目錄）",
             "她**再開始錄之後**，那一列就不再是最新的一列，接下來任何一次清理都會把它\
              帶走——想馬上清掉的話，開始錄之後跑一次 `sister prune`。",
@@ -1707,9 +1726,15 @@ pub mod stop {
                 )
             }
             sister_core::heartbeat::Presence::Thinking { .. } => {
-                println!("■ 錄製已經停了，解釋層還在想最後一段。停止的請求還在，想完就會收工。")
+                println!(
+                    "■ 錄製已經停了，解釋層還在想最後一段。迴圈已經跳出去了，\
+                     想完就會自己收工——沒有請求可以再送。"
+                )
             }
-            _ => println!(
+            sister_core::heartbeat::Presence::NeverStarted
+            | sister_core::heartbeat::Presence::Unreadable
+            | sister_core::heartbeat::Presence::Stopped { .. }
+            | sister_core::heartbeat::Presence::Stalled { .. } => println!(
                 "■ 目前沒有任何 `sister record` 在跑（心跳是停的）。停止的請求還是\
                  留下來了，但下一次開始記錄的時候會先把它清掉，不會影響到那一場。"
             ),
@@ -2309,11 +2334,11 @@ pub mod forget {
     /// 見 [`sister_core::db::DbStats::only_session_shells_left`]。這一句只在
     /// 「窗裡的東西被刪光、而那張表還有列」的時候出現。
     ///
-    /// `beat` 來自 `heartbeat::phase`，決定那一列是**當掉的**還是**活的**，以及
+    /// `beat` 來自 `heartbeat::presence`，決定那一列是**當掉的**還是**活的**，以及
     /// 它什麼時候會走——見 [`session_shell_why`]。
     fn session_shell_note(
         s: &sister_core::db::DbStats,
-        beat: Option<sister_core::heartbeat::Phase>,
+        beat: sister_core::heartbeat::Presence,
     ) -> Option<String> {
         s.only_session_shells_left().then(|| {
             let (why, then) = session_shell_why(beat);
@@ -2403,9 +2428,15 @@ pub mod forget {
         //
         // **這裡重新問一次「現在」**，不是重用上面算區間用的那個。理由寫在
         // `let (from, to)` 那一段：中間隔著一個可以跑好幾分鐘的 `Db::open`。
-        let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
-        let recording = beat == Some(sister_core::heartbeat::Phase::Recording);
-        let booting = beat == Some(sister_core::heartbeat::Phase::Booting);
+        let beat = sister_core::heartbeat::presence(data_dir, sister_core::now_ms());
+        let recording = matches!(
+            beat,
+            sister_core::heartbeat::Presence::Live(sister_core::heartbeat::Phase::Recording)
+        );
+        let booting = matches!(
+            beat,
+            sister_core::heartbeat::Presence::Live(sister_core::heartbeat::Phase::Booting)
+        );
 
         // 「什麼都沒記到」以前直接 return，所以那句警告在**最需要它的那一次**
         // 反而不會出現：她一個 tick 一個 tick 寫，他剛剛做的那件事很可能還沒
@@ -2543,8 +2574,9 @@ pub mod forget {
                 sessions: 1,
                 ..Default::default()
             };
-            use sister_core::heartbeat::Phase;
-            let note = session_shell_note(&shell, None).expect("留下來就要說");
+            use sister_core::heartbeat::{Phase, Presence};
+            let gone = Presence::Stopped { at: None };
+            let note = session_shell_note(&shell, gone).expect("留下來就要說");
             assert!(note.contains('1'), "{note}");
             assert!(
                 note.contains("工作階段"),
@@ -2567,7 +2599,8 @@ pub mod forget {
 
             // 她**正在錄**的時候：那一列是活的，下場也不一樣（收工時
             // `end_session` 自己會掃它）。不可以說她當掉了。
-            let live = session_shell_note(&shell, Some(Phase::Recording)).expect("留下來就要說");
+            let live =
+                session_shell_note(&shell, Presence::Live(Phase::Recording)).expect("留下來就要說");
             assert!(!live.contains("當掉"), "她此刻正在錄：{live}");
             assert!(live.contains("收工"), "活的那一列走的是另一條路：{live}");
 
@@ -2576,7 +2609,8 @@ pub mod forget {
             // `occupied = beat.is_some()`，於是這裡印「此刻有人佔著這個資料目錄
             // （她正在錄，或正在開機）」，而同一秒的 `doctor` 說那是上一次當機
             // 留下來的殼。
-            let booting = session_shell_note(&shell, Some(Phase::Booting)).expect("留下來就要說");
+            let booting =
+                session_shell_note(&shell, Presence::Live(Phase::Booting)).expect("留下來就要說");
             assert!(
                 booting.contains("當掉"),
                 "那一列不是正在起來的那一個：{booting}"
@@ -2603,17 +2637,42 @@ pub mod forget {
                 "那一列不是她的，她收工不會帶走它：{booting}"
             );
 
-            // 三種心跳三句話，兩兩不同。任何兩種撞在一起，就是又有一組不同的
+            // 按下停止之後那兩分鐘：這一列是她的，行程還在。不可以說當掉、
+            // 也不可以說沒有人佔著。
+            let thinking = session_shell_note(
+                &shell,
+                Presence::Thinking {
+                    at: 1,
+                    until: 240_000,
+                },
+            )
+            .expect("留下來就要說");
+            assert!(!thinking.contains("當掉"), "她還在收尾：{thinking}");
+            assert!(
+                !thinking.contains("沒有任何 recorder"),
+                "行程還在：{thinking}"
+            );
+            assert!(thinking.contains("想最後一段"), "{thinking}");
+
+            // 四種心跳四句話，兩兩不同。任何兩種撞在一起，就是又有一組不同的
             // 處境被印成同一行。
-            let three = [&note, &live, &booting];
-            for (i, a) in three.iter().enumerate() {
-                for b in &three[i + 1..] {
-                    assert_ne!(a, b, "三種狀態的下一步不一樣，不可以共用一句話");
+            let four = [&note, &live, &booting, &thinking];
+            for (i, a) in four.iter().enumerate() {
+                for b in &four[i + 1..] {
+                    assert_ne!(a, b, "四種狀態的下一步不一樣，不可以共用一句話");
                 }
             }
 
             // 東西還在的時候沒有這一句：那一場不是殼，它本來就該留著。
-            for beat in [None, Some(Phase::Booting), Some(Phase::Recording)] {
+            for beat in [
+                gone,
+                Presence::Live(Phase::Booting),
+                Presence::Live(Phase::Recording),
+                Presence::Thinking {
+                    at: 1,
+                    until: 240_000,
+                },
+            ] {
                 assert!(
                     session_shell_note(
                         &sister_core::db::DbStats {
@@ -4097,7 +4156,8 @@ pub mod facts {
                         // 這一頁手上有 `data_dir`，所以這一題問得出來——而且
                         // 問的是 `phase` 不是 `is_occupied`，「正在起來」和
                         // 「正在錄」是兩句不同的話。
-                        let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
+                        let beat =
+                            sister_core::heartbeat::presence(data_dir, sister_core::now_ms());
                         no_facts_line(s.frames, s.chunks, Emptiness::of(&db, &s, beat)?)
                     }
                 }
@@ -4249,14 +4309,15 @@ pub mod stats {
     /// 著的那幾列全是空殼，而這一頁上其他每一個數字都是 0。少了但書，這個 1
     /// 讀起來就像「她還記得那一場」，而正上方那個 ⚠ 才剛說完一列都不剩。
     ///
-    /// `beat` 來自 `heartbeat::phase`——這一頁手上有 `data_dir`，所以它分得出
-    /// 那一列是當掉的還是活的，不必印一個「或」。**收 `Phase` 不收布林**：上
+    /// `beat` 來自 `heartbeat::presence`——這一頁手上有 `data_dir`，所以它分得出
+    /// 那一列是當掉的還是活的，不必印一個「或」。**收 `Presence` 不收布林**：上
     /// 一版這一頁自己壓成 `beat.is_some()`，於是同一份 `stats` 上面那個 ⚠ 說
     /// 「有一個 sister record 正在起來」、三行之下這一列說那一場開著是因為
     /// 「她正在錄，或正在開機」——而且同一秒的 `doctor` 說那一列是當機的殼。
+    /// 再上一版收 `Option<Phase>`，`Thinking` 掉進 `None`，同一頁說她當掉了。
     fn sessions_line(
         s: &sister_core::db::DbStats,
-        beat: Option<sister_core::heartbeat::Phase>,
+        beat: sister_core::heartbeat::Presence,
     ) -> String {
         if s.only_session_shells_left() {
             // 只取「為什麼」。「什麼時候會走」留給 `forget`：那裡是他剛按下不
@@ -4316,7 +4377,7 @@ pub mod stats {
         // 布林。**
         //
         // [`Phase`]: sister_core::heartbeat::Phase
-        let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
+        let beat = sister_core::heartbeat::presence(data_dir, sister_core::now_ms());
 
         let days_between = |a: Option<i64>, b: Option<i64>| match (a, b) {
             (Some(a), Some(b)) if b > a => (b - a) as f64 / 86_400_000.0,
@@ -4809,8 +4870,9 @@ pub mod stats {
                 sessions: 1,
                 ..Default::default()
             };
-            use sister_core::heartbeat::Phase;
-            let line = sessions_line(&erased, None);
+            use sister_core::heartbeat::{Phase, Presence};
+            let gone = Presence::Stopped { at: None };
+            let line = sessions_line(&erased, gone);
             assert!(line.contains('1'), "數字還是要印：{line}");
             assert!(
                 line.contains("空殼"),
@@ -4828,7 +4890,7 @@ pub mod stats {
 
             // 反過來：她真的在錄的時候不准說她當機——這是這幾句話裡唯一會嚇到
             // 人的錯。
-            let live = sessions_line(&erased, Some(Phase::Recording));
+            let live = sessions_line(&erased, Presence::Live(Phase::Recording));
             assert!(live.contains("空殼"), "{live}");
             assert!(
                 !live.contains("當掉"),
@@ -4840,15 +4902,36 @@ pub mod stats {
             // 版這裡收 `occupied = beat.is_some()`，於是這一列印「她正在錄，或
             // 正在開機」，而同一份報告上面那個 ⚠ 說「有一個 sister record 正在
             // 起來」。
-            let booting = sessions_line(&erased, Some(Phase::Booting));
+            let booting = sessions_line(&erased, Presence::Live(Phase::Booting));
             assert!(booting.contains("空殼"), "{booting}");
             assert!(booting.contains("當掉"), "那一列不是她的：{booting}");
             assert!(
                 !booting.contains("正在錄"),
                 "她還在開資料庫，一列都還沒寫：{booting}"
             );
-            for (a, b) in [(&line, &live), (&line, &booting), (&live, &booting)] {
-                assert_ne!(a, b, "三種心跳三個下場，不可以共用一句話");
+            let thinking = sessions_line(
+                &erased,
+                Presence::Thinking {
+                    at: 1,
+                    until: 240_000,
+                },
+            );
+            assert!(thinking.contains("空殼"), "{thinking}");
+            assert!(!thinking.contains("當掉"), "她還在收尾：{thinking}");
+            assert!(
+                !thinking.contains("沒有任何 recorder"),
+                "行程還在：{thinking}"
+            );
+            assert!(thinking.contains("想最後一段"), "{thinking}");
+            for (a, b) in [
+                (&line, &live),
+                (&line, &booting),
+                (&line, &thinking),
+                (&live, &booting),
+                (&live, &thinking),
+                (&booting, &thinking),
+            ] {
+                assert_ne!(a, b, "四種心跳四個下場，不可以共用一句話");
             }
 
             // 而她真的記著東西的時候，這個但書一個字都不准出現：那會把一場
@@ -4865,7 +4948,11 @@ pub mod stats {
                     ..Default::default()
                 },
             ] {
-                for beat in [None, Some(Phase::Booting), Some(Phase::Recording)] {
+                for beat in [
+                    gone,
+                    Presence::Live(Phase::Booting),
+                    Presence::Live(Phase::Recording),
+                ] {
                     let line = sessions_line(&has, beat);
                     assert!(!line.contains("空殼"), "她記著東西：{line}");
                     assert_eq!(line, format!("  工作階段  {}", has.sessions));
@@ -4873,7 +4960,7 @@ pub mod stats {
             }
 
             // 一列都沒有的時候也不准講——沒有殼可以講。
-            assert_eq!(sessions_line(&DbStats::default(), None), "  工作階段  0");
+            assert_eq!(sessions_line(&DbStats::default(), gone), "  工作階段  0");
         }
 
         /// **「系統 1」和上面那個 ⚠ 不可以同時只講一半。**
@@ -4961,9 +5048,9 @@ pub mod doctor {
     /// 每一種：暫停的時候有沒有 recorder 佔著都無所謂，她根本沒在看。
     fn watching_verdict(
         paused: Option<String>,
-        beat: Option<sister_core::heartbeat::Phase>,
+        beat: sister_core::heartbeat::Presence,
     ) -> (&'static str, String) {
-        use sister_core::heartbeat::Phase;
+        use sister_core::heartbeat::{Phase, Presence};
         // 這一行是**唯一**會告訴使用者「你上禮拜按的暫停還開著」的地方。暫停
         // 不會自己過期（見 `sister_core::pause`），所以那條路很真實，而它的症
         // 狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
@@ -4974,16 +5061,20 @@ pub mod doctor {
             );
         }
         match beat {
-            Some(Phase::Recording) => ("✓", "有一個 sister record 正在跑".to_string()),
+            Presence::Live(Phase::Recording) => ("✓", "有一個 sister record 正在跑".to_string()),
             // 「正在起來」不可以印成「正在跑」。一顆一年份的資料庫，migration
             // 003 重建 bigram 索引可以跑好幾分鐘，而那幾分鐘裡她一個字都沒記
             // ——使用者照著那句話去做一件他想被記住的事，之後問「剛剛發生什麼
             // 事」會拿到一片空白。
-            Some(Phase::Booting) => (
+            Presence::Live(Phase::Booting) => (
                 "…",
                 "有一個 sister record **正在起來**（多半在開資料庫）。\
                  還沒開始記東西，等它印出第一行再做要被記住的事"
                     .to_string(),
+            ),
+            Presence::Thinking { .. } => (
+                "…",
+                "錄製已停，解釋層還在想最後一段（行程還在，不要再開一個）".to_string(),
             ),
             // 「沒有暫停」以前就印到這裡為止，而那句話讀起來是「她在看」——和
             // 字母人那句「在聽」是同一個謊。沒有暫停**不等於**有人在錄：
@@ -4992,7 +5083,10 @@ pub mod doctor {
             // 但這裡不能畫 ✗。doctor 最常見的用法就是「開始之前先檢查一下」，
             // 那時候沒有人在錄是**正常的**——畫成失敗就是一則每次都會出現、於
             // 是很快就被學會忽略的假警報，正是這個檔案上面幾行在講的那種。
-            None => (
+            Presence::NeverStarted
+            | Presence::Unreadable
+            | Presence::Stopped { .. }
+            | Presence::Stalled { .. } => (
                 "?",
                 "沒有暫停，但也沒有任何 sister record 在跑（還沒開始的話，這是正常的）".to_string(),
             ),
@@ -5264,69 +5358,89 @@ pub mod doctor {
         a: &sister_core::db::CrashAudit,
     ) -> (&'static str, String) {
         let since = fmt::timestamp(last.started_at);
-        let (sym, mut said) = match (last.ended_at, last.reason.as_deref()) {
-            (Some(t), Some(r)) => (
-                "✓",
-                format!(
-                    "{since} 開始，{} 結束——{}",
-                    fmt::timestamp(t),
-                    sister_core::model::EndReason::describe(r)
+        let (sym, mut said) =
+            match (last.ended_at, last.reason.as_deref()) {
+                (Some(t), Some(r)) => (
+                    "✓",
+                    format!(
+                        "{since} 開始，{} 結束——{}",
+                        fmt::timestamp(t),
+                        sister_core::model::EndReason::describe(r)
+                    ),
                 ),
-            ),
-            // 有收尾時間、卻沒有理由。這裡以前一律怪到「那一版還沒有在記」頭
-            // 上，而那句話有一半機率是冤枉的：`sessions` 這張表永遠不會被刪，
-            // `system_events` 會（保留期和 `sister forget` 都刪）。上一場比
-            // `text_days` 還舊、或者 `sister forget --last 2d` 剛好蓋過去，理
-            // 由就會憑空消失。
-            //
-            // 分得出來的證據是「那一場還剩幾筆事件」：一筆都不剩，就是整場被
-            // 清掉了，不是那一版沒寫。
-            (Some(t), None) if last.events_left == 0 => (
-                "?",
-                format!(
-                    "{since} 開始，{} 結束——理由查不出來了\n\
+                // 有收尾時間、卻沒有理由。這裡以前一律怪到「那一版還沒有在記」頭
+                // 上，而那句話有一半機率是冤枉的：`sessions` 這張表永遠不會被刪，
+                // `system_events` 會（保留期和 `sister forget` 都刪）。上一場比
+                // `text_days` 還舊、或者 `sister forget --last 2d` 剛好蓋過去，理
+                // 由就會憑空消失。
+                //
+                // 分得出來的證據是「那一場還剩幾筆事件」：一筆都不剩，就是整場被
+                // 清掉了，不是那一版沒寫。
+                (Some(t), None) if last.events_left == 0 => (
+                    "?",
+                    format!(
+                        "{since} 開始，{} 結束——理由查不出來了\n\
                      \x20                    （那一場的事件紀錄已經被清掉：\
                      保留期，或 `sister forget` 蓋到那段時間）",
-                    fmt::timestamp(t)
+                        fmt::timestamp(t)
+                    ),
                 ),
-            ),
-            // 事件還在、就是沒有 `session_end`：alpha.17 以前寫下的紀錄。不是
-            // 錯誤，只是那個版本答不出來——說出「那時候還沒有在記」，比留一個
-            // 看起來像故障的空白好。
-            (Some(t), None) => (
-                "?",
-                format!(
-                    "{since} 開始，{} 結束（{} 那一版還沒有在記為什麼停）",
-                    fmt::timestamp(t),
-                    last.app_version
+                // 事件還在、就是沒有 `session_end`：alpha.17 以前寫下的紀錄。不是
+                // 錯誤，只是那個版本答不出來——說出「那時候還沒有在記」，比留一個
+                // 看起來像故障的空白好。
+                (Some(t), None) => (
+                    "?",
+                    format!(
+                        "{since} 開始，{} 結束（{} 那一版還沒有在記為什麼停）",
+                        fmt::timestamp(t),
+                        last.app_version
+                    ),
                 ),
-            ),
-            // 這一頁手上有心跳，所以「不是當掉，就是它現在還在跑」那個「或」
-            // 不用留給他猜。
-            //
-            // **三種，不是兩種。** 開機那一段（可以長達幾分鐘）裡，這一列是
-            // 上一次當機留下來的殼，而同時真的有一個 recorder 正在起來——
-            // 「她現在還在跑」是錯的（那不是這一列），「現在沒有任何 recorder
-            // 佔著這個資料目錄」也是錯的（有）。兩句話都有人印過。
-            (None, _) => (
-                "?",
-                format!(
+                // 這一頁手上有心跳，所以「不是當掉，就是它現在還在跑」那個「或」
+                // 不用留給他猜。
+                //
+                // **三種，不是兩種。** 開機那一段（可以長達幾分鐘）裡，這一列是
+                // 上一次當機留下來的殼，而同時真的有一個 recorder 正在起來——
+                // 「她現在還在跑」是錯的（那不是這一列），「現在沒有任何 recorder
+                // 佔著這個資料目錄」也是錯的（有）。兩句話都有人印過。
+                (None, _) => {
+                    (
+                        "?",
+                        format!(
                     "{since} 開始，沒有收尾——{}",
                     match (a.live, a.beat) {
-                        (true, _) => "她現在還在跑".to_string(),
-                        (false, Some(sister_core::heartbeat::Phase::Booting)) =>
+                        (_, sister_core::heartbeat::Presence::Thinking { .. }) =>
+                            "錄製已停，解釋層還在想最後一段（行程還在）".to_string(),
+                        (true, sister_core::heartbeat::Presence::Live(_)) =>
+                            "她現在還在跑".to_string(),
+                        // `live` 是 true 卻不是 Live/Thinking：算錯了，但這一句
+                        // 仍往「不敢說她當掉」倒。
+                        (true, sister_core::heartbeat::Presence::NeverStarted
+                        | sister_core::heartbeat::Presence::Unreadable
+                        | sister_core::heartbeat::Presence::Stopped { .. }
+                        | sister_core::heartbeat::Presence::Stalled { .. }) =>
+                            "她現在還在跑".to_string(),
+                        (false, sister_core::heartbeat::Presence::Live(
+                            sister_core::heartbeat::Phase::Booting,
+                        )) =>
                             "她當掉了。現在有一個 sister record 正在起來，那一場的紀錄還沒進來"
                                 .to_string(),
                         // 心跳說在錄、而這一列不是它的：`forget` 剛好把它那一
                         // 列帶走之類的角落。不猜原因，只講看得到的。
-                        (false, Some(sister_core::heartbeat::Phase::Recording)) =>
+                        (false, sister_core::heartbeat::Presence::Live(
+                            sister_core::heartbeat::Phase::Recording,
+                        )) =>
                             "她當掉了。現在有一個 sister record 在跑，但這一列不是它的".to_string(),
-                        (false, None) =>
+                        (false, sister_core::heartbeat::Presence::NeverStarted
+                        | sister_core::heartbeat::Presence::Unreadable
+                        | sister_core::heartbeat::Presence::Stopped { .. }
+                        | sister_core::heartbeat::Presence::Stalled { .. }) =>
                             "她當掉了（現在沒有任何 recorder 佔著這個資料目錄）".to_string(),
                     }
                 ),
-            ),
-        };
+                    )
+                }
+            };
         // **「上一次」是一個承諾，而這裡拿得到的是「還留著紀錄的上一次」。**
         // 一場什麼都沒存到的錄製收工時連紀錄一起走（`delete_empty_sessions`），
         // 所以真的最後那一場可能根本不在這張表裡——而這一列會若無其事地指著更
@@ -5635,30 +5749,46 @@ pub mod doctor {
     /// 一句 `allow` 會把這兩件事一起蓋掉，連以後真的變成死碼那天也一起。
     #[cfg(any(windows, test))]
     pub(crate) fn keep_capabilities(
-        phase: Option<sister_core::heartbeat::Phase>,
+        beat: sister_core::heartbeat::Presence,
         previous: Option<&sister_core::capabilities::Report>,
     ) -> Option<Keeper> {
-        use sister_core::heartbeat::Phase;
+        use sister_core::heartbeat::{Phase, Presence};
         // 先問完再 match：塞進 guard 裡會長到 rustfmt 得把它拆成三行，而那三行
         // 讀起來會比它要講的事複雜。
         let has_evidence =
             previous.is_some_and(sister_core::capabilities::Report::has_session_evidence);
-        match phase {
-            Some(Phase::Recording) => Some(Keeper {
+        match beat {
+            Presence::Live(Phase::Recording) => Some(Keeper {
                 why: "她正在錄，能力報告交給那個行程寫",
                 whose: "正在錄的那個行程說",
             }),
             // 開機中的那一個還沒寫過任何東西，讀到的是**上一場**留下的。把它
             // 說成「正在錄的那個行程說」會讓他去停一個沒有在做那件事的行程。
-            Some(Phase::Booting) => Some(Keeper {
+            Presence::Live(Phase::Booting) => Some(Keeper {
                 why: "她正在起來，等她開完自己會寫一份",
                 whose: "上一場留下的報告說",
             }),
-            None if has_evidence => Some(Keeper {
-                why: "上一場路上發生的事只有那一場問得到，這裡問不出來",
-                whose: "上一場留下的報告說",
+            // 迴圈已經跳出，但那個行程收工前還會寫最後一份。蓋掉的話，這一場
+            // 路上發生的事（UIA 半路投降了）會被一份全新的探測換掉。
+            Presence::Thinking { .. } => Some(Keeper {
+                why: "錄製已停，解釋層還在想最後一段——能力報告交給那個行程收工時寫",
+                whose: "正在收尾的那個行程說",
             }),
-            None => None,
+            Presence::NeverStarted
+            | Presence::Unreadable
+            | Presence::Stopped { .. }
+            | Presence::Stalled { .. }
+                if has_evidence =>
+            {
+                Some(Keeper {
+                    why: "上一場路上發生的事只有那一場問得到，這裡問不出來",
+                    whose: "上一場留下的報告說",
+                })
+            }
+            Presence::NeverStarted
+            | Presence::Unreadable
+            | Presence::Stopped { .. }
+            | Presence::Stalled { .. } => None,
         }
     }
 
@@ -5715,8 +5845,8 @@ pub mod doctor {
         //
         // 所以判斷的是「有沒有東西可以弄丟」，不是「她在不在」。
         let previous = sister_core::capabilities::read(data_dir);
-        let phase = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
-        if let Some(Keeper { why, whose }) = keep_capabilities(phase, previous.as_ref()) {
+        let beat = sister_core::heartbeat::presence(data_dir, sister_core::now_ms());
+        if let Some(Keeper { why, whose }) = keep_capabilities(beat, previous.as_ref()) {
             println!("  （{why}——這裡不蓋掉它。）");
             for line in previous
                 .as_ref()
@@ -6133,11 +6263,10 @@ pub mod doctor {
         // 心跳**只讀一次**。再讀一次的話，兩次讀之間她可以從 `Booting` 跳到
         // `Recording`，於是同一份報告的上半和下半描述兩個不同的瞬間——一份自相
         // 矛盾的報告，而且重跑一次就不見了。
-        let presence = sister_core::heartbeat::presence(data_dir, sister_core::now_ms());
-        let beat = match presence {
-            sister_core::heartbeat::Presence::Live(p) => Some(p),
-            _ => None,
-        };
+        // 心跳**只讀一次**，而且**不壓扁**。上一版這裡把 `Presence` 收成
+        // `Option<Phase>`，`Thinking` 掉進 `None`，於是同一份報告六行之隔：
+        // 「零當機」說她當掉了、「現在有沒有在看」說行程還在。
+        let beat = sister_core::heartbeat::presence(data_dir, sister_core::now_ms());
 
         let (db, no_db) = match db_file.exists().then(|| Db::open(&db_file)) {
             Some(Ok(d)) => (Some(d), "還沒有資料庫"),
@@ -6282,13 +6411,7 @@ pub mod doctor {
                 .map(|ts| format!("從 {} 起", crate::fmt::timestamp(ts)))
                 .unwrap_or_else(|| "不知道從什麼時候開始".to_string())
         });
-        let (sym, said) = match presence {
-            sister_core::heartbeat::Presence::Thinking { .. } => (
-                "…",
-                "錄製已停，解釋層還在想最後一段（行程還在，不要再開一個）".to_string(),
-            ),
-            _ => watching_verdict(paused, beat),
-        };
+        let (sym, said) = watching_verdict(paused, beat);
         mark(sym, "現在有沒有在看", &said);
         // 題庫是整個資料庫裡唯一一張存著**你自己打進去的字**的表，所以它得
         // 出現在這一頁上。doctor 的工作是把真相攤開，而一張存了東西、卻沒有
@@ -6653,7 +6776,7 @@ pub mod doctor {
     mod doctor_tests {
         use super::*;
         use sister_core::capabilities::{Report, UrlCapture};
-        use sister_core::heartbeat::Phase;
+        use sister_core::heartbeat::{Phase, Presence};
 
         /// 一台剛裝好、還沒錄過的機器上，doctor 要寫得進去。
         ///
@@ -6662,8 +6785,11 @@ pub mod doctor {
         /// 「這台機器讀不到網址」的那個人。護著證據不可以把這條路一起關掉。
         #[test]
         fn a_machine_with_nothing_to_lose_still_gets_its_report_written() {
-            assert!(keep_capabilities(None, None).is_none());
-            assert!(keep_capabilities(None, Some(&Report::default())).is_none());
+            assert!(keep_capabilities(Presence::Stopped { at: None }, None).is_none());
+            assert!(
+                keep_capabilities(Presence::Stopped { at: None }, Some(&Report::default()))
+                    .is_none()
+            );
             // 只有開機探測、沒有歷史——一樣沒有東西可以弄丟。
             let probes_only = Report {
                 at: 1,
@@ -6671,7 +6797,9 @@ pub mod doctor {
                 input_hook_failed: true,
                 ..Default::default()
             };
-            assert!(keep_capabilities(None, Some(&probes_only)).is_none());
+            assert!(
+                keep_capabilities(Presence::Stopped { at: None }, Some(&probes_only)).is_none()
+            );
         }
 
         /// 她收工之後，那一場路上發生的事仍然只有那一場問得到。
@@ -6689,7 +6817,8 @@ pub mod doctor {
                 },
                 ..Default::default()
             };
-            let k = keep_capabilities(None, Some(&gave_up)).expect("心跳停了不代表可以蓋");
+            let k = keep_capabilities(Presence::Stopped { at: None }, Some(&gave_up))
+                .expect("心跳停了不代表可以蓋");
             assert_eq!(k.whose, "上一場留下的報告說");
         }
 
@@ -6708,10 +6837,21 @@ pub mod doctor {
         /// 一挪回去，這一行就又變成謊話，而沒有任何東西會紅。
         #[test]
         fn while_she_is_opening_the_database_the_warnings_are_last_sessions() {
-            let k = keep_capabilities(Some(Phase::Booting), None).expect("開機中不可以蓋");
+            let k =
+                keep_capabilities(Presence::Live(Phase::Booting), None).expect("開機中不可以蓋");
             assert_eq!(k.whose, "上一場留下的報告說");
-            let k = keep_capabilities(Some(Phase::Recording), None).expect("正在錄不可以蓋");
+            let k =
+                keep_capabilities(Presence::Live(Phase::Recording), None).expect("正在錄不可以蓋");
             assert_eq!(k.whose, "正在錄的那個行程說");
+            let k = keep_capabilities(
+                Presence::Thinking {
+                    at: 1,
+                    until: 240_000,
+                },
+                None,
+            )
+            .expect("想最後一段也不可以蓋");
+            assert_eq!(k.whose, "正在收尾的那個行程說");
         }
 
         /// 三種不蓋的理由，要是三句不一樣的話。
@@ -6731,13 +6871,20 @@ pub mod doctor {
                 ..Default::default()
             };
             let kept = [
-                keep_capabilities(Some(Phase::Recording), None),
-                keep_capabilities(Some(Phase::Booting), None),
-                keep_capabilities(None, Some(&evidence)),
+                keep_capabilities(Presence::Live(Phase::Recording), None),
+                keep_capabilities(Presence::Live(Phase::Booting), None),
+                keep_capabilities(
+                    Presence::Thinking {
+                        at: 1,
+                        until: 240_000,
+                    },
+                    None,
+                ),
+                keep_capabilities(Presence::Stopped { at: None }, Some(&evidence)),
             ];
             let whys: Vec<&str> = kept
                 .iter()
-                .map(|k| k.as_ref().expect("這三種都不可以蓋").why)
+                .map(|k| k.as_ref().expect("這四種都不可以蓋").why)
                 .collect();
             assert!(whys.iter().all(|w| !w.is_empty()), "理由不可以是空的");
             for (i, a) in whys.iter().enumerate() {
@@ -6787,8 +6934,8 @@ pub mod doctor {
                 // 真的那一支就是這樣交出來的。
                 live: false,
                 // 「有沒有人佔著這個資料目錄」是另一題，預設沒有。要驗
-                // 「她正在開機」那幾格的自己蓋 `Some(Phase::Booting)` 上去。
-                beat: None,
+                // 「她正在開機」那幾格的自己蓋 `Presence::Live(Phase::Booting)` 上去。
+                beat: Presence::Stopped { at: None },
                 floor: false,
             }
         }
@@ -7120,7 +7267,7 @@ pub mod doctor {
             // 開機中：心跳在（`Booting`），但她那一列還沒 INSERT，所以
             // `crash_audit` 一個數字都沒扣——`live` 是 false。
             let booting = sister_core::db::CrashAudit {
-                beat: Some(Phase::Booting),
+                beat: Presence::Live(Phase::Booting),
                 ..audit(3, 2, 3, 1)
             };
             let (sym, said) = last_session_verdict(&crashed, &booting);
@@ -7145,22 +7292,40 @@ pub mod doctor {
             // 三種心跳三句話，兩兩不同。任何兩種撞在一起就是又有一組不同的
             // 情況被印成同一行——這批 bug 的形狀。
             let says = |a: sister_core::db::CrashAudit| last_session_verdict(&crashed, &a).1;
+            let thinking = says(sister_core::db::CrashAudit {
+                live: true,
+                beat: Presence::Thinking {
+                    at: 1,
+                    until: 240_000,
+                },
+                ..audit(3, 2, 3, 1)
+            });
+            assert!(
+                thinking.contains("想最後一段"),
+                "按下停止之後那兩分鐘不是當機：{thinking}"
+            );
+            assert!(!thinking.contains("當掉了"), "{thinking}");
+            assert!(
+                !thinking.contains("沒有任何 recorder"),
+                "行程還在：{thinking}"
+            );
             let three = [
                 says(sister_core::db::CrashAudit {
                     live: true,
-                    beat: Some(Phase::Recording),
+                    beat: Presence::Live(Phase::Recording),
                     ..audit(3, 2, 3, 1)
                 }),
                 says(booting),
                 says(sister_core::db::CrashAudit {
-                    beat: Some(Phase::Recording),
+                    beat: Presence::Live(Phase::Recording),
                     ..audit(3, 2, 3, 1)
                 }),
                 says(audit(3, 2, 3, 1)),
+                thinking,
             ];
             for (i, a) in three.iter().enumerate() {
                 for b in &three[i + 1..] {
-                    assert_ne!(a, b, "四種情況要有四句話");
+                    assert_ne!(a, b, "五種情況要有五句話");
                 }
             }
         }
@@ -7175,24 +7340,48 @@ pub mod doctor {
         fn there_are_four_answers_to_whether_she_is_watching_right_now() {
             use sister_core::heartbeat::Phase;
             let all = [
-                watching_verdict(Some("從 08-20 03:00 起".into()), None),
+                watching_verdict(
+                    Some("從 08-20 03:00 起".into()),
+                    Presence::Stopped { at: None },
+                ),
                 // 暫停壓過心跳：她佔著這個目錄，可是什麼都不會被記錄。少了這
                 // 一格，一個按著暫停的人會看到「有一個 sister record 正在跑」
                 // 然後以為自己被記著。
-                watching_verdict(Some("從 08-20 03:00 起".into()), Some(Phase::Recording)),
-                watching_verdict(None, Some(Phase::Recording)),
-                watching_verdict(None, Some(Phase::Booting)),
-                watching_verdict(None, None),
+                watching_verdict(
+                    Some("從 08-20 03:00 起".into()),
+                    Presence::Live(Phase::Recording),
+                ),
+                watching_verdict(None, Presence::Live(Phase::Recording)),
+                watching_verdict(None, Presence::Live(Phase::Booting)),
+                watching_verdict(
+                    None,
+                    Presence::Thinking {
+                        at: 1,
+                        until: 240_000,
+                    },
+                ),
+                watching_verdict(None, Presence::Stopped { at: None }),
             ];
             assert_eq!(all[0], all[1], "暫停中就是暫停中，心跳不改變這一句");
             assert_eq!(all[0].0, "⏸");
             assert_eq!(all[2].0, "✓");
             assert_eq!(all[3].0, "…", "「正在起來」不是 ✓——她一個字都還沒記");
-            assert_eq!(all[4].0, "?", "沒人在錄是正常的，不可以畫成失敗");
-            let four = [&all[0], &all[2], &all[3], &all[4]];
-            for (i, a) in four.iter().enumerate() {
-                for b in &four[i + 1..] {
-                    assert_ne!(a.1, b.1, "四種處境要有四句話");
+            assert_eq!(all[4].0, "…", "想最後一段不是 ✓——她不抓畫面了");
+            assert_eq!(all[5].0, "?", "沒人在錄是正常的，不可以畫成失敗");
+            assert!(
+                all[4].1.contains("想最後一段"),
+                "想最後一段要講出來：{}",
+                all[4].1
+            );
+            assert!(
+                !all[4].1.contains("沒有任何 sister record"),
+                "行程還在：{}",
+                all[4].1
+            );
+            let five = [&all[0], &all[2], &all[3], &all[4], &all[5]];
+            for (i, a) in five.iter().enumerate() {
+                for b in &five[i + 1..] {
+                    assert_ne!(a.1, b.1, "五種處境要有五句話");
                 }
             }
             assert!(
@@ -7243,7 +7432,7 @@ pub mod doctor {
                 recorded_verdict(0, 0, Emptiness::Booting, d),
                 crash_verdict(
                     &sister_core::db::CrashAudit {
-                        beat: Some(sister_core::heartbeat::Phase::Booting),
+                        beat: Presence::Live(sister_core::heartbeat::Phase::Booting),
                         ..audit(0, 0, 0, 0)
                     },
                     Emptiness::Booting,
@@ -7275,7 +7464,7 @@ pub mod doctor {
                 crash_verdict(
                     &sister_core::db::CrashAudit {
                         live: true,
-                        beat: Some(sister_core::heartbeat::Phase::Recording),
+                        beat: Presence::Live(sister_core::heartbeat::Phase::Recording),
                         ..audit(3, 2, 3, 1)
                     },
                     Emptiness::Live,
@@ -7311,7 +7500,7 @@ pub mod doctor {
                 let (sym, said) = crash_verdict(
                     &sister_core::db::CrashAudit {
                         live: true,
-                        beat: Some(sister_core::heartbeat::Phase::Recording),
+                        beat: Presence::Live(sister_core::heartbeat::Phase::Recording),
                         ..audit(0, 0, 0, 0)
                     },
                     empty,
@@ -7333,7 +7522,7 @@ pub mod doctor {
             let (sym, said) = crash_verdict(
                 &sister_core::db::CrashAudit {
                     live: true,
-                    beat: Some(sister_core::heartbeat::Phase::Recording),
+                    beat: Presence::Live(sister_core::heartbeat::Phase::Recording),
                     floor: true,
                     ..audit(0, 0, 0, 0)
                 },
@@ -7356,7 +7545,7 @@ pub mod doctor {
             let (sym, said) = crash_verdict(
                 &sister_core::db::CrashAudit {
                     live: true,
-                    beat: Some(sister_core::heartbeat::Phase::Recording),
+                    beat: Presence::Live(sister_core::heartbeat::Phase::Recording),
                     ..audit(0, 1, 0, 0)
                 },
                 Emptiness::Erased,
@@ -7565,7 +7754,7 @@ pub mod doctor {
             let (_, crash) = crash_verdict(
                 &sister_core::db::CrashAudit {
                     live: true,
-                    beat: Some(sister_core::heartbeat::Phase::Recording),
+                    beat: Presence::Live(sister_core::heartbeat::Phase::Recording),
                     ..audit(2, 2, 2, 0)
                 },
                 Emptiness::Live,
@@ -7600,7 +7789,12 @@ pub mod doctor {
 
             let mut db = Db::open_in_memory().expect("db");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats"), None).expect("of"),
+                Emptiness::of(
+                    &db,
+                    &db.stats().expect("stats"),
+                    Presence::Stopped { at: None }
+                )
+                .expect("of"),
                 Emptiness::Fresh,
                 "剛開的資料庫"
             );
@@ -7616,7 +7810,12 @@ pub mod doctor {
             )
             .expect("blocked");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats"), None).expect("of"),
+                Emptiness::of(
+                    &db,
+                    &db.stats().expect("stats"),
+                    Presence::Stopped { at: None }
+                )
+                .expect("of"),
                 Emptiness::Blocked,
                 "她錄了，是規則擋掉的——證據就在這顆資料庫裡"
             );
@@ -7625,7 +7824,12 @@ pub mod doctor {
             db.forget(0, 2_000, None).expect("forget");
             db.end_session(s).expect("end");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats"), None).expect("of"),
+                Emptiness::of(
+                    &db,
+                    &db.stats().expect("stats"),
+                    Presence::Stopped { at: None }
+                )
+                .expect("of"),
                 Emptiness::Erased,
                 "這時候才輪到「被 forget 忘掉了」"
             );
@@ -7665,7 +7869,7 @@ pub mod doctor {
                 "前提：它走的是和「清空過」同一條路：{stats:?}"
             );
             assert_eq!(
-                Emptiness::of(&db, &stats, None).expect("of"),
+                Emptiness::of(&db, &stats, Presence::Stopped { at: None }).expect("of"),
                 Emptiness::Barren,
                 "他一次都沒刪過東西，不可以說東西被刪了"
             );
@@ -7673,8 +7877,12 @@ pub mod doctor {
             // 去看 `capture.enabled`，而一個三秒前才按下開始記錄的人，機器上
             // 沒有東西需要改——那台機器要的是「再等一下」。
             assert_eq!(
-                Emptiness::of(&db, &stats, Some(sister_core::heartbeat::Phase::Recording))
-                    .expect("of"),
+                Emptiness::of(
+                    &db,
+                    &stats,
+                    Presence::Live(sister_core::heartbeat::Phase::Recording)
+                )
+                .expect("of"),
                 Emptiness::Live,
                 "她此刻正佔著這個目錄，不是「跑完了什麼都沒存到」"
             );
@@ -7683,8 +7891,12 @@ pub mod doctor {
             // 上印出「她此刻正在錄，到現在還沒有一列落地」——她還沒開始錄。一
             // 個布林湊不出三種答案，而少掉的那一種永遠是「正在來、還沒好」。
             assert_eq!(
-                Emptiness::of(&db, &stats, Some(sister_core::heartbeat::Phase::Booting))
-                    .expect("of"),
+                Emptiness::of(
+                    &db,
+                    &stats,
+                    Presence::Live(sister_core::heartbeat::Phase::Booting)
+                )
+                .expect("of"),
                 Emptiness::Booting,
                 "她在開資料庫，還沒開始記——既不是「正在錄」也不是「跑完沒存到」"
             );
@@ -7703,7 +7915,12 @@ pub mod doctor {
             db.forget(0, 3_000, None).expect("forget");
             db.end_session(s).expect("end");
             assert_eq!(
-                Emptiness::of(&db, &db.stats().expect("stats"), None).expect("of"),
+                Emptiness::of(
+                    &db,
+                    &db.stats().expect("stats"),
+                    Presence::Stopped { at: None }
+                )
+                .expect("of"),
                 Emptiness::Erased,
                 "存過就是存過——那個位元撐得過 forget"
             );
@@ -11932,34 +12149,39 @@ pub mod record {
     /// 平台才執行得到的閘門，等於一道沒有被執行過的閘門。
     fn already_recording(data_dir: &Path) -> Result<()> {
         let now = sister_core::now_ms();
-        // 想最後一段：心跳說沒在錄，但行程還握著資料庫。那一句要指得出在等
-        // 什麼、還要多久——不可以再印「已經有一個 sister record 在跑了」。
-        if let sister_core::heartbeat::Presence::Thinking { .. } =
-            sister_core::heartbeat::presence(data_dir, now)
-        {
-            anyhow::bail!(
+        // 心跳只讀一次。上一版先 `presence` 再 `occupied_why`，中間那個
+        // recorder 只要把 `beat_thinking` 換成墓碑，第二次讀就是 `Stopped`
+        // → `occupied_why` 回 `None` → `.expect("Thinking 一定佔著")` panic。
+        let seen = sister_core::heartbeat::presence(data_dir, now);
+        match seen {
+            sister_core::heartbeat::Presence::Thinking { .. } => anyhow::bail!(
                 "{}",
-                sister_core::heartbeat::occupied_why(data_dir, now).expect("Thinking 一定佔著")
-            );
+                sister_core::heartbeat::occupied_why_of(seen, now).unwrap_or_else(|| {
+                    "錄製已經停了，解釋層還在想最後一段。想完就會收工，這期間不要再開一個。".into()
+                })
+            ),
+            sister_core::heartbeat::Presence::Live(_) => {
+                // 講得出「多久以前」，那個人才判斷得出這是不是自己剛剛開的那一個。
+                let ago = sister_core::heartbeat::last_beat(data_dir)
+                    .map(|ts| format!("最後一次心跳是 {} 秒前", (now - ts).max(0) / 1000))
+                    .unwrap_or_else(|| "而且它剛剛還在動".to_string());
+                anyhow::bail!(
+                    "已經有一個 sister record 在這個資料目錄上跑了（{ago}）。\n\n\
+                     兩個一起錄會對同一顆資料庫各寫一份，而唯一看得出來的症狀是\n\
+                     磁碟用得比講好的快一倍——所以這裡直接擋下來。\n\n\
+                     要換手的話先請那一個收工：\n    \
+                     sister stop\n\n\
+                     如果你確定那個行程已經死了，等 {} 秒它的心跳就會自己過期。\n\
+                     （心跳檔：{}）\n",
+                    sister_core::heartbeat::STALE_AFTER_MS / 1000,
+                    sister_core::heartbeat::beat_path(data_dir).display()
+                )
+            }
+            sister_core::heartbeat::Presence::NeverStarted
+            | sister_core::heartbeat::Presence::Unreadable
+            | sister_core::heartbeat::Presence::Stopped { .. }
+            | sister_core::heartbeat::Presence::Stalled { .. } => Ok(()),
         }
-        if !sister_core::heartbeat::is_occupied(data_dir, now) {
-            return Ok(());
-        }
-        // 講得出「多久以前」，那個人才判斷得出這是不是自己剛剛開的那一個。
-        let ago = sister_core::heartbeat::last_beat(data_dir)
-            .map(|ts| format!("最後一次心跳是 {} 秒前", (now - ts).max(0) / 1000))
-            .unwrap_or_else(|| "而且它剛剛還在動".to_string());
-        anyhow::bail!(
-            "已經有一個 sister record 在這個資料目錄上跑了（{ago}）。\n\n\
-             兩個一起錄會對同一顆資料庫各寫一份，而唯一看得出來的症狀是\n\
-             磁碟用得比講好的快一倍——所以這裡直接擋下來。\n\n\
-             要換手的話先請那一個收工：\n    \
-             sister stop\n\n\
-             如果你確定那個行程已經死了，等 {} 秒它的心跳就會自己過期。\n\
-             （心跳檔：{}）\n",
-            sister_core::heartbeat::STALE_AFTER_MS / 1000,
-            sister_core::heartbeat::beat_path(data_dir).display()
-        );
     }
 
     mod record_meanings {
@@ -14988,6 +15210,30 @@ pub mod record {
                 said.contains("已經有一個 sister record"),
                 "擋下來的該是那道閘門，不是平台檢查：{said}"
             );
+        }
+
+        #[test]
+        fn thinking_blocks_the_second_recorder_without_claiming_she_is_recording() {
+            let dir = Tmp::new("already-thinking");
+            let now = sister_core::now_ms();
+            sister_core::heartbeat::beat_thinking(&dir.0, now, now + 240_000).expect("thinking");
+            let err = already_recording(&dir.0).expect_err("想最後一段還佔著");
+            let said = format!("{err}");
+            assert!(said.contains("想最後一段"), "{said}");
+            assert!(
+                !said.contains("已經有一個 sister record 在這個資料目錄上跑了"),
+                "心跳說沒在錄，兩句會對打：{said}"
+            );
+        }
+
+        #[test]
+        fn a_tombstone_does_not_panic_the_second_recorder() {
+            // 上一版 `already_recording` 讀兩次心跳，第二次餵給 `.expect()`。
+            // 墓碑那一種 `occupied_why` 回 `None`——只要兩次讀之間有人蓋墓碑，
+            // `sister record` 啟動時就 panic。讀一次之後這一種是 Ok，不是炸。
+            let dir = Tmp::new("already-tomb");
+            sister_core::heartbeat::stop(&dir.0, sister_core::now_ms());
+            already_recording(&dir.0).expect("墓碑不是佔著，更不可以 panic");
         }
 
         #[test]
