@@ -522,6 +522,16 @@ function paintBrain() {
       "命令和同意書都齊了。有一個 sister record 正在起來（多半在開資料庫）——它一開始錄，她就會自己醒，不必再按「開始記錄」。";
     return;
   }
+  if (watchingNow === "thinking") {
+    // 收工那兩分鐘：錄製迴圈已經停了，解釋層還在把最後一段想完
+    // （`heartbeat::Presence::Thinking`）。她確實沒在錄——但底下那句
+    // 「等你按下『開始記錄』」會指著一顆這時候按下去只會回一句
+    // 「還在想最後一段，最多還要 N 秒」的按鈕。和 `WriteOutcome.watching`
+    // 當初為了 booting 拆出第三個值是同一個理由。
+    el.brainSay.textContent =
+      "命令和同意書都齊了。上一場錄製剛停，解釋層還在把最後一段想完——想完才能再開一場，這時候按「開始記錄」會被擋下來。";
+    return;
+  }
   // 3. 填了命令、同意書也勾了，但現在沒有 record 在跑。
   el.brainSay.textContent =
     "命令和同意書都齊了。現在沒有人在錄，等你按下「開始記錄」她才會自己醒。";
@@ -549,7 +559,13 @@ async function refreshBrainFacts() {
   }
   try {
     const w = await invoke("recording_state");
-    watchingNow = w === "recording" || w === "booting" || w === "none" ? w : "none";
+    // `recording_state` 回四個字串（見 main.rs 上面那段 doc）。少收一個的
+    // 話它會掉進 `"none"`，而 `"none"` 那句寫著「等你按下『開始記錄』」——
+    // 想最後一段的那兩分鐘按下去是會被擋的。
+    watchingNow =
+      w === "recording" || w === "booting" || w === "thinking" || w === "none"
+        ? w
+        : "none";
   } catch {
     watchingNow = "none";
   }

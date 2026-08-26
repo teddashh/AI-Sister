@@ -409,6 +409,8 @@ const SENTENCE = {
   readyBooting:
     "命令和同意書都齊了。有一個 sister record 正在起來（多半在開資料庫）——它一開始錄，她就會自己醒，不必再按「開始記錄」。",
   live: "命令和同意書都齊了，而且正在錄：她會自己醒。",
+  readyThinking:
+    "命令和同意書都齊了。上一場錄製剛停，解釋層還在把最後一段想完——想完才能再開一場，這時候按「開始記錄」會被擋下來。",
 };
 
 console.log("⑫ 大腦：沒填命令（同意書勾了、正在錄也不算）");
@@ -472,6 +474,32 @@ console.log("⑯ 大腦：兩個都齊，record 正在起來");
   );
 }
 
+/*
+ * `recording_state` 回**四**個字串，而這一頁的白名單只收前三個的話，
+ * `"thinking"` 會掉進 `"none"` ——於是收工那兩分鐘裡這一格說「等你按下
+ * 『開始記錄』」，而那顆按鈕這時候按下去只會回一句「還在想最後一段」。
+ * 和 ⑯ 守 booting 的理由一模一樣，只是換一個狀態。
+ */
+console.log("⑯ᵇ 大腦：兩個都齊，上一場剛停、腦還在想最後一段");
+{
+  const p = await open({
+    config: { ...BASE, brain_command: "claude" },
+    cloud: true,
+    watching: "thinking",
+  });
+  check("就是那一句", p.brainSay() === SENTENCE.readyThinking, p.brainSay());
+  check(
+    "沒有掉回「沒有人在錄」那句",
+    p.brainSay() !== SENTENCE.readyIdle,
+    p.brainSay(),
+  );
+  check(
+    "不是「按開始記錄」那句（這時候按下去會被擋）",
+    !p.brainSay().includes("等你按下「開始記錄」"),
+    p.brainSay(),
+  );
+}
+
 {
   const four = [
     SENTENCE.noCommand,
@@ -481,11 +509,10 @@ console.log("⑯ 大腦：兩個都齊，record 正在起來");
   ];
   const unique = new Set(four);
   check("C 的四句話沒有兩句一樣", unique.size === 4, four);
-  check(
-    "booting 那句也跟這四句都不同",
-    !four.includes(SENTENCE.readyBooting),
-    SENTENCE.readyBooting,
-  );
+  // booting 和 thinking 都是「兩個條件都齊、但現在不會醒」的變體，最容易
+  // 被寫成同一句——而它們的下一步不一樣（一個等一下就好，一個要等她想完）。
+  const all = [...four, SENTENCE.readyBooting, SENTENCE.readyThinking];
+  check("連 booting、thinking 六句都沒有兩句一樣", new Set(all).size === 6, all);
 }
 
 console.log("⑰ 打字當下就要換成「沒勾同意書」，不能等儲存");
