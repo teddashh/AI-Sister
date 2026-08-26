@@ -212,24 +212,34 @@ pub fn format_reviewer_visibility(
                 out.push_str(&format!("目前辨識到的實體（共 {} 個）：\n", rows.len()));
             }
             for row in rows.iter().take(MAX_ENTITIES_SHOWN) {
-                let refs = row
+                // 「段」是這一行自己的宣稱，所以要先去重再數。`entity_mentions`
+                // 上沒有 `(entity_id, seen_ref)` 的 UNIQUE，同一張卡每輪插兩列
+                // （承諾裡的人 + 卡上的實體），而 `latest_unreviewed` 不排除審過
+                // 的卡——數列的話，一段會被說成一百多段。
+                let mut seen = BTreeSet::new();
+                let segments: Vec<&str> = row
                     .mentions
                     .iter()
-                    .take(MAX_MENTIONS_SHOWN)
                     .map(|m| m.seen_ref.as_str())
+                    .filter(|r| seen.insert(*r))
+                    .collect();
+                let shown = segments
+                    .iter()
+                    .take(MAX_MENTIONS_SHOWN)
+                    .copied()
                     .collect::<Vec<_>>();
-                let refs = if refs.is_empty() {
+                let refs = if shown.is_empty() {
                     "（目前沒有活著的提及）".into()
-                } else if row.mentions.len() > MAX_MENTIONS_SHOWN {
+                } else if segments.len() > MAX_MENTIONS_SHOWN {
                     // 剪掉尾巴的清單跟完整的清單長得一模一樣，所以每一次剪都要
                     // 自己講出來。少講這一句，「出現於：六段」就變成一句假話。
                     format!(
                         "{}（另有 {} 段沒列出來）",
-                        refs.join("、"),
-                        row.mentions.len() - MAX_MENTIONS_SHOWN
+                        shown.join("、"),
+                        segments.len() - MAX_MENTIONS_SHOWN
                     )
                 } else {
-                    refs.join("、")
+                    shown.join("、")
                 };
                 out.push_str(&format!(
                     "- [{}] {}；出現於：{}\n",
@@ -1591,6 +1601,46 @@ mod tests {
             "沒說單一實體漏了幾段：{text}"
         );
         assert!(!text.contains("l2:0-29"), "第 30 段不該印出來：{text}");
+    }
+
+    #[test]
+    fn mentions_are_counted_by_segment_not_by_row() {
+        use crate::db::{EntityRow, EntityWithMentions, MentionRow};
+
+        // `entity_mentions` 上沒有 `(entity_id, seen_ref)` 的 UNIQUE，而同一張
+        // 卡每輪會插兩列（承諾裡的人 + 卡上的實體），`latest_unreviewed` 又不會
+        // 排除審過的卡——所以同一段會累積幾十上百列。「段」是這一行自己的宣稱，
+        // 數列不等於數段。
+        let rows = vec![EntityWithMentions {
+            entity: EntityRow {
+                id: 1,
+                kind: "person".into(),
+                name: "王小明".into(),
+                aliases_json: "[]".into(),
+                first_seen_ref: "l2:87".into(),
+                notes: None,
+                created_at: 20,
+                tombstoned_at: None,
+            },
+            mentions: (0..140)
+                .map(|i| MentionRow {
+                    id: i,
+                    entity_id: 1,
+                    seen_ref: "l2:87".into(),
+                    created_at: 20,
+                    tombstoned_at: None,
+                })
+                .collect(),
+        }];
+        let text = format_reviewer_visibility(
+            &DualPassDivergences::NeverRan,
+            &EntityMemory::Present(rows),
+        );
+        assert!(
+            text.contains("出現於：l2:87\n"),
+            "同一段印了不只一次：{text}"
+        );
+        assert!(!text.contains("沒列出來"), "一段被數成 140 段：{text}");
     }
 
     #[test]

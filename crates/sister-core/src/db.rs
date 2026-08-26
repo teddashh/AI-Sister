@@ -4439,8 +4439,15 @@ impl Db {
     }
 
     pub fn entity_memory(&self) -> Result<EntityMemory> {
+        // 數的是**呼叫**，不是 `reviewer_run` 的列。一輪可以 `skip_reason IS
+        // NULL` 卻零次呼叫（卡片全審過了、或預算剩不到兩次），而寫實體的那幾行
+        // 全在 `calls += 2` 後面、同一個迴圈裡、中間沒有 `continue`——所以那種
+        // 一輪**構不到**它們，不算「看過了、辨識到 0 個」。
+        // 跟隔壁 `latest_dual_pass_divergences` 的 `>= 2` 差一個門檻是故意的：
+        // 那邊問「有沒有兩份答案可比」，這邊問「有沒有開過 CLI」。
         let reviewed: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM reviewer_run WHERE skip_reason IS NULL)",
+            "SELECT EXISTS(SELECT 1 FROM reviewer_run
+             WHERE skip_reason IS NULL AND calls_used > 0)",
             [],
             |r| r.get(0),
         )?;
@@ -11311,7 +11318,10 @@ mod tests {
             db.entity_memory().unwrap(),
             EntityMemory::NeverReviewed
         ));
-        db.insert_reviewer_run(&ReviewerRunInsert {
+        // 一輪零次呼叫的跑（卡片全審過了、或預算剩不到兩次）**構不到**寫實體
+        // 的那幾行——它們全在 `calls += 2` 後面、同一個迴圈裡、中間沒有
+        // `continue`。所以它不算「看過了」。
+        let nothing = ReviewerRunInsert {
             ts: 10,
             day_key: "1970-01-01",
             kind: "interval",
@@ -11324,6 +11334,18 @@ mod tests {
             budget_used: 0,
             budget_limit: 10,
             detail: "",
+        };
+        db.insert_reviewer_run(&nothing).unwrap();
+        assert!(
+            matches!(db.entity_memory().unwrap(), EntityMemory::NeverReviewed),
+            "零次呼叫的一輪被算成『看過了、辨識到 0 個』"
+        );
+
+        db.insert_reviewer_run(&ReviewerRunInsert {
+            ts: 20,
+            calls_used: 2,
+            budget_used: 2,
+            ..nothing
         })
         .unwrap();
         assert!(matches!(db.entity_memory().unwrap(), EntityMemory::Empty));
@@ -11350,5 +11372,57 @@ mod tests {
             }
             state => panic!("該看得到實體和出處：{state:?}"),
         }
+    }
+
+    #[test]
+    fn both_halves_of_the_visibility_block_agree_on_whether_it_ran() {
+        // 這兩支的答案並排印在同一個畫面上，中間隔一行空白。它們對「腦到底
+        // 跑過沒有」講的話不可以相反——alpha.64 就是這樣出去的：分歧那半數
+        // `calls_used`，實體那半數 `reviewer_run` 的列，於是一輪零次呼叫的跑
+        // 讓上面那行說「還沒跑過」、下面那行說「跑過，但辨識到 0 個」。
+        let row = |skip: Option<&'static str>, calls: i64| ReviewerRunInsert {
+            ts: 10,
+            day_key: "1970-01-01",
+            kind: "interval",
+            skip_reason: skip,
+            candidate_count: Some(0),
+            recheck_count: Some(0),
+            wrote_commitments: 0,
+            divergences: 0,
+            calls_used: calls,
+            budget_used: calls,
+            budget_limit: 10,
+            detail: "",
+        };
+        // 一次 CLI 都沒開的三種樣子。兩半都該說「還沒跑過」。
+        for (label, seed) in [
+            ("一列都沒有", None),
+            ("零次呼叫", Some(row(None, 0))),
+            ("跳過的一輪", Some(row(Some("budget"), 0))),
+        ] {
+            let mut db = test_db();
+            if let Some(seed) = seed {
+                db.insert_reviewer_run(&seed).unwrap();
+            }
+            let d = matches!(
+                db.latest_dual_pass_divergences().unwrap(),
+                DualPassDivergences::NeverRan
+            );
+            let e = matches!(db.entity_memory().unwrap(), EntityMemory::NeverReviewed);
+            assert_eq!(d, e, "{label}：兩半對「跑過沒有」講相反的話");
+            assert!(d, "{label}：一次 CLI 都沒開，兩半都該說還沒跑過");
+        }
+
+        // 真的跑過一輪之後，兩半也要一起改口。
+        let mut db = test_db();
+        db.insert_reviewer_run(&row(None, 2)).unwrap();
+        assert!(!matches!(
+            db.latest_dual_pass_divergences().unwrap(),
+            DualPassDivergences::NeverRan
+        ));
+        assert!(!matches!(
+            db.entity_memory().unwrap(),
+            EntityMemory::NeverReviewed
+        ));
     }
 }
