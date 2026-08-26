@@ -687,6 +687,29 @@ button:disabled {
   opacity: 0.7;
 }
 
+.memory-now {
+  background: rgb(154 91 122 / 12%);
+  border: 1px solid rgb(246 236 223 / 16%);
+  border-radius: 10px;
+  margin-bottom: 18px;
+  padding: 12px;
+}
+
+.memory-now h3,
+.memory-day-title {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+
+.memory-now-status {
+  margin: 0 0 10px;
+  opacity: 0.75;
+}
+
+.memory-now .guess {
+  margin-bottom: 0;
+}
+
 .memory-empty {
   margin: 12px 0 0;
   opacity: 0.55;

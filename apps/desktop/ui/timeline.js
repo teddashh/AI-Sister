@@ -468,6 +468,12 @@ function timeValue(ts) {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** `segment:1700000000000` → `09:33`。認不出來就回 null，不要編一個時間出來。 */
+function segmentClock(segmentRef) {
+  const ms = Number(String(segmentRef ?? "").replace(/^segment:/, ""));
+  return Number.isFinite(ms) && ms > 0 ? timeValue(ms) : null;
+}
+
 function dayBounds() {
   if (current === null) return null;
   return { fromTs: current.start_ts, toTs: current.start_ts + DAY };
@@ -639,13 +645,21 @@ function chapterRow(ch, rows, dayStart, next) {
 }
 
 /** 她猜的。長得不能像程式抄下來的 OCR。 */
-function guessRow(card) {
+function guessRow(card, place = "day") {
   const li = document.createElement("li");
   li.className = card.user_corrected ? "guess user" : card.revised ? "guess revised" : "guess";
   if (card.id != null) li.dataset.l2Id = String(card.id);
   const mark = document.createElement("p");
   mark.className = "guess-mark";
-  if (card.user_corrected) {
+  if (place === "current") {
+    // 這張卡講的是**剛結束的那一段**，不是這一秒。解釋層要等段落關掉才看
+    // （`wakeup.rs` 那條 `include_open = false` 的右界），而一段可以在同一個
+    // app 裡開著幾十分鐘。所以時間一定要印出來——沒有它，一張一小時前的猜測
+    // 頂著「現在」兩個字，讀起來跟剛剛量到的一模一樣。
+    mark.textContent = `上一段 · ${segmentClock(card.segment_ref) ?? "時間不明"} 開始`;
+  } else if (place === "same-as-current") {
+    mark.textContent = "同一段 · 也就是上方那一張";
+  } else if (card.user_corrected) {
     mark.textContent = `你改過的（不是她量出來的，也不是模型說的）`;
   } else if (card.revised) {
     mark.textContent = `後來改的（審閱層修訂，模型說的信心 ${Number(card.model_confidence).toFixed(2)}，不是量出來的）。原版還在。`;
@@ -1232,10 +1246,30 @@ async function renderGuesses() {
     return;
   }
   try {
-    const cards = await invoke("memory_guesses", {
-      fromTs: current.start_ts,
-      toTs: current.start_ts + DAY,
-    });
+    const [now, cards] = await Promise.all([
+      invoke("memory_current_guess"),
+      invoke("memory_guesses", {
+        fromTs: current.start_ts,
+        toTs: current.start_ts + DAY,
+      }),
+    ]);
+    const currentBox = document.createElement("section");
+    currentBox.className = "memory-now";
+    const currentTitle = document.createElement("h3");
+    // 標題不寫「現在」。這一格能講的最新的東西是**上一段**——寫「現在」的話，
+    // 標題自己就在說一句底下那句話正在否認的話。
+    currentTitle.textContent = "這一刻";
+    const currentStatus = document.createElement("p");
+    currentStatus.className = "memory-now-status";
+    currentStatus.textContent = now?.message ?? "這一刻的狀態沒有回來。";
+    currentBox.append(currentTitle, currentStatus);
+    if (now?.card) currentBox.append(guessRow(now.card, "current"));
+    el.memory.append(currentBox);
+
+    const dayTitle = document.createElement("h3");
+    dayTitle.className = "memory-day-title";
+    dayTitle.textContent = "選到的那一天";
+    el.memory.append(dayTitle);
     if (!Array.isArray(cards) || cards.length === 0) {
       highlightL2 = null;
       const empty = document.createElement("p");
@@ -1246,7 +1280,10 @@ async function renderGuesses() {
     }
     const list = document.createElement("ol");
     list.className = "memory-list";
-    for (const card of cards) list.append(guessRow(card));
+    const currentRef = now?.card?.segment_ref ?? null;
+    for (const card of cards) {
+      list.append(guessRow(card, card.segment_ref === currentRef ? "same-as-current" : "day"));
+    }
     el.memory.append(list);
     const want = highlightL2;
     highlightL2 = null;
@@ -2037,6 +2074,18 @@ function fakeBackend(mode = "1") {
             Number(String(c.segment_ref).replace(/^segment:/, "")) >= arg.fromTs &&
             Number(String(c.segment_ref).replace(/^segment:/, "")) < arg.toTs,
         );
+      }
+      case "memory_current_guess": {
+        const card = demoGuesses[demoGuesses.length - 1] ?? null;
+        return {
+          status: { kind: card ? "has_card" : "no_segment" },
+          // 這幾句的正本在 `brain.rs` 的 `CurrentGuess::message()`，JS 讀不到
+          // Rust，所以這裡是抄的。抄本會漂：改那邊的字要回來改這裡。
+          message: card
+            ? "她對上一段的猜測（下面那張）。現在這一段還開著，要等它結束她才會看。"
+            : "正在錄，但這一刻還沒有任何段落。",
+          card,
+        };
       }
       case "memory_commitments":
         return demoPledges;

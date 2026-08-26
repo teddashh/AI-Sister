@@ -3324,6 +3324,19 @@ impl Db {
         Ok(kept)
     }
 
+    /// 最新一場尚未收尾的錄製起點。Presence 已先證明 recorder 活著；這裡只提供
+    /// 段落重算的左界，不拿 `None` 反推「沒在錄」。
+    pub fn current_session_started_at(&self) -> Result<Option<Millis>> {
+        self.conn
+            .query_row(
+                "SELECT started_at FROM sessions WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// 問句帶得了時間範圍才算章節。走重算，不讀舊列：他如果沒開過那天的
     /// 時間軸，`segment` 表是空的，讀舊列會把「沒算過」印成「沒有章節」。
     ///

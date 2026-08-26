@@ -24,6 +24,109 @@ use crate::model::Millis;
 use crate::model::SearchHit;
 use crate::segment::{CutKind, LARGE_CLIPBOARD_BYTES, Segment};
 
+/// 記憶瀏覽器最上方那張「現在」卡的判決。
+///
+/// 這裡刻意不放萬用狀態：新增一種 Presence 或一種沒有 L2 的原因時，組裝端必須
+/// 決定它要對人說什麼。CLI 與桌面共用同一份字。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CurrentGuess {
+    NeverStarted,
+    Unreadable,
+    Booting,
+    Thinking,
+    Stopped,
+    Stalled,
+    Paused,
+    NoSegment,
+    HasCard,
+    NotWorthInterpreting,
+    NoConsent,
+    NoCommand,
+    BudgetExhausted { used: u32, limit: u32 },
+    Queued,
+}
+
+impl CurrentGuess {
+    /// `None` 只代表真的正在錄，還需要段落/L2 資料才能完成判決。
+    pub fn from_presence(presence: crate::heartbeat::Presence) -> Option<Self> {
+        use crate::heartbeat::{Phase, Presence};
+        match presence {
+            Presence::NeverStarted => Some(Self::NeverStarted),
+            Presence::Unreadable => Some(Self::Unreadable),
+            Presence::Live(Phase::Booting) => Some(Self::Booting),
+            Presence::Live(Phase::Recording) => None,
+            Presence::Thinking { .. } => Some(Self::Thinking),
+            Presence::Stopped { .. } => Some(Self::Stopped),
+            Presence::Stalled { .. } => Some(Self::Stalled),
+        }
+    }
+
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::NeverStarted => "還沒有開始錄製，所以沒有這一刻的猜測。",
+            Self::Unreadable => "讀不到錄製狀態，現在不能說她正在看。",
+            Self::Booting => "錄製正在啟動，還沒有進入正在看的狀態。",
+            Self::Thinking => "錄製已停，解釋層正在把最後一段收尾；這不是正在錄。",
+            Self::Stopped => "錄製已停止，所以沒有這一刻的猜測。",
+            Self::Stalled => "錄製心跳已過期；她現在有沒有在看，說不準。",
+            Self::Paused => "記錄已暫停；她現在沒有在看，所以沒有這一刻的猜測。",
+            Self::NoSegment => "正在錄，但這一刻還沒有任何段落。",
+            // 解釋層只看**關掉的**段落，所以最新的一張卡講的是上一段，不是這
+            // 一秒。而一段可以在同一個 app 裡開著幾十分鐘——把它叫做「現在」，
+            // 一張一小時前的猜測讀起來就跟剛剛量到的一樣。時間印在卡上。
+            Self::HasCard => "她對上一段的猜測（下面那張）。現在這一段還開著，要等它結束她才會看。",
+            // 不是「她檢查過」——解釋層可能根本還沒走到這一段，這句話是**同一個
+            // 判準**在這裡自己算的。講判斷，不要講一件沒發生過的事。
+            Self::NotWorthInterpreting => {
+                "上一段依目前判準不值得產生假設：沒有換 app、沒有閒置後回來、沒有貼大東西、沒有卡住、也沒有錯誤碼。"
+            }
+            Self::NoConsent => {
+                "最新一段還沒有假設；第二張同意書尚未簽署，解釋層一次都不會呼叫 CLI。"
+            }
+            Self::NoCommand => {
+                "最新一段還沒有假設；[brain] command 尚未設定，解釋層沒有 CLI 可以呼叫。"
+            }
+            Self::BudgetExhausted { .. } => {
+                "最新一段還沒有假設；今天的解釋預算已用完，今天不會再產生新卡。"
+            }
+            Self::Queued => "最新一段值得理解，正在等解釋層處理。",
+        }
+    }
+
+    /// 正在錄時，把最新段落與解釋層可用性收斂成唯一狀態。
+    pub fn while_recording(
+        segment: Option<(bool, bool)>,
+        command_configured: bool,
+        consented: bool,
+        budget_used: u32,
+        budget_limit: u32,
+    ) -> Self {
+        let Some((has_card, worth_interpreting)) = segment else {
+            return Self::NoSegment;
+        };
+        if has_card {
+            return Self::HasCard;
+        }
+        if !command_configured {
+            return Self::NoCommand;
+        }
+        if !consented {
+            return Self::NoConsent;
+        }
+        if budget_used >= budget_limit {
+            return Self::BudgetExhausted {
+                used: budget_used,
+                limit: budget_limit,
+            };
+        }
+        if !worth_interpreting {
+            return Self::NotWorthInterpreting;
+        }
+        Self::Queued
+    }
+}
+
 /// 一次 spawn 等多久。CLI 掛住不能把解釋層卡住。
 pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(120);
 /// 整份 prompt 的位元組上限。超過就截斷，並在外送紀錄記 `truncated`。

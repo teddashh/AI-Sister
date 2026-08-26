@@ -1356,6 +1356,105 @@ fn memory_guesses(
 }
 
 #[derive(Serialize)]
+struct CurrentGuessView {
+    status: sister_core::brain::CurrentGuess,
+    message: &'static str,
+    card: Option<sister_core::brain::L2View>,
+}
+
+/// 「現在」只在這裡組資料；狀態分類與人看到的字都由 sister-core 決定。
+#[tauri::command(async)]
+fn memory_current_guess(shell: tauri::State<'_, Shell>) -> Result<CurrentGuessView, String> {
+    let dir = shell
+        .data_dir
+        .as_deref()
+        .ok_or_else(|| "找不到資料目錄，不能判斷現在的錄製狀態".to_string())?;
+    let presence = sister_core::heartbeat::presence(dir, sister_core::now_ms());
+    if let Some(status) = sister_core::brain::CurrentGuess::from_presence(presence) {
+        return Ok(CurrentGuessView {
+            message: status.message(),
+            status,
+            card: None,
+        });
+    }
+    if sister_core::pause::is_paused(dir) {
+        let status = sister_core::brain::CurrentGuess::Paused;
+        return Ok(CurrentGuessView {
+            message: status.message(),
+            status,
+            card: None,
+        });
+    }
+
+    let config = sister_core::config::Config::load(&config_path()?)
+        .map_err(|e| format!("{e:#}"))?;
+    let consented = sister_core::consent::load(dir).cloud_permit().is_some();
+    let now = sister_core::now_ms();
+    with_db_mut(&shell, |db| {
+        let from = db
+            .current_session_started_at()
+            .map_err(|e| format!("{e:#}"))?
+            .unwrap_or(now);
+        let mut segments = db
+            .chapters_for_range(from, now)
+            .map_err(|e| format!("{e:#}"))?;
+        // 錄製中最後一段還開著，解釋層不送它：`wakeup.rs` 的 `include_open ==
+        // false` 那條路把右界設成 `segs.last().core_started_at`，而
+        // `chapters_for_range` 過濾 `core_started_at < to_ts`，所以最後一段剛好
+        // 被排除在外。這裡照同一條線拿掉它，再看最新的已關閉段落——不然畫面會
+        // 對一段永遠不會有卡的段落說「還在排隊」。
+        segments.pop();
+        let latest = segments.pop();
+        let Some(seg) = latest else {
+            let status = sister_core::brain::CurrentGuess::NoSegment;
+            return Ok(CurrentGuessView {
+                message: status.message(),
+                status,
+                card: None,
+            });
+        };
+        let versions = db
+            .l2_versions_for_segment(seg.core_started_at)
+            .map_err(|e| format!("{e:#}"))?;
+        let card = versions.last().map(|row| {
+            let previous = versions.get(versions.len().saturating_sub(2));
+            sister_core::brain::view_from_row_with_previous(row, previous)
+        });
+        let facts = db
+            .facts_in_range(seg.core_started_at, seg.core_ended_at)
+            .map_err(|e| format!("{e:#}"))?;
+        let large_clip = db
+            .clipboard_in_range(seg.core_started_at, seg.core_ended_at)
+            .map_err(|e| format!("{e:#}"))?
+            .iter()
+            .any(|c| c.byte_len >= sister_core::segment::LARGE_CLIPBOARD_BYTES);
+        let stuck = db
+            .stuck_in_range(seg.core_started_at, seg.core_ended_at)
+            .map_err(|e| format!("{e:#}"))?
+            .iter()
+            .any(|s| s.started_at < seg.core_ended_at && s.ended_at > seg.core_started_at);
+        let worth = sister_core::brain::worth_interpreting(&seg, &facts, large_clip, stuck);
+        let day = sister_core::brain::local_day_key(now)
+            .ok_or_else(|| "算不出今天的日期，不能核對解釋預算".to_string())?;
+        let used = db
+            .brain_outbound_count_on(&day)
+            .map_err(|e| format!("{e:#}"))?;
+        let status = sister_core::brain::CurrentGuess::while_recording(
+            Some((card.is_some(), worth)),
+            config.brain.cli().is_some(),
+            consented,
+            used,
+            config.brain.daily_budget,
+        );
+        Ok(CurrentGuessView {
+            message: status.message(),
+            status,
+            card,
+        })
+    })
+}
+
+#[derive(Serialize)]
 struct PledgeView {
     id: i64,
     text: String,
@@ -2611,6 +2710,7 @@ fn main() {
             timeline_split_chapter,
             timeline_undo_segment_edit,
             memory_guesses,
+            memory_current_guess,
             memory_commitments,
             memory_outbound,
             memory_day_summary,
