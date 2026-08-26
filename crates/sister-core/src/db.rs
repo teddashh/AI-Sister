@@ -4400,6 +4400,67 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
+    pub fn latest_dual_pass_divergences(&self) -> Result<DualPassDivergences> {
+        let run_id = self
+            .conn
+            .query_row(
+                "SELECT id FROM reviewer_run
+                 WHERE skip_reason IS NULL AND calls_used >= 2
+                 ORDER BY ts DESC, id DESC LIMIT 1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(run_id) = run_id else {
+            return Ok(DualPassDivergences::NeverRan);
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT id, run_id, subject, pass_a_json, pass_b_json, reason, created_at
+             FROM reviewer_divergence WHERE run_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([run_id], |r| {
+                Ok(DivergenceRow {
+                    id: r.get(0)?,
+                    run_id: r.get(1)?,
+                    subject: r.get(2)?,
+                    pass_a_json: r.get(3)?,
+                    pass_b_json: r.get(4)?,
+                    reason: r.get(5)?,
+                    created_at: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if rows.is_empty() {
+            Ok(DualPassDivergences::Agreed { run_id })
+        } else {
+            Ok(DualPassDivergences::Diverged { run_id, rows })
+        }
+    }
+
+    pub fn entity_memory(&self) -> Result<EntityMemory> {
+        let reviewed: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reviewer_run WHERE skip_reason IS NULL)",
+            [],
+            |r| r.get(0),
+        )?;
+        if !reviewed {
+            return Ok(EntityMemory::NeverReviewed);
+        }
+        let entities = self.live_entities()?;
+        if entities.is_empty() {
+            return Ok(EntityMemory::Empty);
+        }
+        let rows = entities
+            .into_iter()
+            .map(|entity| {
+                let mentions = self.live_mentions_for(entity.id)?;
+                Ok(EntityWithMentions { entity, mentions })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(EntityMemory::Present(rows))
+    }
+
     /// 把相鄰兩段併成一段。寫進 `segment_edit` 再重算當天。
     pub fn merge_chapters(
         &mut self,
@@ -5941,6 +6002,31 @@ pub struct DivergenceRow {
     pub pass_b_json: String,
     pub reason: String,
     pub created_at: Millis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DualPassDivergences {
+    NeverRan,
+    Agreed {
+        run_id: i64,
+    },
+    Diverged {
+        run_id: i64,
+        rows: Vec<DivergenceRow>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityWithMentions {
+    pub entity: EntityRow,
+    pub mentions: Vec<MentionRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityMemory {
+    NeverReviewed,
+    Empty,
+    Present(Vec<EntityWithMentions>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11091,6 +11177,178 @@ mod tests {
                 assert_eq!(clauses[0].text, "後來又寫了一列");
             }
             other => panic!("該是 live：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn reviewer_visibility_distinguishes_never_agreed_and_diverged() {
+        let mut db = test_db();
+        assert!(matches!(
+            db.latest_dual_pass_divergences().unwrap(),
+            DualPassDivergences::NeverRan
+        ));
+
+        let agreed = db
+            .insert_reviewer_run(&ReviewerRunInsert {
+                ts: 10,
+                day_key: "1970-01-01",
+                kind: "interval",
+                skip_reason: None,
+                candidate_count: Some(1),
+                recheck_count: Some(1),
+                wrote_commitments: 1,
+                divergences: 0,
+                calls_used: 2,
+                budget_used: 2,
+                budget_limit: 10,
+                detail: "",
+            })
+            .unwrap();
+        assert_eq!(
+            db.latest_dual_pass_divergences().unwrap(),
+            DualPassDivergences::Agreed { run_id: agreed }
+        );
+
+        let diverged = db
+            .insert_reviewer_run(&ReviewerRunInsert {
+                ts: 20,
+                day_key: "1970-01-01",
+                kind: "interval",
+                skip_reason: None,
+                candidate_count: Some(1),
+                recheck_count: Some(1),
+                wrote_commitments: 0,
+                divergences: 1,
+                calls_used: 2,
+                budget_used: 4,
+                budget_limit: 10,
+                detail: "",
+            })
+            .unwrap();
+        db.insert_reviewer_divergence(&DivergenceInsert {
+            run_id: diverged,
+            subject: "l2:42 / 交報告",
+            pass_a_json: r#"{"stands":true}"#,
+            pass_b_json: r#"{"stands":false}"#,
+            reason: "stands 不同",
+            created_at: 20,
+        })
+        .unwrap();
+        match db.latest_dual_pass_divergences().unwrap() {
+            DualPassDivergences::Diverged { run_id, rows } => {
+                assert_eq!(run_id, diverged);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].subject, "l2:42 / 交報告");
+            }
+            state => panic!("該看得到最新一輪分歧：{state:?}"),
+        }
+    }
+
+    #[test]
+    fn a_run_that_never_spawned_two_passes_is_not_a_dual_pass() {
+        // `calls += 2` 只在雙 pass 那個區塊裡加。一輪可以 `skip_reason IS NULL`
+        // 卻 `calls_used = 0`：卡片全是使用者寫的、或預算剩不到 2 次，迴圈就
+        // 一路 continue 到底，照樣寫一列 run。
+        // 少了 `calls_used >= 2`，那一列會被當成「最近一次雙 pass」，於是印出
+        // 「最近一次雙 pass（#N）沒有分歧」——講的是一輪一次 CLI 都沒開的跑。
+        let mut db = test_db();
+        let nothing = ReviewerRunInsert {
+            ts: 10,
+            day_key: "1970-01-01",
+            kind: "interval",
+            skip_reason: None,
+            candidate_count: Some(0),
+            recheck_count: Some(0),
+            wrote_commitments: 0,
+            divergences: 0,
+            calls_used: 0,
+            budget_used: 0,
+            budget_limit: 10,
+            detail: "",
+        };
+        db.insert_reviewer_run(&nothing).unwrap();
+        assert_eq!(
+            db.latest_dual_pass_divergences().unwrap(),
+            DualPassDivergences::NeverRan,
+            "零次呼叫的一輪不算跑過雙 pass"
+        );
+
+        let diverged = db
+            .insert_reviewer_run(&ReviewerRunInsert {
+                ts: 20,
+                divergences: 1,
+                calls_used: 2,
+                budget_used: 2,
+                ..nothing
+            })
+            .unwrap();
+        db.insert_reviewer_divergence(&DivergenceInsert {
+            run_id: diverged,
+            subject: "l2:42 / 交報告",
+            pass_a_json: r#"{"stands":true}"#,
+            pass_b_json: r#"{"stands":false}"#,
+            reason: "stands 不同",
+            created_at: 20,
+        })
+        .unwrap();
+
+        // 之後又跑了一輪沒開 CLI 的。警報不准被它蓋掉。
+        db.insert_reviewer_run(&ReviewerRunInsert { ts: 30, ..nothing })
+            .unwrap();
+        match db.latest_dual_pass_divergences().unwrap() {
+            DualPassDivergences::Diverged { run_id, rows } => {
+                assert_eq!(run_id, diverged);
+                assert_eq!(rows.len(), 1);
+            }
+            state => panic!("零次呼叫的一輪把上一次的分歧警報蓋掉了：{state:?}"),
+        }
+    }
+
+    #[test]
+    fn entity_visibility_distinguishes_never_empty_and_mentions() {
+        let mut db = test_db();
+        assert!(matches!(
+            db.entity_memory().unwrap(),
+            EntityMemory::NeverReviewed
+        ));
+        db.insert_reviewer_run(&ReviewerRunInsert {
+            ts: 10,
+            day_key: "1970-01-01",
+            kind: "interval",
+            skip_reason: None,
+            candidate_count: Some(0),
+            recheck_count: Some(0),
+            wrote_commitments: 0,
+            divergences: 0,
+            calls_used: 0,
+            budget_used: 0,
+            budget_limit: 10,
+            detail: "",
+        })
+        .unwrap();
+        assert!(matches!(db.entity_memory().unwrap(), EntityMemory::Empty));
+
+        db.conn
+            .execute(
+                "INSERT INTO entities(kind,name,aliases_json,first_seen_ref,created_at)
+             VALUES('project','AI-Sister','[]','l2:42',20)",
+                [],
+            )
+            .unwrap();
+        let entity_id = db.conn.last_insert_rowid();
+        db.conn
+            .execute(
+                "INSERT INTO entity_mentions(entity_id,seen_ref,created_at)
+             VALUES(?1,'l2:42',20)",
+                [entity_id],
+            )
+            .unwrap();
+        match db.entity_memory().unwrap() {
+            EntityMemory::Present(rows) => {
+                assert_eq!(rows[0].entity.name, "AI-Sister");
+                assert_eq!(rows[0].mentions[0].seen_ref, "l2:42");
+            }
+            state => panic!("該看得到實體和出處：{state:?}"),
         }
     }
 }
