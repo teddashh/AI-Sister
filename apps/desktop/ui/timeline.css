@@ -578,3 +578,144 @@ button:disabled {
 .guess-fact {
   opacity: 0.8;
 }
+
+/* ---------- 記憶瀏覽器 / 承諾表（只加在末尾） ---------- */
+
+.views {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.views button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px rgb(246 236 223 / 18%);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 3px 12px;
+}
+
+.views button:hover {
+  background: rgb(246 236 223 / 8%);
+}
+
+.views button[aria-current="true"] {
+  background: rgb(126 162 214 / 22%);
+  box-shadow: none;
+}
+
+.memory,
+.pledges {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 20px 24px;
+}
+
+.memory-lead {
+  margin: 0 0 12px;
+  opacity: 0.7;
+}
+
+.memory-empty {
+  margin: 12px 0 0;
+  opacity: 0.55;
+}
+
+.memory-list,
+.pledge-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.guess.revised {
+  box-shadow: inset 3px 0 0 #c4a35a;
+}
+
+.guess.user {
+  box-shadow: inset 3px 0 0 #7dba9a;
+}
+
+.guess-prev,
+.guess-lock {
+  margin: 4px 0 0;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.guess-fix {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.guess-fix input {
+  flex: 1;
+  background: rgb(0 0 0 / 25%);
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  padding: 4px 8px;
+}
+
+.guess-fix button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px rgb(246 236 223 / 20%);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 4px 10px;
+}
+
+.pledge {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgb(246 236 223 / 6%);
+}
+
+.pledge.tombstone {
+  opacity: 0.55;
+}
+
+.pledge-text {
+  margin: 0;
+  font-size: 15px;
+}
+
+.pledge-meta {
+  margin: 4px 0 0;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.pledge-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.pledge-actions button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px rgb(246 236 223 / 20%);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 4px 12px;
+}
+
+.pledge-actions button:first-child {
+  background: rgb(154 91 122 / 28%);
+  box-shadow: none;
+}

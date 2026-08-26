@@ -409,6 +409,38 @@ enum Command {
         action: BrainAction,
     },
 
+    /// 審閱層：讀 L2、回查 L0 原件、必要時雙 pass，寫入 L3。
+    ///
+    /// 活躍時最短 15 分鐘一輪；`--eod` 是日終盤點。不是每秒輪詢。
+    /// 沒簽同意書 2、沒設定 CLI、預算用完、還沒到間隔，四種原因印四種話。
+    Review {
+        #[arg(long)]
+        dry_run: bool,
+        /// 往回看多久：`30m`、`2h`、`7d`。預設最近一天
+        #[arg(long, default_value = "24h", value_name = "多久")]
+        last: String,
+        /// 日終盤點（寫日摘要、把到期未互動的轉封存）
+        #[arg(long)]
+        eod: bool,
+        /// 不理 15 分鐘間隔
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// 承諾表。只有兩個動作：結案、其他一切（snooze + 降權）。
+    Commitments {
+        /// 結案（= dead）。帶 `--note` 寫進 kill_note。
+        #[arg(long, value_name = "ID")]
+        kill: Option<i64>,
+        /// 其他一切（= snooze + 降權）
+        #[arg(long, value_name = "ID")]
+        other: Option<i64>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// 三張同意書：現在簽了哪幾張、沒簽會怎樣。
     ///
     /// 不帶參數就是印出目前的狀態。**第一張沒簽，`sister record` 不會開始錄。**
@@ -606,6 +638,18 @@ fn main() -> Result<()> {
         Command::Brain { action } => match action {
             BrainAction::Log { limit } => ops::brain::log(&data_dir, limit),
         },
+        Command::Review {
+            dry_run,
+            last,
+            eod,
+            force,
+        } => ops::review::run(&data_dir, &config()?, dry_run, &last, eod, force),
+        Command::Commitments {
+            kill,
+            other,
+            note,
+            json,
+        } => ops::commitments::run(&data_dir, kill, other, note.as_deref(), json),
         Command::Consent {
             grant,
             revoke,

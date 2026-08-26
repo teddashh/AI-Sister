@@ -590,6 +590,7 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
             outcome: kind.as_str(),
             duration_ms: spawn.duration_ms as i64,
             error: error.as_deref(),
+            role: "interpreter",
         })?;
         if let Some(card) = &card {
             let evidence: Vec<String> = card.evidence_refs.iter().map(|r| r.as_str()).collect();
@@ -607,6 +608,7 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
                 model_confidence: card.model_confidence,
                 evidence_json: serde_json::to_string(&evidence)?,
                 open_questions_json: serde_json::to_string(&card.open_questions)?,
+                author: crate::db::L2Author::Interpreter,
             })?;
         }
         results.push(RanJob {
@@ -909,11 +911,21 @@ pub fn format_dry_run(report: &DryRun) -> String {
 /// 給時間軸用的一張假設。
 #[derive(Debug, Clone, Serialize)]
 pub struct L2View {
+    pub id: i64,
     pub segment_ref: String,
     pub activity: String,
-    /// 模型自己講的。
+    /// 模型自己講的，或審閱／使用者改過的。
     pub model_confidence: f64,
     pub confidence_source: &'static str,
+    pub author: &'static str,
+    pub version: i32,
+    /// 審閱層後來改過。原版還在版本鏈裡。
+    pub revised: bool,
+    /// 使用者當場改過，下一輪 recompute 不會蓋掉。
+    pub user_corrected: bool,
+    /// 若這是後來的版本，上一版的 activity。沒有就是沒有。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_activity: Option<String>,
     pub entities: Vec<Entity>,
     pub evidence: Vec<L2EvidenceView>,
     pub open_questions: Vec<String>,
@@ -927,14 +939,24 @@ pub struct L2EvidenceView {
 }
 
 pub fn view_from_row(row: &L2CardRow) -> L2View {
+    view_from_row_with_previous(row, None)
+}
+
+pub fn view_from_row_with_previous(row: &L2CardRow, previous: Option<&L2CardRow>) -> L2View {
     let entities: Vec<Entity> = serde_json::from_str(&row.entities_json).unwrap_or_default();
     let refs: Vec<String> = serde_json::from_str(&row.evidence_json).unwrap_or_default();
     let questions: Vec<String> = serde_json::from_str(&row.open_questions_json).unwrap_or_default();
     L2View {
+        id: row.id,
         segment_ref: row.segment_ref.clone(),
         activity: row.activity.clone(),
         model_confidence: row.model_confidence,
-        confidence_source: "model",
+        confidence_source: row.author.confidence_source(),
+        author: row.author.as_str(),
+        version: row.version,
+        revised: row.author == crate::db::L2Author::Reviewer,
+        user_corrected: row.author == crate::db::L2Author::User,
+        previous_activity: previous.map(|p| p.activity.clone()),
         entities,
         evidence: refs
             .iter()

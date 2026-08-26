@@ -1,9 +1,18 @@
 # DATA_INVENTORY — 她到底存了什麼
 
-> 這份文件描述 **schema v9**（`sister-core` 的 `MIGRATION_001`…`009`）。
+> 這份文件描述 **schema v12**（`sister-core` 的 `MIGRATION_001`…`012`）。
 > v8 加了 `segment`（斷句結果，打開時間軸才算，不在錄製熱路徑上）。
 > v9 加了 `segment_edit`（使用者合併／切開的訓練訊號）和 `stuck_signal`
 > （卡住偵測 v0，只記錄不開口）。兩張都不是錄製熱路徑。
+> v10 加了 `l2_card` / `brain_outbound` / `brain_skip`（解釋層）。
+> v11 拿掉 `brain_outbound.redaction_json`（出境改為原文）。
+> v12 加了 L3（`commitments` / `entities` / `entity_mentions` / `day_summaries` /
+> `preferences`）、全域血緣圖 `provenance`、L2 墓碑欄，以及審閱層的
+> `reviewer_run` / `reviewer_recheck` / `reviewer_divergence`。
+> 刪一段 L0 時沿 provenance 把衍生 L2/L3 **tombstone**：列還在、標成被忘掉，
+> 但**那一列說了什麼會一起清掉**（活動、承諾原文、人名、日摘要敘事）。
+> 墓碑留的是「這裡曾經有東西」，不是內容——鐵律 2 說任何 L2/L3 不得成為
+> 證據的唯一載體，而 L0 已經刪掉了。
 >
 > 規則：**動到訊號面的 PR 必須同步改這份文件**（PHASES.md §工作紀律 3）。
 > 如果程式碼多存了一個欄位而這裡沒寫，那是 bug，不是文件落後。
@@ -98,7 +107,10 @@ forward-compat 本身是對的：多寫一個欄位的新版不該讓舊版放�
 
 沒有遙測、沒有帳號。程式裡沒有 HTTP client。簽了第二張同意書且設定了
 `[brain] command` 之後，螢幕文字原文會交給那支本機 CLI；外送紀錄在
-`brain_outbound`（結構與計數，不含原文），假設卡片在 `l2_card`。
+`brain_outbound`（結構與計數，不含原文；`role` 分解釋層／審閱層），假設卡片在 `l2_card`（append-only 版本鏈，`author` 是 interpreter／reviewer／user，刪 L0 時 tombstone 而不是實刪——列留著，
+卡片上的字清掉）。
+
+L3 只由 Reviewer 寫入：`commitments`（承諾表，status 為 open／done／dead／snoozed／archived，`due_source` 分螢幕上寫的和她猜的）、`entities` 與 `entity_mentions`、`day_summaries`、`preferences`（例如哪一類被「其他一切」降權）。血緣在 `provenance(child_ref, parent_ref)`。審閱層有沒有跑過、回查了幾次，記在 `reviewer_run`／`reviewer_recheck`——沒跑過和跑了沒回查是兩句話。雙 pass 對不上的那幾筆在 `reviewer_divergence`，分歧不寫入 L3。
 
 ---
 

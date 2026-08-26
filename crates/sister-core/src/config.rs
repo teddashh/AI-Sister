@@ -260,6 +260,10 @@ pub struct BrainConfig {
     pub daily_budget: u32,
     /// 併發槽數。SPEC §5.3 預設 4、上限 8。
     pub concurrency: u32,
+    /// 審閱層每日呼叫預算。和解釋層的 80 次分開計。超過即靜默降級。
+    ///
+    /// `0` 的意思是「今天一輪都不審」，不是「不限制」。
+    pub reviewer_daily_budget: u32,
 }
 
 impl Default for BrainConfig {
@@ -269,6 +273,7 @@ impl Default for BrainConfig {
             args: Vec::new(),
             daily_budget: 80,
             concurrency: 4,
+            reviewer_daily_budget: 40,
         }
     }
 }

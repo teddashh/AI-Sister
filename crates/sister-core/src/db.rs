@@ -32,7 +32,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 11;
+pub const SCHEMA_VERSION: i32 = 12;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -560,6 +560,164 @@ fn migrate_011(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+/// L3 表 + 血緣圖 + L2 墓碑。冪等：每一欄、每一張表都問過才建。
+///
+/// L2 的 `evidence_refs` 從這一版起真的寫進 `provenance`。刪一段 L0 時沿這
+/// 張圖把衍生的 L2/L3 tombstone——不是實刪，留下「這裡曾經有東西、被刪掉了」。
+fn migrate_012(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    add_column_if_missing(
+        tx,
+        "l2_card",
+        "author",
+        "TEXT NOT NULL DEFAULT 'interpreter'",
+    )?;
+    add_column_if_missing(tx, "l2_card", "tombstoned_at", "INTEGER")?;
+    add_column_if_missing(
+        tx,
+        "brain_outbound",
+        "role",
+        "TEXT NOT NULL DEFAULT 'interpreter'",
+    )?;
+    tx.execute_batch(MIGRATION_012)?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> Result<()> {
+    let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = '{column}'");
+    let mut stmt = tx.prepare(&sql)?;
+    let present = stmt.exists([])?;
+    drop(stmt);
+    if !present {
+        tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
+    }
+    Ok(())
+}
+
+const MIGRATION_012: &str = r#"
+CREATE TABLE IF NOT EXISTS commitments (
+  id                    INTEGER PRIMARY KEY,
+  text                  TEXT NOT NULL,
+  kind                  TEXT NOT NULL,
+  born_from             INTEGER NOT NULL,
+  evidence_json         TEXT NOT NULL,
+  people_json           TEXT NOT NULL,
+  due_hint              TEXT,
+  due_source            TEXT,
+  due_at                INTEGER,
+  status                TEXT NOT NULL,
+  confidence            REAL NOT NULL,
+  allowed_next_step     TEXT,
+  last_evidence_seen_at INTEGER,
+  kill_note             TEXT,
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL,
+  tombstoned_at         INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_commitments_status ON commitments(status, tombstoned_at);
+CREATE INDEX IF NOT EXISTS idx_commitments_born ON commitments(born_from);
+
+CREATE TABLE IF NOT EXISTS entities (
+  id              INTEGER PRIMARY KEY,
+  kind            TEXT NOT NULL,
+  name            TEXT NOT NULL,
+  aliases_json    TEXT NOT NULL,
+  first_seen_ref  TEXT NOT NULL,
+  notes           TEXT,
+  created_at      INTEGER NOT NULL,
+  tombstoned_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(kind, name);
+
+CREATE TABLE IF NOT EXISTS entity_mentions (
+  id             INTEGER PRIMARY KEY,
+  entity_id      INTEGER NOT NULL REFERENCES entities(id),
+  seen_ref       TEXT NOT NULL,
+  created_at     INTEGER NOT NULL,
+  tombstoned_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_mentions_entity ON entity_mentions(entity_id);
+CREATE INDEX IF NOT EXISTS idx_mentions_seen ON entity_mentions(seen_ref);
+
+CREATE TABLE IF NOT EXISTS day_summaries (
+  id                 INTEGER PRIMARY KEY,
+  date               TEXT NOT NULL,
+  version            INTEGER NOT NULL,
+  supersedes         INTEGER REFERENCES day_summaries(id),
+  narrative          TEXT NOT NULL,
+  session_refs_json  TEXT NOT NULL,
+  stats_json         TEXT NOT NULL,
+  created_at         INTEGER NOT NULL,
+  tombstoned_at      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_day_summaries_date ON day_summaries(date, version);
+
+CREATE TABLE IF NOT EXISTS preferences (
+  key           TEXT PRIMARY KEY,
+  value         TEXT NOT NULL,
+  learned_from  TEXT NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provenance (
+  child_ref   TEXT NOT NULL,
+  parent_ref  TEXT NOT NULL,
+  PRIMARY KEY (child_ref, parent_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_prov_parent ON provenance(parent_ref);
+CREATE INDEX IF NOT EXISTS idx_prov_child ON provenance(child_ref);
+
+CREATE TABLE IF NOT EXISTS reviewer_run (
+  id                 INTEGER PRIMARY KEY,
+  ts                 INTEGER NOT NULL,
+  day_key            TEXT NOT NULL,
+  kind               TEXT NOT NULL,
+  skip_reason        TEXT,
+  candidate_count    INTEGER,
+  recheck_count      INTEGER,
+  wrote_commitments  INTEGER NOT NULL DEFAULT 0,
+  divergences        INTEGER NOT NULL DEFAULT 0,
+  calls_used         INTEGER NOT NULL DEFAULT 0,
+  budget_used        INTEGER NOT NULL DEFAULT 0,
+  budget_limit       INTEGER NOT NULL DEFAULT 0,
+  detail             TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_reviewer_run_day ON reviewer_run(day_key);
+CREATE INDEX IF NOT EXISTS idx_reviewer_run_ts ON reviewer_run(ts);
+
+CREATE TABLE IF NOT EXISTS reviewer_recheck (
+  id                 INTEGER PRIMARY KEY,
+  run_id             INTEGER NOT NULL REFERENCES reviewer_run(id),
+  category           TEXT NOT NULL,
+  child_ref          TEXT NOT NULL,
+  parent_ref         TEXT NOT NULL,
+  original_present   INTEGER NOT NULL,
+  original_chars     INTEGER,
+  matched            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_recheck_run ON reviewer_recheck(run_id);
+
+CREATE TABLE IF NOT EXISTS reviewer_divergence (
+  id           INTEGER PRIMARY KEY,
+  run_id       INTEGER NOT NULL REFERENCES reviewer_run(id),
+  subject      TEXT NOT NULL,
+  pass_a_json  TEXT NOT NULL,
+  pass_b_json  TEXT NOT NULL,
+  reason       TEXT NOT NULL,
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_divergence_run ON reviewer_divergence(run_id);
+"#;
+
+const L2_SELECT: &str = "SELECT id, segment_core_start, segment_ref, version, supersedes,
+                    activity, entities_json, continues_json, commitments_json,
+                    model_confidence, evidence_json, open_questions_json, created_at,
+                    author, tombstoned_at";
+
 const MIGRATION_010: &str = r#"
 CREATE TABLE IF NOT EXISTS l2_card (
   id                   INTEGER PRIMARY KEY,
@@ -1058,6 +1216,7 @@ impl Db {
             9 => tx.execute_batch(MIGRATION_009)?,
             10 => tx.execute_batch(MIGRATION_010)?,
             11 => migrate_011(&tx)?,
+            12 => migrate_012(&tx)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -3241,12 +3400,12 @@ impl Db {
     pub fn latest_l2_for_segment(&self, core_started_at: Millis) -> Result<Option<L2CardRow>> {
         self.conn
             .query_row(
-                "SELECT id, segment_core_start, segment_ref, version, supersedes,
-                        activity, entities_json, continues_json, commitments_json,
-                        model_confidence, evidence_json, open_questions_json, created_at
+                &format!(
+                    "{L2_SELECT}
                  FROM l2_card
-                 WHERE segment_core_start = ?1
-                 ORDER BY version DESC, id DESC LIMIT 1",
+                 WHERE segment_core_start = ?1 AND tombstoned_at IS NULL
+                 ORDER BY version DESC, id DESC LIMIT 1"
+                ),
                 [core_started_at],
                 map_l2_row,
             )
@@ -3257,12 +3416,12 @@ impl Db {
     pub fn latest_l2_before(&self, core_started_at: Millis) -> Result<Option<L2CardRow>> {
         self.conn
             .query_row(
-                "SELECT id, segment_core_start, segment_ref, version, supersedes,
-                        activity, entities_json, continues_json, commitments_json,
-                        model_confidence, evidence_json, open_questions_json, created_at
+                &format!(
+                    "{L2_SELECT}
                  FROM l2_card
-                 WHERE segment_core_start < ?1
-                 ORDER BY segment_core_start DESC, version DESC, id DESC LIMIT 1",
+                 WHERE segment_core_start < ?1 AND tombstoned_at IS NULL
+                 ORDER BY segment_core_start DESC, version DESC, id DESC LIMIT 1"
+                ),
                 [core_started_at],
                 map_l2_row,
             )
@@ -3271,29 +3430,58 @@ impl Db {
     }
 
     pub fn l2_in_range(&self, from_ts: Millis, to_ts: Millis) -> Result<Vec<L2CardRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, segment_core_start, segment_ref, version, supersedes,
-                    activity, entities_json, continues_json, commitments_json,
-                    model_confidence, evidence_json, open_questions_json, created_at
+        let mut stmt = self.conn.prepare(&format!(
+            "{L2_SELECT}
              FROM l2_card
              WHERE segment_core_start >= ?1 AND segment_core_start < ?2
-             ORDER BY segment_core_start, version, id",
-        )?;
+               AND tombstoned_at IS NULL
+             ORDER BY segment_core_start, version, id"
+        ))?;
         let rows = stmt.query_map(params![from_ts, to_ts], map_l2_row)?;
         Ok(rows.flatten().collect())
     }
 
+    /// 某一段上還活著的每一版，舊的在前。原版留著，後來改的也看得到。
+    pub fn l2_versions_for_segment(&self, core_started_at: Millis) -> Result<Vec<L2CardRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{L2_SELECT}
+             FROM l2_card
+             WHERE segment_core_start = ?1 AND tombstoned_at IS NULL
+             ORDER BY version, id"
+        ))?;
+        let rows = stmt.query_map(params![core_started_at], map_l2_row)?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn l2_by_id(&self, id: i64) -> Result<Option<L2CardRow>> {
+        self.conn
+            .query_row(
+                &format!("{L2_SELECT} FROM l2_card WHERE id = ?1"),
+                [id],
+                map_l2_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn insert_l2_card(&mut self, ins: &L2Insert<'_>) -> Result<i64> {
         let prev = self.latest_l2_for_segment(ins.segment_core_start)?;
+        if let Some(p) = &prev {
+            anyhow::ensure!(
+                p.author != L2Author::User || ins.author == L2Author::User,
+                "使用者改過的假設不會被下一輪蓋掉"
+            );
+        }
         let version = prev.as_ref().map(|p| p.version + 1).unwrap_or(1);
         let supersedes = prev.as_ref().map(|p| p.id);
+        let confidence_source = ins.author.confidence_source();
         self.conn.execute(
             "INSERT INTO l2_card(
                 segment_core_start, segment_ref, version, supersedes,
                 activity, entities_json, continues_json, commitments_json,
                 model_confidence, confidence_source, evidence_json,
-                open_questions_json, created_at
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'model',?10,?11,?12)",
+                open_questions_json, created_at, author, tombstoned_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL)",
             params![
                 ins.segment_core_start,
                 ins.segment_ref,
@@ -3304,12 +3492,24 @@ impl Db {
                 ins.continues_json,
                 ins.commitments_json,
                 ins.model_confidence,
+                confidence_source,
                 ins.evidence_json,
                 ins.open_questions_json,
                 crate::now_ms(),
+                ins.author.as_str(),
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        let child = format!("l2:{id}");
+        self.insert_provenance(&child, &format!("segment:{}", ins.segment_core_start))?;
+        if let Ok(refs) = serde_json::from_str::<Vec<String>>(&ins.evidence_json) {
+            for r in refs {
+                if crate::brain::EvidenceRef::parse(&r).is_some() {
+                    self.insert_provenance(&child, &r)?;
+                }
+            }
+        }
+        Ok(id)
     }
 
     pub fn brain_outbound_count_on(&self, day_key: &str) -> Result<u32> {
@@ -3326,8 +3526,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO brain_outbound(
                 ts, day_key, command, args_json, segment_core_start,
-                chars_sent, truncated, outcome, duration_ms, error
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                chars_sent, truncated, outcome, duration_ms, error, role
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 ins.ts,
                 ins.day_key,
@@ -3339,9 +3539,19 @@ impl Db {
                 ins.outcome,
                 ins.duration_ms,
                 ins.error,
+                ins.role,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn brain_outbound_count_on_role(&self, day_key: &str, role: &str) -> Result<u32> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM brain_outbound WHERE day_key = ?1 AND role = ?2",
+            params![day_key, role],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u32)
     }
 
     pub fn list_brain_outbound(&self, limit: usize) -> Result<Vec<OutboundRow>> {
@@ -3398,6 +3608,662 @@ impl Db {
             params![ts, reason, segment_core_start, detail],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn insert_provenance(&mut self, child_ref: &str, parent_ref: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO provenance(child_ref, parent_ref) VALUES(?1, ?2)",
+            params![child_ref, parent_ref],
+        )?;
+        Ok(())
+    }
+
+    pub fn provenance_children(&self, parent_ref: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT child_ref FROM provenance WHERE parent_ref = ?1")?;
+        let rows = stmt.query_map([parent_ref], |r| r.get(0))?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// 這筆 L0 原件現在還在不在、上面寫了什麼。回查一定走這裡，不走 L2 卡片。
+    pub fn l0_original(&self, r: &crate::brain::EvidenceRef) -> Result<Option<L0Original>> {
+        match r {
+            crate::brain::EvidenceRef::Frame(id) => {
+                let exists: bool = self.conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM frames WHERE id = ?1)",
+                    [*id],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    return Ok(None);
+                }
+                let mut stmt = self.conn.prepare(
+                    "SELECT text FROM text_chunks WHERE frame_id = ?1
+                     UNION ALL
+                     SELECT text FROM ocr_blocks WHERE frame_id = ?1",
+                )?;
+                let texts: Vec<String> =
+                    stmt.query_map([*id], |row| row.get(0))?.flatten().collect();
+                let text = texts.join("\n");
+                Ok(Some(L0Original {
+                    r#ref: r.as_str(),
+                    kind: "frame",
+                    text,
+                }))
+            }
+            crate::brain::EvidenceRef::Fact(id) => {
+                let row = self
+                    .conn
+                    .query_row("SELECT kind, raw FROM facts WHERE id = ?1", [*id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .optional()?;
+                Ok(row.map(|(kind, raw)| L0Original {
+                    r#ref: r.as_str(),
+                    kind: "fact",
+                    text: format!("{kind} {raw}"),
+                }))
+            }
+        }
+    }
+
+    pub fn fact_by_id(&self, id: i64) -> Result<Option<FactRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, ts, kind, raw, normalized, source_kind,
+                        chunk_id, frame_id, app_id, window_title, url
+                 FROM facts WHERE id = ?1",
+                [id],
+                map_fact_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// 收集這段時間裡的 L0／L2 血緣起點，給 cascade tombstone 用。
+    ///
+    /// 要在刪 frames／facts 之前叫：刪完就問不到 id 了。
+    pub fn collect_cascade_parents(&self, from_ts: Millis, to_ts: Millis) -> Result<Vec<String>> {
+        let mut parents = Vec::new();
+        let mut frames = self
+            .conn
+            .prepare("SELECT id FROM frames WHERE ts >= ?1 AND ts < ?2")?;
+        for id in frames
+            .query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))?
+            .flatten()
+        {
+            parents.push(format!("frame:{id}"));
+        }
+        let mut facts = self
+            .conn
+            .prepare("SELECT id FROM facts WHERE ts >= ?1 AND ts < ?2")?;
+        for id in facts
+            .query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))?
+            .flatten()
+        {
+            parents.push(format!("fact:{id}"));
+        }
+        let mut segs = self.conn.prepare(
+            "SELECT core_started_at FROM segment WHERE ended_at > ?1 AND started_at < ?2",
+        )?;
+        for core in segs
+            .query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))?
+            .flatten()
+        {
+            parents.push(format!("segment:{core}"));
+        }
+        let mut cards = self.conn.prepare(
+            "SELECT id FROM l2_card WHERE segment_core_start >= ?1 AND segment_core_start < ?2",
+        )?;
+        for id in cards
+            .query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))?
+            .flatten()
+        {
+            parents.push(format!("l2:{id}"));
+        }
+        Ok(parents)
+    }
+
+    pub fn collect_cascade_parents_before(&self, before_ts: Millis) -> Result<Vec<String>> {
+        self.collect_cascade_parents(0, before_ts)
+    }
+
+    /// 沿 provenance 把衍生列標成墓碑。同一 transaction，呼叫端負責 commit。
+    pub fn tombstone_descendants(
+        tx: &rusqlite::Transaction<'_>,
+        parents: &[String],
+        now: Millis,
+    ) -> Result<TombstoneReport> {
+        // **根自己也要死。**只走子代的話，`collect_cascade_parents` 明明照
+        // 時間範圍收進來的 `l2:` 卡片一列都不會動——它們是「起點」，不是
+        // 任何人的「子代」。而血緣接不上的時候（`migrate_012` 不回填，
+        // alpha.58 就在用的卡片一列 provenance 都沒有）那就是全部。
+        // 舊版這裡是一句照時間範圍的 DELETE，無條件。
+        let mut seen: BTreeSet<String> = parents.iter().cloned().collect();
+        let mut queue: Vec<String> = parents.to_vec();
+        while let Some(parent) = queue.pop() {
+            let mut stmt = tx.prepare("SELECT child_ref FROM provenance WHERE parent_ref = ?1")?;
+            let children: Vec<String> =
+                stmt.query_map([&parent], |r| r.get(0))?.flatten().collect();
+            drop(stmt);
+            for child in children {
+                if seen.insert(child.clone()) {
+                    queue.push(child);
+                }
+            }
+        }
+
+        // 每一句都**連內容一起清掉**，不是只蓋一個日期。
+        //
+        // 墓碑要留下的是「這裡曾經有東西、被刪掉了」，好讓血緣圖不要開天窗、
+        // 讓重算不要把它長回來。留下來的**不包括它說了什麼**。鐵律 2：
+        // 「任何 L2/L3 不得成為證據的唯一載體」——L0 那一段刪掉之後，這幾張
+        // 表就是那段螢幕內容僅存的地方了，而使用者按的是忘掉。
+        //
+        // 這一段之前只寫 `tombstoned_at`。查詢看不到、測試是綠的，而人名和
+        // 金額還躺在檔案裡：`forget` 從此不再刪掉 L2/L3 的字。
+        let mut report = TombstoneReport::default();
+        for r in &seen {
+            if let Some(id) = r.strip_prefix("l2:") {
+                let n = tx.execute(
+                    "UPDATE l2_card SET tombstoned_at = ?1,
+                       activity = '', entities_json = '[]', continues_json = NULL,
+                       commitments_json = '[]', evidence_json = '[]',
+                       open_questions_json = '[]'
+                     WHERE id = ?2 AND tombstoned_at IS NULL",
+                    params![now, id],
+                )?;
+                report.l2 += n as u64;
+            } else if let Some(id) = r.strip_prefix("commitment:") {
+                let n = tx.execute(
+                    "UPDATE commitments SET tombstoned_at = ?1, updated_at = ?1,
+                       text = '', evidence_json = '[]', people_json = '[]',
+                       due_hint = NULL, allowed_next_step = NULL, kill_note = NULL
+                     WHERE id = ?2 AND tombstoned_at IS NULL",
+                    params![now, id],
+                )?;
+                report.commitments += n as u64;
+            } else if let Some(id) = r.strip_prefix("entity-mention:") {
+                let n = tx.execute(
+                    "UPDATE entity_mentions SET tombstoned_at = ?1, seen_ref = ''
+                     WHERE id = ?2 AND tombstoned_at IS NULL",
+                    params![now, id],
+                )?;
+                report.mentions += n as u64;
+            } else if let Some(id) = r.strip_prefix("daysummary:") {
+                let n = tx.execute(
+                    "UPDATE day_summaries SET tombstoned_at = ?1, narrative = '',
+                       session_refs_json = '[]', stats_json = '{}'
+                     WHERE id = ?2 AND tombstoned_at IS NULL",
+                    params![now, id],
+                )?;
+                report.day_summaries += n as u64;
+            } else if let Some(id) = r.strip_prefix("entity:") {
+                let n = tx.execute(
+                    "UPDATE entities SET tombstoned_at = ?1, name = '',
+                       aliases_json = '[]', notes = NULL, first_seen_ref = ''
+                     WHERE id = ?2 AND tombstoned_at IS NULL",
+                    params![now, id],
+                )?;
+                report.entities += n as u64;
+            }
+        }
+
+        // 沒有 live mention 的 entity 一起死。名字也一起走：一個沒有任何
+        // 出處還留著「王小明」的列，就是那三個字最後的藏身處。
+        let n = tx.execute(
+            "UPDATE entities SET tombstoned_at = ?1, name = '',
+               aliases_json = '[]', notes = NULL, first_seen_ref = ''
+             WHERE tombstoned_at IS NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM entity_mentions m
+                 WHERE m.entity_id = entities.id AND m.tombstoned_at IS NULL
+               )
+               AND EXISTS (
+                 SELECT 1 FROM entity_mentions m
+                 WHERE m.entity_id = entities.id
+               )",
+            [now],
+        )?;
+        report.entities += n as u64;
+        Ok(report)
+    }
+
+    /// L3 寫入。第一個參數的型別是 [`crate::reviewer::L3Write`]：只有
+    /// Reviewer 鑄得出來，所以「別的地方寫進承諾表」是編不過的。
+    pub fn insert_commitment(
+        &mut self,
+        permit: crate::reviewer::L3Write,
+        ins: &CommitmentInsert<'_>,
+    ) -> Result<i64> {
+        let _gate = permit;
+        self.conn.execute(
+            "INSERT INTO commitments(
+                text, kind, born_from, evidence_json, people_json,
+                due_hint, due_source, due_at, status, confidence,
+                allowed_next_step, last_evidence_seen_at, kill_note,
+                created_at, updated_at, tombstoned_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14,NULL)",
+            params![
+                ins.text,
+                ins.kind,
+                ins.born_from,
+                ins.evidence_json,
+                ins.people_json,
+                ins.due_hint,
+                ins.due_source,
+                ins.due_at,
+                ins.status,
+                ins.confidence,
+                ins.allowed_next_step,
+                ins.last_evidence_seen_at,
+                ins.kill_note,
+                ins.now,
+            ],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        let child = format!("commitment:{id}");
+        self.insert_provenance(&child, &format!("l2:{}", ins.born_from))?;
+        if let Ok(refs) = serde_json::from_str::<Vec<String>>(&ins.evidence_json) {
+            for r in refs {
+                self.insert_provenance(&child, &r)?;
+            }
+        }
+        Ok(id)
+    }
+
+    pub fn update_commitment_status(
+        &mut self,
+        permit: crate::reviewer::L3Write,
+        id: i64,
+        status: &str,
+        kill_note: Option<&str>,
+        now: Millis,
+    ) -> Result<u64> {
+        let _gate = permit;
+        let n = self.conn.execute(
+            "UPDATE commitments SET status = ?1, kill_note = COALESCE(?2, kill_note),
+                    updated_at = ?3
+             WHERE id = ?4 AND tombstoned_at IS NULL",
+            params![status, kill_note, now, id],
+        )?;
+        Ok(n as u64)
+    }
+
+    pub fn commitment_by_id(&self, id: i64) -> Result<Option<CommitmentRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, text, kind, born_from, evidence_json, people_json,
+                        due_hint, due_source, due_at, status, confidence,
+                        allowed_next_step, last_evidence_seen_at, kill_note,
+                        created_at, updated_at, tombstoned_at
+                 FROM commitments WHERE id = ?1",
+                [id],
+                map_commitment_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn live_commitments(&self) -> Result<Vec<CommitmentRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, kind, born_from, evidence_json, people_json,
+                    due_hint, due_source, due_at, status, confidence,
+                    allowed_next_step, last_evidence_seen_at, kill_note,
+                    created_at, updated_at, tombstoned_at
+             FROM commitments WHERE tombstoned_at IS NULL
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], map_commitment_row)?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn all_commitments(&self) -> Result<Vec<CommitmentRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, kind, born_from, evidence_json, people_json,
+                    due_hint, due_source, due_at, status, confidence,
+                    allowed_next_step, last_evidence_seen_at, kill_note,
+                    created_at, updated_at, tombstoned_at
+             FROM commitments ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], map_commitment_row)?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn open_commitments_due_before(&self, cutoff: Millis) -> Result<Vec<CommitmentRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, kind, born_from, evidence_json, people_json,
+                    due_hint, due_source, due_at, status, confidence,
+                    allowed_next_step, last_evidence_seen_at, kill_note,
+                    created_at, updated_at, tombstoned_at
+             FROM commitments
+             WHERE tombstoned_at IS NULL AND status = 'open'
+               AND due_at IS NOT NULL AND due_at < ?1
+               AND updated_at = created_at
+             ORDER BY due_at, id",
+        )?;
+        let rows = stmt.query_map([cutoff], map_commitment_row)?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn upsert_entity(
+        &mut self,
+        permit: crate::reviewer::L3Write,
+        kind: &str,
+        name: &str,
+        first_seen_ref: &str,
+        now: Millis,
+    ) -> Result<i64> {
+        let _gate = permit;
+        if let Some(id) = self
+            .conn
+            .query_row(
+                "SELECT id FROM entities
+                 WHERE kind = ?1 AND name = ?2 AND tombstoned_at IS NULL
+                 ORDER BY id LIMIT 1",
+                params![kind, name],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            return Ok(id);
+        }
+        self.conn.execute(
+            "INSERT INTO entities(kind, name, aliases_json, first_seen_ref, notes, created_at, tombstoned_at)
+             VALUES(?1,?2,'[]',?3,NULL,?4,NULL)",
+            params![kind, name, first_seen_ref, now],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.insert_provenance(&format!("entity:{id}"), first_seen_ref)?;
+        Ok(id)
+    }
+
+    pub fn insert_entity_mention(
+        &mut self,
+        permit: crate::reviewer::L3Write,
+        entity_id: i64,
+        seen_ref: &str,
+        now: Millis,
+    ) -> Result<i64> {
+        let _gate = permit;
+        self.conn.execute(
+            "INSERT INTO entity_mentions(entity_id, seen_ref, created_at, tombstoned_at)
+             VALUES(?1,?2,?3,NULL)",
+            params![entity_id, seen_ref, now],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        let child = format!("entity-mention:{id}");
+        self.insert_provenance(&child, seen_ref)?;
+        self.insert_provenance(&format!("entity:{entity_id}"), &child)?;
+        Ok(id)
+    }
+
+    pub fn live_entities(&self) -> Result<Vec<EntityRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, aliases_json, first_seen_ref, notes, created_at, tombstoned_at
+             FROM entities WHERE tombstoned_at IS NULL ORDER BY name, id",
+        )?;
+        let rows = stmt.query_map([], map_entity_row)?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn live_mentions_for(&self, entity_id: i64) -> Result<Vec<MentionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, entity_id, seen_ref, created_at, tombstoned_at
+             FROM entity_mentions WHERE entity_id = ?1 AND tombstoned_at IS NULL",
+        )?;
+        let rows = stmt.query_map([entity_id], |r| {
+            Ok(MentionRow {
+                id: r.get(0)?,
+                entity_id: r.get(1)?,
+                seen_ref: r.get(2)?,
+                created_at: r.get(3)?,
+                tombstoned_at: r.get(4)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn insert_day_summary(
+        &mut self,
+        permit: crate::reviewer::L3Write,
+        ins: &DaySummaryInsert<'_>,
+    ) -> Result<i64> {
+        let _gate = permit;
+        let prev: Option<(i64, i32)> = self
+            .conn
+            .query_row(
+                "SELECT id, version FROM day_summaries
+                 WHERE date = ?1 AND tombstoned_at IS NULL
+                 ORDER BY version DESC, id DESC LIMIT 1",
+                [ins.date],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let version = prev.as_ref().map(|p| p.1 + 1).unwrap_or(1);
+        let supersedes = prev.map(|p| p.0);
+        self.conn.execute(
+            "INSERT INTO day_summaries(
+                date, version, supersedes, narrative, session_refs_json,
+                stats_json, created_at, tombstoned_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL)",
+            params![
+                ins.date,
+                version,
+                supersedes,
+                ins.narrative,
+                ins.session_refs_json,
+                ins.stats_json,
+                ins.now,
+            ],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        let child = format!("daysummary:{id}");
+        if let Ok(refs) = serde_json::from_str::<Vec<String>>(&ins.session_refs_json) {
+            for r in refs {
+                self.insert_provenance(&child, &r)?;
+            }
+        }
+        Ok(id)
+    }
+
+    pub fn latest_day_summary(&self, date: &str) -> Result<Option<DaySummaryRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, date, version, supersedes, narrative, session_refs_json,
+                        stats_json, created_at, tombstoned_at
+                 FROM day_summaries
+                 WHERE date = ?1 AND tombstoned_at IS NULL
+                 ORDER BY version DESC, id DESC LIMIT 1",
+                [date],
+                map_day_summary_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn upsert_preference(
+        &mut self,
+        permit: crate::reviewer::L3Write,
+        key: &str,
+        value: &str,
+        learned_from: &str,
+        now: Millis,
+    ) -> Result<()> {
+        let _gate = permit;
+        self.conn.execute(
+            "INSERT INTO preferences(key, value, learned_from, updated_at)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                learned_from = excluded.learned_from,
+                updated_at = excluded.updated_at",
+            params![key, value, learned_from, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn preference(&self, key: &str) -> Result<Option<PreferenceRow>> {
+        self.conn
+            .query_row(
+                "SELECT key, value, learned_from, updated_at FROM preferences WHERE key = ?1",
+                [key],
+                |r| {
+                    Ok(PreferenceRow {
+                        key: r.get(0)?,
+                        value: r.get(1)?,
+                        learned_from: r.get(2)?,
+                        updated_at: r.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn insert_reviewer_run(&mut self, ins: &ReviewerRunInsert<'_>) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO reviewer_run(
+                ts, day_key, kind, skip_reason, candidate_count, recheck_count,
+                wrote_commitments, divergences, calls_used, budget_used,
+                budget_limit, detail
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                ins.ts,
+                ins.day_key,
+                ins.kind,
+                ins.skip_reason,
+                ins.candidate_count,
+                ins.recheck_count,
+                ins.wrote_commitments,
+                ins.divergences,
+                ins.calls_used,
+                ins.budget_used,
+                ins.budget_limit,
+                ins.detail,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn insert_reviewer_recheck(&mut self, ins: &RecheckInsert<'_>) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO reviewer_recheck(
+                run_id, category, child_ref, parent_ref,
+                original_present, original_chars, matched
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                ins.run_id,
+                ins.category,
+                ins.child_ref,
+                ins.parent_ref,
+                ins.original_present as i64,
+                ins.original_chars,
+                ins.matched as i64,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn insert_reviewer_divergence(&mut self, ins: &DivergenceInsert<'_>) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO reviewer_divergence(
+                run_id, subject, pass_a_json, pass_b_json, reason, created_at
+             ) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                ins.run_id,
+                ins.subject,
+                ins.pass_a_json,
+                ins.pass_b_json,
+                ins.reason,
+                ins.created_at,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn last_reviewer_run_at(&self) -> Result<Option<Millis>> {
+        let v: Option<Millis> = self.conn.query_row(
+            "SELECT MAX(ts) FROM reviewer_run WHERE skip_reason IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(v)
+    }
+
+    pub fn last_reviewer_eod_day(&self) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT day_key FROM reviewer_run
+                 WHERE kind = 'eod' AND skip_reason IS NULL
+                 ORDER BY ts DESC, id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn reviewer_recheck_stats(&self) -> Result<RecheckStats> {
+        let runs: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM reviewer_run WHERE skip_reason IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        if runs == 0 {
+            let last_skip: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT skip_reason FROM reviewer_run
+                     WHERE skip_reason IS NOT NULL
+                     ORDER BY ts DESC, id DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            return Ok(RecheckStats {
+                runs: None,
+                candidates: None,
+                rechecks: None,
+                last_skip,
+            });
+        }
+        let candidates: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(candidate_count), 0) FROM reviewer_run WHERE skip_reason IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        let rechecks: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(recheck_count), 0) FROM reviewer_run WHERE skip_reason IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(RecheckStats {
+            runs: Some(runs.max(0) as u32),
+            candidates: Some(candidates.max(0) as u32),
+            rechecks: Some(rechecks.max(0) as u32),
+            last_skip: None,
+        })
+    }
+
+    pub fn list_reviewer_divergences(&self, limit: usize) -> Result<Vec<DivergenceRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, run_id, subject, pass_a_json, pass_b_json, reason, created_at
+             FROM reviewer_divergence ORDER BY created_at DESC, id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok(DivergenceRow {
+                id: r.get(0)?,
+                run_id: r.get(1)?,
+                subject: r.get(2)?,
+                pass_a_json: r.get(3)?,
+                pass_b_json: r.get(4)?,
+                reason: r.get(5)?,
+                created_at: r.get(6)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
     }
 
     /// 把相鄰兩段併成一段。寫進 `segment_edit` 再重算當天。
@@ -4269,6 +5135,58 @@ fn map_l2_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<L2CardRow> {
         evidence_json: row.get(10)?,
         open_questions_json: row.get(11)?,
         created_at: row.get(12)?,
+        author: L2Author::from_str_kind(&row.get::<_, String>(13)?)
+            .unwrap_or(L2Author::Interpreter),
+        tombstoned_at: row.get(14)?,
+    })
+}
+
+fn map_commitment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommitmentRow> {
+    Ok(CommitmentRow {
+        id: row.get(0)?,
+        text: row.get(1)?,
+        kind: row.get(2)?,
+        born_from: row.get(3)?,
+        evidence_json: row.get(4)?,
+        people_json: row.get(5)?,
+        due_hint: row.get(6)?,
+        due_source: row.get(7)?,
+        due_at: row.get(8)?,
+        status: row.get(9)?,
+        confidence: row.get(10)?,
+        allowed_next_step: row.get(11)?,
+        last_evidence_seen_at: row.get(12)?,
+        kill_note: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
+        tombstoned_at: row.get(16)?,
+    })
+}
+
+fn map_entity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityRow> {
+    Ok(EntityRow {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        name: row.get(2)?,
+        aliases_json: row.get(3)?,
+        first_seen_ref: row.get(4)?,
+        notes: row.get(5)?,
+        created_at: row.get(6)?,
+        tombstoned_at: row.get(7)?,
+    })
+}
+
+fn map_day_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DaySummaryRow> {
+    Ok(DaySummaryRow {
+        id: row.get(0)?,
+        date: row.get(1)?,
+        version: row.get(2)?,
+        supersedes: row.get(3)?,
+        narrative: row.get(4)?,
+        session_refs_json: row.get(5)?,
+        stats_json: row.get(6)?,
+        created_at: row.get(7)?,
+        tombstoned_at: row.get(8)?,
     })
 }
 
@@ -4565,6 +5483,40 @@ pub struct FactRow {
     pub url: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum L2Author {
+    Interpreter,
+    Reviewer,
+    User,
+}
+
+impl L2Author {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interpreter => "interpreter",
+            Self::Reviewer => "reviewer",
+            Self::User => "user",
+        }
+    }
+
+    pub fn from_str_kind(s: &str) -> Option<Self> {
+        match s {
+            "interpreter" => Some(Self::Interpreter),
+            "reviewer" => Some(Self::Reviewer),
+            "user" => Some(Self::User),
+            _ => None,
+        }
+    }
+
+    pub fn confidence_source(self) -> &'static str {
+        match self {
+            Self::Interpreter => "model",
+            Self::Reviewer => "reviewer",
+            Self::User => "user",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct L2CardRow {
     pub id: i64,
@@ -4580,6 +5532,8 @@ pub struct L2CardRow {
     pub evidence_json: String,
     pub open_questions_json: String,
     pub created_at: Millis,
+    pub author: L2Author,
+    pub tombstoned_at: Option<Millis>,
 }
 
 pub struct L2Insert<'a> {
@@ -4592,6 +5546,7 @@ pub struct L2Insert<'a> {
     pub model_confidence: f64,
     pub evidence_json: String,
     pub open_questions_json: String,
+    pub author: L2Author,
 }
 
 pub struct OutboundInsert<'a> {
@@ -4605,6 +5560,168 @@ pub struct OutboundInsert<'a> {
     pub outcome: &'a str,
     pub duration_ms: i64,
     pub error: Option<&'a str>,
+    pub role: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct L0Original {
+    pub r#ref: String,
+    pub kind: &'static str,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TombstoneReport {
+    pub l2: u64,
+    pub commitments: u64,
+    pub mentions: u64,
+    pub entities: u64,
+    pub day_summaries: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecheckStats {
+    /// `None` = 審閱層一次都還沒跑成。`Some(0)` 不會出現——0 次就是沒跑過。
+    pub runs: Option<u32>,
+    /// `None` = 還沒跑過。`Some(0)` = 跑了，沒有五類候選。
+    pub candidates: Option<u32>,
+    /// `None` = 還沒跑過。`Some(0)` = 跑了但一次都沒回查原件。
+    pub rechecks: Option<u32>,
+    /// 若還沒跑成，最近一次為什麼停。
+    pub last_skip: Option<String>,
+}
+
+pub struct CommitmentInsert<'a> {
+    pub text: &'a str,
+    pub kind: &'a str,
+    pub born_from: i64,
+    pub evidence_json: String,
+    pub people_json: String,
+    pub due_hint: Option<&'a str>,
+    pub due_source: Option<&'a str>,
+    pub due_at: Option<Millis>,
+    pub status: &'a str,
+    pub confidence: f64,
+    pub allowed_next_step: Option<&'a str>,
+    pub last_evidence_seen_at: Option<Millis>,
+    pub kill_note: Option<&'a str>,
+    pub now: Millis,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommitmentRow {
+    pub id: i64,
+    pub text: String,
+    pub kind: String,
+    pub born_from: i64,
+    pub evidence_json: String,
+    pub people_json: String,
+    pub due_hint: Option<String>,
+    pub due_source: Option<String>,
+    pub due_at: Option<Millis>,
+    pub status: String,
+    pub confidence: f64,
+    pub allowed_next_step: Option<String>,
+    pub last_evidence_seen_at: Option<Millis>,
+    pub kill_note: Option<String>,
+    pub created_at: Millis,
+    pub updated_at: Millis,
+    pub tombstoned_at: Option<Millis>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityRow {
+    pub id: i64,
+    pub kind: String,
+    pub name: String,
+    pub aliases_json: String,
+    pub first_seen_ref: String,
+    pub notes: Option<String>,
+    pub created_at: Millis,
+    pub tombstoned_at: Option<Millis>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MentionRow {
+    pub id: i64,
+    pub entity_id: i64,
+    pub seen_ref: String,
+    pub created_at: Millis,
+    pub tombstoned_at: Option<Millis>,
+}
+
+pub struct DaySummaryInsert<'a> {
+    pub date: &'a str,
+    pub narrative: &'a str,
+    pub session_refs_json: String,
+    pub stats_json: String,
+    pub now: Millis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaySummaryRow {
+    pub id: i64,
+    pub date: String,
+    pub version: i32,
+    pub supersedes: Option<i64>,
+    pub narrative: String,
+    pub session_refs_json: String,
+    pub stats_json: String,
+    pub created_at: Millis,
+    pub tombstoned_at: Option<Millis>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreferenceRow {
+    pub key: String,
+    pub value: String,
+    pub learned_from: String,
+    pub updated_at: Millis,
+}
+
+pub struct ReviewerRunInsert<'a> {
+    pub ts: Millis,
+    pub day_key: &'a str,
+    pub kind: &'a str,
+    pub skip_reason: Option<&'a str>,
+    pub candidate_count: Option<i64>,
+    pub recheck_count: Option<i64>,
+    pub wrote_commitments: i64,
+    pub divergences: i64,
+    pub calls_used: i64,
+    pub budget_used: i64,
+    pub budget_limit: i64,
+    pub detail: &'a str,
+}
+
+pub struct RecheckInsert<'a> {
+    pub run_id: i64,
+    pub category: &'a str,
+    pub child_ref: &'a str,
+    pub parent_ref: &'a str,
+    pub original_present: bool,
+    pub original_chars: Option<i64>,
+    pub matched: bool,
+}
+
+pub struct DivergenceInsert<'a> {
+    pub run_id: i64,
+    pub subject: &'a str,
+    pub pass_a_json: &'a str,
+    pub pass_b_json: &'a str,
+    pub reason: &'a str,
+    pub created_at: Millis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DivergenceRow {
+    pub id: i64,
+    pub run_id: i64,
+    pub subject: String,
+    pub pass_a_json: String,
+    pub pass_b_json: String,
+    pub reason: String,
+    pub created_at: Millis,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7848,12 +8965,42 @@ mod tests {
             ),
             (
                 "l2_card",
-                "模型對一段的假設，不是螢幕上的原件；forget 跟段落一起清",
+                "模型對一段的假設，不是螢幕上的原件；forget 沿 provenance tombstone",
             ),
             ("brain_outbound", "出境稽核：送了什麼結構給誰，不含原文"),
             (
                 "brain_skip",
                 "為什麼沒送出去（沒簽／沒命令／預算／沒東西），不是內容",
+            ),
+            (
+                "commitments",
+                "L3 承諾表，Reviewer 寫的假設狀態；刪 L0 時 tombstone，不是原件",
+            ),
+            (
+                "entities",
+                "L3 人物／專案／app／組織，Reviewer 寫的；提及跟 L0 走",
+            ),
+            (
+                "entity_mentions",
+                "某個 entity 在哪一張 L2／哪筆證據出現過；cascade 的是這一層",
+            ),
+            (
+                "day_summaries",
+                "L3 日摘要，從 L2 欄位拼的，不是原件；刪 L0 時 tombstone",
+            ),
+            (
+                "preferences",
+                "Reviewer 從回饋學到的偏好（例如哪一類被降權），不是螢幕原件",
+            ),
+            ("provenance", "血緣圖本身：誰從誰長出來，不是內容"),
+            (
+                "reviewer_run",
+                "審閱層跑過沒、回查了幾次；沒跑過和跑了沒回查靠這張表分",
+            ),
+            ("reviewer_recheck", "每一次真的去讀 L0 原件的紀錄"),
+            (
+                "reviewer_divergence",
+                "雙 pass 對不上的那幾筆；分歧是警報，不寫入 L3",
             ),
             ("text_fts", "text_chunks 的索引"),
             ("text_fts_uni", "text_chunks 的索引"),

@@ -1256,12 +1256,18 @@ fn attach_l2(ch: &mut Chapter, cards: &[sister_core::db::L2CardRow]) {
     }
     let mut views = Vec::new();
     for start in starts {
-        if let Some(row) = cards
+        let mut versions: Vec<&sister_core::db::L2CardRow> = cards
             .iter()
             .filter(|c| c.segment_core_start == start)
-            .max_by_key(|c| (c.version, c.id))
-        {
-            let view = sister_core::brain::view_from_row(row);
+            .collect();
+        versions.sort_by_key(|c| (c.version, c.id));
+        if let Some(row) = versions.last().copied() {
+            let prev = if versions.len() >= 2 {
+                versions.get(versions.len() - 2).copied()
+            } else {
+                None
+            };
+            let view = sister_core::brain::view_from_row_with_previous(row, prev);
             if !views
                 .iter()
                 .any(|v: &sister_core::brain::L2View| v.segment_ref == view.segment_ref)
@@ -1339,6 +1345,135 @@ fn timeline_undo_segment_edit(
             .map_err(|e| format!("{e:#}"))?;
         let cards = db.l2_in_range(from_ts, to_ts).map_err(|e| format!("{e:#}"))?;
         Ok(timeline_chapters_after_edit(segs, &cards))
+    })
+}
+
+#[tauri::command(async)]
+fn memory_guesses(
+    from_ts: i64,
+    to_ts: i64,
+    shell: tauri::State<'_, Shell>,
+) -> Result<Vec<sister_core::brain::L2View>, String> {
+    with_db(&shell, |db| {
+        let cards = db.l2_in_range(from_ts, to_ts).map_err(|e| format!("{e:#}"))?;
+        let mut by_seg: std::collections::BTreeMap<i64, Vec<&sister_core::db::L2CardRow>> =
+            std::collections::BTreeMap::new();
+        for c in &cards {
+            by_seg.entry(c.segment_core_start).or_default().push(c);
+        }
+        let mut views = Vec::new();
+        for versions in by_seg.values() {
+            let mut ordered = versions.clone();
+            ordered.sort_by_key(|c| (c.version, c.id));
+            if let Some(row) = ordered.last().copied() {
+                let prev = if ordered.len() >= 2 {
+                    ordered.get(ordered.len() - 2).copied()
+                } else {
+                    None
+                };
+                views.push(sister_core::brain::view_from_row_with_previous(row, prev));
+            }
+        }
+        Ok(views)
+    })
+}
+
+#[derive(Serialize)]
+struct PledgeView {
+    id: i64,
+    text: String,
+    kind: String,
+    status: String,
+    due_hint: Option<String>,
+    due_source: Option<String>,
+    confidence: f64,
+    tombstoned: bool,
+    kill_note: Option<String>,
+    evidence: Vec<sister_core::brain::L2EvidenceView>,
+}
+
+#[tauri::command(async)]
+fn memory_commitments(shell: tauri::State<'_, Shell>) -> Result<Vec<PledgeView>, String> {
+    with_db(&shell, |db| {
+        let rows = db.all_commitments().map_err(|e| format!("{e:#}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|c| {
+                let refs: Vec<String> =
+                    serde_json::from_str(&c.evidence_json).unwrap_or_default();
+                PledgeView {
+                    id: c.id,
+                    text: c.text,
+                    kind: c.kind,
+                    status: c.status,
+                    due_hint: c.due_hint,
+                    due_source: c.due_source,
+                    confidence: c.confidence,
+                    tombstoned: c.tombstoned_at.is_some(),
+                    kill_note: c.kill_note,
+                    evidence: refs
+                        .iter()
+                        .filter_map(|s| sister_core::brain::EvidenceRef::parse(s))
+                        .map(|r| match r {
+                            sister_core::brain::EvidenceRef::Frame(id) => {
+                                sister_core::brain::L2EvidenceView {
+                                    kind: "frame",
+                                    id,
+                                    label: format!("畫面 #{id}"),
+                                }
+                            }
+                            sister_core::brain::EvidenceRef::Fact(id) => {
+                                sister_core::brain::L2EvidenceView {
+                                    kind: "fact",
+                                    id,
+                                    label: format!("本機事實 #{id}"),
+                                }
+                            }
+                        })
+                        .collect(),
+                }
+            })
+            .collect())
+    })
+}
+
+#[tauri::command(async)]
+fn correct_l2(
+    segment_core_start: i64,
+    activity: String,
+    shell: tauri::State<'_, Shell>,
+) -> Result<(), String> {
+    with_db_mut(&shell, |db| {
+        sister_core::reviewer::correct_l2(db, segment_core_start, &activity)
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+    })
+}
+
+#[tauri::command(async)]
+fn commitment_kill(
+    id: i64,
+    note: Option<String>,
+    shell: tauri::State<'_, Shell>,
+) -> Result<(), String> {
+    with_db_mut(&shell, |db| {
+        sister_core::reviewer::kill_commitment(
+            db,
+            id,
+            note.as_deref().unwrap_or("使用者結案"),
+            sister_core::now_ms(),
+        )
+        .map_err(|e| format!("{e:#}"))?;
+        Ok(())
+    })
+}
+
+#[tauri::command(async)]
+fn commitment_other(id: i64, shell: tauri::State<'_, Shell>) -> Result<(), String> {
+    with_db_mut(&shell, |db| {
+        sister_core::reviewer::snooze_commitment(db, id, sister_core::now_ms())
+            .map_err(|e| format!("{e:#}"))?;
+        Ok(())
     })
 }
 
@@ -2400,6 +2535,11 @@ fn main() {
             timeline_merge_chapters,
             timeline_split_chapter,
             timeline_undo_segment_edit,
+            memory_guesses,
+            memory_commitments,
+            correct_l2,
+            commitment_kill,
+            commitment_other,
             forget_preview,
             forget_range,
             consent_read,

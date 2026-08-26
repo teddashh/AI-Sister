@@ -496,6 +496,10 @@ impl crate::db::Db {
         //
         // 代價是一列 366 天前的紀錄多活一輪（下一次 prune 是 5 分鐘後）。
         // 兩害相權，這個專案在每一個岔路上都往「壞掉要看得見」那邊倒。
+        let parents = self
+            .collect_cascade_parents_before(text_cut)
+            .context("collect cascade parents for prune")?;
+
         let mut kept: Vec<i64> = Vec::new();
         if let Some(root) = image_root {
             // 檔數和位元組都由 `delete_files` 一起記，這樣「刪掉 2 個畫面檔
@@ -574,11 +578,8 @@ impl crate::db::Db {
         .context("prune segment_edit")?;
         tx.execute("DELETE FROM stuck_signal WHERE ended_at < ?1", [text_cut])
             .context("prune stuck_signal")?;
-        tx.execute(
-            "DELETE FROM l2_card WHERE segment_core_start < ?1",
-            [text_cut],
-        )
-        .context("prune l2_card")?;
+        crate::db::Db::tombstone_descendants(&tx, &parents, now)
+            .context("prune cascade tombstone")?;
         // **最後一步，在同一個 transaction 裡。**上面每一句 DELETE 都跑完了，
         // 所以「一列都不剩」現在才問得準。順序反過來的話，這一支看到的是還沒
         // 被清空的子表，一場都刪不掉——而且不會有人發現，因為 0 是個合理的數字。
@@ -732,6 +733,12 @@ impl crate::db::Db {
             return Ok(report);
         }
 
+        // 血緣起點要在刪 L0 之前收集，否則 frame/fact id 問不到。
+        let parents = self
+            .collect_cascade_parents(from_ts, to_ts)
+            .context("collect cascade parents")?;
+        let now = crate::now_ms();
+
         // 先刪檔案再改資料庫（模組開頭那條規則）。
         let doomed: Vec<(i64, String, i64)> = self
             .conn
@@ -834,11 +841,8 @@ impl crate::db::Db {
             [from_ts, to_ts],
         )
         .context("forget stuck_signal")?;
-        tx.execute(
-            "DELETE FROM l2_card WHERE segment_core_start >= ?1 AND segment_core_start < ?2",
-            [from_ts, to_ts],
-        )
-        .context("forget l2_card")?;
+        crate::db::Db::tombstone_descendants(&tx, &parents, now)
+            .context("forget cascade tombstone")?;
         tx.execute(
             "DELETE FROM brain_outbound WHERE ts >= ?1 AND ts < ?2",
             [from_ts, to_ts],
@@ -1745,6 +1749,151 @@ mod tests {
     }
 
     // ── 手動忘記一段時間 ────────────────────────────────────────────
+
+    /// 那一格上長出來的假設，裡面帶著錢和人名。
+    fn card_over(db: &mut Db, core: Millis, evidence: &str) {
+        db.insert_l2_card(&crate::db::L2Insert {
+            segment_core_start: core,
+            segment_ref: "segment:doomed",
+            activity: "在對帳，要付王小明 NT$12,000",
+            entities_json: r#"["王小明"]"#.into(),
+            continues_json: None,
+            commitments_json: r#"[{"text":"付王小明 NT$12,000"}]"#.into(),
+            model_confidence: 0.6,
+            evidence_json: format!(r#"["{evidence}"]"#),
+            open_questions_json: "[]".into(),
+            author: crate::db::L2Author::Interpreter,
+        })
+        .expect("insert l2");
+    }
+
+    /// 卡片上還讀得到的字，全部接起來。
+    fn l2_blob(db: &Db) -> String {
+        db.conn
+            .prepare("SELECT activity || entities_json || commitments_json FROM l2_card")
+            .expect("prepare")
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("query")
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 忘掉一段之後，那段長出來的**假設內容**也要不見，不是只多一個旗標。
+    ///
+    /// 墓碑的用處是「這裡曾經有東西、被刪掉了」，不是「東西還在，旁邊多一欄
+    /// 日期」。鐵律 2 寫著「任何 L2/L3 不得成為證據的唯一載體」——L0 那一格
+    /// 刪掉之後，這張卡片就成了那段螢幕內容**唯一**的載體，而他按的是忘掉。
+    ///
+    /// 這一條和上面那條「字也要一起消失」是同一個要求，只是換到 L2 這一層。
+    #[test]
+    fn forgetting_a_range_takes_the_words_inside_the_hypothesis_too() {
+        let tmp = Tmp::new("forget-l2-content");
+        let (mut db, _paths) = seeded(&tmp);
+        let fid: i64 = db
+            .conn
+            .query_row("SELECT id FROM frames WHERE ts = ?1", [days_ago(60)], |r| {
+                r.get(0)
+            })
+            .expect("frame id");
+        card_over(&mut db, days_ago(60), &format!("frame:{fid}"));
+
+        db.forget(days_ago(61), days_ago(59), Some(tmp.path()))
+            .expect("forget");
+
+        let blob = l2_blob(&db);
+        assert!(!blob.contains("王小明"), "人名還留在墓碑裡：{blob}");
+        assert!(!blob.contains("12,000"), "金額還留在墓碑裡：{blob}");
+    }
+
+    /// 血緣接不上的卡片也要死。
+    ///
+    /// `migrate_012` 開了 `provenance` 這張表，但**不回填**——alpha.58 就在
+    /// 用的那些卡片一列血緣都沒有。cascade 只走子代的話，它們在忘掉之後
+    /// 一列都不會動，而舊版是照時間範圍硬刪的。也就是說升上來的那一刻，
+    /// 他資料庫裡每一張既有的卡片都變成刪不掉的。
+    #[test]
+    fn a_card_with_no_lineage_still_dies_when_its_range_is_forgotten() {
+        let tmp = Tmp::new("forget-l2-orphan");
+        let (mut db, _paths) = seeded(&tmp);
+        card_over(&mut db, days_ago(60), "frame:999");
+        // 升級上來的資料庫長這樣：卡片在，血緣沒有。
+        db.conn
+            .execute("DELETE FROM provenance", [])
+            .expect("clear provenance");
+
+        db.forget(days_ago(61), days_ago(59), Some(tmp.path()))
+            .expect("forget");
+
+        let alive: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM l2_card WHERE tombstoned_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(alive, 0, "血緣接不上的卡片，忘掉之後還活著");
+    }
+
+    /// L3 也要死，而且是**沿血緣**死，不是靠自己那一欄的時間戳。
+    ///
+    /// 退場條件寫的是「刪一段 L0，衍生 L2/L3 全部 tombstone」。這裡的承諾
+    /// 是**下午三點**才寫進去的，而他忘掉的是**早上那一小時**——按時間範圍
+    /// 查的話這一列碰不到，只有沿著 provenance 走才找得到它。兩種實作在
+    /// 「證據和結論同一個小時」的簡單案例上看起來一模一樣。
+    #[test]
+    fn forgetting_l0_kills_a_commitment_written_hours_later() {
+        let tmp = Tmp::new("forget-l3");
+        let (mut db, _paths) = seeded(&tmp);
+        let fid: i64 = db
+            .conn
+            .query_row("SELECT id FROM frames WHERE ts = ?1", [days_ago(60)], |r| {
+                r.get(0)
+            })
+            .expect("frame id");
+        card_over(&mut db, days_ago(60), &format!("frame:{fid}"));
+        let cid: i64 = db
+            .conn
+            .query_row("SELECT id FROM l2_card LIMIT 1", [], |r| r.get(0))
+            .expect("card id");
+        // 承諾晚了好幾個小時才寫進去，但它的根據是早上那一格。
+        db.conn
+            .execute(
+                "INSERT INTO commitments(text, kind, born_from, evidence_json, people_json,
+                   status, confidence, created_at, updated_at)
+                 VALUES('付王小明 NT$12,000','payment',?1,'[]','[\"王小明\"]','open',0.7,?2,?2)",
+                rusqlite::params![cid, days_ago(60) + 6 * 3_600_000],
+            )
+            .expect("insert commitment");
+        let mid: i64 = db.conn.last_insert_rowid();
+        db.insert_provenance(&format!("commitment:{mid}"), &format!("l2:{cid}"))
+            .expect("link");
+
+        db.forget(days_ago(61), days_ago(59), Some(tmp.path()))
+            .expect("forget");
+
+        let (alive, blob): (i64, String) = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(GROUP_CONCAT(text || people_json), '')
+                 FROM commitments WHERE tombstoned_at IS NULL",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("count");
+        assert_eq!(alive, 0, "承諾沒有跟著證據一起死：{blob}");
+        let leftover: String = db
+            .conn
+            .query_row(
+                "SELECT COALESCE(GROUP_CONCAT(text || people_json), '') FROM commitments",
+                [],
+                |r| r.get(0),
+            )
+            .expect("blob");
+        assert!(!leftover.contains("王小明"), "人名還在墓碑裡：{leftover}");
+        assert!(!leftover.contains("12,000"), "金額還在墓碑裡：{leftover}");
+    }
 
     /// 他親手選一段時間按下忘掉的時候，**字也要一起消失**。
     ///

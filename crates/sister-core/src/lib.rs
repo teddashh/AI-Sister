@@ -11,7 +11,8 @@
 //! - **L1 事實**：[`facts`] 的 typed 抽取。純規則、零幻覺、可重跑。
 //! - L2 假設：[`brain`] 把螢幕上的字（**原文，不去敏**）交給使用者設定的
 //!   CLI，收回一張卡片。沒簽第二張同意書就一次都不送。
-//! - L3 狀態：還沒做。
+//! - **L3 狀態**：[`reviewer`] 是唯一寫入者（承諾表、entities、日摘要），
+//!   而且是型別上唯一——寫入函式要一張 [`reviewer::L3Write`]。
 //!
 //! 「抄寫歸程式，意圖歸模型」。模型呼叫只走 `std::process::Command`，
 //! 而且要有 [`consent::CloudAllowed`]。
@@ -36,6 +37,7 @@ pub mod redact;
 pub mod replay;
 pub mod retention;
 pub mod retrieval;
+pub mod reviewer;
 pub mod segment;
 pub mod segment_edit;
 pub mod stuck;

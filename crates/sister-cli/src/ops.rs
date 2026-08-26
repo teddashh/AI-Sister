@@ -726,6 +726,11 @@ pub mod brain {
 
     pub fn log(data_dir: &Path, limit: usize) -> Result<()> {
         let db = open_existing(data_dir)?;
+        println!(
+            "{}",
+            sister_core::reviewer::format_recheck_rate(&db.reviewer_recheck_stats()?)
+        );
+        println!();
         let outbound = db.list_brain_outbound(limit)?;
         let skips = db.list_brain_skip(limit)?;
         if outbound.is_empty() && skips.is_empty() {
@@ -771,6 +776,158 @@ pub mod brain {
             }
         }
         Ok(())
+    }
+}
+
+pub mod review {
+    use super::*;
+    use sister_core::config::Config;
+    use sister_core::reviewer::{self, ReviewInput, ReviewKind};
+
+    pub fn run(
+        data_dir: &Path,
+        config: &Config,
+        dry_run: bool,
+        last: &str,
+        eod: bool,
+        force: bool,
+    ) -> Result<()> {
+        let span = super::parse_span(last)?;
+        let to = sister_core::now_ms();
+        let from = to.saturating_sub(span);
+        let mut db = open_existing(data_dir)?;
+        let consent = sister_core::consent::load(data_dir);
+        let mut input = ReviewInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &config.brain,
+            from_ts: from,
+            to_ts: to,
+            kind: if eod {
+                ReviewKind::Eod
+            } else {
+                ReviewKind::Interval
+            },
+            force,
+            now: to,
+        };
+        if dry_run {
+            let stats = input.db.reviewer_recheck_stats()?;
+            println!("── 不會送出去（--dry-run）──\n");
+            println!(
+                "命令：{}",
+                config
+                    .brain
+                    .cli()
+                    .map(|(c, a)| format!("{c} {}", a.join(" ")))
+                    .unwrap_or_else(|| "（還沒設定 [brain] command）".into())
+            );
+            println!(
+                "同意書 2：{}",
+                if consent.cloud_permit().is_some() {
+                    "已簽"
+                } else {
+                    "沒簽——真的跑的話一次都不會呼叫"
+                }
+            );
+            let used = {
+                let day = sister_core::brain::local_day_key(to).unwrap_or_default();
+                input.db.brain_outbound_count_on_role(&day, "reviewer")?
+            };
+            println!(
+                "今日審閱預算：{}/{}，還剩 {} 次",
+                used,
+                config.brain.reviewer_daily_budget,
+                config.brain.reviewer_daily_budget.saturating_sub(used)
+            );
+            println!(
+                "節奏：{}",
+                if eod {
+                    "日終盤點"
+                } else {
+                    "活躍批次（最短 15 分鐘）"
+                }
+            );
+            println!();
+            println!("{}", reviewer::format_recheck_rate(&stats));
+            return Ok(());
+        }
+        let result = reviewer::run(&mut input)?;
+        let stats = input.db.reviewer_recheck_stats()?;
+        print!("{}", reviewer::format_review_result(&result, &stats));
+        Ok(())
+    }
+}
+
+pub mod commitments {
+    use super::*;
+
+    pub fn run(
+        data_dir: &Path,
+        kill: Option<i64>,
+        other: Option<i64>,
+        note: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        let mut db = open_existing(data_dir)?;
+        let now = sister_core::now_ms();
+        if let Some(id) = kill {
+            let n = sister_core::reviewer::kill_commitment(
+                &mut db,
+                id,
+                note.unwrap_or("使用者結案"),
+                now,
+            )?;
+            anyhow::ensure!(n > 0, "找不到還活著的承諾 #{id}");
+            println!("承諾 #{id} 已結案。");
+            return Ok(());
+        }
+        if let Some(id) = other {
+            let n = sister_core::reviewer::snooze_commitment(&mut db, id, now)?;
+            anyhow::ensure!(n > 0, "找不到還活著的承諾 #{id}");
+            println!("承諾 #{id} 已降權（snooze）。不會再煩你。");
+            return Ok(());
+        }
+        let rows = db.all_commitments()?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&rows_json(&rows))?);
+            return Ok(());
+        }
+        if rows.is_empty() {
+            println!("承諾表是空的。審閱層跑過之後才會有列。");
+            return Ok(());
+        }
+        for c in &rows {
+            let due = match (c.due_hint.as_deref(), c.due_source.as_deref()) {
+                (Some(h), Some("explicit")) => format!("　期限 {h}（螢幕上寫的）"),
+                (Some(h), Some("inferred")) => format!("　期限 {h}（她從上下文猜的）"),
+                (Some(h), _) => format!("　期限 {h}"),
+                (None, _) => String::new(),
+            };
+            let grave = if c.tombstoned_at.is_some() {
+                "　〔墓碑：這段原件被忘掉了〕"
+            } else {
+                ""
+            };
+            println!("#{}  [{}] {}{}{}", c.id, c.status, c.text, due, grave);
+        }
+        Ok(())
+    }
+
+    fn rows_json(rows: &[sister_core::db::CommitmentRow]) -> serde_json::Value {
+        serde_json::json!(
+            rows.iter()
+                .map(|c| serde_json::json!({
+                    "id": c.id,
+                    "text": c.text,
+                    "kind": c.kind,
+                    "status": c.status,
+                    "due_hint": c.due_hint,
+                    "due_source": c.due_source,
+                    "tombstoned": c.tombstoned_at.is_some(),
+                }))
+                .collect::<Vec<_>>()
+        )
     }
 }
 

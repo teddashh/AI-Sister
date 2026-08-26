@@ -26,8 +26,15 @@
       <header class="day-head">
         <h2 data-day-title>—</h2>
         <p class="day-sub" data-day-sub></p>
+        <nav class="views" data-views>
+          <button type="button" data-view="day" aria-current="true">這一天</button>
+          <button type="button" data-view="guess">她猜的</button>
+          <button type="button" data-view="commitments">承諾</button>
+        </nav>
       </header>
       <ol class="moments" data-moments></ol>
+      <div class="memory" data-memory hidden></div>
+      <div class="pledges" data-pledges hidden></div>
 
       <!--
         刪除鍵長在時間軸上，不是設定頁裡。他要忘掉某一段的那一刻，正是他

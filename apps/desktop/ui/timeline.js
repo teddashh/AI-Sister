@@ -30,7 +30,13 @@ const el = {
   to: document.querySelector("[data-to]"),
   say: document.querySelector("[data-say]"),
   forget: document.querySelector("[data-forget]"),
+  memory: document.querySelector("[data-memory]"),
+  pledges: document.querySelector("[data-pledges]"),
+  views: document.querySelector("[data-views]"),
 };
+
+/** 右邊現在攤的是哪一頁：day / guess / commitments。預設時間軸，忘掉那顆鍵才找得到。 */
+let view = "day";
 
 /** 現在攤開的是哪一天。忘掉那顆鍵要用它換算時間範圍。 */
 let current = null;
@@ -623,14 +629,26 @@ function chapterRow(ch, rows, dayStart, next) {
 /** 她猜的。長得不能像程式抄下來的 OCR。 */
 function guessRow(card) {
   const li = document.createElement("li");
-  li.className = "guess";
+  li.className = card.user_corrected ? "guess user" : card.revised ? "guess revised" : "guess";
   const mark = document.createElement("p");
   mark.className = "guess-mark";
-  mark.textContent = `她猜的（模型說的信心 ${Number(card.model_confidence).toFixed(2)}，不是量出來的）`;
+  if (card.user_corrected) {
+    mark.textContent = `你改過的（不是她量出來的，也不是模型說的）`;
+  } else if (card.revised) {
+    mark.textContent = `後來改的（審閱層修訂，模型說的信心 ${Number(card.model_confidence).toFixed(2)}，不是量出來的）。原版還在。`;
+  } else {
+    mark.textContent = `她猜的（模型說的信心 ${Number(card.model_confidence).toFixed(2)}，不是量出來的）`;
+  }
   const what = document.createElement("p");
   what.className = "guess-activity";
   what.textContent = card.activity ?? "";
   li.append(mark, what);
+  if (card.previous_activity) {
+    const prev = document.createElement("p");
+    prev.className = "guess-prev";
+    prev.textContent = `原版：${card.previous_activity}`;
+    li.append(prev);
+  }
   if (Array.isArray(card.entities) && card.entities.length > 0) {
     const ents = document.createElement("p");
     ents.className = "guess-entities";
@@ -670,6 +688,36 @@ function guessRow(card) {
     q.className = "guess-open";
     q.textContent = `還沒看清：${card.open_questions.join("、")}`;
     li.append(q);
+  }
+  if (card.user_corrected) {
+    const lock = document.createElement("p");
+    lock.className = "guess-lock";
+    lock.textContent = "你改過的。下一輪不會蓋掉。";
+    li.append(lock);
+  } else if (card.id != null) {
+    const form = document.createElement("form");
+    form.className = "guess-fix";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "她猜錯了的話，寫正確的";
+    input.value = card.activity ?? "";
+    const go = document.createElement("button");
+    go.type = "submit";
+    go.textContent = "改成這樣";
+    form.append(input, go);
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const next = input.value.trim();
+      if (!next || invoke == null) return;
+      void invoke("correct_l2", {
+        segmentCoreStart: Number(String(card.segment_ref ?? "").replace(/^segment:/, "")),
+        activity: next,
+      }).then(() => {
+        if (view === "guess") void renderGuesses();
+        else if (current) void load(current.start_ts);
+      });
+    });
+    li.append(form);
   }
   return li;
 }
@@ -1012,6 +1060,163 @@ function listDays(days) {
  * 刪完之後一定要重讀**清單**，不是只重畫右邊：把一整天忘光之後，那一天
  * 就不該再出現在左邊——一個點下去空空如也的日期，會讓人以為刪除失敗了。
  */
+function setView(next) {
+  view = next;
+  if (el.views) {
+    for (const btn of el.views.querySelectorAll("[data-view]")) {
+      btn.setAttribute("aria-current", btn.getAttribute("data-view") === view ? "true" : "false");
+    }
+  }
+  if (el.moments) el.moments.hidden = view !== "day";
+  if (el.memory) el.memory.hidden = view !== "guess";
+  if (el.pledges) el.pledges.hidden = view !== "commitments";
+  if (el.forget) {
+    el.forget.hidden = view !== "day";
+  }
+  if (view === "guess") void renderGuesses();
+  if (view === "commitments") void renderPledges();
+}
+
+async function renderGuesses() {
+  if (!el.memory) return;
+  el.memory.replaceChildren();
+  const heading = document.createElement("p");
+  heading.className = "memory-lead";
+  heading.textContent =
+    "她現在認為你在幹嘛。每一條都是假設，點得出出處。猜錯了可以直接改，改完下一輪不會蓋掉。";
+  el.memory.append(heading);
+  if (invoke === null || current === null) {
+    const empty = document.createElement("p");
+    empty.className = "memory-empty";
+    empty.textContent = "沒有可以攤開的一天。";
+    el.memory.append(empty);
+    return;
+  }
+  try {
+    const cards = await invoke("memory_guesses", {
+      fromTs: current.start_ts,
+      toTs: current.start_ts + DAY,
+    });
+    if (!Array.isArray(cards) || cards.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "memory-empty";
+      empty.textContent = "這一天她還沒猜過。解釋層跑過之後才會有假設。";
+      el.memory.append(empty);
+      return;
+    }
+    const list = document.createElement("ol");
+    list.className = "memory-list";
+    for (const card of cards) list.append(guessRow(card));
+    el.memory.append(list);
+  } catch (err) {
+    const empty = document.createElement("p");
+    empty.className = "memory-empty";
+    empty.textContent = String(err?.message ?? err);
+    el.memory.append(empty);
+  }
+}
+
+async function renderPledges() {
+  if (!el.pledges) return;
+  el.pledges.replaceChildren();
+  const heading = document.createElement("p");
+  heading.className = "memory-lead";
+  heading.textContent = "承諾表。只有兩個動作：結案，或其他一切（snooze + 降權）。";
+  el.pledges.append(heading);
+  if (invoke === null) {
+    const empty = document.createElement("p");
+    empty.className = "memory-empty";
+    empty.textContent = "這一頁不是在 AI-Sister 裡打開的。";
+    el.pledges.append(empty);
+    return;
+  }
+  try {
+    const rows = await invoke("memory_commitments");
+    if (!Array.isArray(rows) || rows.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "memory-empty";
+      empty.textContent = "現在沒有掛著的承諾。審閱層跑過之後才會有列。";
+      el.pledges.append(empty);
+      return;
+    }
+    const list = document.createElement("ol");
+    list.className = "pledge-list";
+    for (const c of rows) list.append(pledgeRow(c));
+    el.pledges.append(list);
+  } catch (err) {
+    const empty = document.createElement("p");
+    empty.className = "memory-empty";
+    empty.textContent = String(err?.message ?? err);
+    el.pledges.append(empty);
+  }
+}
+
+function pledgeRow(c) {
+  const li = document.createElement("li");
+  li.className = c.tombstoned ? "pledge tombstone" : "pledge";
+  const text = document.createElement("p");
+  text.className = "pledge-text";
+  text.textContent = c.text ?? "";
+  const meta = document.createElement("p");
+  meta.className = "pledge-meta";
+  const due = c.due_hint
+    ? c.due_source === "explicit"
+      ? `期限 ${c.due_hint}（螢幕上寫的）`
+      : c.due_source === "inferred"
+        ? `期限 ${c.due_hint}（她從上下文猜的）`
+        : `期限 ${c.due_hint}`
+    : "沒有期限";
+  meta.textContent = `${c.status ?? "open"}　${due}`;
+  if (c.tombstoned) {
+    meta.textContent += "　〔墓碑：這段原件被忘掉了〕";
+  }
+  li.append(text, meta);
+  if (Array.isArray(c.evidence) && c.evidence.length > 0) {
+    const ev = document.createElement("div");
+    ev.className = "guess-evidence";
+    const lab = document.createElement("span");
+    lab.textContent = "根據";
+    ev.append(lab);
+    for (const e of c.evidence) {
+      if (e.kind === "frame") {
+        const see = document.createElement("button");
+        see.type = "button";
+        see.className = "see";
+        see.textContent = e.label ?? `畫面 #${e.id}`;
+        see.addEventListener("click", () => {
+          void invoke?.("open_frame", { frameId: e.id });
+        });
+        ev.append(see);
+      } else {
+        const fact = document.createElement("span");
+        fact.className = "guess-fact";
+        fact.textContent = e.label ?? `本機事實 #${e.id}`;
+        ev.append(fact);
+      }
+    }
+    li.append(ev);
+  }
+  if (!c.tombstoned && (c.status === "open" || c.status === "snoozed")) {
+    const actions = document.createElement("div");
+    actions.className = "pledge-actions";
+    const kill = document.createElement("button");
+    kill.type = "button";
+    kill.textContent = "結案";
+    kill.addEventListener("click", () => {
+      void invoke?.("commitment_kill", { id: c.id, note: "使用者結案" }).then(() => renderPledges());
+    });
+    const other = document.createElement("button");
+    other.type = "button";
+    other.textContent = "其他一切";
+    other.addEventListener("click", () => {
+      void invoke?.("commitment_other", { id: c.id }).then(() => renderPledges());
+    });
+    actions.append(kill, other);
+    li.append(actions);
+  }
+  return li;
+}
+
 async function load(keep = null) {
   if (invoke === null) {
     el.railSay.textContent = "這一頁不是在 AI-Sister 裡打開的。";
@@ -1192,6 +1397,65 @@ function fakeBackend(mode = "1") {
   const chapterDays = new Map();
   const TEN = 10 * 60_000;
 
+  const demoGuesses = [
+    {
+      id: 11,
+      segment_ref: `segment:${at(9, 41)}`,
+      activity: "在改 sister-core 的斷句測試",
+      model_confidence: 0.62,
+      confidence_source: "model",
+      author: "interpreter",
+      version: 1,
+      revised: false,
+      user_corrected: false,
+      entities: [{ type: "project", name: "AI-Sister" }],
+      evidence: [
+        { kind: "frame", id: 4088, label: "畫面 #4088" },
+        { kind: "fact", id: 12, label: "本機事實 #12" },
+      ],
+      open_questions: ["這次測試有沒有綠"],
+    },
+    {
+      id: 12,
+      segment_ref: `segment:${at(9, 12)}`,
+      activity: "在讀 SPEC 的記憶死亡那一節",
+      model_confidence: 0.55,
+      confidence_source: "reviewer",
+      author: "reviewer",
+      version: 2,
+      revised: true,
+      user_corrected: false,
+      previous_activity: "在隨便翻 GitHub",
+      entities: [{ type: "project", name: "AI-Sister" }],
+      evidence: [{ kind: "frame", id: 4021, label: "畫面 #4021" }],
+      open_questions: [],
+    },
+  ];
+  const demoPledges = [
+    {
+      id: 1,
+      text: "五點去接她",
+      kind: "promise",
+      status: "open",
+      due_hint: "17:00",
+      due_source: "explicit",
+      confidence: 0.8,
+      tombstoned: false,
+      evidence: [{ kind: "frame", id: 4310, label: "畫面 #4310" }],
+    },
+    {
+      id: 2,
+      text: "週報寫完再交",
+      kind: "todo",
+      status: "open",
+      due_hint: "今晚",
+      due_source: "inferred",
+      confidence: 0.51,
+      tombstoned: false,
+      evidence: [{ kind: "frame", id: 4310, label: "畫面 #4310" }],
+    },
+  ];
+
   function hostOf(m) {
     if (!m.url) return null;
     const host = m.url
@@ -1301,10 +1565,15 @@ function fakeBackend(mode = "1") {
           first.app === "Code.exe"
             ? [
                 {
+                  id: 11,
                   segment_ref: `segment:${first.core_start_ts}`,
                   activity: "在改 sister-core 的斷句測試",
                   model_confidence: 0.62,
                   confidence_source: "model",
+                  author: "interpreter",
+                  version: 1,
+                  revised: false,
+                  user_corrected: false,
                   entities: [{ type: "project", name: "AI-Sister" }],
                   evidence: [
                     { kind: "frame", id: 3901, label: "畫面 #3901" },
@@ -1482,6 +1751,41 @@ function fakeBackend(mode = "1") {
         });
         return replayChapters(st);
       }
+      case "memory_guesses": {
+        return demoGuesses.filter(
+          (c) =>
+            Number(String(c.segment_ref).replace(/^segment:/, "")) >= arg.fromTs &&
+            Number(String(c.segment_ref).replace(/^segment:/, "")) < arg.toTs,
+        );
+      }
+      case "memory_commitments":
+        return demoPledges;
+      case "correct_l2": {
+        const hit = demoGuesses.find(
+          (c) =>
+            Number(String(c.segment_ref).replace(/^segment:/, "")) === arg.segmentCoreStart,
+        );
+        if (!hit) throw new Error("這一段還沒有假設可以改");
+        hit.activity = arg.activity;
+        hit.user_corrected = true;
+        hit.author = "user";
+        hit.confidence_source = "user";
+        hit.revised = false;
+        return hit;
+      }
+      case "commitment_kill": {
+        const row = demoPledges.find((c) => c.id === arg.id);
+        if (!row) throw new Error("找不到還活著的承諾");
+        row.status = "dead";
+        row.kill_note = arg.note ?? "使用者結案";
+        return row;
+      }
+      case "commitment_other": {
+        const row = demoPledges.find((c) => c.id === arg.id);
+        if (!row) throw new Error("找不到還活著的承諾");
+        row.status = "snoozed";
+        return row;
+      }
       case "timeline_undo_segment_edit": {
         const st = chapterState(arg.fromTs, arg.toTs);
         const e = st.edits.find((x) => x.id === arg.editId);
@@ -1593,5 +1897,12 @@ if (
   // 「現在」推到這一天之後，好讓收尾那段空白也畫出來——16:40 之後的七個
   // 小時是這一頁最容易被漏掉的一塊，看不到就等於沒做過。
   Date.now = () => Date.UTC(2026, 7, 19);
+}
+if (el.views) {
+  el.views.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("[data-view]");
+    if (!btn) return;
+    setView(btn.getAttribute("data-view"));
+  });
 }
 void load();
