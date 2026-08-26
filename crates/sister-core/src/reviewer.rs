@@ -2155,6 +2155,65 @@ mod tests {
         );
     }
 
+    /// 這一串字，寫的人在 sister-core，讀的人在 sister-hands，中間沒有型別。
+    ///
+    /// 上面那兩條各自拿一段寫死的字面值跟自己比對。欄位改個名、
+    /// `deny_unknown_fields` 多擋掉一個欄位，兩條都還是綠的，而他按下去會拿
+    /// 到「按鈕內容已經讀不懂，沒有動手」。這一條把真的寫進資料庫的那串字撿
+    /// 起來，交給真正會讀它的那支 parser，再交給真正會擋它的那支 policy：她
+    /// 端出來的按鈕，要讀得懂，而且要按得下去。
+    #[test]
+    fn the_next_step_this_crate_writes_is_one_the_hands_crate_can_read_and_will_allow() {
+        for (label, ocr, kind, raw) in [
+            (
+                "next-url",
+                "LINE：五點去接她 17:00 https://example.com/x",
+                "url",
+                "https://example.com/x",
+            ),
+            (
+                "next-file",
+                r"LINE：五點去接她 17:00 C:\work\report.txt",
+                "file_path",
+                r"C:\work\report.txt",
+            ),
+        ] {
+            let mut seeded = Db::open_in_memory().expect("db");
+            let ts = 1_700_250_000_000;
+            seed(&mut seeded, ts, ocr);
+            let id = fact_id(&seeded, ts, kind, raw);
+            let (db, _) = run_next_step_fixture(label, ocr, id, None);
+            let written = db.live_commitments().unwrap()[0]
+                .allowed_next_step
+                .clone()
+                .unwrap_or_else(|| panic!("{label}：根本沒寫下一步"));
+
+            // 讀得懂嗎。這是 hands 那一支真正的 parser，不是在這裡重寫一份。
+            let button = sister_hands::SuggestionButton::parse_json(&written)
+                .unwrap_or_else(|e| panic!("{label}：hands 讀不懂 {written}：{e}"));
+            let action = button.press().snapshot();
+            assert!(
+                action.describe().contains(raw),
+                "{label}：按鈕上的字沒有指回那筆 fact，寫進去的是 {written}",
+            );
+
+            // 按得下去嗎。不要端一顆按下去一定會被 target_policy 擋掉的按鈕。
+            match action {
+                sister_hands::ActionSnapshot::OpenUrl { url } => {
+                    sister_hands::target_policy::validate_url(&url)
+                        .unwrap_or_else(|e| panic!("{label}：{e}"));
+                }
+                sister_hands::ActionSnapshot::OpenFile { path } => {
+                    sister_hands::target_policy::validate_file(&path)
+                        .unwrap_or_else(|e| panic!("{label}：{e}"));
+                }
+                sister_hands::ActionSnapshot::FocusWindow { title } => {
+                    panic!("{label}：reviewer 不該寫出聚焦視窗：{title}")
+                }
+            }
+        }
+    }
+
     /// 一次拒絕要看得見，**而且不可以被記成一次分歧**。
     ///
     /// 分歧的意思是「兩份答案對不上」，畫面上印的是「pass A：… pass B：…」。
