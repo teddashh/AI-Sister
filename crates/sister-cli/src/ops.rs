@@ -1303,17 +1303,29 @@ pub mod act {
             })?;
         }
 
+        // 一張都沒端出來的時候，**為什麼**有三種答案，而它們的下一步各自不同。
+        // 只數 `presented == 0` 會讓三種都印成同一句「這一輪的步驟都問完了」。
+        let live = commitments.len();
+        let mut without_next_step = 0_usize;
+        let mut unparseable = 0_usize;
+        let mut presented = 0_usize;
+
         for commitment in commitments {
             let button = match sister_hands::commitment_action::parse_allowed_next_step(
                 commitment.allowed_next_step.as_deref(),
             ) {
-                AllowedNextStep::Missing => continue,
+                AllowedNextStep::Missing => {
+                    without_next_step += 1;
+                    continue;
+                }
                 AllowedNextStep::Unparseable { reason, .. } => {
+                    unparseable += 1;
                     writeln!(out, "#{} 的下一步讀不懂，跳過：{reason}", commitment.id)?;
                     continue;
                 }
                 AllowedNextStep::Suggestion(button) => button,
             };
+            presented += 1;
             if let Err(conclusion) = run.may_start_step() {
                 terminal = Some(conclusion);
                 break;
@@ -1452,6 +1464,14 @@ pub mod act {
             writeln!(out)?;
         }
 
+        if presented == 0 {
+            writeln!(
+                out,
+                "{}",
+                nothing_to_offer(live, without_next_step, unparseable)
+            )?;
+        }
+
         if opts.dry_run {
             if previewed_steps > 0 {
                 writeln!(
@@ -1489,6 +1509,36 @@ pub mod act {
             tally.asked, tally.done, tally.declined, tally.blocked, tally.failed
         )?;
         Ok(())
+    }
+
+    /// 一張都端不出來的時候，**為什麼**。
+    ///
+    /// 這四種處境在 alpha.70 剛做出來的時候印的是同一句話——
+    /// 「這一輪的步驟都問完了。問了 0 步。」而那句話的意思是「沒有東西再問了」，
+    /// 讀起來像「都處理完了」。四種的下一步完全不同：一種要去錄東西，一種要
+    /// 等 L3 挑得出可以打開的東西，一種是資料壞了，一種是他自己該去看承諾表。
+    fn nothing_to_offer(live: usize, without_next_step: usize, unparseable: usize) -> String {
+        if live == 0 {
+            return "承諾表上一張活著的卡都沒有，所以沒有東西可以問你。\
+                    先讓她整理一次：`sister review --force`（要簽過第二張同意書）。"
+                .to_string();
+        }
+        if unparseable > 0 && without_next_step + unparseable == live {
+            return format!(
+                "{live} 張活著的承諾裡，{unparseable} 張的下一步讀不懂（理由在上面），\
+                 其餘 {without_next_step} 張沒有下一步。這一輪沒有東西可以問你。"
+            );
+        }
+        if without_next_step == live {
+            return format!(
+                "有 {live} 張活著的承諾，但**沒有一張帶著下一步**——L3 在那天的事實裡\
+                 挑不到可以打開的網址或檔案，就會把那一欄留空。這不是她做完了。"
+            );
+        }
+        // 走到這裡代表有卡帶著下一步、卻一步都沒被端出來：今天唯一的路是步數
+        // 上限在第一步之前就用完了，而那不可能（`StepLimit` 保證 ≥ 1）。留一句
+        // 說得出自己不知道的話，比留一句聽起來很篤定的假話好。
+        format!("{live} 張活著的承諾，一步都沒有端出來，而我說不出為什麼。這是個 bug，請回報。")
     }
 
     /// `sister hands log`：把 `action-log.jsonl` 讀成人話。
@@ -2240,14 +2290,88 @@ pub mod act {
                 "",
                 None,
             );
-            assert_eq!(run.out.matches("讀不懂").count(), 1, "{}", run.out);
+            // 逐張指名的那一行帶著「跳過：」和原因；底下那句總結不帶。
+            assert_eq!(
+                run.out.matches("，跳過：").count(),
+                1,
+                "壞掉的那一張要被指名一次，只有一次：{}",
+                run.out
+            );
             assert!(run.out.contains("#7"), "{}", run.out);
             assert!(
                 !run.out.contains("#8"),
                 "沒有下一步的卡片要安靜：{}",
                 run.out
             );
+            // 一步都端不出來的時候要說出**為什麼**，而且兩種原因分開算。
+            assert!(
+                run.out.contains("2 張活著的承諾裡，1 張的下一步讀不懂"),
+                "{}",
+                run.out
+            );
+            assert!(run.out.contains("其餘 1 張沒有下一步"), "{}", run.out);
             assert!(run.out.contains("問了 0 步"), "{}", run.out);
+        }
+
+        /// **零步不是一種狀況，是四種。** 而「這一輪的步驟都問完了」讀起來像
+        /// 「都處理完了」——四種裡沒有一種是那個意思。
+        #[test]
+        fn nothing_to_do_says_which_kind_of_nothing_it_was() {
+            let empty = go(
+                "act-none-empty",
+                &Source::default(),
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "",
+                None,
+            );
+            assert!(empty.out.contains("一張活著的卡都沒有"), "{}", empty.out);
+            assert!(empty.out.contains("sister review --force"), "{}", empty.out);
+
+            let no_steps = go(
+                "act-none-nostep",
+                &Source {
+                    rows: vec![card(7, None, &[1]), card(8, None, &[1])],
+                    apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                },
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "",
+                None,
+            );
+            assert!(
+                no_steps.out.contains("有 2 張活著的承諾"),
+                "{}",
+                no_steps.out
+            );
+            assert!(
+                no_steps.out.contains("沒有一張帶著下一步"),
+                "{}",
+                no_steps.out
+            );
+            // **這一句是重點。** 沒有它的話，畫面等於在說「都做完了」。
+            assert!(no_steps.out.contains("這不是她做完了"), "{}", no_steps.out);
+
+            // 四種話要真的是四種——湊在一起說同一件事就白做了。
+            assert_ne!(
+                empty.out.lines().next(),
+                no_steps.out.lines().next(),
+                "兩種零步不可以是同一句話"
+            );
+        }
+
+        /// 有東西可以問的時候，就不要插那一句「一步都沒端出來」。
+        #[test]
+        fn a_run_that_had_something_to_offer_does_not_apologise_for_nothing() {
+            let run = go(
+                "act-none-not",
+                &one_card(),
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "好\n",
+                None,
+            );
+            for phrase in ["一張活著的卡都沒有", "沒有一張帶著下一步", "說不出為什麼"]
+            {
+                assert!(!run.out.contains(phrase), "{phrase}：{}", run.out);
+            }
         }
 
         /// 同一個資料目錄跑兩輪，讀回去要分得出那是兩輪、而且兩張票不一樣。
