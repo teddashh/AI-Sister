@@ -877,11 +877,28 @@ pub mod review {
             );
             println!();
             println!("{}", reviewer::format_recheck_rate(&stats));
+            // 分歧也要印在**這條路**上。SPEC §6「分歧 = 警報」，而一個只有真的
+            // 跑一輪（＝花掉雲端預算、開兩個 CLI）才看得到的警報，等於要他付錢
+            // 才讀得到上一次的警報。`--dry-run` 是這支命令唯一唯讀的入口，
+            // 而它要看的剛好就是**上一輪**留下來的東西。
+            print!(
+                "{}",
+                reviewer::format_reviewer_visibility(
+                    &input.db.latest_dual_pass_divergences()?,
+                    &input.db.entity_memory()?,
+                )
+            );
             return Ok(());
         }
         let result = reviewer::run(&mut input)?;
         let stats = input.db.reviewer_recheck_stats()?;
         print!("{}", reviewer::format_review_result(&result, &stats));
+        let divergences = input.db.latest_dual_pass_divergences()?;
+        let entities = input.db.entity_memory()?;
+        print!(
+            "{}",
+            reviewer::format_reviewer_visibility(&divergences, &entities)
+        );
         Ok(())
     }
 }

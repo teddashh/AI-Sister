@@ -20,8 +20,8 @@ use crate::brain::{
 use crate::config::BrainConfig;
 use crate::consent::Consent;
 use crate::db::{
-    CommitmentInsert, DaySummaryInsert, Db, DivergenceInsert, L2Author, L2CardRow, L2Insert,
-    OutboundInsert, RecheckInsert, RecheckStats, ReviewerRunInsert,
+    CommitmentInsert, DaySummaryInsert, Db, DivergenceInsert, DualPassDivergences, EntityMemory,
+    L2Author, L2CardRow, L2Insert, OutboundInsert, RecheckInsert, RecheckStats, ReviewerRunInsert,
 };
 use crate::model::Millis;
 
@@ -162,6 +162,88 @@ pub fn format_review_result(r: &ReviewResult, stats: &RecheckStats) -> String {
     }
     out.push_str(&format_recheck_rate(stats));
     out.push('\n');
+    out
+}
+
+/// 每一輪審閱都會印一次實體記憶，而實體與提及是**只增不減**的。
+/// 用了幾週之後整份印出來就是一面牆，所以有上限；上限本身不是問題，
+/// 沒講出來才是（見底下兩處「沒列出來」）。
+const MAX_ENTITIES_SHOWN: usize = 20;
+const MAX_MENTIONS_SHOWN: usize = 6;
+
+pub fn format_reviewer_visibility(
+    divergences: &DualPassDivergences,
+    entities: &EntityMemory,
+) -> String {
+    // 分歧是**警報**，不是統計行的續行。前後各空一行，讓它自己是一段。
+    let mut out = String::from("\n");
+    match divergences {
+        DualPassDivergences::NeverRan => {
+            out.push_str("雙 pass 還沒跑過；目前沒有可比較的兩份答案。\n");
+        }
+        DualPassDivergences::Agreed { run_id } => {
+            out.push_str(&format!(
+                "最近一次雙 pass（審閱輪次 #{run_id}）沒有分歧。\n"
+            ));
+        }
+        DualPassDivergences::Diverged { run_id, rows } => {
+            out.push_str(&format!("最近一次雙 pass（審閱輪次 #{run_id}）的分歧：\n"));
+            for row in rows {
+                out.push_str(&format!(
+                    "- {}\n  原因：{}\n  pass A：{}\n  pass B：{}\n",
+                    row.subject, row.reason, row.pass_a_json, row.pass_b_json
+                ));
+            }
+        }
+    }
+    out.push('\n');
+    match entities {
+        EntityMemory::NeverReviewed => {
+            out.push_str("實體記憶還沒跑過 Reviewer；目前不是『辨識到 0 個』。\n");
+        }
+        EntityMemory::Empty => out.push_str("Reviewer 跑過，但目前沒有活著的實體。\n"),
+        EntityMemory::Present(rows) => {
+            if rows.len() > MAX_ENTITIES_SHOWN {
+                out.push_str(&format!(
+                    "目前辨識到的實體（共 {} 個，以下只列 {MAX_ENTITIES_SHOWN} 個）：\n",
+                    rows.len()
+                ));
+            } else {
+                out.push_str(&format!("目前辨識到的實體（共 {} 個）：\n", rows.len()));
+            }
+            for row in rows.iter().take(MAX_ENTITIES_SHOWN) {
+                let refs = row
+                    .mentions
+                    .iter()
+                    .take(MAX_MENTIONS_SHOWN)
+                    .map(|m| m.seen_ref.as_str())
+                    .collect::<Vec<_>>();
+                let refs = if refs.is_empty() {
+                    "（目前沒有活著的提及）".into()
+                } else if row.mentions.len() > MAX_MENTIONS_SHOWN {
+                    // 剪掉尾巴的清單跟完整的清單長得一模一樣，所以每一次剪都要
+                    // 自己講出來。少講這一句，「出現於：六段」就變成一句假話。
+                    format!(
+                        "{}（另有 {} 段沒列出來）",
+                        refs.join("、"),
+                        row.mentions.len() - MAX_MENTIONS_SHOWN
+                    )
+                } else {
+                    refs.join("、")
+                };
+                out.push_str(&format!(
+                    "- [{}] {}；出現於：{}\n",
+                    row.entity.kind, row.entity.name, refs
+                ));
+            }
+            if rows.len() > MAX_ENTITIES_SHOWN {
+                out.push_str(&format!(
+                    "還有 {} 個實體沒列出來；完整的在資料庫的 entities 表。\n",
+                    rows.len() - MAX_ENTITIES_SHOWN
+                ));
+            }
+        }
+    }
     out
 }
 
@@ -727,7 +809,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                             Err(d) => {
                                 divergences += 1;
                                 divergence_rows.push((
-                                    d.subject,
+                                    format!("l2:{} / {}", card.id, d.subject),
                                     d.pass_a_json,
                                     d.pass_b_json,
                                     d.reason,
@@ -741,7 +823,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                             let b_json =
                                 serde_json::to_string(&map_b.get(&key)).unwrap_or_default();
                             divergence_rows.push((
-                                key,
+                                format!("l2:{} / {key}", card.id),
                                 a_json,
                                 b_json,
                                 "只有其中一個 pass 看到這筆承諾".into(),
@@ -753,7 +835,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
             _ => {
                 divergences += 1;
                 divergence_rows.push((
-                    card.activity.clone(),
+                    format!("l2:{} / {}", card.id, card.activity),
                     spawn_a.stdout.chars().take(400).collect(),
                     spawn_b.stdout.chars().take(400).collect(),
                     "其中一個 pass 沒有可用的 JSON".into(),
@@ -1342,6 +1424,208 @@ mod tests {
     }
 
     #[test]
+    fn visibility_copy_names_both_passes_and_entity_mentions() {
+        use crate::db::{DivergenceRow, EntityRow, EntityWithMentions, MentionRow};
+
+        let divergence = DualPassDivergences::Diverged {
+            run_id: 7,
+            rows: vec![DivergenceRow {
+                id: 1,
+                run_id: 7,
+                subject: "l2:42 / 交報告".into(),
+                pass_a_json: r#"{"stands":true}"#.into(),
+                pass_b_json: r#"{"stands":false}"#.into(),
+                reason: "stands 不同".into(),
+                created_at: 20,
+            }],
+        };
+        let entities = EntityMemory::Present(vec![EntityWithMentions {
+            entity: EntityRow {
+                id: 2,
+                kind: "project".into(),
+                name: "AI-Sister".into(),
+                aliases_json: "[]".into(),
+                first_seen_ref: "l2:42".into(),
+                notes: None,
+                created_at: 20,
+                tombstoned_at: None,
+            },
+            mentions: vec![MentionRow {
+                id: 3,
+                entity_id: 2,
+                seen_ref: "l2:42".into(),
+                created_at: 20,
+                tombstoned_at: None,
+            }],
+        }]);
+        let text = format_reviewer_visibility(&divergence, &entities);
+        for expected in [
+            "l2:42 / 交報告",
+            "pass A：{\"stands\":true}",
+            "pass B：{\"stands\":false}",
+            "[project] AI-Sister",
+            "出現於：l2:42",
+        ] {
+            assert!(text.contains(expected), "缺少 {expected:?}：{text}");
+        }
+    }
+
+    #[test]
+    fn visibility_copy_keeps_all_six_states_apart() {
+        use crate::db::{DivergenceRow, EntityRow, EntityWithMentions};
+
+        // 型別分成三段，不代表**螢幕上**分成三句。db.rs 那邊證明的是
+        // 「挑對了 variant」；這裡證明的是「三個 variant 講三句不一樣的話」。
+        // 少了這一條，把 `NeverRan` 的字串改成 `Agreed` 的字串，全綠。
+        let row = DivergenceRow {
+            id: 1,
+            run_id: 7,
+            subject: "l2:42".into(),
+            pass_a_json: "{}".into(),
+            pass_b_json: "{}".into(),
+            reason: "stands 不同".into(),
+            created_at: 20,
+        };
+        let entity = EntityWithMentions {
+            entity: EntityRow {
+                id: 2,
+                kind: "project".into(),
+                name: "AI-Sister".into(),
+                aliases_json: "[]".into(),
+                first_seen_ref: "l2:42".into(),
+                notes: None,
+                created_at: 20,
+                tombstoned_at: None,
+            },
+            mentions: vec![],
+        };
+
+        let d = [
+            DualPassDivergences::NeverRan,
+            DualPassDivergences::Agreed { run_id: 7 },
+            DualPassDivergences::Diverged {
+                run_id: 7,
+                rows: vec![row],
+            },
+        ]
+        .map(|s| format_reviewer_visibility(&s, &EntityMemory::NeverReviewed));
+        let e = [
+            EntityMemory::NeverReviewed,
+            EntityMemory::Empty,
+            EntityMemory::Present(vec![entity]),
+        ]
+        .map(|s| format_reviewer_visibility(&DualPassDivergences::NeverRan, &s));
+
+        for (label, texts) in [("分歧", &d), ("實體", &e)] {
+            for i in 0..texts.len() {
+                for j in (i + 1)..texts.len() {
+                    assert_ne!(
+                        texts[i], texts[j],
+                        "{label}的第 {i} 與第 {j} 種狀態印出同一句話"
+                    );
+                }
+            }
+        }
+
+        // 「三句話不一樣」還不夠。「沒有分歧」是一句**比較過**才講得出口的話，
+        // 只有 Agreed 有資格講；NeverRan 沒有兩份答案可比，Diverged 剛好相反。
+        // 少了這三條，把 NeverRan 改成印「沒有分歧。」照樣三句不同、照樣全綠。
+        assert!(d[0].contains("還沒跑過"), "{}", d[0]);
+        assert!(!d[0].contains("沒有分歧"), "還沒比就說沒有分歧：{}", d[0]);
+        assert!(d[1].contains("沒有分歧"), "{}", d[1]);
+        assert!(!d[2].contains("沒有分歧"), "有分歧卻說沒有：{}", d[2]);
+
+        assert!(e[0].contains("還沒跑過"), "{}", e[0]);
+        assert!(
+            !e[0].contains("沒有活著的實體"),
+            "沒跑過卻說辨識到 0 個：{}",
+            e[0]
+        );
+        assert!(e[1].contains("沒有活著的實體"), "{}", e[1]);
+        assert!(!e[2].contains("沒有活著的實體"), "有實體卻說沒有：{}", e[2]);
+    }
+
+    #[test]
+    fn visibility_says_out_loud_what_it_did_not_list() {
+        use crate::db::{EntityRow, EntityWithMentions, MentionRow};
+
+        // 用了幾週之後，實體會有幾百個、單一實體的提及會有幾百段。
+        // 截斷本身沒問題，**默默**截斷才有問題：一份被剪掉尾巴的清單
+        // 讀起來跟一份完整的清單長得一模一樣。
+        let rows: Vec<EntityWithMentions> = (0..40)
+            .map(|i| EntityWithMentions {
+                entity: EntityRow {
+                    id: i,
+                    kind: "person".into(),
+                    name: format!("人{i:02}"),
+                    aliases_json: "[]".into(),
+                    first_seen_ref: "l2:1".into(),
+                    notes: None,
+                    created_at: 20,
+                    tombstoned_at: None,
+                },
+                mentions: (0..30)
+                    .map(|m| MentionRow {
+                        id: i * 100 + m,
+                        entity_id: i,
+                        seen_ref: format!("l2:{i}-{m}"),
+                        created_at: 20,
+                        tombstoned_at: None,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let text = format_reviewer_visibility(
+            &DualPassDivergences::NeverRan,
+            &EntityMemory::Present(rows),
+        );
+
+        assert!(text.contains("共 40 個"), "沒說總共幾個：{text}");
+        assert!(
+            text.contains("還有 20 個實體沒列出來"),
+            "沒說漏了幾個實體：{text}"
+        );
+        assert!(!text.contains("人39"), "第 40 個不該印出來：{text}");
+        assert!(
+            text.contains("另有 24 段沒列出來"),
+            "沒說單一實體漏了幾段：{text}"
+        );
+        assert!(!text.contains("l2:0-29"), "第 30 段不該印出來：{text}");
+    }
+
+    #[test]
+    fn visibility_stays_quiet_when_nothing_was_cut() {
+        use crate::db::{EntityRow, EntityWithMentions, MentionRow};
+
+        // 反面：沒剪過就不准出現「沒列出來」，否則下一個人會學會忽略它。
+        let rows = vec![EntityWithMentions {
+            entity: EntityRow {
+                id: 1,
+                kind: "person".into(),
+                name: "Ted".into(),
+                aliases_json: "[]".into(),
+                first_seen_ref: "l2:1".into(),
+                notes: None,
+                created_at: 20,
+                tombstoned_at: None,
+            },
+            mentions: vec![MentionRow {
+                id: 1,
+                entity_id: 1,
+                seen_ref: "l2:1".into(),
+                created_at: 20,
+                tombstoned_at: None,
+            }],
+        }];
+        let text = format_reviewer_visibility(
+            &DualPassDivergences::NeverRan,
+            &EntityMemory::Present(rows),
+        );
+        assert!(!text.contains("沒列出來"), "沒剪卻在講剪：{text}");
+        assert!(text.contains("Ted"), "{text}");
+    }
+
+    #[test]
     fn skip_messages_are_not_the_same_sentence() {
         let msgs = [
             SkipReason::NoConsent.message(),
@@ -1474,7 +1758,7 @@ mod tests {
         let (command, args) = fake_cli_split(&tmp.0, &json_a, &json_b, &sentinel);
         let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
         let core = segs[0].core_started_at;
-        write_l2(
+        let l2 = write_l2(
             &mut db,
             core,
             fid,
@@ -1504,6 +1788,123 @@ mod tests {
         let rows = db.list_reviewer_divergences(10).expect("div");
         assert!(!rows.is_empty());
         assert!(rows[0].reason.contains("stands") || rows[0].reason.contains("對不上"));
+        // 一句「兩個 pass 對『五點去接她』講不一樣」查不動——他得知道是**哪一張
+        // L2**。承諾原文會重複出現在很多天的很多張卡上，`subject` 少了這個
+        // 前綴，警報就只剩下情緒。
+        assert!(
+            rows[0].subject.contains(&format!("l2:{l2}")),
+            "分歧沒說是哪一張 L2：{}",
+            rows[0].subject
+        );
+        assert!(
+            rows[0].subject.contains("五點去接她"),
+            "分歧沒說是哪一筆承諾：{}",
+            rows[0].subject
+        );
+    }
+
+    /// 上面那條走的是「兩邊都看到、欄位對不上」。另外兩種分歧各自走不同的
+    /// 分支，也各自要說得出是哪一張 L2；底下兩條分別釘住它們。
+    fn diverge_fixture(
+        tmp: &Tmp,
+        json_a: &str,
+        json_b: &str,
+    ) -> (Db, i64, String, Vec<String>, Millis) {
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_300_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let json_a = json_a.replace("frame:1", &format!("frame:{fid}"));
+        let json_b = json_b.replace("frame:1", &format!("frame:{fid}"));
+        let (command, args) = fake_cli_split(&tmp.0, &json_a, &json_b, &sentinel);
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        let core = segs[0].core_started_at;
+        let l2 = write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        (db, l2, command, args, ts)
+    }
+
+    fn run_diverge(db: &mut Db, command: String, args: Vec<String>, ts: Millis) -> ReviewResult {
+        let consent = signed();
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let mut input = ReviewInput {
+            db,
+            consent: &consent,
+            brain: &brain,
+            from_ts: ts,
+            to_ts: ts + 400_000,
+            kind: ReviewKind::Interval,
+            force: true,
+            now: ts + 500_000,
+        };
+        run(&mut input).expect("run")
+    }
+
+    #[test]
+    fn a_commitment_only_one_pass_saw_names_its_l2() {
+        let tmp = Tmp::new("diverge-solo");
+        let both = r#"{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:1"]}"#;
+        let only_a = r#"{"text":"順路買牛奶","stands":true,"kind":"promise","due_hint":"18:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:1"]}"#;
+        let (mut db, l2, command, args, ts) = diverge_fixture(
+            &tmp,
+            &format!(r#"{{"commitments":[{both},{only_a}]}}"#),
+            &format!(r#"{{"commitments":[{both}]}}"#),
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        assert_eq!(result.divergences, 1, "只有一邊看到的那筆該記成分歧");
+        let rows = db.list_reviewer_divergences(10).expect("div");
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].reason.contains("只有其中一個 pass"),
+            "{}",
+            rows[0].reason
+        );
+        assert!(
+            rows[0].subject.contains(&format!("l2:{l2}")),
+            "沒說是哪一張 L2：{}",
+            rows[0].subject
+        );
+        assert!(
+            rows[0].subject.contains("順路買牛奶"),
+            "沒說是哪一筆：{}",
+            rows[0].subject
+        );
+    }
+
+    #[test]
+    fn an_unparseable_pass_names_its_l2() {
+        // 一支 CLI 壞掉／被限流／回了一句人話，是最常見的分歧來源，
+        // 而它是**整張卡**沒有結果，所以 subject 只能靠 L2 ref 認人。
+        let tmp = Tmp::new("diverge-garbage");
+        let (mut db, l2, command, args, ts) = diverge_fixture(
+            &tmp,
+            r#"{"commitments":[{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:1"]}]}"#,
+            "抱歉，我今天沒辦法回答這個問題。",
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        assert_eq!(result.divergences, 1);
+        assert_eq!(result.wrote_commitments, 0, "只有一個 pass 讀得懂還敢寫 L3");
+        let rows = db.list_reviewer_divergences(10).expect("div");
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].reason.contains("沒有可用的 JSON"),
+            "{}",
+            rows[0].reason
+        );
+        assert!(
+            rows[0].subject.contains(&format!("l2:{l2}")),
+            "沒說是哪一張 L2：{}",
+            rows[0].subject
+        );
     }
 
     #[test]
