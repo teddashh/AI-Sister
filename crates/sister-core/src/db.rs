@@ -22,6 +22,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -4120,6 +4121,9 @@ impl Db {
     }
 
     pub fn latest_day_summary(&self, date: &str) -> Result<Option<DaySummaryRow>> {
+        // 墓碑列故意不回：`forget` 把 narrative 清成空字串，拿來當「這一天
+        // 的摘要」會把「被刪掉了」講成「那天什麼都沒發生」。墓碑用
+        // [`Self::day_summary_tombstoned_at`]。
         self.conn
             .query_row(
                 "SELECT id, date, version, supersedes, narrative, session_refs_json,
@@ -4132,6 +4136,70 @@ impl Db {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// 這一天有沒有被忘掉的日摘要。只回時間，不回內容——內容已經清空了。
+    pub fn day_summary_tombstoned_at(&self, date: &str) -> Result<Option<Millis>> {
+        self.conn
+            .query_row(
+                "SELECT tombstoned_at FROM day_summaries
+                 WHERE date = ?1 AND tombstoned_at IS NOT NULL
+                 ORDER BY version DESC, id DESC LIMIT 1",
+                [date],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// 審閱層的日終，對這一天有沒有真的跑完。
+    ///
+    /// 過濾條件和 [`Self::last_reviewer_eod_day`] 同一套：`kind = 'eod'` 且
+    /// `skip_reason IS NULL`。跳過（沒簽同意書、沒設定 CLI、節奏還沒到）不算
+    /// 跑過——那些列在表裡，但不能拿來當成「她看過、那天沒東西」。
+    pub fn has_reviewer_eod_for_day(&self, day_key: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM reviewer_run
+             WHERE kind = 'eod' AND skip_reason IS NULL AND day_key = ?1",
+            [day_key],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 時間軸要攤的那一列日摘要。三種「沒有」在型別上就分開，不能印成同一句。
+    ///
+    /// 不看這一天現在有沒有 L2 卡片。`write_day_summary` 在沒有卡片時不寫列，
+    /// 那件事的證據是 `reviewer_run`，不是此刻的 `l2_card`。
+    pub fn day_summary_glance(&self, date: &str) -> Result<DaySummaryGlance> {
+        if let Some(row) = self.latest_day_summary(date)? {
+            let (clauses, aligned) = clauses_from(&row.narrative, &row.session_refs_json);
+            let (l2, commitments_open) = parse_day_stats(&row.stats_json);
+            return Ok(DaySummaryGlance::Live {
+                date: row.date,
+                version: row.version,
+                supersedes: row.supersedes,
+                created_at: row.created_at,
+                clauses,
+                aligned,
+                l2,
+                commitments_open,
+            });
+        }
+        if let Some(tombstoned_at) = self.day_summary_tombstoned_at(date)? {
+            return Ok(DaySummaryGlance::Tombstoned {
+                date: date.to_string(),
+                tombstoned_at,
+            });
+        }
+        if self.has_reviewer_eod_for_day(date)? {
+            return Ok(DaySummaryGlance::EodEmpty {
+                date: date.to_string(),
+            });
+        }
+        Ok(DaySummaryGlance::NeverRan {
+            date: date.to_string(),
+        })
     }
 
     pub fn upsert_preference(
@@ -5720,6 +5788,91 @@ pub struct DaySummaryRow {
     pub stats_json: String,
     pub created_at: Millis,
     pub tombstoned_at: Option<Millis>,
+}
+
+/// 日摘要的一段。`l2_id` 有值才點得回「她猜的」那張卡片。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DaySummaryClause {
+    pub text: String,
+    pub l2_id: Option<i64>,
+}
+
+/// 時間軸上的日摘要。四個變體，沒有「沒有」這一個含糊值。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind")]
+pub enum DaySummaryGlance {
+    #[serde(rename = "live")]
+    Live {
+        date: String,
+        version: i32,
+        supersedes: Option<i64>,
+        created_at: Millis,
+        clauses: Vec<DaySummaryClause>,
+        /// `narrative` 用 `；` 切開的段數，和 `session_refs` 的長度相不相等。
+        /// 不相等就不配對——配錯比不配更糟。
+        aligned: bool,
+        /// `stats_json` 裡的 `l2`。沒有這個鍵就 `None`，不要印成 0。
+        l2: Option<u64>,
+        /// `stats_json` 裡的 `commitments_open`。沒有這個鍵就 `None`。
+        commitments_open: Option<u64>,
+    },
+    #[serde(rename = "tombstoned")]
+    Tombstoned { date: String, tombstoned_at: Millis },
+    #[serde(rename = "eod_empty")]
+    EodEmpty { date: String },
+    #[serde(rename = "never_ran")]
+    NeverRan { date: String },
+}
+
+/// `write_day_summary` 用 `activities.join("；")` 和同順序的 `l2:{id}` 組成。
+/// 對得上才接成可點的一段；對不上就不接。
+fn clauses_from(narrative: &str, session_refs_json: &str) -> (Vec<DaySummaryClause>, bool) {
+    let refs: Vec<String> = serde_json::from_str(session_refs_json).unwrap_or_default();
+    let parts: Vec<&str> = if narrative.is_empty() {
+        Vec::new()
+    } else {
+        narrative.split('；').collect()
+    };
+    let aligned = parts.len() == refs.len();
+    if aligned {
+        let clauses = parts
+            .into_iter()
+            .zip(refs)
+            .map(|(text, r)| DaySummaryClause {
+                text: text.to_string(),
+                l2_id: parse_l2_ref(&r),
+            })
+            .collect();
+        (clauses, true)
+    } else {
+        let clauses = parts
+            .into_iter()
+            .map(|text| DaySummaryClause {
+                text: text.to_string(),
+                l2_id: None,
+            })
+            .collect();
+        (clauses, false)
+    }
+}
+
+fn parse_l2_ref(s: &str) -> Option<i64> {
+    s.strip_prefix("l2:")?.parse().ok()
+}
+
+/// 缺鍵不是 0。解析失敗也不是 0。
+fn parse_day_stats(json: &str) -> (Option<u64>, Option<u64>) {
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let as_u64 = |key: &str| {
+        v.get(key).and_then(|x| {
+            x.as_u64()
+                .or_else(|| x.as_i64().and_then(|n| u64::try_from(n).ok()))
+        })
+    };
+    (as_u64("l2"), as_u64("commitments_open"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10587,5 +10740,234 @@ mod tests {
         assert_eq!(fts_query("hello world"), "\"hello\" AND \"world\"");
         assert_eq!(fts_query("say \"hi\""), "\"say\" AND \"\"\"hi\"\"\"");
         assert_eq!(fts_query("   "), "");
+    }
+
+    fn put_day_summary(
+        db: &Db,
+        date: &str,
+        version: i32,
+        narrative: &str,
+        refs_json: &str,
+        stats_json: &str,
+        tombstoned_at: Option<i64>,
+    ) {
+        db.conn
+            .execute(
+                "INSERT INTO day_summaries(
+                    date, version, supersedes, narrative, session_refs_json,
+                    stats_json, created_at, tombstoned_at
+                 ) VALUES(?1,?2,NULL,?3,?4,?5,1,?6)",
+                params![
+                    date,
+                    version,
+                    narrative,
+                    refs_json,
+                    stats_json,
+                    tombstoned_at
+                ],
+            )
+            .expect("insert day_summaries");
+    }
+
+    fn put_eod(db: &mut Db, day_key: &str, skip_reason: Option<&str>) {
+        db.insert_reviewer_run(&ReviewerRunInsert {
+            ts: 1,
+            day_key,
+            kind: "eod",
+            skip_reason,
+            candidate_count: Some(0),
+            recheck_count: Some(0),
+            wrote_commitments: 0,
+            divergences: 0,
+            calls_used: 0,
+            budget_used: 0,
+            budget_limit: 40,
+            detail: "",
+        })
+        .expect("insert reviewer_run");
+    }
+
+    /// `latest_day_summary` 用 `tombstoned_at IS NULL`，墓碑列不會回來。
+    #[test]
+    fn latest_day_summary_does_not_return_a_tombstone() {
+        let db = test_db();
+        put_day_summary(&db, "2026-08-19", 1, "", "[]", "{}", Some(99));
+        assert!(
+            db.latest_day_summary("2026-08-19").unwrap().is_none(),
+            "墓碑列被 latest_day_summary 當成還活著"
+        );
+        assert_eq!(
+            db.day_summary_tombstoned_at("2026-08-19").unwrap(),
+            Some(99)
+        );
+    }
+
+    /// 三種「沒有日摘要」在型別上就分開。不能靠「現在有沒有 L2」反推。
+    #[test]
+    fn three_missing_day_summaries_are_three_kinds() {
+        let mut db = test_db();
+        let never = db.day_summary_glance("2026-08-17").unwrap();
+        let empty = {
+            put_eod(&mut db, "2026-08-18", None);
+            db.day_summary_glance("2026-08-18").unwrap()
+        };
+        let gone = {
+            put_day_summary(&db, "2026-08-19", 1, "", "[]", "{}", Some(50));
+            db.day_summary_glance("2026-08-19").unwrap()
+        };
+        assert!(
+            matches!(never, DaySummaryGlance::NeverRan { .. }),
+            "沒跑過日終卻不是 NeverRan：{never:?}"
+        );
+        assert!(
+            matches!(empty, DaySummaryGlance::EodEmpty { .. }),
+            "日終跑過沒寫列卻不是 EodEmpty：{empty:?}"
+        );
+        assert!(
+            matches!(gone, DaySummaryGlance::Tombstoned { .. }),
+            "墓碑被講成從來沒有：{gone:?}"
+        );
+        let never_s = serde_json::to_string(&never).unwrap();
+        let empty_s = serde_json::to_string(&empty).unwrap();
+        let gone_s = serde_json::to_string(&gone).unwrap();
+        assert_ne!(never_s, empty_s);
+        assert_ne!(never_s, gone_s);
+        assert_ne!(empty_s, gone_s);
+        assert!(
+            !gone_s.contains("narrative"),
+            "墓碑的 JSON 把已清空的內容帶出去了：{gone_s}"
+        );
+    }
+
+    /// 跳過的日終不算跑過。同意書沒勾會在 reviewer_run 留下 skip_reason，
+    /// 那是 NeverRan，不是「她看過、那天沒卡片」。
+    #[test]
+    fn a_skipped_eod_is_not_a_ran_eod() {
+        let mut db = test_db();
+        put_eod(&mut db, "2026-08-20", Some("no_consent"));
+        assert!(!db.has_reviewer_eod_for_day("2026-08-20").unwrap());
+        assert!(matches!(
+            db.day_summary_glance("2026-08-20").unwrap(),
+            DaySummaryGlance::NeverRan { .. }
+        ));
+    }
+
+    /// 區間審閱跑過，不能拿來當成日終跑過。
+    #[test]
+    fn an_interval_run_is_not_eod() {
+        let mut db = test_db();
+        db.insert_reviewer_run(&ReviewerRunInsert {
+            ts: 1,
+            day_key: "2026-08-21",
+            kind: "interval",
+            skip_reason: None,
+            candidate_count: Some(0),
+            recheck_count: Some(0),
+            wrote_commitments: 0,
+            divergences: 0,
+            calls_used: 0,
+            budget_used: 0,
+            budget_limit: 40,
+            detail: "",
+        })
+        .unwrap();
+        assert!(!db.has_reviewer_eod_for_day("2026-08-21").unwrap());
+        assert!(matches!(
+            db.day_summary_glance("2026-08-21").unwrap(),
+            DaySummaryGlance::NeverRan { .. }
+        ));
+    }
+
+    #[test]
+    fn live_day_summary_pairs_clauses_with_the_same_l2_refs() {
+        let db = test_db();
+        put_day_summary(
+            &db,
+            "2026-08-22",
+            2,
+            "在改測試；在讀 SPEC",
+            r#"["l2:11","l2:12"]"#,
+            r#"{"l2":2,"commitments_open":1}"#,
+            None,
+        );
+        match db.day_summary_glance("2026-08-22").unwrap() {
+            DaySummaryGlance::Live {
+                version,
+                supersedes,
+                aligned,
+                l2,
+                commitments_open,
+                clauses,
+                ..
+            } => {
+                assert_eq!(version, 2);
+                assert_eq!(supersedes, None);
+                assert!(aligned);
+                assert_eq!(l2, Some(2));
+                assert_eq!(commitments_open, Some(1));
+                assert_eq!(
+                    clauses,
+                    vec![
+                        DaySummaryClause {
+                            text: "在改測試".into(),
+                            l2_id: Some(11),
+                        },
+                        DaySummaryClause {
+                            text: "在讀 SPEC".into(),
+                            l2_id: Some(12),
+                        },
+                    ]
+                );
+            }
+            other => panic!("該是 live：{other:?}"),
+        }
+    }
+
+    /// 標題裡自己有全形分號時，切開的段數會比 refs 多。對不上就不配。
+    #[test]
+    fn a_mismatched_narrative_is_not_silently_zipped() {
+        let (clauses, aligned) = clauses_from("甲；乙；丙", r#"["l2:1","l2:2"]"#);
+        assert!(!aligned);
+        assert!(clauses.iter().all(|c| c.l2_id.is_none()));
+        assert_eq!(
+            clauses.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            ["甲", "乙", "丙"]
+        );
+    }
+
+    /// stats 缺鍵不是 0。沒量到和量到 0 印出來不能長一樣。
+    #[test]
+    fn missing_stats_keys_are_none_not_zero() {
+        assert_eq!(parse_day_stats("{}"), (None, None));
+        assert_eq!(parse_day_stats("not-json"), (None, None));
+        assert_eq!(
+            parse_day_stats(r#"{"l2":0,"commitments_open":0}"#),
+            (Some(0), Some(0))
+        );
+    }
+
+    /// 活著的新版蓋掉墓碑舊版時，畫面上是新版，不是「被刪掉了」。
+    #[test]
+    fn a_live_version_beats_an_older_tombstone() {
+        let db = test_db();
+        put_day_summary(&db, "2026-08-23", 1, "", "[]", "{}", Some(10));
+        put_day_summary(
+            &db,
+            "2026-08-23",
+            2,
+            "後來又寫了一列",
+            r#"["l2:9"]"#,
+            r#"{"l2":1}"#,
+            None,
+        );
+        match db.day_summary_glance("2026-08-23").unwrap() {
+            DaySummaryGlance::Live {
+                version, clauses, ..
+            } => {
+                assert_eq!(version, 2);
+                assert_eq!(clauses[0].text, "後來又寫了一列");
+            }
+            other => panic!("該是 live：{other:?}"),
+        }
     }
 }

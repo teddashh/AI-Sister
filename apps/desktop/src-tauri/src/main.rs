@@ -1512,6 +1512,19 @@ fn memory_outbound(limit: Option<u32>, shell: tauri::State<'_, Shell>) -> Result
     })
 }
 
+/// 這一天的日摘要。三種「沒有」是三個 `kind`，不是同一個空物件。
+#[tauri::command(async)]
+fn memory_day_summary(
+    from_ts: i64,
+    shell: tauri::State<'_, Shell>,
+) -> Result<sister_core::db::DaySummaryGlance, String> {
+    let date = sister_core::brain::local_day_key(from_ts)
+        .ok_or_else(|| "算不出這一天的日期".to_string())?;
+    with_db(&shell, |db| {
+        db.day_summary_glance(&date).map_err(|e| format!("{e:#}"))
+    })
+}
+
 #[tauri::command(async)]
 fn correct_l2(
     segment_core_start: i64,
@@ -2629,6 +2642,7 @@ fn main() {
             memory_guesses,
             memory_commitments,
             memory_outbound,
+            memory_day_summary,
             correct_l2,
             commitment_kill,
             commitment_other,

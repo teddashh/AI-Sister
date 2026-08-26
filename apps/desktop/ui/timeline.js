@@ -33,11 +33,15 @@ const el = {
   memory: document.querySelector("[data-memory]"),
   pledges: document.querySelector("[data-pledges]"),
   outbound: document.querySelector("[data-outbound]"),
+  daySum: document.querySelector("[data-day-summary]"),
   views: document.querySelector("[data-views]"),
 };
 
 /** 右邊現在攤的是哪一頁：day / guess / commitments / outbound。預設時間軸，忘掉那顆鍵才找得到。 */
 let view = "day";
+
+/** 從日摘要點過來時，要捲到「她猜的」哪一張。用完即清。 */
+let highlightL2 = null;
 
 /** 現在攤開的是哪一天。忘掉那顆鍵要用它換算時間範圍。 */
 let current = null;
@@ -638,6 +642,7 @@ function chapterRow(ch, rows, dayStart, next) {
 function guessRow(card) {
   const li = document.createElement("li");
   li.className = card.user_corrected ? "guess user" : card.revised ? "guess revised" : "guess";
+  if (card.id != null) li.dataset.l2Id = String(card.id);
   const mark = document.createElement("p");
   mark.className = "guess-mark";
   if (card.user_corrected) {
@@ -1036,8 +1041,10 @@ async function openDay(day, button) {
       chapters = [];
     }
     paint(view, day, Date.now(), chapters);
+    await renderDaySummary();
   } catch (err) {
     el.moments.replaceChildren();
+    if (el.daySum) el.daySum.replaceChildren();
     listing = false;
     say(String(err?.message ?? err), true);
   }
@@ -1076,15 +1083,132 @@ function setView(next) {
     }
   }
   if (el.moments) el.moments.hidden = view !== "day";
+  if (el.daySum) el.daySum.hidden = view !== "day";
   if (el.memory) el.memory.hidden = view !== "guess";
   if (el.pledges) el.pledges.hidden = view !== "commitments";
   if (el.outbound) el.outbound.hidden = view !== "outbound";
   if (el.forget) {
     el.forget.hidden = view !== "day";
   }
+  if (view === "day") void renderDaySummary();
   if (view === "guess") void renderGuesses();
   if (view === "commitments") void renderPledges();
   if (view === "outbound") void renderOutbound();
+}
+
+/**
+ * 三種「沒有日摘要」必須是三句話。
+ *
+ * 1. never_ran：審閱層的日終對這一天從來沒跑完（沒開機／腦沒設定／同意書沒勾）。
+ * 2. eod_empty：跑過了，但那天一張 L2 卡片都沒有，所以刻意不寫列。
+ * 3. tombstoned：寫過，後來被 forget／保留期清掉。
+ *
+ * 分得出來是因為後端讀了 `reviewer_run` 和墓碑列，不是拿「現在有沒有 L2」反推。
+ */
+function daySumEmptyText(kind) {
+  switch (kind) {
+    case "never_ran":
+      return "審閱層的日終還沒對這一天跑過。沒開機、腦沒設定、或同意書沒勾，都不會寫這一列。";
+    case "eod_empty":
+      return "審閱層的日終跑過了，那天沒有一張假設卡片，所以沒有寫摘要。";
+    case "tombstoned":
+      return "這一天的摘要被刪掉了。不是從來沒寫過，是後來被忘掉或過了保留期。";
+    default:
+      return null;
+  }
+}
+
+function openSummaryClause(l2Id) {
+  highlightL2 = l2Id;
+  setView("guess");
+}
+
+async function renderDaySummary() {
+  if (!el.daySum) return;
+  el.daySum.replaceChildren();
+  if (view !== "day") return;
+  if (invoke === null || current === null) return;
+  try {
+    const glance = await invoke("memory_day_summary", { fromTs: current.start_ts });
+    if (glance == null || typeof glance !== "object") return;
+    const kind = glance.kind;
+    const emptyText = daySumEmptyText(kind);
+    if (emptyText !== null) {
+      const empty = document.createElement("p");
+      empty.className = "day-sum-empty";
+      empty.textContent = emptyText;
+      el.daySum.append(empty);
+      return;
+    }
+    if (kind !== "live") {
+      const empty = document.createElement("p");
+      empty.className = "day-sum-empty";
+      empty.textContent = `日摘要的狀態是 ${kind}，這一頁不認得。`;
+      el.daySum.append(empty);
+      return;
+    }
+
+    const heading = document.createElement("p");
+    heading.className = "day-sum-lead";
+    heading.textContent =
+      "這一天整體。每一段是一張卡片的標題串起來的，不是模型重寫的散文。點一段就到「她猜的」那張。";
+    el.daySum.append(heading);
+
+    const meta = document.createElement("p");
+    meta.className = "day-sum-meta";
+    const bits = [];
+    if (glance.version != null) {
+      bits.push(
+        glance.supersedes != null
+          ? `第 ${glance.version} 版（蓋掉上一版）`
+          : `第 ${glance.version} 版`,
+      );
+    }
+    if (glance.l2 != null) bits.push(`${glance.l2} 張卡片`);
+    if (glance.commitments_open != null) {
+      bits.push(`當時未結承諾 ${glance.commitments_open} 則`);
+    }
+    meta.textContent = bits.join("・");
+    if (bits.length > 0) el.daySum.append(meta);
+
+    if (glance.aligned === false) {
+      const warn = document.createElement("p");
+      warn.className = "day-sum-empty";
+      warn.textContent =
+        "這一天的分句和卡片對不上（不是一一對應），所以沒有把它們接成可點的一段。";
+      el.daySum.append(warn);
+    }
+
+    const clauses = Array.isArray(glance.clauses) ? glance.clauses : [];
+    if (clauses.length === 0) return;
+    const list = document.createElement("ol");
+    list.className = "day-sum-clauses";
+    for (const clause of clauses) {
+      const li = document.createElement("li");
+      const text = clause.text ?? "";
+      if (clause.l2_id != null && glance.aligned !== false) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "day-sum-clause";
+        btn.textContent = text;
+        const id = clause.l2_id;
+        btn.addEventListener("click", () => openSummaryClause(id));
+        li.append(btn);
+      } else {
+        const span = document.createElement("span");
+        span.className = "day-sum-clause dead";
+        span.textContent = text;
+        li.append(span);
+      }
+      list.append(li);
+    }
+    el.daySum.append(list);
+  } catch (err) {
+    const empty = document.createElement("p");
+    empty.className = "day-sum-empty";
+    empty.textContent = String(err?.message ?? err);
+    el.daySum.append(empty);
+  }
 }
 
 async function renderGuesses() {
@@ -1108,6 +1232,7 @@ async function renderGuesses() {
       toTs: current.start_ts + DAY,
     });
     if (!Array.isArray(cards) || cards.length === 0) {
+      highlightL2 = null;
       const empty = document.createElement("p");
       empty.className = "memory-empty";
       empty.textContent = "這一天她還沒猜過。解釋層跑過之後才會有假設。";
@@ -1118,6 +1243,21 @@ async function renderGuesses() {
     list.className = "memory-list";
     for (const card of cards) list.append(guessRow(card));
     el.memory.append(list);
+    const want = highlightL2;
+    highlightL2 = null;
+    if (want != null) {
+      const node = list.querySelector(`[data-l2-id="${want}"]`);
+      if (node) {
+        node.classList.add("guess-target");
+        node.scrollIntoView({ block: "nearest" });
+      } else {
+        const miss = document.createElement("p");
+        miss.className = "memory-empty";
+        miss.textContent =
+          "日摘要指到的那張卡片，這一天的「她猜的」裡沒有。可能不在這一天的範圍，或已經被忘掉。";
+        el.memory.append(miss);
+      }
+    }
   } catch (err) {
     const empty = document.createElement("p");
     empty.className = "memory-empty";
@@ -1362,6 +1502,7 @@ async function load(keep = null) {
     if (days.length === 0) {
       el.days.replaceChildren();
       el.moments.replaceChildren();
+      if (el.daySum) el.daySum.replaceChildren();
       // 「一天都沒有」有兩種，而它們的下一步是相反的。這裡數的是**還活著
       // 的**列數，分不出「從來沒錄過」和「錄了、然後被忘掉／過保留期」——
       // 而按下「忘掉這一整天」之後看到的正是這個畫面，它會叫他去跑一個他
@@ -1894,6 +2035,27 @@ function fakeBackend(mode = "1") {
       }
       case "memory_commitments":
         return demoPledges;
+      case "memory_day_summary": {
+        if (mode === "nulldata" || arg.fromTs !== day) {
+          return { kind: "never_ran", date: "2026-08-17" };
+        }
+        const ordered = [...demoGuesses].sort(
+          (a, b) =>
+            Number(String(a.segment_ref).replace(/^segment:/, "")) -
+            Number(String(b.segment_ref).replace(/^segment:/, "")),
+        );
+        return {
+          kind: "live",
+          date: "2026-08-17",
+          version: 1,
+          supersedes: null,
+          created_at: at(23, 50),
+          aligned: true,
+          l2: ordered.length,
+          commitments_open: demoPledges.filter((c) => c.status === "open").length,
+          clauses: ordered.map((c) => ({ text: c.activity, l2_id: c.id })),
+        };
+      }
       case "memory_outbound":
         if (mode === "nulldata") {
           return { outbound: [], skips: [], ever_sent: false };
