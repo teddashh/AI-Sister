@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0-alpha.71"
+version = "0.1.0-alpha.72"
 edition = "2024"
 # edition 2024 的地板。沒有這一行的話，舊 toolchain 撞到的是一句在講 manifest
 # 解析的錯誤訊息，而真正的問題是「你的 Rust 太舊」——README 的 quickstart 對

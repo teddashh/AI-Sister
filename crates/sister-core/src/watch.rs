@@ -292,6 +292,7 @@ impl Verdict {
 pub enum Look {
     Asked {
         available_chunks: usize,
+        available_capped: bool,
         chunks: usize,
         newest_app: Option<String>,
         verdict: Verdict,
@@ -304,13 +305,19 @@ impl Look {
         match self {
             Self::Asked {
                 available_chunks,
+                available_capped,
                 chunks,
                 newest_app,
                 verdict,
             } => {
                 let omitted = if available_chunks > chunks {
+                    let available = if *available_capped {
+                        format!("超過 {available_chunks} 段")
+                    } else {
+                        format!("有 {available_chunks} 段")
+                    };
                     format!(
-                        "這一輪畫面上有 {available_chunks} 段，證據上限只放得下 {chunks} 段，送出去的是最新的 {chunks} 段；"
+                        "這一輪畫面上{available}，證據上限只放得下 {chunks} 段，送出去的是最新的 {chunks} 段；"
                     )
                 } else {
                     String::new()
@@ -428,9 +435,9 @@ impl WatchEnd {
     /// 開跑時如實說明這個組建能送出哪一種訊號。
     pub fn notification_notice(windows: bool) -> &'static str {
         if windows {
-            "等到了我會讓工作列那顆按鈕閃一下、響一聲——你可以去做別的事。"
+            "停下來時我會讓工作列那顆按鈕閃一下、響一聲——回來看螢幕上的結果。"
         } else {
-            "等到了我會在終端機響一聲（工作列閃爍是 Windows 才有的，這個組建沒有）。"
+            "停下來時我會在終端機響一聲，回來看螢幕上的結果（工作列閃爍是 Windows 才有的，這個組建沒有）。"
         }
     }
 
@@ -961,6 +968,7 @@ mod tests {
         for _ in 0..30 {
             tally.count(&Look::Asked {
                 available_chunks: 4,
+                available_capped: false,
                 chunks: 4,
                 newest_app: None,
                 verdict: Verdict::CallFailed {
@@ -1011,12 +1019,14 @@ mod tests {
         let mut tally = Tally::default();
         tally.count(&Look::Asked {
             available_chunks: 1,
+            available_capped: false,
             chunks: 1,
             newest_app: None,
             verdict: Verdict::NotYet,
         });
         tally.count(&Look::Asked {
             available_chunks: 1,
+            available_capped: false,
             chunks: 1,
             newest_app: None,
             verdict: Verdict::Unreadable {
@@ -1260,6 +1270,7 @@ mod tests {
     fn look_says_when_not_every_available_chunk_was_sent() {
         let said = Look::Asked {
             available_chunks: 12,
+            available_capped: false,
             chunks: 3,
             newest_app: Some("Newest.exe".into()),
             verdict: Verdict::NotYet,
@@ -1268,6 +1279,33 @@ mod tests {
         assert!(said.contains("畫面上有 12 段"), "{said}");
         assert!(said.contains("最新的 3 段"), "{said}");
         assert!(said.contains("Newest.exe"), "{said}");
+    }
+
+    #[test]
+    fn a_round_that_hit_the_row_cap_says_the_count_is_a_floor() {
+        let said = Look::Asked {
+            available_chunks: 200,
+            available_capped: true,
+            chunks: 67,
+            newest_app: None,
+            verdict: Verdict::NotYet,
+        }
+        .message();
+        assert!(said.contains("超過 200 段"), "{said}");
+    }
+
+    #[test]
+    fn a_round_under_the_row_cap_still_reports_an_exact_count() {
+        let said = Look::Asked {
+            available_chunks: 12,
+            available_capped: false,
+            chunks: 3,
+            newest_app: None,
+            verdict: Verdict::NotYet,
+        }
+        .message();
+        assert!(!said.contains("超過"), "{said}");
+        assert!(said.contains("有 12 段"), "{said}");
     }
 
     /// 開跑那一句要說「最多」，要含到期那一刻的最後一眼，還要講出先撞到哪一邊。
@@ -1344,25 +1382,47 @@ mod tests {
                 last_at: 1,
                 last_app: None,
             },
+            WatchEnd::ConsentRevoked { tally },
         ];
         for end in ends {
+            // **這個 match 什麼都不做，而它是承重的——不要刪。**
+            //
+            // 上面那個陣列是字面量，`WatchEnd` 多一種變體的時候它不會編不過，
+            // 只會靜靜地少測一種（這個 repo 犯過這個形狀不只一次）。這裡放一個
+            // 沒有 `_` 的 match，多一種變體就編不過，而編譯錯誤正好指在這幾行
+            // ——修它的人抬頭就看得到那個該補的陣列。
+            match &end {
+                WatchEnd::Saw { .. }
+                | WatchEnd::Deadline { .. }
+                | WatchEnd::BudgetRanOut { .. }
+                | WatchEnd::WentQuiet { .. }
+                | WatchEnd::ConsentRevoked { .. } => {}
+            }
             assert!(end.should_notify(true), "要求通知卻漏了 {end:?}");
             assert!(!end.should_notify(false), "沒要求通知卻響了 {end:?}");
         }
     }
 
     #[test]
-    fn windows_and_non_windows_announce_different_real_capabilities() {
+    fn the_notice_does_not_promise_the_bell_means_she_found_it() {
         let windows = WatchEnd::notification_notice(true);
         let other = WatchEnd::notification_notice(false);
-        assert_eq!(
-            windows,
-            "等到了我會讓工作列那顆按鈕閃一下、響一聲——你可以去做別的事。"
-        );
-        assert_eq!(
-            other,
-            "等到了我會在終端機響一聲（工作列閃爍是 Windows 才有的，這個組建沒有）。"
-        );
-        assert_ne!(windows, other);
+        assert!(!windows.contains("等到了"), "{windows}");
+        assert!(windows.contains("停下來"), "{windows}");
+        assert!(!other.contains("等到了"), "{other}");
+        assert!(other.contains("停下來"), "{other}");
+        // 「不是等到了」只講掉一半。鈴聲把他從別的房間叫回來之後，另一半是
+        // **答案在哪裡**——沒有這一句，他會拿終端機上那一聲本身當結論，而那
+        // 正是這次改字要修掉的那個誤會，只是換一個方向再犯一次。
+        assert!(windows.contains("回來看螢幕"), "{windows}");
+        assert!(other.contains("回來看螢幕"), "{other}");
+    }
+
+    #[test]
+    fn the_windows_notice_still_says_what_this_build_adds() {
+        let windows = WatchEnd::notification_notice(true);
+        let other = WatchEnd::notification_notice(false);
+        assert!(windows.contains("工作列那顆按鈕閃"), "{windows}");
+        assert!(other.contains("這個組建沒有"), "{other}");
     }
 }

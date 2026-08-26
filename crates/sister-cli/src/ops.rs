@@ -2861,7 +2861,34 @@ pub mod watch {
         )
     }
 
+    /// **她死掉也算「停下來」，所以那一聲也要響。**
+    ///
+    /// 開跑那一行答應的是「停下來時我會響一聲」，而收尾那五種各自都響了。
+    /// 少的是第六條出路：迴圈中間任何一個 `?`（資料庫被鎖住、磁碟滿了）會
+    /// 直接把 `Err` 丟回去，**一聲都不響**。而 `--notify` 這支旗標的整個前提
+    /// 就是他不在螢幕前面——她死了又不出聲，他會一直等下去，正好是這支旗標
+    /// 要防的那件事。沉默被讀成「還在跑」。
+    ///
+    /// 開跑前就失敗的那幾種（目錄不存在、資料庫開不起來）也會走到這裡。那時候
+    /// 還沒答應過任何事，多響一聲是噪音——但他人就坐在終端機前面，因為那幾種
+    /// 在第一秒就炸了。多一聲噪音，比她死得無聲無息便宜太多。
     pub(crate) fn run_with(
+        data_dir: &Path,
+        config: &Config,
+        opts: &WatchOpts,
+        clock: &mut dyn FnMut() -> i64,
+        sleep: &mut dyn FnMut(Millis),
+        out: &mut impl Write,
+    ) -> Result<()> {
+        let result = watch_body(data_dir, config, opts, clock, sleep, out);
+        if result.is_err() && opts.notify && !opts.dry_run {
+            // 已經在回報一個錯了，這一聲響不出來就算了——不要拿它蓋掉真正的原因。
+            let _ = notify(out);
+        }
+        result
+    }
+
+    fn watch_body(
         data_dir: &Path,
         config: &Config,
         opts: &WatchOpts,
@@ -2959,11 +2986,11 @@ pub mod watch {
         }
         // **預演不會盯，所以它沒有收尾可以通知。**
         //
-        // 這一句原本印在 `--dry-run` 那個 early return 前面，於是
-        // `sister watch … --dry-run --notify` 會說「等到了我會讓工作列那顆
-        // 按鈕閃一下」——一句關於一場永遠不會發生的盯梢的承諾。往下搬之後
-        // 換成另一種危險：一個在預演裡安靜地什麼都不做的旗標。所以兩條路
-        // 各講各的話，兩句都不是沉默。
+        // `notification_notice()` 那一句原本印在 `--dry-run` 那個 early return
+        // 前面，於是 `sister watch … --dry-run --notify` 會承諾「停下來時我會讓
+        // 工作列那顆按鈕閃一下、響一聲」——一句關於一場永遠不會發生的盯梢的
+        // 承諾。往下搬之後換成另一種危險：一個在預演裡安靜地什麼都不做的旗標。
+        // 所以兩條路各講各的話，兩句都不是沉默。
         if opts.notify {
             if opts.dry_run {
                 writeln!(
@@ -3112,6 +3139,7 @@ pub mod watch {
                         })?;
                         Look::Asked {
                             available_chunks: hits.len(),
+                            available_capped: more,
                             chunks: prompt.included_chunks,
                             newest_app: sent_hits
                                 .last()
@@ -3331,15 +3359,16 @@ pub mod watch {
 
             // **這條測試要證的不只是「truncated 是 true」，是「哪一把刀讓它變 true」。**
             //
-            // 兩把刀都會寫同一個布林：200 列那一把（`more`）和 64 KB 那一把
-            // （`prompt.truncated`）。位元組那把要是也砍了，就算把實作改回只記
-            // 位元組，這條測試還是綠的——它會為了錯的理由通過，而列上限那一刀
-            // 從此沒有人看著。
+            // 兩把刀都會寫同一個布林：200 列那一把（`more`）和位元組那一把
+            // （`prompt.truncated`，上限是 `brain::MAX_PROMPT_BYTES`）。位元組那把
+            // 要是也砍了，就算把實作改回只記位元組，這條測試還是綠的——它會為了
+            // 錯的理由通過，而列上限那一刀從此沒有人看著。
             //
             // 螢幕上那兩句話是唯一分得開它們的地方，所以斷言直接打在那裡：
             // 列上限那句**要在**，位元組那句**不能在**。
-            // （`chars_sent` 分不開：它數的是字，64 KB 數的是位元組，一個中文字
-            // 三個位元組，拿字數去斷言位元組上限什麼都證不到。）
+            // （`chars_sent` 分不開：它數的是**字**，上限數的是**位元組**，一個
+            // 中文字三個位元組，拿字數去斷言位元組上限什麼都證不到。這裡刻意
+            // 不把那個常數抄成數字——抄下來的數字會在它改動的那天變成假話。）
             let printed = String::from_utf8(out).expect("輸出是 UTF-8");
             assert!(
                 printed.contains("只拿最新的 200 段去問"),
@@ -3365,6 +3394,66 @@ pub mod watch {
             );
         }
 
+        /// **撞到列上限的那一輪，那個段數是下限，不是總數。**
+        ///
+        /// `available_chunks` 拿的是 `hits.len()`，而 `hits` 已經被 `HIT_LIMIT`
+        /// 砍成 200 了。所以沒撞上限的時候它是「畫面上有幾段」，撞上限之後它
+        /// 變成「我撈上來幾段」——**一個變數回答兩個問題**。畫面上會變成
+        /// 上一行說「超過 200 段」、下一行說「有 200 段」。
+        ///
+        /// `watch.rs` 那兩條單元測試釘的是 `Look::message()` 自己，它們手捏
+        /// `available_capped`，所以**接線斷掉它們一條都不會紅**（實測把
+        /// `available_capped: more` 改成 `false`，整個 workspace 十六組測試
+        /// 全綠）。這一條走真的 `run_with`，釘的就是那條線。
+        #[test]
+        fn a_round_capped_by_the_row_limit_calls_the_count_a_floor_not_a_total() {
+            // 每段都要夠長，長到 200 段**也會**撞穿位元組上限——不然
+            // `available_chunks == chunks`，那句省略根本不會印出來，這條測試
+            // 會在一片空白上通過。
+            let fat = "畫面文字".repeat(100);
+            let (tmp, config) = prepared("watch-row-cap-floor", &fat, true);
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let session: i64 = db
+                .conn()
+                .query_row("SELECT id FROM sessions LIMIT 1", [], |row| row.get(0))
+                .expect("session");
+            for n in 1..=200 {
+                db.conn()
+                    .execute(
+                        "INSERT INTO text_chunks(ts,session_id,source_kind,app_id,text) VALUES(?1,?2,'ocr','Terminal.exe',?3)",
+                        (90_000 + n, session, format!("{fat}{n:03}")),
+                    )
+                    .expect("chunk");
+            }
+            drop(db);
+
+            let mut ticks = [100_000, 100_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &opts(false),
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+
+            let printed = String::from_utf8(out).expect("輸出是 UTF-8");
+            assert!(
+                printed.contains("只拿最新的 200 段去問"),
+                "這一輪沒撞到列上限，測不到這條測試要測的東西：{printed}"
+            );
+            assert!(
+                printed.contains("超過 200 段"),
+                "撞了列上限卻把 200 講成總數：{printed}"
+            );
+            assert!(
+                !printed.contains("畫面上有 200 段"),
+                "同一份輸出裡上一行說超過 200、下一行說有 200：{printed}"
+            );
+        }
+
         #[test]
         fn seeing_the_answer_writes_bell_only_when_requested() {
             for requested in [true, false] {
@@ -3384,6 +3473,42 @@ pub mod watch {
                     out.contains(&b'\x07'),
                     requested,
                     "Saw 的通知和旗標不同步：{}",
+                    String::from_utf8_lossy(&out)
+                );
+            }
+        }
+
+        /// **她死掉的時候那一聲也要響，不然沉默會被讀成「還在跑」。**
+        ///
+        /// 五種正常收尾各自都響過了，第六條出路是中途炸掉。`--notify` 的前提
+        /// 就是他不在螢幕前面，所以「她死了又不出聲」正好是這支旗標要防的那件
+        /// 事——他會一直等下去。
+        ///
+        /// 這裡用「資料目錄不見了」去引一個 `Err`：它走的是 `run_with` 包在
+        /// 外面那一層，和迴圈中間任何一個 `?` 是同一條路。
+        #[test]
+        fn a_run_that_dies_still_rings_if_he_asked_to_be_told() {
+            for requested in [true, false] {
+                let missing = std::path::Path::new("/nonexistent-sister-data-dir-for-test");
+                let config = Config::default();
+                let mut out = Vec::new();
+                let err = run_with(
+                    missing,
+                    &config,
+                    &opts(requested),
+                    &mut || 100_000,
+                    &mut |_| {},
+                    &mut out,
+                )
+                .expect_err("目錄不存在，這一趟本來就該失敗");
+                assert!(
+                    format!("{err:#}").contains("我們沒找到那個目錄"),
+                    "紅的理由不是這條測試要引的那一個：{err:#}"
+                );
+                assert_eq!(
+                    out.contains(&b'\x07'),
+                    requested,
+                    "她死掉那一聲和旗標不同步（requested={requested}）：{}",
                     String::from_utf8_lossy(&out)
                 );
             }
@@ -3464,9 +3589,14 @@ pub mod watch {
 
         /// **預演沒有收尾可以通知，所以那句承諾不可以印出來。**
         ///
-        /// `--dry-run` 印完要送的字就結束，一輪都不會盯。原本那句「等到了我會
-        /// 讓工作列那顆按鈕閃一下」印在早退之前，是一句關於一場永遠不會發生的
-        /// 盯梢的承諾。但也不能就這樣安靜地把旗標吃掉——兩條路都要有話講。
+        /// `--dry-run` 印完要送的字就結束，一輪都不會盯。`notification_notice()`
+        /// 那一句（「停下來時我會讓工作列那顆按鈕閃一下、響一聲」）原本印在早退
+        /// 之前，是一句關於一場永遠不會發生的盯梢的承諾。但也不能就這樣安靜地
+        /// 把旗標吃掉——兩條路都要有話講。
+        ///
+        /// 底下拿的是 `notification_notice()` 的回傳值本身，不是抄一份字串：
+        /// 文案改字的那天（alpha.72 就改過一次）這條測試要跟著走，不是變成
+        /// 在比對一句產品早就不說了的話。
         #[test]
         fn a_dry_run_does_not_promise_a_signal_it_will_never_send() {
             let promise = sister_core::watch::WatchEnd::notification_notice(cfg!(windows));
