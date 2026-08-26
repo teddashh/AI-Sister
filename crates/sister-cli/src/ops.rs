@@ -1041,6 +1041,7 @@ pub mod review {
                 "{}",
                 reviewer::format_reviewer_visibility(
                     &input.db.latest_dual_pass_divergences()?,
+                    &input.db.latest_reviewer_refusals()?,
                     &input.db.entity_memory()?,
                 )
             );
@@ -1050,10 +1051,11 @@ pub mod review {
         let stats = input.db.reviewer_recheck_stats()?;
         print!("{}", reviewer::format_review_result(&result, &stats));
         let divergences = input.db.latest_dual_pass_divergences()?;
+        let refusals = input.db.latest_reviewer_refusals()?;
         let entities = input.db.entity_memory()?;
         print!(
             "{}",
-            reviewer::format_reviewer_visibility(&divergences, &entities)
+            reviewer::format_reviewer_visibility(&divergences, &refusals, &entities)
         );
         Ok(())
     }

@@ -160,6 +160,13 @@ pub fn format_review_result(r: &ReviewResult, stats: &RecheckStats) -> String {
             "審閱結束：回查 {}／{}，寫入 {} 筆承諾，分歧 {} 筆，L2 修訂 {} 張。\n",
             r.rechecks, r.candidates, r.wrote_commitments, r.divergences, r.l2_revisions
         ));
+        // 0 的時候不印。印「拒絕 0 個下一步」會讓每一輪都長得像出過事。
+        if r.refused_next_steps > 0 {
+            out.push_str(&format!(
+                "她拒絕了 {} 個模型指的下一步（理由見底下）。\n",
+                r.refused_next_steps
+            ));
+        }
         if r.calls_used > 0 {
             out.push_str(&format!(
                 "今日審閱呼叫 {}/{}（這一輪用了 {} 次）。\n",
@@ -192,6 +199,7 @@ const MAX_MENTIONS_SHOWN: usize = 6;
 
 pub fn format_reviewer_visibility(
     divergences: &DualPassDivergences,
+    refusals: &crate::db::ReviewerRefusals,
     entities: &EntityMemory,
 ) -> String {
     // 分歧是**警報**，不是統計行的續行。前後各空一行，讓它自己是一段。
@@ -216,6 +224,23 @@ pub fn format_reviewer_visibility(
         }
     }
     out.push('\n');
+    // 拒絕不放進上面那一段。那一段的意思是「兩份答案對不上」，而拒絕的時候
+    // 兩份答案是一致的——是她不接受它們指的那筆 fact。
+    match refusals {
+        crate::db::ReviewerRefusals::NeverRan => {}
+        crate::db::ReviewerRefusals::None { run_id } => {
+            out.push_str(&format!(
+                "最近一次審閱（輪次 #{run_id}）沒有拒絕任何下一步。\n\n"
+            ));
+        }
+        crate::db::ReviewerRefusals::Some { run_id, reasons } => {
+            out.push_str(&format!("最近一次審閱（輪次 #{run_id}）拒絕掉的下一步：\n"));
+            for reason in reasons {
+                out.push_str(&format!("- {reason}\n"));
+            }
+            out.push('\n');
+        }
+    }
     match entities {
         EntityMemory::NeverReviewed => {
             out.push_str("實體記憶還沒跑過 Reviewer；目前不是『辨識到 0 個』。\n");
@@ -343,6 +368,9 @@ pub struct ReviewResult {
     pub candidates: u32,
     pub wrote_commitments: u32,
     pub divergences: u32,
+    /// 模型指了一步、而她不接受的次數。**和 `divergences` 是兩個問題。**
+    /// 那個數的是「兩份答案對不上」，這個數的是「兩份答案一致，但我拒絕了」。
+    pub refused_next_steps: u32,
     pub calls_used: u32,
     pub budget_used: u32,
     pub budget_limit: u32,
@@ -374,6 +402,13 @@ pub struct ReviewCommitment {
     pub confidence: Option<f64>,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub allowed_next_step: Option<NextStepRef>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct NextStepRef {
+    pub fact: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,6 +463,11 @@ pub fn merge_commitment_passes(
         people: a.people.clone(),
         confidence: conf,
         evidence_refs: evidence.into_iter().collect(),
+        allowed_next_step: if a.allowed_next_step == b.allowed_next_step {
+            a.allowed_next_step.clone()
+        } else {
+            None
+        },
     })
 }
 
@@ -609,6 +649,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
             candidates: 0,
             wrote_commitments: 0,
             divergences: 0,
+            refused_next_steps: 0,
             calls_used: 0,
             budget_used: used,
             budget_limit: limit,
@@ -630,6 +671,9 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
     let mut rechecks = 0u32;
     let mut wrote = 0u32;
     let mut divergences = 0u32;
+    // 她拒絕掉的下一步。和 `divergences` 分開數：一個是「兩份答案對不上」，
+    // 一個是「兩份答案一致，而我不接受它們指的那筆 fact」。
+    let mut refusals: Vec<String> = Vec::new();
     let mut calls = 0u32;
     let mut l2_revisions = 0u32;
     let mut budget_left = remaining;
@@ -740,8 +784,8 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
             continue;
         }
 
-        let prompt_a = dual_pass_prompt('A', card, &originals, &keep_commits)?;
-        let prompt_b = dual_pass_prompt('B', card, &originals, &keep_commits)?;
+        let prompt_a = dual_pass_prompt('A', card, &originals, &facts, &keep_commits)?;
+        let prompt_b = dual_pass_prompt('B', card, &originals, &facts, &keep_commits)?;
         debug_assert!(
             prompt_a.contains("PASS_A")
                 && prompt_b.contains("PASS_B")
@@ -784,6 +828,33 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                     match (map_a.get(&key), map_b.get(&key)) {
                         (Some(ca), Some(cb)) => match merge_commitment_passes(ca, cb) {
                             Ok(merged) if merged.stands => {
+                                if ca.allowed_next_step != cb.allowed_next_step {
+                                    divergences += 1;
+                                    divergence_rows.push((
+                                        format!("l2:{} / {}", card.id, merged.text),
+                                        serde_json::to_string(ca).unwrap_or_default(),
+                                        serde_json::to_string(cb).unwrap_or_default(),
+                                        "欄位 allowed_next_step 對不上；承諾保留，下一步拿掉"
+                                            .into(),
+                                    ));
+                                }
+                                // 拒絕**不進** `reviewer_divergence`。那張表的意思是
+                                // 「兩份答案對不上」，畫面上印的是「pass A：… pass B：…」。
+                                // 兩個 pass 明明講了同一句話而我拒絕了它，記成分歧的話，
+                                // 讀的人會看到一句「分歧」配上兩段一模一樣的 JSON。
+                                let allowed_next_step = resolve_allowed_next_step(
+                                    input.db,
+                                    &facts,
+                                    merged.allowed_next_step.as_ref(),
+                                )?;
+                                let allowed_next_step = match allowed_next_step {
+                                    ResolvedNextStep::NotAsked => None,
+                                    ResolvedNextStep::Resolved(json) => Some(json),
+                                    ResolvedNextStep::Refused(reason) => {
+                                        refusals.push(reason);
+                                        None
+                                    }
+                                };
                                 let source = due_source_from_originals(
                                     merged.due_hint.as_deref().unwrap_or(""),
                                     &originals,
@@ -811,7 +882,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                                             .confidence
                                             .unwrap_or(card.model_confidence)
                                             .min(card.model_confidence),
-                                        allowed_next_step: None,
+                                        allowed_next_step: allowed_next_step.as_deref(),
                                         last_evidence_seen_at: Some(input.now),
                                         kill_note: None,
                                         now: input.now,
@@ -913,7 +984,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         calls_used: calls as i64,
         budget_used: (used + calls) as i64,
         budget_limit: limit as i64,
-        detail: "",
+        detail: &refusals.join("\n"),
     })?;
     for row in recheck_rows {
         input.db.insert_reviewer_recheck(&RecheckInsert {
@@ -944,6 +1015,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         candidates,
         wrote_commitments: wrote,
         divergences,
+        refused_next_steps: refusals.len() as u32,
         calls_used: calls,
         budget_used: used + calls,
         budget_limit: limit,
@@ -982,6 +1054,7 @@ fn dual_pass_prompt(
     angle: char,
     card: &L2CardRow,
     originals: &[crate::db::L0Original],
+    facts: &[crate::db::FactRow],
     commits: &[CommitmentCandidate],
 ) -> Result<String> {
     let (who, rule, marker) = match angle {
@@ -1007,13 +1080,14 @@ fn dual_pass_prompt(
     s.push_str(
         r#"{
   "commitments": [
-    {"text":"...","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":["..."],"confidence":0.7,"evidence_refs":["frame:1"]}
+    {"text":"...","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":["..."],"confidence":0.7,"evidence_refs":["frame:1"],"allowed_next_step":{"fact":45}}
   ]
 }
 "#,
     );
     s.push_str("due_source 只能是 explicit（螢幕上寫了時間）或 inferred（你從上下文猜的）。\n");
     s.push_str("kind 只能是 promise / todo / followup / reminder。\n\n");
+    s.push_str("allowed_next_step 只能填下方列出的 fact id；只有 url / file_path 有意義，沒有適合的就填 null。\n\n");
     let mut data = String::new();
     data.push_str("L2 假設（可推翻，不是原件）：\n");
     data.push_str(&format!("- activity: {}\n", card.activity));
@@ -1024,6 +1098,13 @@ fn dual_pass_prompt(
             c.text, c.source, c.due_hint
         ));
     }
+    data.push_str("可指向的 L1 facts：\n");
+    for fact in facts {
+        data.push_str(&format!(
+            "- fact:{} kind={} raw={}\n",
+            fact.id, fact.kind, fact.raw
+        ));
+    }
     data.push_str("\n—— L0 原件（真的去讀的，不是 L2 再抄一次）——\n");
     for o in originals {
         data.push_str(&format!("[{}] {}\n", o.r#ref, o.text));
@@ -1032,6 +1113,60 @@ fn dual_pass_prompt(
     debug_assert!(!truncated);
     s.push_str(&fenced);
     Ok(s)
+}
+
+/// 模型指的那一步，解出來是什麼。**三種，不是「一個 json 加一個 rejection」。**
+///
+/// 兩個 `Option` 併排的話，`(Some, Some)` 這種不可能的狀態在型別上是打得出來
+/// 的，而且它會安靜地變成「有下一步，而且我拒絕了它」。分成三格之後打不出來。
+enum ResolvedNextStep {
+    /// 模型說 `null`。**這不是拒絕**——沒有人要求過任何事。
+    NotAsked,
+    Resolved(String),
+    Refused(String),
+}
+
+fn resolve_allowed_next_step(
+    db: &Db,
+    listed_facts: &[crate::db::FactRow],
+    next: Option<&NextStepRef>,
+) -> Result<ResolvedNextStep> {
+    let Some(next) = next else {
+        return Ok(ResolvedNextStep::NotAsked);
+    };
+    let Some(fact) = db.fact_by_id(next.fact)? else {
+        return Ok(ResolvedNextStep::Refused(format!(
+            "拒絕 allowed_next_step：fact:{} 不存在",
+            next.fact
+        )));
+    };
+    if !listed_facts.iter().any(|listed| listed.id == fact.id) {
+        return Ok(ResolvedNextStep::Refused(format!(
+            "拒絕 allowed_next_step：fact:{} 沒有列在這次給模型的 L1 facts",
+            fact.id
+        )));
+    }
+    let value = match fact.kind.as_str() {
+        // 下游 `sister_hands::target_policy::validate_url` 才是真正的權威。
+        // 這裡先看一眼，是為了不要端一顆按下去一定會被擋的按鈕給人。
+        "url" if fact.raw.starts_with("http://") || fact.raw.starts_with("https://") => {
+            serde_json::json!({"action": "open_url", "url": fact.raw})
+        }
+        "url" => {
+            return Ok(ResolvedNextStep::Refused(format!(
+                "拒絕 allowed_next_step：fact:{} 的 url 不是以 http:// 或 https:// 開頭",
+                fact.id
+            )));
+        }
+        "file_path" => serde_json::json!({"action": "open_file", "path": fact.raw}),
+        other => {
+            return Ok(ResolvedNextStep::Refused(format!(
+                "拒絕 allowed_next_step：fact:{} 的 kind 是 {other}，不是 url 或 file_path",
+                fact.id
+            )));
+        }
+    };
+    Ok(ResolvedNextStep::Resolved(serde_json::to_string(&value)?))
 }
 
 fn parse_pass(stdout: &str) -> Option<ReviewPassCard> {
@@ -1136,6 +1271,7 @@ fn skipped(reason: SkipReason, used: u32, limit: u32) -> ReviewResult {
         candidates: 0,
         wrote_commitments: 0,
         divergences: 0,
+        refused_next_steps: 0,
         calls_used: 0,
         budget_used: used,
         budget_limit: limit,
@@ -1382,6 +1518,7 @@ mod tests {
     use super::*;
     use crate::consent::{Sheet, VERSION};
     use crate::db::DaySummaryGlance;
+    use crate::db::ReviewerRefusals;
     use crate::model::{FocusEvent, FocusKind, FocusSnapshot, FrameCapture, OcrBlock};
     use chrono::{Local, LocalResult, TimeZone};
 
@@ -1596,7 +1733,7 @@ mod tests {
                 tombstoned_at: None,
             }],
         }]);
-        let text = format_reviewer_visibility(&divergence, &entities);
+        let text = format_reviewer_visibility(&divergence, &ReviewerRefusals::NeverRan, &entities);
         for expected in [
             "l2:42 / 交報告",
             "pass A：{\"stands\":true}",
@@ -1646,13 +1783,25 @@ mod tests {
                 rows: vec![row],
             },
         ]
-        .map(|s| format_reviewer_visibility(&s, &EntityMemory::NeverReviewed));
+        .map(|s| {
+            format_reviewer_visibility(
+                &s,
+                &ReviewerRefusals::NeverRan,
+                &EntityMemory::NeverReviewed,
+            )
+        });
         let e = [
             EntityMemory::NeverReviewed,
             EntityMemory::Empty,
             EntityMemory::Present(vec![entity]),
         ]
-        .map(|s| format_reviewer_visibility(&DualPassDivergences::NeverRan, &s));
+        .map(|s| {
+            format_reviewer_visibility(
+                &DualPassDivergences::NeverRan,
+                &ReviewerRefusals::NeverRan,
+                &s,
+            )
+        });
 
         for (label, texts) in [("分歧", &d), ("實體", &e)] {
             for i in 0..texts.len() {
@@ -1715,6 +1864,7 @@ mod tests {
             .collect();
         let text = format_reviewer_visibility(
             &DualPassDivergences::NeverRan,
+            &ReviewerRefusals::NeverRan,
             &EntityMemory::Present(rows),
         );
 
@@ -1762,6 +1912,7 @@ mod tests {
         }];
         let text = format_reviewer_visibility(
             &DualPassDivergences::NeverRan,
+            &ReviewerRefusals::NeverRan,
             &EntityMemory::Present(rows),
         );
         assert!(
@@ -1797,6 +1948,7 @@ mod tests {
         }];
         let text = format_reviewer_visibility(
             &DualPassDivergences::NeverRan,
+            &ReviewerRefusals::NeverRan,
             &EntityMemory::Present(rows),
         );
         assert!(!text.contains("沒列出來"), "沒剪卻在講剪：{text}");
@@ -1920,6 +2072,211 @@ mod tests {
             .expect("present");
         assert!(orig.text.contains("五點去接她"), "回查讀到的應是 OCR 原文");
         assert!(!orig.text.contains("在看接人的訊息") || orig.text.contains("LINE"));
+    }
+
+    fn run_next_step_fixture(
+        label: &str,
+        ocr: &str,
+        fact_id: i64,
+        pass_b_fact_id: Option<i64>,
+    ) -> (Db, ReviewResult) {
+        let tmp = Tmp::new(label);
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, ocr);
+        if label == "next-url-scheme" {
+            let inserted = db
+                .test_insert_fact(ts + 30_000, "url", "example.com/x")
+                .expect("fact");
+            assert_eq!(inserted, fact_id, "測試注入的 fact id 漂移");
+        }
+        let card = |next: Option<i64>| {
+            let next = next
+                .map(|id| format!(r#"{{"fact":{id}}}"#))
+                .unwrap_or_else(|| "null".into());
+            format!(
+                r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":{next}}}]}}"#
+            )
+        };
+        let json_a = card((fact_id >= 0).then_some(fact_id));
+        let json_b = card(pass_b_fact_id.or((fact_id >= 0).then_some(fact_id)));
+        let (command, args) = fake_cli_split(&tmp.0, &json_a, &json_b, &sentinel);
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        (db, result)
+    }
+
+    fn fact_id(db: &Db, ts: Millis, kind: &str, raw: &str) -> i64 {
+        db.facts_in_range(ts, ts + 400_000)
+            .expect("facts")
+            .into_iter()
+            .find(|f| f.kind == kind && f.raw == raw)
+            .unwrap_or_else(|| panic!("找不到 {kind} fact {raw:?}"))
+            .id
+    }
+
+    #[test]
+    fn a_url_fact_becomes_an_open_url_next_step() {
+        let ocr = "LINE：五點去接她 17:00 https://example.com/x";
+        let mut seeded = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        seed(&mut seeded, ts, ocr);
+        let id = fact_id(&seeded, ts, "url", "https://example.com/x");
+        let (db, _) = run_next_step_fixture("next-url", ocr, id, None);
+        assert_eq!(
+            db.live_commitments().unwrap()[0]
+                .allowed_next_step
+                .as_deref(),
+            Some(r#"{"action":"open_url","url":"https://example.com/x"}"#)
+        );
+    }
+
+    #[test]
+    fn a_file_path_fact_becomes_an_open_file_next_step() {
+        let ocr = r"LINE：五點去接她 17:00 C:\work\report.txt";
+        let mut seeded = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        seed(&mut seeded, ts, ocr);
+        let id = fact_id(&seeded, ts, "file_path", r"C:\work\report.txt");
+        let (db, _) = run_next_step_fixture("next-file", ocr, id, None);
+        assert_eq!(
+            db.live_commitments().unwrap()[0]
+                .allowed_next_step
+                .as_deref(),
+            Some(r#"{"action":"open_file","path":"C:\\work\\report.txt"}"#)
+        );
+    }
+
+    /// 一次拒絕要看得見，**而且不可以被記成一次分歧**。
+    ///
+    /// 分歧的意思是「兩份答案對不上」，畫面上印的是「pass A：… pass B：…」。
+    /// 兩個 pass 講了同一句話而她拒絕了它，記成分歧的話，讀的人會看到一句
+    /// 「分歧」配上兩段一模一樣的 JSON——每一段都是真的，湊起來在說謊。
+    fn assert_refused(db: &Db, result: &ReviewResult, needles: &[&str]) {
+        assert_eq!(result.divergences, 0, "拒絕不是分歧");
+        assert!(
+            db.list_reviewer_divergences(10).unwrap().is_empty(),
+            "拒絕不該寫進 reviewer_divergence"
+        );
+        assert_eq!(result.refused_next_steps, 1);
+        let ReviewerRefusals::Some { reasons, .. } = db.latest_reviewer_refusals().unwrap() else {
+            panic!("拒絕過的那一輪要說得出它拒絕了什麼");
+        };
+        for needle in needles {
+            assert!(
+                reasons.iter().any(|r| r.contains(needle)),
+                "{needle} 不在 {reasons:?} 裡"
+            );
+        }
+        // 而且那句話真的會被印出來給人看，不是只躺在資料庫裡。
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        for needle in needles {
+            assert!(shown.contains(needle), "{needle} 沒有被印出來：{shown}");
+        }
+        assert!(!shown.contains("的分歧："), "不可以說成分歧：{shown}");
+    }
+
+    #[test]
+    fn a_missing_fact_is_refused_and_the_reason_is_visible() {
+        let (db, result) =
+            run_next_step_fixture("next-missing", "LINE：五點去接她 17:00", 999_999, None);
+        assert!(
+            db.live_commitments().unwrap()[0]
+                .allowed_next_step
+                .is_none()
+        );
+        assert_refused(&db, &result, &["999999", "不存在"]);
+    }
+
+    #[test]
+    fn a_money_fact_is_refused_and_the_reason_is_visible() {
+        let ocr = "LINE：五點去接她 17:00 NT$500";
+        let mut seeded = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        seed(&mut seeded, ts, ocr);
+        let id = fact_id(&seeded, ts, "money", "NT$500");
+        let (db, result) = run_next_step_fixture("next-money", ocr, id, None);
+        assert!(
+            db.live_commitments().unwrap()[0]
+                .allowed_next_step
+                .is_none()
+        );
+        assert_refused(&db, &result, &["money", "拒絕"]);
+    }
+
+    #[test]
+    fn a_url_without_a_scheme_is_refused_and_the_reason_is_visible() {
+        let ocr = "LINE：五點去接她 17:00 example.com/x";
+        let mut seeded = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        seed(&mut seeded, ts, ocr);
+        let id = seeded
+            .test_insert_fact(ts + 30_000, "url", "example.com/x")
+            .expect("fact");
+        let (db, result) = run_next_step_fixture("next-url-scheme", ocr, id, None);
+        assert!(
+            db.live_commitments().unwrap()[0]
+                .allowed_next_step
+                .is_none()
+        );
+        assert_refused(&db, &result, &["http://", "https://"]);
+    }
+
+    #[test]
+    fn disagreeing_next_steps_keep_the_commitment_and_record_the_disagreement() {
+        let ocr = "LINE：五點去接她 17:00 https://example.com/a https://example.com/b";
+        let mut seeded = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        seed(&mut seeded, ts, ocr);
+        let a = fact_id(&seeded, ts, "url", "https://example.com/a");
+        let b = fact_id(&seeded, ts, "url", "https://example.com/b");
+        let (db, result) = run_next_step_fixture("next-diverge", ocr, a, Some(b));
+        let commitments = db.live_commitments().unwrap();
+        assert_eq!(commitments.len(), 1, "下一步分歧不該殺掉承諾");
+        assert!(commitments[0].allowed_next_step.is_none());
+        assert_eq!(result.divergences, 1);
+        assert!(
+            db.list_reviewer_divergences(10).unwrap()[0]
+                .reason
+                .contains("allowed_next_step")
+        );
+    }
+
+    #[test]
+    fn a_null_next_step_keeps_the_commitment_without_a_refusal() {
+        let (db, result) = run_next_step_fixture("next-null", "LINE：五點去接她 17:00", -1, None);
+        let commitments = db.live_commitments().unwrap();
+        assert_eq!(commitments.len(), 1);
+        assert!(commitments[0].allowed_next_step.is_none());
+        assert_eq!(result.divergences, 0, "null 不是分歧");
+        assert!(db.list_reviewer_divergences(10).unwrap().is_empty());
+        // 「他本來就沒有下一步」不可以被講成「她拒絕了一個下一步」。
+        // 這一條是這支測試名字裡的 `without_a_refusal` 那半——少了它，
+        // 把 `NotAsked` 整個改成 `Refused` 也照樣全綠。
+        assert_eq!(result.refused_next_steps, 0, "沒有人要求過任何事");
+        assert_eq!(
+            db.latest_reviewer_refusals().unwrap(),
+            ReviewerRefusals::None { run_id: 1 },
+            "這一輪不該留下任何一句拒絕的理由"
+        );
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        assert!(!shown.contains("拒絕掉的下一步"), "{shown}");
     }
 
     #[test]
@@ -2415,6 +2772,7 @@ mod tests {
             people: vec![],
             confidence: Some(0.9),
             evidence_refs: vec!["frame:1".into()],
+            allowed_next_step: None,
         };
         let b = ReviewCommitment {
             text: "五點去接她".into(),
@@ -2425,6 +2783,7 @@ mod tests {
             people: vec![],
             confidence: Some(0.9),
             evidence_refs: vec!["frame:1".into()],
+            allowed_next_step: None,
         };
         let err = merge_commitment_passes(&a, &b).unwrap_err();
         assert!(err.reason.contains("due_hint"));

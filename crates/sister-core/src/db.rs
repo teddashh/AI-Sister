@@ -3820,6 +3820,21 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// 只給測試用的 fact 注入口。**不要把它變成正式的寫入路徑。**
+    ///
+    /// 它跳過正常抽取那一整段：`normalized` 直接抄 `raw`、`source_kind` 寫死
+    /// `'test'`。存在的理由是要造出 regex 造不出來的舊資料／壞資料——例如一列
+    /// `kind='url'` 但 `raw` 沒有 scheme 的 fact，用來驗那條拒絕路徑真的會走到。
+    #[cfg(test)]
+    pub(crate) fn test_insert_fact(&mut self, ts: Millis, kind: &str, raw: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO facts(ts, kind, raw, normalized, source_kind)
+             VALUES(?1, ?2, ?3, ?3, 'test')",
+            params![ts, kind, raw],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
     /// 收集這段時間裡的 L0／L2 血緣起點，給 cascade tombstone 用。
     ///
     /// 要在刪 frames／facts 之前叫：刪完就問不到 id 了。
@@ -4605,6 +4620,37 @@ impl Db {
             })
         })?;
         Ok(rows.flatten().collect())
+    }
+
+    /// 最近一輪真的跑過的審閱，她拒絕掉了哪幾個模型指的下一步。
+    ///
+    /// **三種，不是「一個 `Vec`」。** 「還沒跑過」、「跑過而且沒拒絕任何東西」、
+    /// 「跑過而且拒絕了這幾個」是三件事；前兩種折成空 `Vec` 的話，一台從來
+    /// 沒跑過 reviewer 的機器會顯示成「她什麼都沒拒絕」。
+    pub fn latest_reviewer_refusals(&self) -> Result<ReviewerRefusals> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, detail FROM reviewer_run
+                 WHERE skip_reason IS NULL
+                 ORDER BY ts DESC, id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((run_id, detail)) = row else {
+            return Ok(ReviewerRefusals::NeverRan);
+        };
+        let reasons: Vec<String> = detail
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        if reasons.is_empty() {
+            Ok(ReviewerRefusals::None { run_id })
+        } else {
+            Ok(ReviewerRefusals::Some { run_id, reasons })
+        }
     }
 
     pub fn latest_dual_pass_divergences(&self) -> Result<DualPassDivergences> {
@@ -6277,6 +6323,14 @@ pub struct ReviewerRunInsert<'a> {
     pub budget_used: i64,
     pub budget_limit: i64,
     pub detail: &'a str,
+}
+
+/// 最近一輪審閱拒絕掉的下一步。見 [`Db::latest_reviewer_refusals`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewerRefusals {
+    NeverRan,
+    None { run_id: i64 },
+    Some { run_id: i64, reasons: Vec<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
