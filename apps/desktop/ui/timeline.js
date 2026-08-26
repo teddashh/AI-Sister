@@ -1428,7 +1428,8 @@ function outboundOutcome(value) {
 function outboundRole(value) {
   if (value === "reviewer") return "審閱層";
   if (value === "interpreter") return "解釋層";
-  return value || "解釋層";
+  if (value === "watcher") return "盯梢層";
+  return `不認得的層別（${value || "空值"}）`;
 }
 
 function outboundRow(row) {

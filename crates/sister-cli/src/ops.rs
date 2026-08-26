@@ -724,6 +724,30 @@ pub mod consent {
             .collect()
     }
 
+    /// 第二張同意書**簽下去之後**，這一頁上唯一告訴他「簽了會發生什麼」的幾行。
+    ///
+    /// 抽成函式不是為了漂亮，是因為 `print_human` 用 `println!` 直接寫 stdout，
+    /// 於是這幾行在測試裡一個字都看不到——而它們正是這一頁上最容易過期的字。
+    ///
+    /// 底下那份指令清單就是 `Consent::cloud_permit()` 的呼叫端。加第五個持票人
+    /// 的時候要回來改這裡——**沒有任何閘門會替你發現這份清單變短了**，短了也
+    /// 只是少一行，讀的人看不出來少了什麼。
+    fn cloud_reading_signed_lines(has_cli: bool) -> &'static [&'static str] {
+        if has_cli {
+            &[
+                "螢幕上的原文會交給設定裡的那支 CLI，沒有去識別化。",
+                "會用這張同意書的是 `sister interpret`、`sister review`、`sister watch`；`sister watch` 會照著 --every 連續問很多次。",
+                // 這一行是整段裡他最不可能自己想到的那一句，所以最不能省。
+                // 前三支要他自己打，`record` 不用——`sister record` 開著的時候
+                // 會自己起一條 wakeup 執行緒去叫解釋層和審閱層（`wakeup.rs`），
+                // 而 `record` 正好是唯一一支他會整天開著的。他以為那只是在錄。
+                "還有 `sister record`：只要設定檔有 [brain] command，它一邊錄就會一邊自己叫解釋層和審閱層，不用你再下任何指令。",
+            ]
+        } else {
+            &["已同意，但還沒設定 [brain] command，一次都不會呼叫。"]
+        }
+    }
+
     fn print_human(data_dir: &Path, c: &Consent, config: &Config, changed: bool) {
         println!(
             "三張同意書（{}）",
@@ -745,12 +769,8 @@ pub mod consent {
                     // 可以開」那句話只寫在 `without()` 裡，也就是只在**沒簽**
                     // 的分支印得出來，於是唯一讀不到它的人正好是簽了的那個。
                     if sheet == Sheet::CloudReading {
-                        if config.brain.cli().is_some() {
-                            println!(
-                                "      去識別化後的字會交給設定裡的那支 CLI（`sister interpret`）。"
-                            );
-                        } else {
-                            println!("      已同意，但還沒設定 [brain] command，一次都不會呼叫。");
+                        for line in cloud_reading_signed_lines(config.brain.cli().is_some()) {
+                            println!("      {line}");
                         }
                     }
                 }
@@ -821,6 +841,64 @@ pub mod consent {
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_signed_second_sheet_does_not_promise_a_deidentification_that_was_removed() {
+            let text = cloud_reading_signed_lines(true).join("\n");
+            assert!(
+                !text.contains("去識別化後"),
+                "仍承諾已移除的去識別化：{text}"
+            );
+            assert!(text.contains("原文"), "沒有說送出去的是原文：{text}");
+            assert!(
+                text.contains("沒有去識別化"),
+                "沒有明說原文未去識別化：{text}"
+            );
+        }
+
+        /// 一支一支斷言，不要寫成迴圈掃一個陣列——那樣少一個名字的時候，
+        /// 陣列和斷言會一起變小，測試照樣全綠。
+        #[test]
+        fn the_signed_second_sheet_names_every_command_that_spends_the_permit() {
+            let text = cloud_reading_signed_lines(true).join("\n");
+            assert!(text.contains("sister interpret"), "漏掉 interpret：{text}");
+            assert!(text.contains("sister review"), "漏掉 review：{text}");
+            assert!(text.contains("sister watch"), "漏掉 watch：{text}");
+            assert!(text.contains("sister record"), "漏掉 record：{text}");
+        }
+
+        /// `record` 進清單還不夠：他看到 `sister record` 四個字，想到的是「錄影」，
+        /// 不是「送字出去」。這一條釘的是那句**為什麼**——只要設了 `[brain]`，
+        /// 光是錄著就會送。少了它，清單多一個名字也還是解釋不了什麼。
+        #[test]
+        fn the_signed_second_sheet_warns_that_recording_alone_wakes_the_brain() {
+            let text = cloud_reading_signed_lines(true).join("\n");
+            let line = text
+                .lines()
+                .find(|l| l.contains("sister record"))
+                .expect("上一條測試已經保證 record 在裡面");
+            assert!(
+                line.contains("[brain]"),
+                "沒說是哪個設定讓 record 自己送字：{line}"
+            );
+            assert!(
+                line.contains("解釋層") && line.contains("審閱層"),
+                "沒說 record 自己叫的是哪兩層：{line}"
+            );
+        }
+
+        #[test]
+        fn the_unsigned_arm_still_says_the_cli_is_missing() {
+            assert_eq!(
+                cloud_reading_signed_lines(false),
+                &["已同意，但還沒設定 [brain] command，一次都不會呼叫。"]
+            );
+        }
     }
 }
 
@@ -901,6 +979,23 @@ pub mod interpret {
 pub mod brain {
     use super::*;
 
+    fn outbound_role_label(role: &str) -> String {
+        match role {
+            "interpreter" => "解釋層".into(),
+            "reviewer" => "審閱層".into(),
+            "watcher" => "盯梢層".into(),
+            other => format!("不認得的層別（{other}）"),
+        }
+    }
+
+    fn outbound_segment_cell(role: &str, segment: Option<sister_core::Millis>) -> String {
+        match (role, segment) {
+            ("watcher", None) => "（盯梢問的是時間區間，本來就沒有段落）".into(),
+            (_, Some(ts)) => ts.to_string(),
+            (_, None) => "（沒有對上段落）".into(),
+        }
+    }
+
     pub fn log(data_dir: &Path, limit: usize) -> Result<()> {
         let db = open_existing(data_dir)?;
         println!(
@@ -927,16 +1022,15 @@ pub mod brain {
             for row in &outbound {
                 let args: Vec<String> = serde_json::from_str(&row.args_json).unwrap_or_default();
                 println!(
-                    "{}  {} {}",
+                    "{}  {}  {} {}",
                     crate::fmt::timestamp(row.ts),
+                    outbound_role_label(&row.role),
                     row.command,
                     args.join(" ")
                 );
                 println!(
                     "    segment={}  {} 字{}  結局 {}  {} ms",
-                    row.segment_core_start
-                        .map(|t| t.to_string())
-                        .unwrap_or_else(|| "（沒有對上段落）".into()),
+                    outbound_segment_cell(&row.role, row.segment_core_start),
                     row.chars_sent,
                     if row.truncated { "（截斷）" } else { "" },
                     row.outcome,
@@ -961,6 +1055,51 @@ pub mod brain {
             }
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn every_role_the_product_writes_has_a_chinese_label() {
+            assert_eq!(outbound_role_label("interpreter"), "解釋層");
+            assert_eq!(outbound_role_label("reviewer"), "審閱層");
+            assert_eq!(outbound_role_label("watcher"), "盯梢層");
+        }
+
+        #[test]
+        fn an_unknown_role_says_it_is_unknown_instead_of_guessing() {
+            let label = outbound_role_label("future-role");
+            assert!(!label.contains("解釋層"), "不認得卻猜成解釋層：{label}");
+            assert!(label.contains("future-role"), "沒帶出不認得的原值：{label}");
+        }
+
+        #[test]
+        fn a_watcher_row_says_it_has_no_segment_by_design() {
+            let cell = outbound_segment_cell("watcher", None);
+            assert!(
+                cell.contains("時間區間"),
+                "沒說明盯梢問的是時間區間：{cell}"
+            );
+            assert!(
+                cell.contains("本來就沒有段落"),
+                "把正常的無段落寫成異常：{cell}"
+            );
+        }
+
+        #[test]
+        fn an_interpreter_row_with_no_segment_still_reads_as_a_miss() {
+            let cell = outbound_segment_cell("interpreter", None);
+            assert!(
+                cell.contains("沒有對上段落"),
+                "異常的無段落沒有寫成 miss：{cell}"
+            );
+            assert!(
+                !cell.contains("本來就沒有"),
+                "把 interpreter 的 miss 寫成正常：{cell}"
+            );
+        }
     }
 }
 
@@ -2965,7 +3104,7 @@ pub mod watch {
                             args: &args,
                             segment_core_start: None,
                             chars_sent: prompt.payload.chars().count() as i64,
-                            truncated: prompt.truncated,
+                            truncated: more || prompt.truncated,
                             outcome: outcome.as_str(),
                             duration_ms: spawn.duration_ms as i64,
                             error: spawn.spawn_error.as_deref(),
@@ -3154,6 +3293,76 @@ pub mod watch {
                 dry_run: false,
                 notify,
             }
+        }
+
+        #[test]
+        fn a_row_capped_by_the_chunk_limit_is_recorded_as_truncated() {
+            let (tmp, config) = prepared(
+                "watch-chunk-limit-truncation",
+                "第000段很短的畫面文字",
+                true,
+            );
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let session: i64 = db
+                .conn()
+                .query_row("SELECT id FROM sessions LIMIT 1", [], |row| row.get(0))
+                .expect("session");
+            for n in 1..=200 {
+                db.conn()
+                    .execute(
+                        "INSERT INTO text_chunks(ts,session_id,source_kind,app_id,text) VALUES(?1,?2,'ocr','Terminal.exe',?3)",
+                        (90_000 + n, session, format!("第{n:03}段很短的畫面文字")),
+                    )
+                    .expect("chunk");
+            }
+            drop(db);
+
+            let mut ticks = [100_000, 100_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &opts(false),
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+
+            // **這條測試要證的不只是「truncated 是 true」，是「哪一把刀讓它變 true」。**
+            //
+            // 兩把刀都會寫同一個布林：200 列那一把（`more`）和 64 KB 那一把
+            // （`prompt.truncated`）。位元組那把要是也砍了，就算把實作改回只記
+            // 位元組，這條測試還是綠的——它會為了錯的理由通過，而列上限那一刀
+            // 從此沒有人看著。
+            //
+            // 螢幕上那兩句話是唯一分得開它們的地方，所以斷言直接打在那裡：
+            // 列上限那句**要在**，位元組那句**不能在**。
+            // （`chars_sent` 分不開：它數的是字，64 KB 數的是位元組，一個中文字
+            // 三個位元組，拿字數去斷言位元組上限什麼都證不到。）
+            let printed = String::from_utf8(out).expect("輸出是 UTF-8");
+            assert!(
+                printed.contains("只拿最新的 200 段去問"),
+                "列上限那一刀沒砍到，這一輪根本不是這條測試要測的那一輪：{printed}"
+            );
+            assert!(
+                !printed.contains("畫面證據超過上限"),
+                "位元組那一刀也砍了，於是這條測試分不出 truncated 是誰記上去的：{printed}"
+            );
+
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let rows = db.list_brain_outbound(10).expect("outbound log");
+            assert_eq!(rows.len(), 1, "這一輪應該只寫一列外送紀錄");
+            let row = &rows[0];
+            assert!(
+                row.truncated,
+                "201 段只送最新 200 段，列上限丟了一段卻記成沒截斷"
+            );
+            assert!(
+                row.chars_sent > 2_000,
+                "送出的字數不像包含 200 段，可能只測到一段：{}",
+                row.chars_sent
+            );
         }
 
         #[test]

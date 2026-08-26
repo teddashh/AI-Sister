@@ -1465,6 +1465,8 @@ alpha.70 把第一個接上去：`sister do`。
 - [ ] **每一次詢問都要在外送紀錄上留下一列。**
       `sister.exe brain log` 要看得到那幾列，而且它們算進今天的預算。
       查一下那幾列**不含原文**（外送紀錄只記結構和計數）。
+      再打開桌面的外送紀錄頁，剛才由 `sister watch` 寫下的每一列都要出現
+      「盯梢層」，不可以顯示英文 `watcher`，也不可以猜成解釋層。
 - [ ] **沒簽第二張同意書的時候，一列都不可以送。**
       `sister.exe consent --revoke cloud-reading` 之後再跑一次，
       要說出 `cloud-reading` 和怎麼簽，而且 `brain log` 不可以多出任何一列。
