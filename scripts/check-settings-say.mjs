@@ -37,6 +37,21 @@ const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui"
 const SRC = process.argv[2] ?? join(UI, "settings.js");
 const HTML = read(join(UI, "settings.html"));
 const boot = loader(read(SRC));
+const MAIN = read(resolve(UI, "../src-tauri/src/main.rs"));
+
+function settingsWriteWatching(state) {
+  const body = MAIN.match(/fn settings_write\([\s\S]*?struct PrivacyHealth/)?.[0] ?? "";
+  if (body.includes("heartbeat::watching_word") && body.includes("heartbeat::presence")) {
+    return state;
+  }
+  const wanted = {
+    recording: /Presence::Live\([\s\S]*?Phase::Recording[\s\S]*?\)\s*=>\s*"recording"/.test(body),
+    booting: /Presence::Live\([\s\S]*?Phase::Booting[\s\S]*?\)\s*=>\s*"booting"/.test(body),
+    thinking: /Presence::Thinking[\s\S]*?=>\s*"thinking"/.test(body),
+    none: /Presence::(?:Missing|Stalled)|watching_word/.test(body),
+  };
+  return wanted[state] ? state : "none";
+}
 
 const BASE = {
   path: "C:\\Users\\ted\\AppData\\Roaming\\sister\\config.toml",
@@ -107,7 +122,7 @@ async function open({
             writes.push(arg.settings);
             if (onWrite) return onWrite(arg.settings, (s) => (state = { ...state, ...s }));
             state = { ...state, ...arg.settings };
-            return { watching: "recording" };
+            return { watching: settingsWriteWatching(watching) };
           case "lint_url_rules":
             return [];
           case "privacy_health":
@@ -500,6 +515,29 @@ console.log("⑯ᵇ 大腦：兩個都齊，上一場剛停、腦還在想最後
   );
 }
 
+console.log("⑯ᶜ 存檔回條：上一場剛停時不可以叫他按一顆會被擋的開始鍵");
+{
+  const p = await open({ watching: "thinking" });
+  await p.save();
+  check("存檔回條說得出還在收尾", p.say().includes("還在把最後一段想完"), p.say());
+  check("沒有叫他按開始記錄", !p.say().includes("等你按下「開始記錄」"), p.say());
+}
+
+console.log("⑯ᵈ 沒存的命令不可以改寫現在的出境狀態");
+{
+  const p = await open({
+    config: { ...BASE, brain_command: "claude" },
+    cloud: true,
+    watching: "recording",
+  });
+  check("開場照已存檔值說正在錄", p.brainSay() === SENTENCE.live, p.brainSay());
+  p.node("[data-brain-command]").value = "";
+  for (const fn of p.node("[data-brain-command]").handlers.input ?? []) fn();
+  check("清空但沒存時只說這是未存改動", p.brainSay().includes("這是還沒存的改動，按下儲存才算數"), p.brainSay());
+  check("不可以宣布解釋層一次都不會醒", !p.brainSay().includes("一次都不會醒"), p.brainSay());
+  check("確實沒有送 settings_write", p.writes.length === 0, p.writes);
+}
+
 {
   const four = [
     SENTENCE.noCommand,
@@ -515,13 +553,37 @@ console.log("⑯ᵇ 大腦：兩個都齊，上一場剛停、腦還在想最後
   check("連 booting、thinking 六句都沒有兩句一樣", new Set(all).size === 6, all);
 }
 
-console.log("⑰ 打字當下就要換成「沒勾同意書」，不能等儲存");
+console.log("⑰ 打字當下要標成未存改動——而且不可以把同意書那句警告一起吞掉");
 {
   const p = await open({ cloud: false, watching: "none" });
   check("開場是沒填命令", p.brainSay() === SENTENCE.noCommand, p.brainSay());
   p.node("[data-brain-command]").value = "claude";
   for (const fn of p.node("[data-brain-command]").handlers.input ?? []) fn();
-  check("立刻變成第二張沒勾", p.brainSay() === SENTENCE.noConsent, p.brainSay());
+  check("立刻說這是未存改動", p.brainSay().includes("還沒存的改動"), p.brainSay());
+  // 同意書勾了沒是**磁碟上的事實**，跟這個框無關。一句「還沒存」替代掉一句
+  // 警告不叫少講一句——他存下去之後，擋住他的就是它。
+  check(
+    "同意書那句警告還在",
+    p.brainSay().includes("第二張同意書還沒勾"),
+    p.brainSay(),
+  );
+  check(
+    "而且是紅的",
+    p.node("[data-brain-say]").classList.contains("bad"),
+    p.brainSay(),
+  );
+}
+
+console.log("⑰ᵇ 勾了同意書的時候，未存改動不用扛那句警告");
+{
+  const p = await open({ cloud: true, watching: "none" });
+  p.node("[data-brain-command]").value = "claude";
+  for (const fn of p.node("[data-brain-command]").handlers.input ?? []) fn();
+  check(
+    "只說未存，不無中生有一句同意書警告",
+    p.brainSay() === "這是還沒存的改動，按下儲存才算數。",
+    p.brainSay(),
+  );
 }
 
 console.log("⑱ 儲存會送出命令和參數，空白會剪掉");
@@ -537,6 +599,15 @@ console.log("⑱ 儲存會送出命令和參數，空白會剪掉");
     JSON.stringify(sent.brain_args) === JSON.stringify(["-m", "flash"]),
     sent.brain_args,
   );
+}
+
+console.log("⑲ 桌面後端真的把 Thinking 接到設定頁和系統匣");
+{
+  const write = MAIN.match(/fn settings_write\([\s\S]*?struct PrivacyHealth/)?.[0] ?? "";
+  check("settings_write 從完整 Presence 推出 watching", write.includes("heartbeat::watching_word") && write.includes("heartbeat::presence"), write);
+  check("tray 標籤用 core 的 exhaustive 純函式", MAIN.includes("heartbeat::tray_record_label(presence)") && MAIN.includes("heartbeat::tray_quit_label(presence)"), "tray labels");
+  check("tray 按鍵按 core 的三向 action 分流", MAIN.includes("heartbeat::tray_record_action(presence)"), "tray action");
+  check("Thinking 那一向會顯示原因", MAIN.includes("TrayRecordAction::WaitForThinking => Err(") && MAIN.includes("heartbeat::occupied_why_of(presence, now)"), "thinking feedback");
 }
 
 console.log("");

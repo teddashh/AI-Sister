@@ -171,32 +171,19 @@ fn pause_state(shell: tauri::State<'_, Shell>) -> bool {
 /// 但行程還在——那兩分鐘裡回 `"none"` 會讓他按開始，然後兩句話對打。
 #[tauri::command]
 fn recording_state(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> String {
-    let now = match shell
+    let presence = shell
         .data_dir
         .as_ref()
         .map(|dir| sister_core::heartbeat::presence(dir, sister_core::now_ms()))
-    {
-        Some(sister_core::heartbeat::Presence::Live(
-            sister_core::heartbeat::Phase::Recording,
-        )) => "recording",
-        Some(sister_core::heartbeat::Presence::Live(
-            sister_core::heartbeat::Phase::Booting,
-        )) => "booting",
-        // 錄製已停、腦還在想最後一段。字母人不能說「在聽」（她不抓畫面了），
-        // 也不能說「沒有人在記錄」配一顆開始鍵（行程還握著資料庫）。
-        Some(sister_core::heartbeat::Presence::Thinking { .. }) => "thinking",
-        // 問不出資料目錄的時候，`pause_state` 回報「暫停」是為了少錄；
-        // 這裡回報「沒在錄」是為了少吹牛。同一個方向：不確定就往
-        // 「她做得比較少」那邊倒。
-        _ => "none",
-    };
+        .unwrap_or(sister_core::heartbeat::Presence::NeverStarted);
+    let now = sister_core::heartbeat::watching_word(presence);
     // 順手把系統匣那兩顆的字改對——手上已經有答案了，不必再讀一次磁碟。這不是
     // 唯一的刷新時機（見 [`refresh_tray`]），是最即時的那一個：視窗開著的時候，
     // 選單和字母人講的是同一秒的事。
     //
     // 那兩行字問的是「按下去會發生什麼」，不是「她在錄嗎」——正在起來的那一個
     // 也停得掉，也會被「結束」帶走，所以兩種都算佔著。
-    set_record_labels(&app, now != "none");
+    set_record_labels(&app, presence);
     now.to_string()
 }
 
@@ -219,18 +206,18 @@ fn refresh_tray(app: &tauri::AppHandle) {
     let Some(shell) = app.try_state::<Shell>() else {
         return;
     };
-    let (occupied, paused) = match &shell.data_dir {
+    let (presence, paused) = match &shell.data_dir {
         Some(dir) => (
             // `is_occupied` 不是 `is_recording`：這兩行字問的是「按下去會發生
             // 什麼」。理由在 [`recording_state`] 上面。
-            sister_core::heartbeat::is_occupied(dir, sister_core::now_ms()),
+            sister_core::heartbeat::presence(dir, sister_core::now_ms()),
             sister_core::pause::is_paused(dir),
         ),
         // 問不出資料目錄的時候，和 `recording_state` / `pause_state` 倒向同一邊：
         // 不確定就往「她做得比較少」那邊講。
-        None => (false, true),
+        None => (sister_core::heartbeat::Presence::NeverStarted, true),
     };
-    set_record_labels(app, occupied);
+    set_record_labels(app, presence);
     if let Some(item) = app.try_state::<PauseItem>() {
         let _ = item.0.set_text(pause_label(paused));
     }
@@ -239,15 +226,18 @@ fn refresh_tray(app: &tauri::AppHandle) {
 /// 「開始／停止記錄」和「結束」那兩行字。分出來是因為 [`recording_state`] 手上
 /// 已經有答案了，不必為了改字再讀一次磁碟。
 ///
-/// 收的是**佔不佔著這個目錄**，不是「在不在錄」：正在起來的那一個停得掉，也會
-/// 被「結束」帶走，而寫著「開始記錄」的那一顆在那幾分鐘按下去只會回一句「已經
-/// 有一個 sister record 在跑了」。
-fn set_record_labels(app: &tauri::AppHandle, occupied: bool) {
+/// 收完整 Presence，因為「佔著」有兩種按鍵後果：錄製／開機中能停止，Thinking
+/// 只能等收尾。標籤直接沿用 core 裡 exhaustive 的三向答案。
+fn set_record_labels(app: &tauri::AppHandle, presence: sister_core::heartbeat::Presence) {
     if let Some(item) = app.try_state::<RecordItem>() {
-        let _ = item.0.set_text(record_label(occupied));
+        let _ = item
+            .0
+            .set_text(sister_core::heartbeat::tray_record_label(presence));
     }
     if let Some(item) = app.try_state::<QuitItem>() {
-        let _ = item.0.set_text(quit_label(occupied));
+        let _ = item
+            .0
+            .set_text(sister_core::heartbeat::tray_quit_label(presence));
     }
 }
 
@@ -347,28 +337,6 @@ struct LastRun {
     why: Option<String>,
     /// `why` 是 `None` 的原因是**紀錄被清掉了**，不是那一版沒在記。
     why_gone: bool,
-}
-
-fn record_label(recording: bool) -> &'static str {
-    if recording {
-        "停止記錄"
-    } else {
-        "開始記錄"
-    }
-}
-
-/// 「結束」在正在錄的時候要把後果講出來。
-///
-/// 結束會**連 recorder 一起停**（見系統匣的 `"quit"`）。不停的話，他關掉的是
-/// 唯一看得見的那個視窗，而螢幕還在被記錄——那是上一版剛修掉的那個謊反過來
-/// 講一次，而反過來的這一版更糟：前者是少記了，後者是在他以為已經關掉之後
-/// 繼續記。
-fn quit_label(recording: bool) -> &'static str {
-    if recording {
-        "結束（記錄也會停）"
-    } else {
-        "結束"
-    }
 }
 
 /// 系統匣裡的那一顆開始／停止。理由和 [`PauseItem`] 一樣：一個永遠寫著同一句
@@ -1644,9 +1612,9 @@ fn eval_report_view(contents: String) -> Result<sister_core::eval::MetricsView, 
 /// 圖示），實際上那個行程幾分鐘前就掛了。這句話會替那件事背書。
 #[derive(Serialize)]
 struct WriteOutcome {
-    /// 心跳現在說什麼：`"recording"`／`"booting"`／`"none"`。決定那句話怎麼講。
+    /// 心跳現在說什麼：`"recording"`／`"booting"`／`"thinking"`／`"none"`。決定那句話怎麼講。
     ///
-    /// **三個值，不是一個布林。** 上一版是 `recording: bool`（`is_recording`），
+    /// **四個值，不是一個布林。** 上一版是 `recording: bool`（`is_recording`），
     /// 於是開機那幾分鐘這一頁說「現在沒有人在錄，所以這一份要等你按下**開始
     /// 記錄**才會生效」——而那顆按鈕在那幾分鐘按下去只會回一句「已經有一個
     /// sister record 在跑了」（見 [`start_recording`] 那道 `is_occupied` 閘
@@ -1679,15 +1647,16 @@ fn settings_write(
     c.save(&path).map_err(|e| format!("{e:#}"))?;
     // 存成功之後才問。反過來的話，一個存不進去的檔案會拿到一句「5 秒內換上」。
     Ok(WriteOutcome {
-        watching: match shell
+        watching: shell
             .data_dir
             .as_ref()
-            .and_then(|dir| sister_core::heartbeat::phase(dir, sister_core::now_ms()))
-        {
-            Some(sister_core::heartbeat::Phase::Recording) => "recording",
-            Some(sister_core::heartbeat::Phase::Booting) => "booting",
-            None => "none",
-        },
+            .map(|dir| {
+                sister_core::heartbeat::watching_word(sister_core::heartbeat::presence(
+                    dir,
+                    sister_core::now_ms(),
+                ))
+            })
+            .unwrap_or("none"),
     })
 }
 
@@ -2346,11 +2315,13 @@ fn forget_range(
         .ok_or_else(|| "找不到資料目錄，不能保證截圖真的會被刪掉".to_string())?;
     let frames = sister_core::config::Config::frames_dir(dir);
     // 在借出資料庫之前問，因為它讀的是磁碟上的心跳檔，不是資料庫。**問
-    // `phase` 不問 `is_occupied`**：理由在 `Erasure::shell_beat` 上面。
-    let beat = match sister_core::heartbeat::phase(dir, sister_core::now_ms()) {
-        Some(sister_core::heartbeat::Phase::Recording) => "live",
-        Some(sister_core::heartbeat::Phase::Booting) => "booting",
-        None => "gone",
+    // 要保留 Thinking；它和「當掉」的下一步不同。
+    let beat = match sister_core::heartbeat::watching_word(sister_core::heartbeat::presence(
+        dir,
+        sister_core::now_ms(),
+    )) {
+        "recording" => "live",
+        other => other,
     };
     with_db_mut(&shell, |db| {
         let report = db
@@ -2786,12 +2757,16 @@ fn main() {
             //
             // 這兩行字問的是「按下去會發生什麼」，所以看的是**有沒有人佔著**
             // ——理由在 [`set_record_labels`] 上面。
-            let occupied_now =
-                recording_state(app.handle().clone(), app.state::<Shell>()) != "none";
+            let presence_now = app
+                .state::<Shell>()
+                .data_dir
+                .as_ref()
+                .map(|dir| sister_core::heartbeat::presence(dir, sister_core::now_ms()))
+                .unwrap_or(sister_core::heartbeat::Presence::NeverStarted);
             let record_item = MenuItem::with_id(
                 app,
                 "record",
-                record_label(occupied_now),
+                sister_core::heartbeat::tray_record_label(presence_now),
                 true,
                 None::<&str>,
             )?;
@@ -2820,8 +2795,13 @@ fn main() {
             } else {
                 None
             };
-            let quit_item =
-                MenuItem::with_id(app, "quit", quit_label(occupied_now), true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(
+                app,
+                "quit",
+                sister_core::heartbeat::tray_quit_label(presence_now),
+                true,
+                None::<&str>,
+            )?;
             let menu = match &metrics_item {
                 Some(metrics_item) => Menu::with_items(
                     app,
@@ -2881,19 +2861,30 @@ fn main() {
                         // 起來的那幾分鐘走 `start_recording` 只會撞上它自己那道
                         // `is_occupied` 閘門，回一句「已經有一個在跑了」——而他
                         // 按的是一顆寫著「開始記錄」的按鈕。
-                        let on = recording_state(app.clone(), shell.clone()) != "none";
-                        let done = if on {
-                            stop_recording(shell.clone())
-                        } else {
-                            start_recording(shell.clone())
+                        let now = sister_core::now_ms();
+                        let presence = shell
+                            .data_dir
+                            .as_ref()
+                            .map(|dir| sister_core::heartbeat::presence(dir, now))
+                            .unwrap_or(sister_core::heartbeat::Presence::NeverStarted);
+                        let action = sister_core::heartbeat::tray_record_action(presence);
+                        let done = match action {
+                            sister_core::heartbeat::TrayRecordAction::Start => {
+                                start_recording(shell.clone())
+                            }
+                            sister_core::heartbeat::TrayRecordAction::Stop => {
+                                stop_recording(shell.clone())
+                            }
+                            sister_core::heartbeat::TrayRecordAction::WaitForThinking => Err(
+                                sister_core::heartbeat::occupied_why_of(presence, now)
+                                    .expect("Thinking 一定有 occupied_why"),
+                            ),
                         };
                         match done {
                             // 立刻改字，不等下一次輪詢——按了之後那一顆要當場
                             // 看起來不一樣，不然他會再按一次。
                             Ok(()) => {
-                                if let Some(item) = app.try_state::<RecordItem>() {
-                                    let _ = item.0.set_text(record_label(!on));
-                                }
+                                refresh_tray(app);
                             }
                             Err(e) => {
                                 tracing::error!("開始／停止記錄失敗：{e}");

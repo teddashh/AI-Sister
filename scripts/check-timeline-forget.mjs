@@ -297,6 +297,17 @@ console.log("⑥ 那份預覽要對得起帳：說不見的、說留下來的，
   check("整段話裡沒有 NaN / undefined", p.nonsense().length === 0, p.nonsense());
 }
 
+console.log("⑥ᵇ 想最後一段不是當掉");
+{
+  const p = await open({
+    forget_range: erasure({ sessions_left: 1, shell_beat: "thinking" }),
+  });
+  await p.press();
+  await p.press();
+  check("說得出解釋層還在收尾", p.say().includes("還在把最後一段想完"), p.say());
+  check("不可以說她當掉了", !p.say().includes("她當掉了"), p.say());
+}
+
 console.log("⑦ 那一天本來就是空的，重讀又失敗——右邊沒有「那一份」可以指");
 {
   // ④ 和 ⑤ 中間還有一格：讀**成功**了，但那一天什麼都沒有。畫面上留下的是

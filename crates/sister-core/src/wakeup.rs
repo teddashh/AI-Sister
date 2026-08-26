@@ -340,25 +340,30 @@ impl Handle {
 }
 
 impl Drop for Handle {
-    /// **這裡也要蓋「想最後一段」，不能只有 [`Self::shutdown`] 蓋。**
+    /// 正常收工會先 `wake.take()` 再走 [`Self::shutdown`]；`Handle` 出生到那一行
+    /// 之間沒有會提早回傳的 `?`／`return Err`／`bail!`。因此還握著 thread 的
+    /// `Drop` 是 panic unwind 的保險路徑。
     ///
-    /// 收工的正路是 `wake.take()` 之後呼叫 `shutdown()`，那條路上
-    /// [`Self::mark_thinking`] 先跑。但 `record` 是一個很長的函式，中途任何
-    /// 一個 `?` 冒出去都會讓這顆 `Handle` 走 `Drop` 而不是 `shutdown`——
-    /// 而 `Drop` 一樣會 `join`，一樣會讓解釋層把最後一段想完（最多兩輪
-    /// CLI）。心跳卻停在迴圈跳出前那一拍 `Recording` 上。
+    /// join 期間仍要說 Thinking，避免另一個 recorder 進來；join 回來後這個
+    /// 行程已經沒有人在想，必須立刻蓋墓碑，不能把兩分鐘上限留在磁碟上。
     ///
-    /// 16 秒之後那一拍過期，[`heartbeat::phase`] 把 `Stalled` 壓成 `None`，
-    /// 於是 [`heartbeat::is_occupied`] 回 false——**而行程還活著、還握著
-    /// 資料庫**。那正是這一版要修掉的那個洞，只是換一個入口進來。
+    /// **但只有這條路蓋。** [`Self::shutdown`] 收 `self`，所以正路上這支
+    /// `drop` 也會跑一次；在這裡蓋墓碑等於把 `record` 收工那一段的順序倒過來，
+    /// 而那一段自己的註解寫著「順序不能倒——倒了的話墓碑會在 CLI 還跑著的
+    /// 時候放行第二個 recorder」。
     fn drop(&mut self) {
-        if self.thread.is_some() {
-            self.mark_thinking();
-        }
+        // `shutdown()` 已經把執行緒收走 ⇒ 正路 ⇒ 墓碑歸呼叫端，這裡什麼都不做。
+        let Some(t) = self.thread.take() else {
+            return;
+        };
+        self.mark_thinking();
         self.shared.stop.store(true, Ordering::SeqCst);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+        let _ = t.join();
+        // 走到這裡代表沒有人呼叫 `shutdown()`，也就是 panic unwind。後面不會
+        // 有人蓋墓碑，而心跳上還寫著「想最後一段，最多兩分鐘」——留著的話，
+        // 一個已經不存在的行程會讓 `is_occupied` 假 true 240 秒（這一版之前
+        // 是過期心跳的 16 秒，那是變壞不是變好）。
+        heartbeat::stop(&self.data_dir, crate::now_ms());
     }
 }
 
@@ -1363,15 +1368,9 @@ mod tests {
         assert!(!heartbeat::is_recording(&tmp.0, crate::now_ms()));
     }
 
-    /// `Drop` 走的路和 `shutdown()` 一樣要蓋「想最後一段」。
-    ///
-    /// `record` 是一個很長的函式，中途任何一個 `?` 冒出去，這顆 `Handle` 就
-    /// 走 `Drop` 而不是 `shutdown`——而 `Drop` 一樣 `join`，一樣讓解釋層把
-    /// 最後一段想完。只在 `shutdown()` 裡蓋的話，這條路上心跳會停在迴圈跳出
-    /// 前那一拍 `Recording`，16 秒後過期，`is_occupied` 回 false，而行程還
-    /// 握著資料庫——同一個洞，換一個入口。
+    /// `Drop` 會等解釋執行緒退出；退出之後磁碟也必須說沒有人在想。
     #[test]
-    fn dropping_the_handle_also_says_it_is_still_thinking() {
+    fn dropping_the_handle_leaves_a_tombstone_after_joining() {
         let tmp = Tmp::new("drop-thinking");
         grant_cloud(&tmp.0);
         let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
@@ -1402,26 +1401,74 @@ mod tests {
         .expect("spawn")
         .expect("armed");
 
-        // **不呼叫 shutdown()。** 這就是 `?` 冒出去那條路。
+        // **不呼叫 shutdown()。** 模擬 panic unwind 直接丟掉 owner。
         drop(handle);
 
-        // 心跳那一拍已經過期很久（beat_at + 16 秒 + 1）。修好之前這裡是
-        // `Stalled` → `phase` 壓成 `None` → `is_occupied` 回 false。
-        let long_after = beat_at + heartbeat::STALE_AFTER_MS + 1;
-        match heartbeat::presence(&tmp.0, long_after) {
-            heartbeat::Presence::Thinking { .. } => {}
-            other => panic!(
-                "Drop 之後心跳該是 Thinking，實際是 {other:?}（過期的 Recording 會讓 is_occupied 回 false）"
-            ),
-        }
+        let after_drop = crate::now_ms();
         assert!(
-            !heartbeat::is_recording(&tmp.0, long_after),
-            "她已經不抓畫面了，不可以還說在錄"
+            !heartbeat::is_occupied(&tmp.0, after_drop),
+            "Drop 已經 join 完、行程不再想了，磁碟不可以還宣稱有人在想"
+        );
+        assert!(matches!(
+            heartbeat::presence(&tmp.0, after_drop),
+            heartbeat::Presence::Stopped { .. }
+        ));
+    }
+
+    /// 正路上墓碑**歸呼叫端**，`Drop` 不准搶著蓋。
+    ///
+    /// `shutdown(mut self)` 收 `self`，所以它跑完 `Drop` 也會跑一次。要是
+    /// `Drop` 在那裡蓋墓碑，`record` 收工那一段的順序就倒了——那一段自己
+    /// 寫著「倒了的話墓碑會在 CLI 還跑著的時候放行第二個 recorder」，而
+    /// `rec.finish()`（寫資料庫、可能失敗）還排在後面。
+    #[test]
+    fn shutdown_leaves_the_tombstone_to_the_caller() {
+        let tmp = Tmp::new("shutdown-tombstone");
+        grant_cloud(&tmp.0);
+        let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+        let ts = 1_700_000_950_000;
+        let fid = seed_worth(&mut db, ts);
+        drop(db);
+        let core = {
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("reopen");
+            db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at
+        };
+        let json = format!(
+            r#"{{"segment_ref":"segment:{core}","activity":"x","entities":[],"confidence":0.5,"evidence_refs":["frame:{fid}"],"open_questions":[]}}"#
+        );
+        let sentinel = tmp.0.join("started");
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel, 0);
+
+        heartbeat::beat(&tmp.0, crate::now_ms()).expect("recording beat");
+        let handle = Handle::maybe_spawn(
+            &tmp.0,
+            BrainConfig {
+                command,
+                args,
+                ..Default::default()
+            },
+            ts,
+        )
+        .expect("spawn")
+        .expect("armed");
+
+        handle.shutdown();
+
+        // 腦已經加入，但 CLI 還要寫 session end / finish()。這段路上
+        // `is_occupied` 必須還是 true，直到呼叫端自己蓋墓碑。
+        let after = crate::now_ms();
+        assert!(
+            heartbeat::is_occupied(&tmp.0, after),
+            "shutdown() 之後墓碑就蓋上去的話，第二個 recorder 會在 CLI 還跑著的時候進來"
         );
         assert!(
-            heartbeat::is_occupied(&tmp.0, long_after),
-            "行程還握著資料庫，這時候放第二個 recorder 進來就是兩份各錄一份"
+            !heartbeat::is_recording(&tmp.0, after),
+            "迴圈已經跳出，不可以還說在錄"
         );
+
+        // 呼叫端蓋上去，這時候才放開。
+        heartbeat::stop(&tmp.0, crate::now_ms());
+        assert!(!heartbeat::is_occupied(&tmp.0, crate::now_ms()));
     }
 
     #[test]

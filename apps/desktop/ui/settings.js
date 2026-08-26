@@ -452,16 +452,18 @@ let queryLogWas = null;
 let cloudOk = null;
 
 /**
- * 心跳現在說什麼：`"recording"`／`"booting"`／`"none"`。
+ * 心跳現在說什麼：`"recording"`／`"booting"`／`"thinking"`／`"none"`。
  *
  * 和 `WriteOutcome.watching` 同一個判斷，不是另一個。存完用後端剛回的那一份；
- * 開場問 `recording_state`（同一顆 `heartbeat::phase`）。認不得的值走
- * `"none"`：三句裡只有它不會替一件沒發生的事背書。
+ * 開場問 `recording_state`（兩邊都從同一顆 `heartbeat::presence` 推出）。認不得的值走
+ * `"none"`：四句裡只有它不會替一件沒發生的事背書。
  */
 let watchingNow = "none";
+let savedBrainCommand = "";
 
 function apply(s) {
   queryLogWas = s.query_log;
+  savedBrainCommand = (s.brain_command ?? "").trim();
   el.path.textContent = s.path;
   if (el.brainCommand) el.brainCommand.value = s.brain_command ?? "";
   if (el.brainArgs) el.brainArgs.value = (s.brain_args ?? []).join("\n");
@@ -492,6 +494,23 @@ function paintBrain() {
   el.brainSay.hidden = false;
   el.brainSay.classList.remove("bad", "ok");
   const cmd = (el.brainCommand?.value ?? "").trim();
+  if (cmd !== savedBrainCommand) {
+    // 這個框裡的字還沒進 config.toml，所以不可以拿它宣布機器**現在**在做
+    // 什麼——這是整頁唯一一個會把螢幕上的字送出這台機器的設定，講錯的方向
+    // 是「說它關了而它還在送」。
+    //
+    // 但「第二張同意書勾了沒」是**磁碟上的事實**，跟這個框無關，所以那句
+    // 警告不准跟著被吞掉：他存下去之後，擋住他的就是它。一句「還沒存」
+    // 替代掉一句警告，不叫少講一句。
+    if (cloudOk === false) {
+      el.brainSay.classList.add("bad");
+      el.brainSay.textContent =
+        "這是還沒存的改動，按下儲存才算數。而且第二張同意書還沒勾：就算存了，螢幕上的字也一次都不會交給這支 CLI。";
+      return;
+    }
+    el.brainSay.textContent = "這是還沒存的改動，按下儲存才算數。";
+    return;
+  }
   if (!cmd) {
     // 1. 沒填命令（不管同意書勾了沒）。
     el.brainSay.textContent =
@@ -876,6 +895,7 @@ async function save() {
     if (
       outcome?.watching === "recording" ||
       outcome?.watching === "booting" ||
+      outcome?.watching === "thinking" ||
       outcome?.watching === "none"
     ) {
       watchingNow = outcome.watching;
@@ -887,6 +907,8 @@ async function save() {
         ? "存好了。正在跑的 record 會在 5 秒內換上這一份。"
         : watchingNow === "booting"
           ? "存好了。有一個 sister record 正在起來（多半在開資料庫）——它一開始錄就會換上這一份，不必再按「開始記錄」。"
+          : watchingNow === "thinking"
+            ? "存好了。上一場錄製剛停，解釋層還在把最後一段想完——想完之後，下一場才會用這一份。"
           : "存好了——不過現在沒有人在錄，所以這一份要等你按下「開始記錄」才會生效。";
     // 把題庫關掉只擋**新的**問題。不講的話，「不要記下我問過的問題」讀起來像
     // 「那些問題沒了」——而 `queries` 是這整顆資料庫裡唯一一張存著**他自己打
