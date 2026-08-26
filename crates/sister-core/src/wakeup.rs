@@ -15,9 +15,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use chrono::{Local, LocalResult, NaiveDate, TimeZone};
 
-use crate::brain::{self, InterpretInput, SkipReason as BrainSkip};
+use crate::brain::{self, InterpretInput, OutboundOutcome, SkipReason as BrainSkip};
 use crate::config::{BrainConfig, Config};
 use crate::db::Db;
+use crate::heartbeat;
 use crate::model::Millis;
 use crate::reviewer::{self, ReviewInput, ReviewKind, SkipReason as ReviewSkip};
 use crate::segment::{LOOKAROUND_MS, TIME_CAP_MS};
@@ -29,6 +30,51 @@ const SLEEP_SLICE: Duration = Duration::from_millis(50);
 /// 沒設定 CLI 時，執行緒根本不會起來。見 [`Handle::maybe_spawn`]。
 pub fn armed(brain: &BrainConfig) -> bool {
     brain.cli().is_some()
+}
+
+/// 收工時還開著的最後一段怎麼了。
+///
+/// 三種空各一句，不准和 [`format_report`] 裡「這一場一次都沒醒」「醒了沒東
+/// 西可想」印成同一句——那些講的是整場已關閉的段落，這一個講的是按下停止
+/// 的那一刻還開著的尾巴。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LastSegment {
+    /// 沒走到收工那一步（沒設定 CLI、執行緒沒起來、沒同意書、預算用盡）。
+    #[default]
+    Skipped,
+    /// 看過了，沒有值得理解的訊號。痕跡在 `brain_skips`，下次開機
+    /// [`Engine::catch_up`] 看得到已關閉的那一段。
+    NothingWorth,
+    /// 跑過 CLI，在時限內結束。
+    Ran,
+    /// 等到 [`shutdown_think_bound`] 的上限，沒想完。痕跡在外送紀錄的
+    /// `timeout`，下次開機 catch_up 會再補一次。
+    TimedOut,
+}
+
+/// 收工時解釋層把最後一段想完的牆上時間上限。
+///
+/// 腦執行緒可能正好卡在一輪 CLI（最多 [`brain::SPAWN_TIMEOUT`]），看到停止
+/// 旗標之後還會再跑一輪把開著的最後一段想完（再一個 SPAWN_TIMEOUT）。槽是
+/// **並行的**，所以不是 concurrency × 120 秒。
+pub fn shutdown_think_bound() -> Duration {
+    brain::SPAWN_TIMEOUT + brain::SPAWN_TIMEOUT
+}
+
+pub fn shutdown_think_bound_secs() -> u64 {
+    shutdown_think_bound().as_secs()
+}
+
+pub fn shutdown_think_bound_ms() -> i64 {
+    shutdown_think_bound().as_millis() as i64
+}
+
+/// 錄製已停、開始等解釋層之前印的那一句。上限是「最多」，不是「一定」。
+pub fn shutdown_wait_notice() -> String {
+    format!(
+        "錄製已停；解釋層還要把最後一段想完（最多 {} 秒）。",
+        shutdown_think_bound_secs()
+    )
 }
 
 /// 一場錄製裡腦自己做了什麼。給收工摘要用。
@@ -47,6 +93,7 @@ pub struct Report {
     pub last_reviewer_skip: Option<String>,
     /// 執行緒自己的資料庫開不起來。錄製不受影響。
     pub open_failed: Option<String>,
+    pub last_segment: LastSegment,
 }
 
 impl Report {
@@ -63,6 +110,7 @@ impl Report {
             reviewer_nothing: 0,
             last_reviewer_skip: None,
             open_failed: None,
+            last_segment: LastSegment::Skipped,
         }
     }
 }
@@ -127,6 +175,20 @@ pub fn format_report(r: &Report) -> String {
         if let Some(skip) = &r.last_reviewer_skip {
             out.push('\n');
             out.push_str(skip);
+        }
+    }
+    match r.last_segment {
+        LastSegment::Skipped | LastSegment::Ran => {}
+        LastSegment::NothingWorth => {
+            out.push('\n');
+            out.push_str("收工時看過還開著的最後一段，沒有值得理解的訊號可想。");
+        }
+        LastSegment::TimedOut => {
+            out.push('\n');
+            out.push_str(&format!(
+                "收工時等到上限（{} 秒），還開著的最後一段沒想完。",
+                shutdown_think_bound_secs()
+            ));
         }
     }
     out
@@ -227,6 +289,7 @@ struct Shared {
 pub struct Handle {
     shared: Arc<Shared>,
     thread: Option<std::thread::JoinHandle<Report>>,
+    data_dir: PathBuf,
 }
 
 impl Handle {
@@ -247,13 +310,15 @@ impl Handle {
             brain: Mutex::new(brain),
         });
         let thread_shared = shared.clone();
+        let worker_dir = data_dir.clone();
         let thread = std::thread::Builder::new()
             .name("sister-brain".into())
-            .spawn(move || worker(db_path, data_dir, thread_shared, now))
+            .spawn(move || worker(db_path, worker_dir, thread_shared, now))
             .context("spawn sister-brain thread")?;
         Ok(Self {
             shared,
             thread: Some(thread),
+            data_dir,
         })
     }
 
@@ -270,7 +335,12 @@ impl Handle {
     }
 
     /// 錄製要停了。會把還開著的最後一段也想一遍，然後加入執行緒。
+    ///
+    /// 加入之前先把心跳改成「沒在錄、但還佔著」：迴圈已經跳出，再蓋
+    /// Recording 是謊；蓋墓碑則是另一個謊（行程還握著資料庫）。見
+    /// [`heartbeat::beat_thinking`]。
     pub fn shutdown(mut self) -> Report {
+        self.mark_thinking();
         self.shared.stop.store(true, Ordering::SeqCst);
         match self.thread.take() {
             Some(t) => t.join().unwrap_or_else(|_| Report {
@@ -280,10 +350,30 @@ impl Handle {
             None => Report::unarmed(),
         }
     }
+
+    fn mark_thinking(&self) {
+        let now = crate::now_ms();
+        let until = now.saturating_add(shutdown_think_bound_ms());
+        let _ = heartbeat::beat_thinking(&self.data_dir, now, until);
+    }
 }
 
 impl Drop for Handle {
+    /// **這裡也要蓋「想最後一段」，不能只有 [`Self::shutdown`] 蓋。**
+    ///
+    /// 收工的正路是 `wake.take()` 之後呼叫 `shutdown()`，那條路上
+    /// [`Self::mark_thinking`] 先跑。但 `record` 是一個很長的函式，中途任何
+    /// 一個 `?` 冒出去都會讓這顆 `Handle` 走 `Drop` 而不是 `shutdown`——
+    /// 而 `Drop` 一樣會 `join`，一樣會讓解釋層把最後一段想完（最多兩輪
+    /// CLI）。心跳卻停在迴圈跳出前那一拍 `Recording` 上。
+    ///
+    /// 16 秒之後那一拍過期，[`heartbeat::phase`] 把 `Stalled` 壓成 `None`，
+    /// 於是 [`heartbeat::is_occupied`] 回 false——**而行程還活著、還握著
+    /// 資料庫**。那正是這一版要修掉的那個洞，只是換一個入口進來。
     fn drop(&mut self) {
+        if self.thread.is_some() {
+            self.mark_thinking();
+        }
         self.shared.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -405,7 +495,11 @@ impl Engine {
         if !armed(&self.brain) {
             return Ok(());
         }
-        self.maybe_eod(now, false)
+        self.maybe_eod(now, false)?;
+        // 上一場收工時沒想完的最後一段：session 已結束，那些章節已關閉。
+        // LOOKAROUND_MS 之內再開始錄，這裡會補上；更久以前的那一筆 Timeout
+        // 還留在外送紀錄裡，只是這一次看不到。
+        self.maybe_interpret(now, false)
     }
 
     fn step(&mut self, now: Millis, kind: Step) -> Result<()> {
@@ -500,6 +594,9 @@ impl Engine {
             }
         };
         if to <= from {
+            if include_open {
+                self.report.last_segment = LastSegment::NothingWorth;
+            }
             return Ok(());
         }
 
@@ -526,9 +623,22 @@ impl Engine {
                 self.report.last_interpreter_skip = result.skip.map(|s| s.message()).or(msg);
                 Ok(())
             }
-            Some(BrainSkip::NothingWorthInterpreting { .. }) => Ok(()),
+            Some(BrainSkip::NothingWorthInterpreting { remaining }) => {
+                if include_open {
+                    let skip = BrainSkip::NothingWorthInterpreting {
+                        remaining: *remaining,
+                    };
+                    self.db
+                        .insert_brain_skip(now, skip.as_str(), None, &skip.message())?;
+                    self.report.last_segment = LastSegment::NothingWorth;
+                }
+                Ok(())
+            }
             None => {
                 if dry.jobs.is_empty() {
+                    if include_open {
+                        self.report.last_segment = LastSegment::NothingWorth;
+                    }
                     return Ok(());
                 }
                 self.report.interpreter_wakes += 1;
@@ -536,6 +646,17 @@ impl Engine {
                 self.report.interpreter_jobs += result.ran.len() as u32;
                 self.report.interpreter_cards +=
                     result.ran.iter().filter(|j| j.card.is_some()).count() as u32;
+                if include_open {
+                    self.report.last_segment = if result
+                        .ran
+                        .iter()
+                        .any(|j| j.outcome == OutboundOutcome::Timeout)
+                    {
+                        LastSegment::TimedOut
+                    } else {
+                        LastSegment::Ran
+                    };
+                }
                 match result.skip {
                     Some(BrainSkip::NothingWorthInterpreting { .. }) => {
                         self.report.interpreter_nothing += 1;
@@ -617,6 +738,7 @@ mod tests {
     use super::*;
     use crate::consent::{Consent, Sheet};
     use crate::db::Db;
+    use crate::heartbeat;
     use crate::model::{FocusEvent, FocusKind, FocusSnapshot, FrameCapture, OcrBlock};
 
     struct Tmp(PathBuf);
@@ -746,19 +868,62 @@ mod tests {
             interpreter_nothing: 2,
             ..Report::unarmed()
         });
+        let last_nothing = format_report(&Report {
+            armed: true,
+            last_segment: LastSegment::NothingWorth,
+            ..Report::unarmed()
+        });
+        let last_timeout = format_report(&Report {
+            armed: true,
+            last_segment: LastSegment::TimedOut,
+            ..Report::unarmed()
+        });
         let reviewer_never = never.clone();
         assert_ne!(unarmed, never, "沒 CLI 和沒醒過印成同一句");
         assert_ne!(never, woke_nothing, "沒醒過和醒了沒東西印成同一句");
+        assert_ne!(
+            never, last_nothing,
+            "這一場一次都沒醒，和收工時最後一段沒東西可想，印成同一句"
+        );
+        assert_ne!(
+            last_nothing, last_timeout,
+            "最後一段沒東西可想，和等到上限沒想完，印成同一句"
+        );
+        assert_ne!(
+            never, last_timeout,
+            "一次都沒醒，和等到上限沒想完，印成同一句"
+        );
         assert!(unarmed.contains("[brain] command"), "{unarmed}");
         assert!(never.contains("一次都沒醒"), "{never}");
         assert!(never.contains("根本沒被叫醒"), "{never}");
         assert!(woke_nothing.contains("醒過"), "{woke_nothing}");
         assert!(woke_nothing.contains("沒有「值得理解」"), "{woke_nothing}");
+        assert!(last_nothing.contains("還開著的最後一段"), "{last_nothing}");
+        assert!(
+            last_nothing.contains("沒有值得理解的訊號可想"),
+            "{last_nothing}"
+        );
+        assert!(!last_nothing.contains("沒想完"), "{last_nothing}");
+        assert!(last_timeout.contains("等到上限"), "{last_timeout}");
+        assert!(last_timeout.contains("沒想完"), "{last_timeout}");
+        assert!(
+            !last_timeout.contains("沒有值得理解的訊號可想"),
+            "{last_timeout}"
+        );
         assert!(reviewer_never.contains("審閱層這一場一次都沒醒"), "{never}");
         assert!(
             !unarmed.contains("沒有已關閉的段落"),
             "沒 CLI 不該講成沒段落：{unarmed}"
         );
+        let wait = shutdown_wait_notice();
+        assert!(wait.contains("錄製已停"), "{wait}");
+        assert!(wait.contains("最後一段"), "{wait}");
+        assert!(
+            wait.contains(&shutdown_think_bound_secs().to_string()),
+            "{wait}"
+        );
+        assert_ne!(wait, last_timeout, "開始等之前那句和等到上限那句印成同一句");
+        assert!(!wait.contains("一次都沒醒"), "{wait}");
     }
 
     #[test]
@@ -1074,5 +1239,168 @@ mod tests {
             text.contains("日終") || text.contains("審閱層自己醒了") || text.contains("醒過"),
             "{text}"
         );
+    }
+
+    /// 按下停止之後，畫面說的和行程真實狀態一致：不在錄，但還佔著。
+    ///
+    /// 假 CLI 睡 2 秒，所以收工那一窗看得到、不必等 120 秒。
+    #[test]
+    fn after_stop_the_beat_says_not_recording_while_the_process_still_thinks() {
+        let tmp = Tmp::new("stop-window");
+        grant_cloud(&tmp.0);
+        let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+        let ts = 1_700_000_800_000;
+        let fid = seed_worth(&mut db, ts);
+        drop(db);
+        let segs = {
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("reopen");
+            db.chapters_for_range(ts, ts + 400_000).expect("segs")
+        };
+        let core = segs[0].core_started_at;
+        let json = format!(
+            r#"{{"segment_ref":"segment:{core}","activity":"x","entities":[],"confidence":0.5,"evidence_refs":["frame:{fid}"],"open_questions":[]}}"#
+        );
+        let sentinel = tmp.0.join("started");
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel, 2);
+        heartbeat::beat(&tmp.0, crate::now_ms()).expect("recording beat");
+        assert!(
+            heartbeat::is_recording(&tmp.0, crate::now_ms()),
+            "前提：停止之前她在錄"
+        );
+
+        let handle = Handle::maybe_spawn(
+            &tmp.0,
+            BrainConfig {
+                command,
+                args,
+                ..Default::default()
+            },
+            ts,
+        )
+        .expect("spawn")
+        .expect("armed");
+
+        let dir = tmp.0.clone();
+        let joined = std::thread::spawn(move || handle.shutdown());
+
+        let gave_up = Instant::now() + Duration::from_secs(2);
+        loop {
+            let now = crate::now_ms();
+            if !heartbeat::is_recording(&dir, now) {
+                assert!(
+                    heartbeat::is_occupied(&dir, now),
+                    "行程還在想最後一段，目錄卻說沒人佔著"
+                );
+                match heartbeat::presence(&dir, now) {
+                    heartbeat::Presence::Thinking { .. } => {}
+                    other => panic!("停止之後心跳該是 Thinking，實際是 {other:?}"),
+                }
+                let why = heartbeat::occupied_why(&dir, now).expect("佔著就要說為什麼");
+                assert!(why.contains("想最後一段"), "{why}");
+                assert!(why.contains("秒"), "{why}");
+                break;
+            }
+            assert!(
+                Instant::now() < gave_up,
+                "shutdown 開始兩秒後心跳還在說她在錄"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let report = joined.join().expect("join");
+        assert!(
+            report.last_segment == LastSegment::Ran
+                || report.last_segment == LastSegment::TimedOut
+                || report.open_failed.is_some(),
+            "最後一段該被想過：{report:?}"
+        );
+        heartbeat::stop(&tmp.0, crate::now_ms());
+        assert!(
+            !heartbeat::is_occupied(&tmp.0, crate::now_ms()),
+            "墓碑之後才可以再開一個"
+        );
+        assert!(!heartbeat::is_recording(&tmp.0, crate::now_ms()));
+    }
+
+    /// `Drop` 走的路和 `shutdown()` 一樣要蓋「想最後一段」。
+    ///
+    /// `record` 是一個很長的函式，中途任何一個 `?` 冒出去，這顆 `Handle` 就
+    /// 走 `Drop` 而不是 `shutdown`——而 `Drop` 一樣 `join`，一樣讓解釋層把
+    /// 最後一段想完。只在 `shutdown()` 裡蓋的話，這條路上心跳會停在迴圈跳出
+    /// 前那一拍 `Recording`，16 秒後過期，`is_occupied` 回 false，而行程還
+    /// 握著資料庫——同一個洞，換一個入口。
+    #[test]
+    fn dropping_the_handle_also_says_it_is_still_thinking() {
+        let tmp = Tmp::new("drop-thinking");
+        grant_cloud(&tmp.0);
+        let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+        let ts = 1_700_000_950_000;
+        let fid = seed_worth(&mut db, ts);
+        drop(db);
+        let core = {
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("reopen");
+            db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at
+        };
+        let json = format!(
+            r#"{{"segment_ref":"segment:{core}","activity":"x","entities":[],"confidence":0.5,"evidence_refs":["frame:{fid}"],"open_questions":[]}}"#
+        );
+        let sentinel = tmp.0.join("started");
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel, 0);
+
+        let beat_at = crate::now_ms();
+        heartbeat::beat(&tmp.0, beat_at).expect("recording beat");
+        let handle = Handle::maybe_spawn(
+            &tmp.0,
+            BrainConfig {
+                command,
+                args,
+                ..Default::default()
+            },
+            ts,
+        )
+        .expect("spawn")
+        .expect("armed");
+
+        // **不呼叫 shutdown()。** 這就是 `?` 冒出去那條路。
+        drop(handle);
+
+        // 心跳那一拍已經過期很久（beat_at + 16 秒 + 1）。修好之前這裡是
+        // `Stalled` → `phase` 壓成 `None` → `is_occupied` 回 false。
+        let long_after = beat_at + heartbeat::STALE_AFTER_MS + 1;
+        match heartbeat::presence(&tmp.0, long_after) {
+            heartbeat::Presence::Thinking { .. } => {}
+            other => panic!(
+                "Drop 之後心跳該是 Thinking，實際是 {other:?}（過期的 Recording 會讓 is_occupied 回 false）"
+            ),
+        }
+        assert!(
+            !heartbeat::is_recording(&tmp.0, long_after),
+            "她已經不抓畫面了，不可以還說在錄"
+        );
+        assert!(
+            heartbeat::is_occupied(&tmp.0, long_after),
+            "行程還握著資料庫，這時候放第二個 recorder 進來就是兩份各錄一份"
+        );
+    }
+
+    #[test]
+    fn shutdown_with_nothing_worth_does_not_print_timed_out() {
+        let tmp = Tmp::new("last-nothing");
+        grant_cloud(&tmp.0);
+        let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+        let ts = 1_700_000_900_000;
+        let brain = BrainConfig {
+            command: "python3".into(),
+            args: vec!["-c".into(), "raise SystemExit(1)".into()],
+            ..Default::default()
+        };
+        let mut engine = Engine::new(db, tmp.0.clone(), brain, ts).expect("engine");
+        engine.step(ts + 5_000, Step::Shutdown).expect("shutdown");
+        assert_eq!(engine.report.last_segment, LastSegment::NothingWorth);
+        let text = format_report(&engine.report);
+        assert!(text.contains("還開著的最後一段"), "{text}");
+        assert!(text.contains("沒有值得理解的訊號可想"), "{text}");
+        assert!(!text.contains("沒想完"), "{text}");
+        assert!(text.contains("一次都沒醒"), "{text}");
     }
 }

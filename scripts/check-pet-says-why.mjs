@@ -730,6 +730,20 @@ console.log("㉗ `?asleep=nobeat` 這條 demo 路徑，在 booting 上也不可�
   check("三行都還在", detail.split("\n").length === 3, detail.split("\n").length);
 }
 
+console.log("㉘ 錄製已停、腦還在想最後一段：不是「在聽」，也不是「沒有人在記錄」");
+{
+  // 按下停止之後那兩分鐘。心跳說沒在錄（她不抓畫面了），行程還握著資料庫。
+  // 畫面若走 `"none"`，他會按開始，然後撞上佔著閘門——兩句對打。
+  const p = await open({ recording_state: "thinking" });
+  check("說她在想最後一段", p.line().includes("想最後一段"), p.line());
+  check("不可以說在聽", !p.line().includes("在聽"), p.line());
+  check("不可以說沒有人在記錄", !p.line().includes("沒有人在記錄"), p.line());
+  const wake = p.node("[data-wake]");
+  check("開始鍵要藏起來——按下去只會撞上佔著閘門", wake.hidden === true, `hidden=${wake.hidden}`);
+  await p.repaint();
+  check("輪詢過後還是同一句", p.line().includes("想最後一段"), p.line());
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——字母人上有話說不出口，或說了活不過下一次輪詢。`);

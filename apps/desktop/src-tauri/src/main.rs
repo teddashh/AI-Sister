@@ -155,7 +155,7 @@ fn pause_state(shell: tauri::State<'_, Shell>) -> bool {
 /// 判斷靠 recorder 每 5 秒蓋一次的時戳（見 [`sister_core::heartbeat`]），
 /// 不靠 `sessions.ended_at`——那一列在 recorder 當掉的時候永遠停在 NULL。
 ///
-/// # 為什麼回三個字串
+/// # 為什麼回四個字串
 ///
 /// 上一版回 `is_recording` 那個布林，而**它把「正在起來」歸進「沒有人在
 /// 錄」**——於是 `app.js` 那個等她起來的迴圈（`startRecording`）在一顆一年份
@@ -167,20 +167,28 @@ fn pause_state(shell: tauri::State<'_, Shell>) -> bool {
 /// record 在跑了」。
 ///
 /// 「她在錄嗎」和「有人佔著這個目錄嗎」是兩個問題（`heartbeat.rs` 開頭那段就
-/// 是在講這件事），而一個布林只答得出一個。
+/// 是在講這件事），而一個布林只答得出一個。收工想最後一段是第四種：沒在錄，
+/// 但行程還在——那兩分鐘裡回 `"none"` 會讓他按開始，然後兩句話對打。
 #[tauri::command]
 fn recording_state(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> String {
     let now = match shell
         .data_dir
         .as_ref()
-        .and_then(|dir| sister_core::heartbeat::phase(dir, sister_core::now_ms()))
+        .map(|dir| sister_core::heartbeat::presence(dir, sister_core::now_ms()))
     {
-        Some(sister_core::heartbeat::Phase::Recording) => "recording",
-        Some(sister_core::heartbeat::Phase::Booting) => "booting",
+        Some(sister_core::heartbeat::Presence::Live(
+            sister_core::heartbeat::Phase::Recording,
+        )) => "recording",
+        Some(sister_core::heartbeat::Presence::Live(
+            sister_core::heartbeat::Phase::Booting,
+        )) => "booting",
+        // 錄製已停、腦還在想最後一段。字母人不能說「在聽」（她不抓畫面了），
+        // 也不能說「沒有人在記錄」配一顆開始鍵（行程還握著資料庫）。
+        Some(sister_core::heartbeat::Presence::Thinking { .. }) => "thinking",
         // 問不出資料目錄的時候，`pause_state` 回報「暫停」是為了少錄；
         // 這裡回報「沒在錄」是為了少吹牛。同一個方向：不確定就往
         // 「她做得比較少」那邊倒。
-        None => "none",
+        _ => "none",
     };
     // 順手把系統匣那兩顆的字改對——手上已經有答案了，不必再讀一次磁碟。這不是
     // 唯一的刷新時機（見 [`refresh_tray`]），是最即時的那一個：視窗開著的時候，
@@ -412,10 +420,11 @@ fn start_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
         .data_dir
         .as_ref()
         .ok_or_else(|| "找不到資料目錄，開不起來".to_string())?;
-    if sister_core::heartbeat::is_occupied(dir, sister_core::now_ms()) {
+    if let Some(why) = sister_core::heartbeat::occupied_why(dir, sister_core::now_ms()) {
         // 不是錯誤，但也不能安靜地再開一個：兩個 recorder 會各自錄一份，
-        // 而使用者只會看到磁碟用得比講好的快一倍。
-        return Err("已經有一個 sister record 在跑了".into());
+        // 而使用者只會看到磁碟用得比講好的快一倍。想最後一段的那一種佔著
+        // 不印「已經有一個在跑了」——心跳這時候說沒在錄，兩句會對打。
+        return Err(why);
     }
     // 心跳還沒出現，不代表沒有人在起來。上一下按出去的那個行程可能正卡在
     // `Db::open` 的 migration 上——它還沒蓋出第一個心跳，所以上面那道閘門

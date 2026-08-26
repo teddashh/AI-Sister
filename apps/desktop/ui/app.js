@@ -84,6 +84,16 @@ let recording = true;
 let booting = false;
 
 /**
+ * 錄製迴圈已經停了，解釋層還在把最後一段想完。
+ *
+ * **這也不是「沒有人在錄」的一種。** 心跳的 `is_recording` 是 false（她不抓
+ * 畫面了），但行程還握著資料庫。畫面若說「沒有人在記錄」配一顆開始鍵，他
+ * 按下去會拿到一句「解釋層還在想最後一段」——兩句都是這台機器印的，直接
+ * 對打。
+ */
+let thinkingLast = false;
+
+/**
  * 按了「開始記錄」之後、她真的開始之前的那一段。
  *
  * 這一段可能要好幾秒：另一個行程要載入、開資料庫、跑 migration。這期間畫面上
@@ -254,13 +264,15 @@ function paint() {
   // 但清跟重畫之間仍然有順序問題，多這一個條件就不必去猜那個順序。
   const line = booting
     ? "她起來了，正在開資料庫…（大的記憶要等一下，這期間還沒開始記）"
-    : starting
-      ? "正在把她叫起來…"
-      : state === "thinking" && slowNote !== null
-        ? slowNote
-        : state === "thinking" && shown !== "thinking"
-          ? `想一下…（${shown === "paused" ? "仍在暫停" : "但沒有人在記錄"}）`
-          : STATE_LINES[shown];
+    : thinkingLast
+      ? "錄製已停，解釋層還在想最後一段"
+      : starting
+        ? "正在把她叫起來…"
+        : state === "thinking" && slowNote !== null
+          ? slowNote
+          : state === "thinking" && shown !== "thinking"
+            ? `想一下…（${shown === "paused" ? "仍在暫停" : "但沒有人在記錄"}）`
+            : STATE_LINES[shown];
   // 灰掉的時候多講一句「上一次是什麼時候、為什麼停的」。換行不換句：那是
   // 同一件事的後半段，而 `.state-line` 的 `pre-line` 讓它自己排。
   //
@@ -300,10 +312,10 @@ function paint() {
   let detail = "";
   if (notice !== null) {
     detail =
-      (starting || booting) && !notice.aboutHer
+      (starting || booting || thinkingLast) && !notice.aboutHer
         ? `這是另一件事：${notice.text}`
         : notice.text;
-  } else if (!starting && !booting && shown === "asleep") {
+  } else if (!starting && !booting && !thinkingLast && shown === "asleep") {
     detail = asleepDetail();
   }
   stateLine.textContent = detail === "" ? line : `${line}\n${detail}`;
@@ -316,7 +328,7 @@ function paint() {
     //
     // `booting` 也不出現，而且理由是同一個：那幾分鐘目錄已經有人佔著，按下去
     // 撞的是 `start_recording` 那道 `is_occupied` 閘門。
-    wakeButton.hidden = shown !== "asleep" || starting || booting;
+    wakeButton.hidden = shown !== "asleep" || starting || booting || thinkingLast;
   }
 }
 
@@ -344,19 +356,25 @@ function setPaused(next) {
 }
 
 /**
- * 心跳說什麼：`"recording"`／`"booting"`／`"none"`（見後端的 `recording_state`）。
+ * 心跳說什麼：`"recording"`／`"booting"`／`"thinking"`／`"none"`（見後端的
+ * `recording_state`）。
  *
- * **收三個字串，不是一個布林。** 認不得的值一律當成「沒有人在錄」——三種裡
- * 只有它不會替一件沒發生的事背書。
+ * **收四個字串，不是一個布林。** 認不得的值一律當成「沒有人在錄」——四種裡
+ * 只有它不會替一件沒發生的事背書。`"thinking"` 是錄製已停、腦還在想最後
+ * 一段：說「在聽」是謊，說「沒有人在記錄」配一顆開始鍵也是謊。
  */
 function setRecording(next) {
   const was = recording;
   const wasBooting = booting;
+  const wasThinking = thinkingLast;
   recording = next === "recording";
   booting = next === "booting";
+  thinkingLast = next === "thinking";
   // 她從別的地方被開起來、或是自己停掉了：一樣是「下一件事發生了」。見
   // [`overtakenByEvents`]。
-  if (was !== recording || wasBooting !== booting) overtakenByEvents();
+  if (was !== recording || wasBooting !== booting || wasThinking !== thinkingLast) {
+    overtakenByEvents();
+  }
   // 她起來了（或是從別的地方被開起來的），那個「正在叫她」的等待就結束了，
   // 而「上一次叫不起來」也就過期了——她現在人在這裡，那句話再留著只會嚇人。
   //
@@ -367,7 +385,12 @@ function setRecording(next) {
   // 剛剛才停下來：現在才有一場「上一次」可以講，而它跟開場時讀到的那一場
   // 不是同一場。停了才問，因為在錄的時候問到的會是**這一場**（沒有收尾），
   // 而畫面會把它讀成「她當掉了」。
-  if (was && !recording) refreshLastRun();
+  //
+  // **想最後一段不算停完。** 那一場的 `end_session` 還沒寫。這時候去問
+  // 「上一次」會拿到正在收尾的這一場，讀成「沒有好好結束」。
+  const fullyStopped = !recording && !booting && !thinkingLast;
+  const wasFullyStopped = !was && !wasBooting && !wasThinking;
+  if (!wasFullyStopped && fullyStopped) refreshLastRun();
   paint();
 }
 
@@ -1434,10 +1457,16 @@ setPaused(wanted === "paused");
 // 去會失敗的按鈕），而他那顆一年份的資料庫每天早上都會停在這裡好幾分鐘。
 // 和上面同一條紀律——走真正的那個旗標，不另外搬一個長得像的樣子出來。
 setRecording(
-  wanted === "asleep" ? "none" : wanted === "booting" ? "booting" : "recording",
+  wanted === "asleep"
+    ? "none"
+    : wanted === "booting"
+      ? "booting"
+      : wanted === "thinking"
+        ? "thinking"
+        : "recording",
 );
 setState(
-  wanted === "paused" || wanted === "asleep" || wanted === "booting"
+  wanted === "paused" || wanted === "asleep" || wanted === "booting" || wanted === "thinking"
     ? "idle"
     : wanted,
 );

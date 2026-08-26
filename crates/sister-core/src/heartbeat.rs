@@ -79,6 +79,20 @@ pub fn beat_booting(data_dir: &Path, ts: Millis) -> Result<()> {
     write_beat(data_dir, ts, Phase::Booting)
 }
 
+/// 錄製迴圈已經停了，解釋層還在把最後一段想完。
+///
+/// 這不是 [`Phase`] 的第三種：字母人和設定頁問的是「她在錄嗎」，答案是
+/// 不在——她一個畫面都不再抓。但這個資料目錄**還有人佔著**（行程活著、握
+/// 著資料庫、CLI 最多還要跑到 `until`），所以 [`is_occupied`] 是 true、
+/// [`is_recording`] 是 false。和開機那幾分鐘同一種拆法，只是方向相反。
+///
+/// `until` 是這一次收工自己算好的上限，寫進檔案裡，不靠 [`STALE_AFTER_MS`]。
+/// 逾時是「她沒回話」，收工想最後一段是「她說了還要多久」——兩件事不准
+/// 共用一個 16 秒。
+pub fn beat_thinking(data_dir: &Path, ts: Millis, until: Millis) -> Result<()> {
+    write_raw(data_dir, &format!("{ts} thinking {until}"))
+}
+
 fn write_beat(data_dir: &Path, ts: Millis, phase: Phase) -> Result<()> {
     // 錄製中就寫一個裸數字，和舊版一模一樣——舊的心跳檔（和舊的 recorder）
     // 讀起來仍然是「在錄」，那也是對的：會寫這個檔案的舊版都在主迴圈裡。
@@ -159,6 +173,8 @@ fn write_raw(data_dir: &Path, body: &str) -> Result<()> {
 enum Record {
     /// 一次心跳：那個時刻她活著，而且在這個階段。
     Beat(Millis, Phase),
+    /// 錄製已停，解釋層還在想最後一段。`until` 是這一次自己寫下的上限。
+    Thinking { at: Millis, until: Millis },
     /// 一塊墓碑：她收工了。`at` 是收工時間；`None` 代表寫墓碑的版本沒寫第三欄。
     Tombstone { at: Option<Millis> },
 }
@@ -215,6 +231,10 @@ fn parse_record(raw: &str) -> Option<Record> {
     // 讀不懂它，只會讀成 `Recording`。靠的是時戳寫 0，見 [`stop`]。
     match fields.next() {
         Some("boot") => Some(Record::Beat(ts, Phase::Booting)),
+        Some("thinking") => Some(Record::Thinking {
+            at: ts,
+            until: fields.next().and_then(|s| s.parse().ok())?,
+        }),
         Some("stopped") => Some(Record::Tombstone {
             at: fields.next().and_then(|s| s.parse().ok()),
         }),
@@ -222,12 +242,13 @@ fn parse_record(raw: &str) -> Option<Record> {
     }
 }
 
-/// 這個資料目錄現在到底是什麼狀況。**五種，而「檔案不在」只剩一個意思。**
+/// 這個資料目錄現在到底是什麼狀況。**六種，而「檔案不在」只剩一個意思。**
 ///
-/// [`phase`] 把後面四種都壓成 `None`，那對「要不要對使用者說她在錄」是對的
+/// [`phase`] 把 Live 以外都壓成 `None`，那對「要不要對使用者說她在錄」是對的
 /// 答案，而且是三十幾個呼叫端要的那一個。這裡分得比較細，給那些**下一步不一樣**
 /// 的地方用——尤其是任何想動手殺行程的地方（見 `main.rs` 那段長註解：`none`
-/// 曾經同時是三件事，而只有其中一件可以落刀）。
+/// 曾經同時是三件事，而只有其中一件可以落刀）。收工想最後一段是第六種：
+/// 她沒在錄，但行程還在，[`is_occupied`] 和 [`phase`] 的答案不一樣。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Presence {
     /// 檔案不在。這個資料目錄**從來沒有人跑過 recorder**——只有這一個意思。
@@ -247,6 +268,11 @@ pub enum Presence {
     Unreadable,
     /// 心跳是新鮮的，她活著，而且在這個階段。
     Live(Phase),
+    /// 錄製迴圈已經停了，解釋層還在把最後一段想完。見 [`beat_thinking`]。
+    ///
+    /// `until` 是檔案裡寫下的上限。過了這個時刻，[`presence`] 會把它讀成
+    /// [`Stalled`]——她說了還要多久，到點沒收工，就和當掉同一種「沒回話」。
+    Thinking { at: Millis, until: Millis },
     /// 她自己講了收工（[`stop`] 留下的墓碑）。不會過期。
     Stopped { at: Option<Millis> },
     /// 心跳停在那裡過期了——當掉、被 kill、整台關機，或者這一拍慢了 16 秒
@@ -271,6 +297,14 @@ pub fn presence(data_dir: &Path, now: Millis) -> Presence {
         // 讀到了，但看不懂（寫到一半斷電）。有人來過。
         None => Presence::Unreadable,
         Some(Record::Tombstone { at }) => Presence::Stopped { at },
+        Some(Record::Thinking { at, until }) if now < until => Presence::Thinking { at, until },
+        // 她寫了上限、到點還沒改成墓碑：沒回話。phase 填 Recording 是因為
+        // [`Phase`] 沒有第三種——這筆 stalled 不會被拿去講「她在錄」
+        // （[`phase`] 只看 Live），只給 [`safe_to_kill_spawn`] 比時戳。
+        Some(Record::Thinking { at, .. }) => Presence::Stalled {
+            at,
+            phase: Phase::Recording,
+        },
         // 未來的時戳一樣算活的：使用者調過時鐘、或者兩個行程對時差了幾百毫秒，
         // 都不該被讀成「她死了」。
         Some(Record::Beat(ts, phase)) if now - ts < STALE_AFTER_MS => Presence::Live(phase),
@@ -284,16 +318,17 @@ pub fn presence(data_dir: &Path, now: Millis) -> Presence {
 /// 心跳是幾秒前」。收工時間要用 [`presence`] 拿。
 pub fn last_beat(data_dir: &Path) -> Option<Millis> {
     match read_record(data_dir)? {
-        Record::Beat(ts, _) => Some(ts),
+        Record::Beat(ts, _) | Record::Thinking { at: ts, .. } => Some(ts),
         Record::Tombstone { .. } => None,
     }
 }
 
 /// 現在這個資料目錄的狀態。`None` = 沒有人在。
 ///
-/// **把 [`Presence`] 五種壓成兩種**：只有新鮮的心跳算「有人在」。收工了、
-/// 過期了、讀不懂、從來沒跑過——對「要不要說她在錄」來說都是同一個答案，而且
-/// 是安全的那個答案（少吹牛，見模組開頭）。要分它們請用 [`presence`]。
+/// **把 [`Presence`] 壓成「在不在錄」**：只有新鮮的 `Recording`／`Booting`
+/// 心跳算「有人在」。收工了、過期了、讀不懂、從來沒跑過、**正在想最後一段**
+/// ——對「要不要說她在錄」來說都是同一個答案，而且是安全的那個答案（少吹
+/// 牛，見模組開頭）。想最後一段那一種佔不佔著，請用 [`is_occupied`]。
 pub fn phase(data_dir: &Path, now: Millis) -> Option<Phase> {
     match presence(data_dir, now) {
         Presence::Live(p) => Some(p),
@@ -324,8 +359,9 @@ pub fn safe_to_kill_spawn(data_dir: &Path, spawned_at: Millis, now: Millis) -> b
         Presence::NeverStarted => true,
         // 檔案在但讀不懂——說不出那半行是誰寫的，也就說不出是不是我這個 child。
         Presence::Unreadable => false,
-        // 她已經蓋過心跳了，那就是走過 `Db::open` 了。
-        Presence::Live(_) => false,
+        // 她已經蓋過心跳了，那就是走過 `Db::open` 了。收工想最後一段也是——
+        // 那一刀會讓 `end_session` 永遠是 NULL。
+        Presence::Live(_) | Presence::Thinking { .. } => false,
         // 墓碑比我 spawn 還早 = 上一場留下的，跟我這個 child 無關。
         // 比我晚 = **她正在收尾**（`heartbeat::stop` 寫在 `rec.finish()` 之前，
         // 中間隔著一次能力報告的寫檔），這一刀會讓 `end_session` 永遠是 NULL。
@@ -345,13 +381,40 @@ pub fn is_recording(data_dir: &Path, now: Millis) -> bool {
     phase(data_dir, now) == Some(Phase::Recording)
 }
 
-/// 這個資料目錄**有人佔著嗎**。正在開機的也算。
+/// 這個資料目錄**有人佔著嗎**。正在開機的也算，收工想最後一段的也算。
 ///
 /// 給那幾個「要不要再開一個」的判斷用。開機那幾分鐘算佔著，否則第二下按鈕
 /// 會穿過去，兩個 recorder 各錄一份，而使用者只會發現磁碟用得比講好的快
-/// 一倍。
+/// 一倍。收工那兩分鐘同樣：行程還握著資料庫，第二個 writer 打進來的症狀
+/// 一樣是磁碟用兩倍、而且兩句話對打（畫面說沒在錄，按開始卻說已經有人）。
 pub fn is_occupied(data_dir: &Path, now: Millis) -> bool {
-    phase(data_dir, now).is_some()
+    matches!(
+        presence(data_dir, now),
+        Presence::Live(_) | Presence::Thinking { .. }
+    )
+}
+
+/// 有人佔著的時候，按「開始記錄」該看到的那一句。
+///
+/// `None` = 沒人佔著，可以開。`Some` 裡的字指得出現在在等什麼、還要多久——
+/// 三種佔著不准印成同一句「已經有一個 sister record 在跑了」，因為下一步
+/// 不一樣：正在錄的是去按停止，正在起來的是再等一下，想最後一段的是等她
+/// 想完（有上限，上限在句子裡）。
+pub fn occupied_why(data_dir: &Path, now: Millis) -> Option<String> {
+    match presence(data_dir, now) {
+        Presence::Live(Phase::Recording) => Some("已經有一個 sister record 在跑了".into()),
+        Presence::Live(Phase::Booting) => {
+            Some("已經有一個 sister record 正在起來（多半在開資料庫）。再等一下".into())
+        }
+        Presence::Thinking { until, .. } => {
+            let left_secs = (until.saturating_sub(now) / 1000).max(1);
+            Some(format!(
+                "錄製已經停了，解釋層還在想最後一段（最多還要 {left_secs} 秒）。\
+                 想完就會收工，這期間不要再開一個。"
+            ))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -678,6 +741,11 @@ mod tests {
             assert!(!safe_to_kill_spawn(&t.0, SPAWN, now), "{name}");
         }
 
+        // 收工想最後一段：錄製迴圈停了，行程還握著資料庫。
+        let thinking = Tmp::new("k-thinking");
+        beat_thinking(&thinking.0, SPAWN + 100, SPAWN + 240_000).expect("thinking");
+        assert!(!safe_to_kill_spawn(&thinking.0, SPAWN, now));
+
         // 我這個 child 蓋過一拍就卡住了（prune 在刪幾萬個檔、休眠喚醒）。
         // 她沒死，她開著資料庫。
         let mine_stalled = Tmp::new("k-mine-stalled");
@@ -707,5 +775,99 @@ mod tests {
         beat(&t.0, 1_000_000 + 5_000).expect("beat again");
         assert_eq!(last_beat(&t.0), Some(1_005_000));
         assert!(is_recording(&t.0, 1_000_000 + STALE_AFTER_MS));
+    }
+
+    /// 停止之後、腦收工之前：沒在錄，但目錄還佔著。
+    ///
+    /// 這是按下停止之後那兩分鐘的整句話。心跳說 Recording 是謊（她不抓畫面
+    /// 了）；心跳說 Stopped 也是謊（行程還握著資料庫）。兩句分開講。
+    #[test]
+    fn thinking_through_the_last_segment_occupies_but_does_not_record() {
+        let t = Tmp::new("thinking");
+        beat(&t.0, 1_000_000).expect("beat");
+        beat_thinking(&t.0, 1_000_100, 1_240_100).expect("thinking");
+        let now = 1_000_200;
+        assert!(!is_recording(&t.0, now), "她已經不抓畫面了，不可以說在錄");
+        assert!(is_occupied(&t.0, now), "行程還在，第二個 recorder 不准進來");
+        assert_eq!(
+            presence(&t.0, now),
+            Presence::Thinking {
+                at: 1_000_100,
+                until: 1_240_100
+            }
+        );
+        assert_eq!(
+            phase(&t.0, now),
+            None,
+            "phase 是「在不在錄」，想最後一段不是"
+        );
+        let why = occupied_why(&t.0, now).expect("佔著就要說為什麼");
+        assert!(why.contains("想最後一段"), "{why}");
+        assert!(why.contains("秒"), "{why}");
+        assert!(!why.contains("已經有一個 sister record 在跑了"), "{why}");
+        assert!(!why.contains("正在起來"), "{why}");
+    }
+
+    /// 上限到了還沒改成墓碑：沒回話，不再佔著——他可以再開一個。
+    #[test]
+    fn a_thinking_beat_expires_at_the_deadline_it_wrote() {
+        let t = Tmp::new("thinking-exp");
+        beat_thinking(&t.0, 1_000_000, 1_240_000).expect("thinking");
+        assert!(is_occupied(&t.0, 1_239_999));
+        assert!(
+            !is_occupied(&t.0, 1_240_000),
+            "到點就是到點，不靠 16 秒逾時"
+        );
+        assert!(!is_recording(&t.0, 1_240_000));
+        // 過了上限仍然不可以落刀：她可能卡在 finish()，只是逾時了。
+        assert!(!safe_to_kill_spawn(&t.0, 999_000, 1_240_000));
+    }
+
+    /// 想最後一段不走 16 秒逾時。那 16 秒是「她沒回話」；這裡她話寫在檔案裡。
+    #[test]
+    fn thinking_does_not_go_stale_at_the_recording_timeout() {
+        let t = Tmp::new("thinking-fresh");
+        beat_thinking(&t.0, 1_000_000, 1_000_000 + 240_000).expect("thinking");
+        let after_stale = 1_000_000 + STALE_AFTER_MS + 1;
+        assert!(
+            is_occupied(&t.0, after_stale),
+            "16 秒後還在上限內，不可以被讀成沒人佔著"
+        );
+        assert!(!is_recording(&t.0, after_stale));
+    }
+
+    /// 三種佔著三句話。印成同一句，按下去的人就不知道下一步是等、是停、還是
+    /// 不要再開一個。
+    #[test]
+    fn the_three_ways_of_occupied_are_three_different_sentences() {
+        let rec = Tmp::new("why-rec");
+        beat(&rec.0, 1_000_000).expect("beat");
+        let boot = Tmp::new("why-boot");
+        beat_booting(&boot.0, 1_000_000).expect("boot");
+        let think = Tmp::new("why-think");
+        beat_thinking(&think.0, 1_000_000, 1_240_000).expect("thinking");
+        let a = occupied_why(&rec.0, 1_000_000).expect("rec");
+        let b = occupied_why(&boot.0, 1_000_000).expect("boot");
+        let c = occupied_why(&think.0, 1_000_000).expect("think");
+        assert_ne!(a, b, "在錄和正在起來印成同一句");
+        assert_ne!(a, c, "在錄和想最後一段印成同一句");
+        assert_ne!(b, c, "正在起來和想最後一段印成同一句");
+        assert!(occupied_why(&Tmp::new("why-none").0, 1_000_000).is_none());
+    }
+
+    /// 墓碑蓋得掉「想最後一段」。否則收工之後那 240 秒裡他再開一次會被擋住。
+    #[test]
+    fn a_tombstone_clears_thinking() {
+        let t = Tmp::new("think-then-stop");
+        beat_thinking(&t.0, 1_000_000, 1_240_000).expect("thinking");
+        stop(&t.0, 1_000_500);
+        assert!(!is_occupied(&t.0, 1_000_600));
+        assert!(!is_recording(&t.0, 1_000_600));
+        assert_eq!(
+            presence(&t.0, 1_000_600),
+            Presence::Stopped {
+                at: Some(1_000_500)
+            }
+        );
     }
 }

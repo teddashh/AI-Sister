@@ -1689,20 +1689,27 @@ pub mod stop {
         // 這個順序沒有測試擋得住（那個競爭窗要用執行緒去搶，而搶得贏是機率問
         // 題，搶不贏就是一支偽綠的測試）。擋著它的只有這一段字——所以它寫在這
         // 裡，不在 commit message 裡。
-        let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
+        let seen = sister_core::heartbeat::presence(data_dir, sister_core::now_ms());
         sister_core::control::request_stop(data_dir)
             .with_context(|| format!("寫不進 {}", data_dir.display()))?;
-        match beat {
-            Some(sister_core::heartbeat::Phase::Recording) => println!(
-                "■ 已經請她收工。正在跑的 `sister record` 會在下一個 tick 把 session \
-                 寫完再結束。"
-            ),
-            Some(sister_core::heartbeat::Phase::Booting) => println!(
-                "■ 已經請她收工。她現在還在開資料庫（第一次開一顆大的要重建索引，\
-                 可能要幾分鐘），主迴圈還沒開始——這個請求會留著，等她開完就直接\
-                 收工，一個字都不會記。"
-            ),
-            None => println!(
+        match seen {
+            sister_core::heartbeat::Presence::Live(sister_core::heartbeat::Phase::Recording) => {
+                println!(
+                    "■ 已經請她收工。正在跑的 `sister record` 會在下一個 tick 把 session \
+                     寫完再結束。"
+                )
+            }
+            sister_core::heartbeat::Presence::Live(sister_core::heartbeat::Phase::Booting) => {
+                println!(
+                    "■ 已經請她收工。她現在還在開資料庫（第一次開一顆大的要重建索引，\
+                     可能要幾分鐘），主迴圈還沒開始——這個請求會留著，等她開完就直接\
+                     收工，一個字都不會記。"
+                )
+            }
+            sister_core::heartbeat::Presence::Thinking { .. } => {
+                println!("■ 錄製已經停了，解釋層還在想最後一段。停止的請求還在，想完就會收工。")
+            }
+            _ => println!(
                 "■ 目前沒有任何 `sister record` 在跑（心跳是停的）。停止的請求還是\
                  留下來了，但下一次開始記錄的時候會先把它清掉，不會影響到那一場。"
             ),
@@ -6126,7 +6133,11 @@ pub mod doctor {
         // 心跳**只讀一次**。再讀一次的話，兩次讀之間她可以從 `Booting` 跳到
         // `Recording`，於是同一份報告的上半和下半描述兩個不同的瞬間——一份自相
         // 矛盾的報告，而且重跑一次就不見了。
-        let beat = sister_core::heartbeat::phase(data_dir, sister_core::now_ms());
+        let presence = sister_core::heartbeat::presence(data_dir, sister_core::now_ms());
+        let beat = match presence {
+            sister_core::heartbeat::Presence::Live(p) => Some(p),
+            _ => None,
+        };
 
         let (db, no_db) = match db_file.exists().then(|| Db::open(&db_file)) {
             Some(Ok(d)) => (Some(d), "還沒有資料庫"),
@@ -6271,7 +6282,13 @@ pub mod doctor {
                 .map(|ts| format!("從 {} 起", crate::fmt::timestamp(ts)))
                 .unwrap_or_else(|| "不知道從什麼時候開始".to_string())
         });
-        let (sym, said) = watching_verdict(paused, beat);
+        let (sym, said) = match presence {
+            sister_core::heartbeat::Presence::Thinking { .. } => (
+                "…",
+                "錄製已停，解釋層還在想最後一段（行程還在，不要再開一個）".to_string(),
+            ),
+            _ => watching_verdict(paused, beat),
+        };
         mark(sym, "現在有沒有在看", &said);
         // 題庫是整個資料庫裡唯一一張存著**你自己打進去的字**的表，所以它得
         // 出現在這一頁上。doctor 的工作是把真相攤開，而一張存了東西、卻沒有
@@ -11915,6 +11932,16 @@ pub mod record {
     /// 平台才執行得到的閘門，等於一道沒有被執行過的閘門。
     fn already_recording(data_dir: &Path) -> Result<()> {
         let now = sister_core::now_ms();
+        // 想最後一段：心跳說沒在錄，但行程還握著資料庫。那一句要指得出在等
+        // 什麼、還要多久——不可以再印「已經有一個 sister record 在跑了」。
+        if let sister_core::heartbeat::Presence::Thinking { .. } =
+            sister_core::heartbeat::presence(data_dir, now)
+        {
+            anyhow::bail!(
+                "{}",
+                sister_core::heartbeat::occupied_why(data_dir, now).expect("Thinking 一定佔著")
+            );
+        }
         if !sister_core::heartbeat::is_occupied(data_dir, now) {
             return Ok(());
         }
@@ -13000,6 +13027,13 @@ pub mod record {
 
         // 腦在另一條執行緒。錄製迴圈停了之後才請它把最後一段想完——
         // 等它的時候不再抓畫面，所以不佔熱路徑。
+        //
+        // **先講一句再等。** `Handle::shutdown` 會把心跳改成「沒在錄、但還
+        // 佔著」（想最後一段），上限是兩輪 CLI、每輪 120 秒。不講的話那兩
+        // 分鐘裡字母人只看得到「沒在錄」，他按下開始會撞上佔著閘門。
+        if wake.is_some() {
+            println!("{}", sister_core::wakeup::shutdown_wait_notice());
+        }
         let wake_report = match wake.take() {
             Some(h) => h.shutdown(),
             None if sister_core::wakeup::armed(&brain_cfg) => sister_core::wakeup::Report {
@@ -13014,6 +13048,10 @@ pub mod record {
         // 會說她還在錄，而她已經走了——**說她還在錄卻沒在錄**，是這兩個狀態
         // 裡比較危險的那一個。放在 `finish()` 之前，因為那一步會寫資料庫，
         // 可能失敗，而失敗不該讓一個錯的「還在錄」留在磁碟上。
+        //
+        // 想最後一段的那一拍（`beat_thinking`）到這裡結束：腦已經加入，墓碑
+        // 蓋上去之後 `is_occupied` 才放開。順序不能倒——倒了的話墓碑會在 CLI
+        // 還跑著的時候放行第二個 recorder。
         sister_core::heartbeat::stop(data_dir, sister_core::now_ms());
 
         let stats = rec.stats().clone();
