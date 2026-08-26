@@ -17,6 +17,7 @@
 //! 這是唯一一個「因為換了殼所以整段不抄」的地方，其餘行為都照舊。
 
 use serde::{Deserialize, Serialize};
+use chrono::{Local, Timelike};
 use sister_shell as bounds;
 use sister_shell::{PetState, Rect};
 use std::path::PathBuf;
@@ -114,6 +115,250 @@ struct Hit {
     title: Option<String>,
     url: Option<String>,
     frame_id: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct GateEvidence {
+    frame_id: i64,
+    label: String,
+}
+
+#[derive(Serialize)]
+struct GateDisplay {
+    utterance_id: i64,
+    form: &'static str,
+    text: String,
+    evidence: Vec<GateEvidence>,
+}
+
+#[derive(Serialize)]
+struct GatekeeperView {
+    display: Option<GateDisplay>,
+    developer: Option<GatekeeperDeveloper>,
+}
+
+#[derive(Serialize)]
+struct GatekeeperDeveloper {
+    points_spent: u32,
+    points_limit: u32,
+    holds: Vec<String>,
+}
+
+/// 把 core 的守門員判決接到每天真的會用的字母人。
+///
+/// **這個 command 是被輪詢的**，所以它的每一步都要問「同一件事被問第二次的
+/// 時候會怎樣」：
+///
+/// 1. 同一件事今天只記一次帳（[`Db::utterance_today_for`]）。少了這一條，
+///    「每天 5 點」量到的不是她講了幾句話，是畫面重新整理了幾次——五秒鐘
+///    就用完，而人一句都還沒看到。
+/// 2. 今天已經開口、人還沒回應的那一句**繼續顯示，不重扣點數**。她已經講
+///    過了，重扣等於同一句話收兩次錢。
+/// 3. 判決分兩趟：先全部判完、排名，**然後才寫**。落選的那幾句記成
+///    [`HoldReason::OutrankedThisRound`]，不是記成 `spoke`——她一次只講一句，
+///    而落選的那幾句人從來沒看到過。
+/// 4. 擋下的理由**變了**才記一列。同一個理由連續輪詢不重複寫。
+#[tauri::command(async)]
+fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, String> {
+    let now = sister_core::now_ms();
+    let day_key = sister_core::local_day::local_day_key(now)
+        .ok_or_else(|| "現在時間無法換成本地日期".to_string())?;
+    let config = sister_core::Config::load(&config_path()?).map_err(|e| format!("{e:#}"))?;
+    let local = Local::now();
+    let quiet_hours_end = config
+        .gatekeeper
+        .quiet_end_at((local.hour() * 60 + local.minute()) as u16)
+        .map_err(|e| format!("{e:#}"))?;
+    let presence = shell
+        .data_dir
+        .as_ref()
+        .map(|d| sister_core::heartbeat::presence(d, now))
+        .unwrap_or(sister_core::heartbeat::Presence::NeverStarted);
+    with_db_mut(&shell, |db| {
+        let candidates = sister_core::gatekeeper_candidates::collect(db, now)
+            .map_err(|e| format!("{e:#}"))?;
+        let first = db.first_recording_at().map_err(|e| format!("{e:#}"))?.unwrap_or(now);
+        let days_since = u32::try_from(now.saturating_sub(first) / 86_400_000).unwrap_or(u32::MAX);
+        use sister_core::db::UtteranceDecision;
+        use sister_core::gatekeeper::{HoldReason, Verdict};
+
+        // 一次快照。迴圈裡重讀的話，第一句開口會把第二句的預算算成已經花掉，
+        // 而這一輪最後只會有一句真的講出去。
+        let spent = db.points_spent_today(&day_key).map_err(|e| format!("{e:#}"))?;
+        let ever = db.has_ever_spoken().map_err(|e| format!("{e:#}"))?;
+
+        // ── 第一趟：判，但不寫。 ──────────────────────────────────
+        // 今天已經開口、人還沒回應的那一句，繼續掛著（不重判、不重扣）。
+        let mut pending: Option<sister_core::db::UtteranceRow> = None;
+        let mut judged: Vec<(sister_core::gatekeeper::Candidate, Verdict, Option<String>)> =
+            Vec::new();
+        let mut holds = Vec::new();
+        for candidate in candidates {
+            let existing = db
+                .utterance_today_for(&day_key, candidate.category, &candidate.evidence)
+                .map_err(|e| format!("{e:#}"))?;
+            if let Some(row) = &existing
+                && let UtteranceDecision::Spoke { .. } = row.decision
+            {
+                // 已經講過了。人還沒回應就繼續顯示；回應過就今天不再提。
+                if row.reaction.is_none() && pending.as_ref().is_none_or(|p| p.id < row.id) {
+                    pending = existing;
+                }
+                continue;
+            }
+            let previous_hold = existing.and_then(|row| match row.decision {
+                UtteranceDecision::Held { reason } => Some(reason),
+                UtteranceDecision::Spoke { .. } => None,
+            });
+            let cooldown_remaining_minutes = db
+                .last_spoke_at(candidate.category)
+                .map_err(|e| format!("{e:#}"))?
+                .and_then(|last| {
+                    let elapsed = now.saturating_sub(last) / 60_000;
+                    (elapsed < i64::from(config.gatekeeper.cooldown_minutes))
+                        .then(|| config.gatekeeper.cooldown_minutes - elapsed as u32)
+                });
+            let verdict = sister_core::gatekeeper::decide(&sister_core::gatekeeper::GateInput {
+                candidate: candidate.clone(),
+                presence,
+                quiet_hours_end: quiet_hours_end.clone(),
+                // 桌面目前也沒有可靠的跨平台前景視窗幾何；沒量到不是 Windowed。
+                focus_mode: sister_core::gatekeeper::FocusMode::Unmeasured,
+                days_since_first_recording: days_since,
+                cold_start_days: config.gatekeeper.cold_start_days,
+                has_ever_spoken: ever,
+                cooldown_remaining_minutes,
+                points_spent_today: spent,
+                daily_budget_points: config.gatekeeper.daily_budget_points,
+                min_score: config.gatekeeper.min_score,
+            });
+            judged.push((candidate, verdict, previous_hold));
+        }
+
+        // ── 排名：她一次只講一句。 ────────────────────────────────
+        // 形式高的優先（建議卡 > 一行字 > 微光），同形式比分數。
+        let mut winner = None;
+        for (i, (candidate, verdict, _)) in judged.iter().enumerate() {
+            if let Verdict::Speak { form, .. } = verdict {
+                let rank = (form.cost(), candidate.score());
+                if winner.is_none_or(|(_, best): (usize, (u32, f64))| {
+                    rank.0 > best.0 || (rank.0 == best.0 && rank.1 > best.1)
+                }) {
+                    winner = Some((i, rank));
+                }
+            }
+        }
+        let winner = winner.map(|(i, _)| i);
+        // 落選那幾句要講得出「輸給了哪一句」，所以先把贏家的原文留下來。
+        let winner_text = winner.map(|i| judged[i].0.text.clone()).unwrap_or_default();
+
+        // ── 第二趟：寫。 ─────────────────────────────────────────
+        let mut display = None;
+        for (i, (candidate, verdict, previous_hold)) in judged.into_iter().enumerate() {
+            // 過得了關但不是這一輪最該講的那一句——記成落選，不是記成講過了。
+            let verdict = match (&verdict, winner) {
+                (Verdict::Speak { .. }, Some(w)) if w != i => {
+                    Verdict::Hold(HoldReason::OutrankedThisRound {
+                        by_text: winner_text.clone(),
+                    })
+                }
+                _ => verdict,
+            };
+            // 擋下的理由沒變就不重複記——輪詢一次寫一列的話，這張表數的是
+            // 畫面重新整理的次數，不是她考慮過幾次。
+            let same_as_before = match (&verdict, &previous_hold) {
+                (Verdict::Hold(reason), Some(before)) => {
+                    before.starts_with(&format!("{}: ", reason.code()))
+                }
+                _ => false,
+            };
+            if same_as_before {
+                if let Verdict::Hold(reason) = &verdict {
+                    holds.push(reason.message());
+                }
+                continue;
+            }
+            let id = db
+                .record_utterance(&sister_core::db::UtteranceInsert {
+                    ts: now,
+                    day_key: &day_key,
+                    candidate: &candidate,
+                    verdict: &verdict,
+                })
+                .map_err(|e| format!("{e:#}"))?;
+            match verdict {
+                Verdict::Speak { form, cost: _ } => {
+                    display = Some(GateDisplay {
+                        utterance_id: id,
+                        form: form.as_str(),
+                        text: candidate.text,
+                        evidence: frame_chips(&candidate.evidence),
+                    });
+                }
+                Verdict::Hold(reason) => holds.push(reason.message()),
+            }
+        }
+        // 舊帳優先：她已經講過而人還沒回應的那一句還掛在畫面上。
+        if let Some(row) = pending {
+            let form = match &row.decision {
+                UtteranceDecision::Spoke { form, .. } => form.as_str(),
+                // 上面已經濾過只留 Spoke；走到這裡代表濾網壞了，要看得見。
+                UtteranceDecision::Held { .. } => {
+                    return Err("pending 裡混進了一列 held——濾網壞了".into());
+                }
+            };
+            display = Some(GateDisplay {
+                utterance_id: row.id,
+                form,
+                text: row.text,
+                evidence: frame_chips(&row.evidence),
+            });
+        }
+        let developer = if config.shell.developer_mode {
+            Some(GatekeeperDeveloper {
+                points_spent: db
+                    .points_spent_today(&day_key)
+                    .map_err(|e| format!("{e:#}"))?,
+                points_limit: config.gatekeeper.daily_budget_points,
+                holds: holds.into_iter().rev().take(5).collect(),
+            })
+        } else {
+            None
+        };
+        Ok(GatekeeperView { display, developer })
+    })
+}
+
+/// evidence ref 裡指得到畫面的那幾個，變成可以點開的 chip。
+///
+/// 認不出來的 ref（`commitment:`、`segment:`、`fact:`）**不進來**：那不是
+/// 「這張沒有畫面」，是「這一種 ref 指的不是畫面」。時間軸那邊的
+/// `guessRow` 是同一套做法（`button.see` → `open_frame`）。
+fn frame_chips(evidence: &[String]) -> Vec<GateEvidence> {
+    evidence
+        .iter()
+        .filter_map(|r| {
+            let frame_id = r.strip_prefix("frame:")?.parse::<i64>().ok()?;
+            Some(GateEvidence {
+                frame_id,
+                label: format!("畫面 #{frame_id}"),
+            })
+        })
+        .collect()
+}
+
+#[tauri::command(async)]
+fn gatekeeper_react(utterance_id: i64, close: bool, shell: tauri::State<'_, Shell>) -> Result<String, String> {
+    with_db_mut(&shell, |db| {
+        let reaction = if close { sister_core::gatekeeper::Reaction::Close } else { sister_core::gatekeeper::Reaction::Other };
+        let effect = sister_core::gatekeeper::react(db, utterance_id, reaction, sister_core::now_ms())
+            .map_err(|e| format!("{e:#}"))?;
+        Ok(match effect {
+            sister_core::gatekeeper::CommitmentReaction::MarkDead { .. } => "這張記憶不會再提了",
+            sister_core::gatekeeper::CommitmentReaction::SnoozeAndLowerWeight => "先收起來，之後再說",
+            sister_core::gatekeeper::CommitmentReaction::None => "收到你的回饋；這一則沒有可結案或延後的承諾",
+        }.to_string())
+    })
 }
 
 #[tauri::command]
@@ -2748,6 +2993,8 @@ fn main() {
             open_onboarding,
             hotkey_state,
             hotkey_set
+            ,gatekeeper_check
+            ,gatekeeper_react
         ])
         .setup(|app| {
             let win = app

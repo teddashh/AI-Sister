@@ -4127,6 +4127,36 @@ impl Db {
             [id], map_utterance_row).optional().context("讀取 utterance")
     }
 
+    /// 今天有沒有為**同一件事**記過一列。
+    ///
+    /// 「同一件事」= 同一天 + 同一類 + 同一份 evidence。a 類的 evidence 第一
+    /// 個是 `commitment:<id>`，c 類是 `segment:<started_at>`，兩種都跟著那件
+    /// 事走，不跟著「我第幾次去問」走。
+    ///
+    /// **為什麼要有這個**：守門員是被輪詢的。沒有這一格的話，同一張快到期的
+    /// 承諾每輪詢一次就記一列、每一列都算一次點數——於是「每天 5 點」量到的
+    /// 不是她對人講了幾句話，是畫面重新整理了幾次。五秒鐘就會用完，而人一句
+    /// 都還沒看到。
+    pub fn utterance_today_for(
+        &self,
+        day_key: &str,
+        category: crate::moments::SpeakCategory,
+        evidence: &[String],
+    ) -> Result<Option<UtteranceRow>> {
+        let evidence_json = serde_json::to_string(evidence)?;
+        self.conn
+            .query_row(
+                "SELECT id,ts,day_key,category,text,evidence_json,impact,confidence,timeliness,evidence_strength,score,decision,form,cost,hold_reason,reaction,reaction_at,created_at,tombstoned_at
+                 FROM utterance
+                 WHERE day_key=?1 AND category=?2 AND evidence_json=?3 AND tombstoned_at IS NULL
+                 ORDER BY id DESC LIMIT 1",
+                params![day_key, category.as_str(), evidence_json],
+                map_utterance_row,
+            )
+            .optional()
+            .context("查今天有沒有為同一件事記過 utterance")
+    }
+
     pub fn utterances_on_day(&self, day_key: &str) -> Result<Vec<UtteranceRow>> {
         let mut stmt = self.conn.prepare("SELECT id,ts,day_key,category,text,evidence_json,impact,confidence,timeliness,evidence_strength,score,decision,form,cost,hold_reason,reaction,reaction_at,created_at,tombstoned_at FROM utterance WHERE day_key=?1 AND tombstoned_at IS NULL ORDER BY ts,id")?;
         Ok(stmt

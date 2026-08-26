@@ -136,6 +136,15 @@ pub enum HoldReason {
     /// 時候她本來就不該開口。壓成同一個 variant 的話，一個 I/O 錯誤會讓她
     /// 對使用者宣布「你沒在錄」。
     PresenceUnreadable,
+    /// 這一輪它自己過得了關，但同一輪有一句更該講的，而她一次只講一句。
+    ///
+    /// **這一格非有不可。** 少了它，落選的候選只有兩條路：記成 `spoke`
+    /// （於是訓練語料裡有一句她從來沒講過的話，而且照樣扣了點數），或者
+    /// 靜靜丟掉（於是那一輪的紀錄少了一半，而 SPEC §8.3.5 要的正是那一半）。
+    /// 兩條都是假話，差別只在假在哪裡。
+    OutrankedThisRound {
+        by_text: String,
+    },
 }
 
 impl HoldReason {
@@ -151,6 +160,7 @@ impl HoldReason {
             Self::FirstUtteranceCategory { .. } => "first_utterance_category",
             Self::NotRecording { .. } => "not_recording",
             Self::PresenceUnreadable => "presence_unreadable",
+            Self::OutrankedThisRound { .. } => "outranked_this_round",
         }
     }
 
@@ -186,6 +196,9 @@ impl HoldReason {
             }
             Self::PresenceUnreadable => {
                 "讀不到心跳，問不出她現在有沒有在錄。說不準的時候不開口。".into()
+            }
+            Self::OutrankedThisRound { by_text } => {
+                format!("這一輪有更該講的一句：「{by_text}」。她一次只講一句。")
             }
         }
     }

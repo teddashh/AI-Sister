@@ -3026,6 +3026,7 @@ name = "sister-desktop"
 version = "0.1.0-alpha.65"
 dependencies = [
  "anyhow",
+ "chrono",
  "serde",
  "serde_json",
  "sister-core",

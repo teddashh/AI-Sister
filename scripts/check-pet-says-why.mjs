@@ -27,6 +27,20 @@ import { domOf, fakeDocument, hiddenIn, loader, read, watchNonsense } from "./fa
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui");
 const SRC = process.argv[2] ?? join(UI, "app.js");
+const LADDER_WORDS = [
+  ["glimmer", "微光形式沒有獨立分支"],
+  ["one_line", "一行形式沒有獨立分支"],
+  ["card", "建議卡形式沒有獨立分支"],
+  ["這張記憶不會再提了", "結案後沒有說記憶不再提"],
+  ["先收起來，之後再說", "其他回饋沒有說之後再說"],
+  ["收到你的回饋", "沒有 commitment 可改時沒有第三句"],
+];
+for (const [word, why] of LADDER_WORDS) {
+  if (!read(SRC).includes(word)) {
+    console.log(`✗ ${why}：缺少 ${word}`);
+    process.exit(1);
+  }
+}
 const boot = loader(read(SRC));
 
 /*
