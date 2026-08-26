@@ -460,6 +460,69 @@ console.log("⑨ 外送紀錄：兩種空、沒送出去的原因、原文沒遮
   check("成功的外送看得到命令", filledText.includes("claude"), filledText);
   check("沒送出去的原因要一起顯示", filledText.includes("還沒簽第二張同意書"), filledText);
   check("有列的時候不是那兩種空", !filledText.includes("還沒送過任何東西") && !filledText.includes("清掉了"), filledText);
+  check("解釋層那一列講得出自己是哪一層", filledText.includes("解釋層"), filledText);
+
+  // **這一段釘的是 `outboundRole`。**
+  //
+  // 那三個中文層別在 `ops.rs` 裡也各有一份，所以「盯梢層這三個字在原始碼裡
+  // 找得到」這種檢查對這個面板什麼都證不到——把 timeline.js 的那一行整行刪掉，
+  // 它照樣綠。要釘住它，就得真的把一列 watcher 餵進面板、再讀畫面上的字。
+  //
+  // 另一半是「不認得的時候不要猜」。這個函式原本的收尾是 `value || "解釋層"`：
+  // 一列它沒讀懂的資料，它會很有把握地宣布那是解釋層。
+  const roles = await openOutbound({
+    memory_outbound: {
+      ever_sent: true,
+      skips: [],
+      outbound: [
+        {
+          ts: D1 + 3_600_000,
+          command: "claude",
+          args: ["-p"],
+          chars_sent: 12,
+          truncated: false,
+          outcome: "success",
+          duration_ms: 40,
+          error: null,
+          role: "watcher",
+        },
+        {
+          ts: D1 + 3_500_000,
+          command: "claude",
+          args: ["-p"],
+          chars_sent: 12,
+          truncated: false,
+          outcome: "success",
+          duration_ms: 40,
+          error: null,
+          role: "future-role",
+        },
+        // 空值要單獨餵一列。壞掉的那一版是 `value || "解釋層"`：非空的怪值它
+        // 會原封不動印出來（於是「畫面上有 future-role」兩版都成立，斷言在
+        // 那上面等於沒斷），只有**空值**那一格會走進 `||` 右邊、被宣布成解釋層。
+        {
+          ts: D1 + 3_400_000,
+          command: "claude",
+          args: ["-p"],
+          chars_sent: 12,
+          truncated: false,
+          outcome: "success",
+          duration_ms: 40,
+          error: null,
+          role: "",
+        },
+      ],
+    },
+  });
+  const rolesText = roles.node("[data-outbound]").textContent;
+  check("盯梢層那一列講得出自己是哪一層", rolesText.includes("盯梢層"), rolesText);
+  check("盯梢層不會印成英文的 watcher", !rolesText.includes("watcher"), rolesText);
+  // 斷言要打在「它說了自己不認得」上，不是打在那個怪值有沒有印出來上——
+  // 怪值兩版都會印出來。
+  check("不認得的層別要說出自己不認得", rolesText.includes("不認得"), rolesText);
+  // 這一份沒有餵任何 interpreter 的列，所以畫面上冒出「解釋層」只有一個來源：
+  // 它替一列自己沒讀懂的資料猜了一個層別。
+  check("沒讀懂的層別不可以被猜成解釋層", !rolesText.includes("解釋層"), rolesText);
 }
 
 console.log("");
