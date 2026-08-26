@@ -45,3 +45,8 @@ research/ted-repos-dna.md
 *.sister-questions-draft.json
 *.sister-eval-report.json
 replay-drafts/
+
+# Delegate 的交付報告。它們寫在工作區根目錄，而收尾的 `git add -A` 會把
+# 它們一起收進來（alpha.62 真的發生過一次，事後才從 main 上拿掉）。
+RESULT.md
+RESULT*.md
