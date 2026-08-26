@@ -93,9 +93,15 @@ pub enum Blind {
     /// 有行程佔著（握著資料庫），所以 `is_occupied` 是 true，但 `is_recording`
     /// 是 false。
     ///
-    /// 所以這一句**一定要講「錄製已停」**：這是全部十種裡「再等下去也永遠
-    /// 不會有新畫面」的三種之一，而寫成「她正在讓大腦讀一段」會讓人接著等滿
-    /// 一小時。repo 裡另外三個渲染這個狀態的地方都留著那半句話。
+    /// 所以這一句**一定要講「錄製已停」**：這是十句話裡「再等下去也永遠不會
+    /// 有新畫面」的三句之一（另外兩句是 [`Self::Stopped`] 的那兩種），而寫成
+    /// 「她正在讓大腦讀一段」會讓人接著等滿一小時。
+    ///
+    /// repo 裡另外四個地方也在渲染這個狀態：`brain::CurrentGuess::Thinking`、
+    /// `heartbeat::occupied_why_of`、`gatekeeper`、`ops` 的錄製狀態——那四個
+    /// 都留著「錄製已停」那半句。托盤那兩個標籤（`tray_record_label`／
+    /// `tray_quit_label`）只寫「還在收尾」，因為托盤上「正在錄」是另一個圖示
+    /// 在講的，不是那一行字。
     Thinking {
         until: Millis,
     },
@@ -112,6 +118,11 @@ pub enum Blind {
     /// 沒有這個變體的話它會落進 [`Self::RecordingButQuiet`]——
     /// 「她確實正在錄，只是這段時間沒有新的字」，替一次根本查不出東西的
     /// 查詢作證。
+    ///
+    /// 游標**不會**跟著往回走（見 `ops::watch` 的高水位）。跟著往回走的話，
+    /// 一次十分鐘的 NTP 校正會讓她把那十分鐘整段重跑一遍：`--every 30s`
+    /// 之下是二十輪重問，每一輪有字就是一次外送——同一段畫面被送出去兩次，
+    /// 而開跑時說的「最多問 N 次」當場變成假話。
     ClockWentBackwards {
         last_seen: Millis,
     },
@@ -159,9 +170,12 @@ impl Blind {
                 "沒有新的畫面可以看——錄製狀態那個檔案讀不懂。這不是「還沒發生」，是我們問不出來。"
                     .into()
             }
+            // 「下一輪就好了」是一句沒查過的預測：十分鐘的校正在 `--every 30s`
+            // 之下要二十輪才走得回來。講得出口的只有「我不會重問已經看過的」。
             Self::ClockWentBackwards { last_seen } => format!(
-                "這一輪什麼都沒查——系統時鐘往回跳了（上一輪看到 {}）。\
-                 這不是「還沒發生」，是那個查詢區間是反的。下一輪會回到正常。",
+                "這一輪什麼都沒查——系統時鐘往回跳了（上一輪已經看到 {}）。\
+                 這不是「還沒發生」，是那個查詢區間是反的。時鐘走回那個時刻之前我都不會再問，\
+                 免得同一段字被送出去第二次。",
                 at(*last_seen)
             ),
             Self::RecordingButQuiet => {
@@ -173,13 +187,22 @@ impl Blind {
 
     /// 再等下去還有沒有意義。
     ///
-    /// 只有三種是「不會再有新畫面了」。這一格不是裝飾——收尾那一句要靠它
-    /// 分辨「時間到了它沒發生」和「她中途就不看了，剩下的時間我對著一張
-    /// 凍住的畫面」。
+    /// 這一格不是裝飾——收尾那一句要靠它分辨「時間到了它沒發生」和
+    /// 「她中途就**停下來**了，剩下的時間我對著一張凍住的畫面」。
+    ///
+    /// `true` 的只有兩個變體（[`Self::Thinking`] 和 [`Self::Stopped`]，
+    /// 後者渲染成兩句話，所以十句裡佔三句）。它們的共同點很窄：
+    /// **她曾經在錄，而且已經停了。** 收尾那句話講的就是這件事。
+    ///
+    /// [`Self::NeverStarted`] 曾經被算進來，那是錯的。「她從來沒有開始錄」
+    /// 之後接一句「只算到她停下來為止」，是在指一個從來沒發生過的停止；
+    /// 而且那是唯一一種使用者在另一個視窗打一行 `sister record` 就能當場
+    /// 解掉的狀態——說它「再等也沒用」等於把一條出路講成死路。
     pub fn hopeless(&self) -> bool {
         match self {
-            Self::NeverStarted | Self::Thinking { .. } | Self::Stopped { .. } => true,
-            Self::Paused
+            Self::Thinking { .. } | Self::Stopped { .. } => true,
+            Self::NeverStarted
+            | Self::Paused
             | Self::Booting
             | Self::Stalled { .. }
             | Self::Unreadable
@@ -202,7 +225,16 @@ pub enum Verdict {
     NotYet,
     /// 回了東西，但讀不懂。
     Unreadable {
+        /// **大腦真的吐出來的字**，一個字都不加。
+        ///
+        /// 這一格一度被拿去塞我們自己的診斷（`（離開碼 1）` 那個前綴），
+        /// 於是一支寫 stderr、stdout 一個字都沒有、然後 exit 1 的 CLI
+        /// ——沒登入的 `claude` 就是這樣——會讓畫面說「大腦回的東西讀不懂：
+        /// 「（離開碼 1）」」，引用一句大腦從來沒說過的話。空的就是空的，
+        /// 那是另一句話。
         head: String,
+        /// 我們這邊看到的離開碼，**和 `head` 分開**。
+        exit_code: Option<i32>,
     },
     /// 根本沒問到（spawn 起不來／逾時）。
     CallFailed {
@@ -228,11 +260,18 @@ impl Verdict {
             Self::NotYet => "還沒有。".into(),
             // 空回覆和「回了一坨看不懂的字」都是讀不懂，但前者連個樣本都印不出來。
             // 印一對空引號會讓人以為大腦回了一個空字串是有意義的。
-            Self::Unreadable { head } if head.is_empty() => {
-                "大腦一個字都沒回，這一輪不算數——不是「還沒有」。".into()
-            }
-            Self::Unreadable { head } => {
-                format!("大腦回的東西讀不懂，這一輪不算數——不是「還沒有」：「{head}」")
+            //
+            // 離開碼是**我們**看到的，不是大腦說的，所以它在引號外面。
+            Self::Unreadable { head, exit_code } => {
+                let code = match exit_code {
+                    Some(c) if *c != 0 => format!("（離開碼 {c}）"),
+                    _ => String::new(),
+                };
+                if head.is_empty() {
+                    format!("大腦一個字都沒回{code}，這一輪不算數——不是「還沒有」。")
+                } else {
+                    format!("大腦回的東西讀不懂{code}，這一輪不算數——不是「還沒有」：「{head}」")
+                }
             }
             Self::CallFailed { how } => {
                 format!(
@@ -487,6 +526,8 @@ pub fn read_verdict(stdout: &str) -> Verdict {
     let Ok(parsed) = serde_json::from_str::<Reply>(json) else {
         return Verdict::Unreadable {
             head: head(trimmed),
+            // `read_verdict` 只看得到那串字，看不到行程怎麼結束的。
+            exit_code: None,
         };
     };
     if !parsed.happened {
@@ -497,6 +538,8 @@ pub fn read_verdict(stdout: &str) -> Verdict {
     if parsed.because.trim().is_empty() {
         return Verdict::Unreadable {
             head: head(trimmed),
+            // `read_verdict` 只看得到那串字，看不到行程怎麼結束的。
+            exit_code: None,
         };
     }
     Verdict::Happened {
@@ -533,14 +576,14 @@ pub fn verdict_from_spawn(spawn: &SpawnOutcome) -> (OutboundOutcome, Verdict) {
         );
     }
     match read_verdict(&spawn.stdout) {
-        // 讀不懂的時候，那個離開碼是**唯一**的線索，要帶著走。
-        Verdict::Unreadable { head } => (
+        // 讀不懂的時候，那個離開碼是**唯一**的線索，要帶著走——但要放在
+        // 自己的格子裡，不可以摻進 `head`。摻進去的話「大腦一個字都沒回」
+        // 這句話就再也印不出來了。
+        Verdict::Unreadable { head, .. } => (
             OutboundOutcome::BadJson,
             Verdict::Unreadable {
-                head: match spawn.exit_code {
-                    Some(code) if code != 0 => format!("（離開碼 {code}）{head}"),
-                    _ => head,
-                },
+                head,
+                exit_code: spawn.exit_code,
             },
         ),
         verdict => (OutboundOutcome::Success, verdict),
@@ -652,14 +695,59 @@ mod tests {
         let thinking = Blind::Thinking { until: 1 }.message();
         assert!(thinking.contains("錄製已停"), "{thinking}");
         assert!(thinking.contains("不會有新的畫面"), "{thinking}");
-        assert!(Blind::Thinking { until: 1 }.hopeless());
-        // 三種「再等也沒用」，其餘七種等下去仍然有意義。
-        assert!(Blind::Stopped { at: None }.hopeless());
-        assert!(Blind::NeverStarted.hopeless());
-        assert!(!Blind::Paused.hopeless());
-        assert!(!Blind::RecordingButQuiet.hopeless());
-        assert!(!Blind::Stalled { at: 1 }.hopeless());
-        assert!(!Blind::Booting.hopeless());
+    }
+
+    /// 十種每一種都要被問到「再等下去還有沒有意義」——**一種都不能漏**。
+    ///
+    /// 漏掉的那幾種會安靜地跟著別人走：把 `Unreadable` 和
+    /// `ClockWentBackwards` 一起翻成 `true`，這個 repo 裡其餘所有測試照樣綠，而一次
+    /// NTP 校正落在最後一輪就會讓收尾說「她已經不在錄了……凍住的畫面」
+    /// ——`Unreadable` 那一句自己講的是「是我們問不出來」。
+    #[test]
+    fn every_kind_of_blind_answers_whether_waiting_is_still_worth_it() {
+        // `true` 的共同點很窄：**她曾經在錄，而且已經停了。**
+        for hopeless in [
+            Blind::Thinking { until: 1 },
+            Blind::Stopped { at: Some(1) },
+            Blind::Stopped { at: None },
+        ] {
+            assert!(hopeless.hopeless(), "{hopeless:?}");
+        }
+        // 其餘每一種等下去都還有意義。`NeverStarted` 尤其是——那是唯一一種
+        // 使用者在另一個視窗打一行 `sister record` 就當場解掉的狀態，
+        // 說它「再等也沒用」等於把一條出路講成死路。
+        for worth_waiting in [
+            Blind::NeverStarted,
+            Blind::Paused,
+            Blind::Booting,
+            Blind::Stalled { at: 1 },
+            Blind::Unreadable,
+            Blind::ClockWentBackwards { last_seen: 1 },
+            Blind::RecordingButQuiet,
+        ] {
+            assert!(!worth_waiting.hopeless(), "{worth_waiting:?}");
+        }
+    }
+
+    /// 「她從來沒有開始錄」之後不可以接「只算到她停下來為止」——
+    /// 那是在指一個從來沒發生過的停止。
+    #[test]
+    fn a_recorder_that_never_started_never_stopped_either() {
+        assert!(!Blind::NeverStarted.hopeless());
+        let tally = Tally {
+            answered: 1,
+            unanswered: 0,
+            blind: 1,
+        };
+        let said = WatchEnd::Deadline {
+            tally,
+            hopeless: Blind::NeverStarted.hopeless(),
+        }
+        .message();
+        assert!(
+            !said.contains("停下來為止"),
+            "她從來沒開始過，哪來的停下來：{said}"
+        );
     }
 
     /// 開機中和「正在錄但畫面沒動」的下一步不一樣，句子也要不一樣。
@@ -758,7 +846,13 @@ mod tests {
     /// 讀不懂的回覆和叫不起來一樣，都不算「問到了」。
     #[test]
     fn an_unreadable_reply_is_not_an_answer() {
-        assert!(!Verdict::Unreadable { head: "x".into() }.answered());
+        assert!(
+            !Verdict::Unreadable {
+                head: "x".into(),
+                exit_code: None
+            }
+            .answered()
+        );
         assert!(
             !Verdict::CallFailed {
                 how: OutboundOutcome::Timeout
@@ -788,6 +882,7 @@ mod tests {
             newest_app: None,
             verdict: Verdict::Unreadable {
                 head: String::new(),
+                exit_code: None,
             },
         });
         tally.count(&Look::NothingNew(Blind::Paused));
@@ -892,7 +987,15 @@ mod tests {
             no_consent.contains("sister watch"),
             "--dry-run 那一行要指到他真的在跑的那支命令：{no_consent}"
         );
-        assert!(WatchSkip::NoCommand.message().contains("[brain]"));
+        // `[brain]` 兩邊都有，所以那一句話證不出任何事。要釘的是
+        // 「所以我沒有開始盯」——interpret 那一句永遠不會這樣講。
+        let no_command = WatchSkip::NoCommand.message();
+        assert_ne!(no_command, crate::brain::SkipReason::NoCommand.message());
+        assert!(no_command.contains("所以我沒有開始盯"), "{no_command}");
+        assert!(
+            !no_command.contains("沒有東西可解釋"),
+            "他跑的是 watch 不是 interpret：{no_command}"
+        );
     }
 
     #[test]
@@ -918,6 +1021,30 @@ mod tests {
             read_verdict("{\"happened\":true,\"because\":\"   \"}"),
             Verdict::Unreadable { .. }
         ));
+    }
+
+    /// **一支 stdout 一個字都沒吐、然後 exit 1 的 CLI，不可以被引用。**
+    ///
+    /// 沒登入的 `claude` 就長這樣：東西全寫到 stderr，stdout 是空的，離開碼
+    /// 非零。離開碼一旦被摻進 `head`，那個格子就再也不是空的了，於是畫面說
+    /// 「大腦回的東西讀不懂：「（離開碼 1）」」——引用一句大腦從來沒說過的話，
+    /// 而「大腦一個字都沒回」那一句從此印不出來。
+    #[test]
+    fn a_brain_that_said_nothing_is_not_quoted_saying_its_exit_code() {
+        let (outcome, verdict) = verdict_from_spawn(&spawn("", Some(1)));
+        assert_eq!(outcome, OutboundOutcome::BadJson);
+        let said = verdict.message();
+        assert!(said.contains("大腦一個字都沒回"), "{said}");
+        assert!(
+            !said.contains("大腦回的東西讀不懂"),
+            "空的被講成回了東西：{said}"
+        );
+        // 離開碼還是要看得到——但它是**我們**看到的，不在引號裡面。
+        assert!(said.contains("離開碼 1"), "{said}");
+        assert!(
+            !said.contains("「（離開碼"),
+            "離開碼被當成大腦的話引用了：{said}"
+        );
     }
 
     /// 逾時不是「還沒有」。
@@ -971,6 +1098,40 @@ mod tests {
         // 同樣 31 次，但今天只剩 5 次 → 預算先到。
         let tight = plan_line(120_000, 3_600_000, 75, 80);
         assert!(tight.contains("外送上限"), "{tight}");
+    }
+
+    /// **除不盡的那些才是重點。**
+    ///
+    /// 上面那條只用了 3 600 000 / 120 000 這種整除的輸入，而
+    /// `(stop_after + every) / every` 這個寫錯的版本在整除的時候答案一樣。
+    /// 這裡直接拿一個模擬的迴圈去對，除不盡的地方它就對不上了。
+    #[test]
+    fn the_plan_line_counts_the_rounds_a_real_loop_would_run() {
+        // 真的迴圈：t = 0, every, 2·every, … 直到某一輪 t >= stop_after
+        // （那一輪就是到期那一眼，看完才收尾）。
+        fn rounds(every: Millis, stop_after: Millis) -> i64 {
+            let (mut t, mut n) = (0, 0);
+            loop {
+                n += 1;
+                if t >= stop_after {
+                    return n;
+                }
+                t += every;
+            }
+        }
+        for every in [7_000, 30_000, 45_000, 60_000, 120_000] {
+            for stop_after in (0..=600_000).step_by(1_000) {
+                let said = plan_line(every, stop_after, 0, 10_000);
+                let expected = rounds(every, stop_after);
+                assert!(
+                    said.contains(&format!("最多問 {expected} 次")),
+                    "every={every} stop_after={stop_after} 應該是 {expected}：{said}"
+                );
+            }
+        }
+        // 具體那一發：70 秒 ÷ 30 秒要跑四輪（0/30/60/70），不是三輪。
+        // 少報的那一次是一次真的外送。
+        assert!(plan_line(30_000, 70_000, 0, 80).contains("最多問 4 次"));
     }
 
     /// 一個公開函式不該靠呼叫端記得先夾住參數才不會 panic。

@@ -2841,10 +2841,24 @@ pub mod watch {
                         let day = day_of(now)?;
                         let used = db.brain_outbound_count_on(&day)?;
                         if used >= config.brain.daily_budget {
-                            let end = WatchEnd::BudgetRanOut {
-                                tally,
-                                used,
-                                limit: config.brain.daily_budget,
+                            // **「預算*先*用完了」是一個排序斷言。**
+                            //
+                            // 到期那一刻同時撞到預算牆的話，那句話沒查過就
+                            // 宣布了誰先誰後——而 `expired` 就在三行以上的
+                            // 作用域裡。它還接著說「我沒有再看下去」，讓人以為
+                            // 多給預算就會有答案；時間已經到了，不會有。
+                            // 他要的是 `--stop-after`，那一句才是他的答案。
+                            let end = if expired {
+                                WatchEnd::Deadline {
+                                    tally,
+                                    hopeless: false,
+                                }
+                            } else {
+                                WatchEnd::BudgetRanOut {
+                                    tally,
+                                    used,
+                                    limit: config.brain.daily_budget,
+                                }
                             };
                             writeln!(out, "{}", end.message())?;
                             return Ok(());
@@ -2880,10 +2894,17 @@ pub mod watch {
                     }
                 }
             };
-            // 時鐘往回跳的那一輪也要更新游標——那會把它往**回**拉，而不是
-            // 留在原本那個高水位。留在高水位的話，時鐘走回原處之前的每一輪
-            // 都會是空的（要等好幾分鐘）；往回拉只會讓幾段字被重問一次。
-            last_seen = now.saturating_add(1);
+            // **高水位，只往前不往後。**
+            //
+            // 這裡原本是 `last_seen = now + 1`，時鐘往回跳的時候就會把游標
+            // 一起拖回去——然後她把跳過的那一段整個重跑一遍。一次十分鐘的
+            // NTP 校正在 `--every 30s` 之下是二十輪重問，每一輪只要有字就是
+            // 一次外送：同一段畫面被送出去第二次，開跑時說的「最多問 N 次」
+            // 當場變成假話，而預設一天只有 80 次。
+            //
+            // 停在高水位的代價是時鐘走回來之前每一輪都查不到東西——但那幾輪
+            // 會誠實地說「時鐘往回跳了」，而且**一毛錢都不花**。
+            last_seen = last_seen.max(now.saturating_add(1));
 
             tally.count(&look);
             // 時刻要讀得懂，而且要和 `sister hands log` 同一個格式——他會拿兩邊
@@ -3140,7 +3161,210 @@ pub mod watch {
             assert!(text.contains("凍住的畫面"), "{text}");
             assert!(
                 !text.contains("時間到了，沒有等到"),
-                "她第 20 秒就不錄了，剩下那 40 分鐘不能算進「沒等到」：{text}"
+                "她中途就不錄了，剩下那段時間不能算進「沒等到」：{text}"
+            );
+        }
+
+        /// **她還在錄的時候到期，那就是一句乾淨的「沒有等到」。**
+        ///
+        /// `hopeless` 那一格只有 `true` 那一面被釘住過——把收尾寫死成
+        /// `let hopeless = true;` 的話，一個從頭到尾都在錄的正常 run 會在最後
+        /// 說「她已經不在錄了，只算到她停下來為止」，而她整段時間都醒著。
+        /// 使用者讀到那句話會去重開錄製，然後再等一次。
+        #[test]
+        fn a_deadline_while_she_is_still_recording_is_a_plain_no() {
+            let (tmp, mut config) = prepared("watch-still-recording", "字", true);
+            config.brain.args = vec![
+                "-c".into(),
+                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
+            ];
+            // 最後那一眼看下去的時候，心跳是新鮮的：她確實還在錄。
+            sister_core::heartbeat::beat(&tmp.0, 158_000).expect("beat");
+            let mut ticks = [100_000_i64, 100_000, 160_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    quiet_for: None,
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            // 有問到答案，所以走的不是「一次都沒問到」那一臂——這一行是
+            // 上面那句斷言的前提，少了它整條測試會被那一臂接走。
+            assert!(text.contains("問到答案 1 次"), "{text}");
+            assert!(text.contains("時間到了，沒有等到"), "{text}");
+            assert!(
+                !text.contains("停下來為止"),
+                "她整段時間都在錄，沒有停下來過：{text}"
+            );
+        }
+
+        /// **一輪新畫面都沒有的時候，那幾輪要如實記在「沒有新畫面可看」那一格。**
+        ///
+        /// 三個數字加起來就是她跑了幾輪；哪一格漏記，收尾那句話就會少算，
+        /// 而使用者正拿它跟開跑時說的「最多問 N 次」對。
+        #[test]
+        fn a_run_that_never_saw_a_chunk_counts_every_round_as_blind() {
+            // 那一段字落在開跑前很久，任何一輪的視窗都碰不到它。
+            let (tmp, config) = prepared_at("watch-all-blind", 1_000, "很久以前", true);
+            let mut ticks = [100_000_i64, 100_000, 130_000, 160_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    quiet_for: None,
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("沒有新畫面可看 3 次"), "{text}");
+            assert!(text.contains("問到答案 0 次"), "{text}");
+            assert!(text.contains("送出去但沒拿到答案 0 次"), "{text}");
+            // 一次都沒送出去，所以帳上不可以有紀錄。
+            let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+            let day = sister_core::local_day::local_day_key(100_000).unwrap();
+            assert_eq!(db.brain_outbound_count_on(&day).unwrap(), 0);
+        }
+
+        /// **時鐘往回跳那一輪，畫面上要講的是「時鐘往回跳了」。**
+        ///
+        /// 那一輪**什麼都沒查**——區間是反的。接線接到 `blind_reason` 的話，
+        /// 她會拿另一種狀態的句子來蓋一次沒發生過的查詢：這裡沒有心跳檔，
+        /// 於是那句話會變成「她從來沒有開始錄」，而 recorder 好端端地跑著。
+        #[test]
+        fn a_backwards_clock_says_so_on_screen() {
+            let (tmp, mut config) = prepared("watch-backwards", "字", true);
+            config.brain.args = vec![
+                "-c".into(),
+                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
+            ];
+            // 第三輪要有字可看，這樣**正常路徑上一次都不會走到 `blind_reason`**
+            // ——於是畫面上只要出現它那句「沒有新的畫面可以看」，就一定是往回
+            // 跳的那一輪被接到了錯的地方去。
+            add_chunk(&tmp.0, 155_000, "第二段");
+            // 第二輪的時鐘比第一輪早（NTP 校時／睡眠喚醒）。
+            let mut ticks = [100_000_i64, 100_000, 90_000, 160_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    quiet_for: None,
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("時鐘往回跳"), "{text}");
+            assert!(
+                !text.contains("沒有新的畫面可以看"),
+                "那一輪沒查過任何東西，不可以拿另一種狀態的句子來蓋：{text}"
+            );
+            assert!(text.contains("沒有新畫面可看 1 次"), "{text}");
+            // 往回跳的那一輪一毛錢都不花：帳上只有有字的那兩輪。
+            let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+            let day = sister_core::local_day::local_day_key(100_000).unwrap();
+            assert_eq!(db.brain_outbound_count_on(&day).unwrap(), 2, "{text}");
+        }
+
+        /// **午夜之後那道預算閘門要讀新的一天的帳，不是開跑那一天的。**
+        ///
+        /// 上面那條測試釘的是「記在哪一天」（寫），這條釘的是「照哪一天放行」
+        /// （讀）。只釘寫的那一面的話，把閘門讀成 `day_of(started)` 照樣全綠：
+        /// 昨天的額度滿了，她今天一次都不問，然後說「今天的外送預算先用完了」
+        /// ——而今天的帳上是 0。
+        #[test]
+        fn the_budget_gate_after_midnight_reads_the_new_days_ledger() {
+            let started = 1_756_200_000_000_i64;
+            let tomorrow = started + 86_400_000;
+            let (tmp, mut config) = prepared_at("watch-midnight-gate", started - 5_000, "字", true);
+            config.brain.args = vec![
+                "-c".into(),
+                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
+            ];
+            // 一天只有兩次，而昨天已經用掉一次。
+            config.brain.daily_budget = 2;
+            let day_one = sister_core::local_day::local_day_key(started).unwrap();
+            let day_two = sister_core::local_day::local_day_key(tomorrow).unwrap();
+            assert_ne!(day_one, day_two, "這兩個時刻要落在不同的本地日期");
+            // 午夜前一小段落地的字：第二輪（午夜之後）看得到，第三輪已經
+            // 滑出視窗——第三輪不再問，帳上的數字才只反映午夜那一輪。
+            add_chunk(&tmp.0, tomorrow - 20_000, "午夜之後才被看到的字");
+            {
+                let mut db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+                db.insert_brain_outbound(&OutboundInsert {
+                    ts: started - 60_000,
+                    day_key: &day_one,
+                    command: "sh",
+                    args: &[],
+                    segment_core_start: None,
+                    chars_sent: 1,
+                    truncated: false,
+                    outcome: "ok",
+                    duration_ms: 1,
+                    error: None,
+                    role: "watcher",
+                })
+                .unwrap();
+            }
+
+            // 第二輪落在午夜之後、而且**還沒到期**，所以撞到牆的話畫面上會是
+            // 「預算先用完了」，不會被收尾那句「時間到了」蓋掉。
+            let mut ticks = [started, started, tomorrow, tomorrow + 30_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 86_400_000 + 10_000,
+                    quiet_for: None,
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            assert!(
+                !text.contains("預算先用完"),
+                "今天的帳上是 0，她卻拿昨天的額度把自己擋在門外：{text}"
+            );
+            let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+            assert_eq!(
+                db.brain_outbound_count_on(&day_two).unwrap(),
+                1,
+                "午夜之後那一輪應該問得出去：{text}"
+            );
+            assert_eq!(
+                db.brain_outbound_count_on(&day_one).unwrap(),
+                2,
+                "昨天的帳：本來一次，加上午夜前那一輪"
             );
         }
 
@@ -3168,12 +3392,64 @@ pub mod watch {
             // 上一輪查到 100_000 為止（游標停在 100_001）。
             let (from, to) = window(100_001, 130_000).expect("時鐘沒有往回跳");
             assert_eq!(to, 130_001);
+            // **要擋的是 OCR 那一段延遲，量級是「秒」不是「毫秒」。**
+            // 這台機器自己量到的 OCR 是每張 2407.6／2798.1 ms（AGENTS.md 的
+            // 兩份 bench），所以往回留的那一段要蓋得住那麼久之前的一列。
+            // 只釘 `99_998`（慢兩毫秒）的話，`GRACE = 1_500` 照樣全綠，而
+            // 每一列真實的落地延遲都會落在洞裡。
+            const OCR_LAG: Millis = 2_800;
             assert!(
-                (from..to).contains(&99_998),
-                "一列 ts=99_998、OCR 慢了兩毫秒才落地的字就永遠看不到了：{from}..{to}"
+                (from..to).contains(&(100_001 - OCR_LAG)),
+                "OCR 慢了 {OCR_LAG} 毫秒才落地的那一列就永遠看不到了：{from}..{to}"
             );
             // 但也不能往回看到上上一輪去，那是白花的外送。
             assert!(!(from..to).contains(&90_000), "{from}..{to}");
+        }
+
+        /// **時鐘往回跳的時候游標不跟著走。**
+        ///
+        /// 跟著走的話，她會把跳過的那一段整個重跑一遍：同一段字被送出去第二
+        /// 次、第三次，每一次都是一通外送，而預設一天只有 80 次。開跑時說的
+        /// 「最多問 N 次」當場變成假話。
+        ///
+        /// 這條測試走真的 `run_with`，量的是**帳上到底寫了幾列**——自己在測試
+        /// 裡把游標的算式再寫一遍的話，量到的是那份抄寫，接線改回
+        /// `last_seen = now + 1` 照樣全綠。
+        #[test]
+        fn a_backwards_clock_does_not_replay_the_span_it_jumped_over() {
+            let (tmp, mut config) = prepared("watch-no-replay", "那一段字", true);
+            config.brain.args = vec![
+                "-c".into(),
+                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
+            ];
+            // 第一輪在 100_000 看到 90_000 那一段（＝第一通外送）。之後時鐘
+            // 往回跳到 90_000、再走到 95_000——游標若跟著往回，那兩輪的視窗
+            // 會重新蓋住 90_000，同一段字就被再送一次。
+            let mut ticks = [100_000_i64, 100_000, 90_000, 95_000, 160_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    quiet_for: None,
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+            let day = sister_core::local_day::local_day_key(100_000).unwrap();
+            assert_eq!(
+                db.brain_outbound_count_on(&day).unwrap(),
+                1,
+                "同一段字被送出去第二次——時鐘往回跳把游標一起拖回去了：{text}"
+            );
         }
 
         /// **跨過午夜的那一輪要記在新的一天，不是開跑那一天。**
