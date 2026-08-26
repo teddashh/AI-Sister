@@ -721,8 +721,8 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
             continue;
         }
 
-        let prompt_a = dual_pass_prompt('A', card, &originals, &keep_commits);
-        let prompt_b = dual_pass_prompt('B', card, &originals, &keep_commits);
+        let prompt_a = dual_pass_prompt('A', card, &originals, &keep_commits)?;
+        let prompt_b = dual_pass_prompt('B', card, &originals, &keep_commits)?;
         debug_assert!(
             prompt_a.contains("PASS_A")
                 && prompt_b.contains("PASS_B")
@@ -964,7 +964,7 @@ fn dual_pass_prompt(
     card: &L2CardRow,
     originals: &[crate::db::L0Original],
     commits: &[CommitmentCandidate],
-) -> String {
+) -> Result<String> {
     let (who, rule, marker) = match angle {
         'A' => (
             "審閱者甲",
@@ -995,20 +995,24 @@ fn dual_pass_prompt(
     );
     s.push_str("due_source 只能是 explicit（螢幕上寫了時間）或 inferred（你從上下文猜的）。\n");
     s.push_str("kind 只能是 promise / todo / followup / reminder。\n\n");
-    s.push_str("L2 假設（可推翻，不是原件）：\n");
-    s.push_str(&format!("- activity: {}\n", card.activity));
-    s.push_str("承諾候選：\n");
+    let mut data = String::new();
+    data.push_str("L2 假設（可推翻，不是原件）：\n");
+    data.push_str(&format!("- activity: {}\n", card.activity));
+    data.push_str("承諾候選：\n");
     for c in commits {
-        s.push_str(&format!(
+        data.push_str(&format!(
             "- {}（來源 {}） due={:?}\n",
             c.text, c.source, c.due_hint
         ));
     }
-    s.push_str("\n—— L0 原件（真的去讀的，不是 L2 再抄一次）——\n");
+    data.push_str("\n—— L0 原件（真的去讀的，不是 L2 再抄一次）——\n");
     for o in originals {
-        s.push_str(&format!("[{}] {}\n", o.r#ref, o.text));
+        data.push_str(&format!("[{}] {}\n", o.r#ref, o.text));
     }
-    s
+    let (fenced, truncated) = crate::prompt_fence::fence_untrusted_data(&data, usize::MAX)?;
+    debug_assert!(!truncated);
+    s.push_str(&fenced);
+    Ok(s)
 }
 
 fn parse_pass(stdout: &str) -> Option<ReviewPassCard> {
