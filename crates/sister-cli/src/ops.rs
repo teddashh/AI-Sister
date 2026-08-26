@@ -2659,6 +2659,56 @@ pub mod watch {
         pub stop_after: Millis,
         pub quiet_for: Option<Millis>,
         pub dry_run: bool,
+        pub notify: bool,
+    }
+
+    /// **閃到他回頭看為止，不是閃三下就算了。**
+    ///
+    /// 這整支旗標存在的前提是「他不在這個終端機前面」。`uCount: 3` 配
+    /// `FLASHW_TRAY` 是閃三下（約一秒半）然後自己停下來——他去泡個咖啡就完全
+    /// 錯過，回來看到的是一個安靜的工作列和一句他不知道什麼時候印出來的話。
+    /// 那和沒有通知是同一件事，而且更糟：他以為自己收得到。
+    ///
+    /// `FLASHW_TIMERNOFG` 是「一直閃到這個視窗被叫到前景為止」，也就是**閃到
+    /// 他真的看到**。這是 Windows 為這件事準備的那一個旗標。搭配它的時候
+    /// `uCount` 不再是次數上限，填 0。
+    ///
+    /// 這一段在這台 Linux 上編得到（`check-windows.sh`）但**執行不到**，
+    /// 一條斷言都蓋不住它——所以它上面這幾行是它唯一的規格。
+    #[cfg(windows)]
+    fn platform_notify() {
+        use windows::Win32::System::Console::GetConsoleWindow;
+        use windows::Win32::System::Diagnostics::Debug::MessageBeep;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, MB_OK,
+        };
+
+        // SAFETY: both calls only address this process's console window. They neither retain
+        // pointers nor transfer focus; failure merely leaves BEL as the notification.
+        unsafe {
+            let hwnd = GetConsoleWindow();
+            if !hwnd.is_invalid() {
+                let info = FLASHWINFO {
+                    cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+                    hwnd,
+                    dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+                    uCount: 0,
+                    dwTimeout: 0,
+                };
+                let _ = FlashWindowEx(&info);
+            }
+            let _ = MessageBeep(MB_OK);
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn platform_notify() {}
+
+    fn notify(out: &mut impl Write) -> Result<()> {
+        write!(out, "\x07")?;
+        out.flush()?;
+        platform_notify();
+        Ok(())
     }
 
     pub fn run(data_dir: &Path, config: &Config, opts: &WatchOpts) -> Result<()> {
@@ -2687,7 +2737,8 @@ pub mod watch {
         );
         let mut db = Db::open(&Config::db_path(data_dir))?;
         let consent = sister_core::consent::load(data_dir);
-        // 這三句用 `WatchSkip`，**不是** `brain::SkipReason`。那三句是替
+        // 這三句用 `WatchSkip`，**不是** `brain::SkipReason`。它們在開跑當下
+        // 就結束，使用者仍坐在終端機前，所以即使有 --notify 也不發訊號。那三句是替
         // `sister interpret` 寫的，其中一句說「超過即靜默降級，只累積 L0/L1」
         // ——對 interpret 是真的，對這裡是假的：這個行程當場就結束，她一眼
         // 都不會看。指路那一行也一樣，要指到 `sister watch --dry-run`。
@@ -2765,6 +2816,23 @@ pub mod watch {
                 crate::fmt::duration_ms(span)
             )?;
         }
+        // **預演不會盯，所以它沒有收尾可以通知。**
+        //
+        // 這一句原本印在 `--dry-run` 那個 early return 前面，於是
+        // `sister watch … --dry-run --notify` 會說「等到了我會讓工作列那顆
+        // 按鈕閃一下」——一句關於一場永遠不會發生的盯梢的承諾。往下搬之後
+        // 換成另一種危險：一個在預演裡安靜地什麼都不做的旗標。所以兩條路
+        // 各講各的話，兩句都不是沉默。
+        if opts.notify {
+            if opts.dry_run {
+                writeln!(
+                    out,
+                    "（--notify 這一趟用不到：預演只印出要送的字就結束，沒有收尾可以通知你。）"
+                )?;
+            } else {
+                writeln!(out, "{}", WatchEnd::notification_notice(cfg!(windows)))?;
+            }
+        }
 
         let mut last_seen = started.saturating_sub(every);
         if opts.dry_run {
@@ -2791,7 +2859,7 @@ pub mod watch {
 
         let deadline = started.saturating_add(opts.stop_after);
         let mut tally = Tally::default();
-        loop {
+        let end: WatchEnd = loop {
             let now = clock();
             // **到期那一刻要再看最後一眼，才輪到收尾那句話。**
             //
@@ -2824,14 +2892,12 @@ pub mod watch {
                                 // 這一輪確實沒有新畫面可看，所以仍算進 blind；
                                 // WentQuiet 是停止原因，不是第四種計數。
                                 tally.count(&Look::NothingNew(Blind::RecordingButQuiet));
-                                let end = WatchEnd::WentQuiet {
+                                break WatchEnd::WentQuiet {
                                     tally,
                                     quiet_for: elapsed,
                                     last_at: last.ts,
                                     last_app: last.app_id,
                                 };
-                                writeln!(out, "{}", end.message())?;
-                                return Ok(());
                             }
                         }
                         Look::NothingNew(blind)
@@ -2848,7 +2914,7 @@ pub mod watch {
                             // 作用域裡。它還接著說「我沒有再看下去」，讓人以為
                             // 多給預算就會有答案；時間已經到了，不會有。
                             // 他要的是 `--stop-after`，那一句才是他的答案。
-                            let end = if expired {
+                            break if expired {
                                 WatchEnd::Deadline {
                                     tally,
                                     hopeless: false,
@@ -2860,8 +2926,6 @@ pub mod watch {
                                     limit: config.brain.daily_budget,
                                 }
                             };
-                            writeln!(out, "{}", end.message())?;
-                            return Ok(());
                         }
                         let (payload, truncated) =
                             sister_core::watch::build_watch_prompt(&opts.question, &hits)?;
@@ -2920,18 +2984,21 @@ pub mod watch {
                 ..
             } = look
             {
-                writeln!(out, "{}", WatchEnd::Saw { tally }.message())?;
-                return Ok(());
+                break WatchEnd::Saw { tally };
             }
             if expired {
                 // 最後那一眼看到的是「她已經不在錄了」的話，「沒等到」只算到
                 // 她停下來為止——後面那段時間我對著的是一張凍住的畫面。
                 let hopeless = matches!(&look, Look::NothingNew(blind) if blind.hopeless());
-                writeln!(out, "{}", WatchEnd::Deadline { tally, hopeless }.message())?;
-                return Ok(());
+                break WatchEnd::Deadline { tally, hopeless };
             }
             sleep(every);
+        };
+        writeln!(out, "{}", end.message())?;
+        if end.should_notify(opts.notify) {
+            notify(out)?;
         }
+        Ok(())
     }
 
     /// 這一輪要查的區間 `[from, to)`，往回多留 [`GRACE`] 那一段。
@@ -3052,6 +3119,173 @@ pub mod watch {
             (tmp, config)
         }
 
+        fn opts(notify: bool) -> WatchOpts {
+            WatchOpts {
+                question: "完成嗎".into(),
+                every: 30_000,
+                stop_after: 0,
+                quiet_for: None,
+                dry_run: false,
+                notify,
+            }
+        }
+
+        #[test]
+        fn seeing_the_answer_writes_bell_only_when_requested() {
+            for requested in [true, false] {
+                let (tmp, config) = prepared("watch-notify-saw", "完成", true);
+                let mut ticks = [100_000, 100_000].into_iter();
+                let mut out = Vec::new();
+                run_with(
+                    &tmp.0,
+                    &config,
+                    &opts(requested),
+                    &mut || ticks.next().expect("fake clock ran out"),
+                    &mut |_| {},
+                    &mut out,
+                )
+                .expect("run");
+                assert_eq!(
+                    out.contains(&b'\x07'),
+                    requested,
+                    "Saw 的通知和旗標不同步：{}",
+                    String::from_utf8_lossy(&out)
+                );
+            }
+        }
+
+        #[test]
+        fn a_quiet_screen_end_also_writes_bell() {
+            let now = 1_756_200_000_000_i64;
+            let (tmp, config) = prepared_at("watch-notify-quiet", now - 60_000, "舊字", true);
+            sister_core::heartbeat::beat(&tmp.0, now).expect("recording");
+            let mut ticks = [now, now].into_iter();
+            let mut out = Vec::new();
+            let mut options = opts(true);
+            options.quiet_for = Some(30_000);
+            run_with(
+                &tmp.0,
+                &config,
+                &options,
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8_lossy(&out).into_owned();
+            // **先證明這一輪真的是從 WentQuiet 收尾的。**
+            // 少了這一句，`stop_after: 0` 讓它走 Deadline 也照樣會響，而測試
+            // 的名字說的是另一件事——綠燈就會是綠得沒有意義的那一種。
+            assert!(
+                text.contains("畫面上已經"),
+                "這一輪不是從畫面安靜收尾的：{text}"
+            );
+            assert!(out.contains(&b'\x07'), "WentQuiet 沒有通知：{text}");
+        }
+
+        /// **開跑那一行要真的印出來，而且要說這個組建做得到什麼。**
+        ///
+        /// 上一輪 `--quiet-for` 就是掉在這裡：旗標收下了、什麼都沒做、畫面上
+        /// 一個字都沒有。`notification_notice` 那條單元測試只釘住那兩句話本身
+        /// ——**把呼叫它的那三行整段刪掉，全部測試照樣綠**（量過）。一個沒有
+        /// 人呼叫的純函式，證不出使用者看得到那句話。
+        #[test]
+        fn asking_for_notification_says_what_this_build_can_actually_do() {
+            let expected = sister_core::watch::WatchEnd::notification_notice(cfg!(windows));
+            let (tmp, config) = prepared("watch-notify-announce", "完成", true);
+            let mut ticks = [100_000, 100_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &opts(true),
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains(expected), "開跑沒有說她會怎麼通知：{text}");
+
+            // 沒要求的時候不可以憑空承諾一個訊號。
+            let (tmp, config) = prepared("watch-notify-silent", "完成", true);
+            let mut ticks = [100_000, 100_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &opts(false),
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            assert!(
+                !text.contains(expected),
+                "沒給 --notify 卻承諾了訊號：{text}"
+            );
+        }
+
+        /// **預演沒有收尾可以通知，所以那句承諾不可以印出來。**
+        ///
+        /// `--dry-run` 印完要送的字就結束，一輪都不會盯。原本那句「等到了我會
+        /// 讓工作列那顆按鈕閃一下」印在早退之前，是一句關於一場永遠不會發生的
+        /// 盯梢的承諾。但也不能就這樣安靜地把旗標吃掉——兩條路都要有話講。
+        #[test]
+        fn a_dry_run_does_not_promise_a_signal_it_will_never_send() {
+            let promise = sister_core::watch::WatchEnd::notification_notice(cfg!(windows));
+            let (tmp, config) = prepared("watch-notify-dry", "完成", true);
+            let mut out = Vec::new();
+            let mut options = opts(true);
+            options.dry_run = true;
+            run_with(
+                &tmp.0,
+                &config,
+                &options,
+                &mut || 100_000,
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            assert!(
+                !text.contains(promise),
+                "預演不會盯，卻承諾了收尾的時候會通知：{text}"
+            );
+            assert!(
+                text.contains("預演只印出要送的字就結束"),
+                "旗標被安靜地吃掉了：{text}"
+            );
+            assert!(!text.contains('\x07'), "預演不可以響：{text}");
+        }
+
+        #[test]
+        fn startup_skips_never_write_bell() {
+            let (no_consent, config) = prepared("watch-skip-consent", "完成", false);
+            let (no_command, mut commandless) = prepared("watch-skip-command", "完成", true);
+            commandless.brain.command.clear();
+            let (no_budget, mut full) = prepared("watch-skip-budget", "完成", true);
+            full.brain.daily_budget = 0;
+            for (dir, config) in [
+                (&no_consent.0, &config),
+                (&no_command.0, &commandless),
+                (&no_budget.0, &full),
+            ] {
+                let mut out = Vec::new();
+                run_with(
+                    dir,
+                    config,
+                    &opts(true),
+                    &mut || 100_000,
+                    &mut |_| {},
+                    &mut out,
+                )
+                .expect("skip");
+                assert!(!out.contains(&b'\x07'), "開跑即跳過卻通知了：{out:?}");
+            }
+        }
+
         /// **一整輪都叫不起來那支 CLI，收尾不可以說「沒有等到」。**
         ///
         /// 那是一句斷言，而她一次都沒有真的問到答案。這條測試走的是真的
@@ -3079,6 +3313,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3117,6 +3352,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3150,6 +3386,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3191,6 +3428,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3227,6 +3465,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3271,6 +3510,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3344,6 +3584,7 @@ pub mod watch {
                     stop_after: 86_400_000 + 10_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3436,6 +3677,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3479,6 +3721,7 @@ pub mod watch {
                     stop_after: 86_400_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3521,6 +3764,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || 1,
                 &mut |_| {},
@@ -3546,6 +3790,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: true,
+                    notify: false,
                 },
                 &mut || 100_000,
                 &mut |_| {},
@@ -3572,6 +3817,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: true,
+                    notify: false,
                 },
                 &mut || 100_000,
                 &mut |_| {},
@@ -3594,6 +3840,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: true,
+                    notify: false,
                 },
                 &mut || 100_000,
                 &mut |_| {},
@@ -3623,6 +3870,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || 100_000,
                 &mut |_| {},
@@ -3649,6 +3897,7 @@ pub mod watch {
                     stop_after: 60_000,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || 100_000,
                 &mut |_| {},
@@ -3722,6 +3971,7 @@ pub mod watch {
                     stop_after: 0,
                     quiet_for: Some(60_000),
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3823,6 +4073,7 @@ pub mod watch {
                     stop_after: 0,
                     quiet_for: Some(30_000),
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3868,6 +4119,7 @@ pub mod watch {
                     stop_after: 0,
                     quiet_for: Some(30_000),
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
@@ -3919,6 +4171,7 @@ pub mod watch {
                     stop_after: 0,
                     quiet_for: None,
                     dry_run: false,
+                    notify: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},

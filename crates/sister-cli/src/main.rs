@@ -448,6 +448,9 @@ enum Command {
         /// 印出這一刻真的會送出去的那段字，一個字都不送。
         #[arg(long)]
         dry_run: bool,
+        /// 停下來的時候發出訊號（終端機響一聲；Windows 再讓工作列那顆按鈕閃）。
+        #[arg(long)]
+        notify: bool,
     },
 
     /// 把最近關閉的段落交給設定的 CLI，收回一張 L2 假設卡片。
@@ -752,6 +755,7 @@ fn main() -> Result<()> {
             stop_after,
             quiet_for,
             dry_run,
+            notify,
         } => {
             let every = ops::parse_span(&every)?;
             let stop_after = ops::parse_span(&stop_after)?;
@@ -765,6 +769,7 @@ fn main() -> Result<()> {
                     stop_after,
                     quiet_for,
                     dry_run,
+                    notify,
                 },
             )
         }

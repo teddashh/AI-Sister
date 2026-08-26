@@ -389,6 +389,28 @@ pub enum WatchEnd {
 }
 
 impl WatchEnd {
+    /// 使用者有要求時，真正跑過的每一種收尾都要發訊號。
+    ///
+    /// 這裡刻意逐一列出變體，不用 `_ => requested`：新增停止原因時，編譯器會
+    /// 逼呼叫端決定它是不是一個「人已經離開終端機等結果」的收尾。
+    pub fn should_notify(&self, requested: bool) -> bool {
+        match self {
+            Self::Saw { .. }
+            | Self::Deadline { .. }
+            | Self::BudgetRanOut { .. }
+            | Self::WentQuiet { .. } => requested,
+        }
+    }
+
+    /// 開跑時如實說明這個組建能送出哪一種訊號。
+    pub fn notification_notice(windows: bool) -> &'static str {
+        if windows {
+            "等到了我會讓工作列那顆按鈕閃一下、響一聲——你可以去做別的事。"
+        } else {
+            "等到了我會在終端機響一聲（工作列閃爍是 Windows 才有的，這個組建沒有）。"
+        }
+    }
+
     pub fn message(&self) -> String {
         match self {
             Self::Saw { tally } => format!("{}等到了。", tally.line()),
@@ -1139,5 +1161,47 @@ mod tests {
     fn the_plan_line_does_not_divide_by_zero() {
         let said = plan_line(0, 3_600_000, 0, 80);
         assert!(said.contains("最多問"), "{said}");
+    }
+
+    #[test]
+    fn every_real_watch_end_obeys_the_notification_request() {
+        let tally = Tally::default();
+        let ends = [
+            WatchEnd::Saw { tally },
+            WatchEnd::Deadline {
+                tally,
+                hopeless: false,
+            },
+            WatchEnd::BudgetRanOut {
+                tally,
+                used: 1,
+                limit: 1,
+            },
+            WatchEnd::WentQuiet {
+                tally,
+                quiet_for: 30_000,
+                last_at: 1,
+                last_app: None,
+            },
+        ];
+        for end in ends {
+            assert!(end.should_notify(true), "要求通知卻漏了 {end:?}");
+            assert!(!end.should_notify(false), "沒要求通知卻響了 {end:?}");
+        }
+    }
+
+    #[test]
+    fn windows_and_non_windows_announce_different_real_capabilities() {
+        let windows = WatchEnd::notification_notice(true);
+        let other = WatchEnd::notification_notice(false);
+        assert_eq!(
+            windows,
+            "等到了我會讓工作列那顆按鈕閃一下、響一聲——你可以去做別的事。"
+        );
+        assert_eq!(
+            other,
+            "等到了我會在終端機響一聲（工作列閃爍是 Windows 才有的，這個組建沒有）。"
+        );
+        assert_ne!(windows, other);
     }
 }
