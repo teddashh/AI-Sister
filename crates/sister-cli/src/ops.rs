@@ -2204,6 +2204,35 @@ pub mod export {
             println!("{}", frames_skipped_line(s.frames_with_image as u64));
         }
 
+        // **她動過的手也是記憶，而且它不在資料庫裡。** 少了這一份，底下那句
+        // 「沒帶走的是 consent.toml 和 config.toml，那兩份是設定不是你的記憶」
+        // 就變成一句漏講了東西的話——而漏掉的那個**是**記憶。
+        //
+        // 不像 `frames/` 那樣配一個開關：它是純文字，通常幾 KB，不會有人為了
+        // 它的大小猶豫。沒按過那顆按鈕的話這個檔案不存在，那就什麼都不印——
+        // 「她一次手都沒動過」不需要在匯出報告上佔一行。
+        //
+        // 檔名向 `ActionLog` 要，不在這裡再拼一次字串：`in_data_dir` 那一處是
+        // 唯一寫死它的地方（見那支函式的註解）。
+        let src_log = sister_hands::ActionLog::in_data_dir(data_dir);
+        let dst_log = sister_hands::ActionLog::in_data_dir(to);
+        match std::fs::copy(src_log.path(), dst_log.path()) {
+            Ok(bytes) => println!(
+                "  ✓ {}   {}（她按你的指示動過的手）",
+                dst_log
+                    .path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                crate::fmt::bytes(bytes as i64),
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::Error::from(e))
+                    .with_context(|| format!("複製 {} 失敗", src_log.path().display()));
+            }
+        }
+
         // 匯出的目錄就是一個資料目錄，所以「還原」不需要任何工具。這一行
         // 是整個指令的重點：他能自己驗證那份匯出是活的。
         println!("\n這個目錄本身就是一個資料目錄，直接問得到：");
@@ -2369,6 +2398,52 @@ pub mod export {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// 自稱「全量」的匯出，不可以把她動過的手留在原地。
+        ///
+        /// SPEC §11.8 說 `sister export` 是全量匯出，「就算本專案死了」他手上
+        /// 那份也要是完整的。`action-log.jsonl` 不在資料庫裡，所以它不會被
+        /// `export_to` 帶走——這一條守的是那一行接線。
+        #[test]
+        fn a_full_export_takes_the_action_log_too() {
+            let src = crate::ops::tmp::Tmp::new("export-actionlog-src");
+            let dst = crate::ops::tmp::Tmp::new("export-actionlog-dst");
+            // `export` 要求來源有資料庫，所以先讓它長出一顆。
+            Db::open(&crate::db_path(&src.0)).expect("db");
+            let log = sister_hands::ActionLog::in_data_dir(&src.0);
+            log.append(&sister_hands::ActionEvent::Executed {
+                at_ms: 1_700_000_000_000,
+                action: sister_hands::ActionSnapshot::OpenUrl {
+                    url: "https://kept.example".into(),
+                },
+                result: sister_hands::ExecutionResult::Succeeded {
+                    detail: "ok".into(),
+                },
+            })
+            .expect("append");
+
+            run(&src.0, &dst.0, false).expect("export");
+
+            let copied = sister_hands::ActionLog::in_data_dir(&dst.0);
+            let raw = std::fs::read_to_string(copied.path())
+                .expect("匯出的目錄裡沒有 action log——那份備份少了她動過的手");
+            assert!(raw.contains("kept.example"), "{raw}");
+        }
+
+        /// 一次手都沒動過的時候，匯出不該憑空生一個空檔案出來。
+        ///
+        /// 「這個檔案不存在」和「這個檔案是空的」在還原之後是兩句不同的話。
+        #[test]
+        fn exporting_a_machine_that_never_acted_does_not_invent_an_action_log() {
+            let src = crate::ops::tmp::Tmp::new("export-noactions-src");
+            let dst = crate::ops::tmp::Tmp::new("export-noactions-dst");
+            Db::open(&crate::db_path(&src.0)).expect("db");
+            run(&src.0, &dst.0, false).expect("export");
+            assert!(
+                !sister_hands::ActionLog::in_data_dir(&dst.0).path().exists(),
+                "憑空生出了一個 action log",
+            );
+        }
 
         /// `--to <資料目錄>/frames/backup --with-frames` 會讓複製一直往下複製
         /// 自己，實測蓋出兩百多層才被檔名長度擋住。但攔它的理由更簡單：放在被

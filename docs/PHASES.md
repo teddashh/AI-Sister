@@ -430,6 +430,11 @@ capture 層本身就是 recorder。
   - 「她沒有建議下一步」（安靜）跟三種拒絕（fact 不在／kind 不合／URL 沒有
     scheme，各留一句看得見的話）分得開。兩個 pass 不同調時掉的是下一步、
     不是整張承諾。
+  - **`action-log.jsonl` 補進刪除與匯出兩條路**（alpha.69）。它是資料庫旁邊
+    的另一個檔案、有完整網址與路徑，而「忘掉一段時間」原本只認得 `sister.db`
+    和 `frames/`——差一點送出一版：資料庫清乾淨了，那幾行網址原封不動躺著，
+    畫面上寫「已經忘掉了」。`sister export` 同理（SPEC §11.8 自稱全量）。
+    刪的是字本身不是旗標；讀不懂的列問不出時間所以一起走、分開報數字。
   - 寫的人在 `sister-core`、讀的人在 `sister-hands`，中間沒有型別。量過：
     把讀的那一邊欄位改名、連它自己測試的字面值一起改，兩邊 28 條全綠而按鈕
     是壞的。`the_next_step_this_crate_writes_is_one_the_hands_crate_can_read_and_will_allow`
