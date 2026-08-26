@@ -1500,7 +1500,11 @@ pub mod act {
             }
             RunConclusion::Completed => log.append(&ActionEvent::Concluded {
                 at_ms: clock(),
-                conclusion: RunConclusionRecord::Completed,
+                // 這個數字就是底下那一行印給他看的 `tally.asked`，同一個變數。
+                // 抄一份「大概是幾」進紀錄的話，兩邊會在某一版分家。
+                conclusion: RunConclusionRecord::Completed {
+                    asked: Some(tally.asked),
+                },
             })?,
         }
         writeln!(
@@ -1560,10 +1564,29 @@ pub mod act {
         let replay = log.replay()?;
         let lines = sister_hands::replay_copy::recent_replay_lines(&replay, limit);
         if lines.is_empty() {
-            writeln!(
-                out,
-                "還沒有任何動作紀錄。她從來沒有把一個動作端到你面前過。"
-            )?;
+            // 上面那句 `ensure!` 擋掉了「目錄查不到」被講成「沒有」，然後**同一個
+            // 錯又在低一層原封不動地再犯一次**：零列有兩種，而它們印同一句話。
+            //
+            // 檔案不存在＝她真的從來沒有把一個動作端到你面前。
+            // 檔案在、但是空的＝她端過，那些列被 `sister forget` 刪掉了
+            // （`ActionLog::forget_range` 保留的列全部落在範圍內的時候，寫出去的
+            // 就是一個 0 位元組的檔案再 rename 蓋上去）。對後者說「她從來沒有」，
+            // 是拿一句沒查過的歷史宣告去蓋掉一次真的刪除。
+            if log.path().exists() {
+                writeln!(
+                    out,
+                    "這份紀錄是空的——**不是**「她從來沒動過手」，是裡面的列被刪光了。"
+                )?;
+                writeln!(
+                    out,
+                    "會把列刪掉的只有 `sister forget`（和字母人上的「忘掉這一整天」）。"
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "還沒有任何動作紀錄。她從來沒有把一個動作端到你面前過。"
+                )?;
+            }
             writeln!(out, "（紀錄會寫在 {}）", log.path().display())?;
             return Ok(());
         }
@@ -2529,6 +2552,87 @@ pub mod act {
             assert!(
                 short.contains("列讀不懂"),
                 "截斷不可以把那句解釋也吃掉：{short}"
+            );
+        }
+
+        /// 空的紀錄有兩種，而它們原本印同一句話。
+        ///
+        /// 檔案不存在＝她真的一次都沒問過你。
+        /// 檔案在、裡面沒東西＝她問過，那些列被 `sister forget` 刪掉了。
+        /// 對後者說「她從來沒有把一個動作端到你面前過」，是拿一句沒查過的歷史
+        /// 去蓋掉一次真的刪除——而讀的人會以為自己記錯了。
+        ///
+        /// 上面那條 `a_data_dir_we_never_looked_at_…` 擋的是同一個錯的高一層版本
+        /// （目錄查不到），低一層這個當時漏掉了。
+        #[test]
+        fn an_emptied_log_is_not_a_hand_that_never_moved() {
+            let run = go(
+                "act-log-emptied",
+                &one_card(),
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "好\n",
+                None,
+            );
+            let log = ActionLog::in_data_dir(&run.dir.0);
+            let before = logged(&run.dir.0, 20);
+            assert!(before.contains("已執行："), "先確定真的寫進去了：{before}");
+
+            // 走真正的刪除路徑，不是自己 truncate 一個檔案出來——這條測試要證明的
+            // 就是「那條路留下的東西長什麼樣」。
+            let report = log.forget_range(0, i64::MAX).expect("忘掉全部");
+            assert!(report.kept == 0, "整段都在範圍裡，一列都不該留：{report:?}");
+            assert!(log.path().exists(), "刪的是列，不是檔案本身");
+
+            let after = logged(&run.dir.0, 20);
+            assert!(
+                !after.contains("從來沒有"),
+                "她端過，只是紀錄被刪了。這句話是假的：{after}"
+            );
+            assert!(after.contains("被刪光了"), "{after}");
+            assert!(
+                after.contains("sister forget"),
+                "要講出唯一會把列刪掉的那條路：{after}"
+            );
+        }
+
+        /// 「問了三步、三步都做完」和「一步都沒問到你」在紀錄裡不可以是同一列。
+        ///
+        /// alpha.70 在**螢幕上**把這兩件事分開了（`nothing_to_offer`），
+        /// 磁碟上那一半漏掉：兩種都寫 `{"conclusion":"completed"}`，
+        /// 而 `sister hands log` 隔一週再看回去，它們又合成同一句
+        /// 「這一輪的步驟都問完了。」——那句話讀起來是「都處理完了」。
+        #[test]
+        fn a_round_that_asked_nothing_does_not_read_as_all_done_in_the_log() {
+            let no_next_step = Source {
+                rows: vec![card(7, None, &[1])],
+                apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+            };
+            let asked_none = go(
+                "act-log-zero",
+                &no_next_step,
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "",
+                None,
+            );
+            let zero = logged(&asked_none.dir.0, 20);
+            assert!(
+                zero.contains("一步都沒有問到你"),
+                "零步要自己講出來：{zero}"
+            );
+
+            let asked_one = go(
+                "act-log-one",
+                &one_card(),
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "好\n",
+                None,
+            );
+            let one = logged(&asked_one.dir.0, 20);
+            assert!(one.contains("問到你面前 1 步"), "{one}");
+            assert_ne!(
+                zero.contains("一步都沒有問到你"),
+                one.contains("一步都沒有問到你"),
+                "兩輪的收尾列不可以讀起來一樣\n零步：{zero}\n一步：{one}"
             );
         }
     }

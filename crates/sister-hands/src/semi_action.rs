@@ -39,12 +39,19 @@ impl ActionKind {
 
 /// 授權書允許碰的 app。
 ///
-/// **這一維約束的是提出請求的那一方自己填的字，不是動作真正會打開什麼。**
-/// [`ActionKind::of`] 是從 [`ActionSnapshot`] 算出來的，[`StepRequest::app`]
-/// 不是——今天沒有一條誠實的路可以從「開啟 `https://…`」或「開啟 `a.txt`」
-/// 推回哪一個 app 會接手（那是 Windows 的檔案關聯決定的，不是我們）。
-/// 在有那條路之前，把它讀成「規劃者宣告它要碰哪些 app」，不要讀成
-/// 「作業系統只會讓這些 app 被打開」。
+/// **這一維約束的是證據，不是作業系統。** [`StepRequest::app`] 這個欄位
+/// 型別上仍然是「呼叫端填進來的字」——這個 crate 管不到它從哪裡來。
+/// 差別在呼叫端：alpha.70 起唯一的生產者（`sister do`）是從承諾卡的
+/// `evidence_json` 一路回查到 `text_chunks.app_id` 算出來的，而算不出唯一
+/// 一個 app 的時候它不會亂填一個名字，會是一個擋得住的三態值。
+///
+/// 仍然**不可以**把它讀成「作業系統只會讓這些 app 被打開」：
+/// 「開啟 `https://…`」最後由哪一支程式接手，是 Windows 的檔案關聯決定的，
+/// 不是我們。這一維說的是「這一步的字，是在哪一個 app 的畫面上看到的」。
+///
+/// （alpha.69 這段話寫的是「規劃者自己填的字，今天沒有一條誠實的路可以推回
+/// 哪個 app」。alpha.70 就把那條路做出來了，於是這段註解變成假話——和
+/// [`crate::execute_with`] 上面那一段是同一天、同一種失效。）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AllowedApps(BTreeSet<App>);
 impl AllowedApps {
@@ -346,16 +353,51 @@ impl ScreenEvidenceRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "conclusion", rename_all = "snake_case")]
 pub enum RunConclusionRecord {
-    Completed,
-    StepLimitReached { completed_steps: u32, limit: u32 },
+    Completed {
+        /// 這一輪**問到你面前**幾步。
+        ///
+        /// 少了這個數字，「問了三步、三步都做完」和「一步都沒問到你」在紀錄裡
+        /// 是同一列 `{"conclusion":"completed"}`——而後者的意思是她挑不出事情做，
+        /// 讀起來卻像她把事情做完了。alpha.70 在螢幕上分開了這兩件事，
+        /// 磁碟上那一半漏掉了，於是 `sister hands log` 隔一週再看回去又合起來。
+        ///
+        /// **這裡的兩種空是不同的兩件事，不可以合併：**
+        /// `None` ＝ 這一列是還沒記這個數字的版本寫的（欄位根本不存在），
+        /// `Some(0)` ＝ 記過了，數出來就是零。
+        #[serde(default)]
+        asked: Option<u32>,
+    },
+    StepLimitReached {
+        completed_steps: u32,
+        limit: u32,
+    },
 }
 
 impl RunConclusionRecord {
     /// 和 [`RunConclusion::message`] 講的是同一句話——這裡把記錄轉回結局再問它，
     /// 不另外抄一份文案。
+    ///
+    /// 例外是 `Completed`：那一層身上沒有「問了幾步」這個數字，講不出這一句。
     pub fn message(self) -> String {
         match self {
-            Self::Completed => RunConclusion::Completed.message(),
+            // 「這一輪的步驟都問完了」在問了零步的時候是一句真話，而它讀起來是
+            // 「都處理完了」。為什麼是零有三種答案，這一列裡沒有那個資訊——
+            // 所以只講數字，不替它猜理由。猜錯的理由比沒有理由更糟。
+            Self::Completed { asked: Some(0) } => {
+                "這一輪走完了，但一步都沒有問到你。為什麼是零，要看當時螢幕上那一句；\
+                 紀錄裡只有這個數字。"
+                    .to_string()
+            }
+            Self::Completed { asked: Some(n) } => {
+                format!(
+                    "{}（問到你面前 {n} 步）",
+                    RunConclusion::Completed.message()
+                )
+            }
+            Self::Completed { asked: None } => format!(
+                "{}（這一列沒有記問了幾步，是 alpha.70 以前寫的）",
+                RunConclusion::Completed.message()
+            ),
             Self::StepLimitReached {
                 completed_steps,
                 limit,

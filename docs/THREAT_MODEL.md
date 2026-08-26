@@ -363,8 +363,13 @@ AI-Sister 每秒看一次你的螢幕，並且記住。這種東西的威脅模�
     是在哪個 app 的畫面上被看到的」——由 `evidence_json` → frame →
     `text_chunks.app_id` 算出來。它**不是**「作業系統只會讓這些 app 被打開」：
     一個 `https://…` 交給 `ShellExecuteW` 之後由誰接手，是 Windows 的檔案關聯
-    決定的，不是我們。`sister_hands::semi_action::AllowedApps` 的型別註解寫的
-    是同一件事，這裡是把它講給使用者聽。
+    決定的，不是我們。
+
+    > `sister_hands::semi_action::AllowedApps` 的型別註解一度和這一段互相矛盾：
+    > 那個 crate 看不到呼叫端，所以它 alpha.69 寫的是「這是規劃者自己填的字，
+    > 今天沒有一條誠實的路可以推回哪個 app」——而 alpha.70 的 `sister do`
+    > 就是那條路，只是它住在另一個 crate 裡。兩邊現在對齊了；改動任何一邊的
+    > 時候要一起改，這種跨 crate 的「它其實是誰填的」沒有任何閘門守得住。
 
 ---
 

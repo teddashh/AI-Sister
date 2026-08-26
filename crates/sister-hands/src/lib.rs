@@ -36,15 +36,25 @@ pub mod target_policy;
 pub enum Level {
     /// 物理上沒有手——[`execute_with`] 在這一級一律拒絕。
     Observe,
-    /// 可開 URL／檔案／聚焦視窗，且**僅限使用者點按鈕觸發**。
+    /// 可開 URL／檔案／聚焦視窗，且**僅限使用者當場親手答應**。
+    ///
+    /// alpha.69 這裡寫的是「僅限使用者點按鈕觸發」，那時候只有字母人上那顆
+    /// 按鈕走得到。alpha.70 的 `sister do` 在終端機上讀一個「好」也走這一級，
+    /// 於是「按鈕」變成假話。守住的那件事沒有變——見 [`UserButtonPress`]。
     Suggest,
     /// 結構化任務授權 + 綁定具體內容的逐步核准。
     SemiAction,
 }
 
-/// 只能由 UI 的 suggestion 按鈕 click handler 鑄出的憑證。
+/// **人當場親手答應**這件事的憑證。
 ///
-/// 私有欄位使模型輸出、L0 文字和一般資料解析不能自己拼出這張票。
+/// 私有欄位使模型輸出、L0 文字和一般資料解析不能自己拼出這張票——這是它唯一
+/// 的職責，而且從 alpha.69 到今天沒有變。
+///
+/// 變的是「親手答應」長什麼樣子：alpha.69 只有字母人上那顆 suggestion 按鈕的
+/// click handler，所以這段話當時寫的是「只能由 UI 的按鈕鑄出」；alpha.70 的
+/// `sister do` 在終端機上讀一個「好」，走的是同一個 [`Suggestion::press`]。
+/// 兩個都是人，都不是模型——名單會再長，型別上的那道牆不會鬆。
 #[derive(Debug, PartialEq, Eq)]
 pub struct UserButtonPress(());
 
