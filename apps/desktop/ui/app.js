@@ -142,7 +142,10 @@ function paintGatekeeper(view) {
       utterance.hidden = false;
       utterance.dataset.form = "card";
       utteranceText.textContent = item.text;
-      utteranceEvidence.hidden = false;
+      // 一格都沒有的時候要收起來。日終那種卡的出處是 `reviewer_run:` 和
+      // `daysummary:`，兩種都不是畫面，所以 chip 一顆都做不出來——留一個空
+      // 框在那裡，讀起來會是「這裡有出處」，而它下面什麼都沒有。
+      utteranceEvidence.hidden = utteranceEvidence.childElementCount === 0;
       utteranceActions.hidden = false;
       return;
   }

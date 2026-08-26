@@ -307,11 +307,13 @@ fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, St
                 Verdict::Speak { form, cost: _ } => {
                     let reference = CommitmentRef::from_candidate(candidate.commitment_id);
                     let suggestion = gate_suggestion(db, &reference, &mut holds)?;
+                    let chips = frame_chips(&candidate.evidence);
+                    holds.extend(evidence_not_on_screen(&candidate.evidence, &chips));
                     display = Some(GateDisplay {
                         utterance_id: id,
                         form: form.as_str(),
                         text: candidate.text,
-                        evidence: frame_chips(&candidate.evidence),
+                        evidence: chips,
                         suggestion,
                     });
                 }
@@ -329,11 +331,13 @@ fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, St
             };
             let reference = CommitmentRef::from_evidence(&row.evidence);
             let suggestion = gate_suggestion(db, &reference, &mut holds)?;
+            let chips = frame_chips(&row.evidence);
+            holds.extend(evidence_not_on_screen(&row.evidence, &chips));
             display = Some(GateDisplay {
                 utterance_id: row.id,
                 form,
                 text: row.text,
-                evidence: frame_chips(&row.evidence),
+                evidence: chips,
                 suggestion,
             });
         }
@@ -436,6 +440,21 @@ fn frame_chips(evidence: &[String]) -> Vec<GateEvidence> {
             })
         })
         .collect()
+}
+
+/// 這句話的出處一顆都點不開的時候，開發者那一欄要講出出處是什麼。
+///
+/// 畫面上收起那條空的 chip 帶不會說謊，但也不會說話。日終那種卡的出處是
+/// `reviewer_run:` 和 `daysummary:`——「這句話沒有出處」和「這句話的出處
+/// 不是畫面」是兩件事，而收起來之後兩者長得一樣。
+fn evidence_not_on_screen(evidence: &[String], chips: &[GateEvidence]) -> Option<String> {
+    if !chips.is_empty() || evidence.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "這句話的出處點不開：{}——這幾種 ref 指的不是畫面。",
+        evidence.join("、")
+    ))
 }
 
 #[tauri::command(async)]
