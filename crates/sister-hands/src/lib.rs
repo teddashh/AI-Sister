@@ -1,0 +1,691 @@
+//! Phase 6 的平台無關 hands 邊界。
+//!
+//! 目前只有 `observe` 與必須由按鈕觸發的 `suggest`。後續權限級別刻意不先放進
+//! [`Level`]；真正開 URL、檔案或聚焦視窗的平台接線也由呼叫端實作 [`Executor`]。
+//!
+//! **這個 crate 不依賴 `sister-core`，`sister-core` 也不依賴它。** hands 在
+//! SPEC §9 裡是物理隔離的 sidecar；讓記憶那一層編進行動那一層，是把隔離
+//! 寫成一句文件上的話。承諾卡的 `allowed_next_step` 是一串字，解析它不需要
+//! 認識 `CommitmentRow`——見 [`commitment_action`]。
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::{
+    fs::{File, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
+};
+
+pub mod commitment_action;
+
+/// 權限階梯（SPEC §9.1）。
+///
+/// **只有兩級。** `semi-action` 和 `takeover` 這一版不放進來：一個永遠走不到
+/// 的 variant 等於在程式碼裡宣布一個還不存在的能力，而下一個人讀到它會以為
+/// 那條路通了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    /// 預設。物理上沒有手——[`execute_with`] 在這一級一律拒絕。
+    Observe,
+    /// 可開 URL／檔案／聚焦視窗，且**僅限使用者點按鈕觸發**。
+    Suggest,
+}
+
+/// 只能由 UI 的 suggestion 按鈕 click handler 鑄出的憑證。
+///
+/// 私有欄位使模型輸出、L0 文字和一般資料解析不能自己拼出這張票。
+#[derive(Debug, PartialEq, Eq)]
+pub struct UserButtonPress(());
+
+impl UserButtonPress {
+    fn from_button_click() -> Self {
+        Self(())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Suggestion {
+    OpenUrl {
+        url: String,
+        pressed: UserButtonPress,
+    },
+    OpenFile {
+        path: PathBuf,
+        pressed: UserButtonPress,
+    },
+    FocusWindow {
+        title: String,
+        pressed: UserButtonPress,
+    },
+}
+
+impl Suggestion {
+    pub fn open_url(pressed: UserButtonPress, url: String) -> Self {
+        Self::OpenUrl { url, pressed }
+    }
+
+    pub fn open_file(pressed: UserButtonPress, path: PathBuf) -> Self {
+        Self::OpenFile { path, pressed }
+    }
+
+    pub fn focus_window(pressed: UserButtonPress, title: String) -> Self {
+        Self::FocusWindow { title, pressed }
+    }
+
+    /// 具體動作 + 具體目標（SPEC §9.7：核准綁「把 A 檔上傳到 B 表單」，
+    /// 不綁「幫我處理這件事」）。
+    ///
+    /// 文案只有 [`ActionSnapshot::describe`] 那一份。按鈕上寫的、action log
+    /// 裡記的、和真的做出去的，必須是同一句話——分成兩份的那一天，畫面上
+    /// 承諾的和日誌裡記下的會是兩件事，而兩邊各自都是真的。
+    pub fn describe(&self) -> String {
+        self.snapshot().describe()
+    }
+
+    pub fn snapshot(&self) -> ActionSnapshot {
+        match self {
+            Self::OpenUrl { url, .. } => ActionSnapshot::OpenUrl { url: url.clone() },
+            Self::OpenFile { path, .. } => ActionSnapshot::OpenFile { path: path.clone() },
+            Self::FocusWindow { title, .. } => ActionSnapshot::FocusWindow {
+                title: title.clone(),
+            },
+        }
+    }
+}
+
+/// 即使未實作也不得由任務授權繼承的五類權限（SPEC §9.2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NeverInherited {
+    Submit,
+    Publish,
+    Pay,
+    Delete,
+    OpenTerminal,
+}
+
+impl NeverInherited {
+    pub const ALL: [Self; 5] = [
+        Self::Submit,
+        Self::Publish,
+        Self::Pay,
+        Self::Delete,
+        Self::OpenTerminal,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Submit => "送出",
+            Self::Publish => "發布",
+            Self::Pay => "付款",
+            Self::Delete => "刪除",
+            Self::OpenTerminal => "開 terminal",
+        }
+    }
+}
+
+/// 這個動作落在永不繼承的哪一類——沒有的話回 `None`。
+///
+/// 沒有 `_`：新增任何 suggestion 都必須在編譯期回答它是否落入那五類。
+/// 這比一個 runtime 檢查有用，因為 runtime 檢查是可以忘記呼叫的。
+///
+/// 回 `Option<NeverInherited>` 而不是 `bool`，是因為呼叫端要說得出**是哪一類**
+/// ——「因為這是付款」和「因為這是刪除」是使用者要看到的兩句不同的話。
+pub const fn never_inherited_class(suggestion: &Suggestion) -> Option<NeverInherited> {
+    match suggestion {
+        Suggestion::OpenUrl { .. } => None,
+        Suggestion::OpenFile { .. } => None,
+        Suggestion::FocusWindow { .. } => None,
+    }
+}
+
+pub const fn is_never_inherited(suggestion: &Suggestion) -> bool {
+    never_inherited_class(suggestion).is_some()
+}
+
+/// 尚未被人按下的 suggestion 按鈕；解析模型產生的欄位最多只能得到這個型別。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestionButton(SuggestionDraft);
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum SuggestionDraft {
+    OpenUrl { url: String },
+    OpenFile { path: PathBuf },
+    FocusWindow { title: String },
+}
+
+impl SuggestionButton {
+    pub fn parse_json(value: &str) -> serde_json::Result<Self> {
+        serde_json::from_str(value).map(Self)
+    }
+
+    /// 按鈕上要寫的字。和按下去之後 [`Suggestion::describe`] 講的是同一句。
+    pub fn describe(&self) -> String {
+        self.snapshot().describe()
+    }
+
+    fn snapshot(&self) -> ActionSnapshot {
+        match &self.0 {
+            SuggestionDraft::OpenUrl { url } => ActionSnapshot::OpenUrl { url: url.clone() },
+            SuggestionDraft::OpenFile { path } => ActionSnapshot::OpenFile { path: path.clone() },
+            SuggestionDraft::FocusWindow { title } => ActionSnapshot::FocusWindow {
+                title: title.clone(),
+            },
+        }
+    }
+
+    /// UI click handler 的唯一入口；憑證在這裡鑄出，外部不能直接建構。
+    pub fn press(self) -> Suggestion {
+        let pressed = UserButtonPress::from_button_click();
+        match self.0 {
+            SuggestionDraft::OpenUrl { url } => Suggestion::open_url(pressed, url),
+            SuggestionDraft::OpenFile { path } => Suggestion::open_file(pressed, path),
+            SuggestionDraft::FocusWindow { title } => Suggestion::focus_window(pressed, title),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ActionSnapshot {
+    OpenUrl { url: String },
+    OpenFile { path: PathBuf },
+    FocusWindow { title: String },
+}
+
+impl ActionSnapshot {
+    /// 全 crate 唯一一份動作文案。
+    pub fn describe(&self) -> String {
+        match self {
+            Self::OpenUrl { url } => format!("開啟網址：{url}"),
+            Self::OpenFile { path } => format!("開啟檔案：{}", path.display()),
+            Self::FocusWindow { title } => format!("聚焦視窗：{title}"),
+        }
+    }
+}
+
+/// 為什麼**根本沒有交給作業系統**。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "refusal", rename_all = "snake_case")]
+pub enum RefusalReason {
+    /// `observe` 級物理上沒有手。
+    ObserveHasNoHands,
+    /// 落在永不繼承的五類裡，要單獨核准（SPEC §9.2）。
+    NeverInherited { class: NeverInherited },
+}
+
+impl RefusalReason {
+    pub fn message(&self) -> String {
+        match self {
+            Self::ObserveHasNoHands => {
+                "現在是 observe 級，她沒有手；要她動手得先把權限升到 suggest。".to_string()
+            }
+            Self::NeverInherited { class } => format!(
+                "「{}」不隨任務授權繼承，每一次都要單獨核准——這一步沒有做。",
+                class.name()
+            ),
+        }
+    }
+}
+
+/// 一次 [`execute_with`] 的結局。**三種，不是兩種。**
+///
+/// 「她不肯做」和「她做了但失敗了」在 action log 上長得一樣的那一天，
+/// 回放的人會把一次被擋下來的付款讀成一次失敗的付款。前者作業系統
+/// 從頭到尾沒有被碰過，後者碰過了而且不知道碰到哪一步。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    Refused { reason: RefusalReason },
+    Failed { error: String },
+    Done { detail: String },
+}
+
+/// 平台呼叫端提供實作者；測試只放 fake，不會真的開瀏覽器或視窗。
+pub trait Executor {
+    fn execute(&mut self, suggestion: &Suggestion) -> std::result::Result<String, String>;
+}
+
+/// 全部執行請求的唯一隘口。
+///
+/// [`Level`] 和 [`never_inherited_class`] 都在這裡被讀——不然它們就只是兩個
+/// 寫出來沒有人看的型別，而這個 repo 有一整排那種東西的墓碑
+/// （`system_events`、`secret_suspected`，都當過「寫進去然後沒人讀」的欄位
+/// 好幾個月：不會報錯、測試全綠、文件照樣承諾使用者查得到）。
+pub fn execute_with(
+    level: Level,
+    executor: &mut impl Executor,
+    suggestion: &Suggestion,
+) -> Outcome {
+    match level {
+        Level::Observe => {
+            return Outcome::Refused {
+                reason: RefusalReason::ObserveHasNoHands,
+            };
+        }
+        Level::Suggest => {}
+    }
+    // 今天走不到：`suggest` 的三種動作都不在那五類裡。留著是因為下一個人
+    // 加第四種動作時，`never_inherited_class` 會**編譯錯誤**逼他回答，
+    // 而他答「是」的那一刻，這裡就自動擋下來了——不必他記得加一道檢查。
+    if let Some(class) = never_inherited_class(suggestion) {
+        return Outcome::Refused {
+            reason: RefusalReason::NeverInherited { class },
+        };
+    }
+    match executor.execute(suggestion) {
+        Ok(detail) => Outcome::Done { detail },
+        Err(error) => Outcome::Failed { error },
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ExecutionResult {
+    Succeeded { detail: String },
+    Failed { error: String },
+}
+
+/// 每列都重複完整 action 與時間，因此可脫離前一列單獨解讀（SPEC §9.3）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ActionEvent {
+    Proposed {
+        at_ms: i64,
+        action: ActionSnapshot,
+    },
+    Approved {
+        at_ms: i64,
+        action: ActionSnapshot,
+    },
+    /// 交給作業系統了。成功或失敗在 `result` 裡。
+    Executed {
+        at_ms: i64,
+        action: ActionSnapshot,
+        result: ExecutionResult,
+    },
+    /// **沒有**交給作業系統。不是 `Executed` 的一種——它連試都沒試。
+    Refused {
+        at_ms: i64,
+        action: ActionSnapshot,
+        reason: RefusalReason,
+    },
+}
+
+/// 一列讀不懂的 log。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableLine {
+    /// 1-indexed，跟人看檔案時的行號一樣。
+    pub line_no: usize,
+    pub why: String,
+}
+
+/// 回放的結果。
+///
+/// **讀不懂的那幾列不會讓讀得懂的那幾列一起消失。** 一支 audit trail 如果
+/// 中間一列壞掉就整份回 `Err`，那使用者問「她到底做了什麼」的時候會得到
+/// 「不知道」，而其實有九列好好地躺在那裡。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Replay {
+    pub events: Vec<ActionEvent>,
+    /// 空的代表**每一列都讀得懂**，不是代表沒事發生。
+    pub unreadable: Vec<UnreadableLine>,
+}
+
+pub struct ActionLog {
+    path: PathBuf,
+}
+
+impl ActionLog {
+    pub fn in_data_dir(data_dir: &Path) -> Self {
+        Self::open(data_dir.join("action-log.jsonl"))
+    }
+
+    pub fn open(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn append(&self, event: &ActionEvent) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("建立 action log 目錄失敗：{}", parent.display()))?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .with_context(|| format!("開啟 action log 失敗：{}", self.path.display()))?;
+        serde_json::to_writer(&mut file, event).context("序列化 action log 失敗")?;
+        file.write_all(b"\n").context("寫入 action log 失敗")?;
+        file.sync_data().context("同步 action log 失敗")?;
+        Ok(())
+    }
+
+    /// 讀回自己寫的那個檔案。
+    ///
+    /// 不收 path 參數：檔名只有 [`Self::in_data_dir`] 那一處寫死，讓每個
+    /// 呼叫端各自再拼一次 `"action-log.jsonl"` 就是等著哪天兩邊拼得不一樣。
+    pub fn replay(&self) -> Result<Replay> {
+        let file = match File::open(&self.path) {
+            Ok(file) => file,
+            // 檔案還沒生出來 = 一次動作都沒有提出過。這是空的，不是壞的。
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Replay::default()),
+            Err(e) => {
+                return Err(anyhow::Error::from(e))
+                    .with_context(|| format!("開啟 action log 失敗：{}", self.path.display()));
+            }
+        };
+        let mut out = Replay::default();
+        for (index, line) in BufReader::new(file).lines().enumerate() {
+            let line_no = index + 1;
+            let line = match line {
+                Ok(line) => line,
+                Err(e) => {
+                    out.unreadable.push(UnreadableLine {
+                        line_no,
+                        why: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+            match serde_json::from_str(&line) {
+                Ok(event) => out.events.push(event),
+                Err(e) => out.unreadable.push(UnreadableLine {
+                    line_no,
+                    why: e.to_string(),
+                }),
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn click() -> UserButtonPress {
+        UserButtonPress::from_button_click()
+    }
+
+    #[test]
+    fn descriptions_name_the_concrete_action_and_target() {
+        let url = Suggestion::open_url(click(), "https://example.com/jobs/42".into());
+        let text = url.describe();
+        assert!(text.contains("開啟網址"));
+        assert!(text.contains("https://example.com/jobs/42"));
+        assert!(!text.contains("處理這件事"));
+
+        let file = Suggestion::open_file(click(), PathBuf::from("C:/work/report.txt"));
+        let text = file.describe();
+        assert!(text.contains("開啟檔案"));
+        assert!(text.contains("C:/work/report.txt"));
+        assert!(!text.contains("某個檔案"));
+
+        let window = Suggestion::focus_window(click(), "Visual Studio Code".into());
+        let text = window.describe();
+        assert!(text.contains("聚焦視窗"));
+        assert!(text.contains("Visual Studio Code"));
+        assert!(!text.contains("某個視窗"));
+    }
+
+    /// 按鈕上寫的字，和按下去之後真的做的那件事，必須是同一句。
+    #[test]
+    fn the_button_and_the_thing_it_does_read_the_same_sentence() {
+        let button =
+            SuggestionButton::parse_json(r#"{"action":"open_file","path":"C:/work/report.txt"}"#)
+                .unwrap();
+        let on_the_button = button.describe();
+        let done = button.press().describe();
+        assert_eq!(on_the_button, done);
+        assert!(done.contains("C:/work/report.txt"));
+    }
+
+    #[test]
+    fn never_inherited_names_and_current_suggestions_are_pinned() {
+        assert_eq!(
+            NeverInherited::ALL.map(NeverInherited::name),
+            ["送出", "發布", "付款", "刪除", "開 terminal"]
+        );
+        assert!(!is_never_inherited(&Suggestion::open_url(
+            click(),
+            "https://example.com".into()
+        )));
+        assert!(!is_never_inherited(&Suggestion::open_file(
+            click(),
+            PathBuf::from("notes.txt")
+        )));
+        assert!(!is_never_inherited(&Suggestion::focus_window(
+            click(),
+            "Editor".into()
+        )));
+    }
+
+    /// 模型輸出解析得出來的是**按鈕**，不是動作。中間隔著一次人按下去。
+    #[test]
+    fn parsed_json_cannot_become_an_executable_suggestion_without_a_press() {
+        let button =
+            SuggestionButton::parse_json(r#"{"action":"open_url","url":"https://evil/x"}"#)
+                .unwrap();
+        // 多一個欄位就整個不收——半懂的指令不執行。
+        assert!(
+            SuggestionButton::parse_json(
+                r#"{"action":"open_url","url":"https://evil/x","also_run":"rm -rf"}"#
+            )
+            .is_err()
+        );
+        let _needs_a_human = button.press();
+    }
+
+    struct Fake {
+        calls: u32,
+    }
+    impl Executor for Fake {
+        fn execute(&mut self, suggestion: &Suggestion) -> std::result::Result<String, String> {
+            self.calls += 1;
+            Ok(format!("fake: {}", suggestion.describe()))
+        }
+    }
+
+    #[test]
+    fn executor_is_replaceable_without_opening_anything() {
+        let mut fake = Fake { calls: 0 };
+        let suggestion = Suggestion::open_url(click(), "https://example.com".into());
+        let Outcome::Done { detail } = execute_with(Level::Suggest, &mut fake, &suggestion) else {
+            panic!("suggest 級的開網址要做得成");
+        };
+        assert!(detail.contains("fake:"));
+        assert!(detail.contains("https://example.com"));
+        assert!(!detail.contains("失敗"));
+        assert_eq!(fake.calls, 1);
+    }
+
+    /// `observe` 級**物理上沒有手**，所以 executor 一次都不該被碰到。
+    /// 只斷言「回了個 Refused」不夠：一個先做完再回 Refused 的實作也會過。
+    #[test]
+    fn observe_level_never_reaches_the_executor() {
+        let mut fake = Fake { calls: 0 };
+        let suggestion = Suggestion::open_url(click(), "https://example.com".into());
+        let outcome = execute_with(Level::Observe, &mut fake, &suggestion);
+        assert_eq!(fake.calls, 0, "observe 級不可以碰到 executor");
+        let Outcome::Refused { reason } = outcome else {
+            panic!("observe 級要拒絕");
+        };
+        assert_eq!(reason, RefusalReason::ObserveHasNoHands);
+        let says = reason.message();
+        assert!(says.contains("observe"));
+        assert!(says.contains("沒有手"));
+        // 「她不肯做」不可以講成「她做了但失敗了」。
+        assert!(!says.contains("失敗"));
+    }
+
+    /// 拒絕、失敗、成功是**三句不一樣的話**。
+    #[test]
+    fn refused_failed_and_done_do_not_read_as_each_other() {
+        let refused = RefusalReason::NeverInherited {
+            class: NeverInherited::Pay,
+        };
+        let says = refused.message();
+        assert!(says.contains("付款"));
+        assert!(says.contains("單獨核准"));
+        assert!(!says.contains("失敗"), "沒有試過的事不能講成失敗：{says}");
+        assert!(!says.contains("完成"), "沒有試過的事不能講成完成：{says}");
+
+        let observe = RefusalReason::ObserveHasNoHands.message();
+        assert_ne!(observe, says);
+    }
+
+    #[test]
+    fn action_log_replays_each_line_without_previous_context() {
+        let proposed = ActionEvent::Proposed {
+            at_ms: 10,
+            action: ActionSnapshot::OpenUrl {
+                url: "https://example.com".into(),
+            },
+        };
+        let line = serde_json::to_string(&proposed).unwrap();
+        assert!(line.contains("proposed"));
+        assert!(line.contains("https://example.com"));
+        assert!(!line.contains("approved"));
+    }
+
+    #[test]
+    fn action_log_has_proposed_approved_failed_succeeded_and_refused_records() {
+        let action = ActionSnapshot::FocusWindow {
+            title: "Editor".into(),
+        };
+        let events = [
+            ActionEvent::Proposed {
+                at_ms: 1,
+                action: action.clone(),
+            },
+            ActionEvent::Approved {
+                at_ms: 2,
+                action: action.clone(),
+            },
+            ActionEvent::Executed {
+                at_ms: 3,
+                action: action.clone(),
+                result: ExecutionResult::Failed {
+                    error: "找不到視窗".into(),
+                },
+            },
+            ActionEvent::Executed {
+                at_ms: 4,
+                action: action.clone(),
+                result: ExecutionResult::Succeeded {
+                    detail: "已聚焦".into(),
+                },
+            },
+            ActionEvent::Refused {
+                at_ms: 5,
+                action,
+                reason: RefusalReason::ObserveHasNoHands,
+            },
+        ];
+        let lines: Vec<String> = events
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap())
+            .collect();
+        assert!(lines[0].contains("proposed"));
+        assert!(!lines[0].contains("approved"));
+        assert!(lines[1].contains("approved"));
+        assert!(!lines[1].contains("succeeded"));
+        assert!(lines[2].contains("failed"));
+        assert!(!lines[2].contains("succeeded"));
+        assert!(lines[3].contains("succeeded"));
+        assert!(!lines[3].contains("failed"));
+        // 被擋下來的那一列，回放的人不可以讀成一次失敗的嘗試。
+        assert!(lines[4].contains("refused"));
+        assert!(!lines[4].contains("failed"));
+        assert!(!lines[4].contains("succeeded"));
+        assert!(lines.iter().all(|line| line.contains("Editor")));
+    }
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sister-hands-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn action_log_appends_jsonl_and_replays_all_rows() {
+        let dir = tmp_dir("log");
+        let log = ActionLog::in_data_dir(&dir);
+        let action = ActionSnapshot::OpenFile {
+            path: PathBuf::from("C:/work/report.txt"),
+        };
+        let proposed = ActionEvent::Proposed {
+            at_ms: 100,
+            action: action.clone(),
+        };
+        let executed = ActionEvent::Executed {
+            at_ms: 120,
+            action,
+            result: ExecutionResult::Succeeded {
+                detail: "作業系統已接受".into(),
+            },
+        };
+        log.append(&proposed).unwrap();
+        log.append(&executed).unwrap();
+
+        let replay = log.replay().unwrap();
+        assert_eq!(replay.events, vec![proposed, executed]);
+        assert!(replay.unreadable.is_empty());
+        let raw = std::fs::read_to_string(dir.join("action-log.jsonl")).unwrap();
+        assert!(raw.contains("C:/work/report.txt"));
+        assert!(raw.contains("succeeded"));
+        assert!(!raw.contains("某個檔案"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 「一次都沒做過」和「日誌讀不出來」是兩件事。
+    #[test]
+    fn a_log_that_was_never_written_is_not_a_log_that_cannot_be_read() {
+        let dir = tmp_dir("never");
+        let never = ActionLog::in_data_dir(&dir).replay().unwrap();
+        assert!(never.events.is_empty());
+        assert!(
+            never.unreadable.is_empty(),
+            "還沒有檔案 = 沒做過任何事，不是有一列壞掉"
+        );
+    }
+
+    /// 中間壞掉一列，不可以讓好的那幾列一起消失。
+    #[test]
+    fn one_broken_line_does_not_swallow_the_readable_ones() {
+        let dir = tmp_dir("broken");
+        let log = ActionLog::in_data_dir(&dir);
+        log.append(&ActionEvent::Proposed {
+            at_ms: 1,
+            action: ActionSnapshot::OpenUrl {
+                url: "https://a".into(),
+            },
+        })
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log.path())
+            .unwrap()
+            .write_all(b"{ this is not json\n")
+            .unwrap();
+        log.append(&ActionEvent::Proposed {
+            at_ms: 3,
+            action: ActionSnapshot::OpenUrl {
+                url: "https://c".into(),
+            },
+        })
+        .unwrap();
+
+        let replay = log.replay().unwrap();
+        assert_eq!(replay.events.len(), 2, "讀得懂的兩列要還在");
+        assert_eq!(replay.unreadable.len(), 1);
+        assert_eq!(replay.unreadable[0].line_no, 2, "行號要指得到那一列");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

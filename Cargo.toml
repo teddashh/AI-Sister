@@ -17,6 +17,7 @@ authors = ["Ted Huang <ted@ted-h.com>"]
 sister-core = { path = "crates/sister-core", default-features = false }
 sister-capture = { path = "crates/sister-capture", default-features = false }
 sister-cli = { path = "crates/sister-cli" }
+sister-hands = { path = "crates/sister-hands" }
 
 anyhow = "1"
 thiserror = "2"

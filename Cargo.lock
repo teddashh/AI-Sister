@@ -777,6 +777,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sister-hands"
+version = "0.1.0-alpha.67"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sister-shell"
 version = "0.1.0-alpha.67"
 dependencies = [
