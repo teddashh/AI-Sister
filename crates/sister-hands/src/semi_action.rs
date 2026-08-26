@@ -339,14 +339,112 @@ impl AbortActor {
     }
 }
 
+// `ScreenEvidenceRef(String)` 本來站在這裡，被 `StepEvidence` 取代之後整份
+// 拿掉了——不是為了少幾行，是因為它會騙人：一個叫「畫面憑據」、就住在真的
+// 那一個隔壁、`pub` 而且零個呼叫端的型別，下一個人讀到會以為那才是接線的
+// 地方，然後把新的東西接到一條死路上。它的名字是它唯一還在說的話，而那句
+// 話是假的。
+
+/// 一步做完後實際查到的畫面狀態。
+///
+/// `ActionEvent::StepFinished::evidence` 外面的 `Option` 留給舊版紀錄：`None`
+/// 代表那一版根本沒有查。新版查過以後一定寫入這裡其中一格，連「沒有」也不拿
+/// `None` 代替。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScreenEvidenceRef(String);
-impl ScreenEvidenceRef {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StepEvidence {
+    After {
+        frame_id: i64,
+        frame_at_ms: i64,
+        has_image: bool,
+    },
+    Before {
+        frame_id: i64,
+        frame_at_ms: i64,
+        earlier_by_ms: i64,
+        has_image: bool,
+    },
+    NotRecording {
+        reason: NotRecordingReason,
+    },
+    NoFrameNearby,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum NotRecordingReason {
+    NeverStarted,
+    Stopped { at_ms: Option<i64> },
+    Thinking { until_ms: i64 },
+    Stalled { at_ms: i64 },
+    Booting,
+    Unreadable,
+}
+
+impl StepEvidence {
+    pub fn message(&self) -> String {
+        match self {
+            Self::After {
+                frame_id,
+                frame_at_ms,
+                has_image,
+            } => {
+                if *has_image {
+                    format!("做完之後的畫面憑據是 frame #{frame_id}（ts:{frame_at_ms}），圖在。")
+                } else {
+                    format!(
+                        "做完之後有 frame #{frame_id}（ts:{frame_at_ms}）這一列，但沒有截圖；紀錄在，圖不在。"
+                    )
+                }
+            }
+            Self::Before {
+                frame_id,
+                frame_at_ms,
+                earlier_by_ms,
+                has_image,
+            } => {
+                if *has_image {
+                    format!(
+                        "只有動作前 {earlier_by_ms} 毫秒的 frame #{frame_id}（ts:{frame_at_ms}）；這不是做完之後的畫面，圖在，只能證明她按下去時先前看見什麼。"
+                    )
+                } else {
+                    format!(
+                        "只有動作前 {earlier_by_ms} 毫秒的 frame #{frame_id}（ts:{frame_at_ms}）；這不是做完之後的畫面，而且沒有截圖；紀錄在，圖不在。"
+                    )
+                }
+            }
+            Self::NotRecording { reason } => reason.message(),
+            Self::NoFrameNearby => "她當時正在錄，但這一步前後的時間窗內一張 frame 都沒有。".into(),
+        }
     }
-    pub fn as_str(&self) -> &str {
-        &self.0
+}
+
+impl NotRecordingReason {
+    fn message(self) -> String {
+        match self {
+            Self::NeverStarted => {
+                "這一步做完時她從來沒有開始錄，所以不會有這一步前後的新畫面憑據。".into()
+            }
+            Self::Stopped { at_ms: Some(at) } => {
+                format!("這一步做完時她已經在 ts:{at} 收工了，所以不會有這一步前後的新畫面憑據。")
+            }
+            Self::Stopped { at_ms: None } => {
+                "這一步做完時她已經收工了，但紀錄裡沒有留下時刻，所以不會有這一步前後的新畫面憑據。"
+                    .into()
+            }
+            Self::Thinking { until_ms } => format!(
+                "這一步做完時錄製已停，只剩解釋層在把最後一段想完（估到 ts:{until_ms}）；再等下去也不會有新的畫面憑據。"
+            ),
+            Self::Stalled { at_ms } => format!(
+                "這一步做完時她從 ts:{at_ms} 起就沒有回報過心跳（當掉了？）；有沒有新的畫面憑據說不準。"
+            ),
+            Self::Booting => {
+                "這一步做完時她才剛起來，還沒開始錄；再等一下可能就有新的畫面憑據。".into()
+            }
+            Self::Unreadable => {
+                "這一步做完時錄製狀態那個檔案讀不懂；有沒有新的畫面憑據說不準。".into()
+            }
+        }
     }
 }
 
@@ -453,7 +551,7 @@ impl SemiActionRun {
         &mut self,
         at_ms: i64,
         action: ActionSnapshot,
-        evidence: Option<ScreenEvidenceRef>,
+        evidence: Option<StepEvidence>,
     ) -> Result<crate::ActionEvent, RunConclusion> {
         self.may_start_step()?;
         self.completed_steps += 1;

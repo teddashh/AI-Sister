@@ -73,10 +73,10 @@ pub fn replay_lines(replay: &Replay) -> Vec<String> {
                 action,
                 evidence,
             } => {
-                // `None` 是「沒有拿到畫面憑據」，不是「檢查過沒問題」。
+                // `None` 是舊版根本沒查，不是新版查過但沒有。
                 let evidence = match evidence {
-                    Some(reference) => format!("畫面憑據：{}", reference.as_str()),
-                    None => "沒有取得畫面憑據".to_string(),
+                    Some(evidence) => evidence.message(),
+                    None => "這一列是舊版寫的；當時沒有去查畫面憑據。".to_string(),
                 };
                 format!(
                     "{} 第 {step_number} 步做完：{}；{evidence}",
@@ -142,6 +142,7 @@ pub fn recent_replay_lines(replay: &Replay, shown: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::semi_action::StepEvidence;
     use crate::{ActionSnapshot, UnreadableLine};
 
     #[test]
@@ -238,6 +239,152 @@ mod tests {
         assert_ne!(refused[0], failed[0]);
         assert!(refused[0].contains("她沒有手"), "{refused:?}");
         assert!(failed[0].contains("作業系統拒絕"), "{failed:?}");
+    }
+
+    fn finished_with(evidence: Option<StepEvidence>) -> Vec<String> {
+        replay_lines(&Replay {
+            events: vec![ActionEvent::StepFinished {
+                at_ms: 10_000,
+                step_number: 1,
+                action: ActionSnapshot::OpenUrl {
+                    url: "https://a".into(),
+                },
+                evidence,
+            }],
+            unreadable: vec![],
+        })
+    }
+
+    /// 動作前的 frame 不是動作後的驗證；兩句話相同就是這輪要修的 bug。
+    #[test]
+    fn before_and_after_frames_are_not_the_same_evidence_sentence() {
+        let after = finished_with(Some(StepEvidence::After {
+            frame_id: 8,
+            frame_at_ms: 10_100,
+            has_image: true,
+        }));
+        let before = finished_with(Some(StepEvidence::Before {
+            frame_id: 7,
+            frame_at_ms: 9_900,
+            earlier_by_ms: 100,
+            has_image: true,
+        }));
+        assert!(after[0].contains("做完之後"), "{after:?}");
+        assert!(before[0].contains("不是做完之後"), "{before:?}");
+        assert!(before[0].contains("100 毫秒"), "{before:?}");
+        assert_ne!(after[0], before[0]);
+    }
+
+    /// 沒在錄時永遠不會來，正在錄但這個時間窗沒有 frame 則仍可能再來一張。
+    #[test]
+    fn not_recording_and_recording_without_a_frame_are_not_the_same_sentence() {
+        let stopped = finished_with(Some(StepEvidence::NotRecording {
+            reason: crate::semi_action::NotRecordingReason::Stopped { at_ms: Some(9_000) },
+        }));
+        let quiet = finished_with(Some(StepEvidence::NoFrameNearby));
+        assert!(stopped[0].contains("收工"), "{stopped:?}");
+        assert!(stopped[0].contains("所以不會有"), "{stopped:?}");
+        assert!(quiet[0].contains("正在錄"), "{quiet:?}");
+        assert!(quiet[0].contains("一張 frame 都沒有"), "{quiet:?}");
+        assert_ne!(stopped[0], quiet[0]);
+    }
+
+    #[test]
+    fn before_and_after_without_images_are_not_the_same_evidence_sentence() {
+        let after = finished_with(Some(StepEvidence::After {
+            frame_id: 9,
+            frame_at_ms: 10_050,
+            has_image: false,
+        }));
+        let before = finished_with(Some(StepEvidence::Before {
+            frame_id: 8,
+            frame_at_ms: 9_950,
+            earlier_by_ms: 50,
+            has_image: false,
+        }));
+        assert!(after[0].contains("做完之後"), "{after:?}");
+        assert!(!after[0].contains("不是做完之後"), "{after:?}");
+        assert!(before[0].contains("不是做完之後"), "{before:?}");
+        assert!(after[0].contains("沒有截圖"), "{after:?}");
+        assert!(before[0].contains("沒有截圖"), "{before:?}");
+        assert_ne!(after[0], before[0]);
+    }
+
+    #[test]
+    fn unreadable_and_stopped_are_not_the_same_sentence() {
+        use crate::semi_action::NotRecordingReason;
+        let unreadable = finished_with(Some(StepEvidence::NotRecording {
+            reason: NotRecordingReason::Unreadable,
+        }));
+        let stopped = finished_with(Some(StepEvidence::NotRecording {
+            reason: NotRecordingReason::Stopped { at_ms: Some(9_000) },
+        }));
+        assert!(unreadable[0].contains("讀不懂"), "{unreadable:?}");
+        assert!(unreadable[0].contains("說不準"), "{unreadable:?}");
+        assert!(!unreadable[0].contains("所以不會有"), "{unreadable:?}");
+        assert!(stopped[0].contains("收工"), "{stopped:?}");
+        assert!(stopped[0].contains("所以不會有"), "{stopped:?}");
+        assert_ne!(unreadable[0], stopped[0]);
+    }
+
+    /// **哪幾句講得出「不會有」，哪幾句講不出——這一格的重點就只有這件事。**
+    ///
+    /// 六種理由分兩堆：她**確定**不會再有新畫面的（從來沒錄過、收工了、錄製
+    /// 已停只剩解釋層在收尾），和她**不知道**的（心跳斷了、才剛起來、狀態檔
+    /// 讀不懂）。第二堆講「不會有」就是一句她沒查過的斷言，而讀的人會拿那句話
+    /// 當「不用再去看了」——`Booting` 尤其冤，她正要開始錄。
+    ///
+    /// 上面那條測試只釘了六種裡的兩種。實測過：把 `Booting` 那一句改成
+    /// 「所以不會有這一步前後的新畫面憑據」，十六組測試全綠。
+    #[test]
+    fn only_the_reasons_that_can_know_the_future_say_there_will_be_none() {
+        use crate::semi_action::NotRecordingReason as R;
+        let certain = [
+            R::NeverStarted,
+            R::Stopped { at_ms: Some(9_000) },
+            R::Stopped { at_ms: None },
+            R::Thinking { until_ms: 12_000 },
+        ];
+        let uncertain = [R::Stalled { at_ms: 8_000 }, R::Booting, R::Unreadable];
+
+        // **這個 match 什麼都不做，而它是承重的——不要刪。**
+        //
+        // 上面兩個陣列是字面量，`NotRecordingReason` 多一種變體的時候它們不會
+        // 編不過，只會靜靜地少測一種。這裡放一個沒有 `_` 的 match，多一種就
+        // 編不過，而編譯錯誤指在這幾行——加那一種的人必須先回答一個問題：
+        // **那一句到底講不講得出「不會有」？**
+        for reason in certain.iter().chain(uncertain.iter()) {
+            match reason {
+                R::NeverStarted
+                | R::Stopped { .. }
+                | R::Thinking { .. }
+                | R::Stalled { .. }
+                | R::Booting
+                | R::Unreadable => {}
+            }
+        }
+
+        for reason in certain {
+            let line = finished_with(Some(StepEvidence::NotRecording { reason }))[0].clone();
+            assert!(
+                line.contains("不會有"),
+                "這一種是確定的，卻沒把「不會有」講出來（{reason:?}）：{line}"
+            );
+        }
+        for reason in uncertain {
+            let line = finished_with(Some(StepEvidence::NotRecording { reason }))[0].clone();
+            assert!(
+                !line.contains("不會有"),
+                "她根本不知道，卻替一件沒查過的事宣布了「不會有」（{reason:?}）：{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_old_unchecked_row_says_it_was_not_checked() {
+        let legacy = finished_with(None);
+        assert!(legacy[0].contains("舊版"), "{legacy:?}");
+        assert!(legacy[0].contains("沒有去查"), "{legacy:?}");
     }
 
     /// 一堆讀不懂的列不可以把她真的做過的事擠出畫面。

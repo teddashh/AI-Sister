@@ -3839,6 +3839,37 @@ impl Db {
         }
     }
 
+    /// 在一個有界時間窗裡，找離 `at_ms` 最近的 frame；同距離時選動作後的。
+    ///
+    /// 窗外的舊 frame 不能冒充這一步的憑據。呼叫端決定時間窗，這裡只用既有的
+    /// `idx_frames_ts` 把候選縮到那一段再排序。
+    pub fn nearest_step_frame(
+        &self,
+        at_ms: Millis,
+        from_ms: Millis,
+        to_ms: Millis,
+    ) -> Result<Option<StepFrameRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, ts, image_path FROM frames
+                 WHERE ts >= ?1 AND ts <= ?2
+                 ORDER BY CASE WHEN ts >= ?3 THEN ts - ?3 ELSE ?3 - ts END,
+                          CASE WHEN ts >= ?3 THEN 0 ELSE 1 END,
+                          id DESC
+                 LIMIT 1",
+                params![from_ms, to_ms, at_ms],
+                |row| {
+                    Ok(StepFrameRow {
+                        id: row.get(0)?,
+                        ts: row.get(1)?,
+                        image_path: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn fact_by_id(&self, id: i64) -> Result<Option<FactRow>> {
         self.conn
             .query_row(
@@ -6866,6 +6897,14 @@ pub struct FrameContext {
     pub height: i64,
 }
 
+/// `sister do` 在一步結束時只需要知道最近 frame 的這三格。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepFrameRow {
+    pub id: i64,
+    pub ts: Millis,
+    pub image_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DbStats {
     pub frames: i64,
@@ -7166,6 +7205,36 @@ mod tests {
             db.app_for_evidence(&crate::brain::EvidenceRef::Fact(fact + 1))
                 .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn nearest_step_frame_is_bounded_and_prefers_after_on_a_tie() {
+        let mut db = test_db();
+        let session = db.start_session("test", "0").unwrap();
+        for (ts, path) in [
+            (1_000, "old.webp"),
+            (9_900, "before.webp"),
+            (10_100, "after.webp"),
+        ] {
+            db.insert_frame(
+                session,
+                &frame_with_text(ts, "a", "b", &[path]),
+                Some(path),
+                1,
+            )
+            .unwrap();
+        }
+        let row = db
+            .nearest_step_frame(10_000, 5_000, 15_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.ts, 10_100);
+        assert_eq!(row.image_path.as_deref(), Some("after.webp"));
+        assert!(
+            db.nearest_step_frame(20_000, 15_000, 25_000)
+                .unwrap()
+                .is_none()
         );
     }
 

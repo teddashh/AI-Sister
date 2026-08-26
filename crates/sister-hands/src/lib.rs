@@ -382,12 +382,12 @@ pub enum ActionEvent {
         action: ActionSnapshot,
         reason: RefusalReason,
     },
-    /// 一步做完後的畫面憑據；`None` 明確表示沒有取得，不表示驗證成功。
+    /// 一步做完後查到的畫面狀態；`None` 只代表舊版根本沒有查。
     StepFinished {
         at_ms: i64,
         step_number: u32,
         action: ActionSnapshot,
-        evidence: Option<semi_action::ScreenEvidenceRef>,
+        evidence: Option<semi_action::StepEvidence>,
     },
     /// 硬中止不回滾先前步驟，並記錄停在哪與誰喊停。
     Aborted {
@@ -800,6 +800,39 @@ mod tests {
         assert!(line.contains("proposed"));
         assert!(line.contains("https://example.com"));
         assert!(!line.contains("approved"));
+    }
+
+    #[test]
+    fn step_evidence_uses_kind_inside_the_evidence_field_and_legacy_null_still_reads() {
+        let action = ActionSnapshot::OpenUrl {
+            url: "https://example.com".into(),
+        };
+        let event = ActionEvent::StepFinished {
+            at_ms: 10,
+            step_number: 1,
+            action: action.clone(),
+            evidence: Some(semi_action::StepEvidence::After {
+                frame_id: 4,
+                frame_at_ms: 11,
+                has_image: true,
+            }),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["evidence"]["kind"], "after");
+        assert!(value["evidence"].get("evidence").is_none(), "{value}");
+
+        let legacy = serde_json::json!({
+            "event": "step_finished",
+            "at_ms": 10,
+            "step_number": 1,
+            "action": action,
+            "evidence": null
+        });
+        let read: ActionEvent = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            read,
+            ActionEvent::StepFinished { evidence: None, .. }
+        ));
     }
 
     #[test]

@@ -1207,8 +1207,8 @@ pub mod act {
     use sister_hands::commitment_action::AllowedNextStep;
     use sister_hands::semi_action::{
         AbortActor, ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, GrantRejection,
-        PresentedStep, RunConclusion, RunConclusionRecord, SemiActionRun, StepLimit, StepRequest,
-        Task, execute_approved_step,
+        NotRecordingReason, PresentedStep, RunConclusion, RunConclusionRecord, SemiActionRun,
+        StepEvidence, StepLimit, StepRequest, Task, execute_approved_step,
     };
     use sister_hands::{ActionEvent, ActionLog, ExecutionResult, Outcome, RefusalReason};
     use std::collections::BTreeSet;
@@ -1281,6 +1281,12 @@ pub mod act {
     pub(crate) trait StepSource {
         fn live_commitments(&self) -> Result<Vec<sister_core::db::CommitmentRow>>;
         fn app_for_evidence(&self, r: &sister_core::brain::EvidenceRef) -> Result<Option<String>>;
+        fn nearest_step_frame(
+            &self,
+            at_ms: i64,
+            from_ms: i64,
+            to_ms: i64,
+        ) -> Result<Option<sister_core::db::StepFrameRow>>;
     }
 
     impl StepSource for Db {
@@ -1290,6 +1296,56 @@ pub mod act {
         fn app_for_evidence(&self, r: &sister_core::brain::EvidenceRef) -> Result<Option<String>> {
             Db::app_for_evidence(self, r)
         }
+        fn nearest_step_frame(
+            &self,
+            at_ms: i64,
+            from_ms: i64,
+            to_ms: i64,
+        ) -> Result<Option<sister_core::db::StepFrameRow>> {
+            Db::nearest_step_frame(self, at_ms, from_ms, to_ms)
+        }
+    }
+
+    const STEP_EVIDENCE_WINDOW_MS: i64 = 5_000;
+
+    fn step_evidence(
+        data_dir: &Path,
+        source: &impl StepSource,
+        at_ms: i64,
+    ) -> Result<StepEvidence> {
+        let frame = source.nearest_step_frame(
+            at_ms,
+            at_ms.saturating_sub(STEP_EVIDENCE_WINDOW_MS),
+            at_ms.saturating_add(STEP_EVIDENCE_WINDOW_MS),
+        )?;
+        Ok(match frame {
+            Some(frame) if frame.ts >= at_ms => StepEvidence::After {
+                frame_id: frame.id,
+                frame_at_ms: frame.ts,
+                has_image: frame.image_path.is_some(),
+            },
+            Some(frame) => StepEvidence::Before {
+                frame_id: frame.id,
+                frame_at_ms: frame.ts,
+                earlier_by_ms: at_ms.saturating_sub(frame.ts),
+                has_image: frame.image_path.is_some(),
+            },
+            None => missing_frame_evidence(sister_core::heartbeat::presence(data_dir, at_ms)),
+        })
+    }
+
+    fn missing_frame_evidence(presence: sister_core::heartbeat::Presence) -> StepEvidence {
+        use sister_core::heartbeat::{Phase, Presence};
+        let reason = match presence {
+            Presence::Live(Phase::Recording) => return StepEvidence::NoFrameNearby,
+            Presence::NeverStarted => NotRecordingReason::NeverStarted,
+            Presence::Unreadable => NotRecordingReason::Unreadable,
+            Presence::Live(Phase::Booting) => NotRecordingReason::Booting,
+            Presence::Thinking { until, .. } => NotRecordingReason::Thinking { until_ms: until },
+            Presence::Stopped { at } => NotRecordingReason::Stopped { at_ms: at },
+            Presence::Stalled { at, phase: _ } => NotRecordingReason::Stalled { at_ms: at },
+        };
+        StepEvidence::NotRecording { reason }
     }
 
     pub fn run(data_dir: &Path, opts: &Options) -> Result<()> {
@@ -1593,8 +1649,12 @@ pub mod act {
                     if matches!(outcome, Outcome::Done { .. }) {
                         // `StepLimitReached` 的欄位叫 `completed_steps`：一次交出去但失敗
                         // 的嘗試不是完成的步驟，因此 Failed 不消耗這版的步數預算。
+                        let finished_at = clock();
+                        // 不等下一張圖。這一刻資料庫裡有什麼就記什麼；「沒在錄」
+                        // 和「在錄但時間窗內沒有 frame」也各自是一筆查過的結果。
+                        let evidence = step_evidence(data_dir, source, finished_at)?;
                         let finished = run
-                            .finish_step(clock(), action, None)
+                            .finish_step(finished_at, action, Some(evidence))
                             .map_err(|conclusion| anyhow::anyhow!(conclusion.message()))?;
                         log.append(&finished)?;
                     }
@@ -1761,6 +1821,7 @@ pub mod act {
             rows: Vec<CommitmentRow>,
             /// `frame:<id>` → 那個 frame 上問得出來的 app。缺席＝問不出來。
             apps: std::collections::BTreeMap<i64, String>,
+            nearest_frame: Option<sister_core::db::StepFrameRow>,
         }
 
         impl StepSource for Source {
@@ -1775,6 +1836,14 @@ pub mod act {
                     sister_core::brain::EvidenceRef::Frame(id) => self.apps.get(id).cloned(),
                     sister_core::brain::EvidenceRef::Fact(_) => None,
                 })
+            }
+            fn nearest_step_frame(
+                &self,
+                _at_ms: i64,
+                _from_ms: i64,
+                _to_ms: i64,
+            ) -> Result<Option<sister_core::db::StepFrameRow>> {
+                Ok(self.nearest_frame.clone())
             }
         }
 
@@ -1903,7 +1972,92 @@ pub mod act {
             Source {
                 rows: vec![card(7, Some(&open_url("https://example.com/a")), &[1])],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                nearest_frame: None,
             }
+        }
+
+        #[test]
+        fn step_evidence_keeps_all_observed_states_separate() {
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence");
+            let at = 10_000;
+
+            assert_eq!(
+                step_evidence(&dir.0, &Source::default(), at).unwrap(),
+                StepEvidence::NotRecording {
+                    reason: NotRecordingReason::NeverStarted
+                }
+            );
+            sister_core::heartbeat::beat(&dir.0, at).unwrap();
+            assert_eq!(
+                step_evidence(&dir.0, &Source::default(), at).unwrap(),
+                StepEvidence::NoFrameNearby
+            );
+
+            let source = |ts, image_path: Option<&str>| Source {
+                nearest_frame: Some(sister_core::db::StepFrameRow {
+                    id: 7,
+                    ts,
+                    image_path: image_path.map(str::to_owned),
+                }),
+                ..Source::default()
+            };
+            assert_eq!(
+                step_evidence(&dir.0, &source(10_100, Some("after.webp")), at).unwrap(),
+                StepEvidence::After {
+                    frame_id: 7,
+                    frame_at_ms: 10_100,
+                    has_image: true
+                }
+            );
+            assert_eq!(
+                step_evidence(&dir.0, &source(9_900, Some("before.webp")), at).unwrap(),
+                StepEvidence::Before {
+                    frame_id: 7,
+                    frame_at_ms: 9_900,
+                    earlier_by_ms: 100,
+                    has_image: true
+                }
+            );
+            assert_eq!(
+                step_evidence(&dir.0, &source(10_100, None), at).unwrap(),
+                StepEvidence::After {
+                    frame_id: 7,
+                    frame_at_ms: 10_100,
+                    has_image: false
+                }
+            );
+            assert_eq!(
+                step_evidence(&dir.0, &source(9_900, None), at).unwrap(),
+                StepEvidence::Before {
+                    frame_id: 7,
+                    frame_at_ms: 9_900,
+                    earlier_by_ms: 100,
+                    has_image: false
+                }
+            );
+
+            assert_eq!(
+                missing_frame_evidence(sister_core::heartbeat::Presence::Live(
+                    sister_core::heartbeat::Phase::Booting
+                )),
+                StepEvidence::NotRecording {
+                    reason: NotRecordingReason::Booting
+                }
+            );
+            assert_eq!(
+                missing_frame_evidence(sister_core::heartbeat::Presence::Unreadable),
+                StepEvidence::NotRecording {
+                    reason: NotRecordingReason::Unreadable
+                }
+            );
+            assert_eq!(
+                missing_frame_evidence(sister_core::heartbeat::Presence::Stopped {
+                    at: Some(9_000)
+                }),
+                StepEvidence::NotRecording {
+                    reason: NotRecordingReason::Stopped { at_ms: Some(9_000) }
+                }
+            );
         }
 
         #[test]
@@ -2044,6 +2198,7 @@ pub mod act {
                     card(8, Some(&open_url("https://example.com/b")), &[1]),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                nearest_frame: None,
             };
             let run = go(
                 "act-limit",
@@ -2116,6 +2271,7 @@ pub mod act {
                 apps: [(1, "chrome.exe".to_string()), (2, "slack.exe".to_string())]
                     .into_iter()
                     .collect(),
+                nearest_frame: None,
             };
             let run = go(
                 "act-app-three",
@@ -2138,6 +2294,7 @@ pub mod act {
                     card(8, Some(&open_url("https://example.com/b")), &[1]),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                nearest_frame: None,
             };
             // 第一步在授權還新的時候；**做完第一步之後**，時鐘跳過兩分鐘，
             // 於是第二步連問都不該被問成「涵蓋」。
@@ -2292,6 +2449,7 @@ pub mod act {
                     card(8, Some(&open_url("https://example.com/b")), &[1]),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                nearest_frame: None,
             };
             let run = go(
                 "act-dry-limit",
@@ -2327,6 +2485,7 @@ pub mod act {
                 apps: [(1, "chrome.exe".to_string()), (2, "slack.exe".to_string())]
                     .into_iter()
                     .collect(),
+                nearest_frame: None,
             };
             let run = go(
                 "act-tally",
@@ -2447,6 +2606,7 @@ pub mod act {
             let source = Source {
                 rows: vec![card(7, Some("幫我處理這件事"), &[1]), card(8, None, &[1])],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                nearest_frame: None,
             };
             let run = go(
                 "act-unreadable",
@@ -2497,6 +2657,7 @@ pub mod act {
                 &Source {
                     rows: vec![card(7, None, &[1]), card(8, None, &[1])],
                     apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                    nearest_frame: None,
                 },
                 &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
                 "",
@@ -2748,6 +2909,7 @@ pub mod act {
             let no_next_step = Source {
                 rows: vec![card(7, None, &[1])],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                nearest_frame: None,
             };
             let asked_none = go(
                 "act-log-zero",

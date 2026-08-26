@@ -165,7 +165,7 @@ fn abort_log_names_step_and_who_stopped_it() {
 }
 
 #[test]
-fn every_step_log_has_an_explicit_optional_evidence_ref() {
+fn every_step_log_distinguishes_legacy_unchecked_from_checked_evidence() {
     let event = ActionEvent::StepFinished {
         at_ms: 9,
         step_number: 1,
@@ -180,10 +180,15 @@ fn every_step_log_has_an_explicit_optional_evidence_ref() {
         at_ms: 10,
         step_number: 2,
         action: action(),
-        evidence: Some(ScreenEvidenceRef::new("frames/42.webp")),
+        evidence: Some(StepEvidence::After {
+            frame_id: 42,
+            frame_at_ms: 10,
+            has_image: true,
+        }),
     };
     let json = serde_json::to_string(&with).unwrap();
-    assert!(json.contains("frames/42.webp"));
+    assert!(json.contains("\"kind\":\"after\""));
+    assert!(json.contains("\"frame_id\":42"));
     assert!(!json.contains("null"));
 }
 
