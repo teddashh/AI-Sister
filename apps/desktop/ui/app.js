@@ -30,6 +30,14 @@ const hideButton = document.querySelector("#hide");
 const pauseButton = document.querySelector("#pause");
 const timelineButton = document.querySelector("#timeline");
 const wakeButton = document.querySelector("[data-wake]");
+const utterance = document.querySelector("[data-utterance]");
+const utteranceText = document.querySelector("[data-utterance-text]");
+const utteranceEvidence = document.querySelector("[data-utterance-evidence]");
+const utteranceActions = document.querySelector("[data-utterance-actions]");
+const utteranceClose = document.querySelector("[data-utterance-close]");
+const utteranceOther = document.querySelector("[data-utterance-other]");
+const utteranceResult = document.querySelector("[data-utterance-result]");
+const gateDebug = document.querySelector("[data-gate-debug]");
 
 /**
  * Tauri 的 IPC。**在瀏覽器裡打開時是 null**，而那是刻意支援的：字母人整個
@@ -53,6 +61,93 @@ const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
  */
 let state = "idle";
 let paused = false;
+
+/**
+ * 她有沒有一件事想讓人看見，是第四個維度：不改「正在做什麼」、不假裝錄製
+ * 狀態，也不改暫停真相。Glimmer 只把這個位元翻起來；所以仍可同時是
+ * thinking + paused + has-something，而 `paint()` 的前三個合成規則完全不變。
+ */
+let hasSomething = false;
+let activeUtteranceId = null;
+
+function paintGatekeeper(view) {
+  const item = view?.display ?? null;
+  const debug = view?.developer ?? null;
+  if (gateDebug) {
+    gateDebug.hidden = debug === null;
+    if (debug !== null) {
+      gateDebug.textContent = `今天用了 ${debug.points_spent} 點 / 上限 ${debug.points_limit} 點\n${debug.holds.join("\n")}`;
+    }
+  }
+  // 後端說「現在沒有要講的」就要**收掉**，不是把上一句留在畫面上。
+  // 輪詢起來以後這一條才有牙齒：上一版只呼叫一次，所以「不再顯示」這件事
+  // 從來沒有發生過，`return` 看起來是對的。
+  if (item === null) {
+    activeUtteranceId = null;
+    hasSomething = false;
+    avatar.classList.remove("has-something");
+    utterance.hidden = true;
+    utteranceActions.hidden = true;
+    utteranceEvidence.replaceChildren();
+    return;
+  }
+  // 同一句話重畫一次不要把他讀到一半的回條擦掉。
+  if (item.utterance_id === activeUtteranceId) return;
+  activeUtteranceId = item.utterance_id;
+  hasSomething = true;
+  avatar.classList.add("has-something");
+  utteranceResult.textContent = "";
+  utteranceEvidence.replaceChildren();
+  for (const evidence of item.evidence ?? []) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "see";
+    chip.textContent = evidence.label;
+    chip.addEventListener("click", () => void invoke?.("open_frame", { frameId: evidence.frame_id }));
+    utteranceEvidence.append(chip);
+  }
+  // 三個 form 是封閉集合；沒有 default。後端多一個字串，這裡會直接報 contract 壞掉。
+  switch (item.form) {
+    case "glimmer":
+      utterance.hidden = true;
+      utteranceText.textContent = "";
+      utteranceActions.hidden = true;
+      return;
+    case "one_line":
+      utterance.hidden = false;
+      utterance.dataset.form = "one_line";
+      utteranceText.textContent = item.text;
+      utteranceEvidence.hidden = true;
+      utteranceActions.hidden = false;
+      return;
+    case "card":
+      utterance.hidden = false;
+      utterance.dataset.form = "card";
+      utteranceText.textContent = item.text;
+      utteranceEvidence.hidden = false;
+      utteranceActions.hidden = false;
+      return;
+  }
+  throw new Error(`不知道的 gatekeeper form：${item.form}`);
+}
+
+function reactToGatekeeper(close) {
+  if (invoke === null || activeUtteranceId === null) return;
+  invoke("gatekeeper_react", { utteranceId: activeUtteranceId, close }).then(
+    (message) => {
+      // 三個後端結果分別是「這張記憶不會再提了」、「先收起來，之後再說」、
+      // 「收到你的回饋；這一則沒有可結案或延後的承諾」。不在前端猜類別。
+      utteranceResult.textContent = message;
+      utteranceActions.hidden = true;
+      hasSomething = false;
+      avatar.classList.remove("has-something");
+    },
+    (error) => { utteranceResult.textContent = String(error); },
+  );
+}
+
+utteranceClose?.addEventListener("click", () => reactToGatekeeper(true));
+utteranceOther?.addEventListener("click", () => reactToGatekeeper(false));
 
 /**
  * 現在到底有沒有人在錄。**這和 `paused` 是兩件事。**
@@ -502,6 +597,14 @@ function pollRecording() {
   if (invoke === null) return;
   invoke("recording_state").then(setRecording, () => {});
   invoke("pause_state").then(setPaused, () => {});
+  // 守門員也要一直問下去。**只在開場問一次的話，五點才到期的那張承諾
+  // 永遠不會被看到**——而 a 類（顯式時間承諾）正是整個 Phase 5 冷啟動期
+  // 唯一放行的兩類之一，它不動就等於守門員沒上線。
+  //
+  // 每 5 秒問一次不會把預算燒掉：後端那一側同一件事今天只記一次帳，
+  // 已經開口而人還沒回應的那一句是繼續顯示、不重扣。理由寫在
+  // `main.rs` 的 `gatekeeper_check` 上面。
+  invoke("gatekeeper_check").then(paintGatekeeper, () => {});
 }
 
 /**
@@ -1498,6 +1601,7 @@ setState(
 // 視窗如果一開始就縮在系統匣裡，那個輪詢是不跑的。
 if (invoke !== null) {
   invoke("pause_state").then(setPaused, () => {});
+  invoke("gatekeeper_check").then(paintGatekeeper, () => {});
 }
 
 // 有沒有人在錄要一直問下去，不是問一次就算了：他隨時可能在另一個終端機

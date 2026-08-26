@@ -209,6 +209,29 @@ body {
     sway 5.8s ease-in-out var(--sway-delay, -1200ms) infinite;
 }
 
+/* has-something 是通知維度，不是 data-state。小點多一圈微光，呼吸比 idle 慢。 */
+.avatar.has-something .face::after {
+  box-shadow: 0 0 0 7px rgb(232 117 90 / 20%), 0 0 20px var(--letter-accent);
+}
+
+.motion .avatar.has-something[data-state="idle"] .face {
+  animation: breathe 7.5s ease-in-out infinite;
+}
+
+.utterance {
+  background: rgb(255 255 255 / 72%);
+  border: 1px solid rgb(46 33 64 / 18%);
+  border-radius: 14px;
+  padding: 10px;
+  width: min(280px, 90%);
+}
+
+.utterance[data-form="one_line"] { border-color: transparent; background: transparent; }
+.utterance-text, .utterance-result { font-size: 13px; margin: 4px 0; }
+.utterance-evidence, .utterance-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.utterance-actions button, .utterance-evidence button { border: 0; border-radius: 999px; cursor: pointer; padding: 5px 9px; }
+.gate-debug { font: 11px/1.5 monospace; opacity: .7; white-space: pre-line; }
+
 @keyframes breathe {
   0%,
   100% {

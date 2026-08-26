@@ -30,6 +30,7 @@ pub mod eval;
 pub mod facts;
 pub mod followup;
 pub mod gatekeeper;
+pub mod gatekeeper_candidates;
 pub mod heartbeat;
 pub mod local_day;
 pub mod model;

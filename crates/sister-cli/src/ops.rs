@@ -8,7 +8,7 @@ use sister_core::db::Db;
 pub mod speak {
     use super::*;
     use chrono::{Local, Timelike};
-    use sister_core::gatekeeper::{Candidate, FocusMode, GateInput, Verdict, decide};
+    use sister_core::gatekeeper::{FocusMode, GateInput, Verdict, decide};
     use sister_core::moments::SpeakCategory;
 
     pub fn run(
@@ -55,41 +55,7 @@ pub mod speak {
             return Ok(());
         }
 
-        let mut candidates = Vec::new();
-        for c in db.open_commitments_due_before(now.saturating_add(40 * 60_000))? {
-            if c.due_source.as_deref() != Some("explicit") {
-                continue;
-            }
-            let evidence: Vec<String> = serde_json::from_str(&c.evidence_json).unwrap_or_default();
-            let mut refs = vec![format!("commitment:{}", c.id)];
-            refs.extend(evidence);
-            candidates.push(Candidate::new(
-                SpeakCategory::CommitmentDue,
-                format!("「{}」的時間快到了。", c.text),
-                refs,
-                0.9,
-                c.confidence,
-                0.9,
-                1.0,
-            )?);
-        }
-        for s in db.stuck_in_range(now.saturating_sub(40 * 60_000), now.saturating_add(1))? {
-            candidates.push(Candidate::new(
-                SpeakCategory::Stuck,
-                format!(
-                    "你似乎卡在{}同一個錯誤。",
-                    s.app
-                        .as_deref()
-                        .map(|app| format!(" {app} 的"))
-                        .unwrap_or_else(|| "".into())
-                ),
-                vec![format!("segment:{}", s.started_at)],
-                0.6,
-                0.8,
-                0.8,
-                0.8,
-            )?);
-        }
+        let candidates = sister_core::gatekeeper_candidates::collect(&db, now)?;
         for category in [
             SpeakCategory::UnattendedNotification,
             SpeakCategory::SessionEnd,
