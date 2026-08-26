@@ -102,27 +102,40 @@ pub fn replay_lines(replay: &Replay) -> Vec<String> {
             }
         })
         .collect::<Vec<_>>();
-    lines.extend(
-        replay
-            .unreadable
-            .iter()
-            .map(|bad| format!("第 {} 列讀不懂：{}", bad.line_no, bad.why)),
-    );
+    lines.extend(unreadable_lines(replay));
     lines
+}
+
+/// 讀不懂的那幾列。它們**不是**她做過的事，是我們解不開的那幾行。
+fn unreadable_lines(replay: &Replay) -> Vec<String> {
+    replay
+        .unreadable
+        .iter()
+        .map(|bad| format!("第 {} 列讀不懂：{}", bad.line_no, bad.why))
+        .collect()
 }
 
 /// 最近 `shown` 列，加上一句「上面還有幾列」。
 ///
 /// 這裡的截斷要說出來。安靜地只給最後 20 列，畫面讀起來會是「她總共就做過
 /// 這 20 件事」——那是一句沒有人寫、但畫面替你講了的話。
+///
+/// **上限只砍事件那一疊，讀不懂的那幾列一律留著。** 兩疊混在一起數的話，
+/// 一份「5 個事件 + 30 列壞掉」的紀錄在 `shown = 20` 底下會把 5 個事件全部
+/// 擠出畫面，只剩滿螢幕的「讀不懂」——讀起來是「她從來沒做過事」，而她做過
+/// 五件。截斷那句話仍然在，但沒有人會從那句話推回「被蓋掉的正好是全部的動作」。
 pub fn recent_replay_lines(replay: &Replay, shown: usize) -> Vec<String> {
-    let all = replay_lines(replay);
+    let mut all = replay_lines(replay);
+    let bad = unreadable_lines(replay);
+    all.truncate(all.len() - bad.len());
     if all.len() <= shown {
+        all.extend(bad);
         return all;
     }
     let hidden = all.len() - shown;
     let mut lines = vec![format!("（更早的 {hidden} 列沒有顯示）")];
     lines.extend(all.into_iter().skip(hidden));
+    lines.extend(bad);
     lines
 }
 
@@ -225,6 +238,41 @@ mod tests {
         assert_ne!(refused[0], failed[0]);
         assert!(refused[0].contains("她沒有手"), "{refused:?}");
         assert!(failed[0].contains("作業系統拒絕"), "{failed:?}");
+    }
+
+    /// 一堆讀不懂的列不可以把她真的做過的事擠出畫面。
+    ///
+    /// 兩疊混在一起數上限的話，「5 個事件 + 30 列壞掉」在 `shown = 20` 底下
+    /// 會只剩滿螢幕的「讀不懂」——讀起來是「她從來沒做過事」，而她做過五件。
+    #[test]
+    fn broken_lines_do_not_push_real_actions_off_the_screen() {
+        let replay = Replay {
+            events: (1..=5)
+                .map(|n| ActionEvent::Proposed {
+                    at_ms: n,
+                    action: ActionSnapshot::OpenUrl {
+                        url: format!("https://{n}"),
+                    },
+                })
+                .collect(),
+            unreadable: (1..=30)
+                .map(|n| UnreadableLine {
+                    line_no: n,
+                    why: "bad json".into(),
+                })
+                .collect(),
+        };
+        let lines = recent_replay_lines(&replay, 20);
+        for n in 1..=5 {
+            assert!(
+                lines.iter().any(|l| l.contains(&format!("https://{n}"))),
+                "第 {n} 個動作被壞掉的列擠掉了：{lines:?}"
+            );
+        }
+        assert!(
+            !lines.iter().any(|l| l.contains("沒有顯示")),
+            "事件只有 5 個、上限 20，不該講截斷：{lines:?}"
+        );
     }
 
     /// 時刻要讀得懂，**而且毫秒不可以被砍掉**。
