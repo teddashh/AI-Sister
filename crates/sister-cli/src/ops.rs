@@ -1288,7 +1288,6 @@ pub mod act {
         let log = ActionLog::in_data_dir(data_dir);
         let mut tally = Tally::default();
         let mut terminal: Option<RunConclusion> = None;
-        let mut previewed_steps = 0_u32;
 
         // **這一輪的第一列是那張授權書。** 少了它，紀錄裡只有「她做了什麼」，
         // 而「他准了什麼」是唯一沒被記下來的那一半；順帶它也是一輪的界線——
@@ -1349,7 +1348,6 @@ pub mod act {
             writeln!(out, "宣告 app：{}", declared_app.label())?;
             writeln!(out, "{covered}")?;
             if opts.dry_run {
-                previewed_steps += 1;
                 writeln!(out)?;
                 continue;
             }
@@ -1473,7 +1471,9 @@ pub mod act {
         }
 
         if opts.dry_run {
-            if previewed_steps > 0 {
+            // 用 `presented`，不要再養一個只在預演路徑上加一的第二個計數器。
+            // 兩個變數答同一個問題，遲早有一天只有一個被改到。
+            if presented > 0 {
                 writeln!(
                     out,
                     "步數上限 {}：真的跑起來的時候，做成 {} 步之後就停，後面的步驟不會被問到。",
