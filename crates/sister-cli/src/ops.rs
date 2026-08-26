@@ -1061,6 +1061,1119 @@ pub mod review {
     }
 }
 
+pub mod act {
+    use super::*;
+    use sister_hands::commitment_action::AllowedNextStep;
+    use sister_hands::semi_action::{
+        AbortActor, ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, GrantRejection,
+        PresentedStep, RunConclusion, RunConclusionRecord, SemiActionRun, StepLimit, StepRequest,
+        Task, execute_approved_step,
+    };
+    use sister_hands::{ActionEvent, ActionLog, ExecutionResult, Outcome, RefusalReason};
+    use std::collections::BTreeSet;
+    use std::io::{BufRead, Write};
+
+    pub struct Options {
+        pub task: String,
+        pub apps: Vec<String>,
+        pub allow: Vec<String>,
+        pub minutes: u64,
+        pub steps: u32,
+        pub dry_run: bool,
+    }
+
+    /// 這一步宣告它會碰哪一個 app。**三種，不是兩種。**
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum StepApp {
+        /// 證據鏈上剛好一個 app。
+        Known(String),
+        /// 證據鏈上有兩個以上不同的 app：兩個答案就是沒有答案。
+        Ambiguous,
+        /// 證據都問不出 app（沒有 app_id、或證據不見了）。
+        Unknown,
+    }
+
+    impl StepApp {
+        fn request_app(&self) -> App {
+            App::new(match self {
+                Self::Known(app) => app.as_str(),
+                Self::Ambiguous => "<兩個以上的 app>",
+                Self::Unknown => "<問不出是哪個 app>",
+            })
+        }
+        fn label(&self) -> &str {
+            match self {
+                Self::Known(app) => app,
+                Self::Ambiguous => "兩個以上的 app",
+                Self::Unknown => "問不出是哪個 app",
+            }
+        }
+        fn explanation(&self) -> Option<&'static str> {
+            match self {
+                Self::Known(_) => None,
+                Self::Ambiguous => Some("證據鏈記得兩個以上不同的 app，不能替這一步選一個。"),
+                Self::Unknown => Some("證據鏈沒有一個問得出的 app，不能證明這一步在授權範圍內。"),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Tally {
+        asked: u32,
+        done: u32,
+        declined: u32,
+        blocked: u32,
+        failed: u32,
+    }
+
+    /// `sister do` 只跟資料庫要兩件事。
+    ///
+    /// **抽成 trait 是為了讓下面那一整段逐步核准跑得起來測試，不是為了抽象。**
+    /// `Db::insert_commitment` 要一張 `sister_core::reviewer::L3Write`，而那張票
+    /// **故意**只有 sister-core 自己鑄得出來（見 `reviewer.rs` 開頭那段：
+    /// 「不是 `bool`，也不是 `struct L3Write { allowed: bool }`」）。
+    /// 所以 CLI 這一側**種不出承諾卡**——沒有這道縫的話，這支指令會跟
+    /// `apps/desktop` 那半邊一樣變成零執行覆蓋的接線層。
+    ///
+    /// 假的 source 不會走到 `app_for_evidence` 真正那段 SQL；那一段由
+    /// `sister-core` 自己的測試蓋（`db.rs` 裡的 `app_for_evidence` 三態測試）。
+    pub(crate) trait StepSource {
+        fn live_commitments(&self) -> Result<Vec<sister_core::db::CommitmentRow>>;
+        fn app_for_evidence(&self, r: &sister_core::brain::EvidenceRef) -> Result<Option<String>>;
+    }
+
+    impl StepSource for Db {
+        fn live_commitments(&self) -> Result<Vec<sister_core::db::CommitmentRow>> {
+            Db::live_commitments(self)
+        }
+        fn app_for_evidence(&self, r: &sister_core::brain::EvidenceRef) -> Result<Option<String>> {
+            Db::app_for_evidence(self, r)
+        }
+    }
+
+    pub fn run(data_dir: &Path, opts: &Options) -> Result<()> {
+        let stdin = std::io::stdin();
+        run_with(
+            data_dir,
+            opts,
+            &mut stdin.lock(),
+            &mut sister_hands::platform::PlatformExecutor,
+            &mut sister_core::now_ms,
+        )
+    }
+
+    pub fn run_with(
+        data_dir: &Path,
+        opts: &Options,
+        input: &mut impl BufRead,
+        executor: &mut impl sister_hands::Executor,
+        clock: &mut impl FnMut() -> i64,
+    ) -> Result<()> {
+        let db = open_existing(data_dir)?;
+        run_with_output(
+            data_dir,
+            opts,
+            &db,
+            input,
+            executor,
+            clock,
+            &mut std::io::stdout(),
+        )
+    }
+
+    fn parse_kinds(raw: &[String]) -> Result<Vec<ActionKind>> {
+        let values: &[String] = if raw.is_empty() {
+            static DEFAULT: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+            DEFAULT.get_or_init(|| vec!["open-url".into()])
+        } else {
+            raw
+        };
+        values
+            .iter()
+            .map(|value| match value.as_str() {
+                "open-url" => Ok(ActionKind::OpenUrl),
+                "open-file" => Ok(ActionKind::OpenFile),
+                "focus-window" => Ok(ActionKind::FocusWindow),
+                _ => anyhow::bail!(
+                    "不認得 --allow {value:?}；只接受 open-url / open-file / focus-window"
+                ),
+            })
+            .collect()
+    }
+
+    fn step_app(source: &impl StepSource, evidence_json: &str) -> Result<StepApp> {
+        let refs: Vec<String> = serde_json::from_str(evidence_json)
+            .with_context(|| format!("證據清單不是 JSON 字串陣列：{evidence_json}"))?;
+        let mut apps = BTreeSet::new();
+        for raw in refs {
+            let Some(reference) = sister_core::brain::EvidenceRef::parse(&raw) else {
+                continue;
+            };
+            if let Some(app) = source.app_for_evidence(&reference)? {
+                apps.insert(app);
+            }
+        }
+        Ok(match apps.len() {
+            0 => StepApp::Unknown,
+            1 => StepApp::Known(apps.into_iter().next().expect("len checked")),
+            _ => StepApp::Ambiguous,
+        })
+    }
+
+    fn coverage(grant: &Grant, step: &StepRequest, app: &StepApp, now: i64) -> String {
+        match grant.covers(step, now) {
+            Ok(()) => "授權涵蓋這一步".into(),
+            Err(rejection) => {
+                let mut text = format!("授權不涵蓋：{}", rejection.message());
+                if rejection == GrantRejection::Apps
+                    && let Some(extra) = app.explanation()
+                {
+                    text.push_str(&format!(" {extra}"));
+                }
+                text
+            }
+        }
+    }
+
+    enum Answer {
+        Approve,
+        Decline,
+        Abort(AbortActor),
+    }
+
+    fn ask(input: &mut impl BufRead, out: &mut impl Write) -> Result<Answer> {
+        loop {
+            write!(out, "要做嗎？好／不要／停：")?;
+            out.flush()?;
+            let mut answer = String::new();
+            if input.read_line(&mut answer)? == 0 {
+                writeln!(out, "沒有收到回答；系統中止這一輪。")?;
+                return Ok(Answer::Abort(AbortActor::System));
+            }
+            match answer.trim().to_lowercase().as_str() {
+                "好" | "y" | "yes" | "是" => return Ok(Answer::Approve),
+                "不要" | "n" | "no" | "跳過" => return Ok(Answer::Decline),
+                "停" | "中止" | "q" | "quit" => return Ok(Answer::Abort(AbortActor::User)),
+                _ => writeln!(out, "聽不懂；好／不要／停")?,
+            }
+        }
+    }
+
+    pub(crate) fn run_with_output(
+        data_dir: &Path,
+        opts: &Options,
+        source: &impl StepSource,
+        input: &mut impl BufRead,
+        executor: &mut impl sister_hands::Executor,
+        clock: &mut impl FnMut() -> i64,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        let step_limit =
+            StepLimit::new(opts.steps).context("步數上限不能是 0；請把 --steps 設為至少 1")?;
+        let kinds = parse_kinds(&opts.allow)?;
+        let valid_for_ms = opts
+            .minutes
+            .checked_mul(60_000)
+            .context("--minutes 太大，無法換算授權期限")?;
+        let issued_at = clock();
+        let grant = Grant::new(
+            Task::new(&opts.task),
+            AllowedApps::new(opts.apps.iter().cloned().map(App::new)),
+            AllowedActions::new(kinds),
+            Expiry::after_issued(issued_at, valid_for_ms),
+            step_limit,
+        );
+        let mut run = SemiActionRun::new(grant);
+        let commitments = source.live_commitments()?;
+        let log = ActionLog::in_data_dir(data_dir);
+        let mut tally = Tally::default();
+        let mut terminal: Option<RunConclusion> = None;
+        let mut previewed_steps = 0_u32;
+
+        for commitment in commitments {
+            let button = match sister_hands::commitment_action::parse_allowed_next_step(
+                commitment.allowed_next_step.as_deref(),
+            ) {
+                AllowedNextStep::Missing => continue,
+                AllowedNextStep::Unparseable { reason, .. } => {
+                    writeln!(out, "#{} 的下一步讀不懂，跳過：{reason}", commitment.id)?;
+                    continue;
+                }
+                AllowedNextStep::Suggestion(button) => button,
+            };
+            if let Err(conclusion) = run.may_start_step() {
+                terminal = Some(conclusion);
+                break;
+            }
+            let declared_app = step_app(source, &commitment.evidence_json)?;
+            let action = button.snapshot();
+            let step = StepRequest::new(
+                // 這支 CLI 的 request 和 grant 都直接取自同一個 `--task`，所以 Task
+                // 在這個呼叫端不可能拒絕。那一維要等授權書能跨行程重用才守得到。
+                Task::new(&opts.task),
+                declared_app.request_app(),
+                action.clone(),
+            );
+            // 印出來的那句判斷講的是「她提出這一步的那一刻」——她只能拿她問你的
+            // 時候手上有的東西來判斷。**執行的那一刻要另外問一次時間**，見下面
+            // `execute_approved_step` 那裡。
+            let step_now = clock();
+            let covered = coverage(run.grant(), &step, &declared_app, step_now);
+            writeln!(out, "承諾 #{}：{}", commitment.id, commitment.text)?;
+            writeln!(out, "步驟：{}", action.describe())?;
+            writeln!(out, "宣告 app：{}", declared_app.label())?;
+            writeln!(out, "{covered}")?;
+            if opts.dry_run {
+                previewed_steps += 1;
+                writeln!(out)?;
+                continue;
+            }
+
+            tally.asked += 1;
+            log.append(&ActionEvent::Proposed {
+                at_ms: clock(),
+                action: action.clone(),
+            })?;
+            let presented = PresentedStep::new(step.clone());
+            match ask(input, out)? {
+                Answer::Decline => {
+                    tally.declined += 1;
+                    log.append(&ActionEvent::Refused {
+                        at_ms: clock(),
+                        action,
+                        reason: RefusalReason::UserDeclinedThisStep,
+                    })?;
+                }
+                Answer::Abort(by) => {
+                    let event = run.abort(clock(), by);
+                    log.append(&event)?;
+                    terminal = Some(match event {
+                        ActionEvent::Aborted {
+                            after_completed_steps,
+                            by,
+                            ..
+                        } => RunConclusion::Aborted {
+                            after_completed_steps,
+                            by,
+                        },
+                        _ => unreachable!("abort always returns Aborted"),
+                    });
+                    break;
+                }
+                Answer::Approve => {
+                    let approval = presented.approve();
+                    let suggestion = button.press();
+                    log.append(&ActionEvent::Approved {
+                        at_ms: clock(),
+                        action: action.clone(),
+                    })?;
+                    // **不是 `step_now`。** `--minutes` 那一維說的是「這張授權書
+                    // 多久後失效」，而失效要管得住的是**她真的動手的那一刻**，
+                    // 不是她開口問的那一刻。拿問話時的時戳來執行的話，一個開著
+                    // 沒人答的提問可以放到三小時後，他順手打一個「好」，動作照樣
+                    // 發生——而畫面上和 `--minutes 5` 都跟他說只有五分鐘。
+                    //
+                    // 兩個時戳因此**故意**不一樣，而它們不一樣的時候，畫面上那句
+                    // 「授權涵蓋這一步」不會變成假話：它講的是問你的那一刻，是真的。
+                    // 改變的事實由這裡吐出一列 `refused` 說出來（`expiry 維度拒絕`），
+                    // 統計那一行也會把它算進「授權擋掉」。
+                    let outcome = execute_approved_step(
+                        run.grant(),
+                        clock(),
+                        approval,
+                        &step,
+                        executor,
+                        &suggestion,
+                    );
+                    // **他說了「好」之後，螢幕上一定要有一句話。** 三種結果都寫進
+                    // log 了，但 log 在磁碟上；他看著的是這個終端機。少了這一段，
+                    // 「擋掉了」和「做好了」在他眼前長得一模一樣——一片空白，而
+                    // 空白讀起來是「成功了」。這正是這個 repo 一路在修的那件事。
+                    //
+                    // 三句話要分得開的是**同一件事的三個不同答案**：
+                    // 沒交出去（Refused）／交出去了但那一端失敗（Failed）／成了。
+                    let event = match &outcome {
+                        Outcome::Refused { reason } => {
+                            tally.blocked += 1;
+                            writeln!(out, "沒有做，也沒有交給作業系統：{}", reason.message())?;
+                            ActionEvent::Refused {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                reason: reason.clone(),
+                            }
+                        }
+                        Outcome::Failed { error } => {
+                            tally.failed += 1;
+                            writeln!(out, "交出去了，那一端失敗了：{error}")?;
+                            ActionEvent::Executed {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                result: ExecutionResult::Failed {
+                                    error: error.clone(),
+                                },
+                            }
+                        }
+                        Outcome::Done { detail } => {
+                            tally.done += 1;
+                            writeln!(out, "做了：{detail}")?;
+                            ActionEvent::Executed {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                result: ExecutionResult::Succeeded {
+                                    detail: detail.clone(),
+                                },
+                            }
+                        }
+                    };
+                    log.append(&event)?;
+                    if matches!(outcome, Outcome::Done { .. }) {
+                        // `StepLimitReached` 的欄位叫 `completed_steps`：一次交出去但失敗
+                        // 的嘗試不是完成的步驟，因此 Failed 不消耗這版的步數預算。
+                        let finished = run
+                            .finish_step(clock(), action, None)
+                            .map_err(|conclusion| anyhow::anyhow!(conclusion.message()))?;
+                        log.append(&finished)?;
+                    }
+                }
+            }
+            writeln!(out)?;
+        }
+
+        if opts.dry_run {
+            if previewed_steps > 0 {
+                writeln!(
+                    out,
+                    "步數上限 {}：真的跑起來的時候，做成 {} 步之後就停，後面的步驟不會被問到。",
+                    opts.steps, opts.steps
+                )?;
+            }
+            return Ok(());
+        }
+        let conclusion = terminal.unwrap_or(RunConclusion::Completed);
+        writeln!(out, "{}", conclusion.message())?;
+        match conclusion {
+            RunConclusion::Aborted { .. } => {}
+            RunConclusion::StepLimitReached {
+                completed_steps,
+                limit,
+            } => {
+                log.append(&ActionEvent::Concluded {
+                    at_ms: clock(),
+                    conclusion: RunConclusionRecord::StepLimitReached {
+                        completed_steps,
+                        limit: limit.get(),
+                    },
+                })?;
+            }
+            RunConclusion::Completed => log.append(&ActionEvent::Concluded {
+                at_ms: clock(),
+                conclusion: RunConclusionRecord::Completed,
+            })?,
+        }
+        writeln!(
+            out,
+            "這一輪：問了 {} 步，做成 {} 步，你說不要 {} 步，授權擋掉 {} 步，執行失敗 {} 步。",
+            tally.asked, tally.done, tally.declined, tally.blocked, tally.failed
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use sister_core::db::CommitmentRow;
+        use sister_hands::{ActionSnapshot, Replay};
+
+        /// 一張假的承諾卡來源。理由見 [`StepSource`] 的註解。
+        #[derive(Default)]
+        struct Source {
+            rows: Vec<CommitmentRow>,
+            /// `frame:<id>` → 那個 frame 上問得出來的 app。缺席＝問不出來。
+            apps: std::collections::BTreeMap<i64, String>,
+        }
+
+        impl StepSource for Source {
+            fn live_commitments(&self) -> Result<Vec<CommitmentRow>> {
+                Ok(self.rows.clone())
+            }
+            fn app_for_evidence(
+                &self,
+                r: &sister_core::brain::EvidenceRef,
+            ) -> Result<Option<String>> {
+                Ok(match r {
+                    sister_core::brain::EvidenceRef::Frame(id) => self.apps.get(id).cloned(),
+                    sister_core::brain::EvidenceRef::Fact(_) => None,
+                })
+            }
+        }
+
+        /// 一張活著的承諾卡，帶著它的下一步和它的證據。
+        fn card(id: i64, next: Option<&str>, frames: &[i64]) -> CommitmentRow {
+            let refs: Vec<String> = frames.iter().map(|f| format!("frame:{f}")).collect();
+            CommitmentRow {
+                id,
+                text: format!("承諾 {id}"),
+                kind: "promise".into(),
+                born_from: 1,
+                evidence_json: serde_json::to_string(&refs).expect("evidence json"),
+                people_json: "[]".into(),
+                due_hint: None,
+                due_source: None,
+                due_at: None,
+                status: "open".into(),
+                confidence: 0.8,
+                allowed_next_step: next.map(str::to_owned),
+                last_evidence_seen_at: None,
+                kill_note: None,
+                created_at: 1,
+                updated_at: 1,
+                tombstoned_at: None,
+            }
+        }
+
+        fn open_url(url: &str) -> String {
+            serde_json::json!({"action": "open_url", "url": url}).to_string()
+        }
+
+        #[derive(Default)]
+        struct Fake {
+            calls: Vec<ActionSnapshot>,
+            fail: Option<String>,
+        }
+
+        impl sister_hands::Executor for Fake {
+            fn execute(&mut self, suggestion: &sister_hands::Suggestion) -> Result<String, String> {
+                self.calls.push(suggestion.snapshot());
+                match &self.fail {
+                    Some(error) => Err(error.clone()),
+                    None => Ok("假的執行器接受了".into()),
+                }
+            }
+        }
+
+        fn opts(task: &str, apps: &[&str], steps: u32, minutes: u64, dry_run: bool) -> Options {
+            Options {
+                task: task.into(),
+                apps: apps.iter().map(|a| (*a).to_owned()).collect(),
+                allow: vec!["open-url".into()],
+                minutes,
+                steps,
+                dry_run,
+            }
+        }
+
+        /// 每叫一次就往前 1 秒。**時間必須會走**，否則 grant 的 expiry 那一維
+        /// 恆為 0 毫秒、永遠不可能拒絕，而 log 上一整輪會擠在同一毫秒。
+        fn ticking(start: i64) -> impl FnMut() -> i64 {
+            let mut t = start;
+            move || {
+                t += 1_000;
+                t
+            }
+        }
+
+        struct Run {
+            out: String,
+            executor: Fake,
+            dir: crate::ops::tmp::Tmp,
+        }
+
+        impl Run {
+            fn events(&self) -> Vec<ActionEvent> {
+                self.replay().events
+            }
+            fn replay(&self) -> Replay {
+                ActionLog::in_data_dir(&self.dir.0)
+                    .replay()
+                    .expect("replay the action log")
+            }
+            fn log_exists(&self) -> bool {
+                ActionLog::in_data_dir(&self.dir.0).path().exists()
+            }
+        }
+
+        fn go(name: &str, source: &Source, opts: &Options, typed: &str, fail: Option<&str>) -> Run {
+            go_from(name, source, opts, typed, fail, ticking(1_700_000_000_000))
+        }
+
+        fn go_from(
+            name: &str,
+            source: &Source,
+            opts: &Options,
+            typed: &str,
+            fail: Option<&str>,
+            mut clock: impl FnMut() -> i64,
+        ) -> Run {
+            let dir = crate::ops::tmp::Tmp::new(name);
+            let mut executor = Fake {
+                fail: fail.map(str::to_owned),
+                ..Fake::default()
+            };
+            let mut input = std::io::Cursor::new(typed.as_bytes().to_vec());
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                opts,
+                source,
+                &mut input,
+                &mut executor,
+                &mut clock,
+                &mut out,
+            )
+            .expect("run");
+            Run {
+                out: String::from_utf8(out).expect("utf-8"),
+                executor,
+                dir,
+            }
+        }
+
+        fn one_card() -> Source {
+            Source {
+                rows: vec![card(7, Some(&open_url("https://example.com/a")), &[1])],
+                apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+            }
+        }
+
+        #[test]
+        fn saying_yes_hands_it_to_the_executor_and_leaves_the_whole_story_in_the_log() {
+            let run = go(
+                "act-yes",
+                &one_card(),
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "好\n",
+                None,
+            );
+            assert_eq!(
+                run.executor.calls,
+                vec![ActionSnapshot::OpenUrl {
+                    url: "https://example.com/a".into()
+                }]
+            );
+            // 成了這件事也要當著他的面說一次，而且要帶著執行那一端回報的話——
+            // 三種結果各有各的句子，才分得出「做了」「擋了」「試了但失敗」。
+            assert!(run.out.contains("做了：假的執行器接受了"), "{}", run.out);
+            let kinds: Vec<&str> = run
+                .events()
+                .iter()
+                .map(|e| match e {
+                    ActionEvent::Proposed { .. } => "proposed",
+                    ActionEvent::Approved { .. } => "approved",
+                    ActionEvent::Executed { .. } => "executed",
+                    ActionEvent::Refused { .. } => "refused",
+                    ActionEvent::StepFinished { .. } => "finished",
+                    ActionEvent::Aborted { .. } => "aborted",
+                    ActionEvent::Concluded { .. } => "concluded",
+                })
+                .collect();
+            assert_eq!(
+                kinds,
+                vec!["proposed", "approved", "executed", "finished", "concluded"],
+                "{}",
+                run.out
+            );
+        }
+
+        /// **這是 A1 的驗收。** 一輪互動花掉的時間如果全部蓋同一個 `at_ms`，
+        /// 回放的人會看到一次零秒的思考——而那個零是我們沒有量，不是他沒有猶豫。
+        #[test]
+        fn two_rows_in_one_run_do_not_claim_the_same_millisecond() {
+            let run = go(
+                "act-clock",
+                &one_card(),
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "好\n",
+                None,
+            );
+            let stamps: Vec<i64> = run.events().iter().map(|e| e.at_ms()).collect();
+            assert!(stamps.len() >= 2, "{stamps:?}");
+            assert!(
+                stamps.windows(2).all(|w| w[0] < w[1]),
+                "每一列都該有自己的時刻：{stamps:?}"
+            );
+        }
+
+        /// 「他說不要」和「這一步根本沒被提出」的差別就是那一列。
+        #[test]
+        fn saying_no_leaves_a_row_that_says_you_said_no_instead_of_a_silence() {
+            let run = go(
+                "act-no",
+                &one_card(),
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "不要\n",
+                None,
+            );
+            assert!(run.executor.calls.is_empty(), "不該交給執行器");
+            let declined = run.events().iter().any(|e| {
+                matches!(
+                    e,
+                    ActionEvent::Refused {
+                        reason: RefusalReason::UserDeclinedThisStep,
+                        ..
+                    }
+                )
+            });
+            assert!(
+                declined,
+                "action log 要留下「你說不要」那一列：{:?}",
+                run.events()
+            );
+        }
+
+        /// `AbortActor` 這個型別存在的全部理由，就是把這兩件事分開。
+        #[test]
+        fn the_log_says_who_stopped_it_and_nobody_answering_is_not_him_saying_stop() {
+            let by = |typed: &str, name: &str| {
+                let run = go(
+                    name,
+                    &one_card(),
+                    &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                    typed,
+                    None,
+                );
+                run.events()
+                    .iter()
+                    .find_map(|e| match e {
+                        ActionEvent::Aborted { by, .. } => Some(*by),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("{name}：沒有中止那一列"))
+            };
+            let typed_stop = by("停\n", "act-stop");
+            let nobody_home = by("", "act-eof");
+            assert_eq!(typed_stop, AbortActor::User);
+            assert_eq!(nobody_home, AbortActor::System);
+            assert_ne!(typed_stop, nobody_home);
+        }
+
+        /// 停在上限不代表任務完成——`RunConclusion` 自己的文案就是這樣寫的。
+        #[test]
+        fn hitting_the_step_limit_is_not_the_same_as_finishing() {
+            let source = Source {
+                rows: vec![
+                    card(7, Some(&open_url("https://example.com/a")), &[1]),
+                    card(8, Some(&open_url("https://example.com/b")), &[1]),
+                ],
+                apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+            };
+            let run = go(
+                "act-limit",
+                &source,
+                &opts("開今天的連結", &["chrome.exe"], 1, 5, false),
+                "好\n好\n",
+                None,
+            );
+            assert!(run.out.contains("不代表任務完成"), "{}", run.out);
+            assert!(!run.out.contains("都問完了"), "{}", run.out);
+            assert_eq!(run.executor.calls.len(), 1, "上限 1 步，只該交出去一次");
+            let last = run.events().last().cloned().expect("有事件");
+            assert_eq!(
+                last,
+                ActionEvent::Concluded {
+                    at_ms: match last {
+                        ActionEvent::Concluded { at_ms, .. } => at_ms,
+                        ref other => panic!("最後一列該是 Concluded：{other:?}"),
+                    },
+                    conclusion: RunConclusionRecord::StepLimitReached {
+                        completed_steps: 1,
+                        limit: 1,
+                    },
+                }
+            );
+        }
+
+        #[test]
+        fn an_app_you_did_not_authorise_never_reaches_the_executor() {
+            let run = go(
+                "act-app",
+                &one_card(),
+                &opts("開今天的連結", &["notepad.exe"], 3, 5, false),
+                "好\n",
+                None,
+            );
+            assert!(run.executor.calls.is_empty(), "沒授權的 app 不該交出去");
+            let blocked = run.events().iter().any(|e| {
+                matches!(
+                    e,
+                    ActionEvent::Refused {
+                        reason: RefusalReason::NotCoveredByGrant {
+                            rejection: GrantRejection::Apps
+                        },
+                        ..
+                    }
+                )
+            });
+            assert!(blocked, "{:?}", run.events());
+            assert!(run.out.contains("授權擋掉 1 步"), "{}", run.out);
+            // **畫面上那句話也要是真的。** 只斷言「預覽和真的跑一致」證不出
+            // 這件事——一個永遠回「授權涵蓋這一步」的 `coverage()` 兩邊一樣假，
+            // 那條一致性測試照樣綠。所以這裡把印出來的判斷釘在真的發生的事上。
+            assert!(
+                run.out.contains("授權不涵蓋：apps 維度拒絕"),
+                "擋下來了就要說擋下來：{}",
+                run.out
+            );
+            assert!(!run.out.contains("授權涵蓋這一步"), "{}", run.out);
+        }
+
+        /// 「她記得是兩個 app」和「她根本不記得」是他要看到的兩件不同的事。
+        #[test]
+        fn not_knowing_which_app_and_knowing_two_are_not_the_same_sentence() {
+            let source = Source {
+                rows: vec![
+                    card(7, Some(&open_url("https://example.com/a")), &[1, 2]),
+                    card(8, Some(&open_url("https://example.com/b")), &[3]),
+                ],
+                apps: [(1, "chrome.exe".to_string()), (2, "slack.exe".to_string())]
+                    .into_iter()
+                    .collect(),
+            };
+            let run = go(
+                "act-app-three",
+                &source,
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, true),
+                "",
+                None,
+            );
+            assert!(run.out.contains("兩個以上的 app"), "{}", run.out);
+            assert!(run.out.contains("問不出是哪個 app"), "{}", run.out);
+        }
+
+        /// **這是 A1 的第二個驗收。** 一整輪共用同一個 `now` 的話，`elapsed`
+        /// 恆為 0，`--minutes` 就是一個印在 `--help` 上但不做事的旗標。
+        #[test]
+        fn an_expired_grant_refuses_even_after_he_says_yes() {
+            let source = Source {
+                rows: vec![
+                    card(7, Some(&open_url("https://example.com/a")), &[1]),
+                    card(8, Some(&open_url("https://example.com/b")), &[1]),
+                ],
+                apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+            };
+            // 第一步在授權還新的時候；問完第一步之後，時鐘跳過兩分鐘。
+            let mut calls = 0;
+            let mut t = 1_700_000_000_000;
+            let clock = move || {
+                calls += 1;
+                t += if calls == 6 { 120_000 } else { 1_000 };
+                t
+            };
+            let run = go_from(
+                "act-expiry",
+                &source,
+                &opts("開今天的連結", &["chrome.exe"], 3, 1, false),
+                "好\n好\n",
+                None,
+                clock,
+            );
+            assert_eq!(
+                run.executor.calls.len(),
+                1,
+                "第二步應該在過期那一維就被擋下來：{}",
+                run.out
+            );
+            let expired = run.events().iter().any(|e| {
+                matches!(
+                    e,
+                    ActionEvent::Refused {
+                        reason: RefusalReason::NotCoveredByGrant {
+                            rejection: GrantRejection::ExpiryElapsed
+                        },
+                        ..
+                    }
+                )
+            });
+            assert!(expired, "{:?}", run.events());
+        }
+
+        /// 他去泡了杯茶，回來才打「好」——而那杯茶泡得比 `--minutes` 還久。
+        ///
+        /// **這一條和上面那條不是同一件事。** 上面那條的授權是在**她開口之前**
+        /// 就過期了，所以畫面上會直接寫「授權不涵蓋」。這一條是她問的時候還沒
+        /// 過期（畫面上寫「授權涵蓋這一步」，那句話是真的），過期發生在他答話
+        /// 的那段空白裡。拿問話那一刻的時戳去執行的話，`--minutes 1` 攔不住一個
+        /// 開著兩小時沒人答的提問——而那正是 `--minutes` 唯一存在的理由。
+        #[test]
+        fn a_yes_typed_long_after_the_ticket_expired_does_not_reach_the_executor() {
+            let source = one_card();
+            // 呼叫順序：1 發證、2 印判斷用的、3 proposed、4 approved、5 執行。
+            // 茶泡在第 4 和第 5 中間——也就是他盯著那個問句的那段時間。
+            let mut calls = 0;
+            let mut t = 1_700_000_000_000;
+            let clock = move || {
+                calls += 1;
+                t += if calls == 5 { 7_200_000 } else { 1_000 };
+                t
+            };
+            let run = go_from(
+                "act-slow-yes",
+                &source,
+                &opts("開今天的連結", &["chrome.exe"], 3, 1, false),
+                "好\n",
+                None,
+                clock,
+            );
+            assert!(
+                run.out.contains("授權涵蓋這一步"),
+                "她問的那一刻票還是好的，畫面上不可以先說謊：{}",
+                run.out
+            );
+            assert!(
+                run.executor.calls.is_empty(),
+                "票過期之後那個「好」不可以把動作交出去：{}",
+                run.out
+            );
+            let expired = run.events().iter().any(|e| {
+                matches!(
+                    e,
+                    ActionEvent::Refused {
+                        reason: RefusalReason::NotCoveredByGrant {
+                            rejection: GrantRejection::ExpiryElapsed
+                        },
+                        ..
+                    }
+                )
+            });
+            assert!(
+                expired,
+                "擋下來這件事要在 log 上有一列說得出理由：{:?}",
+                run.events()
+            );
+            assert!(
+                run.out.contains("授權擋掉 1 步"),
+                "統計那一行要把它算進「授權擋掉」，不是「執行失敗」：{}",
+                run.out
+            );
+            // **他打完「好」之後不可以是一片空白。** 空白讀起來是「成功了」，
+            // 而這一步連交都沒有交出去。
+            assert!(
+                run.out
+                    .contains("沒有做，也沒有交給作業系統：expiry 維度拒絕：授權已過期。"),
+                "擋掉這件事要當著他的面說，不能只寫進 log：{}",
+                run.out
+            );
+            assert!(!run.out.contains("做了："), "{}", run.out);
+        }
+
+        /// 預覽答應一件事、按下去做另一件事，是這個 repo 一路在修的那件事。
+        #[test]
+        fn a_dry_run_writes_nothing_and_says_what_a_real_run_would_say() {
+            let source = one_card();
+            let preview = go(
+                "act-dry",
+                &source,
+                &opts("開今天的連結", &["notepad.exe"], 3, 5, true),
+                "",
+                None,
+            );
+            assert!(!preview.log_exists(), "預覽不可以寫 action log");
+            let real = go(
+                "act-dry-real",
+                &source,
+                &opts("開今天的連結", &["notepad.exe"], 3, 5, false),
+                "好\n",
+                None,
+            );
+            let verdict = |text: &str| {
+                text.lines()
+                    .find(|l| l.starts_with("授權涵蓋") || l.starts_with("授權不涵蓋"))
+                    .unwrap_or_else(|| panic!("找不到涵蓋判斷那一行：{text}"))
+                    .to_owned()
+            };
+            assert_eq!(verdict(&preview.out), verdict(&real.out));
+            // 一致還不夠——兩邊一起說假話也是一致的。這一步的 app 是
+            // `chrome.exe`、授權只給 `notepad.exe`，所以那句話只能是「不涵蓋」。
+            assert!(
+                verdict(&preview.out).starts_with("授權不涵蓋"),
+                "{}",
+                preview.out
+            );
+            assert!(real.executor.calls.is_empty(), "說不涵蓋就不可以交出去");
+        }
+
+        #[test]
+        fn the_dry_run_says_the_step_limit_will_cut_the_list_short() {
+            let source = Source {
+                rows: vec![
+                    card(7, Some(&open_url("https://example.com/a")), &[1]),
+                    card(8, Some(&open_url("https://example.com/b")), &[1]),
+                ],
+                apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+            };
+            let run = go(
+                "act-dry-limit",
+                &source,
+                &opts("開今天的連結", &["chrome.exe"], 1, 5, true),
+                "",
+                None,
+            );
+            assert!(run.out.contains("https://example.com/a"), "{}", run.out);
+            assert!(run.out.contains("https://example.com/b"), "{}", run.out);
+            assert!(run.out.contains("步數上限 1"), "{}", run.out);
+            // 一張可做的卡都沒有的時候，不要對著空清單講上限。
+            let empty = go(
+                "act-dry-empty",
+                &Source::default(),
+                &opts("開今天的連結", &["chrome.exe"], 1, 5, true),
+                "",
+                None,
+            );
+            assert!(!empty.out.contains("步數上限"), "{}", empty.out);
+        }
+
+        /// 五個數字各自獨立累加。任何一個從別的數字減出來的實作都會在這裡紅：
+        /// 問了 3 步、做成 1 步，而「說不要」是 1 不是 2。
+        #[test]
+        fn the_tally_counts_what_happened_instead_of_deriving_it() {
+            let source = Source {
+                rows: vec![
+                    card(7, Some(&open_url("https://example.com/a")), &[1]),
+                    card(8, Some(&open_url("https://example.com/b")), &[1]),
+                    card(9, Some(&open_url("https://example.com/c")), &[2]),
+                ],
+                apps: [(1, "chrome.exe".to_string()), (2, "slack.exe".to_string())]
+                    .into_iter()
+                    .collect(),
+            };
+            let run = go(
+                "act-tally",
+                &source,
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "好\n不要\n好\n",
+                None,
+            );
+            assert!(
+                run.out.contains(
+                    "這一輪：問了 3 步，做成 1 步，你說不要 1 步，授權擋掉 1 步，執行失敗 0 步。"
+                ),
+                "{}",
+                run.out
+            );
+        }
+
+        /// 中止的那一步已經被問了，所以 `asked` 會比其他四個數字的和多 1。
+        /// 這是對的：中止那句話就印在這一行上面，讀的人看得到那一步沒有答案。
+        #[test]
+        fn a_run_that_was_cut_short_does_not_pretend_every_step_got_an_answer() {
+            let run = go(
+                "act-cut",
+                &one_card(),
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "停\n",
+                None,
+            );
+            assert!(
+                run.out.contains(
+                    "這一輪：問了 1 步，做成 0 步，你說不要 0 步，授權擋掉 0 步，執行失敗 0 步。"
+                ),
+                "{}",
+                run.out
+            );
+            assert!(run.out.contains("已中止"), "{}", run.out);
+        }
+
+        #[test]
+        fn a_failed_attempt_is_not_a_refusal_and_says_so() {
+            let run = go(
+                "act-fail",
+                &one_card(),
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "好\n",
+                Some("作業系統拒絕開啟"),
+            );
+            assert_eq!(run.executor.calls.len(), 1, "失敗代表它真的被交出去過");
+            assert!(run.out.contains("執行失敗 1 步"), "{}", run.out);
+            assert!(run.out.contains("做成 0 步"), "{}", run.out);
+            // 統計那一行在最後面；他在那一刻看到的是這一句。**它要說「交出去
+            // 了」**——那是這一種和「擋掉了」唯一的差別，而那個差別決定他要不要
+            // 去別的地方看看有沒有半途發生的事。
+            assert!(
+                run.out.contains("交出去了，那一端失敗了：作業系統拒絕開啟"),
+                "他說了好，螢幕上要說發生了什麼：{}",
+                run.out
+            );
+            assert!(
+                !run.out.contains("做了："),
+                "失敗不可以印成做好了：{}",
+                run.out
+            );
+            assert!(
+                !run.out.contains("沒有交給作業系統"),
+                "它真的被交出去了，不可以說沒有：{}",
+                run.out
+            );
+            let finished = run
+                .events()
+                .iter()
+                .any(|e| matches!(e, ActionEvent::StepFinished { .. }));
+            assert!(
+                !finished,
+                "失敗的嘗試不是一個完成的步驟：{:?}",
+                run.events()
+            );
+        }
+
+        #[test]
+        fn zero_steps_and_a_nonsense_allow_each_say_what_is_wrong() {
+            let dir = crate::ops::tmp::Tmp::new("act-bad-args");
+            let mut bad_steps = opts("開今天的連結", &["chrome.exe"], 0, 5, true);
+            bad_steps.steps = 0;
+            let err = run_with_output(
+                &dir.0,
+                &bad_steps,
+                &Source::default(),
+                &mut std::io::Cursor::new(Vec::new()),
+                &mut Fake::default(),
+                &mut ticking(1),
+                &mut Vec::new(),
+            )
+            .expect_err("步數上限 0 該被拒絕");
+            assert!(format!("{err:#}").contains("至少 1"), "{err:#}");
+
+            let mut bad_allow = opts("開今天的連結", &["chrome.exe"], 3, 5, true);
+            bad_allow.allow = vec!["開個檔案".into()];
+            let err = run_with_output(
+                &dir.0,
+                &bad_allow,
+                &Source::default(),
+                &mut std::io::Cursor::new(Vec::new()),
+                &mut Fake::default(),
+                &mut ticking(1),
+                &mut Vec::new(),
+            )
+            .expect_err("不認得的 --allow 該被拒絕");
+            let text = format!("{err:#}");
+            assert!(text.contains("開個檔案"), "{text}");
+            assert!(text.contains("open-url"), "{text}");
+        }
+
+        /// 「這張卡沒有下一步」和「有寫但讀不懂」共用一句話的那一天，
+        /// 一張明明寫了東西的卡片會安靜地不見。
+        #[test]
+        fn a_next_step_that_cannot_be_read_is_not_a_card_without_one() {
+            let source = Source {
+                rows: vec![card(7, Some("幫我處理這件事"), &[1]), card(8, None, &[1])],
+                apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+            };
+            let run = go(
+                "act-unreadable",
+                &source,
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "",
+                None,
+            );
+            assert_eq!(run.out.matches("讀不懂").count(), 1, "{}", run.out);
+            assert!(run.out.contains("#7"), "{}", run.out);
+            assert!(
+                !run.out.contains("#8"),
+                "沒有下一步的卡片要安靜：{}",
+                run.out
+            );
+            assert!(run.out.contains("問了 0 步"), "{}", run.out);
+        }
+    }
+}
+
 pub mod commitments {
     use super::*;
 

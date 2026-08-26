@@ -377,6 +377,28 @@ enum Command {
         yes: bool,
     },
 
+    /// 逐步顯示承諾卡的下一步；每一步都要你親手核准才會交給作業系統。
+    Do {
+        /// 這次授權的任務描述。核准綁的是「具體動作 + 具體目標」，不是「幫我處理這件事」。
+        #[arg(long)]
+        task: String,
+        /// 允許碰哪些 app（可重複）。步驟宣告的 app 不在裡面就拒絕。
+        #[arg(long = "app")]
+        apps: Vec<String>,
+        /// 允許哪幾類動作（可重複）：open-url / open-file / focus-window。預設 open-url。
+        #[arg(long = "allow")]
+        allow: Vec<String>,
+        /// 授權多久後失效（分鐘）。
+        #[arg(long, default_value_t = 5)]
+        minutes: u64,
+        /// 步數上限。0 會被拒絕（`StepLimit` 鑄不出來）。
+        #[arg(long, default_value_t = 3)]
+        steps: u32,
+        /// 只印出這張授權書會涵蓋哪些步驟，不問、不做。
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// 叫她閉眼睛。正在跑的 `record` 下一個 tick 就會停下來。
     ///
     /// 暫停**不會自己過期**——她會一直停到有人 `sister resume`（或在字母人
@@ -662,6 +684,24 @@ fn main() -> Result<()> {
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config()?, dry_run),
         Command::Export { to, with_frames } => ops::export::run(&data_dir, &to, with_frames),
         Command::Forget { last, yes } => ops::forget::run(&data_dir, &last, yes),
+        Command::Do {
+            task,
+            apps,
+            allow,
+            minutes,
+            steps,
+            dry_run,
+        } => ops::act::run(
+            &data_dir,
+            &ops::act::Options {
+                task,
+                apps,
+                allow,
+                minutes,
+                steps,
+                dry_run,
+            },
+        ),
         Command::Pause => ops::pause::run(&data_dir, true),
         Command::Resume => ops::pause::run(&data_dir, false),
         Command::Stop => ops::stop::run(&data_dir),

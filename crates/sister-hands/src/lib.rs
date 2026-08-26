@@ -17,6 +17,7 @@ use std::{
 };
 
 pub mod commitment_action;
+pub mod platform;
 pub mod semi_action;
 pub mod target_policy;
 
@@ -174,7 +175,12 @@ impl SuggestionButton {
         self.snapshot().describe()
     }
 
-    fn snapshot(&self) -> ActionSnapshot {
+    /// 取出按鈕即將核准的死資料；這不會放寬執行權限。
+    ///
+    /// [`ActionSnapshot`] 不帶 [`UserButtonPress`]，本來就是公開且任何呼叫端都能
+    /// 建構的 enum；公開的 [`Self::describe`] 也一直由同一份 snapshot 算出來。
+    /// 真正鑄出按壓憑證、讓動作有機會通過執行隘口的仍然只有 [`Self::press`]。
+    pub fn snapshot(&self) -> ActionSnapshot {
         match &self.0 {
             SuggestionDraft::OpenUrl { url } => ActionSnapshot::OpenUrl { url: url.clone() },
             SuggestionDraft::OpenFile { path } => ActionSnapshot::OpenFile { path: path.clone() },
@@ -218,6 +224,12 @@ impl ActionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "refusal", rename_all = "snake_case")]
 pub enum RefusalReason {
+    /// 他被問了，他說不要。**這不是她拒絕，是他拒絕**——但結果一樣是
+    /// 根本沒有交給作業系統，所以它屬於 `Refused` 而不是 `Failed`。
+    ///
+    /// 少了這一種的話，一次「他說不要」在 action log 上會是一片空白，
+    /// 而空白讀起來是「她從來沒問過這一步」。
+    UserDeclinedThisStep,
     /// `observe` 級物理上沒有手。
     ObserveHasNoHands,
     /// 落在永不繼承的五類裡，要單獨核准（SPEC §9.2）。
@@ -237,6 +249,7 @@ pub enum RefusalReason {
 impl RefusalReason {
     pub fn message(&self) -> String {
         match self {
+            Self::UserDeclinedThisStep => "你說不要，所以這一步沒有做。".to_string(),
             Self::ObserveHasNoHands => {
                 "現在是 observe 級，她沒有手；要她動手得先把權限升到 suggest。".to_string()
             }
@@ -270,7 +283,14 @@ pub trait Executor {
     fn execute(&mut self, suggestion: &Suggestion) -> std::result::Result<String, String>;
 }
 
-/// 全部執行請求的唯一隘口。
+/// **suggest 那條路**的唯一隘口：字母人上那顆按鈕按下去，走這裡。
+///
+/// **這不是全部執行請求的唯一隘口。** semi-action 有它自己那一個
+/// ([`semi_action::execute_approved_step`])，而底下 [`Level::SemiAction`] 那一臂
+/// 就是在講這件事——那條路要一張結構化的 grant 和逐步核准，混進這裡等於用
+/// 一顆按鈕換掉整張授權書。alpha.69 寫下這段註解的時候 semi-action 還沒有
+/// 呼叫端，「唯一」讀起來是真的；alpha.70 的 `sister do` 一接上去它就變成假話，
+/// 而註解裡的假話正是這個 repo 最常見的那一種——每一行都是真的，湊起來在說謊。
 ///
 /// [`Level`] 和 [`never_inherited_class`] 都在這裡被讀——不然它們就只是兩個
 /// 寫出來沒有人看的型別，而這個 repo 有一整排那種東西的墓碑

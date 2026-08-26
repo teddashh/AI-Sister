@@ -3807,6 +3807,38 @@ impl Db {
         }
     }
 
+    /// 這筆證據是在**哪個 app 的畫面**上長出來的。
+    ///
+    /// **`None` 是「問不出來」，不是「不屬於任何 app」。** 呼叫端要把它讀成
+    /// 「這一步證明不了自己在授權範圍內」，不是「這一步沒有 app 所以放行」。
+    ///
+    /// 同一個 frame 上如果有兩個不同的 `app_id`，一樣回 `None`：兩個答案就是沒有答案。
+    pub fn app_for_evidence(&self, r: &crate::brain::EvidenceRef) -> Result<Option<String>> {
+        match r {
+            crate::brain::EvidenceRef::Frame(id) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT DISTINCT app_id FROM text_chunks
+                     WHERE frame_id = ?1 AND app_id IS NOT NULL",
+                )?;
+                let apps = stmt
+                    .query_map([*id], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?;
+                Ok(match apps.as_slice() {
+                    [app] => Some(app.clone()),
+                    [] | [_, _, ..] => None,
+                })
+            }
+            crate::brain::EvidenceRef::Fact(id) => self
+                .conn
+                .query_row("SELECT app_id FROM facts WHERE id = ?1", [*id], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map(|value| value.flatten())
+                .map_err(Into::into),
+        }
+    }
+
     pub fn fact_by_id(&self, id: i64) -> Result<Option<FactRow>> {
         self.conn
             .query_row(
@@ -7044,6 +7076,97 @@ mod tests {
 
     fn test_db() -> Db {
         Db::open_in_memory().expect("open in-memory db")
+    }
+
+    #[test]
+    fn one_app_on_one_frame_is_the_answer() {
+        let mut db = test_db();
+        let session = db.start_session("test", "0").unwrap();
+        let (frame, _, _) = db
+            .insert_frame(
+                session,
+                &frame_with_text(1, "chrome.exe", "Chrome", &["hello"]),
+                None,
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            db.app_for_evidence(&crate::brain::EvidenceRef::Frame(frame))
+                .unwrap(),
+            Some("chrome.exe".into())
+        );
+    }
+
+    #[test]
+    fn two_apps_on_one_frame_is_not_an_answer_and_neither_is_no_app() {
+        let mut two = test_db();
+        let session = two.start_session("test", "0").unwrap();
+        let (frame, _, _) = two
+            .insert_frame(
+                session,
+                &frame_with_text(1, "chrome.exe", "Chrome", &["hello"]),
+                None,
+                0,
+            )
+            .unwrap();
+        two.conn
+            .execute(
+                "INSERT INTO text_chunks(session_id, ts, source_kind, frame_id, app_id, text)
+                 VALUES(?1, 2, 'ocr', ?2, 'notepad.exe', 'other')",
+                params![session, frame],
+            )
+            .unwrap();
+        assert_eq!(
+            two.app_for_evidence(&crate::brain::EvidenceRef::Frame(frame))
+                .unwrap(),
+            None
+        );
+
+        let mut none = test_db();
+        let session = none.start_session("test", "0").unwrap();
+        none.conn
+            .execute(
+                "INSERT INTO frames(ts, session_id, monitor, width, height, dhash)
+                 VALUES(1, ?1, 0, 1, 1, 0)",
+                [session],
+            )
+            .unwrap();
+        let frame = none.conn.last_insert_rowid();
+        none.conn
+            .execute(
+                "INSERT INTO text_chunks(session_id, ts, source_kind, frame_id, app_id, text)
+                 VALUES(?1, 1, 'ocr', ?2, NULL, 'unknown')",
+                params![session, frame],
+            )
+            .unwrap();
+        assert_eq!(
+            none.app_for_evidence(&crate::brain::EvidenceRef::Frame(frame))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn fact_app_is_returned_and_a_missing_fact_is_not_an_answer() {
+        let db = test_db();
+        db.conn
+            .execute(
+                "INSERT INTO facts(ts, kind, raw, normalized, source_kind, app_id)
+                 VALUES(1, 'url', 'https://example.com', 'https://example.com', 'ocr', 'chrome.exe')",
+                [],
+            )
+            .unwrap();
+        let fact = db.conn.last_insert_rowid();
+        assert_eq!(
+            db.app_for_evidence(&crate::brain::EvidenceRef::Fact(fact))
+                .unwrap(),
+            Some("chrome.exe".into())
+        );
+        assert_eq!(
+            db.app_for_evidence(&crate::brain::EvidenceRef::Fact(fact + 1))
+                .unwrap(),
+            None
+        );
     }
 
     /// 匯出要驗的東西在磁碟上（WAL 是檔案的行為），所以這幾個測試不能用

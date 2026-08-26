@@ -128,8 +128,10 @@ fn inherited_scope_and_separate_approval_are_different_questions() {
 
 #[test]
 fn step_limit_and_completed_are_named_distinctly() {
-    assert!(RunConclusion::Completed.message().contains("做完"));
+    assert!(RunConclusion::Completed.message().contains("問完"));
     assert!(!RunConclusion::Completed.message().contains("上限"));
+    // 「任務做完了」是假話：他可以每一步都說不要，這一輪照樣走到底。
+    assert!(!RunConclusion::Completed.message().contains("做完"));
     assert!(
         RunConclusion::StepLimitReached {
             completed_steps: 2,

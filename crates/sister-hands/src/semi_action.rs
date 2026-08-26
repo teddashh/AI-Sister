@@ -257,7 +257,11 @@ pub enum RunConclusion {
 impl RunConclusion {
     pub fn message(self) -> String {
         match self {
-            Self::Completed => "任務做完了。".into(),
+            // **不是「任務做完了」。** 他可以每一步都說不要，那一輪照樣走到底；
+            // 走到底講的是「沒有東西再問了」，不是「你要的事情辦好了」。
+            // 也不要在這句話裡提上限——那是 `StepLimitReached` 要講的事，
+            // 兩句話各自只講自己那一件，才分得開（見底下那條測試）。
+            Self::Completed => "這一輪的步驟都問完了。".into(),
             Self::StepLimitReached {
                 completed_steps,
                 limit,
