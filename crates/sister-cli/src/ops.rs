@@ -1478,6 +1478,49 @@ pub mod act {
         Ok(())
     }
 
+    /// `sister hands log`：把 `action-log.jsonl` 讀成人話。
+    pub fn log(data_dir: &Path, limit: usize) -> Result<()> {
+        log_to(data_dir, limit, &mut std::io::stdout())
+    }
+
+    pub(crate) fn log_to(data_dir: &Path, limit: usize, out: &mut impl Write) -> Result<()> {
+        // **這一句擋的是一句假話。** 資料目錄打錯字的時候，下面那個 replay 會
+        // 回一份空的（`ActionLog::replay` 把「檔案不存在」當成空的，那對它自己
+        // 那一層是對的），於是螢幕上會寫「她還沒有動過手」——而真相是我們根本
+        // 沒看那個目錄。「查不到」不可以講成「沒有」。
+        anyhow::ensure!(
+            data_dir.exists(),
+            "找不到這個資料目錄：{}\n這不是「她沒有動過手」，是我們沒有看到那個目錄。",
+            data_dir.display()
+        );
+        let log = ActionLog::in_data_dir(data_dir);
+        let replay = log.replay()?;
+        let lines = sister_hands::replay_copy::recent_replay_lines(&replay, limit);
+        if lines.is_empty() {
+            writeln!(
+                out,
+                "還沒有任何動作紀錄。她從來沒有把一個動作端到你面前過。"
+            )?;
+            writeln!(out, "（紀錄會寫在 {}）", log.path().display())?;
+            return Ok(());
+        }
+        writeln!(out, "動作紀錄（{}）\n", log.path().display())?;
+        for line in &lines {
+            writeln!(out, "{line}")?;
+        }
+        // **這一句不是裝飾。** `unreadable` 的那幾列在上面是有印出來的，但它們
+        // 混在一整串裡很容易被讀成「她做過的事情之一」。壞掉的列代表**那一段
+        // 發生過但我們解不開**，和「她沒做」是兩件事。
+        if !replay.unreadable.is_empty() {
+            writeln!(
+                out,
+                "\n有 {} 列讀不懂。那幾列是發生過但解不開，不是沒有發生。",
+                replay.unreadable.len()
+            )?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -2170,6 +2213,96 @@ pub mod act {
                 run.out
             );
             assert!(run.out.contains("問了 0 步"), "{}", run.out);
+        }
+
+        fn logged(dir: &std::path::Path, limit: usize) -> String {
+            let mut out = Vec::new();
+            log_to(dir, limit, &mut out).expect("讀動作紀錄");
+            String::from_utf8(out).expect("utf8")
+        }
+
+        /// 「這個目錄我沒看過」和「她沒有動過手」是兩句話。
+        ///
+        /// `ActionLog::replay` 把「檔案不存在」當成一份空的回放——對它那一層是
+        /// 對的（還沒寫過就是還沒有）。但打錯資料目錄的時候，同一份空回放會讓
+        /// 畫面替你宣布一件它根本沒查過的事。
+        #[test]
+        fn a_data_dir_we_never_looked_at_is_not_a_hand_that_never_moved() {
+            let missing = crate::ops::tmp::Tmp::new("act-log-missing").0.join("nope");
+            let mut out = Vec::new();
+            let err = log_to(&missing, 20, &mut out).expect_err("目錄不存在要報錯");
+            let text = format!("{err:#}");
+            assert!(text.contains("找不到這個資料目錄"), "{text}");
+            assert!(
+                out.is_empty(),
+                "不可以在報錯之前就先印一句「還沒有任何動作紀錄」：{out:?}"
+            );
+        }
+
+        #[test]
+        fn an_empty_log_says_nothing_was_ever_offered_and_where_it_would_live() {
+            let dir = crate::ops::tmp::Tmp::new("act-log-empty");
+            let text = logged(&dir.0, 20);
+            assert!(text.contains("還沒有任何動作紀錄"), "{text}");
+            assert!(
+                text.contains("action-log.jsonl"),
+                "空的時候更要講清楚它會寫在哪：{text}"
+            );
+        }
+
+        /// 跑完一輪之後，`sister hands log` 講的要是**同一輪**發生的事。
+        #[test]
+        fn after_a_real_run_the_log_reads_back_the_same_story() {
+            let run = go(
+                "act-log-story",
+                &one_card(),
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "好\n",
+                None,
+            );
+            let text = logged(&run.dir.0, 20);
+            assert!(text.contains("提出："), "{text}");
+            assert!(text.contains("核准："), "{text}");
+            assert!(text.contains("已執行："), "{text}");
+            assert!(text.contains("https://example.com/a"), "{text}");
+            assert!(
+                !text.contains("還沒有任何動作紀錄"),
+                "有紀錄就不可以說沒有：{text}"
+            );
+        }
+
+        /// 只給最近幾列的時候，被蓋掉的那幾列要有人講；而讀不懂的那幾列
+        /// 不可以混進「她做過的事」裡不說話。
+        #[test]
+        fn truncation_and_unreadable_lines_each_get_their_own_sentence() {
+            let run = go(
+                "act-log-truncate",
+                &one_card(),
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
+                "好\n",
+                None,
+            );
+            let path = ActionLog::in_data_dir(&run.dir.0).path().to_owned();
+            let mut body = std::fs::read_to_string(&path).expect("讀回 jsonl");
+            body.push_str("{這不是 json\n");
+            std::fs::write(&path, body).expect("寫回 jsonl");
+
+            let full = logged(&run.dir.0, 99);
+            assert!(
+                full.contains("列讀不懂。那幾列是發生過但解不開，不是沒有發生。"),
+                "{full}"
+            );
+            assert!(
+                !full.contains("沒有顯示"),
+                "沒有截斷就不要憑空講截斷：{full}"
+            );
+
+            let short = logged(&run.dir.0, 2);
+            assert!(short.contains("沒有顯示"), "截斷了要說出來：{short}");
+            assert!(
+                short.contains("列讀不懂"),
+                "截斷不可以把那句解釋也吃掉：{short}"
+            );
         }
     }
 }

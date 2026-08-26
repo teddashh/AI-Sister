@@ -238,6 +238,18 @@ enum BrainAction {
 }
 
 #[derive(Subcommand)]
+enum HandsAction {
+    /// 動作紀錄回放：提出、核准、交出去、做完、中止，每一列自己讀得懂。
+    ///
+    /// 預設只給最近 20 列，而**被蓋掉的那幾列會有一句話講出來**——安靜地
+    /// 截斷會讓畫面替你講一句「她總共就做過這 20 件事」。
+    Log {
+        #[arg(short, long, default_value_t = 20, value_parser = at_least_one)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// 開始錄製（需要平台擷取後端）
     Record {
@@ -438,6 +450,12 @@ enum Command {
     Brain {
         #[command(subcommand)]
         action: BrainAction,
+    },
+
+    /// 她的手做過什麼。`sister do` 跑完之後就是來這裡看，不必自己去開 JSONL。
+    Hands {
+        #[command(subcommand)]
+        action: HandsAction,
     },
 
     /// 審閱層：讀 L2、回查 L0 原件、必要時雙 pass，寫入 L3。
@@ -713,6 +731,9 @@ fn main() -> Result<()> {
         } => ops::interpret::run(&data_dir, &config()?, dry_run, &last, limit, at),
         Command::Brain { action } => match action {
             BrainAction::Log { limit } => ops::brain::log(&data_dir, limit),
+        },
+        Command::Hands { action } => match action {
+            HandsAction::Log { limit } => ops::act::log(&data_dir, limit),
         },
         Command::Review {
             dry_run,

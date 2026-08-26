@@ -18,6 +18,7 @@ use std::{
 
 pub mod commitment_action;
 pub mod platform;
+pub mod replay_copy;
 pub mod semi_action;
 pub mod target_policy;
 

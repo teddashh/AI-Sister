@@ -1,5 +1,4 @@
-use sister_hands::semi_action::RunConclusion;
-use sister_hands::{ActionEvent, ActionLog, ExecutionResult, Level, Outcome, Replay};
+use sister_hands::{ActionEvent, ActionLog, ExecutionResult, Level, Outcome};
 use std::path::Path;
 
 pub fn outcome_message(outcome: &Outcome) -> String {
@@ -10,94 +9,11 @@ pub fn outcome_message(outcome: &Outcome) -> String {
     }
 }
 
-pub fn replay_lines(replay: &Replay) -> Vec<String> {
-    let mut lines = replay
-        .events
-        .iter()
-        .map(|event| match event {
-            ActionEvent::Proposed { at_ms, action } => {
-                format!("{at_ms} 提出：{}", action.describe())
-            }
-            ActionEvent::Approved { at_ms, action } => {
-                format!("{at_ms} 核准：{}", action.describe())
-            }
-            ActionEvent::Executed {
-                at_ms,
-                action,
-                result,
-            } => match result {
-                ExecutionResult::Succeeded { detail } => {
-                    format!("{at_ms} 已執行：{}；{detail}", action.describe())
-                }
-                ExecutionResult::Failed { error } => {
-                    format!("{at_ms} 執行失敗：{}；{error}", action.describe())
-                }
-            },
-            ActionEvent::Refused {
-                at_ms,
-                action,
-                reason,
-            } => format!(
-                "{at_ms} 未執行：{}；{}",
-                action.describe(),
-                reason.message()
-            ),
-            ActionEvent::StepFinished {
-                at_ms,
-                step_number,
-                action,
-                evidence,
-            } => {
-                // `None` 是「沒有拿到畫面憑據」，不是「檢查過沒問題」。
-                let evidence = match evidence {
-                    Some(reference) => format!("畫面憑據：{}", reference.as_str()),
-                    None => "沒有取得畫面憑據".to_string(),
-                };
-                format!(
-                    "{at_ms} 第 {step_number} 步做完：{}；{evidence}",
-                    action.describe()
-                )
-            }
-            ActionEvent::Aborted {
-                at_ms,
-                after_completed_steps,
-                by,
-            } => format!(
-                "{at_ms} {}",
-                RunConclusion::Aborted {
-                    after_completed_steps: *after_completed_steps,
-                    by: *by
-                }
-                .message()
-            ),
-            ActionEvent::Concluded { at_ms, conclusion } => {
-                format!("{at_ms} {}", conclusion.message())
-            }
-        })
-        .collect::<Vec<_>>();
-    lines.extend(
-        replay
-            .unreadable
-            .iter()
-            .map(|bad| format!("第 {} 列讀不懂：{}", bad.line_no, bad.why)),
-    );
-    lines
-}
-
-/// 最近 `shown` 列，加上一句「上面還有幾列」。
-///
-/// 這裡的截斷要說出來。安靜地只給最後 20 列，畫面讀起來會是「她總共就做過
-/// 這 20 件事」——那是一句沒有人寫、但畫面替你講了的話。
-pub fn recent_replay_lines(replay: &Replay, shown: usize) -> Vec<String> {
-    let all = replay_lines(replay);
-    if all.len() <= shown {
-        return all;
-    }
-    let hidden = all.len() - shown;
-    let mut lines = vec![format!("（更早的 {hidden} 列沒有顯示）")];
-    lines.extend(all.into_iter().skip(hidden));
-    lines
-}
+// 回放那段文案搬進 `sister_hands::replay_copy` 了，理由寫在那個模組開頭：CI 對
+// 這個 workspace 只跑 clippy 和 build，所以住在這裡的測試一列都不會被執行。
+// 這裡只接 `recent_replay_lines`——字母人那一格永遠是截斷過的那一種，
+// 而 `replay_lines`（全量）的呼叫端是 `sister hands log`。
+pub use sister_hands::replay_copy::recent_replay_lines;
 
 pub use sister_hands::platform::PlatformExecutor;
 
@@ -172,62 +88,4 @@ mod tests {
         assert!(!done.contains("失敗"));
     }
 
-    #[test]
-    fn replay_copy_names_bad_line_numbers_and_does_not_count_events_as_actions() {
-        let replay = sister_hands::Replay {
-            events: vec![
-                ActionEvent::Proposed {
-                    at_ms: 1,
-                    action: ActionSnapshot::OpenUrl {
-                        url: "https://a".into(),
-                    },
-                },
-                ActionEvent::Executed {
-                    at_ms: 2,
-                    action: ActionSnapshot::OpenUrl {
-                        url: "https://a".into(),
-                    },
-                    result: ExecutionResult::Succeeded {
-                        detail: "ok".into(),
-                    },
-                },
-            ],
-            unreadable: vec![sister_hands::UnreadableLine {
-                line_no: 3,
-                why: "bad json".into(),
-            }],
-        };
-        let lines = replay_lines(&replay);
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("第 3 列") && line.contains("讀不懂"))
-        );
-        assert!(!lines.iter().any(|line| line.contains("做了 2 件事")));
-    }
-
-    /// 只顯示最近幾列的時候，被蓋掉的那幾列要有人講。
-    #[test]
-    fn a_truncated_action_log_says_how_many_it_is_not_showing() {
-        let replay = sister_hands::Replay {
-            events: (1..=5)
-                .map(|n| ActionEvent::Proposed {
-                    at_ms: n,
-                    action: ActionSnapshot::OpenUrl {
-                        url: format!("https://{n}"),
-                    },
-                })
-                .collect(),
-            unreadable: vec![],
-        };
-        let lines = recent_replay_lines(&replay, 2);
-        assert_eq!(lines.len(), 3, "{lines:?}");
-        assert!(lines[0].contains("更早的 3 列"), "{lines:?}");
-        assert!(
-            lines[1].contains("https://4") && lines[2].contains("https://5"),
-            "{lines:?}"
-        );
-        // 沒有超過上限的時候不要憑空多一句「更早的 0 列」。
-        assert_eq!(recent_replay_lines(&replay, 9).len(), 5);
-    }
 }
