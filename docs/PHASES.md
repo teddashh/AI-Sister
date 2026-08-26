@@ -415,9 +415,26 @@ capture 層本身就是 recorder。
     `never_inherited_class` 的 `match` 沒有 `_`，加第四種動作會編譯錯誤。
   - 結局**三種**：`Refused`（沒交給 OS）／`Failed`（交了但失敗）／`Done`。
 - 🔶 接通承諾卡的 `allowed_next_step`（「要我幫你把視窗點開嗎」）：
-  core 那一側做好了，**還沒有平台執行層、沒有 UI**。她有手，手沒接上去。
-- ⬜ `semi-action` 級：結構化 grant（task/apps/actions/expiry）、逐步核准
-  （對話「好」= 只核准顯示的那一步）、每步截圖驗證、abort 快捷鍵。
+  alpha.69 補上平台執行層（`ShellExecuteW` / `EnumWindows`+`SetForegroundWindow`，
+  不經 cmd.exe、不經 PowerShell）、按鈕、以及畫面上的行動紀錄。
+  目標政策是**白名單**（http/https；可看的副檔名），放在
+  `sister-hands::target_policy` 而不是字母人裡面——CI 對 `apps/desktop` 只跑
+  clippy 和 build，寫在那邊的測試一列都不會被執行。
+  按鈕回叫帶的是承諾 id 不是動作，要做什麼由後端重讀資料庫（SPEC §9.7）。
+  **還缺 writer**：`commitments.allowed_next_step` 從 schema 建好到現在沒有
+  任何一支程式寫過它，所以這顆按鈕在真實使用中還出不來。
+- 🔶 `semi-action` 級：平台無關的核心做好了——結構化 grant
+  （`Task`/`AllowedApps`/`AllowedActions`/`Expiry`/`StepLimit`）、
+  `Grant::covers` 逐維拒絕、內容綁定的 `PresentedStep::approve` → `StepApproval`
+  （A 的票做不了 B）、`RunConclusion::{Completed, StepLimitReached, Aborted}`
+  三種結局分得開、每步 `Option<ScreenEvidenceRef>` 明寫 `null`。
+  授權不通過一律 `Outcome::Refused`，不是 `Failed`——後者的文案是
+  「她動手了，但執行失敗」，而那是一次連 executor 都沒被呼叫的拒絕。
+  **沒有任何呼叫端。** 沒有 UI、沒有 CLI、沒有 abort 快捷鍵、沒有每步截圖。
+  SPEC §9.1 的 `data_scope` 與 `denied_actions` 兩維刻意沒做：現在三種動作都
+  不帶資料 payload，加兩個沒有人讀的欄位是假授權。`AllowedApps` 那一維也要
+  照這個標準讀——app 是請求方自己填的字，沒有一條誠實的路可以從
+  「開啟 https://…」推回哪一個 app 會接手。
 - 🔶 來源防線：L0 內容 data-block 包裹 ✅（alpha.67 `prompt_fence`，
   20 種 injection 變體）；外部內容要求動作 → 強制人工核准 ✅（型別上就過不去）。
   ⬜ 端到端的 injection 套件（在網頁/訊息裡埋指令，驗證 0 執行）還沒有——
