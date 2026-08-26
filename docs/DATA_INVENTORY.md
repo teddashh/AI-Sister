@@ -109,7 +109,9 @@ forward-compat 本身是對的：多寫一個欄位的新版不該讓舊版放�
 
 沒有遙測、沒有帳號。程式裡沒有 HTTP client。簽了第二張同意書且設定了
 `[brain] command` 之後，螢幕文字原文會交給那支本機 CLI；外送紀錄在
-`brain_outbound`（結構與計數，不含原文；`role` 分解釋層／審閱層；送出去的是原文），假設卡片在 `l2_card`（append-only 版本鏈，`author` 是 interpreter／reviewer／user，刪 L0 時 tombstone 而不是實刪——列留著，
+`brain_outbound`（結構與計數，不含原文；`role` 分解釋層／審閱層／盯梢層——
+`interpreter`／`reviewer`／`watcher`，最後一個是 alpha.71 的 `sister watch`；
+送出去的是原文），假設卡片在 `l2_card`（append-only 版本鏈，`author` 是 interpreter／reviewer／user，刪 L0 時 tombstone 而不是實刪——列留著，
 卡片上的字清掉）。桌面時間軸的「外送」頁讀這兩張表和 `meta.ever_brain_outbound`。
 
 L3 只由 Reviewer 寫入：`commitments`（承諾表，status 為 open／done／dead／snoozed／archived，`due_source` 分螢幕上寫的和她猜的）、`entities` 與 `entity_mentions`、`day_summaries`、`preferences`（例如哪一類被「其他一切」降權）。血緣在 `provenance(child_ref, parent_ref)`。審閱層有沒有跑過、回查了幾次，記在 `reviewer_run`／`reviewer_recheck`——沒跑過和跑了沒回查是兩句話。雙 pass 對不上的那幾筆在 `reviewer_divergence`，分歧不寫入 L3。

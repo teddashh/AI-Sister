@@ -2,15 +2,15 @@
 //!
 //! 刻意樸素：這些輸出是給人核對用的證據，不是儀表板。
 
-use chrono::{Local, TimeZone};
 use sister_core::model::Millis;
 
 /// 絕對時間，本地時區。
+///
+/// 只是轉呼叫——定義在 [`sister_core::model::stamp`]。`sister watch` 的每一句話
+/// 是在 `sister-core` 裡組起來的，而那些時刻要和這裡印出來的長得一模一樣；
+/// 兩邊各留一份的話，改格式的人只會找到其中一份。
 pub fn timestamp(ts: Millis) -> String {
-    match Local.timestamp_millis_opt(ts).single() {
-        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-        None => format!("ts:{ts}"),
-    }
+    sister_core::model::stamp(ts)
 }
 
 /// 相對於現在的口語說法（「3 天前」）。

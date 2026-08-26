@@ -47,6 +47,7 @@ pub mod segment;
 pub mod segment_edit;
 pub mod stuck;
 pub mod wakeup;
+pub mod watch;
 
 pub use config::{
     BrainConfig, CaptureConfig, Config, Exclusion, GatekeeperConfig, PrivacyConfig, RetentionConfig,

@@ -220,8 +220,9 @@ fn open_existing(data_dir: &Path) -> Result<Db> {
 ///
 /// 匯出與刪除共用同一套寫法，避免同一個 `--last` 在兩個指令裡代表不同時間。
 /// 單位不可以省：`30` 猜成分鐘或天，兩邊都會是一個看似合理的錯誤。
-fn parse_span(s: &str) -> Result<sister_core::Millis> {
-    const MIN: sister_core::Millis = 60_000;
+pub(crate) fn parse_span(s: &str) -> Result<sister_core::Millis> {
+    const SECOND: sister_core::Millis = 1_000;
+    const MIN: sister_core::Millis = 60 * SECOND;
     let s = s.trim();
     let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
     let n: i64 = num
@@ -230,11 +231,12 @@ fn parse_span(s: &str) -> Result<sister_core::Millis> {
         .filter(|n| *n > 0)
         .with_context(|| format!("看不懂「{s}」——要像 `30m`、`2h`、`7d` 這樣寫"))?;
     let mult = match unit {
+        "s" | "sec" => SECOND,
         "m" | "min" => MIN,
         "h" | "hr" => 60 * MIN,
         "d" | "day" => 24 * 60 * MIN,
         "" => anyhow::bail!("「{s}」少了單位。`{s}m` 是 {s} 分鐘、`{s}d` 是 {s} 天，差很多"),
-        other => anyhow::bail!("看不懂單位「{other}」——只認得 m（分）、h（時）、d（天）"),
+        other => anyhow::bail!("看不懂單位「{other}」——只認得 s（秒）、m（分）、h（時）、d（天）"),
     };
     n.checked_mul(mult)
         .with_context(|| format!("「{s}」太長了"))
@@ -1610,6 +1612,7 @@ pub mod act {
     #[cfg(test)]
     mod tests {
         use super::*;
+
         use sister_core::db::CommitmentRow;
         use sister_hands::{ActionSnapshot, Replay};
 
@@ -2634,6 +2637,555 @@ pub mod act {
                 one.contains("一步都沒有問到你"),
                 "兩輪的收尾列不可以讀起來一樣\n零步：{zero}\n一步：{one}"
             );
+        }
+    }
+}
+
+pub mod watch {
+    use super::*;
+    use anyhow::ensure;
+    use sister_core::brain::{self, SkipReason};
+    use sister_core::db::OutboundInsert;
+    use sister_core::heartbeat::{Phase, Presence};
+    use sister_core::watch::{Blind, Look, Verdict, WatchEnd};
+    use sister_core::{Config, Millis};
+    use std::io::Write;
+
+    const HIT_LIMIT: usize = 200;
+
+    pub struct WatchOpts {
+        pub question: String,
+        pub every: Millis,
+        pub stop_after: Millis,
+        pub dry_run: bool,
+    }
+
+    pub fn run(data_dir: &Path, config: &Config, opts: &WatchOpts) -> Result<()> {
+        run_with(
+            data_dir,
+            config,
+            opts,
+            &mut sister_core::now_ms,
+            &mut |span| std::thread::sleep(std::time::Duration::from_millis(span as u64)),
+            &mut std::io::stdout(),
+        )
+    }
+
+    pub(crate) fn run_with(
+        data_dir: &Path,
+        config: &Config,
+        opts: &WatchOpts,
+        clock: &mut dyn FnMut() -> i64,
+        sleep: &mut dyn FnMut(Millis),
+        out: &mut impl Write,
+    ) -> Result<()> {
+        ensure!(
+            data_dir.is_dir(),
+            "不是她沒看到，是我們沒找到那個目錄：{}",
+            data_dir.display()
+        );
+        let mut db = Db::open(&Config::db_path(data_dir))?;
+        let consent = sister_core::consent::load(data_dir);
+        let Some(permit) = consent.cloud_permit() else {
+            writeln!(out, "{}", SkipReason::NoConsent.message())?;
+            return Ok(());
+        };
+        let Some((command, args)) = config.brain.cli() else {
+            writeln!(out, "{}", SkipReason::NoCommand.message())?;
+            return Ok(());
+        };
+        let command = command.to_string();
+        let args = args.to_vec();
+        let started = clock();
+        let day =
+            sister_core::local_day::local_day_key(started).context("算不出今天的日期，不敢送")?;
+        // daily_budget 是所有外送共用的天花板（brain::run 也讀這支不分 role 的
+        // 計數）；reviewer_daily_budget 只是其中 reviewer 的子上限。watcher 若改
+        // 用 role 計數，會偷偷把使用者設定的每日總數往上加。
+        let used = db.brain_outbound_count_on(&day)?;
+        if used >= config.brain.daily_budget {
+            writeln!(
+                out,
+                "{}",
+                SkipReason::BudgetExhausted {
+                    used,
+                    limit: config.brain.daily_budget
+                }
+                .message()
+            )?;
+            return Ok(());
+        }
+
+        let every = opts.every.max(sister_core::watch::MIN_EVERY);
+        writeln!(out, "盯著：{}", opts.question)?;
+        if every != opts.every {
+            writeln!(
+                out,
+                "你設定的間隔太快，已從 {} 秒抬到 30 秒。",
+                opts.every / 1_000
+            )?;
+        }
+        writeln!(
+            out,
+            "{}",
+            sister_core::watch::plan_line(every, opts.stop_after, used, config.brain.daily_budget)
+        )?;
+
+        let mut last_seen = started.saturating_sub(every);
+        if opts.dry_run {
+            let (hits, more) = newest_since(&db, last_seen, started.saturating_add(1), HIT_LIMIT)?;
+            if more {
+                writeln!(
+                    out,
+                    "（這段時間的字超過 {HIT_LIMIT} 段，底下只有最新的 {HIT_LIMIT} 段。）"
+                )?;
+            }
+            let (payload, truncated) =
+                sister_core::watch::build_watch_prompt(&opts.question, &hits)?;
+            writeln!(out, "{payload}")?;
+            if truncated {
+                writeln!(
+                    out,
+                    "注意：畫面證據超過上限，這次只印出並會送出被截斷的那一段，不是全部。"
+                )?;
+            }
+            writeln!(out, "預演到此為止：一次都沒送，也沒有寫外送紀錄。")?;
+            return Ok(());
+        }
+
+        let deadline = started.saturating_add(opts.stop_after);
+        let mut asked = 0_usize;
+        let mut blind = 0_usize;
+        loop {
+            let now = clock();
+            if now >= deadline {
+                writeln!(out, "{}", WatchEnd::Deadline { asked, blind }.message())?;
+                return Ok(());
+            }
+            let (hits, more) = newest_since(&db, last_seen, now.saturating_add(1), HIT_LIMIT)?;
+            last_seen = now.saturating_add(1);
+            if more {
+                writeln!(
+                    out,
+                    "（這段時間的字超過 {HIT_LIMIT} 段，只拿最新的 {HIT_LIMIT} 段去問。）"
+                )?;
+            }
+            let look = if hits.is_empty() {
+                Look::NothingNew(blind_reason(data_dir, now))
+            } else {
+                let used = db.brain_outbound_count_on(&day)?;
+                if used >= config.brain.daily_budget {
+                    let end = WatchEnd::BudgetRanOut {
+                        asked,
+                        blind,
+                        used,
+                        limit: config.brain.daily_budget,
+                    };
+                    writeln!(out, "{}", end.message())?;
+                    return Ok(());
+                }
+                let (payload, truncated) =
+                    sister_core::watch::build_watch_prompt(&opts.question, &hits)?;
+                if truncated {
+                    writeln!(
+                        out,
+                        "注意：畫面證據超過上限，這輪只問被截斷的那一段，不是全部。"
+                    )?;
+                }
+                let spawn = brain::spawn_cli(permit, &payload, &command, &args);
+                let (outcome, verdict) = sister_core::watch::verdict_from_spawn(&spawn);
+                db.insert_brain_outbound(&OutboundInsert {
+                    ts: now,
+                    day_key: &day,
+                    command: &command,
+                    args: &args,
+                    segment_core_start: None,
+                    chars_sent: payload.chars().count() as i64,
+                    truncated,
+                    outcome: outcome.as_str(),
+                    duration_ms: spawn.duration_ms as i64,
+                    error: spawn.spawn_error.as_deref(),
+                    role: "watcher",
+                })?;
+                let newest = hits.last().expect("nonempty checked");
+                Look::Asked {
+                    chunks: hits.len(),
+                    newest_app: newest.app_id.clone(),
+                    newest_ts: newest.ts,
+                    verdict,
+                }
+            };
+            count_look(&look, &mut asked, &mut blind);
+            // 時刻要讀得懂，而且要和 `sister hands log` 同一個格式——他會拿兩邊
+            // 對時間。印 epoch 毫秒等於沒印。
+            writeln!(
+                out,
+                "{}  {}",
+                sister_core::model::stamp(now),
+                look.message()
+            )?;
+            if let Look::Asked {
+                verdict: Verdict::Happened { .. },
+                newest_ts,
+                ..
+            } = look
+            {
+                writeln!(
+                    out,
+                    "{}",
+                    WatchEnd::Saw {
+                        at: newest_ts,
+                        asked,
+                        blind
+                    }
+                    .message()
+                )?;
+                return Ok(());
+            }
+            sleep(every);
+        }
+    }
+
+    /// **兩個計數器，因為它們回答兩個問題。**
+    ///
+    /// 一個 `looks` 同時在這兩條路上加一，然後印成「問了 N 次」，是這個 repo
+    /// 反覆犯的那種錯：她整段時間被暫停、一次都沒問到大腦，那句話仍然會說
+    /// 「問了 20 次」。
+    fn count_look(look: &Look, asked: &mut usize, blind: &mut usize) {
+        match look {
+            Look::Asked { .. } => *asked += 1,
+            Look::NothingNew(_) => *blind += 1,
+        }
+    }
+
+    /// 這一輪要看的那幾段字：**最新的那幾段**，由舊到新排好。
+    ///
+    /// 用 `Db::recent` 再自己夾時間，不用 `chunks_in_range`——後者是
+    /// `ORDER BY ts ASC LIMIT n`，也就是**最舊的 n 段**。一個編譯到一半狂吐
+    /// 訊息的終端機，一個間隔內輕鬆超過 n 段，於是她永遠在讀兩分鐘前的畫面，
+    /// 而「All checks passed」就在她沒看的那一頭。更糟的是那個變數叫 `newest`。
+    ///
+    /// 拿不到全部的時候要講出來（回傳值第二格），因為「看了 200 段」和
+    /// 「看了 200 段而且還有更多沒看」是兩件事。
+    fn newest_since(
+        db: &Db,
+        from: Millis,
+        to: Millis,
+        limit: usize,
+    ) -> Result<(Vec<sister_core::model::SearchHit>, bool)> {
+        // 多撈一段，才分得出「剛好 limit 段」和「不只 limit 段」。
+        let mut hits: Vec<sister_core::model::SearchHit> = db
+            .recent(limit.saturating_add(1))?
+            .into_iter()
+            .filter(|hit| hit.ts >= from && hit.ts < to)
+            .collect();
+        let more = hits.len() > limit;
+        hits.truncate(limit);
+        // `recent` 給的是新的在前；送進 prompt 的證據要由舊到新，
+        // 不然模型讀到的時間軸是倒的。
+        hits.reverse();
+        Ok((hits, more))
+    }
+
+    /// 看不到新畫面的時候，去把**為什麼**問出來。
+    ///
+    /// 暫停要先問：`Presence` 那個型別看不到暫停（那是旁邊另一個檔案），
+    /// 而暫停的時候心跳照跳，所以只問 `presence` 會得到 `Live` ——
+    /// 於是畫面會說「她確實正在錄」，而她的眼睛是閉著的。
+    fn blind_reason(data_dir: &Path, now: Millis) -> Blind {
+        if sister_core::pause::is_paused(data_dir) {
+            return Blind::Paused;
+        }
+        match sister_core::heartbeat::presence(data_dir, now) {
+            Presence::NeverStarted => Blind::NeverStarted,
+            Presence::Unreadable => Blind::Unreadable,
+            Presence::Live(Phase::Recording) => Blind::RecordingButQuiet,
+            // 開機中不是「正在錄但畫面沒動」。兩個底下都是 `Live`，而
+            // `Live(_)` 一個底線就把它們併成同一句話——如果她卡在開機，
+            // 那句「她確實正在錄」會讓人一直等下去。
+            Presence::Live(Phase::Booting) => Blind::Booting,
+            // **她正在忙，不是停了。** 這一臂原本寫成 `Blind::Stopped`，
+            // 於是每兩分鐘跳一句「她在 X 收工了」——而她正把一段畫面
+            // 交給大腦在讀。那是我們自己造出來的假話。
+            Presence::Thinking { at: _, until } => Blind::Thinking { until },
+            Presence::Stopped { at } => Blind::Stopped { at },
+            Presence::Stalled { at, phase: _ } => Blind::Stalled { at },
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn prepared(name: &str, text: &str, consented: bool) -> (crate::ops::tmp::Tmp, Config) {
+            let tmp = crate::ops::tmp::Tmp::new(name);
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let session = db.start_session("test", "test").expect("session");
+            db.conn()
+                .execute(
+                    "INSERT INTO text_chunks(ts,session_id,source_kind,app_id,text) VALUES(90000,?1,'ocr','Terminal.exe',?2)",
+                    (session, text),
+                )
+                .expect("chunk");
+            drop(db);
+            if consented {
+                let mut consent = sister_core::consent::Consent::default();
+                consent.grant(sister_core::consent::Sheet::CloudReading, 1);
+                sister_core::consent::save(&tmp.0, &consent).expect("consent");
+            }
+            let mut config = Config::default();
+            config.brain.command = "sh".into();
+            config.brain.args = vec![
+                "-c".into(),
+                "printf '%s' '{\"happened\":true,\"because\":\"畫面上出現完成\"}'".into(),
+            ];
+            (tmp, config)
+        }
+
+        #[test]
+        fn asked_and_blind_are_counted_separately() {
+            let mut clock = [1_i64, 2, 3, 4, 5].into_iter();
+            let mut asked = 0;
+            let mut blind = 0;
+            for is_asked in [true, false, true, false, true] {
+                let now = clock.next().expect("five fake ticks");
+                let look = if is_asked {
+                    Look::Asked {
+                        chunks: 1,
+                        newest_app: None,
+                        newest_ts: now,
+                        verdict: Verdict::NotYet,
+                    }
+                } else {
+                    Look::NothingNew(Blind::RecordingButQuiet)
+                };
+                count_look(&look, &mut asked, &mut blind);
+            }
+            let line = WatchEnd::Deadline { asked, blind }.message();
+            assert!(line.contains("問了 3 次"));
+            assert!(line.contains("有 2 次"));
+            assert!(!line.contains("問了 5 次"));
+        }
+
+        #[test]
+        fn a_missing_data_dir_is_not_a_quiet_screen() {
+            let dir =
+                std::env::temp_dir().join(format!("sister-watch-missing-{}", std::process::id()));
+            let mut out = Vec::new();
+            let err = run_with(
+                &dir,
+                &Config::default(),
+                &WatchOpts {
+                    question: "x".into(),
+                    every: 5_000,
+                    stop_after: 60_000,
+                    dry_run: false,
+                },
+                &mut || 1,
+                &mut |_| {},
+                &mut out,
+            )
+            .expect_err("missing");
+            assert!(
+                err.to_string()
+                    .contains("不是她沒看到，是我們沒找到那個目錄")
+            );
+        }
+
+        #[test]
+        fn a_too_fast_interval_says_it_was_raised() {
+            let (tmp, config) = prepared("watch-fast", "真實畫面", true);
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 5_000,
+                    stop_after: 60_000,
+                    dry_run: true,
+                },
+                &mut || 100_000,
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            assert!(String::from_utf8(out).unwrap().contains("抬到 30 秒"));
+        }
+
+        #[test]
+        fn a_truncated_prompt_says_so() {
+            let (tmp, config) = prepared(
+                "watch-truncated",
+                &"畫面原文".repeat(sister_core::brain::MAX_PROMPT_BYTES),
+                true,
+            );
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    dry_run: true,
+                },
+                &mut || 100_000,
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            assert!(String::from_utf8(out).unwrap().contains("不是全部"));
+        }
+
+        #[test]
+        fn a_dry_run_sends_nothing_and_shows_the_real_text() {
+            let (tmp, config) = prepared("watch-dry", "PRIVATE 原始畫面文字", true);
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    dry_run: true,
+                },
+                &mut || 100_000,
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+            let day = sister_core::local_day::local_day_key(100_000).unwrap();
+            assert_eq!(db.brain_outbound_count_on(&day).unwrap(), 0);
+            assert!(
+                String::from_utf8(out)
+                    .unwrap()
+                    .contains("PRIVATE 原始畫面文字")
+            );
+        }
+
+        #[test]
+        fn no_consent_says_which_sheet_and_how_to_sign() {
+            let (tmp, config) = prepared("watch-no-consent", "原文", false);
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    dry_run: false,
+                },
+                &mut || 100_000,
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("cloud-reading"));
+            let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+            let day = sister_core::local_day::local_day_key(100_000).unwrap();
+            assert_eq!(db.brain_outbound_count_on(&day).unwrap(), 0);
+        }
+
+        #[test]
+        fn every_outbound_row_says_watcher() {
+            let (tmp, config) = prepared("watch-role", "完成", true);
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    dry_run: false,
+                },
+                &mut || 100_000,
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+            let day = sister_core::local_day::local_day_key(100_000).unwrap();
+            assert_eq!(db.brain_outbound_count_on(&day).unwrap(), 1);
+            assert_eq!(db.brain_outbound_count_on_role(&day, "watcher").unwrap(), 1);
+            assert!(String::from_utf8(out).unwrap().contains("等到了"));
+        }
+
+        /// 「她正在讓大腦讀一段」不是「她收工了」；「開機中」不是「正在錄」。
+        ///
+        /// `Presence` 有六種，而 `Blind` 那一邊本來只接到四種：`Live(_)` 一個
+        /// 底線把開機和穩定錄製併成一句，`Thinking` 被硬塞進 `Stopped`。
+        /// 後者的畫面是每兩分鐘跳一句「她在 X 收工了」——她正忙著。
+        #[test]
+        fn thinking_and_booting_do_not_borrow_another_states_sentence() {
+            let tmp = crate::ops::tmp::Tmp::new("watch-presence");
+            let now = 1_000_000_i64;
+
+            sister_core::heartbeat::beat_thinking(&tmp.0, now, now + 60_000).expect("thinking");
+            let thinking = blind_reason(&tmp.0, now);
+            assert_eq!(
+                thinking,
+                Blind::Thinking {
+                    until: now + 60_000
+                }
+            );
+            assert!(!thinking.message().contains("收工"), "{thinking:?}");
+
+            sister_core::heartbeat::beat_booting(&tmp.0, now).expect("booting");
+            let booting = blind_reason(&tmp.0, now);
+            assert_eq!(booting, Blind::Booting);
+            assert_ne!(booting.message(), Blind::RecordingButQuiet.message());
+
+            sister_core::heartbeat::beat(&tmp.0, now).expect("recording");
+            assert_eq!(blind_reason(&tmp.0, now), Blind::RecordingButQuiet);
+
+            // 暫停要蓋過心跳：暫停的時候心跳照跳，只問 `presence` 會得到
+            // `Live`，於是畫面會說「她確實正在錄」，而她的眼睛是閉著的。
+            sister_core::pause::set_paused(&tmp.0, true, now).expect("pause");
+            assert_eq!(blind_reason(&tmp.0, now), Blind::Paused);
+        }
+
+        /// 一個間隔內字太多的時候，要拿**最新的**那幾段，而且要講出有沒有漏。
+        ///
+        /// `chunks_in_range` 是 `ORDER BY ts ASC LIMIT n`，也就是最舊的 n 段。
+        /// 一個正在編譯、狂吐訊息的終端機，兩分鐘內輕鬆超過 n 段——於是她永遠
+        /// 在讀兩分鐘前的畫面，而「All checks passed」就在她沒看的那一頭。
+        /// 更糟的是拿來報 app 的那個變數叫 `newest`。
+        #[test]
+        fn a_noisy_screen_is_read_from_the_newest_end_and_says_what_it_skipped() {
+            let tmp = crate::ops::tmp::Tmp::new("watch-newest");
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let session = db.start_session("test", "test").expect("session");
+            for n in 0..10_i64 {
+                db.conn()
+                    .execute(
+                        "INSERT INTO text_chunks(ts,session_id,source_kind,app_id,text) VALUES(?1,?2,'ocr','Terminal.exe',?3)",
+                        (1_000 + n, session, format!("第 {n} 行")),
+                    )
+                    .expect("chunk");
+            }
+
+            let (hits, more) = newest_since(&db, 0, 2_000, 3).expect("newest");
+            assert!(more, "十段只拿三段，要講出還有更多");
+            assert_eq!(hits.len(), 3);
+            // 由舊到新排好，而且是**最新的**那三段，不是最舊的三段。
+            let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+            assert_eq!(texts, vec!["第 7 行", "第 8 行", "第 9 行"], "{texts:?}");
+            assert_eq!(
+                hits.last().expect("nonempty").ts,
+                1_009,
+                "最後一段要真的是最新的那一段——報 app 和報時刻都靠它"
+            );
+
+            // 全部拿得下的時候不要憑空說有漏。
+            let (all, more) = newest_since(&db, 0, 2_000, 50).expect("newest");
+            assert_eq!(all.len(), 10);
+            assert!(!more);
         }
     }
 }

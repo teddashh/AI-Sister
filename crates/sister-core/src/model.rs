@@ -17,6 +17,28 @@ pub fn now_ms() -> Millis {
         .unwrap_or(0)
 }
 
+/// epoch 毫秒讀成人看得懂的本地時刻（秒精度）。
+///
+/// **這是那個格式的唯一定義。** `sister-cli` 的 `fmt::timestamp` 轉呼叫這裡，
+/// [`crate::watch`] 也是——兩份抄寫遲早會分家，而使用者正是拿不同命令的輸出
+/// 在對同一條時間軸。
+///
+/// 對不出時刻的時候印原本那個數字，不是印一個猜的。`ts:` 那個前綴是要讓讀的
+/// 人看得出來「這是原始值，不是時間」。
+///
+/// 秒精度是刻意的。要毫秒的只有一處——`sister_hands::replay_copy` 那一份另外
+/// 寫，理由在它自己的註解裡（動作紀錄有一條承重的性質是「每一列有自己的
+/// 時刻」，砍到秒會把差 400 毫秒的兩列印成同一個時間）。那個 crate 也構不到
+/// 這裡：`sister-core` 只在 dev-dependency 上看得見 `sister-hands`，反過來
+/// 是看不見的。
+pub fn stamp(ts: Millis) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_millis_opt(ts).single() {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        None => format!("ts:{ts}"),
+    }
+}
+
 /// 擷取當下的前景脈絡。附在 frame 上，也可獨立成為 focus 事件。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusSnapshot {

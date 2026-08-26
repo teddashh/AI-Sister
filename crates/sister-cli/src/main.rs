@@ -427,6 +427,26 @@ enum Command {
     /// tick 才會停，不是立刻。
     Stop,
 
+    /// 盯著螢幕等一件事發生。發生了就講出來，然後結束。
+    ///
+    /// 她已經在錄的東西，每隔一段時間拿去問一次大腦：「這件事發生了嗎？」
+    /// 要簽第二張同意書（cloud-reading），而且每一次詢問都算今天的外送預算。
+    ///
+    /// 這個子命令不會動你的電腦——它只讀畫面、只問問題。
+    Watch {
+        /// 你在等什麼。用一句話講，講得越具體她越答得準。
+        question: String,
+        /// 多久看一次（30s / 2m / 5m）。低於 30 秒會被抬到 30 秒，並且告訴你。
+        #[arg(long, default_value = "2m")]
+        every: String,
+        /// 最多盯多久（30m / 1h / 2h）。到了就停。
+        #[arg(long, default_value = "1h")]
+        stop_after: String,
+        /// 印出這一刻真的會送出去的那段字，一個字都不送。
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// 把最近關閉的段落交給設定的 CLI，收回一張 L2 假設卡片。
     ///
     /// `--dry-run` 印出**這一刻真的會送出去的那段字**（原文，沒遮），一個字都不送。
@@ -723,6 +743,25 @@ fn main() -> Result<()> {
         Command::Pause => ops::pause::run(&data_dir, true),
         Command::Resume => ops::pause::run(&data_dir, false),
         Command::Stop => ops::stop::run(&data_dir),
+        Command::Watch {
+            question,
+            every,
+            stop_after,
+            dry_run,
+        } => {
+            let every = ops::parse_span(&every)?;
+            let stop_after = ops::parse_span(&stop_after)?;
+            ops::watch::run(
+                &data_dir,
+                &config()?,
+                &ops::watch::WatchOpts {
+                    question,
+                    every,
+                    stop_after,
+                    dry_run,
+                },
+            )
+        }
         Command::Interpret {
             dry_run,
             last,
