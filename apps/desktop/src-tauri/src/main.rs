@@ -2696,6 +2696,8 @@ struct Erasure {
     /// 故事：一類東西被刪掉了、卻沒有出現在這張清單上。這是第四次，而這一次
     /// 那類東西是完整的網址和檔案路徑。
     actions: u64,
+    /// 存著的授權書不屬於時間區間；按下忘掉仍會整張刪除。
+    grant: bool,
     /// 刪不掉的檔案。**不吞掉**：那幾張截圖還躺在磁碟上，而使用者以為
     /// 它們已經不在了。
     failed: Vec<String>,
@@ -2751,6 +2753,7 @@ impl From<sister_core::retention::PruneReport> for Erasure {
             // 問一次 `ActionLog`，所以這裡只能是 0——和下面 `sessions_left`
             // 同一個模式：這一支答不出來的，不要在這裡編一個。
             actions: 0,
+            grant: false,
             // 這一支只看得到「刪掉了什麼」。留下什麼要再問一次資料庫，所以
             // 預設是「沒問」，由 `forget_range` 補上。
             sessions_left: None,
@@ -2781,10 +2784,13 @@ fn forget_preview(
     let actions = sister_hands::ActionLog::in_data_dir(dir)
         .count_in_range(from_ts, to_ts)
         .map_err(|e| format!("{e:#}"))?;
+    let grant = sister_hands::semi_action::grant_path(dir).exists()
+        || sister_hands::semi_action::grant_tmp_path(dir).exists();
     with_db(&shell, |db| {
         db.forget_preview(from_ts, to_ts, Some(&frames))
             .map(|report| Erasure {
                 actions,
+                grant,
                 ..Erasure::from(report)
             })
             .map_err(|e| format!("{e:#}"))
@@ -2829,6 +2835,11 @@ fn forget_range(
     let forgotten = sister_hands::ActionLog::in_data_dir(dir)
         .forget_range(from_ts, to_ts)
         .map_err(|err| format!("{err:#}"))?;
+    // 授權書。**同一支函式，CLI 的 `sister forget` 也走它**——兩邊各寫一份
+    // 的話，改天多一個檔案只會補到其中一邊，而兩邊都照樣說「已經忘掉了」。
+    let grant = !sister_hands::semi_action::forget_saved_grant(dir)
+        .map_err(|err| format!("刪除授權書失敗：{err}"))?
+        .is_empty();
     with_db_mut(&shell, |db| {
         let report = db
             .forget(from_ts, to_ts, Some(&frames))
@@ -2849,6 +2860,7 @@ fn forget_range(
             // 手」——把一列壞掉的字算進「你那個下午做了 3 件事」，那個 3 就
             // 變成沒有人答得出來的數字。
             actions: forgotten.removed_in_range,
+            grant,
             sessions_left: Some(left),
             // 分得出來就不要印「或」。CLI 那邊同一個判斷（`session_shell_why`）。
             // 沒有留下來的列就沒有這個問題——那時候這一欄不准講一個沒問過的

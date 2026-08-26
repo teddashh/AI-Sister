@@ -44,6 +44,10 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// 一次清理做掉了什麼。每一項都是「真的發生了」的數字，不是預估。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PruneReport {
+    /// 這一輪會刪／已刪一張過期的本機操作授權書。
+    /// 它不在 SQLite 裡，但和資料庫保留期共用同一份報告，避免收尾把已經動過
+    /// 授權書的結果說成「什麼都沒動」。
+    pub expired_grant: bool,
     /// **真的從磁碟上刪掉**的畫面檔數（frame 那一列還在，文字也還在）。
     ///
     /// 資料庫說有幾列帶圖是一回事，`remove_file` 成功幾次是另一回事——

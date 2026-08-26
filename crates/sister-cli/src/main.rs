@@ -392,8 +392,8 @@ enum Command {
     /// 逐步顯示承諾卡的下一步；每一步都要你親手核准才會交給作業系統。
     Do {
         /// 這次授權的任務描述。核准綁的是「具體動作 + 具體目標」，不是「幫我處理這件事」。
-        #[arg(long)]
-        task: String,
+        #[arg(long, required_unless_present = "show_grant")]
+        task: Option<String>,
         /// 允許碰哪些 app（可重複）。步驟宣告的 app 不在裡面就拒絕。
         #[arg(long = "app")]
         apps: Vec<String>,
@@ -409,6 +409,20 @@ enum Command {
         /// 只印出這張授權書會涵蓋哪些步驟，不問、不做。
         #[arg(long)]
         dry_run: bool,
+        /// 把這一輪鑄出的授權書存到資料目錄，供之後的行程重用。
+        #[arg(long, conflicts_with = "use_grant")]
+        save_grant: bool,
+        /// 使用資料目錄裡已存的授權書；仍然每一步都要當場按「好」。
+        #[arg(long, conflicts_with_all = ["apps", "allow", "minutes", "steps"])]
+        use_grant: bool,
+        /// 顯示資料目錄裡已存的授權書後離開。
+        ///
+        /// **跟另外兩個旗標互斥，是刻意的。** 這一條路印完就 return，所以
+        /// `--show-grant --save-grant` 會安靜地什麼都沒存——而他打了那個旗標，
+        /// 回頭會以為存好了。alpha.71 的 `--notify` 就是被這樣吃掉的。與其讓
+        /// 那句話沒人講，不如讓 clap 當場拒絕。
+        #[arg(long, conflicts_with_all = ["task", "apps", "allow", "minutes", "steps", "dry_run", "save_grant", "use_grant"])]
+        show_grant: bool,
     },
 
     /// 叫她閉眼睛。正在跑的 `record` 下一個 tick 就會停下來。
@@ -735,15 +749,21 @@ fn main() -> Result<()> {
             minutes,
             steps,
             dry_run,
+            save_grant,
+            use_grant,
+            show_grant,
         } => ops::act::run(
             &data_dir,
             &ops::act::Options {
-                task,
+                task: task.unwrap_or_default(),
                 apps,
                 allow,
                 minutes,
                 steps,
                 dry_run,
+                save_grant,
+                use_grant,
+                show_grant,
             },
         ),
         Command::Pause => ops::pause::run(&data_dir, true),
@@ -888,6 +908,38 @@ mod tests {
         assert_eq!(at_least_one("20"), Ok(20));
         assert!(at_least_one("-1").is_err(), "負數不是筆數");
         assert!(at_least_one("很多").is_err(), "不是數字就不是數字");
+    }
+
+    /// `--show-grant` 印完就 return，所以任何跟它一起打、需要往下走才會發生
+    /// 的旗標都會被安靜吃掉。**吃掉的那兩個各自都是一件他以為發生了的事**：
+    /// `--save-grant` 是「我存好了」，`--use-grant` 是「我用那張跑過了」。
+    ///
+    /// 這一條釘的是「他會被擋下來」，不是「clap 設定裡有那個字串」——所以走
+    /// `try_parse_from`，跟他在終端機上打的是同一條路。
+    #[test]
+    fn showing_the_grant_cannot_quietly_swallow_a_flag_that_promises_something_happened() {
+        for swallowed in ["--save-grant", "--use-grant"] {
+            let Err(e) = Cli::try_parse_from([
+                "sister",
+                "do",
+                "--task",
+                "寄季報",
+                "--show-grant",
+                swallowed,
+            ]) else {
+                panic!("{swallowed} 跟 --show-grant 一起打要被拒絕，不可以安靜地吃掉");
+            };
+            assert_eq!(
+                e.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "要說它們互斥，不是別的錯：{e}",
+            );
+        }
+
+        // 反面：單獨打得通，而且 `--task` 這時候不是必填。
+        Cli::try_parse_from(["sister", "do", "--show-grant"]).expect("單獨看一眼不必給 --task");
+        Cli::try_parse_from(["sister", "do", "--task", "寄季報", "--save-grant"])
+            .expect("單獨存要打得通");
     }
 
     #[test]

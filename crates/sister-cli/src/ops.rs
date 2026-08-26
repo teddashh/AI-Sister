@@ -1221,6 +1221,51 @@ pub mod act {
         pub minutes: u64,
         pub steps: u32,
         pub dry_run: bool,
+        pub save_grant: bool,
+        pub use_grant: bool,
+        pub show_grant: bool,
+    }
+
+    /// 授權書的路徑。**`prune` / `export` / `forget` 三條路都要走這一個函式**，
+    /// 不要各自再寫一次 `"grant.json"`：那三條路的工作是「帶走／刪掉這個檔案」，
+    /// 而檔名各寫一次的話，改名字的時候編譯器不會說話，它們會安靜地去找一個
+    /// 不存在的檔案，然後照樣印「已刪除」「已匯出」。
+    pub(crate) fn grant_path(data_dir: &Path) -> std::path::PathBuf {
+        sister_hands::semi_action::grant_path(data_dir)
+    }
+
+    /// `save_grant` 的半成品。寫完還沒 rename 就斷電的話它會留在資料目錄裡，
+    /// **而它裡面是整份授權書，含他打的 `--task` 原文**。所以它不是暫存垃圾，
+    /// 它跟 `grant.json` 一樣要被 `sister forget` 帶走。
+    pub(crate) fn grant_tmp_path(data_dir: &Path) -> std::path::PathBuf {
+        sister_hands::semi_action::grant_tmp_path(data_dir)
+    }
+
+    fn load_grant(data_dir: &Path) -> Result<Grant> {
+        let path = grant_path(data_dir);
+        let raw = match std::fs::read(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+                "還沒有存過授權書（{}）。先用 `sister do --save-grant ...` 存一張。",
+                path.display()
+            ),
+            Err(e) => return Err(e).with_context(|| format!("讀取授權書 {}", path.display())),
+        };
+        serde_json::from_slice(&raw).with_context(|| {
+            format!(
+                "授權書檔案讀不懂（{}）；無法判斷授權範圍，所以沒有授權通過。",
+                path.display()
+            )
+        })
+    }
+
+    fn save_grant(data_dir: &Path, grant: &Grant) -> Result<()> {
+        std::fs::create_dir_all(data_dir)?;
+        let path = grant_path(data_dir);
+        let tmp = grant_tmp_path(data_dir);
+        std::fs::write(&tmp, serde_json::to_vec_pretty(grant)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
     }
 
     /// 這一步宣告它會碰哪一個 app。**三種，不是兩種。**
@@ -1349,6 +1394,25 @@ pub mod act {
     }
 
     pub fn run(data_dir: &Path, opts: &Options) -> Result<()> {
+        if opts.show_grant {
+            let grant = load_grant(data_dir)?;
+            println!("目前存著的授權書：{}", grant.describe());
+            let now = sister_core::now_ms();
+            grant
+                .validate_expiry(now)
+                .map_err(|r| anyhow::anyhow!("這張授權書現在不能用：{}", r.message()))?;
+            let expiry = grant.expiry();
+            let expires_at = expiry
+                .issued_at_ms()
+                .saturating_add(i64::try_from(expiry.valid_for_ms()).unwrap_or(i64::MAX));
+            println!(
+                "  發出於 {}；到期於 {}；現在還剩 {}。",
+                crate::fmt::timestamp(expiry.issued_at_ms()),
+                crate::fmt::timestamp(expires_at),
+                crate::fmt::duration_ms(expires_at.saturating_sub(now))
+            );
+            return Ok(());
+        }
         let stdin = std::io::stdin();
         run_with(
             data_dir,
@@ -1465,21 +1529,51 @@ pub mod act {
         clock: &mut impl FnMut() -> i64,
         out: &mut impl Write,
     ) -> Result<()> {
-        let step_limit =
-            StepLimit::new(opts.steps).context("步數上限不能是 0；請把 --steps 設為至少 1")?;
-        let kinds = parse_kinds(&opts.allow)?;
-        let valid_for_ms = opts
-            .minutes
-            .checked_mul(60_000)
-            .context("--minutes 太大，無法換算授權期限")?;
-        let issued_at = clock();
-        let grant = Grant::new(
-            Task::new(&opts.task),
-            AllowedApps::new(opts.apps.iter().cloned().map(App::new)),
-            AllowedActions::new(kinds),
-            Expiry::after_issued(issued_at, valid_for_ms),
-            step_limit,
-        );
+        let grant = if opts.use_grant {
+            let grant = load_grant(data_dir)?;
+            grant
+                .validate_expiry(clock())
+                .map_err(|r| anyhow::anyhow!("存著的授權書現在不能用：{}", r.message()))?;
+            writeln!(out, "使用存著的授權書：{}", grant.describe())?;
+            grant
+        } else {
+            let step_limit =
+                StepLimit::new(opts.steps).context("步數上限不能是 0；請把 --steps 設為至少 1")?;
+            let kinds = parse_kinds(&opts.allow)?;
+            let valid_for_ms = opts
+                .minutes
+                .checked_mul(60_000)
+                .context("--minutes 太大，無法換算授權期限")?;
+            let grant = Grant::new(
+                Task::new(&opts.task),
+                AllowedApps::new(opts.apps.iter().cloned().map(App::new)),
+                AllowedActions::new(kinds),
+                Expiry::after_issued(clock(), valid_for_ms),
+                step_limit,
+            );
+            // **預演不存。** 底下那一行不寫 `Granted` 進紀錄的理由（「等於在
+            // 紀錄上留下一輪從來沒有跑過的授權」）在這裡更重：一張存下來的
+            // 授權書不只是一列紀錄，它**還能被下一個行程拿去用**——
+            // `--dry-run --save-grant` 等於用一趟「不問、不做」的預演，替之後
+            // 的 `--use-grant` 上好膛。而預演一次都不會問他，所以那個範圍
+            // 連被端到他面前過都沒有。
+            //
+            // 但也不能安靜地把旗標吃掉（alpha.71 的 `--notify` 踩過同一顆）：
+            // 他打了 `--save-grant`，回頭會以為存好了。兩條路各講各的話。
+            if opts.save_grant {
+                if opts.dry_run {
+                    writeln!(
+                        out,
+                        "預演不會存授權書——`--dry-run` 一步都不會問你，那個範圍還沒有被端到你面前過。\n\
+                         要存起來的話，拿掉 --dry-run 再跑一次。"
+                    )?;
+                } else {
+                    save_grant(data_dir, &grant)?;
+                    writeln!(out, "已存授權書：{}", grant.describe())?;
+                }
+            }
+            grant
+        };
         let mut run = SemiActionRun::new(grant.clone());
         let commitments = source.live_commitments()?;
         let log = ActionLog::in_data_dir(data_dir);
@@ -1529,8 +1623,6 @@ pub mod act {
             let declared_app = step_app(source, &commitment.evidence_json)?;
             let action = button.snapshot();
             let step = StepRequest::new(
-                // 這支 CLI 的 request 和 grant 都直接取自同一個 `--task`，所以 Task
-                // 在這個呼叫端不可能拒絕。那一維要等授權書能跨行程重用才守得到。
                 Task::new(&opts.task),
                 declared_app.request_app(),
                 action.clone(),
@@ -1675,10 +1767,11 @@ pub mod act {
             // 用 `presented`，不要再養一個只在預演路徑上加一的第二個計數器。
             // 兩個變數答同一個問題，遲早有一天只有一個被改到。
             if presented > 0 {
+                let step_limit = run.grant().step_limit().get();
                 writeln!(
                     out,
                     "步數上限 {}：真的跑起來的時候，做成 {} 步之後就停，後面的步驟不會被問到。",
-                    opts.steps, opts.steps
+                    step_limit, step_limit
                 )?;
             }
             return Ok(());
@@ -1899,6 +1992,9 @@ pub mod act {
                 minutes,
                 steps,
                 dry_run,
+                save_grant: false,
+                use_grant: false,
+                show_grant: false,
             }
         }
 
@@ -1974,6 +2070,134 @@ pub mod act {
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
                 nearest_frame: None,
             }
+        }
+
+        #[test]
+        fn a_saved_grant_rejects_a_different_task_on_the_visible_path() {
+            let dir = crate::ops::tmp::Tmp::new("saved-grant-task");
+            // **存那一趟不可以是預演。** 這條測試原本用 `dry_run = true` 去存，
+            // 而預演存得下來這件事本身就是個洞（見
+            // `a_dry_run_does_not_arm_a_grant_for_the_next_process`）：一趟
+            // 「不問、不做」的預演可以替之後的 `--use-grant` 上好膛。
+            // 這裡沒有承諾卡，所以不是預演也不會問到任何人。
+            let mut save = opts("原來的任務", &["chrome.exe"], 3, 5, false);
+            save.save_grant = true;
+            let mut input = std::io::Cursor::new(Vec::<u8>::new());
+            let mut executor = Fake::default();
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &save,
+                &Source::default(),
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .expect("save grant");
+
+            let mut reuse = opts("不同的任務", &[], 99, 99, false);
+            reuse.use_grant = true;
+            let mut out = Vec::new();
+            let mut input = std::io::Cursor::new("好\n".as_bytes().to_vec());
+            run_with_output(
+                &dir.0,
+                &reuse,
+                &one_card(),
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_001_000),
+                &mut out,
+            )
+            .expect("reuse grant");
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("task 維度拒絕：這不是授權的任務。"), "{out}");
+            assert!(executor.calls.is_empty());
+        }
+
+        /// **預演不可以替之後的 `--use-grant` 上好膛。**
+        ///
+        /// `--dry-run` 的說明是「不問、不做」，而它底下那一行也刻意不寫
+        /// `Granted` 進行動紀錄（理由就在那幾行註解裡）。一張**存下來**的
+        /// 授權書比那一列更重：它會被下一個行程拿去用，而預演一步都沒問過他，
+        /// 所以那個範圍連被端到他面前過都沒有。
+        ///
+        /// 但也不可以安靜地吃掉旗標——他打了 `--save-grant`，回頭會以為存好了。
+        /// 所以這條測試釘兩件事：**檔案沒出現**，而且**畫面上有話講**。
+        #[test]
+        fn a_dry_run_does_not_arm_a_grant_for_the_next_process() {
+            let dir = crate::ops::tmp::Tmp::new("grant-dry-run");
+            let mut save = opts("預演的任務", &["chrome.exe"], 5, 3, true);
+            save.save_grant = true;
+            save.dry_run = true;
+            let mut input = std::io::Cursor::new(Vec::new());
+            let mut executor = Fake::default();
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &save,
+                &one_card(),
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .expect("dry run");
+
+            assert!(
+                !dir.0.join("grant.json").exists(),
+                "預演把一張授權書留在磁碟上，下一個行程就能拿去用"
+            );
+            assert!(
+                !dir.0.join("grant.json.tmp").exists(),
+                "預演留下完整的授權書半成品，仍然把下一輪的範圍落到磁碟"
+            );
+            let out = String::from_utf8(out).unwrap();
+            assert!(
+                out.contains("預演不會存授權書"),
+                "旗標被安靜地吃掉了，他會以為存好了：{out}"
+            );
+            // 而它不可以讀起來像存好了。
+            assert!(!out.contains("已存授權書"), "{out}");
+        }
+
+        #[test]
+        fn a_missing_grant_and_an_unreadable_grant_are_not_the_same_claim() {
+            let dir = crate::ops::tmp::Tmp::new("grant-read-states");
+            let missing = load_grant(&dir.0).unwrap_err().to_string();
+            std::fs::write(dir.0.join("grant.json"), b"not json").unwrap();
+            let broken = load_grant(&dir.0).unwrap_err().to_string();
+            assert!(missing.contains("還沒有存過"), "{missing}");
+            assert!(broken.contains("讀不懂"), "{broken}");
+            assert_ne!(missing, broken);
+        }
+
+        #[test]
+        fn a_grant_is_rechecked_against_read_time_not_save_time() {
+            let dir = crate::ops::tmp::Tmp::new("grant-read-clock");
+            let grant = Grant::new(
+                Task::new("task"),
+                AllowedApps::new([App::new("app")]),
+                AllowedActions::new([ActionKind::OpenUrl]),
+                Expiry::after_issued(1_000, 50),
+                StepLimit::new(1).unwrap(),
+            );
+            save_grant(&dir.0, &grant).unwrap();
+            let mut reuse = opts("task", &[], 99, 99, true);
+            reuse.use_grant = true;
+            let mut input = std::io::Cursor::new(Vec::<u8>::new());
+            let mut executor = Fake::default();
+            let err = run_with_output(
+                &dir.0,
+                &reuse,
+                &Source::default(),
+                &mut input,
+                &mut executor,
+                &mut || 1_051,
+                &mut Vec::new(),
+            )
+            .expect_err("--use-grant 入口必須在讀取時重查期限");
+            assert!(err.to_string().contains("現在不能用"), "{err:#}");
         }
 
         #[test]
@@ -2470,6 +2694,37 @@ pub mod act {
                 None,
             );
             assert!(!empty.out.contains("步數上限"), "{}", empty.out);
+        }
+
+        #[test]
+        fn a_reused_grant_preview_prints_the_saved_step_limit() {
+            let dir = crate::ops::tmp::Tmp::new("grant-preview-limit");
+            let grant = Grant::new(
+                Task::new("開今天的連結"),
+                AllowedApps::new([App::new("chrome.exe")]),
+                AllowedActions::new([ActionKind::OpenUrl]),
+                Expiry::after_issued(1_000, 60_000),
+                StepLimit::new(20).unwrap(),
+            );
+            save_grant(&dir.0, &grant).unwrap();
+            let mut reuse = opts("開今天的連結", &[], 1, 1, true);
+            reuse.use_grant = true;
+            let mut input = std::io::Cursor::new(Vec::<u8>::new());
+            let mut executor = Fake::default();
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &reuse,
+                &one_card(),
+                &mut input,
+                &mut executor,
+                &mut || 2_000,
+                &mut out,
+            )
+            .unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("步數上限 20"), "{out}");
+            assert!(!out.contains("步數上限 1："), "{out}");
         }
 
         /// 五個數字各自獨立累加。任何一個從別的數字減出來的實作都會在這裡紅：
@@ -5811,8 +6066,92 @@ pub mod prune {
         Config::frames_dir(data_dir)
     }
 
+    pub(crate) fn clean_expired_grant(data_dir: &Path, dry_run: bool) -> Result<bool> {
+        let grant_path = super::act::grant_path(data_dir);
+        let expired = std::fs::read(&grant_path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<sister_hands::semi_action::Grant>(&raw).ok())
+            .is_some_and(|grant| {
+                grant.validate_expiry(sister_core::now_ms())
+                    == Err(sister_hands::semi_action::GrantRejection::ExpiryElapsed)
+            });
+        if expired && !dry_run {
+            std::fs::remove_file(&grant_path)?;
+        }
+        Ok(expired)
+    }
+
+    /// 錄製迴圈自己跑的那一次清理：**過期的授權書也要清掉**，然後照著報告
+    /// 講話。開機時一次，之後每 6 小時一次。
+    ///
+    /// **這一段抽出來，是因為它原本住在 `windows_record` 裡。** 那個函式掛著
+    /// `#[cfg(windows)]`，在這台機器上連編都編不到——而這個 repo 已經有一整層
+    /// 接線是零執行覆蓋的，`sister prune` 手打那條路測得到、自動這條路測不到，
+    /// 於是「他從來不手打 prune」的那些人身上，授權書的保留期是不是真的有跑
+    /// 過，沒有任何東西答得出來。抽成這一支之後，`windows_record` 那邊只剩
+    /// 一行呼叫（`check-windows.sh` 編得到），做事的部分在這裡測得到。
+    ///
+    /// 清不掉不擋住錄製，但**絕對不能安靜**——這整個模組的存在理由就是
+    /// 「說好會消失的東西沒有消失」不可以沒有人知道。所以兩種失敗各自印一句，
+    /// 而且都不會讓錄製停下來。
+    ///
+    /// `indent` 是行首那幾格空白：開機那次頂格，迴圈裡那次縮兩格。
+    /// 兩個呼叫端都在 `#[cfg(windows)]` 裡面，所以 Linux 上這支「沒有人用」
+    /// ——但測試用得到，而那正是抽出它的理由。跟這個檔案裡其他幾支同樣情況的
+    /// 函式一致：不掛 `#[cfg(windows)]`，這樣 Linux 也編得到、測得到。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn sweep(
+        data_dir: &Path,
+        db: &mut Db,
+        retention: &sister_core::config::RetentionConfig,
+        frames_root: Option<&Path>,
+        indent: &str,
+        out: &mut impl std::io::Write,
+    ) -> Result<()> {
+        let expired_grant = match clean_expired_grant(data_dir, false) {
+            Ok(expired) => expired,
+            Err(e) => {
+                writeln!(
+                    out,
+                    "{indent}⚠  授權書保留期清理失敗，過期的授權書還在：{e:#}"
+                )?;
+                false
+            }
+        };
+        match db.prune(sister_core::now_ms(), retention, frames_root) {
+            Ok(mut report) => {
+                report.expired_grant = expired_grant;
+                // **空的報告不印。** 但「空」現在算得到授權書那一格，所以剛清掉
+                // 一張票的時候這裡不會安靜——安靜就等於那次清理沒有發生過。
+                if !report.is_empty() {
+                    writeln!(out, "{indent}○ 保留期清理")?;
+                    print_report(&report, false, out)?;
+                }
+            }
+            Err(e) => writeln!(out, "{indent}⚠  保留期清理失敗，過期的資料還在：{e:#}")?,
+        }
+        Ok(())
+    }
+
     pub fn run(data_dir: &Path, config: &Config, dry_run: bool) -> Result<()> {
+        run_with_output(data_dir, config, dry_run, &mut std::io::stdout())
+    }
+
+    pub(crate) fn run_with_output(
+        data_dir: &Path,
+        config: &Config,
+        dry_run: bool,
+        out: &mut impl std::io::Write,
+    ) -> Result<()> {
+        // **底下的 `println!` 不是 `std` 那個。** 它被下面這一行遮住了，展開成
+        // `writeln!(out, …)?`——`forget::run_with_output` 用的是同一招。這樣做
+        // 是為了讓「有沒有印出來」收得到：這個檔案裡有好幾條測試曾經是綠的，
+        // 只因為它們驅動的是 helper 而不是真的出口。
+        macro_rules! println {
+            ($($arg:tt)*) => {{ writeln!(out, $($arg)*)? }};
+        }
         let r = &config.retention;
+        let expired_grant = clean_expired_grant(data_dir, dry_run)?;
         // 「畫面 30 天」單獨講會被讀成「30 天後那一幀就不存在了」，而真正
         // 消失的只有 PNG——時間、app、視窗標題、網址跟著文字走到 365 天。
         // 那幾樣東西本身就說得出他那天在幹嘛，所以這個差別不是細節。
@@ -5829,19 +6168,43 @@ pub mod prune {
         // 使用者以為自己有資料。同一個 helper 套在兩種語意上會弄錯其中一個。
         let path = crate::db_path(data_dir);
         if !path.exists() {
-            println!("  還沒有資料庫（{}），沒有東西可以清。", path.display());
+            if expired_grant {
+                print_report(
+                    &PruneReport {
+                        expired_grant,
+                        ..Default::default()
+                    },
+                    dry_run,
+                    out,
+                )?;
+            }
+            // **這一句要看上面那張票。** 授權書不住在資料庫裡，所以它在這條路上
+            // 已經被清掉了；照樣印一句沒有條件的「沒有東西可以清」，就會變成
+            // 「剛剛那一行是什麼？」——同一個畫面上兩句話互相打臉，而這正是
+            // `print_report` 那句「沒有東西過期，什麼都沒動」剛修掉的同一顆。
+            println!(
+                "  還沒有資料庫（{}），{}",
+                path.display(),
+                if expired_grant {
+                    "所以除了上面那張過期的票，沒有別的東西可以清。"
+                } else {
+                    "沒有東西可以清。"
+                }
+            );
             return Ok(());
         }
         let mut db = Db::open(&path).with_context(|| format!("open {}", path.display()))?;
         let now = sister_core::now_ms();
 
         if dry_run {
-            let report = db.prune_preview(now, r, Some(&frames_dir(data_dir)))?;
-            print_report(&report, true);
+            let mut report = db.prune_preview(now, r, Some(&frames_dir(data_dir)))?;
+            report.expired_grant = expired_grant;
+            print_report(&report, true, out)?;
             return Ok(());
         }
-        let report = db.prune(now, r, Some(&frames_dir(data_dir)))?;
-        print_report(&report, false);
+        let mut report = db.prune(now, r, Some(&frames_dir(data_dir)))?;
+        report.expired_grant = expired_grant;
+        print_report(&report, false, out)?;
         Ok(())
     }
 
@@ -5882,33 +6245,43 @@ pub mod prune {
     ///
     /// 「清理完成」這種話等於沒說：使用者沒辦法分辨「沒有東西過期」和
     /// 「清理其實沒生效」——而這兩件事在磁碟上長得一模一樣。
-    pub fn print_report(r: &PruneReport, preview: bool) {
+    pub fn print_report(
+        r: &PruneReport,
+        preview: bool,
+        out: &mut impl std::io::Write,
+    ) -> Result<()> {
         let verb = if preview { "會刪掉" } else { "刪掉了" };
         if r.is_empty() {
-            println!("  沒有東西過期，什麼都沒動。");
-            return;
+            writeln!(out, "  沒有東西過期，什麼都沒動。")?;
+            return Ok(());
+        }
+        if r.expired_grant {
+            writeln!(out, "  {verb}已過期的 grant.json 授權書")?;
         }
         if r.images_deleted > 0 {
-            println!(
+            writeln!(
+                out,
                 "  {verb} {} 個畫面檔（{}）",
                 r.images_deleted,
                 crate::fmt::bytes(r.image_bytes_freed as i64)
-            );
+            )?;
         }
         // 句子在 `ghost_rows_line`（那裡才驗得到預覽和事後不是同一句）。
         if let Some(line) = ghost_rows_line(r.missing, preview) {
-            println!("{line}");
+            writeln!(out, "{line}")?;
         }
         if r.frames_deleted > 0 {
-            println!(
+            writeln!(
+                out,
                 "  {verb} {} 列畫面紀錄、{} 段文字、{} 個事實、{} 筆事件",
                 r.frames_deleted, r.chunks_deleted, r.facts_deleted, r.events_deleted
-            );
+            )?;
         } else if r.chunks_deleted + r.facts_deleted + r.events_deleted > 0 {
-            println!(
+            writeln!(
+                out,
                 "  {verb} {} 段文字、{} 個事實、{} 筆事件",
                 r.chunks_deleted, r.facts_deleted, r.events_deleted
-            );
+            )?;
         }
         // 單獨一行，不併進上面那串。上面那些是她觀察到的東西，這一行是
         // **他自己打的字**——他有權利當場看到那句話也一起消失了。
@@ -5917,7 +6290,11 @@ pub mod prune {
         // 問過的話」，是註解的人稱漏到輸出裡了——整個 CLI 對使用者一律講
         // 「你」，只有這一句在旁邊講他。）
         if r.queries_deleted > 0 {
-            println!("  {verb} {} 題你自己問過的話（題庫）", r.queries_deleted);
+            writeln!(
+                out,
+                "  {verb} {} 題你自己問過的話（題庫）",
+                r.queries_deleted
+            )?;
         }
         // 又單獨一行，而且**排在題庫那一行後面貼著它**：它是那一行的一部分被
         // 帶走的東西，不是另一類資料。
@@ -5927,38 +6304,172 @@ pub mod prune {
         // 狀態，也是 Phase 1 第一條退場條件唯一的證據。而 `prune` 是在錄製迴圈
         // 裡自己跑的：他可以在完全沒動手的情況下把那幾次弄不見。
         if r.marks_deleted > 0 {
-            println!(
+            writeln!(
+                out,
                 "  {verb} {} 次「★ 我本來已經忘了」——這一格補不回來",
                 r.marks_deleted
-            );
+            )?;
         }
         // 也單獨一行。它刪的不是內容，是「那天 13:02 到 17:44 她在錄」——
         // 一份沒有任何內容、卻證明他那段時間坐在電腦前的紀錄。那張表以前
         // 誰都不刪，而 `forget` 的說明從第一天起就寫著「每一張表都清乾淨」。
         if r.sessions_deleted > 0 {
-            println!(
+            writeln!(
+                out,
                 "  {verb} {} 場錄製的紀錄本身（那幾場已經一列都不剩了）",
                 r.sessions_deleted
-            );
+            )?;
         }
         // 刪不掉的檔案仍然躺在磁碟上，而使用者以為它已經不在了。
         // 這是整份報告裡唯一絕對不能安靜掉的一項。
         for f in &r.failed {
-            println!("  ⚠  刪不掉，這個畫面還在磁碟上：{f}");
+            writeln!(out, "  ⚠  刪不掉，這個畫面還在磁碟上：{f}")?;
         }
         // 指向它們的那幾列**留著了**，所以下一輪會自己再試一次。少了這句，
         // 上面那幾個 ⚠ 讀起來像是要他自己去把檔案挖出來刪掉。
         if !preview && !r.failed.is_empty() {
-            println!(
+            writeln!(
+                out,
                 "     （指向它們的紀錄先留著，不然就沒有人找得到那些檔案了。\
                  \n     下一輪會再試一次；一直失敗的話多半是防毒或權限擋住了）"
-            );
+            )?;
         }
+        Ok(())
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// 存一張**已經過期**的授權書到 `dir`，回傳它的路徑。
+        ///
+        /// `valid_for_ms` 是 0，所以下一毫秒就過期——不必動系統時鐘。
+        fn write_expired_grant(dir: &Path) -> std::path::PathBuf {
+            use sister_hands::semi_action::ActionKind;
+            use sister_hands::semi_action::{
+                AllowedActions, AllowedApps, App, Expiry, Grant, StepLimit, Task,
+            };
+            std::fs::create_dir_all(dir).expect("mkdir");
+            let grant = Grant::new(
+                Task::new("寄季報"),
+                AllowedApps::new([App::new("chrome")]),
+                AllowedActions::new([ActionKind::OpenUrl]),
+                Expiry::after_issued(sister_core::now_ms() - 60_000, 0),
+                StepLimit::new(2).expect("2 步"),
+            );
+            let path = super::super::act::grant_path(dir);
+            std::fs::write(&path, serde_json::to_vec(&grant).expect("serialize")).expect("write");
+            path
+        }
+
+        /// 錄製迴圈自己跑的那一次清理，**也要清掉過期的授權書，而且要講**。
+        ///
+        /// 手打 `sister prune` 那條路和這一條是兩支不同的程式。這一支住在
+        /// `windows_record` 裡（`#[cfg(windows)]`，本機編不到），所以它在這個
+        /// repo 一直是零執行覆蓋的那一層——而**大多數人從來不手打 prune**，
+        /// 他們的保留期只由這一條負責。抽成 `sweep` 就是為了讓這裡測得到。
+        ///
+        /// 兩件事要一起成立：那個檔案真的不見了，而且畫面上有講。只驗其中一件
+        /// 都不夠——安靜地刪掉和沒刪掉一樣糟，這整個模組的存在理由就是那句
+        /// 「說好會消失的東西沒有消失」不可以沒有人知道。
+        #[test]
+        fn the_recording_loops_own_sweep_also_reaps_the_expired_grant_and_says_so() {
+            let dir = crate::ops::tmp::Tmp::new("sweep-grant");
+            std::fs::create_dir_all(&dir.0).expect("mkdir");
+            let mut db = Db::open(&crate::db_path(&dir.0)).expect("open");
+            let path = write_expired_grant(&dir.0);
+            let cfg = Config::default();
+
+            let mut out = Vec::new();
+            sweep(&dir.0, &mut db, &cfg.retention, None, "  ", &mut out).expect("sweep");
+            let said = String::from_utf8(out).expect("utf8");
+
+            assert!(!path.exists(), "過期的票沒有被清掉：{said}");
+            assert!(said.contains("grant.json"), "清掉了卻沒講：{said:?}");
+            assert!(
+                said.contains("保留期清理"),
+                "要掛在保留期那個標題底下：{said:?}"
+            );
+
+            // 反面：沒有票、資料庫也是空的，就一個字都不該印。錄製迴圈每 6 小時
+            // 跑一次，每次都印一段「什麼都沒動」會把終端機洗掉。
+            let quiet = crate::ops::tmp::Tmp::new("sweep-quiet");
+            std::fs::create_dir_all(&quiet.0).expect("mkdir");
+            let mut db = Db::open(&crate::db_path(&quiet.0)).expect("open");
+            let mut out = Vec::new();
+            sweep(&quiet.0, &mut db, &cfg.retention, None, "  ", &mut out).expect("sweep");
+            assert!(
+                out.is_empty(),
+                "沒事就不要出聲：{:?}",
+                String::from_utf8_lossy(&out)
+            );
+        }
+
+        /// `sister prune` 清掉那張過期的票之後，**同一個畫面上不可以再說
+        /// 「什麼都沒動」或「沒有東西可以清」。**
+        ///
+        /// 這一條有兩個出口，而它們曾經只修好一個：報告不是空的那一條走
+        /// `print_report`（`is_empty()` 現在算得到 `expired_grant`），**沒有資料庫
+        /// 那一條走的是另一句話**，而它原本是無條件印的——於是畫面上是
+        ///
+        /// ```text
+        ///   刪掉了已過期的 grant.json 授權書
+        ///   還沒有資料庫（…），沒有東西可以清。
+        /// ```
+        ///
+        /// 兩句話隔一行互相打臉。**同一個承諾有幾個出口，就要驗幾次。**
+        ///
+        /// 順便釘住接線本身：這一條走的是 `run_with_output`，也就是使用者真的
+        /// 打 `sister prune` 會走的那支。把 `clean_expired_grant` 那一行從
+        /// 裡面拿掉，這一條要紅。
+        #[test]
+        fn pruning_the_expired_grant_never_ends_with_nothing_happened() {
+            let cfg = Config::default();
+            let say = |dir: &Path, dry_run: bool| {
+                let mut out = Vec::new();
+                run_with_output(dir, &cfg, dry_run, &mut out).expect("prune");
+                String::from_utf8(out).expect("utf8")
+            };
+
+            // 出口一：連資料庫都沒有。
+            let nodb = crate::ops::tmp::Tmp::new("prune-grant-nodb");
+            let path = write_expired_grant(&nodb.0);
+            let said = say(&nodb.0, false);
+            assert!(said.contains("grant.json"), "沒講那張票：{said}");
+            assert!(
+                !said.contains("沒有東西可以清"),
+                "剛刪完一張票，不可以說沒有東西可以清：{said}",
+            );
+            assert!(!path.exists(), "說刪掉了就要真的不在：{said}");
+
+            // 出口二：有資料庫，而資料庫這邊沒有東西過期。
+            let withdb = crate::ops::tmp::Tmp::new("prune-grant-withdb");
+            std::fs::create_dir_all(&withdb.0).expect("mkdir");
+            Db::open(&crate::db_path(&withdb.0)).expect("open");
+            write_expired_grant(&withdb.0);
+            let said = say(&withdb.0, false);
+            assert!(said.contains("grant.json"), "沒講那張票：{said}");
+            assert!(
+                !said.contains("什麼都沒動"),
+                "剛刪完一張票，不可以說什麼都沒動：{said}",
+            );
+
+            // 反面：沒有票的時候，那兩句話要回來——不然它們就成了永遠印不出來
+            // 的死字，而「沒有東西過期」本來就是 prune 成功的結果之一。
+            let bare = crate::ops::tmp::Tmp::new("prune-grant-none");
+            std::fs::create_dir_all(&bare.0).expect("mkdir");
+            Db::open(&crate::db_path(&bare.0)).expect("open");
+            let said = say(&bare.0, false);
+            assert!(said.contains("什麼都沒動"), "{said}");
+            assert!(!said.contains("grant.json"), "沒有票就不要提它：{said}");
+
+            // `--dry-run` 一個位元組都不准動。
+            let dry = crate::ops::tmp::Tmp::new("prune-grant-dry");
+            let path = write_expired_grant(&dry.0);
+            let said = say(&dry.0, true);
+            assert!(said.contains("會刪掉"), "預覽要用未來式：{said}");
+            assert!(path.exists(), "預覽不准真的刪：{said}");
+        }
 
         /// **預覽也要講那幾列幽靈，但不可以用事後那句話講。**
         ///
@@ -6112,6 +6623,29 @@ pub mod export {
             Err(e) => {
                 return Err(anyhow::Error::from(e))
                     .with_context(|| format!("複製 {} 失敗", src_log.path().display()));
+            }
+        }
+
+        let src_grant = super::act::grant_path(data_dir);
+        let dst_grant = super::act::grant_path(to);
+        match std::fs::copy(&src_grant, &dst_grant) {
+            Ok(bytes) => println!(
+                "  ✓ grant.json   {}（存著的授權範圍）",
+                crate::fmt::bytes(bytes as i64)
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("複製 {} 失敗", src_grant.display())),
+        }
+        let src_grant_tmp = super::act::grant_tmp_path(data_dir);
+        let dst_grant_tmp = super::act::grant_tmp_path(to);
+        match std::fs::copy(&src_grant_tmp, &dst_grant_tmp) {
+            Ok(bytes) => println!(
+                "  ✓ grant.json.tmp   {}（尚未 rename 的完整授權範圍）",
+                crate::fmt::bytes(bytes as i64)
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("複製 {} 失敗", src_grant_tmp.display()));
             }
         }
 
@@ -6312,6 +6846,19 @@ pub mod export {
             assert!(raw.contains("kept.example"), "{raw}");
         }
 
+        #[test]
+        fn a_full_export_takes_the_saved_grant_too() {
+            let src = crate::ops::tmp::Tmp::new("export-grant-src");
+            let dst = crate::ops::tmp::Tmp::new("export-grant-dst");
+            Db::open(&crate::db_path(&src.0)).expect("db");
+            std::fs::write(src.0.join("grant.json"), b"saved grant bytes").unwrap();
+            run(&src.0, &dst.0, false).expect("export");
+            assert_eq!(
+                std::fs::read(dst.0.join("grant.json")).expect("grant 要跟全量匯出走"),
+                b"saved grant bytes"
+            );
+        }
+
         /// 一次手都沒動過的時候，匯出不該憑空生一個空檔案出來。
         ///
         /// 「這個檔案不存在」和「這個檔案是空的」在還原之後是兩句不同的話。
@@ -6482,7 +7029,102 @@ pub mod forget {
         })
     }
 
+    /// 授權書在磁碟上的**兩個**檔案。預覽跟真的刪都走這一個，不然兩邊會各數
+    /// 各的，然後預覽答應的和實際刪掉的不是同一組東西。
+    fn grant_files(data_dir: &Path) -> [std::path::PathBuf; 2] {
+        sister_hands::semi_action::grant_files(data_dir)
+    }
+
+    /// 預覽那一段要講的話——**沒有存著授權書的時候回 `None`**，不要印一句
+    /// 「會刪掉授權書」給一個從來沒存過的人看。
+    ///
+    /// 為什麼要有這一句：底下真的刪的時候，授權書是**不看 `--last` 的**，
+    /// 而預覽從頭到尾在講「要忘掉的是 X 到 Y」。一個站在那個區間外面、卻
+    /// 一樣會死的東西，如果預覽不講，那句「一個位元組都沒動」後面接的就是
+    /// 一件他沒被告知的刪除。
+    ///
+    /// 不看區間是故意的，不是漏掉：授權書不是一段記憶，是一張**還能用的
+    /// 票**。留一張授權書在那裡，等於他說完「忘掉」之後，磁碟上還有一個
+    /// 上好膛的範圍配著他打的原文。所以這裡選擇一起刪，然後把這件事說出來。
+    fn saved_grant_notice(data_dir: &Path) -> Option<String> {
+        let here: Vec<_> = grant_files(data_dir)
+            .into_iter()
+            .filter(|p| p.exists())
+            .collect();
+        (!here.is_empty()).then(|| {
+            format!(
+                // **不要用「另外」開頭。** 這一句排在整段預覽的最前面（它得排在
+                // 每一個資料庫早退前面，不然三個出口裡有兩個看不到它），而
+                // 「另外」是一個回指詞——它前面什麼都還沒講。
+                "這一刀會連存著的授權書一起刪掉（{}）——裡面有你打的 `--task` 原文。\n\
+                 **這一份不看 `--last`**：不管它是什麼時候存的都會刪掉，因為它不是\n\
+                 一段記憶，是一張還能拿去跑的票。刪掉之後 `sister do --use-grant`\n\
+                 會說沒有存過，重存一張就好。\n",
+                here.iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )
+        })
+    }
+
+    /// 預覽的收尾：授權書那一句，加上「這是預覽」那一段。
+    ///
+    /// **這兩句寫在同一支函式裡，是因為它們之間有順序。** 「一個位元組都沒動」
+    /// 收尾整段預覽；授權書那一句排在它後面的話，讀起來像收完尾又補一條。
+    /// 拆成兩個 `println!` 留在 `run` 裡的時候，那個順序沒有任何東西守著，
+    /// 而且「有沒有印出來」這件事測試根本收不到——所以照這個檔案既有的做法
+    /// 走 `out: &mut impl Write`（見 `act::run_with`、`hands::log_to`）。
+    fn preview_close(data_dir: &Path, last: &str, out: &mut impl std::io::Write) -> Result<()> {
+        let _ = data_dir;
+        // `--last` 是從**跑的那一刻**往回算，而 `--yes` 那一次是另一個
+        // 行程、另一個「現在」。上面那兩個時間點會整段往後挪掉他讀這段
+        // 話的時間，於是起點前面的那幾分鐘留了下來——而畫面剛剛才把它們
+        // 算進「要忘掉的」裡面。差幾分鐘不是功能問題，是這一頁做了一個
+        // 它不打算遵守的承諾。
+        writeln!(
+            out,
+            "\n這是預覽，一個位元組都沒動。真的要忘掉就再跑一次，加上 `--yes`：\n  \
+             sister forget --last {last} --yes\n\
+             **沒有回收桶，也沒有復原。**\n\
+             （`--last` 是從跑的那一刻往回算，所以那一次的區間會比上面整段晚一點\n  \
+             ——你讀這段話的時間會從頭那邊掉出去。想連那幾分鐘一起忘就寫長一點。）"
+        )?;
+        Ok(())
+    }
+
+    /// 把存著的授權書刪掉，回傳**真的被刪掉的那幾個路徑**。
+    ///
+    /// 它是一個回傳值而不是一串 `println!`，因為 `sister forget` 的承諾是
+    /// 「那些字不見了」，而 `println!` 印出來的「已刪除」在測試裡收不到——
+    /// 收不到就釘不住，釘不住的刪除路徑，這個 repo 已經漏過一次了
+    /// （`action-log.jsonl`，alpha.69 才補上）。
+    ///
+    /// **兩個檔案，不是一個。** `grant.json.tmp` 是 `save_grant` 寫到一半斷電
+    /// 留下的，裡面是整份授權書；漏掉它的話這句「已刪除」只講掉一半。
+    ///
+    /// 「本來就沒有」不算失敗，回空的；真的刪不掉（權限、被鎖住）要往上丟，
+    /// 不可以吞掉——吞掉就變成一句沒查過的「已刪除」。
+    fn forget_saved_grant(data_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+        // 真的動手的那一段在 `sister-hands`——字母人那一側刪的是同一個資料
+        // 目錄，兩邊各寫一份的話，改天多一個檔案只會補到其中一邊。
+        sister_hands::semi_action::forget_saved_grant(data_dir)
+            .with_context(|| format!("刪除 {} 裡的授權書", data_dir.display()))
+    }
+
     pub fn run(data_dir: &Path, last: &str, yes: bool) -> Result<()> {
+        run_with_output(data_dir, last, yes, &mut std::io::stdout())
+    }
+
+    fn run_with_output(
+        data_dir: &Path,
+        last: &str,
+        yes: bool,
+        out: &mut impl std::io::Write,
+    ) -> Result<()> {
+        macro_rules! println {
+            ($($arg:tt)*) => {{ writeln!(out, $($arg)*)? }};
+        }
         let span = parse_span(last)?;
 
         // **這個「現在」只屬於刪除區間，所以它在這個大括號裡就死掉。**
@@ -6504,6 +7146,12 @@ pub mod forget {
             let asked_at = sister_core::now_ms();
             (asked_at - span, asked_at)
         };
+
+        // 這張票不屬於資料庫，也不看區間。只要真的那條路會刪，預覽就先講；
+        // 放在任何資料庫早退之前，讓三個出口看到的是同一個承諾。
+        if !yes && let Some(line) = saved_grant_notice(data_dir) {
+            println!("{line}");
+        }
 
         // **action log 不住在資料庫裡，所以它的刪除不能掛在資料庫後面。**
         // 底下那個 `path.exists()` 會在沒有資料庫的時候直接印「沒有東西可以忘」
@@ -6538,6 +7186,9 @@ pub mod forget {
                         String::new()
                     }
                 );
+            }
+            for gone in forget_saved_grant(data_dir)? {
+                println!("授權書：已刪除 {}（裡面含 --task 原文）。", gone.display());
             }
         }
 
@@ -6642,7 +7293,7 @@ pub mod forget {
         }
 
         if !yes {
-            prune::print_report(&report, true);
+            prune::print_report(&report, true, out)?;
             if recording {
                 println!(
                     "\n⚠  **她現在還在錄。** 先 `sister pause` 再刪——不然你最想忘掉的\n   \
@@ -6656,23 +7307,12 @@ pub mod forget {
                      多半還在螢幕上。先 `sister pause` 再刪，處理完再 `sister resume`。"
                 );
             }
-            // `--last` 是從**跑的那一刻**往回算，而 `--yes` 那一次是另一個
-            // 行程、另一個「現在」。上面那兩個時間點會整段往後挪掉他讀這段
-            // 話的時間，於是起點前面的那幾分鐘留了下來——而畫面剛剛才把它們
-            // 算進「要忘掉的」裡面。差幾分鐘不是功能問題，是這一頁做了一個
-            // 它不打算遵守的承諾。
-            println!(
-                "\n這是預覽，一個位元組都沒動。真的要忘掉就再跑一次，加上 `--yes`：\n  \
-                 sister forget --last {last} --yes\n\
-                 **沒有回收桶，也沒有復原。**\n\
-                 （`--last` 是從跑的那一刻往回算，所以那一次的區間會比上面整段晚一點\n  \
-                 ——你讀這段話的時間會從頭那邊掉出去。想連那幾分鐘一起忘就寫長一點。）"
-            );
+            preview_close(data_dir, last, out)?;
             return Ok(());
         }
 
         let report = db.forget(from, to, Some(&prune::frames_dir(data_dir)))?;
-        prune::print_report(&report, false);
+        prune::print_report(&report, false, out)?;
         // **沒被帶走的那一列，也要當場說。** 報告只講刪掉了什麼，於是「那一場
         // 當掉了所以留下來」這件事在這裡是靜音的——他下一次跑 `sister stats`
         // 才會看到一個「工作階段 1」站在一整排 0 旁邊，而那時候沒有任何東西
@@ -6710,6 +7350,103 @@ pub mod forget {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// 資料目錄裡（含子目錄）還讀得到 `needle` 的檔案。
+        ///
+        /// **不點名檔案，是刻意的。** 這一條要守的是「那幾個字不在磁碟上了」，
+        /// 不是「`grant.json` 這個檔名不見了」。點名檔案的話，改天多寫一份備份、
+        /// 或是 `save_grant` 的半成品留在那裡，測試照樣綠，而他要忘掉的字還在。
+        fn files_still_holding(dir: &Path, needle: &str) -> Vec<String> {
+            let mut found = Vec::new();
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return found;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    found.extend(files_still_holding(&p, needle));
+                } else if std::fs::read(&p)
+                    .map(|raw| String::from_utf8_lossy(&raw).contains(needle))
+                    .unwrap_or(false)
+                {
+                    found.push(p.display().to_string());
+                }
+            }
+            found
+        }
+
+        /// `sister forget --yes` 之後，存著的授權書裡那句 `--task` 原文要真的
+        /// 從磁碟上消失。
+        ///
+        /// **這一條斷言的是「字不見了」，不是「檔案不見了」。** 授權書是資料
+        /// 目錄裡的第三個檔案（前兩個是資料庫和 `action-log.jsonl`），而這個
+        /// repo 已經漏過一次：`action-log.jsonl` 從加進來到 alpha.69 之間，
+        /// 三條刪除路一條都沒接上，而畫面上那句「已經忘掉了」照印。
+        ///
+        /// 連 `grant.json.tmp` 一起放，是因為那個半成品裡是**整份**授權書。
+        /// 只刪 `grant.json` 的話，這一條會紅——而那正是它一開始的樣子。
+        ///
+        /// 故意連資料庫都不建：授權書的刪除不可以掛在資料庫後面。
+        #[test]
+        fn forgetting_takes_the_saved_grant_text_with_it() {
+            let tmp = crate::ops::tmp::Tmp::new("forget-grant");
+            std::fs::create_dir_all(&tmp.0).expect("mkdir");
+            let secret = "把季報寄給王經理";
+            let body = format!(r#"{{"task":{{"text":"{secret}"}}}}"#);
+            std::fs::write(crate::ops::act::grant_path(&tmp.0), &body).expect("write grant");
+            std::fs::write(crate::ops::act::grant_tmp_path(&tmp.0), &body).expect("write tmp");
+
+            // 預覽一個位元組都不准動，但要**先講**它會刪掉這個。
+            run(&tmp.0, "1d", false).expect("preview");
+            assert_eq!(files_still_holding(&tmp.0, secret).len(), 2, "預覽刪了東西",);
+
+            run(&tmp.0, "1d", true).expect("forget");
+            let left = files_still_holding(&tmp.0, secret);
+            assert!(left.is_empty(), "他打的那句話還在磁碟上：{left:?}");
+        }
+
+        /// 預覽要說出授權書會跟著走——而且要說它**不看 `--last`**。
+        ///
+        /// 授權書是唯一一個站在區間外面、卻一樣會被刪掉的東西。預覽整段都在
+        /// 講「要忘掉的是 X 到 Y」，然後用「一個位元組都沒動」收尾；不講的話，
+        /// 那句收尾後面接的是一件他沒被告知的刪除。
+        ///
+        /// 反面也要釘：沒存過授權書的人不該看到這一句。一句對他不成立的警告，
+        /// 和一句沒講的警告一樣是假話。
+        #[test]
+        fn the_preview_says_the_grant_goes_too_and_that_it_ignores_the_range() {
+            let preview = |dir: &Path| {
+                let mut out = Vec::new();
+                run_with_output(dir, "1d", false, &mut out).expect("forget preview entry");
+                String::from_utf8(out).expect("utf8")
+            };
+
+            // 沒存過授權書的人不該看到這一句。一句對他不成立的警告，和一句
+            // 沒講的警告一樣是假話。
+            let quiet_dir = crate::ops::tmp::Tmp::new("forget-grant-preview-quiet");
+            let quiet = preview(&quiet_dir.0);
+            assert!(!quiet.contains("授權書"), "{quiet}");
+
+            for (name, database_state) in [("no-db", 0), ("empty", 1), ("normal", 2)] {
+                let tmp = crate::ops::tmp::Tmp::new(&format!("forget-grant-{name}"));
+                std::fs::create_dir_all(&tmp.0).expect("mkdir");
+                std::fs::write(crate::ops::act::grant_path(&tmp.0), b"{}").expect("write grant");
+                if database_state > 0 {
+                    let mut db = Db::open(&crate::db_path(&tmp.0)).expect("db");
+                    if database_state == 2 {
+                        let session = db.start_session("test", "test").expect("session");
+                        db.conn().execute(
+                            "INSERT INTO system_events(ts,session_id,kind) VALUES(?1,?2,'lock')",
+                            (sister_core::now_ms() - 1_000, session),
+                        ).expect("event");
+                    }
+                }
+                let said = preview(&tmp.0);
+                assert!(said.contains("授權書"), "{name} 出口漏了：{said}");
+                assert!(said.contains("--task"), "{name} 出口漏了：{said}");
+                assert!(said.contains("不看 `--last`"), "{name} 出口漏了：{said}");
+            }
+        }
 
         /// `sister forget --yes` 要把 action log 那一段也帶走。
         ///
@@ -17077,16 +17814,14 @@ pub mod record {
         // `store_images = false` 的意思是「不要再寫新的圖」，不是「以前
         // 寫的那些不存在」——不帶的話那些舊圖會永遠留在磁碟上。
         let frames_root = crate::ops::prune::frames_dir(data_dir);
-        match db.prune(sister_core::now_ms(), &config.retention, Some(&frames_root)) {
-            Ok(report) if !report.is_empty() => {
-                println!("○ 保留期清理");
-                crate::ops::prune::print_report(&report, false);
-            }
-            Ok(_) => {}
-            // 清不掉不該擋住錄製，但也絕對不能安靜——這整個模組的存在
-            // 理由就是「說好會消失的東西沒有消失」不可以沒有人知道。
-            Err(e) => println!("⚠  保留期清理失敗，過期的資料還在：{e:#}"),
-        }
+        crate::ops::prune::sweep(
+            data_dir,
+            &mut db,
+            &config.retention,
+            Some(&frames_root),
+            "",
+            &mut std::io::stdout(),
+        )?;
 
         // 用上面算好的 `frames_root`，不是再 `join("frames")` 一次。同一個路徑
         // 在這個函式裡現在有三個用途（開錄、定期清理、第三張同意書中途切換），
@@ -17451,17 +18186,14 @@ pub mod record {
 
             if last_prune.elapsed() >= PRUNE_EVERY {
                 last_prune = Instant::now();
-                match rec
-                    .db_mut()
-                    .prune(sister_core::now_ms(), &retention, Some(&prune_images))
-                {
-                    Ok(r) if !r.is_empty() => {
-                        println!("  ○ 保留期清理");
-                        crate::ops::prune::print_report(&r, false);
-                    }
-                    Ok(_) => {}
-                    Err(e) => println!("  ⚠  保留期清理失敗，過期的資料還在：{e:#}"),
-                }
+                crate::ops::prune::sweep(
+                    data_dir,
+                    rec.db_mut(),
+                    &retention,
+                    Some(&prune_images),
+                    "  ",
+                    &mut std::io::stdout(),
+                )?;
             }
 
             // 每一拍量一次，不是每分鐘一次。`peak_rss` 這個名字承諾的是峰值，

@@ -299,3 +299,47 @@ fn the_gate_asks_both_copies_of_the_never_inherited_rule() {
         r#"{"action":"open_file","path":"C:/work/a.txt"}"#
     )));
 }
+
+/// 「忘掉」要把存著的授權書**兩個檔案**都帶走，而且回報的是真的刪掉的那幾個。
+///
+/// **這一條守的是兩個執行檔共用的那一份。** CLI 的 `sister forget` 和字母人
+/// 時間軸上的「忘掉這一段」刪的是同一個資料目錄；這支函式是它們唯一的交集，
+/// 所以它是唯一一個兩邊都測得到的地方——字母人那一半是 Tauri command，
+/// 本機連編都編不到（`#[cfg(windows)]` 那一層在這個 repo 是零執行覆蓋的）。
+///
+/// `grant.json.tmp` 是 `save_grant` 寫到一半斷電留下的，裡面是**整份**授權書，
+/// 含他打的 `--task` 原文。漏掉它，那句「已經忘掉了」就只講掉一半。
+#[test]
+fn forgetting_takes_both_grant_files_and_reports_only_what_it_removed() {
+    let dir = std::env::temp_dir().join(format!("sister-grant-forget-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+
+    // 一個都沒有：不是失敗，也不准回報刪過東西。
+    assert!(
+        forget_saved_grant(&dir)
+            .expect("沒有檔案不算失敗")
+            .is_empty(),
+        "什麼都沒刪就不可以說刪了",
+    );
+
+    // 只有半成品的那一種——斷電剛好卡在 write 和 rename 中間。
+    std::fs::write(grant_tmp_path(&dir), b"{}").expect("write tmp");
+    let gone = forget_saved_grant(&dir).expect("刪");
+    assert_eq!(
+        gone,
+        vec![grant_tmp_path(&dir)],
+        "只有 tmp 的時候只該回 tmp"
+    );
+
+    // 兩個都在：兩個都要走。
+    std::fs::write(grant_path(&dir), b"{}").expect("write grant");
+    std::fs::write(grant_tmp_path(&dir), b"{}").expect("write tmp");
+    let gone = forget_saved_grant(&dir).expect("刪");
+    assert_eq!(gone.len(), 2, "兩個檔案都要帶走：{gone:?}");
+    for path in grant_files(&dir) {
+        assert!(!path.exists(), "{} 還在", path.display());
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

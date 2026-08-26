@@ -3,6 +3,41 @@
 use crate::{ActionSnapshot, Executor, NeverInherited, Outcome, Suggestion, never_inherited_class};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+pub fn grant_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("grant.json")
+}
+
+pub fn grant_tmp_path(data_dir: &Path) -> PathBuf {
+    grant_path(data_dir).with_extension("json.tmp")
+}
+
+/// 授權書在磁碟上的**兩個**檔案。要刪、要帶走、要問「有沒有」的，都走這一個。
+pub fn grant_files(data_dir: &Path) -> [PathBuf; 2] {
+    [grant_path(data_dir), grant_tmp_path(data_dir)]
+}
+
+/// 把存著的授權書刪掉，回傳**真的被刪掉的那幾個路徑**。
+///
+/// **這支函式住在這裡，是因為有兩個執行檔要做同一件事。** CLI 的
+/// `sister forget` 和字母人時間軸上的「忘掉這一段」刪的是同一個資料目錄；
+/// 各寫一份的話，改天有人補了第三個檔案，只會補到其中一邊，而兩邊畫面上
+/// 都照樣寫著「已經忘掉了」。`action-log.jsonl` 就是這樣漏了好幾版。
+///
+/// 「本來就沒有」不算失敗，回空的；真的刪不掉（權限、被鎖住）要往上丟——
+/// 吞掉就變成一句沒查過的「已刪除」。
+pub fn forget_saved_grant(data_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut gone = Vec::new();
+    for path in grant_files(data_dir) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => gone.push(path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(gone)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Task(String);
@@ -81,6 +116,14 @@ impl Expiry {
             valid_for_ms,
         }
     }
+
+    pub const fn issued_at_ms(self) -> i64 {
+        self.issued_at_ms
+    }
+
+    pub const fn valid_for_ms(self) -> u64 {
+        self.valid_for_ms
+    }
 }
 
 /// 步數上限，**永遠 ≥ 1**。
@@ -133,6 +176,19 @@ impl Grant {
     pub const fn step_limit(&self) -> StepLimit {
         self.step_limit
     }
+    pub const fn expiry(&self) -> Expiry {
+        self.expiry
+    }
+    pub fn validate_expiry(&self, now_ms: i64) -> Result<(), GrantRejection> {
+        if now_ms < self.expiry.issued_at_ms {
+            return Err(GrantRejection::ExpiryClockWentBack);
+        }
+        let elapsed = u64::try_from(now_ms - self.expiry.issued_at_ms).unwrap_or(u64::MAX);
+        if elapsed > self.expiry.valid_for_ms {
+            return Err(GrantRejection::ExpiryElapsed);
+        }
+        Ok(())
+    }
     /// 這張授權書讀成一句人話。
     ///
     /// **這是為了讓「他授權過什麼」進得了 action log。** 在這之前那份紀錄只
@@ -166,7 +222,7 @@ impl Grant {
             .collect::<Vec<_>>()
             .join("、");
         format!(
-            "任務「{}」；app：{apps}；動作：{actions}；發出後 {} 毫秒內有效；最多 {} 步",
+            "任務「{}」；app：{apps}；動作：{actions}；整張票在發出後 {} 毫秒內有效；每一輪各自最多 {} 步",
             self.task.0, self.expiry.valid_for_ms, self.step_limit.0
         )
     }
@@ -180,14 +236,7 @@ impl Grant {
         if !self.actions.0.contains(&ActionKind::of(&step.action)) {
             return Err(GrantRejection::Actions);
         }
-        if now_ms < self.expiry.issued_at_ms {
-            return Err(GrantRejection::ExpiryClockWentBack);
-        }
-        let elapsed = u64::try_from(now_ms - self.expiry.issued_at_ms).unwrap_or(u64::MAX);
-        if elapsed > self.expiry.valid_for_ms {
-            return Err(GrantRejection::ExpiryElapsed);
-        }
-        Ok(())
+        self.validate_expiry(now_ms)
     }
 }
 

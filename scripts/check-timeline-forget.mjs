@@ -89,6 +89,9 @@ function erasure(over = {}) {
     // 和 `forget_range` 各自問 `ActionLog` 補上的——所以它正是最容易在這裡被
     // 漏抄的那一種。
     actions: 0,
+    // 存著的那張授權書（alpha.74）。跟 `actions` 一樣不在資料庫裡，而且它
+    // 比誰都容易被漏列——**它是唯一一個站在區間外面也會被刪掉的東西**。
+    grant: false,
     failed: [],
     missing: 0,
     // 預覽算不出「刪完之後」——`null` 是「沒問過」，不是 0。
@@ -523,6 +526,74 @@ console.log("⑨ 外送紀錄：兩種空、沒送出去的原因、原文沒遮
   // 這一份沒有餵任何 interpreter 的列，所以畫面上冒出「解釋層」只有一個來源：
   // 它替一列自己沒讀懂的資料猜了一個層別。
   check("沒讀懂的層別不可以被猜成解釋層", !rolesText.includes("解釋層"), rolesText);
+}
+
+console.log("⑧ 存著的授權書：唯一一個站在區間外面也會被刪掉的東西");
+{
+  // `grant` 這一欄和 `actions` 是同一種東西——不在資料庫裡，由 `forget_preview`
+  // 和 `forget_range` 各自補上。差別是它**不看區間**：他選的是哪一天都無所謂，
+  // 那張票一樣會死。所以「刪掉了卻沒有列出來」在它身上比誰都嚴重：他挑一天
+  // 按下去，結果掉的是一個跟那一天無關的東西。
+  const p = await open({
+    forget_preview: erasure({ grant: true }),
+    forget_range: erasure({ grant: true }),
+  });
+  await p.press();
+  check("預覽就要講那張票會跟著走", p.say().includes("授權書"), p.say());
+  check("而且要講它不看區間", p.say().includes("不看區間"), p.say());
+  check("還要講裡面有他打的任務原文", p.say().includes("任務原文"), p.say());
+  await p.press();
+  check("刪完那一段也要列出來", p.say().includes("授權書"), p.say());
+}
+
+console.log("⑨ 沒存過票的人不該看到那一句");
+{
+  // 一句對他不成立的警告，和一句沒講的警告一樣是假話——而這一欄預設是
+  // `false`，所以少了這一條，上面那三條用一個寫死的 `true` 也會全過。
+  const p = await open({ forget_preview: erasure(), forget_range: erasure() });
+  await p.press();
+  check("沒有票就不要提它", !p.say().includes("授權書"), p.say());
+}
+
+console.log("⑩ 字母人那一側真的有動手（不是只有畫面上寫著）");
+{
+  // **上面九條全部只證明了 `timeline.js` 會不會印。** 後端那兩支是 Tauri
+  // command，本機編不到也跑不到——這個 repo 有一整層接線是零執行覆蓋的，
+  // 而 `action-log.jsonl` 就是在那一層漏了好幾版沒人發現。
+  //
+  // 所以這裡退一步，讀原始碼：只問「那兩支函式的函式體裡有沒有這件事」。
+  // **要框在函式體裡**，不是整份檔案裡找得到就算——同一個字串出現在隔壁
+  // 函式或註解裡也會滿足一個鬆的檢查，而被守的那一行刪掉它照樣綠。
+  const rust = read(
+    resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/src-tauri/src/main.rs"),
+  );
+  const body = (name) => {
+    const at = rust.indexOf(`fn ${name}(`);
+    if (at < 0) return "";
+    const open = rust.indexOf("{", rust.indexOf(") ->", at));
+    let depth = 0;
+    for (let i = open; i < rust.length; i++) {
+      if (rust[i] === "{") depth++;
+      else if (rust[i] === "}" && --depth === 0) return rust.slice(open, i);
+    }
+    return "";
+  };
+  const del = body("forget_range");
+  const pre = body("forget_preview");
+  check("找得到 forget_range 的函式體", del.length > 0, del.length);
+  check("找得到 forget_preview 的函式體", pre.length > 0, pre.length);
+  // 刪的那一支要真的呼叫共用的那支——CLI 走的是同一個函式。
+  check("忘掉這一段要真的刪掉授權書", del.includes("forget_saved_grant"), del.slice(0, 200));
+  // 預覽要問「有沒有」，不然畫面上那一句是憑空來的。
+  check(
+    "預覽要去看磁碟上有沒有那張票",
+    pre.includes("grant_path") && pre.includes("grant_tmp_path"),
+    pre.slice(0, 200),
+  );
+  // 兩支都要把答案放進回傳的那一欄，不然 `timeline.js` 收到的永遠是預設值。
+  for (const [name, src] of [["forget_range", del], ["forget_preview", pre]]) {
+    check(`${name} 要把答案填進 grant 那一欄`, /\bgrant,/.test(src), src.slice(0, 200));
+  }
 }
 
 console.log("");
