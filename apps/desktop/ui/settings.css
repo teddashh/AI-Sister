@@ -76,7 +76,8 @@ h2 {
 }
 
 textarea,
-input[type="number"] {
+input[type="number"],
+input[type="text"] {
   appearance: none;
   background: var(--field);
   border: 1px solid rgb(246 236 223 / 14%);
@@ -225,6 +226,25 @@ button:focus-visible {
 .state.bad {
   color: var(--warn);
   opacity: 1;
+}
+
+/* 「兩個條件都成立而且正在錄」要有自己的樣子。灰色是留給「關著／還在等」
+   的，共用就等於沒修——「她不會叫任何東西」和「她會自己醒」會變成同一片。 */
+.state.ok {
+  color: var(--ok);
+  opacity: 1;
+}
+
+/* ---------- 大腦 ---------- */
+
+.field {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.field > span {
+  display: block;
+  margin-bottom: 4px;
 }
 
 /* ---------- 天數 ---------- */

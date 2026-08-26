@@ -42,8 +42,40 @@
       <p class="health" data-machine hidden></p>
 
       <!--
-        排除規則排在最前面，因為它是這一頁唯一會影響「她看得到什麼」的東西。
-        保留天數只決定舊資料什麼時候消失——那重要，但沒有這個急。
+        這一格決定「她看到的字會不會離開這台機器」——比排除規則更外面一層。
+        排除規則決定她看得到什麼；沒填命令（或第二張同意書沒勾），那些字
+        一次都不會送出去。
+      -->
+      <section>
+        <h2>大腦</h2>
+        <p class="hint">
+          這是整頁唯一一個會把螢幕上的字送出這台機器的設定。
+          它接的是<strong>你自己已經裝好、已經登入的那支 CLI</strong>，
+          不是內建的 HTTP client，也不是內建推論引擎。
+          送出去的是螢幕文字原文，不會先遮掉。
+          <strong>沒填＝解釋層和審閱層一次都不會醒</strong>（不是跑得慢一點）。
+          填了還要第二張同意書勾起來才會真的送——兩個條件都要成立。
+        </p>
+        <label class="field">
+          <span>命令</span>
+          <input
+            type="text"
+            data-brain-command
+            spellcheck="false"
+            autocomplete="off"
+          />
+        </label>
+        <label class="field">
+          <span>參數</span>
+          <textarea data-brain-args rows="3" spellcheck="false"></textarea>
+        </label>
+        <p class="hint">一行一個。prompt 走 stdin，不寫在這裡。</p>
+        <p class="state" data-brain-say></p>
+      </section>
+
+      <!--
+        排除規則決定「她看得到什麼」。大腦那一格更外面：看得到的字會不會離開
+        這台機器。保留天數只決定舊資料什麼時候消失——那重要，但沒有這個急。
       -->
       <section>
         <h2>不要看這些 app</h2>

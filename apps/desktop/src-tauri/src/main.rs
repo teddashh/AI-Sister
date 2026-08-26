@@ -1548,6 +1548,10 @@ fn commitment_other(id: i64, shell: tauri::State<'_, Shell>) -> Result<(), Strin
 /// **刻意只是設定檔的一個子集。** 截圖間隔、去重門檻那些沒有放進來，因為它們
 /// 改了要重開 `record` 才生效（見 `Recorder::set_privacy`）——一個按了儲存卻
 /// 要等重開才生效、而且沒說的欄位，比沒有那個欄位更糟。
+///
+/// `[brain]` 的每日預算、併發、審閱預算同樣沒畫：它們有 `check()` 在守
+/// （concurrency 1..=8），而且改錯了的後果是悄悄降級，不是看得見的東西。
+/// 這一頁只動 `command` / `args`；另外三個必須在「先讀再改再寫」之後原封不動。
 #[derive(Serialize, Deserialize)]
 struct Settings {
     excluded_apps: Vec<String>,
@@ -1558,6 +1562,12 @@ struct Settings {
     query_log: bool,
     frames_days: u32,
     text_days: u32,
+    /// `[brain] command`。空字串＝沒設定＝一次都不 spawn。
+    #[serde(default)]
+    brain_command: String,
+    /// `[brain] args`。一行一個；prompt 走 stdin，不在這裡。
+    #[serde(default)]
+    brain_args: Vec<String>,
     /// 設定檔實際的位置。給人看的——她說她存到哪，就要指得出來是哪一個檔案。
     ///
     /// **只出不進**：存檔時路徑一律由 `config_path()` 重算，不是相信視窗傳回來
@@ -1584,6 +1594,8 @@ fn settings_read() -> Result<Settings, String> {
         query_log: c.privacy.query_log,
         frames_days: c.retention.frames_days,
         text_days: c.retention.text_days,
+        brain_command: c.brain.command,
+        brain_args: c.brain.args,
         path: path.display().to_string(),
     })
 }
@@ -1638,6 +1650,10 @@ fn settings_write(
     c.privacy.query_log = settings.query_log;
     c.retention.frames_days = settings.frames_days;
     c.retention.text_days = settings.text_days;
+    // 只動這兩格。daily_budget / concurrency / reviewer_daily_budget 這一頁
+    // 沒畫，從頭組一份 BrainConfig 會把它們重設成預設值。守這一點的測試是
+    // `a_settings_page_write_must_not_reset_unexposed_brain_fields`。
+    c.set_brain_cli_from_page(settings.brain_command, settings.brain_args);
     c.save(&path).map_err(|e| format!("{e:#}"))?;
     // 存成功之後才問。反過來的話，一個存不進去的檔案會拿到一句「5 秒內換上」。
     Ok(WriteOutcome {

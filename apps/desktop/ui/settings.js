@@ -4,6 +4,9 @@ const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
 
 const el = {
   path: document.querySelector("[data-path]"),
+  brainCommand: document.querySelector("[data-brain-command]"),
+  brainArgs: document.querySelector("[data-brain-args]"),
+  brainSay: document.querySelector("[data-brain-say]"),
   apps: document.querySelector("[data-apps]"),
   urls: document.querySelector("[data-urls]"),
   titles: document.querySelector("[data-titles]"),
@@ -439,9 +442,29 @@ async function reloadHotkey() {
  */
 let queryLogWas = null;
 
+/**
+ * 第二張同意書現在算不算數。`true` / `false` / `null`（問不到）。
+ *
+ * `null` 不可以印成 `false`：那會把「她有 CLI 但你沒許可」講成一件我們沒問
+ * 過的事。問的路是既有的 `consent_read`（onboarding / 時間軸同一條），看
+ * `cloud-reading` 那張的 `effective`——簽過但條文改版了的，那一格就是 false。
+ */
+let cloudOk = null;
+
+/**
+ * 心跳現在說什麼：`"recording"`／`"booting"`／`"none"`。
+ *
+ * 和 `WriteOutcome.watching` 同一個判斷，不是另一個。存完用後端剛回的那一份；
+ * 開場問 `recording_state`（同一顆 `heartbeat::phase`）。認不得的值走
+ * `"none"`：三句裡只有它不會替一件沒發生的事背書。
+ */
+let watchingNow = "none";
+
 function apply(s) {
   queryLogWas = s.query_log;
   el.path.textContent = s.path;
+  if (el.brainCommand) el.brainCommand.value = s.brain_command ?? "";
+  if (el.brainArgs) el.brainArgs.value = (s.brain_args ?? []).join("\n");
   el.apps.value = s.excluded_apps.join("\n");
   el.urls.value = s.excluded_urls.join("\n");
   el.titles.value = s.excluded_titles.join("\n");
@@ -450,6 +473,86 @@ function apply(s) {
   el.querylog.checked = s.query_log;
   el.framesDays.value = s.frames_days;
   el.textDays.value = s.text_days;
+}
+
+/**
+ * 大腦這一格現在到底是開是關。四種，不是兩種。
+ *
+ * 「她沒有 CLI 可以叫」和「她有 CLI 但你沒許可」修法完全不同（一個去填框，
+ * 一個去勾同意書）。印成同一句就是這個 repo 犯過四十次的那個錯。
+ */
+function paintBrain() {
+  if (!el.brainSay) return;
+  if (unreadable) {
+    el.brainSay.textContent = "";
+    el.brainSay.classList.remove("bad", "ok");
+    el.brainSay.hidden = true;
+    return;
+  }
+  el.brainSay.hidden = false;
+  el.brainSay.classList.remove("bad", "ok");
+  const cmd = (el.brainCommand?.value ?? "").trim();
+  if (!cmd) {
+    // 1. 沒填命令（不管同意書勾了沒）。
+    el.brainSay.textContent =
+      "還沒填命令：解釋層和審閱層一次都不會醒。空著就是關，不是跑得慢一點。";
+    return;
+  }
+  if (cloudOk === null) {
+    el.brainSay.textContent =
+      "命令有了，但問不到第二張同意書勾了沒。在問得到之前，不能當成會送。同意書那一頁看得到同一份答案。";
+    return;
+  }
+  if (cloudOk === false) {
+    // 2. 填了命令，第二張沒勾。
+    el.brainSay.classList.add("bad");
+    el.brainSay.textContent =
+      "命令有了，但第二張同意書還沒勾：螢幕上的字只留在這台機器，一次都不會交給這支 CLI。去「三張同意書」那一頁勾上雲解讀。";
+    return;
+  }
+  // 兩個條件都成立。watching 那三個值決定她現在會不會醒——不要自己再發明一個判斷。
+  if (watchingNow === "recording") {
+    // 4. 兩個都成立而且正在錄。
+    el.brainSay.classList.add("ok");
+    el.brainSay.textContent = "命令和同意書都齊了，而且正在錄：她會自己醒。";
+    return;
+  }
+  if (watchingNow === "booting") {
+    el.brainSay.textContent =
+      "命令和同意書都齊了。有一個 sister record 正在起來（多半在開資料庫）——它一開始錄，她就會自己醒，不必再按「開始記錄」。";
+    return;
+  }
+  // 3. 填了命令、同意書也勾了，但現在沒有 record 在跑。
+  el.brainSay.textContent =
+    "命令和同意書都齊了。現在沒有人在錄，等你按下「開始記錄」她才會自己醒。";
+}
+
+async function refreshBrainFacts() {
+  if (invoke === null) {
+    cloudOk = null;
+    watchingNow = "none";
+    return;
+  }
+  try {
+    // **不可以叫 `view`。** `check-combo-is-readable.py` 的白名單是正面表列：
+    // `settings.js` 裡的 `view` 後面永遠要接一個 `.`。那條規則成立的前提是
+    // 「這顆物件只活在 `paintHotkey` 裡」——熱鍵那一份，生的 accelerator
+    // 不准走上畫面。這裡多一個同名的區域變數，會讓那道閘門在一段跟熱鍵
+    // 完全無關的程式碼上翻紅（實測過，就是這兩行）。
+    const consentView = await invoke("consent_read");
+    const sheet = (consentView?.sheets ?? []).find(
+      (s) => s.key === "cloud-reading",
+    );
+    cloudOk = sheet ? sheet.effective === true : null;
+  } catch {
+    cloudOk = null;
+  }
+  try {
+    const w = await invoke("recording_state");
+    watchingNow = w === "recording" || w === "booting" || w === "none" ? w : "none";
+  } catch {
+    watchingNow = "none";
+  }
 }
 
 /**
@@ -472,6 +575,8 @@ let unreadable = false;
 function setUnreadable(on) {
   unreadable = on;
   for (const node of [
+    el.brainCommand,
+    el.brainArgs,
     el.apps,
     el.urls,
     el.titles,
@@ -484,7 +589,7 @@ function setUnreadable(on) {
   ]) {
     if (node) node.disabled = on;
   }
-  for (const box of [el.apps, el.urls, el.titles]) {
+  for (const box of [el.brainCommand, el.brainArgs, el.apps, el.urls, el.titles]) {
     if (!box) continue;
     if (on) {
       box.value = "";
@@ -503,6 +608,9 @@ function setUnreadable(on) {
       "排除規則和兩道防線都還在擋。修好底下那行錯誤再回來。";
     el.unreadable.hidden = !on;
   }
+  // 命令框被清空之後，這一格會看起來像「她沒有 CLI 可以叫」。那是假的——
+  // 正在跑的那一份我們讀不到。藏起來，讓上面那句「都不算數」說話。
+  paintBrain();
 }
 
 /**
@@ -524,6 +632,8 @@ async function load() {
     apply(await invoke("settings_read"));
     setUnreadable(false);
     say("");
+    await refreshBrainFacts();
+    paintBrain();
     await relint();
     ok = true;
   } catch (err) {
@@ -555,9 +665,14 @@ async function load() {
  * 的機器共用同一片空白。分不開就等於沒修，所以這四張要一次看完。
  *
  * 和 app.js 的 `?state=` 同一個理由——這台開發機開不起 Tauri 視窗，而這一頁
- * 有一堆版面（七個區塊、警告清單、底下那條）需要真的看過。**它走的是和產品
- * 一樣的 `apply()`、`paintLint()` 與 `paintHotkey()`**，不是另外畫一份長得像
- * 的出來：上一次讓開發開關走自己的路，截出來的圖就騙了我一次。
+ * 有一堆版面（八個區塊、警告清單、底下那條）需要真的看過。**它走的是和產品
+ * 一樣的 `apply()`、`paintLint()`、`paintBrain()` 與 `paintHotkey()`**，不是另外
+ * 畫一份長得像的出來：上一次讓開發開關走自己的路，截出來的圖就騙了我一次。
+ *
+ * 大腦那一格有四張臉，**要並排看過**：沒填命令、填了但第二張沒勾、兩個都齊
+ * 但沒人在錄、兩個都齊而且正在錄。前兩張印成同一句就是這個 repo 犯過四十次
+ * 的那個錯。`?demo=brain`（沒勾）、`?demo=brainready`（沒人在錄）、
+ * `?demo=brainon`（正在錄）；沒帶這些的 demo 是沒填命令那一張。
  *
  * 熱鍵那一格有兩種畫面，而「搶不到」才是這一格存在的理由，所以它也要被看過。
  */
@@ -583,6 +698,8 @@ function demo(variant) {
     query_log: true,
     frames_days: 30,
     text_days: 365,
+    brain_command: "",
+    brain_args: [],
   });
   // 第二條規則故意是壞的，這樣才看得到警告那一格長什麼樣。理由字串抄自
   // `suspicious_url_rules` 真正回傳的那一句。
@@ -660,6 +777,28 @@ function demo(variant) {
             config_unreadable: null,
           },
   );
+  // 大腦那一格的四張臉。預設是「沒填命令」——那是產品出廠的樣子（A/B 沒贏
+  // 保持預設關）。另外三張要指名才畫得出來。
+  if (variant === "brain") {
+    if (el.brainCommand) el.brainCommand.value = "claude";
+    if (el.brainArgs) el.brainArgs.value = "-p";
+    cloudOk = false;
+    watchingNow = "recording";
+  } else if (variant === "brainready") {
+    if (el.brainCommand) el.brainCommand.value = "claude";
+    if (el.brainArgs) el.brainArgs.value = "-p";
+    cloudOk = true;
+    watchingNow = "none";
+  } else if (variant === "brainon") {
+    if (el.brainCommand) el.brainCommand.value = "claude";
+    if (el.brainArgs) el.brainArgs.value = "-p";
+    cloudOk = true;
+    watchingNow = "recording";
+  } else {
+    cloudOk = false;
+    watchingNow = "none";
+  }
+  paintBrain();
   say("這是 demo 版面，沒有讀任何真的設定。");
 }
 
@@ -698,6 +837,8 @@ async function save() {
         query_log: el.querylog.checked,
         frames_days: days(el.framesDays, "畫面"),
         text_days: days(el.textDays, "文字"),
+        brain_command: (el.brainCommand?.value ?? "").trim(),
+        brain_args: toLines(el.brainArgs?.value ?? ""),
         // `path` 不送。要寫到哪個檔案由 Rust 那邊算，不是這一頁說了算。
       },
     });
@@ -716,10 +857,19 @@ async function save() {
     // 而這一頁給了他一條走不通的路。
     //
     // 認不得的值走「沒有人在錄」那一句：三句裡只有它不會替一件沒發生的事背書。
+    if (
+      outcome?.watching === "recording" ||
+      outcome?.watching === "booting" ||
+      outcome?.watching === "none"
+    ) {
+      watchingNow = outcome.watching;
+    } else {
+      watchingNow = "none";
+    }
     const watching =
-      outcome?.watching === "recording"
+      watchingNow === "recording"
         ? "存好了。正在跑的 record 會在 5 秒內換上這一份。"
-        : outcome?.watching === "booting"
+        : watchingNow === "booting"
           ? "存好了。有一個 sister record 正在起來（多半在開資料庫）——它一開始錄就會換上這一份，不必再按「開始記錄」。"
           : "存好了——不過現在沒有人在錄，所以這一份要等你按下「開始記錄」才會生效。";
     // 把題庫關掉只擋**新的**問題。不講的話，「不要記下我問過的問題」讀起來像
@@ -770,6 +920,7 @@ async function save() {
 
 el.save?.addEventListener("click", () => void save());
 el.reload?.addEventListener("click", () => void load());
+el.brainCommand?.addEventListener("input", () => paintBrain());
 
 const variant = new URLSearchParams(globalThis.location.search).get("demo");
 if (variant !== null) {

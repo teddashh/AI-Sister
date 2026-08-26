@@ -48,6 +48,8 @@ const BASE = {
   query_log: true,
   frames_days: 14,
   text_days: 90,
+  brain_command: "",
+  brain_args: [],
 };
 
 /*
@@ -68,7 +70,15 @@ const HOTKEY = {
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
-async function open({ config = BASE, onRead, onWrite, onHotkeySet, hotkey = HOTKEY } = {}) {
+async function open({
+  config = BASE,
+  onRead,
+  onWrite,
+  onHotkeySet,
+  hotkey = HOTKEY,
+  cloud = false,
+  watching = "recording",
+} = {}) {
   // **`domOf` 而不是「要什麼就生什麼」。** 上一版任何選擇器都回一個新的
   // `fakeEl()`，於是⑧那條守著「儲存被灰掉的時候『重新讀取』還按得動」的斷言，
   // 在那顆按鈕被從 settings.html 刪掉、或者被加上 disabled 的時候照樣是綠的
@@ -107,6 +117,41 @@ async function open({ config = BASE, onRead, onWrite, onHotkeySet, hotkey = HOTK
           case "hotkey_set":
             if (onHotkeySet) return onHotkeySet(arg.combo);
             return { ...hotkey, wanted: arg.combo, registered: true };
+          case "consent_read":
+            return {
+              path: "C:\\consent.toml",
+              current: true,
+              allows_recording: true,
+              allows_frames: true,
+              store_images: true,
+              capture_enabled: true,
+              reset_by_version: false,
+              sheets: [
+                {
+                  key: "local-recording",
+                  wording: "x",
+                  without: "x",
+                  granted_at: 1,
+                  effective: true,
+                },
+                {
+                  key: "cloud-reading",
+                  wording: "x",
+                  without: "x",
+                  granted_at: cloud ? 1 : null,
+                  effective: cloud,
+                },
+                {
+                  key: "frame-storage",
+                  wording: "x",
+                  without: "x",
+                  granted_at: 1,
+                  effective: true,
+                },
+              ],
+            };
+          case "recording_state":
+            return watching;
           default:
             return null;
         }
@@ -145,6 +190,8 @@ async function open({ config = BASE, onRead, onWrite, onHotkeySet, hotkey = HOTK
     },
     combo: () => node("[data-combo]").textContent,
     hotkeySay: () => node("[data-hotkey-say]").textContent,
+    brainSay: () => node("[data-brain-say]").textContent,
+    brainHidden: () => node("[data-brain-say]").hidden,
     /** 按那一格 → 進捕捉模式 → 按一組鍵下去。和真人的順序一樣。 */
     async pressCombo(e) {
       for (const fn of node("[data-combo]").handlers.click ?? []) fn();
@@ -234,6 +281,11 @@ console.log("⑤ 存成功，但存完那次重讀炸了");
   // 沒被清掉。
   check("儲存鍵留在灰的", p.node("[data-save]").disabled === true, p.node("[data-save]").disabled);
   check("排除清單是空的（這是 setUnreadable 做的，故意的）", p.node("[data-apps]").value === "");
+  check(
+    "大腦那一句不可以變成「還沒填命令」（框被清空了，那是假的）",
+    p.brainHidden() === true || !p.brainSay().includes("還沒填命令"),
+    p.brainSay(),
+  );
   const before = p.writes.length;
   check("再按一次按不動", (await p.save()) === false);
   check(
@@ -259,6 +311,7 @@ console.log("⑥ 存不進去");
 console.log("⑦ 沒有人在錄的時候按儲存");
 {
   const p = await open({
+    watching: "none",
     onWrite: (s, commit) => {
       commit(s);
       return { watching: "idle" };
@@ -344,6 +397,119 @@ console.log("⑪ 存不進去，而且退回去的那一組現在也搶不到了
   check("那一格還是答得出「設成哪一組」", p.combo() === "Ctrl + Alt + P", p.combo());
   check("而底下那句要說它現在搶不到", p.hotkeySay().includes("也搶不到了"), p.hotkeySay());
   check("而且是紅的", p.node("[data-hotkey-say]").classList.contains("bad"), p.hotkeySay());
+}
+
+const SENTENCE = {
+  noCommand:
+    "還沒填命令：解釋層和審閱層一次都不會醒。空著就是關，不是跑得慢一點。",
+  noConsent:
+    "命令有了，但第二張同意書還沒勾：螢幕上的字只留在這台機器，一次都不會交給這支 CLI。去「三張同意書」那一頁勾上雲解讀。",
+  readyIdle:
+    "命令和同意書都齊了。現在沒有人在錄，等你按下「開始記錄」她才會自己醒。",
+  readyBooting:
+    "命令和同意書都齊了。有一個 sister record 正在起來（多半在開資料庫）——它一開始錄，她就會自己醒，不必再按「開始記錄」。",
+  live: "命令和同意書都齊了，而且正在錄：她會自己醒。",
+};
+
+console.log("⑫ 大腦：沒填命令（同意書勾了、正在錄也不算）");
+{
+  const p = await open({ cloud: true, watching: "recording" });
+  check("就是那一句", p.brainSay() === SENTENCE.noCommand, p.brainSay());
+  check("句子裡沒有「同意書」（那是另一種修法）", !p.brainSay().includes("同意書"), p.brainSay());
+}
+
+console.log("⑬ 大腦：填了命令，第二張沒勾（正在錄也不算）");
+{
+  const p = await open({
+    config: { ...BASE, brain_command: "claude", brain_args: ["-p"] },
+    cloud: false,
+    watching: "recording",
+  });
+  check("就是那一句", p.brainSay() === SENTENCE.noConsent, p.brainSay());
+  check("指得出去哪裡勾", p.brainSay().includes("三張同意書"), p.brainSay());
+  check(
+    "不是「還沒填命令」那句",
+    p.brainSay() !== SENTENCE.noCommand,
+    p.brainSay(),
+  );
+  check("是紅的", p.node("[data-brain-say]").classList.contains("bad"), p.brainSay());
+}
+
+console.log("⑭ 大腦：命令和同意書都齊，沒有人在錄");
+{
+  const p = await open({
+    config: { ...BASE, brain_command: "claude" },
+    cloud: true,
+    watching: "none",
+  });
+  check("就是那一句", p.brainSay() === SENTENCE.readyIdle, p.brainSay());
+  check("不是正在錄那句", p.brainSay() !== SENTENCE.live, p.brainSay());
+}
+
+console.log("⑮ 大腦：兩個都成立而且正在錄");
+{
+  const p = await open({
+    config: { ...BASE, brain_command: "claude" },
+    cloud: true,
+    watching: "recording",
+  });
+  check("就是那一句", p.brainSay() === SENTENCE.live, p.brainSay());
+  check("是綠的", p.node("[data-brain-say]").classList.contains("ok"), p.brainSay());
+}
+
+console.log("⑯ 大腦：兩個都齊，record 正在起來");
+{
+  const p = await open({
+    config: { ...BASE, brain_command: "claude" },
+    cloud: true,
+    watching: "booting",
+  });
+  check("就是那一句", p.brainSay() === SENTENCE.readyBooting, p.brainSay());
+  check(
+    "不是「按開始記錄」那句（那顆按鈕這時候按下去會說已經有人在跑）",
+    !p.brainSay().includes("等你按下「開始記錄」"),
+    p.brainSay(),
+  );
+}
+
+{
+  const four = [
+    SENTENCE.noCommand,
+    SENTENCE.noConsent,
+    SENTENCE.readyIdle,
+    SENTENCE.live,
+  ];
+  const unique = new Set(four);
+  check("C 的四句話沒有兩句一樣", unique.size === 4, four);
+  check(
+    "booting 那句也跟這四句都不同",
+    !four.includes(SENTENCE.readyBooting),
+    SENTENCE.readyBooting,
+  );
+}
+
+console.log("⑰ 打字當下就要換成「沒勾同意書」，不能等儲存");
+{
+  const p = await open({ cloud: false, watching: "none" });
+  check("開場是沒填命令", p.brainSay() === SENTENCE.noCommand, p.brainSay());
+  p.node("[data-brain-command]").value = "claude";
+  for (const fn of p.node("[data-brain-command]").handlers.input ?? []) fn();
+  check("立刻變成第二張沒勾", p.brainSay() === SENTENCE.noConsent, p.brainSay());
+}
+
+console.log("⑱ 儲存會送出命令和參數，空白會剪掉");
+{
+  const p = await open();
+  p.node("[data-brain-command]").value = "  gemini  ";
+  p.node("[data-brain-args]").value = "-m\n\nflash\n";
+  await p.save();
+  const sent = p.writes[0];
+  check("送了剪過空白的命令", sent.brain_command === "gemini", sent.brain_command);
+  check(
+    "參數一行一個、空行丟掉",
+    JSON.stringify(sent.brain_args) === JSON.stringify(["-m", "flash"]),
+    sent.brain_args,
+  );
 }
 
 console.log("");

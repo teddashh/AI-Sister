@@ -610,6 +610,18 @@ impl Config {
         std::fs::write(path, toml::to_string_pretty(self)?)?;
         Ok(())
     }
+
+    /// 設定頁只改 `[brain] command` / `args`。沒畫出來的欄位原封不動。
+    ///
+    /// 每日預算、併發、審閱預算有 [`BrainConfig::check`] 在守（concurrency
+    /// 1..=8），而且改錯了的後果是悄悄降級，不是看得見的東西——所以那一頁
+    /// 故意沒畫。從頭組一份 `BrainConfig { command, args, ..Default::default() }`
+    /// 會把它們重設成 80 / 4 / 40；這支函式存在的理由就是讓那件事編得出來
+    /// 也跑不過測試。
+    pub fn set_brain_cli_from_page(&mut self, command: String, args: Vec<String>) {
+        self.brain.command = command;
+        self.brain.args = args;
+    }
 }
 
 /// [`Config::reload`] 的三種答案。**兩種都是「別動」**。
@@ -984,6 +996,65 @@ mod tests {
         cfg.brain.concurrency = 4;
         assert!(cfg.brain.check().is_ok());
         assert!(Config::default().brain.cli().is_none(), "預設沒有 CLI");
+    }
+
+    /// 設定頁寫回 `[brain] command` / `args` 時，沒畫出來的三個欄位必須原封不動。
+    ///
+    /// 這是 desktop `settings_write`「先讀再改再寫」對 `[brain]` 的契約。從頭
+    /// 組一份 `BrainConfig { command, args, ..Default::default() }` 會把
+    /// `daily_budget` / `concurrency` / `reviewer_daily_budget` 重設成預設值
+    /// ——使用者只是填了命令，每日額度卻被悄悄換掉了。
+    #[test]
+    fn a_settings_page_write_must_not_reset_unexposed_brain_fields() {
+        // 不引 `tempfile`：這個 crate 的相依樹是 `check-no-network.sh` 盯著的。
+        let path = std::env::temp_dir().join(format!(
+            "sister-brain-page-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        // 這三個數字**不能**是預設值，否則「被重設」和「沒被碰」印成同一個數。
+        let mut original = Config::default();
+        original.brain.daily_budget = 17;
+        original.brain.concurrency = 3;
+        original.brain.reviewer_daily_budget = 9;
+        original.brain.command.clear();
+        original.save(&path).expect("存得進去");
+
+        assert_ne!(
+            BrainConfig::default().daily_budget,
+            17,
+            "對照組失效：17 碰巧是預設值的話，這個測試守不到「被重設」"
+        );
+        assert_ne!(BrainConfig::default().concurrency, 3);
+        assert_ne!(BrainConfig::default().reviewer_daily_budget, 9);
+
+        // 這就是 settings_write 對 [brain] 做的事：先讀、只動這兩格、再寫。
+        let mut page = Config::load(&path).expect("讀得回來");
+        page.set_brain_cli_from_page("claude".into(), vec!["-p".into()]);
+        page.save(&path).expect("寫得回去");
+
+        let back = Config::load(&path).expect("再讀一次");
+        assert_eq!(back.brain.command, "claude");
+        assert_eq!(back.brain.args, ["-p"]);
+        assert_eq!(
+            back.brain.daily_budget, 17,
+            "daily_budget 被重設了——settings_write 從頭組了一份 BrainConfig"
+        );
+        assert_eq!(
+            back.brain.concurrency, 3,
+            "concurrency 被重設了——settings_write 從頭組了一份 BrainConfig"
+        );
+        assert_eq!(
+            back.brain.reviewer_daily_budget, 9,
+            "reviewer_daily_budget 被重設了——settings_write 從頭組了一份 BrainConfig"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
