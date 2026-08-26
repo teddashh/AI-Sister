@@ -35,6 +35,7 @@ pub mod local_day;
 pub mod model;
 pub mod moments;
 pub mod pause;
+pub mod prompt_fence;
 pub mod question;
 pub mod redact;
 pub mod replay;

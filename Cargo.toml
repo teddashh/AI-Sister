@@ -32,6 +32,7 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "6"
+getrandom = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
 [profile.release]

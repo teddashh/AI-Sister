@@ -766,6 +766,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "directories",
+ "getrandom",
  "regex",
  "rusqlite",
  "serde",

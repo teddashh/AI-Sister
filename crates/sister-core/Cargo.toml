@@ -27,3 +27,4 @@ chrono.workspace = true
 rusqlite.workspace = true
 tracing.workspace = true
 directories.workspace = true
+getrandom.workspace = true
