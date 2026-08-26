@@ -483,23 +483,40 @@ impl ActionLog {
     /// 讀不出來，沒有人會發現），刪掉它失去的是一列本來就顯示不出內容的字。
     /// 這跟排除規則「一律偏向多擋」是同一個取捨。刪了幾列會分開回報，因為
     /// 「忘掉了 3 列」和「忘掉了 3 列外加 1 列讀不懂的」不是同一句話。
+    /// **留下來的那幾列一個位元組都不會變。** 這裡不走 [`Self::replay`]——那支
+    /// 回的是解析過的 [`ActionEvent`]，把它們重新序列化寫回去，等於用「這一版
+    /// 認得的欄位」去重寫每一列。`ActionEvent` 沒有 `deny_unknown_fields`，所以
+    /// 一列由新版寫下、帶著這一版還不認得的欄位的紀錄，會在存檔的那一刻安靜地
+    /// 掉一半——而他要求刪掉的是**另一段時間**。忘掉星期二不可以順手改寫星期一。
+    /// 所以留下來的列照原字串搬過去，只有時間拿去比對。
     pub fn forget_range(&self, from_ms: i64, to_ms: i64) -> Result<ForgetReport> {
-        let replay = self.replay()?;
-        // 檔案不存在的時候 `replay()` 回一份空的，這裡就會是一份全 0 的報告，
-        // 而且不會憑空把檔案生出來。
-        if replay.events.is_empty() && replay.unreadable.is_empty() {
-            return Ok(ForgetReport::default());
-        }
-        let mut report = ForgetReport {
-            removed_unreadable: replay.unreadable.len() as u64,
-            ..ForgetReport::default()
+        let file = match File::open(&self.path) {
+            Ok(file) => file,
+            // 檔案還沒生出來 = 一次動作都沒有提出過。回一份全 0 的報告，而且
+            // 不要憑空把檔案生出來。
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ForgetReport::default());
+            }
+            Err(e) => {
+                return Err(anyhow::Error::from(e))
+                    .with_context(|| format!("開啟 action log 失敗：{}", self.path.display()));
+            }
         };
-        let mut kept = Vec::new();
-        for event in &replay.events {
-            if (from_ms..to_ms).contains(&event.at_ms()) {
-                report.removed_in_range += 1;
-            } else {
-                kept.push(event);
+        let mut report = ForgetReport::default();
+        let mut kept: Vec<String> = Vec::new();
+        for line in BufReader::new(file).lines() {
+            let line =
+                line.with_context(|| format!("讀 action log 失敗：{}", self.path.display()))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<ActionEvent>(&line) {
+                Ok(event) if (from_ms..to_ms).contains(&event.at_ms()) => {
+                    report.removed_in_range += 1;
+                }
+                Ok(_) => kept.push(line),
+                // 解不開就問不出時間，也就證明不了自己在範圍外。見上面那段。
+                Err(_) => report.removed_unreadable += 1,
             }
         }
         report.kept = kept.len() as u64;
@@ -514,9 +531,10 @@ impl ActionLog {
         {
             let mut file = File::create(&tmp)
                 .with_context(|| format!("建立暫存 action log 失敗：{}", tmp.display()))?;
-            for event in kept {
-                serde_json::to_writer(&mut file, event).context("序列化 action log 失敗")?;
-                file.write_all(b"\n").context("寫入 action log 失敗")?;
+            for line in &kept {
+                file.write_all(line.as_bytes())
+                    .and_then(|()| file.write_all(b"\n"))
+                    .context("寫入 action log 失敗")?;
             }
             file.sync_data().context("同步 action log 失敗")?;
         }
@@ -850,6 +868,50 @@ mod tests {
         let raw = std::fs::read_to_string(log.path()).unwrap();
         assert!(!raw.contains("secret.example"), "{raw}");
         assert!(raw.contains("keep.example"), "{raw}");
+    }
+
+    /// 忘掉星期二，不可以順手改寫星期一。
+    ///
+    /// 留下來的列如果是重新序列化寫回去的，一列由新版寫下、帶著這一版還不認得
+    /// 的欄位的紀錄就會安靜地掉一半——而他要求刪掉的是另一段時間。這裡塞一列
+    /// 「未來版本」的紀錄：它解得開（`ActionEvent` 沒有 `deny_unknown_fields`），
+    /// 所以不會被當成讀不懂的那一種，時間也在範圍外，因此它必須**原字不動**。
+    #[test]
+    fn a_row_outside_the_range_survives_byte_for_byte() {
+        let dir = tmp_dir("forget-verbatim");
+        let log = ActionLog::in_data_dir(&dir);
+        log.append(&ActionEvent::Executed {
+            at_ms: 1_000,
+            action: ActionSnapshot::OpenUrl {
+                url: "https://gone.example".into(),
+            },
+            result: ExecutionResult::Succeeded {
+                detail: "ok".into(),
+            },
+        })
+        .unwrap();
+        let from_the_future = r#"{"event":"approved","at_ms":9000,"action":{"action":"open_url","url":"https://kept.example"},"why":"未來版本才有的欄位"}"#;
+        {
+            use std::io::Write as _;
+            let mut f = OpenOptions::new().append(true).open(log.path()).unwrap();
+            writeln!(f, "{from_the_future}").unwrap();
+        }
+
+        let report = log.forget_range(0, 5_000).unwrap();
+        assert_eq!(
+            report,
+            ForgetReport {
+                removed_in_range: 1,
+                removed_unreadable: 0,
+                kept: 1,
+            },
+            "那一列解得開而且在範圍外，不可以被算成讀不懂的",
+        );
+        assert_eq!(
+            std::fs::read_to_string(log.path()).unwrap(),
+            format!("{from_the_future}\n"),
+            "留下來的那一列被重寫了——這一版不認得的欄位掉了",
+        );
     }
 
     /// 一次動作都沒有過的時候，忘掉一段時間不該生出一個空檔案。
