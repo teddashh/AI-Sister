@@ -36,6 +36,9 @@ pub fn replay_lines(replay: &Replay) -> Vec<String> {
         .events
         .iter()
         .map(|event| match event {
+            ActionEvent::Granted { at_ms, grant } => {
+                format!("{} 授權：{}", at(*at_ms), grant.describe())
+            }
             ActionEvent::Proposed { at_ms, action } => {
                 format!("{} 提出：{}", at(*at_ms), action.describe())
             }

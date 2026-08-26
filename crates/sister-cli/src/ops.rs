@@ -1283,12 +1283,25 @@ pub mod act {
             Expiry::after_issued(issued_at, valid_for_ms),
             step_limit,
         );
-        let mut run = SemiActionRun::new(grant);
+        let mut run = SemiActionRun::new(grant.clone());
         let commitments = source.live_commitments()?;
         let log = ActionLog::in_data_dir(data_dir);
         let mut tally = Tally::default();
         let mut terminal: Option<RunConclusion> = None;
         let mut previewed_steps = 0_u32;
+
+        // **這一輪的第一列是那張授權書。** 少了它，紀錄裡只有「她做了什麼」，
+        // 而「他准了什麼」是唯一沒被記下來的那一半；順帶它也是一輪的界線——
+        // 沒有它的話兩次 `sister do` 的步驟在檔案裡直接接在一起。
+        //
+        // 預演不寫：`--dry-run` 什麼都不會發生，寫一列「已授權」進去就等於在
+        // 紀錄上留下一輪從來沒有跑過的授權。
+        if !opts.dry_run {
+            log.append(&ActionEvent::Granted {
+                at_ms: clock(),
+                grant,
+            })?;
+        }
 
         for commitment in commitments {
             let button = match sister_hands::commitment_action::parse_allowed_next_step(
@@ -1700,6 +1713,7 @@ pub mod act {
                 .events()
                 .iter()
                 .map(|e| match e {
+                    ActionEvent::Granted { .. } => "granted",
                     ActionEvent::Proposed { .. } => "proposed",
                     ActionEvent::Approved { .. } => "approved",
                     ActionEvent::Executed { .. } => "executed",
@@ -1711,10 +1725,27 @@ pub mod act {
                 .collect();
             assert_eq!(
                 kinds,
-                vec!["proposed", "approved", "executed", "finished", "concluded"],
+                vec![
+                    "granted",
+                    "proposed",
+                    "approved",
+                    "executed",
+                    "finished",
+                    "concluded"
+                ],
                 "{}",
                 run.out
             );
+            // 授權那一列要**排在第一個**。排在後面的話，讀的人會看到一步在
+            // 一張還沒有發出來的票底下發生。
+            let ActionEvent::Granted { grant, .. } = &run.events()[0] else {
+                panic!("第一列要是授權：{:?}", run.events());
+            };
+            let described = grant.describe();
+            assert!(described.contains("開今天的連結"), "{described}");
+            assert!(described.contains("chrome.exe"), "{described}");
+            assert!(described.contains("open-url"), "{described}");
+            assert!(described.contains("最多 3 步"), "{described}");
         }
 
         /// **這是 A1 的驗收。** 一輪互動花掉的時間如果全部蓋同一個 `at_ms`，
@@ -1893,12 +1924,15 @@ pub mod act {
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
             };
-            // 第一步在授權還新的時候；問完第一步之後，時鐘跳過兩分鐘。
+            // 第一步在授權還新的時候；**做完第一步之後**，時鐘跳過兩分鐘，
+            // 於是第二步連問都不該被問成「涵蓋」。
+            // 呼叫順序：1 發證、2 寫授權那一列、3 判斷、4 proposed、5 approved、
+            // 6 執行、7 結果、8 step_finished。跳在 8。
             let mut calls = 0;
             let mut t = 1_700_000_000_000;
             let clock = move || {
                 calls += 1;
-                t += if calls == 6 { 120_000 } else { 1_000 };
+                t += if calls == 8 { 120_000 } else { 1_000 };
                 t
             };
             let run = go_from(
@@ -1939,13 +1973,14 @@ pub mod act {
         #[test]
         fn a_yes_typed_long_after_the_ticket_expired_does_not_reach_the_executor() {
             let source = one_card();
-            // 呼叫順序：1 發證、2 印判斷用的、3 proposed、4 approved、5 執行。
-            // 茶泡在第 4 和第 5 中間——也就是他盯著那個問句的那段時間。
+            // 呼叫順序：1 發證、2 寫授權那一列、3 印判斷用的、4 proposed、
+            // 5 approved、6 執行。茶泡在第 5 和第 6 中間——也就是他盯著那個
+            // 問句的那段時間。
             let mut calls = 0;
             let mut t = 1_700_000_000_000;
             let clock = move || {
                 calls += 1;
-                t += if calls == 5 { 7_200_000 } else { 1_000 };
+                t += if calls == 6 { 7_200_000 } else { 1_000 };
                 t
             };
             let run = go_from(
@@ -2213,6 +2248,74 @@ pub mod act {
                 run.out
             );
             assert!(run.out.contains("問了 0 步"), "{}", run.out);
+        }
+
+        /// 同一個資料目錄跑兩輪，讀回去要分得出那是兩輪、而且兩張票不一樣。
+        ///
+        /// 沒有那一列的時候，兩輪的步驟在檔案裡直接接在一起：既沒有界線，
+        /// 也沒有任何東西說得出「這一步是在什麼權限底下發生的」。
+        #[test]
+        fn two_runs_in_one_data_dir_each_carry_their_own_grant() {
+            let dir = crate::ops::tmp::Tmp::new("act-two-grants");
+            let source = one_card();
+            for (task, app, steps) in [
+                ("開今天的連結", "chrome.exe", 3),
+                ("整理下載資料夾", "explorer.exe", 1),
+            ] {
+                let mut executor = Fake::default();
+                run_with_output(
+                    &dir.0,
+                    &opts(task, &[app], steps, 5, false),
+                    &source,
+                    &mut std::io::Cursor::new(b"\xe5\xa5\xbd\n".to_vec()),
+                    &mut executor,
+                    &mut ticking(1_700_000_000_000),
+                    &mut Vec::new(),
+                )
+                .expect("跑一輪");
+            }
+            let events = ActionLog::in_data_dir(&dir.0)
+                .replay()
+                .expect("replay")
+                .events;
+            let grants: Vec<String> = events
+                .iter()
+                .filter_map(|e| match e {
+                    ActionEvent::Granted { grant, .. } => Some(grant.describe()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(grants.len(), 2, "兩輪要留下兩張票：{events:?}");
+            assert_ne!(grants[0], grants[1], "兩張不一樣的票不可以讀成同一張");
+            assert!(grants[0].contains("chrome.exe") && grants[0].contains("最多 3 步"));
+            assert!(grants[1].contains("explorer.exe") && grants[1].contains("最多 1 步"));
+            // 界線要在最前面：第一列是票，不是步驟。
+            assert!(
+                matches!(events[0], ActionEvent::Granted { .. }),
+                "{events:?}"
+            );
+            // 讀成人話的那一份也要看得到它。
+            let text = logged(&dir.0, 99);
+            assert_eq!(text.matches(" 授權：").count(), 2, "{text}");
+            assert!(text.contains("整理下載資料夾"), "{text}");
+        }
+
+        /// 一個 app 都沒授權的時候，那一列不可以讀起來像「沒有限制」。
+        #[test]
+        fn an_empty_app_list_reads_as_blocking_everything_not_as_unrestricted() {
+            let grant = Grant::new(
+                Task::new("開今天的連結"),
+                AllowedApps::new(std::iter::empty()),
+                AllowedActions::new([ActionKind::OpenUrl]),
+                Expiry::after_issued(0, 60_000),
+                StepLimit::new(3).expect("3 > 0"),
+            );
+            let described = grant.describe();
+            assert!(described.contains("每一步都會被擋"), "{described}");
+            // 五個維度一個都不能少——省掉的那一維會被讀成「這裡沒有限制」。
+            for wanted in ["任務「", "app：", "動作：", "毫秒內有效", "最多 3 步"] {
+                assert!(described.contains(wanted), "少了 {wanted}：{described}");
+            }
         }
 
         fn logged(dir: &std::path::Path, limit: usize) -> String {

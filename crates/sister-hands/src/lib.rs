@@ -340,6 +340,18 @@ pub enum ExecutionResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ActionEvent {
+    /// 一輪的開頭：**這一輪是在哪一張授權書底下發生的**。
+    ///
+    /// 少了這一列，紀錄上只剩「她做了什麼」——他授權過什麼是唯一沒有被記下來
+    /// 的那一半。同一串步驟在一張「只准 chrome、五分鐘、一步」和一張「什麼都
+    /// 准、一整天、一百步」底下發生，翻回去看是一模一樣的。
+    ///
+    /// 它同時是**一輪的界線**。在這之前，兩次 `sister do` 的步驟在檔案裡直接
+    /// 接在一起，沒有任何東西說得出「這一步和上一步不是同一輪的事」。
+    Granted {
+        at_ms: i64,
+        grant: semi_action::Grant,
+    },
     Proposed {
         at_ms: i64,
         action: ActionSnapshot,
@@ -388,7 +400,8 @@ impl ActionEvent {
     /// 一列永遠落在每一個範圍之外，於是它記的那串網址永遠忘不掉。
     pub fn at_ms(&self) -> i64 {
         match self {
-            Self::Proposed { at_ms, .. }
+            Self::Granted { at_ms, .. }
+            | Self::Proposed { at_ms, .. }
             | Self::Approved { at_ms, .. }
             | Self::Executed { at_ms, .. }
             | Self::Refused { at_ms, .. }

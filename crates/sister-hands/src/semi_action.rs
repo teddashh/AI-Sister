@@ -126,6 +126,43 @@ impl Grant {
     pub const fn step_limit(&self) -> StepLimit {
         self.step_limit
     }
+    /// 這張授權書讀成一句人話。
+    ///
+    /// **這是為了讓「他授權過什麼」進得了 action log。** 在這之前那份紀錄只
+    /// 記得她做了什麼——同一串步驟在一張「只准 chrome、五分鐘、一步」和一張
+    /// 「什麼都准、一整天、一百步」底下發生，log 上長得一模一樣。
+    ///
+    /// 五個維度全部要出現，一個都不能省：省掉的那一維在讀的人眼裡不是
+    /// 「沒有限制」，是「這裡沒有這一維」——而那兩件事差得非常遠。
+    pub fn describe(&self) -> String {
+        // 空名單擋掉每一步。寫成「（沒有）」會被讀成「這一維空著＝不設限」，
+        // 而它的意思剛好相反。
+        let apps = if self.apps.0.is_empty() {
+            "（一個都沒有授權，所以每一步都會被擋）".to_string()
+        } else {
+            self.apps
+                .0
+                .iter()
+                .map(|app| app.0.as_str())
+                .collect::<Vec<_>>()
+                .join("、")
+        };
+        let actions = self
+            .actions
+            .0
+            .iter()
+            .map(|kind| match kind {
+                ActionKind::OpenUrl => "open-url",
+                ActionKind::OpenFile => "open-file",
+                ActionKind::FocusWindow => "focus-window",
+            })
+            .collect::<Vec<_>>()
+            .join("、");
+        format!(
+            "任務「{}」；app：{apps}；動作：{actions}；發出後 {} 毫秒內有效；最多 {} 步",
+            self.task.0, self.expiry.valid_for_ms, self.step_limit.0
+        )
+    }
     pub fn covers(&self, step: &StepRequest, now_ms: i64) -> Result<(), GrantRejection> {
         if self.task != step.task {
             return Err(GrantRejection::Task);
