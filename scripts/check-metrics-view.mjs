@@ -48,8 +48,7 @@ function report(over = {}) {
         answer_accuracy: { passed: 0, total: 30, rate: 0 },
         citation_accuracy: { passed: 10, total: 20, rate: 0.5 },
         latency: { samples: 90, p50_ms: 2.1, p95_ms: 5.2, max_ms: 8.7 },
-        model_calls: 0,
-        model_usd_per_day: 0,
+        model: { kind: "measured", calls: 0, usd_per_day: 0, interpreter_calls: 0, reviewer_calls: 0, interpreter_unit_usd: 0.0055, reviewer_unit_usd: 0.0105, source: "SPEC" },
         reminder_false_positive_rate: null,
         reminder_miss_rate: null,
         segmentation_f1: null,
@@ -189,7 +188,7 @@ console.log("② 初始、成功與未量到");
   const otherCells = page.node("[data-other-metrics]").children[0]?.children ?? [];
   check("0 分母不是 0%", profileCells[1]?.textContent === "不適用（0 題）", profileCells.map((cell) => cell.textContent));
   check("量到的 0 仍是 0/30", profileCells[2]?.textContent === "0/30（0.0%）", profileCells.map((cell) => cell.textContent));
-  check("模型的實測 0 沒變成未量到", profileCells[5]?.textContent === "0 calls／US$0.00/天", profileCells.map((cell) => cell.textContent));
+  check("模型的實測 0 沒變成未量到", profileCells[5]?.textContent === "0 calls／US$0.00/天（跑了，沒呼叫）", profileCells.map((cell) => cell.textContent));
   check(
     "八個 null 各自明講未量到",
     otherCells.length === 9 && otherCells.slice(1).every((cell) => cell.textContent === "未量到"),
@@ -197,6 +196,25 @@ console.log("② 初始、成功與未量到");
   );
   check("畫面沒有 report 自由字串或檔名", !page.text().includes(SECRET), page.text());
   check("畫面沒有 NaN / undefined", page.nonsense().length === 0, page.nonsense());
+}
+{
+  const page = await open(
+    report({
+      configurations: [
+        {
+          ...report().configurations[0],
+          model: { kind: "not_on_path" },
+        },
+      ],
+    }),
+  );
+  await page.load();
+  const profileCells = page.node("[data-profiles]").children[0]?.children ?? [];
+  check(
+    "沒跑腦不是量到 0",
+    profileCells[5]?.textContent === "沒跑腦",
+    profileCells.map((cell) => cell.textContent),
+  );
 }
 
 console.log("③ Draft 警告與錯誤清場");

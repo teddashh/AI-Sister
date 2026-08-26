@@ -371,9 +371,75 @@ console.log("⑧ 換到另一天讀失敗（右邊被清空了），接著重讀
   check("所以那一句不可以說整頁是空的", !p.sub().includes("這一頁現在是空的"), p.sub());
 }
 
+console.log("⑨ 外送紀錄：兩種空、沒送出去的原因、原文沒遮過");
+{
+  async function openOutbound(table) {
+    const page = await open(table);
+    const views = page.node("[data-views]");
+    const btn = {
+      getAttribute: (name) => (name === "data-view" ? "outbound" : null),
+    };
+    const ev = {
+      target: {
+        closest(sel) {
+          return sel === "[data-view]" ? btn : null;
+        },
+      },
+    };
+    for (const fn of views.handlers.click ?? []) fn(ev);
+    await tick();
+    return page;
+  }
+  const never = await openOutbound({
+    memory_outbound: { outbound: [], skips: [], ever_sent: false },
+  });
+  const neverText = never.node("[data-outbound]").textContent;
+  check("從來沒送過要講出來", neverText.includes("還沒送過任何東西"), neverText);
+  check("從來沒送過不能說被清掉了", !neverText.includes("清掉了"), neverText);
+  check("面板講原文沒遮", neverText.includes("原文") && neverText.includes("沒有去識別化"), neverText);
+
+  const pruned = await openOutbound({
+    memory_outbound: { outbound: [], skips: [], ever_sent: true },
+  });
+  const prunedText = pruned.node("[data-outbound]").textContent;
+  check("送過被清掉要講出來", prunedText.includes("清掉了") && prunedText.includes("不是從來沒送"), prunedText);
+  check("兩種空不是同一句話", neverText !== prunedText, { neverText, prunedText });
+
+  const filled = await openOutbound({
+    memory_outbound: {
+      ever_sent: true,
+      outbound: [
+        {
+          ts: D1 + 3_600_000,
+          command: "claude",
+          args: ["-p"],
+          chars_sent: 12,
+          truncated: false,
+          outcome: "success",
+          duration_ms: 40,
+          error: null,
+          role: "interpreter",
+        },
+      ],
+      skips: [
+        {
+          ts: D1 + 1_800_000,
+          reason: "no_consent",
+          detail: "還沒簽第二張同意書（上雲解讀）。",
+        },
+      ],
+    },
+  });
+  const filledText = filled.node("[data-outbound]").textContent;
+  check("成功的外送看得到命令", filledText.includes("claude"), filledText);
+  check("沒送出去的原因要一起顯示", filledText.includes("還沒簽第二張同意書"), filledText);
+  check("有列的時候不是那兩種空", !filledText.includes("還沒送過任何東西") && !filledText.includes("清掉了"), filledText);
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——那顆不可逆的按鈕停在一個它不該停的狀態。`);
   process.exit(1);
 }
 console.log("✓ 「忘掉這一段」的兩段式，在成功和失敗之後都退得回去");
+console.log("✓ 外送紀錄面板把兩種空、跳過原因和原文沒遮講開了");

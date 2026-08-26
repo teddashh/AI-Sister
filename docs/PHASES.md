@@ -280,8 +280,10 @@ capture 層本身就是 recorder。
 - L3：commitments/entities/day_summaries + provenance cascade delete。
 - 記憶瀏覽器：「她現在認為我在幹嘛、根據什麼」即時視圖 + 當場更正；
   承諾表 UI（結案/其他 兩鍵）。
-- 外送紀錄面板（送了什麼給誰）。〔SPEC §11.3 的去識別化管線 2026-08-26 拿掉：
-  代號跨段對不起來，會把 §6 承諾表和 entities 的地基拆掉〕
+- 外送紀錄面板（送了什麼給誰）。〔alpha.60 落地：時間軸「外送」頁，
+  含沒送出去的原因；「還沒送過」和「送過但被清掉了」是兩句話。
+  SPEC §11.3 的去識別化管線 2026-08-26 拿掉：代號跨段對不起來，
+  會把 §6 承諾表和 entities 的地基拆掉〕
 - 模型接入：spawn 使用者已登入的 CLI（2026-08-21 定案；不是 BYOK HTTP、
   也不是內建推論引擎）。設定在 `[brain] command` / `args`。
 - **A/B gate**：harness 跑 `+interpreter` vs 不跑——照〔定案〕沒贏就保持預設關。
@@ -289,12 +291,18 @@ capture 層本身就是 recorder。
 **Exit criteria**
 - [ ] `+interpreter+reviewer` 在題庫上答案正確率顯著 > baseline（門檻：+10pt 以上），
       且誤承諾率（幽靈承諾/killed-by-user 比例）< 20%。
+      〔alpha.60：量的工具做好了（`sister replay evaluate --ab`），**但沒過**。
+      現有合成題庫 `facts_session` 已經 3/3、5/5，腦沒有 +10pt 的空間，
+      而誤承諾率的分母是 0（印成「還沒量到」不是 0%）。
+      要過這一條需要真題庫 + 真 CLI，不是再改工具〕
 - [x] 回查率公開量測（Reviewer 實際翻原件的比例）。〔alpha.59：`reviewer_run`
       記 runs/candidates/rechecks，`sister review` 和 `sister brain log` 都印。
       「沒跑過」「跑了沒有五類候選」「有候選一次都沒回查」是三句不同的話〕
 - [ ] 成本實測 ≤ SPEC §13 預算（預設檔位 < US$15/月換算）。
-      〔`eval.rs` 的 `model_calls` / `model_usd_per_day` 目前恆為 0——
-      replay 路徑不呼叫模型，所以今天是誠實的；A/B 接上就必須真的量〕
+      〔alpha.60：`EvalMetrics.model` 從兩個恆為 0 的數字改成帶 kind 的 enum——
+      `not_on_path`（沒跑腦）和 `measured{calls, usd_per_day}` 分得開，
+      單價和出處印在每一行裡。**但真機一天的數字還沒有**：合成 corpus 只有
+      2 秒，換算出來的 US$0.12/月不是 Ted 一天的用量〕
 - [x] 刪除 cascade 驗證：刪一段 L0，衍生 L2/L3 全部 tombstone（自動化測試）。
       〔alpha.59：三條測試在 `retention.rs`。墓碑**連內容一起清掉**——
       只蓋日期的話，查詢看不到而人名和金額還在檔案裡（鐵律 2：L0 刪掉之後

@@ -11,11 +11,15 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::Db;
-use crate::db::QueryRow;
+use crate::brain::{self, InterpretInput};
+use crate::config::BrainConfig;
+use crate::consent::{Consent, Sheet};
+use crate::db::{CommitmentRow, QueryRow};
 use crate::facts::extract;
 use crate::model::{Millis, SourceKind};
 use crate::replay::{Corpus, Event, ReviewStatus};
 use crate::retrieval::{Retrieval, RetrievalProfile};
+use crate::reviewer::{self, ReviewInput, ReviewKind};
 
 pub const QUESTION_SET_VERSION: u32 = 1;
 pub const REPORT_VERSION: u32 = 1;
@@ -364,6 +368,65 @@ pub struct EvalReport {
     pub question_set: EvaluatedQuestions,
     pub parameters: EvalParameters,
     pub configurations: Vec<ConfigurationReport>,
+    /// 同一份題庫「不跑腦 vs 跑腦」的並排。沒開 A/B 就是 `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ab: Option<AbComparison>,
+}
+
+/// 評測時要不要真的 spawn 解釋層／審閱層。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrainEval {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbComparison {
+    pub baseline: String,
+    pub treatment: String,
+    /// 答案正確率差值，單位是百分點。沒有分母就是 `null`。
+    pub accuracy_delta_pt: Option<f64>,
+    pub won_accuracy: bool,
+    pub false_commitment: Fraction,
+    /// 沒有承諾時是 `null`——那是還沒量到，不是過了 <20% 那一關。
+    pub false_commitment_ok: Option<bool>,
+    pub gate: AbGate,
+    pub questions_total: usize,
+    pub questions_graded: usize,
+    pub questions_skipped: Vec<SkippedQuestion>,
+    pub brain: BrainRunSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AbGate {
+    Won,
+    Lost {
+        accuracy: bool,
+        false_commitments: bool,
+    },
+    Incomplete {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkippedQuestion {
+    pub id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrainRunSummary {
+    pub ran: bool,
+    pub skip: Option<String>,
+    pub interpreter_jobs: usize,
+    pub interpreter_success: usize,
+    pub reviewer_ran: bool,
+    pub reviewer_skip: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -453,6 +516,60 @@ pub enum RetrievalChannel {
     Recent,
     Range,
     Session,
+    Hypothesis,
+}
+
+/// 模型花費。兩種 0 不准長得一樣。
+///
+/// `NotOnPath`：這條配置根本沒有模型路徑（不跑腦）。
+/// `Measured`：有跑腦，從 `brain_outbound` 數出來。`calls = 0` 是跑了但一次
+/// 都沒送出去，不是「沒量」。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ModelUsage {
+    NotOnPath,
+    Measured {
+        calls: usize,
+        usd_per_day: f64,
+        interpreter_calls: usize,
+        reviewer_calls: usize,
+        interpreter_unit_usd: f64,
+        reviewer_unit_usd: f64,
+        /// 單價與檔位的出處。沒有出處的美元數字比沒有數字更糟。
+        source: String,
+    },
+}
+
+/// SPEC.md §13 預設檔位、`research/cost-model.md` 2026-08-17 官方價。
+/// Claude Haiku 4.5：$1.00 / MTok input、$5.00 / MTok output。
+pub const HAIKU_INPUT_USD_PER_MTOK: f64 = 1.00;
+pub const HAIKU_OUTPUT_USD_PER_MTOK: f64 = 5.00;
+/// Scenario B 解釋層中位：4k in / 300 out。
+pub const INTERPRETER_INPUT_TOKENS: f64 = 4_000.0;
+pub const INTERPRETER_OUTPUT_TOKENS: f64 = 300.0;
+/// Scenario B 審閱層中位：8k in / 500 out。
+pub const REVIEWER_INPUT_TOKENS: f64 = 8_000.0;
+pub const REVIEWER_OUTPUT_TOKENS: f64 = 500.0;
+/// 答案正確率要贏 baseline 多少個百分點才算過 A/B 閘門。
+pub const AB_ACCURACY_WIN_PT: f64 = 10.0;
+/// 誤承諾率上限（分母是 Reviewer 寫進 L3 的承諾數）。
+pub const AB_FALSE_COMMITMENT_MAX: f64 = 0.20;
+
+pub const MODEL_PRICE_SOURCE: &str = concat!(
+    "SPEC.md §13 預設檔位；單價取 research/cost-model.md 2026-08-17 ",
+    "Claude Haiku 4.5 官方價 $1.00/$5.00 per MTok，用量取同文 Scenario B 中位",
+    "（解釋 4k in / 300 out、審閱 8k in / 500 out）。",
+    "月費對照：Haiku Scenario B 中位 $13.31/月（8h×22 天），exit criteria < US$15/月。"
+);
+
+pub fn interpreter_unit_usd() -> f64 {
+    INTERPRETER_INPUT_TOKENS / 1_000_000.0 * HAIKU_INPUT_USD_PER_MTOK
+        + INTERPRETER_OUTPUT_TOKENS / 1_000_000.0 * HAIKU_OUTPUT_USD_PER_MTOK
+}
+
+pub fn reviewer_unit_usd() -> f64 {
+    REVIEWER_INPUT_TOKENS / 1_000_000.0 * HAIKU_INPUT_USD_PER_MTOK
+        + REVIEWER_OUTPUT_TOKENS / 1_000_000.0 * HAIKU_OUTPUT_USD_PER_MTOK
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -462,9 +579,9 @@ pub struct EvalMetrics {
     pub answer_accuracy: Fraction,
     pub citation_accuracy: Fraction,
     pub latency: LatencyMetrics,
-    /// 現行配置都不呼叫模型；這是由路徑定義得出的 0，不是假裝量過價格。
-    pub model_calls: usize,
-    pub model_usd_per_day: f64,
+    /// 沒跑腦是 `not_on_path`，不是量到 0 次呼叫。跑了但一次都沒送，才是
+    /// `measured` 且 `calls = 0`。
+    pub model: ModelUsage,
     pub reminder_false_positive_rate: Option<f64>,
     pub reminder_miss_rate: Option<f64>,
     pub segmentation_f1: Option<f64>,
@@ -546,8 +663,7 @@ pub struct MetricsConfigurationView {
     pub answer_accuracy: Fraction,
     pub citation_accuracy: Fraction,
     pub latency: LatencyMetrics,
-    pub model_calls: usize,
-    pub model_usd_per_day: f64,
+    pub model: ModelUsage,
     pub reminder_false_positive_rate: Option<f64>,
     pub reminder_miss_rate: Option<f64>,
     pub segmentation_f1: Option<f64>,
@@ -606,14 +722,14 @@ pub fn metrics_view(report: &EvalReport) -> Result<MetricsView> {
                         "baseline_text" => "baseline_text".to_string(),
                         "facts" => "facts".to_string(),
                         "facts_session" => "facts_session".to_string(),
+                        "interpreter_reviewer" => "interpreter_reviewer".to_string(),
                         _ => format!("configuration-{}", configuration_index + 1),
                     },
                     recall_at_k: metrics.recall_at_k.clone(),
                     answer_accuracy: metrics.answer_accuracy.clone(),
                     citation_accuracy: metrics.citation_accuracy.clone(),
                     latency: metrics.latency.clone(),
-                    model_calls: metrics.model_calls,
-                    model_usd_per_day: metrics.model_usd_per_day,
+                    model: metrics.model.clone(),
                     reminder_false_positive_rate: metrics.reminder_false_positive_rate,
                     reminder_miss_rate: metrics.reminder_miss_rate,
                     segmentation_f1: metrics.segmentation_f1,
@@ -696,7 +812,58 @@ pub fn evaluate(
             ranking: "facts_then_session_then_text".into(),
         },
         configurations,
+        ab: None,
     })
+}
+
+/// 同一份題庫跑不跑腦兩路。`brain` 是 `None` 時解釋層會記成「沒設定命令」而跳過，
+/// 題庫仍全跑，不會縮小。
+pub fn evaluate_ab(
+    corpus: &Corpus,
+    questions: &QuestionSet,
+    k: usize,
+    runs: usize,
+    brain: Option<&BrainEval>,
+) -> Result<EvalReport> {
+    let mut report = evaluate(corpus, questions, k, runs)?;
+    let origin = replay_origin();
+    let mut db = Db::open_in_memory()?;
+    db.import_replay(corpus, origin)?;
+
+    let (brain_summary, model) = run_brain_for_eval(&mut db, corpus, origin, brain)?;
+    let mut treatment = evaluate_on_db(
+        &mut db,
+        corpus,
+        questions,
+        RetrievalProfile::TextFactsAndSession,
+        OnDbOpts {
+            k,
+            runs,
+            origin,
+            model,
+            include_l2: true,
+        },
+    )?;
+    treatment.name = "interpreter_reviewer".into();
+
+    let baseline = report
+        .configurations
+        .iter()
+        .find(|c| c.name == "facts_session")
+        .context("A/B 找不到 facts_session 當 baseline")?;
+    let false_commitment = false_commitment_rate(&db)?;
+    let ab = compare_ab(
+        &baseline.metrics.answer_accuracy,
+        &treatment.metrics.answer_accuracy,
+        &false_commitment,
+        questions.questions.len(),
+        questions.questions.len(),
+        Vec::new(),
+        brain_summary,
+    );
+    report.ab = Some(ab);
+    report.configurations.push(treatment);
+    Ok(report)
 }
 
 /// 一次匯入 corpus，替整份題庫產生標註提示，避免每題重建一次資料庫。
@@ -763,12 +930,48 @@ fn evaluate_profile(
     let origin = replay_origin();
     let mut db = Db::open_in_memory()?;
     db.import_replay(corpus, origin)?;
+    evaluate_on_db(
+        &mut db,
+        corpus,
+        questions,
+        profile,
+        OnDbOpts {
+            k,
+            runs,
+            origin,
+            model: ModelUsage::NotOnPath,
+            include_l2: false,
+        },
+    )
+}
 
+struct OnDbOpts {
+    k: usize,
+    runs: usize,
+    origin: Millis,
+    model: ModelUsage,
+    include_l2: bool,
+}
+
+fn evaluate_on_db(
+    db: &mut Db,
+    corpus: &Corpus,
+    questions: &QuestionSet,
+    profile: RetrievalProfile,
+    opts: OnDbOpts,
+) -> Result<ConfigurationReport> {
+    let OnDbOpts {
+        k,
+        runs,
+        origin,
+        model,
+        include_l2,
+    } = opts;
     // 整份題庫先暖一輪；不把第一題的冷 cache 優勢送給後面的題目。
     for question in &questions.questions {
         let now = query_now(question, origin, corpus.duration_ms);
         profile.retrieve_at(
-            &mut db,
+            db,
             &question.question,
             crate::retrieval::RetrievalLimits::same(k),
             now,
@@ -784,7 +987,7 @@ fn evaluate_profile(
         for _ in 0..runs {
             let started = Instant::now();
             let retrieval = profile.retrieve_at(
-                &mut db,
+                db,
                 &question.question,
                 crate::retrieval::RetrievalLimits::same(k),
                 now,
@@ -793,7 +996,10 @@ fn evaluate_profile(
             latencies.push(elapsed_ms);
             all_latency.push(elapsed_ms);
 
-            let items = returned_items(corpus, origin, retrieval, k)?;
+            let mut items = returned_items(corpus, origin, retrieval, k)?;
+            if include_l2 {
+                append_hypothesis_items(db, corpus, origin, &mut items, k)?;
+            }
             if let Some(before) = &stable_items {
                 ensure!(
                     *before == items,
@@ -850,8 +1056,7 @@ fn evaluate_profile(
             answer_accuracy: Fraction::new(answered, results.len()),
             citation_accuracy: Fraction::new(cited, positive),
             latency,
-            model_calls: 0,
-            model_usd_per_day: 0.0,
+            model,
             reminder_false_positive_rate: None,
             reminder_miss_rate: None,
             segmentation_f1: None,
@@ -863,6 +1068,357 @@ fn evaluate_profile(
         },
         questions: results,
     })
+}
+
+fn append_hypothesis_items(
+    db: &Db,
+    corpus: &Corpus,
+    origin: Millis,
+    items: &mut Vec<ReturnedItem>,
+    k: usize,
+) -> Result<()> {
+    if items.len() >= k {
+        return Ok(());
+    }
+    let cards = db.l2_in_range(origin, origin + corpus.duration_ms)?;
+    let extra = hypothesis_items(corpus, origin, &cards)?;
+    for item in extra {
+        if items.len() >= k {
+            break;
+        }
+        if items
+            .iter()
+            .any(|have| have.event_indexes == item.event_indexes && have.values == item.values)
+        {
+            continue;
+        }
+        items.push(item);
+    }
+    for (rank, item) in items.iter_mut().enumerate() {
+        item.rank = rank + 1;
+    }
+    Ok(())
+}
+
+fn hypothesis_items(
+    corpus: &Corpus,
+    origin: Millis,
+    cards: &[crate::db::L2CardRow],
+) -> Result<Vec<ReturnedItem>> {
+    let mut latest: std::collections::BTreeMap<Millis, &crate::db::L2CardRow> =
+        std::collections::BTreeMap::new();
+    for card in cards {
+        latest
+            .entry(card.segment_core_start)
+            .and_modify(|cur| {
+                if card.version > cur.version || (card.version == cur.version && card.id > cur.id) {
+                    *cur = card;
+                }
+            })
+            .or_insert(card);
+    }
+    let mut out = Vec::new();
+    for card in latest.into_values() {
+        let at_ms = card.segment_core_start - origin;
+        let mut values = vec![card.activity.clone()];
+        if let Ok(entities) = serde_json::from_str::<Vec<brain::Entity>>(&card.entities_json) {
+            for entity in entities {
+                if !entity.name.trim().is_empty() {
+                    values.push(entity.name);
+                }
+            }
+        }
+        let event_indexes: Vec<_> = corpus
+            .events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                (event.at_ms() == at_ms && !super_evidence_empty(event)).then_some(index)
+            })
+            .collect();
+        if event_indexes.is_empty() {
+            continue;
+        }
+        out.push(ReturnedItem {
+            rank: 0,
+            channel: RetrievalChannel::Hypothesis,
+            at_ms,
+            end_ms: None,
+            source_kind: SourceKind::Ocr.as_str().to_string(),
+            values,
+            event_indexes,
+        });
+    }
+    Ok(out)
+}
+
+fn super_evidence_empty(event: &Event) -> bool {
+    evidence_surfaces(event).is_empty()
+}
+
+fn run_brain_for_eval(
+    db: &mut Db,
+    corpus: &Corpus,
+    origin: Millis,
+    brain: Option<&BrainEval>,
+) -> Result<(BrainRunSummary, ModelUsage)> {
+    let mut consent = Consent::default();
+    consent.grant(Sheet::CloudReading, origin);
+    consent.grant(Sheet::LocalRecording, origin);
+
+    let (command, args, configured) = match brain {
+        Some(cfg) if !cfg.command.trim().is_empty() => {
+            (cfg.command.clone(), cfg.args.clone(), true)
+        }
+        _ => (String::new(), Vec::new(), false),
+    };
+    let brain_cfg = BrainConfig {
+        command: command.clone(),
+        args: args.clone(),
+        daily_budget: 80,
+        concurrency: 1,
+        reviewer_daily_budget: 40,
+    };
+
+    let mut summary = BrainRunSummary {
+        ran: false,
+        skip: None,
+        interpreter_jobs: 0,
+        interpreter_success: 0,
+        reviewer_ran: false,
+        reviewer_skip: None,
+    };
+
+    if !configured {
+        summary.skip = Some("no_command".into());
+        return Ok((summary, ModelUsage::NotOnPath));
+    }
+
+    let from_ts = origin;
+    let to_ts = origin
+        .checked_add(corpus.duration_ms)
+        .context("eval brain range overflowed")?;
+    let interpreted = {
+        let mut input = InterpretInput {
+            db,
+            consent: &consent,
+            brain: &brain_cfg,
+            from_ts,
+            to_ts,
+            limit: 80,
+            only_core_start: None,
+        };
+        brain::run(&mut input)?
+    };
+    summary.ran = true;
+    summary.skip = interpreted.skip.as_ref().map(|s| s.as_str().to_string());
+    summary.interpreter_jobs = interpreted.ran.len();
+    summary.interpreter_success = interpreted
+        .ran
+        .iter()
+        .filter(|job| job.outcome == brain::OutboundOutcome::Success)
+        .count();
+
+    let reviewed = {
+        let mut review_input = ReviewInput {
+            db,
+            consent: &consent,
+            brain: &brain_cfg,
+            from_ts,
+            to_ts,
+            kind: ReviewKind::Interval,
+            force: true,
+            now: to_ts,
+        };
+        reviewer::run(&mut review_input)?
+    };
+    summary.reviewer_ran = reviewed.ran;
+    summary.reviewer_skip = reviewed.skip.as_ref().map(|s| s.as_str().to_string());
+
+    let outbound = db.list_brain_outbound(10_000)?;
+    let interpreter_calls = outbound
+        .iter()
+        .filter(|row| row.role == "interpreter")
+        .count();
+    let reviewer_calls = outbound.iter().filter(|row| row.role == "reviewer").count();
+    let interp_unit = interpreter_unit_usd();
+    let review_unit = reviewer_unit_usd();
+    let usd_per_day = interpreter_calls as f64 * interp_unit + reviewer_calls as f64 * review_unit;
+    Ok((
+        summary,
+        ModelUsage::Measured {
+            calls: interpreter_calls + reviewer_calls,
+            usd_per_day,
+            interpreter_calls,
+            reviewer_calls,
+            interpreter_unit_usd: interp_unit,
+            reviewer_unit_usd: review_unit,
+            source: MODEL_PRICE_SOURCE.to_string(),
+        },
+    ))
+}
+
+fn false_commitment_rate(db: &Db) -> Result<Fraction> {
+    let rows = db.all_commitments()?;
+    let live: Vec<&CommitmentRow> = rows
+        .iter()
+        .filter(|row| row.tombstoned_at.is_none())
+        .collect();
+    let mut false_n = 0usize;
+    for row in &live {
+        if row.status == "dead" || commitment_unmatched(db, row)? {
+            false_n += 1;
+        }
+    }
+    Ok(Fraction::new(false_n, live.len()))
+}
+
+fn commitment_unmatched(db: &Db, row: &CommitmentRow) -> Result<bool> {
+    let refs: Vec<String> = serde_json::from_str(&row.evidence_json).unwrap_or_default();
+    if refs.is_empty() {
+        return Ok(true);
+    }
+    let mut saw_original = false;
+    for raw in &refs {
+        let Some(r) = brain::EvidenceRef::parse(raw) else {
+            return Ok(true);
+        };
+        match db.l0_original(&r)? {
+            None => return Ok(true),
+            Some(original) => {
+                saw_original = true;
+                if !original.text.contains(row.text.trim()) && !row.text.trim().is_empty() {
+                    // 原文對得上才算有證據。對不上 = 幽靈承諾。
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(!saw_original)
+}
+
+fn compare_ab(
+    baseline: &Fraction,
+    treatment: &Fraction,
+    false_commitment: &Fraction,
+    questions_total: usize,
+    questions_graded: usize,
+    questions_skipped: Vec<SkippedQuestion>,
+    brain: BrainRunSummary,
+) -> AbComparison {
+    let accuracy_delta_pt = match (treatment.rate, baseline.rate) {
+        (Some(t), Some(b)) => Some((t - b) * 100.0),
+        _ => None,
+    };
+    let won_accuracy = accuracy_delta_pt
+        .map(|delta| delta + f64::EPSILON >= AB_ACCURACY_WIN_PT)
+        .unwrap_or(false);
+    let false_commitment_ok = false_commitment
+        .rate
+        .map(|rate| rate < AB_FALSE_COMMITMENT_MAX);
+
+    let gate = if !brain.ran && brain.skip.is_some() {
+        AbGate::Incomplete {
+            reason: brain.skip.clone().unwrap_or_else(|| "brain_skipped".into()),
+        }
+    } else if false_commitment.total == 0 {
+        AbGate::Incomplete {
+            reason: "no_commitments".into(),
+        }
+    } else if accuracy_delta_pt.is_none() {
+        AbGate::Incomplete {
+            reason: "no_accuracy_denominator".into(),
+        }
+    } else if won_accuracy && false_commitment_ok == Some(true) {
+        AbGate::Won
+    } else {
+        AbGate::Lost {
+            accuracy: won_accuracy,
+            false_commitments: false_commitment_ok == Some(true),
+        }
+    };
+
+    AbComparison {
+        baseline: "facts_session".into(),
+        treatment: "interpreter_reviewer".into(),
+        accuracy_delta_pt,
+        won_accuracy,
+        false_commitment: false_commitment.clone(),
+        false_commitment_ok,
+        gate,
+        questions_total,
+        questions_graded,
+        questions_skipped,
+        brain,
+    }
+}
+
+/// 給 CLI 印的那一行。兩種 0 的字不一樣。
+pub fn format_model_usage(model: &ModelUsage) -> String {
+    match model {
+        ModelUsage::NotOnPath => "沒跑腦（不是量到 0 次呼叫）".into(),
+        ModelUsage::Measured {
+            calls,
+            usd_per_day: _,
+            interpreter_calls: _,
+            reviewer_calls: _,
+            interpreter_unit_usd,
+            reviewer_unit_usd,
+            source,
+        } if *calls == 0 => format!(
+            "跑了腦，0 次呼叫，US$0/天（單價：解釋 US${interpreter_unit_usd:.4}/次、審閱 US${reviewer_unit_usd:.4}/次。{source}）"
+        ),
+        ModelUsage::Measured {
+            calls,
+            usd_per_day,
+            interpreter_calls,
+            reviewer_calls,
+            interpreter_unit_usd,
+            reviewer_unit_usd,
+            source,
+        } => format!(
+            "{calls} calls（解釋 {interpreter_calls}、審閱 {reviewer_calls}），US${usd_per_day:.4}/天（單價：解釋 US${interpreter_unit_usd:.4}/次、審閱 US${reviewer_unit_usd:.4}/次。{source}）"
+        ),
+    }
+}
+
+pub fn format_false_commitment(value: &Fraction) -> String {
+    match value.rate {
+        None => "沒有承諾（誤承諾率還沒量到，不是 0%）".into(),
+        Some(rate) => format!("{}/{}（{:.1}%）", value.passed, value.total, rate * 100.0),
+    }
+}
+
+pub fn format_ab_gate(gate: &AbGate) -> String {
+    match gate {
+        AbGate::Won => {
+            "過了 +10pt 與誤承諾 <20%。產品預設仍然關著——這支工具只報數字，不改設定。".into()
+        }
+        AbGate::Lost {
+            accuracy,
+            false_commitments,
+        } => {
+            let acc = if *accuracy {
+                "答案正確率贏了"
+            } else {
+                "答案正確率沒贏（要 +10pt）"
+            };
+            let fc = if *false_commitments {
+                "誤承諾率過關"
+            } else {
+                "誤承諾率沒過（要 <20%）"
+            };
+            format!("沒贏，保持預設關。{acc}；{fc}。")
+        }
+        AbGate::Incomplete { reason } => match reason.as_str() {
+            "no_command" => "沒跑成（還沒設定 CLI），不能宣布贏。保持預設關。".into(),
+            "no_consent" => "沒跑成（沒簽同意書），不能宣布贏。保持預設關。".into(),
+            "no_commitments" => {
+                "沒有承諾，誤承諾率還沒量到（不是 0%）。不能宣布贏。保持預設關。".into()
+            }
+            other => format!("沒跑完（{other}），不能宣布贏。保持預設關。"),
+        },
+    }
 }
 
 fn returned_items(
@@ -1013,9 +1569,9 @@ fn event_supports_item(
     values: &[String],
 ) -> bool {
     let surfaces = evidence_surfaces(event);
-    if channel == RetrievalChannel::Session {
+    if channel == RetrievalChannel::Session || channel == RetrievalChannel::Hypothesis {
         // 章節是範圍：涵蓋到的 event 只要有任何可檢索文字就算對得回。
-        // 對不回去要在呼叫端 `ensure!`，這裡不准因為 source_kind 對不上就吞掉。
+        // L2 假設掛在段落起點，對不回去要在呼叫端 `ensure!`。
         return !surfaces.is_empty();
     }
     surfaces
@@ -1030,7 +1586,9 @@ fn event_supports_item(
             RetrievalChannel::Text | RetrievalChannel::Recent | RetrievalChannel::Range => {
                 values.iter().any(|value| value == &surface)
             }
-            RetrievalChannel::Session => unreachable!("session 走上面那條"),
+            RetrievalChannel::Session | RetrievalChannel::Hypothesis => {
+                unreachable!("session/hypothesis 走上面那條")
+            }
         })
 }
 
@@ -1291,7 +1849,14 @@ mod tests {
         ] {
             assert!(json.contains(&format!("\"{field}\":null")), "{json}");
         }
-        assert!(json.contains("\"model_calls\":0"), "{json}");
+        assert!(
+            json.contains("\"kind\":\"not_on_path\""),
+            "不跑腦必須是 not_on_path，不是量到 0：{json}"
+        );
+        assert!(
+            !json.contains("\"model_calls\":0"),
+            "舊的恆 0 欄位不該還在：{json}"
+        );
     }
 
     #[test]
@@ -1354,8 +1919,11 @@ mod tests {
         assert_eq!(metrics.recall_at_k.passed, 0);
         assert_eq!(metrics.recall_at_k.total, 0);
         assert_eq!(metrics.recall_at_k.rate, None, "zero denominator is null");
-        assert_eq!(metrics.model_calls, 0, "a measured zero stays numeric");
-        assert_eq!(metrics.model_usd_per_day, 0.0);
+        assert_eq!(
+            metrics.model,
+            ModelUsage::NotOnPath,
+            "不跑腦不是量到 0 次呼叫"
+        );
         assert_eq!(
             metrics.reminder_false_positive_rate, None,
             "an unmeasured metric stays null"
@@ -1508,5 +2076,167 @@ mod tests {
         }));
         assert!(previews[1].returned.is_empty());
         assert_eq!(draft, before, "提示不能順手把結果猜成 ground truth");
+    }
+
+    fn fake_eval_cli(dir: &std::path::Path, sentinel: &std::path::Path) -> BrainEval {
+        let script = dir.join("fake-eval-brain.py");
+        std::fs::write(
+            &script,
+            r#"
+import json, pathlib, re, sys
+payload = sys.stdin.buffer.read()
+pathlib.Path(sys.argv[1]).write_bytes(b'spawned')
+text = payload.decode('utf-8', 'replace')
+if b'PASS_A' in payload or b'PASS_B' in payload:
+    out = '{"commitments":[]}'
+else:
+    m = re.search(r'本段 segment_ref：segment:(\d+)', text)
+    ref = f'segment:{m.group(1)}' if m else 'segment:0'
+    frames = re.findall(r'frame:(\d+)', text)
+    evid = f'frame:{frames[0]}' if frames else 'frame:1'
+    out = json.dumps({
+        'segment_ref': ref,
+        'activity': '在看螢幕',
+        'entities': [],
+        'confidence': 0.5,
+        'evidence_refs': [evid],
+        'open_questions': [],
+        'commitment_candidates': [],
+    })
+sys.stdout.buffer.write(out.encode('utf-8'))
+"#,
+        )
+        .expect("script");
+        BrainEval {
+            command: "python3".into(),
+            args: vec![
+                script.to_string_lossy().into_owned(),
+                sentinel.to_string_lossy().into_owned(),
+            ],
+        }
+    }
+
+    #[test]
+    fn ab_without_cli_is_incomplete_and_does_not_shrink_the_set() {
+        let (corpus, questions) = fixture();
+        let report = evaluate_ab(&corpus, &questions, 5, 1, None).expect("ab");
+        let ab = report.ab.as_ref().expect("ab block");
+        assert_eq!(ab.questions_total, 2);
+        assert_eq!(ab.questions_graded, 2);
+        assert!(ab.questions_skipped.is_empty(), "題庫一題都不能偷拿掉");
+        assert_eq!(report.configurations.len(), 4);
+        assert_eq!(report.configurations[3].name, "interpreter_reviewer");
+        assert_eq!(report.configurations[3].questions.len(), 2);
+        assert!(matches!(
+            report.configurations[3].metrics.model,
+            ModelUsage::NotOnPath
+        ));
+        assert!(matches!(
+            ab.gate,
+            AbGate::Incomplete { ref reason } if reason == "no_command"
+        ));
+        let text = format_ab_gate(&ab.gate);
+        assert!(text.contains("保持預設關"), "{text}");
+        assert!(text.contains("沒跑成"), "{text}");
+    }
+
+    #[test]
+    fn ab_with_fake_cli_measures_cost_and_can_honestly_lose() {
+        let dir = std::env::temp_dir().join(format!("sister-eval-ab-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let sentinel = dir.join("spawned");
+        let _ = std::fs::remove_file(&sentinel);
+        let (corpus, questions) = fixture();
+        let brain = fake_eval_cli(&dir, &sentinel);
+        let report = evaluate_ab(&corpus, &questions, 5, 1, Some(&brain)).expect("ab");
+        let ab = report.ab.as_ref().expect("ab block");
+        assert_eq!(ab.questions_total, questions.questions.len());
+        assert_eq!(ab.questions_graded, questions.questions.len());
+        assert!(ab.questions_skipped.is_empty());
+
+        let treatment = report
+            .configurations
+            .iter()
+            .find(|c| c.name == "interpreter_reviewer")
+            .expect("treatment");
+        match &treatment.metrics.model {
+            ModelUsage::Measured {
+                calls,
+                source,
+                interpreter_unit_usd,
+                reviewer_unit_usd,
+                ..
+            } => {
+                assert!(
+                    *calls > 0 || ab.brain.skip.is_some(),
+                    "跑了腦就要麼有呼叫、要麼寫出跳過原因：{:?}",
+                    ab.brain
+                );
+                assert!(source.contains("SPEC.md §13"), "{source}");
+                assert!(source.contains("cost-model.md"), "{source}");
+                assert!(*interpreter_unit_usd > 0.0);
+                assert!(*reviewer_unit_usd > 0.0);
+            }
+            ModelUsage::NotOnPath => panic!("給了 CLI 還說沒跑腦"),
+        }
+
+        let baseline = report
+            .configurations
+            .iter()
+            .find(|c| c.name == "facts_session")
+            .expect("baseline");
+        assert!(
+            matches!(baseline.metrics.model, ModelUsage::NotOnPath),
+            "不跑腦那一路仍是 not_on_path"
+        );
+
+        // 假 CLI 回的 activity 幫不上這份題庫，所以通常沒贏。沒贏要講出來。
+        let gate = format_ab_gate(&ab.gate);
+        assert!(
+            gate.contains("保持預設關") || matches!(ab.gate, AbGate::Won),
+            "{gate}"
+        );
+        if !matches!(ab.gate, AbGate::Won) {
+            assert!(
+                gate.contains("沒贏") || gate.contains("沒有承諾") || gate.contains("沒跑"),
+                "沒贏的話不能只印好消息：{gate}"
+            );
+        }
+        let fc = format_false_commitment(&ab.false_commitment);
+        if ab.false_commitment.total == 0 {
+            assert!(fc.contains("沒有承諾") && fc.contains("不是 0%"), "{fc}");
+            assert!(ab.false_commitment.rate.is_none());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn measured_zero_and_not_on_path_do_not_print_the_same() {
+        let zero = ModelUsage::Measured {
+            calls: 0,
+            usd_per_day: 0.0,
+            interpreter_calls: 0,
+            reviewer_calls: 0,
+            interpreter_unit_usd: interpreter_unit_usd(),
+            reviewer_unit_usd: reviewer_unit_usd(),
+            source: MODEL_PRICE_SOURCE.to_string(),
+        };
+        let ran = format_model_usage(&zero);
+        let skipped = format_model_usage(&ModelUsage::NotOnPath);
+        assert_ne!(ran, skipped);
+        assert!(ran.contains("跑了腦"), "{ran}");
+        assert!(ran.contains("0 次呼叫"), "{ran}");
+        assert!(skipped.contains("沒跑腦"), "{skipped}");
+        assert!(ran.contains("SPEC.md §13"), "{ran}");
+    }
+
+    #[test]
+    fn false_commitment_with_zero_denominator_is_not_zero_percent() {
+        let none = Fraction::new(0, 0);
+        assert_eq!(none.rate, None);
+        let text = format_false_commitment(&none);
+        assert!(text.contains("沒有承諾"), "{text}");
+        assert!(text.contains("不是 0%"), "{text}");
+        assert!(!text.contains("0.0%"), "{text}");
     }
 }

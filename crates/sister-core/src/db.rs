@@ -1482,6 +1482,31 @@ impl Db {
         )?)
     }
 
+    /// 這台機器上，有沒有**曾經**真的把字送出程序。
+    ///
+    /// 和現在 `brain_outbound` 還剩幾列是兩題。`forget` 和保留期會把那些列
+    /// 刪掉，所以「一列外送紀錄都沒有」有兩種意思：從來沒送過，和送過、被
+    /// 清掉了。面板上那兩句話不能長得一樣。
+    ///
+    /// 只在 `insert_brain_outbound` 按下。跳過（`brain_skip`）不算送出。
+    /// 列還在的時候，沒有這個 key 也算——不然升級上來、旗標還沒按下的那幾
+    /// 列會被說成從來沒送過。
+    pub fn ever_brain_outbound(&self) -> Result<bool> {
+        let flagged: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'ever_brain_outbound')",
+            [],
+            |r| r.get(0),
+        )?;
+        if flagged {
+            return Ok(true);
+        }
+        Ok(self
+            .conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM brain_outbound)", [], |r| {
+                r.get(0)
+            })?)
+    }
+
     /// 這台機器上，有沒有**曾經真的存下來過一列內容**。
     ///
     /// [`Db::ever_recorded`] 答的是「她有沒有開始過一場錄製」，而那兩題差一台
@@ -3542,6 +3567,10 @@ impl Db {
                 ins.role,
             ],
         )?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('ever_brain_outbound', '1')",
+            [],
+        )?;
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -3557,7 +3586,7 @@ impl Db {
     pub fn list_brain_outbound(&self, limit: usize) -> Result<Vec<OutboundRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, ts, day_key, command, args_json, segment_core_start,
-                    chars_sent, truncated, outcome, duration_ms, error
+                    chars_sent, truncated, outcome, duration_ms, error, role
              FROM brain_outbound ORDER BY ts DESC, id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit as i64], |r| {
@@ -3573,6 +3602,7 @@ impl Db {
                 outcome: r.get(8)?,
                 duration_ms: r.get(9)?,
                 error: r.get(10)?,
+                role: r.get(11)?,
             })
         })?;
         Ok(rows.flatten().collect())
@@ -5737,6 +5767,7 @@ pub struct OutboundRow {
     pub outcome: String,
     pub duration_ms: i64,
     pub error: Option<String>,
+    pub role: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8606,6 +8637,50 @@ mod tests {
         assert!(
             db.ever_marked().expect("ever_marked"),
             "收回的是標記，不是「他按過」這件事"
+        );
+    }
+
+    /// 外送紀錄那兩種空：從來沒送，和送過、列被清掉了。
+    ///
+    /// 只釘 `true` 那一面的話，一台新機器也會被說成「送過但被清掉了」。
+    #[test]
+    fn never_sent_and_sent_then_gone_are_not_the_same_zero() {
+        let mut db = test_db();
+        assert!(
+            !db.ever_brain_outbound().expect("ever"),
+            "一台新機器不可以說自己送過"
+        );
+
+        db.insert_brain_skip(1_000, "no_consent", None, "還沒簽")
+            .expect("skip");
+        assert!(
+            !db.ever_brain_outbound().expect("skip is not send"),
+            "沒送出去的原因不是一次外送"
+        );
+
+        let mut db = db;
+        db.insert_brain_outbound(&OutboundInsert {
+            ts: 2_000,
+            day_key: "1970-01-01",
+            command: "claude",
+            args: &[],
+            segment_core_start: None,
+            chars_sent: 12,
+            truncated: false,
+            outcome: "success",
+            duration_ms: 10,
+            error: None,
+            role: "interpreter",
+        })
+        .expect("insert");
+        assert!(db.ever_brain_outbound().expect("ever after send"));
+
+        db.conn
+            .execute("DELETE FROM brain_outbound", [])
+            .expect("wipe rows");
+        assert!(
+            db.ever_brain_outbound().expect("ever after wipe"),
+            "列沒了仍要記得送過——不然會跟從來沒送長得一樣"
         );
     }
 

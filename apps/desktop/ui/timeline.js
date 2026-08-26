@@ -32,10 +32,11 @@ const el = {
   forget: document.querySelector("[data-forget]"),
   memory: document.querySelector("[data-memory]"),
   pledges: document.querySelector("[data-pledges]"),
+  outbound: document.querySelector("[data-outbound]"),
   views: document.querySelector("[data-views]"),
 };
 
-/** 右邊現在攤的是哪一頁：day / guess / commitments。預設時間軸，忘掉那顆鍵才找得到。 */
+/** 右邊現在攤的是哪一頁：day / guess / commitments / outbound。預設時間軸，忘掉那顆鍵才找得到。 */
 let view = "day";
 
 /** 現在攤開的是哪一天。忘掉那顆鍵要用它換算時間範圍。 */
@@ -64,6 +65,13 @@ let lastView = null;
 const tzOffsetMs = () => -new Date().getTimezoneOffset() * 60_000;
 
 const hhmm = new Intl.DateTimeFormat("zh-TW", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+const fullTs = new Intl.DateTimeFormat("zh-TW", {
+  month: "numeric",
+  day: "numeric",
   hour: "2-digit",
   minute: "2-digit",
   hour12: false,
@@ -1070,11 +1078,13 @@ function setView(next) {
   if (el.moments) el.moments.hidden = view !== "day";
   if (el.memory) el.memory.hidden = view !== "guess";
   if (el.pledges) el.pledges.hidden = view !== "commitments";
+  if (el.outbound) el.outbound.hidden = view !== "outbound";
   if (el.forget) {
     el.forget.hidden = view !== "day";
   }
   if (view === "guess") void renderGuesses();
   if (view === "commitments") void renderPledges();
+  if (view === "outbound") void renderOutbound();
 }
 
 async function renderGuesses() {
@@ -1149,6 +1159,130 @@ async function renderPledges() {
     empty.textContent = String(err?.message ?? err);
     el.pledges.append(empty);
   }
+}
+
+async function renderOutbound() {
+  if (!el.outbound) return;
+  el.outbound.replaceChildren();
+  const heading = document.createElement("p");
+  heading.className = "memory-lead";
+  heading.textContent =
+    "送出去的是螢幕上的原文，沒有去識別化。這一頁只記結構和計數，不留那份原文。";
+  el.outbound.append(heading);
+  if (invoke === null) {
+    const empty = document.createElement("p");
+    empty.className = "memory-empty";
+    empty.textContent = "這一頁不是在 AI-Sister 裡打開的。";
+    el.outbound.append(empty);
+    return;
+  }
+  try {
+    const log = await invoke("memory_outbound", { limit: 200 });
+    const outbound = Array.isArray(log?.outbound) ? log.outbound : [];
+    const skips = Array.isArray(log?.skips) ? log.skips : [];
+    const everSent = log?.ever_sent === true;
+
+    if (outbound.length === 0 && skips.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "memory-empty";
+      empty.textContent = everSent
+        ? "送過，但那些列已經被保留期或「忘掉」清掉了。不是從來沒送。"
+        : "還沒送過任何東西。沒簽第二張同意書、沒設定 CLI、或解釋層還沒跑過，都不會出現在這裡。";
+      el.outbound.append(empty);
+      return;
+    }
+
+    if (outbound.length === 0 && everSent) {
+      const gone = document.createElement("p");
+      gone.className = "memory-empty";
+      gone.textContent = "外送紀錄本身已經被清掉了（送過，不是從來沒送）。";
+      el.outbound.append(gone);
+    }
+
+    if (outbound.length > 0) {
+      const list = document.createElement("ol");
+      list.className = "outbound-list";
+      for (const row of outbound) list.append(outboundRow(row));
+      el.outbound.append(list);
+    }
+
+    if (skips.length > 0) {
+      const skipHead = document.createElement("p");
+      skipHead.className = "memory-lead";
+      skipHead.textContent = "沒送出去的原因";
+      el.outbound.append(skipHead);
+      const list = document.createElement("ol");
+      list.className = "outbound-list";
+      for (const row of skips) list.append(skipRow(row));
+      el.outbound.append(list);
+    }
+  } catch (err) {
+    const empty = document.createElement("p");
+    empty.className = "memory-empty";
+    empty.textContent = String(err?.message ?? err);
+    el.outbound.append(empty);
+  }
+}
+
+function outboundOutcome(value) {
+  switch (value) {
+    case "success":
+      return "成功";
+    case "spawn_failed":
+      return "CLI 叫不起來／失敗";
+    case "timeout":
+      return "逾時";
+    case "bad_json":
+      return "拿回的 JSON 不能用，沒寫卡片";
+    default:
+      return value || "（結局不明）";
+  }
+}
+
+function outboundRole(value) {
+  if (value === "reviewer") return "審閱層";
+  if (value === "interpreter") return "解釋層";
+  return value || "解釋層";
+}
+
+function outboundRow(row) {
+  const li = document.createElement("li");
+  li.className = "outbound-item";
+  const title = document.createElement("p");
+  title.className = "outbound-cmd";
+  const args = Array.isArray(row.args) ? row.args.join(" ") : "";
+  title.textContent = `${fullTs.format(row.ts)}　${row.command ?? ""} ${args}`.trim();
+  const meta = document.createElement("p");
+  meta.className = "outbound-meta";
+  const bits = [
+    outboundRole(row.role),
+    `${row.chars_sent ?? 0} 字`,
+    row.truncated ? "截斷" : null,
+    outboundOutcome(row.outcome),
+    `${row.duration_ms ?? 0} ms`,
+  ].filter(Boolean);
+  meta.textContent = bits.join("　");
+  li.append(title, meta);
+  if (row.error) {
+    const err = document.createElement("p");
+    err.className = "outbound-error";
+    err.textContent = row.error;
+    li.append(err);
+  }
+  return li;
+}
+
+function skipRow(row) {
+  const li = document.createElement("li");
+  li.className = "outbound-item skip";
+  const title = document.createElement("p");
+  title.className = "outbound-cmd";
+  title.textContent = `${fullTs.format(row.ts)}　[${row.reason ?? ""}]`;
+  const detail = document.createElement("p");
+  detail.className = "outbound-meta";
+  detail.textContent = row.detail ?? "";
+  li.append(title, detail);
+  return li;
 }
 
 function pledgeRow(c) {
@@ -1760,6 +1894,50 @@ function fakeBackend(mode = "1") {
       }
       case "memory_commitments":
         return demoPledges;
+      case "memory_outbound":
+        if (mode === "nulldata") {
+          return { outbound: [], skips: [], ever_sent: false };
+        }
+        return {
+          ever_sent: true,
+          outbound: [
+            {
+              ts: at(9, 50),
+              command: "claude",
+              args: ["-p"],
+              chars_sent: 1840,
+              truncated: false,
+              outcome: "success",
+              duration_ms: 3120,
+              error: null,
+              role: "interpreter",
+            },
+            {
+              ts: at(10, 20),
+              command: "claude",
+              args: ["-p"],
+              chars_sent: 4200,
+              truncated: true,
+              outcome: "bad_json",
+              duration_ms: 880,
+              error: "JSON 對不上契約",
+              role: "reviewer",
+            },
+          ],
+          skips: [
+            {
+              ts: at(8, 5),
+              reason: "no_consent",
+              detail:
+                "還沒簽第二張同意書（上雲解讀）。解釋層一次都不會呼叫那支 CLI。",
+            },
+            {
+              ts: at(11, 0),
+              reason: "budget",
+              detail: "今天的解釋預算已用完（80/80）。超過即靜默降級，只累積 L0/L1。",
+            },
+          ],
+        };
       case "correct_l2": {
         const hit = demoGuesses.find(
           (c) =>

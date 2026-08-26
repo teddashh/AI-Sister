@@ -506,12 +506,14 @@ pub fn prepare(input: &mut InterpretInput<'_>) -> Result<DryRun> {
 /// 真的跑。沒有 [`CloudAllowed`] 就一次都不 spawn。
 pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
     let Some(permit) = input.consent.cloud_permit() else {
+        record_skip(input.db, SkipReason::NoConsent)?;
         return Ok(InterpretResult {
             skip: Some(SkipReason::NoConsent),
             ran: Vec::new(),
         });
     };
     let Some((command, args)) = input.brain.cli() else {
+        record_skip(input.db, SkipReason::NoCommand)?;
         return Ok(InterpretResult {
             skip: Some(SkipReason::NoCommand),
             ran: Vec::new(),
@@ -544,6 +546,7 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
 
     let mut prepared = collect_jobs(input)?;
     if prepared.is_empty() {
+        record_skip(input.db, SkipReason::NothingWorthInterpreting { remaining })?;
         return Ok(InterpretResult {
             skip: Some(SkipReason::NothingWorthInterpreting { remaining }),
             ran: Vec::new(),

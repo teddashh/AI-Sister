@@ -90,6 +90,17 @@ function cell(row, text) {
   row.append(td);
 }
 
+function modelCell(model) {
+  if (!model || model.kind === "not_on_path") return "沒跑腦";
+  if (model.kind === "measured") {
+    if (model.calls === 0) {
+      return "0 calls／US$0.00/天（跑了，沒呼叫）";
+    }
+    return `${whole(model.calls)} calls／US$${measured(model.usd_per_day, "", 2)}/天`;
+  }
+  return "未量到";
+}
+
 function paintProfiles(configurations) {
   el.profiles.replaceChildren();
   el.other.replaceChildren();
@@ -103,7 +114,7 @@ function paintProfiles(configurations) {
     cell(row, fraction(config.answer_accuracy));
     cell(row, fraction(config.citation_accuracy));
     cell(row, latency(config.latency));
-    cell(row, `${whole(config.model_calls)} calls／US$${measured(config.model_usd_per_day, "", 2)}/天`);
+    cell(row, modelCell(config.model));
     el.profiles.append(row);
 
     const other = document.createElement("tr");

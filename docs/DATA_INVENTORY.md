@@ -107,8 +107,8 @@ forward-compat 本身是對的：多寫一個欄位的新版不該讓舊版放�
 
 沒有遙測、沒有帳號。程式裡沒有 HTTP client。簽了第二張同意書且設定了
 `[brain] command` 之後，螢幕文字原文會交給那支本機 CLI；外送紀錄在
-`brain_outbound`（結構與計數，不含原文；`role` 分解釋層／審閱層），假設卡片在 `l2_card`（append-only 版本鏈，`author` 是 interpreter／reviewer／user，刪 L0 時 tombstone 而不是實刪——列留著，
-卡片上的字清掉）。
+`brain_outbound`（結構與計數，不含原文；`role` 分解釋層／審閱層；送出去的是原文），假設卡片在 `l2_card`（append-only 版本鏈，`author` 是 interpreter／reviewer／user，刪 L0 時 tombstone 而不是實刪——列留著，
+卡片上的字清掉）。桌面時間軸的「外送」頁讀這兩張表和 `meta.ever_brain_outbound`。
 
 L3 只由 Reviewer 寫入：`commitments`（承諾表，status 為 open／done／dead／snoozed／archived，`due_source` 分螢幕上寫的和她猜的）、`entities` 與 `entity_mentions`、`day_summaries`、`preferences`（例如哪一類被「其他一切」降權）。血緣在 `provenance(child_ref, parent_ref)`。審閱層有沒有跑過、回查了幾次，記在 `reviewer_run`／`reviewer_recheck`——沒跑過和跑了沒回查是兩句話。雙 pass 對不上的那幾筆在 `reviewer_divergence`，分歧不寫入 L3。
 
@@ -191,8 +191,10 @@ report 寫到 stdout；`--to` 寫一個新檔，目的地已存在就拒絕覆�
 - 每題的問題文字、來源、判分、延遲，以及每個回傳項目的 channel、相對時間、
   source kind、值與 corpus `event_index`。fact 會帶 raw／normalized 值，文字結果
   會帶完整的去敏後文字。
-- `baseline_text` 和 `facts` 各自的找回率@k、答案／出處正確率、延遲分布；兩條
-  現行路徑確定沒有模型，所以 `model_calls` 與 `model_usd_per_day` 是 0。
+- `baseline_text` 和 `facts` 各自的找回率@k、答案／出處正確率、延遲分布。
+  沒有模型路徑的配置 `model.kind = not_on_path`（不是量到 0 次呼叫）。
+  開了 `--ab` 的 `interpreter_reviewer` 才從 `brain_outbound` 數呼叫、
+  用 SPEC §13／`research/cost-model.md` 的 Haiku 4.5 單價換算金額。
 - 尚未量到的提醒誤報／漏報、斷句 F1、Reviewer 回查率、CPU、RAM、電池與磁碟是
   `null`，不是 0；沒有適用題目的比例也因為沒有分母而是 `null`。
 
@@ -725,6 +727,12 @@ CASCADE 帶走的那幾列**不會出現在 `execute()` 的回傳值裡**，所�
 > 沒有回填，也不需要：標記這件事從來沒有出現在任何一個發出去的版本裡，所以
 > 「升級之前按過」是一個不存在的處境。上面 `ever_stored` 那張 `'assumed-at-upgrade'`
 > 標籤在這裡沒有對應物，這是它比前三顆便宜的地方。
+
+> **第五顆：`ever_brain_outbound`。** 一樣單調、一樣過不了期。內容是「這台機器
+> 上曾經把字送出過程式」。`brain_outbound` 的列會被 `forget`／保留期清掉，所以
+> 「一列外送紀錄都沒有」有兩種意思：從來沒送過，和送過、被清掉了。外送紀錄面板
+> 靠這一顆把兩句話分開。跳過（`brain_skip`）不算送出。列還在的時候沒有這個 key
+> 也算送過——不然升級上來、旗標還沒按下的那幾列會被說成從來沒送。
 
 ---
 

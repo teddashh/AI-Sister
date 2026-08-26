@@ -995,6 +995,11 @@ fn record_skip(
         budget_limit: limit as i64,
         detail: &reason.message(),
     })?;
+    // 外送紀錄面板讀 `brain_skip`。審閱層沒送出去的原因要跟解釋層同一張表，
+    // 不然「今天沒送」只看得到一半。
+    input
+        .db
+        .insert_brain_skip(input.now, reason.as_str(), None, &reason.message())?;
     Ok(())
 }
 

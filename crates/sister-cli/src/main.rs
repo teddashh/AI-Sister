@@ -118,6 +118,15 @@ enum ReplayAction {
         /// 把完整 report JSON 寫到新檔案（不覆寫）
         #[arg(long, value_name = "檔案", conflicts_with = "json")]
         to: Option<PathBuf>,
+        /// 同一份題庫再跑一次 +interpreter+reviewer，輸出並排與差值。沒贏就明講沒贏。
+        #[arg(long)]
+        ab: bool,
+        /// 評測用的 CLI。沒給的話 +brain 那一路會跳過，並寫出原因。
+        #[arg(long, value_name = "COMMAND", requires = "ab")]
+        brain_command: Option<String>,
+        /// 傳給 `--brain-command` 的參數，可重複。
+        #[arg(long = "brain-arg", value_name = "ARG", requires = "ab")]
+        brain_arg: Vec<String>,
     },
     /// 把 query-log Draft 逐題補成可跑、可審查的 recall 題庫
     Questions {
@@ -535,7 +544,24 @@ fn main() -> Result<()> {
                 runs,
                 json,
                 to,
-            }) => ops::replay::evaluate_corpus(&corpus, &questions, k, runs, json, to.as_deref()),
+                ab,
+                brain_command,
+                brain_arg,
+            }) => ops::replay::evaluate_corpus(
+                &corpus,
+                &questions,
+                ops::replay::EvaluateOpts {
+                    k,
+                    runs,
+                    json,
+                    output: to.as_deref(),
+                    ab,
+                    brain: brain_command.map(|command| sister_core::eval::BrainEval {
+                        command,
+                        args: brain_arg,
+                    }),
+                },
+            ),
             Some(ReplayAction::Questions { action }) => match action {
                 ReplayQuestionAction::Status { corpus, questions } => {
                     ops::replay::question_status(&corpus, &questions)

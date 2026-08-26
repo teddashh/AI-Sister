@@ -1437,6 +1437,72 @@ fn memory_commitments(shell: tauri::State<'_, Shell>) -> Result<Vec<PledgeView>,
     })
 }
 
+#[derive(Serialize)]
+struct OutboundLine {
+    ts: i64,
+    command: String,
+    args: Vec<String>,
+    chars_sent: i64,
+    truncated: bool,
+    outcome: String,
+    duration_ms: i64,
+    error: Option<String>,
+    role: String,
+}
+
+#[derive(Serialize)]
+struct SkipLine {
+    ts: i64,
+    reason: String,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct OutboundLog {
+    outbound: Vec<OutboundLine>,
+    skips: Vec<SkipLine>,
+    ever_sent: bool,
+}
+
+#[tauri::command(async)]
+fn memory_outbound(limit: Option<u32>, shell: tauri::State<'_, Shell>) -> Result<OutboundLog, String> {
+    let take = limit.unwrap_or(200).clamp(1, 500) as usize;
+    with_db(&shell, |db| {
+        let outbound = db
+            .list_brain_outbound(take)
+            .map_err(|e| format!("{e:#}"))?
+            .into_iter()
+            .map(|row| OutboundLine {
+                ts: row.ts,
+                command: row.command,
+                args: serde_json::from_str(&row.args_json).unwrap_or_default(),
+                chars_sent: row.chars_sent,
+                truncated: row.truncated,
+                outcome: row.outcome,
+                duration_ms: row.duration_ms,
+                error: row.error,
+                role: row.role,
+            })
+            .collect();
+        let skips = db
+            .list_brain_skip(take)
+            .map_err(|e| format!("{e:#}"))?
+            .into_iter()
+            .map(|row| SkipLine {
+                ts: row.ts,
+                reason: row.reason,
+                detail: row.detail,
+            })
+            .collect();
+        let ever_sent = db.ever_brain_outbound().map_err(|e| format!("{e:#}"))?;
+        Ok(OutboundLog {
+            outbound,
+            skips,
+            ever_sent,
+        })
+    })
+}
+
 #[tauri::command(async)]
 fn correct_l2(
     segment_core_start: i64,
@@ -2537,6 +2603,7 @@ fn main() {
             timeline_undo_segment_edit,
             memory_guesses,
             memory_commitments,
+            memory_outbound,
             correct_l2,
             commitment_kill,
             commitment_other,

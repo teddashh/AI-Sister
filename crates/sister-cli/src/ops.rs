@@ -733,9 +733,17 @@ pub mod brain {
         println!();
         let outbound = db.list_brain_outbound(limit)?;
         let skips = db.list_brain_skip(limit)?;
+        println!("送出去的是螢幕上的原文，沒有去識別化。這裡只記結構和計數，不留那份原文。\n");
         if outbound.is_empty() && skips.is_empty() {
-            println!("還沒有外送紀錄，也還沒有降級紀錄。");
+            if db.ever_brain_outbound()? {
+                println!("送過，但那些列已經被保留期或「忘掉」清掉了。不是從來沒送。");
+            } else {
+                println!("還沒送過任何東西，也還沒有降級紀錄。");
+            }
             return Ok(());
+        }
+        if outbound.is_empty() && db.ever_brain_outbound()? {
+            println!("外送紀錄本身已經被清掉了（送過，不是從來沒送）。\n");
         }
         if !outbound.is_empty() {
             println!("外送紀錄（記結構和計數，不留送出去的原文）\n");
@@ -10681,17 +10689,35 @@ pub mod replay {
         shortened
     }
 
+    pub struct EvaluateOpts<'a> {
+        pub k: usize,
+        pub runs: usize,
+        pub json: bool,
+        pub output: Option<&'a Path>,
+        pub ab: bool,
+        pub brain: Option<sister_core::eval::BrainEval>,
+    }
+
     pub fn evaluate_corpus(
         corpus_path: &Path,
         questions_path: &Path,
-        k: usize,
-        runs: usize,
-        json: bool,
-        output: Option<&Path>,
+        opts: EvaluateOpts<'_>,
     ) -> Result<()> {
         let (corpus, questions) = read_corpus_and_questions(corpus_path, questions_path)?;
 
-        let report = sister_core::eval::evaluate(&corpus, &questions, k, runs)?;
+        let report = if opts.ab {
+            sister_core::eval::evaluate_ab(
+                &corpus,
+                &questions,
+                opts.k,
+                opts.runs,
+                opts.brain.as_ref(),
+            )?
+        } else {
+            sister_core::eval::evaluate(&corpus, &questions, opts.k, opts.runs)?
+        };
+        let json = opts.json;
+        let output = opts.output;
         if json {
             warn_private_report(&report);
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -10747,6 +10773,10 @@ pub mod replay {
                 config.metrics.latency.p50_ms,
                 config.metrics.latency.p95_ms,
             );
+            println!(
+                "    模型：{}",
+                sister_core::eval::format_model_usage(&config.metrics.model)
+            );
             let failed: Vec<_> = config
                 .questions
                 .iter()
@@ -10757,7 +10787,47 @@ pub mod replay {
                 println!("    答錯／空手：{}", failed.join("、"));
             }
         }
-        println!("  模型：0 calls，US$0/天（這兩個配置都沒有模型路徑）。");
+        if let Some(ab) = &report.ab {
+            println!();
+            println!(
+                "  A/B：{} vs {}，題庫 {} 題全跑，跳過 {} 題。",
+                ab.baseline,
+                ab.treatment,
+                ab.questions_total,
+                ab.questions_skipped.len()
+            );
+            if !ab.questions_skipped.is_empty() {
+                for skipped in &ab.questions_skipped {
+                    println!("    跳過 {}：{}", skipped.id, skipped.reason);
+                }
+            }
+            match ab.accuracy_delta_pt {
+                Some(delta) => println!(
+                    "    答案正確率差值：{delta:+.1} pt（門檻 +{:.0} pt）",
+                    sister_core::eval::AB_ACCURACY_WIN_PT
+                ),
+                None => println!("    答案正確率差值：沒有分母，還沒量到。"),
+            }
+            println!(
+                "    誤承諾率：{}",
+                sister_core::eval::format_false_commitment(&ab.false_commitment)
+            );
+            if let Some(skip) = &ab.brain.skip {
+                println!(
+                    "    解釋層跳過：{skip}（jobs {}，成功 {}）",
+                    ab.brain.interpreter_jobs, ab.brain.interpreter_success
+                );
+            } else {
+                println!(
+                    "    解釋層：jobs {}，成功 {}",
+                    ab.brain.interpreter_jobs, ab.brain.interpreter_success
+                );
+            }
+            if let Some(skip) = &ab.brain.reviewer_skip {
+                println!("    審閱層跳過：{skip}");
+            }
+            println!("    {}", sister_core::eval::format_ab_gate(&ab.gate));
+        }
         println!(
             "  尚未量到：提醒誤報／漏報、斷句 F1、Reviewer 回查率、CPU／RAM／電池／磁碟；report 裡是 null，不是 0。"
         );
@@ -11474,7 +11544,18 @@ pub mod replay {
                 include_str!("../../../scenarios/recall-baseline.questions.json"),
             )?;
 
-            evaluate_corpus(&corpus, &questions, 5, 1, false, Some(&report))?;
+            evaluate_corpus(
+                &corpus,
+                &questions,
+                EvaluateOpts {
+                    k: 5,
+                    runs: 1,
+                    json: false,
+                    output: Some(&report),
+                    ab: false,
+                    brain: None,
+                },
+            )?;
             let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&report)?)?;
             assert_eq!(value["configurations"][0]["name"], "baseline_text");
             assert_eq!(value["configurations"][1]["name"], "facts");
@@ -11486,7 +11567,19 @@ pub mod replay {
             assert!(value["configurations"][0]["metrics"]["cpu_percent"].is_null());
 
             assert!(
-                evaluate_corpus(&corpus, &questions, 5, 1, false, Some(&report)).is_err(),
+                evaluate_corpus(
+                    &corpus,
+                    &questions,
+                    EvaluateOpts {
+                        k: 5,
+                        runs: 1,
+                        json: false,
+                        output: Some(&report),
+                        ab: false,
+                        brain: None,
+                    },
+                )
+                .is_err(),
                 "既有 report 不可被覆寫"
             );
             Ok(())

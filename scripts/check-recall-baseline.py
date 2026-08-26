@@ -94,6 +94,32 @@ def format_cost(value):
     return f"US${value:g}/天"
 
 
+def format_model_calls(model):
+    if not isinstance(model, dict):
+        return "資料不完整"
+    kind = model.get("kind")
+    if kind == "not_on_path":
+        return "沒跑腦"
+    if kind == "measured":
+        return str(model.get("calls"))
+    return "資料不完整"
+
+
+def format_model_cost(model):
+    if not isinstance(model, dict):
+        return "資料不完整"
+    kind = model.get("kind")
+    if kind == "not_on_path":
+        return "沒跑腦"
+    if kind == "measured":
+        calls = model.get("calls")
+        usd = model.get("usd_per_day")
+        if calls == 0:
+            return "US$0/天（跑了，沒呼叫）"
+        return format_cost(usd)
+    return "資料不完整"
+
+
 def readme_block(report, start=README_START, end=README_END):
     lines = [
         start,
@@ -115,8 +141,8 @@ def readme_block(report, start=README_START, end=README_END):
                 format_fraction(at(metrics, "recall_at_k")),
                 format_fraction(at(metrics, "answer_accuracy")),
                 format_fraction(at(metrics, "citation_accuracy")),
-                at(metrics, "model_calls"),
-                format_cost(at(metrics, "model_usd_per_day")),
+                format_model_calls(at(metrics, "model")),
+                format_model_cost(at(metrics, "model")),
             )
         )
     lines.append(end)
@@ -248,8 +274,14 @@ def check_configurations(report, expected_names, expected_scores, samples, label
         for metric, (passed, total) in expected_scores[name].items():
             expect_fraction(metrics, metric, passed, total, f"{label}.{name}.{metric}")
 
-        expect(at(metrics, "model_calls"), 0, f"{label}.{name}.model_calls")
-        expect(at(metrics, "model_usd_per_day"), 0.0, f"{label}.{name}.model_usd_per_day")
+        # 不跑腦那一路仍然是「沒呼叫模型」。型別上是 not_on_path，
+        # 不是量到 0 次——那是「跑了腦但沒花錢」才用的數字。
+        expect(at(metrics, "model", "kind"), "not_on_path", f"{label}.{name}.model.kind")
+        if isinstance(metrics, dict) and "model_calls" in metrics:
+            die(
+                f"{label}.{name} 還有 model_calls={metrics['model_calls']!r}——"
+                "不跑腦不該再印成一個和「跑了沒花錢」分不開的 0"
+            )
         for field in UNMEASURED:
             expect(at(metrics, field), None, f"{label}.{name}.{field}")
 
