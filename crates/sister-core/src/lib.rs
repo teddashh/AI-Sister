@@ -28,6 +28,7 @@ pub mod db;
 pub mod dedup;
 pub mod eval;
 pub mod facts;
+pub mod followup;
 pub mod heartbeat;
 mod local_day;
 pub mod model;

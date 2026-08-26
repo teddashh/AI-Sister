@@ -1163,16 +1163,121 @@ fn looks_completed(text: &str) -> bool {
         || text.contains("Done")
 }
 
-/// 到期 48h 沒互動 → archived。這是 status=archived 的真路徑。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArchiveDecision {
+    NoDue,
+    NotOpen { status: String },
+    NotDueYet { due_at: Millis },
+    GracePeriod { archive_after: Millis },
+    InteractionUnknown { archive_after: Millis },
+    Archive,
+}
+
+/// 現行 schema 沒有「使用者最後何時與這張卡互動」這一格：`updated_at` 是所有
+/// L3 狀態寫入共用的時間，`last_evidence_seen_at` 是螢幕證據。
+///
+/// **但這不表示這一列答不出規則 3。** 那兩件事的不對稱在這裡：
+///
+/// - `updated_at != created_at` → 有人寫過這一列，而寫的人可能是 Reviewer
+///   也可能是使用者。**這一邊真的分不出來**，所以回 `InteractionUnknown`，
+///   不歸檔。
+/// - `updated_at == created_at` → `insert_commitment`（`db.rs` 的
+///   `VALUES(…,?14,?14,NULL)`）把兩格寫成同一個值，而之後**任何一種**寫入都
+///   會把 `updated_at` 推走。所以這一格相等的意思是「從誕生到現在一次寫入都
+///   沒有」——使用者的互動當然也在「沒有」裡面。這一邊是確定的。
+///
+/// 規則 3 要的是後面那一種確定性。上一版把整個判斷收成
+/// `InteractionUnknown`，於是 `archived` 這個 status **一條路都不剩**，
+/// `archive_overdue` 永遠回 0——那不是誠實，那是把規則關掉。
+pub fn archive_decision(c: &crate::db::CommitmentRow, now: Millis) -> ArchiveDecision {
+    if c.status != "open" {
+        return ArchiveDecision::NotOpen {
+            status: c.status.clone(),
+        };
+    }
+    let Some(due_at) = c.due_at else {
+        return ArchiveDecision::NoDue;
+    };
+    if now < due_at {
+        return ArchiveDecision::NotDueYet { due_at };
+    }
+    let archive_after = due_at.saturating_add(ARCHIVE_GRACE_MS);
+    if now < archive_after {
+        return ArchiveDecision::GracePeriod { archive_after };
+    }
+    if c.updated_at != c.created_at {
+        return ArchiveDecision::InteractionUnknown { archive_after };
+    }
+    ArchiveDecision::Archive
+}
+
+/// EOD 定期走到這裡；只有純判斷明確回 Archive 才寫入。
 pub fn archive_overdue(db: &mut Db, now: Millis) -> Result<u32> {
-    let cutoff = now.saturating_sub(ARCHIVE_GRACE_MS);
-    let due = db.open_commitments_due_before(cutoff)?;
     let mut n = 0u32;
-    for c in due {
-        let changed = db.update_commitment_status(l3_write(), c.id, "archived", None, now)?;
-        n += changed as u32;
+    for c in db.live_commitments()? {
+        match archive_decision(&c, now) {
+            ArchiveDecision::Archive => {
+                n += db.update_commitment_status(l3_write(), c.id, "archived", None, now)? as u32;
+            }
+            ArchiveDecision::NoDue
+            | ArchiveDecision::NotOpen { .. }
+            | ArchiveDecision::NotDueYet { .. }
+            | ArchiveDecision::GracePeriod { .. }
+            | ArchiveDecision::InteractionUnknown { .. } => {}
+        }
     }
     Ok(n)
+}
+
+const FOLLOWUP_PREFERENCE: &str = "followup:last_asked";
+
+pub fn followup_state(db: &Db) -> Result<Option<crate::followup::FollowupState>> {
+    let Some(row) = db.preference(FOLLOWUP_PREFERENCE)? else {
+        return Ok(None);
+    };
+    let Some((id, at)) = row.value.split_once(':') else {
+        return Ok(None);
+    };
+    // 解不出卡號就回「沒問過」，**不要編一個 `-1`**。`-1` 會被
+    // `followup::decide` 當成一個真的卡號拿去比對，於是「上次問的那張」這件事
+    // 被一張不存在的卡佔走，真正問過的那張下一次又會被問一遍——一個看起來
+    // 合理的數字把一句假話說得很順。這個 repo 已經為同一種寫法付過 67 次帳。
+    //
+    // 時間解不出來就退到這一列自己的 `updated_at`：那正是上次寫下這格的時刻，
+    // 是同一件事的另一個量法，不是編的。
+    let Ok(commitment_id) = id.parse::<i64>() else {
+        return Ok(None);
+    };
+    Ok(Some(crate::followup::FollowupState {
+        commitment_id,
+        last_asked_at: at.parse().unwrap_or(row.updated_at),
+    }))
+}
+
+pub fn record_followup(db: &mut Db, commitment_id: i64, now: Millis) -> Result<()> {
+    db.upsert_preference(
+        l3_write(),
+        FOLLOWUP_PREFERENCE,
+        &format!("{commitment_id}:{now}"),
+        &format!("commitment:{commitment_id}"),
+        now,
+    )
+}
+
+pub fn close_from_message(
+    db: &mut Db,
+    message: &str,
+    now: Millis,
+) -> Result<crate::followup::CloseIntent> {
+    let decision = crate::followup::resolve_close_intent(message, &db.live_commitments()?);
+    if let crate::followup::CloseIntent::Close {
+        commitment_id,
+        ref kill_note,
+    } = decision
+    {
+        kill_commitment(db, commitment_id, kill_note, now)?;
+    }
+    Ok(decision)
 }
 
 /// 使用者按「結案」。這是 status=dead 的真路徑。
@@ -1958,7 +2063,7 @@ mod tests {
     }
 
     #[test]
-    fn five_statuses_all_have_a_path() {
+    fn lifecycle_paths_do_not_invent_user_interaction() {
         let mut db = Db::open_in_memory().expect("db");
         let ts = 1_700_400_000_000;
         let (_sid, fid) = seed(&mut db, ts, "帳單 NT$80 已完成");
@@ -2042,6 +2147,23 @@ mod tests {
                 },
             )
             .unwrap();
+        // 誕生後一次寫入都沒有 → 規則 3 走得到底。
+        let overdue = db.commitment_by_id(id3).unwrap().unwrap();
+        assert_eq!(overdue.updated_at, overdue.created_at);
+        assert_eq!(archive_decision(&overdue, now), ArchiveDecision::Archive);
+
+        // 同一張卡，只要**被寫過一次**（誰寫的分不出來），就退回不歸檔。
+        // 這兩個 assert 是一組的：只留上面那一個，把 `updated_at != created_at`
+        // 那道門拿掉也不會紅；只留下面那一個，整條規則關掉也不會紅。
+        let touched = crate::db::CommitmentRow {
+            updated_at: overdue.created_at + 1,
+            ..overdue.clone()
+        };
+        assert!(matches!(
+            archive_decision(&touched, now),
+            ArchiveDecision::InteractionUnknown { .. }
+        ));
+
         assert_eq!(archive_overdue(&mut db, now).unwrap(), 1);
         assert_eq!(
             db.commitment_by_id(id3).unwrap().unwrap().status,

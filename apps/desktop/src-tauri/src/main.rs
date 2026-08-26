@@ -634,6 +634,8 @@ fn with_db_mut<T>(
 #[derive(Serialize)]
 struct Answer {
     kind: &'static str,
+    followup: Option<String>,
+    closure_notice: Option<String>,
     /// 她拿去比對的那串字，**但只在它是黏出來的時候**。`None` = 沒什麼好講。
     ///
     /// `question::terms` 會把「剛剛」「那個」剝掉，剝到不足兩個字還會往回退
@@ -791,6 +793,8 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
     if question.is_empty() {
         return Ok(Answer {
             kind: "keywords",
+            followup: None,
+            closure_notice: None,
             searched: None,
             query_id: None,
             answers: Vec::new(),
@@ -807,6 +811,24 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
     // 章節那一支要寫 `segment`，所以整條改拿可變借用。沒認到時間範圍
     // 時 `chapters_for_question` 立刻回 `None`，不會重算。
     with_db_mut(&shell, |db| {
+        let now = sister_core::now_ms();
+        let close = sister_core::reviewer::close_from_message(db, &question, now)
+            .map_err(|e| format!("{e:#}"))?;
+        let closure_notice = match close {
+            sister_core::followup::CloseIntent::NotAClosure => None,
+            sister_core::followup::CloseIntent::Unrecognized => Some("我認不出你指哪一張記憶，所以沒有動任何一張。".to_string()),
+            sister_core::followup::CloseIntent::Ambiguous { .. } => Some("這句話對得上不只一張記憶，所以沒有動任何一張。".to_string()),
+            sister_core::followup::CloseIntent::Close { .. } => Some("這張記憶已結案，不會再提。".to_string()),
+        };
+        let previous = sister_core::reviewer::followup_state(db).map_err(|e| format!("{e:#}"))?;
+        let followup = match sister_core::followup::decide(&db.live_commitments().map_err(|e| format!("{e:#}"))?, now, previous.as_ref()) {
+            sister_core::followup::FollowupDecision::Ask { commitment_id, text } => {
+                sister_core::reviewer::record_followup(db, commitment_id, now).map_err(|e| format!("{e:#}"))?;
+                Some(text)
+            }
+            sister_core::followup::FollowupDecision::NoEligibleCommitment
+            | sister_core::followup::FollowupDecision::CoolingDown { .. } => None,
+        };
         // 和 CLI、replay harness 共用同一條產品接線。字母人原本就是 facts 10
         // 筆、原文 20 筆，兩個上限各自保留，不為了共用函式偷偷改畫面密度。
         const FACTS: usize = 10;
@@ -916,6 +938,8 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         };
         Ok(Answer {
             kind: shape.name(),
+            followup,
+            closure_notice,
             // 只在**不一樣**的時候送。一樣的時候送過去，畫面那邊還要再比一次，
             // 而「這兩串字算不算同一句」是這裡才知道的事（`terms` 回的是原句的
             // 一個切片）。`Shape::Recent` 根本沒走比對那條路，所以也不送。
