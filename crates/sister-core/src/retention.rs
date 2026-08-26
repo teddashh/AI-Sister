@@ -1779,6 +1779,49 @@ mod tests {
             .join("\n")
     }
 
+    /// 保留期到了，卡片上的字也要跟著走。
+    ///
+    /// `forget` 是他親手按的，`prune` 是自己在跑的——後者沒有人看著，所以
+    /// 更需要一條測試。文字過了 `text_days` 就該消失，而 L2 卡片是從那些字
+    /// 長出來的：留著它等於保留期對這一層失效。
+    #[test]
+    fn the_retention_period_takes_the_words_inside_the_hypothesis_too() {
+        let tmp = Tmp::new("prune-l2-content");
+        let (mut db, _paths) = seeded(&tmp);
+        card_over(&mut db, days_ago(400), "frame:1");
+        // 對照組：還沒過期的那一張，字要留著。沒有它的話，「找不到王小明」
+        // 也可能只是因為這個測試根本沒建出任何卡片——那種綠是空的。
+        db.insert_l2_card(&crate::db::L2Insert {
+            segment_core_start: days_ago(1),
+            segment_ref: "segment:fresh",
+            activity: "昨天在看健保局的單子",
+            entities_json: "[]".into(),
+            continues_json: None,
+            commitments_json: "[]".into(),
+            model_confidence: 0.5,
+            evidence_json: "[]".into(),
+            open_questions_json: "[]".into(),
+            author: crate::db::L2Author::Interpreter,
+        })
+        .expect("insert fresh");
+        assert!(l2_blob(&db).contains("王小明"), "測試自己沒把卡片建出來");
+
+        db.prune(
+            NOW,
+            &RetentionConfig {
+                frames_days: 30,
+                text_days: 365,
+            },
+            Some(tmp.path()),
+        )
+        .expect("prune");
+
+        let blob = l2_blob(&db);
+        assert!(!blob.contains("王小明"), "過期的卡片還留著人名：{blob}");
+        assert!(!blob.contains("12,000"), "過期的卡片還留著金額：{blob}");
+        assert!(blob.contains("健保局"), "沒過期的卡片被連坐清掉了：{blob}");
+    }
+
     /// 忘掉一段之後，那段長出來的**假設內容**也要不見，不是只多一個旗標。
     ///
     /// 墓碑的用處是「這裡曾經有東西、被刪掉了」，不是「東西還在，旁邊多一欄
