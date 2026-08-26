@@ -41,6 +41,7 @@ pub mod reviewer;
 pub mod segment;
 pub mod segment_edit;
 pub mod stuck;
+pub mod wakeup;
 
 pub use config::{BrainConfig, CaptureConfig, Config, Exclusion, PrivacyConfig, RetentionConfig};
 pub use consent::CloudAllowed;

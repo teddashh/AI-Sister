@@ -3406,6 +3406,27 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
+    /// 這段時間裡有沒有任何 L0 原件。沒有就算過，不是回 0 筆再讓呼叫端猜。
+    pub fn has_l0_in_range(&self, from_ts: Millis, to_ts: Millis) -> Result<bool> {
+        if from_ts >= to_ts {
+            return Ok(false);
+        }
+        let focus: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM focus_events WHERE ts >= ?1 AND ts < ?2)",
+            params![from_ts, to_ts],
+            |r| r.get(0),
+        )?;
+        if focus {
+            return Ok(true);
+        }
+        let frames: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM frames WHERE ts >= ?1 AND ts < ?2)",
+            params![from_ts, to_ts],
+            |r| r.get(0),
+        )?;
+        Ok(frames)
+    }
+
     pub fn frame_exists(&self, id: i64) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM frames WHERE id = ?1)",

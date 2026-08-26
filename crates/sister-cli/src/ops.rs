@@ -12213,6 +12213,32 @@ pub mod record {
         Recheck::Images(should)
     }
 
+    /// 這一拍該不該叫醒慢路徑。只看 [`sister_capture::Tick`]，不查資料庫。
+    ///
+    /// - 新畫面（`Kept`）或鎖屏（`NoScreen`）：段落可能剛關上。
+    /// - 剛從 `Idle` 恢復：SPEC §5.1「長停留後恢復」。
+    /// - `Idle` 本身不叫——她還在閉眼，沒有新的資訊價值。
+    #[cfg(any(windows, test))]
+    fn should_ping_brain(tick: &sister_capture::Tick, was_idle: &mut bool) -> bool {
+        use sister_capture::Tick::*;
+        match tick {
+            Idle => {
+                *was_idle = true;
+                false
+            }
+            Disabled | Paused => false,
+            Kept { .. } | NoScreen => {
+                *was_idle = false;
+                true
+            }
+            Duplicate { .. } | Excluded { .. } => {
+                let left_idle = *was_idle;
+                *was_idle = false;
+                left_idle
+            }
+        }
+    }
+
     pub fn run(
         data_dir: &Path,
         config: Config,
@@ -12566,6 +12592,8 @@ pub mod record {
         let image_budget_mb = config.capture.max_image_mb_per_day;
         let retention = config.retention.clone();
         let prune_images = frames_root.clone();
+        // 腦走慢路徑：自己一條執行緒、自己一條資料庫連線。熱路徑只留 ping。
+        let brain_cfg = config.brain.clone();
         let mut rec = Recorder::new(backend, db, config, images)?;
 
         install_ctrl_c_handler();
@@ -12680,6 +12708,22 @@ pub mod record {
         // 保留期也吃熱重載（設定頁的 TTL 那一欄），所以它不能再是 `let`。
         let mut retention = retention;
 
+        let mut wake = match sister_core::wakeup::Handle::maybe_spawn(
+            data_dir,
+            brain_cfg.clone(),
+            sister_core::now_ms(),
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                println!("⚠ 解釋層執行緒開不起來（錄製照跑）：{e:#}");
+                None
+            }
+        };
+        if wake.is_none() && !sister_core::wakeup::armed(&brain_cfg) {
+            println!("  解釋層這一場一次都不會醒：還沒設定 [brain] command。");
+        }
+        let mut was_idle = false;
+
         let mut last_report = Instant::now();
         // 為什麼停的。預設是 Ctrl-C，因為 `while` 那個條件是唯一一條不經過
         // 任何 `break` 的出口——那條路上沒有地方可以設定它。
@@ -12721,14 +12765,21 @@ pub mod record {
                 // 單次 tick 失敗不該終止 session：抓不到畫面的原因多半是
                 // 暫時的（切換使用者、顯示器休眠），下一秒就好了
                 Err(e) => tracing::warn!("tick failed: {e:#}"),
-                Ok(Tick::Kept {
-                    frame_id,
-                    ocr_blocks,
-                    facts,
-                }) => {
-                    tracing::debug!("frame #{frame_id}：{ocr_blocks} 段文字、{facts} 個事實");
+                Ok(tick) => {
+                    if should_ping_brain(&tick, &mut was_idle)
+                        && let Some(w) = wake.as_ref()
+                    {
+                        w.ping();
+                    }
+                    if let Tick::Kept {
+                        frame_id,
+                        ocr_blocks,
+                        facts,
+                    } = tick
+                    {
+                        tracing::debug!("frame #{frame_id}：{ocr_blocks} 段文字、{facts} 個事實");
+                    }
                 }
-                Ok(_) => {}
             }
 
             // 設定改了就當場換上。**讀不出來就維持原樣，絕不退回預設值**——
@@ -12773,6 +12824,20 @@ pub mod record {
                                 consent_dirty = true;
                             }
                             rec.set_privacy(fresh.privacy);
+                            if let Some(w) = wake.as_ref() {
+                                w.set_config(fresh.brain.clone());
+                            } else if sister_core::wakeup::armed(&fresh.brain) {
+                                match sister_core::wakeup::Handle::maybe_spawn(
+                                    data_dir,
+                                    fresh.brain.clone(),
+                                    sister_core::now_ms(),
+                                ) {
+                                    Ok(h) => wake = h,
+                                    Err(e) => {
+                                        println!("  ⚠ 解釋層執行緒開不起來（錄製照跑）：{e:#}")
+                                    }
+                                }
+                            }
                         }
                         Reload::Missing => println!(
                             "  ⚠  設定檔不見了（{}）。**繼續用舊的那一份**——\
@@ -12933,6 +12998,18 @@ pub mod record {
             std::thread::sleep(interval);
         }
 
+        // 腦在另一條執行緒。錄製迴圈停了之後才請它把最後一段想完——
+        // 等它的時候不再抓畫面，所以不佔熱路徑。
+        let wake_report = match wake.take() {
+            Some(h) => h.shutdown(),
+            None if sister_core::wakeup::armed(&brain_cfg) => sister_core::wakeup::Report {
+                armed: true,
+                open_failed: Some("執行緒沒起來".into()),
+                ..sister_core::wakeup::Report::unarmed()
+            },
+            None => sister_core::wakeup::Report::unarmed(),
+        };
+
         // 走人之前先把心跳收掉。留給 16 秒的逾時去猜的話，那段時間裡字母人
         // 會說她還在錄，而她已經走了——**說她還在錄卻沒在錄**，是這兩個狀態
         // 裡比較危險的那一個。放在 `finish()` 之前，因為那一步會寫資料庫，
@@ -13010,6 +13087,7 @@ pub mod record {
         for line in &lost {
             println!("  ⚠  錄製途中失去的能力：{}", line.message);
         }
+        println!("{}", sister_core::wakeup::format_report(&wake_report));
         // 話講完了才把錯誤帶出去。多一句是因為這個失敗有一個看不見的後果：
         // 沒有 `end_session` 的那一場，之後每一個地方都會把它算成「當機」
         // （見 `Db::last_session` 那段）。他明天打開設定頁會看到一句「上一次
@@ -13707,7 +13785,7 @@ pub mod record {
             BootBeat, ConfigWatch, CpuPercent, DiskMeasured, DiskProjection, FootprintElapsedSecs,
             FootprintMeasured, ImageBudgetBytes, StoringImages, TickCounts, WantsImages,
             already_recording, bytes_per_day_at, footprint_context, footprint_lines, ocr_off_words,
-            ocr_work_line,
+            ocr_work_line, should_ping_brain,
         };
         use crate::ops::tmp::Tmp;
         use sister_core::config::Config;
@@ -13725,6 +13803,34 @@ pub mod record {
 
         fn budget_bytes(bytes: u64) -> ImageBudgetBytes {
             ImageBudgetBytes::from_raw_bytes(bytes)
+        }
+
+        #[test]
+        fn brain_ping_follows_information_value_not_every_tick() {
+            use sister_capture::Tick;
+            let mut idle = false;
+            assert!(!should_ping_brain(&Tick::Idle, &mut idle), "還在閒置不該叫");
+            assert!(idle);
+            assert!(
+                should_ping_brain(&Tick::Duplicate { run: 1 }, &mut idle),
+                "長停留後恢復要叫"
+            );
+            assert!(!idle);
+            assert!(
+                !should_ping_brain(&Tick::Duplicate { run: 2 }, &mut idle),
+                "同一畫面的重複不是新資訊"
+            );
+            assert!(should_ping_brain(
+                &Tick::Kept {
+                    frame_id: 1,
+                    ocr_blocks: 0,
+                    facts: 0,
+                },
+                &mut idle
+            ));
+            assert!(should_ping_brain(&Tick::NoScreen, &mut idle));
+            assert!(!should_ping_brain(&Tick::Paused, &mut idle));
+            assert!(!should_ping_brain(&Tick::Disabled, &mut idle));
         }
 
         #[test]
