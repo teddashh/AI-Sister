@@ -337,7 +337,14 @@ capture 層本身就是 recorder。
   訓練語料是被擋下來那半）。
 - ✅ alpha.66 回饋兩鍵接通記憶死亡規則；「順帶確認」機制
   （`crates/sister-core/src/followup.rs`，只在使用者主動開對話時附在回答尾端）。
-- ⬜ 日終「要不要做筆記」offer + 日摘要成品化（d 類訊號源）。
+- ✅ alpha.68 日終「要不要做筆記」offer（d 類訊號源）。訊號源**不是**
+  `SystemKind::SessionEnd`——那只證明一場錄製容器收尾，連 60 秒 bench 都會
+  寫一列。用的是一輪成功的 `ReviewKind::Eod`。
+  - 她講日期不講「今天」：日終盤點盤的是 `previous_local_day_key`，而它跑完
+    多半已經過午夜，那一刻的「今天」正是還沒有筆記的那一天。
+  - 「沒有摘要」拆成 `DayNoteState` 四格。那天一張 L2 卡都沒有 → **不開口**
+    （答應了只生得出一份空的）；他自己按過忘記 → **不開口**（提議寫回來等於
+    問他要不要撤銷自己的刪除）。
 - ⬜ **macOS port**：ScreenCaptureKit + Vision OCR + AX API + TCC/紫點 UX 文案。
   本機編不到、CI 也沒有 mac runner，還沒開始。
 - 🔶 發布工程：安裝包、簽章、自動更新、官網一頁、Show HN / X 發文帶 benchmark 表。
@@ -353,13 +360,19 @@ capture 層本身就是 recorder。
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）
 - ✅ a `CommitmentDue`：`open_commitments_due_before(now + 40min)`，只收
   `due_source='explicit'`。
-- ⬜ b `UnattendedNotification`：**沒有訊號源**。`SystemKind` 沒有通知橫幅
-  這一格，而加它要動 `sister-capture`（錄製熱路徑）。
+- ⬜ b `UnattendedNotification`：**盤點過了，做不出來，所以沒做**。
+  `focus_events` 分不出「通知搶走焦點」和「使用者自己 alt-tab 過去又切回來」；
+  不搶焦點的 toast 可能一列都沒有；`ocr_blocks` 沒抄到也不能證明沒出現。
+  加一種 `SystemKind` 要動 `sister-capture`（錄製熱路徑），不在範圍內。
   **這一格是 Phase 5 最痛的缺口**：§8.4 規定第一句話只能是 a/b，
   §8.3.3 規定冷啟動兩週只開 a/b——所以新使用者前兩週實際上只有 a 類會響。
+  誤報一次就是第一印象，而第一印象只有一次，所以寧可空著。
 - ✅ c `Stuck`：`stuck_signal` 表。
-- ⬜ d `SessionEnd`、⬜ e `Leaving`：`SystemKind::SessionEnd` / `Lock` 都已經
-  在寫，但還沒接進 `gatekeeper_candidates::collect()`。
+- ✅ d `SessionEnd`：成功的 `reviewer_run(kind='eod')`，見上。
+- ⬜ e `Leaving`：**時序上做不到，所以沒做**。`SystemKind::Lock` 是 OS
+  **已經鎖定之後**才寫進 `system_events` 的，而 SPEC 要的是「鎖屏**前**」。
+  在鎖屏後才問「要不要交接」是一句沒有人看得到的話。要真的做到得在
+  `sister-capture` 加鎖前訊號。
 
 **額外做掉的（不在原 scope，但在出貨路上）**
 - ✅ alpha.67 來源防線（SPEC §0.4 / §9.4）：`build_prompt` 原本把 OCR 原文、
@@ -385,13 +398,30 @@ capture 層本身就是 recorder。
 **目標**：從「說」到「做」的第一步，可逆操作 + 逐步核准。物理隔離的 sidecar。
 
 **Scope**
-- hands sidecar（Node）：MAT adapter/redaction/managed runtime 移植。
-- `suggest` 級：開 URL/檔案/聚焦視窗（按鈕觸發）——接通承諾卡的
-  `allowed_next_step`（「要我幫你把視窗點開嗎」）。
-- `semi-action` 級：結構化 grant（task/apps/actions/expiry）、逐步核准
-  （對話「好」= 只核准顯示的那一步）、每步截圖驗證、abort 快捷鍵、action log。
-- 來源防線：L0 內容 data-block 包裹；外部內容要求動作 → 強制人工核准
-  （injection 測試套件：在網頁/訊息裡埋指令，驗證 0 執行）。
+- ~~hands sidecar（Node）：MAT adapter/redaction/managed runtime 移植。~~
+  **改成 Rust crate `crates/sister-hands/`，而且不移植 redaction。**
+  去敏在 alpha.58 整個從產品拿掉了（「記憶是長期在本機資料庫裡的，
+  要去敏的人就不會用」）——把一個已經拆掉的東西移植進來，會讓下一個讀
+  這份文件的人以為產品裡有它。Node sidecar 那一半：這個 repo 的
+  `check-no-network.sh` 連 HTTP client 都禁，一個 Node 行程買到的隔離
+  不如型別上的隘口，等真的需要行程隔離再說。
+- ✅ alpha.68 `suggest` 級：`Level::{Observe, Suggest}`、
+  `Suggestion::{OpenUrl, OpenFile, FocusWindow}`、`execute_with()` 唯一隘口、
+  `ActionLog`（JSONL，可回放）、`commitment_action::parse_allowed_next_step`。
+  - **「這是人按的」是一張型別上的票**（`UserButtonPress`，欄位與鑄造函式
+    都私有）。螢幕上的字和模型輸出最多只能解析成一顆**按鈕**，中間隔著一次
+    人按下去。crate 外面寫 `UserButtonPress(())` 收到 E0603。
+  - 永不繼承的五類一個都沒實作，所以守的不是「攔截」是「無法被偷偷加進來」：
+    `never_inherited_class` 的 `match` 沒有 `_`，加第四種動作會編譯錯誤。
+  - 結局**三種**：`Refused`（沒交給 OS）／`Failed`（交了但失敗）／`Done`。
+- 🔶 接通承諾卡的 `allowed_next_step`（「要我幫你把視窗點開嗎」）：
+  core 那一側做好了，**還沒有平台執行層、沒有 UI**。她有手，手沒接上去。
+- ⬜ `semi-action` 級：結構化 grant（task/apps/actions/expiry）、逐步核准
+  （對話「好」= 只核准顯示的那一步）、每步截圖驗證、abort 快捷鍵。
+- 🔶 來源防線：L0 內容 data-block 包裹 ✅（alpha.67 `prompt_fence`，
+  20 種 injection 變體）；外部內容要求動作 → 強制人工核准 ✅（型別上就過不去）。
+  ⬜ 端到端的 injection 套件（在網頁/訊息裡埋指令，驗證 0 執行）還沒有——
+  現在測的是圍欄那一層，不是「埋了指令然後真的沒有東西被執行」。
 
 **Exit criteria**
 - [ ] Injection 套件 100% 攔截（埋 20 種指令變體）。
