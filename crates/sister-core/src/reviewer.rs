@@ -42,6 +42,18 @@ fn l3_write() -> L3Write {
     L3Write(())
 }
 
+/// 一輪在 `run_at` 跑的日終盤點，盤的是哪一天。
+///
+/// **一份定義，兩個呼叫端。** 日摘要是這裡寫的，而守門員的 d 類候選要拿
+/// `daysummary:` 去指同一列——兩邊各自算一次的話，其中一邊改成
+/// `local_day_key` 就會變成「昨天的筆記做好了」配一個今天的 id，
+/// 或是反過來每天都問一次一份早就寫好的筆記。兩句話都很自然，
+/// 而且沒有任何一行是假的。
+pub fn summarized_day(run_at: Millis) -> Option<String> {
+    // 日終盤點跑完多半已經過午夜，所以盤的是前一天，不是「今天」。
+    brain::previous_local_day_key(run_at)
+}
+
 /// 為什麼這一輪沒審。每一種印出來的字都不一樣。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
@@ -875,8 +887,8 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
     let mut completed = 0u32;
     let mut archived = 0u32;
     if input.kind == ReviewKind::Eod {
-        let summarized_day = brain::previous_local_day_key(input.now)
-            .context("算不出被盤點的那一天，不敢寫日摘要")?;
+        let summarized_day =
+            summarized_day(input.now).context("算不出被盤點的那一天，不敢寫日摘要")?;
         completed = mark_done_from_originals(input)?;
         archived = archive_overdue(input.db, input.now)?;
         write_day_summary(input, &summarized_day)?;

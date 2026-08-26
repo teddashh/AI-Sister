@@ -3342,6 +3342,29 @@ impl Db {
         })
     }
 
+    /// 最近一個成功的日終盤點。跳過的 run 不是「這一天結束了」的證據。
+    pub fn latest_reviewer_eod_in_range(
+        &self,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<Option<ReviewerEodRun>> {
+        self.conn
+            .query_row(
+                "SELECT id, ts FROM reviewer_run
+                 WHERE kind = 'eod' AND skip_reason IS NULL AND ts >= ?1 AND ts < ?2
+                 ORDER BY ts DESC, id DESC LIMIT 1",
+                params![from_ts, to_ts],
+                |r| {
+                    Ok(ReviewerEodRun {
+                        id: r.get(0)?,
+                        ts: r.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// 打開時間軸時叫的那一支：把 `[from, to)` 的段落算一遍寫進 `segment`。
     ///
     /// 每次都重算，不讀舊列。一天的事件量遠小於 OCR，這不是熱路徑。
@@ -6240,6 +6263,12 @@ pub struct ReviewerRunInsert<'a> {
     pub budget_used: i64,
     pub budget_limit: i64,
     pub detail: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewerEodRun {
+    pub id: i64,
+    pub ts: Millis,
 }
 
 pub struct RecheckInsert<'a> {

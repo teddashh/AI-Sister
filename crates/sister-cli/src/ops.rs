@@ -11,6 +11,15 @@ pub mod speak {
     use sister_core::gatekeeper::{FocusMode, GateInput, Verdict, decide};
     use sister_core::moments::SpeakCategory;
 
+    fn signal_source_notice(category: SpeakCategory) -> Option<String> {
+        match category {
+            SpeakCategory::CommitmentDue | SpeakCategory::Stuck | SpeakCategory::SessionEnd => None,
+            SpeakCategory::UnattendedNotification | SpeakCategory::Leaving => {
+                Some(format!("{}：這一類目前沒有訊號源。", category.as_str()))
+            }
+        }
+    }
+
     pub fn run(
         data_dir: &Path,
         config: &sister_core::Config,
@@ -56,16 +65,17 @@ pub mod speak {
         }
 
         let candidates = sister_core::gatekeeper_candidates::collect(&db, now)?;
-        for category in [
-            SpeakCategory::UnattendedNotification,
-            SpeakCategory::SessionEnd,
-            SpeakCategory::Leaving,
-        ] {
-            println!("{}：這一類目前沒有訊號源。", category.as_str());
+        // 走 `ALL`，不是走一份手寫的清單。手寫的那一份和 `signal_source_notice`
+        // 的 `match` 是同一件事的兩個副本，而下一次有人接上訊號源的時候只會
+        // 改到其中一份——留在畫面上的那一句會宣布一件已經不成立的事。
+        for category in SpeakCategory::ALL {
+            if let Some(line) = signal_source_notice(category) {
+                println!("{line}");
+            }
         }
         if candidates.is_empty() {
             println!(
-                "現在一句候選都沒有：a 類沒有 40 分鐘內到期的顯式時間承諾，c 類沒有最近 40 分鐘的卡住訊號；b/d/e 類目前沒有訊號源。"
+                "現在一句候選都沒有：a 類沒有 40 分鐘內到期的顯式時間承諾，c 類沒有最近 40 分鐘的卡住訊號，d 類沒有最近 40 分鐘的成功日終盤點；b/e 類目前沒有訊號源。"
             );
             return Ok(());
         }
@@ -118,6 +128,27 @@ pub mod speak {
             );
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn source_notices_keep_b_and_e_missing_but_not_d() {
+            let b = signal_source_notice(SpeakCategory::UnattendedNotification)
+                .expect("b 仍然沒有訊號源");
+            assert!(b.contains("沒有訊號源"));
+            assert!(b.contains("unattended_notification"));
+            assert!(!b.contains("已接上"));
+
+            assert!(signal_source_notice(SpeakCategory::SessionEnd).is_none());
+
+            let e = signal_source_notice(SpeakCategory::Leaving).expect("e 仍然沒有訊號源");
+            assert!(e.contains("沒有訊號源"));
+            assert!(e.contains("leaving"));
+            assert!(!e.contains("已接上"));
+        }
     }
 }
 
