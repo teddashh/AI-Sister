@@ -2657,6 +2657,7 @@ pub mod watch {
         pub question: String,
         pub every: Millis,
         pub stop_after: Millis,
+        pub quiet_for: Option<Millis>,
         pub dry_run: bool,
     }
 
@@ -2733,11 +2734,37 @@ pub mod watch {
                 opts.every / 1_000
             )?;
         }
+        // **她量不出比自己看一次還短的安靜。**
+        //
+        // 那個判斷掛在「這一輪的視窗裡一段字都沒有」上，而視窗就是一個
+        // `every`。所以 `--quiet-for 30s --every 2m` 之下，那個旗標**一次都不會
+        // 觸發**——她永遠會在視窗裡看到那段字。一個安靜地什麼都不做的旗標，
+        // 比沒有這個旗標更糟：使用者設了、以為她在盯，然後等了一小時。
+        // 抬到看得出來的最短值，然後講出來。
+        let quiet_for = opts.quiet_for.map(|asked| asked.max(every));
+        if let (Some(asked), Some(used_span)) = (opts.quiet_for, quiet_for)
+            && used_span != asked
+        {
+            writeln!(
+                out,
+                "你要求畫面安靜 {}就講，但我每 {}才看一次——比這更短的安靜我量不出來，已抬到 {}。",
+                crate::fmt::duration_ms(asked),
+                crate::fmt::duration_ms(every),
+                crate::fmt::duration_ms(used_span)
+            )?;
+        }
         writeln!(
             out,
             "{}",
             sister_core::watch::plan_line(every, opts.stop_after, used, config.brain.daily_budget)
         )?;
+        if let Some(span) = quiet_for {
+            writeln!(
+                out,
+                "畫面連續 {}沒有新的字，我就停下來講一聲（那是本機的判斷，不問大腦、不吃預算）。",
+                crate::fmt::duration_ms(span)
+            )?;
+        }
 
         let mut last_seen = started.saturating_sub(every);
         if opts.dry_run {
@@ -2787,7 +2814,27 @@ pub mod watch {
                         )?;
                     }
                     if hits.is_empty() {
-                        Look::NothingNew(blind_reason(data_dir, now))
+                        let blind = blind_reason(data_dir, now);
+                        if blind == Blind::RecordingButQuiet
+                            && let (Some(threshold), Some(last)) =
+                                (quiet_for, db.recent(1)?.into_iter().next())
+                        {
+                            let elapsed = now.saturating_sub(last.ts);
+                            if now >= last.ts && elapsed >= threshold {
+                                // 這一輪確實沒有新畫面可看，所以仍算進 blind；
+                                // WentQuiet 是停止原因，不是第四種計數。
+                                tally.count(&Look::NothingNew(Blind::RecordingButQuiet));
+                                let end = WatchEnd::WentQuiet {
+                                    tally,
+                                    quiet_for: elapsed,
+                                    last_at: last.ts,
+                                    last_app: last.app_id,
+                                };
+                                writeln!(out, "{}", end.message())?;
+                                return Ok(());
+                            }
+                        }
+                        Look::NothingNew(blind)
                     } else {
                         // 日期和用量都在這裡才算。跑八小時跨過午夜的話，開跑
                         // 那一刻算好的 `day` 會把今天的外送記在昨天的帳上。
@@ -3009,6 +3056,7 @@ pub mod watch {
                     question: "完成嗎".into(),
                     every: 30_000,
                     stop_after: 60_000,
+                    quiet_for: None,
                     dry_run: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
@@ -3046,6 +3094,7 @@ pub mod watch {
                     question: "編譯跑完了嗎".into(),
                     every: 30_000,
                     stop_after: 60_000,
+                    quiet_for: None,
                     dry_run: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
@@ -3078,6 +3127,7 @@ pub mod watch {
                     question: "完成嗎".into(),
                     every: 30_000,
                     stop_after: 60_000,
+                    quiet_for: None,
                     dry_run: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
@@ -3151,6 +3201,7 @@ pub mod watch {
                     question: "編譯跑完了嗎".into(),
                     every: 30_000,
                     stop_after: 86_400_000,
+                    quiet_for: None,
                     dry_run: false,
                 },
                 &mut || ticks.next().expect("fake clock ran out"),
@@ -3192,6 +3243,7 @@ pub mod watch {
                     question: "x".into(),
                     every: 5_000,
                     stop_after: 60_000,
+                    quiet_for: None,
                     dry_run: false,
                 },
                 &mut || 1,
@@ -3216,6 +3268,7 @@ pub mod watch {
                     question: "完成嗎".into(),
                     every: 5_000,
                     stop_after: 60_000,
+                    quiet_for: None,
                     dry_run: true,
                 },
                 &mut || 100_000,
@@ -3241,6 +3294,7 @@ pub mod watch {
                     question: "完成嗎".into(),
                     every: 30_000,
                     stop_after: 60_000,
+                    quiet_for: None,
                     dry_run: true,
                 },
                 &mut || 100_000,
@@ -3262,6 +3316,7 @@ pub mod watch {
                     question: "完成嗎".into(),
                     every: 30_000,
                     stop_after: 60_000,
+                    quiet_for: None,
                     dry_run: true,
                 },
                 &mut || 100_000,
@@ -3290,6 +3345,7 @@ pub mod watch {
                     question: "完成嗎".into(),
                     every: 30_000,
                     stop_after: 60_000,
+                    quiet_for: None,
                     dry_run: false,
                 },
                 &mut || 100_000,
@@ -3315,6 +3371,7 @@ pub mod watch {
                     question: "完成嗎".into(),
                     every: 30_000,
                     stop_after: 60_000,
+                    quiet_for: None,
                     dry_run: false,
                 },
                 &mut || 100_000,
@@ -3361,6 +3418,243 @@ pub mod watch {
             // `Live`，於是畫面會說「她確實正在錄」，而她的眼睛是閉著的。
             sister_core::pause::set_paused(&tmp.0, true, now).expect("pause");
             assert_eq!(blind_reason(&tmp.0, now), Blind::Paused);
+        }
+
+        fn quiet_config(name: &str) -> (crate::ops::tmp::Tmp, Config) {
+            let tmp = crate::ops::tmp::Tmp::new(name);
+            let mut consent = sister_core::consent::Consent::default();
+            consent.grant(sister_core::consent::Sheet::CloudReading, 1);
+            sister_core::consent::save(&tmp.0, &consent).expect("consent");
+            let mut config = Config::default();
+            config.brain.command = "sh".into();
+            config.brain.args = vec![
+                "-c".into(),
+                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
+            ];
+            (tmp, config)
+        }
+
+        fn run_quiet_once(tmp: &crate::ops::tmp::Tmp, config: &Config, now: Millis) -> String {
+            let mut ticks = [now, now].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 0,
+                    quiet_for: Some(60_000),
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            String::from_utf8(out).unwrap()
+        }
+
+        #[test]
+        fn paused_never_masquerades_as_a_quiet_screen() {
+            let now = 1_000_000;
+            let (tmp, config) = prepared_at("watch-quiet-paused", now - 120_000, "舊字", true);
+            sister_core::heartbeat::beat(&tmp.0, now).expect("recording");
+            sister_core::pause::set_paused(&tmp.0, true, now).expect("pause");
+            let said = run_quiet_once(&tmp, &config, now);
+            assert!(said.contains("她被暫停了"), "{said}");
+            assert!(!said.contains("畫面上已經"), "暫停不是安靜：{said}");
+        }
+
+        #[test]
+        fn no_text_ever_is_not_a_gigantic_quiet_span() {
+            let now = 1_756_200_000_000;
+            let (tmp, config) = quiet_config("watch-quiet-empty");
+            Db::open(&Config::db_path(&tmp.0)).expect("db");
+            sister_core::heartbeat::beat(&tmp.0, now).expect("recording");
+            let said = run_quiet_once(&tmp, &config, now);
+            assert!(
+                !said.contains("畫面上已經"),
+                "從來沒字不能從 epoch 0 起算：{said}"
+            );
+            assert!(said.contains("沒有新的畫面可以看"), "{said}");
+        }
+
+        #[test]
+        fn a_stopped_or_thinking_recorder_is_not_a_quiet_screen() {
+            let now = 1_000_000;
+            for (name, thinking) in [
+                ("watch-quiet-stopped", false),
+                ("watch-quiet-thinking", true),
+            ] {
+                let (tmp, config) = prepared_at(name, now - 120_000, "舊字", true);
+                if thinking {
+                    sister_core::heartbeat::beat_thinking(&tmp.0, now, now + 60_000)
+                        .expect("thinking");
+                } else {
+                    sister_core::heartbeat::stop(&tmp.0, now - 30_000);
+                }
+                let said = run_quiet_once(&tmp, &config, now);
+                assert!(!said.contains("畫面上已經"), "收工或收尾不是安靜：{said}");
+                assert!(
+                    said.contains("收工") || said.contains("錄製已停"),
+                    "要沿用 Blind 原句：{said}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_truly_quiet_recording_ends_locally_with_last_text_evidence() {
+            let now = 1_756_200_000_000;
+            let last = now - 12 * 60_000;
+            let (tmp, config) = prepared_at("watch-went-quiet", last, "舊字", true);
+            sister_core::heartbeat::beat(&tmp.0, now).expect("recording");
+            let said = run_quiet_once(&tmp, &config, now);
+            assert!(said.contains("12 分鐘"), "{said}");
+            assert!(said.contains("Terminal.exe"), "{said}");
+            assert!(said.contains(&sister_core::model::stamp(last)), "{said}");
+            assert!(!said.contains(&last.to_string()), "{said}");
+            assert!(!said.contains("卡住"), "不准把觀察講成診斷：{said}");
+            assert!(said.contains("我只知道畫面沒有動"), "{said}");
+            let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+            assert_eq!(
+                db.brain_outbound_count_on(&day_of(now).unwrap()).unwrap(),
+                0,
+                "本機 quiet 判斷不可以吃外送預算"
+            );
+        }
+
+        /// **一個安靜地什麼都不做的旗標，比沒有這個旗標更糟。**
+        ///
+        /// 那個判斷掛在「這一輪的視窗裡一段字都沒有」上，而視窗就是一個
+        /// `every`。所以 `--quiet-for 30s --every 2m` 之下它一次都不會觸發——
+        /// 使用者設了、以為她在盯，然後等了一小時才發現那一行從來沒出現過。
+        /// 抬到量得出來的最短值，而且**要講**：安靜地夾住等於同一個謊。
+        #[test]
+        fn a_quiet_threshold_shorter_than_the_interval_is_raised_out_loud() {
+            let now = 1_756_200_000_000_i64;
+            // 畫面安靜了 90 秒；門檻設 30 秒，而她兩分鐘才看一次。
+            let (tmp, config) = prepared_at("watch-quiet-raised", now - 90_000, "舊字", true);
+            sister_core::heartbeat::beat(&tmp.0, now).expect("recording");
+            let mut ticks = [now, now].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 120_000,
+                    stop_after: 0,
+                    quiet_for: Some(30_000),
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let said = String::from_utf8(out).unwrap();
+            assert!(
+                said.contains("已抬到 2 分鐘"),
+                "安靜地夾住等於同一個謊：{said}"
+            );
+            assert!(said.contains("我量不出來"), "{said}");
+            // **講出來的那個數字要是她真的會用的那一個。** 抬了門檻卻拿沒抬的
+            // 那個去講，就是一個變數回答兩個問題。
+            assert!(
+                said.contains("畫面連續 2 分鐘沒有新的字"),
+                "說明用的是抬起來之前的值：{said}"
+            );
+            assert!(!said.contains("畫面連續 30 秒"), "{said}");
+        }
+
+        /// 抬起來之後**真的生效的是抬過的那個門檻**，而報出來的時長是
+        /// 她量到的那一段，不是門檻本身。
+        #[test]
+        fn the_raised_threshold_is_the_one_that_actually_fires() {
+            let now = 1_756_200_000_000_i64;
+            // 畫面安靜了 200 秒（＞抬起來的 120 秒門檻）。
+            let last = now - 200_000;
+            let (tmp, mut config) = prepared_at("watch-quiet-fires", last, "舊字", true);
+            config.brain.args = vec![
+                "-c".into(),
+                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
+            ];
+            sister_core::heartbeat::beat(&tmp.0, now).expect("recording");
+            let mut ticks = [now, now].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 120_000,
+                    stop_after: 0,
+                    quiet_for: Some(30_000),
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let said = String::from_utf8(out).unwrap();
+            assert!(said.contains("畫面上已經"), "門檻抬過之後沒有生效：{said}");
+            // 報的是量到的 200 秒（＝3 分鐘），不是門檻的 2 分鐘。
+            assert!(
+                said.contains("畫面上已經 3 分鐘沒有出現新的字"),
+                "報出來的是門檻不是量到的那一段：{said}"
+            );
+            assert!(said.contains(&sister_core::model::stamp(last)), "{said}");
+            assert!(!said.contains("卡住"), "觀察不可以冒充診斷：{said}");
+        }
+
+        /// 時長只有一份定義：90 分鐘在 `watch` 和在別的命令要是同一句話。
+        #[test]
+        fn the_quiet_span_reads_the_same_as_every_other_span_in_the_product() {
+            let ninety = 90 * 60_000;
+            assert_eq!(crate::fmt::duration_ms(ninety), "1 小時 30 分");
+            let said = sister_core::watch::WatchEnd::WentQuiet {
+                tally: Default::default(),
+                quiet_for: ninety,
+                last_at: 1_756_200_000_000,
+                last_app: None,
+            }
+            .message();
+            assert!(
+                said.contains(&crate::fmt::duration_ms(ninety)),
+                "watch 自己寫了第二份時長格式：{said}"
+            );
+        }
+
+        #[test]
+        fn omitting_quiet_for_keeps_the_existing_watch_path() {
+            let now = 1_000_000;
+            let (tmp, config) = prepared_at("watch-no-quiet-option", now - 120_000, "舊字", true);
+            sister_core::heartbeat::beat(&tmp.0, now).expect("recording");
+            let mut ticks = [now, now].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 0,
+                    quiet_for: None,
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let said = String::from_utf8(out).unwrap();
+            assert!(
+                !said.contains("畫面上已經"),
+                "沒給選項不能啟動新行為：{said}"
+            );
+            assert!(said.contains("時間到了"), "應走原本 Deadline：{said}");
         }
 
         /// 一個間隔內字太多的時候，要拿**最新的**那幾段，而且要講出有沒有漏。
@@ -5412,7 +5706,7 @@ pub mod query {
         }
         out.push(format!("那段時間分成 {} 段：", chapters.len()));
         for s in chapters {
-            let dur = fmt::duration_ms(s.core_ms().max(0));
+            let dur = crate::fmt::duration_ms(s.core_ms().max(0));
             let how_long = if s.segment_count > 1 {
                 format!("{dur}，{} 段併成", s.segment_count)
             } else {
@@ -7383,7 +7677,7 @@ pub mod stats {
             println!(
                 "  暫停      {} 段，已結束的加起來 {}",
                 pauses.episodes,
-                fmt::duration_ms(pauses.total_ms)
+                crate::fmt::duration_ms(pauses.total_ms)
             );
             // 「最後一筆 CapturePaused 沒有配到 CaptureResumed」和「她現在
             // 是暫停的」是**兩件事**，而舊版把前者印成了後者。

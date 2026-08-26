@@ -442,6 +442,9 @@ enum Command {
         /// 最多盯多久（30m / 1h / 2h）。到了就停。
         #[arg(long, default_value = "1h")]
         stop_after: String,
+        /// 畫面多久沒有新的字就停下來，只報告觀察、不診斷原因。
+        #[arg(long, value_name = "多久")]
+        quiet_for: Option<String>,
         /// 印出這一刻真的會送出去的那段字，一個字都不送。
         #[arg(long)]
         dry_run: bool,
@@ -747,10 +750,12 @@ fn main() -> Result<()> {
             question,
             every,
             stop_after,
+            quiet_for,
             dry_run,
         } => {
             let every = ops::parse_span(&every)?;
             let stop_after = ops::parse_span(&stop_after)?;
+            let quiet_for = quiet_for.as_deref().map(ops::parse_span).transpose()?;
             ops::watch::run(
                 &data_dir,
                 &config()?,
@@ -758,6 +763,7 @@ fn main() -> Result<()> {
                     question,
                     every,
                     stop_after,
+                    quiet_for,
                     dry_run,
                 },
             )

@@ -39,6 +39,33 @@ pub fn stamp(ts: Millis) -> String {
     }
 }
 
+/// 一段時間有多長，讀成人看得懂的樣子。
+///
+/// **這是那個格式的唯一定義**，理由和 [`stamp`] 一樣：`sister-cli` 的
+/// `fmt::duration_ms` 轉呼叫這裡，[`crate::watch`] 也是。兩份各自寫的話
+/// 會在 90 分鐘那裡分家——一邊印「1 小時 30 分」，一邊印「90 分鐘」，
+/// 而使用者正拿這兩行在比同一段時間。
+///
+/// 進位到分鐘就不再顯示秒：「暫停了 3 小時 12 分 07 秒」裡那個秒數沒有人
+/// 需要，只會讓真正重要的「3 小時」變得比較難讀。
+///
+/// 負數印「0 秒」。時戳倒退是資料壞了，不是一段負的時間。
+pub fn duration(ms: Millis) -> String {
+    let secs = (ms / 1000).max(0);
+    match secs {
+        0..=59 => format!("{secs} 秒"),
+        60..=3599 => format!("{} 分鐘", secs / 60),
+        _ => {
+            let (h, m) = (secs / 3600, (secs % 3600) / 60);
+            if m == 0 {
+                format!("{h} 小時")
+            } else {
+                format!("{h} 小時 {m} 分")
+            }
+        }
+    }
+}
+
 /// 擷取當下的前景脈絡。附在 frame 上，也可獨立成為 focus 事件。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusSnapshot {

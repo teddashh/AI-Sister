@@ -30,22 +30,11 @@ pub fn relative(ts: Millis) -> String {
 
 /// 一段時間有多長。
 ///
-/// 進位到分鐘就不再顯示秒：「暫停了 3 小時 12 分 07 秒」裡那個秒數沒有人
-/// 需要，只會讓真正重要的「3 小時」變得比較難讀。
+/// 只是轉呼叫——定義在 [`sister_core::model::duration`]，理由和 [`timestamp`]
+/// 一樣：`sister watch` 的句子是在 `sister-core` 裡組起來的，而它印的時長要和
+/// 這裡印的一模一樣。90 分鐘在兩邊都要是「1 小時 30 分」。
 pub fn duration_ms(ms: Millis) -> String {
-    let secs = (ms / 1000).max(0);
-    match secs {
-        0..=59 => format!("{secs} 秒"),
-        60..=3599 => format!("{} 分鐘", secs / 60),
-        _ => {
-            let (h, m) = (secs / 3600, (secs % 3600) / 60);
-            if m == 0 {
-                format!("{h} 小時")
-            } else {
-                format!("{h} 小時 {m} 分")
-            }
-        }
-    }
+    sister_core::model::duration(ms)
 }
 
 /// 人類看得懂的位元組數。

@@ -318,8 +318,8 @@ impl Tally {
 
 /// 一輪盯完之後，**為什麼停下來**。
 ///
-/// 三種，而且沒有第四種——Ctrl-C 這一版就是直接把行程殺掉，不假裝有優雅收尾。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 四種，而且沒有第五種——Ctrl-C 這一版就是直接把行程殺掉，不假裝有優雅收尾。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchEnd {
     Saw {
         tally: Tally,
@@ -339,6 +339,13 @@ pub enum WatchEnd {
         tally: Tally,
         used: u32,
         limit: u32,
+    },
+    /// 她只觀察到畫面上很久沒有新的字；這不是對 agent 狀態的診斷。
+    WentQuiet {
+        tally: Tally,
+        quiet_for: Millis,
+        last_at: Millis,
+        last_app: Option<String>,
     },
 }
 
@@ -371,6 +378,29 @@ impl WatchEnd {
                  這**不是**「沒等到」，是我不知道。",
                 tally.line()
             ),
+            Self::WentQuiet {
+                tally,
+                quiet_for,
+                last_at,
+                last_app,
+            } => {
+                let source = last_app
+                    .as_deref()
+                    .map(|app| format!("來自 {app}"))
+                    .unwrap_or_else(|| "沒有掛 app".into());
+                format!(
+                    "{}畫面上已經 {}沒有出現新的字了（最後一段在 {}，{}）。\
+                     我不知道它現在正在做什麼——我只知道畫面沒有動。",
+                    tally.line(),
+                    // **時長只有一份定義**（`sister-cli` 的 `fmt::duration_ms`
+                    // 轉呼叫同一支）。自己在這裡寫一份的話，90 分鐘會在這一行
+                    // 印成「90 分鐘」、在別的命令印成「1 小時 30 分」，而使用者
+                    // 正拿這兩行在比同一段時間。
+                    crate::model::duration(*quiet_for),
+                    at(*last_at),
+                    source
+                )
+            }
         }
     }
 }
@@ -666,6 +696,37 @@ mod tests {
             );
             assert!(said.contains(':'), "看不到時分秒：{said}");
         }
+    }
+
+    #[test]
+    fn went_quiet_reports_only_what_the_screen_proves() {
+        let ms = 1_756_200_000_000_i64;
+        let said = WatchEnd::WentQuiet {
+            tally: Tally {
+                answered: 2,
+                unanswered: 1,
+                blind: 3,
+            },
+            quiet_for: 12 * 60_000,
+            last_at: ms,
+            last_app: Some("codex.exe".into()),
+        }
+        .message();
+        assert!(said.contains("12 分鐘"), "{said}");
+        assert!(said.contains("codex.exe"), "{said}");
+        assert!(said.contains(&at(ms)), "{said}");
+        assert!(
+            !said.contains(&ms.to_string()),
+            "epoch 毫秒漏出來了：{said}"
+        );
+        assert!(!said.contains("卡住"), "觀察不可以冒充診斷：{said}");
+        assert!(said.contains("我只知道畫面沒有動"), "{said}");
+        assert!(said.contains("問到答案 2 次"), "三個計數不能掉：{said}");
+        assert!(said.contains("沒拿到答案 1 次"), "三個計數不能掉：{said}");
+        assert!(
+            said.contains("沒有新畫面可看 3 次"),
+            "三個計數不能掉：{said}"
+        );
     }
 
     /// **這一條是這一版最要緊的。** 三十輪 CLI 全部叫不起來之後，收尾不可以
