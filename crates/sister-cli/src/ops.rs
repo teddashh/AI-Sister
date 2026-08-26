@@ -2846,13 +2846,13 @@ pub mod watch {
                     "（這段時間的字超過 {HIT_LIMIT} 段，底下只有最新的 {HIT_LIMIT} 段。）"
                 )?;
             }
-            let (payload, truncated) =
-                sister_core::watch::build_watch_prompt(&opts.question, &hits)?;
-            writeln!(out, "{payload}")?;
-            if truncated {
+            let prompt = sister_core::watch::build_watch_prompt(&opts.question, &hits)?;
+            writeln!(out, "{}", prompt.payload)?;
+            if prompt.truncated {
                 writeln!(
                     out,
-                    "注意：畫面證據超過上限，這次只印出並會送出被截斷的那一段，不是全部。"
+                    "注意：畫面證據超過上限，這次只印出最新的 {} 段，也只會送出這些，不是全部。",
+                    prompt.included_chunks
                 )?;
             }
             writeln!(out, "預演到此為止：一次都沒送，也沒有寫外送紀錄。")?;
@@ -2947,15 +2947,16 @@ pub mod watch {
                                 }
                             };
                         }
-                        let (payload, truncated) =
-                            sister_core::watch::build_watch_prompt(&opts.question, &hits)?;
-                        if truncated {
+                        let prompt = sister_core::watch::build_watch_prompt(&opts.question, &hits)?;
+                        if prompt.truncated {
                             writeln!(
                                 out,
-                                "注意：畫面證據超過上限，這輪只問被截斷的那一段，不是全部。"
+                                "注意：畫面證據超過上限，這輪只問最新的 {} 段，不是全部。",
+                                prompt.included_chunks
                             )?;
                         }
-                        let spawn = brain::spawn_cli(permit, &payload, &command, &args);
+                        let sent_hits = &hits[prompt.included_from..];
+                        let spawn = brain::spawn_cli(permit, &prompt.payload, &command, &args);
                         let (outcome, verdict) = sister_core::watch::verdict_from_spawn(&spawn);
                         db.insert_brain_outbound(&OutboundInsert {
                             ts: now,
@@ -2963,16 +2964,21 @@ pub mod watch {
                             command: &command,
                             args: &args,
                             segment_core_start: None,
-                            chars_sent: payload.chars().count() as i64,
-                            truncated,
+                            chars_sent: prompt.payload.chars().count() as i64,
+                            truncated: prompt.truncated,
                             outcome: outcome.as_str(),
                             duration_ms: spawn.duration_ms as i64,
                             error: spawn.spawn_error.as_deref(),
                             role: "watcher",
                         })?;
                         Look::Asked {
-                            chunks: hits.len(),
-                            newest_app: hits.last().expect("nonempty checked").app_id.clone(),
+                            available_chunks: hits.len(),
+                            chunks: prompt.included_chunks,
+                            newest_app: sent_hits
+                                .last()
+                                .expect("nonempty prompt evidence")
+                                .app_id
+                                .clone(),
                             verdict,
                         }
                     }
@@ -4314,6 +4320,124 @@ pub mod watch {
             let (all, more) = newest_since(&db, 0, 2_000, 50).expect("newest");
             assert_eq!(all.len(), 10);
             assert!(!more);
+        }
+
+        /// **真的送出去那一輪，畫面上那個段數要是「真的送出去幾段」。**
+        ///
+        /// 上面那條走的是 `--dry-run`，而 dry-run **根本不會建 `Look::Asked`**
+        /// ——那句「看了 N 段字，最新的來自 X」是真實那一輪才印的。所以把
+        /// `chunks: prompt.included_chunks` 改回 `chunks: hits.len()`，
+        /// dry-run 那條照樣綠，而畫面上會說「看了 206 段字」，其中一百多段
+        /// 從來沒有離開這台機器。
+        ///
+        /// 這正是這個 bug 原本的形狀：`newest_since` 挑最新的 200 段、位元組
+        /// 上限又砍掉一大半，然後那句話替全部 206 段作證。
+        #[test]
+        fn a_real_round_counts_the_chunks_it_actually_sent_not_the_ones_it_saw() {
+            let (tmp, mut config) =
+                prepared_at("watch-real-newest-bytes", 80_000, "oldest-marker", true);
+            config.brain.args = vec![
+                "-c".into(),
+                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
+            ];
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let session = db.start_session("test-2", "test").expect("session");
+            for n in 1..=205_i64 {
+                db.conn()
+                    .execute(
+                        "INSERT INTO text_chunks(ts,session_id,source_kind,app_id,text) VALUES(?1,?2,'ocr','Terminal.exe',?3)",
+                        (80_000 + n, session, format!("marker-{n:03}-{}", "x".repeat(150))),
+                    )
+                    .expect("chunk");
+            }
+            drop(db);
+
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 0,
+                    quiet_for: None,
+                    dry_run: false,
+                    notify: false,
+                },
+                &mut || 100_000,
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let said = String::from_utf8(out).unwrap();
+
+            // 有東西沒送，這件事要講出來。
+            assert!(
+                said.contains("證據上限只放得下"),
+                "省略了一百多段卻沒講：{said}"
+            );
+            // 而且「看了 N 段」的 N 不可以是畫面上那個 N。
+            assert!(
+                !said.contains("看了 206 段字") && !said.contains("看了 200 段字"),
+                "那句話在替沒有離開這台機器的字作證：{said}"
+            );
+            let sent = said
+                .split("送出去的是最新的 ")
+                .nth(1)
+                .and_then(|rest| rest.split(' ').next())
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or_else(|| panic!("找不到實際送出的段數：{said}"));
+            assert!(sent > 0 && sent < 200, "實際送出 {sent} 段，不合理：{said}");
+            assert!(
+                said.contains(&format!("看了 {sent} 段字")),
+                "「送出去的是最新的 {sent} 段」和「看了 N 段字」對不起來：{said}"
+            );
+        }
+
+        #[test]
+        fn dry_run_prints_the_newest_byte_limited_evidence_and_both_omissions() {
+            let (tmp, config) =
+                prepared_at("watch-dry-newest-bytes", 80_000, "oldest-marker", true);
+            let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let session = db.start_session("test-2", "test").expect("session");
+            for n in 1..=205_i64 {
+                db.conn()
+                    .execute(
+                        "INSERT INTO text_chunks(ts,session_id,source_kind,app_id,text) VALUES(?1,?2,'ocr','Terminal.exe',?3)",
+                        (80_000 + n, session, format!("marker-{n:03}-{}", "x".repeat(150))),
+                    )
+                    .expect("chunk");
+            }
+            drop(db);
+
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 0,
+                    quiet_for: None,
+                    dry_run: true,
+                    notify: false,
+                },
+                &mut || 100_000,
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("dry run");
+            let said = String::from_utf8(out).unwrap();
+            assert!(said.contains("字超過 200 段"), "列上限的省略沒有講：{said}");
+            assert!(
+                said.contains("畫面證據超過上限"),
+                "位元組省略沒有講：{said}"
+            );
+            assert!(said.contains("marker-205-"), "最新一段沒有送出：{said}");
+            assert!(!said.contains("oldest-marker"), "最舊一段不該送出：{said}");
+            let older = said.find("marker-204-").expect("倒數第二段");
+            let newest = said.find("marker-205-").expect("最新段");
+            assert!(older < newest, "證據沒有由舊到新：{said}");
         }
     }
 }
