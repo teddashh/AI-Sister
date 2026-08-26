@@ -23,9 +23,16 @@ pub mod target_policy;
 /// 權限階梯（SPEC §9.1）。
 ///
 /// `takeover` 尚未實作，因此不先放進來。
+///
+/// **這個 enum 沒有 `Default`，而且不要替它加一個。** 字母人那一支唯一的
+/// 呼叫端寫死 [`Self::Suggest`]，因為那條路上會走到 [`execute_with`] 的只有
+/// 「使用者按了按鈕」這一種事——`Suggestion` 拿不到 [`UserButtonPress`] 就
+/// 建不出來。在這裡寫「預設是 observe」而呼叫端傳 suggest，是在文件上立一
+/// 條沒有人守的規矩。真的要一個「連按了也不准動」的開關的時候，那是 config
+/// 裡的一個欄位，不是這裡的一句話。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
-    /// 預設。物理上沒有手——[`execute_with`] 在這一級一律拒絕。
+    /// 物理上沒有手——[`execute_with`] 在這一級一律拒絕。
     Observe,
     /// 可開 URL／檔案／聚焦視窗，且**僅限使用者點按鈕觸發**。
     Suggest,
