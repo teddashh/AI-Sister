@@ -8,6 +8,10 @@
 //! 這幾種每一種都很容易被印成「還沒有」，而使用者會拿那句話當證據，
 //! 一路等到他自己發現那台機器一小時前就停了。所以底下每一個 enum 的每一個
 //! 變體都有自己的句子，而且測試釘的就是「它們互相不一樣」。
+//!
+//! 收尾那一句更嚴格：**「沒有等到」是一句斷言**，只有在她真的問到過答案的
+//! 時候才說得出口。一次都沒問到（CLI 叫不起來、每一次都逾時、預算先用完）
+//! 的時候，能說的只有「我不知道」。
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -19,6 +23,51 @@ use crate::prompt_fence::fence_untrusted_data;
 /// 時刻讀成人看得懂的樣子。**和 `sister-cli` 的 `fmt::timestamp` 是同一份**，
 /// 因為使用者會拿這裡印的每一列去對別的命令印出來的時間。
 use crate::model::stamp as at;
+
+/// 一輪都還沒跑就得停下來的三種理由。
+///
+/// **不要借 [`crate::brain::SkipReason`] 的文案。** 那幾句話是替 `sister interpret`
+/// 寫的，其中一句是「超過即靜默降級，只累積 L0/L1」——對 interpret 是真的
+/// （它是一次性的，降級之後錄製照跑），對 `watch` 是**假的**：這個行程當場
+/// 就結束了，她一眼都不會看。一個把命令列丟著去吃飯的人，回來會看到一個
+/// 早就跳掉的 shell prompt，而那句話跟他說她還在累積。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchSkip {
+    NoConsent,
+    NoCommand,
+    /// 開跑之前就已經沒有預算了。**和 [`WatchEnd::BudgetRanOut`] 不一樣**：
+    /// 那一個是跑到一半用完，這一個是一輪都沒跑。
+    NoBudgetToday {
+        used: u32,
+        limit: u32,
+    },
+}
+
+impl WatchSkip {
+    pub fn message(&self) -> String {
+        match self {
+            Self::NoConsent => concat!(
+                "沒有簽第二張同意書（上雲解讀），所以我沒有開始盯——一輪都沒有，",
+                "畫面上的字一個都沒有離開這台機器。\n",
+                "要看她會送出什麼：sister watch \"…\" --dry-run\n",
+                "要簽字：sister consent --grant cloud-reading"
+            )
+            .to_string(),
+            Self::NoCommand => concat!(
+                "設定裡沒有 [brain] command，沒有東西可以問，所以我沒有開始盯。\n",
+                "那是你自己已經裝好的那支 CLI，填進設定檔的 [brain] 那一段：\n",
+                "  [brain]\n",
+                "  command = \"claude\""
+            )
+            .to_string(),
+            Self::NoBudgetToday { used, limit } => format!(
+                "今天的外送預算已經用完了（{used}/{limit}），所以我沒有開始盯——\
+                 **一輪都沒有跑**，這個命令現在就結束。\n\
+                 這不是「盯完了沒等到」：那件事發生沒發生，我完全沒有看。"
+            ),
+        }
+    }
+}
 
 /// 這一輪**看不到新畫面**的時候，為什麼。
 ///
@@ -36,10 +85,17 @@ pub enum Blind {
     /// 「還在開機」是過渡，等下去也有用但理由完全不同——而且如果它卡在開機，
     /// 一句「她確實正在錄」會讓人一直等下去。
     Booting,
-    /// 她正在讓大腦讀一段（`sister interpret` / `sister review` 佔著）。
+    /// **錄製已經停了**，只剩解釋層在把最後一段想完。
     ///
-    /// **這一種以前被歸進 [`Self::Stopped`]**，於是畫面上會寫「她已在 X 停止」
-    /// ——她明明正忙著。那是一句由我們自己造出來的假話。
+    /// 這個名字很容易讀錯，而我讀錯過一次，還替它寫了一句
+    /// 「她正在忙，不是停了」的註解。`heartbeat::beat_thinking` 的說明寫得很
+    /// 清楚——「錄製迴圈已經停了……**她一個畫面都不再抓**」。這個資料目錄還
+    /// 有行程佔著（握著資料庫），所以 `is_occupied` 是 true，但 `is_recording`
+    /// 是 false。
+    ///
+    /// 所以這一句**一定要講「錄製已停」**：這是全部十種裡「再等下去也永遠
+    /// 不會有新畫面」的三種之一，而寫成「她正在讓大腦讀一段」會讓人接著等滿
+    /// 一小時。repo 裡另外三個渲染這個狀態的地方都留著那半句話。
     Thinking {
         until: Millis,
     },
@@ -50,6 +106,15 @@ pub enum Blind {
         at: Millis,
     },
     Unreadable,
+    /// 系統時鐘往回跳了（NTP 校時、睡眠喚醒）。
+    ///
+    /// **這一輪什麼都沒查到，因為查詢區間是反的**（起點比終點晚）。
+    /// 沒有這個變體的話它會落進 [`Self::RecordingButQuiet`]——
+    /// 「她確實正在錄，只是這段時間沒有新的字」，替一次根本查不出東西的
+    /// 查詢作證。
+    ClockWentBackwards {
+        last_seen: Millis,
+    },
     /// 她真的在錄，只是這一段時間畫面上沒有新的字。
     RecordingButQuiet,
 }
@@ -70,17 +135,20 @@ impl Blind {
                 "沒有新的畫面可以看——她才剛開始錄，還沒拍到東西。這不是「還沒發生」。".into()
             }
             Self::Thinking { until } => format!(
-                "沒有新的畫面可以看——她正在讓大腦讀一段（估到 {}）。這不是「還沒發生」。",
+                "沒有新的畫面可以看——**錄製已停**，只剩解釋層在把最後一段想完（估到 {}）。\
+                 再等下去也不會有新的畫面。這不是「還沒發生」。",
                 at(*until)
             ),
             Self::Stopped { at: Some(when) } => format!(
-                "沒有新的畫面可以看——她在 {} 收工了。這不是「還沒發生」。",
+                "沒有新的畫面可以看——她在 {} 收工了。再等下去也不會有新的畫面。\
+                 這不是「還沒發生」。",
                 at(*when)
             ),
             // 「停了，但幾點停的不知道」和「幾點停的我知道」要分開講。
             // 硬編一個時間進去比不講更糟。
             Self::Stopped { at: None } => {
-                "沒有新的畫面可以看——她已經收工了，但紀錄裡沒有留下時刻。這不是「還沒發生」。"
+                "沒有新的畫面可以看——她已經收工了，但紀錄裡沒有留下時刻。\
+                 再等下去也不會有新的畫面。這不是「還沒發生」。"
                     .into()
             }
             Self::Stalled { at: when } => format!(
@@ -91,10 +159,32 @@ impl Blind {
                 "沒有新的畫面可以看——錄製狀態那個檔案讀不懂。這不是「還沒發生」，是我們問不出來。"
                     .into()
             }
+            Self::ClockWentBackwards { last_seen } => format!(
+                "這一輪什麼都沒查——系統時鐘往回跳了（上一輪看到 {}）。\
+                 這不是「還沒發生」，是那個查詢區間是反的。下一輪會回到正常。",
+                at(*last_seen)
+            ),
             Self::RecordingButQuiet => {
                 "沒有新的畫面可以看——她確實正在錄，只是這段時間畫面上沒有新的字。這不是「還沒發生」。"
                     .into()
             }
+        }
+    }
+
+    /// 再等下去還有沒有意義。
+    ///
+    /// 只有三種是「不會再有新畫面了」。這一格不是裝飾——收尾那一句要靠它
+    /// 分辨「時間到了它沒發生」和「她中途就不看了，剩下的時間我對著一張
+    /// 凍住的畫面」。
+    pub fn hopeless(&self) -> bool {
+        match self {
+            Self::NeverStarted | Self::Thinking { .. } | Self::Stopped { .. } => true,
+            Self::Paused
+            | Self::Booting
+            | Self::Stalled { .. }
+            | Self::Unreadable
+            | Self::ClockWentBackwards { .. }
+            | Self::RecordingButQuiet => false,
         }
     }
 }
@@ -114,13 +204,24 @@ pub enum Verdict {
     Unreadable {
         head: String,
     },
-    /// 根本沒問到（spawn 失敗／逾時／非零離開）。
+    /// 根本沒問到（spawn 起不來／逾時）。
     CallFailed {
         how: OutboundOutcome,
     },
 }
 
 impl Verdict {
+    /// 這一輪**有沒有真的拿到一個答案**。
+    ///
+    /// 收尾那一句要靠它：「沒有等到」是一句斷言，而 `false` 的那兩種一個字
+    /// 的證據都沒拿到。
+    pub fn answered(&self) -> bool {
+        match self {
+            Self::Happened { .. } | Self::NotYet => true,
+            Self::Unreadable { .. } | Self::CallFailed { .. } => false,
+        }
+    }
+
     pub fn message(&self) -> String {
         match self {
             Self::Happened { because } => format!("★ 等到了：{because}"),
@@ -153,7 +254,6 @@ pub enum Look {
     Asked {
         chunks: usize,
         newest_app: Option<String>,
-        newest_ts: Millis,
         verdict: Verdict,
     },
     NothingNew(Blind),
@@ -166,7 +266,6 @@ impl Look {
                 chunks,
                 newest_app,
                 verdict,
-                ..
             } => match newest_app {
                 Some(app) => format!(
                     "{}（看了 {chunks} 段字，最新的來自 {app}）",
@@ -184,26 +283,60 @@ impl Look {
     }
 }
 
+/// 一輪盯完之後三個數字。**三個，因為它們回答三個不同的問題。**
+///
+/// `answered` 和 `unanswered` 拆開是這個型別存在的理由：[`Look::Asked`] 在
+/// CLI 叫不起來的時候照樣成立（有花掉預算、有寫下外送紀錄），於是一個
+/// 混在一起的 `asked` 計數器會在三十輪全部 spawn 失敗之後印出「問了 30 次」，
+/// 而收尾接著說「沒有等到」——她一次都沒問到。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tally {
+    /// 拿到了一個答案（「還沒有」也是答案）。
+    pub answered: usize,
+    /// 送出去了、花了預算，但沒有拿到答案（叫不起來、逾時、回了讀不懂的字）。
+    pub unanswered: usize,
+    /// 沒有東西可以問。
+    pub blind: usize,
+}
+
+impl Tally {
+    pub fn count(&mut self, look: &Look) {
+        match look {
+            Look::Asked { verdict, .. } if verdict.answered() => self.answered += 1,
+            Look::Asked { .. } => self.unanswered += 1,
+            Look::NothingNew(_) => self.blind += 1,
+        }
+    }
+
+    fn line(&self) -> String {
+        format!(
+            "盯完了：問到答案 {} 次，送出去但沒拿到答案 {} 次，沒有新畫面可看 {} 次。",
+            self.answered, self.unanswered, self.blind
+        )
+    }
+}
+
 /// 一輪盯完之後，**為什麼停下來**。
 ///
 /// 三種，而且沒有第四種——Ctrl-C 這一版就是直接把行程殺掉，不假裝有優雅收尾。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchEnd {
     Saw {
-        at: Millis,
-        asked: usize,
-        blind: usize,
+        tally: Tally,
     },
     Deadline {
-        asked: usize,
-        blind: usize,
+        tally: Tally,
+        /// 最後一輪看下去的時候，再等有沒有意義（見 [`Blind::hopeless`]）。
+        ///
+        /// 「時間到了它沒發生」和「她中途就收工了，剩下的時間我對著一張
+        /// 凍住的畫面」是兩件事，而使用者的下一步完全不同。
+        hopeless: bool,
     },
     /// **不是 [`Self::Deadline`]。** 時間到了沒等到，講的是「這段時間裡它沒發生」；
     /// 預算先用完，講的是「我不看了，它發生沒發生我不知道」。兩句話印成一句的話，
     /// 使用者會拿後者當前者用。
     BudgetRanOut {
-        asked: usize,
-        blind: usize,
+        tally: Tally,
         used: u32,
         limit: u32,
     },
@@ -211,29 +344,32 @@ pub enum WatchEnd {
 
 impl WatchEnd {
     pub fn message(&self) -> String {
-        // 「問了幾次」和「幾次沒東西可看」永遠一起出現。只印前一個的話，
-        // 「問了 0 次」讀起來像她閒著，而真相可能是她整段時間都被暫停。
         match self {
-            Self::Saw {
-                at: when,
-                asked,
-                blind,
-            } => format!(
-                "盯完了：問了 {asked} 次，有 {blind} 次沒有新畫面可看。等到了——那段字出現在 {}。",
-                at(*when)
+            Self::Saw { tally } => format!("{}等到了。", tally.line()),
+            // **「沒有等到」是一句斷言。** 一次都沒問到答案的時候說不出口——
+            // 那三十輪可能全部是 CLI 叫不起來，而畫面上每一輪都已經自己講過
+            // 「這一輪不算數」了；收尾不可以把它們加總成一句相反的話。
+            Self::Deadline { tally, .. } if tally.answered == 0 => format!(
+                "{}時間到了，而我**一次都沒有真的問到答案**——所以「沒等到」這句話我說不出口。\
+                 那件事發生沒發生，我不知道。",
+                tally.line()
             ),
-            Self::Deadline { asked, blind } => format!(
-                "盯完了：問了 {asked} 次，有 {blind} 次沒有新畫面可看。時間到了，沒有等到。"
-            ),
-            Self::BudgetRanOut {
-                asked,
-                blind,
-                used,
-                limit,
+            Self::Deadline {
+                tally,
+                hopeless: true,
             } => format!(
-                "盯完了：問了 {asked} 次，有 {blind} 次沒有新畫面可看。\
-                 今天的外送預算先用完了（{used}/{limit}），我沒有再看下去——\
-                 這**不是**「沒等到」，是我不知道。"
+                "{}時間到了。但**最後那一眼看下去的時候，她已經不在錄了**——\
+                 所以後面那段時間我對著的是一張凍住的畫面，「沒等到」只算到她停下來為止。",
+                tally.line()
+            ),
+            Self::Deadline {
+                tally,
+                hopeless: false,
+            } => format!("{}時間到了，沒有等到。", tally.line()),
+            Self::BudgetRanOut { tally, used, limit } => format!(
+                "{}今天的外送預算先用完了（{used}/{limit}），我沒有再看下去——\
+                 這**不是**「沒等到」，是我不知道。",
+                tally.line()
             ),
         }
     }
@@ -244,15 +380,29 @@ impl WatchEnd {
 /// 這不是禮貌，是錢：每一次都是一次外送，而外送有每日上限。
 pub const MIN_EVERY: Millis = 30_000;
 
+/// 每一輪往回多看一點點，因為**畫面上的時刻不是那一列寫進資料庫的時刻**。
+///
+/// `text_chunks.ts` 是抓那一幀的時間，而那一列要等 OCR 跑完才進得了資料庫。
+/// 把游標推到「現在」的話，每一輪最新的那一小段永遠是在查詢跑完之後才落地，
+/// 於是它被跳過去，而且**下一輪的起點已經在它後面了，所以再也不會被看到**
+/// ——偏偏那正是「編譯剛剛跑完」的那一刻。
+///
+/// 代價是重疊的那幾秒可能被問第二次（`--every 2m` 之下大約 4%）。
+/// 用一次多餘的外送換「不會安靜地漏掉你在等的那件事」。
+pub const GRACE: Millis = 5_000;
+
 /// 開跑之前那一句：**最多**會問幾次，今天還剩幾次，會先撞到哪一邊。
 ///
 /// 一定要寫「最多」。畫面安靜的時候她根本不會問，所以寫成「會問 30 次」是
 /// 一句預告式的假話，而使用者是拿它在心裡算錢的。
+///
+/// `+ 1` 是到期那一刻的最後一眼（見 `ops::watch` 的迴圈）。少算那一次，
+/// 這一行就會在最壞的情況下少報一次外送。
 pub fn plan_line(every: Millis, stop_after: Millis, used: u32, limit: u32) -> String {
     // 呼叫端一律先夾到 `MIN_EVERY`，但這是個 pub fn——除以 0 會 panic，
     // 而一個公開函式不該靠呼叫端的自律活著。
     let every = every.max(1);
-    let maximum = stop_after.max(0).saturating_add(every - 1) / every;
+    let maximum = stop_after.max(0).saturating_add(every - 1) / every + 1;
     let remaining = i64::from(limit.saturating_sub(used));
     let ending = if maximum > remaining {
         "照這個算法會先撞到外送上限，不是時間上限。"
@@ -328,12 +478,15 @@ pub fn read_verdict(stdout: &str) -> Verdict {
 ///
 /// 兩個回傳值刻意是同一次判斷算出來的。分開算的話，磁碟上記著 `success`
 /// 而螢幕上寫著「讀不懂」這種事遲早會發生。
+///
+/// **非零離開碼不是「沒問到」。** 這裡一度多寫了一條
+/// `exit_code != 0 → SpawnFailed`，而 `brain::classify` 沒有那一條：它只看
+/// `spawn_error`（＝行程根本沒起來），非零離開只是解析失敗時附上的線索。
+/// 真實的 CLI 常常一邊在 stderr 印警告、一邊回一個好答案然後 exit 1——
+/// 那一條會把已經到手的「等到了」丟掉，還在 `brain log` 上把同一件事記成
+/// 和 `interpret` 不同的分類。
 pub fn verdict_from_spawn(spawn: &SpawnOutcome) -> (OutboundOutcome, Verdict) {
-    // 順序跟著 `brain::classify`：spawn 失敗最先，因為逾時的那個旗標在
-    // spawn 根本沒起來的時候是沒有意義的。
-    if spawn.spawn_error.is_some()
-        || (!spawn.timed_out && spawn.exit_code.is_some_and(|code| code != 0))
-    {
+    if spawn.spawn_error.is_some() {
         return (
             OutboundOutcome::SpawnFailed,
             Verdict::CallFailed {
@@ -349,13 +502,19 @@ pub fn verdict_from_spawn(spawn: &SpawnOutcome) -> (OutboundOutcome, Verdict) {
             },
         );
     }
-    let verdict = read_verdict(&spawn.stdout);
-    let outcome = if matches!(verdict, Verdict::Unreadable { .. }) {
-        OutboundOutcome::BadJson
-    } else {
-        OutboundOutcome::Success
-    };
-    (outcome, verdict)
+    match read_verdict(&spawn.stdout) {
+        // 讀不懂的時候，那個離開碼是**唯一**的線索，要帶著走。
+        Verdict::Unreadable { head } => (
+            OutboundOutcome::BadJson,
+            Verdict::Unreadable {
+                head: match spawn.exit_code {
+                    Some(code) if code != 0 => format!("（離開碼 {code}）{head}"),
+                    _ => head,
+                },
+            },
+        ),
+        verdict => (OutboundOutcome::Success, verdict),
+    }
 }
 
 /// 實際的 CLI 十次有九次會把 JSON 包在 ```json 裡，即使你叫它不要。
@@ -399,6 +558,17 @@ mod tests {
         }
     }
 
+    fn spawn(stdout: &str, exit_code: Option<i32>) -> SpawnOutcome {
+        SpawnOutcome {
+            duration_ms: 10,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            timed_out: false,
+            spawn_error: None,
+            exit_code,
+        }
+    }
+
     /// 大腦沒回東西不是它說「還沒有」。
     #[test]
     fn an_empty_reply_is_not_a_no() {
@@ -418,7 +588,7 @@ mod tests {
         assert!(!paused.contains(&Verdict::NotYet.message()), "{paused}");
     }
 
-    /// 八種看不到畫面的理由，八句不一樣的話。
+    /// 每一種看不到畫面的理由，一句不一樣的話。
     ///
     /// 這條測試是這個模組的骨頭：任何一種被併進另一種，它就紅。
     #[test]
@@ -432,6 +602,7 @@ mod tests {
             Blind::Stopped { at: None },
             Blind::Stalled { at: 1 },
             Blind::Unreadable,
+            Blind::ClockWentBackwards { last_seen: 1 },
             Blind::RecordingButQuiet,
         ];
         let messages: std::collections::BTreeSet<_> = all.iter().map(Blind::message).collect();
@@ -441,15 +612,24 @@ mod tests {
         }
     }
 
-    /// 「她正在讓大腦讀一段」被歸進「她收工了」的話，畫面會說她停了——她沒有。
+    /// `Presence::Thinking` **不是**「她正忙著，等一下就好」。
+    ///
+    /// `heartbeat::beat_thinking` 的說明：「錄製迴圈已經停了……她一個畫面都
+    /// 不再抓」。少了「錄製已停」那半句，使用者會接著等滿一小時，對著一張
+    /// 從此不會再變的畫面——而那正是這個模組開頭那段話講的災難。
     #[test]
-    fn thinking_is_not_stopped() {
+    fn thinking_says_the_recorder_already_stopped() {
         let thinking = Blind::Thinking { until: 1 }.message();
-        assert!(!thinking.contains("收工"), "{thinking}");
-        assert!(
-            !thinking.contains(&Blind::Stopped { at: Some(1) }.message()),
-            "{thinking}"
-        );
+        assert!(thinking.contains("錄製已停"), "{thinking}");
+        assert!(thinking.contains("不會有新的畫面"), "{thinking}");
+        assert!(Blind::Thinking { until: 1 }.hopeless());
+        // 三種「再等也沒用」，其餘七種等下去仍然有意義。
+        assert!(Blind::Stopped { at: None }.hopeless());
+        assert!(Blind::NeverStarted.hopeless());
+        assert!(!Blind::Paused.hopeless());
+        assert!(!Blind::RecordingButQuiet.hopeless());
+        assert!(!Blind::Stalled { at: 1 }.hopeless());
+        assert!(!Blind::Booting.hopeless());
     }
 
     /// 開機中和「正在錄但畫面沒動」的下一步不一樣，句子也要不一樣。
@@ -457,6 +637,17 @@ mod tests {
     fn booting_is_not_recording_quietly() {
         assert_ne!(Blind::Booting.message(), Blind::RecordingButQuiet.message());
         assert!(!Blind::Booting.message().contains("確實正在錄"));
+    }
+
+    /// 時鐘往回跳的那一輪什麼都沒查，不可以講成「查了，沒有新的字」。
+    #[test]
+    fn a_backwards_clock_does_not_certify_a_clean_look() {
+        let said = Blind::ClockWentBackwards { last_seen: 1 }.message();
+        assert!(said.contains("往回跳"), "{said}");
+        assert!(
+            !said.contains("確實正在錄"),
+            "沒查過的東西不可以拿另一種狀態的句子來蓋：{said}"
+        );
     }
 
     /// 時刻要讀得懂。印 epoch 毫秒等於沒印——沒有人在終端機上心算那個數字。
@@ -467,12 +658,7 @@ mod tests {
             Blind::Stopped { at: Some(ms) }.message(),
             Blind::Stalled { at: ms }.message(),
             Blind::Thinking { until: ms }.message(),
-            WatchEnd::Saw {
-                at: ms,
-                asked: 1,
-                blind: 0,
-            }
-            .message(),
+            Blind::ClockWentBackwards { last_seen: ms }.message(),
         ] {
             assert!(
                 !said.contains(&ms.to_string()),
@@ -482,21 +668,170 @@ mod tests {
         }
     }
 
+    /// **這一條是這一版最要緊的。** 三十輪 CLI 全部叫不起來之後，收尾不可以
+    /// 說「沒有等到」——她一次都沒問到。
+    #[test]
+    fn thirty_failed_calls_do_not_add_up_to_a_verdict() {
+        let mut tally = Tally::default();
+        for _ in 0..30 {
+            tally.count(&Look::Asked {
+                chunks: 4,
+                newest_app: None,
+                verdict: Verdict::CallFailed {
+                    how: OutboundOutcome::SpawnFailed,
+                },
+            });
+        }
+        assert_eq!(tally.answered, 0);
+        assert_eq!(tally.unanswered, 30);
+        let said = WatchEnd::Deadline {
+            tally,
+            hopeless: false,
+        }
+        .message();
+        assert!(!said.contains("沒有等到"), "她一次都沒問到：{said}");
+        assert!(said.contains("我不知道"), "{said}");
+        assert!(said.contains("沒拿到答案 30 次"), "{said}");
+    }
+
+    /// 讀不懂的回覆和叫不起來一樣，都不算「問到了」。
+    #[test]
+    fn an_unreadable_reply_is_not_an_answer() {
+        assert!(!Verdict::Unreadable { head: "x".into() }.answered());
+        assert!(
+            !Verdict::CallFailed {
+                how: OutboundOutcome::Timeout
+            }
+            .answered()
+        );
+        assert!(Verdict::NotYet.answered());
+        assert!(
+            Verdict::Happened {
+                because: "x".into()
+            }
+            .answered()
+        );
+    }
+
+    /// 三個計數器，因為它們回答三個不同的問題。
+    #[test]
+    fn the_three_counters_never_borrow_each_others_rounds() {
+        let mut tally = Tally::default();
+        tally.count(&Look::Asked {
+            chunks: 1,
+            newest_app: None,
+            verdict: Verdict::NotYet,
+        });
+        tally.count(&Look::Asked {
+            chunks: 1,
+            newest_app: None,
+            verdict: Verdict::Unreadable {
+                head: String::new(),
+            },
+        });
+        tally.count(&Look::NothingNew(Blind::Paused));
+        assert_eq!(
+            (tally.answered, tally.unanswered, tally.blind),
+            (1, 1, 1),
+            "{tally:?}"
+        );
+        let said = WatchEnd::Saw { tally }.message();
+        assert!(said.contains("問到答案 1 次"), "{said}");
+        assert!(said.contains("沒拿到答案 1 次"), "{said}");
+        assert!(said.contains("沒有新畫面可看 1 次"), "{said}");
+    }
+
+    /// 她中途收工的話，「沒等到」只算到她停下來為止。
+    #[test]
+    fn a_deadline_after_she_went_home_does_not_claim_the_whole_hour() {
+        let tally = Tally {
+            answered: 3,
+            unanswered: 0,
+            blind: 27,
+        };
+        let stopped = WatchEnd::Deadline {
+            tally,
+            hopeless: true,
+        }
+        .message();
+        let live = WatchEnd::Deadline {
+            tally,
+            hopeless: false,
+        }
+        .message();
+        assert_ne!(stopped, live);
+        assert!(stopped.contains("凍住的畫面"), "{stopped}");
+        assert!(live.contains("沒有等到"), "{live}");
+    }
+
     #[test]
     fn budget_running_out_is_not_the_deadline() {
-        let budget = WatchEnd::BudgetRanOut {
-            asked: 2,
+        let tally = Tally {
+            answered: 2,
+            unanswered: 0,
             blind: 1,
+        };
+        let budget = WatchEnd::BudgetRanOut {
+            tally,
             used: 80,
             limit: 80,
         }
         .message();
-        let deadline = WatchEnd::Deadline { asked: 2, blind: 1 }.message();
+        let deadline = WatchEnd::Deadline {
+            tally,
+            hopeless: false,
+        }
+        .message();
         assert_ne!(budget, deadline);
         assert!(budget.contains("80/80"), "{budget}");
         // 「沒等到」是一句斷言，而預算用完的時候我們沒有資格斷言。
         assert!(budget.contains("我不知道"), "{budget}");
         assert!(deadline.contains("沒有等到"), "{deadline}");
+    }
+
+    /// 一輪都沒跑就停下來，和跑到一半停下來，是兩句話。
+    ///
+    /// 而且**不可以借 `sister interpret` 的文案**：那一句說「超過即靜默降級，
+    /// 只累積 L0/L1」，對 interpret 是真的，對 watch 是假的——這個行程當場
+    /// 就結束，什麼都不會累積。
+    #[test]
+    fn refusing_to_start_does_not_borrow_the_interpreters_sentence() {
+        let mine = WatchSkip::NoBudgetToday {
+            used: 84,
+            limit: 80,
+        }
+        .message();
+        let theirs = crate::brain::SkipReason::BudgetExhausted {
+            used: 84,
+            limit: 80,
+        }
+        .message();
+        assert_ne!(mine, theirs);
+        assert!(!mine.contains("靜默降級"), "{mine}");
+        assert!(!mine.contains("累積"), "{mine}");
+        assert!(mine.contains("一輪都沒有跑"), "{mine}");
+        // 也不可以和「跑到一半用完」講成同一句。
+        assert_ne!(
+            mine,
+            WatchEnd::BudgetRanOut {
+                tally: Tally::default(),
+                used: 84,
+                limit: 80,
+            }
+            .message()
+        );
+
+        let no_consent = WatchSkip::NoConsent.message();
+        assert!(no_consent.contains("cloud-reading"), "{no_consent}");
+        assert!(
+            !no_consent.contains("解釋層"),
+            "他跑的是 watch 不是 interpret，指路要指到 watch：{no_consent}"
+        );
+        assert!(
+            no_consent.contains("sister watch"),
+            "--dry-run 那一行要指到他真的在跑的那支命令：{no_consent}"
+        );
+        assert!(WatchSkip::NoCommand.message().contains("[brain]"));
     }
 
     #[test]
@@ -527,18 +862,32 @@ mod tests {
     /// 逾時不是「還沒有」。
     #[test]
     fn a_timeout_is_not_a_no() {
-        let spawn = SpawnOutcome {
-            duration_ms: 120_000,
-            stdout: String::new(),
-            stderr: String::new(),
-            timed_out: true,
-            spawn_error: None,
-            exit_code: None,
-        };
-        let (outcome, verdict) = verdict_from_spawn(&spawn);
+        let mut timed_out = spawn("", None);
+        timed_out.timed_out = true;
+        let (outcome, verdict) = verdict_from_spawn(&timed_out);
         assert_eq!(outcome, OutboundOutcome::Timeout);
         assert!(matches!(verdict, Verdict::CallFailed { .. }));
         assert!(!verdict.message().contains(&Verdict::NotYet.message()));
+    }
+
+    /// **一個好答案不會因為離開碼不是 0 就被丟掉。**
+    ///
+    /// 真實的 CLI 常常一邊在 stderr 印警告一邊回一個好答案然後 exit 1。
+    /// `brain::classify` 只看 `spawn_error`，這裡也要一樣，不然同一件事會在
+    /// `brain log` 上被 watch 記成 `spawn_failed`、被 interpret 記成 `success`。
+    #[test]
+    fn a_good_answer_survives_a_nonzero_exit_code() {
+        let noisy = spawn("{\"happened\":true,\"because\":\"提示符回來了\"}", Some(1));
+        let (outcome, verdict) = verdict_from_spawn(&noisy);
+        assert_eq!(outcome, OutboundOutcome::Success, "{verdict:?}");
+        assert!(matches!(verdict, Verdict::Happened { .. }), "{verdict:?}");
+        assert!(verdict.answered());
+
+        // 讀不懂的時候，那個離開碼是唯一的線索，要帶著走。
+        let broken = spawn("rate limited", Some(429));
+        let (outcome, verdict) = verdict_from_spawn(&broken);
+        assert_eq!(outcome, OutboundOutcome::BadJson);
+        assert!(verdict.message().contains("離開碼 429"), "{verdict:?}");
     }
 
     #[test]
@@ -550,15 +899,15 @@ mod tests {
         assert!(prompt.contains("原文"), "圍欄不可以改寫原文");
     }
 
-    /// 開跑那一句要說「最多」，而且要講出會先撞到哪一邊。
+    /// 開跑那一句要說「最多」，要含到期那一刻的最後一眼，還要講出先撞到哪一邊。
     #[test]
-    fn the_plan_line_says_at_most_and_which_ceiling_comes_first() {
-        // 60 分鐘 ÷ 2 分鐘 = 30 次，預算還剩 62 → 時間先到。
+    fn the_plan_line_says_at_most_and_counts_the_final_look() {
+        // 60 分鐘 ÷ 2 分鐘 = 30 輪，加上到期那一眼 = 31；預算還剩 62 → 時間先到。
         let roomy = plan_line(120_000, 3_600_000, 18, 80);
-        assert!(roomy.contains("最多問 30 次"), "{roomy}");
+        assert!(roomy.contains("最多問 31 次"), "{roomy}");
         assert!(roomy.contains("還剩 62 次"), "{roomy}");
         assert!(roomy.contains("時間上限"), "{roomy}");
-        // 同樣 30 次，但今天只剩 5 次 → 預算先到。
+        // 同樣 31 次，但今天只剩 5 次 → 預算先到。
         let tight = plan_line(120_000, 3_600_000, 75, 80);
         assert!(tight.contains("外送上限"), "{tight}");
     }

@@ -2644,10 +2644,10 @@ pub mod act {
 pub mod watch {
     use super::*;
     use anyhow::ensure;
-    use sister_core::brain::{self, SkipReason};
+    use sister_core::brain;
     use sister_core::db::OutboundInsert;
     use sister_core::heartbeat::{Phase, Presence};
-    use sister_core::watch::{Blind, Look, Verdict, WatchEnd};
+    use sister_core::watch::{Blind, GRACE, Look, Tally, Verdict, WatchEnd, WatchSkip};
     use sister_core::{Config, Millis};
     use std::io::Write;
 
@@ -2686,28 +2686,36 @@ pub mod watch {
         );
         let mut db = Db::open(&Config::db_path(data_dir))?;
         let consent = sister_core::consent::load(data_dir);
+        // 這三句用 `WatchSkip`，**不是** `brain::SkipReason`。那三句是替
+        // `sister interpret` 寫的，其中一句說「超過即靜默降級，只累積 L0/L1」
+        // ——對 interpret 是真的，對這裡是假的：這個行程當場就結束，她一眼
+        // 都不會看。指路那一行也一樣，要指到 `sister watch --dry-run`。
         let Some(permit) = consent.cloud_permit() else {
-            writeln!(out, "{}", SkipReason::NoConsent.message())?;
+            writeln!(out, "{}", WatchSkip::NoConsent.message())?;
             return Ok(());
         };
         let Some((command, args)) = config.brain.cli() else {
-            writeln!(out, "{}", SkipReason::NoCommand.message())?;
+            writeln!(out, "{}", WatchSkip::NoCommand.message())?;
             return Ok(());
         };
         let command = command.to_string();
         let args = args.to_vec();
         let started = clock();
-        let day =
-            sister_core::local_day::local_day_key(started).context("算不出今天的日期，不敢送")?;
         // daily_budget 是所有外送共用的天花板（brain::run 也讀這支不分 role 的
         // 計數）；reviewer_daily_budget 只是其中 reviewer 的子上限。watcher 若改
         // 用 role 計數，會偷偷把使用者設定的每日總數往上加。
-        let used = db.brain_outbound_count_on(&day)?;
+        //
+        // 這裡只是**開跑那一刻**的數字，拿來印那句「還剩幾次」。迴圈裡每一輪
+        // 都會重新算一次，連日期也重新算——`--stop-after 8h` 跨過午夜的時候，
+        // 一個在啟動時算好就不再動的 `day` 會把四十列外送記在昨天的帳上，
+        // 而昨天的額度已經滿了：使用者設的每日上限就這樣被悄悄加倍。
+        // `brain::run` 也是每次進去才算（`local_day_key(now_ms())`）。
+        let used = db.brain_outbound_count_on(&day_of(started)?)?;
         if used >= config.brain.daily_budget {
             writeln!(
                 out,
                 "{}",
-                SkipReason::BudgetExhausted {
+                WatchSkip::NoBudgetToday {
                     used,
                     limit: config.brain.daily_budget
                 }
@@ -2733,7 +2741,8 @@ pub mod watch {
 
         let mut last_seen = started.saturating_sub(every);
         if opts.dry_run {
-            let (hits, more) = newest_since(&db, last_seen, started.saturating_add(1), HIT_LIMIT)?;
+            let (from, to) = window(last_seen, started).expect("開跑那一刻的時鐘不會比自己早");
+            let (hits, more) = newest_since(&db, from, to, HIT_LIMIT)?;
             if more {
                 writeln!(
                     out,
@@ -2754,68 +2763,82 @@ pub mod watch {
         }
 
         let deadline = started.saturating_add(opts.stop_after);
-        let mut asked = 0_usize;
-        let mut blind = 0_usize;
+        let mut tally = Tally::default();
         loop {
             let now = clock();
-            if now >= deadline {
-                writeln!(out, "{}", WatchEnd::Deadline { asked, blind }.message())?;
-                return Ok(());
-            }
-            let (hits, more) = newest_since(&db, last_seen, now.saturating_add(1), HIT_LIMIT)?;
-            last_seen = now.saturating_add(1);
-            if more {
-                writeln!(
-                    out,
-                    "（這段時間的字超過 {HIT_LIMIT} 段，只拿最新的 {HIT_LIMIT} 段去問。）"
-                )?;
-            }
-            let look = if hits.is_empty() {
-                Look::NothingNew(blind_reason(data_dir, now))
-            } else {
-                let used = db.brain_outbound_count_on(&day)?;
-                if used >= config.brain.daily_budget {
-                    let end = WatchEnd::BudgetRanOut {
-                        asked,
-                        blind,
-                        used,
-                        limit: config.brain.daily_budget,
-                    };
-                    writeln!(out, "{}", end.message())?;
-                    return Ok(());
-                }
-                let (payload, truncated) =
-                    sister_core::watch::build_watch_prompt(&opts.question, &hits)?;
-                if truncated {
-                    writeln!(
-                        out,
-                        "注意：畫面證據超過上限，這輪只問被截斷的那一段，不是全部。"
-                    )?;
-                }
-                let spawn = brain::spawn_cli(permit, &payload, &command, &args);
-                let (outcome, verdict) = sister_core::watch::verdict_from_spawn(&spawn);
-                db.insert_brain_outbound(&OutboundInsert {
-                    ts: now,
-                    day_key: &day,
-                    command: &command,
-                    args: &args,
-                    segment_core_start: None,
-                    chars_sent: payload.chars().count() as i64,
-                    truncated,
-                    outcome: outcome.as_str(),
-                    duration_ms: spawn.duration_ms as i64,
-                    error: spawn.spawn_error.as_deref(),
-                    role: "watcher",
-                })?;
-                let newest = hits.last().expect("nonempty checked");
-                Look::Asked {
-                    chunks: hits.len(),
-                    newest_app: newest.app_id.clone(),
-                    newest_ts: newest.ts,
-                    verdict,
+            // **到期那一刻要再看最後一眼，才輪到收尾那句話。**
+            //
+            // 原本這裡是「到期就直接印 Deadline 然後 return」，於是最後那一段
+            // `[上一輪, deadline)` 從來沒有被查過——`--every 2m --stop-after 1h`
+            // 之下，第 59 分 30 秒才跑完的那個編譯，會得到一句「沒有等到」，
+            // 而那段字就躺在她自己的資料表裡。
+            let expired = now >= deadline;
+
+            let look = match window(last_seen, now) {
+                // 時鐘往回跳了（NTP 校時、睡眠喚醒），這一輪的區間是反的。
+                // 不查，也不要把一次沒查過的空手講成「她確實正在錄」。
+                None => Look::NothingNew(Blind::ClockWentBackwards { last_seen }),
+                Some((from, to)) => {
+                    let (hits, more) = newest_since(&db, from, to, HIT_LIMIT)?;
+                    if more {
+                        writeln!(
+                            out,
+                            "（這段時間的字超過 {HIT_LIMIT} 段，只拿最新的 {HIT_LIMIT} 段去問。）"
+                        )?;
+                    }
+                    if hits.is_empty() {
+                        Look::NothingNew(blind_reason(data_dir, now))
+                    } else {
+                        // 日期和用量都在這裡才算。跑八小時跨過午夜的話，開跑
+                        // 那一刻算好的 `day` 會把今天的外送記在昨天的帳上。
+                        let day = day_of(now)?;
+                        let used = db.brain_outbound_count_on(&day)?;
+                        if used >= config.brain.daily_budget {
+                            let end = WatchEnd::BudgetRanOut {
+                                tally,
+                                used,
+                                limit: config.brain.daily_budget,
+                            };
+                            writeln!(out, "{}", end.message())?;
+                            return Ok(());
+                        }
+                        let (payload, truncated) =
+                            sister_core::watch::build_watch_prompt(&opts.question, &hits)?;
+                        if truncated {
+                            writeln!(
+                                out,
+                                "注意：畫面證據超過上限，這輪只問被截斷的那一段，不是全部。"
+                            )?;
+                        }
+                        let spawn = brain::spawn_cli(permit, &payload, &command, &args);
+                        let (outcome, verdict) = sister_core::watch::verdict_from_spawn(&spawn);
+                        db.insert_brain_outbound(&OutboundInsert {
+                            ts: now,
+                            day_key: &day,
+                            command: &command,
+                            args: &args,
+                            segment_core_start: None,
+                            chars_sent: payload.chars().count() as i64,
+                            truncated,
+                            outcome: outcome.as_str(),
+                            duration_ms: spawn.duration_ms as i64,
+                            error: spawn.spawn_error.as_deref(),
+                            role: "watcher",
+                        })?;
+                        Look::Asked {
+                            chunks: hits.len(),
+                            newest_app: hits.last().expect("nonempty checked").app_id.clone(),
+                            verdict,
+                        }
+                    }
                 }
             };
-            count_look(&look, &mut asked, &mut blind);
+            // 時鐘往回跳的那一輪也要更新游標——那會把它往**回**拉，而不是
+            // 留在原本那個高水位。留在高水位的話，時鐘走回原處之前的每一輪
+            // 都會是空的（要等好幾分鐘）；往回拉只會讓幾段字被重問一次。
+            last_seen = now.saturating_add(1);
+
+            tally.count(&look);
             // 時刻要讀得懂，而且要和 `sister hands log` 同一個格式——他會拿兩邊
             // 對時間。印 epoch 毫秒等於沒印。
             writeln!(
@@ -2826,36 +2849,41 @@ pub mod watch {
             )?;
             if let Look::Asked {
                 verdict: Verdict::Happened { .. },
-                newest_ts,
                 ..
             } = look
             {
-                writeln!(
-                    out,
-                    "{}",
-                    WatchEnd::Saw {
-                        at: newest_ts,
-                        asked,
-                        blind
-                    }
-                    .message()
-                )?;
+                writeln!(out, "{}", WatchEnd::Saw { tally }.message())?;
+                return Ok(());
+            }
+            if expired {
+                // 最後那一眼看到的是「她已經不在錄了」的話，「沒等到」只算到
+                // 她停下來為止——後面那段時間我對著的是一張凍住的畫面。
+                let hopeless = matches!(&look, Look::NothingNew(blind) if blind.hopeless());
+                writeln!(out, "{}", WatchEnd::Deadline { tally, hopeless }.message())?;
                 return Ok(());
             }
             sleep(every);
         }
     }
 
-    /// **兩個計數器，因為它們回答兩個問題。**
+    /// 這一輪要查的區間 `[from, to)`，往回多留 [`GRACE`] 那一段。
     ///
-    /// 一個 `looks` 同時在這兩條路上加一，然後印成「問了 N 次」，是這個 repo
-    /// 反覆犯的那種錯：她整段時間被暫停、一次都沒問到大腦，那句話仍然會說
-    /// 「問了 20 次」。
-    fn count_look(look: &Look, asked: &mut usize, blind: &mut usize) {
-        match look {
-            Look::Asked { .. } => *asked += 1,
-            Look::NothingNew(_) => *blind += 1,
-        }
+    /// **往回多看的那幾秒不是保險，是必需的。** `text_chunks.ts` 是抓那一幀的
+    /// 時間，而那一列要等 OCR 跑完才進得了資料庫。游標貼著「現在」的話，每一
+    /// 輪最新的那一小段永遠是在查詢跑完之後才落地，而下一輪的起點已經在它
+    /// 後面了——所以它**再也不會被看到**，偏偏那正是「編譯剛剛跑完」那一刻。
+    ///
+    /// `None` ＝ 時鐘往回跳了，這個區間是反的。回一個空的 `Vec` 會讓呼叫端
+    /// 把「沒查」講成「查了，沒有新的字」。
+    fn window(last_seen: Millis, now: Millis) -> Option<(Millis, Millis)> {
+        let from = last_seen.saturating_sub(GRACE);
+        let to = now.saturating_add(1);
+        (to > from).then_some((from, to))
+    }
+
+    /// 這一刻算在哪一天的帳上。
+    fn day_of(ts: Millis) -> Result<String> {
+        sister_core::local_day::local_day_key(ts).context("算不出今天的日期，不敢送")
     }
 
     /// 這一輪要看的那幾段字：**最新的那幾段**，由舊到新排好。
@@ -2904,9 +2932,14 @@ pub mod watch {
             // `Live(_)` 一個底線就把它們併成同一句話——如果她卡在開機，
             // 那句「她確實正在錄」會讓人一直等下去。
             Presence::Live(Phase::Booting) => Blind::Booting,
-            // **她正在忙，不是停了。** 這一臂原本寫成 `Blind::Stopped`，
-            // 於是每兩分鐘跳一句「她在 X 收工了」——而她正把一段畫面
-            // 交給大腦在讀。那是我們自己造出來的假話。
+            // **錄製已經停了**，只剩解釋層在把最後一段想完。
+            //
+            // 這一臂原本寫成 `Blind::Stopped`，畫面上每兩分鐘跳一句「她在 X
+            // 收工了」，掉了「還在想」那半段；我改掉的時候在這裡寫了一句
+            // 「她正在忙，不是停了」——**那句話是反過來的假話**。
+            // `heartbeat::beat_thinking` 的說明：「錄製迴圈已經停了……她一個
+            // 畫面都不再抓」。兩半都要留著：錄製停了（所以再等也沒有新畫面），
+            // 而且還有人佔著這個資料目錄（所以不是 `Stopped`）。
             Presence::Thinking { at: _, until } => Blind::Thinking { until },
             Presence::Stopped { at } => Blind::Stopped { at },
             Presence::Stalled { at, phase: _ } => Blind::Stalled { at },
@@ -2918,13 +2951,22 @@ pub mod watch {
         use super::*;
 
         fn prepared(name: &str, text: &str, consented: bool) -> (crate::ops::tmp::Tmp, Config) {
+            prepared_at(name, 90_000, text, consented)
+        }
+
+        fn prepared_at(
+            name: &str,
+            ts: i64,
+            text: &str,
+            consented: bool,
+        ) -> (crate::ops::tmp::Tmp, Config) {
             let tmp = crate::ops::tmp::Tmp::new(name);
             let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
             let session = db.start_session("test", "test").expect("session");
             db.conn()
                 .execute(
-                    "INSERT INTO text_chunks(ts,session_id,source_kind,app_id,text) VALUES(90000,?1,'ocr','Terminal.exe',?2)",
-                    (session, text),
+                    "INSERT INTO text_chunks(ts,session_id,source_kind,app_id,text) VALUES(?1,?2,'ocr','Terminal.exe',?3)",
+                    (ts, session, text),
                 )
                 .expect("chunk");
             drop(db);
@@ -2942,29 +2984,200 @@ pub mod watch {
             (tmp, config)
         }
 
+        /// **一整輪都叫不起來那支 CLI，收尾不可以說「沒有等到」。**
+        ///
+        /// 那是一句斷言，而她一次都沒有真的問到答案。這條測試走的是真的
+        /// `run_with`：`brain.command` 指向一個不存在的執行檔，於是每一輪都是
+        /// spawn 失敗；畫面上每一輪都誠實地說「這一輪不算數」，而舊版的收尾
+        /// 把那三輪加總成「問了 3 次……時間到了，沒有等到」。
         #[test]
-        fn asked_and_blind_are_counted_separately() {
-            let mut clock = [1_i64, 2, 3, 4, 5].into_iter();
-            let mut asked = 0;
-            let mut blind = 0;
-            for is_asked in [true, false, true, false, true] {
-                let now = clock.next().expect("five fake ticks");
-                let look = if is_asked {
-                    Look::Asked {
-                        chunks: 1,
-                        newest_app: None,
-                        newest_ts: now,
-                        verdict: Verdict::NotYet,
-                    }
-                } else {
-                    Look::NothingNew(Blind::RecordingButQuiet)
-                };
-                count_look(&look, &mut asked, &mut blind);
-            }
-            let line = WatchEnd::Deadline { asked, blind }.message();
-            assert!(line.contains("問了 3 次"));
-            assert!(line.contains("有 2 次"));
-            assert!(!line.contains("問了 5 次"));
+        fn a_whole_run_of_failed_spawns_does_not_add_up_to_a_verdict() {
+            let (tmp, mut config) = prepared_at("watch-all-failed", 95_000, "第一段", true);
+            // 每一輪都要有新的字，不然中間那幾輪會變成「沒東西可問」，
+            // 而這條測試量的是「送出去了但沒拿到答案」那一格。
+            add_chunk(&tmp.0, 125_000, "第二段");
+            add_chunk(&tmp.0, 155_000, "第三段");
+            config.brain.command = "definitely-not-a-real-binary-97531".into();
+            config.brain.args = vec![];
+            // 第一格是 `started`，後面三格才是三輪。
+            let mut ticks = [100_000_i64, 100_000, 130_000, 160_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("根本沒問到大腦"), "{text}");
+            assert!(
+                !text.contains("沒有等到"),
+                "她一次都沒問到答案，這句斷言說不出口：{text}"
+            );
+            assert!(text.contains("我不知道"), "{text}");
+            // 而且那幾次都是真的送出去過（有花預算、有寫紀錄），所以不可以
+            // 被算進「沒有新畫面可看」那一格。
+            assert!(text.contains("沒拿到答案 3 次"), "{text}");
+            assert!(text.contains("問到答案 0 次"), "{text}");
+        }
+
+        /// **到期那一刻要再看最後一眼。**
+        ///
+        /// 那一段字是在第 55 秒落地的，而上一輪在第 30 秒就查完了。舊版一到期
+        /// 就直接印收尾，`[130_001, deadline)` 從來沒有被查過——一句「沒有等
+        /// 到」，而證據躺在她自己的資料表裡。
+        #[test]
+        fn the_last_slice_before_the_deadline_still_gets_looked_at() {
+            let (tmp, config) = prepared_at("watch-last-slice", 155_000, "build 完成", true);
+            let mut ticks = [100_000_i64, 130_000, 160_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "編譯跑完了嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("等到了"), "最後那一段沒被看到：{text}");
+            assert!(!text.contains("時間到了，沒有等到"), "{text}");
+        }
+
+        /// 她中途收工的話，「沒等到」只算到她停下來為止。
+        #[test]
+        fn a_deadline_reached_after_she_stopped_says_so() {
+            let (tmp, mut config) = prepared("watch-hopeless", "字", true);
+            // 大腦要回「還沒」，不然第一輪就等到了、根本走不到到期那一刻。
+            config.brain.args = vec![
+                "-c".into(),
+                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
+            ];
+            sister_core::heartbeat::beat_thinking(&tmp.0, 120_000, 200_000).expect("thinking");
+            // `prepared` 那一段字在 90_000，第一輪就會被看到；之後每一輪都空手。
+            let mut ticks = [100_000_i64, 130_000, 160_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("錄製已停"), "{text}");
+            assert!(text.contains("凍住的畫面"), "{text}");
+            assert!(
+                !text.contains("時間到了，沒有等到"),
+                "她第 20 秒就不錄了，剩下那 40 分鐘不能算進「沒等到」：{text}"
+            );
+        }
+
+        fn add_chunk(dir: &Path, ts: i64, text: &str) {
+            let db = Db::open(&Config::db_path(dir)).expect("db");
+            let session: i64 = db
+                .conn()
+                .query_row("SELECT MAX(id) FROM sessions", [], |r| r.get(0))
+                .expect("session");
+            db.conn()
+                .execute(
+                    "INSERT INTO text_chunks(ts,session_id,source_kind,app_id,text) VALUES(?1,?2,'ocr','Terminal.exe',?3)",
+                    (ts, session, text),
+                )
+                .expect("chunk");
+        }
+
+        /// **往回多看的那幾秒不是保險，是必需的。**
+        ///
+        /// `text_chunks.ts` 是抓那一幀的時間，而那一列要等 OCR 跑完才進得了
+        /// 資料庫。游標貼著「現在」的話，每一輪最新的那幾段永遠是在查詢跑完
+        /// 之後才落地，而下一輪的起點已經在它後面了——它再也不會被看到。
+        #[test]
+        fn a_row_that_landed_late_is_still_inside_the_next_window() {
+            // 上一輪查到 100_000 為止（游標停在 100_001）。
+            let (from, to) = window(100_001, 130_000).expect("時鐘沒有往回跳");
+            assert_eq!(to, 130_001);
+            assert!(
+                (from..to).contains(&99_998),
+                "一列 ts=99_998、OCR 慢了兩毫秒才落地的字就永遠看不到了：{from}..{to}"
+            );
+            // 但也不能往回看到上上一輪去，那是白花的外送。
+            assert!(!(from..to).contains(&90_000), "{from}..{to}");
+        }
+
+        /// **跨過午夜的那一輪要記在新的一天，不是開跑那一天。**
+        ///
+        /// `--stop-after 8h` 從晚上十點開跑，`day` 若是啟動時算好就不再動，
+        /// 午夜之後的每一次外送都會記在昨天的帳上——而昨天的額度早就滿了。
+        /// 結果是使用者設的每日上限被悄悄加倍，而 `sister brain log` 上今天那
+        /// 一列是 0。`brain::run` 每次進去都重算（`local_day_key(now_ms())`）。
+        #[test]
+        fn a_run_that_crosses_midnight_bills_the_new_day() {
+            let started = 1_756_200_000_000_i64;
+            let tomorrow = started + 86_400_000;
+            let (tmp, config) =
+                prepared_at("watch-midnight", tomorrow - 400_000, "build 完成", true);
+            let day_one = sister_core::local_day::local_day_key(started).unwrap();
+            let day_two = sister_core::local_day::local_day_key(tomorrow).unwrap();
+            assert_ne!(day_one, day_two, "這兩個時刻要落在不同的本地日期");
+
+            let mut ticks = [started, started, tomorrow].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "編譯跑完了嗎".into(),
+                    every: 30_000,
+                    stop_after: 86_400_000,
+                    dry_run: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+
+            let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+            assert_eq!(
+                db.brain_outbound_count_on(&day_two).unwrap(),
+                1,
+                "午夜之後那一次要記在新的一天"
+            );
+            assert_eq!(
+                db.brain_outbound_count_on(&day_one).unwrap(),
+                0,
+                "記在昨天的帳上，等於把使用者設的每日上限偷偷加倍"
+            );
+        }
+
+        /// 時鐘往回跳的那一輪什麼都沒查，不可以講成「她確實正在錄」。
+        #[test]
+        fn a_backwards_clock_is_not_a_clean_look() {
+            assert_eq!(window(100_001, 90_000), None);
+            // 往回跳得比 GRACE 還小的話，區間仍然成立，不要誤報。
+            assert!(window(100_001, 99_000).is_some());
         }
 
         #[test]
