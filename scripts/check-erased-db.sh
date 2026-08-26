@@ -183,7 +183,7 @@ done
 # 這一刀沒有東西可以刪（上面那一刀已經清乾淨了），走的是「那段時間
 # 裡她什麼都沒記到，不用忘」那條提早收工的路。那條路以前**完全不提**
 # 那一列——而那一列的 `started_at` 就落在他選的那段時間裡。
-grep -q '那段時間裡她什麼都沒記到' live-forget.txt \
+grep -q '那段時間裡她什麼畫面和文字都沒記到' live-forget.txt \
   || { echo "::error::這個 fixture 沒走到提早收工那條路，底下那條就沒在驗它要驗的東西"; exit 1; }
 grep -q '留著 1 場錄製的紀錄本身' live-forget.txt \
   || { echo "::error::forget 什麼都沒刪的那條路又把那一列藏起來了"; exit 1; }

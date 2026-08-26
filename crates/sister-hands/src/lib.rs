@@ -358,6 +358,26 @@ pub enum ActionEvent {
     },
 }
 
+impl ActionEvent {
+    /// 這一列發生在什麼時候。
+    ///
+    /// **沒有 `_` 萬用臂，而且不要替它加一個。** 這支是 [`ActionLog::forget_range`]
+    /// 判斷「這列在不在他要忘掉的範圍裡」唯一的依據；一個新的事件種類如果沒有
+    /// 在這裡被回答，正確的結果是編譯錯誤，不是安靜地回一個 0——那個 0 會讓那
+    /// 一列永遠落在每一個範圍之外，於是它記的那串網址永遠忘不掉。
+    pub fn at_ms(&self) -> i64 {
+        match self {
+            Self::Proposed { at_ms, .. }
+            | Self::Approved { at_ms, .. }
+            | Self::Executed { at_ms, .. }
+            | Self::Refused { at_ms, .. }
+            | Self::StepFinished { at_ms, .. }
+            | Self::Aborted { at_ms, .. }
+            | Self::Concluded { at_ms, .. } => *at_ms,
+        }
+    }
+}
+
 /// 一列讀不懂的 log。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnreadableLine {
@@ -448,6 +468,76 @@ impl ActionLog {
         }
         Ok(out)
     }
+
+    /// 他按下「忘掉這一段」之後，這個檔案裡那一段的字也要不見。
+    ///
+    /// **這裡刪的是字本身，不是蓋一個旗標。** 這個 repo 有過「留著字的墓碑」
+    /// 的前例：軟刪除把列標成已刪、內容原封不動留在磁碟上，而畫面上寫「已忘掉」。
+    /// action log 是純文字 JSONL，裡面有完整的網址和檔案路徑——`sister.db` 那
+    /// 一半清乾淨了而這個檔案沒有，等於那句「忘掉了」只對一半的磁碟成立。
+    ///
+    /// 範圍和 `Db::forget` 同一個慣例：`[from_ms, to_ms)`，左閉右開。
+    ///
+    /// **讀不懂的列一律刪掉。** 它問不出時間，所以沒有辦法判斷在不在範圍內；
+    /// 而兩種錯法不對等——留著它可能留下他剛剛要求忘掉的那串網址（而且畫面上
+    /// 讀不出來，沒有人會發現），刪掉它失去的是一列本來就顯示不出內容的字。
+    /// 這跟排除規則「一律偏向多擋」是同一個取捨。刪了幾列會分開回報，因為
+    /// 「忘掉了 3 列」和「忘掉了 3 列外加 1 列讀不懂的」不是同一句話。
+    pub fn forget_range(&self, from_ms: i64, to_ms: i64) -> Result<ForgetReport> {
+        let replay = self.replay()?;
+        // 檔案不存在的時候 `replay()` 回一份空的，這裡就會是一份全 0 的報告，
+        // 而且不會憑空把檔案生出來。
+        if replay.events.is_empty() && replay.unreadable.is_empty() {
+            return Ok(ForgetReport::default());
+        }
+        let mut report = ForgetReport {
+            removed_unreadable: replay.unreadable.len() as u64,
+            ..ForgetReport::default()
+        };
+        let mut kept = Vec::new();
+        for event in &replay.events {
+            if (from_ms..to_ms).contains(&event.at_ms()) {
+                report.removed_in_range += 1;
+            } else {
+                kept.push(event);
+            }
+        }
+        report.kept = kept.len() as u64;
+        if report.removed_in_range == 0 && report.removed_unreadable == 0 {
+            // 沒有東西要刪就不要重寫檔案——重寫一次就是多一次「寫到一半斷電」
+            // 的機會，而這一趟本來什麼都不必做。
+            return Ok(report);
+        }
+        // 先寫暫存檔再 rename。原地截斷再寫的話，中途斷電會留下一個被砍掉一半
+        // 的 log；rename 在同一個檔案系統上是原子的，要嘛全新的、要嘛全舊的。
+        let tmp = self.path.with_extension("jsonl.forgetting");
+        {
+            let mut file = File::create(&tmp)
+                .with_context(|| format!("建立暫存 action log 失敗：{}", tmp.display()))?;
+            for event in kept {
+                serde_json::to_writer(&mut file, event).context("序列化 action log 失敗")?;
+                file.write_all(b"\n").context("寫入 action log 失敗")?;
+            }
+            file.sync_data().context("同步 action log 失敗")?;
+        }
+        std::fs::rename(&tmp, &self.path)
+            .with_context(|| format!("換掉 action log 失敗：{}", self.path.display()))?;
+        Ok(report)
+    }
+}
+
+/// 從 action log 拿掉了幾列。
+///
+/// 三個數字分開放，不折成一個總數：「忘掉了 3 列」和「忘掉了 3 列、外加 1 列
+/// 讀不懂的也一起刪了」是兩句不同的話，而合成一個 `4` 之後沒有人講得回來。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForgetReport {
+    /// 時間落在範圍裡，被刪掉的列數。
+    pub removed_in_range: u64,
+    /// 解不開、問不出時間，因此一併刪掉的列數。
+    pub removed_unreadable: u64,
+    /// 留下來的列數。
+    pub kept: u64,
 }
 
 #[cfg(test)]
@@ -657,6 +747,121 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sister-hands-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// 「忘掉那個下午」之後，那個下午的網址不可以還躺在磁碟上。
+    ///
+    /// 斷言故意打在**檔案的位元組**上，不是打在 `replay()` 的結果上。這個 repo
+    /// 有過「留著字的墓碑」：軟刪除把列標成已刪，`replay()` 從此不回它，而內容
+    /// 一個字都沒少地留在磁碟上。從 `replay()` 問「還在不在」，問的是讀取端肯
+    /// 不肯給，不是那串字還在不在。
+    #[test]
+    fn forgetting_an_afternoon_takes_the_urls_out_of_the_file_not_just_out_of_the_replay() {
+        let dir = tmp_dir("forget");
+        let log = ActionLog::in_data_dir(&dir);
+        let at = |ms: i64, url: &str| ActionEvent::Executed {
+            at_ms: ms,
+            action: ActionSnapshot::OpenUrl { url: url.into() },
+            result: ExecutionResult::Succeeded {
+                detail: "ok".into(),
+            },
+        };
+        log.append(&at(1_000, "https://before.example")).unwrap();
+        log.append(&at(5_000, "https://during.example")).unwrap();
+        log.append(&at(9_000, "https://after.example")).unwrap();
+
+        let report = log.forget_range(4_000, 8_000).unwrap();
+        assert_eq!(
+            report,
+            ForgetReport {
+                removed_in_range: 1,
+                removed_unreadable: 0,
+                kept: 2,
+            },
+        );
+
+        let raw = std::fs::read_to_string(log.path()).unwrap();
+        assert!(
+            !raw.contains("during.example"),
+            "那個下午的網址還在檔案裡：{raw}",
+        );
+        assert!(
+            raw.contains("before.example") && raw.contains("after.example"),
+            "{raw}"
+        );
+
+        // 範圍是左閉右開，跟 `Db::forget` 同一個慣例：邊界上那一列屬於範圍。
+        assert_eq!(log.forget_range(9_000, 9_001).unwrap().removed_in_range, 1);
+        assert!(
+            !std::fs::read_to_string(log.path())
+                .unwrap()
+                .contains("after.example")
+        );
+
+        // 沒有東西落在範圍裡的時候，不要動到留下來的那幾列。
+        let untouched = std::fs::read_to_string(log.path()).unwrap();
+        let report = log.forget_range(100_000, 200_000).unwrap();
+        assert_eq!(
+            report,
+            ForgetReport {
+                removed_in_range: 0,
+                removed_unreadable: 0,
+                kept: 1
+            }
+        );
+        assert_eq!(std::fs::read_to_string(log.path()).unwrap(), untouched);
+    }
+
+    /// 讀不懂的那一列問不出時間，所以它一起走——而且要講出來它走了。
+    #[test]
+    fn a_line_we_cannot_read_cannot_prove_it_is_outside_the_range_so_it_goes_too() {
+        let dir = tmp_dir("forget-bad");
+        let log = ActionLog::in_data_dir(&dir);
+        log.append(&ActionEvent::Executed {
+            at_ms: 9_000,
+            action: ActionSnapshot::OpenUrl {
+                url: "https://keep.example".into(),
+            },
+            result: ExecutionResult::Succeeded {
+                detail: "ok".into(),
+            },
+        })
+        .unwrap();
+        // 一列解不開、但裡面看得到一串網址的字。
+        {
+            use std::io::Write as _;
+            let mut f = OpenOptions::new().append(true).open(log.path()).unwrap();
+            writeln!(
+                f,
+                r#"{{"event":"from_a_future_version","url":"https://secret.example"}}"#
+            )
+            .unwrap();
+        }
+        let report = log.forget_range(0, 1_000).unwrap();
+        assert_eq!(
+            report,
+            ForgetReport {
+                removed_in_range: 0,
+                removed_unreadable: 1,
+                kept: 1,
+            },
+            "讀不懂的那一列要被算進去，而且不可以被算成 removed_in_range",
+        );
+        let raw = std::fs::read_to_string(log.path()).unwrap();
+        assert!(!raw.contains("secret.example"), "{raw}");
+        assert!(raw.contains("keep.example"), "{raw}");
+    }
+
+    /// 一次動作都沒有過的時候，忘掉一段時間不該生出一個空檔案。
+    #[test]
+    fn forgetting_when_she_never_did_anything_does_not_create_the_file() {
+        let dir = tmp_dir("forget-empty");
+        let log = ActionLog::in_data_dir(&dir);
+        assert_eq!(
+            log.forget_range(0, i64::MAX).unwrap(),
+            ForgetReport::default()
+        );
+        assert!(!log.path().exists(), "憑空生出了一個 action log");
     }
 
     #[test]

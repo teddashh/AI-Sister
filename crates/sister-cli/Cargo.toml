@@ -18,6 +18,11 @@ bundled-sqlite = ["sister-core/bundled-sqlite", "sister-capture/bundled-sqlite"]
 [dependencies]
 sister-core.workspace = true
 sister-capture.workspace = true
+# `sister forget` 要把 action log 裡那一段也刪掉。字母人和 CLI 寫的是**同一個
+# 資料夾裡的同一個檔案**，所以「忘掉」不能只有其中一支做得到——否則他用 CLI
+# 忘掉一個下午，那個下午開過的網址還躺在 `action-log.jsonl` 裡，而畫面上寫的
+# 是「已經忘掉了」。格式歸 sister-hands 管，這裡不自己再寫一份 parser。
+sister-hands.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 chrono.workspace = true

@@ -2548,6 +2548,42 @@ pub mod forget {
             (asked_at - span, asked_at)
         };
 
+        // **action log 不住在資料庫裡，所以它的刪除不能掛在資料庫後面。**
+        // 底下那個 `path.exists()` 會在沒有資料庫的時候直接印「沒有東西可以忘」
+        // 然後回去——而 `action-log.jsonl` 是資料夾裡另一個檔案，裡面有完整的
+        // 網址和檔案路徑。掛在後面的話，那句「沒有東西可以忘」會變成假話。
+        //
+        // 只在真的要刪的時候動手：預覽那條路一個位元組都不准碰（那是 `--yes`
+        // 前面那段文案親口答應的）。
+        //
+        // 字母人那一側是同一句話（`apps/desktop/src-tauri/src/main.rs` 的
+        // `forget`），兩邊都要做。
+        //
+        // 這一句會印在「要忘掉的是 X 到 Y」**前面**，因為那一行在資料庫檢查
+        // 後面。所以它自己要把區間講完整，不可以寫成「那一段」——一句依賴下
+        // 一行才讀得懂的話，就是一句在這個位置讀不懂的話。
+        if yes {
+            let gone = sister_hands::ActionLog::in_data_dir(data_dir).forget_range(from, to)?;
+            if gone.removed_in_range > 0 || gone.removed_unreadable > 0 {
+                println!(
+                    "動作紀錄（{} 到 {}）：忘掉 {} 列{}。",
+                    crate::fmt::timestamp(from.max(0)),
+                    crate::fmt::timestamp(to),
+                    gone.removed_in_range,
+                    // 讀不懂的那幾列問不出時間，所以一起走了。這件事要講——不講
+                    // 的話上面那個數字會被讀成「總共就刪了這些」。
+                    if gone.removed_unreadable > 0 {
+                        format!(
+                            "，另外 {} 列讀不懂、問不出時間，一併刪掉",
+                            gone.removed_unreadable
+                        )
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+        }
+
         // `query` 那邊查不到資料庫要報錯（他以為自己有資料），這裡不用：
         // 「沒有東西可以忘」是一個成功的結果。同一個 helper 套在兩種語意上
         // 會弄錯其中一個——`prune` 那邊有同一段註解。
@@ -2618,7 +2654,10 @@ pub mod forget {
         // 落進資料庫。那時候「不用忘」讀起來像「你沒事」，而三秒後就有事了。
         let report = db.forget_preview(from, to, Some(&prune::frames_dir(data_dir)))?;
         if report.is_empty() {
-            println!("  那段時間裡她什麼都沒記到，不用忘。");
+            // 講明主詞是**錄到的東西**。上面那一行可能剛印完「動作紀錄：忘掉
+            // 1 列」——她那段時間動過手，只是沒錄到畫面或文字。光禿禿一句
+            // 「什麼都沒記到」接在那行後面，兩句各自都是真的，湊起來在打架。
+            println!("  那段時間裡她什麼畫面和文字都沒記到，不用忘。");
             // **「什麼都沒記到」不等於那段時間在資料庫裡沒有留下任何一列。**
             // 上一次刪完之後剩下的那個空殼，`started_at` 就落在這個窗裡，而
             // `count_empty_sessions` 帶著同一道守衛，所以預覽是空的——於是這
@@ -2714,6 +2753,52 @@ pub mod forget {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// `sister forget --yes` 要把 action log 那一段也帶走。
+        ///
+        /// **這一條守的是接線，不是 `forget_range` 本身。** 那支函式在
+        /// `sister-hands` 有自己的測試；這裡要擋的是「有人把這一行從 `run`
+        /// 裡拿掉」——那種 bug 底下每一條測試都還是綠的，而畫面上照樣寫著
+        /// 「已經忘掉了」。這個 repo 有一整層接線是零執行覆蓋的，這一行不要
+        /// 變成下一個。
+        ///
+        /// 故意連資料庫都不建：那條路會在 `path.exists()` 就掉頭回去印
+        /// 「沒有東西可以忘」。如果 action log 的刪除掛在資料庫後面，這一條會
+        /// 紅——而那正是它一開始被我放錯的位置。
+        #[test]
+        fn forgetting_takes_the_action_log_with_it_even_with_no_database() {
+            let tmp = crate::ops::tmp::Tmp::new("forget-actionlog");
+            let log = sister_hands::ActionLog::in_data_dir(&tmp.0);
+            let now = sister_core::now_ms();
+            let put = |ms: i64, url: &str| {
+                log.append(&sister_hands::ActionEvent::Executed {
+                    at_ms: ms,
+                    action: sister_hands::ActionSnapshot::OpenUrl { url: url.into() },
+                    result: sister_hands::ExecutionResult::Succeeded {
+                        detail: "ok".into(),
+                    },
+                })
+                .expect("append");
+            };
+            put(now - 3_600_000, "https://inside.example");
+            put(now - 30 * 86_400_000, "https://longago.example");
+
+            // 預覽不准動任何一個位元組——`--yes` 前面那段文案是這樣答應的。
+            run(&tmp.0, "1d", false).expect("preview");
+            let raw = std::fs::read_to_string(log.path()).expect("read");
+            assert!(raw.contains("inside.example"), "預覽刪了東西：{raw}");
+
+            run(&tmp.0, "1d", true).expect("forget");
+            let raw = std::fs::read_to_string(log.path()).expect("read");
+            assert!(
+                !raw.contains("inside.example"),
+                "那一小時開過的網址還在磁碟上：{raw}",
+            );
+            assert!(
+                raw.contains("longago.example"),
+                "範圍外的那一列不該被帶走：{raw}",
+            );
+        }
 
         #[test]
         fn the_units_it_understands() {

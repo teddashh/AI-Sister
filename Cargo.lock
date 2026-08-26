@@ -754,6 +754,7 @@ dependencies = [
  "serde_json",
  "sister-capture",
  "sister-core",
+ "sister-hands",
  "tracing",
  "tracing-subscriber",
  "windows",

@@ -2801,6 +2801,15 @@ fn forget_range(
         "recording" => "live",
         other => other,
     };
+    // 資料庫和畫面之外，`action-log.jsonl` 裡也有那一段的完整網址與檔案路徑。
+    // 少了這一刀，那句「已經忘掉了」只對一半的磁碟成立。CLI 那邊是同一句話
+    // （`crates/sister-cli/src/ops.rs` 的 `forget`），兩邊都要做。
+    //
+    // 在借資料庫之前先做：這一刀失敗要整個停下來，不能發生「資料庫刪了、
+    // 檔案沒刪」而畫面照樣報成功。
+    sister_hands::ActionLog::in_data_dir(dir)
+        .forget_range(from_ts, to_ts)
+        .map_err(|err| format!("{err:#}"))?;
     with_db_mut(&shell, |db| {
         let report = db
             .forget(from_ts, to_ts, Some(&frames))
