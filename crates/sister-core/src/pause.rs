@@ -30,14 +30,63 @@ pub fn flag_path(data_dir: &Path) -> PathBuf {
     data_dir.join(FLAG)
 }
 
+/// data dir 本人的狀態。抽出來是因為 Windows 會把「父路徑是檔案」的子路徑
+/// `try_exists` 回成 `Ok(false)`，Linux 卻回 `Err(NotADirectory)`；若只測 IO
+/// 薄殼，Linux 永遠站不到 Windows 出貨時的那一格。
+///
+/// 這份判定刻意和 `sister-hands::kill_switch` 各留一份：兩個 crate 不能形成相依環。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DirState {
+    Dir,
+    NotADir,
+    Absent,
+    Unreadable,
+}
+
+fn dir_state(data_dir: &Path) -> DirState {
+    match std::fs::metadata(data_dir) {
+        Ok(metadata) if metadata.is_dir() => DirState::Dir,
+        Ok(_) => DirState::NotADir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DirState::Absent,
+        Err(_) => DirState::Unreadable,
+    }
+}
+
+/// `child` 是 `data_dir/paused.flag` 的 `try_exists` 答案；錯誤內容在這一步不重要。
+fn decide(child: Result<bool, ()>, dir: DirState) -> bool {
+    match child {
+        Ok(true) | Err(()) => true,
+        Ok(false) => match dir {
+            DirState::Dir | DirState::Absent => false,
+            DirState::NotADir | DirState::Unreadable => true,
+        },
+    }
+}
+
+fn decide_for(data_dir: &Path, child: Result<bool, ()>) -> bool {
+    decide(child, dir_state(data_dir))
+}
+
 /// 她現在是不是閉著眼睛。
 ///
 /// 回傳 `bool` 而不是 `Result<bool>` 是刻意的：這個問題只有一個安全的預設答案，
 /// 而把錯誤丟給呼叫端，等於讓每一個呼叫端各自決定一次「讀不到的時候要不要繼續
 /// 錄」——只要有一個人答錯，承諾就破了。所以答案在這裡就定死。
+///
+/// **定死的那個答案，在 alpha.75 之前於 Windows 上是錯的。** 舊的寫法是
+/// `flag_path(data_dir).try_exists().unwrap_or(true)`，而 Windows 會把
+/// 「父路徑是檔案」的子查詢回成 `Ok(false)`，不是 Linux 的 `Err`——於是
+/// 「我讀不到」被講成「旗標確定不在」，使用者按了暫停，她繼續錄。
+///
+/// 跟 `sister-hands` 的 `kill_switch::is_pulled` 同一個病、同一個修法，兩邊
+/// 刻意各留一份（兩個 crate 不能形成正常相依）。**下面這一行同樣沒有 Linux
+/// 測試守得住**：child 查詢要穿過 data dir，Linux 上它一定先回 `Err`，改回
+/// 舊寫法照樣全綠。守住它的是 `unreadable_path_is_paused_fail_closed`，
+/// 而那條只有在 Windows CI 上才走得到那一格。
 pub fn is_paused(data_dir: &Path) -> bool {
-    // 權限不足、路徑中間有個檔案不是資料夾、IO 出錯……都算暫停。
-    flag_path(data_dir).try_exists().unwrap_or(true)
+    // 子路徑讀不到，或 data dir 存在但不是目錄／狀態讀不到，都算暫停；只有確定
+    // 是正常目錄而旗標不在，或 data dir 確定不存在，才算正在錄。
+    decide_for(data_dir, flag_path(data_dir).try_exists().map_err(|_| ()))
 }
 
 /// 從什麼時候開始暫停的。純顯示用；`None` 代表旗標在但內容讀不出來
@@ -105,7 +154,58 @@ mod tests {
     impl Drop for Tmp {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+            let _ = std::fs::remove_file(&self.0);
         }
+    }
+
+    #[test]
+    fn windows_child_missing_with_non_directory_parent_is_paused() {
+        // Linux 的 child `try_exists` 會先回 Err，跑不出 Windows 的 Ok(false) 組合。
+        assert!(decide(Ok(false), DirState::NotADir));
+    }
+
+    #[test]
+    fn absent_data_dir_is_not_paused() {
+        assert!(!decide(Ok(false), DirState::Absent));
+    }
+
+    #[test]
+    fn directory_without_flag_is_not_paused() {
+        assert!(!decide(Ok(false), DirState::Dir));
+    }
+
+    #[test]
+    fn present_flag_and_unreadable_child_are_paused() {
+        assert!(decide(Ok(true), DirState::NotADir));
+        assert!(decide(Err(()), DirState::Dir));
+    }
+
+    #[test]
+    fn shell_maps_real_paths_to_the_right_states() {
+        let tmp = Tmp::new("shell-states");
+        assert!(!is_paused(tmp.path()));
+
+        let absent = tmp.0.join("absent");
+        assert!(!is_paused(&absent));
+
+        let file = tmp.0.join("file");
+        std::fs::write(&file, "not a directory").unwrap();
+        assert!(is_paused(&file));
+        // Windows 對這個真實路徑的 child 查詢回 Ok(false)；Linux 無法自然產生，
+        // 所以在 IO 邊界明確餵入該答案，並仍由薄殼讀取真實 data dir 狀態。
+        assert!(decide_for(&file, Ok(false)));
+    }
+
+    #[test]
+    /// **這是唯一真的走過 `is_paused` 的 Windows 那一格的測試。**
+    /// Linux 上它從 `Err(NotADirectory)` 過關，證不了什麼；Windows 上它從
+    /// `Ok(false)` 過關，而那格在 alpha.75 之前會回「沒暫停」——使用者按了
+    /// 暫停，她繼續錄。上面的 `decide` 單元測試碰不到薄殼，別拿它們當理由刪這條。
+    fn unreadable_path_is_paused_fail_closed() {
+        let tmp = Tmp::new("fail-closed");
+        std::fs::remove_dir_all(&tmp.0).unwrap();
+        std::fs::write(&tmp.0, "not a directory").unwrap();
+        assert!(is_paused(&tmp.0));
     }
 
     #[test]

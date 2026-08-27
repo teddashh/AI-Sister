@@ -18482,8 +18482,9 @@ pub mod record {
             }
 
             // 暫停鍵在**另一個行程**上（字母人），所以唯一的辦法是每個 tick
-            // 去問一次那個旗標檔。一次 `stat` 是微秒等級，相對於一個 tick
-            // 裡最便宜的一步都還小兩個數量級——不值得為它做快取。
+            // 去問一次那個旗標檔。一到兩次 `stat`（旗標不在時會再確認 data dir
+            // 本人是不是還好好的，見 `pause::is_paused`）是微秒等級，相對於一個
+            // tick 裡最便宜的一步都還小兩個數量級——不值得為它做快取。
             let now = sister_core::now_ms();
             match rec.set_paused(sister_core::pause::is_paused(data_dir), now) {
                 Ok(true) if rec.is_paused() => println!("  ⏸ 已暫停——她不看了，直到你解除。"),
