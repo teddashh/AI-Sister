@@ -2338,27 +2338,51 @@ pub mod act {
             ));
         }
 
+        // 這兩條刻意分開，因為它們守的是**兩件不同的事**，而其中一件有執行緒。
+        //
+        // 綁在一起的那個版本在 CI 上紅過一次：watcher 的第一次檢查可能發生在
+        // 測試 `pull()` **之前**，那之後它要睡 250ms 才再看一次，而測試只轉了
+        // 100ms 就放棄。它在我的機器上綠，是因為執行緒起得剛好夠慢。
+        // 拿本機量到的時間當門檻，就是這個下場。
+
+        /// 旗標亮著的時候，那句話要走**注入的 `out`**——不是 `eprintln!`。
+        ///
+        /// 這一條完全沒有執行緒也沒有睡眠：`ask` 拿到的就是一個 `true`。
+        /// 它守的是「這句話測得到」，而那正是 alpha.74 修過的那一顆。
         #[test]
         fn watcher_notice_uses_the_injected_output() {
-            let dir = crate::ops::tmp::Tmp::new("act-watcher-output");
-            let watcher = PullWatcher::start(&dir.0);
-            sister_hands::kill_switch::pull(&dir.0, 1000).unwrap();
-            for _ in 0..100 {
-                if watcher.pulled.load(std::sync::atomic::Ordering::Acquire) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            assert!(watcher.pulled.load(std::sync::atomic::Ordering::Acquire));
+            let pulled = std::sync::atomic::AtomicBool::new(true);
             let mut input = std::io::Cursor::new("停\n".as_bytes());
             let mut out = Vec::new();
             assert!(matches!(
-                ask(&mut input, &mut out, &watcher.pulled).unwrap(),
+                ask(&mut input, &mut out, &pulled).unwrap(),
                 Answer::Abort(AbortActor::User)
             ));
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains("現在這一步交不出去"), "{out}");
             assert!(out.contains("打「停」"), "{out}");
+            // 只講現在，不承諾整輪的未來——拔了又接回去的時候那句話會變成假話。
+            assert!(!out.contains("不會再動手"), "{out}");
+        }
+
+        /// watcher 那條執行緒真的會去看檔案。
+        ///
+        /// **先拔再開**，所以它第一圈（睡之前）就一定看得到；剩下要等的只有
+        /// 執行緒起來的時間。上限給得很寬，因為這裡要驗的是「會不會看」，
+        /// 不是「多快看到」——CI 的機器比開發機慢一倍以上。
+        #[test]
+        fn the_watcher_actually_reads_the_switch() {
+            let dir = crate::ops::tmp::Tmp::new("act-watcher-reads");
+            sister_hands::kill_switch::pull(&dir.0, 1000).unwrap();
+            let watcher = PullWatcher::start(&dir.0);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !watcher.pulled.load(std::sync::atomic::Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "watcher 十秒都沒發現一個開跑前就拔著的開關"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
         }
 
         #[test]
