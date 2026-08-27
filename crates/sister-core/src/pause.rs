@@ -21,6 +21,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+use crate::dir_state::{DirState, dir_state};
 use crate::model::Millis;
 
 /// 旗標檔名。放在 data dir 裡，跟 `sister.db` 同一層。
@@ -28,28 +29,6 @@ const FLAG: &str = "paused.flag";
 
 pub fn flag_path(data_dir: &Path) -> PathBuf {
     data_dir.join(FLAG)
-}
-
-/// data dir 本人的狀態。抽出來是因為 Windows 會把「父路徑是檔案」的子路徑
-/// `try_exists` 回成 `Ok(false)`，Linux 卻回 `Err(NotADirectory)`；若只測 IO
-/// 薄殼，Linux 永遠站不到 Windows 出貨時的那一格。
-///
-/// 這份判定刻意和 `sister-hands::kill_switch` 各留一份：兩個 crate 不能形成相依環。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum DirState {
-    Dir,
-    NotADir,
-    Absent,
-    Unreadable,
-}
-
-fn dir_state(data_dir: &Path) -> DirState {
-    match std::fs::metadata(data_dir) {
-        Ok(metadata) if metadata.is_dir() => DirState::Dir,
-        Ok(_) => DirState::NotADir,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DirState::Absent,
-        Err(_) => DirState::Unreadable,
-    }
 }
 
 /// `child` 是 `data_dir/paused.flag` 的 `try_exists` 答案；錯誤內容在這一步不重要。

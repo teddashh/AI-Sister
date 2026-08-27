@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::config::RetentionConfig;
+use crate::dir_state::{DirState, dir_state};
 use crate::model::Millis;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -194,15 +195,38 @@ pub(crate) fn count_files<'a>(
     report: &mut PruneReport,
 ) {
     for (rel, bytes) in files {
-        // stat 不出來（權限、路徑壞掉）當成「還在」。說它不見了是這裡唯一
-        // 會騙人的方向：那等於替使用者宣告一張截圖已經消失，而它其實還在。
-        if root.join(rel).try_exists().unwrap_or(true) {
+        let path = root.join(rel);
+        if count_file_for(&path, path.try_exists().map_err(|_| ())) {
             report.images_deleted += 1;
             report.image_bytes_freed += bytes.max(0) as u64;
         } else {
             report.missing += 1;
         }
     }
+}
+
+/// `child` 是畫面路徑的 `try_exists` 答案；錯誤內容在這一步不重要。
+///
+/// **問不出來一律當成「還在」。說它不見了是這裡唯一會騙人的方向**：那等於
+/// 替使用者宣告一張截圖已經消失，而它其實還在——使用者在 `sister prune`
+/// 讀到的是「另外 N 列說自己有圖，但那個檔已經不在磁碟上了」。
+///
+/// 注意方向跟 `pause::is_paused` 和 `kill_switch::is_pulled` **相反**：那兩個
+/// 是「不確定就算開關按下去」，這裡是「不確定就算檔案還在」。同一個
+/// `DirState` 讀出來的事實，兩種安全方向；套錯就正好是這個註解在防的那件事。
+fn count_as_present(child: Result<bool, ()>, parent: Option<DirState>) -> bool {
+    match child {
+        Ok(true) | Err(()) => true,
+        Ok(false) => match parent {
+            Some(DirState::Dir | DirState::Absent) => false,
+            Some(DirState::NotADir | DirState::Unreadable) | None => true,
+        },
+    }
+}
+
+fn count_file_for(path: &Path, child: Result<bool, ()>) -> bool {
+    let parent = path.parent().map(dir_state);
+    count_as_present(child, parent)
 }
 
 /// `DELETE FROM frames`，但**跳過 `kept` 裡那幾列**。
@@ -1033,6 +1057,60 @@ mod tests {
         assert_eq!(report.images_deleted, 0, "沒有刪到任何檔案");
         assert_eq!(report.image_bytes_freed, 0, "磁碟上一個位元組都沒有釋放");
         assert_eq!(report.missing, 1, "但資料庫確實有一列以為自己有圖");
+    }
+
+    #[test]
+    fn windows_child_missing_with_non_directory_parent_counts_as_present() {
+        // Linux 的 child `try_exists` 會先回 Err，產不出 Windows 的 Ok(false) 組合。
+        assert!(count_as_present(Ok(false), Some(DirState::NotADir)));
+    }
+
+    #[test]
+    fn child_missing_from_readable_directory_counts_as_missing() {
+        assert!(!count_as_present(Ok(false), Some(DirState::Dir)));
+    }
+
+    #[test]
+    fn child_missing_with_absent_parent_counts_as_missing() {
+        assert!(!count_as_present(Ok(false), Some(DirState::Absent)));
+    }
+
+    #[test]
+    fn unreadable_child_counts_as_present() {
+        assert!(count_as_present(Err(()), Some(DirState::Dir)));
+    }
+
+    #[test]
+    fn count_files_shell_reads_real_child_and_parent_states() {
+        let dir = Tmp::new("count-shell");
+        let present = dir.path().join("present.png");
+        std::fs::write(&present, "frame").unwrap();
+
+        let mut report = PruneReport::default();
+        count_files(
+            dir.path(),
+            [("present.png", 5), ("missing.png", 7)],
+            &mut report,
+        );
+        assert_eq!(report.images_deleted, 1);
+        assert_eq!(report.image_bytes_freed, 5);
+        assert_eq!(report.missing, 1);
+
+        let file_parent = dir.path().join("not-a-directory");
+        std::fs::write(&file_parent, "not a directory").unwrap();
+        let child = file_parent.join("frame.png");
+        // Windows 對這個真實路徑回 Ok(false)；Linux 無法自然產生，所以在 IO
+        // 邊界餵入該答案，仍由薄殼讀取真實 parent 狀態。
+        assert!(count_file_for(&child, Ok(false)));
+
+        // 而這一段走的是**真的 `count_files`**，不是 helper。Linux 從 `Err`
+        // 那條路過關、Windows 從 `Ok(false)` 那條路過關——後者正是會把一張
+        // 還在的截圖講成「已經不在磁碟上」的那一格。少了這幾行，整個薄殼在
+        // 兩個平台都沒有人守。
+        let mut broken = PruneReport::default();
+        count_files(dir.path(), [("not-a-directory/frame.png", 11)], &mut broken);
+        assert_eq!(broken.missing, 0, "問不出來不可以宣告截圖已經消失");
+        assert_eq!(broken.images_deleted, 1);
     }
 
     #[test]
