@@ -31,7 +31,7 @@ pub fn execute_logged(data_dir: &Path, raw: &str, now: i64) -> Result<String, St
         action: action.clone(),
     })
     .map_err(|e| format!("寫入 approved 失敗，沒有動手：{e:#}"))?;
-    let mut executor = PlatformExecutor;
+    let mut executor = PlatformExecutor::new(data_dir);
     let outcome = sister_hands::execute_with(Level::Suggest, &mut executor, &suggestion);
     let terminal = match &outcome {
         Outcome::Refused { reason } => ActionEvent::Refused {

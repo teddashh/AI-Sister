@@ -1,7 +1,7 @@
 use sister_hands::semi_action::*;
 use sister_hands::{
-    ActionEvent, ActionSnapshot, Executor, NeverInherited, Outcome, RefusalReason, Suggestion,
-    SuggestionButton,
+    ActionEvent, ActionSnapshot, Attached, Executor, NeverInherited, Outcome, RefusalReason,
+    Suggestion, SuggestionButton,
 };
 use std::path::PathBuf;
 
@@ -14,6 +14,26 @@ impl Executor for CountingExecutor {
     fn execute(&mut self, _suggestion: &Suggestion) -> Result<String, String> {
         self.calls += 1;
         Ok("開了".into())
+    }
+
+    fn hands_attached(&self) -> Attached {
+        Attached::Yes
+    }
+}
+
+struct PulledExecutor {
+    executed: Vec<ActionSnapshot>,
+}
+impl Executor for PulledExecutor {
+    fn execute(&mut self, suggestion: &Suggestion) -> Result<String, String> {
+        self.executed.push(suggestion.snapshot());
+        Ok("不該執行".into())
+    }
+
+    fn hands_attached(&self) -> Attached {
+        Attached::No {
+            since_ms: Some(2222),
+        }
     }
 }
 
@@ -284,6 +304,30 @@ fn a_step_that_matches_on_every_dimension_actually_runs() {
     );
     assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
     assert_eq!(executor.calls, 1);
+}
+
+#[test]
+fn pulled_hands_are_refused_at_the_semi_action_choke_point_without_execution() {
+    let step = StepRequest::new(Task::new("整理報告"), App::new("Editor"), action());
+    let suggestion = pressed(r#"{"action":"open_file","path":"C:/work/a.txt"}"#);
+    let mut executor = PulledExecutor { executed: vec![] };
+    let outcome = execute_approved_step(
+        &grant(),
+        1_001,
+        PresentedStep::new(step.clone()).approve(),
+        &step,
+        &mut executor,
+        &suggestion,
+    );
+    assert_eq!(
+        outcome,
+        Outcome::Refused {
+            reason: RefusalReason::HandsPulled {
+                since_ms: Some(2222)
+            }
+        }
+    );
+    assert!(executor.executed.is_empty());
 }
 
 /// 五類永不繼承的動作，`separate_approval_required` 那一份規則也要被隘口讀到。

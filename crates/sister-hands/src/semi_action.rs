@@ -378,12 +378,15 @@ impl RunConclusion {
 pub enum AbortActor {
     User,
     System,
+    /// 有人在別的地方拔了手（tray 按鈕、`sister hands stop`）。
+    HandsPulled,
 }
 impl AbortActor {
     const fn name(self) -> &'static str {
         match self {
             Self::User => "使用者",
             Self::System => "系統",
+            Self::HandsPulled => "外部拔手開關",
         }
     }
 }
@@ -664,6 +667,11 @@ pub fn execute_approved_step(
     if let Some(class) = class {
         return Outcome::Refused {
             reason: crate::RefusalReason::NeverInherited { class },
+        };
+    }
+    if let crate::Attached::No { since_ms } = executor.hands_attached() {
+        return Outcome::Refused {
+            reason: crate::RefusalReason::HandsPulled { since_ms },
         };
     }
     match executor.execute(suggestion) {

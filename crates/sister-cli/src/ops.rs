@@ -1309,6 +1309,7 @@ pub mod act {
         done: u32,
         declined: u32,
         blocked: u32,
+        pulled: u32,
         failed: u32,
     }
 
@@ -1414,11 +1415,12 @@ pub mod act {
             return Ok(());
         }
         let stdin = std::io::stdin();
+        let mut executor = sister_hands::platform::PlatformExecutor::new(data_dir);
         run_with(
             data_dir,
             opts,
             &mut stdin.lock(),
-            &mut sister_hands::platform::PlatformExecutor,
+            &mut executor,
             &mut sister_core::now_ms,
         )
     }
@@ -1502,8 +1504,61 @@ pub mod act {
         Abort(AbortActor),
     }
 
-    fn ask(input: &mut impl BufRead, out: &mut impl Write) -> Result<Answer> {
+    struct PullWatcher {
+        stop: std::sync::mpsc::Sender<()>,
+        handle: Option<std::thread::JoinHandle<()>>,
+        pulled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl PullWatcher {
+        fn start(data_dir: &Path) -> Self {
+            let (stop, done) = std::sync::mpsc::channel();
+            let watcher_dir = data_dir.to_path_buf();
+            let pulled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let noticed = pulled.clone();
+            let handle = std::thread::spawn(move || {
+                loop {
+                    if sister_hands::kill_switch::is_pulled(&watcher_dir) {
+                        noticed.store(true, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
+                    match done.recv_timeout(std::time::Duration::from_millis(250)) {
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                }
+            });
+            Self {
+                stop,
+                handle: Some(handle),
+                pulled,
+            }
+        }
+    }
+
+    impl Drop for PullWatcher {
+        fn drop(&mut self) {
+            let _ = self.stop.send(());
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn ask(
+        input: &mut impl BufRead,
+        out: &mut impl Write,
+        pulled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Answer> {
+        let mut announced = false;
         loop {
+            if !announced && pulled.load(std::sync::atomic::Ordering::Acquire) {
+                writeln!(
+                    out,
+                    "手被拔掉了。現在這一步交不出去；要收掉這一輪就打「停」。"
+                )?;
+                announced = true;
+            }
             write!(out, "要做嗎？好／不要／停：")?;
             out.flush()?;
             let mut answer = String::new();
@@ -1527,8 +1582,36 @@ pub mod act {
         input: &mut impl BufRead,
         executor: &mut impl sister_hands::Executor,
         clock: &mut impl FnMut() -> i64,
-        out: &mut impl Write,
+        out: &mut impl std::io::Write,
     ) -> Result<()> {
+        let pulled_at_start = sister_hands::kill_switch::is_pulled(data_dir);
+        if pulled_at_start {
+            let since = sister_hands::kill_switch::pulled_since(data_dir)
+                .map(|value| format!("（從 {} 起）", crate::fmt::timestamp(value)))
+                .unwrap_or_else(|| "（拔手時間讀不到）".into());
+            if opts.dry_run {
+                writeln!(
+                    out,
+                    "手目前被拔掉了{since}；下面這些是她會問的，真的跑起來的時候一步都交不出去，除非先 `sister hands resume`。"
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "手目前被拔掉了{since}；沒有動作會交給作業系統。要接回去請跑 `sister hands resume`。"
+                )?;
+                if opts.save_grant {
+                    writeln!(out, "這一趟沒有存 `--save-grant`；把手接回去後請重打一次。")?;
+                }
+                if opts.use_grant {
+                    writeln!(
+                        out,
+                        "這一趟沒有使用 `--use-grant`；把手接回去後請重打一次。"
+                    )?;
+                }
+                return Ok(());
+            }
+        }
+        let _watcher = PullWatcher::start(data_dir);
         let grant = if opts.use_grant {
             let grant = load_grant(data_dir)?;
             grant
@@ -1620,6 +1703,27 @@ pub mod act {
                 terminal = Some(conclusion);
                 break;
             }
+            if sister_hands::kill_switch::is_pulled(data_dir) && !(opts.dry_run && pulled_at_start)
+            {
+                if opts.dry_run {
+                    writeln!(out, "手已被拔掉；預演到此停止，但沒有寫 action log。")?;
+                    break;
+                }
+                let event = run.abort(clock(), AbortActor::HandsPulled);
+                log.append(&event)?;
+                terminal = Some(match event {
+                    ActionEvent::Aborted {
+                        after_completed_steps,
+                        by,
+                        ..
+                    } => RunConclusion::Aborted {
+                        after_completed_steps,
+                        by,
+                    },
+                    _ => unreachable!("abort always returns Aborted"),
+                });
+                break;
+            }
             let declared_app = step_app(source, &commitment.evidence_json)?;
             let action = button.snapshot();
             let step = StepRequest::new(
@@ -1647,7 +1751,7 @@ pub mod act {
                 action: action.clone(),
             })?;
             let presented = PresentedStep::new(step.clone());
-            match ask(input, out)? {
+            match ask(input, out, &_watcher.pulled)? {
                 Answer::Decline => {
                     tally.declined += 1;
                     log.append(&ActionEvent::Refused {
@@ -1706,7 +1810,11 @@ pub mod act {
                     // 沒交出去（Refused）／交出去了但那一端失敗（Failed）／成了。
                     let event = match &outcome {
                         Outcome::Refused { reason } => {
-                            tally.blocked += 1;
+                            if matches!(reason, RefusalReason::HandsPulled { .. }) {
+                                tally.pulled += 1;
+                            } else {
+                                tally.blocked += 1;
+                            }
                             writeln!(out, "沒有做，也沒有交給作業系統：{}", reason.message())?;
                             ActionEvent::Refused {
                                 at_ms: clock(),
@@ -1738,6 +1846,28 @@ pub mod act {
                         }
                     };
                     log.append(&event)?;
+                    if matches!(
+                        outcome,
+                        Outcome::Refused {
+                            reason: RefusalReason::HandsPulled { .. }
+                        }
+                    ) {
+                        let event = run.abort(clock(), AbortActor::HandsPulled);
+                        log.append(&event)?;
+                        terminal = Some(match event {
+                            ActionEvent::Aborted {
+                                after_completed_steps,
+                                by,
+                                ..
+                            } => RunConclusion::Aborted {
+                                after_completed_steps,
+                                by,
+                            },
+                            _ => unreachable!("abort always returns Aborted"),
+                        });
+                        writeln!(out, "手被拔掉，所以這一輪到此為止。")?;
+                        break;
+                    }
                     if matches!(outcome, Outcome::Done { .. }) {
                         // `StepLimitReached` 的欄位叫 `completed_steps`：一次交出去但失敗
                         // 的嘗試不是完成的步驟，因此 Failed 不消耗這版的步數預算。
@@ -1801,10 +1931,15 @@ pub mod act {
                 },
             })?,
         }
+        let pulled = if tally.pulled > 0 {
+            format!("，拔手擋掉 {} 步", tally.pulled)
+        } else {
+            String::new()
+        };
         writeln!(
             out,
-            "這一輪：問了 {} 步，做成 {} 步，你說不要 {} 步，授權擋掉 {} 步，執行失敗 {} 步。",
-            tally.asked, tally.done, tally.declined, tally.blocked, tally.failed
+            "這一輪：問了 {} 步，做成 {} 步，你說不要 {} 步，授權擋掉 {} 步{}，執行失敗 {} 步。",
+            tally.asked, tally.done, tally.declined, tally.blocked, pulled, tally.failed
         )?;
         Ok(())
     }
@@ -1982,6 +2117,10 @@ pub mod act {
                     None => Ok("假的執行器接受了".into()),
                 }
             }
+
+            fn hands_attached(&self) -> sister_hands::Attached {
+                sister_hands::Attached::Yes
+            }
         }
 
         fn opts(task: &str, apps: &[&str], steps: u32, minutes: u64, dry_run: bool) -> Options {
@@ -2070,6 +2209,182 @@ pub mod act {
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
                 nearest_frame: None,
             }
+        }
+
+        #[test]
+        fn a_pulled_switch_stops_before_grant_or_action_log() {
+            let dir = crate::ops::tmp::Tmp::new("act-pulled-before-start");
+            sister_hands::kill_switch::pull(&dir.0, 1234).unwrap();
+            let mut input = std::io::Cursor::new(Vec::<u8>::new());
+            let mut executor = Fake::default();
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &opts("任務", &["chrome.exe"], 2, 5, false),
+                &one_card(),
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("resume"), "{out}");
+            assert!(!ActionLog::in_data_dir(&dir.0).path().exists());
+        }
+
+        struct PullAfterFirst {
+            data_dir: std::path::PathBuf,
+            calls: Vec<ActionSnapshot>,
+        }
+        impl sister_hands::Executor for PullAfterFirst {
+            fn execute(&mut self, suggestion: &sister_hands::Suggestion) -> Result<String, String> {
+                self.calls.push(suggestion.snapshot());
+                sister_hands::kill_switch::pull(&self.data_dir, 5555).unwrap();
+                Ok("第一步完成".into())
+            }
+
+            fn hands_attached(&self) -> sister_hands::Attached {
+                if sister_hands::kill_switch::is_pulled(&self.data_dir) {
+                    sister_hands::Attached::No {
+                        since_ms: sister_hands::kill_switch::pulled_since(&self.data_dir),
+                    }
+                } else {
+                    sister_hands::Attached::Yes
+                }
+            }
+        }
+
+        #[test]
+        fn pulling_after_the_first_step_aborts_before_asking_the_second() {
+            let dir = crate::ops::tmp::Tmp::new("act-pulled-mid-run");
+            let source = Source {
+                rows: vec![
+                    card(1, Some(&open_url("https://example.com/a")), &[1]),
+                    card(2, Some(&open_url("https://example.com/b")), &[1]),
+                ],
+                apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                nearest_frame: None,
+            };
+            let mut executor = PullAfterFirst {
+                data_dir: dir.0.clone(),
+                calls: vec![],
+            };
+            let mut input = std::io::Cursor::new("好\n".as_bytes());
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &opts("任務", &["chrome.exe"], 3, 5, false),
+                &source,
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .unwrap();
+            assert_eq!(executor.calls.len(), 1);
+            let replay = ActionLog::in_data_dir(&dir.0).replay().unwrap();
+            assert!(matches!(
+                replay.events.last(),
+                Some(ActionEvent::Aborted {
+                    by: AbortActor::HandsPulled,
+                    ..
+                })
+            ));
+            assert_eq!(String::from_utf8(out).unwrap().matches("要做嗎").count(), 1);
+        }
+
+        struct PulledAtGate;
+        impl sister_hands::Executor for PulledAtGate {
+            fn execute(&mut self, _: &sister_hands::Suggestion) -> Result<String, String> {
+                panic!("拔手後不可以執行")
+            }
+            fn hands_attached(&self) -> sister_hands::Attached {
+                sister_hands::Attached::No {
+                    since_ms: Some(5555),
+                }
+            }
+        }
+
+        #[test]
+        fn pulling_at_the_last_steps_gate_aborts_the_whole_round() {
+            let dir = crate::ops::tmp::Tmp::new("act-pulled-at-last-gate");
+            let mut executor = PulledAtGate;
+            let mut input = std::io::Cursor::new("好\n".as_bytes());
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &opts("任務", &["chrome.exe"], 2, 5, false),
+                &one_card(),
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert!(!out.contains("步驟都問完了"), "{out}");
+            assert!(out.contains("授權擋掉 0 步，拔手擋掉 1 步"), "{out}");
+            assert!(matches!(
+                ActionLog::in_data_dir(&dir.0)
+                    .replay()
+                    .unwrap()
+                    .events
+                    .last(),
+                Some(ActionEvent::Aborted {
+                    by: AbortActor::HandsPulled,
+                    ..
+                })
+            ));
+        }
+
+        #[test]
+        fn watcher_notice_uses_the_injected_output() {
+            let dir = crate::ops::tmp::Tmp::new("act-watcher-output");
+            let watcher = PullWatcher::start(&dir.0);
+            sister_hands::kill_switch::pull(&dir.0, 1000).unwrap();
+            for _ in 0..100 {
+                if watcher.pulled.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(watcher.pulled.load(std::sync::atomic::Ordering::Acquire));
+            let mut input = std::io::Cursor::new("停\n".as_bytes());
+            let mut out = Vec::new();
+            assert!(matches!(
+                ask(&mut input, &mut out, &watcher.pulled).unwrap(),
+                Answer::Abort(AbortActor::User)
+            ));
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("現在這一步交不出去"), "{out}");
+            assert!(out.contains("打「停」"), "{out}");
+        }
+
+        #[test]
+        fn pulled_hands_still_allow_a_logless_preview() {
+            let dir = crate::ops::tmp::Tmp::new("act-pulled-preview");
+            sister_hands::kill_switch::pull(&dir.0, 1000).unwrap();
+            let mut executor = Fake::default();
+            let mut input = std::io::Cursor::new(Vec::<u8>::new());
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &opts("任務", &["chrome.exe"], 2, 5, true),
+                &one_card(),
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("下面這些是她會問的"), "{out}");
+            assert!(
+                out.contains("步驟：開啟網址：https://example.com/a"),
+                "{out}"
+            );
+            assert!(!ActionLog::in_data_dir(&dir.0).path().exists());
         }
 
         #[test]
@@ -6055,6 +6370,96 @@ pub mod stop {
     }
 }
 
+pub mod hands_switch {
+    use super::*;
+
+    pub fn stop(data_dir: &Path) -> Result<()> {
+        stop_with_output(data_dir, sister_core::now_ms(), &mut std::io::stdout())
+    }
+
+    pub(crate) fn stop_with_output(
+        data_dir: &Path,
+        now: i64,
+        out: &mut impl std::io::Write,
+    ) -> Result<()> {
+        ensure_data_dir(data_dir)?;
+        if sister_hands::kill_switch::pull(data_dir, now)? {
+            writeln!(out, "已拔掉她的手；還沒交出去的動作都不會交給作業系統。")?;
+        } else {
+            match sister_hands::kill_switch::pulled_since(data_dir) {
+                Some(since) => writeln!(
+                    out,
+                    "手本來就拔著（從 {} 開始）。",
+                    crate::fmt::timestamp(since)
+                )?,
+                None => writeln!(out, "手本來就拔著（開始時間讀不到）。")?,
+            }
+        }
+        Ok(())
+    }
+
+    pub fn resume(data_dir: &Path) -> Result<()> {
+        resume_with_output(data_dir, &mut std::io::stdout())
+    }
+
+    fn ensure_data_dir(data_dir: &Path) -> Result<()> {
+        if !data_dir.is_dir() {
+            anyhow::bail!("找不到這個資料目錄：{}", data_dir.display());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resume_with_output(data_dir: &Path, out: &mut impl std::io::Write) -> Result<()> {
+        ensure_data_dir(data_dir)?;
+        if sister_hands::kill_switch::release(data_dir)? {
+            writeln!(out, "已把手接回去。")?;
+        } else {
+            writeln!(out, "手本來就接著。")?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn stopping_an_already_pulled_switch_says_it_was_already_pulled() {
+            let dir = crate::ops::tmp::Tmp::new("hands-stop-twice");
+            let mut first = Vec::new();
+            stop_with_output(&dir.0, 1000, &mut first).unwrap();
+            let mut second = Vec::new();
+            stop_with_output(&dir.0, 9999, &mut second).unwrap();
+            let second = String::from_utf8(second).unwrap();
+            assert!(second.contains("本來"), "{second}");
+            assert!(!second.contains("已拔掉"), "{second}");
+            assert_eq!(sister_hands::kill_switch::pulled_since(&dir.0), Some(1000));
+        }
+
+        #[test]
+        fn resume_reports_both_attached_states() {
+            let dir = crate::ops::tmp::Tmp::new("hands-resume");
+            let mut already = Vec::new();
+            resume_with_output(&dir.0, &mut already).unwrap();
+            assert!(String::from_utf8(already).unwrap().contains("本來就接著"));
+            sister_hands::kill_switch::pull(&dir.0, 1000).unwrap();
+            let mut resumed = Vec::new();
+            resume_with_output(&dir.0, &mut resumed).unwrap();
+            assert!(String::from_utf8(resumed).unwrap().contains("已把手接回去"));
+        }
+
+        #[test]
+        fn stop_and_resume_reject_a_mistyped_data_dir() {
+            let dir = crate::ops::tmp::Tmp::new("hands-missing-dir")
+                .0
+                .join("typo");
+            assert!(stop_with_output(&dir, 1000, &mut Vec::new()).is_err());
+            assert!(resume_with_output(&dir, &mut Vec::new()).is_err());
+            assert!(!dir.exists());
+        }
+    }
+}
+
 pub mod prune {
     use super::*;
     use sister_core::config::Config;
@@ -6151,6 +6556,7 @@ pub mod prune {
             ($($arg:tt)*) => {{ writeln!(out, $($arg)*)? }};
         }
         let r = &config.retention;
+        // `hands.stop` 刻意不在保留期裡：刪掉它換不到隱私，只會安靜地把手接回去。
         let expired_grant = clean_expired_grant(data_dir, dry_run)?;
         // 「畫面 30 天」單獨講會被讀成「30 天後那一幀就不存在了」，而真正
         // 消失的只有 PNG——時間、app、視窗標題、網址跟著文字走到 365 天。
@@ -6360,6 +6766,19 @@ pub mod prune {
             let path = super::super::act::grant_path(dir);
             std::fs::write(&path, serde_json::to_vec(&grant).expect("serialize")).expect("write");
             path
+        }
+
+        #[test]
+        fn prune_never_releases_the_hands_switch() {
+            let dir = crate::ops::tmp::Tmp::new("prune-keeps-hands-stop");
+            let _db = Db::open(&crate::db_path(&dir.0)).unwrap();
+            sister_hands::kill_switch::pull(&dir.0, 1000).unwrap();
+            let mut out = Vec::new();
+            run_with_output(&dir.0, &Config::default(), false, &mut out).unwrap();
+            // 「忘掉」若刪這道牆，就等於安靜地把手接回去；時戳換不到隱私。
+            assert!(sister_hands::kill_switch::is_pulled(&dir.0));
+            assert!(sister_hands::kill_switch::switch_path(&dir.0).exists());
+            assert_eq!(sister_hands::kill_switch::pulled_since(&dir.0), Some(1000));
         }
 
         /// 錄製迴圈自己跑的那一次清理，**也要清掉過期的授權書，而且要講**。
@@ -7126,6 +7545,7 @@ pub mod forget {
             ($($arg:tt)*) => {{ writeln!(out, $($arg)*)? }};
         }
         let span = parse_span(last)?;
+        // `hands.stop` 刻意不忘：它沒有使用者文字，刪掉這道牆反而會把權力給回去。
 
         // **這個「現在」只屬於刪除區間，所以它在這個大括號裡就死掉。**
         //
@@ -7373,6 +7793,21 @@ pub mod forget {
                 }
             }
             found
+        }
+
+        #[test]
+        fn forget_last_and_whole_range_never_release_the_hands_switch() {
+            for (name, span) in [("last", "1h"), ("whole", "36500d")] {
+                let dir = crate::ops::tmp::Tmp::new(&format!("forget-keeps-hands-{name}"));
+                let _db = Db::open(&crate::db_path(&dir.0)).unwrap();
+                sister_hands::kill_switch::pull(&dir.0, 1000).unwrap();
+                let mut out = Vec::new();
+                run_with_output(&dir.0, span, true, &mut out).unwrap();
+                // `hands.stop` 只有時戳，刪它不會忘掉資料，只會安靜地給回權力。
+                assert!(sister_hands::kill_switch::is_pulled(&dir.0));
+                assert!(sister_hands::kill_switch::switch_path(&dir.0).exists());
+                assert_eq!(sister_hands::kill_switch::pulled_since(&dir.0), Some(1000));
+            }
         }
 
         /// `sister forget --yes` 之後，存著的授權書裡那句 `--task` 原文要真的
@@ -10023,6 +10458,28 @@ pub mod doctor {
         println!("  {sym} {} {detail}", fmt::pad(label, 16));
     }
 
+    fn hands_status(data_dir: &Path) -> (&'static str, String) {
+        if !std::fs::metadata(data_dir).is_ok_and(|m| m.is_dir()) {
+            return ("?", "資料目錄讀不到；無法判斷手目前接著還是拔著".into());
+        }
+        if !sister_hands::kill_switch::is_pulled(data_dir) {
+            return ("✓", "接著；執行隘口可以把核准的動作交給作業系統".into());
+        }
+        match sister_hands::kill_switch::pulled_since(data_dir) {
+            Some(since) => (
+                "✗",
+                format!(
+                    "從 {} 起被拔掉；`sister hands resume` 可接回去",
+                    crate::fmt::timestamp(since)
+                ),
+            ),
+            None => (
+                "✗",
+                "開關在，但開始時間讀不到；`sister hands resume` 可接回去".into(),
+            ),
+        }
+    }
+
     /// 「現在有沒有在看」那一列的符號和句子。
     ///
     /// **這一支拿不到 `data_dir`，而那是它存在的理由。** 上一版這段程式長在
@@ -11130,6 +11587,8 @@ pub mod doctor {
             &format!("sister {}", env!("CARGO_PKG_VERSION")),
         );
         line(true, "平台", std::env::consts::OS);
+        let (symbol, detail) = hands_status(data_dir);
+        mark(symbol, "手", &detail);
 
         let backend = crate::ops::record::backend_name();
         line(
@@ -11772,6 +12231,18 @@ pub mod doctor {
         use super::*;
         use sister_core::capabilities::{Report, UrlCapture};
         use sister_core::heartbeat::{Phase, Presence};
+
+        #[test]
+        fn unreadable_data_dir_is_unknown_not_pulled() {
+            let dir = crate::ops::tmp::Tmp::new("doctor-hands-unreadable");
+            std::fs::remove_dir_all(&dir.0).unwrap();
+            std::fs::write(&dir.0, "not a directory").unwrap();
+            let (symbol, detail) = hands_status(&dir.0);
+            assert_eq!(symbol, "?");
+            assert!(detail.contains("無法判斷"), "{detail}");
+            assert!(!detail.contains("resume"), "{detail}");
+            assert!(!detail.contains("被拔掉"), "{detail}");
+        }
 
         /// 一台剛裝好、還沒錄過的機器上，doctor 要寫得進去。
         ///

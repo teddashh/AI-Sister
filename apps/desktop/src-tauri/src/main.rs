@@ -3278,6 +3278,10 @@ fn main() {
             let show_item = MenuItem::with_id(app, "show", "顯示 AI-Sister", true, None::<&str>)?;
             let pause_item =
                 MenuItem::with_id(app, "pause", pause_label(paused_now), true, None::<&str>)?;
+            let hands_stop_item =
+                MenuItem::with_id(app, "hands-stop", "拔掉她的手", true, None::<&str>)?;
+            let hands_resume_item =
+                MenuItem::with_id(app, "hands-resume", "把手接回去", true, None::<&str>)?;
             // 開始／停止和暫停是兩件事，所以是兩顆。暫停是「先別看，但留在
             // 這裡」，停止是「今天到此為止」——把停止做成「一直暫停」會留下
             // 一個永遠在跑卻永遠不做事的行程，而他在工作管理員裡看得到它。
@@ -3336,6 +3340,8 @@ fn main() {
                         &show_item,
                         &record_item,
                         &pause_item,
+                        &hands_stop_item,
+                        &hands_resume_item,
                         &timeline_item,
                         &settings_item,
                         &consent_item,
@@ -3349,6 +3355,8 @@ fn main() {
                         &show_item,
                         &record_item,
                         &pause_item,
+                        &hands_stop_item,
+                        &hands_resume_item,
                         &timeline_item,
                         &settings_item,
                         &consent_item,
@@ -3377,6 +3385,38 @@ fn main() {
                         // 使用者只會以為自己按到了。
                         if let Err(e) = toggle_pause(app.clone(), app.state::<Shell>()) {
                             tracing::error!("暫停切換失敗：{e}");
+                        }
+                    }
+                    "hands-stop" | "hands-resume" => {
+                        let shell = app.state::<Shell>();
+                        let resume = event.id.as_ref() == "hands-resume";
+                        let changed = shell
+                            .data_dir
+                            .as_ref()
+                            .ok_or_else(|| "資料目錄讀不到".to_string())
+                            .and_then(|dir| {
+                                if resume {
+                                    sister_hands::kill_switch::release(dir)
+                                        .map(|_| ())
+                                        .map_err(|e| e.to_string())
+                                } else {
+                                    sister_hands::kill_switch::pull(dir, sister_core::now_ms())
+                                        .map(|_| ())
+                                        .map_err(|e| e.to_string())
+                                }
+                            });
+                        match changed {
+                            Ok(()) => refresh_tray(app),
+                            Err(e) => {
+                                tracing::error!("拔手開關切換失敗：{e}");
+                                if let Some(win) = app.get_webview_window(PET) {
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                                use tauri::Emitter;
+                                let _ = app.emit("recorder-failed", format!("拔手開關失敗：{e}"));
+                                refresh_tray(app);
+                            }
                         }
                     }
                     "record" => {

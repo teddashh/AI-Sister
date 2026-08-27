@@ -17,6 +17,7 @@ use std::{
 };
 
 pub mod commitment_action;
+pub mod kill_switch;
 pub mod platform;
 pub mod replay_copy;
 pub mod semi_action;
@@ -255,6 +256,8 @@ pub enum RefusalReason {
     ApprovalWasForAnotherStep {
         mismatch: semi_action::ApprovalMismatch,
     },
+    /// 手被拔掉了（`hands.stop`）——這一步沒有交給作業系統。
+    HandsPulled { since_ms: Option<i64> },
 }
 
 impl RefusalReason {
@@ -273,6 +276,16 @@ impl RefusalReason {
             }
             Self::NotCoveredByGrant { rejection } => rejection.message().to_string(),
             Self::ApprovalWasForAnotherStep { mismatch } => mismatch.message(),
+            Self::HandsPulled { since_ms } => match since_ms {
+                Some(since_ms) => format!(
+                    "手從 {} 起被拔掉了，所以這一步沒有交給作業系統。要接回去請跑 `sister hands resume`。",
+                    replay_copy::at(*since_ms)
+                ),
+                None => {
+                    "手被拔掉了，所以這一步沒有交給作業系統。要接回去請跑 `sister hands resume`。"
+                        .to_string()
+                }
+            },
         }
     }
 }
@@ -292,6 +305,20 @@ pub enum Outcome {
 /// 平台呼叫端提供實作者；測試只放 fake，不會真的開瀏覽器或視窗。
 pub trait Executor {
     fn execute(&mut self, suggestion: &Suggestion) -> std::result::Result<String, String>;
+
+    /// 手還在不在。
+    ///
+    /// 沒有預設實作是刻意的：每一個 executor 都必須明講自己有沒有接開關。
+    fn hands_attached(&self) -> Attached;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attached {
+    Yes,
+    /// `since_ms` 是拔的時間；`None` 代表開關在但時戳讀不出來。
+    No {
+        since_ms: Option<i64>,
+    },
 }
 
 /// **suggest 那條路**的唯一隘口：字母人上那顆按鈕按下去，走這裡。
@@ -331,6 +358,11 @@ pub fn execute_with(
     if let Some(class) = never_inherited_class(suggestion) {
         return Outcome::Refused {
             reason: RefusalReason::NeverInherited { class },
+        };
+    }
+    if let Attached::No { since_ms } = executor.hands_attached() {
+        return Outcome::Refused {
+            reason: RefusalReason::HandsPulled { since_ms },
         };
     }
     match executor.execute(suggestion) {
@@ -738,6 +770,63 @@ mod tests {
             self.calls += 1;
             Ok(format!("fake: {}", suggestion.describe()))
         }
+
+        fn hands_attached(&self) -> Attached {
+            Attached::Yes
+        }
+    }
+
+    struct PulledFake {
+        executed: Vec<ActionSnapshot>,
+    }
+    impl Executor for PulledFake {
+        fn execute(&mut self, suggestion: &Suggestion) -> std::result::Result<String, String> {
+            self.executed.push(suggestion.snapshot());
+            Ok("不該執行".into())
+        }
+
+        fn hands_attached(&self) -> Attached {
+            Attached::No {
+                since_ms: Some(1234),
+            }
+        }
+    }
+
+    #[test]
+    fn suggest_choke_point_refuses_pulled_hands_without_executing() {
+        let mut fake = PulledFake { executed: vec![] };
+        let suggestion = Suggestion::open_url(click(), "https://example.com".into());
+        assert_eq!(
+            execute_with(Level::Suggest, &mut fake, &suggestion),
+            Outcome::Refused {
+                reason: RefusalReason::HandsPulled {
+                    since_ms: Some(1234)
+                }
+            }
+        );
+        assert!(fake.executed.is_empty());
+    }
+
+    #[test]
+    fn pulled_hands_copy_never_claims_execution_failed() {
+        let message = RefusalReason::HandsPulled { since_ms: None }.message();
+        assert!(message.contains("手被拔掉"));
+        assert!(message.contains("沒有交給作業系統"));
+        assert!(message.contains("sister hands resume"));
+        assert!(!message.contains("失敗"));
+
+        let dated = RefusalReason::HandsPulled {
+            since_ms: Some(1_700_000_000_000),
+        }
+        .message();
+        assert!(dated.contains("2023"), "{dated}");
+        assert!(
+            !dated
+                .as_bytes()
+                .windows(10)
+                .any(|w| w.iter().all(u8::is_ascii_digit)),
+            "{dated}"
+        );
     }
 
     #[test]

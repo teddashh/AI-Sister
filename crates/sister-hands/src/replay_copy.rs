@@ -20,7 +20,7 @@ use chrono::{Local, TimeZone};
 /// 對不出時刻的時候印原本那個數字，不是印一個猜的。`ts:` 那個前綴是為了讓
 /// 讀的人看得出來「這是原始值，不是時間」——和 `sister-cli` 的 `fmt::timestamp`
 /// 同一個慣例。
-fn at(ms: i64) -> String {
+pub(crate) fn at(ms: i64) -> String {
     match Local.timestamp_millis_opt(ms).single() {
         Some(dt) => dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
         None => format!("ts:{ms}"),
@@ -498,8 +498,20 @@ mod tests {
             }],
             unreadable: vec![],
         });
+        let by_pulled_switch = replay_lines(&Replay {
+            events: vec![ActionEvent::Aborted {
+                at_ms: 1,
+                after_completed_steps: 2,
+                by: crate::semi_action::AbortActor::HandsPulled,
+            }],
+            unreadable: vec![],
+        });
         assert!(by_user[0].contains("使用者"), "{by_user:?}");
         assert!(by_system[0].contains("系統"), "{by_system:?}");
+        assert!(
+            by_pulled_switch[0].contains("外部拔手開關"),
+            "{by_pulled_switch:?}"
+        );
         assert_ne!(by_user[0], by_system[0]);
     }
 }

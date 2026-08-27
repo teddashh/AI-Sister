@@ -239,6 +239,10 @@ enum BrainAction {
 
 #[derive(Subcommand)]
 enum HandsAction {
+    /// 拔掉她的手；還沒交出去的動作都會被擋住。
+    Stop,
+    /// 把手接回去。
+    Resume,
     /// 動作紀錄回放：提出、核准、交出去、做完、中止，每一列自己讀得懂。
     ///
     /// 預設只給最近 20 列，而**被蓋掉的那幾列會有一句話講出來**——安靜地
@@ -803,6 +807,8 @@ fn main() -> Result<()> {
             BrainAction::Log { limit } => ops::brain::log(&data_dir, limit),
         },
         Command::Hands { action } => match action {
+            HandsAction::Stop => ops::hands_switch::stop(&data_dir),
+            HandsAction::Resume => ops::hands_switch::resume(&data_dir),
             HandsAction::Log { limit } => ops::act::log(&data_dir, limit),
         },
         Command::Review {
