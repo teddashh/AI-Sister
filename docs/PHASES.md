@@ -503,6 +503,13 @@ capture 層本身就是 recorder。
     `ShellExecuteW` 之間仍有一個無法消除的窗口，已經交給作業系統的那一個追不回來。
     開關住在模型碰不到的 data dir，`sister do`
     卡在等回答時也能從另一個終端機拔掉。快捷鍵仍未做。
+    **tray 那兩格沒有任何執行覆蓋**——CLI 這半有測試，字母人那半只證明得了編得過
+    （`check-windows.sh` 沒有 `cargo test`），要在真 Windows 上按一遍才算數。
+    另外 alpha.75 修掉一個 Windows 專屬的 fail-open：`try_exists()` 對「祖先是
+    檔案」的子路徑，Linux 回 `Err`、Windows 回 `Ok(false)`，於是「讀不到」被講成
+    「開關不在」。同一行程式在暫停旗標與 prune 預覽各有一份，三處都改成不再無條件
+    相信 `Ok(false)`；**那一格 Linux 測不出來**，守它的測試只在 Windows CI 上
+    走得到，兩個薄殼都把這件事寫在註解裡。
   SPEC §9.1 的 `data_scope` 與 `denied_actions` 兩維刻意沒做：現在三種動作都
   不帶資料 payload，加兩個沒有人讀的欄位是假授權。`AllowedApps` 那一維雖然
   改成從證據算，仍然要照這個標準讀——它說的是「這一步的字是在哪個 app 的畫面上
