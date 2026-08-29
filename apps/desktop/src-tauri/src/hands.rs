@@ -29,6 +29,7 @@ pub fn execute_logged(data_dir: &Path, raw: &str, now: i64) -> Result<String, St
     log.append(&ActionEvent::Approved {
         at_ms: now,
         action: action.clone(),
+        by: Some(sister_hands::ApprovedBy::Press),
     })
     .map_err(|e| format!("寫入 approved 失敗，沒有動手：{e:#}"))?;
     let mut executor = PlatformExecutor::new(data_dir);

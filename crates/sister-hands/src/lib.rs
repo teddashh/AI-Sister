@@ -59,6 +59,33 @@ pub enum Level {
 #[derive(Debug, PartialEq, Eq)]
 pub struct UserButtonPress(());
 
+/// 這一步是憑什麼跑的。
+///
+/// 兩者都是**正當**的批准，差別在有沒有人在鍵盤前面。log 必須分得出來：
+/// 這份 log 存在的理由就是回答「她憑什麼做這件事」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovedBy {
+    /// 他當場按的。
+    Press,
+    /// 憑一張先前簽好的票自己跑的——沒有人在鍵盤前面。
+    StandingGrant,
+}
+
+/// 一張票批准了某一步之後才拿得到的憑證。
+/// 私有欄位、沒有公開建構子——唯一的來源是 `Grant::authorize_unattended`。
+#[derive(Debug, PartialEq, Eq)]
+pub struct GrantPermit(());
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct SuggestionAuthorization(SuggestionAuthorizationKind);
+
+#[derive(Debug, PartialEq, Eq)]
+enum SuggestionAuthorizationKind {
+    Press(UserButtonPress),
+    StandingGrant(GrantPermit),
+}
+
 impl UserButtonPress {
     fn from_button_click() -> Self {
         Self(())
@@ -69,29 +96,38 @@ impl UserButtonPress {
 pub enum Suggestion {
     OpenUrl {
         url: String,
-        pressed: UserButtonPress,
+        authorization: SuggestionAuthorization,
     },
     OpenFile {
         path: PathBuf,
-        pressed: UserButtonPress,
+        authorization: SuggestionAuthorization,
     },
     FocusWindow {
         title: String,
-        pressed: UserButtonPress,
+        authorization: SuggestionAuthorization,
     },
 }
 
 impl Suggestion {
     pub fn open_url(pressed: UserButtonPress, url: String) -> Self {
-        Self::OpenUrl { url, pressed }
+        Self::OpenUrl {
+            url,
+            authorization: SuggestionAuthorization(SuggestionAuthorizationKind::Press(pressed)),
+        }
     }
 
     pub fn open_file(pressed: UserButtonPress, path: PathBuf) -> Self {
-        Self::OpenFile { path, pressed }
+        Self::OpenFile {
+            path,
+            authorization: SuggestionAuthorization(SuggestionAuthorizationKind::Press(pressed)),
+        }
     }
 
     pub fn focus_window(pressed: UserButtonPress, title: String) -> Self {
-        Self::FocusWindow { title, pressed }
+        Self::FocusWindow {
+            title,
+            authorization: SuggestionAuthorization(SuggestionAuthorizationKind::Press(pressed)),
+        }
     }
 
     /// 具體動作 + 具體目標（SPEC §9.7：核准綁「把 A 檔上傳到 B 表單」，
@@ -211,6 +247,22 @@ impl SuggestionButton {
             SuggestionDraft::FocusWindow { title } => Suggestion::focus_window(pressed, title),
         }
     }
+
+    pub fn take_up(self, permit: GrantPermit) -> Suggestion {
+        let authorization =
+            SuggestionAuthorization(SuggestionAuthorizationKind::StandingGrant(permit));
+        match self.0 {
+            SuggestionDraft::OpenUrl { url } => Suggestion::OpenUrl { url, authorization },
+            SuggestionDraft::OpenFile { path } => Suggestion::OpenFile {
+                path,
+                authorization,
+            },
+            SuggestionDraft::FocusWindow { title } => Suggestion::FocusWindow {
+                title,
+                authorization,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +298,8 @@ pub enum RefusalReason {
     ObserveHasNoHands,
     /// 落在永不繼承的五類裡，要單獨核准（SPEC §9.2）。
     NeverInherited { class: NeverInherited },
+    /// 這一類不能憑 standing grant 無人執行，必須有人當場按。
+    NeedsLivePress { class: NeverInherited },
     /// `semi-action` 必須走會讀 grant 與步級核准的隘口。
     SemiActionNeedsGrantAndStepApproval,
     /// grant 的四維 scope 裡有一維不涵蓋這一步（SPEC §9.1）。
@@ -269,6 +323,10 @@ impl RefusalReason {
             }
             Self::NeverInherited { class } => format!(
                 "「{}」不隨任務授權繼承，每一次都要單獨核准——這一步沒有做。",
+                class.name()
+            ),
+            Self::NeedsLivePress { class } => format!(
+                "「{}」這一類不能靠票自己跑，要他當場按——這一步沒有做。",
                 class.name()
             ),
             Self::SemiActionNeedsGrantAndStepApproval => {
@@ -401,6 +459,9 @@ pub enum ActionEvent {
     Approved {
         at_ms: i64,
         action: ActionSnapshot,
+        /// `None` 只代表舊版本沒有記批准來源，不代表沒有人按。
+        #[serde(default)]
+        by: Option<ApprovedBy>,
     },
     /// 交給作業系統了。成功或失敗在 `result` 裡。
     Executed {
@@ -937,6 +998,7 @@ mod tests {
             ActionEvent::Approved {
                 at_ms: 2,
                 action: action.clone(),
+                by: Some(ApprovedBy::Press),
             },
             ActionEvent::Executed {
                 at_ms: 3,

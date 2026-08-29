@@ -8,7 +8,7 @@
 //! 同一個理由讓 `target_policy` 和 [`crate::platform`] 也搬進了這個 crate。
 
 use crate::semi_action::RunConclusion;
-use crate::{ActionEvent, ExecutionResult, Replay};
+use crate::{ActionEvent, ApprovedBy, ExecutionResult, Replay};
 use chrono::{Local, TimeZone};
 
 /// epoch 毫秒讀成人看得懂的時刻。
@@ -42,9 +42,21 @@ pub fn replay_lines(replay: &Replay) -> Vec<String> {
             ActionEvent::Proposed { at_ms, action } => {
                 format!("{} 提出：{}", at(*at_ms), action.describe())
             }
-            ActionEvent::Approved { at_ms, action } => {
-                format!("{} 核准：{}", at(*at_ms), action.describe())
-            }
+            ActionEvent::Approved { at_ms, action, by } => match by {
+                Some(ApprovedBy::Press) => {
+                    format!("{} 他當場按了：{}", at(*at_ms), action.describe())
+                }
+                Some(ApprovedBy::StandingGrant) => format!(
+                    "{} 憑先前簽好的票自己跑，沒有人在鍵盤前面：{}",
+                    at(*at_ms),
+                    action.describe()
+                ),
+                None => format!(
+                    "{} 這一列沒有記批准來源（舊版）：{}",
+                    at(*at_ms),
+                    action.describe()
+                ),
+            },
             ActionEvent::Executed {
                 at_ms,
                 action,
@@ -441,6 +453,7 @@ mod tests {
                 ActionEvent::Approved {
                     at_ms: 1_756_200_000_400,
                     action,
+                    by: Some(ApprovedBy::Press),
                 },
             ],
             unreadable: vec![],

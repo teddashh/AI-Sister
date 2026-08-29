@@ -1,6 +1,9 @@
 //! `semi-action` 的平台無關授權、逐步核准與 audit 型別。
 
-use crate::{ActionSnapshot, Executor, NeverInherited, Outcome, Suggestion, never_inherited_class};
+use crate::{
+    ActionSnapshot, ApprovedBy, Executor, GrantPermit, NeverInherited, Outcome, Suggestion,
+    never_inherited_class,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -238,6 +241,21 @@ impl Grant {
         }
         self.validate_expiry(now_ms)
     }
+
+    pub fn authorize_unattended(
+        &self,
+        step: &StepRequest,
+        now_ms: i64,
+    ) -> Result<(StepApproval, GrantPermit), GrantRejection> {
+        self.covers(step, now_ms)?;
+        Ok((
+            StepApproval {
+                shown: step.clone(),
+                by: ApprovedBy::StandingGrant,
+            },
+            GrantPermit(()),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,12 +315,18 @@ impl PresentedStep {
         Self(step)
     }
     pub fn approve(self) -> StepApproval {
-        StepApproval { shown: self.0 }
+        StepApproval {
+            shown: self.0,
+            by: ApprovedBy::Press,
+        }
     }
 }
 
+// 刻意不 derive `Serialize`/`Deserialize`：批准不能落地後重播。這個否定性質無法用
+// 一般 runtime test 證明；交付閘門用定點 source grep 檢查 derive 沒有出現在這裡。
 pub struct StepApproval {
     shown: StepRequest,
+    by: ApprovedBy,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalMismatch {
@@ -323,6 +347,10 @@ impl ApprovalMismatch {
     }
 }
 impl StepApproval {
+    pub const fn by(&self) -> ApprovedBy {
+        self.by
+    }
+
     pub fn authorizes(&self, requested: &StepRequest) -> Result<(), ApprovalMismatch> {
         if self.shown == *requested {
             Ok(())
@@ -664,10 +692,8 @@ pub fn execute_approved_step(
     let class = step
         .separate_approval_required()
         .or_else(|| never_inherited_class(suggestion));
-    if let Some(class) = class {
-        return Outcome::Refused {
-            reason: crate::RefusalReason::NeverInherited { class },
-        };
+    if let Some(reason) = never_inherited_refusal(approval.by(), class) {
+        return Outcome::Refused { reason };
     }
     if let crate::Attached::No { since_ms } = executor.hands_attached() {
         return Outcome::Refused {
@@ -677,5 +703,55 @@ pub fn execute_approved_step(
     match executor.execute(suggestion) {
         Ok(detail) => Outcome::Done { detail },
         Err(error) => Outcome::Failed { error },
+    }
+}
+
+/// 永不繼承的那五類，**兩種批准來源都擋**——不一樣的只有拒絕的理由。
+///
+/// 這裡一度寫成「他當場按了就放行」，那是一次真的退步：`execute_with` 那半
+/// （`lib.rs:416`）從以前到現在都是無條件擋的，semi-action 這半若放行，同一個
+/// `NeverInherited::Pay` 走兩個隘口就會得到相反的答案，而且那一邊沒有任何東西
+/// 會提醒你。這一類的名字是「不隨任務授權繼承」，不是「按一下就好」；要放寬
+/// 它得先改 SPEC §9.2，不是在加 provenance 的時候順手改掉。
+fn never_inherited_refusal(
+    approved_by: ApprovedBy,
+    class: Option<NeverInherited>,
+) -> Option<crate::RefusalReason> {
+    let class = class?;
+    Some(match approved_by {
+        // 沒有人在鍵盤前面，所以話要講得更明白：這一類靠票是跑不動的。
+        ApprovedBy::StandingGrant => crate::RefusalReason::NeedsLivePress { class },
+        ApprovedBy::Press => crate::RefusalReason::NeverInherited { class },
+    })
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    #[test]
+    fn never_inherited_is_refused_for_both_sources_only_the_reason_differs() {
+        assert_eq!(
+            never_inherited_refusal(ApprovedBy::StandingGrant, Some(NeverInherited::Pay)),
+            Some(crate::RefusalReason::NeedsLivePress {
+                class: NeverInherited::Pay
+            })
+        );
+        // **不是 `None`。** 當場按了仍然擋——只是理由回到既有的那一個。
+        assert_eq!(
+            never_inherited_refusal(ApprovedBy::Press, Some(NeverInherited::Pay)),
+            Some(crate::RefusalReason::NeverInherited {
+                class: NeverInherited::Pay
+            })
+        );
+    }
+
+    #[test]
+    fn an_ordinary_class_free_step_is_not_refused_by_this_gate() {
+        assert_eq!(
+            never_inherited_refusal(ApprovedBy::StandingGrant, None),
+            None
+        );
+        assert_eq!(never_inherited_refusal(ApprovedBy::Press, None), None);
     }
 }

@@ -1782,6 +1782,7 @@ pub mod act {
                     log.append(&ActionEvent::Approved {
                         at_ms: clock(),
                         action: action.clone(),
+                        by: Some(sister_hands::ApprovedBy::Press),
                     })?;
                     // **不是 `step_now`。** `--minutes` 那一維說的是「這張授權書
                     // 多久後失效」，而失效要管得住的是**她真的動手的那一刻**，
@@ -3409,7 +3410,7 @@ pub mod act {
             );
             let text = logged(&run.dir.0, 20);
             assert!(text.contains("提出："), "{text}");
-            assert!(text.contains("核准："), "{text}");
+            assert!(text.contains("他當場按了："), "{text}");
             assert!(text.contains("已執行："), "{text}");
             assert!(text.contains("https://example.com/a"), "{text}");
             assert!(

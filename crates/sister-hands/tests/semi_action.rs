@@ -1,7 +1,7 @@
 use sister_hands::semi_action::*;
 use sister_hands::{
-    ActionEvent, ActionSnapshot, Attached, Executor, NeverInherited, Outcome, RefusalReason,
-    Suggestion, SuggestionButton,
+    ActionEvent, ActionSnapshot, ApprovedBy, Attached, Executor, NeverInherited, Outcome,
+    RefusalReason, Replay, Suggestion, SuggestionButton,
 };
 use std::path::PathBuf;
 
@@ -55,6 +55,162 @@ fn grant() -> Grant {
         Expiry::after_issued(1_000, 300_000),
         StepLimit::new(2).unwrap(),
     )
+}
+
+fn covered_step() -> StepRequest {
+    StepRequest::new(Task::new("整理報告"), App::new("Editor"), action())
+}
+
+#[test]
+fn unattended_authorization_preserves_all_five_cover_rejections_in_order() {
+    let grant = grant();
+    let cases = [
+        (
+            StepRequest::new(
+                Task::new("別的任務"),
+                App::new("Mail"),
+                ActionSnapshot::OpenUrl {
+                    url: "https://x".into(),
+                },
+            ),
+            999,
+            GrantRejection::Task,
+        ),
+        (
+            StepRequest::new(Task::new("整理報告"), App::new("Mail"), action()),
+            999,
+            GrantRejection::Apps,
+        ),
+        (
+            StepRequest::new(
+                Task::new("整理報告"),
+                App::new("Editor"),
+                ActionSnapshot::OpenUrl {
+                    url: "https://x".into(),
+                },
+            ),
+            999,
+            GrantRejection::Actions,
+        ),
+        (covered_step(), 999, GrantRejection::ExpiryClockWentBack),
+        (covered_step(), 301_001, GrantRejection::ExpiryElapsed),
+    ];
+    for (step, now_ms, expected) in cases {
+        let rejection = grant
+            .authorize_unattended(&step, now_ms)
+            .err()
+            .expect("不涵蓋就不能鑄出 unattended 批准");
+        assert_eq!(rejection, expected);
+    }
+}
+
+#[test]
+fn approval_provenance_is_fixed_by_its_only_two_issuers() {
+    let step = covered_step();
+    let (unattended, _permit) = grant().authorize_unattended(&step, 1_001).unwrap();
+    assert_eq!(unattended.by(), ApprovedBy::StandingGrant);
+    assert_eq!(PresentedStep::new(step).approve().by(), ApprovedBy::Press);
+}
+
+#[test]
+fn a_standing_grant_can_take_up_and_finish_a_covered_step() {
+    let step = covered_step();
+    let (approval, permit) = grant().authorize_unattended(&step, 1_001).unwrap();
+    let suggestion =
+        SuggestionButton::parse_json(r#"{"action":"open_file","path":"C:/work/a.txt"}"#)
+            .unwrap()
+            .take_up(permit);
+    let mut executor = CountingExecutor::default();
+    let outcome =
+        execute_approved_step(&grant(), 1_001, approval, &step, &mut executor, &suggestion);
+    assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
+    assert_eq!(executor.calls, 1);
+}
+
+#[test]
+fn unattended_approval_for_a_cannot_execute_b() {
+    let a = covered_step();
+    let (approval, permit) = grant().authorize_unattended(&a, 1_001).unwrap();
+    let b = StepRequest::new(
+        Task::new("整理報告"),
+        App::new("Editor"),
+        ActionSnapshot::OpenFile {
+            path: PathBuf::from("C:/work/b.txt"),
+        },
+    );
+    let suggestion =
+        SuggestionButton::parse_json(r#"{"action":"open_file","path":"C:/work/b.txt"}"#)
+            .unwrap()
+            .take_up(permit);
+    let mut executor = CountingExecutor::default();
+    let outcome = execute_approved_step(&grant(), 1_001, approval, &b, &mut executor, &suggestion);
+    assert!(matches!(
+        outcome,
+        Outcome::Refused {
+            reason: RefusalReason::ApprovalWasForAnotherStep { .. }
+        }
+    ));
+    assert_eq!(executor.calls, 0);
+}
+
+#[test]
+fn pulled_hands_also_block_standing_grants_as_refused() {
+    let step = covered_step();
+    let (approval, permit) = grant().authorize_unattended(&step, 1_001).unwrap();
+    let suggestion =
+        SuggestionButton::parse_json(r#"{"action":"open_file","path":"C:/work/a.txt"}"#)
+            .unwrap()
+            .take_up(permit);
+    let mut executor = PulledExecutor { executed: vec![] };
+    let outcome =
+        execute_approved_step(&grant(), 1_001, approval, &step, &mut executor, &suggestion);
+    assert_eq!(
+        outcome,
+        Outcome::Refused {
+            reason: RefusalReason::HandsPulled {
+                since_ms: Some(2222)
+            }
+        }
+    );
+    assert!(executor.executed.is_empty());
+}
+
+#[test]
+fn replay_copy_distinguishes_press_standing_grant_and_legacy_unknown() {
+    let action = action();
+    let (standing_approval, _permit) = grant()
+        .authorize_unattended(&covered_step(), 1_001)
+        .unwrap();
+    let lines = sister_hands::replay_copy::replay_lines(&Replay {
+        events: vec![
+            ActionEvent::Approved {
+                at_ms: 1,
+                action: action.clone(),
+                by: Some(ApprovedBy::Press),
+            },
+            ActionEvent::Approved {
+                at_ms: 2,
+                action: action.clone(),
+                by: Some(standing_approval.by()),
+            },
+            ActionEvent::Approved {
+                at_ms: 3,
+                action,
+                by: None,
+            },
+        ],
+        unreadable: vec![],
+    });
+    assert!(lines[0].contains("當場按"), "{}", lines[0]);
+    assert!(!lines[0].contains("沒有人在鍵盤前面"), "{}", lines[0]);
+    assert!(lines[1].contains("憑先前簽好的票自己跑"), "{}", lines[1]);
+    assert!(lines[1].contains("沒有人在鍵盤前面"), "{}", lines[1]);
+    assert!(!lines[1].contains("當場按"), "{}", lines[1]);
+    assert!(lines[2].contains("沒有記批准來源"), "{}", lines[2]);
+    assert!(!lines[2].contains('按'), "{}", lines[2]);
+    assert_ne!(lines[0], lines[1]);
+    assert_ne!(lines[1], lines[2]);
+    assert_ne!(lines[0], lines[2]);
 }
 
 #[test]
