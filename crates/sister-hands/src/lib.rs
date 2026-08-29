@@ -329,8 +329,10 @@ pub enum RefusalBucket {
     Pulled,
     /// 票的五維不涵蓋這一步。放寬 `--apps` / `--allow` / `--minutes` 有用。
     OutsideGrant,
-    /// 這一類永遠要當場按，票帶不動它。改成不加 `--unattended` 重跑有用。
-    NeedsALivePress,
+    /// 這一趟缺當場按。改成不加 `--unattended` 重跑有用。
+    NeedsALivePressThisRun,
+    /// 這一類永遠不繼承任務授權；這一趟已經按過，再按也不會過。
+    NeverInheritsTaskGrant,
     /// **警報**：手上那張核准票是對另一步簽的。放寬範圍沒有用。
     ShownStepMismatch,
     /// 走錯了路或權限級數不對——正常使用碰不到，碰到就是這支程式的錯。
@@ -346,9 +348,8 @@ impl RefusalReason {
             Self::UserDeclinedThisStep => RefusalBucket::Declined,
             Self::HandsPulled { .. } => RefusalBucket::Pulled,
             Self::NotCoveredByGrant { .. } => RefusalBucket::OutsideGrant,
-            Self::NeverInherited { .. } | Self::NeedsLivePress { .. } => {
-                RefusalBucket::NeedsALivePress
-            }
+            Self::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
+            Self::NeedsLivePress { .. } => RefusalBucket::NeedsALivePressThisRun,
             Self::ApprovalWasForAnotherStep { .. } => RefusalBucket::ShownStepMismatch,
             Self::ObserveHasNoHands | Self::SemiActionNeedsGrantAndStepApproval => {
                 RefusalBucket::WrongPath
@@ -816,8 +817,8 @@ mod tests {
                 RefusalReason::UserDeclinedThisStep => RefusalBucket::Declined,
                 RefusalReason::ObserveHasNoHands => RefusalBucket::WrongPath,
                 RefusalReason::SemiActionNeedsGrantAndStepApproval => RefusalBucket::WrongPath,
-                RefusalReason::NeverInherited { .. } => RefusalBucket::NeedsALivePress,
-                RefusalReason::NeedsLivePress { .. } => RefusalBucket::NeedsALivePress,
+                RefusalReason::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
+                RefusalReason::NeedsLivePress { .. } => RefusalBucket::NeedsALivePressThisRun,
                 RefusalReason::NotCoveredByGrant { .. } => RefusalBucket::OutsideGrant,
                 RefusalReason::ApprovalWasForAnotherStep { .. } => RefusalBucket::ShownStepMismatch,
                 RefusalReason::HandsPulled { .. } => RefusalBucket::Pulled,

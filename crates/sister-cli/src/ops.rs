@@ -1338,6 +1338,7 @@ pub mod act {
         declined: u32,
         blocked: u32,
         needs_press: u32,
+        never_inherits: u32,
         mismatched: u32,
         wrong_path: u32,
         pulled: u32,
@@ -1352,7 +1353,8 @@ pub mod act {
                 sister_hands::RefusalBucket::Declined => self.declined += 1,
                 sister_hands::RefusalBucket::Pulled => self.pulled += 1,
                 sister_hands::RefusalBucket::OutsideGrant => self.blocked += 1,
-                sister_hands::RefusalBucket::NeedsALivePress => self.needs_press += 1,
+                sister_hands::RefusalBucket::NeedsALivePressThisRun => self.needs_press += 1,
+                sister_hands::RefusalBucket::NeverInheritsTaskGrant => self.never_inherits += 1,
                 sister_hands::RefusalBucket::ShownStepMismatch => self.mismatched += 1,
                 sister_hands::RefusalBucket::WrongPath => self.wrong_path += 1,
             }
@@ -1377,6 +1379,12 @@ pub mod act {
                 out.push_str(&format!(
                     "，{} 步要你當場按（票帶不動這一類）",
                     self.needs_press
+                ));
+            }
+            if self.never_inherits > 0 {
+                out.push_str(&format!(
+                    "，{} 步屬於不隨任務授權繼承的類別（按了也不會過）",
+                    self.never_inherits
                 ));
             }
             if self.wrong_path > 0 {
@@ -2266,6 +2274,27 @@ pub mod act {
                 clauses.contains("放寬授權沒有用"),
                 "少了這一句，他會照著「授權擋掉」的直覺去放寬 --apps/--allow，\
                  而那正好是把唯一擋住它的那道門拆掉：{clauses}"
+            );
+        }
+
+        #[test]
+        fn live_press_and_never_inherited_refusals_give_different_next_steps() {
+            let mut tally = Tally::default();
+            tally.count_refusal(&RefusalReason::NeedsLivePress {
+                class: sister_hands::NeverInherited::Pay,
+            });
+            tally.count_refusal(&RefusalReason::NeverInherited {
+                class: sister_hands::NeverInherited::Pay,
+            });
+
+            let clauses = tally.refusal_clauses();
+            assert!(
+                clauses.contains("1 步要你當場按（票帶不動這一類）"),
+                "缺當場核准的這一趟要叫使用者重跑並按下去：{clauses}"
+            );
+            assert!(
+                clauses.contains("1 步屬於不隨任務授權繼承的類別（按了也不會過）"),
+                "已經按過仍不可繼承的類別不能再叫使用者按一次：{clauses}"
             );
         }
 
@@ -4615,13 +4644,42 @@ pub mod watch {
                 break WatchEnd::Saw { tally };
             }
             if expired {
-                // 最後那一眼看到的是「她已經不在錄了」的話，「沒等到」只算到
-                // 她停下來為止——後面那段時間我對著的是一張凍住的畫面。
-                let hopeless = matches!(&look, Look::NothingNew(blind) if blind.hopeless());
-                break WatchEnd::Deadline {
-                    tally,
-                    last_round: sister_core::watch::DeadlineLastRound::Checked { hopeless },
+                // **逐項列，沒有 `_`。** 這一版修的就是「最後一輪根本沒拿到
+                // 答案，卻被算進『沒有等到』」——而「沒有等到」在這支命令裡是
+                // 一句斷言，整個模組就是為了守住它才存在的。`Verdict` 之後多
+                // 一種「其實沒拿到答案」的變體時，要在這裡編不過，而不是靜靜
+                // 地掉進 `Checked` 讓同一個 bug 再長一次。
+                //
+                // 也因為逐項列，`Happened` / `NotYet` 有自己的分支，就不必靠
+                // `verdict.answered()` 當守衛再配一個 `unreachable!()`：那個
+                // `unreachable!()` 成不成立取決於**另一個 crate** 裡 `answered()`
+                // 怎麼寫，而改那一支的人不會知道要回來看這裡；賭輸的代價是一聲
+                // panic 把他等了一小時的整份 tally 一起吃掉。
+                let last_round = match &look {
+                    Look::Asked {
+                        verdict: Verdict::CallFailed { how },
+                        ..
+                    } => sister_core::watch::DeadlineLastRound::NoAnswer { how: *how },
+                    Look::Asked {
+                        verdict: Verdict::Unreadable { .. },
+                        ..
+                    } => sister_core::watch::DeadlineLastRound::NoAnswer {
+                        how: sister_core::brain::OutboundOutcome::BadJson,
+                    },
+                    // 真的拿到答案了。`Happened` 在上面就 break 成 `Saw` 了，
+                    // 所以這裡實際上只會是 `NotYet`——她答了「還沒有」，那
+                    // 「沒有等到」就是一句有證據的話。
+                    Look::Asked {
+                        verdict: Verdict::Happened { .. } | Verdict::NotYet,
+                        ..
+                    } => sister_core::watch::DeadlineLastRound::Checked { hopeless: false },
+                    // 最後那一眼看到的是「她已經不在錄了」的話，「沒等到」只算到
+                    // 她停下來為止——後面那段時間我對著的是一張凍住的畫面。
+                    Look::NothingNew(blind) => sister_core::watch::DeadlineLastRound::Checked {
+                        hopeless: blind.hopeless(),
+                    },
                 };
+                break WatchEnd::Deadline { tally, last_round };
             }
             sleep(every);
         };
@@ -4988,6 +5046,101 @@ pub mod watch {
                 "這一輪不是從畫面安靜收尾的：{text}"
             );
             assert!(out.contains(&b'\x07'), "WentQuiet 沒有通知：{text}");
+        }
+
+        /// **這一條釘的是建構點，不是 `message()`。**
+        ///
+        /// `watch.rs` 那幾條到期測試手捏 `WatchEnd::Deadline { last_round }`
+        /// 再叫 `message()`，證得出三種收尾各印各的話——但證不出這個迴圈**曾經
+        /// 建構過** `NoAnswer`。量過：把上面那整段 `match &look` 換回「永遠
+        /// `Checked`」（也就是 alpha.78 的行為），`cargo test --workspace`
+        /// 一條都不紅。上面 `asking_for_notification_says_what_this_build_can_actually_do`
+        /// 那一段講的是同一件事，這是它的第二次。
+        ///
+        /// 所以這裡走真的出口，而且**兩邊都釘**：叫不起來的大腦到期不准印那
+        /// 句斷言；答得出「還沒有」的大腦到期才准印。只釘一邊的話，「永遠
+        /// `NoAnswer`」和「永遠 `Checked`」各有一種活得下來。
+        #[test]
+        fn a_deadline_whose_last_call_never_landed_does_not_claim_it_waited() {
+            let never_landed = {
+                // 要**兩輪**：第一輪真的問到答案，最後一輪才問不到。只有一輪
+                // 的話 `message()` 最前面那道 `tally.answered == 0` 守衛會先
+                // 接走，這條就繞過了它要測的那一段。
+                let (tmp, mut config) =
+                    prepared_at("watch-deadline-last-unreadable", 90_000, "完成", true);
+                {
+                    let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+                    let session = db.start_session("test", "test").expect("session");
+                    db.conn()
+                        .execute(
+                            "INSERT INTO text_chunks(ts,session_id,source_kind,app_id,text) VALUES(?1,?2,'ocr','Terminal.exe','第二段字')",
+                            (120_000_i64, session),
+                        )
+                        .expect("chunk");
+                }
+                // 第一次答「還沒有」，第二次吐一坨讀不懂的字。
+                let marker = tmp.0.join("已經答過一次");
+                config.brain.args = vec![
+                    "-c".into(),
+                    format!(
+                        "cat >/dev/null; if [ -e '{m}' ]; then printf 'not json at all'; \
+                         else : > '{m}'; printf '{{\"happened\":false,\"because\":\"\"}}'; fi",
+                        m = marker.display()
+                    ),
+                ];
+                let mut options = opts(false);
+                options.stop_after = 60_000;
+                let mut ticks = [100_000, 100_000, 160_000].into_iter();
+                let mut out = Vec::new();
+                run_with(
+                    &tmp.0,
+                    &config,
+                    &options,
+                    &mut || ticks.next().expect("fake clock ran out"),
+                    &mut |_| {},
+                    &mut out,
+                )
+                .expect("run");
+                String::from_utf8_lossy(&out).into_owned()
+            };
+            assert!(
+                never_landed.contains("問到答案 1 次"),
+                "這一輪沒有問到過答案，那就是被 answered==0 那道守衛接走的，\
+                 測不到這條要測的東西：{never_landed}"
+            );
+            assert!(
+                never_landed.contains("回了讀不懂的字"),
+                "最後一輪問不到的原因沒有說出來：{never_landed}"
+            );
+            assert!(
+                never_landed.contains("不算在「沒有等到」裡"),
+                "最後一輪根本沒問到，收尾卻沒有把它排除：{never_landed}"
+            );
+            assert!(
+                !never_landed.contains("時間到了，沒有等到。"),
+                "一個字的證據都沒拿到，卻印了那句斷言：{never_landed}"
+            );
+
+            let answered_not_yet = {
+                let (tmp, mut config) = prepared("watch-deadline-not-yet", "完成", true);
+                config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
+                let mut ticks = [100_000, 100_000].into_iter();
+                let mut out = Vec::new();
+                run_with(
+                    &tmp.0,
+                    &config,
+                    &opts(false),
+                    &mut || ticks.next().expect("fake clock ran out"),
+                    &mut |_| {},
+                    &mut out,
+                )
+                .expect("run");
+                String::from_utf8_lossy(&out).into_owned()
+            };
+            assert!(
+                answered_not_yet.contains("時間到了，沒有等到。"),
+                "她親口答了「還沒有」，那句斷言就是有證據的，該印：{answered_not_yet}"
+            );
         }
 
         /// **開跑那一行要真的印出來，而且要說這個組建做得到什麼。**
@@ -19722,7 +19875,7 @@ pub mod record {
             )),
             None => Some(format!(
                 "目前是暫停狀態：讀不到資料目錄 {} 這條路，所以刻意一律當成暫停。\
-                 這時刪 paused.flag 沒有用；請先確認資料目錄本身讀不讀得到。",
+                 旗標在不在也讀不出來；請先確認資料目錄本身讀不讀得到，讀得到之後 paused.flag 如果還在，刪掉它就會解除。",
                 data_dir.display()
             )),
         }
@@ -19743,7 +19896,7 @@ pub mod record {
         }
 
         #[test]
-        fn unreadable_path_does_not_offer_to_remove_a_missing_flag() {
+        fn unreadable_path_does_not_claim_what_it_could_not_check() {
             let dir = crate::ops::tmp::Tmp::new("record-unreadable-pause-path");
             std::fs::remove_dir_all(&dir.0).unwrap();
             std::fs::write(&dir.0, "not a directory").unwrap();
@@ -19752,8 +19905,8 @@ pub mod record {
             let said = pause_warning(&dir.0).expect("fail-closed warning");
             assert!(said.contains("讀不到"), "{said}");
             assert!(said.contains("一律當成暫停"), "{said}");
-            assert!(said.contains("刪 paused.flag 沒有用"), "{said}");
-            assert!(!said.contains("刪掉") && !said.contains("可解除"), "{said}");
+            assert!(said.contains("先確認資料目錄本身"), "{said}");
+            assert!(!said.contains("沒有用"), "{said}");
         }
     }
 

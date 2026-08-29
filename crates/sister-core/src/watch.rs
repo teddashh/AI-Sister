@@ -423,8 +423,10 @@ pub enum WatchEnd {
 /// 到期那一輪到底有沒有真的問。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeadlineLastRound {
-    /// 有看完最後一輪；`hopeless` 的語意只是她是否已中途收工。
+    /// 最後一輪真的拿到答案，或根本沒有新畫面可問；`hopeless` 只表示她是否已中途收工。
     Checked { hopeless: bool },
+    /// 最後一輪該問的畫面沒有拿到答案；這一段不能算進「沒有等到」。
+    NoAnswer { how: OutboundOutcome },
     /// 有畫面，但在問之前撞到當日預算牆。
     BudgetBlocked { used: u32, limit: u32 },
 }
@@ -486,6 +488,35 @@ impl WatchEnd {
                  所以那一段沒有問，它發生沒發生我不知道。",
                 tally.line()
             ),
+            Self::Deadline {
+                tally,
+                last_round: DeadlineLastRound::NoAnswer { how },
+            } => {
+                // `Success` 在今天的呼叫端產不出來（`verdict_from_spawn` 只在
+                // spawn 失敗和逾時兩種情況建 `CallFailed`）。但那是**另一個
+                // crate 裡的**一條沒有人強制的規矩，而這裡是 `sister watch`
+                // 印的最後一句話：他可能已經對著螢幕等了一個小時。這一格寫
+                // `unreachable!()` 的代價是那一聲 panic 把整份 tally——他等
+                // 到的、沒等到的、根本沒送出去的次數——連同結論一起吃掉，
+                // 換來的只是我們不必想一句話怎麼寫。
+                //
+                // 所以四種都寫得出一句真話。第四種說的是實話：這兩個欄位
+                // 自己打架了，那是我們的錯，不是他的。`RefusalBucket::WrongPath`
+                // 的「這是程式的錯」是同一個做法。
+                let why = match how {
+                    OutboundOutcome::SpawnFailed => "CLI 叫不起來，根本沒有送出去",
+                    OutboundOutcome::Timeout => "CLI 逾時，沒有拿到答案",
+                    OutboundOutcome::BadJson => "CLI 回了讀不懂的字，沒有拿到答案",
+                    OutboundOutcome::Success => {
+                        "我這邊記下來的原因自相矛盾（記成了「成功」，這是程式的錯）"
+                    }
+                };
+                format!(
+                    "{}時間到了；最後那一段畫面因為{why}，所以那一段不算在「沒有等到」裡，\
+                     它發生沒發生我不知道。",
+                    tally.line()
+                )
+            }
             Self::BudgetRanOut { tally, used, limit } => format!(
                 "{}今天的外送預算先用完了（{used}/{limit}），我沒有再看下去——\
                  這**不是**「沒等到」，是我不知道。",
@@ -766,6 +797,23 @@ mod tests {
         }
     }
 
+    /// 提示送不完整的那一輪不准被 stdout 蓋過去：即使快取剛好吐得出一張好答案，
+    /// `spawn_error.is_some()` 仍必須直接守在真正的 verdict 出口上。
+    #[test]
+    fn an_incomplete_prompt_cannot_be_overruled_by_stdout() {
+        let mut incomplete = spawn("{\"happened\":true,\"because\":\"x\"}", Some(0));
+        incomplete.spawn_error = Some("stdin closed before the whole prompt was written".into());
+        let (outcome, verdict) = verdict_from_spawn(&incomplete);
+        assert_eq!(outcome, OutboundOutcome::SpawnFailed);
+        assert!(matches!(
+            verdict,
+            Verdict::CallFailed {
+                how: OutboundOutcome::SpawnFailed
+            }
+        ));
+        assert!(!matches!(verdict, Verdict::Happened { .. }));
+    }
+
     /// 大腦沒回東西不是它說「還沒有」。
     #[test]
     fn an_empty_reply_is_not_a_no() {
@@ -1016,6 +1064,88 @@ mod tests {
         assert!(said.contains("我不知道"), "{said}");
         assert!(said.contains("根本沒送出去 30 次"), "{said}");
         assert!(!said.contains("送出去但沒拿到答案 30 次"), "{said}");
+    }
+
+    /// 前面真的問到過答案，也不能拿它替最後那段沒有回來的答案背書。
+    /// 把 `NoAnswer` 併回 `Checked { hopeless: false }` 會讓這條重新印出沒有
+    /// 限定的「時間到了，沒有等到」。
+    #[test]
+    fn a_failed_last_call_is_excluded_from_the_deadline_verdict() {
+        let tally = Tally {
+            answered: 1,
+            unanswered: 0,
+            not_sent: 1,
+            blind: 0,
+        };
+        let said = WatchEnd::Deadline {
+            tally,
+            last_round: DeadlineLastRound::NoAnswer {
+                how: OutboundOutcome::SpawnFailed,
+            },
+        }
+        .message();
+        assert!(said.contains("最後那一段畫面"), "{said}");
+        assert!(said.contains("CLI 叫不起來，根本沒有送出去"), "{said}");
+        assert!(said.contains("不算在「沒有等到」裡"), "{said}");
+        assert!(!said.contains("時間到了，沒有等到。"), "{said}");
+    }
+
+    #[test]
+    fn unanswered_last_calls_keep_their_distinct_remedies() {
+        let tally = Tally {
+            answered: 1,
+            unanswered: 1,
+            not_sent: 0,
+            blind: 0,
+        };
+        let timeout = WatchEnd::Deadline {
+            tally,
+            last_round: DeadlineLastRound::NoAnswer {
+                how: OutboundOutcome::Timeout,
+            },
+        }
+        .message();
+        let unreadable = WatchEnd::Deadline {
+            tally,
+            last_round: DeadlineLastRound::NoAnswer {
+                how: OutboundOutcome::BadJson,
+            },
+        }
+        .message();
+        assert!(timeout.contains("CLI 逾時"), "{timeout}");
+        assert!(unreadable.contains("回了讀不懂的字"), "{unreadable}");
+        assert_ne!(timeout, unreadable);
+    }
+
+    /// 這一格今天產不出來——`verdict_from_spawn` 只在 spawn 失敗和逾時兩種
+    /// 情況建 `CallFailed`。但那條規矩住在**另一個 crate** 裡，沒有人強制。
+    /// 這裡守的是它哪天破掉的時候會發生什麼：`sister watch` 印的是最後一句
+    /// 話，他可能已經等了一個小時，所以**不准 panic**——一聲 panic 把整份
+    /// tally 連同結論一起吃掉，換來的只是我們不必想一句話怎麼寫。
+    #[test]
+    fn a_self_contradictory_last_round_still_prints_the_tally_instead_of_panicking() {
+        let tally = Tally {
+            answered: 3,
+            unanswered: 2,
+            not_sent: 1,
+            blind: 0,
+        };
+        let said = WatchEnd::Deadline {
+            tally,
+            last_round: DeadlineLastRound::NoAnswer {
+                how: OutboundOutcome::Success,
+            },
+        }
+        .message();
+        assert!(said.contains("問到答案 3 次"), "整份 tally 要留著：{said}");
+        assert!(
+            said.contains("這是程式的錯"),
+            "自相矛盾要說是我們的錯：{said}"
+        );
+        assert!(
+            !said.contains("時間到了，沒有等到。"),
+            "沒拿到答案就不可以印那句斷言：{said}"
+        );
     }
 
     /// 讀不懂的回覆和叫不起來一樣，都不算「問到了」。
