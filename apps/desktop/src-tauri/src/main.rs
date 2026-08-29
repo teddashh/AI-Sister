@@ -2696,6 +2696,8 @@ struct Erasure {
     /// 故事：一類東西被刪掉了、卻沒有出現在這張清單上。這是第四次，而這一次
     /// 那類東西是完整的網址和檔案路徑。
     actions: u64,
+    /// 讀不懂、問不出時間，因此忘掉時也會被刪掉的 action-log 列數。
+    actions_unreadable: u64,
     /// 存著的授權書不屬於時間區間；按下忘掉仍會整張刪除。
     grant: bool,
     /// 刪不掉的檔案。**不吞掉**：那幾張截圖還躺在磁碟上，而使用者以為
@@ -2753,6 +2755,7 @@ impl From<sister_core::retention::PruneReport> for Erasure {
             // 問一次 `ActionLog`，所以這裡只能是 0——和下面 `sessions_left`
             // 同一個模式：這一支答不出來的，不要在這裡編一個。
             actions: 0,
+            actions_unreadable: 0,
             grant: false,
             // 這一支只看得到「刪掉了什麼」。留下什麼要再問一次資料庫，所以
             // 預設是「沒問」，由 `forget_range` 補上。
@@ -2779,8 +2782,8 @@ fn forget_preview(
         .as_ref()
         .ok_or_else(|| "找不到資料目錄，算不出這一段會刪掉多少東西".to_string())?;
     let frames = sister_core::config::Config::frames_dir(dir);
-    // 預覽也要把她那段時間動過的手算進去。`count_in_range` 和真正刪的那一支
-    // 共用同一份範圍判斷，所以這裡答應的數字就是按下去會消失的數字。
+    // 預覽也要把她那段時間動過的手算進去；可讀列和讀不懂但仍會被刪掉的列
+    // 分開回，和真正刪除的 `ForgetReport` 是同一組數字。
     let actions = sister_hands::ActionLog::in_data_dir(dir)
         .count_in_range(from_ts, to_ts)
         .map_err(|e| format!("{e:#}"))?;
@@ -2789,7 +2792,8 @@ fn forget_preview(
     with_db(&shell, |db| {
         db.forget_preview(from_ts, to_ts, Some(&frames))
             .map(|report| Erasure {
-                actions,
+                actions: actions.removed_in_range,
+                actions_unreadable: actions.removed_unreadable,
                 grant,
                 ..Erasure::from(report)
             })
@@ -2855,11 +2859,8 @@ fn forget_range(
             0
         };
         Ok(Erasure {
-            // 預覽那邊數的是同一種東西（解得開、落在範圍裡的列），所以這兩個
-            // 數字對得起來。讀不懂的那幾列也被刪掉了，但它們不是「她動過的
-            // 手」——把一列壞掉的字算進「你那個下午做了 3 件事」，那個 3 就
-            // 變成沒有人答得出來的數字。
             actions: forgotten.removed_in_range,
+            actions_unreadable: forgotten.removed_unreadable,
             grant,
             sessions_left: Some(left),
             // 分得出來就不要印「或」。CLI 那邊同一個判斷（`session_shell_why`）。

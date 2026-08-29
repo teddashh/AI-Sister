@@ -900,6 +900,8 @@ function scale(e) {
   // 次**：一類東西被刪掉了，卻沒有出現在這張清單上。而這一次那類東西是完整
   // 的網址和檔案路徑——這幾類裡最敏感的一種。
   if (e.actions > 0) bits.push(`${e.actions} 件她替他動過的手`);
+  if (e.actions_unreadable > 0)
+    bits.push(`${e.actions_unreadable} 列讀不懂、問不出時間的動作紀錄`);
   if (e.grant) bits.push("存著的授權書（不看區間，含任務原文）");
   return bits;
 }

@@ -663,30 +663,30 @@ impl ActionLog {
     /// 「忘掉了 3 列」和「忘掉了 3 列外加 1 列讀不懂的」不是同一句話。
     /// 那段時間裡她動過幾次手——**不刪任何東西**。
     ///
-    /// 給「你確定要忘掉嗎」那一頁用的。它和 [`Self::forget_range`] 共用
-    /// [`LineVerdict`]，所以預覽上的數字和按下去真的消失的列數是同一個。
-    ///
-    /// 只數解得開而且落在範圍裡的列。解不開的那幾列 `forget_range` 也會刪掉，
-    /// 但它們不是「她動過的手」——把一列壞掉的字算進「你那個下午做了 3 件事」
-    /// 裡面，那個 3 就變成一個沒有人答得出來的數字。
-    pub fn count_in_range(&self, from_ms: i64, to_ms: i64) -> Result<u64> {
+    /// 給「你確定要忘掉嗎」那一頁用。兩格和 [`ForgetReport`] 同名，讓預覽與
+    /// 真正刪除報的是同一組數字；這一支不會改寫檔案。
+    pub fn count_in_range(&self, from_ms: i64, to_ms: i64) -> Result<ForgetPreview> {
         let file = match File::open(&self.path) {
             Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ForgetPreview::default());
+            }
             Err(e) => {
                 return Err(anyhow::Error::from(e))
                     .with_context(|| format!("開啟 action log 失敗：{}", self.path.display()));
             }
         };
-        let mut n = 0;
+        let mut report = ForgetPreview::default();
         for line in BufReader::new(file).lines() {
             let line =
                 line.with_context(|| format!("讀 action log 失敗：{}", self.path.display()))?;
-            if matches!(LineVerdict::of(&line, from_ms, to_ms), LineVerdict::InRange) {
-                n += 1;
+            match LineVerdict::of(&line, from_ms, to_ms) {
+                LineVerdict::InRange => report.removed_in_range += 1,
+                LineVerdict::Unreadable => report.removed_unreadable += 1,
+                LineVerdict::Outside => {}
             }
         }
-        Ok(n)
+        Ok(report)
     }
 
     /// **留下來的那幾列一個位元組都不會變。** 這裡不走 [`Self::replay`]——那支
@@ -784,6 +784,15 @@ pub struct ForgetReport {
     pub removed_unreadable: u64,
     /// 留下來的列數。
     pub kept: u64,
+}
+
+/// 預覽會被 action log 刪掉的兩種列；欄位刻意和 [`ForgetReport`] 對齊。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForgetPreview {
+    /// 時間落在範圍裡，真的刪除時會被拿掉的列數。
+    pub removed_in_range: u64,
+    /// 解不開、問不出時間，真的刪除時會一併拿掉的列數。
+    pub removed_unreadable: u64,
 }
 
 #[cfg(test)]
@@ -1277,17 +1286,50 @@ mod tests {
         }
 
         let promised = log.count_in_range(1_000, 3_000).unwrap();
-        assert_eq!(promised, 2, "1_500 和 2_500 這兩列");
+        assert_eq!(promised.removed_in_range, 2, "1_500 和 2_500 這兩列");
+        assert_eq!(promised.removed_unreadable, 1, "壞掉那列也要先說");
         let report = log.forget_range(1_000, 3_000).unwrap();
-        assert_eq!(
-            report.removed_in_range, promised,
-            "預覽說 {promised} 件，實際走掉 {} 件",
-            report.removed_in_range,
-        );
-        assert_eq!(report.removed_unreadable, 1, "壞掉那列也走了，只是不算手");
+        assert_eq!(report.removed_in_range, promised.removed_in_range);
+        assert_eq!(report.removed_unreadable, promised.removed_unreadable);
         assert_eq!(report.kept, 2);
         // 刪完再問一次，範圍裡就沒有東西了。
-        assert_eq!(log.count_in_range(1_000, 3_000).unwrap(), 0);
+        assert_eq!(
+            log.count_in_range(1_000, 3_000).unwrap(),
+            ForgetPreview::default()
+        );
+    }
+
+    #[test]
+    fn unreadable_rows_are_not_counted_but_are_forgotten() {
+        let dir = tmp_dir("forget-count-unreadable");
+        let log = ActionLog::in_data_dir(&dir);
+        log.append(&ActionEvent::Executed {
+            at_ms: 1_500,
+            action: ActionSnapshot::OpenUrl {
+                url: "https://normal.example".into(),
+            },
+            result: ExecutionResult::Succeeded {
+                detail: "ok".into(),
+            },
+        })
+        .unwrap();
+        {
+            use std::io::Write as _;
+            let mut file = OpenOptions::new().append(true).open(log.path()).unwrap();
+            writeln!(file, "{{壞掉的 JSON").unwrap();
+        }
+
+        assert_eq!(
+            log.count_in_range(1_000, 2_000).unwrap(),
+            ForgetPreview {
+                removed_in_range: 1,
+                removed_unreadable: 1,
+            }
+        );
+        let report = log.forget_range(1_000, 2_000).unwrap();
+        assert_eq!(report.removed_in_range, 1);
+        assert_eq!(report.removed_unreadable, 1);
+        assert_eq!(std::fs::read(log.path()).unwrap(), b"");
     }
 
     /// 忘掉星期二，不可以順手改寫星期一。

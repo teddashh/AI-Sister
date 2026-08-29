@@ -596,24 +596,22 @@ capture 層本身就是 recorder。
     這件事變糟，但也沒有修掉它。離開偵測、交接 offer 那一段還沒做。
 
 **已知還在說謊的地方**（讀過原始碼確認過，這一輪刻意沒動）：
-- `sister forget` 的**預覽**不提 `action-log.jsonl`。沒有資料庫的時候它印
-  「沒有東西可以忘」就 return，而按下 `--yes` 會刪掉那個檔案裡完整的網址和
-  檔案路徑。`saved_grant_notice` 就是為了這件事存在的，動作紀錄沒有掛上去；
-  `ActionLog::count_in_range` 只有字母人那半在呼叫。
-- `sister watch` 的「時間到了，沒有等到」只看 `hopeless`，沒看
-  `tally.answered`。每一輪都逾時／CLI 全程叫不起來／預算在最後一輪先用完，
-  三種都會印那句斷言，而 `watch.rs:12-14` 的合約說這幾種只能講「我不知道」。
-  預算那一種尤其明顯：`BudgetRanOut` 帶著正確的免責句，`expired` 那條分支把
-  它丟掉了。
-- `tally.blocked` →「授權擋掉 N 步」把 `ApprovalWasForAnotherStep` 也算進去。
-  那是 SPEC §9.7 那道「螢幕上給他看的和要交給作業系統的不是同一步」的警報，
-  是這支程式偵測得到最嚴重的事，卻報成一句例行的範圍不符——而他照著去放寬
-  `--apps` 是沒有用的。`NeverInherited` / `NeedsLivePress` 同一格。
+- `sister watch`：到期那一刻**同時**撞到今天的外送上限，`ops.rs` 那條
+  `break if expired { WatchEnd::Deadline { hopeless: false } }` 會印出
+  「時間到了，沒有等到。」——可是最後那一輪的畫面**根本沒有問過**，
+  `BudgetRanOut` 身上那句「這不是『沒等到』，是我不知道」被丟掉了。
+  （「一次都沒問到答案」那半已經修好了：`watch.rs` 的
+  `Self::Deadline { tally, .. } if tally.answered == 0` 擋在前面。）
 - `sister doctor` 在「暫停旗標讀不到」的那一格叫他去刪一個不存在的檔案
   （Windows fail-close 之後才走得到），刪了沒有用，而 doctor 會一直說暫停中。
-- `ActionLog::count_in_range` 的說明自相矛盾：先說「預覽的數字就是會消失的
-  列數」，下一段說「解不開的那幾列 `forget_range` 也會刪掉」。字母人那邊把
-  前一句當事實再講一次，而 `Erasure` 沒有欄位放讀不懂的那幾列。
+**這一輪修掉的**（alpha.78）：`sister forget` 的預覽以前不提
+`action-log.jsonl`——沒有資料庫時它印「沒有東西可以忘」就 return，而按下
+`--yes` 會刪掉那個檔案裡完整的網址和檔案路徑。現在預覽和真的刪那兩行走同一支
+組句函式、報同一組兩個數字（可讀且落在區間裡的列 ／ 讀不懂、問不出時間的列）。
+`ActionLog::count_in_range` 改回 `ForgetPreview` 兩格，**簽名一改字母人那半就
+編不過**，所以兩個預覽出口不可能只修好一個；`Erasure` 補上 `actions_unreadable`。
+補完的那一次尤其重要：檔案裡**只有**讀不懂的列時，舊寫法 `actions == 0`，
+預覽整個安靜——而那正是最需要它出聲的一種。
 
 **Exit criteria**
 - [ ] 20 次監督式 autopilot run，0 次越界（碰到白名單外動作即停）。

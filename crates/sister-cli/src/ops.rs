@@ -8065,6 +8065,38 @@ pub mod forget {
         run_with_output(data_dir, last, yes, &mut std::io::stdout())
     }
 
+    fn action_log_forget_line(
+        from: i64,
+        to: i64,
+        removed_in_range: u64,
+        removed_unreadable: u64,
+        preview: bool,
+    ) -> Option<String> {
+        let mut parts = Vec::new();
+        if removed_in_range > 0 {
+            parts.push(format!("{removed_in_range} 列可讀且落在區間裡的動作紀錄"));
+        }
+        if removed_unreadable > 0 {
+            parts.push(format!(
+                "{removed_unreadable} 列讀不懂、問不出時間的動作紀錄"
+            ));
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "動作紀錄（{} 到 {}）：{}{}。",
+            crate::fmt::timestamp(from.max(0)),
+            crate::fmt::timestamp(to),
+            if preview {
+                "預覽會刪除 "
+            } else {
+                "忘掉 "
+            },
+            parts.join("，另外 "),
+        ))
+    }
+
     fn run_with_output(
         data_dir: &Path,
         last: &str,
@@ -8119,26 +8151,29 @@ pub mod forget {
         // 一行才讀得懂的話，就是一句在這個位置讀不懂的話。
         if yes {
             let gone = sister_hands::ActionLog::in_data_dir(data_dir).forget_range(from, to)?;
-            if gone.removed_in_range > 0 || gone.removed_unreadable > 0 {
-                println!(
-                    "動作紀錄（{} 到 {}）：忘掉 {} 列{}。",
-                    crate::fmt::timestamp(from.max(0)),
-                    crate::fmt::timestamp(to),
-                    gone.removed_in_range,
-                    // 讀不懂的那幾列問不出時間，所以一起走了。這件事要講——不講
-                    // 的話上面那個數字會被讀成「總共就刪了這些」。
-                    if gone.removed_unreadable > 0 {
-                        format!(
-                            "，另外 {} 列讀不懂、問不出時間，一併刪掉",
-                            gone.removed_unreadable
-                        )
-                    } else {
-                        String::new()
-                    }
-                );
+            if let Some(line) = action_log_forget_line(
+                from,
+                to,
+                gone.removed_in_range,
+                gone.removed_unreadable,
+                false,
+            ) {
+                println!("{line}");
             }
             for gone in forget_saved_grant(data_dir)? {
                 println!("授權書：已刪除 {}（裡面含 --task 原文）。", gone.display());
+            }
+        } else {
+            let actions =
+                sister_hands::ActionLog::in_data_dir(data_dir).count_in_range(from, to)?;
+            if let Some(line) = action_log_forget_line(
+                from,
+                to,
+                actions.removed_in_range,
+                actions.removed_unreadable,
+                true,
+            ) {
+                println!("{line}");
             }
         }
 
@@ -8147,7 +8182,10 @@ pub mod forget {
         // 會弄錯其中一個——`prune` 那邊有同一段註解。
         let path = crate::db_path(data_dir);
         if !path.exists() {
-            println!("  還沒有資料庫（{}），沒有東西可以忘。", path.display());
+            println!(
+                "  還沒有資料庫（{}），所以沒有畫面或文字紀錄可以忘。",
+                path.display()
+            );
             return Ok(());
         }
         let mut db = Db::open(&path).with_context(|| format!("open {}", path.display()))?;
@@ -8457,6 +8495,74 @@ pub mod forget {
                 raw.contains("longago.example"),
                 "範圍外的那一列不該被帶走：{raw}",
             );
+        }
+
+        #[test]
+        fn preview_with_only_an_unreadable_action_row_says_it_will_be_deleted() {
+            let tmp = crate::ops::tmp::Tmp::new("forget-unreadable-only-preview");
+            let log = sister_hands::ActionLog::in_data_dir(&tmp.0);
+            std::fs::create_dir_all(&tmp.0).expect("mkdir");
+            std::fs::write(log.path(), b"{broken json\n").expect("write bad row");
+
+            let mut out = Vec::new();
+            run_with_output(&tmp.0, "1d", false, &mut out).expect("preview");
+            let said = String::from_utf8(out).expect("utf8");
+            assert!(
+                said.contains("預覽會刪除 1 列讀不懂、問不出時間的動作紀錄"),
+                "沒有說壞掉那列會被刪掉：{said}"
+            );
+            assert!(
+                !said.contains("沒有東西可以忘"),
+                "壞掉那列會消失，卻說沒有東西可以忘：{said}"
+            );
+        }
+
+        #[test]
+        fn preview_with_readable_and_unreadable_action_rows_says_both_numbers() {
+            let tmp = crate::ops::tmp::Tmp::new("forget-mixed-action-preview");
+            let log = sister_hands::ActionLog::in_data_dir(&tmp.0);
+            log.append(&sister_hands::ActionEvent::Executed {
+                at_ms: sister_core::now_ms() - 1_000,
+                action: sister_hands::ActionSnapshot::OpenUrl {
+                    url: "https://preview.example/private/path".into(),
+                },
+                result: sister_hands::ExecutionResult::Succeeded {
+                    detail: "ok".into(),
+                },
+            })
+            .expect("append");
+            use std::io::Write as _;
+            writeln!(
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(log.path())
+                    .expect("open"),
+                "{{broken json"
+            )
+            .expect("append bad row");
+
+            let mut out = Vec::new();
+            run_with_output(&tmp.0, "1d", false, &mut out).expect("preview");
+            let said = String::from_utf8(out).expect("utf8");
+            assert!(
+                said.contains("預覽會刪除 1 列可讀且落在區間裡的動作紀錄，另外 1 列讀不懂、問不出時間的動作紀錄"),
+                "同一行沒有報出兩個數字：{said}"
+            );
+        }
+
+        #[test]
+        fn action_log_preview_leaves_the_file_byte_for_byte_unchanged() {
+            let tmp = crate::ops::tmp::Tmp::new("forget-actionlog-preview-bytes");
+            let log = sister_hands::ActionLog::in_data_dir(&tmp.0);
+            std::fs::create_dir_all(&tmp.0).expect("mkdir");
+            std::fs::write(log.path(), b"{broken json\r\nsecond broken row\n").expect("write rows");
+            let before = std::fs::read(log.path()).expect("read before");
+
+            let mut out = Vec::new();
+            run_with_output(&tmp.0, "1d", false, &mut out).expect("preview");
+
+            let after = std::fs::read(log.path()).expect("read after");
+            assert_eq!(after, before, "預覽改寫了 action-log.jsonl");
         }
 
         #[test]
