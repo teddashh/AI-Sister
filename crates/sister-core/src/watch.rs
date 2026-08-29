@@ -392,11 +392,7 @@ pub enum WatchEnd {
     },
     Deadline {
         tally: Tally,
-        /// 最後一輪看下去的時候，再等有沒有意義（見 [`Blind::hopeless`]）。
-        ///
-        /// 「時間到了它沒發生」和「她中途就收工了，剩下的時間我對著一張
-        /// 凍住的畫面」是兩件事，而使用者的下一步完全不同。
-        hopeless: bool,
+        last_round: DeadlineLastRound,
     },
     /// **不是 [`Self::Deadline`]。** 時間到了沒等到，講的是「這段時間裡它沒發生」；
     /// 預算先用完，講的是「我不看了，它發生沒發生我不知道」。兩句話印成一句的話，
@@ -422,6 +418,15 @@ pub enum WatchEnd {
     ConsentRevoked {
         tally: Tally,
     },
+}
+
+/// 到期那一輪到底有沒有真的問。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeadlineLastRound {
+    /// 有看完最後一輪；`hopeless` 的語意只是她是否已中途收工。
+    Checked { hopeless: bool },
+    /// 有畫面，但在問之前撞到當日預算牆。
+    BudgetBlocked { used: u32, limit: u32 },
 }
 
 impl WatchEnd {
@@ -463,7 +468,7 @@ impl WatchEnd {
             ),
             Self::Deadline {
                 tally,
-                hopeless: true,
+                last_round: DeadlineLastRound::Checked { hopeless: true },
             } => format!(
                 "{}時間到了。但**最後那一眼看下去的時候，她已經不在錄了**——\
                  所以後面那段時間我對著的是一張凍住的畫面，「沒等到」只算到她停下來為止。",
@@ -471,8 +476,16 @@ impl WatchEnd {
             ),
             Self::Deadline {
                 tally,
-                hopeless: false,
+                last_round: DeadlineLastRound::Checked { hopeless: false },
             } => format!("{}時間到了，沒有等到。", tally.line()),
+            Self::Deadline {
+                tally,
+                last_round: DeadlineLastRound::BudgetBlocked { used, limit },
+            } => format!(
+                "{}時間到了；最後那一段畫面在問之前就撞到當日外送預算（{used}/{limit}），\
+                 所以那一段沒有問，它發生沒發生我不知道。",
+                tally.line()
+            ),
             Self::BudgetRanOut { tally, used, limit } => format!(
                 "{}今天的外送預算先用完了（{used}/{limit}），我沒有再看下去——\
                  這**不是**「沒等到」，是我不知道。",
@@ -853,7 +866,9 @@ mod tests {
         };
         let said = WatchEnd::Deadline {
             tally,
-            hopeless: Blind::NeverStarted.hopeless(),
+            last_round: DeadlineLastRound::Checked {
+                hopeless: Blind::NeverStarted.hopeless(),
+            },
         }
         .message();
         assert!(
@@ -994,7 +1009,7 @@ mod tests {
         assert_eq!(tally.not_sent, 30);
         let said = WatchEnd::Deadline {
             tally,
-            hopeless: false,
+            last_round: DeadlineLastRound::Checked { hopeless: false },
         }
         .message();
         assert!(!said.contains("沒有等到"), "她一次都沒問到：{said}");
@@ -1077,12 +1092,12 @@ mod tests {
         };
         let stopped = WatchEnd::Deadline {
             tally,
-            hopeless: true,
+            last_round: DeadlineLastRound::Checked { hopeless: true },
         }
         .message();
         let live = WatchEnd::Deadline {
             tally,
-            hopeless: false,
+            last_round: DeadlineLastRound::Checked { hopeless: false },
         }
         .message();
         assert_ne!(stopped, live);
@@ -1106,7 +1121,7 @@ mod tests {
         .message();
         let deadline = WatchEnd::Deadline {
             tally,
-            hopeless: false,
+            last_round: DeadlineLastRound::Checked { hopeless: false },
         }
         .message();
         assert_ne!(budget, deadline);
@@ -1391,7 +1406,7 @@ mod tests {
             WatchEnd::Saw { tally },
             WatchEnd::Deadline {
                 tally,
-                hopeless: false,
+                last_round: DeadlineLastRound::Checked { hopeless: false },
             },
             WatchEnd::BudgetRanOut {
                 tally,

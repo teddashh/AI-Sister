@@ -4379,7 +4379,11 @@ pub mod watch {
                             break if expired {
                                 WatchEnd::Deadline {
                                     tally,
-                                    hopeless: false,
+                                    last_round:
+                                        sister_core::watch::DeadlineLastRound::BudgetBlocked {
+                                            used,
+                                            limit: config.brain.daily_budget,
+                                        },
                                 }
                             } else {
                                 WatchEnd::BudgetRanOut {
@@ -4459,7 +4463,10 @@ pub mod watch {
                 // 最後那一眼看到的是「她已經不在錄了」的話，「沒等到」只算到
                 // 她停下來為止——後面那段時間我對著的是一張凍住的畫面。
                 let hopeless = matches!(&look, Look::NothingNew(blind) if blind.hopeless());
-                break WatchEnd::Deadline { tally, hopeless };
+                break WatchEnd::Deadline {
+                    tally,
+                    last_round: sister_core::watch::DeadlineLastRound::Checked { hopeless },
+                };
             }
             sleep(every);
         };
@@ -5092,6 +5099,39 @@ pub mod watch {
                 !text.contains("停下來為止"),
                 "她整段時間都在錄，沒有停下來過：{text}"
             );
+        }
+
+        /// 前面真的問過，但到期那一輪在問之前撞到預算牆。
+        #[test]
+        fn a_deadline_budget_wall_excludes_the_unasked_last_slice() {
+            let (tmp, mut config) = prepared_at("watch-deadline-budget", 90_000, "第一段", true);
+            add_chunk(&tmp.0, 155_000, "最後一段");
+            config.brain.daily_budget = 1;
+            config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
+            let mut ticks = [100_000_i64, 100_000, 160_000].into_iter();
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    quiet_for: None,
+                    dry_run: false,
+                    notify: false,
+                },
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("問到答案 1 次"), "{text}");
+            assert!(!text.contains("時間到了，沒有等到"), "{text}");
+            assert!(text.contains("最後那一段畫面在問之前"), "{text}");
+            assert!(text.contains("那一段沒有問"), "{text}");
+            assert!(text.contains("1/1"), "{text}");
         }
 
         /// **一輪新畫面都沒有的時候，那幾輪要如實記在「沒有新畫面可看」那一格。**
@@ -18892,19 +18932,8 @@ pub mod record {
         // 暫停是**不會自己過期**的（見 `pause` 模組），所以「上禮拜按了暫停、
         // 這禮拜開起來發現整週都沒錄」是一條真實的路。開場就要講，而且要講
         // 從什麼時候開始——不然使用者只會看到一個永遠是 0 的摘要。
-        if sister_core::pause::is_paused(data_dir) {
-            match sister_core::pause::paused_since(data_dir) {
-                Some(ts) => println!(
-                    "⚠  目前是暫停狀態（從 {} 起），不會記錄任何東西。\
-                     在字母人上按一下暫停鍵解除，或刪掉 {}。",
-                    crate::fmt::timestamp(ts),
-                    sister_core::pause::flag_path(data_dir).display()
-                ),
-                None => println!(
-                    "⚠  目前是暫停狀態，不會記錄任何東西。刪掉 {} 可解除。",
-                    sister_core::pause::flag_path(data_dir).display()
-                ),
-            }
+        if let Some(warning) = pause_warning(data_dir) {
+            println!("⚠  {warning}");
         }
         // doctor 會挑出「寫了也不會命中」的網址規則，但一個只跑 record 的人
         // 永遠看不到那份清單——而那正是把網銀畫面錄一整年的那種規則。
@@ -19455,6 +19484,60 @@ pub mod record {
         }
         finished?;
         Ok(())
+    }
+
+    #[cfg(any(windows, test))]
+    fn pause_warning(data_dir: &Path) -> Option<String> {
+        if !sister_core::pause::is_paused(data_dir) {
+            return None;
+        }
+        let flag = sister_core::pause::flag_path(data_dir);
+        match sister_core::pause::paused_since(data_dir) {
+            Some(ts) => Some(format!(
+                "目前是暫停狀態（從 {} 起），不會記錄任何東西。\
+                 在字母人上按一下暫停鍵解除，或刪掉 {}。",
+                crate::fmt::timestamp(ts),
+                flag.display()
+            )),
+            None if flag.try_exists().is_ok_and(|exists| exists) => Some(format!(
+                "目前是暫停狀態，不會記錄任何東西。刪掉 {} 可解除。",
+                flag.display()
+            )),
+            None => Some(format!(
+                "目前是暫停狀態：讀不到資料目錄 {} 這條路，所以刻意一律當成暫停。\
+                 這時刪 paused.flag 沒有用；請先確認資料目錄本身讀不讀得到。",
+                data_dir.display()
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    mod pause_warning_tests {
+        use super::*;
+
+        #[test]
+        fn broken_present_flag_can_be_removed_to_resume() {
+            let dir = crate::ops::tmp::Tmp::new("record-broken-pause-flag");
+            std::fs::write(sister_core::pause::flag_path(&dir.0), "half-written").unwrap();
+            let said = pause_warning(&dir.0).expect("paused warning");
+            assert!(said.contains("刪掉"), "{said}");
+            assert!(said.contains("可解除"), "{said}");
+            assert!(said.contains("paused.flag"), "{said}");
+        }
+
+        #[test]
+        fn unreadable_path_does_not_offer_to_remove_a_missing_flag() {
+            let dir = crate::ops::tmp::Tmp::new("record-unreadable-pause-path");
+            std::fs::remove_dir_all(&dir.0).unwrap();
+            std::fs::write(&dir.0, "not a directory").unwrap();
+            assert!(sister_core::pause::is_paused(&dir.0));
+            assert!(!sister_core::pause::flag_path(&dir.0).exists());
+            let said = pause_warning(&dir.0).expect("fail-closed warning");
+            assert!(said.contains("讀不到"), "{said}");
+            assert!(said.contains("一律當成暫停"), "{said}");
+            assert!(said.contains("刪 paused.flag 沒有用"), "{said}");
+            assert!(!said.contains("刪掉") && !said.contains("可解除"), "{said}");
+        }
     }
 
     /// 她自己佔了多少。

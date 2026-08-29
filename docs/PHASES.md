@@ -595,16 +595,27 @@ capture 層本身就是 recorder。
     在有人模式底下也滿足得了「他當場按了」那一條路——`--unattended` 沒有讓
     這件事變糟，但也沒有修掉它。離開偵測、交接 offer 那一段還沒做。
 
-**已知還在說謊的地方**（讀過原始碼確認過，這一輪刻意沒動）：
-- `sister watch`：到期那一刻**同時**撞到今天的外送上限，`ops.rs` 那條
-  `break if expired { WatchEnd::Deadline { hopeless: false } }` 會印出
-  「時間到了，沒有等到。」——可是最後那一輪的畫面**根本沒有問過**，
-  `BudgetRanOut` 身上那句「這不是『沒等到』，是我不知道」被丟掉了。
-  （「一次都沒問到答案」那半已經修好了：`watch.rs` 的
-  `Self::Deadline { tally, .. } if tally.answered == 0` 擋在前面。）
-- `sister doctor` 在「暫停旗標讀不到」的那一格叫他去刪一個不存在的檔案
-  （Windows fail-close 之後才走得到），刪了沒有用，而 doctor 會一直說暫停中。
-**這一輪修掉的**（alpha.78）：`sister forget` 的預覽以前不提
+**已知還在說謊的地方**：這一輪清空了。上一版列的五條全部修掉，見下面。
+
+**這一輪修掉的**（alpha.78）：
+
+`sister watch`——到期那一刻**同時**撞到今天的外送上限時，收尾印的是
+「時間到了，沒有等到。」，可是最後那一輪的畫面**根本沒有問過**。
+`if expired` 那個取捨保留（時間已經到了，多給預算不會有答案，他要的是
+`--stop-after`），改的是那句話：`WatchEnd::Deadline` 的 `hopeless: bool`
+換成 `DeadlineLastRound`，`BudgetBlocked { used, limit }` 那一格自己講一句
+「那一段沒有問，它發生沒發生我不知道」。乾淨的「沒有等到」由既有那條測試
+守著，免得修法把整句話變成永遠帶著免責的廢話。
+
+`sister doctor`——暫停那一格叫他去刪一個可能不存在的檔案。`is_paused` 是
+**故意 fail-closed** 的（讀不到路徑就一律當暫停），而 `paused_since` 回
+`None` 同時代表「旗標在、內容壞掉」和「根本讀不到那條路」兩件事：前者刪了
+有用，後者刪了沒用，而 doctor 會一直說暫停中。現在那一格自己去問
+`flag_path().try_exists()`，不拿 `None` 當「旗標在」的證據。判斷抽成
+`pause_warning`（`cfg(any(windows, test))`），所以它在 Linux 上測得到——
+呼叫端 `windows_record` 仍然是 `cfg(windows)`，那一層照舊沒有執行覆蓋。
+
+`sister forget` 的預覽以前不提
 `action-log.jsonl`——沒有資料庫時它印「沒有東西可以忘」就 return，而按下
 `--yes` 會刪掉那個檔案裡完整的網址和檔案路徑。現在預覽和真的刪那兩行走同一支
 組句函式、報同一組兩個數字（可讀且落在區間裡的列 ／ 讀不懂、問不出時間的列）。
