@@ -443,11 +443,41 @@ pub enum StepEvidence {
         frame_at_ms: i64,
         earlier_by_ms: i64,
         has_image: bool,
+        #[serde(default)]
+        wait: StepWait,
     },
     NotRecording {
         reason: NotRecordingReason,
     },
-    NoFrameNearby,
+    NoFrameNearby {
+        #[serde(default)]
+        wait: StepWait,
+    },
+}
+
+/// 這一步之後有沒有等下一張畫面，以及沒等的話是為什麼。
+///
+/// **「我沒有等」和「她沒在錄」是兩件事。** 中間有一版用一個 `waited_ms: u64`
+/// 表示，0 就印「她當時沒在錄」——而 0 底下有六種 presence，其中 `Stalled`
+/// 和 `Unreadable` 的正確答案是「說不準」（見 `NotRecordingReason::message`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "wait", rename_all = "snake_case")]
+pub enum StepWait {
+    /// 等了這麼久，還是沒有等到動作之後的畫面。
+    Waited { ms: u64 },
+    /// 沒有等，理由是這個。`NotRecordingReason` 已經是這個問題的字彙表，
+    /// 借用它就不會有第二套說法。
+    DidNotWait { because: NotRecordingReason },
+    /// 這一列是 alpha.80 以前寫的；那幾版一秒都沒等過。presence 是否有被記下來
+    /// 要由外層 evidence 變體回答，不能在共用的等待訊息裡猜。
+    NotRecorded,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for StepWait {
+    fn default() -> Self {
+        Self::NotRecorded
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -491,8 +521,9 @@ impl StepEvidence {
                 frame_at_ms,
                 earlier_by_ms,
                 has_image,
+                wait,
             } => {
-                if *has_image {
+                let frame = if *has_image {
                     format!(
                         "只有動作前 {earlier_by_ms} 毫秒的 frame #{frame_id}（{}）；這不是做完之後的畫面，圖在，只能證明她按下去時先前看見什麼。",
                         at(*frame_at_ms)
@@ -502,16 +533,33 @@ impl StepEvidence {
                         "只有動作前 {earlier_by_ms} 毫秒的 frame #{frame_id}（{}）；這不是做完之後的畫面，而且沒有截圖；紀錄在，圖不在。",
                         at(*frame_at_ms)
                     )
-                }
+                };
+                let presence = matches!(wait, StepWait::NotRecorded)
+                    .then_some("而她當時在不在錄沒有記。")
+                    .unwrap_or_default();
+                format!("{frame}{}{presence}", wait.message())
             }
             Self::NotRecording { reason } => reason.message(),
-            Self::NoFrameNearby => "她當時正在錄，但這一步前後的時間窗內一張 frame 都沒有。".into(),
+            Self::NoFrameNearby { wait } => format!(
+                "她當時正在錄，但這一步前後的時間窗內一張 frame 都沒有；{}",
+                wait.message()
+            ),
+        }
+    }
+}
+
+impl StepWait {
+    fn message(self) -> String {
+        match self {
+            Self::Waited { ms } => format!("等了 {ms} 毫秒還是沒有等到動作之後的畫面。"),
+            Self::DidNotWait { because } => because.message(),
+            Self::NotRecorded => "這一列是舊版寫的；那幾版不等下一張圖。".into(),
         }
     }
 }
 
 impl NotRecordingReason {
-    fn message(self) -> String {
+    pub(crate) fn message(self) -> String {
         // 同一條規矩，`StepEvidence::message` 那裡寫過一次
         // （「`ts:` 代表這個數字對不出時刻」）。**那一輪只修到直接的那幾臂，
         // 沒修到這裡**——而 `StepEvidence::NotRecording` 整個轉手給這個函式，
@@ -830,6 +878,7 @@ mod provenance_tests {
                 frame_at_ms: ms,
                 earlier_by_ms: 300,
                 has_image: false,
+                wait: StepWait::Waited { ms: 2_000 },
             },
             StepEvidence::NotRecording {
                 reason: NotRecordingReason::Stopped { at_ms: Some(ms) },

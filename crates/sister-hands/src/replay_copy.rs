@@ -345,7 +345,7 @@ fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semi_action::StepEvidence;
+    use crate::semi_action::{StepEvidence, StepWait};
     use crate::{ActionSnapshot, UnreadableLine};
 
     #[test]
@@ -471,6 +471,7 @@ mod tests {
             frame_at_ms: 9_900,
             earlier_by_ms: 100,
             has_image: true,
+            wait: StepWait::Waited { ms: 2_000 },
         }));
         assert!(after[0].contains("做完之後"), "{after:?}");
         assert!(before[0].contains("不是做完之後"), "{before:?}");
@@ -484,12 +485,81 @@ mod tests {
         let stopped = finished_with(Some(StepEvidence::NotRecording {
             reason: crate::semi_action::NotRecordingReason::Stopped { at_ms: Some(9_000) },
         }));
-        let quiet = finished_with(Some(StepEvidence::NoFrameNearby));
+        let quiet = finished_with(Some(StepEvidence::NoFrameNearby {
+            wait: StepWait::Waited { ms: 2_000 },
+        }));
         assert!(stopped[0].contains("收工"), "{stopped:?}");
         assert!(stopped[0].contains("所以不會有"), "{stopped:?}");
         assert!(quiet[0].contains("正在錄"), "{quiet:?}");
         assert!(quiet[0].contains("一張 frame 都沒有"), "{quiet:?}");
         assert_ne!(stopped[0], quiet[0]);
+    }
+
+    #[test]
+    fn before_says_whether_it_really_waited() {
+        let message = |wait| {
+            StepEvidence::Before {
+                frame_id: 7,
+                frame_at_ms: 9_900,
+                earlier_by_ms: 100,
+                has_image: true,
+                wait,
+            }
+            .message()
+        };
+        let did_not_wait = message(StepWait::DidNotWait {
+            because: crate::semi_action::NotRecordingReason::Stopped { at_ms: Some(9_000) },
+        });
+        let waited = message(StepWait::Waited { ms: 2_000 });
+        assert!(
+            did_not_wait.contains("收工") && did_not_wait.contains("不會有"),
+            "{did_not_wait}"
+        );
+        assert!(
+            waited.contains("等了 2000 毫秒") && waited.contains("還是沒有等到"),
+            "{waited}"
+        );
+        assert_ne!(did_not_wait, waited);
+    }
+
+    #[test]
+    fn alpha_79_no_frame_nearby_json_still_reads() {
+        let old = r#"{"event":"step_finished","at_ms":10000,"step_number":1,"action":{"action":"open_url","url":"https://a"},"evidence":{"kind":"no_frame_nearby"}}"#;
+        let event: ActionEvent = serde_json::from_str(old).expect("alpha.79 action-log row");
+        let ActionEvent::StepFinished {
+            evidence: Some(evidence),
+            ..
+        } = event
+        else {
+            panic!("舊列沒有讀成 step_finished evidence");
+        };
+        assert!(matches!(
+            evidence,
+            StepEvidence::NoFrameNearby {
+                wait: StepWait::NotRecorded
+            }
+        ));
+        let message = evidence.message();
+        assert!(message.contains("她當時正在錄"), "{message}");
+        assert!(!message.contains("在不在錄沒有記"), "{message}");
+    }
+
+    #[test]
+    fn alpha_79_before_json_does_not_invent_recording_presence() {
+        let old = r#"{"kind":"before","frame_id":7,"frame_at_ms":9900,"earlier_by_ms":100,"has_image":true}"#;
+        let evidence: StepEvidence = serde_json::from_str(old).expect("alpha.79 evidence");
+        assert!(matches!(
+            evidence,
+            StepEvidence::Before {
+                wait: StepWait::NotRecorded,
+                ..
+            }
+        ));
+        let message = evidence.message();
+        assert!(message.contains("舊版"), "{message}");
+        assert!(message.contains("在不在錄沒有記"), "{message}");
+        assert!(!message.contains("沒在錄"), "{message}");
+        assert!(!message.contains("等了 0 毫秒"), "{message}");
     }
 
     #[test]
@@ -504,6 +574,7 @@ mod tests {
             frame_at_ms: 9_950,
             earlier_by_ms: 50,
             has_image: false,
+            wait: StepWait::Waited { ms: 2_000 },
         }));
         assert!(after[0].contains("做完之後"), "{after:?}");
         assert!(!after[0].contains("不是做完之後"), "{after:?}");

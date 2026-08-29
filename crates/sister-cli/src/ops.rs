@@ -1208,7 +1208,7 @@ pub mod act {
     use sister_hands::semi_action::{
         AbortActor, ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, GrantRejection,
         NotRecordingReason, PresentedStep, RunConclusion, RunConclusionRecord, SemiActionRun,
-        StepEvidence, StepLimit, StepRequest, Task, execute_approved_step,
+        StepEvidence, StepLimit, StepRequest, StepWait, Task, execute_approved_step,
     };
     use sister_hands::{ActionEvent, ActionLog, ExecutionResult, Outcome, RefusalReason};
     use std::collections::BTreeSet;
@@ -1440,17 +1440,52 @@ pub mod act {
     }
 
     const STEP_EVIDENCE_WINDOW_MS: i64 = 5_000;
+    const STEP_EVIDENCE_WAIT_MS: u64 = 2_000;
+    const STEP_EVIDENCE_POLL_MS: u64 = 250;
+
+    fn not_recording_reason(
+        presence: sister_core::heartbeat::Presence,
+    ) -> Option<NotRecordingReason> {
+        use sister_core::heartbeat::{Phase, Presence};
+        Some(match presence {
+            Presence::Live(Phase::Recording) => return None,
+            Presence::NeverStarted => NotRecordingReason::NeverStarted,
+            Presence::Unreadable => NotRecordingReason::Unreadable,
+            Presence::Live(Phase::Booting) => NotRecordingReason::Booting,
+            Presence::Thinking { until, .. } => NotRecordingReason::Thinking { until_ms: until },
+            Presence::Stopped { at } => NotRecordingReason::Stopped { at_ms: at },
+            Presence::Stalled { at, phase: _ } => NotRecordingReason::Stalled { at_ms: at },
+        })
+    }
 
     fn step_evidence(
         data_dir: &Path,
         source: &impl StepSource,
         at_ms: i64,
+        sleep: &mut dyn FnMut(u64),
     ) -> Result<StepEvidence> {
-        let frame = source.nearest_step_frame(
+        let presence = sister_core::heartbeat::presence(data_dir, at_ms);
+        let mut waited_ms = 0;
+        let mut frame = source.nearest_step_frame(
             at_ms,
             at_ms.saturating_sub(STEP_EVIDENCE_WINDOW_MS),
             at_ms.saturating_add(STEP_EVIDENCE_WINDOW_MS),
         )?;
+        while matches!(
+            presence,
+            sister_core::heartbeat::Presence::Live(sister_core::heartbeat::Phase::Recording)
+        ) && !matches!(&frame, Some(frame) if frame.ts >= at_ms)
+            && waited_ms < STEP_EVIDENCE_WAIT_MS
+        {
+            let interval = STEP_EVIDENCE_POLL_MS.min(STEP_EVIDENCE_WAIT_MS - waited_ms);
+            sleep(interval);
+            waited_ms += interval;
+            frame = source.nearest_step_frame(
+                at_ms,
+                at_ms.saturating_sub(STEP_EVIDENCE_WINDOW_MS),
+                at_ms.saturating_add(STEP_EVIDENCE_WINDOW_MS),
+            )?;
+        }
         Ok(match frame {
             Some(frame) if frame.ts >= at_ms => StepEvidence::After {
                 frame_id: frame.id,
@@ -1462,23 +1497,25 @@ pub mod act {
                 frame_at_ms: frame.ts,
                 earlier_by_ms: at_ms.saturating_sub(frame.ts),
                 has_image: frame.image_path.is_some(),
+                wait: match not_recording_reason(presence) {
+                    Some(because) => StepWait::DidNotWait { because },
+                    None => StepWait::Waited { ms: waited_ms },
+                },
             },
-            None => missing_frame_evidence(sister_core::heartbeat::presence(data_dir, at_ms)),
+            None => missing_frame_evidence(presence, waited_ms),
         })
     }
 
-    fn missing_frame_evidence(presence: sister_core::heartbeat::Presence) -> StepEvidence {
-        use sister_core::heartbeat::{Phase, Presence};
-        let reason = match presence {
-            Presence::Live(Phase::Recording) => return StepEvidence::NoFrameNearby,
-            Presence::NeverStarted => NotRecordingReason::NeverStarted,
-            Presence::Unreadable => NotRecordingReason::Unreadable,
-            Presence::Live(Phase::Booting) => NotRecordingReason::Booting,
-            Presence::Thinking { until, .. } => NotRecordingReason::Thinking { until_ms: until },
-            Presence::Stopped { at } => NotRecordingReason::Stopped { at_ms: at },
-            Presence::Stalled { at, phase: _ } => NotRecordingReason::Stalled { at_ms: at },
-        };
-        StepEvidence::NotRecording { reason }
+    fn missing_frame_evidence(
+        presence: sister_core::heartbeat::Presence,
+        waited_ms: u64,
+    ) -> StepEvidence {
+        match not_recording_reason(presence) {
+            Some(reason) => StepEvidence::NotRecording { reason },
+            None => StepEvidence::NoFrameNearby {
+                wait: StepWait::Waited { ms: waited_ms },
+            },
+        }
     }
 
     pub fn run(data_dir: &Path, opts: &Options) -> Result<()> {
@@ -1695,6 +1732,31 @@ pub mod act {
         input: &mut impl BufRead,
         executor: &mut impl sister_hands::Executor,
         clock: &mut impl FnMut() -> i64,
+        out: &mut impl std::io::Write,
+    ) -> Result<()> {
+        run_with_output_and_sleep(
+            data_dir,
+            opts,
+            source,
+            input,
+            executor,
+            clock,
+            &mut |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+            out,
+        )
+    }
+
+    // 這是 `run_with_output` 唯一多出 sleeper 的測試 seam；其餘參數刻意保持同形，
+    // 避免 production 和測試走成兩條接線。
+    #[allow(clippy::too_many_arguments)]
+    fn run_with_output_and_sleep(
+        data_dir: &Path,
+        opts: &Options,
+        source: &impl StepSource,
+        input: &mut impl BufRead,
+        executor: &mut impl sister_hands::Executor,
+        clock: &mut impl FnMut() -> i64,
+        sleep: &mut dyn FnMut(u64),
         out: &mut impl std::io::Write,
     ) -> Result<()> {
         let pulled_at_start = sister_hands::kill_switch::is_pulled(data_dir);
@@ -2011,9 +2073,7 @@ pub mod act {
                     // `StepLimitReached` 的欄位叫 `completed_steps`：一次交出去但失敗
                     // 的嘗試不是完成的步驟，因此 Failed 不消耗這版的步數預算。
                     let finished_at = clock();
-                    // 不等下一張圖。這一刻資料庫裡有什麼就記什麼；「沒在錄」
-                    // 和「在錄但時間窗內沒有 frame」也各自是一筆查過的結果。
-                    let evidence = step_evidence(data_dir, source, finished_at)?;
+                    let evidence = step_evidence(data_dir, source, finished_at, sleep)?;
                     let finished = run
                         .finish_step(finished_at, action, Some(evidence))
                         .map_err(|conclusion| anyhow::anyhow!(conclusion.message()))?;
@@ -2945,17 +3005,21 @@ pub mod act {
         fn step_evidence_keeps_all_observed_states_separate() {
             let dir = crate::ops::tmp::Tmp::new("act-step-evidence");
             let at = 10_000;
+            let mut sleeps = Vec::new();
 
             assert_eq!(
-                step_evidence(&dir.0, &Source::default(), at).unwrap(),
+                step_evidence(&dir.0, &Source::default(), at, &mut |ms| sleeps.push(ms)).unwrap(),
                 StepEvidence::NotRecording {
                     reason: NotRecordingReason::NeverStarted
                 }
             );
+            assert!(sleeps.is_empty(), "她沒在錄的時候一次都不可以睡");
             sister_core::heartbeat::beat(&dir.0, at).unwrap();
             assert_eq!(
-                step_evidence(&dir.0, &Source::default(), at).unwrap(),
-                StepEvidence::NoFrameNearby
+                step_evidence(&dir.0, &Source::default(), at, &mut |_| {}).unwrap(),
+                StepEvidence::NoFrameNearby {
+                    wait: StepWait::Waited { ms: 2_000 }
+                }
             );
 
             let source = |ts, image_path: Option<&str>| Source {
@@ -2967,7 +3031,8 @@ pub mod act {
                 ..Source::default()
             };
             assert_eq!(
-                step_evidence(&dir.0, &source(10_100, Some("after.webp")), at).unwrap(),
+                step_evidence(&dir.0, &source(10_100, Some("after.webp")), at, &mut |_| {})
+                    .unwrap(),
                 StepEvidence::After {
                     frame_id: 7,
                     frame_at_ms: 10_100,
@@ -2975,16 +3040,18 @@ pub mod act {
                 }
             );
             assert_eq!(
-                step_evidence(&dir.0, &source(9_900, Some("before.webp")), at).unwrap(),
+                step_evidence(&dir.0, &source(9_900, Some("before.webp")), at, &mut |_| {})
+                    .unwrap(),
                 StepEvidence::Before {
                     frame_id: 7,
                     frame_at_ms: 9_900,
                     earlier_by_ms: 100,
-                    has_image: true
+                    has_image: true,
+                    wait: StepWait::Waited { ms: 2_000 }
                 }
             );
             assert_eq!(
-                step_evidence(&dir.0, &source(10_100, None), at).unwrap(),
+                step_evidence(&dir.0, &source(10_100, None), at, &mut |_| {}).unwrap(),
                 StepEvidence::After {
                     frame_id: 7,
                     frame_at_ms: 10_100,
@@ -2992,37 +3059,137 @@ pub mod act {
                 }
             );
             assert_eq!(
-                step_evidence(&dir.0, &source(9_900, None), at).unwrap(),
+                step_evidence(&dir.0, &source(9_900, None), at, &mut |_| {}).unwrap(),
                 StepEvidence::Before {
                     frame_id: 7,
                     frame_at_ms: 9_900,
                     earlier_by_ms: 100,
-                    has_image: false
+                    has_image: false,
+                    wait: StepWait::Waited { ms: 2_000 }
                 }
             );
 
             assert_eq!(
-                missing_frame_evidence(sister_core::heartbeat::Presence::Live(
-                    sister_core::heartbeat::Phase::Booting
-                )),
+                missing_frame_evidence(
+                    sister_core::heartbeat::Presence::Live(sister_core::heartbeat::Phase::Booting),
+                    0
+                ),
                 StepEvidence::NotRecording {
                     reason: NotRecordingReason::Booting
                 }
             );
             assert_eq!(
-                missing_frame_evidence(sister_core::heartbeat::Presence::Unreadable),
+                missing_frame_evidence(sister_core::heartbeat::Presence::Unreadable, 0),
                 StepEvidence::NotRecording {
                     reason: NotRecordingReason::Unreadable
                 }
             );
             assert_eq!(
-                missing_frame_evidence(sister_core::heartbeat::Presence::Stopped {
-                    at: Some(9_000)
-                }),
+                missing_frame_evidence(
+                    sister_core::heartbeat::Presence::Stopped { at: Some(9_000) },
+                    0
+                ),
                 StepEvidence::NotRecording {
                     reason: NotRecordingReason::Stopped { at_ms: Some(9_000) }
                 }
             );
+        }
+
+        #[test]
+        fn recording_waits_until_an_after_frame_appears() {
+            struct AppearingSource {
+                calls: std::cell::Cell<u32>,
+            }
+            impl StepSource for AppearingSource {
+                fn live_commitments(&self) -> Result<Vec<CommitmentRow>> {
+                    Ok(vec![])
+                }
+                fn app_for_evidence(
+                    &self,
+                    _r: &sister_core::brain::EvidenceRef,
+                ) -> Result<Option<String>> {
+                    Ok(None)
+                }
+                fn nearest_step_frame(
+                    &self,
+                    _at_ms: i64,
+                    _from_ms: i64,
+                    _to_ms: i64,
+                ) -> Result<Option<sister_core::db::StepFrameRow>> {
+                    let call = self.calls.get() + 1;
+                    self.calls.set(call);
+                    Ok((call >= 3).then(|| sister_core::db::StepFrameRow {
+                        id: 8,
+                        ts: 10_300,
+                        image_path: Some("after.webp".into()),
+                    }))
+                }
+            }
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence-appears");
+            let at = 10_000;
+            sister_core::heartbeat::beat(&dir.0, at).unwrap();
+            let source = AppearingSource {
+                calls: std::cell::Cell::new(0),
+            };
+            let mut sleeps = Vec::new();
+            assert_eq!(
+                step_evidence(&dir.0, &source, at, &mut |ms| sleeps.push(ms)).unwrap(),
+                StepEvidence::After {
+                    frame_id: 8,
+                    frame_at_ms: 10_300,
+                    has_image: true
+                }
+            );
+            assert_eq!(sleeps, vec![250, 250], "一等到就要立刻回來");
+        }
+
+        fn before_frame() -> Source {
+            Source {
+                nearest_frame: Some(sister_core::db::StepFrameRow {
+                    id: 7,
+                    ts: 9_900,
+                    image_path: Some("before.webp".into()),
+                }),
+                ..Source::default()
+            }
+        }
+
+        #[test]
+        fn unreadable_heartbeat_and_a_before_frame_say_the_result_is_uncertain() {
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence-unreadable");
+            std::fs::write(sister_core::heartbeat::beat_path(&dir.0), "not json at all").unwrap();
+            let evidence = step_evidence(&dir.0, &before_frame(), 10_000, &mut |_| {}).unwrap();
+            let message = evidence.message();
+            assert!(matches!(
+                evidence,
+                StepEvidence::Before {
+                    wait: StepWait::DidNotWait {
+                        because: NotRecordingReason::Unreadable
+                    },
+                    ..
+                }
+            ));
+            assert!(message.contains("說不準"), "{message}");
+            assert!(!message.contains("沒在錄"), "{message}");
+        }
+
+        #[test]
+        fn stopped_heartbeat_and_a_before_frame_keep_the_stopped_reason() {
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence-stopped");
+            sister_core::heartbeat::stop(&dir.0, 9_000);
+            let evidence = step_evidence(&dir.0, &before_frame(), 10_000, &mut |_| {}).unwrap();
+            let message = evidence.message();
+            assert!(matches!(
+                evidence,
+                StepEvidence::Before {
+                    wait: StepWait::DidNotWait {
+                        because: NotRecordingReason::Stopped { at_ms: Some(9_000) }
+                    },
+                    ..
+                }
+            ));
+            assert!(message.contains("收工"), "{message}");
+            assert!(!message.contains("說不準"), "{message}");
         }
 
         #[test]
@@ -3404,6 +3571,29 @@ pub mod act {
                 preview.out
             );
             assert!(real.executor.calls.is_empty(), "說不涵蓋就不可以交出去");
+        }
+
+        #[test]
+        fn a_dry_run_never_calls_the_step_evidence_sleeper() {
+            let dir = crate::ops::tmp::Tmp::new("act-dry-no-evidence-wait");
+            let mut input = std::io::Cursor::new(Vec::<u8>::new());
+            let mut executor = Fake::default();
+            let mut sleeps = Vec::new();
+            run_with_output_and_sleep(
+                &dir.0,
+                &opts("開今天的連結", &["chrome.exe"], 3, 5, true),
+                &one_card(),
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut |ms| sleeps.push(ms),
+                &mut Vec::new(),
+            )
+            .expect("dry run");
+            assert!(
+                sleeps.is_empty(),
+                "--dry-run 一步都沒交出去，不可以睡：{sleeps:?}"
+            );
         }
 
         #[test]
