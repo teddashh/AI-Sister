@@ -25,7 +25,7 @@ fn platform_shell() -> Shell {
 fn quote_for(shell: Shell, value: &str) -> String {
     let needs_quotes = value.is_empty()
         || !value.chars().all(|c| {
-            c.is_ascii_alphanumeric()
+            c.is_alphanumeric()
                 || matches!(c, '_' | '-' | '.' | '/' | ':')
                 || (shell == Shell::PowerShell && c == '\\')
         });
@@ -36,6 +36,16 @@ fn quote_for(shell: Shell, value: &str) -> String {
     match shell {
         Shell::PowerShell => format!("'{}'", value.replace('\'', "''")),
         Shell::Posix => format!("'{}'", value.replace('\'', "'\\''")),
+    }
+}
+
+/// 印成 `--name value`；只有會被 clap 誤認成另一個旗標的 leading dash 改用 `=`。
+fn option_with_value(shell: Shell, name: &str, value: &str) -> String {
+    let quoted = quote_for(shell, value);
+    if value.starts_with('-') {
+        format!("{name}={quoted}")
+    } else {
+        format!("{name} {quoted}")
     }
 }
 
@@ -55,8 +65,8 @@ fn cmd_for(data_dir: &Path, default: Option<&Path>, rest: &str) -> String {
         format!("sister {rest}")
     } else {
         format!(
-            "sister --data-dir {} {rest}",
-            quote_for(platform_shell(), &data_dir.to_string_lossy())
+            "sister {} {rest}",
+            option_with_value(platform_shell(), "--data-dir", &data_dir.to_string_lossy())
         )
     }
 }
@@ -144,6 +154,63 @@ mod command_tests {
         assert_eq!(
             command,
             "sister --data-dir /tmp/plain-path forget --last 30d --yes"
+        );
+    }
+
+    #[test]
+    fn next_step_keeps_a_cjk_directory_bare_and_round_trips_it() {
+        let root = tmp::Tmp::new("cmd-cjk");
+        let actual = root.0.join("測試資料");
+        std::fs::create_dir(&actual).expect("create real CJK directory");
+        let command = cmd_for(
+            &actual,
+            Some(Path::new("/not-the-cjk-directory")),
+            "forget --last 30d --yes",
+        );
+        assert_eq!(
+            command,
+            format!(
+                "sister --data-dir {} forget --last 30d --yes",
+                actual.display()
+            )
+        );
+        let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
+        let parsed = crate::Cli::try_parse_from(argv)
+            .unwrap_or_else(|error| panic!("中文資料目錄的下一步要能貼回 sister：{error}"));
+        assert_eq!(parsed.data_dir.as_deref(), Some(actual.as_path()));
+    }
+
+    #[test]
+    fn unicode_whitespace_still_requires_quotes() {
+        for value in ["before\u{3000}after", "before\u{00a0}after"] {
+            assert_eq!(quote_for(Shell::PowerShell, value), format!("'{value}'"));
+            assert_eq!(quote_for(Shell::Posix, value), format!("'{value}'"));
+        }
+    }
+
+    #[test]
+    fn leading_dash_data_dir_uses_equals_and_round_trips() {
+        let command = cmd_for(
+            Path::new("-dash-lead"),
+            Some(Path::new("another-directory")),
+            "forget --last 30d --yes",
+        );
+        assert_eq!(
+            command,
+            "sister --data-dir=-dash-lead forget --last 30d --yes"
+        );
+        let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
+        let parsed = crate::Cli::try_parse_from(argv).unwrap_or_else(|error| {
+            panic!("leading dash 資料目錄的下一步要能貼回 sister：{error}")
+        });
+        assert_eq!(parsed.data_dir.as_deref(), Some(Path::new("-dash-lead")));
+    }
+
+    #[test]
+    fn ordinary_option_value_keeps_the_space_form() {
+        assert_eq!(
+            option_with_value(Shell::Posix, "--data-dir", "plain-path"),
+            "--data-dir plain-path"
         );
     }
 
@@ -1665,7 +1732,7 @@ pub mod act {
 
     fn scoped_grant_command_for(data_dir: &Path, default: Option<&Path>, opts: &Options) -> String {
         let shell = platform_shell();
-        let mut rest = format!("do --task {}", quote_for(shell, &opts.task));
+        let mut rest = format!("do {}", option_with_value(shell, "--task", &opts.task));
         for app in &opts.apps {
             rest.push_str(" --app ");
             rest.push_str(&quote_for(shell, app));
@@ -1691,8 +1758,8 @@ pub mod act {
 
     fn use_grant_command(data_dir: &Path, opts: &Options) -> String {
         let rest = format!(
-            "do --task {} --use-grant --unattended",
-            quote_for(platform_shell(), &opts.task)
+            "do {} --use-grant --unattended",
+            option_with_value(platform_shell(), "--task", &opts.task)
         );
         cmd(data_dir, &rest)
     }
@@ -3063,6 +3130,16 @@ pub mod act {
             let dir = crate::ops::tmp::Tmp::new("act-task-backslash");
             let expected = opts(r"C:\invoices", &["excel.exe"], 3, 5, false);
             let command = scoped_grant_command_for(&dir.0, None, &expected);
+            let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
+            assert_scoped_command(&argv, &dir.0, &expected);
+        }
+
+        #[test]
+        fn scoped_command_round_trips_a_leading_dash_task_with_equals() {
+            let dir = crate::ops::tmp::Tmp::new("act-task-leading-dash");
+            let expected = opts("-x", &["excel.exe"], 3, 5, false);
+            let command = scoped_grant_command_for(&dir.0, None, &expected);
+            assert!(command.contains("do --task=-x "), "{command}");
             let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
             assert_scoped_command(&argv, &dir.0, &expected);
         }
