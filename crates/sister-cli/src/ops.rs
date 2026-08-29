@@ -2233,10 +2233,11 @@ pub mod act {
         /// 走不到 `ApprovalWasForAnotherStep`：`separate_approval_required` 和
         /// `never_inherited_class` 對三種已實作的動作都回 `None`，而那張核准票
         /// 和遞出去的那一步是從同一個 `step` 長出來的。這幾格是**先擺好的**，
-        /// 等那五類實作了才會有東西掉進來。
+        /// 等那幾類實作了才會有東西掉進來——六格裡今天真的產得出來的只有
+        /// 「範圍不涵蓋」和「拔手」兩格。
         ///
         /// 「`refusal_clauses()` 真的會出現在螢幕上那一行」由另一條蓋：
-        /// `hands_pulled_mid_run_stops_and_says_so` 斷言的
+        /// `pulling_at_the_last_steps_gate_aborts_the_whole_round` 斷言的
         /// 「授權擋掉 0 步，拔手擋掉 1 步」是跑完整條 `run_with_output` 印出來的。
         #[test]
         fn the_shown_step_mismatch_alarm_is_not_reported_as_a_scope_problem() {
