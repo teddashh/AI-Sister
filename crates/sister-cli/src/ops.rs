@@ -19,6 +19,49 @@ fn platform_shell() -> Shell {
     }
 }
 
+#[cfg(test)]
+fn split_printed_command(shell: Shell, command: &str) -> Option<Vec<String>> {
+    if shell == Shell::Posix {
+        return shlex::split(command);
+    }
+
+    let mut argv = Vec::new();
+    let mut token = String::new();
+    let mut chars = command.chars().peekable();
+    let mut quoted = false;
+    let mut token_started = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if quoted && chars.peek() == Some(&'\'') => {
+                chars.next();
+                token.push('\'');
+                token_started = true;
+            }
+            '\'' => {
+                quoted = !quoted;
+                token_started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if token_started {
+                    argv.push(std::mem::take(&mut token));
+                    token_started = false;
+                }
+            }
+            _ => {
+                token.push(c);
+                token_started = true;
+            }
+        }
+    }
+    if quoted {
+        return None;
+    }
+    if token_started {
+        argv.push(token);
+    }
+    Some(argv)
+}
+
 /// 印成可以貼回指定 shell 的一個 argv 值。
 ///
 /// 不需要引號的常見路徑／旗標值維持原樣；其餘一律用該 shell 的單引號規則。
@@ -61,12 +104,16 @@ fn cmd(data_dir: &Path, rest: &str) -> String {
 }
 
 fn cmd_for(data_dir: &Path, default: Option<&Path>, rest: &str) -> String {
+    cmd_for_shell(data_dir, default, rest, platform_shell())
+}
+
+fn cmd_for_shell(data_dir: &Path, default: Option<&Path>, rest: &str, shell: Shell) -> String {
     if is_default_data_dir(data_dir, default) {
         format!("sister {rest}")
     } else {
         format!(
             "sister {} {rest}",
-            option_with_value(platform_shell(), "--data-dir", &data_dir.to_string_lossy())
+            option_with_value(shell, "--data-dir", &data_dir.to_string_lossy())
         )
     }
 }
@@ -137,11 +184,32 @@ mod command_tests {
     fn next_step_uses_the_current_non_default_directory() {
         let actual = tmp::Tmp::new("cmd actual");
         let default = tmp::Tmp::new("cmd-default");
-        let command = cmd_for(&actual.0, Some(&default.0), "forget --last 30d --yes");
+        let command = cmd_for_shell(
+            &actual.0,
+            Some(&default.0),
+            "forget --last 30d --yes",
+            Shell::Posix,
+        );
         let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
         let parsed = crate::Cli::try_parse_from(argv)
             .unwrap_or_else(|error| panic!("印出的下一步要能貼回 sister：{error}"));
         assert_eq!(parsed.data_dir.as_deref(), Some(actual.0.as_path()));
+
+        let powershell = cmd_for_shell(
+            Path::new("Ted's dir"),
+            Some(Path::new("another-directory")),
+            "forget --last 30d --yes",
+            Shell::PowerShell,
+        );
+        assert_eq!(
+            powershell,
+            "sister --data-dir 'Ted''s dir' forget --last 30d --yes"
+        );
+        let argv = split_printed_command(Shell::PowerShell, &powershell)
+            .expect("PowerShell 指令要拆得回 argv");
+        let parsed = crate::Cli::try_parse_from(argv)
+            .unwrap_or_else(|error| panic!("PowerShell 下一步要能貼回 sister：{error}"));
+        assert_eq!(parsed.data_dir.as_deref(), Some(Path::new("Ted's dir")));
     }
 
     #[test]
@@ -159,20 +227,17 @@ mod command_tests {
 
     #[test]
     fn next_step_keeps_a_cjk_directory_bare_and_round_trips_it() {
+        assert_eq!(quote_for(Shell::Posix, "測試資料"), "測試資料");
+        assert_eq!(quote_for(Shell::PowerShell, "測試資料"), "測試資料");
+
         let root = tmp::Tmp::new("cmd-cjk");
         let actual = root.0.join("測試資料");
         std::fs::create_dir(&actual).expect("create real CJK directory");
-        let command = cmd_for(
+        let command = cmd_for_shell(
             &actual,
             Some(Path::new("/not-the-cjk-directory")),
             "forget --last 30d --yes",
-        );
-        assert_eq!(
-            command,
-            format!(
-                "sister --data-dir {} forget --last 30d --yes",
-                actual.display()
-            )
+            Shell::Posix,
         );
         let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
         let parsed = crate::Cli::try_parse_from(argv)
@@ -190,10 +255,11 @@ mod command_tests {
 
     #[test]
     fn leading_dash_data_dir_uses_equals_and_round_trips() {
-        let command = cmd_for(
+        let command = cmd_for_shell(
             Path::new("-dash-lead"),
             Some(Path::new("another-directory")),
             "forget --last 30d --yes",
+            Shell::Posix,
         );
         assert_eq!(
             command,
@@ -204,6 +270,23 @@ mod command_tests {
             panic!("leading dash 資料目錄的下一步要能貼回 sister：{error}")
         });
         assert_eq!(parsed.data_dir.as_deref(), Some(Path::new("-dash-lead")));
+
+        let powershell = cmd_for_shell(
+            Path::new("-Ted's dir"),
+            Some(Path::new("another-directory")),
+            "forget --last 30d --yes",
+            Shell::PowerShell,
+        );
+        assert_eq!(
+            powershell,
+            "sister --data-dir='-Ted''s dir' forget --last 30d --yes"
+        );
+        let argv = split_printed_command(Shell::PowerShell, &powershell)
+            .expect("PowerShell leading dash 指令要拆得回 argv");
+        let parsed = crate::Cli::try_parse_from(argv).unwrap_or_else(|error| {
+            panic!("PowerShell leading dash 資料目錄的下一步要能貼回 sister：{error}")
+        });
+        assert_eq!(parsed.data_dir.as_deref(), Some(Path::new("-Ted's dir")));
     }
 
     #[test]
@@ -218,7 +301,12 @@ mod command_tests {
     fn next_step_preserves_a_literal_backslash_in_the_current_directory() {
         let actual = tmp::Tmp::new("back\\slash");
         let default = tmp::Tmp::new("cmd-backslash-default");
-        let command = cmd_for(&actual.0, Some(&default.0), "forget --last 30d --yes");
+        let command = cmd_for_shell(
+            &actual.0,
+            Some(&default.0),
+            "forget --last 30d --yes",
+            Shell::Posix,
+        );
         let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
         let parsed = crate::Cli::try_parse_from(argv)
             .unwrap_or_else(|error| panic!("印出的下一步要能貼回 sister：{error}"));
@@ -241,7 +329,15 @@ mod command_tests {
     #[test]
     fn quote_rules_cover_spaces_and_single_quotes_on_both_shells() {
         for (value, power_shell, posix) in [
+            ("", "''", "''"),
+            (
+                "sister-1234-name-0",
+                "sister-1234-name-0",
+                "sister-1234-name-0",
+            ),
+            ("my.data_dir", "my.data_dir", "my.data_dir"),
             ("plain/path", "plain/path", "plain/path"),
+            ("C:/data", "C:/data", "C:/data"),
             ("two words", "'two words'", "'two words'"),
             ("Ted's", "'Ted''s'", "'Ted'\\''s'"),
             ("Ted's invoice", "'Ted''s invoice'", "'Ted'\\''s invoice'"),
@@ -249,6 +345,14 @@ mod command_tests {
             assert_eq!(quote_for(Shell::PowerShell, value), power_shell);
             assert_eq!(quote_for(Shell::Posix, value), posix);
         }
+    }
+
+    #[test]
+    fn an_empty_quoted_value_round_trips_as_one_argument() {
+        assert_eq!(
+            split_printed_command(Shell::PowerShell, "--data-dir '' forget"),
+            Some(vec!["--data-dir".into(), "".into(), "forget".into()])
+        );
     }
 
     #[test]
@@ -1730,8 +1834,12 @@ pub mod act {
         sister_hands::semi_action::grant_tmp_path(data_dir)
     }
 
-    fn scoped_grant_command_for(data_dir: &Path, default: Option<&Path>, opts: &Options) -> String {
-        let shell = platform_shell();
+    fn scoped_grant_command_for_shell(
+        data_dir: &Path,
+        default: Option<&Path>,
+        opts: &Options,
+        shell: Shell,
+    ) -> String {
         let mut rest = format!("do {}", option_with_value(shell, "--task", &opts.task));
         for app in &opts.apps {
             rest.push_str(" --app ");
@@ -1745,33 +1853,35 @@ pub mod act {
             " --minutes {} --steps {} --save-grant",
             opts.minutes, opts.steps
         ));
-        cmd_for(data_dir, default, &rest)
+        cmd_for_shell(data_dir, default, &rest, shell)
     }
 
-    fn scoped_grant_command(data_dir: &Path, opts: &Options) -> String {
-        scoped_grant_command_for(
+    fn use_grant_command_for_shell(data_dir: &Path, opts: &Options, shell: Shell) -> String {
+        let rest = format!(
+            "do {} --use-grant --unattended",
+            option_with_value(shell, "--task", &opts.task)
+        );
+        cmd_for_shell(
             data_dir,
             sister_core::Config::default_data_dir().as_deref(),
-            opts,
+            &rest,
+            shell,
         )
     }
 
-    fn use_grant_command(data_dir: &Path, opts: &Options) -> String {
-        let rest = format!(
-            "do {} --use-grant --unattended",
-            option_with_value(platform_shell(), "--task", &opts.task)
-        );
-        cmd(data_dir, &rest)
-    }
-
-    fn piped_stdin_message(data_dir: &Path, opts: &Options) -> String {
-        let use_grant = use_grant_command(data_dir, opts);
+    fn piped_stdin_message_for_shell(data_dir: &Path, opts: &Options, shell: Shell) -> String {
+        let use_grant = use_grant_command_for_shell(data_dir, opts, shell);
         if grant_path(data_dir).is_file() {
             format!(
                 "沒有做任何事，一步都沒有交出去：stdin 不是終端機，那個「好」可能是別的程式餵的，卻會被記成你當場按了。這裡已經有存過的授權書；拿掉 `--app`、`--allow`、`--minutes`、`--steps`，改用 `{use_grant}`，紀錄會寫「憑票決定」。`--dry-run` 不受影響。"
             )
         } else {
-            let save_grant = scoped_grant_command(data_dir, opts);
+            let save_grant = scoped_grant_command_for_shell(
+                data_dir,
+                sister_core::Config::default_data_dir().as_deref(),
+                opts,
+                shell,
+            );
             format!(
                 "沒有做任何事，一步都沒有交出去：stdin 不是終端機，那個「好」可能是別的程式餵的，卻會被記成你當場按了。先在終端機裡跑 `{save_grant}`，當場看過範圍並存下授權書；之後在管子裡拿掉 `--app`、`--allow`、`--minutes`、`--steps`，改跑 `{use_grant}`，紀錄會寫「憑票決定」。`--dry-run` 不受影響。"
             )
@@ -2029,8 +2139,9 @@ pub mod act {
     }
 
     pub fn run(data_dir: &Path, opts: &Options) -> Result<()> {
-        // 這一行是整條路上唯一測不到的東西（測試裡做不出終端機）。
-        // 底下那一支才是真的出口，它拿得到這個答案當參數。
+        // 測試做不出真終端，所以把 stdin 是否為終端傳給底下的純邏輯出口。
+        // `run_with_stdin_kind` 還會讀 `platform_shell()`；本機同樣做不出另一個平台，
+        // 所以它再把兩個環境答案都傳給 `run_with_stdin_kind_for_shell`。
         run_with_stdin_kind(data_dir, opts, std::io::stdin().is_terminal())
     }
 
@@ -2039,10 +2150,19 @@ pub mod act {
         opts: &Options,
         stdin_is_terminal: bool,
     ) -> Result<()> {
+        run_with_stdin_kind_for_shell(data_dir, opts, stdin_is_terminal, platform_shell())
+    }
+
+    fn run_with_stdin_kind_for_shell(
+        data_dir: &Path,
+        opts: &Options,
+        stdin_is_terminal: bool,
+        shell: Shell,
+    ) -> Result<()> {
         // 只看 stdin：stdout 被 `tee` 導走時，人還是看得到問題；
         // 反過來，stdin 是管子已足以證明那個「好」不是鍵盤當場給的。
         if who_answers(opts, stdin_is_terminal) == WhoAnswers::SomethingElseIsFeedingAnswers {
-            anyhow::bail!(piped_stdin_message(data_dir, opts));
+            anyhow::bail!(piped_stdin_message_for_shell(data_dir, opts, shell));
         }
         if opts.show_grant {
             let grant = load_grant(data_dir)?;
@@ -3053,13 +3173,13 @@ pub mod act {
             ] {
                 expected.allow = vec!["open-file".into(), "focus-window".into()];
                 let dir = missing_data_dir(&format!("act-piped-{name}"));
-                let err = run_with_stdin_kind(&dir.0, &expected, false)
+                let err = run_with_stdin_kind_for_shell(&dir.0, &expected, false, Shell::Posix)
                     .expect_err("piped answers must be rejected");
                 let message = err.to_string();
                 assert!(message.contains("stdin 不是終端機"), "{message}");
                 assert!(message.contains("拿掉 `--app`"), "{message}");
                 assert!(
-                    message.contains(&dir.0.to_string_lossy().to_string()),
+                    message.contains(&quote_for(Shell::Posix, &dir.0.to_string_lossy())),
                     "{message}"
                 );
                 for value in expected.apps.iter().chain(&expected.allow) {
@@ -3105,6 +3225,35 @@ pub mod act {
             assert!(cmd_for(custom, Some(&default.0), "do --task t").contains("--data-dir"));
         }
 
+        #[test]
+        fn all_production_commands_agree_on_the_real_default_data_dir() {
+            let default = sister_core::Config::default_data_dir().expect("default data dir");
+            std::fs::create_dir_all(&default).expect("create default data dir");
+            let options = opts("任務", &["excel.exe"], 3, 5, false);
+
+            let forget = cmd(&default, "forget --last 30d --yes");
+            let use_grant = use_grant_command_for_shell(&default, &options, Shell::Posix);
+            let piped = piped_stdin_message_for_shell(&default, &options, Shell::Posix);
+
+            for (name, output) in [
+                ("forget", forget.as_str()),
+                ("use grant", use_grant.as_str()),
+                ("piped stdin", piped.as_str()),
+            ] {
+                assert!(
+                    !output.contains("--data-dir"),
+                    "{name} 把真的預設目錄當成另一顆資料庫：{output}"
+                );
+            }
+            // 存過授權書的機器上走不到 save-grant 那一支；乾淨 CI runner 會走到。
+            if grant_path(&default).is_file() {
+                assert!(piped.contains("--use-grant --unattended"), "{piped}");
+                assert!(!piped.contains("--save-grant"), "{piped}");
+            } else {
+                assert!(piped.contains("--save-grant"), "{piped}");
+            }
+        }
+
         #[cfg(unix)]
         #[test]
         fn forget_and_do_agree_when_a_symlink_names_the_default_directory() {
@@ -3115,10 +3264,11 @@ pub mod act {
             std::os::unix::fs::symlink(&default, &link).unwrap();
 
             let forget = cmd_for(&link, Some(&default), "forget --last 30d --yes");
-            let do_command = scoped_grant_command_for(
+            let do_command = scoped_grant_command_for_shell(
                 &link,
                 Some(&default),
                 &opts("t", &["excel.exe", "files.exe"], 3, 5, false),
+                platform_shell(),
             );
             assert_eq!(forget, "sister forget --last 30d --yes");
             assert!(do_command.starts_with("sister do "), "{do_command}");
@@ -3129,7 +3279,7 @@ pub mod act {
         fn scoped_command_preserves_a_literal_backslash_in_the_task() {
             let dir = crate::ops::tmp::Tmp::new("act-task-backslash");
             let expected = opts(r"C:\invoices", &["excel.exe"], 3, 5, false);
-            let command = scoped_grant_command_for(&dir.0, None, &expected);
+            let command = scoped_grant_command_for_shell(&dir.0, None, &expected, Shell::Posix);
             let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
             assert_scoped_command(&argv, &dir.0, &expected);
         }
@@ -3138,7 +3288,7 @@ pub mod act {
         fn scoped_command_round_trips_a_leading_dash_task_with_equals() {
             let dir = crate::ops::tmp::Tmp::new("act-task-leading-dash");
             let expected = opts("-x", &["excel.exe"], 3, 5, false);
-            let command = scoped_grant_command_for(&dir.0, None, &expected);
+            let command = scoped_grant_command_for_shell(&dir.0, None, &expected, Shell::Posix);
             assert!(command.contains("do --task=-x "), "{command}");
             let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
             assert_scoped_command(&argv, &dir.0, &expected);
@@ -3149,9 +3299,13 @@ pub mod act {
             let dir = crate::ops::tmp::Tmp::new("act-piped-with-grant");
             std::fs::write(grant_path(&dir.0), b"not needed by the stdin gate")
                 .expect("grant marker");
-            let err =
-                run_with_stdin_kind(&dir.0, &opts("任務", &["chrome.exe"], 2, 10, false), false)
-                    .expect_err("piped answers must be rejected");
+            let err = run_with_stdin_kind_for_shell(
+                &dir.0,
+                &opts("任務", &["chrome.exe"], 2, 10, false),
+                false,
+                Shell::Posix,
+            )
+            .expect_err("piped answers must be rejected");
             let message = err.to_string();
             assert!(message.contains("已經有存過的授權書"), "{message}");
             assert!(message.contains("拿掉 `--app`"), "{message}");
@@ -3159,7 +3313,7 @@ pub mod act {
             assert!(!message.contains("--save-grant"), "{message}");
             assert!(message.contains("任務"), "{message}");
             assert!(
-                message.contains(&dir.0.to_string_lossy().to_string()),
+                message.contains(&quote_for(Shell::Posix, &dir.0.to_string_lossy())),
                 "{message}"
             );
         }
@@ -3331,7 +3485,10 @@ pub mod act {
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains("resume"), "{out}");
             assert!(
-                out.contains(&format!("--data-dir {}", dir.0.display())),
+                out.contains(&format!(
+                    "--data-dir {}",
+                    crate::ops::quote_for(crate::ops::platform_shell(), &dir.0.to_string_lossy(),)
+                )),
                 "{out}"
             );
             assert!(!ActionLog::in_data_dir(&dir.0).path().exists());
@@ -3643,7 +3800,10 @@ pub mod act {
             let broken = load_grant(&dir.0).unwrap_err().to_string();
             assert!(missing.contains("還沒有存過"), "{missing}");
             assert!(
-                missing.contains(&format!("--data-dir {}", dir.0.display())),
+                missing.contains(&format!(
+                    "--data-dir {}",
+                    crate::ops::quote_for(crate::ops::platform_shell(), &dir.0.to_string_lossy(),)
+                )),
                 "{missing}"
             );
             assert!(broken.contains("讀不懂"), "{broken}");
@@ -5965,11 +6125,11 @@ pub mod watch {
                 let marker = tmp.0.join("已經答過一次");
                 config.brain.args = vec![
                     "-c".into(),
-                    format!(
-                        "cat >/dev/null; if [ -e '{m}' ]; then printf 'not json at all'; \
-                         else : > '{m}'; printf '{{\"happened\":false,\"because\":\"\"}}'; fi",
-                        m = marker.display()
-                    ),
+                    "cat >/dev/null; if [ -e \"$1\" ]; then printf 'not json at all'; \
+                     else : > \"$1\"; printf '{\"happened\":false,\"because\":\"\"}'; fi"
+                        .into(),
+                    "sister-test-brain".into(),
+                    marker.to_string_lossy().into_owned(),
                 ];
                 let mut options = opts(false);
                 options.stop_after = 60_000;
@@ -7572,7 +7732,7 @@ pub mod mark {
             assert!(
                 said.contains(&format!(
                     "sister --data-dir {} mark --undo --id 17",
-                    dir.0.display()
+                    quote_for(platform_shell(), &dir.0.to_string_lossy())
                 )),
                 "mark 的題號屬於這顆資料庫，收回指令也要指回這裡：{said}"
             );
@@ -9683,18 +9843,25 @@ pub mod forget {
         #[test]
         fn preview_yes_command_keeps_the_directory_this_run_is_about() {
             let dir = crate::ops::tmp::Tmp::new("Ted Huang/my data");
+            let span = "7d";
             let mut out = Vec::new();
-            preview_close(&dir.0, "30d", &mut out).unwrap();
+            preview_close(&dir.0, span, &mut out).unwrap();
             let out = String::from_utf8(out).unwrap();
             let command = out
                 .lines()
                 .map(str::trim)
                 .find(|line| line.starts_with("sister "))
                 .expect("預覽要有下一步");
-            let argv = shlex::split(command).expect("POSIX 指令要拆得回 argv");
+            let argv =
+                split_printed_command(platform_shell(), command).expect("印出的指令要拆得回 argv");
             let parsed = crate::Cli::try_parse_from(argv)
                 .unwrap_or_else(|error| panic!("下一步要能貼回 sister：{error}"));
             assert_eq!(parsed.data_dir.as_deref(), Some(dir.0.as_path()));
+            let crate::Command::Forget { last, yes } = parsed.command else {
+                panic!("預覽印出的下一步不是 sister forget");
+            };
+            assert_eq!(last, span, "預覽 {span} 卻叫人刪另一段時間");
+            assert!(yes, "預覽說要加 --yes，印出的指令卻沒有");
         }
 
         /// 資料目錄裡（含子目錄）還讀得到 `needle` 的檔案。
@@ -15056,7 +15223,10 @@ pub mod doctor {
             );
             assert!(
                 since.contains(" resume`")
-                    && since.contains(&format!("--data-dir {}", since_dir.display()))
+                    && since.contains(&format!(
+                        "--data-dir {}",
+                        quote_for(platform_shell(), &since_dir.to_string_lossy())
+                    ))
                     && since.contains("刪掉"),
                 "解不解得開要講出來：{since}"
             );
@@ -21179,7 +21349,10 @@ pub mod record {
             );
             assert!(
                 since.contains(" resume`")
-                    && since.contains(&format!("--data-dir {}", since_dir.display()))
+                    && since.contains(&format!(
+                        "--data-dir {}",
+                        quote_for(platform_shell(), &since_dir.to_string_lossy())
+                    ))
                     && since.contains("刪掉"),
                 "{since}"
             );
@@ -23094,7 +23267,10 @@ pub mod record {
             // 擋下來還要講得出下一步是什麼。一句「不行」會讓人去刪資料庫。
             assert!(said.contains(" stop"), "要指路：{said}");
             assert!(
-                said.contains(&format!("--data-dir {}", dir.0.display())),
+                said.contains(&format!(
+                    "--data-dir {}",
+                    crate::ops::quote_for(crate::ops::platform_shell(), &dir.0.to_string_lossy(),)
+                )),
                 "{said}"
             );
             assert!(said.contains("秒"), "要講得出多久以前／等多久：{said}");
@@ -23285,12 +23461,18 @@ pub mod record {
                 "擋下來還不夠，要說得出怎麼過去：{msg}"
             );
             assert!(
-                msg.contains(&format!("--data-dir {}", dir.0.display())),
+                msg.contains(&format!(
+                    "--data-dir {}",
+                    crate::ops::quote_for(crate::ops::platform_shell(), &dir.0.to_string_lossy(),)
+                )),
                 "{msg}"
             );
             assert_eq!(
-                msg.matches(&format!("--data-dir {}", dir.0.display()))
-                    .count(),
+                msg.matches(&format!(
+                    "--data-dir {}",
+                    crate::ops::quote_for(crate::ops::platform_shell(), &dir.0.to_string_lossy(),)
+                ))
+                .count(),
                 3,
                 "三個同意書出口都要指回同一個資料目錄：{msg}"
             );
