@@ -24,9 +24,11 @@ fn platform_shell() -> Shell {
 /// 不需要引號的常見路徑／旗標值維持原樣；其餘一律用該 shell 的單引號規則。
 fn quote_for(shell: Shell, value: &str) -> String {
     let needs_quotes = value.is_empty()
-        || !value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '\\'));
+        || !value.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '/' | ':')
+                || (shell == Shell::PowerShell && c == '\\')
+        });
     if !needs_quotes {
         return value.to_owned();
     }
@@ -142,6 +144,30 @@ mod command_tests {
         assert_eq!(
             command,
             "sister --data-dir /tmp/plain-path forget --last 30d --yes"
+        );
+    }
+
+    #[test]
+    fn next_step_preserves_a_literal_backslash_in_the_current_directory() {
+        let actual = tmp::Tmp::new("back\\slash");
+        let default = tmp::Tmp::new("cmd-backslash-default");
+        let command = cmd_for(&actual.0, Some(&default.0), "forget --last 30d --yes");
+        let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
+        let parsed = crate::Cli::try_parse_from(argv)
+            .unwrap_or_else(|error| panic!("印出的下一步要能貼回 sister：{error}"));
+        assert_eq!(parsed.data_dir.as_deref(), Some(actual.0.as_path()));
+    }
+
+    #[test]
+    fn a_backslash_is_bare_in_powershell_but_quoted_in_posix() {
+        let value = r"back\slash";
+        assert_eq!(quote_for(Shell::PowerShell, value), value);
+        assert_eq!(quote_for(Shell::Posix, value), r"'back\slash'");
+
+        let windows_data_dir = r"C:\Users\Ted\AppData\Local";
+        assert_eq!(
+            quote_for(Shell::PowerShell, windows_data_dir),
+            windows_data_dir
         );
     }
 
@@ -3030,6 +3056,15 @@ pub mod act {
             assert_eq!(forget, "sister forget --last 30d --yes");
             assert!(do_command.starts_with("sister do "), "{do_command}");
             assert!(!do_command.contains("--data-dir"), "{do_command}");
+        }
+
+        #[test]
+        fn scoped_command_preserves_a_literal_backslash_in_the_task() {
+            let dir = crate::ops::tmp::Tmp::new("act-task-backslash");
+            let expected = opts(r"C:\invoices", &["excel.exe"], 3, 5, false);
+            let command = scoped_grant_command_for(&dir.0, None, &expected);
+            let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
+            assert_scoped_command(&argv, &dir.0, &expected);
         }
 
         #[test]
