@@ -1329,6 +1329,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 那支 CLI 沒把提示讀完就退場 → **它印出來的東西不是我們這一題的答案。**
+    ///
+    /// 這條刻意送一份**比管子還大**的提示，好讓它每次都成立：管子塞滿之後
+    /// 寫入會擋住，而擋住的那一刻讀端已經沒有人了，於是一定收到斷管。拿一份
+    /// 塞得進管子的小提示去測會變成擲骰子——`MAX_PROMPT_BYTES` 是 24 KiB，
+    /// 塞得進 Linux 那 64 KiB 的管子，所以正式路徑上這件事是「誰比較快」在決定：
+    /// 開發機寫得贏它就綠，CI 慢就紅（run 33249588350 的那三條）。
+    #[test]
+    fn a_cli_that_exits_without_reading_does_not_get_to_answer() {
+        let mut c = Consent::default();
+        c.grant(Sheet::CloudReading, 1);
+        let permit = c.cloud_permit().expect("signed");
+        let payload = "問".repeat(256 * 1024);
+
+        let out = spawn_cli(
+            permit,
+            &payload,
+            "sh",
+            &[
+                "-c".into(),
+                "printf '%s' 'ANSWER-THAT-IS-NOT-AN-ANSWER'".into(),
+            ],
+        );
+
+        assert!(
+            out.spawn_error.is_some(),
+            "提示只送出去一部分，這一輪就不算問到了；\
+             `spawn_error` 沒設起來的話，下游會照 stdout 去分類，\
+             於是「我們只送了一半」這件事整個不見了：{out:?}"
+        );
+        assert!(
+            out.payload_chars_written < payload.chars().count(),
+            "沒送完卻報了整份的字數：{} / {}",
+            out.payload_chars_written,
+            payload.chars().count()
+        );
+        // 但它自己說了什麼要留著——真正有用的那句話是它印的，不是我們的
+        // 「Broken pipe」。
+        assert!(
+            out.stdout.contains("ANSWER-THAT-IS-NOT-AN-ANSWER"),
+            "把它印出來的東西丟了，失敗原因就只剩我們自己那句沒有內容的斷管：{out:?}"
+        );
+    }
+
     #[test]
     fn a_failed_write_never_claims_the_whole_payload() {
         struct StopsAfter(usize);

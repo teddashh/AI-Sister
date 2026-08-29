@@ -4461,6 +4461,18 @@ pub mod watch {
     mod tests {
         use super::*;
 
+        /// 假大腦的參數。**`cat >/dev/null` 那半句不是裝飾，不要拿掉。**
+        ///
+        /// 真的 CLI 會把 stdin 讀完再回答。`spawn_cli` 在寫 stdin 撞到斷掉的
+        /// 管子時，會把那支 CLI 印出來的東西整份丟掉——見 `brain.rs` 的
+        /// 「送不完整就不要用那個答案」。假大腦要是像 `printf …` 那樣**不讀
+        /// 就退**，管子的讀端會在我們寫進去之前關掉，於是那一輪變成
+        /// `spawn_failed`：機器快就寫得贏它（綠），機器慢就寫輸（紅）。
+        /// 這不是假設，CI run 33249588350 上這樣紅過三條。
+        fn fake_brain(json: &str) -> Vec<String> {
+            vec!["-c".into(), format!("cat >/dev/null; printf '%s' '{json}'")]
+        }
+
         fn prepared(name: &str, text: &str, consented: bool) -> (crate::ops::tmp::Tmp, Config) {
             prepared_at(name, 90_000, text, consented)
         }
@@ -4488,10 +4500,7 @@ pub mod watch {
             }
             let mut config = Config::default();
             config.brain.command = "sh".into();
-            config.brain.args = vec![
-                "-c".into(),
-                "printf '%s' '{\"happened\":true,\"because\":\"畫面上出現完成\"}'".into(),
-            ];
+            config.brain.args = fake_brain("{\"happened\":true,\"because\":\"畫面上出現完成\"}");
             (tmp, config)
         }
 
@@ -4921,10 +4930,7 @@ pub mod watch {
         fn a_deadline_reached_after_she_stopped_says_so() {
             let (tmp, mut config) = prepared("watch-hopeless", "字", true);
             // 大腦要回「還沒」，不然第一輪就等到了、根本走不到到期那一刻。
-            config.brain.args = vec![
-                "-c".into(),
-                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
-            ];
+            config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
             sister_core::heartbeat::beat_thinking(&tmp.0, 120_000, 200_000).expect("thinking");
             // `prepared` 那一段字在 90_000，第一輪就會被看到；之後每一輪都空手。
             let mut ticks = [100_000_i64, 130_000, 160_000].into_iter();
@@ -4963,10 +4969,7 @@ pub mod watch {
         #[test]
         fn a_deadline_while_she_is_still_recording_is_a_plain_no() {
             let (tmp, mut config) = prepared("watch-still-recording", "字", true);
-            config.brain.args = vec![
-                "-c".into(),
-                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
-            ];
+            config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
             // 最後那一眼看下去的時候，心跳是新鮮的：她確實還在錄。
             sister_core::heartbeat::beat(&tmp.0, 158_000).expect("beat");
             let mut ticks = [100_000_i64, 100_000, 160_000].into_iter();
@@ -5042,10 +5045,7 @@ pub mod watch {
         #[test]
         fn a_backwards_clock_says_so_on_screen() {
             let (tmp, mut config) = prepared("watch-backwards", "字", true);
-            config.brain.args = vec![
-                "-c".into(),
-                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
-            ];
+            config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
             // 第三輪要有字可看，這樣**正常路徑上一次都不會走到 `blind_reason`**
             // ——於是畫面上只要出現它那句「沒有新的畫面可以看」，就一定是往回
             // 跳的那一輪被接到了錯的地方去。
@@ -5093,10 +5093,7 @@ pub mod watch {
             let started = 1_756_200_000_000_i64;
             let tomorrow = started + 86_400_000;
             let (tmp, mut config) = prepared_at("watch-midnight-gate", started - 5_000, "字", true);
-            config.brain.args = vec![
-                "-c".into(),
-                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
-            ];
+            config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
             // 一天只有兩次，而昨天已經用掉一次。
             config.brain.daily_budget = 2;
             let day_one = sister_core::local_day::local_day_key(started).unwrap();
@@ -5175,10 +5172,7 @@ pub mod watch {
         #[test]
         fn revoking_the_second_sheet_stops_the_run_it_is_already_inside() {
             let (tmp, mut config) = prepared_at("watch-revoke", 95_000, "第一段", true);
-            config.brain.args = vec![
-                "-c".into(),
-                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
-            ];
+            config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
             // 每一輪都有新的字可問，所以「沒有多送」不能靠「沒東西可送」蒙混。
             add_chunk(&tmp.0, 125_000, "第二段");
             add_chunk(&tmp.0, 155_000, "第三段");
@@ -5283,10 +5277,7 @@ pub mod watch {
         #[test]
         fn a_backwards_clock_does_not_replay_the_span_it_jumped_over() {
             let (tmp, mut config) = prepared("watch-no-replay", "那一段字", true);
-            config.brain.args = vec![
-                "-c".into(),
-                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
-            ];
+            config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
             // 第一輪在 100_000 看到 90_000 那一段（＝第一通外送）。之後時鐘
             // 往回跳到 90_000、再走到 95_000——游標若跟著往回，那兩輪的視窗
             // 會重新蓋住 90_000，同一段字就被再送一次。
@@ -5576,10 +5567,7 @@ pub mod watch {
             sister_core::consent::save(&tmp.0, &consent).expect("consent");
             let mut config = Config::default();
             config.brain.command = "sh".into();
-            config.brain.args = vec![
-                "-c".into(),
-                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
-            ];
+            config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
             (tmp, config)
         }
 
@@ -5727,10 +5715,7 @@ pub mod watch {
             // 畫面安靜了 200 秒（＞抬起來的 120 秒門檻）。
             let last = now - 200_000;
             let (tmp, mut config) = prepared_at("watch-quiet-fires", last, "舊字", true);
-            config.brain.args = vec![
-                "-c".into(),
-                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
-            ];
+            config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
             sister_core::heartbeat::beat(&tmp.0, now).expect("recording");
             let mut ticks = [now, now].into_iter();
             let mut out = Vec::new();
@@ -5862,10 +5847,7 @@ pub mod watch {
         fn a_real_round_counts_the_chunks_it_actually_sent_not_the_ones_it_saw() {
             let (tmp, mut config) =
                 prepared_at("watch-real-newest-bytes", 80_000, "oldest-marker", true);
-            config.brain.args = vec![
-                "-c".into(),
-                "printf '%s' '{\"happened\":false,\"because\":\"\"}'".into(),
-            ];
+            config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
             let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
             let session = db.start_session("test-2", "test").expect("session");
             for n in 1..=205_i64 {
