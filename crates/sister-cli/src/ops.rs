@@ -4313,7 +4313,7 @@ pub mod watch {
                             command: &command,
                             args: &args,
                             segment_core_start: None,
-                            chars_sent: prompt.payload.chars().count() as i64,
+                            chars_sent: spawn.payload_chars_written as i64,
                             truncated: more || prompt.truncated,
                             outcome: outcome.as_str(),
                             duration_ms: spawn.duration_ms as i64,
@@ -4875,10 +4875,14 @@ pub mod watch {
                 "她一次都沒問到答案，這句斷言說不出口：{text}"
             );
             assert!(text.contains("我不知道"), "{text}");
-            // 而且那幾次都是真的送出去過（有花預算、有寫紀錄），所以不可以
-            // 被算進「沒有新畫面可看」那一格。
-            assert!(text.contains("沒拿到答案 3 次"), "{text}");
+            assert!(text.contains("根本沒送出去 3 次"), "{text}");
+            assert!(!text.contains("送出去但沒拿到答案 3 次"), "{text}");
             assert!(text.contains("問到答案 0 次"), "{text}");
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let rows = db.list_brain_outbound(10).expect("outbound log");
+            assert_eq!(rows.len(), 3);
+            assert!(rows.iter().all(|row| row.role == "watcher"));
+            assert!(rows.iter().all(|row| row.chars_sent == 0));
         }
 
         /// **到期那一刻要再看最後一眼。**

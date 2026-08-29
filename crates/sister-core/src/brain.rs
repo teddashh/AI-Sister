@@ -184,6 +184,8 @@ impl SkipReason {
 /// 一次 spawn 的結果。不含送出去的原文。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnOutcome {
+    /// 成功寫進子行程 stdin 的完整 UTF-8 字元數。
+    pub payload_chars_written: usize,
     pub duration_ms: u64,
     pub stdout: String,
     pub stderr: String,
@@ -250,6 +252,7 @@ pub fn spawn_cli(
         Ok(c) => c,
         Err(e) => {
             return SpawnOutcome {
+                payload_chars_written: 0,
                 duration_ms: started.elapsed().as_millis() as u64,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -260,8 +263,42 @@ pub fn spawn_cli(
         }
     };
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(payload.as_bytes());
+    let (payload_chars_written, stdin_error) = match child.stdin.take() {
+        Some(mut stdin) => match write_payload(&mut stdin, payload) {
+            Ok(written) => (written, None),
+            Err((written, error)) => (written, Some(format!("寫入 CLI stdin 失敗：{error}"))),
+        },
+        None => (0, Some("stdin 管線沒開成".into())),
+    };
+    if let Some(error) = stdin_error {
+        // **送不完整就不要用那個答案。** 半份提示問出來的回答會被當成整份的
+        // 回答收下去，那比沒有答案糟。所以這裡收手，而且 `spawn_error` 一定
+        // 要設起來——不設的話下游會照 stdout 的內容去分類，於是「我們只送出
+        // 去一半」這件事就不見了。
+        //
+        // **但它自己說了什麼要留著。** 這條路最常見的成因是那支 CLI 立刻就
+        // 退了（沒登入、參數不對），於是我們的寫入撞上一根斷掉的管子。真正
+        // 有用的那句話是它印出來的，不是我們的「Broken pipe」。先把管子裡剩
+        // 的字讀乾淨再收工——`kill` 之後兩端都關了，讀不會卡住。
+        let _ = child.kill();
+        let mut stdout = String::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            let _ = pipe.read_to_string(&mut stdout);
+        }
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        let exit_code = child.wait().ok().and_then(|status| status.code());
+        return SpawnOutcome {
+            payload_chars_written,
+            duration_ms: started.elapsed().as_millis() as u64,
+            stdout,
+            stderr,
+            timed_out: false,
+            spawn_error: Some(error),
+            exit_code,
+        };
     }
 
     let mut stdout_pipe = match child.stdout.take() {
@@ -269,6 +306,7 @@ pub fn spawn_cli(
         None => {
             let _ = child.kill();
             return SpawnOutcome {
+                payload_chars_written,
                 duration_ms: started.elapsed().as_millis() as u64,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -304,6 +342,7 @@ pub fn spawn_cli(
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(e) => {
                 return SpawnOutcome {
+                    payload_chars_written,
                     duration_ms: started.elapsed().as_millis() as u64,
                     stdout: String::new(),
                     stderr: String::new(),
@@ -320,6 +359,7 @@ pub fn spawn_cli(
     let exit_code = child.wait().ok().and_then(|s| s.code());
 
     SpawnOutcome {
+        payload_chars_written,
         duration_ms: started.elapsed().as_millis() as u64,
         stdout,
         stderr,
@@ -327,6 +367,29 @@ pub fn spawn_cli(
         spawn_error: None,
         exit_code,
     }
+}
+
+fn write_payload(writer: &mut impl Write, payload: &str) -> Result<usize, (usize, std::io::Error)> {
+    let bytes = payload.as_bytes();
+    let mut written = 0;
+    while written < bytes.len() {
+        match writer.write(&bytes[written..]) {
+            Ok(0) => {
+                let chars = chars_in_written_prefix(payload, written);
+                return Err((chars, std::io::ErrorKind::WriteZero.into()));
+            }
+            Ok(n) => written += n,
+            Err(error) => return Err((chars_in_written_prefix(payload, written), error)),
+        }
+    }
+    Ok(payload.chars().count())
+}
+
+fn chars_in_written_prefix(payload: &str, mut bytes_written: usize) -> usize {
+    while !payload.is_char_boundary(bytes_written) {
+        bytes_written -= 1;
+    }
+    payload[..bytes_written].chars().count()
 }
 
 /// 模型回的 JSON。缺欄、型別錯、範圍外 → 整張丟掉，不填預設值。
@@ -666,6 +729,7 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
             .collect();
         for (job, handle) in prepared.iter().zip(handles) {
             let outcome = handle.join().unwrap_or_else(|_| SpawnOutcome {
+                payload_chars_written: 0,
                 duration_ms: 0,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -687,7 +751,7 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
             command: &command,
             args: &args,
             segment_core_start: Some(job.core_started_at),
-            chars_sent: job.payload.chars().count() as i64,
+            chars_sent: spawn.payload_chars_written as i64,
             truncated: job.truncated,
             outcome: kind.as_str(),
             duration_ms: spawn.duration_ms as i64,
@@ -1260,8 +1324,33 @@ mod tests {
         );
         assert!(out.spawn_error.is_none(), "{:?}", out.spawn_error);
         assert!(!out.timed_out);
+        assert_eq!(out.payload_chars_written, payload.chars().count());
         assert!(out.stdout.contains("segment_ref"), "{}", out.stdout);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_write_never_claims_the_whole_payload() {
+        struct StopsAfter(usize);
+        impl Write for StopsAfter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                let n = self.0.min(bytes.len());
+                self.0 -= n;
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let payload = "甲乙abc";
+        let (written, error) = write_payload(&mut StopsAfter(3), payload).expect_err("管線要斷");
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(written, 1, "只完整寫進第一個中文字");
+        assert_ne!(written, payload.chars().count(), "不能把整包記成已送出");
     }
 
     fn seed(db: &mut Db, ts: Millis) -> i64 {
@@ -1429,8 +1518,40 @@ mod tests {
         assert_eq!(card.model_confidence, 0.55);
         let logs = db.list_brain_outbound(10).expect("log");
         assert_eq!(logs.len(), 1);
+        assert!(logs[0].chars_sent > 0);
         assert!(!logs[0].args_json.contains("13,450"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn interpreter_spawn_failure_logs_zero_chars_sent() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_000_150_000;
+        seed(&mut db, ts);
+        let core = db.chapters_for_range(ts, ts + 400_000).unwrap()[0].core_started_at;
+        let mut consent = Consent::default();
+        consent.grant(Sheet::CloudReading, 1);
+        let brain = crate::config::BrainConfig {
+            command: "definitely-not-a-real-binary-97531".into(),
+            args: vec![],
+            ..Default::default()
+        };
+        let result = run(&mut InterpretInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &brain,
+            from_ts: ts,
+            to_ts: ts + 400_000,
+            limit: 4,
+            only_core_start: Some(core),
+        })
+        .expect("run");
+        assert_eq!(result.ran.len(), 1);
+        assert_eq!(result.ran[0].outcome, OutboundOutcome::SpawnFailed);
+        let logs = db.list_brain_outbound(10).expect("log");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].role, "interpreter");
+        assert_eq!(logs[0].chars_sent, 0);
     }
 
     #[test]

@@ -340,18 +340,20 @@ impl Look {
     }
 }
 
-/// 一輪盯完之後三個數字。**三個，因為它們回答三個不同的問題。**
+/// 一輪盯完之後四個數字。**四個，因為它們回答四個不同的問題。**
 ///
-/// `answered` 和 `unanswered` 拆開是這個型別存在的理由：[`Look::Asked`] 在
-/// CLI 叫不起來的時候照樣成立（有花掉預算、有寫下外送紀錄），於是一個
-/// 混在一起的 `asked` 計數器會在三十輪全部 spawn 失敗之後印出「問了 30 次」，
-/// 而收尾接著說「沒有等到」——她一次都沒問到。
+/// `answered`、`unanswered` 和 `not_sent` 拆開是這個型別存在的理由：
+/// [`Look::Asked`] 在 CLI 叫不起來的時候照樣成立，但那一輪其實沒有送出去；
+/// 一個混在一起的 `asked` 計數器會在三十輪全部 spawn 失敗之後印出
+/// 「問了 30 次」，而收尾接著說「沒有等到」——她一次都沒問到。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tally {
     /// 拿到了一個答案（「還沒有」也是答案）。
     pub answered: usize,
-    /// 送出去了、花了預算，但沒有拿到答案（叫不起來、逾時、回了讀不懂的字）。
+    /// 送出去了、花了預算，但沒有拿到答案（逾時、回了讀不懂的字）。
     pub unanswered: usize,
+    /// 根本沒送出去（CLI 叫不起來或 stdin 寫不進去），沒有花外送預算。
+    pub not_sent: usize,
     /// 沒有東西可以問。
     pub blind: usize,
 }
@@ -360,6 +362,13 @@ impl Tally {
     pub fn count(&mut self, look: &Look) {
         match look {
             Look::Asked { verdict, .. } if verdict.answered() => self.answered += 1,
+            Look::Asked {
+                verdict:
+                    Verdict::CallFailed {
+                        how: OutboundOutcome::SpawnFailed,
+                    },
+                ..
+            } => self.not_sent += 1,
             Look::Asked { .. } => self.unanswered += 1,
             Look::NothingNew(_) => self.blind += 1,
         }
@@ -367,8 +376,8 @@ impl Tally {
 
     fn line(&self) -> String {
         format!(
-            "盯完了：問到答案 {} 次，送出去但沒拿到答案 {} 次，沒有新畫面可看 {} 次。",
-            self.answered, self.unanswered, self.blind
+            "盯完了：問到答案 {} 次，送出去但沒拿到答案 {} 次，根本沒送出去 {} 次，沒有新畫面可看 {} 次。",
+            self.answered, self.unanswered, self.not_sent, self.blind
         )
     }
 }
@@ -734,6 +743,7 @@ mod tests {
 
     fn spawn(stdout: &str, exit_code: Option<i32>) -> SpawnOutcome {
         SpawnOutcome {
+            payload_chars_written: 0,
             duration_ms: 10,
             stdout: stdout.to_string(),
             stderr: String::new(),
@@ -838,6 +848,7 @@ mod tests {
         let tally = Tally {
             answered: 1,
             unanswered: 0,
+            not_sent: 0,
             blind: 1,
         };
         let said = WatchEnd::Deadline {
@@ -861,6 +872,7 @@ mod tests {
         let tally = Tally {
             answered: 10,
             unanswered: 0,
+            not_sent: 0,
             blind: 2,
         };
         let said = WatchEnd::ConsentRevoked { tally }.message();
@@ -936,6 +948,7 @@ mod tests {
             tally: Tally {
                 answered: 2,
                 unanswered: 1,
+                not_sent: 0,
                 blind: 3,
             },
             quiet_for: 12 * 60_000,
@@ -977,7 +990,8 @@ mod tests {
             });
         }
         assert_eq!(tally.answered, 0);
-        assert_eq!(tally.unanswered, 30);
+        assert_eq!(tally.unanswered, 0);
+        assert_eq!(tally.not_sent, 30);
         let said = WatchEnd::Deadline {
             tally,
             hopeless: false,
@@ -985,7 +999,8 @@ mod tests {
         .message();
         assert!(!said.contains("沒有等到"), "她一次都沒問到：{said}");
         assert!(said.contains("我不知道"), "{said}");
-        assert!(said.contains("沒拿到答案 30 次"), "{said}");
+        assert!(said.contains("根本沒送出去 30 次"), "{said}");
+        assert!(!said.contains("送出去但沒拿到答案 30 次"), "{said}");
     }
 
     /// 讀不懂的回覆和叫不起來一樣，都不算「問到了」。
@@ -1013,7 +1028,7 @@ mod tests {
         );
     }
 
-    /// 三個計數器，因為它們回答三個不同的問題。
+    /// 四個計數器，因為它們回答四個不同的問題。
     #[test]
     fn the_three_counters_never_borrow_each_others_rounds() {
         let mut tally = Tally::default();
@@ -1036,8 +1051,13 @@ mod tests {
         });
         tally.count(&Look::NothingNew(Blind::Paused));
         assert_eq!(
-            (tally.answered, tally.unanswered, tally.blind),
-            (1, 1, 1),
+            (
+                tally.answered,
+                tally.unanswered,
+                tally.not_sent,
+                tally.blind
+            ),
+            (1, 1, 0, 1),
             "{tally:?}"
         );
         let said = WatchEnd::Saw { tally }.message();
@@ -1052,6 +1072,7 @@ mod tests {
         let tally = Tally {
             answered: 3,
             unanswered: 0,
+            not_sent: 0,
             blind: 27,
         };
         let stopped = WatchEnd::Deadline {
@@ -1074,6 +1095,7 @@ mod tests {
         let tally = Tally {
             answered: 2,
             unanswered: 0,
+            not_sent: 0,
             blind: 1,
         };
         let budget = WatchEnd::BudgetRanOut {

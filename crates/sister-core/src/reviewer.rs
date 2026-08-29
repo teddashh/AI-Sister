@@ -810,12 +810,8 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         };
         calls += 2;
         budget_left = budget_left.saturating_sub(2);
-        log_outbound(
-            input.db, &run_day, &command, &args, card, &prompt_a, &spawn_a,
-        )?;
-        log_outbound(
-            input.db, &run_day, &command, &args, card, &prompt_b, &spawn_b,
-        )?;
+        log_outbound(input.db, &run_day, &command, &args, card, &spawn_a)?;
+        log_outbound(input.db, &run_day, &command, &args, card, &spawn_b)?;
 
         let parsed_a = parse_pass(&spawn_a.stdout);
         let parsed_b = parse_pass(&spawn_b.stdout);
@@ -1191,6 +1187,7 @@ fn by_text(items: &[ReviewCommitment]) -> BTreeMap<String, ReviewCommitment> {
 
 fn empty_spawn(msg: &str) -> SpawnOutcome {
     SpawnOutcome {
+        payload_chars_written: 0,
         duration_ms: 0,
         stdout: String::new(),
         stderr: String::new(),
@@ -1200,13 +1197,22 @@ fn empty_spawn(msg: &str) -> SpawnOutcome {
     }
 }
 
+/// **這裡刻意收不到 payload。**
+///
+/// `chars_sent` 要記的是「真的離開這台機器的字數」，而那件事只有
+/// [`SpawnOutcome::payload_chars_written`] 量得到：`spawn_cli` 在 spawn 失敗時
+/// 是在寫 stdin **之前**就 return 的，那一路一個位元組都沒送出去。
+///
+/// 手上有 payload 的話，`payload.chars().count()` 永遠寫得出來，而且看起來
+/// 完全正確——alpha.77 之前這裡就是那樣，於是一台沒裝那支 CLI 的機器在
+/// `sister brain log` 上每一輪都寫著送出去幾千個字。**收不到那份資料，這個
+/// 錯就寫不出來**；三個寫入點裡這一個是最後被發現的，因為它在另一個模組。
 fn log_outbound(
     db: &mut Db,
     day: &str,
     command: &str,
     args: &[String],
     card: &L2CardRow,
-    payload: &str,
     spawn: &SpawnOutcome,
 ) -> Result<()> {
     let (outcome, error) = if spawn.spawn_error.is_some() {
@@ -1224,7 +1230,7 @@ fn log_outbound(
         command,
         args,
         segment_core_start: Some(card.segment_core_start),
-        chars_sent: payload.chars().count() as i64,
+        chars_sent: spawn.payload_chars_written as i64,
         truncated: false,
         outcome: outcome.as_str(),
         duration_ms: spawn.duration_ms as i64,
@@ -2852,6 +2858,76 @@ mod tests {
     fn l3_write_is_only_constructible_here() {
         let _ = l3_write();
         let _unused = VERSION;
+    }
+
+    /// **叫不起來的那一輪，稽核紀錄要說零。**
+    ///
+    /// `spawn_cli` 在 spawn 失敗時是在寫 stdin **之前**就 return 的——那一路
+    /// 一個位元組都沒有離開這台機器。alpha.77 之前這裡記的是整包 payload 的
+    /// 字數，於是一台沒裝那支 CLI 的機器，`sister brain log` 上每一輪都寫著
+    /// 送出去幾千個字。這個產品的賣點就是那句話，往「送出去了」的方向錯是
+    /// 最糟的方向。
+    ///
+    /// 兩個方向一起釘：成功那一次必須 > 0，否則寫死一個 0 也會過（實測過，
+    /// 只釘零的話突變 `chars_sent: 0` 是綠的）。
+    #[test]
+    fn a_review_that_never_spawned_records_zero_characters_sent() {
+        fn outbound_chars(command: String, args: Vec<String>) -> Vec<i64> {
+            let mut db = Db::open_in_memory().expect("db");
+            let ts = 1_700_200_000_000;
+            let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00 王小明");
+            let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+            write_l2(
+                &mut db,
+                segs[0].core_started_at,
+                fid,
+                "在看接人的訊息",
+                r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+            );
+            let consent = signed();
+            let brain = BrainConfig {
+                command,
+                args,
+                ..Default::default()
+            };
+            let mut input = ReviewInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: ts,
+                to_ts: ts + 400_000,
+                kind: ReviewKind::Interval,
+                force: true,
+                now: ts + 500_000,
+            };
+            let _ = run(&mut input).expect("run");
+            db.list_brain_outbound(10)
+                .expect("outbound")
+                .into_iter()
+                .filter(|row| row.role == "reviewer")
+                .map(|row| row.chars_sent)
+                .collect()
+        }
+
+        let never_spawned = outbound_chars(
+            "sister-no-such-brain-cli-6f2a".to_string(),
+            vec!["--json".to_string()],
+        );
+        assert!(!never_spawned.is_empty(), "那兩列 reviewer 紀錄要在");
+        assert!(
+            never_spawned.iter().all(|&chars| chars == 0),
+            "叫不起來就是一個字都沒送出去，不可以記成整包：{never_spawned:?}"
+        );
+
+        let tmp = Tmp::new("outbound-chars-sent");
+        let sentinel = tmp.0.join("spawned");
+        let (command, args) = fake_cli(&tmp.0, r#"{"commitments":[]}"#, &sentinel);
+        let really_sent = outbound_chars(command, args);
+        assert!(!really_sent.is_empty(), "那兩列 reviewer 紀錄要在");
+        assert!(
+            really_sent.iter().all(|&chars| chars > 0),
+            "真的送出去的那一輪不可以記成零，否則寫死一個 0 也會過：{really_sent:?}"
+        );
     }
 
     /// 日終幾乎永遠在跨日之後才跑。摘要的 `date` 是被盤點的那天，不是跑的那天。
