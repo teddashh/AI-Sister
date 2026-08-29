@@ -314,7 +314,48 @@ pub enum RefusalReason {
     HandsPulled { since_ms: Option<i64> },
 }
 
+/// 一次拒絕該被算進收尾那一行的哪一格。
+///
+/// **這幾格分開，是因為它們的下一步不一樣。** 收尾本來只有「授權擋掉 N 步」
+/// 一格裝下所有非拔手的拒絕，於是 [`RefusalReason::ApprovalWasForAnotherStep`]
+/// ——SPEC §9.7 那道「螢幕上給他看的，和要交給作業系統的，不是同一步」的警報，
+/// 這支程式偵測得到最嚴重的一件事——被報成一句例行的範圍不符。而他照著那句
+/// 話去放寬 `--apps` / `--allow` 是**沒有用的**，那不是範圍的問題。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalBucket {
+    /// 他被問了，他說不要。
+    Declined,
+    /// 拔手開關。
+    Pulled,
+    /// 票的五維不涵蓋這一步。放寬 `--apps` / `--allow` / `--minutes` 有用。
+    OutsideGrant,
+    /// 這一類永遠要當場按，票帶不動它。改成不加 `--unattended` 重跑有用。
+    NeedsALivePress,
+    /// **警報**：手上那張核准票是對另一步簽的。放寬範圍沒有用。
+    ShownStepMismatch,
+    /// 走錯了路或權限級數不對——正常使用碰不到，碰到就是這支程式的錯。
+    WrongPath,
+}
+
 impl RefusalReason {
+    /// **這裡沒有 `_`。** 多一種拒絕理由就編不過，因為「它該算進哪一格」
+    /// 是一個每次都要重新回答的問題——留一個 `_` 的話，新的那一種會安靜地
+    /// 掉進當時剛好排在最後的那一格（見 `never_inherited_class` 同樣的寫法）。
+    pub const fn bucket(&self) -> RefusalBucket {
+        match self {
+            Self::UserDeclinedThisStep => RefusalBucket::Declined,
+            Self::HandsPulled { .. } => RefusalBucket::Pulled,
+            Self::NotCoveredByGrant { .. } => RefusalBucket::OutsideGrant,
+            Self::NeverInherited { .. } | Self::NeedsLivePress { .. } => {
+                RefusalBucket::NeedsALivePress
+            }
+            Self::ApprovalWasForAnotherStep { .. } => RefusalBucket::ShownStepMismatch,
+            Self::ObserveHasNoHands | Self::SemiActionNeedsGrantAndStepApproval => {
+                RefusalBucket::WrongPath
+            }
+        }
+    }
+
     pub fn message(&self) -> String {
         match self {
             Self::UserDeclinedThisStep => "你說不要，所以這一步沒有做。".to_string(),
@@ -748,6 +789,66 @@ pub struct ForgetReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 每一種拒絕該算進收尾那一行的哪一格，**由這裡獨立回答一次**。
+    ///
+    /// 底下 `expected_bucket` 那個 match 跟 [`RefusalReason::bucket`] 一樣沒有
+    /// `_`。所以新增一種拒絕理由的時候兩邊都會編不過——你會被逼著在這裡重新
+    /// 答一次，而不是讓測試跟著實作的答案跑（那樣它證得出來的只有「實作等於
+    /// 實作」）。
+    ///
+    /// 分格分錯的代價不是排版難看：`ApprovalWasForAnotherStep` 是 SPEC §9.7
+    /// 那道「螢幕上給他看的，和要交給作業系統的，不是同一步」的警報。它要是
+    /// 掉進 `OutsideGrant`，畫面會叫他去放寬 `--apps` / `--allow`，而那一步
+    /// 不但沒用，還剛好會去拆掉唯一擋住它的那道門。
+    #[test]
+    fn each_refusal_lands_in_the_bucket_whose_next_step_actually_helps() {
+        const fn expected_bucket(reason: &RefusalReason) -> RefusalBucket {
+            match reason {
+                RefusalReason::UserDeclinedThisStep => RefusalBucket::Declined,
+                RefusalReason::ObserveHasNoHands => RefusalBucket::WrongPath,
+                RefusalReason::SemiActionNeedsGrantAndStepApproval => RefusalBucket::WrongPath,
+                RefusalReason::NeverInherited { .. } => RefusalBucket::NeedsALivePress,
+                RefusalReason::NeedsLivePress { .. } => RefusalBucket::NeedsALivePress,
+                RefusalReason::NotCoveredByGrant { .. } => RefusalBucket::OutsideGrant,
+                RefusalReason::ApprovalWasForAnotherStep { .. } => RefusalBucket::ShownStepMismatch,
+                RefusalReason::HandsPulled { .. } => RefusalBucket::Pulled,
+            }
+        }
+
+        let every_reason = [
+            RefusalReason::UserDeclinedThisStep,
+            RefusalReason::ObserveHasNoHands,
+            RefusalReason::SemiActionNeedsGrantAndStepApproval,
+            RefusalReason::NeverInherited {
+                class: NeverInherited::Pay,
+            },
+            RefusalReason::NeedsLivePress {
+                class: NeverInherited::Pay,
+            },
+            RefusalReason::NotCoveredByGrant {
+                rejection: semi_action::GrantRejection::Apps,
+            },
+            RefusalReason::ApprovalWasForAnotherStep {
+                mismatch: semi_action::ApprovalMismatch::between(
+                    ActionSnapshot::OpenUrl {
+                        url: "https://screen".into(),
+                    },
+                    ActionSnapshot::OpenUrl {
+                        url: "https://handed-to-the-os".into(),
+                    },
+                ),
+            },
+            RefusalReason::HandsPulled { since_ms: Some(1) },
+        ];
+        for reason in &every_reason {
+            assert_eq!(
+                reason.bucket(),
+                expected_bucket(reason),
+                "{reason:?} 被算進了另一格；那一格教他做的下一步對這一種沒有用"
+            );
+        }
+    }
     use std::path::PathBuf;
 
     fn click() -> UserButtonPress {

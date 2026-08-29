@@ -1310,8 +1310,59 @@ pub mod act {
         done: u32,
         declined: u32,
         blocked: u32,
+        needs_press: u32,
+        mismatched: u32,
+        wrong_path: u32,
         pulled: u32,
         failed: u32,
+    }
+
+    impl Tally {
+        /// 分格照 [`sister_hands::RefusalBucket`]，不要在這裡再判一次。
+        /// 兩邊各判一次的話，它們會在某一版分家，而畫面上看不出來。
+        fn count_refusal(&mut self, reason: &RefusalReason) {
+            match reason.bucket() {
+                sister_hands::RefusalBucket::Declined => self.declined += 1,
+                sister_hands::RefusalBucket::Pulled => self.pulled += 1,
+                sister_hands::RefusalBucket::OutsideGrant => self.blocked += 1,
+                sister_hands::RefusalBucket::NeedsALivePress => self.needs_press += 1,
+                sister_hands::RefusalBucket::ShownStepMismatch => self.mismatched += 1,
+                sister_hands::RefusalBucket::WrongPath => self.wrong_path += 1,
+            }
+        }
+
+        /// 收尾那一行的後半段。**每一格只在不是零的時候出現**——六格永遠並排
+        /// 的話，那句話會長到沒有人讀，而真正該跳出來的那一格（`mismatched`）
+        /// 就淹在裡面了。
+        /// 「授權擋掉」**以外**那幾種拒絕，零的不印。
+        ///
+        /// 這幾格是拆出來的：以前五種拒絕全部併進 `blocked`，螢幕上只有一句
+        /// 「授權擋掉 N 步」——可是它們的下一步完全不一樣，只有
+        /// `NotCoveredByGrant` 那一種是「把 `--apps` / `--allow` 放寬」能解的。
+        /// 尤其 `ApprovalWasForAnotherStep`：放寬授權不但沒用，還剛好會去拆掉
+        /// 唯一擋住它的那道門。所以那一句刻意比別格長、也比別格兇。
+        fn refusal_clauses(&self) -> String {
+            let mut out = String::new();
+            if self.pulled > 0 {
+                out.push_str(&format!("，拔手擋掉 {} 步", self.pulled));
+            }
+            if self.needs_press > 0 {
+                out.push_str(&format!(
+                    "，{} 步要你當場按（票帶不動這一類）",
+                    self.needs_press
+                ));
+            }
+            if self.wrong_path > 0 {
+                out.push_str(&format!("，{} 步走錯了路（這是程式的錯）", self.wrong_path));
+            }
+            if self.mismatched > 0 {
+                out.push_str(&format!(
+                    "，⚠ {} 步在最後一刻發現「給你看的」和「要交出去的」不是同一步，已經擋下來了（放寬授權沒有用，請回報）",
+                    self.mismatched
+                ));
+            }
+            out
+        }
     }
 
     /// `sister do` 只跟資料庫要兩件事。
@@ -1771,8 +1822,8 @@ pub mod act {
                         Some((approval, button.take_up(permit)))
                     }
                     Err(rejection) => {
-                        tally.blocked += 1;
                         let reason = RefusalReason::NotCoveredByGrant { rejection };
+                        tally.count_refusal(&reason);
                         writeln!(out, "沒有做，也沒有交給作業系統：{}", reason.message())?;
                         log.append(&ActionEvent::Refused {
                             at_ms: clock(),
@@ -1850,11 +1901,7 @@ pub mod act {
                 // 沒交出去（Refused）／交出去了但那一端失敗（Failed）／成了。
                 let event = match &outcome {
                     Outcome::Refused { reason } => {
-                        if matches!(reason, RefusalReason::HandsPulled { .. }) {
-                            tally.pulled += 1;
-                        } else {
-                            tally.blocked += 1;
-                        }
+                        tally.count_refusal(reason);
                         writeln!(out, "沒有做，也沒有交給作業系統：{}", reason.message())?;
                         ActionEvent::Refused {
                             at_ms: clock(),
@@ -1979,22 +2026,18 @@ pub mod act {
                 },
             })?,
         }
-        let pulled = if tally.pulled > 0 {
-            format!("，拔手擋掉 {} 步", tally.pulled)
-        } else {
-            String::new()
-        };
+        let refusals = tally.refusal_clauses();
         if opts.unattended {
             writeln!(
                 out,
                 "這一輪：憑票決定了 {} 步，做成 {} 步，授權擋掉 {} 步{}，執行失敗 {} 步。",
-                tally.asked, tally.done, tally.blocked, pulled, tally.failed
+                tally.asked, tally.done, tally.blocked, refusals, tally.failed
             )?;
         } else {
             writeln!(
                 out,
                 "這一輪：問了 {} 步，做成 {} 步，你說不要 {} 步，授權擋掉 {} 步{}，執行失敗 {} 步。",
-                tally.asked, tally.done, tally.declined, tally.blocked, pulled, tally.failed
+                tally.asked, tally.done, tally.declined, tally.blocked, refusals, tally.failed
             )?;
         }
         Ok(())
@@ -2131,6 +2174,56 @@ pub mod act {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// 收尾那一行：SPEC §9.7 的警報**不可以**讀起來像一句例行的範圍不符。
+        ///
+        /// **這條打在 `Tally` 上，不是打在畫面上，是有原因的**——今天這支 CLI
+        /// 走不到 `ApprovalWasForAnotherStep`：`separate_approval_required` 和
+        /// `never_inherited_class` 對三種已實作的動作都回 `None`，而那張核准票
+        /// 和遞出去的那一步是從同一個 `step` 長出來的。這幾格是**先擺好的**，
+        /// 等那五類實作了才會有東西掉進來。
+        ///
+        /// 「`refusal_clauses()` 真的會出現在螢幕上那一行」由另一條蓋：
+        /// `hands_pulled_mid_run_stops_and_says_so` 斷言的
+        /// 「授權擋掉 0 步，拔手擋掉 1 步」是跑完整條 `run_with_output` 印出來的。
+        #[test]
+        fn the_shown_step_mismatch_alarm_is_not_reported_as_a_scope_problem() {
+            let mut tally = Tally::default();
+            tally.count_refusal(&RefusalReason::NotCoveredByGrant {
+                rejection: GrantRejection::Apps,
+            });
+            tally.count_refusal(&RefusalReason::ApprovalWasForAnotherStep {
+                mismatch: sister_hands::semi_action::ApprovalMismatch::between(
+                    sister_hands::ActionSnapshot::OpenUrl {
+                        url: "https://screen".into(),
+                    },
+                    sister_hands::ActionSnapshot::OpenUrl {
+                        url: "https://handed-to-the-os".into(),
+                    },
+                ),
+            });
+
+            assert_eq!(
+                tally.blocked, 1,
+                "「授權擋掉 N 步」那一格只裝範圍不符那一種，警報不可以也被算進去"
+            );
+            assert_eq!(tally.mismatched, 1, "警報那一格要自己數");
+
+            let clauses = tally.refusal_clauses();
+            assert!(
+                !clauses.contains("授權擋掉"),
+                "警報那一句自己也講成「授權擋掉」的話，等於沒有拆：{clauses}"
+            );
+            assert!(
+                clauses.contains("「給你看的」和「要交出去的」不是同一步"),
+                "警報要說出它到底是什麼，不能只給一個數字：{clauses}"
+            );
+            assert!(
+                clauses.contains("放寬授權沒有用"),
+                "少了這一句，他會照著「授權擋掉」的直覺去放寬 --apps/--allow，\
+                 而那正好是把唯一擋住它的那道門拆掉：{clauses}"
+            );
+        }
 
         use sister_core::db::CommitmentRow;
         use sister_hands::{ActionSnapshot, Replay};
