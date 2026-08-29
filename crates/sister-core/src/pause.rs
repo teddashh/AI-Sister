@@ -24,6 +24,20 @@ use std::path::{Path, PathBuf};
 use crate::dir_state::{DirState, dir_state};
 use crate::model::Millis;
 
+/// 她現在的暫停狀態，以及判成暫停的理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseState {
+    /// 沒有暫停。
+    Recording,
+    /// 暫停中，而且知道從什麼時候起。
+    Since(Millis),
+    /// 暫停中：旗標檔確定在，但內容讀不出來。刪掉它可以解除。
+    FlagPresentButUnreadable,
+    /// 暫停中：連 data dir 都讀不到，所以刻意一律當成暫停。
+    /// 旗標在不在沒有看過，刪它不一定有用。
+    PathUnreadable,
+}
+
 /// 旗標檔名。放在 data dir 裡，跟 `sister.db` 同一層。
 const FLAG: &str = "paused.flag";
 
@@ -42,8 +56,21 @@ fn decide(child: Result<bool, ()>, dir: DirState) -> bool {
     }
 }
 
-fn decide_for(data_dir: &Path, child: Result<bool, ()>) -> bool {
-    decide(child, dir_state(data_dir))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PauseDecision {
+    Recording,
+    FlagPresent,
+    PathUnreadable,
+}
+
+fn decide_for(data_dir: &Path, child: Result<bool, ()>) -> PauseDecision {
+    if !decide(child, dir_state(data_dir)) {
+        return PauseDecision::Recording;
+    }
+    match child {
+        Ok(true) => PauseDecision::FlagPresent,
+        Ok(false) | Err(()) => PauseDecision::PathUnreadable,
+    }
 }
 
 /// 她現在是不是閉著眼睛。
@@ -65,11 +92,27 @@ fn decide_for(data_dir: &Path, child: Result<bool, ()>) -> bool {
 pub fn is_paused(data_dir: &Path) -> bool {
     // 子路徑讀不到，或 data dir 存在但不是目錄／狀態讀不到，都算暫停；只有確定
     // 是正常目錄而旗標不在，或 data dir 確定不存在，才算正在錄。
-    decide_for(data_dir, flag_path(data_dir).try_exists().map_err(|_| ()))
+    !matches!(
+        decide_for(data_dir, flag_path(data_dir).try_exists().map_err(|_| ())),
+        PauseDecision::Recording
+    )
 }
 
-/// 從什麼時候開始暫停的。純顯示用；`None` 代表旗標在但內容讀不出來
-/// （例如寫到一半斷電），那仍然是暫停。
+/// 她現在的暫停狀態。
+///
+/// 判定和 [`is_paused`] 共用 [`decide_for`]，避免同一個問題各讀一次、得到兩個答案。
+pub fn state(data_dir: &Path) -> PauseState {
+    match decide_for(data_dir, flag_path(data_dir).try_exists().map_err(|_| ())) {
+        PauseDecision::Recording => PauseState::Recording,
+        PauseDecision::FlagPresent => paused_since(data_dir)
+            .map(PauseState::Since)
+            .unwrap_or(PauseState::FlagPresentButUnreadable),
+        PauseDecision::PathUnreadable => PauseState::PathUnreadable,
+    }
+}
+
+/// 從什麼時候開始暫停的。純顯示用；`None` 可能是旗標在但內容讀不出來，
+/// 也可能是連 data dir 都讀不到。要分辨這兩種情況請用 [`state`]。
 pub fn paused_since(data_dir: &Path) -> Option<Millis> {
     std::fs::read_to_string(flag_path(data_dir))
         .ok()?
@@ -172,7 +215,7 @@ mod tests {
         assert!(is_paused(&file));
         // Windows 對這個真實路徑的 child 查詢回 Ok(false)；Linux 無法自然產生，
         // 所以在 IO 邊界明確餵入該答案，並仍由薄殼讀取真實 data dir 狀態。
-        assert!(decide_for(&file, Ok(false)));
+        assert_eq!(decide_for(&file, Ok(false)), PauseDecision::PathUnreadable);
     }
 
     #[test]
@@ -191,6 +234,36 @@ mod tests {
     fn a_fresh_machine_is_recording() {
         let dir = Tmp::new("fresh");
         assert!(!is_paused(dir.path()));
+    }
+
+    #[test]
+    fn state_and_is_paused_agree_for_every_state() {
+        let dir = Tmp::new("state-agrees");
+        let cases = [
+            (dir.0.join("absent"), PauseState::Recording),
+            (dir.0.join("valid"), PauseState::Since(1234)),
+            (
+                dir.0.join("broken-flag"),
+                PauseState::FlagPresentButUnreadable,
+            ),
+            (dir.0.join("not-a-dir"), PauseState::PathUnreadable),
+        ];
+        std::fs::create_dir_all(&cases[1].0).unwrap();
+        std::fs::write(flag_path(&cases[1].0), "1234").unwrap();
+        std::fs::create_dir_all(&cases[2].0).unwrap();
+        std::fs::write(flag_path(&cases[2].0), "half-written").unwrap();
+        std::fs::write(&cases[3].0, "not a directory").unwrap();
+
+        for (path, expected) in cases {
+            let actual = state(&path);
+            assert_eq!(actual, expected, "{}", path.display());
+            assert_eq!(
+                matches!(actual, PauseState::Recording),
+                !is_paused(&path),
+                "state() 和 is_paused() 對不起來：{}",
+                path.display()
+            );
+        }
     }
 
     #[test]

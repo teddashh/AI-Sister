@@ -11527,6 +11527,51 @@ pub mod doctor {
         }
     }
 
+    /// 暫停那一列要說的話，`None` ＝沒有暫停。
+    ///
+    /// **這一支是量的那一邊，所以它拿得到路徑，而它是唯一拿得到的一邊。**
+    /// `watching_verdict` 刻意沒有路徑（理由見它自己的註解），可是「刪掉哪一個
+    /// 檔」「哪一條路讀不到」只有路徑講得出來，所以三種暫停的句子在這裡寫完，
+    /// 送過去的是一句已經寫好的話。同 `hands_status`：收 `&Path`、回一句話、
+    /// 測試餵真的路徑進來。
+    ///
+    /// 分成三句是這一版修的病。`paused_since()` 回 `None` 同時代表兩件事，而
+    /// 上一版把兩件事印成同一句「**暫停中**（不知道從什麼時候開始）」：
+    ///
+    /// 1. 旗標檔確定在，內容壞了（寫到一半斷電）→ **刪掉它有用**。
+    /// 2. 連 data dir 都讀不到，`is_paused` 刻意 fail-closed 所以算暫停——而
+    ///    這一路上**旗標在不在根本沒看過** → **刪掉它不一定有用**，那句話會讓
+    ///    他去刪一個可能不存在的檔，然後回來看到同一行字。
+    ///
+    /// `sister record` 開場那一行在 alpha.78 已經分開講了（見 `pause_warning`），
+    /// doctor 這一格沒跟上。現在兩邊都問 `pause::state()`，「哪一種暫停」只有一
+    /// 個地方說了算。
+    fn paused_row(data_dir: &Path) -> Option<String> {
+        use sister_core::pause::PauseState;
+        let flag = sister_core::pause::flag_path(data_dir);
+        match sister_core::pause::state(data_dir) {
+            PauseState::Recording => None,
+            PauseState::Since(ts) => Some(format!(
+                "**暫停中**（從 {} 起）。這段期間什麼都不會被記錄；\
+                 在字母人上按一下暫停鍵解除，或刪掉 {}",
+                crate::fmt::timestamp(ts),
+                flag.display()
+            )),
+            PauseState::FlagPresentButUnreadable => Some(format!(
+                "**暫停中**（旗標內容讀不出來）。這段期間什麼都不會被記錄；\
+                 刪掉 {} 可解除",
+                flag.display()
+            )),
+            // 不可以叫他去刪旗標：這一格是「連那條路都讀不到」，旗標在不在
+            // 沒有人看過。
+            PauseState::PathUnreadable => Some(format!(
+                "**暫停中**：讀不到 {} 這條路，所以刻意一律當成暫停；\
+                 旗標在不在也讀不出來，先確認那條路讀不讀得到",
+                data_dir.display()
+            )),
+        }
+    }
+
     /// 「現在有沒有在看」那一列的符號和句子。
     ///
     /// **這一支拿不到 `data_dir`，而那是它存在的理由。** 上一版這段程式長在
@@ -11543,8 +11588,15 @@ pub mod doctor {
     /// 讀。同 `recorded_verdict` / `crash_verdict`，把判斷搬進一支收「已經量
     /// 好的東西」的函式。
     ///
-    /// `paused` 是 `Some(從什麼時候起)`＝暫停中。它排在最前面，因為它壓過其他
-    /// 每一種：暫停的時候有沒有 recorder 佔著都無所謂，她根本沒在看。
+    /// `paused` 是 `Some(那一整句話)`＝暫停中，由 `paused_row` 量好也寫好。它
+    /// 排在最前面，因為它壓過其他每一種：暫停的時候有沒有 recorder 佔著都無所
+    /// 謂，她根本沒在看。
+    ///
+    /// **那句話是別人寫好送進來的，不是這裡現查的。** 中間有一版為了讓三種暫停
+    /// 各自講得出下一步，把 `PauseState` 和兩條路徑（data dir、旗標）一起塞進這
+    /// 支函式。三種話是對的，代價是上面那句「這支函式手上沒有路徑」當場變成
+    /// 假的——`&str` 也是路徑，`Path::new(data_dir)` 一行就編得過，而這支函式
+    /// 存在的全部理由就是它寫不出第二次讀。所以路徑留在 `paused_row` 那一側。
     fn watching_verdict(
         paused: Option<String>,
         beat: sister_core::heartbeat::Presence,
@@ -11553,11 +11605,8 @@ pub mod doctor {
         // 這一行是**唯一**會告訴使用者「你上禮拜按的暫停還開著」的地方。暫停
         // 不會自己過期（見 `sister_core::pause`），所以那條路很真實，而它的症
         // 狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
-        if let Some(since) = paused {
-            return (
-                "⏸",
-                format!("**暫停中**（{since}）。這段期間什麼都不會被記錄"),
-            );
+        if let Some(said) = paused {
+            return ("⏸", said);
         }
         match beat {
             Presence::Live(Phase::Recording) => ("✓", "有一個 sister record 正在跑".to_string()),
@@ -12907,12 +12956,7 @@ pub mod doctor {
         // 而且這一行是**唯一**會告訴使用者「你上禮拜按的暫停還開著」的地方。
         // 暫停不會自己過期（見 `sister_core::pause`），所以那條路很真實，而
         // 它的症狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
-        let paused = sister_core::pause::is_paused(data_dir).then(|| {
-            sister_core::pause::paused_since(data_dir)
-                .map(|ts| format!("從 {} 起", crate::fmt::timestamp(ts)))
-                .unwrap_or_else(|| "不知道從什麼時候開始".to_string())
-        });
-        let (sym, said) = watching_verdict(paused, beat);
+        let (sym, said) = watching_verdict(paused_row(data_dir), beat);
         mark(sym, "現在有沒有在看", &said);
         // 題庫是整個資料庫裡唯一一張存著**你自己打進去的字**的表，所以它得
         // 出現在這一頁上。doctor 的工作是把真相攤開，而一張存了東西、卻沒有
@@ -13854,14 +13898,14 @@ pub mod doctor {
             use sister_core::heartbeat::Phase;
             let all = [
                 watching_verdict(
-                    Some("從 08-20 03:00 起".into()),
+                    Some("**暫停中**（從 08-20 03:00 起）".into()),
                     Presence::Stopped { at: None },
                 ),
                 // 暫停壓過心跳：她佔著這個目錄，可是什麼都不會被記錄。少了這
                 // 一格，一個按著暫停的人會看到「有一個 sister record 正在跑」
                 // 然後以為自己被記著。
                 watching_verdict(
-                    Some("從 08-20 03:00 起".into()),
+                    Some("**暫停中**（從 08-20 03:00 起）".into()),
                     Presence::Live(Phase::Recording),
                 ),
                 watching_verdict(None, Presence::Live(Phase::Recording)),
@@ -13902,6 +13946,84 @@ pub mod doctor {
                 "「正在起來」印成「正在跑」，他就會照著那句話去做一件想被記住的事：{}",
                 all[3].1
             );
+        }
+
+        /// **四種處境各餵一條真的路徑進去，不是手填四個 enum 值。**
+        ///
+        /// 差別在哪裡：手填 `PauseState::PathUnreadable` 再看它印什麼，證明的是
+        /// 「這個 enum 值會印出這句話」；而這一版要證的是「**一條讀不到的路會走
+        /// 到那個 enum 值**」。上一版這條測試是前者，於是把 `paused_row` 的內容
+        /// 整段換回舊行為（兩種 `None` 併成一句「刪掉旗標可解除」）之後，整個
+        /// workspace 照樣全綠——這一版修的那個病被還原了，沒有一條測試出聲。
+        ///
+        /// 所以底下三種暫停的狀態都是**做出來的**：寫一個壞旗標、把 data dir
+        /// 做成一個檔案。`Since` 那一格順便釘住「時間讀得出來的時候不准講
+        /// 『不知道從什麼時候開始』」。
+        #[test]
+        fn every_paused_state_comes_from_a_real_path_and_says_its_own_next_step() {
+            let root = crate::ops::tmp::Tmp::new("doctor-pause-states");
+
+            let recording = root.0.join("recording");
+            std::fs::create_dir_all(&recording).unwrap();
+            assert_eq!(paused_row(&recording), None, "沒暫停就不該有這一列");
+
+            let since_dir = root.0.join("since");
+            std::fs::create_dir_all(&since_dir).unwrap();
+            sister_core::pause::set_paused(&since_dir, true, 1_755_656_400_000).unwrap();
+            let since = paused_row(&since_dir).expect("暫停中");
+            assert!(since.contains("**暫停中**（從 "), "{since}");
+            assert!(
+                !since.contains("不知道從什麼時候開始"),
+                "時間讀得出來就不可以說不知道：{since}"
+            );
+            assert!(
+                since.contains("暫停鍵解除") || since.contains("刪掉"),
+                "解不解得開要講出來：{since}"
+            );
+
+            let broken_dir = root.0.join("broken-flag");
+            std::fs::create_dir_all(&broken_dir).unwrap();
+            std::fs::write(sister_core::pause::flag_path(&broken_dir), "half-written").unwrap();
+            let broken = paused_row(&broken_dir).expect("壞旗標仍然是暫停");
+            let broken_flag = sister_core::pause::flag_path(&broken_dir)
+                .display()
+                .to_string();
+            assert!(
+                broken.contains(&format!("刪掉 {broken_flag} 可解除")),
+                "旗標確定在，刪它有用，那就要說出是哪一個檔：{broken}"
+            );
+
+            let unreadable_dir = root.0.join("not-a-dir");
+            std::fs::write(&unreadable_dir, "not a directory").unwrap();
+            assert!(
+                sister_core::pause::is_paused(&unreadable_dir),
+                "fail-closed"
+            );
+            assert!(
+                !sister_core::pause::flag_path(&unreadable_dir).exists(),
+                "這一格的前提就是旗標不在，而程式沒有看過"
+            );
+            let unreadable = paused_row(&unreadable_dir).expect("fail-closed 也是暫停");
+            assert!(
+                unreadable.contains(&format!("讀不到 {} 這條路", unreadable_dir.display())),
+                "{unreadable}"
+            );
+            assert!(
+                unreadable.contains("先確認那條路讀不讀得到"),
+                "{unreadable}"
+            );
+            assert!(
+                !unreadable.contains("刪掉"),
+                "旗標在不在沒人看過，叫他去刪一個不存在的檔，他會回來看到同一行字：{unreadable}"
+            );
+
+            // 三種暫停各說各的，不可以有兩種印出同一句。
+            let three = [&since, &broken, &unreadable];
+            for (i, a) in three.iter().enumerate() {
+                for b in &three[i + 1..] {
+                    assert_ne!(a, b, "兩種成因印出同一句話，正是這一版在修的病");
+                }
+            }
         }
 
         /// **同一份報告的四列，在開機那幾分鐘要說同一件事。**
@@ -19859,22 +19981,21 @@ pub mod record {
 
     #[cfg(any(windows, test))]
     fn pause_warning(data_dir: &Path) -> Option<String> {
-        if !sister_core::pause::is_paused(data_dir) {
-            return None;
-        }
+        use sister_core::pause::PauseState;
         let flag = sister_core::pause::flag_path(data_dir);
-        match sister_core::pause::paused_since(data_dir) {
-            Some(ts) => Some(format!(
+        match sister_core::pause::state(data_dir) {
+            PauseState::Recording => None,
+            PauseState::Since(ts) => Some(format!(
                 "目前是暫停狀態（從 {} 起），不會記錄任何東西。\
                  在字母人上按一下暫停鍵解除，或刪掉 {}。",
                 crate::fmt::timestamp(ts),
                 flag.display()
             )),
-            None if flag.try_exists().is_ok_and(|exists| exists) => Some(format!(
+            PauseState::FlagPresentButUnreadable => Some(format!(
                 "目前是暫停狀態，不會記錄任何東西。刪掉 {} 可解除。",
                 flag.display()
             )),
-            None => Some(format!(
+            PauseState::PathUnreadable => Some(format!(
                 "目前是暫停狀態：讀不到資料目錄 {} 這條路，所以刻意一律當成暫停。\
                  旗標在不在也讀不出來；請先確認資料目錄本身讀不讀得到，讀得到之後 paused.flag 如果還在，刪掉它就會解除。",
                 data_dir.display()
