@@ -921,7 +921,11 @@ $B --data-dir "$pause_dir" doctor > pause-doctor.txt
 pause_row=$(grep -E '現在有沒有在看' pause-doctor.txt || true)
 echo "$pause_row" | grep -qE '⏸ +現在有沒有在看' \
   || { echo "::error::[暫停中] doctor 那一列沒有畫出暫停符號"; echo "$pause_row"; exit 1; }
-echo "$pause_row" | grep -q '`sister resume`' \
+# 要抓的是**帶著這一次 `--data-dir` 的那一行**，不是句子裡任何一個
+# `sister resume`。上一版寫的是 grep '`sister resume`'，而同一句話裡有一段
+# 「不是裸的 `sister resume`」——於是把八個 resume 出口全部改回裸的指令，
+# 這條照樣綠。錯誤訊息自己寫著要驗 `--data-dir`，驗的卻是那句免責。
+echo "$pause_row" | grep -qF "sister --data-dir $pause_dir resume" \
   || { echo "::error::[暫停中] doctor 那一列沒有給吃得到同一個 --data-dir 的下一步"; echo "$pause_row"; exit 1; }
 if echo "$pause_row" | grep -q '正在跑'; then
   echo "::error::[暫停中] doctor 說她正在跑，但這個資料目錄已經暫停"

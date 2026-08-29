@@ -489,8 +489,12 @@ jobs:
             echo "::error::沒有任何一張同意書，她卻照樣開始錄了"
             exit 1
           fi
-          grep -q 'sister consent --grant local-recording' refused.txt \
-            || { echo "::error::她拒絕了，卻沒告訴使用者下一步該打什麼"; exit 1; }
+          # 要**帶著** `--data-dir ./ungranted`。這一場不是在預設資料目錄跑
+          # 的，那一行少了旗標就是叫他去簽另一個資料夾的同意書——簽完回來，
+          # `./ungranted` 還是沒簽，症狀一個字都不會變。alpha.81 以前整份程式
+          # 碼只有 `sister export` 那一句把旗標帶上。
+          grep -q 'sister --data-dir ./ungranted consent --grant local-recording' refused.txt \
+            || { echo "::error::她拒絕了，卻沒告訴使用者下一步該打什麼（那一行要帶著這一次的 --data-dir）"; cat refused.txt; exit 1; }
 
           # 心跳。字母人靠這個檔案分辨「她在錄」和「根本沒有人開她」——
           # 少了它，暫停旗標乾淨的時候它就顯示「在聽」，而那是這個產品唯一
