@@ -728,6 +728,88 @@ $ sister --data-dir ~/.local/share/ai-sister queries
 掉 `mod command_tests` 本身——那個模組非丟不可，因為違禁清單就是以字串字面值寫
 在它裡面的。**地標不會動，程式碼會搬家；掃描範圍要跟著程式碼走。**
 
+**接著 Windows CI 紅了九條，而病不在 Windows。** runner 的暫存路徑是
+`C:\Users\RUNNER~1\…`，`~` 不在安全字元集裡，所以上面那一輪讓 `cmd_for`
+**正確地**加了引號，而九條斷言把「沒有引號的原始路徑」寫死在裡面。本機把
+`TMPDIR` 指到需要引號的路徑就重現得出來，不必等 CI（下表是 `1dd925c` 原狀）：
+
+| TMPDIR | 紅幾條 |
+|---|---|
+| `RUNNER~1` | 8 |
+| `has space` | 8 |
+| `back\slash` | 8 |
+| `Ted's dir` | **11** |
+| `中文目錄` | 0 |
+| 乾淨路徑 | 0 |
+
+**但本機的複製不是 CI 的超集**——這件事比表格重要。CI 那九條裡，`RUNNER~1`
+這一格只重現得出**七**條：`attended_run_rejects_non_terminal_before_opening_the_database`
+要路徑含單引號才紅，而六種路徑併起來仍有一條
+（`scoped_command_preserves_a_literal_backslash_in_the_task`，上一版自己新加的）
+**一次都複製不出來**——它只在 Windows 的 PowerShell 那一臂紅。反過來本機多紅一條
+CI 沒有的。所以「本機六種路徑全綠」不等於「CI 會綠」，這一輪最後還是得看 CI。
+`Ted's dir` 多出來的三條只有路徑含 `'` 才踩得到，而 `C:\Users\O'Brien\…` 是真的
+會有的使用者名字。
+
+**而修那九條的時候，我自己造了一個更大的洞。** 派工單裡我寫了一句通則：「斷言
+要用跟產品同一條規則算出期望值，不要寫死。」那句話對**問「有沒有指到這個目錄」
+的斷言**是對的（七條照著改，而「`cmd_for` 永遠不印旗標」這個突變仍然殺得掉十九
+條）。它對**問「格式長什麼樣」的斷言是毀滅性的**：
+`next_step_keeps_a_cjk_directory_bare_and_round_trips_it` 問的正是「有沒有加引
+號」，期望值一改用 `quote_for()` 去算，兩邊就一起變了。名字還寫著 bare，斷言已
+經變成「隨便 `quote_for` 怎麼說」。上一輪整輪存在的理由（中文路徑被加上
+`cmd.exe` 不認的單引號）當場歸零：`c.is_alphanumeric()` 換回
+`c.is_ascii_alphanumeric()` 這個突變，改之前殺得掉一條，改之後 341 全綠。
+
+**最難防的那一半：被刪掉的覆蓋是「順便」來的，沒有人知道它在。** 那八條斷言寫的
+是 `--data-dir {}` 加上 `dir.display()`，看起來只在問「有沒有指到這個目錄」。但
+`tmp::Tmp` 造出來的路徑長 `sister-{pid}-{name}-{n}`——**每一條都含數字**，於是它
+們**順便**在守 `quote_for` 的安全集。`c.is_alphanumeric()` → `c.is_alphabetic()`
+這個突變，換斷言之前紅 8 條，換之後 342 全綠。沒有任何一條測試的名字、註解或位
+置透露它在守那件事。**所以「這條斷言在問什麼」不能只讀它，要問它會被什麼突變殺
+掉**；換掉一批斷言之前先對那批跑一次突變表，那份清單才是驗收標準。
+
+四道閘門全綠、RESULT 檔誠實（甚至白紙黑字寫著「CJK round-trip 一併改成依 shell
+quoting 算期望值」）、diff 每一行都合理——只有**重跑上一輪的突變**看得見。
+
+裝回去的牙齒：`quote_for` 的安全集現在有一張字面錨點表，數字、`.`、`_`、`-`、
+`/`、`:` 逐字元守住；兩條組指令測試各補一條 PowerShell 字面斷言與 round trip
+（以前 `platform_shell()` 釘成 POSIX 完全沒事）；`forget` 預覽把輸入 span 跟解析
+結果相比並單獨守 `--yes`（以前「預覽算 30 天、印出來的指令刪 1 小時」和「那一行
+沒帶 `--yes`」兩個突變都活著，而正下方就寫著**「沒有回收桶，也沒有復原。」**）；
+`quote_for` 的空字串守衛拿掉之後以前全綠，而 `--data-dir ''` 那個 token 會整個消
+失。另外 `cmd`、`use_grant`、`save_grant` 是真的會去問 `Config::default_data_dir()`
+的三個出口，而測試全部打在收 `Option<&Path>` 的零件上，三處各自傳 `None` 都是全
+綠；三處不一致的話 `forget` 和 `do` 又會對同一個目錄講不一樣的話——那正是
+alpha.81 頭條修掉的病。現在有測試驅動那三個 production 出口。
+
+**順帶修對了量測的儀器。**「紅」是**兩種零**：可能是突變被抓到，也可能是這棵樹
+本來就紅。第一次「證明」上面那件事用的控制組是壞的——`TMPDIR` 含 `~` 的時候那條
+CJK 測試本來就在紅，突變前後都紅，我讀成「有守」。正確的讀法是比對**失敗測試的
+名單集合**，而且控制組要同一個 commit、同一個 `TMPDIR`，只換那一個檔案。
+
+**最後：一句說「有閘門在守」的註解，那道閘門不存在。** `semi_action.rs` 上寫著
+「刻意不 derive `Serialize`/`Deserialize`⋯⋯這個否定性質無法用一般 runtime test
+證明；**交付閘門用定點 source grep 檢查 derive 沒有出現在這裡**」。`scripts/` 和
+`.github/` 裡沒有任何一條提到 `StepApproval` 或 `PresentedStep`，也沒有任何
+script 在 grep derive。加一個 `#[derive(Serialize)]` 上去，全部閘門照樣綠。
+
+這是 repo 裡三張「偽造不出來的憑證」之一被記錯了：`CloudAllowed(())` 和
+`UserButtonPress(())` 靠私有建構子，繞過去真的編不過；`StepApproval` 的「沒有
+derive」靠的是那句註解。**否定性質特別容易只剩下註解，因為 runtime test 寫不
+出來。**
+
+改成用 coherence 衝突釘住，不需要新 script：兩個 blanket impl 各自涵蓋所有
+`Serialize` 和所有 `DeserializeOwned` 的型別，再對這兩個型別各寫一行具名 impl。
+一旦它們拿到那兩個 trait 之一就同時被兩邊涵蓋，當場 E0119。四個方向
+（`StepApproval`／`PresentedStep` × `Serialize`／`Deserialize`）都在這棵樹上實測
+過會編不過，未突變的狀態 `clippy -D warnings` 乾淨（`#[allow(dead_code)]` 拿掉就
+會紅——那兩個 trait 沒有人呼叫是故意的，它們的用途是佔住 coherence）。
+
+**註解只留程式真的證得到的範圍**：它證的是這兩個型別**沒有那兩個 trait**，
+它**證不了**「批准不能落地後重播」——`StepRequest` 本身可序列化，公開的
+`PresentedStep::new(…).approve()` 仍然能從落地後重讀的 request 產生批准。
+
 **還缺**（alpha.82 當下）：
 - **PowerShell 那套規則，在真的 PowerShell 上貼不貼得回去，仍然沒有執行證據。**
   `quote_for` 這支純函式兩臂都測得到，但測的是「它回傳這個字串」；那個字串**被
