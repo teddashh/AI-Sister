@@ -1586,7 +1586,7 @@ async function load(keep = null) {
       const stored = await invoke("has_ever_stored").catch(() => false);
       if (ever && !stored) {
         el.railSay.textContent = "一天都沒有。";
-        say("她錄過，但一列內容都沒存進來過——先到設定頁看「開始記錄」那一段。");
+        say("她錄過，但一列內容都沒存進來過——跑 `sister doctor`，它會直接說是哪一段擋住了。");
       } else if (ever) {
         el.railSay.textContent = "現在一天都沒有了。";
         say("她錄過——這些紀錄是被忘掉的，或是過了保留期。再錄一段就會有新的。");

@@ -1269,6 +1269,65 @@ pub mod act {
         sister_hands::semi_action::grant_tmp_path(data_dir)
     }
 
+    /// 這裡選 POSIX shell 的單引號規則：整個值用單引號包起來，值裡的
+    /// 單引號改成「結束引號、已跳脫的單引號、再開引號」。產品出貨平台也有 PowerShell，但兩套 shell 對內嵌
+    /// 引號的文法不同；這一行選一套可以被測試完整拆回 argv 的規則，不猜。
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    fn command_prefix(data_dir: &Path) -> String {
+        let mut command = "sister".to_owned();
+        if sister_core::Config::default_data_dir().as_deref() != Some(data_dir) {
+            command.push_str(" --data-dir ");
+            command.push_str(&shell_quote(&data_dir.to_string_lossy()));
+        }
+        command
+    }
+
+    fn scoped_grant_command(data_dir: &Path, opts: &Options) -> String {
+        let mut command = format!(
+            "{} do --task {}",
+            command_prefix(data_dir),
+            shell_quote(&opts.task)
+        );
+        for app in &opts.apps {
+            command.push_str(" --app ");
+            command.push_str(&shell_quote(app));
+        }
+        for allow in &opts.allow {
+            command.push_str(" --allow ");
+            command.push_str(&shell_quote(allow));
+        }
+        command.push_str(&format!(
+            " --minutes {} --steps {} --save-grant",
+            opts.minutes, opts.steps
+        ));
+        command
+    }
+
+    fn use_grant_command(data_dir: &Path, opts: &Options) -> String {
+        format!(
+            "{} do --task {} --use-grant --unattended",
+            command_prefix(data_dir),
+            shell_quote(&opts.task)
+        )
+    }
+
+    fn piped_stdin_message(data_dir: &Path, opts: &Options) -> String {
+        let use_grant = use_grant_command(data_dir, opts);
+        if grant_path(data_dir).is_file() {
+            format!(
+                "沒有做任何事，一步都沒有交出去：stdin 不是終端機，那個「好」可能是別的程式餵的，卻會被記成你當場按了。這裡已經有存過的授權書；拿掉 `--app`、`--allow`、`--minutes`、`--steps`，改用 `{use_grant}`，紀錄會寫「憑票決定」。`--dry-run` 不受影響。"
+            )
+        } else {
+            let save_grant = scoped_grant_command(data_dir, opts);
+            format!(
+                "沒有做任何事，一步都沒有交出去：stdin 不是終端機，那個「好」可能是別的程式餵的，卻會被記成你當場按了。先在終端機裡跑 `{save_grant}`，當場看過範圍並存下授權書；之後在管子裡拿掉 `--app`、`--allow`、`--minutes`、`--steps`，改跑 `{use_grant}`，紀錄會寫「憑票決定」。`--dry-run` 不受影響。"
+            )
+        }
+    }
+
     fn load_grant(data_dir: &Path) -> Result<Grant> {
         let path = grant_path(data_dir);
         let raw = match std::fs::read(&path) {
@@ -1532,9 +1591,7 @@ pub mod act {
         // 只看 stdin：stdout 被 `tee` 導走時，人還是看得到問題；
         // 反過來，stdin 是管子已足以證明那個「好」不是鍵盤當場給的。
         if who_answers(opts, stdin_is_terminal) == WhoAnswers::SomethingElseIsFeedingAnswers {
-            anyhow::bail!(
-                "沒有做任何事，一步都沒有交出去：stdin 不是終端機，那個「好」可能是別的程式餵的，卻會被記成你當場按了。請在終端機裡跑；或明說是憑票跑，使用 `--use-grant --unattended`，紀錄會寫「憑票決定」。`--dry-run` 不受影響。"
-            );
+            anyhow::bail!(piped_stdin_message(data_dir, opts));
         }
         if opts.show_grant {
             let grant = load_grant(data_dir)?;
@@ -2286,6 +2343,7 @@ pub mod act {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use clap::Parser;
 
         /// 收尾那一行：SPEC §9.7 的警報**不可以**讀起來像一句例行的範圍不符。
         ///
@@ -2463,6 +2521,38 @@ pub mod act {
             dir
         }
 
+        fn commands_in(message: &str) -> Vec<Vec<String>> {
+            message
+                .split('`')
+                .filter(|part| part.starts_with("sister"))
+                .map(|command| shlex::split(command).expect("POSIX 引號的指令要拆得回 argv"))
+                .collect()
+        }
+
+        fn assert_scoped_command(argv: &[String], data_dir: &Path, expected: &Options) {
+            let parsed =
+                crate::Cli::try_parse_from(argv).expect("錯誤訊息裡的指令要真的被 clap 接受");
+            assert_eq!(parsed.data_dir.as_deref(), Some(data_dir));
+            let crate::Command::Do {
+                task,
+                apps,
+                allow,
+                minutes,
+                steps,
+                save_grant,
+                ..
+            } = parsed.command
+            else {
+                panic!("訊息裡的第一條指令不是 sister do");
+            };
+            assert_eq!(task.as_deref(), Some(expected.task.as_str()));
+            assert_eq!(apps, expected.apps);
+            assert_eq!(allow, expected.allow);
+            assert_eq!(minutes, expected.minutes);
+            assert_eq!(steps, expected.steps);
+            assert!(save_grant);
+        }
+
         #[test]
         fn who_answers_distinguishes_every_mode() {
             let attended = opts("任務", &[], 1, 5, false);
@@ -2487,12 +2577,92 @@ pub mod act {
 
         #[test]
         fn attended_run_rejects_non_terminal_before_opening_the_database() {
-            let dir = missing_data_dir("act-piped-before-database");
-            let err = run_with_stdin_kind(&dir.0, &opts("任務", &[], 1, 5, false), false)
-                .expect_err("piped answers must be rejected");
+            for (name, mut expected) in [
+                (
+                    "invoices",
+                    opts("整理這個月的發票", &["excel.exe", "files.exe"], 3, 5, false),
+                ),
+                (
+                    "report",
+                    opts(
+                        "Bob's 季報 完成嗎？",
+                        &["chrome.exe", "mail.exe"],
+                        7,
+                        19,
+                        false,
+                    ),
+                ),
+            ] {
+                expected.allow = vec!["open-file".into(), "focus-window".into()];
+                let dir = missing_data_dir(&format!("act-piped-{name}"));
+                let err = run_with_stdin_kind(&dir.0, &expected, false)
+                    .expect_err("piped answers must be rejected");
+                let message = err.to_string();
+                assert!(message.contains("stdin 不是終端機"), "{message}");
+                assert!(message.contains("拿掉 `--app`"), "{message}");
+                assert!(
+                    message.contains(&dir.0.to_string_lossy().to_string()),
+                    "{message}"
+                );
+                for value in expected.apps.iter().chain(&expected.allow) {
+                    assert!(message.contains(value), "{value} 沒有印出來：{message}");
+                }
+                assert!(
+                    message.contains(&format!("--minutes {}", expected.minutes)),
+                    "{message}"
+                );
+                assert!(
+                    message.contains(&format!("--steps {}", expected.steps)),
+                    "{message}"
+                );
+
+                let commands = commands_in(&message);
+                assert_eq!(commands.len(), 2, "{message}");
+                assert_scoped_command(&commands[0], &dir.0, &expected);
+                let parsed_use =
+                    crate::Cli::try_parse_from(&commands[1]).expect("應該也能把憑票指令貼回 shell");
+                let crate::Command::Do {
+                    task,
+                    use_grant,
+                    unattended,
+                    ..
+                } = parsed_use.command
+                else {
+                    panic!("第二條指令不是 sister do");
+                };
+                assert_eq!(task.as_deref(), Some(expected.task.as_str()));
+                assert!(use_grant && unattended);
+            }
+        }
+
+        #[test]
+        fn default_data_dir_is_the_only_one_that_omits_the_flag() {
+            let default =
+                sister_core::Config::default_data_dir().expect("這個平台要有預設資料目錄");
+            assert_eq!(command_prefix(&default), "sister");
+
+            let custom = Path::new("/tmp/not-the-default-sister-dir");
+            assert!(command_prefix(custom).contains("--data-dir"));
+        }
+
+        #[test]
+        fn piped_run_with_a_saved_grant_names_only_the_compatible_flags() {
+            let dir = crate::ops::tmp::Tmp::new("act-piped-with-grant");
+            std::fs::write(grant_path(&dir.0), b"not needed by the stdin gate")
+                .expect("grant marker");
+            let err =
+                run_with_stdin_kind(&dir.0, &opts("任務", &["chrome.exe"], 2, 10, false), false)
+                    .expect_err("piped answers must be rejected");
             let message = err.to_string();
-            assert!(message.contains("stdin 不是終端機"), "{message}");
+            assert!(message.contains("已經有存過的授權書"), "{message}");
+            assert!(message.contains("拿掉 `--app`"), "{message}");
             assert!(message.contains("--use-grant --unattended"), "{message}");
+            assert!(!message.contains("--save-grant"), "{message}");
+            assert!(message.contains("任務"), "{message}");
+            assert!(
+                message.contains(&dir.0.to_string_lossy().to_string()),
+                "{message}"
+            );
         }
 
         /// `run` 的工作只有一件：把**真的那條 stdin** 是哪一種交給下面那一支。
@@ -4561,7 +4731,7 @@ pub mod watch {
         // 都不會看。指路那一行也一樣，要指到 `sister watch --dry-run`。
         // **開跑那一刻的閘門。** 迴圈裡每一輪都會再讀一次（見那裡）——這一張
         // 票只證明「開跑的時候他簽著」，不證明十分鐘後他還簽著。
-        if consent.cloud_permit().is_none() {
+        if consent.cloud_permit().is_none() && !opts.dry_run {
             writeln!(out, "{}", WatchSkip::NoConsent.message())?;
             return Ok(());
         }
@@ -4655,6 +4825,16 @@ pub mod watch {
 
         let mut last_seen = started.saturating_sub(every);
         if opts.dry_run {
+            writeln!(out, "── 不會送出去（--dry-run）──")?;
+            writeln!(
+                out,
+                "同意書 2：{}",
+                if consent.cloud_permit().is_some() {
+                    "已簽"
+                } else {
+                    "沒簽——真的跑的話一次都不會呼叫"
+                }
+            )?;
             let (from, to) = window(last_seen, started).expect("開跑那一刻的時鐘不會比自己早");
             let (hits, more) = newest_since(&db, from, to, HIT_LIMIT)?;
             if more {
@@ -6126,6 +6306,35 @@ pub mod watch {
             .expect("run");
             let text = String::from_utf8(out).unwrap();
             assert!(text.contains("cloud-reading"));
+            let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
+            let day = sister_core::local_day::local_day_key(100_000).unwrap();
+            assert_eq!(db.brain_outbound_count_on(&day).unwrap(), 0);
+        }
+
+        #[test]
+        fn dry_run_without_cloud_consent_still_prints_the_payload_and_sends_nothing() {
+            let (tmp, config) = prepared("watch-dry-no-consent", "PRIVATE 沒簽同意書的原文", false);
+            let mut out = Vec::new();
+            run_with(
+                &tmp.0,
+                &config,
+                &WatchOpts {
+                    question: "完成嗎".into(),
+                    every: 30_000,
+                    stop_after: 60_000,
+                    quiet_for: None,
+                    dry_run: true,
+                    notify: false,
+                },
+                &mut || 100_000,
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("dry-run 不需要第二張同意書");
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("同意書 2：沒簽"), "{text}");
+            assert!(text.contains("PRIVATE 沒簽同意書的原文"), "{text}");
+            assert!(text.contains("一次都沒送"), "{text}");
             let db = Db::open(&Config::db_path(&tmp.0)).unwrap();
             let day = sister_core::local_day::local_day_key(100_000).unwrap();
             assert_eq!(db.brain_outbound_count_on(&day).unwrap(), 0);
