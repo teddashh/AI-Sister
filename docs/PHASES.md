@@ -629,7 +629,7 @@ capture 層本身就是 recorder。
     視窗）沒有一種是破壞性的。在還沒有任何一個人真的跑完一趟逐步核准之前
     就先加一種搬得動檔案的動作，順序是反的。
 
-**已知還在說謊的地方**（alpha.80 當下，兩條）：
+**已知還在說謊的地方**（alpha.81 當下，兩條）：
 
 1. 「提示只送出去一半就整份丟掉」這條規則守不到一種：一支 CLI **沒讀就
    退場**、而提示剛好整份塞得進作業系統的管子緩衝區。正式上限是 24 KiB，
@@ -642,7 +642,55 @@ capture 層本身就是 recorder。
    實作出來的時候沒有人需要記得回來補；但在那之前，那四句話一次都不會出現
    在螢幕上，**沒有任何執行證據說它們印出來是對的**。
 
+**這一輪修掉的**（alpha.81）：
+
+**上一版那三句話裡，有一句的下一步是假的，而且照著做會弄壞他的東西。**
+alpha.80 的 `Since` 那一格寫的是「在字母人上按一下暫停鍵解除，或刪掉
+{flag}」。字母人**寫死讀預設資料目錄**（`main.rs` 拿
+`Config::default_data_dir()` 進 `Shell`，`toggle_pause` 只看 `shell.data_dir`，
+沒有 `--data-dir` 這種東西；`README.md` 自己就寫著「字母人只讀預設資料夾」）。
+所以 `sister --data-dir .\test doctor` 印出那一行，那顆鍵碰不到那個檔；而那顆
+鍵是 **toggle**，預設目錄沒暫停的話，照著做會**把他真正在用的資料目錄暫停
+掉**，然後他回頭再跑一次看到一模一樣的那一行字——正是這一版宣稱消滅掉的失效
+模式，被搬進了「這一格有可行的下一步」那一格。兩處（doctor 和 `record` 開場）
+都改成 `sister resume`，它收 `--data-dir`，而且是同一份報告上下兩列本來就在講
+的那一個。這條規矩 `ops.rs` 早就寫著（「指令要指得到」，是某一版出貨了不存在
+的 `sister pause --off` 之後寫的）。
+
+**`PathUnreadable` 那一格底下也是兩個世界。** `decide_for` 對
+`try_exists` 回 `Err` 這條路**從來沒有再看一次 `dir_state`**，於是「data dir
+是個檔案」和「data dir 是好好的目錄、只有旗標檔讀不到」印同一句「讀不到
+{dir} 這條路」。後者做得出來（指向自己的 symlink、或少了 `+x` 的目錄），而
+那條路 `stat` 得好好的、`ls` 列得出 `paused.flag`、刪掉那個 flag 就是解法，
+同一份報告上 `hands_status` 還會說那個目錄好得很。多一格 `FlagUncheckable`，
+`dir_state` 只讀一次。那一格底下**又**有兩種（壞的是旗標自己 vs 壞的是目錄的
+`+x`），而這兩種**分不出來**——`dir_state` 對兩者都回 `Dir`，要測 `+x` 只能去
+stat 一個子項目，那正是剛剛失敗的那件事。所以那句話不假裝知道是哪一種：兩個
+權限都指出來，而且不承諾刪得掉（少了 `+x` 的目錄裡刪不動東西，實測
+`delete: Err 13 Permission denied`）。
+
+**doctor 那一句停在半路。** `PathUnreadable` 收在「先確認那條路讀不讀得
+到」，而 `record` 的同一格從 alpha.78 起就走完兩步。doctor 補完。
+
+**驗收上補的洞比修的話還重要。** alpha.80 的測試把 render 釘得很好、把接線
+完全沒釘：把 `doctor::run` 裡的 `watching_verdict(paused_row(data_dir), beat)`
+換成 `watching_verdict(None, beat)`——暫停那一列整個從報告上消失——
+`cargo test --workspace` **全綠**。`ops::doctor::run` 有一個呼叫端、零個測試，
+而整個 repo 沒有任何閘門造得出一個 `paused.flag`。現在
+`scripts/check-erased-db.sh` 有一個真的 `sister pause` → `sister doctor`
+場景，那個突變會紅在 `::error::[暫停中] doctor 那一列沒有畫出暫停符號`。
+同一輪還殺掉三條假的綠：`watching_verdict` 可以把整句話丟掉只印
+「**暫停中**」（測試手填 `Some("…")` 餵進去，看不見）、`timestamp(ts)` 可以
+換成 `timestamp(0)`（測試只斷言「（從 」三個字在）、`pause_warning` 最常見的
+兩臂可以對調（那兩臂沒有測試）。外加兩條**永遠不會失敗**的斷言（
+`!contains("不知道從什麼時候開始")`，那句話已經不在任何產品字串上；
+`!contains("沒有用")`，四條臂沒一條產得出來）和一個結構上抓不到東西的
+`assert_ne!` 迴圈（每句話都嵌著自己的探測路徑，所以兩種狀態套同一個模板，
+字串照樣不相等），全部拿掉或換成真的守得住的。
+
 **這一輪修掉的**（alpha.80）：
+
+（下面這一段描述的是 alpha.80 當時；`PauseState` 現在是五格，見上。）
 
 `sister doctor` 的暫停那一格——上一版兩種成因印同一句「**暫停中**（不知道從
 什麼時候開始）」，而那兩種的下一步是相反的：旗標在、內容壞掉，**刪掉它有

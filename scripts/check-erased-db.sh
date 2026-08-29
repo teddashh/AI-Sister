@@ -912,6 +912,22 @@ grep -qE '✓ +現在有沒有在看' live-doctor.txt \
 grep -E '現在有沒有在看' live-doctor.txt | grep -q '正在跑' \
   || { echo "::error::[她正開著] 她真的在錄，那一列要說「正在跑」"; grep 現在有沒有在看 live-doctor.txt; exit 1; }
 
+# 真正從 CLI 造出暫停旗標，再走完整個 doctor 接線。unit test 釘的是組句；
+# 這一顆專門防 `doctor::run` 忘了把 `paused_row` 接進 `watching_verdict`。
+pause_dir=./ci-doctor-paused
+mkdir -p "$pause_dir"
+$B --data-dir "$pause_dir" pause > pause-command.txt
+$B --data-dir "$pause_dir" doctor > pause-doctor.txt
+pause_row=$(grep -E '現在有沒有在看' pause-doctor.txt || true)
+echo "$pause_row" | grep -qE '⏸ +現在有沒有在看' \
+  || { echo "::error::[暫停中] doctor 那一列沒有畫出暫停符號"; echo "$pause_row"; exit 1; }
+echo "$pause_row" | grep -q '`sister resume`' \
+  || { echo "::error::[暫停中] doctor 那一列沒有給吃得到同一個 --data-dir 的下一步"; echo "$pause_row"; exit 1; }
+if echo "$pause_row" | grep -q '正在跑'; then
+  echo "::error::[暫停中] doctor 說她正在跑，但這個資料目錄已經暫停"
+  echo "$pause_row"; exit 1
+fi
+
 # `sister stop` 也有三種狀態，而它只需要一個心跳檔——不必資料庫，所以
 # 三顆現造。上一版它問的是 `is_occupied`，於是開機那幾分鐘印的是「會在
 # 下一個 tick 把 session 寫完再結束」：那時候既沒有 session 也沒有

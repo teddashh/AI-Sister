@@ -15,8 +15,8 @@
 //!    寫成 `CapturePaused` / `CaptureResumed` 兩筆事件。少了那兩筆，資料裡的
 //!    空洞跟「那段時間什麼都沒發生」長得一模一樣。
 //!
-//! 檔案內容是暫停當下的毫秒時戳，純粹給 `doctor` 講人話用；**判定只看檔案在不
-//! 在**。內容壞掉不影響正確性。
+//! 檔案內容是暫停當下的毫秒時戳，純粹給 `doctor` 講人話用；判定先看檔案在不
+//! 在，只有「在不在」本身讀不出來時才看資料目錄狀態。內容壞掉不影響正確性。
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -33,6 +33,8 @@ pub enum PauseState {
     Since(Millis),
     /// 暫停中：旗標檔確定在，但內容讀不出來。刪掉它可以解除。
     FlagPresentButUnreadable,
+    /// 暫停中：data dir 是正常目錄，但旗標檔本身讀不到。
+    FlagUncheckable,
     /// 暫停中：連 data dir 都讀不到，所以刻意一律當成暫停。
     /// 旗標在不在沒有看過，刪它不一定有用。
     PathUnreadable,
@@ -60,15 +62,18 @@ fn decide(child: Result<bool, ()>, dir: DirState) -> bool {
 enum PauseDecision {
     Recording,
     FlagPresent,
+    FlagUncheckable,
     PathUnreadable,
 }
 
 fn decide_for(data_dir: &Path, child: Result<bool, ()>) -> PauseDecision {
-    if !decide(child, dir_state(data_dir)) {
+    let dir = dir_state(data_dir);
+    if !decide(child, dir) {
         return PauseDecision::Recording;
     }
     match child {
         Ok(true) => PauseDecision::FlagPresent,
+        Err(()) if dir == DirState::Dir => PauseDecision::FlagUncheckable,
         Ok(false) | Err(()) => PauseDecision::PathUnreadable,
     }
 }
@@ -107,12 +112,13 @@ pub fn state(data_dir: &Path) -> PauseState {
         PauseDecision::FlagPresent => paused_since(data_dir)
             .map(PauseState::Since)
             .unwrap_or(PauseState::FlagPresentButUnreadable),
+        PauseDecision::FlagUncheckable => PauseState::FlagUncheckable,
         PauseDecision::PathUnreadable => PauseState::PathUnreadable,
     }
 }
 
-/// 從什麼時候開始暫停的。純顯示用；`None` 可能是旗標在但內容讀不出來，
-/// 也可能是連 data dir 都讀不到。要分辨這兩種情況請用 [`state`]。
+/// 從什麼時候開始暫停的。純顯示用；`None` 可能是旗標在但內容讀不出來、
+/// 旗標本身無法檢查，也可能是連 data dir 都讀不到。要分辨這三種情況請用 [`state`]。
 pub fn paused_since(data_dir: &Path) -> Option<Millis> {
     std::fs::read_to_string(flag_path(data_dir))
         .ok()?
@@ -246,12 +252,22 @@ mod tests {
                 dir.0.join("broken-flag"),
                 PauseState::FlagPresentButUnreadable,
             ),
+            #[cfg(unix)]
+            (dir.0.join("flag-uncheckable"), PauseState::FlagUncheckable),
             (dir.0.join("not-a-dir"), PauseState::PathUnreadable),
         ];
         std::fs::create_dir_all(&cases[1].0).unwrap();
         std::fs::write(flag_path(&cases[1].0), "1234").unwrap();
         std::fs::create_dir_all(&cases[2].0).unwrap();
         std::fs::write(flag_path(&cases[2].0), "half-written").unwrap();
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(&cases[3].0).unwrap();
+            std::os::unix::fs::symlink("paused.flag", flag_path(&cases[3].0)).unwrap();
+            assert!(flag_path(&cases[3].0).try_exists().is_err());
+            std::fs::write(&cases[4].0, "not a directory").unwrap();
+        }
+        #[cfg(not(unix))]
         std::fs::write(&cases[3].0, "not a directory").unwrap();
 
         for (path, expected) in cases {

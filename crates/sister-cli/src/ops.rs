@@ -11721,12 +11721,12 @@ pub mod doctor {
     ///
     /// **這一支是量的那一邊，所以它拿得到路徑，而它是唯一拿得到的一邊。**
     /// `watching_verdict` 刻意沒有路徑（理由見它自己的註解），可是「刪掉哪一個
-    /// 檔」「哪一條路讀不到」只有路徑講得出來，所以三種暫停的句子在這裡寫完，
+    /// 檔」「哪一條路讀不到」只有路徑講得出來，所以四種暫停的句子在這裡寫完，
     /// 送過去的是一句已經寫好的話。同 `hands_status`：收 `&Path`、回一句話、
     /// 測試餵真的路徑進來。
     ///
-    /// 分成三句是這一版修的病。`paused_since()` 回 `None` 同時代表兩件事，而
-    /// 上一版把兩件事印成同一句「**暫停中**（不知道從什麼時候開始）」：
+    /// alpha.80 先分成三句；這一版再把其中「檢查旗標失敗」依目錄狀態拆開。
+    /// `paused_since()` 回 `None` 曾把不同原因蓋在一起：
     ///
     /// 1. 旗標檔確定在，內容壞了（寫到一半斷電）→ **刪掉它有用**。
     /// 2. 連 data dir 都讀不到，`is_paused` 刻意 fail-closed 所以算暫停——而
@@ -11743,7 +11743,7 @@ pub mod doctor {
             PauseState::Recording => None,
             PauseState::Since(ts) => Some(format!(
                 "**暫停中**（從 {} 起）。這段期間什麼都不會被記錄；\
-                 在字母人上按一下暫停鍵解除，或刪掉 {}",
+                 `sister resume` 可解除，或刪掉 {}",
                 crate::fmt::timestamp(ts),
                 flag.display()
             )),
@@ -11752,11 +11752,17 @@ pub mod doctor {
                  刪掉 {} 可解除",
                 flag.display()
             )),
+            PauseState::FlagUncheckable => Some(format!(
+                "**暫停中**：資料目錄讀得到，但讀不到旗標檔 {} 本身，所以刻意一律當成暫停；\
+                 請檢查這個檔案或它所在目錄的權限；權限修好之後，刪掉旗標就會解除",
+                flag.display()
+            )),
             // 不可以叫他去刪旗標：這一格是「連那條路都讀不到」，旗標在不在
             // 沒有人看過。
             PauseState::PathUnreadable => Some(format!(
                 "**暫停中**：讀不到 {} 這條路，所以刻意一律當成暫停；\
-                 旗標在不在也讀不出來，先確認那條路讀不讀得到",
+                 旗標在不在也讀不出來，先確認那條路讀不讀得到；\
+                 讀得到之後 paused.flag 如果還在，刪掉它就會解除",
                 data_dir.display()
             )),
         }
@@ -11774,15 +11780,15 @@ pub mod doctor {
     ///
     /// 那種錯**測不到**：它是一場競賽，重跑一次就不見了，而突變測試（把這裡
     /// 改回自己讀一次）兩道 gate 都殺不掉——CI 上那個心跳檔在兩次讀之間不會
-    /// 變。所以守它的不是測試，是型別：這支函式手上沒有路徑，寫不出第二次
-    /// 讀。同 `recorded_verdict` / `crash_verdict`，把判斷搬進一支收「已經量
+    /// 變。所以守它的不是測試，是型別：這支函式拿不到 `&Path`，也就拿不到能
+    /// 再讀一次檔案系統的東西。同 `recorded_verdict` / `crash_verdict`，把判斷搬進一支收「已經量
     /// 好的東西」的函式。
     ///
     /// `paused` 是 `Some(那一整句話)`＝暫停中，由 `paused_row` 量好也寫好。它
     /// 排在最前面，因為它壓過其他每一種：暫停的時候有沒有 recorder 佔著都無所
     /// 謂，她根本沒在看。
     ///
-    /// **那句話是別人寫好送進來的，不是這裡現查的。** 中間有一版為了讓三種暫停
+    /// **那句話是別人寫好送進來的，不是這裡現查的。** 中間有一版為了讓各種暫停
     /// 各自講得出下一步，把 `PauseState` 和兩條路徑（data dir、旗標）一起塞進這
     /// 支函式。三種話是對的，代價是上面那句「這支函式手上沒有路徑」當場變成
     /// 假的——`&str` 也是路徑，`Path::new(data_dir)` 一行就編得過，而這支函式
@@ -11792,7 +11798,7 @@ pub mod doctor {
         beat: sister_core::heartbeat::Presence,
     ) -> (&'static str, String) {
         use sister_core::heartbeat::{Phase, Presence};
-        // 這一行是**唯一**會告訴使用者「你上禮拜按的暫停還開著」的地方。暫停
+        // 這一行是**不必開始錄就會告訴使用者「你上禮拜按的暫停還開著」的唯一一個地方**。暫停
         // 不會自己過期（見 `sister_core::pause`），所以那條路很真實，而它的症
         // 狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
         if let Some(said) = paused {
@@ -13143,7 +13149,7 @@ pub mod doctor {
         // 排在最前面，因為它壓過底下每一條：暫停的時候，那些規則生不生效
         // 都無所謂——她根本沒在看。
         //
-        // 而且這一行是**唯一**會告訴使用者「你上禮拜按的暫停還開著」的地方。
+        // 而且這一行是**不必開始錄就會告訴使用者「你上禮拜按的暫停還開著」的唯一一個地方**。
         // 暫停不會自己過期（見 `sister_core::pause`），所以那條路很真實，而
         // 它的症狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
         let (sym, said) = watching_verdict(paused_row(data_dir), beat);
@@ -14138,7 +14144,7 @@ pub mod doctor {
             );
         }
 
-        /// **四種處境各餵一條真的路徑進去，不是手填四個 enum 值。**
+        /// **五種處境各餵一條真的路徑進去，不是手填五個 enum 值。**
         ///
         /// 差別在哪裡：手填 `PauseState::PathUnreadable` 再看它印什麼，證明的是
         /// 「這個 enum 值會印出這句話」；而這一版要證的是「**一條讀不到的路會走
@@ -14146,9 +14152,9 @@ pub mod doctor {
         /// 整段換回舊行為（兩種 `None` 併成一句「刪掉旗標可解除」）之後，整個
         /// workspace 照樣全綠——這一版修的那個病被還原了，沒有一條測試出聲。
         ///
-        /// 所以底下三種暫停的狀態都是**做出來的**：寫一個壞旗標、把 data dir
-        /// 做成一個檔案。`Since` 那一格順便釘住「時間讀得出來的時候不准講
-        /// 『不知道從什麼時候開始』」。
+        /// 所以底下四種暫停的狀態都是**做出來的**：寫正常／壞掉的旗標、造一個
+        /// 自我指向 symlink、把 data dir 做成一個檔案。`Since` 那一格順便釘住
+        /// 實際印出的時間就是寫進旗標的時間。
         #[test]
         fn every_paused_state_comes_from_a_real_path_and_says_its_own_next_step() {
             let root = crate::ops::tmp::Tmp::new("doctor-pause-states");
@@ -14156,25 +14162,33 @@ pub mod doctor {
             let recording = root.0.join("recording");
             std::fs::create_dir_all(&recording).unwrap();
             assert_eq!(paused_row(&recording), None, "沒暫停就不該有這一列");
+            println!("doctor/Recording: 沒有暫停列");
 
             let since_dir = root.0.join("since");
             std::fs::create_dir_all(&since_dir).unwrap();
             sister_core::pause::set_paused(&since_dir, true, 1_755_656_400_000).unwrap();
             let since = paused_row(&since_dir).expect("暫停中");
+            println!("doctor/Since: {since}");
             assert!(since.contains("**暫停中**（從 "), "{since}");
             assert!(
-                !since.contains("不知道從什麼時候開始"),
-                "時間讀得出來就不可以說不知道：{since}"
+                since.contains(&crate::fmt::timestamp(1_755_656_400_000)),
+                "要印出旗標裡那個時間：{since}"
             );
             assert!(
-                since.contains("暫停鍵解除") || since.contains("刪掉"),
+                since.contains("`sister resume`") && since.contains("刪掉"),
                 "解不解得開要講出來：{since}"
             );
+
+            let (sym, final_said) =
+                watching_verdict(paused_row(&since_dir), Presence::Stopped { at: None });
+            assert_eq!(sym, "⏸");
+            assert!(final_said.contains("`sister resume`"), "{final_said}");
 
             let broken_dir = root.0.join("broken-flag");
             std::fs::create_dir_all(&broken_dir).unwrap();
             std::fs::write(sister_core::pause::flag_path(&broken_dir), "half-written").unwrap();
             let broken = paused_row(&broken_dir).expect("壞旗標仍然是暫停");
+            println!("doctor/FlagPresentButUnreadable: {broken}");
             let broken_flag = sister_core::pause::flag_path(&broken_dir)
                 .display()
                 .to_string();
@@ -14182,6 +14196,62 @@ pub mod doctor {
                 broken.contains(&format!("刪掉 {broken_flag} 可解除")),
                 "旗標確定在，刪它有用，那就要說出是哪一個檔：{broken}"
             );
+
+            #[cfg(unix)]
+            let uncheckable = {
+                use std::os::unix::fs::PermissionsExt;
+
+                let dir = root.0.join("uncheckable-flag");
+                std::fs::create_dir_all(&dir).unwrap();
+                let flag = sister_core::pause::flag_path(&dir);
+                std::os::unix::fs::symlink("paused.flag", &flag).unwrap();
+                assert!(flag.try_exists().is_err(), "自我指向 symlink 必須回 Err");
+                let said = paused_row(&dir).expect("讀不到旗標仍然是暫停");
+                println!("doctor/FlagUncheckable: {said}");
+                assert!(said.contains("資料目錄讀得到"), "{said}");
+                assert!(said.contains(&flag.display().to_string()), "{said}");
+                assert!(
+                    said.contains("檔案") && said.contains("目錄") && said.contains("權限"),
+                    "下一步必須同時指出檔案和目錄的權限：{said}"
+                );
+                assert!(!said.contains("直接刪掉它"), "{said}");
+                assert!(!said.contains("確認那條路讀不讀得到"), "{said}");
+
+                let no_search_dir = root.0.join("uncheckable-no-search-permission");
+                std::fs::create_dir_all(&no_search_dir).unwrap();
+                let no_search_flag = sister_core::pause::flag_path(&no_search_dir);
+                std::fs::write(&no_search_flag, "1755656400000").unwrap();
+                std::fs::set_permissions(&no_search_dir, std::fs::Permissions::from_mode(0o644))
+                    .unwrap();
+                if no_search_flag.try_exists().is_ok() {
+                    std::fs::set_permissions(
+                        &no_search_dir,
+                        std::fs::Permissions::from_mode(0o755),
+                    )
+                    .unwrap();
+                    panic!(
+                        "chmod 644 的資料目錄底下，paused.flag.try_exists() 必須回 Err；不要用 root 跑這條測試"
+                    );
+                }
+                assert!(no_search_flag.try_exists().is_err());
+                let no_search_said = paused_row(&no_search_dir).expect("讀不到旗標仍然是暫停");
+                std::fs::set_permissions(&no_search_dir, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                let expected = said.replace(
+                    &flag.display().to_string(),
+                    &no_search_flag.display().to_string(),
+                );
+                println!("doctor/FlagUncheckable/chmod-644: {no_search_said}");
+                assert_eq!(no_search_said, expected, "兩種成因刻意印同一句");
+                assert!(
+                    no_search_said.contains("檔案")
+                        && no_search_said.contains("目錄")
+                        && no_search_said.contains("權限"),
+                    "下一步必須同時指出檔案和目錄的權限：{no_search_said}"
+                );
+                assert!(!no_search_said.contains("直接刪掉它"), "{no_search_said}");
+                said
+            };
 
             let unreadable_dir = root.0.join("not-a-dir");
             std::fs::write(&unreadable_dir, "not a directory").unwrap();
@@ -14194,26 +14264,18 @@ pub mod doctor {
                 "這一格的前提就是旗標不在，而程式沒有看過"
             );
             let unreadable = paused_row(&unreadable_dir).expect("fail-closed 也是暫停");
+            println!("doctor/PathUnreadable: {unreadable}");
             assert!(
                 unreadable.contains(&format!("讀不到 {} 這條路", unreadable_dir.display())),
                 "{unreadable}"
             );
             assert!(
-                unreadable.contains("先確認那條路讀不讀得到"),
+                unreadable.contains("先確認那條路讀不讀得到")
+                    && unreadable.contains("讀得到之後 paused.flag 如果還在，刪掉它就會解除"),
                 "{unreadable}"
             );
-            assert!(
-                !unreadable.contains("刪掉"),
-                "旗標在不在沒人看過，叫他去刪一個不存在的檔，他會回來看到同一行字：{unreadable}"
-            );
-
-            // 三種暫停各說各的，不可以有兩種印出同一句。
-            let three = [&since, &broken, &unreadable];
-            for (i, a) in three.iter().enumerate() {
-                for b in &three[i + 1..] {
-                    assert_ne!(a, b, "兩種成因印出同一句話，正是這一版在修的病");
-                }
-            }
+            #[cfg(unix)]
+            assert!(uncheckable.contains("讀不到旗標檔"));
         }
 
         /// **同一份報告的四列，在開機那幾分鐘要說同一件事。**
@@ -20177,12 +20239,17 @@ pub mod record {
             PauseState::Recording => None,
             PauseState::Since(ts) => Some(format!(
                 "目前是暫停狀態（從 {} 起），不會記錄任何東西。\
-                 在字母人上按一下暫停鍵解除，或刪掉 {}。",
+                 `sister resume` 可解除，或刪掉 {}。",
                 crate::fmt::timestamp(ts),
                 flag.display()
             )),
             PauseState::FlagPresentButUnreadable => Some(format!(
                 "目前是暫停狀態，不會記錄任何東西。刪掉 {} 可解除。",
+                flag.display()
+            )),
+            PauseState::FlagUncheckable => Some(format!(
+                "目前是暫停狀態：資料目錄讀得到，但讀不到旗標檔 {} 本身，所以刻意一律當成暫停。\
+                 請檢查這個檔案或它所在目錄的權限；權限修好之後，刪掉旗標就會解除。",
                 flag.display()
             )),
             PauseState::PathUnreadable => Some(format!(
@@ -20198,27 +20265,106 @@ pub mod record {
         use super::*;
 
         #[test]
-        fn broken_present_flag_can_be_removed_to_resume() {
-            let dir = crate::ops::tmp::Tmp::new("record-broken-pause-flag");
-            std::fs::write(sister_core::pause::flag_path(&dir.0), "half-written").unwrap();
-            let said = pause_warning(&dir.0).expect("paused warning");
-            assert!(said.contains("刪掉"), "{said}");
-            assert!(said.contains("可解除"), "{said}");
-            assert!(said.contains("paused.flag"), "{said}");
-        }
+        fn all_pause_warnings_come_from_real_filesystem_states() {
+            let root = crate::ops::tmp::Tmp::new("record-pause-states");
 
-        #[test]
-        fn unreadable_path_does_not_claim_what_it_could_not_check() {
-            let dir = crate::ops::tmp::Tmp::new("record-unreadable-pause-path");
-            std::fs::remove_dir_all(&dir.0).unwrap();
-            std::fs::write(&dir.0, "not a directory").unwrap();
-            assert!(sister_core::pause::is_paused(&dir.0));
-            assert!(!sister_core::pause::flag_path(&dir.0).exists());
-            let said = pause_warning(&dir.0).expect("fail-closed warning");
-            assert!(said.contains("讀不到"), "{said}");
-            assert!(said.contains("一律當成暫停"), "{said}");
-            assert!(said.contains("先確認資料目錄本身"), "{said}");
-            assert!(!said.contains("沒有用"), "{said}");
+            let recording = root.0.join("recording");
+            std::fs::create_dir_all(&recording).unwrap();
+            assert_eq!(pause_warning(&recording), None);
+            println!("record/Recording: 沒有警告");
+
+            let since_dir = root.0.join("since");
+            sister_core::pause::set_paused(&since_dir, true, 1_755_656_400_000).unwrap();
+            let since = pause_warning(&since_dir).expect("paused warning");
+            println!("record/Since: {since}");
+            assert!(
+                since.contains(&crate::fmt::timestamp(1_755_656_400_000)),
+                "{since}"
+            );
+            assert!(
+                since.contains("`sister resume`") && since.contains("刪掉"),
+                "{since}"
+            );
+
+            let broken_dir = root.0.join("broken-flag");
+            std::fs::create_dir_all(&broken_dir).unwrap();
+            std::fs::write(sister_core::pause::flag_path(&broken_dir), "half-written").unwrap();
+            let broken = pause_warning(&broken_dir).expect("paused warning");
+            println!("record/FlagPresentButUnreadable: {broken}");
+            assert!(
+                broken.contains("刪掉") && broken.contains("可解除"),
+                "{broken}"
+            );
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let dir = root.0.join("uncheckable-flag");
+                std::fs::create_dir_all(&dir).unwrap();
+                let flag = sister_core::pause::flag_path(&dir);
+                std::os::unix::fs::symlink("paused.flag", &flag).unwrap();
+                assert!(flag.try_exists().is_err(), "自我指向 symlink 必須回 Err");
+                let said = pause_warning(&dir).expect("fail-closed warning");
+                println!("record/FlagUncheckable: {said}");
+                assert!(said.contains("資料目錄讀得到"), "{said}");
+                assert!(said.contains(&flag.display().to_string()), "{said}");
+                assert!(
+                    said.contains("檔案") && said.contains("目錄") && said.contains("權限"),
+                    "下一步必須同時指出檔案和目錄的權限：{said}"
+                );
+                assert!(!said.contains("直接刪掉它"), "{said}");
+                assert!(!said.contains("確認資料目錄本身"), "{said}");
+
+                let no_search_dir = root.0.join("uncheckable-no-search-permission");
+                std::fs::create_dir_all(&no_search_dir).unwrap();
+                let no_search_flag = sister_core::pause::flag_path(&no_search_dir);
+                std::fs::write(&no_search_flag, "1755656400000").unwrap();
+                std::fs::set_permissions(&no_search_dir, std::fs::Permissions::from_mode(0o644))
+                    .unwrap();
+                if no_search_flag.try_exists().is_ok() {
+                    std::fs::set_permissions(
+                        &no_search_dir,
+                        std::fs::Permissions::from_mode(0o755),
+                    )
+                    .unwrap();
+                    panic!(
+                        "chmod 644 的資料目錄底下，paused.flag.try_exists() 必須回 Err；不要用 root 跑這條測試"
+                    );
+                }
+                assert!(no_search_flag.try_exists().is_err());
+                let no_search_said = pause_warning(&no_search_dir).expect("讀不到旗標仍然是暫停");
+                std::fs::set_permissions(&no_search_dir, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                let expected = said.replace(
+                    &flag.display().to_string(),
+                    &no_search_flag.display().to_string(),
+                );
+                println!("record/FlagUncheckable/chmod-644: {no_search_said}");
+                assert_eq!(no_search_said, expected, "兩種成因刻意印同一句");
+                assert!(
+                    no_search_said.contains("檔案")
+                        && no_search_said.contains("目錄")
+                        && no_search_said.contains("權限"),
+                    "下一步必須同時指出檔案和目錄的權限：{no_search_said}"
+                );
+                assert!(!no_search_said.contains("直接刪掉它"), "{no_search_said}");
+            }
+
+            let unreadable_dir = root.0.join("not-a-dir");
+            std::fs::write(&unreadable_dir, "not a directory").unwrap();
+            assert!(sister_core::pause::is_paused(&unreadable_dir));
+            let unreadable = pause_warning(&unreadable_dir).expect("fail-closed warning");
+            println!("record/PathUnreadable: {unreadable}");
+            assert!(
+                unreadable.contains("讀不到") && unreadable.contains("一律當成暫停"),
+                "{unreadable}"
+            );
+            assert!(unreadable.contains("先確認資料目錄本身"), "{unreadable}");
+            assert!(
+                unreadable.contains("讀得到之後 paused.flag 如果還在，刪掉它就會解除"),
+                "{unreadable}"
+            );
         }
     }
 
