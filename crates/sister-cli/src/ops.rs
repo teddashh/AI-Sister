@@ -74,10 +74,8 @@ mod command_tests {
     /// `cmd(data_dir, …)`。
     #[test]
     fn these_ten_imperatives_do_not_come_back() {
-        let ops = OPS_SOURCE
-            .split_once("\n}\n\npub mod speak {")
-            .expect("ops.rs 仍有 production 起點")
-            .1;
+        let ops = production_half(OPS_SOURCE);
+        let ops = ops.as_str();
         let code_without_comments = |source: &str| {
             source
                 .lines()
@@ -86,7 +84,7 @@ mod command_tests {
                 .join("\n")
         };
         let ops_code = code_without_comments(ops);
-        let watch_code = code_without_comments(WATCH_SOURCE);
+        let watch_code = code_without_comments(&WATCH_SOURCE.replace("\r\n", "\n"));
         let forbidden = [
             (ops_code.as_str(), "跑一次 `sister prune`"),
             (ops_code.as_str(), "再 `sister mark --id N`"),
@@ -126,12 +124,25 @@ mod command_tests {
         }
     }
 
-    #[test]
-    fn revoked_frame_consent_points_to_cli_forget_not_the_old_gui_or_prune_copy() {
-        let ops = OPS_SOURCE
+    /// 把 `ops.rs` 切成「production 那一半」（丟掉 `pub mod speak` 之前的
+    /// 前言與這個測試模組自己）。
+    ///
+    /// **先正規化行尾。** `include_str!` 讀的是磁碟上的位元組，而 Windows 的
+    /// checkout 是 CRLF：寫死 `"\n}\n\npub mod speak {"` 的話，這兩條測試在
+    /// Linux 上綠、在 Windows 上炸在 `expect` 那一行——alpha.81 的 CI 就是這樣
+    /// 紅的，而本機四道閘門一道都看不到（`check-windows.sh` 只編譯，不跑測試）。
+    fn production_half(source: &str) -> String {
+        let normalized = source.replace("\r\n", "\n");
+        normalized
             .split_once("\n}\n\npub mod speak {")
             .expect("ops.rs 仍有 production 起點")
-            .1;
+            .1
+            .to_string()
+    }
+
+    #[test]
+    fn revoked_frame_consent_points_to_cli_forget_not_the_old_gui_or_prune_copy() {
+        let ops = production_half(OPS_SOURCE);
         assert!(
             ops.contains("cmd(data_dir, \"forget --last <多久>\")"),
             "撤回第三張同意書後要指向這次資料目錄的 forget"
