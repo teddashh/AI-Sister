@@ -5,6 +5,38 @@ use std::path::{Path, PathBuf};
 
 use sister_core::db::Db;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Shell {
+    PowerShell,
+    Posix,
+}
+
+fn platform_shell() -> Shell {
+    if cfg!(windows) {
+        Shell::PowerShell
+    } else {
+        Shell::Posix
+    }
+}
+
+/// 印成可以貼回指定 shell 的一個 argv 值。
+///
+/// 不需要引號的常見路徑／旗標值維持原樣；其餘一律用該 shell 的單引號規則。
+fn quote_for(shell: Shell, value: &str) -> String {
+    let needs_quotes = value.is_empty()
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '\\'));
+    if !needs_quotes {
+        return value.to_owned();
+    }
+
+    match shell {
+        Shell::PowerShell => format!("'{}'", value.replace('\'', "''")),
+        Shell::Posix => format!("'{}'", value.replace('\'', "'\\''")),
+    }
+}
+
 /// 下一步那一行要指得到**他這一次在看的**那個資料夾。
 ///
 /// 比較失敗時保守地帶上 `--data-dir`：多印旗標只是囉唆，少印可能動到另一份記憶。
@@ -27,28 +59,56 @@ fn cmd_for(data_dir: &Path, default: Option<&Path>, rest: &str) -> String {
     if is_default {
         format!("sister {rest}")
     } else {
-        format!("sister --data-dir {} {rest}", data_dir.display())
+        format!(
+            "sister --data-dir {} {rest}",
+            quote_for(platform_shell(), &data_dir.to_string_lossy())
+        )
     }
 }
 
 #[cfg(test)]
 mod command_tests {
     use super::*;
+    use clap::Parser;
 
     const OPS_SOURCE: &str = include_str!("ops.rs");
     const WATCH_SOURCE: &str = include_str!("../../sister-core/src/watch.rs");
 
     #[test]
     fn next_step_uses_the_current_non_default_directory() {
-        let actual = tmp::Tmp::new("cmd-actual");
+        let actual = tmp::Tmp::new("cmd actual");
         let default = tmp::Tmp::new("cmd-default");
-        assert_eq!(
-            cmd_for(&actual.0, Some(&default.0), "forget --last 30d --yes"),
-            format!(
-                "sister --data-dir {} forget --last 30d --yes",
-                actual.0.display()
-            )
+        let command = cmd_for(&actual.0, Some(&default.0), "forget --last 30d --yes");
+        let argv = shlex::split(&command).expect("POSIX 指令要拆得回 argv");
+        let parsed = crate::Cli::try_parse_from(argv)
+            .unwrap_or_else(|error| panic!("印出的下一步要能貼回 sister：{error}"));
+        assert_eq!(parsed.data_dir.as_deref(), Some(actual.0.as_path()));
+    }
+
+    #[test]
+    fn next_step_does_not_quote_a_plain_path() {
+        let command = cmd_for(
+            Path::new("/tmp/plain-path"),
+            Some(Path::new("/tmp/another-path")),
+            "forget --last 30d --yes",
         );
+        assert_eq!(
+            command,
+            "sister --data-dir /tmp/plain-path forget --last 30d --yes"
+        );
+    }
+
+    #[test]
+    fn quote_rules_cover_spaces_and_single_quotes_on_both_shells() {
+        for (value, power_shell, posix) in [
+            ("plain/path", "plain/path", "plain/path"),
+            ("two words", "'two words'", "'two words'"),
+            ("Ted's", "'Ted''s'", "'Ted'\\''s'"),
+            ("Ted's invoice", "'Ted''s invoice'", "'Ted'\\''s invoice'"),
+        ] {
+            assert_eq!(quote_for(Shell::PowerShell, value), power_shell);
+            assert_eq!(quote_for(Shell::Posix, value), posix);
+        }
     }
 
     #[test]
@@ -1436,49 +1496,38 @@ pub mod act {
         sister_hands::semi_action::grant_tmp_path(data_dir)
     }
 
-    /// 這裡選 POSIX shell 的單引號規則：整個值用單引號包起來，值裡的
-    /// 單引號改成「結束引號、已跳脫的單引號、再開引號」。產品出貨平台也有 PowerShell，但兩套 shell 對內嵌
-    /// 引號的文法不同；這一行選一套可以被測試完整拆回 argv 的規則，不猜。
-    fn shell_quote(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
-
-    fn command_prefix(data_dir: &Path) -> String {
-        let mut command = "sister".to_owned();
-        if sister_core::Config::default_data_dir().as_deref() != Some(data_dir) {
-            command.push_str(" --data-dir ");
-            command.push_str(&shell_quote(&data_dir.to_string_lossy()));
-        }
-        command
-    }
-
-    fn scoped_grant_command(data_dir: &Path, opts: &Options) -> String {
-        let mut command = format!(
-            "{} do --task {}",
-            command_prefix(data_dir),
-            shell_quote(&opts.task)
-        );
+    fn scoped_grant_command_for(data_dir: &Path, default: Option<&Path>, opts: &Options) -> String {
+        let shell = platform_shell();
+        let mut rest = format!("do --task {}", quote_for(shell, &opts.task));
         for app in &opts.apps {
-            command.push_str(" --app ");
-            command.push_str(&shell_quote(app));
+            rest.push_str(" --app ");
+            rest.push_str(&quote_for(shell, app));
         }
         for allow in &opts.allow {
-            command.push_str(" --allow ");
-            command.push_str(&shell_quote(allow));
+            rest.push_str(" --allow ");
+            rest.push_str(&quote_for(shell, allow));
         }
-        command.push_str(&format!(
+        rest.push_str(&format!(
             " --minutes {} --steps {} --save-grant",
             opts.minutes, opts.steps
         ));
-        command
+        cmd_for(data_dir, default, &rest)
+    }
+
+    fn scoped_grant_command(data_dir: &Path, opts: &Options) -> String {
+        scoped_grant_command_for(
+            data_dir,
+            sister_core::Config::default_data_dir().as_deref(),
+            opts,
+        )
     }
 
     fn use_grant_command(data_dir: &Path, opts: &Options) -> String {
-        format!(
-            "{} do --task {} --use-grant --unattended",
-            command_prefix(data_dir),
-            shell_quote(&opts.task)
-        )
+        let rest = format!(
+            "do --task {} --use-grant --unattended",
+            quote_for(platform_shell(), &opts.task)
+        );
+        cmd(data_dir, &rest)
     }
 
     fn piped_stdin_message(data_dir: &Path, opts: &Options) -> String {
@@ -2815,12 +2864,34 @@ pub mod act {
 
         #[test]
         fn default_data_dir_is_the_only_one_that_omits_the_flag() {
-            let default =
-                sister_core::Config::default_data_dir().expect("這個平台要有預設資料目錄");
-            assert_eq!(command_prefix(&default), "sister");
+            let default = crate::ops::tmp::Tmp::new("act-command-default");
+            assert_eq!(
+                cmd_for(&default.0, Some(&default.0), "do --task t"),
+                "sister do --task t"
+            );
 
             let custom = Path::new("/tmp/not-the-default-sister-dir");
-            assert!(command_prefix(custom).contains("--data-dir"));
+            assert!(cmd_for(custom, Some(&default.0), "do --task t").contains("--data-dir"));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn forget_and_do_agree_when_a_symlink_names_the_default_directory() {
+            let root = crate::ops::tmp::Tmp::new("shared-command-symlink");
+            let default = root.0.join("default");
+            let link = root.0.join("default-link");
+            std::fs::create_dir(&default).unwrap();
+            std::os::unix::fs::symlink(&default, &link).unwrap();
+
+            let forget = cmd_for(&link, Some(&default), "forget --last 30d --yes");
+            let do_command = scoped_grant_command_for(
+                &link,
+                Some(&default),
+                &opts("t", &["excel.exe", "files.exe"], 3, 5, false),
+            );
+            assert_eq!(forget, "sister forget --last 30d --yes");
+            assert!(do_command.starts_with("sister do "), "{do_command}");
+            assert!(!do_command.contains("--data-dir"), "{do_command}");
         }
 
         #[test]
@@ -9361,20 +9432,23 @@ pub mod forget {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use clap::Parser;
 
         #[test]
         fn preview_yes_command_keeps_the_directory_this_run_is_about() {
-            let dir = crate::ops::tmp::Tmp::new("forget-preview-command");
+            let dir = crate::ops::tmp::Tmp::new("Ted Huang/my data");
             let mut out = Vec::new();
             preview_close(&dir.0, "30d", &mut out).unwrap();
             let out = String::from_utf8(out).unwrap();
-            assert!(
-                out.contains(&format!(
-                    "sister --data-dir {} forget --last 30d --yes",
-                    dir.0.display()
-                )),
-                "{out}"
-            );
+            let command = out
+                .lines()
+                .map(str::trim)
+                .find(|line| line.starts_with("sister "))
+                .expect("預覽要有下一步");
+            let argv = shlex::split(command).expect("POSIX 指令要拆得回 argv");
+            let parsed = crate::Cli::try_parse_from(argv)
+                .unwrap_or_else(|error| panic!("下一步要能貼回 sister：{error}"));
+            assert_eq!(parsed.data_dir.as_deref(), Some(dir.0.as_path()));
         }
 
         /// 資料目錄裡（含子目錄）還讀得到 `needle` 的檔案。
