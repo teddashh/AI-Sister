@@ -45,14 +45,14 @@ pub enum WatchSkip {
 
 impl WatchSkip {
     pub fn message(&self) -> String {
+        self.message_with_consent_command("sister consent --grant cloud-reading")
+    }
+
+    pub fn message_with_consent_command(&self, consent_command: &str) -> String {
         match self {
-            Self::NoConsent => concat!(
-                "沒有簽第二張同意書（上雲解讀），所以我沒有開始盯——一輪都沒有，",
-                "畫面上的字一個都沒有離開這台機器。\n",
-                "要看她會送出什麼：sister watch \"…\" --dry-run\n",
-                "要簽字：sister consent --grant cloud-reading"
-            )
-            .to_string(),
+            Self::NoConsent => format!(
+                "沒有簽第二張同意書（上雲解讀），所以我沒有開始盯——一輪都沒有，畫面上的字一個都沒有離開這台機器。\n要看她會送出什麼：sister watch \"…\" --dry-run\n要簽字：{consent_command}"
+            ),
             Self::NoCommand => concat!(
                 "設定裡沒有 [brain] command，沒有東西可以問，所以我沒有開始盯。\n",
                 "那是你自己已經裝好的那支 CLI，填進設定檔的 [brain] 那一段：\n",
@@ -132,6 +132,10 @@ pub enum Blind {
 
 impl Blind {
     pub fn message(&self) -> String {
+        self.message_with_resume_command("sister resume")
+    }
+
+    pub fn message_with_resume_command(&self, resume_command: &str) -> String {
         // 每一句都要帶「這不是『還沒發生』」。少了那半句，這幾行混在一串
         // 「還沒有。」中間，讀起來就是同一件事。
         match self {
@@ -139,8 +143,9 @@ impl Blind {
                 "沒有新的畫面可以看——她從來沒有開始錄。這不是「還沒發生」。".into()
             }
             Self::Paused => {
-                "沒有新的畫面可以看——她被暫停了（`sister resume` 解除）。這不是「還沒發生」。"
-                    .into()
+                format!(
+                    "沒有新的畫面可以看——她被暫停了（`{resume_command}` 解除）。這不是「還沒發生」。"
+                )
             }
             Self::Booting => {
                 "沒有新的畫面可以看——她才剛開始錄，還沒拍到東西。這不是「還沒發生」。".into()
@@ -302,6 +307,10 @@ pub enum Look {
 
 impl Look {
     pub fn message(&self) -> String {
+        self.message_with_resume_command("sister resume")
+    }
+
+    pub fn message_with_resume_command(&self, resume_command: &str) -> String {
         match self {
             Self::Asked {
                 available_chunks,
@@ -335,7 +344,7 @@ impl Look {
                     ),
                 }
             }
-            Self::NothingNew(blind) => blind.message(),
+            Self::NothingNew(blind) => blind.message_with_resume_command(resume_command),
         }
     }
 }

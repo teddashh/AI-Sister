@@ -154,13 +154,14 @@ impl SkipReason {
     }
 
     pub fn message(&self) -> String {
+        self.message_with_consent_command("sister consent --grant cloud-reading")
+    }
+
+    pub fn message_with_consent_command(&self, consent_command: &str) -> String {
         match self {
-            SkipReason::NoConsent => concat!(
-                "還沒簽第二張同意書（上雲解讀）。解釋層一次都不會呼叫那支 CLI。\n",
-                "要看她準備送出什麼：sister interpret --dry-run\n",
-                "要簽字：sister consent --grant cloud-reading"
-            )
-            .to_string(),
+            SkipReason::NoConsent => format!(
+                "還沒簽第二張同意書（上雲解讀）。解釋層一次都不會呼叫那支 CLI。\n要看她準備送出什麼：sister interpret --dry-run\n要簽字：{consent_command}"
+            ),
             SkipReason::NoCommand => concat!(
                 "還沒設定 [brain] command。一次都不會呼叫。\n",
                 "（不是今天沒有東西可解釋——她根本沒有一支 CLI 可以叫。）\n",

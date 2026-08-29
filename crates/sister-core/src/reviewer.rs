@@ -83,12 +83,14 @@ impl SkipReason {
     }
 
     pub fn message(&self) -> String {
+        self.message_with_consent_command("sister consent --grant cloud-reading")
+    }
+
+    pub fn message_with_consent_command(&self, consent_command: &str) -> String {
         match self {
-            SkipReason::NoConsent => concat!(
-                "還沒簽第二張同意書（上雲解讀）。審閱層一次都不會呼叫那支 CLI。\n",
-                "要簽字：sister consent --grant cloud-reading"
-            )
-            .to_string(),
+            SkipReason::NoConsent => format!(
+                "還沒簽第二張同意書（上雲解讀）。審閱層一次都不會呼叫那支 CLI。\n要簽字：{consent_command}"
+            ),
             SkipReason::NoCommand => concat!(
                 "還沒設定 [brain] command。審閱層一次都不會呼叫。\n",
                 "（不是今天沒有東西可審——她根本沒有一支 CLI 可以叫。）"
@@ -145,14 +147,22 @@ pub fn format_recheck_rate(s: &RecheckStats) -> String {
 }
 
 pub fn format_review_result(r: &ReviewResult, stats: &RecheckStats) -> String {
+    format_review_result_with_consent_command(r, stats, "sister consent --grant cloud-reading")
+}
+
+pub fn format_review_result_with_consent_command(
+    r: &ReviewResult,
+    stats: &RecheckStats,
+    consent_command: &str,
+) -> String {
     let mut out = String::new();
     if let Some(skip) = &r.skip {
         if r.ran {
-            out.push_str(&skip.message());
+            out.push_str(&skip.message_with_consent_command(consent_command));
             out.push('\n');
         } else {
             out.push_str("真的跑的話會停在這裡：\n");
-            out.push_str(&skip.message());
+            out.push_str(&skip.message_with_consent_command(consent_command));
             out.push('\n');
         }
     } else {
