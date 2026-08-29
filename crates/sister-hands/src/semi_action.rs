@@ -463,6 +463,11 @@ pub enum NotRecordingReason {
 
 impl StepEvidence {
     pub fn message(&self) -> String {
+        // **時刻走 `replay_copy::at`，不要自己插一個 `ts:`。** 那個前綴在這個
+        // crate 裡是有意思的：它代表「這個數字對不出時刻」。硬寫成 `ts:{ms}`
+        // 的話，一個好好的時戳會長得跟一個轉不出來的時戳一模一樣，而這份報告
+        // 存在的理由就是讓人看得出每一步發生在哪一刻。
+        let at = crate::replay_copy::at;
         match self {
             Self::After {
                 frame_id,
@@ -470,10 +475,14 @@ impl StepEvidence {
                 has_image,
             } => {
                 if *has_image {
-                    format!("做完之後的畫面憑據是 frame #{frame_id}（ts:{frame_at_ms}），圖在。")
+                    format!(
+                        "做完之後的畫面憑據是 frame #{frame_id}（{}），圖在。",
+                        at(*frame_at_ms)
+                    )
                 } else {
                     format!(
-                        "做完之後有 frame #{frame_id}（ts:{frame_at_ms}）這一列，但沒有截圖；紀錄在，圖不在。"
+                        "做完之後有 frame #{frame_id}（{}）這一列，但沒有截圖；紀錄在，圖不在。",
+                        at(*frame_at_ms)
                     )
                 }
             }
@@ -485,11 +494,13 @@ impl StepEvidence {
             } => {
                 if *has_image {
                     format!(
-                        "只有動作前 {earlier_by_ms} 毫秒的 frame #{frame_id}（ts:{frame_at_ms}）；這不是做完之後的畫面，圖在，只能證明她按下去時先前看見什麼。"
+                        "只有動作前 {earlier_by_ms} 毫秒的 frame #{frame_id}（{}）；這不是做完之後的畫面，圖在，只能證明她按下去時先前看見什麼。",
+                        at(*frame_at_ms)
                     )
                 } else {
                     format!(
-                        "只有動作前 {earlier_by_ms} 毫秒的 frame #{frame_id}（ts:{frame_at_ms}）；這不是做完之後的畫面，而且沒有截圖；紀錄在，圖不在。"
+                        "只有動作前 {earlier_by_ms} 毫秒的 frame #{frame_id}（{}）；這不是做完之後的畫面，而且沒有截圖；紀錄在，圖不在。",
+                        at(*frame_at_ms)
                     )
                 }
             }
@@ -753,5 +764,36 @@ mod provenance_tests {
             None
         );
         assert_eq!(never_inherited_refusal(ApprovedBy::Press, None), None);
+    }
+
+    /// `ts:` 在這個 crate 裡是「這個數字對不出時刻」的記號（見
+    /// `replay_copy::at`）。畫面證據曾經無條件印 `ts:{ms}`，於是一個好好的
+    /// 時戳和一個轉不出來的時戳在報告上長得一模一樣。
+    #[test]
+    fn step_evidence_prints_a_real_time_not_the_cannot_convert_marker() {
+        let ms = 1_756_200_004_400;
+        for evidence in [
+            StepEvidence::After {
+                frame_id: 7,
+                frame_at_ms: ms,
+                has_image: true,
+            },
+            StepEvidence::Before {
+                frame_id: 7,
+                frame_at_ms: ms,
+                earlier_by_ms: 300,
+                has_image: false,
+            },
+        ] {
+            let message = evidence.message();
+            assert!(
+                message.contains(&crate::replay_copy::at(ms)),
+                "要印得出時刻：{message}"
+            );
+            assert!(
+                !message.contains("ts:"),
+                "這個時戳轉得出來，不該掛著對不出時刻的記號：{message}"
+            );
+        }
     }
 }

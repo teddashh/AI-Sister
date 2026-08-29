@@ -251,6 +251,11 @@ enum HandsAction {
         #[arg(short, long, default_value_t = 20, value_parser = at_least_one)]
         limit: usize,
     },
+    /// 每一輪的授權、步驟、批准來源、結果、畫面證據與收尾。
+    Runs {
+        #[arg(short, long, default_value_t = 5, value_parser = at_least_one)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -810,6 +815,7 @@ fn main() -> Result<()> {
             HandsAction::Stop => ops::hands_switch::stop(&data_dir),
             HandsAction::Resume => ops::hands_switch::resume(&data_dir),
             HandsAction::Log { limit } => ops::act::log(&data_dir, limit),
+            HandsAction::Runs { limit } => ops::act::runs(&data_dir, limit),
         },
         Command::Review {
             dry_run,

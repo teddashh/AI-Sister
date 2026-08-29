@@ -127,6 +127,15 @@ fn unreadable_lines(replay: &Replay) -> Vec<String> {
         .collect()
 }
 
+/// action-log 沒有任何可讀列時，依檔案是否存在分開兩種歷史。
+pub fn empty_run_log_message(file_exists: bool) -> &'static str {
+    if file_exists {
+        "這份紀錄是空的——**不是**「她從來沒動過手」，是裡面的列被刪光了。"
+    } else {
+        "還沒有任何動作紀錄。她從來沒有把一個動作端到你面前過。"
+    }
+}
+
 /// 最近 `shown` 列，加上一句「上面還有幾列」。
 ///
 /// 這裡的截斷要說出來。安靜地只給最後 20 列，畫面讀起來會是「她總共就做過
@@ -148,6 +157,167 @@ pub fn recent_replay_lines(replay: &Replay, shown: usize) -> Vec<String> {
     let mut lines = vec![format!("（更早的 {hidden} 列沒有顯示）")];
     lines.extend(all.into_iter().skip(hidden));
     lines.extend(bad);
+    lines
+}
+
+/// 把扁平 action log 分成「一輪一輪」再讀成人話。
+///
+/// 這份邏輯刻意放在 `sister-hands`，不放 `apps/desktop`：desktop workspace 的
+/// CI 不會執行那裡的單元測試，run 邊界、批准來源和收尾文案若只在那裡測，綠燈
+/// 並沒有證明這份稽核報告真的分得對輪。CLI 只負責讀檔和印出這裡的結果。
+pub fn recent_run_report_lines(replay: &Replay, shown: usize) -> Vec<String> {
+    let mut runs: Vec<Vec<&ActionEvent>> = Vec::new();
+    let mut current: Vec<&ActionEvent> = Vec::new();
+
+    for event in &replay.events {
+        if matches!(event, ActionEvent::Granted { .. }) && !current.is_empty() {
+            runs.push(std::mem::take(&mut current));
+        }
+        current.push(event);
+        if matches!(
+            event,
+            ActionEvent::Concluded { .. } | ActionEvent::Aborted { .. }
+        ) {
+            runs.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        runs.push(current);
+    }
+
+    let hidden = runs.len().saturating_sub(shown);
+    let mut lines = Vec::new();
+    if hidden > 0 {
+        lines.push(format!("（更早的 {hidden} 輪沒有顯示）"));
+    }
+    for (visible_index, run) in runs.into_iter().skip(hidden).enumerate() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(run_report_lines(hidden + visible_index + 1, &run));
+    }
+    if !replay.unreadable.is_empty() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(unreadable_lines(replay));
+    }
+    lines
+}
+
+fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
+    let mut lines = vec![format!("── 第 {run_number} 輪 ──")];
+    match events.first() {
+        Some(ActionEvent::Granted { at_ms, grant }) => lines.push(format!(
+            "開頭：{}；這一輪授權：{}",
+            at(*at_ms),
+            grant.describe()
+        )),
+        Some(first) => lines.push(format!(
+            "開頭：{}；這一輪的開頭不在紀錄裡，所以不知道當初授權了什麼。",
+            at(first.at_ms())
+        )),
+        None => return lines,
+    }
+
+    // 「她提出的第幾件事」。和事件裡那個 `step_number`（做完的第幾步）是兩回事。
+    let mut proposed_number = 0_u32;
+    for event in events {
+        match event {
+            ActionEvent::Granted { .. } => {}
+            ActionEvent::Proposed { at_ms, action } => {
+                proposed_number += 1;
+                lines.push(format!(
+                    "第 {proposed_number} 步：{}；提出動作：{}",
+                    at(*at_ms),
+                    action.describe()
+                ));
+            }
+            ActionEvent::Approved { at_ms, action, by } => {
+                let by = match by {
+                    Some(ApprovedBy::Press) => "他當場按的",
+                    Some(ApprovedBy::StandingGrant) => {
+                        "憑先前簽好的票自己跑的；當時沒有人在鍵盤前面"
+                    }
+                    None => "舊版沒有記批准來源，所以不知道是誰批准的",
+                };
+                lines.push(format!(
+                    "第 {proposed_number} 步批准：{}；{by}；{}",
+                    at(*at_ms),
+                    action.describe()
+                ));
+            }
+            ActionEvent::Executed {
+                at_ms,
+                action,
+                result,
+            } => {
+                let result = match result {
+                    ExecutionResult::Succeeded { detail } => format!("成功：{detail}"),
+                    ExecutionResult::Failed { error } => format!("失敗：{error}"),
+                };
+                lines.push(format!(
+                    "第 {proposed_number} 步結果：{}；{}；{result}",
+                    at(*at_ms),
+                    action.describe()
+                ));
+            }
+            ActionEvent::Refused {
+                at_ms,
+                action,
+                reason,
+            } => lines.push(format!(
+                "第 {proposed_number} 步結果：{}；{}；被拒絕：{}",
+                at(*at_ms),
+                action.describe(),
+                reason.message()
+            )),
+            ActionEvent::StepFinished {
+                at_ms,
+                step_number,
+                action,
+                evidence,
+            } => {
+                let evidence = match evidence {
+                    Some(evidence) => evidence.message(),
+                    None => "這一列是舊版寫的；當時沒有去查畫面憑據。".to_string(),
+                };
+                // **這裡有兩個不同的數字，不能共用「第 N 步」這個標籤。**
+                // 上面那個是「她提出的第幾件事」（每一次 `Proposed` 都加一）；
+                // 事件裡帶的 `step_number` 是 `finish_step` 給的，而 `finish_step`
+                // 只在 `Outcome::Done` 時才被呼叫，數的是「她真的做完的第幾步」。
+                // 第一件被拒絕、第二件做完的時候，這兩個數字是 2 和 1——都印成
+                // 「第 N 步」的話，同一個動作會在報告裡拿到兩個編號。
+                lines.push(format!(
+                    "第 {proposed_number} 步畫面證據：{}；{}；{evidence}（這是她這一輪做完的第 {step_number} 步）",
+                    at(*at_ms),
+                    action.describe()
+                ));
+            }
+            ActionEvent::Aborted {
+                at_ms,
+                after_completed_steps,
+                by,
+            } => lines.push(format!(
+                "收尾：{} {}",
+                at(*at_ms),
+                RunConclusion::Aborted {
+                    after_completed_steps: *after_completed_steps,
+                    by: *by,
+                }
+                .message()
+            )),
+            ActionEvent::Concluded { at_ms, conclusion } => {
+                lines.push(format!("收尾：{} {}", at(*at_ms), conclusion.message()));
+            }
+        }
+    }
+    if !matches!(
+        events.last(),
+        Some(ActionEvent::Concluded { .. } | ActionEvent::Aborted { .. })
+    ) {
+        lines.push("收尾：這一輪的紀錄到這裡就沒有了。".to_string());
+    }
     lines
 }
 
@@ -526,5 +696,247 @@ mod tests {
             "{by_pulled_switch:?}"
         );
         assert_ne!(by_user[0], by_system[0]);
+    }
+
+    fn report(events: Vec<ActionEvent>, limit: usize) -> String {
+        recent_run_report_lines(
+            &Replay {
+                events,
+                unreadable: vec![],
+            },
+            limit,
+        )
+        .join("\n")
+    }
+
+    fn grant(task: &str) -> crate::semi_action::Grant {
+        use crate::semi_action::{
+            ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, StepLimit, Task,
+        };
+        Grant::new(
+            Task::new(task),
+            AllowedApps::new([App::new("chrome.exe")]),
+            AllowedActions::new([ActionKind::OpenUrl]),
+            Expiry::after_issued(1, 60_000),
+            StepLimit::new(3).expect("3 > 0"),
+        )
+    }
+
+    fn proposed(at_ms: i64, url: &str) -> ActionEvent {
+        ActionEvent::Proposed {
+            at_ms,
+            action: ActionSnapshot::OpenUrl { url: url.into() },
+        }
+    }
+
+    /// 一輪裡有兩個不同的「第幾步」，而且它們會分家。
+    ///
+    /// 提出的第幾件事，每次 `Proposed` 加一；事件裡的 `step_number` 由
+    /// `finish_step` 給，而那個只在 `Outcome::Done` 時才被呼叫。第一件被拒絕、
+    /// 第二件做完的時候，這兩個數字是 2 和 1。兩個都印成「第 N 步」的話，同一個
+    /// 動作在報告裡會有兩個編號，而讀的人沒有任何線索知道是哪一種。
+    #[test]
+    fn a_refused_step_makes_the_two_step_numbers_diverge_and_they_must_not_share_a_label() {
+        let text = report(
+            vec![
+                ActionEvent::Granted {
+                    at_ms: 1,
+                    grant: grant("編號"),
+                },
+                proposed(2, "https://refused"),
+                ActionEvent::Refused {
+                    at_ms: 3,
+                    action: ActionSnapshot::OpenUrl {
+                        url: "https://refused".into(),
+                    },
+                    reason: crate::RefusalReason::ObserveHasNoHands,
+                },
+                proposed(4, "https://done"),
+                ActionEvent::StepFinished {
+                    at_ms: 5,
+                    step_number: 1,
+                    action: ActionSnapshot::OpenUrl {
+                        url: "https://done".into(),
+                    },
+                    evidence: None,
+                },
+            ],
+            5,
+        );
+        let evidence = text
+            .lines()
+            .find(|l| l.contains("https://done") && l.contains("畫面證據"))
+            .unwrap_or_else(|| panic!("{text}"));
+        // 那一行講的是**第二件**提出的事，不是「第 1 步」。
+        assert!(evidence.contains("第 2 步畫面證據"), "{evidence}");
+        assert!(!evidence.starts_with("第 1 步"), "{evidence}");
+        // 而做完的第 1 步這個事實還在，只是它有自己的名字。
+        assert!(evidence.contains("做完的第 1 步"), "{evidence}");
+    }
+
+    #[test]
+    fn two_runs_do_not_share_steps() {
+        let text = report(
+            vec![
+                ActionEvent::Granted {
+                    at_ms: 1,
+                    grant: grant("第一輪"),
+                },
+                proposed(2, "https://first"),
+                ActionEvent::Granted {
+                    at_ms: 4,
+                    grant: grant("第二輪"),
+                },
+                proposed(5, "https://second"),
+                ActionEvent::Concluded {
+                    at_ms: 6,
+                    conclusion: crate::semi_action::RunConclusionRecord::Completed {
+                        asked: Some(1),
+                    },
+                },
+            ],
+            5,
+        );
+        let second = text.split("── 第 2 輪 ──").nth(1).expect("第二輪");
+        assert!(second.contains("https://second"), "{text}");
+        assert!(!second.contains("https://first"), "{text}");
+    }
+
+    #[test]
+    fn an_unclosed_run_says_the_record_ends_without_claiming_completion() {
+        let text = report(
+            vec![
+                ActionEvent::Granted {
+                    at_ms: 1,
+                    grant: grant("未收尾"),
+                },
+                proposed(2, "https://a"),
+            ],
+            5,
+        );
+        assert!(text.contains("這一輪的紀錄到這裡就沒有了"), "{text}");
+        assert!(!text.contains("完成"), "{text}");
+    }
+
+    #[test]
+    fn orphan_steps_say_the_opening_is_missing_without_printing_an_empty_scope() {
+        let text = report(vec![proposed(2, "https://orphan")], 5);
+        assert!(text.contains("開頭不在紀錄裡"), "{text}");
+        assert!(text.contains("不知道當初授權了什麼"), "{text}");
+        assert!(!text.contains("這一輪授權："), "{text}");
+    }
+
+    #[test]
+    fn three_approval_sources_have_three_non_overlapping_sentences() {
+        let action = ActionSnapshot::OpenUrl {
+            url: "https://a".into(),
+        };
+        let sentence = |by| {
+            report(
+                vec![ActionEvent::Approved {
+                    at_ms: 1,
+                    action: action.clone(),
+                    by,
+                }],
+                5,
+            )
+        };
+        let press = sentence(Some(ApprovedBy::Press));
+        let ticket = sentence(Some(ApprovedBy::StandingGrant));
+        let legacy = sentence(None);
+        for (left, right) in [(&press, &ticket), (&press, &legacy), (&ticket, &legacy)] {
+            assert!(!left.contains(right), "{left:?} 包含 {right:?}");
+            assert!(!right.contains(left), "{right:?} 包含 {left:?}");
+        }
+        assert!(press.contains("他當場按的"), "{press}");
+        assert!(ticket.contains("憑先前簽好的票自己跑的"), "{ticket}");
+        assert!(legacy.contains("舊版沒有記批准來源"), "{legacy}");
+    }
+
+    #[test]
+    fn missing_evidence_image_says_the_row_exists_but_the_image_does_not() {
+        let text = report(
+            vec![ActionEvent::StepFinished {
+                at_ms: 2,
+                step_number: 1,
+                action: ActionSnapshot::OpenUrl {
+                    url: "https://a".into(),
+                },
+                evidence: Some(StepEvidence::After {
+                    frame_id: 7,
+                    frame_at_ms: 3,
+                    has_image: false,
+                }),
+            }],
+            5,
+        );
+        assert!(text.contains("紀錄在，圖不在"), "{text}");
+        assert!(text.contains("frame #7"), "{text}");
+    }
+
+    #[test]
+    fn legacy_completed_and_measured_zero_are_different_sentences() {
+        use crate::semi_action::RunConclusionRecord;
+        let legacy = report(
+            vec![ActionEvent::Concluded {
+                at_ms: 2,
+                conclusion: RunConclusionRecord::Completed { asked: None },
+            }],
+            5,
+        );
+        let zero = report(
+            vec![ActionEvent::Concluded {
+                at_ms: 2,
+                conclusion: RunConclusionRecord::Completed { asked: Some(0) },
+            }],
+            5,
+        );
+        assert_ne!(legacy, zero);
+        assert!(legacy.contains("沒有記問了幾步"), "{legacy}");
+        assert!(zero.contains("一步都沒有問到你"), "{zero}");
+    }
+
+    #[test]
+    fn pulled_hands_abort_names_the_external_switch() {
+        let text = report(
+            vec![ActionEvent::Aborted {
+                at_ms: 2,
+                after_completed_steps: 1,
+                by: crate::semi_action::AbortActor::HandsPulled,
+            }],
+            5,
+        );
+        assert!(text.contains("外部拔手開關"), "{text}");
+        assert!(!text.contains("中止者：使用者"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_existing_log_and_a_missing_log_are_not_the_same_history() {
+        let emptied = empty_run_log_message(true);
+        let never_existed = empty_run_log_message(false);
+        assert_ne!(emptied, never_existed);
+        assert!(emptied.contains("列被刪光"), "{emptied}");
+        assert!(never_existed.contains("從來沒有"), "{never_existed}");
+    }
+
+    #[test]
+    fn run_limit_keeps_the_newest_runs_and_names_the_hidden_count() {
+        let mut events = Vec::new();
+        for n in 1..=3 {
+            events.push(ActionEvent::Granted {
+                at_ms: n * 10,
+                grant: grant(&format!("第{n}輪")),
+            });
+            events.push(proposed(n * 10 + 1, &format!("https://run-{n}")));
+            events.push(ActionEvent::Concluded {
+                at_ms: n * 10 + 2,
+                conclusion: crate::semi_action::RunConclusionRecord::Completed { asked: Some(1) },
+            });
+        }
+        let text = report(events, 2);
+        assert!(text.contains("更早的 1 輪沒有顯示"), "{text}");
+        assert!(!text.contains("https://run-1"), "{text}");
+        assert!(text.contains("https://run-2"), "{text}");
+        assert!(text.contains("https://run-3"), "{text}");
     }
 }

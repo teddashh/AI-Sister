@@ -1980,6 +1980,42 @@ pub mod act {
         log_to(data_dir, limit, &mut std::io::stdout())
     }
 
+    /// `sister hands runs`：把 action log 按 run 邊界分組後印出。
+    pub fn runs(data_dir: &Path, limit: usize) -> Result<()> {
+        runs_to(data_dir, limit, &mut std::io::stdout())
+    }
+
+    pub(crate) fn runs_to(data_dir: &Path, limit: usize, out: &mut impl Write) -> Result<()> {
+        anyhow::ensure!(
+            data_dir.exists(),
+            "找不到這個資料目錄：{}\n這不是「她沒有動過手」，是我們沒有看到那個目錄。",
+            data_dir.display()
+        );
+        let log = ActionLog::in_data_dir(data_dir);
+        let replay = log.replay()?;
+        if replay.events.is_empty() && replay.unreadable.is_empty() {
+            writeln!(
+                out,
+                "{}",
+                sister_hands::replay_copy::empty_run_log_message(log.path().exists())
+            )?;
+            writeln!(out, "（紀錄會寫在 {}）", log.path().display())?;
+            return Ok(());
+        }
+        writeln!(out, "每一輪的動作報告（{}）\n", log.path().display())?;
+        for line in sister_hands::replay_copy::recent_run_report_lines(&replay, limit) {
+            writeln!(out, "{line}")?;
+        }
+        if !replay.unreadable.is_empty() {
+            writeln!(
+                out,
+                "\n有 {} 列讀不懂。那幾列留在報告最後；它們是發生過但解不開，不是沒有發生。",
+                replay.unreadable.len()
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn log_to(data_dir: &Path, limit: usize, out: &mut impl Write) -> Result<()> {
         // **這一句擋的是一句假話。** 資料目錄打錯字的時候，下面那個 replay 會
         // 回一份空的（`ActionLog::replay` 把「檔案不存在」當成空的，那對它自己
