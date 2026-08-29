@@ -642,6 +642,54 @@ capture 層本身就是 recorder。
    實作出來的時候沒有人需要記得回來補；但在那之前，那四句話一次都不會出現
    在螢幕上，**沒有任何執行證據說它們印出來是對的**。
 
+**這一輪修掉的**（alpha.82）：
+
+**那一行印得出來，卻打不進去。** alpha.81 的頭條修好了「下一步指到別的資料
+夾」，留下了同一行的下一個問題：指對了資料夾，可是那一行貼回去會散掉。
+
+```text
+$ sister --data-dir "/home/ted-h/tmp-tests/Ted Huang/my data" forget --last 30d
+  sister --data-dir /home/ted-h/tmp-tests/Ted Huang/my data forget --last 30d --yes
+$ （照著打）
+error: unrecognized subcommand 'Huang/my'
+```
+
+**出貨平台是 Windows，而 Windows 上帶空白的路徑是常態**（`C:\Users\Ted
+Huang\…`、`C:\Program Files\…`）。clap 擋得下來，所以不是資料遺失——是那句祈
+使句本身是假的。三個病共用一個接縫，所以一起修：
+
+（一）`cmd_for` 一個引號都不加。
+（二）`act::shell_quote` 加的是 POSIX 的 `'\''`，而出貨平台的 shell 不吃這
+套：PowerShell 的單引號字串裡，內嵌單引號要寫成**兩個**單引號。值裡沒有單引
+號的時候 `'…'` 兩邊都對——**這正是它躲過測試的原因**，而那條測試用的是
+`shlex`（POSIX 拆解器），證明的是「貼得回 bash」。
+（三）「這是不是預設目錄」有**兩份實作，而且會給出不同答案**：`cmd_for`
+canonicalize 兩邊再比，`command_prefix` 直接比原始路徑。同一次執行、同一個指
+向預設目錄的 symlink，`forget` 認得出、`do` 認不出。`ops.rs` 自己就寫著「兩個
+執行檔各拼一次遲早會指到不同地方」——這裡是同一個執行檔裡拼了兩次。
+
+改法是**一支函式、一套規則**：`quote_for(Shell, &str)` 是純函式，shell 當參數
+收，所以**兩套規則都在 Linux 上測得到**——`cfg(windows)` 那一層在這台機器上零
+執行覆蓋，寫成 `#[cfg]` 區塊就等於沒測。平台在呼叫端用 `cfg!(windows)`
+（表達式，不是區塊）選。`command_prefix` 和 `shell_quote` 併掉，`do` 的
+`--task`／`--app`／`--allow` 和 `--data-dir` 走同一支。沒有需要引號的時候不加
+——不然每個正常使用者都會看到一行帶著多餘引號的話。
+
+驗收不是讀輸出，是把印出來的那一行用 `shlex` 拆回 argv、餵
+`Cli::try_parse_from`，比對解析出來的 `--data-dir` **逐字等於**原本那一個。
+
+**還缺**（alpha.82 當下）：
+- **PowerShell 那套規則沒有任何執行證據。** `quote_for` 這支純函式兩臂都測得
+  到，但測的是「它回傳這個字串」；**那個字串在真的 PowerShell 上貼得回去，是
+  照文件推的，不是跑出來的**。這台機器上沒有 `pwsh`，而 Windows CI 跑的
+  `cargo test` 也只呼叫同一支純函式——它證明不了那條文法。這和
+  `cfg(windows)` 接線層零覆蓋是同一個形狀。
+- **`cmd.exe` 那條路仍然是壞的。** 單引號在 `cmd.exe` 裡根本不是引號，那一整
+  串會連引號一起被當成參數值。這一輪是把「兩個 Windows shell 都錯」換成「預
+  設那個對」（Windows Terminal 的預設是 PowerShell），不是全對。兩邊都對的引
+  號形式不存在：雙引號在 `cmd.exe` 上對，但在 PowerShell 裡會內插 `$`，而
+  `$` 在 Windows 檔名裡是合法的。真要修得靠偵測父行程，那是另一輪。
+
 **這一輪修掉的**（alpha.81）：
 
 **上一版那三句話裡，有一句的下一步是假的，而且照著做會弄壞他的東西。**
@@ -744,8 +792,8 @@ excel.exe」，畫面叫他去跑「寄季報 / chrome.exe」。現在印他自�
 （五）`db.rs` 那句「或指一個別的 `--data-dir`」會被字母人渲染，而字母人不收
 任何參數。守法是：錯誤訊息裡寫的每一個指令形式都由測試餵進 `Cli::try_parse_from`，
 `--task` 那一行還會被拆回 argv 再解析，證明它貼得回去且逐字相等。
-（**還缺**：那個引號規則選的是 POSIX，而出貨平台是 Windows／PowerShell——
-任務名裡有單引號的時候，印出來的那一行在 PowerShell 上貼不回去。見任務 #30。）
+（那個引號規則當時選的是 POSIX，而出貨平台是 Windows／PowerShell——
+alpha.82 修掉了，見上。）
 
 **這一輪修掉的**（alpha.80）：
 
