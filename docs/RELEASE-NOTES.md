@@ -87,6 +87,67 @@ alpha.80 把 `sister doctor` 的暫停那一格拆成三句，讓三種成因各
 把權限改回去再刪，四種都當場讓那一列變回「沒有暫停」。上一版那句假話之所以
 發得出去，正是因為當時只驗到「程式印得出這幾個字」。
 
+### 同一個病最嚴重的那一個：「再跑一次，加上 `--yes`」會刪掉另一個資料夾
+
+上面那一句是「指到一顆碰不到那個檔案的鍵」。它不是單一事件，是一整族——而這
+一族裡最嚴重的那一個會**不可逆地**刪掉你真正的記憶。
+
+`sister forget` 的預覽函式拿到了資料目錄，第一行就把它丟掉
+（`let _ = data_dir;`）。於是同一個畫面上：
+
+```
+$ sister --data-dir /home/ted-h/tmp-tests/fg forget --last 30d
+  還沒有資料庫（/home/ted-h/tmp-tests/fg/sister.db），所以沒有畫面或文字紀錄可以忘。
+
+這是預覽，一個位元組都沒動。真的要忘掉就再跑一次，加上 `--yes`：
+  sister forget --last 30d --yes          ← 打到預設資料目錄
+**沒有回收桶，也沒有復原。**
+```
+
+上面那行印著 `/tmp/fg/sister.db`，下面那行叫你跑一個會刪掉**別的**資料夾的
+指令，而那句話自己說了沒有復原。
+
+這不是理論上的：README 的 quickstart 從頭到尾都在 `--data-dir ./data` 裡，
+`sister export` 的說明自己就在教 `sister --data-dir <匯出的目錄> query`——
+**「人正看著另一個資料夾」是這個產品設計出來的常態**。清點下來，整份程式碼
+裡把 `--data-dir` 帶上的下一步只有 `export` 那一句。其餘都會打到預設目錄：
+簽同意書、暫停／解除、停止、存授權書、把手接回去、開始錄⋯⋯
+
+守它的不是測試，是型別：
+
+```rust
+/// 收 `&Path` 是刻意的：拿不到路徑就拼不出這一行。
+fn cmd(data_dir: &Path, rest: &str) -> String
+```
+
+和預設目錄 canonicalize 之後相同就印 `sister {rest}`，不同、拿不到、或任一邊
+canonicalize 失敗就**保守印出旗標**（多印一個旗標是安全的，少印才會刪錯東
+西）。41 個出口改走它。真的跑出來的：
+
+```
+$ sister --data-dir /home/ted-h/tmp-tests/nd forget --last 30d
+  sister --data-dir /home/ted-h/tmp-tests/nd forget --last 30d --yes
+
+$ sister forget --last 30d                     ← 預設目錄，不多印那個旗標
+  sister forget --last 30d --yes
+
+$ sister --data-dir <指向預設目錄的 symlink> forget --last 30d
+  sister forget --last 30d --yes               ← canonicalize 解得開
+```
+
+**字母人那三處不是加旗標能修的**——那個介面不收參數。設定頁那個勾改成印出
+**這一次真的在用的**設定檔路徑；時間軸的「忘掉這一段」改走 `sister forget`；
+而 `sister prune` 那半句是另一個病：它是**保留期**專用的，對「剛剛寫下的那些
+截圖」完全無效（實測 `沒有東西過期，什麼都沒動。`）。一個做不到那件事的建議
+不如不給，拿掉。
+
+**型別擋住了 41 處，另外十處從字串字面值溜掉了**（型別碰不到字面值），第二輪
+才補完——包括 `sister prune`、`sister mark --undo`、`sister replay`、
+`consent --grant frame-storage`，和 `watch` 那句「她被暫停了（`sister resume`
+解除）」。那十句現在有一份回歸清單釘著。**那份清單擋不到第十一句**，理由寫在
+測試的註解裡：中文沒有詞界，祈使句和描述句（「正在跑的 `sister record` 會在下
+一個 tick⋯」）長得幾乎一樣，收得夠緊會漏一半，放得夠寬會把描述句一起殺掉。
+
 ### 她會等下一張圖了
 
 `sister do` 每交出一步，就查那一刻前後最近的一張畫面。「動作**之後**」那一種

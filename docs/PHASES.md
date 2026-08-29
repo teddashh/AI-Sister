@@ -688,6 +688,40 @@ stat 一個子項目，那正是剛剛失敗的那件事。所以那句話不假
 `assert_ne!` 迴圈（每句話都嵌著自己的探測路徑，所以兩種狀態套同一個模板，
 字串照樣不相等），全部拿掉或換成真的守得住的。
 
+**那句話不是單一事件，是一整族；而這一族最嚴重的那一個會不可逆地刪東西。**
+`forget::preview_close` 拿到 `data_dir`，第一行 `let _ = data_dir;` 丟掉它，於
+是同一個畫面上上面印著 `X/sister.db`、下面叫他跑 `sister forget --last 30d
+--yes`——打到**預設**目錄，而那句話自己寫著「沒有回收桶，也沒有復原」。清點
+下來，整份程式碼裡帶著 `--data-dir` 的下一步只有 `export` 那一句。而
+`README.md` 的 quickstart 從頭到尾在 `--data-dir ./data` 裡、`sister export`
+自己就在教 `sister --data-dir <匯出目錄> query`——「人正看著另一個資料夾」是這
+個產品**設計出來的**常態，不是邊角。守法照 `watching_verdict` 那條既有紀律
+（「守它的不是測試，是型別」）：`fn cmd(data_dir: &Path, rest: &str) -> String`
+收 `&Path`，拿不到路徑就拼不出這一行；canonicalize 後與
+`Config::default_data_dir()` 相同才省略旗標，任一邊 canonicalize 失敗就**保守
+印出**（多印安全，少印才會刪錯）。41 個出口改走它。字母人那三處不是加旗標能
+修的（那個介面不收參數）：設定頁那個勾改印**這一次真的在用的**設定檔路徑、時
+間軸「忘掉這一段」改走 `sister forget`、`sister prune` 那半句拿掉（它是保留期
+專用的，對剛寫下的截圖完全無效——實測 `沒有東西過期，什麼都沒動。`）。
+
+**型別擋得住呼叫點，擋不住字面值。** 第一輪十處寫成字串字面值的祈使句全部漏
+掉（`sister prune` ×2、`mark --id N`、`mark --undo` ×2、`record`、
+`forget --last 30d`、`consent --grant frame-storage` ×2、`replay`、
+`watch.rs` 的 `resume`）——第二輪才補完。這一條值得記住：**派工單上寫了「不要
+手工改二十個字串字面值，那保證會漏」，然後它還是漏了**，因為型別只守得到
+「有人呼叫那支函式」的地方。
+
+**還缺**（alpha.81 當下）：
+- 那十句由一份**回歸清單**釘著，不是通則——**第十一句寫出來不會有人提醒**。
+  通則試不出來：中文沒有詞界，祈使標記和 `sister` 之間隔著長度不定的字
+  （「跑一次 `sister prune`」「先跑 `sister record`」），而描述句長得幾乎一樣
+  （「正在跑的 `sister record` 會在下一個 tick⋯」）；收得夠緊漏一半，放得夠
+  寬把描述句一起殺掉。理由寫在 `these_ten_imperatives_do_not_come_back` 的註
+  解裡，測試名字也照實改成「這十句」而不是原本那個「不可能繞過」。
+- `WatchSkip::NoConsent` 第二行「要看她會送出什麼：`sister watch "…" --dry-run`」
+  仍然不帶 `--data-dir`。它是**唯讀**的（`--dry-run` 一個字都不送），但照著
+  打會拿預設目錄的畫面組 payload，看到的不是他正在看的那一份。
+
 **同一族的另外五句，指的東西不存在。** 上一句是「指到碰不到那個檔案的鍵」，
 這五句更直接——**照著印出來的字去打，打不出來**。
 （一）`sister do` 在管子裡被擋下時提供的逃生口是 clap 的
