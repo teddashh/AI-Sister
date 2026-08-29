@@ -213,20 +213,41 @@ fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
             at(*at_ms),
             grant.describe()
         )),
+        // **不可以寫成「開頭不在紀錄裡」。** 那句話斷言有一個開頭、而它不見了，
+        // 於是讀的人會去找是誰把它裁掉的。但字母人上那顆按鈕（`Level::Suggest`）
+        // 走的根本不是授權書那條路——它從來沒有過開頭。「被裁掉了」和「這條路
+        // 本來就沒有」在這一列上分不出來，所以兩種都要說，不要替它挑一種。
         Some(first) => lines.push(format!(
-            "開頭：{}；這一輪的開頭不在紀錄裡，所以不知道當初授權了什麼。",
+            "開頭：{}；這一輪沒有授權書那一列，所以不知道當初授權了什麼——可能是開頭被裁掉了（`hands forget`、保留期），也可能它本來就不是 `sister do` 開的（字母人上按的那一顆不經過授權書）。",
             at(first.at_ms())
         )),
         None => return lines,
     }
 
     // 「她提出的第幾件事」。和事件裡那個 `step_number`（做完的第幾步）是兩回事。
+    //
+    // **不可以只在 `Proposed` 加一。** `action-log.jsonl` 有兩個生產者，而字母人
+    // 那一個刻意不寫 `Proposed`（見 `apps/desktop/src-tauri/src/hands.rs:26`——
+    // 提出的時刻沒有量到，寧可少一列也不要多一列假的）。只數 `Proposed` 的話，
+    // 字母人上按的每一顆按鈕都印成「第 0 步」：那個 0 不是「第零步」，是「這裡
+    // 從來沒有加過」，而且 N 顆不同的按鈕會全部共用同一個編號。
+    //
+    // 規矩：`Proposed` 開一步；`Approved` 在前一列不是 `Proposed` 的時候也開一步。
     let mut proposed_number = 0_u32;
+    let mut previous_was_proposed = false;
     for event in events {
+        let opens_a_step = match event {
+            ActionEvent::Proposed { .. } => true,
+            ActionEvent::Approved { .. } => !previous_was_proposed,
+            _ => false,
+        };
+        if opens_a_step {
+            proposed_number += 1;
+        }
+        previous_was_proposed = matches!(event, ActionEvent::Proposed { .. });
         match event {
             ActionEvent::Granted { .. } => {}
             ActionEvent::Proposed { at_ms, action } => {
-                proposed_number += 1;
                 lines.push(format!(
                     "第 {proposed_number} 步：{}；提出動作：{}",
                     at(*at_ms),
@@ -709,6 +730,63 @@ mod tests {
         .join("\n")
     }
 
+    /// 字母人那顆按鈕寫的是 `Approved` + 結果，**沒有 `Proposed`**
+    /// （`apps/desktop/src-tauri/src/hands.rs:26`）。只在 `Proposed` 加一的話，
+    /// 每一顆按鈕都印成「第 0 步」，而且 N 顆全部共用那一個編號。
+    #[test]
+    fn desktop_button_rows_get_their_own_step_numbers_not_a_shared_zero() {
+        let press = |url: &str, at_ms: i64| {
+            vec![
+                ActionEvent::Approved {
+                    at_ms,
+                    action: ActionSnapshot::OpenUrl { url: url.into() },
+                    by: Some(ApprovedBy::Press),
+                },
+                ActionEvent::Executed {
+                    at_ms: at_ms + 1,
+                    action: ActionSnapshot::OpenUrl { url: url.into() },
+                    result: ExecutionResult::Succeeded {
+                        detail: "ok".into(),
+                    },
+                },
+            ]
+        };
+        let mut events = press("https://first", 1_700_000_000_000);
+        events.extend(press("https://second", 1_700_000_010_000));
+        let text = report(events, 5);
+
+        assert!(
+            !text.contains("第 0 步"),
+            "沒有 Proposed 不等於「第零步」，那個 0 是從來沒有加過：\n{text}"
+        );
+        assert!(text.contains("第 1 步批准"), "{text}");
+        assert!(
+            text.contains("第 2 步批准"),
+            "兩顆不同的按鈕不可以共用一個編號：\n{text}"
+        );
+    }
+
+    /// 沒有 `Granted` 的那一輪不可以斷言「開頭被裁掉了」——字母人那條路
+    /// 從來就沒有授權書。兩種都要說，不要替它挑一種。
+    #[test]
+    fn a_run_without_a_grant_row_does_not_claim_the_opening_was_trimmed() {
+        let text = report(
+            vec![ActionEvent::Approved {
+                at_ms: 1_700_000_000_000,
+                action: ActionSnapshot::OpenUrl {
+                    url: "https://a".into(),
+                },
+                by: Some(ApprovedBy::Press),
+            }],
+            5,
+        );
+        assert!(text.contains("被裁掉"), "{text}");
+        assert!(
+            text.contains("字母人"),
+            "「本來就沒有授權書」那一種也要講出來：\n{text}"
+        );
+    }
+
     fn grant(task: &str) -> crate::semi_action::Grant {
         use crate::semi_action::{
             ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, StepLimit, Task,
@@ -792,6 +870,7 @@ mod tests {
                     at_ms: 6,
                     conclusion: crate::semi_action::RunConclusionRecord::Completed {
                         asked: Some(1),
+                        decided_by: Some(ApprovedBy::Press),
                     },
                 },
             ],
@@ -821,7 +900,7 @@ mod tests {
     #[test]
     fn orphan_steps_say_the_opening_is_missing_without_printing_an_empty_scope() {
         let text = report(vec![proposed(2, "https://orphan")], 5);
-        assert!(text.contains("開頭不在紀錄裡"), "{text}");
+        assert!(text.contains("沒有授權書那一列"), "{text}");
         assert!(text.contains("不知道當初授權了什麼"), "{text}");
         assert!(!text.contains("這一輪授權："), "{text}");
     }
@@ -880,20 +959,47 @@ mod tests {
         let legacy = report(
             vec![ActionEvent::Concluded {
                 at_ms: 2,
-                conclusion: RunConclusionRecord::Completed { asked: None },
+                conclusion: RunConclusionRecord::Completed {
+                    asked: None,
+                    decided_by: None,
+                },
             }],
             5,
         );
         let zero = report(
             vec![ActionEvent::Concluded {
                 at_ms: 2,
-                conclusion: RunConclusionRecord::Completed { asked: Some(0) },
+                conclusion: RunConclusionRecord::Completed {
+                    asked: Some(0),
+                    decided_by: Some(ApprovedBy::Press),
+                },
             }],
             5,
         );
         assert_ne!(legacy, zero);
-        assert!(legacy.contains("沒有記問了幾步"), "{legacy}");
+        assert!(legacy.contains("沒有記是誰決定的"), "{legacy}");
         assert!(zero.contains("一步都沒有問到你"), "{zero}");
+    }
+
+    #[test]
+    fn completed_decision_sources_have_three_non_overlapping_sentences() {
+        use crate::semi_action::RunConclusionRecord;
+        let sentence = |decided_by| {
+            RunConclusionRecord::Completed {
+                asked: Some(1),
+                decided_by,
+            }
+            .message()
+        };
+        let press = sentence(Some(ApprovedBy::Press));
+        let ticket = sentence(Some(ApprovedBy::StandingGrant));
+        let legacy = sentence(None);
+        assert!(press.contains("問到你面前"), "{press}");
+        assert!(!ticket.contains('問'), "{ticket}");
+        assert!(legacy.contains("沒有記是誰決定的"), "{legacy}");
+        for (left, right) in [(&press, &ticket), (&press, &legacy), (&ticket, &legacy)] {
+            assert_ne!(left, right);
+        }
     }
 
     #[test]
@@ -930,7 +1036,10 @@ mod tests {
             events.push(proposed(n * 10 + 1, &format!("https://run-{n}")));
             events.push(ActionEvent::Concluded {
                 at_ms: n * 10 + 2,
-                conclusion: crate::semi_action::RunConclusionRecord::Completed { asked: Some(1) },
+                conclusion: crate::semi_action::RunConclusionRecord::Completed {
+                    asked: Some(1),
+                    decided_by: Some(ApprovedBy::Press),
+                },
             });
         }
         let text = report(events, 2);

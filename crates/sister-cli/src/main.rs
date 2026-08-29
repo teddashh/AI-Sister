@@ -424,6 +424,9 @@ enum Command {
         /// 使用資料目錄裡已存的授權書；仍然每一步都要當場按「好」。
         #[arg(long, conflicts_with_all = ["apps", "allow", "minutes", "steps"])]
         use_grant: bool,
+        /// 憑先前存好的授權書逐步執行，不在每一步等人按鍵。
+        #[arg(long, requires = "use_grant", conflicts_with = "dry_run")]
+        unattended: bool,
         /// 顯示資料目錄裡已存的授權書後離開。
         ///
         /// **跟另外兩個旗標互斥，是刻意的。** 這一條路印完就 return，所以
@@ -760,6 +763,7 @@ fn main() -> Result<()> {
             dry_run,
             save_grant,
             use_grant,
+            unattended,
             show_grant,
         } => ops::act::run(
             &data_dir,
@@ -772,6 +776,7 @@ fn main() -> Result<()> {
                 dry_run,
                 save_grant,
                 use_grant,
+                unattended,
                 show_grant,
             },
         ),
@@ -952,6 +957,32 @@ mod tests {
         Cli::try_parse_from(["sister", "do", "--show-grant"]).expect("單獨看一眼不必給 --task");
         Cli::try_parse_from(["sister", "do", "--task", "寄季報", "--save-grant"])
             .expect("單獨存要打得通");
+    }
+
+    #[test]
+    fn unattended_requires_a_saved_grant_and_conflicts_with_dry_run() {
+        let Err(missing) =
+            Cli::try_parse_from(["sister", "do", "--task", "寄季報", "--unattended"])
+        else {
+            panic!("unattended without use-grant must fail")
+        };
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let Err(preview) = Cli::try_parse_from([
+            "sister",
+            "do",
+            "--task",
+            "寄季報",
+            "--use-grant",
+            "--unattended",
+            "--dry-run",
+        ]) else {
+            panic!("unattended preview must fail")
+        };
+        assert_eq!(preview.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

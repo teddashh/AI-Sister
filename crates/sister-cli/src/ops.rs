@@ -1223,6 +1223,7 @@ pub mod act {
         pub dry_run: bool,
         pub save_grant: bool,
         pub use_grant: bool,
+        pub unattended: bool,
         pub show_grant: bool,
     }
 
@@ -1750,110 +1751,42 @@ pub mod act {
                 at_ms: clock(),
                 action: action.clone(),
             })?;
-            let presented = PresentedStep::new(step.clone());
-            match ask(input, out, &_watcher.pulled)? {
-                Answer::Decline => {
-                    tally.declined += 1;
-                    log.append(&ActionEvent::Refused {
-                        at_ms: clock(),
-                        action,
-                        reason: RefusalReason::UserDeclinedThisStep,
-                    })?;
+            let authorized = if opts.unattended {
+                match run.grant().authorize_unattended(&step, clock()) {
+                    Ok((approval, permit)) => {
+                        log.append(&ActionEvent::Approved {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            by: Some(sister_hands::ApprovedBy::StandingGrant),
+                        })?;
+                        Some((approval, button.take_up(permit)))
+                    }
+                    Err(rejection) => {
+                        tally.blocked += 1;
+                        let reason = RefusalReason::NotCoveredByGrant { rejection };
+                        writeln!(out, "沒有做，也沒有交給作業系統：{}", reason.message())?;
+                        log.append(&ActionEvent::Refused {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            reason,
+                        })?;
+                        None
+                    }
                 }
-                Answer::Abort(by) => {
-                    let event = run.abort(clock(), by);
-                    log.append(&event)?;
-                    terminal = Some(match event {
-                        ActionEvent::Aborted {
-                            after_completed_steps,
-                            by,
-                            ..
-                        } => RunConclusion::Aborted {
-                            after_completed_steps,
-                            by,
-                        },
-                        _ => unreachable!("abort always returns Aborted"),
-                    });
-                    break;
-                }
-                Answer::Approve => {
-                    let approval = presented.approve();
-                    let suggestion = button.press();
-                    log.append(&ActionEvent::Approved {
-                        at_ms: clock(),
-                        action: action.clone(),
-                        by: Some(sister_hands::ApprovedBy::Press),
-                    })?;
-                    // **不是 `step_now`。** `--minutes` 那一維說的是「這張授權書
-                    // 多久後失效」，而失效要管得住的是**她真的動手的那一刻**，
-                    // 不是她開口問的那一刻。拿問話時的時戳來執行的話，一個開著
-                    // 沒人答的提問可以放到三小時後，他順手打一個「好」，動作照樣
-                    // 發生——而畫面上和 `--minutes 5` 都跟他說只有五分鐘。
-                    //
-                    // 兩個時戳因此**故意**不一樣，而它們不一樣的時候，畫面上那句
-                    // 「授權涵蓋這一步」不會變成假話：它講的是問你的那一刻，是真的。
-                    // 改變的事實由這裡吐出一列 `refused` 說出來（`expiry 維度拒絕`），
-                    // 統計那一行也會把它算進「授權擋掉」。
-                    let outcome = execute_approved_step(
-                        run.grant(),
-                        clock(),
-                        approval,
-                        &step,
-                        executor,
-                        &suggestion,
-                    );
-                    // **他說了「好」之後，螢幕上一定要有一句話。** 三種結果都寫進
-                    // log 了，但 log 在磁碟上；他看著的是這個終端機。少了這一段，
-                    // 「擋掉了」和「做好了」在他眼前長得一模一樣——一片空白，而
-                    // 空白讀起來是「成功了」。這正是這個 repo 一路在修的那件事。
-                    //
-                    // 三句話要分得開的是**同一件事的三個不同答案**：
-                    // 沒交出去（Refused）／交出去了但那一端失敗（Failed）／成了。
-                    let event = match &outcome {
-                        Outcome::Refused { reason } => {
-                            if matches!(reason, RefusalReason::HandsPulled { .. }) {
-                                tally.pulled += 1;
-                            } else {
-                                tally.blocked += 1;
-                            }
-                            writeln!(out, "沒有做，也沒有交給作業系統：{}", reason.message())?;
-                            ActionEvent::Refused {
-                                at_ms: clock(),
-                                action: action.clone(),
-                                reason: reason.clone(),
-                            }
-                        }
-                        Outcome::Failed { error } => {
-                            tally.failed += 1;
-                            writeln!(out, "交出去了，那一端失敗了：{error}")?;
-                            ActionEvent::Executed {
-                                at_ms: clock(),
-                                action: action.clone(),
-                                result: ExecutionResult::Failed {
-                                    error: error.clone(),
-                                },
-                            }
-                        }
-                        Outcome::Done { detail } => {
-                            tally.done += 1;
-                            writeln!(out, "做了：{detail}")?;
-                            ActionEvent::Executed {
-                                at_ms: clock(),
-                                action: action.clone(),
-                                result: ExecutionResult::Succeeded {
-                                    detail: detail.clone(),
-                                },
-                            }
-                        }
-                    };
-                    log.append(&event)?;
-                    if matches!(
-                        outcome,
-                        Outcome::Refused {
-                            reason: RefusalReason::HandsPulled { .. }
-                        }
-                    ) {
-                        let event = run.abort(clock(), AbortActor::HandsPulled);
+            } else {
+                let presented = PresentedStep::new(step.clone());
+                match ask(input, out, &_watcher.pulled)? {
+                    Answer::Decline => {
+                        tally.declined += 1;
+                        log.append(&ActionEvent::Refused {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            reason: RefusalReason::UserDeclinedThisStep,
+                        })?;
+                        None
+                    }
+                    Answer::Abort(by) => {
+                        let event = run.abort(clock(), by);
                         log.append(&event)?;
                         terminal = Some(match event {
                             ActionEvent::Aborted {
@@ -1866,21 +1799,117 @@ pub mod act {
                             },
                             _ => unreachable!("abort always returns Aborted"),
                         });
-                        writeln!(out, "手被拔掉，所以這一輪到此為止。")?;
                         break;
                     }
-                    if matches!(outcome, Outcome::Done { .. }) {
-                        // `StepLimitReached` 的欄位叫 `completed_steps`：一次交出去但失敗
-                        // 的嘗試不是完成的步驟，因此 Failed 不消耗這版的步數預算。
-                        let finished_at = clock();
-                        // 不等下一張圖。這一刻資料庫裡有什麼就記什麼；「沒在錄」
-                        // 和「在錄但時間窗內沒有 frame」也各自是一筆查過的結果。
-                        let evidence = step_evidence(data_dir, source, finished_at)?;
-                        let finished = run
-                            .finish_step(finished_at, action, Some(evidence))
-                            .map_err(|conclusion| anyhow::anyhow!(conclusion.message()))?;
-                        log.append(&finished)?;
+                    Answer::Approve => {
+                        let approval = presented.approve();
+                        let suggestion = button.press();
+                        log.append(&ActionEvent::Approved {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            by: Some(sister_hands::ApprovedBy::Press),
+                        })?;
+                        Some((approval, suggestion))
                     }
+                }
+            };
+            if let Some((approval, suggestion)) = authorized {
+                // **不是 `step_now`。** `--minutes` 那一維說的是「這張授權書
+                // 多久後失效」，而失效要管得住的是**她真的動手的那一刻**，
+                // 不是她開口問的那一刻。拿問話時的時戳來執行的話，一個開著
+                // 沒人答的提問可以放到三小時後，他順手打一個「好」，動作照樣
+                // 發生——而畫面上和 `--minutes 5` 都跟他說只有五分鐘。
+                //
+                // 兩個時戳因此**故意**不一樣，而它們不一樣的時候，畫面上那句
+                // 「授權涵蓋這一步」不會變成假話：它講的是問你的那一刻，是真的。
+                // 改變的事實由這裡吐出一列 `refused` 說出來（`expiry 維度拒絕`），
+                // 統計那一行也會把它算進「授權擋掉」。
+                let outcome = execute_approved_step(
+                    run.grant(),
+                    clock(),
+                    approval,
+                    &step,
+                    executor,
+                    &suggestion,
+                );
+                // **他說了「好」之後，螢幕上一定要有一句話。** 三種結果都寫進
+                // log 了，但 log 在磁碟上；他看著的是這個終端機。少了這一段，
+                // 「擋掉了」和「做好了」在他眼前長得一模一樣——一片空白，而
+                // 空白讀起來是「成功了」。這正是這個 repo 一路在修的那件事。
+                //
+                // 三句話要分得開的是**同一件事的三個不同答案**：
+                // 沒交出去（Refused）／交出去了但那一端失敗（Failed）／成了。
+                let event = match &outcome {
+                    Outcome::Refused { reason } => {
+                        if matches!(reason, RefusalReason::HandsPulled { .. }) {
+                            tally.pulled += 1;
+                        } else {
+                            tally.blocked += 1;
+                        }
+                        writeln!(out, "沒有做，也沒有交給作業系統：{}", reason.message())?;
+                        ActionEvent::Refused {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            reason: reason.clone(),
+                        }
+                    }
+                    Outcome::Failed { error } => {
+                        tally.failed += 1;
+                        writeln!(out, "交出去了，那一端失敗了：{error}")?;
+                        ActionEvent::Executed {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            result: ExecutionResult::Failed {
+                                error: error.clone(),
+                            },
+                        }
+                    }
+                    Outcome::Done { detail } => {
+                        tally.done += 1;
+                        writeln!(out, "做了：{detail}")?;
+                        ActionEvent::Executed {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            result: ExecutionResult::Succeeded {
+                                detail: detail.clone(),
+                            },
+                        }
+                    }
+                };
+                log.append(&event)?;
+                if matches!(
+                    outcome,
+                    Outcome::Refused {
+                        reason: RefusalReason::HandsPulled { .. }
+                    }
+                ) {
+                    let event = run.abort(clock(), AbortActor::HandsPulled);
+                    log.append(&event)?;
+                    terminal = Some(match event {
+                        ActionEvent::Aborted {
+                            after_completed_steps,
+                            by,
+                            ..
+                        } => RunConclusion::Aborted {
+                            after_completed_steps,
+                            by,
+                        },
+                        _ => unreachable!("abort always returns Aborted"),
+                    });
+                    writeln!(out, "手被拔掉，所以這一輪到此為止。")?;
+                    break;
+                }
+                if matches!(outcome, Outcome::Done { .. }) {
+                    // `StepLimitReached` 的欄位叫 `completed_steps`：一次交出去但失敗
+                    // 的嘗試不是完成的步驟，因此 Failed 不消耗這版的步數預算。
+                    let finished_at = clock();
+                    // 不等下一張圖。這一刻資料庫裡有什麼就記什麼；「沒在錄」
+                    // 和「在錄但時間窗內沒有 frame」也各自是一筆查過的結果。
+                    let evidence = step_evidence(data_dir, source, finished_at)?;
+                    let finished = run
+                        .finish_step(finished_at, action, Some(evidence))
+                        .map_err(|conclusion| anyhow::anyhow!(conclusion.message()))?;
+                    log.append(&finished)?;
                 }
             }
             writeln!(out)?;
@@ -1908,7 +1937,11 @@ pub mod act {
             return Ok(());
         }
         let conclusion = terminal.unwrap_or(RunConclusion::Completed);
-        writeln!(out, "{}", conclusion.message())?;
+        if opts.unattended && matches!(conclusion, RunConclusion::Completed) {
+            writeln!(out, "這一輪憑先前簽好的票走完了。")?;
+        } else {
+            writeln!(out, "{}", conclusion.message())?;
+        }
         match conclusion {
             RunConclusion::Aborted { .. } => {}
             RunConclusion::StepLimitReached {
@@ -1929,6 +1962,11 @@ pub mod act {
                 // 抄一份「大概是幾」進紀錄的話，兩邊會在某一版分家。
                 conclusion: RunConclusionRecord::Completed {
                     asked: Some(tally.asked),
+                    decided_by: Some(if opts.unattended {
+                        sister_hands::ApprovedBy::StandingGrant
+                    } else {
+                        sister_hands::ApprovedBy::Press
+                    }),
                 },
             })?,
         }
@@ -1937,11 +1975,19 @@ pub mod act {
         } else {
             String::new()
         };
-        writeln!(
-            out,
-            "這一輪：問了 {} 步，做成 {} 步，你說不要 {} 步，授權擋掉 {} 步{}，執行失敗 {} 步。",
-            tally.asked, tally.done, tally.declined, tally.blocked, pulled, tally.failed
-        )?;
+        if opts.unattended {
+            writeln!(
+                out,
+                "這一輪：憑票決定了 {} 步，做成 {} 步，授權擋掉 {} 步{}，執行失敗 {} 步。",
+                tally.asked, tally.done, tally.blocked, pulled, tally.failed
+            )?;
+        } else {
+            writeln!(
+                out,
+                "這一輪：問了 {} 步，做成 {} 步，你說不要 {} 步，授權擋掉 {} 步{}，執行失敗 {} 步。",
+                tally.asked, tally.done, tally.declined, tally.blocked, pulled, tally.failed
+            )?;
+        }
         Ok(())
     }
 
@@ -2170,6 +2216,7 @@ pub mod act {
                 dry_run,
                 save_grant: false,
                 use_grant: false,
+                unattended: false,
                 show_grant: false,
             }
         }
@@ -3569,6 +3616,309 @@ pub mod act {
                 one.contains("一步都沒有問到你"),
                 "兩輪的收尾列不可以讀起來一樣\n零步：{zero}\n一步：{one}"
             );
+        }
+
+        fn standing_grant(task: &str, app: &str, steps: u32, valid_for_ms: u64) -> Grant {
+            Grant::new(
+                Task::new(task),
+                AllowedApps::new([App::new(app)]),
+                AllowedActions::new([ActionKind::OpenUrl]),
+                Expiry::after_issued(1_700_000_000_000, valid_for_ms),
+                StepLimit::new(steps).expect("positive step limit"),
+            )
+        }
+
+        fn unattended_opts(task: &str) -> Options {
+            let mut value = opts(task, &[], 3, 5, false);
+            value.use_grant = true;
+            value.unattended = true;
+            value
+        }
+
+        fn go_unattended(
+            name: &str,
+            source: &impl StepSource,
+            grant: &Grant,
+            mut clock: impl FnMut() -> i64,
+        ) -> Run {
+            let dir = crate::ops::tmp::Tmp::new(name);
+            save_grant(&dir.0, grant).expect("save standing grant");
+            let mut executor = Fake::default();
+            let mut input = std::io::Cursor::new(Vec::<u8>::new());
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &unattended_opts("任務"),
+                source,
+                &mut input,
+                &mut executor,
+                &mut clock,
+                &mut out,
+            )
+            .expect("unattended run");
+            Run {
+                out: String::from_utf8(out).expect("utf-8"),
+                executor,
+                dir,
+            }
+        }
+
+        struct PanicInput;
+        impl std::io::Read for PanicInput {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("unattended mode read input")
+            }
+        }
+        impl BufRead for PanicInput {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                panic!("unattended mode read input")
+            }
+            fn consume(&mut self, _: usize) {
+                panic!("unattended mode consumed input")
+            }
+        }
+
+        #[test]
+        fn unattended_never_reads_input_and_completes_a_step() {
+            let dir = crate::ops::tmp::Tmp::new("act-unattended-no-input");
+            save_grant(&dir.0, &standing_grant("任務", "chrome.exe", 3, 3_600_000)).unwrap();
+            let mut executor = Fake::default();
+            let mut input = PanicInput;
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &unattended_opts("任務"),
+                &one_card(),
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .unwrap();
+            assert_eq!(executor.calls.len(), 1);
+            assert!(String::from_utf8(out).unwrap().contains("做了："));
+        }
+
+        #[test]
+        fn unattended_rejects_a_step_outside_the_grant_without_calling_executor() {
+            let run = go_unattended(
+                "act-unattended-scope",
+                &one_card(),
+                &standing_grant("任務", "notepad.exe", 3, 3_600_000),
+                ticking(1_700_000_000_000),
+            );
+            assert!(run.executor.calls.is_empty());
+            assert!(
+                !run.events()
+                    .iter()
+                    .any(|event| matches!(event, ActionEvent::Approved { .. })),
+                "grant 拒絕的步驟不可以先留下 Approved：{:?}",
+                run.events()
+            );
+            assert!(
+                run.events().iter().any(|event| matches!(
+                    event,
+                    ActionEvent::Refused {
+                        reason: RefusalReason::NotCoveredByGrant {
+                            rejection: GrantRejection::Apps
+                        },
+                        ..
+                    }
+                )),
+                "{:?}",
+                run.events()
+            );
+        }
+
+        struct PullWhenListed {
+            inner: Source,
+            dir: std::path::PathBuf,
+        }
+        impl StepSource for PullWhenListed {
+            fn live_commitments(&self) -> Result<Vec<CommitmentRow>> {
+                sister_hands::kill_switch::pull(&self.dir, 1234)?;
+                self.inner.live_commitments()
+            }
+            fn app_for_evidence(
+                &self,
+                r: &sister_core::brain::EvidenceRef,
+            ) -> Result<Option<String>> {
+                self.inner.app_for_evidence(r)
+            }
+            fn nearest_step_frame(
+                &self,
+                at_ms: i64,
+                from_ms: i64,
+                to_ms: i64,
+            ) -> Result<Option<sister_core::db::StepFrameRow>> {
+                self.inner.nearest_step_frame(at_ms, from_ms, to_ms)
+            }
+        }
+
+        #[test]
+        fn unattended_still_aborts_when_hands_are_pulled() {
+            let dir = crate::ops::tmp::Tmp::new("act-unattended-pulled");
+            save_grant(&dir.0, &standing_grant("任務", "chrome.exe", 3, 3_600_000)).unwrap();
+            let source = PullWhenListed {
+                inner: one_card(),
+                dir: dir.0.clone(),
+            };
+            let mut executor = Fake::default();
+            let mut input = PanicInput;
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &unattended_opts("任務"),
+                &source,
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .unwrap();
+            assert!(executor.calls.is_empty());
+            assert!(matches!(
+                ActionLog::in_data_dir(&dir.0)
+                    .replay()
+                    .unwrap()
+                    .events
+                    .last(),
+                Some(ActionEvent::Aborted {
+                    by: AbortActor::HandsPulled,
+                    ..
+                })
+            ));
+        }
+
+        #[test]
+        fn unattended_still_obeys_the_step_limit() {
+            let source = Source {
+                rows: vec![
+                    card(1, Some(&open_url("https://a")), &[1]),
+                    card(2, Some(&open_url("https://b")), &[1]),
+                ],
+                apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                nearest_frame: None,
+            };
+            let run = go_unattended(
+                "act-unattended-limit",
+                &source,
+                &standing_grant("任務", "chrome.exe", 1, 3_600_000),
+                ticking(1_700_000_000_000),
+            );
+            assert_eq!(run.executor.calls.len(), 1);
+            assert!(matches!(
+                run.events().last(),
+                Some(ActionEvent::Concluded {
+                    conclusion: RunConclusionRecord::StepLimitReached {
+                        completed_steps: 1,
+                        limit: 1
+                    },
+                    ..
+                })
+            ));
+        }
+
+        /// **這一條守的是 `authorize_unattended` 那一道，不是隘口那一道。**
+        ///
+        /// 兩道都會問 `covers`，所以「沒有交出去」和「有一列 `ExpiryElapsed`」
+        /// 光靠隘口就成立了——把這裡傳給 `authorize_unattended` 的時鐘凍在發票
+        /// 那一刻（期限永遠到不了），上面那兩句照樣是真的，測試照樣綠。
+        ///
+        /// 差別在紀錄：那樣的話 log 會多一列
+        /// `Approved { by: StandingGrant }`，說這一步是憑那張票跑的——而那張票
+        /// 根本沒有涵蓋它。這份 log 存在的唯一理由就是回答「憑什麼」，所以
+        /// **「沒有那一列」才是這一條真正要釘住的東西**。
+        #[test]
+        fn unattended_checks_expiry_again_for_each_step() {
+            let mut calls = 0;
+            let clock = move || {
+                calls += 1;
+                if calls >= 5 {
+                    1_700_000_120_001
+                } else {
+                    1_700_000_000_001 + calls
+                }
+            };
+            let run = go_unattended(
+                "act-unattended-expiry",
+                &one_card(),
+                &standing_grant("任務", "chrome.exe", 3, 60_000),
+                clock,
+            );
+            assert!(run.executor.calls.is_empty());
+            assert!(run.events().iter().any(|event| matches!(
+                event,
+                ActionEvent::Refused {
+                    reason: RefusalReason::NotCoveredByGrant {
+                        rejection: GrantRejection::ExpiryElapsed
+                    },
+                    ..
+                }
+            )));
+            assert!(
+                !run.events()
+                    .iter()
+                    .any(|event| matches!(event, ActionEvent::Approved { .. })),
+                "票沒涵蓋這一步，紀錄裡就不可以有一列說它被批准過：{:?}",
+                run.events()
+            );
+        }
+
+        #[test]
+        fn unattended_log_records_standing_grant_for_approval_and_conclusion() {
+            let run = go_unattended(
+                "act-unattended-provenance",
+                &one_card(),
+                &standing_grant("任務", "chrome.exe", 3, 3_600_000),
+                ticking(1_700_000_000_000),
+            );
+            let events = run.events();
+            assert!(events.iter().any(|event| matches!(
+                event,
+                ActionEvent::Approved {
+                    by: Some(sister_hands::ApprovedBy::StandingGrant),
+                    ..
+                }
+            )));
+            assert!(matches!(
+                events.last(),
+                Some(ActionEvent::Concluded {
+                    conclusion: RunConclusionRecord::Completed {
+                        decided_by: Some(sister_hands::ApprovedBy::StandingGrant),
+                        ..
+                    },
+                    ..
+                })
+            ));
+            let mut report = Vec::new();
+            runs_to(&run.dir.0, 10, &mut report).unwrap();
+            let report = String::from_utf8(report).unwrap();
+            assert!(!report.contains('問'), "{report}");
+        }
+
+        #[test]
+        fn attended_log_records_press_and_says_it_was_asked() {
+            let run = go(
+                "act-attended-provenance",
+                &one_card(),
+                &opts("任務", &["chrome.exe"], 3, 5, false),
+                "好\n",
+                None,
+            );
+            assert!(matches!(
+                run.events().last(),
+                Some(ActionEvent::Concluded {
+                    conclusion: RunConclusionRecord::Completed {
+                        decided_by: Some(sister_hands::ApprovedBy::Press),
+                        ..
+                    },
+                    ..
+                })
+            ));
+            let mut report = Vec::new();
+            runs_to(&run.dir.0, 10, &mut report).unwrap();
+            assert!(String::from_utf8(report).unwrap().contains("問到你面前"));
         }
     }
 }

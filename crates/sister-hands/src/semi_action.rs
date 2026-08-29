@@ -512,22 +512,34 @@ impl StepEvidence {
 
 impl NotRecordingReason {
     fn message(self) -> String {
+        // 同一條規矩，`StepEvidence::message` 那裡寫過一次
+        // （「`ts:` 代表這個數字對不出時刻」）。**那一輪只修到直接的那幾臂，
+        // 沒修到這裡**——而 `StepEvidence::NotRecording` 整個轉手給這個函式，
+        // 於是同一句謊話在一次委派之外原封不動地活了下來。
+        let at = crate::replay_copy::at;
         match self {
             Self::NeverStarted => {
                 "這一步做完時她從來沒有開始錄，所以不會有這一步前後的新畫面憑據。".into()
             }
-            Self::Stopped { at_ms: Some(at) } => {
-                format!("這一步做完時她已經在 ts:{at} 收工了，所以不會有這一步前後的新畫面憑據。")
+            Self::Stopped {
+                at_ms: Some(stopped_at),
+            } => {
+                format!(
+                    "這一步做完時她已經在 {} 收工了，所以不會有這一步前後的新畫面憑據。",
+                    at(stopped_at)
+                )
             }
             Self::Stopped { at_ms: None } => {
                 "這一步做完時她已經收工了，但紀錄裡沒有留下時刻，所以不會有這一步前後的新畫面憑據。"
                     .into()
             }
             Self::Thinking { until_ms } => format!(
-                "這一步做完時錄製已停，只剩解釋層在把最後一段想完（估到 ts:{until_ms}）；再等下去也不會有新的畫面憑據。"
+                "這一步做完時錄製已停，只剩解釋層在把最後一段想完（估到 {}）；再等下去也不會有新的畫面憑據。",
+                at(until_ms)
             ),
             Self::Stalled { at_ms } => format!(
-                "這一步做完時她從 ts:{at_ms} 起就沒有回報過心跳（當掉了？）；有沒有新的畫面憑據說不準。"
+                "這一步做完時她從 {} 起就沒有回報過心跳（當掉了？）；有沒有新的畫面憑據說不準。",
+                at(at_ms)
             ),
             Self::Booting => {
                 "這一步做完時她才剛起來，還沒開始錄；再等一下可能就有新的畫面憑據。".into()
@@ -555,6 +567,9 @@ pub enum RunConclusionRecord {
         /// `Some(0)` ＝ 記過了，數出來就是零。
         #[serde(default)]
         asked: Option<u32>,
+        /// 那 N 步是誰決定的。`None` 只代表舊版沒有記。
+        #[serde(default)]
+        decided_by: Option<ApprovedBy>,
     },
     StepLimitReached {
         completed_steps: u32,
@@ -572,20 +587,47 @@ impl RunConclusionRecord {
             // 「這一輪的步驟都問完了」在問了零步的時候是一句真話，而它讀起來是
             // 「都處理完了」。為什麼是零有三種答案，這一列裡沒有那個資訊——
             // 所以只講數字，不替它猜理由。猜錯的理由比沒有理由更糟。
-            Self::Completed { asked: Some(0) } => {
-                "這一輪走完了，但一步都沒有問到你。為什麼是零，要看當時螢幕上那一句；\
+            Self::Completed {
+                asked: Some(0),
+                decided_by: Some(ApprovedBy::Press),
+            } => "這一輪走完了，但一步都沒有問到你。為什麼是零，要看當時螢幕上那一句；\
                  紀錄裡只有這個數字。"
-                    .to_string()
-            }
-            Self::Completed { asked: Some(n) } => {
+                .to_string(),
+            Self::Completed {
+                asked: Some(n),
+                decided_by: Some(ApprovedBy::Press),
+            } => {
                 format!(
                     "{}（問到你面前 {n} 步）",
                     RunConclusion::Completed.message()
                 )
             }
-            Self::Completed { asked: None } => format!(
-                "{}（這一列沒有記問了幾步，是 alpha.70 以前寫的）",
+            Self::Completed {
+                asked: Some(0),
+                decided_by: Some(ApprovedBy::StandingGrant),
+            } => "這一輪憑先前簽好的票自己跑完了，但沒有東西可做。".to_string(),
+            Self::Completed {
+                asked: Some(n),
+                decided_by: Some(ApprovedBy::StandingGrant),
+            } => format!("這一輪憑先前簽好的票自己決定了 {n} 步；當時沒有人在鍵盤前面。"),
+            Self::Completed {
+                asked: None,
+                decided_by: Some(ApprovedBy::Press),
+            } => format!(
+                "{}（知道是他當場按的，但這一列沒有記決定了幾步）",
                 RunConclusion::Completed.message()
+            ),
+            Self::Completed {
+                asked: None,
+                decided_by: Some(ApprovedBy::StandingGrant),
+            } => "這一輪走完了；知道是憑先前簽好的票自己決定，但這一列沒有記決定了幾步，當時沒有人在鍵盤前面。".to_string(),
+            Self::Completed {
+                asked,
+                decided_by: None,
+            } => format!(
+                "{}（這一列沒有記是誰決定的；記下的決定步數：{}）",
+                RunConclusion::Completed.message(),
+                asked.map_or_else(|| "沒有記".to_string(), |n| n.to_string())
             ),
             Self::StepLimitReached {
                 completed_steps,
@@ -769,10 +811,15 @@ mod provenance_tests {
     /// `ts:` 在這個 crate 裡是「這個數字對不出時刻」的記號（見
     /// `replay_copy::at`）。畫面證據曾經無條件印 `ts:{ms}`，於是一個好好的
     /// 時戳和一個轉不出來的時戳在報告上長得一模一樣。
+    ///
+    /// **這一條要走完每一個帶時刻的變體，包含轉手出去的那幾個。** alpha.76
+    /// 修的時候只列了 `After` 和 `Before` 兩個直接的臂，而 `NotRecording`
+    /// 整個委派給 `NotRecordingReason::message`——那裡三個 `ts:` 原封不動，
+    /// 測試全綠。少列一個變體和沒有這條測試，在那一版是同一個結果。
     #[test]
     fn step_evidence_prints_a_real_time_not_the_cannot_convert_marker() {
         let ms = 1_756_200_004_400;
-        for evidence in [
+        let carrying_a_real_timestamp = [
             StepEvidence::After {
                 frame_id: 7,
                 frame_at_ms: ms,
@@ -784,7 +831,17 @@ mod provenance_tests {
                 earlier_by_ms: 300,
                 has_image: false,
             },
-        ] {
+            StepEvidence::NotRecording {
+                reason: NotRecordingReason::Stopped { at_ms: Some(ms) },
+            },
+            StepEvidence::NotRecording {
+                reason: NotRecordingReason::Thinking { until_ms: ms },
+            },
+            StepEvidence::NotRecording {
+                reason: NotRecordingReason::Stalled { at_ms: ms },
+            },
+        ];
+        for evidence in carrying_a_real_timestamp {
             let message = evidence.message();
             assert!(
                 message.contains(&crate::replay_copy::at(ms)),
@@ -794,6 +851,34 @@ mod provenance_tests {
                 !message.contains("ts:"),
                 "這個時戳轉得出來，不該掛著對不出時刻的記號：{message}"
             );
+        }
+    }
+
+    /// 上面那條只證明得了「列到的那幾個沒問題」。這一條守的是**列表本身**：
+    /// 帶時刻的變體多一個而測試沒跟著多一個的話，這裡會紅。
+    #[test]
+    fn every_not_recording_reason_that_carries_a_timestamp_is_covered_above() {
+        let ms = 1_756_200_004_400;
+        let all = [
+            NotRecordingReason::NeverStarted,
+            NotRecordingReason::Stopped { at_ms: Some(ms) },
+            NotRecordingReason::Stopped { at_ms: None },
+            NotRecordingReason::Thinking { until_ms: ms },
+            NotRecordingReason::Stalled { at_ms: ms },
+            NotRecordingReason::Booting,
+            NotRecordingReason::Unreadable,
+        ];
+        let with_a_time = all
+            .iter()
+            .filter(|reason| reason.message().contains(&crate::replay_copy::at(ms)))
+            .count();
+        assert_eq!(
+            with_a_time, 3,
+            "帶時刻的 NotRecordingReason 變成 {with_a_time} 個了；\
+             上面那條的清單要跟著補，否則新的那個又會偷偷印 ts:"
+        );
+        for reason in all {
+            assert!(!reason.message().contains("ts:"), "{}", reason.message());
         }
     }
 }
