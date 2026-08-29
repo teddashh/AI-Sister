@@ -1212,7 +1212,7 @@ pub mod act {
     };
     use sister_hands::{ActionEvent, ActionLog, ExecutionResult, Outcome, RefusalReason};
     use std::collections::BTreeSet;
-    use std::io::{BufRead, Write};
+    use std::io::{BufRead, IsTerminal, Write};
 
     pub struct Options {
         pub task: String,
@@ -1225,6 +1225,33 @@ pub mod act {
         pub use_grant: bool,
         pub unattended: bool,
         pub show_grant: bool,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) enum WhoAnswers {
+        /// 這一趟不會問任何人。
+        NobodyGetsAsked,
+        /// 會問，而 stdin 的另一端是終端機。
+        AHumanAtTheKeyboard,
+        /// 會問，但 stdin 是管子／檔案／另一個程式餵進來的。
+        SomethingElseIsFeedingAnswers,
+    }
+
+    pub(crate) fn who_answers(opts: &Options, stdin_is_terminal: bool) -> WhoAnswers {
+        if opts.show_grant {
+            return WhoAnswers::NobodyGetsAsked; // 只顯示現有授權書，印完就離開。
+        }
+        if opts.dry_run {
+            return WhoAnswers::NobodyGetsAsked; // 預演在每一步提問之前就跳過。
+        }
+        if opts.unattended {
+            return WhoAnswers::NobodyGetsAsked; // 每一步由存著的票決定，不讀現場回答。
+        }
+        if stdin_is_terminal {
+            WhoAnswers::AHumanAtTheKeyboard
+        } else {
+            WhoAnswers::SomethingElseIsFeedingAnswers
+        }
     }
 
     /// 授權書的路徑。**`prune` / `export` / `forget` 三條路都要走這一個函式**，
@@ -1447,6 +1474,23 @@ pub mod act {
     }
 
     pub fn run(data_dir: &Path, opts: &Options) -> Result<()> {
+        // 這一行是整條路上唯一測不到的東西（測試裡做不出終端機）。
+        // 底下那一支才是真的出口，它拿得到這個答案當參數。
+        run_with_stdin_kind(data_dir, opts, std::io::stdin().is_terminal())
+    }
+
+    pub(crate) fn run_with_stdin_kind(
+        data_dir: &Path,
+        opts: &Options,
+        stdin_is_terminal: bool,
+    ) -> Result<()> {
+        // 只看 stdin：stdout 被 `tee` 導走時，人還是看得到問題；
+        // 反過來，stdin 是管子已足以證明那個「好」不是鍵盤當場給的。
+        if who_answers(opts, stdin_is_terminal) == WhoAnswers::SomethingElseIsFeedingAnswers {
+            anyhow::bail!(
+                "沒有做任何事，一步都沒有交出去：stdin 不是終端機，那個「好」可能是別的程式餵的，卻會被記成你當場按了。請在終端機裡跑；或明說是憑票跑，使用 `--use-grant --unattended`，紀錄會寫「憑票決定」。`--dry-run` 不受影響。"
+            );
+        }
         if opts.show_grant {
             let grant = load_grant(data_dir)?;
             println!("目前存著的授權書：{}", grant.describe());
@@ -2321,6 +2365,117 @@ pub mod act {
                 unattended: false,
                 show_grant: false,
             }
+        }
+
+        fn missing_data_dir(name: &str) -> crate::ops::tmp::Tmp {
+            let dir = crate::ops::tmp::Tmp::new(name);
+            std::fs::remove_dir(&dir.0).expect("remove temporary data dir");
+            dir
+        }
+
+        #[test]
+        fn who_answers_distinguishes_every_mode() {
+            let attended = opts("任務", &[], 1, 5, false);
+            assert_eq!(
+                who_answers(&attended, true),
+                WhoAnswers::AHumanAtTheKeyboard
+            );
+            assert_eq!(
+                who_answers(&attended, false),
+                WhoAnswers::SomethingElseIsFeedingAnswers
+            );
+
+            let mut dry_run = opts("任務", &[], 1, 5, true);
+            assert_eq!(who_answers(&dry_run, false), WhoAnswers::NobodyGetsAsked);
+            dry_run.dry_run = false;
+            dry_run.unattended = true;
+            assert_eq!(who_answers(&dry_run, false), WhoAnswers::NobodyGetsAsked);
+            dry_run.unattended = false;
+            dry_run.show_grant = true;
+            assert_eq!(who_answers(&dry_run, false), WhoAnswers::NobodyGetsAsked);
+        }
+
+        #[test]
+        fn attended_run_rejects_non_terminal_before_opening_the_database() {
+            let dir = missing_data_dir("act-piped-before-database");
+            let err = run_with_stdin_kind(&dir.0, &opts("任務", &[], 1, 5, false), false)
+                .expect_err("piped answers must be rejected");
+            let message = err.to_string();
+            assert!(message.contains("stdin 不是終端機"), "{message}");
+            assert!(message.contains("--use-grant --unattended"), "{message}");
+        }
+
+        /// `run` 的工作只有一件：把**真的那條 stdin** 是哪一種交給下面那一支。
+        ///
+        /// 所以這一條**不可以寫死答案**。`cargo test` 那條 stdin 是什麼，由
+        /// 「怎麼叫它」決定：CI 和背景跑拿到的是管子，坐在終端機裡打
+        /// `cargo test` 拿到的是終端機。寫死「一定會被擋」的版本在 CI 上綠、
+        /// 在他自己的機器上紅——而紅的原因和程式碼一點關係都沒有。
+        /// 我用 `script -qc` 開一個 pty 試過，就是紅的。
+        ///
+        /// 改成問一次同一件事，然後兩邊各斷言各的。兩端各擋一種突變：管子那一端
+        /// 擋「把 `is_terminal()` 寫死成 `true`」，終端機那一端擋「寫死成
+        /// `false`」——寫死哪一邊，都會讓下面這個 `if` 走進錯的那一半。
+        #[test]
+        fn run_passes_the_real_stdin_kind_to_the_checked_exit() {
+            let dir = missing_data_dir("act-run-stdin-wiring");
+            let err = run(&dir.0, &opts("任務", &[], 1, 5, false))
+                .expect_err("沒有資料庫，兩種 stdin 都會失敗，只是理由不一樣");
+            let message = err.to_string();
+            if std::io::stdin().is_terminal() {
+                assert!(
+                    !message.contains("stdin 不是終端機"),
+                    "在終端機裡跑，卻被當成管子擋掉了：{message}"
+                );
+                assert!(message.contains("找不到資料庫"), "{message}");
+            } else {
+                assert!(
+                    message.contains("stdin 不是終端機"),
+                    "stdin 是管子，卻沒有被擋下來：{message}"
+                );
+            }
+        }
+
+        fn assert_non_asking_mode_ignores_non_terminal_stdin(name: &str, value: &Options) {
+            let dir = missing_data_dir(&format!("act-non-terminal-{name}"));
+            let err = run_with_stdin_kind(&dir.0, value, false)
+                .expect_err("the missing database or grant should still fail");
+            let message = err.to_string();
+            assert!(
+                !message.contains("stdin 不是終端機"),
+                "{name} failed at the stdin gate: {message}"
+            );
+        }
+
+        #[test]
+        fn dry_run_ignores_non_terminal_stdin() {
+            assert_non_asking_mode_ignores_non_terminal_stdin(
+                "dry-run",
+                &opts("任務", &[], 1, 5, true),
+            );
+        }
+
+        #[test]
+        fn unattended_ignores_non_terminal_stdin() {
+            let mut value = opts("任務", &[], 1, 5, false);
+            value.unattended = true;
+            assert_non_asking_mode_ignores_non_terminal_stdin("unattended", &value);
+        }
+
+        #[test]
+        fn show_grant_ignores_non_terminal_stdin() {
+            let mut value = opts("任務", &[], 1, 5, false);
+            value.show_grant = true;
+            assert_non_asking_mode_ignores_non_terminal_stdin("show-grant", &value);
+        }
+
+        #[test]
+        fn attended_terminal_stdin_passes_this_gate() {
+            let dir = missing_data_dir("act-terminal-before-database");
+            let err = run_with_stdin_kind(&dir.0, &opts("任務", &[], 1, 5, false), true)
+                .expect_err("the nonexistent database should fail later");
+            let message = err.to_string();
+            assert!(!message.contains("stdin 不是終端機"), "{message}");
         }
 
         /// 每叫一次就往前 1 秒。**時間必須會走**，否則 grant 的 expiry 那一維
