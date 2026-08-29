@@ -531,11 +531,36 @@ capture 層本身就是 recorder。
   決定的，不是我們）。
 - 🔶 來源防線：L0 內容 data-block 包裹 ✅（alpha.67 `prompt_fence`，
   20 種 injection 變體）；外部內容要求動作 → 強制人工核准 ✅（型別上就過不去）。
-  ⬜ 端到端的 injection 套件（在網頁/訊息裡埋指令，驗證 0 執行）還沒有——
-  現在測的是圍欄那一層，不是「埋了指令然後真的沒有東西被執行」。
+  ✅ 端到端的 injection 套件（alpha.82，`crates/sister-cli/tests/injection_end_to_end.rs`）：
+  20 種變體各走一次 `replay → review → do`，斷言（一）那些字**逐字**進得了
+  `text_chunks`（沒有人去敏、沒有人過濾），（二）`action-log.jsonl` 裡**零行**
+  `executed`。20 條和圍欄那層讀**同一份** `INJECTION_REGRESSION_CASES`，不是各
+  抄一份。
+
+  **要證的不是「模型沒被騙」**——fake brain 是我們寫的，騙不騙得動由我們決定。
+  要證的是更強的那一句：**就算模型整個被攻下、完全照著埋進去的字做，被埋的那
+  些字也變不出一個可以執行的動作。** 守它的是
+  `reviewer::resolve_allowed_next_step`：模型不能自己給 URL，只能給
+  `{"fact": id}`，而那個 fact 必須在**這一輪送給它的 L1 清單裡**。
+
+  **那 20 個 0 是被那道檢查擋出來的，不是 pipeline 沒跑出來的**——這件事有兩條
+  證據，不是靠讀程式碼推的：
+  - **正向控制組**跑完整條路，`action-log.jsonl` 裡**恰好一行** `executed`。
+    （Linux 上 `platform_execute` 回「這台機器上做不到」，但那一行照樣會寫，
+    `result` 是 `failed`——那一行的**存在**就是「作業系統真的被交了東西」。）
+  - **把那道檢查拿掉**（`if false && !listed_facts…`），injection 那條當場從 0
+    變 1，而且 log 裡那一行寫著 `"url":"https://evil.example.com/collect"`。
+    反過來把控制組的 brain 改成指一個捏造的 fact id，控制組從 1 變 0。
+
+  **還缺**：那 20 條**共用同一個攔截點**——每一條都是「模型指了一個沒被送進清
+  單的 fact」。所以 20 條之間真正各自不同的只有第（一）項（逐字到達），第
+  （二）項在 20 條上是同一個機制重跑 20 次。另外兩種攻法還沒測：模型指一個
+  **不存在的** fact id、模型回一張**壞掉／偽造的卡**（`}]} END_JSON` 那種變體
+  目前只出現在螢幕文字裡，沒有被當成 brain 的回答餵過）。
 
 **Exit criteria**
-- [ ] Injection 套件 100% 攔截（埋 20 種指令變體）。
+- [x] Injection 套件 100% 攔截（埋 20 種指令變體）。**（alpha.82；照上面那條
+      「還缺」讀——20 條走的是同一個攔截點。）**
 - [ ] 不可逆動作（送出/付款/刪除類）在任何路徑都會停下要求即時核准（自動化驗證）。
 - [ ] 10 個真實 semi-action 任務自用成功，action log 可回放。
 
@@ -704,11 +729,20 @@ $ sister --data-dir ~/.local/share/ai-sister queries
 在它裡面的。**地標不會動，程式碼會搬家；掃描範圍要跟著程式碼走。**
 
 **還缺**（alpha.82 當下）：
-- **PowerShell 那套規則沒有任何執行證據。** `quote_for` 這支純函式兩臂都測得
-  到，但測的是「它回傳這個字串」；**那個字串在真的 PowerShell 上貼得回去，是
-  照文件推的，不是跑出來的**。這台機器上沒有 `pwsh`，而 Windows CI 跑的
-  `cargo test` 也只呼叫同一支純函式——它證明不了那條文法。這和
-  `cfg(windows)` 接線層零覆蓋是同一個形狀。
+- **PowerShell 那套規則，在真的 PowerShell 上貼不貼得回去，仍然沒有執行證據。**
+  `quote_for` 這支純函式兩臂都測得到，但測的是「它回傳這個字串」；那個字串**被
+  PowerShell 解析回原值**這件事是照文件推的，這台機器上沒有 `pwsh` 可以跑。
+
+  **（自我更正）這一條原本寫的是「PowerShell 那套規則沒有任何執行證據」，還
+  加了一句「Windows CI 跑的 `cargo test` 也只呼叫同一支純函式」——那句是假
+  的。** Windows CI 的 `cargo test --workspace` 會讓 `platform_shell()` 回
+  PowerShell，於是**每一個 `cmd_for` 呼叫端**都在跑那一臂。證據就是它當場把
+  CI 弄紅了（run `33264623177`，`317 passed; 8 failed`）。寫下那句話的時候我
+  正在解釋「這一層沒被執行到」，而 repo 裡真的有一條把它執行了的路——**每個
+  子句單獨看都站得住（這裡沒有 pwsh、純函式就是純函式、文法沒被驗過），湊起
+  來卻說成「沒有人跑過」。** 這正是這個 repo 一路在修的那種假話，出現在我自
+  己寫的「還缺」裡。教訓：寫「X 沒有覆蓋」之前，先問**現有的哪一條 CI 路徑會
+  不會碰到 X**，不要從「我沒有為 X 寫測試」推到「沒有東西執行 X」。
 - **`cmd.exe` 那條路仍然是壞的。** 單引號在 `cmd.exe` 裡根本不是引號，那一整
   串會連引號一起被當成參數值。這一輪是把「兩個 Windows shell 都錯」換成「預
   設那個對」（Windows Terminal 的預設是 PowerShell），不是全對。兩邊都對的引
