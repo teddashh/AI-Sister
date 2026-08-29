@@ -713,9 +713,6 @@ impl ActionLog {
         for line in BufReader::new(file).lines() {
             let line =
                 line.with_context(|| format!("讀 action log 失敗：{}", self.path.display()))?;
-            if line.trim().is_empty() {
-                continue;
-            }
             match LineVerdict::of(&line, from_ms, to_ms) {
                 LineVerdict::InRange => report.removed_in_range += 1,
                 LineVerdict::Outside => kept.push(line),
@@ -764,6 +761,8 @@ enum LineVerdict {
 
 impl LineVerdict {
     fn of(line: &str, from_ms: i64, to_ms: i64) -> Self {
+        // `lines()` 不會把檔尾單獨一個 `\n` 當成空白列；只有檔案裡真的多出
+        // 一列空白才會走到這裡。它和其他解不開的列一樣問不出時間，一律刪掉。
         match serde_json::from_str::<ActionEvent>(line) {
             Ok(event) if (from_ms..to_ms).contains(&event.at_ms()) => Self::InRange,
             Ok(_) => Self::Outside,
@@ -1296,6 +1295,48 @@ mod tests {
         assert_eq!(
             log.count_in_range(1_000, 3_000).unwrap(),
             ForgetPreview::default()
+        );
+    }
+
+    #[test]
+    fn a_blank_row_is_counted_and_removed_as_the_same_unreadable_row() {
+        let dir = tmp_dir("forget-blank-row");
+        let log = ActionLog::in_data_dir(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(log.path(), b"\n").unwrap();
+
+        let promised = log.count_in_range(1_000, 2_000).unwrap();
+        let removed = log.forget_range(1_000, 2_000).unwrap();
+        assert_eq!(promised.removed_in_range, removed.removed_in_range);
+        assert_eq!(promised.removed_unreadable, removed.removed_unreadable);
+        assert_eq!(promised.removed_unreadable, 1, "檔案裡真的有一列空白");
+        assert_eq!(std::fs::read(log.path()).unwrap(), b"");
+    }
+
+    #[test]
+    fn readable_and_blank_rows_keep_preview_and_deletion_in_lockstep() {
+        let dir = tmp_dir("forget-readable-and-blank");
+        let log = ActionLog::in_data_dir(&dir);
+        log.append(&ActionEvent::Executed {
+            at_ms: 1_500,
+            action: ActionSnapshot::OpenUrl {
+                url: "https://inside.example".into(),
+            },
+            result: ExecutionResult::Succeeded {
+                detail: "ok".into(),
+            },
+        })
+        .unwrap();
+        use std::io::Write as _;
+        writeln!(OpenOptions::new().append(true).open(log.path()).unwrap()).unwrap();
+
+        let promised = log.count_in_range(1_000, 2_000).unwrap();
+        let removed = log.forget_range(1_000, 2_000).unwrap();
+        assert_eq!(promised.removed_in_range, removed.removed_in_range);
+        assert_eq!(promised.removed_unreadable, removed.removed_unreadable);
+        assert_eq!(
+            (removed.removed_in_range, removed.removed_unreadable),
+            (1, 1)
         );
     }
 

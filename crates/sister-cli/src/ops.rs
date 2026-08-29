@@ -8381,6 +8381,9 @@ pub mod forget {
                 "  還沒有資料庫（{}），所以沒有畫面或文字紀錄可以忘。",
                 path.display()
             );
+            if !yes {
+                preview_close(data_dir, last, out)?;
+            }
             return Ok(());
         }
         let mut db = Db::open(&path).with_context(|| format!("open {}", path.display()))?;
@@ -8471,6 +8474,9 @@ pub mod forget {
                      東西——所以剛剛那一段真的沒有被記到。但它馬上就要開始記了：\n   \
                      真的不想被記就先 `sister pause`。"
                 );
+            }
+            if !yes {
+                preview_close(data_dir, last, out)?;
             }
             return Ok(());
         }
@@ -8707,8 +8713,8 @@ pub mod forget {
                 "沒有說壞掉那列會被刪掉：{said}"
             );
             assert!(
-                !said.contains("沒有東西可以忘"),
-                "壞掉那列會消失，卻說沒有東西可以忘：{said}"
+                said.contains("所以沒有畫面或文字紀錄可以忘"),
+                "沒有資料庫時沒有把主詞收窄到畫面或文字紀錄：{said}"
             );
         }
 
@@ -8742,6 +8748,62 @@ pub mod forget {
             assert!(
                 said.contains("預覽會刪除 1 列可讀且落在區間裡的動作紀錄，另外 1 列讀不懂、問不出時間的動作紀錄"),
                 "同一行沒有報出兩個數字：{said}"
+            );
+        }
+
+        #[test]
+        fn every_preview_exit_has_the_irreversible_close_but_yes_never_does() {
+            let no_db = crate::ops::tmp::Tmp::new("forget-close-no-db");
+            let mut no_db_out = Vec::new();
+            run_with_output(&no_db.0, "1d", false, &mut no_db_out).expect("no-db preview");
+
+            let empty_db = crate::ops::tmp::Tmp::new("forget-close-empty-db");
+            Db::open(&crate::db_path(&empty_db.0)).expect("db");
+            let mut empty_out = Vec::new();
+            run_with_output(&empty_db.0, "1d", false, &mut empty_out).expect("empty preview");
+
+            for (name, raw) in [("no-db", no_db_out), ("empty-db", empty_out)] {
+                let said = String::from_utf8(raw).expect("utf8");
+                assert!(
+                    said.contains("沒有回收桶"),
+                    "{name} 漏了不可復原警告：{said}"
+                );
+                assert!(said.contains("--yes"), "{name} 漏了真正執行方式：{said}");
+            }
+
+            let mut yes_out = Vec::new();
+            run_with_output(&no_db.0, "1d", true, &mut yes_out).expect("yes");
+            let said = String::from_utf8(yes_out).expect("utf8");
+            assert!(
+                !said.contains("沒有回收桶"),
+                "--yes 不該再印預覽收尾：{said}"
+            );
+            assert!(
+                !said.contains("真的要忘掉就再跑一次"),
+                "--yes 已經在動手：{said}"
+            );
+        }
+
+        #[test]
+        fn blank_action_row_preview_and_yes_report_the_same_numbers() {
+            let tmp = crate::ops::tmp::Tmp::new("forget-blank-cli");
+            let log = sister_hands::ActionLog::in_data_dir(&tmp.0);
+            std::fs::create_dir_all(&tmp.0).expect("mkdir");
+            std::fs::write(log.path(), b"\n").expect("blank row");
+
+            let mut preview = Vec::new();
+            run_with_output(&tmp.0, "1d", false, &mut preview).expect("preview");
+            let preview = String::from_utf8(preview).expect("utf8");
+            let mut yes = Vec::new();
+            run_with_output(&tmp.0, "1d", true, &mut yes).expect("yes");
+            let yes = String::from_utf8(yes).expect("utf8");
+            assert!(
+                preview.contains("預覽會刪除 1 列讀不懂、問不出時間的動作紀錄"),
+                "{preview}"
+            );
+            assert!(
+                yes.contains("忘掉 1 列讀不懂、問不出時間的動作紀錄"),
+                "{yes}"
             );
         }
 

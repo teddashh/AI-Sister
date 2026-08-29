@@ -876,6 +876,11 @@ function armReset() {
  * 記憶回答），那段時間選下去，`bits` 是空的，畫面說「這一段本來就是空的，
  * 沒有東西可以忘」——然後刪掉他那幾題。**紀錄裡唯一一張存著他自己打的字的
  * 表，是唯一一張沒被列出來的。**
+ *
+ * 底下每一段註解都是同一個故事的下一次。**不要因為「太長了」把它們收成一句**
+ * ——`Erasure` 多一欄的時候編譯器不會來提醒這個檔案，這幾段字就是唯一的提醒。
+ * 第五、第六次發生在假後端那一側（`actions_unreadable` 和 `grant` 沒給，
+ * 於是那兩行在開發機上永遠看不到），見 `fakeBackend`。
  */
 function scale(e) {
   const bits = [];
@@ -900,8 +905,13 @@ function scale(e) {
   // 次**：一類東西被刪掉了，卻沒有出現在這張清單上。而這一次那類東西是完整
   // 的網址和檔案路徑——這幾類裡最敏感的一種。
   if (e.actions > 0) bits.push(`${e.actions} 件她替他動過的手`);
+  // 這個片語**自己不可以夾頓號**：`bits` 最後是 `join("、")` 組起來的，
+  // 一項裡再放一個頓號就讀成兩項。「不看區間」也不是客套話——讀不懂的列
+  // 問不出時間，所以證明不了自己在區間外，圈 09:00–10:00 一樣會把昨天寫的
+  // 那一列刪掉（`count_in_range` / `forget_range` 兩支都不比它的時間）。
+  // 旁邊授權書那一項寫的是同一句話。
   if (e.actions_unreadable > 0)
-    bits.push(`${e.actions_unreadable} 列讀不懂、問不出時間的動作紀錄`);
+    bits.push(`${e.actions_unreadable} 列動作紀錄讀不懂（問不出時間，不看區間一律刪）`);
   if (e.grant) bits.push("存著的授權書（不看區間，含任務原文）");
   return bits;
 }
@@ -2247,6 +2257,13 @@ function fakeBackend(mode = "1") {
           // 機器上永遠是 0，也就永遠看不到——上面 `queries` 那段註解講的正是
           // 這件事。同一根釘子的第四個位置。
           actions: Math.ceil(gone.length / 5),
+          // **同一根釘子的第五、第六個位置**，而這兩次都在假後端這一側：
+          // `Erasure` 有 15 欄，這裡以前只給 13。少的那兩欄在 `scale()` 裡是
+          // `undefined > 0`（false）和 `if (undefined)`（false），所以那兩行
+          // 字在開發機上**一次都不可能出現**——Tauri 起不來的時候，這裡就是
+          // 唯一看得到它們的地方。加新欄位到 `Erasure` 的時候要回來補這裡。
+          actions_unreadable: gone.length > 0 ? 1 : 0,
+          grant: mode === "live" || mode === "booting",
           failed: [],
           missing,
           // 「那一場錄製」本身，以及**沒被帶走的那一列**。
