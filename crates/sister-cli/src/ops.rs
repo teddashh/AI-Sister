@@ -49,14 +49,7 @@ fn cmd(data_dir: &Path, rest: &str) -> String {
 }
 
 fn cmd_for(data_dir: &Path, default: Option<&Path>, rest: &str) -> String {
-    let is_default =
-        default.is_some_and(
-            |default| match (data_dir.canonicalize(), default.canonicalize()) {
-                (Ok(actual), Ok(default)) => actual == default,
-                _ => false,
-            },
-        );
-    if is_default {
+    if is_default_data_dir(data_dir, default) {
         format!("sister {rest}")
     } else {
         format!(
@@ -64,6 +57,60 @@ fn cmd_for(data_dir: &Path, default: Option<&Path>, rest: &str) -> String {
             quote_for(platform_shell(), &data_dir.to_string_lossy())
         )
     }
+}
+
+/// 只有兩邊都能 canonicalize、而且確定指到同一個目錄時才算預設資料目錄。
+fn is_default_data_dir(data_dir: &Path, default: Option<&Path>) -> bool {
+    default.is_some_and(
+        |default| match (data_dir.canonicalize(), default.canonicalize()) {
+            (Ok(actual), Ok(default)) => actual == default,
+            _ => false,
+        },
+    )
+}
+
+fn desktop_uses(data_dir: &Path) -> bool {
+    is_default_data_dir(data_dir, sister_core::Config::default_data_dir().as_deref())
+}
+
+fn desktop_search_suffix(data_dir: &Path) -> &'static str {
+    if desktop_uses(data_dir) {
+        " 或字母人的搜尋框"
+    } else {
+        ""
+    }
+}
+
+fn empty_action_log_deletion_line(data_dir: &Path) -> String {
+    if desktop_uses(data_dir) {
+        "會把列刪掉的只有 `sister forget`（和字母人上的「忘掉這一整天」）。".to_string()
+    } else {
+        "會把列刪掉的只有 `sister forget`。".to_string()
+    }
+}
+
+fn empty_mark_line(data_dir: &Path) -> String {
+    format!(
+        "還沒有任何一題可以標記。先問她一題（`sister query …`{}），標記是掛在題目上的。",
+        desktop_search_suffix(data_dir)
+    )
+}
+
+fn empty_recorded_queries_line(data_dir: &Path) -> String {
+    format!(
+        "題庫是空的。可能是還沒問過她任何問題（`sister query …`{}），可能是 \
+         `privacy.query_log` 關著，也可能是問過的那幾題被 `sister forget` \
+         忘掉了、或過了保留期——她錄過，所以這三種都還在檯面上。",
+        desktop_search_suffix(data_dir)
+    )
+}
+
+fn empty_fresh_queries_line(data_dir: &Path) -> String {
+    format!(
+        "題庫是空的。問她幾個問題（`sister query …`{}）就會開始累積。\n\
+         如果你把 `privacy.query_log` 關掉了，那它永遠會是空的——那也是一個合理的選擇。",
+        desktop_search_suffix(data_dir)
+    )
 }
 
 #[cfg(test)]
@@ -117,6 +164,88 @@ mod command_tests {
         assert_eq!(
             cmd_for(&default.0, Some(&default.0), "forget --last 30d --yes"),
             "sister forget --last 30d --yes"
+        );
+    }
+
+    #[test]
+    fn gui_alternative_only_mentions_the_desktop_for_the_same_directory() {
+        let actual = tmp::Tmp::new("gui-copy-actual");
+        for output in [
+            empty_action_log_deletion_line(&actual.0),
+            empty_mark_line(&actual.0),
+            empty_recorded_queries_line(&actual.0),
+            empty_fresh_queries_line(&actual.0),
+        ] {
+            assert!(
+                !output.contains("字母人"),
+                "非預設目錄不可以提字母人：{output}"
+            );
+            assert!(output.contains("sister"), "CLI 那條路仍然要在：{output}");
+        }
+
+        let default = sister_core::Config::default_data_dir().expect("default data dir");
+        std::fs::create_dir_all(&default).expect("create default data dir");
+        for output in [
+            empty_action_log_deletion_line(&default),
+            empty_mark_line(&default),
+            empty_recorded_queries_line(&default),
+            empty_fresh_queries_line(&default),
+        ] {
+            assert!(
+                output.contains("字母人"),
+                "預設目錄要保留字母人入口：{output}"
+            );
+            assert!(output.contains("sister"), "CLI 那條路仍然要在：{output}");
+        }
+    }
+
+    fn assert_non_default_omits_desktop(output: String) {
+        assert!(
+            !output.contains("字母人"),
+            "非預設目錄不可以提字母人：{output}"
+        );
+        assert!(output.contains("sister"), "CLI 那條路仍然要在：{output}");
+    }
+
+    #[test]
+    fn non_default_empty_action_log_omits_desktop() {
+        assert_non_default_omits_desktop(empty_action_log_deletion_line(
+            &tmp::Tmp::new("gui-action-non-default").0,
+        ));
+    }
+
+    #[test]
+    fn non_default_empty_mark_omits_desktop() {
+        assert_non_default_omits_desktop(empty_mark_line(&tmp::Tmp::new("gui-mark-non-default").0));
+    }
+
+    #[test]
+    fn non_default_recorded_queries_omit_desktop() {
+        assert_non_default_omits_desktop(empty_recorded_queries_line(
+            &tmp::Tmp::new("gui-recorded-non-default").0,
+        ));
+    }
+
+    #[test]
+    fn non_default_fresh_queries_omit_desktop() {
+        assert_non_default_omits_desktop(empty_fresh_queries_line(
+            &tmp::Tmp::new("gui-fresh-non-default").0,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gui_alternative_recognizes_a_symlink_to_the_default_directory() {
+        use std::os::unix::fs::symlink;
+
+        let default = sister_core::Config::default_data_dir().expect("default data dir");
+        std::fs::create_dir_all(&default).expect("create default data dir");
+        let link_parent = tmp::Tmp::new("gui-default-link");
+        let link = link_parent.0.join("data");
+        symlink(&default, &link).expect("symlink default data dir");
+        assert!(
+            empty_mark_line(&link).contains("字母人"),
+            "canonicalize 後相同的目錄要保留字母人入口"
         );
     }
 
@@ -184,20 +313,32 @@ mod command_tests {
         }
     }
 
-    /// 把 `ops.rs` 切成「production 那一半」（丟掉 `pub mod speak` 之前的
-    /// 前言與這個測試模組自己）。
+    /// 把 `ops.rs` 切成「production 那一半」——**只**丟掉這個測試模組本身。
+    ///
+    /// 丟掉的必須剛好是 `mod command_tests`，因為下面那份違禁清單是以字串字面
+    /// 值寫在它裡面的：掃到自己身上，每一條斷言都會無條件失敗。
+    ///
+    /// **不可以用「`pub mod speak` 之前的全部」來代替。** 上一版是那樣寫的
+    /// （`split_once("\n}\n\npub mod speak {")` 取後半），而測試模組上面還有一段
+    /// 前言。前言原本只有 `cmd` / `quote_for` 那種組指令的零件，丟掉沒差；
+    /// alpha.82 把四句**使用者看得到的話**搬進前言之後，那一整段就變成掃不到的
+    /// 死角——連「會把列刪掉的只有 `sister forget`」這句正面斷言守著的話都掉進
+    /// 去了。掃描範圍要跟著程式碼走，不是跟著當初那個好記的地標走。
     ///
     /// **先正規化行尾。** `include_str!` 讀的是磁碟上的位元組，而 Windows 的
-    /// checkout 是 CRLF：寫死 `"\n}\n\npub mod speak {"` 的話，這兩條測試在
-    /// Linux 上綠、在 Windows 上炸在 `expect` 那一行——alpha.81 的 CI 就是這樣
-    /// 紅的，而本機四道閘門一道都看不到（`check-windows.sh` 只編譯，不跑測試）。
+    /// checkout 是 CRLF：寫死 `"\n"` 的話，這兩條測試在 Linux 上綠、在 Windows
+    /// 上炸在 `expect` 那一行——alpha.81 的 CI 就是這樣紅的，而本機四道閘門一道
+    /// 都看不到（`check-windows.sh` 只編譯，不跑測試）。
     fn production_half(source: &str) -> String {
         let normalized = source.replace("\r\n", "\n");
-        normalized
+        let (preamble, rest) = normalized
+            .split_once("\n#[cfg(test)]\nmod command_tests {")
+            .expect("ops.rs 仍有 command_tests 模組");
+        let after = rest
             .split_once("\n}\n\npub mod speak {")
             .expect("ops.rs 仍有 production 起點")
-            .1
-            .to_string()
+            .1;
+        format!("{preamble}\n{after}")
     }
 
     #[test]
@@ -2537,10 +2678,7 @@ pub mod act {
                     out,
                     "這份紀錄是空的——**不是**「她從來沒動過手」，是裡面的列被刪光了。"
                 )?;
-                writeln!(
-                    out,
-                    "會把列刪掉的只有 `sister forget`（和字母人上的「忘掉這一整天」）。"
-                )?;
+                writeln!(out, "{}", empty_action_log_deletion_line(data_dir))?;
             } else {
                 writeln!(
                     out,
@@ -7241,11 +7379,9 @@ pub mod mark {
                      如果它本來在，那就是被 `sister forget` 帶走、或者過了保留期了。"
                 )
             })?,
-            None => db.last_query()?.with_context(|| {
-                "還沒有任何一題可以標記。先問她一題（`sister query …` 或字母人的搜尋框），\
-                 標記是掛在題目上的。"
-                    .to_string()
-            })?,
+            None => db
+                .last_query()?
+                .with_context(|| empty_mark_line(data_dir))?,
         };
 
         for line in mark_lines(
@@ -7723,13 +7859,11 @@ pub mod queries {
                      `sister forget` 和保留期，所以是這兩件事其中之一。\n\
                      標記也一個都不剩，而那一格補不回來：它記的是你看到答案那一刻腦袋裡的\
                      狀態，事後補不出來。Phase 1 那條退場條件要是靠那幾次在算的，得從頭再數。"
+                        .to_string()
                 } else if db.ever_recorded()? {
-                    "題庫是空的。可能是還沒問過她任何問題（`sister query …` 或字母人的\
-                     搜尋框），可能是 `privacy.query_log` 關著，也可能是問過的那幾題被 \
-                     `sister forget` 忘掉了、或過了保留期——她錄過，所以這三種都還在檯面上。"
+                    empty_recorded_queries_line(data_dir)
                 } else {
-                    "題庫是空的。問她幾個問題（`sister query …` 或字母人的搜尋框）就會開始累積。\n\
-                     如果你把 `privacy.query_log` 關掉了，那它永遠會是空的——那也是一個合理的選擇。"
+                    empty_fresh_queries_line(data_dir)
                 }
             );
             return Ok(());
