@@ -1519,10 +1519,19 @@ pub mod act {
             let noticed = pulled.clone();
             let handle = std::thread::spawn(move || {
                 loop {
-                    if sister_hands::kill_switch::is_pulled(&watcher_dir) {
-                        noticed.store(true, std::sync::atomic::Ordering::Release);
-                        break;
-                    }
+                    // **每一輪都寫進去現在的答案，看到拔掉也不要 break。**
+                    // 本來這裡是「拔掉了就 store(true) 然後收工」，於是那個旗標
+                    // 是一個閂：沒有任何人會再把它寫回 false。他在另一個終端機
+                    // 打了 `sister hands resume` 之後，`ask()` 還是每一步都印
+                    // 「手被拔掉了。現在這一步交不出去」——而下一行就是「做了：…」，
+                    // 因為真正的閘門（`hands_attached`）是現場問的。
+                    //
+                    // 那句話已經被刻意收窄成只講「現在」（見底下那條測試的註解），
+                    // 而句子收窄了、變數沒有：它答的還是「這一輪有沒有被拔過」。
+                    noticed.store(
+                        sister_hands::kill_switch::is_pulled(&watcher_dir),
+                        std::sync::atomic::Ordering::Release,
+                    );
                     match done.recv_timeout(std::time::Duration::from_millis(250)) {
                         Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -2467,6 +2476,37 @@ pub mod act {
                 );
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
+        }
+
+        /// 接回去之後那個旗標要跟著變回來。
+        ///
+        /// **它本來是一個閂**：看到拔掉就 `store(true)` 然後 `break`，執行緒
+        /// 就收工了，沒有人會再寫回 false。於是他在另一個終端機打了
+        /// `sister hands resume` 之後，`ask()` 剩下的每一步都還印著
+        /// 「手被拔掉了。現在這一步交不出去」，而下一行是「做了：…」——
+        /// 因為真正的閘門是現場問的。那句話講的是「現在」，變數答的是
+        /// 「這一輪有沒有被拔過」，兩件事。
+        ///
+        /// 沿用上面那條的紀律：**先製造狀態再開執行緒**，上限給得很寬，
+        /// 驗的是「會不會跟著改」不是「多快改」。
+        #[test]
+        fn the_watcher_notices_the_hand_being_put_back() {
+            let dir = crate::ops::tmp::Tmp::new("act-watcher-resumes");
+            sister_hands::kill_switch::pull(&dir.0, 1000).unwrap();
+            let watcher = PullWatcher::start(&dir.0);
+            let wait_until = |want: bool| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while watcher.pulled.load(std::sync::atomic::Ordering::Acquire) != want {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "watcher 十秒都沒把旗標改成 {want}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            };
+            wait_until(true);
+            assert!(sister_hands::kill_switch::release(&dir.0).unwrap());
+            wait_until(false);
         }
 
         #[test]
