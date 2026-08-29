@@ -218,7 +218,7 @@ fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
         // 走的根本不是授權書那條路——它從來沒有過開頭。「被裁掉了」和「這條路
         // 本來就沒有」在這一列上分不出來，所以兩種都要說，不要替它挑一種。
         Some(first) => lines.push(format!(
-            "開頭：{}；這一輪沒有授權書那一列，所以不知道當初授權了什麼——可能是開頭被裁掉了（`hands forget`、保留期），也可能它本來就不是 `sister do` 開的（字母人上按的那一顆不經過授權書）。",
+            "開頭：{}；這一輪沒有授權書那一列，所以不知道當初授權了什麼——可能是開頭被裁掉了（`sister forget`、時間軸的忘掉、保留期），也可能它本來就不是 `sister do` 開的（字母人上按的那一顆不經過授權書）。",
             at(first.at_ms())
         )),
         None => return lines,
@@ -852,6 +852,8 @@ mod tests {
             5,
         );
         assert!(text.contains("被裁掉"), "{text}");
+        assert!(text.contains("`sister forget`"), "{text}");
+        assert!(!text.contains("`hands forget`"), "{text}");
         assert!(
             text.contains("字母人"),
             "「本來就沒有授權書」那一種也要講出來：\n{text}"

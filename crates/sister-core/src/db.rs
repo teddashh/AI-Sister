@@ -1114,7 +1114,7 @@ impl Db {
                 // 「請改用新版」對著五個一樣的圖示是一句沒有下一步的話。
                 "這份資料庫是比較新的版本（schema {version}），而你現在跑的這個 sister 是 {}，只認得到 schema {SCHEMA_VERSION}。\n\
                  舊的執行檔硬開下去讀得到的東西會少、寫進去的可能繞過新的索引，而且不會有人告訴你。\n\
-                 請改用新版的 sister（Releases 上最新那一版），或指一個別的 `--data-dir`。",
+                 請改用新版的 sister（Releases 上最新那一版），或改用另一個資料目錄。",
                 env!("CARGO_PKG_VERSION")
             );
         }
@@ -7520,6 +7520,10 @@ mod tests {
             "要講出它是第幾版：{err}"
         );
         assert!(err.contains("新版的 sister"), "要講出他該做什麼：{err}");
+        assert!(
+            !err.contains("--data-dir"),
+            "這句也會出現在不收 CLI 參數的字母人上：{err}"
+        );
 
         // 擋的只有「比我新」這一邊。往回相容照舊：一個還沒有版號的空檔案
         // （user_version = 0，也就是每一個全新使用者）要一路升到最新。

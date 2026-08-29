@@ -758,6 +758,18 @@ console.log("㉘ 錄製已停、腦還在想最後一段：不是「在聽」，
   check("輪詢過後還是同一句", p.line().includes("想最後一段"), p.line());
 }
 
+console.log("㉙ 錄過但一列都沒存：指到 doctor，不指不存在的設定段落");
+{
+  const p = await open({
+    recording_state: "none",
+    ask: answer({ blind: blind({ ever_recorded: true, ever_stored: false }) }),
+  });
+  await p.type("剛剛發生什麼事");
+  const text = p.hitTexts().join("\n");
+  check("下一步是 sister doctor", text.includes("sister doctor"), text);
+  check("不再指向設定頁的開始記錄段落", !text.includes("設定頁的「開始記錄」"), text);
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——字母人上有話說不出口，或說了活不過下一次輪詢。`);

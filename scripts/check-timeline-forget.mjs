@@ -596,6 +596,13 @@ console.log("⑩ 字母人那一側真的有動手（不是只有畫面上寫著
   }
 }
 
+console.log("⑪ 錄過但一列都沒存：指到 doctor，不指不存在的設定段落");
+{
+  const source = read(SRC);
+  check("下一步是 sister doctor", source.includes("一列內容都沒存進來過——跑 `sister doctor`"));
+  check("不再指向設定頁的開始記錄段落", !source.includes("先到設定頁看「開始記錄」那一段"));
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——那顆不可逆的按鈕停在一個它不該停的狀態。`);
