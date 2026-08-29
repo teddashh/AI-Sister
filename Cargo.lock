@@ -739,7 +739,7 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "sister-capture"
-version = "0.1.0-alpha.81"
+version = "0.1.0-alpha.82"
 dependencies = [
  "anyhow",
  "image",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "sister-cli"
-version = "0.1.0-alpha.81"
+version = "0.1.0-alpha.82"
 dependencies = [
  "anyhow",
  "chrono",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "sister-core"
-version = "0.1.0-alpha.81"
+version = "0.1.0-alpha.82"
 dependencies = [
  "anyhow",
  "chrono",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "sister-hands"
-version = "0.1.0-alpha.81"
+version = "0.1.0-alpha.82"
 dependencies = [
  "anyhow",
  "chrono",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "sister-shell"
-version = "0.1.0-alpha.81"
+version = "0.1.0-alpha.82"
 dependencies = [
  "serde",
  "serde_json",
