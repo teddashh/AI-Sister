@@ -5,6 +5,142 @@ use std::path::{Path, PathBuf};
 
 use sister_core::db::Db;
 
+/// 下一步那一行要指得到**他這一次在看的**那個資料夾。
+///
+/// 比較失敗時保守地帶上 `--data-dir`：多印旗標只是囉唆，少印可能動到另一份記憶。
+fn cmd(data_dir: &Path, rest: &str) -> String {
+    cmd_for(
+        data_dir,
+        sister_core::Config::default_data_dir().as_deref(),
+        rest,
+    )
+}
+
+fn cmd_for(data_dir: &Path, default: Option<&Path>, rest: &str) -> String {
+    let is_default =
+        default.is_some_and(
+            |default| match (data_dir.canonicalize(), default.canonicalize()) {
+                (Ok(actual), Ok(default)) => actual == default,
+                _ => false,
+            },
+        );
+    if is_default {
+        format!("sister {rest}")
+    } else {
+        format!("sister --data-dir {} {rest}", data_dir.display())
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    const OPS_SOURCE: &str = include_str!("ops.rs");
+    const WATCH_SOURCE: &str = include_str!("../../sister-core/src/watch.rs");
+
+    #[test]
+    fn next_step_uses_the_current_non_default_directory() {
+        let actual = tmp::Tmp::new("cmd-actual");
+        let default = tmp::Tmp::new("cmd-default");
+        assert_eq!(
+            cmd_for(&actual.0, Some(&default.0), "forget --last 30d --yes"),
+            format!(
+                "sister --data-dir {} forget --last 30d --yes",
+                actual.0.display()
+            )
+        );
+    }
+
+    #[test]
+    fn next_step_omits_the_flag_for_the_canonical_default() {
+        let default = tmp::Tmp::new("cmd-same");
+        assert_eq!(
+            cmd_for(&default.0, Some(&default.0), "forget --last 30d --yes"),
+            "sister forget --last 30d --yes"
+        );
+    }
+
+    /// **這是一份回歸清單，不是一條通則。**
+    ///
+    /// 底下十句是 alpha.81 真的漏掉過的十處：`cmd` 收 `&Path`，所以 41 個呼叫
+    /// 點是型別守著的，但**寫成字串字面值**的下一步它碰不到，於是這十句一路活
+    /// 到出貨前才被抓到。這條測試擋的是「這十句回來」。
+    ///
+    /// 它擋**不到**第十一句。通則試不出來：中文沒有詞界，祈使標記和 `sister`
+    /// 之間隔著長度不定的字（「跑一次 `sister prune`」「先跑 `sister record`」），
+    /// 而描述句長得幾乎一樣（「正在跑的 `sister record` 會在下一個 tick…」）；
+    /// 收得夠緊就漏掉一半，放得夠寬就把描述句一起殺掉。所以這裡只做回歸清單
+    /// ——**新加一句會動磁碟的下一步時，沒有任何東西會提醒你**，請自己走
+    /// `cmd(data_dir, …)`。
+    #[test]
+    fn these_ten_imperatives_do_not_come_back() {
+        let ops = OPS_SOURCE
+            .split_once("\n}\n\npub mod speak {")
+            .expect("ops.rs 仍有 production 起點")
+            .1;
+        let code_without_comments = |source: &str| {
+            source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let ops_code = code_without_comments(ops);
+        let watch_code = code_without_comments(WATCH_SOURCE);
+        let forbidden = [
+            (ops_code.as_str(), "跑一次 `sister prune`"),
+            (ops_code.as_str(), "再 `sister mark --id N`"),
+            (ops_code.as_str(), "標錯了的話：sister mark --undo"),
+            (ops_code.as_str(), "收回的話：sister mark --undo"),
+            (ops_code.as_str(), "先跑 `sister record`"),
+            (ops_code.as_str(), "`sister forget --last 30d` 帶得走"),
+            (ops_code.as_str(), "跑 `sister prune` 讓它們消失"),
+            (
+                ops_code.as_str(),
+                "要留圖請跑 `sister consent --grant frame-storage`",
+            ),
+            (
+                ops_code.as_str(),
+                "sister replay scenarios/bill-lookup.json",
+            ),
+            (watch_code.as_str(), "她被暫停了（`sister resume` 解除）"),
+        ];
+        for (source, imperative) in forbidden {
+            assert!(
+                !source.contains(imperative),
+                "會動磁碟的下一步繞過 cmd(data_dir, …)：{imperative}"
+            );
+        }
+
+        // 這四句只在描述已發生／可發生的事，不是叫人去打下一行。
+        for description in [
+            "有一個 sister record 正在跑",
+            "被 `sister forget` 忘掉了",
+            "會把列刪掉的只有 `sister forget`",
+            "`sister forget` 挖得掉",
+        ] {
+            assert!(
+                ops_code.contains(description),
+                "純描述不該被下一步守門測試改掉：{description}"
+            );
+        }
+    }
+
+    #[test]
+    fn revoked_frame_consent_points_to_cli_forget_not_the_old_gui_or_prune_copy() {
+        let ops = OPS_SOURCE
+            .split_once("\n}\n\npub mod speak {")
+            .expect("ops.rs 仍有 production 起點")
+            .1;
+        assert!(
+            ops.contains("cmd(data_dir, \"forget --last <多久>\")"),
+            "撤回第三張同意書後要指向這次資料目錄的 forget"
+        );
+        let old = "時間軸的「忘掉這一段」或 sister prune";
+        assert!(!ops.contains(old), "舊 GUI／prune 文案回來了：{old}");
+    }
+}
+
 pub mod speak {
     use super::*;
     use chrono::{Local, Timelike};
@@ -210,8 +346,10 @@ fn open_existing(data_dir: &Path) -> Result<Db> {
     let path = crate::db_path(data_dir);
     anyhow::ensure!(
         path.exists(),
-        "找不到資料庫：{}\n先跑 `sister replay <腳本>` 或 `sister record` 產生資料。",
-        path.display()
+        "找不到資料庫：{}\n先跑 `{}` 或 `{}` 產生資料。",
+        path.display(),
+        cmd(data_dir, "replay <腳本>"),
+        cmd(data_dir, "record")
     );
     Db::open(&path).with_context(|| format!("open {}", path.display()))
 }
@@ -630,12 +768,15 @@ impl Emptiness {
 ///   `Recorder::finish` **先**寫一列 `SessionEnd` **再**呼叫 `end_session`，於是
 ///   它自己剛剛寫的那一列讓那一場「不空」——那道清掃在產品裡從來沒有刪掉過任何
 ///   一列。現在 `delete_empty_sessions` 不把那兩列標籤當成內容，這句話才是真的。
-fn session_shell_why(beat: sister_core::heartbeat::Presence) -> (&'static str, &'static str) {
+fn session_shell_why(
+    data_dir: &Path,
+    beat: sister_core::heartbeat::Presence,
+) -> (&'static str, String) {
     use sister_core::heartbeat::{Phase, Presence};
     match beat {
         Presence::Live(Phase::Recording) => (
             "那一場還沒收尾——她此刻正在錄",
-            "等她收工的時候，那一場如果還是一列都不剩，那一列就會跟著走。",
+            "等她收工的時候，那一場如果還是一列都不剩，那一列就會跟著走。".into(),
         ),
         // 她的列還沒進來，所以手上這一列不可能是她的。「什麼時候會走」那一句
         // 因此跟著當機那一格走，只是等待變短了：正在起來的那一個一開始錄，這
@@ -645,21 +786,24 @@ fn session_shell_why(beat: sister_core::heartbeat::Presence) -> (&'static str, &
         // ——收了的話「裡面」的先行詞會變成正在起來的那一個。
         Presence::Live(Phase::Booting) => (
             "那一場沒有正常收尾——她當掉了；現在有一個 sister record 正在起來，但這一列不是它的",
-            "等它開始錄，這一列就不再是最新的一列，接下來任何一次清理都會把它帶走。",
+            "等它開始錄，這一列就不再是最新的一列，接下來任何一次清理都會把它帶走。".into(),
         ),
         // 按下停止之後那兩分鐘：這一列**是她的**（`finish()` 還沒跑），行程
         // 還在。說「當掉了」或「沒有任何 recorder 佔著」都是假的。
         Presence::Thinking { .. } => (
             "那一場還沒收尾——錄製已停，解釋層還在想最後一段",
-            "想完收工的時候，那一場如果還是一列都不剩，那一列就會跟著走。",
+            "想完收工的時候，那一場如果還是一列都不剩，那一列就會跟著走。".into(),
         ),
         Presence::NeverStarted
         | Presence::Unreadable
         | Presence::Stopped { .. }
         | Presence::Stalled { .. } => (
             "那一場沒有正常收尾——她當掉了（現在沒有任何 recorder 佔著這個資料目錄）",
-            "她**再開始錄之後**，那一列就不再是最新的一列，接下來任何一次清理都會把它\
-             帶走——想馬上清掉的話，開始錄之後跑一次 `sister prune`。",
+            format!(
+                "她**再開始錄之後**，那一列就不再是最新的一列，接下來任何一次清理都會把它\
+                 帶走——想馬上清掉的話，開始錄之後跑一次 `{}`。",
+                cmd(data_dir, "prune")
+            ),
         ),
     }
 }
@@ -804,14 +948,16 @@ pub mod consent {
         } else if c.get(Sheet::LocalRecording).is_some() {
             println!(
                 "→ **她不會開始錄**：條文改版了（現在是第 {} 版），要重簽一次。\n  \
-                 `sister consent --grant local-recording`",
+                 `{}`",
+                cmd(data_dir, "consent --grant local-recording"),
                 sister_core::consent::VERSION
             );
         } else {
             println!(
                 "→ **她不會開始錄。** 要她開始請跑：\n  \
-                 `sister consent --grant local-recording`\n  \
-                 想連截圖一起留就再加 `--grant frame-storage`。"
+                 `{}`\n  \
+                 想連截圖一起留就再加 `--grant frame-storage`。",
+                cmd(data_dir, "consent --grant local-recording")
             );
         }
         if !changed {
@@ -939,7 +1085,10 @@ pub mod interpret {
 
         let result = brain::run(&mut input)?;
         if let Some(skip) = &result.skip {
-            println!("{}", skip.message());
+            println!(
+                "{}",
+                skip.message_with_consent_command(&cmd(data_dir, "consent --grant cloud-reading"))
+            );
             return Ok(());
         }
         if result.ran.is_empty() {
@@ -1190,7 +1339,14 @@ pub mod review {
         }
         let result = reviewer::run(&mut input)?;
         let stats = input.db.reviewer_recheck_stats()?;
-        print!("{}", reviewer::format_review_result(&result, &stats));
+        print!(
+            "{}",
+            reviewer::format_review_result_with_consent_command(
+                &result,
+                &stats,
+                &cmd(data_dir, "consent --grant cloud-reading")
+            )
+        );
         let divergences = input.db.latest_dual_pass_divergences()?;
         let refusals = input.db.latest_reviewer_refusals()?;
         let entities = input.db.entity_memory()?;
@@ -1333,8 +1489,9 @@ pub mod act {
         let raw = match std::fs::read(&path) {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
-                "還沒有存過授權書（{}）。先用 `sister do --save-grant ...` 存一張。",
-                path.display()
+                "還沒有存過授權書（{}）。先用 `{}` 存一張。",
+                path.display(),
+                cmd(data_dir, "do --save-grant ...")
             ),
             Err(e) => return Err(e).with_context(|| format!("讀取授權書 {}", path.display())),
         };
@@ -1824,12 +1981,14 @@ pub mod act {
             if opts.dry_run {
                 writeln!(
                     out,
-                    "手目前被拔掉了{since}；下面這些是她會問的，真的跑起來的時候一步都交不出去，除非先 `sister hands resume`。"
+                    "手目前被拔掉了{since}；下面這些是她會問的，真的跑起來的時候一步都交不出去，除非先 `{}`。",
+                    cmd(data_dir, "hands resume")
                 )?;
             } else {
                 writeln!(
                     out,
-                    "手目前被拔掉了{since}；沒有動作會交給作業系統。要接回去請跑 `sister hands resume`。"
+                    "手目前被拔掉了{since}；沒有動作會交給作業系統。要接回去請跑 `{}`。",
+                    cmd(data_dir, "hands resume")
                 )?;
                 if opts.save_grant {
                     writeln!(out, "這一趟沒有存 `--save-grant`；把手接回去後請重打一次。")?;
@@ -1995,7 +2154,11 @@ pub mod act {
                     Err(rejection) => {
                         let reason = RefusalReason::NotCoveredByGrant { rejection };
                         tally.count_refusal(&reason);
-                        writeln!(out, "沒有做，也沒有交給作業系統：{}", reason.message())?;
+                        writeln!(
+                            out,
+                            "沒有做，也沒有交給作業系統：{}",
+                            reason.message_with_hands_resume(&cmd(data_dir, "hands resume"))
+                        )?;
                         log.append(&ActionEvent::Refused {
                             at_ms: clock(),
                             action: action.clone(),
@@ -2073,7 +2236,11 @@ pub mod act {
                 let event = match &outcome {
                     Outcome::Refused { reason } => {
                         tally.count_refusal(reason);
-                        writeln!(out, "沒有做，也沒有交給作業系統：{}", reason.message())?;
+                        writeln!(
+                            out,
+                            "沒有做，也沒有交給作業系統：{}",
+                            reason.message_with_hands_resume(&cmd(data_dir, "hands resume"))
+                        )?;
                         ActionEvent::Refused {
                             at_ms: clock(),
                             action: action.clone(),
@@ -2831,6 +2998,10 @@ pub mod act {
             .unwrap();
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains("resume"), "{out}");
+            assert!(
+                out.contains(&format!("--data-dir {}", dir.0.display())),
+                "{out}"
+            );
             assert!(!ActionLog::in_data_dir(&dir.0).path().exists());
         }
 
@@ -3139,6 +3310,10 @@ pub mod act {
             std::fs::write(dir.0.join("grant.json"), b"not json").unwrap();
             let broken = load_grant(&dir.0).unwrap_err().to_string();
             assert!(missing.contains("還沒有存過"), "{missing}");
+            assert!(
+                missing.contains(&format!("--data-dir {}", dir.0.display())),
+                "{missing}"
+            );
             assert!(broken.contains("讀不懂"), "{broken}");
             assert_ne!(missing, broken);
         }
@@ -4732,7 +4907,12 @@ pub mod watch {
         // **開跑那一刻的閘門。** 迴圈裡每一輪都會再讀一次（見那裡）——這一張
         // 票只證明「開跑的時候他簽著」，不證明十分鐘後他還簽著。
         if consent.cloud_permit().is_none() && !opts.dry_run {
-            writeln!(out, "{}", WatchSkip::NoConsent.message())?;
+            writeln!(
+                out,
+                "{}",
+                WatchSkip::NoConsent
+                    .message_with_consent_command(&cmd(data_dir, "consent --grant cloud-reading"))
+            )?;
             return Ok(());
         }
         let Some((command, args)) = config.brain.cli() else {
@@ -5005,7 +5185,7 @@ pub mod watch {
                 out,
                 "{}  {}",
                 sister_core::model::stamp(now),
-                look.message()
+                look.message_with_resume_command(&cmd(data_dir, "resume"))
             )?;
             if let Look::Asked {
                 verdict: Verdict::Happened { .. },
@@ -6881,7 +7061,8 @@ pub mod pause {
         match (before, paused) {
             (false, true) => println!(
                 "⏸ 已暫停。正在跑的 `sister record` 會在下一個 tick 停下來，\
-                 而且**不會自己恢復**——要她繼續請跑 `sister resume`。"
+                 而且**不會自己恢復**——要她繼續請跑 `{}`。",
+                cmd(data_dir, "resume")
             ),
             (true, true) => {
                 let since = sister_core::pause::paused_since(data_dir)
@@ -6912,7 +7093,18 @@ pub mod mark {
     /// 那個勾關著的時候，`sister query 電話` 照樣答得出來，只是不留下題目——
     /// 於是一個問了一整天的人跑 `sister mark`，會被告訴「先問她一題」。那句話
     /// 的每一個字都對，而它指向的下一步他已經做過一百次了。
+    #[cfg(test)]
     pub fn run(data_dir: &Path, id: Option<i64>, marked: bool, query_log: bool) -> Result<()> {
+        run_with_config_path(data_dir, id, marked, query_log, None)
+    }
+
+    pub fn run_with_config_path(
+        data_dir: &Path,
+        id: Option<i64>,
+        marked: bool,
+        query_log: bool,
+        config_path: Option<PathBuf>,
+    ) -> Result<()> {
         let db = open_existing(data_dir)?;
 
         // 沒給題號就是「剛剛那一題」。**分得出三種**：那個勾關著、沒問過、
@@ -6939,15 +7131,20 @@ pub mod mark {
             anyhow::bail!(
                 "`privacy.query_log` 是關著的，所以你剛剛問的那一題一個字都沒有留下來——\
                  標記是掛在題目上的，沒有題目就沒有地方掛。\n\
-                 要記這一格的話，把那個勾打開（設定頁的「你問過她什麼」），\
+                 要記這一格的話，把這一次真的在用的設定檔 {} 裡 `privacy.query_log` 改成 true，\
                  從下一題開始才留得住。\n{}",
+                config_path
+                    .or_else(sister_core::Config::default_path)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "（無法判定設定檔路徑）".into()),
                 match stale {
                     Some(q) => format!(
                         "（題庫裡還躺著關掉之前的舊題，最近的一題是 #{} 「{}」。\
                          要標的是那裡面的某一題的話，`sister queries` 看題號，\
-                         再 `sister mark --id N`。）",
+                         再 `{}`。）",
                         q.id,
-                        crate::fmt::one_line(&q.question, 40)
+                        crate::fmt::one_line(&q.question, 40),
+                        cmd(data_dir, "mark --id N")
                     ),
                     None =>
                         "（題庫是空的，關掉之前的舊題也一題都沒有，所以現在沒有任何一題標得到。）"
@@ -6969,7 +7166,12 @@ pub mod mark {
             })?,
         };
 
-        for line in mark_lines(row.id, &row.question, db.mark_query(row.id, marked)?) {
+        for line in mark_lines(
+            data_dir,
+            row.id,
+            &row.question,
+            db.mark_query(row.id, marked)?,
+        ) {
             println!("{line}");
         }
         Ok(())
@@ -6989,16 +7191,27 @@ pub mod mark {
     ///
     /// 是個回傳字串的函式而不是一串 `println!`，因為這四句話是這個子命令**唯
     /// 一**的產出：印出去就沒有人驗得到它們互相分得開。
-    fn mark_lines(id: i64, question: &str, out: sister_core::db::MarkOutcome) -> Vec<String> {
+    fn mark_lines(
+        data_dir: &Path,
+        id: i64,
+        question: &str,
+        out: sister_core::db::MarkOutcome,
+    ) -> Vec<String> {
         let q = crate::fmt::one_line(question, 40);
         match (out.marked, out.changed) {
             (true, true) => vec![
                 format!("★ #{id} 「{q}」——記下來了：這一題你本來已經忘了。"),
-                format!("  標錯了的話：sister mark --undo --id {id}"),
+                format!(
+                    "  標錯了的話：{}",
+                    cmd(data_dir, &format!("mark --undo --id {id}"))
+                ),
             ],
             (true, false) => vec![
                 format!("★ #{id} 「{q}」——這一題你本來就標著了，沒有再算一次。"),
-                format!("  收回的話：sister mark --undo --id {id}"),
+                format!(
+                    "  收回的話：{}",
+                    cmd(data_dir, &format!("mark --undo --id {id}"))
+                ),
             ],
             (false, true) => vec![format!("○ #{id} 「{q}」——收回了，這一題不再算在裡面。")],
             (false, false) => vec![
@@ -7012,6 +7225,28 @@ pub mod mark {
     mod mark_tests {
         use super::*;
         use sister_core::db::{QueryLogEntry, SOURCE_CLI};
+
+        #[test]
+        fn mark_follow_up_keeps_the_directory_that_owns_the_question_id() {
+            let dir = crate::ops::tmp::Tmp::new("mark-follow-up-directory");
+            let said = mark_lines(
+                &dir.0,
+                17,
+                "哪一題",
+                sister_core::db::MarkOutcome {
+                    marked: true,
+                    changed: true,
+                },
+            )
+            .join("\n");
+            assert!(
+                said.contains(&format!(
+                    "sister --data-dir {} mark --undo --id 17",
+                    dir.0.display()
+                )),
+                "mark 的題號屬於這顆資料庫，收回指令也要指回這裡：{said}"
+            );
+        }
 
         /// 一顆有題庫的資料目錄。回傳題號，新的在後。
         fn asked(dir: &Path, questions: &[&str]) -> Vec<i64> {
@@ -7198,7 +7433,13 @@ pub mod mark {
         fn taking_back_a_mark_that_was_never_there_says_so() {
             use sister_core::db::MarkOutcome;
             let said = |marked, changed| {
-                mark_lines(7, "打錯的那一題", MarkOutcome { marked, changed }).join("\n")
+                mark_lines(
+                    Path::new("/tmp/sister-mark-lines"),
+                    7,
+                    "打錯的那一題",
+                    MarkOutcome { marked, changed },
+                )
+                .join("\n")
             };
 
             let real = said(false, true);
@@ -8349,7 +8590,7 @@ pub mod export {
         // 匯出的目錄就是一個資料目錄，所以「還原」不需要任何工具。這一行
         // 是整個指令的重點：他能自己驗證那份匯出是活的。
         println!("\n這個目錄本身就是一個資料目錄，直接問得到：");
-        println!("  sister --data-dir {} query 電話", to.display());
+        println!("  {}", cmd(to, "query 電話"));
         println!(
             "沒帶走的是 consent.toml（三張同意書的簽名）和 config.toml（設定）——\n\
              那兩份是這台機器的設定，不是你的記憶。"
@@ -8712,12 +8953,21 @@ pub mod forget {
     ///
     /// `beat` 來自 `heartbeat::presence`，決定那一列是**當掉的**還是**活的**，以及
     /// 它什麼時候會走——見 [`session_shell_why`]。
+    #[cfg(test)]
     fn session_shell_note(
         s: &sister_core::db::DbStats,
         beat: sister_core::heartbeat::Presence,
     ) -> Option<String> {
+        session_shell_note_for(Path::new("/tmp/sister-session-shell"), s, beat)
+    }
+
+    fn session_shell_note_for(
+        data_dir: &Path,
+        s: &sister_core::db::DbStats,
+        beat: sister_core::heartbeat::Presence,
+    ) -> Option<String> {
         s.only_session_shells_left().then(|| {
-            let (why, then) = session_shell_why(beat);
+            let (why, then) = session_shell_why(data_dir, beat);
             format!(
                 "  留著 {} 場錄製的紀錄本身：{}，裡面一列都不剩。\n     \
                  `sister stats` 的「工作階段」會是這個數字。{then}",
@@ -8773,7 +9023,6 @@ pub mod forget {
     /// 而且「有沒有印出來」這件事測試根本收不到——所以照這個檔案既有的做法
     /// 走 `out: &mut impl Write`（見 `act::run_with`、`hands::log_to`）。
     fn preview_close(data_dir: &Path, last: &str, out: &mut impl std::io::Write) -> Result<()> {
-        let _ = data_dir;
         // `--last` 是從**跑的那一刻**往回算，而 `--yes` 那一次是另一個
         // 行程、另一個「現在」。上面那兩個時間點會整段往後挪掉他讀這段
         // 話的時間，於是起點前面的那幾分鐘留了下來——而畫面剛剛才把它們
@@ -8782,10 +9031,11 @@ pub mod forget {
         writeln!(
             out,
             "\n這是預覽，一個位元組都沒動。真的要忘掉就再跑一次，加上 `--yes`：\n  \
-             sister forget --last {last} --yes\n\
+             {}\n\
              **沒有回收桶，也沒有復原。**\n\
              （`--last` 是從跑的那一刻往回算，所以那一次的區間會比上面整段晚一點\n  \
-             ——你讀這段話的時間會從頭那邊掉出去。想連那幾分鐘一起忘就寫長一點。）"
+             ——你讀這段話的時間會從頭那邊掉出去。想連那幾分鐘一起忘就寫長一點。）",
+            cmd(data_dir, &format!("forget --last {last} --yes"))
         )?;
         Ok(())
     }
@@ -9013,19 +9263,21 @@ pub mod forget {
             // 再跑一次 `forget` 確認，和刪完問一句「真的沒了嗎」一樣自然，而
             // 那正是這一批 bug 的第五次。時間軸那邊同一個分支已經接上了
             // （`timeline.js` 的「沒有東西被刪掉」），這裡當時漏了。
-            if let Some(line) = session_shell_note(&db.stats()?, beat) {
+            if let Some(line) = session_shell_note_for(data_dir, &db.stats()?, beat) {
                 println!("{line}");
             }
             if recording {
                 println!(
                     "\n⚠  **但她現在還在錄。** 剛剛那一段可能只是還沒寫進資料庫——\n   \
-                     真的想清掉就先 `sister pause`，過一下再跑一次這個指令。"
+                     真的想清掉就先 `{}`，過一下再跑一次這個指令。",
+                    cmd(data_dir, "pause")
                 );
             } else if booting {
                 println!(
                     "\n⚠  **有一個 sister record 正在起來**（多半在開資料庫），還沒開始記\n   \
                      東西——所以剛剛那一段真的沒有被記到。但它馬上就要開始記了：\n   \
-                     真的不想被記就先 `sister pause`。"
+                     真的不想被記就先 `{}`。",
+                    cmd(data_dir, "pause")
                 );
             }
             if !yes {
@@ -9038,15 +9290,19 @@ pub mod forget {
             prune::print_report(&report, true, out)?;
             if recording {
                 println!(
-                    "\n⚠  **她現在還在錄。** 先 `sister pause` 再刪——不然你最想忘掉的\n   \
+                    "\n⚠  **她現在還在錄。** 先 `{}` 再刪——不然你最想忘掉的\n   \
                      那一幀可能正好在這一刀後面被寫進去，而且那個畫面多半還在螢幕上，\n   \
-                     下一個 tick 就又被記一次。處理完再 `sister resume`。"
+                     下一個 tick 就又被記一次。處理完再 `{}`。",
+                    cmd(data_dir, "pause"),
+                    cmd(data_dir, "resume")
                 );
             } else if booting {
                 println!(
                     "\n⚠  **有一個 sister record 正在起來**（多半在開資料庫）。它還沒開始\n   \
                      記，但你按下 `--yes` 的時候多半已經開始了——而你最想忘掉的那個畫面\n   \
-                     多半還在螢幕上。先 `sister pause` 再刪，處理完再 `sister resume`。"
+                     多半還在螢幕上。先 `{}` 再刪，處理完再 `{}`。",
+                    cmd(data_dir, "pause"),
+                    cmd(data_dir, "resume")
                 );
             }
             preview_close(data_dir, last, out)?;
@@ -9067,14 +9323,15 @@ pub mod forget {
         // `beat` 是上面那一段讀好的（`heartbeat::phase`）。有它，這一句就不必
         // 印「當掉了，或是她此刻正在錄」——底下四行才剛用同一份心跳斷言「她剛
         // 才一直在錄」。
-        if let Some(line) = session_shell_note(&db.stats()?, beat) {
+        if let Some(line) = session_shell_note_for(data_dir, &db.stats()?, beat) {
             println!("{line}");
         }
 
         if recording {
             println!(
                 "\n⚠  她剛才一直在錄，所以這一刀之後寫進去的東西還在——包含你可能\n   \
-                 最想忘掉的最後那一幀。先 `sister pause`，再跑一次這個指令。"
+                 最想忘掉的最後那一幀。先 `{}`，再跑一次這個指令。",
+                cmd(data_dir, "pause")
             );
         } else if booting {
             // **不可以說「她剛才一直在錄」。** 開機那一段她一列都沒寫，所以這一
@@ -9083,7 +9340,8 @@ pub mod forget {
             println!(
                 "\n⚠  這一刀切在那個 sister record 開始記之前，所以刪掉的是舊的。\n   \
                  但它正在起來，馬上就要開始記了——而你最想忘掉的那個畫面多半還在\n   \
-                 螢幕上。先 `sister pause`。"
+                 螢幕上。先 `{}`。",
+                cmd(data_dir, "pause")
             );
         }
         Ok(())
@@ -9092,6 +9350,21 @@ pub mod forget {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn preview_yes_command_keeps_the_directory_this_run_is_about() {
+            let dir = crate::ops::tmp::Tmp::new("forget-preview-command");
+            let mut out = Vec::new();
+            preview_close(&dir.0, "30d", &mut out).unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert!(
+                out.contains(&format!(
+                    "sister --data-dir {} forget --last 30d --yes",
+                    dir.0.display()
+                )),
+                "{out}"
+            );
+        }
 
         /// 資料目錄裡（含子目錄）還讀得到 `needle` 的檔案。
         ///
@@ -9614,7 +9887,12 @@ pub mod query {
     /// 順序是有意的：她還沒開始記，就沒有第二句好講；記了才輪得到「你自己叫我
     /// 別看那個」和「那段時間我閉著眼」。全部都不成立的時候只剩一句實話——
     /// 她記了，而裡面就是沒有。那句話沒有安慰的成分，但它是真的。
+    #[cfg(test)]
     fn blind_lines(b: &sister_core::answer::BlindSpots) -> Vec<String> {
+        blind_lines_for(Path::new("/tmp/sister-blind-lines"), b)
+    }
+
+    fn blind_lines_for(data_dir: &Path, b: &sister_core::answer::BlindSpots) -> Vec<String> {
         let mut out = Vec::new();
         // 讀字斷掉要**單獨先問**，不能掛在 `chunks == 0` 底下。
         //
@@ -9628,8 +9906,9 @@ pub mod query {
         // 「這幾張畫面裡沒有字」，多講只會把人帶偏。
         if b.ocr_is_dead() {
             out.push(format!(
-                "她看過 {} 張畫面，但一個字都沒讀出來——讀字那一段是斷的，跑 `sister doctor` 看是哪一種。",
-                b.frames
+                "她看過 {} 張畫面，但一個字都沒讀出來——讀字那一段是斷的，跑 `{}` 看是哪一種。",
+                b.frames,
+                cmd(data_dir, "doctor")
             ));
             return out;
         }
@@ -9699,13 +9978,15 @@ pub mod query {
                 // 機器上是**指控一件沒發生的事**——他一次都沒刪過東西，該看
                 // 的是 `capture.enabled`。兩種 0 分得出來是因為 `ever_stored`
                 // 活在 `meta` 裡，而觸發器保證它只在真的落地時才按下去。
-                "她錄過，但一列內容都沒存進來過——先看 `capture.enabled`（`sister doctor` 會直接說）。"
-                    .to_string()
+                format!(
+                    "她錄過，但一列內容都沒存進來過——先看 `capture.enabled`（`{}` 會直接說）。",
+                    cmd(data_dir, "doctor")
+                )
             } else if b.ever_recorded {
                 "她錄過，但現在資料庫裡是空的——被 `sister forget` 忘掉了，或是過了保留期。"
                     .to_string()
             } else {
-                "她還沒記過任何東西——先跑 `sister record`。".to_string()
+                format!("她還沒記過任何東西——先跑 `{}`。", cmd(data_dir, "record"))
             });
             // 這裡不再提早收工。以前 `frames > 0` 會直接 return，因為那時候它
             // 確定是 OCR 斷了；現在那個確定的情況在函式最上面就 return 掉了，
@@ -9805,7 +10086,8 @@ pub mod query {
             // 給的唯一一條路走不通。
             let lead = if out.is_empty() { "她" } else { "而且她" };
             out.push(format!(
-                "{lead}**現在是暫停的**（`sister resume` 解除）——這樣錄也不會記到東西。"
+                "{lead}**現在是暫停的**（`{}` 解除）——這樣錄也不會記到東西。",
+                cmd(data_dir, "resume")
             ));
         }
         // 沒有任何理由的時候只剩一句實話。而「每一段」這三個字要看她這次
@@ -10085,7 +10367,10 @@ pub mod query {
                 // 比對用的是 `terms`（剝掉「剛剛」「那個」），所以掃描界線
                 // 也要照 `terms` 判——查 `search` 的是它，不是原句。
                 let asked = sister_core::question::terms(text);
-                for line in blind_lines(&sister_core::answer::blind_spots(&db, data_dir, asked)?) {
+                for line in blind_lines_for(
+                    data_dir,
+                    &sister_core::answer::blind_spots(&db, data_dir, asked)?,
+                ) {
                     println!("{line}");
                 }
             }
@@ -10203,7 +10488,8 @@ pub mod query {
                 paused_now: true,
                 ..Default::default()
             });
-            assert!(out.contains("sister resume"), "{out}");
+            assert!(out.contains(" resume` 解除"), "{out}");
+            assert!(out.contains("--data-dir /tmp/sister-blind-lines"), "{out}");
             assert!(!out.contains("pause --off"), "那個旗標不存在：{out}");
         }
 
@@ -10911,7 +11197,12 @@ pub mod facts {
     /// 所以先問她到底記到了什麼，再談「為什麼是空的」。三種都是不同的下一步：
     /// 有字沒事實是抽取的問題，有畫面沒字是讀字那一段斷了，兩個都 0 才輪到
     /// `Emptiness`。這道閘門寫在函式**裡面**，理由見 `doctor::bigram_verdict`。
+    #[cfg(test)]
     fn no_facts_line(frames: i64, chunks: i64, empty: Emptiness) -> String {
+        no_facts_line_for(Path::new("/tmp/sister-no-facts"), frames, chunks, empty)
+    }
+
+    fn no_facts_line_for(data_dir: &Path, frames: i64, chunks: i64, empty: Emptiness) -> String {
         if chunks > 0 {
             return format!(
                 "這份記憶裡沒有任何事實——她記了 {chunks} 段字，\
@@ -10921,7 +11212,8 @@ pub mod facts {
         if frames > 0 {
             return format!(
                 "這份記憶裡沒有任何事實——她留下了 {frames} 張畫面，\
-                 但一個字都沒讀出來（`sister doctor` 的「已記錄」那一列會說得更清楚）。"
+                 但一個字都沒讀出來（`{}` 的「已記錄」那一列會說得更清楚）。",
+                cmd(data_dir, "doctor")
             );
         }
         match empty {
@@ -10930,12 +11222,16 @@ pub mod facts {
                  忘掉了，或是過了保留期。"
             }
             Emptiness::Blocked => {
-                "這份記憶裡沒有任何事實——她錄過，而那段時間被排除規則擋掉或\
-                 暫停了（`sister stats` 底下的排除稽核會列出來）。"
+                return format!(
+                    "這份記憶裡沒有任何事實——她錄過，而那段時間被排除規則擋掉或暫停了（`{}` 底下的排除稽核會列出來）。",
+                    cmd(data_dir, "stats")
+                );
             }
             Emptiness::Barren => {
-                "這份記憶裡沒有任何事實——她錄過，但一個字都沒真的存進來過\
-                 （多半是 `capture.enabled = false`，`sister doctor` 會說）。"
+                return format!(
+                    "這份記憶裡沒有任何事實——她錄過，但一個字都沒真的存進來過（多半是 `capture.enabled = false`，`{}` 會說）。",
+                    cmd(data_dir, "doctor")
+                );
             }
             // 同一組數字，相反的下一步：上面那句要他去改設定，這句要他**再
             // 等一下**。她三秒前才被開起來，而上一版對她說「多半是
@@ -11034,7 +11330,12 @@ pub mod facts {
                         // 「正在錄」是兩句不同的話。
                         let beat =
                             sister_core::heartbeat::presence(data_dir, sister_core::now_ms());
-                        no_facts_line(s.frames, s.chunks, Emptiness::of(&db, &s, beat)?)
+                        no_facts_line_for(
+                            data_dir,
+                            s.frames,
+                            s.chunks,
+                            Emptiness::of(&db, &s, beat)?,
+                        )
                     }
                 }
             );
@@ -11191,14 +11492,23 @@ pub mod stats {
     /// 「有一個 sister record 正在起來」、三行之下這一列說那一場開著是因為
     /// 「她正在錄，或正在開機」——而且同一秒的 `doctor` 說那一列是當機的殼。
     /// 再上一版收 `Option<Phase>`，`Thinking` 掉進 `None`，同一頁說她當掉了。
+    #[cfg(test)]
     fn sessions_line(
+        s: &sister_core::db::DbStats,
+        beat: sister_core::heartbeat::Presence,
+    ) -> String {
+        sessions_line_for(Path::new("/tmp/sister-sessions-line"), s, beat)
+    }
+
+    fn sessions_line_for(
+        data_dir: &Path,
         s: &sister_core::db::DbStats,
         beat: sister_core::heartbeat::Presence,
     ) -> String {
         if s.only_session_shells_left() {
             // 只取「為什麼」。「什麼時候會走」留給 `forget`：那裡是他剛按下不
             // 可逆的按鈕、正在等一句交代的時刻，而這裡是一份足跡清單。
-            let (why, _) = session_shell_why(beat);
+            let (why, _) = session_shell_why(data_dir, beat);
             format!("  工作階段  {}（空殼：{}）", s.sessions, why)
         } else {
             format!("  工作階段  {}", s.sessions)
@@ -11446,7 +11756,7 @@ pub mod stats {
         // 整句在 `sessions_line`——數字和那個但書要嘛一起印，要嘛一起不印。
         // 拆成「印數字」加「如果……再印一句」的話，那個 `if` 就落在呼叫端，而
         // 這一批 bug 七次有七次犯在呼叫端。
-        println!("{}", sessions_line(&s, beat));
+        println!("{}", sessions_line_for(data_dir, &s, beat));
         println!(
             "  畫面      {} 張保留，{} 張因重複被折疊",
             s.frames, s.frames_collapsed
@@ -11534,7 +11844,8 @@ pub mod stats {
                     "            但她**現在是暫停的**（按下去的時候沒有人在錄，所以紀錄裡看不到）"
                 );
                 println!(
-                    "            `sister resume` 解除。不解除的話，接下來錄的每一分鐘都是空的。"
+                    "            `{}` 解除。不解除的話，接下來錄的每一分鐘都是空的。",
+                    cmd(data_dir, "resume")
                 );
             }
         } else {
@@ -11915,13 +12226,17 @@ pub mod doctor {
             Some(since) => (
                 "✗",
                 format!(
-                    "從 {} 起被拔掉；`sister hands resume` 可接回去",
-                    crate::fmt::timestamp(since)
+                    "從 {} 起被拔掉；`{}` 可接回去",
+                    crate::fmt::timestamp(since),
+                    cmd(data_dir, "hands resume")
                 ),
             ),
             None => (
                 "✗",
-                "開關在，但開始時間讀不到；`sister hands resume` 可接回去".into(),
+                format!(
+                    "開關在，但開始時間讀不到；`{}` 可接回去",
+                    cmd(data_dir, "hands resume")
+                ),
             ),
         }
     }
@@ -11952,8 +12267,9 @@ pub mod doctor {
             PauseState::Recording => None,
             PauseState::Since(ts) => Some(format!(
                 "**暫停中**（從 {} 起）。這段期間什麼都不會被記錄；\
-                 `sister resume` 可解除，或刪掉 {}",
+                 不是裸的 `sister resume`；請跑 `{}` 解除，或刪掉 {}",
                 crate::fmt::timestamp(ts),
+                cmd(data_dir, "resume"),
                 flag.display()
             )),
             PauseState::FlagPresentButUnreadable => Some(format!(
@@ -12488,7 +12804,24 @@ pub mod doctor {
     /// 過」。而它也只能砍掉一種可能——`ever_recorded` 答得出「她錄過」，答
     /// **不**出「他問過」（一個天天在錄、從來沒用過搜尋框的人也是這個 0），
     /// 所以錄過的時候就把可能性攤開，不要替他選一個。
+    #[cfg(test)]
     fn query_log_verdict(
+        has_db: bool,
+        on: bool,
+        ever: bool,
+        q: &sister_core::db::QueryLogStats,
+    ) -> (&'static str, String) {
+        query_log_verdict_for(
+            Path::new("/tmp/sister-query-log-verdict"),
+            has_db,
+            on,
+            ever,
+            q,
+        )
+    }
+
+    fn query_log_verdict_for(
+        data_dir: &Path,
         has_db: bool,
         on: bool,
         ever: bool,
@@ -12535,8 +12868,9 @@ pub mod doctor {
                 // 時間裡的字、事實、畫面會一起走。少講後半句，他會按下去才發現。
                 format!(
                     "**不記了**（privacy.query_log = false）。以前記的 {} 題還在——\
-                     `sister forget --last 30d` 帶得走，但那會連同那 30 天的其他記憶一起忘掉",
-                    q.total
+                     `{}` 帶得走，但那會連同那 30 天的其他記憶一起忘掉",
+                    q.total,
+                    cmd(data_dir, "forget --last 30d")
                 ),
             ),
             // 這一格不提「還沒問過」：關著的時候那張表本來就不會長，講不出
@@ -13382,7 +13716,13 @@ pub mod doctor {
             .map(|d| d.ever_recorded())
             .transpose()?
             .unwrap_or(false);
-        let (sym, said) = query_log_verdict(db.is_some(), config.privacy.query_log, ever, &qlog);
+        let (sym, said) = query_log_verdict_for(
+            data_dir,
+            db.is_some(),
+            config.privacy.query_log,
+            ever,
+            &qlog,
+        );
         mark(
             sym,
             "你問過她什麼",
@@ -13713,7 +14053,7 @@ pub mod doctor {
                 mark(
                     "?",
                     "現在有多少已過期",
-                    &format!("{what}。跑 `sister prune` 讓它們消失"),
+                    &format!("{what}。跑 `{}` 讓它們消失", cmd(data_dir, "prune")),
                 )
             }
             Some(Err(e)) => line(false, "現在有多少已過期", &format!("問不出來：{e:#}")),
@@ -14384,14 +14724,16 @@ pub mod doctor {
                 "要印出旗標裡那個時間：{since}"
             );
             assert!(
-                since.contains("`sister resume`") && since.contains("刪掉"),
+                since.contains(" resume`")
+                    && since.contains(&format!("--data-dir {}", since_dir.display()))
+                    && since.contains("刪掉"),
                 "解不解得開要講出來：{since}"
             );
 
             let (sym, final_said) =
                 watching_verdict(paused_row(&since_dir), Presence::Stopped { at: None });
             assert_eq!(sym, "⏸");
-            assert!(final_said.contains("`sister resume`"), "{final_said}");
+            assert!(final_said.contains(" resume`"), "{final_said}");
 
             let broken_dir = root.0.join("broken-flag");
             std::fs::create_dir_all(&broken_dir).unwrap();
@@ -19266,9 +19608,10 @@ pub mod record {
                      兩個一起錄會對同一顆資料庫各寫一份，而唯一看得出來的症狀是\n\
                      磁碟用得比講好的快一倍——所以這裡直接擋下來。\n\n\
                      要換手的話先請那一個收工：\n    \
-                     sister stop\n\n\
+                     {}\n\n\
                      如果你確定那個行程已經死了，等 {} 秒它的心跳就會自己過期。\n\
                      （心跳檔：{}）\n",
+                    cmd(data_dir, "stop"),
                     sister_core::heartbeat::STALE_AFTER_MS / 1000,
                     sister_core::heartbeat::beat_path(data_dir).display()
                 )
@@ -19493,12 +19836,18 @@ pub mod record {
             anyhow::bail!(
                 "{why}\n\n  「{}」\n\n\
                  要她開始記錄，請跑：\n    \
-                 sister consent --grant local-recording\n\n\
+                 {}\n\n\
                  想連截圖一起留（否則她只記螢幕上的字）：\n    \
-                 sister consent --grant local-recording --grant frame-storage\n\n\
+                 {}\n\n\
                  看目前簽了哪幾張：\n    \
-                 sister consent\n",
-                sister_core::consent::Sheet::LocalRecording.wording()
+                 {}\n",
+                sister_core::consent::Sheet::LocalRecording.wording(),
+                cmd(data_dir, "consent --grant local-recording"),
+                cmd(
+                    data_dir,
+                    "consent --grant local-recording --grant frame-storage"
+                ),
+                cmd(data_dir, "consent")
             );
         }
 
@@ -19516,7 +19865,8 @@ pub mod record {
         if consent.downgrade(&mut config) {
             println!(
                 "  第三張同意書沒簽：這一次只記螢幕上的字，不會寫任何截圖。\n  \
-                 （要留圖請跑 `sister consent --grant frame-storage`）"
+                 （要留圖請跑 `{}`）",
+                cmd(data_dir, "consent --grant frame-storage")
             );
         }
         Ok((config, wants_images_by_config))
@@ -19616,8 +19966,9 @@ pub mod record {
                 "這個平台（{}）還沒有擷取後端。\n\n\
                  Phase 0 的目標平台是 Windows；核心與錄製迴圈本身是平台無關的，\n\
                  可以用腳本完整驗證：\n\n    \
-                 sister replay scenarios/bill-lookup.json\n",
-                std::env::consts::OS
+                 {}\n",
+                std::env::consts::OS,
+                cmd(data_dir, "replay scenarios/bill-lookup.json")
             )
         }
         #[cfg(windows)]
@@ -20228,15 +20579,18 @@ pub mod record {
                     // 他剛剛改了 `store_images`，而實際行為沒有跟著變 = 另一個
                     // 條件在擋。安靜掉的話，他會以為那一行寫了就生效了——而這是
                     // 一句只要他不去翻 frames/ 就永遠不會被戳破的話。
-                    Recheck::Same if by_config => println!(
-                        "  ⟳ 設定檔的 store_images 改了，但實際行為沒變：{}",
-                        if wants_images_by_config.enabled() {
-                            "第三張同意書沒簽，所以還是只記字。\
-                             （要留圖請跑 `sister consent --grant frame-storage`）"
+                    Recheck::Same if by_config => {
+                        let why = if wants_images_by_config.enabled() {
+                            format!(
+                                "第三張同意書沒簽，所以還是只記字。\
+                                 （要留圖請跑 `{}`）",
+                                cmd(data_dir, "consent --grant frame-storage")
+                            )
                         } else {
-                            "第三張同意書本來就沒簽，這一輪本來就沒在留圖。"
-                        }
-                    ),
+                            "第三張同意書本來就沒簽，這一輪本來就沒在留圖。".to_string()
+                        };
+                        println!("  ⟳ 設定檔的 store_images 改了，但實際行為沒變：{why}");
+                    }
                     Recheck::Same => {}
                     // 撤回不是暫停。暫停是「先別看」，撤回是「我收回那句話」
                     // ——所以這裡停的是整場錄製，和開機時那道閘門對稱。當成
@@ -20244,7 +20598,8 @@ pub mod record {
                     Recheck::Stop => {
                         println!(
                             "\n⏹ 第一張同意書被撤回了，錄製到此為止。\n  \
-                             要再開始請跑：sister consent --grant local-recording"
+                             要再開始請跑：{}",
+                            cmd(data_dir, "consent --grant local-recording")
                         );
                         end_reason = sister_core::model::EndReason::ConsentRevoked;
                         break;
@@ -20267,8 +20622,8 @@ pub mod record {
                         };
                         println!(
                             "  ⟳ {why}：從這一刻起只記螢幕上的字，\
-                             不會再寫任何截圖。（先前寫下的那些還在，要清掉請用\
-                             時間軸的「忘掉這一段」或 sister prune。）"
+                             不會再寫任何截圖。（先前寫下的那些還在，要清掉請用 `{}`。）",
+                            cmd(data_dir, "forget --last <多久>")
                         );
                         rec.set_image_dir(None);
                     }
@@ -20448,8 +20803,9 @@ pub mod record {
             PauseState::Recording => None,
             PauseState::Since(ts) => Some(format!(
                 "目前是暫停狀態（從 {} 起），不會記錄任何東西。\
-                 `sister resume` 可解除，或刪掉 {}。",
+                 不是裸的 `sister resume`；請跑 `{}` 解除，或刪掉 {}。",
                 crate::fmt::timestamp(ts),
+                cmd(data_dir, "resume"),
                 flag.display()
             )),
             PauseState::FlagPresentButUnreadable => Some(format!(
@@ -20491,7 +20847,9 @@ pub mod record {
                 "{since}"
             );
             assert!(
-                since.contains("`sister resume`") && since.contains("刪掉"),
+                since.contains(" resume`")
+                    && since.contains(&format!("--data-dir {}", since_dir.display()))
+                    && since.contains("刪掉"),
                 "{since}"
             );
 
@@ -22403,7 +22761,11 @@ pub mod record {
             let err = already_recording(&dir.0).expect_err("第二個要被擋下來");
             let said = format!("{err}");
             // 擋下來還要講得出下一步是什麼。一句「不行」會讓人去刪資料庫。
-            assert!(said.contains("sister stop"), "要指路：{said}");
+            assert!(said.contains(" stop"), "要指路：{said}");
+            assert!(
+                said.contains(&format!("--data-dir {}", dir.0.display())),
+                "{said}"
+            );
             assert!(said.contains("秒"), "要講得出多久以前／等多久：{said}");
         }
 
@@ -22588,8 +22950,18 @@ pub mod record {
             let err = super::gate(&dir.0, Config::default()).expect_err("該被擋下來");
             let msg = err.to_string();
             assert!(
-                msg.contains("sister consent --grant local-recording"),
+                msg.contains(" consent --grant local-recording"),
                 "擋下來還不夠，要說得出怎麼過去：{msg}"
+            );
+            assert!(
+                msg.contains(&format!("--data-dir {}", dir.0.display())),
+                "{msg}"
+            );
+            assert_eq!(
+                msg.matches(&format!("--data-dir {}", dir.0.display()))
+                    .count(),
+                3,
+                "三個同意書出口都要指回同一個資料目錄：{msg}"
             );
         }
 

@@ -747,9 +747,13 @@ fn main() -> Result<()> {
             marked,
             json,
         } => ops::queries::run(&data_dir, limit, empty, marked, json),
-        Command::Mark { id, undo } => {
-            ops::mark::run(&data_dir, id, !undo, config()?.privacy.query_log)
-        }
+        Command::Mark { id, undo } => ops::mark::run_with_config_path(
+            &data_dir,
+            id,
+            !undo,
+            config()?.privacy.query_log,
+            cli.config.clone(),
+        ),
         Command::Stats { json } => ops::stats::run(&data_dir, &config()?, json),
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config()?, dry_run),
         Command::Export { to, with_frames } => ops::export::run(&data_dir, &to, with_frames),

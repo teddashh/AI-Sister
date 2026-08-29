@@ -358,6 +358,11 @@ impl RefusalReason {
     }
 
     pub fn message(&self) -> String {
+        self.message_with_hands_resume("sister hands resume")
+    }
+
+    /// 呼叫端把這一次資料目錄的 resume 指令交進來；這個 crate 不猜預設目錄。
+    pub fn message_with_hands_resume(&self, resume: &str) -> String {
         match self {
             Self::UserDeclinedThisStep => "你說不要，所以這一步沒有做。".to_string(),
             Self::ObserveHasNoHands => {
@@ -378,12 +383,11 @@ impl RefusalReason {
             Self::ApprovalWasForAnotherStep { mismatch } => mismatch.message(),
             Self::HandsPulled { since_ms } => match since_ms {
                 Some(since_ms) => format!(
-                    "手從 {} 起被拔掉了，所以這一步沒有交給作業系統。要接回去請跑 `sister hands resume`。",
-                    replay_copy::at(*since_ms)
+                    "手從 {} 起被拔掉了，所以這一步沒有交給作業系統。要接回去請跑 `{resume}`。",
+                    replay_copy::at(*since_ms),
                 ),
                 None => {
-                    "手被拔掉了，所以這一步沒有交給作業系統。要接回去請跑 `sister hands resume`。"
-                        .to_string()
+                    format!("手被拔掉了，所以這一步沒有交給作業系統。要接回去請跑 `{resume}`。")
                 }
             },
         }
