@@ -310,6 +310,30 @@ pub const fn separate_approval_for_class(class: NeverInherited) -> SeparateAppro
 
 /// UI 顯示過的具體一步。只有消耗它才能鑄出核准票。
 pub struct PresentedStep(StepRequest);
+/// 這一段只在編譯期釘住這兩個型別沒有 `Serialize` 或 `DeserializeOwned`。
+///
+/// 兩個 blanket impl 各自涵蓋「所有 `Serialize` 的型別」和「所有 `DeserializeOwned`
+/// 的型別」。那四行具名 impl 只有在 `StepApproval` 和 `PresentedStep` 這兩個型別
+/// **都不是**那樣的時候才不衝突。任何人幫它們加上 `Serialize` 或
+/// `DeserializeOwned`，這裡當場 E0119。四個方向當下都實測過。
+/// 它不能證明「批准不能落地後重播」：`StepRequest` 本身可序列化，公開的
+/// `PresentedStep::new(...).approve()` 仍能從落地後重讀的 request 產生批准。
+///
+/// `#[allow(dead_code)]`：這兩個 trait 沒有人呼叫是**故意的**——它們的用途是佔住
+/// coherence，不是被呼叫。少了這一行，`clippy -D warnings` 會紅。
+#[allow(dead_code)]
+mod approval_stays_in_memory {
+    trait NotSerialize {}
+    impl<T: serde::Serialize> NotSerialize for T {}
+    impl NotSerialize for super::StepApproval {}
+    impl NotSerialize for super::PresentedStep {}
+
+    trait NotDeserialize {}
+    impl<T: serde::de::DeserializeOwned> NotDeserialize for T {}
+    impl NotDeserialize for super::StepApproval {}
+    impl NotDeserialize for super::PresentedStep {}
+}
+
 impl PresentedStep {
     pub fn new(step: StepRequest) -> Self {
         Self(step)
@@ -322,8 +346,10 @@ impl PresentedStep {
     }
 }
 
-// 刻意不 derive `Serialize`/`Deserialize`：批准不能落地後重播。這個否定性質無法用
-// 一般 runtime test 證明；交付閘門用定點 source grep 檢查 derive 沒有出現在這裡。
+// 刻意不 derive `Serialize`/`Deserialize`。這個型別層的否定性質由上面
+// `approval_stays_in_memory` 那段 coherence 衝突釘住：
+// 一旦 `StepApproval` 拿到 `Serialize`，它就同時被 blanket impl 和具名 impl 涵蓋，
+// 編譯直接紅（E0119）。
 pub struct StepApproval {
     shown: StepRequest,
     by: ApprovedBy,
