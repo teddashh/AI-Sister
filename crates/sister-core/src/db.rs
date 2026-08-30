@@ -3856,8 +3856,13 @@ impl Db {
             // 已經不在，不能讓新 fact 穿著舊 id 替它回答 app。
             Some(row) if row.raw != expected_raw => TargetApp::Forgotten,
             Some(row) => match row.app_id {
-                Some(app) => TargetApp::Known(app),
-                None => TargetApp::AppNotRecorded,
+                Some(app) => TargetApp::Known {
+                    app,
+                    origin: FactOrigin::from_target_row(&row.source_kind, row.frame_id),
+                },
+                None => TargetApp::AppNotRecorded {
+                    origin: FactOrigin::from_target_row(&row.source_kind, row.frame_id),
+                },
             },
         })
     }
@@ -6012,11 +6017,72 @@ pub fn fts_query(input: &str) -> String {
     terms.join(" AND ")
 }
 
+/// 這筆記憶是怎麼被記下來的——只決定她怎麼描述它的出處。
+///
+/// `Screen` 只有在資料列同時是 OCR 且真的有 `frame_id` 時才會產生，讓
+/// 「在畫面上看到的」不可能由單獨的 `app_id` 推出來。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactOrigin {
+    /// `source_kind = 'ocr'` 而且 `frame_id` 有值。
+    Screen,
+    WindowTitle,
+    Clipboard,
+    /// `source_kind = 'ocr'`，卻沒有記是哪一張畫面。
+    ScreenTextWithoutFrame,
+    /// 這一版看不懂的 `source_kind`；刻意不保留原始字串。
+    Unknown,
+}
+
+impl FactOrigin {
+    pub fn from_target_row(source_kind: &str, frame_id: Option<i64>) -> Self {
+        match (source_kind, frame_id) {
+            ("ocr", Some(_)) => Self::Screen,
+            ("window_title", None) => Self::WindowTitle,
+            ("clipboard", None) => Self::Clipboard,
+            ("ocr", None) => Self::ScreenTextWithoutFrame,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// 一筆**沒有** `frame_id` 的記憶是從哪裡來的。
+///
+/// 為什麼要跟 `FactOrigin` 分開一個型別，而不是共用那個再多一臂：那句拒絕的話
+/// 長成「下一步目標 fact:N ⋯⋯，**沒有畫面出處**」。把 `FactOrigin` 直接塞進去
+/// 的話，`Screen` 那一臂就得填一段字，而填出來的是「來自畫面，沒有畫面出處」
+/// ——一句自己打自己的話，正好是這一版要消滅的那種東西。它今天不可能被跑到
+/// （呼叫端在 `frame_id` 是 `None` 的那一臂裡），但那是**呼叫端**的巧合，不是
+/// 型別擋下來的；改一次呼叫端就會把它放出來。
+///
+/// 所以這個型別沒有宣稱「有一張畫面」的變體：`ScreenTextWithoutFrame` 只陳述
+/// 資料列記著它來自畫面文字，同時明講畫面編號缺失；未知值也不帶原始字串。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FramelessOrigin {
+    WindowTitle,
+    Clipboard,
+    /// `source_kind` 說是畫面文字，卻沒有記畫面編號的矛盾列。
+    ScreenTextWithoutFrame,
+    /// 這一版看不懂的 `source_kind`；刻意不保留原始字串。
+    Unknown,
+}
+
+impl FramelessOrigin {
+    /// 只給 `frame_id IS NULL` 的列用——所以這裡收不到 `frame_id`。
+    pub fn from_source_kind(source_kind: &str) -> Self {
+        match source_kind {
+            "window_title" => Self::WindowTitle,
+            "clipboard" => Self::Clipboard,
+            "ocr" => Self::ScreenTextWithoutFrame,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetApp {
     Forgotten,
-    AppNotRecorded,
-    Known(String),
+    AppNotRecorded { origin: FactOrigin },
+    Known { app: String, origin: FactOrigin },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -7268,7 +7334,9 @@ mod tests {
         assert_eq!(
             db.app_for_target_fact(without_app, "https://example.com")
                 .unwrap(),
-            TargetApp::AppNotRecorded
+            TargetApp::AppNotRecorded {
+                origin: FactOrigin::ScreenTextWithoutFrame,
+            }
         );
     }
 
@@ -7287,7 +7355,56 @@ mod tests {
         assert_eq!(
             db.app_for_target_fact(with_app, "https://example.org")
                 .unwrap(),
-            TargetApp::Known("chrome.exe".into())
+            TargetApp::Known {
+                app: "chrome.exe".into(),
+                origin: FactOrigin::ScreenTextWithoutFrame,
+            }
+        );
+    }
+
+    #[test]
+    fn target_fact_origin_requires_a_real_frame_before_calling_it_screen() {
+        let db = test_db();
+        db.conn
+            .execute(
+                "INSERT INTO facts(ts, kind, raw, normalized, source_kind, app_id)
+                 VALUES(2, 'url', 'https://without-frame.example', 'https://without-frame.example', 'ocr', 'chrome.exe')",
+                [],
+            )
+            .unwrap();
+        let without_frame = db.conn.last_insert_rowid();
+        db.conn
+            .execute(
+                "INSERT INTO frames(ts, monitor, width, height, dhash, app_id)
+                 VALUES(3, 0, 1, 1, 0, 'chrome.exe')",
+                [],
+            )
+            .unwrap();
+        let frame_id = db.conn.last_insert_rowid();
+        db.conn
+            .execute(
+                "INSERT INTO facts(ts, kind, raw, normalized, source_kind, app_id, frame_id)
+                 VALUES(3, 'url', 'https://with-frame.example', 'https://with-frame.example', 'ocr', 'chrome.exe', ?1)",
+                [frame_id],
+            )
+            .unwrap();
+        let with_frame = db.conn.last_insert_rowid();
+
+        assert_eq!(
+            db.app_for_target_fact(without_frame, "https://without-frame.example")
+                .unwrap(),
+            TargetApp::Known {
+                app: "chrome.exe".into(),
+                origin: FactOrigin::ScreenTextWithoutFrame,
+            }
+        );
+        assert_eq!(
+            db.app_for_target_fact(with_frame, "https://with-frame.example")
+                .unwrap(),
+            TargetApp::Known {
+                app: "chrome.exe".into(),
+                origin: FactOrigin::Screen,
+            }
         );
     }
 

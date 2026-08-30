@@ -1920,15 +1920,24 @@ pub mod act {
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum StepApp {
         /// 這一步問得到的 app 合起來剛好一個；目標可能是舊資料而沒有參與。
-        Known { app: String, target: Option<String> },
+        Known {
+            app: String,
+            target: Option<TargetOrigin>,
+        },
         /// 這一步問得到兩個以上不同的 app；目標可能是舊資料而沒有參與。
-        Ambiguous { target: Option<String> },
+        Ambiguous { target: Option<TargetOrigin> },
         /// 證據鏈問不出 app；目標可能有 app，但不能替證據作答。
-        Unknown { target: Option<String> },
+        Unknown { target: Option<TargetOrigin> },
         /// 這一步的目標指著一筆 fact，而那筆 fact 已經不在資料庫裡了。
         TargetForgotten,
         /// 目標那筆 fact 還在，但它的畫面沒有記是哪個 app。
-        TargetAppNotRecorded,
+        TargetAppNotRecorded(sister_core::db::FactOrigin),
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TargetOrigin {
+        app: String,
+        origin: sister_core::db::FactOrigin,
     }
 
     impl StepApp {
@@ -1938,7 +1947,7 @@ pub mod act {
                 Self::Ambiguous { .. } => "<兩個以上的 app>",
                 Self::Unknown { .. } => "<問不出是哪個 app>",
                 Self::TargetForgotten => "<目標來源已經不在>",
-                Self::TargetAppNotRecorded => "<目標沒有記 app>",
+                Self::TargetAppNotRecorded(_) => "<目標沒有記 app>",
             })
         }
         fn label(&self) -> &str {
@@ -1947,22 +1956,23 @@ pub mod act {
                 Self::Ambiguous { .. } => "兩個以上的 app",
                 Self::Unknown { .. } => "問不出是哪個 app",
                 Self::TargetForgotten => "目標來源已經不在",
-                Self::TargetAppNotRecorded => "目標沒有記 app",
+                Self::TargetAppNotRecorded(_) => "目標沒有記 app",
             }
         }
-        fn explanation(&self) -> Option<&'static str> {
+        fn explanation(&self) -> Option<String> {
             match self {
                 Self::Known { .. } => None,
-                Self::Ambiguous { .. } => Some("這一步牽涉到兩個以上不同的 app，不能替它選一個。"),
+                Self::Ambiguous { .. } => Some("這一步牽涉到兩個以上不同的 app，不能替它選一個。".to_owned()),
                 Self::Unknown { .. } => Some(
-                    "證據鏈沒有一個問得出的 app，不能證明這一步在授權範圍內。目標自己的 app 不能替證據作答。",
+                    "證據鏈沒有一個問得出的 app，不能證明這一步在授權範圍內。目標自己的 app 不能替證據作答。".to_owned(),
                 ),
-                Self::TargetForgotten => {
-                    Some("這一步的目標來源已經被忘掉或過了保留期，不能證明這一步在授權範圍內。")
-                }
-                Self::TargetAppNotRecorded => {
-                    Some("目標那筆 fact 還在，但畫面沒有記 app，不能證明這一步在授權範圍內。")
-                }
+                Self::TargetForgotten => Some(
+                    "這一步的目標來源已經被忘掉或過了保留期，不能證明這一步在授權範圍內。".to_owned(),
+                ),
+                Self::TargetAppNotRecorded(origin) => Some(format!(
+                    "目標那筆 fact 還在，但{}沒有記 app，不能證明這一步在授權範圍內。",
+                    origin_subject(origin)
+                )),
             }
         }
 
@@ -1971,14 +1981,42 @@ pub mod act {
                 Self::Known { target, .. }
                 | Self::Ambiguous { target }
                 | Self::Unknown { target } => match target {
-                    Some(app) => format!("這個目標是在 {app} 的畫面上看到的"),
+                    Some(TargetOrigin { app, origin }) => match origin {
+                        sister_core::db::FactOrigin::Screen => {
+                            format!("這個目標是在 {app} 的畫面上看到的")
+                        }
+                        sister_core::db::FactOrigin::WindowTitle => {
+                            format!("這個目標是在 {app} 的視窗標題上記下來的")
+                        }
+                        sister_core::db::FactOrigin::Clipboard => {
+                            format!("這個目標是從 {app} 複製起來的")
+                        }
+                        sister_core::db::FactOrigin::ScreenTextWithoutFrame => {
+                            format!("這個目標是 {app} 從畫面上讀到的，可是沒有記是哪一張畫面")
+                        }
+                        sister_core::db::FactOrigin::Unknown => {
+                            format!("這個目標是 {app} 記下來的，來源沒有記清楚")
+                        }
+                    },
                     None => "這個目標是從哪個畫面來的沒有記".to_owned(),
                 },
                 Self::TargetForgotten => {
                     "這個目標的來源已經不在了（被忘掉、或過了保留期）".to_owned()
                 }
-                Self::TargetAppNotRecorded => "這個目標的畫面沒有記是哪個 app".to_owned(),
+                Self::TargetAppNotRecorded(origin) => {
+                    format!("這個目標的{}沒有記是哪個 app", origin_subject(origin))
+                }
             }
+        }
+    }
+
+    fn origin_subject(origin: &sister_core::db::FactOrigin) -> &'static str {
+        match origin {
+            sister_core::db::FactOrigin::Screen => "畫面",
+            sister_core::db::FactOrigin::WindowTitle => "視窗標題",
+            sister_core::db::FactOrigin::Clipboard => "剪貼簿來源",
+            sister_core::db::FactOrigin::ScreenTextWithoutFrame => "從畫面讀來的資料",
+            sister_core::db::FactOrigin::Unknown => "來源沒有記清楚，而且",
         }
     }
 
@@ -2111,7 +2149,9 @@ pub mod act {
             }
             Ok(match fact.frame_id {
                 Some(id) => TargetFrame::Known(id),
-                None => TargetFrame::FrameNotRecorded,
+                None => TargetFrame::FrameNotRecorded(
+                    sister_core::db::FramelessOrigin::from_source_kind(&fact.source_kind),
+                ),
             })
         }
         fn nearest_step_frame(
@@ -2124,11 +2164,11 @@ pub mod act {
         }
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum TargetFrame {
         Forgotten,
         RowReplaced,
-        FrameNotRecorded,
+        FrameNotRecorded(sister_core::db::FramelessOrigin),
         Known(i64),
     }
 
@@ -2156,10 +2196,20 @@ pub mod act {
                     sister_hands::TargetFrameGap::RowReplaced,
                 )));
             }
-            TargetFrame::FrameNotRecorded => {
+            TargetFrame::FrameNotRecorded(origin) => {
+                // 這裡收的是 `FramelessOrigin`，不是 `FactOrigin`：後者的 `Screen`
+                // 填進下面那句話會變成「來自畫面，沒有畫面出處」。見型別上的註解。
+                let origin_text = match origin {
+                    sister_core::db::FramelessOrigin::WindowTitle => "來自視窗標題".to_owned(),
+                    sister_core::db::FramelessOrigin::Clipboard => "來自剪貼簿".to_owned(),
+                    sister_core::db::FramelessOrigin::ScreenTextWithoutFrame => {
+                        "記著是從畫面讀來的，卻沒有記是哪一張".to_owned()
+                    }
+                    sister_core::db::FramelessOrigin::Unknown => "來源沒有記清楚".to_owned(),
+                };
                 return Ok(Some((
                     format!(
-                        "無人值守拒絕：下一步目標 fact:{fact_id} 來自視窗標題或剪貼簿；這類記憶本來就沒有畫面出處，所以無人值守永遠不會做它。要做請在終端機裡自己看過再按。"
+                        "無人值守拒絕：下一步目標 fact:{fact_id} {origin_text}，沒有畫面出處，所以無人值守永遠不會做它。要做請在終端機裡自己看過再按。"
                     ),
                     sister_hands::TargetFrameGap::FrameNotRecorded,
                 )));
@@ -2378,12 +2428,12 @@ pub mod act {
         if let Some((fact_id, expected_raw)) = target {
             match source.app_for_target_fact(fact_id, expected_raw)? {
                 sister_core::db::TargetApp::Forgotten => return Ok(StepApp::TargetForgotten),
-                sister_core::db::TargetApp::AppNotRecorded => {
-                    return Ok(StepApp::TargetAppNotRecorded);
+                sister_core::db::TargetApp::AppNotRecorded { origin } => {
+                    return Ok(StepApp::TargetAppNotRecorded(origin));
                 }
-                sister_core::db::TargetApp::Known(app) => {
+                sister_core::db::TargetApp::Known { app, origin } => {
                     apps.insert(app.clone());
-                    target_app = Some(app);
+                    target_app = Some(TargetOrigin { app, origin });
                 }
             }
         }
@@ -3211,17 +3261,20 @@ pub mod act {
                 Ok(if id == -1 {
                     sister_core::db::TargetApp::Forgotten
                 } else if id > 0 {
-                    sister_core::db::TargetApp::Known("chrome.exe".into())
+                    sister_core::db::TargetApp::Known {
+                        app: "chrome.exe".into(),
+                        origin: sister_core::db::FactOrigin::Screen,
+                    }
                 } else {
-                    sister_core::db::TargetApp::AppNotRecorded
+                    sister_core::db::TargetApp::AppNotRecorded {
+                        origin: sister_core::db::FactOrigin::Unknown,
+                    }
                 })
             }
             fn frame_for_target_fact(&self, id: i64, _expected_raw: &str) -> Result<TargetFrame> {
-                Ok(self
-                    .target_frames
-                    .get(&id)
-                    .copied()
-                    .unwrap_or(TargetFrame::FrameNotRecorded))
+                Ok(self.target_frames.get(&id).cloned().unwrap_or({
+                    TargetFrame::FrameNotRecorded(sister_core::db::FramelessOrigin::Unknown)
+                }))
             }
             fn nearest_step_frame(
                 &self,
@@ -3253,7 +3306,10 @@ pub mod act {
             assert_eq!(
                 app,
                 StepApp::Unknown {
-                    target: Some("chrome.exe".into())
+                    target: Some(TargetOrigin {
+                        app: "chrome.exe".into(),
+                        origin: sister_core::db::FactOrigin::Screen,
+                    })
                 }
             );
             assert_eq!(app.request_app(), App::new("<問不出是哪個 app>"));
@@ -3269,7 +3325,10 @@ pub mod act {
             assert_eq!(
                 step_app(&source, r#"["frame:1"]"#, Some((1, "target"))).unwrap(),
                 StepApp::Ambiguous {
-                    target: Some("chrome.exe".into())
+                    target: Some(TargetOrigin {
+                        app: "chrome.exe".into(),
+                        origin: sister_core::db::FactOrigin::Screen,
+                    })
                 }
             );
         }
@@ -4209,14 +4268,18 @@ pub mod act {
                     _id: i64,
                     _expected_raw: &str,
                 ) -> Result<sister_core::db::TargetApp> {
-                    Ok(sister_core::db::TargetApp::AppNotRecorded)
+                    Ok(sister_core::db::TargetApp::AppNotRecorded {
+                        origin: sister_core::db::FactOrigin::Unknown,
+                    })
                 }
                 fn frame_for_target_fact(
                     &self,
                     _id: i64,
                     _expected_raw: &str,
                 ) -> Result<TargetFrame> {
-                    Ok(TargetFrame::FrameNotRecorded)
+                    Ok(TargetFrame::FrameNotRecorded(
+                        sister_core::db::FramelessOrigin::Unknown,
+                    ))
                 }
                 fn nearest_step_frame(
                     &self,

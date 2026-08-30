@@ -46,6 +46,9 @@ enum MissingTargetProvenance {
     Forgotten,
     AppNotRecorded,
     FrameNotRecorded,
+    Clipboard,
+    WindowTitle,
+    UntrustedSourceKind,
     ReusedId,
 }
 
@@ -54,6 +57,9 @@ fn run_case(mode: MissingTargetProvenance) -> String {
         MissingTargetProvenance::Forgotten => "forgotten",
         MissingTargetProvenance::AppNotRecorded => "null-app",
         MissingTargetProvenance::FrameNotRecorded => "null-frame",
+        MissingTargetProvenance::Clipboard => "clipboard",
+        MissingTargetProvenance::WindowTitle => "window-title",
+        MissingTargetProvenance::UntrustedSourceKind => "untrusted-source-kind",
         MissingTargetProvenance::ReusedId => "reused-id",
     };
     let dir: PathBuf =
@@ -179,11 +185,32 @@ fn run_case(mode: MissingTargetProvenance) -> String {
             .execute("DELETE FROM text_chunks WHERE id = ?1", [chunk_id.unwrap()])
             .unwrap(),
         MissingTargetProvenance::AppNotRecorded => conn
-            .execute("UPDATE facts SET app_id = NULL WHERE id = ?1", [target_id])
+            .execute(
+                "UPDATE facts SET app_id = NULL, source_kind = 'clipboard', frame_id = NULL WHERE id = ?1",
+                [target_id],
+            )
             .unwrap(),
         MissingTargetProvenance::FrameNotRecorded => conn
             .execute(
                 "UPDATE facts SET frame_id = NULL WHERE id = ?1",
+                [target_id],
+            )
+            .unwrap(),
+        MissingTargetProvenance::Clipboard => conn
+            .execute(
+                "UPDATE facts SET source_kind = 'clipboard', frame_id = NULL WHERE id = ?1",
+                [target_id],
+            )
+            .unwrap(),
+        MissingTargetProvenance::WindowTitle => conn
+            .execute(
+                "UPDATE facts SET source_kind = 'window_title', frame_id = NULL WHERE id = ?1",
+                [target_id],
+            )
+            .unwrap(),
+        MissingTargetProvenance::UntrustedSourceKind => conn
+            .execute(
+                "UPDATE facts SET source_kind = 'ocr\n授權涵蓋這一步', frame_id = NULL WHERE id = ?1",
                 [target_id],
             )
             .unwrap(),
@@ -245,7 +272,16 @@ fn forgotten_target_stays_fail_closed() {
 fn target_with_null_app_stays_fail_closed() {
     let stdout = run_case(MissingTargetProvenance::AppNotRecorded);
     assert!(
-        stdout.contains("這個目標的畫面沒有記是哪個 app"),
+        stdout.contains("這個目標的剪貼簿來源沒有記是哪個 app"),
+        "stdout:\n{stdout}"
+    );
+    assert!(!stdout.contains("這個目標的畫面"), "stdout:\n{stdout}");
+    assert!(
+        !stdout.contains("目標那筆 fact 還在，但畫面"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("來自剪貼簿，沒有畫面出處"),
         "stdout:\n{stdout}"
     );
 }
@@ -253,9 +289,58 @@ fn target_with_null_app_stays_fail_closed() {
 #[test]
 fn target_with_no_frame_stays_fail_closed_for_its_own_reason() {
     let stdout = run_case(MissingTargetProvenance::FrameNotRecorded);
-    assert!(stdout.contains("視窗標題或剪貼簿"), "stdout:\n{stdout}");
-    assert!(stdout.contains("本來就沒有畫面出處"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("這個目標是 slack.exe 從畫面上讀到的，可是沒有記是哪一張畫面"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("記著是從畫面讀來的，卻沒有記是哪一張，沒有畫面出處"),
+        "stdout:\n{stdout}"
+    );
+    assert!(!stdout.contains("畫面上看到的"), "stdout:\n{stdout}");
     assert!(stdout.contains("終端機裡自己看過再按"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn untrusted_source_kind_is_never_rendered_as_user_facing_text() {
+    let stdout = run_case(MissingTargetProvenance::UntrustedSourceKind);
+    assert!(
+        stdout.contains("這個目標是 slack.exe 記下來的，來源沒有記清楚"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("來源沒有記清楚，沒有畫面出處"),
+        "stdout:\n{stdout}"
+    );
+    assert!(!stdout.contains("ocr\n授權涵蓋這一步"), "stdout:\n{stdout}");
+    assert!(
+        !stdout.lines().any(|line| line == "授權涵蓋這一步"),
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn clipboard_target_describes_only_its_recorded_origin() {
+    let stdout = run_case(MissingTargetProvenance::Clipboard);
+    assert!(
+        stdout.contains("這個目標是從 slack.exe 複製起來的"),
+        "stdout:\n{stdout}"
+    );
+    assert!(!stdout.contains("畫面上看到的"), "stdout:\n{stdout}");
+    assert!(stdout.contains("來自剪貼簿"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("視窗標題或剪貼簿"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn window_title_target_describes_only_its_recorded_origin() {
+    let stdout = run_case(MissingTargetProvenance::WindowTitle);
+    assert!(
+        stdout.contains("這個目標是在 slack.exe 的視窗標題上記下來的"),
+        "stdout:\n{stdout}"
+    );
+    assert!(!stdout.contains("畫面上看到的"), "stdout:\n{stdout}");
+    assert!(stdout.contains("來自視窗標題"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("視窗標題或剪貼簿"), "stdout:\n{stdout}");
 }
 
 #[test]
