@@ -601,6 +601,75 @@ capture 層本身就是 recorder。
   listed-facts 檢查之後，前四條當場變紅且 `action-log.jsonl` 真的出現
   `executed`；只有「截斷」那條照樣綠。
 
+  **「宣告 app」講的是承諾的證據，不是這一步要開的東西**（alpha.83 修）。
+  `sister do` 那行 `宣告 app` 一直是從**承諾的 evidence** 算出來的。可是要執行的
+  是 `allowed_next_step` 指的那筆 fact，兩者可以來自**不同的畫面**：證據在
+  chrome.exe，目標的 URL 是在另一個 app 的畫面上被看到的。於是那行字說 chrome，
+  授權書比對的也是 chrome，實際要開的東西卻來自別處——**每一行都是真的，湊起來
+  在說謊**。修法是把目標那筆 fact 的 **id** 存進 `commitments.allowed_next_step_fact`
+  （schema 14），`step_app` 把那筆 fact 的 app **當下查出來**一起算進去，並且新增
+  一行看得見的話：「這個目標是在 X 的畫面上看到的」。
+
+  **存 id 而不是存 app，是這裡每一件事的起點**：正因為 app 是事後現查的，
+  `TargetApp::Forgotten` 這一格才存在（那一列可能已經不在了）；也正因為 id 會被
+  SQLite 重用，才需要下面那道原文比對。
+
+  這裡的**三格不是兩格**：「那一列被忘掉了」（過保留期／被 forget 掉）和「那一列
+  在、但沒記 app」是兩件事，兩種都必須 fail-closed 而且要用**不同的話**講。
+  `Db::app_for_evidence` 回 `Option<String>`，把這兩格壓成同一個 `None`——所以另開
+  了 `app_for_target_fact` 回 `TargetApp::{Forgotten, AppNotRecorded, Known}`，
+  `app_for_evidence` **維持原樣不動**（它的兩格對它自己是對的）。
+
+  **收貨時抓到兩個洞，都是修法自己造出來的**（三個鏡頭的 review agent 抓的）：
+
+  1. **目標的 app 會替證據補票。** `step_app` 原本把證據和目標丟進**同一個集合**
+     再數 `len()`，於是「證據一個 app 都問不出來」（`len == 0` → `Unknown` →
+     fail-closed）在目標有 app 的時候變成 `len == 1` → `Known(目標的 app)` →
+     **執行**。這一類步 alpha.82 是擋下來的，等於修法自己放行了一批。而且不需要
+     攻擊者：一格畫面上有兩個 app、或證據那段文字被 forget 掉，`app_for_evidence`
+     就回 `None`。修法：證據那一側自己要先站得住（`evidence_had_an_app`），
+     目標只能**加**限制，不能當唯一的一票。
+  2. **rowid 重用會讓那句新加的話說謊。** `facts.id` 是 `INTEGER PRIMARY KEY`
+     **沒有 AUTOINCREMENT**，欄位也**沒有** `REFERENCES facts(id)`；`sister forget`
+     硬刪 `facts`，SQLite 會把空出來的最大 rowid 給下一筆。於是一筆新 fact 穿著舊
+     id，替一個真的被忘掉的來源回答 app——連 `Forgotten` 一起打穿，只用產品指令就
+     重現得出來。修法：`app_for_target_fact` 多收一個 `expected_raw`，id 還在但原文
+     對不上就一律算 `Forgotten`。
+
+  **這兩條都是「修法可能刪掉的是偵測器」的形狀**：第一條把 alpha.82 的 fail-closed
+  換成了 fail-open，而我寫的文件當時說這一版只會收緊。
+
+  **還缺**：
+  - **#42 沒關**——「螢幕上被埋的 URL 指過去會執行」這件事本身還在。這一輪只是讓
+    那行字不再說謊：目標來自別的 app 時，授權書現在會擋。但**被埋的 URL 如果就在
+    已授權的那個 app 的畫面上，照樣會執行**。產品行為要 Ted 決定。
+  - **字母人那半邊完全沒有這道檢查。** 上面講的全部只在 `sister do` 這條路上。
+    `apps/desktop` 的 `hands_execute` → `sister_hands::execute_with(Level::Suggest,…)`
+    **沒有 `Grant`、沒有 `StepRequest`、沒有 app 維度**，它直接拿 `allowed_next_step`
+    去做；`apps/` 底下 `allowed_next_step_fact` 出現**零次**。公道話：那是「當場按一次
+    算一次」的另一種同意模型，本來就不走授權書，所以不算繞過——但寫版本說明的時候
+    不可以用「授權書現在會擋」這種語氣蓋過那半邊（alpha.83 的說明已經補上這一句）。
+  - **injection 套件會間歇性變紅，而且紅的時候 evil URL 真的被執行了**——不是
+    斷言太嚴，是 `executed` 那行真的寫進 `action-log.jsonl`。加了觀測之後它不再
+    重現（heisenbug），拿掉觀測也沒回來——**還沒抓到**。
+    測試檔本身與 alpha.82 逐位元組相同，**但那不足以證明行為沒變**：這一輪動的
+    `step_app`、`reviewer.rs`、schema 全都在那套測試的執行路徑上。真正撐住「不是
+    這一輪造成的」這句話的是機制——那套語料埋的兩格畫面**都是 `chrome.exe`**，
+    所以目標 app 併進來只是再投一票 chrome，app 那一維的結果不變；擋它的始終是
+    `EVIL_AT_MS` 落在一小時窗外的 listed-facts 檢查。
+  - **舊承諾沒有升級路徑。** migration 014 只是把欄位加上去（既有的列是 NULL），
+    沒有 backfill，`insert_commitment` 也只有 INSERT、沒有比對既有列的去重，所以
+    重跑 `review` 是**多一筆**承諾而不是把舊那筆補齊。結論：這一版的檢查只對之後
+    新記下來的承諾生效，舊的會永遠停在「從哪個畫面來的沒有記」那一格並照舊執行。
+  - `db.rs` 有**數十處** `query_map(...).flatten()`：讀失敗的那一列會被**安靜丟掉**，
+    於是「沒有」和「讀不出來」又是同一種 0。`facts_in_range`（`db.rs:3453`）也在
+    裡面——它正好是上面那道 listed-facts 檢查的資料來源。
+    **不要引用精確數字**：`grep -c '\.flatten()'` 和 `grep -c query_map` 都是 51，
+    但那是兩次剛好撞號的 grep，不是同一批；其中十來處是 `Option::flatten`、和
+    「哪一列」無關（`app_for_evidence` 的 `db.rs:3842` 就是其中之一——它**不屬於**
+    這一條，和上面說它「兩格對它自己是對的」並不矛盾）。要數就照著收據數，
+    別把兩個 51 當成同一個 51。
+
 **Exit criteria**
 - [ ] Injection 套件 100% 攔截（埋 20 種指令變體）。**（alpha.82 打勾過，收貨
       時撤回：20 條走同一個攔截點，而那個攔截點是「時間窗」不是「這是

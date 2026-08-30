@@ -152,6 +152,7 @@ mod tests {
             status: "open".into(),
             confidence: 0.8,
             allowed_next_step: None,
+            allowed_next_step_fact: None,
             last_evidence_seen_at: None,
             kill_note: None,
             created_at: 1,

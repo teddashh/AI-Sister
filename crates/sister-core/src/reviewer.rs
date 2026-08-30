@@ -853,14 +853,17 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                                     &facts,
                                     merged.allowed_next_step.as_ref(),
                                 )?;
-                                let allowed_next_step = match allowed_next_step {
-                                    ResolvedNextStep::NotAsked => None,
-                                    ResolvedNextStep::Resolved(json) => Some(json),
-                                    ResolvedNextStep::Refused(reason) => {
-                                        refusals.push(reason);
-                                        None
-                                    }
-                                };
+                                let (allowed_next_step, allowed_next_step_fact) =
+                                    match allowed_next_step {
+                                        ResolvedNextStep::NotAsked => (None, None),
+                                        ResolvedNextStep::Resolved { json, fact_id } => {
+                                            (Some(json), Some(fact_id))
+                                        }
+                                        ResolvedNextStep::Refused(reason) => {
+                                            refusals.push(reason);
+                                            (None, None)
+                                        }
+                                    };
                                 let source = due_source_from_originals(
                                     merged.due_hint.as_deref().unwrap_or(""),
                                     &originals,
@@ -889,6 +892,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                                             .unwrap_or(card.model_confidence)
                                             .min(card.model_confidence),
                                         allowed_next_step: allowed_next_step.as_deref(),
+                                        allowed_next_step_fact,
                                         last_evidence_seen_at: Some(input.now),
                                         kill_note: None,
                                         now: input.now,
@@ -1128,7 +1132,10 @@ fn dual_pass_prompt(
 enum ResolvedNextStep {
     /// 模型說 `null`。**這不是拒絕**——沒有人要求過任何事。
     NotAsked,
-    Resolved(String),
+    Resolved {
+        json: String,
+        fact_id: i64,
+    },
     Refused(String),
 }
 
@@ -1172,7 +1179,10 @@ fn resolve_allowed_next_step(
             )));
         }
     };
-    Ok(ResolvedNextStep::Resolved(serde_json::to_string(&value)?))
+    Ok(ResolvedNextStep::Resolved {
+        json: serde_json::to_string(&value)?,
+        fact_id: fact.id,
+    })
 }
 
 fn parse_pass(stdout: &str) -> Option<ReviewPassCard> {
@@ -2545,6 +2555,7 @@ mod tests {
                     status: "open",
                     confidence: 0.7,
                     allowed_next_step: None,
+                    allowed_next_step_fact: None,
                     last_evidence_seen_at: Some(now),
                     kill_note: None,
                     now: now - ARCHIVE_GRACE_MS - 10_000,
@@ -2571,6 +2582,7 @@ mod tests {
                     status: "open",
                     confidence: 0.5,
                     allowed_next_step: None,
+                    allowed_next_step_fact: None,
                     last_evidence_seen_at: None,
                     kill_note: None,
                     now,
@@ -2596,6 +2608,7 @@ mod tests {
                     status: "open",
                     confidence: 0.4,
                     allowed_next_step: None,
+                    allowed_next_step_fact: None,
                     last_evidence_seen_at: None,
                     kill_note: None,
                     now: now - ARCHIVE_GRACE_MS - 5_000,
@@ -2640,6 +2653,7 @@ mod tests {
                     status: "open",
                     confidence: 0.6,
                     allowed_next_step: None,
+                    allowed_next_step_fact: None,
                     last_evidence_seen_at: None,
                     kill_note: None,
                     now,
@@ -2722,6 +2736,7 @@ mod tests {
                     status: "open",
                     confidence: 0.8,
                     allowed_next_step: None,
+                    allowed_next_step_fact: Some(99),
                     last_evidence_seen_at: Some(ts),
                     kill_note: None,
                     now: ts,
@@ -2778,6 +2793,10 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM commitments", [], |r| r.get(0))
             .unwrap();
         assert_eq!(still_c, 1);
+        assert_eq!(
+            c.allowed_next_step_fact, None,
+            "commitment 墓碑必須清掉動作目標的 fact id"
+        );
     }
 
     #[test]

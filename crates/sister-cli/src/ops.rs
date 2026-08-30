@@ -1916,37 +1916,68 @@ pub mod act {
         Ok(())
     }
 
-    /// 這一步宣告它會碰哪一個 app。**三種，不是兩種。**
+    /// 這一步宣告它會碰哪一個 app。
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum StepApp {
-        /// 證據鏈上剛好一個 app。
-        Known(String),
-        /// 證據鏈上有兩個以上不同的 app：兩個答案就是沒有答案。
-        Ambiguous,
-        /// 證據都問不出 app（沒有 app_id、或證據不見了）。
-        Unknown,
+        /// 這一步問得到的 app 合起來剛好一個；目標可能是舊資料而沒有參與。
+        Known { app: String, target: Option<String> },
+        /// 這一步問得到兩個以上不同的 app；目標可能是舊資料而沒有參與。
+        Ambiguous { target: Option<String> },
+        /// 證據鏈問不出 app；目標可能有 app，但不能替證據作答。
+        Unknown { target: Option<String> },
+        /// 這一步的目標指著一筆 fact，而那筆 fact 已經不在資料庫裡了。
+        TargetForgotten,
+        /// 目標那筆 fact 還在，但它的畫面沒有記是哪個 app。
+        TargetAppNotRecorded,
     }
 
     impl StepApp {
         fn request_app(&self) -> App {
             App::new(match self {
-                Self::Known(app) => app.as_str(),
-                Self::Ambiguous => "<兩個以上的 app>",
-                Self::Unknown => "<問不出是哪個 app>",
+                Self::Known { app, .. } => app.as_str(),
+                Self::Ambiguous { .. } => "<兩個以上的 app>",
+                Self::Unknown { .. } => "<問不出是哪個 app>",
+                Self::TargetForgotten => "<目標來源已經不在>",
+                Self::TargetAppNotRecorded => "<目標沒有記 app>",
             })
         }
         fn label(&self) -> &str {
             match self {
-                Self::Known(app) => app,
-                Self::Ambiguous => "兩個以上的 app",
-                Self::Unknown => "問不出是哪個 app",
+                Self::Known { app, .. } => app,
+                Self::Ambiguous { .. } => "兩個以上的 app",
+                Self::Unknown { .. } => "問不出是哪個 app",
+                Self::TargetForgotten => "目標來源已經不在",
+                Self::TargetAppNotRecorded => "目標沒有記 app",
             }
         }
         fn explanation(&self) -> Option<&'static str> {
             match self {
-                Self::Known(_) => None,
-                Self::Ambiguous => Some("證據鏈記得兩個以上不同的 app，不能替這一步選一個。"),
-                Self::Unknown => Some("證據鏈沒有一個問得出的 app，不能證明這一步在授權範圍內。"),
+                Self::Known { .. } => None,
+                Self::Ambiguous { .. } => Some("這一步牽涉到兩個以上不同的 app，不能替它選一個。"),
+                Self::Unknown { .. } => Some(
+                    "證據鏈沒有一個問得出的 app，不能證明這一步在授權範圍內。目標自己的 app 不能替證據作答。",
+                ),
+                Self::TargetForgotten => {
+                    Some("這一步的目標來源已經被忘掉或過了保留期，不能證明這一步在授權範圍內。")
+                }
+                Self::TargetAppNotRecorded => {
+                    Some("目標那筆 fact 還在，但畫面沒有記 app，不能證明這一步在授權範圍內。")
+                }
+            }
+        }
+
+        fn target_provenance(&self) -> String {
+            match self {
+                Self::Known { target, .. }
+                | Self::Ambiguous { target }
+                | Self::Unknown { target } => match target {
+                    Some(app) => format!("這個目標是在 {app} 的畫面上看到的"),
+                    None => "這個目標是從哪個畫面來的沒有記".to_owned(),
+                },
+                Self::TargetForgotten => {
+                    "這個目標的來源已經不在了（被忘掉、或過了保留期）".to_owned()
+                }
+                Self::TargetAppNotRecorded => "這個目標的畫面沒有記是哪個 app".to_owned(),
             }
         }
     }
@@ -2029,11 +2060,16 @@ pub mod act {
     /// 所以 CLI 這一側**種不出承諾卡**——沒有這道縫的話，這支指令會跟
     /// `apps/desktop` 那半邊一樣變成零執行覆蓋的接線層。
     ///
-    /// 假的 source 不會走到 `app_for_evidence` 真正那段 SQL；那一段由
-    /// `sister-core` 自己的測試蓋（`db.rs` 裡的 `app_for_evidence` 三態測試）。
+    /// 假的 source 不會走到 `app_for_target_fact` 真正那段 SQL；那一段由
+    /// `sister-core` 自己的三個 `target_fact_app_reports_*` 測試蓋。
     pub(crate) trait StepSource {
         fn live_commitments(&self) -> Result<Vec<sister_core::db::CommitmentRow>>;
         fn app_for_evidence(&self, r: &sister_core::brain::EvidenceRef) -> Result<Option<String>>;
+        fn app_for_target_fact(
+            &self,
+            id: i64,
+            expected_raw: &str,
+        ) -> Result<sister_core::db::TargetApp>;
         fn nearest_step_frame(
             &self,
             at_ms: i64,
@@ -2048,6 +2084,13 @@ pub mod act {
         }
         fn app_for_evidence(&self, r: &sister_core::brain::EvidenceRef) -> Result<Option<String>> {
             Db::app_for_evidence(self, r)
+        }
+        fn app_for_target_fact(
+            &self,
+            id: i64,
+            expected_raw: &str,
+        ) -> Result<sister_core::db::TargetApp> {
+            Db::app_for_target_fact(self, id, expected_raw)
         }
         fn nearest_step_frame(
             &self,
@@ -2233,7 +2276,11 @@ pub mod act {
             .collect()
     }
 
-    fn step_app(source: &impl StepSource, evidence_json: &str) -> Result<StepApp> {
+    fn step_app(
+        source: &impl StepSource,
+        evidence_json: &str,
+        target: Option<(i64, &str)>,
+    ) -> Result<StepApp> {
         let refs: Vec<String> = serde_json::from_str(evidence_json)
             .with_context(|| format!("證據清單不是 JSON 字串陣列：{evidence_json}"))?;
         let mut apps = BTreeSet::new();
@@ -2245,10 +2292,30 @@ pub mod act {
                 apps.insert(app);
             }
         }
+        let evidence_had_an_app = !apps.is_empty();
+        let mut target_app = None;
+        if let Some((fact_id, expected_raw)) = target {
+            match source.app_for_target_fact(fact_id, expected_raw)? {
+                sister_core::db::TargetApp::Forgotten => return Ok(StepApp::TargetForgotten),
+                sister_core::db::TargetApp::AppNotRecorded => {
+                    return Ok(StepApp::TargetAppNotRecorded);
+                }
+                sister_core::db::TargetApp::Known(app) => {
+                    apps.insert(app.clone());
+                    target_app = Some(app);
+                }
+            }
+        }
+        if !evidence_had_an_app {
+            return Ok(StepApp::Unknown { target: target_app });
+        }
         Ok(match apps.len() {
-            0 => StepApp::Unknown,
-            1 => StepApp::Known(apps.into_iter().next().expect("len checked")),
-            _ => StepApp::Ambiguous,
+            0 => StepApp::Unknown { target: target_app },
+            1 => StepApp::Known {
+                app: apps.into_iter().next().expect("len checked"),
+                target: target_app,
+            },
+            _ => StepApp::Ambiguous { target: target_app },
         })
     }
 
@@ -2529,8 +2596,22 @@ pub mod act {
                 });
                 break;
             }
-            let declared_app = step_app(source, &commitment.evidence_json)?;
             let action = button.snapshot();
+            let expected_target = match &action {
+                sister_hands::ActionSnapshot::OpenUrl { url } => Some(url.clone()),
+                sister_hands::ActionSnapshot::OpenFile { path } => {
+                    Some(path.to_string_lossy().into_owned())
+                }
+                sister_hands::ActionSnapshot::FocusWindow { .. } => None,
+            };
+            let declared_app = step_app(
+                source,
+                &commitment.evidence_json,
+                commitment
+                    .allowed_next_step_fact
+                    .zip(expected_target.as_deref()),
+            )?;
+            let target_app = declared_app.target_provenance();
             let step = StepRequest::new(
                 Task::new(&opts.task),
                 declared_app.request_app(),
@@ -2543,6 +2624,7 @@ pub mod act {
             let covered = coverage(run.grant(), &step, &declared_app, step_now);
             writeln!(out, "承諾 #{}：{}", commitment.id, commitment.text)?;
             writeln!(out, "步驟：{}", action.describe())?;
+            writeln!(out, "{target_app}")?;
             writeln!(out, "宣告 app：{}", declared_app.label())?;
             writeln!(out, "{covered}")?;
             if opts.dry_run {
@@ -3020,6 +3102,19 @@ pub mod act {
                     sister_core::brain::EvidenceRef::Fact(_) => None,
                 })
             }
+            fn app_for_target_fact(
+                &self,
+                id: i64,
+                _expected_raw: &str,
+            ) -> Result<sister_core::db::TargetApp> {
+                Ok(if id == -1 {
+                    sister_core::db::TargetApp::Forgotten
+                } else if id > 0 {
+                    sister_core::db::TargetApp::Known("chrome.exe".into())
+                } else {
+                    sister_core::db::TargetApp::AppNotRecorded
+                })
+            }
             fn nearest_step_frame(
                 &self,
                 _at_ms: i64,
@@ -3030,8 +3125,54 @@ pub mod act {
             }
         }
 
+        #[test]
+        fn forgotten_target_fact_fails_closed() {
+            let app = step_app(&Source::default(), "[]", Some((-1, "target"))).unwrap();
+
+            assert_eq!(app, StepApp::TargetForgotten);
+            assert_eq!(app.request_app(), App::new("<目標來源已經不在>"));
+            assert!(
+                app.explanation()
+                    .expect("忘掉的目標必須說明為什麼不能授權")
+                    .contains("不能證明這一步在授權範圍內")
+            );
+        }
+
+        #[test]
+        fn target_app_cannot_fill_in_for_unknown_evidence_app() {
+            let app = step_app(&Source::default(), "[]", Some((1, "target"))).unwrap();
+
+            assert_eq!(
+                app,
+                StepApp::Unknown {
+                    target: Some("chrome.exe".into())
+                }
+            );
+            assert_eq!(app.request_app(), App::new("<問不出是哪個 app>"));
+        }
+
+        #[test]
+        fn target_app_is_merged_with_the_evidence_apps() {
+            let source = Source {
+                apps: [(1, "firefox.exe".to_owned())].into_iter().collect(),
+                ..Source::default()
+            };
+
+            assert_eq!(
+                step_app(&source, r#"["frame:1"]"#, Some((1, "target"))).unwrap(),
+                StepApp::Ambiguous {
+                    target: Some("chrome.exe".into())
+                }
+            );
+        }
+
         /// 一張活著的承諾卡，帶著它的下一步和它的證據。
-        fn card(id: i64, next: Option<&str>, frames: &[i64]) -> CommitmentRow {
+        fn card(
+            id: i64,
+            next: Option<&str>,
+            frames: &[i64],
+            allowed_next_step_fact: Option<i64>,
+        ) -> CommitmentRow {
             let refs: Vec<String> = frames.iter().map(|f| format!("frame:{f}")).collect();
             CommitmentRow {
                 id,
@@ -3046,6 +3187,7 @@ pub mod act {
                 status: "open".into(),
                 confidence: 0.8,
                 allowed_next_step: next.map(str::to_owned),
+                allowed_next_step_fact,
                 last_evidence_seen_at: None,
                 kill_note: None,
                 created_at: 1,
@@ -3459,7 +3601,12 @@ pub mod act {
 
         fn one_card() -> Source {
             Source {
-                rows: vec![card(7, Some(&open_url("https://example.com/a")), &[1])],
+                rows: vec![card(
+                    7,
+                    Some(&open_url("https://example.com/a")),
+                    &[1],
+                    Some(1),
+                )],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
                 nearest_frame: None,
             }
@@ -3521,8 +3668,8 @@ pub mod act {
             let dir = crate::ops::tmp::Tmp::new("act-pulled-mid-run");
             let source = Source {
                 rows: vec![
-                    card(1, Some(&open_url("https://example.com/a")), &[1]),
-                    card(2, Some(&open_url("https://example.com/b")), &[1]),
+                    card(1, Some(&open_url("https://example.com/a")), &[1], None),
+                    card(2, Some(&open_url("https://example.com/b")), &[1], None),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
                 nearest_frame: None,
@@ -3947,6 +4094,13 @@ pub mod act {
                 ) -> Result<Option<String>> {
                     Ok(None)
                 }
+                fn app_for_target_fact(
+                    &self,
+                    _id: i64,
+                    _expected_raw: &str,
+                ) -> Result<sister_core::db::TargetApp> {
+                    Ok(sister_core::db::TargetApp::AppNotRecorded)
+                }
                 fn nearest_step_frame(
                     &self,
                     _at_ms: i64,
@@ -4163,8 +4317,8 @@ pub mod act {
         fn hitting_the_step_limit_is_not_the_same_as_finishing() {
             let source = Source {
                 rows: vec![
-                    card(7, Some(&open_url("https://example.com/a")), &[1]),
-                    card(8, Some(&open_url("https://example.com/b")), &[1]),
+                    card(7, Some(&open_url("https://example.com/a")), &[1], None),
+                    card(8, Some(&open_url("https://example.com/b")), &[1], None),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
                 nearest_frame: None,
@@ -4234,8 +4388,8 @@ pub mod act {
         fn not_knowing_which_app_and_knowing_two_are_not_the_same_sentence() {
             let source = Source {
                 rows: vec![
-                    card(7, Some(&open_url("https://example.com/a")), &[1, 2]),
-                    card(8, Some(&open_url("https://example.com/b")), &[3]),
+                    card(7, Some(&open_url("https://example.com/a")), &[1, 2], None),
+                    card(8, Some(&open_url("https://example.com/b")), &[3], None),
                 ],
                 apps: [(1, "chrome.exe".to_string()), (2, "slack.exe".to_string())]
                     .into_iter()
@@ -4259,8 +4413,8 @@ pub mod act {
         fn an_expired_grant_refuses_even_after_he_says_yes() {
             let source = Source {
                 rows: vec![
-                    card(7, Some(&open_url("https://example.com/a")), &[1]),
-                    card(8, Some(&open_url("https://example.com/b")), &[1]),
+                    card(7, Some(&open_url("https://example.com/a")), &[1], None),
+                    card(8, Some(&open_url("https://example.com/b")), &[1], None),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
                 nearest_frame: None,
@@ -4437,8 +4591,8 @@ pub mod act {
         fn the_dry_run_says_the_step_limit_will_cut_the_list_short() {
             let source = Source {
                 rows: vec![
-                    card(7, Some(&open_url("https://example.com/a")), &[1]),
-                    card(8, Some(&open_url("https://example.com/b")), &[1]),
+                    card(7, Some(&open_url("https://example.com/a")), &[1], None),
+                    card(8, Some(&open_url("https://example.com/b")), &[1], None),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
                 nearest_frame: None,
@@ -4501,9 +4655,9 @@ pub mod act {
         fn the_tally_counts_what_happened_instead_of_deriving_it() {
             let source = Source {
                 rows: vec![
-                    card(7, Some(&open_url("https://example.com/a")), &[1]),
-                    card(8, Some(&open_url("https://example.com/b")), &[1]),
-                    card(9, Some(&open_url("https://example.com/c")), &[2]),
+                    card(7, Some(&open_url("https://example.com/a")), &[1], None),
+                    card(8, Some(&open_url("https://example.com/b")), &[1], None),
+                    card(9, Some(&open_url("https://example.com/c")), &[2], None),
                 ],
                 apps: [(1, "chrome.exe".to_string()), (2, "slack.exe".to_string())]
                     .into_iter()
@@ -4627,7 +4781,10 @@ pub mod act {
         #[test]
         fn a_next_step_that_cannot_be_read_is_not_a_card_without_one() {
             let source = Source {
-                rows: vec![card(7, Some("幫我處理這件事"), &[1]), card(8, None, &[1])],
+                rows: vec![
+                    card(7, Some("幫我處理這件事"), &[1], None),
+                    card(8, None, &[1], None),
+                ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
                 nearest_frame: None,
             };
@@ -4678,7 +4835,7 @@ pub mod act {
             let no_steps = go(
                 "act-none-nostep",
                 &Source {
-                    rows: vec![card(7, None, &[1]), card(8, None, &[1])],
+                    rows: vec![card(7, None, &[1], None), card(8, None, &[1], None)],
                     apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
                     nearest_frame: None,
                 },
@@ -4930,7 +5087,7 @@ pub mod act {
         #[test]
         fn a_round_that_asked_nothing_does_not_read_as_all_done_in_the_log() {
             let no_next_step = Source {
-                rows: vec![card(7, None, &[1])],
+                rows: vec![card(7, None, &[1], None)],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
                 nearest_frame: None,
             };
@@ -5090,6 +5247,13 @@ pub mod act {
             ) -> Result<Option<String>> {
                 self.inner.app_for_evidence(r)
             }
+            fn app_for_target_fact(
+                &self,
+                id: i64,
+                expected_raw: &str,
+            ) -> Result<sister_core::db::TargetApp> {
+                self.inner.app_for_target_fact(id, expected_raw)
+            }
             fn nearest_step_frame(
                 &self,
                 at_ms: i64,
@@ -5139,8 +5303,8 @@ pub mod act {
         fn unattended_still_obeys_the_step_limit() {
             let source = Source {
                 rows: vec![
-                    card(1, Some(&open_url("https://a")), &[1]),
-                    card(2, Some(&open_url("https://b")), &[1]),
+                    card(1, Some(&open_url("https://a")), &[1], None),
+                    card(2, Some(&open_url("https://b")), &[1], None),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
                 nearest_frame: None,
