@@ -306,12 +306,24 @@ pub enum RefusalReason {
     NotCoveredByGrant {
         rejection: semi_action::GrantRejection,
     },
+    /// 無人值守時，下一步目標沒有一張被承諾引用的畫面可供核對。
+    UnattendedTargetHasNoCitedFrame { why: TargetFrameGap },
     /// 手上那張核准票是對**另一步**簽的（SPEC §9.7）。
     ApprovalWasForAnotherStep {
         mismatch: semi_action::ApprovalMismatch,
     },
     /// 手被拔掉了（`hands.stop`）——這一步沒有交給作業系統。
     HandsPulled { since_ms: Option<i64> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetFrameGap {
+    NoTargetRecorded,
+    Forgotten,
+    RowReplaced,
+    FrameNotRecorded,
+    FrameNotCited,
 }
 
 /// 一次拒絕該被算進收尾那一行的哪一格。
@@ -329,6 +341,8 @@ pub enum RefusalBucket {
     Pulled,
     /// 票的五維不涵蓋這一步。放寬 `--apps` / `--allow` / `--minutes` 有用。
     OutsideGrant,
+    /// 放寬 grant 沒有用；要做只能由人在終端機看過後當場按。
+    TargetNotOnACitedScreen,
     /// 這一趟缺當場按。改成不加 `--unattended` 重跑有用。
     NeedsALivePressThisRun,
     /// 這一類永遠不繼承任務授權；這一趟已經按過，再按也不會過。
@@ -348,6 +362,7 @@ impl RefusalReason {
             Self::UserDeclinedThisStep => RefusalBucket::Declined,
             Self::HandsPulled { .. } => RefusalBucket::Pulled,
             Self::NotCoveredByGrant { .. } => RefusalBucket::OutsideGrant,
+            Self::UnattendedTargetHasNoCitedFrame { .. } => RefusalBucket::TargetNotOnACitedScreen,
             Self::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
             Self::NeedsLivePress { .. } => RefusalBucket::NeedsALivePressThisRun,
             Self::ApprovalWasForAnotherStep { .. } => RefusalBucket::ShownStepMismatch,
@@ -380,6 +395,9 @@ impl RefusalReason {
                 "semi-action 需要結構化 grant 和顯示的那一步核准；不可走 suggest 隘口。".to_string()
             }
             Self::NotCoveredByGrant { rejection } => rejection.message().to_string(),
+            Self::UnattendedTargetHasNoCitedFrame { .. } => {
+                "無人值守的下一步目標沒有可核對的引用畫面；請在終端機裡自己看過再按。".to_string()
+            }
             Self::ApprovalWasForAnotherStep { mismatch } => mismatch.message(),
             Self::HandsPulled { since_ms } => match since_ms {
                 Some(since_ms) => format!(
@@ -824,6 +842,9 @@ mod tests {
                 RefusalReason::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
                 RefusalReason::NeedsLivePress { .. } => RefusalBucket::NeedsALivePressThisRun,
                 RefusalReason::NotCoveredByGrant { .. } => RefusalBucket::OutsideGrant,
+                RefusalReason::UnattendedTargetHasNoCitedFrame { .. } => {
+                    RefusalBucket::TargetNotOnACitedScreen
+                }
                 RefusalReason::ApprovalWasForAnotherStep { .. } => RefusalBucket::ShownStepMismatch,
                 RefusalReason::HandsPulled { .. } => RefusalBucket::Pulled,
             }
@@ -841,6 +862,9 @@ mod tests {
             },
             RefusalReason::NotCoveredByGrant {
                 rejection: semi_action::GrantRejection::Apps,
+            },
+            RefusalReason::UnattendedTargetHasNoCitedFrame {
+                why: TargetFrameGap::FrameNotCited,
             },
             RefusalReason::ApprovalWasForAnotherStep {
                 mismatch: semi_action::ApprovalMismatch::between(

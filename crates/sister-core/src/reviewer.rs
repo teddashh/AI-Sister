@@ -1159,6 +1159,16 @@ fn resolve_allowed_next_step(
             fact.id
         )));
     }
+    let listed = listed_facts
+        .iter()
+        .find(|listed| listed.id == fact.id)
+        .expect("前一道檢查已證明這筆 fact 在清單裡");
+    if listed.raw != fact.raw {
+        return Ok(ResolvedNextStep::Refused(format!(
+            "拒絕 allowed_next_step：fact:{} 那一列已經不是當初列給模型看的那一列",
+            fact.id
+        )));
+    }
     let value = match fact.kind.as_str() {
         // 下游 `sister_hands::target_policy::validate_url` 才是真正的權威。
         // 這裡先看一眼，是為了不要端一顆按下去一定會被擋的按鈕給人。
@@ -1609,6 +1619,30 @@ mod tests {
             vec![
                 script.to_string_lossy().into_owned(),
                 sentinel.to_string_lossy().into_owned(),
+            ],
+        )
+    }
+
+    fn fake_cli_swaps_fact_after_prompt(
+        dir: &std::path::Path,
+        json: &str,
+        db_path: &std::path::Path,
+        fact_id: i64,
+    ) -> (String, Vec<String>) {
+        let script = dir.join("fake-swap-after-prompt.py");
+        std::fs::write(
+            &script,
+            format!(
+                "import sys, sqlite3\nsys.stdin.buffer.read()\nconn = sqlite3.connect(sys.argv[1])\nconn.execute(\"UPDATE facts SET raw = ? WHERE id = ?\", ('https://swapped.example/', int(sys.argv[2])))\nconn.commit()\nsys.stdout.buffer.write({json:?}.encode('utf-8'))\n"
+            ),
+        )
+        .expect("script");
+        (
+            "python3".into(),
+            vec![
+                script.to_string_lossy().into_owned(),
+                db_path.to_string_lossy().into_owned(),
+                fact_id.to_string(),
             ],
         )
     }
@@ -2147,6 +2181,87 @@ mod tests {
             .find(|f| f.kind == kind && f.raw == raw)
             .unwrap_or_else(|| panic!("找不到 {kind} fact {raw:?}"))
             .id
+    }
+
+    #[test]
+    fn target_fact_whose_row_was_swapped_is_refused() {
+        let mut db = Db::open_in_memory().expect("db");
+        let id = db
+            .test_insert_fact(1_700_250_000_000, "url", "https://attacker.example/")
+            .expect("fact");
+        let mut originally_listed = db.fact_by_id(id).expect("query").expect("listed fact");
+        originally_listed.raw = "https://original.example/".into();
+
+        let other = db
+            .test_insert_fact(1_700_250_000_001, "url", "https://other.example/")
+            .expect("other fact");
+        let other = db.fact_by_id(other).expect("query").expect("other listed");
+        let result = resolve_allowed_next_step(
+            &db,
+            &[other, originally_listed],
+            Some(&NextStepRef { fact: id }),
+        )
+        .expect("resolve");
+        let ResolvedNextStep::Refused(reason) = result else {
+            panic!("row 換人後仍然解出下一步");
+        };
+        assert!(
+            reason.contains("已經不是當初列給模型看的那一列"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn real_review_pass_refuses_a_fact_swapped_after_prompt_was_built() {
+        let tmp = Tmp::new("swap-after-prompt");
+        let db_path = tmp.0.join("sister.db");
+        let mut db = Db::open(&db_path).expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(
+            &mut db,
+            ts,
+            "LINE：五點去接她 17:00 https://first.example/ https://target.example/",
+        );
+        let facts = db.facts_in_range(ts, ts + 400_000).expect("listed facts");
+        let target = facts
+            .iter()
+            .find(|fact| fact.raw == "https://target.example/")
+            .expect("target fact");
+        assert_ne!(facts.first().expect("two facts").id, target.id);
+        let response = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":{{"fact":{}}}}}]}}"#,
+            target.id
+        );
+        let (command, args) =
+            fake_cli_swaps_fact_after_prompt(&tmp.0, &response, &db_path, target.id);
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        assert_eq!(result.wrote_commitments, 1, "承諾本身應保留");
+        assert_eq!(result.refused_next_steps, 1, "換列的下一步必須被拒絕");
+        let row = db
+            .live_commitments()
+            .expect("commitments")
+            .pop()
+            .expect("one");
+        assert!(row.allowed_next_step.is_none());
+        assert!(row.allowed_next_step_fact.is_none());
+        let ReviewerRefusals::Some { reasons, .. } =
+            db.latest_reviewer_refusals().expect("refusals")
+        else {
+            panic!("真 review pass 沒留下拒絕理由");
+        };
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("當初列給模型看的"))
+        );
     }
 
     #[test]

@@ -35,7 +35,7 @@ fn sister(data_dir: &Path, config: Option<&Path>, args: &[&str]) -> Output {
     out
 }
 
-fn run_case(label: &str, target_app: &str) -> (PathBuf, String, usize) {
+fn run_case(label: &str, target_app: &str, cite_target_frame: bool) -> (PathBuf, String, usize) {
     let dir = tmp(label);
     let scenario = dir.join("scenario.json");
     std::fs::write(
@@ -107,6 +107,10 @@ fn run_case(label: &str, target_app: &str) -> (PathBuf, String, usize) {
         .expect("slack url became a fact");
 
     // 假大腦：承諾的證據指 chrome 的 frame，下一步指另一格 fact。
+    let mut evidence_refs = vec![format!("frame:{frame_id}")];
+    if cite_target_frame {
+        evidence_refs.push(format!("frame:{}", target.frame_id.expect("target frame")));
+    }
     let response = serde_json::json!({
         "commitments": [{
             "text": TASK,
@@ -116,7 +120,7 @@ fn run_case(label: &str, target_app: &str) -> (PathBuf, String, usize) {
             "due_source": "explicit",
             "people": [],
             "confidence": 0.9,
-            "evidence_refs": [format!("frame:{frame_id}")],
+            "evidence_refs": evidence_refs,
             "allowed_next_step": {"fact": target.id}
         }]
     })
@@ -160,6 +164,8 @@ fn run_case(label: &str, target_app: &str) -> (PathBuf, String, usize) {
     );
     std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
 
+    // 這個整合 helper 只能驗 unattended：attended 在 stdin 不是 TTY 時會先被
+    // `who_answers` 拒絕。正向控制在 ops.rs 的單元測試用 live press 接縫驗。
     let action = sister(
         &dir,
         None,
@@ -180,7 +186,7 @@ fn run_case(label: &str, target_app: &str) -> (PathBuf, String, usize) {
 
 #[test]
 fn target_from_another_app_is_not_covered() {
-    let (_, stdout, executed) = run_case("two-apps", "slack.exe");
+    let (_, stdout, executed) = run_case("two-apps", "slack.exe", false);
     assert_eq!(executed, 0, "stdout:\n{stdout}");
     assert!(stdout.contains("授權不涵蓋"), "stdout:\n{stdout}");
     assert!(
@@ -190,15 +196,44 @@ fn target_from_another_app_is_not_covered() {
 }
 
 #[test]
-fn target_from_same_app_is_covered() {
-    let (_, stdout, executed) = run_case("same-app", "chrome.exe");
-    assert_eq!(executed, 1, "stdout:\n{stdout}");
+fn target_from_same_app_is_still_refused_unattended_when_not_cited() {
+    let (dir, stdout, executed) = run_case("same-app-unattended", "chrome.exe", false);
+    assert_eq!(executed, 0, "stdout:\n{stdout}");
     assert!(stdout.contains("授權涵蓋這一步"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("承諾沒有引用下一步目標"),
+        "stdout:\n{stdout}"
+    );
+    let log = std::fs::read_to_string(dir.join("action-log.jsonl")).expect("action log");
+    let refused: Vec<serde_json::Value> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter(|event: &serde_json::Value| event["event"] == "refused")
+        .collect();
+    assert!(
+        refused.iter().any(|event| {
+            event["reason"]["refusal"] == "unattended_target_has_no_cited_frame"
+                && event["reason"]["why"] == "frame_not_cited"
+        }),
+        "action log:\n{log}"
+    );
+    assert!(!log.contains("not_covered_by_grant"), "action log:\n{log}");
+    assert!(
+        !log.contains("user_declined_this_step"),
+        "action log:\n{log}"
+    );
 }
 
 #[test]
-fn schema_13_commitment_opens_with_missing_target_provenance() {
-    let (dir, _, _) = run_case("schema-13", "chrome.exe");
+fn target_on_a_cited_frame_executes_unattended() {
+    let (_, stdout, executed) = run_case("same-app-cited", "chrome.exe", true);
+    assert_eq!(executed, 1, "stdout:\n{stdout}");
+    assert!(!stdout.contains("無人值守拒絕"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn schema_13_commitment_is_refused_with_missing_target_provenance() {
+    let (dir, _, _) = run_case("schema-13", "chrome.exe", true);
     {
         let conn = rusqlite::Connection::open(Config::db_path(&dir)).unwrap();
         conn.execute_batch(
@@ -238,5 +273,9 @@ fn schema_13_commitment_opens_with_missing_target_provenance() {
         .lines()
         .filter(|line| line.contains("\"event\":\"executed\""))
         .count();
-    assert_eq!(executed, 1, "stdout:\n{stdout}");
+    assert_eq!(executed, 0, "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("沒有記下一步目標的 fact 出處"),
+        "stdout:\n{stdout}"
+    );
 }

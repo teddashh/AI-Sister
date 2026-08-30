@@ -42,17 +42,19 @@ fn executed(data_dir: &Path) -> usize {
 }
 
 #[derive(Clone, Copy)]
-enum MissingTargetApp {
+enum MissingTargetProvenance {
     Forgotten,
     AppNotRecorded,
+    FrameNotRecorded,
     ReusedId,
 }
 
-fn run_case(mode: MissingTargetApp) -> String {
+fn run_case(mode: MissingTargetProvenance) -> String {
     let label = match mode {
-        MissingTargetApp::Forgotten => "forgotten",
-        MissingTargetApp::AppNotRecorded => "null-app",
-        MissingTargetApp::ReusedId => "reused-id",
+        MissingTargetProvenance::Forgotten => "forgotten",
+        MissingTargetProvenance::AppNotRecorded => "null-app",
+        MissingTargetProvenance::FrameNotRecorded => "null-frame",
+        MissingTargetProvenance::ReusedId => "reused-id",
     };
     let dir: PathBuf =
         std::env::temp_dir().join(format!("sister-target-{label}-{}", std::process::id()));
@@ -168,18 +170,24 @@ fn run_case(mode: MissingTargetApp) -> String {
     eprintln!(">>> 刪之前 executed = {}", executed(&dir));
     assert_eq!(executed(&dir), 0);
 
-    // 分別模擬 forget / 保留期到期，以及當初沒有記 app。
+    // 分別模擬 forget / 保留期到期、當初沒有記畫面，以及 rowid 被重用。
     let conn = rusqlite::Connection::open(Config::db_path(&dir)).unwrap();
     conn.execute("PRAGMA foreign_keys = ON", []).ok();
     conn.pragma_update(None, "foreign_keys", "ON").unwrap();
     let n = match mode {
-        MissingTargetApp::Forgotten => conn
+        MissingTargetProvenance::Forgotten => conn
             .execute("DELETE FROM text_chunks WHERE id = ?1", [chunk_id.unwrap()])
             .unwrap(),
-        MissingTargetApp::AppNotRecorded => conn
+        MissingTargetProvenance::AppNotRecorded => conn
             .execute("UPDATE facts SET app_id = NULL WHERE id = ?1", [target_id])
             .unwrap(),
-        MissingTargetApp::ReusedId => conn
+        MissingTargetProvenance::FrameNotRecorded => conn
+            .execute(
+                "UPDATE facts SET frame_id = NULL WHERE id = ?1",
+                [target_id],
+            )
+            .unwrap(),
+        MissingTargetProvenance::ReusedId => conn
             .execute(
                 "UPDATE facts SET raw = 'https://new.example/not-the-old-target' WHERE id = ?1",
                 [target_id],
@@ -214,9 +222,17 @@ fn run_case(mode: MissingTargetApp) -> String {
 
 #[test]
 fn forgotten_target_stays_fail_closed() {
-    let stdout = run_case(MissingTargetApp::Forgotten);
+    let stdout = run_case(MissingTargetProvenance::Forgotten);
     assert!(
         stdout.contains("這個目標的來源已經不在了（被忘掉、或過了保留期）"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("下一步目標 fact:") && stdout.contains("已被忘掉、或過了保留期"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("那一列已經換成別的內容"),
         "stdout:\n{stdout}"
     );
     assert!(
@@ -227,7 +243,7 @@ fn forgotten_target_stays_fail_closed() {
 
 #[test]
 fn target_with_null_app_stays_fail_closed() {
-    let stdout = run_case(MissingTargetApp::AppNotRecorded);
+    let stdout = run_case(MissingTargetProvenance::AppNotRecorded);
     assert!(
         stdout.contains("這個目標的畫面沒有記是哪個 app"),
         "stdout:\n{stdout}"
@@ -235,10 +251,26 @@ fn target_with_null_app_stays_fail_closed() {
 }
 
 #[test]
+fn target_with_no_frame_stays_fail_closed_for_its_own_reason() {
+    let stdout = run_case(MissingTargetProvenance::FrameNotRecorded);
+    assert!(stdout.contains("視窗標題或剪貼簿"), "stdout:\n{stdout}");
+    assert!(stdout.contains("本來就沒有畫面出處"), "stdout:\n{stdout}");
+    assert!(stdout.contains("終端機裡自己看過再按"), "stdout:\n{stdout}");
+}
+
+#[test]
 fn reused_fact_id_with_different_raw_is_treated_as_forgotten() {
-    let stdout = run_case(MissingTargetApp::ReusedId);
+    let stdout = run_case(MissingTargetProvenance::ReusedId);
     assert!(
         stdout.contains("這個目標的來源已經不在了（被忘掉、或過了保留期）"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("下一步目標 fact:") && stdout.contains("那一列已經換成別的內容"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("已被忘掉、過了保留期"),
         "stdout:\n{stdout}"
     );
     assert!(

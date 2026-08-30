@@ -1988,6 +1988,7 @@ pub mod act {
         done: u32,
         declined: u32,
         blocked: u32,
+        target_not_cited: u32,
         needs_press: u32,
         never_inherits: u32,
         mismatched: u32,
@@ -2004,6 +2005,7 @@ pub mod act {
                 sister_hands::RefusalBucket::Declined => self.declined += 1,
                 sister_hands::RefusalBucket::Pulled => self.pulled += 1,
                 sister_hands::RefusalBucket::OutsideGrant => self.blocked += 1,
+                sister_hands::RefusalBucket::TargetNotOnACitedScreen => self.target_not_cited += 1,
                 sister_hands::RefusalBucket::NeedsALivePressThisRun => self.needs_press += 1,
                 sister_hands::RefusalBucket::NeverInheritsTaskGrant => self.never_inherits += 1,
                 sister_hands::RefusalBucket::ShownStepMismatch => self.mismatched += 1,
@@ -2025,6 +2027,12 @@ pub mod act {
             let mut out = String::new();
             if self.pulled > 0 {
                 out.push_str(&format!("，拔手擋掉 {} 步", self.pulled));
+            }
+            if self.target_not_cited > 0 {
+                out.push_str(&format!(
+                    "，{} 步的目標沒有被引用的畫面（放寬授權沒有用；請在終端機裡自己看過再按）",
+                    self.target_not_cited
+                ));
             }
             if self.needs_press > 0 {
                 out.push_str(&format!(
@@ -2062,6 +2070,7 @@ pub mod act {
     ///
     /// 假的 source 不會走到 `app_for_target_fact` 真正那段 SQL；那一段由
     /// `sister-core` 自己的三個 `target_fact_app_reports_*` 測試蓋。
+    /// `frame_for_target_fact` 實作長在這個模組，由本模組與 CLI 整合測試覆蓋。
     pub(crate) trait StepSource {
         fn live_commitments(&self) -> Result<Vec<sister_core::db::CommitmentRow>>;
         fn app_for_evidence(&self, r: &sister_core::brain::EvidenceRef) -> Result<Option<String>>;
@@ -2070,6 +2079,7 @@ pub mod act {
             id: i64,
             expected_raw: &str,
         ) -> Result<sister_core::db::TargetApp>;
+        fn frame_for_target_fact(&self, id: i64, expected_raw: &str) -> Result<TargetFrame>;
         fn nearest_step_frame(
             &self,
             at_ms: i64,
@@ -2092,6 +2102,18 @@ pub mod act {
         ) -> Result<sister_core::db::TargetApp> {
             Db::app_for_target_fact(self, id, expected_raw)
         }
+        fn frame_for_target_fact(&self, id: i64, expected_raw: &str) -> Result<TargetFrame> {
+            let Some(fact) = self.fact_by_id(id)? else {
+                return Ok(TargetFrame::Forgotten);
+            };
+            if fact.raw != expected_raw {
+                return Ok(TargetFrame::RowReplaced);
+            }
+            Ok(match fact.frame_id {
+                Some(id) => TargetFrame::Known(id),
+                None => TargetFrame::FrameNotRecorded,
+            })
+        }
         fn nearest_step_frame(
             &self,
             at_ms: i64,
@@ -2099,6 +2121,65 @@ pub mod act {
             to_ms: i64,
         ) -> Result<Option<sister_core::db::StepFrameRow>> {
             Db::nearest_step_frame(self, at_ms, from_ms, to_ms)
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum TargetFrame {
+        Forgotten,
+        RowReplaced,
+        FrameNotRecorded,
+        Known(i64),
+    }
+
+    fn unattended_target_frame_refusal(
+        source: &impl StepSource,
+        evidence_json: &str,
+        target: Option<(i64, &str)>,
+    ) -> Result<Option<(String, sister_hands::TargetFrameGap)>> {
+        let Some((fact_id, expected_raw)) = target else {
+            return Ok(Some((
+                "無人值守拒絕：這筆承諾沒有記下一步目標的 fact 出處。".into(),
+                sister_hands::TargetFrameGap::NoTargetRecorded,
+            )));
+        };
+        let frame_id = match source.frame_for_target_fact(fact_id, expected_raw)? {
+            TargetFrame::Forgotten => {
+                return Ok(Some((
+                    format!("無人值守拒絕：下一步目標 fact:{fact_id} 已被忘掉、或過了保留期。"),
+                    sister_hands::TargetFrameGap::Forgotten,
+                )));
+            }
+            TargetFrame::RowReplaced => {
+                return Ok(Some((
+                    format!("無人值守拒絕：下一步目標 fact:{fact_id} 那一列已經換成別的內容。"),
+                    sister_hands::TargetFrameGap::RowReplaced,
+                )));
+            }
+            TargetFrame::FrameNotRecorded => {
+                return Ok(Some((
+                    format!(
+                        "無人值守拒絕：下一步目標 fact:{fact_id} 來自視窗標題或剪貼簿；這類記憶本來就沒有畫面出處，所以無人值守永遠不會做它。要做請在終端機裡自己看過再按。"
+                    ),
+                    sister_hands::TargetFrameGap::FrameNotRecorded,
+                )));
+            }
+            TargetFrame::Known(id) => id,
+        };
+        let evidence_refs: Vec<String> = serde_json::from_str(evidence_json)
+            .with_context(|| format!("證據清單不是 JSON 字串陣列：{evidence_json}"))?;
+        if evidence_refs
+            .iter()
+            .any(|reference| reference == &format!("frame:{frame_id}"))
+        {
+            Ok(None)
+        } else {
+            Ok(Some((
+                format!(
+                    "無人值守拒絕：承諾沒有引用下一步目標 fact:{fact_id} 的畫面 frame:{frame_id}。"
+                ),
+                sister_hands::TargetFrameGap::FrameNotCited,
+            )))
         }
     }
 
@@ -2638,29 +2719,47 @@ pub mod act {
                 action: action.clone(),
             })?;
             let authorized = if opts.unattended {
-                match run.grant().authorize_unattended(&step, clock()) {
-                    Ok((approval, permit)) => {
-                        log.append(&ActionEvent::Approved {
-                            at_ms: clock(),
-                            action: action.clone(),
-                            by: Some(sister_hands::ApprovedBy::StandingGrant),
-                        })?;
-                        Some((approval, button.take_up(permit)))
-                    }
-                    Err(rejection) => {
-                        let reason = RefusalReason::NotCoveredByGrant { rejection };
-                        tally.count_refusal(&reason);
-                        writeln!(
-                            out,
-                            "沒有做，也沒有交給作業系統：{}",
-                            reason.message_with_hands_resume(&cmd(data_dir, "hands resume"))
-                        )?;
-                        log.append(&ActionEvent::Refused {
-                            at_ms: clock(),
-                            action: action.clone(),
-                            reason,
-                        })?;
-                        None
+                if let Some((message, why)) = unattended_target_frame_refusal(
+                    source,
+                    &commitment.evidence_json,
+                    commitment
+                        .allowed_next_step_fact
+                        .zip(expected_target.as_deref()),
+                )? {
+                    let reason = RefusalReason::UnattendedTargetHasNoCitedFrame { why };
+                    tally.count_refusal(&reason);
+                    writeln!(out, "沒有做，也沒有交給作業系統：{message}")?;
+                    log.append(&ActionEvent::Refused {
+                        at_ms: clock(),
+                        action: action.clone(),
+                        reason,
+                    })?;
+                    None
+                } else {
+                    match run.grant().authorize_unattended(&step, clock()) {
+                        Ok((approval, permit)) => {
+                            log.append(&ActionEvent::Approved {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                by: Some(sister_hands::ApprovedBy::StandingGrant),
+                            })?;
+                            Some((approval, button.take_up(permit)))
+                        }
+                        Err(rejection) => {
+                            let reason = RefusalReason::NotCoveredByGrant { rejection };
+                            tally.count_refusal(&reason);
+                            writeln!(
+                                out,
+                                "沒有做，也沒有交給作業系統：{}",
+                                reason.message_with_hands_resume(&cmd(data_dir, "hands resume"))
+                            )?;
+                            log.append(&ActionEvent::Refused {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                reason,
+                            })?;
+                            None
+                        }
                     }
                 }
             } else {
@@ -3086,6 +3185,8 @@ pub mod act {
             rows: Vec<CommitmentRow>,
             /// `frame:<id>` → 那個 frame 上問得出來的 app。缺席＝問不出來。
             apps: std::collections::BTreeMap<i64, String>,
+            /// `fact id` → 目標 fact 真正掛的 frame；兩種 id 刻意分開。
+            target_frames: std::collections::BTreeMap<i64, TargetFrame>,
             nearest_frame: Option<sister_core::db::StepFrameRow>,
         }
 
@@ -3114,6 +3215,13 @@ pub mod act {
                 } else {
                     sister_core::db::TargetApp::AppNotRecorded
                 })
+            }
+            fn frame_for_target_fact(&self, id: i64, _expected_raw: &str) -> Result<TargetFrame> {
+                Ok(self
+                    .target_frames
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(TargetFrame::FrameNotRecorded))
             }
             fn nearest_step_frame(
                 &self,
@@ -3608,6 +3716,7 @@ pub mod act {
                     Some(1),
                 )],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                target_frames: [(1, TargetFrame::Known(1))].into_iter().collect(),
                 nearest_frame: None,
             }
         }
@@ -3672,6 +3781,7 @@ pub mod act {
                     card(2, Some(&open_url("https://example.com/b")), &[1], None),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                target_frames: Default::default(),
                 nearest_frame: None,
             };
             let mut executor = PullAfterFirst {
@@ -4101,6 +4211,13 @@ pub mod act {
                 ) -> Result<sister_core::db::TargetApp> {
                     Ok(sister_core::db::TargetApp::AppNotRecorded)
                 }
+                fn frame_for_target_fact(
+                    &self,
+                    _id: i64,
+                    _expected_raw: &str,
+                ) -> Result<TargetFrame> {
+                    Ok(TargetFrame::FrameNotRecorded)
+                }
                 fn nearest_step_frame(
                     &self,
                     _at_ms: i64,
@@ -4321,6 +4438,7 @@ pub mod act {
                     card(8, Some(&open_url("https://example.com/b")), &[1], None),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                target_frames: Default::default(),
                 nearest_frame: None,
             };
             let run = go(
@@ -4394,6 +4512,7 @@ pub mod act {
                 apps: [(1, "chrome.exe".to_string()), (2, "slack.exe".to_string())]
                     .into_iter()
                     .collect(),
+                target_frames: Default::default(),
                 nearest_frame: None,
             };
             let run = go(
@@ -4417,6 +4536,7 @@ pub mod act {
                     card(8, Some(&open_url("https://example.com/b")), &[1], None),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                target_frames: Default::default(),
                 nearest_frame: None,
             };
             // 第一步在授權還新的時候；**做完第一步之後**，時鐘跳過兩分鐘，
@@ -4595,6 +4715,7 @@ pub mod act {
                     card(8, Some(&open_url("https://example.com/b")), &[1], None),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                target_frames: Default::default(),
                 nearest_frame: None,
             };
             let run = go(
@@ -4662,6 +4783,7 @@ pub mod act {
                 apps: [(1, "chrome.exe".to_string()), (2, "slack.exe".to_string())]
                     .into_iter()
                     .collect(),
+                target_frames: Default::default(),
                 nearest_frame: None,
             };
             let run = go(
@@ -4786,6 +4908,7 @@ pub mod act {
                     card(8, None, &[1], None),
                 ],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                target_frames: Default::default(),
                 nearest_frame: None,
             };
             let run = go(
@@ -4837,6 +4960,7 @@ pub mod act {
                 &Source {
                     rows: vec![card(7, None, &[1], None), card(8, None, &[1], None)],
                     apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                    target_frames: Default::default(),
                     nearest_frame: None,
                 },
                 &opts("開今天的連結", &["chrome.exe"], 3, 5, false),
@@ -5089,6 +5213,7 @@ pub mod act {
             let no_next_step = Source {
                 rows: vec![card(7, None, &[1], None)],
                 apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                target_frames: Default::default(),
                 nearest_frame: None,
             };
             let asked_none = go(
@@ -5202,6 +5327,30 @@ pub mod act {
         }
 
         #[test]
+        fn target_on_another_uncited_frame_still_executes_attended_after_a_live_press() {
+            let source = Source {
+                rows: vec![card(
+                    1,
+                    Some(&open_url("https://example.com")),
+                    &[1],
+                    Some(2),
+                )],
+                apps: [(1, "chrome.exe".to_owned())].into_iter().collect(),
+                target_frames: [(2, TargetFrame::Forgotten)].into_iter().collect(),
+                nearest_frame: None,
+            };
+            let run = go(
+                "act-attended-cross-frame",
+                &source,
+                &opts("任務", &["chrome.exe"], 3, 5, false),
+                "好\n",
+                None,
+            );
+            assert_eq!(run.executor.calls.len(), 1);
+            assert!(run.out.contains("做了："), "{}", run.out);
+        }
+
+        #[test]
         fn unattended_rejects_a_step_outside_the_grant_without_calling_executor() {
             let run = go_unattended(
                 "act-unattended-scope",
@@ -5254,6 +5403,9 @@ pub mod act {
             ) -> Result<sister_core::db::TargetApp> {
                 self.inner.app_for_target_fact(id, expected_raw)
             }
+            fn frame_for_target_fact(&self, id: i64, expected_raw: &str) -> Result<TargetFrame> {
+                self.inner.frame_for_target_fact(id, expected_raw)
+            }
             fn nearest_step_frame(
                 &self,
                 at_ms: i64,
@@ -5303,10 +5455,15 @@ pub mod act {
         fn unattended_still_obeys_the_step_limit() {
             let source = Source {
                 rows: vec![
-                    card(1, Some(&open_url("https://a")), &[1], None),
-                    card(2, Some(&open_url("https://b")), &[1], None),
+                    card(1, Some(&open_url("https://a")), &[1], Some(1)),
+                    card(2, Some(&open_url("https://b")), &[2], Some(2)),
                 ],
-                apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                apps: [(1, "chrome.exe".to_string()), (2, "chrome.exe".to_string())]
+                    .into_iter()
+                    .collect(),
+                target_frames: [(1, TargetFrame::Known(1)), (2, TargetFrame::Known(2))]
+                    .into_iter()
+                    .collect(),
                 nearest_frame: None,
             };
             let run = go_unattended(
