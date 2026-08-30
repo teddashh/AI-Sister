@@ -34,7 +34,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 14;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -582,6 +582,10 @@ fn migrate_012(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     )?;
     tx.execute_batch(MIGRATION_012)?;
     Ok(())
+}
+
+fn migrate_014(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    add_column_if_missing(tx, "commitments", "allowed_next_step_fact", "INTEGER")
 }
 
 fn add_column_if_missing(
@@ -1248,6 +1252,7 @@ impl Db {
             11 => migrate_011(&tx)?,
             12 => migrate_012(&tx)?,
             13 => tx.execute_batch(MIGRATION_013)?,
+            14 => migrate_014(&tx)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -3839,6 +3844,24 @@ impl Db {
         }
     }
 
+    /// 這一步的目標那筆 fact，它的畫面是哪個 app。
+    ///
+    /// **三格，不是兩格。**「那一列被忘掉了」和「那一列沒有記 app」在
+    /// `app_for_evidence` 裡都是 `None`，但呼叫端必須用不同的話說明。
+    pub fn app_for_target_fact(&self, id: i64, expected_raw: &str) -> Result<TargetApp> {
+        Ok(match self.fact_by_id(id)? {
+            None => TargetApp::Forgotten,
+            // `facts.id` 不是 AUTOINCREMENT；forget 掉最大的 rowid 後，SQLite 可以把
+            // 同一個 id 給另一筆 fact。id 還在但原文換了，對這個動作而言原來源
+            // 已經不在，不能讓新 fact 穿著舊 id 替它回答 app。
+            Some(row) if row.raw != expected_raw => TargetApp::Forgotten,
+            Some(row) => match row.app_id {
+                Some(app) => TargetApp::Known(app),
+                None => TargetApp::AppNotRecorded,
+            },
+        })
+    }
+
     /// 在一個有界時間窗裡，找離 `at_ms` 最近的 frame；同距離時選動作後的。
     ///
     /// 窗外的舊 frame 不能冒充這一步的憑據。呼叫端決定時間窗，這裡只用既有的
@@ -3996,7 +4019,8 @@ impl Db {
                 let n = tx.execute(
                     "UPDATE commitments SET tombstoned_at = ?1, updated_at = ?1,
                        text = '', evidence_json = '[]', people_json = '[]',
-                       due_hint = NULL, allowed_next_step = NULL, kill_note = NULL
+                       due_hint = NULL, allowed_next_step = NULL,
+                       allowed_next_step_fact = NULL, kill_note = NULL
                      WHERE id = ?2 AND tombstoned_at IS NULL",
                     params![now, id],
                 )?;
@@ -4065,9 +4089,9 @@ impl Db {
             "INSERT INTO commitments(
                 text, kind, born_from, evidence_json, people_json,
                 due_hint, due_source, due_at, status, confidence,
-                allowed_next_step, last_evidence_seen_at, kill_note,
+                allowed_next_step, allowed_next_step_fact, last_evidence_seen_at, kill_note,
                 created_at, updated_at, tombstoned_at
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14,NULL)",
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15,NULL)",
             params![
                 ins.text,
                 ins.kind,
@@ -4080,6 +4104,7 @@ impl Db {
                 ins.status,
                 ins.confidence,
                 ins.allowed_next_step,
+                ins.allowed_next_step_fact,
                 ins.last_evidence_seen_at,
                 ins.kill_note,
                 ins.now,
@@ -4119,7 +4144,7 @@ impl Db {
             .query_row(
                 "SELECT id, text, kind, born_from, evidence_json, people_json,
                         due_hint, due_source, due_at, status, confidence,
-                        allowed_next_step, last_evidence_seen_at, kill_note,
+                        allowed_next_step, allowed_next_step_fact, last_evidence_seen_at, kill_note,
                         created_at, updated_at, tombstoned_at
                  FROM commitments WHERE id = ?1",
                 [id],
@@ -4133,7 +4158,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, text, kind, born_from, evidence_json, people_json,
                     due_hint, due_source, due_at, status, confidence,
-                    allowed_next_step, last_evidence_seen_at, kill_note,
+                    allowed_next_step, allowed_next_step_fact, last_evidence_seen_at, kill_note,
                     created_at, updated_at, tombstoned_at
              FROM commitments WHERE tombstoned_at IS NULL
              ORDER BY created_at DESC, id DESC",
@@ -4146,7 +4171,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, text, kind, born_from, evidence_json, people_json,
                     due_hint, due_source, due_at, status, confidence,
-                    allowed_next_step, last_evidence_seen_at, kill_note,
+                    allowed_next_step, allowed_next_step_fact, last_evidence_seen_at, kill_note,
                     created_at, updated_at, tombstoned_at
              FROM commitments ORDER BY created_at DESC, id DESC",
         )?;
@@ -4173,7 +4198,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, text, kind, born_from, evidence_json, people_json,
                     due_hint, due_source, due_at, status, confidence,
-                    allowed_next_step, last_evidence_seen_at, kill_note,
+                    allowed_next_step, allowed_next_step_fact, last_evidence_seen_at, kill_note,
                     created_at, updated_at, tombstoned_at
              FROM commitments
              WHERE tombstoned_at IS NULL AND status = 'open'
@@ -5673,11 +5698,12 @@ fn map_commitment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommitmentRow
         status: row.get(9)?,
         confidence: row.get(10)?,
         allowed_next_step: row.get(11)?,
-        last_evidence_seen_at: row.get(12)?,
-        kill_note: row.get(13)?,
-        created_at: row.get(14)?,
-        updated_at: row.get(15)?,
-        tombstoned_at: row.get(16)?,
+        allowed_next_step_fact: row.get(12)?,
+        last_evidence_seen_at: row.get(13)?,
+        kill_note: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
+        tombstoned_at: row.get(17)?,
     })
 }
 
@@ -5986,6 +6012,13 @@ pub fn fts_query(input: &str) -> String {
     terms.join(" AND ")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetApp {
+    Forgotten,
+    AppNotRecorded,
+    Known(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactRow {
     pub id: i64,
@@ -6121,6 +6154,7 @@ pub struct CommitmentInsert<'a> {
     pub status: &'a str,
     pub confidence: f64,
     pub allowed_next_step: Option<&'a str>,
+    pub allowed_next_step_fact: Option<i64>,
     pub last_evidence_seen_at: Option<Millis>,
     pub kill_note: Option<&'a str>,
     pub now: Millis,
@@ -6231,6 +6265,7 @@ pub struct CommitmentRow {
     pub status: String,
     pub confidence: f64,
     pub allowed_next_step: Option<String>,
+    pub allowed_next_step_fact: Option<i64>,
     pub last_evidence_seen_at: Option<Millis>,
     pub kill_note: Option<String>,
     pub created_at: Millis,
@@ -7205,6 +7240,72 @@ mod tests {
             db.app_for_evidence(&crate::brain::EvidenceRef::Fact(fact + 1))
                 .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn target_fact_app_reports_forgotten_when_the_fact_is_missing() {
+        let db = test_db();
+
+        assert_eq!(
+            db.app_for_target_fact(1, "https://example.com").unwrap(),
+            TargetApp::Forgotten
+        );
+    }
+
+    #[test]
+    fn target_fact_app_reports_app_not_recorded_when_app_id_is_null() {
+        let db = test_db();
+        db.conn
+            .execute(
+                "INSERT INTO facts(ts, kind, raw, normalized, source_kind, app_id)
+                 VALUES(1, 'url', 'https://example.com', 'https://example.com', 'ocr', NULL)",
+                [],
+            )
+            .unwrap();
+        let without_app = db.conn.last_insert_rowid();
+
+        assert_eq!(
+            db.app_for_target_fact(without_app, "https://example.com")
+                .unwrap(),
+            TargetApp::AppNotRecorded
+        );
+    }
+
+    #[test]
+    fn target_fact_app_reports_known_when_app_id_is_present() {
+        let db = test_db();
+        db.conn
+            .execute(
+                "INSERT INTO facts(ts, kind, raw, normalized, source_kind, app_id)
+                 VALUES(2, 'url', 'https://example.org', 'https://example.org', 'ocr', 'chrome.exe')",
+                [],
+            )
+            .unwrap();
+        let with_app = db.conn.last_insert_rowid();
+
+        assert_eq!(
+            db.app_for_target_fact(with_app, "https://example.org")
+                .unwrap(),
+            TargetApp::Known("chrome.exe".into())
+        );
+    }
+
+    #[test]
+    fn reused_target_fact_id_is_forgotten_when_raw_changed() {
+        let db = test_db();
+        db.conn
+            .execute(
+                "INSERT INTO facts(ts, kind, raw, normalized, source_kind, app_id)
+                 VALUES(2, 'url', 'https://new.example', 'https://new.example', 'ocr', 'chrome.exe')",
+                [],
+            )
+            .unwrap();
+        let id = db.conn.last_insert_rowid();
+
+        assert_eq!(
+            db.app_for_target_fact(id, "https://old.example").unwrap(),
+            TargetApp::Forgotten
         );
     }
 
