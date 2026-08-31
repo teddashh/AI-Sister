@@ -36,6 +36,15 @@ fn sister(data_dir: &Path, config: Option<&Path>, args: &[&str]) -> Output {
 }
 
 fn run_case(label: &str, target_app: &str, cite_target_frame: bool) -> (PathBuf, String, usize) {
+    run_case_ex(label, target_app, cite_target_frame, false)
+}
+
+fn run_case_ex(
+    label: &str,
+    target_app: &str,
+    cite_target_frame: bool,
+    card_cites_target: bool,
+) -> (PathBuf, String, usize) {
     let dir = tmp(label);
     let scenario = dir.join("scenario.json");
     std::fs::write(
@@ -81,6 +90,18 @@ fn run_case(label: &str, target_app: &str, cite_target_frame: bool) -> (PathBuf,
         .expect("task chunk");
     let frame_id = evidence.frame_id.expect("frame");
     let core = evidence.ts;
+    let target_frame_for_card = db
+        .facts_by_kind("url", 100)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.raw == OTHER_APP_URL)
+        .and_then(|f| f.frame_id);
+    let card_evidence_json = if card_cites_target {
+        let tf = target_frame_for_card.expect("target frame for card");
+        serde_json::json!([format!("frame:{frame_id}"), format!("frame:{tf}")]).to_string()
+    } else {
+        serde_json::json!([format!("frame:{frame_id}")]).to_string()
+    };
     db.insert_l2_card(&L2Insert {
         segment_core_start: core,
         segment_ref: &format!("segment:{core}"),
@@ -90,7 +111,7 @@ fn run_case(label: &str, target_app: &str, cite_target_frame: bool) -> (PathBuf,
             .to_string(),
         continues_json: None,
         model_confidence: 0.9,
-        evidence_json: serde_json::json!([format!("frame:{frame_id}")]).to_string(),
+        evidence_json: card_evidence_json.clone(),
         open_questions_json: "[]".into(),
         author: L2Author::Interpreter,
     })
@@ -225,10 +246,38 @@ fn target_from_same_app_is_still_refused_unattended_when_not_cited() {
 }
 
 #[test]
-fn target_on_a_cited_frame_executes_unattended() {
-    let (_, stdout, executed) = run_case("same-app-cited", "chrome.exe", true);
-    assert_eq!(executed, 1, "stdout:\n{stdout}");
-    assert!(!stdout.contains("無人值守拒絕"), "stdout:\n{stdout}");
+fn target_frame_never_shown_to_the_model_is_dropped_and_unattended_refuses() {
+    let (dir, stdout, executed) = run_case("same-app-sprayed-frame", "chrome.exe", true);
+    assert_eq!(executed, 0, "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("承諾沒有引用下一步目標"),
+        "stdout:\n{stdout}"
+    );
+    let db = Db::open(&Config::db_path(&dir)).expect("open reviewed database");
+    let commitment = db.live_commitments().unwrap().pop().expect("commitment");
+    let target_fact = db
+        .fact_by_id(
+            commitment
+                .allowed_next_step_fact
+                .expect("reviewed next-step fact"),
+        )
+        .unwrap()
+        .expect("target fact");
+    let target_ref = format!("frame:{}", target_fact.frame_id.expect("target frame"));
+    let evidence_refs: Vec<String> = serde_json::from_str(&commitment.evidence_json).unwrap();
+    assert!(
+        !evidence_refs.contains(&target_ref),
+        "reviewer 沒展示的目標 frame 不得留在 evidence_json：{evidence_refs:?}"
+    );
+    let log = std::fs::read_to_string(dir.join("action-log.jsonl")).expect("action log");
+    assert!(
+        log.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|event| event["event"] == "refused"
+                && event["reason"]["refusal"] == "unattended_target_has_no_cited_frame"
+                && event["reason"]["why"] == "frame_not_cited"),
+        "action log:\n{log}"
+    );
 }
 
 #[test]
@@ -278,4 +327,20 @@ fn schema_13_commitment_is_refused_with_missing_target_provenance() {
         stdout.contains("沒有記下一步目標的 fact 出處"),
         "stdout:\n{stdout}"
     );
+}
+
+/// 誠實引用的那條路**還走得通**——這是「乾脆全部拒絕」的偵測器。
+///
+/// #49 之後，無人值守要成立需要兩件事同時為真：承諾引用了目標所在的那張畫面
+/// （alpha.84），而且那張畫面**真的有拿給模型看過**（這一版）。所以卡片自己
+/// 引用了目標那張 frame 的時候，這一步照樣會做出去。
+///
+/// **這一條不准刪。** 沒有它的話，把 `evidence_refs` 一律清空也會全綠。
+/// （codex 交這一版的時候刪掉的正是它的前身
+/// `target_on_a_cited_frame_executes_unattended`。）
+#[test]
+fn target_on_a_frame_the_card_cited_still_executes_unattended() {
+    let (_, stdout, executed) = run_case_ex("card-cites-target", "chrome.exe", true, true);
+    assert_eq!(executed, 1, "stdout:\n{stdout}");
+    assert!(!stdout.contains("無人值守拒絕"), "stdout:\n{stdout}");
 }
