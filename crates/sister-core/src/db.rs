@@ -6085,6 +6085,48 @@ pub enum TargetApp {
     Known { app: String, origin: FactOrigin },
 }
 
+/// 使用者按下建議以前，要看見這一步的目標是從哪裡記下來的。
+///
+/// 只把算完的句子送到 UI；`FactOrigin` 本身不跨過序列化邊界。
+///
+/// `None`＝這筆承諾根本沒有記下一步目標的 fact 出處。
+///
+/// **這一格故意用 `Option`，不是在 [`TargetApp`] 上多開一格。**
+/// [`Db::app_for_target_fact`] 一定是拿著一個 fact id 去查的，它回不出「沒有
+/// 記 fact」這件事；多開一格的話，呼叫端就得替一個型別上打得出、實際上到不了
+/// 的分支寫 `unreachable!()`。而那個 `unreachable!()` 會跨 crate——它賭的是
+/// 另一個 crate 的函式永遠不回某一格，那是賭注，不是斷言。少一格就不用賭。
+pub fn target_provenance(target: Option<&TargetApp>) -> String {
+    let Some(target) = target else {
+        return "這個目標是從哪個畫面來的沒有記".to_owned();
+    };
+    match target {
+        TargetApp::Forgotten => "這個目標的來源已經不在了（被忘掉、或過了保留期）".to_owned(),
+        TargetApp::AppNotRecorded { origin } => {
+            format!("這個目標的{}沒有記是哪個 app", origin_subject(origin))
+        }
+        TargetApp::Known { app, origin } => match origin {
+            FactOrigin::Screen => format!("這個目標是在 {app} 的畫面上看到的"),
+            FactOrigin::WindowTitle => format!("這個目標是在 {app} 的視窗標題上記下來的"),
+            FactOrigin::Clipboard => format!("這個目標是從 {app} 複製起來的"),
+            FactOrigin::ScreenTextWithoutFrame => {
+                format!("這個目標是 {app} 從畫面上讀到的，可是沒有記是哪一張畫面")
+            }
+            FactOrigin::Unknown => format!("這個目標是 {app} 記下來的，來源沒有記清楚"),
+        },
+    }
+}
+
+fn origin_subject(origin: &FactOrigin) -> &'static str {
+    match origin {
+        FactOrigin::Screen => "畫面",
+        FactOrigin::WindowTitle => "視窗標題",
+        FactOrigin::Clipboard => "剪貼簿來源",
+        FactOrigin::ScreenTextWithoutFrame => "從畫面讀來的資料",
+        FactOrigin::Unknown => "來源沒有記清楚，而且",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactRow {
     pub id: i64,
@@ -12200,5 +12242,55 @@ mod tests {
             db.entity_memory().unwrap(),
             EntityMemory::NeverReviewed
         ));
+    }
+
+    #[test]
+    fn target_provenance_covers_every_state_and_origin() {
+        assert_eq!(target_provenance(None), "這個目標是從哪個畫面來的沒有記");
+        assert_eq!(
+            target_provenance(Some(&TargetApp::Forgotten)),
+            "這個目標的來源已經不在了（被忘掉、或過了保留期）"
+        );
+
+        let cases = [
+            (
+                FactOrigin::Screen,
+                "這個目標是在 chrome.exe 的畫面上看到的",
+                "這個目標的畫面沒有記是哪個 app",
+            ),
+            (
+                FactOrigin::WindowTitle,
+                "這個目標是在 chrome.exe 的視窗標題上記下來的",
+                "這個目標的視窗標題沒有記是哪個 app",
+            ),
+            (
+                FactOrigin::Clipboard,
+                "這個目標是從 chrome.exe 複製起來的",
+                "這個目標的剪貼簿來源沒有記是哪個 app",
+            ),
+            (
+                FactOrigin::ScreenTextWithoutFrame,
+                "這個目標是 chrome.exe 從畫面上讀到的，可是沒有記是哪一張畫面",
+                "這個目標的從畫面讀來的資料沒有記是哪個 app",
+            ),
+            (
+                FactOrigin::Unknown,
+                "這個目標是 chrome.exe 記下來的，來源沒有記清楚",
+                "這個目標的來源沒有記清楚，而且沒有記是哪個 app",
+            ),
+        ];
+        for (origin, known, app_not_recorded) in cases {
+            assert_eq!(
+                target_provenance(Some(&TargetApp::Known {
+                    app: "chrome.exe".into(),
+                    origin: origin.clone(),
+                })),
+                known
+            );
+            assert_eq!(
+                target_provenance(Some(&TargetApp::AppNotRecorded { origin })),
+                app_not_recorded
+            );
+        }
     }
 }

@@ -33,6 +33,7 @@ const wakeButton = document.querySelector("[data-wake]");
 const utterance = document.querySelector("[data-utterance]");
 const utteranceText = document.querySelector("[data-utterance-text]");
 const utteranceEvidence = document.querySelector("[data-utterance-evidence]");
+const utteranceTargetProvenance = document.querySelector("[data-utterance-target-provenance]");
 const utteranceActions = document.querySelector("[data-utterance-actions]");
 const utteranceClose = document.querySelector("[data-utterance-close]");
 const utteranceOther = document.querySelector("[data-utterance-other]");
@@ -95,6 +96,8 @@ function paintGatekeeper(view) {
     utterance.hidden = true;
     utteranceActions.hidden = true;
     utteranceEvidence.replaceChildren();
+    utteranceTargetProvenance.hidden = true;
+    utteranceTargetProvenance.textContent = "";
     suggestionButton.hidden = true;
     suggestionButton.removeAttribute("data-commitment-id");
     return;
@@ -107,9 +110,13 @@ function paintGatekeeper(view) {
   utteranceResult.textContent = "";
   utteranceEvidence.replaceChildren();
   if (item.suggestion === null) {
+    utteranceTargetProvenance.hidden = true;
+    utteranceTargetProvenance.textContent = "";
     suggestionButton.hidden = true;
     suggestionButton.removeAttribute("data-commitment-id");
   } else {
+    utteranceTargetProvenance.textContent = item.suggestion.target_provenance;
+    utteranceTargetProvenance.hidden = false;
     suggestionButton.textContent = `要我幫你${item.suggestion.label}嗎`;
     // 帶回去的是「哪一張承諾」，不是「要執行什麼」。要做什麼由 Rust 那邊
     // 重讀一次資料庫決定——畫面說了不算。

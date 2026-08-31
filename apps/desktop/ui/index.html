@@ -48,6 +48,10 @@
       <section class="utterance" data-utterance hidden>
         <p class="utterance-text" data-utterance-text></p>
         <div class="utterance-evidence" data-utterance-evidence></div>
+        <!-- 出處要自己一行、排在按鈕上面。放在 .utterance-actions 裡面不行——
+             那個容器是 display:flex，這句話會變成跟「結案」「其他」併排的 flex
+             項目，而不是按下去之前先讀到的一句話。 -->
+        <p class="utterance-target-provenance" data-utterance-target-provenance hidden></p>
         <div class="utterance-actions" data-utterance-actions>
           <button type="button" data-utterance-suggestion hidden></button>
           <button type="button" data-utterance-close>結案</button>

@@ -1977,36 +1977,25 @@ pub mod act {
         }
 
         fn target_provenance(&self) -> String {
-            match self {
+            let target = match self {
                 Self::Known { target, .. }
                 | Self::Ambiguous { target }
-                | Self::Unknown { target } => match target {
-                    Some(TargetOrigin { app, origin }) => match origin {
-                        sister_core::db::FactOrigin::Screen => {
-                            format!("這個目標是在 {app} 的畫面上看到的")
+                | Self::Unknown { target } => {
+                    target.as_ref().map(|TargetOrigin { app, origin }| {
+                        sister_core::db::TargetApp::Known {
+                            app: app.clone(),
+                            origin: origin.clone(),
                         }
-                        sister_core::db::FactOrigin::WindowTitle => {
-                            format!("這個目標是在 {app} 的視窗標題上記下來的")
-                        }
-                        sister_core::db::FactOrigin::Clipboard => {
-                            format!("這個目標是從 {app} 複製起來的")
-                        }
-                        sister_core::db::FactOrigin::ScreenTextWithoutFrame => {
-                            format!("這個目標是 {app} 從畫面上讀到的，可是沒有記是哪一張畫面")
-                        }
-                        sister_core::db::FactOrigin::Unknown => {
-                            format!("這個目標是 {app} 記下來的，來源沒有記清楚")
-                        }
-                    },
-                    None => "這個目標是從哪個畫面來的沒有記".to_owned(),
-                },
-                Self::TargetForgotten => {
-                    "這個目標的來源已經不在了（被忘掉、或過了保留期）".to_owned()
+                    })
                 }
+                Self::TargetForgotten => Some(sister_core::db::TargetApp::Forgotten),
                 Self::TargetAppNotRecorded(origin) => {
-                    format!("這個目標的{}沒有記是哪個 app", origin_subject(origin))
+                    Some(sister_core::db::TargetApp::AppNotRecorded {
+                        origin: origin.clone(),
+                    })
                 }
-            }
+            };
+            sister_core::db::target_provenance(target.as_ref())
         }
     }
 
@@ -2728,13 +2717,7 @@ pub mod act {
                 break;
             }
             let action = button.snapshot();
-            let expected_target = match &action {
-                sister_hands::ActionSnapshot::OpenUrl { url } => Some(url.clone()),
-                sister_hands::ActionSnapshot::OpenFile { path } => {
-                    Some(path.to_string_lossy().into_owned())
-                }
-                sister_hands::ActionSnapshot::FocusWindow { .. } => None,
-            };
+            let expected_target = action.expected_target();
             let declared_app = step_app(
                 source,
                 &commitment.evidence_json,
