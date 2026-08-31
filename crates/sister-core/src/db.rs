@@ -1880,7 +1880,8 @@ impl Db {
                 last_ts: r.get(3)?,
             })
         })?;
-        Ok(rows.flatten().collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// 暫停稽核：她總共閉眼多久。
@@ -1903,7 +1904,8 @@ impl Db {
 
         let mut audit = PauseAudit::default();
         let mut open: Option<Millis> = None;
-        for (kind, ts) in rows.flatten() {
+        for row in rows {
+            let (kind, ts) = row?;
             match kind.as_str() {
                 // 連續兩筆 pause 不該發生（recorder 只在轉換時寫），但真的
                 // 發生時要保留第一筆——那才是她真正閉眼的時刻。
@@ -1969,7 +1971,8 @@ impl Db {
 
         let mut all: Vec<PauseSpan> = Vec::new();
         let mut open: Option<Millis> = None;
-        for (kind, ts) in rows.flatten() {
+        for row in rows {
+            let (kind, ts) = row?;
             match kind.as_str() {
                 // 和 `pause_audit` 同一條規則：連兩筆 pause 時留第一筆。
                 "pause" if open.is_none() => open = Some(ts),
@@ -2739,7 +2742,8 @@ impl Db {
             "ORDER BY q.ts ASC, q.id ASC",
         ))?;
         let rows = stmt.query_map(params![from, to], read_query_row)?;
-        Ok(rows.flatten().collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// 他標記過的那幾題，**他問的時候**新的在前——帶著實例本身。
@@ -3450,7 +3454,8 @@ impl Db {
              FROM facts WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
         )?;
         let rows = stmt.query_map(params![from_ts, to_ts], map_fact_row)?;
-        Ok(rows.flatten().collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn clipboard_in_range(
@@ -3496,7 +3501,8 @@ impl Db {
                 error_fact_count: r.get(6)?,
             })
         })?;
-        Ok(rows.flatten().collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// 這段時間裡有沒有任何 L0 原件。沒有就算過，不是回 0 筆再讓呼叫端猜。
@@ -3577,7 +3583,8 @@ impl Db {
              ORDER BY segment_core_start, version, id"
         ))?;
         let rows = stmt.query_map(params![from_ts, to_ts], map_l2_row)?;
-        Ok(rows.flatten().collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// 某一段上還活著的每一版，舊的在前。原版留著，後來改的也看得到。
@@ -3719,7 +3726,8 @@ impl Db {
                 role: r.get(11)?,
             })
         })?;
-        Ok(rows.flatten().collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn list_brain_skip(&self, limit: usize) -> Result<Vec<SkipRow>> {
@@ -3736,7 +3744,8 @@ impl Db {
                 detail: r.get(4)?,
             })
         })?;
-        Ok(rows.flatten().collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn insert_brain_skip(
@@ -3787,8 +3796,9 @@ impl Db {
                      UNION ALL
                      SELECT text FROM ocr_blocks WHERE frame_id = ?1",
                 )?;
-                let texts: Vec<String> =
-                    stmt.query_map([*id], |row| row.get(0))?.flatten().collect();
+                let texts: Vec<String> = stmt
+                    .query_map([*id], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
                 let text = texts.join("\n");
                 Ok(Some(L0Original {
                     r#ref: r.as_str(),
@@ -3934,37 +3944,29 @@ impl Db {
         let mut frames = self
             .conn
             .prepare("SELECT id FROM frames WHERE ts >= ?1 AND ts < ?2")?;
-        for id in frames
-            .query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))?
-            .flatten()
-        {
+        for row in frames.query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))? {
+            let id = row?;
             parents.push(format!("frame:{id}"));
         }
         let mut facts = self
             .conn
             .prepare("SELECT id FROM facts WHERE ts >= ?1 AND ts < ?2")?;
-        for id in facts
-            .query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))?
-            .flatten()
-        {
+        for row in facts.query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))? {
+            let id = row?;
             parents.push(format!("fact:{id}"));
         }
         let mut segs = self.conn.prepare(
             "SELECT core_started_at FROM segment WHERE ended_at > ?1 AND started_at < ?2",
         )?;
-        for core in segs
-            .query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))?
-            .flatten()
-        {
+        for row in segs.query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))? {
+            let core = row?;
             parents.push(format!("segment:{core}"));
         }
         let mut cards = self.conn.prepare(
             "SELECT id FROM l2_card WHERE segment_core_start >= ?1 AND segment_core_start < ?2",
         )?;
-        for id in cards
-            .query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))?
-            .flatten()
-        {
+        for row in cards.query_map(params![from_ts, to_ts], |r| r.get::<_, i64>(0))? {
+            let id = row?;
             parents.push(format!("l2:{id}"));
         }
         Ok(parents)
@@ -3989,8 +3991,9 @@ impl Db {
         let mut queue: Vec<String> = parents.to_vec();
         while let Some(parent) = queue.pop() {
             let mut stmt = tx.prepare("SELECT child_ref FROM provenance WHERE parent_ref = ?1")?;
-            let children: Vec<String> =
-                stmt.query_map([&parent], |r| r.get(0))?.flatten().collect();
+            let children: Vec<String> = stmt
+                .query_map([&parent], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             drop(stmt);
             for child in children {
                 if seen.insert(child.clone()) {
@@ -4169,7 +4172,8 @@ impl Db {
              ORDER BY created_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], map_commitment_row)?;
-        Ok(rows.flatten().collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn all_commitments(&self) -> Result<Vec<CommitmentRow>> {
@@ -4181,7 +4185,8 @@ impl Db {
              FROM commitments ORDER BY created_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], map_commitment_row)?;
-        Ok(rows.flatten().collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// 還開著、而且 `cutoff` 之前到期的承諾。守門員的 a 類候選來源。
@@ -4211,7 +4216,8 @@ impl Db {
              ORDER BY due_at, id",
         )?;
         let rows = stmt.query_map([cutoff], map_commitment_row)?;
-        Ok(rows.flatten().collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn points_spent_today(&self, day_key: &str) -> Result<u32> {
@@ -4712,7 +4718,8 @@ impl Db {
                 created_at: r.get(6)?,
             })
         })?;
-        Ok(rows.flatten().collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// 最近一輪真的跑過的審閱，她拒絕掉了哪幾個模型指的下一步。
@@ -9366,6 +9373,63 @@ mod tests {
         assert!(db.query_log_between(2_000, 1_000).is_err());
     }
 
+    /// 守住 replay 題庫匯出：讀壞一列時必須報錯，不能交出看似完整的部分題庫。
+    #[test]
+    fn unreadable_query_row_aborts_replay_question_export() {
+        let db = test_db();
+        ask(&db, 1_000, "good", 1);
+        db.conn
+            .execute(
+                "UPDATE queries SET latency_ms = 'broken' WHERE ts = 1000",
+                [],
+            )
+            .expect("corrupt query row");
+        assert!(db.query_log_between(0, 2_000).is_err());
+    }
+
+    /// 守住 listed-facts 稽核：讀壞一列時必須報錯，不能假裝範圍內沒有 facts。
+    #[test]
+    fn unreadable_fact_row_aborts_facts_in_range() {
+        let mut db = test_db();
+        db.test_insert_fact(1_000, "url", "https://example.test")
+            .expect("fact");
+        db.conn
+            .execute("UPDATE facts SET raw = X'80' WHERE ts = 1000", [])
+            .expect("corrupt fact row");
+        assert!(db.facts_in_range(0, 2_000).is_err());
+    }
+
+    /// 守住出境揭露：讀壞一列時必須報錯，不能宣稱今天沒有送出任何內容。
+    #[test]
+    fn unreadable_outbound_row_aborts_outbound_disclosure() {
+        let db = test_db();
+        db.conn
+            .execute(
+                "INSERT INTO brain_outbound(ts, day_key, command, args_json,
+             segment_core_start, chars_sent, truncated, outcome,
+             duration_ms, error, role)
+             VALUES(1000, 'day', 'agent', '[]', NULL, 'broken', 0,
+                    'ok', 1, NULL, 'interpreter')",
+                [],
+            )
+            .expect("corrupt outbound row");
+        assert!(db.list_brain_outbound(10).is_err());
+    }
+
+    /// 守住刪除血緣：根節點讀壞時 forget 必須失敗，不能回報刪除成功。
+    #[test]
+    fn unreadable_cascade_parent_aborts_forget() {
+        let mut db = test_db();
+        db.conn
+            .execute(
+                "INSERT INTO segment(started_at, ended_at, core_started_at, core_ended_at,
+             event_ids, computed_at) VALUES(1000, 1100, 'broken', 1050, '[]', 1200)",
+                [],
+            )
+            .expect("corrupt segment row");
+        assert!(db.forget(0, 2_000, None).is_err());
+    }
+
     /// 點下去＝幫這一題標了正解，而 `rank` 說出排序把它放在第幾個。
     #[test]
     fn clicking_a_source_is_the_answer_key() {
@@ -10601,6 +10665,35 @@ mod tests {
         assert_eq!(audit.total_ms, 600_000, "只有量得出來的那一段進總長");
         assert_eq!(audit.open_since, Some(700_000));
         assert_eq!(audit.truncated, 1, "算不出長度的那一段要說出來");
+    }
+
+    /// 守住 pause/resume 配對：事件讀壞時要報錯，不能編出一路延伸到現在的假盲區。
+    #[test]
+    fn unreadable_pause_event_aborts_pause_audit() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        db.insert_system(
+            s,
+            &SystemEvent {
+                ts: 1_000,
+                kind: SystemKind::CapturePaused,
+                detail: None,
+            },
+        )
+        .expect("pause");
+        db.insert_system(
+            s,
+            &SystemEvent {
+                ts: 2_000,
+                kind: SystemKind::CaptureResumed,
+                detail: None,
+            },
+        )
+        .expect("resume");
+        db.conn
+            .execute("UPDATE system_events SET ts = 'broken' WHERE ts = 2000", [])
+            .expect("corrupt resume row");
+        assert!(db.pause_audit().is_err());
     }
 
     #[test]
