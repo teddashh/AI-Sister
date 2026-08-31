@@ -643,12 +643,30 @@ capture 層本身就是 recorder。
   - **#42 沒關**——「螢幕上被埋的 URL 指過去會執行」這件事本身還在。這一輪只是讓
     那行字不再說謊：目標來自別的 app 時，授權書現在會擋。但**被埋的 URL 如果就在
     已授權的那個 app 的畫面上，照樣會執行**。產品行為要 Ted 決定。
+    **alpha.86 也沒有把它補起來。** 那一版擋的是模型**捏造**引用（這次 prompt
+    根本沒給它看過的 ref），完全被攻下的模型只要引用一張**真的**畫面就照樣通過
+    ——引用檢查在原理上就擋不了。真正在守的還是授權書的範圍。它的副作用是**縮小**
+    了無人值守：目標所在那張畫面，現在必須是 L2 卡片自己引用過的。
+  - **`evidence_refs` 是兩個 pass 的聯集**，所以單一個 pass 就能決定一個落在
+    授權路徑上的欄位。alpha.86 的來源檢查不管這件事——它只問「這個 ref 有沒有
+    給模型看過」，不問「是哪一個 pass 說的」。（#53）
   - **字母人那半邊完全沒有這道檢查。** 上面講的全部只在 `sister do` 這條路上。
     `apps/desktop` 的 `hands_execute` → `sister_hands::execute_with(Level::Suggest,…)`
     **沒有 `Grant`、沒有 `StepRequest`、沒有 app 維度**，它直接拿 `allowed_next_step`
     去做；`apps/` 底下 `allowed_next_step_fact` 出現**零次**。公道話：那是「當場按一次
     算一次」的另一種同意模型，本來就不走授權書，所以不算繞過——但寫版本說明的時候
     不可以用「授權書現在會擋」這種語氣蓋過那半邊（alpha.83 的說明已經補上這一句）。
+    **alpha.86 沒有改變這件事。** 那一版只是讓按鈕上面多一行「這個目標是從哪裡
+    記下來的」，讓「當場按一次」變成**知情**的一次；它一個決定都沒改，也沒有多擋
+    住任何東西。
+  - **`apps/desktop` 的測試在任何地方都不會被執行。** 根 `Cargo.toml` 是
+    `members = ["crates/*"]`，桌面那半是**另一個 workspace**（自己的
+    `Cargo.lock`），所以 `cargo test --workspace` 碰不到它；CI 和
+    `scripts/check-windows.sh` 都只 **build／clippy**，不 `cargo test`。
+    於是 `main.rs` 裡那些 `#[test]`——包含 alpha.86 新加的兩條——**從來沒有跑
+    過一次**，綠燈只代表它們編得起來。（本機也跑不動：缺 `libdbus-1-dev`，
+    `libdbus-sys` build.rs 直接 panic。）這一條要嘛把它併進根 workspace，要嘛
+    在 CI 上補一個會真的跑桌面測試的 job。
   - **injection 套件會間歇性變紅，而且紅的時候 evil URL 真的被執行了**——不是
     斷言太嚴，是 `executed` 那行真的寫進 `action-log.jsonl`。加了觀測之後它不再
     重現（heisenbug），拿掉觀測也沒回來——**還沒抓到**。
@@ -662,9 +680,21 @@ capture 層本身就是 recorder。
     重跑 `review` 是**多一筆**承諾而不是把舊那筆補齊。結論：這一版的檢查只對之後
     新記下來的承諾生效；舊承諾沒有目標 fact 出處時，現在會停在無人值守的畫面
     出處閘門，不會照舊執行。
-  - `db.rs` 有**數十處** `query_map(...).flatten()`：讀失敗的那一列會被**安靜丟掉**，
-    於是「沒有」和「讀不出來」又是同一種 0。`facts_in_range`（`db.rs:3453`）也在
-    裡面——它正好是上面那道 listed-facts 檢查的資料來源。
+  - `db.rs` 的 `query_map(...).flatten()`：讀失敗的那一列會被**安靜丟掉**，於是
+    「沒有」和「讀不出來」又是同一種 0。`facts_in_range`（`db.rs:3453`）也在裡面
+    ——它正好是上面那道 listed-facts 檢查的資料來源。
+    **alpha.86 修了 19 處**（血緣 cascade ＋ 出境／稽核匯出兩類），改成把 `Err`
+    往上帶。**查詢與顯示路徑上還有 23 處沒碰**：`search`、`recent`、
+    `chunks_in_range`、`query_log`、`marked_queries`、`search_like`、
+    `fact_sightings`、`facts_by_kind`、`facts_search`、`days_with_data`、
+    `timeline`、`segment_events`（四處）、`clipboard_in_range`、
+    `l2_versions_for_segment`、`provenance_children`、`live_entities`、
+    `live_mentions_for`、`segment_edits_overlapping`、`stuck_inputs`、
+    `stuck_errors`。那些地方讀不出來的時候，畫面上少一列仍然看起來像
+    「本來就沒有」。（`provenance_children` 現在**零個呼叫端**，不在任何一條
+    活著的 cascade 上。）
+    **數的時候別用 grep 的總數**：`db.rs` 現在 `.flatten()` 共 32 處，其中 8 處是
+    `Option::flatten`、1 處在測試裡，和「哪一列」無關。
     **不要引用精確數字**：`grep -c '\.flatten()'` 和 `grep -c query_map` 都是 51，
     但那是兩次剛好撞號的 grep，不是同一批；其中十來處是 `Option::flatten`、和
     「哪一列」無關（`app_for_evidence` 的 `db.rs:3842` 就是其中之一——它**不屬於**
