@@ -121,8 +121,18 @@ alpha.85 讓終端機講出目標真正的來源（畫面／視窗標題／剪�
 少一截，而你看到的是「她只記得這些」，不是「有一段讀不出來」。又是同一種 0。
 
 這一版把 **19 處**改成把錯誤往上帶：整件事中止並講出哪裡讀不出來，而不是回一個
-短的答案。動到的是兩類——`forget` 的血緣 cascade（少讀一列＝**少刪一列**），
-以及出境／稽核的匯出（少讀一列＝**漏報一筆送出去的東西**）。
+短的答案。動到的地方按後果排：
+
+- **血緣 cascade**（`collect_cascade_parents`、`tombstone_descendants`）——
+  少讀一列＝`forget` **少刪一列**。
+- **授權路徑上的 fact 清單**（`facts_in_range`）——少讀一列＝她**看不到**本來會
+  擋下這一步的那筆記憶。
+- **審閱者的輸入**（`l0_original`、`l2_in_range`）——少讀一列＝回查少一筆。
+- **出境與稽核的匯出**（`list_brain_outbound`、`list_brain_skip`、
+  `exclusion_audit`、`pause_audit`）——少讀一列＝**漏報一筆送出去的東西**。
+- 承諾清單與其他查詢（`all_commitments`、`live_commitments`、
+  `open_commitments_due_before`、`query_log_between`、`pause_spans`、
+  `stuck_in_range`、`list_reviewer_divergences`）。
 
 **沒有修完。** 查詢與顯示那些路徑上還有 **23 處**沒碰——`search`、`recent`、
 `timeline`、`facts_by_kind`、`segment_events`、`live_entities` 這些。那些地方讀不
