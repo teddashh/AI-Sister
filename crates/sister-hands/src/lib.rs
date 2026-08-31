@@ -282,6 +282,23 @@ impl ActionSnapshot {
             Self::FocusWindow { title } => format!("聚焦視窗：{title}"),
         }
     }
+
+    /// 這一步的目標字串，用來跟記憶裡那筆 fact 的 `raw` 對照。
+    ///
+    /// **全 crate 唯一一份**，理由和 [`Self::describe`] 一樣。兩個呼叫端
+    /// （`sister do` 的 `step_app`、字母人的 `gate_suggestion`）都要用同一份，
+    /// 各抄一份的話，哪天多一種動作，一邊會去查 fact、另一邊不會——於是終端機
+    /// 檢查的目標和字母人印在按鈕上面那句話講的目標，會是不同的東西。
+    ///
+    /// `None`＝這種動作沒有可以拿來比對的目標字串。`FocusWindow` 比的是視窗
+    /// 標題，那不是記憶裡的 fact，所以不拿它去查。
+    pub fn expected_target(&self) -> Option<String> {
+        match self {
+            Self::OpenUrl { url } => Some(url.clone()),
+            Self::OpenFile { path } => Some(path.to_string_lossy().into_owned()),
+            Self::FocusWindow { .. } => None,
+        }
+    }
 }
 
 /// 為什麼**根本沒有交給作業系統**。
@@ -923,6 +940,40 @@ mod tests {
         let done = button.press().describe();
         assert_eq!(on_the_button, done);
         assert!(done.contains("C:/work/report.txt"));
+    }
+
+    /// 拿去對照記憶的那個目標字串，三種動作各是什麼。
+    ///
+    /// 這一條住在這裡而不是字母人那邊，是因為**字母人的測試哪裡都跑不到**：
+    /// `apps/desktop` 不在 root workspace 的 `members` 裡（`Cargo.toml` 只收
+    /// `crates/*`），CI 對它也只有 build，沒有 `cargo test`。這支函式的兩個
+    /// 呼叫端一個在 `sister do`、一個在字母人，把規則放在這個 crate 才有人跑得到。
+    #[test]
+    fn expected_target_is_the_string_we_match_memory_against() {
+        assert_eq!(
+            ActionSnapshot::OpenUrl {
+                url: "https://example.com/task/7".into(),
+            }
+            .expected_target()
+            .as_deref(),
+            Some("https://example.com/task/7"),
+        );
+        assert_eq!(
+            ActionSnapshot::OpenFile {
+                path: PathBuf::from("C:/work/report.txt"),
+            }
+            .expected_target()
+            .as_deref(),
+            Some("C:/work/report.txt"),
+        );
+        // 視窗標題不是記憶裡的 fact，所以沒有可以比對的目標——**不是** 空字串。
+        assert_eq!(
+            ActionSnapshot::FocusWindow {
+                title: "Visual Studio Code".into(),
+            }
+            .expected_target(),
+            None,
+        );
     }
 
     #[test]

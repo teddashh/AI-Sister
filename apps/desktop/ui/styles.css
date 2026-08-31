@@ -228,6 +228,7 @@ body {
 
 .utterance[data-form="one_line"] { border-color: transparent; background: transparent; }
 .utterance-text, .utterance-result { font-size: 13px; margin: 4px 0; }
+.utterance-target-provenance { font-size: 14px; font-weight: 600; line-height: 1.45; margin: 8px 0 0; overflow-wrap: anywhere; }
 .utterance-evidence, .utterance-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .utterance-actions button, .utterance-evidence button { border: 0; border-radius: 999px; cursor: pointer; padding: 5px 9px; }
 .gate-debug { font: 11px/1.5 monospace; opacity: .7; white-space: pre-line; }
