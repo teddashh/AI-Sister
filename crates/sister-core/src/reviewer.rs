@@ -177,6 +177,12 @@ pub fn format_review_result_with_consent_command(
                 r.refused_next_steps
             ));
         }
+        if r.dropped_evidence_refs > 0 {
+            out.push_str(&format!(
+                "她丟掉了 {} 筆模型引用、但這次根本沒給模型看過的證據；這不代表承諾被拒絕。\n",
+                r.dropped_evidence_refs
+            ));
+        }
         if r.calls_used > 0 {
             out.push_str(&format!(
                 "今日審閱呼叫 {}/{}（這一輪用了 {} 次）。\n",
@@ -381,6 +387,8 @@ pub struct ReviewResult {
     /// 模型指了一步、而她不接受的次數。**和 `divergences` 是兩個問題。**
     /// 那個數的是「兩份答案對不上」，這個數的是「兩份答案一致，但我拒絕了」。
     pub refused_next_steps: u32,
+    /// 模型引用了、而 prompt 根本沒給它看的 ref，被丟掉幾筆。
+    pub dropped_evidence_refs: u32,
     pub calls_used: u32,
     pub budget_used: u32,
     pub budget_limit: u32,
@@ -660,6 +668,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
             wrote_commitments: 0,
             divergences: 0,
             refused_next_steps: 0,
+            dropped_evidence_refs: 0,
             calls_used: 0,
             budget_used: used,
             budget_limit: limit,
@@ -684,6 +693,8 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
     // 她拒絕掉的下一步。和 `divergences` 分開數：一個是「兩份答案對不上」，
     // 一個是「兩份答案一致，而我不接受它們指的那筆 fact」。
     let mut refusals: Vec<String> = Vec::new();
+    // 這不是「拒絕下一步」；分開保存，避免污染 reviewer_run.detail 和拒絕計數。
+    let mut dropped_evidence_refs: Vec<String> = Vec::new();
     let mut calls = 0u32;
     let mut l2_revisions = 0u32;
     let mut budget_left = remaining;
@@ -730,6 +741,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                 originals.push(o);
             }
         }
+        let shown_refs = refs_shown_to_model(&originals, &facts);
         // 五類各自記一筆「我有去讀原件」，即使共用同一組 evidence。
         for cat in cats.iter().skip(1) {
             if let Some(r) = evidence.first() {
@@ -833,7 +845,15 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                 for key in keys {
                     match (map_a.get(&key), map_b.get(&key)) {
                         (Some(ca), Some(cb)) => match merge_commitment_passes(ca, cb) {
-                            Ok(merged) if merged.stands => {
+                            Ok(mut merged) if merged.stands => {
+                                merged.evidence_refs.retain(|reference| {
+                                    if shown_refs.contains(reference) {
+                                        true
+                                    } else {
+                                        dropped_evidence_refs.push(reference.clone());
+                                        false
+                                    }
+                                });
                                 if ca.allowed_next_step != cb.allowed_next_step {
                                     divergences += 1;
                                     divergence_rows.push((
@@ -1026,6 +1046,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         wrote_commitments: wrote,
         divergences,
         refused_next_steps: refusals.len() as u32,
+        dropped_evidence_refs: dropped_evidence_refs.len() as u32,
         calls_used: calls,
         budget_used: used + calls,
         budget_limit: limit,
@@ -1123,6 +1144,23 @@ fn dual_pass_prompt(
     debug_assert!(!truncated);
     s.push_str(&fenced);
     Ok(s)
+}
+
+/// 這一次 prompt 真的把哪些 ref 拿給模型看了。
+///
+/// **必須和 `dual_pass_prompt` 印出去的那兩行同一個來源**：那支函式印
+/// `fact:{id}`（facts）和 `[{r#ref}]`（originals），這裡就只能收這兩樣。
+/// 有人往 prompt 裡加第三種識別字而沒改這裡的話，多出來的那種會被當成
+/// 捏造的丟掉——方向是 fail-closed，不是放行。
+fn refs_shown_to_model(
+    originals: &[crate::db::L0Original],
+    facts: &[crate::db::FactRow],
+) -> std::collections::BTreeSet<String> {
+    originals
+        .iter()
+        .map(|original| original.r#ref.clone())
+        .chain(facts.iter().map(|fact| format!("fact:{}", fact.id)))
+        .collect()
 }
 
 /// 模型指的那一步，解出來是什麼。**三種，不是「一個 json 加一個 rejection」。**
@@ -1308,6 +1346,7 @@ fn skipped(reason: SkipReason, used: u32, limit: u32) -> ReviewResult {
         wrote_commitments: 0,
         divergences: 0,
         refused_next_steps: 0,
+        dropped_evidence_refs: 0,
         calls_used: 0,
         budget_used: used,
         budget_limit: limit,
@@ -2132,6 +2171,155 @@ mod tests {
             .expect("present");
         assert!(orig.text.contains("五點去接她"), "回查讀到的應是 OCR 原文");
         assert!(!orig.text.contains("在看接人的訊息") || orig.text.contains("LINE"));
+    }
+
+    #[test]
+    fn existing_frame_not_shown_to_model_is_dropped_from_evidence() {
+        let tmp = Tmp::new("unshown-existing-frame");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_225_000_000;
+        let (_sid, shown_fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let (_other_sid, unshown_fid) = seed(&mut db, ts + 1_000_000, "另一張真的存在的畫面");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{shown_fid}","frame:{unshown_fid}"]}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            shown_fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        assert_eq!(result.wrote_commitments, 1);
+        let row = db
+            .live_commitments()
+            .expect("commitments")
+            .pop()
+            .expect("one");
+        let refs: Vec<String> = serde_json::from_str(&row.evidence_json).expect("evidence json");
+        assert!(refs.contains(&format!("frame:{shown_fid}")));
+        assert!(
+            !refs.contains(&format!("frame:{unshown_fid}")),
+            "模型沒看過、但真的存在的 frame ref 不得寫進資料庫：{refs:?}"
+        );
+    }
+
+    fn run_evidence_filter_fixture(
+        label: &str,
+        evidence_refs: impl FnOnce(i64, i64, i64) -> Vec<String>,
+    ) -> (Vec<String>, ReviewResult, i64, i64, i64) {
+        let tmp = Tmp::new(label);
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_230_000_000;
+        let (_sid, shown_fid) = seed(&mut db, ts, "LINE：五點去接她 17:00 https://shown.example/");
+        let (_other_sid, unshown_fid) = seed(&mut db, ts + 1_000_000, "另一張真的存在的畫面");
+        let shown_fact = fact_id(&db, ts, "url", "https://shown.example/");
+        let refs = evidence_refs(shown_fid, unshown_fid, shown_fact);
+        let response = serde_json::json!({
+            "commitments": [{
+                "text": "五點去接她",
+                "stands": true,
+                "kind": "promise",
+                "due_hint": "17:00",
+                "due_source": "explicit",
+                "people": [],
+                "confidence": 0.8,
+                "evidence_refs": refs
+            }]
+        })
+        .to_string();
+        let (command, args) = fake_cli(&tmp.0, &response, &sentinel);
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            shown_fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        let row = db
+            .live_commitments()
+            .expect("commitments")
+            .pop()
+            .expect("one");
+        let stored = serde_json::from_str(&row.evidence_json).expect("evidence json");
+        (stored, result, shown_fid, unshown_fid, shown_fact)
+    }
+
+    #[test]
+    fn nonexistent_frame_is_dropped_from_evidence() {
+        let (refs, _, _, _, _) =
+            run_evidence_filter_fixture("nonexistent-frame", |_, _, _| vec!["frame:9999".into()]);
+        assert!(!refs.contains(&"frame:9999".to_string()));
+    }
+
+    #[test]
+    fn non_reference_string_is_dropped_from_evidence() {
+        let (refs, _, _, _, _) =
+            run_evidence_filter_fixture("non-ref", |_, _, _| vec!["這不是一個 ref".into()]);
+        assert!(!refs.contains(&"這不是一個 ref".to_string()));
+    }
+
+    #[test]
+    fn original_reference_shown_to_model_remains_in_evidence() {
+        let (refs, _, shown_fid, _, _) =
+            run_evidence_filter_fixture("shown-original", |shown_fid, _, _| {
+                vec![format!("frame:{shown_fid}")]
+            });
+        assert!(refs.contains(&format!("frame:{shown_fid}")));
+    }
+
+    #[test]
+    fn fact_reference_shown_to_model_remains_in_evidence() {
+        let (refs, _, _, _, shown_fact) =
+            run_evidence_filter_fixture("shown-fact", |_, _, shown_fact| {
+                vec![format!("fact:{shown_fact}")]
+            });
+        assert!(refs.contains(&format!("fact:{shown_fact}")));
+    }
+
+    #[test]
+    fn dropped_evidence_reference_count_matches_removed_refs() {
+        let (_, result, _, _, _) = run_evidence_filter_fixture("drop-count", |shown, unseen, _| {
+            vec![
+                format!("frame:{shown}"),
+                format!("frame:{unseen}"),
+                "frame:9999".into(),
+                "這不是一個 ref".into(),
+            ]
+        });
+        assert_eq!(result.dropped_evidence_refs, 3);
+    }
+
+    #[test]
+    fn dropping_evidence_refs_does_not_count_as_refused_next_steps() {
+        let (_, result, _, _, _) =
+            run_evidence_filter_fixture("drop-not-refusal", |_, _, _| vec!["frame:9999".into()]);
+        assert_eq!(result.refused_next_steps, 0);
+        assert!(result.dropped_evidence_refs > 0);
+    }
+
+    #[test]
+    fn review_result_only_mentions_dropped_evidence_when_nonzero() {
+        let (_, mut result, _, _, _) =
+            run_evidence_filter_fixture("drop-display", |_, _, _| vec!["frame:9999".into()]);
+        let stats = RecheckStats {
+            runs: Some(1),
+            candidates: Some(1),
+            rechecks: Some(1),
+            last_skip: None,
+        };
+        let shown = format_review_result(&result, &stats);
+        assert!(shown.contains("不代表承諾被拒絕"), "{shown}");
+        result.dropped_evidence_refs = 0;
+        let quiet = format_review_result(&result, &stats);
+        assert!(!quiet.contains("根本沒給模型看過"), "{quiet}");
     }
 
     fn run_next_step_fixture(
