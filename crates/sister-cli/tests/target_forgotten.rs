@@ -363,3 +363,190 @@ fn reused_fact_id_with_different_raw_is_treated_as_forgotten() {
         "stdout:\n{stdout}"
     );
 }
+
+#[derive(Clone, Copy)]
+enum RealRemoval {
+    Forget,
+    Prune,
+}
+
+fn run_real_removal(mode: RealRemoval) -> String {
+    let (label, target_at_ms, task_at_ms, review_span) = match mode {
+        RealRemoval::Forget => ("real-forget", 600_000, 0, "2h"),
+        RealRemoval::Prune => ("real-prune", 600_000, 0, "2h"),
+    };
+    let dir = std::env::temp_dir().join(format!("sister-target-{label}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let scenario = dir.join("scenario.json");
+    let task_step = serde_json::json!({
+        "at_ms": task_at_ms, "app": "chrome.exe", "app_name": "Google Chrome",
+        "title": "他在工作的視窗", "text": [TASK]
+    });
+    let target_step = serde_json::json!({
+        "at_ms": target_at_ms, "app": "slack.exe", "app_name": "Slack",
+        "title": "目標在另一個 app", "text": [URL]
+    });
+    let steps = vec![task_step, target_step];
+    std::fs::write(
+        &scenario,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "name": label,
+            "steps": steps
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    sister(
+        &dir,
+        None,
+        &[
+            "replay",
+            scenario.to_str().unwrap(),
+            "--interval-ms",
+            "60000",
+        ],
+    );
+
+    let mut db = Db::open(&Config::db_path(&dir)).unwrap();
+    let chunks = db.recent(100).unwrap();
+    let evidence = chunks.iter().find(|c| c.text.contains(TASK)).unwrap();
+    let frame_id = evidence.frame_id.unwrap();
+    let core = evidence.ts;
+    db.insert_l2_card(&L2Insert {
+        segment_core_start: core,
+        segment_ref: &format!("segment:{core}"),
+        activity: "閱讀工作頁面",
+        entities_json: "[]".into(),
+        commitments_json: serde_json::json!([{ "text": TASK, "source": TASK, "due_hint": null }])
+            .to_string(),
+        continues_json: None,
+        model_confidence: 0.9,
+        evidence_json: serde_json::json!([format!("frame:{frame_id}")]).to_string(),
+        open_questions_json: "[]".into(),
+        author: L2Author::Interpreter,
+    })
+    .unwrap();
+    let target = db
+        .facts_by_kind("url", 100)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.raw == URL)
+        .unwrap();
+    let target_id = target.id;
+    let target_chunk_id = target.chunk_id.unwrap();
+    let target_frame_id = target.frame_id.unwrap();
+    drop(db);
+
+    let response = serde_json::json!({
+        "commitments": [{
+            "text": TASK, "stands": true, "kind": "followup",
+            "due_hint": null, "due_source": "explicit", "people": [], "confidence": 0.9,
+            "evidence_refs": [format!("frame:{frame_id}")],
+            "allowed_next_step": {"fact": target_id}
+        }]
+    })
+    .to_string();
+    let script = dir.join("fake-brain.py");
+    std::fs::write(
+        &script,
+        format!(
+            "import sys\nsys.stdin.buffer.read()\nsys.stdout.buffer.write({response:?}.encode('utf-8'))\n"
+        ),
+    )
+    .unwrap();
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[brain]\ncommand = \"python3\"\nargs = [{}]\nreviewer_daily_budget = 40\n\
+             [retention]\ntext_days = 1\nframes_days = 1\n",
+            serde_json::to_string(&script.to_string_lossy()).unwrap()
+        ),
+    )
+    .unwrap();
+    sister(
+        &dir,
+        Some(&config),
+        &["consent", "--grant", "cloud-reading"],
+    );
+    sister(
+        &dir,
+        Some(&config),
+        &["review", "--last", review_span, "--force"],
+    );
+    let reviewed = Db::open(&Config::db_path(&dir))
+        .unwrap()
+        .live_commitments()
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(reviewed.allowed_next_step_fact, Some(target_id));
+
+    if matches!(mode, RealRemoval::Prune) {
+        let expired_at = sister_core::now_ms() - 172_800_000;
+        let conn = rusqlite::Connection::open(Config::db_path(&dir)).unwrap();
+        conn.execute(
+            "UPDATE facts SET ts = ?1 WHERE id = ?2",
+            rusqlite::params![expired_at, target_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE text_chunks SET ts = ?1 WHERE id = ?2",
+            rusqlite::params![expired_at, target_chunk_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE frames SET ts = ?1 WHERE id = ?2",
+            rusqlite::params![expired_at, target_frame_id],
+        )
+        .unwrap();
+    }
+
+    match mode {
+        RealRemoval::Forget => {
+            sister(&dir, None, &["forget", "--last", "5m", "--yes"]);
+        }
+        RealRemoval::Prune => {
+            sister(&dir, Some(&config), &["prune"]);
+        }
+    }
+
+    let grant = Grant::new(
+        Task::new(TASK),
+        AllowedApps::new([App::new("chrome.exe")]),
+        AllowedActions::new([ActionKind::OpenUrl]),
+        Expiry::after_issued(sister_core::now_ms(), 300_000),
+        StepLimit::new(1).unwrap(),
+    );
+    std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
+
+    let after = sister(
+        &dir,
+        None,
+        &["do", "--task", TASK, "--use-grant", "--unattended"],
+    );
+    let stdout = String::from_utf8(after.stdout).unwrap();
+    assert_eq!(executed(&dir), 0, "stdout:\n{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+    stdout
+}
+
+#[test]
+fn real_forget_makes_the_target_source_forgotten() {
+    let stdout = run_real_removal(RealRemoval::Forget);
+    assert!(
+        stdout.contains("這個目標的來源已經不在了（被忘掉、或過了保留期）"),
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn real_prune_makes_the_target_source_forgotten() {
+    let stdout = run_real_removal(RealRemoval::Prune);
+    assert!(
+        stdout.contains("這個目標的來源已經不在了（被忘掉、或過了保留期）"),
+        "stdout:\n{stdout}"
+    );
+}
