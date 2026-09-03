@@ -661,6 +661,16 @@ capture 層本身就是 recorder。
   - **`evidence_refs` 是兩個 pass 的聯集**，所以單一個 pass 就能決定一個落在
     授權路徑上的欄位。alpha.86 的來源檢查不管這件事——它只問「這個 ref 有沒有
     給模型看過」，不問「是哪一個 pass 說的」。（#53）
+  - **審閱者給每張卡片抓 fact 的視窗是寫死的一小時，那不是「這一段」。**
+    `reviewer.rs:709` 抓的是 `[card.segment_core_start, +3_600_000]`，可是 segment
+    的長度上限是 `segment.rs:18` 的 `TIME_CAP_MS = 10 分鐘`——所以那一小時**最多蓋
+    到六段**。後果：授權路徑上的 listed-facts 檢查（以及 alpha.86 新加的來源檢查）
+    看得到的 fact，包含這張卡片之後最多 59 分鐘內、**其他活動、其他 app** 出現過的
+    東西。配上上面那條 #42，被埋的網址的有效視窗是一小時而不是一段。
+    收緊的材料本來就有：segment 有真的結束時間（`activity.rs:31` 的
+    `core_ended_at`，另有 `OVERLAP_MARGIN_MS = 5 秒`），L2 卡片上的 `segment_ref`
+    （格式 `segment:{core}`）查得回去。**但這是產品行為的收窄，要先決定再做**，
+    而且要確認 `reviewer.rs` 裡好幾條用 `to_ts: ts + 400_000` 的既有測試還成立。（#48）
   - **字母人那半邊完全沒有這道檢查。** 上面講的全部只在 `sister do` 這條路上。
     `apps/desktop` 的 `hands_execute` → `sister_hands::execute_with(Level::Suggest,…)`
     **沒有 `Grant`、沒有 `StepRequest`、沒有 app 維度**，它直接拿 `allowed_next_step`
