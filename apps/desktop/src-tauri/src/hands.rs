@@ -1,13 +1,9 @@
 use sister_hands::{ActionEvent, ActionLog, ExecutionResult, Level, Outcome};
 use std::path::Path;
 
-pub fn outcome_message(outcome: &Outcome) -> String {
-    match outcome {
-        Outcome::Refused { reason } => format!("她沒有動手：{}", reason.message()),
-        Outcome::Failed { error } => format!("她動手了，但執行失敗：{error}"),
-        Outcome::Done { detail } => format!("動作完成：{detail}"),
-    }
-}
+// 按下去之後回給他的那一句話搬進 `sister_hands::outcome_message` 了，理由和
+// 底下 `recent_replay_lines` 那一段一樣：住在這裡的測試一列都不會被執行。
+pub use sister_hands::outcome_message;
 
 // 回放那段文案搬進 `sister_hands::replay_copy` 了，理由寫在那個模組開頭：CI 對
 // 這個 workspace 只跑 clippy 和 build，所以住在這裡的測試一列都不會被執行。
@@ -58,35 +54,4 @@ pub fn execute_logged(data_dir: &Path, raw: &str, now: i64) -> Result<String, St
     log.append(&terminal)
         .map_err(|e| format!("動作已有結果，但寫入結果日誌失敗：{e:#}"))?;
     Ok(outcome_message(&outcome))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use sister_hands::{ActionEvent, ActionSnapshot, ExecutionResult, Outcome, RefusalReason};
-
-    #[test]
-    fn outcome_copy_says_refused_failed_and_done_without_cross_talking() {
-        let refused = outcome_message(&Outcome::Refused {
-            reason: RefusalReason::ObserveHasNoHands,
-        });
-        assert!(refused.contains("沒有動手"));
-        assert!(!refused.contains("失敗"));
-        assert!(!refused.contains("完成"));
-
-        let failed = outcome_message(&Outcome::Failed {
-            error: "找不到".into(),
-        });
-        assert!(failed.contains("失敗"));
-        assert!(!failed.contains("沒有動手"));
-        assert!(!failed.contains("完成"));
-
-        let done = outcome_message(&Outcome::Done {
-            detail: "已接受".into(),
-        });
-        assert!(done.contains("完成"));
-        assert!(!done.contains("沒有動手"));
-        assert!(!done.contains("失敗"));
-    }
-
 }

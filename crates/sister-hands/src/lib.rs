@@ -441,6 +441,20 @@ pub enum Outcome {
     Done { detail: String },
 }
 
+/// 按下去之後，畫面上回給他的那一句話。
+///
+/// **住在這裡而不是字母人裡面**，理由和 [`crate::replay_copy`]、
+/// [`crate::target_policy`]、[`crate::platform`] 一樣：CI 對 `apps/desktop`
+/// 只跑 clippy 和 build，寫在那邊的 `#[cfg(test)]` 一列都不會被執行。
+/// 這一段是 [`Outcome`] 那三格「不准串話」的唯一出口，而那正是需要被守住的東西。
+pub fn outcome_message(outcome: &Outcome) -> String {
+    match outcome {
+        Outcome::Refused { reason } => format!("她沒有動手：{}", reason.message()),
+        Outcome::Failed { error } => format!("她動手了，但執行失敗：{error}"),
+        Outcome::Done { detail } => format!("動作完成：{detail}"),
+    }
+}
+
 /// 平台呼叫端提供實作者；測試只放 fake，不會真的開瀏覽器或視窗。
 pub trait Executor {
     fn execute(&mut self, suggestion: &Suggestion) -> std::result::Result<String, String>;
@@ -1583,5 +1597,29 @@ mod tests {
         assert_eq!(replay.unreadable.len(), 1);
         assert_eq!(replay.unreadable[0].line_no, 2, "行號要指得到那一列");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn outcome_copy_says_refused_failed_and_done_without_cross_talking() {
+        let refused = outcome_message(&Outcome::Refused {
+            reason: RefusalReason::ObserveHasNoHands,
+        });
+        assert!(refused.contains("沒有動手"));
+        assert!(!refused.contains("失敗"));
+        assert!(!refused.contains("完成"));
+
+        let failed = outcome_message(&Outcome::Failed {
+            error: "找不到".into(),
+        });
+        assert!(failed.contains("失敗"));
+        assert!(!failed.contains("沒有動手"));
+        assert!(!failed.contains("完成"));
+
+        let done = outcome_message(&Outcome::Done {
+            detail: "已接受".into(),
+        });
+        assert!(done.contains("完成"));
+        assert!(!done.contains("沒有動手"));
+        assert!(!done.contains("失敗"));
     }
 }

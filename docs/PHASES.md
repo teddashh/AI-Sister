@@ -438,7 +438,14 @@ capture 層本身就是 recorder。
   - 寫的人在 `sister-core`、讀的人在 `sister-hands`，中間沒有型別。量過：
     把讀的那一邊欄位改名、連它自己測試的字面值一起改，兩邊 28 條全綠而按鈕
     是壞的。`the_next_step_this_crate_writes_is_one_the_hands_crate_can_read_and_will_allow`
-    站在那條縫上（sister-hands 是 sister-core 的 dev-dependency，不進出貨相依樹）。
+    站在那條縫上。（那條測試當初靠的是「sister-hands 只是 sister-core 的
+    dev-dependency」；**alpha.87 之後不是了**——`target_app_for_button` 搬進
+    `sister-core` 之後，生產碼自己要吃 `SuggestionButton`，所以升成正式相依。
+    出貨相依樹因此多了 sister-hands——但出貨的兩個 binary（`sister` 與
+    `sister-desktop`）本來就各自直接依賴它，所以執行檔裡不會多出任何東西。
+    sister-hands 自己的相依是 anyhow / chrono / serde / serde_json，
+    加上 `cfg(windows)` 的 `windows` crate；`scripts/check-no-network.sh` 的
+    `--edges normal` 不會因此多出 HTTP client。）
 - 🔶 `semi-action` 級：平台無關的核心做好了——結構化 grant
   （`Task`/`AllowedApps`/`AllowedActions`/`Expiry`/`StepLimit`）、
   `Grant::covers` 逐維拒絕、內容綁定的 `PresentedStep::approve` → `StepApproval`
@@ -686,16 +693,48 @@ capture 層本身就是 recorder。
     `scripts/check-windows.sh` 都只 **build／clippy**，不 `cargo test`。
     於是 `main.rs` 裡那些 `#[test]`——包含 alpha.86 新加的兩條——**從來沒有跑
     過一次**，綠燈只代表它們編得起來。（本機也跑不動：缺 `libdbus-1-dev`，
-    `libdbus-sys` build.rs 直接 panic。）這一條要嘛把它併進根 workspace，要嘛
-    在 CI 上補一個會真的跑桌面測試的 job。
+    `libdbus-sys` build.rs 直接 panic。）
+    **alpha.87 把那三條全部搬走了**，走的是 `target_policy` / `replay_copy` /
+    `platform` 當初那條路——不是改 workspace 結構，是把邏輯搬到跑得到測試的
+    crate：`target_app_for_button`＋新的 `suggestion_text` 進 `sister-core::db`
+    （兩條測試跟著搬），`outcome_message` 進 `sister-hands`（一條跟著搬）。
+    量過：搬之前 `cargo test --workspace` 的輸出裡那三個名字出現 **0 次**，
+    搬之後 3 次。四個突變各自釘住一條：目標查出來丟掉→第一條紅；
+    不看 `expected_target` 就去查 fact→第二條紅（閉包裡的 `panic!`）；
+    `label`／`target_provenance` 對調→兩條都紅；`Refused` 那格改講「動作完成」
+    →第三條紅。`apps/desktop` 現在 `#[test]` **零條**，所以「寫在那邊等於沒寫」
+    這件事不再有機會發生；剩下的是 Tauri command 的接線，那要靠真視窗上的
+    那一遍（見驗收清單）。
   - **injection 套件會間歇性變紅，而且紅的時候 evil URL 真的被執行了**——不是
     斷言太嚴，是 `executed` 那行真的寫進 `action-log.jsonl`。加了觀測之後它不再
-    重現（heisenbug），拿掉觀測也沒回來——**還沒抓到**。
-    測試檔本身與 alpha.82 逐位元組相同，**但那不足以證明行為沒變**：這一輪動的
-    `step_app`、`reviewer.rs`、schema 全都在那套測試的執行路徑上。真正撐住「不是
-    這一輪造成的」這句話的是機制——那套語料埋的兩格畫面**都是 `chrome.exe`**，
-    所以目標 app 併進來只是再投一票 chrome，app 那一維的結果不變；擋它的始終是
-    `EVIL_AT_MS` 落在一小時窗外的 listed-facts 檢查。
+    重現（heisenbug），拿掉觀測也沒回來。
+    **alpha.87 抓到了：成因是我自己的工具，不是產品。** 先量了四件事、
+    排掉兩個機制：
+    (1) 那份腳本產出的時間戳**完全不看真實時鐘**——`grab_screen` 蓋的是 tick 的
+    `ts`，而 `replay` 的迴圈是 `origin + k×interval`。實測 evil 那筆 fact 一定
+    落在第一格畫面之後 3,700,000 ms，窗是 3,600,000 ms，**margin 是固定的 100 秒**，
+    不會漂。(2) `sister review` 不會自己生 L2 卡片（沒有種卡片時它說「這段期間
+    沒有還沒審過的 L2 假設」、`l2_card` 是空的），所以沒有第二張卡片的窗可以罩住
+    evil。(3) 本機連跑 **260 次**（60 次 6 路並行＋200 次 10 路並行，24 核）全綠。
+    (4) **它從來沒有在 CI 上紅過**：`gh run list --limit 120` 的窗從 2026-08-25
+    起算，而這個測試檔 2026-08-29 13:31 才加進來，**整段壽命都在窗內**；那 10 次
+    紅逐一看過 `--log-failed`，全部是別的東西（Windows 的 CJK 引號那批）。
+    所以當初看到的紅是**本機**的，不是 CI 的。
+    然後**照著嫌疑犯重現了一次**：alpha.83 的
+    收貨清單裡有一條「M-F 關掉 listed-facts 檢查 → `all_twenty_injections_...`」，
+    **紅的那個名字正好是那個突變的靶子**。實測三步——
+    (a) 套上 M-F 跑：只有那一條紅，其餘六條全綠，和當初看到的一模一樣；
+    (b) 用 `cp -p` 還原（把備份的舊 mtime 一起搬回去）再跑：`git diff` **是空的**、
+    cargo 印 `Finished in 0.03s`（判定 fresh、沒有重編），而那一條**還是紅的**；
+    (c) `touch` 一下、一個字都沒改：重編，七條全綠。
+    heisenbug 的方向因此也解釋掉了——「加一行觀測」＝改了原始檔＝這才真的重編，
+    所以觀測一加上去它就好了；「拿掉觀測」又改了一次檔，所以也不會回來。
+    **沒有改任何產品程式碼。** 教訓寫在這裡：還原突變之後要 `touch` 再跑，
+    否則紅的是鬼——而且鬼會挑上一個突變的靶子。
+    （當初寫在這裡的那段辯護——「測試檔與 alpha.82 逐位元組相同」不足以證明行為
+    沒變，真正撐住的是那套語料埋的兩格畫面**都是 `chrome.exe`**，所以目標 app
+    併進來只是再投一票 chrome——仍然成立，只是不再是這一格需要的東西了。
+    擋這套測試的始終是 `EVIL_AT_MS` 落在一小時窗外的 listed-facts 檢查。）
   - **舊承諾沒有升級路徑。** migration 014 只是把欄位加上去（既有的列是 NULL），
     沒有 backfill，`insert_commitment` 也只有 INSERT、沒有比對既有列的去重，所以
     重跑 `review` 是**多一筆**承諾而不是把舊那筆補齊。結論：這一版的檢查只對之後
@@ -704,8 +743,12 @@ capture 層本身就是 recorder。
   - `db.rs` 的 `query_map(...).flatten()`：讀失敗的那一列會被**安靜丟掉**，於是
     「沒有」和「讀不出來」又是同一種 0。`facts_in_range`（`db.rs:3453`）也在裡面
     ——它正好是上面那道 listed-facts 檢查的資料來源。
-    **alpha.86 修了 19 處**（血緣 cascade ＋ 出境／稽核匯出兩類），改成把 `Err`
-    往上帶。**查詢與顯示路徑上還有 23 處沒碰**：`search`、`recent`、
+    **alpha.86 修了 19 處**，改成把 `Err` 往上帶。**不是兩類，是五類**——把 diff
+    每個 hunk 對回它所在的函式才算得出來（憑印象寫會漏掉後果最重的那一格）：
+    血緣 cascade（`collect_cascade_parents`、`tombstone_descendants`）、
+    **授權路徑上的 fact 清單（`facts_in_range`）**、審閱者的輸入
+    （`l0_original`、`l2_in_range`）、出境與稽核的匯出（`list_brain_outbound`、
+    `list_brain_skip`、`exclusion_audit`、`pause_audit`），以及承諾清單與其他查詢。**查詢與顯示路徑上還有 23 處沒碰**：`search`、`recent`、
     `chunks_in_range`、`query_log`、`marked_queries`、`search_like`、
     `fact_sightings`、`facts_by_kind`、`facts_search`、`days_with_data`、
     `timeline`、`segment_events`（四處）、`clipboard_in_range`、

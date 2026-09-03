@@ -28,23 +28,16 @@ rusqlite.workspace = true
 tracing.workspace = true
 directories.workspace = true
 getrandom.workspace = true
-
-# **只有測試用得到，出貨的相依樹裡沒有它。**
+# 字母人建議按鈕上的兩句話（`suggestion_text`）和「要不要去查那筆 fact」
+# （`target_app_for_button`）都吃 `SuggestionButton`。這兩支以前住在
+# `apps/desktop`，那裡的 `#[test]` 從來沒跑過；搬進來之後 `cargo test
+# --workspace` 才真的會執行。
 #
-# reviewer 寫進 `commitments.allowed_next_step` 的那一串 JSON，全世界只有
-# `sister_hands::SuggestionButton::parse_json` 會去讀。兩邊都有測試，但兩邊
-# 的測試都是拿自己那一半去比對一段寫死的字面值——欄位改名、或
-# `deny_unknown_fields` 多擋掉一個欄位，兩邊照樣全綠，壞掉的地方要等到他按
-# 下去那一刻才會出現。那條縫需要有人站在中間，而站得到的人必須同時看得見兩
-# 個 crate。
+# 測試也用得到它：reviewer 寫進 `commitments.allowed_next_step` 的那一串
+# JSON，全世界只有 `sister_hands::SuggestionButton::parse_json` 會去讀。
+# 兩邊各自拿寫死的字面值跟自己比對，欄位改名兩邊照樣全綠——那條縫需要有
+# 人站在中間。
 #
-# 挑 dev-dependency，而不是把測試放進本來就同時看得見兩邊的 `apps/desktop`：
-# CI 對那個 crate 只跑 clippy 和 build，沒有 `cargo test`，而且它在 Linux 上
-# 缺 dbus 連編都編不起來。放在那裡的測試等於沒寫——`target_policy` 當初就是
-# 為了同一件事搬出來的。
-#
-# `scripts/check-no-network.sh` 走 `--edges normal`，dev-dependency 不會被算
-# 進去。這不是繞過它，是那支 script 開頭第 16 行就寫明的選擇；sister-hands
-# 自己的相依只有 anyhow / serde / serde_json。
-[dev-dependencies]
+# sister-hands 自己的相依只有 anyhow / serde / serde_json / chrono，
+# `scripts/check-no-network.sh` 走 `--edges normal` 不會因此多出 HTTP client。
 sister-hands.workspace = true
