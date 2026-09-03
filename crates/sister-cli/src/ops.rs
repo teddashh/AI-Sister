@@ -2163,7 +2163,8 @@ pub mod act {
 
     fn unattended_target_frame_refusal(
         source: &impl StepSource,
-        evidence_json: &str,
+        agreed_evidence_json: Option<&str>,
+        union_evidence_json: &str,
         target: Option<(i64, &str)>,
     ) -> Result<Option<(String, sister_hands::TargetFrameGap)>> {
         let Some((fact_id, expected_raw)) = target else {
@@ -2205,14 +2206,41 @@ pub mod act {
             }
             TargetFrame::Known(id) => id,
         };
-        let evidence_refs: Vec<String> = serde_json::from_str(evidence_json)
-            .with_context(|| format!("證據清單不是 JSON 字串陣列：{evidence_json}"))?;
-        if evidence_refs
-            .iter()
-            .any(|reference| reference == &format!("frame:{frame_id}"))
-        {
-            Ok(None)
+        let Some(agreed_json) = agreed_evidence_json else {
+            return Ok(Some((
+                "無人值守拒絕：這筆承諾記在加這道檢查之前，問不出兩個 pass 同不同意這張畫面。"
+                    .into(),
+                sister_hands::TargetFrameGap::RecordedBeforeAgreedEvidence,
+            )));
+        };
+        let agreed_refs: Vec<String> = serde_json::from_str(agreed_json).with_context(|| {
+            format!("兩個 pass 都指過的證據清單不是 JSON 字串陣列：{agreed_json}")
+        })?;
+        let target_ref = format!("frame:{frame_id}");
+        if agreed_refs.iter().any(|reference| reference == &target_ref) {
+            return Ok(None);
+        }
+        let union_refs: Vec<String> = serde_json::from_str(union_evidence_json)
+            .with_context(|| format!("證據清單不是 JSON 字串陣列：{union_evidence_json}"))?;
+        if union_refs.iter().any(|reference| reference == &target_ref) {
+            Ok(Some((
+                format!(
+                    "無人值守拒絕：只有一個 pass 指過下一步目標 fact:{fact_id} 的畫面 frame:{frame_id}。"
+                ),
+                sister_hands::TargetFrameGap::CitedByOnlyOnePass,
+            )))
         } else {
+            // **這裡不能再分出一句「兩個 pass 一張畫面都沒有共同指過」。**
+            // 走到這一行代表目標那張畫面**不在聯集裡**，也就是兩個 pass 誰都沒指過
+            // 它——`agreed_refs` 是不是空的，跟這一步為什麼被擋下來無關。真要那樣
+            // 分，唯一到得了的輸入就是「連聯集都空了」，而那時候誠實的診斷仍然是
+            // 這一句。（原本那句話是我 SPEC 要求的，是我寫錯：`[]` 是那個集合的
+            // 性質，不是這一步的拒絕理由。）
+            //
+            // 差別會害人：「沒有共識」讀起來像兩個 pass 吵架，於是去看分歧紀錄；
+            // 實際發生的是這個目標的來源畫面從頭到尾沒被當成證據——那是 #49 那道
+            // 檢查在擋，該查的是那筆 fact 哪來的。
+            // 「只有一個 pass 指過」才是共識問題，它在上面那一臂。
             Ok(Some((
                 format!(
                     "無人值守拒絕：承諾沒有引用下一步目標 fact:{fact_id} 的畫面 frame:{frame_id}。"
@@ -2754,6 +2782,7 @@ pub mod act {
             let authorized = if opts.unattended {
                 if let Some((message, why)) = unattended_target_frame_refusal(
                     source,
+                    commitment.agreed_evidence_json.as_deref(),
                     &commitment.evidence_json,
                     commitment
                         .allowed_next_step_fact
@@ -3324,12 +3353,14 @@ pub mod act {
             allowed_next_step_fact: Option<i64>,
         ) -> CommitmentRow {
             let refs: Vec<String> = frames.iter().map(|f| format!("frame:{f}")).collect();
+            let evidence_json = serde_json::to_string(&refs).expect("evidence json");
             CommitmentRow {
                 id,
                 text: format!("承諾 {id}"),
                 kind: "promise".into(),
                 born_from: 1,
-                evidence_json: serde_json::to_string(&refs).expect("evidence json"),
+                evidence_json: evidence_json.clone(),
+                agreed_evidence_json: Some(evidence_json),
                 people_json: "[]".into(),
                 due_hint: None,
                 due_source: None,
@@ -3344,6 +3375,123 @@ pub mod act {
                 updated_at: 1,
                 tombstoned_at: None,
             }
+        }
+
+        fn target_on_frame(frame_id: i64) -> Source {
+            Source {
+                target_frames: [(1, TargetFrame::Known(frame_id))].into_iter().collect(),
+                ..Source::default()
+            }
+        }
+
+        #[test]
+        fn unattended_proceeds_when_both_passes_cited_the_target_frame() {
+            let refusal = unattended_target_frame_refusal(
+                &target_on_frame(10),
+                Some(r#"["frame:10"]"#),
+                r#"["frame:10"]"#,
+                Some((1, "https://example.com")),
+            )
+            .unwrap();
+            assert_eq!(refusal, None);
+        }
+
+        #[test]
+        fn unattended_refuses_when_only_one_pass_cited_the_target_frame() {
+            // 聯集含目標畫面、交集不含。舊行為讀聯集會放行。
+            let (message, why) = unattended_target_frame_refusal(
+                &target_on_frame(10),
+                Some("[]"),
+                r#"["frame:1","frame:10"]"#,
+                Some((1, "https://example.com")),
+            )
+            .unwrap()
+            .expect("refused");
+            assert!(message.contains("只有一個 pass 指過"), "{message}");
+            assert_eq!(why, sister_hands::TargetFrameGap::CitedByOnlyOnePass);
+        }
+
+        #[test]
+        fn unattended_refuses_old_commitment_with_null_agreed_evidence() {
+            let (message, why) = unattended_target_frame_refusal(
+                &target_on_frame(10),
+                None,
+                r#"["frame:10"]"#,
+                Some((1, "https://example.com")),
+            )
+            .unwrap()
+            .expect("refused");
+            assert!(message.contains("記在加這道檢查之前"), "{message}");
+            assert!(message.contains("問不出兩個 pass 同不同意"), "{message}");
+            assert!(!message.contains("只有一個 pass 指過"), "{message}");
+            assert!(!message.contains("一張畫面都沒有共同指過"), "{message}");
+            assert_eq!(
+                why,
+                sister_hands::TargetFrameGap::RecordedBeforeAgreedEvidence
+            );
+        }
+
+        #[test]
+        fn unattended_null_and_empty_agreed_evidence_are_different_sentences() {
+            let source = target_on_frame(10);
+            let target = Some((1, "https://example.com"));
+            let (null_msg, null_why) = unattended_target_frame_refusal(&source, None, "[]", target)
+                .unwrap()
+                .expect("null refused");
+            let (empty_msg, empty_why) =
+                unattended_target_frame_refusal(&source, Some("[]"), "[]", target)
+                    .unwrap()
+                    .expect("empty refused");
+            assert_ne!(null_msg, empty_msg);
+            assert_ne!(null_why, empty_why);
+            assert!(null_msg.contains("記在加這道檢查之前"), "{null_msg}");
+            assert!(!null_msg.contains("承諾沒有引用"), "{null_msg}");
+            assert_eq!(
+                null_why,
+                sister_hands::TargetFrameGap::RecordedBeforeAgreedEvidence
+            );
+            // 交集是 `[]` **而且**聯集也沒有這張畫面 → 誰都沒指過它。這一格講的就
+            // 是這件事，不是「兩個 pass 沒共識」。要走到這裡，聯集非空就不可能，
+            // 所以沒有第四句話可以講。
+            assert!(empty_msg.contains("承諾沒有引用"), "{empty_msg}");
+            assert!(!empty_msg.contains("記在加這道檢查之前"), "{empty_msg}");
+            assert_eq!(empty_why, sister_hands::TargetFrameGap::FrameNotCited);
+        }
+
+        #[test]
+        fn an_empty_agreed_set_still_names_the_reason_this_step_was_blocked() {
+            // 同一個空交集，兩種聯集：拒絕的理由必須跟著**目標那張畫面在不在聯集裡**
+            // 走，不是跟著「交集空不空」走。這條釘住 `agreed_refs.is_empty()` 不會
+            // 再爬回來當一個分支。
+            let source = target_on_frame(10);
+            let target = Some((1, "https://example.com"));
+            let (cited_msg, cited_why) = unattended_target_frame_refusal(
+                &source,
+                Some("[]"),
+                r#"["frame:10"]"#, // 有一個 pass 指過
+                target,
+            )
+            .unwrap()
+            .expect("refused");
+            let (uncited_msg, uncited_why) = unattended_target_frame_refusal(
+                &source,
+                Some("[]"),
+                r#"["frame:1"]"#, // 誰都沒指過 frame:10
+                target,
+            )
+            .unwrap()
+            .expect("refused");
+            assert_eq!(
+                cited_why,
+                sister_hands::TargetFrameGap::CitedByOnlyOnePass,
+                "{cited_msg}"
+            );
+            assert_eq!(
+                uncited_why,
+                sister_hands::TargetFrameGap::FrameNotCited,
+                "{uncited_msg}"
+            );
+            assert_ne!(cited_msg, uncited_msg);
         }
 
         fn open_url(url: &str) -> String {

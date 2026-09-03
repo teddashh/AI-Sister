@@ -377,3 +377,313 @@ fn target_on_a_frame_the_card_cited_still_executes_unattended() {
     assert_eq!(executed, 1, "stdout:\n{stdout}");
     assert!(!stdout.contains("無人值守拒絕"), "stdout:\n{stdout}");
 }
+
+fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, String, usize) {
+    let dir = tmp(label);
+    let scenario = dir.join("scenario.json");
+    std::fs::write(
+        &scenario,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "name": "agreed-evidence-probe",
+            "steps": [
+                {
+                    "at_ms": 0,
+                    "app": "chrome.exe",
+                    "app_name": "Google Chrome",
+                    "title": "他真的在工作的那個視窗",
+                    "text": [TASK]
+                },
+                {
+                    "at_ms": 60_000,
+                    "app": "chrome.exe",
+                    "app_name": "Google Chrome",
+                    "title": "下一步目標",
+                    "text": [OTHER_APP_URL]
+                },
+                {
+                    "at_ms": 120_000,
+                    "app": "chrome.exe",
+                    "app_name": "Google Chrome",
+                    "title": "下一步目標",
+                    "text": ["他繼續在同一個視窗做事"]
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    sister(
+        &dir,
+        None,
+        &[
+            "replay",
+            scenario.to_str().unwrap(),
+            "--interval-ms",
+            "60000",
+        ],
+    );
+
+    let mut db = Db::open(&Config::db_path(&dir)).unwrap();
+    let chunks = db.recent(100).unwrap();
+    let evidence = chunks
+        .iter()
+        .find(|c| c.text.contains(TASK))
+        .expect("task chunk");
+    let work_frame = evidence.frame_id.expect("work frame");
+    let target_chunk = chunks
+        .iter()
+        .find(|c| c.text.contains(OTHER_APP_URL))
+        .expect("target chunk");
+    let last_ts = chunks.iter().map(|c| c.ts).max().unwrap_or(evidence.ts);
+    let segs = db
+        .chapters_for_range(evidence.ts, last_ts.saturating_add(1_000))
+        .expect("compute segments");
+    let core = segs
+        .iter()
+        .find(|s| s.core_started_at <= target_chunk.ts && target_chunk.ts < s.core_ended_at)
+        .unwrap_or_else(|| {
+            panic!(
+                "no segment covering the target frame at {}",
+                target_chunk.ts
+            )
+        })
+        .core_started_at;
+    let target = db
+        .facts_by_kind("url", 100)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.raw == OTHER_APP_URL)
+        .expect("target fact");
+    let target_frame = target.frame_id.expect("target frame");
+    db.insert_l2_card(&L2Insert {
+        segment_core_start: core,
+        segment_ref: &format!("segment:{core}"),
+        activity: "閱讀工作頁面",
+        entities_json: "[]".into(),
+        commitments_json: serde_json::json!([{ "text": TASK, "source": TASK, "due_hint": null }])
+            .to_string(),
+        continues_json: None,
+        model_confidence: 0.9,
+        evidence_json: serde_json::json!([
+            format!("frame:{work_frame}"),
+            format!("frame:{target_frame}")
+        ])
+        .to_string(),
+        open_questions_json: "[]".into(),
+        author: L2Author::Interpreter,
+    })
+    .unwrap();
+
+    let commitment_body = |refs: Vec<String>| {
+        serde_json::json!({
+            "commitments": [{
+                "text": TASK,
+                "stands": true,
+                "kind": "followup",
+                "due_hint": null,
+                "due_source": "explicit",
+                "people": [],
+                "confidence": 0.9,
+                "evidence_refs": refs,
+                "allowed_next_step": {"fact": target.id}
+            }]
+        })
+        .to_string()
+    };
+    let json_a = commitment_body(vec![format!("frame:{target_frame}")]);
+    let json_b = if pass_b_cites_target {
+        json_a.clone()
+    } else {
+        commitment_body(vec![format!("frame:{work_frame}")])
+    };
+    let script = dir.join("fake-brain.py");
+    std::fs::write(
+        &script,
+        format!(
+            "import sys\npayload = sys.stdin.buffer.read()\nbody = {json_b:?}.encode('utf-8') if b'PASS_B' in payload else {json_a:?}.encode('utf-8')\nsys.stdout.buffer.write(body)\n"
+        ),
+    )
+    .unwrap();
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[brain]\ncommand = \"python3\"\nargs = [{}]\nreviewer_daily_budget = 40\n",
+            serde_json::to_string(&script.to_string_lossy()).unwrap()
+        ),
+    )
+    .unwrap();
+
+    sister(
+        &dir,
+        Some(&config),
+        &["consent", "--grant", "cloud-reading"],
+    );
+    sister(&dir, Some(&config), &["review", "--last", "2h", "--force"]);
+
+    let grant = Grant::new(
+        Task::new(TASK),
+        AllowedApps::new([App::new("chrome.exe")]),
+        AllowedActions::new([ActionKind::OpenUrl]),
+        Expiry::after_issued(sister_core::now_ms(), 300_000),
+        StepLimit::new(1).unwrap(),
+    );
+    std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
+    let action = sister(
+        &dir,
+        None,
+        &["do", "--task", TASK, "--use-grant", "--unattended"],
+    );
+    let stdout = String::from_utf8(action.stdout).unwrap();
+    let log = std::fs::read_to_string(dir.join("action-log.jsonl")).unwrap_or_default();
+    let executed = log
+        .lines()
+        .filter(|line| line.contains("\"event\":\"executed\""))
+        .count();
+    (dir, stdout, executed)
+}
+
+#[test]
+fn unattended_proceeds_when_both_passes_cited_the_target_frame() {
+    let (_, stdout, executed) = run_agreed_unattended("agreed-both", true);
+    assert_eq!(executed, 1, "stdout:\n{stdout}");
+    assert!(!stdout.contains("無人值守拒絕"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn unattended_refuses_when_only_one_pass_cited_the_target_frame() {
+    let (dir, stdout, executed) = run_agreed_unattended("agreed-one-pass", false);
+    assert_eq!(executed, 0, "stdout:\n{stdout}");
+    assert!(stdout.contains("只有一個 pass 指過"), "stdout:\n{stdout}");
+    let db = Db::open(&Config::db_path(&dir)).unwrap();
+    let commitment = db.live_commitments().unwrap().pop().expect("commitment");
+    let target_fact = db
+        .fact_by_id(
+            commitment
+                .allowed_next_step_fact
+                .expect("reviewed next-step fact"),
+        )
+        .unwrap()
+        .expect("target fact");
+    let target_ref = format!("frame:{}", target_fact.frame_id.expect("target frame"));
+    let union: Vec<String> = serde_json::from_str(&commitment.evidence_json).unwrap();
+    assert!(
+        union.contains(&target_ref),
+        "同一份資料在舊行為下讀聯集會放行：{union:?}"
+    );
+    let agreed = match commitment.agreed_evidence_json.as_deref() {
+        None => panic!("新寫入的承諾不該是 NULL"),
+        Some(json) => serde_json::from_str::<Vec<String>>(json).unwrap(),
+    };
+    assert!(
+        !agreed.contains(&target_ref),
+        "交集不該含只有一個 pass 指過的畫面：{agreed:?}"
+    );
+    let log = std::fs::read_to_string(dir.join("action-log.jsonl")).expect("action log");
+    assert!(
+        log.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|event| event["event"] == "refused"
+                && event["reason"]["refusal"] == "unattended_target_has_no_cited_frame"
+                && event["reason"]["why"] == "cited_by_only_one_pass"),
+        "action log:\n{log}"
+    );
+}
+
+#[test]
+fn unattended_refuses_old_commitment_recorded_before_agreed_evidence() {
+    let (dir, _, _) = run_agreed_unattended("agreed-null-old", true);
+    {
+        let conn = rusqlite::Connection::open(Config::db_path(&dir)).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE commitments DROP COLUMN agreed_evidence_json;
+             PRAGMA user_version = 14;",
+        )
+        .unwrap();
+    }
+    let db = Db::open(&Config::db_path(&dir)).unwrap();
+    let commitment = db.live_commitments().unwrap().pop().expect("commitment");
+    assert_eq!(commitment.agreed_evidence_json, None);
+    drop(db);
+
+    let grant = Grant::new(
+        Task::new(TASK),
+        AllowedApps::new([App::new("chrome.exe")]),
+        AllowedActions::new([ActionKind::OpenUrl]),
+        Expiry::after_issued(sister_core::now_ms(), 300_000),
+        StepLimit::new(1).unwrap(),
+    );
+    std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
+    let _ = std::fs::remove_file(dir.join("action-log.jsonl"));
+    let action = sister(
+        &dir,
+        None,
+        &["do", "--task", TASK, "--use-grant", "--unattended"],
+    );
+    let stdout = String::from_utf8(action.stdout).unwrap();
+    let log = std::fs::read_to_string(dir.join("action-log.jsonl")).unwrap_or_default();
+    let executed = log
+        .lines()
+        .filter(|line| line.contains("\"event\":\"executed\""))
+        .count();
+    assert_eq!(executed, 0, "stdout:\n{stdout}");
+    assert!(stdout.contains("記在加這道檢查之前"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("問不出兩個 pass 同不同意"),
+        "stdout:\n{stdout}"
+    );
+    assert!(!stdout.contains("只有一個 pass 指過"), "stdout:\n{stdout}");
+    assert!(
+        log.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|event| event["event"] == "refused"
+                && event["reason"]["why"] == "recorded_before_agreed_evidence"),
+        "action log:\n{log}"
+    );
+}
+
+#[test]
+fn unattended_empty_agreed_evidence_is_not_the_null_sentence() {
+    let (dir, _, _) = run_agreed_unattended("agreed-empty", true);
+    {
+        let conn = rusqlite::Connection::open(Config::db_path(&dir)).unwrap();
+        // 兩欄都清掉。**只清交集是到不了這一格的**：聯集還留著目標那張畫面時，
+        // 拒絕的理由會是「只有一個 pass 指過」。這件事本身就是「交集是空的」當不
+        // 成獨立拒絕理由的證明——要造出那個狀態，得先讓聯集也空掉，而那時候誰都
+        // 沒指過那張畫面，該講的就是這一句。
+        conn.execute(
+            "UPDATE commitments SET agreed_evidence_json = '[]', evidence_json = '[]'",
+            [],
+        )
+        .unwrap();
+    }
+    let grant = Grant::new(
+        Task::new(TASK),
+        AllowedApps::new([App::new("chrome.exe")]),
+        AllowedActions::new([ActionKind::OpenUrl]),
+        Expiry::after_issued(sister_core::now_ms(), 300_000),
+        StepLimit::new(1).unwrap(),
+    );
+    std::fs::write(grant_path(&dir), serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
+    let _ = std::fs::remove_file(dir.join("action-log.jsonl"));
+    let action = sister(
+        &dir,
+        None,
+        &["do", "--task", TASK, "--use-grant", "--unattended"],
+    );
+    let stdout = String::from_utf8(action.stdout).unwrap();
+    assert!(
+        stdout.contains("承諾沒有引用下一步目標"),
+        "stdout:\n{stdout}"
+    );
+    assert!(!stdout.contains("記在加這道檢查之前"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("只有一個 pass 指過"), "stdout:\n{stdout}");
+    let log = std::fs::read_to_string(dir.join("action-log.jsonl")).unwrap_or_default();
+    assert!(
+        log.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|event| event["event"] == "refused"
+                && event["reason"]["why"] == "frame_not_cited"),
+        "action log:\n{log}"
+    );
+}

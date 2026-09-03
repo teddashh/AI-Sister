@@ -436,6 +436,9 @@ pub struct ReviewCommitment {
     pub confidence: Option<f64>,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
+    /// 兩個 pass 都列到的 ref。模型回覆沒有這一欄——`skip` 讓它塞進來也不會被讀。
+    #[serde(skip)]
+    pub agreed_evidence_refs: Vec<String>,
     #[serde(default)]
     pub allowed_next_step: Option<NextStepRef>,
 }
@@ -482,6 +485,12 @@ pub fn merge_commitment_passes(
     let mut evidence: BTreeSet<String> = BTreeSet::new();
     evidence.extend(a.evidence_refs.iter().cloned());
     evidence.extend(b.evidence_refs.iter().cloned());
+    // 聯集是「她這一輪看了什麼」；交集才是「什麼可以替一步背書」。
+    // 不讀 a/b 的 `agreed_evidence_refs`：那一欄是合併算的，模型塞進來的值
+    // 在反序列化時已被 skip 丟掉，這裡再算一次，兩邊對得起來。
+    let a_refs: BTreeSet<String> = a.evidence_refs.iter().cloned().collect();
+    let b_refs: BTreeSet<String> = b.evidence_refs.iter().cloned().collect();
+    let agreed: Vec<String> = a_refs.intersection(&b_refs).cloned().collect();
     let conf = match (a.confidence, b.confidence) {
         (Some(x), Some(y)) => Some(x.min(y)),
         (Some(x), None) => Some(x),
@@ -497,6 +506,7 @@ pub fn merge_commitment_passes(
         people: a.people.clone(),
         confidence: conf,
         evidence_refs: evidence.into_iter().collect(),
+        agreed_evidence_refs: agreed,
         allowed_next_step: if a.allowed_next_step == b.allowed_next_step {
             a.allowed_next_step.clone()
         } else {
@@ -897,6 +907,11 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                                         false
                                     }
                                 });
+                                // 交集過同一道濾網。濾掉的不算進 `dropped_evidence_refs`：
+                                // 那句話數的是聯集裡丟掉的筆數，同一筆 ref 數兩次會讓它變假話。
+                                merged
+                                    .agreed_evidence_refs
+                                    .retain(|reference| shown_refs.contains(reference));
                                 if ca.allowed_next_step != cb.allowed_next_step {
                                     divergences += 1;
                                     divergence_rows.push((
@@ -937,6 +952,8 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                                     .and_then(|h| parse_due_at(h, card.segment_core_start));
                                 let people_json = serde_json::to_string(&merged.people)?;
                                 let evidence_json = serde_json::to_string(&merged.evidence_refs)?;
+                                let agreed_evidence_json =
+                                    serde_json::to_string(&merged.agreed_evidence_refs)?;
                                 let kind = merged.kind.as_deref().unwrap_or("followup");
                                 input.db.insert_commitment(
                                     l3_write(),
@@ -945,6 +962,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                                         kind,
                                         born_from: card.id,
                                         evidence_json,
+                                        agreed_evidence_json: Some(agreed_evidence_json),
                                         people_json,
                                         due_hint: merged.due_hint.as_deref(),
                                         due_source: Some(source),
@@ -2263,7 +2281,7 @@ mod tests {
     fn run_evidence_filter_fixture(
         label: &str,
         evidence_refs: impl FnOnce(i64, i64, i64) -> Vec<String>,
-    ) -> (Vec<String>, ReviewResult, i64, i64, i64) {
+    ) -> (Vec<String>, Vec<String>, ReviewResult, i64, i64, i64) {
         let tmp = Tmp::new(label);
         let sentinel = tmp.0.join("spawned");
         let mut db = Db::open_in_memory().expect("db");
@@ -2301,26 +2319,30 @@ mod tests {
             .pop()
             .expect("one");
         let stored = serde_json::from_str(&row.evidence_json).expect("evidence json");
-        (stored, result, shown_fid, unshown_fid, shown_fact)
+        let agreed = match row.agreed_evidence_json.as_deref() {
+            None => panic!("新寫入的承諾不該把 agreed_evidence_json 留成 NULL"),
+            Some(json) => serde_json::from_str(json).expect("agreed evidence json"),
+        };
+        (stored, agreed, result, shown_fid, unshown_fid, shown_fact)
     }
 
     #[test]
     fn nonexistent_frame_is_dropped_from_evidence() {
-        let (refs, _, _, _, _) =
+        let (refs, _, _, _, _, _) =
             run_evidence_filter_fixture("nonexistent-frame", |_, _, _| vec!["frame:9999".into()]);
         assert!(!refs.contains(&"frame:9999".to_string()));
     }
 
     #[test]
     fn non_reference_string_is_dropped_from_evidence() {
-        let (refs, _, _, _, _) =
+        let (refs, _, _, _, _, _) =
             run_evidence_filter_fixture("non-ref", |_, _, _| vec!["這不是一個 ref".into()]);
         assert!(!refs.contains(&"這不是一個 ref".to_string()));
     }
 
     #[test]
     fn original_reference_shown_to_model_remains_in_evidence() {
-        let (refs, _, shown_fid, _, _) =
+        let (refs, _, _, shown_fid, _, _) =
             run_evidence_filter_fixture("shown-original", |shown_fid, _, _| {
                 vec![format!("frame:{shown_fid}")]
             });
@@ -2329,7 +2351,7 @@ mod tests {
 
     #[test]
     fn fact_reference_shown_to_model_remains_in_evidence() {
-        let (refs, _, _, _, shown_fact) =
+        let (refs, _, _, _, _, shown_fact) =
             run_evidence_filter_fixture("shown-fact", |_, _, shown_fact| {
                 vec![format!("fact:{shown_fact}")]
             });
@@ -2338,20 +2360,46 @@ mod tests {
 
     #[test]
     fn dropped_evidence_reference_count_matches_removed_refs() {
-        let (_, result, _, _, _) = run_evidence_filter_fixture("drop-count", |shown, unseen, _| {
-            vec![
-                format!("frame:{shown}"),
-                format!("frame:{unseen}"),
-                "frame:9999".into(),
-                "這不是一個 ref".into(),
-            ]
-        });
+        let (_, _, result, _, _, _) =
+            run_evidence_filter_fixture("drop-count", |shown, unseen, _| {
+                vec![
+                    format!("frame:{shown}"),
+                    format!("frame:{unseen}"),
+                    "frame:9999".into(),
+                    "這不是一個 ref".into(),
+                ]
+            });
         assert_eq!(result.dropped_evidence_refs, 3);
     }
 
     #[test]
+    fn agreed_evidence_is_filtered_by_the_same_shown_set_without_double_counting() {
+        let (union, agreed, result, shown_fid, unshown_fid, _) =
+            run_evidence_filter_fixture("agreed-retain", |shown, unseen, _| {
+                vec![format!("frame:{shown}"), format!("frame:{unseen}")]
+            });
+        let shown = format!("frame:{shown_fid}");
+        let unshown = format!("frame:{unshown_fid}");
+        assert!(union.contains(&shown), "{union:?}");
+        assert!(
+            !union.contains(&unshown),
+            "聯集裡不該留下沒給模型看過的 ref：{union:?}"
+        );
+        assert!(agreed.contains(&shown), "{agreed:?}");
+        assert!(
+            !agreed.contains(&unshown),
+            "交集若沒過同一道濾網，會出現聯集裡沒有、交集裡卻有的 ref：{agreed:?}"
+        );
+        assert!(
+            agreed.iter().all(|r| union.contains(r)),
+            "交集必須是聯集的子集：union={union:?} agreed={agreed:?}"
+        );
+        assert_eq!(result.dropped_evidence_refs, 1);
+    }
+
+    #[test]
     fn dropping_evidence_refs_does_not_count_as_refused_next_steps() {
-        let (_, result, _, _, _) =
+        let (_, _, result, _, _, _) =
             run_evidence_filter_fixture("drop-not-refusal", |_, _, _| vec!["frame:9999".into()]);
         assert_eq!(result.refused_next_steps, 0);
         assert!(result.dropped_evidence_refs > 0);
@@ -2359,7 +2407,7 @@ mod tests {
 
     #[test]
     fn review_result_only_mentions_dropped_evidence_when_nonzero() {
-        let (_, mut result, _, _, _) =
+        let (_, _, mut result, _, _, _) =
             run_evidence_filter_fixture("drop-display", |_, _, _| vec!["frame:9999".into()]);
         let stats = RecheckStats {
             runs: Some(1),
@@ -3096,6 +3144,7 @@ mod tests {
                     kind: "todo",
                     born_from: l2,
                     evidence_json: format!(r#"["frame:{fid}"]"#),
+                    agreed_evidence_json: Some(format!(r#"["frame:{fid}"]"#)),
                     people_json: "[]".into(),
                     due_hint: Some("17:00"),
                     due_source: Some("explicit"),
@@ -3123,6 +3172,7 @@ mod tests {
                     kind: "followup",
                     born_from: l2,
                     evidence_json: format!(r#"["frame:{fid}"]"#),
+                    agreed_evidence_json: Some(format!(r#"["frame:{fid}"]"#)),
                     people_json: "[]".into(),
                     due_hint: None,
                     due_source: None,
@@ -3149,6 +3199,7 @@ mod tests {
                     kind: "reminder",
                     born_from: l2,
                     evidence_json: format!(r#"["frame:{fid}"]"#),
+                    agreed_evidence_json: Some(format!(r#"["frame:{fid}"]"#)),
                     people_json: "[]".into(),
                     due_hint: Some("17:00"),
                     due_source: Some("inferred"),
@@ -3194,6 +3245,7 @@ mod tests {
                     kind: "todo",
                     born_from: l2,
                     evidence_json: format!(r#"["frame:{fid}"]"#),
+                    agreed_evidence_json: Some(format!(r#"["frame:{fid}"]"#)),
                     people_json: "[]".into(),
                     due_hint: None,
                     due_source: None,
@@ -3277,6 +3329,7 @@ mod tests {
                     kind: "promise",
                     born_from: l2,
                     evidence_json: format!(r#"["frame:{fid}"]"#),
+                    agreed_evidence_json: Some(format!(r#"["frame:{fid}"]"#)),
                     people_json: r#"["王小明"]"#.into(),
                     due_hint: Some("17:00"),
                     due_source: Some("explicit"),
@@ -3414,6 +3467,7 @@ mod tests {
             people: vec![],
             confidence: Some(0.9),
             evidence_refs: vec!["frame:1".into()],
+            agreed_evidence_refs: vec![],
             allowed_next_step: None,
         };
         let b = ReviewCommitment {
@@ -3425,10 +3479,49 @@ mod tests {
             people: vec![],
             confidence: Some(0.9),
             evidence_refs: vec!["frame:1".into()],
+            agreed_evidence_refs: vec![],
             allowed_next_step: None,
         };
         let err = merge_commitment_passes(&a, &b).unwrap_err();
         assert!(err.reason.contains("due_hint"));
+    }
+
+    fn merge_card(refs: &[&str]) -> ReviewCommitment {
+        ReviewCommitment {
+            text: "五點去接她".into(),
+            stands: true,
+            kind: Some("promise".into()),
+            due_hint: Some("17:00".into()),
+            due_source: Some("explicit".into()),
+            people: vec![],
+            confidence: Some(0.8),
+            evidence_refs: refs.iter().map(|r| (*r).to_string()).collect(),
+            agreed_evidence_refs: vec!["frame:injected".into()],
+            allowed_next_step: None,
+        }
+    }
+
+    #[test]
+    fn merge_unions_evidence_and_intersects_agreed() {
+        let merged = merge_commitment_passes(
+            &merge_card(&["frame:1", "frame:2"]),
+            &merge_card(&["frame:2", "frame:3"]),
+        )
+        .expect("same fields");
+        assert_eq!(merged.evidence_refs, vec!["frame:1", "frame:2", "frame:3"]);
+        assert_eq!(merged.agreed_evidence_refs, vec!["frame:2"]);
+    }
+
+    #[test]
+    fn parse_pass_cannot_inject_agreed_evidence_refs() {
+        let json = r#"{"commitments":[{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:1"],"agreed_evidence_refs":["frame:999"]}]}"#;
+        let parsed = parse_pass(json).expect("parse");
+        assert_eq!(parsed.commitments[0].evidence_refs, ["frame:1"]);
+        assert!(
+            parsed.commitments[0].agreed_evidence_refs.is_empty(),
+            "模型塞進來的 agreed_evidence_refs 必須被丟掉：{:?}",
+            parsed.commitments[0].agreed_evidence_refs
+        );
     }
 
     #[test]

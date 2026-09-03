@@ -145,6 +145,7 @@ mod tests {
             kind: "followup".into(),
             born_from: 1,
             evidence_json: "[]".into(),
+            agreed_evidence_json: Some("[]".into()),
             people_json: "[]".into(),
             due_hint: None,
             due_source: None,
