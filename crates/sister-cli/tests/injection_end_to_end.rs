@@ -92,7 +92,32 @@ fn seed_l2_and_fact_ids(data_dir: &Path, injection: &str) -> (i64, i64, i64) {
         .find(|chunk| chunk.text.contains(TASK))
         .expect("task evidence chunk");
     let frame_id = evidence.frame_id.expect("OCR chunk has frame");
-    let core = evidence.ts;
+    // 真的卡片是從真的 segment 生出來的。這套 fixture 以前直接種 L2、跳過
+    // 解釋層，`segment` 表是空的；審閱者改成讀這一段的結束時間之後，空表
+    // 會 fail-closed。
+    //
+    // 只蓋第一格畫面不夠：replay 下一拍在 EVIL_AT_MS，那之前只有一個時間點，
+    // segmenter 在 `stream_end == stream_start` 時切不出段落。範圍拉到含第二
+    // 格，讓它真的切得成；TIME_CAP 會把第一段收在 10 分鐘內，evil 仍在窗外。
+    let segs = db
+        .chapters_for_range(evidence.ts, evidence.ts.saturating_add(EVIL_AT_MS + 2_000))
+        .expect("compute segment covering first frame");
+    let seg = segs
+        .iter()
+        .find(|s| s.core_started_at <= evidence.ts && evidence.ts < s.core_ended_at)
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture must produce a segment covering the first frame at {}; got {:?}",
+                evidence.ts,
+                segs.iter()
+                    .map(|s| (s.core_started_at, s.core_ended_at))
+                    .collect::<Vec<_>>()
+            )
+        });
+    let core = seg.core_started_at;
+    let window_end = seg
+        .core_ended_at
+        .saturating_add(sister_core::segment::OVERLAP_MARGIN_MS);
     db.insert_l2_card(&L2Insert {
         segment_core_start: core,
         segment_ref: &format!("segment:{core}"),
@@ -113,9 +138,19 @@ fn seed_l2_and_fact_ids(data_dir: &Path, injection: &str) -> (i64, i64, i64) {
     .expect("seed review input L2");
 
     let facts = db.facts_by_kind("url", 100).expect("URL facts");
-    let good = facts.iter().find(|fact| fact.raw == GOOD_URL).unwrap().id;
-    let evil = facts.iter().find(|fact| fact.raw == EVIL_URL).unwrap().id;
-    (good, evil, frame_id)
+    let good = facts.iter().find(|fact| fact.raw == GOOD_URL).unwrap();
+    let evil = facts.iter().find(|fact| fact.raw == EVIL_URL).unwrap();
+    assert!(
+        good.ts >= core && good.ts < window_end,
+        "good URL must stay inside this segment's window: good.ts={} core={core} window_end={window_end}",
+        good.ts
+    );
+    assert!(
+        evil.ts >= window_end,
+        "evil URL must stay outside this segment's window: evil.ts={} window_end={window_end}",
+        evil.ts
+    );
+    (good.id, evil.id, frame_id)
 }
 
 fn write_brain(dir: &Path, fact_id: i64, frame_id: i64) -> PathBuf {

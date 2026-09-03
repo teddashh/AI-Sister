@@ -65,6 +65,16 @@ fn run_case_ex(
                     "app_name": "目標所在 app",
                     "title": "下一步目標",
                     "text": [OTHER_APP_URL]
+                },
+                // 目標之後還要有一格：目標那一刻如果是 `stream_end`，它就正好落在
+                // 自己那一段的 `core_ended_at` 上，而 `facts_in_range` 是半開的，
+                // 會把它排除在自己那一段之外。
+                {
+                    "at_ms": 120_000,
+                    "app": target_app,
+                    "app_name": "目標所在 app",
+                    "title": "下一步目標",
+                    "text": ["他繼續在同一個視窗做事"]
                 }
             ]
         }))
@@ -89,7 +99,30 @@ fn run_case_ex(
         .find(|c| c.text.contains(TASK))
         .expect("task chunk");
     let frame_id = evidence.frame_id.expect("frame");
-    let core = evidence.ts;
+    // 卡片掛在**目標所在的那一段**。#48 之後審閱者只看卡片自己那一段，而換 app
+    // 就會切段——這幾條測試要驗的是「授權涵不涵蓋目標那個 app」，不是跨段指標，
+    // 所以夾具要把卡片放在目標那一段，才問得到後面那個問題。
+    let target_chunk = chunks
+        .iter()
+        .find(|c| c.text.contains(OTHER_APP_URL))
+        .expect("target chunk");
+    let last_ts = chunks.iter().map(|c| c.ts).max().unwrap_or(evidence.ts);
+    let segs = db
+        .chapters_for_range(evidence.ts, last_ts.saturating_add(1_000))
+        .expect("compute segments");
+    let core = segs
+        .iter()
+        .find(|s| s.core_started_at <= target_chunk.ts && target_chunk.ts < s.core_ended_at)
+        .unwrap_or_else(|| {
+            panic!(
+                "no segment covering the target frame at {}; got {:?}",
+                target_chunk.ts,
+                segs.iter()
+                    .map(|s| (s.core_started_at, s.core_ended_at))
+                    .collect::<Vec<_>>()
+            )
+        })
+        .core_started_at;
     let target_frame_for_card = db
         .facts_by_kind("url", 100)
         .unwrap()
