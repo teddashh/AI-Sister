@@ -34,7 +34,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 14;
+pub const SCHEMA_VERSION: i32 = 15;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -586,6 +586,12 @@ fn migrate_012(tx: &rusqlite::Transaction<'_>) -> Result<()> {
 
 fn migrate_014(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     add_column_if_missing(tx, "commitments", "allowed_next_step_fact", "INTEGER")
+}
+
+fn migrate_015(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    // 不加 DEFAULT：既有列維持 NULL。DEFAULT '[]' 會把「問不出來」和
+    // 「兩個 pass 一張畫面都沒有共同指過」壓成同一種答案。
+    add_column_if_missing(tx, "commitments", "agreed_evidence_json", "TEXT")
 }
 
 fn add_column_if_missing(
@@ -1253,6 +1259,7 @@ impl Db {
             12 => migrate_012(&tx)?,
             13 => tx.execute_batch(MIGRATION_013)?,
             14 => migrate_014(&tx)?,
+            15 => migrate_015(&tx)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -4052,7 +4059,8 @@ impl Db {
                     "UPDATE commitments SET tombstoned_at = ?1, updated_at = ?1,
                        text = '', evidence_json = '[]', people_json = '[]',
                        due_hint = NULL, allowed_next_step = NULL,
-                       allowed_next_step_fact = NULL, kill_note = NULL
+                       allowed_next_step_fact = NULL, agreed_evidence_json = NULL,
+                       kill_note = NULL
                      WHERE id = ?2 AND tombstoned_at IS NULL",
                     params![now, id],
                 )?;
@@ -4119,16 +4127,17 @@ impl Db {
         let _gate = permit;
         self.conn.execute(
             "INSERT INTO commitments(
-                text, kind, born_from, evidence_json, people_json,
+                text, kind, born_from, evidence_json, agreed_evidence_json, people_json,
                 due_hint, due_source, due_at, status, confidence,
                 allowed_next_step, allowed_next_step_fact, last_evidence_seen_at, kill_note,
                 created_at, updated_at, tombstoned_at
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15,NULL)",
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?16,NULL)",
             params![
                 ins.text,
                 ins.kind,
                 ins.born_from,
                 ins.evidence_json,
+                ins.agreed_evidence_json,
                 ins.people_json,
                 ins.due_hint,
                 ins.due_source,
@@ -4174,7 +4183,7 @@ impl Db {
     pub fn commitment_by_id(&self, id: i64) -> Result<Option<CommitmentRow>> {
         self.conn
             .query_row(
-                "SELECT id, text, kind, born_from, evidence_json, people_json,
+                "SELECT id, text, kind, born_from, evidence_json, agreed_evidence_json, people_json,
                         due_hint, due_source, due_at, status, confidence,
                         allowed_next_step, allowed_next_step_fact, last_evidence_seen_at, kill_note,
                         created_at, updated_at, tombstoned_at
@@ -4188,7 +4197,7 @@ impl Db {
 
     pub fn live_commitments(&self) -> Result<Vec<CommitmentRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, text, kind, born_from, evidence_json, people_json,
+            "SELECT id, text, kind, born_from, evidence_json, agreed_evidence_json, people_json,
                     due_hint, due_source, due_at, status, confidence,
                     allowed_next_step, allowed_next_step_fact, last_evidence_seen_at, kill_note,
                     created_at, updated_at, tombstoned_at
@@ -4202,7 +4211,7 @@ impl Db {
 
     pub fn all_commitments(&self) -> Result<Vec<CommitmentRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, text, kind, born_from, evidence_json, people_json,
+            "SELECT id, text, kind, born_from, evidence_json, agreed_evidence_json, people_json,
                     due_hint, due_source, due_at, status, confidence,
                     allowed_next_step, allowed_next_step_fact, last_evidence_seen_at, kill_note,
                     created_at, updated_at, tombstoned_at
@@ -4230,7 +4239,7 @@ impl Db {
     /// 一件二十分鐘後到期的事該不該講，跟那一列被寫過幾次沒有關係。
     pub fn open_commitments_due_before(&self, cutoff: Millis) -> Result<Vec<CommitmentRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, text, kind, born_from, evidence_json, people_json,
+            "SELECT id, text, kind, born_from, evidence_json, agreed_evidence_json, people_json,
                     due_hint, due_source, due_at, status, confidence,
                     allowed_next_step, allowed_next_step_fact, last_evidence_seen_at, kill_note,
                     created_at, updated_at, tombstoned_at
@@ -5727,19 +5736,20 @@ fn map_commitment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommitmentRow
         kind: row.get(2)?,
         born_from: row.get(3)?,
         evidence_json: row.get(4)?,
-        people_json: row.get(5)?,
-        due_hint: row.get(6)?,
-        due_source: row.get(7)?,
-        due_at: row.get(8)?,
-        status: row.get(9)?,
-        confidence: row.get(10)?,
-        allowed_next_step: row.get(11)?,
-        allowed_next_step_fact: row.get(12)?,
-        last_evidence_seen_at: row.get(13)?,
-        kill_note: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
-        tombstoned_at: row.get(17)?,
+        agreed_evidence_json: row.get(5)?,
+        people_json: row.get(6)?,
+        due_hint: row.get(7)?,
+        due_source: row.get(8)?,
+        due_at: row.get(9)?,
+        status: row.get(10)?,
+        confidence: row.get(11)?,
+        allowed_next_step: row.get(12)?,
+        allowed_next_step_fact: row.get(13)?,
+        last_evidence_seen_at: row.get(14)?,
+        kill_note: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
+        tombstoned_at: row.get(18)?,
     })
 }
 
@@ -6320,6 +6330,7 @@ pub struct CommitmentInsert<'a> {
     pub kind: &'a str,
     pub born_from: i64,
     pub evidence_json: String,
+    pub agreed_evidence_json: Option<String>,
     pub people_json: String,
     pub due_hint: Option<&'a str>,
     pub due_source: Option<&'a str>,
@@ -6431,6 +6442,9 @@ pub struct CommitmentRow {
     pub kind: String,
     pub born_from: i64,
     pub evidence_json: String,
+    /// `None`＝這筆承諾是加「兩個 pass 都要指過畫面」這道檢查之前記的。
+    /// `Some("[]")`＝兩個 pass 一張畫面都沒有共同指過。兩種不是同一種答案。
+    pub agreed_evidence_json: Option<String>,
     pub people_json: String,
     pub due_hint: Option<String>,
     pub due_source: Option<String>,
@@ -8306,6 +8320,97 @@ mod tests {
             columns_of(&db, "stuck_signal").contains(&"error_fact_count".to_string()),
             "全新資料庫也要有 stuck_signal 表"
         );
+        assert!(
+            columns_of(&db, "commitments").contains(&"agreed_evidence_json".to_string()),
+            "全新資料庫也要有兩個 pass 都指過的畫面那一欄"
+        );
+    }
+
+    #[test]
+    fn migration_015_does_not_backfill_agreed_evidence() {
+        let tmp = TmpDir::new("no-backfill-agreed");
+        let path = tmp.join("sister.db");
+        Db::open(&path).expect("create");
+        {
+            let c = Connection::open(&path).expect("raw");
+            c.execute_batch(
+                "ALTER TABLE commitments DROP COLUMN agreed_evidence_json;
+                 PRAGMA user_version = 14;",
+            )
+            .expect("downgrade to 14");
+            c.execute(
+                "INSERT INTO commitments(
+                    text, kind, born_from, evidence_json, people_json,
+                    status, confidence, created_at, updated_at
+                 ) VALUES('舊承諾', 'todo', 1, '[\"frame:1\"]', '[]', 'open', 0.5, 1, 1)",
+                [],
+            )
+            .expect("schema-14 row");
+        }
+        let db = Db::open(&path).expect("upgrade");
+        assert_eq!(db.schema_version().expect("version"), SCHEMA_VERSION);
+        let row = db.live_commitments().expect("rows").pop().expect("one");
+        assert_eq!(row.evidence_json, r#"["frame:1"]"#);
+        assert_eq!(
+            row.agreed_evidence_json, None,
+            "既有列必須維持 NULL，不可以回填成「兩個 pass 都同意」"
+        );
+    }
+
+    #[test]
+    fn agreed_evidence_null_and_empty_array_round_trip_as_different_values() {
+        let mut db = test_db();
+        let unknown = db
+            .insert_commitment(
+                crate::reviewer::test_l3_write(),
+                &CommitmentInsert {
+                    text: "問不出來",
+                    kind: "todo",
+                    born_from: 1,
+                    evidence_json: r#"["frame:1"]"#.into(),
+                    agreed_evidence_json: None,
+                    people_json: "[]".into(),
+                    due_hint: None,
+                    due_source: None,
+                    due_at: None,
+                    status: "open",
+                    confidence: 0.5,
+                    allowed_next_step: None,
+                    allowed_next_step_fact: None,
+                    last_evidence_seen_at: None,
+                    kill_note: None,
+                    now: 1,
+                },
+            )
+            .expect("insert null");
+        let empty = db
+            .insert_commitment(
+                crate::reviewer::test_l3_write(),
+                &CommitmentInsert {
+                    text: "沒有共同指過",
+                    kind: "todo",
+                    born_from: 1,
+                    evidence_json: r#"["frame:1"]"#.into(),
+                    agreed_evidence_json: Some("[]".into()),
+                    people_json: "[]".into(),
+                    due_hint: None,
+                    due_source: None,
+                    due_at: None,
+                    status: "open",
+                    confidence: 0.5,
+                    allowed_next_step: None,
+                    allowed_next_step_fact: None,
+                    last_evidence_seen_at: None,
+                    kill_note: None,
+                    now: 1,
+                },
+            )
+            .expect("insert empty");
+        let unknown = db.commitment_by_id(unknown).unwrap().unwrap();
+        let empty = db.commitment_by_id(empty).unwrap().unwrap();
+        assert_eq!(unknown.agreed_evidence_json, None);
+        assert_eq!(empty.agreed_evidence_json.as_deref(), Some("[]"));
+        assert_ne!(unknown.agreed_evidence_json, empty.agreed_evidence_json);
     }
 
     /// 已經在跑的資料庫升級上來，事實不能掉，欄位要真的消失。

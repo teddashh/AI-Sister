@@ -340,7 +340,17 @@ pub enum TargetFrameGap {
     Forgotten,
     RowReplaced,
     FrameNotRecorded,
+    /// 聯集裡就沒有這張畫面：兩個 pass 誰都沒指過它。
+    ///
+    /// **沒有第四個 variant 專講「交集是空的」。** 交集空不空是那個集合的性質，
+    /// 不是這一步被擋下來的理由：目標在聯集裡就是 [`Self::CitedByOnlyOnePass`]，
+    /// 不在聯集裡就是這一個。硬要分的話，唯一到得了的輸入是「連聯集都空了」，
+    /// 而那時候誠實的診斷還是這一句。
     FrameNotCited,
+    /// 這筆承諾記在加「兩個 pass 都要指過畫面」這道檢查之前，問不出來。
+    RecordedBeforeAgreedEvidence,
+    /// 聯集有這張畫面、交集沒有：只有一個 pass 指過。
+    CitedByOnlyOnePass,
 }
 
 /// 一次拒絕該被算進收尾那一行的哪一格。
