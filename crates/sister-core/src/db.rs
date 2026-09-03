@@ -6134,6 +6134,40 @@ fn origin_subject(origin: &FactOrigin) -> &'static str {
     }
 }
 
+/// 字母人一顆建議按鈕要顯示的兩句話。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestionText {
+    /// 按鈕上的字。
+    pub label: String,
+    /// 按鈕**上面**那一行：這一步的目標是從哪裡記下來的。
+    pub target_provenance: String,
+}
+
+pub fn suggestion_text(
+    button: &sister_hands::SuggestionButton,
+    target: Option<&TargetApp>,
+) -> SuggestionText {
+    SuggestionText {
+        label: button.describe(),
+        target_provenance: target_provenance(target),
+    }
+}
+
+/// `Ok(None)`＝這筆承諾沒有記下一步目標的 fact 出處，或這個動作根本沒有可比對的
+/// 目標字串（`FocusWindow`）。**沒有記**和**查出來是某一格**是兩件事，所以用
+/// `Option` 分開，不要在 [`TargetApp`] 上多開一格。
+pub fn target_app_for_button<E>(
+    button: &sister_hands::SuggestionButton,
+    allowed_next_step_fact: Option<i64>,
+    lookup: impl FnOnce(i64, &str) -> Result<TargetApp, E>,
+) -> Result<Option<TargetApp>, E> {
+    let expected_target = button.snapshot().expected_target();
+    match allowed_next_step_fact.zip(expected_target.as_deref()) {
+        Some((fact_id, expected_raw)) => lookup(fact_id, expected_raw).map(Some),
+        None => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactRow {
     pub id: i64,
@@ -12385,5 +12419,62 @@ mod tests {
                 app_not_recorded
             );
         }
+    }
+
+    #[test]
+    fn suggestion_uses_core_target_provenance() {
+        let button = sister_hands::SuggestionButton::parse_json(
+            r#"{"action":"open_url","url":"https://example.com"}"#,
+        )
+        .unwrap();
+        let expected = TargetApp::Known {
+            app: "chrome.exe".into(),
+            origin: FactOrigin::Clipboard,
+        };
+        let target = target_app_for_button(&button, Some(7), |fact_id, raw| {
+            assert_eq!(fact_id, 7);
+            assert_eq!(raw, "https://example.com");
+            Ok::<_, String>(expected.clone())
+        })
+        .unwrap();
+
+        let suggestion = suggestion_text(&button, target.as_ref());
+
+        // 比的是「查出來的那一格」算出來的句子，**不是** `target` 自己算出來的。
+        // 拿 `target` 去比的話這一行會變成 `f(x) == f(x)`——`target_app_for_button`
+        // 就算把查到的東西整個丟掉、一律回「沒有記」，那樣的斷言照樣會綠。
+        assert_eq!(
+            suggestion.target_provenance,
+            target_provenance(Some(&expected)),
+            "字母人送出去的出處，必須是它真的查到的那一格"
+        );
+        // 再釘一次真正的那句話：上面那條防「抄第二份文案」，這條防「串錯格」。
+        assert_eq!(
+            suggestion.target_provenance,
+            "這個目標是從 chrome.exe 複製起來的"
+        );
+    }
+
+    #[test]
+    fn focus_window_without_target_fact_still_has_a_button() {
+        let button = sister_hands::SuggestionButton::parse_json(
+            r#"{"action":"focus_window","title":"Visual Studio Code"}"#,
+        )
+        .unwrap();
+        // 閉包裡的 panic 才是這一條的重點：`FocusWindow` 沒有可比對的目標字串，
+        // 所以不該去查 fact——就算承諾上記了 fact id（這裡是 99）也一樣。
+        let target = target_app_for_button(&button, Some(99), |_, _| -> Result<_, String> {
+            panic!("FocusWindow 沒有 expected_target，不該查 fact")
+        })
+        .unwrap();
+        assert!(target.is_none(), "沒查 fact 就不該有 TargetApp");
+
+        let suggestion = suggestion_text(&button, target.as_ref());
+
+        assert_eq!(suggestion.label, "聚焦視窗：Visual Studio Code");
+        assert_eq!(
+            suggestion.target_provenance,
+            "這個目標是從哪個畫面來的沒有記"
+        );
     }
 }
