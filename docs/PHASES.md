@@ -767,6 +767,39 @@ capture 層本身就是 recorder。
     突變五條全部咬住（每一條都確認 cargo 真的重編了）：右界改回一小時 → 紅；
     fail-closed 改成退回一小時 → 紅；margin 加回去 → 紅；fail-closed 那句塞回
     `refusals` → 紅；重複列改取最寬的那一段 → 紅。（#48）
+
+    **還缺（alpha.87 出貨後才發現）：上面第 3 點改寫的那句話，只講了四個成因裡
+    的一個。** 那句「這張卡片指的那一段已經不在紀錄裡（**被忘掉、或過了保留期**）」
+    掛在 `segment_core_end` 回 `Ok(None)` 上，而到得了 `Ok(None)` 的路有四條，
+    其中三條一個字都沒刪到：
+
+    1. 被忘掉／過保留期——講對的那一種。
+    2. **在時間軸上合併過章節**：`segment_edit.rs:93` 的 `apply_merge` 把右邊那一段
+       的 `core_started_at` 那一列 `remove` 掉。桌面上按得到
+       （`main.rs:1678` `timeline_merge_chapters`，已註冊在 `:3155`）。
+    3. **段落邊界自己動了，沒有人按任何東西。** `segment` 是**快取**不是真相
+       （`db.rs:3423` 的註解自己寫著）：`chapters_for_range(A,B)` 每次
+       `DELETE FROM segment WHERE core_started_at >= A AND < B` 再寫回重算結果
+       （`db.rs:5133`），而重算只看得到 `[A - LOOKAROUND_MS, B + LOOKAROUND_MS]`，
+       **`LOOKAROUND_MS` 是 5 分鐘、`TIME_CAP_MS` 是 10 分鐘**——padding 只有切段
+       上限的一半。**實測**（25 分鐘同質活動，`Db::open_in_memory`）：
+
+       ```text
+       寬窗切出來的段落起點（相對 offset）= [0, 600000, 1200000]
+       segment_core_end(ts+1200000) = Some(...)
+       再用「從第 12 分鐘開始」的窄窗問一次 → 段落起點變成 [1020000]
+       segment_core_end(ts+1200000) = None
+       ```
+
+       桌面的時間軸就是照畫面上的範圍去問的，所以**平常捲一捲就會踩到**。
+       （第一次探針挑 offset 600000 沒重現，因為 `DELETE` 的下界是 `>= A`，
+       要挑落在窄窗裡的那一列——「沒重現」可能只是探針挑錯了列。）
+    4. 以上的組合。
+
+    修法是拆成「有一段蓋住這個時間點但起點不是這裡」和「沒有任何一段蓋住」兩句，
+    **兩種都繼續 fail-closed**（放寬視窗等於從另一個門把 #48 退回去）。
+    第一句**不可以寫成「被合併了」**——第 3 點就是反例，那會是用同一個形狀
+    （把一個成因寫成唯一的成因）去修同一種病。（#57）
   - **字母人那半邊完全沒有這道檢查。** 上面講的全部只在 `sister do` 這條路上。
     `apps/desktop` 的 `hands_execute` → `sister_hands::execute_with(Level::Suggest,…)`
     **沒有 `Grant`、沒有 `StepRequest`、沒有 app 維度**，它直接拿 `allowed_next_step`
