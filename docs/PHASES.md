@@ -668,16 +668,64 @@ capture 層本身就是 recorder。
   - **`evidence_refs` 是兩個 pass 的聯集**，所以單一個 pass 就能決定一個落在
     授權路徑上的欄位。alpha.86 的來源檢查不管這件事——它只問「這個 ref 有沒有
     給模型看過」，不問「是哪一個 pass 說的」。（#53）
-  - **審閱者給每張卡片抓 fact 的視窗是寫死的一小時，那不是「這一段」。**
-    `reviewer.rs:709` 抓的是 `[card.segment_core_start, +3_600_000]`，可是 segment
-    的長度上限是 `segment.rs:18` 的 `TIME_CAP_MS = 10 分鐘`——所以那一小時**最多蓋
-    到六段**。後果：授權路徑上的 listed-facts 檢查（以及 alpha.86 新加的來源檢查）
-    看得到的 fact，包含這張卡片之後最多 59 分鐘內、**其他活動、其他 app** 出現過的
-    東西。配上上面那條 #42，被埋的網址的有效視窗是一小時而不是一段。
-    收緊的材料本來就有：segment 有真的結束時間（`activity.rs:31` 的
-    `core_ended_at`，另有 `OVERLAP_MARGIN_MS = 5 秒`），L2 卡片上的 `segment_ref`
-    （格式 `segment:{core}`）查得回去。**但這是產品行為的收窄，要先決定再做**，
-    而且要確認 `reviewer.rs` 裡好幾條用 `to_ts: ts + 400_000` 的既有測試還成立。（#48）
+  - ~~**審閱者給每張卡片抓 fact 的視窗是寫死的一小時，那不是「這一段」。**~~
+    **alpha.87 修好了。** 舊行為：`[card.segment_core_start, +3_600_000]`，而
+    `TIME_CAP_MS = 10 分鐘`，所以那一小時**最多蓋到六段**——授權路徑上的
+    listed-facts 檢查看得到這張卡片之後 59 分鐘內、其他活動、其他 app 的 fact。
+    新行為：`[core_started_at, core_ended_at)`，卡片自己那一段，查不到那一段就
+    fail-closed（新的 `Db::segment_core_end`，`Ok(None)` 和 `Err` 分開）。
+
+    **量出來的差別**（同一個探針：把 injection fixture 的 `EVIL_AT_MS` 從
+    3_700_000 挪到 1_800_000，也就是第 30 分鐘、另一段、還在舊的一小時窗內，
+    其餘一個字不改）：
+
+    ```text
+    修之前（b5c6173）：commitment #1: allowed_next_step=Some("{\"action\":\"open_url\",
+                       \"url\":\"https://evil.example.com/collect\"}") fact=Some(2)
+    修之後：           commitment #1: allowed_next_step=None fact=None
+                       她拒絕了 1 個模型指的下一步（理由見底下）。
+                       - 拒絕 allowed_next_step：fact:2 沒有列在這次給模型的 L1 facts
+    ```
+
+    **這個洞用 `executed` 那個斷言量不到**：無人值守那道 cited-frame 閘門
+    （alpha.86）會替它補票，所以那 7 條 injection 測試修之前也全綠。要釘在
+    審閱者那一層（`allowed_next_step` 有沒有被收下）。字母人那半邊沒有那道閘門，
+    所以修之前攻擊者的網址會變成一顆按得下去的按鈕——見下一條。
+
+    收貨時我自己抓到、delegate 交的版本裡有的三件事：
+
+    1. **`+ OVERLAP_MARGIN_MS` 是錯的**（是我 SPEC 寫錯、它照做）。margin 住在
+       `started_at`/`ended_at` 那一對；core 那一對是**精確相接**的
+       （`segment.rs` 的「核心邊界該相接」那條測試），配上 `facts_in_range` 的
+       半開區間，邊界上的 fact 歸後面那一段，不重不漏。加了 margin 等於把授權視窗
+       伸進**下一段** 5 秒——同一個 bug 的縮小版，而且是單邊、往「晚一點才出現在
+       畫面上」那個方向。另外 `brain.rs:872` 和 `apps/desktop` 抓 fact 都用不含
+       margin 的那一對，寬過它就會有「當初寫這張卡時模型沒看過、現在卻能當授權
+       目標」的 fact。已拿掉，並補一條「接縫後 1 毫秒」的測試釘住它。
+    2. **幽靈拒絕。** fail-closed 那句原本推進 `refusals`，而那個 Vec 就是
+       「她拒絕了 N 個**模型指的**下一步」的分母。它發生在**呼叫模型之前**，
+       而且卡片可能因為 `five_class` 是空的直接跳過，模型從頭到尾沒參與。
+       實測：模型只指了一步，那個數字是 **2**（delegate 自己的測試寫
+       `>= 1`，剛好遮住）。已拆成 `cards_missing_segment`，自己的句子、
+       自己的計數，`detail` 兩種理由都還是印得出來。
+    3. **句子不可以借。** 那句 fail-closed 原本照抄 `TargetApp::Forgotten` 的
+       「這個目標的來源已經不在了」。那句講的是**下一步目標那筆 fact** 的來源沒了，
+       這裡沒了的是**卡片自己那一段**，兩件事。已改寫，並加一條反面斷言。
+
+    **連帶的產品事實：真的 `forget` 之後走不到 `Forgotten` 了。** 因為目標 fact
+    一定在卡片自己那一段裡，所以 `started_at <= target.ts < ended_at`；只要
+    `--last` 的窗蓋到目標，`collect_cascade_parents` 的重疊條件就成立，
+    `segment:{core}` → `l2:{card}` → `commitment:{id}` 整條被墓碑。
+    也就是說**刪得掉目標就一定連承諾一起刪掉**，不會留下一張活著的承諾去講
+    「目標的來源不在了」。舊夾具做得到只因為它沒有 `segment` 列。
+    `real_forget_makes_the_target_source_forgotten` 因此改名為
+    `real_forget_takes_the_whole_commitment_not_just_the_target`；
+    `Forgotten` 那一支改由 `prune` 那條（它按保留期刪特定幾列，不是刪區間）
+    加上 `run_case` 那三條守著。**名字沒改的話就會變成這個 repo 最典型的那種謊。**
+
+    突變五條全部咬住（每一條都確認 cargo 真的重編了）：右界改回一小時 → 紅；
+    fail-closed 改成退回一小時 → 紅；margin 加回去 → 紅；fail-closed 那句塞回
+    `refusals` → 紅；重複列改取最寬的那一段 → 紅。（#48）
   - **字母人那半邊完全沒有這道檢查。** 上面講的全部只在 `sister do` 這條路上。
     `apps/desktop` 的 `hands_execute` → `sister_hands::execute_with(Level::Suggest,…)`
     **沒有 `Grant`、沒有 `StepRequest`、沒有 app 維度**，它直接拿 `allowed_next_step`

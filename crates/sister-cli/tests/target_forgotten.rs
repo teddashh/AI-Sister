@@ -76,7 +76,13 @@ fn run_case(mode: MissingTargetProvenance) -> String {
                 { "at_ms": 0, "app": "chrome.exe", "app_name": "Google Chrome",
                   "title": "他在工作的視窗", "text": [TASK] },
                 { "at_ms": 60_000, "app": "slack.exe", "app_name": "Slack",
-                  "title": "目標在另一個 app", "text": [URL] }
+                  "title": "目標在另一個 app", "text": [URL] },
+                // 目標之後還要有一格。目標那一刻如果是 `stream_end`，它就正好落在
+                // 自己那一段的 `core_ended_at` 上，而 `facts_in_range` 是半開的，
+                // 會把它排除在自己那一段之外。真的在錄的時候也不會在網址出現的
+                // 同一毫秒停掉。
+                { "at_ms": 120_000, "app": "slack.exe", "app_name": "Slack",
+                  "title": "目標在另一個 app", "text": ["他繼續在同一個視窗做事"] }
             ]
         }))
         .unwrap(),
@@ -97,7 +103,33 @@ fn run_case(mode: MissingTargetProvenance) -> String {
     let chunks = db.recent(100).unwrap();
     let evidence = chunks.iter().find(|c| c.text.contains(TASK)).unwrap();
     let frame_id = evidence.frame_id.unwrap();
-    let core = evidence.ts;
+    // 卡片要掛在**目標所在的那一段**，不是任務那一段。#48 之後審閱者只看卡片
+    // 自己那一段，而換 app 就會切段——所以「chrome 的卡片指到 slack 的網址」
+    // 現在本來就該被擋掉，那正是 #48 修掉的東西。這幾條測試要驗的是
+    // `TargetApp::Forgotten`（以及它的幾種鄰居），不是跨段指標，所以夾具要把
+    // 卡片放在對的那一段。證據 frame 仍然是任務那一格：`evidence_json` 和
+    // 「這一段有哪些 fact」是兩件事，前者走 `l0_original`，不受視窗影響。
+    let target_chunk = chunks
+        .iter()
+        .find(|c| c.text.contains(URL))
+        .expect("目標那一格");
+    let last_ts = chunks.iter().map(|c| c.ts).max().unwrap_or(evidence.ts);
+    let segs = db
+        .chapters_for_range(evidence.ts, last_ts.saturating_add(1_000))
+        .expect("compute segments");
+    let core = segs
+        .iter()
+        .find(|s| s.core_started_at <= target_chunk.ts && target_chunk.ts < s.core_ended_at)
+        .unwrap_or_else(|| {
+            panic!(
+                "no segment covering the target frame at {}; got {:?}",
+                target_chunk.ts,
+                segs.iter()
+                    .map(|s| (s.core_started_at, s.core_ended_at))
+                    .collect::<Vec<_>>()
+            )
+        })
+        .core_started_at;
     db.insert_l2_card(&L2Insert {
         segment_core_start: core,
         segment_ref: &format!("segment:{core}"),
@@ -388,7 +420,17 @@ fn run_real_removal(mode: RealRemoval) -> String {
         "at_ms": target_at_ms, "app": "slack.exe", "app_name": "Slack",
         "title": "目標在另一個 app", "text": [URL]
     });
-    let steps = vec![task_step, target_step];
+    // 目標之後還要有一格，否則目標那一刻就是 `stream_end`，而 `stream_end` 正好是
+    // 它自己那一段的 `core_ended_at`——半開區間會把它排除在自己那一段之外。
+    // 真的在錄的時候畫面不會在網址出現的同一毫秒停掉，所以補這一格也比較像真的。
+    // 只往後 60 秒：再遠一點，目標本身就會被推出 `--last 5m` 的窗外，
+    // 那條測試要驗的「真的 forget 帶走了目標」就會變成沒有發生過。
+    // 60 秒也還在同一段裡：同 app 同標題不會切段，閒置恢復要 90 秒才切。
+    let tail_step = serde_json::json!({
+        "at_ms": target_at_ms + 60_000, "app": "slack.exe", "app_name": "Slack",
+        "title": "目標在另一個 app", "text": ["他繼續在同一個視窗做事"]
+    });
+    let steps = vec![task_step, target_step, tail_step];
     std::fs::write(
         &scenario,
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -413,7 +455,33 @@ fn run_real_removal(mode: RealRemoval) -> String {
     let chunks = db.recent(100).unwrap();
     let evidence = chunks.iter().find(|c| c.text.contains(TASK)).unwrap();
     let frame_id = evidence.frame_id.unwrap();
-    let core = evidence.ts;
+    // 卡片要掛在**目標所在的那一段**，不是任務那一段。#48 之後審閱者只看卡片
+    // 自己那一段，而換 app 就會切段——所以「chrome 的卡片指到 slack 的網址」
+    // 現在本來就該被擋掉，那正是 #48 修掉的東西。這幾條測試要驗的是
+    // `TargetApp::Forgotten`（以及它的幾種鄰居），不是跨段指標，所以夾具要把
+    // 卡片放在對的那一段。證據 frame 仍然是任務那一格：`evidence_json` 和
+    // 「這一段有哪些 fact」是兩件事，前者走 `l0_original`，不受視窗影響。
+    let target_chunk = chunks
+        .iter()
+        .find(|c| c.text.contains(URL))
+        .expect("目標那一格");
+    let last_ts = chunks.iter().map(|c| c.ts).max().unwrap_or(evidence.ts);
+    let segs = db
+        .chapters_for_range(evidence.ts, last_ts.saturating_add(1_000))
+        .expect("compute segments");
+    let core = segs
+        .iter()
+        .find(|s| s.core_started_at <= target_chunk.ts && target_chunk.ts < s.core_ended_at)
+        .unwrap_or_else(|| {
+            panic!(
+                "no segment covering the target frame at {}; got {:?}",
+                target_chunk.ts,
+                segs.iter()
+                    .map(|s| (s.core_started_at, s.core_ended_at))
+                    .collect::<Vec<_>>()
+            )
+        })
+        .core_started_at;
     db.insert_l2_card(&L2Insert {
         segment_core_start: core,
         segment_ref: &format!("segment:{core}"),
@@ -507,6 +575,29 @@ fn run_real_removal(mode: RealRemoval) -> String {
     match mode {
         RealRemoval::Forget => {
             sister(&dir, None, &["forget", "--last", "5m", "--yes"]);
+            let db = Db::open(&Config::db_path(&dir)).unwrap();
+            assert!(
+                db.fact_by_id(target_id).unwrap().is_none(),
+                "forget --last 5m must delete the target fact"
+            );
+            // **這不是「測試被改成配合程式」，是這件事在 #48 之後不可能發生了。**
+            // 證明：#48 之後下一步的目標 fact 一定落在卡片自己那一段之內，所以
+            // `started_at <= target.ts < ended_at`。只要 `--last` 的窗蓋到
+            // `target.ts`，`collect_cascade_parents` 的重疊條件
+            // （`ended_at > from AND started_at < to`）就一定成立 → `segment:{core}`
+            // 被收進去 → 沿 `l2:{card}` cascade 到 `commitment:{id}`。
+            //
+            // 換句話說：**真的 `forget` 刪得掉目標，就一定連承諾一起刪掉**，
+            // 不可能留下一張活著的承諾去講「目標的來源不在了」。
+            // 舊夾具做得到，只因為它沒有 `segment` 列（跳過解釋層直接種卡片）。
+            //
+            // 「承諾還在、只有目標的來源沒了」那個狀態現在只有 `prune` 走得到
+            // （它按保留期刪特定幾列，不是刪一個時間區間），由
+            // `real_prune_makes_the_target_source_forgotten` 守著。
+            assert!(
+                db.live_commitments().unwrap().is_empty(),
+                "forgetting the overlapping segment must tombstone the derived commitment"
+            );
         }
         RealRemoval::Prune => {
             sister(&dir, Some(&config), &["prune"]);
@@ -533,12 +624,25 @@ fn run_real_removal(mode: RealRemoval) -> String {
     stdout
 }
 
+/// 名字在 #48 改過：它**不再**走到 `TargetApp::Forgotten`。
+///
+/// 舊名字是 `real_forget_makes_the_target_source_forgotten`，而現在真的
+/// `forget` 會把整張承諾一起帶走（推導見 `run_real_removal` 裡那段註解），
+/// 所以「承諾還在、只有目標的來源沒了」那一句根本印不出來。
+/// 名字留著舊的會變成這個 repo 最常見的那種謊：每一行都是真的，湊起來在說謊。
+/// `Forgotten` 那一支由 `real_prune_makes_the_target_source_forgotten`
+/// 和 `run_case` 那三條守著。
 #[test]
-fn real_forget_makes_the_target_source_forgotten() {
+fn real_forget_takes_the_whole_commitment_not_just_the_target() {
     let stdout = run_real_removal(RealRemoval::Forget);
     assert!(
-        stdout.contains("這個目標的來源已經不在了（被忘掉、或過了保留期）"),
+        stdout.contains("承諾表上一張活著的卡都沒有"),
         "stdout:\n{stdout}"
+    );
+    // 反面也要釘：它不可以印成「目標的來源不在了」——那是承諾還活著時才對的話。
+    assert!(
+        !stdout.contains("這個目標的來源已經不在了"),
+        "承諾已經整張不在了，不可以講成只有目標的來源不見：\n{stdout}"
     );
 }
 

@@ -183,6 +183,14 @@ pub fn format_review_result_with_consent_command(
                 r.dropped_evidence_refs
             ));
         }
+        // 0 的時候不印，理由和上面那句一樣。而且**不能併進「拒絕了 N 個下一步」**：
+        // 這幾張卡片模型連看都沒看到，那句話講的是「模型指了、她不接受」。
+        if r.cards_missing_segment > 0 {
+            out.push_str(&format!(
+                "有 {} 張卡片指的那一段已經不在紀錄裡，這一輪沒有給它們任何畫面上的 fact（理由見底下）。\n",
+                r.cards_missing_segment
+            ));
+        }
         if r.calls_used > 0 {
             out.push_str(&format!(
                 "今日審閱呼叫 {}/{}（這一輪用了 {} 次）。\n",
@@ -389,6 +397,14 @@ pub struct ReviewResult {
     pub refused_next_steps: u32,
     /// 模型引用了、而 prompt 根本沒給它看的 ref，被丟掉幾筆。
     pub dropped_evidence_refs: u32,
+    /// 卡片指的那一段已經不在紀錄裡，於是這一輪不給它任何 L1 fact。
+    ///
+    /// **這不是 `refused_next_steps`。** 那個數的是「模型指了一步、而她不接受」，
+    /// 這個數的是「模型連看都還沒看，她就先把這張卡片的 fact 清單清空了」——
+    /// 發生在呼叫模型**之前**，而且卡片可能因為 `five_class` 算出來是空的就直接
+    /// 跳過，模型從頭到尾沒參與。混進去會讓「她拒絕了 N 個**模型指的**下一步」
+    /// 變成假話：實測過一次模型只指了一步、那個數字卻是 2。
+    pub cards_missing_segment: u32,
     pub calls_used: u32,
     pub budget_used: u32,
     pub budget_limit: u32,
@@ -669,6 +685,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
             divergences: 0,
             refused_next_steps: 0,
             dropped_evidence_refs: 0,
+            cards_missing_segment: 0,
             calls_used: 0,
             budget_used: used,
             budget_limit: limit,
@@ -695,6 +712,10 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
     let mut refusals: Vec<String> = Vec::new();
     // 這不是「拒絕下一步」；分開保存，避免污染 reviewer_run.detail 和拒絕計數。
     let mut dropped_evidence_refs: Vec<String> = Vec::new();
+    // 這也不是「拒絕下一步」，理由同上一行，但踩到的坑更深一點：它發生在**呼叫
+    // 模型之前**，所以連「模型指了一步」這個前提都還不成立。混進 `refusals` 的話
+    // ——我實測過——模型只指了一步，畫面上會印「她拒絕了 2 個模型指的下一步」。
+    let mut missing_segments: Vec<String> = Vec::new();
     let mut calls = 0u32;
     let mut l2_revisions = 0u32;
     let mut budget_left = remaining;
@@ -706,10 +727,32 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         if card.author == L2Author::User {
             continue;
         }
-        let facts = input.db.facts_in_range(
-            card.segment_core_start,
-            card.segment_core_start.saturating_add(3_600_000),
-        )?;
+        // 這張卡片自己那一段，就是它能看到的全部。**不加 `OVERLAP_MARGIN_MS`**：
+        // margin 住在 `started_at`/`ended_at` 那一對（`segment.rs:383`），core 那一對
+        // 是精確相接的（`segment.rs` 的 `核心邊界該相接` 那條測試），配上
+        // `facts_in_range` 的半開區間，邊界上的 fact 歸後面那一段，不重不漏。
+        // 加了 margin 等於把授權視窗伸進**下一段** 5 秒——那正是這次要修的 bug，
+        // 只是縮小版。而且 `brain.rs` 和字母人抓 fact 都用不含 margin 的那一對，
+        // 寬過它就會出現「當初寫這張卡時模型沒看過、現在卻能當授權目標」的 fact。
+        let facts = match input.db.segment_core_end(card.segment_core_start)? {
+            Some(core_ended_at) => input
+                .db
+                .facts_in_range(card.segment_core_start, core_ended_at)?,
+            None => {
+                // 查不到那一段：fail-closed。退回一小時是 fail-open。
+                //
+                // 記在 `missing_segments` 不是 `refusals`：這裡還沒呼叫模型，
+                // 而且底下 `cats.is_empty()` 可能讓這張卡直接跳過，模型從頭到尾
+                // 沒參與。句子也不能借 `TargetApp::Forgotten` 那一句——那句講的是
+                // 「**下一步的目標**那筆 fact 的來源沒了」，這裡沒了的是
+                // 「**這張卡片自己那一段**」，兩件事。
+                missing_segments.push(format!(
+                    "這張卡片指的那一段（{}）已經不在紀錄裡（被忘掉、或過了保留期），所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
+                    card.segment_ref
+                ));
+                Vec::new()
+            }
+        };
         let cats = five_class(card, &facts);
         if cats.is_empty() && input.kind != ReviewKind::Eod {
             continue;
@@ -1014,7 +1057,14 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         calls_used: calls as i64,
         budget_used: (used + calls) as i64,
         budget_limit: limit as i64,
-        detail: &refusals.join("\n"),
+        // 兩種理由都要看得見，但**只有 `refusals` 算進拒絕計數**。
+        // detail 是給人讀的那一疊句子，計數是給那句「她拒絕了 N 個」用的。
+        detail: &refusals
+            .iter()
+            .chain(missing_segments.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n"),
     })?;
     for row in recheck_rows {
         input.db.insert_reviewer_recheck(&RecheckInsert {
@@ -1047,6 +1097,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         divergences,
         refused_next_steps: refusals.len() as u32,
         dropped_evidence_refs: dropped_evidence_refs.len() as u32,
+        cards_missing_segment: missing_segments.len() as u32,
         calls_used: calls,
         budget_used: used + calls,
         budget_limit: limit,
@@ -1347,6 +1398,7 @@ fn skipped(reason: SkipReason, used: u32, limit: u32) -> ReviewResult {
         divergences: 0,
         refused_next_steps: 0,
         dropped_evidence_refs: 0,
+        cards_missing_segment: 0,
         calls_used: 0,
         budget_used: used,
         budget_limit: limit,
@@ -2465,6 +2517,199 @@ mod tests {
                 .allowed_next_step
                 .as_deref(),
             Some(r#"{"action":"open_url","url":"https://example.com/x"}"#)
+        );
+    }
+
+    /// 三條視窗測試共用同一份資料，**只差目標 fact 的時間**。
+    ///
+    /// `where_fact` 拿到 `(core, core_end)` 再決定放哪裡：有一條要釘的是
+    /// 「剛好越過接縫 1 毫秒」，那個時間點得先知道 `core_end` 才算得出來。
+    fn run_segment_window_next_step(
+        label: &str,
+        where_fact: impl FnOnce(Millis, Millis) -> Millis,
+    ) -> (Db, ReviewResult, Millis, Millis, i64) {
+        let tmp = Tmp::new(label);
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        let core = segs[0].core_started_at;
+        let core_end = segs[0].core_ended_at;
+        let fact_ts = where_fact(core, core_end);
+        let fact_id = db
+            .test_insert_fact(fact_ts, "url", "https://window.example/")
+            .expect("fact");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":{{"fact":{fact_id}}}}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        (db, result, core, core_end, fact_id)
+    }
+
+    #[test]
+    fn a_fact_inside_this_segment_becomes_the_next_step() {
+        let ts = 1_700_250_000_000;
+        let fact_ts = ts + 30_000;
+        let (db, result, core, core_end, _) =
+            run_segment_window_next_step("segwin-inside", |_, _| fact_ts);
+        assert!(
+            fact_ts >= core && fact_ts < core_end,
+            "這一條的 fact 必須落在這一段之內：fact_ts={fact_ts} core={core} core_end={core_end}"
+        );
+        assert_eq!(result.refused_next_steps, 0);
+        assert_eq!(result.cards_missing_segment, 0, "這一段明明還在");
+        assert_eq!(
+            db.live_commitments().unwrap()[0]
+                .allowed_next_step
+                .as_deref(),
+            Some(r#"{"action":"open_url","url":"https://window.example/"}"#)
+        );
+    }
+
+    #[test]
+    fn a_fact_outside_this_segment_but_inside_one_hour_is_refused() {
+        let ts = 1_700_250_000_000;
+        let fact_ts = ts + 1_800_000;
+        let (db, result, core, core_end, fact_id) =
+            run_segment_window_next_step("segwin-outside", |_, _| fact_ts);
+        assert!(
+            fact_ts >= core_end,
+            "這一條的 fact 必須在這一段之外：fact_ts={fact_ts} core_end={core_end}"
+        );
+        assert!(
+            fact_ts < core.saturating_add(3_600_000),
+            "這一條的 fact 必須仍在舊的一小時窗內，否則證不到是視窗在起作用：fact_ts={fact_ts} core={core}"
+        );
+        assert!(
+            db.live_commitments().unwrap()[0]
+                .allowed_next_step
+                .is_none()
+        );
+        assert_refused(
+            &db,
+            &result,
+            &[&format!("fact:{fact_id}"), "沒有列在這次給模型的 L1 facts"],
+        );
+    }
+
+    /// 接縫上的那一毫秒。**這一條專門釘住「不加 `OVERLAP_MARGIN_MS`」**。
+    ///
+    /// 上面那條把 fact 放在半小時外，右界就算多寬 5 秒也照樣拒絕——它證不到
+    /// margin 這件事。core 邊界是精確相接的（`segment.rs` 的「核心邊界該相接」），
+    /// 所以 `core_end` 之後的第一毫秒**已經屬於下一段**。授權視窗伸過去，
+    /// 就是這次要修的那個 bug 的縮小版。
+    #[test]
+    fn a_fact_one_millisecond_past_the_seam_belongs_to_the_next_segment() {
+        let (db, result, core, core_end, fact_id) =
+            run_segment_window_next_step("segwin-seam", |_, core_end| core_end + 1);
+        let fact_ts = core_end + 1;
+        assert!(
+            fact_ts > core && fact_ts < core_end.saturating_add(crate::segment::OVERLAP_MARGIN_MS),
+            "這一條的 fact 必須落在 margin 之內，否則證不到 margin：\
+             fact_ts={fact_ts} core={core} core_end={core_end}"
+        );
+        assert!(
+            db.live_commitments().unwrap()[0]
+                .allowed_next_step
+                .is_none(),
+            "接縫外一毫秒的 fact 不可以變成下一步"
+        );
+        assert_eq!(result.cards_missing_segment, 0, "這一段還在，不是查不到");
+        assert_refused(
+            &db,
+            &result,
+            &[&format!("fact:{fact_id}"), "沒有列在這次給模型的 L1 facts"],
+        );
+    }
+
+    #[test]
+    fn a_missing_segment_refuses_even_a_fact_inside_one_hour() {
+        let tmp = Tmp::new("segwin-missing");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        let core = segs[0].core_started_at;
+        db.conn
+            .execute("DELETE FROM segment", [])
+            .expect("drop the segment this card points at");
+        assert_eq!(
+            db.segment_core_end(core).expect("query"),
+            None,
+            "這一條要的是查不到那一段，不是讀失敗"
+        );
+        let fact_ts = ts + 30_000;
+        assert!(
+            fact_ts < core.saturating_add(3_600_000),
+            "目標 fact 仍在一小時內：查不到那一段若退回一小時，這一條會放行"
+        );
+        let fact_id = db
+            .test_insert_fact(fact_ts, "url", "https://window.example/")
+            .expect("fact");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":{{"fact":{fact_id}}}}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        assert!(
+            db.live_commitments().unwrap()[0]
+                .allowed_next_step
+                .is_none(),
+            "查不到那一段還解出下一步"
+        );
+        // **這兩個數字要分開對，而且要對死。** 原本這裡寫的是
+        // `refused_next_steps >= 1`，而實際跑出來是 2——模型只指了一步，
+        // 「她拒絕了 N 個模型指的下一步」卻會印 2。`>=` 把它遮住了。
+        assert_eq!(
+            result.refused_next_steps, 1,
+            "模型只指了一步，拒絕計數就只能是 1"
+        );
+        assert_eq!(
+            result.cards_missing_segment, 1,
+            "段落不見了要算在自己那一格，不是算成「模型指的下一步」"
+        );
+        let ReviewerRefusals::Some { reasons, .. } = db.latest_reviewer_refusals().unwrap() else {
+            panic!("查不到那一段必須留下理由");
+        };
+        // 兩句話要同時在，而且**不可以是同一句**。
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("這張卡片指的那一段")
+                    && r.contains("沒有給模型任何畫面上的 fact")),
+            "少了「這一段不見了」那一句：{reasons:?}"
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains(&format!("fact:{fact_id}"))
+                    && r.contains("沒有列在這次給模型的 L1 facts")),
+            "少了「模型指的那筆 fact 不在清單裡」那一句：{reasons:?}"
+        );
+        // 借 `TargetApp::Forgotten` 的字串會讓兩種狀態講同一句話：那一句講的是
+        // 「**下一步目標**那筆 fact 的來源沒了」，這裡沒了的是「**卡片自己那一段**」。
+        assert!(
+            !reasons
+                .iter()
+                .any(|r| r.contains("這個目標的來源已經不在了")),
+            "段落不見了不可以借用目標來源不見了的那句話：{reasons:?}"
         );
     }
 

@@ -3447,6 +3447,30 @@ impl Db {
         Ok(crate::activity::group(&segments))
     }
 
+    /// 這張卡片指的那一段，真的結束在什麼時候。
+    ///
+    /// **`Ok(None)` 和 `Err` 是兩件事**：前者是「那一段已經不在了」（被忘掉、
+    /// 過了保留期），後者是「讀不出來」。不准用 `.flatten()` 或
+    /// `.unwrap_or_default()` 把它們壓成同一個答案。
+    ///
+    /// 同一個 `core_started_at` 萬一有兩列（`replace_segments` 是「先刪一個
+    /// 區間再插回去」，理論上不會，但沒有 UNIQUE 擋著）：取 **`core_ended_at`
+    /// 最小**的那一列，也就是**最窄**的那一段。這一格是授權路徑，模稜兩可的
+    /// 時候要往收緊的方向倒。
+    pub fn segment_core_end(&self, core_started_at: Millis) -> Result<Option<Millis>> {
+        self.conn
+            .query_row(
+                "SELECT core_ended_at FROM segment
+                 WHERE core_started_at = ?1
+                 ORDER BY core_ended_at ASC
+                 LIMIT 1",
+                [core_started_at],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn facts_in_range(&self, from_ts: Millis, to_ts: Millis) -> Result<Vec<FactRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, ts, kind, raw, normalized, source_kind,
@@ -8382,6 +8406,53 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))
             .expect("stored");
         assert_eq!(stored_again, 2, "重算是換掉，不是疊上去");
+    }
+
+    fn insert_segment_row(db: &Db, core_started_at: Millis, core_ended_at: Millis) {
+        db.conn
+            .execute(
+                "INSERT INTO segment(
+                    started_at, ended_at, core_started_at, core_ended_at,
+                    event_ids, computed_at
+                 ) VALUES(?1, ?2, ?1, ?2, '[]', 0)",
+                [core_started_at, core_ended_at],
+            )
+            .expect("insert segment row");
+    }
+
+    /// `Ok(None)` 是「那一段已經不在了」；讀壞一列是 `Err`。兩種不准合成一個空。
+    #[test]
+    fn segment_core_end_absent_is_none_unreadable_is_err() {
+        let db = test_db();
+        assert_eq!(
+            db.segment_core_end(1).expect("query"),
+            None,
+            "沒有那一列應是 Ok(None)，不是 0、也不是 Err"
+        );
+
+        insert_segment_row(&db, 1, 10);
+        assert_eq!(db.segment_core_end(1).expect("query"), Some(10));
+
+        db.conn
+            .execute(
+                "UPDATE segment SET core_ended_at = X'80' WHERE core_started_at = 1",
+                [],
+            )
+            .expect("corrupt core_ended_at");
+        assert!(
+            db.segment_core_end(1).is_err(),
+            "讀不出來必須是 Err，不能壓成 Ok(None)"
+        );
+    }
+
+    /// 授權路徑：同一個 core 兩列時取最窄的那一段。
+    #[test]
+    fn segment_core_end_picks_the_narrowest_when_two_rows_share_a_core() {
+        let db = test_db();
+        insert_segment_row(&db, 10, 90);
+        insert_segment_row(&db, 10, 50);
+        assert_eq!(db.segment_core_end(10).expect("query"), Some(50));
+        assert_eq!(db.segment_core_end(11).expect("missing"), None);
     }
 
     /// 「沒解析到時間範圍」和「解析了、算過、沒有段落」不可以長成同一個
