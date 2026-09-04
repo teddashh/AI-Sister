@@ -144,6 +144,17 @@ jobs:
       - name: No sentence may tell him to press a key called KeyP
         run: python3 ./scripts/check-combo-is-readable.py
 
+      # 同一個形狀，第六次：「這一刻」那張卡要說得出「她試著問過 N 次，最近一
+      # 次是⋯」，靠的是 `main.rs` 裡查 `core_started_at` ＋ 把結果傳進
+      # `while_recording`。那兩行也在 `apps/desktop/src-tauri`，同樣沒有
+      # `cargo test`——把 `core_started_at` 改成 `core_ended_at`（型別一樣、
+      # clippy 綠）會安靜地回 0 列，卡片永遠退回舊那句「正在等解釋層處理」。
+      #
+      # 這不是推測：那一刀和「寫死成 None」那一刀我都真的跑過，**當時**那 26 條
+      # 閘門全綠——當時就是這一條還不存在的時候。這一條加進來就是為了讓它們變紅。
+      - name: The 這一刻 card must stay wired to the attempt history
+        run: python3 ./scripts/check-current-guess-wiring.py
+
       # `docs/WINDOWS-CHECKLIST.md` 是這個 repo 唯一一份「只有他那台機器執行得
       # 了」的測試——一條一條照著做的那種。所以它自己指錯路的時候，壞掉的是那
       # 一整輪驗證：他打開檔案總管、找不到那個資料夾、然後回報一個沒有壞的東西

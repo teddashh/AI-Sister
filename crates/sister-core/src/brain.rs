@@ -27,7 +27,7 @@ use crate::segment::{CutKind, LARGE_CLIPBOARD_BYTES, Segment};
 /// 記憶瀏覽器最上方那張「現在」卡的判決。
 ///
 /// 這裡刻意不放萬用狀態：新增一種 Presence 或一種沒有 L2 的原因時，組裝端必須
-/// 決定它要對人說什麼。CLI 與桌面共用同一份字。
+/// 決定它要對人說什麼。這是桌面「現在」卡專用；CLI 另有一套字。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CurrentGuess {
@@ -43,7 +43,18 @@ pub enum CurrentGuess {
     NotWorthInterpreting,
     NoConsent,
     NoCommand,
-    BudgetExhausted { used: u32, limit: u32 },
+    BudgetExhausted {
+        used: u32,
+        limit: u32,
+    },
+    /// 這一段值得理解、解釋層也已經問過了，卻到現在都沒有卡片。
+    ///
+    /// payload 只放序列化得出去的東西：`RetainedInterpreterAttempts` 與
+    /// `StoredOutboundOutcome` 都沒有 derive `Serialize`，放進來編不過。
+    AskedWithoutCard {
+        attempts: u32,
+        latest_label: String,
+    },
     Queued,
 }
 
@@ -62,35 +73,38 @@ impl CurrentGuess {
         }
     }
 
-    pub fn message(&self) -> &'static str {
+    pub fn message(&self) -> String {
         match self {
-            Self::NeverStarted => "還沒有開始錄製，所以沒有這一刻的猜測。",
-            Self::Unreadable => "讀不到錄製狀態，現在不能說她正在看。",
-            Self::Booting => "錄製正在啟動，還沒有進入正在看的狀態。",
-            Self::Thinking => "錄製已停，解釋層正在把最後一段收尾；這不是正在錄。",
-            Self::Stopped => "錄製已停止，所以沒有這一刻的猜測。",
-            Self::Stalled => "錄製心跳已過期；她現在有沒有在看，說不準。",
-            Self::Paused => "記錄已暫停；她現在沒有在看，所以沒有這一刻的猜測。",
-            Self::NoSegment => "正在錄，但這一刻還沒有任何段落。",
+            Self::NeverStarted => "還沒有開始錄製，所以沒有這一刻的猜測。".to_string(),
+            Self::Unreadable => "讀不到錄製狀態，現在不能說她正在看。".to_string(),
+            Self::Booting => "錄製正在啟動，還沒有進入正在看的狀態。".to_string(),
+            Self::Thinking => "錄製已停，解釋層正在把最後一段收尾；這不是正在錄。".to_string(),
+            Self::Stopped => "錄製已停止，所以沒有這一刻的猜測。".to_string(),
+            Self::Stalled => "錄製心跳已過期；她現在有沒有在看，說不準。".to_string(),
+            Self::Paused => "記錄已暫停；她現在沒有在看，所以沒有這一刻的猜測。".to_string(),
+            Self::NoSegment => "正在錄，但這一刻還沒有任何段落。".to_string(),
             // 解釋層只看**關掉的**段落，所以最新的一張卡講的是上一段，不是這
             // 一秒。而一段可以在同一個 app 裡開著幾十分鐘——把它叫做「現在」，
             // 一張一小時前的猜測讀起來就跟剛剛量到的一樣。時間印在卡上。
-            Self::HasCard => "她對上一段的猜測（下面那張）。現在這一段還開著，要等它結束她才會看。",
+            Self::HasCard => "她對上一段的猜測（下面那張）。現在這一段還開著，要等它結束她才會看。".to_string(),
             // 不是「她檢查過」——解釋層可能根本還沒走到這一段，這句話是**同一個
             // 判準**在這裡自己算的。講判斷，不要講一件沒發生過的事。
             Self::NotWorthInterpreting => {
-                "上一段依目前判準不值得產生假設：沒有換 app、沒有閒置後回來、沒有貼大東西、沒有卡住、也沒有錯誤碼。"
+                "上一段依目前判準不值得產生假設：沒有換 app、沒有閒置後回來、沒有貼大東西、沒有卡住、也沒有錯誤碼。".to_string()
             }
             Self::NoConsent => {
-                "最新一段還沒有假設；第二張同意書尚未簽署，解釋層一次都不會呼叫 CLI。"
+                "最新一段還沒有假設；第二張同意書尚未簽署，解釋層一次都不會呼叫 CLI。".to_string()
             }
             Self::NoCommand => {
-                "最新一段還沒有假設；[brain] command 尚未設定，解釋層沒有 CLI 可以呼叫。"
+                "最新一段還沒有假設；[brain] command 尚未設定，解釋層沒有 CLI 可以呼叫。".to_string()
             }
             Self::BudgetExhausted { .. } => {
-                "最新一段還沒有假設；今天的解釋預算已用完，今天不會再產生新卡。"
+                "最新一段還沒有假設；今天的解釋預算已用完，今天不會再產生新卡。".to_string()
             }
-            Self::Queued => "最新一段值得理解，正在等解釋層處理。",
+            Self::AskedWithoutCard { attempts, latest_label } => format!(
+                "最新一段值得理解，她試著問過 {attempts} 次，最近一次是{latest_label}，現在手上沒有卡片。次數與結局只算還留著的外送紀錄；她不會因為問過幾次就放棄這一段，但下一次會不會輪到它，這張卡看不出來。"
+            ),
+            Self::Queued => "最新一段值得理解，正在等解釋層處理。".to_string(),
         }
     }
 
@@ -101,6 +115,7 @@ impl CurrentGuess {
         consented: bool,
         budget_used: u32,
         budget_limit: u32,
+        previous_attempts: Option<crate::db::RetainedInterpreterAttempts>,
     ) -> Self {
         let Some((has_card, worth_interpreting)) = segment else {
             return Self::NoSegment;
@@ -123,7 +138,13 @@ impl CurrentGuess {
         if !worth_interpreting {
             return Self::NotWorthInterpreting;
         }
-        Self::Queued
+        match previous_attempts {
+            Some(prev) => Self::AskedWithoutCard {
+                attempts: prev.count,
+                latest_label: prev.latest_outcome.zh_label(),
+            },
+            None => Self::Queued,
+        }
     }
 }
 
