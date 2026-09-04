@@ -21,8 +21,8 @@ use crate::config::BrainConfig;
 use crate::consent::Consent;
 use crate::db::{
     CommitmentInsert, DaySummaryInsert, Db, DivergenceInsert, DualPassDivergences, EntityMemory,
-    L2Author, L2CardRow, L2Insert, OutboundInsert, RecheckInsert, RecheckStats, ReviewerNotes,
-    ReviewerRunInsert,
+    L2Author, L2CardRow, L2Insert, NOTHING_TO_REVIEW_HEAD, OutboundInsert, RecheckInsert,
+    RecheckStats, ReviewerNotes, ReviewerRunInsert,
 };
 use crate::model::Millis;
 
@@ -111,8 +111,7 @@ impl SkipReason {
                 )
             }
             SkipReason::NothingToReview { remaining } => format!(
-                "這段期間沒有還沒審過的 L2 假設。\n\
-                 （同意書已簽、CLI 已設定、預算還剩 {remaining} 次。）"
+                "{NOTHING_TO_REVIEW_HEAD}。（同意書已簽、CLI 已設定、預算還剩 {remaining} 次。）"
             ),
         }
     }
@@ -252,15 +251,22 @@ pub fn format_reviewer_visibility(
     out.push('\n');
     // 拒絕不放進上面那一段。那一段的意思是「兩份答案對不上」，而拒絕的時候
     // 兩份答案是一致的——是她不接受它們指的那筆 fact。
+    //
+    // 三塊取的不是同一列，標籤就不能是同一個詞。
+    // 分歧：`calls_used >= 2` 的最新一列 →「最近一次雙 pass」。
+    // 拒絕：最近一輪 `candidate_count` 不是 0 →「最近一次看過卡片的審閱」。
+    // 說明：最新一列 `skip_reason IS NULL`（含閒置）→「最近一次審閱」。
     match refusals {
         crate::db::ReviewerRefusals::NeverRan => {}
         crate::db::ReviewerRefusals::None { run_id } => {
             out.push_str(&format!(
-                "最近一次審閱（輪次 #{run_id}）沒有拒絕任何下一步。\n\n"
+                "最近一次看過卡片的審閱（輪次 #{run_id}）沒有拒絕任何下一步。\n\n"
             ));
         }
         crate::db::ReviewerRefusals::Some { run_id, reasons } => {
-            out.push_str(&format!("最近一次審閱（輪次 #{run_id}）拒絕掉的下一步：\n"));
+            out.push_str(&format!(
+                "最近一次看過卡片的審閱（輪次 #{run_id}）拒絕掉的下一步：\n"
+            ));
             for reason in reasons {
                 out.push_str(&format!("- {reason}\n"));
             }
@@ -1160,29 +1166,49 @@ impl RawRecordsInCoreWindow {
     }
 }
 
+/// 「切法變了」只准出現在這裡。主句不准平述這個成因。
+const CUT_CHANGED_AS_EXAMPLE: &str =
+    "例如章節的切法變了——你在時間軸上合併過章節，那段範圍被重新計算過，或那段範圍還沒算過";
+
 fn missing_segment_line(
     card: &L2CardRow,
     raw: RawRecordsInCoreWindow,
     covering: Option<(Millis, Millis)>,
 ) -> String {
+    // 走到這裡時手上只有：`segment_core_end(core) == None`，以及窗裡
+    // 有沒有原始紀錄。窗長是章節上限 [`crate::segment::TIME_CAP_MS`]，
+    // 不是這一段的長度——程式界不出「那一段」，所以句子的主詞是
+    // 「這張卡片的起點之後 N 分鐘內」，不是「那一段時間」。
+    let cap_min = crate::segment::TIME_CAP_MS / 60_000;
     if raw.0 {
-        // covering 是附加資訊，不是分辨法。有蓋住就提；沒蓋住仍是
-        // 「紀錄還在、切法變了」，不准改口說被忘掉。
+        // covering 是附加資訊，不是分辨法。有蓋住就提；沒蓋住仍只講
+        // 看得到的：那一段查不到、起點之後一個上限內還留著紀錄。
+        // 「切法變了」是舉例，不是從兩個 probe 推得出來的成因——
+        // 快取空的、從來沒人算過，也會長成這個狀態。成因整段只出現在
+        // [`CUT_CHANGED_AS_EXAMPLE`]，括號裡，不在主句。
         let covering_clause = match covering {
             Some((start, _)) if start != card.segment_core_start => "，那個時間點仍被另一段蓋著",
             _ => "",
         };
         format!(
-            "這張卡片指的那一段（{}）那段時間的紀錄還在，只是章節的切法變了（例如你在時間軸上合併過章節，或那段範圍被重新計算過）{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
+            "這張卡片指的那一段（{}）現在查不到；那張卡片的起點之後{cap_min}分鐘內還留著紀錄（{CUT_CHANGED_AS_EXAMPLE}）{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
             card.segment_ref
         )
     } else {
-        // prune 和 forget 都會連卡片一起墓碑（`collect_cascade_parents`
-        // 同一個 cut），重算只動快取、紀錄還在，所以目前沒有任何已知的
-        // 正式路徑到得了這一臂。它是防守用的：狀態真的發生時要能誠實
-        // 說「我找不到，而且我不知道為什麼」，而不是猜一個成因。
+        // 這一臂只講兩個觀察：那一段查不到，起點之後一個上限內也沒有
+        // 原始紀錄。不准點名成因。
+        //
+        // 卡片為什麼通常走不到這裡：forget／prune 刪 segment 用的是重疊
+        // （`ended_at > from AND started_at < to`，`retention.rs`），收卡片
+        // 卻是包含（`segment_core_start >= from AND < to`，
+        // `collect_cascade_parents`）。一段跨過 `from` 的章節，segment 列
+        // 被刪掉，卡片的 core 卻可能落在墓碑範圍之外。真正接住它的是血緣：
+        // `collect_cascade_parents` 寫 `parent = segment:{...}`，
+        // `tombstone_descendants` 走過去。那條血緣有洞——`migrate_012`
+        // 不回填，alpha.58 就在用的卡片一列 provenance 都沒有；對那些舊
+        // 卡片，落差是開著的。這一輪不修 migrate。
         format!(
-            "這張卡片指的那一段（{}）查不到，而且那段時間也沒有留下任何原始紀錄，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
+            "這張卡片指的那一段（{}）現在查不到，而且那張卡片的起點之後{cap_min}分鐘內也沒有留下任何原始紀錄，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
             card.segment_ref
         )
     }
@@ -1810,6 +1836,48 @@ mod tests {
         )
     }
 
+    /// 「切法變了」出現在 [`CUT_CHANGED_AS_EXAMPLE`] 之外，就是把它講成主句。
+    /// 不能再用「『例如』有沒有出現在它前面」：那會把另一段的「例如」當成通行證。
+    fn cut_changed_appears_outside_the_example(s: &str) -> bool {
+        s.replace(CUT_CHANGED_AS_EXAMPLE, "").contains("切法變了")
+    }
+
+    fn expected_still_there_line(segment_ref: &str, covering_clause: &str) -> String {
+        let cap_min = crate::segment::TIME_CAP_MS / 60_000;
+        format!(
+            "這張卡片指的那一段（{segment_ref}）現在查不到；那張卡片的起點之後{cap_min}分鐘內還留著紀錄（{CUT_CHANGED_AS_EXAMPLE}）{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。"
+        )
+    }
+
+    /// 同一份輸出裡，同一個標籤詞不可以配上兩個不同輪次。
+    fn assert_no_shared_label_across_rounds(shown: &str) {
+        use std::collections::{BTreeMap, BTreeSet};
+        let markers = [
+            ("最近一次看過卡片的審閱", "最近一次看過卡片的審閱（輪次 #"),
+            ("最近一次雙 pass", "最近一次雙 pass（審閱輪次 #"),
+            ("最近一次審閱", "最近一次審閱（輪次 #"),
+        ];
+        let mut by_label: BTreeMap<&str, BTreeSet<i64>> = BTreeMap::new();
+        for (label, marker) in markers {
+            let mut rest = shown;
+            while let Some(at) = rest.find(marker) {
+                let after = &rest[at + marker.len()..];
+                let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+                let id: i64 = digits
+                    .parse()
+                    .unwrap_or_else(|_| panic!("標籤「{label}」後面不是輪次數字：{shown}"));
+                by_label.entry(label).or_default().insert(id);
+                rest = after;
+            }
+        }
+        for (label, ids) in &by_label {
+            assert!(
+                ids.len() <= 1,
+                "「{label}」配上了兩個不同輪次 {ids:?}：{shown}"
+            );
+        }
+    }
+
     fn wipe_raw_records_in_core_window(db: &Db, core: Millis) {
         let raw_to = core.saturating_add(crate::segment::TIME_CAP_MS);
         // facts 先於 text_chunks：chunk_id 是 ON DELETE CASCADE，順序反過來
@@ -1836,6 +1904,11 @@ mod tests {
             (
                 "DELETE FROM system_events WHERE ts >= ?1 AND ts < ?2",
                 "system_events",
+            ),
+            ("DELETE FROM queries WHERE ts >= ?1 AND ts < ?2", "queries"),
+            (
+                "DELETE FROM segment_edit WHERE from_ms IS NOT NULL AND ((to_ms IS NOT NULL AND from_ms < ?2 AND to_ms > ?1) OR (to_ms IS NULL AND from_ms >= ?1 AND from_ms < ?2))",
+                "segment_edit",
             ),
         ] {
             db.conn.execute(sql, [core, raw_to]).expect(what);
@@ -2248,8 +2321,9 @@ mod tests {
 
     /// 「沒有東西可審」寫進 notes 不是 detail。手捏 `ReviewerRefusals` 再叫
     /// render 函式證不到這一格——要走真正的 `run`，讓它自己把那句話寫進哪一欄。
+    /// 沒看過卡片的一輪沒有資格說「沒有拒絕任何下一步」。
     #[test]
-    fn an_empty_interval_review_refuses_nothing_and_says_so() {
+    fn an_empty_interval_review_must_not_claim_she_refused_nothing() {
         let mut db = Db::open_in_memory().expect("db");
         let ts = 1_700_800_000_000;
         let consent = signed();
@@ -2286,8 +2360,8 @@ mod tests {
         );
 
         assert!(
-            shown.contains("沒有拒絕任何下一步"),
-            "空的區間審閱必須把這句印出來：{shown}"
+            !shown.contains("沒有拒絕任何下一步"),
+            "沒看過卡片的一輪沒有資格說「沒有拒絕」：{shown}"
         );
         assert!(
             !shown.contains("拒絕掉的下一步"),
@@ -2310,6 +2384,250 @@ mod tests {
                 "那句話不可以出現在拒絕那一段：{shown}"
             );
         }
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("沒有東西可審要留下一則說明");
+        };
+        assert_eq!(lines.len(), 1, "一則說明不能被 \\n 裁成兩則：{lines:?}");
+    }
+
+    /// 閒置的一輪沒有資格回答「有沒有拒絕」。上一輪真的拒絕過的，
+    /// `sister review --dry-run` 仍要看得到，而且不准改口說「沒有拒絕任何下一步」。
+    #[test]
+    fn an_idle_tick_does_not_erase_the_previous_round_s_refusals() {
+        let tmp = Tmp::new("idle-does-not-erase");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        let core = segs[0].core_started_at;
+        db.conn
+            .execute("DELETE FROM segment", [])
+            .expect("drop the segment this card points at");
+        let fact_ts = ts + crate::segment::TIME_CAP_MS + 30_000;
+        let fact_id = db
+            .test_insert_fact(fact_ts, "url", "https://window.example/")
+            .expect("fact");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":{{"fact":{fact_id}}}}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let first = run_diverge(&mut db, command.clone(), args.clone(), ts);
+        assert_eq!(first.refused_next_steps, 1, "第一輪要真的拒絕過");
+        let ReviewerRefusals::Some { reasons, .. } = db.latest_reviewer_refusals().unwrap() else {
+            panic!("第一輪必須留下拒絕");
+        };
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains(&format!("fact:{fact_id}"))),
+            "{reasons:?}"
+        );
+
+        let consent = signed();
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let second_now = ts + 500_000 + MIN_INTERVAL_MS + 1;
+        let second = {
+            let mut input = ReviewInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: ts + 10_000_000,
+                to_ts: ts + 10_400_000,
+                kind: ReviewKind::Interval,
+                force: false,
+                now: second_now,
+            };
+            run(&mut input).expect("idle run")
+        };
+        assert!(
+            matches!(second.skip, Some(SkipReason::NothingToReview { .. })),
+            "第二輪要走沒有東西可審：{:?}",
+            second.skip
+        );
+        assert!(second.ran, "看過了、沒有東西，要記成一次真正跑過");
+
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        assert!(
+            shown.contains(&format!("fact:{fact_id}")),
+            "閒置 tick 之後上一輪的拒絕還要看得見：{shown}"
+        );
+        assert!(
+            shown.contains("拒絕掉的下一步"),
+            "閒置 tick 不准把上一輪的拒絕清單蓋掉：{shown}"
+        );
+        assert!(
+            !shown.contains("沒有拒絕任何下一步"),
+            "閒置 tick 不准改口說沒有拒絕：{shown}"
+        );
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("第二輪要留下「沒有東西可審」的說明");
+        };
+        assert_eq!(lines.len(), 1, "一則說明不能被裁成兩則：{lines:?}");
+        assert!(
+            lines[0].contains("這段期間沒有還沒審過的 L2 假設"),
+            "{lines:?}"
+        );
+        assert!(
+            shown.contains("最近一次看過卡片的審閱"),
+            "拒絕那一塊要講它真正取的那一輪：{shown}"
+        );
+        assert_no_shared_label_across_rounds(&shown);
+    }
+
+    /// 日終沒有候選時，和閒置 tick 同一個洞：`candidate_count = 0`、
+    /// `skip_reason = NULL`、`notes = ""`。對不上任何文案開頭，只能看那個數字。
+    #[test]
+    fn an_empty_eod_does_not_erase_the_previous_round_s_refusals() {
+        let tmp = Tmp::new("eod-does-not-erase");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        let core = segs[0].core_started_at;
+        db.conn
+            .execute("DELETE FROM segment", [])
+            .expect("drop the segment this card points at");
+        let fact_ts = ts + crate::segment::TIME_CAP_MS + 30_000;
+        let fact_id = db
+            .test_insert_fact(fact_ts, "url", "https://window.example/")
+            .expect("fact");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":{{"fact":{fact_id}}}}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let first = run_diverge(&mut db, command.clone(), args.clone(), ts);
+        assert_eq!(first.refused_next_steps, 1, "第一輪要真的拒絕過");
+        let ReviewerRefusals::Some { reasons, .. } = db.latest_reviewer_refusals().unwrap() else {
+            panic!("第一輪必須留下拒絕");
+        };
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains(&format!("fact:{fact_id}"))),
+            "{reasons:?}"
+        );
+
+        let consent = signed();
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let second = {
+            let mut input = ReviewInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: ts + 10_000_000,
+                to_ts: ts + 10_400_000,
+                kind: ReviewKind::Eod,
+                force: false,
+                now: ts + 500_000 + 1,
+            };
+            run(&mut input).expect("empty eod")
+        };
+        assert_eq!(second.candidates, 0, "第二輪區間裡沒有卡片：{second:?}");
+        assert!(second.ran, "沒有候選的日終仍記成一次真正跑過");
+
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        assert!(
+            shown.contains(&format!("fact:{fact_id}")),
+            "沒有候選的日終之後上一輪的拒絕還要看得見：{shown}"
+        );
+        assert!(
+            shown.contains("拒絕掉的下一步"),
+            "沒有候選的日終不准把上一輪的拒絕清單蓋掉：{shown}"
+        );
+        assert!(
+            !shown.contains("沒有拒絕任何下一步"),
+            "沒有候選的日終不准改口說沒有拒絕：{shown}"
+        );
+        assert!(
+            shown.contains("最近一次看過卡片的審閱"),
+            "拒絕那一塊要講它真正取的那一輪：{shown}"
+        );
+        assert_no_shared_label_across_rounds(&shown);
+    }
+
+    /// 「最近」落在 `ORDER BY ts DESC, id DESC` 上。只有一輪看得了卡片的
+    /// 夾具分不出來；三輪——拒絕 A、夾一輪沒有候選的、拒絕 B——才分得出來。
+    #[test]
+    fn latest_reviewer_refusals_is_the_latest_card_looking_round() {
+        let tmp = Tmp::new("latest-is-latest");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts_a = 1_700_250_000_000;
+        let fact_a = refuse_a_step_at(&mut db, &tmp, ts_a, "https://first.example/");
+        let consent = signed();
+        let brain = BrainConfig {
+            command: "python3".into(),
+            args: vec![],
+            ..Default::default()
+        };
+        let idle_now = ts_a + 500_000 + MIN_INTERVAL_MS + 1;
+        {
+            let mut input = ReviewInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: ts_a + 10_000_000,
+                to_ts: ts_a + 10_400_000,
+                kind: ReviewKind::Interval,
+                force: false,
+                now: idle_now,
+            };
+            let idle = run(&mut input).expect("idle");
+            assert!(
+                matches!(idle.skip, Some(SkipReason::NothingToReview { .. })),
+                "中間那一輪要走沒有東西可審：{:?}",
+                idle.skip
+            );
+        }
+        let ts_b = ts_a + 20_000_000;
+        let fact_b = refuse_a_step_at(&mut db, &tmp, ts_b, "https://second.example/");
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        assert!(
+            shown.contains(&format!("fact:{fact_b}")),
+            "畫面上要是最近那一輪的拒絕 B：{shown}"
+        );
+        assert!(
+            !shown.contains(&format!("fact:{fact_a}")),
+            "ORDER BY 反過來會停在第一輪的拒絕 A：{shown}"
+        );
     }
 
     #[test]
@@ -2860,7 +3178,7 @@ mod tests {
         // 分辨法會看到它。目標 fact 放在 TIME_CAP 窗外、一小時內。
         assert!(
             db.has_raw_records_in_core_window(core).expect("raw"),
-            "畫面還在，分辨法該走「紀錄還在」"
+            "畫面還在，分辨法該走「還留著紀錄」"
         );
         assert_eq!(
             db.segment_core_end(core).expect("query"),
@@ -2930,9 +3248,11 @@ mod tests {
         assert!(
             lines.iter().any(|r| r.contains("這張卡片指的那一段")
                 && r.contains("沒有給模型任何畫面上的 fact")
-                && r.contains("紀錄還在")
-                && r.contains("切法變了")),
-            "畫面還在，要講切法變了：{lines:?}"
+                && r.contains("現在查不到")
+                && r.contains("還留著紀錄")
+                && r.contains("切法變了")
+                && !cut_changed_appears_outside_the_example(r)),
+            "畫面還在，主句只講查不到、還留著紀錄；切法變了只能當例子：{lines:?}"
         );
         assert!(
             !lines
@@ -2965,9 +3285,10 @@ mod tests {
 
     /// 走到「窗裡什麼都沒有」那一臂時，那句話不准點名一個它證明不了的成因。
     ///
-    /// prune / forget 走不到這一臂（卡片一起墓碑）。夾具是段落列沒了、
-    /// 原始紀錄也沒了、卡片還活著。擴大涵蓋範圍之後，畫面、fact、chunk、
-    /// input_metrics 都要一起刪，不然會走到「還在」那一臂。
+    /// 正式路徑通常走不到這一臂（血緣會把卡片一起墓碑），但
+    /// `migrate_012` 不回填 provenance 的舊卡片落差是開著的。夾具是段落列
+    /// 沒了、原始紀錄也沒了、卡片還活著。擴大涵蓋範圍之後，問過的每一張
+    /// 表都要一起刪，不然會走到「還留著紀錄」那一臂。
     #[test]
     fn the_gone_branch_does_not_blame_a_cause_it_cannot_prove() {
         let tmp = Tmp::new("segwin-gone-no-cause");
@@ -3015,9 +3336,17 @@ mod tests {
         };
         assert!(
             lines.iter().any(|r| r.contains("這張卡片指的那一段")
+                && r.contains("現在查不到")
                 && r.contains("沒有留下任何原始紀錄")
+                && r.contains("分鐘內")
                 && r.contains("沒有給模型任何畫面上的 fact")),
-            "要講出連原始紀錄都沒有這個觀察到的事實：{lines:?}"
+            "要講出連原始紀錄都沒有這個觀察到的事實，主詞是起點之後的窗：{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|r| r.contains("那段時間的紀錄")
+                || r.contains("那段時間也沒有")
+                || r.contains("那段時間還")),
+            "程式界不出那一段，不可以用「那段時間」當主詞：{lines:?}"
         );
         assert!(
             !lines.iter().any(|r| r.contains("被忘掉")
@@ -3029,9 +3358,81 @@ mod tests {
         assert!(
             !lines
                 .iter()
-                .any(|r| r.contains("紀錄還在") || r.contains("切法變了")),
-            "窗裡沒有紀錄，不可以走「切法變了」那一臂：{lines:?}"
+                .any(|r| r.contains("還留著紀錄") || r.contains("切法變了")),
+            "窗裡沒有紀錄，不可以走「還留著紀錄」那一臂：{lines:?}"
         );
+    }
+
+    /// 句子裡的「N 分鐘內」必須和 probe 實際掃的窗是同一段時間。
+    /// 造一列落在真正的 `TIME_CAP` 之後、硬編碼 30 分鐘之內的紀錄：
+    /// 把 `cap_min` 釘死成 30、或把 probe 的窗放寬，句子和 probe 就會講相反。
+    #[test]
+    fn the_minutes_in_the_sentence_are_the_window_the_probe_scans() {
+        let tmp = Tmp::new("cap-min-binds-probe");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        let core = segs[0].core_started_at;
+        db.conn
+            .execute("DELETE FROM segment", [])
+            .expect("drop the segment this card points at");
+        wipe_raw_records_in_core_window(&db, core);
+        let planted_ts = core.saturating_add(crate::segment::TIME_CAP_MS) + 30_000;
+        db.test_insert_fact(planted_ts, "url", "https://after-cap.example/")
+            .expect("plant just after the real window");
+        assert!(
+            !db.has_raw_records_in_core_window(core).expect("raw"),
+            "這一列要落在真正的窗之後，probe 才是 false"
+        );
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":null}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        assert_eq!(result.cards_missing_segment, 1);
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("查不到那一段必須留下說明");
+        };
+        let line = lines
+            .iter()
+            .find(|r| r.contains("那張卡片的起點之後") && r.contains("分鐘內"))
+            .unwrap_or_else(|| panic!("說明要講起點之後 N 分鐘內：{lines:?}"));
+        let marker = "那張卡片的起點之後";
+        let after = line
+            .split_once(marker)
+            .map(|(_, rest)| rest)
+            .unwrap_or(line);
+        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let claimed_min: i64 = digits
+            .parse()
+            .unwrap_or_else(|_| panic!("句子裡的分鐘數解析不出來：{line}"));
+        let claimed_end = core.saturating_add(claimed_min.saturating_mul(60_000));
+        let record_in_claimed = planted_ts >= core && planted_ts < claimed_end;
+        let probe = db.has_raw_records_in_core_window(core).expect("probe");
+        assert_eq!(
+            probe, record_in_claimed,
+            "句子裡的 {claimed_min} 分鐘和 probe 對同一列講相反：probe={probe} record_in_claimed={record_in_claimed} line={line}"
+        );
+        if probe {
+            assert!(
+                line.contains("還留著紀錄"),
+                "probe 是 true，句子要說還留著紀錄：{line}"
+            );
+        } else {
+            assert!(
+                line.contains("沒有留下任何原始紀錄"),
+                "probe 是 false，句子要說沒有留下任何原始紀錄：{line}"
+            );
+        }
     }
 
     /// 零拒絕的時候仍然印出「沒有拒絕任何下一步」。
@@ -3093,12 +3494,19 @@ mod tests {
             "零拒絕不准印拒絕清單標題：{shown}"
         );
         assert!(shown.contains("另外記下的說明"), "說明要自己一塊：{shown}");
+        assert!(
+            shown.contains("最近一次看過卡片的審閱"),
+            "None 那一臂也要講它真正取的那一輪：{shown}"
+        );
     }
 
     /// 摘要那一行和底下的說明不能互相打臉。兩臂共用 `cards_missing_segment`，
-    /// 常見的那一臂是「紀錄還在、切法變了」——摘要若寫「不在紀錄裡」，
+    /// 常見的那一臂是「現在查不到、起點之後還留著紀錄」——摘要若寫「不在紀錄裡」，
     /// 同一頁差四行就在說假話。斷言必須對著摘要＋可見度整份輸出，
     /// 分開看每一句都對是這個 bug 的本體。
+    ///
+    /// 摘要那一行必須**正向**釘住「現在查不到」；只把「已經不在紀錄裡」
+    /// 列進黑名單的話，換成另一句一樣打臉的話仍會全綠。
     #[test]
     fn the_summary_line_must_not_contradict_the_note_below_it() {
         let tmp = Tmp::new("summary-vs-note");
@@ -3126,7 +3534,7 @@ mod tests {
         assert_eq!(result.cards_missing_segment, 1);
         assert!(
             db.has_raw_records_in_core_window(core).expect("raw"),
-            "這一條要踩到「紀錄還在」那一臂"
+            "這一條要踩到「還留著紀錄」那一臂"
         );
 
         let stats = db.reviewer_recheck_stats().unwrap();
@@ -3144,16 +3552,127 @@ mod tests {
             "整份輸出必須含摘要那一行：{shown}"
         );
         assert!(
-            shown.contains("紀錄還在"),
-            "這一條要踩到「切法變了」那一臂：{shown}"
+            summary.contains("現在查不到"),
+            "摘要必須用指定的那一句「現在查不到」，不是「不含某六個字」：{summary}"
+        );
+        assert!(
+            shown.contains("還留著紀錄"),
+            "這一條要踩到「還留著紀錄」那一臂：{shown}"
         );
         assert!(
             shown.contains("另外記下的說明："),
             "「理由見底下」要指得到說明那一塊：{shown}"
         );
         assert!(
-            !(shown.contains("已經不在紀錄裡") && shown.contains("紀錄還在")),
-            "摘要說不在紀錄裡、底下說紀錄還在：{shown}"
+            !(shown.contains("已經不在紀錄裡") && shown.contains("還留著紀錄")),
+            "摘要說不在紀錄裡、底下說還留著紀錄：{shown}"
+        );
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("查不到那一段必須留下說明");
+        };
+        assert!(
+            !lines
+                .iter()
+                .any(|r| cut_changed_appears_outside_the_example(r)),
+            "切法變了只能當例子，不能當主句：{lines:?}"
+        );
+    }
+
+    /// 快取空的、從來沒人算過段落：兩個 probe 也推不出「切法變了」。
+    /// 主句只能講看得到的，成因全部降級成舉例。
+    #[test]
+    fn an_uncomputed_cache_must_not_claim_the_cut_changed() {
+        let tmp = Tmp::new("uncomputed-cache");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let sid = db.start_session("test", "0").expect("session");
+        db.insert_focus(
+            sid,
+            &FocusEvent {
+                ts,
+                kind: FocusKind::Focus,
+                snapshot: FocusSnapshot {
+                    app_id: Some("code.exe".into()),
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("focus");
+        let frame = FrameCapture {
+            ts: ts + 1_000,
+            monitor: 0,
+            width: 100,
+            height: 100,
+            dhash: 1,
+            image: None,
+            image_ext: "png",
+            ocr: vec![OcrBlock {
+                text: "LINE：五點去接她 17:00".into(),
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                confidence: 1.0,
+            }],
+            focus: FocusSnapshot {
+                app_id: Some("code.exe".into()),
+                ..Default::default()
+            },
+        };
+        let (fid, _, _) = db.insert_frame(sid, &frame, None, 0).expect("frame");
+        assert_eq!(
+            db.covering_segment_at(ts).expect("cover"),
+            None,
+            "沒算過段落，快取是空的"
+        );
+        assert_eq!(
+            db.segment_core_end(ts).expect("core"),
+            None,
+            "沒有一段從這個時間點開始"
+        );
+        assert!(
+            db.has_raw_records_in_core_window(ts).expect("raw"),
+            "原始紀錄還在"
+        );
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":null}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        write_l2(
+            &mut db,
+            ts,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        assert_eq!(result.cards_missing_segment, 1);
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("查不到那一段必須留下說明");
+        };
+        assert!(
+            lines.iter().any(|r| r.contains("現在查不到")
+                && r.contains("還留著紀錄")
+                && r.contains("分鐘內")),
+            "主句要講看得到的：查不到、起點之後還留著紀錄：{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|r| cut_changed_appears_outside_the_example(r)),
+            "沒算過段落，不可以平述地說切法變了：{lines:?}"
+        );
+        assert_eq!(
+            lines[0],
+            expected_still_there_line(&format!("segment:{ts}"), ""),
+            "主句必須是指定的那一句，成因只出現在括號裡：{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|r| r.contains("那段時間的紀錄")
+                || r.contains("那段時間也沒有")
+                || r.contains("那段時間還")),
+            "程式界不出那一段，不可以用「那段時間」當主詞：{lines:?}"
         );
     }
 
@@ -3544,10 +4063,11 @@ mod tests {
             panic!("查不到那一段必須留下說明");
         };
         assert!(
-            lines
-                .iter()
-                .any(|r| r.contains("紀錄還在") && r.contains("切法變了") && r.contains("例如")),
-            "原始事件還在，要講切法變了，成因只能當例子：{lines:?}"
+            lines.iter().any(|r| r.contains("還留著紀錄")
+                && r.contains("切法變了")
+                && r.contains("例如")
+                && !cut_changed_appears_outside_the_example(r)),
+            "原始事件還在，主句只講還留著紀錄；切法變了只能當例子：{lines:?}"
         );
         assert!(
             !lines.iter().any(|r| r.contains("被忘掉、或過了保留期")),
@@ -3996,6 +4516,32 @@ mod tests {
             now: ts + 500_000,
         };
         run(&mut input).expect("run")
+    }
+
+    fn refuse_a_step_at(db: &mut Db, tmp: &Tmp, ts: Millis, url: &str) -> i64 {
+        let sentinel = tmp.0.join(format!("spawned-{ts}"));
+        let (_sid, fid) = seed(db, ts, "LINE：五點去接她 17:00");
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        let core = segs[0].core_started_at;
+        db.conn
+            .execute("DELETE FROM segment", [])
+            .expect("drop the segment this card points at");
+        let fact_ts = ts + crate::segment::TIME_CAP_MS + 30_000;
+        let fact_id = db.test_insert_fact(fact_ts, "url", url).expect("fact");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":{{"fact":{fact_id}}}}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        write_l2(
+            db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(db, command, args, ts);
+        assert_eq!(result.refused_next_steps, 1, "要真的拒絕過：{url}");
+        fact_id
     }
 
     #[test]

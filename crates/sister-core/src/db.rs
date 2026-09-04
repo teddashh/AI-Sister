@@ -3588,13 +3588,18 @@ impl Db {
     /// 這張卡的 `core_started_at` 往後一個 [`crate::segment::TIME_CAP_MS`]
     /// 的窗裡，還有沒有留下任何一種原始紀錄。
     ///
-    /// 這是「紀錄還在、切法變了」和「查不到、連原始紀錄也沒有」的分辨法。
+    /// 這是「起點之後一個章節上限內還有原始紀錄」和「沒有」的分辨法。
     /// 問的是原始資料，不是 [`Self::covering_segment_at`] 那張快取。
     /// 窗長寫在這裡，呼叫端不能另傳一個看起來差不多的毫秒數進來。
     ///
-    /// 涵蓋 `prune` 會照時間刪掉的表：`frames`、`facts`、`text_chunks`、
-    /// `focus_events`、`input_metrics`、`clipboard_events`、`system_events`。
-    /// 任何一張有列就是「還在」。
+    /// 涵蓋 `prune` 會照時間刪掉、而且不是從別張表算出來的表：`frames`、
+    /// `facts`、`text_chunks`、`focus_events`、`input_metrics`、
+    /// `clipboard_events`、`system_events`、`queries`、`segment_edit`。
+    /// 任何一張有列就是「還在」。`queries` 不是算出來的——`retention.rs`
+    /// 自己的說法是「他打進搜尋框的字往往比畫面更直接」。`segment_edit`
+    /// 也不是快取：merge／split／undo 都是人按的，重算只會把它套上去，
+    /// 不會把它長回來。漏掉任何一張的話，「沒有留下任何原始紀錄」是在
+    /// 一份刻意漏掉原件的表單上做全稱斷言。
     ///
     /// **不能只看 `focus_events`。** 那張表只在前景變了才寫；`TIME_CAP_MS`
     /// 切的正是同質長活動，被切出來的第二、第三塊裡 focus 一定是 0。
@@ -3612,6 +3617,14 @@ impl Db {
         }
         // `input_metrics` 沒有單點 `ts`，用重疊：一段節奏跨過切點，
         // 仍是這段時間留下的紀錄。其餘表都是單點 `ts`。
+        //
+        // `segment_edit` 的窗是 `[from_ms, to_ms)` 與 `[core, core+CAP)` 重疊。
+        // `to_ms IS NULL`：prune 的條件是 `to_ms IS NOT NULL AND to_ms < text_cut`，
+        // 這列永遠不會被照時間刪。apply 那句 `to_ms > ?1` 看不到它（NULL
+        // 比較是 unknown）。全稱「沒有留下任何原始紀錄」在庫裡還躺著一列
+        // 他按過的編輯時不能成立——但沒有結束端就不能用重疊，只問起點
+        // 有沒有落在窗裡，免得一列 `from_ms = 0`、`to_ms = NULL` 讓所有
+        // 窗都變 true。
         for sql in [
             "SELECT EXISTS(SELECT 1 FROM frames WHERE ts >= ?1 AND ts < ?2)",
             "SELECT EXISTS(SELECT 1 FROM facts WHERE ts >= ?1 AND ts < ?2)",
@@ -3620,6 +3633,8 @@ impl Db {
             "SELECT EXISTS(SELECT 1 FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2)",
             "SELECT EXISTS(SELECT 1 FROM clipboard_events WHERE ts >= ?1 AND ts < ?2)",
             "SELECT EXISTS(SELECT 1 FROM system_events WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM queries WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM segment_edit WHERE from_ms IS NOT NULL AND ((to_ms IS NOT NULL AND from_ms < ?2 AND to_ms > ?1) OR (to_ms IS NULL AND from_ms >= ?1 AND from_ms < ?2)))",
         ] {
             let found: bool = self
                 .conn
@@ -4856,30 +4871,60 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// 最近一輪真的跑過的審閱，她拒絕掉了哪幾個模型指的下一步。
+    /// 最近一輪**看過卡片**的審閱，她拒絕掉了哪幾個模型指的下一步。
     ///
-    /// **三種，不是「一個 `Vec`」。** 「還沒跑過」、「跑過而且沒拒絕任何東西」、
-    /// 「跑過而且拒絕了這幾個」是三件事；前兩種折成空 `Vec` 的話，一台從來
-    /// 沒跑過 reviewer 的機器會顯示成「她什麼都沒拒絕」。
+    /// **三種，不是「一個 `Vec`」。** 「還沒跑過一輪看得了卡片的」、
+    /// 「跑過而且沒拒絕任何東西」、「跑過而且拒絕了這幾個」是三件事；
+    /// 前兩種折成空 `Vec` 的話，一台從來沒跑過 reviewer 的機器會顯示成
+    /// 「她什麼都沒拒絕」。
+    ///
+    /// 沒有候選的那一輪 `skip_reason` 仍是 `NULL`（她確實跑過、候選 0），
+    /// 但它**沒看過任何卡片**，沒有資格回答這個問題。判準是這一列的
+    /// `candidate_count == 0`——空的 interval 和空的 eod 都寫 0，eod 的
+    /// notes 還是空字串，對不上任何文案開頭。這一支會跨過那些列，往前
+    /// 找到最近一輪真的看過的。說明仍在 [`Self::latest_reviewer_notes`]，
+    /// 讀的是最新那一列，兩支讀的不一定是同一列。
     ///
     /// `detail` 只裝真的拒絕。卡片那一段不見了、或「沒有東西可審」那種說明
     /// 在 [`Self::latest_reviewer_notes`]。
     pub fn latest_reviewer_refusals(&self) -> Result<ReviewerRefusals> {
-        let Some((run_id, detail, _)) = self.latest_reviewer_run_copy()? else {
-            return Ok(ReviewerRefusals::NeverRan);
-        };
-        let reasons = nonempty_lines(&detail);
-        if reasons.is_empty() {
-            Ok(ReviewerRefusals::None { run_id })
-        } else {
-            Ok(ReviewerRefusals::Some { run_id, reasons })
+        let mut stmt = self.conn.prepare(
+            "SELECT id, detail, candidate_count FROM reviewer_run
+             WHERE skip_reason IS NULL
+             ORDER BY ts DESC, id DESC",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let run_id: i64 = row.get(0)?;
+            let detail: String = row.get(1)?;
+            let candidate_count: Option<i64> = row.get(2)?;
+            // 跳過「候選 0」。空的 interval 和空的 eod 都寫
+            // `candidate_count = Some(0)`、`skip_reason = NULL`。
+            // 正常路徑這個欄位數的是回查次數，不是卡片張數；但沒有候選
+            // 的那一輪兩邊都是 0，所以這一條同時蓋住兩種 kind。
+            //
+            // NULL 不跳過。寫入端只有 `record_skip` 會寫 NULL，而那一類
+            // `skip_reason` 不是 NULL，上面 WHERE 已經濾掉。不要寫成
+            // 「有值就是看過」——那會把照設計寫 NULL 的跳過列，萬一漏進
+            // 這個查詢，當成「看過卡片」。
+            if candidate_count == Some(0) {
+                continue;
+            }
+            let reasons = nonempty_lines(&detail);
+            return Ok(if reasons.is_empty() {
+                ReviewerRefusals::None { run_id }
+            } else {
+                ReviewerRefusals::Some { run_id, reasons }
+            });
         }
+        Ok(ReviewerRefusals::NeverRan)
     }
 
     /// 最近一輪真的跑過的審閱，拒絕以外的說明。
     ///
-    /// 和 [`Self::latest_reviewer_refusals`] 讀同一列。空的時候是 `None`，
-    /// 不是把「沒有說明」講成「沒有拒絕」。
+    /// 讀最新一列 `skip_reason IS NULL`，**包括**「沒有東西可審」那一輪。
+    /// 拒絕清單不在這裡：那一輪沒資格回答，見 [`Self::latest_reviewer_refusals`]。
+    /// 空的時候是 `None`，不是把「沒有說明」講成「沒有拒絕」。
     pub fn latest_reviewer_notes(&self) -> Result<ReviewerNotes> {
         let Some((run_id, _, notes)) = self.latest_reviewer_run_copy()? else {
             return Ok(ReviewerNotes::NeverRan);
@@ -6734,6 +6779,12 @@ pub enum ReviewerNotes {
     Some { run_id: i64, lines: Vec<String> },
 }
 
+/// `SkipReason::NothingToReview` 的第一句。印在說明那一塊。
+///
+/// 拒絕那條路不看這句開頭——沒有候選的 eod 寫的 notes 是空字串，對不上。
+/// 拒絕改看 [`Db::latest_reviewer_refusals`] 的 `candidate_count == 0`。
+pub const NOTHING_TO_REVIEW_HEAD: &str = "這段期間沒有還沒審過的 L2 假設";
+
 fn nonempty_lines(text: &str) -> Vec<String> {
     text.lines()
         .filter(|line| !line.trim().is_empty())
@@ -7456,7 +7507,10 @@ impl DbStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClipboardKind, FocusKind, OcrBlock, SystemKind};
+    use crate::model::{
+        ClipboardEvent, ClipboardKind, FocusEvent, FocusKind, FocusSnapshot, FrameCapture,
+        InputMetrics, OcrBlock, SystemEvent, SystemKind,
+    };
 
     fn test_db() -> Db {
         Db::open_in_memory().expect("open in-memory db")
@@ -8716,6 +8770,199 @@ mod tests {
             None,
             "沒有任何一段蓋住"
         );
+    }
+
+    /// 窗裡**只有那一張表**有列時，分辨法仍是 true。任何一句 EXISTS 被刪掉，
+    /// 對應那一條要紅——正向窗裡都有 frame 的話，後面幾句根本跑不到。
+    #[test]
+    fn each_raw_record_table_alone_is_enough_for_has_raw_records_in_core_window() {
+        let core = 180_000i64;
+        let to = core + crate::segment::TIME_CAP_MS;
+        for table in [
+            "frames",
+            "facts",
+            "text_chunks",
+            "focus_events",
+            "input_metrics",
+            "clipboard_events",
+            "system_events",
+            "queries",
+            "segment_edit",
+        ] {
+            let mut db = test_db();
+            let sid = db.start_session("test", "0").expect("session");
+            match table {
+                "frames" => {
+                    db.insert_frame(
+                        sid,
+                        &FrameCapture {
+                            ts: core,
+                            monitor: 0,
+                            width: 100,
+                            height: 100,
+                            dhash: 1,
+                            image: None,
+                            image_ext: "png",
+                            ocr: vec![],
+                            focus: FocusSnapshot::default(),
+                        },
+                        None,
+                        0,
+                    )
+                    .expect("frame");
+                }
+                "facts" => {
+                    db.test_insert_fact(core, "url", "https://only-fact.example/")
+                        .expect("fact");
+                }
+                "text_chunks" => {
+                    db.conn
+                        .execute(
+                            "INSERT INTO text_chunks(ts, source_kind, text)
+                             VALUES(?1, 'ocr', 'only-chunk')",
+                            [core],
+                        )
+                        .expect("chunk");
+                }
+                "focus_events" => {
+                    db.insert_focus(
+                        sid,
+                        &FocusEvent {
+                            ts: core,
+                            kind: FocusKind::Focus,
+                            snapshot: FocusSnapshot {
+                                app_id: Some("code.exe".into()),
+                                ..Default::default()
+                            },
+                        },
+                    )
+                    .expect("focus");
+                }
+                "input_metrics" => {
+                    db.insert_input(
+                        sid,
+                        &InputMetrics {
+                            ts_start: core,
+                            ts_end: core + 10_000,
+                            keystrokes: 8,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("input");
+                }
+                "clipboard_events" => {
+                    db.insert_clipboard(
+                        sid,
+                        &ClipboardEvent {
+                            ts: core,
+                            kind: ClipboardKind::Image,
+                            text: None,
+                            byte_len: 32,
+                            truncated: false,
+                            secret_suspected: false,
+                            source_app: None,
+                        },
+                    )
+                    .expect("clip");
+                }
+                "system_events" => {
+                    db.insert_system(
+                        sid,
+                        &SystemEvent {
+                            ts: core,
+                            kind: SystemKind::Lock,
+                            detail: None,
+                        },
+                    )
+                    .expect("sys");
+                }
+                "queries" => {
+                    db.log_query(&QueryLogEntry {
+                        ts: core,
+                        question: "電話",
+                        shape: "keywords",
+                        hits: 0,
+                        latency_ms: 1,
+                        source: SOURCE_CLI,
+                    })
+                    .expect("query");
+                }
+                "segment_edit" => {
+                    db.conn
+                        .execute(
+                            "INSERT INTO segment_edit(ts, kind, at_ms, from_ms, to_ms)
+                             VALUES(?1, 'merge', ?1, ?1, ?2)",
+                            [core, core + 1_000],
+                        )
+                        .expect("segment_edit");
+                }
+                other => panic!("沒有這一張表的夾具：{other}"),
+            }
+            let counts = raw_record_counts_in_window(&db, core, to);
+            for (name, n) in &counts {
+                if *name == table {
+                    assert!(*n > 0, "{table} 的夾具沒寫進窗裡：{counts:?}");
+                } else {
+                    assert_eq!(
+                        *n, 0,
+                        "{table} 的夾具把 {name} 也寫進去了，九條會互相補票：{counts:?}"
+                    );
+                }
+            }
+            assert!(
+                db.has_raw_records_in_core_window(core).expect("raw"),
+                "窗裡只有 {table} 有列，分辨法必須是 true"
+            );
+        }
+    }
+
+    fn raw_record_counts_in_window(db: &Db, from: Millis, to: Millis) -> Vec<(&'static str, i64)> {
+        let mut out = Vec::new();
+        for (name, sql) in [
+            (
+                "frames",
+                "SELECT COUNT(*) FROM frames WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "facts",
+                "SELECT COUNT(*) FROM facts WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "text_chunks",
+                "SELECT COUNT(*) FROM text_chunks WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "focus_events",
+                "SELECT COUNT(*) FROM focus_events WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "input_metrics",
+                "SELECT COUNT(*) FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2",
+            ),
+            (
+                "clipboard_events",
+                "SELECT COUNT(*) FROM clipboard_events WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "system_events",
+                "SELECT COUNT(*) FROM system_events WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "queries",
+                "SELECT COUNT(*) FROM queries WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "segment_edit",
+                "SELECT COUNT(*) FROM segment_edit WHERE from_ms IS NOT NULL AND ((to_ms IS NOT NULL AND from_ms < ?2 AND to_ms > ?1) OR (to_ms IS NULL AND from_ms >= ?1 AND from_ms < ?2))",
+            ),
+        ] {
+            let n: i64 = db
+                .conn
+                .query_row(sql, [from, to], |r| r.get(0))
+                .unwrap_or_else(|e| panic!("count {name}: {e}"));
+            out.push((name, n));
+        }
+        out
     }
 
     /// 快取軸和資料軸可以同時給出不同答案：沒有一段蓋住，原始紀錄卻還在。

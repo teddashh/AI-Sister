@@ -432,10 +432,15 @@ pub enum RefusalBucket {
     OutsideGrant,
     /// 放寬 grant 沒有用；要做只能由人在終端機看過後當場按。
     ///
-    /// 這一格裝的是「目標畫面現在問得出來、但兩個 pass 沒有都指過它」
-    /// （[`TargetFrameGap::CitedByOnlyOnePass`] 和 [`TargetFrameGap::FrameNotCited`]）
-    /// 以及更早擋下來、下一步同樣是回終端機自己按的那幾種。
+    /// 這一格只裝「目標畫面現在問得出來、但兩個 pass 沒有都指過它」
+    /// （[`TargetFrameGap::CitedByOnlyOnePass`] 和 [`TargetFrameGap::FrameNotCited`]）。
     TargetNotOnACitedScreen,
+    /// 根本沒有畫面可以核對。視窗標題／剪貼簿照設計就沒有 `frame_id`，
+    /// 矛盾列（畫面文字沒記編號）和沒記目標的也落這裡——收尾句不准
+    /// 把這一格講成「照設計」。
+    TargetHasNoFrameToCheck,
+    /// 那筆目標已經不在了（忘掉了、過了保留期，或那一列換成別的內容）。
+    TargetNoLongerThere,
     /// 這筆承諾記在加「兩個 pass 都要指過畫面」這道檢查之前，問不出來。
     ///
     /// 下一步**不是**回終端機自己按——那是上面那一格的。這一格是「這筆太舊」。
@@ -463,12 +468,15 @@ impl RefusalReason {
                 TargetFrameGap::RecordedBeforeAgreedEvidence => {
                     RefusalBucket::RecordedBeforeThisCheck
                 }
-                TargetFrameGap::NoTargetRecorded
-                | TargetFrameGap::Forgotten
-                | TargetFrameGap::RowReplaced
-                | TargetFrameGap::FrameNotRecorded
-                | TargetFrameGap::FrameNotCited
-                | TargetFrameGap::CitedByOnlyOnePass => RefusalBucket::TargetNotOnACitedScreen,
+                TargetFrameGap::FrameNotCited | TargetFrameGap::CitedByOnlyOnePass => {
+                    RefusalBucket::TargetNotOnACitedScreen
+                }
+                TargetFrameGap::FrameNotRecorded | TargetFrameGap::NoTargetRecorded => {
+                    RefusalBucket::TargetHasNoFrameToCheck
+                }
+                TargetFrameGap::Forgotten | TargetFrameGap::RowReplaced => {
+                    RefusalBucket::TargetNoLongerThere
+                }
             },
             Self::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
             Self::NeedsLivePress { .. } => RefusalBucket::NeedsALivePressThisRun,
@@ -967,12 +975,15 @@ mod tests {
                     TargetFrameGap::RecordedBeforeAgreedEvidence => {
                         RefusalBucket::RecordedBeforeThisCheck
                     }
-                    TargetFrameGap::NoTargetRecorded
-                    | TargetFrameGap::Forgotten
-                    | TargetFrameGap::RowReplaced
-                    | TargetFrameGap::FrameNotRecorded
-                    | TargetFrameGap::FrameNotCited
-                    | TargetFrameGap::CitedByOnlyOnePass => RefusalBucket::TargetNotOnACitedScreen,
+                    TargetFrameGap::FrameNotCited | TargetFrameGap::CitedByOnlyOnePass => {
+                        RefusalBucket::TargetNotOnACitedScreen
+                    }
+                    TargetFrameGap::FrameNotRecorded | TargetFrameGap::NoTargetRecorded => {
+                        RefusalBucket::TargetHasNoFrameToCheck
+                    }
+                    TargetFrameGap::Forgotten | TargetFrameGap::RowReplaced => {
+                        RefusalBucket::TargetNoLongerThere
+                    }
                 },
                 RefusalReason::ApprovalWasForAnotherStep { .. } => RefusalBucket::ShownStepMismatch,
                 RefusalReason::HandsPulled { .. } => RefusalBucket::Pulled,
@@ -1146,6 +1157,23 @@ mod tests {
             old.bucket(),
             uncited.bucket(),
             "太舊的承諾和下一步「回終端機自己按」不是同一格"
+        );
+        let no_frame = RefusalReason::UnattendedTargetHasNoCitedFrame {
+            why: TargetFrameGap::FrameNotRecorded,
+        };
+        let no_target = RefusalReason::UnattendedTargetHasNoCitedFrame {
+            why: TargetFrameGap::NoTargetRecorded,
+        };
+        let forgotten = RefusalReason::UnattendedTargetHasNoCitedFrame {
+            why: TargetFrameGap::Forgotten,
+        };
+        assert_eq!(no_frame.bucket(), RefusalBucket::TargetHasNoFrameToCheck);
+        assert_eq!(no_target.bucket(), RefusalBucket::TargetHasNoFrameToCheck);
+        assert_eq!(forgotten.bucket(), RefusalBucket::TargetNoLongerThere);
+        assert_ne!(
+            no_frame.bucket(),
+            uncited.bucket(),
+            "沒有畫面出處不是「兩個 pass 沒共識」"
         );
     }
     use std::path::PathBuf;

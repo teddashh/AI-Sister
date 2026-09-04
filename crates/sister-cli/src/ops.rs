@@ -2018,6 +2018,8 @@ pub mod act {
         declined: u32,
         blocked: u32,
         target_not_cited: u32,
+        target_no_frame: u32,
+        target_gone: u32,
         recorded_before_this_check: u32,
         needs_press: u32,
         never_inherits: u32,
@@ -2036,6 +2038,8 @@ pub mod act {
                 sister_hands::RefusalBucket::Pulled => self.pulled += 1,
                 sister_hands::RefusalBucket::OutsideGrant => self.blocked += 1,
                 sister_hands::RefusalBucket::TargetNotOnACitedScreen => self.target_not_cited += 1,
+                sister_hands::RefusalBucket::TargetHasNoFrameToCheck => self.target_no_frame += 1,
+                sister_hands::RefusalBucket::TargetNoLongerThere => self.target_gone += 1,
                 sister_hands::RefusalBucket::RecordedBeforeThisCheck => {
                     self.recorded_before_this_check += 1
                 }
@@ -2046,7 +2050,7 @@ pub mod act {
             }
         }
 
-        /// 收尾那一行的後半段。**每一格只在不是零的時候出現**——六格永遠並排
+        /// 收尾那一行的後半段。**每一格只在不是零的時候出現**——這些格永遠並排
         /// 的話，那句話會長到沒有人讀，而真正該跳出來的那一格（`mismatched`）
         /// 就淹在裡面了。
         /// 「授權擋掉」**以外**那幾種拒絕，零的不印。
@@ -2065,6 +2069,18 @@ pub mod act {
                 out.push_str(&format!(
                     "，{} 步的目標沒有兩個 pass 都指過的畫面（放寬授權沒有用；請在終端機裡自己看過再按）",
                     self.target_not_cited
+                ));
+            }
+            if self.target_no_frame > 0 {
+                out.push_str(&format!(
+                    "，{} 步的目標沒有畫面出處（放寬授權沒有用；請在終端機裡自己看過再按）",
+                    self.target_no_frame
+                ));
+            }
+            if self.target_gone > 0 {
+                out.push_str(&format!(
+                    "，{} 步的目標已經不在了（忘掉了、過了保留期、或那一列換成別的內容；放寬授權沒有用）",
+                    self.target_gone
                 ));
             }
             if self.recorded_before_this_check > 0 {
@@ -3602,6 +3618,8 @@ pub mod act {
                 why: sister_hands::TargetFrameGap::FrameNotCited,
             });
             assert_eq!(tally.target_not_cited, 2);
+            assert_eq!(tally.target_no_frame, 0);
+            assert_eq!(tally.target_gone, 0);
             assert_eq!(tally.recorded_before_this_check, 0);
             let clauses = tally.refusal_clauses();
             assert!(
@@ -3610,6 +3628,80 @@ pub mod act {
             );
             assert!(clauses.contains("沒有兩個 pass 都指過的畫面"), "{clauses}");
             assert!(clauses.contains("請在終端機裡自己看過再按"), "{clauses}");
+        }
+
+        /// 六種 `TargetFrameGap` 各餵一次計數器，收尾那句對每一種都要成立。
+        /// 數字要等於餵進去的筆數；「放寬授權沒有用」是把這幾格拆開來的理由。
+        /// `FrameNotRecorded` 併回「兩個 pass 都指過」那一格時，這一條要紅。
+        #[test]
+        fn each_target_frame_gap_gets_a_closing_clause_that_is_true_of_it() {
+            use sister_hands::TargetFrameGap;
+            struct Case {
+                why: TargetFrameGap,
+                count_of: fn(&Tally) -> u32,
+                must: &'static str,
+                must_not: &'static [&'static str],
+            }
+            let cases = [
+                Case {
+                    why: TargetFrameGap::CitedByOnlyOnePass,
+                    count_of: |t| t.target_not_cited,
+                    must: "1 步的目標沒有兩個 pass 都指過的畫面（放寬授權沒有用；請在終端機裡自己看過再按）",
+                    must_not: &["沒有畫面出處", "已經不在了"],
+                },
+                Case {
+                    why: TargetFrameGap::FrameNotCited,
+                    count_of: |t| t.target_not_cited,
+                    must: "1 步的目標沒有兩個 pass 都指過的畫面（放寬授權沒有用；請在終端機裡自己看過再按）",
+                    must_not: &["沒有畫面出處", "已經不在了"],
+                },
+                Case {
+                    why: TargetFrameGap::FrameNotRecorded,
+                    count_of: |t| t.target_no_frame,
+                    must: "1 步的目標沒有畫面出處（放寬授權沒有用；請在終端機裡自己看過再按）",
+                    must_not: &["兩個 pass 都指過", "已經不在了", "故障", "照設計"],
+                },
+                Case {
+                    why: TargetFrameGap::NoTargetRecorded,
+                    count_of: |t| t.target_no_frame,
+                    must: "1 步的目標沒有畫面出處（放寬授權沒有用；請在終端機裡自己看過再按）",
+                    must_not: &["兩個 pass 都指過", "已經不在了", "故障", "照設計"],
+                },
+                Case {
+                    why: TargetFrameGap::Forgotten,
+                    count_of: |t| t.target_gone,
+                    must: "1 步的目標已經不在了（忘掉了、過了保留期、或那一列換成別的內容；放寬授權沒有用）",
+                    must_not: &["兩個 pass 都指過", "沒有畫面出處"],
+                },
+                Case {
+                    why: TargetFrameGap::RowReplaced,
+                    count_of: |t| t.target_gone,
+                    must: "1 步的目標已經不在了（忘掉了、過了保留期、或那一列換成別的內容；放寬授權沒有用）",
+                    must_not: &["兩個 pass 都指過", "沒有畫面出處"],
+                },
+            ];
+            for Case {
+                why,
+                count_of,
+                must,
+                must_not,
+            } in cases
+            {
+                let mut tally = Tally::default();
+                tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame { why });
+                assert_eq!(count_of(&tally), 1, "{why:?} 計數必須等於餵進去的筆數");
+                let clauses = tally.refusal_clauses();
+                assert!(
+                    clauses.contains(must),
+                    "{why:?} 的收尾必須含整句（含數字和行動）：{clauses}"
+                );
+                for needle in must_not {
+                    assert!(
+                        !clauses.contains(needle),
+                        "{why:?} 的收尾不准含「{needle}」：{clauses}"
+                    );
+                }
+            }
         }
 
         #[test]
