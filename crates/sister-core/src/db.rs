@@ -6857,10 +6857,10 @@ pub struct ReviewerRunInsert<'a> {
     pub detail: &'a str,
     /// 拒絕以外的說明（卡片那一段不見了、沒有東西可審）。不是證據。
     pub notes: &'a str,
-    /// 這一輪幾個 pass 真的吐出能讀的 JSON。`None`＝沒記（舊列、或沒開 CLI
-    /// 的一輪）；`Some(0)`＝記了、零次——叫不起 CLI、或兩個 pass 都沒有可用
-    /// 的 JSON。和 `calls_used` 分開：那個數的是試了幾次／扣了幾次額度，
-    /// 這個數的是問到幾次。
+    /// 這一輪幾個 pass 完整送出提示、沒有逾時、正常退出，而且 stdout 能 parse。
+    /// `None`＝沒記（舊列、或沒開 CLI 的一輪）；`Some(0)`＝記了、零次——例如
+    /// 叫不起 CLI、逾時、非零退出，或兩個 pass 都沒有可用的 JSON。和
+    /// `calls_used` 分開：那個數的是試了幾次／扣了幾次額度，這個數的是問到幾次。
     pub answers_got: Option<i64>,
 }
 

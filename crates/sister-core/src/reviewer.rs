@@ -944,9 +944,8 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         log_outbound(input.db, &run_day, &command, &args, card, &spawn_a)?;
         log_outbound(input.db, &run_day, &command, &args, card, &spawn_b)?;
 
-        // `answers_got` 和後面寫承諾的 match 用同一套判準：spawn 失敗或逾時
-        // 的 stdout 不是這一題的答案，不管能不能 parse。只數 stdout 的話，
-        // CLI 沒登入就印一份 JSON、或印完才卡住，會被收成「問到了」。
+        // `answers_got` 和後面寫承諾的 match 用同一套判準：提示送完、沒有逾時、
+        // CLI 正常退出，stdout 也能 parse，才算問到。
         let parsed_a = parse_usable_pass(&spawn_a);
         let parsed_b = parse_usable_pass(&spawn_b);
         if parsed_a.is_some() {
@@ -1089,7 +1088,9 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                 }
             }
             pair => {
-                divergences += 1;
+                if pair.0.is_some() || pair.1.is_some() {
+                    divergences += 1;
+                }
                 divergence_rows.push((
                     format!("l2:{} / {}", card.id, card.activity),
                     pass_excerpt(&spawn_a),
@@ -1461,9 +1462,13 @@ fn pass_excerpt(spawn: &SpawnOutcome) -> String {
 
 /// 一個 pass 為什麼沒有可用的 JSON。只有 [`ProcessStart::NeverStarted`]
 /// 才說「叫不起 CLI」；行程起來了的，講它自己的那件事。
+const COULD_NOT_START_CLI: &str = "叫不起 CLI";
+const PASS_TIMED_OUT: &str = "逾時";
+const NO_USABLE_JSON: &str = "沒有可用的 JSON";
+
 fn unusable_pass_clause(spawn: &SpawnOutcome) -> (bool, String) {
     match spawn.process_start {
-        ProcessStart::NeverStarted => (true, "叫不起 CLI".into()),
+        ProcessStart::NeverStarted => (true, COULD_NOT_START_CLI.into()),
         ProcessStart::Unobserved => (
             false,
             spawn
@@ -1472,19 +1477,19 @@ fn unusable_pass_clause(spawn: &SpawnOutcome) -> (bool, String) {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "執行緒炸了".into()),
         ),
-        ProcessStart::Started if spawn.timed_out => (true, "逾時".into()),
+        ProcessStart::Started if spawn.timed_out => (true, PASS_TIMED_OUT.into()),
         ProcessStart::Started => {
             if let Some(error) = &spawn.spawn_error {
                 (true, error.clone())
             } else {
-                (true, "沒有可用的 JSON".into())
+                (true, NO_USABLE_JSON.into())
             }
         }
     }
 }
 
-/// 「其中一個 pass 沒有可用的 JSON」只在**恰好一個**沒有 JSON 時成立。
-/// 兩個都沒有、或行程根本沒起來，要講它自己的那件事。
+/// 依兩個 pass 的實際狀態組原因。最後一臂是防禦性 fallback；目前呼叫端已先
+/// 接走兩份都能 parse 的狀態，不替那條到不了的路宣稱成因。
 fn no_usable_json_reason(
     pair: (Option<ReviewPassCard>, Option<ReviewPassCard>),
     spawn_a: &SpawnOutcome,
@@ -1507,7 +1512,7 @@ fn no_usable_json_reason(
             if prefix_a
                 && prefix_b
                 && a == b
-                && (a == "叫不起 CLI" || a == "逾時" || a == "沒有可用的 JSON")
+                && (a == COULD_NOT_START_CLI || a == PASS_TIMED_OUT || a == NO_USABLE_JSON)
             {
                 format!("兩個 pass 都{a}")
             } else {
@@ -1578,10 +1583,18 @@ fn log_outbound(
     card: &L2CardRow,
     spawn: &SpawnOutcome,
 ) -> Result<()> {
-    let (outcome, error) = if spawn.spawn_error.is_some() {
-        (OutboundOutcome::SpawnFailed, spawn.spawn_error.clone())
-    } else if spawn.timed_out {
-        (OutboundOutcome::Timeout, Some("逾時".into()))
+    let (outcome, error) = if !spawn.completed_the_ask() {
+        if spawn.timed_out {
+            (OutboundOutcome::Timeout, Some(PASS_TIMED_OUT.into()))
+        } else {
+            (
+                OutboundOutcome::SpawnFailed,
+                spawn
+                    .spawn_error
+                    .clone()
+                    .or_else(|| Some(format!("CLI 退出碼不是 0：{:?}", spawn.exit_code))),
+            )
+        }
     } else if parse_pass(&spawn.stdout).is_none() {
         (OutboundOutcome::BadJson, Some("JSON 不能用".into()))
     } else {
@@ -5253,7 +5266,7 @@ mod tests {
             &db.entity_memory().expect("entities"),
         );
         assert!(
-            shown.contains("叫不起 CLI") || shown.contains("沒有拿到可比較的兩份答案"),
+            shown.contains("兩個 pass 都叫不起 CLI"),
             "這一輪叫不起 CLI，畫面要講出來：{shown}"
         );
         assert!(
@@ -5302,7 +5315,7 @@ mod tests {
             "這一塊還是要有話講：{shown}"
         );
         assert!(
-            shown.contains("目前不是『辨識到 0 個』"),
+            shown.contains("Reviewer 試過問模型，但沒拿到答案；目前不是『辨識到 0 個』"),
             "實體那一塊還是要有話講（擋『靠刪掉整段來過』）：{shown}"
         );
         assert!(
@@ -5357,17 +5370,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_named_common_failures_are_coalesced_for_two_passes() {
+        let failed = SpawnOutcome {
+            payload_chars_written: 0,
+            duration_ms: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            spawn_error: Some("寫入 CLI stdin 失敗：Broken pipe".into()),
+            exit_code: Some(1),
+            process_start: ProcessStart::Started,
+        };
+        let reason = no_usable_json_reason((None, None), &failed, &failed);
+        assert!(
+            reason.contains("pass A") && reason.contains("pass B"),
+            "任意相同錯誤不能被改寫成『兩個 pass 都…』：{reason}"
+        );
+
+        let never_started = SpawnOutcome {
+            process_start: ProcessStart::NeverStarted,
+            spawn_error: Some("叫不起 CLI".into()),
+            ..failed
+        };
+        assert_eq!(
+            no_usable_json_reason((None, None), &never_started, &never_started),
+            format!("兩個 pass 都{COULD_NOT_START_CLI}")
+        );
+    }
+
     /// `migrate_016` 的白名單靠這個開頭把舊 `detail` 裡的說明搬到 `notes`。
-    /// 拒絕全部以「拒絕 allowed_next_step：」開頭，對不上。
+    /// 直接呼叫產品的拒絕路徑，確認每一種拒絕都不會撞上它。
     #[test]
     fn missing_segment_note_head_does_not_match_a_real_refusal() {
-        for reason in [
-            "拒絕 allowed_next_step：fact:1 不存在",
-            "拒絕 allowed_next_step：fact:1 沒有列在這次給模型的 L1 facts",
-            "拒絕 allowed_next_step：fact:1 那一列已經不是當初列給模型看的那一列",
-            "拒絕 allowed_next_step：fact:1 的 url 不是以 http:// 或 https:// 開頭",
-            "拒絕 allowed_next_step：fact:1 的 kind 是 window_title，不是 url 或 file_path",
-        ] {
+        let mut db = Db::open_in_memory().expect("db");
+        let url_id = db.test_insert_fact(1, "url", "example.com").expect("url");
+        let title_id = db
+            .test_insert_fact(2, "window_title", "Editor")
+            .expect("title");
+        let url = db.fact_by_id(url_id).expect("query").expect("url row");
+        let title = db.fact_by_id(title_id).expect("query").expect("title row");
+        let mut swapped = url.clone();
+        swapped.raw = "https://original.example/".into();
+        let cases = [
+            (Vec::new(), NextStepRef { fact: 999 }),
+            (Vec::new(), NextStepRef { fact: url_id }),
+            (vec![swapped], NextStepRef { fact: url_id }),
+            (vec![url], NextStepRef { fact: url_id }),
+            (vec![title], NextStepRef { fact: title_id }),
+        ];
+        for (listed, next) in cases {
+            let ResolvedNextStep::Refused(reason) =
+                resolve_allowed_next_step(&db, &listed, Some(&next)).expect("resolve")
+            else {
+                panic!("這個 case 應該被拒絕")
+            };
             assert!(
                 !reason.starts_with(MISSING_SEGMENT_NOTE_HEAD),
                 "拒絕句對上了搬 notes 的白名單：{reason}"
@@ -5385,11 +5442,11 @@ mod tests {
 
     /// R1（鏡頭 A 第 1 條 ＝ 鏡頭 B G2，兩個獨立鏡頭撞到同一條）
     ///
-    /// 新的 `GotNoAnswer` 那一臂印「最近一次審閱（輪次 #N）」，而 notes 那一塊
+    /// `GotNoAnswer` 那一臂以前印「最近一次審閱（輪次 #N）」，而 notes 那一塊
     /// 也印「最近一次審閱（輪次 #M）」。兩塊取的是不同的列：
     /// refusals 要 `calls_used > 0`，notes（`latest_reviewer_run_copy`）不要。
-    /// 所以同一個畫面上，同一個標籤會配上兩個不同輪次——那正是這個分支
-    /// 在 #73 修掉的那件事，從新加的那一臂走回來。
+    /// 所以同一個畫面上，同一個標籤會配上兩個不同輪次。現在這條守的是
+    /// `GotNoAnswer` 不要退回那個和 notes 共用標籤的版本。
     #[test]
     fn ted_r1_gotnoanswer_shares_a_label_with_the_notes_block() {
         let shown = format_reviewer_visibility(
@@ -5406,13 +5463,11 @@ mod tests {
 
     /// R2（鏡頭 B G3）
     ///
-    /// `entity_memory` 的 `got_answer` 掃的是**整張表**（沒有 ORDER BY / LIMIT），
-    /// 而 `latest_reviewer_refusals` / `latest_dual_pass_divergences` 取的是
-    /// 最新那一列。所以只要歷史上有任何一輪問到過答案，這一輪就算一個模型
-    /// 行程都沒起來，實體那一塊還是會說「跑過，但目前沒有活著的實體」。
+    /// `entity_memory` 的 `got_answer` 以前掃整張表，歷史上任何一輪問到過答案，
+    /// 就會替最新那輪一個行程都沒起來的結果背書。現在它有 ORDER BY / LIMIT，
+    /// 和隔壁兩個鏡頭取同一列；這條守的是不要退回掃整張表。
     ///
-    /// 也就是說 `a_round_whose_cli_never_started_is_not_identified_zero_entities`
-    /// 只在「這顆資料庫從頭到尾只跑過這一輪」的時候成立——真機器上永遠不是。
+    /// 特別保留較早一輪真的問到答案的前提，避免只測一顆從頭到尾都失敗的資料庫。
     #[test]
     fn ted_r2_a_dead_cli_round_is_not_zero_entities_even_after_an_earlier_good_round() {
         let mut db = Db::open_in_memory().expect("db");
@@ -5471,14 +5526,14 @@ mod tests {
 
     /// schema 17 之前的舊列，`answers_got` 是 NULL＝**沒量過**，不是量過是零。
     ///
-    /// `migrate_017` 刻意不加 `DEFAULT 0`（`db.rs:602-609` 的註解），就是為了讓
+    /// `migrate_017` 刻意不加 `DEFAULT 0`（`db.rs:641-648` 的註解），就是為了讓
     /// 這兩種 0 分得開。這條釘的是讀取端有沒有照那份契約走。
     ///
     /// 我在看修法之前寫的。**這一條在 round 9 上是綠的**，它是迴歸網不是 bug
-    /// 報告：把 `db.rs:4931` 寫成 `answers_got.unwrap_or(0) == 0` 會讓它紅。
+    /// 報告：把 `db.rs:4970` 寫成 `answers_got.unwrap_or(0) == 0` 會讓它紅。
     /// 我實測過那個突變今天是**全綠**的（`cargo test --workspace`，19 個
     /// test result 行），而同一個突變打在孿生的 `latest_dual_pass_divergences`
-    /// （`db.rs:4990`）會紅 2 條——同一份 NULL 契約三個讀取端，只有兩個有牙齒。
+    /// （`db.rs:5029`）會紅 2 條——同一份 NULL 契約三個讀取端，只有兩個有牙齒。
     ///
     /// 使用者端的後果：任何 schema 17 之前建的資料庫，升級後最新那一列的
     /// `answers_got` 都是 NULL。讀錯的話整份拒絕清單會消失，畫面改口說
@@ -5529,6 +5584,144 @@ mod tests {
         );
     }
 
+    /// **「分歧」數的是「兩份答案對不上」，不是「一份答案都沒有」。**
+    ///
+    /// `reviewer.rs:438-439` 自己就是這樣定義那個數字的。可是 `pair => {}`
+    /// 那一臂（一份可用 JSON 都沒有的時候）照樣 `divergences += 1`，於是同一次
+    /// `sister review` 的輸出上會**背靠背**印出這兩句：
+    ///
+    /// - 摘要（`reviewer.rs:171`）：「……分歧 1 筆……」
+    /// - 四行底下（`reviewer.rs:239`）：「最近一次雙 pass（審閱輪次 #N）
+    ///   **沒有拿到可比較的兩份答案**」
+    ///
+    /// 兩句話都在同一個畫面上（`ops.rs:1753` 緊接著 `ops.rs:1766`）。
+    /// 一顆叫不起 CLI 的機器，會被告知它有 1 筆「分歧」。
+    ///
+    /// 這條測試不規定怎麼改（可以是不加、也可以是摘要那行分開講），
+    /// 只要求：**沒問到答案的那一輪，不要在摘要上被說成有分歧。**
+    #[test]
+    fn ted_r11_a_round_with_no_answers_has_no_divergence_in_the_summary() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(
+            &mut db,
+            "sister-no-such-brain-binary-9d3f".into(),
+            vec![],
+            ts,
+        );
+        assert!(result.skip.is_none(), "{:?}", result.skip);
+        assert!(result.calls_used > 0, "這一輪要真的試著叫過 CLI");
+
+        assert_eq!(
+            result.divergences, 0,
+            "一份答案都沒拿到，卻在摘要上記了 {} 筆「分歧」。\
+             而同一個畫面四行底下寫的是「沒有拿到可比較的兩份答案」——\
+             同一次輸出的兩段話互相打臉。",
+            result.divergences
+        );
+
+        // ⚠ 這一半和上面一樣重要：**不可以拿「分歧 0」換來第二種 0。**
+        //
+        // 這個 repo 最貴的那個病就是「一個 0 有兩個意思」。把這一輪從
+        // 「分歧 1」改成「分歧 0」之後，摘要那個數字現在同時代表
+        // 「兩份答案都拿到了而且一致」和「一份答案都沒拿到」——除非畫面上
+        // 另外有人把後者講出來。
+        //
+        // 所以這裡直接要求那句話存在，而且**不准用 `||` 讓別的句子替它補票**
+        // （既有那條 `a_round_whose_cli_never_started_is_not_a_dual_pass_divergence`
+        // 就是這樣被架空的：右邊那個 disjunct 是標題，沒答案就無條件印，
+        // 於是左邊永遠不必為真）。
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().expect("divergences"),
+            &db.latest_reviewer_refusals().expect("refusals"),
+            &db.latest_reviewer_notes().expect("notes"),
+            &db.entity_memory().expect("entities"),
+        );
+        assert!(
+            shown.contains("叫不起"),
+            "分歧記成 0 之後，畫面就必須自己講出「這一輪根本沒問到」，\
+             否則「分歧 0」同時代表「都同意」和「沒問到」——\
+             又一個有兩個意思的 0。畫面現在是：\n{shown}"
+        );
+    }
+
+    /// `parse_usable_pass` 的那道 guard 沒有任何測試。
+    ///
+    /// 實測：把 `reviewer.rs` 的 `if !spawn.completed_the_ask() {` 改成
+    /// `if false {`（＝整個停用這一輪的核心修法），`cargo test --workspace`
+    /// **19 個 binary 全綠**。這一版最重要的那一行，刪掉沒有人會發現。
+    ///
+    /// 這條就是那個突變的守衛：一個「沒問到」的 spawn，即使 stdout 是一份
+    /// 完全合法的 JSON，也不可以被 parse 成一張卡。
+    #[test]
+    fn ted_r11_an_unanswered_spawn_yields_no_card_even_with_valid_json() {
+        let json = r#"{"commitments":[],"model_confidence":0.9}"#;
+
+        // 三種「沒問到」，每一種都配一份看起來完全可用的 stdout。
+        let cases = [
+            (
+                "提示沒送完",
+                SpawnOutcome {
+                    payload_chars_written: 3,
+                    duration_ms: 1,
+                    stdout: json.into(),
+                    stderr: String::new(),
+                    timed_out: false,
+                    spawn_error: Some("寫入 CLI stdin 失敗：Broken pipe".into()),
+                    exit_code: Some(1),
+                    process_start: ProcessStart::Started,
+                },
+            ),
+            (
+                "逾時",
+                SpawnOutcome {
+                    payload_chars_written: 700,
+                    duration_ms: 120_000,
+                    stdout: json.into(),
+                    stderr: String::new(),
+                    timed_out: true,
+                    spawn_error: None,
+                    exit_code: None,
+                    process_start: ProcessStart::Started,
+                },
+            ),
+            (
+                "非零退出（沒登入）",
+                SpawnOutcome {
+                    payload_chars_written: 700,
+                    duration_ms: 5,
+                    stdout: json.into(),
+                    stderr: String::new(),
+                    timed_out: false,
+                    spawn_error: None,
+                    exit_code: Some(1),
+                    process_start: ProcessStart::Started,
+                },
+            ),
+        ];
+
+        for (name, spawn) in cases {
+            assert!(
+                parse_pass(&spawn.stdout).is_some(),
+                "夾具壞了：{name} 這一格的 stdout 應該是**看得懂**的 JSON，\
+                 否則這條測試證不出 guard 有沒有作用"
+            );
+            assert!(
+                parse_usable_pass(&spawn).is_none(),
+                "{name}：這一輪沒有問到答案，stdout 裡那份 JSON 不是這一題的\
+                 回覆，不可以拿去寫承諾"
+            );
+        }
+    }
     fn run_diverge(db: &mut Db, command: String, args: Vec<String>, ts: Millis) -> ReviewResult {
         let consent = signed();
         let brain = BrainConfig {
