@@ -1385,7 +1385,7 @@ async function renderOutbound() {
       const empty = document.createElement("p");
       empty.className = "memory-empty";
       empty.textContent = everSent
-        ? "送過，但那些列已經被保留期或「忘掉」清掉了。不是從來沒送。"
+        ? "送過，但那些列已經被 `sister forget` 依外送時間（問出去那一刻）清掉了。不是從來沒送。"
         : "還沒送過任何東西。沒簽第二張同意書、沒設定 CLI、或解釋層還沒跑過，都不會出現在這裡。";
       el.outbound.append(empty);
       return;

@@ -1462,6 +1462,36 @@ pub mod interpret {
     use sister_core::brain::{self, InterpretInput, OutboundOutcome};
     use sister_core::config::Config;
 
+    fn retry_line(job: &brain::RanJob) -> Option<String> {
+        let previous = job.previous.as_ref()?;
+        let attempt = previous.count + 1;
+        Some(if job.outcome.wrote_card() {
+            format!(
+                "  這一段累計問了 {attempt} 次，這一次成功了。次數按還留著的外送紀錄計算；sister forget 會依外送時間（問出去那一刻）刪掉那些列。"
+            )
+        } else {
+            format!(
+                "  這是第 {attempt} 次問這一段；上一次是{}，這一次又沒寫成卡片。",
+                previous.latest_outcome.zh_label()
+            )
+        })
+    }
+
+    fn repeated_failure_warning(
+        result: &brain::InterpretResult,
+        only_core_start: Option<i64>,
+    ) -> Option<&'static str> {
+        result
+            .ran
+            .iter()
+            .any(|j| j.previous.is_some() && !j.outcome.wrote_card())
+            .then(|| if only_core_start.is_some() {
+                "有段落之前問過，這一次仍沒寫成卡片。這一段是你用 --at 指定的；她自己挑段落時不一定會挑到它（--at 會跳過「值不值得」那一關），所以不一定會有下一次。無人值守的同一場 sister watch 裡，如果她自己挑到這一段，每醒來一次就還會再問一次；範圍左界在這一場開始時就定住，不會因為時間過去而放過它，除非今天的外送額度用完，或你重開一次。\n次數按還留著的外送紀錄計算；sister forget 會依外送時間（問出去那一刻）刪掉那些列。"
+            } else {
+                "有段落之前問過，這一次仍沒寫成卡片。手動執行時看的是 --last 時間範圍（預設 24 小時），它會跟著現在往前滑；下一輪只要還撐得到這一段，還會再問一次、再花一次外送額度。額度用完的那一輪一段都不跑。無人值守的同一場 sister watch 裡，她每醒來一次就還會再問一次；範圍左界在這一場開始時就定住，不會因為時間過去而放過它，除非今天的外送額度用完，或你重開一次。\n次數按還留著的外送紀錄計算；sister forget 會依外送時間（問出去那一刻）刪掉那些列。"
+            })
+    }
+
     pub fn run(
         data_dir: &Path,
         config: &Config,
@@ -1517,6 +1547,9 @@ pub mod interpret {
                 },
                 job.duration_ms
             );
+            if let Some(line) = retry_line(job) {
+                println!("{line}");
+            }
             if let Some(err) = &job.error {
                 println!("  {err}");
             }
@@ -1531,7 +1564,138 @@ pub mod interpret {
                 }
             }
         }
+        if let Some(warning) = repeated_failure_warning(&result, only_core_start) {
+            println!("\n{warning}");
+        }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn job(outcome: OutboundOutcome, previous_attempts: u32) -> brain::RanJob {
+            brain::RanJob {
+                segment_ref: "segment:42".into(),
+                outcome,
+                duration_ms: 20,
+                card: None,
+                error: None,
+                previous: (previous_attempts > 0).then_some(
+                    sister_core::db::RetainedInterpreterAttempts {
+                        count: previous_attempts,
+                        latest_outcome: brain::StoredOutboundOutcome::Known(
+                            OutboundOutcome::BadJson,
+                        ),
+                    },
+                ),
+            }
+        }
+
+        #[test]
+        fn second_failed_ask_names_attempt_and_card_failure() {
+            let line = retry_line(&job(OutboundOutcome::BadJson, 1)).expect("retry line");
+            assert!(line.contains("第 2 次問這一段"), "{line}");
+            assert!(line.contains("沒寫成卡片"), "{line}");
+            assert!(line.contains("上一次是拿回的 JSON 不能用"), "{line}");
+        }
+
+        #[test]
+        fn retried_success_has_its_own_sentence_and_no_warning() {
+            let success = job(OutboundOutcome::Success, 2);
+            let line = retry_line(&success).expect("retry line");
+            assert!(line.contains("累計問了 3 次，這一次成功了"), "{line}");
+            assert!(line.contains("還留著的外送紀錄"), "{line}");
+            assert!(line.contains("外送時間"), "{line}");
+            assert!(!line.contains("沒寫成卡片"), "{line}");
+            let result = brain::InterpretResult {
+                skip: None,
+                ran: vec![success],
+            };
+            assert!(repeated_failure_warning(&result, None).is_none());
+        }
+
+        #[test]
+        fn warning_only_appears_for_a_repeated_failure() {
+            let first = brain::InterpretResult {
+                skip: None,
+                ran: vec![job(OutboundOutcome::BadJson, 0)],
+            };
+            assert!(repeated_failure_warning(&first, None).is_none());
+
+            let repeated = brain::InterpretResult {
+                skip: None,
+                ran: vec![job(OutboundOutcome::BadJson, 1)],
+            };
+            let warning = repeated_failure_warning(&repeated, None).expect("warning");
+            for required in [
+                "還會再問",
+                "外送額度",
+                // 這句原本寫「無人值守時每個 tick 都會問一次」。「tick」是實作
+                // 詞：中文 UI 文案裡從來沒出現過它，那樣寫的話這裡會是產品裡
+                // 唯一一次讓人讀到。所以釘的是改過之後的字。
+                "每醒來一次",
+                "--last 時間範圍",
+                "往前滑",
+                "還留著的外送紀錄",
+                "sister forget",
+                "外送時間",
+                "重開",
+            ] {
+                assert!(warning.contains(required), "少了 {required}：{warning}");
+            }
+
+            let mixed = brain::InterpretResult {
+                skip: None,
+                ran: vec![
+                    job(OutboundOutcome::BadJson, 0),
+                    job(OutboundOutcome::BadJson, 1),
+                ],
+            };
+            assert!(
+                repeated_failure_warning(&mixed, None).is_some(),
+                "一段首問失敗不可把另一段的重問警告消掉"
+            );
+        }
+
+        #[test]
+        fn at_warning_tells_the_truth_and_differs_from_last() {
+            let result = brain::InterpretResult {
+                skip: None,
+                ran: vec![job(OutboundOutcome::BadJson, 1)],
+            };
+            let at = repeated_failure_warning(&result, Some(42)).expect("--at warning");
+            let last = repeated_failure_warning(&result, None).expect("--last warning");
+            assert_ne!(at, last, "--at 不可沿用 --last 的承諾");
+            for required in [
+                "--at",
+                "不一定",
+                "每醒來一次",
+                "外送額度",
+                "重開",
+                "外送時間",
+            ] {
+                assert!(at.contains(required), "--at 警告少了 {required}：{at}");
+            }
+            assert!(!at.contains("掉出時間範圍"), "--at 沒有滑動範圍：{at}");
+        }
+
+        #[test]
+        fn stored_outcome_labels_are_exact() {
+            assert_eq!(
+                brain::StoredOutboundOutcome::Known(OutboundOutcome::BadJson).zh_label(),
+                "拿回的 JSON 不能用（bad_json）"
+            );
+            assert_eq!(
+                brain::StoredOutboundOutcome::Unknown("future_token".into()).zh_label(),
+                "不認得的結局（future_token）"
+            );
+        }
+
+        #[test]
+        fn first_ask_has_no_retry_line() {
+            assert!(retry_line(&job(OutboundOutcome::BadJson, 0)).is_none());
+        }
     }
 }
 
@@ -1593,7 +1757,9 @@ pub mod brain {
         println!("送出去的是螢幕上的原文，沒有去識別化。這裡只記結構和計數，不留那份原文。\n");
         if outbound.is_empty() && skips.is_empty() {
             if db.ever_brain_outbound()? {
-                println!("送過，但那些列已經被保留期或「忘掉」清掉了。不是從來沒送。");
+                println!(
+                    "送過，但那些列已經被 `sister forget` 依外送時間（問出去那一刻）清掉了。不是從來沒送。"
+                );
             } else {
                 println!("還沒送過任何東西，也還沒有降級紀錄。");
             }

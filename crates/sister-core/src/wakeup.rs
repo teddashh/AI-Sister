@@ -88,6 +88,8 @@ pub struct Report {
     pub interpreter_cards: u32,
     pub interpreter_nothing: u32,
     pub interpreter_jobs: u32,
+    /// 這一場實際跑到、之前已有保留外送列且這次仍沒寫成卡片的段落次數。
+    pub interpreter_retried_without_card: u32,
     pub last_interpreter_skip: Option<String>,
     pub reviewer_interval_runs: u32,
     pub reviewer_eod_runs: u32,
@@ -106,6 +108,7 @@ impl Report {
             interpreter_cards: 0,
             interpreter_nothing: 0,
             interpreter_jobs: 0,
+            interpreter_retried_without_card: 0,
             last_interpreter_skip: None,
             reviewer_interval_runs: 0,
             reviewer_eod_runs: 0,
@@ -147,9 +150,15 @@ pub fn format_report(r: &Report) -> String {
         }
     } else {
         out.push_str(&format!(
-            "解釋層自己醒了 {} 次，跑了 {} 段，寫進 {} 張假設。",
+            "解釋層自己醒了 {} 次，跑了 {} 次，寫進 {} 張假設。",
             r.interpreter_wakes, r.interpreter_jobs, r.interpreter_cards
         ));
+        if r.interpreter_retried_without_card > 0 {
+            out.push_str(&format!(
+                " 其中 {} 次是之前問過、這一次又沒寫成卡片。",
+                r.interpreter_retried_without_card
+            ));
+        }
         if let Some(skip) = &r.last_interpreter_skip {
             out.push('\n');
             out.push_str(skip);
@@ -499,6 +508,7 @@ impl Engine {
         if changed {
             self.maybe_eod(now, true)?;
             self.last_day = today;
+            self.budget_exhausted = false;
         }
         match kind {
             Step::Activity | Step::Clock => {
@@ -636,6 +646,11 @@ impl Engine {
                 self.report.interpreter_jobs += result.ran.len() as u32;
                 self.report.interpreter_cards +=
                     result.ran.iter().filter(|j| j.card.is_some()).count() as u32;
+                self.report.interpreter_retried_without_card += result
+                    .ran
+                    .iter()
+                    .filter(|j| j.previous.is_some() && !j.outcome.wrote_card())
+                    .count() as u32;
                 if include_open {
                     self.report.last_segment = if result
                         .ran
@@ -814,6 +829,21 @@ mod tests {
             },
         };
         let (fid, _, _) = db.insert_frame(sid, &frame, None, 0).expect("frame");
+        let second = FrameCapture {
+            ts: ts + 190_000,
+            dhash: 2,
+            ocr: vec![OcrBlock {
+                text: "error[E0425]: cannot find value".into(),
+                ..frame.ocr[0].clone()
+            }],
+            focus: FocusSnapshot {
+                app_id: Some("chrome.exe".into()),
+                ..Default::default()
+            },
+            ..frame
+        };
+        db.insert_frame(sid, &second, None, 0)
+            .expect("second worthy frame");
         fid
     }
 
@@ -976,6 +1006,39 @@ mod tests {
     }
 
     #[test]
+    fn report_adds_retry_count_only_when_nonzero() {
+        let without = format_report(&Report {
+            armed: true,
+            interpreter_wakes: 3,
+            interpreter_jobs: 12,
+            ..Report::unarmed()
+        });
+        assert!(
+            without.contains("解釋層自己醒了 3 次，跑了 12 次，寫進 0 張假設。"),
+            "{without}"
+        );
+        assert!(!without.contains("之前問過"), "{without}");
+        assert_eq!(
+            without.lines().next(),
+            Some("解釋層自己醒了 3 次，跑了 12 次，寫進 0 張假設。"),
+            "零次時既有句子必須逐字不變"
+        );
+
+        let with = format_report(&Report {
+            armed: true,
+            interpreter_wakes: 3,
+            interpreter_jobs: 12,
+            interpreter_retried_without_card: 8,
+            ..Report::unarmed()
+        });
+        assert!(
+            with.contains("其中 8 次是之前問過、這一次又沒寫成卡片。"),
+            "{with}"
+        );
+        println!("沒有重問：\n{without}\n---\n有重問：\n{with}");
+    }
+
+    #[test]
     fn unarmed_does_not_spawn_a_thread() {
         let tmp = Tmp::new("unarmed");
         let h = Handle::maybe_spawn(&tmp.0, BrainConfig::default(), 1_700_000_000_000)
@@ -1114,6 +1177,106 @@ mod tests {
         let text = format_report(&engine.report);
         assert!(text.contains("自己醒了"), "{text}");
         assert!(!text.contains("解釋層這一場一次都沒醒"), "{text}");
+    }
+
+    #[test]
+    fn wakeup_does_not_count_a_first_attempt_that_fails() {
+        let tmp = Tmp::new("wake-retry-fail");
+        grant_cloud(&tmp.0);
+        let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+        let ts = 1_700_000_450_000;
+        let fid = seed_worth(&mut db, ts);
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        assert!(segs.len() >= 2, "要有已關閉的前一段：{segs:?}");
+        let first_attempt_core = segs[1].core_started_at;
+        let day = brain::local_day_key(ts).expect("day");
+        db.insert_brain_outbound(&crate::db::OutboundInsert {
+            ts: ts - 1,
+            day_key: &day,
+            command: "old-agent",
+            args: &[],
+            segment_core_start: Some(segs[0].core_started_at),
+            chars_sent: 1,
+            truncated: false,
+            outcome: "timeout",
+            duration_ms: 1,
+            error: None,
+            role: "interpreter",
+        })
+        .expect("prior attempt only for the job that succeeds this time");
+        let json = format!(
+            r#"{{"segment_ref":"segment:{}","activity":"修好第一段","entities":[],"confidence":0.7,"evidence_refs":["frame:{}"],"open_questions":[]}}"#,
+            segs[0].core_started_at, fid
+        );
+        let sentinel = tmp.0.join("mixed-started");
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel, 0);
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(db, tmp.0.clone(), brain, ts).expect("engine");
+        engine
+            .step(ts + 201_000, Step::Shutdown)
+            .expect("mixed retry step");
+        assert_eq!(engine.report.interpreter_jobs, 2, "測試必須真的跑兩種 job");
+        assert_eq!(engine.report.interpreter_cards, 1, "其中一個重問這次要成功");
+        assert_eq!(
+            engine.report.interpreter_retried_without_card, 0,
+            "segment:{first_attempt_core} 這次失敗，但它沒有前置外送列，不可算重問：{:?}",
+            engine.report
+        );
+    }
+
+    #[test]
+    fn wakeup_counts_only_the_retried_job_that_fails_again() {
+        let tmp = Tmp::new("wake-retry-fail");
+        grant_cloud(&tmp.0);
+        let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+        let ts = 1_700_000_450_000;
+        let fid = seed_worth(&mut db, ts);
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        assert!(segs.len() >= 2, "要有已關閉的前一段：{segs:?}");
+        let failed_core = segs[1].core_started_at;
+        let day = brain::local_day_key(ts).expect("day");
+        for core in [segs[0].core_started_at, failed_core] {
+            db.insert_brain_outbound(&crate::db::OutboundInsert {
+                ts: ts - 1,
+                day_key: &day,
+                command: "old-agent",
+                args: &[],
+                segment_core_start: Some(core),
+                chars_sent: 1,
+                truncated: false,
+                outcome: "timeout",
+                duration_ms: 1,
+                error: None,
+                role: "interpreter",
+            })
+            .expect("prior attempt");
+        }
+        let json = format!(
+            r#"{{"segment_ref":"segment:{}","activity":"修好第一段","entities":[],"confidence":0.7,"evidence_refs":["frame:{}"],"open_questions":[]}}"#,
+            segs[0].core_started_at, fid
+        );
+        let sentinel = tmp.0.join("mixed-started");
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel, 0);
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(db, tmp.0.clone(), brain, ts).expect("engine");
+        engine
+            .step(ts + 201_000, Step::Shutdown)
+            .expect("mixed retry step");
+        assert_eq!(engine.report.interpreter_jobs, 2, "測試必須真的跑兩種 job");
+        assert_eq!(engine.report.interpreter_cards, 1, "其中一個重問這次要成功");
+        assert_eq!(
+            engine.report.interpreter_retried_without_card, 1,
+            "只數這一場跑到、先前問過、這次仍沒卡片的那一段：{:?}",
+            engine.report
+        );
     }
 
     #[test]
@@ -1285,6 +1448,48 @@ mod tests {
             text.contains("日終") || text.contains("審閱層自己醒了") || text.contains("醒過"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn interpreter_budget_exhaustion_clears_after_midnight() {
+        let tmp = Tmp::new("budget-midnight");
+        grant_cloud(&tmp.0);
+        let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+        let after = match Local.with_ymd_and_hms(2026, 8, 26, 0, 0, 2) {
+            LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => dt.timestamp_millis(),
+            LocalResult::None => return,
+        };
+        let before = after - 240_000;
+        let fid = seed_worth(&mut db, before);
+        let core = db.chapters_for_range(before, after).expect("segments")[0].core_started_at;
+        let json = format!(
+            r#"{{"segment_ref":"segment:{core}","activity":"跨日後再問","entities":[],"confidence":0.7,"evidence_refs":["frame:{fid}"],"open_questions":[]}}"#
+        );
+        let sentinel = tmp.0.join("after-midnight-started");
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel, 0);
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(db, tmp.0.clone(), brain, before).expect("engine");
+        engine.budget_exhausted = true;
+        engine
+            .step(before + 1_000, Step::Shutdown)
+            .expect("same-day step");
+        assert_eq!(
+            engine.report.interpreter_jobs, 0,
+            "額度用完後同一天不該再問"
+        );
+        assert!(!sentinel.exists(), "額度用完後同一天不該叫 CLI");
+
+        engine.step(after, Step::Shutdown).expect("next-day step");
+        assert!(
+            engine.report.interpreter_jobs > 0,
+            "跨過午夜後應清掉這一場的額度快取並再問：{:?}",
+            engine.report
+        );
+        assert!(sentinel.exists(), "跨過午夜後應再次叫 CLI");
     }
 
     /// 按下停止之後，畫面說的和行程真實狀態一致：不在錄，但還佔著。
