@@ -1758,7 +1758,7 @@ fn memory_guesses(
 #[derive(Serialize)]
 struct CurrentGuessView {
     status: sister_core::brain::CurrentGuess,
-    message: &'static str,
+    message: String,
     card: Option<sister_core::brain::L2View>,
 }
 
@@ -1839,12 +1839,19 @@ fn memory_current_guess(shell: tauri::State<'_, Shell>) -> Result<CurrentGuessVi
         let used = db
             .brain_outbound_count_on(&day)
             .map_err(|e| format!("{e:#}"))?;
+        // 這一格的查詢一律把錯誤往上帶，整塊算完才交出去；任何一個查詢失敗，
+        // 包括上面已經算好的 card，都會讓整塊失敗。brain 外送已經發生後的輔助查詢
+        // 則不能擋住那次外送，所以 brain.rs 那邊會用 `.ok().flatten()`。
+        let previous_attempts = db
+            .retained_interpreter_attempts_for_segment(seg.core_started_at)
+            .map_err(|e| format!("{e:#}"))?;
         let status = sister_core::brain::CurrentGuess::while_recording(
             Some((card.is_some(), worth)),
             config.brain.cli().is_some(),
             consented,
             used,
             config.brain.daily_budget,
+            previous_attempts,
         );
         Ok(CurrentGuessView {
             message: status.message(),
