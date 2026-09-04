@@ -1512,6 +1512,7 @@ pub mod interpret {
                     OutboundOutcome::Success => "成功，寫進 L2",
                     OutboundOutcome::SpawnFailed => "CLI 叫不起來／失敗",
                     OutboundOutcome::Timeout => "逾時",
+                    OutboundOutcome::NoAnswer => "CLI 跑完但沒有回答，沒寫卡片",
                     OutboundOutcome::BadJson => "拿回的 JSON 不能用，沒寫卡片",
                 },
                 job.duration_ms
@@ -1536,6 +1537,32 @@ pub mod interpret {
 
 pub mod brain {
     use super::*;
+
+    pub(super) fn outbound_outcome_cell(token: &str) -> String {
+        match sister_core::brain::OutboundOutcome::from_str_kind(token) {
+            Some(outcome) => format!("{}（{token}）", outcome.zh_label()),
+            None => format!("不認得的結局（{token}）"),
+        }
+    }
+
+    #[cfg(test)]
+    mod outcome_tests {
+        use super::outbound_outcome_cell;
+
+        #[test]
+        fn every_database_outcome_keeps_its_token_beside_a_chinese_label() {
+            let cases = [
+                ("success", "成功（success）"),
+                ("spawn_failed", "CLI 叫不起來／失敗（spawn_failed）"),
+                ("timeout", "逾時（timeout）"),
+                ("no_answer", "CLI 跑完但沒有回答（no_answer）"),
+                ("bad_json", "拿回的 JSON 不能用（bad_json）"),
+            ];
+            for (token, expected) in cases {
+                assert_eq!(outbound_outcome_cell(token), expected);
+            }
+        }
+    }
 
     fn outbound_role_label(role: &str) -> String {
         match role {
@@ -1591,7 +1618,7 @@ pub mod brain {
                     outbound_segment_cell(&row.role, row.segment_core_start),
                     row.chars_sent,
                     if row.truncated { "（截斷）" } else { "" },
-                    row.outcome,
+                    outbound_outcome_cell(&row.outcome),
                     row.duration_ms
                 );
                 if let Some(err) = &row.error {
@@ -6519,6 +6546,12 @@ pub mod watch {
                         let sent_hits = &hits[prompt.included_from..];
                         let spawn = brain::spawn_cli(permit, &prompt.payload, &command, &args);
                         let (outcome, verdict) = sister_core::watch::verdict_from_spawn(&spawn);
+                        let error = match &verdict {
+                            Verdict::NoAnswer { head, .. } if !head.is_empty() => {
+                                Some(head.as_str())
+                            }
+                            _ => spawn.spawn_error.as_deref(),
+                        };
                         db.insert_brain_outbound(&OutboundInsert {
                             ts: now,
                             day_key: &day,
@@ -6529,7 +6562,7 @@ pub mod watch {
                             truncated: more || prompt.truncated,
                             outcome: outcome.as_str(),
                             duration_ms: spawn.duration_ms as i64,
-                            error: spawn.spawn_error.as_deref(),
+                            error,
                             role: "watcher",
                         })?;
                         Look::Asked {
@@ -6596,6 +6629,12 @@ pub mod watch {
                         ..
                     } => sister_core::watch::DeadlineLastRound::NoAnswer {
                         how: sister_core::brain::OutboundOutcome::BadJson,
+                    },
+                    Look::Asked {
+                        verdict: Verdict::NoAnswer { .. },
+                        ..
+                    } => sister_core::watch::DeadlineLastRound::NoAnswer {
+                        how: sister_core::brain::OutboundOutcome::NoAnswer,
                     },
                     // 真的拿到答案了。`Happened` 在上面就 break 成 `Saw` 了，
                     // 所以這裡實際上只會是 `NotYet`——她答了「還沒有」，那
@@ -6757,6 +6796,61 @@ pub mod watch {
                 dry_run: false,
                 notify,
             }
+        }
+
+        /// 真的走 watch 出口：CLI 讀完 stdin、說出可操作的登入提示，再以唯一的
+        /// 變數（退出碼 1）結束。畫面與 brain log 都必須留住它自己說的話。
+        #[test]
+        fn a_nonzero_watch_cli_keeps_its_own_words_in_both_user_visible_outputs() {
+            let (tmp, mut config) = prepared("watch-no-answer-words", "編譯中", true);
+            add_chunk(&tmp.0, 125_000, "還在編譯");
+            let marker = tmp.0.join("answered-once");
+            config.brain.args = vec![
+                "-c".into(),
+                format!(
+                    "cat >/dev/null; if test -e '{}'; then printf '%s' \"Please run 'claude login'\"; exit 1; else touch '{}'; printf '%s' '{{\"happened\":false,\"because\":\"\"}}'; fi",
+                    marker.display(),
+                    marker.display()
+                ),
+            ];
+            let mut ticks = [100_000_i64, 100_000, 130_000].into_iter();
+            let mut out = Vec::new();
+            let mut options = opts(false);
+            options.stop_after = 30_000;
+            run_with(
+                &tmp.0,
+                &config,
+                &options,
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+            )
+            .expect("run");
+
+            let watch_text = String::from_utf8(out).expect("watch output is UTF-8");
+            assert!(
+                watch_text.contains("Please run 'claude login'"),
+                "watch 畫面丟掉 CLI 原文：{watch_text}"
+            );
+            assert!(
+                watch_text.contains("CLI 跑完但沒有正常回答"),
+                "到期原因沒有保留 no_answer：{watch_text}"
+            );
+            assert!(
+                !watch_text.contains("原因自相矛盾"),
+                "no_answer 被接成 success：{watch_text}"
+            );
+
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let rows = db.list_brain_outbound(10).expect("brain log rows");
+            assert_eq!(rows.len(), 2, "兩輪都真的送出了：{rows:?}");
+            let row = rows
+                .iter()
+                .find(|row| row.outcome == "no_answer")
+                .expect("第二輪 no_answer 沒寫進 brain log");
+            assert_eq!(row.error.as_deref(), Some("Please run 'claude login'"));
+            let outcome_cell = crate::ops::brain::outbound_outcome_cell(&row.outcome);
+            assert_eq!(outcome_cell, "CLI 跑完但沒有回答（no_answer）");
         }
 
         #[test]

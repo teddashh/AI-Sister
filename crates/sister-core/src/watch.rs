@@ -219,7 +219,7 @@ impl Blind {
 
 /// 大腦對「這件事發生了嗎」的回答。
 ///
-/// 四個變體裡有**兩個**是「我沒有得到答案」。它們最容易被寫成 `NotYet`，
+/// 五個變體裡有**三類**是「我沒有得到答案」。它們最容易被寫成 `NotYet`，
 /// 因為程式上最順手的寫法就是 `unwrap_or(false)`——而那一行會把
 /// 「逾時」和「她說還沒」變成同一件事。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,9 +239,18 @@ pub enum Verdict {
         /// 那是另一句話。
         head: String,
         /// 我們這邊看到的離開碼，**和 `head` 分開**。
+        /// 目前沒有已知的正式路徑會在這個變體留下非零碼：那會先被
+        /// [`SpawnOutcome::completed_the_ask`] 分到 [`Self::NoAnswer`]。欄位留作防禦，
+        /// 讓直接使用 [`read_verdict`] 的呼叫端仍不能把離開碼摻進原文。
         exit_code: Option<i32>,
     },
-    /// 根本沒問到（spawn 起不來／逾時）。
+    /// CLI 起來並跑完，但沒有正常回答；stdout 不具回答資格。
+    NoAnswer {
+        /// CLI 寫到 stdout 的原文開頭，一個字都不加；空白視為沒有回答。
+        head: String,
+        exit_code: Option<i32>,
+    },
+    /// 根本沒問到（spawn 起不來／逾時／CLI 沒有正常回答）。
     CallFailed {
         how: OutboundOutcome,
     },
@@ -250,12 +259,12 @@ pub enum Verdict {
 impl Verdict {
     /// 這一輪**有沒有真的拿到一個答案**。
     ///
-    /// 收尾那一句要靠它：「沒有等到」是一句斷言，而 `false` 的那兩種一個字
+    /// 收尾那一句要靠它：「沒有等到」是一句斷言，而 `false` 的那三種一個字
     /// 的證據都沒拿到。
     pub fn answered(&self) -> bool {
         match self {
             Self::Happened { .. } | Self::NotYet => true,
-            Self::Unreadable { .. } | Self::CallFailed { .. } => false,
+            Self::Unreadable { .. } | Self::NoAnswer { .. } | Self::CallFailed { .. } => false,
         }
     }
 
@@ -276,6 +285,18 @@ impl Verdict {
                     format!("大腦一個字都沒回{code}，這一輪不算數——不是「還沒有」。")
                 } else {
                     format!("大腦回的東西讀不懂{code}，這一輪不算數——不是「還沒有」：「{head}」")
+                }
+            }
+            Self::NoAnswer { head, exit_code } => {
+                let code = exit_code
+                    .map(|c| format!("（CLI 離開碼 {c}）"))
+                    .unwrap_or_else(|| "（沒有可確認的 CLI 離開碼）".into());
+                if !head.is_empty() {
+                    format!(
+                        "CLI 印了字但沒有正常回答{code}，那不是這一題的答案；這一輪不算數——不是「還沒有」：「{head}」"
+                    )
+                } else {
+                    format!("大腦一個字都沒回{code}，這一輪不算數——不是「還沒有」。")
                 }
             }
             Self::CallFailed { how } => {
@@ -359,7 +380,7 @@ impl Look {
 pub struct Tally {
     /// 拿到了一個答案（「還沒有」也是答案）。
     pub answered: usize,
-    /// 送出去了、花了預算，但沒有拿到答案（逾時、回了讀不懂的字）。
+    /// 送出去了、花了預算，但沒有拿到答案（逾時、回了讀不懂的字、CLI 非正常結束）。
     pub unanswered: usize,
     /// 根本沒送出去（CLI 叫不起來或 stdin 寫不進去），沒有花外送預算。
     pub not_sent: usize,
@@ -509,12 +530,13 @@ impl WatchEnd {
                 // 到的、沒等到的、根本沒送出去的次數——連同結論一起吃掉，
                 // 換來的只是我們不必想一句話怎麼寫。
                 //
-                // 所以四種都寫得出一句真話。第四種說的是實話：這兩個欄位
+                // 所以每種都寫得出一句真話。`Success` 說的是實話：這兩個欄位
                 // 自己打架了，那是我們的錯，不是他的。`RefusalBucket::WrongPath`
                 // 的「這是程式的錯」是同一個做法。
                 let why = match how {
                     OutboundOutcome::SpawnFailed => "CLI 叫不起來，根本沒有送出去",
                     OutboundOutcome::Timeout => "CLI 逾時，沒有拿到答案",
+                    OutboundOutcome::NoAnswer => "CLI 跑完但沒有正常回答",
                     OutboundOutcome::BadJson => "CLI 回了讀不懂的字，沒有拿到答案",
                     OutboundOutcome::Success => {
                         "我這邊記下來的原因自相矛盾（記成了「成功」，這是程式的錯）"
@@ -715,14 +737,13 @@ pub fn read_verdict(stdout: &str) -> Verdict {
 /// 兩個回傳值刻意是同一次判斷算出來的。分開算的話，磁碟上記著 `success`
 /// 而螢幕上寫著「讀不懂」這種事遲早會發生。
 ///
-/// **非零離開碼不是「沒問到」。** 這裡一度多寫了一條
-/// `exit_code != 0 → SpawnFailed`，而 `brain::classify` 沒有那一條：它只看
-/// `spawn_error`（寫 stdin 失敗、逾時以外的對話失敗、或真的叫不起），非零
-/// 離開只是解析失敗時附上的線索。`spawn_error` 不是「行程根本沒起來」——
-/// 那件事看 [`crate::brain::ProcessStart`]。
-/// 真實的 CLI 常常一邊在 stderr 印警告、一邊回一個好答案然後 exit 1——
-/// 那一條會把已經到手的「等到了」丟掉，還在 `brain log` 上把同一件事記成
-/// 和 `interpret` 不同的分類。
+/// 這裡一度把非零離開碼仍當成可解析的答案，理由是 CLI 可能一邊在 stderr
+/// 印警告、一邊回好答案。alpha.89 推翻了：實測這個產品真正接的兩支 CLI，
+/// 成功那一趟都是 `exit 0`（`codex exec` 0、`grok -p` 0），而且 `codex exec`
+/// 成功時往 stderr 印了 393 bytes 橫幅——所以「會往 stderr 印警告」和「然後
+/// exit 1」是兩件事，舊註解把它們綁在一起了。壞掉那一趟才非零
+/// （`codex exec --不存在的旗標` 是 2）。因此非零退出現在是 [`Verdict::NoAnswer`]，
+/// 不是 `SpawnFailed`，也不拿 stdout 建立答案。
 pub fn verdict_from_spawn(spawn: &SpawnOutcome) -> (OutboundOutcome, Verdict) {
     if spawn.spawn_error.is_some() {
         return (
@@ -740,10 +761,18 @@ pub fn verdict_from_spawn(spawn: &SpawnOutcome) -> (OutboundOutcome, Verdict) {
             },
         );
     }
+    if !spawn.completed_the_ask() {
+        return (
+            OutboundOutcome::NoAnswer,
+            Verdict::NoAnswer {
+                head: head(spawn.stdout.trim()),
+                exit_code: spawn.exit_code,
+            },
+        );
+    }
     match read_verdict(&spawn.stdout) {
-        // 讀不懂的時候，那個離開碼是**唯一**的線索，要帶著走——但要放在
-        // 自己的格子裡，不可以摻進 `head`。摻進去的話「大腦一個字都沒回」
-        // 這句話就再也印不出來了。
+        // 目前正式路徑到這裡時離開碼只能是 0；仍和原文分格帶著走，避免未來
+        // 新呼叫端把我們看到的診斷摻進 CLI 自己說的話。
         Verdict::Unreadable { head, .. } => (
             OutboundOutcome::BadJson,
             Verdict::Unreadable {
@@ -1125,9 +1154,18 @@ mod tests {
             },
         }
         .message();
+        let no_answer = WatchEnd::Deadline {
+            tally,
+            last_round: DeadlineLastRound::NoAnswer {
+                how: OutboundOutcome::NoAnswer,
+            },
+        }
+        .message();
         assert!(timeout.contains("CLI 逾時"), "{timeout}");
         assert!(unreadable.contains("回了讀不懂的字"), "{unreadable}");
+        assert!(no_answer.contains("CLI 跑完但沒有正常回答"), "{no_answer}");
         assert_ne!(timeout, unreadable);
+        assert_ne!(unreadable, no_answer);
     }
 
     /// 這一格今天產不出來——`verdict_from_spawn` 只在 spawn 失敗和逾時兩種
@@ -1207,6 +1245,16 @@ mod tests {
                 exit_code: None,
             },
         });
+        tally.count(&Look::Asked {
+            available_chunks: 1,
+            available_capped: false,
+            chunks: 1,
+            newest_app: None,
+            verdict: Verdict::NoAnswer {
+                head: "Please run 'claude login'".into(),
+                exit_code: Some(1),
+            },
+        });
         tally.count(&Look::NothingNew(Blind::Paused));
         assert_eq!(
             (
@@ -1215,12 +1263,12 @@ mod tests {
                 tally.not_sent,
                 tally.blind
             ),
-            (1, 1, 0, 1),
+            (1, 2, 0, 1),
             "{tally:?}"
         );
         let said = WatchEnd::Saw { tally }.message();
         assert!(said.contains("問到答案 1 次"), "{said}");
-        assert!(said.contains("沒拿到答案 1 次"), "{said}");
+        assert!(said.contains("沒拿到答案 2 次"), "{said}");
         assert!(said.contains("沒有新畫面可看 1 次"), "{said}");
     }
 
@@ -1361,7 +1409,7 @@ mod tests {
     #[test]
     fn a_brain_that_said_nothing_is_not_quoted_saying_its_exit_code() {
         let (outcome, verdict) = verdict_from_spawn(&spawn("", Some(1)));
-        assert_eq!(outcome, OutboundOutcome::BadJson);
+        assert_eq!(outcome, OutboundOutcome::NoAnswer);
         let said = verdict.message();
         assert!(said.contains("大腦一個字都沒回"), "{said}");
         assert!(
@@ -1387,24 +1435,128 @@ mod tests {
         assert!(!verdict.message().contains(&Verdict::NotYet.message()));
     }
 
-    /// **一個好答案不會因為離開碼不是 0 就被丟掉。**
-    ///
-    /// 真實的 CLI 常常一邊在 stderr 印警告一邊回一個好答案然後 exit 1。
-    /// `brain::classify` 只看 `spawn_error`，這裡也要一樣，不然同一件事會在
-    /// `brain log` 上被 watch 記成 `spawn_failed`、被 interpret 記成 `success`。
+    /// 非零退出的合法 JSON 仍然不是這一題的答案。
     #[test]
-    fn a_good_answer_survives_a_nonzero_exit_code() {
-        let noisy = spawn("{\"happened\":true,\"because\":\"提示符回來了\"}", Some(1));
-        let (outcome, verdict) = verdict_from_spawn(&noisy);
-        assert_eq!(outcome, OutboundOutcome::Success, "{verdict:?}");
-        assert!(matches!(verdict, Verdict::Happened { .. }), "{verdict:?}");
-        assert!(verdict.answered());
+    fn a_nonzero_cli_cannot_say_it_happened() {
+        let mut consent = crate::consent::Consent::default();
+        consent.grant(crate::consent::Sheet::CloudReading, 1);
+        let permit = consent.cloud_permit().expect("signed");
+        let spawned = crate::brain::spawn_cli(
+            permit,
+            "完成了嗎",
+            "sh",
+            &[
+                "-c".into(),
+                "cat >/dev/null; printf '%s' '{\"happened\":true,\"because\":\"提示符回來了\"}'; exit 7".into(),
+            ],
+        );
+        assert!(spawned.spawn_error.is_none(), "不能靠斷管過：{spawned:?}");
+        assert!(!spawned.timed_out, "不能靠逾時過：{spawned:?}");
+        assert_eq!(spawned.exit_code, Some(7));
+        let (outcome, verdict) = verdict_from_spawn(&spawned);
+        assert_eq!(outcome, OutboundOutcome::NoAnswer, "{verdict:?}");
+        assert!(matches!(
+            verdict,
+            Verdict::NoAnswer {
+                ref head,
+                exit_code: Some(7)
+            } if head.contains("提示符回來了")
+        ));
+        let said = verdict.message();
+        assert!(said.contains("這一輪不算數"), "{said}");
+        assert!(said.contains("不是「還沒有」"), "{said}");
+        assert!(!said.contains("★ 等到了"), "{said}");
+        assert!(said.contains("提示符回來了"), "CLI 原文不見了：{said}");
+
+        let whitespace = spawn("\n", Some(1));
+        let (_, verdict) = verdict_from_spawn(&whitespace);
+        assert!(
+            verdict.message().contains("大腦一個字都沒回"),
+            "只有空白卻說 CLI 印了字：{verdict:?}"
+        );
 
         // 讀不懂的時候，那個離開碼是唯一的線索，要帶著走。
-        let broken = spawn("rate limited", Some(429));
+        let broken = spawn("rate limited", Some(0));
         let (outcome, verdict) = verdict_from_spawn(&broken);
         assert_eq!(outcome, OutboundOutcome::BadJson);
-        assert!(verdict.message().contains("離開碼 429"), "{verdict:?}");
+        assert!(verdict.message().contains("rate limited"), "{verdict:?}");
+    }
+
+    /// **被推翻的那條規則，和它真正在保護的東西。**
+    ///
+    /// 這裡原本有一條 `a_good_answer_survives_a_nonzero_exit_code`，理由寫著
+    /// 「真實的 CLI 常常一邊在 stderr 印警告、一邊回一個好答案然後 exit 1」。
+    /// 那句話把**兩件事綁在一起**，而它們是分開的：
+    ///
+    /// - 「一邊在 stderr 印警告」——真的。實測 `codex exec` 成功那一趟往
+    ///   stderr 印了 393 bytes 的橫幅。
+    /// - 「然後 exit 1」——**沒有證據**。實測兩支這個產品真正接的 CLI，
+    ///   成功那一趟都是 `exit 0`（`codex exec` 0、`grok -p` 0）；
+    ///   壞掉那一趟才非零（`codex exec --this-flag-does-not-exist` 是 2）。
+    ///
+    /// 而那條測試的夾具 `spawn()` 把 `stderr` 寫死成空字串——**它從來沒有
+    /// 讓它宣稱的那個軸變化過**。它證明的是「非零退出照樣算數」，不是
+    /// 「吵鬧的 CLI 照樣算數」。
+    ///
+    /// 所以這裡是兩條，不是一條：新規則要有牙齒，**舊規則真正在保護的那件事
+    /// 也不准回歸**。
+    #[test]
+    fn ted_r13_a_noisy_cli_is_still_believed_but_a_failed_one_is_not() {
+        // ── 保住舊規則真正關心的那件事：吵，但是成功。
+        let mut consent = crate::consent::Consent::default();
+        consent.grant(crate::consent::Sheet::CloudReading, 1);
+        let permit = consent.cloud_permit().expect("signed");
+        let noisy = crate::brain::spawn_cli(
+            permit,
+            "完成了嗎",
+            "sh",
+            &[
+                "-c".into(),
+                "cat >/dev/null; printf '%s' '{\"happened\":true,\"because\":\"提示符回來了\"}'; printf '%s' 'warning: config key foo is deprecated' >&2; exit 0".into(),
+            ],
+        );
+        assert!(noisy.spawn_error.is_none(), "不能靠斷管過：{noisy:?}");
+        assert!(
+            noisy.stderr.contains("warning: config key"),
+            "假 CLI 沒真的寫 stderr：{noisy:?}"
+        );
+        let (outcome, verdict) = verdict_from_spawn(&noisy);
+        assert_eq!(
+            outcome,
+            OutboundOutcome::Success,
+            "stderr 有雜訊不代表沒問到：{verdict:?}"
+        );
+        assert!(
+            matches!(verdict, Verdict::Happened { .. }),
+            "一支印警告但 exit 0 的 CLI 給的好答案不可以被丟掉：{verdict:?}"
+        );
+        assert!(verdict.answered());
+
+        // ── 新規則：跑完了，但退出碼說它沒跑成。這一份 JSON 再漂亮都不算數。
+        let failed = spawn("{\"happened\":true,\"because\":\"提示符回來了\"}", Some(1));
+        let (outcome, verdict) = verdict_from_spawn(&failed);
+        assert_ne!(
+            outcome,
+            OutboundOutcome::Success,
+            "非零退出的那一輪不可以記成 success：{verdict:?}"
+        );
+        assert!(
+            !matches!(verdict, Verdict::Happened { .. }),
+            "「等到了」是整支命令唯一會讓人停下手邊事情的一句話，不可以\
+             建立在一支說自己失敗了的 CLI 上：{verdict:?}"
+        );
+        assert!(
+            !verdict.answered(),
+            "沒問到答案就不可以算「問到了」：{verdict:?}"
+        );
+
+        // ── 「還沒發生」同樣是一句斷言，不可以從失敗的那一輪長出來。
+        let failed_notyet = spawn("{\"happened\":false,\"because\":\"\"}", Some(1));
+        let (_, verdict) = verdict_from_spawn(&failed_notyet);
+        assert!(
+            !matches!(verdict, Verdict::NotYet),
+            "『還沒』也是斷言，只有真的問到才說得出口：{verdict:?}"
+        );
     }
 
     #[test]

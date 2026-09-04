@@ -1593,14 +1593,13 @@ fn log_outbound(
     let (outcome, error) = if !spawn.completed_the_ask() {
         if spawn.timed_out {
             (OutboundOutcome::Timeout, Some(PASS_TIMED_OUT.into()))
-        } else {
+        } else if spawn.spawn_error.is_none() {
             (
-                OutboundOutcome::SpawnFailed,
-                spawn
-                    .spawn_error
-                    .clone()
-                    .or_else(|| Some(unanswered_cli_error(spawn.exit_code))),
+                OutboundOutcome::NoAnswer,
+                Some(unanswered_cli_error(spawn.exit_code)),
             )
+        } else {
+            (OutboundOutcome::SpawnFailed, spawn.spawn_error.clone())
         }
     } else if parse_pass(&spawn.stdout).is_none() {
         (OutboundOutcome::BadJson, Some("JSON 不能用".into()))
@@ -5171,7 +5170,7 @@ mod tests {
     /// `brain_outbound_count_on_role(day, "reviewer")` 去數 `brain_outbound`
     /// 那張表的列（`reviewer.rs` 開頭那個 `used`）。而 `log_outbound` 對
     /// **每一次 spawn 都寫一列**，叫不起來的那一次寫成
-    /// `OutboundOutcome::SpawnFailed`，一樣佔一列。
+    /// `OutboundOutcome::SpawnFailed`（或起來但沒答的 `NoAnswer`），一樣佔一列。
     ///
     /// 也就是說：**一輪叫不起 CLI 的跑，真的花掉了今天的兩次額度。**
     ///
@@ -5784,6 +5783,10 @@ mod tests {
         let rows = db.list_brain_outbound(10).expect("outbound log");
         assert!(!rows.is_empty(), "外送紀錄是空的，這一輪根本沒送");
         for row in &rows {
+            assert_eq!(
+                row.outcome, "no_answer",
+                "確實起來並跑完的 CLI 不可以退回 spawn_failed：{row:?}"
+            );
             let shown = row
                 .error
                 .as_deref()

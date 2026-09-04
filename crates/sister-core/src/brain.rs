@@ -217,7 +217,8 @@ impl SpawnOutcome {
     ///
     /// false 的時候 stdout 裡的字不是這一題的答案。CLI 立刻印登入錯誤再退場
     /// 那一路由退出碼擋住；寫不完、逾時也各由自己的訊號擋住。`log_outbound`、
-    /// reviewer 的 `answers_got`、以及要不要拿 stdout 去寫承諾，都問這個。
+    /// interpreter、watch、reviewer 的 `answers_got`，以及要不要拿 stdout 去寫承諾，
+    /// 都問這個。
     pub fn completed_the_ask(&self) -> bool {
         self.spawn_error.is_none() && !self.timed_out && self.exit_code == Some(0)
     }
@@ -229,6 +230,7 @@ pub enum OutboundOutcome {
     Success,
     SpawnFailed,
     Timeout,
+    NoAnswer,
     BadJson,
 }
 
@@ -238,6 +240,7 @@ impl OutboundOutcome {
             OutboundOutcome::Success => "success",
             OutboundOutcome::SpawnFailed => "spawn_failed",
             OutboundOutcome::Timeout => "timeout",
+            OutboundOutcome::NoAnswer => "no_answer",
             OutboundOutcome::BadJson => "bad_json",
         }
     }
@@ -247,8 +250,20 @@ impl OutboundOutcome {
             "success" => Some(Self::Success),
             "spawn_failed" => Some(Self::SpawnFailed),
             "timeout" => Some(Self::Timeout),
+            "no_answer" => Some(Self::NoAnswer),
             "bad_json" => Some(Self::BadJson),
             _ => None,
+        }
+    }
+
+    /// 中文介面顯示的結局；稽核畫面會另外保留資料庫 token。
+    pub fn zh_label(self) -> &'static str {
+        match self {
+            Self::Success => "成功",
+            Self::SpawnFailed => "CLI 叫不起來／失敗",
+            Self::Timeout => "逾時",
+            Self::NoAnswer => "CLI 跑完但沒有回答",
+            Self::BadJson => "拿回的 JSON 不能用",
         }
     }
 }
@@ -836,6 +851,16 @@ fn classify(
             Some(format!("等了 {} 秒還沒結束", SPAWN_TIMEOUT.as_secs())),
         ));
     }
+    if !spawn.completed_the_ask() {
+        return Ok((
+            OutboundOutcome::NoAnswer,
+            None,
+            Some(match spawn.exit_code {
+                Some(code) => format!("CLI 以退出碼 {code} 結束，沒有回答"),
+                None => "CLI 結束了，但沒有可確認的退出碼；沒有回答".into(),
+            }),
+        ));
+    }
     match parse_card(&spawn.stdout, &job.segment_ref) {
         Ok(mut card) => {
             card.evidence_refs.retain(|r| match r {
@@ -851,14 +876,7 @@ fn classify(
             }
             Ok((OutboundOutcome::Success, Some(card), None))
         }
-        Err(e) => {
-            let extra = if spawn.exit_code.unwrap_or(0) != 0 {
-                format!("{e}（CLI 退出碼 {}）", spawn.exit_code.unwrap_or(-1))
-            } else {
-                e
-            };
-            Ok((OutboundOutcome::BadJson, None, Some(extra)))
-        }
+        Err(e) => Ok((OutboundOutcome::BadJson, None, Some(e))),
     }
 }
 
@@ -1479,8 +1497,9 @@ mod tests {
     /// 那條測試的斷言訊息自己也寫著「沒斷的話這條在擲骰子」。
     ///
     /// 真正分得出來的訊號是**退出碼**：沒登入的 CLI 會非零退出。實測同樣 20 次，
-    /// `exit_code != Some(0)` 抓到 20 次、漏 0 次。`watch.rs:719` 的註解早就寫過
-    /// 這件事（「`exit_code != 0 → SpawnFailed`，而 `brain::classify` 沒有那一條」）。
+    /// `exit_code != Some(0)` 抓到 20 次、漏 0 次。alpha.89 才把這個量測落成
+    /// `completed_the_ask()`，並讓 classify、watch、reviewer 共用同一個判準；
+    /// `watch.rs` 的歷史註解也已改成記錄舊判斷為何被推翻。
     ///
     /// 這條測試不規定修法，只要求：**這種一輪不算「問到了」。**
     #[test]
@@ -1744,6 +1763,68 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert!(logs[0].chars_sent > 0);
         assert!(!logs[0].args_json.contains("13,450"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 合法卡片只有在 CLI 正常回答時才能進 L2。這條走完整的 `run` 路徑、
+    /// 真的開子行程，最後查資料庫，不直接測 `classify`。
+    #[test]
+    fn interpreter_does_not_write_a_valid_card_from_a_nonzero_cli() {
+        let dir =
+            std::env::temp_dir().join(format!("sister-brain-nonzero-card-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let sentinel = dir.join("spawned");
+        let _ = std::fs::remove_file(&sentinel);
+
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_000_125_000;
+        let fid = seed(&mut db, ts);
+        let core = db.chapters_for_range(ts, ts + 400_000).unwrap()[0].core_started_at;
+        let json = format!(
+            r#"{{"segment_ref":"segment:{core}","activity":"不該留下的假設","entities":[],"confidence":0.60,"evidence_refs":["frame:{fid}"],"open_questions":[]}}"#
+        );
+        let (command, args) = fake_cli(&dir, &json, &sentinel);
+        let script = std::path::Path::new(&args[0]);
+        let mut body = std::fs::read_to_string(script).expect("read fake CLI");
+        body.push_str("sys.exit(7)\n");
+        std::fs::write(script, body).expect("make fake CLI exit 7");
+
+        let mut consent = Consent::default();
+        consent.grant(Sheet::CloudReading, 1);
+        let brain = crate::config::BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let result = run(&mut InterpretInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &brain,
+            from_ts: ts,
+            to_ts: ts + 400_000,
+            limit: 4,
+            only_core_start: Some(core),
+        })
+        .expect("run");
+
+        assert!(sentinel.exists(), "假 CLI 要真的起來並讀完 stdin");
+        assert_eq!(result.ran.len(), 1);
+        assert_eq!(result.ran[0].outcome, OutboundOutcome::NoAnswer);
+        assert!(result.ran[0].card.is_none());
+        assert!(
+            db.latest_l2_for_segment(core).expect("query L2").is_none(),
+            "非零退出的合法 JSON 不可以寫進 L2"
+        );
+        let rows = db.list_brain_outbound(10).expect("outbound log");
+        assert_eq!(rows[0].outcome, "no_answer");
+        let shown = rows[0]
+            .error
+            .as_deref()
+            .expect("brain log 要有一句能說明為何沒有回答的話");
+        assert!(
+            shown.contains("退出碼 7"),
+            "brain log 的原因不完整：{shown}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
