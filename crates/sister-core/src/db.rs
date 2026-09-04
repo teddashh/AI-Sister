@@ -34,7 +34,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 17;
+pub const SCHEMA_VERSION: i32 = 18;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -647,6 +647,12 @@ fn migrate_017(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     // 來、沿用 `calls_used > 0` 的舊判準」；新列寫 0 才是「量過、零次」。
     add_column_if_missing(tx, "reviewer_run", "answers_got", "INTEGER")
 }
+
+const MIGRATION_018: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_brain_outbound_segment
+ON brain_outbound(segment_core_start, role, ts);
+CREATE INDEX IF NOT EXISTS idx_input_metrics_end ON input_metrics(ts_end);
+"#;
 
 fn add_column_if_missing(
     tx: &rusqlite::Transaction<'_>,
@@ -1316,6 +1322,7 @@ impl Db {
             15 => migrate_015(&tx)?,
             16 => migrate_016(&tx)?,
             17 => migrate_017(&tx)?,
+            18 => tx.execute_batch(MIGRATION_018)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -1597,9 +1604,9 @@ impl Db {
 
     /// 這台機器上，有沒有**曾經**真的把字送出程序。
     ///
-    /// 和現在 `brain_outbound` 還剩幾列是兩題。`forget` 和保留期會把那些列
-    /// 刪掉，所以「一列外送紀錄都沒有」有兩種意思：從來沒送過，和送過、被
-    /// 清掉了。面板上那兩句話不能長得一樣。
+    /// 和現在 `brain_outbound` 還剩幾列是兩題。`forget` 會把那些列刪掉，
+    /// 所以「一列外送紀錄都沒有」有兩種意思：從來沒送過，和送過、被清掉了。
+    /// 面板上那兩句話不能長得一樣。保留期清理不碰這張表。
     ///
     /// 只在 `insert_brain_outbound` 按下。跳過（`brain_skip`）不算送出。
     /// 列還在的時候，沒有這個 key 也算——不然升級上來、旗標還沒按下的那幾
@@ -3835,6 +3842,35 @@ impl Db {
             |r| r.get(0),
         )?;
         Ok(n.max(0) as u32)
+    }
+
+    /// 數同一段**還留著的**解釋層外送列，並讀最近一次的結局。
+    ///
+    /// 這不是終生次數：`sister forget` 會依外送時間刪除 `brain_outbound` 的列；
+    /// 保留期清理不碰這張表。舊資料若含不認得的 outcome，保留原始 token，仍
+    /// 算一次問過。審閱層與盯梢層的列不屬於這個問題。
+    pub fn retained_interpreter_attempts_for_segment(
+        &self,
+        segment_core_start: Millis,
+    ) -> Result<Option<RetainedInterpreterAttempts>> {
+        let (count, token): (i64, Option<String>) = self.conn.query_row(
+            "SELECT COUNT(*),
+                    (SELECT outcome FROM brain_outbound
+                     WHERE segment_core_start = ?1 AND role = 'interpreter'
+                     ORDER BY ts DESC, id DESC LIMIT 1)
+             FROM brain_outbound
+             WHERE segment_core_start = ?1 AND role = 'interpreter'",
+            [segment_core_start],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let Some(token) = token else {
+            return Ok(None);
+        };
+        let latest_outcome = crate::brain::StoredOutboundOutcome::from_token(token);
+        Ok(Some(RetainedInterpreterAttempts {
+            count: count.max(0) as u32,
+            latest_outcome,
+        }))
     }
 
     pub fn insert_brain_outbound(&mut self, ins: &OutboundInsert<'_>) -> Result<i64> {
@@ -6542,6 +6578,13 @@ pub struct OutboundInsert<'a> {
     pub duration_ms: i64,
     pub error: Option<&'a str>,
     pub role: &'a str,
+}
+
+/// 還留在 `brain_outbound` 裡、同一段由解釋層送出的既有嘗試。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedInterpreterAttempts {
+    pub count: u32,
+    pub latest_outcome: crate::brain::StoredOutboundOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10752,6 +10795,187 @@ mod tests {
         assert!(
             db.ever_brain_outbound().expect("ever after wipe"),
             "列沒了仍要記得送過——不然會跟從來沒送長得一樣"
+        );
+    }
+
+    #[test]
+    fn retained_interpreter_attempts_exclude_other_roles_and_keep_latest_outcome() {
+        let mut db = test_db();
+        // 讓同毫秒的自然索引順序刻意和 id 順序相反；如此拿掉 `id DESC`
+        // 不會因 SQLite 目前剛好把 rowid 倒著掃而僥倖全綠。
+        db.conn()
+            .execute_batch(
+                "DROP INDEX idx_brain_outbound_segment;
+                 CREATE INDEX test_outbound_tie_order
+                 ON brain_outbound(segment_core_start, role, ts DESC, outcome ASC);",
+            )
+            .expect("install adversarial tie index");
+        let segment = 42_000;
+        for (ts, role, outcome) in [
+            (1_000, "interpreter", "timeout"),
+            (5_000, "interpreter", "bad_json"),
+            (5_000, "interpreter", "no_answer"),
+            (6_000, "reviewer", "success"),
+            (4_000, "watcher", "spawn_failed"),
+            // 最後插入，id 最大，但 ts 比真正最新的一筆小。
+            // 只用 `ORDER BY id DESC` 會錯選這筆。
+            (2_000, "interpreter", "spawn_failed"),
+        ] {
+            db.insert_brain_outbound(&OutboundInsert {
+                ts,
+                day_key: "1970-01-01",
+                command: "agent",
+                args: &[],
+                segment_core_start: Some(segment),
+                chars_sent: 1,
+                truncated: false,
+                outcome,
+                duration_ms: 1,
+                error: None,
+                role,
+            })
+            .expect("insert outbound");
+        }
+
+        let got = db
+            .retained_interpreter_attempts_for_segment(segment)
+            .expect("query")
+            .expect("three interpreter rows");
+        assert_eq!(got.count, 4, "reviewer/watcher 不可以混進解釋層次數");
+        assert_eq!(
+            got.latest_outcome,
+            crate::brain::StoredOutboundOutcome::Known(crate::brain::OutboundOutcome::NoAnswer),
+            "最新 reviewer 不可混入；先按 ts DESC，同毫秒再以較大的 id 為最新"
+        );
+        assert!(
+            db.retained_interpreter_attempts_for_segment(segment + 1)
+                .expect("empty query")
+                .is_none(),
+            "沒問過不可以造出一次"
+        );
+    }
+
+    #[test]
+    fn unknown_retained_interpreter_outcome_keeps_count_and_raw_token() {
+        let mut db = test_db();
+        db.insert_brain_outbound(&OutboundInsert {
+            ts: 1_000,
+            day_key: "1970-01-01",
+            command: "agent",
+            args: &[],
+            segment_core_start: Some(42_000),
+            chars_sent: 1,
+            truncated: false,
+            outcome: "future_token",
+            duration_ms: 1,
+            error: None,
+            role: "interpreter",
+        })
+        .expect("insert unknown");
+        let got = db
+            .retained_interpreter_attempts_for_segment(42_000)
+            .expect("unknown token is readable")
+            .expect("one retained attempt");
+        assert_eq!(got.count, 1);
+        assert_eq!(
+            got.latest_outcome,
+            crate::brain::StoredOutboundOutcome::Unknown("future_token".into())
+        );
+    }
+
+    #[test]
+    fn migration_018_indexes_are_used_by_both_hot_queries() {
+        let db = test_db();
+        db.conn()
+            .execute_batch(
+                "DROP INDEX idx_brain_outbound_segment;
+                 DROP INDEX idx_input_metrics_end;",
+            )
+            .expect("simulate schema 17");
+        for i in 0..10_000_i64 {
+            db.conn()
+                .execute(
+                    "INSERT INTO input_metrics(ts_start, ts_end) VALUES(?1, ?2)",
+                    params![i, i + 10],
+                )
+                .expect("seed input metrics");
+        }
+        db.conn().execute_batch("ANALYZE").expect("analyze before");
+
+        let plans = |db: &Db| -> (String, String) {
+            let collect = |sql: &str| {
+                db.conn()
+                    .prepare(sql)
+                    .expect("prepare explain")
+                    .query_map([], |r| r.get::<_, String>(3))
+                    .expect("query explain")
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .expect("collect explain")
+                    .join(" | ")
+            };
+            (
+                collect(
+                    "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM brain_outbound
+                     WHERE segment_core_start = 42 AND role = 'interpreter'",
+                ),
+                collect(
+                    "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM input_metrics
+                     WHERE ts_end > 9990 AND ts_start < 20000)",
+                ),
+            )
+        };
+        let before = plans(&db);
+        db.conn()
+            .execute_batch(MIGRATION_018)
+            .expect("apply migration 018 indexes");
+        let index_columns = |name: &str| -> Vec<String> {
+            db.conn()
+                .prepare(&format!("PRAGMA index_info({name})"))
+                .expect("prepare index_info")
+                .query_map([], |r| r.get::<_, String>(2))
+                .expect("query index_info")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("collect index columns")
+        };
+        assert_eq!(
+            index_columns("idx_brain_outbound_segment"),
+            ["segment_core_start", "role", "ts"]
+        );
+        assert_eq!(index_columns("idx_input_metrics_end"), ["ts_end"]);
+        db.conn().execute_batch("ANALYZE").expect("analyze after");
+        let after = plans(&db);
+        println!(
+            "EXPLAIN_BEFORE\nbrain: {}\ninput: {}\nEXPLAIN_AFTER\nbrain: {}\ninput: {}",
+            before.0, before.1, after.0, after.1
+        );
+        assert!(before.0.contains("SCAN brain_outbound"), "{}", before.0);
+        assert!(
+            after.0.contains("idx_brain_outbound_segment"),
+            "{}",
+            after.0
+        );
+        assert!(!before.1.contains("idx_input_metrics_end"), "{}", before.1);
+        assert!(after.1.contains("idx_input_metrics_end"), "{}", after.1);
+
+        let ordered_plan = db
+            .conn()
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT COUNT(*),
+                    (SELECT outcome FROM brain_outbound
+                     WHERE segment_core_start = 42 AND role = 'interpreter'
+                     ORDER BY ts DESC, id DESC LIMIT 1)
+                 FROM brain_outbound
+                 WHERE segment_core_start = 42 AND role = 'interpreter'",
+            )
+            .expect("prepare correlated plan")
+            .query_map([], |r| r.get::<_, String>(3))
+            .expect("query correlated plan")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect correlated plan")
+            .join(" | ");
+        assert!(
+            !ordered_plan.contains("USE TEMP B-TREE FOR ORDER BY"),
+            "外送索引沒有支撐產品的最新結局子查詢：{ordered_plan}"
         );
     }
 

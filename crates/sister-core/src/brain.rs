@@ -266,6 +266,31 @@ impl OutboundOutcome {
             Self::BadJson => "拿回的 JSON 不能用",
         }
     }
+
+    pub fn wrote_card(self) -> bool {
+        self == Self::Success
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredOutboundOutcome {
+    Known(OutboundOutcome),
+    Unknown(String),
+}
+
+impl StoredOutboundOutcome {
+    pub fn from_token(token: String) -> Self {
+        OutboundOutcome::from_str_kind(&token)
+            .map(Self::Known)
+            .unwrap_or(Self::Unknown(token))
+    }
+
+    pub fn zh_label(&self) -> String {
+        match self {
+            Self::Known(outcome) => format!("{}（{}）", outcome.zh_label(), outcome.as_str()),
+            Self::Unknown(token) => format!("不認得的結局（{token}）"),
+        }
+    }
 }
 
 /// 真正把字送出程序的那一扇門。
@@ -657,6 +682,11 @@ pub struct RanJob {
     pub duration_ms: u64,
     pub card: Option<ParsedCard>,
     pub error: Option<String>,
+    /// 這次送出前，`brain_outbound` 還留著的同段解釋層外送。
+    ///
+    /// 零筆時是 `None`；輔助查詢失敗時也是 `None`，因為外送已經
+    /// 發生，這支查詢不准擋住稽核列與卡片。後一種情況下，次數那行不會印。
+    pub previous: Option<crate::db::RetainedInterpreterAttempts>,
 }
 
 pub struct InterpretInput<'a> {
@@ -789,6 +819,13 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
     let mut results = Vec::new();
     for (job, spawn) in ran {
         let (kind, card, error) = classify(&job, &spawn, input.db)?;
+        // 外送已經發生；這支輔助查詢即使遇到損壞的資料庫，也不能擋住下面的
+        // 出境稽核與卡片。未知 outcome token 本身不是錯誤，會原樣帶回。
+        let previous = input
+            .db
+            .retained_interpreter_attempts_for_segment(job.core_started_at)
+            .ok()
+            .flatten();
         input.db.insert_brain_outbound(&OutboundInsert {
             ts: crate::now_ms(),
             day_key: &day,
@@ -827,6 +864,7 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
             duration_ms: spawn.duration_ms,
             card,
             error,
+            previous,
         });
     }
 
@@ -1728,6 +1766,20 @@ mod tests {
         let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
         assert!(!segs.is_empty(), "要切得出段落才測得到");
         let core = segs[0].core_started_at;
+        db.insert_brain_outbound(&OutboundInsert {
+            ts: ts - 1,
+            day_key: "2023-11-14",
+            command: "future-agent",
+            args: &[],
+            segment_core_start: Some(core),
+            chars_sent: 1,
+            truncated: false,
+            outcome: "future_token",
+            duration_ms: 1,
+            error: None,
+            role: "interpreter",
+        })
+        .expect("seed unknown prior outcome");
         let json = format!(
             r#"{{"segment_ref":"segment:{core}","activity":"在修 compiler error","entities":[],"confidence":0.55,"evidence_refs":["frame:{fid}"],"open_questions":["存了沒"]}}"#
         );
@@ -1753,6 +1805,11 @@ mod tests {
         assert!(sentinel.exists(), "簽了卻沒 spawn");
         assert_eq!(result.ran.len(), 1);
         assert_eq!(result.ran[0].outcome, OutboundOutcome::Success);
+        assert_eq!(result.ran[0].previous.as_ref().map(|p| p.count), Some(1));
+        assert_eq!(
+            result.ran[0].previous.as_ref().map(|p| &p.latest_outcome),
+            Some(&StoredOutboundOutcome::Unknown("future_token".into()))
+        );
         let card = db
             .latest_l2_for_segment(core)
             .expect("l2")
@@ -1760,7 +1817,7 @@ mod tests {
         assert_eq!(card.activity, "在修 compiler error");
         assert_eq!(card.model_confidence, 0.55);
         let logs = db.list_brain_outbound(10).expect("log");
-        assert_eq!(logs.len(), 1);
+        assert_eq!(logs.len(), 2, "未知舊 token 不可擋住這次外送稽核列");
         assert!(logs[0].chars_sent > 0);
         assert!(!logs[0].args_json.contains("13,450"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1825,6 +1882,23 @@ mod tests {
             shown.contains("退出碼 7"),
             "brain log 的原因不完整：{shown}"
         );
+        let second = run(&mut InterpretInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &brain,
+            from_ts: ts,
+            to_ts: ts + 400_000,
+            limit: 4,
+            only_core_start: Some(core),
+        })
+        .expect("second run");
+        assert_eq!(second.ran.len(), 1);
+        assert_eq!(second.ran[0].previous.as_ref().map(|p| p.count), Some(1));
+        assert_eq!(
+            second.ran[0].previous.as_ref().map(|p| &p.latest_outcome),
+            Some(&StoredOutboundOutcome::Known(OutboundOutcome::NoAnswer))
+        );
+        assert_eq!(second.ran[0].outcome, OutboundOutcome::NoAnswer);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
