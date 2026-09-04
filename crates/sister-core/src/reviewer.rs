@@ -233,6 +233,17 @@ pub fn format_reviewer_visibility(
         DualPassDivergences::NeverRan => {
             out.push_str("雙 pass 還沒跑過；目前沒有可比較的兩份答案。\n");
         }
+        DualPassDivergences::NoComparableAnswers { run_id, rows } => {
+            out.push_str(&format!(
+                "最近一次雙 pass（審閱輪次 #{run_id}）沒有拿到可比較的兩份答案：\n"
+            ));
+            for row in rows {
+                out.push_str(&format!(
+                    "- {}\n  原因：{}\n  pass A：{}\n  pass B：{}\n",
+                    row.subject, row.reason, row.pass_a_json, row.pass_b_json
+                ));
+            }
+        }
         DualPassDivergences::Agreed { run_id } => {
             out.push_str(&format!(
                 "最近一次雙 pass（審閱輪次 #{run_id}）沒有分歧。\n"
@@ -252,20 +263,29 @@ pub fn format_reviewer_visibility(
     // 拒絕不放進上面那一段。那一段的意思是「兩份答案對不上」，而拒絕的時候
     // 兩份答案是一致的——是她不接受它們指的那筆 fact。
     //
-    // 三塊取的不是同一列，標籤就不能是同一個詞。
-    // 分歧：`calls_used >= 2` 的最新一列 →「最近一次雙 pass」。
-    // 拒絕：最近一輪 `candidate_count` 不是 0 →「最近一次看過卡片的審閱」。
-    // 說明：最新一列 `skip_reason IS NULL`（含閒置）→「最近一次審閱」。
+    // 前兩塊取的是同一列（`skip_reason IS NULL AND calls_used > 0` 的最新
+    // 一列）：分歧回答「兩份答案對不對得上」，拒絕回答「她拒了哪幾步」。
+    // 標籤不同是因為它們回答那一列的不同問題，不是因為取了不同的列。
+    // `answers_got = 0` 的那一輪兩塊一起改口：不是分歧、也沒資格說她拒了
+    // 什麼。第三塊（說明）讀最新一列 `skip_reason IS NULL`（含零次呼叫），
+    // 才可能是更新的一列。
     match refusals {
-        crate::db::ReviewerRefusals::NeverRan => {}
+        crate::db::ReviewerRefusals::NeverRan => {
+            out.push_str("審閱還沒問過模型；目前沒有資格回答她拒絕了什麼。\n\n");
+        }
+        crate::db::ReviewerRefusals::GotNoAnswer { run_id } => {
+            out.push_str(&format!(
+                "最近一次審閱（輪次 #{run_id}）沒拿到模型的答案；目前沒有資格回答她拒絕了什麼。\n\n"
+            ));
+        }
         crate::db::ReviewerRefusals::None { run_id } => {
             out.push_str(&format!(
-                "最近一次看過卡片的審閱（輪次 #{run_id}）沒有拒絕任何下一步。\n\n"
+                "最近一次問過模型的審閱（輪次 #{run_id}）沒有拒絕任何下一步。\n\n"
             ));
         }
         crate::db::ReviewerRefusals::Some { run_id, reasons } => {
             out.push_str(&format!(
-                "最近一次看過卡片的審閱（輪次 #{run_id}）拒絕掉的下一步：\n"
+                "最近一次問過模型的審閱（輪次 #{run_id}）拒絕掉的下一步：\n"
             ));
             for reason in reasons {
                 out.push_str(&format!("- {reason}\n"));
@@ -286,6 +306,9 @@ pub fn format_reviewer_visibility(
     match entities {
         EntityMemory::NeverReviewed => {
             out.push_str("實體記憶還沒跑過 Reviewer；目前不是『辨識到 0 個』。\n");
+        }
+        EntityMemory::GotNoAnswer => {
+            out.push_str("Reviewer 試過問模型，但沒拿到答案；目前不是『辨識到 0 個』。\n");
         }
         EntityMemory::Empty => out.push_str("Reviewer 跑過，但目前沒有活著的實體。\n"),
         EntityMemory::Present(rows) => {
@@ -704,6 +727,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
             budget_limit: limit as i64,
             detail: "",
             notes: &reason.message(),
+            answers_got: None,
         })?;
         return Ok(ReviewResult {
             skip: Some(reason),
@@ -746,6 +770,10 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
     // ——我實測過——模型只指了一步，畫面上會印「她拒絕了 2 個模型指的下一步」。
     let mut missing_segments: Vec<String> = Vec::new();
     let mut calls = 0u32;
+    // 幾個 pass 真的吐出能讀的 JSON。和 `calls` 分開：那個數的是試了幾次
+    // （也是扣了幾次額度），這個數的是問到幾次。叫不起 CLI 的那一輪
+    // `calls += 2`、這裡仍是 0。
+    let mut answers_got = 0u32;
     let mut l2_revisions = 0u32;
     let mut budget_left = remaining;
 
@@ -916,6 +944,12 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
 
         let parsed_a = parse_pass(&spawn_a.stdout);
         let parsed_b = parse_pass(&spawn_b.stdout);
+        if parsed_a.is_some() {
+            answers_got += 1;
+        }
+        if parsed_b.is_some() {
+            answers_got += 1;
+        }
         match (parsed_a, parsed_b) {
             (Some(a), Some(b)) => {
                 let map_a = by_text(&a.commitments);
@@ -1049,13 +1083,13 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                     }
                 }
             }
-            _ => {
+            pair => {
                 divergences += 1;
                 divergence_rows.push((
                     format!("l2:{} / {}", card.id, card.activity),
-                    spawn_a.stdout.chars().take(400).collect(),
-                    spawn_b.stdout.chars().take(400).collect(),
-                    "其中一個 pass 沒有可用的 JSON".into(),
+                    pass_excerpt(&spawn_a),
+                    pass_excerpt(&spawn_b),
+                    no_usable_json_reason(pair, &spawn_a, &spawn_b),
                 ));
             }
         }
@@ -1104,6 +1138,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         // detail 只裝真的拒絕。卡片那一段不見了是另一塊，見 `notes`。
         detail: &refusals.join("\n"),
         notes: &missing_segments.join("\n"),
+        answers_got: Some(answers_got as i64),
     })?;
     for row in recheck_rows {
         input.db.insert_reviewer_recheck(&RecheckInsert {
@@ -1167,8 +1202,9 @@ impl RawRecordsInCoreWindow {
 }
 
 /// 「切法變了」只准出現在這裡。主句不准平述這個成因。
+/// 括號掛在「現在查不到」上：這是查不到的成因舉例，不是「紀錄還在」的舉例。
 const CUT_CHANGED_AS_EXAMPLE: &str =
-    "例如章節的切法變了——你在時間軸上合併過章節，那段範圍被重新計算過，或那段範圍還沒算過";
+    "例如章節的切法變了——你在時間軸上合併過章節，那段範圍被重新計算過";
 
 fn missing_segment_line(
     card: &L2CardRow,
@@ -1185,20 +1221,28 @@ fn missing_segment_line(
         // 看得到的：那一段查不到、起點之後一個上限內還留著紀錄。
         // 「切法變了」是舉例，不是從兩個 probe 推得出來的成因——
         // 快取空的、從來沒人算過，也會長成這個狀態。成因整段只出現在
-        // [`CUT_CHANGED_AS_EXAMPLE`]，括號裡，不在主句。
+        // 「現在查不到」後面的括號裡，不在主句。
+        //
+        // 快取裡確實有一段蓋住那個時間點時，「還沒算過」已被排除，
+        // 不准再當例子出現在同一句。
         let covering_clause = match covering {
             Some((start, _)) if start != card.segment_core_start => "，那個時間點仍被另一段蓋著",
             _ => "",
         };
+        let uncomputed_example = if covering.is_some() {
+            ""
+        } else {
+            "，或那段範圍還沒算過"
+        };
         format!(
-            "這張卡片指的那一段（{}）現在查不到；那張卡片的起點之後{cap_min}分鐘內還留著紀錄（{CUT_CHANGED_AS_EXAMPLE}）{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
+            "這張卡片指的那一段（{}）現在查不到（{CUT_CHANGED_AS_EXAMPLE}{uncomputed_example}）；那張卡片的起點之後{cap_min}分鐘內還留著紀錄{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
             card.segment_ref
         )
     } else {
         // 這一臂只講兩個觀察：那一段查不到，起點之後一個上限內也沒有
         // 原始紀錄。不准點名成因。
         //
-        // 卡片為什麼通常走不到這裡：forget／prune 刪 segment 用的是重疊
+        // 卡片為什麼通常走不到這裡：forget 刪 segment 用的是重疊
         // （`ended_at > from AND started_at < to`，`retention.rs`），收卡片
         // 卻是包含（`segment_core_start >= from AND < to`，
         // `collect_cascade_parents`）。一段跨過 `from` 的章節，segment 列
@@ -1207,6 +1251,11 @@ fn missing_segment_line(
         // `tombstone_descendants` 走過去。那條血緣有洞——`migrate_012`
         // 不回填，alpha.58 就在用的卡片一列 provenance 都沒有；對那些舊
         // 卡片，落差是開著的。這一輪不修 migrate。
+        //
+        // prune 不是這條路。它刪 segment 用 `ended_at < text_cut`（單邊
+        // 時間點），血緣起點是 `collect_cascade_parents(0, text_cut)`，
+        // 沒有「跨過 from」可跨；過了保留期的卡片會被收進 parents、連根
+        // 墓碑，走不到這一臂。
         format!(
             "這張卡片指的那一段（{}）現在查不到，而且那張卡片的起點之後{cap_min}分鐘內也沒有留下任何原始紀錄，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
             card.segment_ref
@@ -1381,6 +1430,39 @@ fn resolve_allowed_next_step(
     })
 }
 
+/// 畫面上 pass A／B 那兩行。叫不起來的時候 stdout 是空的，空字串看起來像
+/// 「有跑、沒說話」；真正的原因在 `spawn_error`。
+fn pass_excerpt(spawn: &SpawnOutcome) -> String {
+    if let Some(error) = &spawn.spawn_error {
+        error.clone()
+    } else {
+        spawn.stdout.chars().take(400).collect()
+    }
+}
+
+/// 「其中一個 pass 沒有可用的 JSON」只在**恰好一個**沒有 JSON 時成立。
+/// 兩個都沒有、或行程根本沒起來，要講它自己的那件事。
+fn no_usable_json_reason(
+    pair: (Option<ReviewPassCard>, Option<ReviewPassCard>),
+    spawn_a: &SpawnOutcome,
+    spawn_b: &SpawnOutcome,
+) -> String {
+    match (
+        pair.0.is_some(),
+        pair.1.is_some(),
+        spawn_a.spawn_error.is_some(),
+        spawn_b.spawn_error.is_some(),
+    ) {
+        (false, false, true, true) => "兩個 pass 都叫不起 CLI".into(),
+        (false, false, true, false) => "pass A 叫不起 CLI，pass B 沒有可用的 JSON".into(),
+        (false, false, false, true) => "pass B 叫不起 CLI，pass A 沒有可用的 JSON".into(),
+        (false, false, false, false) => "兩個 pass 都沒有可用的 JSON".into(),
+        (true, false, _, true) => "pass B 叫不起 CLI".into(),
+        (false, true, true, _) => "pass A 叫不起 CLI".into(),
+        _ => "其中一個 pass 沒有可用的 JSON".into(),
+    }
+}
+
 fn parse_pass(stdout: &str) -> Option<ReviewPassCard> {
     let trimmed = stdout.trim();
     let value = if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
@@ -1477,6 +1559,7 @@ fn record_skip(
         budget_limit: limit as i64,
         detail: &reason.message(),
         notes: "",
+        answers_got: None,
     })?;
     // 外送紀錄面板讀 `brain_skip`。審閱層沒送出去的原因要跟解釋層同一張表，
     // 不然「今天沒送」只看得到一半。
@@ -1844,8 +1927,13 @@ mod tests {
 
     fn expected_still_there_line(segment_ref: &str, covering_clause: &str) -> String {
         let cap_min = crate::segment::TIME_CAP_MS / 60_000;
+        let uncomputed_example = if covering_clause.is_empty() {
+            "，或那段範圍還沒算過"
+        } else {
+            ""
+        };
         format!(
-            "這張卡片指的那一段（{segment_ref}）現在查不到；那張卡片的起點之後{cap_min}分鐘內還留著紀錄（{CUT_CHANGED_AS_EXAMPLE}）{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。"
+            "這張卡片指的那一段（{segment_ref}）現在查不到（{CUT_CHANGED_AS_EXAMPLE}{uncomputed_example}）；那張卡片的起點之後{cap_min}分鐘內還留著紀錄{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。"
         )
     }
 
@@ -1853,7 +1941,7 @@ mod tests {
     fn assert_no_shared_label_across_rounds(shown: &str) {
         use std::collections::{BTreeMap, BTreeSet};
         let markers = [
-            ("最近一次看過卡片的審閱", "最近一次看過卡片的審閱（輪次 #"),
+            ("最近一次問過模型的審閱", "最近一次問過模型的審閱（輪次 #"),
             ("最近一次雙 pass", "最近一次雙 pass（審閱輪次 #"),
             ("最近一次審閱", "最近一次審閱（輪次 #"),
         ];
@@ -2110,6 +2198,10 @@ mod tests {
 
         let d = [
             DualPassDivergences::NeverRan,
+            DualPassDivergences::NoComparableAnswers {
+                run_id: 7,
+                rows: vec![row.clone()],
+            },
             DualPassDivergences::Agreed { run_id: 7 },
             DualPassDivergences::Diverged {
                 run_id: 7,
@@ -2126,6 +2218,7 @@ mod tests {
         });
         let e = [
             EntityMemory::NeverReviewed,
+            EntityMemory::GotNoAnswer,
             EntityMemory::Empty,
             EntityMemory::Present(vec![entity]),
         ]
@@ -2149,13 +2242,21 @@ mod tests {
             }
         }
 
-        // 「三句話不一樣」還不夠。「沒有分歧」是一句**比較過**才講得出口的話，
-        // 只有 Agreed 有資格講；NeverRan 沒有兩份答案可比，Diverged 剛好相反。
-        // 少了這三條，把 NeverRan 改成印「沒有分歧。」照樣三句不同、照樣全綠。
+        // 「幾句話不一樣」還不夠。「沒有分歧」是一句**比較過**才講得出口的話，
+        // 只有 Agreed 有資格講；NeverRan 沒有兩份答案可比，NoComparableAnswers
+        // 試過但沒拿到答案，Diverged 剛好相反。少了這幾條，把 NeverRan 改成印
+        // 「沒有分歧。」照樣幾句不同、照樣全綠。
         assert!(d[0].contains("還沒跑過"), "{}", d[0]);
         assert!(!d[0].contains("沒有分歧"), "還沒比就說沒有分歧：{}", d[0]);
-        assert!(d[1].contains("沒有分歧"), "{}", d[1]);
-        assert!(!d[2].contains("沒有分歧"), "有分歧卻說沒有：{}", d[2]);
+        assert!(
+            d[1].contains("沒有拿到可比較的兩份答案"),
+            "試過、沒問到要講出來：{}",
+            d[1]
+        );
+        assert!(!d[1].contains("的分歧"), "沒有兩份答案卻說分歧：{}", d[1]);
+        assert!(!d[1].contains("沒有分歧"), "沒問到卻說沒有分歧：{}", d[1]);
+        assert!(d[2].contains("沒有分歧"), "{}", d[2]);
+        assert!(!d[3].contains("沒有分歧"), "有分歧卻說沒有：{}", d[3]);
 
         assert!(e[0].contains("還沒跑過"), "{}", e[0]);
         assert!(
@@ -2163,8 +2264,57 @@ mod tests {
             "沒跑過卻說辨識到 0 個：{}",
             e[0]
         );
-        assert!(e[1].contains("沒有活著的實體"), "{}", e[1]);
-        assert!(!e[2].contains("沒有活著的實體"), "有實體卻說沒有：{}", e[2]);
+        assert!(
+            e[1].contains("沒拿到答案"),
+            "試過、沒問到要講出來：{}",
+            e[1]
+        );
+        assert!(
+            !e[1].contains("沒有活著的實體"),
+            "沒問到卻說辨識到 0 個：{}",
+            e[1]
+        );
+        assert!(e[2].contains("沒有活著的實體"), "{}", e[2]);
+        assert!(!e[3].contains("沒有活著的實體"), "有實體卻說沒有：{}", e[3]);
+    }
+
+    #[test]
+    fn never_asked_the_model_is_not_the_same_sentence_as_asked_and_refused_nothing() {
+        let never = format_reviewer_visibility(
+            &DualPassDivergences::NeverRan,
+            &ReviewerRefusals::NeverRan,
+            &ReviewerNotes::NeverRan,
+            &EntityMemory::NeverReviewed,
+        );
+        let none = format_reviewer_visibility(
+            &DualPassDivergences::NeverRan,
+            &ReviewerRefusals::None { run_id: 1 },
+            &ReviewerNotes::NeverRan,
+            &EntityMemory::NeverReviewed,
+        );
+        assert_ne!(
+            never, none,
+            "還沒問過和問過、沒拒絕印成同一句：\nnever={never}\nnone={none}"
+        );
+        assert!(
+            never.contains("還沒問過模型"),
+            "NeverRan 要講還沒問過：{never}"
+        );
+        // 釘的是「有沒有回答『她拒絕了什麼』」這件事，不是隔壁兩臂的字面值。
+        // 「沒有資格回答」＝拒絕回答這個問題；「沒有拒絕」＝給了答案。
+        // 把 NeverRan 改成「所以這一輪沒有拒絕」時，隔壁的字面針穿過，這一條要紅。
+        assert!(
+            never.contains("沒有資格回答"),
+            "還沒問過必須拒絕回答她拒絕了什麼，不能改口給一個答案：{never}"
+        );
+        assert!(
+            !never.contains("沒有拒絕"),
+            "還沒問過卻宣告她沒有拒絕：{never}"
+        );
+        assert!(
+            none.contains("沒有拒絕任何下一步"),
+            "問過、沒拒絕要講出來：{none}"
+        );
     }
 
     #[test]
@@ -2485,7 +2635,7 @@ mod tests {
             "{lines:?}"
         );
         assert!(
-            shown.contains("最近一次看過卡片的審閱"),
+            shown.contains("最近一次問過模型的審閱"),
             "拒絕那一塊要講它真正取的那一輪：{shown}"
         );
         assert_no_shared_label_across_rounds(&shown);
@@ -2573,7 +2723,7 @@ mod tests {
             "沒有候選的日終不准改口說沒有拒絕：{shown}"
         );
         assert!(
-            shown.contains("最近一次看過卡片的審閱"),
+            shown.contains("最近一次問過模型的審閱"),
             "拒絕那一塊要講它真正取的那一輪：{shown}"
         );
         assert_no_shared_label_across_rounds(&shown);
@@ -2627,6 +2777,57 @@ mod tests {
         assert!(
             !shown.contains(&format!("fact:{fact_a}")),
             "ORDER BY 反過來會停在第一輪的拒絕 A：{shown}"
+        );
+    }
+
+    /// 跳過的一列 `skip_reason` 不是 NULL、`detail` 有內容，不可以變成畫面上
+    /// 的「拒絕掉的下一步」。`record_skip` 寫 `calls_used = 0`，新判準
+    /// `calls_used > 0` 也擋得住；這一條把 `calls_used` 寫成 2，專門守
+    /// `WHERE skip_reason IS NULL` 自己——少了它，預算用完會被印成一句拒絕。
+    #[test]
+    fn a_skipped_reviewer_run_must_not_become_a_refusal_on_screen() {
+        let (mut db, first) =
+            run_next_step_fixture("skip-not-refusal", "LINE：五點去接她 17:00", 999_999, None);
+        assert_eq!(first.refused_next_steps, 1, "第一輪要真的拒絕一步");
+        let skip_detail = SkipReason::BudgetExhausted {
+            used: 40,
+            limit: 40,
+        }
+        .message();
+        db.insert_reviewer_run(&ReviewerRunInsert {
+            ts: 1_700_250_000_000 + 1_000_000,
+            day_key: "2023-11-17",
+            kind: "interval",
+            skip_reason: Some("budget"),
+            candidate_count: None,
+            recheck_count: None,
+            wrote_commitments: 0,
+            divergences: 0,
+            calls_used: 2,
+            budget_used: 40,
+            budget_limit: 40,
+            detail: &skip_detail,
+            notes: "",
+            answers_got: None,
+        })
+        .expect("skip row");
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        assert!(
+            shown.contains("999999"),
+            "跳過的一輪把上一輪真的拒絕擦掉了：{shown}"
+        );
+        assert!(
+            shown.contains("拒絕掉的下一步"),
+            "跳過的一輪不准把拒絕清單蓋掉：{shown}"
+        );
+        assert!(
+            !shown.contains("今天的審閱預算已用完"),
+            "跳過的一輪被印成拒絕掉的下一步：{shown}"
         );
     }
 
@@ -3495,7 +3696,7 @@ mod tests {
         );
         assert!(shown.contains("另外記下的說明"), "說明要自己一塊：{shown}");
         assert!(
-            shown.contains("最近一次看過卡片的審閱"),
+            shown.contains("最近一次問過模型的審閱"),
             "None 那一臂也要講它真正取的那一輪：{shown}"
         );
     }
@@ -4498,6 +4699,540 @@ mod tests {
         (db, l2, command, args, ts)
     }
 
+    /// 一輪**真的撈到卡片、卻一次模型都沒呼叫**的巡邏，不可以把上一輪真的
+    /// 拒絕擦掉。
+    ///
+    /// 這是同一個洞的第三扇門：`candidates` 在三個 `continue` 之前就先加了，
+    /// 所以「候選不是 0」不等於「這一輪問過模型」。這一條是我在看修法**之前**
+    /// 寫的，斷言只打在使用者看得到的那段字上，不綁判準要換成哪個欄位。
+    #[test]
+    fn ted_a_round_that_never_asked_the_model_must_not_erase_the_refusals() {
+        let ts = 1_700_250_000_000;
+        let (mut db, first) =
+            run_next_step_fixture("never-asked", "LINE：五點去接她 17:00", 999_999, None);
+        assert_eq!(first.refused_next_steps, 1, "第一輪要真的拒絕一步");
+
+        let before = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        assert!(
+            before.contains("999999"),
+            "第一輪的拒絕本來就要看得見：{before}"
+        );
+
+        // 第二輪的窗裡放一張卡片，它的 evidence 指著一筆不存在的原件。
+        // 於是 `candidates` 會加上去，但 `originals.is_empty()` 讓它在呼叫
+        // 模型之前就被跳過——`calls_used` 是 0、`detail` 是空的。
+        let later = ts + 3_600_000;
+        write_l2(
+            &mut db,
+            later + 1_000,
+            424_242,
+            "這張卡片的原件已經不在了",
+            r#"[{"text":"隨便一句","stands":true,"kind":"promise","people":[],"confidence":0.5,"evidence_refs":["frame:424242"]}]"#,
+        );
+
+        let consent = signed();
+        let brain = BrainConfig {
+            command: "python3".into(),
+            args: vec![],
+            ..Default::default()
+        };
+        let second = {
+            let mut input = ReviewInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: later,
+                to_ts: later + 400_000,
+                kind: ReviewKind::Eod,
+                force: false,
+                now: later + 500_000,
+            };
+            run(&mut input).expect("run")
+        };
+        // 前提：這一輪確實走到了「有候選、沒問模型」那個形狀。
+        // 這兩條是在證明測試還打得到那個洞，不是在規定修法。
+        assert!(second.skip.is_none(), "第二輪要真的跑過：{:?}", second.skip);
+        assert!(
+            second.candidates > 0,
+            "這一輪要真的數到候選（不然這條測試打不到那個洞）"
+        );
+        assert_eq!(
+            second.refused_next_steps, 0,
+            "這一輪根本沒問過模型，不可能拒絕任何一步"
+        );
+
+        let after = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        assert!(
+            after.contains("999999"),
+            "一輪連模型都沒問的巡邏，把上一輪真的拒絕擦掉了：{after}"
+        );
+        assert!(
+            !after.contains("沒有拒絕任何下一步"),
+            "沒問過模型的一輪不可以回答「她有沒有拒絕過」這個問題：{after}"
+        );
+    }
+
+    /// 快取裡真的有一段蓋住那個時間點的時候，「那段範圍還沒算過」已經被排除，
+    /// 不准再當成可能的成因印出來；而「你合併過章節」「那段範圍被重新計算過」
+    /// 這兩個使用者真的可以動手去查的成因，一個都不准掉。
+    ///
+    /// 為什麼要這一條：round 7 加了 `covering.is_some()` 這道抑制，但我把那
+    /// 一行整個換回無條件之後，1245 條測試全綠——那個行為改動一條斷言都沒有。
+    /// 同一批測試裡唯一比對整句的那一條，期望值是拿產品的同一個常數算出來的，
+    /// 所以我把常數砍短（拿掉破折號後面那兩個成因）之後也全綠。
+    ///
+    /// 所以這一條刻意把那兩個成因寫成字面值，不經過任何常數——鏡子照不出
+    /// 自己變短了。
+    ///
+    /// 我在看修法之前寫的，不規定用哪個判斷式做抑制。
+    #[test]
+    fn ted_a_covered_moment_must_not_offer_uncomputed_and_must_keep_both_actionable_causes() {
+        let tmp = Tmp::new("ted-covered-moment");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let min = 60_000i64;
+        let sid = db.start_session("test", "0").expect("session");
+        for i in 0..=20 {
+            db.insert_focus(
+                sid,
+                &FocusEvent {
+                    ts: ts + i * min,
+                    kind: FocusKind::Focus,
+                    snapshot: FocusSnapshot {
+                        app_id: Some("code.exe".into()),
+                        ..Default::default()
+                    },
+                },
+            )
+            .expect("focus");
+        }
+        let frame = FrameCapture {
+            ts: ts + 16 * min,
+            monitor: 0,
+            width: 100,
+            height: 100,
+            dhash: 1,
+            image: None,
+            image_ext: "png",
+            ocr: vec![OcrBlock {
+                text: "LINE：五點去接她 17:00".into(),
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                confidence: 1.0,
+            }],
+            focus: FocusSnapshot {
+                app_id: Some("code.exe".into()),
+                ..Default::default()
+            },
+        };
+        let (fid, _, _) = db.insert_frame(sid, &frame, None, 0).expect("frame");
+        let narrow = db
+            .chapters_for_range(ts + 10 * min, ts + 20 * min)
+            .expect("narrow");
+        let planted = narrow
+            .iter()
+            .find(|s| s.core_started_at > ts + 10 * min)
+            .or(narrow.last());
+        let Some(planted) = planted else {
+            panic!("窄窗沒切出後面那一節");
+        };
+        let old_core = planted.core_started_at;
+        write_l2(
+            &mut db,
+            old_core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let _ = db
+            .chapters_for_range(ts, ts + 20 * min)
+            .expect("full recompute");
+
+        // 前提：整天重算之後，舊起點查不到了，但那個時間點仍被另一段蓋著。
+        // 這兩條是在證明測試打得到那個洞，不是在規定修法。
+        assert_eq!(
+            db.segment_core_end(old_core).expect("query"),
+            None,
+            "舊起點不該還在"
+        );
+        let Some((start, _)) = db.covering_segment_at(old_core).expect("cover") else {
+            panic!("那個時間點沒被蓋住，這條測試打不到那個洞");
+        };
+        assert_ne!(start, old_core, "蓋住它的必須是另一段");
+
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":null}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        let consent = signed();
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let result = {
+            let mut input = ReviewInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: ts,
+                to_ts: ts + 21 * min,
+                kind: ReviewKind::Interval,
+                force: true,
+                now: ts + 22 * min,
+            };
+            run(&mut input).expect("run")
+        };
+        assert_eq!(result.cards_missing_segment, 1);
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("範圍變了必須留下說明");
+        };
+        let line = lines
+            .iter()
+            .find(|r| r.contains("現在查不到"))
+            .unwrap_or_else(|| panic!("那一句不見了：{lines:?}"));
+
+        assert!(
+            line.contains("仍被另一段蓋著"),
+            "前提：走的要是「被蓋住」那一支：{line}"
+        );
+        assert!(
+            !line.contains("還沒算過"),
+            "那個時間點明明被另一段蓋著，快取算過了——把「還沒算過」列成成因會叫他去重算一段已經算過的範圍：{line}"
+        );
+        // 字面值，刻意不經過任何常數：鏡子照不出自己變短了。
+        assert!(
+            line.contains("合併過章節"),
+            "使用者真的能動手的成因掉了一個（去時間軸看自己合併過什麼）：{line}"
+        );
+        assert!(
+            line.contains("重新計算過"),
+            "使用者真的能動手的成因掉了一個（那段範圍被重算過）：{line}"
+        );
+    }
+
+    /// 拒絕那一塊的標籤，必須對它真的挑中的那一輪成立。
+    ///
+    /// round 7 把判準從「候選不是 0」換成「這一輪問過模型」（`calls_used`），
+    /// 可是標籤那兩句字沒跟著動，還寫著「最近一次**看過卡片**的審閱」。
+    /// 於是「第 1 輪問過模型、第 2 輪也看過卡片但一次都沒問」的機器上，
+    /// 螢幕會指著第 1 輪說它是最近一次看過卡片的——第 2 輪才是。
+    /// 同一個 `match` 裡 round 7 自己新加的那一臂用的是「還沒**問過模型**」，
+    /// 三句話兩套講法、一個判準。
+    ///
+    /// 這一條是我在看修法**之前**寫的。我不規定查詢用哪個欄位，只要求那句
+    /// 標籤講的是它真的拿來挑列的那件事——而那個詞產品裡已經有了，就是
+    /// 隔壁那一臂的「問過模型」。
+    #[test]
+    fn ted_the_refusal_label_must_be_true_of_the_round_it_names() {
+        let ts = 1_700_250_000_000;
+        let (mut db, first) =
+            run_next_step_fixture("refusal-label", "LINE：五點去接她 17:00", 999_999, None);
+        assert_eq!(first.refused_next_steps, 1, "第一輪要真的拒絕一步");
+
+        // 第二輪：窗裡有卡片（所以「看過卡片」對它成立），但它的原件不在，
+        // 於是在呼叫模型之前就被跳過——`calls_used` 是 0。
+        let later = ts + 3_600_000;
+        write_l2(
+            &mut db,
+            later + 1_000,
+            424_242,
+            "這張卡片的原件已經不在了",
+            r#"[{"text":"隨便一句","stands":true,"kind":"promise","people":[],"confidence":0.5,"evidence_refs":["frame:424242"]}]"#,
+        );
+        let consent = signed();
+        let brain = BrainConfig {
+            command: "python3".into(),
+            args: vec![],
+            ..Default::default()
+        };
+        let second = {
+            let mut input = ReviewInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: later,
+                to_ts: later + 400_000,
+                kind: ReviewKind::Eod,
+                force: false,
+                now: later + 500_000,
+            };
+            run(&mut input).expect("run")
+        };
+        // 前提：第二輪確實看過卡片、確實沒問模型。證明這條測試打得到那個洞。
+        assert!(second.skip.is_none(), "第二輪要真的跑過：{:?}", second.skip);
+        assert!(second.candidates > 0, "第二輪要真的看過卡片");
+        assert_eq!(second.refused_next_steps, 0, "第二輪沒問過模型");
+
+        let after = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        assert!(
+            after.contains("999999"),
+            "第一輪真的拒絕過的那一步還是要看得見：{after}"
+        );
+        let head = after
+            .lines()
+            .find(|l| l.contains("拒絕掉的下一步"))
+            .unwrap_or_else(|| panic!("拒絕那一塊的標題不見了：{after}"));
+        assert!(
+            !head.contains("看過卡片"),
+            "它指的是第一輪，但第二輪也看過卡片——這個標籤對它指的那一輪不成立：{head}"
+        );
+        assert!(
+            head.contains("問過模型"),
+            "判準問的是「有沒有問過模型」，標籤就要講這件事（隔壁那一臂已經這樣講了）：{head}"
+        );
+    }
+
+    /// 叫不起那支 CLI 的一輪，不可以被說成「她沒有拒絕任何下一步」。
+    ///
+    /// `calls += 2` 在 `std::thread::scope` **後面、無條件**執行，而
+    /// `spawn_cli` 在 `Command::spawn()` 失敗時**不回 `Err`**，回一個
+    /// `spawn_error: Some("叫不起 …")` 的空 `SpawnOutcome`。所以 `calls_used`
+    /// 數的是**試了幾次**，不是**問到幾次**。
+    ///
+    /// 於是 `brain.command` 指到一個不存在的執行檔時，那一輪
+    /// `skip_reason IS NULL`、`calls_used = 2`、`detail` 是空的——挑列的判準
+    /// （`calls_used > 0`）把它選中，畫面印出「最近一次問過模型的審閱
+    /// （輪次 #N）沒有拒絕任何下一步。」。一個模型行程都沒起來。
+    ///
+    /// 同一份改動自己在 `entity_memory` 頭上把這個判準翻成「有沒有**開過**
+    /// CLI」，在拒絕那一格頭上翻成「沒問過模型」——兩句話不是同一件事，
+    /// 而使用者看到的是後面那句。
+    ///
+    /// 我在看修法之前寫的。兩個方向都收：判準改成只數真的問到的那幾次，
+    /// 或那句標籤改成講它真的問得出來的事。不收的是替一輪零答案的跑，
+    /// 宣告「她沒有拒絕任何下一步」——那句話正是 `NeverRan` 那一臂
+    /// 特地不肯講的（「目前沒有資格回答她拒絕了什麼」）。
+    #[test]
+    fn ted_a_round_whose_cli_never_started_must_not_be_called_a_round_that_refused_nothing() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+
+        // 這個名字不會存在於 PATH 上；`Command::spawn()` 一定失敗。
+        let result = run_diverge(
+            &mut db,
+            "sister-no-such-brain-binary-9d3f".into(),
+            vec![],
+            ts,
+        );
+
+        // 前提三道：它真的跑過、真的把「試過」記成呼叫、而且一份答案都沒拿到。
+        assert!(result.skip.is_none(), "這一輪要真的跑過：{:?}", result.skip);
+        assert!(
+            result.calls_used > 0,
+            "前提變了：叫不起 CLI 的一輪不再記成有呼叫，這條測試要重寫"
+        );
+        assert_eq!(
+            result.wrote_commitments, 0,
+            "一個模型行程都沒起來，不該寫出承諾"
+        );
+
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().expect("divergences"),
+            &db.latest_reviewer_refusals().expect("refusals"),
+            &db.latest_reviewer_notes().expect("notes"),
+            &db.entity_memory().expect("entities"),
+        );
+
+        // 正面的一道，擋「靠刪掉整段來過」。
+        assert!(
+            shown.contains("審閱") || shown.contains("拒絕"),
+            "這一塊還是要有話講：{shown}"
+        );
+        assert!(
+            !shown.contains("沒有拒絕任何下一步"),
+            "一個模型行程都沒起來的一輪，不可以被端成「她沒有拒絕任何下一步」：{shown}"
+        );
+    }
+
+    /// 螢幕上那一行預算，要跟真的被扣掉的那幾次一致。
+    ///
+    /// 真正的每日額度**不是** `calls_used` 在算的——是
+    /// `brain_outbound_count_on_role(day, "reviewer")` 去數 `brain_outbound`
+    /// 那張表的列（`reviewer.rs` 開頭那個 `used`）。而 `log_outbound` 對
+    /// **每一次 spawn 都寫一列**，叫不起來的那一次寫成
+    /// `OutboundOutcome::SpawnFailed`，一樣佔一列。
+    ///
+    /// 也就是說：**一輪叫不起 CLI 的跑，真的花掉了今天的兩次額度。**
+    ///
+    /// 所以「只在 `spawn_error.is_none()` 的時候才 `calls += 2`」那種修法會生出
+    /// 一句新的假話：這一輪的畫面說「這一輪沒呼叫模型（預算還剩 40/40）」，
+    /// 而下一輪的畫面會說「今日審閱呼叫 2/40」——中間沒有任何一輪承認花掉那兩次。
+    /// 那正是這個分支在修的病換一扇門走回來。
+    ///
+    /// 我在看修法之前寫的。**這一條在 round 8 上是綠的**，它是迴歸網不是 bug 報告：
+    /// 不管「問過模型」那三塊最後怎麼判，畫面上那行預算要繼續等於 outbound
+    /// 紀錄真的記下的次數。要改這個對應關係的話，改的是 `log_outbound`
+    /// 那一端（連同它的稽核意義），不是偷偷讓畫面少報。
+    #[test]
+    fn ted_the_budget_line_must_charge_what_the_outbound_log_charged() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+
+        // 這個名字不會存在於 PATH 上；`Command::spawn()` 一定失敗。
+        let result = run_diverge(
+            &mut db,
+            "sister-no-such-brain-binary-9d3f".into(),
+            vec![],
+            ts,
+        );
+
+        let day = brain::local_day_key(ts).expect("day key");
+        let charged = db
+            .brain_outbound_count_on_role(&day, "reviewer")
+            .expect("outbound count");
+
+        // 前提：叫不起來的那兩次，稽核紀錄真的記了、真的算進今天的額度。
+        assert!(
+            charged > 0,
+            "前提變了：叫不起 CLI 不再寫 outbound 紀錄，這條測試要重寫"
+        );
+
+        // 真的被扣掉的，和這一輪自己說被扣掉的，要是同一個數字。
+        assert_eq!(
+            result.budget_used, charged,
+            "outbound 紀錄扣了 {charged} 次，這一輪卻說用掉 {} 次",
+            result.budget_used
+        );
+
+        let stats = RecheckStats {
+            runs: Some(1),
+            candidates: Some(1),
+            rechecks: Some(0),
+            last_skip: None,
+        };
+        let shown = format_review_result(&result, &stats);
+
+        // 使用者看得到的那一句：不可以說額度一次都沒動。
+        assert!(
+            !shown.contains(&format!(
+                "預算還剩 {}/{}",
+                result.budget_limit, result.budget_limit
+            )),
+            "今天已經被扣掉 {charged} 次了，畫面卻說一次都沒用：{shown}"
+        );
+    }
+
+    /// 叫不起 CLI 的一輪，不是「雙 pass 的分歧」，更不是「其中一個 pass 沒有
+    /// 可用的 JSON」——兩個 pass 都沒起來。
+    #[test]
+    fn a_round_whose_cli_never_started_is_not_a_dual_pass_divergence() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(
+            &mut db,
+            "sister-no-such-brain-binary-9d3f".into(),
+            vec![],
+            ts,
+        );
+        assert!(result.skip.is_none(), "{:?}", result.skip);
+        assert!(result.calls_used > 0);
+
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().expect("divergences"),
+            &db.latest_reviewer_refusals().expect("refusals"),
+            &db.latest_reviewer_notes().expect("notes"),
+            &db.entity_memory().expect("entities"),
+        );
+        assert!(
+            shown.contains("叫不起 CLI") || shown.contains("沒有拿到可比較的兩份答案"),
+            "這一輪叫不起 CLI，畫面要講出來：{shown}"
+        );
+        assert!(
+            !shown.contains("的分歧"),
+            "沒有兩份答案，不可以被端成「雙 pass 的分歧」：{shown}"
+        );
+        assert!(
+            !shown.contains("其中一個 pass 沒有可用的 JSON"),
+            "兩個 pass 都沒起來，不可以說「其中一個」沒有 JSON：{shown}"
+        );
+    }
+
+    /// 叫不起 CLI 的一輪，不是「Reviewer 跑過，但目前沒有活著的實體」。
+    /// 那句話把「問不到」講成「辨識到 0 個」。
+    #[test]
+    fn a_round_whose_cli_never_started_is_not_identified_zero_entities() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(
+            &mut db,
+            "sister-no-such-brain-binary-9d3f".into(),
+            vec![],
+            ts,
+        );
+        assert!(result.skip.is_none(), "{:?}", result.skip);
+        assert!(result.calls_used > 0);
+
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().expect("divergences"),
+            &db.latest_reviewer_refusals().expect("refusals"),
+            &db.latest_reviewer_notes().expect("notes"),
+            &db.entity_memory().expect("entities"),
+        );
+        assert!(
+            shown.contains("審閱") || shown.contains("拒絕"),
+            "這一塊還是要有話講：{shown}"
+        );
+        assert!(
+            !shown.contains("沒有活著的實體"),
+            "一個模型行程都沒起來的一輪，不可以被端成「辨識到 0 個」：{shown}"
+        );
+    }
+
     fn run_diverge(db: &mut Db, command: String, args: Vec<String>, ts: Millis) -> ReviewResult {
         let consent = signed();
         let brain = BrainConfig {
@@ -4913,6 +5648,7 @@ mod tests {
             budget_limit: 40,
             detail: "",
             notes: "",
+            answers_got: None,
         })
         .unwrap();
         let consent = signed();

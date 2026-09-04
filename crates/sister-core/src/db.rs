@@ -34,7 +34,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 16;
+pub const SCHEMA_VERSION: i32 = 17;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -597,6 +597,16 @@ fn migrate_015(tx: &rusqlite::Transaction<'_>) -> Result<()> {
 fn migrate_016(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     // 說明文字，不是證據。既有列補空字串：這一欄本來就沒裝過東西。
     add_column_if_missing(tx, "reviewer_run", "notes", "TEXT NOT NULL DEFAULT ''")
+}
+
+fn migrate_017(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    // 幾次真的拿到模型的答案。和 `calls_used`（試了幾次／扣了幾次額度）
+    // 分開：叫不起 CLI 的那一輪 `calls_used = 2`、`answers_got = 0`。
+    //
+    // **不加 DEFAULT 0。** 既有列是「當時沒記這件事」，不是「記了、拿到 0
+    // 次」。NULL 和 0 不准長得一樣——舊列維持 NULL，讀取端把它們當「問不出
+    // 來、沿用 `calls_used > 0` 的舊判準」；新列寫 0 才是「量過、零次」。
+    add_column_if_missing(tx, "reviewer_run", "answers_got", "INTEGER")
 }
 
 fn add_column_if_missing(
@@ -1266,6 +1276,7 @@ impl Db {
             14 => migrate_014(&tx)?,
             15 => migrate_015(&tx)?,
             16 => migrate_016(&tx)?,
+            17 => migrate_017(&tx)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -4711,8 +4722,8 @@ impl Db {
             "INSERT INTO reviewer_run(
                 ts, day_key, kind, skip_reason, candidate_count, recheck_count,
                 wrote_commitments, divergences, calls_used, budget_used,
-                budget_limit, detail, notes
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                budget_limit, detail, notes, answers_got
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 ins.ts,
                 ins.day_key,
@@ -4727,6 +4738,7 @@ impl Db {
                 ins.budget_limit,
                 ins.detail,
                 ins.notes,
+                ins.answers_got,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -4871,53 +4883,60 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// 最近一輪**看過卡片**的審閱，她拒絕掉了哪幾個模型指的下一步。
+    /// 最近一輪**問過模型**的審閱，她拒絕掉了哪幾個模型指的下一步。
     ///
-    /// **三種，不是「一個 `Vec`」。** 「還沒跑過一輪看得了卡片的」、
-    /// 「跑過而且沒拒絕任何東西」、「跑過而且拒絕了這幾個」是三件事；
-    /// 前兩種折成空 `Vec` 的話，一台從來沒跑過 reviewer 的機器會顯示成
-    /// 「她什麼都沒拒絕」。
+    /// **四種，不是「一個 `Vec`」。** 「還沒問過模型」、
+    /// 「試過問但沒拿到任何一份能讀的答案」、
+    /// 「問過而且沒拒絕任何東西」、「問過而且拒絕了這幾個」是四件事；
+    /// 前兩種折成空 `Vec` 的話，一台裝好、跑過巡邏、但還沒問過模型的機器
+    /// 會顯示成「她什麼都沒拒絕」。叫不起 CLI 的那一輪也是：`calls_used`
+    /// 數的是試了幾次，不是問到幾次。
     ///
-    /// 沒有候選的那一輪 `skip_reason` 仍是 `NULL`（她確實跑過、候選 0），
-    /// 但它**沒看過任何卡片**，沒有資格回答這個問題。判準是這一列的
-    /// `candidate_count == 0`——空的 interval 和空的 eod 都寫 0，eod 的
-    /// notes 還是空字串，對不上任何文案開頭。這一支會跨過那些列，往前
-    /// 找到最近一輪真的看過的。說明仍在 [`Self::latest_reviewer_notes`]，
-    /// 讀的是最新那一列，兩支讀的不一定是同一列。
+    /// 一輪可以 `skip_reason IS NULL` 卻零次呼叫（窗裡根本沒有卡片、卡片
+    /// 全是使用者自己寫的、`five_class` 全空、預算剩不到兩次、原件被清掉、
+    /// 或沒有承諾候選）。「卡片全審過了」不是其中一條：`latest_unreviewed`
+    /// 只取每一段的最新版本，不排除審過的卡。那種一輪沒問過模型，沒有資格
+    /// 回答「她拒絕了什麼」。挑列跟 [`Self::entity_memory`]、
+    /// [`Self::latest_dual_pass_divergences`] 同一個拼法：`calls_used > 0`
+    /// （`calls` 只會 `+= 2`，所以 `> 0` 和 `>= 2` 是同一批列；兩種寫法會讓
+    /// 人以為取了不同的列）。`candidate_count` 數的是回查次數，在三個
+    /// `continue` 之前就加了，不能拿來當「問過模型」。
+    ///
+    /// 挑到列之後，`answers_got = 0` 的那一輪是「試過、沒問到」，不是
+    /// 「問過、沒拒絕」。`answers_got IS NULL` 是加這欄之前的舊列，問不出
+    /// 來，沿用舊判準。
     ///
     /// `detail` 只裝真的拒絕。卡片那一段不見了、或「沒有東西可審」那種說明
     /// 在 [`Self::latest_reviewer_notes`]。
     pub fn latest_reviewer_refusals(&self) -> Result<ReviewerRefusals> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, detail, candidate_count FROM reviewer_run
-             WHERE skip_reason IS NULL
-             ORDER BY ts DESC, id DESC",
-        )?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let run_id: i64 = row.get(0)?;
-            let detail: String = row.get(1)?;
-            let candidate_count: Option<i64> = row.get(2)?;
-            // 跳過「候選 0」。空的 interval 和空的 eod 都寫
-            // `candidate_count = Some(0)`、`skip_reason = NULL`。
-            // 正常路徑這個欄位數的是回查次數，不是卡片張數；但沒有候選
-            // 的那一輪兩邊都是 0，所以這一條同時蓋住兩種 kind。
-            //
-            // NULL 不跳過。寫入端只有 `record_skip` 會寫 NULL，而那一類
-            // `skip_reason` 不是 NULL，上面 WHERE 已經濾掉。不要寫成
-            // 「有值就是看過」——那會把照設計寫 NULL 的跳過列，萬一漏進
-            // 這個查詢，當成「看過卡片」。
-            if candidate_count == Some(0) {
-                continue;
-            }
-            let reasons = nonempty_lines(&detail);
-            return Ok(if reasons.is_empty() {
-                ReviewerRefusals::None { run_id }
-            } else {
-                ReviewerRefusals::Some { run_id, reasons }
-            });
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, detail, answers_got FROM reviewer_run
+                 WHERE skip_reason IS NULL AND calls_used > 0
+                 ORDER BY ts DESC, id DESC LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((run_id, detail, answers_got)) = row else {
+            return Ok(ReviewerRefusals::NeverRan);
+        };
+        if answers_got == Some(0) {
+            return Ok(ReviewerRefusals::GotNoAnswer { run_id });
         }
-        Ok(ReviewerRefusals::NeverRan)
+        let reasons = nonempty_lines(&detail);
+        Ok(if reasons.is_empty() {
+            ReviewerRefusals::None { run_id }
+        } else {
+            ReviewerRefusals::Some { run_id, reasons }
+        })
     }
 
     /// 最近一輪真的跑過的審閱，拒絕以外的說明。
@@ -4938,17 +4957,17 @@ impl Db {
     }
 
     pub fn latest_dual_pass_divergences(&self) -> Result<DualPassDivergences> {
-        let run_id = self
+        let picked = self
             .conn
             .query_row(
-                "SELECT id FROM reviewer_run
-                 WHERE skip_reason IS NULL AND calls_used >= 2
+                "SELECT id, answers_got FROM reviewer_run
+                 WHERE skip_reason IS NULL AND calls_used > 0
                  ORDER BY ts DESC, id DESC LIMIT 1",
                 [],
-                |r| r.get::<_, i64>(0),
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)),
             )
             .optional()?;
-        let Some(run_id) = run_id else {
+        let Some((run_id, answers_got)) = picked else {
             return Ok(DualPassDivergences::NeverRan);
         };
         let mut stmt = self.conn.prepare(
@@ -4968,7 +4987,9 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        if rows.is_empty() {
+        if answers_got == Some(0) {
+            Ok(DualPassDivergences::NoComparableAnswers { run_id, rows })
+        } else if rows.is_empty() {
             Ok(DualPassDivergences::Agreed { run_id })
         } else {
             Ok(DualPassDivergences::Diverged { run_id, rows })
@@ -4977,23 +4998,40 @@ impl Db {
 
     pub fn entity_memory(&self) -> Result<EntityMemory> {
         // 數的是**呼叫**，不是 `reviewer_run` 的列。一輪可以 `skip_reason IS
-        // NULL` 卻零次呼叫（卡片全審過了、或預算剩不到兩次），而寫實體的那幾行
-        // 全在 `calls += 2` 後面、同一個迴圈裡、中間沒有 `continue`——所以那種
-        // 一輪**構不到**它們，不算「看過了、辨識到 0 個」。
-        // 跟隔壁 `latest_dual_pass_divergences` 的 `>= 2` 差一個門檻是故意的：
-        // 那邊問「有沒有兩份答案可比」，這邊問「有沒有開過 CLI」。
-        let reviewed: bool = self.conn.query_row(
+        // NULL` 卻零次呼叫（窗裡根本沒有卡片、卡片全是使用者自己寫的、
+        // `five_class` 全空、預算剩不到兩次、原件被清掉、或沒有承諾候選），
+        // 而寫實體的那幾行全在 `calls += 2` 後面、同一個迴圈裡、中間沒有
+        // `continue`——所以那種一輪**構不到**它們，不算「看過了、辨識到 0 個」。
+        // 跟隔壁 `latest_dual_pass_divergences`、`latest_reviewer_refusals`
+        // 同一個拼法 `calls_used > 0`：前兩塊取同一列，問的是那一列的不同
+        // 問題（有沒有兩份答案可比 / 她拒了哪幾步）；這邊問有沒有開過 CLI。
+        //
+        // `calls_used` 數的是試了幾次。叫不起 CLI 的那一輪也是 `> 0`，但
+        // `answers_got = 0`：那不是「看過了、辨識到 0 個」。舊列這欄是 NULL，
+        // 問不出來，沿用「試過就算看過」的舊判準。
+        let tried: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM reviewer_run
              WHERE skip_reason IS NULL AND calls_used > 0)",
             [],
             |r| r.get(0),
         )?;
-        if !reviewed {
+        if !tried {
             return Ok(EntityMemory::NeverReviewed);
         }
+        let got_answer: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reviewer_run
+             WHERE skip_reason IS NULL AND calls_used > 0
+               AND (answers_got IS NULL OR answers_got > 0))",
+            [],
+            |r| r.get(0),
+        )?;
         let entities = self.live_entities()?;
         if entities.is_empty() {
-            return Ok(EntityMemory::Empty);
+            return Ok(if got_answer {
+                EntityMemory::Empty
+            } else {
+                EntityMemory::GotNoAnswer
+            });
         }
         let rows = entities
             .into_iter()
@@ -6281,7 +6319,16 @@ pub enum TargetApp {
 ///
 /// 只把算完的句子送到 UI；`FactOrigin` 本身不跨過序列化邊界。
 ///
-/// `None`＝這筆承諾根本沒有記下一步目標的 fact 出處。
+/// `None`＝`allowed_next_step_fact.zip(expected_target)` 是 `None`。兩種輸入：
+///
+/// 1. 這筆承諾沒有記下一步目標的 fact 出處。寫入端到得了：`migrate_014`
+///    加欄沒有 backfill，而 `allowed_next_step` 在原始 `CREATE TABLE` 就有——
+///    舊版執行檔寫下的列升上來都是 step 有值、fact 是 NULL。整合測試
+///    `schema_13_commitment_is_refused_with_missing_target_provenance`
+///    走真的 CLI 演過這條路。
+/// 2. 這個動作根本沒有可比對的目標字串（`FocusWindow`），即使 fact 有值。
+///    目前找不到寫入端（`resolve_allowed_next_step` 只吐 `open_url` /
+///    `open_file`）；這一格是 fail-closed 的防禦。
 ///
 /// **這一格故意用 `Option`，不是在 [`TargetApp`] 上多開一格。**
 /// [`Db::app_for_target_fact`] 一定是拿著一個 fact id 去查的，它回不出「沒有
@@ -6338,9 +6385,15 @@ pub fn suggestion_text(
     }
 }
 
-/// `Ok(None)`＝這筆承諾沒有記下一步目標的 fact 出處，或這個動作根本沒有可比對的
-/// 目標字串（`FocusWindow`）。**沒有記**和**查出來是某一格**是兩件事，所以用
-/// `Option` 分開，不要在 [`TargetApp`] 上多開一格。
+/// `Ok(None)`＝`allowed_next_step_fact.zip(expected_target)` 是 `None`。兩種輸入：
+///
+/// 1. 這筆承諾沒有記下一步目標的 fact 出處。寫入端到得了：見
+///    `schema_13_commitment_is_refused_with_missing_target_provenance`。
+/// 2. 這個動作根本沒有可比對的目標字串（`FocusWindow`），即使 fact 有值。
+///    目前找不到寫入端；這一格是 fail-closed 的防禦。
+///
+/// **沒有記**和**查出來是某一格**是兩件事，所以用 `Option` 分開，不要在
+/// [`TargetApp`] 上多開一格。
 pub fn target_app_for_button<E>(
     button: &sister_hands::SuggestionButton,
     allowed_next_step_fact: Option<i64>,
@@ -6761,14 +6814,28 @@ pub struct ReviewerRunInsert<'a> {
     pub detail: &'a str,
     /// 拒絕以外的說明（卡片那一段不見了、沒有東西可審）。不是證據。
     pub notes: &'a str,
+    /// 這一輪幾個 pass 真的吐出能讀的 JSON。`None`＝沒記（舊列、或沒開 CLI
+    /// 的一輪）；`Some(0)`＝記了、零次——叫不起 CLI、或兩個 pass 都沒有可用
+    /// 的 JSON。和 `calls_used` 分開：那個數的是試了幾次／扣了幾次額度，
+    /// 這個數的是問到幾次。
+    pub answers_got: Option<i64>,
 }
 
 /// 最近一輪審閱拒絕掉的下一步。見 [`Db::latest_reviewer_refusals`]。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewerRefusals {
     NeverRan,
-    None { run_id: i64 },
-    Some { run_id: i64, reasons: Vec<String> },
+    /// 試過問、但沒拿到任何一份能讀的答案。沒有資格說她拒絕了什麼。
+    GotNoAnswer {
+        run_id: i64,
+    },
+    None {
+        run_id: i64,
+    },
+    Some {
+        run_id: i64,
+        reasons: Vec<String>,
+    },
 }
 
 /// 最近一輪審閱、拒絕以外的說明。見 [`Db::latest_reviewer_notes`]。
@@ -6782,7 +6849,7 @@ pub enum ReviewerNotes {
 /// `SkipReason::NothingToReview` 的第一句。印在說明那一塊。
 ///
 /// 拒絕那條路不看這句開頭——沒有候選的 eod 寫的 notes 是空字串，對不上。
-/// 拒絕改看 [`Db::latest_reviewer_refusals`] 的 `candidate_count == 0`。
+/// 拒絕改看 [`Db::latest_reviewer_refusals`] 的 `calls_used > 0`。
 pub const NOTHING_TO_REVIEW_HEAD: &str = "這段期間沒有還沒審過的 L2 假設";
 
 fn nonempty_lines(text: &str) -> Vec<String> {
@@ -6831,6 +6898,11 @@ pub struct DivergenceRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DualPassDivergences {
     NeverRan,
+    /// 試過雙 pass，但沒拿到可比較的兩份答案。不是「兩份答案對不上」。
+    NoComparableAnswers {
+        run_id: i64,
+        rows: Vec<DivergenceRow>,
+    },
     Agreed {
         run_id: i64,
     },
@@ -6849,6 +6921,8 @@ pub struct EntityWithMentions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityMemory {
     NeverReviewed,
+    /// 有試過問模型，但沒有任何一輪拿到答案。不是辨識到 0 個。
+    GotNoAnswer,
     Empty,
     Present(Vec<EntityWithMentions>),
 }
@@ -8504,6 +8578,10 @@ mod tests {
         assert!(
             columns_of(&db, "reviewer_run").contains(&"notes".to_string()),
             "全新資料庫也要有審閱說明那一欄"
+        );
+        assert!(
+            columns_of(&db, "reviewer_run").contains(&"answers_got".to_string()),
+            "全新資料庫也要有「問到幾次」那一欄"
         );
     }
 
@@ -12602,6 +12680,7 @@ mod tests {
             budget_limit: 40,
             detail: "",
             notes: "",
+            answers_got: None,
         })
         .expect("insert reviewer_run");
     }
@@ -12699,6 +12778,7 @@ mod tests {
             budget_limit: 40,
             detail: "",
             notes: "",
+            answers_got: None,
         })
         .unwrap();
         assert!(!db.has_reviewer_eod_for_day("2026-08-21").unwrap());
@@ -12842,6 +12922,7 @@ mod tests {
                 budget_limit: 10,
                 detail: "",
                 notes: "",
+                answers_got: None,
             })
             .unwrap();
         assert_eq!(
@@ -12864,6 +12945,7 @@ mod tests {
                 budget_limit: 10,
                 detail: "",
                 notes: "",
+                answers_got: None,
             })
             .unwrap();
         db.insert_reviewer_divergence(&DivergenceInsert {
@@ -12888,9 +12970,10 @@ mod tests {
     #[test]
     fn a_run_that_never_spawned_two_passes_is_not_a_dual_pass() {
         // `calls += 2` 只在雙 pass 那個區塊裡加。一輪可以 `skip_reason IS NULL`
-        // 卻 `calls_used = 0`：卡片全是使用者寫的、或預算剩不到 2 次，迴圈就
-        // 一路 continue 到底，照樣寫一列 run。
-        // 少了 `calls_used >= 2`，那一列會被當成「最近一次雙 pass」，於是印出
+        // 卻 `calls_used = 0`：窗裡根本沒有卡片、卡片全是使用者寫的、
+        // `five_class` 全空、或預算剩不到 2 次，迴圈就一路 continue 到底，照樣
+        // 寫一列 run。
+        // 少了 `calls_used > 0`，那一列會被當成「最近一次雙 pass」，於是印出
         // 「最近一次雙 pass（#N）沒有分歧」——講的是一輪一次 CLI 都沒開的跑。
         let mut db = test_db();
         let nothing = ReviewerRunInsert {
@@ -12907,6 +12990,7 @@ mod tests {
             budget_limit: 10,
             detail: "",
             notes: "",
+            answers_got: None,
         };
         db.insert_reviewer_run(&nothing).unwrap();
         assert_eq!(
@@ -12953,9 +13037,10 @@ mod tests {
             db.entity_memory().unwrap(),
             EntityMemory::NeverReviewed
         ));
-        // 一輪零次呼叫的跑（卡片全審過了、或預算剩不到兩次）**構不到**寫實體
-        // 的那幾行——它們全在 `calls += 2` 後面、同一個迴圈裡、中間沒有
-        // `continue`。所以它不算「看過了」。
+        // 一輪零次呼叫的跑（窗裡根本沒有卡片、卡片全是使用者寫的、
+        // `five_class` 全空、或預算剩不到兩次）**構不到**寫實體的那幾行——
+        // 它們全在 `calls += 2` 後面、同一個迴圈裡、中間沒有 `continue`。
+        // 所以它不算「看過了」。
         let nothing = ReviewerRunInsert {
             ts: 10,
             day_key: "1970-01-01",
@@ -12970,6 +13055,7 @@ mod tests {
             budget_limit: 10,
             detail: "",
             notes: "",
+            answers_got: None,
         };
         db.insert_reviewer_run(&nothing).unwrap();
         assert!(
@@ -13030,6 +13116,7 @@ mod tests {
             budget_limit: 10,
             detail: "",
             notes: "",
+            answers_got: None,
         };
         // 一次 CLI 都沒開的三種樣子。兩半都該說「還沒跑過」。
         for (label, seed) in [

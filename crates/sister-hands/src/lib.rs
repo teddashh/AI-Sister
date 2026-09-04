@@ -333,9 +333,45 @@ pub enum RefusalReason {
     HandsPulled { since_ms: Option<i64> },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TargetFrameGap {
+/// 同一份清單生出 enum、`ALL`、`COUNT`。加一種就要改這份清單，
+/// 測試的 `for why in TargetFrameGap::ALL` 才餵得到它。手寫一份 enum
+/// 再手寫一份 `ALL` 的話，補完 exhaustive match 之後不必動陣列，新
+/// variant 一次都沒被餵進去。
+macro_rules! define_target_frame_gaps {
+    ($(
+        $(#[$attr:meta])*
+        $variant:ident
+    ),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum TargetFrameGap {
+            $(
+                $(#[$attr])*
+                $variant,
+            )+
+        }
+
+        impl TargetFrameGap {
+            pub const ALL: [Self; { 0 $(+ { let _ = stringify!($variant); 1 })+ }] = [
+                $(Self::$variant,)+
+            ];
+            pub const COUNT: usize = Self::ALL.len();
+
+            pub const fn index(self) -> usize {
+                let mut i = 0;
+                $(
+                    if matches!(self, Self::$variant) {
+                        return i;
+                    }
+                    i += 1;
+                )+
+                i
+            }
+        }
+    };
+}
+
+define_target_frame_gaps! {
     NoTargetRecorded,
     Forgotten,
     RowReplaced,
@@ -343,7 +379,7 @@ pub enum TargetFrameGap {
     /// 聯集裡就沒有這張畫面：兩個 pass 誰都沒指過它。
     ///
     /// **沒有第四個 variant 專講「交集是空的」。** 交集空不空是那個集合的性質，
-    /// 不是這一步被擋下來的理由：目標在聯集裡就是 [`Self::CitedByOnlyOnePass`]，
+    /// 不是這一步被擋下來的理由：目標在聯集裡就是 [`TargetFrameGap::CitedByOnlyOnePass`]，
     /// 不在聯集裡就是這一個。硬要分的話，唯一到得了的輸入是「連聯集都空了」，
     /// 而那時候誠實的診斷還是這一句。
     FrameNotCited,
@@ -432,13 +468,30 @@ pub enum RefusalBucket {
     OutsideGrant,
     /// 放寬 grant 沒有用；要做只能由人在終端機看過後當場按。
     ///
-    /// 這一格只裝「目標畫面現在問得出來、但兩個 pass 沒有都指過它」
+    /// 這一格裝「目標 fact 上記了畫面編號、但兩個 pass 沒有都指過它」
     /// （[`TargetFrameGap::CitedByOnlyOnePass`] 和 [`TargetFrameGap::FrameNotCited`]）。
+    /// 問的是 fact 列上的 `frame_id`，沒有再去 `frames` 確認那一列還在。
     TargetNotOnACitedScreen,
     /// 根本沒有畫面可以核對。視窗標題／剪貼簿照設計就沒有 `frame_id`，
-    /// 矛盾列（畫面文字沒記編號）和沒記目標的也落這裡——收尾句不准
-    /// 把這一格講成「照設計」。
+    /// 矛盾列（畫面文字沒記編號）也落這裡——收尾句不准把這一格講成「照設計」。
     TargetHasNoFrameToCheck,
+    /// 這一格有兩種輸入，都會讓 `allowed_next_step_fact.zip(expected_target)`
+    /// 變成 `None`：
+    ///
+    /// 1. 這筆承諾沒有記 `allowed_next_step_fact`。寫入端到得了：
+    ///    `migrate_014` 加欄沒有 backfill，而 `allowed_next_step` 在原始
+    ///    `CREATE TABLE` 就有——舊版執行檔寫下的列升上來都是 step 有值、
+    ///    fact 是 NULL。整合測試
+    ///    `schema_13_commitment_is_refused_with_missing_target_provenance`
+    ///    走真的 CLI 演過這條路。
+    /// 2. 這個動作根本沒有可比對的目標字串（[`ActionSnapshot::FocusWindow`]），
+    ///    **即使** fact 有值。目前找不到寫入端（`resolve_allowed_next_step`
+    ///    只吐 `open_url` / `open_file`；`ops.rs` 那個寫得出任意字串的建構子
+    ///    在 `#[cfg(test)]` 裡）。這一格是 fail-closed 的防禦。
+    ///
+    /// 沒有記、和查出來是某一格，是兩件事。收尾句要對兩種都成立，
+    /// 不准把這一格講成缺畫面。
+    NoTargetRecorded,
     /// 那筆目標已經不在了（忘掉了、過了保留期，或那一列換成別的內容）。
     TargetNoLongerThere,
     /// 這筆承諾記在加「兩個 pass 都要指過畫面」這道檢查之前，問不出來。
@@ -456,6 +509,25 @@ pub enum RefusalBucket {
 }
 
 impl RefusalReason {
+    /// 加一種拒絕理由而不在這裡點名，編不過。
+    ///
+    /// `KIND_COUNT` / 測試裡那份 `every_reason` 是手寫的，補完 `bucket` /
+    /// `index` / `message` 的 exhaustive match 之後不必動它們。這一支
+    /// match 沒有 `_`，是「新 variant 沒被餵進去」唯一編不過的那一層。
+    pub const fn named_for_coverage(&self) {
+        match self {
+            Self::UserDeclinedThisStep
+            | Self::ObserveHasNoHands
+            | Self::SemiActionNeedsGrantAndStepApproval
+            | Self::NeverInherited { .. }
+            | Self::NeedsLivePress { .. }
+            | Self::NotCoveredByGrant { .. }
+            | Self::UnattendedTargetHasNoCitedFrame { .. }
+            | Self::ApprovalWasForAnotherStep { .. }
+            | Self::HandsPulled { .. } => {}
+        }
+    }
+
     /// **這裡沒有 `_`。** 多一種拒絕理由就編不過，因為「它該算進哪一格」
     /// 是一個每次都要重新回答的問題——留一個 `_` 的話，新的那一種會安靜地
     /// 掉進當時剛好排在最後的那一格（見 `never_inherited_class` 同樣的寫法）。
@@ -471,9 +543,8 @@ impl RefusalReason {
                 TargetFrameGap::FrameNotCited | TargetFrameGap::CitedByOnlyOnePass => {
                     RefusalBucket::TargetNotOnACitedScreen
                 }
-                TargetFrameGap::FrameNotRecorded | TargetFrameGap::NoTargetRecorded => {
-                    RefusalBucket::TargetHasNoFrameToCheck
-                }
+                TargetFrameGap::FrameNotRecorded => RefusalBucket::TargetHasNoFrameToCheck,
+                TargetFrameGap::NoTargetRecorded => RefusalBucket::NoTargetRecorded,
                 TargetFrameGap::Forgotten | TargetFrameGap::RowReplaced => {
                     RefusalBucket::TargetNoLongerThere
                 }
@@ -484,6 +555,27 @@ impl RefusalReason {
             Self::ObserveHasNoHands | Self::SemiActionNeedsGrantAndStepApproval => {
                 RefusalBucket::WrongPath
             }
+        }
+    }
+
+    /// 非 `UnattendedTargetHasNoCitedFrame` 的種數 + [`TargetFrameGap::COUNT`]。
+    /// 測試把「每種各餵一次」綁在這個數字和 [`Self::index`] 上。
+    pub const KIND_COUNT: usize = 8 + TargetFrameGap::COUNT;
+
+    /// 0..KIND_COUNT-1。match 沒有 `_`：漏一種編不過。
+    /// `UnattendedTargetHasNoCitedFrame` 占 6..6+COUNT-1，所以加一種
+    /// `TargetFrameGap` 會把後面兩個編號往後推。
+    pub const fn index(&self) -> usize {
+        match self {
+            Self::UserDeclinedThisStep => 0,
+            Self::ObserveHasNoHands => 1,
+            Self::SemiActionNeedsGrantAndStepApproval => 2,
+            Self::NeverInherited { .. } => 3,
+            Self::NeedsLivePress { .. } => 4,
+            Self::NotCoveredByGrant { .. } => 5,
+            Self::UnattendedTargetHasNoCitedFrame { why } => 6 + why.index(),
+            Self::ApprovalWasForAnotherStep { .. } => 6 + TargetFrameGap::COUNT,
+            Self::HandsPulled { .. } => 7 + TargetFrameGap::COUNT,
         }
     }
 
@@ -978,9 +1070,8 @@ mod tests {
                     TargetFrameGap::FrameNotCited | TargetFrameGap::CitedByOnlyOnePass => {
                         RefusalBucket::TargetNotOnACitedScreen
                     }
-                    TargetFrameGap::FrameNotRecorded | TargetFrameGap::NoTargetRecorded => {
-                        RefusalBucket::TargetHasNoFrameToCheck
-                    }
+                    TargetFrameGap::FrameNotRecorded => RefusalBucket::TargetHasNoFrameToCheck,
+                    TargetFrameGap::NoTargetRecorded => RefusalBucket::NoTargetRecorded,
                     TargetFrameGap::Forgotten | TargetFrameGap::RowReplaced => {
                         RefusalBucket::TargetNoLongerThere
                     }
@@ -990,7 +1081,7 @@ mod tests {
             }
         }
 
-        let every_reason = [
+        let mut every_reason = vec![
             RefusalReason::UserDeclinedThisStep,
             RefusalReason::ObserveHasNoHands,
             RefusalReason::SemiActionNeedsGrantAndStepApproval,
@@ -1003,61 +1094,52 @@ mod tests {
             RefusalReason::NotCoveredByGrant {
                 rejection: semi_action::GrantRejection::Apps,
             },
-            RefusalReason::UnattendedTargetHasNoCitedFrame {
-                why: TargetFrameGap::FrameNotCited,
-            },
-            RefusalReason::UnattendedTargetHasNoCitedFrame {
-                why: TargetFrameGap::CitedByOnlyOnePass,
-            },
-            RefusalReason::UnattendedTargetHasNoCitedFrame {
-                why: TargetFrameGap::RecordedBeforeAgreedEvidence,
-            },
-            RefusalReason::UnattendedTargetHasNoCitedFrame {
-                why: TargetFrameGap::NoTargetRecorded,
-            },
-            RefusalReason::UnattendedTargetHasNoCitedFrame {
-                why: TargetFrameGap::Forgotten,
-            },
-            RefusalReason::UnattendedTargetHasNoCitedFrame {
-                why: TargetFrameGap::RowReplaced,
-            },
-            RefusalReason::UnattendedTargetHasNoCitedFrame {
-                why: TargetFrameGap::FrameNotRecorded,
-            },
-            RefusalReason::ApprovalWasForAnotherStep {
-                mismatch: semi_action::ApprovalMismatch::between(
-                    ActionSnapshot::OpenUrl {
-                        url: "https://screen".into(),
-                    },
-                    ActionSnapshot::OpenUrl {
-                        url: "https://handed-to-the-os".into(),
-                    },
-                ),
-            },
-            RefusalReason::HandsPulled { since_ms: Some(1) },
         ];
+        for why in TargetFrameGap::ALL {
+            every_reason.push(RefusalReason::UnattendedTargetHasNoCitedFrame { why });
+        }
+        every_reason.push(RefusalReason::ApprovalWasForAnotherStep {
+            mismatch: semi_action::ApprovalMismatch::between(
+                ActionSnapshot::OpenUrl {
+                    url: "https://screen".into(),
+                },
+                ActionSnapshot::OpenUrl {
+                    url: "https://handed-to-the-os".into(),
+                },
+            ),
+        });
+        every_reason.push(RefusalReason::HandsPulled { since_ms: Some(1) });
+        let mut seen = [false; RefusalReason::KIND_COUNT];
         for reason in &every_reason {
+            reason.named_for_coverage();
+            let i = reason.index();
+            assert!(
+                i < RefusalReason::KIND_COUNT,
+                "{reason:?} 編號越界：{i} COUNT={}",
+                RefusalReason::KIND_COUNT
+            );
+            assert!(!seen[i], "{reason:?} 編號重複：{i}");
+            seen[i] = true;
             assert_eq!(
                 reason.bucket(),
                 expected_bucket(reason),
                 "{reason:?} 被算進了另一格；那一格教他做的下一步對這一種沒有用"
             );
         }
+        for (i, hit) in seen.iter().enumerate() {
+            assert!(hit, "編號 {i} 沒被打到（漏了一種沒餵進 Tally / bucket）");
+        }
+        assert_eq!(
+            every_reason.len(),
+            RefusalReason::KIND_COUNT,
+            "筆數必須等於編號個數"
+        );
     }
 
     /// `{ .. }` 把七種印成同一句的時候，這一條要紅。
     #[test]
     fn each_target_frame_gap_has_its_own_refusal_message() {
-        let gaps = [
-            TargetFrameGap::NoTargetRecorded,
-            TargetFrameGap::Forgotten,
-            TargetFrameGap::RowReplaced,
-            TargetFrameGap::FrameNotRecorded,
-            TargetFrameGap::FrameNotCited,
-            TargetFrameGap::RecordedBeforeAgreedEvidence,
-            TargetFrameGap::CitedByOnlyOnePass,
-        ];
-        let msgs: Vec<String> = gaps
+        let msgs: Vec<String> = TargetFrameGap::ALL
             .iter()
             .map(|why| RefusalReason::UnattendedTargetHasNoCitedFrame { why: *why }.message())
             .collect();
@@ -1068,9 +1150,9 @@ mod tests {
                 }
             }
         }
-        let one_pass = &msgs[6];
-        let uncited = &msgs[4];
-        let too_old = &msgs[5];
+        let one_pass = &msgs[TargetFrameGap::CitedByOnlyOnePass.index()];
+        let uncited = &msgs[TargetFrameGap::FrameNotCited.index()];
+        let too_old = &msgs[TargetFrameGap::RecordedBeforeAgreedEvidence.index()];
         assert!(
             one_pass.contains("只有一個 pass 指過"),
             "聯集裡有這張畫面時不能說沒有引用：{one_pass}"
@@ -1094,26 +1176,16 @@ mod tests {
     /// 兩句對「這張畫面有沒有被引用」不准講相反的話。
     #[test]
     fn replay_and_ops_messages_do_not_disagree_on_whether_the_target_frame_was_cited() {
-        let cases = [
-            (TargetFrameGap::NoTargetRecorded, None, None, None),
-            (TargetFrameGap::Forgotten, Some(7), None, None),
-            (TargetFrameGap::RowReplaced, Some(7), None, None),
-            (
-                TargetFrameGap::FrameNotRecorded,
-                Some(7),
-                None,
-                Some("來自剪貼簿"),
-            ),
-            (TargetFrameGap::FrameNotCited, Some(7), Some(11), None),
-            (
-                TargetFrameGap::RecordedBeforeAgreedEvidence,
-                Some(7),
-                Some(11),
-                None,
-            ),
-            (TargetFrameGap::CitedByOnlyOnePass, Some(7), Some(11), None),
-        ];
-        for (why, fact, frame, origin) in cases {
+        // match 沒有 `_`：加一種就非補這一臂不可。
+        for why in TargetFrameGap::ALL {
+            let (fact, frame, origin): (Option<i64>, Option<i64>, Option<&str>) = match why {
+                TargetFrameGap::NoTargetRecorded => (None, None, None),
+                TargetFrameGap::Forgotten | TargetFrameGap::RowReplaced => (Some(7), None, None),
+                TargetFrameGap::FrameNotRecorded => (Some(7), None, Some("來自剪貼簿")),
+                TargetFrameGap::FrameNotCited
+                | TargetFrameGap::RecordedBeforeAgreedEvidence
+                | TargetFrameGap::CitedByOnlyOnePass => (Some(7), Some(11), None),
+            };
             let replay = RefusalReason::UnattendedTargetHasNoCitedFrame { why }.message();
             let ops = why.unattended_message(fact, frame, origin);
             assert_eq!(
@@ -1168,8 +1240,18 @@ mod tests {
             why: TargetFrameGap::Forgotten,
         };
         assert_eq!(no_frame.bucket(), RefusalBucket::TargetHasNoFrameToCheck);
-        assert_eq!(no_target.bucket(), RefusalBucket::TargetHasNoFrameToCheck);
+        assert_eq!(no_target.bucket(), RefusalBucket::NoTargetRecorded);
         assert_eq!(forgotten.bucket(), RefusalBucket::TargetNoLongerThere);
+        assert!(
+            no_frame.message().contains("畫面出處"),
+            "有目標、缺畫面的那一類要講畫面：{}",
+            no_frame.message()
+        );
+        assert!(
+            !no_target.message().contains("畫面出處"),
+            "沒有目標不是「有目標、缺畫面」：{}",
+            no_target.message()
+        );
         assert_ne!(
             no_frame.bucket(),
             uncited.bucket(),

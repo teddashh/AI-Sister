@@ -532,6 +532,7 @@ mod tests {
             budget_limit: 0,
             detail: "",
             notes: "",
+            answers_got: None,
         })
         .unwrap()
     }
