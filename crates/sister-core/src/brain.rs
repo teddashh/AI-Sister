@@ -1448,11 +1448,16 @@ mod tests {
         c.grant(Sheet::CloudReading, 1);
         let permit = c.cloud_permit().expect("signed");
         let json = r#"{"commitments":[]}"#;
+        // 只斷言「沒回答」時，斷管和非零退出都會讓測試綠；要釘住
+        // 真正的擋下機制，就要先讓子行程讀到 EOF，不跟 stdin 寫入擲骰子。
         let out = spawn_cli(
             permit,
             "一張塞得進管子的審閱卡",
             "sh",
-            &["-c".into(), format!("printf '%s' '{json}'; exit 7")],
+            &[
+                "-c".into(),
+                format!("cat >/dev/null; printf '%s' '{json}'; exit 7"),
+            ],
         );
 
         assert!(out.spawn_error.is_none(), "這條不能靠斷管擋：{out:?}");
@@ -1492,7 +1497,10 @@ mod tests {
             permit,
             &payload,
             "sh",
-            &["-c".into(), format!("printf '%s' '{json}'; exit 1")],
+            &[
+                "-c".into(),
+                format!("cat >/dev/null; printf '%s' '{json}'; exit 1"),
+            ],
         );
 
         // 它確實印了一份看起來可用的 JSON——這正是危險的地方。

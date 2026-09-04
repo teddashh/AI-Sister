@@ -1565,6 +1565,13 @@ fn empty_spawn(msg: &str) -> SpawnOutcome {
     }
 }
 
+fn unanswered_cli_error(exit_code: Option<i32>) -> String {
+    match exit_code {
+        Some(code) => format!("CLI 以退出碼 {code} 結束，沒有回答"),
+        None => "CLI 被中止了，沒有回答".into(),
+    }
+}
+
 /// **這裡刻意收不到 payload。**
 ///
 /// `chars_sent` 要記的是「真的離開這台機器的字數」，而那件事只有
@@ -1592,7 +1599,7 @@ fn log_outbound(
                 spawn
                     .spawn_error
                     .clone()
-                    .or_else(|| Some(format!("CLI 退出碼不是 0：{:?}", spawn.exit_code))),
+                    .or_else(|| Some(unanswered_cli_error(spawn.exit_code))),
             )
         }
     } else if parse_pass(&spawn.stdout).is_none() {
@@ -5348,6 +5355,21 @@ mod tests {
     }
 
     #[test]
+    fn outbound_error_explains_both_exit_code_shapes_without_rust_debug_syntax() {
+        let nonzero = unanswered_cli_error(Some(7));
+        let interrupted = unanswered_cli_error(None);
+
+        assert_eq!(nonzero, "CLI 以退出碼 7 結束，沒有回答");
+        assert_eq!(interrupted, "CLI 被中止了，沒有回答");
+        for shown in [&nonzero, &interrupted] {
+            assert!(
+                !shown.contains("Some(") && !shown.contains("None"),
+                "使用者看得到的外送錯誤不可以漏出 Rust Option debug 形狀：{shown}"
+            );
+        }
+    }
+
+    #[test]
     fn a_started_cli_that_exits_is_not_called_could_not_start() {
         let failed = SpawnOutcome {
             payload_chars_written: 0,
@@ -5719,6 +5741,60 @@ mod tests {
                 parse_usable_pass(&spawn).is_none(),
                 "{name}：這一輪沒有問到答案，stdout 裡那份 JSON 不是這一題的\
                  回覆，不可以拿去寫承諾"
+            );
+        }
+    }
+    /// **那句話要從真的出口出來，不是從 helper 出來。**
+    ///
+    /// round 12 加了 `unanswered_cli_error()`，也加了一條測試——可是那條測試
+    /// 直接呼叫 helper 比字串。我實測過：把 `log_outbound()` 裡那句
+    /// `.or_else(|| Some(unanswered_cli_error(spawn.exit_code)))` **整個刪掉**
+    /// （＝這一輪對使用者的改善完全沒接上去），`cargo test --workspace`
+    /// **19 個 binary 全綠**。
+    ///
+    /// 這條走真的路：真的開一支 `sh`、真的讓它非零退出、真的讓 reviewer 把
+    /// 那一列寫進 `brain_outbound`，然後讀**存進去的那個欄位**——也就是
+    /// `sister brain log` 原文印給使用者看的那一格（`ops.rs` 那個
+    /// `if let Some(err) = &row.error { println!("    {err}") }`）。
+    #[test]
+    fn ted_r12_the_outbound_row_a_user_reads_says_it_in_words() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_260_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+
+        // 讀完 stdin 再非零退出：不讀的話寫入端會撞上斷管，那是**另一個**
+        // 成因（`spawn_error` 會被設起來），這條就測不到退出碼那一臂了。
+        let result = run_diverge(
+            &mut db,
+            "sh".into(),
+            vec!["-c".into(), "cat >/dev/null; exit 7".into()],
+            ts,
+        );
+        assert!(result.skip.is_none(), "{:?}", result.skip);
+        assert!(result.calls_used > 0, "這一輪要真的叫過 CLI");
+
+        let rows = db.list_brain_outbound(10).expect("outbound log");
+        assert!(!rows.is_empty(), "外送紀錄是空的，這一輪根本沒送");
+        for row in &rows {
+            let shown = row
+                .error
+                .as_deref()
+                .unwrap_or_else(|| panic!("這一列沒有錯誤訊息，使用者只會看到一個結局：{row:?}"));
+            assert!(
+                !shown.contains("Some(") && !shown.contains("None"),
+                "使用者在 `sister brain log` 看到的是 Rust 的 Option debug：{shown}"
+            );
+            assert!(
+                shown.contains('7'),
+                "沒有回答的原因是退出碼 7，那個數字要講出來：{shown}"
             );
         }
     }
