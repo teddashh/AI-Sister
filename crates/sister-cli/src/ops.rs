@@ -1741,6 +1741,7 @@ pub mod review {
                 reviewer::format_reviewer_visibility(
                     &input.db.latest_dual_pass_divergences()?,
                     &input.db.latest_reviewer_refusals()?,
+                    &input.db.latest_reviewer_notes()?,
                     &input.db.entity_memory()?,
                 )
             );
@@ -1758,10 +1759,11 @@ pub mod review {
         );
         let divergences = input.db.latest_dual_pass_divergences()?;
         let refusals = input.db.latest_reviewer_refusals()?;
+        let notes = input.db.latest_reviewer_notes()?;
         let entities = input.db.entity_memory()?;
         print!(
             "{}",
-            reviewer::format_reviewer_visibility(&divergences, &refusals, &entities)
+            reviewer::format_reviewer_visibility(&divergences, &refusals, &notes, &entities)
         );
         Ok(())
     }
@@ -2016,6 +2018,10 @@ pub mod act {
         declined: u32,
         blocked: u32,
         target_not_cited: u32,
+        target_no_frame: u32,
+        no_target: u32,
+        target_gone: u32,
+        recorded_before_this_check: u32,
         needs_press: u32,
         never_inherits: u32,
         mismatched: u32,
@@ -2033,6 +2039,12 @@ pub mod act {
                 sister_hands::RefusalBucket::Pulled => self.pulled += 1,
                 sister_hands::RefusalBucket::OutsideGrant => self.blocked += 1,
                 sister_hands::RefusalBucket::TargetNotOnACitedScreen => self.target_not_cited += 1,
+                sister_hands::RefusalBucket::TargetHasNoFrameToCheck => self.target_no_frame += 1,
+                sister_hands::RefusalBucket::NoTargetRecorded => self.no_target += 1,
+                sister_hands::RefusalBucket::TargetNoLongerThere => self.target_gone += 1,
+                sister_hands::RefusalBucket::RecordedBeforeThisCheck => {
+                    self.recorded_before_this_check += 1
+                }
                 sister_hands::RefusalBucket::NeedsALivePressThisRun => self.needs_press += 1,
                 sister_hands::RefusalBucket::NeverInheritsTaskGrant => self.never_inherits += 1,
                 sister_hands::RefusalBucket::ShownStepMismatch => self.mismatched += 1,
@@ -2040,7 +2052,7 @@ pub mod act {
             }
         }
 
-        /// 收尾那一行的後半段。**每一格只在不是零的時候出現**——六格永遠並排
+        /// 收尾那一行的後半段。**每一格只在不是零的時候出現**——這些格永遠並排
         /// 的話，那句話會長到沒有人讀，而真正該跳出來的那一格（`mismatched`）
         /// 就淹在裡面了。
         /// 「授權擋掉」**以外**那幾種拒絕，零的不印。
@@ -2057,8 +2069,38 @@ pub mod act {
             }
             if self.target_not_cited > 0 {
                 out.push_str(&format!(
-                    "，{} 步的目標沒有被引用的畫面（放寬授權沒有用；請在終端機裡自己看過再按）",
+                    "，{} 步的目標沒有兩個 pass 都指過的畫面（放寬授權沒有用；請在終端機裡自己看過再按）",
                     self.target_not_cited
+                ));
+            }
+            if self.target_no_frame > 0 {
+                out.push_str(&format!(
+                    "，{} 步的目標沒有畫面出處（放寬授權沒有用；請在終端機裡自己看過再按）",
+                    self.target_no_frame
+                ));
+            }
+            if self.no_target > 0 {
+                // 這道拒絕只掛在 `if opts.unattended` 那一支；不加
+                // `--unattended` 跑的話這一步照樣會被端出來問。所以「請在
+                // 終端機裡自己看過再按」對它成立。隔壁
+                // `RecordedBeforeAgreedEvidence` 故意不講這句：那一格是
+                // 「這筆太舊，問不出兩個 pass 同不同意」，回終端機再按一次
+                // 補不出那份交集。
+                out.push_str(&format!(
+                    "，{} 步沒有可核對的下一步目標 fact 出處（放寬授權沒有用；請在終端機裡自己看過再按）",
+                    self.no_target
+                ));
+            }
+            if self.target_gone > 0 {
+                out.push_str(&format!(
+                    "，{} 步的目標已經不在了（忘掉了、過了保留期、或那一列換成別的內容；放寬授權沒有用）",
+                    self.target_gone
+                ));
+            }
+            if self.recorded_before_this_check > 0 {
+                out.push_str(&format!(
+                    "，{} 步的承諾記在加這道檢查之前，問不出兩個 pass 同不同意這張畫面（放寬授權沒有用）",
+                    self.recorded_before_this_check
                 ));
             }
             if self.needs_press > 0 {
@@ -2168,50 +2210,46 @@ pub mod act {
         target: Option<(i64, &str)>,
     ) -> Result<Option<(String, sister_hands::TargetFrameGap)>> {
         let Some((fact_id, expected_raw)) = target else {
-            return Ok(Some((
-                "無人值守拒絕：這筆承諾沒有記下一步目標的 fact 出處。".into(),
-                sister_hands::TargetFrameGap::NoTargetRecorded,
-            )));
+            let why = sister_hands::TargetFrameGap::NoTargetRecorded;
+            return Ok(Some((why.unattended_message(None, None, None), why)));
         };
         let frame_id = match source.frame_for_target_fact(fact_id, expected_raw)? {
             TargetFrame::Forgotten => {
+                let why = sister_hands::TargetFrameGap::Forgotten;
                 return Ok(Some((
-                    format!("無人值守拒絕：下一步目標 fact:{fact_id} 已被忘掉、或過了保留期。"),
-                    sister_hands::TargetFrameGap::Forgotten,
+                    why.unattended_message(Some(fact_id), None, None),
+                    why,
                 )));
             }
             TargetFrame::RowReplaced => {
+                let why = sister_hands::TargetFrameGap::RowReplaced;
                 return Ok(Some((
-                    format!("無人值守拒絕：下一步目標 fact:{fact_id} 那一列已經換成別的內容。"),
-                    sister_hands::TargetFrameGap::RowReplaced,
+                    why.unattended_message(Some(fact_id), None, None),
+                    why,
                 )));
             }
             TargetFrame::FrameNotRecorded(origin) => {
                 // 這裡收的是 `FramelessOrigin`，不是 `FactOrigin`：後者的 `Screen`
                 // 填進下面那句話會變成「來自畫面，沒有畫面出處」。見型別上的註解。
                 let origin_text = match origin {
-                    sister_core::db::FramelessOrigin::WindowTitle => "來自視窗標題".to_owned(),
-                    sister_core::db::FramelessOrigin::Clipboard => "來自剪貼簿".to_owned(),
+                    sister_core::db::FramelessOrigin::WindowTitle => "來自視窗標題",
+                    sister_core::db::FramelessOrigin::Clipboard => "來自剪貼簿",
                     sister_core::db::FramelessOrigin::ScreenTextWithoutFrame => {
-                        "記著是從畫面讀來的，卻沒有記是哪一張".to_owned()
+                        "記著是從畫面讀來的，卻沒有記是哪一張"
                     }
-                    sister_core::db::FramelessOrigin::Unknown => "來源沒有記清楚".to_owned(),
+                    sister_core::db::FramelessOrigin::Unknown => "來源沒有記清楚",
                 };
+                let why = sister_hands::TargetFrameGap::FrameNotRecorded;
                 return Ok(Some((
-                    format!(
-                        "無人值守拒絕：下一步目標 fact:{fact_id} {origin_text}，沒有畫面出處，所以無人值守永遠不會做它。要做請在終端機裡自己看過再按。"
-                    ),
-                    sister_hands::TargetFrameGap::FrameNotRecorded,
+                    why.unattended_message(Some(fact_id), None, Some(origin_text)),
+                    why,
                 )));
             }
             TargetFrame::Known(id) => id,
         };
         let Some(agreed_json) = agreed_evidence_json else {
-            return Ok(Some((
-                "無人值守拒絕：這筆承諾記在加這道檢查之前，問不出兩個 pass 同不同意這張畫面。"
-                    .into(),
-                sister_hands::TargetFrameGap::RecordedBeforeAgreedEvidence,
-            )));
+            let why = sister_hands::TargetFrameGap::RecordedBeforeAgreedEvidence;
+            return Ok(Some((why.unattended_message(None, None, None), why)));
         };
         let agreed_refs: Vec<String> = serde_json::from_str(agreed_json).with_context(|| {
             format!("兩個 pass 都指過的證據清單不是 JSON 字串陣列：{agreed_json}")
@@ -2223,11 +2261,10 @@ pub mod act {
         let union_refs: Vec<String> = serde_json::from_str(union_evidence_json)
             .with_context(|| format!("證據清單不是 JSON 字串陣列：{union_evidence_json}"))?;
         if union_refs.iter().any(|reference| reference == &target_ref) {
+            let why = sister_hands::TargetFrameGap::CitedByOnlyOnePass;
             Ok(Some((
-                format!(
-                    "無人值守拒絕：只有一個 pass 指過下一步目標 fact:{fact_id} 的畫面 frame:{frame_id}。"
-                ),
-                sister_hands::TargetFrameGap::CitedByOnlyOnePass,
+                why.unattended_message(Some(fact_id), Some(frame_id), None),
+                why,
             )))
         } else {
             // **這裡不能再分出一句「兩個 pass 一張畫面都沒有共同指過」。**
@@ -2241,11 +2278,10 @@ pub mod act {
             // 實際發生的是這個目標的來源畫面從頭到尾沒被當成證據——那是 #49 那道
             // 檢查在擋，該查的是那筆 fact 哪來的。
             // 「只有一個 pass 指過」才是共識問題，它在上面那一臂。
+            let why = sister_hands::TargetFrameGap::FrameNotCited;
             Ok(Some((
-                format!(
-                    "無人值守拒絕：承諾沒有引用下一步目標 fact:{fact_id} 的畫面 frame:{frame_id}。"
-                ),
-                sister_hands::TargetFrameGap::FrameNotCited,
+                why.unattended_message(Some(fact_id), Some(frame_id), None),
+                why,
             )))
         }
     }
@@ -3492,6 +3528,343 @@ pub mod act {
                 "{uncited_msg}"
             );
             assert_ne!(cited_msg, uncited_msg);
+        }
+
+        #[test]
+        fn ops_and_replay_do_not_disagree_on_whether_the_target_frame_was_cited() {
+            struct Case {
+                target: Option<(i64, &'static str)>,
+                agreed: Option<&'static str>,
+                union: &'static str,
+                frame: TargetFrame,
+                expected_why: sister_hands::TargetFrameGap,
+            }
+            // match 沒有 `_`：加一種 `TargetFrameGap` 就非補這一臂不可。
+            fn case_for(why: sister_hands::TargetFrameGap) -> Case {
+                match why {
+                    sister_hands::TargetFrameGap::NoTargetRecorded => Case {
+                        target: None,
+                        agreed: Some("[]"),
+                        union: "[]",
+                        frame: TargetFrame::Forgotten,
+                        expected_why: why,
+                    },
+                    sister_hands::TargetFrameGap::Forgotten => Case {
+                        target: Some((1, "https://example.com")),
+                        agreed: Some("[]"),
+                        union: "[]",
+                        frame: TargetFrame::Forgotten,
+                        expected_why: why,
+                    },
+                    sister_hands::TargetFrameGap::RowReplaced => Case {
+                        target: Some((1, "https://example.com")),
+                        agreed: Some("[]"),
+                        union: "[]",
+                        frame: TargetFrame::RowReplaced,
+                        expected_why: why,
+                    },
+                    sister_hands::TargetFrameGap::FrameNotRecorded => Case {
+                        target: Some((1, "https://example.com")),
+                        agreed: Some("[]"),
+                        union: "[]",
+                        frame: TargetFrame::FrameNotRecorded(
+                            sister_core::db::FramelessOrigin::Clipboard,
+                        ),
+                        expected_why: why,
+                    },
+                    sister_hands::TargetFrameGap::RecordedBeforeAgreedEvidence => Case {
+                        target: Some((1, "https://example.com")),
+                        agreed: None,
+                        union: r#"["frame:10"]"#,
+                        frame: TargetFrame::Known(10),
+                        expected_why: why,
+                    },
+                    sister_hands::TargetFrameGap::CitedByOnlyOnePass => Case {
+                        target: Some((1, "https://example.com")),
+                        agreed: Some("[]"),
+                        union: r#"["frame:10"]"#,
+                        frame: TargetFrame::Known(10),
+                        expected_why: why,
+                    },
+                    sister_hands::TargetFrameGap::FrameNotCited => Case {
+                        target: Some((1, "https://example.com")),
+                        agreed: Some("[]"),
+                        union: r#"["frame:1"]"#,
+                        frame: TargetFrame::Known(10),
+                        expected_why: why,
+                    },
+                }
+            }
+            for why in sister_hands::TargetFrameGap::ALL {
+                let case = case_for(why);
+                let source = Source {
+                    target_frames: [(1, case.frame)].into_iter().collect(),
+                    ..Source::default()
+                };
+                let (ops_msg, why) =
+                    unattended_target_frame_refusal(&source, case.agreed, case.union, case.target)
+                        .unwrap()
+                        .expect("refused");
+                assert_eq!(why, case.expected_why, "{ops_msg}");
+                let replay = RefusalReason::UnattendedTargetHasNoCitedFrame { why }.message();
+                let uncited = |s: &str| s.contains("承諾沒有引用");
+                let one_pass = |s: &str| s.contains("只有一個 pass 指過");
+                assert_eq!(
+                    uncited(&ops_msg),
+                    uncited(&replay),
+                    "ops 與 replay 對「有沒有被引用」講相反：\nops={ops_msg}\nreplay={replay}"
+                );
+                assert_eq!(
+                    one_pass(&ops_msg),
+                    one_pass(&replay),
+                    "ops 與 replay 對「只有一個 pass」講相反：\nops={ops_msg}\nreplay={replay}"
+                );
+            }
+        }
+
+        /// 「根本沒有目標」和「有目標、但那張畫面沒錄到」不是同一件事，
+        /// 收尾那句不可以用同一句話報這兩種。
+        ///
+        /// `NoTargetRecorded` 有兩種輸入。第一種到得了：承諾沒記
+        /// `allowed_next_step_fact`（`migrate_014` 沒 backfill；見
+        /// `schema_13_commitment_is_refused_with_missing_target_provenance`）。
+        /// 第二種——切換視窗那一類動作**照設計就沒有**可比對的目標字串，即使
+        /// fact 有值——目前找不到寫入端，這一格是 fail-closed 的防禦。
+        /// 逐步那一行講的是「這筆承諾沒有記下一步目標的 fact 出處」，收尾那一
+        /// 行卻說「目標沒有畫面出處」——一個說沒有目標，一個說有目標缺畫面。
+        /// 使用者會跑去查截圖保留設定。
+        ///
+        /// 我在看修法之前寫的，不規定新句子長什麼樣，只要求：那句話不可以
+        /// 把問題說成缺畫面，而且不可以跟 `FrameNotRecorded` 共用同一句。
+        #[test]
+        fn ted_no_target_recorded_is_not_the_same_sentence_as_a_missing_screen() {
+            use sister_hands::TargetFrameGap as G;
+
+            let clause = |why: G| {
+                let mut tally = Tally::default();
+                tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame { why });
+                tally.refusal_clauses()
+            };
+
+            let no_target = clause(G::NoTargetRecorded);
+            assert!(
+                !no_target.contains("畫面出處"),
+                "根本沒有目標的那一類，問題不是缺畫面：{no_target}"
+            );
+            assert_ne!(
+                no_target,
+                clause(G::FrameNotRecorded),
+                "「沒有目標」和「有目標、畫面沒錄到」不可以共用同一句"
+            );
+            // 有錄到目標、只是那張畫面沒留下來的那一類，仍然要講畫面。
+            assert!(
+                clause(G::FrameNotRecorded).contains("畫面"),
+                "畫面沒錄到的那一類還是要講畫面：{}",
+                clause(G::FrameNotRecorded)
+            );
+        }
+
+        /// 收尾那一格和逐步那一行，講的必須是同一種失敗。
+        ///
+        /// 走到 `NoTargetRecorded` 的那一步，畫面上剛印過「步驟：開啟 …」——
+        /// 它**有**下一步。缺的是那個下一步的 fact 出處。逐步那一行講對了
+        /// （「這筆承諾沒有記下一步目標的 fact 出處」），round 7 的收尾那一格
+        /// 把「的 fact 出處」拿掉，變成「N 步沒有記下一步目標」。
+        ///
+        /// 而且同一支 CLI 裡「沒有下一步」已經是另一個計數器的名字
+        /// （`without_next_step`，文案「其餘 N 張沒有下一步」），數的是**沒有**
+        /// 下一步的卡片。這兩個計數器的**名字**會互相混淆——那是留著這條測試
+        /// 的理由；它們不會在同一次跑動裡同時印出來（「其餘 N 張沒有下一步」
+        /// 只在 `presented == 0` 時印，有拒絕 ⇒ `presented ≥ 1`）。
+        ///
+        /// 我在看修法之前寫的，不規定新句子長什麼樣，只要求收尾和逐步對同一
+        /// 步指的是同一件缺的東西。
+        #[test]
+        fn ted_the_no_target_clause_must_name_what_the_step_line_says_is_missing() {
+            use sister_hands::TargetFrameGap as G;
+
+            let mut tally = Tally::default();
+            tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame {
+                why: G::NoTargetRecorded,
+            });
+            let clause = tally.refusal_clauses();
+
+            // 逐步那一行是同一次拒絕在畫面上的另一半。
+            let step_line = G::NoTargetRecorded.unattended_message(None, None, None);
+            assert!(
+                step_line.contains("出處"),
+                "前提變了：逐步那一行不再講「出處」，這條測試要重寫：{step_line}"
+            );
+
+            assert!(
+                clause.contains("1 步"),
+                "這一格還是要數得出來（不可以靠刪掉整句來過）：{clause}"
+            );
+            assert!(
+                clause.contains("fact 出處"),
+                "逐步說缺的是「{step_line}」，收尾說「{clause}」——同一步，兩種失敗"
+            );
+        }
+
+        #[test]
+        fn target_not_cited_clause_is_true_for_one_pass_and_for_uncited() {
+            let mut tally = Tally::default();
+            tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame {
+                why: sister_hands::TargetFrameGap::CitedByOnlyOnePass,
+            });
+            tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame {
+                why: sister_hands::TargetFrameGap::FrameNotCited,
+            });
+            assert_eq!(tally.target_not_cited, 2);
+            assert_eq!(tally.target_no_frame, 0);
+            assert_eq!(tally.target_gone, 0);
+            assert_eq!(tally.recorded_before_this_check, 0);
+            let clauses = tally.refusal_clauses();
+            assert!(
+                !clauses.contains("沒有引用"),
+                "只有一個 pass 指過時畫面是有被引用的：{clauses}"
+            );
+            assert!(clauses.contains("沒有兩個 pass 都指過的畫面"), "{clauses}");
+            assert!(clauses.contains("請在終端機裡自己看過再按"), "{clauses}");
+        }
+
+        /// 七種 `TargetFrameGap` 各餵一次計數器，收尾那句對每一種都要成立。
+        /// 數字要等於餵進去的筆數；「放寬授權沒有用」是把這幾格拆開來的理由。
+        /// `FrameNotRecorded` 併回「兩個 pass 都指過」那一格時，這一條要紅。
+        /// `NoTargetRecorded` 併進「沒有畫面出處」那一格時，這一條要紅。
+        ///
+        /// `closing_clause_case` 的 match 沒有 `_`：漏一種編不過。
+        #[test]
+        fn each_target_frame_gap_gets_a_closing_clause_that_is_true_of_it() {
+            use sister_hands::TargetFrameGap;
+            struct Case {
+                why: TargetFrameGap,
+                count_of: fn(&Tally) -> u32,
+                must: &'static str,
+                must_not: &'static [&'static str],
+            }
+            fn closing_clause_case(why: TargetFrameGap) -> Case {
+                match why {
+                    TargetFrameGap::CitedByOnlyOnePass => Case {
+                        why,
+                        count_of: |t| t.target_not_cited,
+                        must: "1 步的目標沒有兩個 pass 都指過的畫面（放寬授權沒有用；請在終端機裡自己看過再按）",
+                        must_not: &["沒有畫面出處", "已經不在了", "沒有記下一步目標"],
+                    },
+                    TargetFrameGap::FrameNotCited => Case {
+                        why,
+                        count_of: |t| t.target_not_cited,
+                        must: "1 步的目標沒有兩個 pass 都指過的畫面（放寬授權沒有用；請在終端機裡自己看過再按）",
+                        must_not: &["沒有畫面出處", "已經不在了", "沒有記下一步目標"],
+                    },
+                    TargetFrameGap::FrameNotRecorded => Case {
+                        why,
+                        count_of: |t| t.target_no_frame,
+                        must: "1 步的目標沒有畫面出處（放寬授權沒有用；請在終端機裡自己看過再按）",
+                        must_not: &[
+                            "兩個 pass 都指過",
+                            "已經不在了",
+                            "故障",
+                            "照設計",
+                            "沒有記下一步目標",
+                        ],
+                    },
+                    TargetFrameGap::NoTargetRecorded => Case {
+                        why,
+                        count_of: |t| t.no_target,
+                        must: "1 步沒有可核對的下一步目標 fact 出處（放寬授權沒有用；請在終端機裡自己看過再按）",
+                        must_not: &[
+                            "畫面出處",
+                            "兩個 pass 都指過",
+                            "已經不在了",
+                            "故障",
+                            "照設計",
+                        ],
+                    },
+                    TargetFrameGap::Forgotten => Case {
+                        why,
+                        count_of: |t| t.target_gone,
+                        must: "1 步的目標已經不在了（忘掉了、過了保留期、或那一列換成別的內容；放寬授權沒有用）",
+                        must_not: &["兩個 pass 都指過", "沒有畫面出處", "沒有記下一步目標"],
+                    },
+                    TargetFrameGap::RowReplaced => Case {
+                        why,
+                        count_of: |t| t.target_gone,
+                        must: "1 步的目標已經不在了（忘掉了、過了保留期、或那一列換成別的內容；放寬授權沒有用）",
+                        must_not: &["兩個 pass 都指過", "沒有畫面出處", "沒有記下一步目標"],
+                    },
+                    TargetFrameGap::RecordedBeforeAgreedEvidence => Case {
+                        why,
+                        count_of: |t| t.recorded_before_this_check,
+                        must: "1 步的承諾記在加這道檢查之前，問不出兩個 pass 同不同意這張畫面（放寬授權沒有用）",
+                        must_not: &[
+                            "請在終端機裡自己看過再按",
+                            "沒有畫面出處",
+                            "沒有記下一步目標",
+                            "已經不在了",
+                        ],
+                    },
+                }
+            }
+            // ALL 和 COUNT / index() 是同一個 macro 從同一份 variant 展開的，
+            // 比它們相等或走 seen[] 是 x == x。真正的牙齒是上面
+            // `closing_clause_case` 沒有 `_`，以及下面手寫的整句。
+            for why in TargetFrameGap::ALL {
+                let Case {
+                    why,
+                    count_of,
+                    must,
+                    must_not,
+                } = closing_clause_case(why);
+                let mut tally = Tally::default();
+                tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame { why });
+                assert_eq!(count_of(&tally), 1, "{why:?} 計數必須等於餵進去的筆數");
+                let clauses = tally.refusal_clauses();
+                assert!(
+                    clauses.contains(must),
+                    "{why:?} 的收尾必須含整句（含數字和行動）：{clauses}"
+                );
+                for needle in must_not {
+                    assert!(
+                        !clauses.contains(needle),
+                        "{why:?} 的收尾不准含「{needle}」：{clauses}"
+                    );
+                }
+            }
+        }
+
+        /// 這道拒絕只掛在 `if opts.unattended` 那一支；不加 `--unattended`
+        /// 跑的話這一步照樣會被端出來問。所以「請在終端機裡自己看過再按」
+        /// 對它成立。隔壁 `RecordedBeforeAgreedEvidence` 是「這筆太舊，問不出
+        /// 兩個 pass 同不同意」——回終端機再按一次補不出那份交集，所以故意
+        /// 不講這句（見上一條）。
+        #[test]
+        fn no_target_recorded_is_told_to_look_at_the_terminal() {
+            let mut tally = Tally::default();
+            tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame {
+                why: sister_hands::TargetFrameGap::NoTargetRecorded,
+            });
+            let clauses = tally.refusal_clauses();
+            assert!(
+                clauses.contains("請在終端機裡自己看過再按"),
+                "沒有可核對的目標時，下一步是回終端機自己看過再按：{clauses}"
+            );
+        }
+
+        #[test]
+        fn recorded_before_this_check_is_not_told_to_go_look_at_the_terminal() {
+            let mut tally = Tally::default();
+            tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame {
+                why: sister_hands::TargetFrameGap::RecordedBeforeAgreedEvidence,
+            });
+            assert_eq!(tally.target_not_cited, 0);
+            assert_eq!(tally.recorded_before_this_check, 1);
+            let clauses = tally.refusal_clauses();
+            assert!(clauses.contains("記在加這道檢查之前"), "{clauses}");
+            assert!(
+                !clauses.contains("請在終端機裡自己看過再按"),
+                "太舊的承諾不是叫他回終端機再按一次：{clauses}"
+            );
         }
 
         fn open_url(url: &str) -> String {

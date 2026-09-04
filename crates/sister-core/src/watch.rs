@@ -717,7 +717,9 @@ pub fn read_verdict(stdout: &str) -> Verdict {
 ///
 /// **非零離開碼不是「沒問到」。** 這裡一度多寫了一條
 /// `exit_code != 0 → SpawnFailed`，而 `brain::classify` 沒有那一條：它只看
-/// `spawn_error`（＝行程根本沒起來），非零離開只是解析失敗時附上的線索。
+/// `spawn_error`（寫 stdin 失敗、逾時以外的對話失敗、或真的叫不起），非零
+/// 離開只是解析失敗時附上的線索。`spawn_error` 不是「行程根本沒起來」——
+/// 那件事看 [`crate::brain::ProcessStart`]。
 /// 真實的 CLI 常常一邊在 stderr 印警告、一邊回一個好答案然後 exit 1——
 /// 那一條會把已經到手的「等到了」丟掉，還在 `brain log` 上把同一件事記成
 /// 和 `interpret` 不同的分類。
@@ -777,6 +779,7 @@ fn head(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brain::ProcessStart;
     use crate::model::SourceKind;
 
     fn hit(text: String) -> SearchHit {
@@ -803,6 +806,7 @@ mod tests {
             timed_out: false,
             spawn_error: None,
             exit_code,
+            process_start: ProcessStart::Started,
         }
     }
 

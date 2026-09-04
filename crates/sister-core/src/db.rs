@@ -34,7 +34,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 15;
+pub const SCHEMA_VERSION: i32 = 17;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -592,6 +592,60 @@ fn migrate_015(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     // 不加 DEFAULT：既有列維持 NULL。DEFAULT '[]' 會把「問不出來」和
     // 「兩個 pass 一張畫面都沒有共同指過」壓成同一種答案。
     add_column_if_missing(tx, "commitments", "agreed_evidence_json", "TEXT")
+}
+
+fn migrate_016(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    // 說明文字，不是證據。舊版 `detail` 刻意裝兩種東西：真的拒絕，以及
+    // `missing_segment_line`（「這張卡片指的那一段…」）。新版 notes 才是
+    // 說明；只把既有列的 notes 補成空字串的話，舊列 `detail` 裡那些說明
+    // 會印在「問過模型的審閱拒絕掉的下一步」底下。
+    add_column_if_missing(tx, "reviewer_run", "notes", "TEXT NOT NULL DEFAULT ''")?;
+    split_legacy_missing_segment_notes(tx)
+}
+
+/// 舊 `detail` 裡以 [`MISSING_SEGMENT_NOTE_HEAD`] 開頭的行，搬到 `notes`。
+///
+/// 這是白名單，不是「看起來像說明」。拒絕全部以「拒絕 allowed_next_step：」
+/// 開頭，對不上這個頭。模型寫的下一步不會進 `detail`。
+fn split_legacy_missing_segment_notes(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let mut stmt = tx.prepare("SELECT id, detail, notes FROM reviewer_run")?;
+    let rows: Vec<(i64, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    for (id, detail, existing_notes) in rows {
+        let mut notes: Vec<String> = nonempty_lines(&existing_notes);
+        let mut kept = Vec::new();
+        let mut moved = false;
+        for line in detail.lines() {
+            if line.starts_with(MISSING_SEGMENT_NOTE_HEAD) {
+                if !notes.iter().any(|n| n == line) {
+                    notes.push(line.to_string());
+                }
+                moved = true;
+            } else if !line.is_empty() {
+                kept.push(line);
+            }
+        }
+        if !moved {
+            continue;
+        }
+        tx.execute(
+            "UPDATE reviewer_run SET detail = ?1, notes = ?2 WHERE id = ?3",
+            params![kept.join("\n"), notes.join("\n"), id],
+        )?;
+    }
+    Ok(())
+}
+
+fn migrate_017(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    // 幾次真的拿到模型的答案。和 `calls_used`（試了幾次／扣了幾次額度）
+    // 分開：叫不起 CLI 的那一輪 `calls_used = 2`、`answers_got = 0`。
+    //
+    // **不加 DEFAULT 0。** 既有列是「當時沒記這件事」，不是「記了、拿到 0
+    // 次」。NULL 和 0 不准長得一樣——舊列維持 NULL，讀取端把它們當「問不出
+    // 來、沿用 `calls_used > 0` 的舊判準」；新列寫 0 才是「量過、零次」。
+    add_column_if_missing(tx, "reviewer_run", "answers_got", "INTEGER")
 }
 
 fn add_column_if_missing(
@@ -1260,6 +1314,8 @@ impl Db {
             13 => tx.execute_batch(MIGRATION_013)?,
             14 => migrate_014(&tx)?,
             15 => migrate_015(&tx)?,
+            16 => migrate_016(&tx)?,
+            17 => migrate_017(&tx)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -3456,9 +3512,13 @@ impl Db {
 
     /// 這張卡片指的那一段，真的結束在什麼時候。
     ///
-    /// **`Ok(None)` 和 `Err` 是兩件事**：前者是「那一段已經不在了」（被忘掉、
-    /// 過了保留期），後者是「讀不出來」。不准用 `.flatten()` 或
-    /// `.unwrap_or_default()` 把它們壓成同一個答案。
+    /// **`Ok(None)` 和 `Err` 是兩件事**：前者是「沒有從這個時間點開始的一段」
+    /// （被忘掉、過了保留期，或那段的範圍後來變了），後者是「讀不出來」。
+    /// 不准用 `.flatten()` 或 `.unwrap_or_default()` 把它們壓成同一個答案。
+    ///
+    /// 講哪句話看的是原始資料（[`Self::has_raw_records_in_core_window`]），不是
+    /// segment 快取現在長什麼樣（[`Self::covering_segment_at`]）。兩個軸
+    /// 可以同時給出不同答案。
     ///
     /// 同一個 `core_started_at` 萬一有兩列（`replace_segments` 是「先刪一個
     /// 區間再插回去」，理論上不會，但沒有 UNIQUE 擋著）：取 **`core_ended_at`
@@ -3473,6 +3533,24 @@ impl Db {
                  LIMIT 1",
                 [core_started_at],
                 |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// 現在有沒有某一段蓋住這個時間點（`core_started_at <= t AND t < core_ended_at`）。
+    ///
+    /// 這是 **segment 快取現在長什麼樣**，不是「原始資料還在不在」。
+    /// 卡片那一段不見了要講哪句話，看的是 [`Self::has_raw_records_in_core_window`]。
+    pub fn covering_segment_at(&self, t: Millis) -> Result<Option<(Millis, Millis)>> {
+        self.conn
+            .query_row(
+                "SELECT core_started_at, core_ended_at FROM segment
+                 WHERE core_started_at <= ?1 AND ?1 < core_ended_at
+                 ORDER BY core_started_at ASC
+                 LIMIT 1",
+                [t],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
             .map_err(Into::into)
@@ -3555,6 +3633,67 @@ impl Db {
             |r| r.get(0),
         )?;
         Ok(frames)
+    }
+
+    /// 這張卡的 `core_started_at` 往後一個 [`crate::segment::TIME_CAP_MS`]
+    /// 的窗裡，還有沒有留下任何一種原始紀錄。
+    ///
+    /// 這是「起點之後一個章節上限內還有原始紀錄」和「沒有」的分辨法。
+    /// 問的是原始資料，不是 [`Self::covering_segment_at`] 那張快取。
+    /// 窗長寫在這裡，呼叫端不能另傳一個看起來差不多的毫秒數進來。
+    ///
+    /// 涵蓋 `prune` 會照時間刪掉、而且不是從別張表算出來的表：`frames`、
+    /// `facts`、`text_chunks`、`focus_events`、`input_metrics`、
+    /// `clipboard_events`、`system_events`、`queries`、`segment_edit`。
+    /// 任何一張有列就是「還在」。`queries` 不是算出來的——`retention.rs`
+    /// 自己的說法是「他打進搜尋框的字往往比畫面更直接」。`segment_edit`
+    /// 也不是快取：merge／split／undo 都是人按的，重算只會把它套上去，
+    /// 不會把它長回來。漏掉任何一張的話，「沒有留下任何原始紀錄」是在
+    /// 一份刻意漏掉原件的表單上做全稱斷言。
+    ///
+    /// **不能只看 `focus_events`。** 那張表只在前景變了才寫；`TIME_CAP_MS`
+    /// 切的正是同質長活動，被切出來的第二、第三塊裡 focus 一定是 0。
+    /// 實測（一個 app、連續打字的 input_metrics、每分鐘一張 frame，25 分鐘）：
+    /// `segments = [(0, 10), (10, 20), (20, 25)]`，
+    /// `core+0min: focus_events=1 frames=10`，
+    /// `core+10min: focus_events=0 frames=10`，
+    /// `core+20min: focus_events=0 frames=6`。
+    /// 只問 focus 的話，後兩段會被說成「沒有留下任何原始紀錄」，
+    /// 而 OCR 過的畫面全部都在。
+    pub fn has_raw_records_in_core_window(&self, core_started_at: Millis) -> Result<bool> {
+        let to = core_started_at.saturating_add(crate::segment::TIME_CAP_MS);
+        if core_started_at >= to {
+            return Ok(false);
+        }
+        // `input_metrics` 沒有單點 `ts`，用重疊：一段節奏跨過切點，
+        // 仍是這段時間留下的紀錄。其餘表都是單點 `ts`。
+        //
+        // `segment_edit` 的窗是 `[from_ms, to_ms)` 與 `[core, core+CAP)` 重疊。
+        // `to_ms IS NULL`：prune 的條件是 `to_ms IS NOT NULL AND to_ms < text_cut`，
+        // 這列永遠不會被照時間刪。apply 那句 `to_ms > ?1` 看不到它（NULL
+        // 比較是 unknown）。全稱「沒有留下任何原始紀錄」在庫裡還躺著一列
+        // 他按過的編輯時不能成立——但沒有結束端就不能用重疊，只問起點
+        // 有沒有落在窗裡，免得一列 `from_ms = 0`、`to_ms = NULL` 讓所有
+        // 窗都變 true。
+        for sql in [
+            "SELECT EXISTS(SELECT 1 FROM frames WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM facts WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM text_chunks WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM focus_events WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM clipboard_events WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM system_events WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM queries WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM segment_edit WHERE from_ms IS NOT NULL AND ((to_ms IS NOT NULL AND from_ms < ?2 AND to_ms > ?1) OR (to_ms IS NULL AND from_ms >= ?1 AND from_ms < ?2)))",
+        ] {
+            let found: bool = self
+                .conn
+                .query_row(sql, params![core_started_at, to], |r| r.get(0))?;
+            if found {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn frame_exists(&self, id: i64) -> Result<bool> {
@@ -3957,6 +4096,13 @@ impl Db {
     /// 它跳過正常抽取那一整段：`normalized` 直接抄 `raw`、`source_kind` 寫死
     /// `'test'`。存在的理由是要造出 regex 造不出來的舊資料／壞資料——例如一列
     /// `kind='url'` 但 `raw` 沒有 scheme 的 fact，用來驗那條拒絕路徑真的會走到。
+    ///
+    /// 插進 `core_started_at` 往後一個 [`crate::segment::TIME_CAP_MS`] 的窗裡
+    /// 的話，[`Self::has_raw_records_in_core_window`] 會看到它——那是真的：
+    /// 這筆 fact 就是一筆原始紀錄。要測「窗裡什麼都沒有」那一臂，
+    /// 不要在這個窗裡呼叫這支。產品路徑不會走這裡
+    /// （`insert_facts_tx` 只被 `insert_frame` / `insert_focus` /
+    /// `insert_clipboard` 呼叫）。
     #[cfg(test)]
     pub(crate) fn test_insert_fact(&mut self, ts: Millis, kind: &str, raw: &str) -> Result<i64> {
         self.conn.execute(
@@ -4615,8 +4761,8 @@ impl Db {
             "INSERT INTO reviewer_run(
                 ts, day_key, kind, skip_reason, candidate_count, recheck_count,
                 wrote_commitments, divergences, calls_used, budget_used,
-                budget_limit, detail
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                budget_limit, detail, notes, answers_got
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 ins.ts,
                 ins.day_key,
@@ -4630,6 +4776,8 @@ impl Db {
                 ins.budget_used,
                 ins.budget_limit,
                 ins.detail,
+                ins.notes,
+                ins.answers_got,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -4755,49 +4903,110 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// 最近一輪真的跑過的審閱，她拒絕掉了哪幾個模型指的下一步。
+    fn latest_reviewer_run_copy(&self) -> Result<Option<(i64, String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT id, detail, notes FROM reviewer_run
+                 WHERE skip_reason IS NULL
+                 ORDER BY ts DESC, id DESC LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// 最近一輪**問過模型**的審閱，她拒絕掉了哪幾個模型指的下一步。
     ///
-    /// **三種，不是「一個 `Vec`」。** 「還沒跑過」、「跑過而且沒拒絕任何東西」、
-    /// 「跑過而且拒絕了這幾個」是三件事；前兩種折成空 `Vec` 的話，一台從來
-    /// 沒跑過 reviewer 的機器會顯示成「她什麼都沒拒絕」。
+    /// **四種，不是「一個 `Vec`」。** 「還沒問過模型」、
+    /// 「試過問但沒拿到任何一份能讀的答案」、
+    /// 「問過而且沒拒絕任何東西」、「問過而且拒絕了這幾個」是四件事；
+    /// 前兩種折成空 `Vec` 的話，一台裝好、跑過巡邏、但還沒問過模型的機器
+    /// 會顯示成「她什麼都沒拒絕」。叫不起 CLI 的那一輪也是：`calls_used`
+    /// 數的是試了幾次，不是問到幾次。
+    ///
+    /// 一輪可以 `skip_reason IS NULL` 卻零次呼叫（窗裡根本沒有卡片、卡片
+    /// 全是使用者自己寫的、`five_class` 全空、預算剩不到兩次、原件被清掉、
+    /// 或沒有承諾候選）。「卡片全審過了」不是其中一條：`latest_unreviewed`
+    /// 只取每一段的最新版本，不排除審過的卡。那種一輪沒問過模型，沒有資格
+    /// 回答「她拒絕了什麼」。挑列跟 [`Self::entity_memory`]、
+    /// [`Self::latest_dual_pass_divergences`] 同一個拼法：`calls_used > 0`
+    /// （`calls` 只會 `+= 2`，所以 `> 0` 和 `>= 2` 是同一批列；兩種寫法會讓
+    /// 人以為取了不同的列）。`candidate_count` 數的是回查次數，在三個
+    /// `continue` 之前就加了，不能拿來當「問過模型」。
+    ///
+    /// 挑到列之後，`answers_got = 0` 的那一輪是「試過、沒問到」，不是
+    /// 「問過、沒拒絕」。`answers_got IS NULL` 是加這欄之前的舊列，問不出
+    /// 來，沿用舊判準。
+    ///
+    /// `detail` 只裝真的拒絕。卡片那一段不見了、或「沒有東西可審」那種說明
+    /// 在 [`Self::latest_reviewer_notes`]。
     pub fn latest_reviewer_refusals(&self) -> Result<ReviewerRefusals> {
         let row = self
             .conn
             .query_row(
-                "SELECT id, detail FROM reviewer_run
-                 WHERE skip_reason IS NULL
+                "SELECT id, detail, answers_got FROM reviewer_run
+                 WHERE skip_reason IS NULL AND calls_used > 0
                  ORDER BY ts DESC, id DESC LIMIT 1",
                 [],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((run_id, detail)) = row else {
+        let Some((run_id, detail, answers_got)) = row else {
             return Ok(ReviewerRefusals::NeverRan);
         };
-        let reasons: Vec<String> = detail
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(str::to_owned)
-            .collect();
-        if reasons.is_empty() {
-            Ok(ReviewerRefusals::None { run_id })
+        if answers_got == Some(0) {
+            return Ok(ReviewerRefusals::GotNoAnswer { run_id });
+        }
+        let reasons = nonempty_lines(&detail);
+        Ok(if reasons.is_empty() {
+            ReviewerRefusals::None { run_id }
         } else {
-            Ok(ReviewerRefusals::Some { run_id, reasons })
+            ReviewerRefusals::Some { run_id, reasons }
+        })
+    }
+
+    /// 最近一輪真的跑過的審閱，拒絕以外的說明。
+    ///
+    /// 讀最新一列 `skip_reason IS NULL`，**包括**「沒有東西可審」那一輪。
+    /// 拒絕清單不在這裡：那一輪沒資格回答，見 [`Self::latest_reviewer_refusals`]。
+    /// 空的時候是 `None`，不是把「沒有說明」講成「沒有拒絕」。
+    pub fn latest_reviewer_notes(&self) -> Result<ReviewerNotes> {
+        let Some((run_id, _, notes)) = self.latest_reviewer_run_copy()? else {
+            return Ok(ReviewerNotes::NeverRan);
+        };
+        let lines = nonempty_lines(&notes);
+        if lines.is_empty() {
+            Ok(ReviewerNotes::None { run_id })
+        } else {
+            Ok(ReviewerNotes::Some { run_id, lines })
         }
     }
 
     pub fn latest_dual_pass_divergences(&self) -> Result<DualPassDivergences> {
-        let run_id = self
+        let picked = self
             .conn
             .query_row(
-                "SELECT id FROM reviewer_run
-                 WHERE skip_reason IS NULL AND calls_used >= 2
+                "SELECT id, answers_got FROM reviewer_run
+                 WHERE skip_reason IS NULL AND calls_used > 0
                  ORDER BY ts DESC, id DESC LIMIT 1",
                 [],
-                |r| r.get::<_, i64>(0),
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)),
             )
             .optional()?;
-        let Some(run_id) = run_id else {
+        let Some((run_id, answers_got)) = picked else {
             return Ok(DualPassDivergences::NeverRan);
         };
         let mut stmt = self.conn.prepare(
@@ -4817,7 +5026,9 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        if rows.is_empty() {
+        if answers_got == Some(0) {
+            Ok(DualPassDivergences::NoComparableAnswers { run_id, rows })
+        } else if rows.is_empty() {
             Ok(DualPassDivergences::Agreed { run_id })
         } else {
             Ok(DualPassDivergences::Diverged { run_id, rows })
@@ -4825,24 +5036,45 @@ impl Db {
     }
 
     pub fn entity_memory(&self) -> Result<EntityMemory> {
-        // 數的是**呼叫**，不是 `reviewer_run` 的列。一輪可以 `skip_reason IS
-        // NULL` 卻零次呼叫（卡片全審過了、或預算剩不到兩次），而寫實體的那幾行
-        // 全在 `calls += 2` 後面、同一個迴圈裡、中間沒有 `continue`——所以那種
-        // 一輪**構不到**它們，不算「看過了、辨識到 0 個」。
-        // 跟隔壁 `latest_dual_pass_divergences` 的 `>= 2` 差一個門檻是故意的：
-        // 那邊問「有沒有兩份答案可比」，這邊問「有沒有開過 CLI」。
-        let reviewed: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM reviewer_run
-             WHERE skip_reason IS NULL AND calls_used > 0)",
-            [],
-            |r| r.get(0),
-        )?;
-        if !reviewed {
+        // 挑列跟隔壁 `latest_dual_pass_divergences`、`latest_reviewer_refusals`
+        // 同一個拼法：`skip_reason IS NULL AND calls_used > 0` 的最新一列。
+        // 前兩塊問那一列的不同問題（有沒有兩份答案可比 / 她拒了哪幾步）；
+        // 這邊問那一列有沒有問到答案。實體清單本身仍是此刻活著的列——
+        // 空不空是現況，但「空」能不能講成「辨識到 0 個」取決於最新那一輪
+        // 有沒有問到。
+        //
+        // 一輪可以 `skip_reason IS NULL` 卻零次呼叫（窗裡根本沒有卡片、卡片
+        // 全是使用者自己寫的、`five_class` 全空、預算剩不到兩次、原件被清掉、
+        // 或沒有承諾候選），那種一輪**構不到**寫實體的那幾行，不算「看過了」。
+        //
+        // `calls_used` 數的是試了幾次。叫不起 CLI 的那一輪也是 `> 0`，但
+        // `answers_got = 0`：那不是「看過了、辨識到 0 個」。舊列這欄是 NULL，
+        // 問不出來，沿用「試過就算看過」的舊判準。
+        //
+        // 掃整張表的 `EXISTS (... answers_got IS NULL OR answers_got > 0)`
+        // 是錯的：歷史上任何一輪問到過，之後一輪一個行程都沒起來，仍會說
+        // 「跑過，但目前沒有活著的實體」。
+        let answers_got: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                "SELECT answers_got FROM reviewer_run
+                 WHERE skip_reason IS NULL AND calls_used > 0
+                 ORDER BY ts DESC, id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(answers_got) = answers_got else {
             return Ok(EntityMemory::NeverReviewed);
-        }
+        };
+        let got_answer = answers_got != Some(0);
         let entities = self.live_entities()?;
         if entities.is_empty() {
-            return Ok(EntityMemory::Empty);
+            return Ok(if got_answer {
+                EntityMemory::Empty
+            } else {
+                EntityMemory::GotNoAnswer
+            });
         }
         let rows = entities
             .into_iter()
@@ -6130,7 +6362,16 @@ pub enum TargetApp {
 ///
 /// 只把算完的句子送到 UI；`FactOrigin` 本身不跨過序列化邊界。
 ///
-/// `None`＝這筆承諾根本沒有記下一步目標的 fact 出處。
+/// `None`＝`allowed_next_step_fact.zip(expected_target)` 是 `None`。兩種輸入：
+///
+/// 1. 這筆承諾沒有記下一步目標的 fact 出處。寫入端到得了：`migrate_014`
+///    加欄沒有 backfill，而 `allowed_next_step` 在原始 `CREATE TABLE` 就有——
+///    舊版執行檔寫下的列升上來都是 step 有值、fact 是 NULL。整合測試
+///    `schema_13_commitment_is_refused_with_missing_target_provenance`
+///    走真的 CLI 演過這條路。
+/// 2. 這個動作根本沒有可比對的目標字串（`FocusWindow`），即使 fact 有值。
+///    目前找不到寫入端（`resolve_allowed_next_step` 只吐 `open_url` /
+///    `open_file`）；這一格是 fail-closed 的防禦。
 ///
 /// **這一格故意用 `Option`，不是在 [`TargetApp`] 上多開一格。**
 /// [`Db::app_for_target_fact`] 一定是拿著一個 fact id 去查的，它回不出「沒有
@@ -6187,9 +6428,15 @@ pub fn suggestion_text(
     }
 }
 
-/// `Ok(None)`＝這筆承諾沒有記下一步目標的 fact 出處，或這個動作根本沒有可比對的
-/// 目標字串（`FocusWindow`）。**沒有記**和**查出來是某一格**是兩件事，所以用
-/// `Option` 分開，不要在 [`TargetApp`] 上多開一格。
+/// `Ok(None)`＝`allowed_next_step_fact.zip(expected_target)` 是 `None`。兩種輸入：
+///
+/// 1. 這筆承諾沒有記下一步目標的 fact 出處。寫入端到得了：見
+///    `schema_13_commitment_is_refused_with_missing_target_provenance`。
+/// 2. 這個動作根本沒有可比對的目標字串（`FocusWindow`），即使 fact 有值。
+///    目前找不到寫入端；這一格是 fail-closed 的防禦。
+///
+/// **沒有記**和**查出來是某一格**是兩件事，所以用 `Option` 分開，不要在
+/// [`TargetApp`] 上多開一格。
 pub fn target_app_for_button<E>(
     button: &sister_hands::SuggestionButton,
     allowed_next_step_fact: Option<i64>,
@@ -6608,14 +6855,56 @@ pub struct ReviewerRunInsert<'a> {
     pub budget_used: i64,
     pub budget_limit: i64,
     pub detail: &'a str,
+    /// 拒絕以外的說明（卡片那一段不見了、沒有東西可審）。不是證據。
+    pub notes: &'a str,
+    /// 這一輪幾個 pass 完整送出提示、沒有逾時、正常退出，而且 stdout 能 parse。
+    /// `None`＝沒記（舊列、或沒開 CLI 的一輪）；`Some(0)`＝記了、零次——例如
+    /// 叫不起 CLI、逾時、非零退出，或兩個 pass 都沒有可用的 JSON。和
+    /// `calls_used` 分開：那個數的是試了幾次／扣了幾次額度，這個數的是問到幾次。
+    pub answers_got: Option<i64>,
 }
 
 /// 最近一輪審閱拒絕掉的下一步。見 [`Db::latest_reviewer_refusals`]。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewerRefusals {
     NeverRan,
+    /// 試過問、但沒拿到任何一份能讀的答案。沒有資格說她拒絕了什麼。
+    GotNoAnswer {
+        run_id: i64,
+    },
+    None {
+        run_id: i64,
+    },
+    Some {
+        run_id: i64,
+        reasons: Vec<String>,
+    },
+}
+
+/// 最近一輪審閱、拒絕以外的說明。見 [`Db::latest_reviewer_notes`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewerNotes {
+    NeverRan,
     None { run_id: i64 },
-    Some { run_id: i64, reasons: Vec<String> },
+    Some { run_id: i64, lines: Vec<String> },
+}
+
+/// `SkipReason::NothingToReview` 的第一句。印在說明那一塊。
+///
+/// 拒絕那條路不看這句開頭——沒有候選的 eod 寫的 notes 是空字串，對不上。
+/// 拒絕改看 [`Db::latest_reviewer_refusals`] 的 `calls_used > 0`。
+pub const NOTHING_TO_REVIEW_HEAD: &str = "這段期間沒有還沒審過的 L2 假設";
+
+/// 卡片那一段查不到時，說明句的開頭。舊版誤裝進 `reviewer_run.detail`，
+/// [`migrate_016`] 靠這個白名單把它們搬到 `notes`。拒絕全部以
+/// 「拒絕 allowed_next_step：」開頭，對不上。
+pub const MISSING_SEGMENT_NOTE_HEAD: &str = "這張卡片指的那一段";
+
+fn nonempty_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6657,6 +6946,11 @@ pub struct DivergenceRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DualPassDivergences {
     NeverRan,
+    /// 試過雙 pass，但沒拿到可比較的兩份答案。不是「兩份答案對不上」。
+    NoComparableAnswers {
+        run_id: i64,
+        rows: Vec<DivergenceRow>,
+    },
     Agreed {
         run_id: i64,
     },
@@ -6675,6 +6969,8 @@ pub struct EntityWithMentions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityMemory {
     NeverReviewed,
+    /// 最新一輪試過問模型，但沒拿到答案。不是辨識到 0 個。
+    GotNoAnswer,
     Empty,
     Present(Vec<EntityWithMentions>),
 }
@@ -7333,7 +7629,10 @@ impl DbStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClipboardKind, FocusKind, OcrBlock, SystemKind};
+    use crate::model::{
+        ClipboardEvent, ClipboardKind, FocusEvent, FocusKind, FocusSnapshot, FrameCapture,
+        InputMetrics, OcrBlock, SystemEvent, SystemKind,
+    };
 
     fn test_db() -> Db {
         Db::open_in_memory().expect("open in-memory db")
@@ -8324,6 +8623,14 @@ mod tests {
             columns_of(&db, "commitments").contains(&"agreed_evidence_json".to_string()),
             "全新資料庫也要有兩個 pass 都指過的畫面那一欄"
         );
+        assert!(
+            columns_of(&db, "reviewer_run").contains(&"notes".to_string()),
+            "全新資料庫也要有審閱說明那一欄"
+        );
+        assert!(
+            columns_of(&db, "reviewer_run").contains(&"answers_got".to_string()),
+            "全新資料庫也要有「問到幾次」那一欄"
+        );
     }
 
     #[test]
@@ -8355,6 +8662,70 @@ mod tests {
             row.agreed_evidence_json, None,
             "既有列必須維持 NULL，不可以回填成「兩個 pass 都同意」"
         );
+    }
+
+    /// 舊版 `detail` 裝了拒絕和「這張卡片指的那一段」兩種東西。升級時要把
+    /// 後者搬到 `notes`，不然會印在「問過模型的審閱拒絕掉的下一步」底下。
+    #[test]
+    fn migrate_016_moves_missing_segment_lines_out_of_detail() {
+        let tmp = TmpDir::new("migrate-016-notes");
+        let path = tmp.join("sister.db");
+        Db::open(&path).expect("create");
+        {
+            let c = Connection::open(&path).expect("raw");
+            c.execute_batch(
+                "ALTER TABLE reviewer_run DROP COLUMN notes;
+                 PRAGMA user_version = 15;",
+            )
+            .expect("downgrade to 15");
+            let mixed = format!(
+                "拒絕 allowed_next_step：fact:1 不存在\n{MISSING_SEGMENT_NOTE_HEAD}（segment:1）現在查不到；所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。"
+            );
+            c.execute(
+                "INSERT INTO reviewer_run(
+                    ts, day_key, kind, skip_reason, candidate_count, recheck_count,
+                    wrote_commitments, divergences, calls_used, budget_used,
+                    budget_limit, detail
+                 ) VALUES(10, '1970-01-01', 'interval', NULL, 1, 0, 0, 0, 2, 2, 40, ?1)",
+                [mixed],
+            )
+            .expect("legacy mixed detail");
+            c.execute(
+                "INSERT INTO reviewer_run(
+                    ts, day_key, kind, skip_reason, candidate_count, recheck_count,
+                    wrote_commitments, divergences, calls_used, budget_used,
+                    budget_limit, detail
+                 ) VALUES(20, '1970-01-01', 'interval', NULL, 1, 0, 0, 0, 2, 2, 40, ?1)",
+                ["拒絕 allowed_next_step：fact:2 不存在"],
+            )
+            .expect("refusal-only row");
+        }
+        let db = Db::open(&path).expect("upgrade");
+        let rows: Vec<(String, String)> = {
+            let mut stmt = db
+                .conn
+                .prepare("SELECT detail, notes FROM reviewer_run ORDER BY ts")
+                .expect("prepare");
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .expect("query")
+                .collect::<rusqlite::Result<_>>()
+                .expect("rows")
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "拒絕 allowed_next_step：fact:1 不存在");
+        assert!(
+            rows[0].1.starts_with(MISSING_SEGMENT_NOTE_HEAD),
+            "說明還留在拒絕那一欄：notes={:?} detail={:?}",
+            rows[0].1,
+            rows[0].0
+        );
+        assert!(
+            !rows[0].0.contains(MISSING_SEGMENT_NOTE_HEAD),
+            "說明沒搬乾淨：{}",
+            rows[0].0
+        );
+        assert_eq!(rows[1].0, "拒絕 allowed_next_step：fact:2 不存在");
+        assert_eq!(rows[1].1, "", "真的拒絕不可以被搬去 notes：{:?}", rows[1]);
     }
 
     #[test]
@@ -8558,6 +8929,334 @@ mod tests {
         insert_segment_row(&db, 10, 50);
         assert_eq!(db.segment_core_end(10).expect("query"), Some(50));
         assert_eq!(db.segment_core_end(11).expect("missing"), None);
+    }
+
+    #[test]
+    fn covering_segment_at_distinguishes_moved_range_from_gone() {
+        let db = test_db();
+        insert_segment_row(&db, 0, 300_000);
+        assert_eq!(
+            db.covering_segment_at(180_000).expect("query"),
+            Some((0, 300_000)),
+            "時間點被另一段蓋著"
+        );
+        assert_eq!(
+            db.segment_core_end(180_000).expect("query"),
+            None,
+            "蓋住它的那一段不是從這個時間點開始的"
+        );
+        assert_eq!(
+            db.covering_segment_at(300_000).expect("query"),
+            None,
+            "半開右界：結束那一毫秒沒被蓋住"
+        );
+        assert_eq!(
+            db.covering_segment_at(1).expect("empty db after?"),
+            Some((0, 300_000))
+        );
+        let empty = test_db();
+        assert_eq!(
+            empty.covering_segment_at(180_000).expect("query"),
+            None,
+            "沒有任何一段蓋住"
+        );
+    }
+
+    /// 窗裡**只有那一張表**有列時，分辨法仍是 true。任何一句 EXISTS 被刪掉，
+    /// 對應那一條要紅——正向窗裡都有 frame 的話，後面幾句根本跑不到。
+    #[test]
+    fn each_raw_record_table_alone_is_enough_for_has_raw_records_in_core_window() {
+        let core = 180_000i64;
+        let to = core + crate::segment::TIME_CAP_MS;
+        for table in [
+            "frames",
+            "facts",
+            "text_chunks",
+            "focus_events",
+            "input_metrics",
+            "clipboard_events",
+            "system_events",
+            "queries",
+            "segment_edit",
+        ] {
+            let mut db = test_db();
+            let sid = db.start_session("test", "0").expect("session");
+            match table {
+                "frames" => {
+                    db.insert_frame(
+                        sid,
+                        &FrameCapture {
+                            ts: core,
+                            monitor: 0,
+                            width: 100,
+                            height: 100,
+                            dhash: 1,
+                            image: None,
+                            image_ext: "png",
+                            ocr: vec![],
+                            focus: FocusSnapshot::default(),
+                        },
+                        None,
+                        0,
+                    )
+                    .expect("frame");
+                }
+                "facts" => {
+                    db.test_insert_fact(core, "url", "https://only-fact.example/")
+                        .expect("fact");
+                }
+                "text_chunks" => {
+                    db.conn
+                        .execute(
+                            "INSERT INTO text_chunks(ts, source_kind, text)
+                             VALUES(?1, 'ocr', 'only-chunk')",
+                            [core],
+                        )
+                        .expect("chunk");
+                }
+                "focus_events" => {
+                    db.insert_focus(
+                        sid,
+                        &FocusEvent {
+                            ts: core,
+                            kind: FocusKind::Focus,
+                            snapshot: FocusSnapshot {
+                                app_id: Some("code.exe".into()),
+                                ..Default::default()
+                            },
+                        },
+                    )
+                    .expect("focus");
+                }
+                "input_metrics" => {
+                    db.insert_input(
+                        sid,
+                        &InputMetrics {
+                            ts_start: core,
+                            ts_end: core + 10_000,
+                            keystrokes: 8,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("input");
+                }
+                "clipboard_events" => {
+                    db.insert_clipboard(
+                        sid,
+                        &ClipboardEvent {
+                            ts: core,
+                            kind: ClipboardKind::Image,
+                            text: None,
+                            byte_len: 32,
+                            truncated: false,
+                            secret_suspected: false,
+                            source_app: None,
+                        },
+                    )
+                    .expect("clip");
+                }
+                "system_events" => {
+                    db.insert_system(
+                        sid,
+                        &SystemEvent {
+                            ts: core,
+                            kind: SystemKind::Lock,
+                            detail: None,
+                        },
+                    )
+                    .expect("sys");
+                }
+                "queries" => {
+                    db.log_query(&QueryLogEntry {
+                        ts: core,
+                        question: "電話",
+                        shape: "keywords",
+                        hits: 0,
+                        latency_ms: 1,
+                        source: SOURCE_CLI,
+                    })
+                    .expect("query");
+                }
+                "segment_edit" => {
+                    db.conn
+                        .execute(
+                            "INSERT INTO segment_edit(ts, kind, at_ms, from_ms, to_ms)
+                             VALUES(?1, 'merge', ?1, ?1, ?2)",
+                            [core, core + 1_000],
+                        )
+                        .expect("segment_edit");
+                }
+                other => panic!("沒有這一張表的夾具：{other}"),
+            }
+            let counts = raw_record_counts_in_window(&db, core, to);
+            for (name, n) in &counts {
+                if *name == table {
+                    assert!(*n > 0, "{table} 的夾具沒寫進窗裡：{counts:?}");
+                } else {
+                    assert_eq!(
+                        *n, 0,
+                        "{table} 的夾具把 {name} 也寫進去了，九條會互相補票：{counts:?}"
+                    );
+                }
+            }
+            assert!(
+                db.has_raw_records_in_core_window(core).expect("raw"),
+                "窗裡只有 {table} 有列，分辨法必須是 true"
+            );
+        }
+    }
+
+    fn raw_record_counts_in_window(db: &Db, from: Millis, to: Millis) -> Vec<(&'static str, i64)> {
+        let mut out = Vec::new();
+        for (name, sql) in [
+            (
+                "frames",
+                "SELECT COUNT(*) FROM frames WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "facts",
+                "SELECT COUNT(*) FROM facts WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "text_chunks",
+                "SELECT COUNT(*) FROM text_chunks WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "focus_events",
+                "SELECT COUNT(*) FROM focus_events WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "input_metrics",
+                "SELECT COUNT(*) FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2",
+            ),
+            (
+                "clipboard_events",
+                "SELECT COUNT(*) FROM clipboard_events WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "system_events",
+                "SELECT COUNT(*) FROM system_events WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "queries",
+                "SELECT COUNT(*) FROM queries WHERE ts >= ?1 AND ts < ?2",
+            ),
+            (
+                "segment_edit",
+                "SELECT COUNT(*) FROM segment_edit WHERE from_ms IS NOT NULL AND ((to_ms IS NOT NULL AND from_ms < ?2 AND to_ms > ?1) OR (to_ms IS NULL AND from_ms >= ?1 AND from_ms < ?2))",
+            ),
+        ] {
+            let n: i64 = db
+                .conn
+                .query_row(sql, [from, to], |r| r.get(0))
+                .unwrap_or_else(|e| panic!("count {name}: {e}"));
+            out.push((name, n));
+        }
+        out
+    }
+
+    /// 快取軸和資料軸可以同時給出不同答案：沒有一段蓋住，原始紀錄卻還在。
+    #[test]
+    fn has_raw_records_in_core_window_is_not_covering_segment_at() {
+        let mut db = test_db();
+        let sid = db.start_session("test", "0").expect("session");
+        db.insert_focus(sid, &focus_at(180_000, "code.exe", "x", None))
+            .expect("focus");
+        assert_eq!(
+            db.covering_segment_at(180_000).expect("cover"),
+            None,
+            "沒算過段落，快取是空的"
+        );
+        assert!(
+            db.has_raw_records_in_core_window(180_000).expect("raw"),
+            "原始紀錄還在，即使沒有任何一段蓋住"
+        );
+        assert!(
+            !db.has_raw_records_in_core_window(180_000 + crate::segment::TIME_CAP_MS)
+                .expect("outside"),
+            "窗外那一格不該把裡面的紀錄算進去"
+        );
+        assert!(
+            !test_db()
+                .has_raw_records_in_core_window(180_000)
+                .expect("empty"),
+            "空庫是沒有，不是 0 筆再讓呼叫端猜"
+        );
+    }
+
+    /// 同質長活動被 `TIME_CAP_MS` 切出來的第二塊：一筆 focus、週期性的
+    /// input_metrics 和 frames。第二塊的 `focus_events` 是 0，但畫面還在，
+    /// 分辨法必須是 `true`。只看 `focus_events` 的突變要讓這一條紅。
+    #[test]
+    fn a_time_capped_later_piece_of_the_same_app_still_has_raw_records() {
+        use crate::model::InputMetrics;
+        let mut db = test_db();
+        let sid = db.start_session("test", "0").expect("session");
+        let ts = 0i64;
+        let min = 60_000i64;
+        db.insert_focus(sid, &focus_at(ts, "code.exe", "db.rs", None))
+            .expect("focus");
+        for i in 0..25 {
+            let t = ts + i * min;
+            db.insert_input(
+                sid,
+                &InputMetrics {
+                    ts_start: t,
+                    ts_end: t + 10_000,
+                    keystrokes: 40,
+                    ..Default::default()
+                },
+            )
+            .expect("input");
+            db.insert_frame(
+                sid,
+                &frame_with_text(t + 1_000, "code.exe", "db.rs", &["typing"]),
+                None,
+                0,
+            )
+            .expect("frame");
+        }
+        let segs = db.chapters_for_range(ts, ts + 25 * min).expect("segments");
+        assert_eq!(
+            segs.len(),
+            3,
+            "25 分鐘同質活動該被 10 分鐘上限切成三段：{:?}",
+            segs.iter()
+                .map(|s| (s.core_started_at - ts, s.core_ended_at - ts))
+                .collect::<Vec<_>>()
+        );
+        let second = &segs[1];
+        let cap = crate::segment::TIME_CAP_MS;
+        assert_eq!(second.core_started_at, ts + cap);
+        let focus_in_second: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM focus_events WHERE ts >= ?1 AND ts < ?2",
+                [second.core_started_at, second.core_started_at + cap],
+                |r| r.get(0),
+            )
+            .expect("count focus");
+        assert_eq!(
+            focus_in_second, 0,
+            "第二塊沒有 focus 事件：這就是只問 focus_events 會說謊的原因"
+        );
+        let frames_in_second: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM frames WHERE ts >= ?1 AND ts < ?2",
+                [second.core_started_at, second.core_started_at + cap],
+                |r| r.get(0),
+            )
+            .expect("count frames");
+        assert!(
+            frames_in_second > 0,
+            "第二塊要有畫面躺在那裡，否則這一條證不到「只問 focus 會漏」：{frames_in_second}"
+        );
+        assert!(
+            db.has_raw_records_in_core_window(second.core_started_at)
+                .expect("raw"),
+            "同質長活動的第二塊 focus_events=0，但畫面還在，不可以回 false"
+        );
     }
 
     /// 「沒解析到時間範圍」和「解析了、算過、沒有段落」不可以長成同一個
@@ -12092,6 +12791,8 @@ mod tests {
             budget_used: 0,
             budget_limit: 40,
             detail: "",
+            notes: "",
+            answers_got: None,
         })
         .expect("insert reviewer_run");
     }
@@ -12188,6 +12889,8 @@ mod tests {
             budget_used: 0,
             budget_limit: 40,
             detail: "",
+            notes: "",
+            answers_got: None,
         })
         .unwrap();
         assert!(!db.has_reviewer_eod_for_day("2026-08-21").unwrap());
@@ -12330,6 +13033,8 @@ mod tests {
                 budget_used: 2,
                 budget_limit: 10,
                 detail: "",
+                notes: "",
+                answers_got: None,
             })
             .unwrap();
         assert_eq!(
@@ -12351,6 +13056,8 @@ mod tests {
                 budget_used: 4,
                 budget_limit: 10,
                 detail: "",
+                notes: "",
+                answers_got: None,
             })
             .unwrap();
         db.insert_reviewer_divergence(&DivergenceInsert {
@@ -12375,9 +13082,10 @@ mod tests {
     #[test]
     fn a_run_that_never_spawned_two_passes_is_not_a_dual_pass() {
         // `calls += 2` 只在雙 pass 那個區塊裡加。一輪可以 `skip_reason IS NULL`
-        // 卻 `calls_used = 0`：卡片全是使用者寫的、或預算剩不到 2 次，迴圈就
-        // 一路 continue 到底，照樣寫一列 run。
-        // 少了 `calls_used >= 2`，那一列會被當成「最近一次雙 pass」，於是印出
+        // 卻 `calls_used = 0`：窗裡根本沒有卡片、卡片全是使用者寫的、
+        // `five_class` 全空、或預算剩不到 2 次，迴圈就一路 continue 到底，照樣
+        // 寫一列 run。
+        // 少了 `calls_used > 0`，那一列會被當成「最近一次雙 pass」，於是印出
         // 「最近一次雙 pass（#N）沒有分歧」——講的是一輪一次 CLI 都沒開的跑。
         let mut db = test_db();
         let nothing = ReviewerRunInsert {
@@ -12393,6 +13101,8 @@ mod tests {
             budget_used: 0,
             budget_limit: 10,
             detail: "",
+            notes: "",
+            answers_got: None,
         };
         db.insert_reviewer_run(&nothing).unwrap();
         assert_eq!(
@@ -12439,9 +13149,10 @@ mod tests {
             db.entity_memory().unwrap(),
             EntityMemory::NeverReviewed
         ));
-        // 一輪零次呼叫的跑（卡片全審過了、或預算剩不到兩次）**構不到**寫實體
-        // 的那幾行——它們全在 `calls += 2` 後面、同一個迴圈裡、中間沒有
-        // `continue`。所以它不算「看過了」。
+        // 一輪零次呼叫的跑（窗裡根本沒有卡片、卡片全是使用者寫的、
+        // `five_class` 全空、或預算剩不到兩次）**構不到**寫實體的那幾行——
+        // 它們全在 `calls += 2` 後面、同一個迴圈裡、中間沒有 `continue`。
+        // 所以它不算「看過了」。
         let nothing = ReviewerRunInsert {
             ts: 10,
             day_key: "1970-01-01",
@@ -12455,6 +13166,8 @@ mod tests {
             budget_used: 0,
             budget_limit: 10,
             detail: "",
+            notes: "",
+            answers_got: None,
         };
         db.insert_reviewer_run(&nothing).unwrap();
         assert!(
@@ -12514,6 +13227,8 @@ mod tests {
             budget_used: calls,
             budget_limit: 10,
             detail: "",
+            notes: "",
+            answers_got: None,
         };
         // 一次 CLI 都沒開的三種樣子。兩半都該說「還沒跑過」。
         for (label, seed) in [

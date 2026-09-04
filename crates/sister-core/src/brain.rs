@@ -182,6 +182,22 @@ impl SkipReason {
     }
 }
 
+/// `Command::spawn()` 有沒有把行程叫起來。
+///
+/// 不要拿 [`SpawnOutcome::spawn_error`] 來問這件事：stdin 寫失敗、stdout
+/// 管線沒開成、等結束失敗，行程都已經起來了，但那些路一樣會設
+/// `spawn_error`。最常見的失敗是 CLI 立刻退了（沒登入、參數不對），
+/// 那不是「叫不起」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessStart {
+    /// `Command::spawn()` 成功。
+    Started,
+    /// `Command::spawn()` 失敗，OS 沒有叫起行程。
+    NeverStarted,
+    /// 跑 [`spawn_cli`] 的執行緒炸了，問不到有沒有起來。
+    Unobserved,
+}
+
 /// 一次 spawn 的結果。不含送出去的原文。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnOutcome {
@@ -193,11 +209,17 @@ pub struct SpawnOutcome {
     pub timed_out: bool,
     pub spawn_error: Option<String>,
     pub exit_code: Option<i32>,
+    pub process_start: ProcessStart,
 }
 
 impl SpawnOutcome {
-    pub fn started(&self) -> bool {
-        self.spawn_error.is_none()
+    /// 提示有沒有完整送到、而且 CLI 在時限內正常結束。
+    ///
+    /// false 的時候 stdout 裡的字不是這一題的答案。CLI 立刻印登入錯誤再退場
+    /// 那一路由退出碼擋住；寫不完、逾時也各由自己的訊號擋住。`log_outbound`、
+    /// reviewer 的 `answers_got`、以及要不要拿 stdout 去寫承諾，都問這個。
+    pub fn completed_the_ask(&self) -> bool {
+        self.spawn_error.is_none() && !self.timed_out && self.exit_code == Some(0)
     }
 }
 
@@ -260,6 +282,7 @@ pub fn spawn_cli(
                 timed_out: false,
                 spawn_error: Some(format!("叫不起 `{command}`：{e}")),
                 exit_code: None,
+                process_start: ProcessStart::NeverStarted,
             };
         }
     };
@@ -299,6 +322,7 @@ pub fn spawn_cli(
             timed_out: false,
             spawn_error: Some(error),
             exit_code,
+            process_start: ProcessStart::Started,
         };
     }
 
@@ -314,6 +338,7 @@ pub fn spawn_cli(
                 timed_out: false,
                 spawn_error: Some("stdout 管線沒開成".into()),
                 exit_code: None,
+                process_start: ProcessStart::Started,
             };
         }
     };
@@ -350,6 +375,7 @@ pub fn spawn_cli(
                     timed_out: false,
                     spawn_error: Some(format!("等 CLI 結束失敗：{e}")),
                     exit_code: None,
+                    process_start: ProcessStart::Started,
                 };
             }
         }
@@ -367,6 +393,7 @@ pub fn spawn_cli(
         timed_out,
         spawn_error: None,
         exit_code,
+        process_start: ProcessStart::Started,
     }
 }
 
@@ -737,6 +764,7 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
                 timed_out: false,
                 spawn_error: Some("工作執行緒炸了".into()),
                 exit_code: None,
+                process_start: ProcessStart::Unobserved,
             });
             ran.push((job.clone(), outcome));
         }
@@ -1372,6 +1400,157 @@ mod tests {
             out.stdout.contains("ANSWER-THAT-IS-NOT-AN-ANSWER"),
             "把它印出來的東西丟了，失敗原因就只剩我們自己那句沒有內容的斷管：{out:?}"
         );
+        assert_eq!(
+            out.process_start,
+            ProcessStart::Started,
+            "行程起來了才寫得斷；這不是『叫不起』：{out:?}"
+        );
+        assert!(
+            !out.completed_the_ask(),
+            "提示沒送完，stdout 不能當這一題的答案：{out:?}"
+        );
+    }
+
+    /// CLI 沒讀提示，先印一份 JSON；大提示把管子塞滿後，寫入端會收到斷管。
+    /// 這條守的是「提示沒送完就不算問到」，不是所有立刻退場的通則。
+    #[test]
+    fn a_broken_pipe_after_json_does_not_count_as_an_answer() {
+        let mut c = Consent::default();
+        c.grant(Sheet::CloudReading, 1);
+        let permit = c.cloud_permit().expect("signed");
+        let payload = "問".repeat(256 * 1024);
+        let json = r#"{"commitments":[]}"#;
+
+        let out = spawn_cli(
+            permit,
+            &payload,
+            "sh",
+            &["-c".into(), format!("printf '%s' '{json}'")],
+        );
+
+        assert!(
+            out.spawn_error.is_some(),
+            "管子塞滿之後寫入一定斷；沒斷的話這條在擲骰子：{out:?}"
+        );
+        assert!(!out.completed_the_ask(), "提示沒送完，不算問到了：{out:?}");
+        assert!(
+            out.stdout.contains("commitments"),
+            "它印的 JSON 要留著給人看，但那不是這一題的答案：{out:?}"
+        );
+        assert_eq!(out.process_start, ProcessStart::Started);
+    }
+
+    /// 正式提示塞得進管子時，CLI 可以不讀 stdin、印出可 parse 的 JSON，再以
+    /// 非零碼退場；這一路要靠退出碼判斷沒有問到，不靠斷管碰運氣。
+    #[test]
+    fn a_nonzero_exit_after_parseable_json_does_not_count_as_an_answer() {
+        let mut c = Consent::default();
+        c.grant(Sheet::CloudReading, 1);
+        let permit = c.cloud_permit().expect("signed");
+        let json = r#"{"commitments":[]}"#;
+        // 只斷言「沒回答」時，斷管和非零退出都會讓測試綠；要釘住
+        // 真正的擋下機制，就要先讓子行程讀到 EOF，不跟 stdin 寫入擲骰子。
+        let out = spawn_cli(
+            permit,
+            "一張塞得進管子的審閱卡",
+            "sh",
+            &[
+                "-c".into(),
+                format!("cat >/dev/null; printf '%s' '{json}'; exit 7"),
+            ],
+        );
+
+        assert!(out.spawn_error.is_none(), "這條不能靠斷管擋：{out:?}");
+        assert!(!out.timed_out, "這條不能靠逾時擋：{out:?}");
+        assert_eq!(out.exit_code, Some(7));
+        assert!(out.stdout.contains("commitments"));
+        assert!(!out.completed_the_ask(), "非零退出不算問到：{out:?}");
+    }
+
+    /// **這一版的招牌情境，用正式路徑的提示大小跑一次。**
+    ///
+    /// round 10 的註解、doc、還有那條測試的名字都宣稱：「CLI 沒登入、印一份
+    /// JSON 就退了」不會被收成「問到了」。實測 20 次，**20 次全部被收下**。
+    ///
+    /// 成因：擋它的是 `spawn_error`，而 `spawn_error` 只有在寫 stdin 撞上斷管
+    /// 時才會設起來。`MAX_PROMPT_BYTES` 是 24 KiB、審閱一張卡幾 KB，**都塞得進
+    /// Linux 那 64 KiB 的管子**——寫入進 buffer 就成功了，子行程讀不讀無所謂。
+    /// `brain.rs` 自己那條 256 KiB 的測試會綠，只是因為它把管子塞爆了；
+    /// 那條測試的斷言訊息自己也寫著「沒斷的話這條在擲骰子」。
+    ///
+    /// 真正分得出來的訊號是**退出碼**：沒登入的 CLI 會非零退出。實測同樣 20 次，
+    /// `exit_code != Some(0)` 抓到 20 次、漏 0 次。`watch.rs:719` 的註解早就寫過
+    /// 這件事（「`exit_code != 0 → SpawnFailed`，而 `brain::classify` 沒有那一條」）。
+    ///
+    /// 這條測試不規定修法，只要求：**這種一輪不算「問到了」。**
+    #[test]
+    fn ted_r11_a_cli_that_exits_nonzero_did_not_answer_the_ask() {
+        let mut c = Consent::default();
+        c.grant(Sheet::CloudReading, 1);
+        let permit = c.cloud_permit().expect("signed");
+        let json = r#"{"commitments":[]}"#;
+        // 正式路徑的大小：一張卡的提示幾 KB，塞得進管子。
+        // **不要**在這裡塞 256 KiB——那樣測到的是管子滿了，不是這一題。
+        let payload = "問".repeat(700);
+
+        let out = spawn_cli(
+            permit,
+            &payload,
+            "sh",
+            &[
+                "-c".into(),
+                format!("cat >/dev/null; printf '%s' '{json}'; exit 1"),
+            ],
+        );
+
+        // 它確實印了一份看起來可用的 JSON——這正是危險的地方。
+        assert!(
+            out.stdout.contains("commitments"),
+            "這條測試要的情境是「印得出 JSON 卻沒登入」，stdout 卻是空的：{out:?}"
+        );
+        assert!(
+            !out.completed_the_ask(),
+            "沒登入的 CLI 印一份 JSON 就退了，這不是我們那份提示的答案。\
+             （擋它的不可以只有 spawn_error——提示塞得進管子的時候它是 None。\
+             這一次 exit_code={:?} spawn_error={:?}）",
+            out.exit_code,
+            out.spawn_error
+        );
+    }
+
+    /// 逾時那一條 `spawn_error` 是 `None`、stdout 可能是完整 JSON。
+    /// 只問 stdout 的話會把「印完才卡住」收成問到了。
+    #[test]
+    fn a_timed_out_spawn_does_not_count_as_an_answer_even_if_stdout_is_json() {
+        let out = SpawnOutcome {
+            payload_chars_written: 10,
+            duration_ms: 120_000,
+            stdout: r#"{"commitments":[]}"#.into(),
+            stderr: String::new(),
+            timed_out: true,
+            spawn_error: None,
+            exit_code: None,
+            process_start: ProcessStart::Started,
+        };
+        assert!(
+            !out.completed_the_ask(),
+            "逾時的 stdout 不是這一題的答案：{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_binary_is_never_started() {
+        let mut c = Consent::default();
+        c.grant(Sheet::CloudReading, 1);
+        let permit = c.cloud_permit().expect("signed");
+        let out = spawn_cli(permit, "hi", "sister-no-such-brain-binary-9d3f", &[]);
+        assert_eq!(out.process_start, ProcessStart::NeverStarted);
+        assert!(
+            out.spawn_error
+                .as_deref()
+                .is_some_and(|e| e.contains("叫不起"))
+        );
+        assert!(!out.completed_the_ask());
     }
 
     #[test]
