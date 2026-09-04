@@ -3607,11 +3607,7 @@ pub mod act {
                         .expect("refused");
                 assert_eq!(why, case.expected_why, "{ops_msg}");
                 let replay = RefusalReason::UnattendedTargetHasNoCitedFrame { why }.message();
-                let uncited = |s: &str| {
-                    s.contains("沒有可核對的引用畫面")
-                        || s.contains("沒有被引用的畫面")
-                        || s.contains("承諾沒有引用")
-                };
+                let uncited = |s: &str| s.contains("承諾沒有引用");
                 let one_pass = |s: &str| s.contains("只有一個 pass 指過");
                 assert_eq!(
                     uncited(&ops_msg),
@@ -3705,7 +3701,7 @@ pub mod act {
                 "這一格還是要數得出來（不可以靠刪掉整句來過）：{clause}"
             );
             assert!(
-                clause.contains("出處"),
+                clause.contains("fact 出處"),
                 "逐步說缺的是「{step_line}」，收尾說「{clause}」——同一步，兩種失敗"
             );
         }
@@ -3725,7 +3721,7 @@ pub mod act {
             assert_eq!(tally.recorded_before_this_check, 0);
             let clauses = tally.refusal_clauses();
             assert!(
-                !clauses.contains("沒有被引用的畫面"),
+                !clauses.contains("沒有引用"),
                 "只有一個 pass 指過時畫面是有被引用的：{clauses}"
             );
             assert!(clauses.contains("沒有兩個 pass 都指過的畫面"), "{clauses}");
@@ -3810,16 +3806,10 @@ pub mod act {
                     },
                 }
             }
-            let mut seen = [false; TargetFrameGap::COUNT];
+            // ALL 和 COUNT / index() 是同一個 macro 從同一份 variant 展開的，
+            // 比它們相等或走 seen[] 是 x == x。真正的牙齒是上面
+            // `closing_clause_case` 沒有 `_`，以及下面手寫的整句。
             for why in TargetFrameGap::ALL {
-                let i = why.index();
-                assert!(
-                    i < TargetFrameGap::COUNT,
-                    "{why:?} 編號越界：{i} COUNT={}",
-                    TargetFrameGap::COUNT
-                );
-                assert!(!seen[i], "{why:?} 編號重複：{i}");
-                seen[i] = true;
                 let Case {
                     why,
                     count_of,
@@ -3841,14 +3831,6 @@ pub mod act {
                     );
                 }
             }
-            for (i, hit) in seen.iter().enumerate() {
-                assert!(hit, "編號 {i} 沒被打到（漏了一種沒餵進 Tally）");
-            }
-            assert_eq!(
-                TargetFrameGap::ALL.len(),
-                TargetFrameGap::COUNT,
-                "筆數必須等於編號個數"
-            );
         }
 
         /// 這道拒絕只掛在 `if opts.unattended` 那一支；不加 `--unattended`

@@ -509,25 +509,6 @@ pub enum RefusalBucket {
 }
 
 impl RefusalReason {
-    /// 加一種拒絕理由而不在這裡點名，編不過。
-    ///
-    /// `KIND_COUNT` / 測試裡那份 `every_reason` 是手寫的，補完 `bucket` /
-    /// `index` / `message` 的 exhaustive match 之後不必動它們。這一支
-    /// match 沒有 `_`，是「新 variant 沒被餵進去」唯一編不過的那一層。
-    pub const fn named_for_coverage(&self) {
-        match self {
-            Self::UserDeclinedThisStep
-            | Self::ObserveHasNoHands
-            | Self::SemiActionNeedsGrantAndStepApproval
-            | Self::NeverInherited { .. }
-            | Self::NeedsLivePress { .. }
-            | Self::NotCoveredByGrant { .. }
-            | Self::UnattendedTargetHasNoCitedFrame { .. }
-            | Self::ApprovalWasForAnotherStep { .. }
-            | Self::HandsPulled { .. } => {}
-        }
-    }
-
     /// **這裡沒有 `_`。** 多一種拒絕理由就編不過，因為「它該算進哪一格」
     /// 是一個每次都要重新回答的問題——留一個 `_` 的話，新的那一種會安靜地
     /// 掉進當時剛好排在最後的那一格（見 `never_inherited_class` 同樣的寫法）。
@@ -1111,7 +1092,6 @@ mod tests {
         every_reason.push(RefusalReason::HandsPulled { since_ms: Some(1) });
         let mut seen = [false; RefusalReason::KIND_COUNT];
         for reason in &every_reason {
-            reason.named_for_coverage();
             let i = reason.index();
             assert!(
                 i < RefusalReason::KIND_COUNT,
@@ -1158,7 +1138,7 @@ mod tests {
             "聯集裡有這張畫面時不能說沒有引用：{one_pass}"
         );
         assert!(
-            !one_pass.contains("沒有可核對的引用畫面"),
+            !one_pass.contains("承諾沒有引用"),
             "只有一個 pass 指過，那張畫面是有被引用的：{one_pass}"
         );
         assert!(
@@ -1167,15 +1147,18 @@ mod tests {
         );
         assert!(too_old.contains("記在加這道檢查之前"), "{too_old}");
         assert!(
-            !too_old.contains("沒有可核對的引用畫面"),
+            !too_old.contains("承諾沒有引用"),
             "這筆太舊，不是「沒有引用畫面」：{too_old}"
         );
     }
 
-    /// `message()` 不帶 id；`unattended_message` 帶 id 是 `ops.rs` 印的那句。
+    /// `message()` 不帶 id；帶 id 的那句是 `unattended_message` 的另一組參數。
     /// 兩句對「這張畫面有沒有被引用」不准講相反的話。
+    ///
+    /// **這條不看 `ops.rs`。** `sister-hands` 連 `sister-cli` 都不 link；
+    /// 跟 ops 對帳的是 `ops.rs` 裡那條同名測試。
     #[test]
-    fn replay_and_ops_messages_do_not_disagree_on_whether_the_target_frame_was_cited() {
+    fn idless_and_identified_unattended_messages_do_not_disagree_on_citation() {
         // match 沒有 `_`：加一種就非補這一臂不可。
         for why in TargetFrameGap::ALL {
             let (fact, frame, origin): (Option<i64>, Option<i64>, Option<&str>) = match why {
@@ -1202,9 +1185,7 @@ mod tests {
     }
 
     fn claims_target_frame_uncited(s: &str) -> bool {
-        s.contains("沒有可核對的引用畫面")
-            || s.contains("沒有被引用的畫面")
-            || s.contains("承諾沒有引用")
+        s.contains("承諾沒有引用")
     }
 
     fn claims_cited_by_only_one_pass(s: &str) -> bool {

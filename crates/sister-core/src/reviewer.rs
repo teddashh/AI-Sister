@@ -15,14 +15,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::brain::{
-    self, CommitmentCandidate, Entity, EvidenceRef, OutboundOutcome, SpawnOutcome, spawn_cli,
+    self, CommitmentCandidate, Entity, EvidenceRef, OutboundOutcome, ProcessStart, SpawnOutcome,
+    spawn_cli,
 };
 use crate::config::BrainConfig;
 use crate::consent::Consent;
 use crate::db::{
     CommitmentInsert, DaySummaryInsert, Db, DivergenceInsert, DualPassDivergences, EntityMemory,
-    L2Author, L2CardRow, L2Insert, NOTHING_TO_REVIEW_HEAD, OutboundInsert, RecheckInsert,
-    RecheckStats, ReviewerNotes, ReviewerRunInsert,
+    L2Author, L2CardRow, L2Insert, MISSING_SEGMENT_NOTE_HEAD, NOTHING_TO_REVIEW_HEAD,
+    OutboundInsert, RecheckInsert, RecheckStats, ReviewerNotes, ReviewerRunInsert,
 };
 use crate::model::Millis;
 
@@ -267,15 +268,16 @@ pub fn format_reviewer_visibility(
     // 一列）：分歧回答「兩份答案對不對得上」，拒絕回答「她拒了哪幾步」。
     // 標籤不同是因為它們回答那一列的不同問題，不是因為取了不同的列。
     // `answers_got = 0` 的那一輪兩塊一起改口：不是分歧、也沒資格說她拒了
-    // 什麼。第三塊（說明）讀最新一列 `skip_reason IS NULL`（含零次呼叫），
-    // 才可能是更新的一列。
+    // 什麼。拒絕那一臂的標籤是「試著問模型」，和「問過模型」、notes 的
+    // 「最近一次審閱」兩兩不同。第三塊（說明）讀最新一列
+    // `skip_reason IS NULL`（含零次呼叫），才可能是更新的一列。
     match refusals {
         crate::db::ReviewerRefusals::NeverRan => {
             out.push_str("審閱還沒問過模型；目前沒有資格回答她拒絕了什麼。\n\n");
         }
         crate::db::ReviewerRefusals::GotNoAnswer { run_id } => {
             out.push_str(&format!(
-                "最近一次審閱（輪次 #{run_id}）沒拿到模型的答案；目前沒有資格回答她拒絕了什麼。\n\n"
+                "最近一次試著問模型的審閱（輪次 #{run_id}）沒拿到模型的答案；目前沒有資格回答她拒絕了什麼。\n\n"
             ));
         }
         crate::db::ReviewerRefusals::None { run_id } => {
@@ -770,9 +772,9 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
     // ——我實測過——模型只指了一步，畫面上會印「她拒絕了 2 個模型指的下一步」。
     let mut missing_segments: Vec<String> = Vec::new();
     let mut calls = 0u32;
-    // 幾個 pass 真的吐出能讀的 JSON。和 `calls` 分開：那個數的是試了幾次
-    // （也是扣了幾次額度），這個數的是問到幾次。叫不起 CLI 的那一輪
-    // `calls += 2`、這裡仍是 0。
+    // 幾個 pass 真的問到了（提示送完、時限內結束、stdout 能 parse）。
+    // 和 `calls` 分開：那個數的是試了幾次（也是扣了幾次額度）。
+    // spawn 失敗或逾時，stdout 裡就算有 JSON 也不算。
     let mut answers_got = 0u32;
     let mut l2_revisions = 0u32;
     let mut budget_left = remaining;
@@ -942,8 +944,11 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         log_outbound(input.db, &run_day, &command, &args, card, &spawn_a)?;
         log_outbound(input.db, &run_day, &command, &args, card, &spawn_b)?;
 
-        let parsed_a = parse_pass(&spawn_a.stdout);
-        let parsed_b = parse_pass(&spawn_b.stdout);
+        // `answers_got` 和後面寫承諾的 match 用同一套判準：spawn 失敗或逾時
+        // 的 stdout 不是這一題的答案，不管能不能 parse。只數 stdout 的話，
+        // CLI 沒登入就印一份 JSON、或印完才卡住，會被收成「問到了」。
+        let parsed_a = parse_usable_pass(&spawn_a);
+        let parsed_b = parse_usable_pass(&spawn_b);
         if parsed_a.is_some() {
             answers_got += 1;
         }
@@ -1235,7 +1240,7 @@ fn missing_segment_line(
             "，或那段範圍還沒算過"
         };
         format!(
-            "這張卡片指的那一段（{}）現在查不到（{CUT_CHANGED_AS_EXAMPLE}{uncomputed_example}）；那張卡片的起點之後{cap_min}分鐘內還留著紀錄{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
+            "{MISSING_SEGMENT_NOTE_HEAD}（{}）現在查不到（{CUT_CHANGED_AS_EXAMPLE}{uncomputed_example}）；那張卡片的起點之後{cap_min}分鐘內還留著紀錄{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
             card.segment_ref
         )
     } else {
@@ -1257,7 +1262,7 @@ fn missing_segment_line(
         // 沒有「跨過 from」可跨；過了保留期的卡片會被收進 parents、連根
         // 墓碑，走不到這一臂。
         format!(
-            "這張卡片指的那一段（{}）現在查不到，而且那張卡片的起點之後{cap_min}分鐘內也沒有留下任何原始紀錄，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
+            "{MISSING_SEGMENT_NOTE_HEAD}（{}）現在查不到，而且那張卡片的起點之後{cap_min}分鐘內也沒有留下任何原始紀錄，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
             card.segment_ref
         )
     }
@@ -1430,13 +1435,51 @@ fn resolve_allowed_next_step(
     })
 }
 
-/// 畫面上 pass A／B 那兩行。叫不起來的時候 stdout 是空的，空字串看起來像
-/// 「有跑、沒說話」；真正的原因在 `spawn_error`。
+/// 畫面上 pass A／B 那兩行。`spawn_error` 在的時候 stdout **不一定空**：
+/// CLI 立刻退的那條路特地先把管子讀乾淨，真正有用的常常是它印的
+/// （沒登入、參數不對），不是我們的「Broken pipe」。兩邊都給人看，各截 400 字。
 fn pass_excerpt(spawn: &SpawnOutcome) -> String {
+    const CAP: usize = 400;
+    let stdout: String = spawn.stdout.chars().take(CAP).collect();
     if let Some(error) = &spawn.spawn_error {
-        error.clone()
+        let error: String = error.chars().take(CAP).collect();
+        if stdout.is_empty() {
+            error
+        } else {
+            format!("{error}；CLI 說：{stdout}")
+        }
+    } else if spawn.timed_out {
+        if stdout.is_empty() {
+            "逾時".into()
+        } else {
+            format!("逾時；CLI 說：{stdout}")
+        }
     } else {
-        spawn.stdout.chars().take(400).collect()
+        stdout
+    }
+}
+
+/// 一個 pass 為什麼沒有可用的 JSON。只有 [`ProcessStart::NeverStarted`]
+/// 才說「叫不起 CLI」；行程起來了的，講它自己的那件事。
+fn unusable_pass_clause(spawn: &SpawnOutcome) -> (bool, String) {
+    match spawn.process_start {
+        ProcessStart::NeverStarted => (true, "叫不起 CLI".into()),
+        ProcessStart::Unobserved => (
+            false,
+            spawn
+                .spawn_error
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "執行緒炸了".into()),
+        ),
+        ProcessStart::Started if spawn.timed_out => (true, "逾時".into()),
+        ProcessStart::Started => {
+            if let Some(error) = &spawn.spawn_error {
+                (true, error.clone())
+            } else {
+                (true, "沒有可用的 JSON".into())
+            }
+        }
     }
 }
 
@@ -1447,20 +1490,41 @@ fn no_usable_json_reason(
     spawn_a: &SpawnOutcome,
     spawn_b: &SpawnOutcome,
 ) -> String {
-    match (
-        pair.0.is_some(),
-        pair.1.is_some(),
-        spawn_a.spawn_error.is_some(),
-        spawn_b.spawn_error.is_some(),
-    ) {
-        (false, false, true, true) => "兩個 pass 都叫不起 CLI".into(),
-        (false, false, true, false) => "pass A 叫不起 CLI，pass B 沒有可用的 JSON".into(),
-        (false, false, false, true) => "pass B 叫不起 CLI，pass A 沒有可用的 JSON".into(),
-        (false, false, false, false) => "兩個 pass 都沒有可用的 JSON".into(),
-        (true, false, _, true) => "pass B 叫不起 CLI".into(),
-        (false, true, true, _) => "pass A 叫不起 CLI".into(),
+    let (prefix_a, a) = unusable_pass_clause(spawn_a);
+    let (prefix_b, b) = unusable_pass_clause(spawn_b);
+    let labelled_a = if prefix_a {
+        format!("pass A {a}")
+    } else {
+        a.clone()
+    };
+    let labelled_b = if prefix_b {
+        format!("pass B {b}")
+    } else {
+        b.clone()
+    };
+    match (pair.0.is_some(), pair.1.is_some()) {
+        (false, false) => {
+            if prefix_a
+                && prefix_b
+                && a == b
+                && (a == "叫不起 CLI" || a == "逾時" || a == "沒有可用的 JSON")
+            {
+                format!("兩個 pass 都{a}")
+            } else {
+                format!("{labelled_a}，{labelled_b}")
+            }
+        }
+        (true, false) => labelled_b,
+        (false, true) => labelled_a,
         _ => "其中一個 pass 沒有可用的 JSON".into(),
     }
+}
+
+fn parse_usable_pass(spawn: &SpawnOutcome) -> Option<ReviewPassCard> {
+    if !spawn.completed_the_ask() {
+        return None;
+    }
+    parse_pass(&spawn.stdout)
 }
 
 fn parse_pass(stdout: &str) -> Option<ReviewPassCard> {
@@ -1492,6 +1556,7 @@ fn empty_spawn(msg: &str) -> SpawnOutcome {
         timed_out: false,
         spawn_error: Some(msg.into()),
         exit_code: None,
+        process_start: ProcessStart::Unobserved,
     }
 }
 
@@ -1933,7 +1998,7 @@ mod tests {
             ""
         };
         format!(
-            "這張卡片指的那一段（{segment_ref}）現在查不到（{CUT_CHANGED_AS_EXAMPLE}{uncomputed_example}）；那張卡片的起點之後{cap_min}分鐘內還留著紀錄{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。"
+            "{MISSING_SEGMENT_NOTE_HEAD}（{segment_ref}）現在查不到（{CUT_CHANGED_AS_EXAMPLE}{uncomputed_example}）；那張卡片的起點之後{cap_min}分鐘內還留著紀錄{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。"
         )
     }
 
@@ -1941,6 +2006,10 @@ mod tests {
     fn assert_no_shared_label_across_rounds(shown: &str) {
         use std::collections::{BTreeMap, BTreeSet};
         let markers = [
+            (
+                "最近一次試著問模型的審閱",
+                "最近一次試著問模型的審閱（輪次 #",
+            ),
             ("最近一次問過模型的審閱", "最近一次問過模型的審閱（輪次 #"),
             ("最近一次雙 pass", "最近一次雙 pass（審閱輪次 #"),
             ("最近一次審閱", "最近一次審閱（輪次 #"),
@@ -5061,10 +5130,14 @@ mod tests {
             &db.entity_memory().expect("entities"),
         );
 
-        // 正面的一道，擋「靠刪掉整段來過」。
+        // 「審閱」出現在分歧那一塊的標題裡，守不住拒絕那一段。
         assert!(
             shown.contains("審閱") || shown.contains("拒絕"),
             "這一塊還是要有話講：{shown}"
+        );
+        assert!(
+            shown.contains("沒拿到模型的答案"),
+            "拒絕那一塊還是要有話講（擋『靠刪掉整段來過』）：{shown}"
         );
         assert!(
             !shown.contains("沒有拒絕任何下一步"),
@@ -5223,13 +5296,236 @@ mod tests {
             &db.latest_reviewer_notes().expect("notes"),
             &db.entity_memory().expect("entities"),
         );
+        // 「審閱」出現在分歧那一塊的標題裡，守不住實體那一段。
         assert!(
             shown.contains("審閱") || shown.contains("拒絕"),
             "這一塊還是要有話講：{shown}"
         );
         assert!(
+            shown.contains("目前不是『辨識到 0 個』"),
+            "實體那一塊還是要有話講（擋『靠刪掉整段來過』）：{shown}"
+        );
+        assert!(
             !shown.contains("沒有活著的實體"),
             "一個模型行程都沒起來的一輪，不可以被端成「辨識到 0 個」：{shown}"
+        );
+    }
+
+    #[test]
+    fn pass_excerpt_keeps_what_the_cli_said_when_spawn_failed() {
+        let spawn = SpawnOutcome {
+            payload_chars_written: 0,
+            duration_ms: 1,
+            stdout: "Error: not logged in".into(),
+            stderr: String::new(),
+            timed_out: false,
+            spawn_error: Some("寫入 CLI stdin 失敗：Broken pipe".into()),
+            exit_code: Some(1),
+            process_start: ProcessStart::Started,
+        };
+        let shown = pass_excerpt(&spawn);
+        assert!(
+            shown.contains("寫入 CLI stdin 失敗"),
+            "我們自己的錯誤不見了：{shown}"
+        );
+        assert!(
+            shown.contains("Error: not logged in"),
+            "CLI 說的話被丟掉了：{shown}"
+        );
+    }
+
+    #[test]
+    fn a_started_cli_that_exits_is_not_called_could_not_start() {
+        let failed = SpawnOutcome {
+            payload_chars_written: 0,
+            duration_ms: 1,
+            stdout: "not logged in".into(),
+            stderr: String::new(),
+            timed_out: false,
+            spawn_error: Some("寫入 CLI stdin 失敗：Broken pipe".into()),
+            exit_code: Some(1),
+            process_start: ProcessStart::Started,
+        };
+        let reason = no_usable_json_reason((None, None), &failed, &failed);
+        assert!(
+            !reason.contains("叫不起 CLI"),
+            "行程起來了還說叫不起：{reason}"
+        );
+        assert!(
+            reason.contains("寫入 CLI stdin 失敗"),
+            "真正的原因不見了：{reason}"
+        );
+    }
+
+    /// `migrate_016` 的白名單靠這個開頭把舊 `detail` 裡的說明搬到 `notes`。
+    /// 拒絕全部以「拒絕 allowed_next_step：」開頭，對不上。
+    #[test]
+    fn missing_segment_note_head_does_not_match_a_real_refusal() {
+        for reason in [
+            "拒絕 allowed_next_step：fact:1 不存在",
+            "拒絕 allowed_next_step：fact:1 沒有列在這次給模型的 L1 facts",
+            "拒絕 allowed_next_step：fact:1 那一列已經不是當初列給模型看的那一列",
+            "拒絕 allowed_next_step：fact:1 的 url 不是以 http:// 或 https:// 開頭",
+            "拒絕 allowed_next_step：fact:1 的 kind 是 window_title，不是 url 或 file_path",
+        ] {
+            assert!(
+                !reason.starts_with(MISSING_SEGMENT_NOTE_HEAD),
+                "拒絕句對上了搬 notes 的白名單：{reason}"
+            );
+            assert!(
+                reason.starts_with("拒絕 allowed_next_step："),
+                "拒絕句改開頭了，白名單那一側也要重看：{reason}"
+            );
+        }
+        assert!(
+            !MISSING_SEGMENT_NOTE_HEAD.starts_with("拒絕 allowed_next_step："),
+            "兩個開頭對上了"
+        );
+    }
+
+    /// R1（鏡頭 A 第 1 條 ＝ 鏡頭 B G2，兩個獨立鏡頭撞到同一條）
+    ///
+    /// 新的 `GotNoAnswer` 那一臂印「最近一次審閱（輪次 #N）」，而 notes 那一塊
+    /// 也印「最近一次審閱（輪次 #M）」。兩塊取的是不同的列：
+    /// refusals 要 `calls_used > 0`，notes（`latest_reviewer_run_copy`）不要。
+    /// 所以同一個畫面上，同一個標籤會配上兩個不同輪次——那正是這個分支
+    /// 在 #73 修掉的那件事，從新加的那一臂走回來。
+    #[test]
+    fn ted_r1_gotnoanswer_shares_a_label_with_the_notes_block() {
+        let shown = format_reviewer_visibility(
+            &DualPassDivergences::NeverRan,
+            &ReviewerRefusals::GotNoAnswer { run_id: 5 },
+            &ReviewerNotes::Some {
+                run_id: 6,
+                lines: vec!["這張卡片指的那一段查不到".into()],
+            },
+            &EntityMemory::NeverReviewed,
+        );
+        assert_no_shared_label_across_rounds(&shown);
+    }
+
+    /// R2（鏡頭 B G3）
+    ///
+    /// `entity_memory` 的 `got_answer` 掃的是**整張表**（沒有 ORDER BY / LIMIT），
+    /// 而 `latest_reviewer_refusals` / `latest_dual_pass_divergences` 取的是
+    /// 最新那一列。所以只要歷史上有任何一輪問到過答案，這一輪就算一個模型
+    /// 行程都沒起來，實體那一塊還是會說「跑過，但目前沒有活著的實體」。
+    ///
+    /// 也就是說 `a_round_whose_cli_never_started_is_not_identified_zero_entities`
+    /// 只在「這顆資料庫從頭到尾只跑過這一輪」的時候成立——真機器上永遠不是。
+    #[test]
+    fn ted_r2_a_dead_cli_round_is_not_zero_entities_even_after_an_earlier_good_round() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+
+        // 更早的一輪：真的問到了答案。唯一和上面那條測試的差別就是這一段。
+        let earlier = ts - 60_000;
+        let day = crate::brain::local_day_key(earlier).expect("day key");
+        db.insert_reviewer_run(&crate::db::ReviewerRunInsert {
+            ts: earlier,
+            day_key: &day,
+            kind: "interval",
+            skip_reason: None,
+            candidate_count: Some(1),
+            recheck_count: Some(0),
+            wrote_commitments: 0,
+            divergences: 0,
+            calls_used: 2,
+            budget_used: 2,
+            budget_limit: 40,
+            detail: "",
+            notes: "",
+            answers_got: Some(2),
+        })
+        .expect("earlier run");
+
+        let result = run_diverge(
+            &mut db,
+            "sister-no-such-brain-binary-9d3f".into(),
+            vec![],
+            ts,
+        );
+        assert!(result.skip.is_none(), "這一輪要真的跑過：{:?}", result.skip);
+
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().expect("divergences"),
+            &db.latest_reviewer_refusals().expect("refusals"),
+            &db.latest_reviewer_notes().expect("notes"),
+            &db.entity_memory().expect("entities"),
+        );
+
+        assert!(
+            !shown.contains("Reviewer 跑過，但目前沒有活著的實體"),
+            "這一輪一個模型行程都沒起來，畫面卻說跑過而且沒有實體：{shown}"
+        );
+    }
+
+    /// schema 17 之前的舊列，`answers_got` 是 NULL＝**沒量過**，不是量過是零。
+    ///
+    /// `migrate_017` 刻意不加 `DEFAULT 0`（`db.rs:602-609` 的註解），就是為了讓
+    /// 這兩種 0 分得開。這條釘的是讀取端有沒有照那份契約走。
+    ///
+    /// 我在看修法之前寫的。**這一條在 round 9 上是綠的**，它是迴歸網不是 bug
+    /// 報告：把 `db.rs:4931` 寫成 `answers_got.unwrap_or(0) == 0` 會讓它紅。
+    /// 我實測過那個突變今天是**全綠**的（`cargo test --workspace`，19 個
+    /// test result 行），而同一個突變打在孿生的 `latest_dual_pass_divergences`
+    /// （`db.rs:4990`）會紅 2 條——同一份 NULL 契約三個讀取端，只有兩個有牙齒。
+    ///
+    /// 使用者端的後果：任何 schema 17 之前建的資料庫，升級後最新那一列的
+    /// `answers_got` 都是 NULL。讀錯的話整份拒絕清單會消失，畫面改口說
+    /// 「沒拿到模型的答案」——那正是這個分支在修的病，從 migration 走回來。
+    #[test]
+    fn ted_an_old_row_without_answers_got_must_keep_showing_its_refusals() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let day = crate::brain::local_day_key(ts).expect("day key");
+        db.insert_reviewer_run(&ReviewerRunInsert {
+            ts,
+            day_key: &day,
+            kind: "interval",
+            skip_reason: None,
+            candidate_count: Some(1),
+            recheck_count: Some(0),
+            wrote_commitments: 0,
+            divergences: 0,
+            calls_used: 2,
+            budget_used: 2,
+            budget_limit: 40,
+            detail: "把某某某的信回掉",
+            notes: "",
+            // 這一欄是 NULL：這一列是升級前寫的，那時候還沒有人在量。
+            answers_got: None,
+        })
+        .expect("old row");
+
+        let refusals = db.latest_reviewer_refusals().expect("refusals");
+        assert!(
+            matches!(refusals, ReviewerRefusals::Some { .. }),
+            "NULL 是「沒量過」，不是「量過是零」；舊列的拒絕清單不可以消失：{refusals:?}"
+        );
+
+        let shown = format_reviewer_visibility(
+            &DualPassDivergences::NeverRan,
+            &refusals,
+            &ReviewerNotes::NeverRan,
+            &EntityMemory::NeverReviewed,
+        );
+        assert!(
+            shown.contains("把某某某的信回掉"),
+            "升級之後那一步的拒絕就看不見了：{shown}"
+        );
+        assert!(
+            !shown.contains("沒拿到模型的答案"),
+            "把 NULL 當成 0 了——這一列從來沒被量過：{shown}"
         );
     }
 

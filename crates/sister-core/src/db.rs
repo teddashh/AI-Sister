@@ -595,8 +595,47 @@ fn migrate_015(tx: &rusqlite::Transaction<'_>) -> Result<()> {
 }
 
 fn migrate_016(tx: &rusqlite::Transaction<'_>) -> Result<()> {
-    // 說明文字，不是證據。既有列補空字串：這一欄本來就沒裝過東西。
-    add_column_if_missing(tx, "reviewer_run", "notes", "TEXT NOT NULL DEFAULT ''")
+    // 說明文字，不是證據。舊版 `detail` 刻意裝兩種東西：真的拒絕，以及
+    // `missing_segment_line`（「這張卡片指的那一段…」）。新版 notes 才是
+    // 說明；只把既有列的 notes 補成空字串的話，舊列 `detail` 裡那些說明
+    // 會印在「問過模型的審閱拒絕掉的下一步」底下。
+    add_column_if_missing(tx, "reviewer_run", "notes", "TEXT NOT NULL DEFAULT ''")?;
+    split_legacy_missing_segment_notes(tx)
+}
+
+/// 舊 `detail` 裡以 [`MISSING_SEGMENT_NOTE_HEAD`] 開頭的行，搬到 `notes`。
+///
+/// 這是白名單，不是「看起來像說明」。拒絕全部以「拒絕 allowed_next_step：」
+/// 開頭，對不上這個頭。模型寫的下一步不會進 `detail`。
+fn split_legacy_missing_segment_notes(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let mut stmt = tx.prepare("SELECT id, detail, notes FROM reviewer_run")?;
+    let rows: Vec<(i64, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    for (id, detail, existing_notes) in rows {
+        let mut notes: Vec<String> = nonempty_lines(&existing_notes);
+        let mut kept = Vec::new();
+        let mut moved = false;
+        for line in detail.lines() {
+            if line.starts_with(MISSING_SEGMENT_NOTE_HEAD) {
+                if !notes.iter().any(|n| n == line) {
+                    notes.push(line.to_string());
+                }
+                moved = true;
+            } else if !line.is_empty() {
+                kept.push(line);
+            }
+        }
+        if !moved {
+            continue;
+        }
+        tx.execute(
+            "UPDATE reviewer_run SET detail = ?1, notes = ?2 WHERE id = ?3",
+            params![kept.join("\n"), notes.join("\n"), id],
+        )?;
+    }
+    Ok(())
 }
 
 fn migrate_017(tx: &rusqlite::Transaction<'_>) -> Result<()> {
@@ -4997,34 +5036,38 @@ impl Db {
     }
 
     pub fn entity_memory(&self) -> Result<EntityMemory> {
-        // 數的是**呼叫**，不是 `reviewer_run` 的列。一輪可以 `skip_reason IS
-        // NULL` 卻零次呼叫（窗裡根本沒有卡片、卡片全是使用者自己寫的、
-        // `five_class` 全空、預算剩不到兩次、原件被清掉、或沒有承諾候選），
-        // 而寫實體的那幾行全在 `calls += 2` 後面、同一個迴圈裡、中間沒有
-        // `continue`——所以那種一輪**構不到**它們，不算「看過了、辨識到 0 個」。
-        // 跟隔壁 `latest_dual_pass_divergences`、`latest_reviewer_refusals`
-        // 同一個拼法 `calls_used > 0`：前兩塊取同一列，問的是那一列的不同
-        // 問題（有沒有兩份答案可比 / 她拒了哪幾步）；這邊問有沒有開過 CLI。
+        // 挑列跟隔壁 `latest_dual_pass_divergences`、`latest_reviewer_refusals`
+        // 同一個拼法：`skip_reason IS NULL AND calls_used > 0` 的最新一列。
+        // 前兩塊問那一列的不同問題（有沒有兩份答案可比 / 她拒了哪幾步）；
+        // 這邊問那一列有沒有問到答案。實體清單本身仍是此刻活著的列——
+        // 空不空是現況，但「空」能不能講成「辨識到 0 個」取決於最新那一輪
+        // 有沒有問到。
+        //
+        // 一輪可以 `skip_reason IS NULL` 卻零次呼叫（窗裡根本沒有卡片、卡片
+        // 全是使用者自己寫的、`five_class` 全空、預算剩不到兩次、原件被清掉、
+        // 或沒有承諾候選），那種一輪**構不到**寫實體的那幾行，不算「看過了」。
         //
         // `calls_used` 數的是試了幾次。叫不起 CLI 的那一輪也是 `> 0`，但
         // `answers_got = 0`：那不是「看過了、辨識到 0 個」。舊列這欄是 NULL，
         // 問不出來，沿用「試過就算看過」的舊判準。
-        let tried: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM reviewer_run
-             WHERE skip_reason IS NULL AND calls_used > 0)",
-            [],
-            |r| r.get(0),
-        )?;
-        if !tried {
+        //
+        // 掃整張表的 `EXISTS (... answers_got IS NULL OR answers_got > 0)`
+        // 是錯的：歷史上任何一輪問到過，之後一輪一個行程都沒起來，仍會說
+        // 「跑過，但目前沒有活著的實體」。
+        let answers_got: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                "SELECT answers_got FROM reviewer_run
+                 WHERE skip_reason IS NULL AND calls_used > 0
+                 ORDER BY ts DESC, id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(answers_got) = answers_got else {
             return Ok(EntityMemory::NeverReviewed);
-        }
-        let got_answer: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM reviewer_run
-             WHERE skip_reason IS NULL AND calls_used > 0
-               AND (answers_got IS NULL OR answers_got > 0))",
-            [],
-            |r| r.get(0),
-        )?;
+        };
+        let got_answer = answers_got != Some(0);
         let entities = self.live_entities()?;
         if entities.is_empty() {
             return Ok(if got_answer {
@@ -6852,6 +6895,11 @@ pub enum ReviewerNotes {
 /// 拒絕改看 [`Db::latest_reviewer_refusals`] 的 `calls_used > 0`。
 pub const NOTHING_TO_REVIEW_HEAD: &str = "這段期間沒有還沒審過的 L2 假設";
 
+/// 卡片那一段查不到時，說明句的開頭。舊版誤裝進 `reviewer_run.detail`，
+/// [`migrate_016`] 靠這個白名單把它們搬到 `notes`。拒絕全部以
+/// 「拒絕 allowed_next_step：」開頭，對不上。
+pub const MISSING_SEGMENT_NOTE_HEAD: &str = "這張卡片指的那一段";
+
 fn nonempty_lines(text: &str) -> Vec<String> {
     text.lines()
         .filter(|line| !line.trim().is_empty())
@@ -6921,7 +6969,7 @@ pub struct EntityWithMentions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityMemory {
     NeverReviewed,
-    /// 有試過問模型，但沒有任何一輪拿到答案。不是辨識到 0 個。
+    /// 最新一輪試過問模型，但沒拿到答案。不是辨識到 0 個。
     GotNoAnswer,
     Empty,
     Present(Vec<EntityWithMentions>),
@@ -8614,6 +8662,70 @@ mod tests {
             row.agreed_evidence_json, None,
             "既有列必須維持 NULL，不可以回填成「兩個 pass 都同意」"
         );
+    }
+
+    /// 舊版 `detail` 裝了拒絕和「這張卡片指的那一段」兩種東西。升級時要把
+    /// 後者搬到 `notes`，不然會印在「問過模型的審閱拒絕掉的下一步」底下。
+    #[test]
+    fn migrate_016_moves_missing_segment_lines_out_of_detail() {
+        let tmp = TmpDir::new("migrate-016-notes");
+        let path = tmp.join("sister.db");
+        Db::open(&path).expect("create");
+        {
+            let c = Connection::open(&path).expect("raw");
+            c.execute_batch(
+                "ALTER TABLE reviewer_run DROP COLUMN notes;
+                 PRAGMA user_version = 15;",
+            )
+            .expect("downgrade to 15");
+            let mixed = format!(
+                "拒絕 allowed_next_step：fact:1 不存在\n{MISSING_SEGMENT_NOTE_HEAD}（segment:1）現在查不到；所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。"
+            );
+            c.execute(
+                "INSERT INTO reviewer_run(
+                    ts, day_key, kind, skip_reason, candidate_count, recheck_count,
+                    wrote_commitments, divergences, calls_used, budget_used,
+                    budget_limit, detail
+                 ) VALUES(10, '1970-01-01', 'interval', NULL, 1, 0, 0, 0, 2, 2, 40, ?1)",
+                [mixed],
+            )
+            .expect("legacy mixed detail");
+            c.execute(
+                "INSERT INTO reviewer_run(
+                    ts, day_key, kind, skip_reason, candidate_count, recheck_count,
+                    wrote_commitments, divergences, calls_used, budget_used,
+                    budget_limit, detail
+                 ) VALUES(20, '1970-01-01', 'interval', NULL, 1, 0, 0, 0, 2, 2, 40, ?1)",
+                ["拒絕 allowed_next_step：fact:2 不存在"],
+            )
+            .expect("refusal-only row");
+        }
+        let db = Db::open(&path).expect("upgrade");
+        let rows: Vec<(String, String)> = {
+            let mut stmt = db
+                .conn
+                .prepare("SELECT detail, notes FROM reviewer_run ORDER BY ts")
+                .expect("prepare");
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .expect("query")
+                .collect::<rusqlite::Result<_>>()
+                .expect("rows")
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "拒絕 allowed_next_step：fact:1 不存在");
+        assert!(
+            rows[0].1.starts_with(MISSING_SEGMENT_NOTE_HEAD),
+            "說明還留在拒絕那一欄：notes={:?} detail={:?}",
+            rows[0].1,
+            rows[0].0
+        );
+        assert!(
+            !rows[0].0.contains(MISSING_SEGMENT_NOTE_HEAD),
+            "說明沒搬乾淨：{}",
+            rows[0].0
+        );
+        assert_eq!(rows[1].0, "拒絕 allowed_next_step：fact:2 不存在");
+        assert_eq!(rows[1].1, "", "真的拒絕不可以被搬去 notes：{:?}", rows[1]);
     }
 
     #[test]
