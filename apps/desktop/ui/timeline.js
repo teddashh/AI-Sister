@@ -1431,6 +1431,8 @@ function outboundOutcome(value) {
       return "CLI 叫不起來／失敗";
     case "timeout":
       return "逾時";
+    case "no_answer":
+      return "CLI 跑完但沒有回答";
     case "bad_json":
       return "拿回的 JSON 不能用，沒寫卡片";
     default:

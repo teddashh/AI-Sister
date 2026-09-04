@@ -883,6 +883,9 @@ capture 層本身就是 recorder。
       跑完、只是非零退出的 CLI 會被 `sister brain log` 記成「結局 spawn_failed」。
       方向是對的（alpha.87 同樣情境記成 **Success**，更糟），粒度不夠。
       加 variant 會動到資料庫詞彙＋桌面＋稽核三個讀取端，留給下一版。（#93）
+      **alpha.89 補上了。** 新增 `no_answer`，並讓終端機和字母人的中文顯示都跟著
+      分開；稽核畫面同時保留括號裡的資料庫 token。它不再借用「CLI 叫不起來／失敗」
+      描述一支確實起來、確實跑完的程式。
 
   - **字母人那半邊完全沒有這道檢查。** 上面講的全部只在 `sister do` 這條路上。
     `apps/desktop` 的 `hands_execute` → `sister_hands::execute_with(Level::Suggest,…)`
@@ -1075,6 +1078,9 @@ capture 層本身就是 recorder。
    退場**、而提示剛好整份塞得進作業系統的管子緩衝區。正式上限是 24 KiB，
    Linux 的管子是 64 KiB，所以那份提示算「送完了」，這條規則不會攔它。
    （不是理論——CI run 33249588350 就是這樣紅的，只是那次紅在測試身上。）
+   **alpha.88 先修好 reviewer；alpha.89 把同一個 `completed_the_ask()` 閘門接到
+   interpreter 和 watch。** 現在非零退出或拿不到退出碼的 CLI 即使印出合法 JSON，
+   也不能寫進 L2，不能回答「等到了」或「還沒有」。
 2. `sister do` 收尾那一行有六格拒絕，今天真的產得出來的只有兩格
    （範圍不涵蓋、拔手）。另外四格是**先擺好在等的**：
    `separate_approval_required` 和 `never_inherited_class` 對三種已實作的
