@@ -1741,6 +1741,7 @@ pub mod review {
                 reviewer::format_reviewer_visibility(
                     &input.db.latest_dual_pass_divergences()?,
                     &input.db.latest_reviewer_refusals()?,
+                    &input.db.latest_reviewer_notes()?,
                     &input.db.entity_memory()?,
                 )
             );
@@ -1758,10 +1759,11 @@ pub mod review {
         );
         let divergences = input.db.latest_dual_pass_divergences()?;
         let refusals = input.db.latest_reviewer_refusals()?;
+        let notes = input.db.latest_reviewer_notes()?;
         let entities = input.db.entity_memory()?;
         print!(
             "{}",
-            reviewer::format_reviewer_visibility(&divergences, &refusals, &entities)
+            reviewer::format_reviewer_visibility(&divergences, &refusals, &notes, &entities)
         );
         Ok(())
     }
@@ -2016,6 +2018,7 @@ pub mod act {
         declined: u32,
         blocked: u32,
         target_not_cited: u32,
+        recorded_before_this_check: u32,
         needs_press: u32,
         never_inherits: u32,
         mismatched: u32,
@@ -2033,6 +2036,9 @@ pub mod act {
                 sister_hands::RefusalBucket::Pulled => self.pulled += 1,
                 sister_hands::RefusalBucket::OutsideGrant => self.blocked += 1,
                 sister_hands::RefusalBucket::TargetNotOnACitedScreen => self.target_not_cited += 1,
+                sister_hands::RefusalBucket::RecordedBeforeThisCheck => {
+                    self.recorded_before_this_check += 1
+                }
                 sister_hands::RefusalBucket::NeedsALivePressThisRun => self.needs_press += 1,
                 sister_hands::RefusalBucket::NeverInheritsTaskGrant => self.never_inherits += 1,
                 sister_hands::RefusalBucket::ShownStepMismatch => self.mismatched += 1,
@@ -2057,8 +2063,14 @@ pub mod act {
             }
             if self.target_not_cited > 0 {
                 out.push_str(&format!(
-                    "，{} 步的目標沒有被引用的畫面（放寬授權沒有用；請在終端機裡自己看過再按）",
+                    "，{} 步的目標沒有兩個 pass 都指過的畫面（放寬授權沒有用；請在終端機裡自己看過再按）",
                     self.target_not_cited
+                ));
+            }
+            if self.recorded_before_this_check > 0 {
+                out.push_str(&format!(
+                    "，{} 步的承諾記在加這道檢查之前，問不出兩個 pass 同不同意這張畫面（放寬授權沒有用）",
+                    self.recorded_before_this_check
                 ));
             }
             if self.needs_press > 0 {
@@ -2168,50 +2180,46 @@ pub mod act {
         target: Option<(i64, &str)>,
     ) -> Result<Option<(String, sister_hands::TargetFrameGap)>> {
         let Some((fact_id, expected_raw)) = target else {
-            return Ok(Some((
-                "無人值守拒絕：這筆承諾沒有記下一步目標的 fact 出處。".into(),
-                sister_hands::TargetFrameGap::NoTargetRecorded,
-            )));
+            let why = sister_hands::TargetFrameGap::NoTargetRecorded;
+            return Ok(Some((why.unattended_message(None, None, None), why)));
         };
         let frame_id = match source.frame_for_target_fact(fact_id, expected_raw)? {
             TargetFrame::Forgotten => {
+                let why = sister_hands::TargetFrameGap::Forgotten;
                 return Ok(Some((
-                    format!("無人值守拒絕：下一步目標 fact:{fact_id} 已被忘掉、或過了保留期。"),
-                    sister_hands::TargetFrameGap::Forgotten,
+                    why.unattended_message(Some(fact_id), None, None),
+                    why,
                 )));
             }
             TargetFrame::RowReplaced => {
+                let why = sister_hands::TargetFrameGap::RowReplaced;
                 return Ok(Some((
-                    format!("無人值守拒絕：下一步目標 fact:{fact_id} 那一列已經換成別的內容。"),
-                    sister_hands::TargetFrameGap::RowReplaced,
+                    why.unattended_message(Some(fact_id), None, None),
+                    why,
                 )));
             }
             TargetFrame::FrameNotRecorded(origin) => {
                 // 這裡收的是 `FramelessOrigin`，不是 `FactOrigin`：後者的 `Screen`
                 // 填進下面那句話會變成「來自畫面，沒有畫面出處」。見型別上的註解。
                 let origin_text = match origin {
-                    sister_core::db::FramelessOrigin::WindowTitle => "來自視窗標題".to_owned(),
-                    sister_core::db::FramelessOrigin::Clipboard => "來自剪貼簿".to_owned(),
+                    sister_core::db::FramelessOrigin::WindowTitle => "來自視窗標題",
+                    sister_core::db::FramelessOrigin::Clipboard => "來自剪貼簿",
                     sister_core::db::FramelessOrigin::ScreenTextWithoutFrame => {
-                        "記著是從畫面讀來的，卻沒有記是哪一張".to_owned()
+                        "記著是從畫面讀來的，卻沒有記是哪一張"
                     }
-                    sister_core::db::FramelessOrigin::Unknown => "來源沒有記清楚".to_owned(),
+                    sister_core::db::FramelessOrigin::Unknown => "來源沒有記清楚",
                 };
+                let why = sister_hands::TargetFrameGap::FrameNotRecorded;
                 return Ok(Some((
-                    format!(
-                        "無人值守拒絕：下一步目標 fact:{fact_id} {origin_text}，沒有畫面出處，所以無人值守永遠不會做它。要做請在終端機裡自己看過再按。"
-                    ),
-                    sister_hands::TargetFrameGap::FrameNotRecorded,
+                    why.unattended_message(Some(fact_id), None, Some(origin_text)),
+                    why,
                 )));
             }
             TargetFrame::Known(id) => id,
         };
         let Some(agreed_json) = agreed_evidence_json else {
-            return Ok(Some((
-                "無人值守拒絕：這筆承諾記在加這道檢查之前，問不出兩個 pass 同不同意這張畫面。"
-                    .into(),
-                sister_hands::TargetFrameGap::RecordedBeforeAgreedEvidence,
-            )));
+            let why = sister_hands::TargetFrameGap::RecordedBeforeAgreedEvidence;
+            return Ok(Some((why.unattended_message(None, None, None), why)));
         };
         let agreed_refs: Vec<String> = serde_json::from_str(agreed_json).with_context(|| {
             format!("兩個 pass 都指過的證據清單不是 JSON 字串陣列：{agreed_json}")
@@ -2223,11 +2231,10 @@ pub mod act {
         let union_refs: Vec<String> = serde_json::from_str(union_evidence_json)
             .with_context(|| format!("證據清單不是 JSON 字串陣列：{union_evidence_json}"))?;
         if union_refs.iter().any(|reference| reference == &target_ref) {
+            let why = sister_hands::TargetFrameGap::CitedByOnlyOnePass;
             Ok(Some((
-                format!(
-                    "無人值守拒絕：只有一個 pass 指過下一步目標 fact:{fact_id} 的畫面 frame:{frame_id}。"
-                ),
-                sister_hands::TargetFrameGap::CitedByOnlyOnePass,
+                why.unattended_message(Some(fact_id), Some(frame_id), None),
+                why,
             )))
         } else {
             // **這裡不能再分出一句「兩個 pass 一張畫面都沒有共同指過」。**
@@ -2241,11 +2248,10 @@ pub mod act {
             // 實際發生的是這個目標的來源畫面從頭到尾沒被當成證據——那是 #49 那道
             // 檢查在擋，該查的是那筆 fact 哪來的。
             // 「只有一個 pass 指過」才是共識問題，它在上面那一臂。
+            let why = sister_hands::TargetFrameGap::FrameNotCited;
             Ok(Some((
-                format!(
-                    "無人值守拒絕：承諾沒有引用下一步目標 fact:{fact_id} 的畫面 frame:{frame_id}。"
-                ),
-                sister_hands::TargetFrameGap::FrameNotCited,
+                why.unattended_message(Some(fact_id), Some(frame_id), None),
+                why,
             )))
         }
     }
@@ -3492,6 +3498,134 @@ pub mod act {
                 "{uncited_msg}"
             );
             assert_ne!(cited_msg, uncited_msg);
+        }
+
+        #[test]
+        fn ops_and_replay_do_not_disagree_on_whether_the_target_frame_was_cited() {
+            struct Case {
+                target: Option<(i64, &'static str)>,
+                agreed: Option<&'static str>,
+                union: &'static str,
+                frame: TargetFrame,
+                expected_why: sister_hands::TargetFrameGap,
+            }
+            let cases = [
+                Case {
+                    target: None,
+                    agreed: Some("[]"),
+                    union: "[]",
+                    frame: TargetFrame::Forgotten,
+                    expected_why: sister_hands::TargetFrameGap::NoTargetRecorded,
+                },
+                Case {
+                    target: Some((1, "https://example.com")),
+                    agreed: Some("[]"),
+                    union: "[]",
+                    frame: TargetFrame::Forgotten,
+                    expected_why: sister_hands::TargetFrameGap::Forgotten,
+                },
+                Case {
+                    target: Some((1, "https://example.com")),
+                    agreed: Some("[]"),
+                    union: "[]",
+                    frame: TargetFrame::RowReplaced,
+                    expected_why: sister_hands::TargetFrameGap::RowReplaced,
+                },
+                Case {
+                    target: Some((1, "https://example.com")),
+                    agreed: Some("[]"),
+                    union: "[]",
+                    frame: TargetFrame::FrameNotRecorded(
+                        sister_core::db::FramelessOrigin::Clipboard,
+                    ),
+                    expected_why: sister_hands::TargetFrameGap::FrameNotRecorded,
+                },
+                Case {
+                    target: Some((1, "https://example.com")),
+                    agreed: None,
+                    union: r#"["frame:10"]"#,
+                    frame: TargetFrame::Known(10),
+                    expected_why: sister_hands::TargetFrameGap::RecordedBeforeAgreedEvidence,
+                },
+                Case {
+                    target: Some((1, "https://example.com")),
+                    agreed: Some("[]"),
+                    union: r#"["frame:10"]"#,
+                    frame: TargetFrame::Known(10),
+                    expected_why: sister_hands::TargetFrameGap::CitedByOnlyOnePass,
+                },
+                Case {
+                    target: Some((1, "https://example.com")),
+                    agreed: Some("[]"),
+                    union: r#"["frame:1"]"#,
+                    frame: TargetFrame::Known(10),
+                    expected_why: sister_hands::TargetFrameGap::FrameNotCited,
+                },
+            ];
+            for case in cases {
+                let source = Source {
+                    target_frames: [(1, case.frame)].into_iter().collect(),
+                    ..Source::default()
+                };
+                let (ops_msg, why) =
+                    unattended_target_frame_refusal(&source, case.agreed, case.union, case.target)
+                        .unwrap()
+                        .expect("refused");
+                assert_eq!(why, case.expected_why, "{ops_msg}");
+                let replay = RefusalReason::UnattendedTargetHasNoCitedFrame { why }.message();
+                let uncited = |s: &str| {
+                    s.contains("沒有可核對的引用畫面")
+                        || s.contains("沒有被引用的畫面")
+                        || s.contains("承諾沒有引用")
+                };
+                let one_pass = |s: &str| s.contains("只有一個 pass 指過");
+                assert_eq!(
+                    uncited(&ops_msg),
+                    uncited(&replay),
+                    "ops 與 replay 對「有沒有被引用」講相反：\nops={ops_msg}\nreplay={replay}"
+                );
+                assert_eq!(
+                    one_pass(&ops_msg),
+                    one_pass(&replay),
+                    "ops 與 replay 對「只有一個 pass」講相反：\nops={ops_msg}\nreplay={replay}"
+                );
+            }
+        }
+
+        #[test]
+        fn target_not_cited_clause_is_true_for_one_pass_and_for_uncited() {
+            let mut tally = Tally::default();
+            tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame {
+                why: sister_hands::TargetFrameGap::CitedByOnlyOnePass,
+            });
+            tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame {
+                why: sister_hands::TargetFrameGap::FrameNotCited,
+            });
+            assert_eq!(tally.target_not_cited, 2);
+            assert_eq!(tally.recorded_before_this_check, 0);
+            let clauses = tally.refusal_clauses();
+            assert!(
+                !clauses.contains("沒有被引用的畫面"),
+                "只有一個 pass 指過時畫面是有被引用的：{clauses}"
+            );
+            assert!(clauses.contains("沒有兩個 pass 都指過的畫面"), "{clauses}");
+            assert!(clauses.contains("請在終端機裡自己看過再按"), "{clauses}");
+        }
+
+        #[test]
+        fn recorded_before_this_check_is_not_told_to_go_look_at_the_terminal() {
+            let mut tally = Tally::default();
+            tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame {
+                why: sister_hands::TargetFrameGap::RecordedBeforeAgreedEvidence,
+            });
+            assert_eq!(tally.target_not_cited, 0);
+            assert_eq!(tally.recorded_before_this_check, 1);
+            let clauses = tally.refusal_clauses();
+            assert!(clauses.contains("記在加這道檢查之前"), "{clauses}");
+            assert!(
+                !clauses.contains("請在終端機裡自己看過再按"),
+                "太舊的承諾不是叫他回終端機再按一次：{clauses}"
+            );
         }
 
         fn open_url(url: &str) -> String {

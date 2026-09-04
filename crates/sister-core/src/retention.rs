@@ -1985,9 +1985,14 @@ mod tests {
         // 承諾晚了好幾個小時才寫進去，但它的根據是早上那一格。
         db.conn
             .execute(
-                "INSERT INTO commitments(text, kind, born_from, evidence_json, people_json,
-                   status, confidence, created_at, updated_at)
-                 VALUES('付王小明 NT$12,000','payment',?1,'[]','[\"王小明\"]','open',0.7,?2,?2)",
+                "INSERT INTO commitments(
+                    text, kind, born_from, evidence_json, agreed_evidence_json, people_json,
+                    status, confidence, created_at, updated_at
+                 ) VALUES(
+                    '付王小明 NT$12,000','payment',?1,
+                    '[\"frame:1\"]','[\"frame:1\"]','[\"王小明\"]',
+                    'open',0.7,?2,?2
+                 )",
                 rusqlite::params![cid, days_ago(60) + 6 * 3_600_000],
             )
             .expect("insert commitment");
@@ -2011,13 +2016,17 @@ mod tests {
         let leftover: String = db
             .conn
             .query_row(
-                "SELECT COALESCE(GROUP_CONCAT(text || people_json), '') FROM commitments",
+                "SELECT COALESCE(GROUP_CONCAT(text || people_json || COALESCE(evidence_json,'') || COALESCE(agreed_evidence_json,'')), '') FROM commitments",
                 [],
                 |r| r.get(0),
             )
             .expect("blob");
         assert!(!leftover.contains("王小明"), "人名還在墓碑裡：{leftover}");
         assert!(!leftover.contains("12,000"), "金額還在墓碑裡：{leftover}");
+        assert!(
+            !leftover.contains("frame:"),
+            "畫面出處還在墓碑裡：{leftover}"
+        );
     }
 
     /// 他親手選一段時間按下忘掉的時候，**字也要一起消失**。

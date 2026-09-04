@@ -34,7 +34,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 15;
+pub const SCHEMA_VERSION: i32 = 16;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -592,6 +592,11 @@ fn migrate_015(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     // 不加 DEFAULT：既有列維持 NULL。DEFAULT '[]' 會把「問不出來」和
     // 「兩個 pass 一張畫面都沒有共同指過」壓成同一種答案。
     add_column_if_missing(tx, "commitments", "agreed_evidence_json", "TEXT")
+}
+
+fn migrate_016(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    // 說明文字，不是證據。既有列補空字串：這一欄本來就沒裝過東西。
+    add_column_if_missing(tx, "reviewer_run", "notes", "TEXT NOT NULL DEFAULT ''")
 }
 
 fn add_column_if_missing(
@@ -1260,6 +1265,7 @@ impl Db {
             13 => tx.execute_batch(MIGRATION_013)?,
             14 => migrate_014(&tx)?,
             15 => migrate_015(&tx)?,
+            16 => migrate_016(&tx)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -3456,9 +3462,13 @@ impl Db {
 
     /// 這張卡片指的那一段，真的結束在什麼時候。
     ///
-    /// **`Ok(None)` 和 `Err` 是兩件事**：前者是「那一段已經不在了」（被忘掉、
-    /// 過了保留期），後者是「讀不出來」。不准用 `.flatten()` 或
-    /// `.unwrap_or_default()` 把它們壓成同一個答案。
+    /// **`Ok(None)` 和 `Err` 是兩件事**：前者是「沒有從這個時間點開始的一段」
+    /// （被忘掉、過了保留期，或那段的範圍後來變了），後者是「讀不出來」。
+    /// 不准用 `.flatten()` 或 `.unwrap_or_default()` 把它們壓成同一個答案。
+    ///
+    /// 講哪句話看的是原始資料（[`Self::has_raw_records_in_core_window`]），不是
+    /// segment 快取現在長什麼樣（[`Self::covering_segment_at`]）。兩個軸
+    /// 可以同時給出不同答案。
     ///
     /// 同一個 `core_started_at` 萬一有兩列（`replace_segments` 是「先刪一個
     /// 區間再插回去」，理論上不會，但沒有 UNIQUE 擋著）：取 **`core_ended_at`
@@ -3473,6 +3483,24 @@ impl Db {
                  LIMIT 1",
                 [core_started_at],
                 |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// 現在有沒有某一段蓋住這個時間點（`core_started_at <= t AND t < core_ended_at`）。
+    ///
+    /// 這是 **segment 快取現在長什麼樣**，不是「原始資料還在不在」。
+    /// 卡片那一段不見了要講哪句話，看的是 [`Self::has_raw_records_in_core_window`]。
+    pub fn covering_segment_at(&self, t: Millis) -> Result<Option<(Millis, Millis)>> {
+        self.conn
+            .query_row(
+                "SELECT core_started_at, core_ended_at FROM segment
+                 WHERE core_started_at <= ?1 AND ?1 < core_ended_at
+                 ORDER BY core_started_at ASC
+                 LIMIT 1",
+                [t],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
             .map_err(Into::into)
@@ -3555,6 +3583,52 @@ impl Db {
             |r| r.get(0),
         )?;
         Ok(frames)
+    }
+
+    /// 這張卡的 `core_started_at` 往後一個 [`crate::segment::TIME_CAP_MS`]
+    /// 的窗裡，還有沒有留下任何一種原始紀錄。
+    ///
+    /// 這是「紀錄還在、切法變了」和「查不到、連原始紀錄也沒有」的分辨法。
+    /// 問的是原始資料，不是 [`Self::covering_segment_at`] 那張快取。
+    /// 窗長寫在這裡，呼叫端不能另傳一個看起來差不多的毫秒數進來。
+    ///
+    /// 涵蓋 `prune` 會照時間刪掉的表：`frames`、`facts`、`text_chunks`、
+    /// `focus_events`、`input_metrics`、`clipboard_events`、`system_events`。
+    /// 任何一張有列就是「還在」。
+    ///
+    /// **不能只看 `focus_events`。** 那張表只在前景變了才寫；`TIME_CAP_MS`
+    /// 切的正是同質長活動，被切出來的第二、第三塊裡 focus 一定是 0。
+    /// 實測（一個 app、連續打字的 input_metrics、每分鐘一張 frame，25 分鐘）：
+    /// `segments = [(0, 10), (10, 20), (20, 25)]`，
+    /// `core+0min: focus_events=1 frames=10`，
+    /// `core+10min: focus_events=0 frames=10`，
+    /// `core+20min: focus_events=0 frames=6`。
+    /// 只問 focus 的話，後兩段會被說成「沒有留下任何原始紀錄」，
+    /// 而 OCR 過的畫面全部都在。
+    pub fn has_raw_records_in_core_window(&self, core_started_at: Millis) -> Result<bool> {
+        let to = core_started_at.saturating_add(crate::segment::TIME_CAP_MS);
+        if core_started_at >= to {
+            return Ok(false);
+        }
+        // `input_metrics` 沒有單點 `ts`，用重疊：一段節奏跨過切點，
+        // 仍是這段時間留下的紀錄。其餘表都是單點 `ts`。
+        for sql in [
+            "SELECT EXISTS(SELECT 1 FROM frames WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM facts WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM text_chunks WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM focus_events WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM clipboard_events WHERE ts >= ?1 AND ts < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM system_events WHERE ts >= ?1 AND ts < ?2)",
+        ] {
+            let found: bool = self
+                .conn
+                .query_row(sql, params![core_started_at, to], |r| r.get(0))?;
+            if found {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn frame_exists(&self, id: i64) -> Result<bool> {
@@ -3957,6 +4031,13 @@ impl Db {
     /// 它跳過正常抽取那一整段：`normalized` 直接抄 `raw`、`source_kind` 寫死
     /// `'test'`。存在的理由是要造出 regex 造不出來的舊資料／壞資料——例如一列
     /// `kind='url'` 但 `raw` 沒有 scheme 的 fact，用來驗那條拒絕路徑真的會走到。
+    ///
+    /// 插進 `core_started_at` 往後一個 [`crate::segment::TIME_CAP_MS`] 的窗裡
+    /// 的話，[`Self::has_raw_records_in_core_window`] 會看到它——那是真的：
+    /// 這筆 fact 就是一筆原始紀錄。要測「窗裡什麼都沒有」那一臂，
+    /// 不要在這個窗裡呼叫這支。產品路徑不會走這裡
+    /// （`insert_facts_tx` 只被 `insert_frame` / `insert_focus` /
+    /// `insert_clipboard` 呼叫）。
     #[cfg(test)]
     pub(crate) fn test_insert_fact(&mut self, ts: Millis, kind: &str, raw: &str) -> Result<i64> {
         self.conn.execute(
@@ -4615,8 +4696,8 @@ impl Db {
             "INSERT INTO reviewer_run(
                 ts, day_key, kind, skip_reason, candidate_count, recheck_count,
                 wrote_commitments, divergences, calls_used, budget_used,
-                budget_limit, detail
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                budget_limit, detail, notes
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 ins.ts,
                 ins.day_key,
@@ -4630,6 +4711,7 @@ impl Db {
                 ins.budget_used,
                 ins.budget_limit,
                 ins.detail,
+                ins.notes,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -4755,34 +4837,58 @@ impl Db {
             .map_err(Into::into)
     }
 
+    fn latest_reviewer_run_copy(&self) -> Result<Option<(i64, String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT id, detail, notes FROM reviewer_run
+                 WHERE skip_reason IS NULL
+                 ORDER BY ts DESC, id DESC LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// 最近一輪真的跑過的審閱，她拒絕掉了哪幾個模型指的下一步。
     ///
     /// **三種，不是「一個 `Vec`」。** 「還沒跑過」、「跑過而且沒拒絕任何東西」、
     /// 「跑過而且拒絕了這幾個」是三件事；前兩種折成空 `Vec` 的話，一台從來
     /// 沒跑過 reviewer 的機器會顯示成「她什麼都沒拒絕」。
+    ///
+    /// `detail` 只裝真的拒絕。卡片那一段不見了、或「沒有東西可審」那種說明
+    /// 在 [`Self::latest_reviewer_notes`]。
     pub fn latest_reviewer_refusals(&self) -> Result<ReviewerRefusals> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT id, detail FROM reviewer_run
-                 WHERE skip_reason IS NULL
-                 ORDER BY ts DESC, id DESC LIMIT 1",
-                [],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        let Some((run_id, detail)) = row else {
+        let Some((run_id, detail, _)) = self.latest_reviewer_run_copy()? else {
             return Ok(ReviewerRefusals::NeverRan);
         };
-        let reasons: Vec<String> = detail
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(str::to_owned)
-            .collect();
+        let reasons = nonempty_lines(&detail);
         if reasons.is_empty() {
             Ok(ReviewerRefusals::None { run_id })
         } else {
             Ok(ReviewerRefusals::Some { run_id, reasons })
+        }
+    }
+
+    /// 最近一輪真的跑過的審閱，拒絕以外的說明。
+    ///
+    /// 和 [`Self::latest_reviewer_refusals`] 讀同一列。空的時候是 `None`，
+    /// 不是把「沒有說明」講成「沒有拒絕」。
+    pub fn latest_reviewer_notes(&self) -> Result<ReviewerNotes> {
+        let Some((run_id, _, notes)) = self.latest_reviewer_run_copy()? else {
+            return Ok(ReviewerNotes::NeverRan);
+        };
+        let lines = nonempty_lines(&notes);
+        if lines.is_empty() {
+            Ok(ReviewerNotes::None { run_id })
+        } else {
+            Ok(ReviewerNotes::Some { run_id, lines })
         }
     }
 
@@ -6608,6 +6714,8 @@ pub struct ReviewerRunInsert<'a> {
     pub budget_used: i64,
     pub budget_limit: i64,
     pub detail: &'a str,
+    /// 拒絕以外的說明（卡片那一段不見了、沒有東西可審）。不是證據。
+    pub notes: &'a str,
 }
 
 /// 最近一輪審閱拒絕掉的下一步。見 [`Db::latest_reviewer_refusals`]。
@@ -6616,6 +6724,21 @@ pub enum ReviewerRefusals {
     NeverRan,
     None { run_id: i64 },
     Some { run_id: i64, reasons: Vec<String> },
+}
+
+/// 最近一輪審閱、拒絕以外的說明。見 [`Db::latest_reviewer_notes`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewerNotes {
+    NeverRan,
+    None { run_id: i64 },
+    Some { run_id: i64, lines: Vec<String> },
+}
+
+fn nonempty_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8324,6 +8447,10 @@ mod tests {
             columns_of(&db, "commitments").contains(&"agreed_evidence_json".to_string()),
             "全新資料庫也要有兩個 pass 都指過的畫面那一欄"
         );
+        assert!(
+            columns_of(&db, "reviewer_run").contains(&"notes".to_string()),
+            "全新資料庫也要有審閱說明那一欄"
+        );
     }
 
     #[test]
@@ -8558,6 +8685,141 @@ mod tests {
         insert_segment_row(&db, 10, 50);
         assert_eq!(db.segment_core_end(10).expect("query"), Some(50));
         assert_eq!(db.segment_core_end(11).expect("missing"), None);
+    }
+
+    #[test]
+    fn covering_segment_at_distinguishes_moved_range_from_gone() {
+        let db = test_db();
+        insert_segment_row(&db, 0, 300_000);
+        assert_eq!(
+            db.covering_segment_at(180_000).expect("query"),
+            Some((0, 300_000)),
+            "時間點被另一段蓋著"
+        );
+        assert_eq!(
+            db.segment_core_end(180_000).expect("query"),
+            None,
+            "蓋住它的那一段不是從這個時間點開始的"
+        );
+        assert_eq!(
+            db.covering_segment_at(300_000).expect("query"),
+            None,
+            "半開右界：結束那一毫秒沒被蓋住"
+        );
+        assert_eq!(
+            db.covering_segment_at(1).expect("empty db after?"),
+            Some((0, 300_000))
+        );
+        let empty = test_db();
+        assert_eq!(
+            empty.covering_segment_at(180_000).expect("query"),
+            None,
+            "沒有任何一段蓋住"
+        );
+    }
+
+    /// 快取軸和資料軸可以同時給出不同答案：沒有一段蓋住，原始紀錄卻還在。
+    #[test]
+    fn has_raw_records_in_core_window_is_not_covering_segment_at() {
+        let mut db = test_db();
+        let sid = db.start_session("test", "0").expect("session");
+        db.insert_focus(sid, &focus_at(180_000, "code.exe", "x", None))
+            .expect("focus");
+        assert_eq!(
+            db.covering_segment_at(180_000).expect("cover"),
+            None,
+            "沒算過段落，快取是空的"
+        );
+        assert!(
+            db.has_raw_records_in_core_window(180_000).expect("raw"),
+            "原始紀錄還在，即使沒有任何一段蓋住"
+        );
+        assert!(
+            !db.has_raw_records_in_core_window(180_000 + crate::segment::TIME_CAP_MS)
+                .expect("outside"),
+            "窗外那一格不該把裡面的紀錄算進去"
+        );
+        assert!(
+            !test_db()
+                .has_raw_records_in_core_window(180_000)
+                .expect("empty"),
+            "空庫是沒有，不是 0 筆再讓呼叫端猜"
+        );
+    }
+
+    /// 同質長活動被 `TIME_CAP_MS` 切出來的第二塊：一筆 focus、週期性的
+    /// input_metrics 和 frames。第二塊的 `focus_events` 是 0，但畫面還在，
+    /// 分辨法必須是 `true`。只看 `focus_events` 的突變要讓這一條紅。
+    #[test]
+    fn a_time_capped_later_piece_of_the_same_app_still_has_raw_records() {
+        use crate::model::InputMetrics;
+        let mut db = test_db();
+        let sid = db.start_session("test", "0").expect("session");
+        let ts = 0i64;
+        let min = 60_000i64;
+        db.insert_focus(sid, &focus_at(ts, "code.exe", "db.rs", None))
+            .expect("focus");
+        for i in 0..25 {
+            let t = ts + i * min;
+            db.insert_input(
+                sid,
+                &InputMetrics {
+                    ts_start: t,
+                    ts_end: t + 10_000,
+                    keystrokes: 40,
+                    ..Default::default()
+                },
+            )
+            .expect("input");
+            db.insert_frame(
+                sid,
+                &frame_with_text(t + 1_000, "code.exe", "db.rs", &["typing"]),
+                None,
+                0,
+            )
+            .expect("frame");
+        }
+        let segs = db.chapters_for_range(ts, ts + 25 * min).expect("segments");
+        assert_eq!(
+            segs.len(),
+            3,
+            "25 分鐘同質活動該被 10 分鐘上限切成三段：{:?}",
+            segs.iter()
+                .map(|s| (s.core_started_at - ts, s.core_ended_at - ts))
+                .collect::<Vec<_>>()
+        );
+        let second = &segs[1];
+        let cap = crate::segment::TIME_CAP_MS;
+        assert_eq!(second.core_started_at, ts + cap);
+        let focus_in_second: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM focus_events WHERE ts >= ?1 AND ts < ?2",
+                [second.core_started_at, second.core_started_at + cap],
+                |r| r.get(0),
+            )
+            .expect("count focus");
+        assert_eq!(
+            focus_in_second, 0,
+            "第二塊沒有 focus 事件：這就是只問 focus_events 會說謊的原因"
+        );
+        let frames_in_second: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM frames WHERE ts >= ?1 AND ts < ?2",
+                [second.core_started_at, second.core_started_at + cap],
+                |r| r.get(0),
+            )
+            .expect("count frames");
+        assert!(
+            frames_in_second > 0,
+            "第二塊要有畫面躺在那裡，否則這一條證不到「只問 focus 會漏」：{frames_in_second}"
+        );
+        assert!(
+            db.has_raw_records_in_core_window(second.core_started_at)
+                .expect("raw"),
+            "同質長活動的第二塊 focus_events=0，但畫面還在，不可以回 false"
+        );
     }
 
     /// 「沒解析到時間範圍」和「解析了、算過、沒有段落」不可以長成同一個
@@ -12092,6 +12354,7 @@ mod tests {
             budget_used: 0,
             budget_limit: 40,
             detail: "",
+            notes: "",
         })
         .expect("insert reviewer_run");
     }
@@ -12188,6 +12451,7 @@ mod tests {
             budget_used: 0,
             budget_limit: 40,
             detail: "",
+            notes: "",
         })
         .unwrap();
         assert!(!db.has_reviewer_eod_for_day("2026-08-21").unwrap());
@@ -12330,6 +12594,7 @@ mod tests {
                 budget_used: 2,
                 budget_limit: 10,
                 detail: "",
+                notes: "",
             })
             .unwrap();
         assert_eq!(
@@ -12351,6 +12616,7 @@ mod tests {
                 budget_used: 4,
                 budget_limit: 10,
                 detail: "",
+                notes: "",
             })
             .unwrap();
         db.insert_reviewer_divergence(&DivergenceInsert {
@@ -12393,6 +12659,7 @@ mod tests {
             budget_used: 0,
             budget_limit: 10,
             detail: "",
+            notes: "",
         };
         db.insert_reviewer_run(&nothing).unwrap();
         assert_eq!(
@@ -12455,6 +12722,7 @@ mod tests {
             budget_used: 0,
             budget_limit: 10,
             detail: "",
+            notes: "",
         };
         db.insert_reviewer_run(&nothing).unwrap();
         assert!(
@@ -12514,6 +12782,7 @@ mod tests {
             budget_used: calls,
             budget_limit: 10,
             detail: "",
+            notes: "",
         };
         // 一次 CLI 都沒開的三種樣子。兩半都該說「還沒跑過」。
         for (label, seed) in [

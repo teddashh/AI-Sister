@@ -21,7 +21,8 @@ use crate::config::BrainConfig;
 use crate::consent::Consent;
 use crate::db::{
     CommitmentInsert, DaySummaryInsert, Db, DivergenceInsert, DualPassDivergences, EntityMemory,
-    L2Author, L2CardRow, L2Insert, OutboundInsert, RecheckInsert, RecheckStats, ReviewerRunInsert,
+    L2Author, L2CardRow, L2Insert, OutboundInsert, RecheckInsert, RecheckStats, ReviewerNotes,
+    ReviewerRunInsert,
 };
 use crate::model::Millis;
 
@@ -187,7 +188,7 @@ pub fn format_review_result_with_consent_command(
         // 這幾張卡片模型連看都沒看到，那句話講的是「模型指了、她不接受」。
         if r.cards_missing_segment > 0 {
             out.push_str(&format!(
-                "有 {} 張卡片指的那一段已經不在紀錄裡，這一輪沒有給它們任何畫面上的 fact（理由見底下）。\n",
+                "有 {} 張卡片指的那一段現在查不到，這一輪沒有給它們任何畫面上的 fact（理由見底下）。\n",
                 r.cards_missing_segment
             ));
         }
@@ -224,6 +225,7 @@ const MAX_MENTIONS_SHOWN: usize = 6;
 pub fn format_reviewer_visibility(
     divergences: &DualPassDivergences,
     refusals: &crate::db::ReviewerRefusals,
+    notes: &ReviewerNotes,
     entities: &EntityMemory,
 ) -> String {
     // 分歧是**警報**，不是統計行的續行。前後各空一行，讓它自己是一段。
@@ -261,6 +263,16 @@ pub fn format_reviewer_visibility(
             out.push_str(&format!("最近一次審閱（輪次 #{run_id}）拒絕掉的下一步：\n"));
             for reason in reasons {
                 out.push_str(&format!("- {reason}\n"));
+            }
+            out.push('\n');
+        }
+    }
+    match notes {
+        ReviewerNotes::NeverRan | ReviewerNotes::None { .. } => {}
+        ReviewerNotes::Some { run_id, lines } => {
+            out.push_str(&format!("最近一次審閱（輪次 #{run_id}）另外記下的說明：\n"));
+            for line in lines {
+                out.push_str(&format!("- {line}\n"));
             }
             out.push('\n');
         }
@@ -397,7 +409,7 @@ pub struct ReviewResult {
     pub refused_next_steps: u32,
     /// 模型引用了、而 prompt 根本沒給它看的 ref，被丟掉幾筆。
     pub dropped_evidence_refs: u32,
-    /// 卡片指的那一段已經不在紀錄裡，於是這一輪不給它任何 L1 fact。
+    /// 卡片指的那一段現在查不到，於是這一輪不給它任何 L1 fact。
     ///
     /// **這不是 `refused_next_steps`。** 那個數的是「模型指了一步、而她不接受」，
     /// 這個數的是「模型連看都還沒看，她就先把這張卡片的 fact 清單清空了」——
@@ -684,7 +696,8 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
             calls_used: 0,
             budget_used: used as i64,
             budget_limit: limit as i64,
-            detail: &reason.message(),
+            detail: "",
+            notes: &reason.message(),
         })?;
         return Ok(ReviewResult {
             skip: Some(reason),
@@ -750,15 +763,22 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
                 .facts_in_range(card.segment_core_start, core_ended_at)?,
             None => {
                 // 查不到那一段：fail-closed。退回一小時是 fail-open。
+                // **兩種成因都一筆 fact 都不給**——原始事件還在、甚至有一段
+                // 蓋住，也不准把視窗放到現在那一段去。授權視窗是這張卡自己
+                // 的 core。
                 //
                 // 記在 `missing_segments` 不是 `refusals`：這裡還沒呼叫模型，
                 // 而且底下 `cats.is_empty()` 可能讓這張卡直接跳過，模型從頭到尾
                 // 沒參與。句子也不能借 `TargetApp::Forgotten` 那一句——那句講的是
                 // 「**下一步的目標**那筆 fact 的來源沒了」，這裡沒了的是
                 // 「**這張卡片自己那一段**」，兩件事。
-                missing_segments.push(format!(
-                    "這張卡片指的那一段（{}）已經不在紀錄裡（被忘掉、或過了保留期），所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
-                    card.segment_ref
+                //
+                // 講哪句話問的是原始資料，不是 segment 快取。covering 只當
+                // 附加資訊：有蓋住就提一句，沒蓋住不准因此改口說被忘掉。
+                missing_segments.push(missing_segment_line(
+                    card,
+                    RawRecordsInCoreWindow::probe(input.db, card.segment_core_start)?,
+                    input.db.covering_segment_at(card.segment_core_start)?,
                 ));
                 Vec::new()
             }
@@ -1075,14 +1095,9 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         calls_used: calls as i64,
         budget_used: (used + calls) as i64,
         budget_limit: limit as i64,
-        // 兩種理由都要看得見，但**只有 `refusals` 算進拒絕計數**。
-        // detail 是給人讀的那一疊句子，計數是給那句「她拒絕了 N 個」用的。
-        detail: &refusals
-            .iter()
-            .chain(missing_segments.iter())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n"),
+        // detail 只裝真的拒絕。卡片那一段不見了是另一塊，見 `notes`。
+        detail: &refusals.join("\n"),
+        notes: &missing_segments.join("\n"),
     })?;
     for row in recheck_rows {
         input.db.insert_reviewer_recheck(&RecheckInsert {
@@ -1133,6 +1148,44 @@ struct RecheckInsertOwned {
     original_present: bool,
     original_chars: Option<i64>,
     matched: bool,
+}
+
+/// 這張卡的 core 窗裡還有沒有任何一種原始紀錄。newtype：不能拿
+/// `covering_segment_at(..).is_some()` 塞進同一個參數槽。
+struct RawRecordsInCoreWindow(bool);
+
+impl RawRecordsInCoreWindow {
+    fn probe(db: &Db, core_started_at: Millis) -> Result<Self> {
+        Ok(Self(db.has_raw_records_in_core_window(core_started_at)?))
+    }
+}
+
+fn missing_segment_line(
+    card: &L2CardRow,
+    raw: RawRecordsInCoreWindow,
+    covering: Option<(Millis, Millis)>,
+) -> String {
+    if raw.0 {
+        // covering 是附加資訊，不是分辨法。有蓋住就提；沒蓋住仍是
+        // 「紀錄還在、切法變了」，不准改口說被忘掉。
+        let covering_clause = match covering {
+            Some((start, _)) if start != card.segment_core_start => "，那個時間點仍被另一段蓋著",
+            _ => "",
+        };
+        format!(
+            "這張卡片指的那一段（{}）那段時間的紀錄還在，只是章節的切法變了（例如你在時間軸上合併過章節，或那段範圍被重新計算過）{covering_clause}，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
+            card.segment_ref
+        )
+    } else {
+        // prune 和 forget 都會連卡片一起墓碑（`collect_cascade_parents`
+        // 同一個 cut），重算只動快取、紀錄還在，所以目前沒有任何已知的
+        // 正式路徑到得了這一臂。它是防守用的：狀態真的發生時要能誠實
+        // 說「我找不到，而且我不知道為什麼」，而不是猜一個成因。
+        format!(
+            "這張卡片指的那一段（{}）查不到，而且那段時間也沒有留下任何原始紀錄，所以這一輪沒有給模型任何畫面上的 fact，也沒有替它解下一步。",
+            card.segment_ref
+        )
+    }
 }
 
 fn latest_unreviewed(db: &Db, from_ts: Millis, to_ts: Millis) -> Result<Vec<L2CardRow>> {
@@ -1397,6 +1450,7 @@ fn record_skip(
         budget_used: used as i64,
         budget_limit: limit as i64,
         detail: &reason.message(),
+        notes: "",
     })?;
     // 外送紀錄面板讀 `brain_skip`。審閱層沒送出去的原因要跟解釋層同一張表，
     // 不然「今天沒送」只看得到一半。
@@ -1663,7 +1717,7 @@ mod tests {
     use super::*;
     use crate::consent::{Sheet, VERSION};
     use crate::db::DaySummaryGlance;
-    use crate::db::ReviewerRefusals;
+    use crate::db::{ReviewerNotes, ReviewerRefusals};
     use crate::model::{FocusEvent, FocusKind, FocusSnapshot, FrameCapture, OcrBlock};
     use chrono::{Local, LocalResult, TimeZone};
 
@@ -1754,6 +1808,38 @@ mod tests {
                 fact_id.to_string(),
             ],
         )
+    }
+
+    fn wipe_raw_records_in_core_window(db: &Db, core: Millis) {
+        let raw_to = core.saturating_add(crate::segment::TIME_CAP_MS);
+        // facts 先於 text_chunks：chunk_id 是 ON DELETE CASCADE，順序反過來
+        // 那句 DELETE 的 rowcount 會變成假的零。
+        for (sql, what) in [
+            ("DELETE FROM facts WHERE ts >= ?1 AND ts < ?2", "facts"),
+            (
+                "DELETE FROM text_chunks WHERE ts >= ?1 AND ts < ?2",
+                "text_chunks",
+            ),
+            ("DELETE FROM frames WHERE ts >= ?1 AND ts < ?2", "frames"),
+            (
+                "DELETE FROM focus_events WHERE ts >= ?1 AND ts < ?2",
+                "focus_events",
+            ),
+            (
+                "DELETE FROM clipboard_events WHERE ts >= ?1 AND ts < ?2",
+                "clipboard",
+            ),
+            (
+                "DELETE FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2",
+                "input_metrics",
+            ),
+            (
+                "DELETE FROM system_events WHERE ts >= ?1 AND ts < ?2",
+                "system_events",
+            ),
+        ] {
+            db.conn.execute(sql, [core, raw_to]).expect(what);
+        }
     }
 
     fn seed(db: &mut Db, ts: Millis, ocr: &str) -> (i64, i64) {
@@ -1902,7 +1988,12 @@ mod tests {
                 tombstoned_at: None,
             }],
         }]);
-        let text = format_reviewer_visibility(&divergence, &ReviewerRefusals::NeverRan, &entities);
+        let text = format_reviewer_visibility(
+            &divergence,
+            &ReviewerRefusals::NeverRan,
+            &ReviewerNotes::NeverRan,
+            &entities,
+        );
         for expected in [
             "l2:42 / 交報告",
             "pass A：{\"stands\":true}",
@@ -1956,6 +2047,7 @@ mod tests {
             format_reviewer_visibility(
                 &s,
                 &ReviewerRefusals::NeverRan,
+                &ReviewerNotes::NeverRan,
                 &EntityMemory::NeverReviewed,
             )
         });
@@ -1968,6 +2060,7 @@ mod tests {
             format_reviewer_visibility(
                 &DualPassDivergences::NeverRan,
                 &ReviewerRefusals::NeverRan,
+                &ReviewerNotes::NeverRan,
                 &s,
             )
         });
@@ -2034,6 +2127,7 @@ mod tests {
         let text = format_reviewer_visibility(
             &DualPassDivergences::NeverRan,
             &ReviewerRefusals::NeverRan,
+            &ReviewerNotes::NeverRan,
             &EntityMemory::Present(rows),
         );
 
@@ -2082,6 +2176,7 @@ mod tests {
         let text = format_reviewer_visibility(
             &DualPassDivergences::NeverRan,
             &ReviewerRefusals::NeverRan,
+            &ReviewerNotes::NeverRan,
             &EntityMemory::Present(rows),
         );
         assert!(
@@ -2118,6 +2213,7 @@ mod tests {
         let text = format_reviewer_visibility(
             &DualPassDivergences::NeverRan,
             &ReviewerRefusals::NeverRan,
+            &ReviewerNotes::NeverRan,
             &EntityMemory::Present(rows),
         );
         assert!(!text.contains("沒列出來"), "沒剪卻在講剪：{text}");
@@ -2147,6 +2243,72 @@ mod tests {
                     assert_ne!(x, y, "兩種原因印成同一句話");
                 }
             }
+        }
+    }
+
+    /// 「沒有東西可審」寫進 notes 不是 detail。手捏 `ReviewerRefusals` 再叫
+    /// render 函式證不到這一格——要走真正的 `run`，讓它自己把那句話寫進哪一欄。
+    #[test]
+    fn an_empty_interval_review_refuses_nothing_and_says_so() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_800_000_000;
+        let consent = signed();
+        let brain = BrainConfig {
+            command: "python3".into(),
+            args: vec![],
+            ..Default::default()
+        };
+        let result = {
+            let mut input = ReviewInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: ts,
+                to_ts: ts + 400_000,
+                kind: ReviewKind::Interval,
+                force: true,
+                now: ts + 500_000,
+            };
+            run(&mut input).expect("run")
+        };
+        assert!(
+            matches!(result.skip, Some(SkipReason::NothingToReview { .. })),
+            "這一條要走的是沒有東西可審，不是別種跳過：{:?}",
+            result.skip
+        );
+        assert!(result.ran, "看過了、沒有東西，要記成一次真正跑過");
+
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+
+        assert!(
+            shown.contains("沒有拒絕任何下一步"),
+            "空的區間審閱必須把這句印出來：{shown}"
+        );
+        assert!(
+            !shown.contains("拒絕掉的下一步"),
+            "空的區間審閱不准把「沒有東西」講成拒絕：{shown}"
+        );
+        let Some(notes_at) = shown.find("另外記下的說明：") else {
+            panic!("那句話要出現在說明那一段：{shown}");
+        };
+        assert!(
+            shown[notes_at..].contains("這段期間沒有還沒審過的 L2 假設"),
+            "那句話要出現在說明那一段底下：{shown}"
+        );
+        if let Some(refusals_at) = shown.find("拒絕掉的下一步") {
+            let refusals_end = shown[refusals_at..]
+                .find("另外記下的說明：")
+                .map(|i| refusals_at + i)
+                .unwrap_or(shown.len());
+            assert!(
+                !shown[refusals_at..refusals_end].contains("這段期間沒有還沒審過的 L2 假設"),
+                "那句話不可以出現在拒絕那一段：{shown}"
+            );
         }
     }
 
@@ -2691,15 +2853,28 @@ mod tests {
         db.conn
             .execute("DELETE FROM segment", [])
             .expect("drop the segment this card points at");
+        // 只刪 segment：快取沒了，畫面還在。這一條要的是 fail-closed
+        // （查不到那一段也不准退回一小時），不是「窗裡什麼都沒有」那一臂。
+        // 後者見 `the_gone_branch_does_not_blame_a_cause_it_cannot_prove`。
+        // 不要在這個窗裡再 `test_insert_fact` 一筆——那筆是真的原始紀錄，
+        // 分辨法會看到它。目標 fact 放在 TIME_CAP 窗外、一小時內。
+        assert!(
+            db.has_raw_records_in_core_window(core).expect("raw"),
+            "畫面還在，分辨法該走「紀錄還在」"
+        );
         assert_eq!(
             db.segment_core_end(core).expect("query"),
             None,
             "這一條要的是查不到那一段，不是讀失敗"
         );
-        let fact_ts = ts + 30_000;
+        let fact_ts = ts + crate::segment::TIME_CAP_MS + 30_000;
         assert!(
             fact_ts < core.saturating_add(3_600_000),
             "目標 fact 仍在一小時內：查不到那一段若退回一小時，這一條會放行"
+        );
+        assert!(
+            fact_ts >= core.saturating_add(crate::segment::TIME_CAP_MS),
+            "目標 fact 要在 TIME_CAP 窗外，不然 test_insert_fact 會讓分辨法看到一筆紀錄"
         );
         let fact_id = db
             .test_insert_fact(fact_ts, "url", "https://window.example/")
@@ -2736,20 +2911,38 @@ mod tests {
         let ReviewerRefusals::Some { reasons, .. } = db.latest_reviewer_refusals().unwrap() else {
             panic!("查不到那一段必須留下理由");
         };
-        // 兩句話要同時在，而且**不可以是同一句**。
-        assert!(
-            reasons
-                .iter()
-                .any(|r| r.contains("這張卡片指的那一段")
-                    && r.contains("沒有給模型任何畫面上的 fact")),
-            "少了「這一段不見了」那一句：{reasons:?}"
-        );
+        // 兩句話要同時在，而且**不可以是同一句**。拒絕那句仍在 `detail`；
+        // 「這一段不見了」不是拒絕，改看 `notes`。
         assert!(
             reasons
                 .iter()
                 .any(|r| r.contains(&format!("fact:{fact_id}"))
                     && r.contains("沒有列在這次給模型的 L1 facts")),
             "少了「模型指的那筆 fact 不在清單裡」那一句：{reasons:?}"
+        );
+        assert!(
+            !reasons.iter().any(|r| r.contains("這張卡片指的那一段")),
+            "「這一段不見了」不可以再混進拒絕清單：{reasons:?}"
+        );
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("查不到那一段必須留下說明");
+        };
+        assert!(
+            lines.iter().any(|r| r.contains("這張卡片指的那一段")
+                && r.contains("沒有給模型任何畫面上的 fact")
+                && r.contains("紀錄還在")
+                && r.contains("切法變了")),
+            "畫面還在，要講切法變了：{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|r| r.contains("被忘掉") || r.contains("保留期")),
+            "畫面還在，不准點名忘掉或保留期：{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|r| r.contains("仍被另一段蓋著")),
+            "快取是空的，附加子句不該出現：{lines:?}"
         );
         // 借 `TargetApp::Forgotten` 的字串會讓兩種狀態講同一句話：那一句講的是
         // 「**下一步目標**那筆 fact 的來源沒了」，這裡沒了的是「**卡片自己那一段**」。
@@ -2758,6 +2951,744 @@ mod tests {
                 .iter()
                 .any(|r| r.contains("這個目標的來源已經不在了")),
             "段落不見了不可以借用目標來源不見了的那句話：{reasons:?}"
+        );
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        assert!(shown.contains("拒絕掉的下一步"), "{shown}");
+        assert!(shown.contains("另外記下的說明"), "{shown}");
+        assert!(!shown.contains("沒有拒絕任何下一步"), "{shown}");
+    }
+
+    /// 走到「窗裡什麼都沒有」那一臂時，那句話不准點名一個它證明不了的成因。
+    ///
+    /// prune / forget 走不到這一臂（卡片一起墓碑）。夾具是段落列沒了、
+    /// 原始紀錄也沒了、卡片還活著。擴大涵蓋範圍之後，畫面、fact、chunk、
+    /// input_metrics 都要一起刪，不然會走到「還在」那一臂。
+    #[test]
+    fn the_gone_branch_does_not_blame_a_cause_it_cannot_prove() {
+        let tmp = Tmp::new("segwin-gone-no-cause");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        let core = segs[0].core_started_at;
+        db.conn
+            .execute("DELETE FROM segment", [])
+            .expect("drop the segment this card points at");
+        wipe_raw_records_in_core_window(&db, core);
+        assert!(
+            !db.has_raw_records_in_core_window(core).expect("raw"),
+            "這一條要的是窗裡什麼紀錄都沒有"
+        );
+        assert_eq!(
+            db.segment_core_end(core).expect("query"),
+            None,
+            "這一條要的是查不到那一段，不是讀失敗"
+        );
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":null}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        assert_eq!(result.cards_missing_segment, 1);
+        assert!(
+            db.live_commitments()
+                .unwrap()
+                .iter()
+                .all(|c| c.allowed_next_step.is_none()),
+            "這一臂仍然 fail-closed，一筆 fact 都不給"
+        );
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("查不到那一段必須留下說明");
+        };
+        assert!(
+            lines.iter().any(|r| r.contains("這張卡片指的那一段")
+                && r.contains("沒有留下任何原始紀錄")
+                && r.contains("沒有給模型任何畫面上的 fact")),
+            "要講出連原始紀錄都沒有這個觀察到的事實：{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|r| r.contains("被忘掉")
+                || r.contains("保留期")
+                || r.contains("forget")
+                || r.contains("prune")),
+            "不准點名一個它證明不了的成因：{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|r| r.contains("紀錄還在") || r.contains("切法變了")),
+            "窗裡沒有紀錄，不可以走「切法變了」那一臂：{lines:?}"
+        );
+    }
+
+    /// 零拒絕的時候仍然印出「沒有拒絕任何下一步」。
+    ///
+    /// 卡片那一段不見了、模型沒指下一步：說明在另一塊，不准把「沒有拒絕」壓掉。
+    #[test]
+    fn a_run_with_missing_segment_and_no_next_step_still_says_it_refused_nothing() {
+        let tmp = Tmp::new("segwin-missing-no-next");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        let core = segs[0].core_started_at;
+        db.conn
+            .execute("DELETE FROM segment", [])
+            .expect("drop the segment this card points at");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":null}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        assert_eq!(result.refused_next_steps, 0, "模型沒指下一步");
+        assert_eq!(result.cards_missing_segment, 1);
+        assert_eq!(
+            db.latest_reviewer_refusals().unwrap(),
+            ReviewerRefusals::None { run_id: 1 },
+            "說明不可以把「沒有拒絕」壓成「拒絕了這幾個」"
+        );
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("零拒絕也要留下「這一段不見了」的說明");
+        };
+        assert!(
+            lines
+                .iter()
+                .any(|r| r.contains("這張卡片指的那一段")
+                    && r.contains("沒有給模型任何畫面上的 fact")),
+            "{lines:?}"
+        );
+        let shown = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        assert!(
+            shown.contains("沒有拒絕任何下一步"),
+            "零拒絕必須把這句印出來：{shown}"
+        );
+        assert!(
+            !shown.contains("拒絕掉的下一步"),
+            "零拒絕不准印拒絕清單標題：{shown}"
+        );
+        assert!(shown.contains("另外記下的說明"), "說明要自己一塊：{shown}");
+    }
+
+    /// 摘要那一行和底下的說明不能互相打臉。兩臂共用 `cards_missing_segment`，
+    /// 常見的那一臂是「紀錄還在、切法變了」——摘要若寫「不在紀錄裡」，
+    /// 同一頁差四行就在說假話。斷言必須對著摘要＋可見度整份輸出，
+    /// 分開看每一句都對是這個 bug 的本體。
+    #[test]
+    fn the_summary_line_must_not_contradict_the_note_below_it() {
+        let tmp = Tmp::new("summary-vs-note");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        let core = segs[0].core_started_at;
+        db.conn
+            .execute("DELETE FROM segment", [])
+            .expect("drop the segment this card points at");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":null}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let result = run_diverge(&mut db, command, args, ts);
+        assert_eq!(result.cards_missing_segment, 1);
+        assert!(
+            db.has_raw_records_in_core_window(core).expect("raw"),
+            "這一條要踩到「紀錄還在」那一臂"
+        );
+
+        let stats = db.reviewer_recheck_stats().unwrap();
+        let summary = format_review_result(&result, &stats);
+        let visibility = format_reviewer_visibility(
+            &db.latest_dual_pass_divergences().unwrap(),
+            &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
+            &db.entity_memory().unwrap(),
+        );
+        let shown = format!("{summary}{visibility}");
+
+        assert!(
+            shown.contains("給它們任何畫面上的 fact"),
+            "整份輸出必須含摘要那一行：{shown}"
+        );
+        assert!(
+            shown.contains("紀錄還在"),
+            "這一條要踩到「切法變了」那一臂：{shown}"
+        );
+        assert!(
+            shown.contains("另外記下的說明："),
+            "「理由見底下」要指得到說明那一塊：{shown}"
+        );
+        assert!(
+            !(shown.contains("已經不在紀錄裡") && shown.contains("紀錄還在")),
+            "摘要說不在紀錄裡、底下說紀錄還在：{shown}"
+        );
+    }
+
+    fn seed_two_chapters(db: &mut Db, ts: Millis, ocr: &str) -> (i64, Millis, Millis) {
+        let sid = db.start_session("test", "0").expect("session");
+        for (offset, app) in [
+            (0, "code.exe"),
+            (180_000, "chrome.exe"),
+            (240_000, "chrome.exe"),
+        ] {
+            db.insert_focus(
+                sid,
+                &FocusEvent {
+                    ts: ts + offset,
+                    kind: FocusKind::Focus,
+                    snapshot: FocusSnapshot {
+                        app_id: Some(app.into()),
+                        ..Default::default()
+                    },
+                },
+            )
+            .expect("focus");
+        }
+        let frame = FrameCapture {
+            ts: ts + 30_000,
+            monitor: 0,
+            width: 100,
+            height: 100,
+            dhash: 1,
+            image: None,
+            image_ext: "png",
+            ocr: vec![OcrBlock {
+                text: ocr.into(),
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                confidence: 1.0,
+            }],
+            focus: FocusSnapshot {
+                app_id: Some("code.exe".into()),
+                ..Default::default()
+            },
+        };
+        let (fid, _, _) = db.insert_frame(sid, &frame, None, 0).expect("frame");
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        assert!(
+            segs.len() >= 2,
+            "要兩段才能合併：{} 段 {:?}",
+            segs.len(),
+            segs.iter()
+                .map(|s| (s.core_started_at - ts, s.core_ended_at - ts))
+                .collect::<Vec<_>>()
+        );
+        (fid, segs[0].core_started_at, segs[1].core_started_at)
+    }
+
+    #[test]
+    fn a_merged_segment_is_covered_not_forgotten() {
+        let tmp = Tmp::new("segwin-merged");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (fid, left, right) = seed_two_chapters(
+            &mut db,
+            ts,
+            "LINE：五點去接她 17:00 https://window.example/",
+        );
+        write_l2(
+            &mut db,
+            right,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        db.merge_chapters(left, right, ts, ts + 400_000)
+            .expect("merge");
+        assert_eq!(
+            db.segment_core_end(right).expect("query"),
+            None,
+            "右邊那一段的起點合併後不在了"
+        );
+        let covering = db.covering_segment_at(right).expect("cover");
+        assert!(
+            covering.is_some_and(|(start, end)| start < right && right < end),
+            "合併後那個時間點仍被另一段蓋著：{covering:?}"
+        );
+        let fact_id = db
+            .test_insert_fact(right + 1, "url", "https://window.example/")
+            .expect("fact");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":{{"fact":{fact_id}}}}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        let result = run_diverge(&mut db, command, args, ts);
+        assert_eq!(result.cards_missing_segment, 1);
+        assert!(
+            db.live_commitments()
+                .unwrap()
+                .iter()
+                .all(|c| c.allowed_next_step.is_none()),
+            "蓋住也不准把視窗放到那一段去"
+        );
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("範圍變了必須留下說明");
+        };
+        assert!(
+            lines
+                .iter()
+                .any(|r| r.contains("仍被另一段蓋著") && r.contains("例如")),
+            "只能講蓋住，成因只能當例子：{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|r| r.contains("被忘掉、或過了保留期")),
+            "東西還在，不准叫人去翻 forget：{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|r| r.contains("被合併了") && !r.contains("例如")),
+            "不准把合併寫成唯一成因：{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|r| r.contains("你合併過章節") && !r.contains("例如")),
+            "不准把合併寫成唯一成因：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn rerunning_review_after_a_merge_does_not_write_a_card_for_the_new_range() {
+        let tmp = Tmp::new("segwin-merged-rerun");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (fid, left, right) = seed_two_chapters(&mut db, ts, "LINE：五點去接她 17:00");
+        write_l2(
+            &mut db,
+            right,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        db.merge_chapters(left, right, ts, ts + 400_000)
+            .expect("merge");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":null}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        let first = run_diverge(&mut db, command.clone(), args.clone(), ts);
+        assert_eq!(first.cards_missing_segment, 1);
+        let before = db.l2_in_range(ts, ts + 400_000).expect("l2");
+        let left_cards = before
+            .iter()
+            .filter(|c| c.segment_core_start == left)
+            .count();
+        let second = run_diverge(&mut db, command, args, ts);
+        assert_eq!(second.cards_missing_segment, 1);
+        let after = db.l2_in_range(ts, ts + 400_000).expect("l2");
+        let left_cards_after = after
+            .iter()
+            .filter(|c| c.segment_core_start == left)
+            .count();
+        assert_eq!(
+            left_cards_after, left_cards,
+            "重跑 review 不會替現在那一段寫一張新卡片；跑前 {left_cards}、跑後 {left_cards_after}"
+        );
+    }
+
+    /// 重跑 `sister review` 不會把舊承諾的 `agreed_evidence_json` 補上。
+    /// 它會另寫一筆；舊的 NULL 原封不動。所以不准寫「重跑就會過」。
+    #[test]
+    fn rerunning_review_adds_a_new_commitment_and_leaves_the_old_null_agreed_evidence() {
+        let tmp = Tmp::new("old-agreed-rerun");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let ocr = "LINE：五點去接她 17:00 https://example.com/x";
+        let (_sid, fid) = seed(&mut db, ts, ocr);
+        let id = fact_id(&db, ts, "url", "https://example.com/x");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":{{"fact":{id}}}}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        let core = db.chapters_for_range(ts, ts + 400_000).expect("segs")[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        db.conn
+            .execute(
+                "INSERT INTO commitments(
+                    text, kind, born_from, evidence_json, agreed_evidence_json, people_json,
+                    status, confidence, allowed_next_step, allowed_next_step_fact,
+                    created_at, updated_at
+                 ) VALUES(
+                    '五點去接她','promise',1,'[\"frame:2\"]',NULL,'[]',
+                    'open',0.7,'{\"action\":\"open_url\",\"url\":\"https://example.com/x\"}',?1,
+                    1,1
+                 )",
+                [id],
+            )
+            .expect("old commitment");
+        let first = run_diverge(&mut db, command.clone(), args.clone(), ts);
+        assert!(first.wrote_commitments >= 1, "{first:?}");
+        let second = run_diverge(&mut db, command, args, ts);
+        assert!(second.wrote_commitments >= 1, "{second:?}");
+        let mut nulls = 0i64;
+        let mut filled = 0i64;
+        let mut stmt = db
+            .conn
+            .prepare("SELECT agreed_evidence_json FROM commitments WHERE tombstoned_at IS NULL")
+            .expect("prep");
+        let rows = stmt
+            .query_map([], |r| r.get::<_, Option<String>>(0))
+            .expect("query");
+        for row in rows {
+            match row.expect("row") {
+                None => nulls += 1,
+                Some(_) => filled += 1,
+            }
+        }
+        assert!(
+            nulls >= 1,
+            "舊的那筆 agreed_evidence_json 仍是 NULL：nulls={nulls} filled={filled}"
+        );
+        assert!(
+            filled >= 1,
+            "重跑會多一筆新的：nulls={nulls} filled={filled}"
+        );
+    }
+
+    /// SPEC 列的「forget 之後走真的不見了那一格」。
+    ///
+    /// 實測：forget 會把 L2 卡片也墓碑，`l2_in_range` 看不到它，reviewer
+    /// 走不到 `segment_core_end == None` 那句話。窗裡什麼紀錄都沒有那一臂，
+    /// 到得了的輸入是段落列被拿掉、原始紀錄也沒了、卡片還活著
+    /// （`the_gone_branch_does_not_blame_a_cause_it_cannot_prove`）。
+    #[test]
+    fn forgetting_the_range_tombstones_the_card_so_reviewer_never_sees_it() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let (_sid, fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let segs = db.chapters_for_range(ts, ts + 400_000).expect("segs");
+        let core = segs[0].core_started_at;
+        write_l2(
+            &mut db,
+            core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        db.forget(ts, ts + 400_000, None).expect("forget");
+        assert!(
+            db.l2_in_range(ts, ts + 400_000).expect("l2").is_empty(),
+            "forget 之後卡片也被墓碑，reviewer 看不到它"
+        );
+        assert_eq!(
+            db.segment_core_end(core).expect("query"),
+            None,
+            "段落列確實沒了"
+        );
+    }
+
+    #[test]
+    fn recomputing_from_mid_activity_still_has_raw_events_so_must_not_say_forgotten() {
+        let tmp = Tmp::new("segwin-recompute");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let min = 60_000i64;
+        let sid = db.start_session("test", "0").expect("session");
+        for i in 0..=20 {
+            db.insert_focus(
+                sid,
+                &FocusEvent {
+                    ts: ts + i * min,
+                    kind: FocusKind::Focus,
+                    snapshot: FocusSnapshot {
+                        app_id: Some("code.exe".into()),
+                        ..Default::default()
+                    },
+                },
+            )
+            .expect("focus");
+        }
+        let frame = FrameCapture {
+            ts: ts + 12 * min,
+            monitor: 0,
+            width: 100,
+            height: 100,
+            dhash: 1,
+            image: None,
+            image_ext: "png",
+            ocr: vec![OcrBlock {
+                text: "LINE：五點去接她 17:00".into(),
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                confidence: 1.0,
+            }],
+            focus: FocusSnapshot {
+                app_id: Some("code.exe".into()),
+                ..Default::default()
+            },
+        };
+        let (fid, _, _) = db.insert_frame(sid, &frame, None, 0).expect("frame");
+        let first = db
+            .chapters_for_range(ts, ts + 20 * min)
+            .expect("first window");
+        assert!(
+            first.len() >= 2,
+            "長活動該被 10 分鐘上限切成多段：{} 段 {:?}",
+            first.len(),
+            first
+                .iter()
+                .map(|s| (s.core_started_at - ts, s.core_ended_at - ts))
+                .collect::<Vec<_>>()
+        );
+        let later = first
+            .iter()
+            .find(|s| s.core_started_at >= ts + crate::segment::TIME_CAP_MS)
+            .unwrap_or(&first[first.len() - 1]);
+        let old_core = later.core_started_at;
+        write_l2(
+            &mut db,
+            old_core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        // 窗從活動中間開始，離真起點超過 LOOKAROUND（5 分鐘）。
+        let from = ts + 7 * min;
+        let _ = db
+            .chapters_for_range(from, ts + 20 * min)
+            .expect("recompute");
+        assert_eq!(
+            db.segment_core_end(old_core).expect("query"),
+            None,
+            "舊的 core_started_at 那一列要消失，否則這一條沒踩到重算"
+        );
+        let covering = db.covering_segment_at(old_core).expect("cover");
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":null}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        let consent = signed();
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let result = {
+            let mut input = ReviewInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: ts,
+                to_ts: ts + 21 * min,
+                kind: ReviewKind::Interval,
+                force: true,
+                now: ts + 22 * min,
+            };
+            run(&mut input).expect("run")
+        };
+        // 快取軸：舊的 10 分鐘切點那一列消失，而且沒有任何一段蓋住它。
+        // 資料軸：focus 和 frame 都還在。講哪句話看資料軸，所以不可以說被忘掉。
+        assert_eq!(
+            covering,
+            None,
+            "快取軸仍是沒蓋住；若開始蓋得住，附加子句會出現「仍被另一段蓋著」。first={:?}",
+            first
+                .iter()
+                .map(|s| (s.core_started_at - ts, s.core_ended_at - ts))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            db.has_raw_records_in_core_window(old_core).expect("raw"),
+            "重算沒刪原始紀錄，這一條要踩到的就是這個"
+        );
+        assert_eq!(result.cards_missing_segment, 1);
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("查不到那一段必須留下說明");
+        };
+        assert!(
+            lines
+                .iter()
+                .any(|r| r.contains("紀錄還在") && r.contains("切法變了") && r.contains("例如")),
+            "原始事件還在，要講切法變了，成因只能當例子：{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|r| r.contains("被忘掉、或過了保留期")),
+            "重算之後事件還在，不可以說被忘掉：{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|r| r.contains("你合併過章節") && !r.contains("例如")),
+            "不准把合併寫成唯一成因：{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|r| r.contains("仍被另一段蓋著")),
+            "這一格快取沒蓋住，附加子句不該出現：{lines:?}"
+        );
+    }
+
+    /// 另一道重算：先用後面那一截窗種卡，再算整天。
+    /// 這不是 SPEC 寫的那道食譜；若它走「被蓋住」，就證明那一格不必是合併。
+    #[test]
+    fn a_full_recompute_after_a_narrow_window_covers_the_planted_core() {
+        let tmp = Tmp::new("segwin-recompute-full");
+        let sentinel = tmp.0.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_250_000_000;
+        let min = 60_000i64;
+        let sid = db.start_session("test", "0").expect("session");
+        for i in 0..=20 {
+            db.insert_focus(
+                sid,
+                &FocusEvent {
+                    ts: ts + i * min,
+                    kind: FocusKind::Focus,
+                    snapshot: FocusSnapshot {
+                        app_id: Some("code.exe".into()),
+                        ..Default::default()
+                    },
+                },
+            )
+            .expect("focus");
+        }
+        let frame = FrameCapture {
+            ts: ts + 16 * min,
+            monitor: 0,
+            width: 100,
+            height: 100,
+            dhash: 1,
+            image: None,
+            image_ext: "png",
+            ocr: vec![OcrBlock {
+                text: "LINE：五點去接她 17:00".into(),
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                confidence: 1.0,
+            }],
+            focus: FocusSnapshot {
+                app_id: Some("code.exe".into()),
+                ..Default::default()
+            },
+        };
+        let (fid, _, _) = db.insert_frame(sid, &frame, None, 0).expect("frame");
+        let narrow = db
+            .chapters_for_range(ts + 10 * min, ts + 20 * min)
+            .expect("narrow");
+        let planted = narrow
+            .iter()
+            .find(|s| s.core_started_at > ts + 10 * min)
+            .or(narrow.last());
+        let Some(planted) = planted else {
+            panic!(
+                "窄窗沒切出後面那一節：{:?}",
+                narrow
+                    .iter()
+                    .map(|s| (s.core_started_at - ts, s.core_ended_at - ts))
+                    .collect::<Vec<_>>()
+            );
+        };
+        let old_core = planted.core_started_at;
+        write_l2(
+            &mut db,
+            old_core,
+            fid,
+            "在看接人的訊息",
+            r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#,
+        );
+        let _ = db
+            .chapters_for_range(ts, ts + 20 * min)
+            .expect("full recompute");
+        assert_eq!(
+            db.segment_core_end(old_core).expect("query"),
+            None,
+            "整天重算後舊起點不該還在"
+        );
+        let covering = db.covering_segment_at(old_core).expect("cover");
+        let Some((start, _)) = covering else {
+            panic!(
+                "整天重算後 old_core=+{} 沒被蓋住；narrow={:?}",
+                old_core - ts,
+                narrow
+                    .iter()
+                    .map(|s| (s.core_started_at - ts, s.core_ended_at - ts))
+                    .collect::<Vec<_>>()
+            );
+        };
+        assert_ne!(start, old_core);
+        let json = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":[],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":null}}]}}"#
+        );
+        let (command, args) = fake_cli(&tmp.0, &json, &sentinel);
+        let consent = signed();
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let result = {
+            let mut input = ReviewInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: ts,
+                to_ts: ts + 21 * min,
+                kind: ReviewKind::Interval,
+                force: true,
+                now: ts + 22 * min,
+            };
+            run(&mut input).expect("run")
+        };
+        assert_eq!(result.cards_missing_segment, 1);
+        let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
+            panic!("範圍變了必須留下說明");
+        };
+        assert!(
+            lines.iter().any(|r| r.contains("仍被另一段蓋著")),
+            "整天重算走的是蓋住那一格：{lines:?} covering={covering:?}"
+        );
+        assert!(
+            !lines.iter().any(|r| r.contains("被忘掉、或過了保留期")),
+            "{lines:?}"
         );
     }
 
@@ -2861,6 +3792,7 @@ mod tests {
         let shown = format_reviewer_visibility(
             &db.latest_dual_pass_divergences().unwrap(),
             &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
             &db.entity_memory().unwrap(),
         );
         for needle in needles {
@@ -2955,6 +3887,7 @@ mod tests {
         let shown = format_reviewer_visibility(
             &db.latest_dual_pass_divergences().unwrap(),
             &db.latest_reviewer_refusals().unwrap(),
+            &db.latest_reviewer_notes().unwrap(),
             &db.entity_memory().unwrap(),
         );
         assert!(!shown.contains("拒絕掉的下一步"), "{shown}");
@@ -3433,6 +4366,7 @@ mod tests {
             budget_used: 0,
             budget_limit: 40,
             detail: "",
+            notes: "",
         })
         .unwrap();
         let consent = signed();
