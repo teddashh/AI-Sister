@@ -2460,7 +2460,16 @@ fn hotkey_set(
         .hands_stop_shortcut;
     let previous = hotkey.0.lock().expect("hotkey").wanted.clone();
     let view = apply_hotkey(&app, &combo, &hands_wanted);
-    let view = if !view.hands_collided && (view.registered || view.wanted.is_empty()) {
+    let action = sister_hands::kill_switch::hotkey_set_action(
+        view.hands_collided,
+        view.registered,
+        view.wanted.is_empty(),
+    );
+    // `hotkey_set_action` 的八格在 sister-hands 裡有執行覆蓋；這個 match 把純決策
+    // 接回 Tauri 的註冊、寫檔與 state，仍沒有執行覆蓋。改純函式的任一格會紅；
+    // 把這裡的 `RestoreCollision` 接到別臂，crate 測試不會知道。
+    let view = match action {
+        sister_hands::kill_switch::HotkeySetAction::Persist => {
         let persist = || -> Result<(), String> {
             let path = config_path()?;
             let mut c = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
@@ -2496,18 +2505,21 @@ fn hotkey_set(
                 "搶到了，但存不進設定檔，所以退回原來那一組。{still}\n{e}"
             ));
         }
-        view
-    } else if view.hands_collided {
-        let mut restored = apply_hotkey(&app, &previous, &hands_wanted);
-        restored.rejected = Some(combo);
-        restored.hands_collided = true;
-        restored
-    } else {
+            view
+        }
+        sister_hands::kill_switch::HotkeySetAction::RestoreCollision => {
+            let mut restored = apply_hotkey(&app, &previous, &hands_wanted);
+            restored.rejected = Some(combo);
+            restored.hands_collided = true;
+            restored
+        }
+        sister_hands::kill_switch::HotkeySetAction::RestoreRejected => {
         // 設定檔沒動過，所以退回去的一定是設定檔裡那一組。`rejected` 帶著他
         // 剛剛打的那個組合，讓那句話講得出「你試的那組沒搶到，還在用舊的」。
-        HotkeyView {
-            rejected: Some(view.wanted),
-            ..apply_hotkey(&app, &previous, &hands_wanted)
+            HotkeyView {
+                rejected: Some(view.wanted),
+                ..apply_hotkey(&app, &previous, &hands_wanted)
+            }
         }
     };
     *hotkey.0.lock().expect("hotkey") = view.clone();

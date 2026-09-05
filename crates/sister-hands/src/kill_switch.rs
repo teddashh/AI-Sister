@@ -216,6 +216,32 @@ pub struct HotkeyPlan {
     pub collided: Option<String>,
 }
 
+/// 設定頁換暫停熱鍵後，桌面接線層該走的路。
+///
+/// 這支純函式和它的八格測試守的是**分流規則**。`main.rs` 把每一臂接到註冊、
+/// 寫檔或還原的那層仍沒有執行覆蓋；例如把 `RestoreCollision` 那臂接成一般的
+/// `RestoreRejected`，這裡的測試不會紅。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeySetAction {
+    Persist,
+    RestoreCollision,
+    RestoreRejected,
+}
+
+pub fn hotkey_set_action(
+    hands_collided: bool,
+    registered: bool,
+    wanted_is_empty: bool,
+) -> HotkeySetAction {
+    if hands_collided {
+        HotkeySetAction::RestoreCollision
+    } else if registered || wanted_is_empty {
+        HotkeySetAction::Persist
+    } else {
+        HotkeySetAction::RestoreRejected
+    }
+}
+
 /// 排兩顆熱鍵；拔手撞號時優先，因為暫停仍可從系統匣操作。
 ///
 /// 只 trim 後逐字比較，不假裝維護 Tauri 的別名表。因此 `Ctrl+Alt+P` 和
@@ -586,6 +612,29 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_set_action_covers_every_boolean_input() {
+        use HotkeySetAction::{Persist, RestoreCollision, RestoreRejected};
+
+        let cases = [
+            ((false, false, false), RestoreRejected),
+            ((false, false, true), Persist),
+            ((false, true, false), Persist),
+            ((false, true, true), Persist),
+            ((true, false, false), RestoreCollision),
+            ((true, false, true), RestoreCollision),
+            ((true, true, false), RestoreCollision),
+            ((true, true, true), RestoreCollision),
+        ];
+        for ((collided, registered, empty), expected) in cases {
+            assert_eq!(
+                hotkey_set_action(collided, registered, empty),
+                expected,
+                "collided={collided}, registered={registered}, empty={empty}"
+            );
+        }
+    }
+
+    #[test]
     fn tray_hands_labels_cover_attached_and_pulled_states() {
         let tmp = Tmp::new("tray-labels");
         assert_eq!(tray_hands_stop_label(&tmp.0), "拔掉她的手");
@@ -603,6 +652,14 @@ mod tests {
         assert_eq!(tray_hands_stop_label(&tmp.0), "拔掉她的手（已經拔了）");
         assert_eq!(tray_hands_resume_label(&tmp.0), "把手接回去");
         release(&tmp.0).unwrap();
+    }
+
+    #[test]
+    fn tray_hands_labels_are_stop_then_resume() {
+        let tmp = Tmp::new("tray-label-order");
+        let labels = tray_hands_labels(&tmp.0);
+        assert_eq!(labels.0, "拔掉她的手");
+        assert_eq!(labels.1, "把手接回去（現在沒拔）");
     }
 
     #[test]
