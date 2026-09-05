@@ -132,6 +132,18 @@ want(
     "      只說「出錯了」而不說現在生效的是哪一組，他讀完不知道下一步做什麼。\n"
     "      那幾個字寫在字面裡、或塞在一個變數裡，都算。",
 )
+unreadable_says = [m.group(1) for m in says if "設定檔讀不出來" in m.group(1)]
+if len(unreadable_says) != 1:
+    die("設定檔讀不出來的回話不是一格", f"抓到 {len(unreadable_says)} 格，無法確認兩顆鍵都交代。")
+unreadable_at = hotkey_set.find(unreadable_says[0])
+unreadable_context = hotkey_set[max(0, unreadable_at - 1800) : unreadable_at + len(unreadable_says[0])]
+want(
+    "③ᵇ 設定檔壞掉時同時交代暫停鍵與拔手鍵",
+    "暫停鍵" in unreadable_context
+    and "拔手鍵" in unreadable_context
+    and "{hands_still}" in unreadable_says[0],
+    "這條路會先拆掉再重裝兩顆鍵；只交代暫停鍵，安全鍵換人或搶不到都沒有一句話說。",
+)
 
 print("▶ 問不出資料目錄的時候，系統匣不宣稱她拔了沒")
 want(

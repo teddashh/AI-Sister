@@ -2337,16 +2337,31 @@ struct Hotkey(Mutex<HotkeyView>);
 fn apply_hotkey(app: &tauri::AppHandle, wanted: &str, hands_wanted: &str) -> HotkeyView {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
+    let configured_wanted = wanted.trim().to_string();
     let plan = sister_hands::kill_switch::plan_hotkeys(wanted, hands_wanted);
-    let wanted = plan.pause.clone().unwrap_or_default();
+    let wanted_to_register = plan.pause.clone().unwrap_or_default();
     let hands_wanted = plan.hands.clone().unwrap_or_default();
     let shortcuts = app.global_shortcut();
     let _ = shortcuts.unregister_all();
 
     // 空字串是一個正當的選擇，不是壞掉的設定：全域熱鍵會從所有程式手上把那個
     // 組合搶走，所以要留一條關掉它的路。這裡不回報 reason，因為沒有失敗。
-    let reason = if wanted.is_empty() { None } else { shortcuts
-        .on_shortcut(wanted.as_str(), |app, _shortcut, event| {
+    // 安全鍵先註冊。若相等判定仍有漏網，第二次的 AlreadyRegistered 會落在可由
+    // 系統匣代替的暫停鍵，而不是拔手鍵。
+    let hands_reason = if hands_wanted.is_empty() { None } else { shortcuts
+        .on_shortcut(hands_wanted.as_str(), |app, _shortcut, event| {
+            if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed { return; }
+            let shell = app.state::<Shell>();
+            let outcome = sister_hands::kill_switch::press_hands_hotkey(
+                shell.data_dir.as_deref(), sister_core::now_ms());
+            let says = sister_hands::kill_switch::hands_hotkey_message(&outcome);
+            tracing::info!("拔手熱鍵：{says}（{outcome:?}）");
+            announce_hands_pulled(app, &says);
+            refresh_tray(app);
+        }).err().map(|e| e.to_string()) };
+
+    let reason = if wanted_to_register.is_empty() { None } else { shortcuts
+        .on_shortcut(wanted_to_register.as_str(), |app, _shortcut, event| {
             // 只認**按下**。少了這一行，按一次會進來兩次（按下 + 放開），
             // 於是暫停立刻被自己取消掉——一顆看起來完全沒反應的熱鍵。
             if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
@@ -2360,26 +2375,11 @@ fn apply_hotkey(app: &tauri::AppHandle, wanted: &str, hands_wanted: &str) -> Hot
         .err()
         .map(|e| e.to_string()) };
 
-    let hands_reason = if hands_wanted.is_empty() { None } else { shortcuts
-        .on_shortcut(hands_wanted.as_str(), |app, _shortcut, event| {
-            if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed { return; }
-            let shell = app.state::<Shell>();
-            let outcome = sister_hands::kill_switch::press_hands_hotkey(
-                shell.data_dir.as_deref(), sister_core::now_ms());
-            let says = sister_hands::kill_switch::hands_hotkey_message(&outcome);
-            // 成功也留一行：「拔掉了」和「這段程式根本沒跑到」在一份只記失敗的
-            // 記錄檔裡長得一模一樣，而那正是他按了熱鍵之後唯一想分辨的兩件事。
-            // 作業系統的原文留在這行 log：`{outcome:?}` 帶著 `os_error`；送進
-            // 中文介面的句子刻意不帶（見 `WhyNotWritten` 的 doc）。
-            tracing::info!("拔手熱鍵：{says}（{outcome:?}）");
-            announce_hands_pulled(app, &says);
-            refresh_tray(app);
-        }).err().map(|e| e.to_string()) };
-
-    let registered = !wanted.is_empty() && reason.is_none();
+    let registered = !wanted_to_register.is_empty() && reason.is_none();
     let hands_registered = !hands_wanted.is_empty() && hands_reason.is_none();
     HotkeyView {
-        wanted,
+        // 撞號時政策層不註冊暫停，但這一格仍要如實顯示設定檔裡的組合。
+        wanted: configured_wanted,
         registered,
         reason,
         rejected: None,
@@ -2456,15 +2456,18 @@ fn hotkey_set(
 ) -> Result<HotkeyView, String> {
     let loaded = config_path()
         .and_then(|path| sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}")));
+    let current = hotkey.0.lock().expect("hotkey").clone();
+    let previous = current.wanted.clone();
     let config_error = loaded.as_ref().err().cloned();
     let hands_wanted = loaded
-        .unwrap_or_default()
-        .shell
-        .hands_stop_shortcut;
-    let previous = hotkey.0.lock().expect("hotkey").wanted.clone();
+        .map(|config| config.shell.hands_stop_shortcut)
+        .unwrap_or_else(|_| current.hands_wanted.clone());
     let view = apply_hotkey(&app, &combo, &hands_wanted);
     if let Some(error) = config_error {
-        let restored = apply_hotkey(&app, &previous, &hands_wanted);
+        let restored = HotkeyView {
+            config_unreadable: Some(error.clone()),
+            ..apply_hotkey(&app, &previous, &hands_wanted)
+        };
         let still = if restored.registered {
             format!("現在還在用 {}。", sister_shell::pretty_combo(&restored.wanted))
         } else if restored.wanted.is_empty() {
@@ -2475,9 +2478,16 @@ fn hotkey_set(
                 sister_shell::pretty_combo(&restored.wanted)
             )
         };
+        let hands_still = if restored.hands_registered {
+            format!("拔手鍵現在還在用 {}。", sister_shell::pretty_combo(&restored.hands_wanted))
+        } else if restored.hands_wanted.is_empty() {
+            "拔手鍵現在是關掉的。".to_string()
+        } else {
+            format!("拔手鍵 {} 現在也搶不到；請從系統匣拔手。", sister_shell::pretty_combo(&restored.hands_wanted))
+        };
         *hotkey.0.lock().expect("hotkey") = restored;
         return Err(format!(
-            "設定檔讀不出來；剛剛試的 {} 沒有存下來。{still}\n{error}",
+            "設定檔讀不出來；剛剛試的 {} 沒有存下來。暫停鍵{still}{hands_still}\n{error}",
             sister_shell::pretty_combo(&combo)
         ));
     }

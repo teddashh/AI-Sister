@@ -3048,6 +3048,7 @@ version = "0.1.0-alpha.95"
 dependencies = [
  "anyhow",
  "chrono",
+ "global-hotkey",
  "serde",
  "serde_json",
  "windows 0.62.2",

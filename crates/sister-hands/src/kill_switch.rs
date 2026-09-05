@@ -249,16 +249,13 @@ pub fn hotkey_set_action(
 
 /// 排兩顆熱鍵；拔手撞號時優先，因為暫停仍可從系統匣操作。
 ///
-/// 比較前只正規化產品自己會產生的 `KeyX` / `DigitN`，以及 global-hotkey
-/// 對修飾鍵接受的 `Control` / `Command` / `Cmd` 別名、大小寫與順序。這不是
-/// Tauri/global-hotkey 的完整別名表；comboOf 生不出的其他形狀仍可能漏掉，並在
-/// 註冊當下失敗。
+/// 相等判定直接使用實際負責註冊的 `global-hotkey` 解析器，涵蓋它接受的修飾鍵、
+/// 主鍵與別名形狀。任一邊解析不了時也讓給拔手：這時不能證明兩顆鍵不同。
+/// 接線層另把拔手排在暫停前註冊；即使這裡未辨認出撞號，安全鍵仍先拿到組合。
 pub fn plan_hotkeys(pause: &str, hands: &str) -> HotkeyPlan {
     let pause = nonempty(pause);
     let hands = nonempty(hands);
-    if pause.as_deref().map(normalize_hotkey) == hands.as_deref().map(normalize_hotkey)
-        && pause.is_some()
-    {
+    if matches!((&pause, &hands), (Some(p), Some(h)) if hotkeys_collide(p, h)) {
         return HotkeyPlan {
             pause: None,
             hands: hands.clone(),
@@ -272,38 +269,15 @@ pub fn plan_hotkeys(pause: &str, hands: &str) -> HotkeyPlan {
     }
 }
 
-fn normalize_hotkey(value: &str) -> String {
-    let mut modifiers = [false; 4];
-    let mut key = None;
-    for token in value.trim().split('+').map(str::trim) {
-        let upper = token.to_ascii_uppercase();
-        match upper.as_str() {
-            "CONTROL" | "CTRL" => modifiers[0] = true,
-            "ALT" => modifiers[1] = true,
-            "SHIFT" => modifiers[2] = true,
-            "COMMAND" | "CMD" | "SUPER" => modifiers[3] = true,
-            _ => {
-                let canonical = if upper.len() == 4 && upper.starts_with("KEY") {
-                    upper[3..].to_string()
-                } else if upper.len() == 6 && upper.starts_with("DIGIT") {
-                    upper[5..].to_string()
-                } else {
-                    upper
-                };
-                key = Some(canonical);
-            }
-        }
+fn hotkeys_collide(left: &str, right: &str) -> bool {
+    use std::str::FromStr;
+    match (
+        global_hotkey::hotkey::HotKey::from_str(left),
+        global_hotkey::hotkey::HotKey::from_str(right),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => true,
     }
-    let mut parts = Vec::new();
-    for (present, name) in modifiers.into_iter().zip(["CTRL", "ALT", "SHIFT", "SUPER"]) {
-        if present {
-            parts.push(name.to_string());
-        }
-    }
-    if let Some(key) = key {
-        parts.push(key);
-    }
-    parts.join("+")
 }
 
 /// 問不出資料目錄時的兩顆系統匣動作；只描述動作，不假稱目前狀態。
@@ -664,20 +638,17 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_normalization_covers_its_declared_shapes() {
+    fn hotkey_parser_covers_registered_aliases() {
         for (left, right) in [
             ("KeyH", "H"),
             ("Digit1", "1"),
             ("Control+H", "Ctrl+H"),
-            ("Command+H", "Super+H"),
-            ("Cmd+H", "Super+H"),
+            ("CommandOrControl+Alt+H", "Ctrl+Alt+H"),
+            ("Option+Ctrl+H", "Alt+Ctrl+H"),
+            ("Ctrl+Alt+ArrowUp", "Ctrl+Alt+Up"),
             ("alt+ctrl+keyh", "Ctrl+Alt+H"),
         ] {
-            assert_eq!(
-                normalize_hotkey(left),
-                normalize_hotkey(right),
-                "{left} / {right}"
-            );
+            assert!(hotkeys_collide(left, right), "{left} / {right}");
         }
     }
 
@@ -701,6 +672,16 @@ mod tests {
                     "{a} 和 {b} 按下去是兩件事，不是撞號"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn modifier_aliases_do_not_create_false_collisions() {
+        for (pause, hands) in [
+            ("Alt+H", "CommandOrControl+Alt+H"),
+            ("Ctrl+H", "Option+Ctrl+H"),
+        ] {
+            assert_eq!(plan_hotkeys(pause, hands).collided, None);
         }
     }
 
