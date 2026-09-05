@@ -1967,8 +1967,8 @@ pub mod act {
     use sister_hands::commitment_action::AllowedNextStep;
     use sister_hands::semi_action::{
         AbortActor, ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, GrantRejection,
-        NotRecordingReason, PresentedStep, RunConclusion, RunConclusionRecord, SemiActionRun,
-        StepEvidence, StepLimit, StepRequest, StepWait, Task, execute_approved_step,
+        NotRecordingReason, PresentedStep, RunConclusion, RunConclusionRecord, ScreenAfter,
+        SemiActionRun, StepEvidence, StepLimit, StepRequest, StepWait, Task, execute_approved_step,
     };
     use sister_hands::{ActionEvent, ActionLog, ExecutionResult, Outcome, RefusalReason};
     use std::collections::BTreeSet;
@@ -2342,7 +2342,7 @@ pub mod act {
             expected_raw: &str,
         ) -> Result<sister_core::db::TargetApp>;
         fn frame_for_target_fact(&self, id: i64, expected_raw: &str) -> Result<TargetFrame>;
-        fn nearest_step_frame(
+        fn step_frame_preferring_after(
             &self,
             at_ms: i64,
             from_ms: i64,
@@ -2378,13 +2378,13 @@ pub mod act {
                 ),
             })
         }
-        fn nearest_step_frame(
+        fn step_frame_preferring_after(
             &self,
             at_ms: i64,
             from_ms: i64,
             to_ms: i64,
         ) -> Result<Option<sister_core::db::StepFrameRow>> {
-            Db::nearest_step_frame(self, at_ms, from_ms, to_ms)
+            Db::step_frame_preferring_after(self, at_ms, from_ms, to_ms)
         }
     }
 
@@ -2501,36 +2501,46 @@ pub mod act {
     fn step_evidence(
         data_dir: &Path,
         source: &impl StepSource,
+        action: &sister_hands::ActionSnapshot,
         at_ms: i64,
         sleep: &mut dyn FnMut(u64),
     ) -> Result<StepEvidence> {
         let presence = sister_core::heartbeat::presence(data_dir, at_ms);
         let mut waited_ms = 0;
-        let mut frame = source.nearest_step_frame(
-            at_ms,
-            at_ms.saturating_sub(STEP_EVIDENCE_WINDOW_MS),
-            at_ms.saturating_add(STEP_EVIDENCE_WINDOW_MS),
-        )?;
+        let look = || {
+            source.step_frame_preferring_after(
+                at_ms,
+                at_ms.saturating_sub(STEP_EVIDENCE_WINDOW_MS),
+                at_ms.saturating_add(STEP_EVIDENCE_WINDOW_MS),
+            )
+        };
+        let mut frame = look()?;
+        // 等的不是「有沒有下一張畫面」，是「畫面有沒有換成他要的樣子」。
+        //
+        // alpha.81 等的是前者，而一個網址按下去之後 400 毫秒的那張畫面，
+        // 常常還是按下去之前那個視窗——瀏覽器還在載。停在第一張就回報，
+        // 會把一次成功的動作講成「對不上」，而且是**每一次**都講錯。
+        //
+        // 停下來的條件見 `screen_has_settled`：對得上就不必再等，
+        // 「再等也沒有用」也不必再等。
         while matches!(
             presence,
             sister_core::heartbeat::Presence::Live(sister_core::heartbeat::Phase::Recording)
-        ) && !matches!(&frame, Some(frame) if frame.ts >= at_ms)
+        ) && !screen_has_settled(frame.as_ref(), action, at_ms)
             && waited_ms < STEP_EVIDENCE_WAIT_MS
         {
             let interval = STEP_EVIDENCE_POLL_MS.min(STEP_EVIDENCE_WAIT_MS - waited_ms);
             sleep(interval);
             waited_ms += interval;
-            frame = source.nearest_step_frame(
-                at_ms,
-                at_ms.saturating_sub(STEP_EVIDENCE_WINDOW_MS),
-                at_ms.saturating_add(STEP_EVIDENCE_WINDOW_MS),
-            )?;
+            frame = look()?;
         }
         Ok(match frame {
             Some(frame) if frame.ts >= at_ms => StepEvidence::After {
                 frame_id: frame.id,
                 frame_at_ms: frame.ts,
                 has_image: frame.image_path.is_some(),
+                waited_ms,
+                target: target_of(&frame, action),
             },
             Some(frame) => StepEvidence::Before {
                 frame_id: frame.id,
@@ -2544,6 +2554,72 @@ pub mod act {
             },
             None => missing_frame_evidence(presence, waited_ms),
         })
+    }
+
+    fn target_of(
+        frame: &sister_core::db::StepFrameRow,
+        action: &sister_hands::ActionSnapshot,
+    ) -> sister_hands::semi_action::TargetOnScreen {
+        sister_core::screen_check::target_on_screen(
+            action,
+            &ScreenAfter {
+                url: frame.url.clone(),
+                window_title: frame.window_title.clone(),
+            },
+        )
+    }
+
+    /// 「不必再等下一張畫面了」。
+    ///
+    /// 判準只有一句：**再等一下有沒有機會變成他要的樣子。** 有機會就再等，
+    /// 沒機會就不要花掉他的兩秒。逐格的理由：
+    ///
+    /// * `Matched` — 等到了，收工。
+    /// * `Mismatched` — **等。** 一個網址按下去之後 400 毫秒的那張畫面，
+    ///   常常還是按下去之前那個視窗（瀏覽器還在載）。停在這裡就會把一次
+    ///   成功的動作講成「對不上」，而且是每一次都講錯。
+    /// * `ScreenUrlUnreadable` — **等。** 這一格最典型的內容就是載入中的
+    ///   `about:blank`，下一張很可能就是真的網址了。
+    /// * `NothingOnScreen` — **不等。** 這一格是**結構性**的：那三個條件
+    ///   （Windows、白名單裡的瀏覽器、UIA 讀得到）少一個就永遠是 `None`，
+    ///   多等兩秒還是同一個 `None`。一台 UIA 被關掉的機器（`uia.rs` 連卡
+    ///   三次就整組關掉，而且不會自己開回來）會**每一步**都白等兩秒，而
+    ///   那兩秒買不到任何一個字。
+    /// * 目標那一側的兩格 — **不等。** 多看一百張畫面也不會讓一個中文網域
+    ///   變得抽得出 host。
+    ///
+    /// 所以會等的只有「畫面上有東西、只是還不是他要的東西」那兩格；
+    /// 「畫面上什麼都沒有」和「目標本身沒得比」都當場收工。
+    fn screen_has_settled(
+        frame: Option<&sister_core::db::StepFrameRow>,
+        action: &sister_hands::ActionSnapshot,
+        at_ms: i64,
+    ) -> bool {
+        use sister_hands::semi_action::{CannotTell, TargetOnScreen};
+        let Some(frame) = frame else {
+            return false;
+        };
+        if frame.ts < at_ms {
+            // 連一張動作之後的畫面都還沒有，當然還沒定下來。
+            return false;
+        }
+        match target_of(frame, action) {
+            TargetOnScreen::Matched { .. } => true,
+            TargetOnScreen::CannotTell {
+                why:
+                    CannotTell::NothingOnScreen { .. }
+                    | CannotTell::NothingInTheAsk
+                    | CannotTell::AskUrlUnreadable
+                    // `target_on_screen()` 回不出這一格（它是舊紀錄反序列化
+                    // 長出來的）。寫在這裡是為了讓這個 match 保持窮舉：加了
+                    // 新的 variant 就必須回來想「這一格該不該再等」。
+                    | CannotTell::NotChecked,
+            } => true,
+            TargetOnScreen::Mismatched { .. }
+            | TargetOnScreen::CannotTell {
+                why: CannotTell::ScreenUrlUnreadable,
+            } => false,
+        }
     }
 
     fn missing_frame_evidence(
@@ -3183,7 +3259,7 @@ pub mod act {
                     // `StepLimitReached` 的欄位叫 `completed_steps`：一次交出去但失敗
                     // 的嘗試不是完成的步驟，因此 Failed 不消耗這版的步數預算。
                     let finished_at = clock();
-                    let evidence = step_evidence(data_dir, source, finished_at, sleep)?;
+                    let evidence = step_evidence(data_dir, source, &action, finished_at, sleep)?;
                     let finished = run
                         .finish_step(finished_at, action, Some(evidence))
                         .map_err(|conclusion| anyhow::anyhow!(conclusion.message()))?;
@@ -3517,7 +3593,7 @@ pub mod act {
                     TargetFrame::FrameNotRecorded(sister_core::db::FramelessOrigin::Unknown)
                 }))
             }
-            fn nearest_step_frame(
+            fn step_frame_preferring_after(
                 &self,
                 _at_ms: i64,
                 _from_ms: i64,
@@ -4856,9 +4932,14 @@ pub mod act {
             let dir = crate::ops::tmp::Tmp::new("act-step-evidence");
             let at = 10_000;
             let mut sleeps = Vec::new();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com".into(),
+            };
 
             assert_eq!(
-                step_evidence(&dir.0, &Source::default(), at, &mut |ms| sleeps.push(ms)).unwrap(),
+                step_evidence(&dir.0, &Source::default(), &action, at, &mut |ms| sleeps
+                    .push(ms))
+                .unwrap(),
                 StepEvidence::NotRecording {
                     reason: NotRecordingReason::NeverStarted
                 }
@@ -4866,7 +4947,7 @@ pub mod act {
             assert!(sleeps.is_empty(), "她沒在錄的時候一次都不可以睡");
             sister_core::heartbeat::beat(&dir.0, at).unwrap();
             assert_eq!(
-                step_evidence(&dir.0, &Source::default(), at, &mut |_| {}).unwrap(),
+                step_evidence(&dir.0, &Source::default(), &action, at, &mut |_| {}).unwrap(),
                 StepEvidence::NoFrameNearby {
                     wait: StepWait::Waited { ms: 2_000 }
                 }
@@ -4877,21 +4958,41 @@ pub mod act {
                     id: 7,
                     ts,
                     image_path: image_path.map(str::to_owned),
+                    window_title: None,
+                    url: None,
                 }),
                 ..Source::default()
             };
             assert_eq!(
-                step_evidence(&dir.0, &source(10_100, Some("after.webp")), at, &mut |_| {})
-                    .unwrap(),
+                step_evidence(
+                    &dir.0,
+                    &source(10_100, Some("after.webp")),
+                    &action,
+                    at,
+                    &mut |_| {}
+                )
+                .unwrap(),
                 StepEvidence::After {
                     frame_id: 7,
                     frame_at_ms: 10_100,
-                    has_image: true
+                    has_image: true,
+                    waited_ms: 0,
+                    target: sister_hands::semi_action::TargetOnScreen::CannotTell {
+                        why: sister_hands::semi_action::CannotTell::NothingOnScreen {
+                            field: sister_hands::semi_action::ScreenField::Url,
+                        },
+                    }
                 }
             );
             assert_eq!(
-                step_evidence(&dir.0, &source(9_900, Some("before.webp")), at, &mut |_| {})
-                    .unwrap(),
+                step_evidence(
+                    &dir.0,
+                    &source(9_900, Some("before.webp")),
+                    &action,
+                    at,
+                    &mut |_| {}
+                )
+                .unwrap(),
                 StepEvidence::Before {
                     frame_id: 7,
                     frame_at_ms: 9_900,
@@ -4901,15 +5002,21 @@ pub mod act {
                 }
             );
             assert_eq!(
-                step_evidence(&dir.0, &source(10_100, None), at, &mut |_| {}).unwrap(),
+                step_evidence(&dir.0, &source(10_100, None), &action, at, &mut |_| {}).unwrap(),
                 StepEvidence::After {
                     frame_id: 7,
                     frame_at_ms: 10_100,
-                    has_image: false
+                    has_image: false,
+                    waited_ms: 0,
+                    target: sister_hands::semi_action::TargetOnScreen::CannotTell {
+                        why: sister_hands::semi_action::CannotTell::NothingOnScreen {
+                            field: sister_hands::semi_action::ScreenField::Url,
+                        },
+                    }
                 }
             );
             assert_eq!(
-                step_evidence(&dir.0, &source(9_900, None), at, &mut |_| {}).unwrap(),
+                step_evidence(&dir.0, &source(9_900, None), &action, at, &mut |_| {}).unwrap(),
                 StepEvidence::Before {
                     frame_id: 7,
                     frame_at_ms: 9_900,
@@ -4942,6 +5049,110 @@ pub mod act {
                 StepEvidence::NotRecording {
                     reason: NotRecordingReason::Stopped { at_ms: Some(9_000) }
                 }
+            );
+        }
+
+        /// 走完一整條路：真的 `frames` 那一列 → `step_frame_preferring_after` 的欄位
+        /// 映射 → 組 `ScreenAfter` 的接線 → 使用者讀到的那一格。
+        ///
+        /// **這一條不是為了再驗一次比對規則**。規則自己有
+        /// `she_checks_the_url_really_opened.rs` 那一整份（寫這一行時 25 條，
+        /// 其中 15 條直接呼叫 `screen_check::target_on_screen`、另外 10 條是
+        /// 自己組 `TargetOnScreen` 去驗使用者讀到的那句話）。**兩種都摸不到
+        /// 中間那兩段接線**——查詢的欄位順序，和組 `ScreenAfter` 的那幾行——
+        /// 因為它們都是從比對函式的**參數**開始的。三刀實測全綠過：
+        ///
+        /// | 改法 | 後果 | 加這一條之前 |
+        /// |---|---|---|
+        /// | `SELECT … window_title, url` 兩欄對調（`row.get` 索引不動） | 拿標題當網址比 | 當時 27 binary 全綠 |
+        /// | 組 `ScreenAfter` 時 `url` / `window_title` 對調 | 同上 | 當時 27 binary 全綠 |
+        /// | `SELECT` 裡的 `url` 換成 `NULL` | **開網址那一格整個關掉**，每一個 `OpenUrl` 都說「說不準」 | 當時 27 binary 全綠 |
+        ///
+        /// 第三刀那句話要照著量到的講：關掉的是 `OpenUrl` 那一臂，不是整個功能。
+        /// `FocusWindow` 和 `OpenFile` 讀的是 `window_title`（`OpenFile` 先把
+        /// 路徑切成檔名再拿去比標題），那兩臂一個字都不受影響。即使如此它仍是
+        /// 最貴的一刀：使用者最在意的那一格可以被安靜地拔掉，而沒有任何東西紅。
+        /// 成因是那些假的 `StepFrameRow` 兩欄都是 `None`——夾具讓路徑走得完，
+        /// 但那條路上一個非空的值都沒有流過。
+        ///
+        /// 所以這裡非要一張**真的**列不可，而且兩欄要有**兩種不同**的值：
+        /// 對調的話 `url` 會拿到一句視窗標題（抽不出 host → 說不準），
+        /// `window_title` 會拿到一串網址（找不到「健保存摺」→ 對不上）。
+        /// 兩個方向各斷言一次，補完一邊的洞才不會原封不動搬到另一邊。
+        #[test]
+        fn a_real_frame_row_carries_both_columns_all_the_way_to_the_verdict() {
+            use sister_core::model::{FocusSnapshot, FrameCapture};
+            use sister_hands::semi_action::{ScreenField, TargetOnScreen};
+
+            const TITLE: &str = "健保存摺 — Chrome";
+            const URL: &str = "https://example.com/a";
+
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence-real-row");
+            let at = 10_000;
+            sister_core::heartbeat::beat(&dir.0, at).unwrap();
+
+            let mut db = Db::open(&sister_core::Config::db_path(&dir.0)).unwrap();
+            let session = db.start_session("test", "0").unwrap();
+            db.insert_frame(
+                session,
+                &FrameCapture {
+                    ts: at + 100,
+                    monitor: 0,
+                    width: 1920,
+                    height: 1080,
+                    dhash: 1,
+                    image: None,
+                    image_ext: "png",
+                    ocr: vec![],
+                    focus: FocusSnapshot {
+                        app_id: Some("chrome.exe".into()),
+                        app_name: Some("Chrome".into()),
+                        window_title: Some(TITLE.into()),
+                        url: Some(URL.into()),
+                        ..Default::default()
+                    },
+                },
+                Some("after.webp"),
+                1,
+            )
+            .unwrap();
+
+            // 網址那一欄真的走到了判斷上。
+            let opened = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com/somewhere-else".into(),
+            };
+            let StepEvidence::After { target, .. } =
+                step_evidence(&dir.0, &db, &opened, at, &mut |_| {}).unwrap()
+            else {
+                panic!("那張 frame 在動作之後，這裡只能是 After");
+            };
+            assert_eq!(
+                target,
+                TargetOnScreen::Matched {
+                    field: ScreenField::Url,
+                    saw: "example.com".into(),
+                    wanted: "example.com".into(),
+                },
+                "真的那一列上的 url 沒有走到判斷上——中間某一段把欄位接錯了，或整欄根本沒被讀出來"
+            );
+
+            // 視窗標題那一欄也是。這一半在，對調才不會兩邊都說得通。
+            let focused = sister_hands::ActionSnapshot::FocusWindow {
+                title: "健保存摺".into(),
+            };
+            let StepEvidence::After { target, .. } =
+                step_evidence(&dir.0, &db, &focused, at, &mut |_| {}).unwrap()
+            else {
+                panic!("那張 frame 在動作之後，這裡只能是 After");
+            };
+            assert_eq!(
+                target,
+                TargetOnScreen::Matched {
+                    field: ScreenField::WindowTitle,
+                    saw: TITLE.into(),
+                    wanted: "健保存摺".into(),
+                },
+                "真的那一列上的 window_title 沒有走到判斷上"
             );
         }
 
@@ -4978,7 +5189,7 @@ pub mod act {
                         sister_core::db::FramelessOrigin::Unknown,
                     ))
                 }
-                fn nearest_step_frame(
+                fn step_frame_preferring_after(
                     &self,
                     _at_ms: i64,
                     _from_ms: i64,
@@ -4990,6 +5201,8 @@ pub mod act {
                         id: 8,
                         ts: 10_300,
                         image_path: Some("after.webp".into()),
+                        window_title: None,
+                        url: None,
                     }))
                 }
             }
@@ -5000,15 +5213,378 @@ pub mod act {
                 calls: std::cell::Cell::new(0),
             };
             let mut sleeps = Vec::new();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com".into(),
+            };
             assert_eq!(
-                step_evidence(&dir.0, &source, at, &mut |ms| sleeps.push(ms)).unwrap(),
+                step_evidence(&dir.0, &source, &action, at, &mut |ms| sleeps.push(ms)).unwrap(),
                 StepEvidence::After {
                     frame_id: 8,
                     frame_at_ms: 10_300,
-                    has_image: true
+                    has_image: true,
+                    waited_ms: 500,
+                    target: sister_hands::semi_action::TargetOnScreen::CannotTell {
+                        why: sister_hands::semi_action::CannotTell::NothingOnScreen {
+                            field: sister_hands::semi_action::ScreenField::Url,
+                        },
+                    }
                 }
             );
             assert_eq!(sleeps, vec![250, 250], "一等到就要立刻回來");
+        }
+
+        /// 每問一次就換一張畫面，照劇本走。
+        struct ScriptedSource {
+            script: Vec<Option<(i64, Option<String>)>>,
+            calls: std::cell::Cell<usize>,
+        }
+        impl ScriptedSource {
+            fn urls(script: &[Option<&str>]) -> Self {
+                Self {
+                    script: script
+                        .iter()
+                        .map(|url| Some((10_100, url.map(str::to_owned))))
+                        .collect(),
+                    calls: std::cell::Cell::new(0),
+                }
+            }
+        }
+        impl StepSource for ScriptedSource {
+            fn live_commitments(&self) -> Result<Vec<CommitmentRow>> {
+                Ok(vec![])
+            }
+            fn app_for_evidence(
+                &self,
+                _r: &sister_core::brain::EvidenceRef,
+            ) -> Result<Option<String>> {
+                Ok(None)
+            }
+            fn app_for_target_fact(
+                &self,
+                _id: i64,
+                _expected_raw: &str,
+            ) -> Result<sister_core::db::TargetApp> {
+                Ok(sister_core::db::TargetApp::AppNotRecorded {
+                    origin: sister_core::db::FactOrigin::Unknown,
+                })
+            }
+            fn frame_for_target_fact(&self, _id: i64, _expected_raw: &str) -> Result<TargetFrame> {
+                Ok(TargetFrame::FrameNotRecorded(
+                    sister_core::db::FramelessOrigin::Unknown,
+                ))
+            }
+            fn step_frame_preferring_after(
+                &self,
+                _at_ms: i64,
+                _from_ms: i64,
+                _to_ms: i64,
+            ) -> Result<Option<sister_core::db::StepFrameRow>> {
+                let i = self.calls.get();
+                self.calls.set(i + 1);
+                let slot = self.script.get(i).or_else(|| self.script.last());
+                Ok(slot
+                    .and_then(Clone::clone)
+                    .map(|(ts, url)| sister_core::db::StepFrameRow {
+                        id: 9,
+                        ts,
+                        image_path: Some("after.webp".into()),
+                        window_title: None,
+                        url,
+                    }))
+            }
+        }
+
+        /// **按下去之後第一張畫面常常還是按下去之前那一頁。**
+        ///
+        /// 瀏覽器要花幾百毫秒才會換過去，而 frame 最快 400 毫秒就寫一列
+        /// （`capture.min_interval_ms`）。停在第一張「動作之後的畫面」就
+        /// 回報，會把一次成功的動作講成「對不上」——每一次都講錯。
+        ///
+        /// 所以等的條件不是「有沒有下一張」，是「有沒有換成他要的樣子」。
+        #[test]
+        fn a_page_still_loading_is_waited_out_not_called_a_mismatch() {
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence-loading");
+            let at = 10_000;
+            sister_core::heartbeat::beat(&dir.0, at).unwrap();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com/a".into(),
+            };
+            // 前兩張還停在舊分頁，第三張才換過去。
+            let source = ScriptedSource::urls(&[
+                Some("https://old.example/"),
+                Some("https://old.example/"),
+                Some("https://example.com/a"),
+            ]);
+            let mut sleeps = Vec::new();
+            let got =
+                step_evidence(&dir.0, &source, &action, at, &mut |ms| sleeps.push(ms)).unwrap();
+            assert_eq!(
+                got,
+                StepEvidence::After {
+                    frame_id: 9,
+                    frame_at_ms: 10_100,
+                    has_image: true,
+                    waited_ms: 500,
+                    target: sister_hands::semi_action::TargetOnScreen::Matched {
+                        field: sister_hands::semi_action::ScreenField::Url,
+                        saw: "example.com".into(),
+                        wanted: "example.com".into(),
+                    }
+                },
+                "還在載入的那兩張把她攔住了——她停在第一張就回報「對不上」"
+            );
+            assert_eq!(sleeps, vec![250, 250], "換過去的那一刻就要收工，不是等滿");
+            assert!(
+                !got.message().contains("盯了"),
+                "等到了就不必跟使用者報告等了多久；實際印的是 {}",
+                got.message()
+            );
+        }
+
+        /// 真的沒換過去的時候，等滿預算，而且**把等了多久說出來**。
+        ///
+        /// 「我看了一眼，對不上」和「我盯了兩秒，一直沒換過去」是兩件事，
+        /// 而使用者要靠它決定要不要自己去看一眼。
+        #[test]
+        fn a_page_that_never_arrives_says_how_long_she_watched() {
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence-never");
+            let at = 10_000;
+            sister_core::heartbeat::beat(&dir.0, at).unwrap();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com/a".into(),
+            };
+            let source = ScriptedSource::urls(&[Some("https://old.example/")]);
+            let mut sleeps = Vec::new();
+            let got =
+                step_evidence(&dir.0, &source, &action, at, &mut |ms| sleeps.push(ms)).unwrap();
+            let StepEvidence::After {
+                waited_ms, target, ..
+            } = &got
+            else {
+                panic!("那張 frame 在動作之後，這裡只能是 After");
+            };
+            assert_eq!(*waited_ms, 2_000, "沒換過去就要等滿 STEP_EVIDENCE_WAIT_MS");
+            assert_eq!(sleeps.iter().sum::<u64>(), 2_000);
+            assert!(
+                matches!(
+                    target,
+                    sister_hands::semi_action::TargetOnScreen::Mismatched { .. }
+                ),
+                "等滿了還是對不上，就要說對不上：{target:?}"
+            );
+            let said = got.message();
+            assert!(
+                said.contains("盯了 2000 毫秒"),
+                "對不上那句要說出她盯了多久，否則讀起來像只瞄了一眼；實際印的是 {said}"
+            );
+        }
+
+        /// 載入中的 `about:blank` 也要等——它是「還在載」，不是「沒得比」。
+        ///
+        /// 這一格和上面那條的差別就是這一版把說不準拆成兩格的理由：
+        /// 網址欄**有東西**（只是還讀不出網站）代表那裡有一個瀏覽器正在動，
+        /// 下一張很可能就是真的網址了。
+        #[test]
+        fn a_blank_page_that_is_still_loading_is_waited_out() {
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence-blank");
+            let at = 10_000;
+            sister_core::heartbeat::beat(&dir.0, at).unwrap();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com/a".into(),
+            };
+            let source =
+                ScriptedSource::urls(&[Some("about:blank"), Some("https://example.com/a")]);
+            let mut sleeps = Vec::new();
+            let got =
+                step_evidence(&dir.0, &source, &action, at, &mut |ms| sleeps.push(ms)).unwrap();
+            assert_eq!(sleeps, vec![250], "about:blank 是還在載，不是沒得比");
+            let StepEvidence::After { target, .. } = &got else {
+                panic!("那張 frame 在動作之後，這裡只能是 After");
+            };
+            assert!(
+                matches!(
+                    target,
+                    sister_hands::semi_action::TargetOnScreen::Matched { .. }
+                ),
+                "多等一張就等到了：{target:?}"
+            );
+        }
+
+        /// 畫面上**什麼都沒探到**的時候不要等——那一格是結構性的。
+        ///
+        /// UIA 被關掉的機器（連卡三次就整組關掉，而且不會自己開回來）
+        /// 每一步都會白等兩秒，而那兩秒買不到任何一個字。
+        #[test]
+        fn a_screen_with_nothing_recorded_does_not_burn_the_budget() {
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence-nothing");
+            let at = 10_000;
+            sister_core::heartbeat::beat(&dir.0, at).unwrap();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com/a".into(),
+            };
+            let source = ScriptedSource::urls(&[None]);
+            let mut sleeps = Vec::new();
+            let got =
+                step_evidence(&dir.0, &source, &action, at, &mut |ms| sleeps.push(ms)).unwrap();
+            assert_eq!(sleeps, Vec::<u64>::new(), "沒得比就不要花掉他的兩秒");
+            let StepEvidence::After { waited_ms, .. } = &got else {
+                panic!("那張 frame 在動作之後，這裡只能是 After");
+            };
+            assert_eq!(*waited_ms, 0);
+        }
+
+        /// 只認**動作前後五秒**裡的畫面。
+        ///
+        /// `db.rs` 那三條測試是自己把窗口當參數傳進去的，所以
+        /// `STEP_EVIDENCE_WINDOW_MS` 這個常數在它們身上是隱形的：實測把
+        /// 5 秒改成十分鐘，27 個 binary 一個都不紅。要釘住它，假貨就得像
+        /// 真的資料庫一樣**遵守那兩個引數**——只回傳落在窗內的那一張。
+        ///
+        /// 為什麼是五秒而不是隨便一個數：使用者讀到的那句話是「做完之後的
+        /// 畫面憑據」。十分鐘後那張畫面上有什麼，跟他剛剛按的那一下沒有關係，
+        /// 而句子仍然會把它說成這一步的憑據。
+        ///
+        /// 兩個方向各一刀（`WINDOW ± 1`），因為窗是對稱的，只驗一邊會讓
+        /// 「只放寬另一邊」溜過去。
+        #[test]
+        fn only_a_frame_within_five_seconds_counts_as_this_step_s_evidence() {
+            struct WindowedSource(i64);
+            impl StepSource for WindowedSource {
+                fn live_commitments(&self) -> Result<Vec<CommitmentRow>> {
+                    Ok(vec![])
+                }
+                fn app_for_evidence(
+                    &self,
+                    _r: &sister_core::brain::EvidenceRef,
+                ) -> Result<Option<String>> {
+                    Ok(None)
+                }
+                fn app_for_target_fact(
+                    &self,
+                    _id: i64,
+                    _expected_raw: &str,
+                ) -> Result<sister_core::db::TargetApp> {
+                    Ok(sister_core::db::TargetApp::AppNotRecorded {
+                        origin: sister_core::db::FactOrigin::Unknown,
+                    })
+                }
+                fn frame_for_target_fact(
+                    &self,
+                    _id: i64,
+                    _expected_raw: &str,
+                ) -> Result<TargetFrame> {
+                    Ok(TargetFrame::FrameNotRecorded(
+                        sister_core::db::FramelessOrigin::Unknown,
+                    ))
+                }
+                // 唯一那張 frame 在 `self.0`；窗外就當作查不到，跟真的
+                // `WHERE ts >= ?1 AND ts <= ?2` 同一個意思。
+                fn step_frame_preferring_after(
+                    &self,
+                    _at_ms: i64,
+                    from_ms: i64,
+                    to_ms: i64,
+                ) -> Result<Option<sister_core::db::StepFrameRow>> {
+                    Ok((from_ms..=to_ms)
+                        .contains(&self.0)
+                        .then(|| sister_core::db::StepFrameRow {
+                            id: 9,
+                            ts: self.0,
+                            image_path: Some("f.webp".into()),
+                            window_title: None,
+                            url: Some("https://example.com/a".into()),
+                        }))
+                }
+            }
+
+            const AT: i64 = 1_000_000;
+            const WINDOW: i64 = 5_000;
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com/a".into(),
+            };
+            for (ts, inside) in [
+                (AT - WINDOW - 1, false),
+                (AT - WINDOW, true),
+                (AT + WINDOW, true),
+                (AT + WINDOW + 1, false),
+            ] {
+                let dir = crate::ops::tmp::Tmp::new(&format!("act-step-window-{ts}"));
+                sister_core::heartbeat::beat(&dir.0, AT).unwrap();
+                let got =
+                    step_evidence(&dir.0, &WindowedSource(ts), &action, AT, &mut |_| {}).unwrap();
+                let found = !matches!(got, StepEvidence::NoFrameNearby { .. });
+                assert_eq!(
+                    found,
+                    inside,
+                    "唯一那張 frame 在 {ts}，動作在 {AT}：{}。實際拿到 {got:?}",
+                    if inside {
+                        "它就在五秒的邊界上，應該算數"
+                    } else {
+                        "它離動作超過五秒，不可以被說成「做完之後的畫面憑據」"
+                    }
+                );
+            }
+        }
+
+        /// 動作**那一毫秒**拍到的畫面算「之後」，不算「之前」。
+        ///
+        /// 這個邊界在兩處各寫了一次——`screen_has_settled` 的早退，和決定
+        /// `After` / `Before` 的那個 guard——兩處都是 `>=`。實測把它們改成
+        /// `>`，27 個 binary 全綠：既有測試的 frame 不是 9_900 就是 10_100，
+        /// 一張都沒有落在動作那一刻上。
+        ///
+        /// 差別使用者看得見，而且是兩層：句子會變成「只有動作前 **0** 毫秒
+        /// 的 frame」（自己打自己），而且 alpha.95 的畫面比對整個不會跑
+        /// ——它只掛在 `After` 那一格上。
+        #[test]
+        fn a_frame_taken_at_the_very_moment_of_the_action_counts_as_after() {
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence-exact");
+            let at = 10_000;
+            sister_core::heartbeat::beat(&dir.0, at).unwrap();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com/a".into(),
+            };
+            let source = Source {
+                nearest_frame: Some(sister_core::db::StepFrameRow {
+                    id: 4,
+                    ts: at,
+                    image_path: Some("exact.webp".into()),
+                    window_title: None,
+                    url: Some("https://example.com/a".into()),
+                }),
+                ..Source::default()
+            };
+            let mut sleeps = Vec::new();
+            let got =
+                step_evidence(&dir.0, &source, &action, at, &mut |ms| sleeps.push(ms)).unwrap();
+            assert!(
+                matches!(
+                    got,
+                    StepEvidence::After {
+                        target: sister_hands::semi_action::TargetOnScreen::Matched { .. },
+                        ..
+                    }
+                ),
+                "動作那一毫秒的畫面被判成「動作之前」，於是比對整個沒跑；實際拿到 {got:?}"
+            );
+            assert!(
+                !got.message().contains("只有動作前"),
+                "同一張畫面同時是「之後」和「動作前 0 毫秒」；實際印的是 {}",
+                got.message()
+            );
+            // 這個邊界寫了兩次，而**兩處不同步是看不出來的**：等待迴圈那一側
+            // 判「還沒到動作之後」的話她會白等滿兩秒，然後外面那個 guard 還是
+            // 判成 `After`＋對得上——上面兩條斷言原封不動地綠。實測 `<` 改成
+            // `<=`，27 個 binary 全綠，就是這一條補起來的。
+            //
+            // 使用者看不到「她多等了兩秒」這句話（對得上那一格不印等待時間），
+            // 只會覺得每一步都慢。所以這裡量的是**她有沒有睡**，不是句子。
+            assert_eq!(
+                sleeps,
+                Vec::<u64>::new(),
+                "畫面已經是他要的樣子了還在等——`screen_has_settled` 和外面那個 \
+                 guard 對「動作那一毫秒」的判斷不一致"
+            );
         }
 
         fn before_frame() -> Source {
@@ -5017,6 +5593,8 @@ pub mod act {
                     id: 7,
                     ts: 9_900,
                     image_path: Some("before.webp".into()),
+                    window_title: None,
+                    url: None,
                 }),
                 ..Source::default()
             }
@@ -5026,7 +5604,11 @@ pub mod act {
         fn unreadable_heartbeat_and_a_before_frame_say_the_result_is_uncertain() {
             let dir = crate::ops::tmp::Tmp::new("act-step-evidence-unreadable");
             std::fs::write(sister_core::heartbeat::beat_path(&dir.0), "not json at all").unwrap();
-            let evidence = step_evidence(&dir.0, &before_frame(), 10_000, &mut |_| {}).unwrap();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com".into(),
+            };
+            let evidence =
+                step_evidence(&dir.0, &before_frame(), &action, 10_000, &mut |_| {}).unwrap();
             let message = evidence.message();
             assert!(matches!(
                 evidence,
@@ -5045,7 +5627,11 @@ pub mod act {
         fn stopped_heartbeat_and_a_before_frame_keep_the_stopped_reason() {
             let dir = crate::ops::tmp::Tmp::new("act-step-evidence-stopped");
             sister_core::heartbeat::stop(&dir.0, 9_000);
-            let evidence = step_evidence(&dir.0, &before_frame(), 10_000, &mut |_| {}).unwrap();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com".into(),
+            };
+            let evidence =
+                step_evidence(&dir.0, &before_frame(), &action, 10_000, &mut |_| {}).unwrap();
             let message = evidence.message();
             assert!(matches!(
                 evidence,
@@ -6166,13 +6752,14 @@ pub mod act {
             fn frame_for_target_fact(&self, id: i64, expected_raw: &str) -> Result<TargetFrame> {
                 self.inner.frame_for_target_fact(id, expected_raw)
             }
-            fn nearest_step_frame(
+            fn step_frame_preferring_after(
                 &self,
                 at_ms: i64,
                 from_ms: i64,
                 to_ms: i64,
             ) -> Result<Option<sister_core::db::StepFrameRow>> {
-                self.inner.nearest_step_frame(at_ms, from_ms, to_ms)
+                self.inner
+                    .step_frame_preferring_after(at_ms, from_ms, to_ms)
             }
         }
 

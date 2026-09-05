@@ -451,6 +451,89 @@ impl AbortActor {
 // 地方，然後把新的東西接到一條死路上。它的名字是它唯一還在說的話，而那句
 // 話是假的。
 
+/// 做完之後那張畫面上記著的東西。欄位對應 `frames` 那一列。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenAfter {
+    pub url: Option<String>,
+    pub window_title: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenField {
+    Url,
+    WindowTitle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "cannot_tell", rename_all = "snake_case")]
+pub enum CannotTell {
+    /// 那張畫面上這一欄是空的——她那一刻沒能記下任何東西。
+    ///
+    /// 和 [`Self::ScreenUrlUnreadable`] 分開，是因為使用者能做的事不一樣：
+    /// 這一格是「沒探到」，那一格是「探到了，但那不是一個網址」。r29 以前
+    /// 兩者共用一句「這台機器沒有記下那張畫面的網址」，而後者根本記下了。
+    NothingOnScreen { field: ScreenField },
+    /// 那張畫面的網址欄**有值**，但抽不出可以比的網站名。
+    ///
+    /// 走得到：`about:blank`、`file:///C:/x.pdf`、UIA 探到半截的字串。
+    /// 只有網址會落到這一格——視窗標題是用「有沒有含這幾個字」比的，
+    /// 任何非空的標題都比得動，所以沒有「有值但讀不懂的標題」這種東西。
+    ScreenUrlUnreadable,
+    /// 這一步的目標本身是空的：`FocusWindow` 給了空白標題，或
+    /// `OpenFile` 的路徑切不出檔名。
+    NothingInTheAsk,
+    /// 這一步要開的是網址，字也在，但她這一版抽不出可以比的網站名。
+    ///
+    /// 已知會走到這裡的是**中文／非 ASCII 網域**（`https://例え.jp/`）：
+    /// `target_policy::validate_url` 收它，`segment::looks_like_host` 不收。
+    /// 和 [`Self::NothingInTheAsk`] 分開是因為那句話會讀成「你沒有給目標」，
+    /// 而使用者明明給了。
+    AskUrlUnreadable,
+    /// 這一列是 alpha.95 以前寫的；那幾版根本沒有比過。
+    ///
+    /// **這一格沒有產品寫入端。** 它只從 `StepEvidence::After::target` 的
+    /// `#[serde(default)]` 長出來——舊紀錄的 JSON 裡沒有 `target` 這個欄位。
+    /// `target_on_screen()` 一格都到不了這裡（它只回 `Matched` /
+    /// `Mismatched`，或 `CannotTell` 的其他四格）。
+    ///
+    /// 所以：**誰在產品碼裡寫下 `TargetOnScreen::default()`，誰就讓上面那句
+    /// 話變成假話**——一列今天寫的紀錄會對使用者說「這是舊版寫的」。要表達
+    /// 「查了、但沒東西可比」請用 `NothingOnScreen` / `NothingInTheAsk`。
+    NotChecked,
+}
+
+/// 做完之後那張畫面，和這一步「該變成的樣子」對不對得上。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "target_on_screen", rename_all = "snake_case")]
+pub enum TargetOnScreen {
+    /// `wanted` 和 `saw` 兩個都留著，因為**這兩格對得上的定義不一樣**：
+    /// 網址是整個網站名相等（正規化過 `www.` 之後），視窗標題是「標題裡
+    /// 含有這幾個字」。少了 `wanted`，句子只能寫成「畫面的標題是 X」，
+    /// 那對一個子字串比對是過度宣稱——標題可能是「登入 — 健保存摺」。
+    Matched {
+        field: ScreenField,
+        saw: String,
+        wanted: String,
+    },
+    Mismatched {
+        field: ScreenField,
+        saw: String,
+        wanted: String,
+    },
+    CannotTell {
+        why: CannotTell,
+    },
+}
+
+impl Default for TargetOnScreen {
+    fn default() -> Self {
+        Self::CannotTell {
+            why: CannotTell::NotChecked,
+        }
+    }
+}
+
 /// 一步做完後實際查到的畫面狀態。
 ///
 /// `ActionEvent::StepFinished::evidence` 外面的 `Option` 留給舊版紀錄：`None`
@@ -463,6 +546,19 @@ pub enum StepEvidence {
         frame_id: i64,
         frame_at_ms: i64,
         has_image: bool,
+        /// 從動作結束到挑中這一張畫面為止，她等了多久。
+        ///
+        /// 0 代表「第一眼就看到了」。這個數字讓「對不上」那句話說得出
+        /// **它找了多久**——一次快照對不上和兩秒內每一張都對不上，是兩件
+        /// 不同的事，而使用者要靠它決定要不要自己去看一眼。
+        ///
+        /// `#[serde(default)]`：alpha.95 以前的那些列沒有這個鍵，補 0。
+        /// 那些列同時也沒有 `target`，所以句子走的是「這一列是舊版寫的」
+        /// 那一格，讀不到這個 0。
+        #[serde(default)]
+        waited_ms: u64,
+        #[serde(default)]
+        target: TargetOnScreen,
     },
     Before {
         frame_id: i64,
@@ -529,18 +625,61 @@ impl StepEvidence {
                 frame_id,
                 frame_at_ms,
                 has_image,
+                waited_ms,
+                target,
             } => {
-                if *has_image {
+                let frame = if *has_image {
                     format!(
-                        "做完之後的畫面憑據是 frame #{frame_id}（{}），圖在。",
+                        "做完之後的畫面憑據是 frame #{frame_id}（{}），圖在",
                         at(*frame_at_ms)
                     )
                 } else {
                     format!(
-                        "做完之後有 frame #{frame_id}（{}）這一列，但沒有截圖；紀錄在，圖不在。",
+                        "做完之後有 frame #{frame_id}（{}）這一列，但沒有截圖；紀錄在，圖不在",
                         at(*frame_at_ms)
                     )
-                }
+                };
+                // 十句。每一句都要講一件另外九句沒講的事——
+                // `each_of_the_ten_endings_says_a_thing_the_others_do_not`
+                // 會把每一句的招牌詞拿去掃另外九句，撞到就紅。
+                //
+                // 對得上的兩句都要**講清楚比的是什麼**：網址比的是網站名
+                // （不是哪一頁），標題比的是「裡面有沒有這幾個字」。r29 早先
+                // 寫成「而且⋯就在 X 上。」，讀起來像「這一步成功了」，而她
+                // 看到的其實可能是同一個網站的登入牆。
+                let ending = match target {
+                    TargetOnScreen::Matched { field: ScreenField::Url, saw, .. } =>
+                        format!("，那張畫面的網址也在 {} 上——她比的是網站，不是你停在哪一頁。", one_line(saw)),
+                    TargetOnScreen::Matched { field: ScreenField::WindowTitle, saw, wanted } =>
+                        format!("，那張畫面的視窗標題「{}」裡有「{}」——她比的是標題含不含這幾個字。", one_line(saw), one_line(wanted)),
+                    TargetOnScreen::Mismatched { field: ScreenField::Url, saw, wanted } =>
+                        format!("，但那張畫面的網址在 {} 上，不是你要開的 {}——這一步有沒有真的做到，她沒有把握。", one_line(saw), one_line(wanted)),
+                    TargetOnScreen::Mismatched { field: ScreenField::WindowTitle, saw, wanted } =>
+                        format!("，但那張畫面的視窗標題是「{}」，裡面沒有「{}」——這一步有沒有真的做到，她沒有把握。", one_line(saw), one_line(wanted)),
+                    TargetOnScreen::CannotTell { why: CannotTell::NothingOnScreen { field: ScreenField::Url } } =>
+                        "。這台機器沒有探到那張畫面的網址欄，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
+                    TargetOnScreen::CannotTell { why: CannotTell::NothingOnScreen { field: ScreenField::WindowTitle } } =>
+                        "。這台機器沒有探到那張畫面的視窗標題，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
+                    TargetOnScreen::CannotTell { why: CannotTell::ScreenUrlUnreadable } =>
+                        "。那張畫面的網址欄有記到東西，但那不是一個看得出網站的網址，所以沒得比。".to_string(),
+                    TargetOnScreen::CannotTell { why: CannotTell::NothingInTheAsk } =>
+                        "。這一步本身沒有給出可以拿去跟畫面比的目標，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
+                    TargetOnScreen::CannotTell { why: CannotTell::AskUrlUnreadable } =>
+                        "。你要開的網址她認得、也開了，但她這一版看不懂那個網域（例如中文網域），所以沒法跟畫面比。".to_string(),
+                    TargetOnScreen::CannotTell { why: CannotTell::NotChecked } =>
+                        "。這一列是舊版寫的，那幾版沒有比對過畫面上真的變成什麼。".to_string(),
+                };
+                // 只有在「沒等到他要的樣子」的時候才補這一句，而且只在真的
+                // 等過的時候。對得上那一格不補：那會變成「等了 0 毫秒」這種
+                // 沒有人需要知道的雜訊。
+                let waited = match target {
+                    TargetOnScreen::Matched { .. } => String::new(),
+                    _ if *waited_ms == 0 => String::new(),
+                    _ => format!(
+                        "（她在這一步之後盯了 {waited_ms} 毫秒，看的是這段時間裡最新的那一張。）"
+                    ),
+                };
+                format!("{frame}{ending}{waited}")
             }
             Self::Before {
                 frame_id,
@@ -572,6 +711,48 @@ impl StepEvidence {
             ),
         }
     }
+}
+
+/// 把畫面上抓來的一段字，收成塞得進一句話裡的樣子。
+///
+/// **這是 r29 才長出來的需求。** alpha.94 以前她只印 frame 的編號和時間，
+/// 從來沒有把畫面上的**內容**複述給使用者；這一版開始複述了，而那段內容
+/// 是網頁自己寫的（`document.title` 想寫什麼就寫什麼），長度沒有上限
+/// ——`validate_window_title` 只擋空字串。
+///
+/// 兩件事：
+///
+/// * **換行和控制字元換成空格。** 留著換行的話，一句敘述會被撐成好幾行，
+///   而底下那幾行看起來就像是她自己說的話。這一步不是為了防禦某個具體的
+///   攻擊，是因為這句話的**形狀**是一行。
+/// * **超過 60 個字就切掉，補一個 `…`。** 這句話的用途是讓他認得出畫面上
+///   那個視窗，不是把整段標題原文搬過來。
+///
+/// 切的單位是 `char` 不是 byte，中文標題在 byte 邊界切會 panic。
+///
+/// **沒有解決的：** 標題裡本來就有「」的話，引號還是會看起來對不齊。
+/// 換一套跳脫規則要動到十句話的排版，而那個歪法看得出來是歪的
+/// （字還在，只是括號多了一層），比截斷更不容易讓人讀錯。
+fn one_line(text: &str) -> String {
+    const CAP: usize = 60;
+    let flat: String = text
+        .chars()
+        // `is_control` 是 Unicode 的 Cc；U+2028 / U+2029 是 Zl / Zp，
+        // 不在裡面，但它們一樣會換行。
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let flat = flat.trim();
+    let mut out: String = flat.chars().take(CAP).collect();
+    if flat.chars().count() > CAP {
+        out.push('…');
+    }
+    out
 }
 
 impl StepWait {
@@ -895,9 +1076,11 @@ mod provenance_tests {
         let ms = 1_756_200_004_400;
         let carrying_a_real_timestamp = [
             StepEvidence::After {
+                waited_ms: 0,
                 frame_id: 7,
                 frame_at_ms: ms,
                 has_image: true,
+                target: Default::default(),
             },
             StepEvidence::Before {
                 frame_id: 7,

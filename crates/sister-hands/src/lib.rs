@@ -1487,9 +1487,11 @@ mod tests {
             step_number: 1,
             action: action.clone(),
             evidence: Some(semi_action::StepEvidence::After {
+                waited_ms: 0,
                 frame_id: 4,
                 frame_at_ms: 11,
                 has_image: true,
+                target: Default::default(),
             }),
         };
         let value = serde_json::to_value(&event).unwrap();
