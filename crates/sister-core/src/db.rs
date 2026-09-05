@@ -3844,15 +3844,12 @@ impl Db {
         Ok(n.max(0) as u32)
     }
 
-    /// 數同一段**還留著的**解釋層外送列，並讀最近一次的結局。
+    /// 下面 `retained_interpreter_attempts_for_segment` 那支查詢的原文。
     ///
-    /// 這不是終生次數：`sister forget` 會依外送時間刪除 `brain_outbound` 的列；
-    /// 保留期清理不碰這張表。舊資料若含不認得的 outcome，保留原始 token，仍
-    /// 算一次問過。審閱層與盯梢層的列不屬於這個問題。
-    /// 上面那支查詢的原文。抽成常數是因為 `migration_018_indexes_are_used_by_both_hot_queries`
-    /// 要對**產品真的在跑的那一句**問執行計畫——它原本手抄了一份，而我在 r28 把
-    /// `WHERE` 從起點相等換成半開區間之後，手抄那份沒有跟著改，於是那條測試繼續
-    /// 綠著守一句已經沒有人在跑的 SQL。抄一份就會漂，所以只留一份。
+    /// 抽成常數是因為 `migration_018_indexes_are_used_by_both_hot_queries` 要對
+    /// **產品真的在跑的那一句**問執行計畫——它原本手抄了一份，而 r28 把 `WHERE`
+    /// 從起點相等換成半開區間之後，手抄那份沒有跟著改，於是那條測試繼續綠著守
+    /// 一句已經沒有人在跑的 SQL。抄一份就會漂，所以只留一份。
     const RETAINED_INTERPRETER_ATTEMPTS_SQL: &str = "SELECT COUNT(*),
                     (SELECT outcome FROM brain_outbound
                      WHERE segment_core_start >= ?1 AND segment_core_start < ?2
@@ -3862,6 +3859,23 @@ impl Db {
              WHERE segment_core_start >= ?1 AND segment_core_start < ?2
                AND role = 'interpreter'";
 
+    /// 數這一段的**時間範圍裡**還留著的解釋層外送列，並讀最近一次的結局。
+    ///
+    /// 範圍是半開的 `[core_started_at, core_ended_at)`。用範圍而不是用起點嚴格
+    /// 相等，是因為使用者**合併**章節之後，右半那些列記著的 `segment_core_start`
+    /// 不再等於任何一段的起點——舊寫法會把它們全部漏掉，而一列都沒有被刪。
+    /// 章節之間嚴格接合（`segment.rs` 的 cursor 遞推，加上 `merge_segments` 寫入前
+    /// 那道 `left.core_ended_at == right.core_started_at`），所以每一列恰好落在
+    /// 一段裡，右界開著才不會被相鄰兩段各數一次。
+    ///
+    /// **這不是終生次數，而且讓它變動的不只一件事：**
+    /// - `sister forget` 會依外送時間刪除 `brain_outbound` 的列（保留期清理不碰
+    ///   這張表）——這一種是「列真的少了」。
+    /// - 使用者合併或切開章節，會改變這一段的範圍，於是同一批列被重新分配到不同
+    ///   的段落上——**一列都沒少，數字照樣會變**。
+    ///
+    /// 舊資料若含不認得的 outcome，保留原始 token，仍算一次問過。
+    /// 審閱層與盯梢層的列不屬於這個問題。
     pub fn retained_interpreter_attempts_for_segment(
         &self,
         core_started_at: Millis,
