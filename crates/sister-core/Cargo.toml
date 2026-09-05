@@ -38,6 +38,11 @@ getrandom.workspace = true
 # 兩邊各自拿寫死的字面值跟自己比對，欄位改名兩邊照樣全綠——那條縫需要有
 # 人站在中間。
 #
-# sister-hands 自己的相依只有 anyhow / serde / serde_json / chrono，
-# `scripts/check-no-network.sh` 走 `--edges normal` 不會因此多出 HTTP client。
+# sister-hands 的相依是 anyhow / serde / serde_json / chrono，**加上 alpha.96 起的
+# `global-hotkey`**：撞號判定要用真正負責註冊的那支 parser，不要手抄別名表。
+# 那一筆連帶把 x11rb / keyboard-types / crossbeam-channel / rustix 一族拉進
+# `sister.exe` 的相依樹（實測 `cargo tree -p sister-cli --edges normal` 從 90 個
+# crate 變 101 個）。裡面沒有 HTTP client，所以 `scripts/check-no-network.sh`
+# 要擋的那件事沒有變——但那道閘門的 `FORBIDDEN` 名單是逐個列的，新進來的這幾個
+# 它不認得，別把「它還是綠的」讀成「它看過這幾個了」。
 sister-hands.workspace = true

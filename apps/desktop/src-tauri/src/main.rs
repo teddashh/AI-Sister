@@ -2465,11 +2465,36 @@ fn hotkey_set(
     let view = apply_hotkey(&app, &combo, &hands_wanted);
     if let Some(error) = config_error {
         let restored = HotkeyView {
-            config_unreadable: Some(error.clone()),
+            // **沿用開機那一次的旗標，不要在這裡自己生一個。**
+            //
+            // 這個欄位的意思是「現在用的是**內建預設值**，不是他設的那一組」，
+            // 設定頁（`settings.js` 的 `paintHandsHotkey`）就是照這個意思寫句子的。
+            // 只有開機那條路會讓它成立：那裡是 `loaded.unwrap_or_default().shell`，
+            // 真的退到了出廠值。
+            //
+            // 這條路正好相反：上面那句 `unwrap_or_else(|_| current.hands_wanted…)`
+            // 保住的就是**他設的那一組**。在這裡填 `Some(error)` 的話，拔手那一格
+            // 會紅著寫「暫停和拔手現在用的都是內建預設值，不是你設的」，而它正上方
+            // 的格子印著他自己那顆、那顆還真的按得動。他會改去按出廠的
+            // `Ctrl+Alt+H`——那顆沒註冊，按下去什麼都不會發生。而且那句話會**黏著**
+            // 到下一次成功換熱鍵為止，中間每一次 `reloadHotkey()` 都再畫一次。
+            //
+            // 沿用之後兩條路都是真的：開機失敗過就一直說（值確實是預設值），開機
+            // 沒失敗過就不說——這一輪讀失敗的事由底下那句 `Err` 交代，而它連拔手鍵
+            // 現在是哪一組都講得出來。
+            config_unreadable: current.config_unreadable.clone(),
             ..apply_hotkey(&app, &previous, &hands_wanted)
         };
         let still = if restored.registered {
             format!("現在還在用 {}。", sister_shell::pretty_combo(&restored.wanted))
+        } else if restored.hands_collided {
+            // 撞號要自己一臂。`wanted` 現在裝的是設定檔裡那一組（撞號時也有值），
+            // 少了這一臂會掉到最後那個 else，把「讓給拔手了」講成「被別的程式
+            // 搶走了」——歸因是假的，而他會去找那個不存在的程式。
+            format!(
+                "現在原來那組 {} 和拔手鍵撞號，讓給拔手了；改用系統匣裡的暫停。",
+                sister_shell::pretty_combo(&restored.wanted)
+            )
         } else if restored.wanted.is_empty() {
             "現在暫停熱鍵是關掉的。".to_string()
         } else {
@@ -2527,6 +2552,15 @@ fn hotkey_set(
             // ——而鍵盤上沒有一顆鍵叫 KeyP。他要照著這句話去按的。
             let still = if restored.registered {
                 format!("還在用 {}。", sister_shell::pretty_combo(&restored.wanted))
+            } else if restored.hands_collided {
+                // 走得到：設定檔裡兩顆本來就同一組（開機就撞號），他在設定頁換成
+                // 一組不撞的、搶到了、但存不進去 → 這裡把**原來那組**裝回去，而
+                // 原來那組正是撞號的那一組。少了這一臂會掉進最後那個 else，
+                // 把「讓給拔手了」講成「被別的程式搶走了」。
+                format!(
+                    "而舊的那組 {} 和拔手鍵撞號，讓給拔手了——改用系統匣裡的暫停。",
+                    sister_shell::pretty_combo(&restored.wanted)
+                )
             } else if restored.wanted.is_empty() {
                 "熱鍵本來就是關掉的，維持原狀。".to_string()
             } else {
@@ -3372,9 +3406,18 @@ fn main() {
                 // 成功也要留一行。「搶到了」和「這段程式根本沒跑到」在一份
                 // 只記失敗的記錄檔裡長得一模一樣，而那正是他按了熱鍵沒反應時
                 // 唯一想分辨的兩件事。
+                // 判準是 `registered`，不是 `wanted.is_empty()`：`wanted` 現在裝的是
+                // **設定檔裡那一組**（撞號時也照樣有值，這樣設定頁才講得出他設的是
+                // 哪一顆）。拿空不空來問「有沒有搶到」的話，撞號那一輪會掉進最後
+                // 一臂印「暫停熱鍵 Ctrl+Alt+H 搶到了」——而那顆這一輪一次都沒送去
+                // 註冊，按下去做的是拔手。這幾行存在的理由就是要分辨「搶到了」和
+                // 「這段程式根本沒跑到」，印肯定句給第三種情況正好毀掉那件事。
                 match &view.reason {
                     Some(reason) => tracing::warn!("暫停熱鍵 {} 註冊不起來：{reason}", view.wanted),
-                    None if view.wanted.is_empty() => tracing::info!("暫停熱鍵是關掉的"),
+                    None if view.hands_collided => {
+                        tracing::info!("暫停熱鍵 {} 讓給拔手了，這一輪沒送去註冊", view.wanted)
+                    }
+                    None if !view.registered => tracing::info!("暫停熱鍵是關掉的"),
                     None => tracing::info!("暫停熱鍵 {} 搶到了", view.wanted),
                 }
                 *app.state::<Hotkey>().0.lock().expect("hotkey") = view;

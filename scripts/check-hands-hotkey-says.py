@@ -29,7 +29,7 @@ build」），**從來沒有 `cargo test` 過**。所以這幾格的行為只可
   做不到**的指示，它照樣綠。
 - ③ 只問那句話裡有沒有「現在」這兩個字（字面或它插進去的變數裡都算）。把「現在」
   接到一個算錯的變數上，它照樣綠。
-- 全部八條都不會在 Windows 上跑出任何行為證據。這一顆鍵在真 Tauri 視窗上
+- 這裡**每一格**都不會在 Windows 上跑出任何行為證據。這一顆鍵在真 Tauri 視窗上
   一次都沒被按過。
 
 ## 錨點對不到就要吵
@@ -63,6 +63,20 @@ def want(tag: str, ok: bool, why: str) -> None:
     if not ok:
         print(f"      {why}")
         BAD.append(tag)
+
+
+def rust_stmt_at(scope: str, at: int) -> str:
+    """從 `at` 起算的一整句 Rust 敘述（右手邊帶大括號也吃得下）。"""
+    depth = 0
+    for j in range(at, len(scope)):
+        if scope[j] == "{":
+            depth += 1
+        elif scope[j] == "}":
+            depth -= 1
+        elif scope[j] == ";" and depth == 0:
+            return scope[at : j + 1]
+    die("敘述沒有結尾的分號", "檔案被截斷，或錨點指到字串裡去了。")
+    return ""
 
 
 def rust_binding(scope: str, name: str) -> str:
@@ -113,9 +127,12 @@ combo_of = brace_body(sjs, sjs.find("function comboOf"), "settings.js 的 comboO
 want(
     "① comboOf 推的是 e.code",
     "parts.push(e.code)" in combo_of,
-    "送給後端的組合鍵形狀（`Ctrl+Alt+KeyH`）是 `kill_switch::normalize_hotkey` 那\n"
-    "      一族測試的前提。這裡一改，`crates/sister-core/tests/exam_r33.rs` 裡\n"
-    "      手寫的那一對字串就不再是產品生得出來的形狀，而它會繼續綠著。",
+    # `normalize_hotkey` 那支手抄別名表的函式在 alpha.96 被整支刪掉了（改用
+    # `global_hotkey::hotkey::HotKey::from_str`），所以這句話不能再指著它。
+    "送給後端的組合鍵形狀（`Ctrl+Alt+KeyH`）是 `hotkeys_collide` 那一族測試的\n"
+    "      前提。這裡一改，`crates/sister-core/tests/exam_r33.rs`、`exam_r34.rs`\n"
+    "      和 `kill_switch.rs` 裡**手寫**的那些字串就不再是產品生得出來的形狀，\n"
+    "      而它們會繼續綠著——綠得沒有意義。那一天要回去重推配對，不是把它改綠。",
 )
 
 print("▶ 設定檔讀不出來的時候，換熱鍵那條路不早退")
@@ -167,6 +184,53 @@ want(
     and "{hands_still}" in unreadable_says[0],
     "這條路會先拆掉再重裝兩顆鍵；只交代暫停鍵，安全鍵換人或搶不到都沒有一句話說。",
 )
+
+# ③ᵇ 只問「那 1800 字裡有沒有這幾個詞」，沒有任何一格把 `hands_still` 綁到
+# `hands_*` 欄位上。實測把 `pretty_combo(&restored.hands_wanted)` 換成
+# `pretty_combo(&restored.wanted)`，13 格全綠、Rust 全綠——而他讀到的是
+# 「拔手鍵現在還在用 Ctrl + Alt + P」，按下去她的手還接著。
+# 兩臂各自只准讀自己那一組欄位。
+# 問的是「**印出來的組合**是不是自己那一顆」，不是「有沒有碰到對方任何欄位」：
+# `still` 讀 `hands_collided` 是正當的——那是暫停鍵為什麼沒註冊的**原因**。
+# 不正當的是把對方的**組合**印進自己這一句。
+# `needs_collision` 只給暫停那一句：撞號的時候讓位的是它，所以它才需要一臂把
+# 「讓給拔手了」和「被別的程式搶走了」分開。拔手那一句相反——撞號時它是活下來
+# 的那顆，照常註冊，`hands_collided` 對它不是一個分辨條件。
+for name, mine, theirs, needs_collision in [
+    ("still", "wanted", ["hands_wanted", "hands_registered"], True),
+    ("hands_still", "hands_wanted", ["wanted", "registered"], False),
+]:
+    # **每一個**同名的 `let` 都要看，不是最後那個。`hotkey_set` 裡有兩個
+    # `let still = `（設定檔讀不出來一個、存不進去一個），而 `rust_binding` 用
+    # `rfind`——第一版的這一格只檢查了後面那個，前面那個從來沒人看。
+    # 這是我在 ③ 上犯過的同一個錯（`find` 拿第一個去替後面每一句背書），
+    # 換成 `rfind` 之後又從另一頭犯了一次。
+    bindings = [
+        rust_stmt_at(hotkey_set, m.start())
+        for m in re.finditer(rf"let {name} = ", hotkey_set)
+    ]
+    if not bindings:
+        die(f"找不到 `let {name} = `", "錨點對不到的時候，這一格是空轉的。")
+    for i, arm in enumerate(bindings, 1):
+        fields = set(re.findall(r"restored\.(\w+)", arm))
+        if not fields:
+            die(f"第 {i} 個 `let {name} = ` 沒有讀任何 restored 欄位", "這一格是空轉的。")
+        stolen = [f for f in theirs if f in fields]
+        want(
+            f"③ᶜ 第 {i} 個 `{name}` 印的是自己那一顆鍵的組合"
+            + ("，而且分得出撞號" if needs_collision else ""),
+            mine in fields
+            and not stolen
+            and (not needs_collision or "hands_collided" in fields),
+            f"讀到了 {sorted(fields)}；不該碰的：{stolen or '（無）'}。\n"
+            f"      兩臂吐的是同一種形狀的完整中文句子，拿錯欄位的話流程不垮、畫面\n"
+            f"      也不怪——他就是讀到隔壁那顆鍵的組合。實測把 `hands_still` 裡的\n"
+            f"      `restored.hands_wanted` 換成 `restored.wanted`，其餘 13 格全綠，\n"
+            f"      而他讀到「拔手鍵現在還在用 Ctrl + Alt + P」：出事時按 P，手還接著。\n"
+            f"      `hands_collided` 要有自己一臂：`wanted` 現在撞號時也有值，少了\n"
+            f"      那一臂會把「讓給拔手了」講成「被別的程式搶走了」——歸因是假的，\n"
+            f"      而他會去找一個不存在的程式。",
+        )
 
 print("▶ 問不出資料目錄的時候，系統匣不宣稱她拔了沒")
 want(
@@ -250,8 +314,11 @@ print("▶ 設定檔讀不出來的那一輪，安全鍵不可以在他沒看見
 # 它就安靜地綠了。針只跟拼法一樣強。
 fallback = rust_binding(hotkey_set, "hands_wanted")
 want(
-    "⑨ 讀不出設定檔時，拔手鍵的退路是現在那一組",
-    "current." in fallback
+    "⑨ 讀不出設定檔時，拔手鍵的退路是現在那一組拔手鍵",
+    # 第一版只問 `"current." in fallback`，而它自己的失敗訊息就招了「擋不住取錯
+    # 欄位」。招了沒人去證＝那句自白是一個沒人守的前提。實測 `current.wanted`
+    # （拿暫停那一組當拔手）CI 一格都不紅，所以這裡把欄位名整個釘死。
+    "current.hands_wanted" in fallback
     and "Config::default" not in fallback
     and "unwrap_or_default" not in fallback,
     "`apply_hotkey` 的第一件事是 `unregister_all()`。這一格退回出廠值的話，他在\n"
@@ -264,12 +331,15 @@ unreadable_flag = re.search(r"config_unreadable:\s*([^,\n]+)", hotkey_set)
 if not unreadable_flag:
     die("hotkey_set 裡找不到 config_unreadable", "這一格是空轉的，而它會印 ✓。")
 want(
-    "⑩ 重裝之後 config_unreadable 還帶著原因",
-    unreadable_flag.group(1).startswith("Some"),
-    "`apply_hotkey` 一律回 `config_unreadable: None`。把它整個寫回 state 就把\n"
-    "      開機那句「讀不出設定檔，所以現在用的都是內建預設值」抹掉了——而那正是\n"
-    "      這條路自己剛剛走過的情況。設定頁從此一個字都不提設定檔壞了。\n"
-    "      擋不住：帶著原因，但那個原因是上一輪的。",
+    "⑩ 重裝之後沿用開機那一次的 config_unreadable，不自己生一個",
+    unreadable_flag.group(1).startswith("current."),
+    "這個欄位的意思是「現在用的是**內建預設值**」，設定頁的 `paintHandsHotkey`\n"
+    "      就是照這個意思寫句子的。兩種寫錯的方向都會出人命：\n"
+    "      填 `None` ＝ 把開機那句警告抹掉，他再也不知道設定檔壞了；\n"
+    "      填 `Some(error)` ＝ 在一條**保住他自己那一組**的路上宣稱那是預設值，\n"
+    "      拔手那一格會紅著說他的安全鍵不是他的，而它正上方就印著他那顆。\n"
+    "      他會改去按出廠的組合，那顆沒註冊。所以只能沿用 `current.` 那一份。\n"
+    "      擋不住：沿用了，但沿用的是別的欄位。",
 )
 
 apply_body = brace_body(main, main.find("fn apply_hotkey("), "main.rs 的 apply_hotkey")
@@ -277,9 +347,19 @@ at_hands = apply_body.find("on_shortcut(hands_wanted")
 at_pause = apply_body.find("on_shortcut(wanted_to_register")
 if at_hands < 0 or at_pause < 0:
     die("apply_hotkey 裡找不到兩次 on_shortcut", "改名或重構過，這一格的比較沒有意義了。")
+at_clear = apply_body.find("unregister_all")
+if at_clear < 0:
+    die("apply_hotkey 裡找不到 unregister_all", "這一格在看一個不存在的東西。")
 want(
-    "⑪ 拔手先註冊，認不出來的撞號才會死在暫停鍵上",
-    at_hands < at_pause,
+    "⑪ 先拆乾淨，再註冊拔手，最後才註冊暫停",
+    # `unregister_all()` 的位置本來零覆蓋——全 repo 唯一提到它的地方是 ⑨ 的
+    # **失敗訊息**裡那句「`apply_hotkey` 的第一件事是 `unregister_all()`」，
+    # 也就是一句被當成事實在用、卻沒人守的前提。實測把它挪到拔手註冊之後，
+    # CI 一格都不紅，而後果是：剛搶到的安全鍵當場被自己拆掉，`hands_reason`
+    # 仍然是 `None`（那一刻真的成功了），於是設定頁寫「搶到了，按 X 就會拔手」
+    # ——按下去什麼都不會發生。**這個洞是改註冊順序的這一版自己開的**：
+    # 改序之前這一刀殺的是暫停鍵，改序之後殺的是拔手鍵。
+    at_clear < at_hands < at_pause,
     "global-hotkey 對第二次註冊同一顆回 `AlreadyRegistered`。正規化再怎麼補都有\n"
     "      補不到的形狀，所以**順序**是最後一道保險：先搶的那顆活下來。暫停排前面\n"
     "      的話，每一個認不出來的撞號死的都是拔手，而暫停是那顆可以從系統匣代替的。",
@@ -292,11 +372,30 @@ if not shown:
 feeds = rust_binding(apply_body, shown.group(1))
 want(
     "⑫ 畫面上那一格是設定檔裡的那一組，不是拿去註冊的那一組",
-    not ("plan.pause" in feeds and "unwrap_or_default" in feeds),
+    # 第一版寫成 `not ("plan.pause" in feeds and "unwrap_or_default" in feeds)`
+    # ——那是一個 **and**，擋的其實是「來自 plan **而且**寫成 `unwrap_or_default`」，
+    # 也就是舊碼那一行的逐字拼法。實測 `plan.pause.clone().unwrap_or_else(String::new)`
+    # 從它旁邊走過去，CI 全綠。改成問產地：這個值只能從參數 `wanted` 來，
+    # 不准碰 `plan`。
+    "plan" not in feeds and "wanted" in feeds,
     "撞號的時候 `plan.pause` 是 `None`，收成空字串之後設定頁那一格印「沒有設」\n"
     "      ——而他的 `config.toml` 裡明明寫著一組。那一格的註解自己說它是**唯一**\n"
     "      寫著暫停鍵是哪一組的地方，卡在一句假話上等於他連「按哪一顆會暫停」都\n"
     "      問不到。要顯示的是他設的那一組，要註冊的是計畫算出來的那一組。",
+)
+
+boot_log = main[main.find("match &view.reason {") :][:600]
+if "暫停熱鍵" not in boot_log:
+    die("找不到開機那段暫停熱鍵的 log", "錨點對不到，這一格是空轉的。")
+want(
+    "⑬ 開機那行 log 不拿「空不空」當「有沒有搶到」",
+    "registered" in boot_log or "hands_collided" in boot_log,
+    "`wanted` 現在裝的是**設定檔裡那一組**，撞號的時候也有值（設定頁要靠它才講\n"
+    "      得出他設的是哪一顆）。拿 `wanted.is_empty()` 問「有沒有搶到」的話，撞號\n"
+    "      那一輪會掉進最後一臂印「暫停熱鍵 Ctrl+Alt+H 搶到了」——那顆這一輪一次\n"
+    "      都沒送去註冊，按下去做的是拔手。這幾行存在的理由（它自己的註解）就是\n"
+    "      要分辨「搶到了」和「這段程式根本沒跑到」，對第三種情況印肯定句正好\n"
+    "      毀掉那件事，而他就是照著 `grep 搶到了` 來查「為什麼我的暫停鍵沒反應」的。",
 )
 
 print()

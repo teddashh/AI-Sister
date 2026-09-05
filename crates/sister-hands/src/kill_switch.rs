@@ -293,7 +293,10 @@ fn hotkeys_collide(left: &str, right: &str) -> bool {
         // 也不必怕漏判：認不出來的撞號由**註冊順序**兜底（`apply_hotkey` 先註冊
         // 拔手），第二次註冊拿到 `AlreadyRegistered` 的一定是暫停，也就是那顆還能
         // 從系統匣按的。所以這裡退回逐字比較就夠——兩串一模一樣的壞字串仍算撞號。
-        _ => left.trim().eq_ignore_ascii_case(right.trim()),
+        // 不用再 `trim()`：唯一的呼叫端 `plan_hotkeys` 先過 `nonempty()`，那支
+        // 就是 trim 完才判空的。在這裡再 trim 一次會讓人以為這支函式自己防著
+        // 空白，而它其實沒有被單獨呼叫過。
+        _ => left.eq_ignore_ascii_case(right),
     }
 }
 
@@ -664,6 +667,13 @@ mod tests {
             ("Option+Ctrl+H", "Alt+Ctrl+H"),
             ("Ctrl+Alt+ArrowUp", "Ctrl+Alt+Up"),
             ("alt+ctrl+keyh", "Ctrl+Alt+H"),
+            // 這兩列是**加回來的**：換掉手抄 normalizer 的時候，新語料把舊語料
+            // 整組換掉了，而 `Command`≡`Cmd`≡`Super`（global-hotkey 的
+            // `hotkey.rs:207-209`）就這樣掉在地上，全 repo 一條都沒剩。
+            // 換測試的時候要「加上」不要「換掉」——舊的那幾列原封不動跑一次，
+            // 綠就是白刪的。
+            ("Command+H", "Super+H"),
+            ("Cmd+H", "Super+H"),
         ] {
             assert!(hotkeys_collide(left, right), "{left} / {right}");
         }
@@ -719,6 +729,16 @@ mod tests {
             ("Ctrl+Alt+H", "Ctrl+Alt+Hh"),
             ("Ctrl+Alt+ContextMenu", "Ctrl+Alt+H"),
         ] {
+            // 先把前提釘住。少了這一句，這條測試的斷言（`collided == None`）和
+            // 「兩顆解析得出來的不同鍵」長得一模一樣——`ContextMenu` 哪天被加進
+            // global-hotkey 的表裡（或我手滑改成 `Ctrl+Alt+J`），它會安靜地變成
+            // 隔壁那條測試的複本，而斷言訊息還在說它守著 fallback 那一臂。
+            use std::str::FromStr;
+            assert!(
+                global_hotkey::hotkey::HotKey::from_str(pause).is_err()
+                    || global_hotkey::hotkey::HotKey::from_str(hands).is_err(),
+                "{pause}／{hands} 兩邊都解析得出來，這一條已經不在守 fallback 那一臂了。"
+            );
             let plan = plan_hotkeys(pause, hands);
             assert_eq!(
                 plan.collided, None,
@@ -735,6 +755,11 @@ mod tests {
     /// 反方向：兩串一模一樣的壞字串，仍然是撞號。
     #[test]
     fn two_identical_unparseable_strings_still_collide() {
+        use std::str::FromStr;
+        assert!(
+            global_hotkey::hotkey::HotKey::from_str("Ctrl+Alt+Hh").is_err(),
+            "`Ctrl+Alt+Hh` 變成解析得出來的了，這一條已經不在守 fallback 那一臂。"
+        );
         let plan = plan_hotkeys("Ctrl+Alt+Hh", "ctrl+alt+hh");
         assert!(
             plan.collided.is_some(),
