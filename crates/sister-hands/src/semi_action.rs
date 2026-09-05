@@ -468,16 +468,34 @@ pub enum ScreenField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cannot_tell", rename_all = "snake_case")]
 pub enum CannotTell {
-    /// 那張畫面上這一欄沒有可以比的值——沒記到，或記到的東西抽不出網站名。
+    /// 那張畫面上這一欄是空的——她那一刻沒能記下任何東西。
+    ///
+    /// 和 [`Self::ScreenUrlUnreadable`] 分開，是因為使用者能做的事不一樣：
+    /// 這一格是「沒探到」，那一格是「探到了，但那不是一個網址」。r29 以前
+    /// 兩者共用一句「這台機器沒有記下那張畫面的網址」，而後者根本記下了。
     NothingOnScreen { field: ScreenField },
-    /// 這一步的目標本身抽不出可以比的值。
+    /// 那張畫面的網址欄**有值**，但抽不出可以比的網站名。
+    ///
+    /// 走得到：`about:blank`、`file:///C:/x.pdf`、UIA 探到半截的字串。
+    /// 只有網址會落到這一格——視窗標題是用「有沒有含這幾個字」比的，
+    /// 任何非空的標題都比得動，所以沒有「有值但讀不懂的標題」這種東西。
+    ScreenUrlUnreadable,
+    /// 這一步的目標本身是空的：`FocusWindow` 給了空白標題，或
+    /// `OpenFile` 的路徑切不出檔名。
     NothingInTheAsk,
+    /// 這一步要開的是網址，字也在，但她這一版抽不出可以比的網站名。
+    ///
+    /// 已知會走到這裡的是**中文／非 ASCII 網域**（`https://例え.jp/`）：
+    /// `target_policy::validate_url` 收它，`segment::looks_like_host` 不收。
+    /// 和 [`Self::NothingInTheAsk`] 分開是因為那句話會讀成「你沒有給目標」，
+    /// 而使用者明明給了。
+    AskUrlUnreadable,
     /// 這一列是 alpha.95 以前寫的；那幾版根本沒有比過。
     ///
     /// **這一格沒有產品寫入端。** 它只從 `StepEvidence::After::target` 的
     /// `#[serde(default)]` 長出來——舊紀錄的 JSON 裡沒有 `target` 這個欄位。
     /// `target_on_screen()` 一格都到不了這裡（它只回 `Matched` /
-    /// `Mismatched` / `NothingOnScreen` / `NothingInTheAsk`）。
+    /// `Mismatched`，或 `CannotTell` 的其他四格）。
     ///
     /// 所以：**誰在產品碼裡寫下 `TargetOnScreen::default()`，誰就讓上面那句
     /// 話變成假話**——一列今天寫的紀錄會對使用者說「這是舊版寫的」。要表達
@@ -489,9 +507,14 @@ pub enum CannotTell {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "target_on_screen", rename_all = "snake_case")]
 pub enum TargetOnScreen {
+    /// `wanted` 和 `saw` 兩個都留著，因為**這兩格對得上的定義不一樣**：
+    /// 網址是整個網站名相等（正規化過 `www.` 之後），視窗標題是「標題裡
+    /// 含有這幾個字」。少了 `wanted`，句子只能寫成「畫面的標題是 X」，
+    /// 那對一個子字串比對是過度宣稱——標題可能是「登入 — 健保存摺」。
     Matched {
         field: ScreenField,
         saw: String,
+        wanted: String,
     },
     Mismatched {
         field: ScreenField,
@@ -604,21 +627,33 @@ impl StepEvidence {
                         at(*frame_at_ms)
                     )
                 };
+                // 十句。每一句都要講一件另外九句沒講的事——
+                // `each_of_the_ten_endings_says_a_thing_the_others_do_not`
+                // 會把每一句的招牌詞拿去掃另外九句，撞到就紅。
+                //
+                // 對得上的兩句都要**講清楚比的是什麼**：網址比的是網站名
+                // （不是哪一頁），標題比的是「裡面有沒有這幾個字」。r29 早先
+                // 寫成「而且⋯就在 X 上。」，讀起來像「這一步成功了」，而她
+                // 看到的其實可能是同一個網站的登入牆。
                 let ending = match target {
-                    TargetOnScreen::Matched { field: ScreenField::Url, saw } =>
-                        format!("，而且那張畫面的網址就在 {saw} 上。"),
-                    TargetOnScreen::Matched { field: ScreenField::WindowTitle, saw } =>
-                        format!("，而且那張畫面的視窗標題是「{saw}」。"),
+                    TargetOnScreen::Matched { field: ScreenField::Url, saw, .. } =>
+                        format!("，那張畫面的網址也在 {saw} 上——她比的是網站，不是你停在哪一頁。"),
+                    TargetOnScreen::Matched { field: ScreenField::WindowTitle, saw, wanted } =>
+                        format!("，那張畫面的視窗標題「{saw}」裡有「{wanted}」——她比的是標題含不含這幾個字。"),
                     TargetOnScreen::Mismatched { field: ScreenField::Url, saw, wanted } =>
                         format!("，但那張畫面的網址在 {saw} 上，不是你要開的 {wanted}——這一步有沒有真的做到，她沒有把握。"),
                     TargetOnScreen::Mismatched { field: ScreenField::WindowTitle, saw, wanted } =>
                         format!("，但那張畫面的視窗標題是「{saw}」，裡面沒有「{wanted}」——這一步有沒有真的做到，她沒有把握。"),
                     TargetOnScreen::CannotTell { why: CannotTell::NothingOnScreen { field: ScreenField::Url } } =>
-                        "。這台機器沒有記下那張畫面的網址，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
+                        "。這台機器沒有探到那張畫面的網址欄，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
                     TargetOnScreen::CannotTell { why: CannotTell::NothingOnScreen { field: ScreenField::WindowTitle } } =>
-                        "。這台機器沒有記下那張畫面的視窗標題，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
+                        "。這台機器沒有探到那張畫面的視窗標題，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
+                    TargetOnScreen::CannotTell { why: CannotTell::ScreenUrlUnreadable } =>
+                        "。那張畫面的網址欄有記到東西，但那不是一個看得出網站的網址，所以沒得比。".to_string(),
                     TargetOnScreen::CannotTell { why: CannotTell::NothingInTheAsk } =>
-                        "。這一步的目標沒有可以拿去跟畫面比的東西，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
+                        "。這一步本身沒有給出可以拿去跟畫面比的目標，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
+                    TargetOnScreen::CannotTell { why: CannotTell::AskUrlUnreadable } =>
+                        "。你要開的網址她認得、也開了，但她這一版看不懂那個網域（例如中文網域），所以沒法跟畫面比。".to_string(),
                     TargetOnScreen::CannotTell { why: CannotTell::NotChecked } =>
                         "。這一列是舊版寫的，那幾版沒有比對過畫面上真的變成什麼。".to_string(),
                 };

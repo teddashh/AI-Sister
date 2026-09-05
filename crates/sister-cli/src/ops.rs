@@ -5055,6 +5055,7 @@ pub mod act {
                 TargetOnScreen::Matched {
                     field: ScreenField::Url,
                     saw: "example.com".into(),
+                    wanted: "example.com".into(),
                 },
                 "真的那一列上的 url 沒有走到判斷上——中間某一段把欄位接錯了，或整欄根本沒被讀出來"
             );
@@ -5073,6 +5074,7 @@ pub mod act {
                 TargetOnScreen::Matched {
                     field: ScreenField::WindowTitle,
                     saw: TITLE.into(),
+                    wanted: "健保存摺".into(),
                 },
                 "真的那一列上的 window_title 沒有走到判斷上"
             );

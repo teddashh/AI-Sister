@@ -46,8 +46,19 @@
     被守著；一份誤報「我沒在看那裡」的自白，和誤報「我有在看那裡」一樣會
     讓下一個人做錯決定。）`crates/**` 裡的 doc comment 沒有人掃，
     `research/` 是刻意排除的（見 `load_docs()`）。
-  - 底下那兩個「看了 N 條」是活體檢查的門檻，不是覆蓋率。22 條路 + 8 條
-    `%APPDATA%`，是這幾份文件裡**寫成那個形狀**的那些，不是全部。
+  - 底下那兩個「看了 N 條」是活體檢查的門檻，不是覆蓋率。數到的是這幾份
+    文件裡**寫成那個形狀**的那些，不是全部。
+
+    **那兩個數字會往上漂，所以不要把它寫死在句子裡。** 這一行本來寫「22 條
+    路 + 8 條 `%APPDATA%`」，2026-09-05 實測是 **79** 和 **10**——文件長大了，
+    而句子沒有。同一天在 `die()` 訊息裡還找到兩句同樣過期的：一句說
+    「WINDOWS-CHECKLIST.md 有七個」（是八個）、「README 各一」（那一條在
+    `RELEASE-NOTES.md`）。三個數字互相打架，而它們全都躺在**只有壞掉才會印
+    出來**的字串裡，所以沒有人會發現。
+
+    要看現在是多少就跑一次：`python3 scripts/check-docs-point-somewhere.py`，
+    它每一圈都會印。**會出事的是數字往下掉**（glob 掃不到、正規表示式對不
+    上），往上長是文件變多，不是故障。
 """
 
 import re
@@ -217,7 +228,7 @@ print(f"  看了 {checked} 條")
 if checked < 15:
     die(
         f"只挑出 {checked} 條路來對，太少了",
-        "2026-08-20 量到 22 條（README + docs/**，反引號裡、對得上 PREFIX/BARE 的）。",
+        "2026-09-05 量到 79 條（根目錄的 .md + docs/**，反引號裡、對得上 PREFIX/BARE 的）。",
         "多半是 PREFIX / BARE 對不上了，或者 glob 掃不到那幾份檔案。",
     )
 
@@ -247,7 +258,7 @@ if DATA_PREFIX is not None:
     if seen_appdata < 6:
         die(
             f"只挑出 {seen_appdata} 條 %APPDATA% 路徑來對，太少了",
-            "光是 WINDOWS-CHECKLIST.md 就有七個，README 和 DATA_INVENTORY 各一。",
+            "2026-09-05 量到 10 條：WINDOWS-CHECKLIST.md 八個，DATA_INVENTORY.md 和 RELEASE-NOTES.md 各一。",
             "多半是 APPDATA 這條正規表示式對不上文件現在的寫法了。",
         )
 
