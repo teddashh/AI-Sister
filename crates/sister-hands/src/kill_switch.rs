@@ -250,7 +250,8 @@ pub fn hotkey_set_action(
 /// 排兩顆熱鍵；拔手撞號時優先，因為暫停仍可從系統匣操作。
 ///
 /// 相等判定直接使用實際負責註冊的 `global-hotkey` 解析器，涵蓋它接受的修飾鍵、
-/// 主鍵與別名形狀。任一邊解析不了時也讓給拔手：這時不能證明兩顆鍵不同。
+/// 主鍵與別名形狀。**解析不出來的時候退回逐字比較，不宣稱撞號**——理由見
+/// [`hotkeys_collide`]。
 /// 接線層另把拔手排在暫停前註冊；即使這裡未辨認出撞號，安全鍵仍先拿到組合。
 pub fn plan_hotkeys(pause: &str, hands: &str) -> HotkeyPlan {
     let pause = nonempty(pause);
@@ -276,7 +277,23 @@ fn hotkeys_collide(left: &str, right: &str) -> bool {
         global_hotkey::hotkey::HotKey::from_str(right),
     ) {
         (Ok(left), Ok(right)) => left == right,
-        _ => true,
+        // 解析不出來的時候**不要**宣稱撞號，退回逐字比較。
+        //
+        // `parse_key` 是一張寫死的表（`global-hotkey-0.8.0/src/hotkey.rs:232` 起）。
+        // `e.code` 生得出來、而那張表不認得的名字至少有 `ContextMenu`（一般 PC
+        // 鍵盤上的選單鍵）、`IntlBackslash`、`IntlRo`、`IntlYen`、`Convert`、
+        // `NonConvert`、`KanaMode`、`Lang1`／`Lang2`；手改 `config.toml` 打錯一個
+        // 字更是一定不認得。
+        //
+        // 回 `true` 的代價是**淨損失**，實測過：`hands_stop_shortcut` 只要解析不
+        // 出來，`plan_hotkeys` 就把 `pause` 收成 `None`，於是他那顆本來按得動的
+        // 暫停鍵被拆掉，而畫面說「撞號」——一句假話換掉一顆能用的鍵，而那顆拔手
+        // 鍵反正也註冊不了（同一張表拒絕它）。
+        //
+        // 也不必怕漏判：認不出來的撞號由**註冊順序**兜底（`apply_hotkey` 先註冊
+        // 拔手），第二次註冊拿到 `AlreadyRegistered` 的一定是暫停，也就是那顆還能
+        // 從系統匣按的。所以這裡退回逐字比較就夠——兩串一模一樣的壞字串仍算撞號。
+        _ => left.trim().eq_ignore_ascii_case(right.trim()),
     }
 }
 
@@ -683,6 +700,47 @@ mod tests {
         ] {
             assert_eq!(plan_hotkeys(pause, hands).collided, None);
         }
+    }
+
+    /// 解析不出來的那顆鍵，不可以連累另一顆本來按得動的。
+    ///
+    /// `global-hotkey` 的 `parse_key` 是一張寫死的表，`e.code` 生得出來的
+    /// `ContextMenu`／`IntlBackslash`／`Convert`／`Lang1` 它都不認得，手改
+    /// `config.toml` 打錯字也一樣。這裡曾經回 `true`（不確定就當撞號），
+    /// 於是 `hands_stop_shortcut` 打錯一個字就把**暫停鍵**收成 `None`：
+    /// 一顆能用的鍵被拆掉，畫面還說「撞號」。
+    ///
+    /// 漏判的那一半由註冊順序兜底（拔手先註冊），所以這裡寧可不宣稱。
+    #[test]
+    fn an_unparseable_key_does_not_drag_the_other_one_down() {
+        for (pause, hands) in [
+            ("Ctrl+Alt+H", "Ctrl+Alt+ContextMenu"),
+            ("Ctrl+Alt+H", "Ctrl+Alt+IntlBackslash"),
+            ("Ctrl+Alt+H", "Ctrl+Alt+Hh"),
+            ("Ctrl+Alt+ContextMenu", "Ctrl+Alt+H"),
+        ] {
+            let plan = plan_hotkeys(pause, hands);
+            assert_eq!(
+                plan.collided, None,
+                "{pause} 和 {hands} 不是同一顆鍵，只是其中一邊 global-hotkey 解析\
+                 不了。宣稱撞號會把暫停鍵收掉，而那句「撞號」是假的。"
+            );
+            assert!(
+                plan.pause.is_some(),
+                "{pause} 本來按得動，不可以因為 {hands} 打錯字就被拆掉。"
+            );
+        }
+    }
+
+    /// 反方向：兩串一模一樣的壞字串，仍然是撞號。
+    #[test]
+    fn two_identical_unparseable_strings_still_collide() {
+        let plan = plan_hotkeys("Ctrl+Alt+Hh", "ctrl+alt+hh");
+        assert!(
+            plan.collided.is_some(),
+            "逐字相同（大小寫不計）就是同一顆鍵，解析不出來也一樣。"
+        );
+        assert!(plan.hands.is_some(), "撞號的時候拔手要留下來。");
     }
 
     #[test]

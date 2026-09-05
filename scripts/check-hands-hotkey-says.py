@@ -49,6 +49,7 @@ SHTML = ROOT / "apps/desktop/ui/settings.html"
 
 CJK = r"[一-鿿]"
 BAD = []
+CHECKED = []
 
 
 def die(what: str, why: str) -> None:
@@ -57,10 +58,32 @@ def die(what: str, why: str) -> None:
 
 
 def want(tag: str, ok: bool, why: str) -> None:
+    CHECKED.append(tag)
     print(f"  {'✓' if ok else '✗'} {tag}")
     if not ok:
         print(f"      {why}")
         BAD.append(tag)
+
+
+def rust_binding(scope: str, name: str) -> str:
+    """`let <name> = …;` 整句（右手邊帶大括號也吃得下）。抓不到就當場停。
+
+    抓不到回空字串的話，底下每一個 `not in` 都會成立，於是這一格印 ✓ 而什麼
+    都沒看——所以是 `die`。
+    """
+    at = scope.rfind(f"let {name} = ")
+    if at < 0:
+        die(f"找不到 `let {name} = `", "錨點對不到的時候，底下那一格是空轉。")
+    depth = 0
+    for j in range(at, len(scope)):
+        if scope[j] == "{":
+            depth += 1
+        elif scope[j] == "}":
+            depth -= 1
+        elif scope[j] == ";" and depth == 0:
+            return scope[at : j + 1]
+    die(f"`let {name} = ` 沒有結尾的分號", "檔案被截斷，或錨點指到字串裡去了。")
+    return ""
 
 
 def brace_body(text: str, start: int, what: str) -> str:
@@ -216,8 +239,70 @@ want(
     "      在此限——原文本來就該留在 log。",
 )
 
+print("▶ 設定檔讀不出來的那一輪，安全鍵不可以在他沒看見的時候換人")
+# 這四格是 alpha.96 補的。它們守的是那一版的**招牌修法**，而那些修法全落在
+# `apps/desktop`——`mut-r34.py` 的 M4／M5／M6／M7 四刀，在補這幾格之前**一刀都
+# 沒有人紅**（只有一次性的收貨考題咬得住，而考題不會進 CI）。
+#
+# 寫法上刻意問「那個值**從哪裡來**」而不是「有沒有出現某幾個字」：第一版的
+# 收貨考題問的是 `"unwrap_or_default" in …`，而 M4 用
+# `Config::default().shell.hands_stop_shortcut` 換同一個 bug 的另一種拼法，
+# 它就安靜地綠了。針只跟拼法一樣強。
+fallback = rust_binding(hotkey_set, "hands_wanted")
+want(
+    "⑨ 讀不出設定檔時，拔手鍵的退路是現在那一組",
+    "current." in fallback
+    and "Config::default" not in fallback
+    and "unwrap_or_default" not in fallback,
+    "`apply_hotkey` 的第一件事是 `unregister_all()`。這一格退回出廠值的話，他在\n"
+    "      `config.toml` 裡設的那顆會被拆掉、出廠的 `Ctrl+Alt+H` 上位，而設定頁\n"
+    "      繼續寫著舊的那一組——**他出事時按下去什麼都不會發生**。\n"
+    "      擋不住：換了來源但取錯欄位（拿到的是暫停鍵那一組）。",
+)
+
+unreadable_flag = re.search(r"config_unreadable:\s*([^,\n]+)", hotkey_set)
+if not unreadable_flag:
+    die("hotkey_set 裡找不到 config_unreadable", "這一格是空轉的，而它會印 ✓。")
+want(
+    "⑩ 重裝之後 config_unreadable 還帶著原因",
+    unreadable_flag.group(1).startswith("Some"),
+    "`apply_hotkey` 一律回 `config_unreadable: None`。把它整個寫回 state 就把\n"
+    "      開機那句「讀不出設定檔，所以現在用的都是內建預設值」抹掉了——而那正是\n"
+    "      這條路自己剛剛走過的情況。設定頁從此一個字都不提設定檔壞了。\n"
+    "      擋不住：帶著原因，但那個原因是上一輪的。",
+)
+
+apply_body = brace_body(main, main.find("fn apply_hotkey("), "main.rs 的 apply_hotkey")
+at_hands = apply_body.find("on_shortcut(hands_wanted")
+at_pause = apply_body.find("on_shortcut(wanted_to_register")
+if at_hands < 0 or at_pause < 0:
+    die("apply_hotkey 裡找不到兩次 on_shortcut", "改名或重構過，這一格的比較沒有意義了。")
+want(
+    "⑪ 拔手先註冊，認不出來的撞號才會死在暫停鍵上",
+    at_hands < at_pause,
+    "global-hotkey 對第二次註冊同一顆回 `AlreadyRegistered`。正規化再怎麼補都有\n"
+    "      補不到的形狀，所以**順序**是最後一道保險：先搶的那顆活下來。暫停排前面\n"
+    "      的話，每一個認不出來的撞號死的都是拔手，而暫停是那顆可以從系統匣代替的。",
+)
+
+view = brace_body(apply_body, apply_body.find("HotkeyView {"), "apply_hotkey 的 HotkeyView")
+shown = re.search(r"(?<!\w)wanted:\s*([\w.]+)", view)
+if not shown:
+    die("HotkeyView 裡找不到 wanted 欄位", "欄位改名了，這一格在看一個不存在的東西。")
+feeds = rust_binding(apply_body, shown.group(1))
+want(
+    "⑫ 畫面上那一格是設定檔裡的那一組，不是拿去註冊的那一組",
+    not ("plan.pause" in feeds and "unwrap_or_default" in feeds),
+    "撞號的時候 `plan.pause` 是 `None`，收成空字串之後設定頁那一格印「沒有設」\n"
+    "      ——而他的 `config.toml` 裡明明寫著一組。那一格的註解自己說它是**唯一**\n"
+    "      寫著暫停鍵是哪一組的地方，卡在一句假話上等於他連「按哪一顆會暫停」都\n"
+    "      問不到。要顯示的是他設的那一組，要註冊的是計畫算出來的那一組。",
+)
+
 print()
 if BAD:
     print(f"✗ 拔手那顆鍵的接線層有 {len(BAD)} 格在說謊：{'、'.join(BAD)}")
     sys.exit(1)
-print("✓ 拔手那顆鍵的接線層，八格都對得上")
+# 數出來的，不是寫死的：codex 補 ③ᵇ 之後這一行還在說「八格」，而那本身就是
+# 一句閘門自己印出來的假話。
+print(f"✓ 拔手那顆鍵的接線層，{len(CHECKED)} 格都對得上")
