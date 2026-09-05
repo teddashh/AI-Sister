@@ -41,6 +41,95 @@ sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.96
+
+**多一顆鍵：在任何程式裡按 `Ctrl+Alt+H`，她的手就停。**
+
+以前要停下她正在做的事，你得先找到她的視窗，或者從系統匣點進去。真的出事的時
+候——她點開了不該點的東西、正要往某個欄位打字——那幾秒就是你要不回來的東西。
+
+這一版把它變成一顆全域熱鍵。按下去：
+
+```text
+$ 按第一次
+手拔掉了。她現在什麼都不會交給作業系統。
+$ 慌了，再按一次
+手本來就是拔著的（從 2023-11-14 12:13:20.000 起）。
+```
+
+第二句是刻意的。**這顆鍵只會拔手，不會切換。** 你是在正在出事的時候按它，慌張
+連按兩下不可以反而把手接回去。接回去只能走慢的那條路：系統匣，或
+`sister hands resume`。
+
+改鍵在設定頁，或 `config.toml` 的 `shell.hands_stop_shortcut`；**填空字串就是
+不註冊這顆鍵**，系統匣那條路不受影響。
+
+### 兩顆鍵設成同一顆的時候，讓位的一定是暫停
+
+暫停熱鍵預設 `Ctrl+Alt+P`、拔手預設 `Ctrl+Alt+H`，開箱不會撞。但兩顆都能自己
+設，而**同一顆鍵在這個程式裡有兩種寫法**：設定頁是你按給它看的，收到什麼存什麼
+（`Ctrl+Alt+KeyH`）；`config.toml` 是你自己打的（`Ctrl+Alt+H`）。
+
+判斷撞號的不是字串比對，是**真正負責搶鍵的那支 parser**——等一下要拿這兩串去跟
+作業系統要鍵的，就是它：
+
+```text
+設定頁按出來的 / config.toml 寫的      撞號？  結果
+Ctrl+Alt+KeyH           Ctrl+Alt+H              是      暫停讓位，拔手留下
+CommandOrControl+Alt+H  Ctrl+Alt+H              是      暫停讓位，拔手留下
+Ctrl+Alt+Digit1         Ctrl+Alt+1              是      暫停讓位，拔手留下
+Option+Ctrl+H           Alt+Ctrl+H              是      暫停讓位，拔手留下
+Ctrl+Alt+KeyH           Ctrl+Alt+KeyJ           否      兩顆都留著
+Ctrl+Alt+H              Ctrl+Alt+ContextMenu    否      兩顆都留著
+```
+
+讓位的方向不是碰運氣：註冊順序是**先拔手、後暫停**。所以連它也認不出來的撞號
+還有兜底——第二個搶不到的一定是暫停，也就是那顆你還能從系統匣按的。
+
+畫面上會直接講是哪一種，不用你自己猜哪顆鍵死了：
+
+> 現在原來那組 Ctrl+Alt+H 和拔手鍵撞號，讓給拔手了；改用系統匣裡的暫停。
+
+少了這一句就會掉進「現在原來那組也搶不到」那一格——讀起來像被別的程式搶走了，
+而你會去找那個不存在的程式。
+
+### 認不出來的鍵不算撞號
+
+最後那一行是這顆鍵最貴的一格。它的 parser 認得的名字是一張寫死的表，而設定頁
+生得出表上沒有的東西：`ContextMenu`（一般 PC 鍵盤右邊那顆選單鍵）、
+`IntlBackslash`、`IntlRo`、`IntlYen`、`Convert`、`KanaMode`、`Lang1`／`Lang2`；
+`config.toml` 打錯一個字更是一定不認得。
+
+「看不懂就當撞號」聽起來保守，實際上是淨損失：
+
+```text
+assertion `left == right` failed: Ctrl+Alt+H 和 Ctrl+Alt+ContextMenu 不是同一顆鍵，只是其中一邊 global-hotkey 解析不了。宣稱撞號會把暫停鍵收掉，而那句「撞號」是假的。
+  left: Some("Ctrl+Alt+ContextMenu")
+ right: None
+```
+
+你那顆本來按得動的暫停鍵會被拆掉，畫面說「撞號」，而那顆拔手鍵反正也註冊不了
+（同一張表拒絕它）。所以看不懂的時候退回逐字比較——兩串一模一樣的壞字串仍算撞
+號，不一樣的就都留著。
+
+### 代價：`sister.exe` 多了 11 個 crate
+
+要用真的 parser，`global-hotkey` 就成了 `sister-hands` 的正式相依，而
+`sister-hands` 從 alpha.87 起是 CLI 的相依——於是 x11rb / keyboard-types /
+crossbeam-channel / rustix 一族被拉進那支**完全不開視窗**的 `sister.exe`。
+
+裡面沒有 HTTP client，`scripts/check-no-network.sh` 還是綠的。但那道閘門的禁用
+名單是逐個列的，新進來的這幾個它不認得——別把「它還是綠的」讀成「它看過這幾個
+了」。
+
+### 這顆鍵住在 CI 摸不到的地方，所以另外釘了 17 格
+
+接線那一半在 `apps/desktop`，那是另一個 workspace，`cargo test --workspace` 一
+行都碰不到。所以「畫面該說哪一句」另外開了一支
+`scripts/check-hands-hotkey-says.py`，17 格逐條比對原始碼的形狀，CI 每次都跑。
+安全鍵說錯話比說不出話更糟。
+
+
 ## v0.1.0-alpha.95
 
 **她替你開了一個網址之後，現在會回頭看一眼「開起來的是不是你要的那個」。**

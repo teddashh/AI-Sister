@@ -41,8 +41,15 @@ getrandom.workspace = true
 # sister-hands 的相依是 anyhow / serde / serde_json / chrono，**加上 alpha.96 起的
 # `global-hotkey`**：撞號判定要用真正負責註冊的那支 parser，不要手抄別名表。
 # 那一筆連帶把 x11rb / keyboard-types / crossbeam-channel / rustix 一族拉進
-# `sister.exe` 的相依樹（實測 `cargo tree -p sister-cli --edges normal` 從 90 個
-# crate 變 101 個）。裡面沒有 HTTP client，所以 `scripts/check-no-network.sh`
+# `sister.exe` 的相依樹：多了 11 個 crate。要重量的話連**數法**一起抄，不然
+# 會得到兩個都對的數字然後以為其中一個是錯的：
+#
+#   cargo tree -p sister-cli --edges normal --prefix none | sed 's/ (\*)$//' \
+#     | sort -u | grep -c .            # 90 → 101，同名不同版分開算
+#                                      #（`syn` 和 `winnow` 各有兩版）
+#   ……同一串但多一道 `awk '{print $1}'` # 88 →  99，只看名字
+#
+# 裡面沒有 HTTP client，所以 `scripts/check-no-network.sh`
 # 要擋的那件事沒有變——但那道閘門的 `FORBIDDEN` 名單是逐個列的，新進來的這幾個
 # 它不認得，別把「它還是綠的」讀成「它看過這幾個了」。
 sister-hands.workspace = true
