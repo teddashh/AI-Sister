@@ -223,7 +223,7 @@ fn no_title_on_the_frame_is_not_a_mismatch() {
 
 /// 舊版寫的那些列**沒有比過**，句子要自己說出來，不可以沉默。
 ///
-/// 沉默的話，一列 alpha.94 以前的紀錄讀起來會和一列「比過、說不準」一模一樣。
+/// 沉默的話，一列 alpha.95 以前的紀錄讀起來會和一列「比過、說不準」一模一樣。
 #[test]
 fn a_row_written_before_this_version_says_it_was_never_checked() {
     let s = sentence(TargetOnScreen::CannotTell {

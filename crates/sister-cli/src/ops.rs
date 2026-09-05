@@ -4982,6 +4982,102 @@ pub mod act {
             );
         }
 
+        /// 走完一整條路：真的 `frames` 那一列 → `nearest_step_frame` 的欄位
+        /// 映射 → 組 `ScreenAfter` 的接線 → 使用者讀到的那一格。
+        ///
+        /// **這一條不是為了再驗一次比對規則**（那有 14 條專門的測試，全部直接
+        /// 呼叫 `screen_check::target_on_screen`）。它守的是**中間那兩段接線**，
+        /// 而那兩段在只呼叫比對函式的測試上是看不見的。三刀實測全綠過：
+        ///
+        /// | 改法 | 後果 | 加這一條之前 |
+        /// |---|---|---|
+        /// | `SELECT … window_title, url` 兩欄對調（`row.get` 索引不動） | 拿標題當網址比 | 27 binary 全綠 |
+        /// | 組 `ScreenAfter` 時 `url` / `window_title` 對調 | 同上 | 27 binary 全綠 |
+        /// | `SELECT` 裡的 `url` 換成 `NULL` | **這個功能整個關掉**，每一步都說「說不準」 | 27 binary 全綠 |
+        ///
+        /// 第三刀是最貴的那一種：招牌功能可以被安靜地拔掉，而沒有任何東西紅。
+        /// 成因是那些假的 `StepFrameRow` 兩欄都是 `None`——夾具讓路徑走得完，
+        /// 但那條路上一個非空的值都沒有流過。
+        ///
+        /// 所以這裡非要一張**真的**列不可，而且兩欄要有**兩種不同**的值：
+        /// 對調的話 `url` 會拿到一句視窗標題（抽不出 host → 說不準），
+        /// `window_title` 會拿到一串網址（找不到「健保存摺」→ 對不上）。
+        /// 兩個方向各斷言一次，補完一邊的洞才不會原封不動搬到另一邊。
+        #[test]
+        fn a_real_frame_row_carries_both_columns_all_the_way_to_the_verdict() {
+            use sister_core::model::{FocusSnapshot, FrameCapture};
+            use sister_hands::semi_action::{ScreenField, TargetOnScreen};
+
+            const TITLE: &str = "健保存摺 — Chrome";
+            const URL: &str = "https://example.com/a";
+
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence-real-row");
+            let at = 10_000;
+            sister_core::heartbeat::beat(&dir.0, at).unwrap();
+
+            let mut db = Db::open(&sister_core::Config::db_path(&dir.0)).unwrap();
+            let session = db.start_session("test", "0").unwrap();
+            db.insert_frame(
+                session,
+                &FrameCapture {
+                    ts: at + 100,
+                    monitor: 0,
+                    width: 1920,
+                    height: 1080,
+                    dhash: 1,
+                    image: None,
+                    image_ext: "png",
+                    ocr: vec![],
+                    focus: FocusSnapshot {
+                        app_id: Some("chrome.exe".into()),
+                        app_name: Some("Chrome".into()),
+                        window_title: Some(TITLE.into()),
+                        url: Some(URL.into()),
+                        ..Default::default()
+                    },
+                },
+                Some("after.webp"),
+                1,
+            )
+            .unwrap();
+
+            // 網址那一欄真的走到了判斷上。
+            let opened = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com/somewhere-else".into(),
+            };
+            let StepEvidence::After { target, .. } =
+                step_evidence(&dir.0, &db, &opened, at, &mut |_| {}).unwrap()
+            else {
+                panic!("那張 frame 在動作之後，這裡只能是 After");
+            };
+            assert_eq!(
+                target,
+                TargetOnScreen::Matched {
+                    field: ScreenField::Url,
+                    saw: "example.com".into(),
+                },
+                "真的那一列上的 url 沒有走到判斷上——中間某一段把欄位接錯了，或整欄根本沒被讀出來"
+            );
+
+            // 視窗標題那一欄也是。這一半在，對調才不會兩邊都說得通。
+            let focused = sister_hands::ActionSnapshot::FocusWindow {
+                title: "健保存摺".into(),
+            };
+            let StepEvidence::After { target, .. } =
+                step_evidence(&dir.0, &db, &focused, at, &mut |_| {}).unwrap()
+            else {
+                panic!("那張 frame 在動作之後，這裡只能是 After");
+            };
+            assert_eq!(
+                target,
+                TargetOnScreen::Matched {
+                    field: ScreenField::WindowTitle,
+                    saw: TITLE.into(),
+                },
+                "真的那一列上的 window_title 沒有走到判斷上"
+            );
+        }
+
         #[test]
         fn recording_waits_until_an_after_frame_appears() {
             struct AppearingSource {

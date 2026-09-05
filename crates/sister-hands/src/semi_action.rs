@@ -472,7 +472,16 @@ pub enum CannotTell {
     NothingOnScreen { field: ScreenField },
     /// 這一步的目標本身抽不出可以比的值。
     NothingInTheAsk,
-    /// 這一列是 alpha.94 以前寫的；那幾版根本沒有比過。
+    /// 這一列是 alpha.95 以前寫的；那幾版根本沒有比過。
+    ///
+    /// **這一格沒有產品寫入端。** 它只從 `StepEvidence::After::target` 的
+    /// `#[serde(default)]` 長出來——舊紀錄的 JSON 裡沒有 `target` 這個欄位。
+    /// `target_on_screen()` 一格都到不了這裡（它只回 `Matched` /
+    /// `Mismatched` / `NothingOnScreen` / `NothingInTheAsk`）。
+    ///
+    /// 所以：**誰在產品碼裡寫下 `TargetOnScreen::default()`，誰就讓上面那句
+    /// 話變成假話**——一列今天寫的紀錄會對使用者說「這是舊版寫的」。要表達
+    /// 「查了、但沒東西可比」請用 `NothingOnScreen` / `NothingInTheAsk`。
     NotChecked,
 }
 
