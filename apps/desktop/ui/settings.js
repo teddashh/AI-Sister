@@ -426,7 +426,7 @@ function paintHandsHotkey(shown, registered, reason, collided, unreadable) {
   } else if (registered) {
     say.textContent = `搶到了。現在在任何程式裡按 ${shown} 都會嘗試把她的手拔掉。`;
   } else {
-    say.textContent = `這一組搶不到（${reason ?? "原因不明"}）。換一組，或從系統匣拔掉她的手。`;
+    say.textContent = `這一組搶不到（${reason ?? "原因不明"}）。可在 config.toml 的 shell.hands_stop_shortcut 手改另一組，或從系統匣拔掉她的手。`;
   }
 }
 
@@ -439,9 +439,8 @@ async function setCombo(combo) {
     // 而那件事會把底下這句錯誤蓋掉——換成一句肯定句（「搶到了。現在按…」）。
     // 那正是這一頁上剛修掉的那一族：每一行都是真的，湊起來在說謊。
     //
-    // 要的只是把那一格退回去。後端在這條路上已經把舊的那組裝回去了
-    // （見 `hotkey_set` 的 `persist()` 失敗分支），所以 `comboShown` 就是
-    // 現在真的在生效的那一組。
+    // 要的只是把那一格退回去。後端會在註冊失敗、撞號、存檔失敗或設定檔
+    // 讀不出來時把舊的那組裝回去，所以 `comboShown` 是現在真的在生效的那一組。
     restoreCombo();
     el.hotkeySay.classList.add("bad");
     el.hotkeySay.textContent = String(err?.message ?? err);

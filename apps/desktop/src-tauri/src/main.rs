@@ -601,7 +601,7 @@ fn refresh_tray(app: &tauri::AppHandle) {
         .data_dir
         .as_ref()
         .map(|dir| sister_hands::kill_switch::tray_hands_labels(dir))
-        .unwrap_or_else(|| ("拔掉她的手".into(), "把手接回去（現在沒拔）".into()));
+        .unwrap_or_else(sister_hands::kill_switch::tray_hands_unknown_labels);
     if let Some(item) = app.try_state::<HandsStopItem>() {
         let _ = item.0.set_text(stop);
     }
@@ -2369,8 +2369,8 @@ fn apply_hotkey(app: &tauri::AppHandle, wanted: &str, hands_wanted: &str) -> Hot
             let says = sister_hands::kill_switch::hands_hotkey_message(&outcome);
             // 成功也留一行：「拔掉了」和「這段程式根本沒跑到」在一份只記失敗的
             // 記錄檔裡長得一模一樣，而那正是他按了熱鍵之後唯一想分辨的兩件事。
-            // **作業系統的原文只在這裡出現**——`{outcome:?}` 帶著 `os_error`，
-            // 而那句話刻意不帶（見 `WhyNotWritten` 的 doc）。
+            // 作業系統的原文留在這行 log：`{outcome:?}` 帶著 `os_error`；送進
+            // 中文介面的句子刻意不帶（見 `WhyNotWritten` 的 doc）。
             tracing::info!("拔手熱鍵：{says}（{outcome:?}）");
             announce_hands_pulled(app, &says);
             refresh_tray(app);
@@ -2454,12 +2454,33 @@ fn hotkey_set(
     combo: String,
     hotkey: tauri::State<'_, Hotkey>,
 ) -> Result<HotkeyView, String> {
-    let hands_wanted = config_path()
-        .and_then(|path| sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}")))?
+    let loaded = config_path()
+        .and_then(|path| sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}")));
+    let config_error = loaded.as_ref().err().cloned();
+    let hands_wanted = loaded
+        .unwrap_or_default()
         .shell
         .hands_stop_shortcut;
     let previous = hotkey.0.lock().expect("hotkey").wanted.clone();
     let view = apply_hotkey(&app, &combo, &hands_wanted);
+    if let Some(error) = config_error {
+        let restored = apply_hotkey(&app, &previous, &hands_wanted);
+        let still = if restored.registered {
+            format!("現在還在用 {}。", sister_shell::pretty_combo(&restored.wanted))
+        } else if restored.wanted.is_empty() {
+            "現在暫停熱鍵是關掉的。".to_string()
+        } else {
+            format!(
+                "現在原來那組 {} 也搶不到；改用系統匣裡的暫停。",
+                sister_shell::pretty_combo(&restored.wanted)
+            )
+        };
+        *hotkey.0.lock().expect("hotkey") = restored;
+        return Err(format!(
+            "設定檔讀不出來；剛剛試的 {} 沒有存下來。{still}\n{error}",
+            sister_shell::pretty_combo(&combo)
+        ));
+    }
     let action = sister_hands::kill_switch::hotkey_set_action(
         view.hands_collided,
         view.registered,
@@ -2467,7 +2488,8 @@ fn hotkey_set(
     );
     // `hotkey_set_action` 的八格在 sister-hands 裡有執行覆蓋；這個 match 把純決策
     // 接回 Tauri 的註冊、寫檔與 state，仍沒有執行覆蓋。改純函式的任一格會紅；
-    // 把這裡的 `RestoreCollision` 接到別臂，crate 測試不會知道。
+    // 把這裡的 `RestoreCollision` 接到別臂，crate 測試不會知道；
+    // `check-settings-say.mjs` ⑳ 會用原始碼形狀針抓到，但那不是行為覆蓋。
     let view = match action {
         sister_hands::kill_switch::HotkeySetAction::Persist => {
         let persist = || -> Result<(), String> {
@@ -3357,7 +3379,7 @@ fn main() {
                 MenuItem::with_id(app, "pause", pause_label(paused_now), true, None::<&str>)?;
             let hands_labels = app.state::<Shell>().data_dir.as_ref()
                 .map(|dir| sister_hands::kill_switch::tray_hands_labels(dir))
-                .unwrap_or_else(|| ("拔掉她的手".into(), "把手接回去（現在沒拔）".into()));
+                .unwrap_or_else(sister_hands::kill_switch::tray_hands_unknown_labels);
             let hands_stop_item =
                 MenuItem::with_id(app, "hands-stop", hands_labels.0, true, None::<&str>)?;
             let hands_resume_item =
@@ -3475,28 +3497,31 @@ fn main() {
                         let changed = shell
                             .data_dir
                             .as_ref()
-                            .ok_or_else(|| "資料目錄讀不到".to_string())
+                            .ok_or((sister_hands::kill_switch::WhyNotWritten::NoDataDir, None))
                             .and_then(|dir| {
                                 if resume {
                                     sister_hands::kill_switch::release(dir)
                                         .map(|_| ())
-                                        .map_err(|e| e.to_string())
+                                        .map_err(|e| (sister_hands::kill_switch::WhyNotWritten::CannotWrite, Some(e.to_string())))
                                 } else {
                                     sister_hands::kill_switch::pull(dir, sister_core::now_ms())
                                         .map(|_| ())
-                                        .map_err(|e| e.to_string())
+                                        .map_err(|e| (sister_hands::kill_switch::WhyNotWritten::CannotWrite, Some(e.to_string())))
                                 }
                             });
                         match changed {
                             Ok(()) => refresh_tray(app),
-                            Err(e) => {
-                                tracing::error!("拔手開關切換失敗：{e}");
+                            Err((why, os_error)) => {
+                                tracing::error!("拔手開關切換失敗：{why:?}（{os_error:?}）");
                                 if let Some(win) = app.get_webview_window(PET) {
                                     let _ = win.show();
                                     let _ = win.set_focus();
                                 }
                                 use tauri::Emitter;
-                                let _ = app.emit("recorder-failed", format!("拔手開關失敗：{e}"));
+                                let _ = app.emit(
+                                    "recorder-failed",
+                                    sister_hands::kill_switch::tray_hands_failure_message(why),
+                                );
                                 refresh_tray(app);
                             }
                         }

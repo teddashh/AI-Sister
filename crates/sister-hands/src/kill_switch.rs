@@ -128,6 +128,11 @@ impl WhyNotWritten {
     }
 }
 
+/// 系統匣切換失敗時給中文介面的句子。作業系統原文應另外留在 log。
+pub fn tray_hands_failure_message(why: WhyNotWritten) -> String {
+    format!("拔手開關失敗：{}。", why.zh())
+}
+
 /// 按下拔手熱鍵之後，真的發生了什麼。
 ///
 /// 分這幾格是因為使用者的下一步不一樣，而不是因為好看。
@@ -244,12 +249,16 @@ pub fn hotkey_set_action(
 
 /// 排兩顆熱鍵；拔手撞號時優先，因為暫停仍可從系統匣操作。
 ///
-/// 只 trim 後逐字比較，不假裝維護 Tauri 的別名表。因此 `Ctrl+Alt+P` 和
-/// `Control+Alt+P` 的撞號認不出來，其中一顆會在註冊當下回報失敗。
+/// 比較前只正規化產品自己會產生的 `KeyX` / `DigitN`，以及 global-hotkey
+/// 對修飾鍵接受的 `Control` / `Command` / `Cmd` 別名、大小寫與順序。這不是
+/// Tauri/global-hotkey 的完整別名表；comboOf 生不出的其他形狀仍可能漏掉，並在
+/// 註冊當下失敗。
 pub fn plan_hotkeys(pause: &str, hands: &str) -> HotkeyPlan {
     let pause = nonempty(pause);
     let hands = nonempty(hands);
-    if pause.is_some() && pause == hands {
+    if pause.as_deref().map(normalize_hotkey) == hands.as_deref().map(normalize_hotkey)
+        && pause.is_some()
+    {
         return HotkeyPlan {
             pause: None,
             hands: hands.clone(),
@@ -261,6 +270,45 @@ pub fn plan_hotkeys(pause: &str, hands: &str) -> HotkeyPlan {
         hands,
         collided: None,
     }
+}
+
+fn normalize_hotkey(value: &str) -> String {
+    let mut modifiers = [false; 4];
+    let mut key = None;
+    for token in value.trim().split('+').map(str::trim) {
+        let upper = token.to_ascii_uppercase();
+        match upper.as_str() {
+            "CONTROL" | "CTRL" => modifiers[0] = true,
+            "ALT" => modifiers[1] = true,
+            "SHIFT" => modifiers[2] = true,
+            "COMMAND" | "CMD" | "SUPER" => modifiers[3] = true,
+            _ => {
+                let canonical = if upper.len() == 4 && upper.starts_with("KEY") {
+                    upper[3..].to_string()
+                } else if upper.len() == 6 && upper.starts_with("DIGIT") {
+                    upper[5..].to_string()
+                } else {
+                    upper
+                };
+                key = Some(canonical);
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    for (present, name) in modifiers.into_iter().zip(["CTRL", "ALT", "SHIFT", "SUPER"]) {
+        if present {
+            parts.push(name.to_string());
+        }
+    }
+    if let Some(key) = key {
+        parts.push(key);
+    }
+    parts.join("+")
+}
+
+/// 問不出資料目錄時的兩顆系統匣動作；只描述動作，不假稱目前狀態。
+pub fn tray_hands_unknown_labels() -> (String, String) {
+    ("拔掉她的手".into(), "把手接回去".into())
 }
 
 fn nonempty(value: &str) -> Option<String> {
@@ -607,8 +655,45 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_plan_does_not_guess_aliases() {
-        assert_eq!(plan_hotkeys("Ctrl+Alt+P", "Control+Alt+P").collided, None);
+    fn hotkey_plan_matches_the_products_two_written_shapes() {
+        assert!(
+            plan_hotkeys("Ctrl+Alt+KeyH", "Ctrl+Alt+H")
+                .collided
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn hotkey_normalization_covers_its_declared_shapes() {
+        for (left, right) in [
+            ("KeyH", "H"),
+            ("Digit1", "1"),
+            ("Control+H", "Ctrl+H"),
+            ("Command+H", "Super+H"),
+            ("Cmd+H", "Super+H"),
+            ("alt+ctrl+keyh", "Ctrl+Alt+H"),
+        ] {
+            assert_eq!(
+                normalize_hotkey(left),
+                normalize_hotkey(right),
+                "{left} / {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn hotkey_plan_keeps_different_keys_apart() {
+        assert_eq!(
+            plan_hotkeys("Ctrl+Alt+KeyH", "Ctrl+Alt+KeyJ").collided,
+            None
+        );
+    }
+
+    #[test]
+    fn tray_failure_sentence_never_carries_os_words() {
+        let says = tray_hands_failure_message(WhyNotWritten::CannotWrite);
+        assert_eq!(says, "拔手開關失敗：資料目錄寫不進去。");
+        assert!(!says.contains("File exists"));
     }
 
     #[test]
