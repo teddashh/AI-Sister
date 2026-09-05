@@ -3851,16 +3851,19 @@ impl Db {
     /// 算一次問過。審閱層與盯梢層的列不屬於這個問題。
     pub fn retained_interpreter_attempts_for_segment(
         &self,
-        segment_core_start: Millis,
+        core_started_at: Millis,
+        core_ended_at: Millis,
     ) -> Result<Option<RetainedInterpreterAttempts>> {
         let (count, token): (i64, Option<String>) = self.conn.query_row(
             "SELECT COUNT(*),
                     (SELECT outcome FROM brain_outbound
-                     WHERE segment_core_start = ?1 AND role = 'interpreter'
+                     WHERE segment_core_start >= ?1 AND segment_core_start < ?2
+                       AND role = 'interpreter'
                      ORDER BY ts DESC, id DESC LIMIT 1)
              FROM brain_outbound
-             WHERE segment_core_start = ?1 AND role = 'interpreter'",
-            [segment_core_start],
+             WHERE segment_core_start >= ?1 AND segment_core_start < ?2
+               AND role = 'interpreter'",
+            params![core_started_at, core_ended_at],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let Some(token) = token else {
@@ -10799,6 +10802,86 @@ mod tests {
     }
 
     #[test]
+    fn merged_segment_retains_interpreter_attempts_from_both_halves() {
+        let mut db = test_db();
+        let (a, b, c) = (42_000, 43_000, 44_000);
+        for (segment_core_start, ts, role, outcome) in [
+            (a, 1_000, "interpreter", "timeout"),
+            (a, 2_000, "interpreter", "bad_json"),
+            (a, 3_000, "interpreter", "spawn_failed"),
+            (b, 4_000, "interpreter", "success"),
+            (b, 5_000, "interpreter", "no_answer"),
+            (b, 6_000, "reviewer", "success"),
+            (c, 7_000, "interpreter", "success"),
+        ] {
+            db.insert_brain_outbound(&OutboundInsert {
+                ts,
+                day_key: "1970-01-01",
+                command: "agent",
+                args: &[],
+                segment_core_start: Some(segment_core_start),
+                chars_sent: 1,
+                truncated: false,
+                outcome,
+                duration_ms: 1,
+                error: None,
+                role,
+            })
+            .expect("insert outbound");
+        }
+
+        let got = db
+            .retained_interpreter_attempts_for_segment(a, c)
+            .expect("query")
+            .expect("five retained attempts");
+        assert_eq!(
+            got.count, 5,
+            "合併後左右兩半都要算，右界與 reviewer 都不能混入"
+        );
+        assert_eq!(
+            got.latest_outcome,
+            crate::brain::StoredOutboundOutcome::Known(crate::brain::OutboundOutcome::NoAnswer),
+            "最近結局必須取範圍內較晚的右半"
+        );
+    }
+
+    #[test]
+    fn unedited_segment_range_count_matches_exact_start_count() {
+        let mut db = test_db();
+        let start = 42_000;
+        for ts in [1_000, 2_000, 3_000] {
+            db.insert_brain_outbound(&OutboundInsert {
+                ts,
+                day_key: "1970-01-01",
+                command: "agent",
+                args: &[],
+                segment_core_start: Some(start),
+                chars_sent: 1,
+                truncated: false,
+                outcome: "success",
+                duration_ms: 1,
+                error: None,
+                role: "interpreter",
+            })
+            .expect("insert outbound");
+        }
+        let exact: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM brain_outbound
+                 WHERE segment_core_start = ?1 AND role = 'interpreter'",
+                [start],
+                |row| row.get(0),
+            )
+            .expect("old exact-start count");
+        let ranged = db
+            .retained_interpreter_attempts_for_segment(start, start + 1_000)
+            .expect("range query")
+            .expect("three retained attempts");
+        assert_eq!(i64::from(ranged.count), exact);
+    }
+
+    #[test]
     fn retained_interpreter_attempts_exclude_other_roles_and_keep_latest_outcome() {
         let mut db = test_db();
         // 讓同毫秒的自然索引順序刻意和 id 順序相反；如此拿掉 `id DESC`
@@ -10838,7 +10921,7 @@ mod tests {
         }
 
         let got = db
-            .retained_interpreter_attempts_for_segment(segment)
+            .retained_interpreter_attempts_for_segment(segment, segment + 1)
             .expect("query")
             .expect("three interpreter rows");
         assert_eq!(got.count, 4, "reviewer/watcher 不可以混進解釋層次數");
@@ -10848,7 +10931,7 @@ mod tests {
             "最新 reviewer 不可混入；先按 ts DESC，同毫秒再以較大的 id 為最新"
         );
         assert!(
-            db.retained_interpreter_attempts_for_segment(segment + 1)
+            db.retained_interpreter_attempts_for_segment(segment + 1, segment + 2)
                 .expect("empty query")
                 .is_none(),
             "沒問過不可以造出一次"
@@ -10873,7 +10956,7 @@ mod tests {
         })
         .expect("insert unknown");
         let got = db
-            .retained_interpreter_attempts_for_segment(42_000)
+            .retained_interpreter_attempts_for_segment(42_000, 42_001)
             .expect("unknown token is readable")
             .expect("one retained attempt");
         assert_eq!(got.count, 1);

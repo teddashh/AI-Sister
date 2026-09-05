@@ -1825,7 +1825,10 @@ fn memory_current_guess(shell: tauri::State<'_, Shell>) -> Result<CurrentGuessVi
             // 包括上面已經算好的 card，都會讓整塊失敗。brain 外送已經發生後的輔助查詢
             // 則不能擋住那次外送，所以 brain.rs 那邊會用 `.ok().flatten()`。
             let previous_attempts = db
-                .retained_interpreter_attempts_for_segment(seg.core_started_at)
+                .retained_interpreter_attempts_for_segment(
+                    seg.core_started_at,
+                    seg.core_ended_at,
+                )
                 .map_err(|e| format!("{e:#}"))?;
             let latest_closed = sister_core::brain::LatestClosedSegment {
                 has_card: card.is_some(),

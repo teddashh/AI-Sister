@@ -244,8 +244,14 @@ def leading_args(text, open_paren, want):
     return None
 
 
-# ── A. 用 segment 當 key 的查詢，key 必須是 core_started_at ──────────────
-for query in ("retained_interpreter_attempts_for_segment", "l2_versions_for_segment"):
+# ── A. 用 segment 當 key 的查詢，key 必須是 core 的時間欄位 ─────────────
+for query, expected in (
+    (
+        "retained_interpreter_attempts_for_segment",
+        "seg.core_started_at, seg.core_ended_at",
+    ),
+    ("l2_versions_for_segment", "seg.core_started_at"),
+):
     calls = re.findall(re.escape(query) + r" *\( *([^)]*)\)", flat)
     if not calls:
         problems.append(f"完全找不到 {query}( 的呼叫——那張卡少了一塊資料。")
@@ -255,10 +261,10 @@ for query in ("retained_interpreter_attempts_for_segment", "l2_versions_for_segm
         # rustfmt 把呼叫拆行時會留一個尾逗號，壓平之後就是 `seg.core_started_at,`。
         # 第一版在這裡用完全相等去比，於是跑一次 `cargo fmt` 就會把閘門弄紅。
         arg = calls[0].strip().rstrip(",").strip()
-        if arg != "seg.core_started_at":
+        if arg != expected:
             problems.append(
-                f"{query}( 的引數是 `{arg}`，不是 `seg.core_started_at`。\n"
-                f"      那兩張表存的都是 core_started_at；查錯欄位會安靜地回 0 列。"
+                f"{query}( 的引數是 `{arg}`，不是 `{expected}`。\n"
+                f"      查錯 core 時間欄位會安靜地回 0 列或算錯範圍。"
             )
 
 # ── B. 順序住在 crates/，而且餵進去的兩個引數是真的算出來的 ──────────────

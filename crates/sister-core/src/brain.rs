@@ -889,7 +889,7 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
         // 出境稽核與卡片。未知 outcome token 本身不是錯誤，會原樣帶回。
         let previous = input
             .db
-            .retained_interpreter_attempts_for_segment(job.core_started_at)
+            .retained_interpreter_attempts_for_segment(job.core_started_at, job.core_ended_at)
             .ok()
             .flatten();
         input.db.insert_brain_outbound(&OutboundInsert {
