@@ -1917,6 +1917,38 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 回傳蓋住這個時間點的輸入視窗。
+    ///
+    /// `None` 代表這段時間沒有輸入紀錄；不能用一列全零的值代替，因為「有量、
+    /// 沒人動」和「根本沒量」是兩件不同的事。
+    pub fn input_window_covering(&self, ts: Millis) -> Result<Option<InputMetrics>> {
+        self.conn
+            .query_row(
+                "SELECT ts_start, ts_end, keystrokes, clicks, mouse_px, scroll_ticks,
+                        window_switches, idle_ms, typing_bursts
+                 FROM input_metrics
+                 WHERE ts_start <= ?1 AND ts_end >= ?1
+                 ORDER BY ts_start
+                 LIMIT 1",
+                [ts],
+                |row| {
+                    Ok(InputMetrics {
+                        ts_start: row.get(0)?,
+                        ts_end: row.get(1)?,
+                        keystrokes: row.get(2)?,
+                        clicks: row.get(3)?,
+                        mouse_px: row.get(4)?,
+                        scroll_ticks: row.get(5)?,
+                        window_switches: row.get(6)?,
+                        idle_ms: row.get(7)?,
+                        typing_bursts: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn insert_system(&mut self, session_id: i64, e: &SystemEvent) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO system_events(ts, session_id, kind, detail) VALUES(?1,?2,?3,?4)",
@@ -12321,6 +12353,23 @@ mod tests {
         let st = db.stats().expect("stats");
         assert_eq!(st.input_windows, 1);
         assert_eq!(st.system_events, 1);
+    }
+
+    #[test]
+    fn input_window_covering_keeps_not_measured_distinct_from_measured_zero() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let measured_zero = InputMetrics {
+            ts_start: 100,
+            ts_end: 200,
+            ..InputMetrics::default()
+        };
+        db.insert_input(s, &measured_zero).expect("insert input");
+
+        assert_eq!(db.input_window_covering(99).unwrap(), None);
+        assert_eq!(db.input_window_covering(100).unwrap(), Some(measured_zero));
+        assert_eq!(db.input_window_covering(200).unwrap(), Some(measured_zero));
+        assert_eq!(db.input_window_covering(201).unwrap(), None);
     }
 
     /// 「零當機」現在有實作了，而不是靠使用者的印象。

@@ -1974,6 +1974,56 @@ pub mod act {
     use std::collections::BTreeSet;
     use std::io::{BufRead, IsTerminal, Write};
 
+    const STEP_DRIVE_WINDOW_MS: i64 = 30_000;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HumanMotion {
+        HumanActive,
+        NobodyTouched,
+        NotMeasured,
+    }
+
+    fn human_motion(metrics: Option<sister_core::model::InputMetrics>) -> HumanMotion {
+        match metrics {
+            None => HumanMotion::NotMeasured,
+            Some(m) if m.keystrokes + m.clicks + m.mouse_px + m.scroll_ticks > 0 => {
+                HumanMotion::HumanActive
+            }
+            Some(_) => HumanMotion::NobodyTouched,
+        }
+    }
+
+    fn previous_step_seconds(events: &[ActionEvent], target_ts: i64) -> Option<i64> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ActionEvent::Executed { at_ms, .. }
+                    if *at_ms <= target_ts && target_ts - *at_ms <= STEP_DRIVE_WINDOW_MS =>
+                {
+                    Some(target_ts - *at_ms)
+                }
+                _ => None,
+            })
+            .min()
+            .map(|delta_ms| delta_ms / 1_000)
+    }
+
+    fn target_drive_sentence(previous_step_seconds: Option<i64>, motion: HumanMotion) -> String {
+        let prefix = previous_step_seconds
+            .map(|seconds| format!("她的上一步就在這之前 {seconds} 秒；"))
+            .unwrap_or_default();
+        let observation = match motion {
+            HumanMotion::NobodyTouched => "這個目標出現在畫面上的那一段，鍵盤和滑鼠一下都沒有動。",
+            HumanMotion::HumanActive => {
+                "這個目標出現在畫面上的那一段，你在動鍵盤滑鼠——但這只說明同一段時間有人在操作，不表示是你叫出這個東西的。"
+            }
+            HumanMotion::NotMeasured => {
+                "這台機器沒有在記輸入，所以說不出這個目標出現的時候有沒有人在動。"
+            }
+        };
+        format!("{prefix}{observation}")
+    }
+
     pub struct Options {
         pub task: String,
         pub apps: Vec<String>,
@@ -2342,6 +2392,15 @@ pub mod act {
             expected_raw: &str,
         ) -> Result<sister_core::db::TargetApp>;
         fn frame_for_target_fact(&self, id: i64, expected_raw: &str) -> Result<TargetFrame>;
+        fn target_fact_ts(&self, _id: i64, _expected_raw: &str) -> Result<Option<i64>> {
+            Ok(None)
+        }
+        fn input_window_covering(
+            &self,
+            _ts: i64,
+        ) -> Result<Option<sister_core::model::InputMetrics>> {
+            Ok(None)
+        }
         fn step_frame_preferring_after(
             &self,
             at_ms: i64,
@@ -2377,6 +2436,18 @@ pub mod act {
                     sister_core::db::FramelessOrigin::from_source_kind(&fact.source_kind),
                 ),
             })
+        }
+        fn target_fact_ts(&self, id: i64, expected_raw: &str) -> Result<Option<i64>> {
+            Ok(self
+                .fact_by_id(id)?
+                .filter(|fact| fact.raw == expected_raw)
+                .map(|fact| fact.ts))
+        }
+        fn input_window_covering(
+            &self,
+            ts: i64,
+        ) -> Result<Option<sister_core::model::InputMetrics>> {
+            Db::input_window_covering(self, ts)
         }
         fn step_frame_preferring_after(
             &self,
@@ -3074,6 +3145,16 @@ pub mod act {
             writeln!(out, "{target_app}")?;
             writeln!(out, "宣告 app：{}", declared_app.label())?;
             writeln!(out, "{covered}")?;
+            if let Some((fact_id, expected_raw)) = commitment
+                .allowed_next_step_fact
+                .zip(expected_target.as_deref())
+            {
+                if let Some(target_ts) = source.target_fact_ts(fact_id, expected_raw)? {
+                    let previous = previous_step_seconds(&log.replay()?.events, target_ts);
+                    let motion = human_motion(source.input_window_covering(target_ts)?);
+                    writeln!(out, "{}", target_drive_sentence(previous, motion))?;
+                }
+            }
             if opts.dry_run {
                 writeln!(out)?;
                 continue;
@@ -3601,6 +3682,59 @@ pub mod act {
             ) -> Result<Option<sister_core::db::StepFrameRow>> {
                 Ok(self.nearest_frame.clone())
             }
+        }
+
+        #[test]
+        fn input_observation_keeps_unmeasured_zero_and_active_separate() {
+            let zero = sister_core::model::InputMetrics {
+                ts_start: 1,
+                ts_end: 2,
+                ..Default::default()
+            };
+            let active = sister_core::model::InputMetrics {
+                keystrokes: 1,
+                ..zero
+            };
+
+            assert_eq!(human_motion(None), HumanMotion::NotMeasured);
+            assert_eq!(human_motion(Some(zero)), HumanMotion::NobodyTouched);
+            assert_eq!(human_motion(Some(active)), HumanMotion::HumanActive);
+            let unmeasured = target_drive_sentence(None, human_motion(None));
+            let untouched = target_drive_sentence(None, human_motion(Some(zero)));
+            assert_ne!(unmeasured, untouched);
+            assert!(unmeasured.contains("沒有在記輸入"), "{unmeasured}");
+            assert!(untouched.contains("一下都沒有動"), "{untouched}");
+        }
+
+        #[test]
+        fn her_previous_step_is_an_independent_prefix_not_a_human_motion_vote() {
+            let action = ActionSnapshot::FocusWindow {
+                title: "target".into(),
+            };
+            let events = vec![ActionEvent::Executed {
+                at_ms: 70_000,
+                action,
+                result: ExecutionResult::Succeeded {
+                    detail: "done".into(),
+                },
+            }];
+            let previous = previous_step_seconds(&events, 100_000);
+            assert_eq!(previous, Some(30));
+            assert_eq!(previous_step_seconds(&events, 100_001), None);
+
+            let with_her = target_drive_sentence(previous, HumanMotion::NobodyTouched);
+            let without_her = target_drive_sentence(None, HumanMotion::NobodyTouched);
+            assert!(with_her.starts_with("她的上一步就在這之前 30 秒；"));
+            assert!(with_her.ends_with(&without_her));
+            assert!(with_her.contains("一下都沒有動"), "{with_her}");
+        }
+
+        #[test]
+        fn active_wording_does_not_claim_the_human_caused_the_target() {
+            let line = target_drive_sentence(Some(2), HumanMotion::HumanActive);
+            assert!(line.contains("她的上一步就在這之前 2 秒；"), "{line}");
+            assert!(line.contains("你在動鍵盤滑鼠"), "{line}");
+            assert!(line.contains("不表示是你叫出這個東西的"), "{line}");
         }
 
         #[test]
