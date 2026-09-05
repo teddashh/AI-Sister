@@ -33,11 +33,17 @@ r25 之後：順序搬進 `crates/sister-core/src/brain.rs` 的 `CurrentGuess::d
 於是這裡守 A–D 四塊（**全部只在 `fn memory_current_guess` 的函式本體裡找**——
 `let presence = …` 在整個 `main.rs` 有四處，只有這一處是這張卡的）：
 
-  A. 用 segment 當 key 的查詢，key 還是 `seg.core_started_at`。
-     `brain_outbound.segment_core_start` 和 L2 版本表存的都是 `core_started_at`；
-     換成 `core_ended_at` 一定查到 0 列 → 卡片安靜地消失或退回
-     「正在等解釋層處理」。型別一模一樣，clippy 不會叫。
+  A. 用 segment 當 key 的查詢，引數逐字對得上。兩支的形狀**不一樣**，
+     這一點是 r28 之後才分岔的：
+       - `l2_versions_for_segment(seg.core_started_at)` —— 一條卡片脈絡，起點相等。
+       - `retained_interpreter_attempts_for_segment(seg.core_started_at,
+         seg.core_ended_at)` —— 一整段的**時間範圍**（半開）。r28 之前它也是相等
+         查，而使用者合併章節之後，右半那些外送列的鍵就對不上任何一段了。
+     兩支都是把 `core_started_at` 換成 `core_ended_at` 一定查到 0 列 → 卡片安靜地
+     消失或退回「正在等解釋層處理」。型別一模一樣，clippy 不會叫。
      **這一刀我實跑過，26 條閘門全綠。**
+     r28 起這一段還會擋「範圍那支少傳第二個引數」：窗寬塌掉就是把那個少算 bug
+     放回來。
 
   B. 順序沒有偷偷搬回來，**而且餵給它的三個輸入是真的算出來的**：
      不可以出現 `from_presence(` / `while_recording(`；`decide(` 要剛好一次，
@@ -258,7 +264,8 @@ for query, expected in (
     elif len(calls) != 1:
         problems.append(f"{query}( 出現 {len(calls)} 次，這支腳本只認得剛好一次。")
     else:
-        # rustfmt 把呼叫拆行時會留一個尾逗號，壓平之後就是 `seg.core_started_at,`。
+        # rustfmt 把呼叫拆行時會留一個尾逗號，壓平之後就是 `<那支的引數列>,`
+        # （範圍那支是 `seg.core_started_at, seg.core_ended_at,`）。
         # 第一版在這裡用完全相等去比，於是跑一次 `cargo fmt` 就會把閘門弄紅。
         arg = calls[0].strip().rstrip(",").strip()
         if arg != expected:
@@ -520,7 +527,8 @@ if problems:
     sys.exit(1)
 
 print(
-    "✓ 「這一刻」的桌面接線完整（A 查 core_started_at／B 順序只在 decide 裡、"
+    "✓ 「這一刻」的桌面接線完整（A 卡片查 core_started_at、次數查 "
+    "[core_started_at, core_ended_at)／B 順序只在 decide 裡、"
     "三個輸入是算出來的／C 欄位有來源／D 回來之後 message 是 status.message()、"
     "錯誤用 ? 往上傳／E 前一版走 latest_with_previous，沒有人手算下標）"
 )

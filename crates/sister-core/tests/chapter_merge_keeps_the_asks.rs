@@ -11,21 +11,29 @@
 //! 的原因說成「紀錄被刪掉了」。這一次一列都沒少，是鍵對不上了。
 //!
 //! ⚠ 這一檔在舊碼上**編不過**（舊簽名只吃一個參數），編不過的紅什麼都沒證明。
-//!   有價值的是交貨**之後**的突變。五刀都跑過了，五刀都紅，箭頭後面是這一檔
-//!   被點名的那一條：
+//!   有價值的是交貨**之後**的突變。五刀都跑過了、都紅，每一刀都確認過是 24 個
+//!   binary 全部跑完之後的紅，不是編不過的紅。箭頭後面是**這一檔**被點名的測試
+//!   （完整清單，不是挑一條）：
 //!
-//!   1. 兩處 `WHERE` 都退回 `= ?1`（＝原本那個 bug）
+//!   1. 兩處 `WHERE` 都退回 `= ?1`、`?2` 留著不用（＝原本那個 bug）
 //!      → `merging_two_chapters_keeps_both_halves_asks`
-//!   2. 右界 `< ?2` 改成 `<= ?2`
-//!      → `the_right_edge_belongs_to_the_next_chapter`
-//!   3. `AND role = 'interpreter'` 改成 `AND 1 = 1`
-//!      → `other_roles_are_still_not_counted`
-//!   4. 只有子查詢退回相等（COUNT 仍是範圍）
 //!      → `the_latest_outcome_comes_from_the_whole_range_not_the_start`
-//!   5. `params![core_started_at, core_ended_at]` 兩個引數對調
-//!      → `an_unedited_chapter_counts_exactly_what_it_did_before`
+//!      （另外還紅了 `db::tests::migration_018_indexes_are_used_by_both_hot_queries`
+//!      ——那是刻意留的絆索，見 `db.rs` 那條測試尾巴的註解。）
+//!   2. 右界 `< ?2` 改成 `<= ?2`
+//!      → `the_right_edge_belongs_to_the_next_chapter`（**唯一**）
+//!   3. `AND role = 'interpreter'` 改成 `AND 1 = 1`
+//!      → `other_roles_are_still_not_counted`（**唯一**）
+//!   4. 只有子查詢退回相等（COUNT 仍是範圍）
+//!      → `the_latest_outcome_comes_from_the_whole_range_not_the_start`（**唯一**）
 //!
-//!   每一刀都確認過是 24 個 binary 全部跑完之後的紅，不是編不過的紅。
+//!   ⚠ 第 5 刀（`params!` 兩個引數對調）**是鈍的，它什麼都沒有鑑別出來**。
+//!   對調之後範圍變成 `[結束, 起點)`，一列都查不到，於是這一檔六條裡有**五條**
+//!   一起紅（全部死在 `.expect("有列")` 的解包，不是死在它們自己的斷言），
+//!   連同全樹共 13 條。我原本在這裡寫「→ `an_unedited_chapter_counts…`」，
+//!   那是**假的**——我讀的是 `sort -u | head -6` 截斷過的輸出，把第一行當成了
+//!   全部。鈍刀證明的是「這條路上有人」，不是「這一條守住了那個性質」；
+//!   2、3、4 那三刀各自唯一命中，才是有鑑別力的那種。
 //!
 //! ⚠ 這一檔守的是 `db.rs` 那支查詢，**不是使用者讀到的那句話**。
 //!   `apps/desktop/src-tauri/src/main.rs` 那個呼叫端在另一個 workspace，
