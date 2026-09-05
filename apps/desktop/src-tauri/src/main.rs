@@ -597,6 +597,22 @@ fn refresh_tray(app: &tauri::AppHandle) {
     if let Some(item) = app.try_state::<PauseItem>() {
         let _ = item.0.set_text(pause_label(paused));
     }
+    let (stop, resume) = shell
+        .data_dir
+        .as_ref()
+        .map(|dir| {
+            (
+                sister_hands::kill_switch::tray_hands_stop_label(dir),
+                sister_hands::kill_switch::tray_hands_resume_label(dir),
+            )
+        })
+        .unwrap_or_else(|| ("拔掉她的手".into(), "把手接回去（現在沒拔）".into()));
+    if let Some(item) = app.try_state::<HandsStopItem>() {
+        let _ = item.0.set_text(stop);
+    }
+    if let Some(item) = app.try_state::<HandsResumeItem>() {
+        let _ = item.0.set_text(resume);
+    }
 }
 
 /// 「開始／停止記錄」和「結束」那兩行字。分出來是因為 [`recording_state`] 手上
@@ -718,6 +734,8 @@ struct LastRun {
 /// 系統匣裡的那一顆開始／停止。理由和 [`PauseItem`] 一樣：一個永遠寫著同一句
 /// 話的切換項目，會讓人按出他沒想要的那個方向。
 struct RecordItem(MenuItem<tauri::Wry>);
+struct HandsStopItem(MenuItem<tauri::Wry>);
+struct HandsResumeItem(MenuItem<tauri::Wry>);
 
 /// 系統匣裡的「結束」。存起來的理由見 [`quit_label`]。
 struct QuitItem(MenuItem<tauri::Wry>);
@@ -2308,6 +2326,10 @@ struct HotkeyView {
     /// 對一顆**暫停**鍵來說這是最壞的一種壞法，和 [`hotkey_set`] 那段註解
     /// 講的是同一件事：他以為她停了，她還在錄。
     config_unreadable: Option<String>,
+    hands_wanted: String,
+    hands_registered: bool,
+    hands_reason: Option<String>,
+    hands_collided: bool,
 }
 
 struct Hotkey(Mutex<HotkeyView>);
@@ -2317,29 +2339,18 @@ struct Hotkey(Mutex<HotkeyView>);
 /// 先 `unregister_all` 再註冊：這一支同時被開機和「設定頁上改了一組」呼叫，
 /// 不先拆掉舊的話，改過三次之後會有三組熱鍵同時活著——其中兩組是他以為自己
 /// 已經取消掉的。
-fn apply_hotkey(app: &tauri::AppHandle, wanted: &str) -> HotkeyView {
+fn apply_hotkey(app: &tauri::AppHandle, wanted: &str, hands_wanted: &str) -> HotkeyView {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
-    let wanted = wanted.trim().to_string();
+    let plan = sister_hands::kill_switch::plan_hotkeys(wanted, hands_wanted);
+    let wanted = plan.pause.clone().unwrap_or_default();
+    let hands_wanted = plan.hands.clone().unwrap_or_default();
     let shortcuts = app.global_shortcut();
     let _ = shortcuts.unregister_all();
 
     // 空字串是一個正當的選擇，不是壞掉的設定：全域熱鍵會從所有程式手上把那個
     // 組合搶走，所以要留一條關掉它的路。這裡不回報 reason，因為沒有失敗。
-    if wanted.is_empty() {
-        return HotkeyView {
-            wanted,
-            registered: false,
-            reason: None,
-            rejected: None,
-            // 這一支只負責「去搶那一組」。設定檔讀不讀得出來是呼叫端的事，
-            // 而唯一問得到的呼叫端是開機那一段——`hotkey_set` 走到這裡的時候
-            // 設定檔剛剛才讀成功過。
-            config_unreadable: None,
-        };
-    }
-
-    let reason = shortcuts
+    let reason = if wanted.is_empty() { None } else { shortcuts
         .on_shortcut(wanted.as_str(), |app, _shortcut, event| {
             // 只認**按下**。少了這一行，按一次會進來兩次（按下 + 放開），
             // 於是暫停立刻被自己取消掉——一顆看起來完全沒反應的熱鍵。
@@ -2352,14 +2363,31 @@ fn apply_hotkey(app: &tauri::AppHandle, wanted: &str) -> HotkeyView {
             }
         })
         .err()
-        .map(|e| e.to_string());
+        .map(|e| e.to_string()) };
 
+    let hands_reason = if hands_wanted.is_empty() { None } else { shortcuts
+        .on_shortcut(hands_wanted.as_str(), |app, _shortcut, event| {
+            if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed { return; }
+            let shell = app.state::<Shell>();
+            let outcome = sister_hands::kill_switch::press_hands_hotkey(
+                shell.data_dir.as_deref(), sister_core::now_ms());
+            tracing::info!("拔手熱鍵：{}", sister_hands::kill_switch::hands_hotkey_message(&outcome));
+            if let Some(win) = app.get_webview_window(PET) { let _ = win.show(); }
+            refresh_tray(app);
+        }).err().map(|e| e.to_string()) };
+
+    let registered = !wanted.is_empty() && reason.is_none();
+    let hands_registered = !hands_wanted.is_empty() && hands_reason.is_none();
     HotkeyView {
         wanted,
-        registered: reason.is_none(),
+        registered,
         reason,
         rejected: None,
         config_unreadable: None,
+        hands_registered,
+        hands_wanted,
+        hands_reason,
+        hands_collided: plan.collided.is_some(),
     }
 }
 
@@ -2406,8 +2434,12 @@ fn hotkey_set(
     combo: String,
     hotkey: tauri::State<'_, Hotkey>,
 ) -> Result<HotkeyView, String> {
+    let hands_wanted = config_path()
+        .and_then(|path| sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}")))?
+        .shell
+        .hands_stop_shortcut;
     let previous = hotkey.0.lock().expect("hotkey").wanted.clone();
-    let view = apply_hotkey(&app, &combo);
+    let view = apply_hotkey(&app, &combo, &hands_wanted);
     let view = if view.registered || view.wanted.is_empty() {
         let persist = || -> Result<(), String> {
             let path = config_path()?;
@@ -2428,7 +2460,7 @@ fn hotkey_set(
         // 什麼時候會走到這裡：設定檔壞掉（手寫的 retention = 0）、防毒或
         // OneDrive 鎖著 config.toml、磁碟滿。
         if let Err(e) = persist() {
-            let restored = apply_hotkey(&app, &previous);
+            let restored = apply_hotkey(&app, &previous, &hands_wanted);
             // `pretty_combo` 而不是原樣印：這一整串是塞進 `Err(String)` 直接
             // 上畫面的，設定頁不會替它排版。原樣印出來是「還在用 Ctrl+Alt+KeyP」
             // ——而鍵盤上沒有一顆鍵叫 KeyP。他要照著這句話去按的。
@@ -2450,7 +2482,7 @@ fn hotkey_set(
         // 剛剛打的那個組合，讓那句話講得出「你試的那組沒搶到，還在用舊的」。
         HotkeyView {
             rejected: Some(view.wanted),
-            ..apply_hotkey(&app, &previous)
+            ..apply_hotkey(&app, &previous, &hands_wanted)
         }
     };
     *hotkey.0.lock().expect("hotkey") = view.clone();
@@ -3253,14 +3285,21 @@ fn main() {
                     sister_core::config::Config::load(&p).map_err(|e| format!("{e:#}"))
                 });
                 let config_unreadable = loaded.as_ref().err().cloned();
-                let wanted = loaded
-                    .unwrap_or_default()
-                    .shell
-                    .pause_shortcut;
+                let shell_config = loaded.unwrap_or_default().shell;
+                let wanted = shell_config.pause_shortcut;
+                let hands_wanted = shell_config.hands_stop_shortcut;
                 let view = HotkeyView {
                     config_unreadable,
-                    ..apply_hotkey(app.handle(), &wanted)
+                    ..apply_hotkey(app.handle(), &wanted, &hands_wanted)
                 };
+                if view.hands_collided {
+                    tracing::warn!("熱鍵撞號：{} 留給拔手，暫停熱鍵已讓掉", view.hands_wanted);
+                }
+                match &view.hands_reason {
+                    Some(reason) => tracing::warn!("拔手熱鍵 {} 註冊不起來：{reason}", view.hands_wanted),
+                    None if view.hands_wanted.is_empty() => tracing::info!("拔手熱鍵是關掉的"),
+                    None => tracing::info!("拔手熱鍵 {} 搶到了", view.hands_wanted),
+                }
                 // 成功也要留一行。「搶到了」和「這段程式根本沒跑到」在一份
                 // 只記失敗的記錄檔裡長得一模一樣，而那正是他按了熱鍵沒反應時
                 // 唯一想分辨的兩件事。
@@ -3279,10 +3318,14 @@ fn main() {
             let show_item = MenuItem::with_id(app, "show", "顯示 AI-Sister", true, None::<&str>)?;
             let pause_item =
                 MenuItem::with_id(app, "pause", pause_label(paused_now), true, None::<&str>)?;
+            let hands_labels = app.state::<Shell>().data_dir.as_ref().map(|dir| (
+                sister_hands::kill_switch::tray_hands_stop_label(dir),
+                sister_hands::kill_switch::tray_hands_resume_label(dir),
+            )).unwrap_or_else(|| ("拔掉她的手".into(), "把手接回去（現在沒拔）".into()));
             let hands_stop_item =
-                MenuItem::with_id(app, "hands-stop", "拔掉她的手", true, None::<&str>)?;
+                MenuItem::with_id(app, "hands-stop", hands_labels.0, true, None::<&str>)?;
             let hands_resume_item =
-                MenuItem::with_id(app, "hands-resume", "把手接回去", true, None::<&str>)?;
+                MenuItem::with_id(app, "hands-resume", hands_labels.1, true, None::<&str>)?;
             // 開始／停止和暫停是兩件事，所以是兩顆。暫停是「先別看，但留在
             // 這裡」，停止是「今天到此為止」——把停止做成「一直暫停」會留下
             // 一個永遠在跑卻永遠不做事的行程，而他在工作管理員裡看得到它。
@@ -3368,6 +3411,8 @@ fn main() {
             app.manage(PauseItem(pause_item));
             app.manage(RecordItem(record_item));
             app.manage(QuitItem(quit_item));
+            app.manage(HandsStopItem(hands_stop_item));
+            app.manage(HandsResumeItem(hands_resume_item));
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("icon").clone())

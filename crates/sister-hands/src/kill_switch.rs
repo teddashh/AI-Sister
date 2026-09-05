@@ -103,13 +103,111 @@ pub fn pulled_since(data_dir: &Path) -> Option<i64> {
         .ok()
 }
 
-pub fn tray_label(data_dir: &Path) -> String {
+/// 按下拔手熱鍵之後，真的發生了什麼。
+///
+/// 分這幾格是因為使用者的下一步不一樣，而不是因為好看。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandsHotkeyOutcome {
+    /// 這一下真的把手拔掉了。
+    Pulled { at_ms: i64 },
+    /// 本來就拔著；時間是第一次拔的時間。
+    AlreadyPulled { since_ms: Option<i64> },
+    /// 問不出資料目錄，所以沒有地方可以寫旗標。手還接著。
+    NoDataDir,
+    /// 寫不進去。手還接著。
+    Failed { why: String },
+}
+
+pub fn press_hands_hotkey(data_dir: Option<&Path>, at_ms: i64) -> HandsHotkeyOutcome {
+    let Some(data_dir) = data_dir else {
+        return HandsHotkeyOutcome::NoDataDir;
+    };
+    match pull(data_dir, at_ms) {
+        Ok(true) => HandsHotkeyOutcome::Pulled { at_ms },
+        Ok(false) => HandsHotkeyOutcome::AlreadyPulled {
+            since_ms: pulled_since(data_dir),
+        },
+        Err(error) => HandsHotkeyOutcome::Failed {
+            why: error.to_string(),
+        },
+    }
+}
+
+/// 按完之後對他說的那一句。
+pub fn hands_hotkey_message(outcome: &HandsHotkeyOutcome) -> String {
+    match outcome {
+        HandsHotkeyOutcome::Pulled { .. } => "手拔掉了。她現在什麼都不會交給作業系統。".into(),
+        HandsHotkeyOutcome::AlreadyPulled { since_ms: Some(t) } => {
+            format!("手本來就是拔著的（從 {} 起）。", crate::replay_copy::at(*t))
+        }
+        HandsHotkeyOutcome::AlreadyPulled { since_ms: None } => {
+            "手本來就是拔著的（拔手時間讀不到）。".into()
+        }
+        HandsHotkeyOutcome::NoDataDir => failure_message("問不出資料目錄"),
+        HandsHotkeyOutcome::Failed { why } => failure_message(why),
+    }
+}
+
+fn failure_message(why: &str) -> String {
+    format!(
+        "沒能拔掉：{why}。她的手還接著——去系統匣按『拔掉她的手』，或在終端機打 `sister hands stop`。"
+    )
+}
+
+/// 這一輪要真的去搶哪幾組。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotkeyPlan {
+    pub pause: Option<String>,
+    pub hands: Option<String>,
+    pub collided: Option<String>,
+}
+
+/// 排兩顆熱鍵；拔手撞號時優先，因為暫停仍可從系統匣操作。
+///
+/// 只 trim 後逐字比較，不假裝維護 Tauri 的別名表。因此 `Ctrl+Alt+P` 和
+/// `Control+Alt+P` 的撞號認不出來，其中一顆會在註冊當下回報失敗。
+pub fn plan_hotkeys(pause: &str, hands: &str) -> HotkeyPlan {
+    let pause = nonempty(pause);
+    let hands = nonempty(hands);
+    if pause.is_some() && pause == hands {
+        return HotkeyPlan {
+            pause: None,
+            hands: hands.clone(),
+            collided: hands,
+        };
+    }
+    HotkeyPlan {
+        pause,
+        hands,
+        collided: None,
+    }
+}
+
+fn nonempty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// 系統匣「拔掉她的手」那一顆的字。
+pub fn tray_hands_stop_label(data_dir: &Path) -> String {
     if !is_pulled(data_dir) {
         return "拔掉她的手".into();
     }
     match pulled_since(data_dir) {
-        Some(since) => format!("把手接回去（從 {} 拔的）", crate::replay_copy::at(since)),
-        None => "把手接回去（拔手時間讀不到）".into(),
+        Some(t) => format!(
+            "拔掉她的手（已經拔了，從 {} 起）",
+            crate::replay_copy::at(t)
+        ),
+        None => "拔掉她的手（已經拔了）".into(),
+    }
+}
+
+/// 系統匣「把手接回去」那一顆的字。
+pub fn tray_hands_resume_label(data_dir: &Path) -> String {
+    if is_pulled(data_dir) {
+        "把手接回去".into()
+    } else {
+        "把手接回去（現在沒拔）".into()
     }
 }
 
@@ -204,5 +302,178 @@ mod tests {
         pull(&tmp.0, 1000).unwrap();
         assert!(release(&tmp.0).unwrap());
         assert!(!release(&tmp.0).unwrap());
+    }
+
+    #[test]
+    fn hotkey_pulls_a_clean_directory() {
+        let tmp = Tmp::new("hotkey-pull");
+        assert_eq!(
+            press_hands_hotkey(Some(&tmp.0), 123),
+            HandsHotkeyOutcome::Pulled { at_ms: 123 }
+        );
+        assert!(is_pulled(&tmp.0));
+    }
+
+    #[test]
+    fn hotkey_twice_preserves_the_first_timestamp() {
+        let tmp = Tmp::new("hotkey-twice");
+        press_hands_hotkey(Some(&tmp.0), 123);
+        assert_eq!(
+            press_hands_hotkey(Some(&tmp.0), 999),
+            HandsHotkeyOutcome::AlreadyPulled {
+                since_ms: Some(123)
+            }
+        );
+    }
+
+    #[test]
+    fn hotkey_without_data_dir_writes_nothing() {
+        let tmp = Tmp::new("hotkey-none");
+        let before = std::fs::read_dir(&tmp.0).unwrap().count();
+        assert_eq!(press_hands_hotkey(None, 123), HandsHotkeyOutcome::NoDataDir);
+        assert_eq!(std::fs::read_dir(&tmp.0).unwrap().count(), before);
+    }
+
+    #[test]
+    fn hotkey_write_failure_never_claims_success() {
+        let tmp = Tmp::new("hotkey-failed");
+        std::fs::remove_dir_all(&tmp.0).unwrap();
+        std::fs::write(&tmp.0, "file").unwrap();
+        assert!(matches!(
+            press_hands_hotkey(Some(&tmp.0), 123),
+            HandsHotkeyOutcome::Failed { .. }
+        ));
+        assert!(is_pulled(&tmp.0));
+    }
+
+    #[test]
+    fn pulled_hotkey_message_claims_the_completed_fact() {
+        assert_eq!(
+            hands_hotkey_message(&HandsHotkeyOutcome::Pulled { at_ms: 1 }),
+            "手拔掉了。她現在什麼都不會交給作業系統。"
+        );
+    }
+
+    #[test]
+    fn already_pulled_hotkey_message_keeps_the_first_time() {
+        assert_eq!(
+            hands_hotkey_message(&HandsHotkeyOutcome::AlreadyPulled { since_ms: Some(1) }),
+            format!("手本來就是拔著的（從 {} 起）。", crate::replay_copy::at(1))
+        );
+    }
+
+    #[test]
+    fn already_pulled_hotkey_message_admits_an_unreadable_time() {
+        assert_eq!(
+            hands_hotkey_message(&HandsHotkeyOutcome::AlreadyPulled { since_ms: None }),
+            "手本來就是拔著的（拔手時間讀不到）。"
+        );
+    }
+
+    #[test]
+    fn no_data_dir_message_says_the_hands_are_still_attached() {
+        let message = hands_hotkey_message(&HandsHotkeyOutcome::NoDataDir);
+        assert!(message.contains("還接著"));
+        assert!(!message.contains("拔掉了。"));
+    }
+
+    #[test]
+    fn write_failure_message_says_the_hands_are_still_attached() {
+        let message = hands_hotkey_message(&HandsHotkeyOutcome::Failed {
+            why: "磁碟滿".into(),
+        });
+        assert!(message.contains("還接著"));
+        assert!(!message.contains("拔掉了。"));
+    }
+
+    #[test]
+    fn hotkey_plan_handles_enabled_and_disabled_sides() {
+        assert_eq!(
+            plan_hotkeys("P", "H"),
+            HotkeyPlan {
+                pause: Some("P".into()),
+                hands: Some("H".into()),
+                collided: None
+            }
+        );
+        assert_eq!(
+            plan_hotkeys("P", ""),
+            HotkeyPlan {
+                pause: Some("P".into()),
+                hands: None,
+                collided: None
+            }
+        );
+        assert_eq!(
+            plan_hotkeys("", "H"),
+            HotkeyPlan {
+                pause: None,
+                hands: Some("H".into()),
+                collided: None
+            }
+        );
+        assert_eq!(
+            plan_hotkeys(" ", ""),
+            HotkeyPlan {
+                pause: None,
+                hands: None,
+                collided: None
+            }
+        );
+    }
+
+    #[test]
+    fn hotkey_plan_gives_collisions_to_hands_after_trimming() {
+        for (pause, hands) in [("P", "P"), (" P ", "P")] {
+            assert_eq!(
+                plan_hotkeys(pause, hands),
+                HotkeyPlan {
+                    pause: None,
+                    hands: Some("P".into()),
+                    collided: Some("P".into())
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn hotkey_plan_does_not_guess_aliases() {
+        assert_eq!(plan_hotkeys("Ctrl+Alt+P", "Control+Alt+P").collided, None);
+    }
+
+    #[test]
+    fn tray_hands_labels_cover_attached_and_pulled_states() {
+        let tmp = Tmp::new("tray-labels");
+        assert_eq!(tray_hands_stop_label(&tmp.0), "拔掉她的手");
+        assert_eq!(tray_hands_resume_label(&tmp.0), "把手接回去（現在沒拔）");
+        pull(&tmp.0, 1).unwrap();
+        assert_eq!(
+            tray_hands_stop_label(&tmp.0),
+            format!(
+                "拔掉她的手（已經拔了，從 {} 起）",
+                crate::replay_copy::at(1)
+            )
+        );
+        assert_eq!(tray_hands_resume_label(&tmp.0), "把手接回去");
+        std::fs::write(switch_path(&tmp.0), "broken").unwrap();
+        assert_eq!(tray_hands_stop_label(&tmp.0), "拔掉她的手（已經拔了）");
+        assert_eq!(tray_hands_resume_label(&tmp.0), "把手接回去");
+        release(&tmp.0).unwrap();
+    }
+
+    #[test]
+    fn pulled_tray_labels_keep_status_on_only_one_action() {
+        let tmp = Tmp::new("tray-distinct");
+        pull(&tmp.0, 1).unwrap();
+        let stop = tray_hands_stop_label(&tmp.0);
+        let resume = tray_hands_resume_label(&tmp.0);
+        assert_ne!(stop, resume);
+        assert_eq!(
+            [stop, resume]
+                .iter()
+                .filter(|s| s.contains("已經拔了"))
+                .count(),
+            1
+        );
     }
 }
