@@ -465,6 +465,7 @@ mod tests {
             frame_id: 8,
             frame_at_ms: 10_100,
             has_image: true,
+            target: Default::default(),
         }));
         let before = finished_with(Some(StepEvidence::Before {
             frame_id: 7,
@@ -568,6 +569,7 @@ mod tests {
             frame_id: 9,
             frame_at_ms: 10_050,
             has_image: false,
+            target: Default::default(),
         }));
         let before = finished_with(Some(StepEvidence::Before {
             frame_id: 8,
@@ -1018,6 +1020,7 @@ mod tests {
                     frame_id: 7,
                     frame_at_ms: 3,
                     has_image: false,
+                    target: Default::default(),
                 }),
             }],
             5,

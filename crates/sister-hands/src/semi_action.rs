@@ -451,6 +451,57 @@ impl AbortActor {
 // 地方，然後把新的東西接到一條死路上。它的名字是它唯一還在說的話，而那句
 // 話是假的。
 
+/// 做完之後那張畫面上記著的東西。欄位對應 `frames` 那一列。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenAfter {
+    pub url: Option<String>,
+    pub window_title: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenField {
+    Url,
+    WindowTitle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "cannot_tell", rename_all = "snake_case")]
+pub enum CannotTell {
+    /// 那張畫面上這一欄沒有可以比的值——沒記到，或記到的東西抽不出網站名。
+    NothingOnScreen { field: ScreenField },
+    /// 這一步的目標本身抽不出可以比的值。
+    NothingInTheAsk,
+    /// 這一列是 alpha.94 以前寫的；那幾版根本沒有比過。
+    NotChecked,
+}
+
+/// 做完之後那張畫面，和這一步「該變成的樣子」對不對得上。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "target_on_screen", rename_all = "snake_case")]
+pub enum TargetOnScreen {
+    Matched {
+        field: ScreenField,
+        saw: String,
+    },
+    Mismatched {
+        field: ScreenField,
+        saw: String,
+        wanted: String,
+    },
+    CannotTell {
+        why: CannotTell,
+    },
+}
+
+impl Default for TargetOnScreen {
+    fn default() -> Self {
+        Self::CannotTell {
+            why: CannotTell::NotChecked,
+        }
+    }
+}
+
 /// 一步做完後實際查到的畫面狀態。
 ///
 /// `ActionEvent::StepFinished::evidence` 外面的 `Option` 留給舊版紀錄：`None`
@@ -463,6 +514,8 @@ pub enum StepEvidence {
         frame_id: i64,
         frame_at_ms: i64,
         has_image: bool,
+        #[serde(default)]
+        target: TargetOnScreen,
     },
     Before {
         frame_id: i64,
@@ -529,18 +582,38 @@ impl StepEvidence {
                 frame_id,
                 frame_at_ms,
                 has_image,
+                target,
             } => {
-                if *has_image {
+                let frame = if *has_image {
                     format!(
-                        "做完之後的畫面憑據是 frame #{frame_id}（{}），圖在。",
+                        "做完之後的畫面憑據是 frame #{frame_id}（{}），圖在",
                         at(*frame_at_ms)
                     )
                 } else {
                     format!(
-                        "做完之後有 frame #{frame_id}（{}）這一列，但沒有截圖；紀錄在，圖不在。",
+                        "做完之後有 frame #{frame_id}（{}）這一列，但沒有截圖；紀錄在，圖不在",
                         at(*frame_at_ms)
                     )
-                }
+                };
+                let ending = match target {
+                    TargetOnScreen::Matched { field: ScreenField::Url, saw } =>
+                        format!("，而且那張畫面的網址就在 {saw} 上。"),
+                    TargetOnScreen::Matched { field: ScreenField::WindowTitle, saw } =>
+                        format!("，而且那張畫面的視窗標題是「{saw}」。"),
+                    TargetOnScreen::Mismatched { field: ScreenField::Url, saw, wanted } =>
+                        format!("，但那張畫面的網址在 {saw} 上，不是你要開的 {wanted}——這一步有沒有真的做到，她沒有把握。"),
+                    TargetOnScreen::Mismatched { field: ScreenField::WindowTitle, saw, wanted } =>
+                        format!("，但那張畫面的視窗標題是「{saw}」，裡面沒有「{wanted}」——這一步有沒有真的做到，她沒有把握。"),
+                    TargetOnScreen::CannotTell { why: CannotTell::NothingOnScreen { field: ScreenField::Url } } =>
+                        "。這台機器沒有記下那張畫面的網址，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
+                    TargetOnScreen::CannotTell { why: CannotTell::NothingOnScreen { field: ScreenField::WindowTitle } } =>
+                        "。這台機器沒有記下那張畫面的視窗標題，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
+                    TargetOnScreen::CannotTell { why: CannotTell::NothingInTheAsk } =>
+                        "。這一步的目標沒有可以拿去跟畫面比的東西，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
+                    TargetOnScreen::CannotTell { why: CannotTell::NotChecked } =>
+                        "。這一列是舊版寫的，那幾版沒有比對過畫面上真的變成什麼。".to_string(),
+                };
+                format!("{frame}{ending}")
             }
             Self::Before {
                 frame_id,
@@ -898,6 +971,7 @@ mod provenance_tests {
                 frame_id: 7,
                 frame_at_ms: ms,
                 has_image: true,
+                target: Default::default(),
             },
             StepEvidence::Before {
                 frame_id: 7,

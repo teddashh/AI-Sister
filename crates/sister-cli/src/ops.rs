@@ -1967,8 +1967,8 @@ pub mod act {
     use sister_hands::commitment_action::AllowedNextStep;
     use sister_hands::semi_action::{
         AbortActor, ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, GrantRejection,
-        NotRecordingReason, PresentedStep, RunConclusion, RunConclusionRecord, SemiActionRun,
-        StepEvidence, StepLimit, StepRequest, StepWait, Task, execute_approved_step,
+        NotRecordingReason, PresentedStep, RunConclusion, RunConclusionRecord, ScreenAfter,
+        SemiActionRun, StepEvidence, StepLimit, StepRequest, StepWait, Task, execute_approved_step,
     };
     use sister_hands::{ActionEvent, ActionLog, ExecutionResult, Outcome, RefusalReason};
     use std::collections::BTreeSet;
@@ -2501,6 +2501,7 @@ pub mod act {
     fn step_evidence(
         data_dir: &Path,
         source: &impl StepSource,
+        action: &sister_hands::ActionSnapshot,
         at_ms: i64,
         sleep: &mut dyn FnMut(u64),
     ) -> Result<StepEvidence> {
@@ -2531,6 +2532,13 @@ pub mod act {
                 frame_id: frame.id,
                 frame_at_ms: frame.ts,
                 has_image: frame.image_path.is_some(),
+                target: sister_core::screen_check::target_on_screen(
+                    action,
+                    &ScreenAfter {
+                        url: frame.url,
+                        window_title: frame.window_title,
+                    },
+                ),
             },
             Some(frame) => StepEvidence::Before {
                 frame_id: frame.id,
@@ -3183,7 +3191,7 @@ pub mod act {
                     // `StepLimitReached` 的欄位叫 `completed_steps`：一次交出去但失敗
                     // 的嘗試不是完成的步驟，因此 Failed 不消耗這版的步數預算。
                     let finished_at = clock();
-                    let evidence = step_evidence(data_dir, source, finished_at, sleep)?;
+                    let evidence = step_evidence(data_dir, source, &action, finished_at, sleep)?;
                     let finished = run
                         .finish_step(finished_at, action, Some(evidence))
                         .map_err(|conclusion| anyhow::anyhow!(conclusion.message()))?;
@@ -4856,9 +4864,14 @@ pub mod act {
             let dir = crate::ops::tmp::Tmp::new("act-step-evidence");
             let at = 10_000;
             let mut sleeps = Vec::new();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com".into(),
+            };
 
             assert_eq!(
-                step_evidence(&dir.0, &Source::default(), at, &mut |ms| sleeps.push(ms)).unwrap(),
+                step_evidence(&dir.0, &Source::default(), &action, at, &mut |ms| sleeps
+                    .push(ms))
+                .unwrap(),
                 StepEvidence::NotRecording {
                     reason: NotRecordingReason::NeverStarted
                 }
@@ -4866,7 +4879,7 @@ pub mod act {
             assert!(sleeps.is_empty(), "她沒在錄的時候一次都不可以睡");
             sister_core::heartbeat::beat(&dir.0, at).unwrap();
             assert_eq!(
-                step_evidence(&dir.0, &Source::default(), at, &mut |_| {}).unwrap(),
+                step_evidence(&dir.0, &Source::default(), &action, at, &mut |_| {}).unwrap(),
                 StepEvidence::NoFrameNearby {
                     wait: StepWait::Waited { ms: 2_000 }
                 }
@@ -4877,21 +4890,40 @@ pub mod act {
                     id: 7,
                     ts,
                     image_path: image_path.map(str::to_owned),
+                    window_title: None,
+                    url: None,
                 }),
                 ..Source::default()
             };
             assert_eq!(
-                step_evidence(&dir.0, &source(10_100, Some("after.webp")), at, &mut |_| {})
-                    .unwrap(),
+                step_evidence(
+                    &dir.0,
+                    &source(10_100, Some("after.webp")),
+                    &action,
+                    at,
+                    &mut |_| {}
+                )
+                .unwrap(),
                 StepEvidence::After {
                     frame_id: 7,
                     frame_at_ms: 10_100,
-                    has_image: true
+                    has_image: true,
+                    target: sister_hands::semi_action::TargetOnScreen::CannotTell {
+                        why: sister_hands::semi_action::CannotTell::NothingOnScreen {
+                            field: sister_hands::semi_action::ScreenField::Url,
+                        },
+                    }
                 }
             );
             assert_eq!(
-                step_evidence(&dir.0, &source(9_900, Some("before.webp")), at, &mut |_| {})
-                    .unwrap(),
+                step_evidence(
+                    &dir.0,
+                    &source(9_900, Some("before.webp")),
+                    &action,
+                    at,
+                    &mut |_| {}
+                )
+                .unwrap(),
                 StepEvidence::Before {
                     frame_id: 7,
                     frame_at_ms: 9_900,
@@ -4901,15 +4933,20 @@ pub mod act {
                 }
             );
             assert_eq!(
-                step_evidence(&dir.0, &source(10_100, None), at, &mut |_| {}).unwrap(),
+                step_evidence(&dir.0, &source(10_100, None), &action, at, &mut |_| {}).unwrap(),
                 StepEvidence::After {
                     frame_id: 7,
                     frame_at_ms: 10_100,
-                    has_image: false
+                    has_image: false,
+                    target: sister_hands::semi_action::TargetOnScreen::CannotTell {
+                        why: sister_hands::semi_action::CannotTell::NothingOnScreen {
+                            field: sister_hands::semi_action::ScreenField::Url,
+                        },
+                    }
                 }
             );
             assert_eq!(
-                step_evidence(&dir.0, &source(9_900, None), at, &mut |_| {}).unwrap(),
+                step_evidence(&dir.0, &source(9_900, None), &action, at, &mut |_| {}).unwrap(),
                 StepEvidence::Before {
                     frame_id: 7,
                     frame_at_ms: 9_900,
@@ -4990,6 +5027,8 @@ pub mod act {
                         id: 8,
                         ts: 10_300,
                         image_path: Some("after.webp".into()),
+                        window_title: None,
+                        url: None,
                     }))
                 }
             }
@@ -5000,12 +5039,20 @@ pub mod act {
                 calls: std::cell::Cell::new(0),
             };
             let mut sleeps = Vec::new();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com".into(),
+            };
             assert_eq!(
-                step_evidence(&dir.0, &source, at, &mut |ms| sleeps.push(ms)).unwrap(),
+                step_evidence(&dir.0, &source, &action, at, &mut |ms| sleeps.push(ms)).unwrap(),
                 StepEvidence::After {
                     frame_id: 8,
                     frame_at_ms: 10_300,
-                    has_image: true
+                    has_image: true,
+                    target: sister_hands::semi_action::TargetOnScreen::CannotTell {
+                        why: sister_hands::semi_action::CannotTell::NothingOnScreen {
+                            field: sister_hands::semi_action::ScreenField::Url,
+                        },
+                    }
                 }
             );
             assert_eq!(sleeps, vec![250, 250], "一等到就要立刻回來");
@@ -5017,6 +5064,8 @@ pub mod act {
                     id: 7,
                     ts: 9_900,
                     image_path: Some("before.webp".into()),
+                    window_title: None,
+                    url: None,
                 }),
                 ..Source::default()
             }
@@ -5026,7 +5075,11 @@ pub mod act {
         fn unreadable_heartbeat_and_a_before_frame_say_the_result_is_uncertain() {
             let dir = crate::ops::tmp::Tmp::new("act-step-evidence-unreadable");
             std::fs::write(sister_core::heartbeat::beat_path(&dir.0), "not json at all").unwrap();
-            let evidence = step_evidence(&dir.0, &before_frame(), 10_000, &mut |_| {}).unwrap();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com".into(),
+            };
+            let evidence =
+                step_evidence(&dir.0, &before_frame(), &action, 10_000, &mut |_| {}).unwrap();
             let message = evidence.message();
             assert!(matches!(
                 evidence,
@@ -5045,7 +5098,11 @@ pub mod act {
         fn stopped_heartbeat_and_a_before_frame_keep_the_stopped_reason() {
             let dir = crate::ops::tmp::Tmp::new("act-step-evidence-stopped");
             sister_core::heartbeat::stop(&dir.0, 9_000);
-            let evidence = step_evidence(&dir.0, &before_frame(), 10_000, &mut |_| {}).unwrap();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com".into(),
+            };
+            let evidence =
+                step_evidence(&dir.0, &before_frame(), &action, 10_000, &mut |_| {}).unwrap();
             let message = evidence.message();
             assert!(matches!(
                 evidence,

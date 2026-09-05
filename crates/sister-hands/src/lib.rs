@@ -1490,6 +1490,7 @@ mod tests {
                 frame_id: 4,
                 frame_at_ms: 11,
                 has_image: true,
+                target: Default::default(),
             }),
         };
         let value = serde_json::to_value(&event).unwrap();

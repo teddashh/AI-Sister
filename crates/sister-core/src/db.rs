@@ -4151,7 +4151,7 @@ impl Db {
     ) -> Result<Option<StepFrameRow>> {
         self.conn
             .query_row(
-                "SELECT id, ts, image_path FROM frames
+                "SELECT id, ts, image_path, window_title, url FROM frames
                  WHERE ts >= ?1 AND ts <= ?2
                  ORDER BY CASE WHEN ts >= ?3 THEN ts - ?3 ELSE ?3 - ts END,
                           CASE WHEN ts >= ?3 THEN 0 ELSE 1 END,
@@ -4163,6 +4163,8 @@ impl Db {
                         id: row.get(0)?,
                         ts: row.get(1)?,
                         image_path: row.get(2)?,
+                        window_title: row.get(3)?,
+                        url: row.get(4)?,
                     })
                 },
             )
@@ -7514,12 +7516,14 @@ pub struct FrameContext {
     pub height: i64,
 }
 
-/// `sister do` 在一步結束時只需要知道最近 frame 的這三格。
+/// `sister do` 在一步結束時需要知道最近 frame 的憑據與畫面目標欄位。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepFrameRow {
     pub id: i64,
     pub ts: Millis,
     pub image_path: Option<String>,
+    pub window_title: Option<String>,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

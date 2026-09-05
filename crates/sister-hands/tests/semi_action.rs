@@ -360,6 +360,7 @@ fn every_step_log_distinguishes_legacy_unchecked_from_checked_evidence() {
             frame_id: 42,
             frame_at_ms: 10,
             has_image: true,
+            target: Default::default(),
         }),
     };
     let json = serde_json::to_string(&with).unwrap();
