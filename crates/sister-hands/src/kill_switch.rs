@@ -103,14 +103,242 @@ pub fn pulled_since(data_dir: &Path) -> Option<i64> {
         .ok()
 }
 
-pub fn tray_label(data_dir: &Path) -> String {
+/// 寫不下那個旗標的原因。粒度只有兩格，因為他做得出來的下一步只有兩種。
+///
+/// **這裡刻意不含 `io::Error` 的原文。** 這幾個字會被拼進一句出現在中文介面
+/// 上的話，而 `io::Error::to_string()` 是英文的——資料目錄的位置上放著一個
+/// 檔案時實測拿到的是 `File exists (os error 17)`，那串字對按下熱鍵的人沒有
+/// 任何用處。原文走 [`HandsHotkeyOutcome::NotWritten::os_error`]，只進 log。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhyNotWritten {
+    /// 這個行程問不出資料目錄在哪。
+    NoDataDir,
+    /// 資料目錄寫不進去：權限、唯讀、被別的程式鎖著、或者那條路上根本不是
+    /// 一個資料夾。
+    CannotWrite,
+}
+
+impl WhyNotWritten {
+    /// 拼進句子裡的那一段。後面會接「，⋯⋯」，所以這裡不帶標點。
+    pub fn zh(self) -> &'static str {
+        match self {
+            Self::NoDataDir => "問不出資料目錄在哪",
+            Self::CannotWrite => "資料目錄寫不進去",
+        }
+    }
+}
+
+/// 系統匣切換失敗時給中文介面的句子。作業系統原文應另外留在 log。
+pub fn tray_hands_failure_message(why: WhyNotWritten) -> String {
+    format!("拔手開關失敗：{}。", why.zh())
+}
+
+/// 按下拔手熱鍵之後，真的發生了什麼。
+///
+/// 分這幾格是因為使用者的下一步不一樣，而不是因為好看。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandsHotkeyOutcome {
+    /// 這一下真的把手拔掉了。
+    Pulled { at_ms: i64 },
+    /// 本來就拔著；時間是第一次拔的時間。
+    AlreadyPulled { since_ms: Option<i64> },
+    /// 那個旗標**沒有**被寫下來。
+    NotWritten {
+        why: WhyNotWritten,
+        /// 寫失敗之後**再問一次** [`is_pulled`] 的答案。
+        ///
+        /// **「寫成功了沒」和「她會不會動」是兩個問題，而且答案會相反。**
+        /// 交出去之前的最後一刻問的是 [`is_pulled`]（`platform.rs`），而它
+        /// 是 fail-closed 的：資料目錄的位置上放著一個檔案的時候 `pull` 一定
+        /// 失敗，`is_pulled` 卻回 `true`，她一個動作都交不出去。那一格說
+        /// 「她的手還接著」是假話，而且錯在最貴的方向——他會跑去做一件已經
+        /// 不必做的事，同時以為自己還在危險裡。
+        stopped: bool,
+        /// 作業系統的原文。**只給 log，永遠不要拼進句子。** 見 [`WhyNotWritten`]。
+        os_error: Option<String>,
+    },
+}
+
+pub fn press_hands_hotkey(data_dir: Option<&Path>, at_ms: i64) -> HandsHotkeyOutcome {
+    let Some(data_dir) = data_dir else {
+        return HandsHotkeyOutcome::NotWritten {
+            why: WhyNotWritten::NoDataDir,
+            // 沒有路徑就沒有東西可以問 `is_pulled`。倒向「她還會動」，因為那
+            // 是要他再去做一件事的方向；把沒停說成停了，是這顆鍵唯一不能犯
+            // 的錯。
+            stopped: false,
+            os_error: None,
+        };
+    };
+    match pull(data_dir, at_ms) {
+        Ok(true) => HandsHotkeyOutcome::Pulled { at_ms },
+        Ok(false) => HandsHotkeyOutcome::AlreadyPulled {
+            since_ms: pulled_since(data_dir),
+        },
+        Err(error) => HandsHotkeyOutcome::NotWritten {
+            why: WhyNotWritten::CannotWrite,
+            stopped: is_pulled(data_dir),
+            os_error: Some(error.to_string()),
+        },
+    }
+}
+
+/// 按完之後對他說的那一句。
+pub fn hands_hotkey_message(outcome: &HandsHotkeyOutcome) -> String {
+    match outcome {
+        HandsHotkeyOutcome::Pulled { .. } => "手拔掉了。她現在什麼都不會交給作業系統。".into(),
+        HandsHotkeyOutcome::AlreadyPulled { since_ms: Some(t) } => {
+            format!("手本來就是拔著的（從 {} 起）。", crate::replay_copy::at(*t))
+        }
+        HandsHotkeyOutcome::AlreadyPulled { since_ms: None } => {
+            "手本來就是拔著的（拔手時間讀不到）。".into()
+        }
+        // 沒寫成，可是她照樣停著。不講那個開關的人會以為自己白按了一下。
+        HandsHotkeyOutcome::NotWritten {
+            why, stopped: true, ..
+        } => format!(
+            "{}，那個開關沒寫下來。不過她現在讀到的狀態就是「拔著」，一樣什麼都不會交給作業系統。",
+            why.zh()
+        ),
+        HandsHotkeyOutcome::NotWritten {
+            why: WhyNotWritten::NoDataDir,
+            stopped: false,
+            ..
+        } => "問不出資料目錄在哪，沒能拔掉。她的手還接著——在終端機打 `sister hands stop`。".into(),
+        HandsHotkeyOutcome::NotWritten {
+            why: WhyNotWritten::CannotWrite,
+            stopped: false,
+            ..
+        } => "資料目錄寫不進去，沒能拔掉。她的手還接著。系統匣和 `sister hands stop` 也會撞上同一道牆；修好資料夾權限，或直接把她關掉。".into(),
+    }
+}
+
+/// 這一輪要真的去搶哪幾組。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotkeyPlan {
+    pub pause: Option<String>,
+    pub hands: Option<String>,
+    pub collided: Option<String>,
+}
+
+/// 設定頁換暫停熱鍵後，桌面接線層該走的路。
+///
+/// 這支純函式和它的八格測試守的是**分流規則**。`main.rs` 把每一臂接到註冊、
+/// 寫檔或還原的那層仍沒有執行覆蓋；例如把 `RestoreCollision` 那臂接成一般的
+/// `RestoreRejected`，這裡的測試不會紅。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeySetAction {
+    Persist,
+    RestoreCollision,
+    RestoreRejected,
+}
+
+pub fn hotkey_set_action(
+    hands_collided: bool,
+    registered: bool,
+    wanted_is_empty: bool,
+) -> HotkeySetAction {
+    if hands_collided {
+        HotkeySetAction::RestoreCollision
+    } else if registered || wanted_is_empty {
+        HotkeySetAction::Persist
+    } else {
+        HotkeySetAction::RestoreRejected
+    }
+}
+
+/// 排兩顆熱鍵；拔手撞號時優先，因為暫停仍可從系統匣操作。
+///
+/// 相等判定直接使用實際負責註冊的 `global-hotkey` 解析器，涵蓋它接受的修飾鍵、
+/// 主鍵與別名形狀。**解析不出來的時候退回逐字比較，不宣稱撞號**——理由見
+/// [`hotkeys_collide`]。
+/// 接線層另把拔手排在暫停前註冊；即使這裡未辨認出撞號，安全鍵仍先拿到組合。
+pub fn plan_hotkeys(pause: &str, hands: &str) -> HotkeyPlan {
+    let pause = nonempty(pause);
+    let hands = nonempty(hands);
+    if matches!((&pause, &hands), (Some(p), Some(h)) if hotkeys_collide(p, h)) {
+        return HotkeyPlan {
+            pause: None,
+            hands: hands.clone(),
+            collided: hands,
+        };
+    }
+    HotkeyPlan {
+        pause,
+        hands,
+        collided: None,
+    }
+}
+
+fn hotkeys_collide(left: &str, right: &str) -> bool {
+    use std::str::FromStr;
+    match (
+        global_hotkey::hotkey::HotKey::from_str(left),
+        global_hotkey::hotkey::HotKey::from_str(right),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        // 解析不出來的時候**不要**宣稱撞號，退回逐字比較。
+        //
+        // `parse_key` 是一張寫死的表（`global-hotkey-0.8.0/src/hotkey.rs:232` 起）。
+        // `e.code` 生得出來、而那張表不認得的名字至少有 `ContextMenu`（一般 PC
+        // 鍵盤上的選單鍵）、`IntlBackslash`、`IntlRo`、`IntlYen`、`Convert`、
+        // `NonConvert`、`KanaMode`、`Lang1`／`Lang2`；手改 `config.toml` 打錯一個
+        // 字更是一定不認得。
+        //
+        // 回 `true` 的代價是**淨損失**，實測過：`hands_stop_shortcut` 只要解析不
+        // 出來，`plan_hotkeys` 就把 `pause` 收成 `None`，於是他那顆本來按得動的
+        // 暫停鍵被拆掉，而畫面說「撞號」——一句假話換掉一顆能用的鍵，而那顆拔手
+        // 鍵反正也註冊不了（同一張表拒絕它）。
+        //
+        // 也不必怕漏判：認不出來的撞號由**註冊順序**兜底（`apply_hotkey` 先註冊
+        // 拔手），第二次註冊拿到 `AlreadyRegistered` 的一定是暫停，也就是那顆還能
+        // 從系統匣按的。所以這裡退回逐字比較就夠——兩串一模一樣的壞字串仍算撞號。
+        // 不用再 `trim()`：唯一的呼叫端 `plan_hotkeys` 先過 `nonempty()`，那支
+        // 就是 trim 完才判空的。在這裡再 trim 一次會讓人以為這支函式自己防著
+        // 空白，而它其實沒有被單獨呼叫過。
+        _ => left.eq_ignore_ascii_case(right),
+    }
+}
+
+/// 問不出資料目錄時的兩顆系統匣動作；只描述動作，不假稱目前狀態。
+pub fn tray_hands_unknown_labels() -> (String, String) {
+    ("拔掉她的手".into(), "把手接回去".into())
+}
+
+fn nonempty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// 系統匣「拔掉她的手」那一顆的字。
+pub fn tray_hands_stop_label(data_dir: &Path) -> String {
     if !is_pulled(data_dir) {
         return "拔掉她的手".into();
     }
     match pulled_since(data_dir) {
-        Some(since) => format!("把手接回去（從 {} 拔的）", crate::replay_copy::at(since)),
-        None => "把手接回去（拔手時間讀不到）".into(),
+        Some(t) => format!(
+            "拔掉她的手（已經拔了，從 {} 起）",
+            crate::replay_copy::at(t)
+        ),
+        None => "拔掉她的手（已經拔了）".into(),
     }
+}
+
+/// 系統匣「把手接回去」那一顆的字。
+pub fn tray_hands_resume_label(data_dir: &Path) -> String {
+    if is_pulled(data_dir) {
+        "把手接回去".into()
+    } else {
+        "把手接回去（現在沒拔）".into()
+    }
+}
+
+/// 系統匣兩顆拔手按鈕各自拿到的字；順序固定為「拔掉、接回」。
+pub fn tray_hands_labels(data_dir: &Path) -> (String, String) {
+    (
+        tray_hands_stop_label(data_dir),
+        tray_hands_resume_label(data_dir),
+    )
 }
 
 #[cfg(test)]
@@ -204,5 +432,492 @@ mod tests {
         pull(&tmp.0, 1000).unwrap();
         assert!(release(&tmp.0).unwrap());
         assert!(!release(&tmp.0).unwrap());
+    }
+
+    #[test]
+    fn hotkey_pulls_a_clean_directory() {
+        let tmp = Tmp::new("hotkey-pull");
+        assert_eq!(
+            press_hands_hotkey(Some(&tmp.0), 123),
+            HandsHotkeyOutcome::Pulled { at_ms: 123 }
+        );
+        assert!(is_pulled(&tmp.0));
+    }
+
+    #[test]
+    fn hotkey_twice_preserves_the_first_timestamp() {
+        let tmp = Tmp::new("hotkey-twice");
+        press_hands_hotkey(Some(&tmp.0), 123);
+        assert_eq!(
+            press_hands_hotkey(Some(&tmp.0), 999),
+            HandsHotkeyOutcome::AlreadyPulled {
+                since_ms: Some(123)
+            }
+        );
+    }
+
+    #[test]
+    fn hotkey_without_data_dir_writes_nothing() {
+        let tmp = Tmp::new("hotkey-none");
+        let before = std::fs::read_dir(&tmp.0).unwrap().count();
+        assert_eq!(
+            press_hands_hotkey(None, 123),
+            HandsHotkeyOutcome::NotWritten {
+                why: WhyNotWritten::NoDataDir,
+                stopped: false,
+                os_error: None,
+            }
+        );
+        assert_eq!(std::fs::read_dir(&tmp.0).unwrap().count(), before);
+    }
+
+    /// 資料目錄的位置上放著一個**檔案**：`pull` 一定失敗，而 `is_pulled` 對
+    /// 那一格是 fail-closed 的。
+    ///
+    /// **這一條的重點是那兩個斷言擺在一起。** 這個測試的前一版只斷言了
+    /// 「回的是失敗那一格」和 `is_pulled` 為真——兩句都對，可是它們湊起來
+    /// 說的是「寫失敗了，而她已經停了」，而當時的句子寫著「她的手還接著」。
+    /// 所以現在把 `stopped` 一起釘住：它是**同一件事**的唯一權威。
+    #[test]
+    fn a_data_dir_that_is_a_file_cannot_be_written_but_still_stops_her() {
+        let tmp = Tmp::new("hotkey-failed");
+        std::fs::remove_dir_all(&tmp.0).unwrap();
+        std::fs::write(&tmp.0, "file").unwrap();
+        let outcome = press_hands_hotkey(Some(&tmp.0), 123);
+        assert!(
+            matches!(
+                &outcome,
+                HandsHotkeyOutcome::NotWritten {
+                    why: WhyNotWritten::CannotWrite,
+                    stopped: true,
+                    os_error: Some(_),
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert!(is_pulled(&tmp.0), "fail-closed 那一格不成立了，前提變了");
+        let _ = std::fs::remove_file(&tmp.0);
+    }
+
+    /// 作業系統的原文**不可以**出現在那句話裡。
+    ///
+    /// `io::Error::to_string()` 是英文的（上面那一格實測是
+    /// `File exists (os error 17)`），而這句話會被畫在中文介面上。
+    #[test]
+    fn the_sentence_never_carries_the_operating_systems_own_words() {
+        for stopped in [true, false] {
+            let says = hands_hotkey_message(&HandsHotkeyOutcome::NotWritten {
+                why: WhyNotWritten::CannotWrite,
+                stopped,
+                os_error: Some("File exists (os error 17)".into()),
+            });
+            assert!(
+                !says.contains("os error") && !says.contains("File exists"),
+                "作業系統的原文漏進中文句子了（stopped={stopped}）：{says}"
+            );
+        }
+    }
+
+    #[test]
+    fn pulled_hotkey_message_claims_the_completed_fact() {
+        assert_eq!(
+            hands_hotkey_message(&HandsHotkeyOutcome::Pulled { at_ms: 1 }),
+            "手拔掉了。她現在什麼都不會交給作業系統。"
+        );
+    }
+
+    #[test]
+    fn already_pulled_hotkey_message_keeps_the_first_time() {
+        assert_eq!(
+            hands_hotkey_message(&HandsHotkeyOutcome::AlreadyPulled { since_ms: Some(1) }),
+            format!("手本來就是拔著的（從 {} 起）。", crate::replay_copy::at(1))
+        );
+    }
+
+    #[test]
+    fn already_pulled_hotkey_message_admits_an_unreadable_time() {
+        assert_eq!(
+            hands_hotkey_message(&HandsHotkeyOutcome::AlreadyPulled { since_ms: None }),
+            "手本來就是拔著的（拔手時間讀不到）。"
+        );
+    }
+
+    #[test]
+    fn no_data_dir_message_says_the_hands_are_still_attached() {
+        let message = hands_hotkey_message(&HandsHotkeyOutcome::NotWritten {
+            why: WhyNotWritten::NoDataDir,
+            stopped: false,
+            os_error: None,
+        });
+        assert!(message.contains("還接著"), "{message}");
+        assert!(!message.contains("拔掉了。"), "{message}");
+        assert!(message.contains("問不出資料目錄在哪"), "{message}");
+    }
+
+    #[test]
+    fn write_failure_message_says_the_hands_are_still_attached() {
+        let message = hands_hotkey_message(&HandsHotkeyOutcome::NotWritten {
+            why: WhyNotWritten::CannotWrite,
+            stopped: false,
+            os_error: Some("磁碟滿".into()),
+        });
+        assert!(message.contains("還接著"), "{message}");
+        assert!(!message.contains("拔掉了。"), "{message}");
+        assert!(message.contains("資料目錄寫不進去"), "{message}");
+        assert!(message.contains("修好資料夾權限"), "{message}");
+    }
+
+    /// 同一個 `why`，`stopped` 兩邊要說**相反**的事。
+    ///
+    /// 只驗一邊的話，把 `stopped` 整個忽略掉（兩臂共用一句）也是綠的——而
+    /// 那正是這一輪修掉的那個 bug。
+    #[test]
+    fn the_two_halves_of_a_failed_write_do_not_share_a_sentence() {
+        let says = |stopped| {
+            hands_hotkey_message(&HandsHotkeyOutcome::NotWritten {
+                why: WhyNotWritten::CannotWrite,
+                stopped,
+                os_error: None,
+            })
+        };
+        let attached = says(false);
+        let stopped = says(true);
+        assert_ne!(attached, stopped, "兩臂講同一句話，`stopped` 等於沒人讀");
+        assert!(attached.contains("還接著"), "{attached}");
+        assert!(
+            !stopped.contains("還接著"),
+            "她已經停了，這句話還在說手接著：{stopped}"
+        );
+        assert!(
+            stopped.contains("什麼都不會交給作業系統"),
+            "沒告訴他「其實已經停了」，他會白跑一趟：{stopped}"
+        );
+        assert!(
+            stopped.contains("開關沒寫下來") && !stopped.contains("手拔掉了。"),
+            "寫入失敗不能借用真的寫成功那一句：{stopped}"
+        );
+    }
+
+    #[test]
+    fn hotkey_plan_handles_enabled_and_disabled_sides() {
+        assert_eq!(
+            plan_hotkeys("P", "H"),
+            HotkeyPlan {
+                pause: Some("P".into()),
+                hands: Some("H".into()),
+                collided: None
+            }
+        );
+        assert_eq!(
+            plan_hotkeys("P", ""),
+            HotkeyPlan {
+                pause: Some("P".into()),
+                hands: None,
+                collided: None
+            }
+        );
+        assert_eq!(
+            plan_hotkeys("", "H"),
+            HotkeyPlan {
+                pause: None,
+                hands: Some("H".into()),
+                collided: None
+            }
+        );
+        assert_eq!(
+            plan_hotkeys(" ", ""),
+            HotkeyPlan {
+                pause: None,
+                hands: None,
+                collided: None
+            }
+        );
+    }
+
+    #[test]
+    fn hotkey_plan_gives_collisions_to_hands_after_trimming() {
+        for (pause, hands) in [("P", "P"), (" P ", "P")] {
+            assert_eq!(
+                plan_hotkeys(pause, hands),
+                HotkeyPlan {
+                    pause: None,
+                    hands: Some("P".into()),
+                    collided: Some("P".into())
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn hotkey_plan_matches_the_products_two_written_shapes() {
+        assert!(
+            plan_hotkeys("Ctrl+Alt+KeyH", "Ctrl+Alt+H")
+                .collided
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn hotkey_parser_covers_registered_aliases() {
+        for (left, right) in [
+            ("KeyH", "H"),
+            ("Digit1", "1"),
+            ("Control+H", "Ctrl+H"),
+            ("CommandOrControl+Alt+H", "Ctrl+Alt+H"),
+            ("Option+Ctrl+H", "Alt+Ctrl+H"),
+            ("Ctrl+Alt+ArrowUp", "Ctrl+Alt+Up"),
+            ("alt+ctrl+keyh", "Ctrl+Alt+H"),
+            // 這兩列是**加回來的**：換掉手抄 normalizer 的時候，新語料把舊語料
+            // 整組換掉了，而 `Command`≡`Cmd`≡`Super`（global-hotkey 的
+            // `hotkey.rs:207-209`）就這樣掉在地上，全 repo 一條都沒剩。
+            // 換測試的時候要「加上」不要「換掉」——舊的那幾列原封不動跑一次，
+            // 綠就是白刪的。
+            ("Command+H", "Super+H"),
+            ("Cmd+H", "Super+H"),
+        ] {
+            assert!(hotkeys_collide(left, right), "{left} / {right}");
+        }
+    }
+
+    /// 四顆修飾鍵不可以共用同一格。
+    ///
+    /// 上面那條語料**全是別名等式**（`KeyH`＝`H`、`Control`＝`Ctrl`…），而等式
+    /// 對「有沒有把兩個不同的修飾鍵併在一起」是瞎的：把 `"COMMAND" | "CMD" |
+    /// "SUPER"` 那一臂寫成 `modifiers[0] = true`（併進 CTRL），六對等式仍然全綠。
+    /// 而 `Super+Alt+H` 從此會被判成和 `Ctrl+Alt+H` 撞號——他的暫停熱鍵一聲不響
+    /// 地不註冊，設定頁只說「撞號了」，那是一句假話。
+    ///
+    /// 四取二全跑，一格都不留。
+    #[test]
+    fn the_four_modifiers_never_share_a_bucket() {
+        let each = ["Ctrl+H", "Alt+H", "Shift+H", "Super+H"];
+        for (i, a) in each.iter().enumerate() {
+            for b in &each[i + 1..] {
+                assert_eq!(
+                    plan_hotkeys(a, b).collided,
+                    None,
+                    "{a} 和 {b} 按下去是兩件事，不是撞號"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn modifier_aliases_do_not_create_false_collisions() {
+        for (pause, hands) in [
+            ("Alt+H", "CommandOrControl+Alt+H"),
+            ("Ctrl+H", "Option+Ctrl+H"),
+        ] {
+            assert_eq!(plan_hotkeys(pause, hands).collided, None);
+        }
+    }
+
+    /// 解析不出來的那顆鍵，不可以連累另一顆本來按得動的。
+    ///
+    /// `global-hotkey` 的 `parse_key` 是一張寫死的表，`e.code` 生得出來的
+    /// `ContextMenu`／`IntlBackslash`／`Convert`／`Lang1` 它都不認得，手改
+    /// `config.toml` 打錯字也一樣。這裡曾經回 `true`（不確定就當撞號），
+    /// 於是 `hands_stop_shortcut` 打錯一個字就把**暫停鍵**收成 `None`：
+    /// 一顆能用的鍵被拆掉，畫面還說「撞號」。
+    ///
+    /// 漏判的那一半由註冊順序兜底（拔手先註冊），所以這裡寧可不宣稱。
+    #[test]
+    fn an_unparseable_key_does_not_drag_the_other_one_down() {
+        for (pause, hands) in [
+            ("Ctrl+Alt+H", "Ctrl+Alt+ContextMenu"),
+            ("Ctrl+Alt+H", "Ctrl+Alt+IntlBackslash"),
+            ("Ctrl+Alt+H", "Ctrl+Alt+Hh"),
+            ("Ctrl+Alt+ContextMenu", "Ctrl+Alt+H"),
+        ] {
+            // 先把前提釘住。少了這一句，這條測試的斷言（`collided == None`）和
+            // 「兩顆解析得出來的不同鍵」長得一模一樣——`ContextMenu` 哪天被加進
+            // global-hotkey 的表裡（或我手滑改成 `Ctrl+Alt+J`），它會安靜地變成
+            // 隔壁那條測試的複本，而斷言訊息還在說它守著 fallback 那一臂。
+            use std::str::FromStr;
+            assert!(
+                global_hotkey::hotkey::HotKey::from_str(pause).is_err()
+                    || global_hotkey::hotkey::HotKey::from_str(hands).is_err(),
+                "{pause}／{hands} 兩邊都解析得出來，這一條已經不在守 fallback 那一臂了。"
+            );
+            let plan = plan_hotkeys(pause, hands);
+            assert_eq!(
+                plan.collided, None,
+                "{pause} 和 {hands} 不是同一顆鍵，只是其中一邊 global-hotkey 解析\
+                 不了。宣稱撞號會把暫停鍵收掉，而那句「撞號」是假的。"
+            );
+            assert!(
+                plan.pause.is_some(),
+                "{pause} 本來按得動，不可以因為 {hands} 打錯字就被拆掉。"
+            );
+        }
+    }
+
+    /// 反方向：兩串一模一樣的壞字串，仍然是撞號。
+    #[test]
+    fn two_identical_unparseable_strings_still_collide() {
+        use std::str::FromStr;
+        assert!(
+            global_hotkey::hotkey::HotKey::from_str("Ctrl+Alt+Hh").is_err(),
+            "`Ctrl+Alt+Hh` 變成解析得出來的了，這一條已經不在守 fallback 那一臂。"
+        );
+        let plan = plan_hotkeys("Ctrl+Alt+Hh", "ctrl+alt+hh");
+        assert!(
+            plan.collided.is_some(),
+            "逐字相同（大小寫不計）就是同一顆鍵，解析不出來也一樣。"
+        );
+        assert!(plan.hands.is_some(), "撞號的時候拔手要留下來。");
+    }
+
+    #[test]
+    fn hotkey_plan_keeps_different_keys_apart() {
+        assert_eq!(
+            plan_hotkeys("Ctrl+Alt+KeyH", "Ctrl+Alt+KeyJ").collided,
+            None
+        );
+    }
+
+    #[test]
+    fn tray_failure_sentence_never_carries_os_words() {
+        let says = tray_hands_failure_message(WhyNotWritten::CannotWrite);
+        assert_eq!(says, "拔手開關失敗：資料目錄寫不進去。");
+        assert!(!says.contains("File exists"));
+    }
+
+    /// 那句話要真的讀它拿到的理由。
+    ///
+    /// 上面那條只呼叫一次、參數寫死 `CannotWrite`，於是「這支函式有沒有真的讀
+    /// `why`」零覆蓋——在本體加一行 `let _ = why;` 再寫死一格，它照樣綠。而
+    /// `NoDataDir` 正是 `main.rs` 那個 `data_dir == None` 真的到得了的格子：
+    /// 挑錯格的話他會跑去改資料夾權限，而問題根本不在那裡，同時她的手還接著。
+    #[test]
+    fn the_tray_failure_sentence_reads_the_reason_it_was_given() {
+        for why in [WhyNotWritten::NoDataDir, WhyNotWritten::CannotWrite] {
+            let says = tray_hands_failure_message(why);
+            assert!(
+                says.contains(why.zh()),
+                "{why:?} 那一格要講它自己的理由，不可以借隔壁那一格的：{says}"
+            );
+        }
+        assert_ne!(
+            tray_hands_failure_message(WhyNotWritten::NoDataDir),
+            tray_hands_failure_message(WhyNotWritten::CannotWrite),
+            "兩格要講不一樣的話——他讀完要做的事不一樣。"
+        );
+    }
+
+    /// 問不出資料目錄的時候，那兩顆按鈕只准寫動作，不准宣稱狀態。
+    ///
+    /// 這一條是突變刀 S1 逼出來的：把這支函式的回傳值換成
+    /// `"把手接回去（現在沒拔）"`——也就是這一輪 §3 才修掉的那個 bug，原封不動
+    /// 搬到隔壁一個檔案——十二刀跑完**沒有任何一把尺紅**。
+    /// `scripts/check-hands-hotkey-says.py` 只掃 `main.rs`，而這支函式是這一輪
+    /// 新加的，在此之前零測試呼叫端。
+    ///
+    /// **不要把「沒有括號」讀成「這裡編碼了『不知道』」。** 我第一版的 doc 寫
+    /// 「那兩支都用一個括號補述狀態」——那是假的：`tray_hands_stop_label` 在
+    /// 「沒拔」時回的就是裸的「拔掉她的手」，`tray_hands_resume_label` 在
+    /// 「拔著」時回的就是裸的「把手接回去」。所以這兩顆的字和**已知狀態那一半**
+    /// 逐字相同。這條測試守的只是「不要多長出一句狀態宣稱」。
+    #[test]
+    fn the_unknown_labels_never_claim_a_state() {
+        let (stop, resume) = tray_hands_unknown_labels();
+
+        // 順序也要釘。四個被禁的字擋不住把 tuple 對調，而對調之後系統匣最上面
+        // 那顆會寫「把手接回去」——那本身就暗示現在是拔著的，正是這條測試自稱
+        // 在擋的東西。拿產品自己在已知狀態下吐的字當尺，不手抄。
+        let dir = Tmp::new("unknown-order");
+        assert_eq!(
+            stop,
+            tray_hands_stop_label(&dir.0),
+            "第 0 格是「拔掉」那一顆（拿沒拔的資料目錄當對照）。"
+        );
+        pull(&dir.0, 1).expect("pull");
+        assert_eq!(
+            resume,
+            tray_hands_resume_label(&dir.0),
+            "第 1 格是「接回」那一顆（拿拔著的資料目錄當對照）。"
+        );
+
+        for label in [&stop, &resume] {
+            assert!(
+                !label.contains('（'),
+                "問不出資料目錄＝她拔沒拔我們根本不知道，這一格不可以用括號補一\
+                 句狀態：{label}"
+            );
+            for claim in ["沒拔", "拔了", "已經"] {
+                assert!(
+                    !label.contains(claim),
+                    "「{claim}」是一句狀態宣稱，而這條路上沒有人知道狀態：{label}"
+                );
+            }
+        }
+        assert_ne!(stop, resume, "兩顆按鈕不可以長一樣，他得分得出按哪一顆。");
+    }
+
+    #[test]
+    fn hotkey_set_action_covers_every_boolean_input() {
+        use HotkeySetAction::{Persist, RestoreCollision, RestoreRejected};
+
+        let cases = [
+            ((false, false, false), RestoreRejected),
+            ((false, false, true), Persist),
+            ((false, true, false), Persist),
+            ((false, true, true), Persist),
+            ((true, false, false), RestoreCollision),
+            ((true, false, true), RestoreCollision),
+            ((true, true, false), RestoreCollision),
+            ((true, true, true), RestoreCollision),
+        ];
+        for ((collided, registered, empty), expected) in cases {
+            assert_eq!(
+                hotkey_set_action(collided, registered, empty),
+                expected,
+                "collided={collided}, registered={registered}, empty={empty}"
+            );
+        }
+    }
+
+    #[test]
+    fn tray_hands_labels_cover_attached_and_pulled_states() {
+        let tmp = Tmp::new("tray-labels");
+        assert_eq!(tray_hands_stop_label(&tmp.0), "拔掉她的手");
+        assert_eq!(tray_hands_resume_label(&tmp.0), "把手接回去（現在沒拔）");
+        pull(&tmp.0, 1).unwrap();
+        assert_eq!(
+            tray_hands_stop_label(&tmp.0),
+            format!(
+                "拔掉她的手（已經拔了，從 {} 起）",
+                crate::replay_copy::at(1)
+            )
+        );
+        assert_eq!(tray_hands_resume_label(&tmp.0), "把手接回去");
+        std::fs::write(switch_path(&tmp.0), "broken").unwrap();
+        assert_eq!(tray_hands_stop_label(&tmp.0), "拔掉她的手（已經拔了）");
+        assert_eq!(tray_hands_resume_label(&tmp.0), "把手接回去");
+        release(&tmp.0).unwrap();
+    }
+
+    #[test]
+    fn tray_hands_labels_are_stop_then_resume() {
+        let tmp = Tmp::new("tray-label-order");
+        let labels = tray_hands_labels(&tmp.0);
+        assert_eq!(labels.0, "拔掉她的手");
+        assert_eq!(labels.1, "把手接回去（現在沒拔）");
+    }
+
+    #[test]
+    fn pulled_tray_labels_keep_status_on_only_one_action() {
+        let tmp = Tmp::new("tray-distinct");
+        pull(&tmp.0, 1).unwrap();
+        let stop = tray_hands_stop_label(&tmp.0);
+        let resume = tray_hands_resume_label(&tmp.0);
+        assert_ne!(stop, resume);
+        assert_eq!(
+            [stop, resume]
+                .iter()
+                .filter(|s| s.contains("已經拔了"))
+                .count(),
+            1
+        );
     }
 }

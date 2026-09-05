@@ -538,9 +538,22 @@ capture 層本身就是 recorder。
   - **還缺**（拔手開關這一格）：行程外拔手開關已接上 CLI 與 tray：每個動作在交出去之前的最後一刻查；檢查和
     `ShellExecuteW` 之間仍有一個無法消除的窗口，已經交給作業系統的那一個追不回來。
     開關住在模型碰不到的 data dir，`sister do`
-    卡在等回答時也能從另一個終端機拔掉。快捷鍵仍未做。
-    **tray 那兩格沒有任何執行覆蓋**——CLI 這半有測試，字母人那半只證明得了編得過
-    （`check-windows.sh` 沒有 `cargo test`），要在真 Windows 上按一遍才算數。
+    卡在等回答時也能從另一個終端機拔掉。
+    **快捷鍵 alpha.96 做好了**：全域熱鍵按下去寫同一個旗標，設定頁多一節說搶到
+    沒搶到、撞號、關掉，七種結局七句話。同一版把撞號比對改成先正規化——設定頁
+    送出去的是 code 形狀（`Ctrl+Alt+KeyH`）、設定檔的出廠值是 key 形狀
+    （`Ctrl+Alt+H`），在此之前那兩串**不相等**，於是兩顆都送去註冊、後註冊的
+    拔手拿到 `AlreadyRegistered`，**安全鍵靜靜地死掉**。正規化只認產品自己生得
+    出來的那幾種形狀（`KeyX`／`DigitN`／`Control`／`Command`／`Cmd`／大小寫／
+    修飾鍵順序），不是 global-hotkey 的完整別名表；沒列到的（例如
+    `CmdOrCtrl`、`Option`）仍然漏，而漏掉的後果就是上面那一句。
+    **tray 那兩顆 handler 仍然沒有任何執行覆蓋**——標籤的**字**這一輪搬進
+    `sister_hands::kill_switch` 了（`tray_hands_labels` / `tray_hands_unknown_labels`
+    在 `crates/` 裡有測試），但 `main.rs` 那兩顆 handler 本身、以及熱鍵註冊那條
+    接線，守它的是 `scripts/check-hands-hotkey-says.py` 那支**原始碼形狀的針**，
+    不是行為證據（`apps/desktop` 是另一個 workspace，`cargo test --workspace`
+    一行都編不到它；`check-windows.sh` 也沒有 `cargo test`）。
+    要在真 Windows 上按一遍才算數。
     另外 alpha.75 修掉一個 Windows 專屬的 fail-open：`try_exists()` 對「祖先是
     檔案」的子路徑，Linux 回 `Err`、Windows 回 `Ok(false)`，於是「讀不到」被講成
     「開關不在」。同一行程式在暫停旗標與 prune 預覽各有一份，三處都改成不再無條件

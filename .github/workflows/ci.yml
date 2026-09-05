@@ -145,6 +145,15 @@ jobs:
       - name: No sentence may tell him to press a key called KeyP
         run: python3 ./scripts/check-combo-is-readable.py
 
+      # 同一個檔案、同一個理由，換一顆鍵：拔手熱鍵是**安全鍵**，按下去把她的手
+      # 拔掉。它的接線同樣整條躺在 `apps/desktop`，同樣一條 `cargo test` 都編不
+      # 到。r33 那十二刀突變裡有四刀打在呼叫端，第一輪跑出來**四刀全綠**——包括
+      # 「系統匣兩顆標籤對調」（他按下去做的是相反的事，畫面上一個字看不出來）
+      # 和「問不出資料目錄時宣稱『現在沒拔』」（不確定的時候倒向危險那一邊）。
+      # 加上這支之後同樣四刀全紅。它擋不住什麼，寫在那支腳本開頭。
+      - name: The kill-switch hotkey wiring must not lie
+        run: python3 ./scripts/check-hands-hotkey-says.py
+
       # 同一個形狀，第六次：「這一刻」那張卡要說得出「她試著問過 N 次，最近一
       # 次是⋯」。r25 把**判斷順序**搬進 `sister_core::brain::CurrentGuess::decide`
       # 了（由 `crates/sister-core/tests/current_guess_order.rs` 釘住，7 刀突變

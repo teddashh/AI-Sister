@@ -321,6 +321,25 @@ function restoreCombo() {
 }
 
 function paintHotkey(view) {
+  // 排版在**這裡**做完，底下那支收到的已經是人看得懂的字。`hands_wanted` 和
+  // `wanted` 一樣是生的 accelerator（`Ctrl+Alt+KeyH`），而鍵盤上沒有一顆鍵叫
+  // KeyH。`check-combo-is-readable.py` 認得的形狀只有 `view.<欄位>`——把整顆
+  // `view` 傳給另一支函式，那道白名單就認不出那邊的每一個用法了（它會紅，而
+  // 且它紅得對）。`null` 是「沒有設」，不是「讀不出來」。
+  // `!= null` 那一半不是裝飾：`?demo=` 那幾組夾具和 `check-settings-say.mjs`
+  // 的假 view 都沒有 `hands_*` 欄位，於是這裡拿到的是 `undefined`——少了它，
+  // `pretty(undefined)` 會在 `.split()` 上當場炸掉，而炸掉的是**整頁**，不只是
+  // 這一節（實測：那支腳本的第一格就印出兩則
+  // `Cannot read properties of undefined`）。正式路徑上 `HotkeyView` 一定帶著
+  // 字串，所以這一格只在那兩條路上到得了。
+  const handsSet = view.hands_wanted != null && view.hands_wanted !== "";
+  paintHandsHotkey(
+    handsSet ? pretty(view.hands_wanted) : null,
+    view.hands_registered,
+    view.hands_reason,
+    view.hands_collided,
+    view.config_unreadable,
+  );
   capturing = false;
   el.combo.classList.remove("listening");
   comboShown = view.wanted === "" ? "沒有設" : pretty(view.wanted);
@@ -337,17 +356,30 @@ function paintHotkey(view) {
   //
   // 對一顆暫停鍵來說那是最壞的一種壞法：他以為她停了，她還在錄。
   if (view.config_unreadable != null) {
+    // 這一段拆出來是因為上一版在 `wanted` 是空字串的時候會印出
+    // 「⋯內建預設值；暫停是，不是你設的。」——一個空格子，而句子照樣通過每一條
+    // 「有沒有含某個字」的斷言。空字串是一個正當的狀態（熱鍵可以關掉），所以
+    // 那一格要有自己的話，不是一段留白。
+    const which =
+      view.wanted === "" ? "暫停是關掉的" : `暫停是 ${pretty(view.wanted)}`;
     el.hotkeySay.textContent =
-      `開機時讀不出設定檔，所以現在用的是內建預設的那一組${
-        view.wanted === "" ? "" : `（${pretty(view.wanted)}）`
-      }，不是你設的。` +
+      `開機時讀不出設定檔，所以暫停和拔手現在用的都是內建預設值（${which}），不是你設的。` +
       `你設的那一組現在按下去不會有任何反應。修好設定檔再重開一次她：\n${view.config_unreadable}`;
     return;
   }
   // 剛剛試的那組被別人佔走了。後端已經把舊的那組裝回去了——講清楚「你試的
   // 那組沒成功、現在還在用哪一組」，不然他會以為暫停鍵從此不見了（以前**真的**
   // 會不見：`apply_hotkey` 先 `unregister_all()`，失敗就什麼都沒裝回去）。
-  if (view.rejected != null) {
+  if (view.hands_collided) {
+    // `rejected` 帶的是他**剛剛打的**那一組，`hands_wanted` 是拔手現在用的那一
+    // 組——撞號的時候兩個是同一串字，但來路不同。走 `hotkey_set` 進來的一定有
+    // `rejected`（`main.rs` 那一臂自己設的）；開機那條路沒有，所以留一個退路。
+    // 兩邊都各自包 `pretty()`，不要寫成 `pretty(a ?? b)`：那個形狀
+    // `check-combo-is-readable.py` 認不出來，而它認不出來就等於沒在守。
+    const tried =
+      view.rejected != null ? pretty(view.rejected) : pretty(view.hands_wanted);
+    el.hotkeySay.textContent = `${tried} 和拔手熱鍵撞號了。那一組留給拔手；暫停熱鍵沒有換成你打的那一組。`;
+  } else if (view.rejected != null) {
     const now = view.registered
       ? `還在用 ${pretty(view.wanted)}，那一組按得動。`
       : view.wanted === ""
@@ -365,6 +397,39 @@ function paintHotkey(view) {
   }
 }
 
+/**
+ * 拔手那一節。
+ *
+ * **這支函式拿不到 `view`，那是故意的。** `hands_wanted` 和 `wanted` 一樣是生的
+ * accelerator（`Ctrl+Alt+KeyH`），而鍵盤上沒有一顆鍵叫 KeyH。
+ * `check-combo-is-readable.py` 守的規則是「那個欄位只准拿去比較、或包在
+ * `pretty()` 裡」，而它認得的形狀只有 `view.<欄位>` 這一種——整顆 `view` 一旦
+ * 被傳出去，它就認不出這裡的每一個用法，於是那道白名單在這一整支函式上等於
+ * 一格空白。所以排版留在 `paintHotkey` 裡做完，這裡收到的 `shown` 已經是人看
+ * 得懂的字。
+ *
+ * `shown` 是 `null` 代表**沒有設**（一個正當的選擇），不是「讀不出來」。
+ */
+function paintHandsHotkey(shown, registered, reason, collided, unreadable) {
+  const combo = document.querySelector("[data-hands-combo]");
+  const say = document.querySelector("[data-hands-hotkey-say]");
+  if (combo === null || say === null) return;
+  combo.textContent = shown ?? "沒有設";
+  const bad = unreadable != null || collided || (shown !== null && !registered);
+  say.classList.toggle("bad", bad);
+  if (unreadable != null) {
+    say.textContent = `開機時讀不出設定檔，所以暫停和拔手現在用的都是內建預設值，不是你設的。修好設定檔再重開一次她：\n${unreadable}`;
+  } else if (collided) {
+    say.textContent = `${shown} 和暫停熱鍵撞號了；這一組留給拔手。`;
+  } else if (shown === null) {
+    say.textContent = "拔手熱鍵是關掉的。仍可從系統匣拔掉她的手。";
+  } else if (registered) {
+    say.textContent = `搶到了。現在在任何程式裡按 ${shown} 都會嘗試把她的手拔掉。`;
+  } else {
+    say.textContent = `這一組搶不到（${reason ?? "原因不明"}）。可在 config.toml 的 shell.hands_stop_shortcut 手改另一組，改完要重開一次她；或從系統匣拔掉她的手。`;
+  }
+}
+
 async function setCombo(combo) {
   if (invoke === null) return;
   try {
@@ -374,10 +439,13 @@ async function setCombo(combo) {
     // 而那件事會把底下這句錯誤蓋掉——換成一句肯定句（「搶到了。現在按…」）。
     // 那正是這一頁上剛修掉的那一族：每一行都是真的，湊起來在說謊。
     //
-    // 要的只是把那一格退回去。後端在這條路上已經把舊的那組裝回去了
-    // （見 `hotkey_set` 的 `persist()` 失敗分支），所以 `comboShown` 就是
-    // 現在真的在生效的那一組。
-    restoreCombo();
+    // 只有存檔失敗或設定檔讀不出來會走到 catch。後端會嘗試裝回舊組合，但舊組合
+    // 仍可能搶不到；重新讀 state，讓暫停和拔手兩節都畫出實際結果。
+    try {
+      paintHotkey(await invoke("hotkey_state"));
+    } catch (_) {
+      restoreCombo();
+    }
     el.hotkeySay.classList.add("bad");
     el.hotkeySay.textContent = String(err?.message ?? err);
   }

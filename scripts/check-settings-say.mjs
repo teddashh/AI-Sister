@@ -81,6 +81,10 @@ const HOTKEY = {
   reason: null,
   rejected: null,
   config_unreadable: null,
+  hands_wanted: "Ctrl+Alt+KeyH",
+  hands_registered: true,
+  hands_reason: null,
+  hands_collided: false,
 };
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
@@ -205,6 +209,8 @@ async function open({
     },
     combo: () => node("[data-combo]").textContent,
     hotkeySay: () => node("[data-hotkey-say]").textContent,
+    handsCombo: () => node("[data-hands-combo]").textContent,
+    handsHotkeySay: () => node("[data-hands-hotkey-say]").textContent,
     brainSay: () => node("[data-brain-say]").textContent,
     brainHidden: () => node("[data-brain-say]").hidden,
     /** 按那一格 → 進捕捉模式 → 按一組鍵下去。和真人的順序一樣。 */
@@ -388,6 +394,46 @@ console.log("⑩ 換熱鍵，這次成功");
   await p.pressCombo({ key: "s", code: "KeyS", ctrlKey: true, altKey: true });
   check("那一格換成新的那一組", p.combo() === "Ctrl + Alt + S", p.combo());
   check("說了搶到了", p.hotkeySay().includes("搶到了"), p.hotkeySay());
+}
+
+console.log("⑩ᵇ 拔手熱鍵：搶到、搶不到、關掉、撞號都畫得出來");
+{
+  const cases = [
+    {
+      name: "搶到",
+      hotkey: { ...HOTKEY },
+      premise: (h) => h.hands_registered === true && h.hands_wanted !== "" && !h.hands_collided,
+      says: "搶到了",
+      combo: "Ctrl + Alt + H",
+    },
+    {
+      name: "搶不到",
+      hotkey: { ...HOTKEY, hands_registered: false, hands_reason: "已被佔用" },
+      premise: (h) => h.hands_registered === false && h.hands_wanted !== "" && !h.hands_collided,
+      says: "這一組搶不到（已被佔用）",
+      combo: "Ctrl + Alt + H",
+    },
+    {
+      name: "關掉",
+      hotkey: { ...HOTKEY, hands_wanted: "", hands_registered: false },
+      premise: (h) => h.hands_registered === false && h.hands_wanted === "" && !h.hands_collided,
+      says: "拔手熱鍵是關掉的",
+      combo: "沒有設",
+    },
+    {
+      name: "撞號",
+      hotkey: { ...HOTKEY, hands_collided: true },
+      premise: (h) => h.hands_collided === true && h.hands_wanted !== "",
+      says: "和暫停熱鍵撞號了",
+      combo: "Ctrl + Alt + H",
+    },
+  ];
+  for (const c of cases) {
+    check(`${c.name}的前提是真的`, c.premise(c.hotkey), c.hotkey);
+    const p = await open({ hotkey: c.hotkey });
+    check(`${c.name}時印出人看得懂的組合`, p.handsCombo() === c.combo, p.handsCombo());
+    check(`${c.name}時說得出狀態`, p.handsHotkeySay().includes(c.says), p.handsHotkeySay());
+  }
 }
 
 console.log("⑪ 存不進去，而且退回去的那一組現在也搶不到了");
@@ -608,6 +654,34 @@ console.log("⑲ 桌面後端真的把 Thinking 接到設定頁和系統匣");
   check("tray 標籤用 core 的 exhaustive 純函式", MAIN.includes("heartbeat::tray_record_label(presence)") && MAIN.includes("heartbeat::tray_quit_label(presence)"), "tray labels");
   check("tray 按鍵按 core 的三向 action 分流", MAIN.includes("heartbeat::tray_record_action(presence)"), "tray action");
   check("Thinking 那一向會顯示原因", MAIN.includes("TrayRecordAction::WaitForThinking => Err(") && MAIN.includes("heartbeat::occupied_why_of(presence, now)"), "thinking feedback");
+}
+
+console.log("⑳ 拔手撞號的純決策真的接回桌面回傳值");
+{
+  // 這三條只讀 main.rs 原始碼，守的是接線形狀，不是執行覆蓋。Rust 的八格
+  // 測試會咬住純決策；這裡能咬住 R7/R8 這種欄位漏接，卻不能證明 Tauri 在
+  // Windows 上真的註冊、還原或寫檔成功。
+  const collision = MAIN.match(
+    /HotkeySetAction::RestoreCollision\s*=>\s*\{[\s\S]*?\n\s*\}/,
+  )?.[0] ?? "";
+  check(
+    "桌面用 sister-hands 的三向決策",
+    MAIN.includes("kill_switch::hotkey_set_action(") &&
+      MAIN.includes("HotkeySetAction::Persist =>") &&
+      MAIN.includes("HotkeySetAction::RestoreCollision =>") &&
+      MAIN.includes("HotkeySetAction::RestoreRejected =>"),
+    "hotkey_set match",
+  );
+  check(
+    "撞號臂保留被拒絕的那一組",
+    collision.includes("restored.rejected = Some(combo);"),
+    collision,
+  );
+  check(
+    "撞號臂把撞號事實送到畫面",
+    collision.includes("restored.hands_collided = true;"),
+    collision,
+  );
 }
 
 console.log("");

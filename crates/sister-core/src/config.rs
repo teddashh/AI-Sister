@@ -302,6 +302,12 @@ pub struct ShellConfig {
     /// 這裡刻意不驗格式。能不能註冊得起來只有作業系統知道（同一個組合在別台
     /// 機器上可能被佔走了），所以答案是**註冊當下**回報的，不是這裡猜的。
     pub pause_shortcut: String,
+    /// 全域拔手熱鍵，Tauri 的寫法。**空字串 = 不註冊**。
+    ///
+    /// 這顆鍵刻意只會拔手，不會切換：使用者是在正在出事時按它，慌張連按兩下
+    /// 不可以反而把手接回去。接回去是慢動作，只能走系統匣或
+    /// `sister hands resume`。
+    pub hands_stop_shortcut: String,
     /// 是否把只給開發者的評測指標頁放進桌面殼。
     ///
     /// 預設關閉：一般使用者不該在系統匣看到一扇要自己選 eval report JSON
@@ -315,6 +321,7 @@ impl Default for ShellConfig {
             // Ctrl+Alt+P：Windows 上 Ctrl+Alt 這一組很少被應用程式自己吃掉，
             // 而 P 是 pause。這只是預設值——搶不到的時候設定頁會講，改得動。
             pause_shortcut: "Ctrl+Alt+P".to_string(),
+            hands_stop_shortcut: "Ctrl+Alt+H".to_string(),
             developer_mode: false,
         }
     }
@@ -1549,6 +1556,16 @@ mod tests {
             cfg.privacy.excluded_apps.len()
         );
         assert_eq!(back.retention.text_days, 365);
+    }
+
+    #[test]
+    fn old_shell_config_gets_the_new_hands_hotkey_default() {
+        let old: Config =
+            toml::from_str("[shell]\npause_shortcut = \"Ctrl+Alt+S\"\ndeveloper_mode = true\n")
+                .expect("old shell config");
+        assert_eq!(old.shell.hands_stop_shortcut, "Ctrl+Alt+H");
+        assert_eq!(old.shell.pause_shortcut, "Ctrl+Alt+S");
+        assert!(old.shell.developer_mode);
     }
 
     #[test]

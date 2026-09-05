@@ -11,6 +11,7 @@ description = "AI-Sister platform-independent suggest-level hands boundary"
 anyhow.workspace = true
 # 只給 `replay_copy` 把 epoch 毫秒讀成人看得懂的時刻用。
 chrono.workspace = true
+global-hotkey = "0.8"
 serde.workspace = true
 serde_json.workspace = true
 
