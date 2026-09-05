@@ -462,6 +462,7 @@ mod tests {
     #[test]
     fn before_and_after_frames_are_not_the_same_evidence_sentence() {
         let after = finished_with(Some(StepEvidence::After {
+            waited_ms: 0,
             frame_id: 8,
             frame_at_ms: 10_100,
             has_image: true,
@@ -566,6 +567,7 @@ mod tests {
     #[test]
     fn before_and_after_without_images_are_not_the_same_evidence_sentence() {
         let after = finished_with(Some(StepEvidence::After {
+            waited_ms: 0,
             frame_id: 9,
             frame_at_ms: 10_050,
             has_image: false,
@@ -1017,6 +1019,7 @@ mod tests {
                     url: "https://a".into(),
                 },
                 evidence: Some(StepEvidence::After {
+                    waited_ms: 0,
                     frame_id: 7,
                     frame_at_ms: 3,
                     has_image: false,

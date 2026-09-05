@@ -4139,11 +4139,26 @@ impl Db {
         })
     }
 
-    /// 在一個有界時間窗裡，找離 `at_ms` 最近的 frame；同距離時選動作後的。
+    /// 在一個有界時間窗裡挑這一步的畫面憑據：**動作之後的優先，然後取最新的
+    /// 那一張**；一張動作之後的都沒有，才退回動作之前最接近的那一張。
+    ///
+    /// 名字裡的 `preferring_after` 是這一支唯一的判準，不要改回「最近的」。
+    /// 這裡曾經是純距離排序（同距離才偏好動作後），而那有兩個後果：
+    ///
+    /// 1. 動作前 10 毫秒那張會贏過動作後 800 毫秒那張，於是呼叫端等滿 2 秒、
+    ///    印出「等了 2000 毫秒還是沒有等到動作之後的畫面」——**而那張畫面
+    ///    從頭到尾都在**。順帶把 alpha.95 的比對整個關掉（比對只在
+    ///    「動作之後」那一格跑）。
+    /// 2. 呼叫端每 250 毫秒重問一次，純距離排序每次都回**同一張**最早的，
+    ///    等下去看不到任何新畫面。
+    ///
+    /// 兩組都取 `ts` 最大的那一張，所以排序寫得出來只有一句：先按「是不是
+    /// 動作之後」，再按 `ts` 由新到舊。動作之前那一組取最大的 `ts`，正好就是
+    /// 最接近動作的那一張。
     ///
     /// 窗外的舊 frame 不能冒充這一步的憑據。呼叫端決定時間窗，這裡只用既有的
     /// `idx_frames_ts` 把候選縮到那一段再排序。
-    pub fn nearest_step_frame(
+    pub fn step_frame_preferring_after(
         &self,
         at_ms: Millis,
         from_ms: Millis,
@@ -4153,8 +4168,8 @@ impl Db {
             .query_row(
                 "SELECT id, ts, image_path, window_title, url FROM frames
                  WHERE ts >= ?1 AND ts <= ?2
-                 ORDER BY CASE WHEN ts >= ?3 THEN ts - ?3 ELSE ?3 - ts END,
-                          CASE WHEN ts >= ?3 THEN 0 ELSE 1 END,
+                 ORDER BY (ts >= ?3) DESC,
+                          ts DESC,
                           id DESC
                  LIMIT 1",
                 params![from_ms, to_ms, at_ms],
@@ -7949,14 +7964,19 @@ mod tests {
         );
     }
 
+    /// 動作**之後**那一張贏，不管動作之前那一張離得多近。
+    ///
+    /// `before` 離動作 10 毫秒、`after` 離 800 毫秒。純距離排序會選 `before`，
+    /// 而那會讓呼叫端等滿兩秒、然後說「還是沒有等到動作之後的畫面」——
+    /// 一句假話，外加 alpha.95 的畫面比對整個不跑。
     #[test]
-    fn nearest_step_frame_is_bounded_and_prefers_after_on_a_tie() {
+    fn an_after_frame_beats_a_closer_before_frame() {
         let mut db = test_db();
         let session = db.start_session("test", "0").unwrap();
         for (ts, path) in [
             (1_000, "old.webp"),
-            (9_900, "before.webp"),
-            (10_100, "after.webp"),
+            (9_990, "before.webp"),
+            (10_800, "after.webp"),
         ] {
             db.insert_frame(
                 session,
@@ -7967,15 +7987,69 @@ mod tests {
             .unwrap();
         }
         let row = db
-            .nearest_step_frame(10_000, 5_000, 15_000)
+            .step_frame_preferring_after(10_000, 5_000, 15_000)
             .unwrap()
             .unwrap();
-        assert_eq!(row.ts, 10_100);
-        assert_eq!(row.image_path.as_deref(), Some("after.webp"));
+        assert_eq!(
+            row.image_path.as_deref(),
+            Some("after.webp"),
+            "動作前 10 毫秒那張贏了動作後 800 毫秒那張——排序又變回比距離了"
+        );
+    }
+
+    /// 動作之後有好幾張的時候，取**最新**的那一張。
+    ///
+    /// 呼叫端每 250 毫秒重問一次，等的就是「畫面終於換成他要的樣子」。
+    /// 回最早的那一張，等下去永遠拿到同一張，那個迴圈就只是在睡覺。
+    #[test]
+    fn among_after_frames_the_newest_one_wins() {
+        let mut db = test_db();
+        let session = db.start_session("test", "0").unwrap();
+        for (ts, path) in [(10_100, "loading.webp"), (10_900, "settled.webp")] {
+            db.insert_frame(
+                session,
+                &frame_with_text(ts, "a", "b", &[path]),
+                Some(path),
+                1,
+            )
+            .unwrap();
+        }
+        let row = db
+            .step_frame_preferring_after(10_000, 5_000, 15_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.image_path.as_deref(),
+            Some("settled.webp"),
+            "拿到的是最早那張——重問一次也看不到新畫面"
+        );
+    }
+
+    /// 一張動作之後的都沒有，才退回動作**之前最接近**的那一張；而窗外的
+    /// 舊 frame 不能冒充這一步的憑據。
+    #[test]
+    fn without_an_after_frame_it_falls_back_to_the_closest_before_one() {
+        let mut db = test_db();
+        let session = db.start_session("test", "0").unwrap();
+        for (ts, path) in [(6_000, "far.webp"), (9_900, "near.webp")] {
+            db.insert_frame(
+                session,
+                &frame_with_text(ts, "a", "b", &[path]),
+                Some(path),
+                1,
+            )
+            .unwrap();
+        }
+        let row = db
+            .step_frame_preferring_after(10_000, 5_000, 15_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.image_path.as_deref(), Some("near.webp"));
         assert!(
-            db.nearest_step_frame(20_000, 15_000, 25_000)
+            db.step_frame_preferring_after(20_000, 15_000, 25_000)
                 .unwrap()
-                .is_none()
+                .is_none(),
+            "時間窗外的 frame 不可以被當成這一步的憑據"
         );
     }
 

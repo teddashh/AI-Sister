@@ -546,6 +546,17 @@ pub enum StepEvidence {
         frame_id: i64,
         frame_at_ms: i64,
         has_image: bool,
+        /// 從動作結束到挑中這一張畫面為止，她等了多久。
+        ///
+        /// 0 代表「第一眼就看到了」。這個數字讓「對不上」那句話說得出
+        /// **它找了多久**——一次快照對不上和兩秒內每一張都對不上，是兩件
+        /// 不同的事，而使用者要靠它決定要不要自己去看一眼。
+        ///
+        /// `#[serde(default)]`：alpha.95 以前的那些列沒有這個鍵，補 0。
+        /// 那些列同時也沒有 `target`，所以句子走的是「這一列是舊版寫的」
+        /// 那一格，讀不到這個 0。
+        #[serde(default)]
+        waited_ms: u64,
         #[serde(default)]
         target: TargetOnScreen,
     },
@@ -614,6 +625,7 @@ impl StepEvidence {
                 frame_id,
                 frame_at_ms,
                 has_image,
+                waited_ms,
                 target,
             } => {
                 let frame = if *has_image {
@@ -657,7 +669,17 @@ impl StepEvidence {
                     TargetOnScreen::CannotTell { why: CannotTell::NotChecked } =>
                         "。這一列是舊版寫的，那幾版沒有比對過畫面上真的變成什麼。".to_string(),
                 };
-                format!("{frame}{ending}")
+                // 只有在「沒等到他要的樣子」的時候才補這一句，而且只在真的
+                // 等過的時候。對得上那一格不補：那會變成「等了 0 毫秒」這種
+                // 沒有人需要知道的雜訊。
+                let waited = match target {
+                    TargetOnScreen::Matched { .. } => String::new(),
+                    _ if *waited_ms == 0 => String::new(),
+                    _ => format!(
+                        "（她在這一步之後盯了 {waited_ms} 毫秒，看的是這段時間裡最新的那一張。）"
+                    ),
+                };
+                format!("{frame}{ending}{waited}")
             }
             Self::Before {
                 frame_id,
@@ -1012,6 +1034,7 @@ mod provenance_tests {
         let ms = 1_756_200_004_400;
         let carrying_a_real_timestamp = [
             StepEvidence::After {
+                waited_ms: 0,
                 frame_id: 7,
                 frame_at_ms: ms,
                 has_image: true,

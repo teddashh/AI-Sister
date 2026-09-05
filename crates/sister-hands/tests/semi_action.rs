@@ -357,6 +357,7 @@ fn every_step_log_distinguishes_legacy_unchecked_from_checked_evidence() {
         step_number: 2,
         action: action(),
         evidence: Some(StepEvidence::After {
+            waited_ms: 0,
             frame_id: 42,
             frame_at_ms: 10,
             has_image: true,

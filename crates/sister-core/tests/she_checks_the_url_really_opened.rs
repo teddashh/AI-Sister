@@ -56,6 +56,7 @@ fn evidence(has_image: bool, target: TargetOnScreen) -> StepEvidence {
         frame_id: 12,
         frame_at_ms: 1_700_000_000_000,
         has_image,
+        waited_ms: 0,
         target,
     }
 }
@@ -704,6 +705,7 @@ fn the_frame_id_and_time_survive_and_stay_in_front() {
     .message();
     let other = StepEvidence::After {
         frame_id: 12,
+        waited_ms: 0,
         frame_at_ms: 1_700_000_000_000 + 3_661_000, // 一小時零一分零一秒之後
         has_image: true,
         target: TargetOnScreen::CannotTell {
