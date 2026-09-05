@@ -696,6 +696,34 @@ mod tests {
         assert!(!says.contains("File exists"));
     }
 
+    /// 問不出資料目錄的時候，那兩顆按鈕只准寫動作，不准宣稱狀態。
+    ///
+    /// 這一條是突變刀 S1 逼出來的：把這支函式的回傳值換成
+    /// `"把手接回去（現在沒拔）"`——也就是這一輪 §3 才修掉的那個 bug，原封不動
+    /// 搬到隔壁一個檔案——十二刀跑完**沒有任何一把尺紅**。`exam-r33.py` 只掃
+    /// `main.rs`，而這支函式是這一輪新加的，在此之前零測試呼叫端。
+    ///
+    /// 對照的是產品自己在「知道狀態」時吐的字：那兩支都用一個括號補述狀態
+    /// （`（已經拔了…）`／`（現在沒拔）`）。問不出來的時候要的正是沒有那個括號。
+    #[test]
+    fn the_unknown_labels_never_claim_a_state() {
+        let (stop, resume) = tray_hands_unknown_labels();
+        for label in [&stop, &resume] {
+            assert!(
+                !label.contains('（'),
+                "問不出資料目錄＝她拔沒拔我們根本不知道，這一格不可以用括號補一\
+                 句狀態：{label}"
+            );
+            for claim in ["沒拔", "拔了", "已經"] {
+                assert!(
+                    !label.contains(claim),
+                    "「{claim}」是一句狀態宣稱，而這條路上沒有人知道狀態：{label}"
+                );
+            }
+        }
+        assert_ne!(stop, resume, "兩顆按鈕不可以長一樣，他得分得出按哪一顆。");
+    }
+
     #[test]
     fn hotkey_set_action_covers_every_boolean_input() {
         use HotkeySetAction::{Persist, RestoreCollision, RestoreRejected};
