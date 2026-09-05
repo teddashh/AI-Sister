@@ -468,7 +468,29 @@ if decide_calls:
                 f"      它看不出你是往上傳還是吞掉——那種寫法要自己另外找人守。"
             )
 
-# ── E. 「前一版是誰」這個決定只准住在 crates/ ────────────────────────────
+# ── E. 時間軸把整章的半開範圍交給 crates/ 選卡 ────────────────────────────
+#
+# 這種原始碼閘門只釘得住**引數**，釘不住**結果**：即使這個呼叫原封不動，呼叫端
+# 隨後又把結果濾回 `segment_core_start == ch.core_start_ts`，這條仍會是綠的。
+# 行為本身要由 crates/ 的執行測試守；這裡只守 apps/ 這個零執行覆蓋 workspace 的接線。
+timeline_call = re.findall(
+    r"sister_core::brain::chapter_l2_views *\( *([^)]*)\)", whole
+)
+if len(timeline_call) != 1:
+    problems.append(
+        "sister_core::brain::chapter_l2_views( 在 main.rs 應該剛好出現 1 次，"
+        f"實際是 {len(timeline_call)} 次。"
+    )
+else:
+    args = timeline_call[0].strip().rstrip(",").strip()
+    if args != "cards, ch.core_start_ts, ch.core_end_ts":
+        problems.append(
+            "chapter_l2_views( 的引數是 `"
+            + args
+            + "`，不是 `cards, ch.core_start_ts, ch.core_end_ts`。"
+        )
+
+# ── F. 「前一版是誰」這個決定只准住在 crates/ ────────────────────────────
 #
 # 這一條是量出來才加的。r27 修好之後，我把 `memory_current_guess` 那一行原封
 # 不動改回舊的 `versions.get(versions.len().saturating_sub(2))`，然後跑：
@@ -499,12 +521,12 @@ if decide_calls:
 #   結論：字串比對守得住「這個決定被整個抄走」，守不住「答案被算出來又丟掉」。
 #   不要因為這一段印 ✓ 就相信呼叫端是對的。
 PREV_HELPER = "sister_core::brain::latest_with_previous"
-WANT_HELPER_CALLS = 3  # attach_l2、memory_guesses、memory_current_guess
+WANT_HELPER_CALLS = 2  # memory_guesses、memory_current_guess；attach_l2 已搬進 crates/
 n_helper = whole.count(PREV_HELPER)
 if n_helper != WANT_HELPER_CALLS:
     problems.append(
         f"`{PREV_HELPER}` 在 {MAIN} 裡出現 {n_helper} 次，預期 {WANT_HELPER_CALLS} 次。\n"
-        f"      預期的三處是 attach_l2、memory_guesses、memory_current_guess。\n"
+        f"      預期的兩處是 memory_guesses、memory_current_guess。\n"
         f"      注意這裡數的是**整份檔案裡這串字出現幾次**，不是「那三支函式各有一次」\n"
         f"      ——註解或字串裡寫到它一樣會被數進來。多一處少一處都請先改這支腳本的\n"
         f"      WANT_HELPER_CALLS，順便想一下新的那一處是不是又抄了一份「前一版是誰」。"

@@ -1271,6 +1271,39 @@ pub fn latest_with_previous<T>(versions: &[T]) -> Option<(&T, Option<&T>)> {
     Some((latest, earlier.last()))
 }
 
+/// 把一章半開時間範圍內每條還活著的卡片脈絡組成時間軸顯示資料。
+pub fn chapter_l2_views(
+    cards: &[L2CardRow],
+    core_start: crate::model::Millis,
+    core_end: crate::model::Millis,
+) -> Vec<L2View> {
+    let mut by_start = std::collections::BTreeMap::new();
+    for card in cards
+        .iter()
+        .filter(|card| core_start <= card.segment_core_start && card.segment_core_start < core_end)
+    {
+        by_start
+            .entry(card.segment_core_start)
+            .or_insert_with(Vec::new)
+            .push(card);
+    }
+
+    let mut views = Vec::new();
+    for versions in by_start.values_mut() {
+        versions.sort_by_key(|card| (card.version, card.id));
+        if let Some((row, previous)) = latest_with_previous(versions) {
+            let view = view_from_row_with_previous(row, previous.copied());
+            if !views
+                .iter()
+                .any(|existing: &L2View| existing.segment_ref == view.segment_ref)
+            {
+                views.push(view);
+            }
+        }
+    }
+    views
+}
+
 pub fn view_from_row_with_previous(row: &L2CardRow, previous: Option<&L2CardRow>) -> L2View {
     let entities: Vec<Entity> = serde_json::from_str(&row.entities_json).unwrap_or_default();
     let refs: Vec<String> = serde_json::from_str(&row.evidence_json).unwrap_or_default();

@@ -44,10 +44,15 @@
 //!   `scripts/check-current-guess-wiring.py` 用原始碼比對去釘。
 //!
 //! ⚠ `brain.rs` 的 `collect_jobs` 是同一個 bug 的第二個消費端（「這一章有卡了嗎？
-//!   有就跳過」也還在用起點相等，於是合併之後她會把已經有卡的章節**再問一次**）。
-//!   那支函式是私有的，這一檔（整合測試）呼叫不到它，所以**這裡沒有它的證據**——
-//!   它的測試要寫在 `brain.rs` 的 `mod tests` 裡面。不要因為這一檔全綠就以為那半
-//!   有人守。
+//!   有就跳過」，起點相等的話合併之後她會把已經有卡的章節**再問一次**）。它和
+//!   這一檔在**同一輪**一起修好了，也一起有了測試——但那條測試不在這裡。那支
+//!   函式是私有的，這一檔（整合測試）呼叫不到它，它的證據在 `brain.rs` 的
+//!   `mod tests` 裡，叫 `collect_jobs_skips_a_merged_chapter_with_a_card_on_its_right_half`。
+//!   **不要因為這一檔全綠就以為那半有人守**——守它的是那一條，不是這七條。
+//!
+//!   （這段話原本寫的是「也**還在**用起點相等」「這裡沒有它的證據」。兩句在寫下
+//!   的當時都是真的——我是在交貨之前寫這個檔頭的——而交貨之後兩句都反了。
+//!   考題的檔頭會比考題本身更早過期，因為它描述的是**還沒發生的事**。）
 //!
 //! ⚠ 交貨**之前**這一檔編不過（那支函式還不存在），而編不過的紅什麼都沒證明。
 //!   有價值的是交貨**之後**的突變。
@@ -106,8 +111,16 @@ fn a_merged_chapter_shows_the_card_written_for_its_right_half() {
 
 /// 沒有人編輯過章節的時候，這個改動不准改變畫面上的任何一個字。
 ///
-/// 斷言對的是 `l2_versions_for_segment`——同一顆資料庫、同一個章節，兩支函式
-/// 必須給出**一模一樣**的版本史。這裡不手抄一份期望值：抄一份就會漂。
+/// 第一條斷言對的是 `l2_versions_for_segment`——同一顆資料庫、同一個章節，兩支
+/// 函式必須給出同一份版本史，而**那一條不手抄期望值**：抄一份就會漂。
+///
+/// 第二條斷言就**是**手抄的（`vec!["第一版", "第二版"]`），那是刻意的：只有第一
+/// 條的話，兩支函式一起壞掉、一起回空的，它照樣是綠的。手抄那份釘的是「順序由舊
+/// 到新」和「真的有兩版」，那是第一條證不出來的東西。
+///
+/// 兩條都只比 `activity` 字串（`activities()` 就是這樣寫的），`version` / `id` /
+/// `author` / `model_confidence` 沒有人比——所以「一模一樣的版本史」這句話在這裡
+/// 不成立，這裡驗的是「同一串活動描述、同一個順序」。
 #[test]
 fn an_unedited_chapter_returns_exactly_what_it_did_before() {
     let mut db = db();
@@ -250,4 +263,26 @@ fn ask(db: &mut Db, segment_core_start: i64, ts: i64, outcome: OutboundOutcome) 
         role: "interpreter",
     })
     .expect("insert outbound");
+}
+
+/// 合併之後，使用者親手改過的那張不可以被機器的猜測擠掉。
+///
+/// `l2_versions_for_chapter` 用 `MAX(segment_core_start)` 挑脈絡，而 `MAX`
+/// **不看作者**。使用者改的在左半（鍵小）、機器猜的在右半（鍵大），合併之後
+/// 挑出來的是機器那張——而時間軸上就寫著「你改過的。下一輪不會蓋掉。」
+///
+/// `insert_l2_card` 那道 `ensure!("使用者改過的假設不會被下一輪蓋掉")` 是
+/// **按鍵**檢查的（`latest_l2_for_segment(ins.segment_core_start)`），跨鍵
+/// 一點都擋不住——它擋的是「同一段被蓋掉」，這裡是「另一段贏了」。
+#[test]
+fn a_user_correction_outranks_a_machine_guess_from_the_other_half() {
+    let mut db = db();
+    card(&mut db, A, "我自己改的", L2Author::User);
+    card(&mut db, B, "機器猜的", L2Author::Interpreter);
+
+    assert!(
+        activities(&chapter(&db, A, C)).contains(&"我自己改的"),
+        "使用者改過的那張不可以因為合併就被機器的猜測擠掉；實際挑出來的是 {:?}",
+        activities(&chapter(&db, A, C))
+    );
 }

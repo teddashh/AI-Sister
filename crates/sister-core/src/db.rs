@@ -3776,7 +3776,10 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
-    /// 某一章裡最後一條還活著的脈絡之每一版，舊的在前。
+    /// 某一章裡優先挑含使用者版本、否則挑最後一條還活著的脈絡，回傳其每一版。
+    ///
+    /// 這裡查「含使用者版本」；同一個 key 一旦有使用者版本，`insert_l2_card`
+    /// 保證後續也只能由使用者寫，所以它等價於「最新版本是使用者寫的」。
     pub fn l2_versions_for_chapter(
         &self,
         core_started_at: Millis,
@@ -3786,7 +3789,10 @@ impl Db {
             "{L2_SELECT}
              FROM l2_card
              WHERE segment_core_start = (
-                 SELECT MAX(segment_core_start)
+                 SELECT COALESCE(
+                     MAX(CASE WHEN author = 'user' THEN segment_core_start END),
+                     MAX(segment_core_start)
+                 )
                  FROM l2_card
                  WHERE segment_core_start >= ?1 AND segment_core_start < ?2
                    AND tombstoned_at IS NULL
@@ -3886,9 +3892,14 @@ impl Db {
     /// 範圍是半開的 `[core_started_at, core_ended_at)`。用範圍而不是用起點嚴格
     /// 相等，是因為使用者**合併**章節之後，右半那些列記著的 `segment_core_start`
     /// 不再等於任何一段的起點——舊寫法會把它們全部漏掉，而一列都沒有被刪。
-    /// 章節之間嚴格接合（`segment.rs` 的 cursor 遞推，加上 `merge_segments` 寫入前
-    /// 那道 `left.core_ended_at == right.core_started_at`），所以每一列恰好落在
-    /// 一段裡，右界開著才不會被相鄰兩段各數一次。
+    /// 章節之間嚴格接合（`segment.rs` 的 cursor 遞推，加上 [`Db::merge_chapters`]
+    /// 寫入前那道 `left.core_ended_at == right.core_started_at` 的 `ensure!`），
+    /// 所以每一列恰好落在一段裡，右界開著才不會被相鄰兩段各數一次。
+    ///
+    /// （合併的算法本身是 `segment_edit` 的 `merge_two`，那支**沒有**這道檢查；
+    /// 擋在外面的是 [`Db::merge_chapters`]。這裡原本寫的是 `merge_segments`，
+    /// 一個全 repo 都不存在的名字——而這句話是上面整支範圍查詢正確性的**唯一**
+    /// 論證，指到不存在的地方就等於沒有論證。）
     ///
     /// **這不是終生次數，而且讓它變動的不只一件事：**
     /// - `sister forget` 會依外送時間刪除 `brain_outbound` 的列（保留期清理不碰
