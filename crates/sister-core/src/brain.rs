@@ -1260,6 +1260,17 @@ pub fn view_from_row(row: &L2CardRow) -> L2View {
     view_from_row_with_previous(row, None)
 }
 
+/// 從「同一段的所有版本，已照 (version, id) 由舊到新排好」裡，挑出要顯示的
+/// 那一張和它**緊鄰的**前一版。
+///
+/// 只有一版的時候前一版是 `None`——這正是這支函式存在的理由：呼叫端寫成
+/// `versions.get(versions.len().saturating_sub(2))` 的話，一版會挑到自己。
+pub fn latest_with_previous<T>(versions: &[T]) -> Option<(&T, Option<&T>)> {
+    let latest = versions.last()?;
+    let previous = versions.iter().rev().nth(1);
+    Some((latest, previous))
+}
+
 pub fn view_from_row_with_previous(row: &L2CardRow, previous: Option<&L2CardRow>) -> L2View {
     let entities: Vec<Entity> = serde_json::from_str(&row.entities_json).unwrap_or_default();
     let refs: Vec<String> = serde_json::from_str(&row.evidence_json).unwrap_or_default();
@@ -1305,6 +1316,14 @@ mod tests {
     use crate::consent::{Sheet, VERSION};
     use crate::db::Db;
     use std::cell::Cell;
+
+    #[test]
+    fn latest_version_has_only_its_immediate_predecessor() {
+        assert_eq!(latest_with_previous::<i32>(&[]), None);
+        assert_eq!(latest_with_previous(&[10]), Some((&10, None)));
+        assert_eq!(latest_with_previous(&[10, 20]), Some((&20, Some(&10))));
+        assert_eq!(latest_with_previous(&[10, 20, 30]), Some((&30, Some(&20))));
+    }
 
     fn recording_facts(latest_closed: Option<LatestClosedSegment>) -> RecordingFacts {
         RecordingFacts {
