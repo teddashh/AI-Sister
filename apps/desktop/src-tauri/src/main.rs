@@ -600,12 +600,7 @@ fn refresh_tray(app: &tauri::AppHandle) {
     let (stop, resume) = shell
         .data_dir
         .as_ref()
-        .map(|dir| {
-            (
-                sister_hands::kill_switch::tray_hands_stop_label(dir),
-                sister_hands::kill_switch::tray_hands_resume_label(dir),
-            )
-        })
+        .map(|dir| sister_hands::kill_switch::tray_hands_labels(dir))
         .unwrap_or_else(|| ("拔掉她的手".into(), "把手接回去（現在沒拔）".into()));
     if let Some(item) = app.try_state::<HandsStopItem>() {
         let _ = item.0.set_text(stop);
@@ -2465,7 +2460,7 @@ fn hotkey_set(
         .hands_stop_shortcut;
     let previous = hotkey.0.lock().expect("hotkey").wanted.clone();
     let view = apply_hotkey(&app, &combo, &hands_wanted);
-    let view = if view.registered || view.wanted.is_empty() {
+    let view = if !view.hands_collided && (view.registered || view.wanted.is_empty()) {
         let persist = || -> Result<(), String> {
             let path = config_path()?;
             let mut c = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
@@ -2502,6 +2497,11 @@ fn hotkey_set(
             ));
         }
         view
+    } else if view.hands_collided {
+        let mut restored = apply_hotkey(&app, &previous, &hands_wanted);
+        restored.rejected = Some(combo);
+        restored.hands_collided = true;
+        restored
     } else {
         // 設定檔沒動過，所以退回去的一定是設定檔裡那一組。`rejected` 帶著他
         // 剛剛打的那個組合，讓那句話講得出「你試的那組沒搶到，還在用舊的」。
@@ -3343,10 +3343,9 @@ fn main() {
             let show_item = MenuItem::with_id(app, "show", "顯示 AI-Sister", true, None::<&str>)?;
             let pause_item =
                 MenuItem::with_id(app, "pause", pause_label(paused_now), true, None::<&str>)?;
-            let hands_labels = app.state::<Shell>().data_dir.as_ref().map(|dir| (
-                sister_hands::kill_switch::tray_hands_stop_label(dir),
-                sister_hands::kill_switch::tray_hands_resume_label(dir),
-            )).unwrap_or_else(|| ("拔掉她的手".into(), "把手接回去（現在沒拔）".into()));
+            let hands_labels = app.state::<Shell>().data_dir.as_ref()
+                .map(|dir| sister_hands::kill_switch::tray_hands_labels(dir))
+                .unwrap_or_else(|| ("拔掉她的手".into(), "把手接回去（現在沒拔）".into()));
             let hands_stop_item =
                 MenuItem::with_id(app, "hands-stop", hands_labels.0, true, None::<&str>)?;
             let hands_resume_item =

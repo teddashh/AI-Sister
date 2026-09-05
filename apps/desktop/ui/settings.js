@@ -321,6 +321,7 @@ function restoreCombo() {
 }
 
 function paintHotkey(view) {
+  paintHandsHotkey(view);
   capturing = false;
   el.combo.classList.remove("listening");
   comboShown = view.wanted === "" ? "沒有設" : pretty(view.wanted);
@@ -338,7 +339,7 @@ function paintHotkey(view) {
   // 對一顆暫停鍵來說那是最壞的一種壞法：他以為她停了，她還在錄。
   if (view.config_unreadable != null) {
     el.hotkeySay.textContent =
-      `開機時讀不出設定檔，所以現在用的是內建預設的那一組${
+      `開機時讀不出設定檔，所以暫停和拔手現在用的是內建預設值；暫停是${
         view.wanted === "" ? "" : `（${pretty(view.wanted)}）`
       }，不是你設的。` +
       `你設的那一組現在按下去不會有任何反應。修好設定檔再重開一次她：\n${view.config_unreadable}`;
@@ -347,7 +348,9 @@ function paintHotkey(view) {
   // 剛剛試的那組被別人佔走了。後端已經把舊的那組裝回去了——講清楚「你試的
   // 那組沒成功、現在還在用哪一組」，不然他會以為暫停鍵從此不見了（以前**真的**
   // 會不見：`apply_hotkey` 先 `unregister_all()`，失敗就什麼都沒裝回去）。
-  if (view.rejected != null) {
+  if (view.hands_collided) {
+    el.hotkeySay.textContent = `${pretty(view.rejected ?? view.hands_wanted)} 和拔手熱鍵撞號了。那一組留給拔手；暫停熱鍵沒有換成你打的那一組。`;
+  } else if (view.rejected != null) {
     const now = view.registered
       ? `還在用 ${pretty(view.wanted)}，那一組按得動。`
       : view.wanted === ""
@@ -362,6 +365,28 @@ function paintHotkey(view) {
   } else {
     // 這一句是這一格存在的理由：搶不到的時候要指名道姓，而不是讓他按了沒反應。
     el.hotkeySay.textContent = `這一組搶不到（${view.reason ?? "原因不明"}）。換一組，或改用系統匣裡的暫停。`;
+  }
+}
+
+function paintHandsHotkey(view) {
+  const combo = document.querySelector("[data-hands-combo]");
+  const say = document.querySelector("[data-hands-hotkey-say]");
+  if (combo === null || say === null) return;
+  const wanted = view.hands_wanted ?? "";
+  combo.textContent = wanted === "" ? "沒有設" : pretty(wanted);
+  const bad = view.config_unreadable != null || view.hands_collided ||
+    (wanted !== "" && !view.hands_registered);
+  say.classList.toggle("bad", bad);
+  if (view.config_unreadable != null) {
+    say.textContent = `開機時讀不出設定檔，所以暫停和拔手現在用的是內建預設值，不是你設的。修好設定檔再重開一次她：\n${view.config_unreadable}`;
+  } else if (view.hands_collided) {
+    say.textContent = `${pretty(wanted)} 和暫停熱鍵撞號了；這一組留給拔手。`;
+  } else if (wanted === "") {
+    say.textContent = "拔手熱鍵是關掉的。仍可從系統匣拔掉她的手。";
+  } else if (view.hands_registered) {
+    say.textContent = `搶到了。現在在任何程式裡按 ${pretty(wanted)} 都會嘗試把她的手拔掉。`;
+  } else {
+    say.textContent = `這一組搶不到（${view.hands_reason ?? "原因不明"}）。換一組，或從系統匣拔掉她的手。`;
   }
 }
 

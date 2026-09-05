@@ -789,6 +789,14 @@ console.log("㉚ 拔手熱鍵按下去之後，那句話要真的出現在畫面
   // 那行字還寫著「手拔掉了」，而他中午就把手接回去了。
   await p.fromOutside("pause-changed", true);
   check("下一件事蓋得掉", !p.line().includes(PULLED), p.line());
+
+  const booting = await open({ recording_state: "booting" });
+  check("前提：她正在開資料庫", booting.line().includes("正在開資料庫"), booting.line());
+  await booting.fromOutside("hands-pulled", PULLED);
+  check("booting 時那句話也在", booting.line().includes(PULLED), booting.line());
+  check("而且她還在 booting（不然下面那條等於沒驗）", booting.line().includes("正在開資料庫"), booting.line());
+  const detail = booting.line().split("\n")[1] ?? "";
+  check("拔手結果不可以被推開成另一件事", !detail.includes("另一件事"), detail);
 }
 
 console.log("㉛ 送出去的事件名字，另一邊要真的有人在聽");

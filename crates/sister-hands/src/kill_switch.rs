@@ -196,13 +196,15 @@ pub fn hands_hotkey_message(outcome: &HandsHotkeyOutcome) -> String {
             why.zh()
         ),
         HandsHotkeyOutcome::NotWritten {
-            why,
+            why: WhyNotWritten::NoDataDir,
             stopped: false,
             ..
-        } => format!(
-            "{}，沒能拔掉。她的手還接著——去系統匣按『拔掉她的手』，或在終端機打 `sister hands stop`。",
-            why.zh()
-        ),
+        } => "問不出資料目錄在哪，沒能拔掉。她的手還接著——在終端機打 `sister hands stop`。".into(),
+        HandsHotkeyOutcome::NotWritten {
+            why: WhyNotWritten::CannotWrite,
+            stopped: false,
+            ..
+        } => "資料目錄寫不進去，沒能拔掉。她的手還接著。系統匣和 `sister hands stop` 也會撞上同一道牆；修好資料夾權限，或直接把她關掉。".into(),
     }
 }
 
@@ -261,6 +263,14 @@ pub fn tray_hands_resume_label(data_dir: &Path) -> String {
     } else {
         "把手接回去（現在沒拔）".into()
     }
+}
+
+/// 系統匣兩顆拔手按鈕各自拿到的字；順序固定為「拔掉、接回」。
+pub fn tray_hands_labels(data_dir: &Path) -> (String, String) {
+    (
+        tray_hands_stop_label(data_dir),
+        tray_hands_resume_label(data_dir),
+    )
 }
 
 #[cfg(test)]
@@ -485,6 +495,8 @@ mod tests {
         });
         assert!(message.contains("還接著"), "{message}");
         assert!(!message.contains("拔掉了。"), "{message}");
+        assert!(message.contains("資料目錄寫不進去"), "{message}");
+        assert!(message.contains("修好資料夾權限"), "{message}");
     }
 
     /// 同一個 `why`，`stopped` 兩邊要說**相反**的事。
@@ -511,6 +523,10 @@ mod tests {
         assert!(
             stopped.contains("什麼都不會交給作業系統"),
             "沒告訴他「其實已經停了」，他會白跑一趟：{stopped}"
+        );
+        assert!(
+            stopped.contains("開關沒寫下來") && !stopped.contains("手拔掉了。"),
+            "寫入失敗不能借用真的寫成功那一句：{stopped}"
         );
     }
 

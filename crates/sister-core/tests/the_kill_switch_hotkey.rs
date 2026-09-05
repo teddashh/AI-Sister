@@ -174,11 +174,18 @@ fn the_sentence_agrees_with_the_only_authority() {
     let already = Tmp::dir("agree-already");
     kill_switch::pull(already.path(), T1).expect("先拔起來");
     let not_a_dir = Tmp::file("agree-notdir");
+    let ancestor = Tmp::file("agree-ancestor-file");
+    let below_file = ancestor.path().join("子目錄");
 
     let cases: Vec<(&str, Option<&Path>)> = vec![
         ("乾淨的資料目錄", Some(clean.path())),
         ("本來就拔著", Some(already.path())),
         ("資料目錄的位置上是一個檔案", Some(not_a_dir.path())),
+        // `pull` 在兩個平台都因祖先是檔案而失敗。Linux 的 metadata 是 ENOTDIR，
+        // 所以 fail-closed 成 stopped；Windows 會是 ERROR_PATH_NOT_FOUND，所以仍
+        // attached。這裡釘兩邊都必須成立的「句子跟權威一致」，不假裝 Windows
+        // 的固定值已經在這台機器驗證過。
+        ("資料目錄的祖先是一個檔案", Some(below_file.as_path())),
         ("問不出資料目錄", None),
     ];
 
@@ -203,12 +210,12 @@ fn the_sentence_agrees_with_the_only_authority() {
     }
 }
 
-/// 說「還接著」的時候，要告訴他還有哪兩條路。
+/// 問不出資料目錄時，只能指向真的可能成功的終端機那條路。
 ///
 /// 一句只講失敗、不講下一步的話，等於把他留在原地——而他按這顆鍵的那一刻
 /// 正在出事。
 #[test]
-fn a_hotkey_that_could_not_pull_names_the_other_two_ways() {
+fn a_hotkey_without_a_data_dir_names_only_the_working_way() {
     let says = hands_hotkey_message(&press_hands_hotkey(None, T1));
     assert!(
         says.contains("還接著"),
@@ -219,8 +226,8 @@ fn a_hotkey_that_could_not_pull_names_the_other_two_ways() {
         "沒告訴他終端機那條路：{says}"
     );
     assert!(
-        says.contains("拔掉她的手"),
-        "沒告訴他系統匣那顆的字（要和選單上寫的一模一樣，他才找得到）：{says}"
+        !says.contains("系統匣"),
+        "系統匣走同一個缺失的 data_dir：{says}"
     );
 }
 
