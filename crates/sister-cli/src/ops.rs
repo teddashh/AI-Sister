@@ -13912,15 +13912,15 @@ pub mod doctor {
         match sister_core::pause::state(data_dir) {
             PauseState::Recording => None,
             PauseState::Since(ts) => Some(format!(
-                "**暫停中**（從 {} 起）。這段期間什麼都不會被記錄；\
-                 不是裸的 `sister resume`；請跑 `{}` 解除，或刪掉 {}",
+                "**暫停中**（從 {} 起）。她不會再看新的畫面——但**已經記下來的**那些，解釋層還是會讀、還是可能送給雲端模型、還是會寫成新的卡片；要連那半也停，請跑 `{}`。解除暫停請跑 `{}`（不是裸的 `sister resume`），或刪掉 {}",
                 crate::fmt::timestamp(ts),
+                cmd(data_dir, "consent --revoke cloud-reading"),
                 cmd(data_dir, "resume"),
                 flag.display()
             )),
             PauseState::FlagPresentButUnreadable => Some(format!(
-                "**暫停中**（旗標內容讀不出來）。這段期間什麼都不會被記錄；\
-                 刪掉 {} 可解除",
+                "**暫停中**（旗標內容讀不出來）。她不會再看新的畫面——但**已經記下來的**那些還是會被送去解讀、寫成新的卡片；要連那半也停，請跑 `{}`。刪掉 {} 可解除",
+                cmd(data_dir, "consent --revoke cloud-reading"),
                 flag.display()
             )),
             PauseState::FlagUncheckable => Some(format!(
@@ -16292,7 +16292,7 @@ pub mod doctor {
                     Some("**暫停中**（從 08-20 03:00 起）".into()),
                     Presence::Stopped { at: None },
                 ),
-                // 暫停壓過心跳：她佔著這個目錄，可是什麼都不會被記錄。少了這
+                // 暫停壓過心跳：她佔著這個目錄，可是她不會再看新的畫面。少了這
                 // 一格，一個按著暫停的人會看到「有一個 sister record 正在跑」
                 // 然後以為自己被記著。
                 watching_verdict(
@@ -16366,6 +16366,12 @@ pub mod doctor {
             println!("doctor/Since: {since}");
             assert!(since.contains("**暫停中**（從 "), "{since}");
             assert!(
+                since.contains("她不會再看新的畫面")
+                    && since.contains("**已經記下來的**")
+                    && since.contains("consent --revoke cloud-reading"),
+                "暫停停了哪半、沒停哪半、以及另一半的開關都要講出來：{since}"
+            );
+            assert!(
                 since.contains(&crate::fmt::timestamp(1_755_656_400_000)),
                 "要印出旗標裡那個時間：{since}"
             );
@@ -16393,7 +16399,10 @@ pub mod doctor {
                 .display()
                 .to_string();
             assert!(
-                broken.contains(&format!("刪掉 {broken_flag} 可解除")),
+                broken.contains("她不會再看新的畫面")
+                    && broken.contains("**已經記下來的**")
+                    && broken.contains("consent --revoke cloud-reading")
+                    && broken.contains(&format!("刪掉 {broken_flag} 可解除")),
                 "旗標確定在，刪它有用，那就要說出是哪一個檔：{broken}"
             );
 
@@ -22451,14 +22460,15 @@ pub mod record {
         match sister_core::pause::state(data_dir) {
             PauseState::Recording => None,
             PauseState::Since(ts) => Some(format!(
-                "目前是暫停狀態（從 {} 起），不會記錄任何東西。\
-                 不是裸的 `sister resume`；請跑 `{}` 解除，或刪掉 {}。",
+                "目前是暫停狀態（從 {} 起）。她不會再看新的畫面——但**已經記下來的**那些，解釋層還是會讀、還是可能送給雲端模型、還是會寫成新的卡片；要連那半也停，請跑 `{}`。解除暫停請跑 `{}`（不是裸的 `sister resume`），或刪掉 {}。",
                 crate::fmt::timestamp(ts),
+                cmd(data_dir, "consent --revoke cloud-reading"),
                 cmd(data_dir, "resume"),
                 flag.display()
             )),
             PauseState::FlagPresentButUnreadable => Some(format!(
-                "目前是暫停狀態，不會記錄任何東西。刪掉 {} 可解除。",
+                "目前是暫停狀態。她不會再看新的畫面——但**已經記下來的**那些還是會被送去解讀、寫成新的卡片；要連那半也停，請跑 `{}`。刪掉 {} 可解除。",
+                cmd(data_dir, "consent --revoke cloud-reading"),
                 flag.display()
             )),
             PauseState::FlagUncheckable => Some(format!(
@@ -22496,6 +22506,12 @@ pub mod record {
                 "{since}"
             );
             assert!(
+                since.contains("她不會再看新的畫面")
+                    && since.contains("**已經記下來的**")
+                    && since.contains("consent --revoke cloud-reading"),
+                "暫停停了哪半、沒停哪半、以及另一半的開關都要講出來：{since}"
+            );
+            assert!(
                 since.contains(" resume`")
                     && since.contains(&format!(
                         "--data-dir {}",
@@ -22511,7 +22527,11 @@ pub mod record {
             let broken = pause_warning(&broken_dir).expect("paused warning");
             println!("record/FlagPresentButUnreadable: {broken}");
             assert!(
-                broken.contains("刪掉") && broken.contains("可解除"),
+                broken.contains("她不會再看新的畫面")
+                    && broken.contains("**已經記下來的**")
+                    && broken.contains("consent --revoke cloud-reading")
+                    && broken.contains("刪掉")
+                    && broken.contains("可解除"),
                 "{broken}"
             );
 
