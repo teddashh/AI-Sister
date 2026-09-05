@@ -770,6 +770,27 @@ console.log("㉙ 錄過但一列都沒存：指到 doctor，不指不存在的�
   check("不再指向設定頁的開始記錄段落", !text.includes("設定頁的「開始記錄」"), text);
 }
 
+console.log("㉚ 拔手熱鍵按下去之後，那句話要真的出現在畫面上");
+{
+  // 熱鍵存在的理由是「她不在畫面上的時候我也想按」，所以按完他能讀到的只有
+  // 系統匣那兩行（要點開選單）和這一行。少了這條路，按下去的後果是視窗被叫
+  // 出來、然後一個字都沒多。
+  //
+  // 四種結局裡有兩種的下一步是**相反**的（「沒寫成，可是她已經停了」對上
+  // 「沒寫成，手還接著」），而字母人灰不灰分不出它們——所以驗的是整句話進
+  // 得了那一格，不是「有沒有被叫出來」。句子本身在 `kill_switch.rs` 那邊有
+  // 自己的測試，這裡只證它送得到。
+  const PULLED = "手拔掉了。她現在什麼都不會交給作業系統。";
+  const p = await open({ recording_state: "recording" });
+  await p.fromOutside("hands-pulled", PULLED);
+  check("那句話在狀態行上", p.line().includes(PULLED), p.line());
+
+  // 而且它是「他剛剛按下去的那一下」，所以下一件事要蓋得掉——不然明天早上
+  // 那行字還寫著「手拔掉了」，而他中午就把手接回去了。
+  await p.fromOutside("pause-changed", true);
+  check("下一件事蓋得掉", !p.line().includes(PULLED), p.line());
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——字母人上有話說不出口，或說了活不過下一次輪詢。`);

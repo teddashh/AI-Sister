@@ -103,6 +103,31 @@ pub fn pulled_since(data_dir: &Path) -> Option<i64> {
         .ok()
 }
 
+/// 寫不下那個旗標的原因。粒度只有兩格，因為他做得出來的下一步只有兩種。
+///
+/// **這裡刻意不含 `io::Error` 的原文。** 這幾個字會被拼進一句出現在中文介面
+/// 上的話，而 `io::Error::to_string()` 是英文的——資料目錄的位置上放著一個
+/// 檔案時實測拿到的是 `File exists (os error 17)`，那串字對按下熱鍵的人沒有
+/// 任何用處。原文走 [`HandsHotkeyOutcome::NotWritten::os_error`]，只進 log。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhyNotWritten {
+    /// 這個行程問不出資料目錄在哪。
+    NoDataDir,
+    /// 資料目錄寫不進去：權限、唯讀、被別的程式鎖著、或者那條路上根本不是
+    /// 一個資料夾。
+    CannotWrite,
+}
+
+impl WhyNotWritten {
+    /// 拼進句子裡的那一段。後面會接「，⋯⋯」，所以這裡不帶標點。
+    pub fn zh(self) -> &'static str {
+        match self {
+            Self::NoDataDir => "問不出資料目錄在哪",
+            Self::CannotWrite => "資料目錄寫不進去",
+        }
+    }
+}
+
 /// 按下拔手熱鍵之後，真的發生了什麼。
 ///
 /// 分這幾格是因為使用者的下一步不一樣，而不是因為好看。
@@ -112,23 +137,43 @@ pub enum HandsHotkeyOutcome {
     Pulled { at_ms: i64 },
     /// 本來就拔著；時間是第一次拔的時間。
     AlreadyPulled { since_ms: Option<i64> },
-    /// 問不出資料目錄，所以沒有地方可以寫旗標。手還接著。
-    NoDataDir,
-    /// 寫不進去。手還接著。
-    Failed { why: String },
+    /// 那個旗標**沒有**被寫下來。
+    NotWritten {
+        why: WhyNotWritten,
+        /// 寫失敗之後**再問一次** [`is_pulled`] 的答案。
+        ///
+        /// **「寫成功了沒」和「她會不會動」是兩個問題，而且答案會相反。**
+        /// 交出去之前的最後一刻問的是 [`is_pulled`]（`platform.rs`），而它
+        /// 是 fail-closed 的：資料目錄的位置上放著一個檔案的時候 `pull` 一定
+        /// 失敗，`is_pulled` 卻回 `true`，她一個動作都交不出去。那一格說
+        /// 「她的手還接著」是假話，而且錯在最貴的方向——他會跑去做一件已經
+        /// 不必做的事，同時以為自己還在危險裡。
+        stopped: bool,
+        /// 作業系統的原文。**只給 log，永遠不要拼進句子。** 見 [`WhyNotWritten`]。
+        os_error: Option<String>,
+    },
 }
 
 pub fn press_hands_hotkey(data_dir: Option<&Path>, at_ms: i64) -> HandsHotkeyOutcome {
     let Some(data_dir) = data_dir else {
-        return HandsHotkeyOutcome::NoDataDir;
+        return HandsHotkeyOutcome::NotWritten {
+            why: WhyNotWritten::NoDataDir,
+            // 沒有路徑就沒有東西可以問 `is_pulled`。倒向「她還會動」，因為那
+            // 是要他再去做一件事的方向；把沒停說成停了，是這顆鍵唯一不能犯
+            // 的錯。
+            stopped: false,
+            os_error: None,
+        };
     };
     match pull(data_dir, at_ms) {
         Ok(true) => HandsHotkeyOutcome::Pulled { at_ms },
         Ok(false) => HandsHotkeyOutcome::AlreadyPulled {
             since_ms: pulled_since(data_dir),
         },
-        Err(error) => HandsHotkeyOutcome::Failed {
-            why: error.to_string(),
+        Err(error) => HandsHotkeyOutcome::NotWritten {
+            why: WhyNotWritten::CannotWrite,
+            stopped: is_pulled(data_dir),
+            os_error: Some(error.to_string()),
         },
     }
 }
@@ -143,15 +188,24 @@ pub fn hands_hotkey_message(outcome: &HandsHotkeyOutcome) -> String {
         HandsHotkeyOutcome::AlreadyPulled { since_ms: None } => {
             "手本來就是拔著的（拔手時間讀不到）。".into()
         }
-        HandsHotkeyOutcome::NoDataDir => failure_message("問不出資料目錄"),
-        HandsHotkeyOutcome::Failed { why } => failure_message(why),
+        // 沒寫成，可是她照樣停著。不講那個開關的人會以為自己白按了一下。
+        HandsHotkeyOutcome::NotWritten {
+            why,
+            stopped: true,
+            ..
+        } => format!(
+            "{}，那個開關沒寫下來。不過她現在讀到的狀態就是「拔著」，一樣什麼都不會交給作業系統。",
+            why.zh()
+        ),
+        HandsHotkeyOutcome::NotWritten {
+            why,
+            stopped: false,
+            ..
+        } => format!(
+            "{}，沒能拔掉。她的手還接著——去系統匣按『拔掉她的手』，或在終端機打 `sister hands stop`。",
+            why.zh()
+        ),
     }
-}
-
-fn failure_message(why: &str) -> String {
-    format!(
-        "沒能拔掉：{why}。她的手還接著——去系統匣按『拔掉她的手』，或在終端機打 `sister hands stop`。"
-    )
 }
 
 /// 這一輪要真的去搶哪幾組。
@@ -330,20 +384,62 @@ mod tests {
     fn hotkey_without_data_dir_writes_nothing() {
         let tmp = Tmp::new("hotkey-none");
         let before = std::fs::read_dir(&tmp.0).unwrap().count();
-        assert_eq!(press_hands_hotkey(None, 123), HandsHotkeyOutcome::NoDataDir);
+        assert_eq!(
+            press_hands_hotkey(None, 123),
+            HandsHotkeyOutcome::NotWritten {
+                why: WhyNotWritten::NoDataDir,
+                stopped: false,
+                os_error: None,
+            }
+        );
         assert_eq!(std::fs::read_dir(&tmp.0).unwrap().count(), before);
     }
 
+    /// 資料目錄的位置上放著一個**檔案**：`pull` 一定失敗，而 `is_pulled` 對
+    /// 那一格是 fail-closed 的。
+    ///
+    /// **這一條的重點是那兩個斷言擺在一起。** 這個測試的前一版只斷言了
+    /// 「回的是失敗那一格」和 `is_pulled` 為真——兩句都對，可是它們湊起來
+    /// 說的是「寫失敗了，而她已經停了」，而當時的句子寫著「她的手還接著」。
+    /// 所以現在把 `stopped` 一起釘住：它是**同一件事**的唯一權威。
     #[test]
-    fn hotkey_write_failure_never_claims_success() {
+    fn a_data_dir_that_is_a_file_cannot_be_written_but_still_stops_her() {
         let tmp = Tmp::new("hotkey-failed");
         std::fs::remove_dir_all(&tmp.0).unwrap();
         std::fs::write(&tmp.0, "file").unwrap();
-        assert!(matches!(
-            press_hands_hotkey(Some(&tmp.0), 123),
-            HandsHotkeyOutcome::Failed { .. }
-        ));
-        assert!(is_pulled(&tmp.0));
+        let outcome = press_hands_hotkey(Some(&tmp.0), 123);
+        assert!(
+            matches!(
+                &outcome,
+                HandsHotkeyOutcome::NotWritten {
+                    why: WhyNotWritten::CannotWrite,
+                    stopped: true,
+                    os_error: Some(_),
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert!(is_pulled(&tmp.0), "fail-closed 那一格不成立了，前提變了");
+        let _ = std::fs::remove_file(&tmp.0);
+    }
+
+    /// 作業系統的原文**不可以**出現在那句話裡。
+    ///
+    /// `io::Error::to_string()` 是英文的（上面那一格實測是
+    /// `File exists (os error 17)`），而這句話會被畫在中文介面上。
+    #[test]
+    fn the_sentence_never_carries_the_operating_systems_own_words() {
+        for stopped in [true, false] {
+            let says = hands_hotkey_message(&HandsHotkeyOutcome::NotWritten {
+                why: WhyNotWritten::CannotWrite,
+                stopped,
+                os_error: Some("File exists (os error 17)".into()),
+            });
+            assert!(
+                !says.contains("os error") && !says.contains("File exists"),
+                "作業系統的原文漏進中文句子了（stopped={stopped}）：{says}"
+            );
+        }
     }
 
     #[test]
@@ -372,18 +468,52 @@ mod tests {
 
     #[test]
     fn no_data_dir_message_says_the_hands_are_still_attached() {
-        let message = hands_hotkey_message(&HandsHotkeyOutcome::NoDataDir);
-        assert!(message.contains("還接著"));
-        assert!(!message.contains("拔掉了。"));
+        let message = hands_hotkey_message(&HandsHotkeyOutcome::NotWritten {
+            why: WhyNotWritten::NoDataDir,
+            stopped: false,
+            os_error: None,
+        });
+        assert!(message.contains("還接著"), "{message}");
+        assert!(!message.contains("拔掉了。"), "{message}");
+        assert!(message.contains("問不出資料目錄在哪"), "{message}");
     }
 
     #[test]
     fn write_failure_message_says_the_hands_are_still_attached() {
-        let message = hands_hotkey_message(&HandsHotkeyOutcome::Failed {
-            why: "磁碟滿".into(),
+        let message = hands_hotkey_message(&HandsHotkeyOutcome::NotWritten {
+            why: WhyNotWritten::CannotWrite,
+            stopped: false,
+            os_error: Some("磁碟滿".into()),
         });
-        assert!(message.contains("還接著"));
-        assert!(!message.contains("拔掉了。"));
+        assert!(message.contains("還接著"), "{message}");
+        assert!(!message.contains("拔掉了。"), "{message}");
+    }
+
+    /// 同一個 `why`，`stopped` 兩邊要說**相反**的事。
+    ///
+    /// 只驗一邊的話，把 `stopped` 整個忽略掉（兩臂共用一句）也是綠的——而
+    /// 那正是這一輪修掉的那個 bug。
+    #[test]
+    fn the_two_halves_of_a_failed_write_do_not_share_a_sentence() {
+        let says = |stopped| {
+            hands_hotkey_message(&HandsHotkeyOutcome::NotWritten {
+                why: WhyNotWritten::CannotWrite,
+                stopped,
+                os_error: None,
+            })
+        };
+        let attached = says(false);
+        let stopped = says(true);
+        assert_ne!(attached, stopped, "兩臂講同一句話，`stopped` 等於沒人讀");
+        assert!(attached.contains("還接著"), "{attached}");
+        assert!(
+            !stopped.contains("還接著"),
+            "她已經停了，這句話還在說手接著：{stopped}"
+        );
+        assert!(
+            stopped.contains("什麼都不會交給作業系統"),
+            "沒告訴他「其實已經停了」，他會白跑一趟：{stopped}"
+        );
     }
 
     #[test]

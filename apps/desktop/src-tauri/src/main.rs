@@ -2371,8 +2371,13 @@ fn apply_hotkey(app: &tauri::AppHandle, wanted: &str, hands_wanted: &str) -> Hot
             let shell = app.state::<Shell>();
             let outcome = sister_hands::kill_switch::press_hands_hotkey(
                 shell.data_dir.as_deref(), sister_core::now_ms());
-            tracing::info!("拔手熱鍵：{}", sister_hands::kill_switch::hands_hotkey_message(&outcome));
-            if let Some(win) = app.get_webview_window(PET) { let _ = win.show(); }
+            let says = sister_hands::kill_switch::hands_hotkey_message(&outcome);
+            // 成功也留一行：「拔掉了」和「這段程式根本沒跑到」在一份只記失敗的
+            // 記錄檔裡長得一模一樣，而那正是他按了熱鍵之後唯一想分辨的兩件事。
+            // **作業系統的原文只在這裡出現**——`{outcome:?}` 帶著 `os_error`，
+            // 而那句話刻意不帶（見 `WhyNotWritten` 的 doc）。
+            tracing::info!("拔手熱鍵：{says}（{outcome:?}）");
+            announce_hands_pulled(app, &says);
             refresh_tray(app);
         }).err().map(|e| e.to_string()) };
 
@@ -2406,6 +2411,26 @@ fn announce_hotkey(app: &tauri::AppHandle, paused: bool) {
     if let Some(win) = app.get_webview_window(PET) {
         // 不 `set_focus`：他按下暫停的那一刻，螢幕上多半正有一件他在做的事，
         // 把游標從那件事上搶走不是幫忙。
+        let _ = win.show();
+    }
+}
+
+/// 拔手熱鍵按下去之後，讓他**讀到**那句話。
+///
+/// [`announce_hotkey`] 那一半靠「字母人變灰」就講完了——暫停只有兩種狀態。
+/// 拔手不是：`press_hands_hotkey` 有四種結局，其中兩種（沒寫成而她其實已經
+/// 停了／沒寫成而手真的還接著）的下一步完全相反，而**灰不灰分不出它們**。
+/// 所以這一半一定要把整句話送過去。
+///
+/// 走的是既有的那條 `notice`（前端 `noticeAboutHer`），不是新發明的機制：
+/// 那一格本來就是「他手指剛剛按下去的那一下」的位置。事件另取名字而不是借
+/// `recorder-failed`，是因為這一句多半不是失敗，借那個名字會讓事件名自己說謊。
+///
+/// `show()` 不 `set_focus()`，和上面同一個理由。
+fn announce_hands_pulled(app: &tauri::AppHandle, says: &str) {
+    use tauri::Emitter;
+    let _ = app.emit("hands-pulled", says.to_string());
+    if let Some(win) = app.get_webview_window(PET) {
         let _ = win.show();
     }
 }
