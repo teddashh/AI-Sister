@@ -1012,7 +1012,8 @@ fn collect_jobs(input: &mut InterpretInput<'_>) -> Result<Vec<PreparedJob>> {
         }
         if input
             .db
-            .latest_l2_for_segment(seg.core_started_at)?
+            .l2_versions_for_chapter(seg.core_started_at, seg.core_ended_at)?
+            .last()
             .is_some()
         {
             continue;
@@ -1899,6 +1900,73 @@ mod tests {
         };
         let (fid, _, _) = db.insert_frame(sid, &frame, None, 0).expect("frame");
         fid
+    }
+
+    #[test]
+    fn collect_jobs_skips_a_merged_chapter_with_a_card_on_its_right_half() {
+        use crate::model::{FocusEvent, FocusKind, FocusSnapshot};
+
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_000_050_000;
+        let sid = db.start_session("test", "0").expect("session");
+        for (offset, app) in [
+            (0, "code.exe"),
+            (180_000, "chrome.exe"),
+            (360_000, "notion.exe"),
+        ] {
+            db.insert_focus(
+                sid,
+                &FocusEvent {
+                    ts: ts + offset,
+                    kind: FocusKind::Focus,
+                    snapshot: FocusSnapshot {
+                        app_id: Some(app.into()),
+                        ..Default::default()
+                    },
+                },
+            )
+            .expect("focus");
+        }
+        let before = db
+            .chapters_for_range(ts, ts + 540_000)
+            .expect("chapters before merge");
+        assert_eq!(before.len(), 2, "夾具要先切出左右兩章");
+        let left = before[0].core_started_at;
+        let right = before[1].core_started_at;
+        db.insert_l2_card(&crate::db::L2Insert {
+            segment_core_start: right,
+            segment_ref: &segment_ref(right),
+            activity: "右半已經有卡",
+            entities_json: "[]".into(),
+            continues_json: None,
+            commitments_json: "[]".into(),
+            model_confidence: 0.7,
+            evidence_json: "[]".into(),
+            open_questions_json: "[]".into(),
+            author: crate::db::L2Author::Interpreter,
+        })
+        .expect("card on right half");
+        let merged = db
+            .merge_chapters(left, right, ts, ts + 540_000)
+            .expect("merge chapters");
+        assert_eq!(merged.len(), 1, "左右兩章要真的合併");
+
+        let consent = Consent::default();
+        let brain = crate::config::BrainConfig::default();
+        let jobs = collect_jobs(&mut InterpretInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &brain,
+            from_ts: ts,
+            to_ts: ts + 540_000,
+            limit: 4,
+            only_core_start: Some(left),
+        })
+        .expect("collect jobs");
+        assert!(
+            jobs.is_empty(),
+            "右半已經有活卡的合併章節，不可以再花一次解釋預算"
+        );
     }
 
     fn fake_cli(

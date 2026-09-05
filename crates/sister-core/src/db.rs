@@ -3776,6 +3776,28 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
+    /// 某一章裡最後一條還活著的脈絡之每一版，舊的在前。
+    pub fn l2_versions_for_chapter(
+        &self,
+        core_started_at: Millis,
+        core_ended_at: Millis,
+    ) -> Result<Vec<L2CardRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{L2_SELECT}
+             FROM l2_card
+             WHERE segment_core_start = (
+                 SELECT MAX(segment_core_start)
+                 FROM l2_card
+                 WHERE segment_core_start >= ?1 AND segment_core_start < ?2
+                   AND tombstoned_at IS NULL
+             )
+               AND tombstoned_at IS NULL
+             ORDER BY version, id"
+        ))?;
+        let rows = stmt.query_map(params![core_started_at, core_ended_at], map_l2_row)?;
+        Ok(rows.flatten().collect())
+    }
+
     pub fn l2_by_id(&self, id: i64) -> Result<Option<L2CardRow>> {
         self.conn
             .query_row(

@@ -1797,7 +1797,7 @@ fn memory_current_guess(shell: tauri::State<'_, Shell>) -> Result<CurrentGuessVi
                 });
             };
             let versions = db
-                .l2_versions_for_segment(seg.core_started_at)
+                .l2_versions_for_chapter(seg.core_started_at, seg.core_ended_at)
                 .map_err(|e| format!("{e:#}"))?;
             card = sister_core::brain::latest_with_previous(&versions).map(|(row, previous)| {
                 sister_core::brain::view_from_row_with_previous(row, previous)

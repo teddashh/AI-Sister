@@ -35,7 +35,8 @@ r25 之後：順序搬進 `crates/sister-core/src/brain.rs` 的 `CurrentGuess::d
 
   A. 用 segment 當 key 的查詢，引數逐字對得上。兩支的形狀**不一樣**，
      這一點是 r28 之後才分岔的：
-       - `l2_versions_for_segment(seg.core_started_at)` —— 一條卡片脈絡，起點相等。
+       - `l2_versions_for_chapter(seg.core_started_at, seg.core_ended_at)` —— 一整段的
+         **時間範圍**（半開），先找最後一條活著的卡片脈絡，再讀那條脈絡的版本史。
        - `retained_interpreter_attempts_for_segment(seg.core_started_at,
          seg.core_ended_at)` —— 一整段的**時間範圍**（半開）。r28 之前它也是相等
          查，而使用者合併章節之後，右半那些外送列的鍵就對不上任何一段了。
@@ -256,7 +257,10 @@ for query, expected in (
         "retained_interpreter_attempts_for_segment",
         "seg.core_started_at, seg.core_ended_at",
     ),
-    ("l2_versions_for_segment", "seg.core_started_at"),
+    (
+        "l2_versions_for_chapter",
+        "seg.core_started_at, seg.core_ended_at",
+    ),
 ):
     calls = re.findall(re.escape(query) + r" *\( *([^)]*)\)", flat)
     if not calls:
@@ -527,7 +531,7 @@ if problems:
     sys.exit(1)
 
 print(
-    "✓ 「這一刻」的桌面接線完整（A 卡片查 core_started_at、次數查 "
+    "✓ 「這一刻」的桌面接線完整（A 卡片與次數都查 "
     "[core_started_at, core_ended_at)／B 順序只在 decide 裡、"
     "三個輸入是算出來的／C 欄位有來源／D 回來之後 message 是 status.message()、"
     "錯誤用 ? 往上傳／E 前一版走 latest_with_previous，沒有人手算下標）"
