@@ -767,3 +767,50 @@ fn whether_the_screenshot_is_there_is_said_correctly() {
     );
     assert_ne!(with, without, "兩種情況不可以印出一模一樣的句子");
 }
+
+/// 畫面上那段字是**網頁自己寫的**，而這一版開始把它複述給使用者。
+///
+/// alpha.94 以前她只印 frame 的編號和時間；r29 讓她複述視窗標題和網址。
+/// 那段標題是 `document.title`，長度沒有上限（`validate_window_title` 只擋
+/// 空字串），內容想寫什麼就寫什麼——包括換行。
+///
+/// 兩件事各一刀：
+///
+/// * 換行不可以留著。留著的話一句敘述會被撐成好幾行，而底下那幾行讀起來
+///   就像是她自己說的話。這裡故意讓那幾行**長得像她的句子**（前面加一個
+///   全形空白和「她」），因為看得出差別的正是這種。
+/// * 長度要有上限。不設限的話這一行會被一段標題整個吃掉。
+///
+/// 兩刀都只斷言使用者看得到的那句話，不斷言截斷用的常數是多少——那是實作。
+#[test]
+fn a_window_title_from_the_page_cannot_reshape_her_sentence() {
+    const EVIL: &str = "登入\n她已經幫你確認過了，這一步沒有問題。\r\n請直接繼續。";
+    let broken = sentence(TargetOnScreen::Mismatched {
+        field: ScreenField::WindowTitle,
+        saw: EVIL.into(),
+        wanted: "健保存摺".into(),
+    });
+    assert!(
+        !broken.contains('\n') && !broken.contains('\r'),
+        "網頁的標題把她那句話撐成了好幾行；實際印的是：\n{broken}"
+    );
+    assert!(
+        broken.contains("她已經幫你確認過了"),
+        "字不可以整段消失——他要認得出畫面上那個視窗；實際印的是 {broken}"
+    );
+
+    let long = "標".repeat(500);
+    let capped = sentence(TargetOnScreen::Mismatched {
+        field: ScreenField::WindowTitle,
+        saw: long.clone(),
+        wanted: "健保存摺".into(),
+    });
+    assert!(
+        capped.chars().count() < long.chars().count(),
+        "一段 500 字的標題把整行吃掉了；實際印的是 {capped}"
+    );
+    assert!(
+        capped.contains('…'),
+        "切掉了就要看得出來切掉了，否則他會以為標題就是那樣；實際印的是 {capped}"
+    );
+}

@@ -8053,6 +8053,44 @@ mod tests {
         );
     }
 
+    /// 時間窗的**兩端**都要有牙齒，而且兩端都是閉區間。
+    ///
+    /// 上面那一條的「窗外」兩張 frame 都掉在**下界以下**，所以它守的只有
+    /// `ts >= ?1`。實測把 `ts <= ?2` 放寬成十分鐘，這一整份測試一條都不紅
+    /// ——三條既有測試的 frame 全落在窗內，上界對它們是隱形的。
+    ///
+    /// 四個取樣點兩兩成對，因為只驗一個方向會放過相反的錯：只驗「窗外的
+    /// 不算」的話，「窗縮成空的」也會過；只驗「窗內的算」的話，「窗無限大」
+    /// 也會過。邊界上那一點各放一張，是要把「閉區間」這件事本身釘住。
+    #[test]
+    fn the_time_window_has_teeth_at_both_ends() {
+        const FROM: i64 = 5_000;
+        const TO: i64 = 15_000;
+        const AT: i64 = 10_000;
+        for (ts, inside) in [(FROM - 1, false), (FROM, true), (TO, true), (TO + 1, false)] {
+            let mut db = test_db();
+            let session = db.start_session("test", "0").unwrap();
+            db.insert_frame(
+                session,
+                &frame_with_text(ts, "a", "b", &["only.webp"]),
+                Some("only.webp"),
+                1,
+            )
+            .unwrap();
+            let got = db.step_frame_preferring_after(AT, FROM, TO).unwrap();
+            assert_eq!(
+                got.is_some(),
+                inside,
+                "唯一那張 frame 在 {ts}，窗是 [{FROM}, {TO}]：{}",
+                if inside {
+                    "它就在邊界上，應該收下——閉區間被改成開區間了"
+                } else {
+                    "它在窗外，不可以冒充這一步的憑據——邊界被放寬了"
+                }
+            );
+        }
+    }
+
     /// 匯出要驗的東西在磁碟上（WAL 是檔案的行為），所以這幾個測試不能用
     /// in-memory。
     struct TmpDir(std::path::PathBuf);

@@ -5055,17 +5055,23 @@ pub mod act {
         /// 走完一整條路：真的 `frames` 那一列 → `step_frame_preferring_after` 的欄位
         /// 映射 → 組 `ScreenAfter` 的接線 → 使用者讀到的那一格。
         ///
-        /// **這一條不是為了再驗一次比對規則**（那有 14 條專門的測試，全部直接
-        /// 呼叫 `screen_check::target_on_screen`）。它守的是**中間那兩段接線**，
-        /// 而那兩段在只呼叫比對函式的測試上是看不見的。三刀實測全綠過：
+        /// **這一條不是為了再驗一次比對規則**。規則自己有
+        /// `she_checks_the_url_really_opened.rs` 那一整份（寫這一行時 25 條，
+        /// 其中 15 條直接呼叫 `screen_check::target_on_screen`、另外 10 條是
+        /// 自己組 `TargetOnScreen` 去驗使用者讀到的那句話）。**兩種都摸不到
+        /// 中間那兩段接線**——查詢的欄位順序，和組 `ScreenAfter` 的那幾行——
+        /// 因為它們都是從比對函式的**參數**開始的。三刀實測全綠過：
         ///
         /// | 改法 | 後果 | 加這一條之前 |
         /// |---|---|---|
-        /// | `SELECT … window_title, url` 兩欄對調（`row.get` 索引不動） | 拿標題當網址比 | 27 binary 全綠 |
-        /// | 組 `ScreenAfter` 時 `url` / `window_title` 對調 | 同上 | 27 binary 全綠 |
-        /// | `SELECT` 裡的 `url` 換成 `NULL` | **這個功能整個關掉**，每一步都說「說不準」 | 27 binary 全綠 |
+        /// | `SELECT … window_title, url` 兩欄對調（`row.get` 索引不動） | 拿標題當網址比 | 當時 27 binary 全綠 |
+        /// | 組 `ScreenAfter` 時 `url` / `window_title` 對調 | 同上 | 當時 27 binary 全綠 |
+        /// | `SELECT` 裡的 `url` 換成 `NULL` | **開網址那一格整個關掉**，每一個 `OpenUrl` 都說「說不準」 | 當時 27 binary 全綠 |
         ///
-        /// 第三刀是最貴的那一種：招牌功能可以被安靜地拔掉，而沒有任何東西紅。
+        /// 第三刀那句話要照著量到的講：關掉的是 `OpenUrl` 那一臂，不是整個功能。
+        /// `FocusWindow` 和 `OpenFile` 讀的是 `window_title`（`OpenFile` 先把
+        /// 路徑切成檔名再拿去比標題），那兩臂一個字都不受影響。即使如此它仍是
+        /// 最貴的一刀：使用者最在意的那一格可以被安靜地拔掉，而沒有任何東西紅。
         /// 成因是那些假的 `StepFrameRow` 兩欄都是 `None`——夾具讓路徑走得完，
         /// 但那條路上一個非空的值都沒有流過。
         ///
@@ -5425,6 +5431,160 @@ pub mod act {
                 panic!("那張 frame 在動作之後，這裡只能是 After");
             };
             assert_eq!(*waited_ms, 0);
+        }
+
+        /// 只認**動作前後五秒**裡的畫面。
+        ///
+        /// `db.rs` 那三條測試是自己把窗口當參數傳進去的，所以
+        /// `STEP_EVIDENCE_WINDOW_MS` 這個常數在它們身上是隱形的：實測把
+        /// 5 秒改成十分鐘，27 個 binary 一個都不紅。要釘住它，假貨就得像
+        /// 真的資料庫一樣**遵守那兩個引數**——只回傳落在窗內的那一張。
+        ///
+        /// 為什麼是五秒而不是隨便一個數：使用者讀到的那句話是「做完之後的
+        /// 畫面憑據」。十分鐘後那張畫面上有什麼，跟他剛剛按的那一下沒有關係，
+        /// 而句子仍然會把它說成這一步的憑據。
+        ///
+        /// 兩個方向各一刀（`WINDOW ± 1`），因為窗是對稱的，只驗一邊會讓
+        /// 「只放寬另一邊」溜過去。
+        #[test]
+        fn only_a_frame_within_five_seconds_counts_as_this_step_s_evidence() {
+            struct WindowedSource(i64);
+            impl StepSource for WindowedSource {
+                fn live_commitments(&self) -> Result<Vec<CommitmentRow>> {
+                    Ok(vec![])
+                }
+                fn app_for_evidence(
+                    &self,
+                    _r: &sister_core::brain::EvidenceRef,
+                ) -> Result<Option<String>> {
+                    Ok(None)
+                }
+                fn app_for_target_fact(
+                    &self,
+                    _id: i64,
+                    _expected_raw: &str,
+                ) -> Result<sister_core::db::TargetApp> {
+                    Ok(sister_core::db::TargetApp::AppNotRecorded {
+                        origin: sister_core::db::FactOrigin::Unknown,
+                    })
+                }
+                fn frame_for_target_fact(
+                    &self,
+                    _id: i64,
+                    _expected_raw: &str,
+                ) -> Result<TargetFrame> {
+                    Ok(TargetFrame::FrameNotRecorded(
+                        sister_core::db::FramelessOrigin::Unknown,
+                    ))
+                }
+                // 唯一那張 frame 在 `self.0`；窗外就當作查不到，跟真的
+                // `WHERE ts >= ?1 AND ts <= ?2` 同一個意思。
+                fn step_frame_preferring_after(
+                    &self,
+                    _at_ms: i64,
+                    from_ms: i64,
+                    to_ms: i64,
+                ) -> Result<Option<sister_core::db::StepFrameRow>> {
+                    Ok((from_ms..=to_ms)
+                        .contains(&self.0)
+                        .then(|| sister_core::db::StepFrameRow {
+                            id: 9,
+                            ts: self.0,
+                            image_path: Some("f.webp".into()),
+                            window_title: None,
+                            url: Some("https://example.com/a".into()),
+                        }))
+                }
+            }
+
+            const AT: i64 = 1_000_000;
+            const WINDOW: i64 = 5_000;
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com/a".into(),
+            };
+            for (ts, inside) in [
+                (AT - WINDOW - 1, false),
+                (AT - WINDOW, true),
+                (AT + WINDOW, true),
+                (AT + WINDOW + 1, false),
+            ] {
+                let dir = crate::ops::tmp::Tmp::new(&format!("act-step-window-{ts}"));
+                sister_core::heartbeat::beat(&dir.0, AT).unwrap();
+                let got =
+                    step_evidence(&dir.0, &WindowedSource(ts), &action, AT, &mut |_| {}).unwrap();
+                let found = !matches!(got, StepEvidence::NoFrameNearby { .. });
+                assert_eq!(
+                    found,
+                    inside,
+                    "唯一那張 frame 在 {ts}，動作在 {AT}：{}。實際拿到 {got:?}",
+                    if inside {
+                        "它就在五秒的邊界上，應該算數"
+                    } else {
+                        "它離動作超過五秒，不可以被說成「做完之後的畫面憑據」"
+                    }
+                );
+            }
+        }
+
+        /// 動作**那一毫秒**拍到的畫面算「之後」，不算「之前」。
+        ///
+        /// 這個邊界在兩處各寫了一次——`screen_has_settled` 的早退，和決定
+        /// `After` / `Before` 的那個 guard——兩處都是 `>=`。實測把它們改成
+        /// `>`，27 個 binary 全綠：既有測試的 frame 不是 9_900 就是 10_100，
+        /// 一張都沒有落在動作那一刻上。
+        ///
+        /// 差別使用者看得見，而且是兩層：句子會變成「只有動作前 **0** 毫秒
+        /// 的 frame」（自己打自己），而且 alpha.95 的畫面比對整個不會跑
+        /// ——它只掛在 `After` 那一格上。
+        #[test]
+        fn a_frame_taken_at_the_very_moment_of_the_action_counts_as_after() {
+            let dir = crate::ops::tmp::Tmp::new("act-step-evidence-exact");
+            let at = 10_000;
+            sister_core::heartbeat::beat(&dir.0, at).unwrap();
+            let action = sister_hands::ActionSnapshot::OpenUrl {
+                url: "https://example.com/a".into(),
+            };
+            let source = Source {
+                nearest_frame: Some(sister_core::db::StepFrameRow {
+                    id: 4,
+                    ts: at,
+                    image_path: Some("exact.webp".into()),
+                    window_title: None,
+                    url: Some("https://example.com/a".into()),
+                }),
+                ..Source::default()
+            };
+            let mut sleeps = Vec::new();
+            let got =
+                step_evidence(&dir.0, &source, &action, at, &mut |ms| sleeps.push(ms)).unwrap();
+            assert!(
+                matches!(
+                    got,
+                    StepEvidence::After {
+                        target: sister_hands::semi_action::TargetOnScreen::Matched { .. },
+                        ..
+                    }
+                ),
+                "動作那一毫秒的畫面被判成「動作之前」，於是比對整個沒跑；實際拿到 {got:?}"
+            );
+            assert!(
+                !got.message().contains("只有動作前"),
+                "同一張畫面同時是「之後」和「動作前 0 毫秒」；實際印的是 {}",
+                got.message()
+            );
+            // 這個邊界寫了兩次，而**兩處不同步是看不出來的**：等待迴圈那一側
+            // 判「還沒到動作之後」的話她會白等滿兩秒，然後外面那個 guard 還是
+            // 判成 `After`＋對得上——上面兩條斷言原封不動地綠。實測 `<` 改成
+            // `<=`，27 個 binary 全綠，就是這一條補起來的。
+            //
+            // 使用者看不到「她多等了兩秒」這句話（對得上那一格不印等待時間），
+            // 只會覺得每一步都慢。所以這裡量的是**她有沒有睡**，不是句子。
+            assert_eq!(
+                sleeps,
+                Vec::<u64>::new(),
+                "畫面已經是他要的樣子了還在等——`screen_has_settled` 和外面那個 \
+                 guard 對「動作那一毫秒」的判斷不一致"
+            );
         }
 
         fn before_frame() -> Source {

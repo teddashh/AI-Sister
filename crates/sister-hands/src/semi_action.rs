@@ -649,13 +649,13 @@ impl StepEvidence {
                 // 看到的其實可能是同一個網站的登入牆。
                 let ending = match target {
                     TargetOnScreen::Matched { field: ScreenField::Url, saw, .. } =>
-                        format!("，那張畫面的網址也在 {saw} 上——她比的是網站，不是你停在哪一頁。"),
+                        format!("，那張畫面的網址也在 {} 上——她比的是網站，不是你停在哪一頁。", one_line(saw)),
                     TargetOnScreen::Matched { field: ScreenField::WindowTitle, saw, wanted } =>
-                        format!("，那張畫面的視窗標題「{saw}」裡有「{wanted}」——她比的是標題含不含這幾個字。"),
+                        format!("，那張畫面的視窗標題「{}」裡有「{}」——她比的是標題含不含這幾個字。", one_line(saw), one_line(wanted)),
                     TargetOnScreen::Mismatched { field: ScreenField::Url, saw, wanted } =>
-                        format!("，但那張畫面的網址在 {saw} 上，不是你要開的 {wanted}——這一步有沒有真的做到，她沒有把握。"),
+                        format!("，但那張畫面的網址在 {} 上，不是你要開的 {}——這一步有沒有真的做到，她沒有把握。", one_line(saw), one_line(wanted)),
                     TargetOnScreen::Mismatched { field: ScreenField::WindowTitle, saw, wanted } =>
-                        format!("，但那張畫面的視窗標題是「{saw}」，裡面沒有「{wanted}」——這一步有沒有真的做到，她沒有把握。"),
+                        format!("，但那張畫面的視窗標題是「{}」，裡面沒有「{}」——這一步有沒有真的做到，她沒有把握。", one_line(saw), one_line(wanted)),
                     TargetOnScreen::CannotTell { why: CannotTell::NothingOnScreen { field: ScreenField::Url } } =>
                         "。這台機器沒有探到那張畫面的網址欄，所以這只證明畫面變了，不證明變成你要的樣子。".to_string(),
                     TargetOnScreen::CannotTell { why: CannotTell::NothingOnScreen { field: ScreenField::WindowTitle } } =>
@@ -711,6 +711,48 @@ impl StepEvidence {
             ),
         }
     }
+}
+
+/// 把畫面上抓來的一段字，收成塞得進一句話裡的樣子。
+///
+/// **這是 r29 才長出來的需求。** alpha.94 以前她只印 frame 的編號和時間，
+/// 從來沒有把畫面上的**內容**複述給使用者；這一版開始複述了，而那段內容
+/// 是網頁自己寫的（`document.title` 想寫什麼就寫什麼），長度沒有上限
+/// ——`validate_window_title` 只擋空字串。
+///
+/// 兩件事：
+///
+/// * **換行和控制字元換成空格。** 留著換行的話，一句敘述會被撐成好幾行，
+///   而底下那幾行看起來就像是她自己說的話。這一步不是為了防禦某個具體的
+///   攻擊，是因為這句話的**形狀**是一行。
+/// * **超過 60 個字就切掉，補一個 `…`。** 這句話的用途是讓他認得出畫面上
+///   那個視窗，不是把整段標題原文搬過來。
+///
+/// 切的單位是 `char` 不是 byte，中文標題在 byte 邊界切會 panic。
+///
+/// **沒有解決的：** 標題裡本來就有「」的話，引號還是會看起來對不齊。
+/// 換一套跳脫規則要動到十句話的排版，而那個歪法看得出來是歪的
+/// （字還在，只是括號多了一層），比截斷更不容易讓人讀錯。
+fn one_line(text: &str) -> String {
+    const CAP: usize = 60;
+    let flat: String = text
+        .chars()
+        // `is_control` 是 Unicode 的 Cc；U+2028 / U+2029 是 Zl / Zp，
+        // 不在裡面，但它們一樣會換行。
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let flat = flat.trim();
+    let mut out: String = flat.chars().take(CAP).collect();
+    if flat.chars().count() > CAP {
+        out.push('…');
+    }
+    out
 }
 
 impl StepWait {
