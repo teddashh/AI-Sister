@@ -3148,12 +3148,11 @@ pub mod act {
             if let Some((fact_id, expected_raw)) = commitment
                 .allowed_next_step_fact
                 .zip(expected_target.as_deref())
+                && let Some(target_ts) = source.target_fact_ts(fact_id, expected_raw)?
             {
-                if let Some(target_ts) = source.target_fact_ts(fact_id, expected_raw)? {
-                    let previous = previous_step_seconds(&log.replay()?.events, target_ts);
-                    let motion = human_motion(source.input_window_covering(target_ts)?);
-                    writeln!(out, "{}", target_drive_sentence(previous, motion))?;
-                }
+                let previous = previous_step_seconds(&log.replay()?.events, target_ts);
+                let motion = human_motion(source.input_window_covering(target_ts)?);
+                writeln!(out, "{}", target_drive_sentence(previous, motion))?;
             }
             if opts.dry_run {
                 writeln!(out)?;
@@ -3735,6 +3734,255 @@ pub mod act {
             assert!(line.contains("她的上一步就在這之前 2 秒；"), "{line}");
             assert!(line.contains("你在動鍵盤滑鼠"), "{line}");
             assert!(line.contains("不表示是你叫出這個東西的"), "{line}");
+        }
+
+        /// r35 收貨考題（派工前寫好的）：**「沒人碰」和「這台機器沒在記」
+        /// 是兩件事**。壓成一句，使用者會把「不知道」讀成「確定沒人碰」。
+        #[test]
+        fn ted_not_measured_does_not_borrow_the_nobody_touched_wording() {
+            let unknown = target_drive_sentence(None, HumanMotion::NotMeasured);
+            assert!(
+                !unknown.contains("一下都沒有動"),
+                "答不出來那一句借用了「沒人碰」的措辭：{unknown}"
+            );
+        }
+
+        /// 三格必須兩兩不同，不是只有一對不同。
+        #[test]
+        fn ted_all_three_motions_say_different_things() {
+            let all = [
+                HumanMotion::HumanActive,
+                HumanMotion::NobodyTouched,
+                HumanMotion::NotMeasured,
+            ];
+            for (i, a) in all.iter().enumerate() {
+                for b in &all[i + 1..] {
+                    assert_ne!(
+                        target_drive_sentence(None, *a),
+                        target_drive_sentence(None, *b),
+                        "{a:?} 和 {b:?} 講同一句話"
+                    );
+                }
+            }
+        }
+
+        /// 「那段時間有人在動」不等於「是你叫出這個東西的」。
+        /// 針取的是**否定子句本身**，不是產品那一整句的手抄本。
+        #[test]
+        fn ted_active_wording_carries_an_explicit_disclaimer() {
+            let says = target_drive_sentence(None, HumanMotion::HumanActive);
+            // 針不能只取「是你叫出」——產品那句正是靠緊鄰在前的「不表示」
+            // 把它否定掉的。要問的是**每一次**出現都有沒有被否定，
+            // 而不是句子裡有沒有某個字。
+            for claim in ["是你叫出", "是你打開", "由你開啟"] {
+                for (at, _) in says.match_indices(claim) {
+                    let before = &says[..at];
+                    assert!(
+                        before.ends_with("不表示")
+                            || before.ends_with("不代表")
+                            || before.ends_with("不等於"),
+                        "「{claim}」沒有被緊鄰的否定詞蓋住，這句話在宣稱因果：{says}"
+                    );
+                }
+            }
+            assert!(
+                says.contains("不表示") || says.contains("不代表") || says.contains("不等於"),
+                "沒有把「有人在動 ≠ 是你叫出來的」講出來：{says}"
+            );
+        }
+
+        /// 這條測試一律按「不要」，所以它不該被呼叫到——被呼叫到就是流程走錯了。
+        struct NeverRuns;
+        impl sister_hands::Executor for NeverRuns {
+            fn execute(&mut self, _: &sister_hands::Suggestion) -> Result<String, String> {
+                panic!("按了「不要」還是執行了")
+            }
+            fn hands_attached(&self) -> sister_hands::Attached {
+                sister_hands::Attached::Yes
+            }
+        }
+
+        /// 把「誰驅動的」那一句接到**真正的出口**上。
+        ///
+        /// r35 收貨時我下了一刀：把 `writeln!` 換成 `let _ = (&previous, &motion);`
+        /// ——值照算、就是不印——**全部測試都是綠的**。成因是 `StepSource` 給那兩支
+        /// 新方法留了回 `Ok(None)` 的預設實作，而所有測試假貨都沒有覆寫它，
+        /// 於是那一段在整個測試套件裡從來沒有被走進去過。讓測試綠的是夾具，
+        /// 不是機制。這個雙層 wrapper 存在的唯一理由就是把那一格走一次。
+        struct Driven {
+            inner: Source,
+            fact_ts: Option<i64>,
+            window: Option<sister_core::model::InputMetrics>,
+        }
+
+        impl StepSource for Driven {
+            fn live_commitments(&self) -> Result<Vec<CommitmentRow>> {
+                self.inner.live_commitments()
+            }
+            fn app_for_evidence(
+                &self,
+                r: &sister_core::brain::EvidenceRef,
+            ) -> Result<Option<String>> {
+                self.inner.app_for_evidence(r)
+            }
+            fn app_for_target_fact(
+                &self,
+                id: i64,
+                expected_raw: &str,
+            ) -> Result<sister_core::db::TargetApp> {
+                self.inner.app_for_target_fact(id, expected_raw)
+            }
+            fn frame_for_target_fact(&self, id: i64, expected_raw: &str) -> Result<TargetFrame> {
+                self.inner.frame_for_target_fact(id, expected_raw)
+            }
+            fn target_fact_ts(&self, _id: i64, _expected_raw: &str) -> Result<Option<i64>> {
+                Ok(self.fact_ts)
+            }
+            fn input_window_covering(
+                &self,
+                _ts: i64,
+            ) -> Result<Option<sister_core::model::InputMetrics>> {
+                Ok(self.window)
+            }
+            fn step_frame_preferring_after(
+                &self,
+                at_ms: i64,
+                from_ms: i64,
+                to_ms: i64,
+            ) -> Result<Option<sister_core::db::StepFrameRow>> {
+                self.inner
+                    .step_frame_preferring_after(at_ms, from_ms, to_ms)
+            }
+        }
+
+        fn drive_line(window: Option<sister_core::model::InputMetrics>) -> String {
+            let dir = crate::ops::tmp::Tmp::new("r35-drive-line");
+            let source = Driven {
+                inner: Source {
+                    rows: vec![card(
+                        1,
+                        Some(&open_url("https://example.com/a")),
+                        &[1],
+                        Some(7),
+                    )],
+                    apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                    target_frames: Default::default(),
+                    nearest_frame: None,
+                },
+                fact_ts: Some(1_700_000_000_000),
+                window,
+            };
+            let mut executor = NeverRuns;
+            let mut input = std::io::Cursor::new("不要\n".as_bytes());
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &opts("任務", &["chrome.exe"], 3, 5, false),
+                &source,
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .unwrap();
+            String::from_utf8(out).unwrap()
+        }
+
+        /// 三種狀態都要**真的印到使用者面前**，而且是三句不同的話。
+        #[test]
+        fn ted_the_drive_sentence_reaches_the_user_at_the_real_exit() {
+            let zero = sister_core::model::InputMetrics::default();
+            let active = sister_core::model::InputMetrics {
+                keystrokes: 1,
+                ..zero
+            };
+
+            let unmeasured = drive_line(None);
+            let untouched = drive_line(Some(zero));
+            let human = drive_line(Some(active));
+
+            assert!(
+                unmeasured.contains("沒有在記輸入"),
+                "「這台機器沒在記輸入」沒有印到使用者面前：{unmeasured}"
+            );
+            assert!(
+                untouched.contains("一下都沒有動"),
+                "「沒人碰」沒有印到使用者面前——這是這一輪唯一有價值的訊號：{untouched}"
+            );
+            assert!(
+                human.contains("你在動鍵盤滑鼠"),
+                "「你在動」沒有印到使用者面前：{human}"
+            );
+            // 三句話真的不一樣，而且是在**同一個出口**上不一樣。
+            assert!(!untouched.contains("沒有在記輸入"), "{untouched}");
+            assert!(!human.contains("一下都沒有動"), "{human}");
+        }
+
+        struct AlwaysSucceeds;
+        impl sister_hands::Executor for AlwaysSucceeds {
+            fn execute(&mut self, _: &sister_hands::Suggestion) -> Result<String, String> {
+                Ok("做完了".into())
+            }
+            fn hands_attached(&self) -> sister_hands::Attached {
+                sister_hands::Attached::Yes
+            }
+        }
+
+        /// 她做過上一步的時候，仍然要照實說「你在動鍵盤滑鼠」。
+        ///
+        /// 派工單第 2 節明講兩個訊號要各自獨立，因為它們可以**同時成立**。
+        /// 收貨時我下的 M6 是：`if previous.is_some() { NobodyTouched }`——
+        /// 讓訊號 A 替訊號 B 投票。交回來的測試抓不到它（它只測格式化函式，
+        /// 而兩個訊號是在呼叫端算出來的），所以這一條打在呼叫端上。
+        #[test]
+        fn ted_her_previous_step_does_not_overwrite_what_the_human_did() {
+            let dir = crate::ops::tmp::Tmp::new("r35-two-signals");
+            let source = Driven {
+                inner: Source {
+                    rows: vec![
+                        card(1, Some(&open_url("https://example.com/a")), &[1], Some(7)),
+                        card(2, Some(&open_url("https://example.com/b")), &[1], Some(8)),
+                    ],
+                    apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                    target_frames: Default::default(),
+                    nearest_frame: None,
+                },
+                // 第二張卡的目標比她的上一步晚幾秒，所以前綴會出現。
+                fact_ts: Some(1_700_000_020_000),
+                window: Some(sister_core::model::InputMetrics {
+                    keystrokes: 12,
+                    ..Default::default()
+                }),
+            };
+            let mut executor = AlwaysSucceeds;
+            let mut input = std::io::Cursor::new("好\n不要\n".as_bytes());
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &opts("任務", &["chrome.exe"], 3, 5, false),
+                &source,
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .unwrap();
+            let out = String::from_utf8(out).unwrap();
+
+            assert!(
+                out.contains("她的上一步就在這之前"),
+                "她確實做過上一步，前綴卻沒有出現——訊號 A 沒有接上：{out}"
+            );
+            assert!(
+                out.contains("你在動鍵盤滑鼠"),
+                "人明明在動鍵盤滑鼠（keystrokes=12），卻沒有這樣說。\
+                 最可能的原因是訊號 A 替訊號 B 投了票：{out}"
+            );
+            assert!(
+                !out.contains("一下都沒有動"),
+                "她做過上一步，就把「人有沒有在動」蓋成「沒人碰」——\
+                 這正是派工單第 2 節禁止的合票：{out}"
+            );
         }
 
         #[test]
