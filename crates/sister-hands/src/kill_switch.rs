@@ -681,6 +681,29 @@ mod tests {
         }
     }
 
+    /// 四顆修飾鍵不可以共用同一格。
+    ///
+    /// 上面那條語料**全是別名等式**（`KeyH`＝`H`、`Control`＝`Ctrl`…），而等式
+    /// 對「有沒有把兩個不同的修飾鍵併在一起」是瞎的：把 `"COMMAND" | "CMD" |
+    /// "SUPER"` 那一臂寫成 `modifiers[0] = true`（併進 CTRL），六對等式仍然全綠。
+    /// 而 `Super+Alt+H` 從此會被判成和 `Ctrl+Alt+H` 撞號——他的暫停熱鍵一聲不響
+    /// 地不註冊，設定頁只說「撞號了」，那是一句假話。
+    ///
+    /// 四取二全跑，一格都不留。
+    #[test]
+    fn the_four_modifiers_never_share_a_bucket() {
+        let each = ["Ctrl+H", "Alt+H", "Shift+H", "Super+H"];
+        for (i, a) in each.iter().enumerate() {
+            for b in &each[i + 1..] {
+                assert_eq!(
+                    plan_hotkeys(a, b).collided,
+                    None,
+                    "{a} 和 {b} 按下去是兩件事，不是撞號"
+                );
+            }
+        }
+    }
+
     #[test]
     fn hotkey_plan_keeps_different_keys_apart() {
         assert_eq!(
@@ -696,18 +719,61 @@ mod tests {
         assert!(!says.contains("File exists"));
     }
 
+    /// 那句話要真的讀它拿到的理由。
+    ///
+    /// 上面那條只呼叫一次、參數寫死 `CannotWrite`，於是「這支函式有沒有真的讀
+    /// `why`」零覆蓋——在本體加一行 `let _ = why;` 再寫死一格，它照樣綠。而
+    /// `NoDataDir` 正是 `main.rs` 那個 `data_dir == None` 真的到得了的格子：
+    /// 挑錯格的話他會跑去改資料夾權限，而問題根本不在那裡，同時她的手還接著。
+    #[test]
+    fn the_tray_failure_sentence_reads_the_reason_it_was_given() {
+        for why in [WhyNotWritten::NoDataDir, WhyNotWritten::CannotWrite] {
+            let says = tray_hands_failure_message(why);
+            assert!(
+                says.contains(why.zh()),
+                "{why:?} 那一格要講它自己的理由，不可以借隔壁那一格的：{says}"
+            );
+        }
+        assert_ne!(
+            tray_hands_failure_message(WhyNotWritten::NoDataDir),
+            tray_hands_failure_message(WhyNotWritten::CannotWrite),
+            "兩格要講不一樣的話——他讀完要做的事不一樣。"
+        );
+    }
+
     /// 問不出資料目錄的時候，那兩顆按鈕只准寫動作，不准宣稱狀態。
     ///
     /// 這一條是突變刀 S1 逼出來的：把這支函式的回傳值換成
     /// `"把手接回去（現在沒拔）"`——也就是這一輪 §3 才修掉的那個 bug，原封不動
-    /// 搬到隔壁一個檔案——十二刀跑完**沒有任何一把尺紅**。`exam-r33.py` 只掃
-    /// `main.rs`，而這支函式是這一輪新加的，在此之前零測試呼叫端。
+    /// 搬到隔壁一個檔案——十二刀跑完**沒有任何一把尺紅**。
+    /// `scripts/check-hands-hotkey-says.py` 只掃 `main.rs`，而這支函式是這一輪
+    /// 新加的，在此之前零測試呼叫端。
     ///
-    /// 對照的是產品自己在「知道狀態」時吐的字：那兩支都用一個括號補述狀態
-    /// （`（已經拔了…）`／`（現在沒拔）`）。問不出來的時候要的正是沒有那個括號。
+    /// **不要把「沒有括號」讀成「這裡編碼了『不知道』」。** 我第一版的 doc 寫
+    /// 「那兩支都用一個括號補述狀態」——那是假的：`tray_hands_stop_label` 在
+    /// 「沒拔」時回的就是裸的「拔掉她的手」，`tray_hands_resume_label` 在
+    /// 「拔著」時回的就是裸的「把手接回去」。所以這兩顆的字和**已知狀態那一半**
+    /// 逐字相同。這條測試守的只是「不要多長出一句狀態宣稱」。
     #[test]
     fn the_unknown_labels_never_claim_a_state() {
         let (stop, resume) = tray_hands_unknown_labels();
+
+        // 順序也要釘。四個被禁的字擋不住把 tuple 對調，而對調之後系統匣最上面
+        // 那顆會寫「把手接回去」——那本身就暗示現在是拔著的，正是這條測試自稱
+        // 在擋的東西。拿產品自己在已知狀態下吐的字當尺，不手抄。
+        let dir = Tmp::new("unknown-order");
+        assert_eq!(
+            stop,
+            tray_hands_stop_label(&dir.0),
+            "第 0 格是「拔掉」那一顆（拿沒拔的資料目錄當對照）。"
+        );
+        pull(&dir.0, 1).expect("pull");
+        assert_eq!(
+            resume,
+            tray_hands_resume_label(&dir.0),
+            "第 1 格是「接回」那一顆（拿拔著的資料目錄當對照）。"
+        );
+
         for label in [&stop, &resume] {
             assert!(
                 !label.contains('（'),

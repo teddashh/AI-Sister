@@ -19,8 +19,9 @@ use sister_hands::kill_switch::plan_hotkeys;
 /// 設定檔那個寫入端（出廠值）吐 key 形狀 `Ctrl+Alt+H`；設定頁那個寫入端
 /// （`settings.js` 的 `comboOf` 推 `e.code`）吐 code 形狀 `Ctrl+Alt+KeyH`。
 /// 出廠值**跟產品要**、不手抄；code 形狀那一串是手寫的，所以
-/// `exam-r33.py` 另有一條在守「`comboOf` 還在推 `e.code`」——那一邊的慣例
-/// 一改，這裡的配對就要重新推導。
+/// `scripts/check-hands-hotkey-says.py` 的 ① 在守「`comboOf` 還在推 `e.code`」
+/// ——那一邊的慣例一改，這裡的配對就要重新推導（那一條紅了要回去重推，不是
+/// 把它改綠）。
 #[test]
 fn the_two_real_writers_are_recognised_as_the_same_key() {
     let factory = Config::default().shell.hands_stop_shortcut;
