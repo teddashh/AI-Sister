@@ -1322,6 +1322,14 @@ mod tests {
         assert_eq!(latest_with_previous(&[10]), Some((&10, None)));
         assert_eq!(latest_with_previous(&[10, 20]), Some((&20, Some(&10))));
         assert_eq!(latest_with_previous(&[10, 20, 30]), Some((&30, Some(&20))));
+        assert_eq!(
+            latest_with_previous(&[10, 20, 30, 40]),
+            Some((&40, Some(&30)))
+        );
+        assert_eq!(
+            latest_with_previous(&[10, 20, 30, 40, 50]),
+            Some((&50, Some(&40)))
+        );
     }
 
     fn recording_facts(latest_closed: Option<LatestClosedSegment>) -> RecordingFacts {

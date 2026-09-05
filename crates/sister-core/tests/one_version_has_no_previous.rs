@@ -36,7 +36,7 @@
 //! `cargo test --workspace` 碰不到它，在 `main.rs` 裡加測試等於沒加。
 
 use sister_core::brain::{latest_with_previous, view_from_row_with_previous};
-use sister_core::db::{L2Author, L2CardRow};
+use sister_core::db::{Db, L2Author, L2CardRow, L2Insert};
 
 fn row(id: i64, version: i32, activity: &str, author: L2Author) -> L2CardRow {
     L2CardRow {
@@ -123,4 +123,46 @@ fn the_card_shown_is_the_newest_version() {
     ];
     let (latest, _) = latest_with_previous(&versions).expect("有兩版");
     assert_eq!(latest.activity, "第二版", "顯示的是最舊那一版");
+}
+
+#[test]
+fn database_versions_are_oldest_first_and_select_the_immediate_previous() {
+    let mut db = Db::open_in_memory().expect("db");
+    let segment_core_start = 1_000;
+
+    for (activity, author) in [
+        ("第一版", L2Author::Interpreter),
+        ("第二版", L2Author::Reviewer),
+        ("第三版", L2Author::Reviewer),
+    ] {
+        db.insert_l2_card(&L2Insert {
+            segment_core_start,
+            segment_ref: "segment:1000",
+            activity,
+            entities_json: "[]".to_owned(),
+            continues_json: None,
+            commitments_json: "[]".to_owned(),
+            model_confidence: 0.7,
+            evidence_json: "[]".to_owned(),
+            open_questions_json: "[]".to_owned(),
+            author,
+        })
+        .expect("insert l2 card");
+    }
+
+    let versions = db
+        .l2_versions_for_segment(segment_core_start)
+        .expect("versions");
+    assert_eq!(
+        versions.first().map(|row| row.activity.as_str()),
+        Some("第一版")
+    );
+    assert_eq!(
+        versions.last().map(|row| row.activity.as_str()),
+        Some("第三版")
+    );
+
+    let (latest, previous) = latest_with_previous(&versions).expect("有三版");
+    assert_eq!(latest.activity, "第三版");
+    assert_eq!(previous.map(|row| row.activity.as_str()), Some("第二版"));
 }
