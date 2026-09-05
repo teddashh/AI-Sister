@@ -52,11 +52,15 @@ fn sentence(target: TargetOnScreen) -> String {
 }
 
 fn evidence(has_image: bool, target: TargetOnScreen) -> StepEvidence {
+    evidence_waited(0, target, has_image)
+}
+
+fn evidence_waited(waited_ms: u64, target: TargetOnScreen, has_image: bool) -> StepEvidence {
     StepEvidence::After {
         frame_id: 12,
         frame_at_ms: 1_700_000_000_000,
         has_image,
-        waited_ms: 0,
+        waited_ms,
         target,
     }
 }
@@ -766,6 +770,47 @@ fn whether_the_screenshot_is_there_is_said_correctly() {
         "沒截圖的時候要說圖不在；實際印的是 {without}"
     );
     assert_ne!(with, without, "兩種情況不可以印出一模一樣的句子");
+}
+
+/// 「瞄了一眼」和「盯了兩秒」是兩件事，而使用者要靠它決定要不要自己去看。
+///
+/// 這一格在 `ops.rs` 有一條測試（它量的是**她有沒有真的睡**），但那條沒有
+/// 摸到句子——它的斷言是 `waited_ms == 2_000`。同一件事在句子上也要有一針，
+/// 否則「等了多久」可以照算、就是不印。
+///
+/// 反向那一半一起釘：**對得上就不補這一句**。補了會變成「等了 0 毫秒」那種
+/// 沒有人需要知道的雜訊，而且會讓一次順利的動作讀起來像出了什麼事。
+#[test]
+fn a_wait_that_never_paid_off_says_how_long_she_watched() {
+    let waited = evidence_waited(
+        2_000,
+        TargetOnScreen::Mismatched {
+            field: ScreenField::Url,
+            saw: "old.example".into(),
+            wanted: "example.com".into(),
+        },
+        true,
+    )
+    .message();
+    assert!(
+        waited.contains("盯了 2000 毫秒"),
+        "對不上那句要說出她盯了多久，否則讀起來像只瞄了一眼；實際印的是 {waited}"
+    );
+
+    let matched = evidence_waited(
+        2_000,
+        TargetOnScreen::Matched {
+            field: ScreenField::Url,
+            saw: "example.com".into(),
+            wanted: "example.com".into(),
+        },
+        true,
+    )
+    .message();
+    assert!(
+        !matched.contains("盯了"),
+        "等到了就不必報告等了多久；實際印的是 {matched}"
+    );
 }
 
 /// 畫面上那段字是**網頁自己寫的**，而這一版開始把它複述給使用者。
