@@ -1266,9 +1266,8 @@ pub fn view_from_row(row: &L2CardRow) -> L2View {
 /// 只有一版的時候前一版是 `None`——這正是這支函式存在的理由：呼叫端寫成
 /// `versions.get(versions.len().saturating_sub(2))` 的話，一版會挑到自己。
 pub fn latest_with_previous<T>(versions: &[T]) -> Option<(&T, Option<&T>)> {
-    let latest = versions.last()?;
-    let previous = versions.iter().rev().nth(1);
-    Some((latest, previous))
+    let (latest, earlier) = versions.split_last()?;
+    Some((latest, earlier.last()))
 }
 
 pub fn view_from_row_with_previous(row: &L2CardRow, previous: Option<&L2CardRow>) -> L2View {
