@@ -540,13 +540,18 @@ capture 層本身就是 recorder。
     開關住在模型碰不到的 data dir，`sister do`
     卡在等回答時也能從另一個終端機拔掉。
     **快捷鍵 alpha.96 做好了**：全域熱鍵按下去寫同一個旗標，設定頁多一節說搶到
-    沒搶到、撞號、關掉，七種結局七句話。同一版把撞號比對改成先正規化——設定頁
-    送出去的是 code 形狀（`Ctrl+Alt+KeyH`）、設定檔的出廠值是 key 形狀
-    （`Ctrl+Alt+H`），在此之前那兩串**不相等**，於是兩顆都送去註冊、後註冊的
-    拔手拿到 `AlreadyRegistered`，**安全鍵靜靜地死掉**。正規化只認產品自己生得
-    出來的那幾種形狀（`KeyX`／`DigitN`／`Control`／`Command`／`Cmd`／大小寫／
-    修飾鍵順序），不是 global-hotkey 的完整別名表；沒列到的（例如
-    `CmdOrCtrl`、`Option`）仍然漏，而漏掉的後果就是上面那一句。
+    沒搶到、撞號、關掉，七種結局七句話。同一版把撞號比對接上真正負責註冊的那支
+    parser（`global_hotkey::hotkey::HotKey::from_str`）——設定頁送出去的是 code
+    形狀（`Ctrl+Alt+KeyH`）、設定檔的出廠值是 key 形狀（`Ctrl+Alt+H`），在此之前
+    那兩串**不相等**，於是兩顆都送去註冊、後註冊的拔手拿到 `AlreadyRegistered`，
+    **安全鍵靜靜地死掉**。中間一度是自己手抄的別名表，漏掉 `CmdOrCtrl`／`Option`；
+    改問 parser 之後這四種都比得出來（實測 `CmdOrCtrl+Alt+H`／`Option+Ctrl+H`／
+    `CommandOrControl+Alt+H`／`CmdOrCtrl+Alt+H` vs `Control+Alt+KeyH` 全判撞號）。
+    **剩下的洞換了形狀**：parser 那張表本身認不得的名字（`ContextMenu`、
+    `IntlBackslash`、`IntlRo`、`IntlYen`、`Convert`、`KanaMode`、`Lang1`／`Lang2`，
+    以及 `config.toml` 打錯的字）比不出來，這時**刻意不宣稱撞號**、退回逐字比較——
+    宣稱撞號會拆掉一顆按得動的暫停鍵，而那顆拔手鍵反正也註冊不了。認不出來的真撞號
+    由註冊順序兜底：先拔手、後暫停，所以搶不到的一定是還能從系統匣按的那顆。
     **tray 那兩顆 handler 仍然沒有任何執行覆蓋**——標籤的**字**這一輪搬進
     `sister_hands::kill_switch` 了（`tray_hands_labels` / `tray_hands_unknown_labels`
     在 `crates/` 裡有測試），但 `main.rs` 那兩顆 handler 本身、以及熱鍵註冊那條
