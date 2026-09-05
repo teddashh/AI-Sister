@@ -58,7 +58,52 @@ pub enum CurrentGuess {
     Queued,
 }
 
+/// 「這一刻」那張卡在資料庫那一段算出來的東西。
+pub struct RecordingFacts {
+    /// `None` = 這一場還沒有任何**已關閉**的段落。
+    pub latest_closed: Option<LatestClosedSegment>,
+    pub has_command: bool,
+    pub consented: bool,
+    pub used_today: u32,
+    pub daily_budget: u32,
+    pub previous_attempts: Option<crate::db::RetainedInterpreterAttempts>,
+}
+
+pub struct LatestClosedSegment {
+    pub has_card: bool,
+    pub worth_interpreting: bool,
+}
+
 impl CurrentGuess {
+    /// 判斷順序住在這裡。`fetch` **只有在順序真的需要**資料庫那一段時才會被呼叫。
+    pub fn decide<F, E>(
+        presence: crate::heartbeat::Presence,
+        paused: bool,
+        fetch: F,
+    ) -> Result<CurrentGuess, E>
+    where
+        F: FnOnce() -> Result<RecordingFacts, E>,
+    {
+        if let Some(status) = Self::from_presence(presence) {
+            return Ok(status);
+        }
+        if paused {
+            return Ok(Self::Paused);
+        }
+
+        let facts = fetch()?;
+        Ok(Self::while_recording(
+            facts
+                .latest_closed
+                .map(|segment| (segment.has_card, segment.worth_interpreting)),
+            facts.has_command,
+            facts.consented,
+            facts.used_today,
+            facts.daily_budget,
+            facts.previous_attempts,
+        ))
+    }
+
     /// `None` 只代表真的正在錄，還需要段落/L2 資料才能完成判決。
     pub fn from_presence(presence: crate::heartbeat::Presence) -> Option<Self> {
         use crate::heartbeat::{Phase, Presence};
@@ -1259,6 +1304,129 @@ mod tests {
     use super::*;
     use crate::consent::{Sheet, VERSION};
     use crate::db::Db;
+    use std::cell::Cell;
+
+    fn recording_facts(latest_closed: Option<LatestClosedSegment>) -> RecordingFacts {
+        RecordingFacts {
+            latest_closed,
+            has_command: true,
+            consented: true,
+            used_today: 3,
+            daily_budget: 80,
+            previous_attempts: None,
+        }
+    }
+
+    #[test]
+    fn current_guess_presence_wins_regardless_of_pause() {
+        for paused in [false, true] {
+            let result = CurrentGuess::decide(
+                crate::heartbeat::Presence::Stopped { at: Some(10) },
+                paused,
+                || Ok::<_, ()>(recording_facts(None)),
+            )
+            .unwrap();
+            assert_eq!(result, CurrentGuess::Stopped);
+        }
+    }
+
+    #[test]
+    fn current_guess_pause_wins_over_recording_facts() {
+        let result = CurrentGuess::decide(
+            crate::heartbeat::Presence::Live(crate::heartbeat::Phase::Recording),
+            true,
+            || {
+                Ok::<_, ()>(RecordingFacts {
+                    latest_closed: Some(LatestClosedSegment {
+                        has_card: true,
+                        worth_interpreting: true,
+                    }),
+                    has_command: true,
+                    consented: true,
+                    used_today: 100,
+                    daily_budget: 1,
+                    previous_attempts: None,
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(result, CurrentGuess::Paused);
+    }
+
+    #[test]
+    fn current_guess_does_not_fetch_after_presence_or_pause() {
+        for (presence, paused) in [
+            (crate::heartbeat::Presence::NeverStarted, false),
+            (
+                crate::heartbeat::Presence::Live(crate::heartbeat::Phase::Recording),
+                true,
+            ),
+        ] {
+            let calls = Cell::new(0);
+            CurrentGuess::decide(presence, paused, || {
+                calls.set(calls.get() + 1);
+                Ok::<_, ()>(recording_facts(None))
+            })
+            .unwrap();
+            assert_eq!(calls.get(), 0);
+        }
+    }
+
+    #[test]
+    fn current_guess_propagates_fetch_error() {
+        let result = CurrentGuess::decide(
+            crate::heartbeat::Presence::Live(crate::heartbeat::Phase::Recording),
+            false,
+            || Err::<RecordingFacts, _>("db broke"),
+        );
+        assert_eq!(result.unwrap_err(), "db broke");
+    }
+
+    #[test]
+    fn current_guess_without_closed_segment_is_no_segment() {
+        let result = CurrentGuess::decide(
+            crate::heartbeat::Presence::Live(crate::heartbeat::Phase::Recording),
+            false,
+            || Ok::<_, ()>(recording_facts(None)),
+        )
+        .unwrap();
+        assert_eq!(result, CurrentGuess::NoSegment);
+    }
+
+    #[test]
+    fn current_guess_recording_arguments_match_while_recording() {
+        let previous_attempts = crate::db::RetainedInterpreterAttempts {
+            count: 2,
+            latest_outcome: StoredOutboundOutcome::Known(OutboundOutcome::BadJson),
+        };
+        let expected = CurrentGuess::while_recording(
+            Some((false, true)),
+            true,
+            true,
+            3,
+            80,
+            Some(previous_attempts.clone()),
+        );
+        let actual = CurrentGuess::decide(
+            crate::heartbeat::Presence::Live(crate::heartbeat::Phase::Recording),
+            false,
+            || {
+                Ok::<_, ()>(RecordingFacts {
+                    latest_closed: Some(LatestClosedSegment {
+                        has_card: false,
+                        worth_interpreting: true,
+                    }),
+                    has_command: true,
+                    consented: true,
+                    used_today: 3,
+                    daily_budget: 80,
+                    previous_attempts: Some(previous_attempts),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
 
     /// 螢幕上讀到的每一種字，都要落在**會被圍欄包起來的那一半**。
     ///
