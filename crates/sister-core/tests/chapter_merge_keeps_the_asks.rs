@@ -160,3 +160,22 @@ fn a_chapter_nobody_asked_about_has_no_row_at_all() {
         "範圍裡沒有提問就不該回 Some——那會讓上游印出「問過 0 次」"
     );
 }
+
+/// 次數不准封頂。
+///
+/// 「她試著問過 N 次」是使用者直接讀到的數字，而這一檔原本最大只數到 4
+/// （`an_unedited_chapter_counts_exactly_what_it_did_before`）。我把
+/// `count: count.max(0) as u32` 換成 `(… ).min(9)` 跑過一次——**26 個 binary 全綠**，
+/// 也就是問二十次、畫面永遠寫 9 次，沒有任何人會紅。
+///
+/// ⚠ 這一條只殺得掉「上限 < 12」的封頂。真要窮盡得插到 `u32::MAX` 那一側，
+///   代價不划算；這裡誠實記下它擋得住什麼、擋不住什麼。
+#[test]
+fn the_count_is_not_capped() {
+    let mut db = db();
+    for i in 0..12 {
+        ask(&mut db, A, A + i, "interpreter", OutboundOutcome::NoAnswer);
+    }
+    let (n, _) = attempts(&db, A, B).expect("有列");
+    assert_eq!(n, 12, "問了 12 次就要說 12 次，不准封頂");
+}

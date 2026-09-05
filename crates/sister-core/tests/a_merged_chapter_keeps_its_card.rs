@@ -286,3 +286,22 @@ fn a_user_correction_outranks_a_machine_guess_from_the_other_half() {
         activities(&chapter(&db, A, C))
     );
 }
+
+/// 自己沒有卡的那一章，不准去借前一章的。
+///
+/// `MAX(segment_core_start)` 會把下界的鬆動蓋住：只要這一章**自己有卡**，
+/// 挑出來的就還是自己那張，放寬下界看不出差別。要它現形，這一章必須是空的。
+/// 我把子查詢的 `>= ?1` 換成 `>= ?1 - 86400000` 跑過一次——**26 個 binary 全綠**，
+/// 而那個 bug 在畫面上是「每一章都掛著前一章的假設」。
+#[test]
+fn a_chapter_with_no_card_does_not_borrow_the_previous_chapters() {
+    let mut db = db();
+    card(&mut db, A, "第一章", L2Author::Interpreter);
+    // 第二章（B..C）自己一張卡都沒有。
+
+    assert!(
+        chapter(&db, B, C).is_empty(),
+        "第二章自己沒有卡，就是沒有卡——實際挑出來的是 {:?}",
+        activities(&chapter(&db, B, C))
+    );
+}
