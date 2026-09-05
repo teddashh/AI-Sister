@@ -315,10 +315,7 @@ fn command_in_slot(row: &str, marker: &str) -> Option<&'static str> {
     let rest = &row[start..];
     let cmd = &rest[..rest.find('`')?];
     // 只認得這兩個；認不出來就回 None，讓 assert_eq! 紅在「不是預期那個」上。
-    for known in [THE_LEVER, "resume"] {
-        if cmd.ends_with(known) {
-            return Some(known);
-        }
-    }
-    None
+    [THE_LEVER, "resume"]
+        .into_iter()
+        .find(|known| cmd.ends_with(known))
 }
