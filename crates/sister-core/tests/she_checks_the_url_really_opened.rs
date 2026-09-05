@@ -302,6 +302,154 @@ fn the_three_verdicts_do_not_read_as_each_other() {
     );
 }
 
+/// 八個結局各有一句話：每一句都要說出自己那件事，而那個片語**不准出現在
+/// 另外七句裡**。
+///
+/// **為什麼補這一條。** 上面那些測試斷言的是**型別**
+/// （`Matched { field: ScreenField::WindowTitle, .. }`），而使用者讀的是
+/// **句子**。我把 `message()` 的八個 arm 對回這一檔數了一次：
+///
+/// | 結局 | 加這一條之前 |
+/// |---|---|
+/// | `Matched{Url}`、`Mismatched{Url}`、`NothingOnScreen{Url}`、`NotChecked` | 有句子層的測試 |
+/// | 視窗標題那三格 | 只有型別層——那三句可以被清空或互相對調而沒有人紅 |
+/// | `NothingInTheAsk` | **一個字都沒有人碰** |
+///
+/// 「片語只出現在自己那一句裡」比「八句兩兩不相等」硬：後者只擋得住整句
+/// 複製，前者連「把對得上那句改成對不上的說法」都擋得住。
+///
+/// **這一條證明不了什麼：** 底下那個八格陣列是手寫的。`phrase()` 的窮舉
+/// `match` 只對放進去的值求值，它擋不住「陣列少一格」；它擋得住的是「加了
+/// 新的 variant 卻沒有人替它想句子」——那時候這一條會**編不過**，而那個
+/// 編譯錯誤就落在陣列旁邊。
+#[test]
+fn each_of_the_eight_endings_says_a_thing_the_other_seven_do_not() {
+    // 窮舉。加 `TargetOnScreen`／`CannotTell`／`ScreenField` 的 variant，
+    // 這裡就編不過。
+    fn phrase(target: &TargetOnScreen) -> &'static str {
+        match target {
+            TargetOnScreen::Matched {
+                field: ScreenField::Url,
+                ..
+            } => "而且那張畫面的網址就在",
+            TargetOnScreen::Matched {
+                field: ScreenField::WindowTitle,
+                ..
+            } => "而且那張畫面的視窗標題是",
+            TargetOnScreen::Mismatched {
+                field: ScreenField::Url,
+                ..
+            } => "不是你要開的",
+            TargetOnScreen::Mismatched {
+                field: ScreenField::WindowTitle,
+                ..
+            } => "裡面沒有",
+            TargetOnScreen::CannotTell {
+                why:
+                    CannotTell::NothingOnScreen {
+                        field: ScreenField::Url,
+                    },
+            } => "沒有記下那張畫面的網址",
+            TargetOnScreen::CannotTell {
+                why:
+                    CannotTell::NothingOnScreen {
+                        field: ScreenField::WindowTitle,
+                    },
+            } => "沒有記下那張畫面的視窗標題",
+            TargetOnScreen::CannotTell {
+                why: CannotTell::NothingInTheAsk,
+            } => "這一步的目標沒有可以拿去跟畫面比的東西",
+            TargetOnScreen::CannotTell {
+                why: CannotTell::NotChecked,
+            } => "這一列是舊版寫的",
+        }
+    }
+
+    let all = [
+        TargetOnScreen::Matched {
+            field: ScreenField::Url,
+            saw: "example.com".into(),
+        },
+        TargetOnScreen::Matched {
+            field: ScreenField::WindowTitle,
+            saw: "健保存摺 — Chrome".into(),
+        },
+        TargetOnScreen::Mismatched {
+            field: ScreenField::Url,
+            saw: "evil.example".into(),
+            wanted: "example.com".into(),
+        },
+        TargetOnScreen::Mismatched {
+            field: ScreenField::WindowTitle,
+            saw: "收件匣 — Outlook".into(),
+            wanted: "健保存摺".into(),
+        },
+        TargetOnScreen::CannotTell {
+            why: CannotTell::NothingOnScreen {
+                field: ScreenField::Url,
+            },
+        },
+        TargetOnScreen::CannotTell {
+            why: CannotTell::NothingOnScreen {
+                field: ScreenField::WindowTitle,
+            },
+        },
+        TargetOnScreen::CannotTell {
+            why: CannotTell::NothingInTheAsk,
+        },
+        TargetOnScreen::CannotTell {
+            why: CannotTell::NotChecked,
+        },
+    ];
+
+    let said: Vec<String> = all.iter().cloned().map(sentence).collect();
+    for (i, target) in all.iter().enumerate() {
+        let needle = phrase(target);
+        let hits: Vec<usize> = said
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.contains(needle))
+            .map(|(j, _)| j)
+            .collect();
+        assert_eq!(
+            hits,
+            vec![i],
+            "「{needle}」應該只出現在 {target:?} 那一句裡，實際出現在第 {hits:?} 句；\
+             八句話是：{said:#?}"
+        );
+    }
+}
+
+/// 「這一步的目標沒有可以拿去跟畫面比的東西」**到得了**——而且不是靠一個
+/// 壞掉的輸入。
+///
+/// 兩道閘門的判準不一樣，中間有一條縫：
+///
+/// - `target_policy::validate_url` 只要求 `http(s):` ＋ 後面 `//` 非空。
+/// - `segment::looks_like_host` 要求 host 全部是 ASCII 英數／`.`／`-`。
+///
+/// 於是一個**中文／日文網域**過得了白名單、卻抽不出 host。那不是攻擊，是
+/// 一個真的網址。
+///
+/// 這一條把「到得了」寫成**斷言**而不是寫成註解：兩件事在同一條測試裡量，
+/// 哪天有人放寬 `looks_like_host`（或收緊 `validate_url`），這裡會紅，而不是
+/// 留下一句沒有人再驗過的話。
+#[test]
+fn an_idn_host_passes_the_allowlist_but_leaves_nothing_to_compare() {
+    const IDN: &str = "https://例え.jp/";
+    assert!(
+        sister_hands::target_policy::validate_url(IDN).is_ok(),
+        "這一條的前提是它過得了白名單——過不了的話，上面那段話是假的"
+    );
+    assert_eq!(
+        target_on_screen(&open(IDN), &screen(Some(IDN), None)),
+        TargetOnScreen::CannotTell {
+            why: CannotTell::NothingInTheAsk
+        },
+        "目標抽不出網站名的時候要說「說不準」，不可以說她開錯了"
+    );
+}
+
 /// 原本那句話的前半段不准被換掉。
 ///
 /// frame 編號和時刻是這份報告存在的理由，加一句比對結果不可以把它們擠掉。
