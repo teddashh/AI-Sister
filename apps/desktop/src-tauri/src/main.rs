@@ -1638,12 +1638,9 @@ fn attach_l2(ch: &mut Chapter, cards: &[sister_core::db::L2CardRow]) {
             .filter(|c| c.segment_core_start == start)
             .collect();
         versions.sort_by_key(|c| (c.version, c.id));
-        if let Some(row) = versions.last().copied() {
-            let prev = if versions.len() >= 2 {
-                versions.get(versions.len() - 2).copied()
-            } else {
-                None
-            };
+        if let Some((row, prev)) = sister_core::brain::latest_with_previous(&versions) {
+            let row = *row;
+            let prev = prev.copied();
             let view = sister_core::brain::view_from_row_with_previous(row, prev);
             if !views
                 .iter()
@@ -1742,12 +1739,9 @@ fn memory_guesses(
         for versions in by_seg.values() {
             let mut ordered = versions.clone();
             ordered.sort_by_key(|c| (c.version, c.id));
-            if let Some(row) = ordered.last().copied() {
-                let prev = if ordered.len() >= 2 {
-                    ordered.get(ordered.len() - 2).copied()
-                } else {
-                    None
-                };
+            if let Some((row, prev)) = sister_core::brain::latest_with_previous(&ordered) {
+                let row = *row;
+                let prev = prev.copied();
                 views.push(sister_core::brain::view_from_row_with_previous(row, prev));
             }
         }
@@ -1805,8 +1799,7 @@ fn memory_current_guess(shell: tauri::State<'_, Shell>) -> Result<CurrentGuessVi
             let versions = db
                 .l2_versions_for_segment(seg.core_started_at)
                 .map_err(|e| format!("{e:#}"))?;
-            card = versions.last().map(|row| {
-                let previous = versions.get(versions.len().saturating_sub(2));
+            card = sister_core::brain::latest_with_previous(&versions).map(|(row, previous)| {
                 sister_core::brain::view_from_row_with_previous(row, previous)
             });
             let facts = db

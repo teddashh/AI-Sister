@@ -451,6 +451,62 @@ if decide_calls:
                 f"      它看不出你是往上傳還是吞掉——那種寫法要自己另外找人守。"
             )
 
+# ── E. 「前一版是誰」這個決定只准住在 crates/ ────────────────────────────
+#
+# 這一條是量出來才加的。r27 修好之後，我把 `memory_current_guess` 那一行原封
+# 不動改回舊的 `versions.get(versions.len().saturating_sub(2))`，然後跑：
+#
+#     cargo test --workspace          → 23 個 test binary 全綠
+#     check-current-guess-wiring.py   → ✓
+#
+# 一個都沒紅。原因是 `apps/desktop` 是另一個 workspace（根 Cargo.toml 的
+# `members = ["crates/*"]` 不含它），`cargo test --workspace` 一行都執行不到
+# 它；而 crates/ 那邊的測試釘的是 `latest_with_previous` 這支函式**本身**，
+# 呼叫端有沒有用它，那些測試看不見。
+#
+# 所以這一格只能由原始碼形狀來守——它是唯一搆得到那半的東西。
+#
+# ⚠ 而「唯一搆得到」不等於「守得住」。下面這四刀我全部真的打過，閘門一聲都
+#   沒響（對照組「把 helper 拆回 saturating_sub(2)」是紅的，所以它不是壞的，
+#   是**淺的**）：
+#
+#     1. view_from_row_with_previous(row, previous.or_else(|| versions.first()))
+#        —— helper 有呼叫、計數是 3，但它算出來的答案在下一格被蓋掉。
+#           r27 修掉的那個 bug 一字不差地回來，而且讀起來像「防禦性補值」。
+#     2. saturating_sub( 2 ) —— 括號內側加空白。下面壓空白只做了
+#        re.sub(r"\s+", " ")，沒做 B/C 兩塊都有做的 .replace("( ", "(")。
+#     3. versions.len().max(2) - 2 —— 語意等同舊 bug，三根針逐字比對都不中。
+#     4. attach_l2 的 sort_by_key 改成 Reverse(...) —— A-D 只掃
+#        `fn memory_current_guess` 的函式本體，attach_l2 整段在掃描範圍外。
+#
+#   結論：字串比對守得住「這個決定被整個抄走」，守不住「答案被算出來又丟掉」。
+#   不要因為這一段印 ✓ 就相信呼叫端是對的。
+PREV_HELPER = "sister_core::brain::latest_with_previous"
+WANT_HELPER_CALLS = 3  # attach_l2、memory_guesses、memory_current_guess
+n_helper = whole.count(PREV_HELPER)
+if n_helper != WANT_HELPER_CALLS:
+    problems.append(
+        f"`{PREV_HELPER}` 在 {MAIN} 裡出現 {n_helper} 次，預期 {WANT_HELPER_CALLS} 次。\n"
+        f"      預期的三處是 attach_l2、memory_guesses、memory_current_guess。\n"
+        f"      注意這裡數的是**整份檔案裡這串字出現幾次**，不是「那三支函式各有一次」\n"
+        f"      ——註解或字串裡寫到它一樣會被數進來。多一處少一處都請先改這支腳本的\n"
+        f"      WANT_HELPER_CALLS，順便想一下新的那一處是不是又抄了一份「前一版是誰」。"
+    )
+
+# 手算下標的三種寫法一種都不准回來。這正是 r27 之前的 bug：只有一版的時候
+# `1usize.saturating_sub(2)` 是 0，`get(0)` 拿到的就是最新那一版自己，畫面上
+# 就變成「原版：<和它正上方一模一樣的那句話>」。
+#
+# main.rs 裡另外兩處 `saturating_sub` 是時間相減（:199、:235），不帶 `(2)`，
+# 所以這三根針不會誤傷它們。
+for shape in ("saturating_sub(2)", "len() - 2", "len()-2"):
+    if shape in whole:
+        problems.append(
+            f"{MAIN} 裡出現 `{shape}`——「前一版是誰」又被手算了一次。\n"
+            f"      只有一版的時候這個算式會指回最新那一版自己。改用\n"
+            f"      `{PREV_HELPER}`，那支函式在 crates/ 裡有測試守著。"
+        )
+
 if problems:
     print("✗ 「這一刻」那張卡在桌面那半的接線斷了：")
     for p in problems:
@@ -460,5 +516,5 @@ if problems:
 print(
     "✓ 「這一刻」的桌面接線完整（A 查 core_started_at／B 順序只在 decide 裡、"
     "三個輸入是算出來的／C 欄位有來源／D 回來之後 message 是 status.message()、"
-    "錯誤用 ? 往上傳）"
+    "錯誤用 ? 往上傳／E 前一版走 latest_with_previous，沒有人手算下標）"
 )
