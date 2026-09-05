@@ -46,7 +46,19 @@ research/ted-repos-dna.md
 *.sister-eval-report.json
 replay-drafts/
 
-# Delegate 的交付報告。它們寫在工作區根目錄，而收尾的 `git add -A` 會把
-# 它們一起收進來（alpha.62 真的發生過一次，事後才從 main 上拿掉）。
+# Delegate 的交付報告，以及派給它的那張工作單。兩者都寫在工作區根目錄，而
+# 收尾的 `git add -A` 會把它們一起收進來（alpha.62 的 RESULT 真的發生過一次，
+# 事後才從 main 上拿掉；r28b 的 `TASK-r28b.md` 又發生一次）。
+#
+# 工作單那半是 `check-docs-point-somewhere.py` 抓到的。這裡原本寫「那些行號在
+# delegate 動手的那一刻就漂掉了」——**那是假的**，我後來逐一比對過，`main.rs:1800`
+# 和 `brain.rs:1015` 改動前後都精準指著被改的那兩個呼叫（hunk 是 1 換 1）。
+# 真正的成因和行號對不對無關：那支閘門把反引號裡的整串當成路徑去 `.exists()`，
+# 而沒有任何檔案真的叫做 `main.rs:1800`，所以**只要寫了「檔:行」就一定紅**。
+#
+# ⚠ 而且底下這幾行**擋不住那道閘門**：`.gitignore` 只擋 `git add`，閘門掃的是
+#   工作區。r28c 的 `TASK-r28c.md` 已經在忽略名單裡，閘門照樣紅（四條，全部指
+#   著我自己寫的行號）。工作單和交付報告收工時要**移出工作區**，不是只靠忽略。
 RESULT.md
 RESULT*.md
+TASK*.md

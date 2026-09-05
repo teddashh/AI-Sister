@@ -33,11 +33,22 @@ r25 之後：順序搬進 `crates/sister-core/src/brain.rs` 的 `CurrentGuess::d
 於是這裡守 A–D 四塊（**全部只在 `fn memory_current_guess` 的函式本體裡找**——
 `let presence = …` 在整個 `main.rs` 有四處，只有這一處是這張卡的）：
 
-  A. 用 segment 當 key 的查詢，key 還是 `seg.core_started_at`。
-     `brain_outbound.segment_core_start` 和 L2 版本表存的都是 `core_started_at`；
-     換成 `core_ended_at` 一定查到 0 列 → 卡片安靜地消失或退回
-     「正在等解釋層處理」。型別一模一樣，clippy 不會叫。
+  A. 用 segment 當 key 的查詢，引數逐字對得上。兩支現在的形狀**一模一樣**，
+     而且它們是在 r28 **合流**的，不是分岔的——r28 之前兩支都是「起點嚴格相等」
+     的單引數查詢，r28 把兩支都改成了半開時間範圍（原本這裡寫「兩支的形狀不
+     一樣，這一點是 r28 之後才分岔的」，兩個宣稱都是反的，而底下那兩行自己就
+     把「一整段的時間範圍（半開）」寫了兩次）：
+       - `l2_versions_for_chapter(seg.core_started_at, seg.core_ended_at)` —— 一整段的
+         **時間範圍**（半開），先找該挑的那條活著的卡片脈絡，再讀那條脈絡的版本史。
+       - `retained_interpreter_attempts_for_segment(seg.core_started_at,
+         seg.core_ended_at)` —— 一整段的**時間範圍**（半開）。
+     兩支改成範圍的理由是同一個：使用者合併章節之後，右半那些列記著的鍵就對不上
+     任何一段了，而一列都沒有被刪。
+     兩支都是把 `core_started_at` 換成 `core_ended_at` 一定查到 0 列 → 卡片安靜地
+     消失或退回「正在等解釋層處理」。型別一模一樣，clippy 不會叫。
      **這一刀我實跑過，26 條閘門全綠。**
+     r28 起這一段還會擋「範圍那支少傳第二個引數」：窗寬塌掉就是把那個少算 bug
+     放回來。
 
   B. 順序沒有偷偷搬回來，**而且餵給它的三個輸入是真的算出來的**：
      不可以出現 `from_presence(` / `while_recording(`；`decide(` 要剛好一次，
@@ -244,21 +255,31 @@ def leading_args(text, open_paren, want):
     return None
 
 
-# ── A. 用 segment 當 key 的查詢，key 必須是 core_started_at ──────────────
-for query in ("retained_interpreter_attempts_for_segment", "l2_versions_for_segment"):
+# ── A. 用 segment 當 key 的查詢，key 必須是 core 的時間欄位 ─────────────
+for query, expected in (
+    (
+        "retained_interpreter_attempts_for_segment",
+        "seg.core_started_at, seg.core_ended_at",
+    ),
+    (
+        "l2_versions_for_chapter",
+        "seg.core_started_at, seg.core_ended_at",
+    ),
+):
     calls = re.findall(re.escape(query) + r" *\( *([^)]*)\)", flat)
     if not calls:
         problems.append(f"完全找不到 {query}( 的呼叫——那張卡少了一塊資料。")
     elif len(calls) != 1:
         problems.append(f"{query}( 出現 {len(calls)} 次，這支腳本只認得剛好一次。")
     else:
-        # rustfmt 把呼叫拆行時會留一個尾逗號，壓平之後就是 `seg.core_started_at,`。
+        # rustfmt 把呼叫拆行時會留一個尾逗號，壓平之後就是 `<那支的引數列>,`
+        # （範圍那支是 `seg.core_started_at, seg.core_ended_at,`）。
         # 第一版在這裡用完全相等去比，於是跑一次 `cargo fmt` 就會把閘門弄紅。
         arg = calls[0].strip().rstrip(",").strip()
-        if arg != "seg.core_started_at":
+        if arg != expected:
             problems.append(
-                f"{query}( 的引數是 `{arg}`，不是 `seg.core_started_at`。\n"
-                f"      那兩張表存的都是 core_started_at；查錯欄位會安靜地回 0 列。"
+                f"{query}( 的引數是 `{arg}`，不是 `{expected}`。\n"
+                f"      查錯 core 時間欄位會安靜地回 0 列或算錯範圍。"
             )
 
 # ── B. 順序住在 crates/，而且餵進去的兩個引數是真的算出來的 ──────────────
@@ -451,7 +472,29 @@ if decide_calls:
                 f"      它看不出你是往上傳還是吞掉——那種寫法要自己另外找人守。"
             )
 
-# ── E. 「前一版是誰」這個決定只准住在 crates/ ────────────────────────────
+# ── E. 時間軸把整章的半開範圍交給 crates/ 選卡 ────────────────────────────
+#
+# 這種原始碼閘門只釘得住**引數**，釘不住**結果**：即使這個呼叫原封不動，呼叫端
+# 隨後又把結果濾回 `segment_core_start == ch.core_start_ts`，這條仍會是綠的。
+# 行為本身要由 crates/ 的執行測試守；這裡只守 apps/ 這個零執行覆蓋 workspace 的接線。
+timeline_call = re.findall(
+    r"sister_core::brain::chapter_l2_views *\( *([^)]*)\)", whole
+)
+if len(timeline_call) != 1:
+    problems.append(
+        "sister_core::brain::chapter_l2_views( 在 main.rs 應該剛好出現 1 次，"
+        f"實際是 {len(timeline_call)} 次。"
+    )
+else:
+    args = timeline_call[0].strip().rstrip(",").strip()
+    if args != "cards, ch.core_start_ts, ch.core_end_ts":
+        problems.append(
+            "chapter_l2_views( 的引數是 `"
+            + args
+            + "`，不是 `cards, ch.core_start_ts, ch.core_end_ts`。"
+        )
+
+# ── F. 「前一版是誰」這個決定只准住在 crates/ ────────────────────────────
 #
 # 這一條是量出來才加的。r27 修好之後，我把 `memory_current_guess` 那一行原封
 # 不動改回舊的 `versions.get(versions.len().saturating_sub(2))`，然後跑：
@@ -482,12 +525,12 @@ if decide_calls:
 #   結論：字串比對守得住「這個決定被整個抄走」，守不住「答案被算出來又丟掉」。
 #   不要因為這一段印 ✓ 就相信呼叫端是對的。
 PREV_HELPER = "sister_core::brain::latest_with_previous"
-WANT_HELPER_CALLS = 3  # attach_l2、memory_guesses、memory_current_guess
+WANT_HELPER_CALLS = 2  # memory_guesses、memory_current_guess；attach_l2 已搬進 crates/
 n_helper = whole.count(PREV_HELPER)
 if n_helper != WANT_HELPER_CALLS:
     problems.append(
         f"`{PREV_HELPER}` 在 {MAIN} 裡出現 {n_helper} 次，預期 {WANT_HELPER_CALLS} 次。\n"
-        f"      預期的三處是 attach_l2、memory_guesses、memory_current_guess。\n"
+        f"      預期的兩處是 memory_guesses、memory_current_guess。\n"
         f"      注意這裡數的是**整份檔案裡這串字出現幾次**，不是「那三支函式各有一次」\n"
         f"      ——註解或字串裡寫到它一樣會被數進來。多一處少一處都請先改這支腳本的\n"
         f"      WANT_HELPER_CALLS，順便想一下新的那一處是不是又抄了一份「前一版是誰」。"
@@ -514,7 +557,8 @@ if problems:
     sys.exit(1)
 
 print(
-    "✓ 「這一刻」的桌面接線完整（A 查 core_started_at／B 順序只在 decide 裡、"
+    "✓ 「這一刻」的桌面接線完整（A 卡片與次數都查 "
+    "[core_started_at, core_ended_at)／B 順序只在 decide 裡、"
     "三個輸入是算出來的／C 欄位有來源／D 回來之後 message 是 status.message()、"
     "錯誤用 ? 往上傳／E 前一版走 latest_with_previous，沒有人手算下標）"
 )

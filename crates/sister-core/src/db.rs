@@ -3776,6 +3776,34 @@ impl Db {
         Ok(rows.flatten().collect())
     }
 
+    /// 某一章裡優先挑含使用者版本、否則挑最後一條還活著的脈絡，回傳其每一版。
+    ///
+    /// 這裡查「含使用者版本」；同一個 key 一旦有使用者版本，`insert_l2_card`
+    /// 保證後續也只能由使用者寫，所以它等價於「最新版本是使用者寫的」。
+    pub fn l2_versions_for_chapter(
+        &self,
+        core_started_at: Millis,
+        core_ended_at: Millis,
+    ) -> Result<Vec<L2CardRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{L2_SELECT}
+             FROM l2_card
+             WHERE segment_core_start = (
+                 SELECT COALESCE(
+                     MAX(CASE WHEN author = 'user' THEN segment_core_start END),
+                     MAX(segment_core_start)
+                 )
+                 FROM l2_card
+                 WHERE segment_core_start >= ?1 AND segment_core_start < ?2
+                   AND tombstoned_at IS NULL
+             )
+               AND tombstoned_at IS NULL
+             ORDER BY version, id"
+        ))?;
+        let rows = stmt.query_map(params![core_started_at, core_ended_at], map_l2_row)?;
+        Ok(rows.flatten().collect())
+    }
+
     pub fn l2_by_id(&self, id: i64) -> Result<Option<L2CardRow>> {
         self.conn
             .query_row(
@@ -3844,23 +3872,51 @@ impl Db {
         Ok(n.max(0) as u32)
     }
 
-    /// 數同一段**還留著的**解釋層外送列，並讀最近一次的結局。
+    /// 下面 `retained_interpreter_attempts_for_segment` 那支查詢的原文。
     ///
-    /// 這不是終生次數：`sister forget` 會依外送時間刪除 `brain_outbound` 的列；
-    /// 保留期清理不碰這張表。舊資料若含不認得的 outcome，保留原始 token，仍
-    /// 算一次問過。審閱層與盯梢層的列不屬於這個問題。
-    pub fn retained_interpreter_attempts_for_segment(
-        &self,
-        segment_core_start: Millis,
-    ) -> Result<Option<RetainedInterpreterAttempts>> {
-        let (count, token): (i64, Option<String>) = self.conn.query_row(
-            "SELECT COUNT(*),
+    /// 抽成常數是因為 `migration_018_indexes_are_used_by_both_hot_queries` 要對
+    /// **產品真的在跑的那一句**問執行計畫——它原本手抄了一份，而 r28 把 `WHERE`
+    /// 從起點相等換成半開區間之後，手抄那份沒有跟著改，於是那條測試繼續綠著守
+    /// 一句已經沒有人在跑的 SQL。抄一份就會漂，所以只留一份。
+    const RETAINED_INTERPRETER_ATTEMPTS_SQL: &str = "SELECT COUNT(*),
                     (SELECT outcome FROM brain_outbound
-                     WHERE segment_core_start = ?1 AND role = 'interpreter'
+                     WHERE segment_core_start >= ?1 AND segment_core_start < ?2
+                       AND role = 'interpreter'
                      ORDER BY ts DESC, id DESC LIMIT 1)
              FROM brain_outbound
-             WHERE segment_core_start = ?1 AND role = 'interpreter'",
-            [segment_core_start],
+             WHERE segment_core_start >= ?1 AND segment_core_start < ?2
+               AND role = 'interpreter'";
+
+    /// 數這一段的**時間範圍裡**還留著的解釋層外送列，並讀最近一次的結局。
+    ///
+    /// 範圍是半開的 `[core_started_at, core_ended_at)`。用範圍而不是用起點嚴格
+    /// 相等，是因為使用者**合併**章節之後，右半那些列記著的 `segment_core_start`
+    /// 不再等於任何一段的起點——舊寫法會把它們全部漏掉，而一列都沒有被刪。
+    /// 章節之間嚴格接合（`segment.rs` 的 cursor 遞推，加上 [`Db::merge_chapters`]
+    /// 寫入前那道 `left.core_ended_at == right.core_started_at` 的 `ensure!`），
+    /// 所以每一列恰好落在一段裡，右界開著才不會被相鄰兩段各數一次。
+    ///
+    /// （合併的算法本身是 `segment_edit` 的 `merge_two`，那支**沒有**這道檢查；
+    /// 擋在外面的是 [`Db::merge_chapters`]。這裡原本寫的是 `merge_segments`，
+    /// 一個全 repo 都不存在的名字——而這句話是上面整支範圍查詢正確性的**唯一**
+    /// 論證，指到不存在的地方就等於沒有論證。）
+    ///
+    /// **這不是終生次數，而且讓它變動的不只一件事：**
+    /// - `sister forget` 會依外送時間刪除 `brain_outbound` 的列（保留期清理不碰
+    ///   這張表）——這一種是「列真的少了」。
+    /// - 使用者合併或切開章節，會改變這一段的範圍，於是同一批列被重新分配到不同
+    ///   的段落上——**一列都沒少，數字照樣會變**。
+    ///
+    /// 舊資料若含不認得的 outcome，保留原始 token，仍算一次問過。
+    /// 審閱層與盯梢層的列不屬於這個問題。
+    pub fn retained_interpreter_attempts_for_segment(
+        &self,
+        core_started_at: Millis,
+        core_ended_at: Millis,
+    ) -> Result<Option<RetainedInterpreterAttempts>> {
+        let (count, token): (i64, Option<String>) = self.conn.query_row(
+            Self::RETAINED_INTERPRETER_ATTEMPTS_SQL,
+            params![core_started_at, core_ended_at],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let Some(token) = token else {
@@ -10799,6 +10855,86 @@ mod tests {
     }
 
     #[test]
+    fn merged_segment_retains_interpreter_attempts_from_both_halves() {
+        let mut db = test_db();
+        let (a, b, c) = (42_000, 43_000, 44_000);
+        for (segment_core_start, ts, role, outcome) in [
+            (a, 1_000, "interpreter", "timeout"),
+            (a, 2_000, "interpreter", "bad_json"),
+            (a, 3_000, "interpreter", "spawn_failed"),
+            (b, 4_000, "interpreter", "success"),
+            (b, 5_000, "interpreter", "no_answer"),
+            (b, 6_000, "reviewer", "success"),
+            (c, 7_000, "interpreter", "success"),
+        ] {
+            db.insert_brain_outbound(&OutboundInsert {
+                ts,
+                day_key: "1970-01-01",
+                command: "agent",
+                args: &[],
+                segment_core_start: Some(segment_core_start),
+                chars_sent: 1,
+                truncated: false,
+                outcome,
+                duration_ms: 1,
+                error: None,
+                role,
+            })
+            .expect("insert outbound");
+        }
+
+        let got = db
+            .retained_interpreter_attempts_for_segment(a, c)
+            .expect("query")
+            .expect("five retained attempts");
+        assert_eq!(
+            got.count, 5,
+            "合併後左右兩半都要算，右界與 reviewer 都不能混入"
+        );
+        assert_eq!(
+            got.latest_outcome,
+            crate::brain::StoredOutboundOutcome::Known(crate::brain::OutboundOutcome::NoAnswer),
+            "最近結局必須取範圍內較晚的右半"
+        );
+    }
+
+    #[test]
+    fn unedited_segment_range_count_matches_exact_start_count() {
+        let mut db = test_db();
+        let start = 42_000;
+        for ts in [1_000, 2_000, 3_000] {
+            db.insert_brain_outbound(&OutboundInsert {
+                ts,
+                day_key: "1970-01-01",
+                command: "agent",
+                args: &[],
+                segment_core_start: Some(start),
+                chars_sent: 1,
+                truncated: false,
+                outcome: "success",
+                duration_ms: 1,
+                error: None,
+                role: "interpreter",
+            })
+            .expect("insert outbound");
+        }
+        let exact: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM brain_outbound
+                 WHERE segment_core_start = ?1 AND role = 'interpreter'",
+                [start],
+                |row| row.get(0),
+            )
+            .expect("old exact-start count");
+        let ranged = db
+            .retained_interpreter_attempts_for_segment(start, start + 1_000)
+            .expect("range query")
+            .expect("three retained attempts");
+        assert_eq!(i64::from(ranged.count), exact);
+    }
+
+    #[test]
     fn retained_interpreter_attempts_exclude_other_roles_and_keep_latest_outcome() {
         let mut db = test_db();
         // 讓同毫秒的自然索引順序刻意和 id 順序相反；如此拿掉 `id DESC`
@@ -10838,7 +10974,7 @@ mod tests {
         }
 
         let got = db
-            .retained_interpreter_attempts_for_segment(segment)
+            .retained_interpreter_attempts_for_segment(segment, segment + 1)
             .expect("query")
             .expect("three interpreter rows");
         assert_eq!(got.count, 4, "reviewer/watcher 不可以混進解釋層次數");
@@ -10848,7 +10984,7 @@ mod tests {
             "最新 reviewer 不可混入；先按 ts DESC，同毫秒再以較大的 id 為最新"
         );
         assert!(
-            db.retained_interpreter_attempts_for_segment(segment + 1)
+            db.retained_interpreter_attempts_for_segment(segment + 1, segment + 2)
                 .expect("empty query")
                 .is_none(),
             "沒問過不可以造出一次"
@@ -10873,7 +11009,7 @@ mod tests {
         })
         .expect("insert unknown");
         let got = db
-            .retained_interpreter_attempts_for_segment(42_000)
+            .retained_interpreter_attempts_for_segment(42_000, 42_001)
             .expect("unknown token is readable")
             .expect("one retained attempt");
         assert_eq!(got.count, 1);
@@ -10903,11 +11039,11 @@ mod tests {
         db.conn().execute_batch("ANALYZE").expect("analyze before");
 
         let plans = |db: &Db| -> (String, String) {
-            let collect = |sql: &str| {
+            let collect = |sql: String, args: &[&dyn rusqlite::ToSql]| -> String {
                 db.conn()
-                    .prepare(sql)
+                    .prepare(&sql)
                     .expect("prepare explain")
-                    .query_map([], |r| r.get::<_, String>(3))
+                    .query_map(args, |r| r.get::<_, String>(3))
                     .expect("query explain")
                     .collect::<rusqlite::Result<Vec<_>>>()
                     .expect("collect explain")
@@ -10915,12 +11051,17 @@ mod tests {
             };
             (
                 collect(
-                    "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM brain_outbound
-                     WHERE segment_core_start = 42 AND role = 'interpreter'",
+                    format!(
+                        "EXPLAIN QUERY PLAN {}",
+                        Db::RETAINED_INTERPRETER_ATTEMPTS_SQL
+                    ),
+                    &[&42_i64, &99_i64],
                 ),
                 collect(
                     "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM input_metrics
-                     WHERE ts_end > 9990 AND ts_start < 20000)",
+                     WHERE ts_end > 9990 AND ts_start < 20000)"
+                        .to_owned(),
+                    &[],
                 ),
             )
         };
@@ -10957,25 +11098,34 @@ mod tests {
         assert!(!before.1.contains("idx_input_metrics_end"), "{}", before.1);
         assert!(after.1.contains("idx_input_metrics_end"), "{}", after.1);
 
-        let ordered_plan = db
-            .conn()
-            .prepare(
-                "EXPLAIN QUERY PLAN SELECT COUNT(*),
-                    (SELECT outcome FROM brain_outbound
-                     WHERE segment_core_start = 42 AND role = 'interpreter'
-                     ORDER BY ts DESC, id DESC LIMIT 1)
-                 FROM brain_outbound
-                 WHERE segment_core_start = 42 AND role = 'interpreter'",
-            )
-            .expect("prepare correlated plan")
-            .query_map([], |r| r.get::<_, String>(3))
-            .expect("query correlated plan")
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .expect("collect correlated plan")
-            .join(" | ");
+        // 排序那半：索引**沒有**支撐它，這是量到的，不是推的。
+        //
+        // r28 之前這句 SQL 用起點相等去查，`(segment_core_start, role, ts)` 這個
+        // 複合索引在等值條件之後還能照 `ts` 供貨，所以排序不必另外開暫存 B-tree。
+        // 換成半開區間之後，範圍條件吃掉了前導欄位，`ts` 就排不上了。
+        //
+        // 可以接受的理由：那個 `ORDER BY` 只排**一個章節內**的解釋層外送列（個位數
+        // 到數十列），不是整張表。真正會痛的是掃描那半，而釘住它的是上面那條
+        // `after.0.contains("idx_brain_outbound_segment")`（不是緊鄰的那兩行——
+        // 那兩行問的是 `input_metrics`，`.1` 不是 `.0`）。
+        //
+        // ⚠ 而那條斷言比它看起來弱：`after.0` 是整份計畫 join 起來的字串，**子查詢
+        // 那半用到索引就足以讓它綠**，所以它證不出「COUNT 那半也吃得到索引」。
+        // 目前量到的是兩半都吃得到，但這條斷言守不住其中一半掉下去。
+        //
+        // 下面斷言暫存 B-tree**存在**是刻意的：把量到的限制寫下來，`✓` 才不會被
+        // 過度解讀。它順帶是一根絆索——實測把兩處 `WHERE` 改回 `= ?1`（`?2` 留著
+        // 不用）這一條會紅。但要說清楚它**不是**唯一會響的東西：如果連 `?2` 和
+        // `params!` 一起拿掉（也就是完整回退成 r28 之前的簽名），那麼測試這邊綁的
+        // 兩個參數會先撞上 `InvalidParameterCount`，在上面 `plans()` 的
+        // `.expect("query explain")` 就 panic 了，根本走不到這裡——紅是紅了，但下面
+        // 這段訊息不會印出來。所以訊息只講量到的事，不替紅的原因下結論。
         assert!(
-            !ordered_plan.contains("USE TEMP B-TREE FOR ORDER BY"),
-            "外送索引沒有支撐產品的最新結局子查詢：{ordered_plan}"
+            after.0.contains("USE TEMP B-TREE FOR ORDER BY"),
+            "排序忽然吃得到索引了。可能是有人把 WHERE 改回起點相等（那是把合併章節\
+             少算次數的 bug 放回來），也可能是索引或 SQLite 的規劃器換了形狀——\
+             後者的話，上面那段「可以接受」的理由要重新量一次再寫：{}",
+            after.0
         );
     }
 

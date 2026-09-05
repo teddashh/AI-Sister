@@ -1627,29 +1627,11 @@ fn timeline_chapters(
 }
 
 fn attach_l2(ch: &mut Chapter, cards: &[sister_core::db::L2CardRow]) {
-    let mut starts = vec![ch.core_start_ts];
-    if let Some(segs) = &ch.segments {
-        starts.extend(segs.iter().map(|s| s.core_start_ts));
-    }
-    let mut views = Vec::new();
-    for start in starts {
-        let mut versions: Vec<&sister_core::db::L2CardRow> = cards
-            .iter()
-            .filter(|c| c.segment_core_start == start)
-            .collect();
-        versions.sort_by_key(|c| (c.version, c.id));
-        if let Some((row, prev)) = sister_core::brain::latest_with_previous(&versions) {
-            let row = *row;
-            let prev = prev.copied();
-            let view = sister_core::brain::view_from_row_with_previous(row, prev);
-            if !views
-                .iter()
-                .any(|v: &sister_core::brain::L2View| v.segment_ref == view.segment_ref)
-            {
-                views.push(view);
-            }
-        }
-    }
+    let views = sister_core::brain::chapter_l2_views(
+        cards,
+        ch.core_start_ts,
+        ch.core_end_ts,
+    );
     ch.l2 = if views.is_empty() { None } else { Some(views) };
 }
 
@@ -1797,7 +1779,7 @@ fn memory_current_guess(shell: tauri::State<'_, Shell>) -> Result<CurrentGuessVi
                 });
             };
             let versions = db
-                .l2_versions_for_segment(seg.core_started_at)
+                .l2_versions_for_chapter(seg.core_started_at, seg.core_ended_at)
                 .map_err(|e| format!("{e:#}"))?;
             card = sister_core::brain::latest_with_previous(&versions).map(|(row, previous)| {
                 sister_core::brain::view_from_row_with_previous(row, previous)
@@ -1825,7 +1807,10 @@ fn memory_current_guess(shell: tauri::State<'_, Shell>) -> Result<CurrentGuessVi
             // 包括上面已經算好的 card，都會讓整塊失敗。brain 外送已經發生後的輔助查詢
             // 則不能擋住那次外送，所以 brain.rs 那邊會用 `.ok().flatten()`。
             let previous_attempts = db
-                .retained_interpreter_attempts_for_segment(seg.core_started_at)
+                .retained_interpreter_attempts_for_segment(
+                    seg.core_started_at,
+                    seg.core_ended_at,
+                )
                 .map_err(|e| format!("{e:#}"))?;
             let latest_closed = sister_core::brain::LatestClosedSegment {
                 has_card: card.is_some(),
