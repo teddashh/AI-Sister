@@ -52,7 +52,7 @@
 //! ⚠ 交貨**之前**這一檔編不過（那支函式還不存在），而編不過的紅什麼都沒證明。
 //!   有價值的是交貨**之後**的突變。
 
-use sister_core::brain::{latest_with_previous, OutboundOutcome};
+use sister_core::brain::{OutboundOutcome, latest_with_previous};
 use sister_core::db::{Db, L2Author, L2CardRow, L2Insert, OutboundInsert};
 
 const A: i64 = 10_000; // 左邊那一章的起點
@@ -120,7 +120,11 @@ fn an_unedited_chapter_returns_exactly_what_it_did_before() {
         activities(&before),
         "沒編輯過的章節，新舊兩支函式必須給同一份版本史"
     );
-    assert_eq!(activities(&after), vec!["第一版", "第二版"], "版本要由舊到新");
+    assert_eq!(
+        activities(&after),
+        vec!["第一版", "第二版"],
+        "版本要由舊到新"
+    );
 }
 
 /// 右界是**開**的。閉區間會讓下一章的卡片被這一章顯示走，於是同一張卡出現在
