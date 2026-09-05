@@ -15,8 +15,9 @@
 （設定檔存不進去、退回舊的那一組）在測試機上幾乎踩不到。
 
 而且它**沒有任何測試守著**：那句話在 `apps/desktop/src-tauri`，那是一個獨立的
-workspace，只跑 `cargo check` 和 `clippy`，從來沒有 `cargo test` 過。把
-`main.rs` 那一行改回 `restored.wanted` 是紅不了任何東西的。
+workspace，CI 對它只跑 `cargo clippy --all-targets -- -D warnings` 和
+`cargo build --release`（`ci.yml` 的「字母人 — lint and build」），**從來沒有
+`cargo test` 過**。把 `main.rs` 那一行改回 `restored.wanted` 是紅不了任何東西的。
 
 這支腳本上一版是 shell，而它有三個洞，三個都是對抗式稽核當場示範出來的：
 

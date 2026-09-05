@@ -135,8 +135,9 @@ jobs:
       # 用 {}。", restored.wanted)` 編得過、clippy 綠、讀起來也對。
       #
       # 為什麼是掃原始碼而不是測試：那句話在 `apps/desktop/src-tauri`，那是一個
-      # 獨立的 workspace，CI 只對它跑 `cargo check` 和 `clippy`，從來沒有
-      # `cargo test` 過。把那一行改回去是紅不了任何東西的。
+      # 獨立的 workspace，CI 對它只跑 `cargo clippy --all-targets -- -D warnings`
+      # 和 `cargo build --release`（本檔「字母人 — lint and build」那一步），
+      # **從來沒有 `cargo test` 過**。把那一行改回去是紅不了任何東西的。
       #
       # 為什麼是 python 而不是 grep：`cargo fmt` 會把一句中文的 `format!` 拆成
       # 三行，而一行一行看的 grep 會因此從紅變綠——**一個被例行動作關掉的閘門，
@@ -145,13 +146,32 @@ jobs:
         run: python3 ./scripts/check-combo-is-readable.py
 
       # 同一個形狀，第六次：「這一刻」那張卡要說得出「她試著問過 N 次，最近一
-      # 次是⋯」，靠的是 `main.rs` 裡查 `core_started_at` ＋ 把結果傳進
-      # `while_recording`。那兩行也在 `apps/desktop/src-tauri`，同樣沒有
-      # `cargo test`——把 `core_started_at` 改成 `core_ended_at`（型別一樣、
-      # clippy 綠）會安靜地回 0 列，卡片永遠退回舊那句「正在等解釋層處理」。
+      # 次是⋯」。r25 把**判斷順序**搬進 `sister_core::brain::CurrentGuess::decide`
+      # 了（由 `crates/sister-core/tests/current_guess_order.rs` 釘住，7 刀突變
+      # 實測 7/7 咬住），所以這支腳本現在守的是**搬不走的那一半**，有三塊：
       #
-      # 這不是推測：那一刀和「寫死成 None」那一刀我都真的跑過，**當時**那 26 條
-      # 閘門全綠——當時就是這一條還不存在的時候。這一條加進來就是為了讓它們變紅。
+      #   (a) 餵進 `decide` 的 `presence` / `paused` / `consented`。順序搬走了，
+      #       決定順序走哪一條的**輸入**沒有——`decide(presence, false, …)` 會讓
+      #       暫停那張卡永遠不出現，而 `cargo test --workspace` 21 個 binary 全綠
+      #       （那些測試拿 `paused` 當輸入參數在測 `decide` 內部，測不到誰餵它）。
+      #   (b) 去資料庫撈那六個欄位的那一段（綁著 tauri 的 `State`，搬不進 crates/）。
+      #       把 `core_started_at` 改成 `core_ended_at`（型別一樣、clippy 綠）
+      #       會安靜地回 0 列，卡片永遠退回舊那句「正在等解釋層處理」。
+      #   (c) `decide` 回來之後把結果攤成 `CurrentGuessView` 的那五行——**使用者
+      #       唯一讀得到的欄位（`message`）就在那裡**。這一塊是對抗式稽核逼出來
+      #       的：這支腳本的第一版整個停在 (b) 結束的地方，八刀實測八刀全溜，
+      #       包括「`message` 釘死成 `Queued.message()`」（15 句塌成最讓人安心
+      #       的那一句）和「`?` 換成 `unwrap_or`」（資料庫壞掉長得像正常的一天）。
+      #
+      # 三塊都在 `apps/desktop/src-tauri`，那裡從來沒有 `cargo test`。
+      # 這不是推測：(b) 那一刀和「寫死成 None」那一刀我都真的跑過，**當時**那
+      # 26 條閘門全綠——當時就是這一條還不存在的時候。這一條加進來就是為了讓
+      # 它們變紅。
+      #
+      # 閘門自己的正負對照是 31 刀（26 want=1、5 want=0）＋「跑一次 `cargo fmt`
+      # 不准把它弄紅」，跑在 `/home/ted-h/tmp-tests/validate-gate-r25.py`——那是
+      # 我本機的驗收紀錄，**不在這個 repo 裡**，clone 下來的人打不開。這支腳本
+      # 開頭寫的是它守得住／守不住哪幾種，不是那 31 刀的清單。
       - name: The 這一刻 card must stay wired to the attempt history
         run: python3 ./scripts/check-current-guess-wiring.py
 
