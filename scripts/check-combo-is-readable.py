@@ -84,9 +84,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# 那個 accelerator 欄位的兩個名字。`wanted` 是現在設成哪一組，`rejected` 是剛剛
-# 試了但沒搶到的那一組——兩個都是生的。
-FIELDS = re.compile(r"\.(wanted|rejected)\b")
+# 那個 accelerator 欄位的三個名字。`wanted` 是暫停現在設成哪一組，`rejected` 是
+# 剛剛試了但沒搶到的那一組，`hands_wanted` 是拔手那顆——三個裝的都是生的
+# `Ctrl+Alt+KeyP`。
+#
+# **`hands_wanted` 是後來才加進來的，而它示範了這張名單自己的失效方式。** 拔手
+# 快捷鍵那一輪新增了一個性質一模一樣的欄位，而這支腳本當時只認得前兩個：
+# `${view.hands_wanted}` 少包一層 `pretty()` 也會安靜地綠。那一輪的碼剛好每一處
+# 都包對了，於是「沒有人紅」和「沒有問題」在那一刻長得一模一樣——**這正是上面
+# docstring 說這支腳本存在的理由，發生在它自己身上。**
+#
+# 所以規則寫在這裡給下一個人：**新增一個帶 accelerator 的欄位，就回來加一行。**
+# 判準是「這個欄位裡裝的是不是那種字串」，不是它叫什麼名字。
+FIELDS = re.compile(r"\.(wanted|rejected|hands_wanted)\b")
 
 failed = []
 
@@ -418,7 +428,7 @@ if js is not None:
     # `pretty` 前面不是識別字元：窗切在半路的時候，`notpretty(` 會被截成
     # `pretty(`，那是同一個洞換一個入口。
     WRAP = re.compile(r"(?:^|[^\w$.])pretty\s*\(\s*$")
-    for m in re.finditer(r"view\.(wanted|rejected)\b", body):
+    for m in re.finditer(r"view\.(wanted|rejected|hands_wanted)\b", body):
         before, after = around(m.start(), m.end())
         wrapped = WRAP.search(body[: m.start()]) is not None
         # 收尾那個逗號要放過：formatter 拆多行的時候會自己加一個

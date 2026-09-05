@@ -35,13 +35,35 @@ fn every_ending() -> Vec<(&'static str, Outcome)> {
         os_error: None,
     };
     vec![
-        ("這一下真的拔掉了", Outcome::Pulled { at_ms: 1_700_000_000_000 }),
-        ("本來就拔著，讀得到時間", Outcome::AlreadyPulled { since_ms: Some(1_700_000_000_000) }),
-        ("本來就拔著，讀不到時間", Outcome::AlreadyPulled { since_ms: None }),
-        ("問不出資料目錄，手還接著", not_written(Why::NoDataDir, false)),
-        ("問不出資料目錄，可是她讀到的是拔著", not_written(Why::NoDataDir, true)),
+        (
+            "這一下真的拔掉了",
+            Outcome::Pulled {
+                at_ms: 1_700_000_000_000,
+            },
+        ),
+        (
+            "本來就拔著，讀得到時間",
+            Outcome::AlreadyPulled {
+                since_ms: Some(1_700_000_000_000),
+            },
+        ),
+        (
+            "本來就拔著，讀不到時間",
+            Outcome::AlreadyPulled { since_ms: None },
+        ),
+        (
+            "問不出資料目錄，手還接著",
+            not_written(Why::NoDataDir, false),
+        ),
+        (
+            "問不出資料目錄，可是她讀到的是拔著",
+            not_written(Why::NoDataDir, true),
+        ),
         ("寫不進去，手還接著", not_written(Why::CannotWrite, false)),
-        ("寫不進去，可是她讀到的是拔著", not_written(Why::CannotWrite, true)),
+        (
+            "寫不進去，可是她讀到的是拔著",
+            not_written(Why::CannotWrite, true),
+        ),
     ]
 }
 
@@ -170,7 +192,11 @@ fn the_sentence_says_whether_the_hands_are_still_attached() {
                 line.contains("還接著"),
                 !stopped,
                 "{why:?}／她讀到的狀態是 {stopped}，而那句話{}說手還接著：{line}",
-                if line.contains("還接著") { "" } else { "沒有" }
+                if line.contains("還接著") {
+                    ""
+                } else {
+                    "沒有"
+                }
             );
         }
     }
