@@ -3849,20 +3849,26 @@ impl Db {
     /// 這不是終生次數：`sister forget` 會依外送時間刪除 `brain_outbound` 的列；
     /// 保留期清理不碰這張表。舊資料若含不認得的 outcome，保留原始 token，仍
     /// 算一次問過。審閱層與盯梢層的列不屬於這個問題。
-    pub fn retained_interpreter_attempts_for_segment(
-        &self,
-        core_started_at: Millis,
-        core_ended_at: Millis,
-    ) -> Result<Option<RetainedInterpreterAttempts>> {
-        let (count, token): (i64, Option<String>) = self.conn.query_row(
-            "SELECT COUNT(*),
+    /// 上面那支查詢的原文。抽成常數是因為 `migration_018_indexes_are_used_by_both_hot_queries`
+    /// 要對**產品真的在跑的那一句**問執行計畫——它原本手抄了一份，而我在 r28 把
+    /// `WHERE` 從起點相等換成半開區間之後，手抄那份沒有跟著改，於是那條測試繼續
+    /// 綠著守一句已經沒有人在跑的 SQL。抄一份就會漂，所以只留一份。
+    const RETAINED_INTERPRETER_ATTEMPTS_SQL: &str = "SELECT COUNT(*),
                     (SELECT outcome FROM brain_outbound
                      WHERE segment_core_start >= ?1 AND segment_core_start < ?2
                        AND role = 'interpreter'
                      ORDER BY ts DESC, id DESC LIMIT 1)
              FROM brain_outbound
              WHERE segment_core_start >= ?1 AND segment_core_start < ?2
-               AND role = 'interpreter'",
+               AND role = 'interpreter'";
+
+    pub fn retained_interpreter_attempts_for_segment(
+        &self,
+        core_started_at: Millis,
+        core_ended_at: Millis,
+    ) -> Result<Option<RetainedInterpreterAttempts>> {
+        let (count, token): (i64, Option<String>) = self.conn.query_row(
+            Self::RETAINED_INTERPRETER_ATTEMPTS_SQL,
             params![core_started_at, core_ended_at],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -10986,11 +10992,11 @@ mod tests {
         db.conn().execute_batch("ANALYZE").expect("analyze before");
 
         let plans = |db: &Db| -> (String, String) {
-            let collect = |sql: &str| {
+            let collect = |sql: String, args: &[&dyn rusqlite::ToSql]| -> String {
                 db.conn()
-                    .prepare(sql)
+                    .prepare(&sql)
                     .expect("prepare explain")
-                    .query_map([], |r| r.get::<_, String>(3))
+                    .query_map(args, |r| r.get::<_, String>(3))
                     .expect("query explain")
                     .collect::<rusqlite::Result<Vec<_>>>()
                     .expect("collect explain")
@@ -10998,12 +11004,17 @@ mod tests {
             };
             (
                 collect(
-                    "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM brain_outbound
-                     WHERE segment_core_start = 42 AND role = 'interpreter'",
+                    format!(
+                        "EXPLAIN QUERY PLAN {}",
+                        Db::RETAINED_INTERPRETER_ATTEMPTS_SQL
+                    ),
+                    &[&42_i64, &99_i64],
                 ),
                 collect(
                     "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM input_metrics
-                     WHERE ts_end > 9990 AND ts_start < 20000)",
+                     WHERE ts_end > 9990 AND ts_start < 20000)"
+                        .to_owned(),
+                    &[],
                 ),
             )
         };
@@ -11040,25 +11051,23 @@ mod tests {
         assert!(!before.1.contains("idx_input_metrics_end"), "{}", before.1);
         assert!(after.1.contains("idx_input_metrics_end"), "{}", after.1);
 
-        let ordered_plan = db
-            .conn()
-            .prepare(
-                "EXPLAIN QUERY PLAN SELECT COUNT(*),
-                    (SELECT outcome FROM brain_outbound
-                     WHERE segment_core_start = 42 AND role = 'interpreter'
-                     ORDER BY ts DESC, id DESC LIMIT 1)
-                 FROM brain_outbound
-                 WHERE segment_core_start = 42 AND role = 'interpreter'",
-            )
-            .expect("prepare correlated plan")
-            .query_map([], |r| r.get::<_, String>(3))
-            .expect("query correlated plan")
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .expect("collect correlated plan")
-            .join(" | ");
+        // 排序那半：索引**沒有**支撐它，這是量到的，不是推的。
+        //
+        // r28 之前這句 SQL 用起點相等去查，`(segment_core_start, role, ts)` 這個
+        // 複合索引在等值條件之後還能照 `ts` 供貨，所以排序不必另外開暫存 B-tree。
+        // 換成半開區間之後，範圍條件吃掉了前導欄位，`ts` 就排不上了。
+        //
+        // 可以接受的理由：那個 `ORDER BY` 只排**一個章節內**的解釋層外送列（個位數
+        // 到數十列），不是整張表。真正會痛的是掃描那半，而它上面兩行已經釘住了。
+        //
+        // 這裡斷言它**存在**是刻意的——它同時是一根絆索：誰把 `WHERE` 改回起點相等
+        // （也就是 r28 修掉的那個少算 bug），這一條就會紅。
         assert!(
-            !ordered_plan.contains("USE TEMP B-TREE FOR ORDER BY"),
-            "外送索引沒有支撐產品的最新結局子查詢：{ordered_plan}"
+            after.0.contains("USE TEMP B-TREE FOR ORDER BY"),
+            "排序忽然吃得到索引了。如果是有人把 WHERE 改回 `segment_core_start = ?1`，\
+             那是把合併章節少算次數的 bug 放回來了；如果是索引換了形狀，上面那段\
+             「可以接受」的理由要重寫：{}",
+            after.0
         );
     }
 
