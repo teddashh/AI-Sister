@@ -16,8 +16,8 @@
 //! `is_pulled` 一不一致。**
 
 use sister_hands::kill_switch::{
-    self, HandsHotkeyOutcome, hands_hotkey_message, is_pulled, plan_hotkeys, press_hands_hotkey,
-    pulled_since, tray_hands_resume_label, tray_hands_stop_label,
+    self, hands_hotkey_message, is_pulled, plan_hotkeys, press_hands_hotkey, pulled_since,
+    tray_hands_resume_label, tray_hands_stop_label,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -234,6 +234,9 @@ fn a_hotkey_that_could_not_pull_names_the_other_two_ways() {
 #[cfg(unix)]
 #[test]
 fn a_read_only_data_dir_really_does_leave_the_hands_attached() {
+    // 這個名字只有這一格用得到，而這一格在 Windows 上編不進來——放在檔頭
+    // 的話，Windows target 的 clippy 會因為 `unused_imports` 直接紅。
+    use sister_hands::kill_switch::HandsHotkeyOutcome;
     use std::os::unix::fs::PermissionsExt;
     let tmp = Tmp::dir("readonly");
     std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o555)).expect("設成唯讀");

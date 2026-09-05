@@ -190,9 +190,7 @@ pub fn hands_hotkey_message(outcome: &HandsHotkeyOutcome) -> String {
         }
         // 沒寫成，可是她照樣停著。不講那個開關的人會以為自己白按了一下。
         HandsHotkeyOutcome::NotWritten {
-            why,
-            stopped: true,
-            ..
+            why, stopped: true, ..
         } => format!(
             "{}，那個開關沒寫下來。不過她現在讀到的狀態就是「拔著」，一樣什麼都不會交給作業系統。",
             why.zh()

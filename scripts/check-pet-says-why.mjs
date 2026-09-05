@@ -791,6 +791,35 @@ console.log("㉚ 拔手熱鍵按下去之後，那句話要真的出現在畫面
   check("下一件事蓋得掉", !p.line().includes(PULLED), p.line());
 }
 
+console.log("㉛ 送出去的事件名字，另一邊要真的有人在聽");
+{
+  // 上面那一節證的是「事件到了，話就上得了畫面」。它證不到的是**事件會不會
+  // 到**：`main.rs` 那個名字和 `app.js` 那個名字是兩份各自寫死的字串，中間沒
+  // 有共用的常數。實測過——把 `app.emit("hands-pulled", …)` 改成
+  // `"hands-pulled-x"`，這支腳本、`check-settings-say.mjs`、`check-windows.sh`
+  // 全綠，而使用者按下熱鍵之後畫面一個字都不會多。
+  //
+  // **這一條擋不住什麼，先寫在這裡：** 名字對、送的值是空的（把
+  // `announce_hands_pulled(app, &says)` 改成 `announce_hands_pulled(app, "")`）
+  // 一樣全綠。要抓那一種得真的把 Tauri 跑起來；這裡只保證兩張名單對得上。
+  //
+  // 兩個方向都實測過，但它們的來路不一樣：改 `main.rs` 那個名字，底下兩條
+  // 斷言同時紅（那是這一節唯一的偵測器）；改 `app.js` 那個名字，前面的
+  // `fromOutside` 會先丟「沒有人在聽 ⋯」，這一節根本沒跑到。所以「聽的 X
+  // 真的有人送」是給**還沒有人驅動的新 listener** 留的後備，不是主力。
+  const RS = read(join(UI, "../src-tauri/src/main.rs"));
+  const emitted = [...RS.matchAll(/\.emit\(\s*"([^"]+)"/g)].map((m) => m[1]);
+  const heard = [...read(SRC).matchAll(/\.listen\?\.\(\s*"([^"]+)"/g)].map((m) => m[1]);
+  check("main.rs 真的有在送事件", emitted.length > 0, `${emitted.length} 個`);
+  check("app.js 真的有在聽事件", heard.length > 0, `${heard.length} 個`);
+  for (const name of new Set(emitted)) {
+    check(`送出去的 ${name} 有人在聽`, heard.includes(name), heard.join("、"));
+  }
+  for (const name of new Set(heard)) {
+    check(`聽的 ${name} 真的有人送`, emitted.includes(name), emitted.join("、"));
+  }
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——字母人上有話說不出口，或說了活不過下一次輪詢。`);
