@@ -7686,7 +7686,9 @@ pub mod watch {
     use sister_core::brain;
     use sister_core::db::OutboundInsert;
     use sister_core::heartbeat::{Phase, Presence};
-    use sister_core::watch::{Blind, GRACE, Look, Tally, Verdict, WatchEnd, WatchSkip};
+    use sister_core::watch::{
+        Blind, GRACE, Look, SystemNotice, Tally, Verdict, WatchEnd, WatchSkip,
+    };
     use sister_core::{Config, Millis};
     use std::io::Write;
 
@@ -7715,7 +7717,7 @@ pub mod watch {
     /// 這一段在這台 Linux 上編得到（`check-windows.sh`）但**執行不到**，
     /// 一條斷言都蓋不住它——所以它上面這幾行是它唯一的規格。
     #[cfg(windows)]
-    fn platform_notify() {
+    fn platform_notify() -> SystemNotice {
         use windows::Win32::System::Console::GetConsoleWindow;
         use windows::Win32::System::Diagnostics::Debug::MessageBeep;
         use windows::Win32::UI::WindowsAndMessaging::{
@@ -7738,15 +7740,173 @@ pub mod watch {
             }
             let _ = MessageBeep(MB_OK);
         }
+        // 那一聲要在托盤那一段之前響完：`show_toast` 結尾會停一下不讓行程死掉。
+        show_toast()
+    }
+
+    /// **這一則通知刻意不帶畫面上的任何一個字。**
+    ///
+    /// 它會進 Windows 的通知中心，而通知中心在資料目錄外面——`sister forget`、
+    /// `sister prune`、匯出時那句「沒帶走的是…」，三條路一條都碰不到它。畫面上
+    /// 的字一旦被抄進去，這台機器上就多了一份這個 repo 的刪除路徑清不掉的副本。
+    /// 所以標題和內文都是寫死的常數，一個變數都不插；要看結果回終端機看。
+    ///
+    /// **為什麼是 `Shell_NotifyIconW`，不是 WinRT 的 `ToastNotificationManager`：**
+    /// 後者對沒有打包的桌面程式，要求開始功能表裡有一個帶 AppUserModelID 的
+    /// 捷徑，沒有那個捷徑的話 `Show()` **安靜地什麼都不發生**。裝捷徑是動使用者
+    /// 系統的事，而「安靜地什麼都不發生」正好是這支旗標要修的那個病。
+    /// `Shell_NotifyIconW` 每一步都回 `BOOL`，失敗看得見。
+    ///
+    /// **為什麼自己開一個隱藏視窗，不拿 `GetConsoleWindow()`：** 托盤圖示的
+    /// `hWnd` 是殼層用來回呼、以及用來判斷「擁有者還在不在」的把手，它得屬於
+    /// 這個行程，而主控台視窗多半屬於 conhost。閃爍那一邊沒有這個限制
+    /// （`FlashWindowEx` 對任何視窗都行），所以那邊照舊用主控台視窗——
+    /// **兩條通道從這裡開始各有各的失敗條件**，`SystemNotice` 那幾句話因此
+    /// 一個字都不提工作列。
+    ///
+    /// `RegisterClassW` 的回傳值刻意不看：同名類別已經註冊過時它會回 0，而那
+    /// 種情況下 `CreateWindowExW` 照樣成功。讓建視窗那一步當唯一的裁判。
+    ///
+    /// **沒有 `NIM_DELETE`。** 那顆圖示是這則通知的擁有者，刪掉圖示會把通知一起
+    /// 收走，而他有可能一小時後才回來。行程結束時 Windows 會回收它；代價是托盤
+    /// 上可能留一顆滑過去才消失的殘影，比一則他永遠看不到的通知便宜。
+    ///
+    /// **這一段在這台 Linux 上編得到（`check-windows.sh`）但執行不到，一條斷言
+    /// 都蓋不住它——上面這幾行是它唯一的規格。** 真的在 Windows 上跑的時候第一
+    /// 個要確認的是通知有沒有出現；沒出現而這裡又回報「交出去了」的話，頭號
+    /// 嫌犯是行程在殼層把氣泡畫出來之前就結束了（`DWELL` 就是為它留的），
+    /// 二號嫌犯是專注輔助。
+    #[cfg(windows)]
+    fn show_toast() -> SystemNotice {
+        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::Shell::{
+            NIF_ICON, NIF_INFO, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_MODIFY, NOTIFYICONDATAW,
+            Shell_NotifyIconW,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, IDI_INFORMATION, LoadIconW, RegisterClassW,
+            WINDOW_EX_STYLE, WNDCLASSW, WS_OVERLAPPED,
+        };
+        use windows::core::w;
+
+        /// `WNDCLASSW.lpfnWndProc` 要的是一根 `extern "system"` 的函式指標，而
+        /// windows-rs 匯出的 `DefWindowProcW` 是一層 Rust ABI 的包裝，不能直接
+        /// 塞進去（`check-windows.sh` 當場擋下來的就是這個）。這個視窗從不顯示、
+        /// 也沒有訊息迴圈在抽它的佇列，所以這裡除了轉手什麼都不用做。
+        unsafe extern "system" fn wndproc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            // SAFETY: 原封不動把殼層給的四個參數交還給系統的預設處理常式。
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+
+        const TITLE: &str = "妹妹：這一場盯梢停下來了";
+        const BODY: &str = "回終端機看結果。這一則通知刻意不帶畫面上的字。";
+        /// 殼層要一點時間才把氣泡畫出來，而那顆托盤圖示——連同掛在它身上的
+        /// 通知——會跟著這個行程一起消失。收尾本來就要結束了，多等這一下的
+        /// 代價是零：這支旗標的前提就是他不在這裡等。
+        const DWELL: std::time::Duration = std::time::Duration::from_millis(1_200);
+
+        /// `szInfoTitle` 是 64 個 UTF-16 單位、`szInfo` 是 256 個，上面兩句都是
+        /// 全形中文（BMP，一個字一個單位）且離上限很遠，所以那條截斷分支切不到
+        /// 代理對。留著它是為了下一個改文案的人。
+        fn fill(dst: &mut [u16], src: &str) {
+            let mut i = 0;
+            for unit in src.encode_utf16() {
+                if i + 1 >= dst.len() {
+                    break;
+                }
+                dst[i] = unit;
+                i += 1;
+            }
+            dst[i] = 0;
+        }
+
+        let class = w!("SisterWatchNotifyHost");
+        // SAFETY: 註冊一個只用 `DefWindowProcW` 的類別，再開一個從不 `ShowWindow`
+        // 的 0x0 視窗當托盤圖示的擁有者。兩個呼叫都不保留外來指標。
+        let host = unsafe {
+            let Ok(module) = GetModuleHandleW(None) else {
+                return SystemNotice::NoHost;
+            };
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(wndproc),
+                hInstance: module.into(),
+                lpszClassName: class,
+                ..Default::default()
+            };
+            let _ = RegisterClassW(&wc);
+            match CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class,
+                w!("sister"),
+                WS_OVERLAPPED,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(module.into()),
+                None,
+            ) {
+                Ok(hwnd) if !hwnd.is_invalid() => hwnd,
+                _ => return SystemNotice::NoHost,
+            }
+        };
+
+        let mut data = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: host,
+            uID: 1,
+            uFlags: NIF_ICON | NIF_TIP,
+            ..Default::default()
+        };
+        // SAFETY: 共用的系統圖示，不需要釋放；拿不到就讓 `hIcon` 留在預設值。
+        if let Ok(icon) = unsafe { LoadIconW(None, IDI_INFORMATION) } {
+            data.hIcon = icon;
+        }
+        fill(&mut data.szTip, TITLE);
+
+        // SAFETY: `data` 是本地端的，`cbSize` 對得上這個 struct，`hWnd` 屬於這個
+        // 行程。殼層只在呼叫期間讀它。
+        unsafe {
+            if !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
+                return SystemNotice::Refused;
+            }
+            data.uFlags = NIF_INFO;
+            data.dwInfoFlags = NIIF_INFO;
+            fill(&mut data.szInfoTitle, TITLE);
+            fill(&mut data.szInfo, BODY);
+            if !Shell_NotifyIconW(NIM_MODIFY, &data).as_bool() {
+                return SystemNotice::Refused;
+            }
+        }
+        std::thread::sleep(DWELL);
+        SystemNotice::HandedOver
     }
 
     #[cfg(not(windows))]
-    fn platform_notify() {}
+    fn platform_notify() -> SystemNotice {
+        SystemNotice::NotOnThisBuild
+    }
 
+    /// **那一行不是給現在看的，是給他回來的時候看的。**
+    ///
+    /// 這支旗標的前提就是他當時不在螢幕前面。他回來讀終端機，如果只有一個
+    /// 「等到了」而沒有任何一句話交代那幾條通道，「通知正常送出」和「那段程式碼
+    /// 根本沒跑到」在畫面上會是同一種沉默——這個 repo 修了八十幾次的那顆
+    /// 「兩種 0」。所以四種結果都印，成功那一種也印。
     fn notify(out: &mut impl Write) -> Result<()> {
         write!(out, "\x07")?;
         out.flush()?;
-        platform_notify();
+        let notice = platform_notify();
+        writeln!(out, "{}", notice.line())?;
+        out.flush()?;
         Ok(())
     }
 
@@ -8501,6 +8661,59 @@ pub mod watch {
                     requested,
                     "Saw 的通知和旗標不同步：{}",
                     String::from_utf8_lossy(&out)
+                );
+            }
+        }
+
+        /// **那一聲響了，就必須有一行字說它是怎麼響的。**
+        ///
+        /// `SystemNotice` 那四句話在 `sister-core` 有自己的測試，但那些測試只
+        /// 證明「四句話各講各的」——一句都沒有證明**有人把它印出來**。把
+        /// `notify()` 裡那行 `writeln!` 刪掉，`sister-core` 那五條會全部繼續是
+        /// 綠的，而他回到終端機看到的是一個沒有交代的鈴聲。這一條釘的是呼叫端。
+        ///
+        /// **而且釘的不只是「有印」，還有「印的是這個平台答得出來的那一句」。**
+        /// 只數「四句裡命中幾句」的話，一個把 `#[cfg(not(windows))]` 那支改成
+        /// 回 `HandedOver` 的 Linux 組建照樣是綠的——它會對著一台根本沒有通知
+        /// 中心的機器說「我把通知交給 Windows 了」。所以兩邊都要釘：這個平台
+        /// 該講的那幾句要出現，不該講的那幾句一句都不准出現。
+        #[test]
+        fn the_bell_never_rings_without_a_line_saying_which_channels_it_used() {
+            // Windows 上真正走到哪一格要看那台機器（有沒有建成視窗、殼層收不
+            // 收），三句都是合法答案；能確定的是它**不會**是「這個組建沒有」。
+            let mine: Vec<SystemNotice> = SystemNotice::ALL
+                .into_iter()
+                .filter(|n| (*n == SystemNotice::NotOnThisBuild) != cfg!(windows))
+                .collect();
+            for requested in [true, false] {
+                let (tmp, config) = prepared("watch-notify-report", "完成", true);
+                let mut ticks = [100_000, 100_000].into_iter();
+                let mut out = Vec::new();
+                run_with(
+                    &tmp.0,
+                    &config,
+                    &opts(requested),
+                    &mut || ticks.next().expect("fake clock ran out"),
+                    &mut |_| {},
+                    &mut out,
+                )
+                .expect("run");
+                let printed = String::from_utf8_lossy(&out).into_owned();
+
+                let hit = mine.iter().filter(|n| printed.contains(n.line())).count();
+                assert_eq!(
+                    hit,
+                    usize::from(requested),
+                    "鈴聲和交代那一行不同步（requested={requested}）：{printed}"
+                );
+
+                let wrong: Vec<SystemNotice> = SystemNotice::ALL
+                    .into_iter()
+                    .filter(|n| !mine.contains(n) && printed.contains(n.line()))
+                    .collect();
+                assert!(
+                    wrong.is_empty(),
+                    "這個平台印了一句它答不出來的話 {wrong:?}：{printed}"
                 );
             }
         }
