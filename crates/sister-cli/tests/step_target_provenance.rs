@@ -461,6 +461,44 @@ fn drive_prefix_is_measured_from_target_fact_time_not_command_time() {
     assert!(stdout.contains("她的上一步就在這之前 5 秒"), "{stdout}");
 }
 
+/// target fact 的 raw 換成別的內容之後，dry-run 不該再對它下「誰驅動的」判斷。
+///
+/// `Db::target_fact_ts` 的 `.filter(raw == expected_raw)` 是這道守衛。拿掉它，
+/// 這一步（來源已經不在了）後面就會緊接一句拿新那列 ts 算出來的驅動判斷，
+/// 自相矛盾。dry-run 在授權之前就印，所以這裡看得到；`--unattended` 會因為
+/// 這一步被拒絕而不印，抓不到這一刀。
+#[test]
+fn real_db_prints_no_drive_sentence_when_the_target_raw_no_longer_matches() {
+    let (dir, _, _) = run_case("drive-raw-mismatch", "chrome.exe", false);
+    {
+        let conn = rusqlite::Connection::open(Config::db_path(&dir)).unwrap();
+        let target_id: i64 = conn
+            .query_row("SELECT id FROM facts WHERE raw = ?1", [OTHER_APP_URL], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        conn.execute(
+            "UPDATE facts SET raw = 'https://new.example/not-the-old-target' WHERE id = ?1",
+            [target_id],
+        )
+        .unwrap();
+    }
+    let out = sister(
+        &dir,
+        None,
+        &[
+            "do", "--task", TASK, "--app", "chrome.exe", "--allow", "open-url", "--dry-run",
+        ],
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !stdout.contains("紀錄裡沒有可以對照")
+            && !stdout.contains("一下都沒有動")
+            && !stdout.contains("你在動鍵盤滑鼠"),
+        "target fact 的 raw 換掉了，dry-run 卻還印『誰驅動的』判斷——raw 濾網被拿掉了：\n{stdout}"
+    );
+}
+
 fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, String, usize) {
     let dir = tmp(label);
     let scenario = dir.join("scenario.json");

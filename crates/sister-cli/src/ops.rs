@@ -3907,6 +3907,11 @@ pub mod act {
             inner: Source,
             fact_ts: Option<i64>,
             window: Option<sister_core::model::InputMetrics>,
+            /// `Some(n)` 代表這個假貨只在被問到 fact id `n` 時才交出 `fact_ts`。
+            /// `None` 代表不看 id（給那些一次餵好幾張卡的舊測試用）。
+            /// 存在的理由：呼叫端要問的是**下一步 fact 的 id**，不是承諾卡自己的
+            /// id，而 `Driven` 一旦忽略 id，`fact_id`→`commitment.id` 那一刀就打不到。
+            expect_fact_id: Option<i64>,
         }
 
         impl StepSource for Driven {
@@ -3929,8 +3934,11 @@ pub mod act {
             fn frame_for_target_fact(&self, id: i64, expected_raw: &str) -> Result<TargetFrame> {
                 self.inner.frame_for_target_fact(id, expected_raw)
             }
-            fn target_fact_ts(&self, _id: i64, _expected_raw: &str) -> Result<Option<i64>> {
-                Ok(self.fact_ts)
+            fn target_fact_ts(&self, id: i64, _expected_raw: &str) -> Result<Option<i64>> {
+                match self.expect_fact_id {
+                    Some(expected) if id != expected => Ok(None),
+                    _ => Ok(self.fact_ts),
+                }
             }
             fn input_window_covering(
                 &self,
@@ -3965,6 +3973,7 @@ pub mod act {
                 },
                 fact_ts: Some(1_700_000_000_000),
                 window,
+                expect_fact_id: None,
             };
             let mut executor = NeverRuns;
             let mut input = std::io::Cursor::new("不要\n".as_bytes());
@@ -3980,6 +3989,51 @@ pub mod act {
             )
             .unwrap();
             String::from_utf8(out).unwrap()
+        }
+
+        /// 那句話要問的是**下一步 fact 的 id**，不是承諾卡自己的 id。
+        ///
+        /// r35 收貨突變 E4：把呼叫端的 `fact_id` 換成 `commitment.id`——兩個都是
+        /// `i64`，編得過，而舊夾具裡承諾卡 id 剛好等於 fact id，所以看不出來。
+        /// 這裡把承諾卡 id（1）和下一步 fact id（99）拆開，`Driven` 只認 99；
+        /// 呼叫端若拿卡片 id 去問，`target_fact_ts` 回 `None`，那句話就消失。
+        #[test]
+        fn ted_drive_sentence_is_keyed_to_the_target_fact_id_not_the_commitment_id() {
+            let dir = crate::ops::tmp::Tmp::new("r36-fact-id");
+            let source = Driven {
+                inner: Source {
+                    rows: vec![card(
+                        1,
+                        Some(&open_url("https://example.com/a")),
+                        &[1],
+                        Some(99),
+                    )],
+                    apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                    target_frames: Default::default(),
+                    nearest_frame: None,
+                },
+                fact_ts: Some(1_700_000_000_000),
+                window: Some(sister_core::model::InputMetrics::default()),
+                expect_fact_id: Some(99),
+            };
+            let mut executor = NeverRuns;
+            let mut input = std::io::Cursor::new("不要\n".as_bytes());
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &opts("任務", &["chrome.exe"], 3, 5, false),
+                &source,
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert!(
+                out.contains("一下都沒有動"),
+                "那句話沒有出現——呼叫端問的 fact id 不是下一步 fact 的 id（99）：{out}"
+            );
         }
 
         /// 三種狀態都要**真的印到使用者面前**，而且是三句不同的話。
@@ -4047,6 +4101,7 @@ pub mod act {
                     keystrokes: 12,
                     ..Default::default()
                 }),
+                expect_fact_id: None,
             };
             let mut executor = AlwaysSucceeds;
             let mut input = std::io::Cursor::new("好\n不要\n".as_bytes());
