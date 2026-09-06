@@ -1926,9 +1926,9 @@ impl Db {
             .query_row(
                 "SELECT ts_start, ts_end, keystrokes, clicks, mouse_px, scroll_ticks,
                         window_switches, idle_ms, typing_bursts
-                 FROM input_metrics
+                 FROM input_metrics INDEXED BY idx_input_ts
                  WHERE ts_start <= ?1 AND ts_end >= ?1
-                 ORDER BY ts_start
+                 ORDER BY ts_start DESC
                  LIMIT 1",
                 [ts],
                 |row| {
@@ -12359,17 +12359,67 @@ mod tests {
     fn input_window_covering_keeps_not_measured_distinct_from_measured_zero() {
         let mut db = test_db();
         let s = db.start_session("test", "0.0.1").expect("session");
-        let measured_zero = InputMetrics {
+        let measured = InputMetrics {
             ts_start: 100,
-            ts_end: 200,
-            ..InputMetrics::default()
+            ts_end: 1_000,
+            keystrokes: 11,
+            clicks: 22,
+            mouse_px: 33,
+            scroll_ticks: 44,
+            window_switches: 55,
+            idle_ms: 66,
+            typing_bursts: 77,
         };
-        db.insert_input(s, &measured_zero).expect("insert input");
+        let later = InputMetrics {
+            ts_start: 500,
+            ts_end: 600,
+            keystrokes: 101,
+            clicks: 102,
+            mouse_px: 103,
+            scroll_ticks: 104,
+            window_switches: 105,
+            idle_ms: 106,
+            typing_bursts: 107,
+        };
+        db.insert_input(s, &measured).expect("insert input");
+        db.insert_input(s, &later)
+            .expect("insert overlapping input");
 
         assert_eq!(db.input_window_covering(99).unwrap(), None);
-        assert_eq!(db.input_window_covering(100).unwrap(), Some(measured_zero));
-        assert_eq!(db.input_window_covering(200).unwrap(), Some(measured_zero));
-        assert_eq!(db.input_window_covering(201).unwrap(), None);
+        assert_eq!(db.input_window_covering(100).unwrap(), Some(measured));
+        assert_eq!(db.input_window_covering(1_000).unwrap(), Some(measured));
+        assert_eq!(db.input_window_covering(1_001).unwrap(), None);
+        // 雖然產品視窗不重疊，這裡刻意重疊：DESC 的公開選取規則是取起點較晚者。
+        assert_eq!(db.input_window_covering(550).unwrap(), Some(later));
+    }
+
+    #[test]
+    fn input_window_covering_uses_start_index_without_a_sort_btree() {
+        let db = test_db();
+        for i in 0..10_000_i64 {
+            db.conn()
+                .execute(
+                    "INSERT INTO input_metrics(ts_start, ts_end) VALUES(?1, ?2)",
+                    params![i * 100, i * 100 + 99],
+                )
+                .expect("seed input metrics");
+        }
+        db.conn().execute_batch("ANALYZE").expect("analyze");
+        let plan = db
+            .conn()
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT ts_start, ts_end, keystrokes, clicks, mouse_px,
+             scroll_ticks, window_switches, idle_ms, typing_bursts FROM input_metrics INDEXED BY idx_input_ts
+             WHERE ts_start <= ?1 AND ts_end >= ?1 ORDER BY ts_start DESC LIMIT 1",
+            )
+            .expect("prepare explain")
+            .query_map([999_950_i64], |r| r.get::<_, String>(3))
+            .expect("query explain")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect explain")
+            .join(" | ");
+        assert!(plan.contains("idx_input_ts"), "{plan}");
+        assert!(!plan.contains("USE TEMP B-TREE FOR ORDER BY"), "{plan}");
     }
 
     /// 「零當機」現在有實作了，而不是靠使用者的印象。

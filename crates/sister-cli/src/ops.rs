@@ -2018,7 +2018,7 @@ pub mod act {
                 "這個目標出現在畫面上的那一段，你在動鍵盤滑鼠——但這只說明同一段時間有人在操作，不表示是你叫出這個東西的。"
             }
             HumanMotion::NotMeasured => {
-                "這台機器沒有在記輸入，所以說不出這個目標出現的時候有沒有人在動。"
+                "這個目標出現的時候，紀錄裡沒有可以對照的鍵盤或滑鼠動作——可能是沒人動，也可能是那一小段沒被記進來，我分不出是哪一種。"
             }
         };
         format!("{prefix}{observation}")
@@ -3145,14 +3145,21 @@ pub mod act {
             writeln!(out, "{target_app}")?;
             writeln!(out, "宣告 app：{}", declared_app.label())?;
             writeln!(out, "{covered}")?;
-            if let Some((fact_id, expected_raw)) = commitment
+            let target_drive_line = if let Some((fact_id, expected_raw)) = commitment
                 .allowed_next_step_fact
                 .zip(expected_target.as_deref())
                 && let Some(target_ts) = source.target_fact_ts(fact_id, expected_raw)?
             {
                 let previous = previous_step_seconds(&log.replay()?.events, target_ts);
                 let motion = human_motion(source.input_window_covering(target_ts)?);
-                writeln!(out, "{}", target_drive_sentence(previous, motion))?;
+                Some(target_drive_sentence(previous, motion))
+            } else {
+                None
+            };
+            if !opts.unattended
+                && let Some(line) = &target_drive_line
+            {
+                writeln!(out, "{line}")?;
             }
             if opts.dry_run {
                 writeln!(out)?;
@@ -3185,6 +3192,9 @@ pub mod act {
                 } else {
                     match run.grant().authorize_unattended(&step, clock()) {
                         Ok((approval, permit)) => {
+                            if let Some(line) = &target_drive_line {
+                                writeln!(out, "{line}")?;
+                            }
                             log.append(&ActionEvent::Approved {
                                 at_ms: clock(),
                                 action: action.clone(),
@@ -3701,7 +3711,9 @@ pub mod act {
             let unmeasured = target_drive_sentence(None, human_motion(None));
             let untouched = target_drive_sentence(None, human_motion(Some(zero)));
             assert_ne!(unmeasured, untouched);
-            assert!(unmeasured.contains("沒有在記輸入"), "{unmeasured}");
+            assert!(unmeasured.contains("我分不出是哪一種"), "{unmeasured}");
+            assert!(!unmeasured.contains("沒有在記"), "{unmeasured}");
+            assert!(!unmeasured.contains("沒在記錄"), "{unmeasured}");
             assert!(untouched.contains("一下都沒有動"), "{untouched}");
         }
 
@@ -3726,6 +3738,68 @@ pub mod act {
             assert!(with_her.starts_with("她的上一步就在這之前 30 秒；"));
             assert!(with_her.ends_with(&without_her));
             assert!(with_her.contains("一下都沒有動"), "{with_her}");
+        }
+
+        #[test]
+        fn previous_step_uses_only_the_nearest_executed_event_at_or_before_the_target() {
+            let action = ActionSnapshot::FocusWindow {
+                title: "target".into(),
+            };
+            let executed = |at_ms| ActionEvent::Executed {
+                at_ms,
+                action: action.clone(),
+                result: ExecutionResult::Succeeded {
+                    detail: "done".into(),
+                },
+            };
+            let proposed = |at_ms| ActionEvent::Proposed {
+                at_ms,
+                action: action.clone(),
+            };
+
+            assert_eq!(
+                previous_step_seconds(&[executed(75_000), executed(95_000)], 100_000),
+                Some(5)
+            );
+            assert_eq!(previous_step_seconds(&[executed(105_000)], 100_000), None);
+            assert_eq!(
+                previous_step_seconds(&[executed(90_000), proposed(99_000)], 100_000),
+                Some(10)
+            );
+            assert_eq!(previous_step_seconds(&[proposed(99_000)], 100_000), None);
+            assert_eq!(
+                previous_step_seconds(&[executed(100_000)], 100_000),
+                Some(0)
+            );
+        }
+
+        #[test]
+        fn every_direct_human_input_signal_counts_as_active() {
+            let cases = [
+                sister_core::model::InputMetrics {
+                    keystrokes: 11,
+                    ..Default::default()
+                },
+                sister_core::model::InputMetrics {
+                    clicks: 22,
+                    ..Default::default()
+                },
+                sister_core::model::InputMetrics {
+                    mouse_px: 33,
+                    ..Default::default()
+                },
+                sister_core::model::InputMetrics {
+                    scroll_ticks: 44,
+                    ..Default::default()
+                },
+            ];
+            for metrics in cases {
+                assert_eq!(human_motion(Some(metrics)), HumanMotion::HumanActive);
+                assert!(
+                    target_drive_sentence(None, human_motion(Some(metrics)))
+                        .contains("你在動鍵盤滑鼠")
+                );
+            }
         }
 
         #[test]
@@ -3770,6 +3844,21 @@ pub mod act {
         /// 針取的是**否定子句本身**，不是產品那一整句的手抄本。
         #[test]
         fn ted_active_wording_carries_an_explicit_disclaimer() {
+            let all = [
+                HumanMotion::HumanActive,
+                HumanMotion::NobodyTouched,
+                HumanMotion::NotMeasured,
+            ];
+            for motion in all {
+                let says = target_drive_sentence(None, motion);
+                for forbidden in ["所以", "就是", "就是你", "你自己", "一定是", "就是她"]
+                {
+                    assert!(
+                        !says.contains(forbidden),
+                        "因果詞「{forbidden}」出現在：{says}"
+                    );
+                }
+            }
             let says = target_drive_sentence(None, HumanMotion::HumanActive);
             // 針不能只取「是你叫出」——產品那句正是靠緊鄰在前的「不表示」
             // 把它否定掉的。要問的是**每一次**出現都有沒有被否定，
@@ -3788,6 +3877,11 @@ pub mod act {
             assert!(
                 says.contains("不表示") || says.contains("不代表") || says.contains("不等於"),
                 "沒有把「有人在動 ≠ 是你叫出來的」講出來：{says}"
+            );
+            assert!(
+                says.trim_end_matches('。')
+                    .ends_with("不表示是你叫出這個東西的"),
+                "否定因果必須是最後結論：{says}"
             );
         }
 
@@ -3902,8 +3996,8 @@ pub mod act {
             let human = drive_line(Some(active));
 
             assert!(
-                unmeasured.contains("沒有在記輸入"),
-                "「這台機器沒在記輸入」沒有印到使用者面前：{unmeasured}"
+                unmeasured.contains("我分不出是哪一種"),
+                "不確定的觀察沒有印到使用者面前：{unmeasured}"
             );
             assert!(
                 untouched.contains("一下都沒有動"),
@@ -3914,7 +4008,7 @@ pub mod act {
                 "「你在動」沒有印到使用者面前：{human}"
             );
             // 三句話真的不一樣，而且是在**同一個出口**上不一樣。
-            assert!(!untouched.contains("沒有在記輸入"), "{untouched}");
+            assert!(!untouched.contains("我分不出是哪一種"), "{untouched}");
             assert!(!human.contains("一下都沒有動"), "{human}");
         }
 

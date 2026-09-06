@@ -1,9 +1,11 @@
 //! 下一步目標自己的畫面來源必須參與授權書的 app 維度。
 use sister_core::config::Config;
 use sister_core::db::{Db, L2Author, L2Insert};
+use sister_core::model::InputMetrics;
 use sister_hands::semi_action::{
     ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, StepLimit, Task, grant_path,
 };
+use sister_hands::{ActionEvent, ActionLog, ActionSnapshot, ExecutionResult};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -276,6 +278,10 @@ fn target_from_same_app_is_still_refused_unattended_when_not_cited() {
         !log.contains("user_declined_this_step"),
         "action log:\n{log}"
     );
+    assert!(
+        !stdout.contains("我分不出是哪一種"),
+        "拒絕前不該印驅動判斷：{stdout}"
+    );
 }
 
 #[test]
@@ -376,6 +382,83 @@ fn target_on_a_frame_the_card_cited_still_executes_unattended() {
     let (_, stdout, executed) = run_case_ex("card-cites-target", "chrome.exe", true, true);
     assert_eq!(executed, 1, "stdout:\n{stdout}");
     assert!(!stdout.contains("無人值守拒絕"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("我分不出是哪一種"),
+        "通過後應印驅動判斷：{stdout}"
+    );
+}
+
+fn dry_run_drive_observation(
+    label: &str,
+    metrics: Option<InputMetrics>,
+    with_previous: bool,
+) -> String {
+    let (dir, _, _) = run_case(label, "chrome.exe", false);
+    let mut db = Db::open(&Config::db_path(&dir)).expect("open fixture db");
+    let target = db
+        .facts_by_kind("url", 100)
+        .unwrap()
+        .into_iter()
+        .find(|fact| fact.raw == OTHER_APP_URL)
+        .expect("target fact");
+    if let Some(mut metrics) = metrics {
+        metrics.ts_start = target.ts;
+        metrics.ts_end = target.ts;
+        let session = db.start_session("drive-observation", "test").unwrap();
+        db.insert_input(session, &metrics).unwrap();
+    }
+    if with_previous {
+        ActionLog::in_data_dir(&dir)
+            .append(&ActionEvent::Executed {
+                at_ms: target.ts - 5_000,
+                action: ActionSnapshot::OpenUrl {
+                    url: OTHER_APP_URL.into(),
+                },
+                result: ExecutionResult::Succeeded {
+                    detail: "seed prior step".into(),
+                },
+            })
+            .unwrap();
+    }
+    drop(db);
+    let out = sister(
+        &dir,
+        None,
+        &[
+            "do",
+            "--task",
+            TASK,
+            "--app",
+            "chrome.exe",
+            "--allow",
+            "open-url",
+            "--dry-run",
+        ],
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn real_db_wiring_prints_all_three_input_states_during_dry_run() {
+    let active = dry_run_drive_observation(
+        "drive-active",
+        Some(InputMetrics {
+            clicks: 1,
+            ..Default::default()
+        }),
+        false,
+    );
+    let zero = dry_run_drive_observation("drive-zero", Some(InputMetrics::default()), false);
+    let missing = dry_run_drive_observation("drive-missing", None, false);
+    assert!(active.contains("你在動鍵盤滑鼠"), "{active}");
+    assert!(zero.contains("一下都沒有動"), "{zero}");
+    assert!(missing.contains("我分不出是哪一種"), "{missing}");
+}
+
+#[test]
+fn drive_prefix_is_measured_from_target_fact_time_not_command_time() {
+    let stdout = dry_run_drive_observation("drive-target-time", None, true);
+    assert!(stdout.contains("她的上一步就在這之前 5 秒"), "{stdout}");
 }
 
 fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, String, usize) {
