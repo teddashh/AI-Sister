@@ -1088,8 +1088,17 @@ impl<B: Backend> Recorder<B> {
         let drained = self.backend.drain_input(ts);
         self.timings.input.record(t.elapsed());
 
-        if let Some(metrics) = drained? {
-            self.db.insert_input(self.session_id, &metrics)?;
+        if let Some(tick) = drained? {
+            if let Some(metrics) = tick.metrics {
+                self.db.insert_input(self.session_id, &metrics)?;
+            } else {
+                self.db.insert_input_health(
+                    self.session_id,
+                    tick.ts_start,
+                    tick.ts_end,
+                    tick.listening,
+                )?;
+            }
         }
         Ok(())
     }
@@ -1105,6 +1114,57 @@ mod tests {
     use super::*;
     use crate::replay::{Scenario, Step};
     use sister_core::config::PrivacyConfig;
+
+    #[test]
+    fn recorder_writes_quiet_input_health_from_the_input_source() {
+        use crate::traits::{
+            CompositeBackend, InputSource, NullClipboard, NullFocus, NullOcr, NullScreen,
+        };
+        use sister_core::model::{HookHealth, InputListening, InputTick, classify_quiet_window};
+
+        struct Quiet {
+            hook: HookHealth,
+            os_idle_ms: Option<u64>,
+        }
+        impl InputSource for Quiet {
+            fn drain(&mut self, ts: Millis) -> Result<Option<InputTick>> {
+                Ok(Some(InputTick {
+                    ts_start: ts - 10_000,
+                    ts_end: ts,
+                    metrics: None,
+                    listening: classify_quiet_window(self.hook, self.os_idle_ms, 10_000),
+                }))
+            }
+        }
+
+        for (os_idle_ms, state) in [
+            (Some(10_000), InputListening::IdleConfirmed),
+            (Some(9_999), InputListening::NotListening),
+        ] {
+            let backend = CompositeBackend {
+                name: "quiet-input".into(),
+                screen: NullScreen,
+                focus: NullFocus,
+                clipboard: NullClipboard,
+                input: Quiet {
+                    hook: HookHealth::Active,
+                    os_idle_ms,
+                },
+                ocr: NullOcr,
+            };
+            let mut recorder = Recorder::new(
+                backend,
+                Db::open_in_memory().expect("db"),
+                Config::default(),
+                None,
+            )
+            .expect("recorder");
+            recorder.record_input(20_000).expect("record input");
+            let db = recorder.into_db();
+            assert_eq!(db.input_window_covering(15_000).unwrap(), None);
+            assert_eq!(db.input_health_covering(15_000).unwrap(), Some(state));
+        }
+    }
 
     #[derive(Debug, Default, PartialEq, Eq)]
     struct OcrLifecycle {
@@ -1642,7 +1702,7 @@ mod tests {
         }
         struct NeverTouched;
         impl crate::traits::InputSource for NeverTouched {
-            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputMetrics>> {
+            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputTick>> {
                 Ok(None)
             }
             fn idle_ms(&mut self) -> Option<u64> {
@@ -1707,7 +1767,7 @@ mod tests {
         }
         struct NeverTouched;
         impl crate::traits::InputSource for NeverTouched {
-            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputMetrics>> {
+            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputTick>> {
                 Ok(None)
             }
             fn idle_ms(&mut self) -> Option<u64> {
@@ -1795,7 +1855,7 @@ mod tests {
         }
         struct NeverTouched;
         impl crate::traits::InputSource for NeverTouched {
-            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputMetrics>> {
+            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputTick>> {
                 Ok(None)
             }
             fn idle_ms(&mut self) -> Option<u64> {
@@ -1892,7 +1952,7 @@ mod tests {
         }
         struct NeverTouched;
         impl crate::traits::InputSource for NeverTouched {
-            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputMetrics>> {
+            fn drain(&mut self, _ts: Millis) -> Result<Option<sister_core::model::InputTick>> {
                 Ok(None)
             }
             fn idle_ms(&mut self) -> Option<u64> {

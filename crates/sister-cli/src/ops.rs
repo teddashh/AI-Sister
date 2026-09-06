@@ -1980,16 +1980,27 @@ pub mod act {
     enum HumanMotion {
         HumanActive,
         NobodyTouched,
+        HookDown,
         NotMeasured,
     }
 
-    fn human_motion(metrics: Option<sister_core::model::InputMetrics>) -> HumanMotion {
+    fn human_motion(
+        metrics: Option<sister_core::model::InputMetrics>,
+        health: Option<sister_core::model::InputListening>,
+    ) -> HumanMotion {
         match metrics {
-            None => HumanMotion::NotMeasured,
             Some(m) if m.keystrokes + m.clicks + m.mouse_px + m.scroll_ticks > 0 => {
                 HumanMotion::HumanActive
             }
-            Some(_) => HumanMotion::NobodyTouched,
+            _ => match health {
+                Some(sister_core::model::InputListening::IdleConfirmed) => {
+                    HumanMotion::NobodyTouched
+                }
+                Some(sister_core::model::InputListening::NotListening) => HumanMotion::HookDown,
+                Some(sister_core::model::InputListening::Unknown) | None => {
+                    HumanMotion::NotMeasured
+                }
+            },
         }
     }
 
@@ -2016,6 +2027,9 @@ pub mod act {
             HumanMotion::NobodyTouched => "這個目標出現在畫面上的那一段，鍵盤和滑鼠一下都沒有動。",
             HumanMotion::HumanActive => {
                 "這個目標出現在畫面上的那一段，你在動鍵盤滑鼠——但這只說明同一段時間有人在操作，不表示是你叫出這個東西的。"
+            }
+            HumanMotion::HookDown => {
+                "這個目標出現的時候，我的輸入監聽是斷的——那一段就算有人在動鍵盤滑鼠，我也看不到。"
             }
             HumanMotion::NotMeasured => {
                 "這個目標出現的時候，紀錄裡沒有可以對照的鍵盤或滑鼠動作——可能是沒人動，也可能是那一小段沒被記進來，我分不出是哪一種。"
@@ -2401,6 +2415,12 @@ pub mod act {
         ) -> Result<Option<sister_core::model::InputMetrics>> {
             Ok(None)
         }
+        fn input_health_covering(
+            &self,
+            _ts: i64,
+        ) -> Result<Option<sister_core::model::InputListening>> {
+            Ok(None)
+        }
         fn step_frame_preferring_after(
             &self,
             at_ms: i64,
@@ -2448,6 +2468,12 @@ pub mod act {
             ts: i64,
         ) -> Result<Option<sister_core::model::InputMetrics>> {
             Db::input_window_covering(self, ts)
+        }
+        fn input_health_covering(
+            &self,
+            ts: i64,
+        ) -> Result<Option<sister_core::model::InputListening>> {
+            Db::input_health_covering(self, ts)
         }
         fn step_frame_preferring_after(
             &self,
@@ -3151,7 +3177,10 @@ pub mod act {
                 && let Some(target_ts) = source.target_fact_ts(fact_id, expected_raw)?
             {
                 let previous = previous_step_seconds(&log.replay()?.events, target_ts);
-                let motion = human_motion(source.input_window_covering(target_ts)?);
+                let motion = human_motion(
+                    source.input_window_covering(target_ts)?,
+                    source.input_health_covering(target_ts)?,
+                );
                 Some(target_drive_sentence(previous, motion))
             } else {
                 None
@@ -3705,11 +3734,23 @@ pub mod act {
                 ..zero
             };
 
-            assert_eq!(human_motion(None), HumanMotion::NotMeasured);
-            assert_eq!(human_motion(Some(zero)), HumanMotion::NobodyTouched);
-            assert_eq!(human_motion(Some(active)), HumanMotion::HumanActive);
-            let unmeasured = target_drive_sentence(None, human_motion(None));
-            let untouched = target_drive_sentence(None, human_motion(Some(zero)));
+            assert_eq!(human_motion(None, None), HumanMotion::NotMeasured);
+            assert_eq!(
+                human_motion(
+                    None,
+                    Some(sister_core::model::InputListening::IdleConfirmed)
+                ),
+                HumanMotion::NobodyTouched
+            );
+            assert_eq!(human_motion(Some(active), None), HumanMotion::HumanActive);
+            let unmeasured = target_drive_sentence(None, human_motion(None, None));
+            let untouched = target_drive_sentence(
+                None,
+                human_motion(
+                    None,
+                    Some(sister_core::model::InputListening::IdleConfirmed),
+                ),
+            );
             assert_ne!(unmeasured, untouched);
             assert!(unmeasured.contains("我分不出是哪一種"), "{unmeasured}");
             assert!(!unmeasured.contains("沒有在記"), "{unmeasured}");
@@ -3794,9 +3835,9 @@ pub mod act {
                 },
             ];
             for metrics in cases {
-                assert_eq!(human_motion(Some(metrics)), HumanMotion::HumanActive);
+                assert_eq!(human_motion(Some(metrics), None), HumanMotion::HumanActive);
                 assert!(
-                    target_drive_sentence(None, human_motion(Some(metrics)))
+                    target_drive_sentence(None, human_motion(Some(metrics), None))
                         .contains("你在動鍵盤滑鼠")
                 );
             }
@@ -3907,6 +3948,7 @@ pub mod act {
             inner: Source,
             fact_ts: Option<i64>,
             window: Option<sister_core::model::InputMetrics>,
+            health: Option<sister_core::model::InputListening>,
             /// `Some(n)` 代表這個假貨只在被問到 fact id `n` 時才交出 `fact_ts`。
             /// `None` 代表不看 id（給那些一次餵好幾張卡的舊測試用）。
             /// 存在的理由：呼叫端要問的是**下一步 fact 的 id**，不是承諾卡自己的
@@ -3946,6 +3988,12 @@ pub mod act {
             ) -> Result<Option<sister_core::model::InputMetrics>> {
                 Ok(self.window)
             }
+            fn input_health_covering(
+                &self,
+                _ts: i64,
+            ) -> Result<Option<sister_core::model::InputListening>> {
+                Ok(self.health)
+            }
             fn step_frame_preferring_after(
                 &self,
                 at_ms: i64,
@@ -3957,7 +4005,10 @@ pub mod act {
             }
         }
 
-        fn drive_line(window: Option<sister_core::model::InputMetrics>) -> String {
+        fn drive_line(
+            window: Option<sister_core::model::InputMetrics>,
+            health: Option<sister_core::model::InputListening>,
+        ) -> String {
             let dir = crate::ops::tmp::Tmp::new("r35-drive-line");
             let source = Driven {
                 inner: Source {
@@ -3973,6 +4024,7 @@ pub mod act {
                 },
                 fact_ts: Some(1_700_000_000_000),
                 window,
+                health,
                 expect_fact_id: None,
             };
             let mut executor = NeverRuns;
@@ -4013,7 +4065,8 @@ pub mod act {
                     nearest_frame: None,
                 },
                 fact_ts: Some(1_700_000_000_000),
-                window: Some(sister_core::model::InputMetrics::default()),
+                window: None,
+                health: Some(sister_core::model::InputListening::IdleConfirmed),
                 expect_fact_id: Some(99),
             };
             let mut executor = NeverRuns;
@@ -4045,9 +4098,12 @@ pub mod act {
                 ..zero
             };
 
-            let unmeasured = drive_line(None);
-            let untouched = drive_line(Some(zero));
-            let human = drive_line(Some(active));
+            let unmeasured = drive_line(None, None);
+            let untouched = drive_line(
+                None,
+                Some(sister_core::model::InputListening::IdleConfirmed),
+            );
+            let human = drive_line(Some(active), None);
 
             assert!(
                 unmeasured.contains("我分不出是哪一種"),
@@ -4101,6 +4157,7 @@ pub mod act {
                     keystrokes: 12,
                     ..Default::default()
                 }),
+                health: None,
                 expect_fact_id: None,
             };
             let mut executor = AlwaysSucceeds;

@@ -239,17 +239,28 @@ impl Backend for ReplayBackend {
         }))
     }
 
-    fn drain_input(&mut self, ts: Millis) -> Result<Option<InputMetrics>> {
+    fn drain_input(&mut self, ts: Millis) -> Result<Option<sister_core::model::InputTick>> {
         self.advance(ts);
         if self.input_acc == InputMetrics::default() {
+            let start = self.input_since;
             self.input_since = ts;
-            return Ok(None);
+            return Ok(Some(sister_core::model::InputTick {
+                ts_start: start,
+                ts_end: ts,
+                metrics: None,
+                listening: sister_core::model::InputListening::Unknown,
+            }));
         }
         let mut m = std::mem::take(&mut self.input_acc);
         m.ts_start = self.input_since;
         m.ts_end = ts;
         self.input_since = ts;
-        Ok(Some(m))
+        Ok(Some(sister_core::model::InputTick {
+            ts_start: m.ts_start,
+            ts_end: m.ts_end,
+            metrics: Some(m),
+            listening: sister_core::model::InputListening::Unknown,
+        }))
     }
 
     fn recognize(&mut self, frame: &RawFrame) -> crate::traits::OcrAttempt {
@@ -355,7 +366,8 @@ mod tests {
         let f = b.focus_snapshot(9500).expect("focus");
         assert_eq!(f.app_id.as_deref(), Some("code.exe"));
 
-        let m = b.drain_input(9500).expect("input").expect("some input");
+        let tick = b.drain_input(9500).expect("input").expect("some input");
+        let m = tick.metrics.expect("metrics");
         assert_eq!(
             m.keystrokes, 52,
             "keystrokes from all elapsed steps accumulate"
@@ -381,13 +393,13 @@ mod tests {
     #[test]
     fn input_drains_to_empty() {
         let mut b = ReplayBackend::new(scenario());
-        let m = b.drain_input(1000).expect("input").expect("some");
+        let tick = b.drain_input(1000).expect("input").expect("some");
+        let m = tick.metrics.expect("metrics");
         assert_eq!(m.keystrokes, 12);
         assert_eq!(m.clicks, 2);
-        assert!(
-            b.drain_input(2000).expect("input").is_none(),
-            "drained means empty"
-        );
+        let empty = b.drain_input(2000).expect("input").expect("quiet tick");
+        assert_eq!(empty.metrics, None, "drained means no metrics");
+        assert_eq!(empty.listening, sister_core::model::InputListening::Unknown);
     }
 
     #[test]

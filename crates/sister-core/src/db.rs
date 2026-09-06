@@ -121,6 +121,15 @@ CREATE TABLE IF NOT EXISTS input_metrics (
 );
 CREATE INDEX IF NOT EXISTS idx_input_ts ON input_metrics(ts_start);
 
+CREATE TABLE IF NOT EXISTS input_health (
+  id         INTEGER PRIMARY KEY,
+  ts_start   INTEGER NOT NULL,
+  ts_end     INTEGER NOT NULL,
+  session_id INTEGER REFERENCES sessions(id),
+  state      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_input_health_start ON input_health(ts_start);
+
 CREATE TABLE IF NOT EXISTS system_events (
   id         INTEGER PRIMARY KEY,
   ts         INTEGER NOT NULL,
@@ -884,6 +893,7 @@ const CONTENT_TABLES: &[(&str, Option<&str>)] = &[
     ("focus_events", None),
     ("clipboard_events", None),
     ("input_metrics", None),
+    ("input_health", None),
     ("system_events", Some("{q}kind NOT IN {marks}")),
 ];
 
@@ -1915,6 +1925,42 @@ impl Db {
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn insert_input_health(
+        &mut self,
+        session_id: i64,
+        ts_start: Millis,
+        ts_end: Millis,
+        state: crate::model::InputListening,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO input_health(ts_start, ts_end, session_id, state) VALUES(?1,?2,?3,?4)",
+            params![ts_start, ts_end, session_id, state.as_str()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn input_health_covering(
+        &self,
+        ts: Millis,
+    ) -> Result<Option<crate::model::InputListening>> {
+        let state: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT state FROM input_health INDEXED BY idx_input_health_start
+                 WHERE ts_start <= ?1 AND ts_end > ?1
+                 ORDER BY ts_start DESC LIMIT 1",
+                [ts],
+                |row| row.get(0),
+            )
+            .optional()?;
+        state
+            .map(|value| {
+                crate::model::InputListening::from_db(&value)
+                    .ok_or_else(|| anyhow::anyhow!("unknown input_health state: {value}"))
+            })
+            .transpose()
     }
 
     /// 回傳蓋住這個時間點的輸入視窗。
@@ -3720,6 +3766,7 @@ impl Db {
             "SELECT EXISTS(SELECT 1 FROM text_chunks WHERE ts >= ?1 AND ts < ?2)",
             "SELECT EXISTS(SELECT 1 FROM focus_events WHERE ts >= ?1 AND ts < ?2)",
             "SELECT EXISTS(SELECT 1 FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2)",
+            "SELECT EXISTS(SELECT 1 FROM input_health WHERE ts_end > ?1 AND ts_start < ?2)",
             "SELECT EXISTS(SELECT 1 FROM clipboard_events WHERE ts >= ?1 AND ts < ?2)",
             "SELECT EXISTS(SELECT 1 FROM system_events WHERE ts >= ?1 AND ts < ?2)",
             "SELECT EXISTS(SELECT 1 FROM queries WHERE ts >= ?1 AND ts < ?2)",
@@ -9221,6 +9268,7 @@ mod tests {
             "text_chunks",
             "focus_events",
             "input_metrics",
+            "input_health",
             "clipboard_events",
             "system_events",
             "queries",
@@ -9286,6 +9334,15 @@ mod tests {
                         },
                     )
                     .expect("input");
+                }
+                "input_health" => {
+                    db.insert_input_health(
+                        sid,
+                        core,
+                        core + 10_000,
+                        crate::model::InputListening::IdleConfirmed,
+                    )
+                    .expect("input health");
                 }
                 "clipboard_events" => {
                     db.insert_clipboard(
@@ -9375,6 +9432,10 @@ mod tests {
             (
                 "input_metrics",
                 "SELECT COUNT(*) FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2",
+            ),
+            (
+                "input_health",
+                "SELECT COUNT(*) FROM input_health WHERE ts_end > ?1 AND ts_start < ?2",
             ),
             (
                 "clipboard_events",
@@ -11581,6 +11642,10 @@ mod tests {
                 "INSERT INTO input_metrics(ts_start, ts_end) VALUES(1,2)",
             ),
             (
+                "input_health",
+                "INSERT INTO input_health(ts_start, ts_end, state) VALUES(1,2,'unknown')",
+            ),
+            (
                 "system_events",
                 "INSERT INTO system_events(ts, kind) VALUES(1,'lock')",
             ),
@@ -12420,6 +12485,64 @@ mod tests {
             .join(" | ");
         assert!(plan.contains("idx_input_ts"), "{plan}");
         assert!(!plan.contains("USE TEMP B-TREE FOR ORDER BY"), "{plan}");
+    }
+
+    #[test]
+    fn input_health_covering_is_half_open_and_reads_the_latest_covering_window() {
+        let mut db = test_db();
+        let session = db.start_session("test", "0").expect("session");
+        db.insert_input_health(
+            session,
+            100,
+            1_001,
+            crate::model::InputListening::IdleConfirmed,
+        )
+        .expect("first");
+        db.insert_input_health(
+            session,
+            500,
+            600,
+            crate::model::InputListening::NotListening,
+        )
+        .expect("later");
+
+        assert_eq!(db.input_health_covering(99).unwrap(), None);
+        assert_eq!(
+            db.input_health_covering(100).unwrap(),
+            Some(crate::model::InputListening::IdleConfirmed)
+        );
+        assert_eq!(
+            db.input_health_covering(550).unwrap(),
+            Some(crate::model::InputListening::NotListening)
+        );
+        assert_eq!(db.input_health_covering(1_001).unwrap(), None);
+    }
+
+    #[test]
+    fn input_health_covering_uses_start_index_without_a_sort_btree() {
+        let db = test_db();
+        for i in 0..10 {
+            db.conn
+                .execute(
+                    "INSERT INTO input_health(ts_start, ts_end, state) VALUES(?1, ?2, 'unknown')",
+                    params![i * 100, i * 100 + 200],
+                )
+                .expect("seed health");
+        }
+        let detail = db
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT state FROM input_health INDEXED BY idx_input_health_start
+                 WHERE ts_start <= ?1 AND ts_end > ?1 ORDER BY ts_start DESC LIMIT 1",
+            )
+            .unwrap()
+            .query_map([550], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join(" | ");
+        assert!(detail.contains("idx_input_health_start"), "{detail}");
+        assert!(!detail.contains("USE TEMP B-TREE FOR ORDER BY"), "{detail}");
     }
 
     /// 「零當機」現在有實作了，而不是靠使用者的印象。

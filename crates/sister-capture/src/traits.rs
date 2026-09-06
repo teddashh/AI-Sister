@@ -8,7 +8,9 @@
 //! 不重試、不阻塞。感官層停下來的代價遠大於少一筆脈絡。
 
 use anyhow::Result;
-use sister_core::model::{ClipboardEvent, FocusSnapshot, InputMetrics, Millis, OcrBlock};
+use sister_core::model::{
+    ClipboardEvent, FocusSnapshot, InputListening, InputTick, Millis, OcrBlock,
+};
 use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
@@ -112,7 +114,7 @@ pub trait ClipboardSource {
 ///
 /// 實作者的鐵律：**永遠不記錄按鍵內容**，只記節奏與計數。
 pub trait InputSource {
-    fn drain(&mut self, ts: Millis) -> Result<Option<InputMetrics>>;
+    fn drain(&mut self, ts: Millis) -> Result<Option<InputTick>>;
 
     /// 距離使用者最後一次碰鍵盤滑鼠過了多久。`None` = 這個平台答不出來。
     ///
@@ -337,7 +339,7 @@ pub trait Backend {
     fn skip_clipboard(&mut self, ts: Millis) {
         let _ = ts;
     }
-    fn drain_input(&mut self, ts: Millis) -> Result<Option<InputMetrics>>;
+    fn drain_input(&mut self, ts: Millis) -> Result<Option<InputTick>>;
     /// 見 [`InputSource::idle_ms`]。
     fn idle_ms(&mut self) -> Option<u64> {
         None
@@ -410,7 +412,7 @@ where
     fn skip_clipboard(&mut self, ts: Millis) {
         self.clipboard.skip(ts)
     }
-    fn drain_input(&mut self, ts: Millis) -> Result<Option<InputMetrics>> {
+    fn drain_input(&mut self, ts: Millis) -> Result<Option<InputTick>> {
         self.input.drain(ts)
     }
     fn idle_ms(&mut self) -> Option<u64> {
@@ -461,8 +463,13 @@ impl ClipboardSource for NullClipboard {
 
 pub struct NullInput;
 impl InputSource for NullInput {
-    fn drain(&mut self, _ts: Millis) -> Result<Option<InputMetrics>> {
-        Ok(None)
+    fn drain(&mut self, ts: Millis) -> Result<Option<InputTick>> {
+        Ok(Some(InputTick {
+            ts_start: ts,
+            ts_end: ts,
+            metrics: None,
+            listening: InputListening::Unknown,
+        }))
     }
 }
 
@@ -550,7 +557,9 @@ mod tests {
             FocusSnapshot::default()
         );
         assert!(NullClipboard.poll(0).expect("no error").is_none());
-        assert!(NullInput.drain(0).expect("no error").is_none());
+        let input = NullInput.drain(0).expect("no error").expect("unknown tick");
+        assert_eq!(input.metrics, None);
+        assert_eq!(input.listening, InputListening::Unknown);
         let f = RawFrame {
             ts: 0,
             monitor: 0,

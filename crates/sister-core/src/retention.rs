@@ -265,11 +265,12 @@ fn delete_frames_except(
 /// 寫成一份清單而不是七句 SQL：漏掉一張的下場是一列被判定成「空的」然後刪掉，
 /// 而它其實還有東西指著——外鍵是 `ON` 的，所以那會變成一次整批 rollback。
 /// 新增一張帶 `session_id` 的表卻忘了加進來，也是同一個下場（會很吵，這是對的）。
-const SESSION_CHILDREN: [&str; 7] = [
+const SESSION_CHILDREN: [&str; 8] = [
     "frames",
     "focus_events",
     "clipboard_events",
     "input_metrics",
+    "input_health",
     "system_events",
     "text_chunks",
     "facts",
@@ -383,9 +384,11 @@ fn count_empty_sessions(
     to_ts: Millis,
 ) -> Result<u64> {
     let gone = |t: &str| match t {
-        "input_metrics" => "NOT EXISTS(SELECT 1 FROM input_metrics WHERE session_id = sessions.id \
+        "input_metrics" | "input_health" => format!(
+            "NOT EXISTS(SELECT 1 FROM {t} WHERE session_id = sessions.id \
              AND NOT (ts_end > ?1 AND ts_start < ?2))"
-            .to_string(),
+        )
+        ,
         // `content_only` 要和上面那一支用同一句話，否則預覽會替一場「只剩下自
         // 己那兩列標籤」的錄製回報 0，而真的跑會刪掉 1。
         _ => format!(
@@ -448,6 +451,7 @@ impl crate::db::Db {
             "SELECT COUNT(*) FROM focus_events WHERE ts < ?1",
             "SELECT COUNT(*) FROM clipboard_events WHERE ts < ?1",
             "SELECT COUNT(*) FROM input_metrics WHERE ts_end < ?1",
+            "SELECT COUNT(*) FROM input_health WHERE ts_end < ?1",
             "SELECT COUNT(*) FROM system_events WHERE ts < ?1",
         ] {
             r.events_deleted += n(sql, text_cut)?;
@@ -571,6 +575,7 @@ impl crate::db::Db {
                 "DELETE FROM input_metrics WHERE ts_end < ?1",
                 "input_metrics",
             ),
+            ("DELETE FROM input_health WHERE ts_end < ?1", "input_health"),
             ("DELETE FROM system_events WHERE ts < ?1", "system_events"),
         ] {
             report.events_deleted +=
@@ -707,6 +712,7 @@ impl crate::db::Db {
             "SELECT COUNT(*) FROM focus_events WHERE ts >= ?1 AND ts < ?2",
             "SELECT COUNT(*) FROM clipboard_events WHERE ts >= ?1 AND ts < ?2",
             "SELECT COUNT(*) FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2",
+            "SELECT COUNT(*) FROM input_health WHERE ts_end > ?1 AND ts_start < ?2",
             "SELECT COUNT(*) FROM system_events WHERE ts >= ?1 AND ts < ?2",
         ] {
             r.events_deleted += n(sql)?;
@@ -821,6 +827,10 @@ impl crate::db::Db {
             (
                 "DELETE FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2",
                 "input_metrics",
+            ),
+            (
+                "DELETE FROM input_health WHERE ts_end > ?1 AND ts_start < ?2",
+                "input_health",
             ),
             // 暫停紀錄也一起走。這會讓稽核出現孤兒 resume，而
             // `pause_audit` / `pause_spans` 本來就要面對那種情況（保留期
@@ -1139,6 +1149,50 @@ mod tests {
     use crate::model::{FocusSnapshot, FrameCapture, OcrBlock};
 
     const NOW: Millis = 1_800_000_000_000;
+
+    #[test]
+    fn input_health_follows_prune_and_forget_overlap_rules() {
+        let mut db = Db::open_in_memory().expect("db");
+        let session = db.start_session("test", "0").expect("session");
+        let old_start = days_ago(400);
+        db.insert_input_health(
+            session,
+            old_start,
+            old_start + 10_000,
+            crate::model::InputListening::IdleConfirmed,
+        )
+        .expect("old health");
+        db.insert_input_health(
+            session,
+            NOW - 20_000,
+            NOW - 10_000,
+            crate::model::InputListening::NotListening,
+        )
+        .expect("recent health");
+
+        db.prune(
+            NOW,
+            &RetentionConfig {
+                frames_days: 30,
+                text_days: 365,
+            },
+            None,
+        )
+        .expect("prune");
+        let after_prune: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM input_health", [], |row| row.get(0))
+            .expect("count after prune");
+        assert_eq!(after_prune, 1);
+
+        db.forget(NOW - 15_000, NOW - 5_000, None)
+            .expect("forget overlap");
+        let after_forget: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM input_health", [], |row| row.get(0))
+            .expect("count after forget");
+        assert_eq!(after_forget, 0);
+    }
 
     fn days_ago(n: i64) -> Millis {
         NOW - n * DAY_MS

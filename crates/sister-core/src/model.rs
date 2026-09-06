@@ -199,6 +199,62 @@ pub struct InputMetrics {
     pub typing_bursts: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookHealth {
+    NotStarted,
+    Active,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputListening {
+    IdleConfirmed,
+    NotListening,
+    Unknown,
+}
+
+impl InputListening {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IdleConfirmed => "idle_confirmed",
+            Self::NotListening => "not_listening",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "idle_confirmed" => Some(Self::IdleConfirmed),
+            "not_listening" => Some(Self::NotListening),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputTick {
+    pub ts_start: Millis,
+    pub ts_end: Millis,
+    pub metrics: Option<InputMetrics>,
+    pub listening: InputListening,
+}
+
+pub fn classify_quiet_window(
+    hook: HookHealth,
+    os_idle_ms: Option<u64>,
+    window_ms: i64,
+) -> InputListening {
+    match hook {
+        HookHealth::Failed | HookHealth::NotStarted => InputListening::NotListening,
+        HookHealth::Active => match os_idle_ms {
+            None => InputListening::Unknown,
+            Some(idle) if idle >= window_ms.max(0) as u64 => InputListening::IdleConfirmed,
+            Some(_) => InputListening::NotListening,
+        },
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SystemKind {
     Lock,
@@ -548,5 +604,41 @@ mod tests {
         // 那一列是「她看到了、而且照規則沒記」，是這份紀錄裡最需要留下來的
         // 一種證據。
         assert!(!sql.contains("'excluded'"), "{sql}");
+    }
+
+    #[test]
+    fn quiet_window_without_a_started_hook_is_not_listening() {
+        assert_eq!(
+            classify_quiet_window(HookHealth::Failed, Some(99_999), 10_000),
+            InputListening::NotListening
+        );
+        assert_eq!(
+            classify_quiet_window(HookHealth::NotStarted, None, 10_000),
+            InputListening::NotListening
+        );
+    }
+
+    #[test]
+    fn active_hook_without_os_idle_evidence_is_unknown() {
+        assert_eq!(
+            classify_quiet_window(HookHealth::Active, None, 10_000),
+            InputListening::Unknown
+        );
+    }
+
+    #[test]
+    fn os_idle_equal_to_the_window_confirms_idle() {
+        assert_eq!(
+            classify_quiet_window(HookHealth::Active, Some(10_000), 10_000),
+            InputListening::IdleConfirmed
+        );
+    }
+
+    #[test]
+    fn os_input_one_millisecond_inside_a_quiet_window_means_the_hook_is_down() {
+        assert_eq!(
+            classify_quiet_window(HookHealth::Active, Some(9_999), 10_000),
+            InputListening::NotListening
+        );
     }
 }

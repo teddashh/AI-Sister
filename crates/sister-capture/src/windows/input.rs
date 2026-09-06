@@ -18,7 +18,9 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering::Relaxed};
 
 use anyhow::Result;
-use sister_core::model::{InputMetrics, Millis};
+use sister_core::model::{
+    HookHealth, InputListening, InputMetrics, InputTick, Millis, classify_quiet_window,
+};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, HHOOK, MSG, MSLLHOOKSTRUCT,
@@ -104,7 +106,7 @@ impl InputSource for WindowsInput {
         system_idle_ms()
     }
 
-    fn drain(&mut self, ts: Millis) -> Result<Option<InputMetrics>> {
+    fn drain(&mut self, ts: Millis) -> Result<Option<InputTick>> {
         // 視窗還沒滿就先繼續累積。**這個 early return 一定要在 swap 之前**：
         // 先把計數器清掉再判斷要不要出一列，等於把那一段的輸入丟掉。
         //
@@ -134,12 +136,23 @@ impl InputSource for WindowsInput {
         let typing_bursts = BURSTS.swap(0, Relaxed) as i64;
 
         if keystrokes == 0 && clicks == 0 && scroll_ticks == 0 && mouse_px == 0 {
-            // 完全沒動就不寫一列全 0 進資料庫——idle 是由「沒有紀錄」表達的
-            return Ok(None);
+            // 完全沒動仍不寫一列全 0 的 input_metrics；改由 input_health
+            // 分清楚「作業系統證實沒人動」和「我們沒有在聽」。
+            let hook = match Self::state() {
+                HookState::NotStarted => HookHealth::NotStarted,
+                HookState::Active => HookHealth::Active,
+                HookState::Failed => HookHealth::Failed,
+            };
+            return Ok(Some(InputTick {
+                ts_start: start,
+                ts_end: ts,
+                metrics: None,
+                listening: classify_quiet_window(hook, system_idle_ms(), ts - start),
+            }));
         }
 
         let window_ms = (ts - start).max(0);
-        Ok(Some(InputMetrics {
+        let metrics = InputMetrics {
             ts_start: start,
             ts_end: ts,
             keystrokes,
@@ -150,6 +163,12 @@ impl InputSource for WindowsInput {
             window_switches: 0,
             idle_ms: idle_ms().min(window_ms),
             typing_bursts,
+        };
+        Ok(Some(InputTick {
+            ts_start: start,
+            ts_end: ts,
+            metrics: Some(metrics),
+            listening: InputListening::Unknown,
         }))
     }
 }
@@ -359,10 +378,11 @@ mod tests {
         assert!(input.drain(800).expect("no error").is_none());
 
         // 視窗滿了，這時候才出一列，而且要含全部的按鍵數
-        let m = input
+        let tick = input
             .drain(10_000)
             .expect("no error")
             .expect("視窗滿了就該出列");
+        let m = tick.metrics.expect("metrics");
         assert_eq!(m.keystrokes, 9, "視窗中間累積的輸入不能被丟掉");
         assert_eq!((m.ts_start, m.ts_end), (0, 10_000));
     }
@@ -402,10 +422,11 @@ mod tests {
             window_start: 1000,
             window_ms: 10_000,
         };
-        let m = input
+        let tick = input
             .drain(11_000)
             .expect("no error")
             .expect("some metrics");
+        let m = tick.metrics.expect("metrics");
         assert_eq!((m.keystrokes, m.clicks, m.scroll_ticks), (7, 2, 3));
         assert_eq!(m.mouse_px, 450);
         assert_eq!((m.ts_start, m.ts_end), (1000, 11_000));
@@ -413,7 +434,11 @@ mod tests {
         assert_eq!(m.window_switches, 0);
 
         // 取走就要歸零，不然下一個視窗會重複計算同一批輸入
-        assert!(input.drain(21_000).expect("no error").is_none());
+        let quiet = input
+            .drain(21_000)
+            .expect("no error")
+            .expect("quiet window");
+        assert_eq!(quiet.metrics, None);
     }
 
     #[test]
@@ -426,7 +451,8 @@ mod tests {
             window_start: 5_000,
             window_ms: 1_000,
         };
-        let m = input.drain(6_000).expect("no error").expect("some metrics");
+        let tick = input.drain(6_000).expect("no error").expect("some metrics");
+        let m = tick.metrics.expect("metrics");
         assert!(m.idle_ms <= 1_000, "idle {} > window", m.idle_ms);
     }
 }
