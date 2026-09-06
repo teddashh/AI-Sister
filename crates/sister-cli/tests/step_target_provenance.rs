@@ -469,8 +469,10 @@ fn real_db_wiring_prints_all_four_input_states_during_dry_run() {
     );
     let missing = dry_run_drive_observation("drive-missing", None, None, false);
     // 一列全 0 的 `input_metrics`：alpha.97 拿它講「一下都沒有動」，而那一列
-    // 分不出「真的沒人動」和「我沒在聽」。這一格是這一版翻面的那一格，
-    // 唯一釘住它的斷言在改動裡被**換掉**了，所以在真出口上補回來。
+    // 分不出「真的沒人動」和「我沒在聽」。（寫得出那種列的只有重播／匯入語
+    // 料——alpha.97 的 Windows 那一路四個計數全 0 就不出列。）這一格是這一版
+    // 翻面的那一格，唯一釘住它的斷言在改動裡被**換掉**了，所以在真出口上補
+    // 回來。
     let zero = dry_run_drive_observation("drive-zero", Some(InputMetrics::default()), None, false);
     assert!(active.contains("你在動鍵盤滑鼠"), "{active}");
     assert!(idle.contains("一下都沒有動"), "{idle}");

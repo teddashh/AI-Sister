@@ -329,13 +329,83 @@ mod tests {
         COUNTERS.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// **`HookState` 翻成 `HookHealth` 的那三臂，每一臂都要是對的。**
+    ///
+    /// 隔壁那條只走得到 `NotStarted`（這個測試 binary 從來沒有裝過 hook），
+    /// 於是 `Active` 和 `Failed` 兩臂在整套測試裡是死碼——而把
+    /// `HookState::Failed => HookHealth::Active` 這樣改一個字，
+    /// 「hook 裝失敗 ＋ 使用者真的離開電腦」就會退回**有把握地**說
+    /// 「鍵盤和滑鼠一下都沒有動」，正是這一版宣稱修掉的那句謊。
+    /// `ops.rs` 那條原始碼形狀測試守的是 `match` 問誰，守不到每一臂算出什麼。
+    ///
+    /// 視窗長度刻意用 0，好讓判定變成確定的而不是看機器閒置幾秒：
+    /// `idle >= 0` 恆真，所以 `Active` 一定不是 `NotListening`
+    /// （作業系統答不出來的話是 `Unknown`，同樣不是 `NotListening`），
+    /// 而 `NotStarted` / `Failed` 根本不看作業系統。
+    #[test]
+    fn every_hook_state_maps_to_its_own_listening_verdict() {
+        let _lock = exclusive();
+        let saved = (HOOK_START_ATTEMPTED.load(Relaxed), HOOKS_OK.load(Relaxed));
+
+        for (attempted, ok, deaf) in [
+            (false, false, true), // NotStarted
+            (true, false, true),  // Failed
+            (true, true, false),  // Active
+        ] {
+            HOOK_START_ATTEMPTED.store(attempted, Relaxed);
+            HOOKS_OK.store(ok, Relaxed);
+            KEYSTROKES.store(0, Relaxed);
+            CLICKS.store(0, Relaxed);
+            SCROLL.store(0, Relaxed);
+            MOUSE_PX.store(0, Relaxed);
+
+            let mut input = WindowsInput {
+                window_start: 1000,
+                window_ms: 0,
+            };
+            let tick = input
+                .drain(1000)
+                .expect("no error")
+                .expect("安靜的視窗要出一個 tick");
+            let state = Self_state_name(attempted, ok);
+            if deaf {
+                assert_eq!(
+                    tick.listening,
+                    InputListening::NotListening,
+                    "{state} 的時候不准說成「沒人碰」"
+                );
+            } else {
+                assert_ne!(
+                    tick.listening,
+                    InputListening::NotListening,
+                    "{state} 而且作業系統說整段沒人碰，卻講成「我沒在聽」"
+                );
+            }
+        }
+
+        HOOK_START_ATTEMPTED.store(saved.0, Relaxed);
+        HOOKS_OK.store(saved.1, Relaxed);
+    }
+
+    /// 只是給上面那條的斷言訊息用的名字。
+    #[allow(non_snake_case)]
+    fn Self_state_name(attempted: bool, ok: bool) -> &'static str {
+        match (attempted, ok) {
+            (false, _) => "hook 還沒去裝",
+            (true, false) => "hook 裝失敗",
+            (true, true) => "hook 裝起來了",
+        }
+    }
+
     /// 安靜的視窗仍然不寫一列全 0 的 `input_metrics`——那張表上的 idle 是用
     /// 「沒有列」表達的，一秒一列空紀錄會把資料庫塞滿沒有資訊的東西。
     ///
     /// 但「安靜」本身要留下痕跡，所以改成出一個 `metrics: None` 的 tick，由
     /// recorder 寫進 `input_health`：好分清楚「作業系統證實沒人碰」和「我們
-    /// 的 hook 根本沒在聽」。alpha.97 以前這兩件事是同一個沉默，於是她會用
-    /// 有把握的語氣說「鍵盤和滑鼠一下都沒有動」。
+    /// 的 hook 根本沒在聽」。alpha.97 以前這兩件事是同一個沉默——她講的是
+    /// 誠實的那一句（「我分不出是哪一種」），代價是**有把握的那一句在真實
+    /// 錄製上永遠印不出來**（它要的是一列全 0 的紀錄，而這裡從不寫）；而讓
+    /// 它印得出來的便宜作法（把沉默直接當成沒人動）會製造一句更糟的謊。
     ///
     /// 這條也釘住那條鐵律：這個測試程序從來沒有裝過 hook（`install_hooks`
     /// 的唯一入口 `WindowsInput::start` 沒有任何測試會走），所以不管作業系統

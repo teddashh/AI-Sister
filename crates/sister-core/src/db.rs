@@ -661,6 +661,14 @@ CREATE INDEX IF NOT EXISTS idx_input_metrics_end ON input_metrics(ts_end);
 /// return，001 那一段一輩子不會再跑。已經在外面的每一顆資料庫都會少這張表，
 /// 而 `insert_input_health` / `input_health_covering` / `prune` / `forget`
 /// 都是 `?` 直接往外冒：錄製會在第一個滿十秒的安靜視窗整個停掉。
+///
+/// 那句 `DROP TRIGGER` 收的是同一個錯誤的另一半，**而且只有沒出貨的 dev build
+/// 建出來的檔案會中**（那張表當時也在 `CONTENT_TABLES` 裡，於是 step 5 替它長
+/// 了一顆 `input_health_ever_stored`）。留著那顆觸發器的話，第一個安靜視窗就
+/// 把 `ever_stored` 按成 `'1'`，於是 `Emptiness::of` 走 `Erased` 而不是
+/// `Barren`——`stats` 會對一個從來沒刪過東西的人說「她錄過，而她記下來的東西
+/// 現在一列都不剩」。**那正是這張表存在的目的在拆的那種句子。** 對真的
+/// alpha.97 檔案這一句是 no-op（那顆觸發器從來沒存在過）。
 const MIGRATION_019: &str = r#"
 CREATE TABLE IF NOT EXISTS input_health (
   id         INTEGER PRIMARY KEY,
@@ -670,6 +678,7 @@ CREATE TABLE IF NOT EXISTS input_health (
   state      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_input_health_start ON input_health(ts_start);
+DROP TRIGGER IF EXISTS input_health_ever_stored;
 "#;
 
 fn add_column_if_missing(
@@ -3736,7 +3745,13 @@ impl Db {
     /// 問的是原始資料，不是 [`Self::covering_segment_at`] 那張快取。
     /// 窗長寫在這裡，呼叫端不能另傳一個看起來差不多的毫秒數進來。
     ///
-    /// 涵蓋 `prune` 會照時間刪掉、而且不是從別張表算出來的表：`frames`、
+    /// 涵蓋 `prune` 會照時間刪掉、而且不是從別張表算出來的表——**除了
+    /// `input_health`**。那張表兩個條件都滿足，卻**故意不列**：它記的是她自己那一
+    /// 段聽不聽得見，是錄製的日誌，不是使用者的原件（同一個判準也讓它進了
+    /// `NOT_CONTENT` 和 `retention::content_only`）。少了這個例外，一個 core 窗裡
+    /// 只剩安靜輸入列的時候，`reviewer::missing_segment_line` 會從「那一段查不到、
+    /// 起點之後還留著紀錄」翻成全稱的「沒有留下任何原始紀錄」。照著上面那條規則把
+    /// 它加回來之前，先看這一段：`frames`、
     /// `facts`、`text_chunks`、`focus_events`、`input_metrics`、
     /// `clipboard_events`、`system_events`、`queries`、`segment_edit`。
     /// 任何一張有列就是「還在」。`queries` 不是算出來的——`retention.rs`
@@ -10131,19 +10146,6 @@ mod tests {
         dir
     }
 
-    /// **「結構是新的、版號是舊的」不可以是一顆打不開的資料庫。**
-    ///
-    /// 那個狀態是真的做得出來的，而且已經在外面了：alpha.32 以前 `commit()` 和
-    /// 蓋版號中間有大約一毫秒，程序在那裡被砍掉（`kill -9`、拔電、Windows 更新
-    /// 重開）就留下它。用真的執行檔掃 SIGKILL 的時機，189 次裡中了 1 次。
-    ///
-    /// 上面那個 transaction 只擋得住**以後**。這一條擋的是**已經發生過**的：
-    /// 每一段 migration 重跑一次都要是 no-op。撞上去的話是
-    /// `table queries already exists` / `no such column: confidence`，然後那顆
-    /// 資料庫**每一次開都失敗，永遠**——沒有 `sister repair`，逃生路只有退回舊
-    /// 版執行檔，而那正是前向相容閘門在防的事。
-    ///
-    /// 版號一路退到 0 掃一遍，所以新加一段 migration 忘了寫冪等，這裡會紅。
     /// **已經在外面的資料庫，也要拿得到這一版新加的表。**
     ///
     /// `input_health` 本來被寫進 `MIGRATION_001` 而 `SCHEMA_VERSION` 沒動。
@@ -10158,6 +10160,15 @@ mod tests {
     /// 東西砍掉**，再蓋回上一版的版號，也就是一顆真的上一版檔案。
     #[test]
     fn a_database_from_the_previous_release_gets_this_versions_new_tables() {
+        // **這條測試會隨著版號自己爛掉，所以先在這裡擋一下。** 底下那個「上一
+        // 版的 schema」是寫死的（砍掉 019 加的那兩樣）。等 `MIGRATION_020` 進
+        // 來，同一段程式碼就不再是「一顆真的上一版檔案」，而是隔壁那條已經在
+        // 測的「結構新、版號舊」——而且它會**綠**。所以下一個動版號的人必須先
+        // 回答這裡：把 DROP 那幾句換成 `SCHEMA_VERSION - 1` 那一版的差集。
+        assert_eq!(
+            SCHEMA_VERSION, 19,
+            "版號動了：把下面那段『上一版的 schema』換成新的差集，再改這個數字"
+        );
         let dir = migrate_tmp("upgrade");
         let path = dir.join("previous-release.db");
         {
@@ -10189,6 +10200,71 @@ mod tests {
         );
     }
 
+    /// **沒出貨的那幾版 dev build 建出來的檔案，帶著一顆會說謊的觸發器。**
+    ///
+    /// 那幾版把 `input_health` 寫進 `MIGRATION_001`，而且放進了
+    /// `CONTENT_TABLES`——於是 step 5 替它長了一顆 `input_health_ever_stored`。
+    /// 表搬去 019、名單也拿掉了，但那顆觸發器沒有人拆：它會在第一個安靜視窗
+    /// 把 `ever_stored` 按成 `'1'`，於是 `stats` 對一個從來沒刪過東西的人說
+    /// 「她錄過，而她記下來的東西現在一列都不剩」。
+    ///
+    /// 使用者一個都碰不到（那幾版沒有 tag），所以這不是修 bug，是讓 migration
+    /// 自己把手尾收乾淨。斷言看的是**那句話有沒有被按下去**，不是
+    /// `sqlite_master` 裡還有沒有那個名字——後者少一句 `INSERT` 照樣是綠的。
+    #[test]
+    fn a_dev_build_database_loses_the_trigger_that_would_call_a_quiet_tick_content() {
+        let dir = migrate_tmp("dev-trigger");
+        let path = dir.join("dev-build.db");
+        {
+            let db = Db::open(&path).expect("build a current one");
+            // 照抄 `migration_005` 當時替它長出來的那一顆。
+            db.conn
+                .execute_batch(
+                    "CREATE TRIGGER IF NOT EXISTS input_health_ever_stored                      AFTER INSERT ON input_health
+                       WHEN NOT EXISTS(SELECT 1 FROM meta WHERE key = 'ever_stored' AND value = '1')
+                     BEGIN
+                       INSERT OR REPLACE INTO meta(key, value) VALUES('ever_stored', '1');
+                     END;",
+                )
+                .expect("長回那顆觸發器");
+            db.conn
+                .pragma_update(None, "user_version", 18)
+                .expect("退回那幾版的版號");
+        }
+
+        let mut db = Db::open(&path).unwrap_or_else(|e| panic!("dev build 的檔案升不上來：{e:#}"));
+        let sid = db.start_session("test", "0").expect("session");
+        db.insert_input_health(sid, 1, 2, crate::model::InputListening::IdleConfirmed)
+            .expect("health");
+
+        let flag: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'ever_stored'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("read meta");
+        assert_eq!(
+            flag, None,
+            "一拍安靜的錄製日誌把『她錄過東西』按下去了——那句話是假的"
+        );
+    }
+
+    /// **「結構是新的、版號是舊的」不可以是一顆打不開的資料庫。**
+    ///
+    /// 那個狀態是真的做得出來的，而且已經在外面了：alpha.32 以前 `commit()` 和
+    /// 蓋版號中間有大約一毫秒，程序在那裡被砍掉（`kill -9`、拔電、Windows 更新
+    /// 重開）就留下它。用真的執行檔掃 SIGKILL 的時機，189 次裡中了 1 次。
+    ///
+    /// 上面那個 transaction 只擋得住**以後**。這一條擋的是**已經發生過**的：
+    /// 每一段 migration 重跑一次都要是 no-op。撞上去的話是
+    /// `table queries already exists` / `no such column: confidence`，然後那顆
+    /// 資料庫**每一次開都失敗，永遠**——沒有 `sister repair`，逃生路只有退回舊
+    /// 版執行檔，而那正是前向相容閘門在防的事。
+    ///
+    /// 版號一路退到 0 掃一遍，所以新加一段 migration 忘了寫冪等，這裡會紅。
     #[test]
     fn a_version_stamp_older_than_its_schema_does_not_brick_the_file() {
         let dir = migrate_tmp("brick");

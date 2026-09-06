@@ -464,8 +464,9 @@ impl InputSource for NullInput {
     fn drain(&mut self, _ts: Millis) -> Result<Option<InputTick>> {
         // 和隔壁三個 Null 一樣：降級是安靜的。回一列 `unknown` 的話，每個
         // tick 都會多一列**零長度**（`ts_start == ts_end`）的 input_health
-        // ——那種列 `input_health_covering` 用半開區間永遠查不到，重疊刪除
-        // 和「還有沒有紀錄」卻都看得到它。
+        // ——`input_health_covering` 用的是半開區間（`ts_end > ?1`），對
+        // `ts_start == ts_end` 恆假，所以那種列**一個讀得到的地方都沒有**；
+        // 而 `forget` 的重疊刪除和 `prune` 照樣要走過它。純成本。
         Ok(None)
     }
 }

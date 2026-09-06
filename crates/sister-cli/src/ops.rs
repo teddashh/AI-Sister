@@ -197,21 +197,35 @@ mod command_tests {
     /// 那一格整個包在 `#[cfg(windows)]` 裡，Linux 上一行都執行不到
     /// （`check-windows.sh` 只編譯、不跑測試），所以只能用原始碼形狀守。
     ///
-    /// 壓平擋得住的是 Windows checkout 的 CRLF、縮排改變、和整個呼叫被換行
-    /// （含 rustfmt 補的尾逗號）。**擋不住**參數自己被拆成多行之外的任何改寫
-    /// ——那種情況這條會紅，該做的是重新收緊這根針，不是把它刪掉。
+    /// 壓平擋得住的是 Windows checkout 的 CRLF 和縮排改變。**擋不住整個呼叫
+    /// 被 rustfmt 拆成多行**——量過的：拆行之後壓平出來是
+    /// `classify_quiet_window( hook, … ts - start, )`，左括號後面多一個空格、
+    /// 尾巴多一個逗號，兩處各自都足以讓這根針落空（尾逗號有沒有補都一樣）。
+    /// 行尾註解也擋不住，那是這個作法的已知極限。
+    ///
+    /// 所以這條紅起來有兩種意思，而底下那句斷言訊息兩種都要講得出來：真的有
+    /// 人把證人換回 `idle_ms()`，或者只是排版動了。後者該做的是重新收緊這根
+    /// 針，不是把它刪掉。
     #[test]
     fn the_quiet_window_asks_the_os_not_our_own_hook() {
+        // 整行的註解先丟掉。這個 codebase 的習慣是在註解裡引用程式碼
+        // （input.rs 自己就有好幾處寫著 `classify_quiet_window`），不丟的話
+        // 一段抄了整個呼叫的註解就能讓底下每一根針自我滿足。
+        // 行尾註解丟不掉，那是這個作法的已知極限。
         let flat = WINDOWS_INPUT_SOURCE
             .replace("\r\n", "\n")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
             .split_whitespace()
             .collect::<Vec<_>>()
-            .join(" ")
-            // rustfmt 把呼叫拆行的話會補一個尾逗號，壓平之後是 `… , )`。
-            .replace(", )", ")");
+            .join(" ");
         assert!(
             flat.contains("classify_quiet_window(hook, system_idle_ms(), ts - start)"),
-            "安靜視窗要拿 system_idle_ms() 當證人（不經過 hook）"
+            "安靜視窗要拿 system_idle_ms() 當證人（不經過 hook）。\
+             也可能只是那個呼叫被 rustfmt 拆成多行了——壓平擋不住那個。\
+             先去 input.rs 看那一行還在不在，在的話收緊這根針"
         );
         assert!(
             !flat.contains("classify_quiet_window(hook, idle_ms()"),
@@ -229,13 +243,26 @@ mod command_tests {
         // 系統這個證人也有盲點（送到 secure desktop 的輸入——UAC、鎖定畫面——
         // `GetLastInputInfo` 不報，low-level hook 也收不到）。兩個證人同時缺席
         // 的時候不該端出一句有把握的話。
-        //
-        // 這一刀（W2）在 Linux 上只有這條原始碼形狀測試抓得到：實測 17 刀裡，
-        // 它是唯一一刀在加這條之前是綠的。
         assert!(
             flat.contains("let hook = match Self::state() {"),
             "hook 狀態要去問 Self::state()，寫死成某一態會把「我沒在聽」講成「沒人碰」"
         );
+        // **每一臂算出來的值也要釘。** 上面那一根只釘住「match 問的是誰」：
+        // 整個 match 刪掉會紅，把 `HookState::Failed => HookHealth::Active`
+        // 這樣改一個字卻全綠——而使用者讀到的正是後者（hook 裝失敗的機器，
+        // 從此有把握地說「沒人碰」）。真正跑起來的守衛是 input.rs 那條
+        // `every_hook_state_maps_to_its_own_listening_verdict`，但它只有
+        // Windows CI 跑得到；這三根是 Linux 這邊唯一看得見那三臂的東西。
+        for arm in [
+            "HookState::NotStarted => HookHealth::NotStarted,",
+            "HookState::Active => HookHealth::Active,",
+            "HookState::Failed => HookHealth::Failed,",
+        ] {
+            assert!(
+                flat.contains(arm),
+                "`{arm}` 不見了——hook 狀態被翻錯一臂，就會把「我沒在聽」講成「沒人碰」"
+            );
+        }
     }
 
     #[test]
@@ -3806,6 +3833,12 @@ pub mod act {
             // 現在要 health 說得出 `idle_confirmed` 才算。全 0 那一列本身分不出
             // 「真的沒人動」和「我沒在聽」——alpha.97 拿它講前者，那就是這一版
             // 在修的謊。
+            //
+            // **那句謊的受害者不是既有的錄製資料。** alpha.97 的
+            // `WindowsInput::drain` 四個計數全 0 就 `return Ok(None)`，所以真的
+            // Windows 錄製寫不出那種列；寫得出來的只有 `import_replay`（語料裡
+            // 一個全 0 的輸入事件）和 `ReplayBackend`（換視窗那一拍只加
+            // `window_switches`，四個動作計數還是 0）。
             assert_eq!(human_motion(Some(zero), None), HumanMotion::NotMeasured);
             assert_eq!(
                 human_motion(
@@ -3814,8 +3847,12 @@ pub mod act {
                 ),
                 HumanMotion::NobodyTouched
             );
-            // 兩個訊號打架的時候（同一段時間既有一列全 0、health 又說沒在聽）
-            // 站保守的那一邊：不准講成「沒人碰」。
+            // 「同一段時間既有一列全 0 的 `input_metrics`、health 又說沒在
+            // 聽」——**這個組合現在沒有寫入端**：全 0 那種列只有
+            // `import_replay` / `ReplayBackend` 寫得出來，而那兩條路都不寫
+            // `input_health`。留著這一格是因為兩個 `Option` 的組合要窮舉，不
+            // 是因為量到過。真的走到這裡的時候站保守的那一邊：不准講成
+            // 「沒人碰」。
             assert_eq!(
                 human_motion(
                     Some(zero),
