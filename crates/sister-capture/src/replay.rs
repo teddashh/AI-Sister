@@ -242,14 +242,14 @@ impl Backend for ReplayBackend {
     fn drain_input(&mut self, ts: Millis) -> Result<Option<sister_core::model::InputTick>> {
         self.advance(ts);
         if self.input_acc == InputMetrics::default() {
-            let start = self.input_since;
+            // 回 `None`，不是一列 `unknown`。**重播沒有作業系統可以問**：
+            // 沒有 hook、沒有 `GetLastInputInfo`，`Unknown` 那一列講的和
+            // 「沒有列」是同一件事（`human_motion` 兩種都走 `NotMeasured`），
+            // 但代價不一樣——重播沒有視窗批次，每個 tick 都會寫一列，一分鐘
+            // 一百多列；而且 `input_health` 是 `SESSION_CHILDREN`，那些列會
+            // 讓 `delete_empty_sessions` 從此清不掉重播出來的 session。
             self.input_since = ts;
-            return Ok(Some(sister_core::model::InputTick {
-                ts_start: start,
-                ts_end: ts,
-                metrics: None,
-                listening: sister_core::model::InputListening::Unknown,
-            }));
+            return Ok(None);
         }
         let mut m = std::mem::take(&mut self.input_acc);
         m.ts_start = self.input_since;
@@ -397,9 +397,10 @@ mod tests {
         let m = tick.metrics.expect("metrics");
         assert_eq!(m.keystrokes, 12);
         assert_eq!(m.clicks, 2);
-        let empty = b.drain_input(2000).expect("input").expect("quiet tick");
-        assert_eq!(empty.metrics, None, "drained means no metrics");
-        assert_eq!(empty.listening, sister_core::model::InputListening::Unknown);
+        assert!(
+            b.drain_input(2000).expect("input").is_none(),
+            "重播沒有作業系統可以問，安靜的時候不該寫 input_health"
+        );
     }
 
     #[test]

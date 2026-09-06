@@ -34,7 +34,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 18;
+pub const SCHEMA_VERSION: i32 = 19;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -120,15 +120,6 @@ CREATE TABLE IF NOT EXISTS input_metrics (
   typing_bursts   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_input_ts ON input_metrics(ts_start);
-
-CREATE TABLE IF NOT EXISTS input_health (
-  id         INTEGER PRIMARY KEY,
-  ts_start   INTEGER NOT NULL,
-  ts_end     INTEGER NOT NULL,
-  session_id INTEGER REFERENCES sessions(id),
-  state      TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_input_health_start ON input_health(ts_start);
 
 CREATE TABLE IF NOT EXISTS system_events (
   id         INTEGER PRIMARY KEY,
@@ -663,6 +654,24 @@ ON brain_outbound(segment_core_start, role, ts);
 CREATE INDEX IF NOT EXISTS idx_input_metrics_end ON input_metrics(ts_end);
 "#;
 
+/// 安靜的視窗記在這裡：起訖時間，加上「那一段我聽不聽得見」。
+///
+/// **這張表本來被寫進 `MIGRATION_001` 而 `SCHEMA_VERSION` 沒動**，於是它只有
+/// 全新安裝的檔案會有——`migrate()` 讀到版號等於 `SCHEMA_VERSION` 就整個
+/// return，001 那一段一輩子不會再跑。已經在外面的每一顆資料庫都會少這張表，
+/// 而 `insert_input_health` / `input_health_covering` / `prune` / `forget`
+/// 都是 `?` 直接往外冒：錄製會在第一個滿十秒的安靜視窗整個停掉。
+const MIGRATION_019: &str = r#"
+CREATE TABLE IF NOT EXISTS input_health (
+  id         INTEGER PRIMARY KEY,
+  ts_start   INTEGER NOT NULL,
+  ts_end     INTEGER NOT NULL,
+  session_id INTEGER REFERENCES sessions(id),
+  state      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_input_health_start ON input_health(ts_start);
+"#;
+
 fn add_column_if_missing(
     tx: &rusqlite::Transaction<'_>,
     table: &str,
@@ -893,7 +902,6 @@ const CONTENT_TABLES: &[(&str, Option<&str>)] = &[
     ("focus_events", None),
     ("clipboard_events", None),
     ("input_metrics", None),
-    ("input_health", None),
     ("system_events", Some("{q}kind NOT IN {marks}")),
 ];
 
@@ -1333,6 +1341,7 @@ impl Db {
             16 => migrate_016(&tx)?,
             17 => migrate_017(&tx)?,
             18 => tx.execute_batch(MIGRATION_018)?,
+            19 => tx.execute_batch(MIGRATION_019)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -3766,7 +3775,6 @@ impl Db {
             "SELECT EXISTS(SELECT 1 FROM text_chunks WHERE ts >= ?1 AND ts < ?2)",
             "SELECT EXISTS(SELECT 1 FROM focus_events WHERE ts >= ?1 AND ts < ?2)",
             "SELECT EXISTS(SELECT 1 FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2)",
-            "SELECT EXISTS(SELECT 1 FROM input_health WHERE ts_end > ?1 AND ts_start < ?2)",
             "SELECT EXISTS(SELECT 1 FROM clipboard_events WHERE ts >= ?1 AND ts < ?2)",
             "SELECT EXISTS(SELECT 1 FROM system_events WHERE ts >= ?1 AND ts < ?2)",
             "SELECT EXISTS(SELECT 1 FROM queries WHERE ts >= ?1 AND ts < ?2)",
@@ -9268,7 +9276,6 @@ mod tests {
             "text_chunks",
             "focus_events",
             "input_metrics",
-            "input_health",
             "clipboard_events",
             "system_events",
             "queries",
@@ -9334,15 +9341,6 @@ mod tests {
                         },
                     )
                     .expect("input");
-                }
-                "input_health" => {
-                    db.insert_input_health(
-                        sid,
-                        core,
-                        core + 10_000,
-                        crate::model::InputListening::IdleConfirmed,
-                    )
-                    .expect("input health");
                 }
                 "clipboard_events" => {
                     db.insert_clipboard(
@@ -9432,10 +9430,6 @@ mod tests {
             (
                 "input_metrics",
                 "SELECT COUNT(*) FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2",
-            ),
-            (
-                "input_health",
-                "SELECT COUNT(*) FROM input_health WHERE ts_end > ?1 AND ts_start < ?2",
             ),
             (
                 "clipboard_events",
@@ -10150,6 +10144,51 @@ mod tests {
     /// 版執行檔，而那正是前向相容閘門在防的事。
     ///
     /// 版號一路退到 0 掃一遍，所以新加一段 migration 忘了寫冪等，這裡會紅。
+    /// **已經在外面的資料庫，也要拿得到這一版新加的表。**
+    ///
+    /// `input_health` 本來被寫進 `MIGRATION_001` 而 `SCHEMA_VERSION` 沒動。
+    /// 新裝的機器看起來一切正常——建全新檔案的時候 001 會跑到它。但 `migrate()`
+    /// 對一顆版號已經等於 `SCHEMA_VERSION` 的檔案是直接 `return Ok(())`，所以
+    /// **升級上來的每一個人都永遠拿不到那張表**，而 `insert_input_health` /
+    /// `input_health_covering` / `prune` / `forget` 都是 `?` 直接往外冒。
+    ///
+    /// 隔壁那條 `a_version_stamp_older_than_its_schema_does_not_brick_the_file`
+    /// 結構上抓不到這一類：它是拿一顆**當下建好的**（已經含新表的）資料庫把版號
+    /// 往回蓋，模擬的是「結構新、版號舊」。這一條反過來——**先把這一版新加的
+    /// 東西砍掉**，再蓋回上一版的版號，也就是一顆真的上一版檔案。
+    #[test]
+    fn a_database_from_the_previous_release_gets_this_versions_new_tables() {
+        let dir = migrate_tmp("upgrade");
+        let path = dir.join("previous-release.db");
+        {
+            let db = Db::open(&path).expect("build a current one");
+            // 這兩行就是「上一版的 schema」：v0.1.0-alpha.97 和這一版之間，
+            // 整份 DDL 的差集**只有**這張表和它的索引（`git diff` 對過）。
+            db.conn
+                .execute_batch(
+                    "DROP INDEX IF EXISTS idx_input_health_start;
+                     DROP TABLE IF EXISTS input_health;",
+                )
+                .expect("退回上一版的結構");
+            db.conn
+                .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+                .expect("退回上一版的版號");
+        }
+
+        let mut db = Db::open(&path).unwrap_or_else(|e| panic!("上一版的資料庫升不上來：{e:#}"));
+        assert_eq!(db.schema_version().expect("version"), SCHEMA_VERSION);
+
+        // 斷言「寫得進去、讀得回來」，不是「`sqlite_master` 裡有這個名字」——
+        // 少一個索引或少一個欄位，後者照樣是綠的，而下游炸的是這兩步。
+        let sid = db.start_session("test", "0").expect("session");
+        db.insert_input_health(sid, 1, 2, crate::model::InputListening::IdleConfirmed)
+            .expect("升級上來的資料庫寫不進 input_health");
+        assert_eq!(
+            db.input_health_covering(1).expect("read"),
+            Some(crate::model::InputListening::IdleConfirmed),
+        );
+    }
+
     #[test]
     fn a_version_stamp_older_than_its_schema_does_not_brick_the_file() {
         let dir = migrate_tmp("brick");
@@ -11642,10 +11681,6 @@ mod tests {
                 "INSERT INTO input_metrics(ts_start, ts_end) VALUES(1,2)",
             ),
             (
-                "input_health",
-                "INSERT INTO input_health(ts_start, ts_end, state) VALUES(1,2,'unknown')",
-            ),
-            (
                 "system_events",
                 "INSERT INTO system_events(ts, kind) VALUES(1,'lock')",
             ),
@@ -11728,6 +11763,12 @@ mod tests {
                 "Reviewer 從回饋學到的偏好（例如哪一類被降權），不是螢幕原件",
             ),
             ("provenance", "血緣圖本身：誰從誰長出來，不是內容"),
+            (
+                "input_health",
+                "錄製自己的日誌：安靜的那一段她聽不聽得見。不是螢幕原件，\
+                 而且進了 `CONTENT_TABLES` 會讓一顆只剩這張表的資料庫同時是\
+                 「什麼都不剩」和「存過東西」——那正是 `ever_stored` 要拆開的兩種 0",
+            ),
             (
                 "reviewer_run",
                 "審閱層跑過沒、回查了幾次；沒跑過和跑了沒回查靠這張表分",

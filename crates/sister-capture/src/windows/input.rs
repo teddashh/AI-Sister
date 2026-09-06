@@ -329,10 +329,19 @@ mod tests {
         COUNTERS.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 沒有任何輸入時不該寫一列全 0 的紀錄：idle 是用「沒有列」表達的，
-    /// 一秒一列空紀錄會把資料庫塞滿沒有資訊的東西。
+    /// 安靜的視窗仍然不寫一列全 0 的 `input_metrics`——那張表上的 idle 是用
+    /// 「沒有列」表達的，一秒一列空紀錄會把資料庫塞滿沒有資訊的東西。
+    ///
+    /// 但「安靜」本身要留下痕跡，所以改成出一個 `metrics: None` 的 tick，由
+    /// recorder 寫進 `input_health`：好分清楚「作業系統證實沒人碰」和「我們
+    /// 的 hook 根本沒在聽」。alpha.97 以前這兩件事是同一個沉默，於是她會用
+    /// 有把握的語氣說「鍵盤和滑鼠一下都沒有動」。
+    ///
+    /// 這條也釘住那條鐵律：這個測試程序從來沒有裝過 hook（`install_hooks`
+    /// 的唯一入口 `WindowsInput::start` 沒有任何測試會走），所以不管作業系統
+    /// 怎麼回答，都**不准**說成「沒人碰」。
     #[test]
-    fn silence_produces_no_row() {
+    fn a_silent_window_yields_a_health_tick_not_an_empty_metrics_row() {
         let _lock = exclusive();
         KEYSTROKES.store(0, Relaxed);
         CLICKS.store(0, Relaxed);
@@ -343,7 +352,21 @@ mod tests {
             window_start: 0,
             window_ms: 0,
         };
-        assert!(input.drain(1000).expect("no error").is_none());
+
+        let tick = input
+            .drain(1000)
+            .expect("no error")
+            .expect("安靜的視窗也要出一個 tick，不然「我沒在聽」沒有人記");
+        assert!(
+            tick.metrics.is_none(),
+            "安靜的視窗不可以寫一列全 0 的 input_metrics"
+        );
+        assert_eq!((tick.ts_start, tick.ts_end), (0, 1000));
+        assert_eq!(
+            tick.listening,
+            InputListening::NotListening,
+            "hook 沒裝上的時候，不管作業系統說什麼都不准講成「沒人碰」"
+        );
     }
 
     /// **視窗沒滿之前不出列，而且累積的輸入不可以被丟掉。**
@@ -439,9 +462,14 @@ mod tests {
             .expect("no error")
             .expect("quiet window");
         assert_eq!(quiet.metrics, None);
-        // 這個測試沒有裝 hook，所以 `state()` 是 `NotStarted`——安靜視窗要說
-        // 「我沒在聽」，**不准**說成「作業系統證實沒人碰」。少了這一行的話，
-        // 把 hook 狀態寫死成 `Active`、或把兩臂對調，這裡都不會紅。
+        // 這個測試沒有裝 hook（`install_hooks` 的唯一入口 `WindowsInput::start`
+        // 整個 crate 的測試都不會走），所以 `state()` 一定是 `NotStarted`，
+        // 而 `classify_quiet_window` 對那一態**不看作業系統怎麼回答**——這條
+        // 斷言因此是確定的，不是碰運氣。
+        //
+        // 但它守不住「hook 狀態寫死」那一刀：寫死成 `Active` 之後，紅不紅
+        // 就取決於跑測試那台機器剛好閒置了幾秒（這個視窗是 10 秒）。那一刀
+        // 的守衛是 `ops.rs` 那條原始碼形狀測試，不是這裡。
         assert_eq!(
             quiet.listening,
             InputListening::NotListening,

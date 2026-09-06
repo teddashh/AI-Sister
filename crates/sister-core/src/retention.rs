@@ -260,9 +260,9 @@ fn delete_frames_except(
         .context("delete frames")? as u64)
 }
 
-/// 帶著 `session_id` 的那七張表。
+/// 帶著 `session_id` 的那八張表。
 ///
-/// 寫成一份清單而不是七句 SQL：漏掉一張的下場是一列被判定成「空的」然後刪掉，
+/// 寫成一份清單而不是八句 SQL：漏掉一張的下場是一列被判定成「空的」然後刪掉，
 /// 而它其實還有東西指著——外鍵是 `ON` 的，所以那會變成一次整批 rollback。
 /// 新增一張帶 `session_id` 的表卻忘了加進來，也是同一個下場（會很吵，這是對的）。
 const SESSION_CHILDREN: [&str; 8] = [
@@ -349,7 +349,7 @@ pub(crate) fn delete_empty_sessions(
 ///
 /// 只有 `system_events` 需要挑：`session_start` / `session_end` 是那場錄製自己
 /// 的標籤，不是她記的東西（見 [`crate::model::SystemKind::is_session_mark`]）。
-/// 其餘六張表整張都算。
+/// 其餘七張表整張都算。
 ///
 /// 沒有這一句的時候，上面那支清掃在**產品裡從來沒有刪掉過任何一列**：
 /// `Recorder::finish` **先**寫 `SessionEnd` **再**呼叫 `end_session`，於是它自
@@ -375,7 +375,8 @@ fn content_only(table: &str) -> String {
 /// 「這一場剩下的東西，是不是全都落在那個窗裡」。同一個 `ts` 條件，只是反過來
 /// 問——窗外還有東西的那一場，等一下也不會被刪。
 ///
-/// `input_metrics` 那張表用 `ts_end` / `ts_start`，而且 `forget` 收的是**重疊**
+/// `input_metrics` 和 `input_health` 那兩張表用 `ts_end` / `ts_start`，而且
+/// `forget` 收的是**重疊**
 /// 而不是包含（見 [`crate::db::Db::forget`] 的邊界那一段）。這裡照抄那個條件，
 /// 不然一段跨過邊界的輸入統計會讓兩支的答案差一列。
 fn count_empty_sessions(

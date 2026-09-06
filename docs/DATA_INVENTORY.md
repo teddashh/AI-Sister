@@ -377,6 +377,33 @@ Windows 的鍵盤 hook **從未解參考 `KBDLLHOOKSTRUCT`**——按鍵碼從�
 > 一句「不需要你相信任何人」的承諾，如果只能靠寫的人記得，那它要求的
 > 信任比它宣稱的還多。
 
+### `input_health` — 安靜的那一段，她聽不聽得見
+
+`ts_start` / `ts_end` / `session_id` / `state`，只在**一個視窗內四個計數器
+全都是 0** 的時候寫一列（有人在動就寫 `input_metrics`，不寫這張）。
+所以它記的是「沒有輸入」這件事，不是輸入本身——這張表裡沒有任何按鍵、
+座標或內容。
+
+`state` 三種：
+
+| 值 | 意思 |
+|---|---|
+| `idle_confirmed` | hook 正常，而且作業系統（`GetLastInputInfo`）說整個視窗都沒人碰 |
+| `not_listening` | hook 沒裝起來／裝失敗，或是作業系統說那段有人動過而我們一個事件都沒收到（hook 被系統靜默拆掉的指紋） |
+| `unknown` | 問不出作業系統的閒置時間 |
+
+**為什麼要多一張表**：alpha.97 以前，「真的沒人碰」和「我沒在聽」在資料庫裡
+是同一個沉默——`input_metrics` 沒有列。於是她會用有把握的語氣說
+「鍵盤和滑鼠一下都沒有動」，而那一段她可能整段都聾了。
+`LowLevelHooksTimeout` 會讓 Windows **無聲地**把 hook 拆掉：沒有錯誤、
+沒有事件，`HookState::Active` 只代表「當初裝上去了」。
+
+**隱私面**：一串連續的 `idle_confirmed` 等於「這段時間他不在電腦前」。
+這是關於他的資訊，所以它跟 `retention.text_days` 一起過期、
+`sister forget` 會照重疊區間刪掉、砍 session 時一起走。
+它**不算**「她記下來的東西」（不在 `CONTENT_TABLES` 裡）：那是錄製自己的
+日誌，一顆只剩這張表的資料庫應該說「從來沒存過」，不是「存過但被忘掉了」。
+
 ### `facts` — L1 抽取出來的事實
 
 `kind`（money / phone / url / email / file_path / error_code / id_like /
@@ -448,7 +475,8 @@ datetime）、`raw`（螢幕原文）、`normalized`，以及回指
 > 順帶把整份表的規矩講清楚，這份文件以前只說了存什麼、沒說存多久：
 > **除了畫面檔（`retention.frames_days`，預設 30 天，到期只丟圖、字留著）
 > 以外，其餘每一張表都跟著 `retention.text_days`。** 包含這張、`queries`
-> 題庫、焦點／剪貼簿／輸入那三張訊號表、以及 `segment`、`segment_edit`、
+> 題庫、焦點／剪貼簿／輸入那四張訊號表（`input_health` 也在內）、
+> 以及 `segment`、`segment_edit`、
 > `stuck_signal`。`sister prune --dry-run` 會
 > 當場把「現在會刪掉什麼」印出來，一個位元組都不動。
 

@@ -8,9 +8,7 @@
 //! 不重試、不阻塞。感官層停下來的代價遠大於少一筆脈絡。
 
 use anyhow::Result;
-use sister_core::model::{
-    ClipboardEvent, FocusSnapshot, InputListening, InputTick, Millis, OcrBlock,
-};
+use sister_core::model::{ClipboardEvent, FocusSnapshot, InputTick, Millis, OcrBlock};
 use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
@@ -463,13 +461,12 @@ impl ClipboardSource for NullClipboard {
 
 pub struct NullInput;
 impl InputSource for NullInput {
-    fn drain(&mut self, ts: Millis) -> Result<Option<InputTick>> {
-        Ok(Some(InputTick {
-            ts_start: ts,
-            ts_end: ts,
-            metrics: None,
-            listening: InputListening::Unknown,
-        }))
+    fn drain(&mut self, _ts: Millis) -> Result<Option<InputTick>> {
+        // 和隔壁三個 Null 一樣：降級是安靜的。回一列 `unknown` 的話，每個
+        // tick 都會多一列**零長度**（`ts_start == ts_end`）的 input_health
+        // ——那種列 `input_health_covering` 用半開區間永遠查不到，重疊刪除
+        // 和「還有沒有紀錄」卻都看得到它。
+        Ok(None)
     }
 }
 
@@ -557,9 +554,7 @@ mod tests {
             FocusSnapshot::default()
         );
         assert!(NullClipboard.poll(0).expect("no error").is_none());
-        let input = NullInput.drain(0).expect("no error").expect("unknown tick");
-        assert_eq!(input.metrics, None);
-        assert_eq!(input.listening, InputListening::Unknown);
+        assert!(NullInput.drain(0).expect("no error").is_none());
         let f = RawFrame {
             ts: 0,
             monitor: 0,

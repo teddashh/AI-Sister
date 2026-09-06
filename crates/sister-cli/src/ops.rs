@@ -187,22 +187,28 @@ mod command_tests {
     /// （`GetLastInputInfo`，不經過我們裝的 hook），不能是同一個檔案裡那支
     /// `idle_ms()`（讀 `LAST_INPUT_TICK`，只有 hook 還活著才會前進）。
     ///
-    /// 差別是這一版的全部意義：hook 被系統靜默拆掉的時候 `LAST_INPUT_TICK`
-    /// 從此不動，`idle_ms()` 會回一個**越來越大**的數字，於是
+    /// 差別是這一版的全部意義：hook **裝起來過、後來被系統靜默拆掉**的時候
+    /// `LAST_INPUT_TICK` 從此不動，`idle_ms()` 會回一個**越來越大**的數字，於是
     /// `idle >= window` → `IdleConfirmed` → 她用有把握的語氣說
     /// 「鍵盤和滑鼠一下都沒有動」，而真相是她已經聾了。那正是這一版要修掉的謊，
-    /// 只是換成一句聽起來更確定的版本。
+    /// 只是換成一句聽起來更確定的版本。（從來沒裝起來的那一格不一樣：
+    /// `LAST_INPUT_TICK` 是 0，`idle_ms()` 直接回 0，反而不會說謊。）
     ///
     /// 那一格整個包在 `#[cfg(windows)]` 裡，Linux 上一行都執行不到
     /// （`check-windows.sh` 只編譯、不跑測試），所以只能用原始碼形狀守。
-    /// 先把空白壓平，才不會被 `cargo fmt` 換行或 Windows checkout 的 CRLF 弄假紅。
+    ///
+    /// 壓平擋得住的是 Windows checkout 的 CRLF、縮排改變、和整個呼叫被換行
+    /// （含 rustfmt 補的尾逗號）。**擋不住**參數自己被拆成多行之外的任何改寫
+    /// ——那種情況這條會紅，該做的是重新收緊這根針，不是把它刪掉。
     #[test]
     fn the_quiet_window_asks_the_os_not_our_own_hook() {
         let flat = WINDOWS_INPUT_SOURCE
             .replace("\r\n", "\n")
             .split_whitespace()
             .collect::<Vec<_>>()
-            .join(" ");
+            .join(" ")
+            // rustfmt 把呼叫拆行的話會補一個尾逗號，壓平之後是 `… , )`。
+            .replace(", )", ")");
         assert!(
             flat.contains("classify_quiet_window(hook, system_idle_ms(), ts - start)"),
             "安靜視窗要拿 system_idle_ms() 當證人（不經過 hook）"
@@ -211,10 +217,21 @@ mod command_tests {
             !flat.contains("classify_quiet_window(hook, idle_ms()"),
             "idle_ms() 依賴 hook 還活著——hook 死掉時它會把「我聾了」講成「沒人碰」"
         );
-        // hook 狀態也要真的去問，不能寫死。寫死成 `Active` 的話，「hook 根本沒裝
-        // 起來」會退化成「只看作業系統的 idle」——使用者剛好沒在動的時候，她會用
-        // 有把握的語氣說「沒人碰」，而她其實整段都沒在聽。這一刀（W2）在 Linux 上
-        // 沒有任何測試抓得到，實測 17 刀裡只有它是綠的。
+        // 上面那條負向的目前是**絆線**不是牙齒：`idle_ms()` 回 `i64`，
+        // `classify_quiet_window` 第二個參數是 `Option<u64>`，所以那串字現在
+        // 根本編不過。真正有牙齒的是前面那條正向的。留著是為了哪天有人改了
+        // 型別、讓那個寫法變成編得過的東西。
+        // hook 狀態也要真的去問，不能寫死。理由是**保守**，不是「不然她會講假
+        // 話」——`GetLastInputInfo` 不經過我們的 hook，所以「hook 沒裝起來 ＋ 作業
+        // 系統說整段都沒人動」這一格，「一下都沒有動」其實是真的。
+        //
+        // 保守的理由有兩層：那一格我們**自己**對那個視窗一份證據都沒有；而作業
+        // 系統這個證人也有盲點（送到 secure desktop 的輸入——UAC、鎖定畫面——
+        // `GetLastInputInfo` 不報，low-level hook 也收不到）。兩個證人同時缺席
+        // 的時候不該端出一句有把握的話。
+        //
+        // 這一刀（W2）在 Linux 上只有這條原始碼形狀測試抓得到：實測 17 刀裡，
+        // 它是唯一一刀在加這條之前是綠的。
         assert!(
             flat.contains("let hook = match Self::state() {"),
             "hook 狀態要去問 Self::state()，寫死成某一態會把「我沒在聽」講成「沒人碰」"
@@ -2070,7 +2087,7 @@ pub mod act {
                 "這個目標出現在畫面上的那一段，你在動鍵盤滑鼠——但這只說明同一段時間有人在操作，不表示是你叫出這個東西的。"
             }
             HumanMotion::HookDown => {
-                "這個目標出現的時候，我的輸入監聽是斷的——那一段就算有人在動鍵盤滑鼠，我也看不到。"
+                "這個目標出現的那一段，我沒有收到任何鍵盤或滑鼠動作，而那不能當成沒人動——我的輸入監聽有可能整段都沒在運作。"
             }
             HumanMotion::NotMeasured => {
                 "這個目標出現的時候，紀錄裡沒有可以對照的鍵盤或滑鼠動作——可能是沒人動，也可能是那一小段沒被記進來，我分不出是哪一種。"
@@ -3784,6 +3801,28 @@ pub mod act {
                 HumanMotion::NobodyTouched
             );
             assert_eq!(human_motion(Some(active), None), HumanMotion::HumanActive);
+
+            // 這一版翻了面：一列全 0 的 `input_metrics` 以前直接算「沒人碰」，
+            // 現在要 health 說得出 `idle_confirmed` 才算。全 0 那一列本身分不出
+            // 「真的沒人動」和「我沒在聽」——alpha.97 拿它講前者，那就是這一版
+            // 在修的謊。
+            assert_eq!(human_motion(Some(zero), None), HumanMotion::NotMeasured);
+            assert_eq!(
+                human_motion(
+                    Some(zero),
+                    Some(sister_core::model::InputListening::IdleConfirmed)
+                ),
+                HumanMotion::NobodyTouched
+            );
+            // 兩個訊號打架的時候（同一段時間既有一列全 0、health 又說沒在聽）
+            // 站保守的那一邊：不准講成「沒人碰」。
+            assert_eq!(
+                human_motion(
+                    Some(zero),
+                    Some(sister_core::model::InputListening::NotListening)
+                ),
+                HumanMotion::HookDown
+            );
             let unmeasured = target_drive_sentence(None, human_motion(None, None));
             let untouched = target_drive_sentence(
                 None,
@@ -3903,12 +3942,16 @@ pub mod act {
             );
         }
 
-        /// 三格必須兩兩不同，不是只有一對不同。
+        /// 四格必須兩兩不同，不是只有一對不同。
+        ///
+        /// 新加一格卻沒加進這個陣列，等於那句新的話沒有人守——`HookDown`
+        /// 進來的那一版就是這樣，它和「沒人碰」只差在沒有人比過。
         #[test]
-        fn ted_all_three_motions_say_different_things() {
+        fn ted_all_four_motions_say_different_things() {
             let all = [
                 HumanMotion::HumanActive,
                 HumanMotion::NobodyTouched,
+                HumanMotion::HookDown,
                 HumanMotion::NotMeasured,
             ];
             for (i, a) in all.iter().enumerate() {
@@ -3929,6 +3972,7 @@ pub mod act {
             let all = [
                 HumanMotion::HumanActive,
                 HumanMotion::NobodyTouched,
+                HumanMotion::HookDown,
                 HumanMotion::NotMeasured,
             ];
             for motion in all {
@@ -4130,7 +4174,7 @@ pub mod act {
             );
         }
 
-        /// 三種狀態都要**真的印到使用者面前**，而且是三句不同的話。
+        /// 四種狀態都要**真的印到使用者面前**，而且是四句不同的話。
         #[test]
         fn ted_the_drive_sentence_reaches_the_user_at_the_real_exit() {
             let zero = sister_core::model::InputMetrics::default();
@@ -4145,6 +4189,7 @@ pub mod act {
                 Some(sister_core::model::InputListening::IdleConfirmed),
             );
             let human = drive_line(Some(active), None);
+            let down = drive_line(None, Some(sister_core::model::InputListening::NotListening));
 
             assert!(
                 unmeasured.contains("我分不出是哪一種"),
@@ -4158,9 +4203,16 @@ pub mod act {
                 human.contains("你在動鍵盤滑鼠"),
                 "「你在動」沒有印到使用者面前：{human}"
             );
-            // 三句話真的不一樣，而且是在**同一個出口**上不一樣。
+            assert!(
+                down.contains("不能當成沒人動"),
+                "「我沒在聽」沒有印到使用者面前：{down}"
+            );
+            // 四句話真的不一樣，而且是在**同一個出口**上不一樣。
             assert!(!untouched.contains("我分不出是哪一種"), "{untouched}");
             assert!(!human.contains("一下都沒有動"), "{human}");
+            // 這一句最危險：把「我沒在聽」講成「沒人碰」，比 alpha.97 修掉的
+            // 那個謊更嚴重，因為它聽起來是有把握的。
+            assert!(!down.contains("一下都沒有動"), "{down}");
         }
 
         struct AlwaysSucceeds;
