@@ -83,8 +83,179 @@ pub fn validate_window_title(title: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 一個網址的 **host**，正規化到可以跟「她記下來的那一份」比對。
+///
+/// 為什麼是 host 而不是整條網址：`focus_events.url` 那一欄的來源是 Chromium
+/// 的位址列，而位址列給的是**給人看的縮寫**——`kFormatUrlOmitHTTPS` 與
+/// `kFormatUrlOmitTrivialSubdomains` 會把 `https://www.example.com/a?b=c`
+/// 顯示成 `example.com/a?b=c`（見 `sister-capture` 的 `windows/uia.rs` 開頭）。
+/// 逐字比對兩邊永遠不會相等，而且**不會有人發現**：它只會安靜地一個都不放行。
+///
+/// **這裡不可以用子字串比對。** `evil.com/?next=example.com` 含著
+/// `example.com`，`example.com.evil.com` 也含著。所以先切出 authority，
+/// 再整段相等比對。切的順序有三個容易錯的地方，三個都有測試釘著：
+///
+/// - **userinfo**：`https://example.com@evil.com/` 的 host 是 `evil.com`，
+///   要取**最後**一個 `@` 之後。
+/// - **IPv6**：`[::1]:8080` 的 host 是 `[::1]`，不能看到 `:` 就砍。
+/// - **path/query/fragment**：三個都可能先出現，取最早的那一個。
+///
+/// 回 `None` 表示「這個字串講不出一個 host」——呼叫端必須把它當成
+/// **不放行**，不是當成「沒有限制」。
+pub fn host_of(url: &str) -> Option<String> {
+    let v = url.trim();
+    if v.is_empty() || v.chars().any(char::is_whitespace) {
+        return None;
+    }
+    // scheme 是選配的：她記下來的那一份被砍掉了 scheme，模型讀來的那一份通常有。
+    let rest = match v.split_once("://") {
+        Some((scheme, rest)) => {
+            // **只有 http/https 講得出「站」。** `chrome://settings` 有 `://`
+            // 卻不是一個網站，早一版這裡把 `settings` 當成 host 回出去了。
+            // 這一行和 `validate_url` 的白名單是同一個決定，兩邊要一起讀。
+            if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+                return None;
+            }
+            rest
+        }
+        None => {
+            // 沒有 `://` 卻有 `:` 在第一個 `/` 之前，可能是 `about:blank`
+            // 這種；也可能是 `example.com:8080/x`。用「冒號後面是不是全數字」
+            // 分辨——是就當 port，不是就當 scheme 而且沒有 authority。
+            let head = v.split(['/', '?', '#']).next().unwrap_or(v);
+            if let Some((before, after)) = head.split_once(':')
+                && !before.is_empty()
+                && !after.is_empty()
+                && !after.chars().all(|c| c.is_ascii_digit())
+                && !before.starts_with('[')
+            {
+                return None;
+            }
+            v
+        }
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    // userinfo：取最後一個 `@` 之後。
+    let authority = match authority.rsplit_once('@') {
+        Some((_, host)) => host,
+        None => authority,
+    };
+    let host = if let Some(end) = authority.strip_prefix('[').and_then(|r| r.find(']')) {
+        // IPv6 字面值：連方括號一起留著，`[::1]` 和 `::1` 不要變成兩個答案。
+        &authority[..end + 2]
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+    let host = host.trim().to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    // `www.` 是位址列會省略的那一個，所以兩邊都要省，否則同一個站會變兩個答案。
+    let host = host.strip_prefix("www.").unwrap_or(&host).to_string();
+    if host.is_empty() { None } else { Some(host) }
+}
+
+/// 她記下來的那條網址，跟她正要打開的那條，是不是同一個站。
+///
+/// 兩邊都走 [`host_of`]。任何一邊講不出 host 就是 `false`——**「我看不懂」
+/// 不可以讀成「可以」**。
+pub fn same_site(recorded: &str, target: &str) -> bool {
+    match (host_of(recorded), host_of(target)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// 她記下來的是縮寫版，模型讀來的是完整版。這兩個必須是同一個站，
+    /// 否則整道閘門會安靜地一個都不放行——而「一個都不放行」看起來很安全，
+    /// 實際上是這個功能整個沒接上，沒有人會發現。
+    #[test]
+    fn the_abbreviated_one_she_recorded_is_the_same_site_as_the_full_one() {
+        assert!(same_site(
+            "example.com/a?b=c",
+            "https://www.example.com/a?b=c"
+        ));
+        assert!(same_site("example.com", "https://example.com/"));
+        assert!(same_site("EXAMPLE.com/x", "https://Example.COM/y"));
+        assert!(same_site("example.com/a", "https://example.com:8443/a"));
+    }
+
+    /// `@` 前面那一段是 userinfo，不是主機。這一條擋的是把記得住的網域
+    /// 貼在 `@` 前面來借過的那一招。
+    #[test]
+    fn the_bit_before_the_at_sign_is_not_the_host() {
+        assert_eq!(
+            host_of("https://example.com@evil.com/").as_deref(),
+            Some("evil.com")
+        );
+        assert!(!same_site("example.com", "https://example.com@evil.com/"));
+        // 兩個 `@` 也一樣，取最後一個。
+        assert_eq!(
+            host_of("https://a@example.com@evil.com/").as_deref(),
+            Some("evil.com")
+        );
+    }
+
+    /// 子字串比對會全中的那三種，這裡必須全不中。
+    #[test]
+    fn a_host_that_merely_contains_the_remembered_one_is_a_different_site() {
+        for impostor in [
+            "https://evil.com/?next=example.com",
+            "https://example.com.evil.com/",
+            "https://notexample.com/",
+            "https://example.community/",
+        ] {
+            assert!(
+                !same_site("example.com", impostor),
+                "{impostor} 不是 example.com，可是它被放行了"
+            );
+        }
+    }
+
+    /// 講不出 host 的一律不是同一個站。**「我看不懂」不可以讀成「可以」**。
+    #[test]
+    fn something_it_cannot_read_is_never_the_same_site() {
+        for unreadable in [
+            "",
+            "   ",
+            "about:blank",
+            "chrome://settings",
+            "javascript:alert(1)",
+            "/just/a/path",
+        ] {
+            assert_eq!(host_of(unreadable), None, "{unreadable} 竟然講得出 host");
+            assert!(!same_site("example.com", unreadable));
+            assert!(!same_site(unreadable, "https://example.com/"));
+        }
+    }
+
+    /// `www.` 是位址列會省略的那一個，所以兩邊都要省——否則同一個站在
+    /// 她的紀錄裡和在模型嘴裡會是兩個答案。而別的子網域**不可以**省。
+    #[test]
+    fn only_www_is_dropped_and_other_subdomains_are_not() {
+        assert!(same_site("example.com", "https://www.example.com/"));
+        assert!(same_site("www.example.com", "https://example.com/"));
+        assert!(!same_site("example.com", "https://mail.example.com/"));
+        assert_eq!(
+            host_of("https://mail.example.com/").as_deref(),
+            Some("mail.example.com")
+        );
+    }
+
+    /// IPv6 字面值不可以被冒號切成兩半。開發時整天看的 `localhost:3000` 也一樣。
+    #[test]
+    fn a_colon_inside_brackets_is_not_a_port() {
+        assert_eq!(host_of("http://[::1]:8080/x").as_deref(), Some("[::1]"));
+        assert!(same_site("[::1]/a", "http://[::1]:8080/b"));
+        assert_eq!(
+            host_of("http://localhost:3000/x").as_deref(),
+            Some("localhost")
+        );
+        assert!(same_site("localhost:3000/a", "http://localhost/b"));
+    }
     use super::*;
 
     #[test]

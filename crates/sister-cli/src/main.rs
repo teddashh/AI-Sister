@@ -15,6 +15,30 @@ use std::path::PathBuf;
 
 use sister_core::config::Config;
 
+/// clap 那一側的兩個答案。
+///
+/// **和 `sister_hands::url_policy::UrlOpenAnswer` 分成兩個型別**，因為
+/// `sister-hands` 不該為了一支指令列去相依 clap。底下那支 `From` 是唯一的
+/// 橋，而它沒有 `_`——加第三個答案的那天這裡會編不過。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum UrlAnswerArg {
+    /// 等我在——網址一律要我當場按。
+    #[value(name = "only-on-my-press")]
+    OnlyOnMyPress,
+    /// 可以自己按，但你要說得出這個網址從哪來。
+    #[value(name = "when-you-can-name-the-origin")]
+    WhenYouCanNameTheOrigin,
+}
+
+impl From<UrlAnswerArg> for sister_hands::url_policy::UrlOpenAnswer {
+    fn from(value: UrlAnswerArg) -> Self {
+        match value {
+            UrlAnswerArg::OnlyOnMyPress => Self::OnlyOnMyPress,
+            UrlAnswerArg::WhenYouCanNameTheOrigin => Self::WhenYouCanNameTheOrigin,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "sister",
@@ -446,6 +470,16 @@ enum Command {
     /// 解除暫停。
     Resume,
 
+    /// 「我一個人在跑的時候，可不可以自己按網址？」——看你現在的答案，或回答它。
+    ///
+    /// 不帶 `--set` 就只是把問題和你現在站的位置端出來。**沒回答過不是一個
+    /// 預設值**：她會告訴你在你回答之前她不會開網址，而那不是因為你選了不要。
+    UrlPolicy {
+        /// 回答它。兩個答案都合法，這一格由你決定，不由產品決定。
+        #[arg(long, value_name = "答案")]
+        set: Option<UrlAnswerArg>,
+    },
+
     /// 請正在跑的 `record` 收工。
     ///
     /// 和 `pause` 不一樣：暫停是「先別看，但留在這裡」，這個是「今天到此為止」
@@ -782,7 +816,13 @@ fn main() -> Result<()> {
                 use_grant,
                 unattended,
                 show_grant,
+                url_open: config()?.hands.url_open,
             },
+        ),
+        Command::UrlPolicy { set } => ops::url_policy::run(
+            cli.config.as_deref(),
+            set.map(sister_hands::url_policy::UrlOpenAnswer::from),
+            &mut std::io::stdout(),
         ),
         Command::Pause => ops::pause::run(&data_dir, true),
         Command::Resume => ops::pause::run(&data_dir, false),

@@ -23,6 +23,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
+use sister_hands::url_policy::UrlOrigin;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -2783,6 +2784,45 @@ impl Db {
     ///
     /// 查不到的那些**照記**。理由見 [`MIGRATION_004`]：找得回來的那些只證明她
     /// 現在能做什麼，找不回來的那些才是下一版要修的東西。
+    /// 這個網址的**站**，在她自己的紀錄裡出現過嗎（PHASES #42）。
+    ///
+    /// 「沒有」有兩種，而它們要他做的事完全相反，所以這裡不回 `bool`：
+    ///
+    /// - [`UrlOrigin::NotInHerRecord`]：她查了，`focus_events` 裡有網址，
+    ///   只是沒有這一個。**下一步是他自己看一眼那個網址。**
+    /// - [`UrlOrigin::SheIsNotReadingUrls`]：`focus_events` 裡一個網址都沒有。
+    ///   讀網址那條路只有 Windows 有（UIA），而且它連續卡三次會**永久**放棄
+    ///   （見 `sister-capture` 的 `windows/uia.rs`）。這一種下她對**每一個**
+    ///   網址都答不出來，**下一步是去修擷取，不是去看那個網址**。
+    ///
+    /// 壓成 `bool` 的那一版會把第二種講成第一種：一台從來沒讀過網址的機器，
+    /// 會對每一步都說「這個站你沒去過」——每個字都是假的推論。
+    ///
+    /// 比對只到 host 這一層，理由見 [`sister_hands::target_policy::host_of`]：
+    /// 她記下來的那一份是位址列的**縮寫**，逐字比對永遠不會相等。
+    pub fn site_in_her_record(&self, url: &str) -> Result<UrlOrigin> {
+        let Some(target) = sister_hands::target_policy::host_of(url) else {
+            return Ok(UrlOrigin::NotAReadableSite);
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT url FROM focus_events WHERE url IS NOT NULL AND url <> \'\'",
+        )?;
+        let mut saw_any_url = false;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for recorded in rows {
+            let recorded = recorded?;
+            saw_any_url = true;
+            if sister_hands::target_policy::host_of(&recorded).as_deref() == Some(target.as_str()) {
+                return Ok(UrlOrigin::InHerRecord);
+            }
+        }
+        Ok(if saw_any_url {
+            UrlOrigin::NotInHerRecord
+        } else {
+            UrlOrigin::SheIsNotReadingUrls
+        })
+    }
+
     pub fn log_query(&self, entry: &QueryLogEntry<'_>) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO queries(ts, question, shape, hits, latency_ms, source)
@@ -7856,6 +7896,93 @@ mod tests {
 
     fn test_db() -> Db {
         Db::open_in_memory().expect("open in-memory db")
+    }
+
+    /// **「她查了沒有」和「她根本沒在讀網址」不可以是同一個答案。**
+    ///
+    /// 一台從來沒讀過網址的機器（不是 Windows、或 UIA 已經永久放棄），
+    /// 如果回的是 `NotInHerRecord`，畫面就會對每一步說「這個站你沒去過」
+    /// ——那是一句從零證據推出來的斷言。
+    #[test]
+    fn a_machine_that_never_read_a_url_does_not_claim_you_never_went_there() {
+        let mut db = test_db();
+        let session = db.start_session("test", "0").expect("session");
+
+        // 一列網址都沒有的時候：不可以說「不在紀錄裡」。
+        assert_eq!(
+            db.site_in_her_record("https://example.com/a").expect("查"),
+            UrlOrigin::SheIsNotReadingUrls
+        );
+
+        // 有網址了，但不是這一個——這時候才輪到「不在紀錄裡」。
+        db.insert_focus(
+            session,
+            &FocusEvent {
+                ts: 1_100,
+                kind: FocusKind::TitleChange,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    app_name: Some("Chrome".into()),
+                    window_title: Some("別的站".into()),
+                    url: Some("elsewhere.test/x".into()),
+                    pid: Some(1),
+                    password_field: false,
+                },
+            },
+        )
+        .expect("insert");
+        assert_eq!(
+            db.site_in_her_record("https://example.com/a").expect("查"),
+            UrlOrigin::NotInHerRecord
+        );
+    }
+
+    /// 她記下來的是位址列的**縮寫**，模型讀來的是完整網址。這兩個必須對得起來，
+    /// 否則整道閘門會安靜地一個都不放行——而那看起來很安全，實際上是這個功能
+    /// 沒接上，沒有人會發現。
+    #[test]
+    fn the_abbreviated_url_she_recorded_still_matches_the_full_one() {
+        let mut db = test_db();
+        let session = db.start_session("test", "0").expect("session");
+        db.insert_focus(
+            session,
+            &FocusEvent {
+                ts: 1_100,
+                kind: FocusKind::TitleChange,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    app_name: Some("Chrome".into()),
+                    window_title: Some("帳單".into()),
+                    // Chromium 位址列真正給出來的形狀：沒有 scheme、沒有 www.
+                    url: Some("example.com/bill?id=7".into()),
+                    pid: Some(1),
+                    password_field: false,
+                },
+            },
+        )
+        .expect("insert");
+        assert_eq!(
+            db.site_in_her_record("https://www.example.com/bill?id=7")
+                .expect("查"),
+            UrlOrigin::InHerRecord
+        );
+        // 同一個站的別條路徑也算——比對只到 host 這一層，這是刻意的。
+        assert_eq!(
+            db.site_in_her_record("https://example.com/other")
+                .expect("查"),
+            UrlOrigin::InHerRecord
+        );
+        // 借網域的那一招不算。
+        assert_eq!(
+            db.site_in_her_record("https://example.com@evil.test/")
+                .expect("查"),
+            UrlOrigin::NotInHerRecord
+        );
+        // 讀不出站名的字串自成一格，不可以講成「你沒去過」。
+        assert_eq!(
+            db.site_in_her_record("javascript:alert(1)").expect("查"),
+            UrlOrigin::NotAReadableSite
+        );
     }
 
     #[test]

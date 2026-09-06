@@ -23,8 +23,18 @@ fn tmp(label: &str) -> PathBuf {
 fn sister(data_dir: &Path, config: Option<&Path>, args: &[&str]) -> Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_sister"));
     c.arg("--data-dir").arg(data_dir);
-    if let Some(config) = config {
-        c.arg("--config").arg(config);
+    // 不指的時候落回**夾具自己寫的那一份**。`--config` 沒給的話產品讀的是
+    // `Config::default_path()`，也就是跑測試的人自己的 `~/.config`——夾具在
+    // 資料目錄裡寫的設定於是一個字都到不了受測的那支指令手上，而兩邊都不報錯。
+    let fallback = data_dir.join("config.toml");
+    match config {
+        Some(config) => {
+            c.arg("--config").arg(config);
+        }
+        None if fallback.exists() => {
+            c.arg("--config").arg(&fallback);
+        }
+        None => {}
     }
     c.args(args);
     let out = c.output().expect("run sister");
@@ -66,6 +76,10 @@ fn run_case_ex(
                     "app": target_app,
                     "app_name": "目標所在 app",
                     "title": "下一步目標",
+                    // #42 之後開網址多了一道「這個站在不在她自己的紀錄裡」。
+                    // 這一套問的是**目標畫面的出處**，不是網址政策，所以要讓那道
+                    // 閘門在這裡保持中立：同一個站種進 `focus_events.url`。
+                    "url": OTHER_APP_URL,
                     "text": [OTHER_APP_URL]
                 },
                 // 目標之後還要有一格：目標那一刻如果是 `stream_end`，它就正好落在
@@ -76,6 +90,7 @@ fn run_case_ex(
                     "app": target_app,
                     "app_name": "目標所在 app",
                     "title": "下一步目標",
+                    "url": OTHER_APP_URL,
                     "text": ["他繼續在同一個視窗做事"]
                 }
             ]
@@ -193,7 +208,8 @@ fn run_case_ex(
     std::fs::write(
         &config,
         format!(
-            "[brain]\ncommand = \"python3\"\nargs = [{}]\nreviewer_daily_budget = 40\n",
+            "[brain]\ncommand = \"python3\"\nargs = [{}]\nreviewer_daily_budget = 40\n\
+             [hands]\nurl_open = \"when-you-can-name-the-origin\"\n",
             serde_json::to_string(&script.to_string_lossy()).unwrap()
         ),
     )
@@ -556,6 +572,10 @@ fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, St
                     "app": "chrome.exe",
                     "app_name": "Google Chrome",
                     "title": "下一步目標",
+                    // #42 之後開網址多了一道「這個站在不在她自己的紀錄裡」。
+                    // 這一套問的是**目標畫面的出處**，不是網址政策，所以要讓那道
+                    // 閘門在這裡保持中立：同一個站種進 `focus_events.url`。
+                    "url": OTHER_APP_URL,
                     "text": [OTHER_APP_URL]
                 },
                 {
@@ -563,6 +583,7 @@ fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, St
                     "app": "chrome.exe",
                     "app_name": "Google Chrome",
                     "title": "下一步目標",
+                    "url": OTHER_APP_URL,
                     "text": ["他繼續在同一個視窗做事"]
                 }
             ]
@@ -666,7 +687,8 @@ fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, St
     std::fs::write(
         &config,
         format!(
-            "[brain]\ncommand = \"python3\"\nargs = [{}]\nreviewer_daily_budget = 40\n",
+            "[brain]\ncommand = \"python3\"\nargs = [{}]\nreviewer_daily_budget = 40\n\
+             [hands]\nurl_open = \"when-you-can-name-the-origin\"\n",
             serde_json::to_string(&script.to_string_lossy()).unwrap()
         ),
     )

@@ -22,6 +22,7 @@ pub mod platform;
 pub mod replay_copy;
 pub mod semi_action;
 pub mod target_policy;
+pub mod url_policy;
 
 /// 權限階梯（SPEC §9.1）。
 ///
@@ -325,6 +326,11 @@ pub enum RefusalReason {
     },
     /// 無人值守時，下一步目標沒有一張被承諾引用的畫面可供核對。
     UnattendedTargetHasNoCitedFrame { why: TargetFrameGap },
+    /// 無人值守時，這一步要開的網址過不了他自己選的那道規則（#42）。
+    ///
+    /// **和 `NeverInherited` 是兩回事**：那一類兩種批准來源都擋，這一種
+    /// 只擋票、當場按了就放行——因為他選的就是「按了才算」。
+    UnattendedUrlOriginUnknown { why: UrlOriginGap },
     /// 手上那張核准票是對**另一步**簽的（SPEC §9.7）。
     ApprovalWasForAnotherStep {
         mismatch: semi_action::ApprovalMismatch,
@@ -337,21 +343,21 @@ pub enum RefusalReason {
 /// 測試的 `for why in TargetFrameGap::ALL` 才餵得到它。手寫一份 enum
 /// 再手寫一份 `ALL` 的話，補完 exhaustive match 之後不必動陣列，新
 /// variant 一次都沒被餵進去。
-macro_rules! define_target_frame_gaps {
-    ($(
+macro_rules! define_gaps {
+    ($name:ident { $(
         $(#[$attr:meta])*
         $variant:ident
-    ),+ $(,)?) => {
+    ),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
-        pub enum TargetFrameGap {
+        pub enum $name {
             $(
                 $(#[$attr])*
                 $variant,
             )+
         }
 
-        impl TargetFrameGap {
+        impl $name {
             pub const ALL: [Self; { 0 $(+ { let _ = stringify!($variant); 1 })+ }] = [
                 $(Self::$variant,)+
             ];
@@ -371,7 +377,7 @@ macro_rules! define_target_frame_gaps {
     };
 }
 
-define_target_frame_gaps! {
+define_gaps! { TargetFrameGap {
     NoTargetRecorded,
     Forgotten,
     RowReplaced,
@@ -387,6 +393,62 @@ define_target_frame_gaps! {
     RecordedBeforeAgreedEvidence,
     /// 聯集有這張畫面、交集沒有：只有一個 pass 指過。
     CitedByOnlyOnePass,
+}}
+
+define_gaps! { UrlOriginGap {
+    /// 她還沒問過他。**這不是他說了不要**——兩句話在畫面上必須分得開，
+    /// 否則這個設定自己就犯了「兩種 0」：沒問過和拒絕長得一模一樣。
+    NotAskedYet,
+    /// 他選了「網址要我當場按」。票跑不動它，這是他要的。
+    YouSaidPressItYourself,
+    /// 他選了「說得出來源就可以」，而這個站不在她的紀錄裡。
+    NotInHerRecord,
+    /// 他選了「說得出來源就可以」，而她**根本沒在讀網址**——於是她對每一個
+    /// 網址都答不出來。這跟「這一個網址可疑」是兩件事，句子不可以合併：
+    /// 前者要他去修擷取，後者要他自己看一眼那個網址。
+    SheIsNotReadingUrls,
+    /// 那一串字讀不出一個站名，所以連「你去過嗎」都問不出口。
+    NotAReadableSite,
+}}
+
+impl UrlOriginGap {
+    /// 無人值守時，這一步為什麼沒有開那個網址。**只有這裡寫。**
+    ///
+    /// `host` 只有 [`Self::NotInHerRecord`] 用得到；其他四種給不給都一樣，
+    /// 因為它們講的不是「哪一個站」而是「我為什麼答不出來」。
+    pub fn unattended_message(&self, host: Option<&str>, answer_cmd: &str) -> String {
+        match self {
+            Self::NotAskedYet => format!(
+                "這一步要開一個網址，而我還沒問過你「我一個人在跑的時候，可不可以自己按網址」。\
+                 **這不是你說了不要，是我還沒問**——所以我先不開。要現在回答就跑 `{answer_cmd}`。"
+            ),
+            Self::YouSaidPressItYourself => {
+                "你說過網址要你當場按。這一步是憑授權票跑的，沒有人在鍵盤前面，\
+                 所以我把它擱著等你回來——這是你選的，不是出了什麼事。"
+                    .to_string()
+            }
+            Self::NotInHerRecord => match host {
+                Some(host) => format!(
+                    "你說過我可以自己按網址，條件是我要說得出它從哪來。而這個站（{host}）\
+                     在我自己的紀錄裡從來沒出現過——我只是在螢幕上讀到這串字，\
+                     沒有別的東西替它背書。"
+                ),
+                None => "你說過我可以自己按網址，條件是我要說得出它從哪來。而這個站\
+                         在我自己的紀錄裡從來沒出現過。"
+                    .to_string(),
+            },
+            Self::SheIsNotReadingUrls => {
+                "你說過我可以自己按網址，條件是我要說得出它從哪來。**但我現在根本沒在讀網址**，\
+                 所以我對每一個網址都說不出來源——這不是這一個網址可疑，是我這一整條路沒在跑。"
+                    .to_string()
+            }
+            Self::NotAReadableSite => {
+                "你說過我可以自己按網址，條件是我要說得出它從哪來。而這一串字我讀不出一個站名，\
+                 所以我連「這是不是你去過的地方」都問不出口。"
+                    .to_string()
+            }
+        }
+    }
 }
 
 impl TargetFrameGap {
@@ -466,6 +528,13 @@ pub enum RefusalBucket {
     Pulled,
     /// 票的五維不涵蓋這一步。放寬 `--apps` / `--allow` / `--minutes` 有用。
     OutsideGrant,
+    /// 她還沒問過他那個網址問題。**一個動作就全部解決**（回答它），所以它
+    /// 不可以跟下面那一格併在一起——那一格的下一步是「你自己看一眼再按」，
+    /// 對這一格來說是一句沒有用的話。
+    UrlPolicyNotAnswered,
+    /// 這一步要開的網址過不了他自己選的那道規則（#42）。放寬 grant 沒有用，
+    /// 當場按或去修擷取才有用——所以它不可以和 `OutsideGrant` 合併。
+    UrlOriginUnknown,
     /// 放寬 grant 沒有用；要做只能由人在終端機看過後當場按。
     ///
     /// 這一格裝「目標 fact 上記了畫面編號、但兩個 pass 沒有都指過它」
@@ -530,6 +599,13 @@ impl RefusalReason {
                     RefusalBucket::TargetNoLongerThere
                 }
             },
+            Self::UnattendedUrlOriginUnknown { why } => match why {
+                UrlOriginGap::NotAskedYet => RefusalBucket::UrlPolicyNotAnswered,
+                UrlOriginGap::YouSaidPressItYourself
+                | UrlOriginGap::NotInHerRecord
+                | UrlOriginGap::SheIsNotReadingUrls
+                | UrlOriginGap::NotAReadableSite => RefusalBucket::UrlOriginUnknown,
+            },
             Self::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
             Self::NeedsLivePress { .. } => RefusalBucket::NeedsALivePressThisRun,
             Self::ApprovalWasForAnotherStep { .. } => RefusalBucket::ShownStepMismatch,
@@ -541,7 +617,7 @@ impl RefusalReason {
 
     /// 非 `UnattendedTargetHasNoCitedFrame` 的種數 + [`TargetFrameGap::COUNT`]。
     /// 測試把「每種各餵一次」綁在這個數字和 [`Self::index`] 上。
-    pub const KIND_COUNT: usize = 8 + TargetFrameGap::COUNT;
+    pub const KIND_COUNT: usize = 8 + TargetFrameGap::COUNT + UrlOriginGap::COUNT;
 
     /// 0..KIND_COUNT-1。match 沒有 `_`：漏一種編不過。
     /// `UnattendedTargetHasNoCitedFrame` 占 6..6+COUNT-1，所以加一種
@@ -557,6 +633,7 @@ impl RefusalReason {
             Self::UnattendedTargetHasNoCitedFrame { why } => 6 + why.index(),
             Self::ApprovalWasForAnotherStep { .. } => 6 + TargetFrameGap::COUNT,
             Self::HandsPulled { .. } => 7 + TargetFrameGap::COUNT,
+            Self::UnattendedUrlOriginUnknown { why } => 8 + TargetFrameGap::COUNT + why.index(),
         }
     }
 
@@ -585,6 +662,11 @@ impl RefusalReason {
             Self::NotCoveredByGrant { rejection } => rejection.message().to_string(),
             Self::UnattendedTargetHasNoCitedFrame { why } => {
                 why.unattended_message(None, None, None)
+            }
+            Self::UnattendedUrlOriginUnknown { why } => {
+                // 這裡不帶 host：和上面那一行同一個理由，id 與 host 由 `ops.rs`
+                // 在它拿得到的地方接進去。同一支方法，兩句話不會互相打架。
+                why.unattended_message(None, "sister url-policy")
             }
             Self::ApprovalWasForAnotherStep { mismatch } => mismatch.message(),
             Self::HandsPulled { since_ms } => match since_ms {
@@ -1059,6 +1141,15 @@ mod tests {
                 },
                 RefusalReason::ApprovalWasForAnotherStep { .. } => RefusalBucket::ShownStepMismatch,
                 RefusalReason::HandsPulled { .. } => RefusalBucket::Pulled,
+                // 分兩格的理由是「下一步」：沒問過的話，回答一次就全部解決；
+                // 其他四種要他一步一步自己看，回答設定救不了它們。
+                RefusalReason::UnattendedUrlOriginUnknown { why } => match why {
+                    UrlOriginGap::NotAskedYet => RefusalBucket::UrlPolicyNotAnswered,
+                    UrlOriginGap::YouSaidPressItYourself
+                    | UrlOriginGap::NotInHerRecord
+                    | UrlOriginGap::SheIsNotReadingUrls
+                    | UrlOriginGap::NotAReadableSite => RefusalBucket::UrlOriginUnknown,
+                },
             }
         }
 
@@ -1090,6 +1181,9 @@ mod tests {
             ),
         });
         every_reason.push(RefusalReason::HandsPulled { since_ms: Some(1) });
+        for why in UrlOriginGap::ALL {
+            every_reason.push(RefusalReason::UnattendedUrlOriginUnknown { why });
+        }
         let mut seen = [false; RefusalReason::KIND_COUNT];
         for reason in &every_reason {
             let i = reason.index();
@@ -1113,6 +1207,37 @@ mod tests {
             every_reason.len(),
             RefusalReason::KIND_COUNT,
             "筆數必須等於編號個數"
+        );
+    }
+
+    /// 五種不開網址的理由，五句不同的話。合併任何兩種，這一條要紅。
+    ///
+    /// 最要緊的是 `NotAskedYet` 和 `YouSaidPressItYourself`：一個是「我還沒問」，
+    /// 一個是「你說了不要」。它們印成同一句的那天，一個從來沒被問過的人會以為
+    /// 這是他自己選的——這個設定就自己犯了它要修的那顆「兩種 0」。
+    #[test]
+    fn each_url_origin_gap_has_its_own_refusal_message() {
+        let msgs: Vec<String> = UrlOriginGap::ALL
+            .iter()
+            .map(|why| RefusalReason::UnattendedUrlOriginUnknown { why: *why }.message())
+            .collect();
+        assert_eq!(msgs.len(), 5, "UrlOriginGap::ALL 沒有餵到五種");
+        for (i, a) in msgs.iter().enumerate() {
+            for (j, b) in msgs.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "UrlOriginGap 第 {i} 與第 {j} 種印出同一句話：{a}");
+                }
+            }
+        }
+        let not_asked = &msgs[UrlOriginGap::NotAskedYet.index()];
+        assert!(
+            not_asked.contains("還沒問") && not_asked.contains("不是你說了不要"),
+            "沒問過那一句必須同時說出「我還沒問」和「這不是你說了不要」：{not_asked}"
+        );
+        let he_answered = &msgs[UrlOriginGap::YouSaidPressItYourself.index()];
+        assert!(
+            !he_answered.contains("還沒問"),
+            "他已經答過了，這一句不可以說我還沒問：{he_answered}"
         );
     }
 

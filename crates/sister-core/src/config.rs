@@ -20,6 +20,24 @@ pub struct Config {
     pub shell: ShellConfig,
     pub brain: BrainConfig,
     pub gatekeeper: GatekeeperConfig,
+    pub hands: HandsConfig,
+}
+
+/// 她的手要遵守的規則裡，**由他選、而不是由產品決定**的那些。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HandsConfig {
+    /// 「我一個人在跑的時候，可不可以自己按網址？」——他的答案（PHASES #42）。
+    ///
+    /// **`None` 是「還沒問過」，不是預設值。** 這一欄永遠不可以在 `Default`
+    /// 裡被填成某個答案：填了就等於產品安靜地替他選了一邊，而「不要替他選」
+    /// 正是這個設定存在的唯一理由。沒有這一欄的時候她**不開**網址，但她講的
+    /// 是「我還沒問你」，不是「你說了不要」——兩句話在畫面上分得開。
+    ///
+    /// `skip_serializing_if`：沒答過就不要在設定檔裡留下一行 `url_open =`，
+    /// 否則下一個讀設定檔的人會以為那是一個有預設值的開關。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url_open: Option<sister_hands::url_policy::UrlOpenAnswer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

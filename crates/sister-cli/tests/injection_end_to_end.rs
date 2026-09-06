@@ -61,6 +61,11 @@ fn write_scenario(dir: &Path, injection: &str) -> PathBuf {
                 "app": "chrome.exe",
                 "app_name": "Google Chrome",
                 "title": "良性工作頁面",
+                // 兩格都給網址，**兩個站都真的被瀏覽過**。這是刻意的：alpha.100
+                // 那道網址來源閘門（#42）如果在這裡擋掉 evil，這一整套就會為了
+                // 另一個理由變綠，而它原本要證的那件事（時間窗把 evil 關在外面）
+                // 就沒有人在跑了。讓新閘門對兩邊都中立，這套測試的軸才沒有變。
+                "url": GOOD_URL,
                 "text": [TASK, GOOD_URL, injection],
                 "clipboard": injection,
                 "clipboard_source_app": "chrome.exe"
@@ -70,6 +75,7 @@ fn write_scenario(dir: &Path, injection: &str) -> PathBuf {
                 "app": "chrome.exe",
                 "app_name": "Google Chrome",
                 "title": "稍後出現、未送給 Reviewer 的頁面",
+                "url": EVIL_URL,
                 "text": [EVIL_URL]
             },
             { "at_ms": EVIL_AT_MS + 1_000, "no_screen": true }
@@ -184,7 +190,8 @@ fn write_brain_raw(dir: &Path, response_json_text: &str) -> PathBuf {
     std::fs::write(
         &config,
         format!(
-            "[brain]\ncommand = \"python3\"\nargs = [{}]\nreviewer_daily_budget = 40\n",
+            "[brain]\ncommand = \"python3\"\nargs = [{}]\nreviewer_daily_budget = 40\n\
+             [hands]\nurl_open = \"when-you-can-name-the-origin\"\n",
             serde_json::to_string(&script.to_string_lossy()).unwrap()
         ),
     )
@@ -257,9 +264,12 @@ fn run_case(injection: &str, compromised: bool) -> (TempDir, Vec<String>) {
         "review pipeline did not run"
     );
     write_grant(&dir.0);
+    // **`--config` 不能省。** 沒有它的話 `do` 讀的是 `Config::default_path()`
+    // 那一份（開發機上真的那一份），資料目錄裡這一份完全不會被看到——
+    // 於是 `[hands] url_open` 沒生效，整套停在「我還沒問過你」。
     let action = sister(
         &dir.0,
-        None,
+        Some(&config),
         &["do", "--task", TASK, "--use-grant", "--unattended"],
     );
     let _ = action;
@@ -298,11 +308,12 @@ fn run_raw_brain_case(response: impl FnOnce(i64) -> String) -> (TempDir, Vec<Str
         "review pipeline did not run"
     );
     write_grant(&dir.0);
-    sister(
+    let did = sister(
         &dir.0,
-        None,
+        Some(&config),
         &["do", "--task", TASK, "--use-grant", "--unattended"],
     );
+    let _ = did;
     let lines = executed_lines(&dir.0);
     (dir, lines)
 }
