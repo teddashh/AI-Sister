@@ -474,7 +474,7 @@ enum Command {
         /// 印出這一刻真的會送出去的那段字，一個字都不送。
         #[arg(long)]
         dry_run: bool,
-        /// 停下來的時候發出訊號（終端機響一聲；Windows 再讓工作列那顆按鈕閃）。
+        /// 停下來的時候發出訊號（終端機響一聲；Windows 再讓工作列那顆按鈕閃、跳一則系統通知）。
         #[arg(long)]
         notify: bool,
     },

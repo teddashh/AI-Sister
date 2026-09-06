@@ -461,6 +461,86 @@ pub enum DeadlineLastRound {
     BudgetBlocked { used: u32, limit: u32 },
 }
 
+/// `--notify` 那一下，那一則系統通知**實際上**發生了什麼。
+///
+/// **「終端機上沒有多出一行」和「通知送出去了」不可以長得一樣。** 這支旗標的
+/// 整個前提就是他當時不在螢幕前面；他回來讀終端機的時候，唯一能告訴他「我剛才
+/// 怎麼叫過你」的就是這幾個字。所以五種結果各有一句話，**包括成功那一種**——
+/// 少了那一句，「通知正常送出」和「那段程式碼根本沒跑到」在畫面上是同一種沉默。
+///
+/// 而送出去了**不等於**他看到了：殼層收下之後那則通知會不會真的畫出來、會不會
+/// 被專注輔助（Focus Assist）安靜收走，`Shell_NotifyIconW` 一個字都不會回報，
+/// 它照樣回 `TRUE`。所以那一句話只敢說「我送了」。
+///
+/// **這五句話一個字都不提工作列閃爍，那是刻意的。** 閃爍掛在
+/// `GetConsoleWindow()` 上，系統通知掛在另外一個自己建的隱藏視窗上——兩條
+/// 通道各有各的失敗條件。而且 `FlashWindowEx` 的回傳值是「呼叫之前那扇窗的
+/// 狀態」，**不是成功與否**，所以就算想問也問不到。順手補一句「工作列的閃爍
+/// 照發」讀起來很體貼，但那是**猜**得剛好常常對。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemNotice {
+    /// 不是 Windows：這個組建沒有工作列閃爍，也沒有系統通知。
+    NotOnThisBuild,
+    /// 這一趟刻意不送——她是中途出錯停下來的，不是一場盯完的收尾。
+    NotForThisEnding,
+    /// 是 Windows，但我沒能替它開一個掛得上去的視窗。
+    NoHost,
+    /// 視窗有了，Windows 的殼層沒有收下。
+    Refused,
+    /// 交出去了。這是「我送了」，不是「你收到了」。
+    HandedOver,
+}
+
+impl SystemNotice {
+    /// 多一種結果，`_every_one_of_them` 那個窮舉 `match` 就編不過。
+    ///
+    /// **但它逼你做的只是「看這個陣列一眼」，不是「把它補起來」。** r40 實測：
+    /// 加第五個變體、順手補上 `_every_one_of_them` 和 `line()` 兩臂、`ALL`
+    /// 照樣停在四格，`cargo check -p sister-core` 是**綠的**。這個 repo 別的
+    /// 地方也記著同一句話（見 `tests/current_guess_order.rs` 那條斷言訊息：
+    /// 「窮舉 match 只逼你寫出那一句話，逼不出你去跑它」）。
+    ///
+    /// 這裡是 `pub` 而不是 `#[cfg(test)]`：`sister-cli` 那條釘呼叫端的測試要用
+    /// 它，而它在別的 crate 裡編的時候 `cfg(test)` 是關的。
+    pub const ALL: [Self; 5] = {
+        const fn _every_one_of_them(n: SystemNotice) -> u8 {
+            match n {
+                SystemNotice::NotOnThisBuild => 0,
+                SystemNotice::NotForThisEnding => 1,
+                SystemNotice::NoHost => 2,
+                SystemNotice::Refused => 3,
+                SystemNotice::HandedOver => 4,
+            }
+        }
+        [
+            Self::NotOnThisBuild,
+            Self::NotForThisEnding,
+            Self::NoHost,
+            Self::Refused,
+            Self::HandedOver,
+        ]
+    };
+
+    /// 收尾那一聲之後補的那一行：我剛才實際上把那一則通知怎麼了。
+    pub fn line(self) -> &'static str {
+        match self {
+            Self::NotOnThisBuild => {
+                "（沒有系統通知：那是 Windows 才有的，這個組建只有終端機那一聲。）"
+            }
+            Self::NotForThisEnding => {
+                "（沒有跳系統通知：這一趟是中途出錯停下來的，不是一場盯完的收尾。）"
+            }
+            Self::NoHost => "（那一則系統通知**沒有送出去**：我沒能替它開一個掛得上去的視窗。）",
+            Self::Refused => {
+                "（那一則系統通知**沒有送出去**：Windows 的殼層沒有收下它——它有可能正在重新啟動。）"
+            }
+            Self::HandedOver => {
+                "（我把一則系統通知交給 Windows 了。它有沒有真的跳出來、有沒有被專注輔助安靜收走，Windows 都不會回報——所以我只敢說我送了，不敢說你看到了。）"
+            }
+        }
+    }
+}
+
 impl WatchEnd {
     /// 使用者有要求時，真正跑過的每一種收尾都要發訊號。
     ///
@@ -481,9 +561,10 @@ impl WatchEnd {
     /// 開跑時如實說明這個組建能送出哪一種訊號。
     pub fn notification_notice(windows: bool) -> &'static str {
         if windows {
-            "停下來時我會讓工作列那顆按鈕閃一下、響一聲——回來看螢幕上的結果。"
+            "停下來時我會讓工作列那顆按鈕閃到你回來為止、跳一則系統通知、響一聲——回來看螢幕上的結果。\
+             （專注輔助開著的話那則通知會被安靜收走，現在關掉還來得及。）"
         } else {
-            "停下來時我會在終端機響一聲，回來看螢幕上的結果（工作列閃爍是 Windows 才有的，這個組建沒有）。"
+            "停下來時我會在終端機響一聲，回來看螢幕上的結果（工作列閃爍和系統通知是 Windows 才有的，這個組建沒有）。"
         }
     }
 
@@ -1756,5 +1837,142 @@ mod tests {
         let other = WatchEnd::notification_notice(false);
         assert!(windows.contains("工作列那顆按鈕閃"), "{windows}");
         assert!(other.contains("這個組建沒有"), "{other}");
+    }
+    /// **兩種結果共用同一句話，等於把它們合併成一種。**
+    ///
+    /// 這五句話唯一的工作就是分辨五種結果，而錯配它們不會編不過。裡面有兩種
+    /// 是失敗、一種是成功、兩種是「這一趟沒有那條通道」——把任兩種併起來，
+    /// 正好又長出這個 repo 一直在修的那顆「兩種 0」。
+    #[test]
+    fn no_two_outcomes_are_allowed_to_say_the_same_thing() {
+        let mut seen = std::collections::HashSet::new();
+        for n in SystemNotice::ALL {
+            let line = n.line();
+            assert!(!line.trim().is_empty(), "{n:?} 一句話都沒有");
+            assert!(seen.insert(line), "{n:?} 和前面某一種共用同一句話：{line}");
+        }
+        // 不是拿 `ALL.len()` 來比——那樣寫的話從 `ALL` 裡刪掉一格會讓兩邊
+        // 一起變小，永遠相等。這裡要的是「五種結果**都**在陣列裡」，而陣列是
+        // 手寫的（見 `ALL` 頭上那段：窮舉 match 逼不出你去補它）。
+        assert_eq!(seen.len(), 5, "`ALL` 少了一格，底下每一條都會少測一種");
+    }
+
+    /// **五句話一個字都不提工作列閃爍。**
+    ///
+    /// `FlashWindowEx` 的回傳值是「呼叫之前那扇窗的狀態」，不是成功與否，而且
+    /// 它掛的是主控台視窗、通知掛的是另一扇自己建的窗——這裡拿不到閃爍的答案。
+    /// 順手補一句「工作列的閃爍照發」讀起來很體貼，實際上是替沒量到的事作保。
+    ///
+    /// **這一條要跑滿五句**：只查兩句的話，成功那一句尾巴接一個
+    /// 「（工作列那顆按鈕也一直替你閃著。）」照樣全綠。
+    #[test]
+    fn not_one_of_the_lines_vouches_for_the_taskbar_flash() {
+        for n in SystemNotice::ALL {
+            let line = n.line();
+            assert!(
+                !line.contains("工作列"),
+                "{n:?} 替它拿不到的事作了保：{line}"
+            );
+            assert!(!line.contains("閃"), "{n:?} 替它拿不到的事作了保：{line}");
+        }
+    }
+
+    /// 成功那一句只敢說「我送了」，因為 Windows 只答得出這麼多。
+    #[test]
+    fn the_success_line_says_i_sent_it_not_you_saw_it() {
+        let ok = SystemNotice::HandedOver.line();
+        // **釘開頭**，不只是釘「有沒有免責」。只查免責在不在的話，前面再多加
+        // 一句「那一則系統通知已經送達你的通知中心了。」照樣全綠——他讀到的
+        // 第一個斷言就會是 Windows 答不出來的那一個。
+        assert!(
+            ok.starts_with("（我把一則系統通知交給 Windows 了。"),
+            "開頭那句斷言變了：{ok}"
+        );
+        assert!(ok.contains("我只敢說我送了"), "{ok}");
+        assert!(ok.contains("不敢說你看到了"), "{ok}");
+        for overclaim in ["通知你了", "送達", "已經看到", "確定"] {
+            assert!(!ok.contains(overclaim), "冒充成事實了（{overclaim}）：{ok}");
+        }
+        // 專注輔助要提，但**不准講成唯一的成因**——沒跳出來的原因不只那一個
+        // （殼層畫不畫得出來我們也不知道），而那一句話是他唯一的線索。
+        assert!(ok.contains("專注輔助"), "{ok}");
+        assert!(
+            ok.contains("有沒有真的跳出來"),
+            "只列了他自己能排除的那一個成因：{ok}"
+        );
+    }
+
+    /// 沒有那條通道的兩種，不准印得像它試過了。
+    #[test]
+    fn the_endings_without_a_toast_do_not_pretend_they_tried() {
+        let absent = SystemNotice::NotOnThisBuild.line();
+        // `starts_with` 釘的是**第一個斷言**。只用黑名單的話，
+        // 「我試著送一則系統通知，沒成功：…」會從每一根針之間穿過去。
+        assert!(absent.starts_with("（沒有系統通知："), "{absent}");
+        assert!(absent.contains("這個組建只有終端機那一聲"), "{absent}");
+
+        let skipped = SystemNotice::NotForThisEnding.line();
+        assert!(skipped.starts_with("（沒有跳系統通知："), "{skipped}");
+        assert!(skipped.contains("中途出錯"), "{skipped}");
+
+        for line in [absent, skipped] {
+            // 這兩格是「這一趟沒有那條通道」，不是「試過了沒成功」。混進去的話，
+            // 在 Linux 上跑一趟會讀起來像 Windows 上壞掉了。
+            assert!(!line.contains("沒有送出去"), "{line}");
+            assert!(!line.contains("試"), "{line}");
+            assert!(!line.contains("交給 Windows"), "{line}");
+        }
+    }
+
+    /// **「沒送出去」有兩個成因，而它們要他做的事不一樣。**
+    ///
+    /// 殼層沒收下，是那台機器的事（工作列可能正在重啟，重跑一次就好）；視窗
+    /// 開不起來，是這支程式自己的事（該回報的 bug）。兩種併成一句話就等於叫
+    /// 他去查錯的地方。
+    #[test]
+    fn the_two_ways_of_not_sending_it_name_different_causes() {
+        let refused = SystemNotice::Refused.line();
+        let no_host = SystemNotice::NoHost.line();
+        for line in [refused, no_host] {
+            assert!(line.contains("沒有送出去"), "{line}");
+        }
+        assert!(refused.contains("殼層沒有收下"), "{refused}");
+        assert!(
+            refused.contains("重新啟動"),
+            "沒告訴他重跑一次可能就好：{refused}"
+        );
+        assert!(no_host.contains("沒能替它開"), "{no_host}");
+        assert!(
+            !no_host.contains("殼層"),
+            "把自家的 bug 講成殼層的事：{no_host}"
+        );
+    }
+
+    /// 開跑那一句要講一件他**現在**還做得到的事。
+    #[test]
+    fn the_startup_notice_names_the_thing_he_can_still_turn_off() {
+        let windows = WatchEnd::notification_notice(true);
+        assert!(windows.contains("跳一則系統通知"), "{windows}");
+        // 這一句唯一的價值在於時機：他此刻人就在終端機前面，讀完可以去把專注
+        // 輔助關掉再走開。留到收尾那一行才講，就只是一句藉口了。
+        assert!(windows.contains("專注輔助"), "{windows}");
+        assert!(windows.contains("還來得及"), "{windows}");
+        // **閃多久是這支旗標的生死線**，而 `FLASHW_TIMERNOFG` 是閃到那扇窗被叫
+        // 到前景為止。說成「閃一下」等於描述了 `WINDOWS-CHECKLIST` 判紅的那個
+        // 行為（閃三下就停 ≈ 沒通知，而且更糟：他以為他收得到）。
+        assert!(windows.contains("閃到你回來為止"), "{windows}");
+        assert!(!windows.contains("閃一下"), "{windows}");
+
+        // 反面：開跑那句既然承諾了系統通知，非 Windows 的組建就得當場說它沒有。
+        // **針要取整個否定片語**——只查「系統通知」四個字的話，一句
+        // 「…響一聲、跳一則系統通知，（工作列閃爍是 Windows 才有的…）」照樣
+        // 全綠，而那是一句對著沒有通知中心的機器許下的承諾。
+        let other = WatchEnd::notification_notice(false);
+        assert!(
+            other.contains("工作列閃爍和系統通知是 Windows 才有的，這個組建沒有"),
+            "{other}"
+        );
+        assert!(!other.contains("跳一則系統通知"), "{other}");
+        assert!(!other.contains("專注輔助"), "{other}");
     }
 }
