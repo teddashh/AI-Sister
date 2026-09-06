@@ -246,8 +246,12 @@ impl Backend for ReplayBackend {
             // 沒有 hook、沒有 `GetLastInputInfo`，`Unknown` 那一列講的和
             // 「沒有列」是同一件事（`human_motion` 兩種都走 `NotMeasured`），
             // 但代價不一樣——重播沒有視窗批次，每個 tick 都會寫一列，一分鐘
-            // 一百多列；而且 `input_health` 是 `SESSION_CHILDREN`，那些列會
-            // 讓 `delete_empty_sessions` 從此清不掉重播出來的 session。
+            // 一百多列，而那一百多列一個讀得到的地方都沒有。
+            //
+            // （`input_health` 帶著 `session_id`，所以這裡曾經還有第二個理由：
+            // 那些列會讓 `delete_empty_sessions` 從此清不掉重播出來的 session。
+            // 那條已經在 `retention::content_only` 修掉了——整張表都不算內容，
+            // 而且會跟著那一場一起走。留在這裡當紀錄，別再拿它當理由。）
             self.input_since = ts;
             return Ok(None);
         }

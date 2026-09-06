@@ -2069,6 +2069,36 @@ pub mod act {
         NotMeasured,
     }
 
+    impl HumanMotion {
+        /// 四種全部。**底下那兩條「每一種都要講不一樣的話」靠它站著。**
+        ///
+        /// 那兩條以前寫的是陣列字面量，而**陣列字面量不會因為 enum 多一種變體
+        /// 而編不過**。這一版加 `HookDown` 的時候就是這樣：兩個迴圈原本停在三
+        /// 種，是手動補進去的——下一次沒補的人不會收到任何警告，而那兩條會繼
+        /// 續綠著，少測的正好是新加的那一格。
+        ///
+        /// 和 [`Emptiness::ALL`] 是同一根釘子，那邊記著同一件事真的發生過
+        /// （`Barren` 加進來的那一版）。
+        #[cfg(test)]
+        const ALL: [Self; 4] = {
+            // 這支函式只有一個用途：多一種變體的時候讓底下那一列在這裡編不過。
+            const fn _every_one_of_them(m: HumanMotion) -> u8 {
+                match m {
+                    HumanMotion::HumanActive => 0,
+                    HumanMotion::NobodyTouched => 1,
+                    HumanMotion::HookDown => 2,
+                    HumanMotion::NotMeasured => 3,
+                }
+            }
+            [
+                Self::HumanActive,
+                Self::NobodyTouched,
+                Self::HookDown,
+                Self::NotMeasured,
+            ]
+        };
+    }
+
     fn human_motion(
         metrics: Option<sister_core::model::InputMetrics>,
         health: Option<sister_core::model::InputListening>,
@@ -3985,12 +4015,7 @@ pub mod act {
         /// 進來的那一版就是這樣，它和「沒人碰」只差在沒有人比過。
         #[test]
         fn ted_all_four_motions_say_different_things() {
-            let all = [
-                HumanMotion::HumanActive,
-                HumanMotion::NobodyTouched,
-                HumanMotion::HookDown,
-                HumanMotion::NotMeasured,
-            ];
+            let all = HumanMotion::ALL;
             for (i, a) in all.iter().enumerate() {
                 for b in &all[i + 1..] {
                     assert_ne!(
@@ -4006,12 +4031,7 @@ pub mod act {
         /// 針取的是**否定子句本身**，不是產品那一整句的手抄本。
         #[test]
         fn ted_active_wording_carries_an_explicit_disclaimer() {
-            let all = [
-                HumanMotion::HumanActive,
-                HumanMotion::NobodyTouched,
-                HumanMotion::HookDown,
-                HumanMotion::NotMeasured,
-            ];
+            let all = HumanMotion::ALL;
             for motion in all {
                 let says = target_drive_sentence(None, motion);
                 for forbidden in ["所以", "就是", "就是你", "你自己", "一定是", "就是她"]
