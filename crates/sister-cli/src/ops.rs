@@ -8904,6 +8904,39 @@ pub mod watch {
             );
         }
 
+        /// **另一半：真的盯完了的那一種，要**。
+        ///
+        /// 上面那條釘的是「中途死掉 ⟹ 不送」。判準寫成「X 就跳過」的時候，我
+        /// 會自動去驗 `X ⟹ 該跳過`，而會說謊的永遠是另一邊：`¬X ⟹ 不該跳過`。
+        /// 這一條就是那另一邊——沒有它的話，把收尾那一路的 `Toast::Send` 改成
+        /// `Toast::SkipThisEnding` **全部測試都是綠的**（實測：r40 的 M5 活下來
+        /// 了），而後果是這一整輪加的通道在 Windows 上安靜地永遠不開。
+        ///
+        /// Linux 上抓不到這一刀的理由也在這裡：`#[cfg(not(windows))]` 那支
+        /// `platform_notify` 根本不看那個參數，兩邊都回 `NotOnThisBuild`。所以
+        /// 要釘的是**傳下去的那個參數**，不是印出來的那句話。
+        #[test]
+        fn the_finished_run_asks_for_a_toast() {
+            let (tmp, config) = prepared("watch-notify-asks", "完成", true);
+            let mut ticks = [100_000, 100_000].into_iter();
+            let mut out = Vec::new();
+            let mut asked = Vec::new();
+            run_with_signal(
+                &tmp.0,
+                &config,
+                &opts(true),
+                &mut || ticks.next().expect("fake clock ran out"),
+                &mut |_| {},
+                &mut out,
+                &mut |toast| {
+                    asked.push(toast);
+                    SystemNotice::HandedOver
+                },
+            )
+            .expect("run");
+            assert_eq!(asked, [Toast::Send], "一場盯完的收尾沒有要那一則系統通知");
+        }
+
         /// **她死掉的時候那一聲也要響，不然沉默會被讀成「還在跑」。**
         ///
         /// 五種正常收尾各自都響過了，第六條出路是中途炸掉。`--notify` 的前提
