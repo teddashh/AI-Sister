@@ -391,6 +391,7 @@ fn target_on_a_frame_the_card_cited_still_executes_unattended() {
 fn dry_run_drive_observation(
     label: &str,
     metrics: Option<InputMetrics>,
+    health: Option<sister_core::model::InputListening>,
     with_previous: bool,
 ) -> String {
     let (dir, _, _) = run_case(label, "chrome.exe", false);
@@ -406,6 +407,11 @@ fn dry_run_drive_observation(
         metrics.ts_end = target.ts;
         let session = db.start_session("drive-observation", "test").unwrap();
         db.insert_input(session, &metrics).unwrap();
+    }
+    if let Some(health) = health {
+        let session = db.start_session("drive-health", "test").unwrap();
+        db.insert_input_health(session, target.ts, target.ts + 1, health)
+            .unwrap();
     }
     if with_previous {
         ActionLog::in_data_dir(&dir)
@@ -439,25 +445,47 @@ fn dry_run_drive_observation(
 }
 
 #[test]
-fn real_db_wiring_prints_all_three_input_states_during_dry_run() {
+fn real_db_wiring_prints_all_four_input_states_during_dry_run() {
     let active = dry_run_drive_observation(
         "drive-active",
         Some(InputMetrics {
             clicks: 1,
             ..Default::default()
         }),
+        None,
         false,
     );
-    let zero = dry_run_drive_observation("drive-zero", Some(InputMetrics::default()), false);
-    let missing = dry_run_drive_observation("drive-missing", None, false);
+    let idle = dry_run_drive_observation(
+        "drive-idle",
+        None,
+        Some(sister_core::model::InputListening::IdleConfirmed),
+        false,
+    );
+    let down = dry_run_drive_observation(
+        "drive-down",
+        None,
+        Some(sister_core::model::InputListening::NotListening),
+        false,
+    );
+    let missing = dry_run_drive_observation("drive-missing", None, None, false);
+    // 一列全 0 的 `input_metrics`：alpha.97 拿它講「一下都沒有動」，而那一列
+    // 分不出「真的沒人動」和「我沒在聽」。（寫得出那種列的只有重播／匯入語
+    // 料——alpha.97 的 Windows 那一路四個計數全 0 就不出列。）這一格是這一版
+    // 翻面的那一格，唯一釘住它的斷言在改動裡被**換掉**了，所以在真出口上補
+    // 回來。
+    let zero = dry_run_drive_observation("drive-zero", Some(InputMetrics::default()), None, false);
     assert!(active.contains("你在動鍵盤滑鼠"), "{active}");
-    assert!(zero.contains("一下都沒有動"), "{zero}");
+    assert!(idle.contains("一下都沒有動"), "{idle}");
+    assert!(down.contains("不能當成沒人動"), "{down}");
+    assert!(!down.contains("一下都沒有動"), "{down}");
     assert!(missing.contains("我分不出是哪一種"), "{missing}");
+    assert!(!zero.contains("一下都沒有動"), "{zero}");
+    assert!(zero.contains("我分不出是哪一種"), "{zero}");
 }
 
 #[test]
 fn drive_prefix_is_measured_from_target_fact_time_not_command_time() {
-    let stdout = dry_run_drive_observation("drive-target-time", None, true);
+    let stdout = dry_run_drive_observation("drive-target-time", None, None, true);
     assert!(stdout.contains("她的上一步就在這之前 5 秒"), "{stdout}");
 }
 

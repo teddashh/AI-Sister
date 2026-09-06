@@ -8,7 +8,7 @@
 //! 不重試、不阻塞。感官層停下來的代價遠大於少一筆脈絡。
 
 use anyhow::Result;
-use sister_core::model::{ClipboardEvent, FocusSnapshot, InputMetrics, Millis, OcrBlock};
+use sister_core::model::{ClipboardEvent, FocusSnapshot, InputTick, Millis, OcrBlock};
 use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
@@ -112,7 +112,7 @@ pub trait ClipboardSource {
 ///
 /// 實作者的鐵律：**永遠不記錄按鍵內容**，只記節奏與計數。
 pub trait InputSource {
-    fn drain(&mut self, ts: Millis) -> Result<Option<InputMetrics>>;
+    fn drain(&mut self, ts: Millis) -> Result<Option<InputTick>>;
 
     /// 距離使用者最後一次碰鍵盤滑鼠過了多久。`None` = 這個平台答不出來。
     ///
@@ -337,7 +337,7 @@ pub trait Backend {
     fn skip_clipboard(&mut self, ts: Millis) {
         let _ = ts;
     }
-    fn drain_input(&mut self, ts: Millis) -> Result<Option<InputMetrics>>;
+    fn drain_input(&mut self, ts: Millis) -> Result<Option<InputTick>>;
     /// 見 [`InputSource::idle_ms`]。
     fn idle_ms(&mut self) -> Option<u64> {
         None
@@ -410,7 +410,7 @@ where
     fn skip_clipboard(&mut self, ts: Millis) {
         self.clipboard.skip(ts)
     }
-    fn drain_input(&mut self, ts: Millis) -> Result<Option<InputMetrics>> {
+    fn drain_input(&mut self, ts: Millis) -> Result<Option<InputTick>> {
         self.input.drain(ts)
     }
     fn idle_ms(&mut self) -> Option<u64> {
@@ -461,7 +461,12 @@ impl ClipboardSource for NullClipboard {
 
 pub struct NullInput;
 impl InputSource for NullInput {
-    fn drain(&mut self, _ts: Millis) -> Result<Option<InputMetrics>> {
+    fn drain(&mut self, _ts: Millis) -> Result<Option<InputTick>> {
+        // 和隔壁三個 Null 一樣：降級是安靜的。回一列 `unknown` 的話，每個
+        // tick 都會多一列**零長度**（`ts_start == ts_end`）的 input_health
+        // ——`input_health_covering` 用的是半開區間（`ts_end > ?1`），對
+        // `ts_start == ts_end` 恆假，所以那種列**一個讀得到的地方都沒有**；
+        // 而 `forget` 的重疊刪除和 `prune` 照樣要走過它。純成本。
         Ok(None)
     }
 }

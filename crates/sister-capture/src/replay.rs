@@ -239,9 +239,19 @@ impl Backend for ReplayBackend {
         }))
     }
 
-    fn drain_input(&mut self, ts: Millis) -> Result<Option<InputMetrics>> {
+    fn drain_input(&mut self, ts: Millis) -> Result<Option<sister_core::model::InputTick>> {
         self.advance(ts);
         if self.input_acc == InputMetrics::default() {
+            // 回 `None`，不是一列 `unknown`。**重播沒有作業系統可以問**：
+            // 沒有 hook、沒有 `GetLastInputInfo`，`Unknown` 那一列講的和
+            // 「沒有列」是同一件事（`human_motion` 兩種都走 `NotMeasured`），
+            // 但代價不一樣——重播沒有視窗批次，每個 tick 都會寫一列，一分鐘
+            // 一百多列，而那一百多列一個讀得到的地方都沒有。
+            //
+            // （`input_health` 帶著 `session_id`，所以這裡曾經還有第二個理由：
+            // 那些列會讓 `delete_empty_sessions` 從此清不掉重播出來的 session。
+            // 那條已經在 `retention::content_only` 修掉了——整張表都不算內容，
+            // 而且會跟著那一場一起走。留在這裡當紀錄，別再拿它當理由。）
             self.input_since = ts;
             return Ok(None);
         }
@@ -249,7 +259,12 @@ impl Backend for ReplayBackend {
         m.ts_start = self.input_since;
         m.ts_end = ts;
         self.input_since = ts;
-        Ok(Some(m))
+        Ok(Some(sister_core::model::InputTick {
+            ts_start: m.ts_start,
+            ts_end: m.ts_end,
+            metrics: Some(m),
+            listening: sister_core::model::InputListening::Unknown,
+        }))
     }
 
     fn recognize(&mut self, frame: &RawFrame) -> crate::traits::OcrAttempt {
@@ -355,7 +370,8 @@ mod tests {
         let f = b.focus_snapshot(9500).expect("focus");
         assert_eq!(f.app_id.as_deref(), Some("code.exe"));
 
-        let m = b.drain_input(9500).expect("input").expect("some input");
+        let tick = b.drain_input(9500).expect("input").expect("some input");
+        let m = tick.metrics.expect("metrics");
         assert_eq!(
             m.keystrokes, 52,
             "keystrokes from all elapsed steps accumulate"
@@ -381,12 +397,13 @@ mod tests {
     #[test]
     fn input_drains_to_empty() {
         let mut b = ReplayBackend::new(scenario());
-        let m = b.drain_input(1000).expect("input").expect("some");
+        let tick = b.drain_input(1000).expect("input").expect("some");
+        let m = tick.metrics.expect("metrics");
         assert_eq!(m.keystrokes, 12);
         assert_eq!(m.clicks, 2);
         assert!(
             b.drain_input(2000).expect("input").is_none(),
-            "drained means empty"
+            "重播沒有作業系統可以問，安靜的時候不該寫 input_health"
         );
     }
 

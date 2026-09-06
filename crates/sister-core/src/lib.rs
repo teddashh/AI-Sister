@@ -59,9 +59,9 @@ pub use db::{Db, DbStats, FactRow, FrameContext, SCHEMA_VERSION};
 pub use dedup::{Deduper, FrameVerdict, dhash_gray, dhash_rgb, hamming};
 pub use facts::{ExtractedFact, FactKind, extract};
 pub use model::{
-    ClipboardEvent, ClipboardKind, FocusEvent, FocusKind, FocusSnapshot, FrameCapture,
-    InputMetrics, Millis, OcrBlock, SearchHit, Signal, SourceKind, SystemEvent, SystemKind,
-    TextChunk, now_ms,
+    ClipboardEvent, ClipboardKind, FocusEvent, FocusKind, FocusSnapshot, FrameCapture, HookHealth,
+    InputListening, InputMetrics, InputTick, Millis, OcrBlock, SearchHit, Signal, SourceKind,
+    SystemEvent, SystemKind, TextChunk, classify_quiet_window, now_ms,
 };
 pub use redact::{SecretKind, looks_like_secret};
 

@@ -260,16 +260,22 @@ fn delete_frames_except(
         .context("delete frames")? as u64)
 }
 
-/// 帶著 `session_id` 的那七張表。
+/// 帶著 `session_id` 的那八張表。
 ///
-/// 寫成一份清單而不是七句 SQL：漏掉一張的下場是一列被判定成「空的」然後刪掉，
+/// 寫成一份清單而不是八句 SQL：漏掉一張的下場是一列被判定成「空的」然後刪掉，
 /// 而它其實還有東西指著——外鍵是 `ON` 的，所以那會變成一次整批 rollback。
 /// 新增一張帶 `session_id` 的表卻忘了加進來，也是同一個下場（會很吵，這是對的）。
-const SESSION_CHILDREN: [&str; 7] = [
+///
+/// **這份清單問的是「還有沒有人指著它」，不是「裡面還有沒有內容」。** 那兩個
+/// 問題的答案不一樣：`system_events` 的標籤和整張 `input_health` 都指著
+/// `sessions`，卻都不算她記下來的東西。分開的地方是 [`content_only`]，而分開
+/// 之後那幾列必須有人負責刪——見 [`delete_empty_sessions`] 裡的兩句 DELETE。
+const SESSION_CHILDREN: [&str; 8] = [
     "frames",
     "focus_events",
     "clipboard_events",
     "input_metrics",
+    "input_health",
     "system_events",
     "text_chunks",
     "facts",
@@ -322,22 +328,31 @@ pub(crate) fn delete_empty_sessions(
         Some(_) => "id = ?1",
         None => "(ended_at IS NOT NULL OR id < (SELECT MAX(id) FROM sessions))",
     };
-    // 先把標籤帶走，`sessions` 那一刀才刪得掉——外鍵是 `ON` 的。這兩句用的是
-    // 同一組 `guard AND empty`，所以第一句刪掉的一定是第二句要刪的那幾場；
-    // 而 `empty` 本來就不看標籤，第一句跑完那幾場照樣被選中。
+    // 先把「容器自己的東西」帶走，`sessions` 那一刀才刪得掉——外鍵是 `ON`
+    // 的。有兩種：`system_events` 的那兩列開場／收場標籤，和整張
+    // `input_health`（那是她自己的錄製日誌，不是她記下來的東西，見
+    // `content_only`）。三句用的是同一組 `guard AND empty`，所以前兩句刪掉的
+    // 一定是第三句要刪的那幾場；而 `empty` 兩者都不看，前兩句跑完那幾場照樣
+    // 被選中。
     let marks = format!(
         "DELETE FROM system_events WHERE kind IN {} \
          AND session_id IN (SELECT id FROM sessions WHERE {guard} AND {empty})",
         crate::model::SystemKind::session_marks_sql()
     );
+    let health = format!(
+        "DELETE FROM input_health \
+         WHERE session_id IN (SELECT id FROM sessions WHERE {guard} AND {empty})"
+    );
     let sql = format!("DELETE FROM sessions WHERE {guard} AND {empty}");
     Ok(match only {
         Some(id) => {
             tx.execute(&marks, [id]).context("delete session marks")?;
+            tx.execute(&health, [id]).context("delete session health")?;
             tx.execute(&sql, [id])
         }
         None => {
             tx.execute(&marks, []).context("delete session marks")?;
+            tx.execute(&health, []).context("delete session health")?;
             tx.execute(&sql, [])
         }
     }
@@ -346,8 +361,19 @@ pub(crate) fn delete_empty_sessions(
 
 /// 那張表裡，哪幾列算是**她記下來的東西**。
 ///
-/// 只有 `system_events` 需要挑：`session_start` / `session_end` 是那場錄製自己
-/// 的標籤，不是她記的東西（見 [`crate::model::SystemKind::is_session_mark`]）。
+/// 兩張表需要挑，理由是同一個——**那幾列是容器自己的東西，不是裝在裡面的**：
+///
+/// * `system_events`：`session_start` / `session_end` 是那場錄製自己的標籤（見
+///   [`crate::model::SystemKind::is_session_mark`]）。挑掉那兩種 `kind`。
+/// * `input_health`：**整張**。它記的是她自己那一段聽不聽得見，不是她記下來的
+///   東西——`ever_stored` 的觸發器、`has_raw_records_in_core_window` 和
+///   `DbStats` 三邊都已經不算它（見 `db.rs` 的 `NOT_CONTENT`）。少了這一句，
+///   一場只剩下自己那幾拍錄製日誌的錄製就永遠刪不掉，而 `stats` 會對它印
+///   「工作階段 1（空殼：⋯她當掉了）」——正是那三邊在拆的那句話。
+///   而它剩得下來：`prune` 砍這張表用的是 `ts_end < cut`，砍 `focus_events`
+///   那幾張用的是 `ts < cut`，所以一拍剛好跨過那一刀的健康紀錄會活下來，而同
+///   一場裡比它早的每一列都走了。
+///
 /// 其餘六張表整張都算。
 ///
 /// 沒有這一句的時候，上面那支清掃在**產品裡從來沒有刪掉過任何一列**：
@@ -364,6 +390,9 @@ fn content_only(table: &str) -> String {
             " AND kind NOT IN {}",
             crate::model::SystemKind::session_marks_sql()
         ),
+        // 一列都不算。光有這一句還不夠——那幾列還指著 `sessions`，而外鍵是
+        // `ON` 的，所以 `delete_empty_sessions` 要像帶走標籤那樣先把它們刪掉。
+        "input_health" => " AND 0".to_string(),
         _ => String::new(),
     }
 }
@@ -374,18 +403,26 @@ fn content_only(table: &str) -> String {
 /// 「這一場剩下的東西，是不是全都落在那個窗裡」。同一個 `ts` 條件，只是反過來
 /// 問——窗外還有東西的那一場，等一下也不會被刪。
 ///
-/// `input_metrics` 那張表用 `ts_end` / `ts_start`，而且 `forget` 收的是**重疊**
+/// `input_metrics` 用 `ts_end` / `ts_start`，而且 `forget` 收的是**重疊**
 /// 而不是包含（見 [`crate::db::Db::forget`] 的邊界那一段）。這裡照抄那個條件，
 /// 不然一段跨過邊界的輸入統計會讓兩支的答案差一列。
+///
+/// `input_health` 不用問時間：它一列都不算內容（見 [`content_only`]），所以它
+/// 永遠不會讓一場錄製看起來「窗外還有東西」。這裡少寫一句 `AND 0`、改用時間
+/// 條件的話，預覽會替一場只剩下錄製日誌的錄製回報 0，而真的跑會刪掉 1。
 fn count_empty_sessions(
     conn: &rusqlite::Connection,
     from_ts: Millis,
     to_ts: Millis,
 ) -> Result<u64> {
     let gone = |t: &str| match t {
-        "input_metrics" => "NOT EXISTS(SELECT 1 FROM input_metrics WHERE session_id = sessions.id \
+        // `content_only` 把整張表判成「不是內容」，這裡要講同一句話。
+        "input_health" => "1".to_string(),
+        "input_metrics" => format!(
+            "NOT EXISTS(SELECT 1 FROM {t} WHERE session_id = sessions.id \
              AND NOT (ts_end > ?1 AND ts_start < ?2))"
-            .to_string(),
+        )
+        ,
         // `content_only` 要和上面那一支用同一句話，否則預覽會替一場「只剩下自
         // 己那兩列標籤」的錄製回報 0，而真的跑會刪掉 1。
         _ => format!(
@@ -448,6 +485,7 @@ impl crate::db::Db {
             "SELECT COUNT(*) FROM focus_events WHERE ts < ?1",
             "SELECT COUNT(*) FROM clipboard_events WHERE ts < ?1",
             "SELECT COUNT(*) FROM input_metrics WHERE ts_end < ?1",
+            "SELECT COUNT(*) FROM input_health WHERE ts_end < ?1",
             "SELECT COUNT(*) FROM system_events WHERE ts < ?1",
         ] {
             r.events_deleted += n(sql, text_cut)?;
@@ -571,6 +609,7 @@ impl crate::db::Db {
                 "DELETE FROM input_metrics WHERE ts_end < ?1",
                 "input_metrics",
             ),
+            ("DELETE FROM input_health WHERE ts_end < ?1", "input_health"),
             ("DELETE FROM system_events WHERE ts < ?1", "system_events"),
         ] {
             report.events_deleted +=
@@ -707,6 +746,7 @@ impl crate::db::Db {
             "SELECT COUNT(*) FROM focus_events WHERE ts >= ?1 AND ts < ?2",
             "SELECT COUNT(*) FROM clipboard_events WHERE ts >= ?1 AND ts < ?2",
             "SELECT COUNT(*) FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2",
+            "SELECT COUNT(*) FROM input_health WHERE ts_end > ?1 AND ts_start < ?2",
             "SELECT COUNT(*) FROM system_events WHERE ts >= ?1 AND ts < ?2",
         ] {
             r.events_deleted += n(sql)?;
@@ -821,6 +861,10 @@ impl crate::db::Db {
             (
                 "DELETE FROM input_metrics WHERE ts_end > ?1 AND ts_start < ?2",
                 "input_metrics",
+            ),
+            (
+                "DELETE FROM input_health WHERE ts_end > ?1 AND ts_start < ?2",
+                "input_health",
             ),
             // 暫停紀錄也一起走。這會讓稽核出現孤兒 resume，而
             // `pause_audit` / `pause_spans` 本來就要面對那種情況（保留期
@@ -1139,6 +1183,155 @@ mod tests {
     use crate::model::{FocusSnapshot, FrameCapture, OcrBlock};
 
     const NOW: Millis = 1_800_000_000_000;
+
+    #[test]
+    fn input_health_follows_prune_and_forget_overlap_rules() {
+        let mut db = Db::open_in_memory().expect("db");
+        let session = db.start_session("test", "0").expect("session");
+        let old_start = days_ago(400);
+        db.insert_input_health(
+            session,
+            old_start,
+            old_start + 10_000,
+            crate::model::InputListening::IdleConfirmed,
+        )
+        .expect("old health");
+        db.insert_input_health(
+            session,
+            NOW - 20_000,
+            NOW - 10_000,
+            crate::model::InputListening::NotListening,
+        )
+        .expect("recent health");
+
+        db.prune(
+            NOW,
+            &RetentionConfig {
+                frames_days: 30,
+                text_days: 365,
+            },
+            None,
+        )
+        .expect("prune");
+        let after_prune: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM input_health", [], |row| row.get(0))
+            .expect("count after prune");
+        assert_eq!(after_prune, 1);
+
+        db.forget(NOW - 15_000, NOW - 5_000, None)
+            .expect("forget overlap");
+        let after_forget: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM input_health", [], |row| row.get(0))
+            .expect("count after forget");
+        assert_eq!(after_forget, 0);
+    }
+
+    /// **一場只剩下她自己那幾拍錄製日誌的錄製，要跟著日誌一起走。**
+    ///
+    /// `input_health` 帶著 `session_id`，所以它在 [`SESSION_CHILDREN`] 裡。少
+    /// 了 [`content_only`] 那一句 `AND 0`，那幾列會讓 `delete_empty_sessions`
+    /// 判定這一場「不空」，`sessions` 那一列就永遠刪不掉；而它一列都不算內容，
+    /// 於是 `DbStats::nothing_recorded_left` 是 true，`stats` 印的是
+    /// 「工作階段 1（空殼：⋯）」——對一場**乾淨收尾**的錄製說她當掉了。那正
+    /// 是這張表存在的目的在拆的那種句子。
+    ///
+    /// **這一格到得了，而且不是手工擺出來的。** 成因是兩張表的刀口形狀不一
+    /// 樣：`prune` 砍 `input_health` 用 `ts_end < cut`，砍 `frames` 用
+    /// `ts < cut`。一拍剛好跨過那一刀的健康紀錄會活下來，同一場裡比它早的每
+    /// 一列都走了。底下照那個順序跑一次，不自己 INSERT 出那個狀態。
+    #[test]
+    fn a_session_left_with_only_its_own_health_log_is_not_an_immortal_shell() {
+        let mut db = Db::open_in_memory().expect("db");
+        let session = db.start_session("test", "0").expect("session");
+        let cut = days_ago(365);
+        db.insert_frame(session, &frame(days_ago(400), "帳單"), None, 0)
+            .expect("frame");
+        // 跨過那一刀的那一拍：`ts_start < cut <= ts_end`。
+        db.insert_input_health(
+            session,
+            cut - 5_000,
+            cut + 5_000,
+            crate::model::InputListening::IdleConfirmed,
+        )
+        .expect("health");
+        // 乾淨收尾——`ended_at` 有值，所以守衛那一臂放行。這一場**沒有**當掉。
+        db.end_session(session).expect("end");
+        assert_eq!(
+            db.stats().expect("stats").sessions,
+            1,
+            "先確定那一場真的還在，不然底下驗的是別件事"
+        );
+
+        let r = db
+            .prune(
+                NOW,
+                &RetentionConfig {
+                    frames_days: 30,
+                    text_days: 365,
+                },
+                None,
+            )
+            .expect("prune");
+
+        let s = db.stats().expect("stats");
+        assert_eq!(
+            r.sessions_deleted, 1,
+            "只剩下錄製日誌的那一場要在這一刀跟著走：{r:?}"
+        );
+        assert_eq!(s.sessions, 0, "{s:?}");
+        let left: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM input_health", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(
+            left, 0,
+            "那幾列要跟著那一場一起走——外鍵是 ON 的，留著它們那一刀根本刪不動"
+        );
+    }
+
+    /// **預覽和真的刪，對「只剩下錄製日誌的那一場」要講同一個數字。**
+    ///
+    /// [`content_only`] 把整張 `input_health` 判成「不是內容」，預覽那一支就得
+    /// 講同一句話。少了它、改用 `input_metrics` 的重疊條件的話：一場**窗外**
+    /// 還留著健康紀錄、窗內只有一張畫面的錄製，預覽說 0 場、真的跑刪掉 1 場。
+    /// 而那個數字是他按下不可逆的按鈕之前唯一看得到的東西。
+    ///
+    /// 上面那條 [`a_session_left_with_only_its_own_health_log_is_not_an_immortal_shell`]
+    /// 抓不到這一半：它只跑真的那一支。
+    #[test]
+    fn the_preview_counts_the_recording_whose_only_leftover_is_its_health_log() {
+        let mut db = Db::open_in_memory().expect("db");
+        let session = db.start_session("test", "0").expect("session");
+        // 窗**外**的一拍健康紀錄——`forget` 收的是重疊，所以這一列不會被那一刀
+        // 砍到；它是不是「內容」因此就決定了那一場的生死。
+        db.insert_input_health(
+            session,
+            days_ago(400),
+            days_ago(400) + 10_000,
+            crate::model::InputListening::IdleConfirmed,
+        )
+        .expect("health");
+        // 窗**內**唯一的內容。
+        db.insert_frame(session, &frame(days_ago(3), "帳單"), None, 0)
+            .expect("frame");
+        db.end_session(session).expect("end");
+
+        let (from, to) = (days_ago(4), days_ago(2));
+        let preview = db.forget_preview(from, to, None).expect("preview");
+        let actual = db.forget(from, to, None).expect("forget");
+        assert_eq!(
+            (preview.sessions_deleted, actual.sessions_deleted),
+            (1, 1),
+            "預覽和真的跑講的不是同一件事：preview={preview:?} actual={actual:?}"
+        );
+        let left: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM input_health", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(left, 0, "那一場走了，窗外那一列要跟著走，不能變成孤兒");
+    }
 
     fn days_ago(n: i64) -> Millis {
         NOW - n * DAY_MS

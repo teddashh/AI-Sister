@@ -18,7 +18,9 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering::Relaxed};
 
 use anyhow::Result;
-use sister_core::model::{InputMetrics, Millis};
+use sister_core::model::{
+    HookHealth, InputListening, InputMetrics, InputTick, Millis, classify_quiet_window,
+};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, HHOOK, MSG, MSLLHOOKSTRUCT,
@@ -104,7 +106,7 @@ impl InputSource for WindowsInput {
         system_idle_ms()
     }
 
-    fn drain(&mut self, ts: Millis) -> Result<Option<InputMetrics>> {
+    fn drain(&mut self, ts: Millis) -> Result<Option<InputTick>> {
         // 視窗還沒滿就先繼續累積。**這個 early return 一定要在 swap 之前**：
         // 先把計數器清掉再判斷要不要出一列，等於把那一段的輸入丟掉。
         //
@@ -134,12 +136,23 @@ impl InputSource for WindowsInput {
         let typing_bursts = BURSTS.swap(0, Relaxed) as i64;
 
         if keystrokes == 0 && clicks == 0 && scroll_ticks == 0 && mouse_px == 0 {
-            // 完全沒動就不寫一列全 0 進資料庫——idle 是由「沒有紀錄」表達的
-            return Ok(None);
+            // 完全沒動仍不寫一列全 0 的 input_metrics；改由 input_health
+            // 分清楚「作業系統證實沒人動」和「我們沒有在聽」。
+            let hook = match Self::state() {
+                HookState::NotStarted => HookHealth::NotStarted,
+                HookState::Active => HookHealth::Active,
+                HookState::Failed => HookHealth::Failed,
+            };
+            return Ok(Some(InputTick {
+                ts_start: start,
+                ts_end: ts,
+                metrics: None,
+                listening: classify_quiet_window(hook, system_idle_ms(), ts - start),
+            }));
         }
 
         let window_ms = (ts - start).max(0);
-        Ok(Some(InputMetrics {
+        let metrics = InputMetrics {
             ts_start: start,
             ts_end: ts,
             keystrokes,
@@ -150,6 +163,12 @@ impl InputSource for WindowsInput {
             window_switches: 0,
             idle_ms: idle_ms().min(window_ms),
             typing_bursts,
+        };
+        Ok(Some(InputTick {
+            ts_start: start,
+            ts_end: ts,
+            metrics: Some(metrics),
+            listening: InputListening::Unknown,
         }))
     }
 }
@@ -310,10 +329,89 @@ mod tests {
         COUNTERS.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 沒有任何輸入時不該寫一列全 0 的紀錄：idle 是用「沒有列」表達的，
-    /// 一秒一列空紀錄會把資料庫塞滿沒有資訊的東西。
+    /// **`HookState` 翻成 `HookHealth` 的那三臂，每一臂都要是對的。**
+    ///
+    /// 隔壁那條只走得到 `NotStarted`（這個測試 binary 從來沒有裝過 hook），
+    /// 於是 `Active` 和 `Failed` 兩臂在整套測試裡是死碼——而把
+    /// `HookState::Failed => HookHealth::Active` 這樣改一個字，
+    /// 「hook 裝失敗 ＋ 使用者真的離開電腦」就會退回**有把握地**說
+    /// 「鍵盤和滑鼠一下都沒有動」，正是這一版宣稱修掉的那句謊。
+    /// `ops.rs` 那條原始碼形狀測試守的是 `match` 問誰，守不到每一臂算出什麼。
+    ///
+    /// 視窗長度刻意用 0，好讓判定變成確定的而不是看機器閒置幾秒：
+    /// `idle >= 0` 恆真，所以 `Active` 一定不是 `NotListening`
+    /// （作業系統答不出來的話是 `Unknown`，同樣不是 `NotListening`），
+    /// 而 `NotStarted` / `Failed` 根本不看作業系統。
     #[test]
-    fn silence_produces_no_row() {
+    fn every_hook_state_maps_to_its_own_listening_verdict() {
+        let _lock = exclusive();
+        let saved = (HOOK_START_ATTEMPTED.load(Relaxed), HOOKS_OK.load(Relaxed));
+
+        for (attempted, ok, deaf) in [
+            (false, false, true), // NotStarted
+            (true, false, true),  // Failed
+            (true, true, false),  // Active
+        ] {
+            HOOK_START_ATTEMPTED.store(attempted, Relaxed);
+            HOOKS_OK.store(ok, Relaxed);
+            KEYSTROKES.store(0, Relaxed);
+            CLICKS.store(0, Relaxed);
+            SCROLL.store(0, Relaxed);
+            MOUSE_PX.store(0, Relaxed);
+
+            let mut input = WindowsInput {
+                window_start: 1000,
+                window_ms: 0,
+            };
+            let tick = input
+                .drain(1000)
+                .expect("no error")
+                .expect("安靜的視窗要出一個 tick");
+            let state = Self_state_name(attempted, ok);
+            if deaf {
+                assert_eq!(
+                    tick.listening,
+                    InputListening::NotListening,
+                    "{state} 的時候不准說成「沒人碰」"
+                );
+            } else {
+                assert_ne!(
+                    tick.listening,
+                    InputListening::NotListening,
+                    "{state} 而且作業系統說整段沒人碰，卻講成「我沒在聽」"
+                );
+            }
+        }
+
+        HOOK_START_ATTEMPTED.store(saved.0, Relaxed);
+        HOOKS_OK.store(saved.1, Relaxed);
+    }
+
+    /// 只是給上面那條的斷言訊息用的名字。
+    #[allow(non_snake_case)]
+    fn Self_state_name(attempted: bool, ok: bool) -> &'static str {
+        match (attempted, ok) {
+            (false, _) => "hook 還沒去裝",
+            (true, false) => "hook 裝失敗",
+            (true, true) => "hook 裝起來了",
+        }
+    }
+
+    /// 安靜的視窗仍然不寫一列全 0 的 `input_metrics`——那張表上的 idle 是用
+    /// 「沒有列」表達的，一秒一列空紀錄會把資料庫塞滿沒有資訊的東西。
+    ///
+    /// 但「安靜」本身要留下痕跡，所以改成出一個 `metrics: None` 的 tick，由
+    /// recorder 寫進 `input_health`：好分清楚「作業系統證實沒人碰」和「我們
+    /// 的 hook 根本沒在聽」。alpha.97 以前這兩件事是同一個沉默——她講的是
+    /// 誠實的那一句（「我分不出是哪一種」），代價是**有把握的那一句在真實
+    /// 錄製上永遠印不出來**（它要的是一列全 0 的紀錄，而這裡從不寫）；而讓
+    /// 它印得出來的便宜作法（把沉默直接當成沒人動）會製造一句更糟的謊。
+    ///
+    /// 這條也釘住那條鐵律：這個測試程序從來沒有裝過 hook（`install_hooks`
+    /// 的唯一入口 `WindowsInput::start` 沒有任何測試會走），所以不管作業系統
+    /// 怎麼回答，都**不准**說成「沒人碰」。
+    #[test]
+    fn a_silent_window_yields_a_health_tick_not_an_empty_metrics_row() {
         let _lock = exclusive();
         KEYSTROKES.store(0, Relaxed);
         CLICKS.store(0, Relaxed);
@@ -324,7 +422,21 @@ mod tests {
             window_start: 0,
             window_ms: 0,
         };
-        assert!(input.drain(1000).expect("no error").is_none());
+
+        let tick = input
+            .drain(1000)
+            .expect("no error")
+            .expect("安靜的視窗也要出一個 tick，不然「我沒在聽」沒有人記");
+        assert!(
+            tick.metrics.is_none(),
+            "安靜的視窗不可以寫一列全 0 的 input_metrics"
+        );
+        assert_eq!((tick.ts_start, tick.ts_end), (0, 1000));
+        assert_eq!(
+            tick.listening,
+            InputListening::NotListening,
+            "hook 沒裝上的時候，不管作業系統說什麼都不准講成「沒人碰」"
+        );
     }
 
     /// **視窗沒滿之前不出列，而且累積的輸入不可以被丟掉。**
@@ -359,10 +471,11 @@ mod tests {
         assert!(input.drain(800).expect("no error").is_none());
 
         // 視窗滿了，這時候才出一列，而且要含全部的按鍵數
-        let m = input
+        let tick = input
             .drain(10_000)
             .expect("no error")
             .expect("視窗滿了就該出列");
+        let m = tick.metrics.expect("metrics");
         assert_eq!(m.keystrokes, 9, "視窗中間累積的輸入不能被丟掉");
         assert_eq!((m.ts_start, m.ts_end), (0, 10_000));
     }
@@ -402,10 +515,11 @@ mod tests {
             window_start: 1000,
             window_ms: 10_000,
         };
-        let m = input
+        let tick = input
             .drain(11_000)
             .expect("no error")
             .expect("some metrics");
+        let m = tick.metrics.expect("metrics");
         assert_eq!((m.keystrokes, m.clicks, m.scroll_ticks), (7, 2, 3));
         assert_eq!(m.mouse_px, 450);
         assert_eq!((m.ts_start, m.ts_end), (1000, 11_000));
@@ -413,7 +527,24 @@ mod tests {
         assert_eq!(m.window_switches, 0);
 
         // 取走就要歸零，不然下一個視窗會重複計算同一批輸入
-        assert!(input.drain(21_000).expect("no error").is_none());
+        let quiet = input
+            .drain(21_000)
+            .expect("no error")
+            .expect("quiet window");
+        assert_eq!(quiet.metrics, None);
+        // 這個測試沒有裝 hook（`install_hooks` 的唯一入口 `WindowsInput::start`
+        // 整個 crate 的測試都不會走），所以 `state()` 一定是 `NotStarted`，
+        // 而 `classify_quiet_window` 對那一態**不看作業系統怎麼回答**——這條
+        // 斷言因此是確定的，不是碰運氣。
+        //
+        // 但它守不住「hook 狀態寫死」那一刀：寫死成 `Active` 之後，紅不紅
+        // 就取決於跑測試那台機器剛好閒置了幾秒（這個視窗是 10 秒）。那一刀
+        // 的守衛是 `ops.rs` 那條原始碼形狀測試，不是這裡。
+        assert_eq!(
+            quiet.listening,
+            InputListening::NotListening,
+            "沒裝 hook 的安靜視窗不可以被講成「沒人碰」"
+        );
     }
 
     #[test]
@@ -426,7 +557,8 @@ mod tests {
             window_start: 5_000,
             window_ms: 1_000,
         };
-        let m = input.drain(6_000).expect("no error").expect("some metrics");
+        let tick = input.drain(6_000).expect("no error").expect("some metrics");
+        let m = tick.metrics.expect("metrics");
         assert!(m.idle_ms <= 1_000, "idle {} > window", m.idle_ms);
     }
 }
