@@ -211,6 +211,14 @@ mod command_tests {
             !flat.contains("classify_quiet_window(hook, idle_ms()"),
             "idle_ms() 依賴 hook 還活著——hook 死掉時它會把「我聾了」講成「沒人碰」"
         );
+        // hook 狀態也要真的去問，不能寫死。寫死成 `Active` 的話，「hook 根本沒裝
+        // 起來」會退化成「只看作業系統的 idle」——使用者剛好沒在動的時候，她會用
+        // 有把握的語氣說「沒人碰」，而她其實整段都沒在聽。這一刀（W2）在 Linux 上
+        // 沒有任何測試抓得到，實測 17 刀裡只有它是綠的。
+        assert!(
+            flat.contains("let hook = match Self::state() {"),
+            "hook 狀態要去問 Self::state()，寫死成某一態會把「我沒在聽」講成「沒人碰」"
+        );
     }
 
     #[test]
