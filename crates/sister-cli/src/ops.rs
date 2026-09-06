@@ -7702,6 +7702,14 @@ pub mod watch {
         pub dry_run: bool,
         pub notify: bool,
     }
+    /// 這一趟要不要送那一則系統通知。
+    ///
+    /// 錯誤路徑不送——見 [`run_with`]。閃爍和那一聲兩邊都照發。
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(crate) enum Toast {
+        Send,
+        SkipThisEnding,
+    }
 
     /// **閃到他回頭看為止，不是閃三下就算了。**
     ///
@@ -7714,10 +7722,14 @@ pub mod watch {
     /// 他真的看到**。這是 Windows 為這件事準備的那一個旗標。搭配它的時候
     /// `uCount` 不再是次數上限，填 0。
     ///
+    /// **`FlashWindowEx` 的回傳值不能拿來當「閃成功了沒」**：它回的是呼叫之前
+    /// 那扇窗的狀態。所以這條通道的結果是問不到的，而 [`SystemNotice`] 那幾句
+    /// 話因此一個字都不提工作列——不是忘了，是拿不到。
+    ///
     /// 這一段在這台 Linux 上編得到（`check-windows.sh`）但**執行不到**，
     /// 一條斷言都蓋不住它——所以它上面這幾行是它唯一的規格。
     #[cfg(windows)]
-    fn platform_notify() -> SystemNotice {
+    fn platform_notify(toast: Toast) -> SystemNotice {
         use windows::Win32::System::Console::GetConsoleWindow;
         use windows::Win32::System::Diagnostics::Debug::MessageBeep;
         use windows::Win32::UI::WindowsAndMessaging::{
@@ -7738,10 +7750,15 @@ pub mod watch {
                 };
                 let _ = FlashWindowEx(&info);
             }
+            // `MessageBeep` 不等音效播完就回，所以這裡保證的只有「**呼叫**發生在
+            // 托盤那一段之前」。托盤那一段會佔住這條執行緒約 `DWELL` 那麼久，
+            // 排在它前面才不會讓這一聲跟著延後。
             let _ = MessageBeep(MB_OK);
         }
-        // 那一聲要在托盤那一段之前響完：`show_toast` 結尾會停一下不讓行程死掉。
-        show_toast()
+        match toast {
+            Toast::SkipThisEnding => SystemNotice::NotForThisEnding,
+            Toast::Send => show_toast(),
+        }
     }
 
     /// **這一則通知刻意不帶畫面上的任何一個字。**
@@ -7753,47 +7770,52 @@ pub mod watch {
     ///
     /// **為什麼是 `Shell_NotifyIconW`，不是 WinRT 的 `ToastNotificationManager`：**
     /// 後者對沒有打包的桌面程式，要求開始功能表裡有一個帶 AppUserModelID 的
-    /// 捷徑，沒有那個捷徑的話 `Show()` **安靜地什麼都不發生**。裝捷徑是動使用者
-    /// 系統的事，而「安靜地什麼都不發生」正好是這支旗標要修的那個病。
+    /// 捷徑，沒有那個捷徑的話那則通知**安靜地不會出現**。裝捷徑是動使用者系統
+    /// 的事，而「安靜地什麼都不發生」正好是這支旗標要修的那個病。
     /// `Shell_NotifyIconW` 每一步都回 `BOOL`，失敗看得見。
     ///
     /// **為什麼自己開一個隱藏視窗，不拿 `GetConsoleWindow()`：** 托盤圖示的
     /// `hWnd` 是殼層用來回呼、以及用來判斷「擁有者還在不在」的把手，它得屬於
     /// 這個行程，而主控台視窗多半屬於 conhost。閃爍那一邊沒有這個限制
     /// （`FlashWindowEx` 對任何視窗都行），所以那邊照舊用主控台視窗——
-    /// **兩條通道從這裡開始各有各的失敗條件**，`SystemNotice` 那幾句話因此
-    /// 一個字都不提工作列。
+    /// **兩條通道從這裡開始各有各的失敗條件**。
     ///
-    /// `RegisterClassW` 的回傳值刻意不看：同名類別已經註冊過時它會回 0，而那
-    /// 種情況下 `CreateWindowExW` 照樣成功。讓建視窗那一步當唯一的裁判。
+    /// `RegisterClassW` 的回傳值刻意不看：同名類別已經註冊過時它會回 0，而那種
+    /// 情況下 `CreateWindowExW` 照樣用先前那份類別把窗建起來。
     ///
-    /// **沒有 `NIM_DELETE`。** 那顆圖示是這則通知的擁有者，刪掉圖示會把通知一起
-    /// 收走，而他有可能一小時後才回來。行程結束時 Windows 會回收它；代價是托盤
-    /// 上可能留一顆滑過去才消失的殘影，比一則他永遠看不到的通知便宜。
+    /// **回 `NoHost` 的路有兩條**（拿不到 module handle、視窗建不起來），所以
+    /// [`SystemNotice::NoHost`] 那句話講的是「我沒能替它開一個掛得上去的視窗」
+    /// 而不是「`CreateWindowExW` 失敗」——後者只涵蓋其中一條。
     ///
     /// **這一段在這台 Linux 上編得到（`check-windows.sh`）但執行不到，一條斷言
     /// 都蓋不住它——上面這幾行是它唯一的規格。** 真的在 Windows 上跑的時候第一
-    /// 個要確認的是通知有沒有出現；沒出現而這裡又回報「交出去了」的話，頭號
-    /// 嫌犯是行程在殼層把氣泡畫出來之前就結束了（`DWELL` 就是為它留的），
-    /// 二號嫌犯是專注輔助。
+    /// 個要確認的是通知有沒有出現；沒出現而這裡又回報「交出去了」的話，嫌犯有
+    /// 三個：`DWELL` 不夠長、專注輔助把它收走了、或者殼層在等一個我們沒回的
+    /// 同步訊息（`DWELL` 那個迴圈就是為最後這一種抽訊息的）。
     #[cfg(windows)]
     fn show_toast() -> SystemNotice {
         use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::Shell::{
-            NIF_ICON, NIF_INFO, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_MODIFY, NOTIFYICONDATAW,
-            Shell_NotifyIconW,
+            NIF_ICON, NIF_INFO, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+            NOTIFYICONDATAW, Shell_NotifyIconW,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, IDI_INFORMATION, LoadIconW, RegisterClassW,
-            WINDOW_EX_STYLE, WNDCLASSW, WS_OVERLAPPED,
+            CreateWindowExW, DefWindowProcW, DispatchMessageW, IDI_INFORMATION, LoadIconW, MSG,
+            PM_REMOVE, PeekMessageW, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WNDCLASSW,
+            WS_OVERLAPPED,
         };
         use windows::core::w;
 
+        const TITLE: &str = "妹妹：這一場盯梢停下來了";
+        const BODY: &str = "回終端機看結果。這一則通知刻意不帶畫面上的字。";
+        /// 殼層要一點時間才把氣泡畫出來。收尾本來就要結束了，多等這一下的代價
+        /// 是零：這支旗標的前提就是他不在這裡等。
+        const DWELL: std::time::Duration = std::time::Duration::from_millis(1_200);
+
         /// `WNDCLASSW.lpfnWndProc` 要的是一根 `extern "system"` 的函式指標，而
         /// windows-rs 匯出的 `DefWindowProcW` 是一層 Rust ABI 的包裝，不能直接
-        /// 塞進去（`check-windows.sh` 當場擋下來的就是這個）。這個視窗從不顯示、
-        /// 也沒有訊息迴圈在抽它的佇列，所以這裡除了轉手什麼都不用做。
+        /// 塞進去（`check-windows.sh` 當場擋下來的就是這個）。
         unsafe extern "system" fn wndproc(
             hwnd: HWND,
             msg: u32,
@@ -7803,13 +7825,6 @@ pub mod watch {
             // SAFETY: 原封不動把殼層給的四個參數交還給系統的預設處理常式。
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
-
-        const TITLE: &str = "妹妹：這一場盯梢停下來了";
-        const BODY: &str = "回終端機看結果。這一則通知刻意不帶畫面上的字。";
-        /// 殼層要一點時間才把氣泡畫出來，而那顆托盤圖示——連同掛在它身上的
-        /// 通知——會跟著這個行程一起消失。收尾本來就要結束了，多等這一下的
-        /// 代價是零：這支旗標的前提就是他不在這裡等。
-        const DWELL: std::time::Duration = std::time::Duration::from_millis(1_200);
 
         /// `szInfoTitle` 是 64 個 UTF-16 單位、`szInfo` 是 256 個，上面兩句都是
         /// 全形中文（BMP，一個字一個單位）且離上限很遠，所以那條截斷分支切不到
@@ -7827,8 +7842,8 @@ pub mod watch {
         }
 
         let class = w!("SisterWatchNotifyHost");
-        // SAFETY: 註冊一個只用 `DefWindowProcW` 的類別，再開一個從不 `ShowWindow`
-        // 的 0x0 視窗當托盤圖示的擁有者。兩個呼叫都不保留外來指標。
+        // SAFETY: 註冊一個只轉手給 `DefWindowProcW` 的類別，再開一個從不
+        // `ShowWindow` 的 0x0 視窗當托盤圖示的擁有者。兩個呼叫都不保留外來指標。
         let host = unsafe {
             let Ok(module) = GetModuleHandleW(None) else {
                 return SystemNotice::NoHost;
@@ -7854,8 +7869,8 @@ pub mod watch {
                 Some(module.into()),
                 None,
             ) {
-                Ok(hwnd) if !hwnd.is_invalid() => hwnd,
-                _ => return SystemNotice::NoHost,
+                Ok(hwnd) => hwnd,
+                Err(_) => return SystemNotice::NoHost,
             }
         };
 
@@ -7863,12 +7878,15 @@ pub mod watch {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: host,
             uID: 1,
-            uFlags: NIF_ICON | NIF_TIP,
+            uFlags: NIF_TIP,
             ..Default::default()
         };
-        // SAFETY: 共用的系統圖示，不需要釋放；拿不到就讓 `hIcon` 留在預設值。
+        // **拿不到圖示就不要宣告 `NIF_ICON`。** 那個旗標的意思是「`hIcon` 這個
+        // 欄位是有效的」，配一個 null 把手等於對殼層說謊，換來的是通知區一顆
+        // 空白的圖示。SAFETY: 共用的系統圖示，不需要釋放。
         if let Ok(icon) = unsafe { LoadIconW(None, IDI_INFORMATION) } {
             data.hIcon = icon;
+            data.uFlags |= NIF_ICON;
         }
         fill(&mut data.szTip, TITLE);
 
@@ -7883,28 +7901,82 @@ pub mod watch {
             fill(&mut data.szInfoTitle, TITLE);
             fill(&mut data.szInfo, BODY);
             if !Shell_NotifyIconW(NIM_MODIFY, &data).as_bool() {
+                let _ = Shell_NotifyIconW(NIM_DELETE, &data);
                 return SystemNotice::Refused;
             }
         }
-        std::thread::sleep(DWELL);
+
+        // **抽訊息，不要 `thread::sleep` 睡死。**
+        //
+        // 這是一扇 top-level 視窗，而 Win32 的規矩是：跨行程 `SendMessage` 過來
+        // 的訊息，只有在這條執行緒進入訊息擷取函式的時候才會被處理——`sleep`
+        // 不算。睡死的那 1.2 秒裡，任何 `HWND_BROADCAST`（插 USB、改顯示設定、
+        // 換主題）都會卡住**發送方**直到它自己逾時；而如果殼層在氣泡這條路上
+        // 對擁有者視窗同步送了什麼，我們永遠不回應，它就等到逾時然後不畫那個
+        // 氣泡——**而 `Shell_NotifyIconW` 早就回 `TRUE` 了**。那正是這支旗標
+        // 要修的那個病，換一個位置重演。
+        let deadline = std::time::Instant::now() + DWELL;
+        loop {
+            let mut msg = MSG::default();
+            // SAFETY: `msg` 是本地端的，`PeekMessageW` 只寫它。呼叫它本身就會讓
+            // 這條執行緒處理掉排隊中的 sent message，那才是這個迴圈的重點。
+            while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+                // SAFETY: 原封不動把剛取出來的訊息交回系統。
+                unsafe {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            std::thread::sleep((deadline - now).min(std::time::Duration::from_millis(20)));
+        }
+
+        // **`NIM_DELETE` 收掉那顆圖示，而這是一個賭注。**
+        //
+        // 兩邊各有一個沒人量過的未知數：
+        // - **不刪**：殼層對托盤圖示是**惰性**回收的。行程死掉之後那顆圖示會留
+        //   在通知區，要等使用者把滑鼠移過去才一起消失——跑一個下午就疊一排
+        //   無名殭屍（`szTip` 都一樣、圖示都是共用的系統圖示）。
+        // - **刪**：氣泡是掛在那顆圖示上的，刪掉可能把它一起收走。Win8 之後
+        //   `NIF_INFO` 的氣泡是以 toast 的形式呈現的，但**它會不會留在通知
+        //   中心、擁有者行程消失之後會不會被連帶清掉，我沒有文件依據**。
+        //
+        // 選「刪」，因為兩邊的代價不對等：殭屍圖示是**確定會發生**、而且是弄髒
+        // 他機器的那一種；通知中心的存活是**不確定的**好處。而且他真的離開很久
+        // 的那一種情況，接他的是工作列那顆一直閃的按鈕（`FLASHW_TIMERNOFG`）
+        // ——那條通道本來就是為「一小時後才回來」準備的，系統通知補的是**工作列
+        // 看不到**的時候（全螢幕、另一個虛擬桌面）。
+        //
+        // **這一格要在真的 Windows 上翻案**：跑一次 `watch --notify`，等它結束，
+        // 按 Win+N 看通知中心裡還有沒有那一則。還在的話就把這一行拿掉。
+        //
+        // SAFETY: 同一組 `(hWnd, uID)`，把剛才加進去的那顆收掉。
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+        }
         SystemNotice::HandedOver
     }
 
     #[cfg(not(windows))]
-    fn platform_notify() -> SystemNotice {
+    fn platform_notify(_toast: Toast) -> SystemNotice {
         SystemNotice::NotOnThisBuild
     }
 
     /// **那一行不是給現在看的，是給他回來的時候看的。**
     ///
     /// 這支旗標的前提就是他當時不在螢幕前面。他回來讀終端機，如果只有一個
-    /// 「等到了」而沒有任何一句話交代那幾條通道，「通知正常送出」和「那段程式碼
+    /// 「等到了」而沒有任何一句話交代那條通道，「通知正常送出」和「那段程式碼
     /// 根本沒跑到」在畫面上會是同一種沉默——這個 repo 修了八十幾次的那顆
-    /// 「兩種 0」。所以四種結果都印，成功那一種也印。
-    fn notify(out: &mut impl Write) -> Result<()> {
+    /// 「兩種 0」。所以五種結果都印，成功那一種也印。
+    ///
+    /// 拆成兩支是為了讓「哪一種結果對應哪一句話」測得到：`platform_notify()`
+    /// 在 Linux 上永遠只回得出一種，在 Windows 上回哪一種要看那台機器。
+    fn notify_with(out: &mut impl Write, notice: SystemNotice) -> Result<()> {
         write!(out, "\x07")?;
         out.flush()?;
-        let notice = platform_notify();
         writeln!(out, "{}", notice.line())?;
         out.flush()?;
         Ok(())
@@ -7921,6 +7993,35 @@ pub mod watch {
         )
     }
 
+    /// 把「這一下實際上發生了什麼」當成參數傳進去，就像 `clock` 和 `sleep`。
+    ///
+    /// 兩個理由，兩個都是實測出來的：
+    /// 1. **不然「印出來的那一句是不是算出來的那一句」測不到。** 只數「五句裡
+    ///    命中幾句」的話，一個把它改成 `if cfg!(windows) { HandedOver } else
+    ///    { NotOnThisBuild }` 的版本在兩趟 CI 上都是綠的——而 Windows 上不管
+    ///    視窗建不建得起來，畫面永遠說「我把一則系統通知交給 Windows 了」。
+    /// 2. **不然 Windows CI 上 `cargo test` 會真的發通知。** 走到這裡的測試有
+    ///    好幾條，每一條都會 `RegisterClassW` + `Shell_NotifyIconW` + 佔住
+    ///    `DWELL` 那麼久，還在跑測試的機器的通知區留下托盤圖示。
+    pub(crate) fn run_with(
+        data_dir: &Path,
+        config: &Config,
+        opts: &WatchOpts,
+        clock: &mut dyn FnMut() -> i64,
+        sleep: &mut dyn FnMut(Millis),
+        out: &mut impl Write,
+    ) -> Result<()> {
+        run_with_signal(
+            data_dir,
+            config,
+            opts,
+            clock,
+            sleep,
+            out,
+            &mut platform_notify,
+        )
+    }
+
     /// **她死掉也算「停下來」，所以那一聲也要響。**
     ///
     /// 開跑那一行答應的是「停下來時我會響一聲」，而收尾那五種各自都響了。
@@ -7932,18 +8033,27 @@ pub mod watch {
     /// 開跑前就失敗的那幾種（目錄不存在、資料庫開不起來）也會走到這裡。那時候
     /// 還沒答應過任何事，多響一聲是噪音——但他人就坐在終端機前面，因為那幾種
     /// 在第一秒就炸了。多一聲噪音，比她死得無聲無息便宜太多。
-    pub(crate) fn run_with(
+    pub(crate) fn run_with_signal(
         data_dir: &Path,
         config: &Config,
         opts: &WatchOpts,
         clock: &mut dyn FnMut() -> i64,
         sleep: &mut dyn FnMut(Millis),
         out: &mut impl Write,
+        signal: &mut dyn FnMut(Toast) -> SystemNotice,
     ) -> Result<()> {
-        let result = watch_body(data_dir, config, opts, clock, sleep, out);
+        let result = watch_body(data_dir, config, opts, clock, sleep, out, signal);
         if result.is_err() && opts.notify && !opts.dry_run {
+            // **錯誤路徑不跳系統通知。**
+            //
+            // 那一則氣泡寫死了「這一場盯梢停下來了」，而走到這裡最常見的是
+            // 「目錄打錯了」「資料庫開不起來」這種**開跑第一秒就炸掉**的——
+            // 對一場從來沒開始的盯梢來說，那句話是錯的。閃爍和那一聲的噪音很
+            // 便宜（上面那段已經論證過），一則跳到桌面上的通知加一顆托盤圖示
+            // 不是；而且托盤那一段會佔住這條執行緒，錯誤訊息會跟著慢那麼久。
+            //
             // 已經在回報一個錯了，這一聲響不出來就算了——不要拿它蓋掉真正的原因。
-            let _ = notify(out);
+            let _ = notify_with(out, signal(Toast::SkipThisEnding));
         }
         result
     }
@@ -7955,6 +8065,7 @@ pub mod watch {
         clock: &mut dyn FnMut() -> i64,
         sleep: &mut dyn FnMut(Millis),
         out: &mut impl Write,
+        signal: &mut dyn FnMut(Toast) -> SystemNotice,
     ) -> Result<()> {
         ensure!(
             data_dir.is_dir(),
@@ -8312,7 +8423,14 @@ pub mod watch {
         };
         writeln!(out, "{}", end.message())?;
         if end.should_notify(opts.notify) {
-            notify(out)?;
+            // **這一聲失敗不算這一場失敗。**
+            //
+            // 用 `?` 的話，收尾那一行已經印出去了、只是最後那次 flush 沒成功
+            // （stdout 是管子而讀端先走了），整場盯梢就會被記成 `Err`——然後
+            // `run_with_signal` 看到 `Err` 會**再叫一次**，於是兩聲、兩次閃爍。
+            // 托盤那一段還會把中間那個空窗撐到 `DWELL` 那麼長，讀端有整整那麼
+            // 久可以死掉。她盯完了，這是事實，不因為鈴聲沒響完而改變。
+            let _ = notify_with(out, signal(Toast::Send));
         }
         Ok(())
     }
@@ -8474,13 +8592,14 @@ pub mod watch {
             let mut out = Vec::new();
             let mut options = opts(false);
             options.stop_after = 30_000;
-            run_with(
+            run_with_signal(
                 &tmp.0,
                 &config,
                 &options,
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
                 &mut out,
+                &mut |_| SystemNotice::NotOnThisBuild,
             )
             .expect("run");
 
@@ -8647,13 +8766,14 @@ pub mod watch {
                 let (tmp, config) = prepared("watch-notify-saw", "完成", true);
                 let mut ticks = [100_000, 100_000].into_iter();
                 let mut out = Vec::new();
-                run_with(
+                run_with_signal(
                     &tmp.0,
                     &config,
                     &opts(requested),
                     &mut || ticks.next().expect("fake clock ran out"),
                     &mut |_| {},
                     &mut out,
+                    &mut |_| SystemNotice::NotOnThisBuild,
                 )
                 .expect("run");
                 assert_eq!(
@@ -8664,27 +8784,20 @@ pub mod watch {
                 );
             }
         }
-
         /// **那一聲響了，就必須有一行字說它是怎麼響的。**
         ///
-        /// `SystemNotice` 那四句話在 `sister-core` 有自己的測試，但那些測試只
-        /// 證明「四句話各講各的」——一句都沒有證明**有人把它印出來**。把
-        /// `notify()` 裡那行 `writeln!` 刪掉，`sister-core` 那五條會全部繼續是
-        /// 綠的，而他回到終端機看到的是一個沒有交代的鈴聲。這一條釘的是呼叫端。
+        /// `SystemNotice` 那幾句話在 `sister-core` 有自己的測試，但那些測試只
+        /// 證明「五句話各講各的」——一句都沒有證明**有人把它印出來**。把
+        /// `notify_with()` 裡那行 `writeln!` 刪掉，`sister-core` 那六條會全部
+        /// 繼續是綠的，而他回到終端機看到的是一個沒有交代的鈴聲。
         ///
-        /// **而且釘的不只是「有印」，還有「印的是這個平台答得出來的那一句」。**
-        /// 只數「四句裡命中幾句」的話，一個把 `#[cfg(not(windows))]` 那支改成
-        /// 回 `HandedOver` 的 Linux 組建照樣是綠的——它會對著一台根本沒有通知
-        /// 中心的機器說「我把通知交給 Windows 了」。所以兩邊都要釘：這個平台
-        /// 該講的那幾句要出現，不該講的那幾句一句都不准出現。
+        /// 這一條走的是**真的** `run_with`（沒有注入），所以它同時釘住
+        /// 「`platform_notify()` 在這個平台上回的那一種，真的被印出來了」。
+        /// 在 Linux 上這是一個很緊的斷言（只有 `NotOnThisBuild` 過得了）；
+        /// **在 Windows 上它鬆得多**——那邊三種結果都合法，這條測試分不出來，
+        /// 分得出來的是底下那條注入版的 `each_outcome_prints_its_own_line`。
         #[test]
         fn the_bell_never_rings_without_a_line_saying_which_channels_it_used() {
-            // Windows 上真正走到哪一格要看那台機器（有沒有建成視窗、殼層收不
-            // 收），三句都是合法答案；能確定的是它**不會**是「這個組建沒有」。
-            let mine: Vec<SystemNotice> = SystemNotice::ALL
-                .into_iter()
-                .filter(|n| (*n == SystemNotice::NotOnThisBuild) != cfg!(windows))
-                .collect();
             for requested in [true, false] {
                 let (tmp, config) = prepared("watch-notify-report", "完成", true);
                 let mut ticks = [100_000, 100_000].into_iter();
@@ -8699,23 +8812,96 @@ pub mod watch {
                 )
                 .expect("run");
                 let printed = String::from_utf8_lossy(&out).into_owned();
-
-                let hit = mine.iter().filter(|n| printed.contains(n.line())).count();
+                let hit: Vec<SystemNotice> = SystemNotice::ALL
+                    .into_iter()
+                    .filter(|n| printed.contains(n.line()))
+                    .collect();
                 assert_eq!(
-                    hit,
+                    hit.len(),
                     usize::from(requested),
                     "鈴聲和交代那一行不同步（requested={requested}）：{printed}"
                 );
-
-                let wrong: Vec<SystemNotice> = SystemNotice::ALL
-                    .into_iter()
-                    .filter(|n| !mine.contains(n) && printed.contains(n.line()))
-                    .collect();
-                assert!(
-                    wrong.is_empty(),
-                    "這個平台印了一句它答不出來的話 {wrong:?}：{printed}"
-                );
+                if requested && !cfg!(windows) {
+                    // 這個組建根本沒有那條通道。印出別的四句裡任何一句都是謊話
+                    // ——尤其「我把一則系統通知交給 Windows 了」。
+                    assert_eq!(hit, [SystemNotice::NotOnThisBuild], "{printed}");
+                }
             }
+        }
+
+        /// **每一種結果各自印出自己那一句，而且只印自己那一句。**
+        ///
+        /// 上面那條走真的 `platform_notify()`，所以它在 Linux 上只碰得到五分之
+        /// 一、在 Windows 上分不出三種。這一條把訊號注進去，五種全跑一遍——
+        /// 兩個平台上都一樣緊。
+        ///
+        /// 它擋的是這一刀：`notify_with` 裡的 `notice.line()` 換成
+        /// `if cfg!(windows) { HandedOver.line() } else { NotOnThisBuild.line() }`。
+        /// 那一刀在**兩趟 CI 上都是綠的**，如果沒有這一條的話——而它的後果是
+        /// Windows 上不管視窗建不建得起來，畫面永遠說「我把一則系統通知交給
+        /// Windows 了」，正好是這一輪要修的那個病本人。
+        #[test]
+        fn each_outcome_prints_its_own_line() {
+            for chosen in SystemNotice::ALL {
+                let (tmp, config) = prepared("watch-notify-injected", "完成", true);
+                let mut ticks = [100_000, 100_000].into_iter();
+                let mut out = Vec::new();
+                run_with_signal(
+                    &tmp.0,
+                    &config,
+                    &opts(true),
+                    &mut || ticks.next().expect("fake clock ran out"),
+                    &mut |_| {},
+                    &mut out,
+                    &mut |_| chosen,
+                )
+                .expect("run");
+                let printed = String::from_utf8_lossy(&out).into_owned();
+                assert!(
+                    printed.contains(chosen.line()),
+                    "{chosen:?} 沒被印出來：{printed}"
+                );
+                for other in SystemNotice::ALL {
+                    if other != chosen {
+                        assert!(
+                            !printed.contains(other.line()),
+                            "選的是 {chosen:?}，畫面上卻有 {other:?} 那一句：{printed}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// **她死掉的時候，那條通道拿到的是 `SkipThisEnding`。**
+        ///
+        /// 錯誤路徑不跳系統通知：那則氣泡寫死了「這一場盯梢停下來了」，而走到
+        /// 那裡最常見的是「目錄打錯了」這種開跑第一秒就炸掉的——對一場從來沒
+        /// 開始的盯梢來說那句話是錯的。這一條釘的是**傳下去的那個參數**，不是
+        /// 文案：把 `Toast::SkipThisEnding` 改成 `Toast::Send` 會紅。
+        #[test]
+        fn the_dying_run_does_not_ask_for_a_toast() {
+            let missing = std::path::Path::new("/nonexistent-sister-data-dir-for-test");
+            let config = Config::default();
+            let mut out = Vec::new();
+            let mut asked = Vec::new();
+            let _ = run_with_signal(
+                missing,
+                &config,
+                &opts(true),
+                &mut || 100_000,
+                &mut |_| {},
+                &mut out,
+                &mut |toast| {
+                    asked.push(toast);
+                    SystemNotice::NotForThisEnding
+                },
+            );
+            assert_eq!(asked, [Toast::SkipThisEnding], "錯誤路徑要了一則系統通知");
+            let printed = String::from_utf8_lossy(&out).into_owned();
+            assert!(
+                printed.contains(SystemNotice::NotForThisEnding.line()),
+                "她死了，響了一聲，卻沒說那一聲是怎麼響的：{printed}"
+            );
         }
 
         /// **她死掉的時候那一聲也要響，不然沉默會被讀成「還在跑」。**
@@ -8732,13 +8918,14 @@ pub mod watch {
                 let missing = std::path::Path::new("/nonexistent-sister-data-dir-for-test");
                 let config = Config::default();
                 let mut out = Vec::new();
-                let err = run_with(
+                let err = run_with_signal(
                     missing,
                     &config,
                     &opts(requested),
                     &mut || 100_000,
                     &mut |_| {},
                     &mut out,
+                    &mut |_| SystemNotice::NotOnThisBuild,
                 )
                 .expect_err("目錄不存在，這一趟本來就該失敗");
                 assert!(
@@ -8763,13 +8950,14 @@ pub mod watch {
             let mut out = Vec::new();
             let mut options = opts(true);
             options.quiet_for = Some(30_000);
-            run_with(
+            run_with_signal(
                 &tmp.0,
                 &config,
                 &options,
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
                 &mut out,
+                &mut |_| SystemNotice::NotOnThisBuild,
             )
             .expect("run");
             let text = String::from_utf8_lossy(&out).into_owned();
@@ -8827,13 +9015,14 @@ pub mod watch {
                 options.stop_after = 60_000;
                 let mut ticks = [100_000, 100_000, 160_000].into_iter();
                 let mut out = Vec::new();
-                run_with(
+                run_with_signal(
                     &tmp.0,
                     &config,
                     &options,
                     &mut || ticks.next().expect("fake clock ran out"),
                     &mut |_| {},
                     &mut out,
+                    &mut |_| SystemNotice::NotOnThisBuild,
                 )
                 .expect("run");
                 String::from_utf8_lossy(&out).into_owned()
@@ -8861,13 +9050,14 @@ pub mod watch {
                 config.brain.args = fake_brain("{\"happened\":false,\"because\":\"\"}");
                 let mut ticks = [100_000, 100_000].into_iter();
                 let mut out = Vec::new();
-                run_with(
+                run_with_signal(
                     &tmp.0,
                     &config,
                     &opts(false),
                     &mut || ticks.next().expect("fake clock ran out"),
                     &mut |_| {},
                     &mut out,
+                    &mut |_| SystemNotice::NotOnThisBuild,
                 )
                 .expect("run");
                 String::from_utf8_lossy(&out).into_owned()
@@ -8890,13 +9080,14 @@ pub mod watch {
             let (tmp, config) = prepared("watch-notify-announce", "完成", true);
             let mut ticks = [100_000, 100_000].into_iter();
             let mut out = Vec::new();
-            run_with(
+            run_with_signal(
                 &tmp.0,
                 &config,
                 &opts(true),
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
                 &mut out,
+                &mut |_| SystemNotice::NotOnThisBuild,
             )
             .expect("run");
             let text = String::from_utf8(out).unwrap();
@@ -8906,13 +9097,14 @@ pub mod watch {
             let (tmp, config) = prepared("watch-notify-silent", "完成", true);
             let mut ticks = [100_000, 100_000].into_iter();
             let mut out = Vec::new();
-            run_with(
+            run_with_signal(
                 &tmp.0,
                 &config,
                 &opts(false),
                 &mut || ticks.next().expect("fake clock ran out"),
                 &mut |_| {},
                 &mut out,
+                &mut |_| SystemNotice::NotOnThisBuild,
             )
             .expect("run");
             let text = String::from_utf8(out).unwrap();
