@@ -1,25 +1,43 @@
 //! 一個動作的**目標**可不可以交給作業系統。
 //!
-//! 放在這裡而不是放在字母人裡面，理由只有一個：**測試要跑得到。** CI 對
-//! `apps/desktop` 只做 `clippy` 和 `cargo build --release`，沒有 `cargo test`；
-//! 那個 crate 在 Linux 上連編都編不起來（缺 dbus）。一份寫在那裡的
-//! `#[cfg(test)] mod tests` 是四道閘門全綠也證明不了任何事的東西——這個 repo
-//! 已經有一整層那樣的程式碼了。搬到 `sister-hands`，`cargo test --workspace`
-//! 在 Linux 和 Windows 兩邊都會跑它。
+//! 放在這裡而不是放在字母人裡面，理由只有一個：**每個平台都要測得到。**
+//! desktop 是獨立 workspace，Linux 的 `cargo test --workspace` 連編都編不到它；
+//! Windows CI 從 alpha.100 起會另跑 desktop tests，但共用規則若留在那裡，Linux
+//! 仍然沒有覆蓋，CLI 呼叫端也得再抄一份。搬到 `sister-hands`，根 workspace 在
+//! Linux 和 Windows 兩邊都會跑它，而且兩個產品入口只認同一份判斷。
 //!
 //! 判斷全部是字串比對，不碰檔案系統，所以在哪個平台跑結果都一樣。
 
 use std::path::Path;
 
+use crate::Suggestion;
+
+/// 三種公開 suggestion 共用的一道目標白名單。執行隘口在呼叫 `Executor` 前走
+/// 一次；平台實作貼著 OS 呼叫再走一次，擋住日後繞過隘口或 TOCTOU 的退步。
+pub(crate) fn validate_suggestion(suggestion: &Suggestion) -> Result<(), String> {
+    match suggestion {
+        Suggestion::OpenUrl { url, .. } => validate_url(url),
+        Suggestion::OpenFile { path, .. } => validate_file(path),
+        Suggestion::FocusWindow { title, .. } => validate_window_title(title),
+    }
+}
+
 pub fn validate_url(url: &str) -> Result<(), String> {
     if url.chars().any(char::is_whitespace) || url.chars().any(char::is_control) {
         return Err("不會開啟：網址含空白或控制字元".into());
+    }
+    // WHATWG 的 http(s) parser 會把反斜線當成斜線，手寫的 authority
+    // parser 卻不會。例如 `https://evil.example\@example.com/` 在這裡若照
+    // `@` 切會讀成 `example.com`，瀏覽器實際開的卻是 `evil.example`。
+    // 這裡不嘗試重寫整套瀏覽器 parser；有歧義就不交給它。
+    if url.contains('\\') {
+        return Err("不會開啟：網址含反斜線，瀏覽器對它的解讀不唯一".into());
     }
     let Some((scheme, rest)) = url.split_once(':') else {
         return Err("不會開啟：網址沒有 scheme".into());
     };
     match scheme.to_ascii_lowercase().as_str() {
-        "http" | "https" if rest.starts_with("//") && rest.len() > 2 => Ok(()),
+        "http" | "https" if rest.starts_with("//") && host_of(url).is_some() => Ok(()),
         "http" | "https" => Err("不會開啟：網址沒有主機名稱".into()),
         // 白名單。`file:` `javascript:` `vbscript:` `data:` `shell:` `ms-…:`
         // 全部走這一條，不另外列一份看起來很兇、其實和這一行做同一件事的黑名單。
@@ -44,10 +62,39 @@ pub fn validate_file(path: &Path) -> Result<(), String> {
     if shown.trim().is_empty() {
         return Err("不會開啟：路徑是空的".into());
     }
-    // `\\?\` 和 `\\.\` 也從這裡走：兩者都以 `\\` 開頭，多寫兩個 `starts_with`
-    // 只是看起來比較周到，實際上一列都到不了。
-    if shown.starts_with(r"\\") {
+    // `PCWSTR` 以 NUL 結尾。`evil.exe\0.pdf` 若按 Rust 字串檢查會像文件，
+    // ShellExecuteW 實際只看見前面的 executable。其他控制字元也沒有一個
+    // 跨平台、可稽核的檔名語意，一起 fail-closed。
+    if shown.chars().any(char::is_control) {
+        return Err("不會開啟：檔案路徑含控制字元".into());
+    }
+    // `\\?\` 和 `\\.\` 也從這裡走。兩個 separator 的任何組合都算：Windows
+    // API 也接受 `//server/share`，而這支函式底下本來就刻意把 `/` 與 `\` 視為
+    // 同一種分隔符。只擋 `\\` 會讓同一條 UNC 換個拼法就通過。
+    let begins_with_two_separators = shown
+        .as_bytes()
+        .get(..2)
+        .is_some_and(|pair| pair.iter().all(|byte| matches!(byte, b'\\' | b'/')));
+    if begins_with_two_separators {
         return Err("不會開啟：網路路徑與 Windows device path 不在允許範圍".into());
+    }
+    // `ShellExecuteW` 的 lpFile 不只收檔案，也收 URI。若只看最後一段的副檔名，
+    // `https://evil.example/report.pdf` 會被當成可讀文件放行，最後卻由瀏覽器開啟，
+    // 整道 URL 來源政策因此被 action kind 繞掉。冒號只准出現在絕對 Windows
+    // 磁碟機前綴（`C:\\` / `C:/`）；`C:report.pdf` 是 drive-relative 路徑，語意
+    // 也取決於行程狀態，所以不收。
+    let bytes = shown.as_bytes();
+    let windows_drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    let has_other_colon = if windows_drive {
+        shown[2..].contains(':')
+    } else {
+        shown.contains(':')
+    };
+    if has_other_colon {
+        return Err("不會開啟：檔案路徑不能是 URI，也不能含磁碟機前綴以外的「:」".into());
     }
     // **不用 `Path::file_name` / `Path::extension`。** 那兩支在 Linux 上不認得
     // `\`，所以 `C:\work\report.pdf` 整串都會被當成檔名——連 `C:` 的冒號都算進去。
@@ -60,9 +107,10 @@ pub fn validate_file(path: &Path) -> Result<(), String> {
         return Err("不會開啟：檔名裡有「:」（alternate data stream）".into());
     }
     match name.rsplit_once('.') {
-        // 沒有副檔名：資料夾，或一個 Windows 不知道要拿什麼開的檔案。兩者都不會被
-        // 執行——Windows 是看副檔名決定要不要執行的。
-        None => Ok(()),
+        // 沒有副檔名可能是資料夾，也可能是 extensionless executable；光看字串
+        // 分不出來，而 ShellExecuteW 可以直接執行後者。這個 action 叫 open-file，
+        // 先整類拒絕；將來要開資料夾得在 OS 邊界用 metadata 證明它真是資料夾。
+        None => Err("不會開啟：路徑沒有可驗證的文件副檔名".into()),
         Some((_, ext)) if OPENABLE.iter().any(|ok| ext.eq_ignore_ascii_case(ok)) => Ok(()),
         Some((_, ext)) => Err(format!("不會開啟：「.{ext}」不在可開啟的檔案類型清單裡")),
     }
@@ -83,7 +131,33 @@ pub fn validate_window_title(title: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 一個網址的 **host**，正規化到可以跟「她記下來的那一份」比對。
+/// 方括號裡的 IPv6 literal。刻意不碰 `std::net`：產品的結構性承諾是出貨樹與
+/// 原始碼都沒有 socket API，`check-no-network.sh` 會把那個 namespace 也視為
+/// 越界。這裡只需要解析，不需要網路；IPv4-mapped 與 zone id 先 fail-closed。
+fn valid_ipv6_literal(value: &str) -> bool {
+    if value.is_empty()
+        || value.contains(":::")
+        || value.chars().any(|c| c != ':' && !c.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    let compressed = value.match_indices("::").count();
+    if compressed > 1 {
+        return false;
+    }
+    let groups: Vec<&str> = value.split(':').filter(|group| !group.is_empty()).collect();
+    if groups.iter().any(|group| group.len() > 4) {
+        return false;
+    }
+    match compressed {
+        0 => groups.len() == 8 && !value.starts_with(':') && !value.ends_with(':'),
+        1 => groups.len() < 8,
+        _ => false,
+    }
+}
+
+/// 從一個網址解析出 **host**，並統一 ASCII 大小寫。它不在這裡剝 `www.`；
+/// Chromium 可能省略一層的等價規則只寫在 [`same_site`]，才不會不小心剝兩層。
 ///
 /// 為什麼是 host 而不是整條網址：`focus_events.url` 那一欄的來源是 Chromium
 /// 的位址列，而位址列給的是**給人看的縮寫**——`kFormatUrlOmitHTTPS` 與
@@ -104,11 +178,15 @@ pub fn validate_window_title(title: &str) -> Result<(), String> {
 /// **不放行**，不是當成「沒有限制」。
 pub fn host_of(url: &str) -> Option<String> {
     let v = url.trim();
-    if v.is_empty() || v.chars().any(char::is_whitespace) {
+    if v.is_empty()
+        || v.chars().any(char::is_whitespace)
+        || v.chars().any(char::is_control)
+        || v.contains('\\')
+    {
         return None;
     }
     // scheme 是選配的：她記下來的那一份被砍掉了 scheme，模型讀來的那一份通常有。
-    let rest = match v.split_once("://") {
+    let (rest, had_scheme) = match v.split_once("://") {
         Some((scheme, rest)) => {
             // **只有 http/https 講得出「站」。** `chrome://settings` 有 `://`
             // 卻不是一個網站，早一版這裡把 `settings` 當成 host 回出去了。
@@ -116,7 +194,7 @@ pub fn host_of(url: &str) -> Option<String> {
             if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
                 return None;
             }
-            rest
+            (rest, true)
         }
         None => {
             // 沒有 `://` 卻有 `:` 在第一個 `/` 之前，可能是 `about:blank`
@@ -131,28 +209,51 @@ pub fn host_of(url: &str) -> Option<String> {
             {
                 return None;
             }
-            v
+            (v, false)
         }
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    // Chromium 會省略 scheme，但 scheme-less 的 `name@company.com` 更常是位址列
+    // 裡拿來搜尋的 email，不是一個帶 userinfo 的已完成 URL。完整 http(s) URL
+    // 仍按最後一個 `@` 解析；沒有 scheme 的歧義字串不拿來替網址背書。
+    if !had_scheme && authority.contains('@') {
+        return None;
+    }
     // userinfo：取最後一個 `@` 之後。
     let authority = match authority.rsplit_once('@') {
         Some((_, host)) => host,
         None => authority,
     };
-    let host = if let Some(end) = authority.strip_prefix('[').and_then(|r| r.find(']')) {
+    let host = if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        if !valid_ipv6_literal(&authority[1..end]) {
+            return None;
+        }
+        let after = &authority[end + 1..];
+        if !after.is_empty()
+            && !after
+                .strip_prefix(':')
+                .is_some_and(|port| port.parse::<u16>().is_ok())
+        {
+            return None;
+        }
         // IPv6 字面值：連方括號一起留著，`[::1]` 和 `::1` 不要變成兩個答案。
-        &authority[..end + 2]
+        &authority[..=end]
     } else {
-        authority.split(':').next().unwrap_or(authority)
+        if authority.contains(['[', ']']) {
+            return None;
+        }
+        match authority.split_once(':') {
+            Some((host, port)) if port.parse::<u16>().is_ok() => host,
+            Some(_) => return None,
+            None => authority,
+        }
     };
     let host = host.trim().to_ascii_lowercase();
     if host.is_empty() {
         return None;
     }
-    // `www.` 是位址列會省略的那一個，所以兩邊都要省，否則同一個站會變兩個答案。
-    let host = host.strip_prefix("www.").unwrap_or(&host).to_string();
-    if host.is_empty() { None } else { Some(host) }
+    Some(host)
 }
 
 /// 她記下來的那條網址，跟她正要打開的那條，是不是同一個站。
@@ -160,8 +261,15 @@ pub fn host_of(url: &str) -> Option<String> {
 /// 兩邊都走 [`host_of`]。任何一邊講不出 host 就是 `false`——**「我看不懂」
 /// 不可以讀成「可以」**。
 pub fn same_site(recorded: &str, target: &str) -> bool {
+    fn without_one_www(host: &str) -> &str {
+        host.strip_prefix("www.").unwrap_or(host)
+    }
     match (host_of(recorded), host_of(target)) {
-        (Some(a), Some(b)) => a == b,
+        (Some(a), Some(b)) => {
+            // Chromium 可能把位址列最外面一層 trivial `www.` 省掉。只允許**一邊
+            // 少一層**，不反覆剝：`www.www.evil` 和 `evil` 仍是兩個站。
+            a == b || without_one_www(&a) == b || a == without_one_www(&b)
+        }
         _ => false,
     }
 }
@@ -197,6 +305,21 @@ mod tests {
             host_of("https://a@example.com@evil.com/").as_deref(),
             Some("evil.com")
         );
+        // 沒有 scheme 的這個形狀也可能只是位址列裡拿來搜尋的 email；不能把它
+        // 當成「company.com 出現過」的憑據。
+        assert_eq!(host_of("john.smith@company.com"), None);
+        assert!(!same_site("john.smith@company.com", "https://company.com/"));
+    }
+
+    /// http(s) 裡的反斜線會被瀏覽器當成斜線。如果這裡按普通字元
+    /// 讀，`@` 後面那一段會借到一個已記錄網站的票，但瀏覽器會開另一站。
+    #[test]
+    fn a_backslash_cannot_borrow_the_site_after_an_at_sign() {
+        let disguised = r"https://evil.example\@example.com/collect";
+        assert_eq!(host_of(disguised), None);
+        assert!(!same_site("example.com", disguised));
+        let error = validate_url(disguised).unwrap_err();
+        assert!(error.contains("反斜線"), "{error}");
     }
 
     /// 子字串比對會全中的那三種，這裡必須全不中。
@@ -255,6 +378,22 @@ mod tests {
             Some("localhost")
         );
         assert!(same_site("localhost:3000/a", "http://localhost/b"));
+        for malformed in [
+            "https://[::1",
+            "https://[::1]evil.example/",
+            "https://[::1]:evil/",
+            "https://[evil.example]/",
+            "https://[]/",
+            "https://[::::]/",
+            "https://[::1]:99999/",
+            "https://example.com:evil/",
+            "https://example.com:65536/",
+            "https:///example.com/",
+            "https:////example.com/",
+        ] {
+            assert_eq!(host_of(malformed), None, "{malformed}");
+            assert!(validate_url(malformed).is_err(), "{malformed}");
+        }
     }
     use super::*;
 
@@ -298,6 +437,17 @@ mod tests {
             r"C:\work\a.exe:note.txt",
             r"\\server\share\note.txt",
             r"\\?\C:\note.txt",
+            "//server/share/note.txt",
+            r"/\server/share/note.txt",
+            r"\/server/share/note.txt",
+            "//?/C:/note.txt",
+            "C:\\work\\evil.exe\0.pdf",
+            r"C:\work\payload",
+            r"C:\work\inbox",
+            "https://evil.example/report.pdf",
+            "file:///C:/work/report.pdf",
+            r"C:report.pdf",
+            r"C:\work\https://evil.example/report.pdf",
         ] {
             let error = validate_file(Path::new(bad)).unwrap_err();
             assert!(error.contains("不會開啟"), "{bad}: {error}");
@@ -307,8 +457,6 @@ mod tests {
             r"C:\work\report.pdf",
             r"C:\work\notes.md",
             r"C:\work\data.CSV",
-            // 資料夾：沒有副檔名的東西 Windows 不會拿去執行。
-            r"C:\work\inbox",
             // 同一組字串換成正斜線，答案必須一樣——這一支不能有兩種平台行為。
             "C:/work/report.pdf",
         ] {

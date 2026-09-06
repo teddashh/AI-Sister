@@ -118,6 +118,25 @@ fn cmd_for_shell(data_dir: &Path, default: Option<&Path>, rest: &str, shell: She
     }
 }
 
+/// 回答 URL 政策要指到**這一趟真的在讀的設定檔**。
+///
+/// `url-policy` 是全域設定，不跟 `--data-dir` 走。所以這裡不可以借
+/// [`cmd`] 幫它只帶資料目錄：`sister --config X do ...` 若被擋下來，
+/// 下一行卻去改預設設定檔，重跑原指令還是會永遠停在「我還沒問過」。
+fn url_policy_cmd(explicit_config: Option<&Path>) -> String {
+    url_policy_cmd_for_shell(explicit_config, platform_shell())
+}
+
+fn url_policy_cmd_for_shell(explicit_config: Option<&Path>, shell: Shell) -> String {
+    match explicit_config {
+        Some(path) => format!(
+            "sister {} url-policy",
+            option_with_value(shell, "--config", &path.to_string_lossy())
+        ),
+        None => "sister url-policy".to_string(),
+    }
+}
+
 /// 只有兩邊都能 canonicalize、而且確定指到同一個目錄時才算預設資料目錄。
 fn is_default_data_dir(data_dir: &Path, default: Option<&Path>) -> bool {
     default.is_some_and(
@@ -307,6 +326,27 @@ mod command_tests {
         assert_eq!(
             command,
             "sister --data-dir /tmp/plain-path forget --last 30d --yes"
+        );
+    }
+
+    #[test]
+    fn url_policy_answer_points_back_to_the_explicit_config_not_the_data_dir() {
+        let config = Path::new("Ted's settings/config.toml");
+        let command = url_policy_cmd_for_shell(Some(config), Shell::PowerShell);
+        assert_eq!(
+            command,
+            "sister --config 'Ted''s settings/config.toml' url-policy"
+        );
+        let argv = split_printed_command(Shell::PowerShell, &command)
+            .expect("PowerShell 指令要拆得回 argv");
+        let parsed = crate::Cli::try_parse_from(argv)
+            .unwrap_or_else(|error| panic!("印出的 URL 政策指令要能貼回 sister：{error}"));
+        assert_eq!(parsed.config.as_deref(), Some(config));
+        assert!(matches!(parsed.command, crate::Command::UrlPolicy { .. }));
+
+        assert_eq!(
+            url_policy_cmd_for_shell(None, Shell::Posix),
+            "sister url-policy"
         );
     }
 
@@ -2176,6 +2216,11 @@ pub mod act {
         /// `None` ＝ 還沒問過，不是預設值。見
         /// [`sister_hands::url_policy::UrlOpenPolicy::from_answer`]。
         pub url_open: Option<sister_hands::url_policy::UrlOpenAnswer>,
+        /// 這一趟 CLI 明確收到的 `--config`。沒有就是預設設定檔。
+        ///
+        /// 這一欄只用來印下一步：政策判斷已經用 `url_open` 傳進來的
+        /// 值做完。但被擋下來時，他必須被帶回同一份設定檔才改得到它。
+        pub url_policy_config: Option<PathBuf>,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -2410,6 +2455,7 @@ pub mod act {
         never_inherits: u32,
         url_policy_not_answered: u32,
         url_origin_unknown: u32,
+        target_rejected: u32,
         mismatched: u32,
         wrong_path: u32,
         pulled: u32,
@@ -2437,6 +2483,7 @@ pub mod act {
                     self.url_policy_not_answered += 1
                 }
                 sister_hands::RefusalBucket::UrlOriginUnknown => self.url_origin_unknown += 1,
+                sister_hands::RefusalBucket::TargetRejectedBeforeOs => self.target_rejected += 1,
                 sister_hands::RefusalBucket::ShownStepMismatch => self.mismatched += 1,
                 sister_hands::RefusalBucket::WrongPath => self.wrong_path += 1,
             }
@@ -2501,9 +2548,9 @@ pub mod act {
             }
             if self.url_policy_not_answered > 0 {
                 // 這一格和下面那一格分開，是因為它們的下一步完全不一樣：
-                // 這一格一個動作就全部解決，下面那一格要他一步一步自己看。
+                // 這一格要先回答，下面那一格則已經有答案、要逐步自己看。
                 out.push_str(&format!(
-                    "，{} 步要開網址而我還沒問過你要不要讓我自己按（不是你說了不要；跑 `{answer_cmd}` 回答一次就全部解決）",
+                    "，{} 步要開網址而我還沒問過你要不要讓我自己按（不是你說了不要；跑 `{answer_cmd}` 回答後會照你選的規則處理）",
                     self.url_policy_not_answered,
                 ));
             }
@@ -2511,6 +2558,12 @@ pub mod act {
                 out.push_str(&format!(
                     "，{} 步的網址過不了你選的那道規則（放寬授權沒有用；上面每一步各自寫了是哪一種）",
                     self.url_origin_unknown
+                ));
+            }
+            if self.target_rejected > 0 {
+                out.push_str(&format!(
+                    "，{} 步的目標在碰到作業系統前被白名單擋下來（放寬授權沒有用；上面每一步寫了是哪條規則）",
+                    self.target_rejected
                 ));
             }
             if self.never_inherits > 0 {
@@ -2558,12 +2611,12 @@ pub mod act {
         }
         /// 這個網址的站，在她自己的紀錄裡出現過嗎（PHASES #42）。
         ///
-        /// 預設是 `SheIsNotReadingUrls`，也就是 **fail-closed**：一個沒有實作
+        /// 預設是 `NoTrustedRecordedUrls`，也就是 **fail-closed**：一個沒有實作
         /// 這支方法的 source 不會意外地替某個網址背書。它同時是誠實的——
         /// 那種 source 確實一列網址都讀不到。真正那一份實作在
         /// [`Db::site_in_her_record`]，由 `sister-core` 自己的兩條測試蓋。
         fn site_in_her_record(&self, _url: &str) -> Result<sister_hands::url_policy::UrlOrigin> {
-            Ok(sister_hands::url_policy::UrlOrigin::SheIsNotReadingUrls)
+            Ok(sister_hands::url_policy::UrlOrigin::NoTrustedRecordedUrls)
         }
         fn input_window_covering(
             &self,
@@ -2590,8 +2643,8 @@ pub mod act {
             Db::live_commitments(self)
         }
         /// 真正那一份。**沒有這三行，這道閘門對每一個網址都會答
-        /// `SheIsNotReadingUrls`**——一台好機器上，說得出來源的那條路一次都
-        /// 不會成立，而畫面上的理由是「我沒在讀網址」，每個字都是假的。
+        /// `NoTrustedRecordedUrls`**——一台有可採信網址紀錄的機器上，說得出來源的那條路
+        /// 一次都不會成立，而畫面會把非空集合講成空集合。
         fn site_in_her_record(&self, url: &str) -> Result<sister_hands::url_policy::UrlOrigin> {
             Db::site_in_her_record(self, url)
         }
@@ -2657,37 +2710,6 @@ pub mod act {
 
     /// 這一步的網址過不過得了他選的那道規則（PHASES #42）——過得了回 `Ok(None)`。
     ///
-    /// **查不動的時候往上丟，不當成「她沒在讀網址」。** 那一句話會叫他去修
-    /// 擷取，而壞掉的其實是這次查詢；照著做等於去修一個沒有壞的東西。這是
-    /// 這個 repo 一路在修的那顆「兩種 0」的第三種形狀：把錯誤讀成一個測量值。
-    ///
-    /// 查詢是惰性的：他還沒被問過、或者他選了「一律當場按」的時候，
-    /// `site_in_her_record` 不會被呼叫（那兩種情況查了也是白查）。
-    fn url_gap(
-        source: &impl StepSource,
-        action: &sister_hands::ActionSnapshot,
-        answer: Option<sister_hands::url_policy::UrlOpenAnswer>,
-    ) -> Result<Option<sister_hands::UrlOriginGap>> {
-        let mut failure = None;
-        let gap = sister_hands::url_policy::url_origin_gap(
-            action,
-            sister_hands::ApprovedBy::StandingGrant,
-            sister_hands::url_policy::UrlOpenPolicy::from_answer(answer),
-            |url| match source.site_in_her_record(url) {
-                Ok(origin) => origin,
-                Err(e) => {
-                    failure = Some(e);
-                    // 這個值不會被用到——下面那個 `match` 會把錯誤丟出去。
-                    sister_hands::url_policy::UrlOrigin::SheIsNotReadingUrls
-                }
-            },
-        );
-        match failure {
-            Some(e) => Err(e),
-            None => Ok(gap),
-        }
-    }
-
     fn unattended_target_frame_refusal(
         source: &impl StepSource,
         agreed_evidence_json: Option<&str>,
@@ -3395,68 +3417,51 @@ pub mod act {
                 at_ms: clock(),
                 action: action.clone(),
             })?;
-            let authorized = if opts.unattended {
-                if let Some((message, why)) = unattended_target_frame_refusal(
-                    source,
-                    commitment.agreed_evidence_json.as_deref(),
-                    &commitment.evidence_json,
-                    commitment
-                        .allowed_next_step_fact
-                        .zip(expected_target.as_deref()),
-                )? {
-                    let reason = RefusalReason::UnattendedTargetHasNoCitedFrame { why };
-                    tally.count_refusal(&reason);
-                    writeln!(out, "沒有做，也沒有交給作業系統：{message}")?;
-                    log.append(&ActionEvent::Refused {
-                        at_ms: clock(),
-                        action: action.clone(),
-                        reason,
-                    })?;
-                    None
-                } else {
-                    match run.grant().authorize_unattended(&step, clock()) {
+            let authorized =
+                if opts.unattended {
+                    if let Some((message, why)) = unattended_target_frame_refusal(
+                        source,
+                        commitment.agreed_evidence_json.as_deref(),
+                        &commitment.evidence_json,
+                        commitment
+                            .allowed_next_step_fact
+                            .zip(expected_target.as_deref()),
+                    )? {
+                        let reason = RefusalReason::UnattendedTargetHasNoCitedFrame { why };
+                        tally.count_refusal(&reason);
+                        writeln!(out, "沒有做，也沒有交給作業系統：{message}")?;
+                        log.append(&ActionEvent::Refused {
+                            at_ms: clock(),
+                            action: action.clone(),
+                            reason,
+                        })?;
+                        None
+                    } else {
+                        match run.grant().authorize_unattended(
+                        &step,
+                        clock(),
+                        sister_hands::url_policy::UrlOpenPolicy::from_answer(opts.url_open),
+                        |url| source.site_in_her_record(url),
+                    ) {
                         // **這道網址閘門擺在授權書通過之後，不是之前。** 兩邊都
                         // 是拒絕、都不會執行，所以順序只影響他讀到哪一句——而
                         // 「這個 app 不在授權內」是比較根本的那一句：先講網址
                         // 政策的話，一個授權書根本沒涵蓋這一步的人會去改設定，
                         // 改完還是不會過。
                         Ok((approval, permit)) => {
-                            if let Some(why) = url_gap(source, &action, opts.url_open)? {
-                                let host = match &action {
-                                    sister_hands::ActionSnapshot::OpenUrl { url } => {
-                                        sister_hands::target_policy::host_of(url)
-                                    }
-                                    _ => None,
-                                };
-                                let reason = RefusalReason::UnattendedUrlOriginUnknown { why };
-                                tally.count_refusal(&reason);
-                                writeln!(
-                                    out,
-                                    "沒有做，也沒有交給作業系統：{}",
-                                    why.unattended_message(
-                                        host.as_deref(),
-                                        &cmd(data_dir, "url-policy"),
-                                    )
-                                )?;
-                                log.append(&ActionEvent::Refused {
-                                    at_ms: clock(),
-                                    action: action.clone(),
-                                    reason,
-                                })?;
-                                None
-                            } else {
-                                if let Some(line) = &target_drive_line {
-                                    writeln!(out, "{line}")?;
-                                }
-                                log.append(&ActionEvent::Approved {
-                                    at_ms: clock(),
-                                    action: action.clone(),
-                                    by: Some(sister_hands::ApprovedBy::StandingGrant),
-                                })?;
-                                Some((approval, button.take_up(permit)))
+                            if let Some(line) = &target_drive_line {
+                                writeln!(out, "{line}")?;
                             }
+                            log.append(&ActionEvent::Approved {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                by: Some(sister_hands::ApprovedBy::StandingGrant),
+                            })?;
+                            Some((approval, button.take_up(permit)?))
                         }
-                        Err(rejection) => {
+                        Err(sister_hands::semi_action::UnattendedAuthorizationFailure::Grant(
+                            rejection,
+                        )) => {
                             let reason = RefusalReason::NotCoveredByGrant { rejection };
                             tally.count_refusal(&reason);
                             writeln!(
@@ -3471,48 +3476,79 @@ pub mod act {
                             })?;
                             None
                         }
+                        Err(sister_hands::semi_action::UnattendedAuthorizationFailure::UrlPolicy(
+                            why,
+                        )) => {
+                            let host = match &action {
+                                sister_hands::ActionSnapshot::OpenUrl { url } => {
+                                    sister_hands::target_policy::host_of(url)
+                                }
+                                _ => None,
+                            };
+                            let reason = RefusalReason::UnattendedUrlOriginUnknown { why };
+                            tally.count_refusal(&reason);
+                            writeln!(
+                                out,
+                                "沒有做，也沒有交給作業系統：{}",
+                                why.unattended_message(
+                                    host.as_deref(),
+                                    Some(&url_policy_cmd(opts.url_policy_config.as_deref())),
+                                )
+                            )?;
+                            log.append(&ActionEvent::Refused {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                reason,
+                            })?;
+                            None
+                        }
+                        Err(
+                            sister_hands::semi_action::UnattendedAuthorizationFailure::OriginLookup(
+                                error,
+                            ),
+                        ) => return Err(error),
                     }
-                }
-            } else {
-                let presented = PresentedStep::new(step.clone());
-                match ask(input, out, &_watcher.pulled)? {
-                    Answer::Decline => {
-                        tally.declined += 1;
-                        log.append(&ActionEvent::Refused {
-                            at_ms: clock(),
-                            action: action.clone(),
-                            reason: RefusalReason::UserDeclinedThisStep,
-                        })?;
-                        None
                     }
-                    Answer::Abort(by) => {
-                        let event = run.abort(clock(), by);
-                        log.append(&event)?;
-                        terminal = Some(match event {
-                            ActionEvent::Aborted {
-                                after_completed_steps,
-                                by,
-                                ..
-                            } => RunConclusion::Aborted {
-                                after_completed_steps,
-                                by,
-                            },
-                            _ => unreachable!("abort always returns Aborted"),
-                        });
-                        break;
+                } else {
+                    let presented = PresentedStep::new(step.clone());
+                    match ask(input, out, &_watcher.pulled)? {
+                        Answer::Decline => {
+                            tally.declined += 1;
+                            log.append(&ActionEvent::Refused {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                reason: RefusalReason::UserDeclinedThisStep,
+                            })?;
+                            None
+                        }
+                        Answer::Abort(by) => {
+                            let event = run.abort(clock(), by);
+                            log.append(&event)?;
+                            terminal = Some(match event {
+                                ActionEvent::Aborted {
+                                    after_completed_steps,
+                                    by,
+                                    ..
+                                } => RunConclusion::Aborted {
+                                    after_completed_steps,
+                                    by,
+                                },
+                                _ => unreachable!("abort always returns Aborted"),
+                            });
+                            break;
+                        }
+                        Answer::Approve => {
+                            let approval = presented.approve();
+                            let suggestion = button.press();
+                            log.append(&ActionEvent::Approved {
+                                at_ms: clock(),
+                                action: action.clone(),
+                                by: Some(sister_hands::ApprovedBy::Press),
+                            })?;
+                            Some((approval, suggestion))
+                        }
                     }
-                    Answer::Approve => {
-                        let approval = presented.approve();
-                        let suggestion = button.press();
-                        log.append(&ActionEvent::Approved {
-                            at_ms: clock(),
-                            action: action.clone(),
-                            by: Some(sister_hands::ApprovedBy::Press),
-                        })?;
-                        Some((approval, suggestion))
-                    }
-                }
-            };
+                };
             if let Some((approval, suggestion)) = authorized {
                 // **不是 `step_now`。** `--minutes` 那一維說的是「這張授權書
                 // 多久後失效」，而失效要管得住的是**她真的動手的那一刻**，
@@ -3668,7 +3704,7 @@ pub mod act {
                 },
             })?,
         }
-        let refusals = tally.refusal_clauses(&cmd(data_dir, "url-policy"));
+        let refusals = tally.refusal_clauses(&url_policy_cmd(opts.url_policy_config.as_deref()));
         if opts.unattended {
             writeln!(
                 out,
@@ -3909,7 +3945,7 @@ pub mod act {
 
         impl StepSource for Source {
             /// 這個假貨代表**一台正常的機器**：有在讀網址，而且看過這個站。
-            /// 不覆寫的話它會用 trait 的 fail-closed 預設（`SheIsNotReadingUrls`），
+            /// 不覆寫的話它會用 trait 的 fail-closed 預設（`NoTrustedRecordedUrls`），
             /// 於是每一條無人值守測試都會被網址閘門擋在門外。
             fn site_in_her_record(
                 &self,
@@ -4196,7 +4232,10 @@ pub mod act {
         /// 這條測試一律按「不要」，所以它不該被呼叫到——被呼叫到就是流程走錯了。
         struct NeverRuns;
         impl sister_hands::Executor for NeverRuns {
-            fn execute(&mut self, _: &sister_hands::Suggestion) -> Result<String, String> {
+            fn execute(
+                &mut self,
+                _: &sister_hands::Suggestion,
+            ) -> std::result::Result<String, sister_hands::ExecutorError> {
                 panic!("按了「不要」還是執行了")
             }
             fn hands_attached(&self) -> sister_hands::Attached {
@@ -4399,7 +4438,10 @@ pub mod act {
 
         struct AlwaysSucceeds;
         impl sister_hands::Executor for AlwaysSucceeds {
-            fn execute(&mut self, _: &sister_hands::Suggestion) -> Result<String, String> {
+            fn execute(
+                &mut self,
+                _: &sister_hands::Suggestion,
+            ) -> std::result::Result<String, sister_hands::ExecutorError> {
                 Ok("做完了".into())
             }
             fn hands_attached(&self) -> sister_hands::Attached {
@@ -5010,10 +5052,13 @@ pub mod act {
         }
 
         impl sister_hands::Executor for Fake {
-            fn execute(&mut self, suggestion: &sister_hands::Suggestion) -> Result<String, String> {
+            fn execute(
+                &mut self,
+                suggestion: &sister_hands::Suggestion,
+            ) -> std::result::Result<String, sister_hands::ExecutorError> {
                 self.calls.push(suggestion.snapshot());
                 match &self.fail {
-                    Some(error) => Err(error.clone()),
+                    Some(error) => Err(sister_hands::ExecutorError::platform(error.clone())),
                     None => Ok("假的執行器接受了".into()),
                 }
             }
@@ -5037,6 +5082,7 @@ pub mod act {
                 show_grant: false,
                 // 預設「還沒問過」＝ fail-closed。要驗放行那條路的測試自己指定。
                 url_open: None,
+                url_policy_config: None,
             }
         }
 
@@ -5452,7 +5498,10 @@ pub mod act {
             calls: Vec<ActionSnapshot>,
         }
         impl sister_hands::Executor for PullAfterFirst {
-            fn execute(&mut self, suggestion: &sister_hands::Suggestion) -> Result<String, String> {
+            fn execute(
+                &mut self,
+                suggestion: &sister_hands::Suggestion,
+            ) -> std::result::Result<String, sister_hands::ExecutorError> {
                 self.calls.push(suggestion.snapshot());
                 sister_hands::kill_switch::pull(&self.data_dir, 5555).unwrap();
                 Ok("第一步完成".into())
@@ -5511,7 +5560,10 @@ pub mod act {
 
         struct PulledAtGate;
         impl sister_hands::Executor for PulledAtGate {
-            fn execute(&mut self, _: &sister_hands::Suggestion) -> Result<String, String> {
+            fn execute(
+                &mut self,
+                _: &sister_hands::Suggestion,
+            ) -> std::result::Result<String, sister_hands::ExecutorError> {
                 panic!("拔手後不可以執行")
             }
             fn hands_attached(&self) -> sister_hands::Attached {
@@ -6566,6 +6618,66 @@ pub mod act {
             assert!(described.contains("chrome.exe"), "{described}");
             assert!(described.contains("open-url"), "{described}");
             assert!(described.contains("最多 3 步"), "{described}");
+        }
+
+        #[test]
+        fn saying_yes_to_an_unsafe_file_target_is_logged_as_refused_before_os() {
+            let unsafe_step =
+                serde_json::json!({"action": "open_file", "path": "C:\\work\\payload.exe"})
+                    .to_string();
+            let source = Source {
+                rows: vec![card(8, Some(&unsafe_step), &[1], None)],
+                apps: [(1, "chrome.exe".to_string())].into_iter().collect(),
+                ..Source::default()
+            };
+            let mut options = opts("開這個檔案", &["chrome.exe"], 1, 5, false);
+            options.allow = vec!["open-file".into()];
+
+            let run = go("act-unsafe-file", &source, &options, "好\n", None);
+            assert!(
+                run.executor.calls.is_empty(),
+                "不安全的目標不可以交給 executor：{}",
+                run.out
+            );
+
+            let events = run.events();
+            let refusals: Vec<&RefusalReason> = events
+                .iter()
+                .filter_map(|event| match event {
+                    ActionEvent::Refused { reason, .. } => Some(reason),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(refusals.len(), 1, "拒絕結果只能有一列：{events:?}");
+            let RefusalReason::TargetRejectedBeforeOs { why } = refusals[0] else {
+                panic!("不安全的目標必須記成 pre-OS refusal：{events:?}");
+            };
+            assert!(
+                why.contains(".exe"),
+                "拒絕理由要說出哪個目標規則擋住了：{why}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, ActionEvent::Executed { .. })),
+                "連 executor 都沒收到的動作不可以寫成 Executed：{events:?}"
+            );
+            assert!(
+                run.out
+                    .contains("沒有做，也沒有交給作業系統：目標在交給作業系統前被擋下來"),
+                "使用者當場要看得出這一步沒有執行：{}",
+                run.out
+            );
+            assert!(
+                !run.out.contains("做了："),
+                "拒絕不可以看起來像成功：{}",
+                run.out
+            );
+            assert!(
+                !run.out.contains("交出去了，那一端失敗了"),
+                "pre-OS refusal 不可以看起來像平台失敗：{}",
+                run.out
+            );
         }
 
         /// **這是 A1 的驗收。** 一輪互動花掉的時間如果全部蓋同一個 `at_ms`，
@@ -7644,7 +7756,7 @@ pub mod act {
                 run.out
             );
             assert!(
-                run.out.contains("回答一次就全部解決"),
+                run.out.contains("回答後會照你選的規則處理"),
                 "收尾沒算進「還沒問過」那一格：{}",
                 run.out
             );
@@ -7715,7 +7827,7 @@ pub mod act {
             .expect("這一趟該印拒絕");
             assert!(run.executor.calls.is_empty(), "{}", run.out);
             assert!(
-                run.out.contains("在我自己的紀錄裡從來沒出現過"),
+                run.out.contains("在我目前可採信的錄製來源裡找不到"),
                 "沒講出是哪一種說不出來：{}",
                 run.out
             );
@@ -7732,41 +7844,41 @@ pub mod act {
                 run.out
             );
             assert!(
-                !run.out.contains("回答一次就全部解決"),
+                !run.out.contains("回答後會照你選的規則處理"),
                 "被算成了「還沒問過」，而他明明答過了：{}",
                 run.out
             );
         }
 
         #[test]
-        fn a_machine_that_reads_no_urls_says_so_instead_of_blaming_this_one_site() {
+        fn no_trusted_recorded_urls_names_the_empty_evidence_without_guessing_why() {
             let run = go_unattended_answering(
                 "act-url-not-reading",
                 Some(sister_hands::url_policy::UrlOpenAnswer::WhenYouCanNameTheOrigin),
-                &SiteSays::new(sister_hands::url_policy::UrlOrigin::SheIsNotReadingUrls),
+                &SiteSays::new(sister_hands::url_policy::UrlOrigin::NoTrustedRecordedUrls),
                 &standing_grant("任務", "chrome.exe", 3, 3_600_000),
                 ticking(1_700_000_000_000),
             )
             .expect("這一趟該印拒絕");
             assert!(run.executor.calls.is_empty(), "{}", run.out);
             assert!(
-                run.out.contains("我這一整條路沒在跑"),
-                "把「我沒在讀網址」講成了「這個網址可疑」：{}",
+                run.out.contains("錄製來源") && run.out.contains("我分不出是哪一種"),
+                "沒有把可採信來源的空集合和不知道原因分開：{}",
                 run.out
             );
             assert!(
-                !run.out.contains("在我自己的紀錄裡從來沒出現過"),
+                !run.out.contains("在我目前可採信的錄製來源裡找不到"),
                 "兩種「說不出來源」講成了同一句：{}",
                 run.out
             );
         }
 
-        /// 查詢自己壞掉的時候**往上丟**，不可以印成「她沒在讀網址」。
+        /// 查詢自己壞掉的時候**往上丟**，不可以印成「目前沒有網址證據」。
         ///
         /// 那一句話會叫他去修擷取，而壞掉的其實是這次查詢——照著做等於去修一個
         /// 沒有壞的東西。這是「兩種 0」的第三種形狀：把錯誤讀成一個測量值。
         #[test]
-        fn a_broken_lookup_is_raised_not_reported_as_her_not_reading_urls() {
+        fn a_broken_lookup_is_raised_not_reported_as_empty_evidence() {
             let failed = go_unattended_answering(
                 "act-url-lookup-broken",
                 Some(sister_hands::url_policy::UrlOpenAnswer::WhenYouCanNameTheOrigin),
@@ -7812,7 +7924,9 @@ pub mod act {
             use sister_core::model::{FocusEvent, FocusKind, FocusSnapshot};
             let dir = crate::ops::tmp::Tmp::new("act-url-real-source");
             let mut db = sister_core::db::Db::open(&dir.0.join("sister.db")).expect("open db");
-            let session = db.start_session("test", "0").expect("session");
+            let session = db
+                .start_session(sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM, "0")
+                .expect("session");
             db.insert_focus(
                 session,
                 &FocusEvent {
@@ -7821,7 +7935,7 @@ pub mod act {
                     snapshot: FocusSnapshot {
                         app_id: Some("chrome.exe".into()),
                         app_name: Some("Chrome".into()),
-                        window_title: Some("他真的開過的那個站".into()),
+                        window_title: Some("位址列留下這個站".into()),
                         // 位址列給的是縮寫過的字串，比對只到 host 這一層。
                         url: Some("example.com/a?b=c".into()),
                         pid: Some(1),

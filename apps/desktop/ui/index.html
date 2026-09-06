@@ -59,6 +59,22 @@
         </div>
         <p class="utterance-result" data-utterance-result></p>
       </section>
+      <!--
+        她問的那一題（PHASES #42）。**只在他還沒答過的時候出現**——一個問過
+        的問題再問一次是騷擾，而這個視窗整天掛在螢幕角落。
+
+        兩顆按鈕的字不寫在這裡，是從 `sister_hands::url_policy::UrlOpenAnswer`
+        拿的：同一題 `sister url-policy` 也在問，文案分兩份的話他答的是哪一個
+        沒人說得準。
+      -->
+      <section class="asked" data-url-policy hidden>
+        <p class="asked-question" data-url-policy-question></p>
+        <!-- 「還沒答之前我怎麼做」。少了這一句，一個從來沒被問過的人會以為
+             現在這個行為是他自己選的。 -->
+        <p class="asked-note" data-url-policy-note></p>
+        <div class="asked-actions" data-url-policy-actions></div>
+        <p class="asked-result" data-url-policy-result aria-live="polite"></p>
+      </section>
       <aside class="gate-debug" data-gate-debug hidden></aside>
       <aside class="hands-log" data-hands-log aria-label="行動紀錄"></aside>
       <!-- 每一筆答案都掛著出處。沒有出處的那一行不會出現在這裡。 -->

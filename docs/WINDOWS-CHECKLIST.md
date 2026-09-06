@@ -1230,8 +1230,10 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 核准、四個維度的拒絕、中止與步數上限，四百多行，**而且一個呼叫端都沒有**。
 alpha.70 把第一個接上去：`sister do`。
 
-**這一整節在終端機裡做，不用開字母人。這是目前唯一一條她真的會動手的路。**
-每一步都要你親手打一個字才會發生，沒有任何一種寫法能讓她連續做兩件事。
+**alpha.70 當時，這一整節在終端機裡做，不用開字母人；那是當時唯一一條她真的
+會動手的路。** 本節前半保留的是互動模式驗收，每一步都要你親手打一個字。
+alpha.77 起另有明確的 `--use-grant --unattended` 路徑；它不是把這些歷史步驟改寫成
+「當時也能自己跑」。目前無人值守 URL 的額外政策見第 15 節。
 
 - [ ] **先確認手上有東西可以做。** `sister.exe commitments` 要看到至少一張活著的
       承諾卡。一張都沒有的話先 `sister.exe review --force --last 24h` 跑一次 L3
@@ -1358,7 +1360,8 @@ alpha.70 把第一個接上去：`sister do`。
          動作、期限、步數那幾個旗標）。跑完要看到它說已存授權書。
       2. `sister.exe do --show-grant`。要把剛才那張的範圍念一次給你聽。
       3. `sister.exe do --task "把季報寄出去" --use-grant`。這一輪不必重打
-         那些旗標，而**每一步還是要你當場按**——它不會自己動起來。這件事
+         那些旗標；**這行沒有 `--unattended`，所以每一步還是要你當場按**——
+         它不會自己動起來。這件事
          比省下的打字重要得多；她自己跑完的話就是紅的。
       4. **換一個任務再跑一次**：`sister.exe do --task "刪掉桌面的檔案"
          --use-grant`。要被擋下來，而且畫面上要看得到那句話：
@@ -1568,3 +1571,75 @@ alpha.70 把第一個接上去：`sister do`。
 - [ ] **沒簽第二張同意書的時候，一列都不可以送。**
       `sister.exe consent --revoke cloud-reading` 之後再跑一次，
       要說出 `cloud-reading` 和怎麼簽，而且 `brain log` 不可以多出任何一列。
+
+---
+
+## 15. alpha.100：你不在時，網址要不要自己按
+
+這一節只驗 `sister do --use-grant --unattended` 的 URL。互動模式仍由你按眼前那一步；
+檔案與聚焦視窗也不是這一題在決定。開始前先備份 `%APPDATA%` 底下的
+`ted-h\AI-Sister\config\config.toml`，測完還原，不要為了做 fresh state 丟掉自己的
+其他設定。
+
+- [ ] **沒答過要真的問，而且只能有兩個完整答案。** 在備份後，只移除
+      `[hands]` 底下的 `url_open` 那一行，再開 `sister-desktop.exe`。如果 gatekeeper
+      正在講話，先處理或收起那張卡；接著字母人要顯示完整問題、「回答以前不會開，
+      但不是你選了不要」的說明，以及兩顆沒有截字的答案按鈕。沒有那一欄是第三種
+      狀態，不可以直接替你勾任何一邊。
+- [ ] **340×560 看得到，也不和別的話疊在一起。** 保持出貨尺寸，確認必要時可以捲到
+      兩顆按鈕。URL 題出現時立刻送一個搜尋問題：搜尋／答案要先佔說話位置，結束後
+      URL 題再回來；gatekeeper 的 one-line/card 也要排在尚未作答的 URL 題前面。
+      同一時刻疊兩張卡、答案被視窗底裁掉、或長錯誤訊息撐出橫向捲軸，都是紅的。
+- [ ] **讀不到、寫不進去、寫成功是三個畫面。** 先把設定 TOML 暫時改壞，開字母人：
+      她要說讀不出來、顯示原由並給「再讀一次」，不可以把你算成答過。還原檔案後按
+      重試，問題要回來。接著讓設定檔暫時唯讀再按答案：問題要留著並說沒有存進去；
+      解除唯讀後重按，才可以複述所選答案，約五秒後收起。重開字母人不能再問一次。
+- [ ] **CLI 和字母人讀同一個預設答案。** 依序跑：
+
+      ```text
+      sister.exe url-policy
+      sister.exe url-policy --set only-on-my-press
+      sister.exe url-policy
+      sister.exe url-policy --set when-you-can-name-the-origin
+      sister.exe url-policy
+      ```
+
+      每次讀回都要逐字對上剛才的選擇，而且保存前後其他 capture／privacy／brain／
+      gatekeeper 設定不可以被重設。另複製一份既有設定到測試路徑，再跑
+      `sister.exe --config .\url-policy-test.toml url-policy --set only-on-my-press`：
+      只准改那份，預設設定與字母人的答案不可以跟著變。親手指定一個不存在的
+      `--config` 要報找不到，不能偷偷建立一份預設檔。
+- [ ] **「等我在」只擋無人值守，不擋你眼前的按鍵。** 準備一張仍有效、包含 URL
+      next step 的 saved grant。選 `only-on-my-press` 後，先跑不帶 `--unattended` 的
+      `sister.exe do --task "<原任務>" --use-grant` 並親手核准：其他閘門通過時 URL
+      仍應交給 Windows。再跑同一行並加 `--unattended`：要在碰 OS 前拒絕，理由要說
+      是你選了等在場；不能說成「還沒問過」或「站不在紀錄」。
+- [ ] **「說得出來源」只信升級後真 recorder 看過的同一 host。** 選
+      `when-you-can-name-the-origin`。先拿一個只存在 alpha.99 舊 session 的 host 跑
+      無人值守：必須拒絕；import corpus 與 scenario replay 種出的 URL 也都不能算。
+      再用 alpha.100 的 `sister record` 真錄一場，在 Chrome／Edge 導覽到該 host、
+      讓她留下 URL 後乾淨收工，再跑同一個有效 grant：其他閘門通過時才可放行。
+      若目前沒有任何一列符合新的 trusted recorder identity，理由要明說**可採信的
+      來源集合為空，舊版資料可能存在但不可信**；不能宣稱整顆 DB 一個 URL 都沒有。
+      資料庫讀取失敗則要報查詢失敗，兩者也不能都叫「這個站不在紀錄」。
+- [ ] **host 邊界不能靠看起來像。** 用各自有合法 evidence／grant 的 next step 驗：
+      `https://www.example.com/a` 的紀錄可以替 `https://example.com/b` 背書；
+      `sub.example.com`、`example.com.evil.com`、`example.com@evil.com` 與 IDN／ASCII
+      lookalike 都不可以借到 `example.com` 的票。前一格通過只證明政策刻意比到 host，
+      **不證明 path、安全性、使用者意圖、redirect，或那個 UIA Edit 一定是位址列。**
+- [ ] **位址列正在輸入時不留來源；COM error 那一臂沒實測就標沒實測。** 錄製中把
+      焦點留在 Chrome／Edge 位址列，打一串帶點但不要送出的半截 host；那串不應進
+      新 session 的 `focus_events.url`。`CurrentHasKeyboardFocus()` 真正回 error 很難
+      靠操作穩定造出來；沒有定點 instrument 到那個錯誤，就在回報寫「未驗」，不可以
+      拿前一格的正常 focused=true 當成 error fail-closed 已實機通過。
+- [ ] **OpenFile 不能借 `.pdf` 的殼開瀏覽器。** 在 Windows source checkout 跑：
+
+      ```text
+      cargo test -p sister-hands file_policy_blocks_everything_that_is_not_a_document
+      cargo test -p sister-hands a_disguised_file_target_is_stopped_before_the_platform_call
+      ```
+
+      `https://evil.example/report.pdf`、`file:///C:/work/report.pdf`、UNC／device path、
+      NUL/control、drive-relative path 與無副檔名 target 都要在 pre-OS refusal 停下；
+      不可以跳瀏覽器、檔案關聯選擇器或任何 viewer。這只證明共同驗證站在 OS 呼叫前，
+      不代表白名單裡的 `.doc`／`.svg` 等文件格式本身沒有 active content。

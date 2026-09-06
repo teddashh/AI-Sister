@@ -454,10 +454,10 @@ fn url_from(element: &IUIAutomationElement) -> Option<String> {
     // **焦點在位址列上的時候不要讀。** 使用者正在打字或用方向鍵選建議項，
     // 那時候 `Value` 是給人看的一句話（"搜尋或輸入網址"、"xxx — Google 搜尋"），
     // 不是網址。把那個字串存進 `frames.url` 會讓排除規則比對到一堆散文。
-    if unsafe { element.CurrentHasKeyboardFocus() }
-        .map(|f| f.as_bool())
-        .unwrap_or(false)
-    {
+    // 問不出焦點不是「沒有焦點」。以前 `unwrap_or(false)` 會在 COM 查詢失敗時
+    // 把正在輸入的半截網址當成已完成的位址；那一欄現在也會替 unattended
+    // URL 提供來源證據，所以不知道必須 fail-closed。
+    if unsafe { element.CurrentHasKeyboardFocus() }.ok()?.as_bool() {
         return None;
     }
 

@@ -41,6 +41,11 @@ const utteranceResult = document.querySelector("[data-utterance-result]");
 const gateDebug = document.querySelector("[data-gate-debug]");
 const suggestionButton = document.querySelector("[data-utterance-suggestion]");
 const handsLog = document.querySelector("[data-hands-log]");
+const urlPolicy = document.querySelector("[data-url-policy]");
+const urlPolicyQuestion = document.querySelector("[data-url-policy-question]");
+const urlPolicyActions = document.querySelector("[data-url-policy-actions]");
+const urlPolicyNote = document.querySelector("[data-url-policy-note]");
+const urlPolicyResult = document.querySelector("[data-url-policy-result]");
 
 /**
  * Tauri 的 IPC。**在瀏覽器裡打開時是 null**，而那是刻意支援的：字母人整個
@@ -72,13 +77,23 @@ let paused = false;
  */
 let hasSomething = false;
 let activeUtteranceId = null;
+let latestGatekeeperView = null;
+let gatekeeperReadError = null;
 
-function paintGatekeeper(view) {
+function renderGatekeeper(view) {
   const item = view?.display ?? null;
   const debug = view?.developer ?? null;
   if (handsLog) {
-    const lines = view?.action_log ?? [];
-    handsLog.textContent = lines.length === 0 ? "還沒有提出過任何動作。" : `行動紀錄\n${lines.join("\n")}`;
+    if (gatekeeperReadError !== null) {
+      handsLog.setAttribute("role", "alert");
+      handsLog.textContent = `守門員／行動紀錄這一輪讀不出來：${gatekeeperReadError}`;
+    } else {
+      handsLog.removeAttribute("role");
+      const lines = Array.isArray(view?.action_log) ? view.action_log : [];
+      handsLog.textContent = lines.length === 0
+        ? "守門員回傳了一份沒有說明的空 action log。"
+        : `行動紀錄\n${lines.join("\n")}`;
+    }
   }
   if (gateDebug) {
     gateDebug.hidden = debug === null;
@@ -103,7 +118,12 @@ function paintGatekeeper(view) {
     return;
   }
   // 同一句話重畫一次不要把他讀到一半的回條擦掉。
-  if (item.utterance_id === activeUtteranceId) return;
+  if (item.utterance_id === activeUtteranceId) {
+    // URL 題正在存的幾秒會暫借同一個文字 slot。還回來時，同一句 gatekeeper
+    // 不會重畫內容，但必須重新露出來。
+    if (item.form !== "glimmer") utterance.hidden = false;
+    return;
+  }
   activeUtteranceId = item.utterance_id;
   hasSomething = true;
   avatar.classList.add("has-something");
@@ -187,6 +207,171 @@ suggestionButton?.addEventListener("click", () => {
     (error) => { utteranceResult.textContent = String(error); },
   ).finally(() => { suggestionButton.disabled = false; });
 });
+
+/**
+ * 她問的那一題：「你不在的時候，要我自己按下去嗎？」（PHASES #42）
+ *
+ * **這一格不是設定頁裡的一個開關，是她開口問的一個問題。** 差別在預設值：
+ * 開關有一邊是預設的，而預設的那一邊等於產品替他選了。這裡沒有預設值——
+ * 後端回 `answered === null` 就是**還沒問過**，而那和「他說了不要」是兩句
+ * 不同的話（她一個人在跑的時候兩種都不會開網址，但講的理由不一樣）。
+ *
+ * 每一句話都是後端給的。前端一個字都不寫：同一題 `sister url-policy` 也在
+ * 問，文案分兩份的話他答的是哪一個沒人說得準。
+ *
+ * **答過就不再問。** 這個視窗整天掛在螢幕角落，一個問過的問題再問一次是
+ * 騷擾。改主意的路是 `sister url-policy`——那條路寫在他按完之後那一句裡。
+ */
+let urlPolicyView = null;
+let urlPolicyReadError = null;
+let urlPolicyWriteState = "idle";
+let urlPolicyWriteMessage = "";
+let urlPolicyConfirmationTimer = null;
+
+function gatekeeperClaimsConversation() {
+  const form = latestGatekeeperView?.display?.form;
+  return form === "one_line" || form === "card";
+}
+
+function showUrlPolicy(shown) {
+  urlPolicy.hidden = !shown;
+  document.body.classList.toggle("has-url-policy", shown);
+}
+
+/** 一個文字 slot：gatekeeper 已經開口時，這題等下一輪，不在她臉上疊第二句。 */
+function paintConversation() {
+  if (!urlPolicy) return;
+  if (latestGatekeeperView !== null) renderGatekeeper(latestGatekeeperView);
+
+  const ownsWhileWriting = ["writing", "failed", "confirmed"].includes(urlPolicyWriteState);
+  const userIsTalking = state === "thinking" || document.body.classList.contains("has-hits");
+  // 只有一格能說話，優先序是：使用者正在問／讀答案 > 正在存的回答與回條 >
+  // gatekeeper > 還沒作答的 URL 題。URL 存到一半不能被五秒輪詢蓋掉；反過來，
+  // 使用者剛問的那一題也不能被一張寫入回條蓋掉。
+  if (userIsTalking) {
+    if (gatekeeperClaimsConversation()) utterance.hidden = true;
+    showUrlPolicy(false);
+    return;
+  }
+  if (ownsWhileWriting && gatekeeperClaimsConversation()) utterance.hidden = true;
+  if (!ownsWhileWriting && gatekeeperClaimsConversation()) {
+    showUrlPolicy(false);
+    return;
+  }
+
+  if (urlPolicyWriteState === "confirmed") {
+    // 成功後只剩一張短回條。問題、未回答說明、兩個答案都已經不是現在式。
+    urlPolicyQuestion.textContent = "";
+    urlPolicyNote.textContent = "";
+    urlPolicyActions.replaceChildren();
+    urlPolicyResult.setAttribute("role", "status");
+    urlPolicyResult.textContent = urlPolicyWriteMessage;
+    if (gatekeeperClaimsConversation()) utterance.hidden = true;
+    showUrlPolicy(true);
+    return;
+  }
+
+  if (urlPolicyReadError !== null) {
+    urlPolicyQuestion.textContent =
+      "這題現在讀不出來；沒有把你算成答過，也沒有替你選。";
+    urlPolicyNote.textContent = "";
+    urlPolicyResult.setAttribute("role", "alert");
+    urlPolicyResult.textContent = urlPolicyReadError;
+    urlPolicyActions.replaceChildren();
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "再讀一次";
+    retry.addEventListener("click", readUrlPolicy);
+    urlPolicyActions.append(retry);
+    showUrlPolicy(true);
+    return;
+  }
+
+  const view = urlPolicyView;
+  if (!view || (view.answered !== null && view.answered !== undefined)) {
+    showUrlPolicy(false);
+    return;
+  }
+  urlPolicyQuestion.textContent = view.question;
+  urlPolicyNote.textContent = view.before_you_answer;
+  urlPolicyResult.removeAttribute("role");
+  urlPolicyResult.textContent = urlPolicyWriteState === "failed" ? urlPolicyWriteMessage : "";
+  if (urlPolicyWriteState === "failed") urlPolicyResult.setAttribute("role", "alert");
+  urlPolicyActions.replaceChildren();
+  for (const option of view.options ?? []) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = option.line;
+    button.dataset.urlPolicyAnswer = option.key;
+    button.disabled = urlPolicyWriteState === "writing";
+    button.addEventListener("click", () => answerUrlPolicy(option.key, view.path));
+    urlPolicyActions.append(button);
+  }
+  showUrlPolicy(urlPolicyActions.childElementCount > 0);
+}
+
+function receiveGatekeeper(view) {
+  gatekeeperReadError = null;
+  latestGatekeeperView = view;
+  paintConversation();
+}
+
+function failToReceiveGatekeeper(error) {
+  // 不留上一輪的卡片或 action log 假裝仍是現在式。錯誤本身要看得見，也要讓
+  // 螢幕閱讀器聽得見；「讀不到」不是「現在沒有任何事」。
+  gatekeeperReadError = String(error);
+  latestGatekeeperView = null;
+  renderGatekeeper(null);
+  paintConversation();
+}
+
+function receiveUrlPolicy(view) {
+  urlPolicyView = view;
+  urlPolicyReadError = null;
+  urlPolicyWriteState = "idle";
+  paintConversation();
+}
+
+function failToReadUrlPolicy(error) {
+  urlPolicyView = null;
+  urlPolicyReadError = String(error);
+  urlPolicyWriteState = "idle";
+  paintConversation();
+}
+
+function readUrlPolicy() {
+  if (invoke === null) return;
+  invoke("url_policy_read").then(receiveUrlPolicy, failToReadUrlPolicy);
+}
+
+function answerUrlPolicy(key, path) {
+  if (invoke === null) return;
+  urlPolicyWriteState = "writing";
+  urlPolicyWriteMessage = "";
+  paintConversation();
+  invoke("url_policy_write", { key }).then(
+    (message) => {
+      urlPolicyView = { ...urlPolicyView, answered: key };
+      urlPolicyWriteState = "confirmed";
+      urlPolicyWriteMessage =
+        `${message}\n存到 ${path}。改主意的話跑 sister url-policy。`;
+      paintConversation();
+      clearTimeout(urlPolicyConfirmationTimer);
+      // 回條只留一小段時間；之後這題已經答完，讓正在等的 gatekeeper 接手。
+      urlPolicyConfirmationTimer = setTimeout(() => {
+        urlPolicyWriteState = "idle";
+        paintConversation();
+      }, 5000);
+    },
+    (error) => {
+      // 存不進去的時候**不可以**顯示成他答過了：下一次她一個人在跑，
+      // 擋下來的理由仍然會是「我還沒問過你」，而畫面說他選過了。
+      urlPolicyWriteState = "failed";
+      urlPolicyWriteMessage = `沒有存進去，所以這一題還是沒答：${String(error)}`;
+      paintConversation();
+    },
+  );
+}
 
 /**
  * 現在到底有沒有人在錄。**這和 `paused` 是兩件事。**
@@ -470,6 +655,7 @@ function setState(next) {
   if (!STATES.includes(next)) return;
   state = next;
   paint();
+  paintConversation();
 }
 
 function setPaused(next) {
@@ -643,7 +829,7 @@ function pollRecording() {
   // 每 5 秒問一次不會把預算燒掉：後端那一側同一件事今天只記一次帳，
   // 已經開口而人還沒回應的那一句是繼續顯示、不重扣。理由寫在
   // `main.rs` 的 `gatekeeper_check` 上面。
-  invoke("gatekeeper_check").then(paintGatekeeper, () => {});
+  invoke("gatekeeper_check").then(receiveGatekeeper, failToReceiveGatekeeper);
 }
 
 /**
@@ -1486,6 +1672,7 @@ function renderHits(
 
   hitList.hidden = false;
   document.body.classList.add("has-hits");
+  paintConversation();
   // **不是無條件 `true`。** [`showingAnswer`] 的唯一讀者是那句「底下原本那幾筆
   // 是上一題的」，而空手而回的那一次底下躺的是「我記得的東西裡沒有這件事。」
   // 加上幾行理由——一筆都沒有。寫死 `true` 的話，下一題失敗會請他去看幾筆
@@ -1596,6 +1783,7 @@ async function ask() {
     // 那一台。答成過一次之後才會自己好，所以它專挑新使用者。
     hitList.hidden = false;
     document.body.classList.add("has-hits");
+    paintConversation();
   } finally {
     clearTimeout(slow);
     // **過期的那一份不准動畫面，包括這裡。** 他多按了幾次 Enter、先送的後回，
@@ -1661,7 +1849,9 @@ setState(
 // 視窗如果一開始就縮在系統匣裡，那個輪詢是不跑的。
 if (invoke !== null) {
   invoke("pause_state").then(setPaused, () => {});
-  invoke("gatekeeper_check").then(paintGatekeeper, () => {});
+  // 只問一次，不進輪詢：這個答案只有他自己改得動，而她每 5 秒重問一次
+  // 等於每 5 秒重畫一個他已經看過的問題。
+  readUrlPolicy();
 }
 
 // 有沒有人在錄要一直問下去，不是問一次就算了：他隨時可能在另一個終端機

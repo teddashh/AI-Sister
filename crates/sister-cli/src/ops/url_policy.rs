@@ -18,13 +18,9 @@ use anyhow::{Context, Result};
 use sister_core::Config;
 use sister_hands::url_policy::UrlOpenAnswer;
 
-/// 她問的那一句。**全 repo 只有這裡寫一份。**
-pub(crate) const QUESTION: &str =
-    "有時候我讀到的東西裡會有一個網址。你不在的時候，要我自己按下去嗎？";
-
-/// 還沒答之前她怎麼做。這句話要和 `UrlOriginGap::NotAskedYet` 那一句講同一件事。
-const BEFORE_YOU_ANSWER: &str = "在你回答之前，我一個人跑的時候不會開網址——\
-     但那**不是**因為你選了「不要」，是因為我還沒問過你。這兩件事在我嘴裡是兩句話。";
+// 問句和「還沒答之前怎麼做」那一句住在 `sister_hands::url_policy`，因為**字母人
+// 也在問同一題**。抄一份到這裡的話，兩個入口會在某一版分家。
+use sister_hands::url_policy::{BEFORE_YOU_ANSWER, QUESTION};
 
 pub(crate) fn run(
     explicit_config: Option<&Path>,
@@ -32,20 +28,21 @@ pub(crate) fn run(
     out: &mut impl Write,
 ) -> Result<()> {
     let path = resolve(explicit_config)?;
-    let mut config = load(&path)?;
+    let mut config = load(&path, explicit_config.is_some())?;
     match set {
         Some(answer) => {
             config.hands.url_open = Some(answer);
             config
                 .save(&path)
                 .with_context(|| format!("寫入設定 {}", path.display()))?;
-            writeln!(out, "記下來了：{}", answer.line())?;
+            writeln!(out, "{}", answer.recorded_line())?;
             writeln!(out, "存到 {}", path.display())?;
-            writeln!(
-                out,
-                "改主意的話再跑一次 `sister url-policy --set {}`。",
+            let change = format!(
+                "{} --set {}",
+                super::url_policy_cmd(explicit_config),
                 other(answer).key()
-            )?;
+            );
+            writeln!(out, "改主意的話再跑一次 `{change}`。",)?;
         }
         None => {
             writeln!(out, "{QUESTION}")?;
@@ -90,13 +87,18 @@ fn resolve(explicit: Option<&Path>) -> Result<PathBuf> {
     }
 }
 
-fn load(path: &Path) -> Result<Config> {
-    if path.exists() {
-        Config::load(path).with_context(|| format!("讀設定 {}", path.display()))
-    } else {
-        // 沒有設定檔是正常狀態。**但預設值裡那一欄仍然是 `None`**——
-        // 「檔案不存在」不可以被讀成一個答案。
-        Ok(Config::default())
+fn load(path: &Path, explicitly_named: bool) -> Result<Config> {
+    match path
+        .try_exists()
+        .with_context(|| format!("檢查設定 {}", path.display()))?
+    {
+        true => Config::load(path).with_context(|| format!("讀設定 {}", path.display())),
+        false if explicitly_named => anyhow::bail!("找不到設定檔：{}", path.display()),
+        false => {
+            // 預設位置沒有設定檔是正常的第一回。**但預設值裡那一欄仍然是
+            // `None`**——「檔案不存在」不可以被讀成一個答案。
+            Ok(Config::default())
+        }
     }
 }
 
@@ -117,6 +119,7 @@ mod tests {
     fn the_unanswered_screen_says_it_is_a_question_not_a_decision_he_made() {
         let dir = crate::ops::tmp::Tmp::new("url-policy-unanswered");
         let path = dir.0.join("config.toml");
+        Config::default().save(&path).expect("seed explicit config");
         let said = say(None, &path);
         assert!(said.contains(QUESTION), "問題沒問出來：{said}");
         assert!(said.contains("你還沒回答過"), "沒說他還沒答：{said}");
@@ -139,9 +142,14 @@ mod tests {
     fn an_answer_survives_being_written_and_read_back() {
         let dir = crate::ops::tmp::Tmp::new("url-policy-roundtrip");
         let path = dir.0.join("config.toml");
+        Config::default().save(&path).expect("seed explicit config");
         for answer in UrlOpenAnswer::ALL {
             let wrote = say(Some(answer), &path);
             assert!(wrote.contains(answer.line()), "沒複述他選的那一句：{wrote}");
+            assert!(
+                wrote.contains("--config") && wrote.contains(&path.display().to_string()),
+                "改答案的指令沒有帶回同一份設定檔：{wrote}"
+            );
 
             let back = Config::load(&path).expect("讀回來");
             assert_eq!(
@@ -173,13 +181,25 @@ mod tests {
         assert_eq!(other(b), a);
     }
 
-    /// 設定檔不存在 ≠ 一個答案。
+    /// 預設位置還沒有設定檔 ≠ 一個答案；親手指定的不存在路徑則是打錯了。
     #[test]
-    fn a_missing_config_file_is_not_an_answer() {
+    fn only_a_missing_default_config_is_a_first_run() {
         let dir = crate::ops::tmp::Tmp::new("url-policy-nofile");
         let path = dir.0.join("nowhere").join("config.toml");
         assert!(!path.exists());
-        assert_eq!(load(&path).expect("載得起來").hands.url_open, None);
-        assert!(say(None, &path).contains("你還沒回答過"));
+        assert_eq!(
+            load(&path, false)
+                .expect("預設位置第一次要載得起來")
+                .hands
+                .url_open,
+            None
+        );
+        for set in [None, Some(UrlOpenAnswer::OnlyOnMyPress)] {
+            let mut out = Vec::new();
+            let error = run(Some(&path), set, &mut out).expect_err("明指的路徑不存在要報錯");
+            assert!(error.to_string().contains("找不到設定檔"), "{error:#}");
+            assert!(out.is_empty(), "失敗以前不該先說成成功：{out:?}");
+            assert!(!path.exists(), "打錯的路徑不可以被偷偷建立");
+        }
     }
 }

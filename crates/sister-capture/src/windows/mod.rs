@@ -124,7 +124,13 @@ pub fn backend(config: &Config) -> Result<impl Backend + use<>> {
     enable_dpi_awareness();
 
     Ok(CompositeBackend {
-        name: "windows-gdi".to_string(),
+        // 這個 identity 不只拿來顯示：core 只信任修過 UIA address-field focus
+        // fail-closed 的 session 替 unattended URL 背書。從共用常數拆掉 OS 前綴，
+        // 避免 writer 與 reader 各寫一份看起來相同、之後卻走散的字串。
+        name: sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM
+            .strip_prefix("windows/")
+            .expect("trusted Windows recorder identity starts with windows/")
+            .to_string(),
         screen: screen::WindowsScreen::new(),
         focus: focus::WindowsFocus::new(),
         clipboard: clipboard::WindowsClipboard::new(),

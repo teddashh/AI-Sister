@@ -1,6 +1,6 @@
 # DATA_INVENTORY — 她到底存了什麼
 
-> 這份文件描述 **schema v12**（`sister-core` 的 `MIGRATION_001`…`012`）。
+> 這份文件描述 **schema v19**（`sister-core` 的 `MIGRATION_001`…`019`）。
 > v8 加了 `segment`（斷句結果，打開時間軸才算，不在錄製熱路徑上）。
 > v9 加了 `segment_edit`（使用者合併／切開的訓練訊號）和 `stuck_signal`
 > （卡住偵測 v0，只記錄不開口）。兩張都不是錄製熱路徑。
@@ -9,6 +9,13 @@
 > v12 加了 L3（`commitments` / `entities` / `entity_mentions` / `day_summaries` /
 > `preferences`）、全域血緣圖 `provenance`、L2 墓碑欄，以及審閱層的
 > `reviewer_run` / `reviewer_recheck` / `reviewer_divergence`。
+> v13 加了 `utterance`（守門員實際說了、或決定先不說的候選與理由）。
+> v14 把 `commitments.allowed_next_step_fact` 綁回一筆 L1 fact；v15 加
+> `commitments.agreed_evidence_json`，只留雙 pass 共同引用的證據。舊列在這兩欄
+> 可以是 `NULL`：那是當時沒量，不是量到空集合。
+> v16 把 `reviewer_run` 裡的說明搬到 `notes`，和真的拒絕 `detail` 分開；v17 加
+> nullable 的 `answers_got`，把「試著叫了幾次 CLI」和「真的拿到幾份答案」分開。
+> v18 加查詢索引；v19 補齊 `input_health` 表與索引，讓升級安裝和全新安裝一致。
 > 刪一段 L0 時沿 provenance 把衍生 L2/L3 **tombstone**：列還在、標成被忘掉，
 > 但**那一列說了什麼會一起清掉**（活動、承諾原文、人名、日摘要敘事）。
 > 墓碑留的是「這裡曾經有東西」，不是內容——鐵律 2 說任何 L2/L3 不得成為
@@ -113,14 +120,26 @@ forward-compat 本身是對的：多寫一個欄位的新版不該讓舊版放�
 （實際路徑由 `directories` 依平台慣例決定，`sister doctor` 的「資料目錄」
 那一行印的永遠是真的那一個。）
 
-沒有遙測、沒有帳號。程式裡沒有 HTTP client。簽了第二張同意書且設定了
+設定檔不在上面的資料目錄裡。Windows 預設在 `%APPDATA%` 底下的
+`ted-h\AI-Sister\config\config.toml`；它是這台機器的設定，不是某一段記憶。
+`--data-dir` 不會搬動它，`sister forget` 不會刪它，記憶匯出也不會帶走它；
+CLI 可以用全域 `--config <FILE>` 明確改讀另一份，字母人則讀預設位置。
+`[hands] url_open` 也住在這裡：沒有這一欄是**還沒問過**，不是某個預設答案；
+答過之後只會是 `only-on-my-press` 或 `when-you-can-name-the-origin`。所以刪掉記憶
+不會順便改變這個選擇，刪掉或移走設定檔才會讓它回到「還沒問過」。
+
+沒有遙測、沒有帳號。AI-Sister 程式本身沒有 HTTP client。簽了第二張同意書且設定了
 `[brain] command` 之後，螢幕文字原文會交給那支本機 CLI；外送紀錄在
 `brain_outbound`（結構與計數，不含原文；`role` 分解釋層／審閱層／盯梢層——
 `interpreter`／`reviewer`／`watcher`，最後一個是 alpha.71 的 `sister watch`；
 送出去的是原文），假設卡片在 `l2_card`（append-only 版本鏈，`author` 是 interpreter／reviewer／user，刪 L0 時 tombstone 而不是實刪——列留著，
 卡片上的字清掉）。桌面時間軸的「外送」頁讀這兩張表和 `meta.ever_brain_outbound`。
 
-L3 只由 Reviewer 寫入：`commitments`（承諾表，status 為 open／done／dead／snoozed／archived，`due_source` 分螢幕上寫的和她猜的）、`entities` 與 `entity_mentions`、`day_summaries`、`preferences`（例如哪一類被「其他一切」降權）。血緣在 `provenance(child_ref, parent_ref)`。審閱層有沒有跑過、回查了幾次，記在 `reviewer_run`／`reviewer_recheck`——沒跑過和跑了沒回查是兩句話。雙 pass 對不上的那幾筆在 `reviewer_divergence`，分歧不寫入 L3。
+L3 只由 Reviewer 寫入：`commitments`（承諾表，status 為 open／done／dead／snoozed／archived，`due_source` 分螢幕上寫的和她猜的）、`entities` 與 `entity_mentions`、`day_summaries`、`preferences`（例如哪一類被「其他一切」降權）。承諾的 `allowed_next_step_fact` 是下一步所引用的 L1 fact id；`agreed_evidence_json` 是兩個 reviewer pass 共同引用的 evidence refs。血緣在 `provenance(child_ref, parent_ref)`。審閱層有沒有跑過、回查了幾次，記在 `reviewer_run`／`reviewer_recheck`——`calls_used` 是嘗試呼叫數，nullable 的 `answers_got` 才是實際取得答案數；`detail` 是拒絕，`notes` 是其他說明。雙 pass 對不上的那幾筆在 `reviewer_divergence`，分歧不寫入 L3。
+
+守門員每一個「要不要現在開口」的候選都在 `utterance`：候選文字、evidence refs、
+四個評分輸入與總分、最後是 `spoke` 還是 `held`、呈現形式／點數或壓住的理由，
+以及使用者之後的反應。忘掉來源 L0 時，衍生列會 tombstone，文字、證據與反應一起清掉。
 
 ---
 
@@ -241,7 +260,7 @@ ranking、題目 id、每題 question 與 returned values 都不過這道邊界�
 | 有存密碼嗎？ | 焦點在密碼欄上時整幀不擷取（僅瀏覽器）；密碼管理員整段不擷取 |
 | 網銀畫面呢？ | 網址命中 blocklist 就整段不擷取——**但見下方「已知缺口」** |
 | 有存我**問過她**什麼嗎？ | 有——`queries`，只在這台機器上。可用 `privacy.query_log = false` 關掉 |
-| 資料會離開這台機器嗎？ | 不會。沒有任何網路輸出路徑 |
+| 資料會離開這台機器嗎？ | 畫面 pixel 不會。簽 `cloud-reading` 後，OCR 文字原文會交給你設定的本機 CLI；那支 CLI 是否送給 provider，由它自己的設定與行為決定。AI-Sister 本身沒有 HTTP client |
 
 ---
 
@@ -334,6 +353,13 @@ trigram 給中日韓、unicode61 給英文。
 
 `kind`（focus / title_change / url_change）+ `app_id` / `app_name` /
 `window_title` / `url` / `pid`。脈絡變了才寫一列，不是每秒一列。
+
+> **alpha.100 起，這張表也會替無人值守的 URL 回答「她說不說得出來源」。**
+> 但不是每一列 `url` 都有這個資格：查詢會 join `sessions`，只信 exact
+> `platform = 'windows/windows-gdi-uia-focused-url-v1'` 的保留中真 Windows
+> recorder session。舊 `windows/windows-gdi`、corpus import、scenario replay
+> 都不能當來源票。比對只到 host，最多把一層 `www.` 視為同站；它不證明那串字
+> 一定來自位址列、不證明網站安全或是你主動開的，也不證明 path 或 redirect。
 
 ### `clipboard_events` — 複製了什麼
 
@@ -601,7 +627,10 @@ CASCADE 帶走的那幾列**不會出現在 `execute()` 的回傳值裡**，所�
 
 ### `sessions` / `meta`
 
-程式版本、平台、起訖時間；schema 版本。
+程式版本、擷取後端 identity、起訖時間；schema 版本。`sessions.platform` 不只是
+顯示用的 OS 名稱：alpha.100 的 URL 來源查詢只接受
+`windows/windows-gdi-uia-focused-url-v1` 這個 exact identity；換 backend 時會先
+fail-closed，不能靠字首或版本字串大小猜成可信。
 
 > **`sessions` 也會過期，跟著它自己那幾列走。** 一場錄製的每一列都被
 > `prune` 或 `forget` 帶走之後，那一列 `sessions` 本身也刪掉——不然「我那天
@@ -851,7 +880,11 @@ alpha.69 那句「沒按過就沒有這個檔案」在 alpha.70 之後是假的�
 ## `grant.json` — 跨行程重用的授權範圍
 
 這個 JSON 檔只存 `Grant` 的五個範圍：任務原文、允許的 app、允許的動作種類、
-發出時刻與相對期限、步數上限。它不存逐步核准；每一步仍要人在當場按「好」。
+發出時刻與相對期限、步數上限。它不存 `StepApproval` 或 `GrantPermit`：互動模式的
+每一步仍要人在當場按「好」；只有明確使用 `sister do --use-grant --unattended`
+才不等按鍵。無人值守時也不是把整張 grant 直接交給 executor——每個 exact action
+通過 scope／期限／步數、目標畫面與 URL 政策後，才現鑄一張綁定該 action 的 permit。
+`[hands] url_open` 是上面那份全域設定，不存在 `grant.json` 裡。
 
 **`sister forget --yes` 會刪掉整個檔案，而且不看 `--last`。** 授權書含 `--task`
 原文，又不是能按畫面時間切片的事件；只刪一部分會假裝剩下的 scope 沒有包含那段字。
@@ -908,9 +941,14 @@ alpha.69 那句「沒按過就沒有這個檔案」在 alpha.70 之後是假的�
    永遠不會生效——`sister doctor` 會把這種規則挑出來。
    使用者正在位址列打字時我們**不讀**，因為那時候上面是散文不是網址。
    要講清楚的是：擋住這件事的是「位址列有沒有鍵盤焦點」那一道閘門，
-   不是後面的字串檢查。後面那層只濾掉有空白的提示語，一串沒有空白又
-   帶點的字——在位址列裡搜的 email、內網 IP、打到一半的網域——是通得過的。
-   那道閘門要一個活的 COM 元素才驗得到，所以它沒有單元測試，只有
+   不是後面的字串檢查。alpha.100 起，連 `CurrentHasKeyboardFocus()` 自己報錯
+   都會拒收這一個候選；「問不出來」不再被當成「沒有焦點」。修正後的 recorder
+   用新的 session identity，舊 session 不會在升級後突然變成無人值守 URL 的來源票。
+   但這仍不證明候選一定是位址列或已完成導覽：若 COM 明確回報沒有焦點，後面那層
+   仍只濾掉有空白的提示語；一串沒有空白又帶點的字——email、內網 IP、未送出的
+   半截網域——仍可能看起來像網址。來源政策因此只敢叫它 host provenance，不能
+   叫安全判斷。
+   那道焦點閘門要一個活的 COM 元素才驗得到，所以它沒有單元測試，只有
    `plausible_url_is_not_a_substitute_for_the_keyboard_focus_gate` 這條
    把它的「不可取代」釘住，以及 Windows 上的實機驗證。
 
@@ -952,9 +990,9 @@ alpha.69 那句「沒按過就沒有這個檔案」在 alpha.70 之後是假的�
    一樣。`8/17` 會被當成日期抽出來，但它也可能是分數、比例或版本號；
    規則裡曾經有一個「把這種的信心壓到 0.65」的動作，而那個數字沒有人讀，
    所以實際上 `8/17` 一直是以日期的身分照樣進資料庫的。刪掉那欄之後這件事
-   從「假裝處理過」變成「明講沒處理」。判斷這些歧義要嘛靠 L2（會推論的那層，
-   還沒開始），要嘛靠 Phase 1 的重播評測集量出每條規則的準確率——
-   在那之前，搜尋結果裡出現不像日期的日期是預期行為。
+   從「假裝處理過」變成「明講沒處理」。L2／Reviewer 現在已經會推論與回查，
+   但它們不會倒過來把每一列 L1 regex 命中改成真；重播評測也只能量出這類錯誤，
+   不能把未標註的列自動升格成 ground truth。搜尋結果裡仍可能出現不像日期的日期。
 
 8. ~~**兩個字的中文詞沒有索引，而且只找得回最近 30 天。**~~ **schema 3 補起來了。**
    原本的缺口：`text_fts` 用 trigram，比不了少於 3 個字的東西；`text_fts_uni`
@@ -971,23 +1009,13 @@ alpha.69 那句「沒按過就沒有這個檔案」在 alpha.70 之後是假的�
    會同時命中「客服」和「服部」——`search_bigram` 拿真字串再篩一次，那層篩
    掉的是索引答不了的部分，不是可以省的。
 
-9. **三張表整張沒有讀者，所以整張沒有人驗。** `focus_events`、
-   `input_metrics`、以及 `ocr_blocks` 的 `x/y/w/h`，在 Phase 0 除了
-   `stats` 的 `COUNT(*)` 之外，這份 codebase 一行 SELECT 都沒有。
-   **這件事本身不是缺陷**——它們是 L2/L3 才會用到的原料，「暴力用在保存」
-   講的就是先存下來；為了「有人讀」硬加一個讀者才是錯的。
-   缺陷是另一件事：沒人讀，所以真的寫壞了也沒有任何地方會講。`COUNT(*)`
-   分不出「這張表是空的」和「這張表有一萬列、每一列都是空殼」——後者正是
-   alpha.1 那個災難的形狀（`doctor` 全綠、錄了一分鐘、一個字都沒進去）。
-   `sister doctor` 現在會問這三個訊號「你裡面到底有沒有東西」，判斷的條件
-   是**自相矛盾**而不是**數字很小**：焦點事件沒有一列知道自己是哪個 app、
-   輸入節奏每一個計數器都是 0（擷取端在沒動靜時根本不寫列）、一整張畫面的
-   文字方框全部在同一個高度。使用者安靜地坐一個下午不會觸發任何一條——
-   對正常資料報警的檢查，三天內就會被學會忽略。
-   仍然沒有被驗到的：`clipboard_events` 的 `byte_len`/`truncated`/
-   `source_app`、`text_chunks.source_id`、`facts` 的 `byte_start`/`byte_end`、
-   `frames.monitor`、`sessions` 的 `platform`/`note`。它們同樣只寫不讀，
-   只是還沒有一個「壞掉的樣子」夠明確到可以寫成斷言。
+9. **有 reader 不等於訊號正確。** `focus_events` 現在供 segmenter 與 alpha.100
+   的 URL 來源查詢使用，`input_metrics` 也進斷句／卡住訊號，`ocr_blocks` 的位置
+   有 doctor 的自相矛盾檢查；所以它們已經不是「整張沒人讀」。但目前能驗的主要是
+   **明顯自相矛盾**：焦點事件全無 app、輸入列四個計數器全 0、一整張畫面的文字框
+   全在同一高度。錯但看起來合理的 app、host、計數或座標仍可能被下游採信。
+   alpha.100 讀 `sessions.platform` 只解決 URL 來源的 backend allowlist，也不替
+   每一列內容背書；「有人 SELECT」不能被寫成「有人驗過是真的」。
 10. **`action-log.jsonl` 不受保留期管。**（alpha.69）`sister prune` 清得掉
    過期的畫面和文字，碰不到這個檔案——三年前你按下的那顆按鈕，那串網址今天
    還在裡面。`sister forget` 和 `sister export` 兩條路這一版都補上了，保留期

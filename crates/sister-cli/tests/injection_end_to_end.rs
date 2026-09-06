@@ -1,5 +1,6 @@
 use sister_core::config::Config;
 use sister_core::db::{Db, L2Author, L2Insert};
+use sister_core::model::{FocusEvent, FocusKind, FocusSnapshot};
 use sister_core::prompt_fence::INJECTION_REGRESSION_CASES;
 use sister_hands::semi_action::{
     ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, StepLimit, Task, grant_path,
@@ -156,6 +157,30 @@ fn seed_l2_and_fact_ids(data_dir: &Path, injection: &str) -> (i64, i64, i64) {
         "evil URL must stay outside this segment's window: evil.ts={} window_end={window_end}",
         evil.ts
     );
+    // Replay 的 URL 不能替真機日後的 unattended 動作背書；否則下載一份語料
+    // 就能種票。這套測的是另一個軸，所以另種一場明確的 Windows 真 recorder
+    // provenance，讓網址政策對 good / evil 都保持中立。
+    let session = db
+        .start_session(sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM, "test")
+        .expect("real capture provenance session");
+    for (index, url) in [GOOD_URL, EVIL_URL].into_iter().enumerate() {
+        db.insert_focus(
+            session,
+            &FocusEvent {
+                ts: 10_000_000 + index as i64,
+                kind: FocusKind::UrlChange,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    app_name: Some("Google Chrome".into()),
+                    window_title: Some("網址來源夾具".into()),
+                    url: Some(url.into()),
+                    pid: Some(1),
+                    password_field: false,
+                },
+            },
+        )
+        .expect("seed real URL provenance");
+    }
     (good.id, evil.id, frame_id)
 }
 

@@ -1,8 +1,10 @@
 use sister_hands::semi_action::*;
 use sister_hands::{
-    ActionEvent, ActionSnapshot, ApprovedBy, Attached, Executor, NeverInherited, Outcome,
-    RefusalReason, Replay, Suggestion, SuggestionButton,
+    ActionEvent, ActionSnapshot, ApprovedBy, Attached, Executor, ExecutorError, Level,
+    NeverInherited, Outcome, RefusalReason, Replay, Suggestion, SuggestionButton, execute_with,
+    url_policy::{UrlOpenAnswer, UrlOpenPolicy, UrlOrigin},
 };
+use std::convert::Infallible;
 use std::path::PathBuf;
 
 /// 唯一在意的事：作業系統到底被碰過幾次。
@@ -11,7 +13,7 @@ struct CountingExecutor {
     calls: usize,
 }
 impl Executor for CountingExecutor {
-    fn execute(&mut self, _suggestion: &Suggestion) -> Result<String, String> {
+    fn execute(&mut self, _suggestion: &Suggestion) -> Result<String, ExecutorError> {
         self.calls += 1;
         Ok("開了".into())
     }
@@ -24,8 +26,25 @@ impl Executor for CountingExecutor {
 struct PulledExecutor {
     executed: Vec<ActionSnapshot>,
 }
+
+/// 模擬公開隘口檢查完之後、貼著 OS 呼叫的第二道開關才發現手已被拔掉。
+struct LatePreOsRefusal {
+    platform_entries: usize,
+}
+impl Executor for LatePreOsRefusal {
+    fn execute(&mut self, _suggestion: &Suggestion) -> Result<String, ExecutorError> {
+        self.platform_entries += 1;
+        Err(ExecutorError::refused(RefusalReason::HandsPulled {
+            since_ms: Some(3333),
+        }))
+    }
+
+    fn hands_attached(&self) -> Attached {
+        Attached::Yes
+    }
+}
 impl Executor for PulledExecutor {
-    fn execute(&mut self, suggestion: &Suggestion) -> Result<String, String> {
+    fn execute(&mut self, suggestion: &Suggestion) -> Result<String, ExecutorError> {
         self.executed.push(suggestion.snapshot());
         Ok("不該執行".into())
     }
@@ -59,6 +78,36 @@ fn grant() -> Grant {
 
 fn covered_step() -> StepRequest {
     StepRequest::new(Task::new("整理報告"), App::new("Editor"), action())
+}
+
+fn url_grant() -> Grant {
+    Grant::new(
+        Task::new("開說明"),
+        AllowedApps::new([App::new("Browser")]),
+        AllowedActions::new([ActionKind::OpenUrl]),
+        Expiry::after_issued(1_000, 300_000),
+        StepLimit::new(2).unwrap(),
+    )
+}
+
+fn covered_url_step() -> StepRequest {
+    StepRequest::new(
+        Task::new("開說明"),
+        App::new("Browser"),
+        ActionSnapshot::OpenUrl {
+            url: "https://example.com/help".into(),
+        },
+    )
+}
+
+fn authorize(
+    grant: &Grant,
+    step: &StepRequest,
+    now_ms: i64,
+) -> Result<(StepApproval, sister_hands::GrantPermit), UnattendedAuthorizationFailure<Infallible>> {
+    grant.authorize_unattended(step, now_ms, UrlOpenPolicy::NotAskedYet, |_| {
+        panic!("非 URL 或 grant 先拒絕的測試不該查網址來源")
+    })
 }
 
 #[test]
@@ -96,18 +145,275 @@ fn unattended_authorization_preserves_all_five_cover_rejections_in_order() {
         (covered_step(), 301_001, GrantRejection::ExpiryElapsed),
     ];
     for (step, now_ms, expected) in cases {
-        let rejection = grant
-            .authorize_unattended(&step, now_ms)
+        let rejection = authorize(&grant, &step, now_ms)
             .err()
             .expect("不涵蓋就不能鑄出 unattended 批准");
-        assert_eq!(rejection, expected);
+        assert_eq!(rejection, UnattendedAuthorizationFailure::Grant(expected));
     }
+}
+
+/// `GrantPermit` 的唯一鑄票入口本身就要守 URL 政策；只在 CLI caller 前面放一個
+/// if，下一個 caller 會直接走 authorize → take_up 繞過。
+#[test]
+fn a_covered_url_cannot_mint_a_permit_when_policy_refuses_it() {
+    let grant = url_grant();
+    let step = covered_url_step();
+
+    for (policy, expected) in [
+        (
+            UrlOpenPolicy::NotAskedYet,
+            sister_hands::UrlOriginGap::NotAskedYet,
+        ),
+        (
+            UrlOpenPolicy::Answered(UrlOpenAnswer::OnlyOnMyPress),
+            sister_hands::UrlOriginGap::YouSaidPressItYourself,
+        ),
+    ] {
+        let failure = grant
+            .authorize_unattended(&step, 1_001, policy, |_| {
+                panic!("答案本身已經拒絕，不該查來源")
+            })
+            .err()
+            .expect("政策拒絕時不可以拿到 permit");
+        assert_eq!(
+            failure,
+            UnattendedAuthorizationFailure::<Infallible>::UrlPolicy(expected)
+        );
+    }
+
+    for (origin, expected) in [
+        (
+            UrlOrigin::NotInHerRecord,
+            sister_hands::UrlOriginGap::NotInHerRecord,
+        ),
+        (
+            UrlOrigin::NoTrustedRecordedUrls,
+            sister_hands::UrlOriginGap::NoTrustedRecordedUrls,
+        ),
+        (
+            UrlOrigin::NotAReadableSite,
+            sister_hands::UrlOriginGap::NotAReadableSite,
+        ),
+    ] {
+        let failure = grant
+            .authorize_unattended(
+                &step,
+                1_001,
+                UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin),
+                |_| Ok::<_, Infallible>(origin),
+            )
+            .err()
+            .expect("說不出來源時不可以拿到 permit");
+        assert_eq!(failure, UnattendedAuthorizationFailure::UrlPolicy(expected));
+    }
+}
+
+#[test]
+fn only_a_covered_url_with_origin_evidence_can_mint_and_execute() {
+    let grant = url_grant();
+    let step = covered_url_step();
+    let (approval, permit) = grant
+        .authorize_unattended(
+            &step,
+            1_001,
+            UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin),
+            |_| Ok::<_, Infallible>(UrlOrigin::InHerRecord),
+        )
+        .expect("有來源且在 grant 裡才拿得到票");
+    let suggestion =
+        SuggestionButton::parse_json(r#"{"action":"open_url","url":"https://example.com/help"}"#)
+            .unwrap()
+            .take_up(permit)
+            .unwrap();
+    let mut executor = CountingExecutor::default();
+    let outcome = execute_approved_step(&grant, 1_001, approval, &step, &mut executor, &suggestion);
+    assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
+    assert_eq!(executor.calls, 1);
+}
+
+/// `GrantPermit` 以前是單純的 `()`：替檔案 A 鑄出的 permit 可以接到網址 B，
+/// 再從公開的 executor 入口送出去。permit 必須自己綁住批准的 action，不能只靠
+/// 某一個下游 caller 記得比對。
+#[test]
+fn a_grant_permit_cannot_be_attached_to_another_target_or_action_kind() {
+    let (_, file_permit) = authorize(&grant(), &covered_step(), 1_001).unwrap();
+    let mismatch = SuggestionButton::parse_json(
+        r#"{"action":"open_url","url":"https://evil.example/report.pdf"}"#,
+    )
+    .unwrap()
+    .take_up(file_permit)
+    .expect_err("file permit must not authorize a URL");
+    let words = mismatch.to_string();
+    assert!(
+        words.contains("a.txt") && words.contains("evil.example"),
+        "{words}"
+    );
+
+    let step_a = covered_url_step();
+    let (_, url_a_permit) = url_grant()
+        .authorize_unattended(
+            &step_a,
+            1_001,
+            UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin),
+            |_| Ok::<_, Infallible>(UrlOrigin::InHerRecord),
+        )
+        .unwrap();
+    let mismatch =
+        SuggestionButton::parse_json(r#"{"action":"open_url","url":"https://evil.example/other"}"#)
+            .unwrap()
+            .take_up(url_a_permit)
+            .expect_err("URL A permit must not authorize URL B");
+    let words = mismatch.to_string();
+    assert!(
+        words.contains("example.com/help") && words.contains("evil.example"),
+        "{words}"
+    );
+}
+
+/// `execute_with(Level::Suggest)` 只具備 live click 的規則。讓 standing-grant
+/// suggestion 走這裡，等於跳過 grant/step/expiry/URL policy 的 semi-action 隘口。
+#[test]
+fn the_suggest_gateway_rejects_standing_grants_but_keeps_live_presses_working() {
+    let (_, permit) = authorize(&grant(), &covered_step(), 1_001).unwrap();
+    let unattended =
+        SuggestionButton::parse_json(r#"{"action":"open_file","path":"C:/work/a.txt"}"#)
+            .unwrap()
+            .take_up(permit)
+            .unwrap();
+    let mut executor = CountingExecutor::default();
+    assert_eq!(
+        execute_with(Level::Suggest, &mut executor, &unattended),
+        Outcome::Refused {
+            reason: RefusalReason::SemiActionNeedsGrantAndStepApproval
+        }
+    );
+    assert_eq!(executor.calls, 0);
+
+    let live = pressed(r#"{"action":"open_file","path":"C:/work/a.txt"}"#);
+    assert!(
+        matches!(
+            execute_with(Level::Suggest, &mut executor, &live),
+            Outcome::Done { .. }
+        ),
+        "a real press must keep using the suggest gateway"
+    );
+    assert_eq!(executor.calls, 1);
+}
+
+/// 目標白名單是執行隘口，不只是 `PlatformExecutor` 裡的一道實作細節。用會把
+/// 每個請求都算成成功的 fake，證明兩個公開入口自己都先擋，而且沒有呼叫它。
+#[test]
+fn unsafe_targets_are_refused_before_both_public_execution_gateways_touch_the_executor() {
+    let unsafe_live = pressed(r#"{"action":"open_file","path":"https://evil.example/report.pdf"}"#);
+    let mut live_executor = CountingExecutor::default();
+    let live = execute_with(Level::Suggest, &mut live_executor, &unsafe_live);
+    assert!(
+        matches!(
+            live,
+            Outcome::Refused {
+                reason: RefusalReason::TargetRejectedBeforeOs { .. }
+            }
+        ),
+        "{live:?}"
+    );
+    assert_eq!(live_executor.calls, 0);
+
+    let unsafe_step = StepRequest::new(
+        Task::new("整理報告"),
+        App::new("Editor"),
+        ActionSnapshot::OpenFile {
+            path: PathBuf::from("C:/work/evil.exe"),
+        },
+    );
+    let (approval, permit) = authorize(&grant(), &unsafe_step, 1_001).unwrap();
+    let unsafe_unattended =
+        SuggestionButton::parse_json(r#"{"action":"open_file","path":"C:/work/evil.exe"}"#)
+            .unwrap()
+            .take_up(permit)
+            .unwrap();
+    let mut unattended_executor = CountingExecutor::default();
+    let unattended = execute_approved_step(
+        &grant(),
+        1_001,
+        approval,
+        &unsafe_step,
+        &mut unattended_executor,
+        &unsafe_unattended,
+    );
+    assert!(
+        matches!(
+            unattended,
+            Outcome::Refused {
+                reason: RefusalReason::TargetRejectedBeforeOs { .. }
+            }
+        ),
+        "{unattended:?}"
+    );
+    assert_eq!(unattended_executor.calls, 0);
+}
+
+/// 第二道開關在第一道之後才拉下來，也仍然是「沒交給 OS」；typed executor
+/// error 不准再把這個 TOCTOU 窗口記成 Failed / Executed。
+#[test]
+fn a_late_pre_os_refusal_stays_refused_instead_of_becoming_platform_failure() {
+    let live = pressed(r#"{"action":"open_file","path":"C:/work/a.txt"}"#);
+    let mut executor = LatePreOsRefusal {
+        platform_entries: 0,
+    };
+    assert_eq!(
+        execute_with(Level::Suggest, &mut executor, &live),
+        Outcome::Refused {
+            reason: RefusalReason::HandsPulled {
+                since_ms: Some(3333)
+            }
+        }
+    );
+    assert_eq!(executor.platform_entries, 1);
+}
+
+#[test]
+fn grant_scope_wins_before_lookup_and_lookup_errors_stay_errors() {
+    let grant = url_grant();
+    let wrong = StepRequest::new(
+        Task::new("別的任務"),
+        App::new("Browser"),
+        ActionSnapshot::OpenUrl {
+            url: "https://example.com/help".into(),
+        },
+    );
+    let failure = grant
+        .authorize_unattended(
+            &wrong,
+            1_001,
+            UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin),
+            |_| -> Result<UrlOrigin, &'static str> { panic!("grant 拒絕以前不該查來源") },
+        )
+        .err()
+        .expect("錯任務要拒絕");
+    assert_eq!(
+        failure,
+        UnattendedAuthorizationFailure::Grant(GrantRejection::Task)
+    );
+
+    let failure = grant
+        .authorize_unattended(
+            &covered_url_step(),
+            1_001,
+            UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin),
+            |_| Err("db broke"),
+        )
+        .err()
+        .expect("查詢錯誤要往上丟");
+    assert_eq!(
+        failure,
+        UnattendedAuthorizationFailure::OriginLookup("db broke")
+    );
 }
 
 #[test]
 fn approval_provenance_is_fixed_by_its_only_two_issuers() {
     let step = covered_step();
-    let (unattended, _permit) = grant().authorize_unattended(&step, 1_001).unwrap();
+    let (unattended, _permit) = authorize(&grant(), &step, 1_001).unwrap();
     assert_eq!(unattended.by(), ApprovedBy::StandingGrant);
     assert_eq!(PresentedStep::new(step).approve().by(), ApprovedBy::Press);
 }
@@ -115,11 +421,12 @@ fn approval_provenance_is_fixed_by_its_only_two_issuers() {
 #[test]
 fn a_standing_grant_can_take_up_and_finish_a_covered_step() {
     let step = covered_step();
-    let (approval, permit) = grant().authorize_unattended(&step, 1_001).unwrap();
+    let (approval, permit) = authorize(&grant(), &step, 1_001).unwrap();
     let suggestion =
         SuggestionButton::parse_json(r#"{"action":"open_file","path":"C:/work/a.txt"}"#)
             .unwrap()
-            .take_up(permit);
+            .take_up(permit)
+            .unwrap();
     let mut executor = CountingExecutor::default();
     let outcome =
         execute_approved_step(&grant(), 1_001, approval, &step, &mut executor, &suggestion);
@@ -130,7 +437,7 @@ fn a_standing_grant_can_take_up_and_finish_a_covered_step() {
 #[test]
 fn unattended_approval_for_a_cannot_execute_b() {
     let a = covered_step();
-    let (approval, permit) = grant().authorize_unattended(&a, 1_001).unwrap();
+    let (approval, permit) = authorize(&grant(), &a, 1_001).unwrap();
     let b = StepRequest::new(
         Task::new("整理報告"),
         App::new("Editor"),
@@ -139,9 +446,12 @@ fn unattended_approval_for_a_cannot_execute_b() {
         },
     );
     let suggestion =
-        SuggestionButton::parse_json(r#"{"action":"open_file","path":"C:/work/b.txt"}"#)
+        // Permit 自己先守 action A；這一條刻意仍把 A 交進下游，單獨驗
+        // StepApproval 不能拿去批准 request B。
+        SuggestionButton::parse_json(r#"{"action":"open_file","path":"C:/work/a.txt"}"#)
             .unwrap()
-            .take_up(permit);
+            .take_up(permit)
+            .unwrap();
     let mut executor = CountingExecutor::default();
     let outcome = execute_approved_step(&grant(), 1_001, approval, &b, &mut executor, &suggestion);
     assert!(matches!(
@@ -156,11 +466,12 @@ fn unattended_approval_for_a_cannot_execute_b() {
 #[test]
 fn pulled_hands_also_block_standing_grants_as_refused() {
     let step = covered_step();
-    let (approval, permit) = grant().authorize_unattended(&step, 1_001).unwrap();
+    let (approval, permit) = authorize(&grant(), &step, 1_001).unwrap();
     let suggestion =
         SuggestionButton::parse_json(r#"{"action":"open_file","path":"C:/work/a.txt"}"#)
             .unwrap()
-            .take_up(permit);
+            .take_up(permit)
+            .unwrap();
     let mut executor = PulledExecutor { executed: vec![] };
     let outcome =
         execute_approved_step(&grant(), 1_001, approval, &step, &mut executor, &suggestion);
@@ -178,9 +489,7 @@ fn pulled_hands_also_block_standing_grants_as_refused() {
 #[test]
 fn replay_copy_distinguishes_press_standing_grant_and_legacy_unknown() {
     let action = action();
-    let (standing_approval, _permit) = grant()
-        .authorize_unattended(&covered_step(), 1_001)
-        .unwrap();
+    let (standing_approval, _permit) = authorize(&grant(), &covered_step(), 1_001).unwrap();
     let lines = sister_hands::replay_copy::replay_lines(&Replay {
         events: vec![
             ActionEvent::Approved {
@@ -204,7 +513,8 @@ fn replay_copy_distinguishes_press_standing_grant_and_legacy_unknown() {
     assert!(lines[0].contains("當場按"), "{}", lines[0]);
     assert!(!lines[0].contains("沒有人在鍵盤前面"), "{}", lines[0]);
     assert!(lines[1].contains("憑先前簽好的票自己跑"), "{}", lines[1]);
-    assert!(lines[1].contains("沒有人在鍵盤前面"), "{}", lines[1]);
+    assert!(lines[1].contains("沒有這一步的當場核准"), "{}", lines[1]);
+    assert!(!lines[1].contains("沒有人在鍵盤前面"), "{}", lines[1]);
     assert!(!lines[1].contains("當場按"), "{}", lines[1]);
     assert!(lines[2].contains("沒有記批准來源"), "{}", lines[2]);
     assert!(!lines[2].contains('按'), "{}", lines[2]);

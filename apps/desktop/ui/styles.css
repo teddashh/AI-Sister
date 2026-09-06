@@ -97,7 +97,9 @@ body {
   flex: 1;
   flex-direction: column;
   gap: 14px;
-  justify-content: center;
+  justify-content: safe center;
+  min-height: 0;
+  overflow-y: auto;
   padding: 18px;
 }
 
@@ -227,11 +229,54 @@ body {
 }
 
 .utterance[data-form="one_line"] { border-color: transparent; background: transparent; }
-.utterance-text, .utterance-result { font-size: 13px; margin: 4px 0; }
+.utterance-text, .utterance-result {
+  font-size: 13px;
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
 .utterance-target-provenance { font-size: 14px; font-weight: 600; line-height: 1.45; margin: 8px 0 0; overflow-wrap: anywhere; }
 .utterance-evidence, .utterance-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .utterance-actions button, .utterance-evidence button { border: 0; border-radius: 999px; cursor: pointer; padding: 5px 9px; }
 .gate-debug { font: 11px/1.5 monospace; opacity: .7; white-space: pre-line; }
+
+/* 她問的那一題。長得像 `.utterance`（同一個人在講話），但**兩顆答案按鈕要
+   直向排、而且會換行**：上面寫的是一整句話，不是「好／不要」。橫排＋截斷的
+   話他會在讀不完一句話的情況下按下去，而那正是這一格在防的事。 */
+.asked {
+  background: rgb(255 255 255 / 72%);
+  border: 1px solid rgb(46 33 64 / 18%);
+  border-radius: 14px;
+  padding: 10px;
+  width: min(280px, 90%);
+}
+.asked[hidden] { display: none; }
+.asked-question { font-size: 13px; font-weight: 600; line-height: 1.5; margin: 0; }
+.asked-actions { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.asked-actions button {
+  border: 1px solid rgb(46 33 64 / 24%); border-radius: 10px; cursor: pointer;
+  font: inherit; font-size: 12px; line-height: 1.45; padding: 7px 9px;
+  text-align: left; white-space: normal; overflow-wrap: anywhere;
+}
+.asked-actions button:hover { filter: brightness(.97); }
+.asked-actions button:focus-visible { outline: 2px solid var(--letter-accent); outline-offset: 2px; }
+/* 他現在選的那一顆。**不是只換顏色**——一個色盲的人在這一格會分不出兩顆
+   按鈕哪一顆是他選的，而那正好是這個設定唯一的回饋。 */
+.asked-actions button[aria-pressed="true"] {
+  background: var(--letter-accent); border-color: var(--letter-accent);
+  color: var(--letter-bg); font-weight: 600;
+}
+.asked-note, .asked-result {
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.asked-result {
+  white-space: pre-line;
+}
+.asked-note:empty, .asked-result:empty { display: none; }
 /* 會動手的那顆，和「結案／其他」長得不一樣：按下去是有東西真的會被打開的。 */
 /* 那顆按鈕上寫的是完整目標（`開啟網址：https://…`）。**要讓它換行。**
    讓它撐出去被卡片切掉的話，`https://safe.com.......evil.com` 會被切成
@@ -241,7 +286,15 @@ body {
   max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left;
 }
 /* `pre-line` 不是裝飾：這一欄是用 `\n` 接起來的，少了它整份紀錄會擠成一行。 */
-.hands-log { display: block; font: 11px/1.5 monospace; opacity: .75; white-space: pre-line; margin-top: 8px; }
+.hands-log {
+  display: block;
+  font: 11px/1.5 monospace;
+  opacity: .75;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+  margin-top: 8px;
+  width: 100%;
+}
 .hands-log:empty { display: none; }
 
 @keyframes breathe {
@@ -360,12 +413,14 @@ body {
  * 有答案的時候她讓位：字母人縮小、往上，清單佔滿剩下的地方。
  * 她不會消失——使用者要看得出來是誰在回答，而且下一句還要對著她問。
  */
-body.has-hits .avatar {
+body.has-hits .avatar,
+body.has-url-policy .avatar {
   height: 64px;
   width: 64px;
 }
 
-body.has-hits .face {
+body.has-hits .face,
+body.has-url-policy .face {
   border-radius: 14px;
   border-width: 3px;
   box-shadow: 0 4px 0 var(--letter-fg);
@@ -373,18 +428,21 @@ body.has-hits .face {
   width: 56px;
 }
 
-body.has-hits .glyph {
+body.has-hits .glyph,
+body.has-url-policy .glyph {
   font-size: 28px;
 }
 
-body.has-hits .face::after {
+body.has-hits .face::after,
+body.has-url-policy .face::after {
   height: 12px;
   right: -5px;
   top: -5px;
   width: 12px;
 }
 
-body.has-hits .stage {
+body.has-hits .stage,
+body.has-url-policy .stage {
   gap: 8px;
   justify-content: flex-start;
   padding: 12px 10px;

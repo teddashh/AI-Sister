@@ -15,15 +15,14 @@
 //!   之後整組關掉）。所以「空的」是常態，不是故障。
 //! * 那一欄**有值、但不是一個看得出網站的網址**（`ScreenUrlUnreadable`）。
 //!   實測走得到：UIA 的 `plausible_url` 明文收 `about:` 和 `chrome:`
-//!   （`uia.rs:494`），而 `about:blank` 進 `url_host` 之後 host 算出來是
-//!   `about`，沒有點，`looks_like_host` 不收 → `None`。開新分頁就是這一格。
+//!   （`uia.rs:494`），而共用的 http(s) host parser 不把 `about:blank` 當網站。
+//!   開新分頁就是這一格。
 //! * **目標那一側**也有同樣的兩格（`NothingInTheAsk` / `AskUrlUnreadable`）。
 //!
 //! 三格都不可以被歸進「對不上」，那會把一次讀不到 UIA 講成「她開錯了」。
 //!
-//! 住在 `sister-core` 而不是 `sister-hands`，是因為 `url_host` 在
-//! `segment.rs`，而相依方向是 `sister-core` → `sister-hands`（反過來不行）。
-//! 在 `sister-hands` 裡再抄一份 host 抽取就會漂。
+//! host parser 住在 action 邊界 `sister-hands::target_policy`；segment、來源政策
+//! 和這支做完後驗證都呼叫同一份。各抄一份會讓同一網址在兩道安全邊界得到反答案。
 
 use sister_hands::ActionSnapshot;
 use sister_hands::semi_action::{CannotTell, ScreenAfter, ScreenField, TargetOnScreen};
@@ -110,21 +109,14 @@ pub fn target_on_screen(action: &ActionSnapshot, screen: &ScreenAfter) -> Target
 /// `facts.rs:548` 早就在做同一件正規化了；這裡是第三個知道這件事、
 /// 卻沒做的地方，補上去。
 ///
-/// 判準寫成一句話：**兩個網站名相等，或者其中一個是另一個加上一層
-/// 開頭的 `www.`**。網址列少印的就是那一層，不多不少。
-///
-/// 所以不是「把所有 `www.` 都剝掉再比」——那會把
-/// `www.www.evil.com` 和 `evil.com` 當成同一個網站，而它們不是。
-/// `bwww.example.com` 也一個字都不剝：`www.` 只在開頭才算前綴。
+/// 判準只有一份，在 [`sister_hands::target_policy::same_site`]。來源政策和做完後
+/// 的畫面驗證若各自解析一次，同一個 URL 會在兩道安全邊界得到相反答案。
 ///
 /// 回傳的 `saw` / `wanted` 是**沒剝過的原樣**——句子要讓使用者認得出
 /// 自己打的那串字，正規化只發生在「相不相等」這個判斷上。
 fn compare_hosts(saw: String, wanted: String) -> TargetOnScreen {
-    fn bare(host: &str) -> &str {
-        host.strip_prefix("www.").unwrap_or(host)
-    }
     let field = ScreenField::Url;
-    let same = saw == wanted || bare(&saw) == wanted || saw == bare(&wanted);
+    let same = sister_hands::target_policy::same_site(&saw, &wanted);
     if same {
         TargetOnScreen::Matched { field, saw, wanted }
     } else {

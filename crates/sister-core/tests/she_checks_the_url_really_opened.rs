@@ -660,23 +660,10 @@ fn an_unreadable_ask_does_not_read_as_no_ask() {
     );
 }
 
-/// 「她看不懂那個網域」**到得了**——而且不是靠一個壞掉的輸入。
-///
-/// 兩道閘門的判準不一樣，中間有一條縫：
-///
-/// - `target_policy::validate_url` 要求 `http(s):` ＋ 後面 `//` 非空，並擋掉
-///   空白與控制字元；ASCII 不 ASCII 它不管。
-/// - `segment::looks_like_host` 要求 host 有一個點（`localhost` 例外）**且**
-///   整串都是 ASCII 英數／`.`／`-`。
-///
-/// 於是一個**中文／日文網域**過得了白名單、卻抽不出 host。那不是攻擊，是
-/// 一個真的網址。
-///
-/// 這一條把「到得了」寫成**斷言**而不是寫成註解：兩件事在同一條測試裡量，
-/// 哪天有人放寬 `looks_like_host`（或收緊 `validate_url`），這裡會紅，而不是
-/// 留下一句沒有人再驗過的話。
+/// 授權前的來源政策和做完後的畫面驗證共用同一個 host parser。IDN 是真的網址，
+/// 不能在第一道讀得懂、第二道卻說目標讀不懂。
 #[test]
-fn an_idn_host_passes_the_allowlist_but_leaves_nothing_to_compare() {
+fn an_idn_host_gets_the_same_answer_at_both_url_boundaries() {
     const IDN: &str = "https://例え.jp/";
     assert!(
         sister_hands::target_policy::validate_url(IDN).is_ok(),
@@ -684,10 +671,26 @@ fn an_idn_host_passes_the_allowlist_but_leaves_nothing_to_compare() {
     );
     assert_eq!(
         target_on_screen(&open(IDN), &screen(Some(IDN), None)),
-        TargetOnScreen::CannotTell {
-            why: CannotTell::AskUrlUnreadable
+        TargetOnScreen::Matched {
+            field: ScreenField::Url,
+            saw: "例え.jp".into(),
+            wanted: "例え.jp".into(),
         },
-        "目標抽不出網站名的時候要說「說不準」，不可以說她開錯了"
+        "同一個 parser 不該在驗證層失去這個站"
+    );
+}
+
+#[test]
+fn an_omnibox_email_cannot_masquerade_as_a_site_after_execution() {
+    assert_eq!(
+        target_on_screen(
+            &open("https://company.com/"),
+            &screen(Some("john.smith@company.com"), None)
+        ),
+        TargetOnScreen::CannotTell {
+            why: CannotTell::ScreenUrlUnreadable
+        },
+        "位址列裡拿來搜尋的 email 不是 company.com 已經打開的證據"
     );
 }
 

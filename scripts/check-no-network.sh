@@ -2,10 +2,11 @@
 #
 # PRIVACY.md 的第一句承諾是：
 #
-#     「資料不離開這台機器。程式裡沒有任何對外連線的程式碼路徑。
-#       你可以自己驗證：整個 repo 搜不到 HTTP client。」
+#     「畫面不離開這台機器。程式本身沒有 HTTP client。」
 #
 # 這支腳本讓那句話**由 CI 保證，而不是由記性保證**。
+# 它不替使用者設定的外部 CLI 背書：簽了 cloud-reading 後，OCR 原文會交給
+# 那支本機行程；它是否連到 provider，是那支 CLI 自己的邊界。
 #
 # 為什麼需要它：這個缺口不會由人親手打開，會由一個相依套件默默帶進來。
 # 實際差一點發生過——OCR 本來要用 `oar-ocr`，而它的 `auto-download` feature
@@ -22,10 +23,9 @@ cd "$(dirname "$0")/.."
 # 常見的 Rust HTTP/網路 client。名單寧可長一點——多列一個頂多是誤報，
 # 少列一個就是一句沒有人守著的承諾。
 #
-# 後半段是推論引擎。PRIVACY.md 與 README 都寫著「目前整份程式碼零次模型
-# 呼叫」，而那句話跟「沒有 HTTP client」是兩件不同的事：一個本機的 ONNX
-# runtime 一條網路連線都不會開，照樣讓那句話變成假的。這裡守的是 L0/L1
-# 「抄寫歸程式」那條線本身，不是隱私。
+# 後半段是**內建**推論引擎。產品現在可以用 `std::process::Command` 呼叫
+# 使用者設定的 CLI；這份名單守的是「AI-Sister 自己沒有模型 runtime」，
+# 不是「整個產品零次模型呼叫」，也不檢查外部 CLI 之後是否連網。
 FORBIDDEN='^(reqwest|ureq|hyper|curl|isahc|attohttpc|surf|minreq|ehttp|awc|http-req|tokio-tungstenite|tungstenite|async-tungstenite|websocket|ort|onnxruntime|onnxruntime-sys|tract-onnx|tract-core|candle-core|candle-nn|candle-transformers|llama-cpp-2|llm|tch|burn|rten|openai-api-rs|async-openai)$'
 
 # 出貨的是**兩個**執行檔，而它們在兩個不同的 workspace 裡：`sister.exe` 在
@@ -69,16 +69,16 @@ for manifest in "${MANIFESTS[@]}"; do
             echo "✗ 出貨的相依樹裡出現了 HTTP client（$who / $label）："
             echo "$hits" | sed 's/^/    /'
             echo
-            echo "  PRIVACY.md 說「程式裡沒有任何對外連線的程式碼路徑」。"
+            echo "  PRIVACY.md 說「程式本身沒有 HTTP client」。"
             echo "  要嘛拿掉這個相依，要嘛去改 PRIVACY.md——但不能兩個都不做。"
             fail=1
         fi
     done
 done
 
-# THREAT_MODEL.md 對遠端攻擊者寫的是「結構性免疫：**沒有監聽埠**、沒有輸出
-# 連線」。上面那個相依樹檢查只擋得住 client——一個 `TcpListener::bind` 只用
-# std，一個相依都不會多，而那句話從那一刻起就是假的。
+# THREAT_MODEL.md 對遠端攻擊者寫的是「本程式沒有監聽埠或 HTTP client」，
+# 同時明講外部 CLI 是另一個邊界。上面的相依樹檢查只擋得住 client——一個
+# `TcpListener::bind` 只用 std，一個相依都不會多，而那句話從那一刻起就是假的。
 #
 # 這裡看的是原始碼而不是相依樹，因為 std 本來就在相依樹裡。
 # `apps/` 和上面同一個理由：字母人的外殼也是我們自己寫的 Rust。TokenMonster
@@ -103,8 +103,8 @@ if [ -n "$sockets" ]; then
     echo "✗ 原始碼裡出現了 socket："
     echo "$sockets" | sed 's/^/    /'
     echo
-    echo "  THREAT_MODEL.md 說「沒有監聽埠、沒有輸出連線」，而那是它對"
-    echo "  遠端攻擊者宣稱的**結構性**免疫——不是設定、不是預設值。"
+    echo "  THREAT_MODEL.md 說 AI-Sister 本身沒有監聽埠或 HTTP client。"
+    echo "  使用者設定的外部 CLI 是另一個邊界，不是替本程式開 socket 的例外。"
     fail=1
 fi
 
@@ -179,4 +179,4 @@ if [ -n "$skipped" ]; then
     echo "⚠ 有東西沒檢查到（未安裝 target）：$skipped"
     echo "  底下這句話只涵蓋真的跑過的那幾棵樹。出貨的是 Windows 執行檔。"
 fi
-echo "✓ 出貨的相依樹裡沒有 HTTP client 也沒有推論引擎，原始碼和畫面裡沒有連外的路"
+echo "✓ AI-Sister 沒有 HTTP client、內建推論引擎或 socket；畫面也沒有遠端來源（不涵蓋使用者設定的外部 CLI）"

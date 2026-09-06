@@ -16,15 +16,15 @@
 //!
 //! 這是唯一一個「因為換了殼所以整段不抄」的地方，其餘行為都照舊。
 
-use serde::{Deserialize, Serialize};
 use chrono::{Local, Timelike};
+use serde::{Deserialize, Serialize};
 use sister_core::gatekeeper_candidates::CommitmentRef;
 use sister_shell as bounds;
 use sister_shell::{PetState, Rect};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -162,6 +162,30 @@ struct GatekeeperDeveloper {
     holds: Vec<String>,
 }
 
+/// action log 的「兩種零」在還看得到檔案的這一層分開。`Replay::default()` 同時
+/// 代表檔案不存在與存在但為空；等 replay 完才問就已經永遠答不回來了。
+fn action_log_lines(data_dir: Option<&Path>) -> Result<Vec<String>, String> {
+    let Some(dir) = data_dir else {
+        return Ok(vec!["這台機器上找不到資料目錄，action log 讀不到。".into()]);
+    };
+    let log = sister_hands::ActionLog::in_data_dir(dir);
+    let file_exists = log
+        .path()
+        .try_exists()
+        .map_err(|e| format!("檢查 action log 失敗：{e}"))?;
+    let replay = log
+        .replay()
+        .map_err(|e| format!("讀 action log 失敗：{e:#}"))?;
+    let lines = hands::recent_replay_lines(&replay, ACTION_LOG_SHOWN);
+    if lines.is_empty() {
+        Ok(vec![
+            sister_hands::replay_copy::empty_run_log_message(file_exists).into(),
+        ])
+    } else {
+        Ok(lines)
+    }
+}
+
 /// 把 core 的守門員判決接到每天真的會用的字母人。
 ///
 /// **這個 command 是被輪詢的**，所以它的每一步都要問「同一件事被問第二次的
@@ -193,16 +217,21 @@ fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, St
         .map(|d| sister_core::heartbeat::presence(d, now))
         .unwrap_or(sister_core::heartbeat::Presence::NeverStarted);
     with_db_mut(&shell, |db| {
-        let candidates = sister_core::gatekeeper_candidates::collect(db, now)
-            .map_err(|e| format!("{e:#}"))?;
-        let first = db.first_recording_at().map_err(|e| format!("{e:#}"))?.unwrap_or(now);
+        let candidates =
+            sister_core::gatekeeper_candidates::collect(db, now).map_err(|e| format!("{e:#}"))?;
+        let first = db
+            .first_recording_at()
+            .map_err(|e| format!("{e:#}"))?
+            .unwrap_or(now);
         let days_since = u32::try_from(now.saturating_sub(first) / 86_400_000).unwrap_or(u32::MAX);
         use sister_core::db::UtteranceDecision;
         use sister_core::gatekeeper::{HoldReason, Verdict};
 
         // 一次快照。迴圈裡重讀的話，第一句開口會把第二句的預算算成已經花掉，
         // 而這一輪最後只會有一句真的講出去。
-        let spent = db.points_spent_today(&day_key).map_err(|e| format!("{e:#}"))?;
+        let spent = db
+            .points_spent_today(&day_key)
+            .map_err(|e| format!("{e:#}"))?;
         let ever = db.has_ever_spoken().map_err(|e| format!("{e:#}"))?;
 
         // ── 第一趟：判，但不寫。 ──────────────────────────────────
@@ -353,15 +382,42 @@ fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, St
         } else {
             None
         };
-        let action_log = match &shell.data_dir {
-            Some(dir) => sister_hands::ActionLog::in_data_dir(dir)
-                .replay()
-                .map(|replay| hands::recent_replay_lines(&replay, ACTION_LOG_SHOWN))
-                .map_err(|e| format!("讀 action log 失敗：{e:#}"))?,
-            None => vec!["這台機器上找不到資料目錄，action log 讀不到。".into()],
-        };
-        Ok(GatekeeperView { display, developer, action_log })
+        let action_log = action_log_lines(shell.data_dir.as_deref())?;
+        Ok(GatekeeperView {
+            display,
+            developer,
+            action_log,
+        })
     })
+}
+
+#[cfg(test)]
+mod action_log_view_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "sister-desktop-action-log-{}-{label}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp action-log dir");
+        dir
+    }
+
+    #[test]
+    fn missing_and_existing_but_empty_logs_are_two_different_histories() {
+        let dir = temp_dir("two-zeros");
+        let missing = action_log_lines(Some(&dir)).expect("missing log is readable");
+        std::fs::write(dir.join("action-log.jsonl"), "").expect("make empty log");
+        let emptied = action_log_lines(Some(&dir)).expect("empty log is readable");
+        assert_ne!(missing, emptied);
+        assert!(missing.join("\n").contains("從來沒有"), "{missing:?}");
+        assert!(emptied.join("\n").contains("列被刪光"), "{emptied:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// 這張卡上要不要放「要我幫你…嗎」那顆按鈕。
@@ -397,10 +453,14 @@ fn gate_suggestion(
             Ok(None)
         }
         AllowedNextStep::Suggestion(button) => {
-            let target = sister_core::db::target_app_for_button(&button, row.allowed_next_step_fact, |fact_id, raw| {
-                db.app_for_target_fact(fact_id, raw)
-                    .map_err(|e| format!("讀下一步目標 fact #{fact_id} 失敗：{e:#}"))
-            })?;
+            let target = sister_core::db::target_app_for_button(
+                &button,
+                row.allowed_next_step_fact,
+                |fact_id, raw| {
+                    db.app_for_target_fact(fact_id, raw)
+                        .map_err(|e| format!("讀下一步目標 fact #{fact_id} 失敗：{e:#}"))
+                },
+            )?;
             Ok(Some(gate_suggestion_from_target(
                 id,
                 &button,
@@ -479,16 +539,30 @@ fn evidence_not_on_screen(evidence: &[String], chips: &[GateEvidence]) -> Option
 }
 
 #[tauri::command(async)]
-fn gatekeeper_react(utterance_id: i64, close: bool, shell: tauri::State<'_, Shell>) -> Result<String, String> {
+fn gatekeeper_react(
+    utterance_id: i64,
+    close: bool,
+    shell: tauri::State<'_, Shell>,
+) -> Result<String, String> {
     with_db_mut(&shell, |db| {
-        let reaction = if close { sister_core::gatekeeper::Reaction::Close } else { sister_core::gatekeeper::Reaction::Other };
-        let effect = sister_core::gatekeeper::react(db, utterance_id, reaction, sister_core::now_ms())
-            .map_err(|e| format!("{e:#}"))?;
+        let reaction = if close {
+            sister_core::gatekeeper::Reaction::Close
+        } else {
+            sister_core::gatekeeper::Reaction::Other
+        };
+        let effect =
+            sister_core::gatekeeper::react(db, utterance_id, reaction, sister_core::now_ms())
+                .map_err(|e| format!("{e:#}"))?;
         Ok(match effect {
             sister_core::gatekeeper::CommitmentReaction::MarkDead { .. } => "這張記憶不會再提了",
-            sister_core::gatekeeper::CommitmentReaction::SnoozeAndLowerWeight => "先收起來，之後再說",
-            sister_core::gatekeeper::CommitmentReaction::None => "收到你的回饋；這一則沒有可結案或延後的承諾",
-        }.to_string())
+            sister_core::gatekeeper::CommitmentReaction::SnoozeAndLowerWeight => {
+                "先收起來，之後再說"
+            }
+            sister_core::gatekeeper::CommitmentReaction::None => {
+                "收到你的回饋；這一則沒有可結案或延後的承諾"
+            }
+        }
+        .to_string())
     })
 }
 
@@ -692,8 +766,10 @@ fn last_recording_end(shell: tauri::State<'_, Shell>) -> Option<LastRun> {
 /// 這一支問的是 `meta` 裡那個位元：沒有時間、沒有長度，忘不掉也重建不出東西。
 #[tauri::command(async)]
 fn has_ever_recorded(shell: tauri::State<'_, Shell>) -> bool {
-    with_db(&shell, |db| db.ever_recorded().map_err(|e| format!("{e:#}")))
-        .unwrap_or(false)
+    with_db(&shell, |db| {
+        db.ever_recorded().map_err(|e| format!("{e:#}"))
+    })
+    .unwrap_or(false)
 }
 
 /// 她有沒有**真的存下來過一列內容**。
@@ -806,11 +882,9 @@ fn start_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
         // 指路要指得到。這個視窗上沒有 ⚙（只有 ⏸ ▤ ● −），而同意書也不在
         // 設定頁上——設定頁管的是排除規則、保留天數那些。三張同意書是系統匣
         // 選單裡自己的一頁。指去一個不存在的按鈕，比不指路更糟。
-        return Err(
-            "第一張同意書還沒簽——她不會開始記錄。\
+        return Err("第一張同意書還沒簽——她不會開始記錄。\
              在系統匣圖示上按右鍵，選「三張同意書…」簽好再回來"
-                .into(),
-        );
+            .into());
     }
     let exe = recorder_path()?;
     // 上一次在沒有 recorder 的時候按下的「停止」會留在磁碟上，而那會讓這一場
@@ -1205,14 +1279,28 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             .map_err(|e| format!("{e:#}"))?;
         let closure_notice = match close {
             sister_core::followup::CloseIntent::NotAClosure => None,
-            sister_core::followup::CloseIntent::Unrecognized => Some("我認不出你指哪一張記憶，所以沒有動任何一張。".to_string()),
-            sister_core::followup::CloseIntent::Ambiguous { .. } => Some("這句話對得上不只一張記憶，所以沒有動任何一張。".to_string()),
-            sister_core::followup::CloseIntent::Close { .. } => Some("這張記憶已結案，不會再提。".to_string()),
+            sister_core::followup::CloseIntent::Unrecognized => {
+                Some("我認不出你指哪一張記憶，所以沒有動任何一張。".to_string())
+            }
+            sister_core::followup::CloseIntent::Ambiguous { .. } => {
+                Some("這句話對得上不只一張記憶，所以沒有動任何一張。".to_string())
+            }
+            sister_core::followup::CloseIntent::Close { .. } => {
+                Some("這張記憶已結案，不會再提。".to_string())
+            }
         };
         let previous = sister_core::reviewer::followup_state(db).map_err(|e| format!("{e:#}"))?;
-        let followup = match sister_core::followup::decide(&db.live_commitments().map_err(|e| format!("{e:#}"))?, now, previous.as_ref()) {
-            sister_core::followup::FollowupDecision::Ask { commitment_id, text } => {
-                sister_core::reviewer::record_followup(db, commitment_id, now).map_err(|e| format!("{e:#}"))?;
+        let followup = match sister_core::followup::decide(
+            &db.live_commitments().map_err(|e| format!("{e:#}"))?,
+            now,
+            previous.as_ref(),
+        ) {
+            sister_core::followup::FollowupDecision::Ask {
+                commitment_id,
+                text,
+            } => {
+                sister_core::reviewer::record_followup(db, commitment_id, now)
+                    .map_err(|e| format!("{e:#}"))?;
                 Some(text)
             }
             sister_core::followup::FollowupDecision::NoEligibleCommitment
@@ -1545,11 +1633,7 @@ fn chapter_from_segment(s: sister_core::segment::Segment) -> Chapter {
         app: s.app,
         title: s.title,
         host: s.host,
-        cut_kinds: s
-            .cut_kinds
-            .iter()
-            .map(|k| k.as_str().to_string())
-            .collect(),
+        cut_kinds: s.cut_kinds.iter().map(|k| k.as_str().to_string()).collect(),
         confidence: s.confidence,
         edited: s.last_edit.map(|e| e.kind.as_str().to_string()),
         edit_id: s.last_edit.map(|e| e.id),
@@ -1570,21 +1654,13 @@ fn chapter_from_activity_timeline(a: sister_core::activity::Activity) -> Chapter
     chapter_from_activity_with_nested(a, true)
 }
 
-fn chapter_from_activity_with_nested(
-    a: sister_core::activity::Activity,
-    nested: bool,
-) -> Chapter {
+fn chapter_from_activity_with_nested(a: sister_core::activity::Activity, nested: bool) -> Chapter {
     let core_ms = a.core_ms();
     let last = a.last_edit();
     let opening = a
         .segments
         .first()
-        .map(|s| {
-            s.cut_kinds
-                .iter()
-                .map(|k| k.as_str().to_string())
-                .collect()
-        })
+        .map(|s| s.cut_kinds.iter().map(|k| k.as_str().to_string()).collect())
         .unwrap_or_default();
     let confidence = a.segments.first().and_then(|s| s.confidence);
     let (start_ts, end_ts) = if nested {
@@ -1592,12 +1668,7 @@ fn chapter_from_activity_with_nested(
     } else {
         (a.core_started_at, a.core_ended_at)
     };
-    let segments = nested.then(|| {
-        a.segments
-            .into_iter()
-            .map(chapter_from_segment)
-            .collect()
-    });
+    let segments = nested.then(|| a.segments.into_iter().map(chapter_from_segment).collect());
     Chapter {
         start_ts,
         end_ts,
@@ -1625,7 +1696,9 @@ fn timeline_chapters(
     shell: tauri::State<'_, Shell>,
 ) -> Result<Vec<Chapter>, String> {
     with_db_mut(&shell, |db| {
-        let cards = db.l2_in_range(from_ts, to_ts).map_err(|e| format!("{e:#}"))?;
+        let cards = db
+            .l2_in_range(from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?;
         Ok(db
             .activities_for_range(from_ts, to_ts)
             .map_err(|e| format!("{e:#}"))?
@@ -1640,11 +1713,7 @@ fn timeline_chapters(
 }
 
 fn attach_l2(ch: &mut Chapter, cards: &[sister_core::db::L2CardRow]) {
-    let views = sister_core::brain::chapter_l2_views(
-        cards,
-        ch.core_start_ts,
-        ch.core_end_ts,
-    );
+    let views = sister_core::brain::chapter_l2_views(cards, ch.core_start_ts, ch.core_end_ts);
     ch.l2 = if views.is_empty() { None } else { Some(views) };
 }
 
@@ -1678,7 +1747,9 @@ fn timeline_merge_chapters(
         let segs = db
             .merge_chapters(left_core_start, right_core_start, from_ts, to_ts)
             .map_err(|e| format!("{e:#}"))?;
-        let cards = db.l2_in_range(from_ts, to_ts).map_err(|e| format!("{e:#}"))?;
+        let cards = db
+            .l2_in_range(from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?;
         Ok(timeline_chapters_after_edit(segs, &cards))
     })
 }
@@ -1695,7 +1766,9 @@ fn timeline_split_chapter(
         let segs = db
             .split_chapter(at_ts, from_ts, to_ts)
             .map_err(|e| format!("{e:#}"))?;
-        let cards = db.l2_in_range(from_ts, to_ts).map_err(|e| format!("{e:#}"))?;
+        let cards = db
+            .l2_in_range(from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?;
         Ok(timeline_chapters_after_edit(segs, &cards))
     })
 }
@@ -1712,7 +1785,9 @@ fn timeline_undo_segment_edit(
         let segs = db
             .undo_segment_edit(edit_id, from_ts, to_ts)
             .map_err(|e| format!("{e:#}"))?;
-        let cards = db.l2_in_range(from_ts, to_ts).map_err(|e| format!("{e:#}"))?;
+        let cards = db
+            .l2_in_range(from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?;
         Ok(timeline_chapters_after_edit(segs, &cards))
     })
 }
@@ -1724,7 +1799,9 @@ fn memory_guesses(
     shell: tauri::State<'_, Shell>,
 ) -> Result<Vec<sister_core::brain::L2View>, String> {
     with_db(&shell, |db| {
-        let cards = db.l2_in_range(from_ts, to_ts).map_err(|e| format!("{e:#}"))?;
+        let cards = db
+            .l2_in_range(from_ts, to_ts)
+            .map_err(|e| format!("{e:#}"))?;
         let mut by_seg: std::collections::BTreeMap<i64, Vec<&sister_core::db::L2CardRow>> =
             std::collections::BTreeMap::new();
         for c in &cards {
@@ -1820,10 +1897,7 @@ fn memory_current_guess(shell: tauri::State<'_, Shell>) -> Result<CurrentGuessVi
             // 包括上面已經算好的 card，都會讓整塊失敗。brain 外送已經發生後的輔助查詢
             // 則不能擋住那次外送，所以 brain.rs 那邊會用 `.ok().flatten()`。
             let previous_attempts = db
-                .retained_interpreter_attempts_for_segment(
-                    seg.core_started_at,
-                    seg.core_ended_at,
-                )
+                .retained_interpreter_attempts_for_segment(seg.core_started_at, seg.core_ended_at)
                 .map_err(|e| format!("{e:#}"))?;
             let latest_closed = sister_core::brain::LatestClosedSegment {
                 has_card: card.is_some(),
@@ -1867,8 +1941,7 @@ fn memory_commitments(shell: tauri::State<'_, Shell>) -> Result<Vec<PledgeView>,
         Ok(rows
             .into_iter()
             .map(|c| {
-                let refs: Vec<String> =
-                    serde_json::from_str(&c.evidence_json).unwrap_or_default();
+                let refs: Vec<String> = serde_json::from_str(&c.evidence_json).unwrap_or_default();
                 PledgeView {
                     id: c.id,
                     text: c.text,
@@ -1933,7 +2006,10 @@ struct OutboundLog {
 }
 
 #[tauri::command(async)]
-fn memory_outbound(limit: Option<u32>, shell: tauri::State<'_, Shell>) -> Result<OutboundLog, String> {
+fn memory_outbound(
+    limit: Option<u32>,
+    shell: tauri::State<'_, Shell>,
+) -> Result<OutboundLog, String> {
     let take = limit.unwrap_or(200).clamp(1, 500) as usize;
     with_db(&shell, |db| {
         let outbound = db
@@ -2081,6 +2157,162 @@ fn settings_read() -> Result<Settings, String> {
     })
 }
 
+/// 她問「我一個人在跑的時候，可不可以自己按網址」那一格（PHASES #42）。
+///
+/// **這一格不是設定頁裡的一個開關，是她開口問的一個問題。** 差別在預設值：
+/// 開關有一邊是預設的，而預設的那一邊等於產品替他選了。這裡沒有預設值——
+/// `answered` 是 `None` 就是**還沒問過**，而那和「他說了不要」是兩句不同的話。
+///
+/// 每一句話都從 `sister_hands::url_policy` 拿，一個字都不在這裡寫。同一題
+/// `sister url-policy` 也在問，兩份文案分家的話他答的是哪一個沒人說得準。
+#[derive(Serialize)]
+struct UrlPolicyView {
+    /// 她問的那一句。
+    question: &'static str,
+    /// 他現在的答案的 key；`None` = **還沒問過**，不是一個答案。
+    answered: Option<&'static str>,
+    /// 兩個答案。順序就是 `UrlOpenAnswer::ALL`，不在前端重排。
+    options: Vec<UrlPolicyOption>,
+    /// 他回答之前她怎麼做。**這一句不能省**：少了它，一個從來沒被問過的人
+    /// 會以為現在這個行為是他自己選的。
+    before_you_answer: &'static str,
+    /// 答案會被存到哪裡。他要看得到那個檔案。
+    path: String,
+}
+
+#[derive(Serialize)]
+struct UrlPolicyOption {
+    key: &'static str,
+    line: &'static str,
+}
+
+fn url_policy_view(
+    path: &Path,
+    answered: Option<sister_hands::url_policy::UrlOpenAnswer>,
+) -> UrlPolicyView {
+    UrlPolicyView {
+        question: sister_hands::url_policy::QUESTION,
+        answered: answered.map(|a| a.key()),
+        options: sister_hands::url_policy::UrlOpenAnswer::ALL
+            .into_iter()
+            .map(|a| UrlPolicyOption {
+                key: a.key(),
+                line: a.line(),
+            })
+            .collect(),
+        before_you_answer: sister_hands::url_policy::BEFORE_YOU_ANSWER,
+        path: path.display().to_string(),
+    }
+}
+
+#[tauri::command]
+fn url_policy_read() -> Result<UrlPolicyView, String> {
+    let path = config_path()?;
+    url_policy_read_at(&path)
+}
+
+fn url_policy_read_at(path: &Path) -> Result<UrlPolicyView, String> {
+    // 設定檔還不存在是正常狀態（他剛裝好）。**但那不是一個答案**，所以這裡
+    // 走預設的 `Config`，而它那一欄仍然是 `None`。
+    let config = match path
+        .try_exists()
+        .map_err(|e| format!("檢查設定 {}：{e}", path.display()))?
+    {
+        true => sister_core::config::Config::load(path).map_err(|e| format!("{e:#}"))?,
+        false => sister_core::config::Config::default(),
+    };
+    Ok(url_policy_view(path, config.hands.url_open))
+}
+
+/// 他按了其中一顆。回傳的是**她複述他選的那一句**。
+///
+/// `key` 認不得就整個拒絕，不挑一個最像的：挑了等於替他做決定，而且做完
+/// 之後畫面會顯示他「答過了」。前端只送 `UrlOpenAnswer::ALL` 裡的 key，
+/// 但這一格是 IPC 邊界，前端說什麼都不算數。
+#[tauri::command]
+fn url_policy_write(key: String) -> Result<String, String> {
+    let path = config_path()?;
+    url_policy_write_at(&path, &key)
+}
+
+fn url_policy_write_at(path: &Path, key: &str) -> Result<String, String> {
+    let answer = sister_hands::url_policy::UrlOpenAnswer::from_key(key)
+        .ok_or_else(|| format!("這不是我問的那兩個答案之一，沒有存：{key}"))?;
+    // **先讀再改再寫**，和 `settings_write` 同一條紀律：從空白組一份會把這一
+    // 格沒畫出來的欄位（排除規則、保留天數……）全部重設成預設值。
+    let mut config = match path
+        .try_exists()
+        .map_err(|e| format!("檢查設定 {}：{e}", path.display()))?
+    {
+        true => sister_core::config::Config::load(path).map_err(|e| format!("{e:#}"))?,
+        false => sister_core::config::Config::default(),
+    };
+    config.hands.url_open = Some(answer);
+    config.save(path).map_err(|e| format!("{e:#}"))?;
+    Ok(answer.recorded_line())
+}
+
+#[cfg(test)]
+mod url_policy_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn temp_config(label: &str) -> (PathBuf, PathBuf) {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "sister-desktop-url-policy-{}-{label}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp config dir");
+        let path = dir.join("config.toml");
+        (dir, path)
+    }
+
+    #[test]
+    fn missing_answer_is_null_and_both_shared_answers_are_visible() {
+        let (dir, path) = temp_config("read");
+        let view = url_policy_read_at(&path).expect("first run is readable");
+        let json = serde_json::to_value(&view).expect("serialize view");
+        assert!(json["answered"].is_null(), "{json}");
+        assert_eq!(json["options"].as_array().map(Vec::len), Some(2));
+        assert_eq!(json["question"], sister_hands::url_policy::QUESTION);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn writing_an_answer_preserves_every_setting_this_question_does_not_show() {
+        let (dir, path) = temp_config("write");
+        let mut config = sister_core::config::Config::default();
+        config.privacy.excluded_apps = vec!["keepass.exe".into(), "bank.exe".into()];
+        config.retention.text_days = 777;
+        config.save(&path).expect("seed config");
+
+        let before_invalid = std::fs::read(&path).unwrap();
+        assert!(url_policy_write_at(&path, "yes-please").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before_invalid);
+
+        for answer in sister_hands::url_policy::UrlOpenAnswer::ALL {
+            let line = url_policy_write_at(&path, answer.key()).expect("write answer");
+            assert!(line.contains(answer.line()), "{line}");
+            let back = sister_core::config::Config::load(&path).expect("read back");
+            assert_eq!(back.hands.url_open, Some(answer));
+            assert_eq!(back.privacy.excluded_apps, ["keepass.exe", "bank.exe"]);
+            assert_eq!(back.retention.text_days, 777);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn malformed_config_is_an_error_not_an_unanswered_question() {
+        let (dir, path) = temp_config("malformed");
+        std::fs::write(&path, "not = [valid").unwrap();
+        assert!(url_policy_read_at(&path).is_err());
+        assert!(url_policy_write_at(&path, "only-on-my-press").is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// 把 CLI 產生的完整 eval report 縮成開發者指標頁能看的那一層。
 ///
 /// 瀏覽器端會讀使用者明確選的檔案，再把內容送進這支 command。這裡
@@ -2190,7 +2422,10 @@ struct PrivacyHealth {
 }
 
 #[tauri::command]
-fn privacy_health(urls: Vec<String>, shell: tauri::State<'_, Shell>) -> Result<PrivacyHealth, String> {
+fn privacy_health(
+    urls: Vec<String>,
+    shell: tauri::State<'_, Shell>,
+) -> Result<PrivacyHealth, String> {
     let path = config_path()?;
     let mut config = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
     // 拿**輸入框裡現在這一刻**的規則去問，不是設定檔裡存好的那一份——和
@@ -2267,8 +2502,8 @@ fn frame_image(frame_id: i64, shell: tauri::State<'_, Shell>) -> Result<FrameVie
         let path = root.join(&rel);
         // 路徑要印出來，而且是**接好根目錄之後**的那一條。使用者拿它去檔案總管
         // 貼上就知道到底有沒有那個檔——這是他唯一能自己驗證這句話的辦法。
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("圖不見了：{}（{e}）", path.display()))?;
+        let bytes =
+            std::fs::read(&path).map_err(|e| format!("圖不見了：{}（{e}）", path.display()))?;
 
         let ext = std::path::Path::new(&rel)
             .extension()
@@ -2348,32 +2583,46 @@ fn apply_hotkey(app: &tauri::AppHandle, wanted: &str, hands_wanted: &str) -> Hot
     // 組合搶走，所以要留一條關掉它的路。這裡不回報 reason，因為沒有失敗。
     // 安全鍵先註冊。若相等判定仍有漏網，第二次的 AlreadyRegistered 會落在可由
     // 系統匣代替的暫停鍵，而不是拔手鍵。
-    let hands_reason = if hands_wanted.is_empty() { None } else { shortcuts
-        .on_shortcut(hands_wanted.as_str(), |app, _shortcut, event| {
-            if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed { return; }
-            let shell = app.state::<Shell>();
-            let outcome = sister_hands::kill_switch::press_hands_hotkey(
-                shell.data_dir.as_deref(), sister_core::now_ms());
-            let says = sister_hands::kill_switch::hands_hotkey_message(&outcome);
-            tracing::info!("拔手熱鍵：{says}（{outcome:?}）");
-            announce_hands_pulled(app, &says);
-            refresh_tray(app);
-        }).err().map(|e| e.to_string()) };
+    let hands_reason = if hands_wanted.is_empty() {
+        None
+    } else {
+        shortcuts
+            .on_shortcut(hands_wanted.as_str(), |app, _shortcut, event| {
+                if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                    return;
+                }
+                let shell = app.state::<Shell>();
+                let outcome = sister_hands::kill_switch::press_hands_hotkey(
+                    shell.data_dir.as_deref(),
+                    sister_core::now_ms(),
+                );
+                let says = sister_hands::kill_switch::hands_hotkey_message(&outcome);
+                tracing::info!("拔手熱鍵：{says}（{outcome:?}）");
+                announce_hands_pulled(app, &says);
+                refresh_tray(app);
+            })
+            .err()
+            .map(|e| e.to_string())
+    };
 
-    let reason = if wanted_to_register.is_empty() { None } else { shortcuts
-        .on_shortcut(wanted_to_register.as_str(), |app, _shortcut, event| {
-            // 只認**按下**。少了這一行，按一次會進來兩次（按下 + 放開），
-            // 於是暫停立刻被自己取消掉——一顆看起來完全沒反應的熱鍵。
-            if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                return;
-            }
-            match toggle_pause(app.clone(), app.state::<Shell>()) {
-                Ok(paused) => announce_hotkey(app, paused),
-                Err(e) => tracing::error!("熱鍵暫停失敗：{e}"),
-            }
-        })
-        .err()
-        .map(|e| e.to_string()) };
+    let reason = if wanted_to_register.is_empty() {
+        None
+    } else {
+        shortcuts
+            .on_shortcut(wanted_to_register.as_str(), |app, _shortcut, event| {
+                // 只認**按下**。少了這一行，按一次會進來兩次（按下 + 放開），
+                // 於是暫停立刻被自己取消掉——一顆看起來完全沒反應的熱鍵。
+                if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                    return;
+                }
+                match toggle_pause(app.clone(), app.state::<Shell>()) {
+                    Ok(paused) => announce_hotkey(app, paused),
+                    Err(e) => tracing::error!("熱鍵暫停失敗：{e}"),
+                }
+            })
+            .err()
+            .map(|e| e.to_string())
+    };
 
     let registered = !wanted_to_register.is_empty() && reason.is_none();
     let hands_registered = !hands_wanted.is_empty() && hands_reason.is_none();
@@ -2435,7 +2684,6 @@ fn hotkey_state(hotkey: tauri::State<'_, Hotkey>) -> HotkeyView {
     hotkey.0.lock().expect("hotkey").clone()
 }
 
-
 /// 換一組熱鍵：先真的去搶，搶到了才寫進設定檔。
 ///
 /// 順序是刻意的。反過來寫（先存再註冊）的話，一組搶不到的熱鍵會留在設定檔裡，
@@ -2486,7 +2734,10 @@ fn hotkey_set(
             ..apply_hotkey(&app, &previous, &hands_wanted)
         };
         let still = if restored.registered {
-            format!("現在還在用 {}。", sister_shell::pretty_combo(&restored.wanted))
+            format!(
+                "現在還在用 {}。",
+                sister_shell::pretty_combo(&restored.wanted)
+            )
         } else if restored.hands_collided {
             // 撞號要自己一臂。`wanted` 現在裝的是設定檔裡那一組（撞號時也有值），
             // 少了這一臂會掉到最後那個 else，把「讓給拔手了」講成「被別的程式
@@ -2504,11 +2755,17 @@ fn hotkey_set(
             )
         };
         let hands_still = if restored.hands_registered {
-            format!("拔手鍵現在還在用 {}。", sister_shell::pretty_combo(&restored.hands_wanted))
+            format!(
+                "拔手鍵現在還在用 {}。",
+                sister_shell::pretty_combo(&restored.hands_wanted)
+            )
         } else if restored.hands_wanted.is_empty() {
             "拔手鍵現在是關掉的。".to_string()
         } else {
-            format!("拔手鍵 {} 現在也搶不到；請從系統匣拔手。", sister_shell::pretty_combo(&restored.hands_wanted))
+            format!(
+                "拔手鍵 {} 現在也搶不到；請從系統匣拔手。",
+                sister_shell::pretty_combo(&restored.hands_wanted)
+            )
         };
         *hotkey.0.lock().expect("hotkey") = restored;
         return Err(format!(
@@ -2527,50 +2784,51 @@ fn hotkey_set(
     // `check-settings-say.mjs` ⑳ 會用原始碼形狀針抓到，但那不是行為覆蓋。
     let view = match action {
         sister_hands::kill_switch::HotkeySetAction::Persist => {
-        let persist = || -> Result<(), String> {
-            let path = config_path()?;
-            let mut c = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
-            c.shell.pause_shortcut = view.wanted.clone();
-            c.save(&path).map_err(|e| format!("{e:#}"))
-        };
-        // 存不進去的時候**不可以直接 `?` 出去**。那三行以前是裸的 `?`，於是
-        // 新的那組已經真的搶下來了（`apply_hotkey` 開頭就 `unregister_all()`），
-        // 而底下那行「把結果寫回 state」永遠跑不到——`hotkey_state` 從此回報
-        // 舊的那組 `registered: true`，設定頁照著印「搶到了。現在按 Ctrl+Alt+P
-        // 都會暫停或繼續」。真正會暫停的是他剛剛試的那一組，P 是死的。下次
-        // 開機又從設定檔讀回 P，所以這個分歧不留下任何痕跡。
-        //
-        // 而且這是那顆**暫停**鍵。上面那段註解說這一格最壞的壞法是「他以為
-        // 她停了，她還在錄」——這條路正好走到那裡。
-        //
-        // 什麼時候會走到這裡：設定檔壞掉（手寫的 retention = 0）、防毒或
-        // OneDrive 鎖著 config.toml、磁碟滿。
-        if let Err(e) = persist() {
-            let restored = apply_hotkey(&app, &previous, &hands_wanted);
-            // `pretty_combo` 而不是原樣印：這一整串是塞進 `Err(String)` 直接
-            // 上畫面的，設定頁不會替它排版。原樣印出來是「還在用 Ctrl+Alt+KeyP」
-            // ——而鍵盤上沒有一顆鍵叫 KeyP。他要照著這句話去按的。
-            let still = if restored.registered {
-                format!("還在用 {}。", sister_shell::pretty_combo(&restored.wanted))
-            } else if restored.hands_collided {
-                // 走得到：設定檔裡兩顆本來就同一組（開機就撞號），他在設定頁換成
-                // 一組不撞的、搶到了、但存不進去 → 這裡把**原來那組**裝回去，而
-                // 原來那組正是撞號的那一組。少了這一臂會掉進最後那個 else，
-                // 把「讓給拔手了」講成「被別的程式搶走了」。
-                format!(
-                    "而舊的那組 {} 和拔手鍵撞號，讓給拔手了——改用系統匣裡的暫停。",
-                    sister_shell::pretty_combo(&restored.wanted)
-                )
-            } else if restored.wanted.is_empty() {
-                "熱鍵本來就是關掉的，維持原狀。".to_string()
-            } else {
-                "而舊的那組現在也搶不到了——改用系統匣裡的暫停。".to_string()
+            let persist = || -> Result<(), String> {
+                let path = config_path()?;
+                let mut c =
+                    sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
+                c.shell.pause_shortcut = view.wanted.clone();
+                c.save(&path).map_err(|e| format!("{e:#}"))
             };
-            *hotkey.0.lock().expect("hotkey") = restored;
-            return Err(format!(
-                "搶到了，但存不進設定檔，所以退回原來那一組。{still}\n{e}"
-            ));
-        }
+            // 存不進去的時候**不可以直接 `?` 出去**。那三行以前是裸的 `?`，於是
+            // 新的那組已經真的搶下來了（`apply_hotkey` 開頭就 `unregister_all()`），
+            // 而底下那行「把結果寫回 state」永遠跑不到——`hotkey_state` 從此回報
+            // 舊的那組 `registered: true`，設定頁照著印「搶到了。現在按 Ctrl+Alt+P
+            // 都會暫停或繼續」。真正會暫停的是他剛剛試的那一組，P 是死的。下次
+            // 開機又從設定檔讀回 P，所以這個分歧不留下任何痕跡。
+            //
+            // 而且這是那顆**暫停**鍵。上面那段註解說這一格最壞的壞法是「他以為
+            // 她停了，她還在錄」——這條路正好走到那裡。
+            //
+            // 什麼時候會走到這裡：設定檔壞掉（手寫的 retention = 0）、防毒或
+            // OneDrive 鎖著 config.toml、磁碟滿。
+            if let Err(e) = persist() {
+                let restored = apply_hotkey(&app, &previous, &hands_wanted);
+                // `pretty_combo` 而不是原樣印：這一整串是塞進 `Err(String)` 直接
+                // 上畫面的，設定頁不會替它排版。原樣印出來是「還在用 Ctrl+Alt+KeyP」
+                // ——而鍵盤上沒有一顆鍵叫 KeyP。他要照著這句話去按的。
+                let still = if restored.registered {
+                    format!("還在用 {}。", sister_shell::pretty_combo(&restored.wanted))
+                } else if restored.hands_collided {
+                    // 走得到：設定檔裡兩顆本來就同一組（開機就撞號），他在設定頁換成
+                    // 一組不撞的、搶到了、但存不進去 → 這裡把**原來那組**裝回去，而
+                    // 原來那組正是撞號的那一組。少了這一臂會掉進最後那個 else，
+                    // 把「讓給拔手了」講成「被別的程式搶走了」。
+                    format!(
+                        "而舊的那組 {} 和拔手鍵撞號，讓給拔手了——改用系統匣裡的暫停。",
+                        sister_shell::pretty_combo(&restored.wanted)
+                    )
+                } else if restored.wanted.is_empty() {
+                    "熱鍵本來就是關掉的，維持原狀。".to_string()
+                } else {
+                    "而舊的那組現在也搶不到了——改用系統匣裡的暫停。".to_string()
+                };
+                *hotkey.0.lock().expect("hotkey") = restored;
+                return Err(format!(
+                    "搶到了，但存不進設定檔，所以退回原來那一組。{still}\n{e}"
+                ));
+            }
             view
         }
         sister_hands::kill_switch::HotkeySetAction::RestoreCollision => {
@@ -2580,8 +2838,8 @@ fn hotkey_set(
             restored
         }
         sister_hands::kill_switch::HotkeySetAction::RestoreRejected => {
-        // 設定檔沒動過，所以退回去的一定是設定檔裡那一組。`rejected` 帶著他
-        // 剛剛打的那個組合，讓那句話講得出「你試的那組沒搶到，還在用舊的」。
+            // 設定檔沒動過，所以退回去的一定是設定檔裡那一組。`rejected` 帶著他
+            // 剛剛打的那個組合，讓那句話講得出「你試的那組沒搶到，還在用舊的」。
             HotkeyView {
                 rejected: Some(view.wanted),
                 ..apply_hotkey(&app, &previous, &hands_wanted)
@@ -3287,6 +3545,8 @@ fn main() {
             ,gatekeeper_check
             ,gatekeeper_react
             ,hands_execute
+            ,url_policy_read
+            ,url_policy_write
         ])
         .setup(|app| {
             let win = app

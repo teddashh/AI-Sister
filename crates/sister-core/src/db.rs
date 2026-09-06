@@ -37,6 +37,14 @@ use crate::model::{
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
 pub const SCHEMA_VERSION: i32 = 19;
 
+/// 可以替無人值守 URL 背書的 recorder 來源版本。
+///
+/// alpha.99 以前的 Windows UIA 在 `CurrentHasKeyboardFocus()` 問失敗時會把它
+/// 當成 `false`，因此可能留下使用者仍在位址列輸入的半截字。只改 writer 不會
+/// 改寫那些歷史列；用新的 session identity 讓舊資料自然 fail-closed，也避免拿
+/// prerelease 版本字串做脆弱的大小比較。
+pub const TRUSTED_URL_ORIGIN_PLATFORM: &str = "windows/windows-gdi-uia-focused-url-v1";
+
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
@@ -2780,49 +2788,64 @@ impl Db {
 
     // ---------- 題庫 ----------
 
-    /// 記下一次提問。回傳那一列的 id——點擊要靠它掛回來。
-    ///
-    /// 查不到的那些**照記**。理由見 [`MIGRATION_004`]：找得回來的那些只證明她
-    /// 現在能做什麼，找不回來的那些才是下一版要修的東西。
     /// 這個網址的**站**，在她自己的紀錄裡出現過嗎（PHASES #42）。
     ///
     /// 「沒有」有兩種，而它們要他做的事完全相反，所以這裡不回 `bool`：
     ///
-    /// - [`UrlOrigin::NotInHerRecord`]：她查了，`focus_events` 裡有網址，
-    ///   只是沒有這一個。**下一步是他自己看一眼那個網址。**
-    /// - [`UrlOrigin::SheIsNotReadingUrls`]：`focus_events` 裡一個網址都沒有。
-    ///   讀網址那條路只有 Windows 有（UIA），而且它連續卡三次會**永久**放棄
-    ///   （見 `sister-capture` 的 `windows/uia.rs`）。這一種下她對**每一個**
-    ///   網址都答不出來，**下一步是去修擷取，不是去看那個網址**。
+    /// - [`UrlOrigin::NotInHerRecord`]：可採信的錄製來源裡有 URL，只是沒有這個站。
+    /// - [`UrlOrigin::NoTrustedRecordedUrls`]：沒有可排除「還在輸入」的錄製
+    ///   URL。舊版 session 可能仍有 URL，但無法安全地拿來背書。
     ///
-    /// 壓成 `bool` 的那一版會把第二種講成第一種：一台從來沒讀過網址的機器，
-    /// 會對每一步都說「這個站你沒去過」——每個字都是假的推論。
+    /// 壓成 `bool` 的那一版會把第二種講成第一種，從零證據推出「這一個站不在
+    /// 紀錄裡」。兩種零要保留。
     ///
     /// 比對只到 host 這一層，理由見 [`sister_hands::target_policy::host_of`]：
     /// 她記下來的那一份是位址列的**縮寫**，逐字比對永遠不會相等。
     pub fn site_in_her_record(&self, url: &str) -> Result<UrlOrigin> {
-        let Some(target) = sister_hands::target_policy::host_of(url) else {
+        let Some(_target) = sister_hands::target_policy::host_of(url) else {
             return Ok(UrlOrigin::NotAReadableSite);
         };
+        // 只接受修過 address-field focus fail-closed 的**真 Windows recorder**。
+        // 舊 `windows/windows-gdi` 可能在 UIA 問焦點失敗時留下半截輸入，不能在
+        // 升級後突然變成來源票；identity 換版讓它保持 fail-closed。
+        // 這裡刻意用 allowlist：
+        // `import_replay` 寫 `replay/import`，`sister replay scenario` 則透過
+        // Recorder 寫 `windows/replay` 或 `linux/replay`；用 replay 前綴黑名單
+        // 會漏掉後者，下載／自造語料就能替日後的 unattended 網址種票。
+        // 將來換 capture backend 時這裡會先 fail-closed，直到明確接上來源。
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT url FROM focus_events WHERE url IS NOT NULL AND url <> \'\'",
+            "SELECT DISTINCT f.url
+               FROM focus_events AS f
+               JOIN sessions AS s ON s.id = f.session_id
+              WHERE f.url IS NOT NULL AND f.url <> ''
+                AND s.platform = ?1",
         )?;
-        let mut saw_any_url = false;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut saw_any_trusted_site = false;
+        let rows = stmt.query_map([TRUSTED_URL_ORIGIN_PLATFORM], |r| r.get::<_, String>(0))?;
         for recorded in rows {
             let recorded = recorded?;
-            saw_any_url = true;
-            if sister_hands::target_policy::host_of(&recorded).as_deref() == Some(target.as_str()) {
+            // 新 recorder identity 只回答「這列走過修正後的擷取路徑」；欄位內容
+            // 仍可能是 about:blank 之類講不出 host 的字。那種列不能把「沒有可比
+            // 的來源」翻成「我比較過別的網站」。
+            if sister_hands::target_policy::host_of(&recorded).is_none() {
+                continue;
+            }
+            saw_any_trusted_site = true;
+            if sister_hands::target_policy::same_site(&recorded, url) {
                 return Ok(UrlOrigin::InHerRecord);
             }
         }
-        Ok(if saw_any_url {
+        Ok(if saw_any_trusted_site {
             UrlOrigin::NotInHerRecord
         } else {
-            UrlOrigin::SheIsNotReadingUrls
+            UrlOrigin::NoTrustedRecordedUrls
         })
     }
 
+    /// 記下一次提問。回傳那一列的 id——點擊要靠它掛回來。
+    ///
+    /// 查不到的那些**照記**。理由見 [`MIGRATION_004`]：找得回來的那些只證明她
+    /// 現在能做什麼，找不回來的那些才是下一版要修的東西。
     pub fn log_query(&self, entry: &QueryLogEntry<'_>) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO queries(ts, question, shape, hits, latency_ms, source)
@@ -7898,20 +7921,40 @@ mod tests {
         Db::open_in_memory().expect("open in-memory db")
     }
 
-    /// **「她查了沒有」和「她根本沒在讀網址」不可以是同一個答案。**
-    ///
-    /// 一台從來沒讀過網址的機器（不是 Windows、或 UIA 已經永久放棄），
-    /// 如果回的是 `NotInHerRecord`，畫面就會對每一步說「這個站你沒去過」
-    /// ——那是一句從零證據推出來的斷言。
+    /// **「查到別的網址」和「目前一個網址證據都沒有」不可以是同一個答案。**
     #[test]
     fn a_machine_that_never_read_a_url_does_not_claim_you_never_went_there() {
         let mut db = test_db();
-        let session = db.start_session("test", "0").expect("session");
+        let session = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "0")
+            .expect("session");
 
         // 一列網址都沒有的時候：不可以說「不在紀錄裡」。
         assert_eq!(
             db.site_in_her_record("https://example.com/a").expect("查"),
-            UrlOrigin::SheIsNotReadingUrls
+            UrlOrigin::NoTrustedRecordedUrls
+        );
+
+        // 有一列，但那串字講不出網站，也仍然不是「比較過別的站」。
+        db.insert_focus(
+            session,
+            &FocusEvent {
+                ts: 1_000,
+                kind: FocusKind::UrlChange,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    app_name: Some("Chrome".into()),
+                    window_title: Some("新分頁".into()),
+                    url: Some("about:blank".into()),
+                    pid: Some(1),
+                    password_field: false,
+                },
+            },
+        )
+        .expect("insert unreadable URL field");
+        assert_eq!(
+            db.site_in_her_record("https://example.com/a").expect("查"),
+            UrlOrigin::NoTrustedRecordedUrls
         );
 
         // 有網址了，但不是這一個——這時候才輪到「不在紀錄裡」。
@@ -7943,7 +7986,9 @@ mod tests {
     #[test]
     fn the_abbreviated_url_she_recorded_still_matches_the_full_one() {
         let mut db = test_db();
-        let session = db.start_session("test", "0").expect("session");
+        let session = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "0")
+            .expect("session");
         db.insert_focus(
             session,
             &FocusEvent {
@@ -7982,6 +8027,114 @@ mod tests {
         assert_eq!(
             db.site_in_her_record("javascript:alert(1)").expect("查"),
             UrlOrigin::NotAReadableSite
+        );
+    }
+
+    /// Replay 是測搜尋／抽取的輸入，不是「這台機器上被她看見過」的憑據。
+    /// 兩條 replay 接線留下的 platform 長得不同，兩條都不能替日後的網址種票。
+    #[test]
+    fn neither_kind_of_replay_can_seed_an_unattended_url_origin() {
+        let mut db = test_db();
+        let corpus = crate::replay::Corpus {
+            format_version: crate::replay::FORMAT_VERSION,
+            name: "外來網址".into(),
+            duration_ms: 1_000,
+            review: crate::replay::ReviewStatus::Draft,
+            redactions: crate::replay::RedactionSummary::default(),
+            events: vec![crate::replay::Event::Focus {
+                at_ms: 10,
+                kind: FocusKind::TitleChange,
+                snapshot: crate::replay::ReplayFocus {
+                    app_id: Some("chrome.exe".into()),
+                    app_name: Some("Chrome".into()),
+                    window_title: Some("語料".into()),
+                    url: Some("seeded.example/path".into()),
+                },
+            }],
+        };
+        db.import_replay(&corpus, 10_000).expect("匯入 corpus");
+
+        let scenario = db.start_session("windows/replay", "0").expect("scenario");
+        db.insert_focus(
+            scenario,
+            &FocusEvent {
+                ts: 20_000,
+                kind: FocusKind::TitleChange,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    app_name: Some("Chrome".into()),
+                    window_title: Some("scenario".into()),
+                    url: Some("seeded.example/again".into()),
+                    pid: Some(2),
+                    password_field: false,
+                },
+            },
+        )
+        .expect("insert scenario URL");
+
+        assert_eq!(
+            db.site_in_her_record("https://seeded.example/collect")
+                .expect("查"),
+            UrlOrigin::NoTrustedRecordedUrls,
+            "兩種 replay 都不是使用者真實錄製的來源"
+        );
+    }
+
+    /// alpha.99 以前 UIA 問「位址列是不是還有鍵盤焦點」失敗時會當成 false，
+    /// 因此歷史 `windows/windows-gdi` 裡可能有尚未送出的半截網址。新 writer
+    /// fail-closed 不會改寫舊列；只有換過 identity 的錄製能替 URL 背書。
+    #[test]
+    fn legacy_windows_url_rows_do_not_become_origin_tickets_after_upgrade() {
+        let mut db = test_db();
+        let legacy = db
+            .start_session("windows/windows-gdi", "0.1.0-alpha.99")
+            .expect("legacy session");
+        db.insert_focus(
+            legacy,
+            &FocusEvent {
+                ts: 1_000,
+                kind: FocusKind::UrlChange,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    app_name: Some("Chrome".into()),
+                    window_title: Some("還在輸入".into()),
+                    url: Some("cathaybk.com".into()),
+                    pid: Some(1),
+                    password_field: false,
+                },
+            },
+        )
+        .expect("legacy half-typed URL");
+        assert_eq!(
+            db.site_in_her_record("https://cathaybk.com/transfer")
+                .expect("查"),
+            UrlOrigin::NoTrustedRecordedUrls,
+            "舊 recorder 的半截位址不可以在升級後變成來源票"
+        );
+
+        let fixed = db
+            .start_session(TRUSTED_URL_ORIGIN_PLATFORM, "0.1.0-alpha.100")
+            .expect("fixed session");
+        db.insert_focus(
+            fixed,
+            &FocusEvent {
+                ts: 2_000,
+                kind: FocusKind::UrlChange,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    app_name: Some("Chrome".into()),
+                    window_title: Some("已開啟".into()),
+                    url: Some("cathaybk.com/account".into()),
+                    pid: Some(1),
+                    password_field: false,
+                },
+            },
+        )
+        .expect("fixed URL observation");
+        assert_eq!(
+            db.site_in_her_record("https://cathaybk.com/transfer")
+                .expect("查"),
+            UrlOrigin::InHerRecord
         );
     }
 

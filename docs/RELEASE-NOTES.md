@@ -11,7 +11,7 @@
 
 ## 開場
 
-單一執行檔，不需要安裝，沒有任何外掛 DLL 或模型檔。
+Release 裡有兩個各自獨立的 Windows 執行檔，不需要安裝，沒有任何外掛 DLL 或模型檔。
 
 ```
 sister.exe doctor                 # 先看這個：她在這台機器上做得到什麼
@@ -28,8 +28,9 @@ sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 字、一張截圖都不寫。`sister.exe consent` 不帶參數就是看現在簽了哪幾張。
 開字母人（`sister-desktop.exe`）的話它會自己把那一頁跳出來。
 
-資料放在 `%APPDATA%\ted-h\AI-Sister\data\`，刪掉那個資料夾就等於
-全部忘掉。也可以用 `--data-dir .\test` 錄到別的地方，測完直接刪。
+記憶資料放在 `%APPDATA%\ted-h\AI-Sister\data\`，刪掉那個資料夾就等於
+把記憶全部忘掉；`config.toml` 裡的機器設定（包括 alpha.100 的 URL 答案）不在其中。
+也可以用 `--data-dir .\test` 錄到別的地方，測完直接刪。
 
 
 ## 結尾
@@ -39,6 +40,78 @@ sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
+
+
+## v0.1.0-alpha.100
+
+**你不在的時候，她可不可以自己按網址，現在由你回答；產品不會替你選。**
+
+第一次打開字母人而設定裡還沒有答案時，她會直接問：
+
+> 有時候我讀到的東西裡會有一個網址。你不在的時候，要我自己按下去嗎？
+
+兩個答案都合法：
+
+- `only-on-my-press`：網址一律等你當場按；standing grant 帶不動 URL。
+- `when-you-can-name-the-origin`：只有她能從自己的保留中、可採信的錄製來源說出那個站曾出現過，
+  才可以在無人值守模式繼續走其他授權檢查。
+
+同一題也可以在終端機看或改：
+
+```text
+sister.exe url-policy
+sister.exe url-policy --set only-on-my-press
+sister.exe url-policy --set when-you-can-name-the-origin
+```
+
+**沒答過是第三種狀態，不是「你選了不要」。** 設定裡的 `hands.url_open` 是
+`Option`；沒有那一欄時，無人值守 URL 會 fail-closed，畫面說的是「我還沒問過你」。
+答案存在預設的 `config.toml`，不在記憶資料目錄或 `grant.json` 裡；`forget` 不會
+替你改答案。字母人讀設定失敗會顯示原因與重試，寫失敗會把問題留在畫面上；寫成功
+才會複述你選的那一句。資料庫查來源失敗也有自己的拒絕理由，不會偽裝成「可採信的
+來源集合是空的」。後者也不等於整顆資料庫從未存過 URL；舊版資料可能存在，只是不可信。
+
+### 這一題只管無人值守網址
+
+它只在 `sister do --use-grant --unattended` 想執行 URL 時生效。你正在場、親手按下
+畫面上的完整目標時，兩個答案都放行；`--dry-run` 也不拿這個選擇假裝做過執行判斷。
+檔案與聚焦視窗不受這一題控制，仍走各自的 target allowlist 和 grant 範圍。
+
+選第二個答案也**不是**讓畫面文字自己變成授權。每一步仍須同時通過已存 grant 的
+task／app／action／期限／步數、兩個 reviewer pass 都引用的目標畫面，以及 exact
+action permit。任一格拒絕或讀取出錯都不會碰作業系統。
+
+### 「說得出來源」只到 host，不是安全判斷
+
+她比的是 URL host，ASCII 大小寫不分，並容許 Chromium 省略的一層 `www.`；
+`example.com` 不等於 `sub.example.com`，也不等於 `example.com.evil.com`。同一個 host
+的不同 path 會被視為同站。
+
+這張來源票只表示：保留中的一場真 Windows 錄製，曾從瀏覽器 chrome 的非內容 Edit
+候選讀到那個 host。它**不證明那個 Edit 一定是位址列、不證明網站安全、不證明是你
+主動開的、不檢查 path，也不證明中間沒有 redirect**。選「等我在」才是所有 URL
+一律不吃 standing grant 的答案。
+
+alpha.100 也把 UIA 問 `CurrentHasKeyboardFocus` 失敗改成拒收候選，並替修正後的
+recorder 使用 exact identity `windows/windows-gdi-uia-focused-url-v1`。來源查詢只信
+這個 identity：alpha.99 以前的 `windows/windows-gdi`、匯入 corpus 和 scenario replay
+都不能在升級後變成來源票。**升級後要讓 recorder 實際觀察到一次該站**；這版沒有
+改 schema，資料庫仍是 v19。
+
+### 兩個靠近作業系統的洞一起關掉
+
+Standing grant 以前鑄出的 permit 沒有帶目標，理論上可把替 action A 拿到的票接到
+action B。現在 `GrantPermit` 綁住完整 `ActionSnapshot`，目標對不上就拒絕；唯一鑄票
+入口同時執行 URL 政策，公開 caller 不能拿一張泛用票繞過它。
+
+`ShellExecuteW` 的 `lpFile` 不只接受檔案，也接受 URI。只看 `.pdf` 的舊驗證會把
+`https://evil.example/report.pdf` 當成文件，最後卻叫瀏覽器打開，繞過整道 URL 政策。
+現在貼著 OS 呼叫的共同驗證會先拒絕 URI、非磁碟機前綴的冒號、UNC／device path、
+控制字元及沒有可驗證文件副檔名的路徑。這不代表清單裡的文件格式絕對安全；它只表示
+`open_file` 不再能借殼變成 `open_url` 或 extensionless executable。
+
+這版完成的是 URL 無人值守選擇與它的授權邊界，**不是**宣告 Phase 6 的整體 injection
+退場條件已完成。
 
 
 ## v0.1.0-alpha.99

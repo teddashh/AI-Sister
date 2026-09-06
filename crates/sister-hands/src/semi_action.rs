@@ -2,7 +2,8 @@
 
 use crate::{
     ActionSnapshot, ApprovedBy, Executor, GrantPermit, NeverInherited, Outcome, Suggestion,
-    never_inherited_class,
+    UrlOriginGap, execute_checked, never_inherited_class,
+    url_policy::{UrlOpenPolicy, UrlOrigin, try_url_origin_gap},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -242,20 +243,44 @@ impl Grant {
         self.validate_expiry(now_ms)
     }
 
-    pub fn authorize_unattended(
+    /// 用 standing grant 鑄出一步的批准。**網址政策是這個唯一鑄票入口的一部分**：
+    /// 公開 caller 不可能先拿到 [`GrantPermit`] 再忘記檢查 URL 來源。
+    ///
+    /// 順序也是契約：先跑 `covers` 的 task/app/action/expiry，再碰來源查詢。
+    /// step limit 由 [`Run::may_start_step`] 先守；這裡不假裝自己檢查過。否則根本
+    /// 不在授權範圍內的一步會叫使用者去改網址政策，改完仍然過不了。
+    pub fn authorize_unattended<E>(
         &self,
         step: &StepRequest,
         now_ms: i64,
-    ) -> Result<(StepApproval, GrantPermit), GrantRejection> {
-        self.covers(step, now_ms)?;
+        policy: UrlOpenPolicy,
+        origin: impl FnOnce(&str) -> Result<UrlOrigin, E>,
+    ) -> Result<(StepApproval, GrantPermit), UnattendedAuthorizationFailure<E>> {
+        self.covers(step, now_ms)
+            .map_err(UnattendedAuthorizationFailure::Grant)?;
+        if let Some(why) =
+            try_url_origin_gap(step.action(), ApprovedBy::StandingGrant, policy, origin)
+                .map_err(UnattendedAuthorizationFailure::OriginLookup)?
+        {
+            return Err(UnattendedAuthorizationFailure::UrlPolicy(why));
+        }
         Ok((
             StepApproval {
                 shown: step.clone(),
                 by: ApprovedBy::StandingGrant,
             },
-            GrantPermit(()),
+            GrantPermit(step.action().clone()),
         ))
     }
+}
+
+/// 無人值守鑄票失敗的三個來源。不能壓成同一個字串：grant 範圍、使用者選的
+/// URL 規則、以及查詢本身壞掉，三者下一步完全不同。
+#[derive(Debug, PartialEq, Eq)]
+pub enum UnattendedAuthorizationFailure<E> {
+    Grant(GrantRejection),
+    UrlPolicy(UrlOriginGap),
+    OriginLookup(E),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -864,7 +889,7 @@ impl RunConclusionRecord {
             Self::Completed {
                 asked: Some(n),
                 decided_by: Some(ApprovedBy::StandingGrant),
-            } => format!("這一輪憑先前簽好的票自己決定了 {n} 步；當時沒有人在鍵盤前面。"),
+            } => format!("這一輪憑先前簽好的票自己決定了 {n} 步；這些步沒有當場核准。"),
             Self::Completed {
                 asked: None,
                 decided_by: Some(ApprovedBy::Press),
@@ -875,7 +900,7 @@ impl RunConclusionRecord {
             Self::Completed {
                 asked: None,
                 decided_by: Some(ApprovedBy::StandingGrant),
-            } => "這一輪走完了；知道是憑先前簽好的票自己決定，但這一列沒有記決定了幾步，當時沒有人在鍵盤前面。".to_string(),
+            } => "這一輪走完了；知道是憑先前簽好的票自己決定、沒有逐步當場核准，但這一列沒有記決定了幾步。".to_string(),
             Self::Completed {
                 asked,
                 decided_by: None,
@@ -1008,10 +1033,7 @@ pub fn execute_approved_step(
             reason: crate::RefusalReason::HandsPulled { since_ms },
         };
     }
-    match executor.execute(suggestion) {
-        Ok(detail) => Outcome::Done { detail },
-        Err(error) => Outcome::Failed { error },
-    }
+    execute_checked(executor, suggestion)
 }
 
 /// 永不繼承的那五類，**兩種批准來源都擋**——不一樣的只有拒絕的理由。
@@ -1027,7 +1049,7 @@ fn never_inherited_refusal(
 ) -> Option<crate::RefusalReason> {
     let class = class?;
     Some(match approved_by {
-        // 沒有人在鍵盤前面，所以話要講得更明白：這一類靠票是跑不動的。
+        // 沒有這一步的當場核准，所以話要講得更明白：這一類靠票是跑不動的。
         ApprovedBy::StandingGrant => crate::RefusalReason::NeedsLivePress { class },
         ApprovedBy::Press => crate::RefusalReason::NeverInherited { class },
     })

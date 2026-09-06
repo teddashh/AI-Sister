@@ -5,10 +5,12 @@
 >
 > An open-source, local-first desktop companion: a filing cabinet that never
 > forgets, an event-driven brain that can admit it's wrong, and a letter-person
-> who knows when to stay quiet. Raw screen data never leaves your machine.
+> who knows when to stay quiet. Screen pixels never leave your machine; after
+> explicit opt-in, OCR text can be handed to the local CLI you configured.
 
-**Status: Phase 0 收尾、Phase 1 開工，Windows alpha 可以下載來跑**
-（[Releases](https://github.com/teddashh/AI-Sister/releases)）。
+**Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Phase 6
+仍在進行，整體 prompt-injection 退場條件尚未完成。** 可以從
+[Releases](https://github.com/teddashh/AI-Sister/releases) 下載來跑。
 
 她開始看之前有**三張各自獨立、隨時撤得掉的同意書**，條文和效力就是：
 
@@ -40,15 +42,17 @@ WAL 工作檔當成每天永久長大，所以**不拿來作 Phase 0 判決**；
 功能與體驗，再回來優化容量；它照實公開，不再擋目前的功能 milestone。
 細節與下一步見 [`docs/WINDOWS-CHECKLIST.md`](docs/WINDOWS-CHECKLIST.md)。
 
-跑得起來的是最底下那一層：看畫面、讀字、抓出電話與金額之類的事實、存進 SQLite、搜得回來。
-**這一層一個模型呼叫都沒有**，全部是程式在抄寫。L2/L3（會推論的那個腦）還沒開始。
+最底下那一層會看畫面、讀字、抓出電話與金額之類的事實、存進 SQLite、搜得回來；
+**這一層一個模型呼叫都沒有**，全部是程式在抄寫。L2/L3 的 Interpreter、Reviewer、
+承諾表與 Gatekeeper，以及只做白名單動作的 hands 也已經接上；會把 OCR 原文交給模型的
+部分仍須第二張同意書與使用者自己設定好的 CLI，沒有就維持純本機檢索。
 
-Release 裡有**兩個**執行檔，分工是「一個記、一個問」：
+Release 裡有**兩個**執行檔：
 
 | | 做什麼 |
 |---|---|
-| `sister.exe` | 記。`record` 錄、`doctor` 自我檢查、`query` 在終端機查、`pause` 叫她閉眼、`consent` 簽或撤同意書 |
-| `sister-desktop.exe` | 問。桌面角落那個字母人：搜尋框 + 出處，點得開當時那張畫面；還有一條時間軸，可以翻、可以刪 |
+| `sister.exe` | 錄製、搜尋、重播評測與資料管理；也包含 `interpret`／`review`／`watch`、Gatekeeper 的 `speak`，以及 `do`／`hands`／`url-policy` 的行動與稽核入口 |
+| `sister-desktop.exe` | 桌面角落的字母人：錄製狀態、搜尋與可點開的出處、時間軸與刪除；也顯示目前推測、Gatekeeper 與 hands 建議，並主動詢問無人值守網址政策 |
 
 ## 跑起來
 
@@ -65,6 +69,21 @@ sister record --duration 60
 然後開 `sister-desktop.exe` 問她剛剛那一分鐘發生了什麼，或者直接 `sister query 電話`。
 `doctor` 排在錄之前是有意的：它會當場示範這台機器**現在**讀不讀得到網址、
 OCR 有沒有裝、哪幾條排除規則其實不生效——比錄完 60 秒才發現什麼都沒進去好。
+
+**alpha.100 多問一個只關於無人值守網址的問題。** 設定尚未回答時，第一次開
+`sister-desktop.exe` 會直接問：「有時候我讀到的東西裡會有一個網址。你不在的時候，
+要我自己按下去嗎？」CLI 的同一個入口是 `sister url-policy`。兩個答案都合法：
+
+- `only-on-my-press`：「等我在。」網址一律等你當場按，standing grant 帶不動。
+- `when-you-can-name-the-origin`：「可以，但你要說得出它從哪來。」只有她在保留中的
+  alpha.100 之後真 Windows 錄製裡看過同一個 host，standing grant 才帶得動；只容許
+  一層 `www.` 的差異，不把子網域當成同一站。
+
+沒回答不是拒絕或預設選項；在回答前，無人值守網址會 fail-closed。這個設定只管
+帶 `--use-grant --unattended` 的 `sister do`：你當場按的網址在兩個答案下都照常執行，
+`--dry-run` 也不走這道閘門。舊版錄製、import 與 replay 都不會被升格成來源票，
+升級後要讓 recorder 實際看過該站一次。**同 host 只是一筆來源紀錄，不證明那格一定
+是位址列、不證明網址安全或由你主動開啟，也不證明 path、redirect 或站內內容可信。**
 
 **從原始碼**——Linux/macOS 也跑得起來，只是還沒有擷取後端，所以第一次不能叫她
 錄；改用 repo 裡那份腳本重播一遍（CI 每次 push 走的是同一條路）：
@@ -421,5 +440,6 @@ Phase 0 的七天自我錄製與磁碟預算還沒達成；CPU／RAM 的真機�
 - **產品**：檔案櫃（L0/L1，零 LLM）+ 大腦（L2/L3，事件驅動、可推翻、可結案）+
   守門員（開口預算制）。
 - **原則**：暴力用在保存，不用在生成；抄寫歸程式，意圖歸模型；敢開著比聰明重要。
-- **路線**：先做「搜得到」（Sister 1.0），再做「想得對」（大腦），最後做「接得了手」
-  （hands）——每一步都用重播評測的數字守門。
+- **路線**：「搜得到」與「想得對」已接上，現在在 Phase 6 把「接得了手」的授權與
+  prompt-injection 邊界做完；之後才進 bounded takeover——每一步都用重播與 hostile
+  fixture 的結果守門。

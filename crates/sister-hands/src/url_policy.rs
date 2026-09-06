@@ -28,36 +28,104 @@ use serde::{Deserialize, Serialize};
 use crate::ApprovedBy;
 use crate::{ActionSnapshot, UrlOriginGap};
 
-/// 他真的講過的話。**只有兩個變體，因為他只可能答這兩個。**
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum UrlOpenAnswer {
-    /// 「等我在。」網址一律要他當場按，票帶不動。
-    OnlyOnMyPress,
-    /// 「可以，但你要說得出它從哪來。」
-    WhenYouCanNameTheOrigin,
-}
+// enum、畫面列出的封閉集合、設定 key 與答句由**同一列**展開。若分開手寫，新增
+// variant 卻漏掉 `ALL` 仍會編譯、CLI/桌面/IPC 還會一起漏掉，測試若也走 `ALL`
+// 甚至全綠。這個 macro 讓那種「每一行都對，合起來少一個答案」沒有接縫可鑽。
+macro_rules! define_url_open_answers {
+    ($(#[$meta:meta])* $first:ident => ($first_key:literal, $first_line:literal)
+     $(, $(#[$rest_meta:meta])* $rest:ident => ($rest_key:literal, $rest_line:literal))* $(,)?) => {
+        /// 他真的講過的話。封閉集合中的每一個變體都是他可見、可選的答案。
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        pub enum UrlOpenAnswer {
+            $(#[$meta])*
+            #[serde(rename = $first_key)]
+            $first,
+            $(
+                $(#[$rest_meta])*
+                #[serde(rename = $rest_key)]
+                $rest,
+            )*
+        }
 
-impl UrlOpenAnswer {
-    pub const ALL: [Self; 2] = [Self::OnlyOnMyPress, Self::WhenYouCanNameTheOrigin];
+        impl UrlOpenAnswer {
+            pub const ALL: [Self; 1 $(+ { let _ = stringify!($rest); 1 })*] = [
+                Self::$first,
+                $(Self::$rest,)*
+            ];
 
-    /// 他選的時候看到的那一句。**問句和答句只有這裡寫一份**，否則
-    /// `sister url-policy` 問的和 `sister doctor` 回報的會在某一版分家。
-    pub const fn line(self) -> &'static str {
-        match self {
-            Self::OnlyOnMyPress => "等我在——網址一律要我當場按，你一個人跑的時候先擱著。",
-            Self::WhenYouCanNameTheOrigin => {
-                "可以自己按，但條件是你說得出這個網址從哪來（那個站要在你自己的紀錄裡出現過）。"
+            pub fn from_key(key: &str) -> Option<Self> {
+                match key {
+                    $first_key => Some(Self::$first),
+                    $($rest_key => Some(Self::$rest),)*
+                    _ => None,
+                }
+            }
+
+            pub const fn line(self) -> &'static str {
+                match self {
+                    Self::$first => $first_line,
+                    $(Self::$rest => $rest_line,)*
+                }
+            }
+
+            pub const fn key(self) -> &'static str {
+                match self {
+                    Self::$first => $first_key,
+                    $(Self::$rest => $rest_key,)*
+                }
             }
         }
-    }
+    };
+}
 
-    /// 設定檔裡寫的那個字。`serde` 那一份是同一份，這裡只是給人看的入口。
-    pub const fn key(self) -> &'static str {
-        match self {
-            Self::OnlyOnMyPress => "only-on-my-press",
-            Self::WhenYouCanNameTheOrigin => "when-you-can-name-the-origin",
-        }
+define_url_open_answers! {
+    /// 「等我在。」網址一律要他當場按，票帶不動。
+    OnlyOnMyPress => (
+        "only-on-my-press",
+        "等我在——網址一律要我當場按，你一個人跑的時候先擱著。"
+    ),
+    /// 「可以，但你要說得出它從哪來。」
+    WhenYouCanNameTheOrigin => (
+        "when-you-can-name-the-origin",
+        "可以自己按，但條件是你說得出這個網址從哪來（那個站要在你自己的紀錄裡出現過）。"
+    ),
+}
+
+/// 她問的那一句。**全 repo 只有這裡寫一份。**
+///
+/// 兩個地方在問它：`sister url-policy` 和字母人身上那一格。分成兩份的話，
+/// 同一個設定會在兩個地方長成兩個不同的問題，而他答的是哪一個沒人說得準。
+pub const QUESTION: &str = "有時候我讀到的東西裡會有一個網址。你不在的時候，要我自己按下去嗎？";
+
+/// 還沒答之前她怎麼做。這句話要和 [`UrlOriginGap::NotAskedYet`] 講同一件事：
+/// 不開，但理由是「我還沒問」不是「你說了不要」。
+///
+/// [`UrlOriginGap::NotAskedYet`]: crate::UrlOriginGap::NotAskedYet
+pub const BEFORE_YOU_ANSWER: &str = "在你回答之前，我一個人跑的時候不會開網址——\
+     但那不是因為你選了「不要」，是因為我還沒問過你。這兩件事在我嘴裡是兩句話。";
+
+impl UrlOpenAnswer {
+    /// 他答完之後她回的那一句。CLI 和桌面共用同一份，否則同一個動作在兩個
+    /// 地方會得到兩種確認。
+    pub fn recorded_line(self) -> String {
+        format!("記下來了：{}", self.line())
+    }
+}
+
+impl std::str::FromStr for UrlOpenAnswer {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::from_key(value).ok_or_else(|| {
+            format!(
+                "答案只能是 {}",
+                Self::ALL
+                    .into_iter()
+                    .map(Self::key)
+                    .collect::<Vec<_>>()
+                    .join(" 或 ")
+            )
+        })
     }
 }
 
@@ -88,10 +156,11 @@ impl UrlOpenPolicy {
 pub enum UrlOrigin {
     /// 這個站在她自己的紀錄裡出現過。
     InHerRecord,
-    /// 查了，沒有。
+    /// 查過可採信的錄製來源，其中沒有這個站。
     NotInHerRecord,
-    /// 她根本沒在讀網址，所以對**每一個**網址都答不出來。
-    SheIsNotReadingUrls,
+    /// 目前沒有可確認為已完成 URL、能替這一步背書的錄製來源。
+    /// 舊版錄製可能仍留著 URL，但無法排除是正在輸入的半截字，所以不採信。
+    NoTrustedRecordedUrls,
     /// 那一串字讀不出一個站名。
     NotAReadableSite,
 }
@@ -104,32 +173,46 @@ pub enum UrlOrigin {
 /// [`ApprovedBy::Press`] 一律放行——**兩種答案都放行**，因為兩種答案講的都是
 /// 「我一個人在跑的時候」。這是它和 `never_inherited_refusal` 最大的差別：
 /// 那一支兩種來源都擋（SPEC §9.2），這一支只擋票。
+pub fn try_url_origin_gap<E>(
+    action: &ActionSnapshot,
+    approved_by: ApprovedBy,
+    policy: UrlOpenPolicy,
+    origin: impl FnOnce(&str) -> Result<UrlOrigin, E>,
+) -> Result<Option<UrlOriginGap>, E> {
+    // 不是開網址的那一步，這道閘門沒有意見。判斷放在裡面不放在呼叫端，
+    // 是因為呼叫端只有一個而它會忘記。
+    let ActionSnapshot::OpenUrl { url } = action else {
+        return Ok(None);
+    };
+    if matches!(approved_by, ApprovedBy::Press) {
+        return Ok(None);
+    }
+    Ok(match policy {
+        UrlOpenPolicy::NotAskedYet => Some(UrlOriginGap::NotAskedYet),
+        UrlOpenPolicy::Answered(UrlOpenAnswer::OnlyOnMyPress) => {
+            Some(UrlOriginGap::YouSaidPressItYourself)
+        }
+        UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin) => match origin(url)? {
+            UrlOrigin::InHerRecord => None,
+            UrlOrigin::NotInHerRecord => Some(UrlOriginGap::NotInHerRecord),
+            UrlOrigin::NoTrustedRecordedUrls => Some(UrlOriginGap::NoTrustedRecordedUrls),
+            UrlOrigin::NotAReadableSite => Some(UrlOriginGap::NotAReadableSite),
+        },
+    })
+}
+
+/// 不會失敗的來源查詢所用的薄 wrapper。真正的授權邊界走
+/// [`try_url_origin_gap`]：資料庫查詢錯誤必須保留，不能冒充某一種「沒有」。
 pub fn url_origin_gap(
     action: &ActionSnapshot,
     approved_by: ApprovedBy,
     policy: UrlOpenPolicy,
     origin: impl FnOnce(&str) -> UrlOrigin,
 ) -> Option<UrlOriginGap> {
-    // 不是開網址的那一步，這道閘門沒有意見。判斷放在裡面不放在呼叫端，
-    // 是因為呼叫端只有一個而它會忘記。
-    let ActionSnapshot::OpenUrl { url } = action else {
-        return None;
-    };
-    if matches!(approved_by, ApprovedBy::Press) {
-        return None;
-    }
-    match policy {
-        UrlOpenPolicy::NotAskedYet => Some(UrlOriginGap::NotAskedYet),
-        UrlOpenPolicy::Answered(UrlOpenAnswer::OnlyOnMyPress) => {
-            Some(UrlOriginGap::YouSaidPressItYourself)
-        }
-        UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin) => match origin(url) {
-            UrlOrigin::InHerRecord => None,
-            UrlOrigin::NotInHerRecord => Some(UrlOriginGap::NotInHerRecord),
-            UrlOrigin::SheIsNotReadingUrls => Some(UrlOriginGap::SheIsNotReadingUrls),
-            UrlOrigin::NotAReadableSite => Some(UrlOriginGap::NotAReadableSite),
-        },
-    }
+    try_url_origin_gap(action, approved_by, policy, |url| {
+        Ok::<_, std::convert::Infallible>(origin(url))
+    })
+    .expect("Infallible origin lookup")
 }
 
 #[cfg(test)]
@@ -142,6 +225,65 @@ mod tests {
     }
     fn never(_: &str) -> UrlOrigin {
         panic!("這條路不該去查來源");
+    }
+
+    /// 設定檔和 IPC 送過來的都是**字串**，而字串什麼都可能是。
+    /// 認不得的時候要回 `None`，不是挑一個最像的——挑了等於替他做決定，
+    /// 而且做完之後畫面會顯示他「答過了」。
+    #[test]
+    fn a_key_it_does_not_recognise_is_not_an_answer() {
+        for answer in UrlOpenAnswer::ALL {
+            assert_eq!(
+                UrlOpenAnswer::from_key(answer.key()),
+                Some(answer),
+                "自己的 key 認不回來：{}",
+                answer.key()
+            );
+        }
+        for junk in [
+            "",
+            " ",
+            "only-on-my-press ",
+            "ONLY-ON-MY-PRESS",
+            "only_on_my_press",
+            "only",
+            "when-you-can-name-the-origin-x",
+            "yes",
+            "true",
+        ] {
+            assert_eq!(
+                UrlOpenAnswer::from_key(junk),
+                None,
+                "「{junk}」被認成了一個答案"
+            );
+        }
+    }
+
+    /// 他答完之後兩個入口（CLI、字母人）回的必須是同一句話，而且**兩個答案
+    /// 的確認句不可以一樣**——那是他唯一看得到「我剛剛選到哪一個」的地方。
+    #[test]
+    fn the_recorded_line_repeats_back_which_one_he_chose() {
+        let a = UrlOpenAnswer::OnlyOnMyPress.recorded_line();
+        let b = UrlOpenAnswer::WhenYouCanNameTheOrigin.recorded_line();
+        assert_ne!(a, b);
+        assert!(a.contains(UrlOpenAnswer::OnlyOnMyPress.line()), "{a}");
+        assert!(
+            b.contains(UrlOpenAnswer::WhenYouCanNameTheOrigin.line()),
+            "{b}"
+        );
+    }
+
+    /// 問句和「還沒答之前怎麼做」那一句是**兩件事**：一句在問，一句在說明
+    /// 沉默期間的行為。把後者忘了寫的話，一個從來沒被問過的人會以為現在這個
+    /// 行為是他自己選的。
+    #[test]
+    fn the_question_and_what_she_does_before_he_answers_are_two_sentences() {
+        assert!(QUESTION.contains("你不在的時候"), "{QUESTION}");
+        assert!(
+            BEFORE_YOU_ANSWER.contains("是因為我還沒問過你"),
+            "{BEFORE_YOU_ANSWER}"
+        );
+        assert_ne!(QUESTION, BEFORE_YOU_ANSWER);
     }
 
     /// 他當場按了，兩種答案都放行。**這是這道閘門和 `NeverInherited` 的分界**：
@@ -193,10 +335,10 @@ mod tests {
         assert_ne!(not_asked, he_said);
         let a = not_asked
             .unwrap()
-            .unattended_message(None, "sister url-policy");
+            .unattended_message(None, Some("sister url-policy"));
         let b = he_said
             .unwrap()
-            .unattended_message(None, "sister url-policy");
+            .unattended_message(None, Some("sister url-policy"));
         assert_ne!(a, b, "兩種不開的理由印出同一句話");
         assert!(
             a.contains("還沒問"),
@@ -231,8 +373,8 @@ mod tests {
         let cases = [
             (UrlOrigin::NotInHerRecord, UrlOriginGap::NotInHerRecord),
             (
-                UrlOrigin::SheIsNotReadingUrls,
-                UrlOriginGap::SheIsNotReadingUrls,
+                UrlOrigin::NoTrustedRecordedUrls,
+                UrlOriginGap::NoTrustedRecordedUrls,
             ),
             (UrlOrigin::NotAReadableSite, UrlOriginGap::NotAReadableSite),
         ];
@@ -245,17 +387,20 @@ mod tests {
                 |_| origin,
             );
             assert_eq!(gap, Some(expected));
-            said.push(gap.unwrap().unattended_message(Some("example.com"), "x"));
+            said.push(
+                gap.unwrap()
+                    .unattended_message(Some("example.com"), Some("x")),
+            );
         }
         for i in 0..said.len() {
             for j in (i + 1)..said.len() {
                 assert_ne!(said[i], said[j], "兩種說不出來印出同一句話");
             }
         }
-        // 「這一整條路沒在跑」不可以讀起來像「這一個網址可疑」。
+        // 「目前沒有任何網址證據」不可以讀起來像「這一個網址可疑」。
         assert!(
-            said[1].contains("每一個"),
-            "沒在讀網址那一句要說清楚它對每一個網址都成立：{}",
+            said[1].contains("沒有") && said[1].contains("錄製來源"),
+            "沒有可採信 URL 來源那一句要說清楚量到的空集合：{}",
             said[1]
         );
     }

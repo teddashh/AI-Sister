@@ -44,8 +44,9 @@ jobs:
 
       # PRIVACY.md 說「整個 repo 搜不到 HTTP client」。這一步讓那句話由 CI
       # 保證，而不是由記性保證——缺口通常是相依套件帶進來的，不是人手動加的。
-      # 同一支腳本現在也守「零次模型呼叫」（本機推論引擎一條連線都不用開）
-      # 與「沒有監聽埠」（`TcpListener` 只用 std，一個相依都不會多）。
+      # 同一支腳本也守「沒有內建推論引擎」與「沒有監聽埠」
+      # （`TcpListener` 只用 std，一個相依都不會多）。它不替 cloud-reading
+      # 交給使用者設定之外部 CLI 的後續網路行為背書。
       - name: Privacy — no HTTP client, no inference engine, no socket
         run: ./scripts/check-no-network.sh
 
@@ -134,10 +135,9 @@ jobs:
       # 要過 `pretty_combo`，而漏掉那一層的每一行都長得完全正常——`format!("還在
       # 用 {}。", restored.wanted)` 編得過、clippy 綠、讀起來也對。
       #
-      # 為什麼是掃原始碼而不是測試：那句話在 `apps/desktop/src-tauri`，那是一個
-      # 獨立的 workspace，CI 對它只跑 `cargo clippy --all-targets -- -D warnings`
-      # 和 `cargo build --release`（本檔「字母人 — lint and build」那一步），
-      # **從來沒有 `cargo test` 過**。把那一行改回去是紅不了任何東西的。
+      # 為什麼仍掃原始碼：那句話在獨立的 desktop workspace。alpha.100 起 Windows
+      # CI 會跑它的 unit tests，但沒有一條測試驅動這個 Tauri 接線；Linux job 更是
+      # 編不到它。把那一行改回去，單靠 cargo test 仍然紅不了。
       #
       # 為什麼是 python 而不是 grep：`cargo fmt` 會把一句中文的 `format!` 拆成
       # 三行，而一行一行看的 grep 會因此從紅變綠——**一個被例行動作關掉的閘門，
@@ -146,8 +146,9 @@ jobs:
         run: python3 ./scripts/check-combo-is-readable.py
 
       # 同一個檔案、同一個理由，換一顆鍵：拔手熱鍵是**安全鍵**，按下去把她的手
-      # 拔掉。它的接線同樣整條躺在 `apps/desktop`，同樣一條 `cargo test` 都編不
-      # 到。r33 那十二刀突變裡有四刀打在呼叫端，第一輪跑出來**四刀全綠**——包括
+      # 拔掉。它的接線同樣整條躺在 `apps/desktop`；Windows unit tests 雖從
+      # alpha.100 起會跑，仍沒有一條真的按 Tauri tray/hotkey。r33 那十二刀突變裡
+      # 有四刀打在呼叫端，第一輪跑出來**四刀全綠**——包括
       # 「系統匣兩顆標籤對調」（他按下去做的是相反的事，畫面上一個字看不出來）
       # 和「問不出資料目錄時宣稱『現在沒拔』」（不確定的時候倒向危險那一邊）。
       # 加上這支之後同樣四刀全紅。它擋不住什麼，寫在那支腳本開頭。
@@ -172,7 +173,8 @@ jobs:
       #       包括「`message` 釘死成 `Queued.message()`」（15 句塌成最讓人安心
       #       的那一句）和「`?` 換成 `unwrap_or`」（資料庫壞掉長得像正常的一天）。
       #
-      # 三塊都在 `apps/desktop/src-tauri`，那裡從來沒有 `cargo test`。
+      # 三塊都在 `apps/desktop/src-tauri`。alpha.100 以前那裡從來沒有 `cargo test`；
+      # 現在 Windows CI 會跑 unit tests，但這三塊接線仍由下面的形狀閘門補位。
       # 這不是推測：(b) 那一刀和「寫死成 None」那一刀我都真的跑過，**當時**那
       # 26 條閘門全綠——當時就是這一條還不存在的時候。這一條加進來就是為了讓
       # 它們變紅。
@@ -773,12 +775,13 @@ jobs:
 
       # 字母人是**另一個 workspace**（Tauri 在 Linux 上要 webkit2gtk，開發機
       # 沒有也裝不了——理由寫在它的 Cargo.toml），所以上面每一個 `--workspace`
-      # 都碰不到它。**這裡是它第一次被真的編譯**：開發機那邊只驗得到型別，
-      # 連圖示能不能嵌進執行檔都是用一個假的 llvm-rc 混過去的。
-      - name: 字母人 — lint and build
+      # 都碰不到它。這裡在真 Windows 上 lint、執行 unit tests 並產 release；Linux
+      # 的 check-windows 只做跨平台 check/clippy，圖示資源也用假的 llvm-rc。
+      - name: 字母人 — lint, test and build
         working-directory: apps/desktop/src-tauri
         run: |
           cargo clippy --all-targets -- -D warnings
+          cargo test --all-targets
           cargo build --release
 
       - name: Upload ai-sister.exe

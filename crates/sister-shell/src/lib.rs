@@ -167,10 +167,9 @@ pub fn base64(bytes: &[u8]) -> String {
 /// `Ctrl+Alt+KeyP` → `Ctrl + Alt + P`。存的是前者，給人看的是後者。
 ///
 /// 為什麼在這裡而不是在 `main.rs`：跟 [`base64`] 同一個理由。桌面那個 crate
-/// 在這台機器上編不起來，所以放在那邊的測試**一行都跑不到**——CI 也一樣，
-/// 它對字母人只跑 `cargo clippy --all-targets -- -D warnings` 與
-/// `cargo build --release`，**沒有 `cargo test`**。一個永遠不會執行的測試比
-/// 沒有測試更糟，因為它看起來像有人在顧。
+/// 在這台 Linux 機器上編不起來，root workspace 的測試也碰不到它。
+/// alpha.100 起 Windows CI 會另跑 desktop unit tests，但這個純字串規則放在
+/// 共用 crate，仍能讓 Linux 開發與根 workspace 測試當場驗到。
 ///
 /// 而這件事不需要一個真的視窗系統才回答得了（那是這個 crate 開頭那段講的
 /// 判準），它是一個字串問題。

@@ -127,6 +127,37 @@ function blind(over = {}) {
   };
 }
 
+/** #42 那題的 IPC 形狀；兩個選項的字刻意像後端真的回傳，不在測試裡縮成好／不要。 */
+function urlPolicy(over = {}) {
+  return {
+    question: "我一個人在跑的時候，可不可以自己按網址？",
+    answered: null,
+    options: [
+      { key: "only-on-my-press", line: "等我在；網址要我當場按。" },
+      { key: "when-you-can-name-the-origin", line: "可以，但你要說得出它從哪來。" },
+    ],
+    before_you_answer: "你還沒回答以前，我一個人跑時不會開任何網址。",
+    path: "C:\\Users\\ted\\AppData\\Roaming\\AI-Sister\\config.toml",
+    ...over,
+  };
+}
+
+/** gatekeeper_check 的 IPC 形狀。`display: null` 是量過的沒有，不是 command 沒跑。 */
+function gatekeeper(display = null, actionLog = ["還沒有任何動作紀錄。她從來沒有把一個動作端到你面前過。"]) {
+  return { display, developer: null, action_log: actionLog };
+}
+
+function gateCard(over = {}) {
+  return {
+    utterance_id: 91,
+    form: "card",
+    text: "五點了，要不要看那份報告？",
+    evidence: [],
+    suggestion: null,
+    ...over,
+  };
+}
+
 /**
  * 開一次字母人。`invoke` 收一張 `{ 指令: 回傳值或會丟出來的 Error }` 表；
  * 沒列到的指令回 `null`。函式值會被呼叫（要延遲、要丟例外的用這個）。
@@ -179,6 +210,12 @@ async function open(table = {}, { search = "" } = {}) {
     line: () => node("[data-state-line]").textContent,
     hits: () => node("[data-hits]"),
     hitTexts: () => node("[data-hits]").children.map((c) => c.textContent),
+    urlPolicy: () => node("[data-url-policy]"),
+    urlPolicyQuestion: () => node("[data-url-policy-question]").textContent,
+    urlPolicyActions: () => node("[data-url-policy-actions]"),
+    urlPolicyResult: () => node("[data-url-policy-result]"),
+    utterance: () => node("[data-utterance]"),
+    handsLog: () => node("[data-hands-log]"),
     /** 從這個視窗**以外**發生的事：系統匣的按鈕、熱鍵、她自己停掉。 */
     async fromOutside(name, payload) {
       const cb = listeners.get(name);
@@ -193,6 +230,12 @@ async function open(table = {}, { search = "" } = {}) {
     async type(q) {
       node("[data-ask-input]").value = q;
       for (const fn of node("[data-ask-send]").handlers.click ?? []) fn();
+      await tick();
+    },
+    async chooseUrlPolicy(index) {
+      const button = node("[data-url-policy-actions]").children[index];
+      if (!button) throw new Error(`URL 題沒有第 ${index + 1} 顆按鈕`);
+      for (const fn of button.handlers.click ?? []) fn();
       await tick();
     },
     /**
@@ -825,6 +868,71 @@ console.log("㉛ 送出去的事件名字，另一邊要真的有人在聽");
   }
   for (const name of new Set(heard)) {
     check(`聽的 ${name} 真的有人送`, emitted.includes(name), emitted.join("、"));
+  }
+}
+
+console.log("㉜ URL 題寫入中撞上五秒輪詢：同一格不可以同時冒出兩張卡");
+{
+  let finishWrite;
+  const writing = new Promise((resolve) => { finishWrite = resolve; });
+  let gateChecks = 0;
+  const p = await open({
+    recording_state: "recording",
+    url_policy_read: urlPolicy(),
+    url_policy_write: () => writing,
+    gatekeeper_check: () => gatekeeper(gateChecks++ === 0 ? null : gateCard()),
+    ask: answer(),
+  });
+  check("前提：還沒回答時兩個答案都在", p.urlPolicy().hidden === false, p.urlPolicyQuestion());
+  await p.chooseUrlPolicy(1);
+  check("開始存之後 URL 題仍在", p.urlPolicy().hidden === false, p.urlPolicy().hidden);
+  await tick(5100);
+  check("輪詢來了一張 gatekeeper 卡，URL 寫入仍優先", p.urlPolicy().hidden === false, p.urlPolicy().hidden);
+  check("gatekeeper 卡沒有疊在同一格", p.utterance().hidden === true, p.utterance().textContent);
+
+  finishWrite("記下了：可以，但你要說得出它從哪來。");
+  await tick();
+  check("寫成後顯示的是確實存好的回條", p.urlPolicyResult().textContent.includes("存到"), p.urlPolicyResult().textContent);
+  check("回條期間 gatekeeper 仍讓開", p.utterance().hidden === true, p.utterance().textContent);
+
+  await p.type("剛剛發生什麼事");
+  check("使用者自己的答案優先於剛存好的回條", p.urlPolicy().hidden === true, p.urlPolicy().hidden);
+  check("也不把等著的 gatekeeper 疊回來", p.utterance().hidden === true, p.utterance().textContent);
+}
+
+console.log("㉝ URL 設定讀不回來不是『沒答過』，錯誤要看得見也聽得見");
+{
+  const LONG = `config parse failed: ${"x".repeat(400)}`;
+  const p = await open({
+    recording_state: "recording",
+    gatekeeper_check: gatekeeper(),
+    url_policy_read: new Error(LONG),
+  });
+  check("沒有替他選、也沒有把錯誤藏起來", p.urlPolicyResult().textContent.includes(LONG), p.urlPolicyResult().textContent);
+  check("錯誤是 alert，不只是一塊看得到的顏色", p.urlPolicyResult().dataset.role === "alert", p.urlPolicyResult().dataset);
+  check("仍有重試出口", p.urlPolicyActions().children.length === 1, p.urlPolicyActions().children.length);
+}
+
+console.log("㉞ gatekeeper／action log 讀不到時，不准留舊卡或安靜吞掉");
+{
+  const p = await open({
+    recording_state: "recording",
+    gatekeeper_check: new Error("database is locked"),
+    url_policy_read: urlPolicy({ answered: "only-on-my-press" }),
+  });
+  check("讀取錯誤出現在 action log 那格", p.handsLog().textContent.includes("database is locked"), p.handsLog().textContent);
+  check("那格會被螢幕閱讀器宣布", p.handsLog().dataset.role === "alert", p.handsLog().dataset);
+  check("沒有拿上一輪卡片冒充現在式", p.utterance().hidden === true, p.utterance().textContent);
+}
+
+console.log("㉟ 長網址與 action log 不可以橫向裁掉真正的目標");
+{
+  const css = read(join(UI, "styles.css"));
+  for (const selector of [".asked-note", ".asked-result", ".utterance-text", ".utterance-result", ".hands-log"]) {
+    const start = css.indexOf(selector);
+    const end = css.indexOf("}", start);
+    const rule = css.slice(start, end);
+    check(`${selector} 允許沒有斷點的字換行`, start >= 0 && rule.includes("overflow-wrap: anywhere"), rule);
   }
 }
 

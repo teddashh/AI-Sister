@@ -418,8 +418,9 @@ capture 層本身就是 recorder。
   平台執行層（`ShellExecuteW` / `EnumWindows`+`SetForegroundWindow`，
   不經 cmd.exe、不經 PowerShell）、按鈕、以及畫面上的行動紀錄。
   目標政策是**白名單**（http/https；可看的副檔名），放在
-  `sister-hands::target_policy` 而不是字母人裡面——CI 對 `apps/desktop` 只跑
-  clippy 和 build，寫在那邊的測試一列都不會被執行。
+  `sister-hands::target_policy` 而不是字母人裡面——根 workspace 在 Linux 也要
+  執行這些規則，CLI 與 desktop 也不能各抄一份。alpha.100 起 Windows CI 另跑
+  desktop unit tests，但不改變共用政策應住在共用 crate 的理由。
   按鈕回叫帶的是承諾 id 不是動作，要做什麼由後端重讀資料庫（SPEC §9.7）。
   - **writer 也在 alpha.69**：在這之前 `commitments.allowed_next_step` 從
     schema 建好到那天沒有任何一支程式寫過它，所以整條路——按鈕、`Level::Suggest`、
@@ -456,8 +457,8 @@ capture 層本身就是 recorder。
   **alpha.70 有第一個呼叫端了：`sister do`。** 在這之前這 443 行從發表那天起
   一次都沒被執行過。SPEC §9.1 對介面有定案（「逐步核准；對話式『好』= 核准」
   〔定案：CLI 證明的是互動可行，不是授權夠精確〕），所以第一個呼叫端是 CLI
-  而不是字母人——而且 CI 對 `apps/desktop` 只跑 clippy 和 build，寫在那邊的
-  測試一列都不會被執行。
+  而不是字母人——alpha.70 當時 desktop CI 也只有 clippy/build；alpha.100 起
+  Windows CI 已另跑它的 unit tests，接線層仍由原始碼閘門與真機清單補位。
   - 步驟來源是**承諾卡的 `allowed_next_step`**，不是一個新的 planner
     （那是 Phase 7）。三態分得開：沒有下一步的卡安靜跳過，寫了但讀不懂的卡
     要印出來。
@@ -482,7 +483,7 @@ capture 層本身就是 recorder。
     檔案裡直接接在一起）。`--dry-run` 不寫這一列。
   - `sister hands log` 讀同一份紀錄。回放那段文案從 `apps/desktop` 搬進
     `sister_hands::replay_copy`，兩個呼叫端共用一份——順帶讓那兩條測試第一次
-    真的被執行（CI 對那個 workspace 只跑 clippy 和 build）。目錄不存在時**報錯**，
+    真的被執行（alpha.70 當時那個 workspace 只跑 clippy 和 build）。目錄不存在時**報錯**，
     不印「還沒有任何動作紀錄」：`ActionLog::replay` 把「檔案不存在」當成空的
     （對它那一層是對的），而在 CLI 這一層那會變成一句沒查過的宣布。
   - ✅ **每步畫面憑據（alpha.73）**：那一格從發表那天起一律 `None`，而唯一
@@ -556,8 +557,9 @@ capture 層本身就是 recorder。
     `sister_hands::kill_switch` 了（`tray_hands_labels` / `tray_hands_unknown_labels`
     在 `crates/` 裡有測試），但 `main.rs` 那兩顆 handler 本身、以及熱鍵註冊那條
     接線，守它的是 `scripts/check-hands-hotkey-says.py` 那支**原始碼形狀的針**，
-    不是行為證據（`apps/desktop` 是另一個 workspace，`cargo test --workspace`
-    一行都編不到它；`check-windows.sh` 也沒有 `cargo test`）。
+    不是行為證據（`apps/desktop` 是另一個 workspace，根 `cargo test --workspace`
+    與 `check-windows.sh` 都不執行它；alpha.100 起 Windows CI 會跑 desktop unit
+    tests，但仍沒有測試真的按 tray handler）。
     要在真 Windows 上按一遍才算數。
     另外 alpha.75 修掉一個 Windows 專屬的 fail-open：`try_exists()` 對「祖先是
     檔案」的子路徑，Linux 回 `Err`、Windows 回 `Ok(false)`，於是「讀不到」被講成
@@ -570,7 +572,9 @@ capture 層本身就是 recorder。
   看到的」，不是「作業系統只會讓這些 app 被打開」（那是 Windows 的檔案關聯
   決定的，不是我們）。
 - 🔶 來源防線：L0 內容 data-block 包裹 ✅（alpha.67 `prompt_fence`，
-  20 種 injection 變體）；外部內容要求動作 → 強制人工核准 ✅（型別上就過不去）。
+  20 種 injection 變體）。外部內容本身**不是授權**：互動模式要當場按，無人值守
+  則要同時通過結構化 grant、兩個 pass 都引用的目標畫面，以及 alpha.100 的 URL
+  政策。不能再把這句縮寫成「一律人工核准」——產品已經有 standing grant。
   ✅ 端到端的 injection 套件（alpha.82，`crates/sister-cli/tests/injection_end_to_end.rs`）：
   20 種變體各走一次 `replay → review → do`，斷言（一）那些字**逐字**進得了
   `text_chunks`（沒有人去敏、沒有人過濾），（二）`action-log.jsonl` 裡**零行**
@@ -710,9 +714,13 @@ capture 層本身就是 recorder。
        有列而加總是 0＝真的沒動）。把承諾建在一個會回「我不知道」的訊號上，
        等於發一張她守不住的票。
     2. **「可以，但你要說得出它從哪來。」** 她只開**來源講得出來**的網址——那個
-       網址必須被 `focus_events.url` 佐證過（你真的在瀏覽器裡開過那個站），
-       說不出來就不開。這一格用的是已經有的 UIA 讀網址機制，而它壞掉的時候
-       **是 fail-closed**（UIA 連續卡三次會永久放棄讀網址，那之後她一個都開不了）。
+       host 必須在修正後的真 Windows recorder 留下的 `focus_events.url` 出現過，
+       說不出來就不開。精確意思只是「她曾在一場保留中的真 Windows 錄製裡，從
+       瀏覽器 chrome 的非內容 Edit 候選讀到這個 host」；它**不證明那格一定是位址列、
+       不證明安全、不證明是你主動開的，也不證明沒有經過 redirect**。這一格用的是
+       已經有的 UIA 讀網址機制，而它壞掉的時候**是 fail-closed**（問候選欄位焦點
+       失敗就不收那串字；UIA 連續卡三次會永久放棄讀網址，那之後不會再新增來源
+       host；先前仍在保留期內、由可信 session 留下的 host 仍可通過）。
        **注意比對只能到 host 這一層**：Chromium 位址列給的是縮寫過的字串
        （`kFormatUrlOmitHTTPS`／`OmitTrivialSubdomains`，見 `uia.rs:29`），
        `https://www.example.com/a` 讀回來是 `example.com/a`，逐字比對永遠不會中。
@@ -735,18 +743,26 @@ capture 層本身就是 recorder。
     才去問這個設定的三種狀態。`ApprovedBy` 這個型別已經在了，不用新造訊號。
     兩種行為都合法，安靜地替他選了才是 bug。（這一條自己關不掉 Phase 6 那個 injection 的
     exit criterion——那一條缺的是套件打不同的攔截點，見 :1012。）
-    **〔alpha.100 落地——CLI 那一半〕** 閘門做出來了，位置就在上面說的那裡，而且
-    **擺在授權書通過之後、不是之前**：兩邊都是拒絕、都不會執行，所以順序只影響他讀到
-    哪一句，而「這個 app 不在授權內」是比較根本的那一句——先講網址政策的話，一個授權書
-    根本沒涵蓋這一步的人會去改設定，改完還是不會過。
-    - `sister url-policy` 問那一題、記下答案。**沒答過不會在設定檔留下任何一行**：
+    **〔alpha.100 落地——CLI、字母人與唯一授權邊界都接完〕** 閘門在
+    `Grant::authorize_unattended`——唯一能把 standing grant 鑄成一步 permit 的地方；
+    不是只掛在目前這一個 CLI caller 上。它**擺在授權書通過之後**：兩邊都是拒絕、
+    都不會執行，所以順序只影響他讀到哪一句，而「這個 app 不在授權內」是比較根本
+    的那一句。先講網址政策的話，一個授權書根本沒涵蓋這一步的人會去改設定，改完
+    還是不會過。
+    - 第一次打開字母人、設定仍是 `None` 時，她會直接把問題和兩個答案端出來；不是
+      躺在設定頁裡等人找。這張卡與 gatekeeper、查詢答案共用一個說話位置，不能同時
+      疊成兩句；340×560 的小視窗可以捲，不會把答案裁掉。讀設定失敗會顯示原因和
+      重試，寫失敗保留問題，寫成功先複述選到哪一個再收起來。
+    - `sister url-policy` 是同一題的 CLI 入口，也能事後改答案。**沒答過不會在設定檔
+      留下任何一行**：
       `hands.url_open` 是 `Option`，`None` 就是「還沒問過」，型別上不可能被寫成
       一個答案（`UrlOpenAnswer` 只有兩個變體，兩個都是他真的講過的話）。
-    - **五句拒絕各自講不同的成因**：還沒問過／你說了要當場按／這個站不在你的紀錄裡／
-      她根本沒在讀網址／這根本不是一個讀得懂的站。後面三種都是「說不出來源」，分開是
-      因為它們要他做的事完全不一樣：換一個網址、去修擷取、還是根本沒得修。
-      摘要那一行也分成兩句：「還沒問過」那一種一個動作就全部解決，其餘那幾種要他
-      一步一步自己看——壓成同一句會把「跑一次指令」講成「一步一步去查」。
+    - **五句拒絕各自講不同的已知事實**：還沒問過／你說了要當場按／這個站不在目前
+      可採信的網址來源裡／目前沒有可確認為已完成 URL、能替這一步背書的錄製來源／
+      這串字讀不出站名。第四種不能猜成「擷取壞了」，也不能猜成整顆 DB 沒有 URL：
+      舊版錄製可能仍有 URL，但無法排除是輸入到一半的字，所以不拿來背書；也可能只是
+      尚未用新版錄到。摘要也把「要先回答」與「已回答但這一步仍過不了規則」分開；
+      回答只會讓她照選到的規則繼續判斷，不保證那個網址因此放行。
     - 比對到 **host** 這一層（`target_policy::host_of`）：`www.` 去掉、userinfo 取
       **最後**一個 `@` 之後的（`https://example.com@evil.com/` 的站是 `evil.com`）、
       `[::1]:8080` 括號裡的冒號不是 port 分隔、只有 http/https 講得出「站」
@@ -754,16 +770,30 @@ capture 層本身就是 recorder。
       `example.com.evil.com` 不算數。
     - **查詢出錯往上丟，不讀成「她沒在讀網址」。** 那是「兩種 0」的第三種形狀：
       把錯誤讀成一個測量值。那一句話會叫他去修擷取，而壞掉的其實是這次查詢。
+    - **舊錄製不會突然升格成來源票。** alpha.99 以前，UIA 問位址列是否仍有鍵盤
+      焦點失敗時會當成 `false`，可能留下尚未送出的半截字。alpha.100 把修正後的
+      recorder session 標成 `windows/windows-gdi-uia-focused-url-v1`，查詢只信這個
+      exact identity；舊 `windows/windows-gdi`、匯入 corpus 與 scenario replay 全部
+      fail-closed。升級後要讓她實際觀察到一次，不能拿版本字串大小猜。
+    - `open_file` 不能拿網址借殼：`ShellExecuteW` 的 `lpFile` 也接受 URI，所以只看
+      `.pdf` 會讓 `https://evil/report.pdf` 繞過 URL 閘門。貼著 OS 呼叫的共同驗證現在
+      拒絕 URI、非磁碟機前綴的冒號、正斜線／混合寫法的 UNC/device path、控制字元、
+      無副檔名與不在文件白名單裡的副檔名；這道驗證搬到 `cfg(windows)` 外，Linux CI
+      真的跑得到。`ExecutorError` 也把「第二道檢查在 OS 前拒絕」與「OS 碰過後失敗」
+      分成兩個型別，拔手若恰好發生在兩道檢查之間也不會被記成 Executed。
+    - standing grant 鑄出的 `GrantPermit` 綁 exact `ActionSnapshot`，檔案 A 的 permit
+      接不了網址 B，網址 A 的也接不了網址 B；舊 `execute_with(Level::Suggest)` 只收
+      live press，standing grant 必須走會重查 grant、step、期限和 URL policy 的隘口。
     - 既有兩套整合測試（`injection_end_to_end`、`step_target_provenance`）要讓這道
       新閘門**保持中立**才算數：它們問的是別的問題（時間窗、目標畫面的出處），
       新閘門在裡面一開火，那些測試就會**因為新的理由**通過，而它們原本在守的東西
       沒人守了。做法是夾具答過那一題、並且把目標那個站種進 `focus_events.url`。
-    **還缺（#42 仍然沒關）**：
-    - **她還沒真的「開口問」。** Ted 講的是「讓他跟字母人對話的時候問」——現在只有
-      `sister url-policy`，他得自己想到去跑它。桌面那一半沒做，所以這個設定目前在
-      畫面上的**可見度是零**：不去跑那支指令的人，只會在拒絕訊息裡第一次看到它。
-    - 這道閘門只擋**無人值守**。當場按一律放行（兩種答案都是），`--dry-run` 也不走
-      它——這是設計，不是漏掉。
+    **邊界（所以 Phase 6 的 injection exit criterion 仍不打勾）**：這道閘門只擋
+    **無人值守**。當場按一律放行（兩種答案都是），`--dry-run` 也不走它——這是設計，
+    不是漏掉。選「說得出來源」的人得到的是 host provenance，不是安全判斷；同站不同
+    路徑、redirect、或站內被埋的 URL 仍可能通過。選「等我在」才是所有 URL 都不吃
+    standing grant。這個選擇功能做完了，不等於可以把 20 種 injection 的整體退場條件
+    宣告 100%。
     **alpha.86 也沒有把它補起來。** 那一版擋的是模型**捏造**引用（這次 prompt
     根本沒給它看過的 ref），完全被攻下的模型只要引用一張**真的**畫面就照樣通過
     ——引用檢查在原理上就擋不了。真正在守的還是授權書的範圍。它的副作用是**縮小**

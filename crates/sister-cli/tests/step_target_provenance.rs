@@ -1,7 +1,7 @@
 //! 下一步目標自己的畫面來源必須參與授權書的 app 維度。
 use sister_core::config::Config;
 use sister_core::db::{Db, L2Author, L2Insert};
-use sister_core::model::InputMetrics;
+use sister_core::model::{FocusEvent, FocusKind, FocusSnapshot, InputMetrics};
 use sister_hands::semi_action::{
     ActionKind, AllowedActions, AllowedApps, App, Expiry, Grant, StepLimit, Task, grant_path,
 };
@@ -11,6 +11,31 @@ use std::process::{Command, Output};
 
 const TASK: &str = "執行這個下一步";
 const OTHER_APP_URL: &str = "https://from-another-app.example.com/collect";
+
+fn seed_real_url_origin(db: &mut Db, ts: i64) {
+    // Scenario 是 replay，不能替日後的 unattended URL 種來源票。這套測的是
+    // target frame/app，另種一場明確的 Windows 真 recorder provenance 才能
+    // 讓 #42 的網址政策保持中立。
+    let session = db
+        .start_session(sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM, "test")
+        .expect("real capture provenance session");
+    db.insert_focus(
+        session,
+        &FocusEvent {
+            ts,
+            kind: FocusKind::UrlChange,
+            snapshot: FocusSnapshot {
+                app_id: Some("chrome.exe".into()),
+                app_name: Some("Google Chrome".into()),
+                window_title: Some("網址來源夾具".into()),
+                url: Some(OTHER_APP_URL.into()),
+                pid: Some(1),
+                password_field: false,
+            },
+        },
+    )
+    .expect("seed real URL provenance");
+}
 
 fn tmp(label: &str) -> PathBuf {
     let path =
@@ -110,6 +135,7 @@ fn run_case_ex(
     );
 
     let mut db = Db::open(&Config::db_path(&dir)).unwrap();
+    seed_real_url_origin(&mut db, 10_000_000);
     let chunks = db.recent(100).unwrap();
     let evidence = chunks
         .iter()
@@ -603,6 +629,7 @@ fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, St
     );
 
     let mut db = Db::open(&Config::db_path(&dir)).unwrap();
+    seed_real_url_origin(&mut db, 10_000_000);
     let chunks = db.recent(100).unwrap();
     let evidence = chunks
         .iter()

@@ -47,7 +47,7 @@ pub fn replay_lines(replay: &Replay) -> Vec<String> {
                     format!("{} 他當場按了：{}", at(*at_ms), action.describe())
                 }
                 Some(ApprovedBy::StandingGrant) => format!(
-                    "{} 憑先前簽好的票自己跑，沒有人在鍵盤前面：{}",
+                    "{} 憑先前簽好的票自己跑，沒有這一步的當場核准：{}",
                     at(*at_ms),
                     action.describe()
                 ),
@@ -130,7 +130,7 @@ fn unreadable_lines(replay: &Replay) -> Vec<String> {
 /// action-log 沒有任何可讀列時，依檔案是否存在分開兩種歷史。
 pub fn empty_run_log_message(file_exists: bool) -> &'static str {
     if file_exists {
-        "這份紀錄是空的——**不是**「她從來沒動過手」，是裡面的列被刪光了。"
+        "這份紀錄是空的——不是「她從來沒動過手」，是裡面的列被刪光了。"
     } else {
         "還沒有任何動作紀錄。她從來沒有把一個動作端到你面前過。"
     }
@@ -258,7 +258,7 @@ fn run_report_lines(run_number: usize, events: &[&ActionEvent]) -> Vec<String> {
                 let by = match by {
                     Some(ApprovedBy::Press) => "他當場按的",
                     Some(ApprovedBy::StandingGrant) => {
-                        "憑先前簽好的票自己跑的；當時沒有人在鍵盤前面"
+                        "憑先前簽好的票自己跑的；沒有這一步的當場核准"
                     }
                     None => "舊版沒有記批准來源，所以不知道是誰批准的",
                 };

@@ -2,11 +2,12 @@ use sister_hands::{ActionEvent, ActionLog, ExecutionResult, Level, Outcome};
 use std::path::Path;
 
 // 按下去之後回給他的那一句話搬進 `sister_hands::outcome_message` 了，理由和
-// 底下 `recent_replay_lines` 那一段一樣：住在這裡的測試一列都不會被執行。
+// 底下 `recent_replay_lines` 一樣：CLI 與 desktop 要共用，而且根 workspace
+// 在 Linux 上也要跑得到；desktop 自己的測試只在 Windows CI 執行。
 pub use sister_hands::outcome_message;
 
-// 回放那段文案搬進 `sister_hands::replay_copy` 了，理由寫在那個模組開頭：CI 對
-// 這個 workspace 只跑 clippy 和 build，所以住在這裡的測試一列都不會被執行。
+// 回放那段文案搬進 `sister_hands::replay_copy` 了，理由寫在那個模組開頭：
+// 兩個 workspace 都要讀同一句，而且 Linux 根 workspace 也要有執行覆蓋。
 // 這裡只接 `recent_replay_lines`——字母人那一格永遠是截斷過的那一種，
 // 而 `replay_lines`（全量）的呼叫端是 `sister hands log`。
 pub use sister_hands::replay_copy::recent_replay_lines;

@@ -62,21 +62,41 @@ pub struct UserButtonPress(());
 
 /// 這一步是憑什麼跑的。
 ///
-/// 兩者都是**正當**的批准，差別在有沒有人在鍵盤前面。log 必須分得出來：
+/// 兩者都是**正當**的批准，差別在這一步有沒有當場核准。log 必須分得出來：
 /// 這份 log 存在的理由就是回答「她憑什麼做這件事」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovedBy {
     /// 他當場按的。
     Press,
-    /// 憑一張先前簽好的票自己跑的——沒有人在鍵盤前面。
+    /// 憑一張先前簽好的票自己跑的——沒有這一步的當場核准。
     StandingGrant,
 }
 
 /// 一張票批准了某一步之後才拿得到的憑證。
 /// 私有欄位、沒有公開建構子——唯一的來源是 `Grant::authorize_unattended`。
 #[derive(Debug, PartialEq, Eq)]
-pub struct GrantPermit(());
+pub struct GrantPermit(ActionSnapshot);
+
+/// 拿 A 的 permit 去接 B 的按鈕。兩個目標都保留，讓錯誤不只說「不合」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantPermitMismatch {
+    authorized: ActionSnapshot,
+    requested: ActionSnapshot,
+}
+
+impl std::fmt::Display for GrantPermitMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "standing grant 的 permit 只對「{}」有效，不能拿去做「{}」",
+            self.authorized.describe(),
+            self.requested.describe()
+        )
+    }
+}
+
+impl std::error::Error for GrantPermitMismatch {}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SuggestionAuthorization(SuggestionAuthorizationKind);
@@ -148,6 +168,20 @@ impl Suggestion {
             Self::FocusWindow { title, .. } => ActionSnapshot::FocusWindow {
                 title: title.clone(),
             },
+        }
+    }
+
+    /// 只給 crate 內的兩個執行隘口看。外部 caller 不該能把 grant 產生的
+    /// suggestion 冒充成人剛按下去的 suggestion。
+    const fn approved_by(&self) -> ApprovedBy {
+        let authorization = match self {
+            Self::OpenUrl { authorization, .. }
+            | Self::OpenFile { authorization, .. }
+            | Self::FocusWindow { authorization, .. } => authorization,
+        };
+        match &authorization.0 {
+            SuggestionAuthorizationKind::Press(_) => ApprovedBy::Press,
+            SuggestionAuthorizationKind::StandingGrant(_) => ApprovedBy::StandingGrant,
         }
     }
 }
@@ -249,10 +283,17 @@ impl SuggestionButton {
         }
     }
 
-    pub fn take_up(self, permit: GrantPermit) -> Suggestion {
+    pub fn take_up(self, permit: GrantPermit) -> Result<Suggestion, GrantPermitMismatch> {
+        let requested = self.snapshot();
+        if permit.0 != requested {
+            return Err(GrantPermitMismatch {
+                authorized: permit.0,
+                requested,
+            });
+        }
         let authorization =
             SuggestionAuthorization(SuggestionAuthorizationKind::StandingGrant(permit));
-        match self.0 {
+        Ok(match self.0 {
             SuggestionDraft::OpenUrl { url } => Suggestion::OpenUrl { url, authorization },
             SuggestionDraft::OpenFile { path } => Suggestion::OpenFile {
                 path,
@@ -262,7 +303,7 @@ impl SuggestionButton {
                 title,
                 authorization,
             },
-        }
+        })
     }
 }
 
@@ -324,6 +365,11 @@ pub enum RefusalReason {
     NotCoveredByGrant {
         rejection: semi_action::GrantRejection,
     },
+    /// 目標白名單在碰到作業系統前拒絕了這一步。
+    ///
+    /// 這不是 [`Outcome::Failed`]：沒有 OS 呼叫發生。`why` 是共用 target policy
+    /// 產生的理由，讓即時輸出與 action log 都說得出是哪一條規則擋下來。
+    TargetRejectedBeforeOs { why: String },
     /// 無人值守時，下一步目標沒有一張被承諾引用的畫面可供核對。
     UnattendedTargetHasNoCitedFrame { why: TargetFrameGap },
     /// 無人值守時，這一步要開的網址過不了他自己選的那道規則（#42）。
@@ -401,13 +447,14 @@ define_gaps! { UrlOriginGap {
     NotAskedYet,
     /// 他選了「網址要我當場按」。票跑不動它，這是他要的。
     YouSaidPressItYourself,
-    /// 他選了「說得出來源就可以」，而這個站不在她的紀錄裡。
+    /// 他選了「說得出來源就可以」，而這個站不在她目前可採信的錄製來源裡。
     NotInHerRecord,
-    /// 他選了「說得出來源就可以」，而她**根本沒在讀網址**——於是她對每一個
-    /// 網址都答不出來。這跟「這一個網址可疑」是兩件事，句子不可以合併：
-    /// 前者要他去修擷取，後者要他自己看一眼那個網址。
-    SheIsNotReadingUrls,
-    /// 那一串字讀不出一個站名，所以連「你去過嗎」都問不出口。
+    /// 他選了「說得出來源就可以」，但目前沒有一筆可採信的錄製 URL。
+    /// 這跟「這一個網址不在紀錄裡」是兩件事；舊版錄製可能仍有 URL，
+    /// 但無法排除是焦點查詢失敗時留下的半截輸入，所以不能拿來背書。
+    #[serde(alias = "no_recorded_urls", alias = "she_is_not_reading_urls")]
+    NoTrustedRecordedUrls,
+    /// 那一串字讀不出一個站名，所以連要和哪個已留存 host 對照都問不出口。
     NotAReadableSite,
 }}
 
@@ -416,35 +463,44 @@ impl UrlOriginGap {
     ///
     /// `host` 只有 [`Self::NotInHerRecord`] 用得到；其他四種給不給都一樣，
     /// 因為它們講的不是「哪一個站」而是「我為什麼答不出來」。
-    pub fn unattended_message(&self, host: Option<&str>, answer_cmd: &str) -> String {
+    pub fn unattended_message(&self, host: Option<&str>, answer_cmd: Option<&str>) -> String {
         match self {
-            Self::NotAskedYet => format!(
-                "這一步要開一個網址，而我還沒問過你「我一個人在跑的時候，可不可以自己按網址」。\
-                 **這不是你說了不要，是我還沒問**——所以我先不開。要現在回答就跑 `{answer_cmd}`。"
-            ),
+            Self::NotAskedYet => {
+                let next = answer_cmd
+                    .map(|cmd| format!("要現在回答就跑 `{cmd}`。"))
+                    .unwrap_or_else(|| {
+                        "請回到這一趟使用的設定入口回答；這一列沒有保存設定檔路徑。".into()
+                    });
+                format!(
+                    "這一步要開一個網址，而我還沒問過你「我一個人在跑的時候，可不可以自己按網址」。\
+                     **這不是你說了不要，是我還沒問**——所以我先不開。{next}"
+                )
+            }
             Self::YouSaidPressItYourself => {
-                "你說過網址要你當場按。這一步是憑授權票跑的，沒有人在鍵盤前面，\
-                 所以我把它擱著等你回來——這是你選的，不是出了什麼事。"
+                "你說過網址要你當場按。這一步是憑授權票跑的，這一趟沒有你當場按，\
+                 所以我把它擱著——這是你選的，不是出了什麼事。"
                     .to_string()
             }
             Self::NotInHerRecord => match host {
                 Some(host) => format!(
                     "你說過我可以自己按網址，條件是我要說得出它從哪來。而這個站（{host}）\
-                     在我自己的紀錄裡從來沒出現過——我只是在螢幕上讀到這串字，\
+                     在我目前可採信的錄製來源裡找不到——我只是在這一步讀到這串字，\
                      沒有別的東西替它背書。"
                 ),
                 None => "你說過我可以自己按網址，條件是我要說得出它從哪來。而這個站\
-                         在我自己的紀錄裡從來沒出現過。"
+                         在我目前可採信的錄製來源裡找不到。"
                     .to_string(),
             },
-            Self::SheIsNotReadingUrls => {
-                "你說過我可以自己按網址，條件是我要說得出它從哪來。**但我現在根本沒在讀網址**，\
-                 所以我對每一個網址都說不出來源——這不是這一個網址可疑，是我這一整條路沒在跑。"
+            Self::NoTrustedRecordedUrls => {
+                "你說過我可以自己按網址，條件是我要說得出它從哪來。但我目前沒有\
+                 可以確認為已完成網址、能替這一步背書的錄製來源。舊版紀錄可能留著 URL，\
+                 但當時焦點問不出來時可能把輸入到一半的字當成完成網址，所以我不拿它們背書；\
+                 也可能只是還沒用新版錄到。光看可用的來源，我分不出是哪一種。"
                     .to_string()
             }
             Self::NotAReadableSite => {
                 "你說過我可以自己按網址，條件是我要說得出它從哪來。而這一串字我讀不出一個站名，\
-                 所以我連「這是不是你去過的地方」都問不出口。"
+                 所以我連要拿哪個 host 和留下的紀錄對照都問不出口。"
                     .to_string()
             }
         }
@@ -575,6 +631,8 @@ pub enum RefusalBucket {
     ShownStepMismatch,
     /// 走錯了路或權限級數不對——正常使用碰不到，碰到就是這支程式的錯。
     WrongPath,
+    /// 動作目標本身不在可安全交給 OS 的白名單。換目標才有用；放寬 grant 沒用。
+    TargetRejectedBeforeOs,
 }
 
 impl RefusalReason {
@@ -586,6 +644,7 @@ impl RefusalReason {
             Self::UserDeclinedThisStep => RefusalBucket::Declined,
             Self::HandsPulled { .. } => RefusalBucket::Pulled,
             Self::NotCoveredByGrant { .. } => RefusalBucket::OutsideGrant,
+            Self::TargetRejectedBeforeOs { .. } => RefusalBucket::TargetRejectedBeforeOs,
             Self::UnattendedTargetHasNoCitedFrame { why } => match why {
                 TargetFrameGap::RecordedBeforeAgreedEvidence => {
                     RefusalBucket::RecordedBeforeThisCheck
@@ -603,7 +662,7 @@ impl RefusalReason {
                 UrlOriginGap::NotAskedYet => RefusalBucket::UrlPolicyNotAnswered,
                 UrlOriginGap::YouSaidPressItYourself
                 | UrlOriginGap::NotInHerRecord
-                | UrlOriginGap::SheIsNotReadingUrls
+                | UrlOriginGap::NoTrustedRecordedUrls
                 | UrlOriginGap::NotAReadableSite => RefusalBucket::UrlOriginUnknown,
             },
             Self::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
@@ -617,10 +676,10 @@ impl RefusalReason {
 
     /// 非 `UnattendedTargetHasNoCitedFrame` 的種數 + [`TargetFrameGap::COUNT`]。
     /// 測試把「每種各餵一次」綁在這個數字和 [`Self::index`] 上。
-    pub const KIND_COUNT: usize = 8 + TargetFrameGap::COUNT + UrlOriginGap::COUNT;
+    pub const KIND_COUNT: usize = 9 + TargetFrameGap::COUNT + UrlOriginGap::COUNT;
 
     /// 0..KIND_COUNT-1。match 沒有 `_`：漏一種編不過。
-    /// `UnattendedTargetHasNoCitedFrame` 占 6..6+COUNT-1，所以加一種
+    /// `UnattendedTargetHasNoCitedFrame` 占 7..7+COUNT-1，所以加一種
     /// `TargetFrameGap` 會把後面兩個編號往後推。
     pub const fn index(&self) -> usize {
         match self {
@@ -630,10 +689,11 @@ impl RefusalReason {
             Self::NeverInherited { .. } => 3,
             Self::NeedsLivePress { .. } => 4,
             Self::NotCoveredByGrant { .. } => 5,
-            Self::UnattendedTargetHasNoCitedFrame { why } => 6 + why.index(),
-            Self::ApprovalWasForAnotherStep { .. } => 6 + TargetFrameGap::COUNT,
-            Self::HandsPulled { .. } => 7 + TargetFrameGap::COUNT,
-            Self::UnattendedUrlOriginUnknown { why } => 8 + TargetFrameGap::COUNT + why.index(),
+            Self::TargetRejectedBeforeOs { .. } => 6,
+            Self::UnattendedTargetHasNoCitedFrame { why } => 7 + why.index(),
+            Self::ApprovalWasForAnotherStep { .. } => 7 + TargetFrameGap::COUNT,
+            Self::HandsPulled { .. } => 8 + TargetFrameGap::COUNT,
+            Self::UnattendedUrlOriginUnknown { why } => 9 + TargetFrameGap::COUNT + why.index(),
         }
     }
 
@@ -660,13 +720,18 @@ impl RefusalReason {
                 "semi-action 需要結構化 grant 和顯示的那一步核准；不可走 suggest 隘口。".to_string()
             }
             Self::NotCoveredByGrant { rejection } => rejection.message().to_string(),
+            Self::TargetRejectedBeforeOs { why } => {
+                format!("目標在交給作業系統前被擋下來：{why}")
+            }
             Self::UnattendedTargetHasNoCitedFrame { why } => {
                 why.unattended_message(None, None, None)
             }
             Self::UnattendedUrlOriginUnknown { why } => {
                 // 這裡不帶 host：和上面那一行同一個理由，id 與 host 由 `ops.rs`
                 // 在它拿得到的地方接進去。同一支方法，兩句話不會互相打架。
-                why.unattended_message(None, "sister url-policy")
+                // action log 沒有保存當時的 `--config`；硬塞預設指令會把用自訂
+                // 設定檔的人帶去改錯檔案。即時輸出拿得到路徑，回放只講真話。
+                why.unattended_message(None, None)
             }
             Self::ApprovalWasForAnotherStep { mismatch } => mismatch.message(),
             Self::HandsPulled { since_ms } => match since_ms {
@@ -694,11 +759,35 @@ pub enum Outcome {
     Done { detail: String },
 }
 
+/// `Executor` 回來的錯誤也必須說清楚 OS 有沒有被碰過。
+///
+/// 這個型別特別守平台實作裡的第二道 kill switch / target-policy 檢查：它們可能
+/// 在公開隘口檢查後才攔住請求。若只回一串 `Err(String)`，呼叫端只能把「攔住」
+/// 誤記成「交出去了但失敗」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutorError {
+    RefusedBeforeOs { reason: RefusalReason },
+    PlatformFailed { error: String },
+}
+
+impl ExecutorError {
+    pub fn refused(reason: RefusalReason) -> Self {
+        Self::RefusedBeforeOs { reason }
+    }
+
+    pub fn platform(error: impl Into<String>) -> Self {
+        Self::PlatformFailed {
+            error: error.into(),
+        }
+    }
+}
+
 /// 按下去之後，畫面上回給他的那一句話。
 ///
 /// **住在這裡而不是字母人裡面**，理由和 [`crate::replay_copy`]、
-/// [`crate::target_policy`]、[`crate::platform`] 一樣：CI 對 `apps/desktop`
-/// 只跑 clippy 和 build，寫在那邊的 `#[cfg(test)]` 一列都不會被執行。
+/// [`crate::target_policy`]、[`crate::platform`] 一樣：CLI 與 desktop 要讀
+/// 同一句，而且 root workspace 的 Linux CI 也要執行得到。alpha.100 起 Windows CI
+/// 另跑 desktop unit tests，但共用規則仍不該因此分成兩份。
 /// 這一段是 [`Outcome`] 那三格「不准串話」的唯一出口，而那正是需要被守住的東西。
 pub fn outcome_message(outcome: &Outcome) -> String {
     match outcome {
@@ -710,12 +799,26 @@ pub fn outcome_message(outcome: &Outcome) -> String {
 
 /// 平台呼叫端提供實作者；測試只放 fake，不會真的開瀏覽器或視窗。
 pub trait Executor {
-    fn execute(&mut self, suggestion: &Suggestion) -> std::result::Result<String, String>;
+    fn execute(&mut self, suggestion: &Suggestion) -> std::result::Result<String, ExecutorError>;
 
     /// 手還在不在。
     ///
     /// 沒有預設實作是刻意的：每一個 executor 都必須明講自己有沒有接開關。
     fn hands_attached(&self) -> Attached;
+}
+
+/// 已通過權限／核准與拔手檢查後的最後一道共用執行邊界。
+pub(crate) fn execute_checked(executor: &mut impl Executor, suggestion: &Suggestion) -> Outcome {
+    if let Err(why) = target_policy::validate_suggestion(suggestion) {
+        return Outcome::Refused {
+            reason: RefusalReason::TargetRejectedBeforeOs { why },
+        };
+    }
+    match executor.execute(suggestion) {
+        Ok(detail) => Outcome::Done { detail },
+        Err(ExecutorError::RefusedBeforeOs { reason }) => Outcome::Refused { reason },
+        Err(ExecutorError::PlatformFailed { error }) => Outcome::Failed { error },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -758,6 +861,14 @@ pub fn execute_with(
             };
         }
     }
+    // `Suggestion` 的隱藏票有兩種來源。這個舊入口只具備「人按了」所需的
+    // 檢查；standing grant 還要 grant、step approval、期限與 URL policy，必須走
+    // `execute_approved_step`。只檢查「裡面有票」會讓 grant 借這條路逃掉。
+    if suggestion.approved_by() != ApprovedBy::Press {
+        return Outcome::Refused {
+            reason: RefusalReason::SemiActionNeedsGrantAndStepApproval,
+        };
+    }
     // 今天走不到：`suggest` 的三種動作都不在那五類裡。留著是因為下一個人
     // 加第四種動作時，`never_inherited_class` 會**編譯錯誤**逼他回答，
     // 而他答「是」的那一刻，這裡就自動擋下來了——不必他記得加一道檢查。
@@ -771,10 +882,7 @@ pub fn execute_with(
             reason: RefusalReason::HandsPulled { since_ms },
         };
     }
-    match executor.execute(suggestion) {
-        Ok(detail) => Outcome::Done { detail },
-        Err(error) => Outcome::Failed { error },
-    }
+    execute_checked(executor, suggestion)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1126,6 +1234,9 @@ mod tests {
                 RefusalReason::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
                 RefusalReason::NeedsLivePress { .. } => RefusalBucket::NeedsALivePressThisRun,
                 RefusalReason::NotCoveredByGrant { .. } => RefusalBucket::OutsideGrant,
+                RefusalReason::TargetRejectedBeforeOs { .. } => {
+                    RefusalBucket::TargetRejectedBeforeOs
+                }
                 RefusalReason::UnattendedTargetHasNoCitedFrame { why } => match why {
                     TargetFrameGap::RecordedBeforeAgreedEvidence => {
                         RefusalBucket::RecordedBeforeThisCheck
@@ -1141,13 +1252,14 @@ mod tests {
                 },
                 RefusalReason::ApprovalWasForAnotherStep { .. } => RefusalBucket::ShownStepMismatch,
                 RefusalReason::HandsPulled { .. } => RefusalBucket::Pulled,
-                // 分兩格的理由是「下一步」：沒問過的話，回答一次就全部解決；
-                // 其他四種要他一步一步自己看，回答設定救不了它們。
+                // 分兩格的理由是「下一步」：沒問過的話要先回答；其他四種要他
+                // 一步一步自己看，回答設定救不了它們。「一律當場按」也不會讓
+                // 無人值守網址放行，所以不能宣稱回答一次就全部解決。
                 RefusalReason::UnattendedUrlOriginUnknown { why } => match why {
                     UrlOriginGap::NotAskedYet => RefusalBucket::UrlPolicyNotAnswered,
                     UrlOriginGap::YouSaidPressItYourself
                     | UrlOriginGap::NotInHerRecord
-                    | UrlOriginGap::SheIsNotReadingUrls
+                    | UrlOriginGap::NoTrustedRecordedUrls
                     | UrlOriginGap::NotAReadableSite => RefusalBucket::UrlOriginUnknown,
                 },
             }
@@ -1165,6 +1277,9 @@ mod tests {
             },
             RefusalReason::NotCoveredByGrant {
                 rejection: semi_action::GrantRejection::Apps,
+            },
+            RefusalReason::TargetRejectedBeforeOs {
+                why: "不會開啟：測試目標".into(),
             },
         ];
         for why in TargetFrameGap::ALL {
@@ -1405,10 +1520,11 @@ mod tests {
 
     /// 拿去對照記憶的那個目標字串，三種動作各是什麼。
     ///
-    /// 這一條住在這裡而不是字母人那邊，是因為**字母人的測試哪裡都跑不到**：
-    /// `apps/desktop` 不在 root workspace 的 `members` 裡（`Cargo.toml` 只收
-    /// `crates/*`），CI 對它也只有 build，沒有 `cargo test`。這支函式的兩個
-    /// 呼叫端一個在 `sister do`、一個在字母人，把規則放在這個 crate 才有人跑得到。
+    /// 這一條住在這裡而不是字母人那邊，是因為 `apps/desktop`
+    /// 不在 root workspace 的 `members` 裡（`Cargo.toml` 只收 `crates/*`）；
+    /// alpha.100 起 Windows CI 會另跑它的 unit tests，但 Linux 根 workspace 仍碰不到。
+    /// 這支函式的兩個呼叫端一個在 `sister do`、一個在字母人；
+    /// 把規則放在共用 crate，才不會生出兩份不同的答案。
     #[test]
     fn expected_target_is_the_string_we_match_memory_against() {
         assert_eq!(
@@ -1477,7 +1593,10 @@ mod tests {
         calls: u32,
     }
     impl Executor for Fake {
-        fn execute(&mut self, suggestion: &Suggestion) -> std::result::Result<String, String> {
+        fn execute(
+            &mut self,
+            suggestion: &Suggestion,
+        ) -> std::result::Result<String, ExecutorError> {
             self.calls += 1;
             Ok(format!("fake: {}", suggestion.describe()))
         }
@@ -1491,7 +1610,10 @@ mod tests {
         executed: Vec<ActionSnapshot>,
     }
     impl Executor for PulledFake {
-        fn execute(&mut self, suggestion: &Suggestion) -> std::result::Result<String, String> {
+        fn execute(
+            &mut self,
+            suggestion: &Suggestion,
+        ) -> std::result::Result<String, ExecutorError> {
             self.executed.push(suggestion.snapshot());
             Ok("不該執行".into())
         }
@@ -1635,6 +1757,51 @@ mod tests {
             read,
             ActionEvent::StepFinished { evidence: None, .. }
         ));
+    }
+
+    /// alpha.100 把一個會猜原因的 variant 改成只講量到的空集合；舊 action log
+    /// 的 wire name 仍要讀得回來。讀不回來不只會少一列：`forget_range` 對無法
+    /// 判時戳的壞列會明講後刪掉，所以忘別天時也可能誤刪這一列。
+    #[test]
+    fn the_old_empty_url_evidence_name_survives_replay_and_forget() {
+        let event = ActionEvent::Refused {
+            at_ms: 1_000,
+            action: ActionSnapshot::OpenUrl {
+                url: "https://example.com".into(),
+            },
+            reason: RefusalReason::UnattendedUrlOriginUnknown {
+                why: UrlOriginGap::NoTrustedRecordedUrls,
+            },
+        };
+        let current = serde_json::to_string(&event).unwrap();
+        for old_name in ["no_recorded_urls", "she_is_not_reading_urls"] {
+            let legacy = current.replace("no_trusted_recorded_urls", old_name);
+            let parsed: ActionEvent = serde_json::from_str(&legacy).expect("舊名字仍要能讀");
+            assert!(matches!(
+                parsed,
+                ActionEvent::Refused {
+                    reason: RefusalReason::UnattendedUrlOriginUnknown {
+                        why: UrlOriginGap::NoTrustedRecordedUrls
+                    },
+                    ..
+                }
+            ));
+        }
+
+        let legacy = current.replace("no_trusted_recorded_urls", "she_is_not_reading_urls");
+
+        let dir = tmp_dir("legacy-url-gap");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = ActionLog::in_data_dir(&dir);
+        std::fs::write(log.path(), format!("{legacy}\n")).unwrap();
+        let report = log.forget_range(2_000, 3_000).unwrap();
+        assert_eq!(report.removed_unreadable, 0);
+        assert_eq!(report.kept, 1);
+        assert!(
+            std::fs::read_to_string(log.path())
+                .unwrap()
+                .contains("she_is_not_reading_urls")
+        );
     }
 
     #[test]

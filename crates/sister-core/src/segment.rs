@@ -188,42 +188,7 @@ impl EventStream {
 
 /// 從 URL 抽出 host。沒有 host 可抽就回 `None`，不拿路徑或標題來充數。
 pub fn url_host(url: &str) -> Option<String> {
-    let s = url.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let rest = match s.find("://") {
-        Some(i) => s.get(i + 3..)?,
-        None => s,
-    };
-    let hostport = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .rsplit('@')
-        .next()
-        .unwrap_or("");
-    let host = if let Some(inner) = hostport.strip_prefix('[') {
-        inner.split(']').next().unwrap_or("")
-    } else {
-        hostport.split(':').next().unwrap_or("")
-    };
-    let host = host.trim().trim_matches('.').to_ascii_lowercase();
-    if !looks_like_host(&host) {
-        return None;
-    }
-    Some(host)
-}
-
-fn looks_like_host(host: &str) -> bool {
-    if host == "localhost" {
-        return true;
-    }
-    if host.is_empty() || !host.contains('.') {
-        return false;
-    }
-    host.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    sister_hands::target_policy::host_of(url)
 }
 
 /// 把事件流切成段落。沒有事件就回空向量，不是一段假的全天。
