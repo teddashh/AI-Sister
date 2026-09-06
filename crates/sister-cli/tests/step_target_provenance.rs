@@ -473,9 +473,11 @@ fn real_db_prints_no_drive_sentence_when_the_target_raw_no_longer_matches() {
     {
         let conn = rusqlite::Connection::open(Config::db_path(&dir)).unwrap();
         let target_id: i64 = conn
-            .query_row("SELECT id FROM facts WHERE raw = ?1", [OTHER_APP_URL], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT id FROM facts WHERE raw = ?1",
+                [OTHER_APP_URL],
+                |r| r.get(0),
+            )
             .unwrap();
         conn.execute(
             "UPDATE facts SET raw = 'https://new.example/not-the-old-target' WHERE id = ?1",
@@ -487,7 +489,14 @@ fn real_db_prints_no_drive_sentence_when_the_target_raw_no_longer_matches() {
         &dir,
         None,
         &[
-            "do", "--task", TASK, "--app", "chrome.exe", "--allow", "open-url", "--dry-run",
+            "do",
+            "--task",
+            TASK,
+            "--app",
+            "chrome.exe",
+            "--allow",
+            "open-url",
+            "--dry-run",
         ],
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
