@@ -1115,12 +1115,23 @@ capture 層本身就是 recorder。
    **alpha.88 先修好 reviewer；alpha.89 把同一個 `completed_the_ask()` 閘門接到
    interpreter 和 watch。** 現在非零退出或拿不到退出碼的 CLI 即使印出合法 JSON，
    也不能寫進 L2，不能回答「等到了」或「還沒有」。
-2. `sister do` 收尾那一行有六格拒絕，今天真的產得出來的只有兩格
-   （範圍不涵蓋、拔手）。另外四格是**先擺好在等的**：
-   `separate_approval_required` 和 `never_inherited_class` 對三種已實作的
-   動作全回 `None`。分格分在型別上（多一種拒絕理由就編不過），所以那幾類
-   實作出來的時候沒有人需要記得回來補；但在那之前，那四句話一次都不會出現
-   在螢幕上，**沒有任何執行證據說它們印出來是對的**。
+2. `sister do` 收尾那一行有四格拒絕**沒有寫入端**：
+   `never_inherits`、`needs_press`（`separate_approval_required` 和
+   `never_inherited_class` 對三種已實作的動作全回 `None`）、`mismatched`
+   （票和遞出去的那一步是從同一個 `step` 長出來的）、`wrong_path`（這支 CLI
+   不會走錯級數）。分格分在型別上（多一種拒絕理由就編不過），所以那幾類實作
+   出來的時候沒有人需要記得回來補；但在那之前，那四句話一次都不會出現在螢幕
+   上，**沒有任何執行證據說它們印出來是對的**。
+
+   〔alpha.98 更正〕這一條原本寫「**六格**拒絕，今天真的產得出來的只有兩格
+   （範圍不涵蓋、拔手）」。那是 alpha.81 的數字，早就過期了：`Tally` 現在有
+   **12 格**拒絕，和 `RefusalBucket` 一對一，產得出來的是 8 格——目標出處那
+   五格（`target_not_cited` / `target_no_frame` / `no_target` / `target_gone`
+   / `recorded_before_this_check`）是 alpha.86–87 那幾輪長出來的，
+   `step_target_provenance.rs` 拿真的 CLI 走過。**沒有寫入端的那四格從頭到尾
+   沒變**，所以上面那半句仍然成立。
+   要重數不要照抄數字：`RefusalBucket` 的變體個數就是格數（`bucket()` 沒有
+   `_`），沒有寫入端的那幾格看 `never_inherited_class` 回不回得出 `Some`。
 
 **這一輪修掉的**（alpha.82）：
 

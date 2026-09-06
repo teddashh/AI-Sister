@@ -3711,8 +3711,14 @@ pub mod act {
         /// 走不到 `ApprovalWasForAnotherStep`：`separate_approval_required` 和
         /// `never_inherited_class` 對三種已實作的動作都回 `None`，而那張核准票
         /// 和遞出去的那一步是從同一個 `step` 長出來的。這幾格是**先擺好的**，
-        /// 等那幾類實作了才會有東西掉進來——六格裡今天真的產得出來的只有
-        /// 「範圍不涵蓋」和「拔手」兩格。
+        /// 等那幾類實作了才會有東西掉進來。
+        ///
+        /// **沒有寫入端的是四格**：`never_inherits`、`needs_press`、
+        /// `mismatched`、`wrong_path`。（這句話原本寫「六格裡今天真的產得出來
+        /// 的只有『範圍不涵蓋』和『拔手』兩格」——那是 alpha.81 的數字。
+        /// `Tally` 現在有 12 格拒絕，目標出處那五格 alpha.86–87 就長出來了，
+        /// `step_target_provenance.rs` 拿真的 CLI 走過。沒有寫入端的那四格沒
+        /// 變。）要重數就數 `RefusalBucket` 的變體，別照抄這裡的數字。
         ///
         /// 「`refusal_clauses()` 真的會出現在螢幕上那一行」由另一條蓋：
         /// `pulling_at_the_last_steps_gate_aborts_the_whole_round` 斷言的
