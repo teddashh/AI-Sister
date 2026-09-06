@@ -439,6 +439,14 @@ mod tests {
             .expect("no error")
             .expect("quiet window");
         assert_eq!(quiet.metrics, None);
+        // 這個測試沒有裝 hook，所以 `state()` 是 `NotStarted`——安靜視窗要說
+        // 「我沒在聽」，**不准**說成「作業系統證實沒人碰」。少了這一行的話，
+        // 把 hook 狀態寫死成 `Active`、或把兩臂對調，這裡都不會紅。
+        assert_eq!(
+            quiet.listening,
+            InputListening::NotListening,
+            "沒裝 hook 的安靜視窗不可以被講成「沒人碰」"
+        );
     }
 
     #[test]

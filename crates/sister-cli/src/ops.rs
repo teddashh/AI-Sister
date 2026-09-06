@@ -179,6 +179,39 @@ mod command_tests {
 
     const OPS_SOURCE: &str = include_str!("ops.rs");
     const WATCH_SOURCE: &str = include_str!("../../sister-core/src/watch.rs");
+    const WINDOWS_INPUT_SOURCE: &str = include_str!("../../sister-capture/src/windows/input.rs");
+
+    /// 安靜視窗的分類要問**作業系統**，不准問我們自己的 hook。
+    ///
+    /// `classify_quiet_window` 的第二個參數必須是 `system_idle_ms()`
+    /// （`GetLastInputInfo`，不經過我們裝的 hook），不能是同一個檔案裡那支
+    /// `idle_ms()`（讀 `LAST_INPUT_TICK`，只有 hook 還活著才會前進）。
+    ///
+    /// 差別是這一版的全部意義：hook 被系統靜默拆掉的時候 `LAST_INPUT_TICK`
+    /// 從此不動，`idle_ms()` 會回一個**越來越大**的數字，於是
+    /// `idle >= window` → `IdleConfirmed` → 她用有把握的語氣說
+    /// 「鍵盤和滑鼠一下都沒有動」，而真相是她已經聾了。那正是這一版要修掉的謊，
+    /// 只是換成一句聽起來更確定的版本。
+    ///
+    /// 那一格整個包在 `#[cfg(windows)]` 裡，Linux 上一行都執行不到
+    /// （`check-windows.sh` 只編譯、不跑測試），所以只能用原始碼形狀守。
+    /// 先把空白壓平，才不會被 `cargo fmt` 換行或 Windows checkout 的 CRLF 弄假紅。
+    #[test]
+    fn the_quiet_window_asks_the_os_not_our_own_hook() {
+        let flat = WINDOWS_INPUT_SOURCE
+            .replace("\r\n", "\n")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains("classify_quiet_window(hook, system_idle_ms(), ts - start)"),
+            "安靜視窗要拿 system_idle_ms() 當證人（不經過 hook）"
+        );
+        assert!(
+            !flat.contains("classify_quiet_window(hook, idle_ms()"),
+            "idle_ms() 依賴 hook 還活著——hook 死掉時它會把「我聾了」講成「沒人碰」"
+        );
+    }
 
     #[test]
     fn next_step_uses_the_current_non_default_directory() {
