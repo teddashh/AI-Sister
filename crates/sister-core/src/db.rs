@@ -1917,6 +1917,38 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 回傳蓋住這個時間點的輸入視窗。
+    ///
+    /// `None` 代表這段時間沒有輸入紀錄；不能用一列全零的值代替，因為「有量、
+    /// 沒人動」和「根本沒量」是兩件不同的事。
+    pub fn input_window_covering(&self, ts: Millis) -> Result<Option<InputMetrics>> {
+        self.conn
+            .query_row(
+                "SELECT ts_start, ts_end, keystrokes, clicks, mouse_px, scroll_ticks,
+                        window_switches, idle_ms, typing_bursts
+                 FROM input_metrics INDEXED BY idx_input_ts
+                 WHERE ts_start <= ?1 AND ts_end >= ?1
+                 ORDER BY ts_start DESC
+                 LIMIT 1",
+                [ts],
+                |row| {
+                    Ok(InputMetrics {
+                        ts_start: row.get(0)?,
+                        ts_end: row.get(1)?,
+                        keystrokes: row.get(2)?,
+                        clicks: row.get(3)?,
+                        mouse_px: row.get(4)?,
+                        scroll_ticks: row.get(5)?,
+                        window_switches: row.get(6)?,
+                        idle_ms: row.get(7)?,
+                        typing_bursts: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn insert_system(&mut self, session_id: i64, e: &SystemEvent) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO system_events(ts, session_id, kind, detail) VALUES(?1,?2,?3,?4)",
@@ -12321,6 +12353,73 @@ mod tests {
         let st = db.stats().expect("stats");
         assert_eq!(st.input_windows, 1);
         assert_eq!(st.system_events, 1);
+    }
+
+    #[test]
+    fn input_window_covering_keeps_not_measured_distinct_from_measured_zero() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let measured = InputMetrics {
+            ts_start: 100,
+            ts_end: 1_000,
+            keystrokes: 11,
+            clicks: 22,
+            mouse_px: 33,
+            scroll_ticks: 44,
+            window_switches: 55,
+            idle_ms: 66,
+            typing_bursts: 77,
+        };
+        let later = InputMetrics {
+            ts_start: 500,
+            ts_end: 600,
+            keystrokes: 101,
+            clicks: 102,
+            mouse_px: 103,
+            scroll_ticks: 104,
+            window_switches: 105,
+            idle_ms: 106,
+            typing_bursts: 107,
+        };
+        db.insert_input(s, &measured).expect("insert input");
+        db.insert_input(s, &later)
+            .expect("insert overlapping input");
+
+        assert_eq!(db.input_window_covering(99).unwrap(), None);
+        assert_eq!(db.input_window_covering(100).unwrap(), Some(measured));
+        assert_eq!(db.input_window_covering(1_000).unwrap(), Some(measured));
+        assert_eq!(db.input_window_covering(1_001).unwrap(), None);
+        // 雖然產品視窗不重疊，這裡刻意重疊：DESC 的公開選取規則是取起點較晚者。
+        assert_eq!(db.input_window_covering(550).unwrap(), Some(later));
+    }
+
+    #[test]
+    fn input_window_covering_uses_start_index_without_a_sort_btree() {
+        let db = test_db();
+        for i in 0..10_000_i64 {
+            db.conn()
+                .execute(
+                    "INSERT INTO input_metrics(ts_start, ts_end) VALUES(?1, ?2)",
+                    params![i * 100, i * 100 + 99],
+                )
+                .expect("seed input metrics");
+        }
+        db.conn().execute_batch("ANALYZE").expect("analyze");
+        let plan = db
+            .conn()
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT ts_start, ts_end, keystrokes, clicks, mouse_px,
+             scroll_ticks, window_switches, idle_ms, typing_bursts FROM input_metrics INDEXED BY idx_input_ts
+             WHERE ts_start <= ?1 AND ts_end >= ?1 ORDER BY ts_start DESC LIMIT 1",
+            )
+            .expect("prepare explain")
+            .query_map([999_950_i64], |r| r.get::<_, String>(3))
+            .expect("query explain")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect explain")
+            .join(" | ");
+        assert!(plan.contains("idx_input_ts"), "{plan}");
+        assert!(!plan.contains("USE TEMP B-TREE FOR ORDER BY"), "{plan}");
     }
 
     /// 「零當機」現在有實作了，而不是靠使用者的印象。
