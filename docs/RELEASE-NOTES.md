@@ -47,6 +47,37 @@ sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.105
+
+**這一版加入 Rust 1.85 真編譯合約與第一條 macOS ad-hoc signed app-tree 原生診斷；它不是
+macOS Preview，也沒有 macOS release asset。**
+
+CI 現在用 Rust 1.85.0 分別編根目錄與 desktop 兩個 workspace，而且 Linux／Windows
+兩邊都要通過才准進 release。macOS diagnostic 也以 Rust 1.85 建 feature-gated root
+sidecar；ScreenCaptureKit 9.0.1 接受的 `apple-metal >=0.6,<0.9` 中，從 0.6.1 起會編
+runner SDK 尚未提供的 macOS 26 Metal state symbols，因此這條 diagnostic 精確固定
+0.6.0。原生 Xcode 16.4／SDK 15.5 已證明這組依賴能編譯、連結及跑測試；一般
+shipping build 不會啟用這個 feature。
+
+2026-09-07 的有效 main run 在 macOS 15.7.9 Apple Silicon 建出 arm64、minOS 14.0 的
+hardened `.app`，以 ad-hoc identity 簽 app、desktop 與 exact bundled `sister` child，
+再由 LaunchServices 真正啟動。verifier 以 `proc_pidpath` 核對兩個 live executable，
+並證明 child 的 PPID 是 desktop；child 回報 code 0 並被回收，LaunchServices 等待
+結束後兩個已觀察 PID 都不存在。診斷只有全部 bundle、程序、擷取結果與 immediate
+probe directory 檔案檢查跑完才會寫 completion record，workflow 另讀精確內容，不能
+再由 shell 提早退出冒充成功。
+
+同一台 runner 上，shell 的 CoreGraphics preflight 是 true，bundle 內 exact child 則回
+`not_granted_or_undetermined`／`not_attempted`，因此沒有呼叫 ScreenCaptureKit
+capture。這是原生 app-tree 拓撲與 diagnostic fail-closed 路徑的執行證據，**沒有
+ScreenCaptureKit pixel-path 執行證據，也不是 Preview**。`launchctl procinfo` 雖把
+desktop 列為 responsible path，這份分類仍只是 diagnostic text 的 inference，不是
+production TCC identity API。Vision、AX、產品 consent/TCC lifecycle、production
+`record`、完整 S1 與 Developer ID／notarization 都還沒完成；ad-hoc app 的 Gatekeeper
+assessment 也確實是 rejected。七天 Actions artifact 名稱明寫 `NOT-PREVIEW`，可下載
+作診斷收據，但不是 macOS release asset；公開 release 仍只有兩個 Windows 執行檔。
+
+
 ## v0.1.0-alpha.104
 
 **alpha.102 與 alpha.103 的 tag 都被 Persona 發版 gate 擋下，沒有可下載檔；

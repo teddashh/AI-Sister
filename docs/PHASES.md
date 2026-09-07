@@ -475,9 +475,20 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
   feature-gated CLI child 只在 CoreGraphics preflight 明確為 true 時呼叫一次
   ScreenCaptureKit，Tauri 用 ad-hoc identity 把 exact child 包進 hardened `.app`；
   workflow 會另查 live PID／PPID／`proc_pidpath`、簽章、架構與 bundle metadata，
-  並斷言沒有圖片或資料庫落地。這個 app tree 明標 **NOT PREVIEW**、只保留七天 CI
-  診斷，不進 release；第一場原生 runner 結果尚未回收，也還沒有 Vision／AX、產品
-  同意書與完整 S1，所以這格不勾。
+  並檢查 immediate probe directory 沒有列入檢查的圖片或資料庫檔。
+  [2026-09-07 main CI 的 macOS job](https://github.com/teddashh/AI-Sister/actions/runs/34128562116/job/101762914414)
+  已在 macOS 15.7.9 ARM64、Xcode 16.4／SDK 15.5 跑到底：Rust 1.85 編過 root child
+  與 desktop；LaunchServices 啟動的 live PPID 與 `proc_pidpath` 對回
+  `sister-desktop` → bundle 內 exact `sister`，兩者都是 arm64、minOS 14.0、ad-hoc
+  hardened runtime。child 回報 code 0 並被回收；LaunchServices 等待結束後兩個已觀察
+  PID 都不存在。runner shell 的 CoreGraphics preflight 是 true，但 exact child 回
+  `not_granted_or_undetermined`／`not_attempted`，因此沒有呼叫 ScreenCaptureKit
+  capture。這是原生 app-tree 拓撲與 diagnostic fail-closed 路徑的執行證據，**沒有
+  ScreenCaptureKit pixel-path 執行證據，也不是 Preview**。`launchctl procinfo` 雖把
+  desktop 列為 responsible path，收據也明標那只是 diagnostic text 的 inference，不是
+  production TCC identity API。七天 Actions artifact 明標 `NOT-PREVIEW`、不進 release；
+  Vision／AX、產品同意書與 TCC lifecycle、production `record` 及完整 S1 都還沒接，
+  所以這格不勾。
 - ⬜ **Linux X11 Developer Preview**：先接通 X11 capture + OCR + S1 主流程；
   Wayland 明示 unsupported／degraded，不用 portal 的半套能力冒充背景常駐。
   alpha.104 已落第一層 fail-closed preflight：Wayland／headless 與 Unknown 分開，

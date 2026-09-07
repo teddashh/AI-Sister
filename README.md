@@ -15,6 +15,16 @@ Windows 走完下載、驗證、原子安裝與精準移除。真人設定頁／
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
 
+macOS 現在有一條 **feature-gated 原生診斷，不是產品擷取後端或 Preview**：alpha.105
+的 `macos-15` Apple Silicon job 由 LaunchServices 啟動 ad-hoc signed、hardened `.app`，
+再以 live PPID 與 `proc_pidpath` 對回 `sister-desktop` → bundle 內 exact `sister`。那場
+runner shell 的 CoreGraphics preflight 是 true，exact child 則回
+`not_granted_or_undetermined`／`not_attempted`，因此沒有呼叫 ScreenCaptureKit capture。
+這證明的是原生 app-tree 拓撲與「未授權就停」的 diagnostic fail-closed 路徑，**沒有
+執行 pixel path，也不是 macOS Preview**。七天 Actions artifact 雖可下載，名稱明標
+`NOT-PREVIEW`，不是 release asset；production `record`、Vision／AX、產品
+consent/TCC lifecycle 與完整 S1 都還沒接。
+
 她開始看之前有**三張各自獨立、隨時撤得掉的同意書**，條文和效力就是：
 
 - `local-recording`：「我同意在我的硬碟上記錄我的螢幕。」沒有這一張，`sister record`
@@ -112,7 +122,7 @@ fallback，不會背景重抓。cache 在預設資料目錄的 `persona-assets-v
 升級後要讓 v2 recorder 實際看過該站一次。**同 host 只是一筆來源紀錄，不證明網址
 安全或由你主動開啟，也不證明 path、redirect 或站內內容可信。**
 
-**從原始碼**——Linux/macOS 也跑得起來，只是還沒有擷取後端，所以第一次不能叫她
+**從原始碼**——Linux/macOS 也跑得起來，只是還沒有產品擷取後端，所以第一次不能叫她
 錄；改用 repo 裡那份腳本重播一遍（CI 每次 push 走的是同一條路）：
 
 ```
