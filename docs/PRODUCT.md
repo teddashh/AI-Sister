@@ -153,7 +153,8 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
 
 ## 7. Non-Goals（v1 明確不做）
 
-- ❌ 雲端服務 / 帳號系統（local-first；cloud sync 遠期選配、E2EE）
+- ❌ 雲端服務 / 帳號系統（local-first；cloud sync 遠期選配、E2EE）。使用者明確按下後
+  從固定 CDN 取一次公開 Persona 素材，是內容交付，不是帳號、sync、推論或遙測服務
 - ❌ 音訊 / 麥克風錄製（Limitless 的死線 + 旁人同意問題最尖銳的地方）
 - ❌ Autopilot（記憶還可能記歪之前，不讓它碰滑鼠；見 PHASES Phase 7 的門檻）
 - ❌ 一直講話的桌寵（我們是為了讓她安靜而設計整個引擎的）
@@ -182,10 +183,26 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
 - **Release 1.0 要把 persona 當產品面，不是換色彩蛋。** 首批 catalog 是
   Aster / Cedar / Mira / Rook；使用者可以選人、看立繪、在自己點角色時聽到固定
   的非敏感台詞。persona 不得改答案事實、證據、同意書、守門員分數或 hands 權限。
-- 完整立繪／固定語音走一個含四位角色的內容定址 omnibus asset pack。下載前先列實際 CDN host、大小
-  與資料邊界，只有使用者明確按下才連線；下載後逐檔驗 hash／大小，整包成功才原子
-  啟用。請求不帶 persona 選擇／狀態、OCR、畫面、問題、答案或記憶內容；切換角色
-  不改 URL、header 或 body。**角色體驗是賣點，CDN 只是交付機制。**
+- 完整立繪／固定語音走一個含四位角色的內容定址 omnibus asset pack。下載前先列
+  `cdn.ted-h.com`、精確大小 **73,261,088 bytes** 與資料邊界，只有使用者明確按下才可
+  做一次 fixed GET；不 redirect／proxy／retry，不帶 cookie／credentials／authorization、
+  referrer、query 或 body。請求不帶 persona 選擇／狀態、OCR、畫面、問題、答案或
+  記憶內容；切換角色不改 method、URL、header 或 body。**角色體驗是賣點，CDN 只是
+  交付機制。**
+- app 只嵌入 compact authority（descriptor、exact allowlist、四位角色 selected public
+  rights projection、八段選用聲音的核准逐字稿、完整 manifest 的 canonical hash），
+  不把約 2.1 MB 的完整 11 人
+  manifest 塞進執行檔。73,261,088-byte ZIP 的 SHA-256
+  `7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30` pin 住全部
+  946 項；實際呈現／播放的 selected entries 另逐檔驗大小、hash 與權利 binding，全部
+  成功才原子啟用。
+- 首版實際選用四張立繪與八段無條件成立的語音。pack 裡說「今天滿有活力」的四段
+  `active` 聲音需要產品沒有量到的前提，所以不進 click allowlist；顯示文字與核准
+  逐字稿不同時也直接靜音。
+- 素材 cache 在 `Config::default_data_dir()/persona-assets-v1`，不是使用者記憶：memory
+  export、forget、prune 不碰它，只有 Persona 撤回精準清該 release。下載能力只由
+  desktop 啟用；recorder／core／brain／hands 與 WebView 沒有因此得到 HTTP 能力，
+  CSP 也不開 CDN。
 - 聲音不因 idle、capture、記憶或系統事件自己播放，也不朗讀私人答案；runtime TTS、
   自動招呼與關係養成不在 Release 1.0。`prefers-reduced-motion` 與靜音選擇照樣優先。
 

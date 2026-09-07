@@ -13,6 +13,21 @@ const el = {
   personaMotion: document.querySelector("[data-persona-motion]"),
   personaTapLines: document.querySelector("[data-persona-tap-lines]"),
   personaAssets: document.querySelector("[data-persona-assets]"),
+  personaAssetSummary: document.querySelector("[data-persona-asset-summary]"),
+  personaDisclosure: document.querySelector("[data-persona-disclosure]"),
+  personaRelease: document.querySelector("[data-persona-release]"),
+  personaHost: document.querySelector("[data-persona-host]"),
+  personaPackPath: document.querySelector("[data-persona-pack-path]"),
+  personaSize: document.querySelector("[data-persona-size]"),
+  personaBoundary: document.querySelector("[data-persona-boundary]"),
+  personaProgress: document.querySelector("[data-persona-progress]"),
+  personaAssetError: document.querySelector("[data-persona-asset-error]"),
+  personaDownload: document.querySelector("[data-persona-download]"),
+  personaRepair: document.querySelector("[data-persona-repair]"),
+  personaCancel: document.querySelector("[data-persona-cancel]"),
+  personaRemove: document.querySelector("[data-persona-remove]"),
+  personaVoice: document.querySelector("[data-persona-voice]"),
+  personaVoiceState: document.querySelector("[data-persona-voice-state]"),
   apps: document.querySelector("[data-apps]"),
   urls: document.querySelector("[data-urls]"),
   titles: document.querySelector("[data-titles]"),
@@ -38,10 +53,10 @@ const el = {
 // 存之前看懂自己選的是誰，不把任何一段 personaContext 或 prompt 送進模型。
 const PERSONA_TAGLINES = Object.freeze({
   neutral: "原來的字母人；安靜待著，只在你點她或問她時回應。",
-  chatgpt: "沉著務實，會把選項整理清楚，陪你照自己的步調決定。",
-  claude: "溫柔細膩，願意留白，也陪你慢慢想清楚每個細節。",
-  gemini: "好奇敏銳，喜歡發現日常模式，從不替你的節奏打分。",
-  grok: "直率活潑，帶點玩心，給你輕快但不催促的陪伴。",
+  chatgpt: "深藍與薄荷綠；固定台詞用「我在」開場。",
+  claude: "深綠與淡綠；固定台詞用「慢慢來」開場。",
+  gemini: "深藍與淡紫；固定台詞用「一起看看」開場。",
+  grok: "深棕與淡黃；固定台詞用「收到」開場。",
 });
 
 function say(message, bad = false) {
@@ -560,39 +575,383 @@ function paintPersonaSettings() {
   if (el.personaTapLines) el.personaTapLines.disabled = controlsOff;
 }
 
+const PERSONA_ASSET_PHASES = Object.freeze([
+  "unavailable",
+  "available",
+  "installing",
+  "removing",
+  "repair-needed",
+  "installed",
+]);
+
+let personaAssetStatus = null;
+let personaAssetRefreshRevision = 0;
+let personaAssetOperationRevision = 0;
+let personaAssetOperation = null;
+let personaVoiceEnabled = false;
+let personaVoiceKnown = false;
+let personaVoiceBusy = false;
+let personaVoiceRevision = 0;
+
+function nonempty(value) {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+function wholeNumber(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function disclosureOf(status) {
+  const raw = status?.disclosure;
+  if (raw === null || typeof raw !== "object") {
+    return { value: null, missing: ["版本、主機、路徑、大小與資料邊界"] };
+  }
+  const value = {
+    releaseId: nonempty(raw.release_id),
+    host: nonempty(raw.host),
+    path: nonempty(raw.path),
+    bytes: wholeNumber(raw.bytes),
+    boundary: nonempty(raw.boundary),
+  };
+  const missing = [];
+  if (value.releaseId === null) missing.push("版本");
+  if (value.host === null) missing.push("主機");
+  if (value.path === null) missing.push("路徑");
+  if (value.bytes === null || value.bytes === 0) missing.push("大小");
+  if (value.boundary === null) missing.push("資料邊界");
+  return { value, missing };
+}
+
+function exactBytes(bytes) {
+  const mib = bytes / (1024 * 1024);
+  return `${bytes.toLocaleString("en-US")} bytes（${mib.toFixed(2)} MiB）`;
+}
+
+function showPersonaAssetError(message) {
+  if (!el.personaAssetError) return;
+  el.personaAssetError.textContent = message;
+  el.personaAssetError.hidden = message === "";
+}
+
+function paintPersonaDisclosure(status) {
+  if (!el.personaDisclosure) return false;
+  const { value, missing } = disclosureOf(status);
+  el.personaDisclosure.hidden = value === null;
+  if (value === null) return false;
+
+  el.personaRelease.textContent = value.releaseId ?? "沒有回報";
+  el.personaHost.textContent = value.host ?? "沒有回報";
+  el.personaPackPath.textContent = value.path ?? "沒有回報";
+  el.personaSize.textContent = value.bytes === null ? "沒有回報" : exactBytes(value.bytes);
+  el.personaBoundary.textContent = value.boundary ?? "沒有回報";
+  return missing.length === 0;
+}
+
+function paintPersonaVoice(error = "") {
+  if (!el.personaVoice || !el.personaVoiceState) return;
+  const assetPhase = PERSONA_ASSET_PHASES.includes(personaAssetStatus?.phase)
+    ? personaAssetStatus.phase
+    : null;
+  const installed = assetPhase === "installed";
+  el.personaVoice.checked = personaVoiceEnabled;
+  el.personaVoice.disabled = unreadable || !personaVoiceKnown || !installed || personaVoiceBusy;
+  el.personaVoiceState.classList.toggle("bad", error !== "");
+
+  if (error !== "") {
+    el.personaVoiceState.textContent = error;
+  } else if (unreadable) {
+    el.personaVoiceState.textContent =
+      "設定檔讀不出來，問不到語音開關；素材仍可在上面獨立修復或刪除。";
+  } else if (!personaVoiceKnown) {
+    el.personaVoiceState.textContent = "問不到固定台詞語音開關；在問得到以前不會把它畫成已開啟。";
+  } else if (assetPhase === null) {
+    el.personaVoiceState.textContent = personaVoiceEnabled
+      ? "語音設定是開啟；本機素材狀態尚未確認，無法判定目前有沒有可播放的固定錄音。"
+      : "固定台詞語音目前關閉；本機素材狀態尚未確認。";
+  } else if (!installed) {
+    el.personaVoiceState.textContent = personaVoiceEnabled
+      ? "語音設定是開啟，但目前沒有一份驗證通過的素材包，所以不會播放。"
+      : "固定台詞語音目前關閉；安裝並驗證素材包後才可另外打開。";
+  } else {
+    el.personaVoiceState.textContent = personaVoiceEnabled
+      ? "固定台詞語音已開啟；只會在你明確按角色時播放預錄固定台詞。"
+      : "固定台詞語音目前關閉。";
+  }
+}
+
+function hidePersonaAssetActions() {
+  for (const button of [
+    el.personaDownload,
+    el.personaRepair,
+    el.personaCancel,
+    el.personaRemove,
+  ]) {
+    if (!button) continue;
+    button.hidden = true;
+    button.disabled = false;
+  }
+}
+
+function paintPersonaAssets(status, error = "") {
+  if (!el.personaAssets || !el.personaAssetSummary) return;
+  personaAssetStatus = status;
+  hidePersonaAssetActions();
+  if (el.personaProgress) el.personaProgress.hidden = true;
+  if (el.personaDisclosure) el.personaDisclosure.hidden = true;
+  showPersonaAssetError(error);
+
+  const phase = status?.phase;
+  const disclosureComplete = paintPersonaDisclosure(status);
+  const disclosureMissing = disclosureOf(status).missing;
+  switch (phase) {
+    case "unavailable":
+      el.personaAssetSummary.textContent =
+        "這台機器問不出預設素材 cache 路徑；沒有連線，也沒有把未知位置當成尚未下載。字母人仍可使用。";
+      break;
+    case "available":
+      el.personaAssetSummary.textContent =
+        "目前使用內建字母人；立繪與語音素材尚未下載。記錄、搜尋、證據、刪除與匯出不受影響。";
+      el.personaDownload.hidden = false;
+      el.personaDownload.disabled = !disclosureComplete || personaAssetOperation !== null;
+      break;
+    case "installing":
+      el.personaAssetSummary.textContent =
+        "正在下載並驗證固定素材包；完成以前仍使用內建字母人。";
+      if (el.personaProgress) {
+        el.personaProgress.hidden = false;
+        el.personaProgress.setAttribute("aria-label", "正在下載並驗證角色素材包");
+      }
+      el.personaCancel.hidden = false;
+      el.personaCancel.disabled = personaAssetOperation === "cancel";
+      break;
+    case "removing":
+      el.personaAssetSummary.textContent =
+        "正在刪除本機素材；立繪與語音已停用，完成以前仍使用內建字母人。";
+      if (el.personaProgress) {
+        el.personaProgress.hidden = false;
+        el.personaProgress.setAttribute("aria-label", "正在刪除角色素材包");
+      }
+      break;
+    case "repair-needed":
+      el.personaAssetSummary.textContent =
+        "本機素材包不完整或驗證失敗；立繪與語音已停用，目前仍使用內建字母人。";
+      el.personaRepair.hidden = false;
+      el.personaRepair.disabled = !disclosureComplete || personaAssetOperation !== null;
+      el.personaRemove.hidden = false;
+      el.personaRemove.disabled = personaAssetOperation !== null;
+      break;
+    case "installed": {
+      const assetFileBytes = wholeNumber(status?.asset_file_bytes);
+      const portraits = wholeNumber(status?.portrait_count);
+      const voices = wholeNumber(status?.voice_count);
+      const release = nonempty(status?.disclosure?.release_id) ?? "未回報版本";
+      const counts =
+        portraits === null || voices === null
+          ? "後端沒有完整回報立繪或語音數量"
+          : `${portraits} 張立繪、${voices} 句固定台詞語音`;
+      const size =
+        assetFileBytes === null
+          ? "後端沒有回報素材檔合計大小"
+          : `素材檔合計 ${exactBytes(assetFileBytes)}`;
+      el.personaAssetSummary.textContent = `已安裝並驗證 ${release}：${counts}，${size}。`;
+      el.personaRemove.hidden = false;
+      el.personaRemove.disabled = personaAssetOperation !== null;
+      break;
+    }
+    default:
+      el.personaAssetSummary.textContent =
+        "問不到可辨識的本機素材狀態；這一頁不會啟動下載，也不會把未知狀態當成尚未下載。";
+      if (error === "") {
+        showPersonaAssetError("素材狀態不是這一版認得的六種之一；重新開啟設定再試一次。");
+      }
+  }
+
+  if (
+    (phase === "available" || phase === "repair-needed") &&
+    !disclosureComplete &&
+    error === ""
+  ) {
+    showPersonaAssetError(
+      `下載揭露不完整（缺少${disclosureMissing.join("、")}），所以不會啟動下載。`,
+    );
+  }
+  paintPersonaVoice();
+}
+
 async function refreshPersonaAssets() {
   if (!el.personaAssets) return;
   if (invoke === null) {
-    el.personaAssets.textContent = "這一頁不在 AI-Sister 裡，問不到本機素材狀態。";
+    paintPersonaAssets(null, "這一頁不在 AI-Sister 裡，問不到本機素材狀態，也沒有啟動下載。");
     return;
   }
+  const revision = ++personaAssetRefreshRevision;
   try {
-    const personaView = await invoke("persona_read");
-    const pack = personaView?.asset_pack;
-    switch (pack?.phase) {
-      case "installed": {
-        const hasPortrait = pack.portrait?.data_url?.startsWith?.("data:image/") === true;
-        const voices = Array.isArray(pack.voice_lines) ? pack.voice_lines.length : 0;
-        el.personaAssets.textContent =
-          `已驗證的素材包在本機：${hasPortrait ? "有立繪" : "沒有立繪"}、` +
-          `${voices === 0 ? "沒有固定台詞語音" : `${voices} 句固定台詞語音`}。`;
-        return;
-      }
-      case "available":
-        el.personaAssets.textContent = "有一份固定素材包可取得，但這一版沒有在這裡下載。";
-        return;
-      case "installing":
-        el.personaAssets.textContent = "固定素材包正在安裝；完成以前繼續使用字母人。";
-        return;
-      case "repair-needed":
-        el.personaAssets.textContent = "本機素材包驗證失敗；目前只使用字母人。";
-        return;
-      case "unavailable":
-      default:
-        el.personaAssets.textContent = "目前只有內建字母人；沒有可用的本機立繪或語音包。";
+    const status = await invoke("persona_asset_status");
+    if (revision !== personaAssetRefreshRevision) return;
+    const phase = status?.phase;
+    paintPersonaAssets(
+      PERSONA_ASSET_PHASES.includes(phase) ? status : null,
+      PERSONA_ASSET_PHASES.includes(phase)
+        ? ""
+        : "素材狀態回傳了這一版不認得的值；這一頁不會啟動下載。",
+    );
+  } catch (err) {
+    if (revision !== personaAssetRefreshRevision) return;
+    paintPersonaAssets(
+      null,
+      `問不到本機素材狀態；這一頁沒有啟動下載。${String(err?.message ?? err)}`,
+    );
+  }
+}
+
+async function refreshPersonaVoice() {
+  if (!el.personaVoice) return;
+  if (invoke === null || unreadable) {
+    personaVoiceKnown = false;
+    personaVoiceEnabled = false;
+    paintPersonaVoice();
+    return;
+  }
+  // 使用者剛按下的 write 才是最新意圖；另一扇視窗的 asset event 可以刷新素材
+  // 狀態，但不能讓一個較早送出的 persona_read 把這顆 checkbox 永久卡在 busy。
+  if (personaVoiceBusy) return;
+  const revision = ++personaVoiceRevision;
+  try {
+    const persona = await invoke("persona_read");
+    if (revision !== personaVoiceRevision) return;
+    if (typeof persona?.voice_enabled !== "boolean") {
+      throw new Error("後端沒有回報語音開關");
     }
+    personaVoiceKnown = true;
+    personaVoiceEnabled = persona.voice_enabled;
+    paintPersonaVoice();
   } catch {
-    el.personaAssets.textContent = "問不到本機素材狀態；字母人仍可使用。";
+    if (revision !== personaVoiceRevision) return;
+    personaVoiceKnown = false;
+    personaVoiceEnabled = false;
+    paintPersonaVoice();
+  }
+}
+
+function isTrustedUserAction(event) {
+  return event?.isTrusted === true;
+}
+
+async function installPersonaAssets(event) {
+  if (!isTrustedUserAction(event) || invoke === null || personaAssetOperation !== null) return;
+  if (personaAssetStatus?.phase !== "available" && personaAssetStatus?.phase !== "repair-needed") {
+    return;
+  }
+  if (disclosureOf(personaAssetStatus).missing.length > 0) return;
+
+  const operation = ++personaAssetOperationRevision;
+  const repairing = personaAssetStatus.phase === "repair-needed";
+  personaAssetRefreshRevision += 1;
+  personaAssetOperation = "install";
+  paintPersonaAssets({ ...personaAssetStatus, phase: "installing" });
+  try {
+    await invoke("persona_asset_install");
+    if (operation !== personaAssetOperationRevision) return;
+    personaAssetOperation = null;
+    await Promise.all([refreshPersonaAssets(), refreshPersonaVoice()]);
+  } catch (err) {
+    if (operation !== personaAssetOperationRevision) return;
+    personaAssetOperation = null;
+    await refreshPersonaAssets();
+    showPersonaAssetError(
+      `${repairing ? "修復" : "下載"}沒有完成：${String(err?.message ?? err)}。字母人仍可使用。`,
+    );
+  }
+}
+
+async function cancelPersonaAssetInstall(event) {
+  if (!isTrustedUserAction(event) || invoke === null || personaAssetStatus?.phase !== "installing") {
+    return;
+  }
+  const operation = ++personaAssetOperationRevision;
+  personaAssetRefreshRevision += 1;
+  personaAssetOperation = "cancel";
+  paintPersonaAssets(personaAssetStatus);
+  try {
+    await invoke("persona_asset_cancel");
+    if (operation !== personaAssetOperationRevision) return;
+    personaAssetOperation = null;
+    await refreshPersonaAssets();
+  } catch (err) {
+    if (operation !== personaAssetOperationRevision) return;
+    personaAssetOperation = null;
+    await refreshPersonaAssets();
+    showPersonaAssetError(`取消失敗：${String(err?.message ?? err)}。下載狀態沒有被假裝成已停止。`);
+  }
+}
+
+async function removePersonaAssets(event) {
+  if (!isTrustedUserAction(event) || invoke === null || personaAssetOperation !== null) return;
+  if (personaAssetStatus?.phase !== "installed" && personaAssetStatus?.phase !== "repair-needed") {
+    return;
+  }
+  const operation = ++personaAssetOperationRevision;
+  personaAssetRefreshRevision += 1;
+  personaAssetOperation = "remove";
+  paintPersonaAssets({ ...personaAssetStatus, phase: "removing" });
+  try {
+    await invoke("persona_asset_remove");
+    if (operation !== personaAssetOperationRevision) return;
+    personaAssetOperation = null;
+    await Promise.all([refreshPersonaAssets(), refreshPersonaVoice()]);
+  } catch (err) {
+    if (operation !== personaAssetOperationRevision) return;
+    personaAssetOperation = null;
+    await refreshPersonaAssets();
+    const reason = String(err?.message ?? err);
+    if (personaAssetStatus?.phase === "available") {
+      // 後端可能已精準刪完 cache，只是 config 本來就壞了、因此無法把 voice 偏好
+      // 一起寫回。把這種部分成功叫作「刪除失敗」會和同一句後半段互相打臉。
+      showPersonaAssetError(`本機素材現在已移除，但後續設定沒有全部完成：${reason}`);
+    } else if (
+      personaAssetStatus?.phase === "installed" ||
+      personaAssetStatus?.phase === "repair-needed"
+    ) {
+      showPersonaAssetError(`刪除沒有完成：${reason}。畫面仍以後端回報的狀態為準。`);
+    } else {
+      showPersonaAssetError(`刪除結果無法確認：${reason}。重新開啟設定再查一次本機狀態。`);
+    }
+  }
+}
+
+async function setPersonaVoice(event) {
+  if (!isTrustedUserAction(event) || invoke === null || !el.personaVoice) {
+    if (el.personaVoice) el.personaVoice.checked = personaVoiceEnabled;
+    return;
+  }
+  if (unreadable || !personaVoiceKnown || personaAssetStatus?.phase !== "installed" || personaVoiceBusy) {
+    el.personaVoice.checked = personaVoiceEnabled;
+    return;
+  }
+
+  const wanted = el.personaVoice.checked;
+  const revision = ++personaVoiceRevision;
+  personaVoiceBusy = true;
+  paintPersonaVoice();
+  try {
+    const result = await invoke("persona_voice_set", { enabled: wanted });
+    if (revision !== personaVoiceRevision) return;
+    if (typeof result?.voice_enabled !== "boolean") {
+      personaVoiceEnabled = false;
+      personaVoiceKnown = false;
+      personaVoiceBusy = false;
+      paintPersonaVoice("語音設定結果缺少可辨識的開關；無法確認是否已改，請重新讀取。");
+      return;
+    }
+    personaVoiceEnabled = result.voice_enabled;
+    personaVoiceKnown = true;
+    personaVoiceBusy = false;
+    paintPersonaVoice();
+  } catch (err) {
+    if (revision !== personaVoiceRevision) return;
+    personaVoiceBusy = false;
+    el.personaVoice.checked = personaVoiceEnabled;
+    paintPersonaVoice(`語音設定沒有改：${String(err?.message ?? err)}`);
   }
 }
 
@@ -731,13 +1090,6 @@ async function refreshBrainFacts() {
 }
 
 /**
- * 讀不出設定檔的時候，把整張表關掉。
- *
- * 不是為了防呆——`days()` 本來就會在空欄位上擋下儲存。是為了不說謊：一張
- * 空白的排除清單和兩顆沒打勾的防線，讀起來是一個明確的斷言（「你什麼都沒
- * 擋」），而它是假的。灰掉 + 換掉 placeholder 之後，那張表不再宣稱任何事。
- */
-/**
  * 現在這張表是不是「不算數」的狀態。
  *
  * 存在的理由是 `save()` 的 `finally`：它無條件把儲存鍵點亮，而這正好會拆掉
@@ -749,6 +1101,12 @@ let unreadable = false;
 
 function setUnreadable(on) {
   unreadable = on;
+  if (on) {
+    // `persona_asset_status` 不讀 config，所以素材修復／刪除仍能用；語音開關會寫
+    // config，讀壞時不能拿上一次的勾勾冒充現在值。
+    personaVoiceKnown = false;
+    personaVoiceEnabled = false;
+  }
   for (const node of [
     el.brainCommand,
     el.brainArgs,
@@ -791,6 +1149,7 @@ function setUnreadable(on) {
   // 正在跑的那一份我們讀不到。藏起來，讓上面那句「都不算數」說話。
   paintBrain();
   paintPersonaSettings();
+  paintPersonaVoice();
 }
 
 /**
@@ -807,12 +1166,15 @@ async function load() {
     say("這一頁不是在 AI-Sister 裡打開的，改了不會存到任何地方。", true);
     return false;
   }
+  // 這一份只讀 cache 狀態，不讀 config。先獨立送出去，不能讓 consent／hotkey 或
+  // 一份壞掉的 config 擋在它前面；後面仍 await，讓呼叫 load() 的人拿到穩定畫面。
+  const personaAssetsRead = refreshPersonaAssets();
   let ok = false;
   try {
     apply(await invoke("settings_read"));
     setUnreadable(false);
     say("");
-    await refreshPersonaAssets();
+    await refreshPersonaVoice();
     await refreshBrainFacts();
     paintBrain();
     await relint();
@@ -828,6 +1190,9 @@ async function load() {
     setUnreadable(true);
     say(String(err?.message ?? err), true);
   }
+  // 素材 cache 有自己的狀態檔，不依賴 config.toml。即使上面的設定讀壞了，
+  // 使用者仍要看得到並能修復或刪除素材；把這行放進 try 成功臂會把那條出口一起關掉。
+  await personaAssetsRead;
   // 熱鍵分開讀：它問的不是設定檔裡寫什麼，是**現在真的搶到了沒**——那個答案
   // 只有已經跑起來的那支程式知道。設定讀失敗也不該讓這一格空著。
   await reloadHotkey();
@@ -862,6 +1227,19 @@ function demo(variant) {
   // 它以前長得跟「你什麼都沒擋、兩道防線都關了」一模一樣。
   if (variant === "broken") {
     setUnreadable(true);
+    paintPersonaAssets({
+      phase: "repair-needed",
+      disclosure: {
+        release_id: "persona-pack-v1",
+        host: "assets.example.invalid",
+        path: "/ai-sister/persona-pack-v1.zip",
+        bytes: 104857600,
+        boundary: "只送固定素材包請求；不送角色選擇或任何記錄內容。",
+      },
+      asset_file_bytes: 31457280,
+      portrait_count: 0,
+      voice_count: 0,
+    });
     say(
       "讀不出設定檔：retention.frames_days 不能是 0。0 在有些工具裡是「不限制」，但在這裡它的意思是「下一次整理就把畫面檔全部刪掉」。",
       true,
@@ -886,9 +1264,21 @@ function demo(variant) {
     persona_motion: true,
     persona_tap_lines: true,
   });
-  if (el.personaAssets) {
-    el.personaAssets.textContent = "目前只有內建字母人；沒有可用的本機立繪或語音包。";
-  }
+  personaVoiceKnown = true;
+  personaVoiceEnabled = false;
+  paintPersonaAssets({
+    phase: "available",
+    disclosure: {
+      release_id: "persona-pack-v1",
+      host: "assets.example.invalid",
+      path: "/ai-sister/persona-pack-v1.zip",
+      bytes: 104857600,
+      boundary: "只送固定素材包請求；不送角色選擇或任何記錄內容。",
+    },
+    asset_file_bytes: 0,
+    portrait_count: 0,
+    voice_count: 0,
+  });
   // 第二條規則故意是壞的，這樣才看得到警告那一格長什麼樣。理由字串抄自
   // `suspicious_url_rules` 真正回傳的那一句。
   paintLint([
@@ -1122,6 +1512,19 @@ el.reload?.addEventListener("click", () => void load());
 el.brainCommand?.addEventListener("input", () => paintBrain());
 el.personaEnabled?.addEventListener("change", paintPersonaSettings);
 el.personaId?.addEventListener("change", paintPersonaSettings);
+el.personaDownload?.addEventListener("click", (event) => void installPersonaAssets(event));
+el.personaRepair?.addEventListener("click", (event) => void installPersonaAssets(event));
+el.personaCancel?.addEventListener("click", (event) => void cancelPersonaAssetInstall(event));
+el.personaRemove?.addEventListener("click", (event) => void removePersonaAssets(event));
+el.personaVoice?.addEventListener("change", (event) => void setPersonaVoice(event));
+
+// 下載在後端完成、取消、修復或被另一扇視窗刪除時，這一頁重讀本機真相。
+// 這個事件只會讀 status；不會自己啟動下載。
+globalThis.__TAURI__?.event
+  ?.listen?.("persona-assets-changed", () => {
+    void Promise.all([refreshPersonaAssets(), refreshPersonaVoice()]);
+  })
+  ?.catch?.(() => {});
 
 const variant = new URLSearchParams(globalThis.location.search).get("demo");
 if (variant !== null) {

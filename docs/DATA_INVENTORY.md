@@ -31,6 +31,33 @@
 你自己跑 `sister replay export` 時會明確多做一份私有草稿；它是匯出副本，
 不是活資料庫的一部分，要另外刪除。
 
+另有一個物理上位於預設資料目錄、但**不是記憶**的公開素材 cache：
+`Config::default_data_dir()/persona-assets-v1/`。安裝時會短暫有 `.staging-*`；完成後是
+`ai-sister-media-11-voice55-2026.07.23/objects/` 底下四張 selected WebP、八條 selected
+WAV，以及 `installed-v1.txt`。receipt 只有 schema、release ID、canonical manifest
+digest 與 pack digest，沒有下載時間；73,261,088-byte omnibus ZIP 與其餘 934 個未選
+object 不留在 cache。這裡不得放 OCR、畫面、問題、答案、記憶 ID、目前 persona 或
+request-derived IP／response header。`--data-dir` 不搬它；memory export、`sister
+forget`、`sister prune` 都不讀、不複製、不刪它。Persona 撤回才停用並精準刪除該
+release；直接刪掉整個預設資料目錄當然也會連素材一起刪掉。既有 staging 或 cache
+損毀時會落到 `RepairNeeded`／字母 fallback；全新下載在建立 staging 前驗證失敗則
+仍是 `Available`，並顯示當次錯誤。兩者都不會自動連網修復。
+
+cache 旁邊另有四種不跟 release 目錄一起刪的協定檔：`persona-assets-v1.lock-v1`
+是空的跨行程鎖；`persona-assets-v1.revocations-v1/` 在第一次安裝嘗試或撤回時建立一個
+空的 `epoch-<128-bit OS-random>`，之後每次撤回會追加一個內容只有 schema／release ID、
+檔名為 `revoke-<128-bit OS-random>` 的 marker；
+`persona-assets-v1.revocations-authorized-v1` 在任何一次完整安裝（包括第一次安裝、
+修復或重裝）成功後保存當下 epoch＋ticket 名稱集合的 digest；
+`persona-assets-v1.revocations-settled-v1` 保存最後一次 blocking remove 已結束處理的
+同一種集合 digest。新 ticket 會立刻讓 settled digest 失配，下載／修復要等 remove
+結束才可重新由人開始；即使精準刪除回錯，結束點仍會寫下，讓下一次明確修復可以處理
+留下的 `RepairNeeded`，但不會因此重新授權舊素材。這些檔案不含角色、網路 metadata、
+記憶、PID、撤回次數或程式自行寫入的操作時間；檔案系統本身仍會像任何檔案一樣留下
+建立／修改時間，marker 數量也看得出撤回 ticket 的累積數。這組檔案讓另一個行程正在
+下載或程式在撤回途中當掉時，舊 release 不會重新被當成可用；所以 memory export／
+`forget`／`prune` 也不碰它們。
+
 同一個資料夾裡還有 `replay-drafts/`（它有資料，單獨列在下面），以及幾個
 小檔案。底下這幾個小檔案**都不含你的任何資料**：
 
@@ -124,12 +151,22 @@ forward-compat 本身是對的：多寫一個欄位的新版不該讓舊版放�
 `ted-h\AI-Sister\config\config.toml`；它是這台機器的設定，不是某一段記憶。
 `--data-dir` 不會搬動它，`sister forget` 不會刪它，記憶匯出也不會帶走它；
 CLI 可以用全域 `--config <FILE>` 明確改讀另一份，字母人則讀預設位置。
+同目錄的 `config.toml.write-lock` 是內容為空、會保留在磁碟上的跨行程寫鎖；它讓
+設定頁、語音開關、網址政策與熱鍵各自更新一格時不會把別人剛寫好的欄位蓋回舊值。
+它不含設定值；刪掉會在下次寫入重建，但正在有行程持鎖時手動 unlink 會破壞鎖語意。
 `[hands] url_open` 也住在這裡：沒有這一欄是**還沒問過**，不是某個預設答案；
 答過之後只會是 `only-on-my-press` 或 `when-you-can-name-the-origin`。所以刪掉記憶
 不會順便改變這個選擇，刪掉或移走設定檔才會讓它回到「還沒問過」。
 
-沒有遙測、沒有帳號。AI-Sister 程式本身沒有 HTTP client。簽了第二張同意書且設定了
-`[brain] command` 之後，螢幕文字原文會交給那支本機 CLI；外送紀錄在
+`[shell.persona]` 也住在 `config.toml`，保存角色顯示開關、穩定 ID、動態效果、
+tap-lines 與聲音偏好。這些值會改本機呈現，**不會進 asset request**；四位角色與
+所有狀態的 method／URL／headers／body 必須相同。刪記憶不會重設它們，刪設定檔才會
+回到 Neutral／預設值。素材 cache 本身也不另存一份「目前選誰」。
+
+沒有遙測、沒有帳號。`sister.exe` 與 recorder／core／capture／brain／hands 沒有
+HTTP client；desktop 唯一內建 outbound 能力是使用者看完揭露並明確按下後，經
+`sister-assets/download` 對固定 Persona pack 發至多一次 GET。簽了第二張同意書且
+設定了 `[brain] command` 之後，螢幕文字原文會交給那支本機 CLI；外送紀錄在
 `brain_outbound`（結構與計數，不含原文；`role` 分解釋層／審閱層／盯梢層——
 `interpreter`／`reviewer`／`watcher`，最後一個是 alpha.71 的 `sister watch`；
 送出去的是原文），假設卡片在 `l2_card`（append-only 版本鏈，`author` 是 interpreter／reviewer／user，刪 L0 時 tombstone 而不是實刪——列留著，
@@ -260,7 +297,7 @@ ranking、題目 id、每題 question 與 returned values 都不過這道邊界�
 | 有存密碼嗎？ | 焦點在密碼欄上時整幀不擷取（僅瀏覽器）；密碼管理員整段不擷取 |
 | 網銀畫面呢？ | 網址命中 blocklist 就整段不擷取——**但見下方「已知缺口」** |
 | 有存我**問過她**什麼嗎？ | 有——`queries`，只在這台機器上。可用 `privacy.query_log = false` 關掉 |
-| 資料會離開這台機器嗎？ | 畫面 pixel 不會。簽 `cloud-reading` 後，OCR 文字原文會交給你設定的本機 CLI；那支 CLI 是否送給 provider，由它自己的設定與行為決定。AI-Sister 本身沒有 HTTP client |
+| 資料會離開這台機器嗎？ | 畫面 pixel 不會。簽 `cloud-reading` 後，OCR 文字原文會交給你設定的本機 CLI；那支 CLI 是否送給 provider，由它自己的設定與行為決定。另有一條不帶記憶的 Persona 路徑：看完 `cdn.ted-h.com`／73,261,088 bytes／metadata 揭露並按下載後，desktop 對同一條 hash URL 發至多一次固定 GET；CDN 仍看得到 IP、時間、TLS、固定 path／headers |
 
 ---
 
@@ -920,8 +957,10 @@ alpha.69 那句「沒按過就沒有這個檔案」在 alpha.70 之後是假的�
 以下**沒有任何表、任何欄位**承接：
 
 - 按鍵內容、輸入法組字內容
-- 麥克風、攝影機、任何音訊
-- 網路流量、DNS、封包
+- 麥克風、攝影機、系統音訊或使用者音訊（Persona cache 可有公開的預錄固定 WAV，
+  不是從這台機器錄來的內容）
+- 網路流量、DNS、封包內容（Persona GET 會真的發生，但資料庫不擷取或保存那些流量；
+  素材 cache 的允許內容另列在文件開頭）
 - 檔案內容（除非它顯示在螢幕上被 OCR 讀到）
 - 位置、聯絡人、行事曆
 - 任何形式的識別碼上傳、遙測、崩潰回報

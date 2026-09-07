@@ -42,6 +42,47 @@ sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.102
+
+**這是讓你下載實測 Persona 立繪與固定語音的 alpha。** tag CI 會在公開 release
+之前另外用 Windows native TLS 跑完固定下載、驗證、安裝與刪除；但人工 packet
+trace 與真機 UX checklist 還是「尚未實測」，不會因為 tag CI 變成已完成。
+
+Persona 的下一段把完整立繪與預錄固定語音接到一個內容定址 omnibus pack。設定頁會先
+列 `cdn.ted-h.com`、精確的 **73,261,088 bytes**，以及 CDN 會看見來源 IP、時間、TLS、
+固定 path／headers；只有使用者看完並明確按下後，desktop 才可發至多一個 fixed HTTPS
+`GET`。這一個 request 不帶目前角色或狀態、OCR、畫面、問題、答案或記憶；不跟
+redirect、不走 proxy、不送 cookie／credentials／authorization／referrer／query／body，
+不 retry、不先 `HEAD`，也不逐物件下載。四位角色與任何本機狀態的 method／URL／
+headers／body 完全相同。
+
+下載能力獨立在 root workspace 的 `crates/sister-assets`，預設 feature 集合不含
+`download`，只有 desktop 明確啟用。`sister.exe`、recorder／core／capture／brain／hands
+仍沒有 HTTP client；WebView 仍只走 Tauri IPC，CSP 不加入 CDN。
+
+app 不嵌入約 2.1 MB 的完整 11 人 manifest；compact authority 是 descriptor、exact
+origin/path allowlist、Aster／Cedar／Mira／Rook 的 selected public rights projection、
+八段選用聲音的核准逐字稿，
+以及完整 manifest canonical SHA-256
+`21e4675653ce66b50b61e91260f1623e6e3005177f900991e3a8eeadaf9e6474`。descriptor
+cross-bind release ID、73,261,088 bytes、946 entries 與 pack SHA-256
+`7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30`。整包 digest
+pin 住 946 項；真正會呈現／播放的 selected entries 再逐檔驗 size、hash 與 rights
+binding，完整通過才從同檔案系統 staging 原子啟用。renderer 的顯示文字還要逐字等於
+該段核准逐字稿，才會把聲音放進 click allowlist。
+
+cache 固定在預設資料目錄的 `persona-assets-v1/`。它不是記憶：`--data-dir` 不搬，
+memory export、`forget`、`prune` 不碰；Persona 撤回先停聲、回所選角色的 code-native
+字母，再只清 exact release。fresh 下載的半包／損毀會留在 `Available` 並顯示當次錯誤；
+既有 cache 損毀、殘留 staging 或刪除失敗才明講 `RepairNeeded`。兩者都不自動重抓。
+跨行程 lock 加上持久撤回 generation，讓兩個 desktop 不會各發一個 GET；remove 會先讓
+仍在進行的下載失去授權、等它退出後才刪，只有後來再次明確按下修復才能啟用新 bytes。
+Neutral 與四位角色的字母 fallback 永遠離線可用；固定語音仍只有當下 trusted avatar
+click 才播放，不主動出聲、不朗讀 OCR、回憶或私人答案。首版每位選兩句、共八段；
+pack 裡另有四段會說「今天滿有活力」的 `active` 聲音，但單純點角色沒有量到那件事，
+所以 app 不選、不存也不播放，不拿一句沒查過的話湊第三句。
+
+
 ## v0.1.0-alpha.101
 
 **四位姊妹先住進設定與桌面；這一版不把尚未接好的立繪／語音說成已經完成。**

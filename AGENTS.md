@@ -2,7 +2,10 @@
 
 一句話：**AI-Sister 是一個在 Windows 上安靜看著螢幕、事後答得出「我昨天在幹嘛」、
 而且每一句話都點得開證據的本機記錄器。**「本機」指的是**截圖和文字留在這台機器**；
-腦（L2/L3）接的是使用者自己已經裝好的 CLI agent，不是內建的 HTTP client。
+腦（L2/L3）接的是使用者自己已經裝好的 CLI agent，不是內建的 HTTP client。唯一
+內建 outbound 能力是 desktop 在使用者看完揭露並明確按下後，經
+`crates/sister-assets` 下載一包固定 Persona 素材；它不能擴散到 recorder／core／
+capture／brain／hands 或 WebView。
 
 先讀 `docs/PHASES.md`（路線圖，退場條件就是驗收條件）、`docs/SPEC.md`、`docs/PRODUCT.md`。
 **現在該做什麼看 .handoff/PLAN.md**（刻意不進 git，只在工作目錄裡）。
@@ -31,6 +34,26 @@
 
 **節奏**：有執行檔他就下載測，沒有就繼續推。不要停下來等回覆；做完一段就切 tag。
 一次多做一點再叫他測。
+
+### Persona asset 網路邊界（alpha.102 起）
+
+- `crates/sister-assets` 在 root workspace，預設 feature 集合**沒有** `download`；只有
+  desktop 明確啟用。不要把 HTTP client 直接加進 `sister-desktop`，更不能加進
+  recorder／core／capture／brain／hands。
+- 唯一 request 是使用者看見 `cdn.ted-h.com`、73,261,088 bytes 與資料邊界後明確按下，
+  對內嵌 allowlist 的 exact hash path 做至多一次 HTTPS `GET`。不 redirect／proxy／
+  retry，不送 cookie／credentials／authorization／referrer／query／body，不先 `HEAD`
+  或逐物件抓。切換 persona 不改 method／URL／headers／body。
+- embedded authority 是 descriptor + exact origin/path allowlist + Aster／Cedar／Mira／
+  Rook selected public rights projection + 完整 manifest 的 canonical hash；**不是**約
+  2.1 MB 的完整 11 人 manifest。73,261,088-byte pack 的 SHA-256 是
+  `7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30`，集體 pin
+  946 entries；真正使用的 selected entries 再逐檔驗 size／hash／rights binding。
+- cache 固定在 `Config::default_data_dir()/persona-assets-v1`，`--data-dir` 不搬；memory
+  export／forget／prune 不碰，Persona 撤回才清 exact release。失敗或損毀退回所選
+  code-native 字母、不得自動連線修復。
+- HTTP 在 native Rust；所有 WebView CSP 繼續只准 IPC，**不要把 CDN 加進
+  `connect-src`／`img-src`／`media-src`**。一般 CI 也不打真 CDN。
 
 ---
 
@@ -100,7 +123,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ./scripts/check-windows.sh          # 動到 windows/ 或 apps/desktop/ 才需要，但很便宜
-./scripts/check-no-network.sh       # 隱私：repo 裡搜不到 HTTP client
+./scripts/check-no-network.sh       # 隱私：只有 desktop → sister-assets[download] 這條 fixed GET；其餘無 client/socket，WebView 無遠端來源
 ```
 
 CI（`.github/workflows/ci.yml`）另外還跑十幾支 `scripts/check-*.{py,mjs,sh}`，

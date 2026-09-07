@@ -5,10 +5,11 @@
 //! 一開始的規劃（SPEC §14）是 PP-OCRv5 走 ONNX Runtime。實際去看相依樹之後
 //! 改了主意，理由有三個，而第一個是決定性的：
 //!
-//! 1. **它會把一個 HTTP client 連進執行檔裡。** `oar-ocr` 的 `auto-download`
-//!    會拉進 `ureq`，用來在執行期下載模型。PRIVACY.md 寫著「程式裡沒有任何
-//!    對外連線的程式碼路徑，你可以自己驗證：整個 repo 搜不到 HTTP client」。
-//!    那句話要嘛是真的，要嘛不是；為了省事讓它變成半真的，整份文件就不值錢了。
+//! 1. **它會讓 recorder/capture 拿到 HTTP client。** `oar-ocr` 的 `auto-download`
+//!    會拉進 `ureq`，用來在執行期下載模型。PRIVACY.md 現在只允許 desktop 經由
+//!    `sister-assets[download]`，在人按下按鈕後向固定 CDN 做一次 Persona GET；
+//!    recorder、capture、core、brain 與 hands 仍不能有 client。OCR 不能把這個
+//!    很窄的例外擴散成背景下載能力。
 //! 2. **當時的預算。** 做這個選型時，Phase 0 的驗收條件是 CPU < 3%、
 //!    RAM < 400MB。ONNX Runtime 加上兩個模型常駐，光是 arena 就吃掉大半個
 //!    預算，而這是一個整天都在跑的背景程式。2026-08-23 起 CPU < 3% 不再是
@@ -16,8 +17,8 @@
 //! 3. **體積。** 模型約 20MB，`onnxruntime.dll` 約 15MB，而且是外掛的 DLL
 //!    （`ort` 的 `copy-dylibs`）——使用者要下載的就不再是一個檔案。
 //!
-//! 系統內建的 OCR 這三項全部是零：零相依、零模型位元組、零 DLL。
-//! 現在的 `sister.exe` 仍然是**一個 5.4MB 的檔案**，沒有任何附屬檔案。
+//! 系統內建的 OCR 這三項全部是零：零 OCR 相依、零模型位元組、零附屬 DLL；
+//! `sister.exe` 仍然是一個單檔執行檔。
 //!
 //! 代價是精準度不如 PP-OCRv5，而且綁在 Windows 上。[`crate::traits::Ocr`]
 //! 這個 trait 就是為了讓以後換引擎不必動到其他任何地方。

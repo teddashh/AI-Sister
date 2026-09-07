@@ -9,8 +9,9 @@
 > explicit opt-in, OCR text can be handed to the local CLI you configured.
 
 **Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Persona
-本機骨架也已落地，但立繪／固定語音 pack 與安裝／更新工程還沒完成，所以現在還不是
-Release 1.0。** Windows 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
+也從本機骨架接到 alpha.102 的固定素材下載／驗證邊界，但正式簽章、發布審查與其餘
+安裝／更新工程尚未完成，所以現在還不是 Release 1.0。** Windows 會是 1.0 的正式
+支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
 
 她開始看之前有**三張各自獨立、隨時撤得掉的同意書**，條文和效力就是：
@@ -71,13 +72,28 @@ sister record --duration 60
 `doctor` 排在錄之前是有意的：它會當場示範這台機器**現在**讀不讀得到網址、
 OCR 有沒有裝、哪幾條排除規則其實不生效——比錄完 60 秒才發現什麼都沒進去好。
 
-**alpha.101 可以在設定裡選 Neutral、Aster、Cedar、Mira 或 Rook，也可以關掉角色、
-動畫或點擊台詞。** 四位姊妹目前先以各自的字母、顏色與三句固定文字落地；只有你
+**alpha.102 可以在設定裡選 Neutral、Aster、Cedar、Mira 或 Rook，也可以關掉角色、
+動畫、點擊台詞或聲音。** 每位的字母、顏色與兩句固定文字仍隨程式離線提供；只有你
 真的按下角色（或在原生按鈕上用 Enter／Space）才會說下一句，不叫模型、不改答案，
-也不因開場、輪詢、錄製或記憶事件自己開口。這一版仍誠實顯示「只有內建字母人」：
-**沒有下載 CDN、沒有顯示立繪，也沒有播放語音。** 現成 image+voice pack 的明確揭露、
-固定下載、完整驗證、原子安裝與撤回會在下一段接入；每位的字母呈現都留作離線
-fallback，Neutral 則是永遠可選的預設。
+也不因開場、輪詢、錄製或記憶事件自己開口。
+
+完整立繪與預錄固定語音是同一個 optional pack。下載按鈕前會列出
+`cdn.ted-h.com`、**73,261,088 bytes**，以及 CDN 會看見來源 IP、時間、TLS、固定
+path／headers；只有你看完後明確按下，desktop 才可發至多一個 fixed GET。請求不含
+目前選誰、角色狀態、OCR、畫面、問題、答案或記憶，也不 redirect／proxy／retry，
+不帶 cookie／credentials／authorization、referrer、query 或 body。WebView 本身仍只
+走 Tauri IPC，CSP 沒有開 CDN。
+
+目前實際選用的是四張立繪與八段語音。pack 裡另有四段 `active` 聲音會說
+「今天滿有活力」，但點角色這件事沒有量到這個事實，所以 app 不選、不存也不播放；
+不拿一段有條件的聲音湊成第三句。
+
+程式先用 compact embedded authority 驗 73,261,088-byte ZIP 的整包 SHA-256
+`7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30`、946 entries，
+再逐檔驗真正會使用的四位角色 projection；不是把約 2.1 MB 的完整 11 人 manifest
+塞進執行檔。全部成功才原子啟用；任何失敗都留在所選角色的 code-native 字母
+fallback，不會背景重抓。cache 在預設資料目錄的 `persona-assets-v1/`，memory export、
+`forget`、`prune` 不碰它；Persona 撤回才精準清除該 release。
 
 **alpha.100 多問一個只關於無人值守網址的問題。** 設定尚未回答時，第一次開
 `sister-desktop.exe` 會直接問：「有時候我讀到的東西裡會有一個網址。你不在的時候，
@@ -357,8 +373,10 @@ sister --data-dir ~/sister-backup query 電話      # 直接就問得到
 躺在旁邊的 `-wal` 檔裡，只複製主檔的備份會安靜地少掉最後那幾小時，而你會在
 真的需要它的那天才發現。
 
-字母人**沒有任何圖檔**——整個角色是一個字加幾條 CSS，連應用程式圖示都是把
-同一份 CSS 渲染出來的。所以她離線、可縮放，而且沒有任何一張圖的授權需要解釋。
+每個角色的 **code-native fallback 沒有任何圖檔**——是一個字加幾條 CSS，離線、
+可縮放，拒絕下載或 cache 壞掉仍然可用。選配的立繪／固定語音是另一層；只有通過
+public rights projection、整包與 selected-file 驗證的 fixed pack 才能蓋上去，不能
+拿 fallback 沒有圖檔這件事替素材授權背書。
 
 先跑 `sister doctor`——它不會宣稱任何東西，只會當場示範給你看：能不能讀到你現在的網址、
 OCR 引擎讀不讀得出內建那張圖上的字、哪幾條隱私規則現在其實不生效。

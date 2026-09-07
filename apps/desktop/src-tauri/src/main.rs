@@ -23,8 +23,8 @@ use sister_shell as bounds;
 use sister_shell::{PetState, Rect};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Mutex,
-    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -85,7 +85,16 @@ struct Shell {
     /// 心跳那一頭已經補好（見 `ops::BootBeat`），但那是靠時間差贏的；握著這個
     /// 把手就不必賭：行程還活著就是還活著，跟它寫沒寫檔案無關。
     spawned: Mutex<Option<Spawned>>,
+    /// Persona omnibus pack 同一時間只准有一個 mutation。Arc 只為了把狀態安全
+    /// 帶進 `spawn_blocking`；下載 API 本身不接受 persona、URL 或私人資料。
+    asset_operation: Arc<AtomicU8>,
+    asset_cancel: Arc<AtomicBool>,
 }
+
+const ASSET_IDLE: u8 = 0;
+const ASSET_INSTALLING: u8 = 1;
+const ASSET_REMOVING: u8 = 2;
+const ASSET_SETTING_VOICE: u8 = 3;
 
 /// 我們自己開起來的那個 recorder，**加上它是什麼時候被開起來的**。
 struct Spawned {
@@ -2102,42 +2111,39 @@ fn commitment_other(id: i64, shell: tauri::State<'_, Shell>) -> Result<(), Strin
 
 /// Persona 素材包在畫面上的狀態。
 ///
-/// 名字沿用既有 fixed-pack boundary，讓之後接入「可取得／安裝中／需修復／已安裝」
-/// 不必再改前端 contract。這個 zero-network base 只會產生 `unavailable`；它不掃任意
-/// 本機目錄，更不會把「看見一個檔案」當成「權利與 digest 都驗過」。
+/// 每個狀態都描述 native authority 對 exact cache 的判斷；它不掃任意本機目錄，
+/// 更不會把「看見一個檔案」當成「權利與 digest 都驗過」。
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PersonaAssetPackPhase {
     Unavailable,
     Available,
     Installing,
+    Removing,
     RepairNeeded,
     Installed,
 }
 
-/// 已驗證的本機素材才可以填 portrait data URL。Persona v1 沒有這種素材，因此
-/// 保持空；保留型別是為了讓字母 fallback 與 fixed pack 共用同一條 renderer。
+/// 只有已驗證的本機素材才可以填 portrait data URL；其他狀態都保持空，讓 renderer
+/// 沿同一條 contract 回到 code-native 字母 fallback。
 #[derive(Clone, Serialize)]
 struct PersonaPortraitView {
     data_url: String,
 }
 
-/// 公開 manifest 裡可由 avatar click 指到的十二條 fixed voice。封閉 enum 讓 renderer
-/// 不能把任意路徑或私人文字塞進 IPC；trigger 名只作素材身分，不授權自動播放。
+/// 公開 manifest 裡可由 avatar click 指到的八條無條件 fixed voice。封閉 enum 讓
+/// renderer 不能把任意路徑或私人文字塞進 IPC。pack 另有需要活動證據的 active clips，
+/// 但 click rotation 沒有那份證據，所以不把它們放進這個 enum。
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum PersonaVoiceLineId {
     ChatgptGreeting,
-    ChatgptActive,
     ChatgptQuiet,
     ClaudeGreeting,
-    ClaudeActive,
     ClaudeQuiet,
     GeminiGreeting,
-    GeminiActive,
     GeminiQuiet,
     GrokGreeting,
-    GrokActive,
     GrokQuiet,
 }
 
@@ -2145,10 +2151,38 @@ impl PersonaVoiceLineId {
     fn persona(self) -> sister_core::config::PersonaId {
         use sister_core::config::PersonaId;
         match self {
-            Self::ChatgptGreeting | Self::ChatgptActive | Self::ChatgptQuiet => PersonaId::Chatgpt,
-            Self::ClaudeGreeting | Self::ClaudeActive | Self::ClaudeQuiet => PersonaId::Claude,
-            Self::GeminiGreeting | Self::GeminiActive | Self::GeminiQuiet => PersonaId::Gemini,
-            Self::GrokGreeting | Self::GrokActive | Self::GrokQuiet => PersonaId::Grok,
+            Self::ChatgptGreeting | Self::ChatgptQuiet => PersonaId::Chatgpt,
+            Self::ClaudeGreeting | Self::ClaudeQuiet => PersonaId::Claude,
+            Self::GeminiGreeting | Self::GeminiQuiet => PersonaId::Gemini,
+            Self::GrokGreeting | Self::GrokQuiet => PersonaId::Grok,
+        }
+    }
+
+    fn asset_line(self) -> sister_assets::VoiceLine {
+        use sister_assets::VoiceLine;
+        match self {
+            Self::ChatgptGreeting => VoiceLine::ChatgptGreeting,
+            Self::ChatgptQuiet => VoiceLine::ChatgptQuiet,
+            Self::ClaudeGreeting => VoiceLine::ClaudeGreeting,
+            Self::ClaudeQuiet => VoiceLine::ClaudeQuiet,
+            Self::GeminiGreeting => VoiceLine::GeminiGreeting,
+            Self::GeminiQuiet => VoiceLine::GeminiQuiet,
+            Self::GrokGreeting => VoiceLine::GrokGreeting,
+            Self::GrokQuiet => VoiceLine::GrokQuiet,
+        }
+    }
+
+    fn from_asset(line: sister_assets::VoiceLine) -> Self {
+        use sister_assets::VoiceLine;
+        match line {
+            VoiceLine::ChatgptGreeting => Self::ChatgptGreeting,
+            VoiceLine::ChatgptQuiet => Self::ChatgptQuiet,
+            VoiceLine::ClaudeGreeting => Self::ClaudeGreeting,
+            VoiceLine::ClaudeQuiet => Self::ClaudeQuiet,
+            VoiceLine::GeminiGreeting => Self::GeminiGreeting,
+            VoiceLine::GeminiQuiet => Self::GeminiQuiet,
+            VoiceLine::GrokGreeting => Self::GrokGreeting,
+            VoiceLine::GrokQuiet => Self::GrokQuiet,
         }
     }
 }
@@ -2159,6 +2193,7 @@ impl PersonaVoiceLineId {
 struct PersonaVoiceLineView {
     line_id: PersonaVoiceLineId,
     duration_ms: u32,
+    spoken_text: &'static str,
 }
 
 #[derive(Serialize)]
@@ -2175,31 +2210,119 @@ struct PersonaAssetPackView {
     voice_lines: Vec<PersonaVoiceLineView>,
 }
 
-/// fixed pack 的唯一 resolver seam。
-///
-/// 下一步接素材時只替換這支：它要從「內嵌 allowlist + digest 驗過的本機 cache」
-/// 產生 view，不能接受 renderer 傳路徑，也不能在這裡下載。下載／同意／權利證明是
-/// 另一條流程。現在誠實回 unavailable，字母人仍完整可用。
-fn resolve_local_persona_assets(
-    _data_dir: Option<&Path>,
-    _persona: sister_core::config::PersonaId,
-) -> PersonaAssetPackView {
-    PersonaAssetPackView {
-        phase: PersonaAssetPackPhase::Unavailable,
-        release_id: None,
-        portrait: None,
-        voice_lines: Vec::new(),
+/// Persona cache 不跟 `sister --data-dir` 走。記憶 export／forget／prune 只處理
+/// 記憶；這份可撤回的 public media 永遠住在 app 的 default data dir。
+fn persona_asset_cache_root() -> Option<PathBuf> {
+    sister_core::config::Config::default_data_dir()
+        .map(|directory| directory.join(sister_assets::CACHE_DIRECTORY))
+}
+
+fn asset_persona(id: sister_core::config::PersonaId) -> Option<sister_assets::Persona> {
+    use sister_core::config::PersonaId;
+    Some(match id {
+        PersonaId::Neutral => return None,
+        PersonaId::Chatgpt => sister_assets::Persona::Chatgpt,
+        PersonaId::Claude => sister_assets::Persona::Claude,
+        PersonaId::Gemini => sister_assets::Persona::Gemini,
+        PersonaId::Grok => sister_assets::Persona::Grok,
+    })
+}
+
+fn local_asset_phase(shell: &Shell) -> Result<PersonaAssetPackPhase, String> {
+    match shell.asset_operation.load(Ordering::Acquire) {
+        ASSET_INSTALLING => return Ok(PersonaAssetPackPhase::Installing),
+        ASSET_REMOVING => return Ok(PersonaAssetPackPhase::Removing),
+        _ => {}
+    }
+    let Some(cache) = persona_asset_cache_root() else {
+        return Ok(PersonaAssetPackPhase::Unavailable);
+    };
+    match sister_assets::cache_state(&cache) {
+        Ok(sister_assets::CacheState::Available) => Ok(PersonaAssetPackPhase::Available),
+        Ok(sister_assets::CacheState::RepairNeeded) => Ok(PersonaAssetPackPhase::RepairNeeded),
+        Ok(sister_assets::CacheState::Installed) => Ok(PersonaAssetPackPhase::Installed),
+        Err(error) => Err(format!("問不到 Persona 素材 cache 狀態：{error}")),
     }
 }
 
-/// fixed-pack voice 的單條讀取 seam。這一版沒有 pack，因此永遠是 `None`；下一版
-/// 只能在這裡從 embedded manifest 指到的已驗 regular file 讀 exact WAV，不能接受
-/// renderer 路徑、任意文字或遠端 URL。
-fn resolve_local_persona_voice(
-    _data_dir: Option<&Path>,
-    _line_id: PersonaVoiceLineId,
-) -> Option<PersonaVoicePayloadView> {
-    None
+/// fixed pack 的唯一本機 resolver seam。它只從 embedded authority 指到的 cache
+/// 讀 bytes；renderer 不能傳路徑，也不會沿這條路觸發下載。
+fn resolve_local_persona_assets(
+    shell: &Shell,
+    persona: sister_core::config::PersonaId,
+) -> PersonaAssetPackView {
+    // 主畫面不能因選配素材的 lock／I/O 問題連角色設定都讀不到。設定頁的獨立
+    // status command 會保留完整錯誤；這裡只做 fail-closed presentation fallback。
+    let phase = local_asset_phase(shell).unwrap_or(PersonaAssetPackPhase::Unavailable);
+    if phase != PersonaAssetPackPhase::Installed {
+        return PersonaAssetPackView {
+            phase,
+            release_id: None,
+            portrait: None,
+            voice_lines: Vec::new(),
+        };
+    }
+    let Some(cache) = persona_asset_cache_root() else {
+        return PersonaAssetPackView {
+            phase: PersonaAssetPackPhase::Unavailable,
+            release_id: None,
+            portrait: None,
+            voice_lines: Vec::new(),
+        };
+    };
+    let Some(persona) = asset_persona(persona) else {
+        return PersonaAssetPackView {
+            phase,
+            release_id: Some(sister_assets::RELEASE_ID.to_string()),
+            portrait: None,
+            voice_lines: Vec::new(),
+        };
+    };
+
+    let resolved = sister_assets::read_portrait(&cache, persona).and_then(|portrait| {
+        let voice_lines = sister_assets::voice_metadata(&cache, persona)?
+            .into_iter()
+            .map(|voice| PersonaVoiceLineView {
+                line_id: PersonaVoiceLineId::from_asset(voice.line),
+                duration_ms: voice.duration_ms,
+                spoken_text: voice.spoken_text,
+            })
+            .collect();
+        Ok((portrait, voice_lines))
+    });
+    match resolved {
+        Ok((portrait, voice_lines)) => PersonaAssetPackView {
+            phase,
+            release_id: Some(sister_assets::RELEASE_ID.to_string()),
+            portrait: Some(PersonaPortraitView {
+                data_url: format!(
+                    "data:image/webp;base64,{}",
+                    sister_shell::base64(&portrait.bytes)
+                ),
+            }),
+            voice_lines,
+        },
+        Err(_) => PersonaAssetPackView {
+            phase: PersonaAssetPackPhase::RepairNeeded,
+            release_id: None,
+            portrait: None,
+            voice_lines: Vec::new(),
+        },
+    }
+}
+
+/// 單條 fixed voice 讀取。line 是封閉 enum，cache path 與檔名完全由 embedded
+/// authority 決定；私人文字、renderer 路徑或遠端 URL 都進不了這個簽章。
+fn resolve_local_persona_voice(line_id: PersonaVoiceLineId) -> Option<PersonaVoicePayloadView> {
+    let cache = persona_asset_cache_root()?;
+    let voice = sister_assets::read_voice(&cache, line_id.asset_line()).ok()?;
+    Some(PersonaVoicePayloadView {
+        line_id,
+        data_url: format!(
+            "data:audio/wav;base64,{}",
+            sister_shell::base64(&voice.bytes)
+        ),
+    })
 }
 
 #[derive(Clone, Serialize)]
@@ -2208,12 +2331,12 @@ struct PersonaView {
     id: sister_core::config::PersonaId,
     motion: sister_core::config::PersonaMotionEnabled,
     tap_lines: sister_core::config::PersonaTapLinesEnabled,
-    /// 這一格目前只能由 config.toml 留住，出廠永遠 false。素材包存在也不能越過它。
+    /// 出廠永遠 false；設定頁另行明確打開以前，素材包存在也不能越過它。
     voice_enabled: sister_core::config::PersonaVoiceEnabled,
     asset_pack: PersonaAssetPackView,
 }
 
-fn persona_view(config: &sister_core::config::Config, data_dir: Option<&Path>) -> PersonaView {
+fn persona_view(config: &sister_core::config::Config, shell: &Shell) -> PersonaView {
     let persona = config.shell.persona;
     PersonaView {
         enabled: persona.visible(),
@@ -2221,18 +2344,18 @@ fn persona_view(config: &sister_core::config::Config, data_dir: Option<&Path>) -
         motion: persona.motion_enabled(),
         tap_lines: persona.tap_lines_enabled(),
         voice_enabled: persona.voice_enabled(),
-        asset_pack: resolve_local_persona_assets(data_dir, persona.id),
+        asset_pack: resolve_local_persona_assets(shell, persona.id),
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn persona_read(shell: tauri::State<'_, Shell>) -> Result<PersonaView, String> {
     let config =
         sister_core::config::Config::load(&config_path()?).map_err(|e| format!("{e:#}"))?;
-    Ok(persona_view(&config, shell.data_dir.as_deref()))
+    Ok(persona_view(&config, &shell))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn persona_voice_read(
     line_id: PersonaVoiceLineId,
     shell: tauri::State<'_, Shell>,
@@ -2248,16 +2371,246 @@ fn persona_voice_read(
         return Ok(None);
     }
 
-    let assets = resolve_local_persona_assets(shell.data_dir.as_deref(), persona.id);
+    let assets = resolve_local_persona_assets(&shell, persona.id);
     if assets.phase != PersonaAssetPackPhase::Installed
-        || !assets.voice_lines.iter().any(|line| line.line_id == line_id)
+        || !assets
+            .voice_lines
+            .iter()
+            .any(|line| line.line_id == line_id)
     {
         return Ok(None);
     }
-    Ok(resolve_local_persona_voice(
-        shell.data_dir.as_deref(),
-        line_id,
-    ))
+    Ok(resolve_local_persona_voice(line_id))
+}
+
+#[derive(Clone, Serialize)]
+struct PersonaAssetDisclosureView {
+    release_id: &'static str,
+    host: &'static str,
+    path: &'static str,
+    bytes: usize,
+    boundary: &'static str,
+}
+
+#[derive(Clone, Serialize)]
+struct PersonaAssetManagerView {
+    phase: PersonaAssetPackPhase,
+    disclosure: PersonaAssetDisclosureView,
+    /// `None` 是尚未有一份完整安裝，不用 0 冒充「裝了 0 bytes」。
+    asset_file_bytes: Option<usize>,
+    portrait_count: Option<u8>,
+    voice_count: Option<u8>,
+}
+
+fn persona_asset_manager_view(shell: &Shell) -> Result<PersonaAssetManagerView, String> {
+    let phase = local_asset_phase(shell)?;
+    let installed = phase == PersonaAssetPackPhase::Installed;
+    let disclosure = sister_assets::disclosure();
+    Ok(PersonaAssetManagerView {
+        phase,
+        disclosure: PersonaAssetDisclosureView {
+            release_id: disclosure.release_id,
+            host: disclosure.host,
+            path: sister_assets::PACK_PATH,
+            bytes: disclosure.bytes,
+            boundary: disclosure.boundary_zh_tw,
+        },
+        asset_file_bytes: installed.then_some(sister_assets::INSTALLED_ASSET_BYTES),
+        portrait_count: installed.then_some(4),
+        voice_count: installed.then_some(8),
+    })
+}
+
+fn emit_persona_from_disk(app: &tauri::AppHandle, shell: &Shell) {
+    use tauri::Emitter;
+    let Ok(path) = config_path() else {
+        return;
+    };
+    let Ok(config) = sister_core::config::Config::load(&path) else {
+        return;
+    };
+    let _ = app.emit("persona-changed", persona_view(&config, shell));
+}
+
+fn emit_persona_asset_status(app: &tauri::AppHandle, shell: &Shell) {
+    use tauri::Emitter;
+    // listener 不採信 event payload，收到後會重叫 status command；即使這一刻讀
+    // cache 出錯也要通知另一扇設定頁，讓它顯示那個錯而不是留著舊的 Installed。
+    let _ = app.emit("persona-assets-changed", persona_asset_manager_view(shell).ok());
+}
+
+struct AssetOperationGuard(Arc<AtomicU8>);
+
+impl Drop for AssetOperationGuard {
+    fn drop(&mut self) {
+        self.0.store(ASSET_IDLE, Ordering::Release);
+    }
+}
+
+#[tauri::command(async)]
+fn persona_asset_status(shell: tauri::State<'_, Shell>) -> Result<PersonaAssetManagerView, String> {
+    persona_asset_manager_view(&shell)
+}
+
+/// 這支 command 是唯一會連網的產品入口。簽章故意沒有參數：renderer 無法換
+/// persona、URL、path、headers 或 body；每次呼叫也只做一次 fixed GET。
+#[tauri::command]
+async fn persona_asset_install(
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+) -> Result<PersonaAssetManagerView, String> {
+    let cache = persona_asset_cache_root()
+        .ok_or_else(|| "找不到 Persona 素材 cache 路徑，沒有連線。".to_string())?;
+    match sister_assets::cache_state(&cache) {
+        Ok(sister_assets::CacheState::Installed) => return persona_asset_manager_view(&shell),
+        Ok(sister_assets::CacheState::Available | sister_assets::CacheState::RepairNeeded) => {}
+        Err(error) => {
+            return Err(format!(
+                "問不到 Persona 素材 cache 狀態，沒有開始下載：{error}"
+            ));
+        }
+    }
+    shell
+        .asset_operation
+        .compare_exchange(
+            ASSET_IDLE,
+            ASSET_INSTALLING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .map_err(|running| match running {
+            ASSET_REMOVING => "正在刪除本機素材，沒有開始另一個下載。".to_string(),
+            ASSET_SETTING_VOICE => "正在更新固定台詞語音設定，沒有開始下載。".to_string(),
+            _ => "同一份素材包已經在下載；沒有開始第二個請求。".to_string(),
+        })?;
+    shell.asset_cancel.store(false, Ordering::Release);
+    emit_persona_asset_status(&app, &shell);
+    emit_persona_from_disk(&app, &shell);
+
+    let installing = Arc::clone(&shell.asset_operation);
+    let cancelled = Arc::clone(&shell.asset_cancel);
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = AssetOperationGuard(installing);
+        sister_assets::download_and_install(&cache, &cancelled, |_| {})
+    });
+    let result = task
+        .await
+        .map_err(|_| "素材安裝工作沒有完成；沒有啟用半包。".to_string())?;
+
+    emit_persona_asset_status(&app, &shell);
+    emit_persona_from_disk(&app, &shell);
+    result.map_err(|error| error.to_string())?;
+    persona_asset_manager_view(&shell)
+}
+
+#[tauri::command]
+fn persona_asset_cancel(shell: tauri::State<'_, Shell>) -> bool {
+    let installing = shell.asset_operation.load(Ordering::Acquire) == ASSET_INSTALLING;
+    if installing {
+        shell.asset_cancel.store(true, Ordering::Release);
+    }
+    installing
+}
+
+/// 撤回先讓 renderer 停聲、resolver fail closed，再碰 exact managed cache。
+#[tauri::command]
+async fn persona_asset_remove(
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+) -> Result<PersonaAssetManagerView, String> {
+    let cache =
+        persona_asset_cache_root().ok_or_else(|| "找不到 Persona 素材 cache 路徑。".to_string())?;
+    shell
+        .asset_operation
+        .compare_exchange(
+            ASSET_IDLE,
+            ASSET_REMOVING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .map_err(|running| match running {
+            ASSET_INSTALLING => "素材仍在下載；先按停止，等它停下來再刪除。".to_string(),
+            ASSET_SETTING_VOICE => {
+                "正在更新固定台詞語音設定；完成後再刪除素材。".to_string()
+            }
+            _ => "本機素材已經在刪除。".to_string(),
+        })?;
+
+    use tauri::Emitter;
+    let _ = app.emit("persona-media-stop", ());
+    let voice_save_error = (|| {
+        let path = config_path()?;
+        sister_core::config::Config::update(&path, |config| {
+            config
+                .set_persona_voice_from_page(sister_core::config::PersonaVoiceEnabled::new(false));
+            Ok(())
+        })
+        .map_err(|e| format!("{e:#}"))?;
+        Ok::<(), String>(())
+    })()
+    .err();
+    emit_persona_asset_status(&app, &shell);
+    emit_persona_from_disk(&app, &shell);
+
+    let removing = Arc::clone(&shell.asset_operation);
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = AssetOperationGuard(removing);
+        sister_assets::remove(&cache)
+    });
+    let result = task
+        .await
+        .map_err(|_| "素材刪除工作沒有完成；素材仍停用。".to_string())?;
+
+    emit_persona_asset_status(&app, &shell);
+    emit_persona_from_disk(&app, &shell);
+    result.map_err(|error| error.to_string())?;
+    if let Some(error) = voice_save_error {
+        return Err(format!(
+            "本機素材已刪除，但聲音偏好存不回設定檔；目前仍因沒有素材而不會播放：{error}"
+        ));
+    }
+    persona_asset_manager_view(&shell)
+}
+
+/// 聲音是和素材下載分開的一次明確選擇。打開不會播放；關掉會先送停聲事件。
+#[tauri::command]
+fn persona_voice_set(
+    enabled: sister_core::config::PersonaVoiceEnabled,
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+) -> Result<PersonaView, String> {
+    shell
+        .asset_operation
+        .compare_exchange(
+            ASSET_IDLE,
+            ASSET_SETTING_VOICE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .map_err(|running| match running {
+            ASSET_INSTALLING => {
+                "素材仍在下載；完成或停止後再改固定台詞語音。".to_string()
+            }
+            ASSET_REMOVING => "素材正在刪除，固定台詞語音已停用。".to_string(),
+            _ => "另一個固定台詞語音設定仍在寫入。".to_string(),
+        })?;
+    let _guard = AssetOperationGuard(Arc::clone(&shell.asset_operation));
+    if enabled.get() && local_asset_phase(&shell)? != PersonaAssetPackPhase::Installed {
+        return Err("先下載並驗證素材包，才能打開固定台詞語音。".to_string());
+    }
+    let path = config_path()?;
+    let (config, ()) = sister_core::config::Config::update(&path, |config| {
+        config.set_persona_voice_from_page(enabled);
+        Ok(())
+    })
+    .map_err(|e| format!("{e:#}"))?;
+    use tauri::Emitter;
+    if !enabled.get() {
+        let _ = app.emit("persona-media-stop", ());
+    }
+    let view = persona_view(&config, &shell);
+    let _ = app.emit("persona-changed", view.clone());
+    Ok(view)
 }
 
 /// 設定頁上看得到、改得動的那幾項。
@@ -2408,15 +2761,11 @@ fn url_policy_write_at(path: &Path, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("這不是我問的那兩個答案之一，沒有存：{key}"))?;
     // **先讀再改再寫**，和 `settings_write` 同一條紀律：從空白組一份會把這一
     // 格沒畫出來的欄位（排除規則、保留天數……）全部重設成預設值。
-    let mut config = match path
-        .try_exists()
-        .map_err(|e| format!("檢查設定 {}：{e}", path.display()))?
-    {
-        true => sister_core::config::Config::load(path).map_err(|e| format!("{e:#}"))?,
-        false => sister_core::config::Config::default(),
-    };
-    config.hands.url_open = Some(answer);
-    config.save(path).map_err(|e| format!("{e:#}"))?;
+    sister_core::config::Config::update(path, |config| {
+        config.hands.url_open = Some(answer);
+        Ok(())
+    })
+    .map_err(|e| format!("{e:#}"))?;
     Ok(answer.recorded_line())
 }
 
@@ -2526,35 +2875,34 @@ fn settings_write(
     // **先讀再改再寫**，不是從空白組一份出來。設定檔裡有這一頁沒有畫出來的
     // 欄位（截圖間隔、每日畫面額度……），從頭組一份會把它們全部重設成預設值
     // ——使用者只是改了個保留天數，磁碟預算卻被悄悄換掉了。
-    let mut c = sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
-    c.privacy.excluded_apps = settings.excluded_apps;
-    c.privacy.excluded_urls = settings.excluded_urls;
-    c.privacy.excluded_titles = settings.excluded_titles;
-    c.privacy.pause_on_screenshare = settings.pause_on_screenshare;
-    c.privacy.redact_clipboard_secrets = settings.redact_clipboard_secrets;
-    c.privacy.query_log = settings.query_log;
-    c.retention.frames_days = settings.frames_days;
-    c.retention.text_days = settings.text_days;
-    c.set_persona_from_page(
-        settings.persona_enabled,
-        settings.persona_id,
-        settings.persona_motion,
-        settings.persona_tap_lines,
-    );
-    // 只動這兩格。daily_budget / concurrency / reviewer_daily_budget 這一頁
-    // 沒畫，從頭組一份 BrainConfig 會把它們重設成預設值。守這一點的測試是
-    // `a_settings_page_write_must_not_reset_unexposed_brain_fields`。
-    c.set_brain_cli_from_page(settings.brain_command, settings.brain_args);
-    c.save(&path).map_err(|e| format!("{e:#}"))?;
+    let (c, ()) = sister_core::config::Config::update(&path, |c| {
+        c.privacy.excluded_apps = settings.excluded_apps;
+        c.privacy.excluded_urls = settings.excluded_urls;
+        c.privacy.excluded_titles = settings.excluded_titles;
+        c.privacy.pause_on_screenshare = settings.pause_on_screenshare;
+        c.privacy.redact_clipboard_secrets = settings.redact_clipboard_secrets;
+        c.privacy.query_log = settings.query_log;
+        c.retention.frames_days = settings.frames_days;
+        c.retention.text_days = settings.text_days;
+        c.set_persona_from_page(
+            settings.persona_enabled,
+            settings.persona_id,
+            settings.persona_motion,
+            settings.persona_tap_lines,
+        );
+        // 只動這兩格。daily_budget / concurrency / reviewer_daily_budget 這一頁
+        // 沒畫，從頭組一份 BrainConfig 會把它們重設成預設值。守這一點的測試是
+        // `a_settings_page_write_must_not_reset_unexposed_brain_fields`。
+        c.set_brain_cli_from_page(settings.brain_command, settings.brain_args);
+        Ok(())
+    })
+    .map_err(|e| format!("{e:#}"))?;
     // 存成功才換角色。設定頁和字母人是兩扇 WebView；少了這個事件，畫面會直到
     // 整支 desktop 重開才跟 config.toml 一致。payload 仍只含表達層資料，沒有
     // 排除規則、OCR、答案或 action。
     use tauri::Emitter;
     let persona_event_emitted = app
-        .emit(
-            "persona-changed",
-            persona_view(&c, shell.data_dir.as_deref()),
-        )
+        .emit("persona-changed", persona_view(&c, &shell))
         .is_ok();
     // 存成功之後才問。反過來的話，一個存不進去的檔案會拿到一句「5 秒內換上」。
     Ok(WriteOutcome {
@@ -2975,10 +3323,12 @@ fn hotkey_set(
         sister_hands::kill_switch::HotkeySetAction::Persist => {
             let persist = || -> Result<(), String> {
                 let path = config_path()?;
-                let mut c =
-                    sister_core::config::Config::load(&path).map_err(|e| format!("{e:#}"))?;
-                c.shell.pause_shortcut = view.wanted.clone();
-                c.save(&path).map_err(|e| format!("{e:#}"))
+                sister_core::config::Config::update(&path, |c| {
+                    c.shell.pause_shortcut = view.wanted.clone();
+                    Ok(())
+                })
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"))
             };
             // 存不進去的時候**不可以直接 `?` 出去**。那三行以前是裸的 `?`，於是
             // 新的那組已經真的搶下來了（`apply_hotkey` 開頭就 `unregister_all()`），
@@ -3684,6 +4034,8 @@ fn main() {
             data_dir,
             db: Mutex::new(None),
             spawned: Mutex::new(None),
+            asset_operation: Arc::new(AtomicU8::new(ASSET_IDLE)),
+            asset_cancel: Arc::new(AtomicBool::new(false)),
         })
         .manage(Hotkey(Mutex::new(HotkeyView::default())))
         .invoke_handler(tauri::generate_handler![
@@ -3705,6 +4057,11 @@ fn main() {
             toggle_pause,
             persona_read,
             persona_voice_read,
+            persona_asset_status,
+            persona_asset_install,
+            persona_asset_cancel,
+            persona_asset_remove,
+            persona_voice_set,
             settings_read,
             settings_write,
             eval_report_view,

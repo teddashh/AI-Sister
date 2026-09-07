@@ -845,7 +845,7 @@ console.log("㉚ 拔手熱鍵按下去之後，那句話要真的出現在畫面
 console.log("㉛ 送出去的事件名字，另一邊要真的有人在聽");
 {
   // 上面那一節證的是「事件到了，話就上得了畫面」。它證不到的是**事件會不會
-  // 到**：`main.rs` 那個名字和 `app.js` 那個名字是兩份各自寫死的字串，中間沒
+  // 到**：`main.rs` 那個名字和兩扇 renderer 裡的名字是各自寫死的字串，中間沒
   // 有共用的常數。實測過——把 `app.emit("hands-pulled", …)` 改成
   // `"hands-pulled-x"`，這支腳本、`check-settings-say.mjs`、`check-windows.sh`
   // 全綠，而使用者按下熱鍵之後畫面一個字都不會多。
@@ -860,9 +860,14 @@ console.log("㉛ 送出去的事件名字，另一邊要真的有人在聽");
   // 真的有人送」是給**還沒有人驅動的新 listener** 留的後備，不是主力。
   const RS = read(join(UI, "../src-tauri/src/main.rs"));
   const emitted = [...RS.matchAll(/\.emit\(\s*"([^"]+)"/g)].map((m) => m[1]);
-  const heard = [...read(SRC).matchAll(/\.listen\?\.\(\s*"([^"]+)"/g)].map((m) => m[1]);
+  // `persona-assets-changed` 的接收者合理地是設定頁，不是 pet；只掃 app.js 會逼
+  // 一扇不需要該事件的視窗掛假 listener。聚合兩份真正有 Tauri event 的 renderer。
+  const rendererSources = `${read(SRC)}\n${read(join(UI, "settings.js"))}`;
+  const heard = [...rendererSources.matchAll(/\.listen\?\.\(\s*"([^"]+)"/g)].map(
+    (m) => m[1],
+  );
   check("main.rs 真的有在送事件", emitted.length > 0, `${emitted.length} 個`);
-  check("app.js 真的有在聽事件", heard.length > 0, `${heard.length} 個`);
+  check("renderer 真的有在聽事件", heard.length > 0, `${heard.length} 個`);
   for (const name of new Set(emitted)) {
     check(`送出去的 ${name} 有人在聽`, heard.includes(name), heard.join("、"));
   }

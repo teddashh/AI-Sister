@@ -5,8 +5,11 @@
 //!
 //! 設定放在使用者看得到、改得動的 TOML；預設值就是安全的預設值。
 
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
+use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::model::FocusSnapshot;
@@ -425,8 +428,8 @@ impl PersonaVoiceEnabled {
 
 /// 只屬於桌面表達層的 Persona 設定。
 ///
-/// `voice_enabled` 先留作本機 fixed-pack 的 fail-closed 開關；Persona v1 沒有內建
-/// 聲音、設定頁也不會把它打開。未來即使素材包已安裝，少了這個明確選擇仍然不播。
+/// `voice_enabled` 是本機 fixed-pack 的 fail-closed 開關。設定頁只在素材完整驗證後
+/// 才讓使用者另外打開；素材存在但少了這個明確選擇，仍然不播。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PersonaConfig {
@@ -466,7 +469,7 @@ impl Default for PersonaConfig {
             id: PersonaId::Neutral,
             motion: true,
             tap_lines: true,
-            // 素材與同意邊界尚未接入；不能因為哪天本機多出一個檔案就自己開始播。
+            // 安裝素材不等於同意播放；使用者仍要在設定頁另外打開固定台詞語音。
             voice_enabled: false,
         }
     }
@@ -787,6 +790,10 @@ impl Config {
 
     /// 讀取設定；檔案不存在則回傳預設值（不自動寫檔）。
     pub fn load(path: &Path) -> anyhow::Result<Config> {
+        Self::load_unlocked(path)
+    }
+
+    fn load_unlocked(path: &Path) -> anyhow::Result<Config> {
         if !path.exists() {
             return Ok(Config::default());
         }
@@ -832,6 +839,44 @@ impl Config {
     /// 回來的檔案，症狀會是**下一次開機她整個起不來**，而使用者手上只有一句
     /// 「我剛剛改了保留天數」。擋在寫入之前，錯誤訊息還指得到那個輸入框。
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        let _lock = ConfigWriteLock::acquire(path)?;
+        self.save_unlocked(path)
+    }
+
+    /// 在同一把跨行程鎖裡重讀、修改、驗證與寫回。設定頁有多個各自只改一格的
+    /// command；少了這條 transaction，兩個同時到達的「先讀再改再寫」會各自
+    /// 把另一個較新的欄位蓋回舊值。
+    pub fn update<T>(
+        path: &Path,
+        change: impl FnOnce(&mut Config) -> anyhow::Result<T>,
+    ) -> anyhow::Result<(Config, T)> {
+        Self::update_inner(path, false, change)
+    }
+
+    /// 同上，但呼叫者明確要求「不存在」是錯誤，不可以拿 defaults 建一份。
+    pub fn update_existing<T>(
+        path: &Path,
+        change: impl FnOnce(&mut Config) -> anyhow::Result<T>,
+    ) -> anyhow::Result<(Config, T)> {
+        Self::update_inner(path, true, change)
+    }
+
+    fn update_inner<T>(
+        path: &Path,
+        must_exist: bool,
+        change: impl FnOnce(&mut Config) -> anyhow::Result<T>,
+    ) -> anyhow::Result<(Config, T)> {
+        let _lock = ConfigWriteLock::acquire(path)?;
+        if must_exist && !path.exists() {
+            anyhow::bail!("找不到設定檔：{}", path.display());
+        }
+        let mut config = Self::load_unlocked(path)?;
+        let value = change(&mut config)?;
+        config.save_unlocked(path)?;
+        Ok((config, value))
+    }
+
+    fn save_unlocked(&self, path: &Path) -> anyhow::Result<()> {
         self.retention.check()?;
         self.brain.check()?;
         self.gatekeeper.check()?;
@@ -869,6 +914,43 @@ impl Config {
         self.shell.persona.id = id;
         self.shell.persona.motion = motion.get();
         self.shell.persona.tap_lines = tap_lines.get();
+    }
+
+    /// 素材管理卡上的聲音選擇獨立立即存檔。它不能混進設定頁那份長 payload：
+    /// 一扇開很久的設定頁若拿舊值一起送回來，會把剛關掉的聲音重新打開。
+    pub fn set_persona_voice_from_page(&mut self, enabled: PersonaVoiceEnabled) {
+        self.shell.persona.voice_enabled = enabled.get();
+    }
+}
+
+/// 寫鎖放在 config 的 sibling；檔案本身可被 truncate/recreate，鎖不能跟著 inode
+/// 換掉。handle drop 會由作業系統釋放鎖，crash 不會留下永遠卡住的 owner。
+struct ConfigWriteLock {
+    _file: File,
+}
+
+impl ConfigWriteLock {
+    fn acquire(path: &Path) -> anyhow::Result<Self> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("設定檔沒有 parent：{}", path.display()))?;
+        std::fs::create_dir_all(parent)?;
+        let mut name = path
+            .file_name()
+            .map(OsString::from)
+            .ok_or_else(|| anyhow::anyhow!("設定檔沒有檔名：{}", path.display()))?;
+        name.push(".write-lock");
+        let lock_path = parent.join(name);
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(lock_path)?;
+        FileExt::lock(&file)?;
+        Ok(Self { _file: file })
     }
 }
 
@@ -1228,6 +1310,53 @@ mod tests {
             app_id: Some(id.into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn concurrent_field_updates_do_not_restore_each_others_stale_config() {
+        use std::sync::mpsc;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ai-sister-config-lock-test-{}-{unique}",
+            std::process::id()
+        ));
+        let path = dir.join("config.toml");
+        Config::default().save(&path).expect("seed config");
+        let first_path = path.clone();
+        let second_path = path.clone();
+        let (inside_tx, inside_rx) = mpsc::channel();
+
+        let first = std::thread::spawn(move || {
+            Config::update(&first_path, |config| {
+                config.retention.text_days = 777;
+                inside_tx.send(()).expect("announce held transaction");
+                // 沒有跨行程鎖時，第二支會在這裡讀到舊的 text_days 並先寫回；
+                // 第一支醒來再把它的 brain.command 蓋掉。這不是靠排程碰運氣。
+                std::thread::sleep(Duration::from_millis(150));
+                Ok(())
+            })
+            .expect("first update");
+        });
+        inside_rx.recv().expect("first transaction entered");
+        let second = std::thread::spawn(move || {
+            Config::update(&second_path, |config| {
+                config.brain.command = "keep-this-command".into();
+                Ok(())
+            })
+            .expect("second update");
+        });
+
+        first.join().expect("first thread");
+        second.join().expect("second thread");
+        let saved = Config::load(&path).expect("read merged config");
+        assert_eq!(saved.retention.text_days, 777);
+        assert_eq!(saved.brain.command, "keep-this-command");
+        std::fs::remove_dir_all(dir).expect("test cleanup");
     }
 
     /// `0` 在 logrotate、journald、docker 那邊是「不限制」，在這裡是「下一次
@@ -1831,6 +1960,16 @@ mod tests {
             serde_json::to_value(PersonaMotionEnabled::new(true)).expect("motion JSON"),
             serde_json::Value::Bool(true)
         );
+    }
+
+    #[test]
+    fn persona_voice_has_one_typed_immediate_setter() {
+        let mut config = Config::default();
+        assert!(!config.shell.persona.voice_enabled);
+        config.set_persona_voice_from_page(PersonaVoiceEnabled::new(true));
+        assert!(config.shell.persona.voice_enabled);
+        config.set_persona_voice_from_page(PersonaVoiceEnabled::new(false));
+        assert!(!config.shell.persona.voice_enabled);
     }
 
     #[test]

@@ -11,18 +11,21 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 
 ## 三件事
 
-**一、畫面不離開這台機器。程式本身沒有 HTTP client。**
-沒有帳號、沒有遙測、沒有崩潰回報。整個 repo 搜不到 HTTP client——而且這件事
-**每次 CI 都會被檢查一次**（`scripts/check-no-network.sh`），不是靠我們記得。
-兩個執行檔各自的相依樹都要掃過（它們在兩個不同的 workspace 裡，而這件事
-一度讓字母人那半邊整個沒被看到，見 THREAT_MODEL 第 9 條）。
+**一、畫面不離開這台機器；內建網路能力只有列得出名字的一條。**
+沒有帳號、沒有遙測、沒有崩潰回報。`sister.exe` 與 recorder／core／capture／brain／
+hands 沒有 HTTP client 或監聽埠；WebView 也只走 Tauri IPC，CSP 不開 CDN。唯一的
+內建 outbound 能力是 desktop 在你看完揭露、明確按下後，替 Persona 下載一包固定
+公開素材。這不是一句「大致上本機」：`crates/sister-assets` 預設不開 `download`
+feature，只有 desktop 明確啟用；CI 逐棵相依樹與 renderer/CSP 檢查這條邊界
+（`scripts/check-no-network.sh`），不是靠我們記得。
 
 螢幕上的**文字**原文（不是畫面）只在你簽了第二張同意書、而且在設定裡寫了
 `[brain] command` 之後，才會交給那支你自己已經在跑的 CLI。沒簽、沒設定，
 一次都不 spawn。外送紀錄只記結構和計數，不抄原文。
 
-這句話已經擋掉過一個功能：OCR 本來要用 PP-OCRv5，但它的模型下載會把一個
-HTTP client 連進執行檔裡。最後改用系統內建的 OCR，順帶少了 35MB。
+這條邊界已經擋掉過一個功能：OCR 本來要用 PP-OCRv5，但它的模型下載會把一個
+HTTP client 連進長時間運作的 recorder。最後改用系統內建的 OCR，順帶少了 35MB；
+Persona 的窄下載能力不能拿來替 OCR、brain 或 hands 開例外。
 
 **二、暴力要暴在保存，不要暴在生成。**
 她盡可能忠實地把發生過的事記下來（那是不可逆的——沒記到就永遠沒有了），
@@ -33,6 +36,63 @@ HTTP client 連進執行檔裡。最後改用系統內建的 OCR，順帶少了 
 
 **三、每一句話都要能追回出處。**
 她說的每件事都能一路追回到當時的那張畫面。她不能「就是知道」某件事。
+
+---
+
+## Persona 素材的唯一內建網路路徑
+
+不下載也能使用 Neutral、Aster、Cedar、Mira、Rook 的 code-native 字母呈現，S1 的
+記錄、搜尋、證據、刪除與匯出一項都不少。開程式、開設定、hover、切換角色、重開、
+點角色播放已在本機的聲音，都不授權下載，也不會背景預抓或自動更新。
+
+只有你在同一個揭露畫面看見下列三件事，再明確按「下載」後，desktop 才可嘗試：
+
+- host 是 `cdn.ted-h.com`；固定 ZIP 是 **73,261,088 bytes**
+- 請求不會放入 persona 選擇或狀態、OCR、畫面、問題、答案、記憶 ID、資料庫內容
+  或其他私人內容
+- DNS／CDN 仍會看見一般網路 metadata；CDN 會看見來源 IP、時間、TLS、固定的
+  host／path／headers。這些是真的送出，不會被寫成「什麼都沒送」
+
+按下後獲准的是**至多一個** HTTPS `GET`，固定到
+`https://cdn.ted-h.com/tokenmonster/characters/v1/packs/ai-sister-media-11-voice55-2026.07.23/7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30.zip`。
+它不跟 redirect、不走 proxy、不送 cookie／credentials／authorization／referrer／
+query／body，不 retry、不先 `HEAD`、也不逐檔連線。四位角色與任何本機狀態都走相同
+method／URL／headers／body；下載失敗後要再看揭露、再按一次，程式不能自己重試。
+
+正式簽章的 app 內嵌 compact authority：descriptor、exact origin/path allowlist、四位
+角色的 selected public rights projection、八段選用聲音的核准逐字稿，以及完整
+schema-v2 manifest 的 canonical SHA-256
+`21e4675653ce66b50b61e91260f1623e6e3005177f900991e3a8eeadaf9e6474`。
+**約 2.1 MB 的完整 11 人 manifest 沒有嵌進執行檔。** descriptor 另外綁住 release
+ID、73,261,088 bytes、946 entries 與 ZIP SHA-256
+`7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30`；整包 digest
+pin 住那 946 項，真正會呈現／播放的 selected entries 再逐檔驗大小、hash 與 rights
+binding；顯示文字不同於核准逐字稿時，那段聲音也不會進播放 allowlist。先驗完整
+response 的大小/hash，才解析 ZIP；安全路徑、regular-file 集合與
+entry count 全通過，才從同檔案系統 staging 原子啟用。全新 cache 收到半包、缺檔、
+損毀或權利 binding 不符時不會建立可用 cache，畫面保留 `Available` 並顯示那次錯誤；
+既有 cache 損毀、留下 staging 或撤回不完整才是 `RepairNeeded`。兩種都留在所選
+persona 的字母 fallback，而且不自動連線修復。
+
+cache 固定在 `Config::default_data_dir()/persona-assets-v1`。它是公開素材 cache，不是
+記憶：`--data-dir` 不搬它，memory export、`forget`、`prune` 都不讀、不複製、不刪它；
+Persona 撤回才停聲、回字母呈現並精準刪除該 release。cache 刪不掉就明講
+`RepairNeeded`，不假裝已經撤乾淨，也不因此連網。
+
+cache 旁會保留一個空的跨行程 lock、一個首次安裝嘗試或撤回建立的 OS-random epoch、
+後續的 OS-random 撤回 tickets、每次完整安裝成功時對 epoch＋ticket 名稱集合寫下的
+authorization digest，以及最後一次 blocking remove 已結束處理的 settled digest。
+新 ticket 會先讓舊 authorization 與 settled checkpoint 同時失效；remove 結束前，另一個
+行程不能下載或修復，結束後也只有新的明確下載／修復能重新授權素材。內容只含 schema／
+固定 release identity，或集合 digest；隨機值只在檔名，不含角色、PID、網路 metadata、
+記憶、撤回次數或程式寫入的時間；檔案系統 metadata 與 ticket 數量仍可透露大致取得／
+撤回活動。它們不進 memory export，也不由 `forget`／`prune` 刪除，因為那會讓另一個
+行程的舊下載在撤回後重新被啟用。
+
+這個當下下載按鈕不是第四張持久同意書，更不藏在下面三張裡；每一個新的 GET 都要
+重新揭露、重新按。固定語音只在你當下點角色時播放 pack 內預錄的非敏感台詞，不主動
+出聲，也不朗讀 OCR、回憶或私人答案。pack 裡四段會說「今天滿有活力」的聲音不在
+click allowlist，因為單純點角色沒有量到那件事。
 
 ---
 
@@ -94,8 +154,9 @@ HTTP client 連進執行檔裡。最後改用系統內建的 OCR，順帶少了 
   存進區域變數再解」——把指標搬去別的地方，就已經算違規了。
   這個檢查自己也會被檢查：同一條規則必須抓得到隔壁 `mouse_proc` 那行真的
   解參考的程式碼，不然它就只是一個永遠是綠的檢查。
-- 麥克風、攝影機、音訊
-- 網路流量
+- 麥克風、攝影機、系統音訊或使用者音訊。Persona pack 的預錄固定台詞是公開素材，
+  不是從這台機器錄來的聲音
+- 網路流量、DNS 或封包內容（程式不擷取這些；Persona 單次 GET 本身仍會發生）
 - 檔案內容（除非它顯示在螢幕上）
 - 位置、聯絡人、行事曆
 
@@ -257,8 +318,9 @@ Windows 上用的是系統內建的 OCR（`Windows.Media.Ocr`）。它是本機�
 畫面不會因此離開這台機器——但處理那些像素的元件不是我們寫的，也不在我們的
 稽核範圍內。
 
-換來的是：不需要下載模型、不需要外掛 DLL、執行檔仍然只有一個檔案，
-而且**沒有任何相依套件把 HTTP client 帶進來**。
+換來的是：不需要下載模型、不需要外掛 DLL、recorder 執行檔仍然只有一個檔案，
+而且它的相依樹**沒有任何套件把 HTTP client 帶進來**。desktop 的 Persona transport
+是另一個明確、固定且使用者觸發的能力，不屬於 OCR。
 
 代價是她**只讀得懂你裝了語言包的那些語言**。沒裝中文的話，她會安靜地退回
 英文，然後把滿螢幕的中文讀成空白。`sister doctor` 會直接告訴你實際用的是
@@ -476,6 +538,7 @@ ranking、自由填寫的題目 id、逐題原問句與 returned values **全部
 
 ```bash
 cargo test -p sister-capture --test privacy
+./scripts/check-no-network.sh
 ```
 
 這個測試跑一段踩滿地雷的腳本（密碼管理員、網銀、螢幕分享、剪貼簿秘密），
@@ -483,6 +546,16 @@ cargo test -p sister-capture --test privacy
 
 它刻意不去查特定欄位——那樣只能證明我想到要檢查的地方是乾淨的。掃位元組
 才能在未來多一個欄位、多一張表、多一個索引時仍然抓得到洩漏。
+
+第二條檢查不是再宣稱整個 repo 沒有 HTTP client；它要逐棵證明 root workspace 在
+預設 feature 下仍無 download、recorder／core／capture／brain／hands 沒有 client，
+只有 desktop 能經 `sister-assets/download` 抵達固定 Persona transport。它同時繼續
+拒絕 raw socket、renderer 的 `fetch`／WebSocket／遠端資源，以及任何把 CDN 放進
+WebView CSP 的改動。branch CI 用本機 transport/cache 測試守住 0／1 request、固定
+request metadata、失敗／取消與跨行程鎖；不碰 CDN。tag CI 才另外從 public CDN 取
+完整 manifest 重算 authority，並在原生 Windows 上走一次固定 GET、驗證、安裝與撤回。
+按下前 0 request、四位 request 完全相同及系統 proxy 對照仍列在真 Windows 出貨清單，
+不拿一次成功下載冒充 packet trace。
 
 開發過程中，這類驗證實際抓到過三個「規則讀起來正確但什麼都沒比對到」的
 bug。詳見 [THREAT_MODEL.md](THREAT_MODEL.md#最危險的失效模式安靜地不生效)。

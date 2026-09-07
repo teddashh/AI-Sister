@@ -28,13 +28,19 @@ pub(crate) fn run(
     out: &mut impl Write,
 ) -> Result<()> {
     let path = resolve(explicit_config)?;
-    let mut config = load(&path, explicit_config.is_some())?;
+    let config = load(&path, explicit_config.is_some())?;
     match set {
         Some(answer) => {
-            config.hands.url_open = Some(answer);
-            config
-                .save(&path)
-                .with_context(|| format!("寫入設定 {}", path.display()))?;
+            let change = |config: &mut Config| -> Result<()> {
+                config.hands.url_open = Some(answer);
+                Ok(())
+            };
+            if explicit_config.is_some() {
+                Config::update_existing(&path, change)
+            } else {
+                Config::update(&path, change)
+            }
+            .with_context(|| format!("寫入設定 {}", path.display()))?;
             writeln!(out, "{}", answer.recorded_line())?;
             writeln!(out, "存到 {}", path.display())?;
             let change = format!(

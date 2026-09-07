@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0-alpha.101"
+version = "0.1.0-alpha.102"
 edition = "2024"
 # edition 2024 的地板。沒有這一行的話，舊 toolchain 撞到的是一句在講 manifest
 # 解析的錯誤訊息，而真正的問題是「你的 Rust 太舊」——README 的 quickstart 對
@@ -18,6 +18,7 @@ sister-core = { path = "crates/sister-core", default-features = false }
 sister-capture = { path = "crates/sister-capture", default-features = false }
 sister-cli = { path = "crates/sister-cli" }
 sister-hands = { path = "crates/sister-hands" }
+sister-assets = { path = "crates/sister-assets", default-features = false }
 
 anyhow = "1"
 thiserror = "2"
@@ -35,6 +36,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "6"
 getrandom = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+sha2 = { version = "=0.11.0", default-features = false }
+ureq = { version = "=3.4.1", default-features = false, features = ["native-tls"] }
+fs4 = { version = "=1.1.0", default-features = false, features = ["sync"] }
 
 [profile.release]
 lto = "thin"

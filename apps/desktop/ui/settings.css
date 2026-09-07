@@ -99,6 +99,82 @@ select {
   padding: 4px 9px;
 }
 
+.persona-assets {
+  background: rgb(246 236 223 / 4%);
+  border: 1px solid rgb(246 236 223 / 12%);
+  border-radius: 10px;
+  margin-top: 14px;
+  padding: 12px;
+}
+
+.persona-assets h3 {
+  font-size: 13px;
+  margin: 0;
+}
+
+.persona-disclosure {
+  background: rgb(246 236 223 / 4%);
+  border-left: 3px solid var(--accent);
+  margin-top: 10px;
+  padding: 8px 10px;
+}
+
+.persona-disclosure[hidden],
+.persona-progress[hidden] {
+  display: none;
+}
+
+.persona-disclosure p {
+  margin: 0 0 8px;
+}
+
+.persona-disclosure dl {
+  margin: 0 0 8px;
+}
+
+.persona-disclosure dl > div {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(110px, 0.32fr) minmax(0, 1fr);
+  padding: 3px 0;
+}
+
+.persona-disclosure dt {
+  opacity: 0.62;
+}
+
+.persona-disclosure dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.persona-progress {
+  accent-color: var(--accent);
+  margin-top: 10px;
+  width: 100%;
+}
+
+.persona-asset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.persona-asset-actions .danger {
+  box-shadow: inset 0 0 0 1px rgb(232 163 61 / 55%);
+  color: var(--warn);
+}
+
+.persona-voice {
+  margin-top: 14px;
+}
+
+.persona-immediate {
+  margin-top: 9px;
+}
+
 textarea {
   resize: vertical;
 }

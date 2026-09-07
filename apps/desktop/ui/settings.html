@@ -79,7 +79,86 @@
             <em>只在你按角色或用 Enter／Space 按下她時出現；不會計時開口，也不叫模型。</em>
           </span>
         </label>
-        <p class="state" data-persona-assets>正在讀本機素材狀態…</p>
+        <div class="persona-assets" data-persona-assets>
+          <h3>立繪與固定台詞語音</h3>
+          <p class="state" role="status" aria-live="polite" data-persona-asset-summary>
+            正在讀本機素材狀態…
+          </p>
+          <div class="persona-disclosure" data-persona-disclosure hidden>
+            <p>
+              這是一份包含四位角色全部立繪與預錄固定台詞的素材包，不能只下載其中一位。
+              第一次下載不會自行打開語音；若你先前已明確打開，修復成功後會沿用那個設定。
+            </p>
+            <dl>
+              <div>
+                <dt>版本</dt>
+                <dd><code data-persona-release>—</code></dd>
+              </div>
+              <div>
+                <dt>連線主機</dt>
+                <dd><code data-persona-host>—</code></dd>
+              </div>
+              <div>
+                <dt>固定路徑</dt>
+                <dd><code data-persona-pack-path>—</code></dd>
+              </div>
+              <div>
+                <dt>完整大小</dt>
+                <dd data-persona-size>—</dd>
+              </div>
+              <div>
+                <dt>會離開這台機器的資料</dt>
+                <dd data-persona-boundary>—</dd>
+              </div>
+            </dl>
+            <p class="hint">
+              按下後只允許對上面的固定路徑做至多一個 HTTPS GET；不跟 redirect、不走
+              proxy，不帶 cookie、credentials、authorization、referrer、query 或 body，
+              不 retry、不先 HEAD，也不逐檔連線。DNS 與 CDN 仍會看到一般網路 metadata；
+              CDN 會看到來源 IP、時間、TLS、固定 host、path 與 headers，固定路徑也會透露
+              素材包版本。請求不會帶角色選擇、角色或記錄狀態、OCR、畫面像素、問題、答案、
+              記憶 ID 或資料庫內容；四位角色的 method、URL、headers 與 body 完全相同。
+            </p>
+          </div>
+          <progress
+            class="persona-progress"
+            data-persona-progress
+            aria-label="正在處理角色素材包"
+            hidden
+          ></progress>
+          <p class="state bad" role="alert" data-persona-asset-error hidden></p>
+          <div class="persona-asset-actions">
+            <button class="primary" type="button" data-persona-download hidden>
+              下載完整素材包
+            </button>
+            <button class="primary" type="button" data-persona-repair hidden>
+              修復素材包
+            </button>
+            <button class="ghost" type="button" data-persona-cancel hidden>
+              取消下載
+            </button>
+            <button class="ghost danger" type="button" data-persona-remove hidden>
+              刪除本機素材
+            </button>
+          </div>
+          <label class="check persona-voice">
+            <input type="checkbox" data-persona-voice disabled />
+            <span>
+              點角色時播放固定台詞語音
+              <em>
+                預設關閉；只在你明確按角色時播放素材包裡的固定錄音，不朗讀問題、答案、
+                OCR 或記憶內容。
+              </em>
+            </span>
+          </label>
+          <p class="state" aria-live="polite" data-persona-voice-state>
+            固定台詞語音預設關閉。
+          </p>
+          <p class="hint persona-immediate">
+            下載、修復、取消、刪除與語音開關按下後立即執行，不必再按頁尾的「儲存」。
+            沒有素材時仍完整使用字母人；角色選擇不會改變下載請求，也不會改變回答與安全路徑。
+          </p>
+        </div>
       </section>
 
       <!--

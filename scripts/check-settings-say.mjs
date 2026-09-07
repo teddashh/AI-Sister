@@ -71,6 +71,22 @@ const BASE = {
   persona_tap_lines: true,
 };
 
+const ASSET_DISCLOSURE = {
+  release_id: "persona-pack-v1",
+  host: "cdn.example.invalid",
+  path: "/ai-sister/persona-pack-v1.zip",
+  bytes: 123456789,
+  boundary: "只送固定素材包請求；不送任何記錄內容。",
+};
+
+const ASSET_AVAILABLE = {
+  phase: "available",
+  disclosure: ASSET_DISCLOSURE,
+  asset_file_bytes: 0,
+  portrait_count: 0,
+  voice_count: 0,
+};
+
 /*
  * `HotkeyView` 的形狀，照 main.rs 那個 struct 抄的。
  *
@@ -98,6 +114,14 @@ async function open({
   onRead,
   onWrite,
   onHotkeySet,
+  onAssetStatus,
+  onAssetInstall,
+  onAssetCancel,
+  onAssetRemove,
+  onVoiceSet,
+  onPersonaRead,
+  asset = ASSET_AVAILABLE,
+  voice = false,
   hotkey = HOTKEY,
   cloud = false,
   watching = "recording",
@@ -118,10 +142,15 @@ async function open({
   globalThis.removeEventListener = () => {};
 
   let state = { ...config };
+  let assetState = { ...asset, disclosure: asset.disclosure ? { ...asset.disclosure } : null };
+  let voiceState = voice;
   const writes = [];
+  const invokes = [];
+  const events = new Map();
   globalThis.__TAURI__ = {
     core: {
       invoke: async (cmd, arg) => {
+        invokes.push({ cmd, arg });
         switch (cmd) {
           case "settings_read":
             if (onRead) return onRead(state);
@@ -175,9 +204,58 @@ async function open({
             };
           case "recording_state":
             return watching;
+          case "persona_asset_status":
+            if (onAssetStatus) return onAssetStatus(assetState);
+            return {
+              ...assetState,
+              disclosure: assetState.disclosure ? { ...assetState.disclosure } : null,
+            };
+          case "persona_asset_install":
+            if (onAssetInstall) {
+              return onAssetInstall(assetState, (s) => (assetState = { ...s }));
+            }
+            assetState = {
+              ...assetState,
+              phase: "installed",
+              asset_file_bytes: 100000000,
+              portrait_count: 4,
+              voice_count: 8,
+            };
+            return null;
+          case "persona_asset_cancel":
+            if (onAssetCancel) {
+              return onAssetCancel(assetState, (s) => (assetState = { ...s }));
+            }
+            assetState = { ...assetState, phase: "available", asset_file_bytes: 0 };
+            return null;
+          case "persona_asset_remove":
+            if (onAssetRemove) {
+              return onAssetRemove(assetState, (s) => (assetState = { ...s }));
+            }
+            assetState = {
+              ...ASSET_AVAILABLE,
+              disclosure: { ...ASSET_DISCLOSURE },
+            };
+            voiceState = false;
+            return null;
+          case "persona_read":
+            if (onPersonaRead) return onPersonaRead(voiceState);
+            return { voice_enabled: voiceState };
+          case "persona_voice_set":
+            if (onVoiceSet) {
+              return onVoiceSet(arg, (enabled) => (voiceState = enabled));
+            }
+            voiceState = arg.enabled;
+            return { voice_enabled: voiceState };
           default:
             return null;
         }
+      },
+    },
+    event: {
+      listen: async (name, handler) => {
+        (events.get(name) ?? events.set(name, []).get(name)).push(handler);
+        return () => {};
       },
     },
   };
@@ -188,6 +266,7 @@ async function open({
   return {
     node,
     writes,
+    invokes,
     nonsense,
     say: () => node("[data-say]").textContent,
     bad: () => node("[data-say]").classList.contains("bad"),
@@ -210,6 +289,20 @@ async function open({
       for (const fn of node("[data-reload]").handlers.click ?? []) fn();
       await tick();
       return true;
+    },
+    async act(selector, { trusted = true, event = "click" } = {}) {
+      const target = node(selector);
+      if (target.disabled || target.hidden) return false;
+      for (const fn of target.handlers[event] ?? []) fn({ isTrusted: trusted });
+      await tick();
+      return true;
+    },
+    async emit(name, payload = null) {
+      for (const fn of events.get(name) ?? []) fn({ payload });
+      await tick();
+    },
+    setAsset(s) {
+      assetState = { ...s, disclosure: s.disclosure ? { ...s.disclosure } : null };
     },
     combo: () => node("[data-combo]").textContent,
     hotkeySay: () => node("[data-hotkey-say]").textContent,
@@ -239,6 +332,10 @@ function check(name, ok, detail) {
     failed++;
     if (detail !== undefined) console.log(`      實際：${JSON.stringify(detail)}`);
   }
+}
+
+function calls(p, command) {
+  return p.invokes.filter(({ cmd }) => cmd === command);
 }
 
 console.log("① 題庫本來開著，關掉按儲存");
@@ -731,6 +828,346 @@ console.log("⑳ 拔手撞號的純決策真的接回桌面回傳值");
     collision.includes("restored.hands_collided = true;"),
     collision,
   );
+}
+
+console.log("㉑ 素材下載前先把 exact host／path／bytes／資料邊界攤開");
+{
+  const p = await open();
+  const compactHtml = HTML.replace(/\s+/g, "");
+  check("available 會顯示下載鍵", p.node("[data-persona-download]").hidden === false);
+  check("揭露區不是藏著", p.node("[data-persona-disclosure]").hidden === false);
+  check("host 一字不改", p.node("[data-persona-host]").textContent === ASSET_DISCLOSURE.host);
+  check("固定 path 一字不改", p.node("[data-persona-pack-path]").textContent === ASSET_DISCLOSURE.path);
+  check(
+    "完整 byte 數看得到，不只是一個四捨五入 MB",
+    p.node("[data-persona-size]").textContent.includes("123,456,789 bytes"),
+    p.node("[data-persona-size]").textContent,
+  );
+  check(
+    "後端回的資料邊界一字不改",
+    p.node("[data-persona-boundary]").textContent === ASSET_DISCLOSURE.boundary,
+    p.node("[data-persona-boundary]").textContent,
+  );
+  check(
+    "固定文案明講 CDN metadata 與不能帶出的私人資料",
+    compactHtml.includes("來源IP、時間、TLS") &&
+      compactHtml.includes("角色選擇") &&
+      compactHtml.includes("OCR") &&
+      compactHtml.includes("問題、答案、記憶ID或資料庫內容") &&
+      compactHtml.includes("四位角色的method、URL、headers與body完全相同") &&
+      compactHtml.includes("至多一個HTTPSGET") &&
+      compactHtml.includes("不retry、不先HEAD"),
+    "settings.html disclosure",
+  );
+  check("開場只讀 status，沒有自己下載", calls(p, "persona_asset_install").length === 0, p.invokes);
+  check("status 是零參數 IPC", calls(p, "persona_asset_status").every((c) => c.arg === undefined), calls(p, "persona_asset_status"));
+  check("語音出廠畫成關閉", p.node("[data-persona-voice]").checked === false);
+}
+
+console.log("㉒ 下載只有 trusted click 能開始，而且 IPC 不帶 persona 或私人資料");
+{
+  const p = await open();
+  await p.act("[data-persona-download]", { trusted: false });
+  check("script 送的假 click 不下載", calls(p, "persona_asset_install").length === 0, p.invokes);
+  await p.act("[data-persona-download]");
+  const installs = calls(p, "persona_asset_install");
+  check("真人 click 恰好下載一次", installs.length === 1, installs);
+  check("install 是零參數，角色選擇不可能混進 request", installs[0]?.arg === undefined, installs[0]);
+  check("完成後重讀成 installed", p.node("[data-persona-asset-summary]").textContent.includes("已安裝並驗證"), p.node("[data-persona-asset-summary]").textContent);
+}
+
+console.log("㉑ᵇ cache 路徑問不到不能假裝是尚未下載");
+{
+  const p = await open({
+    asset: {
+      ...ASSET_AVAILABLE,
+      phase: "unavailable",
+    },
+  });
+  const summary = p.node("[data-persona-asset-summary]").textContent;
+  check("明說是 cache 路徑問不出來", summary.includes("問不出預設素材 cache 路徑"), summary);
+  check("不顯示下載鍵", p.node("[data-persona-download]").hidden === true);
+  check("不顯示修復或刪除鍵", p.node("[data-persona-repair]").hidden && p.node("[data-persona-remove]").hidden);
+  check("開場沒有產生 GET 入口", calls(p, "persona_asset_install").length === 0, p.invokes);
+}
+
+console.log("㉑ᶜ 素材 status 失敗或陌生時保持 unknown，不宣稱正在用 fallback 或一定不會播放");
+for (const [label, onAssetStatus] of [
+  ["讀取失敗", () => { throw new Error("cache 暫時讀不到"); }],
+  ["陌生 phase", (status) => ({ ...status, phase: "future-pack-state" })],
+]) {
+  const p = await open({ voice: true, onAssetStatus });
+  const summary = p.node("[data-persona-asset-summary]").textContent;
+  const voice = p.node("[data-persona-voice-state]").textContent;
+  check(`${label}不冒充字母 fallback 已套用`, !summary.includes("角色仍使用內建字母人"), summary);
+  check(`${label}明講這一頁不會下載`, summary.includes("不會啟動下載"), summary);
+  check(`${label}不把未知素材折成一定不播放`, voice.includes("尚未確認") && !voice.includes("所以不會播放"), voice);
+  check(`${label}時語音開關 fail closed`, p.node("[data-persona-voice]").disabled === true);
+  check(`${label}沒有 GET 入口`, calls(p, "persona_asset_install").length === 0, p.invokes);
+}
+
+console.log("㉓ persona 選擇只改本機表單，不會觸發素材下載");
+{
+  const p = await open();
+  const statusReads = calls(p, "persona_asset_status").length;
+  p.node("[data-persona-id]").value = "grok";
+  for (const fn of p.node("[data-persona-id]").handlers.change ?? []) fn({ isTrusted: true });
+  await tick();
+  check("Rook tagline 會換", p.node("[data-persona-tagline]").textContent.includes("深棕與淡黃"), p.node("[data-persona-tagline]").textContent);
+  check("沒有下載", calls(p, "persona_asset_install").length === 0, p.invokes);
+  check("連下載 status 都沒有因 persona 另打一份", calls(p, "persona_asset_status").length === statusReads, p.invokes);
+}
+
+console.log("㉔ installing 是不確定進度，且取消也是 trusted、零參數");
+{
+  let settleInstall = null;
+  const p = await open({
+    onAssetInstall: () =>
+      new Promise((resolveInstall) => {
+        settleInstall = resolveInstall;
+      }),
+    onAssetCancel: (_status, store) => {
+      store({ ...ASSET_AVAILABLE, disclosure: { ...ASSET_DISCLOSURE } });
+      settleInstall?.();
+      return null;
+    },
+  });
+  await p.act("[data-persona-download]");
+  check("等待整包完成時畫 installing", p.node("[data-persona-asset-summary]").textContent.includes("正在下載並驗證"), p.node("[data-persona-asset-summary]").textContent);
+  check("不確定 progress 看得到", p.node("[data-persona-progress]").hidden === false);
+  const progressTag = HTML.match(/<progress[\s\S]*?<\/progress>/)?.[0] ?? "";
+  check("沒有虛構 chunk 百分比", !/\bvalue\s*=|\bmax\s*=/.test(progressTag), progressTag);
+  check("下載中只有取消鍵是這條路的出口", p.node("[data-persona-cancel]").hidden === false);
+  await p.act("[data-persona-cancel]", { trusted: false });
+  check("假 click 不取消", calls(p, "persona_asset_cancel").length === 0);
+  await p.act("[data-persona-cancel]");
+  const cancels = calls(p, "persona_asset_cancel");
+  check("真人 click 取消一次", cancels.length === 1, cancels);
+  check("cancel 是零參數", cancels[0]?.arg === undefined, cancels[0]);
+  check("取消後回到字母 fallback", p.node("[data-persona-asset-summary]").textContent.includes("目前使用內建字母人"), p.node("[data-persona-asset-summary]").textContent);
+}
+
+console.log("㉕ repair-needed 用同一個受揭露保護的 install contract");
+{
+  const p = await open({
+    asset: {
+      ...ASSET_AVAILABLE,
+      phase: "repair-needed",
+      asset_file_bytes: 42,
+    },
+  });
+  check("修復鍵看得到", p.node("[data-persona-repair]").hidden === false);
+  check("壞素材不冒充立繪可用", p.node("[data-persona-asset-summary]").textContent.includes("立繪與語音已停用"), p.node("[data-persona-asset-summary]").textContent);
+  await p.act("[data-persona-repair]");
+  const installs = calls(p, "persona_asset_install");
+  check("修復沿用 install 一次", installs.length === 1, installs);
+  check("修復同樣不送參數", installs[0]?.arg === undefined, installs[0]);
+}
+
+console.log("㉖ 揭露缺一格就 fail closed，不會讓下載按得下去");
+{
+  const p = await open({
+    asset: {
+      ...ASSET_AVAILABLE,
+      disclosure: { ...ASSET_DISCLOSURE, bytes: null },
+    },
+  });
+  check("仍把缺的那格畫成沒有回報", p.node("[data-persona-size]").textContent === "沒有回報", p.node("[data-persona-size]").textContent);
+  check("下載鍵是灰的", p.node("[data-persona-download]").disabled === true);
+  check("明講是大小缺失，不是假裝網路壞", p.node("[data-persona-asset-error]").textContent.includes("缺少大小"), p.node("[data-persona-asset-error]").textContent);
+  check("按不到也沒有 IPC", (await p.act("[data-persona-download]")) === false && calls(p, "persona_asset_install").length === 0, p.invokes);
+}
+
+console.log("㉗ removing 是正式 fail-closed 態；完成後回字母人");
+{
+  let finishRemove = null;
+  const installed = {
+    phase: "installed",
+    disclosure: { ...ASSET_DISCLOSURE },
+    asset_file_bytes: 100000000,
+    portrait_count: 4,
+    voice_count: 8,
+  };
+  const p = await open({
+    asset: installed,
+    voice: true,
+    onAssetRemove: (_status, store) =>
+      new Promise((resolveRemove) => {
+        finishRemove = () => {
+          store({ ...ASSET_AVAILABLE, disclosure: { ...ASSET_DISCLOSURE } });
+          resolveRemove();
+        };
+      }),
+  });
+  check("已安裝時可刪除", p.node("[data-persona-remove]").hidden === false);
+  await p.act("[data-persona-remove]");
+  check("刪除一開始就畫 removing", p.node("[data-persona-asset-summary]").textContent.includes("正在刪除本機素材"), p.node("[data-persona-asset-summary]").textContent);
+  check("刪除中明講立繪與語音已停用", p.node("[data-persona-asset-summary]").textContent.includes("立繪與語音已停用"), p.node("[data-persona-asset-summary]").textContent);
+  check("刪除中也只有不確定進度", p.node("[data-persona-progress]").hidden === false);
+  check("刪除中語音不可再操作", p.node("[data-persona-voice]").disabled === true);
+  const removes = calls(p, "persona_asset_remove");
+  check("remove 是零參數", removes.length === 1 && removes[0].arg === undefined, removes);
+  finishRemove();
+  await tick();
+  check("完成後回 available 字母人", p.node("[data-persona-asset-summary]").textContent.includes("目前使用內建字母人"), p.node("[data-persona-asset-summary]").textContent);
+}
+
+console.log("㉘ config 讀壞不會連素材 status／remove 的出口一起關掉");
+{
+  const p = await open({
+    onRead: () => {
+      throw new Error("config.toml 壞了");
+    },
+    asset: {
+      phase: "installed",
+      disclosure: { ...ASSET_DISCLOSURE },
+      asset_file_bytes: 100000000,
+      portrait_count: 4,
+      voice_count: 8,
+    },
+  });
+  check("一般儲存確實因 config 壞掉而關閉", p.node("[data-save]").disabled === true);
+  check("asset status 仍獨立讀到了", calls(p, "persona_asset_status").length === 1, p.invokes);
+  check("刪除素材沒有跟著灰掉", p.node("[data-persona-remove]").disabled === false);
+  await p.act("[data-persona-remove]");
+  check("config 壞掉仍送得出 remove", calls(p, "persona_asset_remove").length === 1, p.invokes);
+  check("語音設定不冒充可讀可寫", p.node("[data-persona-voice]").disabled === true);
+}
+
+{
+  const p = await open({
+    onRead: () => {
+      throw new Error("config.toml 壞了");
+    },
+    asset: {
+      phase: "installed",
+      disclosure: { ...ASSET_DISCLOSURE },
+      asset_file_bytes: 100000000,
+      portrait_count: 4,
+      voice_count: 8,
+    },
+    onAssetRemove: (_status, store) => {
+      store({ ...ASSET_AVAILABLE, disclosure: { ...ASSET_DISCLOSURE } });
+      throw new Error("本機素材已刪除，但聲音偏好存不回設定檔");
+    },
+  });
+  await p.act("[data-persona-remove]");
+  const line = p.node("[data-persona-asset-error]").textContent;
+  check("cache 刪完但 config 寫壞時不會反過來宣稱刪除失敗", line.includes("本機素材現在已移除") && !line.startsWith("刪除失敗"), line);
+  check("部分成功的真正錯誤仍完整可見", line.includes("聲音偏好存不回設定檔"), line);
+}
+
+console.log("㉙ persona-assets-changed 只重讀真相，不會自行下載");
+{
+  const p = await open();
+  const before = calls(p, "persona_asset_status").length;
+  p.setAsset({
+    phase: "installed",
+    disclosure: { ...ASSET_DISCLOSURE },
+    asset_file_bytes: 100000000,
+    portrait_count: 4,
+    voice_count: 8,
+  });
+  await p.emit("persona-assets-changed");
+  check("事件後多讀一次 status", calls(p, "persona_asset_status").length === before + 1, p.invokes);
+  check("畫面換成 installed", p.node("[data-persona-asset-summary]").textContent.includes("4 張立繪、8 句"), p.node("[data-persona-asset-summary]").textContent);
+  check("事件本身不下載", calls(p, "persona_asset_install").length === 0, p.invokes);
+}
+
+console.log("㉚ 聲音是另外一次 trusted opt-in，失敗會退回，設定頁永遠不播放");
+{
+  const installed = {
+    phase: "installed",
+    disclosure: { ...ASSET_DISCLOSURE },
+    asset_file_bytes: 100000000,
+    portrait_count: 4,
+    voice_count: 8,
+  };
+  const p = await open({ asset: installed });
+  check("pack 安裝不會順便打開聲音", p.node("[data-persona-voice]").checked === false);
+  check("已安裝才讓 voice opt-in 可按", p.node("[data-persona-voice]").disabled === false);
+  p.node("[data-persona-voice]").checked = true;
+  await p.act("[data-persona-voice]", { trusted: false, event: "change" });
+  check("假 change 被退回關閉", p.node("[data-persona-voice]").checked === false);
+  check("假 change 沒有寫設定", calls(p, "persona_voice_set").length === 0);
+  p.node("[data-persona-voice]").checked = true;
+  await p.act("[data-persona-voice]", { event: "change" });
+  const voiceSets = calls(p, "persona_voice_set");
+  check("真人 opt-in 立刻寫一次，不等頁尾 Save", voiceSets.length === 1 && p.writes.length === 0, { voiceSets, writes: p.writes });
+  check("voice IPC 只送 enabled bool", JSON.stringify(voiceSets[0]?.arg) === JSON.stringify({ enabled: true }), voiceSets[0]);
+  check("成功後明講只在按角色時播固定台詞", p.node("[data-persona-voice-state]").textContent.includes("只會在你明確按角色時播放預錄固定台詞"), p.node("[data-persona-voice-state]").textContent);
+  check("設定頁沒有任何 audio play 路徑", !read(SRC).includes(".play("), "settings.js");
+  check("opt-in 沒有讀任何語音 bytes", calls(p, "persona_voice_read").length === 0, p.invokes);
+}
+
+{
+  const p = await open({
+    asset: {
+      phase: "installed",
+      disclosure: { ...ASSET_DISCLOSURE },
+      asset_file_bytes: 100000000,
+      portrait_count: 4,
+      voice_count: 8,
+    },
+    onVoiceSet: () => {
+      throw new Error("設定檔拒絕寫入");
+    },
+  });
+  p.node("[data-persona-voice]").checked = true;
+  await p.act("[data-persona-voice]", { event: "change" });
+  check("voice 寫失敗會退回原值", p.node("[data-persona-voice]").checked === false);
+  check("而且把失敗原因說出來", p.node("[data-persona-voice-state]").textContent.includes("設定檔拒絕寫入"), p.node("[data-persona-voice-state]").textContent);
+}
+
+{
+  const p = await open({
+    asset: {
+      phase: "installed",
+      disclosure: { ...ASSET_DISCLOSURE },
+      asset_file_bytes: 100000000,
+      portrait_count: 4,
+      voice_count: 8,
+    },
+    onVoiceSet: () => ({}),
+  });
+  p.node("[data-persona-voice]").checked = true;
+  await p.act("[data-persona-voice]", { event: "change" });
+  const voiceState = p.node("[data-persona-voice-state]").textContent;
+  check("voice success payload 缺欄位不拿 wanted 冒充結果", !p.node("[data-persona-voice]").checked, voiceState);
+  check("malformed voice result 轉成 unknown 並鎖住開關", p.node("[data-persona-voice]").disabled === true, voiceState);
+  check("malformed voice result 明講無法確認", voiceState.includes("無法確認是否已改"), voiceState);
+  check("malformed voice result 不宣稱已開啟", !voiceState.includes("語音已開啟"), voiceState);
+}
+
+{
+  let finishVoice = null;
+  const installed = {
+    phase: "installed",
+    disclosure: { ...ASSET_DISCLOSURE },
+    asset_file_bytes: 100000000,
+    portrait_count: 4,
+    voice_count: 8,
+  };
+  const p = await open({
+    asset: installed,
+    onVoiceSet: (arg, store) =>
+      new Promise((resolveVoice) => {
+        finishVoice = () => {
+          store(arg.enabled);
+          resolveVoice({ voice_enabled: arg.enabled });
+        };
+      }),
+  });
+  p.node("[data-persona-voice]").checked = true;
+  await p.act("[data-persona-voice]", { event: "change" });
+  await p.emit("persona-assets-changed");
+  check("voice write 飛行中遇到 asset event 仍保持 disabled", p.node("[data-persona-voice]").disabled === true);
+  finishVoice();
+  await tick();
+  check("write 回來後不會永久卡在 busy", p.node("[data-persona-voice]").checked === true && p.node("[data-persona-voice]").disabled === false, {
+    checked: p.node("[data-persona-voice]").checked,
+    disabled: p.node("[data-persona-voice]").disabled,
+  });
 }
 
 console.log("");

@@ -19,6 +19,8 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 4. **視窗標題與網址** — 看似 metadata，實則常含人名、案號、病歷號。
 5. **輸入節奏** — 不含內容，但能推斷作息與情緒狀態。
 6. **資料庫本身的存在** — 「這台機器上有一份七天的螢幕紀錄」這個事實。
+7. **Persona cache 與取得時間** — 素材本身公開，但 cache 的存在與本機時間可透露
+   這台機器曾明確下載；它不該混進記憶 export 或 query。
 
 ---
 
@@ -29,7 +31,7 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 | **拿到未鎖機器的人** | 讀檔案、跑 `sister query` | **部分防禦**：靠 OS 帳號隔離。目前資料庫**未加密** |
 | **同機的惡意程式** | 以使用者身分讀任何檔案 | **不防禦**。同權限即同讀取權，這是 OS 邊界 |
 | **偷走硬碟的人** | 離線讀取 | **依賴 BitLocker/LUKS**。應用層無額外加密 |
-| **遠端攻擊者** | 網路 | **部分防禦**：本程式沒有監聽埠或 HTTP client；簽 cloud-reading 後會把 OCR 原文交給使用者設定的本機 CLI，後續網路與供應商邊界屬於那支 CLI |
+| **遠端攻擊者** | 網路 | **部分防禦**：本程式沒有監聽埠；`sister.exe`、recorder/core/capture/brain/hands 與 WebView 無任意 HTTP 能力。desktop 只有使用者揭露後按下的 Persona fixed-pack GET；簽 cloud-reading 後則會把 OCR 原文交給使用者設定的本機 CLI，後續網路與供應商邊界屬於那支 CLI |
 | **供應鏈** | 汙染相依套件 | **部分**：`Cargo.lock` 鎖定；未做 vendoring 或 reproducible build |
 | **好奇的旁人** | 看你的螢幕 | 不適用（他本來就看得到） |
 | **被記錄的第三方** | 無 | **這是最重要的一項，見下方** |
@@ -50,6 +52,33 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 光憑 app 名稱分不出「正在分享畫面」與「正在聊天」；把它們列進去等於讓
 整個工作日最重要的對話永遠不被記得。這是**刻意的取捨**，代價由使用者
 與他的同事承擔，所以必須寫在這裡而不是埋在程式碼註解裡。
+
+---
+
+## Persona asset GET 新增的攻擊面
+
+這條路不是「反正公開檔案就沒風險」。使用者按下載後，DNS 與 CDN 至少能觀察
+hostname；CDN 會看見來源 IP、時間、TLS、固定 path／headers。程式先在按鈕旁列
+`cdn.ted-h.com`、73,261,088 bytes 與這個邊界，而且請求不帶 persona、使用狀態或
+任何記憶。四位角色共用同一條 hash path，避免 URL 本身變成角色選擇的旁路訊號。
+
+| 失效方式 | 防線 | 防不住／失敗時 |
+|---|---|---|
+| renderer 或別的 crate 把 fixed GET 擴成任意 URL | HTTP client 只在 `crates/sister-assets` 的非預設 `download` feature；只有 desktop 啟用；API 不收 renderer/config 傳來的 URL、header、body、persona 或 memory；WebView CSP 仍只准 IPC | desktop binary 的供應鏈若被攻破仍在同一信任邊界；因此相依圖與 source boundary 必須由 CI 守 |
+| 隱藏的背景請求、retry、redirect 或 proxy | 開機／開設定／hover／切人都是 0 request；一次 trusted click 至多一個固定 HTTPS GET；redirect、proxy、retry、`HEAD` 與逐物件 request 全禁 | 網路失敗就停在 fallback；使用者要重新看揭露、重新按 |
+| cookie、憑證、referrer 或私人狀態被帶出 | request 沒 cookie／credentials／authorization／referrer／query／body；method、URL、headers、body 對四位角色及所有狀態完全相同 | IP、時間、TLS、固定 host/path/headers 仍會被 CDN 看見，這是明示的 metadata，不假裝消失 |
+| CDN、路上攻擊者或壞 cache 換掉 bytes | 正常 TLS；正式簽章 app 內的 compact authority pin exact origin/path、73,261,088-byte ZIP、946 entries、canonical manifest hash 與 pack SHA-256 | 攻擊者最多造成下載失敗／fallback；hash 不符的內容不解析、不啟用 |
+| 惡意 ZIP traversal、symlink、duplicate、zip bomb 或 parser 差異 | response 大小/hash 先驗；之後只收 canonical safe path、regular file、exact entry count/set 與大小上限；同檔案系統 staging，全部成功才 atomic publish | 全新失敗不建立 cache，維持 `Available` 並回報當次錯誤；既有壞 cache 才是 `RepairNeeded`；兩者都不自動重抓 |
+| 完整 manifest 太大而被「簡化」成無法查權利或聲音內容 | app 嵌 descriptor、exact allowlist、四位 selected public rights projection、八段選用聲音的核准逐字稿與完整 manifest canonical hash；**不宣稱嵌入約 2.1 MB 的完整 11 人 manifest** | pack digest 集體 pin 946 項；真正使用的 selected entries 再逐檔對 projection 驗 size/hash/rights binding；顯示文字不同於逐字稿即靜音 |
+| 本機 cache 被換、被截斷或撤回只刪一半 | 每次啟用前按 embedded authority 重驗；撤回先停聲／回字母，再只刪 exact release | 同使用者權限 malware 本來就不在防護範圍；刪不掉必須顯示 `RepairNeeded`，不能報已撤乾淨 |
+
+cache 固定在 `Config::default_data_dir()/persona-assets-v1`，雖然物理上與預設資料目錄
+相鄰，邏輯上不是記憶：`--data-dir` 不搬它，memory export、forget、prune 不碰它。
+跨行程 lock 與 durable random revocation tickets 放在 cache sibling；remove 先寫 ticket
+再等 exclusive lock，讀者會在回傳 bytes 前後重查。另一個行程要等該 generation 的
+blocking remove 寫下 settled checkpoint 後才能明確修復，而完整重裝最後才以集合 digest
+重新授權目前 generation；settled 本身不授權任何 bytes。這防的是 crash／兩個
+AI-Sister 行程的競爭，不防同權限程式手動竄改檔案。
 
 ---
 
@@ -162,8 +191,9 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 
 第九次的位置最尷尬：出事的不是規則，是**守規則的那支腳本**。
 
-9. **看門狗只看著一半的房子。** `scripts/check-no-network.sh` 是這份專案第一句
-   承諾（「程式裡沒有任何對外連線的程式碼路徑」）唯一的自動保證，而它掃相依樹
+9. **看門狗只看著一半的房子。** 在 Persona transport 出現前，
+   `scripts/check-no-network.sh` 是當時「程式裡沒有任何對外連線的程式碼路徑」承諾
+   唯一的自動保證，而它掃相依樹
    用的是 `cargo tree --workspace`。出貨的是**兩個**執行檔，而 Tauri 要自己一份
    `Cargo.lock`：`sister-desktop.exe` 在另一個 workspace 裡，於是字母人那半邊
    ——外殼、視窗、所有 plugin——**從來沒有被那支腳本看過**。同一支腳本裡搜
@@ -171,7 +201,7 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
    發現的時機很普通：往桌面那半邊加一個全域熱鍵 plugin，腳本照樣印綠勾。
    它比前八條都安靜，因為前八條至少會在資料裡留下痕跡（沒擋到的畫面、查不到
    的中文、變大的磁碟）；這一條在真的被觸發之前**不留任何痕跡**，而它被觸發的
-   那一天，PRIVACY.md 的第一句話就已經是假的了。
+   那一天，PRIVACY.md 當時的第一句話就已經是假的了。
    修法：兩個 manifest 各掃一次（host + Windows target 各一輪，錯誤訊息指名是
    哪一個執行檔），socket 那一行加上 `apps/`。順便修掉旁邊一個同型的問題——
    那行 grep 原本吃掉**所有**非零退出碼，包括「目錄不存在」，所以目錄改個名字
@@ -193,9 +223,12 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 - 每個修好的缺口都留一個回歸測試，且該測試經過**變異驗證**（拿掉修正就要變紅）
 - 能力缺席時 `sister doctor` 報「**目前失效的隱私保護**」與「**看起來正常，
   但其實記不住東西**」，不報「N 條規則 ✓」
-- 承諾能被機器檢查的就交給機器：`scripts/check-no-network.sh` 在 CI 上檢查
-  出貨的相依樹裡沒有 HTTP client，讓 PRIVACY.md 的第一句由建置保證而不是由
-  記性保證。這個缺口通常不是人手動打開的，是相依套件默默帶進來的
+- 承諾能被機器檢查的就交給機器：`scripts/check-no-network.sh` 在 CI 上逐棵檢查
+  root workspace 預設無 download、recorder／core／capture／brain／hands 無 HTTP
+  client，且唯一 client 的 reverse dependency path 是
+  `client → sister-assets[download] → sister-desktop`；renderer/CSP 仍無遠端出口。
+  這讓 PRIVACY.md 的能力邊界由建置保證而不是由記性保證。缺口通常不是人手動
+  打開的，是相依套件或 feature 默默帶進來的
 - 平台相關的假設要在**那個平台上**驗，不能只靠推理：OCR 有一個 CI 步驟真的
   在 Windows 上辨識一張中文圖（`tests/windows_ocr.rs`）
 - **測試要用真實的尺寸。** 第 6 條之所以躲過 CI，一部分是因為測試圖是
@@ -347,7 +380,8 @@ URL 仍可能通過，所以這些防線不等於 Phase 6 的 prompt-injection �
    畫面像素會交給作業系統的元件處理。它是本機的、離線的，但它不是我們寫的，
    也不在我們的稽核範圍內。選它的理由見
    `crates/sister-capture/src/windows/ocr.rs` 的模組註解——最主要的一條是：
-   原本要用的 ONNX 方案會把一個 HTTP client 連進執行檔裡。
+   原本要用的 ONNX 方案會把一個 HTTP client 連進 recorder 執行檔裡；desktop 的
+   Persona fixed-pack transport 不是 OCR 可以重用的例外。
 10. **白名單管得住「哪個程式會被叫起來」，管不住那個程式。** `.pdf` 交給
     PDF 閱讀器、`.docx` 交給 Word、`.svg` 多半交給瀏覽器——而
     **`.svg` 裡可以放 `<script>`**，用瀏覽器開就會在 `file://` 的來源上跑；

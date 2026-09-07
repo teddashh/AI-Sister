@@ -280,8 +280,9 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   提供「不透明小窗」低功耗模式，透明模式的功耗列入 §2.3 電池預算量測。
 - 識別：Neutral 與四個 catalog 身分各有 day-one、離線、零資產的 code-native
   字母 fallback；Neutral 是預設。Release 1.0 提供 Aster／Cedar／Mira／Rook
-  catalog、立繪與固定語音。資產只能由使用者在看見
-  CDN host、實際大小與資料邊界後明確按下下載，整包驗證成功才原子啟用。
+  catalog、立繪與固定語音。資產只能由使用者在看見 `cdn.ted-h.com`、精確大小
+  73,261,088 bytes 與資料邊界後明確按下下載；desktop 才可對內嵌 allowlist 做一次
+  固定 GET，完整驗證成功才原子啟用。WebView 本身仍只有 IPC，CSP 不開 CDN。
 - 狀態表達（不彈窗）：`idle`（呼吸）／`paused`（閉眼 = capture 停）／
   `thinking`（微動）／`has-something`（微光 + 一個小點，像未讀）。
   點角色 → 一句本機 deterministic tap-line；不點不出聲。persona 不得影響答案、
@@ -377,8 +378,10 @@ a 類（顯式時間承諾）**——這兩類是「使用者自己能立刻驗�
 claude code / codex / grok / gemini cli。所以 L2/L3 那個腦要接的第一個東西
 **不是 HTTP client，也不是 secret-vault 裡的 API key**，是使用者已經裝好、
 已經登入、已經在付錢的那支 CLI。`sister` 用 `std::process::Command` spawn
-它：prompt 從 stdin 進、JSON 從 stdout 出。`check-no-network.sh` 繼續禁
-`reqwest`／`ureq`／本機推論引擎，沒有例外。
+它：prompt 從 stdin 進、JSON 從 stdout 出。`check-no-network.sh` 對 `sister.exe`、
+recorder／core／capture／brain／hands 繼續禁 HTTP client 與本機推論引擎，沒有
+例外。Persona 的下載能力收在 root workspace 的 `crates/sister-assets`：預設 feature
+集合沒有 `download`，只有 desktop 明確啟用；它不把 HTTP 能力交給 brain。
 
 - **這一版落地的**：`[brain] command` + `args`。沒設定就一次都不呼叫。
 - **還沒做的**：(a) 訂閱登入的 OAuth 輔助（MAT `signin.ts`）——使用者自己
@@ -395,7 +398,9 @@ claude code / codex / grok / gemini cli。所以 L2/L3 那個腦要接的第一�
 
 ### 11.1 三張同意書〔定案〕（onboarding 三個獨立開關，README 第一段公開承諾）
 
-1. **本機記錄**：我同意在我的硬碟上記錄我的螢幕（可全功能運作，永不聯網）。
+1. **本機記錄**：我同意在我的硬碟上記錄我的螢幕。這張只授權本機記錄，不授權
+   上傳畫面或文字；不簽第二張時 S1 仍可完全離線運作。Persona 的選配素材下載是
+   另一個當下揭露、當下按鈕，不藏在這張同意書裡。
 2. **上雲解讀**：我同意把**螢幕上的文字原文**（OCR 抽出來的字，永不含
    pixel）交給我在設定裡指定的本機 CLI，由那支程式去做解讀（預設關 →
    沒簽就一次都不 spawn）。
@@ -464,15 +469,33 @@ claude code / codex / grok / gemini cli。所以 L2/L3 那個腦要接的第一�
 **開放資料格式**：SQLite schema 公開文件化、`sister export` 全量匯出。S1 記憶功能
 與已下載素材不依賴我們的伺服器；Persona 首次取得固定 pack 需要使用者明確發起 CDN
 下載。就算本專案或 CDN 消失，既有記憶仍可讀、匯出，已驗本機素材也仍可用。
+素材 cache 固定在 `Config::default_data_dir()/persona-assets-v1`，不隨 `--data-dir`
+搬動，也不是記憶 export 的一部分；`sister forget`／`prune`／memory export 都不碰它，
+只有 Persona 撤回流程精準刪除該 release。
 
 ### 11.9 遙測
 
 **零遙測。** Release 1.0 不內建 Cloudflare D1 或其他 usage counter。Persona 的固定
-asset-pack GET 是使用者當下發起的內容下載，不是遙測；它仍須揭露 CDN 能看到的
-一般網路 metadata，且不得夾帶角色選擇、使用狀態或任何記憶內容。
-首版四位角色共用同一個 omnibus pack 與 exact hash path，切換 persona 不改 URL、
-header 或 body；未來若改成分包，必須先把 path 可透露哪一包寫進揭露，不能沿用
-「不帶角色選擇」的舊承諾。
+asset-pack GET 是使用者當下發起的內容下載，不是遙測；它仍須在按鈕前揭露 DNS／CDN
+能看到的一般網路 metadata：CDN 會看到來源 IP、時間、TLS、固定 host／path／headers。
+請求不得夾帶角色選擇、使用狀態、OCR、畫面、問題、答案、記憶 ID 或資料庫內容。
+首版四位角色共用同一個 omnibus pack 與 exact hash path，切換 persona 不改 method、
+URL、header 或 body；不 follow redirect、不走 proxy、不帶 cookie／credentials／
+authorization／referrer／query／body，不 retry，也不發 `HEAD` 或逐物件請求。未來若改成
+分包，必須先把 path 可透露哪一包寫進揭露，不能沿用「不帶角色選擇」的舊承諾。
+
+目前唯一 allowlist 是 `https://cdn.ted-h.com` 加上
+`/tokenmonster/characters/v1/packs/ai-sister-media-11-voice55-2026.07.23/7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30.zip`。
+compact embedded authority 只含 descriptor、exact origin/path allowlist、四位角色的
+selected public rights projection、八段選用聲音的核准逐字稿，以及完整 schema-v2
+manifest 的 canonical SHA-256
+`21e4675653ce66b50b61e91260f1623e6e3005177f900991e3a8eeadaf9e6474`，**不嵌入約
+2.1 MB 的完整 11 人 manifest**。descriptor cross-bind release ID、canonical manifest
+hash、73,261,088 bytes、946 entries 與 pack SHA-256
+`7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30`；整包 digest pin
+住 946 項，實際使用的 selected entries 另逐檔驗 size／hash／rights binding；只有
+renderer 顯示文字逐字等於 embedded transcript 的 line 才能進播放 allowlist。pack 中
+需要「今天滿有活力」前提的四段 `active` WAV 不在首版 selected set。
 
 ## §12. Replay 評測（第一級公民，不是附件）〔定案：全場唯一無異議的下一步〕
 
@@ -537,8 +560,9 @@ header 或 body；未來若改成分包，必須先把 path 可透露哪一包�
 | Pet overlay | always-on-top 透明無框窗 + `set_ignore_cursor_events` 動態 toggle（輪詢游標；Tauri 無 per-region hit-testing）| 已知坑：macOS production 透明窗 bug 群、全螢幕 space 需動 collectionBehavior、Wayland overlay 品質差 |
 | macOS 權限 | `tauri-plugin-macos-permissions` 2.3（Screen Recording 無 entitlement，純 TCC + hardened runtime + notarization；MAS 不可行，站外發行） | 開發期 `tccutil reset ScreenCapture` 測 onboarding |
 | hands | **Rust crate `sister-hands`**，CLI／desktop 共用 permit 與 target policy | 尚未做獨立 process；需要時另立 threat-model milestone |
+| Persona transport | root workspace 的 **`sister-assets`**；預設 feature 集合不含 `download`，desktop 才明確啟用 | API 不接受 renderer 傳入 URL／header／body／persona 或 memory；唯一 fixed GET 與 cache contract 見 §11.9 |
 | Schema | Rust serde DTO + 前端封閉集合檢查 | 沒有 Zod／codegen build step |
-| Persona assets | 本機 catalog + 每位的字母 fallback（Neutral 預設）；內容定址的固定 CDN pack、明確點擊、完整驗證後原子啟用 | recorder/core 保持零網路；下載邊界依 PHASES Release 1.0 合約 |
+| Persona assets | 本機 catalog + 每位的字母 fallback（Neutral 預設）；內容定址的固定 CDN pack、明確點擊、compact authority 驗證後原子啟用 | recorder/core 保持零網路；WebView CSP 不開 CDN；cache 在 default data dir 的 `persona-assets-v1`，不進 memory export／forget／prune |
 | hands 元件（Phase 6+） | Agent S3（Apache-2.0）/ UFO²（MIT）/ OmniParser v3 weights（MIT，避開舊 AGPL detector） | 「手」已商品化：用組的，不自己寫 grounding |
 | 參考不引用 | Screenpipe（2026-06 起自訂商業授權，僅參考架構；MIT fork point 在舊版）；Everywhere（BUSL，僅 MCP/API interop） | license 判定見 research/landscape.md |
 
@@ -555,9 +579,10 @@ always-on。capture 從 day 1 走 trait 抽象，但「介面同形」不等於�
 
 實際去看相依樹之後才發現的、選型當時不知道的事：
 
-1. **`oar-ocr` 的 `auto-download` 會把 `ureq` 連進執行檔。** 那是一個真的 HTTP
-   client，存在於出貨的二進位檔裡。PRIVACY.md 的第一句是「程式裡沒有任何對外
-   連線的程式碼路徑」——那句話要嘛是真的，要嘛不是。
+1. **`oar-ocr` 的 `auto-download` 會把 `ureq` 連進 recorder 執行檔。** 那是一個真的
+   HTTP client，而且會讓長時間看螢幕的 `sister.exe` 自己下載模型。PRIVACY.md 的
+   邊界是 recorder／core／capture／brain 沒有這種能力；Persona 後來獲准的 desktop
+   fixed-pack GET 不能拿來替 OCR 開例外。
 2. **`ort` 用 `copy-dylibs` 出貨 `onnxruntime.dll`**（~15MB）加上模型（~20MB），
    使用者要下載的就不再是一個檔案。目前 `sister.exe` 是 2.4MB 的單檔。
 3. **實作選型當時，Phase 0 寫下的驗收條件是 CPU < 3%、RAM < 400MB**，而

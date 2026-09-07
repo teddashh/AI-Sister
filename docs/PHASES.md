@@ -71,25 +71,48 @@
 - **不下載也完整可用**：每個 catalog 身分都有隨程式提供的 code-native 字母呈現，
   Neutral 是預設且永遠可選；使用者可關閉 Persona、留在 Neutral，或永遠不下載 pack，
   S1 記錄、查詢、出處、刪除與匯出都不能因此降級。
-- **網路一定由人開始**：catalog 與下載前揭露所需 metadata 隨程式留在本機；只有
-  使用者在揭露畫面上明確按下下載，程式才可第一次連 CDN。自動預抓、背景更新、
-  hover／開設定頁就連線都不算同意。
-- **按下下載前把邊界說完**：畫面先列出實際 CDN host、manifest 宣告的總下載大小，
-  以及會送出的資料邊界。asset request 不得夾帶 OCR、畫面、問題、答案、記憶 ID、
-  persona 選擇、使用狀態、資料庫內容或其他私人內容；host 能看見的網路傳輸 metadata
-  也不能被寫成「什麼都沒送」。首版四姊妹共用**同一個 omnibus pack、同一條 exact
-  hash path**，不因目前選誰而換 URL；若未來拆包，就必須先揭露 path 會暴露哪一包，
-  不能繼續宣稱 request 不帶角色選擇。
-  host、大小或邊界有一格未知就停在下載前，不用 `0` 或空字串冒充已知。
-- **驗證完才啟用**：正式簽章的 app 內嵌 public release manifest、descriptor 與
-  exact origin/path allowlist，三者的 release ID／canonical manifest hash／pack hash／
-  大小／物件集合必須互相綁定；它們就是固定 release 的 trust root，不再發明一把
-  沒有更新流程的第二套 manifest signing key。pack 本身與每個檔案仍逐一驗 hash／
-  大小，安裝／切換要原子化。缺檔、損毀或任一 binding 不符時不啟用半包，刪掉
-  staging，退回目前所選 persona 的 code-native 字母呈現；ID 不合法才回 Neutral。
+- **網路一定由人開始，而且能力只住一處**：catalog 與下載前揭露所需 metadata 隨程式
+  留在本機；只有使用者在揭露畫面上明確按下下載，desktop 才能叫一次 Persona
+  installer。自動預抓、背景更新、hover／開設定頁就連線都不算同意。HTTP transport
+  只准在 `crates/sister-assets` 的 `download` feature；root workspace 預設不開，只有
+  desktop 明確啟用。`sister.exe`、recorder／core／capture／brain／hands 與 WebView
+  都不能因此取得任意 HTTP 能力；CSP 仍只准 IPC，不加入 CDN。
+- **按下下載前把邊界說完**：畫面列出實際 host `cdn.ted-h.com`、精確大小
+  **73,261,088 bytes**，以及會送出的資料邊界。唯一獲准的網路動作是對內嵌 allowlist
+  那條 content-hash path 做至多一次固定 HTTPS `GET`；不跟 redirect、不走 proxy、
+  不帶 cookie／credentials／authorization／referrer／query／body，也不做 retry、`HEAD`
+  或逐物件請求。asset request 不得夾帶 OCR、畫面、問題、答案、記憶 ID、persona
+  選擇／狀態、資料庫內容或其他私人內容；四位切換時 method／URL／header／body 都相同。
+  DNS 與 CDN 仍能看見一般網路 metadata；CDN 會看見來源 IP、時間、TLS、固定 host／
+  path／headers，不能寫成「什麼都沒送」。host、大小或邊界有一格未知就停在下載前，
+  不用 `0` 或空字串冒充已知。首版 exact URL 是
+  `https://cdn.ted-h.com/tokenmonster/characters/v1/packs/ai-sister-media-11-voice55-2026.07.23/7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30.zip`。
+- **驗證完才啟用**：正式簽章的 app 內嵌的是 compact authority——descriptor、exact
+  origin/path allowlist、Aster／Cedar／Mira／Rook 的 selected public rights projection
+  與八段聲音的核准逐字稿，
+  以及完整 schema-v2 manifest 的 canonical SHA-256
+  `21e4675653ce66b50b61e91260f1623e6e3005177f900991e3a8eeadaf9e6474`；**不是**把約
+  2.1 MB 的完整 11 人 manifest 塞進執行檔。descriptor 把 release ID、canonical
+  manifest hash、73,261,088 bytes、946 entries 與整包 SHA-256
+  `7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30` 綁在一起；整包
+  hash pin 住 946 項，實際會呈現／播放的 selected entries 再逐檔對內嵌 projection
+  驗大小、hash、rights binding；renderer 顯示文字也要逐字等於該聲音的核准逐字稿。
+  這組 authority 是固定 release 的 trust root，不再
+  發明一把沒有更新流程的第二套 manifest signing key。ZIP 的 entry count／安全路徑／
+  regular-file 集合、大小與 hash 全部通過後才可啟用。
+- **cache 不是記憶**：未驗 response 不得成為可用檔；整包通過後，selected entries
+  才寫進 `Config::default_data_dir()/persona-assets-v1` 內的同檔案系統 staging，完整
+  重驗後原子 publish，73,261,088-byte ZIP 本身不留存。`--data-dir` 不搬它；memory
+  export、forget、prune 都不讀、不複製、
+  不刪這個目錄。Persona 的撤回才精準刪除該 release cache。全新下載若是半包、損毀
+  或 binding 不符，不建立 cache、回 `Available` 並顯示當次錯誤；既有 cache 缺檔／
+  損毀、殘留 staging 或撤回不完整才保持 `RepairNeeded`。兩者都退回目前所選 persona
+  的 code-native 字母呈現，且不自動重抓；ID 不合法才回 Neutral。
 - **聲音邊界固定**：1.0 只播放 pack 內預錄、固定且非敏感的台詞，且必須由使用者
   當下操作觸發；不因 capture、記憶或系統事件主動出聲，不把私人答案、OCR 或回憶
-  內容念出來，也不以 runtime TTS 繞過這條邊界。
+  內容念出來，也不以 runtime TTS 繞過這條邊界。現成 pack 的 `active` 台詞會斷言
+  「今天滿有活力」，而單純點角色沒有那份證據，所以 Release 1.0 的 click allowlist
+  明確不含那四段；首版每位使用兩句無條件成立的聲音，不拿假第三句湊數。
 - **權利先驗後說**：TokenMonster 現有 image+voice fixed pack 附有可公開嵌入的
   schema-v2 manifest；它投影每項資產的內容／品牌／聲音來源審查狀態與 public-use／
   redistribution 宣告。這證明公開 release metadata 存在，**不等於 AI-Sister 已完成
@@ -206,8 +229,10 @@ Wayland 才留到 P8／社群成熟化；Preview 的隱私與資料語意不因�
   而且第一批使用者手上已經有 claude code / codex / grok / gemini cli 了，本地模型
   （Ollama）是之後的事。所以 L2/L3 那個腦要接的第一個東西不是 HTTP client，是
   **使用者已經裝好、已經登入、已經在付錢的那支 CLI**。
-  這也順帶解掉了原本以為存在的衝突：走 CLI 就不需要把 HTTP client 拉進相依樹，
-  `check-no-network.sh` 不用開例外。（真正要重寫措辭的是別的地方：出去的是 OCR
+  這也順帶解掉了原本以為存在的衝突：走 CLI 就不需要把 HTTP client 拉進 brain／
+  recorder 的相依樹，這一側不開例外。Persona 的單一 fixed-pack transport 後來收在
+  預設無 `download` feature 的 `crates/sister-assets`，只由 desktop 明確啟用；它不是
+  brain 的通用網路能力。（真正要重寫措辭的是別的地方：出去的是 OCR
   抽出來的**字**，不是畫面——那是同意書 2 的事，等 L2/L3 開工再一起講清楚。）
 - Query log 開始累積（本機）：每次提問 + 點擊了哪個出處 = 未來題庫。再加一個
   他自己按的位元（`sister mark` / 答案底下那顆「這件事我本來已經忘了」）——那是
@@ -268,9 +293,11 @@ Wayland 才留到 P8／社群成熟化；Preview 的隱私與資料語意不因�
       畫面張數對畫面檔大小。字母人那幾頁（同意書、設定、時間軸兩段式刪除）在
       `?demo=1` 的無頭瀏覽器裡驗過版面與狀態轉換。
       **還缺的是真 Tauri 視窗上的那一遍**——那要在 Windows 上做，見驗收清單。
-      另外「離線」是預設：程式裡沒有 HTTP client（`check-no-network.sh` 每次
-      push 都在證明），畫面永不離開這台機器。簽了第二張同意書且設定了 CLI
-      之後，螢幕上的**字**（原文）才會交給那支本機行程。
+      另外「離線」是預設：root workspace 不開 `sister-assets/download`，`sister.exe`
+      與 recorder／core／capture／brain／hands 沒有 HTTP client，畫面永不離開這台
+      機器。desktop 也要等人看完揭露並明確按下載，才可走獨立的單次 Persona pack
+      GET；不下載不影響這條 S1 主流程。簽了第二張同意書且設定了 CLI 之後，螢幕上的
+      **字**（原文）才會交給那支本機行程。
 - [x] clone → 跑起來 < 10 分鐘（含 README quickstart 實測）。
       **實測 33 秒**（乾淨 `CARGO_HOME`：clone → 抓 108 MB 相依 → release build
       32 秒 → replay → 第一個 ★ 答案。16 核開發機；runner 約 2.1 倍）。這一條
@@ -449,15 +476,21 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
 - ⬜ **Persona Release 1.0 角色體驗（使用者可關閉／可不下載）**：
   - 隨程式提供離線 Neutral 與 Aster／Cedar／Mira／Rook 的 code-native 字母呈現，以及四姊妹的
     本機 catalog、選擇入口與可用角色呈現；不把尚未驗證的素材寫成已可發布。
-  - 四位每一位都至少有一幅已核准立繪，而且 UI 三句 fixed tap-line 都對得到已核准
+  - 四位每一位都至少有一幅已核准立繪，而且 UI 兩句 fixed tap-line 都對得到已核准
     的本機語音；不能用四個名字配一位角色的素材通過。
-  - 完成共用 omnibus 立繪／固定語音 asset-pack 的 end-to-end pipeline：本機揭露 → 使用者明確
-    點擊 → CDN 下載 → embedded authority cross-binding 與逐檔 hash／大小驗證 →
-    原子安裝／啟用；
+  - 完成共用 omnibus 立繪／固定語音 asset-pack 的 end-to-end pipeline：本機揭露
+    `cdn.ted-h.com`／73,261,088 bytes／資料邊界 → 使用者明確點擊 → 唯一固定 GET →
+    compact embedded authority cross-binding、整包 hash／大小／946 entry 驗證與
+    selected entries 逐檔 hash／大小／rights 驗證 → 原子安裝／啟用；
     任一步失敗就清掉 staging 並回到所選 persona 的字母呈現，不能留下半包。
-  - 下載前逐包列出實際 host、manifest 總大小與資料邊界；host／大小／邊界未知時
+  - 下載前逐包列出實際 host、精確 byte size 與資料邊界；host／大小／邊界未知時
     不連線。請求不得帶出 persona 選擇／狀態、OCR、畫面、問題、答案、記憶 ID 或
-    資料庫內容；四位切換不改 request URL／header／body。
+    資料庫內容；四位切換不改 request method／URL／header／body。redirect、proxy、
+    cookie／credentials／authorization、referrer、query、body、retry、`HEAD` 與逐物件
+    fetch 都拒絕；WebView CSP 不開 CDN。
+  - `crates/sister-assets` 預設 feature 集合無 download；只有 desktop 啟用。cache 固定在
+    `Config::default_data_dir()/persona-assets-v1`，memory export／forget／prune 不碰；
+    撤回只清 exact release，損毀／離線重開不自動 retry。
   - 語音只播由使用者當下操作觸發的固定非敏感台詞；不主動出聲、不朗讀私人答案、
     OCR 或回憶內容。CDN 是交付機制；角色的選擇、視覺、聲音與離線退路才是產品面。
   - 下載／修復／撤回 UX、鍵盤可及性、prefers-reduced-motion 與靜音都要真的可用；
@@ -466,6 +499,12 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
   - 每個發布 pack 都要通過 public rights/provenance manifest 審查；只嵌入公開安全
     projection，不把私下收據帶進 repo。現成 pack 可重用，但要先證明 AI-Sister
     內嵌的 authority、CDN bytes 與實際播放／呈現用的是同一版。
+  - ✅ alpha.102 已完成這一包的 AI-Sister selection review：四張 exact-hash WebP
+    逐角色打開確認，八段 exact-hash WAV 逐句對到顯示文字；public projection
+    的 public/commercial/modify/redistribute、brand/content/release 全部是 approved。
+    四段會斷言「今天滿有活力」的 `active` 聲音明確排除，不進 selected
+    projection、cache、IPC 或 click rotation。這項只完成內容／權利／接線審查；
+    底下真 Windows 的 GET、播放、撤回與 packet trace 仍是未實測。
 - 🔶 發布工程：安裝包／code signing／自動更新、single-instance、recorder
   watchdog/backoff、開機自啟、跨 capture／brain／hands 的 master stop、官網一頁，
   以及 Show HN / X 發文帶 benchmark 表。
@@ -510,12 +549,14 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
       pause／resume、跨 capture／brain／hands 的 master stop 在 Windows 正式 artifact
       上走完；隱私腳本與真 Windows smoke 都過。
 - [ ] Persona 產品面走完：離線 Neutral、四姊妹 catalog 與選擇入口可用；**每一位**
-      都實際呈現至少一幅通過發布審查的立繪，且三句 UI fixed tap-line 都能在當下
+      都實際呈現至少一幅通過發布審查的立繪，且兩句 UI fixed tap-line 都能在當下
       trusted click 後播放相符的已核准語音。共用 omnibus pack 經「本機揭露 →
-      明確點擊 → CDN → 驗證 → 原子啟用」完整跑通；切換角色不改網路請求。
+      明確點擊 → 單一 fixed GET → 驗證 → 原子啟用」完整跑通；切換角色不改網路請求，
+      任一額外 GET、redirect、proxy、credential/referrer/query/body 或 retry 都會失敗。
 - [ ] Persona 發布 gate 逐包通過 public rights/provenance manifest 與技術 manifest
-      驗證：允許用途／散布範圍、檔案 hash／大小與 embedded authority cross-binding
-      都可查；下載前顯示的 host、總大小、資料邊界和實際請求一致，未驗證的素材
+      驗證：selected projection 的允許用途／散布範圍、檔案 hash／大小，及 compact
+      embedded authority 對 canonical manifest hash、73,261,088-byte／946-entry pack 的
+      cross-binding 都可查；下載前顯示的 host、總大小、資料邊界和實際請求一致，未驗證的素材
       不進發布 catalog。拒絕下載、關閉、靜音、reduced-motion、撤回／精準清 cache、
       離線重開、損毀／修復路徑都實測；任何失敗 fail closed 回 code-native 字母呈現
       （非法 ID 回 Neutral）且 S1 完整。
@@ -546,9 +587,10 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
   **改成 Rust crate `crates/sister-hands/`，而且不移植 redaction。**
   去敏在 alpha.58 整個從產品拿掉了（「記憶是長期在本機資料庫裡的，
   要去敏的人就不會用」）——把一個已經拆掉的東西移植進來，會讓下一個讀
-  這份文件的人以為產品裡有它。Node sidecar 那一半：這個 repo 的
-  `check-no-network.sh` 連 HTTP client 都禁，一個 Node 行程買到的隔離
-  不如型別上的隘口，等真的需要行程隔離再說。
+  這份文件的人以為產品裡有它。Node sidecar 那一半：這個決定當時的
+  `check-no-network.sh` 對整個產品連 HTTP client 都禁；alpha.102 即使為 Persona
+  加了窄的 `sister-assets/download` capability，hands 這側仍不准用。一個 Node 行程
+  買到的隔離不如型別上的隘口，等真的需要行程隔離再說。
 - ✅ alpha.68 `suggest` 級：`Level::{Observe, Suggest}`、
   `Suggestion::{OpenUrl, OpenFile, FocusWindow}`、`execute_with()` 唯一隘口、
   `ActionLog`（JSONL，可回放）、`commitment_action::parse_allowed_next_step`。
@@ -871,10 +913,10 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     **第三種狀態不是預設值，是「還沒問過」。** 沒問到之前她不開，而且**講得出
     理由是「我還沒問你」而不是「你說了不要」**——這兩句話在畫面上必須分得開，
     否則這個設定自己就犯了這個 repo 一路在修的那顆「兩種 0」。
-    **不叫它「對外連結網路」**：她自己從來不連網（`check-no-network.sh` 守著，
-    整份 repo 沒有 HTTP client），問模型連網的是她 spawn 出來的 CLI agent
-    （`brain.rs:866`），而這一格連網的是**瀏覽器**。名詞要指動作，不是指網路，
-    否則那句核心承諾聽起來變得可以商量。
+    **不叫它「對外連結網路」**：這條 hands 能力自己沒有 HTTP client；問模型連網的
+    是她 spawn 出來的 CLI agent（`brain.rs:866`），而這一格連網的是**瀏覽器**。
+    desktop 另有一條只服務明確 Persona 下載點擊的 fixed-pack GET，不能拿那個窄例外
+    替 hands 開任意 URL client。名詞要指動作，不是把不同的網路邊界混成一格。
     **實作起點——而且第一個看起來對的機制是錯的。**
     `NeverInherited` 那五類看起來正好（拒絕路徑、bucket、每類一句話都寫好了），
     但 `never_inherited_refusal`（`semi_action.rs:1024`）**兩種批准來源都擋**：

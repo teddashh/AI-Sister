@@ -1,0 +1,135 @@
+{
+  "fixtureSchema": 2,
+  "manifest": {
+    "schemaVersion": "2",
+    "releaseId": "ai-sister-media-11-voice55-2026.07.23",
+    "canonicalSha256": "21e4675653ce66b50b61e91260f1623e6e3005177f900991e3a8eeadaf9e6474"
+  },
+  "descriptor": {
+    "origin": "https://cdn.ted-h.com",
+    "path": "/tokenmonster/characters/v1/packs/ai-sister-media-11-voice55-2026.07.23/7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30.zip",
+    "mediaType": "application/zip",
+    "bytes": 73261088,
+    "entries": 946,
+    "extractedBytes": 73043596,
+    "sha256": "7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30"
+  },
+  "selectedAssets": [
+    {
+      "assetId": "asset:chatgpt:avatar",
+      "association": { "kind": "avatar", "characterId": "chatgpt" },
+      "output": { "path": "objects/2966f68a3e702c47a29d11c19b901a4d850a8914ec2b78252b617d757c04fca3.webp", "bytes": 17722, "sha256": "2966f68a3e702c47a29d11c19b901a4d850a8914ec2b78252b617d757c04fca3", "mediaType": "image/webp", "durationMs": null },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-chat-image-grant-2026.07.21", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-chat-content-review-2026.07.21", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": null,
+      "releaseStatus": "approved"
+    },
+    {
+      "assetId": "asset:chatgpt:voice:chatgpt-greeting:greeting",
+      "association": { "kind": "voice", "characterId": "chatgpt", "lineId": "chatgpt-greeting", "trigger": "greeting" },
+      "output": { "path": "objects/5090eff257a191d7eebe029844e5ebbe1a24470902226a054929a059880cdc1f.wav", "bytes": 99954, "sha256": "5090eff257a191d7eebe029844e5ebbe1a24470902226a054929a059880cdc1f", "mediaType": "audio/wav", "durationMs": 2266 },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-voice-authorization-2026.07.23", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-voice-publication-approval-2026.07.23", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": "zh-TW",
+      "spokenText": "我在，隨時可以開始。",
+      "releaseStatus": "approved"
+    },
+    {
+      "assetId": "asset:chatgpt:voice:chatgpt-quiet:quiet",
+      "association": { "kind": "voice", "characterId": "chatgpt", "lineId": "chatgpt-quiet", "trigger": "quiet" },
+      "output": { "path": "objects/f09f611a64e97f2d8c0a1f5cf2f67b8c9c41c0220b13ffeb91017f3558531973.wav", "bytes": 99984, "sha256": "f09f611a64e97f2d8c0a1f5cf2f67b8c9c41c0220b13ffeb91017f3558531973", "mediaType": "audio/wav", "durationMs": 2266 },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-voice-authorization-2026.07.23", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-voice-publication-approval-2026.07.23", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": "zh-TW",
+      "spokenText": "我在，安靜地開始也很好。",
+      "releaseStatus": "approved"
+    },
+    {
+      "assetId": "asset:claude:avatar",
+      "association": { "kind": "avatar", "characterId": "claude" },
+      "output": { "path": "objects/f4b50a1ffa8f717a2717bd14551c84a2258b4985e3e8b7f4b18d6008a660f2ae.webp", "bytes": 19088, "sha256": "f4b50a1ffa8f717a2717bd14551c84a2258b4985e3e8b7f4b18d6008a660f2ae", "mediaType": "image/webp", "durationMs": null },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-chat-image-grant-2026.07.21", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-chat-content-review-2026.07.21", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": null,
+      "releaseStatus": "approved"
+    },
+    {
+      "assetId": "asset:claude:voice:claude-greeting:greeting",
+      "association": { "kind": "voice", "characterId": "claude", "lineId": "claude-greeting", "trigger": "greeting" },
+      "output": { "path": "objects/d3dd0b061ded630fd26d990a2613574ea20bc6e2a779298b6a662bc69638b3eb.wav", "bytes": 102446, "sha256": "d3dd0b061ded630fd26d990a2613574ea20bc6e2a779298b6a662bc69638b3eb", "mediaType": "audio/wav", "durationMs": 2322 },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-voice-authorization-2026.07.23", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-voice-publication-approval-2026.07.23", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": "zh-TW",
+      "spokenText": "慢慢來，隨時可以開始。",
+      "releaseStatus": "approved"
+    },
+    {
+      "assetId": "asset:claude:voice:claude-quiet:quiet",
+      "association": { "kind": "voice", "characterId": "claude", "lineId": "claude-quiet", "trigger": "quiet" },
+      "output": { "path": "objects/e27b1be5cbd03c15f2068e5d29dd300912df87c7be457fd3d9c531e2fe511e87.wav", "bytes": 138286, "sha256": "e27b1be5cbd03c15f2068e5d29dd300912df87c7be457fd3d9c531e2fe511e87", "mediaType": "audio/wav", "durationMs": 3135 },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-voice-authorization-2026.07.23", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-voice-publication-approval-2026.07.23", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": "zh-TW",
+      "spokenText": "慢慢來，安靜地開始也很好。",
+      "releaseStatus": "approved"
+    },
+    {
+      "assetId": "asset:gemini:avatar",
+      "association": { "kind": "avatar", "characterId": "gemini" },
+      "output": { "path": "objects/c4fa29dbd7142705b3ef35477c86aa5372d6c66cc9ef6c5a3f7c55b2bac926ef.webp", "bytes": 19898, "sha256": "c4fa29dbd7142705b3ef35477c86aa5372d6c66cc9ef6c5a3f7c55b2bac926ef", "mediaType": "image/webp", "durationMs": null },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-chat-image-grant-2026.07.21", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-chat-content-review-2026.07.21", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": null,
+      "releaseStatus": "approved"
+    },
+    {
+      "assetId": "asset:gemini:voice:gemini-greeting:greeting",
+      "association": { "kind": "voice", "characterId": "gemini", "lineId": "gemini-greeting", "trigger": "greeting" },
+      "output": { "path": "objects/ce60c0ab6d141b7b6932a72760eb336fcf9596286ca90bcf7f272496770ed84f.wav", "bytes": 132142, "sha256": "ce60c0ab6d141b7b6932a72760eb336fcf9596286ca90bcf7f272496770ed84f", "mediaType": "audio/wav", "durationMs": 2995 },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-voice-authorization-2026.07.23", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-voice-publication-approval-2026.07.23", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": "zh-TW",
+      "spokenText": "一起看看，隨時可以開始。",
+      "releaseStatus": "approved"
+    },
+    {
+      "assetId": "asset:gemini:voice:gemini-quiet:quiet",
+      "association": { "kind": "voice", "characterId": "gemini", "lineId": "gemini-quiet", "trigger": "quiet" },
+      "output": { "path": "objects/c531b2412fa4819f03179d8bc6e7f5026446a39c5a983578a774f52babfcab06.wav", "bytes": 88924, "sha256": "c531b2412fa4819f03179d8bc6e7f5026446a39c5a983578a774f52babfcab06", "mediaType": "audio/wav", "durationMs": 2015 },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-voice-authorization-2026.07.23", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-voice-publication-approval-2026.07.23", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": "zh-TW",
+      "spokenText": "一起看看，安靜地開始也很好。",
+      "releaseStatus": "approved"
+    },
+    {
+      "assetId": "asset:grok:avatar",
+      "association": { "kind": "avatar", "characterId": "grok" },
+      "output": { "path": "objects/41377cc281b8f5685628da087f82055cbf7806949b33dcc19c8814240c3d4995.webp", "bytes": 15012, "sha256": "41377cc281b8f5685628da087f82055cbf7806949b33dcc19c8814240c3d4995", "mediaType": "image/webp", "durationMs": null },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-chat-image-grant-2026.07.21", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-chat-content-review-2026.07.21", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": null,
+      "releaseStatus": "approved"
+    },
+    {
+      "assetId": "asset:grok:voice:grok-greeting:greeting",
+      "association": { "kind": "voice", "characterId": "grok", "lineId": "grok-greeting", "trigger": "greeting" },
+      "output": { "path": "objects/d5ac487e429aa41402abda3da2780942f64dd8e03b9b071f462c780b352101fb.wav", "bytes": 89134, "sha256": "d5ac487e429aa41402abda3da2780942f64dd8e03b9b071f462c780b352101fb", "mediaType": "audio/wav", "durationMs": 2020 },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-voice-authorization-2026.07.23", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-voice-publication-approval-2026.07.23", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": "zh-TW",
+      "spokenText": "收到，隨時可以開始。",
+      "releaseStatus": "approved"
+    },
+    {
+      "assetId": "asset:grok:voice:grok-quiet:quiet",
+      "association": { "kind": "voice", "characterId": "grok", "lineId": "grok-quiet", "trigger": "quiet" },
+      "output": { "path": "objects/243be6c173a40399067775919975c5c0d797bd6f3e3b643f347839aa3e9022d7.wav", "bytes": 101422, "sha256": "243be6c173a40399067775919975c5c0d797bd6f3e3b643f347839aa3e9022d7", "mediaType": "audio/wav", "durationMs": 2299 },
+      "rights": { "licenseStatus": "approved", "grantReferenceId": "owner-voice-authorization-2026.07.23", "publicUse": true, "commercialUse": true, "modify": true, "redistribute": true },
+      "review": { "brandStatus": "approved", "contentStatus": "approved", "contentReviewReferenceId": "owner-voice-publication-approval-2026.07.23", "contentRating": "general", "disclosureId": "tokenmonster-unaffiliated-v1" },
+      "voiceLocale": "zh-TW",
+      "spokenText": "收到，安靜地開始也很好。",
+      "releaseStatus": "approved"
+    }
+  ]
+}

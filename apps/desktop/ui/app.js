@@ -56,9 +56,10 @@ const urlPolicyResult = document.querySelector("[data-url-policy-result]");
 /**
  * 這是完整 allowlist，不是 prompt。
  *
- * Aster／Cedar／Mira／Rook 的 provider ID、alias、glyph、tagline 與三句 greeting
- * 沿用既有 TokenMonster catalog。上游 fixed-line builder 本來就是
- * `角色 lead + greeting copy`，所以這裡的文字與 content ID 是同一份；沒有把
+ * Aster／Cedar／Mira／Rook 的 provider ID、alias、glyph、palette 與兩句 tap-line
+ * 沿用既有 TokenMonster catalog；tagline 只描述畫面上看得到的配色與固定開場語。
+ * 顯示文字逐字對應已核准 WAV 的 spoken transcript；installed metadata 不同時
+ * renderer 會拒絕把那句列入 voice allowlist。沒有把
  * personaContext 接進 `ask()`，因為角色
  * 口吻不能改寫一個可查證答案的事實或安全邊界。每句只會從 avatar 的 click
  * handler 出現，沒有 idle／開場／timer trigger。
@@ -68,17 +69,12 @@ function fixedTaps(id, lead) {
     Object.freeze({
       id: `fixed-line/1.0.0/${id}/zh-TW/greeting/general`,
       voiceLineId: `${id}-greeting`,
-      text: `${lead} 隨時可以開始。`,
-    }),
-    Object.freeze({
-      id: `fixed-line/1.0.0/${id}/zh-TW/greeting/active`,
-      voiceLineId: `${id}-active`,
-      text: `${lead} 可以照自己的步調探索。`,
+      text: `${lead}，隨時可以開始。`,
     }),
     Object.freeze({
       id: `fixed-line/1.0.0/${id}/zh-TW/greeting/quiet`,
       voiceLineId: `${id}-quiet`,
-      text: `${lead} 安靜地開始也很好。`,
+      text: `${lead}，安靜地開始也很好。`,
     }),
   ]);
 }
@@ -121,37 +117,37 @@ const PERSONA_CATALOG = Object.freeze({
     id: "chatgpt",
     alias: "Aster",
     glyph: "T",
-    tagline: "沉著務實，會把選項整理清楚，陪你照自己的步調決定。",
+    tagline: "深藍與薄荷綠；固定台詞用「我在」開場。",
     inspiredBy: "ChatGPT",
     palette: { background: "#0B1F33", foreground: "#F8FAFC", accent: "#5EEAD4" },
-    taps: fixedTaps("chatgpt", "我在。"),
+    taps: fixedTaps("chatgpt", "我在"),
   }),
   claude: profile({
     id: "claude",
     alias: "Cedar",
     glyph: "C",
-    tagline: "溫柔細膩，願意留白，也陪你慢慢想清楚每個細節。",
+    tagline: "深綠與淡綠；固定台詞用「慢慢來」開場。",
     inspiredBy: "Claude",
     palette: { background: "#12372A", foreground: "#F8FAFC", accent: "#A7F3D0" },
-    taps: fixedTaps("claude", "慢慢來。"),
+    taps: fixedTaps("claude", "慢慢來"),
   }),
   gemini: profile({
     id: "gemini",
     alias: "Mira",
     glyph: "G",
-    tagline: "好奇敏銳，喜歡發現日常模式，從不替你的節奏打分。",
+    tagline: "深藍與淡紫；固定台詞用「一起看看」開場。",
     inspiredBy: "Gemini",
     palette: { background: "#172554", foreground: "#F8FAFC", accent: "#A5B4FC" },
-    taps: fixedTaps("gemini", "一起看看。"),
+    taps: fixedTaps("gemini", "一起看看"),
   }),
   grok: profile({
     id: "grok",
     alias: "Rook",
     glyph: "X",
-    tagline: "直率活潑，帶點玩心，給你輕快但不催促的陪伴。",
+    tagline: "深棕與淡黃；固定台詞用「收到」開場。",
     inspiredBy: "Grok",
     palette: { background: "#3B1B0B", foreground: "#F8FAFC", accent: "#FDE68A" },
-    taps: fixedTaps("grok", "收到。"),
+    taps: fixedTaps("grok", "收到"),
   }),
 });
 
@@ -194,24 +190,30 @@ let personaVoiceEnabled = false;
 let nextTap = 0;
 let voiceRequest = 0;
 let personaRevision = 0;
-let localAssets = Object.freeze({
-  phase: "unavailable",
-  portrait: null,
-  voiceLineIds: new Set(),
-});
+
+function fallbackLocalAssets() {
+  return Object.freeze({ phase: "unavailable", portrait: null, voiceLineIds: new Set() });
+}
+
+let localAssets = fallbackLocalAssets();
 
 /**
  * Renderer 只接受後端已驗過的 portrait data URL 與 fixed-voice availability。
  *
- * `phase` 刻意保留 fixed-pack 的五態；這一版後端只會回 unavailable。未來 resolver
- * 接入後，遠端 URL／任意路徑仍過不了這裡。開場不拿 WAV bytes；voice 只回可用
+ * `phase` 刻意保留 fixed-pack 的六態（含未提供與刪除中）。遠端 URL／任意路徑
+ * 仍過不了這裡。開場不拿 WAV bytes；voice 只回可用
  * line ID，等 trusted click 當下再向 Rust 取那一條。顯示台詞的版本 ID 與公開素材
  * manifest ID 是兩個命名空間，不能混成一格，更不能拿語音路徑朗讀私人文字。
  */
 function resolveLocalAssets(view, persona) {
-  const phase = ["unavailable", "available", "installing", "repair-needed", "installed"].includes(
-    view?.phase,
-  )
+  const phase = [
+    "unavailable",
+    "available",
+    "installing",
+    "removing",
+    "repair-needed",
+    "installed",
+  ].includes(view?.phase)
     ? view.phase
     : "unavailable";
   if (phase !== "installed") {
@@ -228,7 +230,12 @@ function resolveLocalAssets(view, persona) {
   );
   const voiceLineIds = new Set();
   for (const voice of Array.isArray(view?.voice_lines) ? view.voice_lines : []) {
-    if (allowed.has(voice?.line_id) && Number.isInteger(voice?.duration_ms)) {
+    const tap = persona.taps.find((line) => line.voiceLineId === voice?.line_id);
+    if (
+      allowed.has(voice?.line_id) &&
+      Number.isInteger(voice?.duration_ms) &&
+      voice?.spoken_text === tap?.text
+    ) {
       voiceLineIds.add(voice.line_id);
     }
   }
@@ -312,20 +319,30 @@ async function sayPersonaLine(event) {
   )
     return;
 
+  let voice;
   try {
-    const voice = await invoke("persona_voice_read", { lineId: line.voiceLineId });
-    if (
-      request !== voiceRequest ||
-      voice?.line_id !== line.voiceLineId ||
-      typeof voice?.data_url !== "string" ||
-      !voice.data_url.startsWith("data:audio/wav;base64,")
-    )
-      return;
-    personaAudio.currentTime = 0;
-    personaAudio.src = voice.data_url;
+    voice = await invoke("persona_voice_read", { lineId: line.voiceLineId });
+  } catch {
+    // 安裝後的 cache 也可能被截斷或換掉。重讀 native resolver，讓它在驗證失敗時
+    // 把已載入的 portrait 與 voice allowlist 一起退回字母，而不是只吞掉這次聲音。
+    readPersona();
+    return;
+  }
+  if (
+    request !== voiceRequest ||
+    voice?.line_id !== line.voiceLineId ||
+    typeof voice?.data_url !== "string" ||
+    !voice.data_url.startsWith("data:audio/wav;base64,")
+  ) {
+    readPersona();
+    return;
+  }
+  personaAudio.currentTime = 0;
+  personaAudio.src = voice.data_url;
+  try {
     await personaAudio.play?.();
   } catch {
-    // 固定聲音是選配表達層；讀不到或 WebView 拒播不能把搜尋／錄製一起拖垮。
+    // WebView 拒絕播放不代表本機 cache 壞了；保留固定台詞與已驗證立繪。
   }
 }
 
@@ -1250,6 +1267,24 @@ globalThis.__TAURI__?.event
   ?.listen?.("persona-changed", (event) => {
     personaRevision += 1;
     applyPersona(event.payload);
+  })
+  ?.catch?.(() => {});
+
+/**
+ * 刪除素材的第一步，不等檔案真的刪完，也不依賴 config.toml 還讀得出來。
+ *
+ * 後端隨後仍會送完整的 `persona-changed`；這個窄事件只負責 fail closed：讓飛行中
+ * 的單條 WAV 回來也失效、停掉正在播的固定錄音、清掉立繪，並保留 activeProfile
+ * 的字母 fallback。它不改 persona 選擇，更不碰 ask／Gatekeeper／hands。
+ */
+globalThis.__TAURI__?.event
+  ?.listen?.("persona-media-stop", () => {
+    personaRevision += 1;
+    voiceRequest += 1;
+    clearPersonaLine();
+    localAssets = fallbackLocalAssets();
+    avatar.dataset.assetPack = localAssets.phase;
+    paintPersonaPortrait();
   })
   ?.catch?.(() => {});
 

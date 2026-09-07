@@ -24,6 +24,13 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
 
+      - name: Release version — workspaces, locks, Tauri config and tag agree
+        shell: bash
+        run: |
+          args=()
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then args+=(--tag "${GITHUB_REF_NAME}"); fi
+          python3 ./scripts/check-release-version.py "${args[@]}"
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -32,6 +39,27 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # sister-assets 的預設 feature 刻意沒有 HTTP client；因此 workspace test 不會
+      # 編譯、更不會執行 fixed transport seam。這一步只跑本機 fake transport，
+      # 不碰 CDN；真正的 native Windows GET 仍只在 tag gate 發生。
+      - name: Persona pack — fixed transport contract without network
+        run: cargo test -p sister-assets --features download
+
+      # runtime 只內嵌 compact projection；tag 出貨前仍拿完整 public manifest
+      # 重新算 canonical digest，並把實際用到的 12 項逐欄投影回 Rust authority。
+      - name: Persona authority — full public manifest still matches
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/asset-release-manifest-v2.json"
+          status=$(curl --silent --show-error --output "$manifest" --write-out '%{http_code}' \
+            --proto '=https' \
+            'https://cdn.ted-h.com/tokenmonster/characters/v1/releases/ai-sister-media-11-voice55-2026.07.23/asset-release-manifest-v2.json')
+          test "$status" = 200
+          AI_SISTER_PUBLIC_ASSET_MANIFEST="$manifest" \
+            cargo test -p sister-assets full_public_manifest_canonical_hash_and_projection_match -- --ignored
 
       # 核心同意文案在 core，與 onboarding 的三份開發示範逐字比對；撤回週期則從 ops.rs 的 CONSENT_EVERY 抽出秒數，
       # 再逐一比對五份使用者看得到的文案，避免畫面、說明與真正執行的契約各說各話。
@@ -42,12 +70,10 @@ jobs:
       - name: Privacy — sensitive content must never reach disk
         run: cargo test -p sister-capture --test privacy -- --nocapture
 
-      # PRIVACY.md 說「整個 repo 搜不到 HTTP client」。這一步讓那句話由 CI
-      # 保證，而不是由記性保證——缺口通常是相依套件帶進來的，不是人手動加的。
-      # 同一支腳本也守「沒有內建推論引擎」與「沒有監聽埠」
-      # （`TcpListener` 只用 std，一個相依都不會多）。它不替 cloud-reading
-      # 交給使用者設定之外部 CLI 的後續網路行為背書。
-      - name: Privacy — no HTTP client, no inference engine, no socket
+      # root/recorder/core/brain/hands 仍零 client；desktop 唯一例外只能是
+      # sister-assets[download] 的 fixed Persona GET。另守沒有內建推論引擎、
+      # raw socket／監聽埠與 renderer 遠端來源；外部 CLI 是另一個邊界。
+      - name: Privacy — only the fixed Persona GET may use a client
         run: ./scripts/check-no-network.sh
 
       # L2 出境路徑。現行同意書 2 明講送的是螢幕原文，不承諾去敏；這一條守的是
@@ -328,6 +354,19 @@ jobs:
       # 這一步是 Linux 上做不到的事：Win32 程式碼真的被執行
       - name: Test
         run: cargo test --workspace
+
+      # fs4 鎖與 downloader feature 都要在真正 Windows 執行一次；這些測試使用
+      # 本機 fake transport，平常 push 不連 CDN。
+      - name: Persona pack — Windows cache and fixed transport contract
+        run: cargo test -p sister-assets --features download
+
+      # Linux 上用同一支 client 跑過仍不代表 Windows native-tls provider 真能握手。
+      # tag 才做這一個 fixed GET；測試自己要求明確環境旗標，平常 test 不會連網。
+      - name: Persona pack — native Windows fixed GET, verify, install, remove
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          AI_SISTER_ALLOW_ASSET_NETWORK: "1"
+        run: cargo test -p sister-assets --features download fixed_network_path_downloads_validates_installs_and_removes -- --ignored --nocapture
 
       # runner 預設只有英文 OCR，於是「中文會不會被逐字切開」這一題永遠停在
       # 「跳過」——而那是這個產品的主要語言。裝上繁中語言包讓它真的被驗到。
@@ -833,17 +872,107 @@ jobs:
           ./scripts/release-notes.sh "${GITHUB_REF_NAME}" > notes.md
           cat notes.md
 
-      - uses: softprops/action-gh-release@v2
+      # alpha 是 prerelease；softprops v2 對 prerelease 不會自動先藏成 draft。若直接
+      # 發布再上傳，第二個 asset 的 API 失敗會在外面留下一份只有半套 exe 的 release。
+      # 這裡先固定成不可見 draft；下一步從同一個 release ID 讀回、下載並逐 byte 驗完
+      # 兩個遠端 asset，最後一個 API 呼叫才公開。
+      - name: Create draft release and upload both executables
+        id: create_release
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             sister.exe
             sister-desktop.exe
-          # 預設是 false，也就是**上面兩行有一行對不到檔案的時候，它會照樣發
-          # 一個少一半的 release，而且是綠的**。現在真正擋著這件事的是上游那
-          # 兩個 `download-artifact`（artifact 不在就會紅）加上兩個
-          # `if-no-files-found: error`——三層裡有兩層在別的 job 上，而這一步
-          # 自己不會說話。一個發出去了、少一個執行檔、conclusion 寫著
-          # success 的 release，正是這個 repo 一路在修的那種東西。
+          # 預設 false 只會警告 unmatched local glob；它也管不到「第一個遠端 upload
+          # 成功、第二個失敗」。這裡先讓本機缺檔必紅，遠端 partial 則由 draft +
+          # 下一步的 exact remote verification 隔離在公開 release 之外。
           fail_on_unmatched_files: true
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           body_path: notes.md
+
+      - name: Verify the exact remote assets, then publish the same release
+        id: publish_release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.create_release.outputs.id }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_ID"
+          test -s sister.exe
+          test -s sister-desktop.exe
+
+          release_api="repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}"
+          release_json="$RUNNER_TEMP/release-before-publish.json"
+          asset_plan="$RUNNER_TEMP/release-assets.tsv"
+          gh api "$release_api" > "$release_json"
+
+          # 先驗的是 GitHub 現在真正持有的 draft，不採信上一個 action 的輸入或 output
+          # asset list。名字、數量、uploaded state、非零大小與 tag 任一不符都停在 draft。
+          python3 - "$release_json" "$GITHUB_REF_NAME" > "$asset_plan" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release_path, expected_tag = sys.argv[1:]
+          release = json.loads(pathlib.Path(release_path).read_text(encoding="utf-8"))
+          if release.get("draft") is not True:
+              raise SystemExit("release 在遠端 asset 驗證前已經不是 draft")
+          if release.get("tag_name") != expected_tag:
+              raise SystemExit(
+                  f"release tag 不符：expected={expected_tag!r}, actual={release.get('tag_name')!r}"
+              )
+
+          assets = release.get("assets")
+          if not isinstance(assets, list):
+              raise SystemExit("GitHub release assets 不是 list")
+          expected_names = {"sister.exe", "sister-desktop.exe"}
+          names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
+          if len(assets) != 2 or len(names) != 2 or set(names) != expected_names:
+              raise SystemExit(f"遠端 release asset 必須恰為兩個 exe，實際：{names!r}")
+
+          for asset in sorted(assets, key=lambda item: item["name"]):
+              asset_id = asset.get("id")
+              size = asset.get("size")
+              state = asset.get("state")
+              url = asset.get("url")
+              if not isinstance(asset_id, int) or asset_id <= 0:
+                  raise SystemExit(f"{asset.get('name')} 沒有合法 asset id")
+              if not isinstance(size, int) or size <= 0:
+                  raise SystemExit(f"{asset.get('name')} 在遠端是空檔或沒有可驗大小")
+              if state != "uploaded":
+                  raise SystemExit(f"{asset.get('name')} 尚未 uploaded：{state!r}")
+              if not isinstance(url, str) or not url.startswith("https://"):
+                  raise SystemExit(f"{asset.get('name')} 沒有 HTTPS asset API URL")
+              print(f"{asset_id}\t{asset['name']}\t{size}")
+          PY
+
+          # 用 release asset API 把 draft 裡的兩檔真的讀回來；size 相等不代表內容相等，
+          # 所以最後仍和剛通過 Windows job 的本機 artifact 做 byte-for-byte compare。
+          while IFS=$'\t' read -r asset_id asset_name asset_size; do
+            downloaded="$RUNNER_TEMP/remote-${asset_name}"
+            gh api \
+              -H 'Accept: application/octet-stream' \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$downloaded"
+            test "$(wc -c < "$downloaded")" -eq "$asset_size"
+            cmp -- "$asset_name" "$downloaded"
+          done < "$asset_plan"
+
+          # JSON input 保留 boolean 型別；PATCH 是最後一步，所以它之前任何失敗都只會
+          # 留下不可見 draft。alpha tag 含連字號，正式版則不含。
+          prerelease=false
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=true; fi
+          publish_payload="$RUNNER_TEMP/release-publish.json"
+          python3 - "$prerelease" > "$publish_payload" <<'PY'
+          import json
+          import sys
+
+          json.dump(
+              {"draft": False, "prerelease": sys.argv[1] == "true"},
+              sys.stdout,
+              separators=(",", ":"),
+          )
+          PY
+          gh api --method PATCH "$release_api" --input "$publish_payload" >/dev/null

@@ -23,6 +23,10 @@ if [[ -z "$TAG" ]]; then
   echo "用法：$0 <tag>   例：$0 v0.1.0-alpha.68" >&2
   exit 2
 fi
+if [[ ! "$TAG" =~ ^v[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+  echo "::error::tag 不是可安全放進固定 GitHub blob link 的版本名：$TAG" >&2
+  exit 2
+fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/docs/RELEASE-NOTES.md"
@@ -57,7 +61,18 @@ fi
 
 THIS="$(section "$TAG")"
 
-printf '%s\n' "$OPENING"
+if grep -qF '**草稿：' <<<"$THIS"; then
+  echo "::error::$TAG 的 release notes 仍標成草稿；拒絕發布" >&2
+  exit 1
+fi
+
+# Release 頁必須指向這次實際出貨的文件，不可讓 main 日後改寫舊版合約。
+# TAG 已限制成不含 slash、空白或 sed replacement metacharacter 的安全集合。
+pin_release_links() {
+  sed "s#/blob/main/#/blob/$TAG/#g"
+}
+
+printf '%s\n' "$OPENING" | pin_release_links
 
 if [[ -z "${THIS//[[:space:]]/}" ]]; then
   # 沒寫就說沒寫。這裡**不可以**退回上一版的說明——那正是這支腳本要修掉的事。
@@ -73,7 +88,7 @@ commit 清單是這一版唯一的說明。
 EOF
   echo "::warning title=這一版沒有寫版本說明::docs/RELEASE-NOTES.md 裡沒有 ## $TAG，release 只會有 commit 清單" >&2
 else
-  printf '%s\n' "$THIS"
+  printf '%s\n' "$THIS" | pin_release_links
 fi
 
-printf '%s\n' "$CLOSING"
+printf '%s\n' "$CLOSING" | pin_release_links

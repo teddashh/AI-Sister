@@ -1,0 +1,26 @@
+[package]
+name = "sister-assets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "AI-Sister Persona 固定素材包的驗證、本機快取與受限下載邊界"
+publish = false
+
+[features]
+default = []
+# root workspace 與 recorder 不會打開這格；只有 desktop artifact 明確啟用。
+download = ["dep:ureq"]
+
+[dependencies]
+fs4.workspace = true
+getrandom.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+ureq = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true

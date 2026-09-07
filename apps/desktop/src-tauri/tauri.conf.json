@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AI-Sister",
-  "version": "0.1.0-alpha.101",
+  "version": "0.1.0-alpha.102",
   "identifier": "com.ted-h.ai-sister",
   "build": {
     "frontendDist": "../ui"
@@ -38,6 +38,6 @@
     ],
     "copyright": "Copyright (c) Ted Huang",
     "shortDescription": "一個住在你螢幕角落的字母人",
-    "longDescription": "AI-Sister 桌面外殼：本機記憶的搜尋框與字母人。畫面像素不離機；桌面殼沒有 HTTP client。"
+    "longDescription": "AI-Sister 桌面外殼：本機記憶的搜尋框與字母人。畫面像素不離機；WebView 只走 IPC，Persona 素材只在明確揭露與點擊後由原生端固定下載。"
   }
 }

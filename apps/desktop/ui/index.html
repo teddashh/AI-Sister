@@ -37,7 +37,7 @@
            否則瀏覽器合成的 click 會讓一個按鍵說兩句。 -->
       <button class="avatar" data-avatar type="button">
         <span class="face">
-          <!-- fixed pack 尚未接入時永遠 hidden；字母 fallback 不依賴它。 -->
+          <!-- 只有 native resolver 驗過 fixed pack 才顯示；字母 fallback 不依賴它。 -->
           <img class="portrait" data-persona-portrait alt="" draggable="false" hidden />
           <span class="glyph" data-persona-glyph>S</span>
         </span>
