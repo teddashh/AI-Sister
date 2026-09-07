@@ -361,9 +361,10 @@ jobs:
         run: cargo test -p sister-assets --features download
 
       # Linux 上用同一支 client 跑過仍不代表 Windows native-tls provider 真能握手。
-      # tag 才做這一個 fixed GET；測試自己要求明確環境旗標，平常 test 不會連網。
+      # tag 或人工 dispatch 才做這一個 fixed GET；後者讓發版前能先驗 Windows native
+      # TLS。測試自己仍要求明確環境旗標，平常 push/test 不會連網。
       - name: Persona pack — native Windows fixed GET, verify, install, remove
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         env:
           AI_SISTER_ALLOW_ASSET_NETWORK: "1"
         run: cargo test -p sister-assets --features download fixed_network_path_downloads_validates_installs_and_removes -- --ignored --nocapture

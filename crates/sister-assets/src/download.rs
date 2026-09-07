@@ -4,10 +4,12 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use ureq::ResponseExt;
-use ureq::tls::{TlsConfig, TlsProvider};
+use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
 use crate::cache::{InstallTransaction, begin_install, install_from_bytes_in_transaction};
-use crate::{Error, InstallOutcome, PACK_BYTES, PACK_MEDIA_TYPE, PACK_URL, Result};
+use crate::{
+    DownloadFailure, Error, InstallOutcome, PACK_BYTES, PACK_MEDIA_TYPE, PACK_URL, Result,
+};
 
 const USER_AGENT: &str = "AI-Sister-Persona-Assets/1";
 const READ_CHUNK_BYTES: usize = 64 * 1024;
@@ -73,6 +75,11 @@ impl NativeTransport {
             .tls_config(
                 TlsConfig::builder()
                     .provider(TlsProvider::NativeTls)
+                    // NativeTls means the OS owns certificate verification. Explicitly retain
+                    // its trust store too: ureq otherwise disables Schannel's built-in roots and
+                    // replaces them with WebPKI roots, a configuration that failed before the
+                    // first response on the GitHub Windows runner.
+                    .root_certs(RootCerts::PlatformVerifier)
                     .build(),
             )
             .timeout_connect(Some(Duration::from_secs(15)))
@@ -102,7 +109,7 @@ impl Transport for NativeTransport {
         let response = self
             .agent
             .run(fixed_pack_request())
-            .map_err(|_| Error::DownloadUnavailable)?;
+            .map_err(|error| Error::DownloadUnavailable(classify_transport_error(&error)))?;
         let status = response.status().as_u16();
         let final_url = response.get_uri().to_string();
         let content_type = response
@@ -128,6 +135,25 @@ impl Transport for NativeTransport {
             content_length,
             body: Box::new(response.into_body().into_reader()),
         })
+    }
+}
+
+fn classify_transport_error(error: &ureq::Error) -> DownloadFailure {
+    match error {
+        ureq::Error::HostNotFound => DownloadFailure::HostResolution,
+        ureq::Error::Tls(_)
+        | ureq::Error::NativeTls(_)
+        | ureq::Error::Pem(_)
+        | ureq::Error::Der(_) => DownloadFailure::Tls,
+        ureq::Error::Timeout(_) => DownloadFailure::Timeout,
+        ureq::Error::Io(_) | ureq::Error::ConnectionFailed => DownloadFailure::Connection,
+        ureq::Error::Protocol(_)
+        | ureq::Error::Http(_)
+        | ureq::Error::BadUri(_)
+        | ureq::Error::StatusCode(_)
+        | ureq::Error::RedirectFailed
+        | ureq::Error::TooManyRedirects => DownloadFailure::Protocol,
+        _ => DownloadFailure::Transport,
     }
 }
 
@@ -199,7 +225,7 @@ fn download_transaction(
         transaction.checkpoint(cancelled)?;
         let read = reader
             .read(&mut chunk)
-            .map_err(|_| Error::DownloadUnavailable)?;
+            .map_err(|_| Error::DownloadUnavailable(DownloadFailure::ResponseBody))?;
         if read == 0 {
             break;
         }
@@ -232,7 +258,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use ureq::config::AutoHeaderValue;
-    use ureq::tls::TlsProvider;
+    use ureq::tls::{RootCerts, TlsProvider};
 
     const TEST_RESPONSE: ExpectedResponse = ExpectedResponse {
         final_url: PACK_URL,
@@ -272,7 +298,7 @@ mod tests {
                 .lock()
                 .expect("fake transport lock")
                 .take()
-                .ok_or(Error::DownloadUnavailable)
+                .ok_or(Error::DownloadUnavailable(DownloadFailure::Transport))
         }
     }
 
@@ -376,11 +402,39 @@ mod tests {
         assert!(config.proxy().is_none());
         assert!(!config.http_status_as_error());
         assert_eq!(config.tls_config().provider(), TlsProvider::NativeTls);
+        assert!(matches!(
+            config.tls_config().root_certs(),
+            RootCerts::PlatformVerifier
+        ));
         assert_eq!(config.timeouts().connect, Some(Duration::from_secs(15)));
         assert_eq!(config.timeouts().global, Some(Duration::from_secs(180)));
         assert_provided_header(config.user_agent(), USER_AGENT);
         assert_provided_header(config.accept(), PACK_MEDIA_TYPE);
         assert_provided_header(config.accept_encoding(), "identity");
+    }
+
+    #[test]
+    fn transport_failures_keep_the_stage_without_exposing_request_data() {
+        assert_eq!(
+            classify_transport_error(&ureq::Error::HostNotFound),
+            DownloadFailure::HostResolution
+        );
+        assert_eq!(
+            classify_transport_error(&ureq::Error::Timeout(ureq::Timeout::Connect)),
+            DownloadFailure::Timeout
+        );
+        assert_eq!(
+            classify_transport_error(&ureq::Error::ConnectionFailed),
+            DownloadFailure::Connection
+        );
+        assert_eq!(
+            classify_transport_error(&ureq::Error::BadUri("fixed request".to_owned())),
+            DownloadFailure::Protocol
+        );
+        assert_eq!(
+            Error::DownloadUnavailable(DownloadFailure::Tls).to_string(),
+            "連不到固定素材下載主機（TLS 憑證驗證或握手失敗）"
+        );
     }
 
     #[test]

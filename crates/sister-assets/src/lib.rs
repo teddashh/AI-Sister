@@ -42,6 +42,33 @@ pub const fn disclosure() -> Disclosure {
     }
 }
 
+#[cfg(feature = "download")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadFailure {
+    HostResolution,
+    Tls,
+    Timeout,
+    Connection,
+    Protocol,
+    ResponseBody,
+    Transport,
+}
+
+#[cfg(feature = "download")]
+impl std::fmt::Display for DownloadFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::HostResolution => "主機名稱解析失敗",
+            Self::Tls => "TLS 憑證驗證或握手失敗",
+            Self::Timeout => "連線逾時",
+            Self::Connection => "網路連線失敗",
+            Self::Protocol => "HTTP 傳輸格式失敗",
+            Self::ResponseBody => "回應內容讀取失敗",
+            Self::Transport => "傳輸失敗",
+        })
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("素材包不是內嵌 authority 指定的 exact archive")]
@@ -59,8 +86,8 @@ pub enum Error {
     #[error("素材檔案 I/O 失敗：{0}")]
     Io(#[from] std::io::Error),
     #[cfg(feature = "download")]
-    #[error("連不到固定素材下載主機")]
-    DownloadUnavailable,
+    #[error("連不到固定素材下載主機（{0}）")]
+    DownloadUnavailable(DownloadFailure),
     #[cfg(feature = "download")]
     #[error("素材主機回了未允許的 HTTP 狀態：{0}")]
     UnexpectedStatus(u16),
