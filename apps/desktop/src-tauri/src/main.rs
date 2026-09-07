@@ -37,9 +37,9 @@ mod macos_ci;
 mod single_instance;
 
 #[cfg(any(windows, test))]
-use single_instance::{
-    ExistingInstanceReveal, RevealWindow, reveal_or_defer, take_deferred_reveal,
-};
+use single_instance::RevealWindow;
+#[cfg(windows)]
+use single_instance::{ExistingInstanceReveal, reveal_or_defer, take_deferred_reveal};
 
 /// 行動紀錄那一欄一次顯示幾列。
 ///
