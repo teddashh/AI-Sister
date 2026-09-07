@@ -161,10 +161,11 @@ def named_step(lines: list[str], name: str) -> list[str]:
     return lines[start:end]
 
 
-def check_tag_only_persona_gates(workflow_path: pathlib.Path) -> None:
-    """發版才可碰 CDN；這兩個 if 不能在改 CI 時悄悄掉下來。"""
+def check_persona_release_gates(workflow_path: pathlib.Path) -> None:
+    """完整 manifest 只在發版讀；fixed GET 另准人工發版前驗證。"""
     lines = workflow_path.read_text(encoding="utf-8").splitlines()
     tag_if = "startsWith(github.ref, 'refs/tags/v')"
+    tag_or_manual_if = f"{tag_if} || github.event_name == 'workflow_dispatch'"
 
     manifest = named_step(lines, "Persona authority — full public manifest still matches")
     if step_scalar(manifest, "if") != tag_if:
@@ -181,8 +182,8 @@ def check_tag_only_persona_gates(workflow_path: pathlib.Path) -> None:
     native_get = named_step(
         lines, "Persona pack — native Windows fixed GET, verify, install, remove"
     )
-    if step_scalar(native_get, "if") != tag_if:
-        fail("Persona native fixed GET 必須只在 v tag 執行")
+    if step_scalar(native_get, "if") != tag_or_manual_if:
+        fail("Persona native fixed GET 必須只在 v tag 或人工 workflow dispatch 執行")
     if nested_scalar(native_get, "env", "AI_SISTER_ALLOW_ASSET_NETWORK") != '"1"':
         fail("Persona native fixed GET 必須明確以 AI_SISTER_ALLOW_ASSET_NETWORK=1 解鎖")
     if step_scalar(native_get, "run") != (
@@ -363,7 +364,7 @@ def main() -> None:
 
     workflow = ROOT / ".github/workflows/ci.yml"
     check_atomic_release_workflow(workflow)
-    check_tag_only_persona_gates(workflow)
+    check_persona_release_gates(workflow)
 
     print(f"✓ Release 版號一致：v{root_version}（{len(observed)} 個位置）")
 
