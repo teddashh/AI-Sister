@@ -50,8 +50,14 @@ sister-assets = { path = "../../../crates/sister-assets", features = ["download"
 tauri-plugin-global-shortcut = "2"
 
 [target.'cfg(windows)'.dependencies]
+# startup guard 依照這個版本的 Windows WM_COPYDATA 協定轉交；更新時要連
+# `src/single_instance.rs` 的 names、dwData 和 payload 一起核對。
+tauri-plugin-single-instance = { version = "=2.4.4", default-features = false }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_DataExchange",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

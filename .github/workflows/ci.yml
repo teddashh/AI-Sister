@@ -346,6 +346,17 @@ jobs:
       - name: Root workspace compiles on the declared minimum
         run: cargo check --workspace --all-targets --locked
 
+      # generate_context 連 `cargo check` 都會先確認 Windows externalBin 的 suffixed
+      # path 存在；這格只驗 MSRV 型別，真正 bytes 由下面 Windows production job
+      # 綁定並裝進 NSIS。fresh runner 上造一個存在性 fixture，不冒充可執行檔。
+      - name: Prepare compile-only sidecar path for desktop MSRV
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path 'target/release' -Force | Out-Null
+          New-Item -ItemType File `
+            -Path 'target/release/sister-x86_64-pc-windows-msvc.exe' -Force | Out-Null
+
       - name: Desktop workspace compiles on the declared minimum
         if: runner.os == 'Windows'
         working-directory: apps/desktop/src-tauri
@@ -982,20 +993,323 @@ jobs:
 
       # 字母人是**另一個 workspace**（Tauri 在 Linux 上要 webkit2gtk，開發機
       # 沒有也裝不了——理由寫在它的 Cargo.toml），所以上面每一個 `--workspace`
-      # 都碰不到它。這裡在真 Windows 上 lint、執行 unit tests 並產 release；Linux
-      # 的 check-windows 只做跨平台 check/clippy，圖示資源也用假的 llvm-rc。
-      - name: 字母人 — lint, test and build
-        working-directory: apps/desktop/src-tauri
+      # 都碰不到它。這裡在真 Windows 上 lint、執行 unit tests，再用和 macOS job
+      # 相同的 pinned Tauri CLI 產生 desktop 與 NSIS；Linux 的 check-windows 只做
+      # 跨平台 check/clippy，圖示資源也用假的 llvm-rc。
+      - name: Install the pinned Tauri bundler for Windows
+        run: cargo install tauri-cli --version 2.11.4 --locked
+
+      # externalBin 接受的是沒有 target suffix 的 logical path，但 bundler 讀檔時會
+      # 加回 host triple。沒有這一份 exact copy，cargo build 出來的 sister.exe 雖在，
+      # 安裝包仍會因找不到 sister-x86_64-pc-windows-msvc.exe 而失敗；不能改成從 PATH
+      # 撿另一版 recorder。
+      - name: Installer sidecar — bind the exact recorder built above
+        shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $hostLine = rustc -vV | Select-String '^host: '
+          if ($hostLine.Line -ne 'host: x86_64-pc-windows-msvc') {
+            throw "NSIS artifact host 不符：$($hostLine.Line)"
+          }
+          $source = Resolve-Path 'target/release/sister.exe'
+          $bound = 'target/release/sister-x86_64-pc-windows-msvc.exe'
+          Copy-Item -LiteralPath $source -Destination $bound -Force
+          if ((Get-FileHash $source -Algorithm SHA256).Hash -ne
+              (Get-FileHash $bound -Algorithm SHA256).Hash) {
+            throw 'externalBin sidecar 不是這一輪通過 Windows smoke 的 exact sister.exe'
+          }
+
+      - name: 字母人 — lint, test and build NSIS
+        working-directory: apps/desktop/src-tauri
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo clippy --all-targets -- -D warnings
           cargo test --all-targets
-          cargo build --release
+          # rust-cache 可以帶回上一個版號的 bundle output；只清 generated NSIS
+          # directory，不碰 target 裡已編好的依賴或這輪剛綁定的 root sidecar。
+          rm -rf -- target/release/bundle/nsis
+          cargo tauri build --bundles nsis --ci -- --locked
+
+      # Tauri 的版本化檔名留在 build tree；對外只有一個固定名字，release job 才能
+      # 對「恰好三個 asset」做 exact set 驗證。不能用 glob 直接餵 release：舊 setup
+      # 若殘留在 cache，兩份都會被發出去，而下載頁看不出哪一份是真的。
+      - name: Installer — resolve one versioned output to the stable release name
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $config = Get-Content 'apps/desktop/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          $directory = 'apps/desktop/src-tauri/target/release/bundle/nsis'
+          $expected = Join-Path $directory "AI-Sister_$($config.version)_x64-setup.exe"
+          $outputs = @(Get-ChildItem -LiteralPath $directory -File -Filter '*.exe')
+          if ($outputs.Count -ne 1) {
+            throw "NSIS build 應恰有一個 exe，實際：$($outputs.Name -join ', ')"
+          }
+          if ($outputs[0].FullName -ne (Resolve-Path $expected).Path) {
+            throw "NSIS 檔名沒有綁到 Tauri 版本：$($outputs[0].Name)"
+          }
+          Copy-Item -LiteralPath $expected -Destination 'AI-Sister-Setup.exe'
+
+      # 這裡不是拿「bundle build 成功」冒充「使用者裝得起來」。同一台原生 Windows
+      # runner 真的安裝、啟動、再裝與移除，並分別讓 desktop 和 recorder 活著去撞
+      # installer。兩場都必須回固定非零，而且原行程仍活著；否則 Tauri 內建的
+      # KillProcess 會把「升級」做成強制砍掉錄製中的資料庫。
+      - name: Installer — install, single-instance, refuse live processes, reinstall, uninstall
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          $setup = (Resolve-Path 'AI-Sister-Setup.exe').Path
+          $installDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-smoke'
+          $dataDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-memory'
+          $configPath = Join-Path $env:RUNNER_TEMP 'ai-sister-installer.toml'
+          if ($installDir -match '\s' -or $dataDir -match '\s' -or $configPath -match '\s') {
+            throw 'NSIS /D 與 recorder smoke 使用的暫存路徑不可含空白'
+          }
+          if (Test-Path -LiteralPath $installDir) {
+            throw "installer smoke 起點不是 fresh install root：$installDir"
+          }
+
+          function Run-Setup([int] $expectedExit) {
+            $process = Start-Process -FilePath $setup `
+              -ArgumentList @('/S', '/NS', "/D=$installDir") -Wait -PassThru
+            if ($process.ExitCode -ne $expectedExit) {
+              throw "setup exit code 應為 $expectedExit，實際 $($process.ExitCode)"
+            }
+          }
+
+          function Assert-ProductFiles {
+            $names = @(Get-ChildItem -LiteralPath $installDir -File -Force |
+              ForEach-Object Name | Sort-Object)
+            $directories = @(Get-ChildItem -LiteralPath $installDir -Directory -Recurse -Force)
+            $expected = @('sister-desktop.exe', 'sister.exe', 'uninstall.exe') | Sort-Object
+            $difference = @(Compare-Object $expected $names)
+            if ($difference.Count -ne 0 -or $directories.Count -ne 0) {
+              throw "install root 不是 exact 三檔、零子目錄：files=$($names -join ', ') dirs=$($directories.FullName -join ', ')"
+            }
+          }
+
+          function Assert-Pe([string] $path, [int] $expectedMachine, [int] $expectedMagic) {
+            $bytes = [IO.File]::ReadAllBytes($path)
+            if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+              throw "$path 不是 MZ executable"
+            }
+            $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+            if ($pe -lt 0 -or $pe + 26 -gt $bytes.Length -or
+                $bytes[$pe] -ne 0x50 -or $bytes[$pe + 1] -ne 0x45 -or
+                $bytes[$pe + 2] -ne 0 -or $bytes[$pe + 3] -ne 0) {
+              throw "$path 沒有合法 PE header"
+            }
+            $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+            $magic = [BitConverter]::ToUInt16($bytes, $pe + 24)
+            if ($machine -ne $expectedMachine -or $magic -ne $expectedMagic) {
+              throw "$path PE kind 不符（machine=$machine magic=$magic；expected=$expectedMachine/$expectedMagic）"
+            }
+          }
+
+          Run-Setup 0
+          Assert-ProductFiles
+          $desktop = Join-Path $installDir 'sister-desktop.exe'
+          $sister = Join-Path $installDir 'sister.exe'
+          Assert-Pe $desktop 0x8664 0x20b
+          Assert-Pe $sister 0x8664 0x20b
+          # NSIS launcher 本身是 32-bit PE；檔名的 x64 指它攜帶的兩個 product payload。
+          Assert-Pe $setup 0x014c 0x10b
+          Assert-Pe (Join-Path $installDir 'uninstall.exe') 0x014c 0x10b
+          if ((Get-FileHash $sister -Algorithm SHA256).Hash -ne
+              (Get-FileHash 'target/release/sister.exe' -Algorithm SHA256).Hash) {
+            throw '安裝後的 sister.exe 不是這一輪通過 smoke 的 exact recorder'
+          }
+          if ((Get-FileHash $desktop -Algorithm SHA256).Hash -ne
+              (Get-FileHash 'apps/desktop/src-tauri/target/release/sister-desktop.exe' -Algorithm SHA256).Hash) {
+            throw '安裝後的 sister-desktop.exe 不是這一輪通過 test 的 exact desktop'
+          }
+          $version = (Get-Content 'apps/desktop/src-tauri/tauri.conf.json' -Raw |
+            ConvertFrom-Json).version
+          $reported = & $sister --version
+          if ($LASTEXITCODE -ne 0 -or $reported -ne "sister $version") {
+            throw "安裝後 recorder 版本不符：$reported"
+          }
+          $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AI-Sister'
+          $installed = Get-ItemProperty -LiteralPath $uninstallKey
+          if ($installed.DisplayVersion -ne $version -or
+              $installed.InstallLocation.Trim('"') -ne $installDir) {
+            throw 'current-user uninstall metadata 沒有對回 exact 版本與 install root'
+          }
+
+          # 第一個 owner 拿到 startup guard 後刻意停 5 秒，把官方 receiver 尚未建立的
+          # 真實競態放大成可觀察測試窗。四個 secondary 必須等 receiver、逐一交棒退出；
+          # 若只靠官方 plugin 的單次 FindWindow，它們會穿過 setup 留成四份 desktop。
+          $firstInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $firstInfo.FileName = $desktop
+          $firstInfo.UseShellExecute = $false
+          $firstInfo.EnvironmentVariables['AI_SISTER_DIAGNOSTIC_PRIMARY_DELAY_MS'] = '5000'
+          $first = [System.Diagnostics.Process]::Start($firstInfo)
+          if ($null -eq $first) { throw '第一個 installed desktop 無法啟動' }
+          $burst = @()
+          try {
+            $identifier = (Get-Content 'apps/desktop/src-tauri/tauri.conf.json' -Raw |
+              ConvertFrom-Json).identifier
+            $guardName = "Local\$identifier-startup-guard-v1"
+            $guardDeadline = [DateTime]::UtcNow.AddSeconds(10)
+            $guardSeen = $false
+            while (-not $guardSeen -and [DateTime]::UtcNow -lt $guardDeadline -and
+                   -not $first.HasExited) {
+              try {
+                $probe = [System.Threading.Mutex]::OpenExisting($guardName)
+                $probe.Dispose()
+                $guardSeen = $true
+              }
+              catch [System.Threading.WaitHandleCannotBeOpenedException] {
+                Start-Sleep -Milliseconds 25
+              }
+            }
+            if ($first.HasExited) { throw '第一個 installed desktop 沒有維持執行' }
+            if (-not $guardSeen) { throw "第一個 desktop 沒有建立 startup guard：$guardName" }
+
+            foreach ($attempt in 1..4) {
+              $burst += Start-Process -FilePath $desktop -PassThru
+            }
+            foreach ($secondary in $burst) {
+              if (-not $secondary.WaitForExit(30000)) {
+                throw "burst secondary PID $($secondary.Id) 沒有被 single-instance 邊界收掉"
+              }
+              if ($secondary.ExitCode -ne 0) {
+                throw "burst secondary PID $($secondary.Id) exit=$($secondary.ExitCode)，沒有成功交棒"
+              }
+            }
+            if ($first.HasExited) {
+              throw '啟動競態交棒後第一個 desktop 沒有原樣活著'
+            }
+            $samePath = @(Get-Process -Name 'sister-desktop' -ErrorAction SilentlyContinue |
+              Where-Object { $_.Path -eq $desktop })
+            if ($samePath.Count -ne 1 -or $samePath[0].Id -ne $first.Id) {
+              throw "burst 後 installed desktop 應恰有原本那一個 PID，實際：$($samePath.Id -join ', ')"
+            }
+
+            # hook 的 32 是「請先自己結束」；最重要的反面是 installer 沒替人 kill。
+            Run-Setup 32
+            Start-Sleep -Milliseconds 500
+            if ($first.HasExited) {
+              throw 'installer 宣稱拒絕，卻仍然殺掉了 desktop'
+            }
+          }
+          finally {
+            foreach ($secondary in $burst) {
+              if (-not $secondary.HasExited) {
+                Stop-Process -Id $secondary.Id -Force -ErrorAction SilentlyContinue
+                $secondary.WaitForExit()
+              }
+            }
+            if (-not $first.HasExited) {
+              Stop-Process -Id $first.Id -Force -ErrorAction SilentlyContinue
+              $first.WaitForExit()
+            }
+          }
+
+          New-Item -ItemType Directory -Path $dataDir | Out-Null
+          Set-Content -LiteralPath $configPath -Encoding ascii -Value @(
+            '[capture]',
+            'enabled = false'
+          )
+          & $sister --data-dir $dataDir consent --grant local-recording --grant frame-storage
+          if ($LASTEXITCODE -ne 0) { throw 'installer recorder smoke 簽同意書失敗' }
+          $recordOut = Join-Path $env:RUNNER_TEMP 'installer-record.out'
+          $recordErr = Join-Path $env:RUNNER_TEMP 'installer-record.err'
+          $recorder = Start-Process -FilePath $sister -ArgumentList @(
+            '--data-dir', $dataDir, '--config', $configPath,
+            'record', '--duration', '120'
+          ) -RedirectStandardOutput $recordOut -RedirectStandardError $recordErr -PassThru
+          try {
+            $beat = Join-Path $dataDir 'recording.beat'
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while (-not (Test-Path -LiteralPath $beat) -and
+                   [DateTime]::UtcNow -lt $deadline -and -not $recorder.HasExited) {
+              Start-Sleep -Milliseconds 250
+            }
+            if ($recorder.HasExited -or -not (Test-Path -LiteralPath $beat)) {
+              throw "installed recorder 沒有進入 live heartbeat：$(Get-Content $recordErr -Raw)"
+            }
+            Run-Setup 32
+            Start-Sleep -Milliseconds 500
+            if ($recorder.HasExited) {
+              throw 'installer 宣稱拒絕，卻仍然殺掉了 recorder'
+            }
+
+            # NSIS uninstaller 會先自我複製到 temp；外層 process 不保證轉交 inner
+            # SetErrorLevel，所以這裡不拿 wrapper exit code冒充 hook 結果。可驗的是
+            # PREUNINSTALL 真的 fail-closed：recorder 與 exact install root 都還在。
+            $liveUninstaller = Join-Path $installDir 'uninstall.exe'
+            $null = Start-Process -FilePath $liveUninstaller -ArgumentList '/S' -Wait -PassThru
+            Start-Sleep -Seconds 2
+            if ($recorder.HasExited) {
+              throw 'uninstaller 拒絕期間殺掉了 recorder'
+            }
+            Assert-ProductFiles
+            if (-not (Test-Path -LiteralPath $uninstallKey)) {
+              throw 'uninstaller 宣稱拒絕，卻移除了 HKCU uninstall metadata'
+            }
+
+            & $sister --data-dir $dataDir stop
+            if ($LASTEXITCODE -ne 0) { throw 'installed sister stop 失敗' }
+            if (-not $recorder.WaitForExit(30000)) {
+              throw 'installed recorder 沒有在 stop 後正常收工'
+            }
+            if ($recorder.ExitCode -ne 0) {
+              throw "installed recorder exit=$($recorder.ExitCode)：$(Get-Content $recordErr -Raw)"
+            }
+          }
+          finally {
+            if (-not $recorder.HasExited) {
+              Stop-Process -Id $recorder.Id -Force -ErrorAction SilentlyContinue
+              $recorder.WaitForExit()
+            }
+          }
+
+          # 同一份 setup 再跑一次，證明 install root 可以原地更新、外部記憶不被碰。
+          # `/S` 不會執行 NSIS page callback，因此這一場只叫同版 reinstall，不能拿它
+          # 冒充既有版本判斷，更不是下一版 old-binary → new-binary migration。
+          $db = Join-Path $dataDir 'sister.db'
+          if (-not (Test-Path -LiteralPath $db)) { throw 'recorder 沒有建立可保留的資料庫' }
+          $dbHash = (Get-FileHash $db -Algorithm SHA256).Hash
+          Run-Setup 0
+          Assert-ProductFiles
+          if ((Get-FileHash $db -Algorithm SHA256).Hash -ne $dbHash) {
+            throw 'installer reinstall 改動了 install root 之外的既有記憶資料庫'
+          }
+          $installed = Get-ItemProperty -LiteralPath $uninstallKey
+          if ($installed.DisplayVersion -ne $version) {
+            throw "reinstall 後 registry 版本不是 $version"
+          }
+
+          $uninstaller = Join-Path $installDir 'uninstall.exe'
+          $removed = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+          if ($removed.ExitCode -ne 0) { throw "uninstaller exit=$($removed.ExitCode)" }
+          $deadline = [DateTime]::UtcNow.AddSeconds(20)
+          while ((Test-Path -LiteralPath $installDir) -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+          }
+          if (Test-Path -LiteralPath $installDir) { throw 'uninstaller 沒移除 install root' }
+          if (Test-Path -LiteralPath $uninstallKey) { throw 'uninstaller 沒移除 HKCU uninstall metadata' }
+          if ((Get-FileHash $db -Algorithm SHA256).Hash -ne $dbHash) {
+            throw '移除程式連 install root 之外的記憶資料庫也刪／改了'
+          }
 
       - name: Upload ai-sister.exe
         uses: actions/upload-artifact@v4
         with:
           name: ai-sister-desktop-x64
           path: apps/desktop/src-tauri/target/release/sister-desktop.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload offline Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-sister-installer-x64
+          path: AI-Sister-Setup.exe
           if-no-files-found: error
           retention-days: 30
 
@@ -1015,6 +1329,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ai-sister-desktop-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai-sister-installer-x64
 
       # 在這一步之前，release 說明是這個檔案裡寫死的一塊 570 行的字，每出一版
       # 就往裡面疊一節「這一版：⋯⋯」然後**整塊**貼上去。到 alpha.67 為止，
@@ -1035,14 +1352,15 @@ jobs:
           cat notes.md
 
       # alpha 是 prerelease；softprops v2 對 prerelease 不會自動先藏成 draft。若直接
-      # 發布再上傳，第二個 asset 的 API 失敗會在外面留下一份只有半套 exe 的 release。
+      # 發布再上傳，後面的 asset API 失敗會在外面留下一份只有半套成品的 release。
       # 這裡先固定成不可見 draft；下一步從同一個 release ID 讀回、下載並逐 byte 驗完
-      # 兩個遠端 asset，最後一個 API 呼叫才公開。
-      - name: Create draft release and upload both executables
+      # 三個遠端 asset，最後一個 API 呼叫才公開。
+      - name: Create draft release and upload installer plus portable executables
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            AI-Sister-Setup.exe
             sister.exe
             sister-desktop.exe
           # 預設 false 只會警告 unmatched local glob；它也管不到「第一個遠端 upload
@@ -1063,6 +1381,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$RELEASE_ID"
+          test -s AI-Sister-Setup.exe
           test -s sister.exe
           test -s sister-desktop.exe
 
@@ -1090,10 +1409,10 @@ jobs:
           assets = release.get("assets")
           if not isinstance(assets, list):
               raise SystemExit("GitHub release assets 不是 list")
-          expected_names = {"sister.exe", "sister-desktop.exe"}
+          expected_names = {"AI-Sister-Setup.exe", "sister.exe", "sister-desktop.exe"}
           names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
-          if len(assets) != 2 or len(names) != 2 or set(names) != expected_names:
-              raise SystemExit(f"遠端 release asset 必須恰為兩個 exe，實際：{names!r}")
+          if len(assets) != 3 or len(names) != 3 or set(names) != expected_names:
+              raise SystemExit(f"遠端 release asset 必須恰為 setup 與兩個 portable exe，實際：{names!r}")
 
           for asset in sorted(assets, key=lambda item: item["name"]):
               asset_id = asset.get("id")
@@ -1111,7 +1430,7 @@ jobs:
               print(f"{asset_id}\t{asset['name']}\t{size}")
           PY
 
-          # 用 release asset API 把 draft 裡的兩檔真的讀回來；size 相等不代表內容相等，
+          # 用 release asset API 把 draft 裡的三檔真的讀回來；size 相等不代表內容相等，
           # 所以最後仍和剛通過 Windows job 的本機 artifact 做 byte-for-byte compare。
           while IFS=$'\t' read -r asset_id asset_name asset_size; do
             downloaded="$RUNNER_TEMP/remote-${asset_name}"

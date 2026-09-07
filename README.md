@@ -11,7 +11,10 @@
 **Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Persona
 的四張立繪、八段固定語音與 fixed CDN pack 也已接通，alpha.104 的發版 gate 在真
 Windows 走完下載、驗證、原子安裝與精準移除。真人設定頁／播放／撤回與 packet trace，
-以及正式安裝、簽章、升級工程仍未完成，所以現在還不是 Release 1.0。** Windows 10+
+仍未完成。alpha.106 candidate 已接上 Windows current-user 離線安裝包與
+single-instance，但真 Windows installer／tag gate 尚未回收；code signing、真舊版到
+新版的升級、開機自啟、watchdog 與跨層 master stop 也仍未完成，所以現在還不是
+Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
 
@@ -60,17 +63,27 @@ WAL 工作檔當成每天永久長大，所以**不拿來作 Phase 0 判決**；
 承諾表與 Gatekeeper，以及只做白名單動作的 hands 也已經接上；會把 OCR 原文交給模型的
 部分仍須第二張同意書與使用者自己設定好的 CLI，沒有就維持純本機檢索。
 
-Release 裡有**兩個**執行檔：
+alpha.106 candidate 的 Windows release contract 有一個預設入口與兩個 portable／診斷
+備用檔：
 
 | | 做什麼 |
 |---|---|
+| `AI-Sister-Setup.exe` | **一般使用者優先下載這個。** current-user NSIS 會把 exact `sister.exe` sidecar 和 WebView2 offline installer 一起帶進去；安裝本身不需連網，代價是安裝包會顯著變大，實際大小由 tag artifact 回報 |
 | `sister.exe` | 錄製、搜尋、重播評測與資料管理；也包含 `interpret`／`review`／`watch`、Gatekeeper 的 `speak`，以及 `do`／`hands`／`url-policy` 的行動與稽核入口 |
 | `sister-desktop.exe` | 桌面角落的字母人：錄製狀態、搜尋與可點開的出處、時間軸與刪除；也顯示目前推測、Gatekeeper 與 hands 建議，並主動詢問無人值守網址政策 |
 
+installer 沒有內建自動更新。升級時由使用者下載新 `AI-Sister-Setup.exe`，先自行結束
+desktop 並停止 recorder，再原地安裝；安裝檢查開始時已在執行的任一行程會讓這次操作
+拒絕，不會被 hook 強制關閉。alpha.106 尚未封住 hook 檢查後才啟動行程的窄競態：
+late desktop 仍可能被 Tauri 內建 silent check 強制關閉，late recorder 則可能讓安裝／
+移除只做一部分；現在也還沒有 code signing，Windows 可能顯示未簽章警告。
+
 ## 跑起來
 
-**Windows 10 以上**——[Releases](https://github.com/teddashh/AI-Sister/releases) 下載那兩個
-執行檔，放同一個資料夾（字母人是去隔壁找 `sister.exe` 的）。她要先拿到第一張
+**Windows 10 以上**——alpha.106 通過 tag gate 後，從
+[Releases](https://github.com/teddashh/AI-Sister/releases) 優先下載
+`AI-Sister-Setup.exe`；只想跑 CLI 或診斷 installer 問題時，仍可下載兩個 portable
+執行檔並放在同一個資料夾（字母人是去隔壁找 `sister.exe` 的）。她要先拿到第一張
 同意書才會動：
 
 ```
@@ -79,9 +92,13 @@ sister doctor
 sister record --duration 60
 ```
 
-然後開 `sister-desktop.exe` 問她剛剛那一分鐘發生了什麼，或者直接 `sister query 電話`。
+安裝版可直接開 AI-Sister；portable 版則開 `sister-desktop.exe`。然後問她剛剛那一分鐘
+發生了什麼，或者直接 `sister query 電話`。
 `doctor` 排在錄之前是有意的：它會當場示範這台機器**現在**讀不讀得到網址、
 OCR 有沒有裝、哪幾條排除規則其實不生效——比錄完 60 秒才發現什麼都沒進去好。
+
+Windows 上第二次開 `sister-desktop.exe` 只會請原本的字母人顯示並取得焦點；它不會
+再開一份，也不會因此停止或重啟 recorder。顯示／焦點本身仍列在下方真機人工確認。
 
 **目前可以在設定裡選 Neutral、Aster、Cedar、Mira 或 Rook，也可以關掉角色、
 動畫、點擊台詞或聲音。** 每位的字母、顏色與兩句固定文字仍隨程式離線提供；只有你

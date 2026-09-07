@@ -33,6 +33,13 @@ use tauri::{Manager, PhysicalPosition, WindowEvent};
 mod hands;
 #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
 mod macos_ci;
+#[cfg(any(windows, test))]
+mod single_instance;
+
+#[cfg(any(windows, test))]
+use single_instance::{
+    ExistingInstanceReveal, RevealWindow, reveal_or_defer, take_deferred_reveal,
+};
 
 /// 行動紀錄那一欄一次顯示幾列。
 ///
@@ -48,6 +55,43 @@ static ONBOARDING_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
 static TIMELINE_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
 static METRICS_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
 static FRAME_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static SECOND_INSTANCE_REVEAL_PENDING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(any(windows, test))]
+impl<R: tauri::Runtime> RevealWindow for tauri::WebviewWindow<R> {
+    fn reveal_show(&self) -> Result<(), String> {
+        self.show().map_err(|error| error.to_string())
+    }
+
+    fn reveal_focus(&self) -> Result<(), String> {
+        self.set_focus().map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(windows)]
+fn single_instance_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        // callback 是在**原本那個** app 裡執行；plugin 會讓後來的行程在 setup、
+        // tray 與 recorder ownership 建立前退出。這裡只把原視窗叫回來，絕不
+        // 呼叫 `app.exit`、`stop_recording` 或系統匣的 quit handler。
+        let window = app.get_webview_window(PET);
+        match reveal_or_defer(&SECOND_INSTANCE_REVEAL_PENDING, window.as_ref()) {
+            ExistingInstanceReveal::Revealed => {
+                tracing::info!("第二次啟動：原本的字母人已顯示並取得焦點")
+            }
+            ExistingInstanceReveal::Missing => {
+                tracing::info!("第二次啟動早於主視窗建立；setup 完成後再顯示並取得焦點")
+            }
+            ExistingInstanceReveal::ShowFailed(error) => {
+                tracing::error!("第二次啟動：原本的字母人顯示失敗：{error}")
+            }
+            ExistingInstanceReveal::FocusFailed(error) => {
+                tracing::error!("第二次啟動：原本的字母人已顯示，但取得焦點失敗：{error}")
+            }
+        }
+    })
+}
 
 /// 同一扇輔助視窗的非阻塞建立保留。
 ///
@@ -4015,6 +4059,40 @@ fn start_log_at(dir: &std::path::Path, name: &str) -> Option<std::fs::File> {
     std::fs::File::create(&path).ok()
 }
 
+fn initialize_logging(data_dir: Option<&PathBuf>) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "sister_desktop=info".into());
+    match start_log(data_dir) {
+        // 檔案裡不要 ANSI 跳脫碼，記事本打開會是一片亂碼。
+        Some(file) => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(Mutex::new(file))
+            .init(),
+        // 連資料目錄都問不出來就退回 stdout。開發時（有主控台）仍然看得到，
+        // 出貨時看不到——但那個情況下她本來也幾乎做不了任何事。
+        None => tracing_subscriber::fmt().with_env_filter(filter).init(),
+    }
+}
+
+/// 只替取得 primary 身分的 desktop 開記錄檔，而且要早於 Tauri 建視窗。
+///
+/// 放在一般 `.setup` 會漏掉「WebView 本身建不起來」；放回 `main` 則第二個
+/// instance 還沒被仲裁就會先把 primary 的 `desktop.log` 輪替掉。plugin 的註冊
+/// 順序因此是 startup guard → 官方 single-instance receiver → logging →
+/// 其他會碰產品狀態的 plugin。
+fn primary_logging_plugin<R: tauri::Runtime>(
+    data_dir: Option<PathBuf>,
+) -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("primary-logging")
+        .setup(move |_app, _api| {
+            initialize_logging(data_dir.as_ref());
+            tracing::info!("AI-Sister {} 起來了", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        })
+        .build()
+}
+
 fn main() {
     #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
     match macos_ci::requested_directory() {
@@ -4035,27 +4113,22 @@ fn main() {
     }
 
     let data_dir = sister_core::config::Config::default_data_dir();
-
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "sister_desktop=info".into());
-    match start_log(data_dir.as_ref()) {
-        // 檔案裡不要 ANSI 跳脫碼，記事本打開會是一片亂碼。
-        Some(file) => tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_ansi(false)
-            .with_writer(Mutex::new(file))
-            .init(),
-        // 連資料目錄都問不出來就退回 stdout。開發時（有主控台）仍然看得到，
-        // 出貨時看不到——但那個情況下她本來也幾乎做不了任何事。
-        None => tracing_subscriber::fmt().with_env_filter(filter).init(),
-    }
-    tracing::info!("AI-Sister {} 起來了", env!("CARGO_PKG_VERSION"));
     let state_path = data_dir
         .clone()
         .unwrap_or_else(std::env::temp_dir)
         .join("pet-window.json");
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(windows)]
+    // guard 必須是第一個 plugin，官方 receiver 緊接在後。後來那個行程要在
+    // 註冊熱鍵、setup 與任何產品狀態 mutation 之前退出；尤其不能建立一份
+    // 新的 desktop.log 把原本那輪改名。
+    let builder = builder
+        .plugin(single_instance::startup_guard_plugin())
+        .plugin(single_instance_plugin());
+
+    builder
+        .plugin(primary_logging_plugin(data_dir.clone()))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Shell {
             state: Mutex::new(bounds::load(&state_path).unwrap_or_default()),
@@ -4182,6 +4255,26 @@ fn main() {
                 state.y = place.y;
             }
             let _ = win.show();
+            #[cfg(windows)]
+            if let Some(outcome) =
+                take_deferred_reveal(&SECOND_INSTANCE_REVEAL_PENDING, &win)
+            {
+                match outcome {
+                    ExistingInstanceReveal::Revealed => {
+                        tracing::info!("開機中的第二次啟動請求已補做：字母人已顯示並取得焦點")
+                    }
+                    ExistingInstanceReveal::ShowFailed(error) => {
+                        tracing::error!("開機中的第二次啟動請求補做顯示失敗：{error}")
+                    }
+                    ExistingInstanceReveal::FocusFailed(error) => {
+                        tracing::error!("開機中的第二次啟動請求已顯示，但取得焦點失敗：{error}")
+                    }
+                    // 傳進去的是剛從 Tauri 取出的實體視窗，不會走這一臂。
+                    ExistingInstanceReveal::Missing => {
+                        tracing::error!("開機中的第二次啟動請求補做時，主視窗仍不存在")
+                    }
+                }
+            }
 
             // ---- 先去把資料庫打開 ----
             //

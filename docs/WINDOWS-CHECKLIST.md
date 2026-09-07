@@ -10,9 +10,10 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-下載 [Releases](https://github.com/teddashh/AI-Sister/releases) 最新一版的
-`sister.exe` 和 `sister-desktop.exe`，**放同一個資料夾**（字母人是去隔壁找
-`sister.exe` 的）。
+alpha.106 公開後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+下載 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
+installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
+**放同一個資料夾**（字母人是去隔壁找 `sister.exe` 的）。
 
 從 §1 開始，順序是有意的：底層錯了上面全部不用看。每一節開頭那句粗體字是
 「這一節在懷疑什麼」——不是懷疑功能沒寫，是懷疑它在真機器上的行為和我們以為
@@ -20,6 +21,24 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
+
+### alpha.106 先做兩段人工確認
+
+- **installer：** 先斷網再跑 `AI-Sister-Setup.exe`；WebView2 已內嵌，安裝不應要求
+  連線。開起來後再開一次，只能把原視窗叫回來，不能多一份 desktop，也不能讓
+  recorder 停掉。先讓 desktop／recorder 穩定活著，再各自重跑 installer：兩次都應
+  明講請先結束、拒絕繼續，原 PID 仍活著。recorder 活著時也跑一次 uninstaller，應
+  保留原 PID 與三個安裝檔；它的外層 exit code 不可靠，不拿來判斷。解除安裝頁若勾
+  清除資料，文字必須明講只清桌面外殼、AI-Sister 記憶會保留。這版未簽章，Windows
+  警告是已知缺口；
+  請把畫面和檔案大小貼回來。不要把同版 overwrite 算成真跨版升級，第一個可驗的
+  old-binary → new-binary 要等下一版。最後移除 app，`%APPDATA%\ted-h\AI-Sister\data\`
+  的記憶要仍在；移除安裝檔不是「忘掉」。
+- **Persona：** 用安裝版開設定頁，照 §16 從 fresh cache 與 packet capture 開始。
+  真正按一次下載後，要逐位看到 Aster／Cedar／Mira／Rook 的四張立繪；打開聲音後，
+  逐位點兩次共聽到八段相符固定語音，再做撤回。這才是產品面證據；CI 的 fixed
+  GET／hash／安裝成功不能代替真人 click、播放、撤回與「按下前 0 request／按下後
+  exact 一個 GET」。
 
 ### 只有十分鐘的話，做這五條
 

@@ -155,6 +155,267 @@ for target in "" "x86_64-pc-windows-msvc"; do
     fi
 done
 
+# NSIS 本身不是 runtime HTTP client，但 Tauri 的 Windows 預設值是
+# `downloadBootstrapper`：使用者按的是「安裝」，installer 卻會臨時連出去抓
+# WebView2。那會在 Cargo dependency tree 完全看不見。alpha.106 改成把官方
+# offline installer 嵌進 setup；這裡解析真正的 platform merge，避免有人把 overlay
+# 改名、刪掉或在 base 裡加一個 minimum version，讓 EdgeUpdate 旁路又活回來。
+echo "▶ 檢查 Windows installer 不需要執行期網路"
+if ! python3 - <<'PY'
+import difflib
+import json
+import pathlib
+import re
+import sys
+
+
+def merge_patch(base: object, patch: object) -> object:
+    """RFC 7396；Tauri 的 platform config 使用同一種 object merge 語意。"""
+    if not isinstance(patch, dict):
+        return patch
+    merged = dict(base) if isinstance(base, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = merge_patch(merged.get(key), value)
+    return merged
+
+
+root = pathlib.Path("apps/desktop/src-tauri")
+base_path = root / "tauri.conf.json"
+windows_path = root / "tauri.windows.conf.json"
+if not windows_path.is_file():
+    raise SystemExit("✗ 缺少 tauri.windows.conf.json；Tauri 會退回會連網的 WebView2 預設")
+
+base = json.loads(base_path.read_text(encoding="utf-8"))
+windows_overlay = json.loads(windows_path.read_text(encoding="utf-8"))
+merged = merge_patch(base, windows_overlay)
+bundle = merged.get("bundle", {})
+if not isinstance(bundle, dict):
+    raise SystemExit("✗ merged bundle config 不是 object")
+if bundle.get("createUpdaterArtifacts") is not False:
+    raise SystemExit("✗ Windows bundle 必須精確關閉 createUpdaterArtifacts")
+windows = bundle.get("windows")
+if not isinstance(windows, dict):
+    raise SystemExit("✗ merged Windows bundle config 不存在")
+
+expected_mode = {"type": "offlineInstaller", "silent": True}
+if windows.get("webviewInstallMode") != expected_mode:
+    raise SystemExit(
+        "✗ WebView2 install mode 必須精確是 embedded offlineInstaller + silent=true，"
+        f"實際：{windows.get('webviewInstallMode')!r}"
+    )
+for minimum_key in ("minimumWebview2Version", "minimum-webview2-version"):
+    if minimum_key in windows:
+        raise SystemExit(f"✗ {minimum_key} 會讓 installer 呼叫 EdgeUpdate；這裡不准存在")
+nsis = windows.get("nsis")
+if not isinstance(nsis, dict):
+    raise SystemExit("✗ merged Windows NSIS config 不存在")
+for minimum_key in ("minimumWebview2Version", "minimum-webview2-version"):
+    if minimum_key in nsis:
+        raise SystemExit(f"✗ NSIS {minimum_key} 也會呼叫 EdgeUpdate；這裡不准存在")
+if "template" in nsis:
+    raise SystemExit("✗ 自訂 NSIS template 可繞過 offlineInstaller；這裡只准 pinned Tauri template")
+
+expected_hook = "windows/installer-hooks.nsh"
+if nsis.get("installerHooks") != expected_hook:
+    raise SystemExit(
+        f"✗ NSIS installerHooks 必須精確是 {expected_hook!r}，實際：{nsis.get('installerHooks')!r}"
+    )
+expected_languages = ["TradChinese", "English"]
+if nsis.get("languages") != expected_languages:
+    raise SystemExit(
+        f"✗ NSIS languages 必須精確是 {expected_languages!r}，實際：{nsis.get('languages')!r}"
+    )
+expected_language_files = {
+    "TradChinese": "windows/languages/TradChinese.nsh",
+    "English": "windows/languages/English.nsh",
+}
+if nsis.get("customLanguageFiles") != expected_language_files:
+    raise SystemExit(
+        "✗ NSIS customLanguageFiles 必須精確綁住兩份已稽核文案，"
+        f"實際：{nsis.get('customLanguageFiles')!r}"
+    )
+
+# hook 是 raw NSIS，Cargo tree 看不到它叫外部 downloader。不用 primitive
+# denylist：NSIS preprocessor 可以用 `!include` 或巨集別名把同一個指令拆開，
+# 讓每一個關鍵字都消失在 source 掃描裡。這裡忽略純註解與空白後，
+# 其餘每一行與順序都必須等於這份最小 allowlist；真的新增 hook 能力時，
+# 必須在同一個 diff 裡明確擴充這份清單。語言檔也被 raw include，
+# 所以只准註解與 LangString。
+hook_path = root / expected_hook
+if not hook_path.is_file():
+    raise SystemExit(f"✗ 缺少 installer hook：{hook_path}")
+hook_text = hook_path.read_text(encoding="utf-8")
+
+
+def executable_hook_lines(source: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(";"):
+            # NSIS 的 line continuation 對註解也生效；`; ... \`
+            # 會把下一行一起吃掉。允許這種註解就等於允許
+            # 只改註解便可關掉一道 process check，所以留在
+            # actual lines 裡交給 exact allowlist 拒絕。
+            if line.endswith("\\"):
+                lines.append(line)
+            continue
+        lines.append(line)
+    return lines
+
+
+expected_hook_lines = [
+    "!macro AI_SISTER_REQUIRE_STOPPED executableName",
+    'nsis_tauri_utils::FindProcessCurrentUser "${executableName}"',
+    "Pop $R0",
+    "${If} $R0 = 0",
+    "${IfNot} ${Silent}",
+    'MessageBox MB_ICONSTOP|MB_OK "$(aiSisterStillRunning)"',
+    "${EndIf}",
+    "SetErrorLevel 32",
+    "Quit",
+    "${EndIf}",
+    "!macroend",
+    "!macro NSIS_HOOK_PREINSTALL",
+    '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister-desktop.exe"',
+    '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister.exe"',
+    "!macroend",
+    "!macro NSIS_HOOK_PREUNINSTALL",
+    '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister-desktop.exe"',
+    '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister.exe"',
+    "!macroend",
+]
+
+
+def hook_is_allowed(source: str) -> bool:
+    return executable_hook_lines(source) == expected_hook_lines
+
+
+# 這三種是 denylist／太寬的註解過濾會放過的實際繞法。自測用記憶體內的字串，
+# 不暫改、不還原工作目錄裡真正的 hook。
+hook_mutations = {
+    "!include 繞過": hook_text.replace(
+        "!macro NSIS_HOOK_PREINSTALL",
+        '!include "unreviewed-network-hook.nsh"\n\n!macro NSIS_HOOK_PREINSTALL',
+        1,
+    ),
+    "巨集別名繞過": hook_text.replace(
+        "!macro NSIS_HOOK_PREINSTALL\n",
+        "!define AI_SISTER_DL NSISdl\n\n"
+        "!macro NSIS_HOOK_PREINSTALL\n"
+        '  ${AI_SISTER_DL}::download "$0" "$TEMP\\payload"\n',
+        1,
+    ),
+    "註解 continuation 吃掉檢查": hook_text.replace(
+        '  nsis_tauri_utils::FindProcessCurrentUser "${executableName}"',
+        '  ; ignore the next process check \\\n'
+        '  nsis_tauri_utils::FindProcessCurrentUser "${executableName}"',
+        1,
+    ),
+}
+for label, mutation in hook_mutations.items():
+    if mutation == hook_text or hook_is_allowed(mutation):
+        raise SystemExit(f"✗ installer hook allowlist 自測沒有拒絕 {label}")
+
+actual_hook_lines = executable_hook_lines(hook_text)
+if actual_hook_lines != expected_hook_lines:
+    difference = "\n".join(
+        difflib.unified_diff(
+            expected_hook_lines,
+            actual_hook_lines,
+            fromfile="allowed installer hook",
+            tofile=str(hook_path),
+            lineterm="",
+        )
+    )
+    raise SystemExit(
+        "✗ installer hook 出現 allowlist 外的 raw NSIS 指令；"
+        "新增能力前必須先重新稽核：\n"
+        f"{difference}"
+    )
+
+expected_keys = {
+    "addOrReinstall", "alreadyInstalled", "alreadyInstalledLong", "appRunning",
+    "appRunningOkKill", "chooseMaintenanceOption", "choowHowToInstall", "createDesktop",
+    "dontUninstall", "dontUninstallDowngrade", "failedToKillApp", "installingWebview2",
+    "newerVersionInstalled", "older", "olderOrUnknownVersionInstalled", "silentDowngrades",
+    "unableToUninstall", "uninstallApp", "uninstallBeforeInstalling", "unknown",
+    "webview2AbortError", "webview2DownloadError", "webview2DownloadSuccess",
+    "webview2Downloading", "webview2InstallError", "webview2InstallSuccess", "deleteAppData",
+    "aiSisterStillRunning",
+}
+expected_delete_copy = {
+    "TradChinese": "清除桌面外殼資料（AI-Sister 記憶會保留）",
+    "English": "Clear desktop-shell data (AI-Sister memories are kept)",
+}
+expected_running_copy = {
+    "TradChinese": "AI-Sister 仍在執行。請先從系統匣結束桌面程式並停止 recorder，再重新執行。這次操作沒有強制關閉任何程式。",
+    "English": "AI-Sister is still running. Exit the desktop app from the tray and stop the recorder, then try again. No process was force-closed.",
+}
+lang_line = re.compile(r'^LangString ([A-Za-z0-9]+) \$\{LANG_([A-Z]+)\} "(.*)"$')
+for language, relative_path in expected_language_files.items():
+    path = root / relative_path
+    if not path.is_file():
+        raise SystemExit(f"✗ 缺少 NSIS {language} 文案：{path}")
+    messages: dict[str, str] = {}
+    for number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith(";"):
+            continue
+        parsed = lang_line.fullmatch(line)
+        if parsed is None:
+            raise SystemExit(f"✗ {path}:{number} 不是單純 LangString：{line}")
+        key, token, copy = parsed.groups()
+        if token != language.upper():
+            raise SystemExit(f"✗ {path}:{number} 的 language token 是 {token}，不是 {language.upper()}")
+        if key in messages:
+            raise SystemExit(f"✗ {path} 重複 LangString：{key}")
+        messages[key] = copy
+    if set(messages) != expected_keys:
+        missing = sorted(expected_keys - set(messages))
+        extra = sorted(set(messages) - expected_keys)
+        raise SystemExit(f"✗ {path} LangString 集合不符：missing={missing} extra={extra}")
+    if messages["deleteAppData"] != expected_delete_copy[language]:
+        raise SystemExit(f"✗ {path} 又把外殼資料說成 AI-Sister 記憶：{messages['deleteAppData']!r}")
+    if messages["aiSisterStillRunning"] != expected_running_copy[language]:
+        raise SystemExit(f"✗ {path} 的執行中拒絕文案不再是已稽核版本：{messages['aiSisterStillRunning']!r}")
+
+
+def contains_key(value: object, wanted: str) -> bool:
+    if isinstance(value, dict):
+        return wanted in value or any(contains_key(child, wanted) for child in value.values())
+    if isinstance(value, list):
+        return any(contains_key(child, wanted) for child in value)
+    return False
+
+
+for config_path in sorted(root.glob("tauri*.conf.json")):
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if contains_key(config, "updater"):
+        raise SystemExit(f"✗ {config_path} 啟用了 updater；產品目前只有人工下載 installer")
+
+for manifest in pathlib.Path(".").rglob("Cargo.toml"):
+    if "target" in manifest.parts or ".git" in manifest.parts:
+        continue
+    text = manifest.read_text(encoding="utf-8")
+    if "tauri-plugin-updater" in text or "tauri_plugin_updater" in text:
+        raise SystemExit(f"✗ {manifest} 取得了 Tauri updater dependency")
+
+for source_root in (pathlib.Path("crates"), pathlib.Path("apps")):
+    for source in source_root.rglob("*.rs"):
+        if "target" in source.parts:
+            continue
+        if "tauri_plugin_updater" in source.read_text(encoding="utf-8"):
+            raise SystemExit(f"✗ {source} 接上了 Tauri updater runtime")
+PY
+then
+    fail=1
+fi
+
 # THREAT_MODEL.md 對遠端攻擊者寫的是「本程式沒有監聽埠」，並把唯一 fixed
 # outbound client 收在上面的 crate 邊界。相依樹檢查擋不住 raw socket——一個
 # `TcpListener::bind` 只用 std，一個相依都不會多，而那句話從那一刻起就是假的。
@@ -274,9 +535,31 @@ for name in sorted(glob.glob("apps/desktop/ui/*.html")):
         sys.exit(1)
     policies.append((name, parser.policies[0]))
 
+def merge_patch(base: object, patch: object) -> object:
+    """RFC 7396；Tauri 的 platform config 使用同一種 object merge 語意。"""
+    if not isinstance(patch, dict):
+        return patch
+    merged = dict(base) if isinstance(base, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = merge_patch(merged.get(key), value)
+    return merged
+
+
 tauri_name = "apps/desktop/src-tauri/tauri.conf.json"
 tauri = json.loads(pathlib.Path(tauri_name).read_text(encoding="utf-8"))
 policies.append((tauri_name, tauri["app"]["security"]["csp"]))
+for overlay_name in sorted(glob.glob("apps/desktop/src-tauri/tauri.*.conf.json")):
+    overlay = json.loads(pathlib.Path(overlay_name).read_text(encoding="utf-8"))
+    merged = merge_patch(tauri, overlay)
+    try:
+        merged_csp = merged["app"]["security"]["csp"]
+    except (KeyError, TypeError):
+        print(f"✗ {overlay_name} 合併後缺少 WebView CSP", file=sys.stderr)
+        sys.exit(1)
+    policies.append((f"{overlay_name}（platform merge）", merged_csp))
 
 bad: list[str] = []
 for name, policy in policies:
@@ -330,4 +613,4 @@ if [ -n "$skipped" ]; then
     echo "⚠ 有東西沒檢查到（未安裝 target）：$skipped"
     echo "  底下這句話只涵蓋真的跑過的那幾棵樹。出貨的是 Windows 執行檔。"
 fi
-echo "✓ 未授權網路邊界成立：root/recorder/core/brain/hands 無 HTTP client，desktop 只有 fixed Persona GET；原始碼無直接 socket API，WebView 無遠端來源"
+echo "✓ 未授權網路邊界成立：root/recorder/core/brain/hands 無 HTTP client，desktop 只有 fixed Persona GET；installer 內嵌離線 WebView2、無 updater，原始碼無直接 socket API，WebView 無遠端來源"

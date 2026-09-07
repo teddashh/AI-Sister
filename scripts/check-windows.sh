@@ -52,7 +52,24 @@ cargo clippy --target "$TARGET" --workspace --no-default-features --all-targets 
 DESKTOP=apps/desktop/src-tauri
 if [[ -d "$DESKTOP" ]]; then
     shim="$(mktemp -d)"
-    trap 'rm -rf "$shim"' EXIT
+    # Tauri 會在 build script 階段確認 externalBin 的 target-suffixed 路徑存在，
+    # 即使 `cargo check` 根本不會打包或讀它的 PE 內容。正式 Windows job 會把
+    # 同一輪通過 smoke 的 sister.exe 複製到這裡並逐 hash 驗；這支 Linux cross
+    # check 只需要一個存在性 fixture，而且絕不能覆蓋開發者已經 build 的檔案。
+    sidecar="$PWD/target/release/sister-$TARGET.exe"
+    sidecar_created=0
+    if [[ ! -e "$sidecar" && ! -L "$sidecar" ]]; then
+        mkdir -p "$(dirname "$sidecar")"
+        touch "$sidecar"
+        sidecar_created=1
+    fi
+    cleanup_desktop_check() {
+        rm -rf "$shim"
+        if [[ "$sidecar_created" -eq 1 ]]; then
+            rm -f -- "$sidecar"
+        fi
+    }
+    trap cleanup_desktop_check EXIT
     if ! command -v llvm-rc >/dev/null 2>&1; then
         ln -s "$PWD/scripts/fake-llvm-rc.py" "$shim/llvm-rc"
     fi

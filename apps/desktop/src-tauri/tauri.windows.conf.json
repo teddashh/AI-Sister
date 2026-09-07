@@ -1,0 +1,24 @@
+{
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "externalBin": ["../../../target/release/sister"],
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "languages": ["TradChinese", "English"],
+        "customLanguageFiles": {
+          "TradChinese": "windows/languages/TradChinese.nsh",
+          "English": "windows/languages/English.nsh"
+        },
+        "displayLanguageSelector": false,
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
+    }
+  }
+}

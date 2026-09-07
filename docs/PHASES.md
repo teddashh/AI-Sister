@@ -47,6 +47,10 @@
 | Linux | **X11-only Developer Preview** | 真正的 X11 capture + OCR + S1，不把只能 replay 說成桌面支援；Wayland 明示 unsupported／degraded | 沒達到就不發該 artifact；缺席不擋 Windows GA |
 | Persona | **Release 1.0 角色體驗（opt-in assets）** | 四姊妹各自真的有可選立繪與固定語音；同一個 omnibus asset-pack 從揭露、下載、驗證到啟用完整跑通；每位的 code-native 字母 fallback 與 Neutral 永遠離線可用 | **Windows GA 產品面 blocker**；使用者選擇關閉或不下載不是 blocker |
 
+Windows 的「可升級」不要求把任意網路更新器塞進程式。Release 1.0 採**使用者手動下載
+新版 installer、關掉 desktop／recorder 後原地安裝**；仍必須拿真的舊版 binary → 新版
+binary 跑過，並證明既有資料與 migration 都不丟。自動 updater 不在 1.0 合約內。
+
 ### 每個掛上 GA／Preview 名字的 artifact 都不能缺的 blocker
 
 - **隱私不因 Preview 降級**：三張同意書仍各自 fail-closed；沒簽第一張不記錄、
@@ -531,7 +535,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     讀滿 73,261,088 bytes 後走同一套整包／逐檔驗證、原子安裝與精準移除。這補的是
     真 Windows transport；設定頁真人點擊、四位立繪／八段播放、撤回 UX 與 packet trace
     仍須在 Ted 的正式 artifact 上實測，不能拿 CI 的成功下載代替。
-- 🔶 發布工程：安裝包／code signing／自動更新、single-instance、recorder
+- 🔶 發布工程：安裝包／code signing／手動 installer 升級、single-instance、recorder
   watchdog/backoff、開機自啟、跨 capture／brain／hands 的 master stop、官網一頁，
   以及 Show HN / X 發文帶 benchmark 表。
   - ✅ alpha.68 版本說明。在這之前它是 `ci.yml` 裡寫死的一塊 570 行的字，
@@ -541,7 +545,26 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     改成 [`docs/RELEASE-NOTES.md`](RELEASE-NOTES.md) 一個 tag 一節，
     `scripts/release-notes.sh` 組出來。**沒寫那一節不會退回上一版**，
     會印「這一版沒有寫版本說明」。
-  - ⬜ 上列 lifecycle／安裝／簽章／更新／官網：還沒開始。
+  - 🔶 alpha.106 candidate 已接 current-user `AI-Sister-Setup.exe`：bundle 內是同一輪
+    build 的 exact `sister.exe` sidecar，另內嵌 WebView2 offline installer，所以安裝時
+    不需連網、代價是安裝包會顯著變大；exact 大小等 tag artifact 回收。Windows-only
+    startup guard 補住官方 single-instance receiver 尚未建好的啟動競態；第二次開啟只
+    請求顯示／聚焦原視窗，不碰 recorder。installer 的 hook 偵測到檢查當下已活著的
+    desktop 或 recorder 時固定拒絕，不替使用者 kill；移除也走同一道 gate。
+  - 🔶 這個 candidate 的真 Windows/tag gate 尚待回收。預定 smoke 會做 fresh install、
+    exact 三檔、setup／uninstaller 合法 NSIS 32-bit PE，以及兩個產品 payload 的 x64
+    PE32+；啟動競態期間第二份也只能交棒、setup 對 desktop／recorder 兩種 exit 32
+    拒絕且原 PID 存活、uninstaller 在 recorder 活著時 fail-closed、同一份 installer
+    原地 reinstall 且外部 DB hash 不變，以及 uninstall 不刪外部記憶。uninstaller
+    自我複製後不保證把 inner exit code 傳回 caller，所以只斷言行程與檔案未動。
+    同版 reinstall 也**不是**真 old-binary → new-binary 的升級證據；silent NSIS 不會
+    執行版本判斷頁，不能把 registry 改字當作升級測試。
+  - ⬜ alpha.106 的 hook 後仍有一個窄窗：desktop 若恰在放行後才啟動，Tauri stock
+    silent path 仍可能 kill；recorder 若此時才啟動則不會被 stock 重查，安裝／移除可能
+    只做一部分。要移除 stock killer 或做 installer／app 協調後，才能承諾完整 lifecycle；
+    candidate 只承諾檢查當下已活著的 PID。
+  - ⬜ code signing、真跨版升級、recorder watchdog/backoff、開機自啟、跨層 master
+    stop 與官網仍未完成；1.0 不內建自動 updater，由使用者手動下載新版 installer。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）
 - ✅ a `CommitmentDue`：`open_commitments_due_before(now + 40min)`，只收
@@ -569,7 +592,8 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
 
 **Release 1.0 exit criteria**
 - [ ] Windows GA 走完上方 Release 1.0 合約的 S1 主流程；正式 artifact 可安裝、
-      code-signed、可升級、single-instance、可開機常駐。recorder crash 有 bounded
+      code-signed、可用手動下載的新版 installer 升級、single-instance、可開機常駐。
+      recorder crash 有 bounded
       watchdog/backoff，升級與 migration 不丟既有資料。最低支援 Windows 10，舊版
       Windows 不把反向 WTS lock flags 猜成現行語意。
 - [ ] 三張同意書、capture-time 排除、出處、cascade 刪除、export／restore 與

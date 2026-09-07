@@ -16,7 +16,17 @@
 
 ## 開場
 
-Release 裡有兩個各自獨立的 Windows 執行檔，不需要安裝，沒有任何外掛 DLL 或模型檔。
+Windows 預設下載 `AI-Sister-Setup.exe`。這是 current-user 安裝包，內嵌 WebView2
+offline installer 與同版 `sister.exe`，所以安裝時不需連網；代價是安裝包顯著變大，
+exact 大小以該 tag 的 asset 為準。Release 也保留 `sister.exe` 與
+`sister-desktop.exe`，只想跑 CLI、
+portable 使用或診斷 installer 問題時，請把兩個檔放在同一個資料夾。
+
+目前 installer 沒有 code signing，也沒有內建自動 updater。升級是使用者手動下載新版
+`AI-Sister-Setup.exe`，先自行結束 desktop 並停止 recorder，再重新執行；安裝檢查開始時
+已活著的任一行程會讓這次操作拒絕，不會被自訂 hook 強制關閉。alpha.106 尚有一個窄
+競態：desktop 若在 hook 放行後才啟動，Tauri stock silent check 仍可能強制結束它；
+recorder 若此時才啟動則不會被 stock 重查，安裝／移除可能只做一部分。
 
 ```
 sister.exe doctor                 # 先看這個：她在這台機器上做得到什麼
@@ -45,6 +55,44 @@ sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
+
+
+## v0.1.0-alpha.106
+
+**這一版的 candidate 把 Windows 預設入口從兩個 loose exe 推進到 current-user 離線
+installer，並讓 desktop 在 Windows 上成為 single-instance；只有原生 Windows/tag gate
+全部通過才會公開 release。**
+
+`AI-Sister-Setup.exe` 內嵌 WebView2 offline installer 與這一輪 build 的 exact
+`sister.exe` sidecar，安裝本身不用網路；安裝包會顯著變大，exact 大小等 tag artifact
+回收。`sister.exe`／`sister-desktop.exe` 仍作
+portable 與診斷備用，不會因有 installer 就拿掉。Windows startup guard 先補住官方
+single-instance receiver 尚未建好的啟動競態，兩者都排在 logging、setup、tray 與產品
+狀態 mutation 之前；第二次啟動只向原本的字母人請求顯示並取得焦點，不建立第二份
+desktop，也不停止或重啟 recorder。顯示／焦點本身仍待正式 artifact 的人工真機確認。
+
+installer 的 preinstall／preuninstall hook 若看到同一個使用者的
+`sister-desktop.exe` 或 `sister.exe` 在檢查當下已活著，就拒絕，不採用「替你 kill
+再繼續」。setup 可觀察到固定 exit 32；uninstaller 會自我複製到 temp，外層不保證轉交
+inner exit code，所以那一面驗的是原 PID 與 install root 都沒動。tag gate 將在真
+Windows 做 fresh install，核對 install root 恰為 desktop、
+sidecar、uninstaller 三檔；setup／uninstaller 必須是合法 NSIS 32-bit PE，desktop／
+sidecar payload 則必須是 x64 PE32+。再實際啟動第二份 desktop、分別讓 desktop 與
+recorder 活著撞 installer，要求第二份正常退出、
+兩次 setup 拒絕都不殺原 PID，並在 recorder 活著時實跑 uninstaller 的 fail-closed
+路徑。它也會用同一份 installer 原地 reinstall，核對 install root 外的記憶 DB hash
+不變，最後 uninstall 並確認那份外部記憶仍在。解除安裝頁的 checkbox 已精確改成
+「清除桌面外殼資料（AI-Sister 記憶會保留）」，不再把兩種資料說成同一件事。
+
+同版 silent reinstall **不是**真的舊版 binary → 新版 binary upgrade evidence；silent
+NSIS 不會執行版本判斷頁，不能靠改 registry 版本字串冒充。第一版 installer 發出後，
+還要拿它和下一版跑一次跨版升級。這一版也還沒有 code signing、
+autostart、recorder watchdog 或跨 capture／brain／hands 的 master stop；1.0 不打算
+內建自動 updater，更新由使用者手動下載新 installer。Persona 的真人設定頁點擊、四張
+立繪／八段語音播放、撤回 UX 與 packet trace 也仍待 Ted 用正式 artifact 實測。
+自訂 hook 後方仍接 Tauri stock running-app check；desktop 若恰在兩次檢查間啟動，
+silent path 仍可能 kill；recorder 若在 hook 後才啟動則不會被 stock 重查，安裝／移除
+可能只做一部分。這個窄競態還不能寫成完整 lifecycle。
 
 
 ## v0.1.0-alpha.105

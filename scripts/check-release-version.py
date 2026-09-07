@@ -211,10 +211,11 @@ def check_atomic_release_workflow(workflow_path: pathlib.Path) -> None:
     if nested_scalar(creator, "with", "fail_on_unmatched_files") != "true":
         fail("action-gh-release 必須拒絕 unmatched local asset")
     if nested_literal_lines(creator, "with", "files") != [
+        "AI-Sister-Setup.exe",
         "sister.exe",
         "sister-desktop.exe",
     ]:
-        fail("action-gh-release 的 local asset 必須恰為 sister.exe 與 sister-desktop.exe")
+        fail("action-gh-release 的 local asset 必須恰為 setup 與兩個 portable exe")
 
     publishers = [
         (index, step)
@@ -250,9 +251,9 @@ def check_atomic_release_workflow(workflow_path: pathlib.Path) -> None:
             'if release.get("tag_name") != expected_tag:',
             'assets = release.get("assets")',
             'if not isinstance(assets, list):',
-            'expected_names = {"sister.exe", "sister-desktop.exe"}',
+            'expected_names = {"AI-Sister-Setup.exe", "sister.exe", "sister-desktop.exe"}',
             'names = [asset.get("name") for asset in assets if isinstance(asset, dict)]',
-            'if len(assets) != 2 or len(names) != 2 or set(names) != expected_names:',
+            'if len(assets) != 3 or len(names) != 3 or set(names) != expected_names:',
             'for asset in sorted(assets, key=lambda item: item["name"]):',
             'asset_id = asset.get("id")',
             'size = asset.get("size")',
