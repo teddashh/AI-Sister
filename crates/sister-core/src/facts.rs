@@ -796,7 +796,7 @@ fn tw_id_valid(s: &str) -> bool {
         let weight = if i == 8 { 1 } else { 8 - i as u32 };
         sum += (d - b'0') as u32 * weight;
     }
-    sum.is_multiple_of(10)
+    sum.rem_euclid(10) == 0
 }
 
 fn ids(text: &str, out: &mut Vec<Cand>) {

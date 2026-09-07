@@ -471,7 +471,13 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
 - ⬜ **macOS Public Preview**：ScreenCaptureKit + Vision OCR + AX API + TCC/紫點 UX 文案。
   capture 必須住在簽進 `.app` 的主程序樹；Preview 至少要走完同意、錄製、OCR、
   提問、出處、暫停、刪除與匯出。完整 P0／P1 足跡與電池數字留作升 GA 條件，
-  不擋 Release 1.0。本機編不到、CI 也沒有 mac runner，還沒開始。
+  不擋 Release 1.0。目前先放進一條 `macos-15` Apple Silicon 原生 CI diagnostic：
+  feature-gated CLI child 只在 CoreGraphics preflight 明確為 true 時呼叫一次
+  ScreenCaptureKit，Tauri 用 ad-hoc identity 把 exact child 包進 hardened `.app`；
+  workflow 會另查 live PID／PPID／`proc_pidpath`、簽章、架構與 bundle metadata，
+  並斷言沒有圖片或資料庫落地。這個 app tree 明標 **NOT PREVIEW**、只保留七天 CI
+  診斷，不進 release；第一場原生 runner 結果尚未回收，也還沒有 Vision／AX、產品
+  同意書與完整 S1，所以這格不勾。
 - ⬜ **Linux X11 Developer Preview**：先接通 X11 capture + OCR + S1 主流程；
   Wayland 明示 unsupported／degraded，不用 portal 的半套能力冒充背景常駐。
   alpha.104 已落第一層 fail-closed preflight：Wayland／headless 與 Unknown 分開，

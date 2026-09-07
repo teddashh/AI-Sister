@@ -83,6 +83,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "apple-cf"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7fd680cd0f3f02ee717b2014b26d18985c57b784384ba47213fcf8791e8c250"
+dependencies = [
+ "doom-fish-utils",
+]
+
+[[package]]
+name = "apple-metal"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b1c24b280fad9eadf6f2bf560d826392020ac6258b4c88c6dd356ae7a24f4e3"
+dependencies = [
+ "doom-fish-utils",
+ "libc",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -261,6 +280,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-queue"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03e8bd762f7479489c70ed6c768ddca99d7296857de437a68dcb2a94365b3fae"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -324,6 +352,16 @@ checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags",
  "objc2",
+]
+
+[[package]]
+name = "doom-fish-utils"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c801f6c2a0db1a1909d89fc395b9dccc594de9ef599659fbde9bb3b55ef67f9f"
+dependencies = [
+ "crossbeam-queue",
+ "futures-util",
 ]
 
 [[package]]
@@ -573,9 +611,9 @@ dependencies = [
 
 [[package]]
 name = "image"
-version = "0.25.10"
+version = "0.25.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
+checksum = "e6506c6c10786659413faa717ceebcb8f70731c0a60cbae39795fdf114519c1a"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
@@ -712,9 +750,9 @@ dependencies = [
 
 [[package]]
 name = "moxcms"
-version = "0.8.1"
+version = "0.7.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
+checksum = "ac9557c559cd6fc9867e122e20d2cbefc9ca29d80d027a8e39310920ed2f0a97"
 dependencies = [
  "num-traits",
  "pxfm",
@@ -784,6 +822,16 @@ dependencies = [
  "bitflags",
  "dispatch2",
  "objc2",
+]
+
+[[package]]
+name = "objc2-core-graphics"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
+dependencies = [
+ "bitflags",
+ "objc2-core-foundation",
 ]
 
 [[package]]
@@ -1043,6 +1091,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "screencapturekit"
+version = "9.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a801be27969d7ccd11dc5c2d5884b9efb1dd47edd1174e615c0fc2c35148dfc"
+dependencies = [
+ "apple-cf",
+ "apple-metal",
+]
+
+[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1174,6 +1232,8 @@ version = "0.1.0-alpha.104"
 dependencies = [
  "anyhow",
  "image",
+ "objc2-core-graphics",
+ "screencapturekit",
  "serde",
  "serde_json",
  "sister-core",
@@ -1190,6 +1250,7 @@ dependencies = [
  "chrono",
  "clap",
  "rusqlite",
+ "serde",
  "serde_json",
  "shlex 1.3.0",
  "sister-capture",

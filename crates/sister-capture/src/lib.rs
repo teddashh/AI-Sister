@@ -19,6 +19,9 @@ pub mod recorder;
 /// exact-process system-session 驗證時只會回 Unknown，不會開始讀內容。
 #[cfg(target_os = "linux")]
 pub mod linux;
+/// 原生 macOS app-tree 擷取診斷；不是 production backend，也不在 shipping build。
+#[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
+pub mod macos;
 pub mod replay;
 pub mod scale;
 pub mod timings;

@@ -367,15 +367,16 @@ fn install_hooks() {
 unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32
         && (wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize)
-        && let Some(_guard) = InputCallbackGuard::enter()
     {
-        let now = tick_now();
-        KEYSTROKES.fetch_add(1, Relaxed);
-        LAST_INPUT_TICK.store(now, Relaxed);
+        if let Some(_guard) = InputCallbackGuard::enter() {
+            let now = tick_now();
+            KEYSTROKES.fetch_add(1, Relaxed);
+            LAST_INPUT_TICK.store(now, Relaxed);
 
-        let prev = LAST_KEY_TICK.swap(now, Relaxed);
-        if prev == 0 || now.saturating_sub(prev) > BURST_GAP_MS {
-            BURSTS.fetch_add(1, Relaxed);
+            let prev = LAST_KEY_TICK.swap(now, Relaxed);
+            if prev == 0 || now.saturating_sub(prev) > BURST_GAP_MS {
+                BURSTS.fetch_add(1, Relaxed);
+            }
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -383,29 +384,29 @@ unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 
 /// 滑鼠 hook。讀座標（位置不是內容），不讀其它任何東西。
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32
-        && let Some(_guard) = InputCallbackGuard::enter()
-    {
-        LAST_INPUT_TICK.store(tick_now(), Relaxed);
-        match wparam.0 as u32 {
-            WM_MOUSEMOVE => unsafe {
-                let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-                let (x, y) = (info.pt.x, info.pt.y);
-                if HAVE_POS.swap(true, Relaxed) {
-                    let dx = (x - LAST_X.load(Relaxed)) as f64;
-                    let dy = (y - LAST_Y.load(Relaxed)) as f64;
-                    MOUSE_PX.fetch_add(dx.hypot(dy) as u64, Relaxed);
+    if code == HC_ACTION as i32 {
+        if let Some(_guard) = InputCallbackGuard::enter() {
+            LAST_INPUT_TICK.store(tick_now(), Relaxed);
+            match wparam.0 as u32 {
+                WM_MOUSEMOVE => unsafe {
+                    let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+                    let (x, y) = (info.pt.x, info.pt.y);
+                    if HAVE_POS.swap(true, Relaxed) {
+                        let dx = (x - LAST_X.load(Relaxed)) as f64;
+                        let dy = (y - LAST_Y.load(Relaxed)) as f64;
+                        MOUSE_PX.fetch_add(dx.hypot(dy) as u64, Relaxed);
+                    }
+                    LAST_X.store(x, Relaxed);
+                    LAST_Y.store(y, Relaxed);
+                },
+                WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
+                    CLICKS.fetch_add(1, Relaxed);
                 }
-                LAST_X.store(x, Relaxed);
-                LAST_Y.store(y, Relaxed);
-            },
-            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
-                CLICKS.fetch_add(1, Relaxed);
+                WM_MOUSEWHEEL => {
+                    SCROLL.fetch_add(1, Relaxed);
+                }
+                _ => {}
             }
-            WM_MOUSEWHEEL => {
-                SCROLL.fetch_add(1, Relaxed);
-            }
-            _ => {}
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }

@@ -201,13 +201,14 @@ pub fn host_of(url: &str) -> Option<String> {
             // 這種；也可能是 `example.com:8080/x`。用「冒號後面是不是全數字」
             // 分辨——是就當 port，不是就當 scheme 而且沒有 authority。
             let head = v.split(['/', '?', '#']).next().unwrap_or(v);
-            if let Some((before, after)) = head.split_once(':')
-                && !before.is_empty()
-                && !after.is_empty()
-                && !after.chars().all(|c| c.is_ascii_digit())
-                && !before.starts_with('[')
-            {
-                return None;
+            if let Some((before, after)) = head.split_once(':') {
+                if !before.is_empty()
+                    && !after.is_empty()
+                    && !after.chars().all(|c| c.is_ascii_digit())
+                    && !before.starts_with('[')
+                {
+                    return None;
+                }
             }
             (v, false)
         }
@@ -230,12 +231,11 @@ pub fn host_of(url: &str) -> Option<String> {
             return None;
         }
         let after = &authority[end + 1..];
-        if !after.is_empty()
-            && !after
-                .strip_prefix(':')
-                .is_some_and(|port| port.parse::<u16>().is_ok())
-        {
-            return None;
+        if !after.is_empty() {
+            match after.strip_prefix(':') {
+                Some(port) if port.parse::<u16>().is_ok() => {}
+                _ => return None,
+            }
         }
         // IPv6 字面值：連方括號一起留著，`[::1]` 和 `::1` 不要變成兩個答案。
         &authority[..=end]

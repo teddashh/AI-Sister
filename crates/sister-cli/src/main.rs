@@ -7,6 +7,8 @@
 #[cfg(any(windows, test))]
 mod disk_attribution;
 mod fmt;
+#[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
+mod macos_ci;
 mod ops;
 
 use anyhow::{Context, Result};
@@ -596,6 +598,13 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
+    if let Some(directory) = macos_ci::requested_directory()? {
+        // 這條私有入口必須在 clap、log、config 與 data dir 之前結束；它只為
+        // app-tree CI 證明 exact bundled child 能呼叫一次原生 API。
+        return macos_ci::run(&directory);
+    }
+
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()

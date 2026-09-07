@@ -9,9 +9,10 @@
 > explicit opt-in, OCR text can be handed to the local CLI you configured.
 
 **Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Persona
-也從本機骨架接到 alpha.102 的固定素材下載／驗證邊界，但正式簽章、發布審查與其餘
-安裝／更新工程尚未完成，所以現在還不是 Release 1.0。** Windows 10+ 會是 1.0 的正式
-支援平台；macOS 與 Linux X11 先走 Preview。
+的四張立繪、八段固定語音與 fixed CDN pack 也已接通，alpha.104 的發版 gate 在真
+Windows 走完下載、驗證、原子安裝與精準移除。真人設定頁／播放／撤回與 packet trace，
+以及正式安裝、簽章、升級工程仍未完成，所以現在還不是 Release 1.0。** Windows 10+
+會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
 
 她開始看之前有**三張各自獨立、隨時撤得掉的同意書**，條文和效力就是：
@@ -72,7 +73,7 @@ sister record --duration 60
 `doctor` 排在錄之前是有意的：它會當場示範這台機器**現在**讀不讀得到網址、
 OCR 有沒有裝、哪幾條排除規則其實不生效——比錄完 60 秒才發現什麼都沒進去好。
 
-**alpha.102 可以在設定裡選 Neutral、Aster、Cedar、Mira 或 Rook，也可以關掉角色、
+**目前可以在設定裡選 Neutral、Aster、Cedar、Mira 或 Rook，也可以關掉角色、
 動畫、點擊台詞或聲音。** 每位的字母、顏色與兩句固定文字仍隨程式離線提供；只有你
 真的按下角色（或在原生按鈕上用 Enter／Space）才會說下一句，不叫模型、不改答案，
 也不因開場、輪詢、錄製或記憶事件自己開口。
@@ -136,7 +137,8 @@ cargo build --release -p sister-cli
 
 **clone 到第一個答案實測 33 秒**（乾淨的 `CARGO_HOME`：抓 108 MB 相依 + build 32 秒。
 16 核開發機，GitHub 的 runner 大約是這裡的 2.1 倍）。需要 Rust 1.85 以上——這份
-程式是 edition 2024。整條路上沒有 `sudo`、沒有服務、沒有帳號。
+程式是 edition 2024；CI 會用 Rust 1.85.0 對根目錄與 desktop 兩個 workspace 做
+`cargo check`。整條路上沒有 `sudo`、沒有服務、沒有帳號。
 
 這一步**一個像素都沒讀你的螢幕**，所以它不用簽同意書：`replay` 讀的是 repo 裡那份
 JSON 腳本，沒有任何東西可以同意。要看她在你自己的機器上會做什麼，得走上面那條

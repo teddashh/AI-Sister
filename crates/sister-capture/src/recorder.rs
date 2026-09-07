@@ -635,12 +635,12 @@ impl<B: Backend> Recorder<B> {
         // gate 進這裡；若只在 observe_system 重試，就會寫成 pause/resume/lock。
         // 沒有 pause 狀態變化時不能在這裡偷吃 pending：那一拍仍須由 tick
         // 回 SystemChanged，禁止在 audit 重試成功後立刻讀內容。
-        if self.pending_system.is_some()
-            && let Err(error) = self.commit_pending_system()
-        {
-            self.seal_system_gap(ts);
-            return Err(error)
-                .context("commit pending system transition audit before pause change");
+        if self.pending_system.is_some() {
+            if let Err(error) = self.commit_pending_system() {
+                self.seal_system_gap(ts);
+                return Err(error)
+                    .context("commit pending system transition audit before pause change");
+            }
         }
         // 稽核列寫成之後才承認狀態已切換。失敗時 self.paused 留在舊值，外部
         // 旗標若仍相異，下一拍會重試；若先改它，缺掉的 audit 永遠補不回來。
@@ -777,11 +777,11 @@ impl<B: Backend> Recorder<B> {
             return;
         }
         self.pause_input_gap = false;
-        if !self.system_input_gap
-            && let Err(error) = self.backend.resume_input(ts)
-        {
-            self.pause_input_gap = true;
-            tracing::warn!(error = %error, "input source could not resume after pause; keeping input fail closed");
+        if !self.system_input_gap {
+            if let Err(error) = self.backend.resume_input(ts) {
+                self.pause_input_gap = true;
+                tracing::warn!(error = %error, "input source could not resume after pause; keeping input fail closed");
+            }
         }
     }
 
@@ -791,11 +791,11 @@ impl<B: Backend> Recorder<B> {
             return;
         }
         self.system_input_gap = false;
-        if !self.pause_input_gap
-            && let Err(error) = self.backend.resume_input(ts)
-        {
-            self.system_input_gap = true;
-            tracing::warn!(error = %error, "input source could not resume after system gap; keeping input fail closed");
+        if !self.pause_input_gap {
+            if let Err(error) = self.backend.resume_input(ts) {
+                self.system_input_gap = true;
+                tracing::warn!(error = %error, "input source could not resume after system gap; keeping input fail closed");
+            }
         }
     }
 
@@ -1206,12 +1206,12 @@ impl<B: Backend> Recorder<B> {
         // 網址擷取到底有沒有在運作，只有這裡看得到。數在排除判定**之前**：
         // 一個被 `excluded_apps` 擋掉的瀏覽器同樣證明了 UIA 讀不讀得到，
         // 而且往下走的路上這個 snapshot 就不見了。
-        if let Some(focus) = privacy_context.focus()
-            && crate::browsers::is_browser(&focus.app_key())
-        {
-            self.stats.browser_ticks += 1;
-            if focus.url.is_some() {
-                self.stats.url_reads += 1;
+        if let Some(focus) = privacy_context.focus() {
+            if crate::browsers::is_browser(&focus.app_key()) {
+                self.stats.browser_ticks += 1;
+                if focus.url.is_some() {
+                    self.stats.url_reads += 1;
+                }
             }
         }
 
@@ -4981,7 +4981,7 @@ mod tests {
         fn grab(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
             self.0 = self.0.wrapping_add(1);
             let mut px = vec![255u8; 64 * 64 * 4];
-            for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            for (i, p) in px.chunks_exact_mut(4).enumerate() {
                 let v = ((i as u32 * 7 + self.0 * 40) % 256) as u8;
                 (p[0], p[1], p[2]) = (v, v, v);
             }
@@ -5081,7 +5081,7 @@ mod tests {
     /// 灰階漸層。同一個 `seed` 一定算出同一個 dhash，換 seed 就會變。
     fn pattern(w: u32, h: u32, seed: u32) -> Vec<u8> {
         let mut px = vec![255u8; (w * h * 4) as usize];
-        for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        for (i, p) in px.chunks_exact_mut(4).enumerate() {
             let v = ((i as u32 * 7 + seed * 40) % 256) as u8;
             (p[0], p[1], p[2]) = (v, v, v);
         }

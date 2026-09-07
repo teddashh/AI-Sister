@@ -669,10 +669,10 @@ pub fn parse_card(stdout: &str, expected_segment_ref: &str) -> Result<ParsedCard
 
 fn extract_json_object(stdout: &str) -> Option<serde_json::Value> {
     let trimmed = stdout.trim();
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
-        && v.is_object()
-    {
-        return Some(v);
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if v.is_object() {
+            return Some(v);
+        }
     }
     let start = trimmed.find('{')?;
     let end = trimmed.rfind('}')?;

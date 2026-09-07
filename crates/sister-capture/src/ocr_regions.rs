@@ -149,7 +149,7 @@ impl AnalyzedFrame {
             .and_then(|n| usize::try_from(n).ok())
             .ok_or_else(|| anyhow!("RGB baseline 尺寸溢位：{}x{}", frame.width, frame.height))?;
         let mut rgb = Vec::with_capacity(rgb_len);
-        for pixel in rgba[..needed].as_chunks::<4>().0 {
+        for pixel in rgba[..needed].chunks_exact(4) {
             rgb.extend_from_slice(&pixel[..3]);
         }
         let rgb = rgb.into_boxed_slice();

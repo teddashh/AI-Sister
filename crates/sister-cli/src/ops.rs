@@ -3158,8 +3158,9 @@ pub mod act {
             Ok(()) => "授權涵蓋這一步".into(),
             Err(rejection) => {
                 let mut text = format!("授權不涵蓋：{}", rejection.message());
-                if rejection == GrantRejection::Apps
-                    && let Some(extra) = app.explanation()
+                if let Some(extra) = (rejection == GrantRejection::Apps)
+                    .then(|| app.explanation())
+                    .flatten()
                 {
                     text.push_str(&format!(" {extra}"));
                 }
@@ -3455,23 +3456,26 @@ pub mod act {
             writeln!(out, "{target_app}")?;
             writeln!(out, "宣告 app：{}", declared_app.label())?;
             writeln!(out, "{covered}")?;
-            let target_drive_line = if let Some((fact_id, expected_raw)) = commitment
+            let target_drive_line = match commitment
                 .allowed_next_step_fact
                 .zip(expected_target.as_deref())
-                && let Some(target_ts) = source.target_fact_ts(fact_id, expected_raw)?
             {
-                let previous = previous_step_seconds(&log.replay()?.events, target_ts);
-                let motion = human_motion(
-                    source.input_window_covering(target_ts)?,
-                    source.input_health_covering(target_ts)?,
-                );
-                Some(target_drive_sentence(previous, motion))
-            } else {
-                None
+                Some((fact_id, expected_raw)) => {
+                    match source.target_fact_ts(fact_id, expected_raw)? {
+                        Some(target_ts) => {
+                            let previous = previous_step_seconds(&log.replay()?.events, target_ts);
+                            let motion = human_motion(
+                                source.input_window_covering(target_ts)?,
+                                source.input_health_covering(target_ts)?,
+                            );
+                            Some(target_drive_sentence(previous, motion))
+                        }
+                        None => None,
+                    }
+                }
+                None => None,
             };
-            if !opts.unattended
-                && let Some(line) = &target_drive_line
-            {
+            if let Some(line) = target_drive_line.as_ref().filter(|_| !opts.unattended) {
                 writeln!(out, "{line}")?;
             }
             if opts.dry_run {
@@ -8764,8 +8768,10 @@ pub mod watch {
         // 比沒有這個旗標更糟：使用者設了、以為她在盯，然後等了一小時。
         // 抬到看得出來的最短值，然後講出來。
         let quiet_for = opts.quiet_for.map(|asked| asked.max(every));
-        if let (Some(asked), Some(used_span)) = (opts.quiet_for, quiet_for)
-            && used_span != asked
+        if let Some((asked, used_span)) = opts
+            .quiet_for
+            .zip(quiet_for)
+            .filter(|(asked, used_span)| used_span != asked)
         {
             writeln!(
                 out,
@@ -8882,10 +8888,13 @@ pub mod watch {
                     }
                     if hits.is_empty() {
                         let blind = blind_reason(data_dir, now);
-                        if blind == Blind::RecordingButQuiet
-                            && let (Some(threshold), Some(last)) =
-                                (quiet_for, db.recent(1)?.into_iter().next())
-                        {
+                        let quiet_candidate = match &blind {
+                            Blind::RecordingButQuiet => {
+                                quiet_for.zip(db.recent(1)?.into_iter().next())
+                            }
+                            _ => None,
+                        };
+                        if let Some((threshold, last)) = quiet_candidate {
                             let elapsed = now.saturating_sub(last.ts);
                             if now >= last.ts && elapsed >= threshold {
                                 // 這一輪確實沒有新畫面可看，所以仍算進 blind；
@@ -13161,7 +13170,8 @@ pub mod forget {
 
         // 這張票不屬於資料庫，也不看區間。只要真的那條路會刪，預覽就先講；
         // 放在任何資料庫早退之前，讓三個出口看到的是同一個承諾。
-        if !yes && let Some(line) = saved_grant_notice(data_dir) {
+        let grant_notice = (!yes).then(|| saved_grant_notice(data_dir)).flatten();
+        if let Some(line) = grant_notice {
             println!("{line}");
         }
 
@@ -14209,21 +14219,24 @@ pub mod query {
         //
         // 記不進去不算失敗：他要的是答案，不是一筆紀錄。但要講一次，不然
         // 題庫會安靜地停止累積，而唯一的症狀是幾個月後發現它是空的。
-        if query_log
-            && let Err(e) = db.log_query(&sister_core::db::QueryLogEntry {
-                ts: sister_core::now_ms(),
-                question: text,
-                shape: shape.name(),
-                // ★ 答案和原文一起數。只數 `hits` 的那一版把 `sister query
-                // 電話` 記成「一筆都沒找到」——電話號碼是從 L1 事實那一欄
-                // 來的，全文比對確實是 0 筆，而那正是這個產品最典型的一次
-                // 成功。題庫裡最有價值的是「她答不出來」的那些題，所以這個
-                // 數字必須數他**看到了什麼**，不是內部走了哪一條路。
-                hits: answers.len() + hits.len(),
-                latency_ms: elapsed.as_millis() as i64,
-                source: sister_core::db::SOURCE_CLI,
+        let query_log_error = query_log
+            .then(|| {
+                db.log_query(&sister_core::db::QueryLogEntry {
+                    ts: sister_core::now_ms(),
+                    question: text,
+                    shape: shape.name(),
+                    // ★ 答案和原文一起數。只數 `hits` 的那一版把 `sister query
+                    // 電話` 記成「一筆都沒找到」——電話號碼是從 L1 事實那一欄
+                    // 來的，全文比對確實是 0 筆，而那正是這個產品最典型的一次
+                    // 成功。題庫裡最有價值的是「她答不出來」的那些題，所以這個
+                    // 數字必須數他**看到了什麼**，不是內部走了哪一條路。
+                    hits: answers.len() + hits.len(),
+                    latency_ms: elapsed.as_millis() as i64,
+                    source: sister_core::db::SOURCE_CLI,
+                })
             })
-        {
+            .and_then(Result::err);
+        if let Some(e) = query_log_error {
             eprintln!("  ⚠ 這一題沒記進題庫：{e}");
         }
 
@@ -17397,9 +17410,7 @@ pub mod doctor {
             // 對象，而且會比出一條永遠不會成立的規則：一條讀起來很對、卻
             // 一輩子命中不了任何東西的檢查，正是這個專案在獵的那種 bug。
             let limit = ocr.max_dimension();
-            if let Some(edge) = grabbed_edge
-                && edge > limit
-            {
+            if let Some(edge) = grabbed_edge.filter(|edge| *edge > limit) {
                 probes.push((
                     false,
                     "影像尺寸上限",
@@ -24827,15 +24838,16 @@ pub mod record {
             },
             || guarded_pause_signal(data_dir),
             |rec, ping_brain, recording_beat| {
-                if ping_brain && let Some(w) = wake.as_ref() {
+                if let Some(w) = wake.as_ref().filter(|_| ping_brain) {
                     w.ping();
                 }
 
                 // 設定改了就當場換上。**讀不出來就維持原樣，絕不退回預設值**——
                 // 預設值比任何一份使用者自訂的 blocklist 都寬鬆，所以一個打錯的
                 // TOML 會安靜地把排除規則全部拿掉。那是這裡唯一不能犯的錯。
-                if let Some(path) = watched.as_deref()
-                    && last_config_check.elapsed() >= CONFIG_EVERY
+                if let Some(path) = watched
+                    .as_deref()
+                    .filter(|_| last_config_check.elapsed() >= CONFIG_EVERY)
                 {
                     last_config_check = Instant::now();
                     if config_watch.changed(path) {

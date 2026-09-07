@@ -93,12 +93,12 @@ impl RetrievalProfile {
 
         let mut activities = Vec::new();
         let mut activities_truncated = false;
-        if self.wants_session()
-            && let Some((_, acts)) = db.chapters_for_question(question, now)?
-        {
-            activities_truncated = acts.len() > limits.text;
-            activities = acts;
-            activities.truncate(limits.text);
+        if self.wants_session() {
+            if let Some((_, acts)) = db.chapters_for_question(question, now)? {
+                activities_truncated = acts.len() > limits.text;
+                activities = acts;
+                activities.truncate(limits.text);
+            }
         }
 
         Ok(Retrieval {

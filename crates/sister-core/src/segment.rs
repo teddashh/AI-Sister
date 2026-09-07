@@ -601,13 +601,13 @@ fn insert_time_caps(
 }
 
 fn push_cut(out: &mut Vec<(Millis, Vec<CutKind>)>, ts: Millis, kinds: Vec<CutKind>) {
-    if let Some((last_ts, last_kinds)) = out.last_mut()
-        && *last_ts == ts
-    {
-        last_kinds.extend(kinds);
-        last_kinds.sort();
-        last_kinds.dedup();
-        return;
+    if let Some((last_ts, last_kinds)) = out.last_mut() {
+        if *last_ts == ts {
+            last_kinds.extend(kinds);
+            last_kinds.sort();
+            last_kinds.dedup();
+            return;
+        }
     }
     out.push((ts, kinds));
 }
@@ -642,10 +642,10 @@ fn representative(
             current = Some((id, p.ts));
         }
     }
-    if let Some((prev, since)) = current
-        && core_end > since
-    {
-        *dwell.entry(prev).or_default() += core_end - since;
+    if let Some((prev, since)) = current {
+        if core_end > since {
+            *dwell.entry(prev).or_default() += core_end - since;
+        }
     }
     let best = dwell.into_iter().max_by_key(|(_, ms)| *ms).map(|(w, _)| w);
     match best {

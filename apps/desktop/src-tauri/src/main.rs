@@ -31,6 +31,8 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, PhysicalPosition, WindowEvent};
 
 mod hands;
+#[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
+mod macos_ci;
 
 /// 行動紀錄那一欄一次顯示幾列。
 ///
@@ -253,14 +255,15 @@ fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, St
             let existing = db
                 .utterance_today_for(&day_key, candidate.category, &candidate.evidence)
                 .map_err(|e| format!("{e:#}"))?;
-            if let Some(row) = &existing
-                && let UtteranceDecision::Spoke { .. } = row.decision
-            {
-                // 已經講過了。人還沒回應就繼續顯示；回應過就今天不再提。
-                if row.reaction.is_none() && pending.as_ref().is_none_or(|p| p.id < row.id) {
-                    pending = existing;
+            match &existing {
+                Some(row) if matches!(row.decision, UtteranceDecision::Spoke { .. }) => {
+                    // 已經講過了。人還沒回應就繼續顯示；回應過就今天不再提。
+                    if row.reaction.is_none() && pending.as_ref().is_none_or(|p| p.id < row.id) {
+                        pending = existing;
+                    }
+                    continue;
                 }
-                continue;
+                _ => {}
             }
             let previous_hold = existing.and_then(|row| match row.decision {
                 UtteranceDecision::Held { reason } => Some(reason),
@@ -4013,6 +4016,24 @@ fn start_log_at(dir: &std::path::Path, name: &str) -> Option<std::fs::File> {
 }
 
 fn main() {
+    #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
+    match macos_ci::requested_directory() {
+        Ok(Some(directory)) => {
+            // 在 data dir、logging、WebView 與任何正常產品狀態之前走完。這個
+            // feature-only 入口只負責維持一棵可由 CI 查證的 app/child process tree。
+            if let Err(error) = macos_ci::run(&directory) {
+                eprintln!("macOS app-tree diagnostic failed: {error}");
+                std::process::exit(2);
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("macOS app-tree diagnostic arguments are invalid: {error}");
+            std::process::exit(2);
+        }
+    }
+
     let data_dir = sister_core::config::Config::default_data_dir();
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -4528,24 +4549,28 @@ fn main() {
                         // 終端機裡開的那一場不歸這個視窗管。
                         if let Some(dir) = shell.data_dir.as_deref() {
                             let mut spawned = shell.spawned.lock().expect("spawned recorder");
-                            if let Some(s) = spawned.as_mut()
-                                && matches!(s.child.try_wait(), Ok(None))
-                                && sister_core::heartbeat::safe_to_kill_spawn(
-                                    dir,
-                                    s.at,
-                                    sister_core::now_ms(),
-                                )
-                            {
-                                match s.child.kill() {
-                                    Ok(()) => {
-                                        tracing::info!(
-                                            "剛 spawn 出來還沒開資料庫，直接收掉：pid {}",
-                                            s.child.id()
-                                        );
-                                        // 收屍，不然她變 zombie 掛在我們身上。
-                                        let _ = s.child.wait();
+                            if let Some(s) = spawned.as_mut() {
+                                let still_running = matches!(s.child.try_wait(), Ok(None));
+                                if still_running
+                                    && sister_core::heartbeat::safe_to_kill_spawn(
+                                        dir,
+                                        s.at,
+                                        sister_core::now_ms(),
+                                    )
+                                {
+                                    match s.child.kill() {
+                                        Ok(()) => {
+                                            tracing::info!(
+                                                "剛 spawn 出來還沒開資料庫，直接收掉：pid {}",
+                                                s.child.id()
+                                            );
+                                            // 收屍，不然她變 zombie 掛在我們身上。
+                                            let _ = s.child.wait();
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("收不掉剛 spawn 的 recorder：{e}")
+                                        }
                                     }
-                                    Err(e) => tracing::error!("收不掉剛 spawn 的 recorder：{e}"),
                                 }
                             }
                         }
@@ -4561,13 +4586,15 @@ fn main() {
                         button_state: tauri::tray::MouseButtonState::Up,
                         ..
                     } = event
-                        && let Some(win) = tray.app_handle().get_webview_window(PET)
                     {
-                        if win.is_visible().unwrap_or(false) {
-                            let _ = win.hide();
-                        } else {
-                            let _ = win.show();
-                            let _ = win.set_focus();
+                        let pet_window = tray.app_handle().get_webview_window(PET);
+                        if let Some(win) = pet_window {
+                            if win.is_visible().unwrap_or(false) {
+                                let _ = win.hide();
+                            } else {
+                                let _ = win.show();
+                                let _ = win.set_focus();
+                            }
                         }
                     }
                 })
@@ -4627,9 +4654,11 @@ fn main() {
             if !consent_read(app.state::<Shell>())
                 .map(|v| v.allows_recording)
                 .unwrap_or(false)
-                && let Err(e) = open_onboarding_window(app.handle().clone())
             {
-                tracing::error!("同意書開不起來：{e}");
+                match open_onboarding_window(app.handle().clone()) {
+                    Ok(()) => {}
+                    Err(e) => tracing::error!("同意書開不起來：{e}"),
+                }
             }
 
             Ok(())

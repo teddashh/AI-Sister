@@ -324,6 +324,152 @@ jobs:
       - name: Cross-check the Windows half
         run: ./scripts/check-windows.sh
 
+  # `rust-version` 不是只給 resolver 看的標籤：用宣告的最低版真的編兩個
+  # workspace。desktop 放在 Windows 跑，因為 Linux runner 沒有 Tauri 的 GTK
+  # 系統函式庫；這格只證明 1.85 能編，不冒充 Windows 行為測試。
+  msrv:
+    name: Rust 1.85 — ${{ matrix.label }} compiles
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux root workspace
+          - os: windows-latest
+            label: Windows root and desktop workspaces
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Root workspace compiles on the declared minimum
+        run: cargo check --workspace --all-targets --locked
+
+      - name: Desktop workspace compiles on the declared minimum
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --all-targets --locked
+
+  # 第一個原生 macOS 證據只回答一個窄問題：一棵 ad-hoc signed Apple Silicon
+  # app tree 能不能由 LaunchServices 啟動 exact bundled child，並在 preflight
+  # 明確為 true 時嘗試一次 ScreenCaptureKit。它不寫像素／DB，也沒有產品同意書、
+  # Vision OCR、query/evidence 或 TCC 撤回生命週期，所以 job 與 artifact 都明講
+  # NOT PREVIEW；這格失敗也不擋 Windows release。
+  macos_spike:
+    name: macOS ARM64 — signed app-tree capture diagnostic (not Preview)
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Record the native runner and reject an unexpected architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            uname -a
+            sw_vers
+            rustup run 1.85.0 rustc -vV
+            rustc -vV
+            xcodebuild -version
+            printf 'macos_sdk='; xcrun --sdk macosx --show-sdk-version
+            printf 'runner_image_os=%s\n' "${ImageOS:-unavailable}"
+            printf 'runner_image_version=%s\n' "${ImageVersion:-unavailable}"
+          } > "$RUNNER_TEMP/macos-environment.txt"
+          cat "$RUNNER_TEMP/macos-environment.txt"
+          test "$(uname -m)" = arm64
+          rustup run 1.85.0 rustc -vV | grep -q '^host: aarch64-apple-darwin$'
+          rustc -vV | grep -q '^host: aarch64-apple-darwin$'
+
+      - name: Native macOS capture feature compiles on Rust 1.85
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.85.0 check -p sister-capture --all-targets --features macos-ci-spike --locked
+          cargo +1.85.0 check -p sister-cli --all-targets --features macos-ci-spike --locked
+
+      - name: Native macOS capture feature — format, lint and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy -p sister-capture --all-targets --features macos-ci-spike --locked -- -D warnings
+          cargo clippy -p sister-cli --all-targets --features macos-ci-spike --locked -- -D warnings
+          cargo test -p sister-capture --all-targets --features macos-ci-spike --locked
+          cargo test -p sister-cli --all-targets --features macos-ci-spike --locked
+
+      - name: Build the exact feature-gated sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.85.0 build --release -p sister-cli --features macos-ci-spike --locked
+          cp target/release/sister target/release/sister-aarch64-apple-darwin
+          test "$(lipo -archs target/release/sister-aarch64-apple-darwin)" = arm64
+
+      - name: Desktop app-tree feature compiles on 1.85, then lint and test it
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.85.0 check --manifest-path apps/desktop/src-tauri/Cargo.toml \
+            --all-targets --features macos-ci-spike --locked
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml \
+            --all-targets --features macos-ci-spike --locked -- -D warnings
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml \
+            --all-targets --features macos-ci-spike --locked
+
+      - name: Install the pinned Tauri bundler
+        run: cargo install tauri-cli --version 2.11.4 --locked
+
+      - name: Build an ad-hoc signed app tree (not a distributable Preview)
+        working-directory: apps/desktop/src-tauri
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: cargo tauri build --bundles app --features macos-ci-spike
+
+      - name: Inspect the live app tree and permit one no-persistence capture probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/macos-app-tree-spike.sh \
+            apps/desktop/src-tauri/target/release/bundle/macos/AI-Sister.app \
+            "$RUNNER_TEMP/macos-spike"
+          cp "$RUNNER_TEMP/macos-environment.txt" "$RUNNER_TEMP/macos-spike/environment.txt"
+
+      - name: Preserve and re-verify the exact ad-hoc app tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=apps/desktop/src-tauri/target/release/bundle/macos/AI-Sister.app
+          archive="$RUNNER_TEMP/AI-Sister-macOS-arm64-app-tree-spike-NOT-PREVIEW.zip"
+          expanded="$RUNNER_TEMP/reexpanded-app-tree"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$archive"
+          mkdir "$expanded"
+          ditto -x -k "$archive" "$expanded"
+          codesign --verify --deep --strict "$expanded/AI-Sister.app"
+          test "$(lipo -archs "$expanded/AI-Sister.app/Contents/MacOS/sister-desktop")" = arm64
+          test "$(lipo -archs "$expanded/AI-Sister.app/Contents/MacOS/sister")" = arm64
+
+      - name: Upload diagnostic evidence — never a Preview release asset
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-app-tree-spike-NOT-PREVIEW-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/AI-Sister-macOS-arm64-app-tree-spike-NOT-PREVIEW.zip
+            ${{ runner.temp }}/macos-spike
+            ${{ runner.temp }}/macos-environment.txt
+          if-no-files-found: warn
+          retention-days: 7
+
   # 真正的 Windows：這裡才會連結、才會執行 Win32 的單元測試。
   windows:
     name: Windows — test and build
@@ -846,7 +992,7 @@ jobs:
   # 打 tag 才發 release，這樣才有一個不用登入就能下載的連結。
   release:
     name: Release
-    needs: [linux, windows]
+    needs: [linux, msrv, windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

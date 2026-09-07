@@ -2,6 +2,7 @@
 name = "sister-capture"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -10,6 +11,9 @@ description = "AI-Sister capture layer: platform traits, replay backend, recordi
 [features]
 default = ["bundled-sqlite"]
 bundled-sqlite = ["sister-core/bundled-sqlite"]
+# 只給原生 macOS CI 的 app-tree diagnostic。shipping build 不啟用，這也還不是
+# production capture backend。
+macos-ci-spike = ["dep:objc2-core-graphics", "dep:screencapturekit"]
 
 [dependencies]
 sister-core.workspace = true
@@ -54,3 +58,7 @@ windows = { version = "0.62", features = [
 # xinput／xfixes 等尚未實作的能力一起帶進來。
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "=0.13.2", default-features = false, features = ["image", "randr"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGDirectDisplay", "CGWindow"], optional = true }
+screencapturekit = { version = "=9.0.1", default-features = false, features = ["macos_14_0"], optional = true }

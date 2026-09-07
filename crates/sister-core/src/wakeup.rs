@@ -550,10 +550,10 @@ impl Engine {
     }
 
     fn maybe_interval(&mut self, now: Millis) -> Result<()> {
-        if let Some(last) = self.last_review_at
-            && now.saturating_sub(last) < reviewer::MIN_INTERVAL_MS
-        {
-            return Ok(());
+        if let Some(last) = self.last_review_at {
+            if now.saturating_sub(last) < reviewer::MIN_INTERVAL_MS {
+                return Ok(());
+            }
         }
         if self.last_review_at.is_none()
             && now.saturating_sub(self.session_started_at) < reviewer::MIN_INTERVAL_MS

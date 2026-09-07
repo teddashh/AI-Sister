@@ -2,8 +2,8 @@
 name = "sister-desktop"
 version = "0.1.0-alpha.104"
 edition = "2024"
-# 和根 workspace 同一個地板，理由見那邊的註解。這是第二個 workspace，繼承不到。
-rust-version = "1.85"
+# 和根 workspace 同一個地板；這是第二個 workspace，所以在下方自己宣告再繼承。
+rust-version.workspace = true
 license = "Apache-2.0"
 repository = "https://github.com/teddashh/AI-Sister"
 authors = ["Ted Huang <ted@ted-h.com>"]
@@ -20,11 +20,17 @@ publish = false
 # 分開之後：根 workspace 照舊在 Linux 上跑全部測試，這個 crate 只在
 # Windows（CI 與 Ted 的機器）上編。代價是 sister-core 會被編兩次。
 [workspace]
+resolver = "3"
+
+[workspace.package]
+rust-version = "1.85"
 
 [features]
 default = ["bundled-sqlite"]
 # 見 sister-core 的同名 feature：關掉它才能從 Linux 對 Windows `cargo check`。
 bundled-sqlite = ["sister-core/bundled-sqlite"]
+# 只存在於 macOS CI 的 signed app-tree diagnostic；公開 build 不帶這個入口。
+macos-ci-spike = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

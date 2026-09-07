@@ -2661,15 +2661,15 @@ impl Db {
         // 索引（見 [`cjk_bigrams`]），問得到就不必掃全表——退場條件那句
         // `sister query 電話` 走的正是這條路。
         let mut bigram_saw_everything = false;
-        if hits.is_empty()
-            && let Some(bq) = bigram_query(query)
-        {
-            let (found, exhausted) = self.search_bigram(&bq, query, limit)?;
-            bigram_saw_everything = exhausted;
-            for hit in found {
-                if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(hit.chunk_id) {
-                    e.insert(hits.len());
-                    hits.push(hit);
+        if hits.is_empty() {
+            if let Some(bq) = bigram_query(query) {
+                let (found, exhausted) = self.search_bigram(&bq, query, limit)?;
+                bigram_saw_everything = exhausted;
+                for hit in found {
+                    if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(hit.chunk_id) {
+                        e.insert(hits.len());
+                        hits.push(hit);
+                    }
                 }
             }
         }
