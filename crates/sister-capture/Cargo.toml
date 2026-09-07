@@ -13,7 +13,11 @@ default = ["bundled-sqlite"]
 bundled-sqlite = ["sister-core/bundled-sqlite"]
 # 只給原生 macOS CI 的 app-tree diagnostic。shipping build 不啟用，這也還不是
 # production capture backend。
-macos-ci-spike = ["dep:objc2-core-graphics", "dep:screencapturekit"]
+macos-ci-spike = [
+    "dep:apple-metal",
+    "dep:objc2-core-graphics",
+    "dep:screencapturekit",
+]
 
 [dependencies]
 sister-core.workspace = true
@@ -60,5 +64,9 @@ windows = { version = "0.62", features = [
 x11rb = { version = "=0.13.2", default-features = false, features = ["image", "randr"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# ScreenCaptureKit 9.0.1 supports apple-metal >=0.6,<0.9. Versions after
+# 0.6.0 compile macOS 26 Metal state APIs even when only the macOS 14 SCK
+# feature is enabled, so they require an SDK newer than the macOS 15 runner.
+apple-metal = { version = "=0.6.0", default-features = false, optional = true }
 objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGDirectDisplay", "CGWindow"], optional = true }
 screencapturekit = { version = "=9.0.1", default-features = false, features = ["macos_14_0"], optional = true }
