@@ -545,13 +545,13 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     改成 [`docs/RELEASE-NOTES.md`](RELEASE-NOTES.md) 一個 tag 一節，
     `scripts/release-notes.sh` 組出來。**沒寫那一節不會退回上一版**，
     會印「這一版沒有寫版本說明」。
-  - 🔶 alpha.106 candidate 已接 current-user `AI-Sister-Setup.exe`：bundle 內是同一輪
-    build 的 exact `sister.exe` sidecar，另內嵌 WebView2 offline installer，所以安裝時
-    不需連網、代價是安裝包會顯著變大；exact 大小等 tag artifact 回收。Windows-only
+  - ✅ alpha.106 已接 current-user `AI-Sister-Setup.exe`：bundle 內是同一輪
+    build 的 exact `sister.exe` sidecar，另內嵌 WebView2 offline installer，設計為安裝時
+    不需連網、代價是安裝包會顯著變大；exact 大小以公開 Release asset 為準。Windows-only
     startup guard 補住官方 single-instance receiver 尚未建好的啟動競態；第二次開啟只
     請求顯示／聚焦原視窗，不碰 recorder。installer 的 hook 偵測到檢查當下已活著的
     desktop 或 recorder 時固定拒絕，不替使用者 kill；移除也走同一道 gate。
-  - 🔶 這個 candidate 的真 Windows/tag gate 尚待回收。預定 smoke 會做 fresh install、
+  - ✅ 原生 Windows CI 已做 fresh install、
     exact 三檔、setup／uninstaller 合法 NSIS 32-bit PE，以及兩個產品 payload 的 x64
     PE32+；啟動競態期間第二份也只能交棒、setup 對 desktop／recorder 兩種 exit 32
     拒絕且原 PID 存活、uninstaller 在 recorder 活著時 fail-closed、同一份 installer
@@ -559,10 +559,12 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     自我複製後不保證把 inner exit code 傳回 caller，所以只斷言行程與檔案未動。
     同版 reinstall 也**不是**真 old-binary → new-binary 的升級證據；silent NSIS 不會
     執行版本判斷頁，不能把 registry 改字當作升級測試。
+  - ⬜ 正式 `AI-Sister-Setup.exe` 的斷網安裝仍待 Ted 實測；在線 CI 與靜態網路邊界
+    只證明 WebView2 offline installer 已內嵌、程式沒有 updater／直接 socket。
   - ⬜ alpha.106 的 hook 後仍有一個窄窗：desktop 若恰在放行後才啟動，Tauri stock
     silent path 仍可能 kill；recorder 若此時才啟動則不會被 stock 重查，安裝／移除可能
     只做一部分。要移除 stock killer 或做 installer／app 協調後，才能承諾完整 lifecycle；
-    candidate 只承諾檢查當下已活著的 PID。
+    alpha.106 只承諾檢查當下已活著的 PID。
   - ⬜ code signing、真跨版升級、recorder watchdog/backoff、開機自啟、跨層 master
     stop 與官網仍未完成；1.0 不內建自動 updater，由使用者手動下載新版 installer。
 

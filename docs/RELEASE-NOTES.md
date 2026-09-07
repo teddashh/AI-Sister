@@ -17,10 +17,11 @@
 ## 開場
 
 Windows 預設下載 `AI-Sister-Setup.exe`。這是 current-user 安裝包，內嵌 WebView2
-offline installer 與同版 `sister.exe`，所以安裝時不需連網；代價是安裝包顯著變大，
-exact 大小以該 tag 的 asset 為準。Release 也保留 `sister.exe` 與
+offline installer 與同版 `sister.exe`，設計為安裝時不需連網；代價是安裝包顯著變大，
+exact 大小以該 tag 的 asset 為準。正式 artifact 的斷網安裝仍待實測。Release 也保留
+`sister.exe` 與
 `sister-desktop.exe`，只想跑 CLI、
-portable 使用或診斷 installer 問題時，請把兩個檔放在同一個資料夾。
+免安裝使用或診斷 installer 問題時，請把兩個檔放在同一個資料夾。
 
 目前 installer 沒有 code signing，也沒有內建自動 updater。升級是使用者手動下載新版
 `AI-Sister-Setup.exe`，先自行結束 desktop 並停止 recorder，再重新執行；安裝檢查開始時
@@ -59,14 +60,14 @@ sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 
 ## v0.1.0-alpha.106
 
-**這一版的 candidate 把 Windows 預設入口從兩個 loose exe 推進到 current-user 離線
-installer，並讓 desktop 在 Windows 上成為 single-instance；只有原生 Windows/tag gate
-全部通過才會公開 release。**
+**這一版把 Windows 預設入口從兩個 loose exe 推進到 current-user 離線 installer，
+並讓 desktop 在 Windows 上成為 single-instance。原生 Windows smoke 會在 tag 重跑；
+任一發布 gate 失敗都不會公開 release。**
 
 `AI-Sister-Setup.exe` 內嵌 WebView2 offline installer 與這一輪 build 的 exact
-`sister.exe` sidecar，安裝本身不用網路；安裝包會顯著變大，exact 大小等 tag artifact
-回收。`sister.exe`／`sister-desktop.exe` 仍作
-portable 與診斷備用，不會因有 installer 就拿掉。Windows startup guard 先補住官方
+`sister.exe` sidecar，設計為安裝時不用網路；安裝包會顯著變大，exact 大小以公開 Release
+asset 為準。`sister.exe`／`sister-desktop.exe` 仍作
+免安裝與診斷備用，不會因有 installer 就拿掉。Windows startup guard 先補住官方
 single-instance receiver 尚未建好的啟動競態，兩者都排在 logging、setup、tray 與產品
 狀態 mutation 之前；第二次啟動只向原本的字母人請求顯示並取得焦點，不建立第二份
 desktop，也不停止或重啟 recorder。顯示／焦點本身仍待正式 artifact 的人工真機確認。
@@ -74,15 +75,21 @@ desktop，也不停止或重啟 recorder。顯示／焦點本身仍待正式 art
 installer 的 preinstall／preuninstall hook 若看到同一個使用者的
 `sister-desktop.exe` 或 `sister.exe` 在檢查當下已活著，就拒絕，不採用「替你 kill
 再繼續」。setup 可觀察到固定 exit 32；uninstaller 會自我複製到 temp，外層不保證轉交
-inner exit code，所以那一面驗的是原 PID 與 install root 都沒動。tag gate 將在真
-Windows 做 fresh install，核對 install root 恰為 desktop、
+inner exit code，所以那一面驗的是原 PID 與 install root 都沒動。原生 Windows CI
+已做 fresh install，核對 install root 恰為 desktop、
 sidecar、uninstaller 三檔；setup／uninstaller 必須是合法 NSIS 32-bit PE，desktop／
 sidecar payload 則必須是 x64 PE32+。再實際啟動第二份 desktop、分別讓 desktop 與
 recorder 活著撞 installer，要求第二份正常退出、
 兩次 setup 拒絕都不殺原 PID，並在 recorder 活著時實跑 uninstaller 的 fail-closed
-路徑。它也會用同一份 installer 原地 reinstall，核對 install root 外的記憶 DB hash
+路徑。它也用同一份 installer 原地 reinstall，核對 install root 外的記憶 DB hash
 不變，最後 uninstall 並確認那份外部記憶仍在。解除安裝頁的 checkbox 已精確改成
 「清除桌面外殼資料（AI-Sister 記憶會保留）」，不再把兩種資料說成同一件事。
+
+Tauri 會在打進 NSIS 前把 desktop 的唯一 package marker 從 `UNK` 改成 `NSS`，完成後
+再還原 build tree；因此不能把兩個不同 hash 硬說成同一檔。發布管線先逐 byte 驗證差異
+只能是那三個 marker bytes，再從成功安裝的 root staging 公開版
+`sister-desktop.exe`。公開的免安裝 desktop 就是這份 NSS-marked payload；它與 fresh
+install、reinstall 後 install root 裡的檔案逐 byte 相同，fresh-install 那份另有實際啟動。
 
 同版 silent reinstall **不是**真的舊版 binary → 新版 binary upgrade evidence；silent
 NSIS 不會執行版本判斷頁，不能靠改 registry 版本字串冒充。第一版 installer 發出後，

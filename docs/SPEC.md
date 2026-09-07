@@ -581,7 +581,7 @@ renderer 顯示文字逐字等於 embedded transcript 的 line 才能進播放 a
 | 向量（選配） | `sqlite-vec` 0.1.9（2026 復活版；256-d int8 MRL，brute-force 在我們規模內互動級） | pre-1.0 格式風險 → 存 model-id+dim，設計成可背景 re-embed |
 | 本地 embedding | 遠期選配；Release 1.0 沒有內嵌推論 runtime | 腦優先 spawn 使用者已登入的 CLI；沒有 HTTP client |
 | 磁碟保護 | SQLite/frame 無應用層加密；依賴 BitLocker／FileVault／LUKS | 未開 OS 全碟加密時，離線竊碟者可讀；PRIVACY／THREAT_MODEL 明講 |
-| UI shell | **Tauri 2** Rust backend + build-free HTML/CSS/ES modules；tray + global-shortcut 已落地 | alpha.106 candidate 新增 Windows startup guard + 官方 single-instance receiver，以及 current-user NSIS：exact sidecar + offline WebView2，原生 tag gate 尚待回收；code signing／真跨版升級／autostart／watchdog 仍是 Release 1.0 工作，不內建自動 updater |
+| UI shell | **Tauri 2** Rust backend + build-free HTML/CSS/ES modules；tray + global-shortcut 已落地 | alpha.106 新增 Windows startup guard + 官方 single-instance receiver，以及 current-user NSIS：exact sidecar + offline WebView2；原生 Windows CI 已驗 install／process refusal／reinstall／uninstall mechanics。顯示與聚焦仍待人工證據，late-process 窄窗、code signing／真跨版升級／autostart／watchdog 仍是 Release 1.0 工作；不內建自動 updater |
 | Pet overlay | always-on-top 透明無框窗 + `set_ignore_cursor_events` 動態 toggle（輪詢游標；Tauri 無 per-region hit-testing）| 已知坑：macOS production 透明窗 bug 群、全螢幕 space 需動 collectionBehavior、Wayland overlay 品質差 |
 | macOS 權限 | `tauri-plugin-macos-permissions` 2.3（Screen Recording 無 entitlement，純 TCC + hardened runtime + notarization；MAS 不可行，站外發行） | 開發期 `tccutil reset ScreenCapture` 測 onboarding |
 | hands | **Rust crate `sister-hands`**，CLI／desktop 共用 permit 與 target policy | 尚未做獨立 process；需要時另立 threat-model milestone |
