@@ -1065,6 +1065,7 @@ jobs:
           $installDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-smoke'
           $dataDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-memory'
           $configPath = Join-Path $env:RUNNER_TEMP 'ai-sister-installer.toml'
+          $releaseDesktop = Join-Path (Get-Location) 'sister-desktop.exe'
           if ($installDir -match '\s' -or $dataDir -match '\s' -or $configPath -match '\s') {
             throw 'NSIS /D 與 recorder smoke 使用的暫存路徑不可含空白'
           }
@@ -1109,6 +1110,19 @@ jobs:
             }
           }
 
+          function Assert-ExactFile([string] $leftPath, [string] $rightPath, [string] $failure) {
+            [byte[]] $left = [IO.File]::ReadAllBytes($leftPath)
+            [byte[]] $right = [IO.File]::ReadAllBytes($rightPath)
+            if ($left.Length -ne $right.Length -or
+                -not [System.Linq.Enumerable]::SequenceEqual[byte]($left, $right)) {
+              $leftHash = [Convert]::ToHexString(
+                [Security.Cryptography.SHA256]::HashData($left))
+              $rightHash = [Convert]::ToHexString(
+                [Security.Cryptography.SHA256]::HashData($right))
+              throw ("{0}：left={1} right={2}" -f $failure, $leftHash, $rightHash)
+            }
+          }
+
           function Assert-NsisDesktopPayload([string] $installedPath, [string] $portablePath) {
             # tauri-bundler 會在打進 NSIS 前，把 main binary 裡唯一的 fixed-width
             # package marker 從 UNK 改成 NSS，完成後再把 target/release 還原成
@@ -1124,6 +1138,9 @@ jobs:
               throw 'portable desktop 沒有恰好一個 Tauri UNK bundle marker'
             }
             [byte[]] $replacement = [Text.Encoding]::ASCII.GetBytes($nsis)
+            if ($replacement.Length -ne $unknown.Length) {
+              throw 'Tauri NSS 與 UNK marker 不再等長；不能安全做原位來源驗證'
+            }
             [Array]::Copy($replacement, 0, $expected, $marker, $replacement.Length)
 
             [byte[]] $actual = [IO.File]::ReadAllBytes($installedPath)
@@ -1131,7 +1148,8 @@ jobs:
               [Security.Cryptography.SHA256]::HashData($expected))
             $actualHash = [Convert]::ToHexString(
               [Security.Cryptography.SHA256]::HashData($actual))
-            if ($actual.Length -ne $expected.Length -or $actualHash -ne $expectedHash) {
+            if ($actual.Length -ne $expected.Length -or
+                -not [System.Linq.Enumerable]::SequenceEqual[byte]($actual, $expected)) {
               throw "安裝後 desktop 不是這一輪 portable 的 exact NSIS-marker 衍生檔：expected=$expectedHash actual=$actualHash"
             }
           }
@@ -1151,6 +1169,12 @@ jobs:
           }
           Assert-NsisDesktopPayload $desktop `
             'apps/desktop/src-tauri/target/release/sister-desktop.exe'
+          if (Test-Path -LiteralPath $releaseDesktop) {
+            throw "release desktop staging 起點不乾淨：$releaseDesktop"
+          }
+          Copy-Item -LiteralPath $desktop -Destination $releaseDesktop
+          Assert-ExactFile $releaseDesktop $desktop `
+            'release desktop staging 不是 fresh install 實際執行的 exact payload'
           $version = (Get-Content 'apps/desktop/src-tauri/tauri.conf.json' -Raw |
             ConvertFrom-Json).version
           $reported = & $sister --version
@@ -1301,6 +1325,8 @@ jobs:
           $dbHash = (Get-FileHash $db -Algorithm SHA256).Hash
           Run-Setup 0
           Assert-ProductFiles
+          Assert-ExactFile $desktop $releaseDesktop `
+            'reinstall 後的 desktop 不再等於準備公開的 exact installer payload'
           if ((Get-FileHash $db -Algorithm SHA256).Hash -ne $dbHash) {
             throw 'installer reinstall 改動了 install root 之外的既有記憶資料庫'
           }
@@ -1326,7 +1352,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ai-sister-desktop-x64
-          path: apps/desktop/src-tauri/target/release/sister-desktop.exe
+          path: sister-desktop.exe
           if-no-files-found: error
           retention-days: 30
 
