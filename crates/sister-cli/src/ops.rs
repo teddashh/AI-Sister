@@ -26824,6 +26824,7 @@ pub mod record {
 
         /// CPU 欄位必須接平均百分比，不能接成這場累積用掉的 CPU 秒數。
         #[test]
+        #[cfg(any(target_os = "linux", windows))]
         fn measure_uses_cpu_percent_instead_of_cpu_seconds_used() {
             let f = sister_capture::footprint::Footprint::new();
             let from_percent = f.cpu_percent();
