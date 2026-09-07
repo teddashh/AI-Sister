@@ -556,7 +556,12 @@ jobs:
           set -euo pipefail
           S=./target/release/sister.exe
           OCR_CONFIG=./ci-ocr.toml
-          printf '[capture]\nocr = true\n' > "$OCR_CONFIG"
+          # Hosted runner 的 foreground 可能正好是 Edge。alpha.103 起，只要有
+          # URL 排除規則而地址列問不到，正確行為就是整拍 fail closed；拿那場
+          # 當 capture positive control 會變成「隱私閘門成功，所以錄製測試失敗」。
+          # 這支 smoke 測的是 live loop／OCR／stop，URL Unknown 的正反面已由
+          # core 與 recorder tests 獨立守。明確清空規則，別靠 runner 當下焦點猜。
+          printf '[capture]\nocr = true\n\n[privacy]\nexcluded_urls = []\n' > "$OCR_CONFIG"
 
           # 這道閘門擋下來過**這一步自己**：alpha.14 加了同意書之後，CI 第一次
           # 跑就在這裡失敗，錯誤訊息是「還沒有人同意讓她記錄這台機器的螢幕」。
