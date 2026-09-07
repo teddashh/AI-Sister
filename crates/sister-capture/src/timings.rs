@@ -9,8 +9,8 @@
 //! 那個最好改的地方，而不是那個最貴的地方。
 //!
 //! 量測本身必須便宜到可以忽略：`Instant::now()` 在 Windows 上是
-//! QueryPerformanceCounter，數十奈秒，一個 tick 取樣六次，對一個每
-//! 400ms 才跑一次的迴圈來說不存在。
+//! QueryPerformanceCounter，數十奈秒；每個實際外部讀取各取一對樣本，
+//! 對一個每 400ms 才跑一次的迴圈來說不存在。
 
 use std::num::NonZeroU64;
 use std::time::Duration;
@@ -58,6 +58,10 @@ pub struct Timings {
     /// 一份效能報告最會騙人的形狀：沒被量到的那一段完全不會出現在版面上，
     /// 於是「我量到的最大的那一項」看起來就像「最大的那一項」。
     pub tick: Stage,
+    /// 讀跨行程暫停控制檔的 snapshot；不含後續 audit／source 封邊界。
+    pub pause_probe: Stage,
+    /// 向 OS lifecycle source 讀目前鎖定／睡眠狀態；不含驗證與 DB audit。
+    pub system_poll: Stage,
     /// 問前景視窗是誰（含 UIA 的跨程序往返）。
     pub focus: Stage,
     /// 讀剪貼簿。**每個 tick 都付**，而且是一次跨程序的 Win32 往返。
@@ -85,6 +89,8 @@ impl Timings {
     /// 而且會讓百分比加起來超過 100%。
     pub fn ranked(&self) -> Vec<(&'static str, Stage)> {
         let mut v = vec![
+            ("暫停檢查", self.pause_probe),
+            ("系統檢查", self.system_poll),
             ("脈絡", self.focus),
             ("剪貼簿", self.clipboard),
             ("輸入", self.input),
@@ -156,15 +162,17 @@ mod tests {
     fn the_ranking_names_the_expensive_stage_first_and_hides_the_unused() {
         let mut t = Timings::default();
         t.ocr.record(Duration::from_millis(50));
+        t.pause_probe.record(Duration::from_millis(40));
+        t.system_poll.record(Duration::from_millis(30));
         t.grab.record(Duration::from_millis(10));
 
         let names: Vec<&str> = t.ranked().iter().map(|(n, _)| *n).collect();
         assert_eq!(
             names,
-            vec!["OCR", "抓圖"],
+            vec!["OCR", "暫停檢查", "系統檢查", "抓圖"],
             "最貴的要排第一，沒跑過的不佔版面"
         );
-        assert_eq!(t.total(), Duration::from_millis(60));
+        assert_eq!(t.total(), Duration::from_millis(130));
     }
 
     /// 沒量過整個 tick 的時候，「沒歸因到的時間」必須說不知道。

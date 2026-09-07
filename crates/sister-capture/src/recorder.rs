@@ -833,7 +833,10 @@ impl<B: Backend> Recorder<B> {
         &mut self,
         probe: &mut dyn FnMut() -> PauseSignal,
     ) -> Result<PauseCheck> {
-        match probe() {
+        let started = Instant::now();
+        let signal = probe();
+        self.timings.pause_probe.record(started.elapsed());
+        match signal {
             // Replay／直接測試沒有跨行程 state。Recording 不能順便 resume：
             // 呼叫端若先用 set_paused(true)，普通 tick 必須一直停到它明確解除。
             PauseSignal::Recording => Ok(if self.paused {
@@ -1040,7 +1043,10 @@ impl<B: Backend> Recorder<B> {
             return Ok(SystemGate::PendingCommitted);
         }
 
-        let observation = match self.backend.poll_system(ts) {
+        let started = Instant::now();
+        let observation_result = self.backend.poll_system(ts);
+        self.timings.system_poll.record(started.elapsed());
+        let observation = match observation_result {
             Ok(observation) => observation,
             Err(error) => {
                 self.seal_system_gap(ts);
@@ -2276,6 +2282,16 @@ mod tests {
             Tick::Paused
         );
         assert!(recorder.is_paused());
+        assert_eq!(
+            recorder.timings().pause_probe.calls,
+            2,
+            "entry 與 privacy 後的 pause probe 都要記帳"
+        );
+        assert_eq!(
+            recorder.timings().system_poll.calls,
+            1,
+            "走過的 system poll 要記帳"
+        );
         let order = &calls.borrow().order;
         assert!(
             order.contains(&"privacy"),
@@ -2849,6 +2865,16 @@ mod tests {
                         .contains("read system state before content")
                 );
             }
+            assert_eq!(
+                recorder.timings().pause_probe.calls,
+                1,
+                "system gate 前的 pause probe 要記帳"
+            );
+            assert_eq!(
+                recorder.timings().system_poll.calls,
+                1,
+                "unknown 與 error 回答都必須記下實際 poll"
+            );
             let calls = calls.borrow();
             assert_eq!(
                 calls.order,
