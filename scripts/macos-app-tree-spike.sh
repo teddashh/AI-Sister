@@ -166,8 +166,8 @@ if test "$ready" != true; then
   exit 1
 fi
 
-read -r app_pid child_pid < <(
-  python3 - "$probe" "$main" "$child" "$output/process-paths.json" <<'PY'
+python3 - "$probe" "$main" "$child" "$output/process-paths.json" \
+  > "$output/live-pids.txt" <<'PY'
 import ctypes
 import json
 import os
@@ -240,7 +240,7 @@ output_path.write_text(
 )
 print(app["pid"], child["pid"])
 PY
-)
+read -r app_pid child_pid < "$output/live-pids.txt"
 [[ "$app_pid" =~ ^[0-9]+$ ]]
 [[ "$child_pid" =~ ^[0-9]+$ ]]
 kill -0 "$app_pid"
@@ -396,4 +396,25 @@ if kill -0 "$app_pid" 2>/dev/null; then
   printf 'app process is still alive after LaunchServices returned\n' >&2
   exit 1
 fi
+
+# This file can only appear after every bundle, live-process, capture and no-orphan
+# assertion above has completed. The workflow checks its exact contents separately so a
+# shell/parser quirk cannot turn an early exit into a green diagnostic again.
+python3 - "$output/complete.json" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(path, flags, 0o600)
+try:
+    payload = json.dumps({"schema": 1, "all_checks_completed": True}, indent=2) + "\n"
+    os.write(fd, payload.encode("utf-8"))
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
 trap - EXIT

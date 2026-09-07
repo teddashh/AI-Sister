@@ -442,6 +442,16 @@ jobs:
           ./scripts/macos-app-tree-spike.sh \
             apps/desktop/src-tauri/target/release/bundle/macos/AI-Sister.app \
             "$RUNNER_TEMP/macos-spike"
+          python3 - "$RUNNER_TEMP/macos-spike/complete.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          record = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected = {"schema": 1, "all_checks_completed": True}
+          if record != expected:
+              raise SystemExit(f"macOS diagnostic did not complete every check: {record!r}")
+          PY
           cp "$RUNNER_TEMP/macos-environment.txt" "$RUNNER_TEMP/macos-spike/environment.txt"
 
       - name: Preserve and re-verify the exact ad-hoc app tree
