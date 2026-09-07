@@ -1,7 +1,10 @@
 # AI-Sister — Final Spec
 
-> 版本：v1.0（2026-08-17）。本 spec 是 roundtable 辯論（7 題 × 5 輪）收斂 + 外部研究後的
-> 最終技術規格。產品定義見 [PRODUCT.md](PRODUCT.md)，階段規劃見 [PHASES.md](PHASES.md)。
+> 版本：v1.0（2026-08-17；2026-09-06 收斂現況）。本 spec 是 roundtable 辯論
+> （7 題 × 5 輪）收斂 + 外部研究後的技術規格。產品定義見 [PRODUCT.md](PRODUCT.md)，
+> 階段規劃與**目前有效的 Release 1.0 合約**見 [PHASES.md](PHASES.md)。本文件保留
+> 部分被實作推翻的歷史決策來解釋來路；若與具日期的偏離紀錄、PHASES 或現行程式
+> 衝突，以後三者為準，不能把舊選型直接當待辦。
 > 狀態標記：〔定案〕辯論已收斂／〔決定〕辯論未解、由本 spec 拍板（附理由）／〔待驗〕要靠 replay 評測回答。
 
 ---
@@ -11,7 +14,8 @@
 所有資料屬於四層之一，層與層之間的規則不可違反：
 
 ```
-L0 原始證據 (Evidence)     — append-only，不經 LLM，不可改寫，可過期刪除（帶墓碑）
+L0 原始證據 (Evidence)     — 存在期間 append-only、不經 LLM、不改寫；保留期或使用者
+                             刪除時物理清內容，並 cascade 清掉衍生內容
 L1 可確認事實 (Facts)      — 程式（regex/rule）從 L0 抽出，零 LLM，typed + indexed
 L2 暫時解釋 (Hypotheses)   — LLM 產物；每筆掛 confidence + 證據指標；只能追加新版本，
                              不能覆寫舊版本；可被推翻、可過期
@@ -30,37 +34,33 @@ L3 可更新狀態 (State)      — 承諾/未完成事項/實體/偏好；每�
    使用者鍵盤輸入與 UI 按鈕 = 指令；網頁/郵件/文件/截圖裡的文字 = 資料。
    任何來自 L0 的內容永不進入 system prompt 的指令位置；一律以 data block
    包裹並標示來源（prompt-injection 的第一道防線；全行業空白，我們把它做成標準）。
-5. **每一句對使用者說出口的話，都要能沿 L3→L2→L0 點回當時的畫面。**
+5. **每一句對使用者說出口的事實，都要能沿 provenance 點回本機證據。** 有被同意
+   保留且尚未過期的 frame 才顯示畫面；text-only／已過期時要明講只剩文字、時間或
+   來源，不能把一個不存在的圖示畫成可點。
 
 ## §1. 系統總覽
 
 ```
-┌─ sister-core（Rust daemon，開機自啟，無 UI 也活著）────────────────┐
-│  Capture 感官層 ──> L0/L1 落地（SQLite + frame files，全本機）      │
-│  Segmenter 斷句器（純程式，事件+相似度+時間上限）                    │
-│  Interpreter workers 解釋工作槽（事件驅動喚醒，預算制）→ L2          │
-│  Reviewer 批次審閱者（15–30min/次 + 日終盤點）→ L2 修訂 + L3        │
-│  Gatekeeper 守門員（開口候選評分、預算、quiet hours）                │
-│  Query engine（FTS + facts + 選配向量）＋ loopback API（token 驗證）│
+┌─ sister / sister-core（Rust）──────────────────────────────────────┐
+│  recorder process：Capture → L0/L1（SQLite + frame files，全本機） │
+│  Segmenter / Interpreter / Reviewer / Gatekeeper / Query engine   │
 └──────────────────────────────────────────────────────────────────┘
-        ▲ loopback HTTP/WS（nonce/session，MAT/TokenMonster 模式）
-┌─ sister-shell（Tauri 2：Rust 薄殼 + TS UI）────────────────────────┐
-│  字母人/姊妹角色視窗（transparent、pin、dragbar、close→tray）        │
-│  對話面板、時間軸瀏覽器、記憶瀏覽器、同意書/設定、開發者模式          │
+            ▲ sibling process + 共用 data dir；沒有 HTTP／WS／socket
+┌─ sister-desktop（Tauri 2 Rust backend + 原生 HTML/CSS/ES module）──┐
+│  字母人／姊妹、對話、時間軸、同意書、設定、開發者模式               │
+│  renderer 只經 Tauri IPC 呼叫同一行程裡的 Rust                     │
 └──────────────────────────────────────────────────────────────────┘
-┌─ sister-hands（Node sidecar，Phase 6+ 才存在）─────────────────────┐
-│  MAT adapter 層移植：claude/codex/grok/OpenRouter 官方 runtime      │
-│  semi-action 執行器（逐步核准、螢幕驗證、可逆白名單）                │
+┌─ sister-hands（Rust crate；CLI 與 desktop 共用唯一授權邊界）──────┐
+│  observe / suggest / semi-action；平台 executor 是封閉 capability │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-拓撲決策〔決定〕：core 與 shell **邏輯分離**（記錄不因 UI 崩潰中斷；shell 重啟不丟資料）；
-hands 獨立 sidecar（權限邊界物理隔離：沒裝 hands 的系統物理上沒有手）。
-三者只經 loopback 通訊，對外零 port。
-**部署拓撲 per-OS**〔tech-stack 裁決〕：Windows = core 可為真背景 daemon；
-macOS = **capture 必須跑在簽名 .app 的主程序樹內**（TCC 不認裸 sidecar；
-「常駐」由 close→tray 的 tray-resident app 達成，不是獨立 launchd daemon），
-OCR/索引 worker 才走 bundled sidecar。capture trait 抽象不變，宿主程序按平台掛載。
+現行拓撲〔2026-09-06〕：core 與 shell **邏輯分離**；長時間 recorder 是桌面可啟動的
+sibling process，資料與 UI 生命週期分開。Tauri renderer 直接走 IPC，沒有早期草案的
+loopback HTTP/WS、nonce server 或對外 port。hands 已是 Rust crate 與型別隘口，不是
+Node sidecar；若未來真需要更強的 OS process isolation，再用實際 threat model 另立里程碑。
+macOS 的 capture 仍必須住在簽名 `.app` 主程序樹內以維持 TCC identity；這個平台限制
+不代表要把已移除的 loopback 拓撲裝回來。capture trait 抽象不變，宿主按平台掛 adapter。
 
 ## §2. Capture 感官層規格
 
@@ -135,7 +135,9 @@ CPU 的 `<3%` 不再是 Phase 0 gate：alpha.46 在 Ted 的真 Windows、1920×1
 CPU 仍然每場照實量；這個 Phase 0 例外不等於刪掉正式產品的長期目標，也不把
 44.0% 改寫成一條新的通用預算。
 
-（數字依 `research/tech-stack.md` 論證；這張表是長期產品的 release blocker。
+（數字依 `research/tech-stack.md` 論證；這張表是長期優化目標，不是 Release 1.0 的
+精確數字 gate。發布仍要照實列當版實測，且無上限成長／資料損失不能放行；但依
+2026-08-23 決策，不為湊 `<3%` 或 `<300MB/天` 停掉功能發版。
 競爭基準：Screenpipe 官方自承 5–10% CPU / 0.5–3GB RAM / 5–20GB/月
 ——我們不錄影不錄音、text-first，量級直接少一個 0。）
 
@@ -276,13 +278,16 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   `macos-private-api`+`tauri-nspanel` 且有 DMG 透明失效與 **GPU 功耗 8×** 的已知 issue
   → 對策：角色動畫用低 fps 靜態立繪 crossfade（TokenMonster 本來的做法，不是巧合），
   提供「不透明小窗」低功耗模式，透明模式的功耗列入 §2.3 電池預算量測。
-- 識別：字母人 letter-avatar（day-one、離線、零資產）→ 四姊妹立繪選配
-  （明確同意後 CDN 單次下載；`ai-sister` bucket 現成）。
+- 識別：Neutral 與四個 catalog 身分各有 day-one、離線、零資產的 code-native
+  字母 fallback；Neutral 是預設。Release 1.0 提供 Aster／Cedar／Mira／Rook
+  catalog、立繪與固定語音。資產只能由使用者在看見
+  CDN host、實際大小與資料邊界後明確按下下載，整包驗證成功才原子啟用。
 - 狀態表達（不彈窗）：`idle`（呼吸）／`paused`（閉眼 = capture 停）／
   `thinking`（微動）／`has-something`（微光 + 一個小點，像未讀）。
-  點角色 → 對話面板。tap-lines 台詞引擎沿用。
+  點角色 → 一句本機 deterministic tap-line；不點不出聲。persona 不得影響答案、
+  證據、同意書、Gatekeeper 或 hands；固定語音不朗讀 OCR／回憶／私人答案。
 
-### 8.2 對話（被動答題——永遠可用，這是 1.0 的全部）
+### 8.2 對話（被動答題——永遠可用，這是 Release 1.0 的核心）
 
 - 輸入框隨時可問；查詢管線：意圖解析（1 次 LLM 或規則）→ L1/FTS/（選配向量）檢索
   → 附出處作答（1 次 LLM 潤句；離線模式退化為結果列表）。
@@ -328,8 +333,10 @@ a 類（顯式時間承諾）**——這兩類是「使用者自己能立刻驗�
    無人值守不是把一句舊的「好」重播，而是每一步重新檢查授權範圍、期限、步數與
    目標來源，再鑄出只對該具體動作有效的 permit〔定案：CLI 證明的是互動可行，
    不是授權夠精確〕。授權是結構化物件，不是一句話。目前 saved grant 落地的是
-   `grant = {task, apps[], allowed_actions[], expiry, step_limit}`；Final Spec 仍要加入
-   `data_scope` 與 `denied_actions[]`——例：「允許修改草稿、不允許寄出、五分鐘後失效」。
+   `grant = {task, apps[], allowed_actions[], expiry, step_limit}`。現在的三種 action
+   沒有資料 payload，先加 `data_scope`／`denied_actions[]` 只會造出沒人讀的假授權；
+   新增資料型或不可逆 action 時，才必須在同一版把對應 scope／deny 語意與 enforcement
+   原子加入。
 2. **可逆性是分界線**〔定案〕：不可逆動作在任何模式下都需要顯式即時核准；
    **永不繼承清單**〔定案〕：送出、發布、付款、刪除、開 terminal——
    這五類權限不隨任務授權繼承，每次都要單獨核准。
@@ -338,8 +345,10 @@ a 類（顯式時間承諾）**——這兩類是「使用者自己能立刻驗�
    **「接手模式」（takeover）**，因為它承諾的是「有邊界地接手」，不是「自動駕駛」。
 3. **驗證迴圈**〔定案：解 35% 複利魔咒的不是步準確率〕：每步後截圖驗證結果，
    失敗即停；任務有 scope 描述、停止條件、步數上限、完整 action log。
-   **硬中斷是 OS 級的**〔定案〕：全域快捷鍵 + tray 按鈕直接 kill hands process，
-   實作在模型碰不到的層（不是請模型停，是把手拔掉）；不綁 Esc（太容易誤觸與被吃）。
+   **硬中斷在模型碰不到的層**〔定案〕：全域快捷鍵 + tray kill flag 阻止下一步並讓
+   executor fail-closed（不是請模型停）；不綁 Esc（太容易誤觸與被吃）。目前 hands
+   不是獨立 process，已交給 OS 的單一步驟也不能假裝可撤回；若要宣稱 process kill
+   或 rollback，必須先真的加入對應隔離與可逆機制。
 4. **來源防線**：畫面文字 = 資料不是指令（§0.4）；hands 的 system prompt
    不接受任何 L0 內容作為指令，L0 最多只能提供 typed fact 與候選動作，永遠不能
    自己成為授權。互動路徑要有當場按下的 `UserButtonPress`；無人值守路徑則須同時
@@ -419,11 +428,13 @@ claude code / codex / grok / gemini cli。所以 L2/L3 那個腦要接的第一�
 沒有改變的：**畫面一粒 pixel 都不出去**，只有 OCR 抽出來的字；
 沒簽第二張同意書一次都不送；剪貼簿秘密偵測（§11.2）仍然不落地。
 
-### 11.4 保留與加密
+### 11.4 保留與磁碟邊界
 
-分層 TTL（預設）：變化幀 30 天 → 縮圖 90 天 → OCR/L1 365 天 → L3 直到結案。
-SQLCipher 或 OS-keyring 包裹的 at-rest 加密；一鍵 pause；一鍵 panic wipe
-（含 export 先行選項）；時間軸瀏覽器可框選區間刪除（cascade）。
+現行 TTL（預設）：畫面 PNG 30 天；OCR/L1 文字 365 天；沒有一個程式其實未產生的
+「90 天縮圖層」。資料庫與 frame **沒有應用層加密**，依賴 BitLocker／FileVault／LUKS
+等 OS 全碟加密；匯出檔也不會自己加密。這個邊界要在產品裡明講，不能再用 SQLCipher
+選型表暗示已防離線竊碟。已有一鍵 pause、時間軸區間刪除與 cascade；panic wipe 與
+跨 capture／brain／hands 的單一「全部停止」是另列的產品／實作工作，未完成前不宣稱。
 
 ### 11.5 旁人問題（誠實聲明）〔定案為無技術完解〕
 
@@ -432,29 +443,36 @@ SQLCipher 或 OS-keyring 包裹的 at-rest 加密；一鍵 pause；一鍵 panic 
 (c) 文件（PRIVACY.md）誠實陳述此邊界，
 不假裝解決了。法域註記：部分地區對「記錄他人通訊」有法律風險，文件明示。
 
-### 11.6 供應商端留存（第三張同意書的誠實註腳）
+### 11.6 供應商端留存（第二張同意書的誠實註腳）
 
 螢幕文字上雲後仍受各模型商 abuse-monitoring 留存政策約束。而且它是原文
 （§11.3），所以這一節比原本更重要。對策：
 (a) 文件列出各 provider 的留存/zero-retention 選項，預設推薦有 ZDR 的通道；
-(b) 上雲內容全部可在「外送紀錄」面板檢視（送了什麼、給誰、何時）。
+(b) 「外送紀錄」面板列出可驗證的命令、角色、字數、時間、結果與截斷狀態；不另外
+複製一份敏感 OCR 原文來假裝審計更完整。要看下一次會送什麼，走 dry-run。
 
 ### 11.7 可驗證性（Recall 的教訓：「宣稱本機」不夠）
 
-加密可驗證（文件化金鑰鏈）、開機自動鎖（session 未解鎖不解密）、
-**master kill switch 一鍵全停**（Recall 至今沒有）、
-非本人帳號/離線竊碟不可讀 DB（TotalRecall 級攻擊的防線）、安全審計歡迎聲明。
+同意書 fail-closed、capture-time 排除、零遙測掃描、可見的錄製狀態、
+可驗證的 pause／刪除／匯出，以及 **master stop 一鍵全停**是可驗證面。
+磁碟由 OS 全碟加密保護；應用程式不宣稱未實作的自動鎖、keychain 或離線 DB 加密。
 誠實邊界：**同使用者 session 內的 malware 不在防護範圍**——userland OSS
 做不到 Recall 的 VBS enclave + TPM 綁定，README 明講，不假裝。
 
 ### 11.8 資料主權（Rewind 的教訓：closed product 的退場 = 記憶滅絕）
 
-**開放資料格式**：SQLite schema 公開文件化、`sister export` 全量匯出、
-沒有任何功能依賴我們的伺服器。就算本專案死了，你的記憶還是你的。
+**開放資料格式**：SQLite schema 公開文件化、`sister export` 全量匯出。S1 記憶功能
+與已下載素材不依賴我們的伺服器；Persona 首次取得固定 pack 需要使用者明確發起 CDN
+下載。就算本專案或 CDN 消失，既有記憶仍可讀、匯出，已驗本機素材也仍可用。
 
 ### 11.9 遙測
 
-零遙測預設。opt-in 匿名計數器（Cloudflare D1 模式，TokenMonster 現成）。
+**零遙測。** Release 1.0 不內建 Cloudflare D1 或其他 usage counter。Persona 的固定
+asset-pack GET 是使用者當下發起的內容下載，不是遙測；它仍須揭露 CDN 能看到的
+一般網路 metadata，且不得夾帶角色選擇、使用狀態或任何記憶內容。
+首版四位角色共用同一個 omnibus pack 與 exact hash path，切換 persona 不改 URL、
+header 或 body；未來若改成分包，必須先把 path 可透露哪一包寫進揭露，不能沿用
+「不帶角色選擇」的舊承諾。
 
 ## §12. Replay 評測（第一級公民，不是附件）〔定案：全場唯一無異議的下一步〕
 
@@ -499,7 +517,7 @@ SQLCipher 或 OS-keyring 包裹的 at-rest 加密；一鍵 pause；一鍵 panic 
 - i18n：zh-TW / en day one（MAT i18n 骨架）；
 - 可觀測：開發者模式面板（L2 卡片流、回查 log、開口候選與分數）——
   預設關閉〔定案〕；
-- 所有內部 IPC strict Zod/serde schema（Ted 兩 repo 的一貫簽名）。
+- 所有內部 Tauri IPC 使用 strict serde DTO；前端對封閉集合做窮舉檢查。
 
 ## §15. 技術選型
 
@@ -507,28 +525,28 @@ SQLCipher 或 OS-keyring 包裹的 at-rest 加密；一鍵 pause；一鍵 panic 
 
 | 元件 | 選型 | 備註 |
 |---|---|---|
-| core daemon | **Rust** 單 binary（Tauri sidecar 形式打包，獨立於 UI 存活） | macOS TCC 權限歸屬 responsible process——sidecar 必須簽進 .app bundle，權限只要一次 |
-| 截圖 | Windows Phase 0：Win32 GDI（BitBlt／GetDIBits）；後續候選：Windows WGC、macOS ScreenCaptureKit、Linux PipeWire | 目前只有 Windows GDI 已落地 |
+| core runtime | **Rust** crates + `sister` recorder/CLI；desktop 以 sibling process 啟動 recorder、以 Tauri IPC 進 Rust backend | 無 loopback server；macOS capture 必須簽進 `.app` responsible process tree |
+| 截圖 | Windows：Win32 GDI（BitBlt／GetDIBits）；macOS Preview：ScreenCaptureKit；Linux Preview：X11，Wayland 只保留實驗性 portal 路線 | 目前只有 Windows GDI 已落地 |
 | 去重／OCR gate | 自製 64-bit dHash（預設 Hamming ≤5 視為近似同幀）+ 64×64 RGB tile FNV-1a；Windows Phase 0 的近似重複幀只讓能一對一拼回舊閱讀順序的 crop 升格，其餘維持重複；dHash 新幀的局部證據不足才退回全幅 | 沒有使用 DXGI dirty rects |
 | OCR | macOS：Apple Vision（zh-Hant 一等公民，accurate ~0.3–1.4s/全幅，搭配 OCR gate 只跑 crop）；Windows：**Phase 0 實作改用 `Windows.Media.Ocr`，見 §14.1**；PP-OCRv5 via `oar-ocr` 保留為精準度升級路線；TextRecognizer 鎖 Copilot+ NPU；OneOCR 授權灰色，只做使用者自機 opt-in；Tesseract 僅最後底線 | 搜尋前全半形正規化 + OpenCC 繁簡歸一 |
 | DB | SQLite 3.53（`rusqlite` 0.40，WAL）+ **FTS5 trigram + unicode61 + bigram 三索引**（external-content table；trigram 補 CJK 子字串、unicode61 補英文整詞、`text_fts_bi` 補**兩個字的中文**——unicode61 把整串 CJK 當一個 token，`MATCH "客服"` 是 0 筆，schema 3 之前只剩夾在 30 天內的 LIKE 掃描。bigram 是粗篩，命中要拿真字串再驗一次；只剩單字查詢仍走掃描） | 之後要拼音再上 `simple` tokenizer |
 | 向量（選配） | `sqlite-vec` 0.1.9（2026 復活版；256-d int8 MRL，brute-force 在我們規模內互動級） | pre-1.0 格式風險 → 存 model-id+dim，設計成可背景 re-embed |
-| 本地 embedding | `fastembed` 6.0：EmbeddingGemma-300m 首選（量化 <200MB RAM）/ Qwen3-Embedding-0.6B 品質檔 | 批次排到 idle/插電 |
-| 加密 | SQLCipher 4.13（開銷 5–15%）+ `keyring` 4.1（OS keychain 金鑰） | 誠實威脅模型：同使用者 malware 不在防護範圍（userland OSS 做不到 Recall 的 VBS enclave），README 明講 |
-| UI shell | **Tauri 2.11** + React + Tailwind；plugins：tray、global-shortcut、autostart、notification、clipboard-manager、single-instance、positioner、shell、updater | Screenpipe/Cap 同路線的大型先例存在 |
+| 本地 embedding | 遠期選配；Release 1.0 沒有內嵌推論 runtime | 腦優先 spawn 使用者已登入的 CLI；沒有 HTTP client |
+| 磁碟保護 | SQLite/frame 無應用層加密；依賴 BitLocker／FileVault／LUKS | 未開 OS 全碟加密時，離線竊碟者可讀；PRIVACY／THREAT_MODEL 明講 |
+| UI shell | **Tauri 2** Rust backend + build-free HTML/CSS/ES modules；tray + global-shortcut 已落地 | autostart／single-instance／正式 installer／updater 仍是 Release 1.0 工作 |
 | Pet overlay | always-on-top 透明無框窗 + `set_ignore_cursor_events` 動態 toggle（輪詢游標；Tauri 無 per-region hit-testing）| 已知坑：macOS production 透明窗 bug 群、全螢幕 space 需動 collectionBehavior、Wayland overlay 品質差 |
 | macOS 權限 | `tauri-plugin-macos-permissions` 2.3（Screen Recording 無 entitlement，純 TCC + hardened runtime + notarization；MAS 不可行，站外發行） | 開發期 `tccutil reset ScreenCapture` 測 onboarding |
-| hands sidecar | **Node ≥20 TS**（Phase 6+） | 直接重用 MAT adapters/signin |
-| Schema | serde + Zod（跨層 contract 生成） | |
+| hands | **Rust crate `sister-hands`**，CLI／desktop 共用 permit 與 target policy | 尚未做獨立 process；需要時另立 threat-model milestone |
+| Schema | Rust serde DTO + 前端封閉集合檢查 | 沒有 Zod／codegen build step |
+| Persona assets | 本機 catalog + 每位的字母 fallback（Neutral 預設）；內容定址的固定 CDN pack、明確點擊、完整驗證後原子啟用 | recorder/core 保持零網路；下載邊界依 PHASES Release 1.0 合約 |
 | hands 元件（Phase 6+） | Agent S3（Apache-2.0）/ UFO²（MIT）/ OmniParser v3 weights（MIT，避開舊 AGPL detector） | 「手」已商品化：用組的，不自己寫 grounding |
 | 參考不引用 | Screenpipe（2026-06 起自訂商業授權，僅參考架構；MIT fork point 在舊版）；Everywhere（BUSL，僅 MCP/API interop） | license 判定見 research/landscape.md |
 
-平台順序〔決定〕：**Windows 首發**（最友善平台：WGC 24H2 dirty rects +
-MinUpdateInterval 免費變化偵測、無擷取指示、Ted 日用、Recall 陰影下最大受眾）；
-macOS 於 Phase 5 公開宣傳前補齊（紫點與 TCC 憲法見 §2.4）；
-Linux **X11 首發、Wayland 明示降級**〔定案〕——Wayland 背景連續擷取是架構性死路
-（restore_token 單次、鎖屏拒發、GNOME 缺 toplevel/idle-notify），不承諾、文件明講。
-capture 從 day 1 走 trait 抽象，三平台介面同形。
+Release 1.0 平台層級〔2026-09-06 決定〕：**Windows GA**；macOS Public Preview；
+Linux X11-only Developer Preview。只有 Windows 是平台支援 blocker；Preview 沒達到
+自己的 native capture/OCR/privacy/artifact 最小合約就不發該 artifact，不能拿 replay
+冒充。Wayland 背景連續擷取與隱私脈絡不足，明示 unsupported／degraded，不承諾
+always-on。capture 從 day 1 走 trait 抽象，但「介面同形」不等於能力未知時可以放行。
 
 ### §14.1 偏離紀錄：Windows OCR 引擎（Phase 0）
 
@@ -582,6 +600,6 @@ capture 從 day 1 走 trait 抽象，三平台介面同形。
 | 5 | autopilot | Phase 7、白名單+可逆+預檢+獨立 sidecar | 記憶會歪的東西不能直接點滑鼠；物理隔離 |
 | 6 | 開源時機 | repo 早開、宣傳晚放 | 公開 ≠ 發布，兩事件解耦 |
 | 7 | License | Apache-2.0 | 目標是名聲與採用；local-first 不怕託管 |
-| 8 | 平台 | Windows → macOS → Linux | Ted 日用 + 受眾 + API 成熟度 |
+| 8 | 平台 | ~~Windows → macOS → Linux~~；2026-09-06 改為 Windows GA、Linux X11 Developer Preview 與 macOS Public Preview 可依可驗環境平行推進 | Ted 日用決定 GA；Preview 不假裝等同正式支援，實作順序見 PHASES／handoff |
 | 9 | 8/3 兩個數字 | worker pool 參數（預設 4/上限 8）與 Reviewer 雙 pass | 排程真相 + 並聯辯證，數字本身無意義 |
 | 10 | 回饋分類 | 兩鍵（結案/其他），三分類內部推斷 | 使用者不會標三層意圖 |

@@ -7,6 +7,12 @@ const el = {
   brainCommand: document.querySelector("[data-brain-command]"),
   brainArgs: document.querySelector("[data-brain-args]"),
   brainSay: document.querySelector("[data-brain-say]"),
+  personaEnabled: document.querySelector("[data-persona-enabled]"),
+  personaId: document.querySelector("[data-persona-id]"),
+  personaTagline: document.querySelector("[data-persona-tagline]"),
+  personaMotion: document.querySelector("[data-persona-motion]"),
+  personaTapLines: document.querySelector("[data-persona-tap-lines]"),
+  personaAssets: document.querySelector("[data-persona-assets]"),
   apps: document.querySelector("[data-apps]"),
   urls: document.querySelector("[data-urls]"),
   titles: document.querySelector("[data-titles]"),
@@ -27,6 +33,16 @@ const el = {
   save: document.querySelector("[data-save]"),
   reload: document.querySelector("[data-reload]"),
 };
+
+// alias／tagline 與桌面上的 allowlist 同一份公開 catalog；這裡只負責讓使用者在
+// 存之前看懂自己選的是誰，不把任何一段 personaContext 或 prompt 送進模型。
+const PERSONA_TAGLINES = Object.freeze({
+  neutral: "原來的字母人；安靜待著，只在你點她或問她時回應。",
+  chatgpt: "沉著務實，會把選項整理清楚，陪你照自己的步調決定。",
+  claude: "溫柔細膩，願意留白，也陪你慢慢想清楚每個細節。",
+  gemini: "好奇敏銳，喜歡發現日常模式，從不替你的節奏打分。",
+  grok: "直率活潑，帶點玩心，給你輕快但不催促的陪伴。",
+});
 
 function say(message, bad = false) {
   el.say.textContent = message;
@@ -529,12 +545,67 @@ let cloudOk = null;
 let watchingNow = "none";
 let savedBrainCommand = "";
 
+function paintPersonaSettings() {
+  if (!el.personaEnabled || !el.personaId) return;
+  const known = Object.hasOwn(PERSONA_TAGLINES, el.personaId.value)
+    ? el.personaId.value
+    : "neutral";
+  if (known !== el.personaId.value) el.personaId.value = known;
+  if (el.personaTagline) el.personaTagline.textContent = PERSONA_TAGLINES[known];
+
+  // 關掉角色不等於清掉他的選擇：三格只灰掉、值留著，下次打開還是同一位。
+  const controlsOff = unreadable || !el.personaEnabled.checked;
+  el.personaId.disabled = controlsOff;
+  if (el.personaMotion) el.personaMotion.disabled = controlsOff;
+  if (el.personaTapLines) el.personaTapLines.disabled = controlsOff;
+}
+
+async function refreshPersonaAssets() {
+  if (!el.personaAssets) return;
+  if (invoke === null) {
+    el.personaAssets.textContent = "這一頁不在 AI-Sister 裡，問不到本機素材狀態。";
+    return;
+  }
+  try {
+    const personaView = await invoke("persona_read");
+    const pack = personaView?.asset_pack;
+    switch (pack?.phase) {
+      case "installed": {
+        const hasPortrait = pack.portrait?.data_url?.startsWith?.("data:image/") === true;
+        const voices = Array.isArray(pack.voice_lines) ? pack.voice_lines.length : 0;
+        el.personaAssets.textContent =
+          `已驗證的素材包在本機：${hasPortrait ? "有立繪" : "沒有立繪"}、` +
+          `${voices === 0 ? "沒有固定台詞語音" : `${voices} 句固定台詞語音`}。`;
+        return;
+      }
+      case "available":
+        el.personaAssets.textContent = "有一份固定素材包可取得，但這一版沒有在這裡下載。";
+        return;
+      case "installing":
+        el.personaAssets.textContent = "固定素材包正在安裝；完成以前繼續使用字母人。";
+        return;
+      case "repair-needed":
+        el.personaAssets.textContent = "本機素材包驗證失敗；目前只使用字母人。";
+        return;
+      case "unavailable":
+      default:
+        el.personaAssets.textContent = "目前只有內建字母人；沒有可用的本機立繪或語音包。";
+    }
+  } catch {
+    el.personaAssets.textContent = "問不到本機素材狀態；字母人仍可使用。";
+  }
+}
+
 function apply(s) {
   queryLogWas = s.query_log;
   savedBrainCommand = (s.brain_command ?? "").trim();
   el.path.textContent = s.path;
   if (el.brainCommand) el.brainCommand.value = s.brain_command ?? "";
   if (el.brainArgs) el.brainArgs.value = (s.brain_args ?? []).join("\n");
+  if (el.personaEnabled) el.personaEnabled.checked = s.persona_enabled !== false;
+  if (el.personaId) el.personaId.value = s.persona_id ?? "neutral";
+  if (el.personaMotion) el.personaMotion.checked = s.persona_motion !== false;
+  if (el.personaTapLines) el.personaTapLines.checked = s.persona_tap_lines !== false;
   el.apps.value = s.excluded_apps.join("\n");
   el.urls.value = s.excluded_urls.join("\n");
   el.titles.value = s.excluded_titles.join("\n");
@@ -543,6 +614,7 @@ function apply(s) {
   el.querylog.checked = s.query_log;
   el.framesDays.value = s.frames_days;
   el.textDays.value = s.text_days;
+  paintPersonaSettings();
 }
 
 /**
@@ -680,6 +752,10 @@ function setUnreadable(on) {
   for (const node of [
     el.brainCommand,
     el.brainArgs,
+    el.personaEnabled,
+    el.personaId,
+    el.personaMotion,
+    el.personaTapLines,
     el.apps,
     el.urls,
     el.titles,
@@ -714,6 +790,7 @@ function setUnreadable(on) {
   // 命令框被清空之後，這一格會看起來像「她沒有 CLI 可以叫」。那是假的——
   // 正在跑的那一份我們讀不到。藏起來，讓上面那句「都不算數」說話。
   paintBrain();
+  paintPersonaSettings();
 }
 
 /**
@@ -735,6 +812,7 @@ async function load() {
     apply(await invoke("settings_read"));
     setUnreadable(false);
     say("");
+    await refreshPersonaAssets();
     await refreshBrainFacts();
     paintBrain();
     await relint();
@@ -803,7 +881,14 @@ function demo(variant) {
     text_days: 365,
     brain_command: "",
     brain_args: [],
+    persona_enabled: true,
+    persona_id: "chatgpt",
+    persona_motion: true,
+    persona_tap_lines: true,
   });
+  if (el.personaAssets) {
+    el.personaAssets.textContent = "目前只有內建字母人；沒有可用的本機立繪或語音包。";
+  }
   // 第二條規則故意是壞的，這樣才看得到警告那一格長什麼樣。理由字串抄自
   // `suspicious_url_rules` 真正回傳的那一句。
   paintLint([
@@ -942,6 +1027,10 @@ async function save() {
         text_days: days(el.textDays, "文字"),
         brain_command: (el.brainCommand?.value ?? "").trim(),
         brain_args: toLines(el.brainArgs?.value ?? ""),
+        persona_enabled: el.personaEnabled?.checked === true,
+        persona_id: el.personaId?.value ?? "neutral",
+        persona_motion: el.personaMotion?.checked === true,
+        persona_tap_lines: el.personaTapLines?.checked === true,
         // `path` 不送。要寫到哪個檔案由 Rust 那邊算，不是這一頁說了算。
       },
     });
@@ -990,9 +1079,13 @@ async function save() {
     // **在 `load()` 之前算完**：它會把 `el.querylog.checked` 和 `queryLogWas`
     // 一起換成剛存進去的那一份，那之後這個比較永遠是 false。
     const justTurnedOff = queryLogWas === true && el.querylog.checked === false;
-    const message = justTurnedOff
+    const persistedMessage = justTurnedOff
       ? `${watching}\n從現在起她不會再記你問過的問題。先前記下的那些不會因為這個動作消失——要清掉請用時間軸的「忘掉這一段」，或等文字保留期到。`
       : watching;
+    const personaEventMissed = outcome?.persona_event_emitted === false;
+    const message = personaEventMissed
+      ? `${persistedMessage}\n角色設定已存進檔案，但即時更新事件沒能送出；重新啟動 AI-Sister desktop 後會讀到。`
+      : persistedMessage;
     // 存進去的是剪過空白、丟過空行的版本，畫面要跟著變成那個樣子，
     // 不然他看到的和檔案裡的是兩份東西。
     //
@@ -1005,7 +1098,7 @@ async function save() {
     // 卻讀不出來，多半是我們剛剛寫壞了那個檔——那件事比「存好了」急，而且
     // 「存好了」在那個當下已經不是一句完整的真話。
     if (await load()) {
-      say(message);
+      say(message, personaEventMissed);
     }
   } catch (err) {
     say(String(err?.message ?? err), true);
@@ -1027,6 +1120,8 @@ async function save() {
 el.save?.addEventListener("click", () => void save());
 el.reload?.addEventListener("click", () => void load());
 el.brainCommand?.addEventListener("input", () => paintBrain());
+el.personaEnabled?.addEventListener("change", paintPersonaSettings);
+el.personaId?.addEventListener("change", paintPersonaSettings);
 
 const variant = new URLSearchParams(globalThis.location.search).get("demo");
 if (variant !== null) {

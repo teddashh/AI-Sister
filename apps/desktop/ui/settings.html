@@ -41,6 +41,47 @@
       -->
       <p class="health" data-machine hidden></p>
 
+      <section>
+        <h2>角色</h2>
+        <label class="check">
+          <input type="checkbox" data-persona-enabled />
+          <span>
+            顯示字母人
+            <em>關掉只拿掉角色與固定台詞；記錄、搜尋、狀態、暫停和時間軸都不變。</em>
+          </span>
+        </label>
+        <label class="field">
+          <span>常駐角色</span>
+          <select data-persona-id>
+            <option value="neutral">Neutral — 原來的 S 字母人</option>
+            <option value="chatgpt">Aster — 受 ChatGPT 啟發</option>
+            <option value="claude">Cedar — 受 Claude 啟發</option>
+            <option value="gemini">Mira — 受 Gemini 啟發</option>
+            <option value="grok">Rook — 受 Grok 啟發</option>
+          </select>
+        </label>
+        <p class="persona-tagline" data-persona-tagline></p>
+        <p class="hint">
+          四位是受供應商產品啟發的虛構角色；AI-Sister 是獨立產品，未與這些供應商
+          合作、隸屬或獲其背書。
+        </p>
+        <label class="check">
+          <input type="checkbox" data-persona-motion />
+          <span>
+            角色動畫
+            <em>關掉後不呼吸、不搖晃；系統的「減少動態效果」仍永遠優先。</em>
+          </span>
+        </label>
+        <label class="check">
+          <input type="checkbox" data-persona-tap-lines />
+          <span>
+            點角色時說一句固定台詞
+            <em>只在你按角色或用 Enter／Space 按下她時出現；不會計時開口，也不叫模型。</em>
+          </span>
+        </label>
+        <p class="state" data-persona-assets>正在讀本機素材狀態…</p>
+      </section>
+
       <!--
         這一格決定「她看到的字會不會離開這台機器」——比排除規則更外面一層。
         排除規則決定她看得到什麼；沒填命令（或第二張同意書沒勾），那些字

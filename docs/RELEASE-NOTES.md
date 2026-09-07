@@ -42,6 +42,32 @@ sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.101
+
+**四位姊妹先住進設定與桌面；這一版不把尚未接好的立繪／語音說成已經完成。**
+
+設定頁現在可以選 Neutral、Aster、Cedar、Mira 或 Rook，也可以分別關掉角色、動畫與
+點擊台詞。選擇會寫回 typed config；存成功後會送出即時更新事件，已開啟的桌面通常
+不用重開；若事件連送出都失敗，設定頁會明講已存檔並請使用者重啟。
+每位有固定 ID、名稱、palette、tagline 與三句 deterministic 台詞；未知 ID 會拒絕，
+不會悄悄變成另一位。
+
+桌面上的角色改成原生 button，所以滑鼠、Enter 與 Space 都走同一條 click 語意。
+冷啟動、五秒輪詢、錄製狀態、Gatekeeper、hands 與模型都不會觸發台詞；程式合成的
+click 也不算使用者操作。關掉 Persona 只拿掉角色和台詞，記錄、搜尋、狀態、暫停與
+時間軸不受影響。系統的「減少動態效果」仍優先於 Persona 動畫選項。
+
+這一版的素材 resolver 明確回 `unavailable`，設定頁會照實顯示目前只有字母人。
+**沒有 CDN 請求、沒有遠端圖像、沒有語音播放。** 後端與前端已留出五態的 fixed-pack
+接口，但只有通過後續內嵌 authority、整包／逐檔驗證與本機 cache gate 的素材才能填入；
+即使未來素材已安裝，固定語音仍要同時通過聲音偏好，且只服務當次使用者點擊。
+
+路線圖也把原本口語上的「Windows 1.0」改成可逐項驗收的 **Release 1.0 合約**：
+Windows 是正式支援平台，macOS 是 Public Preview，Linux 是 X11-only Developer
+Preview。Persona 的立繪／固定語音體驗是產品 blocker，但使用者關閉、只用 Neutral
+或永遠不下載素材都是必須完整支援的正常路徑。CDN 是交付機制，不是產品賣點。
+
+
 ## v0.1.0-alpha.100
 
 **你不在的時候，她可不可以自己按網址，現在由你回答；產品不會替你選。**

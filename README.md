@@ -1,4 +1,4 @@
-# AI-Sister（字母人）
+# AI-Sister
 
 > 一個站在桌面角落的姊妹。她一直都在，看得見你的一天，記得住細節，
 > 95% 的時間安靜，該說話的時候才說話——說的每一句都能點開證據。
@@ -8,9 +8,10 @@
 > who knows when to stay quiet. Screen pixels never leave your machine; after
 > explicit opt-in, OCR text can be handed to the local CLI you configured.
 
-**Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Phase 6
-仍在進行，整體 prompt-injection 退場條件尚未完成。** 可以從
-[Releases](https://github.com/teddashh/AI-Sister/releases) 下載來跑。
+**Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Persona
+本機骨架也已落地，但立繪／固定語音 pack 與安裝／更新工程還沒完成，所以現在還不是
+Release 1.0。** Windows 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
+可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
 
 她開始看之前有**三張各自獨立、隨時撤得掉的同意書**，條文和效力就是：
 
@@ -69,6 +70,14 @@ sister record --duration 60
 然後開 `sister-desktop.exe` 問她剛剛那一分鐘發生了什麼，或者直接 `sister query 電話`。
 `doctor` 排在錄之前是有意的：它會當場示範這台機器**現在**讀不讀得到網址、
 OCR 有沒有裝、哪幾條排除規則其實不生效——比錄完 60 秒才發現什麼都沒進去好。
+
+**alpha.101 可以在設定裡選 Neutral、Aster、Cedar、Mira 或 Rook，也可以關掉角色、
+動畫或點擊台詞。** 四位姊妹目前先以各自的字母、顏色與三句固定文字落地；只有你
+真的按下角色（或在原生按鈕上用 Enter／Space）才會說下一句，不叫模型、不改答案，
+也不因開場、輪詢、錄製或記憶事件自己開口。這一版仍誠實顯示「只有內建字母人」：
+**沒有下載 CDN、沒有顯示立繪，也沒有播放語音。** 現成 image+voice pack 的明確揭露、
+固定下載、完整驗證、原子安裝與撤回會在下一段接入；每位的字母呈現都留作離線
+fallback，Neutral 則是永遠可選的預設。
 
 **alpha.100 多問一個只關於無人值守網址的問題。** 設定尚未回答時，第一次開
 `sister-desktop.exe` 會直接問：「有時候我讀到的東西裡會有一個網址。你不在的時候，

@@ -331,6 +331,9 @@ pub struct ShellConfig {
     /// 預設關閉：一般使用者不該在系統匣看到一扇要自己選 eval report JSON
     /// 的門。這個開關只決定頁面入口是否出現，不會讓記錄器多寫任何資料。
     pub developer_mode: bool,
+    /// 常駐角色的本機設定。它只改桌面殼的外觀與「點一下」台詞；錄製、搜尋、
+    /// 守門員、手與模型路徑一個欄位都不讀。
+    pub persona: PersonaConfig,
 }
 
 impl Default for ShellConfig {
@@ -341,6 +344,130 @@ impl Default for ShellConfig {
             pause_shortcut: "Ctrl+Alt+P".to_string(),
             hands_stop_shortcut: "Ctrl+Alt+H".to_string(),
             developer_mode: false,
+            persona: PersonaConfig::default(),
+        }
+    }
+}
+
+/// Persona catalog 的穩定 ID。
+///
+/// 四個非 neutral 的值刻意沿用既有 TokenMonster catalog 的 provider ID；畫面上
+/// 顯示的是 Aster／Cedar／Mira／Rook。把 alias 當設定值會讓未來的固定素材包還得
+/// 再維護一張翻譯表，也容易把「角色叫什麼」和「素材 manifest 指誰」接反。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PersonaId {
+    #[default]
+    Neutral,
+    Chatgpt,
+    Claude,
+    Gemini,
+    Grok,
+}
+
+/// 設定頁的三個 bool 長得一樣，但接反會改變完全不同的事。用不同 newtype 讓
+/// `visible / motion / tap-lines` 的順序錯誤在編譯時就停下來，而不是靠欄位名祈禱。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PersonaVisible(bool);
+
+impl PersonaVisible {
+    pub const fn new(value: bool) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> bool {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PersonaMotionEnabled(bool);
+
+impl PersonaMotionEnabled {
+    pub const fn new(value: bool) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> bool {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PersonaTapLinesEnabled(bool);
+
+impl PersonaTapLinesEnabled {
+    pub const fn new(value: bool) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> bool {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PersonaVoiceEnabled(bool);
+
+impl PersonaVoiceEnabled {
+    pub const fn new(value: bool) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> bool {
+        self.0
+    }
+}
+
+/// 只屬於桌面表達層的 Persona 設定。
+///
+/// `voice_enabled` 先留作本機 fixed-pack 的 fail-closed 開關；Persona v1 沒有內建
+/// 聲音、設定頁也不會把它打開。未來即使素材包已安裝，少了這個明確選擇仍然不播。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PersonaConfig {
+    pub enabled: bool,
+    pub id: PersonaId,
+    pub motion: bool,
+    pub tap_lines: bool,
+    pub voice_enabled: bool,
+}
+
+impl PersonaConfig {
+    /// UI 邊界不要各自從四個同型別欄位拔裸 bool；getter 直接產生不同 newtype，
+    /// 把「欄位名對、值拿錯」也變成編譯錯誤。
+    pub const fn visible(self) -> PersonaVisible {
+        PersonaVisible::new(self.enabled)
+    }
+
+    pub const fn motion_enabled(self) -> PersonaMotionEnabled {
+        PersonaMotionEnabled::new(self.motion)
+    }
+
+    pub const fn tap_lines_enabled(self) -> PersonaTapLinesEnabled {
+        PersonaTapLinesEnabled::new(self.tap_lines)
+    }
+
+    pub const fn voice_enabled(self) -> PersonaVoiceEnabled {
+        PersonaVoiceEnabled::new(self.voice_enabled)
+    }
+}
+
+impl Default for PersonaConfig {
+    fn default() -> Self {
+        Self {
+            // 保留目前出廠就看得到、會微動的 S 字母人；新增的台詞只會在他明確
+            // 點下角色（原生 button 的 Enter／Space 也會產生 click）後出現。
+            enabled: true,
+            id: PersonaId::Neutral,
+            motion: true,
+            tap_lines: true,
+            // 素材與同意邊界尚未接入；不能因為哪天本機多出一個檔案就自己開始播。
+            voice_enabled: false,
         }
     }
 }
@@ -725,6 +852,23 @@ impl Config {
     pub fn set_brain_cli_from_page(&mut self, command: String, args: Vec<String>) {
         self.brain.command = command;
         self.brain.args = args;
+    }
+
+    /// 設定頁能改的 Persona 四格。未露出的 `voice_enabled` 原封不動。
+    ///
+    /// 聲音需要另一道素材權利／同意邊界；只是換字母或關動畫，不能順手把那道
+    /// 選擇打開或重設。收成一個函式，讓 desktop 不必重建整份 `PersonaConfig`。
+    pub fn set_persona_from_page(
+        &mut self,
+        visible: PersonaVisible,
+        id: PersonaId,
+        motion: PersonaMotionEnabled,
+        tap_lines: PersonaTapLinesEnabled,
+    ) {
+        self.shell.persona.enabled = visible.get();
+        self.shell.persona.id = id;
+        self.shell.persona.motion = motion.get();
+        self.shell.persona.tap_lines = tap_lines.get();
     }
 }
 
@@ -1622,6 +1766,95 @@ mod tests {
         let text = toml::to_string_pretty(&enabled).expect("serialize");
         let back: Config = toml::from_str(&text).expect("deserialize");
         assert!(back.shell.developer_mode);
+    }
+
+    #[test]
+    fn old_shell_config_gets_the_quiet_neutral_persona_default() {
+        let old: Config =
+            toml::from_str("[shell]\npause_shortcut = \"Ctrl+Alt+P\"\n").expect("old shell config");
+        assert_eq!(old.shell.persona, PersonaConfig::default());
+        assert!(old.shell.persona.enabled);
+        assert_eq!(old.shell.persona.id, PersonaId::Neutral);
+        assert!(old.shell.persona.motion);
+        assert!(old.shell.persona.tap_lines);
+        assert!(!old.shell.persona.voice_enabled, "舊設定不能自己得到語音");
+    }
+
+    #[test]
+    fn every_persona_id_and_local_switch_survives_a_round_trip() {
+        for id in [
+            PersonaId::Neutral,
+            PersonaId::Chatgpt,
+            PersonaId::Claude,
+            PersonaId::Gemini,
+            PersonaId::Grok,
+        ] {
+            let mut config = Config::default();
+            config.shell.persona = PersonaConfig {
+                enabled: false,
+                id,
+                motion: false,
+                tap_lines: false,
+                voice_enabled: true,
+            };
+            let text = toml::to_string_pretty(&config).expect("serialize persona");
+            let back: Config = toml::from_str(&text).expect("deserialize persona");
+            assert_eq!(back.shell.persona, config.shell.persona, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn settings_page_persona_write_cannot_change_the_unexposed_voice_gate() {
+        let mut config = Config::default();
+        config.shell.persona.voice_enabled = true;
+        config.set_persona_from_page(
+            PersonaVisible::new(false),
+            PersonaId::Grok,
+            PersonaMotionEnabled::new(true),
+            PersonaTapLinesEnabled::new(false),
+        );
+
+        assert_eq!(config.shell.persona.id, PersonaId::Grok);
+        assert!(!config.shell.persona.enabled);
+        assert!(config.shell.persona.motion);
+        assert!(!config.shell.persona.tap_lines);
+        assert!(
+            config.shell.persona.voice_enabled,
+            "換外觀的設定頁沒有畫聲音同意，不能重設那道 gate"
+        );
+
+        assert_eq!(
+            serde_json::to_value(PersonaVisible::new(false)).expect("visible JSON"),
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(
+            serde_json::to_value(PersonaMotionEnabled::new(true)).expect("motion JSON"),
+            serde_json::Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn persona_ui_getters_keep_four_asymmetric_switches_apart() {
+        let persona = PersonaConfig {
+            enabled: false,
+            id: PersonaId::Gemini,
+            motion: true,
+            tap_lines: false,
+            voice_enabled: true,
+        };
+
+        assert!(!persona.visible().get());
+        assert!(persona.motion_enabled().get());
+        assert!(!persona.tap_lines_enabled().get());
+        assert!(persona.voice_enabled().get());
+        assert_eq!(persona.id, PersonaId::Gemini);
+    }
+
+    #[test]
+    fn an_unknown_persona_id_is_rejected_instead_of_becoming_someone_else() {
+        let err = toml::from_str::<Config>("[shell.persona]\nid = \"astor\"\n")
+            .expect_err("a misspelled persona must not silently fall back");
+        assert!(err.to_string().contains("astor"), "{err:#}");
     }
 
     /// 空字串是「使用者關掉了熱鍵」，不是「還沒設定」——所以它要能存進去、

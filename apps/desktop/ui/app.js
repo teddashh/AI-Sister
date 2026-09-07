@@ -22,6 +22,10 @@ const STATE_LINES = Object.freeze({
 });
 
 const avatar = document.querySelector("[data-avatar]");
+const personaGlyph = document.querySelector("[data-persona-glyph]");
+const personaPortrait = document.querySelector("[data-persona-portrait]");
+const personaLine = document.querySelector("[data-persona-line]");
+const personaAudio = document.querySelector("[data-persona-audio]");
 const stateLine = document.querySelector("[data-state-line]");
 const askInput = document.querySelector("[data-ask-input]");
 const askSend = document.querySelector("[data-ask-send]");
@@ -47,6 +51,116 @@ const urlPolicyActions = document.querySelector("[data-url-policy-actions]");
 const urlPolicyNote = document.querySelector("[data-url-policy-note]");
 const urlPolicyResult = document.querySelector("[data-url-policy-result]");
 
+// ---------- Persona catalog ----------
+
+/**
+ * 這是完整 allowlist，不是 prompt。
+ *
+ * Aster／Cedar／Mira／Rook 的 provider ID、alias、glyph、tagline 與三句 greeting
+ * 沿用既有 TokenMonster catalog。上游 fixed-line builder 本來就是
+ * `角色 lead + greeting copy`，所以這裡的文字與 content ID 是同一份；沒有把
+ * personaContext 接進 `ask()`，因為角色
+ * 口吻不能改寫一個可查證答案的事實或安全邊界。每句只會從 avatar 的 click
+ * handler 出現，沒有 idle／開場／timer trigger。
+ */
+function fixedTaps(id, lead) {
+  return Object.freeze([
+    Object.freeze({
+      id: `fixed-line/1.0.0/${id}/zh-TW/greeting/general`,
+      voiceLineId: `${id}-greeting`,
+      text: `${lead} 隨時可以開始。`,
+    }),
+    Object.freeze({
+      id: `fixed-line/1.0.0/${id}/zh-TW/greeting/active`,
+      voiceLineId: `${id}-active`,
+      text: `${lead} 可以照自己的步調探索。`,
+    }),
+    Object.freeze({
+      id: `fixed-line/1.0.0/${id}/zh-TW/greeting/quiet`,
+      voiceLineId: `${id}-quiet`,
+      text: `${lead} 安靜地開始也很好。`,
+    }),
+  ]);
+}
+
+function profile(value) {
+  return Object.freeze({
+    ...value,
+    palette: Object.freeze({ ...value.palette }),
+    taps: Object.freeze([...value.taps]),
+  });
+}
+
+const PERSONA_CATALOG = Object.freeze({
+  neutral: profile({
+    id: "neutral",
+    alias: "Neutral",
+    glyph: "S",
+    tagline: "原來的字母人；安靜待著，只在你點她或問她時回應。",
+    inspiredBy: null,
+    palette: { background: "#F6ECDF", foreground: "#2E2140", accent: "#955572" },
+    taps: [
+      Object.freeze({
+        id: "persona-tap/1.0.0/neutral/zh-TW/hello",
+        voiceLineId: null,
+        text: "我在。你可以直接問。",
+      }),
+      Object.freeze({
+        id: "persona-tap/1.0.0/neutral/zh-TW/search",
+        voiceLineId: null,
+        text: "想查哪一段，就在下面打字。",
+      }),
+      Object.freeze({
+        id: "persona-tap/1.0.0/neutral/zh-TW/quiet",
+        voiceLineId: null,
+        text: "你不點也不問時，我會安靜待著。",
+      }),
+    ],
+  }),
+  chatgpt: profile({
+    id: "chatgpt",
+    alias: "Aster",
+    glyph: "T",
+    tagline: "沉著務實，會把選項整理清楚，陪你照自己的步調決定。",
+    inspiredBy: "ChatGPT",
+    palette: { background: "#0B1F33", foreground: "#F8FAFC", accent: "#5EEAD4" },
+    taps: fixedTaps("chatgpt", "我在。"),
+  }),
+  claude: profile({
+    id: "claude",
+    alias: "Cedar",
+    glyph: "C",
+    tagline: "溫柔細膩，願意留白，也陪你慢慢想清楚每個細節。",
+    inspiredBy: "Claude",
+    palette: { background: "#12372A", foreground: "#F8FAFC", accent: "#A7F3D0" },
+    taps: fixedTaps("claude", "慢慢來。"),
+  }),
+  gemini: profile({
+    id: "gemini",
+    alias: "Mira",
+    glyph: "G",
+    tagline: "好奇敏銳，喜歡發現日常模式，從不替你的節奏打分。",
+    inspiredBy: "Gemini",
+    palette: { background: "#172554", foreground: "#F8FAFC", accent: "#A5B4FC" },
+    taps: fixedTaps("gemini", "一起看看。"),
+  }),
+  grok: profile({
+    id: "grok",
+    alias: "Rook",
+    glyph: "X",
+    tagline: "直率活潑，帶點玩心，給你輕快但不催促的陪伴。",
+    inspiredBy: "Grok",
+    palette: { background: "#3B1B0B", foreground: "#F8FAFC", accent: "#FDE68A" },
+    taps: fixedTaps("grok", "收到。"),
+  }),
+});
+
+function profileFor(id) {
+  return typeof id === "string" && Object.hasOwn(PERSONA_CATALOG, id)
+    ? PERSONA_CATALOG[id]
+    : PERSONA_CATALOG.neutral;
+}
+
 /**
  * Tauri 的 IPC。**在瀏覽器裡打開時是 null**，而那是刻意支援的：字母人整個
  * 是 HTML/CSS，所以它可以在一般瀏覽器裡開發、截圖、比對，不必每次都去開一個
@@ -69,6 +183,167 @@ const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
  */
 let state = "idle";
 let paused = false;
+
+// Persona 是表達層，不是上面的錄製狀態。關掉她、換顏色或停動畫都不可以改
+// `state` / `paused`，也不可以走 ask、Gatekeeper、hands 或 CLI。
+let activeProfile = PERSONA_CATALOG.neutral;
+let personaEnabled = true;
+let personaMotion = true;
+let personaTapLines = true;
+let personaVoiceEnabled = false;
+let nextTap = 0;
+let voiceRequest = 0;
+let personaRevision = 0;
+let localAssets = Object.freeze({
+  phase: "unavailable",
+  portrait: null,
+  voiceLineIds: new Set(),
+});
+
+/**
+ * Renderer 只接受後端已驗過的 portrait data URL 與 fixed-voice availability。
+ *
+ * `phase` 刻意保留 fixed-pack 的五態；這一版後端只會回 unavailable。未來 resolver
+ * 接入後，遠端 URL／任意路徑仍過不了這裡。開場不拿 WAV bytes；voice 只回可用
+ * line ID，等 trusted click 當下再向 Rust 取那一條。顯示台詞的版本 ID 與公開素材
+ * manifest ID 是兩個命名空間，不能混成一格，更不能拿語音路徑朗讀私人文字。
+ */
+function resolveLocalAssets(view, persona) {
+  const phase = ["unavailable", "available", "installing", "repair-needed", "installed"].includes(
+    view?.phase,
+  )
+    ? view.phase
+    : "unavailable";
+  if (phase !== "installed") {
+    return Object.freeze({ phase, portrait: null, voiceLineIds: new Set() });
+  }
+
+  const portrait =
+    typeof view?.portrait?.data_url === "string" &&
+    view.portrait.data_url.startsWith("data:image/webp;base64,")
+      ? view.portrait.data_url
+      : null;
+  const allowed = new Set(
+    persona.taps.map((line) => line.voiceLineId).filter((lineId) => lineId !== null),
+  );
+  const voiceLineIds = new Set();
+  for (const voice of Array.isArray(view?.voice_lines) ? view.voice_lines : []) {
+    if (allowed.has(voice?.line_id) && Number.isInteger(voice?.duration_ms)) {
+      voiceLineIds.add(voice.line_id);
+    }
+  }
+  return Object.freeze({ phase, portrait, voiceLineIds });
+}
+
+function clearPersonaLine() {
+  if (personaLine) {
+    personaLine.textContent = "";
+    personaLine.hidden = true;
+  }
+  personaAudio?.pause?.();
+  personaAudio?.removeAttribute?.("src");
+}
+
+function paintPersonaPortrait() {
+  const hasPortrait = personaEnabled && localAssets.portrait !== null;
+  avatar.classList.toggle("has-portrait", hasPortrait);
+  if (personaPortrait) {
+    if (hasPortrait) personaPortrait.src = localAssets.portrait;
+    else personaPortrait.removeAttribute("src");
+    personaPortrait.hidden = !hasPortrait;
+  }
+  if (personaGlyph) personaGlyph.hidden = hasPortrait;
+}
+
+function applyPersona(view) {
+  // 讓正在等單條 WAV 的舊 click 失效；換人後回來的 bytes 不能在新角色身上播放。
+  voiceRequest += 1;
+  activeProfile = profileFor(view?.id);
+  // 缺欄位代表舊後端／瀏覽器 demo，保留目前的 neutral 字母人；只有明確 false
+  // 才能把使用者眼前的角色或動畫關掉。
+  personaEnabled = view?.enabled !== false;
+  personaMotion = view?.motion !== false;
+  personaTapLines = view?.tap_lines !== false;
+  personaVoiceEnabled = view?.voice_enabled === true;
+  nextTap = 0;
+  localAssets = resolveLocalAssets(view?.asset_pack, activeProfile);
+
+  // Persona 只改 avatar 自己的三色。`--letter-*` 是整個淺色 stage 的 UI theme；
+  // 把深底角色的白色 foreground 寫進那組變數，會連錄製狀態、答案與安全卡片
+  // 一起變成淺底白字。角色外觀不能改壞核心 UI。
+  document.documentElement.style.setProperty("--persona-bg", activeProfile.palette.background);
+  document.documentElement.style.setProperty("--persona-fg", activeProfile.palette.foreground);
+  document.documentElement.style.setProperty("--persona-accent", activeProfile.palette.accent);
+  if (personaGlyph) personaGlyph.textContent = activeProfile.glyph;
+  avatar.dataset.persona = activeProfile.id;
+  avatar.dataset.assetPack = localAssets.phase;
+  avatar.title = `${activeProfile.alias}：${activeProfile.tagline}`;
+  avatar.hidden = !personaEnabled;
+  avatar.disabled = !personaEnabled || !personaTapLines;
+  clearPersonaLine();
+  paintPersonaPortrait();
+  updateMotionGate();
+  paint();
+}
+
+async function sayPersonaLine(event) {
+  // `.click()` / `dispatchEvent()` 也能走進同一個 DOM handler，但那不是「使用者
+  // 當下操作」。鍵盤在原生 button 上產生的 click 仍是 trusted，所以 Enter／Space
+  // 可用；程式合成的事件則連文字都不說，更不可能沿這條路取得語音播放權。
+  if (event?.isTrusted !== true) return;
+  if (!personaEnabled || !personaTapLines || activeProfile.taps.length === 0) return;
+  const line = activeProfile.taps[nextTap % activeProfile.taps.length];
+  nextTap += 1;
+  personaLine.textContent = line.text;
+  personaLine.hidden = false;
+
+  const request = ++voiceRequest;
+  personaAudio?.pause?.();
+  personaAudio?.removeAttribute?.("src");
+
+  // 這是唯一的播放入口，而且它就在使用者 click 裡。沒有 voice opt-in、沒有
+  // installed fixed pack、或這句不在本機 voice allowlist，三種都是完全不向後端取。
+  if (
+    !personaVoiceEnabled ||
+    line.voiceLineId === null ||
+    !localAssets.voiceLineIds.has(line.voiceLineId) ||
+    invoke === null ||
+    !personaAudio
+  )
+    return;
+
+  try {
+    const voice = await invoke("persona_voice_read", { lineId: line.voiceLineId });
+    if (
+      request !== voiceRequest ||
+      voice?.line_id !== line.voiceLineId ||
+      typeof voice?.data_url !== "string" ||
+      !voice.data_url.startsWith("data:audio/wav;base64,")
+    )
+      return;
+    personaAudio.currentTime = 0;
+    personaAudio.src = voice.data_url;
+    await personaAudio.play?.();
+  } catch {
+    // 固定聲音是選配表達層；讀不到或 WebView 拒播不能把搜尋／錄製一起拖垮。
+  }
+}
+
+avatar?.addEventListener("click", sayPersonaLine);
+
+function readPersona() {
+  if (invoke === null) return;
+  const revisionWhenStarted = personaRevision;
+  invoke("persona_read").then(
+    (view) => {
+      // 設定頁事件若先到，它代表比這次 initial read 更新的設定；舊回應不能蓋回去。
+      if (personaRevision === revisionWhenStarted) applyPersona(view);
+    },
+    () => {
+      // Persona 是選配表達層；設定檔暫時讀不出來不可以連搜尋框一起拖垮。
+    },
+  );
+}
 
 /**
  * 她有沒有一件事想讓人看見，是第四個維度：不改「正在做什麼」、不假裝錄製
@@ -638,8 +913,10 @@ function paint() {
     detail = asleepDetail();
   }
   stateLine.textContent = detail === "" ? line : `${line}\n${detail}`;
-  // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。
-  avatar.setAttribute("aria-label", `AI-Sister：${line}`);
+  // 讀螢幕的人也要知道她在忙，不然「想一下…」只是給看得見的人看的。角色名
+  // 只加在 label，不改狀態那一格的事實；能點時也說明這顆 button 會做什麼。
+  const tapHint = personaEnabled && personaTapLines ? "；按下會說一條固定台詞" : "";
+  avatar.setAttribute("aria-label", `${activeProfile.alias}（AI-Sister）：${line}${tapHint}`);
 
   if (wakeButton) {
     // 只在真的沒人在錄的時候出現。暫停中不出現——那時候的下一步是按 ▶，
@@ -880,7 +1157,10 @@ const reducedMotion = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)"
  */
 function updateMotionGate() {
   const allowed =
-    document.visibilityState === "visible" && reducedMotion?.matches !== true;
+    personaEnabled &&
+    personaMotion &&
+    document.visibilityState === "visible" &&
+    reducedMotion?.matches !== true;
   document.documentElement.classList.toggle("motion", allowed);
 }
 
@@ -963,6 +1243,14 @@ pauseButton?.addEventListener("click", async () => {
  */
 globalThis.__TAURI__?.event
   ?.listen?.("pause-changed", (event) => setPaused(event.payload))
+  ?.catch?.(() => {});
+
+/** 設定頁是另一扇 WebView；存成功後立即換成本機 persona，不等整支程式重開。 */
+globalThis.__TAURI__?.event
+  ?.listen?.("persona-changed", (event) => {
+    personaRevision += 1;
+    applyPersona(event.payload);
+  })
   ?.catch?.(() => {});
 
 /**
@@ -1814,8 +2102,10 @@ askInput?.addEventListener("keydown", (event) => {
 const params = new URLSearchParams(globalThis.location.search);
 
 seedSwayPhase();
-updateMotionGate();
+applyPersona({ id: "neutral", enabled: true, motion: true, tap_lines: true });
 paintPin();
+// 只讀本機 config；失敗就留在上面已經畫好的 Neutral 字母 fallback。
+readPersona();
 
 // `?state=paused` 走的是**和產品一樣的那條路**（設 `paused` 旗標），不是另外
 // 搬一個長得像暫停的樣子出來。這一點是被截圖抓到的：第一版讓它去設 `state`，

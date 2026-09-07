@@ -65,6 +65,10 @@ const BASE = {
   text_days: 90,
   brain_command: "",
   brain_args: [],
+  persona_enabled: true,
+  persona_id: "neutral",
+  persona_motion: true,
+  persona_tap_lines: true,
 };
 
 /*
@@ -654,6 +658,51 @@ console.log("⑲ 桌面後端真的把 Thinking 接到設定頁和系統匣");
   check("tray 標籤用 core 的 exhaustive 純函式", MAIN.includes("heartbeat::tray_record_label(presence)") && MAIN.includes("heartbeat::tray_quit_label(presence)"), "tray labels");
   check("tray 按鍵按 core 的三向 action 分流", MAIN.includes("heartbeat::tray_record_action(presence)"), "tray action");
   check("Thinking 那一向會顯示原因", MAIN.includes("TrayRecordAction::WaitForThinking => Err(") && MAIN.includes("heartbeat::occupied_why_of(presence, now)"), "thinking feedback");
+}
+
+console.log("⑲ᵖ Persona 四格會一起讀寫，關掉角色不會清掉選擇");
+{
+  const p = await open({
+    config: {
+      ...BASE,
+      persona_enabled: true,
+      persona_id: "chatgpt",
+      persona_motion: true,
+      persona_tap_lines: true,
+    },
+  });
+  check("讀回 Aster 的穩定 ID", p.node("[data-persona-id]").value === "chatgpt", p.node("[data-persona-id]").value);
+  check("讀回角色開關", p.node("[data-persona-enabled]").checked === true);
+  p.node("[data-persona-id]").value = "grok";
+  p.node("[data-persona-motion]").checked = false;
+  p.node("[data-persona-tap-lines]").checked = false;
+  p.node("[data-persona-enabled]").checked = false;
+  for (const fn of p.node("[data-persona-enabled]").handlers.change ?? []) fn();
+  check("關掉只灰掉選擇、值仍是 Rook", p.node("[data-persona-id]").disabled && p.node("[data-persona-id]").value === "grok");
+  await p.save();
+  const sent = p.writes[0];
+  check("送出關閉狀態", sent.persona_enabled === false, sent);
+  check("關掉仍保留 Rook", sent.persona_id === "grok", sent);
+  check("動畫和 tap-lines 各自可關", sent.persona_motion === false && sent.persona_tap_lines === false, sent);
+
+  const body = MAIN.match(/fn settings_write\([\s\S]*?struct PrivacyHealth/)?.[0] ?? "";
+  check("Rust 只透過 typed persona setter 寫四格", body.includes("c.set_persona_from_page("), body);
+  check("存成功才通知另一扇 WebView", body.includes('"persona-changed"') && body.indexOf("c.save(&path)") < body.indexOf('"persona-changed"'), body);
+}
+
+console.log("⑲ᑫ Persona event 沒送到時，存檔成功與畫面未更新要分開說");
+{
+  const p = await open({
+    onWrite(settings, store) {
+      store(settings);
+      return { watching: "recording", persona_event_emitted: false };
+    },
+  });
+  await p.save();
+  check("仍明講設定已存", p.say().includes("角色設定已存進檔案"), p.say());
+  check("不冒充桌面已即時換角", p.say().includes("即時更新事件沒能送出"), p.say());
+  check("給得出真的恢復路徑", p.say().includes("重新啟動 AI-Sister desktop"), p.say());
+  check("部分套用用警告色", p.bad(), p.say());
 }
 
 console.log("⑳ 拔手撞號的純決策真的接回桌面回傳值");

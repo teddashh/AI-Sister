@@ -10,7 +10,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; media-src data:; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     />
     <title>AI-Sister</title>
     <link rel="stylesheet" href="./styles.css" />
@@ -33,12 +33,20 @@
     </header>
 
     <main class="stage">
-      <div class="avatar" data-avatar aria-live="polite">
+      <!-- 原生 button 自己提供 Enter／Space 語意；不要手寫 keydown 再觸發一次，
+           否則瀏覽器合成的 click 會讓一個按鍵說兩句。 -->
+      <button class="avatar" data-avatar type="button">
         <span class="face">
-          <span class="glyph">S</span>
+          <!-- fixed pack 尚未接入時永遠 hidden；字母 fallback 不依賴它。 -->
+          <img class="portrait" data-persona-portrait alt="" draggable="false" hidden />
+          <span class="glyph" data-persona-glyph>S</span>
         </span>
-      </div>
+      </button>
       <p class="state-line" data-state-line>在聽</p>
+      <!-- 只有使用者點上面的 button 才會填字；開場、輪詢與 timer 都不碰這一格。 -->
+      <p class="persona-line" data-persona-line aria-live="polite" hidden></p>
+      <!-- 不 autoplay。未來本機 fixed pack 的固定台詞也只能從同一次 click 播。 -->
+      <audio data-persona-audio preload="none" hidden></audio>
       <!--
         只在「沒有人在記錄」的時候出現。她已經說得出那句話了，但說完之後
         使用者唯一的下一步是開一個終端機打指令——而 Phase 1 的退場條件是

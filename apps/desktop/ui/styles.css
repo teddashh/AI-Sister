@@ -1,10 +1,9 @@
 /*
- * 字母人。**沒有任何圖檔**——整個角色是一個字 + 幾條 CSS。
+ * 字母 fallback 沒有任何圖檔——整個角色是一個字 + 幾條 CSS。
  *
- * 這不是省事，是授權上的唯一安全路徑：TokenMonster 那批 891 張 WebP 的
- * 權利來源是私下的書面授權，不在任何 repo 裡，所以一張都不能帶過來
- * （見 PRODUCT §6 的「讀過再自己寫」）。一個純 CSS 的角色沒有這個問題，
- * 而且離線、可縮放、改色只要換三個變數。
+ * 公開 schema-v2 fixed pack 已有可再散布的 projection；素材仍不放進 git，因為它
+ * 會由可驗證的選配本機 pack 交付，不是因為權利本身一概不可用。pack 尚未安裝或
+ * 驗證失敗時，這個 CSS fallback 仍然離線、可縮放，改色只要換三個變數。
  *
  * 動畫走兩個獨立通道：`transform` 負責呼吸（上下），`rotate` 負責搖晃。
  * 分開是因為同一個 `transform` 上疊兩段 keyframes 會互相覆蓋，得手動把
@@ -15,7 +14,11 @@
   /* 這三個顏色是角色的全部外觀。換一組就是換一個人。 */
   --letter-bg: #f6ecdf;
   --letter-fg: #2e2140;
-  --letter-accent: #9a5b7a;
+  --letter-accent: #955572;
+  /* Persona palette 只准影響 avatar；stage 上的狀態、答案與按鈕仍用上面三色。 */
+  --persona-bg: var(--letter-bg);
+  --persona-fg: var(--letter-fg);
+  --persona-accent: var(--letter-accent);
 
   --chrome: rgb(46 33 64 / 94%);
   --chrome-fg: #f6ecdf;
@@ -104,10 +107,35 @@ body {
 }
 
 .avatar {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--persona-fg);
+  cursor: pointer;
   display: grid;
+  font: inherit;
   height: 132px;
+  margin: 0;
+  padding: 0;
   place-items: center;
   width: 132px;
+}
+
+/* `.avatar` 自己指定了 display，所以 UA 的 `[hidden]` 壓不過它。Persona 關掉
+ * 不是變透明：要真的拿掉圖像和 focus target，底下搜尋／狀態仍照常存在。 */
+.avatar[hidden] {
+  display: none;
+}
+
+.avatar:disabled {
+  cursor: default;
+}
+
+.avatar:focus-visible {
+  /* focus ring 落在固定的淺色 stage 上，不是在 persona 的深色 face 裡。深色角色的
+   * accent 對 stage 幾乎看不見，所以這一格必須留在可驗證的 UI theme。 */
+  outline: 3px solid var(--letter-accent);
+  outline-offset: 2px;
 }
 
 /*
@@ -116,18 +144,31 @@ body {
  */
 .face {
   align-items: center;
-  background: var(--letter-bg);
-  border: 4px solid var(--letter-fg);
+  background: var(--persona-bg);
+  border: 4px solid var(--persona-fg);
   border-radius: 26px;
   box-shadow:
     inset 0 -12px 0 rgb(46 33 64 / 6%),
-    0 8px 0 var(--letter-fg),
+    0 8px 0 var(--persona-fg),
     0 16px 26px rgb(46 33 64 / 18%);
   display: flex;
   height: 108px;
   justify-content: center;
   position: relative;
   width: 108px;
+}
+
+.portrait {
+  border-radius: 20px;
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.portrait[hidden],
+.avatar.has-portrait .glyph {
+  display: none;
 }
 
 .glyph {
@@ -140,8 +181,8 @@ body {
 
 /* 右上那顆點：她現在是什麼狀態，一眼看得出來。 */
 .face::after {
-  background: var(--letter-accent);
-  border: 3px solid var(--letter-fg);
+  background: var(--persona-accent);
+  border: 3px solid var(--persona-fg);
   border-radius: 999px;
   content: "";
   height: 18px;
@@ -161,6 +202,23 @@ body {
    * 擠成一長條就等於沒印。`pre-line` 保留 \n 但仍然摺疊多餘空白。 */
   text-align: center;
   white-space: pre-line;
+}
+
+/* Persona 台詞和狀態分格：前者只在按角色後出現；後者仍只描述錄製真相。 */
+.persona-line {
+  background: color-mix(in srgb, var(--letter-accent) 12%, transparent);
+  border-left: 3px solid var(--letter-accent);
+  border-radius: 8px;
+  color: var(--letter-fg);
+  font-size: 12px;
+  margin: -4px 0 0;
+  max-width: 260px;
+  padding: 7px 10px;
+  text-align: left;
+}
+
+.persona-line[hidden] {
+  display: none;
 }
 
 /*
@@ -213,7 +271,7 @@ body {
 
 /* has-something 是通知維度，不是 data-state。小點多一圈微光，呼吸比 idle 慢。 */
 .avatar.has-something .face::after {
-  box-shadow: 0 0 0 7px rgb(232 117 90 / 20%), 0 0 20px var(--letter-accent);
+  box-shadow: 0 0 0 7px rgb(232 117 90 / 20%), 0 0 20px var(--persona-accent);
 }
 
 .motion .avatar.has-something[data-state="idle"] .face {
@@ -326,8 +384,8 @@ body {
  * 這兩格是同一張圖。狀態差異必須有一個不靠動畫的版本。
  */
 .avatar[data-state="thinking"] .face::after {
-  background: var(--letter-bg);
-  box-shadow: inset 0 0 0 4px var(--letter-accent);
+  background: var(--persona-bg);
+  box-shadow: inset 0 0 0 4px var(--persona-accent);
 }
 
 .motion .avatar[data-state="thinking"] .face {
@@ -364,11 +422,11 @@ body {
 }
 
 .avatar[data-state="paused"] .face::after {
-  background: var(--letter-bg);
+  background: var(--persona-bg);
 }
 
 .avatar[data-state="paused"]::after {
-  background: var(--letter-fg);
+  background: var(--persona-fg);
   border-radius: 2px;
   content: "";
   height: 4px;
@@ -403,7 +461,7 @@ body {
 /* 狀態點空心。和 thinking 的空心環不同：這裡沒有那圈 accent 色，
    因為那個環的意思是「她正在忙」。 */
 .avatar[data-state="asleep"] .face::after {
-  background: var(--letter-bg);
+  background: var(--persona-bg);
   box-shadow: none;
 }
 
@@ -423,7 +481,7 @@ body.has-hits .face,
 body.has-url-policy .face {
   border-radius: 14px;
   border-width: 3px;
-  box-shadow: 0 4px 0 var(--letter-fg);
+  box-shadow: 0 4px 0 var(--persona-fg);
   height: 56px;
   width: 56px;
 }

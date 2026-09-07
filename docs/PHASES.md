@@ -8,6 +8,11 @@
 > 1. 「你的第一個 killer function，一隻 agent 都不需要。」
 > 2. 「先出第一個。搜得到，第二個才有地基；搜不到，八隻 agent 開再多會也是在猜。」
 > 3. 「不要再想架構了，去寫那個重播評測。」
+>
+> 這是原始的風險排序，不再表示每一個歷史 checkbox 都會阻擋下一段功能。2026-08-23
+> 起，需長時間／真資料的量測與舊資源數字照實保留，但不阻擋功能推進；`1.0` 是否
+> 可發，只看下方具日期的 **Release 1.0 exit criteria**，不要用早期 phase 的未勾格
+> 反推，也不要因程式已走到後段就把它們補勾。
 
 ---
 
@@ -16,16 +21,101 @@
 | Phase | 名字 | 退役的風險 | 週 |
 |---|---|---|---|
 | 0 | 感官與地基 | 「抓不抓得到、扛不扛得動」 | 1–2 |
-| 1 | Sister 1.0：檔案櫃 + 搜尋框 + 字母人 | 「第一週有沒有魔法時刻」 | 2–3 |
+| 1 | S1 回憶核心：檔案櫃 + 搜尋框 + 字母人 | 「第一週有沒有魔法時刻」 | 2–3 |
 | 2 | 重播評測 harness | 「辯論 vs 數據」 | 1–2 |
 | 3 | 斷句 + 事實層強化 | 「沒有論文可抄的核心演算法」 | 2–3 |
 | 4 | 理解與記憶（大腦上線） | 「記憶會歪、會腐爛」 | 3–4 |
-| 5 | 開口（守門員）+ macOS + 正式發布 | 「怕多嘴」＋公開信任 | 3–4 |
+| 5 | Release 1.0：Windows GA + 跨平台 Preview | 「怕多嘴」＋公開信任 | 3–4 |
 | 6 | 手 v1（suggest → semi-action） | 「有手就危險」 | 3–4 |
 | 7 | 接手模式（bounded takeover） | 「記歪的東西點滑鼠」 | 3–4 |
-| 8 | 生態 | 「單人維護死」 | 持續 |
+| 8 | 生態與 Preview 成熟化 | 「單人維護死」 | 持續 |
 
 到正式發布（P5 末）累計約 12–18 專注週。
+
+## Release 1.0 合約〔2026-09-06 定案〕
+
+「Windows 1.0」改叫 **Release 1.0**，但不把三個平台假裝成同一種完成度。
+1.0 的必要產品迴路仍是 PRODUCT §4 的 S1：同意後記錄 → OCR／L0／L1 →
+被動提問 → 附出處回答 → 暫停／忘掉／匯出。主動開口、hands 與接手可以各自
+關掉，不拿其中任何一個冒充回憶核心。Persona 也必須可關閉、可完全不下載，
+但**角色體驗本身是 Release 1.0 的產品 blocker**，不是可有可無的 Preview。
+
+| 對象 | Release 1.0 身分 | 最小合約 | 對 `1.0` tag 的關係 |
+|---|---|---|---|
+| Windows | **正式支援（GA）** | 可安裝、可升級、可開機常駐；走完 S1 主流程並承諾維護與安全修補 | **唯一的平台支援 blocker** |
+| macOS | **Public Preview** | 簽進 `.app` 主程序樹的 ScreenCaptureKit + Vision OCR + AX；TCC／紫點狀態與重新授權 UX 說真話；走得完 S1 | 沒達到就不發該 artifact；缺席不擋 Windows GA |
+| Linux | **X11-only Developer Preview** | 真正的 X11 capture + OCR + S1，不把只能 replay 說成桌面支援；Wayland 明示 unsupported／degraded | 沒達到就不發該 artifact；缺席不擋 Windows GA |
+| Persona | **Release 1.0 角色體驗（opt-in assets）** | 四姊妹各自真的有可選立繪與固定語音；同一個 omnibus asset-pack 從揭露、下載、驗證到啟用完整跑通；每位的 code-native 字母 fallback 與 Neutral 永遠離線可用 | **Windows GA 產品面 blocker**；使用者選擇關閉或不下載不是 blocker |
+
+### 每個掛上 GA／Preview 名字的 artifact 都不能缺的 blocker
+
+- **隱私不因 Preview 降級**：三張同意書仍各自 fail-closed；沒簽第一張不記錄、
+  沒簽第二張不 spawn CLI、沒簽第三張不寫畫面；pixel 不出機器，capture-time
+  排除仍在寫入前生效。
+- **資料承諾同一份**：公開 schema／migration、出處、時間區間刪除的 provenance
+  cascade、全量 export／restore 在平台間不得分叉；不能有一個平台「忘掉了」而
+  衍生內容或旁邊的檔案還留著。
+- **名字要對得上能力**：桌面 Preview 至少要在該平台真的完成一次
+  capture → OCR → query → 打開出處；只有 CLI／replay 就只叫 CLI／replay build。
+- **原生權限與停止路徑要能驗**：錄製狀態、pause／resume、密碼欄／blocklist／
+  螢幕分享排除與原生安裝 artifact 都要有該平台上的 smoke；不能拿另一個平台
+  編得過當成它跑過。
+- **危險的選配能力另外上鎖**：hands 若還沒通過 Phase 6 injection 退場條件，
+  就只能是 Labs／預設關或不進 GA surface；不能為了讓 1.0 看起來功能多而放寬授權。
+
+### Persona Release 1.0 合約
+
+- **賣點是角色體驗，不是 CDN**：1.0 要有至少四位可選姊妹的 catalog；首批名錄為
+  Aster／Cedar／Mira／Rook。CDN 只是把立繪與固定語音 pack 交到本機的機制，
+  不能拿「接上 CDN」代替角色選擇、呈現與聲音真的可用。
+- **不下載也完整可用**：每個 catalog 身分都有隨程式提供的 code-native 字母呈現，
+  Neutral 是預設且永遠可選；使用者可關閉 Persona、留在 Neutral，或永遠不下載 pack，
+  S1 記錄、查詢、出處、刪除與匯出都不能因此降級。
+- **網路一定由人開始**：catalog 與下載前揭露所需 metadata 隨程式留在本機；只有
+  使用者在揭露畫面上明確按下下載，程式才可第一次連 CDN。自動預抓、背景更新、
+  hover／開設定頁就連線都不算同意。
+- **按下下載前把邊界說完**：畫面先列出實際 CDN host、manifest 宣告的總下載大小，
+  以及會送出的資料邊界。asset request 不得夾帶 OCR、畫面、問題、答案、記憶 ID、
+  persona 選擇、使用狀態、資料庫內容或其他私人內容；host 能看見的網路傳輸 metadata
+  也不能被寫成「什麼都沒送」。首版四姊妹共用**同一個 omnibus pack、同一條 exact
+  hash path**，不因目前選誰而換 URL；若未來拆包，就必須先揭露 path 會暴露哪一包，
+  不能繼續宣稱 request 不帶角色選擇。
+  host、大小或邊界有一格未知就停在下載前，不用 `0` 或空字串冒充已知。
+- **驗證完才啟用**：正式簽章的 app 內嵌 public release manifest、descriptor 與
+  exact origin/path allowlist，三者的 release ID／canonical manifest hash／pack hash／
+  大小／物件集合必須互相綁定；它們就是固定 release 的 trust root，不再發明一把
+  沒有更新流程的第二套 manifest signing key。pack 本身與每個檔案仍逐一驗 hash／
+  大小，安裝／切換要原子化。缺檔、損毀或任一 binding 不符時不啟用半包，刪掉
+  staging，退回目前所選 persona 的 code-native 字母呈現；ID 不合法才回 Neutral。
+- **聲音邊界固定**：1.0 只播放 pack 內預錄、固定且非敏感的台詞，且必須由使用者
+  當下操作觸發；不因 capture、記憶或系統事件主動出聲，不把私人答案、OCR 或回憶
+  內容念出來，也不以 runtime TTS 繞過這條邊界。
+- **權利先驗後說**：TokenMonster 現有 image+voice fixed pack 附有可公開嵌入的
+  schema-v2 manifest；它投影每項資產的內容／品牌／聲音來源審查狀態與 public-use／
+  redistribution 宣告。這證明公開 release metadata 存在，**不等於 AI-Sister 已完成
+  發布審查**。AI-Sister 只重用這份 public projection，不把私下收據或 owner ledger
+  搬進 public repo；接線、byte verification 與逐角色 release review 完成前一律叫
+  candidate，不能因另一個產品曾用過就宣稱可出貨。
+- **平台邊界要講名字**：Persona 完整體驗是 Windows GA 的 `1.0` tag blocker。
+  macOS／Linux Preview 至少都帶同一份本機 catalog 與 Neutral；若該 artifact 暴露
+  pack 下載或聲音，就必須通過完全相同的 authority、cache、撤回與點擊 gate。沒有
+  通過時只能標成 Neutral-only Preview，不能用未簽章 artifact 冒充受信 trust root。
+
+### 不擋 Release 1.0 的項目
+
+- macOS 完整重跑 Windows P0／P1 的長期足跡、電池與兩週自用數字；這些是它從
+  Public Preview 升正式支援的條件，不是 Windows GA 的條件。
+- Linux Wayland，以及 macOS／Linux Preview artifact 本身的缺席。Preview 沒達
+  最小合約時就不發，不能靠降標湊齊平台表格。
+- 使用者選擇關閉 Persona、只用 Neutral 或不下載任何 pack；這是 1.0 必須支援的
+  正常路徑，不等於產品可以省略 catalog、立繪／固定語音交付 pipeline 或驗證 gate。
+- ≥100 題真題庫、斷句 F1、A/B +10pt、兩週開口有用率等要靠真資料／時間才會有的
+  指標。數字繼續照實公開，但依 Ted 已定方向，不再拿來擋功能發版。
+- P0 的 7 天零 crash、CPU `<3%`、磁碟 `<300MB/天` 與 macOS 電池等舊精確門檻。
+  Release build 仍要公開實測、不准把未量到寫成 0，且明顯無上限成長／資料損失仍是
+  blocker；但已接受的資源基準和長期優化目標本身不擋 `1.0` tag。
+- b／e 類主動開口、完整 hands 與 Phase 7 接手模式。它們各有自己的退場條件，
+  不是 S1 回憶核心成立的前提。
 
 ---
 
@@ -36,8 +126,8 @@
 capture 層本身就是 recorder。
 
 **Scope**
-- Rust daemon 骨架：SQLite（WAL）+ migration、loopback API（token 驗證）、
-  tray 圖示（pause/resume/quit）、開機自啟。
+- Rust recorder／CLI 骨架：SQLite（WAL）+ migration；沒有 loopback server。
+  tray 在桌面殼，開機自啟留在 Release 1.0 發布工程。
 - Windows capture pipeline：變化驅動截圖（dHash 去重）→ 原生 OCR → L0 落地；
   前景視窗/URL（UIA）、剪貼簿、輸入動態（節奏不記內容）、idle/lock。
 - 「事後補不回來」訊號清單全數當下抓（SPEC §2.1）。
@@ -92,12 +182,13 @@ capture 層本身就是 recorder。
 
 **明確不做**：任何 LLM 呼叫、任何 UI、macOS/Linux。
 
-**官方維護承諾範圍**〔定案〕：1 個平台（Windows）、1 條訊號路徑（通用 OS API）、
-1 條操作路徑。其餘一律 adapter/plugin 化，等 P8 交給社群。
+**正式維護承諾範圍**〔2026-09-06 更新〕：Release 1.0 只把 Windows 稱為 GA；
+macOS／Linux 是第一方 Preview，不是丟給社群的空白。per-app adapter 與 Linux
+Wayland 才留到 P8／社群成熟化；Preview 的隱私與資料語意不因名稱降級。
 
 ---
 
-## Phase 1 — Sister 1.0：檔案櫃 + 搜尋框 + 字母人
+## Phase 1 — S1 回憶核心：檔案櫃 + 搜尋框 + 字母人
 
 **目標**：那個「這禮拜就能做完、做完當天就會每天用」的產品。被動答題，
 100% 本機可跑。**Phase 末 repo 轉 public（alpha 標示，不宣傳）。**
@@ -318,9 +409,12 @@ capture 層本身就是 recorder。
 
 ---
 
-## Phase 5 — 開口（守門員）+ macOS + 正式發布
+## Phase 5 — Release 1.0：Windows GA + 跨平台 Preview
 
-**目標**：解鎖主動性——用預算和證據門檻，不用熱情。帶著 benchmark 數字正式見人。
+**目標**：Windows 以正式支援（GA）完成 S1 回憶核心與發布工程；同一列車可帶
+macOS Public Preview 與 Linux X11 Developer Preview；Persona 角色體驗則是
+Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和證據門檻解鎖，
+但它不是 S1 或 `1.0` tag 的前提。
 
 **Scope**
 - ✅ alpha.66 Gatekeeper（SPEC §8.3）：五類候選白名單、評分、預算 ≤ 5 **點**/天、
@@ -345,9 +439,36 @@ capture 層本身就是 recorder。
   - 「沒有摘要」拆成 `DayNoteState` 四格。那天一張 L2 卡都沒有 → **不開口**
     （答應了只生得出一份空的）；他自己按過忘記 → **不開口**（提議寫回來等於
     問他要不要撤銷自己的刪除）。
-- ⬜ **macOS port**：ScreenCaptureKit + Vision OCR + AX API + TCC/紫點 UX 文案。
-  本機編不到、CI 也沒有 mac runner，還沒開始。
-- 🔶 發布工程：安裝包、簽章、自動更新、官網一頁、Show HN / X 發文帶 benchmark 表。
+- ⬜ **macOS Public Preview**：ScreenCaptureKit + Vision OCR + AX API + TCC/紫點 UX 文案。
+  capture 必須住在簽進 `.app` 的主程序樹；Preview 至少要走完同意、錄製、OCR、
+  提問、出處、暫停、刪除與匯出。完整 P0／P1 足跡與電池數字留作升 GA 條件，
+  不擋 Release 1.0。本機編不到、CI 也沒有 mac runner，還沒開始。
+- ⬜ **Linux X11 Developer Preview**：先接通 X11 capture + OCR + S1 主流程；
+  Wayland 明示 unsupported／degraded，不用 portal 的半套能力冒充背景常駐。
+  現在從原始碼能跑 CLI／replay，不等於 Linux 桌面 Preview，capture backend 還沒開始。
+- ⬜ **Persona Release 1.0 角色體驗（使用者可關閉／可不下載）**：
+  - 隨程式提供離線 Neutral 與 Aster／Cedar／Mira／Rook 的 code-native 字母呈現，以及四姊妹的
+    本機 catalog、選擇入口與可用角色呈現；不把尚未驗證的素材寫成已可發布。
+  - 四位每一位都至少有一幅已核准立繪，而且 UI 三句 fixed tap-line 都對得到已核准
+    的本機語音；不能用四個名字配一位角色的素材通過。
+  - 完成共用 omnibus 立繪／固定語音 asset-pack 的 end-to-end pipeline：本機揭露 → 使用者明確
+    點擊 → CDN 下載 → embedded authority cross-binding 與逐檔 hash／大小驗證 →
+    原子安裝／啟用；
+    任一步失敗就清掉 staging 並回到所選 persona 的字母呈現，不能留下半包。
+  - 下載前逐包列出實際 host、manifest 總大小與資料邊界；host／大小／邊界未知時
+    不連線。請求不得帶出 persona 選擇／狀態、OCR、畫面、問題、答案、記憶 ID 或
+    資料庫內容；四位切換不改 request URL／header／body。
+  - 語音只播由使用者當下操作觸發的固定非敏感台詞；不主動出聲、不朗讀私人答案、
+    OCR 或回憶內容。CDN 是交付機制；角色的選擇、視覺、聲音與離線退路才是產品面。
+  - 下載／修復／撤回 UX、鍵盤可及性、prefers-reduced-motion 與靜音都要真的可用；
+    撤回立刻停聲、回所選 persona 的字母呈現、精準刪除該 release cache，失敗則留
+    RepairNeeded 且不連線；ID 不合法才回 Neutral。
+  - 每個發布 pack 都要通過 public rights/provenance manifest 審查；只嵌入公開安全
+    projection，不把私下收據帶進 repo。現成 pack 可重用，但要先證明 AI-Sister
+    內嵌的 authority、CDN bytes 與實際播放／呈現用的是同一版。
+- 🔶 發布工程：安裝包／code signing／自動更新、single-instance、recorder
+  watchdog/backoff、開機自啟、跨 capture／brain／hands 的 master stop、官網一頁，
+  以及 Show HN / X 發文帶 benchmark 表。
   - ✅ alpha.68 版本說明。在這之前它是 `ci.yml` 裡寫死的一塊 570 行的字，
     每出一版往裡面疊一節「這一版：⋯⋯」再**整塊**貼上去——alpha.67 那份
     release 說明裡有三十個「這一版」，而且最後一行寫著「沒有 UI、沒有常駐、
@@ -355,7 +476,7 @@ capture 層本身就是 recorder。
     改成 [`docs/RELEASE-NOTES.md`](RELEASE-NOTES.md) 一個 tag 一節，
     `scripts/release-notes.sh` 組出來。**沒寫那一節不會退回上一版**，
     會印「這一版沒有寫版本說明」。
-  - ⬜ 安裝包／簽章／自動更新／官網一頁：還沒開始。
+  - ⬜ 上列 lifecycle／安裝／簽章／更新／官網：還沒開始。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）
 - ✅ a `CommitmentDue`：`open_commitments_due_before(now + 40min)`，只收
@@ -381,14 +502,37 @@ capture 層本身就是 recorder。
   （`crates/sister-core/src/prompt_fence.rs`），20 種 injection 變體測試。
   **不去敏、不遮蔽、不過濾**——圍欄標的是「這是資料」，不是把資料改掉。
 
-**Exit criteria**
+**Release 1.0 exit criteria**
+- [ ] Windows GA 走完上方 Release 1.0 合約的 S1 主流程；正式 artifact 可安裝、
+      code-signed、可升級、single-instance、可開機常駐。recorder crash 有 bounded
+      watchdog/backoff，升級與 migration 不丟既有資料。
+- [ ] 三張同意書、capture-time 排除、出處、cascade 刪除、export／restore 與
+      pause／resume、跨 capture／brain／hands 的 master stop 在 Windows 正式 artifact
+      上走完；隱私腳本與真 Windows smoke 都過。
+- [ ] Persona 產品面走完：離線 Neutral、四姊妹 catalog 與選擇入口可用；**每一位**
+      都實際呈現至少一幅通過發布審查的立繪，且三句 UI fixed tap-line 都能在當下
+      trusted click 後播放相符的已核准語音。共用 omnibus pack 經「本機揭露 →
+      明確點擊 → CDN → 驗證 → 原子啟用」完整跑通；切換角色不改網路請求。
+- [ ] Persona 發布 gate 逐包通過 public rights/provenance manifest 與技術 manifest
+      驗證：允許用途／散布範圍、檔案 hash／大小與 embedded authority cross-binding
+      都可查；下載前顯示的 host、總大小、資料邊界和實際請求一致，未驗證的素材
+      不進發布 catalog。拒絕下載、關閉、靜音、reduced-motion、撤回／精準清 cache、
+      離線重開、損毀／修復路徑都實測；任何失敗 fail closed 回 code-native 字母呈現
+      （非法 ID 回 Neutral）且 S1 完整。
+- [ ] 任何隨 1.0 發出的 macOS／Linux Preview artifact 各自在原生平台走完 Preview
+      最小合約；沒過就不發該 artifact，不因此把 Windows GA 降格或延後。
+
+**仍要量／仍要做，但依 Release 1.0 合約不擋 `1.0` tag**
 - [ ] 自用 ≥ 2 週：開口 ≤ 5/天、有用率（未被按掉/被感謝/被採納）≥ 60%、
       誤報導致的「錯誤事實開口」= 0（開口內容全部有證據 ref）。
 - [ ] a/b 類開口的可驗證正確率 ≥ 90%（這兩類使用者能立刻驗證）。
-- [ ] macOS 走完 P0/P1 全部 exit criteria（足跡預算含電池項）。
+- [ ] macOS Public Preview 走完上述最小合約；完整 P0/P1 exit criteria（足跡預算
+      含電池項）改作它升為正式支援的 gate，不再是 Release 1.0 blocker。
 - [ ] 發布物料：README benchmark 表 + 隱私宣言 + 3 分鐘 demo（回憶秒答 + 一次克制的開口）。
-- [ ] **正式發布的兩個條件**〔定案，Grok〕：(1) 你自己願意整天開著它；
-      (2) 一個陌生人 10 分鐘內裝得起來。兩者皆真才按下發布鍵。
+- [x] ~~**正式發布的兩個條件**〔舊定案，Grok〕：(1) 你自己願意整天開著它；
+      (2) 一個陌生人 10 分鐘內裝得起來。兩者皆真才按下發布鍵。~~
+      2026-09-06 由前段可逐項驗收的 Release 1.0 合約取代；這兩項保留作產品成功
+      指標，不再讓主觀感受或尚未出現的陌生人替 tag 做唯一判決。
 - [ ] 發布後 2 週：修 issue 節奏可持續（單人 + agent fleet 撐得住的量）。
 
 ---
@@ -1619,12 +1763,16 @@ enum 值」。現在四種處境各餵一條真的路徑進去（寫一個壞旗
 
 ---
 
-## Phase 8 — 生態（持續）
+## Phase 8 — 生態與 Preview 成熟化（持續）
 
 - Plugin/adapter 介面：per-app 訊號 adapter（Photoshop 類自繪 UI）交給社群；
   Everywhere MCP interop；瀏覽器 extension（更準的 URL/DOM）。
-- Linux（X11 先、Wayland portal 後）。
-- 語音 TTS（opt-in、僅 a 類開口）；四姊妹立繪/語音資產接入完成度打磨。
+- Linux Preview 成熟化：把 Phase 5 的 X11 Developer Preview 往正式支援推；
+  Wayland portal 繼續研究，做不到可靠背景擷取就維持明示降級，不在這裡首次假裝落地。
+- Persona 1.0 完成後的成熟化：Phase 5 必須先交付四姊妹 catalog、立繪／固定語音
+  pack、明確下載與驗證 pipeline；到這裡才增加已取得權利的新角色資產、表情、語言與可及性，
+  不在這裡首次補核心角色體驗。runtime TTS 若未來另案評估，要有新的隱私與同意合約；
+  不能默默取代 1.0「固定非敏感台詞、不主動、不朗讀私人答案」的邊界。
 - 選配 E2EE 多機同步（獨立審視授權與架構）。
 - 社群治理：issue 模板按「訊號抓不到」分流到 adapter plugin、
   benchmark 語料貢獻管道（去敏審查 gate）。
@@ -1634,9 +1782,9 @@ enum 值」。現在四種處境各餵一條真的路徑進去（寫一個壞旗
 ## 跨階段紀律
 
 1. **每個 phase 合入 = harness 回歸不退步**（P2 起）。
-2. **長期足跡預算原則上是 release blocker**；目前 Ted 已明確接受「先完成功能與
-   體驗，再優化容量」的例外，實測與取捨已寫在 Phase 0。數字繼續照實公開，
-   不能暗改門檻，但也不能拿它擋功能 milestone。
+2. **長期足跡預算是方向，不是 Release 1.0 的精確數字 blocker**；Ted 已明確接受
+   「先完成功能與體驗，再優化容量」，實測與取捨已寫在 Phase 0。數字繼續照實公開、
+   不能暗改門檻；無上限成長或資料損失仍擋發布，但 `<3%`／`<300MB/天` 本身不擋 tag。
 3. **隱私文件與功能同 PR**：動到訊號面的 PR 必須同步改 DATA_INVENTORY.md。
 4. **她的每一句話都有出處**——從第一次開口到 autopilot 報告，無一例外。
 5. **任何「缺一不可」的說法出現時，回去讀 PRODUCT §3 第 8 條。**

@@ -2100,6 +2100,166 @@ fn commitment_other(id: i64, shell: tauri::State<'_, Shell>) -> Result<(), Strin
     })
 }
 
+/// Persona 素材包在畫面上的狀態。
+///
+/// 名字沿用既有 fixed-pack boundary，讓之後接入「可取得／安裝中／需修復／已安裝」
+/// 不必再改前端 contract。這個 zero-network base 只會產生 `unavailable`；它不掃任意
+/// 本機目錄，更不會把「看見一個檔案」當成「權利與 digest 都驗過」。
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PersonaAssetPackPhase {
+    Unavailable,
+    Available,
+    Installing,
+    RepairNeeded,
+    Installed,
+}
+
+/// 已驗證的本機素材才可以填 portrait data URL。Persona v1 沒有這種素材，因此
+/// 保持空；保留型別是為了讓字母 fallback 與 fixed pack 共用同一條 renderer。
+#[derive(Clone, Serialize)]
+struct PersonaPortraitView {
+    data_url: String,
+}
+
+/// 公開 manifest 裡可由 avatar click 指到的十二條 fixed voice。封閉 enum 讓 renderer
+/// 不能把任意路徑或私人文字塞進 IPC；trigger 名只作素材身分，不授權自動播放。
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum PersonaVoiceLineId {
+    ChatgptGreeting,
+    ChatgptActive,
+    ChatgptQuiet,
+    ClaudeGreeting,
+    ClaudeActive,
+    ClaudeQuiet,
+    GeminiGreeting,
+    GeminiActive,
+    GeminiQuiet,
+    GrokGreeting,
+    GrokActive,
+    GrokQuiet,
+}
+
+impl PersonaVoiceLineId {
+    fn persona(self) -> sister_core::config::PersonaId {
+        use sister_core::config::PersonaId;
+        match self {
+            Self::ChatgptGreeting | Self::ChatgptActive | Self::ChatgptQuiet => PersonaId::Chatgpt,
+            Self::ClaudeGreeting | Self::ClaudeActive | Self::ClaudeQuiet => PersonaId::Claude,
+            Self::GeminiGreeting | Self::GeminiActive | Self::GeminiQuiet => PersonaId::Gemini,
+            Self::GrokGreeting | Self::GrokActive | Self::GrokQuiet => PersonaId::Grok,
+        }
+    }
+}
+
+/// 開場只回 availability metadata，不把 WAV bytes 預先交給 renderer。真正的 bytes
+/// 要等同一次 trusted avatar click 經 `persona_voice_read` 只取一條。
+#[derive(Clone, Serialize)]
+struct PersonaVoiceLineView {
+    line_id: PersonaVoiceLineId,
+    duration_ms: u32,
+}
+
+#[derive(Serialize)]
+struct PersonaVoicePayloadView {
+    line_id: PersonaVoiceLineId,
+    data_url: String,
+}
+
+#[derive(Clone, Serialize)]
+struct PersonaAssetPackView {
+    phase: PersonaAssetPackPhase,
+    release_id: Option<String>,
+    portrait: Option<PersonaPortraitView>,
+    voice_lines: Vec<PersonaVoiceLineView>,
+}
+
+/// fixed pack 的唯一 resolver seam。
+///
+/// 下一步接素材時只替換這支：它要從「內嵌 allowlist + digest 驗過的本機 cache」
+/// 產生 view，不能接受 renderer 傳路徑，也不能在這裡下載。下載／同意／權利證明是
+/// 另一條流程。現在誠實回 unavailable，字母人仍完整可用。
+fn resolve_local_persona_assets(
+    _data_dir: Option<&Path>,
+    _persona: sister_core::config::PersonaId,
+) -> PersonaAssetPackView {
+    PersonaAssetPackView {
+        phase: PersonaAssetPackPhase::Unavailable,
+        release_id: None,
+        portrait: None,
+        voice_lines: Vec::new(),
+    }
+}
+
+/// fixed-pack voice 的單條讀取 seam。這一版沒有 pack，因此永遠是 `None`；下一版
+/// 只能在這裡從 embedded manifest 指到的已驗 regular file 讀 exact WAV，不能接受
+/// renderer 路徑、任意文字或遠端 URL。
+fn resolve_local_persona_voice(
+    _data_dir: Option<&Path>,
+    _line_id: PersonaVoiceLineId,
+) -> Option<PersonaVoicePayloadView> {
+    None
+}
+
+#[derive(Clone, Serialize)]
+struct PersonaView {
+    enabled: sister_core::config::PersonaVisible,
+    id: sister_core::config::PersonaId,
+    motion: sister_core::config::PersonaMotionEnabled,
+    tap_lines: sister_core::config::PersonaTapLinesEnabled,
+    /// 這一格目前只能由 config.toml 留住，出廠永遠 false。素材包存在也不能越過它。
+    voice_enabled: sister_core::config::PersonaVoiceEnabled,
+    asset_pack: PersonaAssetPackView,
+}
+
+fn persona_view(config: &sister_core::config::Config, data_dir: Option<&Path>) -> PersonaView {
+    let persona = config.shell.persona;
+    PersonaView {
+        enabled: persona.visible(),
+        id: persona.id,
+        motion: persona.motion_enabled(),
+        tap_lines: persona.tap_lines_enabled(),
+        voice_enabled: persona.voice_enabled(),
+        asset_pack: resolve_local_persona_assets(data_dir, persona.id),
+    }
+}
+
+#[tauri::command]
+fn persona_read(shell: tauri::State<'_, Shell>) -> Result<PersonaView, String> {
+    let config =
+        sister_core::config::Config::load(&config_path()?).map_err(|e| format!("{e:#}"))?;
+    Ok(persona_view(&config, shell.data_dir.as_deref()))
+}
+
+#[tauri::command]
+fn persona_voice_read(
+    line_id: PersonaVoiceLineId,
+    shell: tauri::State<'_, Shell>,
+) -> Result<Option<PersonaVoicePayloadView>, String> {
+    let config =
+        sister_core::config::Config::load(&config_path()?).map_err(|e| format!("{e:#}"))?;
+    let persona = config.shell.persona;
+    if !persona.visible().get()
+        || !persona.tap_lines_enabled().get()
+        || !persona.voice_enabled().get()
+        || persona.id != line_id.persona()
+    {
+        return Ok(None);
+    }
+
+    let assets = resolve_local_persona_assets(shell.data_dir.as_deref(), persona.id);
+    if assets.phase != PersonaAssetPackPhase::Installed
+        || !assets.voice_lines.iter().any(|line| line.line_id == line_id)
+    {
+        return Ok(None);
+    }
+    Ok(resolve_local_persona_voice(
+        shell.data_dir.as_deref(),
+        line_id,
+    ))
+}
+
 /// 設定頁上看得到、改得動的那幾項。
 ///
 /// **刻意只是設定檔的一個子集。** 截圖間隔、去重門檻那些沒有放進來，因為它們
@@ -2125,6 +2285,10 @@ struct Settings {
     /// `[brain] args`。一行一個；prompt 走 stdin，不在這裡。
     #[serde(default)]
     brain_args: Vec<String>,
+    persona_enabled: sister_core::config::PersonaVisible,
+    persona_id: sister_core::config::PersonaId,
+    persona_motion: sister_core::config::PersonaMotionEnabled,
+    persona_tap_lines: sister_core::config::PersonaTapLinesEnabled,
     /// 設定檔實際的位置。給人看的——她說她存到哪，就要指得出來是哪一個檔案。
     ///
     /// **只出不進**：存檔時路徑一律由 `config_path()` 重算，不是相信視窗傳回來
@@ -2153,6 +2317,10 @@ fn settings_read() -> Result<Settings, String> {
         text_days: c.retention.text_days,
         brain_command: c.brain.command,
         brain_args: c.brain.args,
+        persona_enabled: c.shell.persona.visible(),
+        persona_id: c.shell.persona.id,
+        persona_motion: c.shell.persona.motion_enabled(),
+        persona_tap_lines: c.shell.persona.tap_lines_enabled(),
         path: path.display().to_string(),
     })
 }
@@ -2343,11 +2511,15 @@ struct WriteOutcome {
     /// sister record 在跑了」（見 [`start_recording`] 那道 `is_occupied` 閘
     /// 門）。一句在他剛改完排除規則的那一刻、指著一條走不通的路的話。
     watching: &'static str,
+    /// 設定已落盤但 Persona event 沒能送出，和「存檔失敗」是兩件事。
+    /// `true` 只代表 Tauri 接受這次 emit，不冒充另一扇 WebView 已經套用。
+    persona_event_emitted: bool,
 }
 
 #[tauri::command]
 fn settings_write(
     settings: Settings,
+    app: tauri::AppHandle,
     shell: tauri::State<'_, Shell>,
 ) -> Result<WriteOutcome, String> {
     let path = config_path()?;
@@ -2363,11 +2535,27 @@ fn settings_write(
     c.privacy.query_log = settings.query_log;
     c.retention.frames_days = settings.frames_days;
     c.retention.text_days = settings.text_days;
+    c.set_persona_from_page(
+        settings.persona_enabled,
+        settings.persona_id,
+        settings.persona_motion,
+        settings.persona_tap_lines,
+    );
     // 只動這兩格。daily_budget / concurrency / reviewer_daily_budget 這一頁
     // 沒畫，從頭組一份 BrainConfig 會把它們重設成預設值。守這一點的測試是
     // `a_settings_page_write_must_not_reset_unexposed_brain_fields`。
     c.set_brain_cli_from_page(settings.brain_command, settings.brain_args);
     c.save(&path).map_err(|e| format!("{e:#}"))?;
+    // 存成功才換角色。設定頁和字母人是兩扇 WebView；少了這個事件，畫面會直到
+    // 整支 desktop 重開才跟 config.toml 一致。payload 仍只含表達層資料，沒有
+    // 排除規則、OCR、答案或 action。
+    use tauri::Emitter;
+    let persona_event_emitted = app
+        .emit(
+            "persona-changed",
+            persona_view(&c, shell.data_dir.as_deref()),
+        )
+        .is_ok();
     // 存成功之後才問。反過來的話，一個存不進去的檔案會拿到一句「5 秒內換上」。
     Ok(WriteOutcome {
         watching: shell
@@ -2380,6 +2568,7 @@ fn settings_write(
                 ))
             })
             .unwrap_or("none"),
+        persona_event_emitted,
     })
 }
 
@@ -3514,6 +3703,8 @@ fn main() {
             has_ever_recorded,
             has_ever_stored,
             toggle_pause,
+            persona_read,
+            persona_voice_read,
             settings_read,
             settings_write,
             eval_report_view,

@@ -76,6 +76,7 @@ h2 {
 }
 
 textarea,
+select,
 input[type="number"],
 input[type="text"] {
   appearance: none;
@@ -86,6 +87,16 @@ input[type="text"] {
   font: 12.5px/1.6 "Cascadia Mono", Consolas, monospace;
   padding: 8px 10px;
   width: 100%;
+}
+
+select {
+  cursor: pointer;
+}
+
+.persona-tagline {
+  border-left: 3px solid var(--accent);
+  margin: 0 0 9px;
+  padding: 4px 9px;
 }
 
 textarea {

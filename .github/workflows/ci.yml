@@ -50,10 +50,10 @@ jobs:
       - name: Privacy — no HTTP client, no inference engine, no socket
         run: ./scripts/check-no-network.sh
 
-      # L2 出境路徑。沒簽同意書 2 就 spawn、送出去的字沒去敏、外送紀錄抄了原文，
-      # 都是「她開始寫使用者剛剛關掉的截圖」同一族的失敗。腳本自己會改壞三行
-      # 確認會紅。
-      - name: Privacy — cloud path needs a permit, redaction, and no raw outbound log
+      # L2 出境路徑。現行同意書 2 明講送的是螢幕原文，不承諾去敏；這一條守的是
+      # 沒簽就不能 spawn、出境只能交給使用者設定的 CLI，而且 audit table 不另抄原文。
+      # 腳本自己會改壞三行確認會紅。
+      - name: Privacy — cloud path needs a permit, external CLI, and no raw outbound log
         run: python3 ./scripts/check-brain-outbound.py
 
       # PRIVACY.md 最強的那一句：「按鍵內容…是從來沒讀過」。它的份量在於
@@ -84,6 +84,12 @@ jobs:
       # 的原始碼註解自己就在描述這個 bug。
       - name: The pet must be able to say why something failed — and still be saying it 5s later
         run: node ./scripts/check-pet-says-why.mjs
+
+      # Persona 只能在使用者按下原生 button 後，從本機 allowlist 取一條固定台詞。
+      # 這支直接載入產品 app.js，跑過冷啟動與五秒輪詢，並守住關閉後搜尋／狀態仍在、
+      # palette 對比、typed settings persistence，以及未來 voice pack 仍只能服務同一次 click。
+      - name: Persona must stay local, optional, and silent until pressed
+        run: node ./scripts/check-persona.mjs
 
       # 那顆「忘掉這一段」是這整個程式裡唯一一個不可逆的動作，而它是兩段式的。
       # 帶狀態的按鈕只有兩種壞法，兩種都很安靜：停在紅色的「確定刪掉」（下一下
