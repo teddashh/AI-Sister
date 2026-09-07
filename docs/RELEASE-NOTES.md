@@ -47,10 +47,37 @@ sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.104
+
+**alpha.102 與 alpha.103 的 tag 都被 Persona 發版 gate 擋下，沒有可下載檔；
+alpha.104 修的是 Windows 真正走 CDN 時才露出的 native TLS 失敗。**
+
+ureq 的 NativeTls 原本仍把 Windows Schannel 的內建 trust store 關掉、改用 WebPKI
+roots；使用那份設定的 alpha.103 在收到任何 HTTP response 前就停了，Release job
+正確跳過。當時錯誤類型被壓掉，所以不能反過來宣稱已證明唯一根因；
+這一版明確讓 NativeTls 使用 OS trust store，並把 DNS、TLS、timeout、connection、
+protocol 與 response-body 階段分開回報，不再全部壓成「下載不可用」。發版前的人工
+Windows workflow 已在七秒內讀完固定 **73,261,088-byte** ZIP，走完同一套整包／
+逐檔驗證、原子安裝與精準移除；tag 仍會再跑一次，任一步失敗就不公開 release。
+
+跨平台錄製先把共用生命週期抽出來。Windows 原順序保持為 stop／duration／外部停止 →
+帶 pause probe 的 tick → brain wake → 設定與同意書熱重載 → prune／footprint → sleep；
+現在這段 runner mechanics 可在 Linux CI 用 replay 真跑。maintenance 中途失敗或 unwind
+時，RAII 也會收掉 recording heartbeat，不再讓字母人暫時誤報「仍在錄」。Windows-only
+hot-reload closure 仍只在 Windows build 中編譯，未因此取得完整的原生執行覆蓋；
+這三支 replay test 不會被拿來冒充整條 Win32 loop 已跑過。
+
+Linux 新增第一層 X11 preflight foundation：Wayland／headless 是已量到的 Unsupported；
+矛盾環境、壞或遠端 `DISPLAY`、無法用 exact process 對回 system session 都是 Unknown。
+它只允許本機 Unix X11 transport，並把 verifier 看過的同一條 connection 保留下來，
+核准後不重連。production 的 logind verifier、capture、OCR 與完整 S1 都尚未接，因此
+**這一版沒有 Linux Preview artifact**；CLI／replay 可跑不等於桌面支援。
+
+
 ## v0.1.0-alpha.103
 
-**alpha.102 的 tag 沒有產出可下載檔；這才是 Persona 立繪與固定語音的
-第一個可下載實測版，並且補上 Release 1.0 跨平台共用的隱私安全地基。**
+**alpha.102 的 tag 沒有產出可下載檔；alpha.103 原定作為 Persona 立繪與固定語音的
+第一個實測版，但 Windows native TLS gate 失敗，因此這個 tag 同樣沒有公開 release。**
 
 Persona 包保留 alpha.102 已寫好的嚴格邊界：設定頁先攤開固定 CDN host、path、
 **73,261,088 bytes** 與資料邊界，只有使用者當下按下原生按鈕才可發一次

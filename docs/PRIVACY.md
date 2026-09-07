@@ -615,8 +615,11 @@ cargo test -p sister-capture --test privacy
 第二條檢查不是再宣稱整個 repo 沒有 HTTP client；它要逐棵證明 root workspace 在
 預設 feature 下仍無 download、recorder／core／capture／brain／hands 沒有 client，
 只有 desktop 能經 `sister-assets/download` 抵達固定 Persona transport。它同時繼續
-拒絕 raw socket、renderer 的 `fetch`／WebSocket／遠端資源，以及任何把 CDN 放進
-WebView CSP 的改動。branch CI 用本機 transport/cache 測試守住 0／1 request、固定
+拒絕我們自己的 Rust 原始碼直接開任意 TCP／UDP／Unix socket、renderer 的
+`fetch`／WebSocket／遠端資源，以及任何把 CDN 放進 WebView CSP 的改動。Linux X11
+preflight 使用 pinned `x11rb` dependency 連本機 X server 的 Unix socket；它會在連線前
+拒絕 TCP／SSH `DISPLAY`，不是對外內容路徑，也不是這個 source-level socket gate
+掃描得到的東西。branch CI 用本機 transport/cache 測試守住 0／1 request、固定
 request metadata、失敗／取消與跨行程鎖；不碰 CDN。tag CI 才另外從 public CDN 取
 完整 manifest 重算 authority，並在原生 Windows 上走一次固定 GET、驗證、安裝與撤回。
 按下前 0 request、四位 request 完全相同及系統 proxy 對照仍列在真 Windows 出貨清單，

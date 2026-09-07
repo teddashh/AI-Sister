@@ -330,4 +330,4 @@ if [ -n "$skipped" ]; then
     echo "⚠ 有東西沒檢查到（未安裝 target）：$skipped"
     echo "  底下這句話只涵蓋真的跑過的那幾棵樹。出貨的是 Windows 執行檔。"
 fi
-echo "✓ 未授權網路邊界成立：root/recorder/core/brain/hands 無 client，desktop 只有 fixed Persona GET；無內建推論/raw socket，WebView 無遠端來源"
+echo "✓ 未授權網路邊界成立：root/recorder/core/brain/hands 無 HTTP client，desktop 只有 fixed Persona GET；原始碼無直接 socket API，WebView 無遠端來源"

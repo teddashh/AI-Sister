@@ -474,7 +474,10 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
   不擋 Release 1.0。本機編不到、CI 也沒有 mac runner，還沒開始。
 - ⬜ **Linux X11 Developer Preview**：先接通 X11 capture + OCR + S1 主流程；
   Wayland 明示 unsupported／degraded，不用 portal 的半套能力冒充背景常駐。
-  現在從原始碼能跑 CLI／replay，不等於 Linux 桌面 Preview，capture backend 還沒開始。
+  alpha.104 已落第一層 fail-closed preflight：Wayland／headless 與 Unknown 分開，
+  只准本機 Unix X11 transport，且 verifier 看過的 exact connection 會原樣留給後端。
+  production 的 exact-process logind verifier、capture／focus／input／clipboard／OCR
+  都還沒接，所以真 X11 目前仍回 Unknown；這不是 Linux 桌面 Preview，也沒有 Linux artifact。
 - ⬜ **Persona Release 1.0 角色體驗（使用者可關閉／可不下載）**：
   - 隨程式提供離線 Neutral 與 Aster／Cedar／Mira／Rook 的 code-native 字母呈現，以及四姊妹的
     本機 catalog、選擇入口與可用角色呈現；不把尚未驗證的素材寫成已可發布。
@@ -507,6 +510,10 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     四段會斷言「今天滿有活力」的 `active` 聲音明確排除，不進 selected
     projection、cache、IPC 或 click rotation。這項只完成內容／權利／接線審查；
     底下真 Windows 的 GET、播放、撤回與 packet trace 仍是未實測。
+  - ✅ alpha.104 發版前的人工 Windows workflow 已用 native Schannel 完成唯一 fixed GET，
+    讀滿 73,261,088 bytes 後走同一套整包／逐檔驗證、原子安裝與精準移除。這補的是
+    真 Windows transport；設定頁真人點擊、四位立繪／八段播放、撤回 UX 與 packet trace
+    仍須在 Ted 的正式 artifact 上實測，不能拿 CI 的成功下載代替。
 - 🔶 發布工程：安裝包／code signing／自動更新、single-instance、recorder
   watchdog/backoff、開機自啟、跨 capture／brain／hands 的 master stop、官網一頁，
   以及 Show HN / X 發文帶 benchmark 表。
