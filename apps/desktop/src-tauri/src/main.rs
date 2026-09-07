@@ -591,9 +591,9 @@ fn toggle_pin(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> bool {
 
 /// 她現在有沒有在看。
 ///
-/// 每次都去讀磁碟，**不快取在這個行程裡**：按下暫停的可能是系統匣、可能是
-/// 上一次開機、也可能是使用者自己去刪了那個檔案。這個視窗只是一面鏡子，
-/// 真相在 data dir 裡。
+/// 每次都去讀磁碟，**不快取在這個行程裡**：按下暫停的可能是系統匣、終端機，
+/// 也可能是上一次開機留下的狀態。這個視窗只是一面鏡子，真相在 data dir 的
+/// transaction state 裡。
 #[tauri::command]
 fn pause_state(shell: tauri::State<'_, Shell>) -> bool {
     match &shell.data_dir {
@@ -1009,8 +1009,9 @@ fn toggle_pause(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> Result
         .data_dir
         .as_ref()
         .ok_or_else(|| "找不到資料目錄，暫停鍵沒有作用".to_string())?;
-    let next = !sister_core::pause::is_paused(dir);
-    sister_core::pause::set_paused(dir, next, sister_core::now_ms())
+    // 讀取與翻轉必須在同一把跨行程鎖裡：熱鍵和系統匣若同時先各自讀一次，
+    // 兩次 toggle 會從同一個舊值算出同一個答案，實際只翻一次。
+    let next = sister_core::pause::toggle_paused(dir, sister_core::now_ms())
         .map_err(|e| format!("{e:#}"))?;
     announce_pause(&app, next);
     Ok(next)
@@ -1354,7 +1355,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         // 記不進去不算失敗：他要的是答案。
         //
         // 每次都重讀設定檔，不快取：他剛在設定頁上把那個勾拿掉，下一個問題就
-        // 不該再被記。和暫停旗標同一條紀律——真相在磁碟上，這個行程只是鏡子。
+        // 不該再被記。和暫停控制狀態同一條紀律——真相在磁碟上，這個行程只是鏡子。
         // 讀不到設定檔就當成不要記（`unwrap_or(false)`）：不確定的時候少存
         // 一點，方向和其他每一個 fail-closed 一致。
         let wanted = config_path()
@@ -2436,7 +2437,10 @@ fn emit_persona_asset_status(app: &tauri::AppHandle, shell: &Shell) {
     use tauri::Emitter;
     // listener 不採信 event payload，收到後會重叫 status command；即使這一刻讀
     // cache 出錯也要通知另一扇設定頁，讓它顯示那個錯而不是留著舊的 Installed。
-    let _ = app.emit("persona-assets-changed", persona_asset_manager_view(shell).ok());
+    let _ = app.emit(
+        "persona-assets-changed",
+        persona_asset_manager_view(shell).ok(),
+    );
 }
 
 struct AssetOperationGuard(Arc<AtomicU8>);
@@ -2530,9 +2534,7 @@ async fn persona_asset_remove(
         )
         .map_err(|running| match running {
             ASSET_INSTALLING => "素材仍在下載；先按停止，等它停下來再刪除。".to_string(),
-            ASSET_SETTING_VOICE => {
-                "正在更新固定台詞語音設定；完成後再刪除素材。".to_string()
-            }
+            ASSET_SETTING_VOICE => "正在更新固定台詞語音設定；完成後再刪除素材。".to_string(),
             _ => "本機素材已經在刪除。".to_string(),
         })?;
 
@@ -2588,9 +2590,7 @@ fn persona_voice_set(
             Ordering::Acquire,
         )
         .map_err(|running| match running {
-            ASSET_INSTALLING => {
-                "素材仍在下載；完成或停止後再改固定台詞語音。".to_string()
-            }
+            ASSET_INSTALLING => "素材仍在下載；完成或停止後再改固定台詞語音。".to_string(),
             ASSET_REMOVING => "素材正在刪除，固定台詞語音已停用。".to_string(),
             _ => "另一個固定台詞語音設定仍在寫入。".to_string(),
         })?;
@@ -2949,13 +2949,19 @@ struct PrivacyHealth {
     /// 而這件事的方向剛好相反（整棟房子是空的）。混在一起會讓那幾句話變成
     /// 一堆語氣一樣、輕重不分的字。
     capture_off: bool,
-    /// 那幾條規則**驗過了沒有**。`None` = 根本沒有報告（由 `at` 那一格回答）。
+    /// 輸入 hook 是已知可用、已知不可用，還是這份報告沒量到。
+    ///
+    /// 另存原始三態，不從 `broken` 是否有一句話反推：清單空白可能是
+    /// `Available`，也可能是 `Unknown`。
+    input_hook: sister_core::capabilities::CapabilityState,
+    /// 那幾條規則**驗過了沒有**。沒有報告時是 `Unknown`，
+    /// `at` 同時說明連一份報告都沒有。
     ///
     /// 同樣不能塞進 `broken`，同樣是因為方向不同：那個清單講「門開著」，這裡
     /// 講「我還不知道門關了沒」。而**「不知道」在這一頁上一直長得像「沒問
     /// 題」**——`broken` 是空的、這一格就是空白，而這一頁自己寫著「空白在這
     /// 一格就是『都生效』」。見 [`sister_core::capabilities::UrlRules`]。
-    url_rules: Option<sister_core::capabilities::UrlRules>,
+    url_rules: sister_core::capabilities::UrlRules,
 }
 
 #[tauri::command]
@@ -2979,13 +2985,15 @@ fn privacy_health(
             broken: r.broken_privacy_rules(&config.privacy),
             at: Some(r.at),
             capture_off,
-            url_rules: Some(r.url_rules_verdict(&config.privacy)),
+            input_hook: r.input_hook,
+            url_rules: r.url_rules_verdict(&config.privacy),
         },
         None => PrivacyHealth {
             broken: Vec::new(),
             at: None,
             capture_off,
-            url_rules: None,
+            input_hook: sister_core::capabilities::CapabilityState::Unknown,
+            url_rules: sister_core::capabilities::UrlRules::Unknown,
         },
     })
 }

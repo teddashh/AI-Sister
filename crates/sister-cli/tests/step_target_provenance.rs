@@ -11,6 +11,7 @@ use std::process::{Command, Output};
 
 const TASK: &str = "執行這個下一步";
 const OTHER_APP_URL: &str = "https://from-another-app.example.com/collect";
+const WORK_URL: &str = "https://work.example.test/task";
 
 fn seed_real_url_origin(db: &mut Db, ts: i64) {
     // Scenario 是 replay，不能替日後的 unattended URL 種來源票。這套測的是
@@ -30,7 +31,6 @@ fn seed_real_url_origin(db: &mut Db, ts: i64) {
                 window_title: Some("網址來源夾具".into()),
                 url: Some(OTHER_APP_URL.into()),
                 pid: Some(1),
-                password_field: false,
             },
         },
     )
@@ -88,12 +88,15 @@ fn run_case_ex(
         &scenario,
         serde_json::to_vec_pretty(&serde_json::json!({
             "name": "app-provenance-probe",
+            "privacy_context": "clear",
+            "system_state": "active",
             "steps": [
                 {
                     "at_ms": 0,
                     "app": "chrome.exe",
                     "app_name": "Google Chrome",
                     "title": "他真的在工作的那個視窗",
+                    "url": WORK_URL,
                     "text": [TASK]
                 },
                 {
@@ -585,12 +588,15 @@ fn run_agreed_unattended(label: &str, pass_b_cites_target: bool) -> (PathBuf, St
         &scenario,
         serde_json::to_vec_pretty(&serde_json::json!({
             "name": "agreed-evidence-probe",
+            "privacy_context": "clear",
+            "system_state": "active",
             "steps": [
                 {
                     "at_ms": 0,
                     "app": "chrome.exe",
                     "app_name": "Google Chrome",
                     "title": "他真的在工作的那個視窗",
+                    "url": WORK_URL,
                     "text": [TASK]
                 },
                 {

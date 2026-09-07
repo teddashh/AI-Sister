@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 
-use crate::model::FocusSnapshot;
+#[cfg(test)]
+use crate::model::{BrowserUrlState, FocusSnapshot, PrivacyContext, SensitiveFieldState};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -566,6 +567,37 @@ const SCREENSHARE_APPS: &[&str] = &[
     "teamviewer",
 ];
 
+/// 需要網址來源證據的瀏覽器 app 字根。這份清單同時供 Windows UIA 與
+/// clipboard source gate 使用；兩邊各抄一份會讓「畫面認得、剪貼簿不認得」
+/// 變成一個安靜的漏擋。
+pub const BROWSER_APP_ROOTS: &[&str] = &[
+    "chrome",
+    "msedge",
+    "firefox",
+    "brave",
+    "vivaldi",
+    "opera",
+    "chromium",
+    "arc",
+    "zen",
+    "librewolf",
+    "waterfox",
+    "floorp",
+    "thorium",
+    "iexplore",
+];
+
+pub fn app_is_browser(app_key: &str) -> bool {
+    BROWSER_APP_ROOTS.iter().any(|root| {
+        app_key.match_indices(root).any(|(at, _)| {
+            app_key[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric())
+        })
+    })
+}
+
 /// 排除判定結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Exclusion {
@@ -589,18 +621,85 @@ impl Exclusion {
 }
 
 impl PrivacyConfig {
+    /// 剪貼簿事件的來源 app 是獨立 privacy 前提。
+    ///
+    /// 使用者可能在 KeePass 複製後先切回 editor，recorder 下拍才看到
+    /// sequence 變化。當前前景的 permit 不能代替「這份 bytes 從哪裡來」。
+    pub fn check_clipboard_source(&self, source_app: Option<&str>) -> Exclusion {
+        let Some(source_app) = source_app
+            .map(str::trim)
+            .filter(|source| !source.is_empty())
+        else {
+            return Exclusion::Blocked("clipboard source app unknown".to_string());
+        };
+        let app = source_app.to_ascii_lowercase();
+        if self.pause_on_screenshare
+            && SCREENSHARE_APPS
+                .iter()
+                .any(|candidate| app.contains(candidate))
+        {
+            return Exclusion::Blocked(format!("clipboard screenshare source: {app}"));
+        }
+        if self
+            .excluded_apps
+            .iter()
+            .any(|pattern| app_pattern_matches(&pattern.to_ascii_lowercase(), &app))
+        {
+            return Exclusion::Blocked(format!("clipboard excluded source: {app}"));
+        }
+        // Win32 clipboard owner 只能證明 app，沒有 origin tab 的 URL/title。
+        // 使用者可能在銀行頁複製後於下一拍前切回 editor；拿 editor 的當前
+        // permit 替那份 bytes 背書會漏掉 URL 規則。能取得 origin URL 前，
+        // 有任何 URL 規則時就保守丟棄 browser clipboard。
+        if !self.excluded_urls.is_empty() && app_is_browser(&app) {
+            return Exclusion::Blocked(format!("clipboard browser source URL unknown: {app}"));
+        }
+        Exclusion::Allowed
+    }
+
     /// 依前景脈絡判斷這一刻能不能擷取。
     ///
     /// 這個函式是 capture 迴圈裡最先被呼叫的東西——它回 `Blocked` 時，
     /// 連截圖都不會發生。
-    pub fn check(&self, focus: &FocusSnapshot) -> Exclusion {
+    pub fn check(&self, context: &crate::model::PrivacyContext) -> Exclusion {
+        use crate::model::{BrowserUrlState, PrivacyContext, SensitiveFieldState};
+
+        let (focus, sensitive_field, browser_url) = match context {
+            PrivacyContext::Known {
+                focus,
+                sensitive_field,
+                browser_url,
+                ..
+            } => (focus, *sensitive_field, browser_url),
+            PrivacyContext::Unknown => {
+                return Exclusion::Blocked("privacy context unavailable".to_string());
+            }
+        };
+
+        // 這個三態是 capture-time 的最前面一道門。「問不出來」和
+        // 「確定沒有」的後果不對稱：前者若被當成 clear，被寫下的
+        // 秘密不會有任何症狀。因此 Unknown 要有自己的穩定稽核理由。
+        match sensitive_field {
+            SensitiveFieldState::Focused => {
+                return Exclusion::Blocked("sensitive field focused".to_string());
+            }
+            SensitiveFieldState::Unknown => {
+                return Exclusion::Blocked("sensitive field state unknown".to_string());
+            }
+            SensitiveFieldState::Clear => {}
+        }
+
         let app = focus.app_key();
 
-        // 排在所有規則之前。規則是在猜「這個 app 大概會有秘密」，
-        // 這一條是「她**現在正在**輸入秘密」——後者確定得多，而且不需要
-        // 任何設定就成立。使用者沒設定過的東西也該保護得到。
-        if focus.password_field {
-            return Exclusion::Blocked("password field focused".to_string());
+        // 只有真的量到位址列，才能聲稱 URL 排除規則已比對。
+        // `NotApplicable` 不能只靠 backend 自律：即將加入的 Linux/macOS
+        // backend 若把 Chrome 誤標成非瀏覽器，所有 URL 規則會安靜失效。
+        // 中央 gate 再用同一份 browser classifier 核對：Unknown 一律擋；
+        // 已知瀏覽器即使收到 NotApplicable 也擋。
+        let url_unavailable = matches!(browser_url, BrowserUrlState::Unknown)
+            || (matches!(browser_url, BrowserUrlState::NotApplicable) && app_is_browser(&app));
+        if url_unavailable && !self.excluded_urls.is_empty() {
+            return Exclusion::Blocked("browser URL state unknown".to_string());
         }
 
         if self.pause_on_screenshare && !app.is_empty() {
@@ -1269,10 +1368,14 @@ mod url_rule_lint_tests {
             "slack.exe", // 能分享螢幕，但刻意不列（見 SCREENSHARE_APPS 說明）
             "discord.exe",
         ] {
-            let verdict = cfg.check(&FocusSnapshot {
-                app_id: Some(innocent.into()),
-                ..Default::default()
-            });
+            let verdict = cfg.check(&PrivacyContext::known(
+                FocusSnapshot {
+                    app_id: Some(innocent.into()),
+                    ..Default::default()
+                },
+                SensitiveFieldState::Clear,
+                BrowserUrlState::NotApplicable,
+            ));
             assert!(
                 !verdict.is_blocked(),
                 "{innocent} 被擋掉了（{:?}）——等於在它前景時什麼都不記",
@@ -1305,11 +1408,77 @@ mod url_rule_lint_tests {
 mod tests {
     use super::*;
 
-    fn app(id: &str) -> FocusSnapshot {
-        FocusSnapshot {
-            app_id: Some(id.into()),
-            ..Default::default()
-        }
+    #[test]
+    fn browser_clipboard_without_origin_url_proof_fails_closed() {
+        let mut privacy = PrivacyConfig::default();
+        let blocked = privacy.check_clipboard_source(Some("chrome.exe"));
+        assert_eq!(
+            blocked.reason(),
+            Some("clipboard browser source URL unknown: chrome.exe")
+        );
+
+        // 沒有任何 URL policy 時不假裝是因 URL 規則擋的；app/screenshare
+        // gates 仍照常獨立運作。
+        privacy.excluded_urls.clear();
+        assert_eq!(
+            privacy.check_clipboard_source(Some("chrome.exe")),
+            Exclusion::Allowed
+        );
+        assert_eq!(
+            privacy.check_clipboard_source(Some("notepad.exe")),
+            Exclusion::Allowed
+        );
+    }
+
+    #[test]
+    fn browser_identity_uses_word_boundaries_for_both_content_paths() {
+        assert!(app_is_browser("google chrome"));
+        assert!(app_is_browser("ungoogled-chromium.exe"));
+        assert!(!app_is_browser("searchapp.exe"));
+        assert!(!app_is_browser("monarch.exe"));
+    }
+
+    #[test]
+    fn a_browser_cannot_call_its_url_not_applicable_to_bypass_url_rules() {
+        let mut privacy = PrivacyConfig::default();
+        let context = PrivacyContext::known(
+            FocusSnapshot {
+                app_id: Some("chrome.exe".into()),
+                app_name: Some("Google Chrome".into()),
+                window_title: Some("普通分頁".into()),
+                ..Default::default()
+            },
+            SensitiveFieldState::Clear,
+            BrowserUrlState::NotApplicable,
+        );
+
+        assert_eq!(
+            privacy.check(&context).reason(),
+            Some("browser URL state unknown"),
+            "backend 無權用 NotApplicable 把瀏覽器降成非瀏覽器"
+        );
+        privacy.excluded_urls.clear();
+        assert_eq!(
+            privacy.check(&context),
+            Exclusion::Allowed,
+            "沒有 URL 規則時不要捏造一個 URL policy 拒絕"
+        );
+    }
+
+    fn app(id: &str) -> PrivacyContext {
+        let browser_url = if app_is_browser(id) {
+            BrowserUrlState::Known("example.test/ordinary".to_string())
+        } else {
+            BrowserUrlState::NotApplicable
+        };
+        PrivacyContext::known(
+            FocusSnapshot {
+                app_id: Some(id.into()),
+                ..Default::default()
+            },
+            SensitiveFieldState::Clear,
+            browser_url,
+        )
     }
 
     #[test]
@@ -1686,15 +1855,21 @@ mod tests {
         assert!(!app_pattern_matches("", "chrome.exe"));
     }
 
-    fn focus(app: &str, title: &str, url: Option<&str>) -> FocusSnapshot {
-        FocusSnapshot {
-            app_id: Some(app.into()),
-            app_name: Some(app.into()),
-            window_title: Some(title.into()),
-            url: url.map(|u| u.into()),
-            pid: Some(1),
-            password_field: false,
-        }
+    fn focus(app: &str, title: &str, url: Option<&str>) -> PrivacyContext {
+        let browser_url = url.map_or(BrowserUrlState::NotApplicable, |url| {
+            BrowserUrlState::Known(url.to_string())
+        });
+        PrivacyContext::known(
+            FocusSnapshot {
+                app_id: Some(app.into()),
+                app_name: Some(app.into()),
+                window_title: Some(title.into()),
+                url: url.map(|u| u.into()),
+                pid: Some(1),
+            },
+            SensitiveFieldState::Clear,
+            browser_url,
+        )
     }
 
     /// 焦點在密碼欄上時，**什麼規則都不必命中**這一幀就該被丟掉。
@@ -1706,18 +1881,42 @@ mod tests {
     #[test]
     fn a_focused_password_field_blocks_even_a_completely_innocent_window() {
         let privacy = PrivacyConfig::default();
-        let mut focus = focus("notepad.exe", "未命名 - 記事本", None);
+        let clear = focus("notepad.exe", "未命名 - 記事本", None);
         assert!(
-            !privacy.check(&focus).is_blocked(),
+            !privacy.check(&clear).is_blocked(),
             "這個脈絡本身應該是可以錄的，否則這條測試證明不了任何事"
         );
 
-        focus.password_field = true;
-        let reason = privacy.check(&focus);
+        let focused = PrivacyContext::known(
+            FocusSnapshot {
+                app_id: Some("notepad.exe".into()),
+                app_name: Some("notepad.exe".into()),
+                window_title: Some("未命名 - 記事本".into()),
+                pid: Some(1),
+                ..Default::default()
+            },
+            SensitiveFieldState::Focused,
+            BrowserUrlState::NotApplicable,
+        );
+        let reason = privacy.check(&focused);
         assert!(reason.is_blocked(), "焦點在密碼欄上還照錄");
         assert!(
-            reason.reason().unwrap().contains("password"),
+            reason.reason().unwrap().contains("sensitive"),
             "理由要看得出是密碼欄，不然稽核紀錄講不清楚：{reason:?}"
+        );
+
+        let unknown = PrivacyContext::known(
+            FocusSnapshot::default(),
+            SensitiveFieldState::Unknown,
+            BrowserUrlState::NotApplicable,
+        );
+        assert!(
+            privacy.check(&unknown).is_blocked(),
+            "敏感欄沒量到不能當成 clear"
+        );
+        assert!(
+            privacy.check(&PrivacyContext::Unknown).is_blocked(),
+            "整個 privacy context 沒量到也必須擋住"
         );
     }
 
@@ -1824,7 +2023,14 @@ mod tests {
             Exclusion::Allowed
         );
         // 空的 focus 不該被誤擋
-        assert_eq!(p.check(&FocusSnapshot::default()), Exclusion::Allowed);
+        assert_eq!(
+            p.check(&PrivacyContext::known(
+                FocusSnapshot::default(),
+                SensitiveFieldState::Clear,
+                BrowserUrlState::NotApplicable,
+            )),
+            Exclusion::Allowed
+        );
     }
 
     #[test]

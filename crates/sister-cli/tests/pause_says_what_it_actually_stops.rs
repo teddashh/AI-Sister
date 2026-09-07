@@ -106,6 +106,8 @@ fn seeded(name: &str) -> PathBuf {
         &scenario,
         serde_json::to_vec_pretty(&serde_json::json!({
             "name": "pause-does-not-stop-the-brain",
+            "privacy_context": "clear",
+            "system_state": "active",
             "steps": [
                 {"at_ms": 0, "app": "code.exe", "title": "compiler",
                  "text": ["error[E0308]: mismatched types"]},

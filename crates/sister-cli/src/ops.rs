@@ -1039,6 +1039,50 @@ fn report_exclusions(stats: &sister_capture::RecorderStats) {
     }
 }
 
+/// 隱私閘門安全停讀的原因。這些不是一般的「無畫面」：一個是 OS 根本
+/// 沒量到、一個是內容讀到 RAM 後脈絡改變，另幾個只影響 clipboard。
+/// 混成五個零會讓安全停讀看起來像正常安靜。
+fn safety_gap_lines(stats: &sister_capture::RecorderStats) -> Vec<String> {
+    let mut lines = Vec::new();
+    if stats.system_unknown > 0 {
+        lines.push(format!(
+            "  ⚠  {} 拍問不到鎖定／電源狀態；都在內容來源前停下。",
+            stats.system_unknown
+        ));
+    }
+    if stats.context_changed > 0 {
+        lines.push(format!(
+            "  ⚠  {} 拍在隱私檢查後前景脈絡改變；暫存內容已丟棄，未進 OCR／資料庫／PNG。",
+            stats.context_changed
+        ));
+    }
+    if stats.clipboard_watermark_unknown > 0 {
+        lines.push(format!(
+            "  ⚠  剪貼簿安全水位 {} 次沒建立；對應隱私空洞保持封閉，沒有補撿舊內容。",
+            stats.clipboard_watermark_unknown
+        ));
+    }
+    if stats.clipboard_source_unknown > 0 {
+        lines.push(format!(
+            "  剪貼簿丟棄 {} 筆：來源 app 無法確認。",
+            stats.clipboard_source_unknown
+        ));
+    }
+    if stats.clipboard_source_excluded > 0 {
+        lines.push(format!(
+            "  剪貼簿丟棄 {} 筆：來源命中隱私規則，或瀏覽器來源網址無法證明。",
+            stats.clipboard_source_excluded
+        ));
+    }
+    lines
+}
+
+fn report_safety_gaps(stats: &sister_capture::RecorderStats) {
+    for line in safety_gap_lines(stats) {
+        println!("{line}");
+    }
+}
+
 #[cfg(test)]
 mod summary_tests {
     use super::*;
@@ -1092,6 +1136,29 @@ mod summary_tests {
         let warn = tick_failures_line(&s).expect("三拍也要說");
         assert!(warn.contains("3 拍失敗（共 7200 拍做過事）"), "{warn}");
         assert!(!warn.contains("每一拍都失敗了"), "{warn}");
+    }
+
+    #[test]
+    fn safety_stops_are_not_hidden_inside_an_empty_summary() {
+        assert!(safety_gap_lines(&Default::default()).is_empty());
+        let stats = sister_capture::RecorderStats {
+            system_unknown: 1,
+            context_changed: 2,
+            clipboard_watermark_unknown: 3,
+            clipboard_source_unknown: 4,
+            clipboard_source_excluded: 5,
+            ..Default::default()
+        };
+        let text = safety_gap_lines(&stats).join("\n");
+        for fact in [
+            "1 拍問不到鎖定／電源狀態",
+            "2 拍在隱私檢查後前景脈絡改變",
+            "安全水位 3 次沒建立",
+            "來源 app 無法確認",
+            "瀏覽器來源網址無法證明",
+        ] {
+            assert!(text.contains(fact), "摘要漏了 {fact:?}：{text}");
+        }
     }
 }
 
@@ -7939,7 +8006,6 @@ pub mod act {
                         // 位址列給的是縮寫過的字串，比對只到 host 這一層。
                         url: Some("example.com/a?b=c".into()),
                         pid: Some(1),
-                        password_field: false,
                     },
                 },
             )
@@ -14539,7 +14605,6 @@ pub mod query {
                     window_title: Some("t".into()),
                     url: None,
                     pid: None,
-                    password_field: false,
                 },
             }
         }
@@ -15833,14 +15898,14 @@ pub mod stats {
             // 「最後一筆 CapturePaused 沒有配到 CaptureResumed」和「她現在
             // 是暫停的」是**兩件事**，而舊版把前者印成了後者。
             //
-            // 那兩筆事件是 recorder 寫的，暫停旗標是桌面程式（或 `sister
+            // 那兩筆事件是 recorder 寫的，暫停控制狀態是桌面程式（或 `sister
             // pause`）寫的，兩者不同行程。錄製當中按暫停、然後關掉 record、
             // 再解除——解除的時候沒有人在跑 recorder，`CaptureResumed` 就沒
             // 有人寫。資料庫從此永遠掛著一段沒收尾的暫停，而這一行會永遠
             // 印「她現在就是閉著眼睛的」，即使她正在錄。
             //
-            // 現在就是不是暫停，`paused.flag` 當場答得出來（見 `pause.rs`：
-            // 讀不到一律當成暫停）。所以先問旗標，再決定那段沒收尾的紀錄
+            // 現在就是不是暫停，`pause::snapshot` 當場答得出來（見 `pause.rs`：
+            // 控制狀態讀不到一律當成暫停）。所以先問控制面，再決定那段沒收尾的紀錄
             // 該怎麼講。
             if let Some(since) = pauses.open_since {
                 if sister_core::pause::is_paused(data_dir) {
@@ -16171,11 +16236,21 @@ pub mod stats {
 pub mod doctor {
     use super::*;
     use crate::fmt;
+    use sister_core::capabilities::CapabilityState;
     use sister_core::config::Config;
     use sister_core::db::SignalVerdict;
 
     fn line(ok: bool, label: &str, detail: &str) {
         mark(if ok { "✓" } else { "✗" }, label, detail);
+    }
+
+    /// 能力探測不可以經過 `bool` 才到畫面：那會逼 `Unknown` 假裝成其中一面。
+    fn capability_symbol(state: CapabilityState) -> &'static str {
+        match state {
+            CapabilityState::Available => "✓",
+            CapabilityState::Unavailable => "✗",
+            CapabilityState::Unknown => "?",
+        }
     }
 
     /// 第三種狀態：**還沒驗到**。
@@ -16220,15 +16295,16 @@ pub mod doctor {
     /// 暫停那一列要說的話，`None` ＝沒有暫停。
     ///
     /// **這一支是量的那一邊，所以它拿得到路徑，而它是唯一拿得到的一邊。**
-    /// `watching_verdict` 刻意沒有路徑（理由見它自己的註解），可是「刪掉哪一個
-    /// 檔」「哪一條路讀不到」只有路徑講得出來，所以四種暫停的句子在這裡寫完，
+    /// `watching_verdict` 刻意沒有路徑（理由見它自己的註解），可是「哪一個控制
+    /// 檔壞了」「哪一條路讀不到」只有路徑講得出來，所以五種暫停的句子在這裡寫完，
     /// 送過去的是一句已經寫好的話。同 `hands_status`：收 `&Path`、回一句話、
     /// 測試餵真的路徑進來。
     ///
     /// alpha.80 先分成三句；這一版再把其中「檢查旗標失敗」依目錄狀態拆開。
     /// `paused_since()` 回 `None` 曾把不同原因蓋在一起：
     ///
-    /// 1. 旗標檔確定在，內容壞了（寫到一半斷電）→ **刪掉它有用**。
+    /// 1. 旗標檔確定在，內容壞了（寫到一半斷電）→ 舊版刪掉它有用；新版還要
+    ///    經過 `pause.state`，所以一律跑明確的 `resume` transaction。
     /// 2. 連 data dir 都讀不到，`is_paused` 刻意 fail-closed 所以算暫停——而
     ///    這一路上**旗標在不在根本沒看過** → **刪掉它不一定有用**，那句話會讓
     ///    他去刪一個可能不存在的檔，然後回來看到同一行字。
@@ -16239,32 +16315,50 @@ pub mod doctor {
     fn paused_row(data_dir: &Path) -> Option<String> {
         use sister_core::pause::PauseState;
         let flag = sister_core::pause::flag_path(data_dir);
+        let state = data_dir.join("pause.state");
+        let lock = data_dir.join("pause.lock");
         match sister_core::pause::state(data_dir) {
             PauseState::Recording => None,
             PauseState::Since(ts) => Some(format!(
-                "**暫停中**（從 {} 起）。她不會再看新的畫面——但**已經記下來的**那些，解釋層還是會讀、還是可能送給雲端模型、還是會寫成新的卡片；要連那半也停，請跑 `{}`。解除暫停請跑 `{}`（不是裸的 `sister resume`），或刪掉 {}",
+                "**暫停中**（從 {} 起）。她不會再看新的畫面——但**已經記下來的**那些，解釋層還是會讀、還是可能送給雲端模型、還是會寫成新的卡片；要連那半也停，請跑 `{}`。解除暫停請跑 `{}`（不是裸的 `sister resume`）；不要只刪 {}，新版控制狀態仍可能維持暫停",
                 crate::fmt::timestamp(ts),
                 cmd(data_dir, "consent --revoke cloud-reading"),
                 cmd(data_dir, "resume"),
                 flag.display()
             )),
             PauseState::FlagPresentButUnreadable => Some(format!(
-                "**暫停中**（旗標內容讀不出來）。她不會再看新的畫面——但**已經記下來的**那些還是會被送去解讀、寫成新的卡片；要連那半也停，請跑 `{}`。刪掉 {} 可解除",
+                "**暫停中**（旗標內容讀不出來）。她不會再看新的畫面——但**已經記下來的**那些還是會被送去解讀、寫成新的卡片；要連那半也停，請跑 `{}`。解除請跑 `{}`；不要只刪 {}，新版控制狀態仍可能維持暫停",
                 cmd(data_dir, "consent --revoke cloud-reading"),
+                cmd(data_dir, "resume"),
                 flag.display()
             )),
             PauseState::FlagUncheckable => Some(format!(
                 "**暫停中**：資料目錄讀得到，但讀不到旗標檔 {} 本身，所以刻意一律當成暫停；\
-                 請檢查這個檔案或它所在目錄的權限；權限修好之後，刪掉旗標就會解除",
-                flag.display()
+                 這裡無法分辨是檔案／symlink 等路徑型態、權限或其他 I/O 錯誤，請先修好這個路徑及所在目錄，\
+                 再跑 `{}` 明確解除；不要只刪旗標",
+                flag.display(),
+                cmd(data_dir, "resume")
             )),
             // 不可以叫他去刪旗標：這一格是「連那條路都讀不到」，旗標在不在
             // 沒有人看過。
             PauseState::PathUnreadable => Some(format!(
                 "**暫停中**：讀不到 {} 這條路，所以刻意一律當成暫停；\
                  旗標在不在也讀不出來，先確認那條路讀不讀得到；\
-                 讀得到之後 paused.flag 如果還在，刪掉它就會解除",
-                data_dir.display()
+                 讀得到之後跑 `{}` 明確解除",
+                data_dir.display(),
+                cmd(data_dir, "resume")
+            )),
+            PauseState::ControlStateUncheckable => Some(format!(
+                "**暫停中**：{} 讀不到或內容損毀，或 {} 無法安全開啟／上鎖為一般檔案，\
+                 所以刻意一律當成暫停；先關閉所有 AI-Sister 行程，再檢查資料目錄權限。\
+                 {} 必須是一般檔案；損毀的 {} 可刪除。修好後請跑 `{}` 明確解除；\
+                 不要在任何 AI-Sister 行程仍執行時刪除 {}",
+                state.display(),
+                lock.display(),
+                lock.display(),
+                state.display(),
+                cmd(data_dir, "resume"),
+                lock.display()
             )),
         }
     }
@@ -16933,7 +17027,7 @@ pub mod doctor {
     /// 探測 OCR 要真的把引擎建起來，所以整份報告只問一次。
     #[derive(Default)]
     struct Caps {
-        url: bool,
+        url: CapabilityState,
         /// 對現在的前景視窗真的問一次網址的結果。`None` = 本平台問不了。
         url_probe: Option<(&'static str, &'static str, String)>,
         /// 現在的前景視窗是誰：`(app, 標題)`。`None` = 本平台問不到，
@@ -16943,22 +17037,11 @@ pub mod doctor {
         /// 「規則有幾條」和「規則會不會生效」是兩件事：讀不到字串的話，
         /// 那些規則一條都不會命中——而數量照樣印得出來。
         focus_probe: Option<(String, String)>,
-        /// 輸入 hook：`None` = 本平台沒有這個東西。
-        /// 不是「沒試過」——doctor 現在會真的裝一次（見 [`caps`]）。
-        input_hooks: Option<bool>,
-        ocr: bool,
-        /// 這台機器上**問過**了沒有。
-        ///
-        /// `#[cfg(not(windows))]` 那半邊回的是 `Caps::default()`，而
-        /// default 的 `ocr_language` 是 `None`、`ocr_available` 是空的——
-        /// 和「Windows 上真的問了，答案是一個語言包都沒裝」一模一樣。
-        /// 那兩件事的下一步是相反的（一個是去 Windows 設定裝語言，一個是
-        /// 換一台機器），所以印出來不能長一樣。
-        ///
-        /// 這條線 300 行前的 `capabilities::write` 旁邊就寫過了：那半邊的
-        /// default 是「這個平台問不出來」，不是「問了，答案是做不到」。
-        /// 少了這個欄位，讀出來的那一頁就正好犯了它自己記下來的錯。
-        ocr_probed: bool,
+        /// doctor 會在 Windows 真的裝一次；其他平台沒有這項探測時是
+        /// `Unknown`，不是一個偽造的 `Unavailable`。
+        input_hooks: CapabilityState,
+        /// OCR 後端的三態探測。語言欄位的 `None` 不再兼差「沒量到」。
+        ocr: CapabilityState,
         ocr_language: Option<String>,
         ocr_available: Vec<String>,
         /// **實測**出來的檢查列：(過了沒, 標籤, 說明)。
@@ -17058,7 +17141,7 @@ pub mod doctor {
     #[cfg(windows)]
     fn caps(data_dir: &Path, config: &Config) -> Caps {
         use sister_capture::traits::{Ocr, ScreenSource};
-        use sister_capture::windows::input::{HookState, WindowsInput};
+        use sister_capture::windows::input::WindowsInput;
         use sister_capture::windows::{Capabilities, ocr::WindowsOcr, screen::WindowsScreen};
 
         // 不宣稱，直接裝一次。以前 doctor 永遠印「輸入 hook 沒裝上」，
@@ -17066,11 +17149,6 @@ pub mod doctor {
         // 那則真的警告一起被忽略。hook 只數次數不看內容，裝一次很便宜。
         // doctor 只想知道 hook 裝不裝得上，聚合視窗多長無關緊要
         let _ = WindowsInput::start(sister_core::now_ms(), config.capture.input_window_secs);
-        let input_hooks = match WindowsInput::state() {
-            HookState::Active => Some(true),
-            // NotStarted 在上一行之後不可能發生；真發生了也是「沒裝上」
-            HookState::Failed | HookState::NotStarted => Some(false),
-        };
 
         let c = Capabilities::current(config);
         // 順手留一份給設定頁。README 的 quickstart 第一句就是「跑一次 doctor」，
@@ -17092,7 +17170,7 @@ pub mod doctor {
         // 而且要**把那個行程講的話唸出來**。底下 `url_probe` 那一段是拿一份
         // 全新的 `WindowsFocus` 去問的，也就是一個**全新的 UIA**——正在錄的
         // 那個行程手上那份可能早就投降了，而兩份是不同的物件。doctor 於是會
-        // 對著一台網銀正在被錄進去的機器印一個 ✓。這一行是那件事唯一的出口。
+        // 對著一台錄製內容其實已 fail closed 的機器印一個 ✓。這一行是那件事唯一的出口。
         //
         // **「她停了」不等於「可以蓋了」。** 上一版這道閘門只問 `is_recording`，
         // 於是有兩種情況會漏掉，而兩種都會弄丟同一樣東西：
@@ -17135,45 +17213,89 @@ pub mod doctor {
         {
             use sister_capture::traits::FocusSource;
             let mut source = sister_capture::windows::focus::WindowsFocus::new();
-            let snapshot = source.snapshot(sister_core::now_ms()).unwrap_or_default();
-            let app = snapshot.app_key();
-            // 排除規則比對的就是這兩個字串。讀得到才代表那些規則跑得動。
-            focus_probe = Some((
-                app.clone(),
-                snapshot.window_title.clone().unwrap_or_default(),
-            ));
-            url_probe = Some(match (&snapshot.url, source.url_capture_alive()) {
-                (Some(url), _) => (
-                    "✓",
-                    "讀你現在的網址",
-                    format!("{app} → {}", crate::fmt::one_line(url, 60)),
-                ),
-                (None, false) => (
-                    "✗",
-                    "讀你現在的網址",
-                    "UIA 卡住太多次，已經放棄——excluded_urls 這一整組規則不生效".to_string(),
-                ),
-                // 以下兩種都**不是失敗**，是「這一刻沒東西可測」。畫成 ✗ 的話，
-                // 從終端機跑 doctor 永遠會看到它（前景就是那個終端機），
-                // 於是它變成一則恆真的警告——那種東西會把整個警告區塊一起
-                // 教壞。但也絕不能畫成 ✓：那會讓使用者以為驗過了。
-                (None, true) if app.is_empty() => (
-                    "?",
-                    "讀你現在的網址",
-                    "現在沒有前景視窗，這一刻測不出來".to_string(),
-                ),
-                (None, true) => (
-                    "?",
-                    "讀你現在的網址",
-                    format!(
-                        "前景是 {app}，不是瀏覽器（或位址列是空的）。\
+            match source.context(sister_core::now_ms()) {
+                Ok(sister_capture::PrivacyObservation::Known {
+                    context:
+                        sister_core::model::PrivacyContext::Known {
+                            focus, browser_url, ..
+                        },
+                    ..
+                }) => {
+                    let app = focus.app_key();
+                    // 排除規則比對的就是這兩個字串。讀得到才代表那些規則跑得動。
+                    focus_probe =
+                        Some((app.clone(), focus.window_title.clone().unwrap_or_default()));
+                    url_probe = Some(match (browser_url, source.url_capture_alive()) {
+                        (sister_core::model::BrowserUrlState::Known(url), _) => (
+                            "✓",
+                            "讀你現在的網址",
+                            format!("{app} → {}", crate::fmt::one_line(&url, 60)),
+                        ),
+                        (_, false) => (
+                            "✗",
+                            "讀你現在的網址",
+                            "UIA 卡住太多次，privacy context 已不可用；recorder 會在讀內容前停下"
+                                .to_string(),
+                        ),
+                        // 以下兩種都**不是失敗**，是「這一刻沒東西可測」。畫成 ✗ 的話，
+                        // 從終端機跑 doctor 永遠會看到它（前景就是那個終端機），
+                        // 於是它變成一則恆真的警告——那種東西會把整個警告區塊一起
+                        // 教壞。但也絕不能畫成 ✓：那會讓使用者以為驗過了。
+                        (sister_core::model::BrowserUrlState::NotApplicable, true)
+                            if app.is_empty() =>
+                        {
+                            (
+                                "?",
+                                "讀你現在的網址",
+                                "現在沒有前景視窗，這一刻測不出來".to_string(),
+                            )
+                        }
+                        (sister_core::model::BrowserUrlState::NotApplicable, true) => (
+                            "?",
+                            "讀你現在的網址",
+                            format!(
+                                "前景是 {app}，不是瀏覽器。\
                          把瀏覽器切到前景再跑一次 doctor 才驗得到"
-                    ),
-                ),
-            });
+                            ),
+                        ),
+                        (sister_core::model::BrowserUrlState::Unknown, true) => (
+                            "?",
+                            "讀你現在的網址",
+                            format!(
+                                "前景是 {app}，但網址或位址列焦點沒量到；\
+                                 recorder 會在內容來源前停下"
+                            ),
+                        ),
+                    });
+                }
+                Ok(sister_capture::PrivacyObservation::Unknown)
+                | Ok(sister_capture::PrivacyObservation::Known {
+                    context: sister_core::model::PrivacyContext::Unknown,
+                    ..
+                }) => {
+                    focus_probe = None;
+                    url_probe = Some((
+                        "?",
+                        "讀你現在的網址",
+                        if source.url_capture_alive() {
+                            "現在讀不到前景視窗，privacy gate 會停止讀取內容".to_string()
+                        } else {
+                            "UIA 已不可用，privacy gate 會停止讀取內容".to_string()
+                        },
+                    ));
+                }
+                Err(error) => {
+                    focus_probe = None;
+                    url_probe = Some((
+                        "?",
+                        "讀你現在的網址",
+                        format!("privacy context 讀取失敗，會停止讀取內容：{error:#}"),
+                    ));
+                }
+            }
         }
 
-        if c.ocr && config.capture.ocr {
+        if c.ocr == CapabilityState::Available && config.capture.ocr {
             let mut ocr = WindowsOcr::new(&config.capture.ocr_languages);
 
             // 第一關：引擎讀不讀得到字。圖是編進執行檔的，答案是已知的。
@@ -17290,9 +17412,8 @@ pub mod doctor {
             url: c.url,
             url_probe,
             focus_probe,
-            input_hooks,
+            input_hooks: c.input,
             ocr: c.ocr,
-            ocr_probed: true,
             ocr_language: c.ocr_language.clone(),
             ocr_available: c.ocr_languages_available.clone(),
             ocr_probes: probes,
@@ -17716,7 +17837,7 @@ pub mod doctor {
             Some(_) => ("?", "，但現在沒有前景視窗，這一刻測不出來".to_string()),
             None => (
                 "✗",
-                "（本平台讀不到前景 app，這些規則目前不生效）".to_string(),
+                "（讀不到前景 app，privacy gate 不會把未知狀態當安全放行）".to_string(),
             ),
         };
         mark(
@@ -17724,8 +17845,8 @@ pub mod doctor {
             "排除的 app",
             &format!("{} 條規則{note}", config.privacy.excluded_apps.len()),
         );
-        // 規則數量不等於規則有效。沒有 URL 擷取能力時這些規則一條都不會跑，
-        // 而使用者看到「16 條規則 ✓」只會更放心——那正是最糟的結果。
+        // 規則數量不等於規則有效。沒有 UIA 時這些規則無法評估，而且 recorder
+        // 會因敏感欄狀態未知而 fail closed；不能把「16 條」畫成正常錄製的 ✓。
         //
         // 但「UIA 建得起來」也不夠格畫 ✓：那只證明了一個 COM 物件生得出來，
         // 沒有證明我們從位址列上讀得到任何東西（Firefox 的樹長得就不一樣）。
@@ -17733,10 +17854,17 @@ pub mod doctor {
         // 所以 ✓ 只給「下面那一列真的讀到了網址」的情況。
         let demonstrated = caps.url_probe.as_ref().is_some_and(|(s, ..)| *s == "✓");
         let (sym, note) = match (caps.url, demonstrated) {
-            (false, _) => ("✗", "（本平台無法讀取網址，這些規則目前不生效）"),
-            (true, true) => ("✓", ""),
+            (CapabilityState::Unavailable, _) => (
+                capability_symbol(caps.url),
+                "（已探測：UIA 不可用，privacy gate 會在讀內容前停下）",
+            ),
+            (CapabilityState::Available, true) => (capability_symbol(caps.url), ""),
             // UIA 在，但這一刻沒能證明讀得到。可能只是前景不是瀏覽器。
-            (true, false) => ("?", "（還沒驗到——見下面那一列）"),
+            (CapabilityState::Available, false) => ("?", "（還沒驗到——見下面那一列）"),
+            (CapabilityState::Unknown, _) => (
+                capability_symbol(caps.url),
+                "（這份報告沒有量到網址擷取能力）",
+            ),
         };
         mark(
             sym,
@@ -17818,39 +17946,43 @@ pub mod doctor {
         println!("\n讀字");
         if !config.capture.ocr {
             line(false, "OCR", "已關閉（畫面會留下，但上面的字不會進資料庫）");
-        } else if !caps.ocr_probed {
-            // 這個平台沒有 OCR 後端可以問。以前這裡照樣走下面那條路，於是
-            // 在 Linux 上印出「無：這台機器沒有安裝任何 OCR 語言」——那是
-            // 一句關於 Windows 語言包的話，講給一台不裝 Windows 語言包的
-            // 機器聽。開發機每跑一次 doctor 就看一次，久了就學會忽略它，
-            // 而真的在 Windows 上少裝語言包的時候，長得一模一樣。
-            mark(
-                "?",
-                "OCR 語言",
-                &format!("問不到：{} 上沒有擷取後端", std::env::consts::OS),
-            );
         } else {
-            line(
-                caps.ocr,
-                "OCR 語言",
-                &match &caps.ocr_language {
-                    Some(tag) => format!("{tag}（實際使用）"),
-                    None => "無：這台機器沒有安裝任何 OCR 語言".to_string(),
-                },
-            );
-            line(
-                !caps.ocr_available.is_empty(),
-                "已安裝的語言",
-                &if caps.ocr_available.is_empty() {
-                    "（無）".to_string()
-                } else {
-                    caps.ocr_available.join("、")
-                },
-            );
-            // 上面兩行講的都是「引擎建得起來」。下面這些是真的去讀了。
-            // 這個分野是實測換來的：語言 ✓、錄了一分鐘、資料庫裡零個字。
-            for (ok, label, detail) in &caps.ocr_probes {
-                line(*ok, label, detail);
+            match caps.ocr {
+                CapabilityState::Unknown => {
+                    // 「沒有語言」和「這個平台沒量到」的下一步相反。
+                    mark(
+                        capability_symbol(caps.ocr),
+                        "OCR 語言",
+                        &format!("沒有量到：{} 目前沒有可用的探測結果", std::env::consts::OS),
+                    );
+                }
+                CapabilityState::Unavailable => {
+                    mark(
+                        capability_symbol(caps.ocr),
+                        "OCR 語言",
+                        "已探測：這台機器沒有任何 OCR 語言",
+                    );
+                    mark(
+                        capability_symbol(caps.ocr),
+                        "已安裝的語言",
+                        "（已探測，無）",
+                    );
+                }
+                CapabilityState::Available => {
+                    match &caps.ocr_language {
+                        Some(tag) => line(true, "OCR 語言", &format!("{tag}（實際使用）")),
+                        None => mark("?", "OCR 語言", "探測說 OCR 可用，但沒有記下實際使用的語言"),
+                    }
+                    if caps.ocr_available.is_empty() {
+                        mark("?", "已安裝的語言", "OCR 可用，但這份報告沒有語言清單");
+                    } else {
+                        line(true, "已安裝的語言", &caps.ocr_available.join("、"));
+                    }
+                    // 上面兩行講的都是「引擎建得起來」。下面這些是真的去讀了。
+                    for (ok, label, detail) in &caps.ocr_probes {
+                        line(*ok, label, detail);
+                    }
+                }
             }
         }
 
@@ -17876,16 +18008,25 @@ pub mod doctor {
                 )
             },
         );
-        if let Some(ok) = caps.input_hooks {
-            line(
-                ok,
+        match caps.input_hooks {
+            CapabilityState::Available => mark(
+                capability_symbol(caps.input_hooks),
                 "輸入 hook",
-                if ok {
-                    "裝得上（doctor 剛剛真的裝了一次；只數次數，不看按了什麼）"
-                } else {
-                    "裝不上：打字節奏這一路訊號會是空的"
-                },
-            );
+                "裝得上（doctor 剛剛真的裝了一次；只數次數，不看按了什麼）",
+            ),
+            CapabilityState::Unavailable => mark(
+                capability_symbol(caps.input_hooks),
+                "輸入 hook",
+                "已探測：裝不上，打字節奏這一路訊號會是空的",
+            ),
+            CapabilityState::Unknown => mark(
+                capability_symbol(caps.input_hooks),
+                "輸入 hook",
+                &format!(
+                    "沒有量到：{} 目前沒有可用的 hook 探測結果",
+                    std::env::consts::OS
+                ),
+            ),
         }
 
         if !caps.broken_privacy.is_empty() {
@@ -18041,8 +18182,19 @@ pub mod doctor {
     #[cfg(test)]
     mod doctor_tests {
         use super::*;
-        use sister_core::capabilities::{Report, UrlCapture};
+        use sister_core::capabilities::{CapabilityState, Report, UrlCapture};
         use sister_core::heartbeat::{Phase, Presence};
+
+        #[test]
+        fn unprobed_capabilities_have_their_own_doctor_mark() {
+            let caps = Caps::default();
+            assert_eq!(caps.url, CapabilityState::Unknown);
+            assert_eq!(caps.input_hooks, CapabilityState::Unknown);
+            assert_eq!(caps.ocr, CapabilityState::Unknown);
+            assert_eq!(capability_symbol(CapabilityState::Available), "✓");
+            assert_eq!(capability_symbol(CapabilityState::Unavailable), "✗");
+            assert_eq!(capability_symbol(CapabilityState::Unknown), "?");
+        }
 
         #[test]
         fn unreadable_data_dir_is_unknown_not_pulled() {
@@ -18071,8 +18223,8 @@ pub mod doctor {
             // 只有開機探測、沒有歷史——一樣沒有東西可以弄丟。
             let probes_only = Report {
                 at: 1,
-                url: true,
-                input_hook_failed: true,
+                url: CapabilityState::Available,
+                input_hook: CapabilityState::Unavailable,
                 ..Default::default()
             };
             assert!(
@@ -18669,7 +18821,7 @@ pub mod doctor {
             );
         }
 
-        /// **五種處境各餵一條真的路徑進去，不是手填五個 enum 值。**
+        /// **六種處境各餵一條真的路徑進去，不是手填六個 enum 值。**
         ///
         /// 差別在哪裡：手填 `PauseState::PathUnreadable` 再看它印什麼，證明的是
         /// 「這個 enum 值會印出這句話」；而這一版要證的是「**一條讀不到的路會走
@@ -18677,9 +18829,9 @@ pub mod doctor {
         /// 整段換回舊行為（兩種 `None` 併成一句「刪掉旗標可解除」）之後，整個
         /// workspace 照樣全綠——這一版修的那個病被還原了，沒有一條測試出聲。
         ///
-        /// 所以底下四種暫停的狀態都是**做出來的**：寫正常／壞掉的旗標、造一個
-        /// 自我指向 symlink、把 data dir 做成一個檔案。`Since` 那一格順便釘住
-        /// 實際印出的時間就是寫進旗標的時間。
+        /// 所以底下五種暫停的狀態都是**做出來的**：寫正常／壞掉的旗標、造一個
+        /// 自我指向 symlink、把 data dir 做成一個檔案，再寫壞 `pause.state`。
+        /// `Since` 那一格順便釘住實際印出的時間就是寫進旗標的時間。
         #[test]
         fn every_paused_state_comes_from_a_real_path_and_says_its_own_next_step() {
             let root = crate::ops::tmp::Tmp::new("doctor-pause-states");
@@ -18711,7 +18863,7 @@ pub mod doctor {
                         "--data-dir {}",
                         quote_for(platform_shell(), &since_dir.to_string_lossy())
                     ))
-                    && since.contains("刪掉"),
+                    && since.contains("不要只刪"),
                 "解不解得開要講出來：{since}"
             );
 
@@ -18732,8 +18884,10 @@ pub mod doctor {
                 broken.contains("她不會再看新的畫面")
                     && broken.contains("**已經記下來的**")
                     && broken.contains("consent --revoke cloud-reading")
-                    && broken.contains(&format!("刪掉 {broken_flag} 可解除")),
-                "旗標確定在，刪它有用，那就要說出是哪一個檔：{broken}"
+                    && broken.contains("解除請跑")
+                    && broken.contains(&cmd(&broken_dir, "resume"))
+                    && broken.contains(&format!("不要只刪 {broken_flag}")),
+                "新版 state 可能仍維持暫停，不能把刪旗標說成普遍解法：{broken}"
             );
 
             #[cfg(unix)]
@@ -18753,6 +18907,7 @@ pub mod doctor {
                     said.contains("檔案") && said.contains("目錄") && said.contains("權限"),
                     "下一步必須同時指出檔案和目錄的權限：{said}"
                 );
+                assert!(said.contains(&cmd(&dir, "resume")), "{said}");
                 assert!(!said.contains("直接刪掉它"), "{said}");
                 assert!(!said.contains("確認那條路讀不讀得到"), "{said}");
 
@@ -18773,22 +18928,19 @@ pub mod doctor {
                     );
                 }
                 assert!(no_search_flag.try_exists().is_err());
-                let no_search_said = paused_row(&no_search_dir).expect("讀不到旗標仍然是暫停");
+                let no_search_said =
+                    paused_row(&no_search_dir).expect("整個控制面讀不到仍然是暫停");
                 std::fs::set_permissions(&no_search_dir, std::fs::Permissions::from_mode(0o755))
                     .unwrap();
-                let expected = said.replace(
-                    &flag.display().to_string(),
-                    &no_search_flag.display().to_string(),
-                );
-                println!("doctor/FlagUncheckable/chmod-644: {no_search_said}");
-                assert_eq!(no_search_said, expected, "兩種成因刻意印同一句");
+                println!("doctor/ControlStateUncheckable/chmod-644: {no_search_said}");
                 assert!(
-                    no_search_said.contains("檔案")
-                        && no_search_said.contains("目錄")
+                    no_search_said.contains("pause.state")
+                        && no_search_said.contains("pause.lock")
+                        && no_search_said.contains("先關閉所有 AI-Sister 行程")
                         && no_search_said.contains("權限"),
-                    "下一步必須同時指出檔案和目錄的權限：{no_search_said}"
+                    "連 lock 都開不了時不能冒充只量過旗標：{no_search_said}"
                 );
-                assert!(!no_search_said.contains("直接刪掉它"), "{no_search_said}");
+                assert!(!no_search_said.contains("讀不到旗標檔"), "{no_search_said}");
                 said
             };
 
@@ -18810,11 +18962,33 @@ pub mod doctor {
             );
             assert!(
                 unreadable.contains("先確認那條路讀不讀得到")
-                    && unreadable.contains("讀得到之後 paused.flag 如果還在，刪掉它就會解除"),
+                    && unreadable.contains(&cmd(&unreadable_dir, "resume"))
+                    && unreadable.contains("明確解除"),
                 "{unreadable}"
             );
             #[cfg(unix)]
             assert!(uncheckable.contains("讀不到旗標檔"));
+
+            let control_dir = root.0.join("broken-control-state");
+            std::fs::create_dir_all(&control_dir).unwrap();
+            std::fs::write(control_dir.join("pause.state"), "{broken-json").unwrap();
+            assert_eq!(
+                sister_core::pause::state(&control_dir),
+                sister_core::pause::PauseState::ControlStateUncheckable
+            );
+            let control = paused_row(&control_dir).expect("控制狀態壞掉要 fail closed");
+            println!("doctor/ControlStateUncheckable: {control}");
+            assert!(control.contains("pause.state") && control.contains("pause.lock"));
+            assert!(
+                control.contains("先關閉所有 AI-Sister 行程")
+                    && control.contains("明確解除")
+                    && control.contains(&cmd(&control_dir, "resume")),
+                "要講清楚不製造第二把 lock 的恢復順序：{control}"
+            );
+            assert!(
+                control.contains("不要在任何 AI-Sister 行程仍執行時刪除"),
+                "不能叫使用者在持鎖期間刪 pause.lock：{control}"
+            );
         }
 
         /// **同一份報告的四列，在開機那幾分鐘要說同一件事。**
@@ -22800,7 +22974,7 @@ pub mod replay {
         let mut rec = Recorder::new(backend, db, config, image_dir)?;
 
         let mut offset = 0i64;
-        while offset <= duration {
+        loop {
             let ts = origin + offset;
             match rec.tick(ts)? {
                 Tick::Kept {
@@ -22814,11 +22988,37 @@ pub mod replay {
                 }
                 Tick::Excluded { reason } => println!("  {offset:>7} ms  排除：{reason}"),
                 Tick::NoScreen => println!("  {offset:>7} ms  沒有畫面"),
-                // 重播不看暫停旗標——腳本要能重跑出同一份結果，而旗標是
+                Tick::SystemUnknown => {
+                    println!("  {offset:>7} ms  系統狀態不明（未讀任何內容）")
+                }
+                Tick::SystemChanged => {
+                    println!("  {offset:>7} ms  系統狀態改變（這一拍未讀任何內容）")
+                }
+                Tick::ContextChanged => {
+                    println!("  {offset:>7} ms  前景改變（暫存內容已丟棄，未寫入）")
+                }
+                // 重播不看暫停控制狀態——腳本要能重跑出同一份結果，而控制面是
                 // 執行當下的環境狀態。所以 `Paused` 在這條路上到不了。
-                Tick::Duplicate { .. } | Tick::Disabled | Tick::Paused | Tick::Idle => {}
+                Tick::Duplicate { .. }
+                | Tick::Disabled
+                | Tick::Paused
+                | Tick::Resumed
+                | Tick::Idle => {}
             }
-            offset += interval_ms;
+
+            if offset == duration {
+                // 一個 coarse tick 可能同時跨過 Unknown、recovery baseline 與
+                // 後續 transition。ReplayBackend 刻意把這些安全 barrier 分成
+                // 多個 observation；在最後時點原地多 tick 幾次，把它們全交給
+                // recorder 驗證／寫 audit，不能讓 finish() 安靜丟掉尾巴。
+                if disabled || !rec.backend().has_pending_system_observations() {
+                    break;
+                }
+            } else {
+                // interval 不整除 duration 時仍要真的跑最後一個 step；舊迴圈
+                // 會停在最後一個整拍，讓腳本尾端完全沒被看見。
+                offset = offset.saturating_add(interval_ms).min(duration);
+            }
         }
         // 重播一定是跑完整份腳本才結束的：沒有人按得了停止，也沒有 Ctrl-C
         // 以外的出口。`--days-ago` 這種參數改的是時間戳，不是長度。
@@ -22841,6 +23041,7 @@ pub mod replay {
         if let Some(line) = tick_failures_line(s) {
             println!("{line}");
         }
+        report_safety_gaps(s);
         report_idle(s);
         report_exclusions(s);
         if s.secrets_redacted > 0 {
@@ -22890,6 +23091,85 @@ pub mod replay {
                 999,
             )?;
             db.end_session(session)?;
+            Ok(())
+        }
+
+        #[test]
+        fn replay_forces_the_final_timestamp_and_drains_system_barriers() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("replay-system-tail");
+            let scenario = tmp.0.join("tail.json");
+            std::fs::write(
+                &scenario,
+                r#"{
+                  "name":"system-tail",
+                  "privacy_context":"clear",
+                  "system_state":"active",
+                  "steps":[
+                    {"at_ms":0,"app":"notes.exe","title":"before","text":["before"]},
+                    {"at_ms":1000,"system_state":"unknown"},
+                    {"at_ms":2000,"system_state":"active"},
+                    {"at_ms":3000,"system_event":"lock"}
+                  ]
+                }"#,
+            )?;
+
+            // interval 大於 duration：除了驗 tail drain，也釘住最後一步不能因為
+            // 不整除而整段消失。
+            run(
+                &tmp.0,
+                Config::default(),
+                &scenario,
+                10_000,
+                false,
+                0.0,
+                Some(1_000_000),
+            )?;
+
+            let db = Db::open(&crate::db_path(&tmp.0))?;
+            assert_eq!(
+                db.conn().query_row(
+                    "SELECT COUNT(*) FROM system_events WHERE kind='lock' AND ts=1003000",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                1,
+                "duration 最後一拍的 transition 必須 exactly once 落 audit"
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn disabled_replay_does_not_try_to_drain_an_unread_initial_baseline() -> Result<()> {
+            let tmp = crate::ops::tmp::Tmp::new("disabled-replay-system-tail");
+            let scenario = tmp.0.join("disabled.json");
+            std::fs::write(
+                &scenario,
+                r#"{
+                  "name":"disabled",
+                  "privacy_context":"clear",
+                  "system_state":"active",
+                  "steps":[{"at_ms":1250,"app":"notes.exe","text":["never stored"]}]
+                }"#,
+            )?;
+            let mut config = Config::default();
+            config.capture.enabled = false;
+            run(
+                &tmp.0,
+                config,
+                &scenario,
+                10_000,
+                false,
+                0.0,
+                Some(2_000_000),
+            )?;
+
+            let db = Db::open(&crate::db_path(&tmp.0))?;
+            assert_eq!(
+                db.conn()
+                    .query_row("SELECT COUNT(*) FROM frames", [], |row| row
+                        .get::<_, i64>(0))?,
+                0
+            );
             Ok(())
         }
 
@@ -23909,7 +24189,7 @@ pub mod record {
                 *was_idle = true;
                 false
             }
-            Disabled | Paused => false,
+            Disabled | Paused | Resumed | SystemChanged | SystemUnknown | ContextChanged => false,
             Kept { .. } | NoScreen => {
                 *was_idle = false;
                 true
@@ -24177,8 +24457,8 @@ pub mod record {
         // 而她還在一張一張寫。
         mut wants_images_by_config: WantsImages,
     ) -> Result<()> {
+        use sister_capture::Tick;
         use sister_capture::windows::{self, Capabilities};
-        use sister_capture::{Recorder, Tick};
         use std::sync::atomic::Ordering;
         use std::time::{Duration, Instant};
 
@@ -24197,21 +24477,6 @@ pub mod record {
         // 唯一的症狀是磁碟用得比講好的快一倍。
         let mut boot = BootBeat::start(data_dir)?;
         let mut db = Db::open(&crate::db_path(data_dir))?;
-        // **先建後端、再問能力。** 反過來的話，「輸入 hook 裝上了沒」永遠
-        // 是在 hook 還沒裝之前問的，於是永遠回報失敗——一則恆假的警告。
-        let backend = windows::backend(&config)?;
-
-        // 缺席的能力會讓某些排除規則整組失效，或讓她其實什麼都沒記住。
-        // 這兩件事都要在開始錄之前講，不是藏在 doctor 裡等使用者自己去發現。
-        let caps = Capabilities::current(&config);
-        // **這裡不寫能力報告。** 它排在底下 `boot.hand_off()` 之後，理由寫在
-        // 那裡——這個順序是有意義的，不是誰順手擺的。
-        for warning in caps.broken_privacy_rules(&config.privacy) {
-            println!("⚠  {}", warning.message);
-        }
-        for warning in caps.silently_degraded(&config) {
-            println!("⚠  {warning}");
-        }
         // 總開關關著的時候，每個 tick 都直接回 `Disabled`，而摘要的四個
         // 欄位剛好全部是 0——和「錄得好好的、只是螢幕沒變」長得一模一樣。
         // 一個打字打錯、或一個沒關回來的暫停，就能讓她整天什麼都沒記，
@@ -24265,7 +24530,26 @@ pub mod record {
         let prune_images = frames_root.clone();
         // 腦走慢路徑：自己一條執行緒、自己一條資料庫連線。熱路徑只留 ping。
         let brain_cfg = config.brain.clone();
-        let mut rec = Recorder::new(backend, db, config, images)?;
+        // Capabilities 要在 production backend 把 input hook 裝好後才量；但 config
+        // 馬上會被 recorder 接走，所以留一份只供這次開機探測與文案判決。
+        let capability_config = config.clone();
+        // 只有 windows 模組內這條 composition 能建立 trusted v2 session。
+        // 公開的 Recorder::new 不論 backend 名字為何都只會得到 untrusted provenance。
+        let mut rec = windows::recorder(config, db, images)?;
+
+        // **先建後端、再問能力。** 反過來的話，「輸入 hook 裝上了沒」永遠
+        // 是在 hook 還沒裝之前問的，於是永遠回報失敗——一則恆假的警告。
+        // 缺席的能力會讓某些排除規則整組失效，或讓她其實什麼都沒記住。
+        // 這兩件事都要在開始錄之前講，不是藏在 doctor 裡等使用者自己去發現。
+        let caps = Capabilities::current(&capability_config);
+        // **這裡不寫能力報告。** 它排在底下 `boot.hand_off()` 之後，理由寫在
+        // 那裡——這個順序是有意義的，不是誰順手擺的。
+        for warning in caps.broken_privacy_rules(&capability_config.privacy) {
+            println!("⚠  {}", warning.message);
+        }
+        for warning in caps.silently_degraded(&capability_config) {
+            println!("⚠  {warning}");
+        }
 
         install_ctrl_c_handler();
         // 磁碟歸因的開場快照排在 Recorder 建好之後：schema／migration／session_start
@@ -24292,14 +24576,13 @@ pub mod record {
         let mut last_prune = Instant::now();
 
         // 能力報告也一樣不能只在開機時寫一次，而且理由更硬：UIA 卡三次之後
-        // 就**永久**投降，從那一刻起 `excluded_urls` 一條都不生效——沒有錯誤、
-        // 沒有例外，只是網銀跟登入頁開始被錄進去。以前唯一問過這件事的是收工
-        // 時的一行 `println!`，印進沒有人會開的 `record.log`；而使用者是在設定
-        // 頁上打那些規則的，那一頁拿著一份開機時的「一切正常」，一句話都不說。
+        // 就**永久**投降，privacy context 從那刻起 Unknown，recorder 會安全停讀。
+        // 如果不報告，使用者只看到記憶無故中斷；開機時的「一切正常」解釋不了
+        // 這一場半路發生的事。
         //
         // 一分鐘一次：這個檔案兩百多個位元組，寫一次是一次 write + 一次 rename。
-        // 對一個要開一整天的迴圈來說成本是零，而使用者能忍受的「我的網銀規則
-        // 什麼時候壞掉的」誤差，一分鐘綽綽有餘。
+        // 對一個要開一整天的迴圈來說成本是零，而「privacy gate 何時開始停讀」
+        // 的顯示誤差，一分鐘綽綽有餘。
         const CAPS_EVERY: Duration = Duration::from_secs(60);
         let mut last_caps = Instant::now();
         // 開機那一份在交棒之後才寫（見那裡），而它沒有這一場的證據。這個閉包是
@@ -24415,25 +24698,21 @@ pub mod record {
                 break;
             }
 
-            // 暫停鍵在**另一個行程**上（字母人），所以唯一的辦法是每個 tick
-            // 去問一次那個旗標檔。一到兩次 `stat`（旗標不在時會再確認 data dir
-            // 本人是不是還好好的，見 `pause::is_paused`）是微秒等級，相對於一個
-            // tick 裡最便宜的一步都還小兩個數量級——不值得為它做快取。
+            // 暫停鍵在**另一個行程**上（字母人）。每一道內容邊界都重新拿 shared
+            // pause snapshot；最後一份 guard 會活到 PNG／DB transaction 結束，
+            // 所以另一個行程的 toggle 不是完整排在寫入前，就是排在寫入後。
+            // 不能在這裡另存一個 bool：它既看不見同一拍內的 pause→resume generation，
+            // 也會把 probe 與 commit 之間重新打開成 TOCTOU。
             let now = sister_core::now_ms();
-            match rec.set_paused(sister_core::pause::is_paused(data_dir), now) {
-                Ok(true) if rec.is_paused() => println!("  ⏸ 已暫停——她不看了，直到你解除。"),
-                Ok(true) => println!("  ▶ 已解除暫停。"),
-                Ok(false) => {}
-                // 事件寫不進去就不能宣稱已經暫停：使用者會以為停了，實際上
-                // 下一行 tick 照錄。寧可整個 tick 跳過。
-                Err(e) => {
-                    tracing::warn!("暫停狀態切換失敗：{e:#}");
-                    std::thread::sleep(interval);
-                    continue;
-                }
+            let was_paused = rec.is_paused();
+            let tick_result = rec.tick_with_pause_probe(now, || guarded_pause_signal(data_dir));
+            match (was_paused, rec.is_paused()) {
+                (false, true) => println!("  ⏸ 已暫停——她不看了，直到你解除。"),
+                (true, false) => println!("  ▶ 已解除暫停。"),
+                _ => {}
             }
 
-            match rec.tick(now) {
+            match tick_result {
                 // 單次 tick 失敗不該終止 session：抓不到畫面的原因多半是
                 // 暫時的（切換使用者、顯示器休眠），下一秒就好了
                 Err(e) => tracing::warn!("tick failed: {e:#}"),
@@ -24751,6 +25030,7 @@ pub mod record {
         if let Some(line) = tick_failures_line(&stats) {
             println!("{line}");
         }
+        report_safety_gaps(&stats);
         report_idle(&stats);
         report_exclusions(&stats);
         let storing_images = StoringImages::from_recorder(&rec);
@@ -24783,33 +25063,65 @@ pub mod record {
         Ok(())
     }
 
+    /// Production pause probe：快照和 shared lock 必須是同一個不可拆的值。
+    ///
+    /// `any(windows, test)` 讓 Linux 單元測試也能真的造出 guard；否則這段接線只會
+    /// 在 cross-check 編譯，沒有測試能證明 indeterminate state 仍送進 recorder。
+    #[cfg(any(windows, test))]
+    fn guarded_pause_signal(data_dir: &Path) -> sister_capture::PauseSignal {
+        let guard = sister_core::pause::snapshot_guard(data_dir);
+        sister_capture::PauseSignal::Snapshot {
+            // 取到 guard 之後才算觀察完成；writer 若正持有 exclusive lock，
+            // 排隊的時間不能冒充成更早就看見 request。
+            observed_at: sister_core::now_ms(),
+            guard,
+        }
+    }
+
     #[cfg(any(windows, test))]
     fn pause_warning(data_dir: &Path) -> Option<String> {
         use sister_core::pause::PauseState;
         let flag = sister_core::pause::flag_path(data_dir);
+        let state = data_dir.join("pause.state");
+        let lock = data_dir.join("pause.lock");
         match sister_core::pause::state(data_dir) {
             PauseState::Recording => None,
             PauseState::Since(ts) => Some(format!(
-                "目前是暫停狀態（從 {} 起）。她不會再看新的畫面——但**已經記下來的**那些，解釋層還是會讀、還是可能送給雲端模型、還是會寫成新的卡片；要連那半也停，請跑 `{}`。解除暫停請跑 `{}`（不是裸的 `sister resume`），或刪掉 {}。",
+                "目前是暫停狀態（從 {} 起）。她不會再看新的畫面——但**已經記下來的**那些，解釋層還是會讀、還是可能送給雲端模型、還是會寫成新的卡片；要連那半也停，請跑 `{}`。解除暫停請跑 `{}`（不是裸的 `sister resume`）；不要只刪 {}，新版控制狀態仍可能維持暫停。",
                 crate::fmt::timestamp(ts),
                 cmd(data_dir, "consent --revoke cloud-reading"),
                 cmd(data_dir, "resume"),
                 flag.display()
             )),
             PauseState::FlagPresentButUnreadable => Some(format!(
-                "目前是暫停狀態。她不會再看新的畫面——但**已經記下來的**那些還是會被送去解讀、寫成新的卡片；要連那半也停，請跑 `{}`。刪掉 {} 可解除。",
+                "目前是暫停狀態。她不會再看新的畫面——但**已經記下來的**那些還是會被送去解讀、寫成新的卡片；要連那半也停，請跑 `{}`。解除請跑 `{}`；不要只刪 {}，新版控制狀態仍可能維持暫停。",
                 cmd(data_dir, "consent --revoke cloud-reading"),
+                cmd(data_dir, "resume"),
                 flag.display()
             )),
             PauseState::FlagUncheckable => Some(format!(
                 "目前是暫停狀態：資料目錄讀得到，但讀不到旗標檔 {} 本身，所以刻意一律當成暫停。\
-                 請檢查這個檔案或它所在目錄的權限；權限修好之後，刪掉旗標就會解除。",
-                flag.display()
+                 這裡無法分辨是檔案／symlink 等路徑型態、權限或其他 I/O 錯誤，請先修好這個路徑及所在目錄，再跑 `{}` 明確解除；不要只刪旗標。",
+                flag.display(),
+                cmd(data_dir, "resume")
             )),
             PauseState::PathUnreadable => Some(format!(
                 "目前是暫停狀態：讀不到資料目錄 {} 這條路，所以刻意一律當成暫停。\
-                 旗標在不在也讀不出來；請先確認資料目錄本身讀不讀得到，讀得到之後 paused.flag 如果還在，刪掉它就會解除。",
-                data_dir.display()
+                 旗標在不在也讀不出來；請先確認資料目錄本身讀不讀得到，讀得到之後跑 `{}` 明確解除。",
+                data_dir.display(),
+                cmd(data_dir, "resume")
+            )),
+            PauseState::ControlStateUncheckable => Some(format!(
+                "目前是暫停狀態：{} 讀不到或內容損毀，或 {} 無法安全開啟／上鎖為一般檔案，\
+                 所以刻意一律當成暫停。請先關閉所有 AI-Sister 行程，再檢查資料目錄權限；\
+                 {} 必須是一般檔案，損毀的 {} 可刪除。修好後請跑 `{}` 明確解除；\
+                 不要在任何 AI-Sister 行程仍執行時刪除 {}。",
+                state.display(),
+                lock.display(),
+                lock.display(),
+                state.display(),
+                cmd(data_dir, "resume"),
+                lock.display()
             )),
         }
     }
@@ -24817,6 +25129,41 @@ pub mod record {
     #[cfg(test)]
     mod pause_warning_tests {
         use super::*;
+
+        #[test]
+        fn production_pause_probe_keeps_the_guard_and_every_snapshot_state() {
+            use sister_core::pause::PauseSnapshot;
+
+            let root = crate::ops::tmp::Tmp::new("record-pause-guard");
+
+            let recording = guarded_pause_signal(&root.0);
+            match recording {
+                sister_capture::PauseSignal::Snapshot { guard, .. } => {
+                    assert!(matches!(guard.snapshot(), PauseSnapshot::Recording(_)));
+                }
+                _ => panic!("production probe must carry a snapshot guard"),
+            }
+
+            sister_core::pause::set_paused(&root.0, true, 1_000).unwrap();
+            let paused = guarded_pause_signal(&root.0);
+            match paused {
+                sister_capture::PauseSignal::Snapshot { guard, .. } => {
+                    assert!(matches!(guard.snapshot(), PauseSnapshot::Paused(_)));
+                }
+                _ => panic!("paused state must still carry the guard"),
+            }
+
+            let broken = root.0.join("broken");
+            std::fs::create_dir_all(&broken).unwrap();
+            std::fs::write(broken.join("pause.state"), "{broken-json").unwrap();
+            let indeterminate = guarded_pause_signal(&broken);
+            match indeterminate {
+                sister_capture::PauseSignal::Snapshot { guard, .. } => {
+                    assert_eq!(guard.snapshot(), PauseSnapshot::Indeterminate);
+                }
+                _ => panic!("uncheckable control state must not become Recording"),
+            }
+        }
 
         #[test]
         fn all_pause_warnings_come_from_real_filesystem_states() {
@@ -24847,7 +25194,7 @@ pub mod record {
                         "--data-dir {}",
                         quote_for(platform_shell(), &since_dir.to_string_lossy())
                     ))
-                    && since.contains("刪掉"),
+                    && since.contains("不要只刪"),
                 "{since}"
             );
 
@@ -24860,8 +25207,9 @@ pub mod record {
                 broken.contains("她不會再看新的畫面")
                     && broken.contains("**已經記下來的**")
                     && broken.contains("consent --revoke cloud-reading")
-                    && broken.contains("刪掉")
-                    && broken.contains("可解除"),
+                    && broken.contains("解除請跑")
+                    && broken.contains(&cmd(&broken_dir, "resume"))
+                    && broken.contains("不要只刪"),
                 "{broken}"
             );
 
@@ -24882,6 +25230,7 @@ pub mod record {
                     said.contains("檔案") && said.contains("目錄") && said.contains("權限"),
                     "下一步必須同時指出檔案和目錄的權限：{said}"
                 );
+                assert!(said.contains(&cmd(&dir, "resume")), "{said}");
                 assert!(!said.contains("直接刪掉它"), "{said}");
                 assert!(!said.contains("確認資料目錄本身"), "{said}");
 
@@ -24902,22 +25251,19 @@ pub mod record {
                     );
                 }
                 assert!(no_search_flag.try_exists().is_err());
-                let no_search_said = pause_warning(&no_search_dir).expect("讀不到旗標仍然是暫停");
+                let no_search_said =
+                    pause_warning(&no_search_dir).expect("整個控制面讀不到仍然是暫停");
                 std::fs::set_permissions(&no_search_dir, std::fs::Permissions::from_mode(0o755))
                     .unwrap();
-                let expected = said.replace(
-                    &flag.display().to_string(),
-                    &no_search_flag.display().to_string(),
-                );
-                println!("record/FlagUncheckable/chmod-644: {no_search_said}");
-                assert_eq!(no_search_said, expected, "兩種成因刻意印同一句");
+                println!("record/ControlStateUncheckable/chmod-644: {no_search_said}");
                 assert!(
-                    no_search_said.contains("檔案")
-                        && no_search_said.contains("目錄")
+                    no_search_said.contains("pause.state")
+                        && no_search_said.contains("pause.lock")
+                        && no_search_said.contains("先關閉所有 AI-Sister 行程")
                         && no_search_said.contains("權限"),
-                    "下一步必須同時指出檔案和目錄的權限：{no_search_said}"
+                    "連 lock 都開不了時不能冒充只量過旗標：{no_search_said}"
                 );
-                assert!(!no_search_said.contains("直接刪掉它"), "{no_search_said}");
+                assert!(!no_search_said.contains("讀不到旗標檔"), "{no_search_said}");
             }
 
             let unreadable_dir = root.0.join("not-a-dir");
@@ -24931,8 +25277,30 @@ pub mod record {
             );
             assert!(unreadable.contains("先確認資料目錄本身"), "{unreadable}");
             assert!(
-                unreadable.contains("讀得到之後 paused.flag 如果還在，刪掉它就會解除"),
+                unreadable.contains(&cmd(&unreadable_dir, "resume"))
+                    && unreadable.contains("明確解除"),
                 "{unreadable}"
+            );
+
+            let control_dir = root.0.join("broken-control-state");
+            std::fs::create_dir_all(&control_dir).unwrap();
+            std::fs::write(control_dir.join("pause.state"), "{broken-json").unwrap();
+            assert_eq!(
+                sister_core::pause::state(&control_dir),
+                sister_core::pause::PauseState::ControlStateUncheckable
+            );
+            let control = pause_warning(&control_dir).expect("控制狀態壞掉要 fail closed");
+            println!("record/ControlStateUncheckable: {control}");
+            assert!(control.contains("pause.state") && control.contains("pause.lock"));
+            assert!(
+                control.contains("先關閉所有 AI-Sister 行程")
+                    && control.contains("明確解除")
+                    && control.contains(&cmd(&control_dir, "resume")),
+                "要講清楚不製造第二把 lock 的恢復順序：{control}"
+            );
+            assert!(
+                control.contains("不要在任何 AI-Sister 行程仍執行時刪除"),
+                "不能叫使用者在持鎖期間刪 pause.lock：{control}"
             );
         }
     }
@@ -25668,6 +26036,7 @@ pub mod record {
             ));
             assert!(should_ping_brain(&Tick::NoScreen, &mut idle));
             assert!(!should_ping_brain(&Tick::Paused, &mut idle));
+            assert!(!should_ping_brain(&Tick::Resumed, &mut idle));
             assert!(!should_ping_brain(&Tick::Disabled, &mut idle));
         }
 

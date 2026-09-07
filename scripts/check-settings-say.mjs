@@ -113,6 +113,7 @@ async function open({
   config = BASE,
   onRead,
   onWrite,
+  onHealth,
   onHotkeySet,
   onAssetStatus,
   onAssetInstall,
@@ -163,7 +164,14 @@ async function open({
           case "lint_url_rules":
             return [];
           case "privacy_health":
-            return { url_rules: { kind: "working", reads: 12 }, at: 1_755_000_000_000 };
+            if (onHealth) return onHealth(arg.urls);
+            return {
+              broken: [],
+              capture_off: false,
+              input_hook: "available",
+              url_rules: { kind: "working", reads: 12 },
+              at: 1_755_000_000_000,
+            };
           case "hotkey_state":
             return hotkey;
           case "hotkey_set":
@@ -310,6 +318,13 @@ async function open({
     handsHotkeySay: () => node("[data-hands-hotkey-say]").textContent,
     brainSay: () => node("[data-brain-say]").textContent,
     brainHidden: () => node("[data-brain-say]").hidden,
+    health: () => node("[data-health]").textContent,
+    healthHidden: () => node("[data-health]").hidden,
+    healthUnknown: () => node("[data-health]").classList.contains("unknown"),
+    healthOk: () => node("[data-health]").classList.contains("ok"),
+    machine: () => node("[data-machine]").textContent,
+    machineHidden: () => node("[data-machine]").hidden,
+    machineUnknown: () => node("[data-machine]").classList.contains("unknown"),
     /** 按那一格 → 進捕捉模式 → 按一組鍵下去。和真人的順序一樣。 */
     async pressCombo(e) {
       for (const fn of node("[data-combo]").handlers.click ?? []) fn();
@@ -1168,6 +1183,154 @@ console.log("㉚ 聲音是另外一次 trusted opt-in，失敗會退回，設定
     checked: p.node("[data-persona-voice]").checked,
     disabled: p.node("[data-persona-voice]").disabled,
   });
+}
+
+console.log("㉛ 能力報告的 Unknown 不會被畫成可用或不可用");
+{
+  const available = await open();
+  check(
+    "URL Working 只說這場真的讀到過可供比對的網址",
+    available.health().includes("至少有 12 個瀏覽器拍讀到網址") &&
+      available.health().includes("可供這幾條規則比對") &&
+      !available.health().includes("生效中"),
+    available.health(),
+  );
+  check("輸入 hook 已驗證可用時不畫警告", available.machineHidden(), available.machine());
+
+  const unknown = await open({
+    onHealth: () => ({
+      broken: [],
+      capture_off: false,
+      input_hook: "unknown",
+      url_rules: { kind: "unknown" },
+      at: 1_755_000_000_000,
+    }),
+  });
+  check("URL Unknown 是灰色問號狀態", !unknown.healthHidden() && unknown.healthUnknown(), unknown.health());
+  check("URL Unknown 明說沒量到", unknown.health().includes("沒有量到"), unknown.health());
+  check("URL Unknown 不宣稱生效或失效", !unknown.health().includes("生效中") && !unknown.health().includes("規則失效"), unknown.health());
+  check("hook Unknown 是灰色問號狀態", !unknown.machineHidden() && unknown.machineUnknown(), unknown.machine());
+  check("hook Unknown 不宣稱已探測或節奏必然是空的", !unknown.machine().includes("已探測") && !unknown.machine().includes("會是空的"), unknown.machine());
+}
+
+{
+  let reports = 0;
+  const changed = await open({
+    onHealth: () => {
+      reports += 1;
+      return reports === 1
+        ? {
+            broken: [],
+            capture_off: false,
+            input_hook: "available",
+            url_rules: { kind: "working", reads: 4 },
+            at: 1_755_000_000_000,
+          }
+        : {
+            broken: [],
+            capture_off: false,
+            input_hook: "unknown",
+            url_rules: { kind: "unknown" },
+            at: 1_755_000_000_000,
+          };
+    },
+  });
+  check("Working 開始時是綠燈", changed.healthOk(), changed.health());
+  await changed.reload();
+  check(
+    "同一頁轉成 Unknown 會拿掉上一拍的綠燈",
+    changed.healthUnknown() && !changed.healthOk(),
+    changed.health(),
+  );
+}
+
+{
+  const privacyReason =
+    "開機探測拿不到 UIA；若錄製後端同樣無法確認，會停在內容來源前。";
+  const combined = await open({
+    onHealth: () => ({
+      broken: [{ about: "privacy_capture", message: privacyReason }],
+      capture_off: false,
+      input_hook: "unknown",
+      url_rules: { kind: "broken" },
+      at: 1_755_000_000_000,
+    }),
+  });
+  check(
+    "PrivacyCapture 警告與 hook Unknown 同時呈現",
+    combined.machine().includes(privacyReason) &&
+      combined.machine().includes("還不知道輸入 hook"),
+    combined.machine(),
+  );
+  check(
+    "UrlRules Broken 不會在旁邊說假的沒有原因",
+    combined.healthHidden() && !combined.health().includes("找不到對應原因"),
+    { health: combined.health(), machine: combined.machine() },
+  );
+}
+
+{
+  const bootProbe = await open({
+    config: { ...BASE, excluded_urls: [] },
+    onHealth: () => ({
+      broken: [
+        {
+          about: "privacy_capture",
+          message: "開機探測拿不到 UIA；若錄製後端同樣無法確認，會停在內容來源前。",
+        },
+      ],
+      capture_off: false,
+      input_hook: "available",
+      url_rules: { kind: "none" },
+      at: 1_755_000_000_000,
+    }),
+  });
+  check(
+    "沒有 URL 規則也會顯示 UIA 開機探測警告",
+    !bootProbe.machineHidden() &&
+      bootProbe.machine().includes("若錄製後端同樣無法確認，會停在內容來源前"),
+    bootProbe.machine(),
+  );
+}
+
+{
+  // 舊 desktop 或損壞的 payload 漏了新欄位，也必須 fail-unknown，不能走
+  // 舊的 `?? { kind: "none" }` 藏掉整格。
+  const legacy = await open({
+    onHealth: () => ({ broken: [], capture_off: false, at: 1_755_000_000_000 }),
+  });
+  check("漏 url_rules 的舊回應不會假裝無規則", !legacy.healthHidden() && legacy.healthUnknown(), legacy.health());
+  check("漏 input_hook 的舊回應不會假裝 hook 可用", !legacy.machineHidden() && legacy.machineUnknown(), legacy.machine());
+}
+
+{
+  const unaskable = await open({
+    onHealth: (() => {
+      let reports = 0;
+      return () => {
+        reports += 1;
+        if (reports === 1) {
+          return {
+            broken: [],
+            capture_off: false,
+            input_hook: "available",
+            url_rules: { kind: "working", reads: 3 },
+            at: 1_755_000_000_000,
+          };
+        }
+        throw new Error("capabilities.json 讀不到");
+      };
+    })(),
+  });
+  check("privacy_health 問得到時先是綠燈", unaskable.healthOk(), unaskable.health());
+  await unaskable.reload();
+  check(
+    "privacy_health 後來問不到會拿掉上一拍綠燈",
+    unaskable.healthUnknown() && !unaskable.healthOk(),
+    unaskable.health(),
+  );
+  check("privacy_health 整個問不到時 hook 仍畫 Unknown", !unaskable.machineHidden() && unaskable.machineUnknown(), unaskable.machine());
+  check("問不到不會留住或藏成 hook 可用", unaskable.machine().includes("還不知道") && !unaskable.machine().includes("已探測"), unaskable.machine());
 }
 
 console.log("");

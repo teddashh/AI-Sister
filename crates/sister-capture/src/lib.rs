@@ -7,6 +7,7 @@
 //! [`replay`] 讓整條錄製迴圈能在沒有螢幕的機器上被完整測試，
 //! 也是 SPEC §12 replay 評測的地基。
 
+mod backend_identity;
 pub mod browsers;
 pub mod footprint;
 pub mod frames;
@@ -22,10 +23,12 @@ pub mod traits;
 #[cfg(windows)]
 pub mod windows;
 
-pub use recorder::{Recorder, RecorderStats, Tick};
+pub use recorder::{PauseSignal, Recorder, RecorderStats, Tick};
 pub use replay::{ReplayBackend, Scenario, Step};
 pub use traits::{
-    Backend, ClipboardSource, CompositeBackend, DhashRecheck, FocusSource, InputSource,
-    NullClipboard, NullFocus, NullInput, NullOcr, NullScreen, Ocr, OcrAttempt, OcrOutcome, OcrWork,
-    RawFrame, RecordingOcr, ScreenSource,
+    Backend, CapturePermit, ClipboardCapture, ClipboardSource, ClipboardWatermark,
+    CompositeBackend, DhashRecheck, FocusSource, InputSource, NullClipboard, NullFocus, NullInput,
+    NullOcr, NullScreen, NullSystem, Ocr, OcrAttempt, OcrOutcome, OcrWork, PrivacyObservation,
+    RawFrame, RecordingOcr, ScreenCapture, ScreenSource, SystemContentState, SystemLockState,
+    SystemObservation, SystemPowerState, SystemSource, SystemTransition, SystemTransitionKind,
 };

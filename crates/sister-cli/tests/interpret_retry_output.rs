@@ -38,10 +38,12 @@ fn second_real_interpret_prints_retry_line_and_whole_run_warning() {
         &scenario,
         serde_json::to_vec_pretty(&serde_json::json!({
             "name": "interpret-retry-output",
+            "privacy_context": "clear",
+            "system_state": "active",
             "steps": [
                 {"at_ms": 0, "app": "code.exe", "title": "compiler", "text": ["error[E0308]: mismatched types"]},
-                {"at_ms": 180000, "app": "chrome.exe", "title": "docs", "text": ["查型別文件"]},
-                {"at_ms": 200000, "app": "chrome.exe", "title": "docs continued", "text": ["繼續閱讀"]}
+                {"at_ms": 180000, "app": "chrome.exe", "title": "docs", "url": "https://docs.example.test/types", "text": ["查型別文件"]},
+                {"at_ms": 200000, "app": "chrome.exe", "title": "docs continued", "url": "https://docs.example.test/types", "text": ["繼續閱讀"]}
             ]
         }))
         .expect("scenario json"),

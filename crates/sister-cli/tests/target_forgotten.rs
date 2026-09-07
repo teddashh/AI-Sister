@@ -15,6 +15,7 @@ use std::process::{Command, Output};
 
 const TASK: &str = "執行這個下一步";
 const URL: &str = "https://from-another-app.example.com/collect";
+const WORK_URL: &str = "https://work.example.test/task";
 
 fn sister(data_dir: &Path, config: Option<&Path>, args: &[&str]) -> Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_sister"));
@@ -72,9 +73,11 @@ fn run_case(mode: MissingTargetProvenance) -> String {
         &scenario,
         serde_json::to_vec_pretty(&serde_json::json!({
             "name": "deleted-fact-probe",
+            "privacy_context": "clear",
+            "system_state": "active",
             "steps": [
                 { "at_ms": 0, "app": "chrome.exe", "app_name": "Google Chrome",
-                  "title": "他在工作的視窗", "text": [TASK] },
+                  "title": "他在工作的視窗", "url": WORK_URL, "text": [TASK] },
                 { "at_ms": 60_000, "app": "slack.exe", "app_name": "Slack",
                   "title": "目標在另一個 app", "text": [URL] },
                 // 目標之後還要有一格。目標那一刻如果是 `stream_end`，它就正好落在
@@ -414,7 +417,7 @@ fn run_real_removal(mode: RealRemoval) -> String {
     let scenario = dir.join("scenario.json");
     let task_step = serde_json::json!({
         "at_ms": task_at_ms, "app": "chrome.exe", "app_name": "Google Chrome",
-        "title": "他在工作的視窗", "text": [TASK]
+        "title": "他在工作的視窗", "url": WORK_URL, "text": [TASK]
     });
     let target_step = serde_json::json!({
         "at_ms": target_at_ms, "app": "slack.exe", "app_name": "Slack",
@@ -435,6 +438,8 @@ fn run_real_removal(mode: RealRemoval) -> String {
         &scenario,
         serde_json::to_vec_pretty(&serde_json::json!({
             "name": label,
+            "privacy_context": "clear",
+            "system_state": "active",
             "steps": steps
         }))
         .unwrap(),

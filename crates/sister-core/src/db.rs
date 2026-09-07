@@ -39,11 +39,14 @@ pub const SCHEMA_VERSION: i32 = 19;
 
 /// 可以替無人值守 URL 背書的 recorder 來源版本。
 ///
-/// alpha.99 以前的 Windows UIA 在 `CurrentHasKeyboardFocus()` 問失敗時會把它
-/// 當成 `false`，因此可能留下使用者仍在位址列輸入的半截字。只改 writer 不會
-/// 改寫那些歷史列；用新的 session identity 讓舊資料自然 fail-closed，也避免拿
-/// prerelease 版本字串做脆弱的大小比較。
-pub const TRUSTED_URL_ORIGIN_PLATFORM: &str = "windows/windows-gdi-uia-focused-url-v1";
+/// v1 雖修過 address-field focus 的 Unknown，仍把全桌面 focused element 當成
+/// 目前 HWND 的答案，且快取 `(HWND,title) -> URL` 字串；SPA／同標題導覽可沿用
+/// 舊安全網址。v2 綁 UIA root、每拍重讀 address element，並在內容邊界重驗完整
+/// privacy observation。只改 writer 不會改寫歷史列，所以信任值必須換版。
+pub const TRUSTED_URL_ORIGIN_PLATFORM: &str = "windows/windows-gdi-uia-focused-url-v2";
+
+/// 只供 migration/regression 測試描述歷史資料；查詢永遠不以它授權。
+pub const LEGACY_URL_ORIGIN_PLATFORM_V1: &str = "windows/windows-gdi-uia-focused-url-v1";
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -1156,7 +1159,6 @@ fn replay_focus_snapshot(focus: &crate::replay::ReplayFocus) -> FocusSnapshot {
         // PID 是這次程序的暫時識別，不是可攜脈絡；password_field 原本就從不
         // 落地，兩者都不能在 import 時猜一個值。
         pid: None,
-        password_field: false,
     }
 }
 
@@ -2030,6 +2032,33 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 將同一次 OS observation 的 audit events 全部寫入，或一筆都不寫。
+    ///
+    /// System source 在 `poll` 時已經 consume 事件。若這裡先成功一半再
+    /// 回錯，recorder 下次 retry 會產生重複 audit，不 retry 則會丟事件。
+    /// Transaction 把這兩個錯誤形狀一起拿掉。
+    pub fn insert_system_batch(&mut self, session_id: i64, events: &[SystemEvent]) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut statement = tx.prepare(
+                "INSERT INTO system_events(ts, session_id, kind, detail) VALUES(?1,?2,?3,?4)",
+            )?;
+            for event in events {
+                statement.execute(params![
+                    event.ts,
+                    session_id,
+                    event.kind.as_str(),
+                    event.detail.as_deref()
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 排除稽核：哪幾條規則真的生效過、生效過幾**段**、第一段和最後一段何時開始。
     ///
     /// 這張表以前是只寫不讀的。DATA_INVENTORY 說 `excluded` 這一列「是稽核用的，
@@ -2805,12 +2834,13 @@ impl Db {
         let Some(_target) = sister_hands::target_policy::host_of(url) else {
             return Ok(UrlOrigin::NotAReadableSite);
         };
-        // 只接受修過 address-field focus fail-closed 的**真 Windows recorder**。
-        // 舊 `windows/windows-gdi` 可能在 UIA 問焦點失敗時留下半截輸入，不能在
-        // 升級後突然變成來源票；identity 換版讓它保持 fail-closed。
+        // 只接受綁 exact HWND root、每拍重讀 URL、並重驗完整 privacy context
+        // 的**真 Windows recorder**。舊 v1 與 `windows/windows-gdi` 都不能在
+        // 升級後突然變成來源票；identity 換版讓它們保持 fail-closed。
         // 這裡刻意用 allowlist：
         // `import_replay` 寫 `replay/import`，`sister replay scenario` 則透過
-        // Recorder 寫 `windows/replay` 或 `linux/replay`；用 replay 前綴黑名單
+        // Recorder 寫 `untrusted/windows/replay` 或 `untrusted/linux/replay`；
+        // 用 replay 前綴黑名單
         // 會漏掉後者，下載／自造語料就能替日後的 unattended 網址種票。
         // 將來換 capture backend 時這裡會先 fail-closed，直到明確接上來源。
         let mut stmt = self.conn.prepare(
@@ -6078,7 +6108,6 @@ impl Db {
                         window_title: row.get(8)?,
                         url: row.get(9)?,
                         pid: None,
-                        password_field: false,
                     },
                     ocr: Vec::new(),
                 });
@@ -7947,7 +7976,6 @@ mod tests {
                     window_title: Some("新分頁".into()),
                     url: Some("about:blank".into()),
                     pid: Some(1),
-                    password_field: false,
                 },
             },
         )
@@ -7969,7 +7997,6 @@ mod tests {
                     window_title: Some("別的站".into()),
                     url: Some("elsewhere.test/x".into()),
                     pid: Some(1),
-                    password_field: false,
                 },
             },
         )
@@ -8001,7 +8028,6 @@ mod tests {
                     // Chromium 位址列真正給出來的形狀：沒有 scheme、沒有 www.
                     url: Some("example.com/bill?id=7".into()),
                     pid: Some(1),
-                    password_field: false,
                 },
             },
         )
@@ -8054,7 +8080,9 @@ mod tests {
         };
         db.import_replay(&corpus, 10_000).expect("匯入 corpus");
 
-        let scenario = db.start_session("windows/replay", "0").expect("scenario");
+        let scenario = db
+            .start_session("untrusted/windows/replay", "0")
+            .expect("scenario");
         db.insert_focus(
             scenario,
             &FocusEvent {
@@ -8066,7 +8094,6 @@ mod tests {
                     window_title: Some("scenario".into()),
                     url: Some("seeded.example/again".into()),
                     pid: Some(2),
-                    password_field: false,
                 },
             },
         )
@@ -8080,9 +8107,8 @@ mod tests {
         );
     }
 
-    /// alpha.99 以前 UIA 問「位址列是不是還有鍵盤焦點」失敗時會當成 false，
-    /// 因此歷史 `windows/windows-gdi` 裡可能有尚未送出的半截網址。新 writer
-    /// fail-closed 不會改寫舊列；只有換過 identity 的錄製能替 URL 背書。
+    /// v1 仍可能把別窗 focused element 或同 HWND/title 的 stale URL 當證據。
+    /// 升級不改寫歷史列；只有 v2 錄製能替 unattended URL 背書。
     #[test]
     fn legacy_windows_url_rows_do_not_become_origin_tickets_after_upgrade() {
         let mut db = test_db();
@@ -8100,7 +8126,6 @@ mod tests {
                     window_title: Some("還在輸入".into()),
                     url: Some("cathaybk.com".into()),
                     pid: Some(1),
-                    password_field: false,
                 },
             },
         )
@@ -8110,6 +8135,31 @@ mod tests {
                 .expect("查"),
             UrlOrigin::NoTrustedRecordedUrls,
             "舊 recorder 的半截位址不可以在升級後變成來源票"
+        );
+
+        let v1 = db
+            .start_session(LEGACY_URL_ORIGIN_PLATFORM_V1, "0.1.0-alpha.102")
+            .expect("v1 session");
+        db.insert_focus(
+            v1,
+            &FocusEvent {
+                ts: 1_500,
+                kind: FocusKind::UrlChange,
+                snapshot: FocusSnapshot {
+                    app_id: Some("chrome.exe".into()),
+                    app_name: Some("Chrome".into()),
+                    window_title: Some("同標題導覽".into()),
+                    url: Some("v1-only.example/account".into()),
+                    pid: Some(1),
+                },
+            },
+        )
+        .expect("legacy v1 URL");
+        assert_eq!(
+            db.site_in_her_record("https://v1-only.example/transfer")
+                .expect("查"),
+            UrlOrigin::NoTrustedRecordedUrls,
+            "v1 的 stale URL 風險不可以在升級後繼續授權"
         );
 
         let fixed = db
@@ -8126,7 +8176,6 @@ mod tests {
                     window_title: Some("已開啟".into()),
                     url: Some("cathaybk.com/account".into()),
                     pid: Some(1),
-                    password_field: false,
                 },
             },
         )
@@ -8882,7 +8931,6 @@ mod tests {
                         window_title: Some("workspace replay ERR_FOCUS_REPLAY".into()),
                         url: Some("https://example.test/build".into()),
                         pid: Some(4242),
-                        password_field: false,
                     },
                 },
             )
@@ -9177,7 +9225,6 @@ mod tests {
                 window_title: Some(title.into()),
                 url: None,
                 pid: Some(42),
-                password_field: false,
             },
         }
     }
@@ -12417,7 +12464,6 @@ mod tests {
                     window_title: Some("Cloudflare DNS 設定".into()),
                     url: Some("https://dash.cloudflare.com/dns".into()),
                     pid: Some(9),
-                    password_field: false,
                 },
             },
         )
@@ -13359,7 +13405,6 @@ mod tests {
                     url: None,
                     // pid 在 replay 上永遠是 None，那是後端的限制不是故障。
                     pid: None,
-                    password_field: false,
                 },
             },
         )

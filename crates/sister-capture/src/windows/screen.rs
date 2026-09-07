@@ -74,9 +74,6 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromWindow, ReleaseDC, SRCCOPY, SelectObject, SetBrushOrgEx, SetStretchBltMode,
     StretchBlt,
 };
-use windows::Win32::System::StationsAndDesktops::{
-    CloseDesktop, DESKTOP_SWITCHDESKTOP, OpenInputDesktop,
-};
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 use crate::scale::{OCR_LONG_EDGE, fit};
@@ -162,20 +159,14 @@ impl ScreenSource for WindowsScreen {
     }
 }
 
-/// 工作站是否鎖定。
-///
-/// 鎖定時輸入桌面切到 `Winlogon`，本程序就打不開它了。這比去猜
-/// 「畫面是不是全黑」可靠得多。
+/// 工作站是否鎖定。WTS 問不出來也往鎖定倒：這個 helper
+/// 被 bench／doctor 的單獨 screen capture 路徑使用，不一定有 Recorder
+/// 外層那道 `SystemSource` gate 替它停下。
 pub fn session_locked() -> bool {
-    unsafe {
-        match OpenInputDesktop(Default::default(), false, DESKTOP_SWITCHDESKTOP) {
-            Ok(desk) => {
-                let _ = CloseDesktop(desk);
-                false
-            }
-            Err(_) => true,
-        }
-    }
+    !matches!(
+        crate::windows::system::content_state(),
+        Ok(Some(state)) if state.allows_content()
+    )
 }
 
 /// 前景視窗所在的那一台螢幕，以及它的桌面座標矩形。

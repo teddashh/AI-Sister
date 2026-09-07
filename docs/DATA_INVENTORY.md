@@ -63,7 +63,9 @@ cache 旁邊另有四種不跟 release 目錄一起刪的協定檔：`persona-as
 
 | 檔案 | 是什麼 | 刪掉會怎樣 |
 |---|---|---|
-| `paused.flag` | 她現在有沒有被暫停。內容是按下暫停的時戳 | 等於解除暫停 |
+| `paused.flag` | 她現在有沒有被暫停的相容旗標。新版內容是格式版本、pause generation 與按下暫停的時戳；舊版純時戳仍讀得懂 | **不保證解除暫停**：`pause.state` 仍可能維持同一代 pause；請用 `sister resume` |
+| `pause.state` | 最近一代 pause 的 generation、是否仍暫停，以及 pause／resume request 時戳；解除後仍保留，防止一整段 pause→resume 在兩次 recorder 探測之間消失 | 執行中不可刪。所有 AI-Sister 行程關閉後，損毀時才可刪除；會失去這份控制歷史，下次操作會重建 |
+| `pause.lock` | 空的跨行程 read/write transaction 鎖；檔案留著，真正的鎖由作業系統 handle 持有 | 執行中不可刪，否則不同 process 可能各鎖到不同檔案；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `hands.stop` | 她的手現在是不是被拔掉。內容只有第一次拔手的毫秒時戳 | 等於安靜地把手接回去，所以任何 forget、prune、export 都刻意不動它 |
 | `consent.toml` | 三張同意書各自是**何時**簽的，加上一個條文版本號 | 等於三張都沒簽，`sister record` 拒絕啟動 |
 | `pet-window.json` | 字母人視窗的位置與置頂狀態 | 下次開在右下角 |
@@ -71,11 +73,23 @@ cache 旁邊另有四種不跟 release 目錄一起刪的協定檔：`persona-as
 | `stop.request` | 有人（字母人的選單、`sister stop`）請正在跑的 `record` 收工。內容只有 `stop` 兩個字 | 那次「請你停下來」不會送到，她繼續錄 |
 | `desktop.log` / `desktop.log.1` | 字母人這一輪（與上一輪）自己發生了什麼事 | 沒有影響，下次開會重寫 |
 | `record.log` / `record.log.1` | 從字母人按「開始記錄」跑起來的那個 `record`，它印在終端機上的東西 | 沒有影響，下次開會重寫 |
-| `capabilities.json` | 上一次 `sister record` 起來的時候，這台機器**做得到什麼**（讀不讀得到瀏覽器網址、輸入 hook 裝不裝得上）| 設定頁改說「還不知道這幾條會不會生效」 |
+| `capabilities.json` | 上一份能力快照：這台機器對每一項是已知可用、已知不可用，還是沒量到；錄製中每分鐘更新 URL 實測證據 | 設定頁改說「還不知道這幾條會不會生效」 |
+
+`paused.flag`、`pause.state`、`pause.lock` 是同一份跨行程控制協定，不是三個
+可以各自切換的開關。Desktop 的 toggle 會在 `pause.lock` 的 exclusive lock 裡配置
+新 generation 並更新前兩個檔；recorder 每一道內容持久化邊界持有 shared lock，讓
+「這次寫入」和「這次暫停」有唯一先後。`pause.lock` 本身不會因 owner crash 變成
+stale lock，作業系統會釋放 handle；檔案留在原位是刻意的。
+
+三者任一讀不到、格式互相矛盾，或 `pause.lock` 不是一般檔案時，都會 **fail closed**
+成暫停。恢復時先關閉 recorder、字母人及其他 AI-Sister 行程，再修好資料目錄權限；
+`pause.lock` 必須是一般檔案，損毀的 `pause.state` 可在所有行程關閉後刪除。最後跑
+`sister --data-dir <同一個資料目錄> resume` 明確解除。不要在任何行程仍執行時刪
+`pause.lock`，也不要只刪 `paused.flag`：新版 `pause.state` 仍可能正確地維持暫停。
 
 `consent.toml` 存時戳而不是 `true`／`false`，因為「你什麼時候同意的」是一個
 你有權利問、而我們答得出來的問題。讀不到的時候一律倒向「她做得比較少」那一邊：
-暫停旗標讀不到當作暫停中，同意書讀不到當作沒簽，心跳讀不到當作沒有人在錄。
+暫停控制狀態讀不到當作暫停中，同意書讀不到當作沒簽，心跳讀不到當作沒有人在錄。
 
 `hands.stop` 不在任何刪除路徑上。它沒有使用者打的字，只有一個毫秒時戳；刪掉它
 換不到隱私，卻會把一道阻止執行的牆拿掉。「忘掉」若順手刪它，就等於沒有明講地
@@ -133,13 +147,18 @@ forward-compat 本身是對的：多寫一個欄位的新版不該讓舊版放�
 漏寫，是寫了一條自以為有效的**——而「這台機器讀不到瀏覽器網址，所以你那幾條
 `excluded_urls` 一條都不生效」這句話，以前只印在 `record.log` 裡。你是在設定頁上
 打那些規則的，那句話該出現在那一頁。能力探測只有 recorder 做得到（設定頁在另一個
-行程裡，它沒有 UIA），所以 recorder 每次開機留一份給它讀。
+行程裡，它沒有 UIA），所以 recorder 開機時留一份，錄製中再每分鐘更新
+只有那一場看得到的證據。
 
 裡面**存的是原始能力，不是結論**：上一場錄製開始的時候你可能一條規則都還沒寫，
 那時候的結論會是「沒問題」，而你正是現在才在打第一條。結論每次都拿眼前這一刻的
 規則清單重算。也刻意不放進資料庫——`sister forget` 會清掉 `system_events`，而這
 不是一段記憶，是一台機器的事實；被 `forget` 帶走的話，設定頁會安靜地變回
 「看起來沒問題」。
+
+能力不用 `true` / `false` 兼差「沒量到」。新報告寫 `available` / `unavailable` /
+`unknown`；舊報告沒有記下輸入 hook 的正向成功證據，所以舊的
+`input_hook_failed = false` 升級後是 `unknown`，不會自動補成「已驗證可用」。
 
     Windows   %APPDATA%\ted-h\AI-Sister\data\
     Linux     ~/.local/share/ai-sister/
@@ -206,8 +225,9 @@ Draft 是純文字 JSON，沒有額外加密；它放到哪裡，就只被那個
 `sister replay import <corpus> --dry-run` 可以把 Draft 匯入記憶體資料庫做本機驗證；
 未 Reviewed 不影響本機重播，但仍不可分享。import 從 corpus 裡去敏後的 L0
 重建 `text_chunks` / FTS 索引與 `facts` L1，不把匯出當時的衍生表當作不可質疑的答案。
-原本的 `sister replay scenarios/bill-lookup.json` 腳本語法繼續存在，和 corpus import
-同樣都是本機、零連網。
+原本的 `sister replay scenarios/bill-lookup.json` 指令繼續存在，和 corpus import
+同樣都是本機、零連網。scenario JSON 必須明寫 `privacy_context` 與 `system_state`
+安全前提；缺欄會拒絕執行，不能默認成「已知安全」。
 
 ### replay 題庫與評測報告
 
@@ -292,10 +312,10 @@ ranking、題目 id、每題 question 與 returned values 都不過這道邊界�
 | 問題 | 答案 |
 |---|---|
 | 有存我按了什麼鍵嗎？ | **沒有。** 只存計數與節奏，見 `input_metrics` |
-| 有存螢幕截圖嗎？ | 有，降採樣後的 PNG。可用 `store_images = false` 關掉 |
+| 有存螢幕截圖嗎？ | 有，降採樣後的 PNG。Windows 抓的是前景所在的整個 monitor，可見背景視窗也可能入幀；可用 `store_images = false` 關掉 PNG，但 OCR 仍會讀工作幀 |
 | 有存我複製的東西嗎？ | 有，但疑似秘密者只存「發生過」，不存內容 |
-| 有存密碼嗎？ | 焦點在密碼欄上時整幀不擷取（僅瀏覽器）；密碼管理員整段不擷取 |
-| 網銀畫面呢？ | 網址命中 blocklist 就整段不擷取——**但見下方「已知缺口」** |
+| 有存密碼嗎？ | 前置檢查確認焦點在敏感欄時不讀內容；所有前景 app 都問，問不出來也不放行。密碼管理員另由 app 規則整段排除；可見背景視窗與換窗 race 見下方「已知缺口」 |
+| 網銀畫面呢？ | **前景**網址命中 blocklist 時不讀內容——但背景視窗與 browser clipboard 的邊界見下方「已知缺口」 |
 | 有存我**問過她**什麼嗎？ | 有——`queries`，只在這台機器上。可用 `privacy.query_log = false` 關掉 |
 | 資料會離開這台機器嗎？ | 畫面 pixel 不會。簽 `cloud-reading` 後，OCR 文字原文會交給你設定的本機 CLI；那支 CLI 是否送給 provider，由它自己的設定與行為決定。另有一條不帶記憶的 Persona 路徑：看完 `cdn.ted-h.com`／73,261,088 bytes／metadata 揭露並按下載後，desktop 對同一條 hash URL 發至多一次固定 GET；CDN 仍看得到 IP、時間、TLS、固定 path／headers |
 
@@ -391,12 +411,13 @@ trigram 給中日韓、unicode61 給英文。
 `kind`（focus / title_change / url_change）+ `app_id` / `app_name` /
 `window_title` / `url` / `pid`。脈絡變了才寫一列，不是每秒一列。
 
-> **alpha.100 起，這張表也會替無人值守的 URL 回答「她說不說得出來源」。**
-> 但不是每一列 `url` 都有這個資格：查詢會 join `sessions`，只信 exact
-> `platform = 'windows/windows-gdi-uia-focused-url-v1'` 的保留中真 Windows
-> recorder session。舊 `windows/windows-gdi`、corpus import、scenario replay
-> 都不能當來源票。比對只到 host，最多把一層 `www.` 視為同站；它不證明那串字
-> 一定來自位址列、不證明網站安全或是你主動開的，也不證明 path 或 redirect。
+> **alpha.100 起，這張表也會替無人值守的 URL 回答「她說不說得出來源」；
+> alpha.103 起只信 v2。** 不是每一列 `url` 都有這個資格：查詢會 join `sessions`，
+> 只信 exact `platform = 'windows/windows-gdi-uia-focused-url-v2'` 的保留中真 Windows
+> recorder session。歷史 `windows/windows-gdi-uia-focused-url-v1` 列仍可讀、可顯示，
+> 但不再能當來源票；舊 `windows/windows-gdi`、corpus import、scenario replay 也不行。
+> 比對只到 host，最多把一層 `www.` 視為同站；它不證明網站安全或是你主動開的，
+> 也不證明 path、redirect 或站內內容。
 
 ### `clipboard_events` — 複製了什麼
 
@@ -418,6 +439,11 @@ trigram 給中日韓、unicode61 給英文。
 | `source_app` | 從哪個程式複製的 |
 
 只存文字類內容。圖片與檔案只記「發生過」與來源，不存本體。
+
+`source_app` 是 clipboard owner 的程式，不是下一拍前景 app；事件沒有一個可持久化的
+來源 URL／視窗標題欄位，也不拿當下前景補值。因而使用者在瀏覽器複製後立刻切到
+編輯器時，資料庫無法證明來源頁面。alpha.103 在 `excluded_urls` 非空、來源是瀏覽器、
+但沒有 origin URL proof 時，整筆內容在 insert 前丟棄；不寫一列假來源來填這個空洞。
 
 ### `input_metrics` — 打字節奏（**不含內容**）
 
@@ -496,10 +522,22 @@ datetime）、`raw`（螢幕原文）、`normalized`，以及回指
 > 有了重播評測集、真的量得出每條規則抽對的比例，它再帶著一個有來源的值回來。
 > （升級是自動的：`sister` 一開資料庫就跑 migration 002。）
 
-### `system_events` — 她自己的動作
+### `system_events` — 錄製邊界與原生系統轉換
 
-`kind`（session_start/end、lock、unlock、capture_paused/resumed、
-**excluded**）+ `detail`。
+`kind`（session_start/end、lock、unlock、sleep、wake、capture_paused/resumed、
+**excluded**）+ `detail`。平台來源的型別只能送 lock／unlock／sleep／wake；session、
+pause 與 excluded 只能由 recorder 自己寫。Windows 目前只從連續、可觀測的 WTS
+**相鄰 polling 樣本**產生 lock／unlock；第一個樣本或 Unknown 空洞後只建立狀態
+基準，不捏造精確事件時刻。兩個樣本之間發生又恢復的轉換可能觀察不到，所以這張表
+不是每個原生 WTS 事件的完整 event log。Release 1.0 最低 Windows 10；只在 session
+同時為 active + unlocked 時讀內容，鎖定與電源正交，wake 不會自己變成 unlock。
+sleep／wake 要等真正的 power notification，不能拿時鐘空洞猜。
+
+同一次 observation 的多筆 transition 由一個 SQLite transaction 全寫或全不寫。
+若 DB 寫入失敗，recorder 把完整 observation 留在**行程 RAM** 的 pending，下一拍在
+新 poll 或讀內容前重試；狀態、timestamp 與 sequence watermark 等 transaction 成功
+才一起推進。行程在成功前 crash 時 pending 仍會消失，因此這是 process-lifetime
+best effort，不是 crash-safe exactly-once。
 
 `excluded` 這一列是**稽核用的**：它記錄「這段時間因為某規則沒有擷取」，
 理由字串裡含 app 名稱、以及**命中的那一條規則**（`excluded url: *password*`）。
@@ -665,9 +703,10 @@ CASCADE 帶走的那幾列**不會出現在 `execute()` 的回傳值裡**，所�
 ### `sessions` / `meta`
 
 程式版本、擷取後端 identity、起訖時間；schema 版本。`sessions.platform` 不只是
-顯示用的 OS 名稱：alpha.100 的 URL 來源查詢只接受
-`windows/windows-gdi-uia-focused-url-v1` 這個 exact identity；換 backend 時會先
-fail-closed，不能靠字首或版本字串大小猜成可信。
+顯示用的 OS 名稱：alpha.103 的 URL 來源查詢只接受
+`windows/windows-gdi-uia-focused-url-v2` 這個 exact identity；換 backend 時會先
+fail-closed，不能靠字首或版本字串大小猜成可信。歷史 v1 identity 仍留在原列供查詢
+與顯示，但不再授權無人值守 URL。
 
 > **`sessions` 也會過期，跟著它自己那幾列走。** 一場錄製的每一列都被
 > `prune` 或 `forget` 帶走之後，那一列 `sessions` 本身也刪掉——不然「我那天
@@ -982,34 +1021,37 @@ alpha.69 那句「沒按過就沒有這個檔案」在 alpha.70 之後是假的�
    要講清楚的是：擋住這件事的是「位址列有沒有鍵盤焦點」那一道閘門，
    不是後面的字串檢查。alpha.100 起，連 `CurrentHasKeyboardFocus()` 自己報錯
    都會拒收這一個候選；「問不出來」不再被當成「沒有焦點」。修正後的 recorder
-   用新的 session identity，舊 session 不會在升級後突然變成無人值守 URL 的來源票。
-   但這仍不證明候選一定是位址列或已完成導覽：若 COM 明確回報沒有焦點，後面那層
-   仍只濾掉有空白的提示語；一串沒有空白又帶點的字——email、內網 IP、未送出的
-   半截網域——仍可能看起來像網址。來源政策因此只敢叫它 host provenance，不能
-   叫安全判斷。
+   當時用了 v1 session identity。alpha.103 又發現全域 focused element 沒綁回原本
+   exact HWND，且 cache 可能重用舊 URL 字串；因此 v1 歷史列雖仍可讀，已不能替無人
+   值守 URL 背書。只有每拍把 focused element 綁回原 HWND、重讀 live value 並通過
+   前後 exact HWND／PID 重驗的 v2 session 才有資格。升級不改寫舊 session，也不能
+   拿版本字串大小猜；要讓新版 recorder 實際觀察該站一次。
+   v2 仍不把 host provenance 叫成安全判斷：一串沒有空白又帶點的字——email、
+   內網 IP、未送出的半截網域——仍可能看起來像網址。
    那道焦點閘門要一個活的 COM 元素才驗得到，所以它沒有單元測試，只有
    `plausible_url_is_not_a_substitute_for_the_keyboard_focus_gate` 這條
    把它的「不可取代」釘住，以及 Windows 上的實機驗證。
 
-2. **密碼欄偵測只涵蓋瀏覽器。** UIA 只對瀏覽器視窗呼叫（清單與比對規則見
-   `crates/sister-capture/src/browsers.rs`），所以非瀏覽器的密碼欄看不到：
-   RDP 登入框、安裝程式、VPN 用戶端。那些情境仍然只靠「密碼顯示為圓點」
-   與 app 排除。這個範圍是刻意的——每一次 UIA 呼叫都是一次可能卡住而且
-   叫不回來的跨程序往返，讓一天裡絕大多數時間完全不碰 UIA 本身就是一項功能。
-   另外：按下「顯示密碼」的那個畫面仍然會被記下來。
-
-   還有一個上限：問不出「焦點在不在密碼欄上」的時候我們會**擋掉那一幀**，
-   但如果連續問不出來五次，就停止拿它擋畫面。理由是一條永遠答不出來的
-   安全規則不是保守，是「她在瀏覽器裡什麼都記不住」，而且症狀藏在沒有人
-   會看的地方。所以這個缺口寧可被講出來，也不要安靜地擴大。
+2. **敏感欄偵測會問每一個前景 app。** UIA 的密碼屬性查詢每拍都做；只有昂貴的
+   位址列樹遍歷仍限瀏覽器。UIA 回報焦點在敏感欄、回報不知道，或整個 privacy
+   context 讀不到時，recorder 都在剪貼簿與螢幕之前停下。連續失敗五次會另外把
+   能力缺口顯示給使用者，但不會把 fail-closed 保護關掉。若使用者按「顯示密碼」
+   使控制項不再帶密碼屬性，仍可能被記下；app／標題排除規則仍是第二道防線。
+   前置檢查後仍可能換窗：Windows pixels 可能短暫進工作 RAM，但 permit／system
+   post-check 不通過就不進 dedup、OCR、DB 或 PNG。這是防持久化，不是「RAM 從未碰過」。
 
 3. **旁人的畫面。** 會議 app 前景時自動暫停（Zoom/Teams/Meet 等），
    但 Slack 與 Discord **不在**該清單——它們平時是主要工作場所，
    光憑 app 名稱分不出「正在分享畫面」與「正在聊天」。在 Slack 裡開啟
-   螢幕分享時，對方的畫面可能被記錄。
+   螢幕分享時，對方的畫面可能被記錄。Windows GDI 抓的是前景所在的整個 monitor；
+   前景很普通時，同一個 monitor 上仍可見的背景敏感視窗也可能一起入幀，foreground
+   app／URL／title／敏感欄規則不保護它。
 
 4. **排除是規則式的，不是語意式的。** 沒有列進 blocklist 的敏感網站
-   會被完整記錄。預設清單只涵蓋常見的台灣銀行與幾個登入頁。
+   會被完整記錄。預設清單只涵蓋常見的台灣銀行與幾個登入頁。剪貼簿又沒有可靠的
+   來源 URL／標題證明：快速 browser copy → switch 不能拿下一拍前景補來源。
+   alpha.103 在有 URL rules 時保守丟棄這種 browser clipboard；代價是她也記不住
+   本來可安全保留的瀏覽器複製內容。
 
 5. **沒有人動的時候，她最多五秒沒在看。** 這道閘門原本為了降低 CPU，從上次
    看螢幕到現在沒有任何鍵盤滑鼠輸入的話，那個 tick 完全不碰螢幕。這是一個

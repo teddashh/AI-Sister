@@ -4,11 +4,12 @@
 //! 測試用的 replay，全部實作同一組 trait；上面的錄製迴圈與整個
 //! `sister-core` 都看不見它們的差別。
 //!
-//! 每個來源都**允許失敗**且必須失敗得安靜——抓不到 URL 就是 `None`，
-//! 不重試、不阻塞。感官層停下來的代價遠大於少一筆脈絡。
+//! 每個來源都允許失敗，但安全前提失敗不能冒充正常值：system／privacy
+//! context 不知道時明確回 `Unknown`，recorder 會在任何內容來源前 fail closed。
+//! 不重試、不阻塞；能力缺口另由報告說清楚。
 
 use anyhow::Result;
-use sister_core::model::{ClipboardEvent, FocusSnapshot, InputTick, Millis, OcrBlock};
+use sister_core::model::{ClipboardEvent, InputTick, Millis, OcrBlock, PrivacyContext};
 use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,134 @@ pub struct RawFrame {
     /// RGBA8 像素（每像素 4 bytes）。`None` = 這個後端不提供影像。
     pub rgba: Option<Vec<u8>>,
     pub dhash: u64,
+}
+
+/// 一次和 privacy gate 前景身份綁定的畫面擷取。
+#[derive(Debug, Clone)]
+pub enum ScreenCapture {
+    Frame(RawFrame),
+    /// 畫面來源當下沒有可用 frame；這不代表 OS lock/sleep。
+    Unavailable,
+    /// 擷取前或後的前景已不是 privacy gate 核准的那個。
+    PrivacyChanged,
+}
+
+/// Privacy 問答核准的 native 前景身份。
+///
+/// 內部欄位不公開；只能拿整個 permit 交回同一個 backend 重驗。
+/// Windows 同時綁 exact HWND、PID、核准世代與完整 privacy observation；
+/// replay 綁 timeline step generation；第三方 backend 可建立一個只供自己
+/// 比對的 opaque generation。`kind` 不公開，讓 replay／第三方／測試名字
+/// 都不能造出 Windows production permit。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapturePermit {
+    kind: CapturePermitKind,
+    native_window: u64,
+    process_id: Option<u32>,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapturePermitKind {
+    BackendLocal,
+    Replay,
+    #[cfg(windows)]
+    Windows,
+    #[cfg(test)]
+    Test,
+}
+
+impl CapturePermit {
+    /// 建立只在同一個 backend 內有意義的 opaque permit。
+    ///
+    /// 外部 backend 在 privacy observation 核准時保存這個完整值，之後於
+    /// `is_current` 重新量完自己的前景狀態，再與收到的值比較。這不攜帶
+    /// Windows 身分、也不會讓 [`crate::Recorder::new`] 寫出 trusted session
+    /// provenance；它只解決「這份核准還是不是同一個 backend 世代」。
+    pub const fn backend_local(generation: u64) -> Self {
+        Self {
+            kind: CapturePermitKind::BackendLocal,
+            native_window: generation,
+            process_id: None,
+            generation,
+        }
+    }
+
+    pub(crate) const fn replay(generation: u64) -> Self {
+        Self {
+            kind: CapturePermitKind::Replay,
+            native_window: generation,
+            process_id: None,
+            generation,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test(generation: u64) -> Self {
+        Self {
+            kind: CapturePermitKind::Test,
+            native_window: generation,
+            process_id: None,
+            generation,
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) const fn windows(
+        _: crate::windows::WindowsBackendToken,
+        native_window: u64,
+        process_id: u32,
+        generation: u64,
+    ) -> Self {
+        Self {
+            kind: CapturePermitKind::Windows,
+            native_window,
+            process_id: Some(process_id),
+            generation,
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) const fn windows_parts(self) -> Option<(u64, u32, u64)> {
+        match (self.kind, self.process_id) {
+            (CapturePermitKind::Windows, Some(process_id)) => {
+                Some((self.native_window, process_id, self.generation))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Focus source 的一次完整回答。Unknown 沒有 permit，所以不可能
+/// 在後面意外被當成已核准前景。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivacyObservation {
+    Known {
+        context: PrivacyContext,
+        permit: CapturePermit,
+    },
+    Unknown,
+}
+
+impl PrivacyObservation {
+    pub fn known(context: PrivacyContext, permit: CapturePermit) -> Self {
+        debug_assert!(matches!(context, PrivacyContext::Known { .. }));
+        Self::Known { context, permit }
+    }
+}
+
+/// Clipboard bytes 已讀到 RAM 後，前景 permit 仍然成立才能交給 recorder。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardCapture {
+    Event(Option<ClipboardEvent>),
+    ContextChanged,
+}
+
+/// Clipboard source 是否真的建立了 nonzero/可信的事件水位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardWatermark {
+    Established,
+    Unknown,
 }
 
 impl RawFrame {
@@ -83,12 +212,151 @@ pub trait ScreenSource {
 
 /// 前景視窗來源。
 pub trait FocusSource {
-    fn snapshot(&mut self, ts: Millis) -> Result<FocusSnapshot>;
+    /// 這一拍能不能安全地讀內容，以及已知的前景脈絡。
+    ///
+    /// 回傳型別刻意沒有 `Default`：平台層問不出來就只能送
+    /// [`PrivacyContext::Unknown`]，不能把全空 snapshot 當成安全。
+    fn context(&mut self, ts: Millis) -> Result<PrivacyObservation>;
+
+    /// 剛才 privacy gate 核准的 native 前景還是不是現在這一個。
+    ///
+    /// 這個比對不讀內容；Windows 只重讀 HWND + PID。問不到是
+    /// error/false，呼叫端都必須在持久化 clipboard/frame 前丟掉。
+    fn is_current(&mut self, permit: CapturePermit) -> Result<bool>;
 
     /// 見 [`Backend::url_capture`]。
     fn url_capture(&self) -> sister_core::capabilities::UrlCapture {
         Default::default()
     }
+}
+
+/// 原生作業系統會送出的四種生命週期轉換。
+///
+/// 平台後端只拿得到這個受限 enum，所以它不可能偽造
+/// `CapturePaused` / `Excluded` / session marker 這些只能由 recorder
+/// 自己建立的稽核事件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemTransitionKind {
+    Lock,
+    Unlock,
+    Sleep,
+    Wake,
+}
+
+impl SystemTransitionKind {
+    pub(crate) const fn core_kind(self) -> sister_core::model::SystemKind {
+        match self {
+            Self::Lock => sister_core::model::SystemKind::Lock,
+            Self::Unlock => sister_core::model::SystemKind::Unlock,
+            Self::Sleep => sister_core::model::SystemKind::Sleep,
+            Self::Wake => sister_core::model::SystemKind::Wake,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemTransition {
+    /// 來源在這次 recorder 生命週期內單調遞增的序號。
+    /// 時戳可以相同，但 sequence 不可重送或倒退。
+    pub sequence: u64,
+    pub ts: Millis,
+    pub kind: SystemTransitionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemLockState {
+    Unlocked,
+    Locked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemPowerState {
+    Awake,
+    Sleeping,
+}
+
+/// 這一拍的 OS 內容狀態。Lock 與 power 是正交的兩維；
+/// `Wake` 只能改 power，不能把仍然 locked 的 session 假裝成可讀。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemContentState {
+    lock: SystemLockState,
+    power: SystemPowerState,
+}
+
+impl SystemContentState {
+    pub const fn new(lock: SystemLockState, power: SystemPowerState) -> Self {
+        Self { lock, power }
+    }
+
+    pub const fn active() -> Self {
+        Self::new(SystemLockState::Unlocked, SystemPowerState::Awake)
+    }
+
+    pub const fn locked_awake() -> Self {
+        Self::new(SystemLockState::Locked, SystemPowerState::Awake)
+    }
+
+    pub const fn lock(self) -> SystemLockState {
+        self.lock
+    }
+
+    pub const fn power(self) -> SystemPowerState {
+        self.power
+    }
+
+    pub const fn allows_content(self) -> bool {
+        matches!(self.lock, SystemLockState::Unlocked)
+            && matches!(self.power, SystemPowerState::Awake)
+    }
+
+    pub const fn applying(self, transition: SystemTransitionKind) -> Self {
+        match transition {
+            SystemTransitionKind::Lock => Self::new(SystemLockState::Locked, self.power),
+            SystemTransitionKind::Unlock => Self::new(SystemLockState::Unlocked, self.power),
+            SystemTransitionKind::Sleep => Self::new(self.lock, SystemPowerState::Sleeping),
+            SystemTransitionKind::Wake => Self::new(self.lock, SystemPowerState::Awake),
+        }
+    }
+
+    /// 把一個真正改變對應維度的 event 套上去。
+    /// 同狀態的 `Unlock` / `Wake` 等重複宣告不是 transition。
+    pub fn checked_applying(self, transition: SystemTransitionKind) -> Option<Self> {
+        let next = self.applying(transition);
+        if self.lock == next.lock && self.power == next.power {
+            None
+        } else {
+            Some(next)
+        }
+    }
+}
+
+/// 系統狀態來源的一次觀察。
+///
+/// `Unknown` 和「已知可用、沒有新事件」是不同變體，而且沒有
+/// `Default`。不知道時 recorder 必須在 focus／clipboard／screen
+/// 之前停下。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemObservation {
+    Known {
+        state: SystemContentState,
+        transitions: Vec<SystemTransition>,
+    },
+    Unknown,
+}
+
+impl SystemObservation {
+    pub fn active() -> Self {
+        Self::Known {
+            state: SystemContentState::active(),
+            transitions: Vec::new(),
+        }
+    }
+}
+
+/// 鎖定／睡眠等原生系統狀態的來源。
+pub trait SystemSource {
+    fn poll(&mut self, ts: Millis) -> Result<SystemObservation>;
 }
 
 /// 剪貼簿來源。回傳自上次呼叫以來的新事件。
@@ -103,8 +371,9 @@ pub trait ClipboardSource {
     /// 那份內容照樣會被讀進資料庫——排除規則只是延後了洩漏，沒有擋掉它。
     ///
     /// 預設是 no-op：以事件時間為準的來源（replay）本來就沒有這個問題。
-    fn skip(&mut self, ts: Millis) {
+    fn skip(&mut self, ts: Millis) -> Result<ClipboardWatermark> {
         let _ = ts;
+        Ok(ClipboardWatermark::Unknown)
     }
 }
 
@@ -113,6 +382,22 @@ pub trait ClipboardSource {
 /// 實作者的鐵律：**永遠不記錄按鍵內容**，只記節奏與計數。
 pub trait InputSource {
     fn drain(&mut self, ts: Millis) -> Result<Option<InputTick>>;
+
+    /// 停止累積輸入，放棄到 `ts` 為止的節奏，並將來源維持在停止態。
+    ///
+    /// 使用者暫停，或 OS 鎖定、休眠、狀態 Unknown 期間必須呼叫這個，
+    /// 不能只是不呼叫 [`drain`](Self::drain)。輸入 hook 是持續累加的；
+    /// 沒有主動停掉的話，空洞期間的計數會在恢復後第一次 drain
+    /// 才被寫進資料庫。一般 app/URL 排除仍保留不含內容的節奏，不使用這個邊界。
+    /// 重複呼叫必須安全，不得在這裡自動恢復累積。
+    fn suspend(&mut self, ts: Millis) -> Result<()>;
+
+    /// 放棄停止期間到 `ts` 為止的所有輸入，然後重開統計視窗。
+    ///
+    /// 呼叫端只能在所有重疊的 pause/system gap 都關閉後呼叫；
+    /// 在那之前的 [`drain`](Self::drain) 不得把來源偷偷打開。
+    /// 重複呼叫必須是 no-op，不得清掉恢復後的新輸入。
+    fn resume(&mut self, ts: Millis) -> Result<()>;
 
     /// 距離使用者最後一次碰鍵盤滑鼠過了多久。`None` = 這個平台答不出來。
     ///
@@ -327,17 +612,65 @@ impl std::error::Error for OcrImageTooLarge {}
 /// 刻意用扁平的方法而不是回傳 `&mut dyn XSource`：像 replay 這種
 /// 五個來源共享同一份時間軸的後端，用 getter 會被 borrow checker 卡死。
 /// 來源彼此獨立的平台（Windows、macOS）可以用 [`CompositeBackend`] 組起來。
+///
+/// Backend 只能提供診斷名稱，不能自行聲稱 session provenance。這個
+/// compile-fail regression 盯住那條曾經公開的轉授 seam；若以後又加回
+/// `identity()`，doc test 會由預期失敗變成意外成功：
+///
+/// ```compile_fail
+/// use sister_capture::Backend;
+/// fn steal_identity<B: Backend>(backend: &B) {
+///     let _ = backend.identity();
+/// }
+/// ```
+///
+/// 第三方 backend 仍能建立自己的 Known observation；permit 是 opaque，
+/// 實作者只保存並以整值比較，不必也不能讀它的欄位：
+///
+/// ```
+/// use anyhow::Result;
+/// use sister_capture::{CapturePermit, FocusSource, PrivacyObservation};
+/// use sister_core::model::{
+///     BrowserUrlState, FocusSnapshot, Millis, PrivacyContext, SensitiveFieldState,
+/// };
+///
+/// struct ExternalFocus { approved: Option<CapturePermit> }
+/// impl FocusSource for ExternalFocus {
+///     fn context(&mut self, _ts: Millis) -> Result<PrivacyObservation> {
+///         let permit = CapturePermit::backend_local(7);
+///         self.approved = Some(permit);
+///         Ok(PrivacyObservation::known(
+///             PrivacyContext::known(
+///                 FocusSnapshot::default(),
+///                 SensitiveFieldState::Clear,
+///                 BrowserUrlState::NotApplicable,
+///             ),
+///             permit,
+///         ))
+///     }
+///     fn is_current(&mut self, permit: CapturePermit) -> Result<bool> {
+///         Ok(self.approved == Some(permit))
+///     }
+/// }
+/// ```
 pub trait Backend {
-    /// 人類看得懂的後端名稱，寫進 sessions 表。
+    /// 人類看得懂的後端名稱，只供診斷顯示。
     fn name(&self) -> &str;
-    fn grab_screen(&mut self, ts: Millis) -> Result<Option<RawFrame>>;
-    fn focus_snapshot(&mut self, ts: Millis) -> Result<FocusSnapshot>;
-    fn poll_clipboard(&mut self, ts: Millis) -> Result<Option<ClipboardEvent>>;
+    fn poll_system(&mut self, ts: Millis) -> Result<SystemObservation>;
+    fn grab_screen(&mut self, ts: Millis, permit: CapturePermit) -> Result<ScreenCapture>;
+    fn privacy_context(&mut self, ts: Millis) -> Result<PrivacyObservation>;
+    fn capture_permit_is_current(&mut self, permit: CapturePermit) -> Result<bool>;
+    fn poll_clipboard(&mut self, ts: Millis, permit: CapturePermit) -> Result<ClipboardCapture>;
     /// 見 [`ClipboardSource::skip`]。排除期間必須呼叫。
-    fn skip_clipboard(&mut self, ts: Millis) {
+    fn skip_clipboard(&mut self, ts: Millis) -> Result<ClipboardWatermark> {
         let _ = ts;
+        Ok(ClipboardWatermark::Unknown)
     }
     fn drain_input(&mut self, ts: Millis) -> Result<Option<InputTick>>;
+    /// 見 [`InputSource::suspend`]。輸入來源要持續停止，不是單次清除。
+    fn suspend_input(&mut self, ts: Millis) -> Result<()>;
+    /// 見 [`InputSource::resume`]。只能在所有重疊 gap 都已關閉後呼叫。
+    fn resume_input(&mut self, ts: Millis) -> Result<()>;
     /// 見 [`InputSource::idle_ms`]。
     fn idle_ms(&mut self) -> Option<u64> {
         None
@@ -353,10 +686,9 @@ pub trait Backend {
     /// 這段錄製中途**壞掉**的能力，原始事實。
     ///
     /// `sister doctor` 只看得到開機那一瞬間。但能力是會在半路上掉的：UIA
-    /// 卡三次之後就永久投降，而它一投降，`excluded_urls` 整組規則從那一刻起
-    /// 一條都不生效——`doctor` 當時是綠的，摘要也是綠的，只有網銀從那之後
-    /// 全被錄了進去。那是這個專案最不能接受的失效方式（THREAT_MODEL
-    /// 「安靜地不生效」）。
+    /// 卡三次之後就永久投降；privacy context 從那刻起 Unknown，recorder 安全停讀。
+    /// 若摘要仍是綠的，使用者只看到一段無由來的記憶空洞，所以這個能力缺口仍要
+    /// 沿後端接出去。
     ///
     /// **回布林不回句子。** 以前這裡回的是寫好的警告字串，於是同一個判斷在
     /// 這裡和 `capabilities::Report::broken_privacy_rules` 各寫了一份，而那兩
@@ -369,12 +701,13 @@ pub trait Backend {
     }
 }
 
-/// 把五個各自獨立的來源組成一個 [`Backend`]。
+/// 把六個各自獨立的來源組成一個 [`Backend`]。
 ///
 /// 平台層只要各自實作最小的 trait，缺的用 `Null*` 補齊即可——
 /// 能力是逐項降級的，不是全有全無。
-pub struct CompositeBackend<S, F, C, I, O> {
+pub struct CompositeBackend<Y, S, F, C, I, O> {
     pub name: String,
+    pub system: Y,
     pub screen: S,
     pub focus: F,
     pub clipboard: C,
@@ -382,8 +715,9 @@ pub struct CompositeBackend<S, F, C, I, O> {
     pub ocr: O,
 }
 
-impl<S, F, C, I, O> Backend for CompositeBackend<S, F, C, I, O>
+impl<Y, S, F, C, I, O> Backend for CompositeBackend<Y, S, F, C, I, O>
 where
+    Y: SystemSource,
     S: ScreenSource,
     F: FocusSource,
     C: ClipboardSource,
@@ -393,25 +727,55 @@ where
     fn name(&self) -> &str {
         &self.name
     }
-    fn grab_screen(&mut self, ts: Millis) -> Result<Option<RawFrame>> {
-        self.screen.grab(ts)
+    fn poll_system(&mut self, ts: Millis) -> Result<SystemObservation> {
+        self.system.poll(ts)
     }
-    fn focus_snapshot(&mut self, ts: Millis) -> Result<FocusSnapshot> {
-        self.focus.snapshot(ts)
+    fn grab_screen(&mut self, ts: Millis, permit: CapturePermit) -> Result<ScreenCapture> {
+        if !self.focus.is_current(permit)? {
+            return Ok(ScreenCapture::PrivacyChanged);
+        }
+        let frame = self.screen.grab(ts)?;
+        if !self.focus.is_current(permit)? {
+            return Ok(ScreenCapture::PrivacyChanged);
+        }
+        Ok(match frame {
+            Some(frame) => ScreenCapture::Frame(frame),
+            None => ScreenCapture::Unavailable,
+        })
+    }
+    fn privacy_context(&mut self, ts: Millis) -> Result<PrivacyObservation> {
+        self.focus.context(ts)
+    }
+    fn capture_permit_is_current(&mut self, permit: CapturePermit) -> Result<bool> {
+        self.focus.is_current(permit)
     }
     fn url_capture(&self) -> sister_core::capabilities::UrlCapture {
         // 目前只有 focus 那一支會半路掉能力（UIA）。其他來源要嘛一開始就
         // 不在，要嘛一直都在，那些由 `Capabilities` 在開機時講完。
         self.focus.url_capture()
     }
-    fn poll_clipboard(&mut self, ts: Millis) -> Result<Option<ClipboardEvent>> {
-        self.clipboard.poll(ts)
+    fn poll_clipboard(&mut self, ts: Millis, permit: CapturePermit) -> Result<ClipboardCapture> {
+        if !self.focus.is_current(permit)? {
+            return Ok(ClipboardCapture::ContextChanged);
+        }
+        let event = self.clipboard.poll(ts)?;
+        if !self.focus.is_current(permit)? {
+            let _ = self.clipboard.skip(ts);
+            return Ok(ClipboardCapture::ContextChanged);
+        }
+        Ok(ClipboardCapture::Event(event))
     }
-    fn skip_clipboard(&mut self, ts: Millis) {
+    fn skip_clipboard(&mut self, ts: Millis) -> Result<ClipboardWatermark> {
         self.clipboard.skip(ts)
     }
     fn drain_input(&mut self, ts: Millis) -> Result<Option<InputTick>> {
         self.input.drain(ts)
+    }
+    fn suspend_input(&mut self, ts: Millis) -> Result<()> {
+        self.input.suspend(ts)
+    }
+    fn resume_input(&mut self, ts: Millis) -> Result<()> {
+        self.input.resume(ts)
     }
     fn idle_ms(&mut self) -> Option<u64> {
         self.input.idle_ms()
@@ -447,8 +811,20 @@ impl ScreenSource for NullScreen {
 
 pub struct NullFocus;
 impl FocusSource for NullFocus {
-    fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
-        Ok(FocusSnapshot::default())
+    fn context(&mut self, _ts: Millis) -> Result<PrivacyObservation> {
+        Ok(PrivacyObservation::Unknown)
+    }
+
+    fn is_current(&mut self, _permit: CapturePermit) -> Result<bool> {
+        Ok(false)
+    }
+}
+
+/// 沒有原生系統狀態來源。這不是「系統可用」，而是不知道。
+pub struct NullSystem;
+impl SystemSource for NullSystem {
+    fn poll(&mut self, _ts: Millis) -> Result<SystemObservation> {
+        Ok(SystemObservation::Unknown)
     }
 }
 
@@ -469,6 +845,14 @@ impl InputSource for NullInput {
         // 而 `forget` 的重疊刪除和 `prune` 照樣要走過它。純成本。
         Ok(None)
     }
+
+    fn suspend(&mut self, _ts: Millis) -> Result<()> {
+        Ok(())
+    }
+
+    fn resume(&mut self, _ts: Millis) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// 不做 OCR。text-only 以外的用途下，它代表「這台機器還沒有 OCR 引擎」。
@@ -482,6 +866,13 @@ impl Ocr for NullOcr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_local_permits_never_equal_internal_authority_kinds() {
+        let local = CapturePermit::backend_local(7);
+        assert_ne!(local, CapturePermit::replay(7));
+        assert_ne!(local, CapturePermit::test(7));
+    }
 
     #[test]
     fn raw_frame_computes_its_own_hash() {
@@ -551,11 +942,19 @@ mod tests {
         // 降級必須是安靜的，不能變成錯誤往上冒
         assert!(NullScreen.grab(0).expect("no error").is_none());
         assert_eq!(
-            NullFocus.snapshot(0).expect("no error"),
-            FocusSnapshot::default()
+            NullFocus.context(0).expect("no error"),
+            PrivacyObservation::Unknown,
+            "缺 focus source 是沒量到，不是已知安全"
+        );
+        assert_eq!(
+            NullSystem.poll(0).expect("no error"),
+            SystemObservation::Unknown,
+            "缺 system source 也不可以冒充 active"
         );
         assert!(NullClipboard.poll(0).expect("no error").is_none());
         assert!(NullInput.drain(0).expect("no error").is_none());
+        NullInput.suspend(0).expect("no error");
+        NullInput.resume(0).expect("no error");
         let f = RawFrame {
             ts: 0,
             monitor: 0,
@@ -567,18 +966,81 @@ mod tests {
         assert!(NullOcr.recognize(&f).expect("no error").is_empty());
     }
 
+    #[test]
+    fn composite_keeps_input_suspended_until_an_explicit_resume() {
+        struct BufferedInput {
+            pending: u64,
+            enabled: bool,
+            suspended_at: Option<Millis>,
+            resumed_at: Option<Millis>,
+        }
+
+        impl InputSource for BufferedInput {
+            fn drain(&mut self, _ts: Millis) -> Result<Option<InputTick>> {
+                assert_eq!(self.pending, 0, "suspend 後不得還有舊計數可以 drain");
+                Ok(None)
+            }
+
+            fn suspend(&mut self, ts: Millis) -> Result<()> {
+                self.pending = 0;
+                self.enabled = false;
+                self.suspended_at = Some(ts);
+                Ok(())
+            }
+
+            fn resume(&mut self, ts: Millis) -> Result<()> {
+                if !self.enabled {
+                    self.pending = 0;
+                    self.enabled = true;
+                    self.resumed_at = Some(ts);
+                }
+                Ok(())
+            }
+        }
+
+        let mut backend = CompositeBackend {
+            name: "test".into(),
+            system: NullSystem,
+            screen: NullScreen,
+            focus: NullFocus,
+            clipboard: NullClipboard,
+            input: BufferedInput {
+                pending: 9,
+                enabled: true,
+                suspended_at: None,
+                resumed_at: None,
+            },
+            ocr: NullOcr,
+        };
+
+        Backend::suspend_input(&mut backend, 4_000).expect("suspend input");
+        assert_eq!(backend.input.suspended_at, Some(4_000));
+        assert!(!backend.input.enabled);
+        assert!(
+            Backend::drain_input(&mut backend, 14_000)
+                .expect("drain")
+                .is_none()
+        );
+
+        Backend::resume_input(&mut backend, 15_000).expect("resume input");
+        assert!(backend.input.enabled);
+        assert_eq!(backend.input.resumed_at, Some(15_000));
+    }
+
     /// 半路上掉的能力要走得出後端這一層。
     ///
-    /// 這條線存在的理由很具體：UIA 卡三次之後會永久投降，而它一投降，
-    /// `excluded_urls` 從那一刻起一條都不生效。開機時的 `doctor` 是綠的、
-    /// 錄製摘要也是綠的——除非有人在收工時問一句。這個測試就是在盯著
-    /// 那句問話還在不在，別哪天重構把它接丟了。
+    /// 這條線存在的理由很具體：UIA 卡三次之後會永久投降，recorder 雖然
+    /// fail closed，開機時的 `doctor` 卻仍可能是綠的。這個測試盯著能力缺口
+    /// 有接到收工報告，避免安全停讀變成無從解釋的空洞。
     #[test]
     fn a_capability_lost_mid_run_makes_it_out_of_the_backend() {
         struct Flaky;
         impl FocusSource for Flaky {
-            fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
-                Ok(FocusSnapshot::default())
+            fn context(&mut self, _ts: Millis) -> Result<PrivacyObservation> {
+                Ok(PrivacyObservation::Unknown)
+            }
+            fn is_current(&mut self, _permit: CapturePermit) -> Result<bool> {
+                Ok(false)
             }
             fn url_capture(&self) -> sister_core::capabilities::UrlCapture {
                 sister_core::capabilities::UrlCapture {
@@ -590,6 +1052,7 @@ mod tests {
 
         let backend = CompositeBackend {
             name: "test".into(),
+            system: NullSystem,
             screen: NullScreen,
             focus: Flaky,
             clipboard: NullClipboard,
@@ -602,6 +1065,7 @@ mod tests {
         // 被學會忽略，包括旁邊那則是真的
         let healthy = CompositeBackend {
             name: "test".into(),
+            system: NullSystem,
             screen: NullScreen,
             focus: NullFocus,
             clipboard: NullClipboard,

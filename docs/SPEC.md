@@ -1,6 +1,6 @@
 # AI-Sister — Final Spec
 
-> 版本：v1.0（2026-08-17；2026-09-06 收斂現況）。本 spec 是 roundtable 辯論
+> 版本：v1.0（2026-08-17；2026-09-07 收斂現況）。本 spec 是 roundtable 辯論
 > （7 題 × 5 輪）收斂 + 外部研究後的技術規格。產品定義見 [PRODUCT.md](PRODUCT.md)，
 > 階段規劃與**目前有效的 Release 1.0 合約**見 [PHASES.md](PHASES.md)。本文件保留
 > 部分被實作推翻的歷史決策來解釋來路；若與具日期的偏離紀錄、PHASES 或現行程式
@@ -70,11 +70,11 @@ macOS 的 capture 仍必須住在簽名 `.app` 主程序樹內以維持 TCC iden
 |---|---|---|---|
 | 螢幕 frame | Windows Phase 0 用 GDI 擷取（OCR／dHash 工作幀長邊上限 4096px，超過才等比縮小），再做 dHash 去重；真的留圖時另依 `max_long_edge`（預設 1568px）縮成 PNG | 每拍做完後預設等待 400ms；無輸入時可跳過擷取，但最久 5s 補看一次 | L0 |
 | OCR 全文 | 平台原生 OCR（見 §15），只跑「保留下來的」幀 | 隨保留幀 | L0 |
-| 前景 app / 視窗標題 | Win32 / NSWorkspace 事件 | 事件驅動 | L0 |
-| 瀏覽器 URL | UIA（Win）/ AX（macOS）讀址欄；失敗容忍 | 視窗事件時 | L0 |
-| 剪貼簿 | 系統事件；>64KB 截斷；秘密偵測（見 §11） | 事件驅動 | L0 |
+| 前景 app / 視窗標題 | Win32 / NSWorkspace；Windows alpha.103 逐拍取 exact HWND／PID 並在內容讀取後重驗 | capture tick | L0 |
+| 瀏覽器 URL | UIA（Win）/ AX（macOS）讀址欄；瀏覽器 URL 或焦點狀態 Unknown 時 fail closed | capture tick／視窗事件 | L0 |
+| 剪貼簿 | Windows sequence polling；>64KB 截斷；秘密與來源 app 排除（見 §11） | capture tick；排除／鎖定空洞只建立水位、不讀內容 | L0 |
 | 輸入動態 | 鍵擊/滑鼠**節奏與計數**（永不記內容）、捲動、視窗切換頻率、idle | 聚合 per-10s | L0 |
-| 系統狀態 | 螢幕鎖定、電源、網路、通知橫幅（能抓則抓，抓不到靠 OCR 幀） | 事件驅動 | L0 |
+| 系統狀態 | lock × power 正交狀態；Windows alpha.103 由相鄰 WTS polling 樣本觀察 lock／unlock，power notification 尚未接，不從時間空洞猜 sleep／wake；Unknown 時不讀內容 | 每個內容來源前後重驗 | L0 audit transition |
 
 **「事後補不回來」清單**〔定案，Claude T6 提案〕：捲動位置與速度、滑鼠停留、
 視窗切換節奏、輸入爆發模式、選取事件、一閃即逝的通知。
@@ -108,7 +108,9 @@ macOS 的 capture 仍必須住在簽名 `.app` 主程序樹內以維持 TCC iden
   路徑，正常多半是 0。真 Windows 實測後再決定下一層
   文字區域偵測值不值得做。（Vision 後續設定仍是 accurate-only、zh-Hant 放語言
   列首位、關 language correction）；
-- 敏感排除（§11.2）發生在**capture 當下**，不是事後刪除。
+- 敏感排除（§11.2）發生在**capture 當下**，不是事後刪除。前置閘門命中時不讀
+  clipboard content、不呼叫 screen capture；若前景在 OS 呼叫期間改變，工作 frame
+  可能短暫存在 RAM，但後驗失敗會在 dedup／OCR／DB／PNG 前丟棄。
 
 ### 2.4 macOS 平台憲法（躲不掉的，就做成賣點）
 
@@ -357,10 +359,12 @@ a 類（顯式時間承諾）**——這兩類是「使用者自己能立刻驗�
    使用者選定的 URL 政策。任何缺資料或查詢錯誤都 fail-closed。URL 政策只管
    standing grant：當場按下在兩種答案下都放行；沒答過時無人值守拒絕，但不能把
    「沒問過」寫成「使用者說不要」。使用者可選「網址一律當場按」，或只讓她開在
-   保留中的真 Windows 錄製裡見過同 host 的網址（容許一層 `www.` 差異）。後者只信
-   `sessions.platform = windows/windows-gdi-uia-focused-url-v1`；舊錄製、import 與 replay
-   都不能背書，而且 host provenance 不證明位址列身分、安全、使用者意圖、path 或
-   redirect。
+   保留中的真 Windows 錄製裡見過同 host 的網址（容許一層 `www.` 差異）。alpha.103
+   起後者只信 exact
+   `sessions.platform = windows/windows-gdi-uia-focused-url-v2`。歷史 v1 可讀、可顯示，
+   但因全域 focused element／stale URL cache 沒有證明 exact HWND 與當拍 live value，
+   不再授權；更舊錄製、import 與 replay 也不能背書。v2 的 host provenance 仍不證明
+   網站安全、使用者意圖、path、redirect 或站內內容。
 5. **預檢**：接手模式啟動前做 fresh-evidence check（重新看畫面），
    不信任可能過期的 L3 記憶〔定案：記憶可能記歪的東西不能直接點滑鼠〕。
 6. **代理身份方向**（遠期）：關注 OS 級 agent identity/session 隔離的發展，
@@ -411,7 +415,27 @@ recorder／core／capture／brain／hands 繼續禁 HTTP client 與本機推論�
 - App/URL blocklist（預設含密碼管理器、網銀常見 domain 樣板）；
 - 隱私視窗（incognito）偵測即跳過；密碼欄位（UIA SecureText / AXSecureTextField）
   永不 OCR；螢幕分享/會議 app 前景時自動 pause（旁人畫面防線）；
-- 剪貼簿秘密偵測（高熵字串/`sk-` 類 pattern）→ 不落地，只記「複製了一個秘密」事件。
+- 剪貼簿秘密偵測（高熵字串/`sk-` 類 pattern）→ 不落地，只記「複製了一個秘密」事件；
+- Windows Release 1.0 最低 Windows 10；WTS 只有 active + unlocked 放行。Unknown、
+  disconnected、狀態矛盾或讀取錯誤一律停在內容前。lock 與 power 正交，wake 不等於
+  unlock；目前只從相鄰 polling 樣本產生觀察到的 lock／unlock，不宣稱捕捉每個事件。
+
+privacy observation 要鑄出綁 exact native window／PID 的 capture permit；slow UIA
+之後、剪貼簿 bytes staged 後、screen frame 取得後都重驗 permit 與 system state。
+前置閘門命中時不讀內容；race 發生時 clipboard bytes／pixels 可能短暫在工作 RAM。
+clipboard 後驗不通過時，staged event 與該次 focus 不進 DB；screen 後驗不通過時，
+frame 不進 dedup、OCR、frame DB 或 PNG（較早已安全驗過的 focus audit 仍可能存在）。
+多筆 system transition audit 以單一 SQLite transaction 寫入；失敗時完整 observation
+留在 recorder 行程 RAM，下一拍先 retry、成功前不 poll 新事件或讀內容。這不是
+durable queue：transaction 前 crash 仍可能失去 pending observation，不宣稱
+crash-safe exactly-once。
+
+Windows GDI 截的是前景所在的**整個 monitor**。以上 foreground app／URL／title／
+sensitive-field 規則不會遮掉同螢幕可見的背景敏感視窗；那是明示殘餘風險。
+
+剪貼簿來源不得以讀完後的 current foreground 回填。browser copy → 立刻 switch 時，
+目前沒有可靠的 origin URL／title proof；有任何 URL rules 且來源 app 是瀏覽器時，
+alpha.103 保守丟棄這類 clipboard content，不拿下一拍的安全脈絡替前一拍背書。
 
 ### 11.3 出境內容（上雲前）〔2026-08-26 改：不去敏〕
 
@@ -549,7 +573,7 @@ renderer 顯示文字逐字等於 embedded transcript 的 line 才能進播放 a
 | 元件 | 選型 | 備註 |
 |---|---|---|
 | core runtime | **Rust** crates + `sister` recorder/CLI；desktop 以 sibling process 啟動 recorder、以 Tauri IPC 進 Rust backend | 無 loopback server；macOS capture 必須簽進 `.app` responsible process tree |
-| 截圖 | Windows：Win32 GDI（BitBlt／GetDIBits）；macOS Preview：ScreenCaptureKit；Linux Preview：X11，Wayland 只保留實驗性 portal 路線 | 目前只有 Windows GDI 已落地 |
+| 截圖 | Windows 10+：Win32 GDI（BitBlt／GetDIBits）；macOS Preview：ScreenCaptureKit；Linux Preview：X11，Wayland 只保留實驗性 portal 路線 | 目前只有 Windows GDI 已落地；GDI 是整個 monitor，不是前景視窗 crop |
 | 去重／OCR gate | 自製 64-bit dHash（預設 Hamming ≤5 視為近似同幀）+ 64×64 RGB tile FNV-1a；Windows Phase 0 的近似重複幀只讓能一對一拼回舊閱讀順序的 crop 升格，其餘維持重複；dHash 新幀的局部證據不足才退回全幅 | 沒有使用 DXGI dirty rects |
 | OCR | macOS：Apple Vision（zh-Hant 一等公民，accurate ~0.3–1.4s/全幅，搭配 OCR gate 只跑 crop）；Windows：**Phase 0 實作改用 `Windows.Media.Ocr`，見 §14.1**；PP-OCRv5 via `oar-ocr` 保留為精準度升級路線；TextRecognizer 鎖 Copilot+ NPU；OneOCR 授權灰色，只做使用者自機 opt-in；Tesseract 僅最後底線 | 搜尋前全半形正規化 + OpenCC 繁簡歸一 |
 | DB | SQLite 3.53（`rusqlite` 0.40，WAL）+ **FTS5 trigram + unicode61 + bigram 三索引**（external-content table；trigram 補 CJK 子字串、unicode61 補英文整詞、`text_fts_bi` 補**兩個字的中文**——unicode61 把整串 CJK 當一個 token，`MATCH "客服"` 是 0 筆，schema 3 之前只剩夾在 30 天內的 LIKE 掃描。bigram 是粗篩，命中要拿真字串再驗一次；只剩單字查詢仍走掃描） | 之後要拼音再上 `simple` tokenizer |
@@ -566,7 +590,7 @@ renderer 顯示文字逐字等於 embedded transcript 的 line 才能進播放 a
 | hands 元件（Phase 6+） | Agent S3（Apache-2.0）/ UFO²（MIT）/ OmniParser v3 weights（MIT，避開舊 AGPL detector） | 「手」已商品化：用組的，不自己寫 grounding |
 | 參考不引用 | Screenpipe（2026-06 起自訂商業授權，僅參考架構；MIT fork point 在舊版）；Everywhere（BUSL，僅 MCP/API interop） | license 判定見 research/landscape.md |
 
-Release 1.0 平台層級〔2026-09-06 決定〕：**Windows GA**；macOS Public Preview；
+Release 1.0 平台層級〔2026-09-06 決定〕：**Windows 10+ GA**；macOS Public Preview；
 Linux X11-only Developer Preview。只有 Windows 是平台支援 blocker；Preview 沒達到
 自己的 native capture/OCR/privacy/artifact 最小合約就不發該 artifact，不能拿 replay
 冒充。Wayland 背景連續擷取與隱私脈絡不足，明示 unsupported／degraded，不承諾

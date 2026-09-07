@@ -1,6 +1,6 @@
 //! Windows 擷取後端。
 //!
-//! 五個來源各自獨立實作最小的 trait，再用 [`CompositeBackend`] 組起來。
+//! 六個來源各自獨立實作最小的 trait，再用 [`CompositeBackend`] 組起來。
 //! 能力是逐項降級的：OCR 還沒接上不代表焦點與剪貼簿不能先跑。
 //!
 //! 目前**還沒有**的東西，以及它們各自的代價，都在 [`Capabilities`] 裡誠實
@@ -12,14 +12,29 @@ pub mod focus;
 pub mod input;
 pub mod ocr;
 pub mod screen;
+pub mod system;
 pub mod uia;
 
 use anyhow::Result;
+use sister_core::capabilities::CapabilityState;
 use sister_core::config::Config;
+use sister_core::db::Db;
 use sister_core::now_ms;
+use std::path::PathBuf;
 
+use crate::Recorder;
 use crate::ocr_regions::ChangedRegionOcr;
 use crate::traits::{Backend, CompositeBackend};
+
+/// 只有這個 production Windows 模組與其子模組能造出的證明。
+/// permit 與 session provenance 都要求它，避免 replay／測試後端只靠拼字串
+/// 冒充已通過 UIA v2 隱私契約的 recorder。
+#[derive(Clone, Copy)]
+pub(crate) struct WindowsBackendToken(());
+
+const fn backend_token() -> WindowsBackendToken {
+    WindowsBackendToken(())
+}
 
 /// 這台機器上這個後端實際做得到什麼。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,13 +43,14 @@ pub struct Capabilities {
     // 而且沒有任何一行程式碼讀過它們。那正是這個專案在對付的東西：一個
     // 回報 ✓ 但什麼都沒驗證的能力欄位。真的要知道前景讀不讀得到，
     // `doctor` 現在會當場問一次——見那裡的 `focus_probe`。
-    /// 瀏覽器網址（需要 UIA）。**沒有它，`excluded_urls` 整組規則不會生效。**
-    pub url: bool,
-    /// 輸入 hook 的三態。**不能是布林**：`doctor` 不會去裝 hook，而
-    /// 「沒去裝」不等於「裝失敗」——把兩者壓成 false 會產生一則永遠錯的
-    /// 警告，然後整個警告區塊都會被使用者學會忽略。
-    pub input: input::HookState,
-    pub ocr: bool,
+    /// UIA／瀏覽器網址能力。沒有它時 privacy context 不可確認，recorder fail closed；
+    /// `excluded_urls` 因此無法評估，不會被拿空值當成安全而放行。
+    pub url: CapabilityState,
+    /// 輸入 hook 的三態。**不能是布林**：「沒去裝」不等於
+    /// 「裝失敗」——把兩者壓成 false 會產生一則永遠錯的警告，
+    /// 然後整個警告區塊都會被使用者學會忽略。
+    pub input: CapabilityState,
+    pub ocr: CapabilityState,
     /// OCR 實際挑中的語言，以及這台機器上裝了哪些。
     ///
     /// 「有沒有 OCR」是個布林，但「讀不讀得懂中文」不是——所以兩件事分開存。
@@ -48,9 +64,13 @@ impl Capabilities {
         Self {
             // 「UIA 建得起來」而已。真的讀不讀得到位址列要在有瀏覽器開著
             // 的時候才知道——那件事由 `doctor` 的實測那一段回答，不是這裡。
-            url: uia::Uia::probe(),
-            input: input::WindowsInput::state(),
-            ocr: ocr.chosen.is_some(),
+            url: CapabilityState::from_measured(uia::Uia::probe()),
+            input: match input::WindowsInput::state() {
+                input::HookState::Active => CapabilityState::Available,
+                input::HookState::Failed => CapabilityState::Unavailable,
+                input::HookState::NotStarted => CapabilityState::Unknown,
+            },
+            ocr: CapabilityState::from_measured(ocr.chosen.is_some()),
             ocr_language: ocr.chosen,
             ocr_languages_available: ocr.available,
         }
@@ -69,17 +89,15 @@ impl Capabilities {
         sister_core::capabilities::Report {
             at: now_ms(),
             url: self.url,
-            // 只有「試過而且失敗」才算失效。還沒試過不是問題，`record` 起來時
-            // 才會裝——在那之前吵，吵的是一件還沒發生的事。
-            input_hook_failed: self.input == input::HookState::Failed,
+            input_hook: self.input,
             ..Default::default()
         }
     }
 
-    /// 因為能力缺席而**失效的隱私規則**。
+    /// 因為能力缺席而無法評估的隱私規則／錄製缺口。
     ///
     /// 和一般的功能缺口分開講：使用者可以接受「還不會 OCR」，但她必須知道
-    /// 「你設定的網銀排除規則現在一條都不會生效」。這種事不能只寫在
+    /// 「UIA 不可用，所以錄製為了安全停在內容來源前」。這種事不能只寫在
     /// release note 裡。
     ///
     /// 判斷本身住在 [`sister_core::capabilities::Report`]：設定頁那個行程
@@ -94,43 +112,45 @@ impl Capabilities {
 
     /// 看起來在運作、實際上不會有結果的地方。
     ///
-    /// 和 [`Self::broken_privacy_rules`] 分開：那個講的是「她記了不該記的」，
-    /// 這個講的是「她其實什麼都沒記住，但你不會發現」。兩者都是安靜的失敗，
-    /// 但補救方式完全不同，混在一起講只會兩邊都被忽略。
+    /// 和 [`Self::broken_privacy_rules`] 分開：前者講 privacy gate／網址規則的
+    /// 可用性，這個講 OCR 等其他「其實什麼都沒記住」的功能缺口。
     pub fn silently_degraded(&self, config: &Config) -> Vec<String> {
         let mut out = Vec::new();
         if config.capture.ocr {
-            if !self.ocr {
-                out.push(
+            match self.ocr {
+                CapabilityState::Unavailable => out.push(
                     "這台機器沒有任何 OCR 語言：畫面會被記下來，但上面的字\
                      一個都不會進資料庫，搜尋永遠是空的"
                         .into(),
-                );
-            } else if let Some(gap) = (ocr::OcrStatus {
-                available: self.ocr_languages_available.clone(),
-                chosen: self.ocr_language.clone(),
-            })
-            .cjk_gap()
-            {
-                out.push(gap);
+                ),
+                CapabilityState::Available => {
+                    if let Some(gap) = (ocr::OcrStatus {
+                        available: self.ocr_languages_available.clone(),
+                        chosen: self.ocr_language.clone(),
+                    })
+                    .cjk_gap()
+                    {
+                        out.push(gap);
+                    }
+                }
+                // 沒量到不是「沒有 OCR」的證據。doctor 會把 Unknown 另列出來。
+                CapabilityState::Unknown => {}
             }
         }
         out
     }
 }
 
-/// 組出 Windows 後端。
-pub fn backend(config: &Config) -> Result<impl Backend + use<>> {
+/// 組出 Windows 後端。刻意不公開：第三方不能拿 production composition 包一層
+/// 再要求 trusted session。需要錄製只能走 [`recorder`]。
+pub(crate) fn backend(config: &Config) -> Result<impl Backend + use<>> {
     enable_dpi_awareness();
 
     Ok(CompositeBackend {
-        // 這個 identity 不只拿來顯示：core 只信任修過 UIA address-field focus
-        // fail-closed 的 session 替 unattended URL 背書。從共用常數拆掉 OS 前綴，
-        // 避免 writer 與 reader 各寫一份看起來相同、之後卻走散的字串。
-        name: sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM
-            .strip_prefix("windows/")
-            .expect("trusted Windows recorder identity starts with windows/")
-            .to_string(),
+        // 這只是診斷名稱；trusted provenance 不再放在 Backend 上，因此不能被
+        // wrapper 經公開 trait 轉授。真正的票只在 `recorder` 裡建立。
+        name: "windows-gdi-uia-focused-url-v2".to_owned(),
+        system: system::WindowsSystem::new(),
         screen: screen::WindowsScreen::new(),
         focus: focus::WindowsFocus::new(),
         clipboard: clipboard::WindowsClipboard::new(),
@@ -139,6 +159,19 @@ pub fn backend(config: &Config) -> Result<impl Backend + use<>> {
         // gate，兩種量測不會在型別相同的情況下不小心接反。
         ocr: ChangedRegionOcr::new(ocr::WindowsOcr::new(&config.capture.ocr_languages)),
     })
+}
+
+/// 建立唯一能替 focused-browser URL 背書的 production Windows recorder。
+///
+/// `Backend::name` 與 `Recorder::new` 都沒有 trusted seam；只有這個模組能造出
+/// `WindowsBackendToken`，而 raw backend constructor 也沒有離開 crate。
+pub fn recorder(
+    config: Config,
+    db: Db,
+    image_dir: Option<PathBuf>,
+) -> Result<Recorder<impl Backend + use<>>> {
+    let backend = backend(&config)?;
+    Recorder::new_trusted_windows(backend, db, config, image_dir, backend_token())
 }
 
 /// 宣告自己認得 per-monitor DPI。
@@ -158,13 +191,42 @@ fn enable_dpi_awareness() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn only_the_windows_module_token_mints_v2_url_provenance() {
+        let identity = crate::backend_identity::BackendIdentity::trusted_windows(backend_token());
+        assert_eq!(
+            identity.session_platform(),
+            sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM
+        );
+        assert!(identity.session_platform().ends_with("focused-url-v2"));
+        assert_ne!(
+            crate::CapturePermit::backend_local(7),
+            crate::CapturePermit::windows(backend_token(), 7, 7, 7),
+            "third-party backend-local permits must not cross the Windows permit boundary"
+        );
+    }
+
+    #[test]
+    fn production_composition_writes_v2_url_provenance() {
+        let recorder = recorder(Config::default(), Db::open_in_memory().expect("db"), None)
+            .expect("windows recorder");
+        let platform: String = recorder
+            .db()
+            .conn()
+            .query_row("SELECT platform FROM sessions WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("platform");
+        assert_eq!(platform, sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM);
+    }
+
     /// 一台什麼都做得到的機器。測試從這裡出發，只改要測的那一項，
     /// 這樣斷言就不會受跑測試的那台機器裝了什麼影響。
     fn fully_capable() -> Capabilities {
         Capabilities {
-            url: true,
-            input: input::HookState::Active,
-            ocr: true,
+            url: CapabilityState::Available,
+            input: CapabilityState::Available,
+            ocr: CapabilityState::Available,
             ocr_language: Some("zh-Hant-TW".into()),
             ocr_languages_available: vec!["zh-Hant-TW".into()],
         }
@@ -175,7 +237,7 @@ mod tests {
     #[test]
     fn missing_url_capture_is_reported_as_a_privacy_gap() {
         let caps = Capabilities {
-            url: false,
+            url: CapabilityState::Unavailable,
             ..fully_capable()
         };
         let broken = caps.broken_privacy_rules(&Config::default().privacy);
@@ -201,7 +263,7 @@ mod tests {
     #[test]
     fn missing_ocr_is_reported_as_a_silent_failure() {
         let caps = Capabilities {
-            ocr: false,
+            ocr: CapabilityState::Unavailable,
             ocr_language: None,
             ocr_languages_available: vec![],
             ..fully_capable()
@@ -213,12 +275,33 @@ mod tests {
         );
     }
 
+    /// 三態最重要的反面：探測沒有結果時，不能把三個 `Unknown`
+    /// 壓成三個已經驗證的失敗。真 Windows 報告與 core 判決都要保留它。
+    #[test]
+    fn unmeasured_windows_capabilities_are_not_reported_as_missing() {
+        let caps = Capabilities {
+            url: CapabilityState::Unknown,
+            input: CapabilityState::Unknown,
+            ocr: CapabilityState::Unknown,
+            ocr_language: None,
+            ocr_languages_available: vec![],
+        };
+        let report = caps.report();
+        assert_eq!(report.url, CapabilityState::Unknown);
+        assert_eq!(report.input_hook, CapabilityState::Unknown);
+        assert!(
+            caps.broken_privacy_rules(&Config::default().privacy)
+                .is_empty()
+        );
+        assert!(caps.silently_degraded(&Config::default()).is_empty());
+    }
+
     /// 有 OCR 但只讀得懂英文，比完全沒有 OCR 更陰險：
     /// 英文介面讀得到，中文內容讀不到，看起來就只是「她沒記到那件事」。
     #[test]
     fn an_english_only_ocr_engine_is_reported_as_a_gap() {
         let caps = Capabilities {
-            ocr: true,
+            ocr: CapabilityState::Available,
             ocr_language: Some("en-US".into()),
             ocr_languages_available: vec!["en-US".into()],
             ..fully_capable()
@@ -236,7 +319,7 @@ mod tests {
         let mut config = Config::default();
         config.capture.ocr = false;
         let caps = Capabilities {
-            ocr: false,
+            ocr: CapabilityState::Unavailable,
             ocr_language: None,
             ocr_languages_available: vec![],
             ..fully_capable()

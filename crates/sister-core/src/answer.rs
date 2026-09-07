@@ -362,7 +362,6 @@ mod tests {
                     window_title: Some("帳單查詢".into()),
                     url: None,
                     pid: Some(42),
-                    password_field: false,
                 },
             },
             None,
@@ -428,7 +427,6 @@ mod tests {
                         window_title: Some("網路銀行".into()),
                         url: None,
                         pid: Some(42),
-                        password_field: false,
                     },
                 },
                 Some("/tmp/x.webp"),
@@ -463,7 +461,6 @@ mod tests {
             window_title: Some("網路銀行".into()),
             url: None,
             pid: Some(42),
-            password_field: false,
         };
         // 十二張畫面、一行字都沒讀出來（`ocr` 空的），外加真的 recorder 一定
         // 會寫的那幾筆 focus。
@@ -744,7 +741,6 @@ mod tests {
                         window_title: Some("客服系統".into()),
                         url: None,
                         pid: Some(42),
-                        password_field: false,
                     },
                 },
                 None,

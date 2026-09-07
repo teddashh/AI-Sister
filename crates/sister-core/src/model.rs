@@ -67,23 +67,22 @@ pub fn duration(ms: Millis) -> String {
 }
 
 /// 擷取當下的前景脈絡。附在 frame 上，也可獨立成為 focus 事件。
+///
+/// 這個型別只是已經通過 capture-time privacy gate 後可以落地的脈絡；
+/// 它刻意不攜帶密碼欄狀態。那個只活在寫入前的答案由
+/// [`PrivacyContext`] 另外承載，避免落庫的 snapshot 裡一個 `false`
+/// 同時表示「明確沒有」和「當時根本沒量」。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusSnapshot {
     /// 穩定識別碼：Windows 用 executable 名，macOS 用 bundle id。
     pub app_id: Option<String>,
     pub app_name: Option<String>,
     pub window_title: Option<String>,
-    /// 僅瀏覽器；抓不到就是 None（失敗容忍，不重試不阻塞）。
+    /// 僅瀏覽器。這裡的 `None` 只是「沒有可落地的網址」；當時是
+    /// 非瀏覽器、還是瀏覽器網址根本沒量到，由 [`BrowserUrlState`]
+    /// 在 capture-time privacy gate 明確區分。
     pub url: Option<String>,
     pub pid: Option<i64>,
-    /// 鍵盤焦點在密碼欄上。**這一欄不落地**，它只活到排除判定為止。
-    ///
-    /// 用 `bool` 而不是 `Option<bool>` 是刻意的：「不知道」要在**來源那一端**
-    /// 就決定成 `true`（見 `sister_capture::windows::uia::Reading::should_skip_frame`），
-    /// 而不是一路傳下來讓每個看到它的人各自決定一次要不要保守。
-    /// 那種設計遲早會有一個地方選錯，而且沒有人會發現。
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub password_field: bool,
 }
 
 impl FocusSnapshot {
@@ -94,6 +93,75 @@ impl FocusSnapshot {
             .or(self.app_name.as_deref())
             .unwrap_or("")
             .to_ascii_lowercase()
+    }
+}
+
+/// Capture-time 量到的敏感輸入欄狀態。
+///
+/// 三態不准壓成布林：`Unknown` 必須擋掉當前 tick，不是
+/// `Clear` 的另一種拼法。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensitiveFieldState {
+    Clear,
+    Focused,
+    Unknown,
+}
+
+/// 瀏覽器網址這個 privacy 前提有沒有真的量到。
+///
+/// `NotApplicable` 只能用在非瀏覽器；瀏覽器位址列讀不到必須是
+/// `Unknown`，不能藉由 `FocusSnapshot::url == None` 偽裝成沒有網址。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserUrlState {
+    NotApplicable,
+    Known(String),
+    Unknown,
+}
+
+/// 在讀任何內容之前取得的 privacy context。
+///
+/// 這個 enum **沒有 `Default`**。平台問不到前景或敏感欄狀態時，
+/// 只能明確送出 `Unknown`；呼叫端不可以再用一個全空
+/// `FocusSnapshot::default()` 把「沒量到」假裝成「沒有敏感內容」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivacyContext {
+    Known {
+        focus: FocusSnapshot,
+        sensitive_field: SensitiveFieldState,
+        browser_url: BrowserUrlState,
+    },
+    Unknown,
+}
+
+impl PrivacyContext {
+    pub fn known(
+        mut focus: FocusSnapshot,
+        sensitive_field: SensitiveFieldState,
+        browser_url: BrowserUrlState,
+    ) -> Self {
+        focus.url = match &browser_url {
+            BrowserUrlState::Known(url) => Some(url.clone()),
+            BrowserUrlState::NotApplicable | BrowserUrlState::Unknown => None,
+        };
+        Self::Known {
+            focus,
+            sensitive_field,
+            browser_url,
+        }
+    }
+
+    pub fn focus(&self) -> Option<&FocusSnapshot> {
+        match self {
+            Self::Known { focus, .. } => Some(focus),
+            Self::Unknown => None,
+        }
+    }
+
+    pub fn into_focus(self) -> Option<FocusSnapshot> {
+        match self {
+            Self::Known { focus, .. } => Some(focus),
+            Self::Unknown => None,
+        }
     }
 }
 

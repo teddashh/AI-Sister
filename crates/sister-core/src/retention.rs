@@ -1360,7 +1360,6 @@ mod tests {
                 window_title: Some("測試".into()),
                 url: None,
                 pid: Some(1),
-                password_field: false,
             },
         }
     }

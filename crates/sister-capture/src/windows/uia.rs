@@ -41,6 +41,7 @@
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
+use sister_core::model::BrowserUrlState;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
@@ -73,27 +74,31 @@ const MAX_ABANDONS: u32 = 3;
 const MAX_DEPTH: u32 = 8;
 const MAX_NODES: u32 = 400;
 
-/// 連續問不出「焦點在不在密碼欄上」幾次之後，停止拿它擋畫面。
+/// 連續問不出「焦點在不在密碼欄上」幾次後，宣告能力已失效。
 ///
-/// [`Reading::should_skip_frame`] 在不知道的時候會擋掉那一幀，那是對的。
-/// 但如果**每一次都不知道**，那就不是在保守了——那是「她在瀏覽器裡
-/// 什麼都記不住」，而原因藏在一個沒有人會去看的地方。這正是這個專案
-/// 一直在修的那個形狀，只是這次是我自己用一條安全規則造出來的。
-///
-/// 所以分兩段：短暫的不知道 → 擋住（安全）；持續的不知道 → 宣告做不到
-/// （誠實），並且大聲講出來。
+/// 短暫與持續的不知道都繼續 fail closed。這個門檻只決定什麼時候
+/// 要把「能力壞了」告訴使用者，不再是什麼時候把保護關掉。
 const MAX_UNKNOWN_STREAK: u32 = 5;
 
 /// 對某個視窗問到的東西。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reading {
-    /// 位址列上的字。**縮寫過**，見模組說明。
-    pub url: Option<String>,
+    /// 非瀏覽器、已讀到網址、或瀏覽器網址沒量到必須是三個不同答案。
+    pub browser_url: BrowserUrlState,
     /// 鍵盤焦點是不是在密碼欄上。
     ///
     /// `None` 是「問不出來」，**不是 `false`**。這個區別就是這一欄存在的
     /// 理由：把「不知道」壓成「沒有」會產生一個永遠不會被發現的漏擋。
     pub password_focused: Option<bool>,
+}
+
+impl Default for Reading {
+    fn default() -> Self {
+        Self {
+            browser_url: BrowserUrlState::Unknown,
+            password_focused: None,
+        }
+    }
 }
 
 impl Reading {
@@ -103,9 +108,8 @@ impl Reading {
     /// 多擋了她查不到東西，會來抱怨，然後我們就修得掉。兩個方向不對等，
     /// 所以往看得見的那邊倒（THREAT_MODEL「最危險的失效模式」）。
     ///
-    /// 注意這個判斷只在 UIA **還活著**的時候會被問到。UIA 整個掛掉時
-    /// 我們根本不會產生 `Reading`，而是報成一個能力缺口——那時候
-    /// 「不知道」是常態，拿它來擋掉每一幀只會讓她什麼都記不住。
+    /// UIA 整個掛掉時不會產生 `Reading`；呼叫端會把整個 privacy
+    /// context 當成 Unknown，同樣在任何內容來源之前擋住。
     pub fn should_skip_frame(&self) -> bool {
         self.password_focused.unwrap_or(true)
     }
@@ -117,17 +121,14 @@ pub struct Uia {
     abandons: u32,
     /// 放棄太多次了。這台機器上就是讀不到，別再漏執行緒。
     surrendered: bool,
-    /// 上一次走過樹的視窗與標題。網址只在這一對變了才重新走。
-    walked: Option<(isize, String)>,
-    cached_url: Option<String>,
     /// 連續幾次問不出密碼欄狀態。見 [`MAX_UNKNOWN_STREAK`]。
     unknown_streak: u32,
 }
 
 struct Job {
     hwnd: isize,
-    /// 要不要走樹找網址。密碼欄每次都問（一次呼叫），走樹很貴所以要省。
-    want_url: bool,
+    /// 是否為瀏覽器。密碼欄每次都問；瀏覽器每拍重讀位址列 Value。
+    browser: bool,
     reply: SyncSender<Reading>,
 }
 
@@ -143,8 +144,6 @@ impl Uia {
             worker: None,
             abandons: 0,
             surrendered: false,
-            walked: None,
-            cached_url: None,
             unknown_streak: 0,
         }
     }
@@ -156,9 +155,8 @@ impl Uia {
 
     /// 密碼欄那一路已經連續問不出來太多次了。
     ///
-    /// `true` 的時候呼叫端**不該**再用「不知道」去擋畫面——見
-    /// [`MAX_UNKNOWN_STREAK`]。這是一個要被講出來的缺口，不是一個
-    /// 可以安靜維持的保守狀態。
+    /// 這只是給能力報告的狀態，不能用來繞過 privacy gate；不論短暫或
+    /// 持續不知道，呼叫端都必須繼續 fail closed。
     pub fn password_check_broken(&self) -> bool {
         self.unknown_streak >= MAX_UNKNOWN_STREAK
     }
@@ -167,8 +165,8 @@ impl Uia {
     ///
     /// 卡住的計數是**連續**的：中間只要有一次回得來，就證明這條路還通，
     /// 前面那幾次是偶發而不是壞掉。所以歸零，而不是累積到某天湊滿三次
-    /// 就把整組網址規則關掉——那會讓一台好機器在跑了一整個下午之後，
-    /// 因為三次分散的抽筋而失去所有網銀防護。
+    /// 就讓 UIA 永久停工——那會讓一台好機器在跑了一整個下午之後，
+    /// 因為三次分散的抽筋而開始 fail closed、不再留下內容。
     fn note_answer_arrived(&mut self, password_seen: Option<bool>) {
         self.abandons = 0;
         self.note_password_reading(password_seen);
@@ -178,9 +176,9 @@ impl Uia {
     ///
     /// 搬出來的理由跟 [`Self::note_password_reading`] 一樣，而且更急：
     /// 這段以前長在 `read()` 中間，而 `read()` 要一條活的 COM 工作執行緒，
-    /// 於是這個**會把 `excluded_urls` 整組規則永久關掉**的狀態機，
-    /// 一條測試都沒有。它關掉之後不會有錯誤、不會有例外，只是從那一刻起
-    /// 網銀跟登入頁開始被錄進去。
+    /// 於是這個**會讓整個 privacy context 永久 Unknown** 的狀態機，
+    /// 一條測試都沒有。它關掉之後 recorder 會 fail closed；能力報告仍要說明，
+    /// 否則使用者只看到記憶無故中斷。
     ///
     /// 跟密碼欄那個計數不一樣，這裡**沒有復原**：每放棄一次就漏一條卡在
     /// UIA 裡回不來的執行緒，「再試一次」的代價是再漏一條。誠實地宣告
@@ -189,8 +187,6 @@ impl Uia {
         // 對面卡住了，而我們沒有辦法把它叫回來。整條丟掉。
         // **不要 join。** join 就等於把自己也賠進去。
         self.worker = None;
-        self.walked = None;
-        self.cached_url = None;
         self.abandons += 1;
         if self.abandons >= MAX_ABANDONS {
             self.surrendered = true;
@@ -204,12 +200,8 @@ impl Uia {
 
     /// 記一次密碼欄問答的結果，維護那個連續失敗計數。
     ///
-    /// 這段本來長在 `ask()` 中間。搬出來的唯一理由是**它以前沒有辦法被
-    /// 測**：`ask()` 要一條活的 COM 工作執行緒，於是這個「隱私保護會在
-    /// 第 5 次之後把自己關掉」的狀態機，一條測試都沒有。
-    ///
-    /// 而它關掉的東西不是一個功能，是一條擋畫面的規則。關掉之後不會有
-    /// 錯誤、不會有例外，只是從那一刻起密碼欄不再擋任何東西。
+    /// 這段本來長在 `ask()` 中間。搬出來讓「第 5 次開始對外報告能力
+    /// 失效」的門檻能被測；它不會把 fail-closed 保護關掉。
     fn note_password_reading(&mut self, seen: Option<bool>) {
         match seen {
             // 問得出來就歸零。機器好起來了，保護就該回來——
@@ -222,7 +214,7 @@ impl Uia {
                 if self.unknown_streak == MAX_UNKNOWN_STREAK {
                     tracing::warn!(
                         "連續 {MAX_UNKNOWN_STREAK} 次問不出焦點是否在密碼欄上；\
-                         停止用它擋畫面，否則瀏覽器裡會什麼都記不住"
+                         持續 fail closed，並將能力標成失效"
                     );
                 }
             }
@@ -255,25 +247,20 @@ impl Uia {
 
     /// 問一個前景視窗：它的網址是什麼、焦點是不是在密碼欄上。
     ///
-    /// 回 `None` 代表 UIA 在這台機器上不能用（或已經投降）。那是一個
-    /// **能力缺口**，由 `Capabilities` 講給使用者聽，不是每一幀各自處理的事。
+    /// 回 `None` 代表 UIA 在這台機器上不能用（或已經投降）。呼叫端會
+    /// 把整個 privacy context 當成 Unknown，在內容來源前停下。
     ///
-    /// **只該對瀏覽器呼叫**（由 `focus` 那邊把關）。走樹很貴，而且每一次
-    /// 呼叫都是一次可能卡住的跨程序往返——對一個整天在跑的背景程式來說，
-    /// 「平常完全不碰 UIA」本身就是一項功能。
-    pub fn read(&mut self, hwnd: HWND, window_title: &str) -> Option<Reading> {
+    /// 每個前景 app 都問焦點是否在敏感欄；`want_url_for_window`
+    /// 只控制貴得多的位址列樹遍歷，只有瀏覽器會開。
+    pub fn read(&mut self, hwnd: HWND, browser: bool) -> Option<Reading> {
         if self.surrendered {
             return None;
         }
 
-        let key = (hwnd.0 as isize, window_title.to_string());
-        // 密碼欄每次都問（一次呼叫），走樹只在視窗或標題變了才做。
-        let want_url = self.walked.as_ref() != Some(&key);
-
         let (tx, rx) = sync_channel(1);
         let job = Job {
-            hwnd: key.0,
-            want_url,
+            hwnd: hwnd.0 as isize,
+            browser,
             reply: tx,
         };
 
@@ -287,23 +274,8 @@ impl Uia {
         }
 
         match rx.recv_timeout(ASK_BUDGET) {
-            Ok(mut reading) => {
+            Ok(reading) => {
                 self.note_answer_arrived(reading.password_focused);
-                if want_url {
-                    self.walked = Some(key);
-                    self.cached_url = reading.url.clone();
-                } else if self.walked.as_ref() == Some(&key) {
-                    // 同一個視窗、同一個標題：沿用上次走樹的結果
-                    reading.url = self.cached_url.clone();
-                } else {
-                    // **不能沿用別人的網址。** 換到記事本卻掛著上一個分頁的
-                    // 網銀網址，會讓那一幀被莫名其妙地擋掉；反過來換到網銀
-                    // 卻掛著上一個無害的網址，會讓它被莫名其妙地錄下來。
-                    // 後者是安靜的，所以這行不能省。
-                    self.walked = None;
-                    self.cached_url = None;
-                    reading.url = None;
-                }
                 Some(reading)
             }
             Err(_) => self.note_abandoned_thread(),
@@ -333,8 +305,16 @@ fn worker_main(rx: Receiver<Job>) {
     }
 
     if let Some(automation) = create_automation() {
+        // 只快取 COM element locator，不快取它的字。SPA、同標題導覽及
+        // 位址列編輯都可能在 HWND 不變時改 URL；Value 每一拍都重讀。
+        let mut cached_address: Option<(isize, IUIAutomationElement)> = None;
         while let Ok(job) = rx.recv() {
-            let reading = probe(&automation, HWND(job.hwnd as *mut _), job.want_url);
+            let reading = probe(
+                &automation,
+                HWND(job.hwnd as *mut _),
+                job.browser,
+                &mut cached_address,
+            );
             // 客戶端可能已經放棄我們了（容量 1 的 channel 不會阻塞）
             let _ = job.reply.send(reading);
         }
@@ -362,20 +342,30 @@ fn create_automation() -> Option<IUIAutomation> {
     Some(automation)
 }
 
-fn probe(automation: &IUIAutomation, hwnd: HWND, want_url: bool) -> Reading {
-    // 密碼欄先問：它只要一次呼叫，而且是三件事裡最重要的那件。
-    let password_focused = focused_is_password(automation);
+fn probe(
+    automation: &IUIAutomation,
+    hwnd: HWND,
+    browser: bool,
+    cached_address: &mut Option<(isize, IUIAutomationElement)>,
+) -> Reading {
+    let Ok(root) = (unsafe { automation.ElementFromHandle(hwnd) }) else {
+        *cached_address = None;
+        return Reading::default();
+    };
 
-    let url = if want_url {
-        unsafe { automation.ElementFromHandle(hwnd) }
-            .ok()
-            .and_then(|root| find_address_bar(automation, &root))
+    // 全桌面的 GetFocusedElement 只有在能沿 parent chain 證明屬於這個 exact
+    // HWND root 時才有意義。否則別的視窗的普通欄不能替這個視窗背書。
+    let password_focused = focused_is_password(automation, &root);
+
+    let browser_url = if browser {
+        read_browser_url(automation, hwnd, &root, cached_address)
     } else {
-        None
+        *cached_address = None;
+        BrowserUrlState::NotApplicable
     };
 
     Reading {
-        url,
+        browser_url,
         password_focused,
     }
 }
@@ -385,13 +375,75 @@ fn probe(automation: &IUIAutomation, hwnd: HWND, want_url: bool) -> Reading {
 /// 用 `CurrentIsPassword()` 這個型別化的存取器，而不是
 /// `GetCurrentPropertyValue`——後者回傳 `VARIANT`，會逼我們開
 /// `Win32_System_Variant` 這個 Cargo feature，只為了讀一個 bool。
-fn focused_is_password(automation: &IUIAutomation) -> Option<bool> {
+fn focused_is_password(automation: &IUIAutomation, root: &IUIAutomationElement) -> Option<bool> {
     let element = unsafe { automation.GetFocusedElement() }.ok()?;
+    belongs_to_root(automation, &element, root)?;
     Some(unsafe { element.CurrentIsPassword() }.ok()?.as_bool())
 }
 
+/// `element` 是 `root` 本身或 descendant 才回 Some。走不到 root、COM
+/// 問不出來都回 None；呼叫端會把敏感欄狀態當 Unknown。
+fn belongs_to_root(
+    automation: &IUIAutomation,
+    element: &IUIAutomationElement,
+    root: &IUIAutomationElement,
+) -> Option<()> {
+    if unsafe { automation.CompareElements(element, root) }
+        .ok()?
+        .as_bool()
+    {
+        return Some(());
+    }
+    let walker = unsafe { automation.ControlViewWalker() }.ok()?;
+    let mut current = element.clone();
+    // UIA tree 理論上有限；上限避免壞 provider 造出 parent cycle。
+    for _ in 0..64 {
+        current = unsafe { walker.GetParentElement(&current) }.ok()?;
+        if unsafe { automation.CompareElements(&current, root) }
+            .ok()?
+            .as_bool()
+        {
+            return Some(());
+        }
+    }
+    None
+}
+
+fn read_browser_url(
+    automation: &IUIAutomation,
+    hwnd: HWND,
+    root: &IUIAutomationElement,
+    cached: &mut Option<(isize, IUIAutomationElement)>,
+) -> BrowserUrlState {
+    let key = hwnd.0 as isize;
+    if cached
+        .as_ref()
+        .is_some_and(|(cached_key, _)| *cached_key != key)
+    {
+        *cached = None;
+    }
+
+    if let Some((_, element)) = cached.as_ref() {
+        if belongs_to_root(automation, element, root).is_some()
+            && let Some(state) = read_cached_address(element)
+        {
+            return state;
+        }
+        *cached = None;
+    }
+
+    let Some((element, state)) = find_address_bar(automation, root) else {
+        return BrowserUrlState::Unknown;
+    };
+    *cached = Some((key, element));
+    state
+}
+
 /// 從視窗根節點往下找位址列。
-fn find_address_bar(automation: &IUIAutomation, root: &IUIAutomationElement) -> Option<String> {
+fn find_address_bar(
+    automation: &IUIAutomation,
+    root: &IUIAutomationElement,
+) -> Option<(IUIAutomationElement, BrowserUrlState)> {
     let walker = unsafe { automation.ControlViewWalker() }.ok()?;
     let mut budget = MAX_NODES;
     walk(&walker, root, 0, &mut budget)
@@ -402,7 +454,7 @@ fn walk(
     element: &IUIAutomationElement,
     depth: u32,
     budget: &mut u32,
-) -> Option<String> {
+) -> Option<(IUIAutomationElement, BrowserUrlState)> {
     if depth > MAX_DEPTH || *budget == 0 {
         return None;
     }
@@ -412,8 +464,8 @@ fn walk(
         // 網頁那一支整支不進去。進去一次的代價是瀏覽器要建整棵樹。
         return None;
     }
-    if let Some(url) = url_from(element) {
-        return Some(url);
+    if let Some(state) = address_candidate(element) {
+        return Some((element.clone(), state));
     }
 
     let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
@@ -445,22 +497,49 @@ fn is_web_content(element: &IUIAutomationElement) -> bool {
     )
 }
 
-/// 如果這個節點是位址列，把上面的字讀出來。
-fn url_from(element: &IUIAutomationElement) -> Option<String> {
+/// 已快取為位址列的 element，每拍都重讀 Value 與 keyboard focus。
+/// `None` 只表示 element 已不是 Edit，呼叫端會重新找 locator；任何讀取
+/// 失敗或正在編輯都明確是 browser URL Unknown。
+fn read_cached_address(element: &IUIAutomationElement) -> Option<BrowserUrlState> {
     if unsafe { element.CurrentControlType() }.ok()? != UIA_EditControlTypeId {
         return None;
     }
 
-    // **焦點在位址列上的時候不要讀。** 使用者正在打字或用方向鍵選建議項，
-    // 那時候 `Value` 是給人看的一句話（"搜尋或輸入網址"、"xxx — Google 搜尋"），
-    // 不是網址。把那個字串存進 `frames.url` 會讓排除規則比對到一堆散文。
-    // 問不出焦點不是「沒有焦點」。以前 `unwrap_or(false)` 會在 COM 查詢失敗時
-    // 把正在輸入的半截網址當成已完成的位址；那一欄現在也會替 unattended
-    // URL 提供來源證據，所以不知道必須 fail-closed。
-    if unsafe { element.CurrentHasKeyboardFocus() }.ok()?.as_bool() {
+    let focused = match unsafe { element.CurrentHasKeyboardFocus() } {
+        Ok(value) => value.as_bool(),
+        Err(_) => return Some(BrowserUrlState::Unknown),
+    };
+    let value = match current_value(element) {
+        Some(value) => value,
+        None => return Some(BrowserUrlState::Unknown),
+    };
+    if focused {
+        return Some(BrowserUrlState::Unknown);
+    }
+    Some(
+        plausible_url(&value)
+            .map(BrowserUrlState::Known)
+            .unwrap_or(BrowserUrlState::Unknown),
+    )
+}
+
+/// 走樹時只把「目前有 plausible URL 的 Edit」認成位址列。若它正被
+/// 編輯仍可快取 element，但這一拍一定回 Unknown。
+fn address_candidate(element: &IUIAutomationElement) -> Option<BrowserUrlState> {
+    if unsafe { element.CurrentControlType() }.ok()? != UIA_EditControlTypeId {
         return None;
     }
+    let focused = unsafe { element.CurrentHasKeyboardFocus() }.ok()?.as_bool();
+    let value = current_value(element)?;
+    let url = plausible_url(&value)?;
+    Some(if focused {
+        BrowserUrlState::Unknown
+    } else {
+        BrowserUrlState::Known(url)
+    })
+}
 
+fn current_value(element: &IUIAutomationElement) -> Option<String> {
     let pattern: IUIAutomationValuePattern = unsafe {
         element
             .GetCurrentPattern(UIA_ValuePatternId)
@@ -468,9 +547,12 @@ fn url_from(element: &IUIAutomationElement) -> Option<String> {
             .cast()
             .ok()?
     };
-    let value = unsafe { pattern.CurrentValue() }.ok()?.to_string();
-    plausible_url(&value)
+    Some(unsafe { pattern.CurrentValue() }.ok()?.to_string())
 }
+
+// **焦點在位址列上的時候不要讀。** 使用者正在打字或用方向鍵選建議項，
+// 那時候 `Value` 是給人看的一句話，不是已確認網址。問不出焦點也不是
+// 「沒有焦點」；兩種情況都由上面的 typed `BrowserUrlState::Unknown` 擋住。
 
 /// 位址列讀回來的字看起來像不像一個位址。
 ///
@@ -524,16 +606,9 @@ mod tests {
         );
     }
 
-    /// 一條會把自己關掉的隱私規則，關掉的那一刻必須是可預測的。
-    ///
-    /// `should_skip_frame` 在「不知道」的時候擋畫面，那是對的。但如果
-    /// **每一次**都不知道，擋住每一幀就等於「她在瀏覽器裡什麼都記不住」，
-    /// 而原因藏在一個沒有人會看的地方。所以第 5 次之後改成宣告做不到。
-    ///
-    /// 這個取捨本身沒問題，問題是它在這條測試之前**一條測試都沒有**——
-    /// 而它管的是一條擋畫面的規則什麼時候停止生效。
+    /// 持續失敗到了門檻要被能力報告看見，但安全後果不會反轉。
     #[test]
-    fn the_password_guard_gives_up_only_after_a_real_streak() {
+    fn persistent_password_unknown_is_reported_without_disabling_the_guard() {
         let mut uia = Uia::new();
         assert!(!uia.password_check_broken(), "一開始不該是壞的");
 
@@ -551,15 +626,18 @@ mod tests {
             uia.password_check_broken(),
             "連續 {MAX_UNKNOWN_STREAK} 次之後該宣告做不到"
         );
+        assert!(
+            Reading::default().should_skip_frame(),
+            "能力報告變成失效後，不知道仍然必須擋住"
+        );
     }
 
-    /// 一次問得出來的答案就把保護叫回來。
+    /// 一次問得出來的答案就把能力報告復原。
     ///
     /// 這是刻意的：連續失敗代表這條路不通，而一次成功就證明它通了。
-    /// 沒有這一條的話，一台偶爾抽風的機器會在第 5 次之後**永久**失去
-    /// 密碼欄保護，而畫面上完全看不出來。
+    /// 沒有這一條的話，一台偶爾抽風的機器會永久顯示錯誤能力狀態。
     #[test]
-    fn one_good_answer_brings_the_password_guard_back() {
+    fn one_good_answer_recovers_the_sensitive_field_capability_report() {
         let mut uia = Uia::new();
         for _ in 0..MAX_UNKNOWN_STREAK {
             uia.note_password_reading(None);
@@ -567,7 +645,7 @@ mod tests {
         assert!(uia.password_check_broken());
 
         uia.note_password_reading(Some(false));
-        assert!(!uia.password_check_broken(), "問得出來之後保護該回來");
+        assert!(!uia.password_check_broken(), "問得出來之後報告該復原");
 
         // 而且是真的歸零，不是減一——否則下一次失敗就又壞掉。
         uia.note_password_reading(None);
@@ -577,11 +655,10 @@ mod tests {
     /// 卡住三次之後投降，而在那之前每一幀都還是往安全的那邊倒。
     ///
     /// 這是這個檔案裡代價最大的一個狀態機：踩到之後 `read()` 永遠回
-    /// `None`，於是 `excluded_urls` 那 16 條規則**整組停止生效**——
-    /// 網銀、登入頁從那一刻起原封不動地錄進資料庫。而它在這條測試之前
-    /// 一條測試都沒有。
+    /// `None`。呼叫端必須把整個 privacy context 當 Unknown，不能把
+    /// `None` 換成一張看似安全的空 snapshot。
     #[test]
-    fn three_stuck_threads_in_a_row_end_the_url_rules() {
+    fn three_stuck_threads_make_the_whole_context_unknown() {
         let mut uia = Uia::new();
         assert!(uia.is_alive(), "一開始不該是投降狀態");
 
@@ -603,15 +680,14 @@ mod tests {
         );
         assert!(
             !uia.is_alive(),
-            "投降之後 is_alive() 要是 false，degradations() 才講得出那句\
-             「excluded_urls 整組規則不再生效」"
+            "投降之後 is_alive() 要是 false，能力報告才能說明 privacy context 不可用"
         );
     }
 
     /// 三次**分散**的抽筋不算投降。
     ///
     /// 沒有這一條的話，一台跑了整個下午的好機器會因為三次互不相干的
-    /// 逾時而永久失去所有網址規則。註解寫的是「連續」，這裡是那兩個字
+    /// 逾時而永久進入 fail-closed 空洞。註解寫的是「連續」，這裡是那兩個字
     /// 唯一被執行的地方——`abandons = 0` 那一行刪掉，測試套件其餘部分
     /// 不會有任何反應。
     #[test]
@@ -651,7 +727,7 @@ mod tests {
         // 問它是安全的——如果哪天那道閘門不見了，這裡會直接當掉，
         // 而不是安靜地又開始漏執行緒。
         assert!(
-            uia.read(HWND(std::ptr::null_mut()), "任何視窗").is_none(),
+            uia.read(HWND(std::ptr::null_mut()), false).is_none(),
             "投降之後不該再送出任何一個 job"
         );
     }
@@ -729,12 +805,15 @@ mod tests {
         let config = sister_core::config::Config::default();
         let elided = plausible_url("ebank.taiwanbank.com.tw/login").expect("是網址");
 
-        let focus = sister_core::model::FocusSnapshot {
-            app_id: Some("chrome.exe".into()),
-            window_title: Some("臺灣銀行".into()),
-            url: Some(elided),
-            ..Default::default()
-        };
+        let focus = sister_core::model::PrivacyContext::known(
+            sister_core::model::FocusSnapshot {
+                app_id: Some("chrome.exe".into()),
+                window_title: Some("臺灣銀行".into()),
+                ..Default::default()
+            },
+            sister_core::model::SensitiveFieldState::Clear,
+            sister_core::model::BrowserUrlState::Known(elided),
+        );
         assert!(
             config.privacy.check(&focus).reason().is_some(),
             "縮寫過的網銀網址沒有被擋下來——UIA 讀到了，規則卻不認得"

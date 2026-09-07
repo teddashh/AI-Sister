@@ -10,7 +10,7 @@
 
 **Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Persona
 也從本機骨架接到 alpha.102 的固定素材下載／驗證邊界，但正式簽章、發布審查與其餘
-安裝／更新工程尚未完成，所以現在還不是 Release 1.0。** Windows 會是 1.0 的正式
+安裝／更新工程尚未完成，所以現在還不是 Release 1.0。** Windows 10+ 會是 1.0 的正式
 支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
 
@@ -58,7 +58,7 @@ Release 裡有**兩個**執行檔：
 
 ## 跑起來
 
-**Windows**——[Releases](https://github.com/teddashh/AI-Sister/releases) 下載那兩個
+**Windows 10 以上**——[Releases](https://github.com/teddashh/AI-Sister/releases) 下載那兩個
 執行檔，放同一個資料夾（字母人是去隔壁找 `sister.exe` 的）。她要先拿到第一張
 同意書才會動：
 
@@ -101,14 +101,15 @@ fallback，不會背景重抓。cache 在預設資料目錄的 `persona-assets-v
 
 - `only-on-my-press`：「等我在。」網址一律等你當場按，standing grant 帶不動。
 - `when-you-can-name-the-origin`：「可以，但你要說得出它從哪來。」只有她在保留中的
-  alpha.100 之後真 Windows 錄製裡看過同一個 host，standing grant 才帶得動；只容許
-  一層 `www.` 的差異，不把子網域當成同一站。
+  alpha.103 v2 真 Windows 錄製裡看過同一個 host，standing grant 才帶得動；只容許
+  一層 `www.` 的差異，不把子網域當成同一站。alpha.100–102 的 v1 錄製仍可查、
+  但不再是無人值守 URL 的來源票。
 
 沒回答不是拒絕或預設選項；在回答前，無人值守網址會 fail-closed。這個設定只管
 帶 `--use-grant --unattended` 的 `sister do`：你當場按的網址在兩個答案下都照常執行，
-`--dry-run` 也不走這道閘門。舊版錄製、import 與 replay 都不會被升格成來源票，
-升級後要讓 recorder 實際看過該站一次。**同 host 只是一筆來源紀錄，不證明那格一定
-是位址列、不證明網址安全或由你主動開啟，也不證明 path、redirect 或站內內容可信。**
+`--dry-run` 也不走這道閘門。v1／更舊錄製、import 與 replay 都不會被升格成來源票，
+升級後要讓 v2 recorder 實際看過該站一次。**同 host 只是一筆來源紀錄，不證明網址
+安全或由你主動開啟，也不證明 path、redirect 或站內內容可信。**
 
 **從原始碼**——Linux/macOS 也跑得起來，只是還沒有擷取後端，所以第一次不能叫她
 錄；改用 repo 裡那份腳本重播一遍（CI 每次 push 走的是同一條路）：
@@ -128,7 +129,7 @@ cargo build --release -p sister-cli
 
 我最後看到的是：
   ★ +886800080123  「0800-080-123」
-    ↳ phone · 2026-08-19 04:37:39 (剛剛) · slack.exe
+    ↳ phone · 2026-08-19 04:37:39 (剛剛) · chrome.exe · 中華電信 客戶服務 - 帳單查詢 · frame #1
   ★ +886912345678  「0912-345-678」
     ↳ phone · 2026-08-19 04:36:47 (1 分鐘前) · chrome.exe · 中華電信 客戶服務 - 帳單查詢 · frame #1
 ```
@@ -141,7 +142,9 @@ cargo build --release -p sister-cli
 JSON 腳本，沒有任何東西可以同意。要看她在你自己的機器上會做什麼，得走上面那條
 Windows 的路。
 
-舊的 `sister replay scenarios/bill-lookup.json` 語法保留不變。現在也能把自己記下的
+`sister replay scenarios/bill-lookup.json` 指令不變；scenario JSON 現在必須明寫
+`privacy_context` 與 `system_state`（例如 `"clear"`／`"active"`）。這兩欄是測試語料
+對安全前提的聲明，缺欄就拒絕執行，不會默認成「已知安全」。現在也能把自己記下的
 一段真實工作日做成 replay 語料：
 
 ```bash

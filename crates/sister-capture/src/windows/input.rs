@@ -15,7 +15,10 @@
 //! 計數器是 process 全域的 static，因為 hook callback 是 `extern "system"`
 //! 函式指標，沒有地方掛使用者資料。整個程序只會有一組 hook。
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU64,
+    Ordering::{AcqRel, Acquire, Relaxed, Release},
+};
 
 use anyhow::Result;
 use sister_core::model::{
@@ -39,6 +42,20 @@ static BURSTS: AtomicU64 = AtomicU64::new(0);
 static LAST_X: AtomicI32 = AtomicI32::new(0);
 static LAST_Y: AtomicI32 = AtomicI32::new(0);
 static HAVE_POS: AtomicBool = AtomicBool::new(false);
+
+/// 最高位是「不准新 callback 進入」，其餘位數現在已進入的 callback。
+///
+/// 這兩個狀態必須放在**同一個** atomic：若分成 `enabled` 與
+/// `in_flight`，callback 可以在讀到 enabled 之後被掛起，suspend 看到
+/// `in_flight == 0` 就清除並返回；等 resume 重開後，那個舊 callback
+/// 才繼續加一，隱私洞裡的計數就穿過了邊界。
+///
+/// 用單一 CAS 後，線性化點就是 callback 的 reader-count CAS 與
+/// suspend 的 disabled-bit `fetch_or` 誰先成功：前者先就會被 wait 等完，
+/// 後者先就讓 callback 當場放棄。兩者之間沒有漏縫。
+const INPUT_DISABLED: u64 = 1 << 63;
+const INPUT_IN_FLIGHT_MASK: u64 = !INPUT_DISABLED;
+static INPUT_GATE: AtomicU64 = AtomicU64::new(0);
 
 /// 最後一次輸入的 tick（`GetTickCount64` 的毫秒）。0 = 從來沒有過。
 static LAST_INPUT_TICK: AtomicU64 = AtomicU64::new(0);
@@ -80,10 +97,14 @@ impl WindowsInput {
     /// 裝上 hook 並開始累積。失敗不致命——沒有節奏訊號比沒有記憶好。
     pub fn start(now: Millis, window_secs: u64) -> Self {
         install_hooks();
-        Self {
+        let mut input = Self {
             window_start: now,
             window_ms: (window_secs as i64) * 1000,
-        }
+        };
+        // 一個 process 只有一組 static callback 狀態；若同行程重開
+        // recorder，不能繼承上一場未滿視窗的計數或 suspended 狀態。
+        input.restart_accumulation(now);
+        input
     }
 
     pub fn state() -> HookState {
@@ -98,6 +119,82 @@ impl WindowsInput {
 
     pub fn hooks_active() -> bool {
         Self::state() == HookState::Active
+    }
+
+    /// 丟掉現在所有尚未交付的輸入狀態，並從 `ts` 重開視窗。
+    ///
+    /// 除了會出現在 `InputMetrics` 的五個計數，連 idle、打字段落與
+    /// 滑鼠位置的 baseline 也必須清。否則隱私洞裡的最後一個事件雖然
+    /// 沒有直接出列，還是會透過「下一鍵是不是新 burst」或跨洞滑鼠距離
+    /// 影響恢復後的第一列。
+    fn discard_accumulated(&mut self, ts: Millis) {
+        KEYSTROKES.store(0, Relaxed);
+        CLICKS.store(0, Relaxed);
+        SCROLL.store(0, Relaxed);
+        MOUSE_PX.store(0, Relaxed);
+        BURSTS.store(0, Relaxed);
+
+        LAST_INPUT_TICK.store(0, Relaxed);
+        LAST_KEY_TICK.store(0, Relaxed);
+        HAVE_POS.store(false, Relaxed);
+        LAST_X.store(0, Relaxed);
+        LAST_Y.store(0, Relaxed);
+        self.window_start = ts;
+    }
+
+    /// 關上入口，等所有已取得 reader 票的 callback 離開，再清空。
+    fn suspend_accumulation(&mut self, ts: Millis) {
+        INPUT_GATE.fetch_or(INPUT_DISABLED, AcqRel);
+        while INPUT_GATE.load(Acquire) & INPUT_IN_FLIGHT_MASK != 0 {
+            // callback 只做 atomic 運算，yield 是避免 recorder 執行緒在
+            // 少見的排程撞期裡把它餓死。
+            std::thread::yield_now();
+        }
+        self.discard_accumulated(ts);
+    }
+
+    /// 仍在 disabled 時清掉 gap 尾端，然後以一次 release store 開關。
+    fn resume_accumulation(&mut self, ts: Millis) {
+        if INPUT_GATE.load(Acquire) & INPUT_DISABLED == 0 {
+            return; // 重複 resume 是 no-op，不可清掉恢復後的新輸入
+        }
+        debug_assert_eq!(INPUT_GATE.load(Acquire) & INPUT_IN_FLIGHT_MASK, 0);
+        self.discard_accumulated(ts);
+        INPUT_GATE.store(0, Release);
+    }
+
+    fn restart_accumulation(&mut self, ts: Millis) {
+        self.suspend_accumulation(ts);
+        self.resume_accumulation(ts);
+    }
+}
+
+/// callback 持有這張票時，suspend 一定會等它 Drop 才清計數。
+/// 零大小、不配置、不上鎖，符合 low-level hook 的時間限制。
+struct InputCallbackGuard;
+
+impl InputCallbackGuard {
+    fn enter() -> Option<Self> {
+        let mut gate = INPUT_GATE.load(Acquire);
+        loop {
+            if gate & INPUT_DISABLED != 0 {
+                return None;
+            }
+            let in_flight = gate & INPUT_IN_FLIGHT_MASK;
+            if in_flight == INPUT_IN_FLIGHT_MASK {
+                return None; // 不可能到達；溢位時仍以放棄為安全答案
+            }
+            match INPUT_GATE.compare_exchange_weak(gate, gate + 1, AcqRel, Acquire) {
+                Ok(_) => return Some(Self),
+                Err(actual) => gate = actual,
+            }
+        }
+    }
+}
+
+impl Drop for InputCallbackGuard {
+    fn drop(&mut self) {
+        INPUT_GATE.fetch_sub(1, Release);
     }
 }
 
@@ -170,6 +267,16 @@ impl InputSource for WindowsInput {
             metrics: Some(metrics),
             listening: InputListening::Unknown,
         }))
+    }
+
+    fn suspend(&mut self, ts: Millis) -> Result<()> {
+        self.suspend_accumulation(ts);
+        Ok(())
+    }
+
+    fn resume(&mut self, ts: Millis) -> Result<()> {
+        self.resume_accumulation(ts);
+        Ok(())
     }
 }
 
@@ -260,6 +367,7 @@ fn install_hooks() {
 unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32
         && (wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize)
+        && let Some(_guard) = InputCallbackGuard::enter()
     {
         let now = tick_now();
         KEYSTROKES.fetch_add(1, Relaxed);
@@ -275,7 +383,9 @@ unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 
 /// 滑鼠 hook。讀座標（位置不是內容），不讀其它任何東西。
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
+    if code == HC_ACTION as i32
+        && let Some(_guard) = InputCallbackGuard::enter()
+    {
         LAST_INPUT_TICK.store(tick_now(), Relaxed);
         match wparam.0 as u32 {
             WM_MOUSEMOVE => unsafe {
@@ -545,6 +655,96 @@ mod tests {
             InputListening::NotListening,
             "沒裝 hook 的安靜視窗不可以被講成「沒人碰」"
         );
+    }
+
+    #[test]
+    fn suspended_input_and_its_baselines_cannot_leak_into_the_next_window() {
+        let _lock = exclusive();
+        INPUT_GATE.store(0, Release);
+        KEYSTROKES.store(7, Relaxed);
+        CLICKS.store(2, Relaxed);
+        SCROLL.store(3, Relaxed);
+        MOUSE_PX.store(450, Relaxed);
+        BURSTS.store(4, Relaxed);
+        LAST_INPUT_TICK.store(123, Relaxed);
+        LAST_KEY_TICK.store(456, Relaxed);
+        HAVE_POS.store(true, Relaxed);
+        LAST_X.store(800, Relaxed);
+        LAST_Y.store(600, Relaxed);
+
+        let mut input = WindowsInput {
+            window_start: 1_000,
+            window_ms: 10_000,
+        };
+        input.suspend(6_000).expect("suspend privacy gap");
+
+        assert_ne!(INPUT_GATE.load(Acquire) & INPUT_DISABLED, 0);
+        assert_eq!(KEYSTROKES.load(Relaxed), 0);
+        assert_eq!(CLICKS.load(Relaxed), 0);
+        assert_eq!(SCROLL.load(Relaxed), 0);
+        assert_eq!(MOUSE_PX.load(Relaxed), 0);
+        assert_eq!(BURSTS.load(Relaxed), 0);
+        assert_eq!(LAST_INPUT_TICK.load(Relaxed), 0);
+        assert_eq!(LAST_KEY_TICK.load(Relaxed), 0);
+        assert!(!HAVE_POS.load(Relaxed));
+        assert_eq!((LAST_X.load(Relaxed), LAST_Y.load(Relaxed)), (0, 0));
+        assert!(
+            InputCallbackGuard::enter().is_none(),
+            "gap 內的 callback 必須在計數前就被擋掉"
+        );
+
+        // 排除後又發生的一次輸入仍要留下，但它的視窗和計數都
+        // 只能從 gap 邊界開始，不得把前面的 7/2/3/450 帶回來。
+        input.resume(6_000).expect("resume after privacy gap");
+        {
+            let _guard = InputCallbackGuard::enter().expect("callbacks enabled after resume");
+            KEYSTROKES.fetch_add(1, Relaxed);
+            BURSTS.fetch_add(1, Relaxed);
+        }
+        // 重複 resume 不能把上面這個新事件清掉。
+        input.resume(7_000).expect("idempotent resume");
+        let tick = input.drain(16_000).expect("input").expect("post-gap input");
+        let metrics = tick.metrics.expect("metrics");
+        assert_eq!((metrics.ts_start, metrics.ts_end), (6_000, 16_000));
+        assert_eq!(metrics.keystrokes, 1);
+        assert_eq!(metrics.clicks, 0);
+        assert_eq!(metrics.scroll_ticks, 0);
+        assert_eq!(metrics.mouse_px, 0);
+        assert_eq!(metrics.typing_bursts, 1);
+    }
+
+    #[test]
+    fn suspend_waits_for_a_callback_that_crossed_the_linearization_point() {
+        let _lock = exclusive();
+        INPUT_GATE.store(0, Release);
+        let guard = InputCallbackGuard::enter().expect("callback enters while enabled");
+        assert_eq!(INPUT_GATE.load(Acquire) & INPUT_IN_FLIGHT_MASK, 1);
+
+        let handle = std::thread::spawn(|| {
+            let mut input = WindowsInput {
+                window_start: 0,
+                window_ms: 10_000,
+            };
+            input.suspend(4_000).expect("suspend");
+            input
+        });
+
+        // 等 suspend 把 disabled bit 設上。只要舊 callback 還持有 reader 票，
+        // 它就不可以返回並清除計數。
+        while INPUT_GATE.load(Acquire) & INPUT_DISABLED == 0 {
+            std::thread::yield_now();
+        }
+        assert_eq!(INPUT_GATE.load(Acquire) & INPUT_IN_FLIGHT_MASK, 1);
+        assert!(!handle.is_finished(), "suspend 不可越過 in-flight callback");
+
+        drop(guard);
+        let mut input = handle.join().expect("suspend thread");
+        assert_eq!(INPUT_GATE.load(Acquire), INPUT_DISABLED);
+        assert!(InputCallbackGuard::enter().is_none());
+
+        input.resume(4_000).expect("resume");
+        assert_eq!(INPUT_GATE.load(Acquire), 0);
+        drop(InputCallbackGuard::enter().expect("callback enters after resume"));
     }
 
     #[test]

@@ -2,18 +2,19 @@
 //!
 //! 視窗那一半是純 Win32，不碰 COM，快到可以每個 tick 跑一次。這是整條
 //! 管線最先跑的東西——排除規則要靠它決定這一刻該不該擷取，所以它必須快、
-//! 必須不會卡住，而且抓不到就安靜地回傳空值（`FocusSnapshot::default()`），
-//! 不是錯誤。
+//! 必須不會卡住。抓不到時回傳 [`PrivacyContext::Unknown`]，
+//! 讓 recorder 在任何內容來源之前 fail closed；不再把空 snapshot
+//! 當成「確定安全」。
 //!
 //! 網址那一半（以及「焦點是不是在密碼欄上」）只能靠 UIA，而 UIA 會卡。
 //! 那一整包風險關在 [`crate::windows::uia`] 裡的一條可拋棄執行緒中，
 //! 這裡只負責問與不問：
 //!
-//! - **網址**只對瀏覽器問，而且只在 `(hwnd, 標題)` 變了才走一次樹
+//! - **網址**只對瀏覽器問；可快取位址列 element，但每拍重讀 Value
 //! - **密碼欄**每個 tick 都問，但那只是一次呼叫，不走樹
 
 use anyhow::Result;
-use sister_core::model::{FocusSnapshot, Millis};
+use sister_core::model::{FocusSnapshot, Millis, PrivacyContext, SensitiveFieldState};
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -23,12 +24,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PWSTR;
 
-use crate::traits::FocusSource;
+use crate::traits::{CapturePermit, FocusSource, PrivacyObservation};
 
 use crate::browsers::is_browser;
 
 pub struct WindowsFocus {
     uia: crate::windows::uia::Uia,
+    next_generation: u64,
+    approved: Option<Approved>,
+}
+
+#[derive(Clone)]
+struct Approved {
+    native_window: u64,
+    process_id: u32,
+    generation: u64,
+    context: PrivacyContext,
 }
 
 impl Default for WindowsFocus {
@@ -41,46 +52,91 @@ impl WindowsFocus {
     pub fn new() -> Self {
         Self {
             uia: crate::windows::uia::Uia::new(),
+            next_generation: 0,
+            approved: None,
         }
     }
 
-    /// UIA 還活著嗎。`false` = `excluded_urls` 整組規則目前不生效。
+    /// UIA 還活著嗎。`false` = privacy context 不可用，recorder 會 fail closed。
     pub fn url_capture_alive(&self) -> bool {
         self.uia.is_alive()
+    }
+
+    /// 讀一份完整、綁 exact HWND/PID 的 privacy observation。慢 UIA 回來後
+    /// 再讀一次 Win32 identity；不同就把整份答案作廢。
+    fn observe_current(&mut self) -> Option<(u64, u32, PrivacyContext)> {
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let pid = process_id(hwnd)?;
+        let snapshot = foreground_for(hwnd, pid)?;
+        let browser = is_browser(&snapshot.app_key());
+        let reading = self.uia.read(hwnd, browser)?;
+
+        let after = unsafe { GetForegroundWindow() };
+        if after != hwnd || process_id(after) != Some(pid) {
+            return None;
+        }
+
+        let sensitive_field = match reading.password_focused {
+            Some(false) => SensitiveFieldState::Clear,
+            Some(true) => SensitiveFieldState::Focused,
+            None => SensitiveFieldState::Unknown,
+        };
+        Some((
+            hwnd.0 as isize as u64,
+            pid,
+            PrivacyContext::known(snapshot, sensitive_field, reading.browser_url),
+        ))
     }
 }
 
 impl FocusSource for WindowsFocus {
-    fn snapshot(&mut self, _ts: Millis) -> Result<FocusSnapshot> {
-        let mut snapshot = foreground();
+    fn context(&mut self, _ts: Millis) -> Result<PrivacyObservation> {
+        let Some((native_window, process_id, context)) = self.observe_current() else {
+            self.approved = None;
+            return Ok(PrivacyObservation::Unknown);
+        };
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Windows capture permit generation exhausted"))?;
+        let generation = self.next_generation;
+        self.approved = Some(Approved {
+            native_window,
+            process_id,
+            generation,
+            context: context.clone(),
+        });
+        let permit = CapturePermit::windows(
+            super::backend_token(),
+            native_window,
+            process_id,
+            generation,
+        );
+        Ok(PrivacyObservation::known(context, permit))
+    }
 
-        let hwnd = unsafe { GetForegroundWindow() };
-        if hwnd.0.is_null() {
-            return Ok(snapshot);
+    fn is_current(&mut self, permit: CapturePermit) -> Result<bool> {
+        let Some((native_window, process_id, generation)) = permit.windows_parts() else {
+            return Ok(false);
+        };
+        let Some(approved) = self.approved.clone() else {
+            return Ok(false);
+        };
+        if (
+            approved.native_window,
+            approved.process_id,
+            approved.generation,
+        ) != (native_window, process_id, generation)
+        {
+            return Ok(false);
         }
-        // **不是瀏覽器就完全不碰 UIA。** 這不只是省時間：每一次 UIA 呼叫
-        // 都是一次可能卡住、而且叫不回來的跨程序往返，對一個整天在跑的
-        // 背景程式來說，「一天裡絕大多數時間根本沒有這個風險」本身就是
-        // 一項功能。代價是非瀏覽器的密碼欄我們看不到（DATA_INVENTORY
-        // 「已知缺口」有記）。清單與比對規則見 [`crate::browsers`]。
-        if !is_browser(&snapshot.app_key()) {
-            return Ok(snapshot);
-        }
-
-        let title = snapshot.window_title.clone().unwrap_or_default();
-        if let Some(reading) = self.uia.read(hwnd, &title) {
-            // 「不知道焦點在不在密碼欄上」→ 擋掉這一幀，那是對的。
-            // 但**每一次都不知道**就不是保守了，那是「她在瀏覽器裡什麼都
-            // 記不住」，而原因藏在沒有人會看的地方。`password_check_broken`
-            // 是那條線：踩到之後改成「宣告做不到」而不是「安靜地全擋」。
-            snapshot.password_field =
-                reading.should_skip_frame() && !self.uia.password_check_broken();
-            snapshot.url = reading.url;
-        }
-        // `None` = UIA 在這台機器上不能用。那是一個能力缺口，由
-        // `Capabilities` 一次講清楚，不是在這裡每秒擋掉一幀——
-        // 那只會讓她什麼都記不住，而且原因藏在一個沒有人看的地方。
-        Ok(snapshot)
+        let Some((now_window, now_pid, now_context)) = self.observe_current() else {
+            return Ok(false);
+        };
+        Ok(now_window == native_window && now_pid == process_id && now_context == approved.context)
     }
 
     fn url_capture(&self) -> sister_core::capabilities::UrlCapture {
@@ -94,34 +150,31 @@ impl FocusSource for WindowsFocus {
     }
 }
 
-/// 現在的前景視窗。任何一步失敗都退化成 `None`，不往上冒錯誤。
-pub fn foreground() -> FocusSnapshot {
+/// 現在的前景視窗。`None` 是不知道，呼叫端不得放行內容。
+pub fn foreground() -> Option<FocusSnapshot> {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
-        // 沒有前景視窗是正常狀態：切換桌面、鎖定畫面的瞬間都會這樣
-        return FocusSnapshot::default();
+        return None;
     }
+    let pid = process_id(hwnd)?;
+    foreground_for(hwnd, pid)
+}
 
-    let (app_id, app_name) = match process_image_path(hwnd) {
-        Some(path) => {
-            let file = file_name(&path);
-            let stem = file.rsplit_once('.').map_or(file.as_str(), |(s, _)| s);
-            // app_id 用小寫檔名（chrome.exe），排除規則比對的就是它
-            (Some(file.to_ascii_lowercase()), Some(stem.to_string()))
-        }
-        None => (None, None),
-    };
+fn foreground_for(hwnd: HWND, pid: u32) -> Option<FocusSnapshot> {
+    let path = process_image_path_for_pid(pid)?;
+    let file = file_name(&path);
+    let stem = file.rsplit_once('.').map_or(file.as_str(), |(s, _)| s);
 
-    FocusSnapshot {
-        app_id,
-        app_name,
+    Some(FocusSnapshot {
+        app_id: Some(file.to_ascii_lowercase()),
+        app_name: Some(stem.to_string()),
+        // 視窗標題抓不到時仍可依 app 規則擋掉；空標題本身不被寫入。
         window_title: window_title(hwnd),
-        // 網址與密碼欄由 UIA 在 `snapshot()` 裡補上。這個函式刻意只碰
+        // 網址與敏感欄由 UIA 在 `context()` 裡補上。這個函式刻意只碰
         // Win32：它是排除判定的第一手資料，不能因為 COM 卡住而跟著卡住。
         url: None,
-        pid: process_id(hwnd).map(|p| p as i64),
-        password_field: false,
-    }
+        pid: Some(pid as i64),
+    })
 }
 
 pub fn window_title(hwnd: HWND) -> Option<String> {
@@ -153,6 +206,10 @@ pub fn process_id(hwnd: HWND) -> Option<u32> {
 /// 沒有理由要求超過必要的權限。
 pub fn process_image_path(hwnd: HWND) -> Option<String> {
     let pid = process_id(hwnd)?;
+    process_image_path_for_pid(pid)
+}
+
+fn process_image_path_for_pid(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
 
@@ -191,12 +248,10 @@ mod tests {
         assert_eq!(file_name(r"C:\a/b\c.exe"), "c.exe");
     }
 
-    /// 前景視窗抓不到時必須安靜降級。錄製迴圈每秒呼叫一次，
-    /// 讓它變成錯誤等於讓整個 session 因為切個桌面就死掉。
+    /// 無頭 session 或正在切換桌面時仍必須有限時間內回來。
+    /// 返回 `None` 的安全後果由 `PrivacyContext::Unknown` 測試釘住。
     #[test]
-    fn foreground_never_panics() {
-        let f = foreground();
-        // 無頭 session 裡兩種結果都合法，重點是它有回來
-        assert!(f.app_id.is_some() || f.app_id.is_none());
+    fn foreground_returns_without_panicking() {
+        let _ = foreground();
     }
 }

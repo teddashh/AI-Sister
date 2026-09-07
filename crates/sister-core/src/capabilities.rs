@@ -7,8 +7,8 @@
 //! 為什麼要寫成檔案：能力探測（UIA、輸入 hook）只有 `sister-capture` 的
 //! Windows 那半邊做得到，而**設定頁在另一個行程裡**——那個行程沒有、也不該有
 //! 那些相依（多一份 UIA、多一次 COM 初始化，只為了畫一行警告）。於是唯一
-//! 知道「你那 12 條 excluded_urls 一條都不會生效」的人，是把它印進 `record.log`
-//! 的 recorder，而那個檔案沒有人會開。
+//! 知道「UIA 中途失效，privacy gate 從那刻起停止讀內容」的人，是把它印進
+//! `record.log` 的 recorder，而那個檔案沒有人會開。
 //!
 //! **存原始能力，不存結論。** 上一場錄製開始的時候使用者可能一條網址規則都
 //! 還沒寫——那時候算出來的結論是「沒問題」，而他正是**現在**才在設定頁上打
@@ -28,20 +28,84 @@ use crate::model::Millis;
 /// 檔名。放在 data dir 裡，跟 `sister.db`、`recording.beat` 同一層。
 const FILE: &str = "capabilities.json";
 
+/// 一項能力的三種真實狀態。
+///
+/// `Unknown` 不是 `Unavailable` 的溫和寫法：前者是這份報告沒量到，
+/// 後者是已經量過且確定做不到。開始加 macOS／Linux backend 之後，
+/// 建置過、還沒有探測器的平台會大量用到第一種；把它壓成 `false`
+/// 會讓 doctor 把「我不知道」畫成一個已驗證的 ✗。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityState {
+    Available,
+    Unavailable,
+    #[default]
+    Unknown,
+}
+
+impl CapabilityState {
+    /// 把一次**真的做過**的布林探測轉成能力狀態。
+    ///
+    /// 名字裡帶 `measured`，避免呼叫端把 `unwrap_or(false)` 之類的假值
+    /// 塞進來後還看起來像一次真探測。
+    pub const fn from_measured(available: bool) -> Self {
+        if available {
+            Self::Available
+        } else {
+            Self::Unavailable
+        }
+    }
+}
+
+/// 舊報告的正向布林（`true` = 有能力）與新的三態都能讀。
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CapabilityWire {
+    State(CapabilityState),
+    LegacyBool(bool),
+}
+
+fn deserialize_capability<'de, D>(deserializer: D) -> std::result::Result<CapabilityState, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match CapabilityWire::deserialize(deserializer)? {
+        CapabilityWire::State(state) => state,
+        CapabilityWire::LegacyBool(available) => CapabilityState::from_measured(available),
+    })
+}
+
+/// 舊欄位存的是 `input_hook_failed`，極性和新欄位相反。
+///
+/// `true` 能夠證明當時裝過且失敗，所以是 `Unavailable`。`false` 只能
+/// 證明「沒有留下失敗旗標」；舊 schema 沒有存「試過而且成功」的正向
+/// 證據，升級時保守讀成 `Unknown`，不替舊檔案補寫一次沒量過的成功。
+fn deserialize_input_capability<'de, D>(
+    deserializer: D,
+) -> std::result::Result<CapabilityState, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match CapabilityWire::deserialize(deserializer)? {
+        CapabilityWire::State(state) => state,
+        CapabilityWire::LegacyBool(true) => CapabilityState::Unavailable,
+        CapabilityWire::LegacyBool(false) => CapabilityState::Unknown,
+    })
+}
+
 /// UIA 那一路在**這一刻**的狀態。
 ///
 /// 單獨一個型別，因為它和 [`Report`] 其他欄位的時間性不一樣：那些是開機探測
-/// 出來的，一整場不會變；這兩個是**錄製途中才會掉**的，而且掉了不會有錯誤、
-/// 不會有例外——UIA 連續卡住三次就永久投降（見
-/// `sister_capture::windows::uia`），從那一刻起 `excluded_urls` 一條都不生效，
-/// 網銀跟登入頁開始被錄進去。以前唯一問過這件事的人是收工時的那一行
-/// `println!`，印進 `record.log`。
+/// 出來的，一整場不會變；這兩個是**錄製途中才會掉**的。UIA 連續卡住三次就
+/// 永久投降（見 `sister_capture::windows::uia`）；recorder 會把 privacy context
+/// 當 Unknown，在任何內容來源前 fail closed。這個狀態仍要對外說清楚，否則一段
+/// 「安全地什麼都沒記」會和正常錄製長得一樣。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UrlCapture {
     /// 卡住太多次，已經**永久**放棄讀網址。沒有復原。
     #[serde(default)]
     pub gave_up: bool,
-    /// 已經停止用「焦點在密碼欄上」擋畫面（連續問不出來）。
+    /// 連續問不出焦點是否在敏感欄；只供能力報告，不會關掉 fail-closed gate。
     #[serde(default)]
     pub password_check_broken: bool,
 }
@@ -66,15 +130,22 @@ pub struct Report {
     ///
     /// 注意這只是「COM 物件造得出來」，不是「讀得到位址列」。那兩件事之間
     /// 差著一整台機器，而它們的差別由 [`Self::browser_ticks`] /
-    /// [`Self::url_reads`] 回答——`false` 的時候 `excluded_urls` 整組規則
-    /// 鐵定不生效，`true` 的時候只是**還不確定**。
-    pub url: bool,
-    /// 輸入 hook **試過而且失敗**。
+    /// [`Self::url_reads`] 回答——`Unavailable` 的時候 `excluded_urls`
+    /// 整組規則鐵定不生效，`Available` 的時候只是
+    /// **還不確定**。
+    #[serde(default, deserialize_with = "deserialize_capability")]
+    pub url: CapabilityState,
+    /// 輸入 hook 這一場到底裝不裝得上。
     ///
-    /// 是 `試過失敗` 而不是 `裝好了`：「沒去裝」和「裝失敗」不是同一件事，
-    /// 壓成一個布林會產生一則永遠為真的警告，然後整區警告都會被學會忽略。
-    /// 這一份是 recorder 寫的，它一定試過——但欄位的語意要留給以後也對。
-    pub input_hook_failed: bool,
+    /// 不再存「有沒有失敗」：那個問法的 `false` 同時包了成功和沒試過。
+    /// 新報告存完整三態；升級讀舊 `input_hook_failed` 時，只有 `true`
+    /// 能安全地換成 `Unavailable`，舊 `false` 保守留在 `Unknown`。
+    #[serde(
+        default,
+        alias = "input_hook_failed",
+        deserialize_with = "deserialize_input_capability"
+    )]
+    pub input_hook: CapabilityState,
     /// 錄製途中掉掉的那兩樣。見 [`UrlCapture`]。
     #[serde(default)]
     pub url_capture: UrlCapture,
@@ -86,7 +157,7 @@ pub struct Report {
     pub browser_ticks: u64,
     /// 其中真的拿到網址的拍數。
     ///
-    /// `url = true` 而這個是 0，是**這一整條線最常見的壞法**：UIA 造得出來、
+    /// `url = Available` 而這個是 0，是**這一整條線最常見的壞法**：UIA 造得出來、
     /// `doctor` 全綠、設定頁一片乾淨，而位址列從頭到尾沒讀到過一次（瀏覽器
     /// 用系統管理員身分跑、無障礙介面沒開、UIA 樹換了形狀）。那台機器把使用者
     /// 的網銀錄了一整天，而他寫的每一條 `excluded_urls` 一次都沒擋過東西。
@@ -100,9 +171,9 @@ pub fn path(data_dir: &Path) -> PathBuf {
 
 /// 蓋一份新的。recorder 開機寫一次，之後**錄製途中每隔一段時間再蓋一次**。
 ///
-/// 「只在開機寫一次」是這個檔案原本最大的問題：UIA 會在半路上永久投降，而
-/// 那之後 `excluded_urls` 一條都不生效——設定頁卻拿著一份開機時的「一切正常」
-/// 一句話都不說。使用者正是在那一頁上打那些規則的。
+/// 「只在開機寫一次」是這個檔案原本最大的問題：UIA 會在半路上永久投降，
+/// recorder 從那之後會 fail closed；設定頁若仍拿著開機時的「一切正常」，使用者
+/// 只會看到記憶無故停止，卻不知道是哪個安全前提壞了。
 ///
 /// 和 [`crate::heartbeat::beat`] 同一個作法：先寫暫存檔再 rename。讀的人有
 /// 機會讀到寫到一半的 JSON——那不會壞掉（解析失敗就當成沒有報告），但會讓
@@ -148,7 +219,9 @@ const ENOUGH_BROWSER_TICKS: u64 = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum About {
-    /// 「排除的網址」那一格：`excluded_urls`，以及瀏覽器裡的密碼欄遮蔽。
+    /// 整個錄製的 UIA/privacy context；不是只屬於某一條 URL 規則。
+    PrivacyCapture,
+    /// 「排除的網址」那一格：`excluded_urls`，以及 UIA privacy context。
     UrlRules,
     /// 「輸入節奏」那一格。
     InputHook,
@@ -169,14 +242,14 @@ impl Report {
     ///
     /// 分成兩半是因為這個型別裝著兩種時間性完全不同的事實：
     ///
-    /// * `url`、`input_hook_failed` 是**探測**——任何人任何時候重問一次都拿得
+    /// * `url`、`input_hook` 是**探測**——任何人任何時候重問一次都拿得
     ///   到同一個答案。
     /// * 這裡數的這四個是**歷史**。`gave_up` 記的是「UIA 在上一場的某一刻卡住
-    ///   太多次，從那之後位址列一個字都讀不到」；那件事發生在一個已經結束的
+    ///   太多次，從那之後 privacy context 不可用、錄製內容 fail closed」；那件事發生在一個已經結束的
     ///   行程裡，用一份全新的 UIA 去問**永遠問不出來**——新的那份是好的。
     ///
     /// 而 `doctor` 手上只有探測那一半。它拿 `Caps::current()` 蓋一次檔，等於
-    /// 把上面那四個全部歸零：一則「你的網銀從昨天下午三點開始被錄進去了」的
+    /// 把上面那四個全部歸零：一則「錄製從昨天下午三點開始因 privacy gate 停住」的
     /// 警告，被換成一份時戳是五分鐘前、全部乾淨的報告——而 [`Self::at`] 那段
     /// 註解說得很清楚，時戳存在的意義就是讓讀的人拿它判斷可信度。愈新的愈可
     /// 信，於是那份假的比真的更有說服力。
@@ -203,32 +276,49 @@ impl Report {
         let rules = privacy.excluded_urls.len();
         let mut out = Vec::new();
         let mut push = |about, message: String| out.push(Broken { about, message });
-        // 三種壞法，一條路上的三個點，所以 `else if`：全部印出來只會稀釋掉
+        // 三種能力缺口是一條路上的三個點，所以 `else if`：全部印出來只會稀釋掉
         // 真正要看的那一則。由重到輕——路上死掉最急，因為它有一個「從那之後」。
         if self.url_capture.gave_up {
-            // 密碼欄那道保護跟著一起沒了，而且不會反映在
-            // `password_check_broken` 上——那個旗標數的是「問了問不出來」，
-            // 投降之後根本不會再問。所以那件事得由這一句帶著講，不能等
-            // 底下那則。
+            let rules_note = if rules == 0 {
+                String::new()
+            } else {
+                format!("；{rules} 條 excluded_urls 也無法評估")
+            };
             push(
-                About::UrlRules,
+                About::PrivacyCapture,
                 format!(
-                    "UIA 在錄製途中卡住太多次已放棄：**從那一刻起讀不到網址**，\
-                     {rules} 條 excluded_urls 規則不再生效（網銀、登入頁可能被錄了進去），\
-                     瀏覽器裡的密碼欄也不再擋畫面。\
-                     這是永久的，重開 sister record 才會再試一次"
+                    "UIA 在錄製途中卡住太多次已放棄：**從那一刻起 privacy context \
+                     無法確認，recorder 會在剪貼簿與螢幕之前停止讀內容**{rules_note}。\
+                     這一場不會自行復原，\
+                     重開 sister record 才會再試一次"
                 ),
             );
-        } else if !self.url && rules > 0 {
+        } else if self.url_capture.password_check_broken {
             push(
-                About::UrlRules,
+                About::PrivacyCapture,
+                "這一場連續問不出焦點是不是在敏感欄：recorder 仍保持 fail closed，\
+                 每拍都在剪貼簿與螢幕之前停下，直到 UIA 再次明確回答"
+                    .into(),
+            );
+        } else if self.url == CapabilityState::Unavailable {
+            let rules_note = if rules == 0 {
+                String::new()
+            } else {
+                format!("；{rules} 條 excluded_urls 也會無法評估")
+            };
+            push(
+                About::PrivacyCapture,
                 format!(
-                    "沒有 UIA 網址擷取：{rules} 條 excluded_urls 規則（網銀、登入頁）\
-                     目前不會生效，瀏覽器畫面只靠視窗標題規則過濾"
+                    "開機探測拿不到 UIA；錄製端若同樣無法確認 privacy context，\
+                     會在剪貼簿與螢幕之前停下，不把 Unknown 當成安全{rules_note}"
                 ),
             );
-        } else if rules > 0 && self.url_reads == 0 && self.browser_ticks >= ENOUGH_BROWSER_TICKS {
-            // `url = true` 只代表 COM 物件造得出來。這一條是那句話和「讀得到
+        } else if self.url == CapabilityState::Available
+            && rules > 0
+            && self.url_reads == 0
+            && self.browser_ticks >= ENOUGH_BROWSER_TICKS
+        {
+            // `url = Available` 只代表 COM 物件造得出來。這一條是那句話和「讀得到
             // 位址列」之間的距離，而它整個是安靜的：doctor 全綠、摘要全綠。
             push(
                 About::UrlRules,
@@ -240,19 +330,7 @@ impl Report {
                 ),
             );
         }
-        // `!gave_up`：投降之後這道保護早就沒了，而上面那一則已經講過。
-        // 兩則講同一個原因只會稀釋掉真正要看的那一則。
-        if self.url_capture.password_check_broken && !self.url_capture.gave_up {
-            push(
-                // 密碼欄遮蔽和 `excluded_urls` 擋的不是同一件事，但它們在設定頁
-                // 上是同一格（都在講「瀏覽器裡的東西怎麼被擋掉」）。
-                About::UrlRules,
-                "問不出焦點是不是在密碼欄上（連續失敗），已停止用它擋畫面：\
-                 瀏覽器裡的密碼欄現在只靠圓點遮蔽保護"
-                    .into(),
-            );
-        }
-        if self.input_hook_failed {
+        if self.input_hook == CapabilityState::Unavailable {
             push(
                 About::InputHook,
                 "輸入 hook 裝不上：節奏訊號這個 session 會是空的".into(),
@@ -285,8 +363,11 @@ impl Report {
         }
         // 上面那三格任何一格有話講，這裡就閉嘴：同一件事講兩次，讀的人會以為
         // 是兩件事。
-        if self.url_capture.gave_up || !self.url {
+        if self.url_capture.gave_up || self.url == CapabilityState::Unavailable {
             return UrlRules::Broken;
+        }
+        if self.url == CapabilityState::Unknown {
+            return UrlRules::Unknown;
         }
         if self.url_reads > 0 {
             return UrlRules::Working {
@@ -305,17 +386,19 @@ impl Report {
     }
 }
 
-/// 「你那幾條 excluded_urls 到底有沒有在擋東西」的三種答案。
+/// 「你那幾條 excluded_urls 到底有沒有在擋東西」的答案。
 ///
-/// 三種，不是兩種：**「驗過了，有效」和「還沒驗過」不可以長得一樣。** 這是
-/// `db::signal_audit` 那個三態 `Verdict` 的同一條規矩——那裡本來是一個
-/// `broken: bool`，於是「驗過了，是好的」和「資料還太少，看不出來」印出同一
-/// 個 ✓。這一格當時沒跟上。
+/// 核心事實仍是三態：已驗證有效、已驗證失效、還不知道。
+/// `None` 是「沒有規則，所以沒有問題要回答」；`Broken` 是「失效原因已由
+/// [`Report::broken_privacy_rules`] 講了」的顯示控制態。它們不能被拿來合併
+/// 核心三態，尤其**「驗過了，有效」和「還沒驗過」不可以長得一樣**。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UrlRules {
     /// 一條規則都沒有——這一格沒有問題要回答。
     None,
+    /// 這份報告沒有量到 URL 能力。不是已經確定失效。
+    Unknown,
     /// 這一場真的讀到過網址，所以那幾條規則有機會生效。
     Working { reads: u64 },
     /// **還沒有證據**：瀏覽器用得還不夠多，問不出來。不是「沒問題」。
@@ -347,8 +430,8 @@ mod tests {
     fn able() -> Report {
         Report {
             at: 1_000,
-            url: true,
-            input_hook_failed: false,
+            url: CapabilityState::Available,
+            input_hook: CapabilityState::Available,
             url_capture: UrlCapture::default(),
             // 讀得到，而且證明過：從這裡出發，只改要測的那一項。
             browser_ticks: 500,
@@ -379,7 +462,7 @@ mod tests {
             ..able()
         };
         let blind = Report {
-            url: false,
+            url: CapabilityState::Unavailable,
             ..able()
         };
 
@@ -410,6 +493,33 @@ mod tests {
         // 而「還沒驗過」那一台，`broken` 仍然是空的：那個清單講的是「你以為
         // 關上的門其實開著」，這件事是第三種方向。兩邊要各自成立。
         assert!(never.broken_privacy_rules(&rules).is_empty());
+    }
+
+    /// 「沒量到」不是一種可用，也不是一種不可用。這是三態模型
+    /// 最容易在消費端被壓回 bool 的那一面，所以同時釘住判決與警告。
+    #[test]
+    fn an_unmeasured_capability_is_neither_working_nor_broken() {
+        let rules = with_rules(3);
+        let unknown = Report {
+            url: CapabilityState::Unknown,
+            input_hook: CapabilityState::Unknown,
+            // 即使舊報告留下了夠多瀏覽器拍數，沒量到 URL 能力就
+            // 不能用那個分母反過來證明它已失效。
+            browser_ticks: ENOUGH_BROWSER_TICKS + 100,
+            url_reads: 0,
+            ..able()
+        };
+
+        assert_eq!(unknown.url_rules_verdict(&rules), UrlRules::Unknown);
+        assert!(
+            unknown.broken_privacy_rules(&rules).is_empty(),
+            "沒量到的 URL 或 hook 不能被描述成已確定失敗"
+        );
+        assert_ne!(unknown.url_rules_verdict(&rules), UrlRules::Broken);
+        assert_ne!(
+            unknown.url_rules_verdict(&rules),
+            UrlRules::Working { reads: 1 }
+        );
     }
 
     /// 門檻兩側各一次。差一拍就從「還不知道」翻成一則指控，所以那一刀要落在
@@ -462,7 +572,7 @@ mod tests {
                 ..able()
             },
             Report {
-                url: false,
+                url: CapabilityState::Unavailable,
                 ..able()
             },
         ] {
@@ -495,12 +605,20 @@ mod tests {
         // 頁上打第一條。存結論的話，那一頁會拿著一份三禮拜前的「沒問題」，
         // 對著一條剛剛才寫下、而且不會生效的規則，什麼都不說。
         let blind = Report {
-            url: false,
+            url: CapabilityState::Unavailable,
             ..able()
         };
+        let without_rules = blind.broken_privacy_rules(&with_rules(0));
+        assert_eq!(
+            without_rules.len(),
+            1,
+            "開機 UIA probe 缺席仍是整體 privacy capture 警告，不依賴 URL 規則"
+        );
+        assert_eq!(without_rules[0].about, About::PrivacyCapture);
         assert!(
-            blind.broken_privacy_rules(&with_rules(0)).is_empty(),
-            "沒有規則就沒有失效的規則"
+            !without_rules[0].message.contains("excluded_urls"),
+            "沒有規則時不能假稱有 URL 規則失效：{}",
+            without_rules[0].message
         );
         let said = blind.broken_privacy_rules(&with_rules(1));
         assert_eq!(said.len(), 1, "剛打的這一條要被判出來：{said:?}");
@@ -516,7 +634,7 @@ mod tests {
         assert!(able().broken_privacy_rules(&with_rules(1)).is_empty());
     }
 
-    /// `url: true` 只代表 COM 物件造得出來，不代表讀得到位址列。
+    /// `url: Available` 只代表 COM 物件造得出來，不代表讀得到位址列。
     ///
     /// 這是這一整條線最常見的壞法，而且從頭到尾是安靜的：UIA 建得起來，
     /// `doctor` 全綠，設定頁一片乾淨，而位址列一次都沒讀到（瀏覽器用系統
@@ -570,7 +688,8 @@ mod tests {
     /// UIA 半路投降，是這個檔案存在的第二個理由。
     ///
     /// 它是**永久的**（`uia::note_abandoned_thread` 沒有復原路徑），發生時
-    /// 不會有錯誤也不會有例外，只是從那一刻起網銀跟登入頁開始被錄進去。
+    /// 不會有錯誤也不會有例外；recorder 會從那一刻起安全停讀內容，但若不報告，
+    /// 使用者只會得到一段沒有原因的記憶空洞。
     /// 以前唯一問過這件事的是收工時的一行 `println!`，印進沒有人會開的
     /// `record.log`——而那要等到這一場結束，可能是好幾天以後。
     #[test]
@@ -590,16 +709,18 @@ mod tests {
             said[0].message
         );
         assert!(said[0].message.contains("16 條"), "{}", said[0].message);
-        // 密碼欄那道保護跟著一起沒了，而 `password_check_broken` 那個旗標
-        // 數的是「問了問不出來」——投降之後根本不會再問，所以它是 false。
-        // 這句話不由它帶的話，那件事就沒有人會講。
         assert!(!died.url_capture.password_check_broken);
-        assert!(said[0].message.contains("密碼欄"), "{}", said[0].message);
+        assert!(
+            said[0].message.contains("停止讀內容"),
+            "{}",
+            said[0].message
+        );
+        assert!(!said[0].message.contains("可能被錄"), "{}", said[0].message);
 
         // 三種壞法在同一條路上，所以只講一則。全部印出來只會稀釋掉真正
         // 要看的那一則——而這裡最該看的是「有一個從那之後」。
         let died_blind_and_unprobed = Report {
-            url: false,
+            url: CapabilityState::Unavailable,
             browser_ticks: 400,
             url_reads: 0,
             ..died
@@ -610,9 +731,9 @@ mod tests {
         );
     }
 
-    /// 密碼欄那道保護關掉了要單獨講：它和網址規則擋的不是同一件事。
+    /// 敏感欄狀態持續未知要單獨講，但不能把警告寫成保護已關掉。
     #[test]
-    fn the_password_shield_switching_itself_off_gets_its_own_line() {
+    fn persistent_sensitive_field_failure_reports_that_fail_closed_remains_active() {
         let no_shield = Report {
             url_capture: UrlCapture {
                 password_check_broken: true,
@@ -624,7 +745,17 @@ mod tests {
         // 是產品本來就答應他的。
         let said = no_shield.broken_privacy_rules(&with_rules(0));
         assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].message.contains("密碼欄"), "{}", said[0].message);
+        assert!(said[0].message.contains("敏感欄"), "{}", said[0].message);
+        assert!(
+            said[0].message.contains("fail closed"),
+            "{}",
+            said[0].message
+        );
+        assert!(
+            !said[0].message.contains("停止用它擋"),
+            "{}",
+            said[0].message
+        );
     }
 
     /// 輸入 hook 那一句不准被歸到「排除的網址」底下。
@@ -636,7 +767,7 @@ mod tests {
     #[test]
     fn the_input_hook_line_does_not_get_filed_under_the_url_rules() {
         let no_hook = Report {
-            input_hook_failed: true,
+            input_hook: CapabilityState::Unavailable,
             ..able()
         };
         let said = no_hook.broken_privacy_rules(&with_rules(16));
@@ -645,13 +776,13 @@ mod tests {
 
         // 兩件事同時壞的時候要分成兩則、掛兩格——不是併成一段話塞在其中一格。
         let both = Report {
-            url: false,
+            url: CapabilityState::Unavailable,
             ..no_hook
         };
         let said = both.broken_privacy_rules(&with_rules(16));
         assert_eq!(
             said.iter().map(|b| b.about).collect::<Vec<_>>(),
-            vec![About::UrlRules, About::InputHook],
+            vec![About::PrivacyCapture, About::InputHook],
             "{said:?}"
         );
     }
@@ -670,11 +801,45 @@ mod tests {
         )
         .expect("write");
         let back = read(&dir.0).expect("舊格式要讀得出來");
-        assert!(back.url);
+        assert_eq!(back.url, CapabilityState::Available);
+        assert_eq!(
+            back.input_hook,
+            CapabilityState::Unknown,
+            "舊 false 沒有記下成功證據，不能自動補成可用"
+        );
         assert_eq!(back.browser_ticks, 0, "舊檔案本來就沒有這個證據");
         assert!(!back.url_capture.gave_up);
         // 而「沒有證據」必須是沉默，不是警告。
         assert!(back.broken_privacy_rules(&with_rules(16)).is_empty());
+    }
+
+    #[test]
+    fn a_legacy_hook_failure_remains_a_known_failure() {
+        let dir = Tmp::new("old-hook-failure");
+        std::fs::write(
+            path(&dir.0),
+            r#"{"at":1755000000000,"url":false,"input_hook_failed":true}"#,
+        )
+        .expect("write");
+        let back = read(&dir.0).expect("舊格式要讀得出來");
+        assert_eq!(back.url, CapabilityState::Unavailable);
+        assert_eq!(back.input_hook, CapabilityState::Unavailable);
+        let said = back.broken_privacy_rules(&with_rules(1));
+        assert_eq!(
+            said.iter().map(|line| line.about).collect::<Vec<_>>(),
+            vec![About::PrivacyCapture, About::InputHook]
+        );
+    }
+
+    #[test]
+    fn fields_absent_from_an_old_report_are_unknown_not_false() {
+        let dir = Tmp::new("old-missing-capabilities");
+        std::fs::write(path(&dir.0), r#"{"at":1755000000000}"#).expect("write");
+        let back = read(&dir.0).expect("舊格式要讀得出來");
+        assert_eq!(back.url, CapabilityState::Unknown);
+        assert_eq!(back.input_hook, CapabilityState::Unknown);
+        assert_eq!(back.url_rules_verdict(&with_rules(1)), UrlRules::Unknown);
+        assert!(back.broken_privacy_rules(&with_rules(1)).is_empty());
     }
 
     #[test]
@@ -693,8 +858,8 @@ mod tests {
         let dir = Tmp::new("roundtrip");
         let written = Report {
             at: 1_755_000_000_000,
-            url: false,
-            input_hook_failed: true,
+            url: CapabilityState::Unavailable,
+            input_hook: CapabilityState::Unavailable,
             url_capture: UrlCapture {
                 gave_up: true,
                 password_check_broken: true,
@@ -705,10 +870,17 @@ mod tests {
         write(&dir.0, &written).expect("write");
         let back = read(&dir.0).expect("read back");
         assert_eq!(back.at, written.at);
-        assert!(!back.url);
-        assert!(back.input_hook_failed);
+        assert_eq!(back.url, CapabilityState::Unavailable);
+        assert_eq!(back.input_hook, CapabilityState::Unavailable);
         assert_eq!(back.url_capture, written.url_capture);
         assert_eq!((back.browser_ticks, back.url_reads), (300, 7));
+        let body = std::fs::read_to_string(path(&dir.0)).expect("read JSON");
+        assert!(body.contains(r#""url": "unavailable""#), "{body}");
+        assert!(body.contains(r#""input_hook": "unavailable""#), "{body}");
+        assert!(
+            !body.contains("input_hook_failed"),
+            "新報告不能繼續寫模糊的舊欄位：{body}"
+        );
         // 暫存檔要收乾淨，不然 data dir 裡會慢慢長出一堆 .json.tmp。
         assert!(!path(&dir.0).with_extension("json.tmp").exists());
     }
@@ -724,8 +896,8 @@ mod tests {
         assert!(
             !Report {
                 at: 1,
-                url: true,
-                input_hook_failed: true,
+                url: CapabilityState::Available,
+                input_hook: CapabilityState::Unavailable,
                 ..Default::default()
             }
             .has_session_evidence()
@@ -735,8 +907,8 @@ mod tests {
     /// 而這四個只有那一場問得到，蓋掉就沒了。
     #[test]
     fn the_four_things_only_that_session_could_have_seen_are_evidence() {
-        // 最重的那一則：從投降那一刻起，excluded_urls 一條都不生效。用一份
-        // 全新的 UIA 去問永遠問不出來——新的那份是好的。
+        // 最重的那一則：從投降那一刻起，整個 privacy context fail closed。
+        // 用一份全新的 UIA 去問永遠問不出上一場何時停住——新的那份是好的。
         let gave_up = Report {
             url_capture: UrlCapture {
                 gave_up: true,

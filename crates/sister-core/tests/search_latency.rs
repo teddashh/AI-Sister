@@ -119,7 +119,6 @@ fn frame(ts: i64, i: usize) -> FrameCapture {
             window_title: Some(format!("工單系統 — #{i}")),
             url: Some("https://tickets.example.com/queue".into()),
             pid: Some(4242),
-            password_field: false,
         },
     }
 }

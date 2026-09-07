@@ -82,6 +82,26 @@ AI-Sister 行程的競爭，不防同權限程式手動竄改檔案。
 
 ---
 
+## Capture-time 邊界的競爭與殘餘風險
+
+「排除在 capture-time」表示內容不能通過 recorder 的落地管線，不表示數個 Windows
+API 呼叫能組成一個不可分割的快照。
+
+| 失效方式 | 防線 | 防不住／失敗時 |
+|---|---|---|
+| 隱私檢查後才切換前景或鎖屏 | privacy context 鑄出綁 exact HWND／PID 的 permit；剪貼簿讀取後與 `BitBlt` 後都重驗 permit 和系統狀態，不一致的 bytes／frame 在 dedup、OCR、DB、PNG 前丟棄 | `BitBlt` 已開始時，raced pixels 可能短暫存在工作 RAM；這道防線保證不持久化，不宣稱 RAM 從未碰過 |
+| 敏感視窗留在同一個螢幕背景 | app／URL／標題／敏感欄規則判斷前景，前置命中時不呼叫 capture | GDI 抓的是前景所在的整個 monitor；可見背景 pixels 仍可能入幀，必須靠暫停、最小化或畫面配置避免 |
+| 瀏覽器複製後立刻切到另一個 app | clipboard sequence、owner、格式與 bytes 在同一個 clipboard lock 內取樣，不拿下一拍前景冒充來源；有 URL rules、來源是瀏覽器但沒有 origin URL proof 時直接丟棄 | clipboard event 目前沒有可靠的來源 URL／標題；保守丟棄會留下記憶空洞，URL／標題規則不能聲稱涵蓋 fast copy → switch |
+| WTS 在兩次 poll 之間 lock 又 unlock | Windows 10+ 只有 `WTSActive` 且 unlocked 才放行；Unknown／矛盾／失敗停拍，並在慢 UIA、clipboard、screen 周圍重驗 | 目前是相鄰樣本 polling，不是 `WM_WTSSESSION_CHANGE` 訂閱；兩個樣本間發生又恢復的轉換可能沒有 audit row，不能宣稱捕捉每個原生事件 |
+| source 已 consume 系統轉換，但 DB 寫入失敗 | 完整 observation 留在 recorder-owned pending；一個 transaction 全寫或全不寫，成功前不再 poll 或讀內容，watermark 也不前進 | pending 只在行程 RAM；transaction 前 crash 仍可能失去該 observation，所以是 process-lifetime retry，不是 crash-safe exactly-once |
+| 另一個行程在 recorder 最後一次 pause probe 後、內容 commit 前按下暫停 | Desktop toggle 持有 `pause.lock` exclusive lock；recorder 每個慢來源後重取 snapshot，最後一份 shared guard 留到 PNG／DB transaction 結束。`pause.state` generation 也讓兩次 probe 中間完整發生的 pause→resume 留下 audit 空洞 | 同使用者權限程式直接竄改控制檔本來就不在防護範圍；尤其不能在任何 AI-Sister 行程仍執行時刪 `pause.lock`，那會讓不同 process 各鎖到不同檔案 |
+| input hook callback 正在累加時進入 pause／lock | packed disabled-bit + in-flight count 先禁止新 callback、等在途 callback 歸零才清 counters 與時間／位置基線；resume 也在 disabled 狀態下推進並再清一次 | 這保證已收到的節奏不跨 gap 落地；OS 根本沒有交付的原生事件仍不可觀察，也不宣稱完整 event feed |
+
+Windows 10 是 Release 1.0 最低支援版本；不把 Windows 7／Server 2008 R2 的反向
+`SessionFlags` 語意猜成現行值。
+
+---
+
 ## 最危險的失效模式：安靜地不生效
 
 排除規則出錯有兩個方向，而它們**完全不對等**：
@@ -176,7 +196,7 @@ AI-Sister 行程的競爭，不防同權限程式手動竄改檔案。
 第八次的形狀跟前七次相反，而且是**自己找到的**：前面每一條都是規則
 太窄、命中不了該命中的東西；這一條是規則**太寬**，而懲罰落在別的規則上。
 
-8. **一條三個字母的字根，讓開始功能表變成了瀏覽器。** 決定「要不要問 UIA」
+8. **一條三個字母的字根，讓開始功能表變成了瀏覽器（alpha.102 以前的失效模式）。** 決定「要不要問 UIA」
    的清單裡有 `arc`（Arc 瀏覽器），而比對方式是子字串。於是
    `se·arc·happ.exe`、`se·arc·hhost.exe`——Windows 11 自己的搜尋與開始
    功能表——每次跳到前景都會被當成瀏覽器，被發一次 UIA 呼叫。
@@ -184,8 +204,9 @@ AI-Sister 行程的競爭，不防同權限程式手動竄改檔案。
    連續三次就永久放棄讀網址，於是 `excluded_urls` 那十六條網銀規則
    一起失效。一個看起來只是浪費幾微秒的比對錯誤，出口在十六條規則的墳墓，
    而中間沒有任何一步會出錯或報警。
-   修法：比對改成**詞首**而不是任意子字串，並且清單裡每一條字根都要有一個
-   真的執行檔名證明它會命中（`crates/sister-capture/src/browsers.rs`）。
+   當時的修法：比對改成**詞首**而不是任意子字串，並且清單裡每一條字根都要有一個
+   真的執行檔名證明它會命中（`crates/sister-capture/src/browsers.rs`）。alpha.103
+   再把安全後果改成整個 privacy context Unknown：UIA 失效後不再放行任何內容。
    順便把它從 `windows/` 搬出來——它全部是字串判斷，沒有理由讓它只能在
    CI 上被測到。
 
@@ -214,10 +235,10 @@ AI-Sister 行程的競爭，不防同權限程式手動竄改檔案。
   是「它掃了哪些東西」從來沒有被寫在輸出裡：它只印 `▶ 檢查出貨相依樹（host）`，
   不印它掃的是哪一份 manifest。**看不出範圍的綠勾，和沒有那個勾一樣。**
   現在每一輪都印出是哪一個執行檔
-- **「多擋一點比較安全」在有預算的地方不成立。** 前七條養出的直覺是「規則
-  寧可寬一點」，但第 8 條的兩個方向通到同一個地方：漏掉瀏覽器 → 網址規則
-  對它失效；多抓到非瀏覽器 → 燒掉重試額度 → 網址規則對**所有人**失效。
-  凡是「試錯有次數上限」的機制，寬鬆就不再是免費的保守
+- **有預算的 fail closed 必須把可用性代價說出來。** alpha.102 以前，多抓到
+  非瀏覽器會燒掉 UIA 重試額度，最後讓網址規則安靜失效；現在敏感欄要問每個
+  前景 app，所以重試耗盡時整個 privacy context 會 Unknown、內容停止記錄。
+  安全方向不再反轉，但這段記憶空洞必須由能力報告說明
 - 端到端測試把整個資料目錄**當成位元組**掃過，不依賴任何人記得檢查哪個欄位
   （`cargo test -p sister-capture --test privacy`）
 - 每個修好的缺口都留一個回歸測試，且該測試經過**變異驗證**（拿掉修正就要變紅）
@@ -240,12 +261,9 @@ AI-Sister 行程的競爭，不防同權限程式手動竄改檔案。
 - **狀態報告一律「示範」而非「宣稱」。** `doctor` 的每一個 ✓ 都必須是某件事
   真的做成了，不能是某個物件建得起來。它現在會真的讀一張圖、真的讀一次
   你的螢幕、真的裝一次 hook
-- **「不知道就擋住」必須有上限。** 保守的預設是對的，但一條永遠處於保守
-  狀態的規則不是保守，是失效——而且是最難發現的那種失效，因為它長得就像
-  在正常運作。密碼欄偵測問不出答案時會擋掉那一幀（安全），但連續問不出
-  [`MAX_UNKNOWN_STREAK`] 次之後改成宣告「這台機器上做不到」（誠實），
-  否則在瀏覽器裡就什麼都記不住了。這一條是我自己在寫安全規則時造出來的，
-  在出貨前抓到——**上面那六個是使用者幫我抓的，這個形狀顯然不挑作者**
+- **「不知道就擋住」沒有安全旁路，但必須可見。** 敏感欄偵測問不出答案時
+  當拍 fail closed；連續 [`MAX_UNKNOWN_STREAK`] 次後能力報告宣告「這台機器上
+  做不到」，recorder 仍繼續擋。門檻只改變可觀測性，不把 Unknown 翻成 Clear
 - **排除一定要說得出是誰擋的。** 錄製摘要現在把「排除 80」拆成每條理由各
   幾次。沒有這一行的話，一條寬到吃掉一整天的規則，症狀只是一個沒有解釋
   的數字
@@ -344,10 +362,13 @@ AI-Sister 行程的競爭，不防同權限程式手動竄改檔案。
 印出完整、不截斷的目標；無人值守路徑最後由先前保存的結構化 grant、雙 pass
 target provenance、exact-action permit 與 URL 政策一起承重。URL 政策的
 「說得出來源」只比對保留中的真 Windows 錄製是否看過同一 host（容許一層 `www.`
-差異）；只有 exact `sessions.platform = windows/windows-gdi-uia-focused-url-v1` 的列
-能背書，舊錄製、import 與 replay 都不行。它不證明那格一定是位址列、不證明安全或
-使用者意圖，也不驗 path、redirect 或站內內容。被埋在已授權 app、已見過 host 裡的
-URL 仍可能通過，所以這些防線不等於 Phase 6 的 prompt-injection 退場條件已完成。
+差異）；alpha.103 起只有 exact
+`sessions.platform = windows/windows-gdi-uia-focused-url-v2` 的列能背書。歷史
+`windows/windows-gdi-uia-focused-url-v1` 仍可讀、仍可顯示，但因當時的全域 focused
+element 與 stale URL cache 無法證明 exact HWND／當拍 live value，已撤銷來源授權；
+更舊錄製、import 與 replay 也不能背書。v2 仍不證明網站安全、使用者意圖、path、
+redirect 或站內內容。被埋在已授權 app、已見過 host 裡的 URL 仍可能通過，所以
+這些防線不等於 Phase 6 的 prompt-injection 退場條件已完成。
 
 ---
 
@@ -364,10 +385,9 @@ URL 仍可能通過，所以這些防線不等於 Phase 6 的 prompt-injection �
 6. **網址只讀得到位址列上那串字**，而且只在瀏覽器裡。Chromium 交出來的是
    縮寫版（沒有 scheme、沒有 `www.`），所以按結構寫的規則會整條失效——
    這正是「安靜地不生效」第 1 條的形狀，只是換了個來源。
-7. **密碼欄偵測只涵蓋瀏覽器。** 非瀏覽器（RDP 登入框、安裝程式、VPN
-   用戶端）的密碼欄看不到，仍然只靠「密碼顯示為圓點」與 app 排除。
-   範圍是刻意的：UIA 呼叫沒有辦法取消，讓它一天裡只在瀏覽器上跑，
-   是在拿覆蓋率換「她不會被別人的 app 卡死」。
+7. **顯示密碼仍可能繞過控制項屬性。** 敏感欄屬性現在會對每個前景 app 查；
+   查不到、UIA 失效或前景未知都 fail closed。但使用者按下「顯示密碼」後，
+   控制項若不再回報密碼屬性，內容仍可能被記下；app／標題規則是第二道防線。
 8. **沒有人動的時候，她最多會有 5 秒沒在看。** 這道閘門原本為了降低 CPU，
    從上次看螢幕到現在沒有任何鍵盤滑鼠輸入的話，那個 tick 完全不碰螢幕
    （`GetLastInputInfo`）。這是一個**猜測**：沒有人動 ⇒ 畫面沒變。它對

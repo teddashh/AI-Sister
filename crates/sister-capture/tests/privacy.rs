@@ -8,7 +8,9 @@
 //! 的好處是它不依賴我想得到要檢查哪些欄位——多一個欄位、多一張表、
 //! 未來多一個索引，只要內容漏出去就會被抓到。
 
-use sister_capture::replay::{ReplayBackend, Scenario, Step};
+use sister_capture::replay::{
+    ReplayBackend, ReplayPrivacyContext, ReplaySystemState, Scenario, Step,
+};
 use sister_capture::{Recorder, Tick};
 use sister_core::config::Config;
 use sister_core::db::Db;
@@ -43,14 +45,18 @@ fn step(at_ms: i64, app: &str, title: &str, text: &[&str]) -> Step {
 fn minefield() -> Scenario {
     Scenario {
         name: "privacy-minefield".into(),
+        privacy_context: ReplayPrivacyContext::Clear,
+        system_state: ReplaySystemState::Active,
         steps: vec![
             // 正常工作：這些**應該**被記下來，用來確認我們不是靠「什麼都不記」過關
-            step(
-                0,
-                "chrome.exe",
-                "中華電信 帳單查詢",
-                &["本期應繳 NT$13,450", "客服專線 0800-080-123"],
-            ),
+            Step {
+                at_ms: 0,
+                app: Some("chrome.exe".into()),
+                title: Some("中華電信 帳單查詢".into()),
+                url: Some("https://billing.example.test/statement".into()),
+                text: vec!["本期應繳 NT$13,450".into(), "客服專線 0800-080-123".into()],
+                ..Default::default()
+            },
             // 密碼管理員：整段不該存在
             step(
                 4_000,
@@ -93,9 +99,18 @@ fn minefield() -> Scenario {
                 "Change your password - Example",
                 &["新密碼", "確認新密碼"],
             ),
-            // 回到正常工作，並複製一把 API key（允許的 app，但內容是秘密）
+            // 回到正常工作。離開排除區的第一拍必須先建立
+            // clipboard watermark，不能把邊界上的內容當成可信事件。
             Step {
                 at_ms: 20_000,
+                app: Some("code.exe".into()),
+                title: Some("main.rs - project".into()),
+                text: vec!["fn main() {}".into()],
+                ..Default::default()
+            },
+            // watermark 已經在普通視窗裡建立後才複製 API key。
+            Step {
+                at_ms: 21_000,
                 app: Some("code.exe".into()),
                 title: Some("main.rs - project".into()),
                 text: vec!["fn main() {}".into()],

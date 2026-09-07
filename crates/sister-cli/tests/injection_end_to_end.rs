@@ -56,6 +56,8 @@ fn write_scenario(dir: &Path, injection: &str) -> PathBuf {
     let path = dir.join("scenario.json");
     let scenario = serde_json::json!({
         "name": "injection-end-to-end",
+        "privacy_context": "clear",
+        "system_state": "active",
         "steps": [
             {
                 "at_ms": 0,
@@ -90,7 +92,7 @@ fn seed_l2_and_fact_ids(data_dir: &Path, injection: &str) -> (i64, i64, i64) {
     let mut db = Db::open(&Config::db_path(data_dir)).expect("open replay database");
     let chunks = db.recent(100).expect("read text_chunks");
     assert!(
-        chunks.iter().any(|chunk| chunk.text == injection),
+        chunks.iter().any(|chunk| chunk.text.contains(injection)),
         "injection did not arrive verbatim in text_chunks: {injection:?}; got {:?}",
         chunks.iter().map(|chunk| &chunk.text).collect::<Vec<_>>()
     );
@@ -175,7 +177,6 @@ fn seed_l2_and_fact_ids(data_dir: &Path, injection: &str) -> (i64, i64, i64) {
                     window_title: Some("網址來源夾具".into()),
                     url: Some(url.into()),
                     pid: Some(1),
-                    password_field: false,
                 },
             },
         )

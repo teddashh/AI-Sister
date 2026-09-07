@@ -42,7 +42,7 @@
 
 | 對象 | Release 1.0 身分 | 最小合約 | 對 `1.0` tag 的關係 |
 |---|---|---|---|
-| Windows | **正式支援（GA）** | 可安裝、可升級、可開機常駐；走完 S1 主流程並承諾維護與安全修補 | **唯一的平台支援 blocker** |
+| Windows 10+ | **正式支援（GA）** | 可安裝、可升級、可開機常駐；走完 S1 主流程並承諾維護與安全修補 | **唯一的平台支援 blocker** |
 | macOS | **Public Preview** | 簽進 `.app` 主程序樹的 ScreenCaptureKit + Vision OCR + AX；TCC／紫點狀態與重新授權 UX 說真話；走得完 S1 | 沒達到就不發該 artifact；缺席不擋 Windows GA |
 | Linux | **X11-only Developer Preview** | 真正的 X11 capture + OCR + S1，不把只能 replay 說成桌面支援；Wayland 明示 unsupported／degraded | 沒達到就不發該 artifact；缺席不擋 Windows GA |
 | Persona | **Release 1.0 角色體驗（opt-in assets）** | 四姊妹各自真的有可選立繪與固定語音；同一個 omnibus asset-pack 從揭露、下載、驗證到啟用完整跑通；每位的 code-native 字母 fallback 與 Neutral 永遠離線可用 | **Windows GA 產品面 blocker**；使用者選擇關閉或不下載不是 blocker |
@@ -51,7 +51,8 @@
 
 - **隱私不因 Preview 降級**：三張同意書仍各自 fail-closed；沒簽第一張不記錄、
   沒簽第二張不 spawn CLI、沒簽第三張不寫畫面；pixel 不出機器，capture-time
-  排除仍在寫入前生效。
+  排除仍在寫入前生效。前置閘門命中時不讀內容；OS 呼叫期間換窗時，工作 buffer
+  可能短暫在 RAM，但 permit／system post-check 不通過就不得進 dedup、OCR、DB 或 PNG。
 - **資料承諾同一份**：公開 schema／migration、出處、時間區間刪除的 provenance
   cascade、全量 export／restore 在平台間不得分叉；不能有一個平台「忘掉了」而
   衍生內容或旁邊的檔案還留著。
@@ -152,7 +153,8 @@ capture 層本身就是 recorder。
 - Rust recorder／CLI 骨架：SQLite（WAL）+ migration；沒有 loopback server。
   tray 在桌面殼，開機自啟留在 Release 1.0 發布工程。
 - Windows capture pipeline：變化驅動截圖（dHash 去重）→ 原生 OCR → L0 落地；
-  前景視窗/URL（UIA）、剪貼簿、輸入動態（節奏不記內容）、idle/lock。
+  前景視窗/URL（UIA）、剪貼簿、輸入動態（節奏不記內容）、idle，以及相鄰 WTS
+  polling 樣本觀察到的 lock/unlock；不是完整原生 lifecycle event feed。
 - 「事後補不回來」訊號清單全數當下抓（SPEC §2.1）。
 - Capture 時排除 v0：app/URL blocklist、密碼欄位跳過、一鍵 pause。
 - L1 facts 抽取器（regex：money/phone/url/email/error_code/file_path/datetime）。
@@ -198,10 +200,10 @@ capture 層本身就是 recorder。
       地方是乾淨的」，而未來多一張表、多一個索引就漏了。
       **正反成對**：`ordinary_work_is_still_remembered` 專門證明同一場裡中華電信帳單那
       幾行**有**留下來——不然一個什麼都不記的壞版本會全綠。
-      **這一格有一半是手驗的，不要當成全自動**：UIA 密碼欄偵測（焦點在密碼輸入框上那
-      一刻整幀不擷取）要真的 UIA 樹才跑得起來，Linux CI 上造不出來。上面那支測試蓋到的
-      是**標題規則**那一半。UIA 那一半在 alpha.3 的真 Windows 上手驗過（見 PRIVACY.md
-      「密碼欄偵測只涵蓋瀏覽器」）。
+      **這一格仍有真機部分，不要當成全自動**：alpha.103 起，UIA 敏感欄狀態會對每個
+      前景 app 查；Focused／Unknown／backend error 都在 clipboard 與 screen 前 fail closed，
+      這些 recorder 反面路徑已有 Linux 單元測試。真正的 Windows UIA 樹與非瀏覽器控制項
+      仍只能在真 Windows 驗；alpha.3 只手驗過當時的瀏覽器範圍，擴大後尚未重驗。
 
 **明確不做**：任何 LLM 呼叫、任何 UI、macOS/Linux。
 
@@ -544,10 +546,12 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
 **Release 1.0 exit criteria**
 - [ ] Windows GA 走完上方 Release 1.0 合約的 S1 主流程；正式 artifact 可安裝、
       code-signed、可升級、single-instance、可開機常駐。recorder crash 有 bounded
-      watchdog/backoff，升級與 migration 不丟既有資料。
+      watchdog/backoff，升級與 migration 不丟既有資料。最低支援 Windows 10，舊版
+      Windows 不把反向 WTS lock flags 猜成現行語意。
 - [ ] 三張同意書、capture-time 排除、出處、cascade 刪除、export／restore 與
       pause／resume、跨 capture／brain／hands 的 master stop 在 Windows 正式 artifact
-      上走完；隱私腳本與真 Windows smoke 都過。
+      上走完；隱私腳本與真 Windows smoke 都過。smoke 要覆蓋 WTS active/lock/Unknown、
+      slow UIA 後換窗、clipboard copy → switch 與 frame post-check，不拿 compile 當執行證據。
 - [ ] Persona 產品面走完：離線 Neutral、四姊妹 catalog 與選擇入口可用；**每一位**
       都實際呈現至少一幅通過發布審查的立繪，且兩句 UI fixed tap-line 都能在當下
       trusted click 後播放相符的已核准語音。共用 omnibus pack 經「本機揭露 →
@@ -957,10 +961,13 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     - **查詢出錯往上丟，不讀成「她沒在讀網址」。** 那是「兩種 0」的第三種形狀：
       把錯誤讀成一個測量值。那一句話會叫他去修擷取，而壞掉的其實是這次查詢。
     - **舊錄製不會突然升格成來源票。** alpha.99 以前，UIA 問位址列是否仍有鍵盤
-      焦點失敗時會當成 `false`，可能留下尚未送出的半截字。alpha.100 把修正後的
-      recorder session 標成 `windows/windows-gdi-uia-focused-url-v1`，查詢只信這個
-      exact identity；舊 `windows/windows-gdi`、匯入 corpus 與 scenario replay 全部
-      fail-closed。升級後要讓她實際觀察到一次，不能拿版本字串大小猜。
+      焦點失敗時會當成 `false`，可能留下尚未送出的半截字。alpha.100 因此把當時
+      修正後的 recorder session 標成 `windows/windows-gdi-uia-focused-url-v1`。
+      alpha.103 再發現 v1 的 global focused element 沒綁回原 exact HWND，且 cache
+      可能重用 stale URL 字串，所以 **v1 現在只可讀／顯示、不再授權**。只有
+      `windows/windows-gdi-uia-focused-url-v2` 能背書；更舊 `windows/windows-gdi`、
+      匯入 corpus 與 scenario replay 也全數 fail-closed。升級後要讓 v2 recorder
+      實際觀察到一次，不能拿版本字串大小猜。
     - `open_file` 不能拿網址借殼：`ShellExecuteW` 的 `lpFile` 也接受 URI，所以只看
       `.pdf` 會讓 `https://evil/report.pdf` 繞過 URL 閘門。貼著 OS 呼叫的共同驗證現在
       拒絕 URI、非磁碟機前綴的冒號、正斜線／混合寫法的 UNC/device path、控制字元、
@@ -1717,7 +1724,8 @@ alpha.82 修掉了，見上。）
 
 **這一輪修掉的**（alpha.80）：
 
-（下面這一段描述的是 alpha.80 當時；`PauseState` 現在是五格，見上。）
+（下面這一段描述的是 alpha.80 當時；`PauseState` 現在是六格：五種暫停理由，
+alpha.103 另把 `pause.state`／`pause.lock` 無法確認分成 `ControlStateUncheckable`。）
 
 `sister doctor` 的暫停那一格——上一版兩種成因印同一句「**暫停中**（不知道從
 什麼時候開始）」，而那兩種的下一步是相反的：旗標在、內容壞掉，**刪掉它有

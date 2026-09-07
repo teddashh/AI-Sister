@@ -14,27 +14,6 @@
 //! 這個模組刻意**不放在 `windows/` 底下**：它全部是字串判斷，放在這裡
 //! 開發機（Linux）就跑得到測試。同樣的理由見 `uia::plausible_url`。
 
-/// 會叫 UIA 的瀏覽器（比對小寫執行檔名，例如 `chrome.exe`）。
-///
-/// 只寫可辨識的字根，讓 `chrome` 一條同時涵蓋 `chrome.exe`、
-/// `chrome_proxy.exe` 與各家 Chromium 分支的命名。
-const BROWSERS: &[&str] = &[
-    "chrome",
-    "msedge",
-    "firefox",
-    "brave",
-    "vivaldi",
-    "opera",
-    "chromium",
-    "arc",
-    "zen",
-    "librewolf",
-    "waterfox",
-    "floorp",
-    "thorium",
-    "iexplore",
-];
-
 /// 這個 app 該不該被問 UIA。
 ///
 /// 比對的是**詞首**，不是任意子字串。原本是 `app_key.contains(b)`，
@@ -47,16 +26,7 @@ const BROWSERS: &[&str] = &[
 /// 會退回顯示名稱（`google chrome`），那時候字根不在開頭。所以只要求
 /// 前一個字元不是英數即可——空白、`-`、`_`、`.`、`\` 都算界線。
 pub fn is_browser(app_key: &str) -> bool {
-    BROWSERS.iter().any(|b| starts_a_word(app_key, b))
-}
-
-fn starts_a_word(haystack: &str, needle: &str) -> bool {
-    haystack.match_indices(needle).any(|(at, _)| {
-        haystack[..at]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !c.is_alphanumeric())
-    })
+    sister_core::config::app_is_browser(app_key)
 }
 
 #[cfg(test)]
@@ -116,7 +86,10 @@ mod tests {
         // 集合相等：加了字根卻沒給證人會紅，刪了字根卻留著證人也會紅。
         let named: std::collections::BTreeSet<&str> =
             witnesses.iter().map(|(root, _)| *root).collect();
-        let actual: std::collections::BTreeSet<&str> = BROWSERS.iter().copied().collect();
+        let actual: std::collections::BTreeSet<&str> = sister_core::config::BROWSER_APP_ROOTS
+            .iter()
+            .copied()
+            .collect();
         assert_eq!(actual, named, "BROWSERS 有字根沒有被證明過");
 
         for (root, witness) in witnesses {

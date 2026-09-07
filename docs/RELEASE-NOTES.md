@@ -8,6 +8,11 @@
 找不到那一節的時候，release 上會明講「這一版沒有寫版本說明」，
 **不會拿上一版的字頂上去**。這份檔案存在的唯一理由就是那件事——見底下的〈存檔〉。
 
+> 下方舊版本段落描述的是各版**當時**的行為。alpha.102 以前曾在 UIA 持續失效後
+> 放棄網址／敏感欄防線；alpha.103 的安全地基改為整個 privacy context fail closed，
+> 對所有前景 app 查敏感欄，Unknown／error 都在剪貼簿與螢幕之前停下。舊段落保留作
+> 版本紀錄，不代表目前契約。
+
 
 ## 開場
 
@@ -40,6 +45,50 @@ sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
+
+
+## v0.1.0-alpha.103
+
+**alpha.102 的 tag 沒有產出可下載檔；這才是 Persona 立繪與固定語音的
+第一個可下載實測版，並且補上 Release 1.0 跨平台共用的隱私安全地基。**
+
+Persona 包保留 alpha.102 已寫好的嚴格邊界：設定頁先攤開固定 CDN host、path、
+**73,261,088 bytes** 與資料邊界，只有使用者當下按下原生按鈕才可發一次
+fixed HTTPS GET。整包與逐檔 hash／size／rights 全過才會原子啟用；失敗、取消、
+刪除或沒下載時都回本機字母人。四位角色各有一張立繪與兩句核准的 WAV；
+語音預設關閉，只服務同一下真人點擊，不主動出聲，不念 OCR、回憶或答案。
+tag CI 會在公開 release 前另用 Windows native TLS 實際下載、驗包、安裝與刪除；
+任一步沒過就不會公開這個 release。
+
+錄製門改成明確的三態。Windows 10+ 的 WTS 查不到 session、狀態矛盾、舊系統、
+UIA 讀不到前景或瀏覽器 URL，都是 **Unknown 當拍停讀**，不再借預設值當安全。
+鎖定／解鎖觀察先以同一筆 transaction 寫好 audit 才可繼續；寫入暫時失敗會
+在行程存活期間保留待重試，正常收尾也會先把它寫完。這不是完整的 OS event
+feed，也不宣稱 crash-safe exactly-once；摘要會把停讀次數與原因單獨說出來。
+
+跨行程暫停不再是「先讀一個 bool、稍後再寫內容」。Desktop 的 toggle 在
+`pause.lock` exclusive lock 裡完成；recorder 在每一道慢來源後重取 snapshot，並把
+最後一份 shared guard 留到 PNG／DB transaction 結束。`pause.state` 的持久
+generation 讓完整 pause→resume 即使發生在兩次探測之間也會留下 audit 空洞；控制
+檔讀不到或互相矛盾一律 fail closed。暫停中的鍵鼠節奏與剪貼簿也只會清除／推水位，
+不會在 resume 後補進資料庫；看到 resume 的那一拍只關閉 audit，不會拿較早的 tick
+時間寫內容，下一拍才真正恢復。正常恢復請用同一 data dir 的 `sister resume`；只刪
+`paused.flag` 不再保證解除，而任何行程仍執行時都不能刪 `pause.lock`。
+
+前景許可不再只記一個布林值：它綁定 exact HWND、PID、世代與整份 privacy
+context，在 clipboard 與 screen 的 RAM buffer 要進入 focus／dedup／OCR／DB／PNG 前重新量一次。
+UIA 只接受 exact foreground HWND 下的 focused element，並每拍重讀瀏覽器地址列的
+value／focus；同一個視窗切分頁、焦點轉到密碼欄或中途鎖屏都會丟掉這拍。
+有 URL 排除規則時，瀏覽器 clipboard 若無法證明原始分頁 URL／標題也會保守丟掉。
+
+無人值守 URL 的 trusted recorder identity 升為
+`windows/windows-gdi-uia-focused-url-v2`。Replay、舊 v1 資料，以及把 backend 名字偽裝成這串
+的第三方實作，都不能再替無人值守動作種來源票。已有 v1 紀錄仍可查、可看，
+只是不授權動作。
+
+邊界也明寫在隱私文件：Windows 現行擷取的是整個前景 monitor，所以後方露出的
+敏感視窗仍可能入鏡；前景競態也可能讓 pixels 短暫進 RAM。可承諾的是後驗失敗時
+在 RAM 丟掉，不進 OCR、資料庫或 PNG，不是「任何像素從未被讀到」。
 
 
 ## v0.1.0-alpha.102

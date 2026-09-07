@@ -1,5 +1,7 @@
 {
   "name": "bill-lookup",
+  "privacy_context": "clear",
+  "system_state": "active",
   "steps": [
     { "at_ms": 0, "app": "chrome.exe", "app_name": "Google Chrome",
       "title": "中華電信 客戶服務 - 帳單查詢",

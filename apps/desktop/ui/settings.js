@@ -152,15 +152,19 @@ async function refreshHealth(urls) {
  */
 function paintHealthUnaskable(hasRules) {
   if (!el.health) return;
+  // 同一扇視窗可能先畫過 Working。只加 `.unknown` 會留下 `.ok`，而 CSS 裡
+  // `.health.ok` 排在後面，最後看起來仍是綠的。
+  el.health.classList.remove("ok");
   el.health.classList.add("unknown");
   el.health.textContent =
     "問不出這幾條規則會不會生效（設定或能力報告讀不出來）。" +
     "底下那幾條可能一條都沒在擋——sister doctor 問得到同一份答案。";
   el.health.hidden = !hasRules;
   // 問不到就什麼都不知道，包括總開關和輸入 hook。留著上一次的答案會讓那兩格
-  // 變成「現在的狀況」，而它們可能是十分鐘前的。
+  // 變成「現在的狀況」，而它們可能是十分鐘前的。hook 要畫成 Unknown，
+  // 不能藏掉；空白和已驗證可用原本就是同一個樣子。
   if (el.captureOff) el.captureOff.hidden = true;
-  if (el.machine) el.machine.hidden = true;
+  paintMachine([], "unknown");
 }
 
 /**
@@ -183,30 +187,60 @@ function paintCaptureOff(off) {
 }
 
 /**
- * 不屬於底下任何一格的能力缺口。目前只有輸入 hook。
+ * 不屬於底下任何一格的能力狀態。目前只有輸入 hook。
  *
  * 它以前和網址規則那幾句話擠在同一格裡，而那一格就在網址輸入框正下方——
  * 一個 hook 裝不上的人，讀到的是「我有一條網址規則寫壞了」。
  */
-function paintMachine(lines) {
+function paintMachine(issues, inputHook) {
   if (!el.machine) return;
-  el.machine.classList.toggle("bad", lines.length > 0);
+  el.machine.classList.remove("bad", "unknown", "ok");
+  const lines = issues.map((issue) => issue.message);
+  const hasKnownFailure = issues.length > 0 || inputHook === "unavailable";
+
+  // 這是 Rust DTO 的 closed set；每一態都要在這裡有明確的畫法。
+  // 漏了欄位的舊 desktop 回應或未來的新值也一律 fail-unknown，
+  // 不能因為「沒有 broken 訊息」就藏起來假裝可用。也不能在已知的 privacy
+  // 警告後 early return：同一份報告裡的 hook Unknown 仍是一件不同的事。
+  switch (inputHook) {
+    case "available":
+      break;
+    case "unavailable":
+      // 正常的 DTO 會同時帶著 core 產生的 InputHook reason；若 payload 不完整，
+      // 仍不能把一個明確的 Unavailable 畫成空白。
+      if (!issues.some((issue) => issue.about === "input_hook")) {
+        lines.push("已探測：輸入 hook 裝不上，這一場的節奏訊號會是空的。");
+      }
+      break;
+    case "unknown":
+    default:
+      lines.push("還不知道輸入 hook 裝不裝得上：這份能力報告沒有量到它。");
+  }
+
   el.machine.textContent = lines.join("\n");
   el.machine.hidden = lines.length === 0;
+  if (lines.length > 0) {
+    el.machine.classList.add(hasKnownFailure ? "bad" : "unknown");
+  }
 }
 
 function paintHealth(health, hasRules) {
   if (!el.health) return;
+  // 每次都從無判決樣式開始；尤其要在 `at == null` 的早退之前清 `.ok`。
+  // 否則同一頁上一拍的綠燈會蓋過下一拍的 Unknown。
+  el.health.classList.remove("unknown", "ok");
   // 先把不屬於這一格的兩件事送去它們該去的地方。**在 `at === null` 那條早退
   // 路徑之前**：一台從沒錄過的機器，總開關可能就是關著的，而那正是他最該
   // 知道的時候——他還在設定，還沒按下開始。
   paintCaptureOff(health.capture_off === true);
   paintMachine(
-    (health.broken ?? [])
-      .filter((b) => b.about !== "url_rules")
-      .map((b) => b.message),
+    (health.broken ?? []).filter((b) => b.about !== "url_rules"),
+    health.input_hook,
   );
   const urlRules = (health.broken ?? []).filter((b) => b.about === "url_rules");
+  const privacyCapture = (health.broken ?? []).filter(
+    (b) => b.about === "privacy_capture",
+  );
   // **三種狀態，不是兩種。** 「沒有報告」和「都生效」以前會長得一樣，而那
   // 正是這一格要修的那種安靜——一個從沒錄過的人看到一片乾淨，會以為門關好了。
   //
@@ -231,7 +265,6 @@ function paintHealth(health, hasRules) {
     el.health.hidden = !hasRules;
     return;
   }
-  el.health.classList.remove("unknown", "ok");
   // 「開始記錄的時候測到的」以前寫在這裡，而那句話本身就是那個 bug：這個檔案
   // 開機寫一次就凍住，於是 UIA 半路投降之後的那幾小時，這一頁拿著一份開機時的
   // 「一切正常」什麼都不說。現在 recorder 錄製途中每分鐘蓋一次，所以這個時戳
@@ -252,28 +285,53 @@ function paintHealth(health, hasRules) {
   // 「UIA 真的讀得到網址」和「UIA 起得來但一次都沒讀到過」印同一片空白，而後
   // 者是 `capabilities.rs` 叫做「這一整條線最常見的壞法」的那一台——那個人
   // 現在就在這一頁上打 `*.bank.com.tw*`，然後去網銀。
-  const verdict = health.url_rules ?? { kind: "none" };
-  if (verdict.kind === "unproven") {
-    el.health.classList.add("unknown");
-    el.health.textContent =
-      `還不知道這幾條會不會生效：上一場在瀏覽器視窗上只停了 ${verdict.ticks} 拍` +
-      `（要 ${verdict.need} 拍才問得出來），一個網址都還沒讀到過。\n` +
-      `多用一下瀏覽器再回來看這裡。（${when(health.at)} 的狀況）`;
-    el.health.hidden = !hasRules;
-    return;
+  const verdict = health.url_rules;
+  switch (verdict?.kind) {
+    case "unproven":
+      el.health.classList.add("unknown");
+      el.health.textContent =
+        `還不知道這幾條會不會生效：上一場在瀏覽器視窗上只停了 ${verdict.ticks} 拍` +
+        `（要 ${verdict.need} 拍才問得出來），一個網址都還沒讀到過。\n` +
+        `多用一下瀏覽器再回來看這裡。（${when(health.at)} 的狀況）`;
+      el.health.hidden = !hasRules;
+      return;
+    case "working":
+      el.health.classList.add("ok");
+      el.health.textContent =
+        `上一場至少有 ${verdict.reads} 個瀏覽器拍讀到網址，可供這幾條規則比對。` +
+        `（${when(health.at)} 的狀況）`;
+      el.health.hidden = false;
+      return;
+    case "none":
+      // 一條規則都沒寫：沒有這個問題要回答。
+      el.health.textContent = "";
+      el.health.hidden = true;
+      return;
+    case "broken":
+      // UIA/privacy context 的原因屬於整台 recorder，已經在上面的 machine 格
+      // 顯示；它同時讓 URL verdict 成為 Broken，不代表 Rust 漏了原因。不要在
+      // 原因正掛在畫面上時，旁邊再捏造一句「沒有帶回原因」。
+      if (privacyCapture.length > 0) {
+        el.health.textContent = "";
+        el.health.hidden = true;
+        return;
+      }
+      // 真的既沒有 URL reason，也沒有 privacy reason，才是一份不完整的回應。
+      el.health.textContent =
+        `能力報告判定這幾條規則失效，但這份回應找不到對應原因。` +
+        `（${when(health.at)} 的狀況）`;
+      el.health.hidden = !hasRules;
+      return;
+    case "unknown":
+    default:
+      // 舊回應漏了 `url_rules`，或新版多了這頁還不認得的值：都是
+      // 「我現在沒有一個可信的結論」，不是 `none` 或 `working`。
+      el.health.classList.add("unknown");
+      el.health.textContent =
+        `還不知道這幾條會不會生效：這份能力報告沒有量到網址擷取能力。` +
+        `（${when(health.at)} 的狀況）`;
+      el.health.hidden = !hasRules;
   }
-  if (verdict.kind === "working") {
-    el.health.classList.add("ok");
-    el.health.textContent =
-      `這幾條生效中：上一場讀到 ${verdict.reads} 個網址，` +
-      `所以規則有東西可以比對。（${when(health.at)} 的狀況）`;
-    el.health.hidden = false;
-    return;
-  }
-  // `none`（一條規則都沒寫）。這一格問的是「你寫的這幾條會不會生效」，沒寫
-  // 就沒有那個問題——空輸入框底下掛一句話只會變成背景雜訊。
-  el.health.textContent = "";
-  el.health.hidden = true;
 }
 
 /**
@@ -1291,7 +1349,8 @@ function demo(variant) {
   // 一定要看得到它——版面沒被眼睛看過的警告，等於還沒寫。`?demo=unknown` 是
   // 另外那一半：一台還沒錄過的機器。那句話要**看起來明顯比較不吵**，不然
   // 「還不知道」會被當成「有問題」，而那一頁上真正的警告就貶值了。
-  // `?demo=unproven` 和 `?demo=working` 是這一格的另外兩張臉，而它們在這之前
+  // `?demo=unproven`、`?demo=working` 和 `?demo=capability-unknown` 是這一格
+  // 的其他幾張臉，而它們在這之前
   // **同一張都畫不出來**：`broken` 是空的，這一格就整個藏起來。三台不同的機器
   // 一片相同的空白，其中一台把使用者的網銀錄了一整天。
   //
@@ -1300,15 +1359,23 @@ function demo(variant) {
   const verdicts = {
     unproven: { kind: "unproven", ticks: 6, need: 20 },
     working: { kind: "working", reads: 412 },
+    "capability-unknown": { kind: "unknown" },
   };
   paintHealth(
     variant === "unknown"
-      ? { broken: [], at: null, capture_off: false }
+      ? {
+          broken: [],
+          at: null,
+          capture_off: false,
+          input_hook: "unknown",
+          url_rules: { kind: "unknown" },
+        }
       : verdicts[variant]
         ? {
             broken: [],
             at: Date.now() - 40 * 60 * 1000,
             capture_off: false,
+            input_hook: variant === "capability-unknown" ? "unknown" : "available",
             url_rules: verdicts[variant],
           }
         : {
@@ -1328,6 +1395,8 @@ function demo(variant) {
             at: Date.now() - 3 * 3600 * 1000,
             // 總開關那一句要被眼睛看過：它是這一頁上唯一一句「這一整頁都不算數」。
             capture_off: variant === "off",
+            input_hook: "unavailable",
+            url_rules: { kind: "broken" },
           },
     true,
   );
