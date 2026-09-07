@@ -15,6 +15,10 @@ pub mod ocr_layout;
 pub mod ocr_regions;
 pub mod recorder;
 
+/// Linux X11 擷取後端的可信啟動邊界。Wayland 明確不支援；尚未通過
+/// exact-process system-session 驗證時只會回 Unknown，不會開始讀內容。
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod replay;
 pub mod scale;
 pub mod timings;

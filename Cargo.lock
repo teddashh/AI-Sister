@@ -1179,6 +1179,7 @@ dependencies = [
  "sister-core",
  "tracing",
  "windows",
+ "x11rb",
 ]
 
 [[package]]

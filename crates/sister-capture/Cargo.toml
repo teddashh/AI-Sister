@@ -48,3 +48,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# X11 Preview 走 x11rb 自己的純 Rust transport，不啟用 XCB FFI／dlopen。
+# `image` 供之後把 GetImage reply 正規化，`randr` 供 monitor 枚舉；先不把
+# xinput／xfixes 等尚未實作的能力一起帶進來。
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "=0.13.2", default-features = false, features = ["image", "randr"] }
