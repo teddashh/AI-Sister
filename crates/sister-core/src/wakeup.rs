@@ -350,8 +350,8 @@ impl Handle {
 
 impl Drop for Handle {
     /// 正常收工會先 `wake.take()` 再走 [`Self::shutdown`]；`Handle` 出生到那一行
-    /// 之間沒有會提早回傳的 `?`／`return Err`／`bail!`。因此還握著 thread 的
-    /// `Drop` 是 panic unwind 的保險路徑。
+    /// 之間若 maintenance 的 `?` 提早離開，或發生 panic unwind，還握著 thread
+    /// 的 `Drop` 就是收掉 worker 與心跳的保險路徑。
     ///
     /// join 期間仍要說 Thinking，避免另一個 recorder 進來；join 回來後這個
     /// 行程已經沒有人在想，必須立刻蓋墓碑，不能把兩分鐘上限留在磁碟上。

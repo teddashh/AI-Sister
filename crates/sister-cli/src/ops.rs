@@ -24430,6 +24430,137 @@ pub mod record {
         }
     }
 
+    /// 主迴圈存活期間的 recording heartbeat。
+    ///
+    /// 正常收工會明確 [`Self::stop`]，讓墓碑排在 brain shutdown 後、資料庫
+    /// finalize 前。任何每拍 maintenance 提早 `?`、panic unwind，或未來新增的
+    /// 錯誤出口則由 `Drop` 收掉；不能再留一份新鮮的 Recording 心跳等逾時。
+    #[derive(Debug)]
+    #[cfg_attr(not(windows), allow(dead_code))]
+    struct RecordingBeat {
+        dir: PathBuf,
+        stopped: bool,
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    impl RecordingBeat {
+        fn start(data_dir: &Path) -> Self {
+            // 沿用既有語意：第一拍寫不進去不擋錄製，定期拍也只警告。
+            let _ = sister_core::heartbeat::beat(data_dir, sister_core::now_ms());
+            Self {
+                dir: data_dir.to_path_buf(),
+                stopped: false,
+            }
+        }
+
+        fn beat(&mut self) -> Result<()> {
+            sister_core::heartbeat::beat(&self.dir, sister_core::now_ms())
+        }
+
+        fn stop(&mut self) {
+            if !self.stopped {
+                sister_core::heartbeat::stop(&self.dir, sister_core::now_ms());
+                self.stopped = true;
+            }
+        }
+    }
+
+    impl Drop for RecordingBeat {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    enum LiveLoopControl {
+        Tick(sister_core::model::Millis),
+        Stop(sister_core::model::EndReason),
+    }
+
+    #[cfg(any(windows, test))]
+    enum LiveAfterTick {
+        Continue,
+        Stop(sister_core::model::EndReason),
+    }
+
+    /// 平台中立的 live lifecycle seam。
+    ///
+    /// `next` 是平台控制面（Ctrl-C／duration／外部 stop），`pause_probe` 是平台
+    /// pause snapshot，`after_tick` 是可熱重載的 maintenance hooks。runner 統一
+    /// recorder tick、pause transition 與 brain wake 判斷；caller 擁有 heartbeat
+    /// RAII，production 的 `?` 會立刻退出它的 scope，錯誤路徑因此也會蓋墓碑。
+    #[cfg(any(windows, test))]
+    fn run_live_loop<B, Next, Pause, After, Sleep>(
+        recorder: &mut sister_capture::Recorder<B>,
+        recording_beat: &mut RecordingBeat,
+        mut next: Next,
+        mut pause_probe: Pause,
+        mut after_tick: After,
+        mut sleep: Sleep,
+    ) -> Result<sister_core::model::EndReason>
+    where
+        B: sister_capture::Backend,
+        Next: FnMut() -> LiveLoopControl,
+        Pause: FnMut() -> sister_capture::PauseSignal,
+        After: FnMut(
+            &mut sister_capture::Recorder<B>,
+            bool,
+            &mut RecordingBeat,
+        ) -> Result<LiveAfterTick>,
+        Sleep: FnMut(),
+    {
+        let mut was_idle = false;
+        loop {
+            let now = match next() {
+                LiveLoopControl::Tick(now) => now,
+                LiveLoopControl::Stop(reason) => return Ok(reason),
+            };
+
+            let was_paused = recorder.is_paused();
+            let tick_result = recorder.tick_with_pause_probe(now, &mut pause_probe);
+            match (was_paused, recorder.is_paused()) {
+                (false, true) => println!("  ⏸ 已暫停——她不看了，直到你解除。"),
+                (true, false) => println!("  ▶ 已解除暫停。"),
+                _ => {}
+            }
+
+            let ping_brain = match tick_result {
+                Err(e) => {
+                    tracing::warn!("tick failed: {e:#}");
+                    false
+                }
+                Ok(tick) => {
+                    let ping = should_ping_brain(&tick, &mut was_idle);
+                    if let sister_capture::Tick::Kept {
+                        frame_id,
+                        ocr_blocks,
+                        facts,
+                    } = tick
+                    {
+                        tracing::debug!("frame #{frame_id}：{ocr_blocks} 段文字、{facts} 個事實");
+                    }
+                    ping
+                }
+            };
+
+            if let LiveAfterTick::Stop(reason) = after_tick(recorder, ping_brain, recording_beat)? {
+                return Ok(reason);
+            }
+            sleep();
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    fn finalize_live_recording<B: sister_capture::Backend>(
+        recorder: &mut sister_capture::Recorder<B>,
+        reason: sister_core::model::EndReason,
+        recording_beat: &mut RecordingBeat,
+    ) -> Result<()> {
+        // 墓碑必須先於可能失敗的 DB finalize；brain shutdown 由呼叫端排在這之前。
+        recording_beat.stop();
+        recorder.finish(reason)
+    }
+
     /// 把開機那份能力報告落地。**只有交棒之後叫得動**（見 [`HandedOff`]）。
     #[cfg(windows)]
     fn write_boot_report(
@@ -24457,7 +24588,6 @@ pub mod record {
         // 而她還在一張一張寫。
         mut wants_images_by_config: WantsImages,
     ) -> Result<()> {
-        use sister_capture::Tick;
         use sister_capture::windows::{self, Capabilities};
         use std::sync::atomic::Ordering;
         use std::time::{Duration, Instant};
@@ -24620,7 +24750,7 @@ pub mod record {
         // 這裡把它接過來：交棒之後那個執行緒就停了，心跳從此跟著這個迴圈走
         // ——一個蓋得動心跳但迴圈已經卡死的行程，不該還在說自己在錄。
         let handed_off = boot.hand_off();
-        let _ = sister_core::heartbeat::beat(data_dir, sister_core::now_ms());
+        let mut recording_beat = RecordingBeat::start(data_dir);
         let mut last_beat = Instant::now();
 
         // 開機那份能力報告寫在這裡，**不是**在上面探測完的那一刻。
@@ -24676,279 +24806,252 @@ pub mod record {
         if wake.is_none() && !sister_core::wakeup::armed(&brain_cfg) {
             println!("  解釋層這一場一次都不會醒：還沒設定 [brain] command。");
         }
-        let mut was_idle = false;
-
         let mut last_report = Instant::now();
-        // 為什麼停的。預設是 Ctrl-C，因為 `while` 那個條件是唯一一條不經過
-        // 任何 `break` 的出口——那條路上沒有地方可以設定它。
-        let mut end_reason = sister_core::model::EndReason::Interrupted;
-        while !STOP.load(Ordering::SeqCst) {
-            if let Some(d) = deadline
-                && Instant::now() >= d
-            {
-                end_reason = sister_core::model::EndReason::Duration;
-                break;
-            }
-
-            // 字母人（或別的什麼人）按了「停止」。跟暫停用同一個節拍去問，因為
-            // 它們是同一種東西：一次 `stat`，而按下去的那個人正看著螢幕等它生效。
-            if sister_core::control::take_stop(data_dir) {
-                println!("  ■ 收到停止的請求，這就收工。");
-                end_reason = sister_core::model::EndReason::Requested;
-                break;
-            }
-
-            // 暫停鍵在**另一個行程**上（字母人）。每一道內容邊界都重新拿 shared
-            // pause snapshot；最後一份 guard 會活到 PNG／DB transaction 結束，
-            // 所以另一個行程的 toggle 不是完整排在寫入前，就是排在寫入後。
-            // 不能在這裡另存一個 bool：它既看不見同一拍內的 pause→resume generation，
-            // 也會把 probe 與 commit 之間重新打開成 TOCTOU。
-            let now = sister_core::now_ms();
-            let was_paused = rec.is_paused();
-            let tick_result = rec.tick_with_pause_probe(now, || guarded_pause_signal(data_dir));
-            match (was_paused, rec.is_paused()) {
-                (false, true) => println!("  ⏸ 已暫停——她不看了，直到你解除。"),
-                (true, false) => println!("  ▶ 已解除暫停。"),
-                _ => {}
-            }
-
-            match tick_result {
-                // 單次 tick 失敗不該終止 session：抓不到畫面的原因多半是
-                // 暫時的（切換使用者、顯示器休眠），下一秒就好了
-                Err(e) => tracing::warn!("tick failed: {e:#}"),
-                Ok(tick) => {
-                    if should_ping_brain(&tick, &mut was_idle)
-                        && let Some(w) = wake.as_ref()
-                    {
-                        w.ping();
-                    }
-                    if let Tick::Kept {
-                        frame_id,
-                        ocr_blocks,
-                        facts,
-                    } = tick
-                    {
-                        tracing::debug!("frame #{frame_id}：{ocr_blocks} 段文字、{facts} 個事實");
-                    }
+        let end_reason = run_live_loop(
+            &mut rec,
+            &mut recording_beat,
+            || {
+                // Ctrl-C 是唯一不經過具名 break 的出口。
+                if STOP.load(Ordering::SeqCst) {
+                    return LiveLoopControl::Stop(sister_core::model::EndReason::Interrupted);
                 }
-            }
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    return LiveLoopControl::Stop(sister_core::model::EndReason::Duration);
+                }
+                // 開機前留下的 request 已由 BootBeat 清掉；這裡看到的一定屬於本場。
+                if sister_core::control::take_stop(data_dir) {
+                    println!("  ■ 收到停止的請求，這就收工。");
+                    return LiveLoopControl::Stop(sister_core::model::EndReason::Requested);
+                }
+                LiveLoopControl::Tick(sister_core::now_ms())
+            },
+            || guarded_pause_signal(data_dir),
+            |rec, ping_brain, recording_beat| {
+                if ping_brain && let Some(w) = wake.as_ref() {
+                    w.ping();
+                }
 
-            // 設定改了就當場換上。**讀不出來就維持原樣，絕不退回預設值**——
-            // 預設值比任何一份使用者自訂的 blocklist 都寬鬆，所以一個打錯的
-            // TOML 會安靜地把排除規則全部拿掉。那是這裡唯一不能犯的錯。
-            if let Some(path) = watched.as_deref()
-                && last_config_check.elapsed() >= CONFIG_EVERY
-            {
-                last_config_check = Instant::now();
-                if config_watch.changed(path) {
-                    // 三種答案裡有兩種是「別動」，而那條規則住在 core
-                    // （`Config::reload`），因為這個迴圈只在 Windows 上編譯——
-                    // 開發機和 CI 都跑不進來，寫在這裡等於沒有人驗得到。
-                    use sister_core::config::Reload;
-                    match Config::reload(path) {
-                        Reload::Fresh(fresh) => {
-                            println!(
-                                "  ⟳ 設定檔換了：排除 {} 個 app、{} 條網址；\
+                // 設定改了就當場換上。**讀不出來就維持原樣，絕不退回預設值**——
+                // 預設值比任何一份使用者自訂的 blocklist 都寬鬆，所以一個打錯的
+                // TOML 會安靜地把排除規則全部拿掉。那是這裡唯一不能犯的錯。
+                if let Some(path) = watched.as_deref()
+                    && last_config_check.elapsed() >= CONFIG_EVERY
+                {
+                    last_config_check = Instant::now();
+                    if config_watch.changed(path) {
+                        // 三種答案裡有兩種是「別動」，而那條規則住在 core
+                        // （`Config::reload`），因為這個迴圈只在 Windows 上編譯——
+                        // 開發機和 CI 都跑不進來，寫在這裡等於沒有人驗得到。
+                        use sister_core::config::Reload;
+                        match Config::reload(path) {
+                            Reload::Fresh(fresh) => {
+                                println!(
+                                    "  ⟳ 設定檔換了：排除 {} 個 app、{} 條網址；\
                                  保留期 畫面 {} 天、文字 {} 天",
-                                fresh.privacy.excluded_apps.len(),
-                                fresh.privacy.excluded_urls.len(),
-                                fresh.retention.frames_days,
-                                fresh.retention.text_days
-                            );
-                            // 新規則裡「寫了也不會命中」的那幾條要當場講。
-                            // 這是使用者最可能剛剛打錯字的那一刻。
-                            for (rule, why) in sister_core::config::suspicious_url_rules(
-                                &fresh.privacy.excluded_urls,
-                            ) {
-                                println!("    ⚠  這條寫了也不會命中：{rule} — {why}");
-                            }
-                            retention = fresh.retention.clone();
-                            // `capture.store_images` 以前不在這裡，於是它凍在
-                            // 開機那一刻——設定頁上關掉截圖、`doctor` 照著磁碟
-                            // 上那一份說「text-only 模式」，而這個迴圈還在一張
-                            // 一張寫。真正動手的是下面那道 `recheck`（同意書仍
-                            // 然是上限），這裡只負責把他寫下的意思送過去，並且
-                            // 叫它別等下一個節拍。
-                            let fresh_wants_images = WantsImages::from_reloaded_config(&fresh);
-                            if wants_images_by_config != fresh_wants_images {
-                                wants_images_by_config = fresh_wants_images;
-                                consent_dirty = true;
-                            }
-                            rec.set_privacy(fresh.privacy);
-                            if let Some(w) = wake.as_ref() {
-                                w.set_config(fresh.brain.clone());
-                            } else if sister_core::wakeup::armed(&fresh.brain) {
-                                match sister_core::wakeup::Handle::maybe_spawn(
-                                    data_dir,
-                                    fresh.brain.clone(),
-                                    sister_core::now_ms(),
+                                    fresh.privacy.excluded_apps.len(),
+                                    fresh.privacy.excluded_urls.len(),
+                                    fresh.retention.frames_days,
+                                    fresh.retention.text_days
+                                );
+                                // 新規則裡「寫了也不會命中」的那幾條要當場講。
+                                // 這是使用者最可能剛剛打錯字的那一刻。
+                                for (rule, why) in sister_core::config::suspicious_url_rules(
+                                    &fresh.privacy.excluded_urls,
                                 ) {
-                                    Ok(h) => wake = h,
-                                    Err(e) => {
-                                        println!("  ⚠ 解釋層執行緒開不起來（錄製照跑）：{e:#}")
+                                    println!("    ⚠  這條寫了也不會命中：{rule} — {why}");
+                                }
+                                retention = fresh.retention.clone();
+                                // `capture.store_images` 以前不在這裡，於是它凍在
+                                // 開機那一刻——設定頁上關掉截圖、`doctor` 照著磁碟
+                                // 上那一份說「text-only 模式」，而這個迴圈還在一張
+                                // 一張寫。真正動手的是下面那道 `recheck`（同意書仍
+                                // 然是上限），這裡只負責把他寫下的意思送過去，並且
+                                // 叫它別等下一個節拍。
+                                let fresh_wants_images = WantsImages::from_reloaded_config(&fresh);
+                                if wants_images_by_config != fresh_wants_images {
+                                    wants_images_by_config = fresh_wants_images;
+                                    consent_dirty = true;
+                                }
+                                rec.set_privacy(fresh.privacy);
+                                if let Some(w) = wake.as_ref() {
+                                    w.set_config(fresh.brain.clone());
+                                } else if sister_core::wakeup::armed(&fresh.brain) {
+                                    match sister_core::wakeup::Handle::maybe_spawn(
+                                        data_dir,
+                                        fresh.brain.clone(),
+                                        sister_core::now_ms(),
+                                    ) {
+                                        Ok(h) => wake = h,
+                                        Err(e) => {
+                                            println!("  ⚠ 解釋層執行緒開不起來（錄製照跑）：{e:#}")
+                                        }
                                     }
                                 }
                             }
-                        }
-                        Reload::Missing => println!(
-                            "  ⚠  設定檔不見了（{}）。**繼續用舊的那一份**——\
+                            Reload::Missing => println!(
+                                "  ⚠  設定檔不見了（{}）。**繼續用舊的那一份**——\
                              真要回到預設值請放一個空的設定檔。",
-                            path.display()
-                        ),
-                        Reload::Broken(why) => println!(
-                            "  ⚠  設定檔讀不出來，**繼續用舊的那一份**（不是預設值）：{why}"
-                        ),
-                    }
-                }
-            }
-
-            // 同意書也吃熱重載，而且它比設定檔更不能等。PRIVACY.md 上寫的是
-            // 「各自獨立、各自隨時撤得掉」——只在開機時讀一次的話，那句話真正
-            // 的意思是「下次重開的時候才撤得掉」，而剛按下撤回的那個人，正是
-            // 最不該被要求等待的那一個。
-            //
-            // 不做 mtime 去抖：這個檔案是幾百個位元組，而 `consent::load` 的
-            // 失敗方向是「當作沒簽」。少一層快取就少一種「檔案已經變了、我還
-            // 拿著舊答案」的可能。
-            // 「我還活著」。**暫停中也要蓋**——暫停是她閉著眼睛，不是她走了，
-            // 而字母人要分得出這兩件事：一個要按「繼續」，一個要去開 recorder。
-            if last_beat.elapsed().as_millis() as i64 >= sister_core::heartbeat::BEAT_EVERY_MS {
-                last_beat = Instant::now();
-                if let Err(e) = sister_core::heartbeat::beat(data_dir, sister_core::now_ms()) {
-                    // 蓋不動不值得停止錄製——真正的工作還在做。但要講一次，
-                    // 因為字母人從現在起會說「沒有人在記錄」，而那是錯的。
-                    eprintln!("  ⚠ 心跳寫不進去（字母人會以為沒有人在錄）：{e}");
-                }
-            }
-
-            // 能力報告：見 `CAPS_EVERY`。寫不出來**不重試也不吵**——這一行的
-            // 失敗方向是設定頁上那句警告晚一分鐘出現，而它一分鐘後就會再試
-            // 一次。在這裡 `eprintln!` 的話，一顆磁碟滿了的機器會每分鐘吐一行
-            // 到 `record.log` 裡，把真正的原因埋掉。
-            if last_caps.elapsed() >= CAPS_EVERY {
-                last_caps = Instant::now();
-                let report = caps_report(
-                    rec.stats(),
-                    sister_capture::Backend::url_capture(rec.backend()),
-                );
-                let _ = sister_core::capabilities::write(data_dir, &report);
-            }
-
-            if consent_dirty || last_consent_check.elapsed() >= CONSENT_EVERY {
-                let by_config = std::mem::take(&mut consent_dirty);
-                last_consent_check = Instant::now();
-                let consent = sister_core::consent::load(data_dir);
-                match recheck(
-                    &consent,
-                    wants_images_by_config,
-                    StoringImages::from_recorder(&rec),
-                ) {
-                    // 他剛剛改了 `store_images`，而實際行為沒有跟著變 = 另一個
-                    // 條件在擋。安靜掉的話，他會以為那一行寫了就生效了——而這是
-                    // 一句只要他不去翻 frames/ 就永遠不會被戳破的話。
-                    Recheck::Same if by_config => {
-                        let why = if wants_images_by_config.enabled() {
-                            format!(
-                                "第三張同意書沒簽，所以還是只記字。\
-                                 （要留圖請跑 `{}`）",
-                                cmd(data_dir, "consent --grant frame-storage")
-                            )
-                        } else {
-                            "第三張同意書本來就沒簽，這一輪本來就沒在留圖。".to_string()
-                        };
-                        println!("  ⟳ 設定檔的 store_images 改了，但實際行為沒變：{why}");
-                    }
-                    Recheck::Same => {}
-                    // 撤回不是暫停。暫停是「先別看」，撤回是「我收回那句話」
-                    // ——所以這裡停的是整場錄製，和開機時那道閘門對稱。當成
-                    // 暫停處理的話，稽核紀錄上會留下一筆理由是假的 pause。
-                    Recheck::Stop => {
-                        println!(
-                            "\n⏹ 第一張同意書被撤回了，錄製到此為止。\n  \
-                             要再開始請跑：{}",
-                            cmd(data_dir, "consent --grant local-recording")
-                        );
-                        end_reason = sister_core::model::EndReason::ConsentRevoked;
-                        break;
-                    }
-                    // 底下兩句以前一律說「第三張同意書」，因為那時候只有同意書
-                    // 動得了它。現在設定檔也動得了，而說錯的話他會去撤一張已經
-                    // 撤過的同意書、或去改一個根本沒關的設定。
-                    //
-                    // 講的是**現在這兩個條件長什麼樣**，不是猜剛剛動的是哪一個
-                    // ——後者需要記住上一輪的值，而那是一份會和事實漂開的副本。
-                    Recheck::Images(true) => {
-                        println!("  ⟳ 設定檔和第三張同意書現在都說要留圖：從這一刻起會留截圖。");
-                        rec.set_image_dir(Some(frames_root.clone()));
-                    }
-                    Recheck::Images(false) => {
-                        let why = if !consent.allows_frames() {
-                            "第三張同意書被撤回了"
-                        } else {
-                            "設定檔把 store_images 關掉了"
-                        };
-                        println!(
-                            "  ⟳ {why}：從這一刻起只記螢幕上的字，\
-                             不會再寫任何截圖。（先前寫下的那些還在，要清掉請用 `{}`。）",
-                            cmd(data_dir, "forget --last <多久>")
-                        );
-                        rec.set_image_dir(None);
-                    }
-                }
-            }
-
-            if last_prune.elapsed() >= PRUNE_EVERY {
-                last_prune = Instant::now();
-                crate::ops::prune::sweep(
-                    data_dir,
-                    rec.db_mut(),
-                    &retention,
-                    Some(&prune_images),
-                    "  ",
-                    &mut std::io::stdout(),
-                )?;
-            }
-
-            // 每一拍量一次，不是每分鐘一次。`peak_rss` 這個名字承諾的是峰值，
-            // 而一分鐘取一次樣的話，任何短於一分鐘的尖峰都和取平均一樣看不
-            // 見——2560×1440 的一次抓圖握著 14.7 MB 的 RGBA 加 GDI bitmap 加
-            // 縮圖緩衝，只有幾十毫秒，也就是取樣週期的 0.007%。
-            //
-            // 成本：`sample()` 是一次 /proc 讀取（Linux）或兩個 Win32 呼叫
-            // （Windows），比這個迴圈每拍都付的剪貼簿輪詢還便宜。CPU 那邊不
-            // 受影響——它是拿 `first` 和 `latest` 兩個累計值相減算的，多量
-            // 幾次只會讓 `latest` 更新。
-            footprint.tick();
-
-            if last_report.elapsed() >= Duration::from_secs(60) {
-                last_report = Instant::now();
-                // 暫停時如果照原樣印那四個數字，讀起來就是「一切正常，只是
-                // 這一分鐘沒有新東西」——那正是暫停最危險的失效模式：
-                // 使用者以為她還在錄。
-                if rec.is_paused() {
-                    println!("  ⏸ 仍在暫停中，這一分鐘沒有記錄任何東西。");
-                } else {
-                    let s = rec.stats();
-                    println!(
-                        "  … {} tick：保留 {}、重複 {}、排除 {}、資料庫留下 {} 行字{}",
-                        s.ticks,
-                        s.kept,
-                        s.duplicates,
-                        s.excluded,
-                        s.ocr_blocks,
-                        match (footprint.cpu_percent(), footprint.peak_rss_bytes()) {
-                            (Some(cpu), Some(rss)) => format!(
-                                "；CPU {cpu:.1}%、RAM 峰值 {}",
-                                crate::fmt::bytes(rss as i64)
+                                path.display()
                             ),
-                            _ => String::new(),
+                            Reload::Broken(why) => println!(
+                                "  ⚠  設定檔讀不出來，**繼續用舊的那一份**（不是預設值）：{why}"
+                            ),
                         }
-                    );
+                    }
                 }
-            }
 
-            std::thread::sleep(interval);
-        }
+                // 同意書也吃熱重載，而且它比設定檔更不能等。PRIVACY.md 上寫的是
+                // 「各自獨立、各自隨時撤得掉」——只在開機時讀一次的話，那句話真正
+                // 的意思是「下次重開的時候才撤得掉」，而剛按下撤回的那個人，正是
+                // 最不該被要求等待的那一個。
+                //
+                // 不做 mtime 去抖：這個檔案是幾百個位元組，而 `consent::load` 的
+                // 失敗方向是「當作沒簽」。少一層快取就少一種「檔案已經變了、我還
+                // 拿著舊答案」的可能。
+                // 「我還活著」。**暫停中也要蓋**——暫停是她閉著眼睛，不是她走了，
+                // 而字母人要分得出這兩件事：一個要按「繼續」，一個要去開 recorder。
+                if last_beat.elapsed().as_millis() as i64 >= sister_core::heartbeat::BEAT_EVERY_MS {
+                    last_beat = Instant::now();
+                    if let Err(e) = recording_beat.beat() {
+                        // 蓋不動不值得停止錄製——真正的工作還在做。但要講一次，
+                        // 因為字母人從現在起會說「沒有人在記錄」，而那是錯的。
+                        eprintln!("  ⚠ 心跳寫不進去（字母人會以為沒有人在錄）：{e}");
+                    }
+                }
+
+                // 能力報告：見 `CAPS_EVERY`。寫不出來**不重試也不吵**——這一行的
+                // 失敗方向是設定頁上那句警告晚一分鐘出現，而它一分鐘後就會再試
+                // 一次。在這裡 `eprintln!` 的話，一顆磁碟滿了的機器會每分鐘吐一行
+                // 到 `record.log` 裡，把真正的原因埋掉。
+                if last_caps.elapsed() >= CAPS_EVERY {
+                    last_caps = Instant::now();
+                    let report = caps_report(
+                        rec.stats(),
+                        sister_capture::Backend::url_capture(rec.backend()),
+                    );
+                    let _ = sister_core::capabilities::write(data_dir, &report);
+                }
+
+                if consent_dirty || last_consent_check.elapsed() >= CONSENT_EVERY {
+                    let by_config = std::mem::take(&mut consent_dirty);
+                    last_consent_check = Instant::now();
+                    let consent = sister_core::consent::load(data_dir);
+                    match recheck(
+                        &consent,
+                        wants_images_by_config,
+                        StoringImages::from_recorder(rec),
+                    ) {
+                        // 他剛剛改了 `store_images`，而實際行為沒有跟著變 = 另一個
+                        // 條件在擋。安靜掉的話，他會以為那一行寫了就生效了——而這是
+                        // 一句只要他不去翻 frames/ 就永遠不會被戳破的話。
+                        Recheck::Same if by_config => {
+                            let why = if wants_images_by_config.enabled() {
+                                format!(
+                                    "第三張同意書沒簽，所以還是只記字。\
+                                 （要留圖請跑 `{}`）",
+                                    cmd(data_dir, "consent --grant frame-storage")
+                                )
+                            } else {
+                                "第三張同意書本來就沒簽，這一輪本來就沒在留圖。".to_string()
+                            };
+                            println!("  ⟳ 設定檔的 store_images 改了，但實際行為沒變：{why}");
+                        }
+                        Recheck::Same => {}
+                        // 撤回不是暫停。暫停是「先別看」，撤回是「我收回那句話」
+                        // ——所以這裡停的是整場錄製，和開機時那道閘門對稱。當成
+                        // 暫停處理的話，稽核紀錄上會留下一筆理由是假的 pause。
+                        Recheck::Stop => {
+                            println!(
+                                "\n⏹ 第一張同意書被撤回了，錄製到此為止。\n  \
+                             要再開始請跑：{}",
+                                cmd(data_dir, "consent --grant local-recording")
+                            );
+                            return Ok(LiveAfterTick::Stop(
+                                sister_core::model::EndReason::ConsentRevoked,
+                            ));
+                        }
+                        // 底下兩句以前一律說「第三張同意書」，因為那時候只有同意書
+                        // 動得了它。現在設定檔也動得了，而說錯的話他會去撤一張已經
+                        // 撤過的同意書、或去改一個根本沒關的設定。
+                        //
+                        // 講的是**現在這兩個條件長什麼樣**，不是猜剛剛動的是哪一個
+                        // ——後者需要記住上一輪的值，而那是一份會和事實漂開的副本。
+                        Recheck::Images(true) => {
+                            println!(
+                                "  ⟳ 設定檔和第三張同意書現在都說要留圖：從這一刻起會留截圖。"
+                            );
+                            rec.set_image_dir(Some(frames_root.clone()));
+                        }
+                        Recheck::Images(false) => {
+                            let why = if !consent.allows_frames() {
+                                "第三張同意書被撤回了"
+                            } else {
+                                "設定檔把 store_images 關掉了"
+                            };
+                            println!(
+                                "  ⟳ {why}：從這一刻起只記螢幕上的字，\
+                             不會再寫任何截圖。（先前寫下的那些還在，要清掉請用 `{}`。）",
+                                cmd(data_dir, "forget --last <多久>")
+                            );
+                            rec.set_image_dir(None);
+                        }
+                    }
+                }
+
+                if last_prune.elapsed() >= PRUNE_EVERY {
+                    last_prune = Instant::now();
+                    crate::ops::prune::sweep(
+                        data_dir,
+                        rec.db_mut(),
+                        &retention,
+                        Some(&prune_images),
+                        "  ",
+                        &mut std::io::stdout(),
+                    )?;
+                }
+
+                // 每一拍量一次，不是每分鐘一次。`peak_rss` 這個名字承諾的是峰值，
+                // 而一分鐘取一次樣的話，任何短於一分鐘的尖峰都和取平均一樣看不
+                // 見——2560×1440 的一次抓圖握著 14.7 MB 的 RGBA 加 GDI bitmap 加
+                // 縮圖緩衝，只有幾十毫秒，也就是取樣週期的 0.007%。
+                //
+                // 成本：`sample()` 是一次 /proc 讀取（Linux）或兩個 Win32 呼叫
+                // （Windows），比這個迴圈每拍都付的剪貼簿輪詢還便宜。CPU 那邊不
+                // 受影響——它是拿 `first` 和 `latest` 兩個累計值相減算的，多量
+                // 幾次只會讓 `latest` 更新。
+                footprint.tick();
+
+                if last_report.elapsed() >= Duration::from_secs(60) {
+                    last_report = Instant::now();
+                    // 暫停時如果照原樣印那四個數字，讀起來就是「一切正常，只是
+                    // 這一分鐘沒有新東西」——那正是暫停最危險的失效模式：
+                    // 使用者以為她還在錄。
+                    if rec.is_paused() {
+                        println!("  ⏸ 仍在暫停中，這一分鐘沒有記錄任何東西。");
+                    } else {
+                        let s = rec.stats();
+                        println!(
+                            "  … {} tick：保留 {}、重複 {}、排除 {}、資料庫留下 {} 行字{}",
+                            s.ticks,
+                            s.kept,
+                            s.duplicates,
+                            s.excluded,
+                            s.ocr_blocks,
+                            match (footprint.cpu_percent(), footprint.peak_rss_bytes()) {
+                                (Some(cpu), Some(rss)) => format!(
+                                    "；CPU {cpu:.1}%、RAM 峰值 {}",
+                                    crate::fmt::bytes(rss as i64)
+                                ),
+                                _ => String::new(),
+                            }
+                        );
+                    }
+                }
+
+                Ok(LiveAfterTick::Continue)
+            },
+            || std::thread::sleep(interval),
+        )?;
 
         // 腦在另一條執行緒。錄製迴圈停了之後才請它把最後一段想完——
         // 等它的時候不再抓畫面，所以不佔熱路徑。
@@ -24977,8 +25080,7 @@ pub mod record {
         // 想最後一段的那一拍（`beat_thinking`）到這裡結束：腦已經加入，墓碑
         // 蓋上去之後 `is_occupied` 才放開。順序不能倒——倒了的話墓碑會在 CLI
         // 還跑著的時候放行第二個 recorder。
-        sister_core::heartbeat::stop(data_dir, sister_core::now_ms());
-
+        recording_beat.stop();
         let stats = rec.stats().clone();
         // 收工前問一次「這段路上掉了什麼」。`doctor` 只看得到開機那一瞬間，
         // 而 UIA 會在半路上永久投降——那之後 excluded_urls 一條都不生效，
@@ -25001,7 +25103,7 @@ pub mod record {
         //
         // 裸的 `?` 讓它們一行都印不出來。他錄了一整天，最後看到的只有一句
         // `database is locked`——而那一天到底錄到了什麼，沒有第二個地方可以問。
-        let finished = rec.finish(end_reason);
+        let finished = finalize_live_recording(&mut rec, end_reason, &mut recording_beat);
 
         // 先凍結足跡，再跑 dbstat 與目錄掃描。歸因本身是診斷成本，不屬於這場
         // 錄製；若掃完才取樣，CPU 分子停在舊樣本、牆上時間卻繼續走，會把平均
@@ -25989,14 +26091,19 @@ pub mod record {
         use super::record_meanings::{ImageBytesWritten, OcrEnabled};
         use super::{
             BootBeat, ConfigWatch, CpuPercent, DiskMeasured, DiskProjection, FootprintElapsedSecs,
-            FootprintMeasured, ImageBudgetBytes, StoringImages, TickCounts, WantsImages,
-            already_recording, bytes_per_day_at, footprint_context, footprint_lines, ocr_off_words,
-            ocr_work_line, should_ping_brain,
+            FootprintMeasured, ImageBudgetBytes, LiveAfterTick, LiveLoopControl, RecordingBeat,
+            StoringImages, TickCounts, WantsImages, already_recording, bytes_per_day_at,
+            finalize_live_recording, footprint_context, footprint_lines, ocr_off_words,
+            ocr_work_line, run_live_loop, should_ping_brain,
         };
         use crate::ops::tmp::Tmp;
+        use anyhow::Result;
+        use sister_capture::replay::{ReplayPrivacyContext, ReplaySystemState};
+        use sister_capture::{Recorder, ReplayBackend};
         use sister_core::config::Config;
         use sister_core::consent::{Consent, Sheet};
         use sister_core::heartbeat;
+        use std::path::Path;
 
         const MB: f64 = 1024.0 * 1024.0;
         const MB_I: i64 = 1024 * 1024;
@@ -26038,6 +26145,174 @@ pub mod record {
             assert!(!should_ping_brain(&Tick::Paused, &mut idle));
             assert!(!should_ping_brain(&Tick::Resumed, &mut idle));
             assert!(!should_ping_brain(&Tick::Disabled, &mut idle));
+        }
+
+        fn replay_live_recorder() -> Recorder<ReplayBackend> {
+            let scenario = sister_capture::Scenario {
+                name: "live-loop".into(),
+                privacy_context: ReplayPrivacyContext::Clear,
+                system_state: ReplaySystemState::Active,
+                steps: vec![sister_capture::Step {
+                    at_ms: 1_000,
+                    app: Some("editor.exe".into()),
+                    title: Some("notes".into()),
+                    text: vec!["一段可重播的工作".into()],
+                    ..Default::default()
+                }],
+            };
+            Recorder::new(
+                ReplayBackend::new(scenario),
+                sister_core::Db::open_in_memory().expect("db"),
+                Config::default(),
+                None,
+            )
+            .expect("replay recorder")
+        }
+
+        #[test]
+        fn replay_live_runner_wakes_on_value_and_finalizes_a_consent_exit() {
+            let dir = Tmp::new("live-runner-finish");
+            let mut recorder = replay_live_recorder();
+            let mut beat = RecordingBeat::start(&dir.0);
+            let mut controls = 0;
+            let mut maintenance = 0;
+            let mut pinged = Vec::new();
+            let mut slept = 0;
+
+            let reason = run_live_loop(
+                &mut recorder,
+                &mut beat,
+                || {
+                    controls += 1;
+                    assert!(controls <= 2, "consent stop 後不准再取下一拍");
+                    LiveLoopControl::Tick(999 + controls)
+                },
+                || sister_capture::PauseSignal::Recording,
+                |_recorder, ping_brain, beat| {
+                    maintenance += 1;
+                    pinged.push(ping_brain);
+                    beat.beat()?;
+                    Ok(if maintenance == 1 {
+                        LiveAfterTick::Continue
+                    } else {
+                        LiveAfterTick::Stop(sister_core::model::EndReason::ConsentRevoked)
+                    })
+                },
+                || slept += 1,
+            )
+            .expect("live loop");
+
+            assert_eq!(reason, sister_core::model::EndReason::ConsentRevoked);
+            assert_eq!(recorder.stats().ticks, 2);
+            assert_eq!(
+                pinged,
+                vec![true, false],
+                "只有 Kept tick 要叫醒解釋層 hook"
+            );
+            assert_eq!(slept, 1, "同意撤回那拍不准再 sleep 或進下一拍");
+            assert!(heartbeat::is_recording(&dir.0, sister_core::now_ms()));
+
+            finalize_live_recording(&mut recorder, reason, &mut beat).expect("finalize");
+            assert!(!heartbeat::is_occupied(&dir.0, sister_core::now_ms()));
+            let detail: String = recorder
+                .db()
+                .conn()
+                .query_row(
+                    "SELECT detail FROM system_events WHERE kind='session_end'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("session end reason");
+            assert_eq!(detail, "consent-revoked");
+        }
+
+        #[test]
+        fn replay_live_runner_error_drops_the_recording_heartbeat() {
+            fn fail_after_one_tick(
+                recorder: &mut Recorder<ReplayBackend>,
+                data_dir: &Path,
+            ) -> Result<()> {
+                let mut beat = RecordingBeat::start(data_dir);
+                let mut first = true;
+                run_live_loop(
+                    recorder,
+                    &mut beat,
+                    || {
+                        if std::mem::take(&mut first) {
+                            LiveLoopControl::Tick(1_000)
+                        } else {
+                            LiveLoopControl::Stop(sister_core::model::EndReason::Duration)
+                        }
+                    },
+                    || sister_capture::PauseSignal::Recording,
+                    |_recorder, _ping_brain, _beat| anyhow::bail!("maintenance failed"),
+                    || panic!("錯誤後不該 sleep"),
+                )?;
+                Ok(())
+            }
+
+            let dir = Tmp::new("live-runner-error");
+            let mut recorder = replay_live_recorder();
+            let error = fail_after_one_tick(&mut recorder, &dir.0)
+                .expect_err("maintenance error must leave the runner");
+
+            assert!(format!("{error:#}").contains("maintenance failed"));
+            assert_eq!(recorder.stats().ticks, 1, "錯誤發生前的 tick 真的跑過");
+            assert!(
+                matches!(
+                    heartbeat::presence(&dir.0, sister_core::now_ms()),
+                    heartbeat::Presence::Stopped { at: Some(_) }
+                ),
+                "任何 ? 出口都要由 RecordingBeat::drop 蓋墓碑"
+            );
+        }
+
+        #[test]
+        fn replay_live_runner_honors_pause_then_an_external_stop() {
+            let dir = Tmp::new("live-runner-pause-stop");
+            sister_core::pause::set_paused(&dir.0, true, 900).expect("pause");
+            let mut recorder = replay_live_recorder();
+            let mut beat = RecordingBeat::start(&dir.0);
+            let mut controls = 0;
+            let mut pinged = Vec::new();
+
+            let reason = run_live_loop(
+                &mut recorder,
+                &mut beat,
+                || {
+                    controls += 1;
+                    match controls {
+                        1 => LiveLoopControl::Tick(1_000),
+                        2 => LiveLoopControl::Stop(sister_core::model::EndReason::Requested),
+                        _ => panic!("stop 後不准再取下一拍"),
+                    }
+                },
+                || super::guarded_pause_signal(&dir.0),
+                |recorder, ping_brain, _beat| {
+                    pinged.push(ping_brain);
+                    assert!(recorder.is_paused(), "pause snapshot 必須到達 recorder");
+                    Ok(LiveAfterTick::Continue)
+                },
+                || {},
+            )
+            .expect("pause then stop");
+
+            assert_eq!(reason, sister_core::model::EndReason::Requested);
+            assert_eq!(recorder.stats().ticks, 1);
+            assert_eq!(recorder.stats().kept, 0, "暫停拍不准寫 replay frame");
+            assert_eq!(pinged, vec![false], "暫停不叫醒 brain");
+            finalize_live_recording(&mut recorder, reason, &mut beat).expect("finalize");
+            let detail: String = recorder
+                .db()
+                .conn()
+                .query_row(
+                    "SELECT detail FROM system_events WHERE kind='session_end'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("session end reason");
+            assert_eq!(detail, "requested");
+            assert!(!heartbeat::is_occupied(&dir.0, sister_core::now_ms()));
         }
 
         #[test]
