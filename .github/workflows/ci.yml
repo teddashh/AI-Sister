@@ -1109,6 +1109,33 @@ jobs:
             }
           }
 
+          function Assert-NsisDesktopPayload([string] $installedPath, [string] $portablePath) {
+            # tauri-bundler 會在打進 NSIS 前，把 main binary 裡唯一的 fixed-width
+            # package marker 從 UNK 改成 NSS，完成後再把 target/release 還原成
+            # portable 的 UNK。兩檔因此不應 hash 相同，但除這三個 bytes 外也不准
+            # 有任何差異；直接比 synthetic expected hash，不能拿「同版」代替。
+            [byte[]] $expected = [IO.File]::ReadAllBytes($portablePath)
+            $latin1 = [Text.Encoding]::Latin1.GetString($expected)
+            $unknown = '__TAURI_BUNDLE_TYPE_VAR_UNK'
+            $nsis = '__TAURI_BUNDLE_TYPE_VAR_NSS'
+            $marker = $latin1.IndexOf($unknown, [StringComparison]::Ordinal)
+            if ($marker -lt 0 -or
+                $marker -ne $latin1.LastIndexOf($unknown, [StringComparison]::Ordinal)) {
+              throw 'portable desktop 沒有恰好一個 Tauri UNK bundle marker'
+            }
+            [byte[]] $replacement = [Text.Encoding]::ASCII.GetBytes($nsis)
+            [Array]::Copy($replacement, 0, $expected, $marker, $replacement.Length)
+
+            [byte[]] $actual = [IO.File]::ReadAllBytes($installedPath)
+            $expectedHash = [Convert]::ToHexString(
+              [Security.Cryptography.SHA256]::HashData($expected))
+            $actualHash = [Convert]::ToHexString(
+              [Security.Cryptography.SHA256]::HashData($actual))
+            if ($actual.Length -ne $expected.Length -or $actualHash -ne $expectedHash) {
+              throw "安裝後 desktop 不是這一輪 portable 的 exact NSIS-marker 衍生檔：expected=$expectedHash actual=$actualHash"
+            }
+          }
+
           Run-Setup 0
           Assert-ProductFiles
           $desktop = Join-Path $installDir 'sister-desktop.exe'
@@ -1122,10 +1149,8 @@ jobs:
               (Get-FileHash 'target/release/sister.exe' -Algorithm SHA256).Hash) {
             throw '安裝後的 sister.exe 不是這一輪通過 smoke 的 exact recorder'
           }
-          if ((Get-FileHash $desktop -Algorithm SHA256).Hash -ne
-              (Get-FileHash 'apps/desktop/src-tauri/target/release/sister-desktop.exe' -Algorithm SHA256).Hash) {
-            throw '安裝後的 sister-desktop.exe 不是這一輪通過 test 的 exact desktop'
-          }
+          Assert-NsisDesktopPayload $desktop `
+            'apps/desktop/src-tauri/target/release/sister-desktop.exe'
           $version = (Get-Content 'apps/desktop/src-tauri/tauri.conf.json' -Raw |
             ConvertFrom-Json).version
           $reported = & $sister --version
