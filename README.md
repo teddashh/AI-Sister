@@ -6,7 +6,9 @@
 > An open-source, local-first desktop companion: a filing cabinet that never
 > forgets, an event-driven brain that can admit it's wrong, and a desktop sister
 > who knows when to stay quiet. Screen pixels never leave your machine; after
-> explicit opt-in, OCR text can be handed to the local CLI you configured.
+> explicit opt-in, OCR text can be handed to the local CLI you configured. A
+> separate, default-off Azure TTS option can send only the current answer body
+> after its own consent and click; local speech remains the default.
 
 **Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Persona
 的四姊妹 fixed voice 與 fixed CDN pack 也已接通，alpha.104 的發版 gate 在真
@@ -18,8 +20,11 @@ desktop 自己啟動之 recorder 的 bounded supervisor；純 policy／狀態機
 與 Windows registry test-subkey 都有自動測試，但正式 alpha.107 安裝檔的真登入、暫停、
 重試與移除流程仍待 Windows 人工實測，不能寫成已通過。alpha.108 移除單字母角色，
 直接內建四姊妹＋13 位閨密的 17 張 current 角色圖，並接上 trusted-click、localService-only
-的本機中文語音與答案朗讀；這一段仍待正式 Windows artifact 人工聽驗。code signing、真舊版到新版的
-升級與跨層 master stop 仍未完成，所以現在還不是 Release 1.0。** Windows 10+
+的本機中文語音與答案朗讀；這一段仍待正式 Windows artifact 人工聽驗。alpha.109 再加入
+預設關閉、沒有自動 fallback 的 Azure 繁中 TTS：第四張獨立同意、Windows Credential
+Manager 金鑰與三個固定區域的 native POST 已接線，正式 Windows artifact 的語音、封包
+與取消時序仍待人工勾驗。code signing、真舊版到新版的升級與跨層 master stop 仍未完成，
+所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
 
@@ -33,7 +38,7 @@ runner shell 的 CoreGraphics preflight 是 true，exact child 則回
 `NOT-PREVIEW`，不是 release asset；production `record`、Vision／AX、產品
 consent/TCC lifecycle 與完整 S1 都還沒接。
 
-她開始看之前有**三張各自獨立、隨時撤得掉的同意書**，條文和效力就是：
+她開始看或把答案文字交給 Azure 之前有**四張各自獨立、隨時撤得掉的同意書**，條文和效力就是：
 
 - `local-recording`：「我同意在我的硬碟上記錄我的螢幕。」沒有這一張，`sister record`
   不會開始錄；錄到一半撤回，正在跑的 record 每 5 秒重讀同意書，最多再錄 5 秒加一拍；
@@ -43,12 +48,18 @@ consent/TCC lifecycle 與完整 S1 都還沒接。
   沒有這一張，解釋層一次都不會呼叫那支 CLI。畫面永不離開這台機器；出去的是 OCR 抽出來的字，**原文，不遮**——記憶要能跨段把同一個人認出來，代號做不到。要先看清楚會送什麼：`sister interpret --dry-run` 會把那段字整份印出來，一個字都不送。
 - `frame-storage`：「我同意保留變化幀的截圖，而不是只留上面的字。」沒簽不擋錄，
   她會當場說明降級，只記字、一張截圖都不寫；簽了才准依設定保留變化幀。
+- `azure-tts`：「我同意每次按下 Azure 朗讀時，把當前答案正文原文交給我在設定裡
+  選擇區域的 Microsoft Azure 語音服務。正文可能含姓名、電話與金額，不會先遮罩；
+  不會送出截圖、來源連結、memory id、整份資料庫或其他文字。」沒有這一張，她一次
+  都不會呼叫 Azure 語音服務；本機朗讀不受影響。
 
 例如要准她在本機記字並保留截圖，要寫
 `sister consent --grant local-recording --grant frame-storage`。三個介面——
 `sister consent` 和使用者第一次開桌面姊妹時那一頁都從 core 取同一份條文與未簽後果；
 `sister doctor` 讀同一個檔案，另外報告目前是否簽署及會發生什麼事。
-條文改版會讓舊簽名全部失效，檔案讀不到、損壞或版本不符也一律當成沒簽。CLI
+條文改版會讓舊簽名全部失效，檔案讀不到、損壞或版本不符也一律當成沒簽。alpha.109
+讀到尚未有 Azure 欄位的同版本舊檔時，原本三張簽名照舊，第四張維持未簽，不能從
+任何舊同意推定 Azure 已獲授權。CLI
 指定 `--data-dir` 時，同意書跟著那個資料夾走；桌面姊妹只讀預設資料夾，兩邊不一定是同一份。
 
 **alpha.46 已在 Ted 的真 Windows、1920×1080、正常切換 Better Agent workspace
@@ -184,6 +195,27 @@ Nemotron、Cohere、MiMo。** 17 張真人物 WebP（合計 225,082 bytes）隨�
 有已驗證固定錄音時優先播放，否則只接受 WebView 明確回報 `localService = true` 的繁中／
 中文系統 voice。找不到就保持安靜，不會偷換 remote voice。答案清單底下的「用本機聲音
 朗讀」也只在使用者親手按下後讀畫面文字，不經 Rust IPC 或遠端 TTS。
+
+alpha.109 另提供**可選而且預設關閉**的 Azure 繁中朗讀；它不是本機 voice 的自動
+fallback，本機找不到聲音時仍靜音，Azure 失敗時也不自動改走另一條。啟用 Azure、
+選定 `eastasia`、`southeastasia` 或 `japaneast`、把 subscription key 存進 Windows
+Credential Manager 的固定 target `ted-h/AI-Sister/AzureSpeech/v1`、簽第四張
+`azure-tts`，再親手按 Azure 朗讀，才會由 native Rust 對所選區域的固定
+`https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` 發出一個 HTTPS
+`POST`。WebView 仍只走 IPC，不能傳 URL，也沒有 redirect、proxy 或 retry。
+
+每次 POST 只含**當前答案正文原文**，可能含姓名、電話與金額且不先遮罩；不含截圖、
+來源連結／出處 chip、memory id、資料庫或任何其他文字。subscription key 不進
+`config.toml`、log、資料庫或 export；你輸入時它會短暫存在 password 欄位與 Tauri IPC，
+保存後頁面立即清空，native 回條只帶 Present／Missing／Unreadable／Unsupported 狀態，
+不會把 secret 讀回 renderer。程式不保存或重播文字／MP3 cache，每次按下都可能是新請求。按停止
+或切到別題會立刻讓這一代音訊失效，晚回來的 MP3 不播放、不快取；但已開始的 blocking
+POST **無法中途撤回**，仍可能跑到 45 秒 timeout，而且 Azure 可能已把它計入用量。
+若這時撤回第四張同意，撤回操作可能等既有 POST 結束或逾時才回覆；回覆成功後，舊的
+同意快照不可能才開始另一個 POST。
+Microsoft 目前公開列出的 Azure Speech F0 neural TTS 額度是每月 0.5 million characters；
+是否可用、計費與額度仍以你的 Azure 帳號、resource、方案及 Microsoft 當下規則為準，
+AI-Sister 不提供或保證免費額度。見 [Azure Speech 定價](https://azure.microsoft.com/en-us/pricing/details/speech/)。
 
 四姊妹的八句預錄固定語音仍由舊 optional pack 提供。下載按鈕前會列出
 `cdn.ted-h.com`、**73,261,088 bytes**，以及 CDN 會看見來源 IP、時間、TLS、固定

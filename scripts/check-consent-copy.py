@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""檢查三張同意書逐字一致，且五份撤回文案符合程式的重讀週期。"""
+"""檢查四張同意書逐字一致，且五份撤回文案符合程式的重讀週期。"""
 
 import json
 import re
@@ -28,8 +28,8 @@ def rust_strings(method: str) -> list[str]:
         fail(f"consent.rs 無法切出 {method}()")
     body = source[start:end]
     values = re.findall(r'=>\s*(?:\{\s*)?"((?:[^"\\]|\\.)*)"', body, re.DOTALL)
-    if len(values) != 3:
-        fail(f"consent.rs 的 {method}() 應有三張文案，實際抓到 {len(values)} 張")
+    if len(values) != 4:
+        fail(f"consent.rs 的 {method}() 應有四張文案，實際抓到 {len(values)} 張")
     return [json.loads(f'"{value}"') for value in values]
 
 
@@ -42,8 +42,8 @@ def js_strings(field: str) -> list[str]:
         values = json.loads(re.sub(r",\s*]$", "]", match.group(1)))
     except json.JSONDecodeError as error:
         fail(f"onboarding.js 的 {field} 陣列不是可比對的字串陣列：{error}")
-    if len(values) != 3 or not all(isinstance(value, str) for value in values):
-        fail(f"onboarding.js 的 {field} 應有三張字串文案")
+    if len(values) != 4 or not all(isinstance(value, str) for value in values):
+        fail(f"onboarding.js 的 {field} 應有四張字串文案")
     return values
 
 
@@ -110,6 +110,6 @@ for path, path_needles in needles.items():
             )
 
 print(
-    "三張同意書的條文與未簽後果：consent.rs / onboarding.js 逐字一致；"
+    "四張同意書的條文與未簽後果：consent.rs / onboarding.js 逐字一致；"
     f"撤回週期的五份文案都與 ops.rs 的 CONSENT_EVERY={seconds} 秒一致"
 )

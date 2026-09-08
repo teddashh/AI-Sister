@@ -731,7 +731,10 @@ console.log("⑧ Rust／JS 邊界沒有把 Persona 接進答案或安全路徑")
     answerRead,
   );
   const localSpeech = SRC.match(/function speakWithLocalSystemVoice\(text\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
-  const mediaStop = SRC.match(/function stopPersonaMedia\(\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
+  const mediaStop =
+    SRC.match(
+      /^function stopPersonaMedia\(\{ cancelAzureNative = true \} = \{\}\) \{[\s\S]*?^\}$/mu,
+    )?.[0] ?? "";
   check(
     "長答案按段依序播且整串有 revision cancel gate",
     SRC.includes("function chunkLocalSpeech(text, limit = 160)") &&

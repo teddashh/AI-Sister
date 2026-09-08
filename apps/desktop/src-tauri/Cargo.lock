@@ -3381,7 +3381,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "sister-assets"
-version = "0.1.0-alpha.108"
+version = "0.1.0-alpha.109"
 dependencies = [
  "fs4",
  "getrandom 0.2.17",
@@ -3392,7 +3392,7 @@ dependencies = [
 
 [[package]]
 name = "sister-core"
-version = "0.1.0-alpha.108"
+version = "0.1.0-alpha.109"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3413,9 +3413,10 @@ dependencies = [
 
 [[package]]
 name = "sister-desktop"
-version = "0.1.0-alpha.108"
+version = "0.1.0-alpha.109"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "serde",
  "serde_json",
@@ -3423,10 +3424,12 @@ dependencies = [
  "sister-core",
  "sister-hands",
  "sister-shell",
+ "sister-tts",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-single-instance",
+ "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",
  "windows 0.62.2",
@@ -3434,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "sister-hands"
-version = "0.1.0-alpha.108"
+version = "0.1.0-alpha.109"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3446,11 +3449,19 @@ dependencies = [
 
 [[package]]
 name = "sister-shell"
-version = "0.1.0-alpha.108"
+version = "0.1.0-alpha.109"
 dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "sister-tts"
+version = "0.1.0-alpha.109"
+dependencies = [
+ "serde",
+ "ureq",
 ]
 
 [[package]]

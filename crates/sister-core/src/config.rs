@@ -338,6 +338,10 @@ pub struct ShellConfig {
     /// 常駐角色的本機設定。它只改桌面殼的外觀與「點一下」台詞；錄製、搜尋、
     /// 守門員、手與模型路徑一個欄位都不讀。
     pub persona: PersonaConfig,
+    /// 可選的 Azure 雲端語音。這條路和 Persona 的本機聲音完全獨立；
+    /// 開其中一邊不會順手打開另一邊。密鑰不放在 TOML，由 desktop 放進
+    /// 作業系統的 credential store。
+    pub azure_tts: AzureTtsConfig,
 }
 
 impl Default for ShellConfig {
@@ -349,7 +353,107 @@ impl Default for ShellConfig {
             hands_stop_shortcut: "Ctrl+Alt+H".to_string(),
             developer_mode: false,
             persona: PersonaConfig::default(),
+            azure_tts: AzureTtsConfig::default(),
         }
+    }
+}
+
+/// alpha.109 明確允許的 Azure Speech public-cloud region identifier。
+///
+/// 不收任意字串：這個值會直接決定文字送到哪一個 host，所以打錯、
+/// allowlist 以外的其他 Azure 區域、未來值或自訂 endpoint 都必須讓設定讀取
+/// 失敗，不能安靜退回某個區域或擴大網路目的地。
+/// serde 名稱是 Azure 的 stable region identifier，不是 UI 顯示名。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AzureTtsRegion {
+    EastAsia,
+    SoutheastAsia,
+    JapanEast,
+}
+
+impl AzureTtsRegion {
+    /// Azure API 與 TOML 共用的 canonical identifier。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EastAsia => "eastasia",
+            Self::SoutheastAsia => "southeastasia",
+            Self::JapanEast => "japaneast",
+        }
+    }
+
+    /// 帳號密鑰所屬區域的唯一 TTS host。
+    pub fn host(self) -> String {
+        format!("{}.tts.speech.microsoft.com", self.as_str())
+    }
+
+    /// Real-time text-to-speech 的固定 public-cloud endpoint。
+    pub fn endpoint(self) -> String {
+        format!("https://{}/cognitiveservices/v1", self.host())
+    }
+}
+
+/// alpha.109 允許的三支繁體中文 Azure Neural voice。
+///
+/// 存的是 Azure API 的 canonical short name，而不是可變的翻譯標籤。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AzureTtsVoice {
+    #[default]
+    #[serde(rename = "zh-TW-HsiaoChenNeural")]
+    HsiaoChen,
+    #[serde(rename = "zh-TW-HsiaoYuNeural")]
+    HsiaoYu,
+    #[serde(rename = "zh-TW-YunJheNeural")]
+    YunJhe,
+}
+
+impl AzureTtsVoice {
+    /// Azure SSML `voice name` 與 TOML 共用的 canonical short name。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HsiaoChen => "zh-TW-HsiaoChenNeural",
+            Self::HsiaoYu => "zh-TW-HsiaoYuNeural",
+            Self::YunJhe => "zh-TW-YunJheNeural",
+        }
+    }
+}
+
+/// 可選 Azure 雲端 TTS 的非密密設定。
+///
+/// `enabled = true` 只是使用者的偏好，不是出境許可；真正 request 仍必須同時
+/// 持有 [`crate::consent::AzureTtsAllowed`]。`region = None` 是「還沒設好」，
+/// 不可以由呼叫端猜一個預設區域。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AzureTtsConfig {
+    pub enabled: bool,
+    pub region: Option<AzureTtsRegion>,
+    pub voice: AzureTtsVoice,
+}
+
+impl Default for AzureTtsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            region: None,
+            voice: AzureTtsVoice::HsiaoChen,
+        }
+    }
+}
+
+/// 設定頁的 Azure 開關和 Persona 本機聲音開關都是 bool，但接反的後果
+/// 是「本機播放」和「允許一條雲端路徑」的差別，所以 IPC 邊界不傳裸 bool。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AzureTtsEnabled(bool);
+
+impl AzureTtsEnabled {
+    pub const fn new(value: bool) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> bool {
+        self.0
     }
 }
 
@@ -1115,6 +1219,21 @@ impl Config {
     /// 一扇開很久的設定頁若拿舊值一起送回來，會把剛關掉的聲音重新打開。
     pub fn set_persona_voice_from_page(&mut self, enabled: PersonaVoiceEnabled) {
         self.shell.persona.voice_enabled = enabled.get();
+    }
+
+    /// Azure TTS 設定頁的三格一起存，但不重建 `ShellConfig`，所以當下
+    /// 沒畫在這張卡上的 Persona／熱鍵／developer mode 都不會被舊頁面重設。
+    pub fn set_azure_tts_from_page(
+        &mut self,
+        enabled: AzureTtsEnabled,
+        region: Option<AzureTtsRegion>,
+        voice: AzureTtsVoice,
+    ) {
+        self.shell.azure_tts = AzureTtsConfig {
+            enabled: enabled.get(),
+            region,
+            voice,
+        };
     }
 }
 
@@ -2209,6 +2328,120 @@ mod tests {
         assert!(old.shell.persona.motion);
         assert!(old.shell.persona.tap_lines);
         assert!(!old.shell.persona.voice_enabled, "舊設定不能自己得到語音");
+    }
+
+    #[test]
+    fn old_shell_config_gets_a_disabled_unconfigured_azure_tts() {
+        let old: Config =
+            toml::from_str("[shell]\npause_shortcut = \"Ctrl+Alt+P\"\n").expect("old shell config");
+
+        assert_eq!(old.shell.azure_tts, AzureTtsConfig::default());
+        assert!(!old.shell.azure_tts.enabled);
+        assert_eq!(old.shell.azure_tts.region, None);
+        assert_eq!(old.shell.azure_tts.voice, AzureTtsVoice::HsiaoChen);
+        assert!(!old.shell.persona.voice_enabled);
+    }
+
+    #[test]
+    fn azure_regions_have_stable_names_and_only_build_the_fixed_tts_endpoint() {
+        let regions = [
+            (AzureTtsRegion::EastAsia, "eastasia"),
+            (AzureTtsRegion::SoutheastAsia, "southeastasia"),
+            (AzureTtsRegion::JapanEast, "japaneast"),
+        ];
+
+        for (region, name) in regions {
+            assert_eq!(region.as_str(), name);
+            assert_eq!(
+                serde_json::to_value(region).expect("serialize region"),
+                serde_json::Value::String(name.to_string())
+            );
+            assert_eq!(
+                serde_json::from_value::<AzureTtsRegion>(serde_json::Value::String(
+                    name.to_string()
+                ))
+                .expect("deserialize region"),
+                region
+            );
+            assert_eq!(region.host(), format!("{name}.tts.speech.microsoft.com"));
+            assert_eq!(
+                region.endpoint(),
+                format!("https://{name}.tts.speech.microsoft.com/cognitiveservices/v1")
+            );
+        }
+    }
+
+    #[test]
+    fn azure_zh_tw_voices_have_stable_api_names() {
+        for (voice, name) in [
+            (AzureTtsVoice::HsiaoChen, "zh-TW-HsiaoChenNeural"),
+            (AzureTtsVoice::HsiaoYu, "zh-TW-HsiaoYuNeural"),
+            (AzureTtsVoice::YunJhe, "zh-TW-YunJheNeural"),
+        ] {
+            assert_eq!(voice.as_str(), name);
+            assert_eq!(
+                serde_json::to_value(voice).expect("serialize voice"),
+                serde_json::Value::String(name.to_string())
+            );
+            assert_eq!(
+                serde_json::from_value::<AzureTtsVoice>(serde_json::Value::String(
+                    name.to_string()
+                ))
+                .expect("deserialize voice"),
+                voice
+            );
+        }
+    }
+
+    #[test]
+    fn azure_tts_round_trips_without_changing_the_local_voice_gate() {
+        let mut config = Config::default();
+        config.shell.persona.voice_enabled = true;
+        let persona_before = config.shell.persona;
+        let shortcut_before = config.shell.pause_shortcut.clone();
+
+        config.set_azure_tts_from_page(
+            AzureTtsEnabled::new(true),
+            Some(AzureTtsRegion::EastAsia),
+            AzureTtsVoice::HsiaoYu,
+        );
+
+        assert_eq!(config.shell.persona, persona_before);
+        assert_eq!(config.shell.pause_shortcut, shortcut_before);
+        assert_eq!(
+            config.shell.azure_tts,
+            AzureTtsConfig {
+                enabled: true,
+                region: Some(AzureTtsRegion::EastAsia),
+                voice: AzureTtsVoice::HsiaoYu,
+            }
+        );
+
+        let text = toml::to_string_pretty(&config).expect("serialize Azure TTS");
+        assert!(text.contains("region = \"eastasia\""), "{text}");
+        assert!(text.contains("voice = \"zh-TW-HsiaoYuNeural\""), "{text}");
+        let back: Config = toml::from_str(&text).expect("deserialize Azure TTS");
+        assert_eq!(back.shell.azure_tts, config.shell.azure_tts);
+        assert!(back.shell.persona.voice_enabled);
+    }
+
+    #[test]
+    fn unknown_azure_region_voice_or_key_is_rejected() {
+        for (text, offending) in [
+            ("[shell.azure_tts]\nregion = \"westus\"\n", "westus"),
+            (
+                "[shell.azure_tts]\nvoice = \"zh-TW-SomeoneElseNeural\"\n",
+                "SomeoneElse",
+            ),
+            (
+                "[shell.azure_tts]\nsubscription_key = \"must-not-live-in-toml\"\n",
+                "subscription_key",
+            ),
+        ] {
+            let error = toml::from_str::<Config>(text)
+                .expect_err("unknown Azure TTS values must fail closed");
+            assert!(error.to_string().contains(offending), "{error:#}");
+        }
     }
 
     #[test]

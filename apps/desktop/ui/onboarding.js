@@ -1,6 +1,6 @@
-// 三張同意書。和其他幾頁一樣沒有打包步驟——這個檔案就是瀏覽器讀到的那個檔案。
+// 四張同意書。和其他幾頁一樣沒有打包步驟——這個檔案就是瀏覽器讀到的那個檔案。
 //
-// 這一頁上**沒有任何一句條文**。三段文字全部是從 Rust 那邊拿的
+// 這一頁上**沒有任何一句條文**。四段文字全部是從 Rust 那邊拿的
 // （`sister_core::consent::Sheet`），因為 `sister consent`、`sister doctor` 和
 // 這一頁講的必須是同一句話——三個地方各抄一份，遲早會變成三份不一樣的承諾，
 // 而「他到底同意了哪一句」就沒有答案了。
@@ -47,11 +47,14 @@ function card(sheet) {
 
   const without = document.createElement("span");
   without.className = "without";
-  // 第二張勾下去之後，沒簽那句「一次都不會呼叫」就不該再印在勾好的框裡。
-  without.textContent =
-    sheet.key === "cloud-reading" && sheet.effective
+  // 出境張勾下去之後，沒簽那句「一次都不會呼叫」就不該再印在勾好的框裡。
+  without.textContent = sheet.effective
+    ? sheet.key === "cloud-reading"
       ? "勾了之後，螢幕上的字會原封不動交給你在設定裡指定的那支 CLI。沒設定命令就一次都不叫。"
-      : sheet.without;
+      : sheet.key === "azure-tts"
+        ? "勾了之後也不會自動連線；只有你按「用 Azure 朗讀」時，才把當前答案正文送到所選區域。"
+        : sheet.without
+    : sheet.without;
 
   body.append(wording, without);
 
@@ -151,13 +154,13 @@ async function set(key, granted, box = null) {
     if (view.reset_by_version && !granted) {
       // 他**取消**勾選的那一路：後端先把整份清成預設值（改版的簽名不能跟著
       // 新的一起存成「這一版簽的」），然後 `revoke` 落在一張本來就空的紙上。
-      // 結果是三張全空，而下面那句話說「只留下你剛剛按的這一張」——那一張
+      // 結果是四張全空，而下面那句話說「只留下你剛剛按的這一張」——那一張
       // 不存在。
-      say("條文改版了，你之前簽的那幾張本來就已經不算數。現在三張都是空的，要重新確認。");
+      say("條文改版了，你之前簽的那些本來就已經不算數。現在四張都是空的，要逐張重新確認。");
     } else if (view.reset_by_version) {
-      // CLI 對這件事印一行 ⚠，這一頁以前完全安靜——他勾了一張，另外兩張的
+      // CLI 對這件事印一行 ⚠，這一頁以前完全安靜——當時他勾了一張，另外兩張的
       // 「2026 年 7 月 2 日同意過」就從畫面上消失了，像是紀錄被弄丟了。
-      say("條文改版了，之前簽的那幾張不再算數，現在只留下你剛剛按的這一張。另外兩張要重新確認。");
+      say("條文改版了，之前簽的那些不再算數，現在只留下你剛剛按的這一張。另外三張要重新確認。");
     } else if (key === "frame-storage" && !granted) {
       // 撤掉這一張只擋**新的**截圖。不講的話，「不留截圖」讀起來像「截圖沒
       // 了」——而他要去翻 frames/ 才會發現不是。錄製迴圈撤回時也講同一句話。
@@ -229,8 +232,8 @@ async function load({ keepSay = false } = {}) {
   }
 }
 
-// 「好」只是關掉這一頁。**沒有「全部同意」那顆按鈕**——一顆一次勾完三張的
-// 按鈕，會讓第二張（上雲解讀）在他沒有分別想過的情況下被打開。
+// 「好」只是關掉這一頁。**沒有「全部同意」那顆按鈕**——一顆一次勾完四張的
+// 按鈕，會讓兩張出境同意在他沒有分別想過的情況下被打開。
 el.done?.addEventListener("click", () => {
   globalThis.__TAURI__?.window?.getCurrentWindow?.()?.close?.();
 });
@@ -252,13 +255,15 @@ const DEMO = {
     "我同意在我的硬碟上記錄我的螢幕。",
     "我同意把螢幕上的文字原文（OCR 抽出來的字，永不含畫面）交給我在設定裡指定的本機 CLI，由那支程式去做解讀。裡面有什麼就送什麼，不會先遮掉。",
     "我同意保留變化幀的截圖，而不是只留上面的字。",
+    "我同意每次按下 Azure 朗讀時，把當前答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
   ],
   without: [
     "沒有這一張，sister record 不會開始錄；錄到一半撤回，正在跑的 record 每 5 秒重讀同意書，最多再錄 5 秒加一拍；capture.min_interval_ms 超過 5 秒時，主要會等那一拍。",
     "沒有這一張，她一次都不會呼叫那支 CLI；解釋層保持關閉，只累積本機的畫面與文字。正在跑的 sister watch 每看一次就重讀一次同意書，撤回之後它下一次看的時候就停下來，不會再問。",
     "沒有這一張，她只記螢幕上的字，不留截圖。",
+    "沒有這一張，她一次都不會呼叫 Azure 語音服務；本機朗讀不受影響。",
   ],
-  keys: ["local-recording", "cloud-reading", "frame-storage"],
+  keys: ["local-recording", "cloud-reading", "frame-storage", "azure-tts"],
 };
 
 function demoView(current, storeImages = true, mode = "1") {
@@ -268,6 +273,8 @@ function demoView(current, storeImages = true, mode = "1") {
     // 「勾了之後字會交給 CLI」那句話的辦法。
     mode === "cloud" ? Date.UTC(2026, 7, 14, 2, 32) : null,
     Date.UTC(2026, 6, 2, 9, 5),
+    // 第四張也預設不勾；`?demo=azure` 才畫出明確按鈕觸發的出境狀態。
+    mode === "azure" ? Date.UTC(2026, 7, 14, 2, 33) : null,
   ];
   return {
     path: DEMO.path,
@@ -283,7 +290,7 @@ function demoView(current, storeImages = true, mode = "1") {
       wording: DEMO.wording[i],
       without: DEMO.without[i],
       granted_at: at[i],
-      // 簽過**而且**條文沒改版才算數。`current` 是整份的屬性——改版時三張
+      // 簽過**而且**條文沒改版才算數。`current` 是整份的屬性——改版時四張
       // 一起失效，不會有一張有效、另一張同時顯示「條文改版了」。
       effective: current && at[i] !== null,
     })),

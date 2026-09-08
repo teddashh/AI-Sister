@@ -1,0 +1,23 @@
+[package]
+name = "sister-tts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Typed, bounded text-to-speech transport boundary for AI-Sister"
+publish = false
+
+[features]
+default = []
+# The default graph is pure request/response policy. Only the desktop integration that has
+# collected explicit Azure consent should enable this native HTTP implementation.
+azure = ["dep:ureq"]
+
+[dependencies]
+serde.workspace = true
+ureq = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true

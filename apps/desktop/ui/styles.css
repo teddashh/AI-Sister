@@ -702,6 +702,15 @@ body.has-url-policy .stage {
   outline: none;
 }
 
+.answer-cloud {
+  border-style: dashed;
+}
+
+.answer-read:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 .mark-toggle {
   background: none;
   border: 1px solid var(--letter-accent);

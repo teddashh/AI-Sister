@@ -46,6 +46,11 @@ jobs:
       - name: Persona pack — fixed transport contract without network
         run: cargo test -p sister-assets --features download
 
+      # sister-tts 預設同樣沒有 HTTP client；workspace test 只涵蓋 typed policy。
+      # 額外啟用 azure 跑 native request builder 與 fake transport 測試，仍不連真 Azure。
+      - name: Azure TTS — fixed POST contract without network
+        run: cargo test -p sister-tts --features azure
+
       # runtime 只內嵌 compact projection；tag 出貨前仍拿完整 public manifest
       # 重新算 canonical digest，並把實際用到的 12 項逐欄投影回 Rust authority。
       - name: Persona authority — full public manifest still matches
@@ -61,7 +66,7 @@ jobs:
           AI_SISTER_PUBLIC_ASSET_MANIFEST="$manifest" \
             cargo test -p sister-assets full_public_manifest_canonical_hash_and_projection_match -- --ignored
 
-      # 核心同意文案在 core，與 onboarding 的三份開發示範逐字比對；撤回週期則從 ops.rs 的 CONSENT_EVERY 抽出秒數，
+      # 核心同意文案在 core，與 onboarding 的四份開發示範逐字比對；撤回週期則從 ops.rs 的 CONSENT_EVERY 抽出秒數，
       # 再逐一比對五份使用者看得到的文案，避免畫面、說明與真正執行的契約各說各話。
       - name: Consent copies and withdrawal timing must match the program
         run: python3 ./scripts/check-consent-copy.py
@@ -70,10 +75,10 @@ jobs:
       - name: Privacy — sensitive content must never reach disk
         run: cargo test -p sister-capture --test privacy -- --nocapture
 
-      # root/recorder/core/brain/hands 仍零 client；desktop 唯一例外只能是
-      # sister-assets[download] 的 fixed Persona GET。另守沒有內建推論引擎、
-      # raw socket／監聽埠與 renderer 遠端來源；外部 CLI 是另一個邊界。
-      - name: Privacy — only the fixed Persona GET may use a client
+      # root 預設與 recorder/core/brain/hands 仍零 client；desktop 只准
+      # sister-assets[download] 的 fixed GET 與 sister-tts[azure] 的 fixed POST。
+      # 另守沒有內建推論引擎、raw socket／監聽埠與 renderer 遠端來源。
+      - name: Privacy — only the fixed Persona GET and Azure POST may use a client
         run: ./scripts/check-no-network.sh
 
       # L2 出境路徑。現行同意書 2 明講送的是螢幕原文，不承諾去敏；這一條守的是
@@ -111,6 +116,12 @@ jobs:
       - name: The pet must be able to say why something failed — and still be saying it 5s later
         run: node ./scripts/check-pet-says-why.mjs
 
+      # 上兩支直接載入 settings.js / app.js，驗 trusted controls、正文 allowlist、
+      # 無 autoplay/fallback 與取消後晚 MP3 不播放；這支再釘 Windows/Tauri 那半邊：
+      # 四道 native gate、shared-consent guard、單一 in-flight、generation 與 secret projection。
+      - name: Azure TTS must stay behind one trusted click and four native gates
+        run: node ./scripts/check-azure-tts.mjs
+
       # Persona 只能在使用者按下原生 button 後，從本機 allowlist 取一條固定台詞。
       # 這支直接載入產品 app.js，跑過冷啟動與五秒輪詢，並守住關閉後搜尋／狀態仍在、
       # palette 對比、typed settings persistence，以及未來 voice pack 仍只能服務同一次 click。
@@ -124,7 +135,7 @@ jobs:
       - name: The one irreversible button must never be left in the wrong half of its two-step
         run: node ./scripts/check-timeline-forget.mjs
 
-      # 三張同意書是這整個產品的隱私契約，而那一頁只有一種真正嚴重的錯：畫面
+      # 四張同意書是這整個產品的隱私契約，而那一頁只有一種真正嚴重的錯：畫面
       # 說已同意、檔案裡沒有（或反過來）。那顆勾勾是原生 checkbox——`change`
       # 事件到 JS 手上的時候瀏覽器早就翻過去了，所以寫失敗的正確反應是「把已經
       # 被改掉的畫面翻回去」，不是「不要改畫面」。而退回去讀一次來修正畫面的

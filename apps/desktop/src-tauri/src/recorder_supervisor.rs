@@ -1155,7 +1155,7 @@ impl Worker {
                 );
             }
             sister_core::consent::RecordingStartConsent::NotAllowed(_) => {
-                let message = "目前讀不到有效的第一張同意書——她不會開始記錄。在系統匣圖示上按右鍵，選「三張同意書…」確認後再回來";
+                let message = "目前讀不到有效的第一張同意書——她不會開始記錄。在系統匣圖示上按右鍵，選「四張同意書…」確認後再回來";
                 self.publish_custom(SupervisorView {
                     phase: SupervisorPhase::Stopped,
                     failures: 0,

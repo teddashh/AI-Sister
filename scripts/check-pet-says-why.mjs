@@ -82,6 +82,10 @@ function answer(over = {}) {
     truncated: false,
     answers_truncated: false,
     blind: null,
+    time_range: null,
+    chapters: null,
+    followup: null,
+    closure_notice: null,
     ...over,
   };
 }
@@ -104,6 +108,40 @@ function hit(over = {}) {
     title: "帳單查詢",
     url: "https://example.com/bill",
     frame_id: null,
+    ...over,
+  };
+}
+
+function fact(over = {}) {
+  return {
+    value: "+886800080123",
+    raw: "客服專線 0800-080-123",
+    sightings: 2,
+    ts: 1_755_000_000_000,
+    chunk_id: 31,
+    frame_id: 42,
+    app: "chrome.exe",
+    title: "帳單查詢",
+    url: "https://source.example.invalid/private",
+    ...over,
+  };
+}
+
+function chapter(over = {}) {
+  return {
+    start_ts: 1_755_000_000_000,
+    end_ts: 1_755_000_360_000,
+    core_start_ts: 1_755_000_030_000,
+    core_end_ts: 1_755_000_330_000,
+    app: "Notion.exe",
+    title: "Azure 主句章節",
+    host: "source.example.invalid",
+    cut_kinds: [],
+    confidence: 0.8,
+    edited: null,
+    edit_id: null,
+    segment_count: 2,
+    core_ms: 300_000,
     ...over,
   };
 }
@@ -180,7 +218,34 @@ async function open(table = {}, { search = "", beforeListenerRegistered = null }
   const node = domOf(HTML);
   const listeners = new Map();
   const calls = [];
+  const invokes = [];
   const intervals = [];
+  let audioPlays = 0;
+  let localSpeaks = 0;
+
+  // fake-dom 的 selector 子集刻意很小；這一頁新增的 Azure allowlist 是 attribute
+  // selector。只在真正的 [data-hits] 子樹補上這一種，避免測試自己用 class
+  // denylist 重抄產品邏輯。
+  const hitsNode = node("[data-hits]");
+  const basicQuerySelectorAll = hitsNode.querySelectorAll.bind(hitsNode);
+  hitsNode.querySelectorAll = (selector) => {
+    if (selector !== "[data-azure-answer-body]") return basicQuerySelectorAll(selector);
+    const selected = [];
+    const walk = (parent) => {
+      for (const child of parent.children ?? []) {
+        if (Object.hasOwn(child.dataset ?? {}, "azureAnswerBody")) selected.push(child);
+        walk(child);
+      }
+    };
+    walk(hitsNode);
+    return selected;
+  };
+
+  const audio = node("[data-persona-audio]");
+  audio.pause = () => {};
+  audio.play = async () => {
+    audioPlays += 1;
+  };
 
   globalThis.document = fakeDocument(node, {
     // **要是 visible。** 開場那一段對 `recording` 寫死的是 `"recording"`，
@@ -193,6 +258,14 @@ async function open(table = {}, { search = "", beforeListenerRegistered = null }
   globalThis.addEventListener = () => {};
   globalThis.removeEventListener = () => {};
   globalThis.matchMedia = () => ({ matches: false, addEventListener() {} });
+  globalThis.speechSynthesis = {
+    getVoices: () => [],
+    addEventListener() {},
+    cancel() {},
+    speak() {
+      localSpeaks += 1;
+    },
+  };
   globalThis.setInterval = (fn, ms, ...args) => {
     const id = nativeSetInterval(fn, ms, ...args);
     intervals.push({ fn, ms, id });
@@ -204,6 +277,7 @@ async function open(table = {}, { search = "", beforeListenerRegistered = null }
     core: {
       invoke: async (cmd, arg) => {
         calls.push(cmd);
+        invokes.push({ cmd, arg });
         const v = Object.hasOwn(table, cmd)
           ? table[cmd]
           : cmd === "recorder_supervisor_state"
@@ -229,10 +303,14 @@ async function open(table = {}, { search = "", beforeListenerRegistered = null }
   return {
     node,
     calls,
+    invokes,
     nonsense,
     line: () => node("[data-state-line]").textContent,
     hits: () => node("[data-hits]"),
     hitTexts: () => node("[data-hits]").children.map((c) => c.textContent),
+    azureButton: () => node("[data-hits]").querySelector(".answer-cloud"),
+    audioPlays: () => audioPlays,
+    localSpeaks: () => localSpeaks,
     urlPolicy: () => node("[data-url-policy]"),
     urlPolicyQuestion: () => node("[data-url-policy-question]").textContent,
     urlPolicyActions: () => node("[data-url-policy-actions]"),
@@ -249,6 +327,12 @@ async function open(table = {}, { search = "", beforeListenerRegistered = null }
     async click(sel) {
       for (const fn of node(sel).handlers.click ?? []) fn();
       await tick();
+    },
+    async clickElement(element, { trusted = true } = {}) {
+      if (!element || element.disabled || element.hidden) return false;
+      for (const fn of element.handlers.click ?? []) fn({ isTrusted: trusted });
+      await tick();
+      return true;
     },
     async type(q) {
       node("[data-ask-input]").value = q;
@@ -290,7 +374,7 @@ function check(name, ok, detail) {
   }
 }
 
-const CONSENT = "第一張同意書還沒簽——她不會開始記錄。在系統匣圖示上按右鍵，選「三張同意書…」簽好再回來";
+const CONSENT = "第一張同意書還沒簽——她不會開始記錄。在系統匣圖示上按右鍵，選「四張同意書…」簽好再回來";
 
 console.log("① 按「開始記錄」，後端說同意書還沒簽");
 {
@@ -1455,6 +1539,381 @@ console.log("53. 拔手失敗不是 recorder 回條，heartbeat transition 不�
     /\.emit\(\s*"hands-pulled"/.test(trayHands) && !/\.emit\(\s*"recorder-failed"/.test(trayHands),
     trayHands,
   );
+}
+
+const AZURE_READY = {
+  generation: 7,
+  config_readable: true,
+  enabled: true,
+  region: "eastasia",
+  voice: "zh-TW-HsiaoChenNeural",
+  endpoint: "https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1",
+  credential: "present",
+  consented: true,
+  consent_at: 1_757_299_200_000,
+  ready: true,
+  config_error: null,
+};
+
+const AZURE_OFF = {
+  ...AZURE_READY,
+  generation: 6,
+  enabled: false,
+  region: null,
+  endpoint: null,
+  credential: "missing",
+  consented: false,
+  consent_at: null,
+  ready: false,
+};
+
+function azureCalls(page, command = "azure_tts_speak") {
+  return page.invokes.filter(({ cmd }) => cmd === command);
+}
+
+console.log("54. Azure 只有 trusted 答案按鈕能送；失敗不 autoplay、不 fallback");
+{
+  const p = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("Azure 測試拒絕"),
+    ask: answer({ hits: [hit({ snippet: "AZURE_HIT_BODY" })] }),
+    recording_state: "recording",
+  });
+  await p.type("讀這份答案");
+  const button = p.azureButton();
+  check("ready 狀態才長出 Azure 按鈕", button !== null, p.hitTexts());
+  check("回答完成本身沒有送 request", azureCalls(p).length === 0, p.invokes);
+  check("回答完成也沒有 autoplay", p.audioPlays() === 0 && p.localSpeaks() === 0);
+  await p.clickElement(button, { trusted: false });
+  check("script 合成 click 沒有送 request", azureCalls(p).length === 0, p.invokes);
+  await p.clickElement(button);
+  check(
+    "真人 click 恰好送一次正文與剛讀到的完整 gate snapshot",
+    azureCalls(p).length === 1 &&
+      azureCalls(p)[0].arg?.text === "AZURE_HIT_BODY" &&
+      JSON.stringify(azureCalls(p)[0].arg?.expected) ===
+        JSON.stringify({
+          generation: AZURE_READY.generation,
+          enabled: true,
+          region: AZURE_READY.region,
+          voice: AZURE_READY.voice,
+          consentAt: AZURE_READY.consent_at,
+          credentialPresent: true,
+        }),
+    azureCalls(p),
+  );
+  check("Azure 失敗沒有自動改用本機聲音", p.audioPlays() === 0 && p.localSpeaks() === 0);
+  check(
+    "失敗回條明講沒有 fallback",
+    p.node("[data-persona-line]").textContent.includes("沒有自動改用本機或另一個雲端"),
+    p.node("[data-persona-line]").textContent,
+  );
+}
+
+console.log("55. Azure payload 是正文 allowlist：hit/chapter 進，所有提示、出處與控制不進");
+{
+  const answerWithEverything = answer({
+    kind: "range",
+    searched: "SEARCH_DIAGNOSTIC_MUST_STAY_LOCAL",
+    query_id: 7007,
+    hits: [
+      hit({
+        snippet: "HIT_BODY_MUST_LEAVE",
+        app: "SOURCE_APP_MUST_STAY_LOCAL",
+        title: "SOURCE_TITLE_MUST_STAY_LOCAL",
+        url: "https://source-must-stay-local.invalid/private",
+      }),
+    ],
+    truncated: true,
+    time_range: {
+      from: 1_755_000_000_000,
+      to: 1_755_000_360_000,
+      said: "DATE_SCOPE_MUST_STAY_LOCAL",
+    },
+    chapters: [chapter()],
+    followup: "FOLLOWUP_MUST_STAY_LOCAL",
+    closure_notice: "CLOSURE_MUST_STAY_LOCAL",
+  });
+  const p = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("stop after payload capture"),
+    ask: answerWithEverything,
+    recording_state: "recording",
+  });
+  await p.type("範圍題");
+  await p.clickElement(p.azureButton());
+  const text = azureCalls(p)[0]?.arg?.text ?? "";
+  check("hit 主句會送", text.includes("HIT_BODY_MUST_LEAVE"), text);
+  check("chapter 的核心時間與主句會送", text.includes("5 分鐘") && text.includes("Azure 主句章節"), text);
+  for (const localOnly of [
+    "CLOSURE_MUST_STAY_LOCAL",
+    "SEARCH_DIAGNOSTIC_MUST_STAY_LOCAL",
+    "DATE_SCOPE_MUST_STAY_LOCAL",
+    "FOLLOWUP_MUST_STAY_LOCAL",
+    "SOURCE_APP_MUST_STAY_LOCAL",
+    "SOURCE_TITLE_MUST_STAY_LOCAL",
+    "Notion.exe",
+    "source-must-stay-local.invalid",
+    "7007",
+    "這裡最多列 20 筆",
+    "我本來已經忘了",
+    "用本機聲音朗讀",
+    "用 Azure 朗讀",
+  ]) {
+    check(`不送 ${localOnly}`, !text.includes(localOnly), text);
+  }
+}
+
+console.log("56. Azure payload 的 fact 與 empty 只送各自主句，不送 source／blind 診斷");
+{
+  const facts = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("captured"),
+    ask: answer({
+      answers: [fact()],
+      hits: [],
+    }),
+    recording_state: "recording",
+  });
+  await facts.type("電話");
+  await facts.clickElement(facts.azureButton());
+  const factText = azureCalls(facts)[0]?.arg?.text ?? "";
+  check(
+    "fact 認知界線、值與原文會送",
+    factText.includes("我最後看到的是") &&
+      factText.includes("+886800080123") &&
+      factText.includes("客服專線 0800-080-123"),
+    factText,
+  );
+  check(
+    "fact source 與控制仍留本機",
+    !factText.includes("chrome.exe") &&
+      !factText.includes("帳單查詢") &&
+      !factText.includes("source.example.invalid") &&
+      !factText.includes("我本來已經忘了"),
+    factText,
+  );
+
+  const empty = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("captured"),
+    ask: answer({
+      query_id: 8008,
+      hits: [],
+      answers: [],
+      truncated: true,
+      blind: blind({
+        ever_recorded: true,
+        excluded: [["excluded app: BLIND_DIAGNOSTIC_MUST_STAY_LOCAL", 9]],
+        paused_episodes: 3,
+        paused_now: true,
+        truncated: 4,
+      }),
+    }),
+    recording_state: "recording",
+  });
+  await empty.type("沒有的事");
+  await empty.clickElement(empty.azureButton());
+  const emptyText = azureCalls(empty)[0]?.arg?.text ?? "";
+  check("empty 主句會送", emptyText === "我記得的東西裡沒有這件事。", emptyText);
+  check(
+    "blind／pause 診斷不會跟著送",
+    !emptyText.includes("BLIND_DIAGNOSTIC_MUST_STAY_LOCAL") &&
+      !emptyText.includes("暫停") &&
+      !emptyText.includes("9 段") &&
+      !emptyText.includes("這裡最多列 20 筆") &&
+      !emptyText.includes("8008"),
+    emptyText,
+  );
+}
+
+console.log("57. 取消會送一次 cancel、丟掉晚 response，且不開始第二個 speak");
+{
+  let finishA = null;
+  let finishCancel = null;
+  let speakNumber = 0;
+  let azureStatus = AZURE_READY;
+  const p = await open({
+    azure_tts_read: () => azureStatus,
+    azure_tts_speak: () => {
+      speakNumber += 1;
+      if (speakNumber > 1) throw new Error("second request captured");
+      return new Promise((resolveSpeak) => {
+        finishA = resolveSpeak;
+      });
+    },
+    azure_tts_cancel: () =>
+      new Promise((resolveCancel) => {
+        finishCancel = () => {
+          // A 已 admission 會先把 7 消耗成 8；cancel A 再推成 9。只有 cancel
+          // settle 後的 authoritative read 可以把 9 交給 B。
+          azureStatus = { ...AZURE_READY, generation: 9 };
+          resolveCancel(true);
+        };
+      }),
+    ask: answer({ hits: [hit({ snippet: "PENDING_AZURE_BODY" })] }),
+    recording_state: "recording",
+  });
+  await p.type("慢一點");
+  const button = p.azureButton();
+  await p.clickElement(button);
+  check("前提：一個 speak 在飛", azureCalls(p).length === 1 && typeof finishA === "function");
+  await p.clickElement(button);
+  check("第二下是 cancel，不是第二個 speak", azureCalls(p).length === 1, azureCalls(p));
+  check(
+    "cancel IPC 恰好一次且只取消這次 read 綁定的 generation",
+    azureCalls(p, "azure_tts_cancel").length === 1 &&
+      JSON.stringify(azureCalls(p, "azure_tts_cancel")[0].arg) ===
+        JSON.stringify({ expectedGeneration: AZURE_READY.generation }),
+    azureCalls(p, "azure_tts_cancel"),
+  );
+  check("前提：cancel IPC 被故意卡住", typeof finishCancel === "function");
+  // token-null 路徑若自行 read，下一按會把 cancel 前的同一代 token 撿回來；A cancel
+  // 晚到就可能誤殺這個 B。cancel settle 前不准送第二個 speak。
+  await p.clickElement(button);
+  await p.clickElement(button);
+  check("cancel native 尚未回來時，連按也不會重用 A token 送 B", azureCalls(p).length === 1, azureCalls(p));
+  finishA({
+    generation: 8,
+    content_type: "audio/mpeg",
+    audio_bytes: 3,
+    data_url: "data:audio/mpeg;base64,AQID",
+  });
+  await tick(40);
+  check("取消後的晚 MP3 不播放", p.audioPlays() === 0, p.audioPlays());
+  check("取消不 fallback 到本機", p.localSpeaks() === 0, p.localSpeaks());
+  finishCancel(true);
+  await tick(40);
+  await p.clickElement(button);
+  check(
+    "cancel settle 並重讀後才准新的 generation 送 B",
+    azureCalls(p).length === 2 && azureCalls(p)[1].arg?.expected?.generation === 9,
+    azureCalls(p),
+  );
+}
+
+console.log("58. 合法 MP3 只在 click response 後播放；malformed response 不 fallback");
+{
+  const ok = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: {
+      generation: 8,
+      content_type: "audio/mpeg",
+      audio_bytes: 3,
+      data_url: "data:audio/mpeg;base64,AQID",
+    },
+    ask: answer({ hits: [hit({ snippet: "PLAY_ME" })] }),
+    recording_state: "recording",
+  });
+  await ok.type("播放");
+  check("按以前仍沒有 autoplay", ok.audioPlays() === 0);
+  await ok.clickElement(ok.azureButton());
+  check("可信 click 的合法 MP3 播一次", ok.audioPlays() === 1, ok.audioPlays());
+
+  const bad = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: {
+      generation: 8,
+      content_type: "audio/wav",
+      audio_bytes: 3,
+      data_url: "data:audio/wav;base64,AQID",
+    },
+    ask: answer({ hits: [hit({ snippet: "DO_NOT_PLAY" })] }),
+    recording_state: "recording",
+  });
+  await bad.type("別播放壞回應");
+  await bad.clickElement(bad.azureButton());
+  check("malformed audio 不播放", bad.audioPlays() === 0, bad.audioPlays());
+  check("malformed audio 不改用本機", bad.localSpeaks() === 0, bad.localSpeaks());
+
+  const staleGeneration = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: {
+      generation: AZURE_READY.generation,
+      content_type: "audio/mpeg",
+      audio_bytes: 3,
+      data_url: "data:audio/mpeg;base64,AQID",
+    },
+    ask: answer({ hits: [hit({ snippet: "STALE_GENERATION_MUST_NOT_PLAY" })] }),
+    recording_state: "recording",
+  });
+  await staleGeneration.type("別播放舊代回應");
+  await staleGeneration.clickElement(staleGeneration.azureButton());
+  check("不是 baseline 精確 +1 的 MP3 也不播放", staleGeneration.audioPlays() === 0);
+  check("generation mismatch 仍不 fallback", staleGeneration.localSpeaks() === 0);
+}
+
+console.log("59. changed event 的新狀態不會被較早開始、較晚回來的 read 蓋掉");
+{
+  let finishOldRead = null;
+  let reads = 0;
+  const p = await open({
+    azure_tts_read: () => {
+      reads += 1;
+      // 開場 read 與 listener-ready 補讀先一致回 off；接著故意讓第一個 event
+      // 卡住，再讓第二個 event 的新 generation 先回來。
+      if (reads === 3) {
+        return new Promise((resolveRead) => {
+          finishOldRead = () => resolveRead(AZURE_OFF);
+        });
+      }
+      return reads >= 4 ? AZURE_READY : AZURE_OFF;
+    },
+    ask: answer({ hits: [hit({ snippet: "READ_REVISION_BODY" })] }),
+    recording_state: "recording",
+  });
+  await p.type("狀態更新");
+  check("前提：開場與 listener-ready 補讀都回 off，答案沒有 Azure 按鈕", reads === 2 && p.azureButton() === null, {
+    reads,
+    button: p.azureButton()?.textContent ?? null,
+  });
+  await p.fromOutside("azure-tts-changed");
+  check("前提：第一個 changed read 還在飛", reads === 3 && typeof finishOldRead === "function", reads);
+  await p.fromOutside("azure-tts-changed");
+  check("第二個 event 只觸發一次新 read，最新 ready 長出按鈕", reads === 4 && p.azureButton() !== null, {
+    reads,
+    button: p.azureButton()?.textContent ?? null,
+  });
+  finishOldRead();
+  await tick(40);
+  check("舊的 off 回應晚到仍不能拿掉新按鈕", p.azureButton() !== null, p.hitTexts());
+  check("四次純 read 都沒有 speak 或 autoplay", azureCalls(p).length === 0 && p.audioPlays() === 0);
+}
+
+console.log("60. listener 註冊前遺失的 Azure change 由 ready 後補讀追回來");
+{
+  let azure = AZURE_OFF;
+  let reads = 0;
+  let finishAzureListener = () => {};
+  const azureListenerHeld = new Promise((resolveListener) => {
+    finishAzureListener = resolveListener;
+  });
+  const p = await open(
+    {
+      azure_tts_read: () => {
+        reads += 1;
+        return azure;
+      },
+      ask: answer({ hits: [hit({ snippet: "LISTENER_READY_BODY" })] }),
+      recording_state: "recording",
+    },
+    {
+      beforeListenerRegistered: (name) =>
+        name === "azure-tts-changed" ? azureListenerHeld : undefined,
+    },
+  );
+  await p.type("listener gap");
+  check("前提：listener 未完成時只有開場舊 read", reads === 1 && p.azureButton() === null, {
+    reads,
+    button: p.azureButton()?.textContent ?? null,
+  });
+  // 這次 change 落在 read 和 listen ready 之間，沒有 event callback 可呼叫。
+  azure = AZURE_READY;
+  finishAzureListener();
+  await tick(40);
+  check("listener ready 後恰好多一次 native read", reads === 2, reads);
+  check("補讀追回新 generation/ready，答案按鈕出現", p.azureButton() !== null, p.hitTexts());
+  check("補讀本身沒有 speak 或 autoplay", azureCalls(p).length === 0 && p.audioPlays() === 0);
 }
 
 console.log("");

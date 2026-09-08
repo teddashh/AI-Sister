@@ -10,7 +10,7 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.108 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+alpha.109 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
@@ -21,6 +21,52 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
+
+### alpha.109 先驗 Azure 可選 TTS 邊界
+
+**目前狀態：下面全是待勾項。** core config／consent、native transport、Credential
+Manager backend 與 renderer contract 有自動測試，不等於正式 Windows artifact 已用真
+帳號播過，也不等於 packet capture 已證明實際 request 沒有多帶資料。
+
+- [ ] fresh install／沒有 `[shell.azure_tts]`／沒有 Azure key／第四張未簽時，Azure
+      顯示 disabled/unconfigured；「用本機聲音朗讀」仍照 alpha.108 走 `localService`。
+      沒有本機中文 voice 時保持靜音，不能自動 POST；Azure 失敗也不能自動改走本機或
+      其他 provider。開 app、開設定、顯示答案、選 Persona、錄製與 idle 都要是 0 Azure
+      request。
+- [ ] 從 alpha.108 的 v3 `consent.toml` 升級：原來三張的 timestamps 逐字保留，新增
+      `azure-tts` 顯示未簽。只簽第二張 `cloud-reading`、只開 Persona `voice_enabled`、
+      或只存 key 都必須仍是 0 Azure POST；只簽第四張也不能反過來授權 recording、
+      frame storage 或 CLI 解讀。刪壞／未知／版本不符的 consent 要 fail closed。
+- [ ] 在 Azure 設定存一支測試 key；用 Windows Credential Manager 確認它只有 generic
+      credential target `ted-h/AI-Sister/AzureSpeech/v1`、username
+      `Azure Speech subscription key`。`config.toml`、`desktop.log*`、`record.log*`、
+      `sister.db` 與 memory export 都找不到 key。輸入當下 password 欄位／renderer RAM／
+      Tauri IPC 會短暫持有它；保存後欄位要立即清空，後端回條只顯示
+      Present／Missing／Unreadable／Unsupported，不能讀回已存 key。從設定刪 key 後
+      target 要真的消失。
+      不要把真 key 貼回 issue 或測試紀錄。
+- [ ] `[shell.azure_tts]` 只能選 `eastasia`、`southeastasia`、`japaneast` 與三支
+      canonical zh-TW voice。依序用三區 resource／key 實測並抓封包：每次按 Azure
+      朗讀只有一個 native HTTPS `POST` 到
+      `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1`；沒有 `HEAD`、
+      redirect follow、proxy、retry 或 WebView request。`westus`、大小寫變體、自訂 URL、
+      未知 voice／多餘 config key 都要讓設定 fail closed，不能猜成 East Asia。
+- [ ] 準備一個答案正文含唯一測試字串、假姓名／電話／金額，來源 chip、source URL、
+      memory id、問題與另一題各放不同 sentinel。簽第四張並按 Azure 後，native request
+      的唯一使用者內容必須是**當前答案正文原文**：正文 sentinel 和未遮罩的假個資在，
+      截圖 bytes、來源／chip、memory id、DB、問題、舊答案、Persona 台詞與其他 sentinel
+      全不在。不要用真個資做這項測試。
+- [ ] 同一答案連按兩次，應看到兩次獨立 POST，不能命中磁碟或可重播記憶體 cache。
+      播完、失敗、重開 app、`forget`、`prune`、memory export 後搜尋資料目錄，不得多出
+      Azure 文字／SSML／MP3 cache；這些動作也不能刪 Credential Manager key。
+- [ ] 先用自動化的 delayed test transport 驗 late-response state machine；正式 artifact
+      則在 POST 已開始後立即按 Stop、換題及開始新播放。舊 playback 要立刻失效，late
+      MP3 不得播放或快取；但不要要求 packet trace 當場消失——blocking POST 仍可繼續到
+      response 或最長 45 秒 timeout。UI 必須只說不再播放，不可宣稱網路或計費已取消；
+      Azure 可能已計入這次字數。
+- [ ] 額度文案只能說 Microsoft **目前公開**列 F0 neural TTS 每月 0.5 million
+      characters，並緊接著說是否可用、額度與費用以這個 Azure 帳號／resource／方案及
+      Microsoft 當下規則為準。不得顯示成 AI-Sister 附送、保證免費或硬費用上限。
 
 ### alpha.108 先看 17 人角色與本機語音
 
@@ -230,7 +276,7 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
    同上，每次都中。順便看系統匣那兩行字是不是「停止記錄」。
 4. **開機前後各跑一次 `sister.exe doctor`，「零當機」那一行要逐字相同。**
    兩步，一分鐘。它抓的是「她開機這件事本身改掉了一個統計數字」。
-5. **全離線走一遍**：三張同意書只簽第一張，然後 `record` → `stats` →
+5. **全離線走一遍**：四張同意書只簽第一張，Azure 設定維持關閉，然後 `record` → `stats` →
    `query`。（§2 第二條 ＋ §7）這是 Phase 1 的退場條件之一，而它現在只有我
    這邊的 fixture 說它成立。
 
@@ -294,7 +340,7 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
       是好的」和「資料還太少」以前都印 ✓，那正是這一節自己要抓的形狀。
       錄個兩三分鐘再跑一次，它們就該翻成 ✓。
 
-## 2. 三張同意書：沒簽她就不該動
+## 2. 四張同意書：沒簽她就不該動
 
 **懷疑的是**：這道閘門在 Linux 上測得到（它被刻意抽成獨立函式就是為了這個），
 但「拒絕之後使用者看到什麼」只有真的跑一次才知道。
@@ -304,6 +350,9 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
 - [ ] 只簽第一張，錄一分鐘。`frames\` 資料夾要**保持空的**（只記字不留圖），
       而且開錄時要印出「第三張同意書沒簽：這一次只記螢幕上的字」。
 - [ ] 再簽第三張，錄一分鐘。這次 `frames\` 裡要出現 PNG。
+- [ ] 第四張 `azure-tts` 維持未簽，即使設定 enabled、region／voice 合法且 Credential
+      Manager 有 key，按 Azure 朗讀仍要明講「沒有送出 request」；本機朗讀照常可用。
+      反過來只簽第四張，`sister record` 仍要被第一張擋住，CLI 解讀仍要被第二張擋住。
 - [ ] 錄到一半在另一個終端機 `sister consent --revoke local-recording`。
       正在跑的 record 每 5 秒重讀同意書，所以撤回後最多再錄 5 秒加一拍；
       `capture.min_interval_ms` 超過 5 秒時，主要會等那一拍。結束理由要是
@@ -360,7 +409,7 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
 - [ ] 同意書那一頁的「好」按得下去而且真的關得掉窗（這是 ACL 那個修法，
       按不動代表 `capabilities/aux-windows.json` 還是錯的）。
 - [ ] **alpha.50 回歸：五扇輔助視窗不能再凍成白窗。** 從系統匣依序開時間軸、
-      設定、三張同意書與開發者評測指標；再從一筆有畫面的答案開「看當時的畫面」。
+      設定、四張同意書與開發者評測指標；再從一筆有畫面的答案開「看當時的畫面」。
       每扇都要立刻畫出內容而且仍能操作。只有原生標題、裡面全白，接著整個桌面顯示
       `Not Responding`，就是這次 Windows WebView2 deadlock 還沒修到。
 - [ ] 問一題讓它真的等超過 4 秒，慢訊息只能說「這一題已經超過 4 秒」。它沒有量
@@ -448,7 +497,8 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
 
 **alpha.23 新增（同意是上限，不是開關）：**
 
-- [ ] 三張都簽好、`record` 正在跑，把設定檔的 `[capture] store_images` 改成
+- [ ] 當時的三張（現行前三張；Azure 第四張與這條無關）都簽好、`record` 正在跑，
+      把設定檔的 `[capture] store_images` 改成
       `false` 存檔。5 秒內終端機要說「設定檔把 store_images 關掉了」，而且
       `frames/` 底下**不再多出新檔案**（開著檔案總管看）。這個旗標以前凍在開機
       那一刻，改了完全沒有作用——而 `sister doctor` 會照著新設定說「text-only
@@ -984,7 +1034,7 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
 - [ ] **視窗外面發生的事，要蓋掉視窗裡那句話。** 在字母人上按「叫她起來」，
       等它說出任何一句「沒成」的話（最好按的：**同意書 1 沒簽**的時候按下去，
       那一格會寫「第一張同意書還沒簽——她不會開始記錄。在系統匣圖示上按右鍵，
-      選「三張同意書…」簽好再回來」，逐字抄自 `main.rs` 的 `start_recording`）。
+      選「四張同意書…」簽好再回來」，逐字抄自 `main.rs` 的 `start_recording`）。
       **接著從系統匣**按「開始記錄」讓她真的起來。那一格要換成她現在的狀態，
       **不可以還掛著那句「同意書還沒簽」**。反過來也一樣：從系統匣停掉，那一格
       要跟著換。

@@ -1420,7 +1420,7 @@ pub mod consent {
 
     /// `sister consent [--grant …] [--revoke …]`。
     ///
-    /// 在無頭機器上把整條同意流程走完的入口。字母人上那三張卡片按下去之後
+    /// 在無頭機器上把整條同意流程走完的入口。桌面姊妹上那四張卡片按下去之後
     /// 改的是**同一個檔案**，所以這裡驗得過的東西，那邊也就驗過了。
     pub fn run(
         data_dir: &Path,
@@ -1546,7 +1546,7 @@ pub mod consent {
 
     fn print_human(data_dir: &Path, c: &Consent, config: &Config, changed: bool) {
         println!(
-            "三張同意書（{}）",
+            "四張同意書（{}）",
             sister_core::consent::path(data_dir).display()
         );
         for sheet in Sheet::ALL {
@@ -12804,7 +12804,7 @@ pub mod export {
         println!("\n這個目錄本身就是一個資料目錄，直接問得到：");
         println!("  {}", cmd(to, "query 電話"));
         println!(
-            "沒帶走的是 consent.toml（三張同意書的簽名）和 config.toml（設定）——\n\
+            "沒帶走的是 consent.toml（四張同意書的簽名）和 config.toml（設定）——\n\
              那兩份是這台機器的設定，不是你的記憶。"
         );
 

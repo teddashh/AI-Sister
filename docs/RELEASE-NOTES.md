@@ -59,6 +59,48 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.109
+
+**這一版加入可選的 Azure 繁中答案朗讀，但本機聲音仍是預設；Azure 預設關閉，
+兩條路都不會互相自動 fallback。**
+
+Azure 不是 Persona 的 `voice_enabled`，也不借原本三張同意。設定頁要分別啟用 Azure、
+選擇 `eastasia`、`southeastasia` 或 `japaneast`，把自己的 Azure Speech subscription
+key 存入目前 Windows 使用者的 Credential Manager fixed target
+`ted-h/AI-Sister/AzureSpeech/v1`，並簽第四張 `azure-tts`，最後親手按 Azure 朗讀，
+才會建立請求。第四張條文明講：每次按下會送**當前答案正文原文**，其中可能含姓名、
+電話與金額且不先遮罩；不送截圖、來源連結、memory id、整份資料庫或其他文字。沒簽
+這一張時一次都不呼叫 Azure，本機朗讀不受影響。升級時，沒有 Azure 欄位的同版本舊
+`consent.toml` 會保留原三張簽名，但第四張一律是未簽，不倒推授權。
+
+非密設定只把 `enabled`、typed region 與三個 typed zh-TW voice 寫進
+`[shell.azure_tts]`；key 不進 `config.toml`、log、DB 或 export。輸入時會短暫經過
+password 欄位與 Tauri IPC，保存後頁面清空；native 回條只讓頁面看
+Present／Missing／Unreadable／Unsupported，不把已存 secret 讀回 renderer。region 以外的值、自訂 endpoint、多餘的
+subscription key 欄位都 fail closed。刪記憶、設定檔、Persona cache 或改 `--data-dir`
+不會順手刪 Credential Manager key；要在 Azure 設定裡明確刪除。
+
+真正的 transport 在 native Rust，只對所選的
+`https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` 發一個 HTTPS `POST`；
+不 redirect、不走 proxy、不 retry。WebView 仍只走 Tauri IPC，不能提供 URL，CSP 也
+沒有 Azure host。唯一的使用者內容是當前答案正文；來源 chips、問題、舊答案、Persona
+台詞、OCR 集合、截圖、memory id、DB 與其他 UI 文字都不夾帶。
+
+這版不做文字或 MP3 的磁碟 cache，也沒有跨 click 重播的記憶體 cache；每次按 Azure
+朗讀都可能是新 POST。按停止、換題或開始另一段會立即讓舊 playback generation 失效，
+晚回的 MP3 不播放、不快取；但已開始的 blocking native POST **不能中途 abort**，仍
+可能跑到 45 秒 timeout，Azure 也可能已計入用量。畫面不會把「不再播放」說成「網路
+請求已取消」。
+第四張的 admission 與 CLI／desktop 撤回另由跨行程 shared lock 排序，guard 活過完整
+transport；撤回若撞上既有 POST 可能等到 timeout，但成功回覆後舊 snapshot 不會才送。
+
+Microsoft 目前公開列出的 Azure Speech F0 neural TTS 額度是每月 0.5 million
+characters。這不是 AI-Sister 提供或保證的免費額度；能否使用、實際額度與費用仍以
+你的 Azure 帳號、resource、方案及 Microsoft 當下規則為準。正式 Windows artifact
+的三區 packet trace、真帳號播放、key lifecycle 與 in-flight cancel 時序仍列在人工
+驗收清單，沒有在 release note 裡冒充已跑過。
+
+
 ## v0.1.0-alpha.108
 
 **這一版把單一字母角色整條退場，直接帶四姊妹與 13 位閨密共 17 張角色圖；

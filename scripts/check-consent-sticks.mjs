@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * 三張同意書那一頁：勾勾上寫的東西，一定要是檔案裡的東西。
+ * 四張同意書那一頁：勾勾上寫的東西，一定要是檔案裡的東西。
  *
  * 這一頁是這整個產品的隱私契約，而它只有一種真正嚴重的錯——**畫面說已同意、
  * 檔案裡沒有**（或反過來）。`sister record` 讀的是那個檔案，不是這個畫面。
@@ -27,10 +27,10 @@ const SRC = process.argv[2] ?? join(UI, "onboarding.js");
 const HTML = read(join(UI, "onboarding.html"));
 const boot = loader(read(SRC));
 
-const KEYS = ["local-recording", "cloud-reading", "frame-storage"];
+const KEYS = ["local-recording", "cloud-reading", "frame-storage", "azure-tts"];
 
 /** `ConsentView` 的形狀，照 main.rs 那個 struct 抄的。 */
-function view(granted = [true, false, true]) {
+function view(granted = [true, false, true, true]) {
   return {
     path: "C:\\Users\\ted\\AppData\\Roaming\\sister\\consent.toml",
     current: granted[0],
@@ -55,7 +55,7 @@ async function open({ onRead, onSet } = {}) {
   // 開場的 `hidden` 照 onboarding.html、HTML 上沒有的選擇器當場算前提不成立。
   // 自己寫 `nodes.get(sel) ?? fakeEl()` 的版本會替一顆被刪掉的按鈕生一個出來。
   const node = domOf(HTML);
-  let state = [true, false, true];
+  let state = [true, false, true, true];
 
   globalThis.document = fakeDocument(node);
   globalThis.location = { search: "" };
@@ -89,7 +89,7 @@ async function open({ onRead, onSet } = {}) {
     disk: () => state,
     say: () => node("[data-say]").textContent,
     bad: () => node("[data-say]").classList.contains("bad"),
-    /** 那三顆勾勾，順序和 KEYS 一樣。 */
+    /** 那四顆勾勾，順序和 KEYS 一樣。 */
     boxes: () => node("[data-cards]").children.map((li) => li.querySelector("input")),
     /**
      * 按第 i 張。**先自己翻**再送 change 事件——原生的 checkbox 就是這個順序，
@@ -118,7 +118,7 @@ console.log("① 一般狀態：勾勾照著檔案畫");
 {
   const p = await open();
   const boxes = p.boxes();
-  check("三張都在", boxes.length === 3, boxes.length);
+  check("四張都在", boxes.length === 4, boxes.length);
   // `view()` 少抄 main.rs 那邊一欄的時候，卡片上那句話會印出 undefined，
   // 而底下每一條問的都是勾勾的狀態——全綠。見 fake-dom.mjs 的 `watchNonsense`。
   check("卡片上沒有 NaN / undefined", p.nonsense().length === 0, p.nonsense());
@@ -126,6 +126,12 @@ console.log("① 一般狀態：勾勾照著檔案畫");
     "勾的狀態和檔案一致",
     boxes.map((b) => b.checked).join() === p.disk().join(),
     boxes.map((b) => b.checked),
+  );
+  check(
+    "第四張勾著也明講不會自動連線，只認答案按鈕",
+    p.node("[data-cards]").children[3].textContent.includes("不會自動連線") &&
+      p.node("[data-cards]").children[3].textContent.includes("只有你按"),
+    p.node("[data-cards]").children[3].textContent,
   );
 }
 
@@ -201,6 +207,27 @@ console.log("⑤ 反方向：取消第三張來停掉截圖，兩邊都失敗");
     "勾勾不可以停在「取消」——她其實還在寫圖",
     p.boxes()[2].checked === true,
     p.boxes()[2].checked,
+  );
+  check("而且畫面上有話說", p.say().includes("寫不進去"), p.say());
+}
+
+console.log("⑥ 反方向：取消第四張來停 Azure，兩邊都失敗");
+{
+  let reads = 0;
+  const p = await open({
+    onSet: () => {
+      throw new Error("寫不進去：拒絕存取");
+    },
+    onRead: (state) => {
+      if (reads++ > 0) throw new Error("讀不出同意書：拒絕存取");
+      return view(state);
+    },
+  });
+  await p.toggle(3);
+  check(
+    "第四張不可以停在『取消』——檔案裡其實仍允許 Azure",
+    p.boxes()[3].checked === true,
+    p.boxes()[3].checked,
   );
   check("而且畫面上有話說", p.say().includes("寫不進去"), p.say());
 }

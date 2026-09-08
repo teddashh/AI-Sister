@@ -16,6 +16,7 @@
 //!
 //! 這是唯一一個「因為換了殼所以整段不抄」的地方，其餘行為都照舊。
 
+use base64::Engine as _;
 use chrono::{Local, Timelike};
 use serde::{Deserialize, Serialize};
 use sister_core::gatekeeper_candidates::CommitmentRef;
@@ -27,12 +28,13 @@ use sister_shell::{PetState, Rect};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU8, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, PhysicalPosition, WindowEvent};
 
+mod azure_credential;
 mod hands;
 mod login_startup;
 #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
@@ -174,12 +176,31 @@ struct Shell {
     /// 帶進 `spawn_blocking`；下載 API 本身不接受 persona、URL 或私人資料。
     asset_operation: Arc<AtomicU8>,
     asset_cancel: Arc<AtomicBool>,
+    /// Azure 一次只准一個 native POST。generation 是播放意圖，不冒充能中止
+    /// 已經進入 blocking transport 的 socket：取消後晚回應會被丟掉。
+    azure_tts_in_flight: Arc<AtomicBool>,
+    azure_tts_generation: Arc<AtomicU64>,
+    /// `u64::MAX` 表示沒有 request；其餘值是目前 in-flight request 入場時消耗的
+    /// baseline generation。每個 request 都先把全域 generation 往前推一代，
+    /// 延遲到達的 A cancel 才不會誤殺稍後開始的 B。
+    azure_tts_active_generation: Arc<AtomicU64>,
+    /// config／credential／desktop consent mutation 與一次 outbound admission 共用。
+    /// 誰先拿到鎖，誰就先完成它的線性化點；mutation 在鎖內先 bump 再落地，
+    /// speak 則在鎖內重讀並比對 renderer 帶來的完整 gate snapshot。
+    azure_tts_admission: Arc<Mutex<()>>,
+    /// generation／active request／single-flight 三格的極短 transition lock。Cancel
+    /// 只拿這把，不必等 credential／consent I/O；A drop、A cancel 與 B admit 仍不可
+    /// 在兩顆 atomic 中間交錯，舊 cancel 才不會拒掉新的 B click。
+    azure_tts_transition: Arc<Mutex<()>>,
 }
 
 const ASSET_IDLE: u8 = 0;
 const ASSET_INSTALLING: u8 = 1;
 const ASSET_REMOVING: u8 = 2;
 const ASSET_SETTING_VOICE: u8 = 3;
+const AZURE_TTS_NO_ACTIVE_GENERATION: u64 = u64::MAX;
+// JavaScript Number 能無損表示的最大整數；跨 IPC 的 generation 永遠留在這個範圍。
+const AZURE_TTS_MAX_GENERATION: u64 = 9_007_199_254_740_991;
 
 impl Shell {
     fn persist(&self) {
@@ -3059,6 +3080,527 @@ fn persona_voice_set(
     Ok(view)
 }
 
+// ---------- 可選 Azure 雲端朗讀 ----------
+
+#[derive(Clone, Serialize)]
+struct AzureTtsView {
+    /// 綁住 renderer 看到的狀態與下一次 click。舊 click 若排到 cancel／mutation
+    /// 後才進 native，不能把新 generation 收編成自己的。
+    generation: u64,
+    /// `false` 時下面四個 config projection 都是 `null`，不是假裝成預設關閉。
+    config_readable: bool,
+    enabled: Option<bool>,
+    region: Option<sister_core::config::AzureTtsRegion>,
+    voice: Option<sister_core::config::AzureTtsVoice>,
+    endpoint: Option<String>,
+    /// present / missing / unreadable / unsupported；未知和不存在不能共用一個 false。
+    credential: &'static str,
+    /// `None` = 這台機器連 data dir 都問不到；`false` 含未簽、壞檔與舊版本。
+    consented: Option<bool>,
+    /// 只有目前條文有效時才投影第四張的原始簽署時間；未簽、舊版、壞檔與
+    /// 問不到都不能拿一個 0 冒充。下一次 click 會把它原樣帶回來做 TOCTOU 比對。
+    consent_at: Option<sister_core::model::Millis>,
+    /// 只是「按鈕按下後有資格送」；讀這份狀態本身永遠不發 request。
+    ready: bool,
+    config_error: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AzureTtsExpected {
+    generation: u64,
+    enabled: bool,
+    region: Option<sister_core::config::AzureTtsRegion>,
+    voice: sister_core::config::AzureTtsVoice,
+    consent_at: Option<sister_core::model::Millis>,
+    credential_present: bool,
+}
+
+#[derive(Serialize)]
+struct AzureTtsAudioView {
+    /// 這次 admission 消耗 baseline 後的新一代；renderer 只有驗過精確 +1 才能
+    /// 把它當下一個 click 的 token。
+    generation: u64,
+    content_type: &'static str,
+    audio_bytes: usize,
+    data_url: String,
+}
+
+fn azure_credential_word(state: azure_credential::CredentialState) -> &'static str {
+    match state {
+        azure_credential::CredentialState::Present => "present",
+        azure_credential::CredentialState::Missing => "missing",
+        azure_credential::CredentialState::Unreadable => "unreadable",
+        azure_credential::CredentialState::Unsupported => "unsupported",
+    }
+}
+
+fn azure_tts_view(shell: &Shell) -> AzureTtsView {
+    let generation = shell.azure_tts_generation.load(Ordering::Acquire);
+    let credential_state = azure_credential::state();
+    let credential = azure_credential_word(credential_state);
+    let consent = shell.data_dir.as_deref().map(sister_core::consent::load);
+    let consented = consent.as_ref().map(|consent| consent.allows_azure_tts());
+    let consent_at = consent
+        .as_ref()
+        .filter(|consent| consent.allows_azure_tts())
+        .and_then(|consent| consent.azure_tts);
+    let loaded = config_path().and_then(|path| {
+        sister_core::config::Config::load(&path).map_err(|error| format!("{error:#}"))
+    });
+    match loaded {
+        Ok(config) => {
+            let azure = config.shell.azure_tts;
+            let ready = azure.enabled
+                && azure.region.is_some()
+                && credential_state == azure_credential::CredentialState::Present
+                && consented == Some(true);
+            AzureTtsView {
+                generation,
+                config_readable: true,
+                enabled: Some(azure.enabled),
+                region: azure.region,
+                voice: Some(azure.voice),
+                endpoint: azure.region.map(|region| region.endpoint()),
+                credential,
+                consented,
+                consent_at,
+                ready,
+                config_error: None,
+            }
+        }
+        Err(error) => AzureTtsView {
+            generation,
+            config_readable: false,
+            enabled: None,
+            region: None,
+            voice: None,
+            endpoint: None,
+            credential,
+            consented,
+            consent_at,
+            ready: false,
+            config_error: Some(error),
+        },
+    }
+}
+
+fn emit_azure_tts_changed(app: &tauri::AppHandle, shell: &Shell) {
+    // payload 沒有 secret（只有 credential 四態）；兩扇 WebView 收到後仍各自
+    // 重讀一次 native truth，不能把 event payload 當 cache。
+    let _ = app.emit("azure-tts-changed", azure_tts_view(shell));
+}
+
+fn next_azure_tts_generation(current: u64) -> u64 {
+    if current >= AZURE_TTS_MAX_GENERATION {
+        0
+    } else {
+        current + 1
+    }
+}
+
+fn stop_azure_tts_intent(app: &tauri::AppHandle, shell: &Shell) {
+    {
+        let _transition = azure_tts_transition(shell);
+        let _ = shell.azure_tts_generation.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| Some(next_azure_tts_generation(current)),
+        );
+    }
+    let _ = app.emit("azure-tts-stop", ());
+}
+
+fn azure_tts_admission(shell: &Shell) -> std::sync::MutexGuard<'_, ()> {
+    // 這把鎖只負責把 in-process mutation 和 request admission 排序；沒有可被
+    // poison 後信任的資料結構。若先前 command panic，收回 guard 繼續走 fail-closed
+    // config／consent／credential 檢查，比永久鎖死刪 key／撤回出口安全。
+    shell
+        .azure_tts_admission
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn azure_tts_transition(shell: &Shell) -> std::sync::MutexGuard<'_, ()> {
+    shell
+        .azure_tts_transition
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[tauri::command]
+fn azure_tts_read(shell: tauri::State<'_, Shell>) -> AzureTtsView {
+    let _admission = azure_tts_admission(&shell);
+    azure_tts_view(&shell)
+}
+
+/// 這三格立即、獨立落地；不經頁尾那份可能已經開很久的 Settings payload。
+#[tauri::command]
+fn azure_tts_config_set(
+    enabled: sister_core::config::AzureTtsEnabled,
+    region: Option<sister_core::config::AzureTtsRegion>,
+    voice: sister_core::config::AzureTtsVoice,
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+) -> Result<AzureTtsView, String> {
+    let _admission = azure_tts_admission(&shell);
+    // 在同一個 admission transaction 裡先讓舊 click 失效，再寫新設定；因此不會
+    // 出現「新 generation + 舊設定」的可重用 snapshot。即使寫檔失敗，停掉舊
+    // 播放也是較安全、且 UI 會明講保存失敗的結果。
+    stop_azure_tts_intent(&app, &shell);
+    let path = config_path()?;
+    sister_core::config::Config::update(&path, |config| {
+        config.set_azure_tts_from_page(enabled, region, voice);
+        Ok(())
+    })
+    .map_err(|error| format!("{error:#}"))?;
+    let status = azure_tts_view(&shell);
+    let _ = app.emit("azure-tts-changed", status.clone());
+    Ok(status)
+}
+
+#[tauri::command]
+fn azure_tts_key_set(
+    key: String,
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+) -> Result<AzureTtsView, String> {
+    let _admission = azure_tts_admission(&shell);
+    stop_azure_tts_intent(&app, &shell);
+    azure_credential::write(key).map_err(|error| error.to_string())?;
+    let status = azure_tts_view(&shell);
+    let _ = app.emit("azure-tts-changed", status.clone());
+    Ok(status)
+}
+
+#[tauri::command]
+fn azure_tts_key_delete(
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+) -> Result<AzureTtsView, String> {
+    let _admission = azure_tts_admission(&shell);
+    stop_azure_tts_intent(&app, &shell);
+    azure_credential::delete().map_err(|error| error.to_string())?;
+    let status = azure_tts_view(&shell);
+    let _ = app.emit("azure-tts-changed", status.clone());
+    Ok(status)
+}
+
+#[tauri::command]
+fn azure_tts_cancel(expected_generation: u64, shell: tauri::State<'_, Shell>) -> bool {
+    let _transition = azure_tts_transition(&shell);
+    cancel_azure_tts_generation(
+        expected_generation,
+        &shell.azure_tts_generation,
+        &shell.azure_tts_active_generation,
+    )
+}
+
+fn cancel_azure_tts_generation(
+    expected_generation: u64,
+    generation: &AtomicU64,
+    active_generation: &AtomicU64,
+) -> bool {
+    let next = next_azure_tts_generation(expected_generation);
+    // 還沒 admitted：全域仍停在 click 看見的 baseline，直接消耗它，讓排隊中的
+    // speak 第一行失效。
+    if generation
+        .compare_exchange(
+            expected_generation,
+            next,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+    {
+        return true;
+    }
+    // 已 admitted：speak 已把全域推到 baseline+1，active 仍精確記著 baseline。
+    // 只有這兩格同時命中，A cancel 才能再推一次；A 晚到而 B 已開始時 active
+    // 會是 B 的 baseline，不能誤殺 B。
+    if active_generation.load(Ordering::Acquire) != expected_generation {
+        return false;
+    }
+    let after_cancel = next_azure_tts_generation(next);
+    generation
+        .compare_exchange(next, after_cancel, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+fn transport_region(region: sister_core::config::AzureTtsRegion) -> sister_tts::AzureRegion {
+    match region {
+        sister_core::config::AzureTtsRegion::EastAsia => sister_tts::AzureRegion::EastAsia,
+        sister_core::config::AzureTtsRegion::SoutheastAsia => {
+            sister_tts::AzureRegion::SoutheastAsia
+        }
+        sister_core::config::AzureTtsRegion::JapanEast => sister_tts::AzureRegion::JapanEast,
+    }
+}
+
+fn transport_voice(voice: sister_core::config::AzureTtsVoice) -> sister_tts::Voice {
+    match voice {
+        sister_core::config::AzureTtsVoice::HsiaoChen => sister_tts::Voice::HsiaoChen,
+        sister_core::config::AzureTtsVoice::HsiaoYu => sister_tts::Voice::HsiaoYu,
+        sister_core::config::AzureTtsVoice::YunJhe => sister_tts::Voice::YunJhe,
+    }
+}
+
+/// 唯一能碰 native Azure client 的 desktop helper。第一個參數不是 bool 或一份
+/// 可在鎖外重放的 snapshot；只有第四張有效時，shared consent transaction 才能
+/// 鑄出這份 guard。Helper by-value 吃掉它並跨完整 transport，第二張 cloud-reading
+/// 不能代替，caller 也不能在 POST 前先把跨行程鎖丟掉。
+fn synthesize_azure(
+    consent_guard: sister_core::consent::AzureTtsAdmissionGuard,
+    region: sister_core::config::AzureTtsRegion,
+    voice: sister_core::config::AzureTtsVoice,
+    key: &str,
+    text: &str,
+) -> Result<Vec<u8>, String> {
+    let _permit = consent_guard.permit();
+    let result = sister_tts::AzureClient::new()
+        .synthesize(transport_region(region), transport_voice(voice), key, text)
+        .map(sister_tts::Audio::into_bytes)
+        .map_err(|error| error.to_string());
+    drop(consent_guard);
+    result
+}
+
+struct AzureTtsInFlightGuard {
+    in_flight: Arc<AtomicBool>,
+    active_generation: Arc<AtomicU64>,
+    transition: Arc<Mutex<()>>,
+}
+
+impl Drop for AzureTtsInFlightGuard {
+    fn drop(&mut self) {
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 先拿掉 request identity 再開 single-flight；cancel 看見沒有 identity 時
+        // 最多讓已完成 request 的下一代失效，不會把它誤認成仍在飛。
+        self.active_generation
+            .store(AZURE_TTS_NO_ACTIVE_GENERATION, Ordering::Release);
+        self.in_flight.store(false, Ordering::Release);
+    }
+}
+
+/// 唯一 outbound command。每次都重讀四道 gate；任何一格缺失都在建立 client 前
+/// 返回。blocking transport 無法被假裝成可中止：取消只推進 generation，closure
+/// 在 POST 前與回應後各檢查一次，已開始的 request 可能仍跑到 45 秒 global timeout。
+#[tauri::command]
+async fn azure_tts_speak(
+    text: String,
+    expected: AzureTtsExpected,
+    shell: tauri::State<'_, Shell>,
+) -> Result<AzureTtsAudioView, String> {
+    // 整份 expected 來自 renderer 最近一次讀到的 native view，不是在 command 終於
+    // 被 poll 時才現場領一張。舊 click 若排在 cancel／mutation 後面才進來，第一行
+    // 就拒絕，不能把已經更新的 gate 收編成自己的。
+    if shell.azure_tts_generation.load(Ordering::Acquire) != expected.generation {
+        return Err("Azure 朗讀狀態已經變更；舊的 click 沒有送出 POST，請重按。".to_string());
+    }
+    let _admission = azure_tts_admission(&shell);
+    if shell.azure_tts_generation.load(Ordering::Acquire) != expected.generation {
+        return Err("Azure 朗讀狀態已經變更；舊的 click 沒有送出 POST，請重按。".to_string());
+    }
+    let path = config_path()?;
+    let config = sister_core::config::Config::load(&path).map_err(|error| format!("{error:#}"))?;
+    let azure = config.shell.azure_tts;
+    if expected.enabled != azure.enabled
+        || expected.region != azure.region
+        || expected.voice != azure.voice
+    {
+        return Err(
+            "Azure 開關、區域或聲音已經變更；舊的 click 沒有送出 POST，請重按。".to_string(),
+        );
+    }
+    if !azure.enabled {
+        return Err("Azure 雲端朗讀目前關閉；沒有送出 request。".to_string());
+    }
+    let region = azure
+        .region
+        .ok_or_else(|| "還沒選 Azure Speech 區域；沒有送出 request。".to_string())?;
+    // 空白／過大／XML 非法在 consent、credential 與 transport 之前就停。
+    sister_tts::build_ssml(transport_voice(azure.voice), &text)
+        .map_err(|error| error.to_string())?;
+    let data_dir = shell
+        .data_dir
+        .as_deref()
+        .ok_or_else(|| "找不到資料目錄，問不到第四張同意書；沒有送出 request。".to_string())?;
+    let consent_guard = match sister_core::consent::begin_azure_tts_admission(data_dir) {
+        sister_core::consent::AzureTtsAdmissionConsent::Allowed(guard) => {
+            if expected.consent_at != Some(guard.signed_at()) {
+                return Err(
+                    "第四張 Azure 朗讀同意書已經變更；舊的 click 沒有送出 POST，請重按。"
+                        .to_string(),
+                );
+            }
+            guard
+        }
+        sister_core::consent::AzureTtsAdmissionConsent::NotAllowed(consent) => {
+            let actual_at = consent
+                .allows_azure_tts()
+                .then_some(consent.azure_tts)
+                .flatten();
+            if expected.consent_at != actual_at {
+                return Err(
+                    "第四張 Azure 朗讀同意書已經變更；舊的 click 沒有送出 POST，請重按。"
+                        .to_string(),
+                );
+            }
+            return Err("第四張 Azure 朗讀同意書沒有生效；沒有送出 request。".to_string());
+        }
+        sister_core::consent::AzureTtsAdmissionConsent::Unknown(error) => {
+            return Err(format!(
+                "問不到第四張 Azure 朗讀同意書；沒有送出 request：{error:#}"
+            ));
+        }
+    };
+    debug_assert!(consent_guard.belongs_to(data_dir));
+    let credential = azure_credential::read();
+    let credential_present = matches!(&credential, Ok(Some(_)));
+    if expected.credential_present != credential_present {
+        return Err(
+            "Windows Credential Manager 裡的 Azure key 狀態已經變更；舊的 click 沒有送出 POST，請重按。"
+                .to_string(),
+        );
+    }
+    let secret = credential
+        .map_err(|error| {
+            format!("讀不到 Windows Credential Manager 裡的金鑰；沒有送出 request：{error}")
+        })?
+        .ok_or_else(|| {
+            "Windows Credential Manager 裡沒有 Azure Speech key；沒有送出 request。".to_string()
+        })?;
+
+    let request_generation = next_azure_tts_generation(expected.generation);
+    {
+        let _transition = azure_tts_transition(&shell);
+        shell
+            .azure_tts_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                "上一個 Azure POST 還沒結束；沒有開始第二個 request。取消後，已開始的 POST 仍可能跑到逾時，請稍後再按。"
+                    .to_string()
+            })?;
+        shell
+            .azure_tts_active_generation
+            .store(expected.generation, Ordering::Release);
+        if shell
+            .azure_tts_generation
+            .compare_exchange(
+                expected.generation,
+                request_generation,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            shell
+                .azure_tts_active_generation
+                .store(AZURE_TTS_NO_ACTIVE_GENERATION, Ordering::Release);
+            shell.azure_tts_in_flight.store(false, Ordering::Release);
+            return Err("Azure 朗讀在入場時已取消；沒有送出 POST。".to_string());
+        }
+    }
+    let active_generation = Arc::clone(&shell.azure_tts_active_generation);
+    let in_flight = Arc::clone(&shell.azure_tts_in_flight);
+    let in_flight_guard = AzureTtsInFlightGuard {
+        in_flight,
+        active_generation,
+        transition: Arc::clone(&shell.azure_tts_transition),
+    };
+    let generation_state = Arc::clone(&shell.azure_tts_generation);
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let _in_flight_guard = in_flight_guard;
+        if generation_state.load(Ordering::Acquire) != request_generation {
+            return Err("Azure 朗讀已取消；沒有開始 POST。".to_string());
+        }
+        let key = secret.as_str().map_err(|error| error.to_string())?;
+        // Guard 刻意跨完整 blocking transport：CLI 撤回會等這個已在先的 request
+        // 結束才回覆；撤回一旦回覆成功，之後不可能再由這次 admission 開始 POST。
+        let bytes = synthesize_azure(consent_guard, region, azure.voice, key, &text)?;
+        if generation_state.load(Ordering::Acquire) != request_generation {
+            return Err("Azure 朗讀已取消；POST 可能已完成，但回應已丟掉、沒有播放。".to_string());
+        }
+        Ok(bytes)
+    });
+    // process admission 只排到 worker 已拿到 generation-pinned 工作為止；config／
+    // key mutation 不會被 45 秒 transport 卡住。Consent 的跨行程 shared guard 則
+    // 刻意留在 worker 到 transport 結束，讓「撤回已回覆」成為可信邊界。
+    drop(_admission);
+    let bytes = task
+        .await
+        .map_err(|_| "Azure 朗讀工作沒有完成；沒有可播放的回應。".to_string())??;
+    let audio_bytes = bytes.len();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(AzureTtsAudioView {
+        generation: request_generation,
+        content_type: sister_tts::AUDIO_CONTENT_TYPE,
+        audio_bytes,
+        data_url: format!("data:{};base64,{encoded}", sister_tts::AUDIO_CONTENT_TYPE),
+    })
+}
+
+#[cfg(test)]
+mod azure_tts_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn config_and_transport_share_the_same_exact_regions_and_voices() {
+        for region in [
+            sister_core::config::AzureTtsRegion::EastAsia,
+            sister_core::config::AzureTtsRegion::SoutheastAsia,
+            sister_core::config::AzureTtsRegion::JapanEast,
+        ] {
+            let transport = transport_region(region);
+            assert_eq!(region.as_str(), transport.id());
+            assert_eq!(region.host(), transport.host());
+            assert_eq!(region.endpoint(), transport.endpoint());
+        }
+        for voice in [
+            sister_core::config::AzureTtsVoice::HsiaoChen,
+            sister_core::config::AzureTtsVoice::HsiaoYu,
+            sister_core::config::AzureTtsVoice::YunJhe,
+        ] {
+            assert_eq!(voice.as_str(), transport_voice(voice).short_name());
+        }
+    }
+
+    #[test]
+    fn cancel_only_consumes_the_click_or_the_request_that_came_from_it() {
+        let generation = AtomicU64::new(7);
+        let active = AtomicU64::new(AZURE_TTS_NO_ACTIVE_GENERATION);
+        assert!(cancel_azure_tts_generation(7, &generation, &active));
+        assert_eq!(generation.load(Ordering::Acquire), 8);
+
+        // A 已 admitted：全域是 A baseline + 1，而 active 還記著 A baseline。
+        active.store(8, Ordering::Release);
+        generation.store(9, Ordering::Release);
+        assert!(cancel_azure_tts_generation(8, &generation, &active));
+        assert_eq!(generation.load(Ordering::Acquire), 10);
+
+        // B 已用下一個 baseline 入場後，晚到的 A cancel 不得推進 B 的 generation。
+        active.store(10, Ordering::Release);
+        generation.store(11, Ordering::Release);
+        assert!(!cancel_azure_tts_generation(8, &generation, &active));
+        assert_eq!(generation.load(Ordering::Acquire), 11);
+    }
+
+    #[test]
+    fn renderer_safe_generation_wrap_keeps_cancel_pairing_exact() {
+        let generation = AtomicU64::new(0);
+        let active = AtomicU64::new(AZURE_TTS_MAX_GENERATION);
+        assert!(cancel_azure_tts_generation(
+            AZURE_TTS_MAX_GENERATION,
+            &generation,
+            &active,
+        ));
+        assert_eq!(generation.load(Ordering::Acquire), 1);
+    }
+}
+
 /// 設定頁上看得到、改得動的那幾項。
 ///
 /// **刻意只是設定檔的一個子集。** 截圖間隔、去重門檻那些沒有放進來，因為它們
@@ -3894,7 +4436,7 @@ async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
     open_settings_window(app)
 }
 
-// ---------- 三張同意書 ----------
+// ---------- 四張同意書 ----------
 
 #[derive(Serialize)]
 struct SheetView {
@@ -3933,10 +4475,10 @@ struct ConsentView {
     /// 和 `store_images` 分開送，因為那兩件事要講的話不一樣：一個是「她根本
     /// 不會開始」，一個是「她會開始，但只記字」。
     capture_enabled: Option<bool>,
-    /// 剛剛那一下**順手把另外兩張的簽署時間清掉了**（條文改版）。
+    /// 剛剛那一下**順手把另外三張的簽署時間清掉了**（條文改版）。
     ///
     /// `consent_read` 永遠是 false——只有真的動手的那一下才會是 true。CLI 對
-    /// 這件事會印一行 ⚠，這一頁以前完全安靜：他勾了一張，另外兩張的「2026 年
+    /// 這件事會印一行 ⚠，這一頁以前完全安靜：他勾了一張，另外三張的「2026 年
     /// 7 月 2 日同意過」就這樣從畫面上消失，沒有人告訴他為什麼。
     reset_by_version: bool,
     sheets: Vec<SheetView>,
@@ -3994,17 +4536,28 @@ fn consent_read(shell: tauri::State<'_, Shell>) -> Result<ConsentView, String> {
 
 /// 勾或不勾其中一張。
 ///
-/// 一次只動一張，而且每一下都馬上落地——「按了三個勾再按確定」的做法，會在
-/// 他關掉視窗的那一刻讓前兩個勾消失，而他以為都存好了。
+/// 一次只動一張，而且每一下都馬上落地——「按了四個勾再按確定」的做法，會在
+/// 他關掉視窗的那一刻讓前幾個勾消失，而他以為都存好了。
 #[tauri::command]
 fn consent_set(
     key: String,
     granted: bool,
+    app: tauri::AppHandle,
     shell: tauri::State<'_, Shell>,
 ) -> Result<ConsentView, String> {
     use std::str::FromStr;
     let dir = consent_dir(&shell)?;
     let sheet = sister_core::consent::Sheet::from_str(&key)?;
+    let changing_azure = sheet == sister_core::consent::Sheet::AzureTts;
+    let _azure_admission = changing_azure.then(|| azure_tts_admission(&shell));
+    if changing_azure {
+        // 拿到 admission transaction 後，先讓已排隊但還沒 admitted 的舊 click 失效，
+        // 再在同一個 transaction 裡寫同意書。
+        // Grant 也必須做：未簽時按下的舊 click 不能延遲到 grant 後，拿同一代 token
+        // 借到剛新增的權限才 POST。
+        // 寫檔失敗時仍停止舊播放；比讓使用者按了撤回卻在錯誤回條後又聽到聲音安全。
+        stop_azure_tts_intent(&app, &shell);
+    }
     if !granted && sheet == sister_core::consent::Sheet::LocalRecording {
         // 先送一個零 I/O 的 typed message，讓 worker 在 consent/stop 寫檔可能失敗
         // 之前就永久取消 pending Login/watchdog。若 worker 已停，不存在 automatic
@@ -4029,7 +4582,7 @@ fn consent_set(
         // 和 CLI 那邊同一個決定：整份清掉，只留他這次真的按下去的。
         //
         // **而且要講出來。** CLI 對這件事印一行 ⚠，這一頁以前完全安靜——他勾了
-        // 一張，另外兩張的「2026 年 7 月 2 日同意過」就從畫面上消失了。
+        // 一張，另外三張的「2026 年 7 月 2 日同意過」就從畫面上消失了。
         reset_by_version = !c.current() && *c != sister_core::consent::Consent::default();
         if !c.current() {
             *c = sister_core::consent::Consent::default();
@@ -4091,6 +4644,8 @@ fn consent_set(
             }
         }
     }
+    // 任一張改動都可能是 version reset；另一扇設定頁收到後自己重讀第四張真相。
+    emit_azure_tts_changed(&app, &shell);
     Ok(consent_view_after(dir, reset_by_version))
 }
 
@@ -4111,7 +4666,7 @@ fn open_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
         ONBOARDING,
         tauri::WebviewUrl::App("onboarding.html".into()),
     )
-    .title("三張同意書")
+    .title("四張同意書")
     .inner_size(620.0, 720.0)
     .min_inner_size(460.0, 480.0)
     .build()
@@ -4611,6 +5166,13 @@ fn main() {
             recorder: Mutex::new(None),
             asset_operation: Arc::new(AtomicU8::new(ASSET_IDLE)),
             asset_cancel: Arc::new(AtomicBool::new(false)),
+            azure_tts_in_flight: Arc::new(AtomicBool::new(false)),
+            azure_tts_generation: Arc::new(AtomicU64::new(0)),
+            azure_tts_active_generation: Arc::new(AtomicU64::new(
+                AZURE_TTS_NO_ACTIVE_GENERATION,
+            )),
+            azure_tts_admission: Arc::new(Mutex::new(())),
+            azure_tts_transition: Arc::new(Mutex::new(())),
         })
         .manage(Hotkey(Mutex::new(HotkeyView::default())))
         .invoke_handler(tauri::generate_handler![
@@ -4638,6 +5200,12 @@ fn main() {
             persona_asset_cancel,
             persona_asset_remove,
             persona_voice_set,
+            azure_tts_read,
+            azure_tts_config_set,
+            azure_tts_key_set,
+            azure_tts_key_delete,
+            azure_tts_cancel,
+            azure_tts_speak,
             login_startup_read,
             login_startup_set,
             settings_read,
@@ -4891,7 +5459,7 @@ fn main() {
                 MenuItem::with_id(app, "timeline", "她記得的每一天…", true, None::<&str>)?;
             let settings_item = MenuItem::with_id(app, "settings", "設定…", true, None::<&str>)?;
             let consent_item =
-                MenuItem::with_id(app, "consent", "三張同意書…", true, None::<&str>)?;
+                MenuItem::with_id(app, "consent", "四張同意書…", true, None::<&str>)?;
             // 開發者入口預設不存在，不是放一顆灰掉的按鈕讓一般使用者猜。
             // 設定檔讀不懂時也維持隱藏；這個選項只加一扇工具頁，沒有理由在
             // 不確定時自行打開。改完設定要重開桌面殼，選單才會重建。

@@ -45,7 +45,8 @@
 4. **開口那一秒是唯一的考試。** 使用者永遠不看後台。一天講五次中四次是助理；
    一天講三十次中六次，準確率一樣，第三天就會被關掉。沉默是預設值。
 5. **敢開著，比聰明重要。** 原始畫面一粒 pixel 都不上雲。上雲的只有
-   少量文字，而且是三張分開的同意書。這是 open source 對上 Copilot 唯一的生路。
+   明確列出的少量文字，而且是四張分開的同意書：OCR 原文交給自帶 CLI 與當前答案
+   正文交給可選 Azure TTS 是兩張不同的門。這是 open source 對上 Copilot 唯一的生路。
 6. **每句話查得到出處。** 她說的任何事實都能點回本機證據；只有在截圖確實
    被同意保留且尚未過期時才承諾看得到畫面，否則明講只有文字／時間／來源。
    說不確定的時候用「我最後看到的是……」，不說「你還沒做」。
@@ -157,7 +158,7 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
 
 1. **重播評測工具鏈 + 公開數字**——「市面上沒人敢公布這種數字」。
    錄真實工作流、重播、比架構、公布找回率/誤提醒率/成本。資料是你的，工具是大家的。
-2. **隱私架構本身**——README 第一行就把三張同意書講得比微軟硬，
+2. **隱私架構本身**——README 第一行就把四張同意書講得比微軟硬，
    而且可驗證（§SPEC 11.7）、可帶走（§SPEC 11.8）。
 3. **品味**——「什麼時候閉嘴」的守門員是沒有論文可抄的部分，靠評測語料磨出來。
 
@@ -167,8 +168,10 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
 
 ## 7. Non-Goals（v1 明確不做）
 
-- ❌ 雲端服務 / 帳號系統（local-first；cloud sync 遠期選配、E2EE）。使用者明確按下後
-  從固定 CDN 取一次公開 Persona 素材，是內容交付，不是帳號、sync、推論或遙測服務
+- ❌ 產品自營的雲端服務 / 帳號系統（local-first；cloud sync 遠期選配、E2EE）。使用者
+  明確按下後從固定 CDN 取一次公開 Persona 素材，是內容交付；alpha.109 的 Azure TTS
+  則是預設關閉、使用者自備 Azure resource/key、獨立同意且逐次按下的表達供應商。
+  兩者都不是產品帳號、sync、背景推論或遙測服務
 - ❌ 音訊 / 麥克風錄製（Limitless 的死線 + 旁人同意問題最尖銳的地方）
 - ❌ Autopilot（記憶還可能記歪之前，不讓它碰滑鼠；見 PHASES Phase 7 的門檻）
 - ❌ 一直講話的桌寵（我們是為了讓她安靜而設計整個引擎的）
@@ -195,7 +198,7 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
   **ChatGPT 是預設**。Neutral 與 S/T/C/G/X 字母呈現已淘汰；沒有下載、下載失敗或
   使用者撤回舊 pack 時，仍保留所選真人物圖，S1 一項功能都不能少。
 - **Release 1.0 要把 persona 當產品面，不是換色彩蛋。** 首批 catalog 是
-  ChatGPT / Claude / Gemini / Grok / DeepSeek / Qwen / Mistral / Llama / Sakana /
+  ChatGPT / Claude / Gemini / Grok / DeepSeek / Qwen / Mistral / Venice / Sakana /
   Perplexity / GLM / Kimi / Hunyuan / MiniMax / Nemotron / Cohere / MiMo；使用者可以選人、
   看角色圖、在自己點角色時聽到固定的非敏感台詞。persona 不得改答案事實、證據、
   同意書、守門員分數或 hands 權限。
@@ -222,6 +225,15 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
 - 聲音不因 idle、capture、記憶或系統事件自己播放。使用者打開聲音後，四姊妹優先用
   已驗證固定錄音，其餘只用 `localService` 中文系統 TTS；答案也要再按一次朗讀才出聲。
   找不到本機 voice 就保持靜音，不自動改用雲端。`prefers-reduced-motion` 與靜音選擇優先。
+- alpha.109 的 Azure 繁中答案朗讀是**另選、預設關閉**的路徑，不是上面本機聲音的
+  fallback。它要設定啟用、`eastasia`／`southeastasia`／`japaneast` typed region、
+  Windows Credential Manager fixed target `ted-h/AI-Sister/AzureSpeech/v1` 的 key、
+  第四張 `azure-tts` 同意與當下 click 全部成立，才由 native Rust 對所選區域 fixed
+  endpoint POST。唯一送出的使用者內容是當前答案正文原文，可能含姓名、電話與金額
+  且不遮罩；不含截圖、來源、memory id、DB 或其他文字。沒有文字／MP3 cache；停止只
+  阻止舊音訊播放，不能 abort 已開始、最長 45 秒的 blocking request。Microsoft 目前
+  公開的 F0 neural TTS 額度是每月 0.5 million characters，但可用性與費用以使用者
+  帳號／resource／方案及 Microsoft 當下規則為準，產品不保證免費額度。
 
 ## 10. 成功指標（產品層）
 

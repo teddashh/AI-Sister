@@ -354,17 +354,93 @@ function applyPersona(view) {
 
 let localSystemVoices = [];
 let localSpeechRevision = 0;
+let azureSpeechRevision = 0;
+let azureSpeechRequestPending = false;
+let azureSpeechEnabled = false;
+let azureAnswerLine = null;
+let azureAnswerButton = null;
+let azureStatusReadRevision = 0;
+let azureNativeGeneration = null;
+let azureNativeExpected = null;
+let azurePendingGeneration = null;
+let azureCancelPending = false;
+
+function resetAzureAnswerButton() {
+  if (azureAnswerButton) {
+    azureAnswerButton.disabled = false;
+    azureAnswerButton.textContent = "☁ 用 Azure 朗讀（送出這段文字）";
+  }
+  azureAnswerButton = null;
+}
+
+/**
+ * 取消的是播放意圖：晚到的 native response 會被丟掉，已經開始的 blocking HTTPS
+ * POST 可能仍跑到 timeout。只有真的有 request 在飛時才送 cancel IPC；冷啟動與
+ * persona 重畫不會因此製造一個假的「使用者按過停止」。
+ */
+function stopAzureSpeech({ cancelNative = true } = {}) {
+  azureSpeechRevision += 1;
+  const hadPendingRequest = azureSpeechRequestPending;
+  const pendingGeneration = azurePendingGeneration;
+  const hadAzureMedia = hadPendingRequest || azureAnswerButton !== null;
+  azureSpeechRequestPending = false;
+  azurePendingGeneration = null;
+  resetAzureAnswerButton();
+  if (hadAzureMedia && personaAudio) {
+    personaAudio.pause?.();
+    personaAudio.removeAttribute?.("src");
+    personaAudio.onended = null;
+    personaAudio.onerror = null;
+  }
+  if (
+    cancelNative &&
+    hadPendingRequest &&
+    Number.isSafeInteger(pendingGeneration) &&
+    pendingGeneration >= 0 &&
+    invoke !== null
+  ) {
+    // 先拿掉可重用的 native token。A 的 cancel 是 fire-and-forget；在它回來、重讀
+    // 新 generation 前，不能讓快速第二按 B 帶著 A 的 token 排進去。
+    azureNativeGeneration = null;
+    azureNativeExpected = null;
+    azureCancelPending = true;
+    // 讓取消前已送出的 status read 全部過期。Cancel settle 以前，任何 event/read
+    // 都不能把同一代 token 填回來，否則快速連點會讓延遲的 A cancel 誤殺 B。
+    azureStatusReadRevision += 1;
+    const finishCancel = () => {
+      azureCancelPending = false;
+      readAzureTts();
+    };
+    try {
+      Promise.resolve(
+        invoke("azure_tts_cancel", { expectedGeneration: pendingGeneration }),
+      ).then(finishCancel, finishCancel);
+    } catch {
+      finishCancel();
+    }
+  } else if (!cancelNative) {
+    // native mutation/revoke 已經先 bump；不要再排一個全新的 cancel。只把 renderer
+    // token 作廢並在下面補讀，避免事件後的第一個 click 還拿舊 generation。
+    azureNativeGeneration = null;
+    azureNativeExpected = null;
+  }
+}
 
 function stopLocalSpeech() {
   localSpeechRevision += 1;
   globalThis.speechSynthesis?.cancel?.();
 }
 
-/** 固定 WAV 與系統 TTS 共用同一顆 stop；新意圖不能讓兩條播放路徑疊在一起。 */
-function stopPersonaMedia() {
+/** 三條聲音共用同一顆 stop；新意圖不能讓本機 WAV、系統 TTS 與 Azure 疊在一起。 */
+function stopPersonaMedia({ cancelAzureNative = true } = {}) {
+  stopAzureSpeech({ cancelNative: cancelAzureNative });
   voiceRequest += 1;
   personaAudio?.pause?.();
   personaAudio?.removeAttribute?.("src");
+  if (personaAudio) {
+    personaAudio.onended = null;
+    personaAudio.onerror = null;
+  }
   stopLocalSpeech();
 }
 
@@ -532,6 +608,98 @@ function readPersona() {
     },
     () => {
       // Persona 是選配表達層；設定檔暫時讀不出來不可以連搜尋框一起拖垮。
+    },
+  );
+}
+
+function usableAzureTtsStatus(raw) {
+  const endpoints = {
+    eastasia: "https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1",
+    southeastasia: "https://southeastasia.tts.speech.microsoft.com/cognitiveservices/v1",
+    japaneast: "https://japaneast.tts.speech.microsoft.com/cognitiveservices/v1",
+  };
+  const voices = [
+    "zh-TW-HsiaoChenNeural",
+    "zh-TW-HsiaoYuNeural",
+    "zh-TW-YunJheNeural",
+  ];
+  return typeof raw === "object" &&
+    raw !== null &&
+    Number.isSafeInteger(raw.generation) &&
+    raw.generation >= 0 &&
+    raw.config_readable === true &&
+    typeof raw.enabled === "boolean" &&
+    (raw.region === null || Object.hasOwn(endpoints, raw.region)) &&
+    voices.includes(raw.voice) &&
+    raw.endpoint === (raw.region === null ? null : endpoints[raw.region]) &&
+    ["present", "missing", "unreadable", "unsupported"].includes(raw.credential) &&
+    (raw.consented === null || typeof raw.consented === "boolean") &&
+    (raw.consent_at === null ||
+      (Number.isSafeInteger(raw.consent_at) && raw.consent_at >= 0)) &&
+    (raw.consented === true ? raw.consent_at !== null : raw.consent_at === null) &&
+    raw.config_error === null &&
+    raw.ready ===
+      (raw.enabled &&
+        raw.region !== null &&
+        raw.credential === "present" &&
+        raw.consented === true &&
+        raw.consent_at !== null)
+    ? raw
+    : null;
+}
+
+function syncAzureAnswerLine() {
+  if (!azureSpeechEnabled) {
+    if (azureAnswerLine) azureAnswerLine.remove?.();
+    azureAnswerLine = null;
+    stopAzureSpeech();
+    return;
+  }
+  if (azureAnswerLine === null && hitList?.hidden === false) {
+    azureAnswerLine = answerAzureLine();
+    hitList.append(azureAnswerLine);
+  }
+}
+
+function applyAzureTtsStatus(raw) {
+  if (azureCancelPending) {
+    // Cancel Promise 尚未 settle 時不能重發 token；狀態會在 settle 後權威重讀。
+    azureNativeGeneration = null;
+    azureNativeExpected = null;
+    return;
+  }
+  const status = usableAzureTtsStatus(raw);
+  azureNativeGeneration = status?.generation ?? null;
+  azureNativeExpected = status
+    ? Object.freeze({
+        generation: status.generation,
+        enabled: status.enabled,
+        region: status.region,
+        voice: status.voice,
+        consentAt: status.consent_at,
+        credentialPresent: status.credential === "present",
+      })
+    : null;
+  azureSpeechEnabled = status?.enabled === true;
+  syncAzureAnswerLine();
+}
+
+function readAzureTts() {
+  if (azureCancelPending) {
+    azureStatusReadRevision += 1;
+    return;
+  }
+  const revision = ++azureStatusReadRevision;
+  if (invoke === null) {
+    applyAzureTtsStatus(null);
+    return;
+  }
+  invoke("azure_tts_read").then(
+    (status) => {
+      if (revision === azureStatusReadRevision) applyAzureTtsStatus(status);
+    },
+    () => {
+      if (revision === azureStatusReadRevision) applyAzureTtsStatus(null);
     },
   );
 }
@@ -1790,6 +1958,30 @@ globalThis.__TAURI__?.event
   })
   ?.catch?.(() => {});
 
+// 設定頁與第四張同意書只送「狀態變了」；這一扇窗重新讀 native 真相。事件本身
+// 不帶答案、不播放，也不會啟動 Azure request。
+const azureTtsChangedListener = globalThis.__TAURI__?.event?.listen?.(
+  "azure-tts-changed",
+  () => readAzureTts(),
+);
+azureTtsChangedListener?.then?.(
+  () => {
+    // listen 本身是 async：開場 read 與真正註冊之間若剛好換設定，event 會丟掉。
+    // 註冊完成後再讀一次，revision 會讓較早回來的 snapshot 失效。
+    readAzureTts();
+  },
+  () => {},
+);
+
+// 關開關、刪金鑰或撤回第四張時立即停止播放／丟掉晚回應。後端同時把 generation
+// 推進；已開始的 blocking POST 仍可能跑到 timeout，所以畫面不宣稱 socket 已中止。
+globalThis.__TAURI__?.event
+  ?.listen?.("azure-tts-stop", () => {
+    stopPersonaMedia({ cancelAzureNative: false });
+    readAzureTts();
+  })
+  ?.catch?.(() => {});
+
 /**
  * 拔手熱鍵按下去之後那一句。
  *
@@ -1923,6 +2115,7 @@ function chapterHit(ch) {
   li.className = "hit chapter";
   const whenEl = document.createElement("p");
   whenEl.className = "chapter-when";
+  whenEl.dataset.azureAnswerBody = "";
   // 答案講的是核心時間。start_ts／end_ts 在時間軸上含 5 秒 margin，
   // 相加會把相鄰段的邊界算兩次。
   const start = ch.core_start_ts ?? ch.start_ts;
@@ -1936,8 +2129,29 @@ function chapterHit(ch) {
   whenEl.textContent = `${clock(start)}–${clock(end)}　${howLong}`;
   const what = document.createElement("p");
   what.className = "chapter-what";
-  const label = [ch.app, ch.title || ch.host].filter(Boolean).join(" · ");
-  what.textContent = label || "一段紀錄";
+  const visibleTitle = ch.title || ch.host;
+  if (ch.app) {
+    const app = document.createElement("span");
+    app.className = "chapter-source-app";
+    app.textContent = ch.app;
+    what.append(app);
+    if (visibleTitle) what.append(document.createTextNode(" · "));
+  }
+  if (visibleTitle) {
+    const title = document.createElement("span");
+    title.className = "chapter-answer-title";
+    title.textContent = visibleTitle;
+    // Window title 是這段答案的主句；host 只是沒有 title 時的出處 fallback，
+    // 畫面照常顯示但不因 Azure click 出境。
+    if (ch.title) title.dataset.azureAnswerBody = "";
+    what.append(title);
+  }
+  if (!ch.app && !visibleTitle) {
+    const fallback = document.createElement("span");
+    fallback.dataset.azureAnswerBody = "";
+    fallback.textContent = "一段紀錄";
+    what.append(fallback);
+  }
   li.append(whenEl, what);
   return li;
 }
@@ -2236,10 +2450,24 @@ function markLine(queryId) {
 
 function answerTextForLocalSpeech() {
   const copy = hitList.cloneNode(true);
-  for (const node of copy.querySelectorAll(".hit-source, .hits-mark, .hits-read, button, a")) {
+  for (const node of copy.querySelectorAll(
+    ".hit-source, .hits-mark, .hits-read, .hits-cloud, button, a",
+  )) {
     node.remove();
   }
   return copy.textContent.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Azure 只收 renderHits 明確標成答案正文的節點。不能從整張清單做「排除幾個
+ * class」：那種 denylist 一新增提示、日期說明、follow-up 或診斷句就會悄悄出境。
+ * OCR／模型文字只用 textContent 放進既有節點，不能自行鑄出這個 data attribute。
+ */
+function azureAnswerText() {
+  return [...hitList.querySelectorAll("[data-azure-answer-body]")]
+    .map((node) => node.textContent.replace(/\s+/g, " ").trim())
+    .filter((line) => line !== "")
+    .join("\n");
 }
 
 function answerReadLine() {
@@ -2263,6 +2491,146 @@ function answerReadLine() {
     if (text !== "" && speakWithLocalSystemVoice(text)) return;
     personaLine.textContent = "這台機器沒有回報可用的本機中文語音；我沒有改用雲端。";
     personaLine.hidden = false;
+  });
+  li.append(button);
+  return li;
+}
+
+function answerAzureLine() {
+  const li = document.createElement("li");
+  li.className = "hits-read hits-cloud";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "answer-read answer-cloud";
+  button.textContent = "☁ 用 Azure 朗讀（送出這段文字）";
+  button.addEventListener("click", async (event) => {
+    if (event?.isTrusted !== true) return;
+    if (azureCancelPending) {
+      personaLine.textContent =
+        "上一個 Azure 取消還在向 native 確認；這次沒有送出 request，確認完成後再按一次。";
+      personaLine.hidden = false;
+      return;
+    }
+    if (azureAnswerButton === button) {
+      const wasPending = azureSpeechRequestPending;
+      stopPersonaMedia();
+      personaLine.textContent = wasPending
+        ? "Azure 朗讀已取消；已經開始的 HTTPS POST 可能仍跑到逾時，晚回應不會播放。"
+        : "Azure 朗讀已停止。";
+      personaLine.hidden = false;
+      return;
+    }
+
+    // 這一下是唯一 outbound trigger。先取消所有舊播放，再從目前畫面抽答案正文；
+    // 不傳來源 link、button 文案、memory id 或畫面資料。
+    stopPersonaMedia();
+    if (invoke === null) {
+      personaLine.textContent = "這一頁不在 AI-Sister desktop 裡，沒有送出 Azure request。";
+      personaLine.hidden = false;
+      return;
+    }
+    const text = azureAnswerText();
+    if (text === "") {
+      personaLine.textContent = "這一題沒有可朗讀的答案正文，沒有送出 Azure request。";
+      personaLine.hidden = false;
+      return;
+    }
+    const nativeExpected = azureNativeExpected;
+    const nativeGeneration = nativeExpected?.generation;
+    if (
+      !Number.isSafeInteger(nativeGeneration) ||
+      nativeGeneration < 0 ||
+      nativeGeneration !== azureNativeGeneration
+    ) {
+      personaLine.textContent =
+        "Azure 狀態正在重讀；這次沒有送出 request。等按鈕狀態更新後再按一次。";
+      personaLine.hidden = false;
+      readAzureTts();
+      return;
+    }
+
+    const revision = azureSpeechRevision;
+    azureSpeechRequestPending = true;
+    azurePendingGeneration = nativeGeneration;
+    azureAnswerButton = button;
+    button.textContent = "■ 停止／取消 Azure 朗讀";
+    let audio;
+    try {
+      audio = await invoke("azure_tts_speak", {
+        text,
+        expected: nativeExpected,
+      });
+    } catch (err) {
+      if (revision !== azureSpeechRevision) return;
+      azureSpeechRequestPending = false;
+      azurePendingGeneration = null;
+      resetAzureAnswerButton();
+      personaLine.textContent = `Azure 這次沒有播成：${String(err?.message ?? err)}。我沒有自動改用本機或另一個雲端。`;
+      personaLine.hidden = false;
+      readAzureTts();
+      return;
+    }
+    if (revision !== azureSpeechRevision) return;
+    azureSpeechRequestPending = false;
+    azurePendingGeneration = null;
+    if (
+      !Number.isSafeInteger(audio?.generation) ||
+      audio.generation !==
+        (nativeGeneration >= Number.MAX_SAFE_INTEGER ? 0 : nativeGeneration + 1) ||
+      audio?.content_type !== "audio/mpeg" ||
+      !Number.isSafeInteger(audio?.audio_bytes) ||
+      audio.audio_bytes < 1 ||
+      audio.audio_bytes > 8 * 1024 * 1024 ||
+      typeof audio?.data_url !== "string" ||
+      !audio.data_url.startsWith("data:audio/mpeg;base64,") ||
+      audio.data_url.length > 12 * 1024 * 1024
+    ) {
+      resetAzureAnswerButton();
+      personaLine.textContent = "Azure 回應不是這一版允許的 MP3 形狀；沒有播放，也沒有改用其他聲音。";
+      personaLine.hidden = false;
+      readAzureTts();
+      return;
+    }
+    // Native 每 admitted 一個 request 就消耗一代。只有精確 +1 的回應能成為下一次
+    // click 的 snapshot；其餘欄位仍是這次 native 已逐格比對過的原始狀態。
+    azureNativeGeneration = audio.generation;
+    azureNativeExpected = Object.freeze({
+      ...nativeExpected,
+      generation: audio.generation,
+    });
+    if (!personaAudio) {
+      resetAzureAnswerButton();
+      personaLine.textContent = "這扇視窗沒有可用的本機 audio 元件；Azure MP3 沒有播放，也沒有落地。";
+      personaLine.hidden = false;
+      return;
+    }
+    const playbackFailed = () => {
+      if (revision !== azureSpeechRevision) return;
+      resetAzureAnswerButton();
+      personaAudio.onerror = null;
+      personaAudio.onended = null;
+      personaAudio.removeAttribute?.("src");
+      personaLine.textContent =
+        "Azure MP3 已回來，但 WebView 這次沒有播放；沒有落地，也沒有改用其他聲音。";
+      personaLine.hidden = false;
+    };
+    personaAudio.onerror = playbackFailed;
+    // 先裝 error handler 再交出 data URL；即使 decoder 立刻拒絕，也有清除記憶中
+    // MP3 與還原按鈕的出口。
+    personaAudio.currentTime = 0;
+    personaAudio.src = audio.data_url;
+    personaAudio.onended = () => {
+      if (revision !== azureSpeechRevision) return;
+      resetAzureAnswerButton();
+      personaAudio.onerror = null;
+      personaAudio.onended = null;
+      personaAudio.removeAttribute?.("src");
+    };
+    try {
+      await personaAudio.play?.();
+    } catch {
+      playbackFailed();
+    }
   });
   li.append(button);
   return li;
@@ -2298,6 +2666,8 @@ function renderHits(
   followup = null,
   closureNotice = null,
 ) {
+  azureAnswerLine = null;
+  azureAnswerButton = null;
   hitList.replaceChildren();
 
   if (closureNotice) {
@@ -2381,6 +2751,9 @@ function renderHits(
   if (facts.length > 0) {
     const note = document.createElement("li");
     note.className = "hits-note";
+    // 這一句是事實答案必要的認知界線，不是操作提示；逐一 allow，而不是把
+    // `.hits-note` 整類送出去。
+    note.dataset.azureAnswerBody = "";
     note.textContent = "我最後看到的是：";
     hitList.append(note);
   }
@@ -2391,12 +2764,15 @@ function renderHits(
 
     const value = document.createElement("p");
     value.className = "fact-value";
+    value.dataset.azureAnswerBody = "";
     value.textContent = fact.value;
     // 1 次和 12 次是強度不同的答案。她自己不下判斷，只把數字講出來。
     if (fact.sightings > 1) {
       const seen = document.createElement("span");
       seen.className = "fact-seen";
-      seen.textContent = `看過 ${fact.sightings} 次`;
+      // CSS 的 badge 間距不是文字；Azure extractor 讀 textContent，需要真的有
+      // 語音停頓，否則會念成「0800...看過十二次」黏在一起。
+      seen.textContent = `（看過 ${fact.sightings} 次）`;
       value.append(seen);
     }
     li.append(value);
@@ -2405,6 +2781,7 @@ function renderHits(
     // 要的，`客服專線 0800-080-123` 才是他記得的那一行。兩個都給。
     const raw = document.createElement("p");
     raw.className = "hit-text fact-raw";
+    raw.dataset.azureAnswerBody = "";
     raw.textContent = fact.raw;
     li.append(raw);
 
@@ -2427,6 +2804,7 @@ function renderHits(
   if (hits.length === 0 && facts.length === 0 && !hasChapters) {
     const empty = document.createElement("li");
     empty.className = "hits-empty";
+    empty.dataset.azureAnswerBody = "";
     // 「我沒看過這件事」和「我什麼都還沒看過」是兩件不同的事。
     //
     // 但問時間卻空手而回，**不是**只有「她還沒錄過東西」這一種解釋——三十行
@@ -2476,6 +2854,7 @@ function renderHits(
 
     const text = document.createElement("p");
     text.className = "hit-text";
+    text.dataset.azureAnswerBody = "";
     renderSnippet(text, hit.snippet || hit.text);
     li.append(text);
 
@@ -2531,6 +2910,10 @@ function renderHits(
 
   // 朗讀是另一個明確 click；不 autoplay，也不把答案塞進舊 fixed-voice IPC。
   hitList.append(answerReadLine());
+  if (azureSpeechEnabled) {
+    azureAnswerLine = answerAzureLine();
+    hitList.append(azureAnswerLine);
+  }
 
   hitList.hidden = false;
   document.body.classList.add("has-hits");
@@ -2682,6 +3065,8 @@ applyPersona({ id: "chatgpt", enabled: true, motion: true, tap_lines: true });
 paintPin();
 // 只讀本機 config；失敗就留在 HTML 已經畫好的 ChatGPT 內建角色圖。
 readPersona();
+// 只讀開關／region／credential 四態／第四張同意書，不會合成，也不會連 Azure。
+readAzureTts();
 
 // `?state=paused` 走的是**和產品一樣的那條路**（設 `paused` 旗標），不是另外
 // 搬一個長得像暫停的樣子出來。這一點是被截圖抓到的：第一版讓它去設 `state`，

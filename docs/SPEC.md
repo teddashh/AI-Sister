@@ -291,7 +291,9 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   `thinking`（微動）／`has-something`（微光 + 一個小點，像未讀）。
   點角色 → 一句本機 deterministic tap-line；不點不出聲。聲音另行 opt-in：有已驗證
   固定錄音就播放，否則只用 WebView 明確標成 `localService` 的中文系統 voice；沒有就
-  靜音，不准降級成 remote voice。答案只能由使用者按「用本機聲音朗讀」後讀出。
+  靜音，不准自動降級成 remote voice。答案的本機朗讀只能由使用者按「用本機聲音朗讀」
+  後讀出。alpha.109 另有預設關閉的 Azure 繁中朗讀按鈕，須獨立設定、key、第四張
+  consent 與當下 click；它不是本機 voice 的 fallback，兩條也不互相自動切換。
   persona 不得影響答案、證據、同意書、Gatekeeper 或 hands。
 
 ### 8.2 對話（被動答題——永遠可用，這是 Release 1.0 的核心）
@@ -388,8 +390,10 @@ claude code / codex / grok / gemini cli。所以 L2/L3 那個腦要接的第一�
 已經登入、已經在付錢的那支 CLI。`sister` 用 `std::process::Command` spawn
 它：prompt 從 stdin 進、JSON 從 stdout 出。`check-no-network.sh` 對 `sister.exe`、
 recorder／core／capture／brain／hands 繼續禁 HTTP client 與本機推論引擎，沒有
-例外。Persona 的下載能力收在 root workspace 的 `crates/sister-assets`：預設 feature
-集合沒有 `download`，只有 desktop 明確啟用；它不把 HTTP 能力交給 brain。
+例外。desktop 的 Persona 下載能力收在 root workspace 的 `crates/sister-assets`：預設
+feature 集合沒有 `download`；Azure 答案朗讀收在 `crates/sister-tts`：預設 feature
+集合沒有 `azure`。只有 desktop 明確啟用這兩個窄 transport；它們都不把 HTTP 能力
+交給 brain，Azure TTS 也不是模型接入或 OCR 出境路徑。
 
 - **這一版落地的**：`[brain] command` + `args`。沒設定就一次都不呼叫。
 - **還沒做的**：(a) 訂閱登入的 OAuth 輔助（MAT `signin.ts`）——使用者自己
@@ -404,7 +408,7 @@ recorder／core／capture／brain／hands 繼續禁 HTTP client 與本機推論�
 
 ## §11. 隱私與安全（產品的第一賣點，工程上與功能同權重）
 
-### 11.1 三張同意書〔定案〕（onboarding 三個獨立開關，README 第一段公開承諾）
+### 11.1 四張同意書〔定案〕（onboarding 四個獨立開關，README 第一段公開承諾）
 
 1. **本機記錄**：我同意在我的硬碟上記錄我的螢幕。這張只授權本機記錄，不授權
    上傳畫面或文字；不簽第二張時 S1 仍可完全離線運作。Persona 的選配素材下載是
@@ -412,7 +416,16 @@ recorder／core／capture／brain／hands 繼續禁 HTTP client 與本機推論�
 2. **上雲解讀**：我同意把**螢幕上的文字原文**（OCR 抽出來的字，永不含
    pixel）交給我在設定裡指定的本機 CLI，由那支程式去做解讀（預設關 →
    沒簽就一次都不 spawn）。
-3. **畫面暫存**：我同意保留變化幀截圖 N 天（可選 0 天 = 只留 OCR 文字）。
+3. **畫面暫存**：我同意保留變化幀的截圖，而不是只留上面的字。沒簽仍可記 OCR，
+   但一張截圖都不寫。
+4. **Azure TTS**：我同意每次按下 Azure 朗讀時，把當前答案正文原文交給我在設定裡
+   選擇區域的 Microsoft Azure 語音服務。正文可能含姓名、電話與金額，不會先遮罩；
+   不會送出截圖、來源連結、memory id、整份資料庫或其他文字。沒有這一張，她一次都
+   不會呼叫 Azure 語音服務；本機朗讀不受影響。
+
+四張各自獨立。第四張只鑄出 Azure TTS permit，不能借第二張、Persona 下載點擊或
+Persona `voice_enabled` 代替。alpha.109 讀同版本、但尚無 Azure 欄位的舊 consent 時，
+前三張簽名保留，第四張明確遷移成未簽；未知／損壞／版本不符仍 fail closed。
 
 ### 11.2 Capture 時排除（不是事後刪）〔定案〕
 
@@ -458,8 +471,9 @@ alpha.103 保守丟棄這類 clipboard content，不拿下一拍的安全脈絡�
 看得到你螢幕上的字。這件事寫在第二張同意書的條文裡，他按的就是那句話
 （`consent.rs` `VERSION = 3`），不是寫在某份文件的第 11 節。
 
-沒有改變的：**畫面一粒 pixel 都不出去**，只有 OCR 抽出來的字；
-沒簽第二張同意書一次都不送；剪貼簿秘密偵測（§11.2）仍然不落地。
+沒有改變的：**畫面一粒 pixel 都不出去**；在 L2/L3 解釋路徑上只有 OCR 抽出來的字，
+沒簽第二張同意書一次都不送；剪貼簿秘密偵測（§11.2）仍然不落地。alpha.109 的
+Azure TTS 是 §11.10 另外一條只送當前答案正文的明示路徑，不借這張同意書。
 
 ### 11.4 保留與磁碟邊界
 
@@ -476,13 +490,16 @@ alpha.103 保守丟棄這類 clipboard content，不拿下一拍的安全脈絡�
 (c) 文件（PRIVACY.md）誠實陳述此邊界，
 不假裝解決了。法域註記：部分地區對「記錄他人通訊」有法律風險，文件明示。
 
-### 11.6 供應商端留存（第二張同意書的誠實註腳）
+### 11.6 供應商端留存（第二、第四張同意書的誠實註腳）
 
 螢幕文字上雲後仍受各模型商 abuse-monitoring 留存政策約束。而且它是原文
 （§11.3），所以這一節比原本更重要。對策：
 (a) 文件列出各 provider 的留存/zero-retention 選項，預設推薦有 ZDR 的通道；
 (b) 「外送紀錄」面板列出可驗證的命令、角色、字數、時間、結果與截斷狀態；不另外
 複製一份敏感 OCR 原文來假裝審計更完整。要看下一次會送什麼，走 dry-run。
+Azure TTS 的當前答案正文與一般網路 metadata 交給 Microsoft 後，則受使用者 Azure
+帳號、resource、方案與 Microsoft 當下政策約束；AI-Sister 不把 F0 額度或 provider
+留存寫成產品自己的保證。它不另做文字／MP3 cache，詳見 §11.10。
 
 ### 11.7 可驗證性（Recall 的教訓：「宣稱本機」不夠）
 
@@ -512,7 +529,7 @@ URL、header 或 body；不 follow redirect、不走 proxy、不帶 cookie／cre
 authorization／referrer／query／body，不 retry，也不發 `HEAD` 或逐物件請求。未來若改成
 分包，必須先把 path 可透露哪一包寫進揭露，不能沿用「不帶角色選擇」的舊承諾。
 
-目前唯一 allowlist 是 `https://cdn.ted-h.com` 加上
+Persona transport 自己唯一的 allowlist 是 `https://cdn.ted-h.com` 加上
 `/tokenmonster/characters/v1/packs/ai-sister-media-11-voice55-2026.07.23/7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30.zip`。
 compact embedded authority 只含 descriptor、exact origin/path allowlist、四位角色的
 selected public rights projection、八段選用聲音的核准逐字稿，以及完整 schema-v2
@@ -524,6 +541,46 @@ hash、73,261,088 bytes、946 entries 與 pack SHA-256
 住 946 項，實際使用的 selected entries 另逐檔驗 size／hash／rights binding；只有
 renderer 顯示文字逐字等於 embedded transcript 的 line 才能進播放 allowlist。pack 中
 需要「今天滿有活力」前提的四段 `active` WAV 不在首版 selected set。
+
+### 11.10 Azure 可選 TTS
+
+alpha.109 加入第二條 desktop 內建 outbound，範圍只限使用者明確要求朗讀的**當前
+答案正文原文**。本機 `localService` 語音仍是預設；Azure 預設 `enabled = false`、
+沒有預設 region，也不會在本機 voice 缺席／失敗時自動 fallback。反方向也一樣：
+Azure 失敗不自動改走本機或其他 provider。開 app、開設定、答案出現、選 Persona、
+錄製或記憶事件都是 0 Azure request。
+
+真正 POST 前必須同時具備：設定明確啟用；region 是 `eastasia`、`southeastasia`、
+`japaneast` 之一；voice 是三個 canonical zh-TW allowlist 值之一；目前 Windows 使用者
+Credential Manager 的 fixed target `ted-h/AI-Sister/AzureSpeech/v1` 有 subscription
+key；第四張 `azure-tts` consent 有效；以及使用者剛剛親手按了 Azure 朗讀。缺一項
+就不建立 transport，也不能借 Persona `voice_enabled` 或第二張 `cloud-reading` 通過。
+
+native Rust 只能對所選區域的
+`https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` 做一個 HTTPS `POST`。
+region／voice 是 typed enum，未知值令設定 fail closed；renderer 不傳 URL。request
+不 follow redirect、不走 proxy、不 retry；WebView 繼續只有 IPC，CSP 不加入 Azure。
+每次 POST 的唯一使用者內容是當前答案正文原文，可能含姓名、電話與金額而且不先遮罩；
+不得加入截圖、來源連結／出處 chip、memory id、整份資料庫、問題、舊答案、Persona
+台詞或其他 UI 文字。
+
+subscription key 不進 `config.toml`、log、DB 或 export；輸入時會短暫存在 password
+欄位、renderer 記憶體與 Tauri IPC，保存後頁面立即清空。native 回條只帶
+Present／Missing／Unreadable／Unsupported，不把已存 secret 讀回 renderer。非密設定 `[shell.azure_tts]` 只存
+`enabled`、typed `region` 與 typed `voice`。Windows Credential Manager 是目前使用者
+帳號的 OS 邊界，不宣稱能抵擋同使用者權限 malware。
+
+不做文字或 MP3 的磁碟 cache，也沒有可跨 click 重播的記憶體 cache；每次按下都可能
+是新 POST。Stop／換題／新播放會先讓舊 playback generation 失效，晚回的 MP3 不播放、
+不快取；但已開始的 blocking native POST **不能中途 abort**，仍可能跑到 45 秒 timeout，
+而且 Azure 可能已計入用量。UI 不得把「不再播放」寫成「請求已取消」。
+第四張 consent 的 admission 與 CLI／desktop 撤回共用跨行程 lock，而且該 shared guard
+保留到既有 transport 結束：因此碰到正在送的 request 時，撤回操作本身可能等到 45 秒
+timeout；但撤回一旦回覆成功，舊 snapshot 不可能才開始另一個 POST。
+
+Microsoft 目前公開列 Azure Speech F0 neural TTS 每月 0.5 million characters；是否
+可用、實際額度與費用以使用者 Azure 帳號、resource、方案及 Microsoft 當下規則為準。
+AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限。
 
 ## §12. Replay 評測（第一級公民，不是附件）〔定案：全場唯一無異議的下一步〕
 
@@ -688,7 +745,8 @@ renderer 顯示文字逐字等於 embedded transcript 的 line 才能進播放 a
 | Pet overlay | always-on-top 透明無框窗 + `set_ignore_cursor_events` 動態 toggle（輪詢游標；Tauri 無 per-region hit-testing）| 已知坑：macOS production 透明窗 bug 群、全螢幕 space 需動 collectionBehavior、Wayland overlay 品質差 |
 | macOS 權限 | `tauri-plugin-macos-permissions` 2.3（Screen Recording 無 entitlement，純 TCC + hardened runtime + notarization；MAS 不可行，站外發行） | 開發期 `tccutil reset ScreenCapture` 測 onboarding |
 | hands | **Rust crate `sister-hands`**，CLI／desktop 共用 permit 與 target policy | 尚未做獨立 process；需要時另立 threat-model milestone |
-| Persona transport | root workspace 的 **`sister-assets`**；預設 feature 集合不含 `download`，desktop 才明確啟用 | API 不接受 renderer 傳入 URL／header／body／persona 或 memory；唯一 fixed GET 與 cache contract 見 §11.9 |
+| Persona transport | root workspace 的 **`sister-assets`**；預設 feature 集合不含 `download`，desktop 才明確啟用 | API 不接受 renderer 傳入 URL／header／body／persona 或 memory；Persona 的 fixed GET 與 cache contract 見 §11.9 |
+| Azure TTS transport | root workspace 的 **`sister-tts`**；預設 feature 集合不含 `azure`，desktop 才明確啟用 | 預設關閉、第四張 consent、Credential Manager key 與 trusted click 缺一不可；三個 fixed region POST、payload、cache 與 cancel 邊界見 §11.10 |
 | Schema | Rust serde DTO + 前端封閉集合檢查 | 沒有 Zod／codegen build step |
 | Persona assets | 17 人本機 catalog + bundled WebP（ChatGPT 預設）；內容定址的四姊妹 fixed-voice pack，明確點擊、compact authority 驗證後原子啟用 | recorder/core 保持零網路；WebView CSP 不開 CDN；cache 只存舊 fixed voice，在 default data dir 的 `persona-assets-v1`，不進 memory export／forget／prune |
 | hands 元件（Phase 6+） | Agent S3（Apache-2.0）/ UFO²（MIT）/ OmniParser v3 weights（MIT，避開舊 AGPL detector） | 「手」已商品化：用組的，不自己寫 grounding |
@@ -710,7 +768,7 @@ always-on。capture 從 day 1 走 trait 抽象，但「介面同形」不等於�
 1. **`oar-ocr` 的 `auto-download` 會把 `ureq` 連進 recorder 執行檔。** 那是一個真的
    HTTP client，而且會讓長時間看螢幕的 `sister.exe` 自己下載模型。PRIVACY.md 的
    邊界是 recorder／core／capture／brain 沒有這種能力；Persona 後來獲准的 desktop
-   fixed-pack GET 不能拿來替 OCR 開例外。
+   fixed-pack GET 與 Azure TTS fixed POST 都不能拿來替 OCR 開例外。
 2. **`ort` 用 `copy-dylibs` 出貨 `onnxruntime.dll`**（~15MB）加上模型（~20MB），
    使用者要下載的就不再是一個檔案。目前 `sister.exe` 是 2.4MB 的單檔。
 3. **實作選型當時，Phase 0 寫下的驗收條件是 CPU < 3%、RAM < 400MB**，而
@@ -737,7 +795,7 @@ always-on。capture 從 day 1 走 trait 抽象，但「介面同形」不等於�
 - License：**Apache-2.0**（PRODUCT §8 的理由）；
 - Phase 1 完成即開 repo（alpha 標示、預設 observe-only）；正式宣傳於 Phase 5
   帶 benchmark 數字；
-- 必備文件（day one）：README（三張同意書宣言 + benchmark 表）、PRIVACY.md
+- 必備文件（day one）：README（四張同意書宣言 + benchmark 表）、PRIVACY.md
   （含旁人邊界誠實聲明）、THREAT_MODEL.md、DATA_INVENTORY.md
   （TokenMonster 的寫法沿用）；
 - clone → 跑起來 < 10 分鐘是硬指標〔定案：clone 十分鐘要看到桌面姊妹動〕。

@@ -19,7 +19,10 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 4. **視窗標題與網址** — 看似 metadata，實則常含人名、案號、病歷號。
 5. **輸入節奏** — 不含內容，但能推斷作息與情緒狀態。
 6. **資料庫本身的存在** — 「這台機器上有一份七天的螢幕紀錄」這個事實。
-7. **Persona cache 與取得時間** — 素材本身公開，但 cache 的存在與本機時間可透露
+7. **Azure Speech subscription key 與當次答案／音訊** — key 能代表使用者的 Azure
+   resource；答案正文可能含姓名、電話與金額。key 長存 Windows Credential Manager，
+   答案、SSML 與 MP3 只在 request／playback 的行程 RAM，不做 replay cache。
+8. **Persona cache 與取得時間** — 素材本身公開，但 cache 的存在與本機時間可透露
    這台機器曾明確下載；它不該混進記憶 export 或 query。
 
 ---
@@ -31,7 +34,7 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 | **拿到未鎖機器的人** | 讀檔案、跑 `sister query` | **部分防禦**：靠 OS 帳號隔離。目前資料庫**未加密** |
 | **同機的惡意程式** | 以使用者身分讀任何檔案 | **不防禦**。同權限即同讀取權，這是 OS 邊界 |
 | **偷走硬碟的人** | 離線讀取 | **依賴 BitLocker/LUKS**。應用層無額外加密 |
-| **遠端攻擊者** | 網路 | **部分防禦**：本程式沒有監聽埠；`sister.exe`、recorder/core/capture/brain/hands 與 WebView 無任意 HTTP 能力。desktop 只有使用者揭露後按下的 Persona fixed-pack GET；簽 cloud-reading 後則會把 OCR 原文交給使用者設定的本機 CLI，後續網路與供應商邊界屬於那支 CLI |
+| **遠端攻擊者** | 網路 | **部分防禦**：本程式沒有監聽埠；`sister.exe`、recorder/core/capture/brain/hands 與 WebView 無任意 HTTP 能力。desktop 只有使用者揭露後按下的 Persona fixed-pack GET，以及設定啟用、獨立 consent、Credential Manager key 與當下 click 全成立後的 Azure TTS fixed POST；簽 cloud-reading 後另會把 OCR 原文交給使用者設定的本機 CLI，後續網路與供應商邊界屬於那支 CLI |
 | **供應鏈** | 汙染相依套件 | **部分**：`Cargo.lock` 鎖定；未做 vendoring 或 reproducible build |
 | **好奇的旁人** | 看你的螢幕 | 不適用（他本來就看得到） |
 | **被記錄的第三方** | 無 | **這是最重要的一項，見下方** |
@@ -47,6 +50,8 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 - 任何 app 可一鍵加入 blocklist
 - 畫面 pixels 永不離開本機；沒簽 cloud-reading 時 OCR 文字也不交給外部 CLI。簽署後，
   OCR 原文會交給使用者設定的本機 CLI，並受那支 CLI 與其供應商的邊界約束
+- 選用 Azure TTS 時，當前答案正文可能也逐字含有第三方資料。第四張同意會明示不遮罩；
+  不願把這段文字交給 Azure 時，維持預設關閉並使用本機朗讀
 
 **明確不緩解**：Slack 與 Discord 不在暫停清單。它們平時是主要工作場所，
 光憑 app 名稱分不出「正在分享畫面」與「正在聊天」；把它們列進去等於讓
@@ -79,6 +84,29 @@ cache 固定在 `Config::default_data_dir()/persona-assets-v1`，雖然物理上
 blocking remove 寫下 settled checkpoint 後才能明確修復，而完整重裝最後才以集合 digest
 重新授權目前 generation；settled 本身不授權任何 bytes。這防的是 crash／兩個
 AI-Sister 行程的競爭，不防同權限程式手動竄改檔案。
+
+---
+
+## alpha.109 Azure TTS POST 新增的攻擊面
+
+這條路會把使用者正在看的**當前答案正文原文**交給 Microsoft Azure Speech。正文
+可能含姓名、電話與金額，不先遮罩；Azure 也會看見一般網路 metadata，例如來源 IP、
+時間、TLS、所選區域 endpoint 與 request headers。它不送截圖、來源連結／出處 chip、
+memory id、整份資料庫或其他文字。第四張 `azure-tts` 同意書只授權這次由人按下的
+朗讀，不授權背景朗讀、OCR 出境或把答案以外的 UI 拼進 payload。
+
+| 失效方式 | 防線 | 防不住／失敗時 |
+|---|---|---|
+| 本機 voice 缺席或失敗後偷偷改走雲端 | Azure 預設關閉；本機與 Azure 是兩顆明確按鈕，不互相自動 fallback；啟用、typed region／voice、key、當前第四張 consent 與 trusted click 缺一即不 POST | 使用者選擇 Azure 就是在選擇把正文交給 provider；這不是「仍完全離線」 |
+| renderer、設定或其他 crate 把 TTS client 擴成任意 URL | HTTP client 只在 `crates/sister-tts` 的非預設 `azure` feature；只有 desktop 啟用；region 只有 `eastasia`、`southeastasia`、`japaneast`，固定到 `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1`；renderer 不傳 URL，WebView CSP 仍只准 IPC | desktop binary 或 dependency 供應鏈若被攻破，仍在同一 native trust boundary；所以相依圖、host/path 與 request shape 要由 CI 守 |
+| 顯示層把來源、舊答案、問題、DB 或截圖一起送出 | native command 只把當前答案正文當 payload；renderer 帶回的 typed gate snapshot 只能用來和 native 重讀值逐格比對，不能指定 endpoint／key／permit；shared-lock Azure guard 守住唯一 helper，測試釘 payload 不含 source URL、app、memory id、DB 或其他 UI text | 正文本身可能逐字重複 OCR／記憶內容，也可能已包含個資；「只送正文」不是「正文已去敏」 |
+| key 被長期寫進 TOML、log、DB、renderer storage 或 export | key 長期只存目前 Windows 使用者的 Credential Manager fixed target `ted-h/AI-Sister/AzureSpeech/v1`；輸入時短暫經過 password 欄位／renderer RAM／Tauri IPC，保存後清空；native 回條只帶 Present／Missing／Unreadable／Unsupported，不讀回 secret | 同一 Windows 使用者權限的惡意程式仍可能讀 Credential Manager 或行程記憶體；這個產品不防已被攻破的 OS 帳號 |
+| Stop 文案讓人誤以為 request／費用已取消 | Stop／換題先使 playback generation 失效；晚回的 MP3 不播放、不快取；UI 明講 blocking native POST 不能 abort | 已開始的 POST 仍可能跑到 45 秒 timeout，provider 也可能已計入用量；網路與計費取消沒有被保證 |
+| 文字或合成音訊變成第二份長期記憶 | 不做磁碟或可重播的記憶體 cache；每次 click 都可能新 POST；late response 丟棄 | request body、key 與 MP3 在處理期間仍存在 process RAM，可能受 OS paging、crash dump 或同權限除錯工具影響；Azure 端處理受使用者帳號、方案與 Microsoft 條款約束 |
+
+Microsoft 目前公開列 Azure Speech F0 neural TTS 每月 0.5 million characters，但這不是
+安全或費用上限，也不是 AI-Sister 提供的額度；可用性、費用與 provider 行為以使用者
+Azure 帳號、resource、方案及 Microsoft 當下規則為準。
 
 ---
 
@@ -245,9 +273,10 @@ Windows 10 是 Release 1.0 最低支援版本；不把 Windows 7／Server 2008 R
 - 能力缺席時 `sister doctor` 報「**目前失效的隱私保護**」與「**看起來正常，
   但其實記不住東西**」，不報「N 條規則 ✓」
 - 承諾能被機器檢查的就交給機器：`scripts/check-no-network.sh` 在 CI 上逐棵檢查
-  root workspace 預設無 download、recorder／core／capture／brain／hands 無 HTTP
-  client，且唯一 client 的 reverse dependency path 是
-  `client → sister-assets[download] → sister-desktop`；renderer/CSP 仍無遠端出口。
+  root workspace 預設無 Persona download 或 Azure transport、recorder／core／capture／
+  brain／hands 無 HTTP client，且只有兩條核准的 reverse dependency path：
+  `client → sister-assets[download] → sister-desktop` 與
+  `client → sister-tts[azure] → sister-desktop`；renderer/CSP 仍無遠端出口。
   這讓 PRIVACY.md 的能力邊界由建置保證而不是由記性保證。缺口通常不是人手動
   打開的，是相依套件或 feature 默默帶進來的
 - 平台相關的假設要在**那個平台上**驗，不能只靠推理：OCR 有一個 CI 步驟真的
@@ -401,7 +430,7 @@ redirect 或站內內容。被埋在已授權 app、已見過 host 裡的 URL �
    也不在我們的稽核範圍內。選它的理由見
    `crates/sister-capture/src/windows/ocr.rs` 的模組註解——最主要的一條是：
    原本要用的 ONNX 方案會把一個 HTTP client 連進 recorder 執行檔裡；desktop 的
-   Persona fixed-pack transport 不是 OCR 可以重用的例外。
+   Persona fixed-pack GET 與 Azure TTS fixed POST 都不是 OCR 可以重用的例外。
 10. **白名單管得住「哪個程式會被叫起來」，管不住那個程式。** `.pdf` 交給
     PDF 閱讀器、`.docx` 交給 Word、`.svg` 多半交給瀏覽器——而
     **`.svg` 裡可以放 `<script>`**，用瀏覽器開就會在 `file://` 的來源上跑；

@@ -1,6 +1,6 @@
 [package]
 name = "sister-desktop"
-version = "0.1.0-alpha.108"
+version = "0.1.0-alpha.109"
 edition = "2024"
 # 和根 workspace 同一個地板；這是第二個 workspace，所以在下方自己宣告再繼承。
 rust-version.workspace = true
@@ -47,7 +47,10 @@ sister-core = { path = "../../../crates/sister-core", default-features = false }
 sister-shell = { path = "../../../crates/sister-shell" }
 sister-hands = { path = "../../../crates/sister-hands" }
 sister-assets = { path = "../../../crates/sister-assets", features = ["download"] }
+sister-tts = { path = "../../../crates/sister-tts", features = ["azure"] }
 tauri-plugin-global-shortcut = "2"
+base64 = "0.22"
+thiserror = "2"
 
 [target.'cfg(windows)'.dependencies]
 # startup guard 依照這個版本的 Windows WM_COPYDATA 協定轉交；更新時要連
@@ -56,6 +59,7 @@ tauri-plugin-single-instance = { version = "=2.4.4", default-features = false }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Credentials",
     "Win32_System_DataExchange",
     "Win32_System_Registry",
     "Win32_System_Threading",

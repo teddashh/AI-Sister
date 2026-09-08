@@ -1,11 +1,11 @@
 # AGENTS.md — 給接手的 agent
 
 一句話：**AI-Sister 是一個在 Windows 上安靜看著螢幕、事後答得出「我昨天在幹嘛」、
-而且每一句話都點得開證據的本機記錄器。**「本機」指的是**截圖和文字留在這台機器**；
-腦（L2/L3）接的是使用者自己已經裝好的 CLI agent，不是內建的 HTTP client。唯一
-內建 outbound 能力是 desktop 在使用者看完揭露並明確按下後，經
-`crates/sister-assets` 下載一包固定 Persona 素材；它不能擴散到 recorder／core／
-capture／brain／hands 或 WebView。
+而且每一句話都點得開證據的本機記錄器。**「本機」指的是錄下的截圖、OCR 與記憶留在
+這台機器**；腦（L2/L3）接的是使用者自己已經裝好的 CLI agent，不是內建的 HTTP
+client。desktop 只有兩條具名、窄化的內建 outbound：Persona 固定素材包的使用者發起
+GET，以及 alpha.109 預設關閉、另行同意與按下才送當前答案正文的 Azure TTS POST。
+它們不能擴散到 recorder／core／capture／brain／hands 或 WebView。
 
 先讀 `docs/PHASES.md`（路線圖，退場條件就是驗收條件）、`docs/SPEC.md`、`docs/PRODUCT.md`。
 **現在該做什麼看 .handoff/PLAN.md**（刻意不進 git，只在工作目錄裡）。
@@ -60,6 +60,36 @@ capture／brain／hands 或 WebView。
   `connect-src`／`img-src`／`media-src`**。一般 CI 也不打真 CDN。
 - 本機語音只接受 WebView 明確標成 `localService` 的中文 voice；找不到就靜音，不得
   自動換 remote voice。角色台詞與答案朗讀都要由 trusted click 開始，不 autoplay。
+
+### Azure TTS 網路邊界（alpha.109 起）
+
+- 本機 `localService` 語音仍是預設；Azure 預設關閉，而且兩條路**都不互相自動
+  fallback**。只有設定明確啟用、region 與 voice 都是 typed allowlist、Windows
+  Credential Manager 有 key、第四張 `azure-tts` 同意有效，再由使用者親手按 Azure
+  朗讀，才可建立請求。舊三張同意不授權 Azure；同版本舊檔遷移時第四張一律未簽。
+- `crates/sister-tts` 的預設 feature 沒有 Azure HTTP；只有 desktop 明確啟用。region
+  嚴格只有 `eastasia`、`southeastasia`、`japaneast`，各自只准 native Rust 對
+  `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` 做一個 HTTPS `POST`。
+  不接受 renderer 傳 URL，不 redirect／proxy／retry，也不能把 TTS client 拿給 OCR、
+  brain、hands 或 Persona 使用。
+- POST 只含**當前答案正文原文**；它可能含姓名、電話與金額而且不先遮罩。不得夾帶
+  截圖、來源連結／chip、memory id、整份資料庫或其他文字。第四張條文明講這個邊界；
+  沒簽時一次都不呼叫 Azure，本機朗讀不受影響。
+- subscription key 長期只存目前 Windows 使用者的 Credential Manager，fixed target 是
+  `ted-h/AI-Sister/AzureSpeech/v1`；不進 `config.toml`、log、DB 或 export。使用者輸入時
+  它會短暫存在 password 欄位與 Tauri IPC；保存後頁面立即清空，native 回條只准帶
+  Present／Missing／Unreadable／Unsupported，不能把 secret 讀回 renderer。
+- 不做文字或 MP3 cache；每次 trusted click 都可能重新 POST。停止／換題立即讓 playback
+  generation 失效，晚回來的音訊不得播放或快取；但 blocking native POST 不能中途 abort，
+  最長仍可能跑到 45 秒 timeout，且 provider 可能已計入用量。UI 不得把「不再播放」寫成
+  「網路請求已取消」。
+- outbound helper 必須 by-value 吃掉跨行程 shared consent guard，並讓它活過完整 transport；
+  所以碰到既有 POST 時，第四張撤回可能等到 timeout，但撤回回覆後舊 snapshot 絕不能才送。
+- Microsoft 目前公開列 Azure Speech F0 neural TTS 每月 0.5 million characters；這是
+  provider 方案，不是產品保證。是否可用、額度與費用以使用者 Azure 帳號、resource、
+  方案及 Microsoft 當下規則為準。
+- WebView CSP 繼續只准 IPC，**不要把 Azure host 加進 `connect-src` 或 `media-src`**。
+  一般 CI 不打真 Azure。
 
 ---
 
@@ -129,7 +159,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ./scripts/check-windows.sh          # 動到 windows/ 或 apps/desktop/ 才需要，但很便宜
-./scripts/check-no-network.sh       # 隱私：只有 desktop → sister-assets[download] 這條 fixed GET；其餘無 client/socket，WebView 無遠端來源
+./scripts/check-no-network.sh       # 隱私：只准 desktop 的 Persona fixed GET 與 Azure TTS fixed POST；其餘無 client/socket，WebView 無遠端來源
 ```
 
 CI（`.github/workflows/ci.yml`）另外還跑十幾支 `scripts/check-*.{py,mjs,sh}`，

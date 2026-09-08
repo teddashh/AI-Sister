@@ -87,6 +87,31 @@ const ASSET_AVAILABLE = {
   voice_count: 0,
 };
 
+const AZURE_OFF = {
+  generation: 7,
+  config_readable: true,
+  enabled: false,
+  region: null,
+  voice: "zh-TW-HsiaoChenNeural",
+  endpoint: null,
+  credential: "missing",
+  consented: false,
+  consent_at: null,
+  ready: false,
+  config_error: null,
+};
+
+const AZURE_READY = {
+  ...AZURE_OFF,
+  enabled: true,
+  region: "eastasia",
+  endpoint: "https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1",
+  credential: "present",
+  consented: true,
+  consent_at: 1_757_299_200_000,
+  ready: true,
+};
+
 /*
  * `HotkeyView` 的形狀，照 main.rs 那個 struct 抄的。
  *
@@ -132,7 +157,12 @@ async function open({
   onPersonaRead,
   onLoginStartupRead,
   onLoginStartupSet,
+  onAzureRead,
+  onAzureConfigSet,
+  onAzureKeySet,
+  onAzureKeyDelete,
   asset = ASSET_AVAILABLE,
+  azure = AZURE_OFF,
   voice = false,
   hotkey = HOTKEY,
   loginStartup = LOGIN_STARTUP,
@@ -158,6 +188,7 @@ async function open({
   let assetState = { ...asset, disclosure: asset.disclosure ? { ...asset.disclosure } : null };
   let voiceState = voice;
   let loginStartupState = { ...loginStartup };
+  let azureState = { ...azure };
   const writes = [];
   const invokes = [];
   const events = new Map();
@@ -220,6 +251,13 @@ async function open({
                   without: "x",
                   granted_at: 1,
                   effective: true,
+                },
+                {
+                  key: "azure-tts",
+                  wording: "x",
+                  without: "x",
+                  granted_at: null,
+                  effective: false,
                 },
               ],
             };
@@ -293,6 +331,56 @@ async function open({
             }
             voiceState = arg.enabled;
             return { voice_enabled: voiceState };
+          case "azure_tts_read":
+            if (onAzureRead) return onAzureRead({ ...azureState });
+            return { ...azureState };
+          case "azure_tts_config_set":
+            if (onAzureConfigSet) {
+              return onAzureConfigSet(
+                arg,
+                { ...azureState },
+                (next) => (azureState = { ...next }),
+              );
+            }
+            azureState = {
+              ...azureState,
+              enabled: arg.enabled,
+              region: arg.region,
+              voice: arg.voice,
+              endpoint:
+                arg.region === null
+                  ? null
+                  : `https://${arg.region}.tts.speech.microsoft.com/cognitiveservices/v1`,
+            };
+            azureState.ready =
+              azureState.enabled &&
+              azureState.region !== null &&
+              azureState.credential === "present" &&
+              azureState.consented === true;
+            return { ...azureState };
+          case "azure_tts_key_set":
+            if (onAzureKeySet) {
+              return onAzureKeySet(
+                arg,
+                { ...azureState },
+                (next) => (azureState = { ...next }),
+              );
+            }
+            azureState = { ...azureState, credential: "present" };
+            azureState.ready =
+              azureState.enabled && azureState.region !== null && azureState.consented === true;
+            return { ...azureState };
+          case "azure_tts_key_delete":
+            if (onAzureKeyDelete) {
+              return onAzureKeyDelete(
+                { ...azureState },
+                (next) => (azureState = { ...next }),
+              );
+            }
+            azureState = { ...azureState, credential: "missing", ready: false };
+            return { ...azureState };
+          case "open_onboarding":
+            return null;
           default:
             return null;
         }
@@ -349,6 +437,9 @@ async function open({
     },
     setAsset(s) {
       assetState = { ...s, disclosure: s.disclosure ? { ...s.disclosure } : null };
+    },
+    setAzure(s) {
+      azureState = { ...s };
     },
     combo: () => node("[data-combo]").textContent,
     hotkeySay: () => node("[data-hotkey-say]").textContent,
@@ -868,7 +959,7 @@ const SENTENCE = {
   noCommand:
     "還沒填命令：解釋層和審閱層一次都不會醒。空著就是關，不是跑得慢一點。",
   noConsent:
-    "命令有了，但第二張同意書還沒勾：螢幕上的字只留在這台機器，一次都不會交給這支 CLI。去「三張同意書」那一頁勾上雲解讀。",
+    "命令有了，但第二張同意書還沒勾：螢幕上的字只留在這台機器，一次都不會交給這支 CLI。去「四張同意書」那一頁勾上雲解讀。",
   readyIdle:
     "命令和同意書都齊了。現在沒有人在錄，等你按下「開始記錄」她才會自己醒。",
   readyBooting:
@@ -893,7 +984,7 @@ console.log("⑬ 大腦：填了命令，第二張沒勾（正在錄也不算）
     watching: "recording",
   });
   check("就是那一句", p.brainSay() === SENTENCE.noConsent, p.brainSay());
-  check("指得出去哪裡勾", p.brainSay().includes("三張同意書"), p.brainSay());
+  check("指得出去哪裡勾", p.brainSay().includes("四張同意書"), p.brainSay());
   check(
     "不是「還沒填命令」那句",
     p.brainSay() !== SENTENCE.noCommand,
@@ -1489,6 +1580,227 @@ console.log("㉚ 聲音是另外一次 trusted opt-in，失敗會退回，設定
     checked: p.node("[data-persona-voice]").checked,
     disabled: p.node("[data-persona-voice]").disabled,
   });
+}
+
+console.log("㉚ᵃ Azure 五態分開畫；只有四道 native gate 齊全才說 ready");
+{
+  const cases = [
+    ["關閉", AZURE_OFF, "目前關閉"],
+    [
+      "缺區域",
+      { ...AZURE_READY, region: null, endpoint: null, ready: false },
+      "還沒選金鑰所屬區域",
+    ],
+    ["缺金鑰", { ...AZURE_READY, credential: "missing", ready: false }, "沒有金鑰"],
+    [
+      "缺第四張",
+      { ...AZURE_READY, consented: false, consent_at: null, ready: false },
+      "還沒勾第四張",
+    ],
+    ["全齊", AZURE_READY, "四個條件都齊了"],
+  ];
+  const sentences = [];
+  for (const [name, azure, words] of cases) {
+    const p = await open({ azure });
+    const sentence = p.node("[data-azure-state]").textContent;
+    sentences.push(sentence);
+    check(`${name}照實說`, sentence.includes(words), sentence);
+    check(
+      `${name}的 ready 沒有自創第五種判斷`,
+      p.node("[data-azure-state]").classList.contains("ok") === azure.ready,
+      sentence,
+    );
+  }
+  check("五態不是同一句", new Set(sentences).size === cases.length, sentences);
+
+  const compact = HTML.replace(/\s+/g, "");
+  check(
+    "控制旁明講 POST 資料、排除項、credential store 與取消語意",
+    compact.includes("只會送出當前答案正文原文") &&
+      compact.includes("不送截圖、來源連結、memoryid、整份資料庫、其他文字或角色選擇") &&
+      compact.includes("WindowsCredentialManager") &&
+      compact.includes("不寫進config.toml，也不會把已存值回傳到這一頁") &&
+      compact.includes("丟掉晚到的回應") &&
+      compact.includes("HTTPSPOST可能仍會跑到逾時"),
+    "settings.html Azure disclosure",
+  );
+}
+
+console.log("㉚ᵇ Azure 設定只接受 trusted controls，IPC 只帶 typed 三格");
+{
+  const p = await open();
+  const setWanted = () => {
+    p.node("[data-azure-enabled]").checked = true;
+    p.node("[data-azure-region]").value = "southeastasia";
+    p.node("[data-azure-voice]").value = "zh-TW-YunJheNeural";
+  };
+  setWanted();
+  await p.act("[data-azure-enabled]", { trusted: false, event: "change" });
+  check("script 假 change 沒有寫 Azure 設定", calls(p, "azure_tts_config_set").length === 0);
+  setWanted();
+  await p.act("[data-azure-enabled]", { event: "change" });
+  const writes = calls(p, "azure_tts_config_set");
+  check(
+    "真人 change 恰好送 enabled/region/voice",
+    writes.length === 1 &&
+      JSON.stringify(writes[0].arg) ===
+        JSON.stringify({
+          enabled: true,
+          region: "southeastasia",
+          voice: "zh-TW-YunJheNeural",
+        }),
+    writes,
+  );
+  check("Azure 即時設定不混進頁尾 settings payload", p.writes.length === 0, p.writes);
+  check(
+    "endpoint 只能由 typed region 投影",
+    p.node("[data-azure-endpoint]").textContent ===
+      "https://southeastasia.tts.speech.microsoft.com/cognitiveservices/v1",
+    p.node("[data-azure-endpoint]").textContent,
+  );
+}
+
+console.log("㉚ᶜ Azure key 只往 credential command 送一次，立刻離開 DOM且不混進 config");
+{
+  const secret = "0123456789abcdef0123456789abcdef";
+  let received = null;
+  const p = await open({
+    azure: { ...AZURE_READY, credential: "missing", ready: false },
+    onAzureKeySet: (arg, state, store) => {
+      received = arg;
+      const next = { ...state, credential: "present", ready: true };
+      store(next);
+      return next;
+    },
+  });
+  p.node("[data-azure-key]").value = secret;
+  await p.act("[data-azure-key]", { event: "input" });
+  await p.act("[data-azure-key-save]", { trusted: false });
+  check("假 click 沒有送 key", calls(p, "azure_tts_key_set").length === 0);
+  check("假 click 也不冒充保存成功", p.node("[data-azure-key]").value === secret);
+  await p.act("[data-azure-key-save]");
+  check(
+    "真人 click 只送 key_set 一次",
+    calls(p, "azure_tts_key_set").length === 1 && received?.key === secret,
+  );
+  check("送出當下就把 password input 清空", p.node("[data-azure-key]").value === "");
+  check(
+    "一般 config payload 從來沒有 key",
+    p.writes.every((write) => !Object.keys(write).some((key) => /azure|credential|key/i.test(key))),
+    p.writes,
+  );
+  check(
+    "後端回條只投影 credential state，不回 key",
+    !Object.hasOwn(AZURE_READY, "key") && !p.node("[data-azure-state]").textContent.includes(secret),
+    p.node("[data-azure-state]").textContent,
+  );
+}
+
+console.log("㉚ᵈ key 刪除與 consent 入口也只接受 trusted click；changed event 只重讀");
+{
+  const p = await open({ azure: AZURE_READY });
+  await p.act("[data-azure-key-delete]", { trusted: false });
+  await p.act("[data-azure-consent]", { trusted: false });
+  check("兩個假 click 都沒有 IPC", calls(p, "azure_tts_key_delete").length === 0 && calls(p, "open_onboarding").length === 0);
+  await p.act("[data-azure-key-delete]");
+  check(
+    "刪除是零參數且只做一次",
+    calls(p, "azure_tts_key_delete").length === 1 && calls(p, "azure_tts_key_delete")[0].arg === undefined,
+    calls(p, "azure_tts_key_delete"),
+  );
+
+  const q = await open();
+  await q.act("[data-azure-consent]");
+  check("真人才能開四張同意書", calls(q, "open_onboarding").length === 1);
+  const reads = calls(q, "azure_tts_read").length;
+  const mutationsBeforeEvent = [
+    "azure_tts_config_set",
+    "azure_tts_key_set",
+    "azure_tts_key_delete",
+    "open_onboarding",
+  ].map((command) => calls(q, command).length);
+  q.setAzure(AZURE_READY);
+  await q.emit("azure-tts-changed");
+  check("狀態事件只多讀一次 native truth", calls(q, "azure_tts_read").length === reads + 1, q.invokes);
+  check(
+    "事件不寫設定、不存刪 key、不開同意書",
+    [
+      "azure_tts_config_set",
+      "azure_tts_key_set",
+      "azure_tts_key_delete",
+      "open_onboarding",
+    ].every((command, index) => calls(q, command).length === mutationsBeforeEvent[index]),
+    q.invokes,
+  );
+}
+
+console.log("㉚ᵉ config 讀壞與 malformed status 都 fail closed，但 credential 刪除出口仍在");
+{
+  const unreadable = {
+    generation: 8,
+    config_readable: false,
+    enabled: null,
+    region: null,
+    voice: null,
+    endpoint: null,
+    credential: "present",
+    consented: false,
+    consent_at: null,
+    ready: false,
+    config_error: "config.toml parse error",
+  };
+  const p = await open({ azure: unreadable });
+  check("壞 config 不冒充 Azure 關閉", p.node("[data-azure-state]").textContent.includes("設定讀不出來"));
+  check("開關與 typed region 都鎖住", p.node("[data-azure-enabled]").disabled && p.node("[data-azure-region]").disabled);
+  check("credential present 仍保留刪除出口", p.node("[data-azure-key-delete]").disabled === false);
+
+  const malformed = await open({ azure: { ...AZURE_READY, ready: false } });
+  check(
+    "後端把 ready 算錯時不畫成可連線",
+    malformed.node("[data-azure-state]").textContent.includes("沒有回傳可辨識") &&
+      !malformed.node("[data-azure-state]").classList.contains("ok"),
+    malformed.node("[data-azure-state]").textContent,
+  );
+}
+
+console.log("㉚ᶠ Azure write 飛行中收到 changed event，完成後必須補讀 native truth");
+{
+  let finishWrite = null;
+  let reads = 0;
+  const staleWriteReply = {
+    ...AZURE_READY,
+    region: "southeastasia",
+    endpoint: "https://southeastasia.tts.speech.microsoft.com/cognitiveservices/v1",
+  };
+  const p = await open({
+    onAzureRead: (state) => {
+      reads += 1;
+      return state;
+    },
+    onAzureConfigSet: () =>
+      new Promise((resolveWrite) => {
+        finishWrite = () => resolveWrite(staleWriteReply);
+      }),
+  });
+  p.node("[data-azure-enabled]").checked = true;
+  p.node("[data-azure-region]").value = "southeastasia";
+  p.node("[data-azure-voice]").value = "zh-TW-HsiaoChenNeural";
+  await p.act("[data-azure-enabled]", { event: "change" });
+  check("前提：write 還在飛且控制已鎖", typeof finishWrite === "function" && p.node("[data-azure-enabled]").disabled);
+  const readsBeforeEvent = reads;
+  p.setAzure(AZURE_READY);
+  await p.emit("azure-tts-changed");
+  check("busy 時 event 先排隊，不平行讀舊狀態", reads === readsBeforeEvent, reads);
+  finishWrite();
+  await tick();
+  await tick();
+  check("write 完成後補讀恰好一次", reads === readsBeforeEvent + 1, reads);
+  check(
+    "補讀的 eastasia native truth 蓋過 stale southeastasia write reply",
+    p.node("[data-azure-endpoint]").textContent === AZURE_READY.endpoint,
+    p.node("[data-azure-endpoint]").textContent,
+  );
+  check("補讀完成後控制恢復", p.node("[data-azure-enabled]").disabled === false);
 }
 
 console.log("㉛ 能力報告的 Unknown 不會被畫成可用或不可用");

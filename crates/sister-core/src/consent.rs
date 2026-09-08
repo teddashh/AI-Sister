@@ -1,24 +1,26 @@
-//! 三張同意書。
+//! 四張同意書。
 //!
-//! SPEC §11.1 定的三件事，各自獨立、各自可以撤回：
+//! 每一件事各自獨立、各自可以撤回：
 //!
 //! 1. **本機記錄**：在這台機器的硬碟上記錄螢幕。
 //! 2. **上雲解讀**：把螢幕上的文字原文交給使用者設定的本機 CLI。
 //! 3. **畫面暫存**：保留變化幀的截圖（相對於「只留 OCR 出來的字」）。
+//! 4. **Azure 朗讀**：只在使用者點下朗讀時，把當前答案正文原文交給 Azure。
 //!
 //! ## 為什麼它會擋住東西
 //!
 //! 一張不擋任何事情的同意書不是同意書，是免責聲明。所以第一張沒簽，
 //! `sister record` 就不會開始錄——不是印個警告然後照錄。
 //!
-//! 三張的效力刻意**不一樣**，因為三件事的性質不一樣：
+//! 四張的效力刻意**不一樣**，因為四件事的性質不一樣：
 //!
 //! - 第一張是前提。沒有它就沒有這個產品，所以它是硬擋。
 //! - 第三張是程度。沒有它不代表她不能記事，只代表她**只記字不留圖**——
 //!   而那正是 SPEC 寫的「0 天 = 只留 OCR 文字」。所以它降級，不擋。
-//! - 第二張是出境閘門。沒簽，解釋層一次都不會 `spawn` 那支 CLI。而且它
+//! - 第二張和第四張是兩扇不同的出境閘門。第二張沒簽，解釋層一次都不會
+//!   `spawn` 那支 CLI；第四張沒簽，一次都不會呼叫 Azure。兩者不能互相代替，也
 //!   不能靠每個呼叫端自己記得加 `if allows_cloud()`——那一扇門要的是
-//!   [`CloudAllowed`]，只有 [`Consent::cloud_permit`] 鑄得出來。
+//!   [`CloudAllowed`]，另一扇要 [`AzureTtsAllowed`]；只有對應的 consent method 鑄得出來。
 //!
 //! ## 不確定就是沒同意
 //!
@@ -52,12 +54,16 @@ use crate::model::Millis;
 /// （為什麼拿掉去敏：記憶長期活在本機資料庫裡，而 `<PERSON_1>` 這種代號是
 /// 每次呼叫重編的，跨段對不起來——承諾表和 entities 要的正是「王小明」
 /// 這三個字能對得起來。去敏等於先拆掉 L3 的地基。）
+///
+/// alpha.109 新增的 Azure TTS 是第四張**獨立**條文，沒改舊三張的 wording，
+/// 所以不把版本升到 4。舊的 version 3 檔案沒有 `azure_tts`，serde 會讀成
+/// `None`：舊三張的簽名繼續如實生效，但絕對不會順便授權新的出境路徑。
 pub const VERSION: u32 = 3;
 
 const FILE: &str = "consent.toml";
 const WRITE_LOCK: &str = "consent.lock";
 
-/// 三張同意書。
+/// 四張同意書。
 ///
 /// 每一張存的是**何時**簽的而不是一個 `bool`：`None` 和 `false` 在型別上就分得
 /// 開，而且「我什麼時候同意的」是一個他有權利問、而我們現在答得出來的問題。
@@ -75,21 +81,26 @@ pub struct Consent {
     /// 第三張：保留變化幀截圖。
     #[serde(default)]
     pub frame_storage: Option<Millis>,
+    /// 第四張：把當前答案正文原文交給 Azure TTS。
+    #[serde(default)]
+    pub azure_tts: Option<Millis>,
 }
 
-/// 三張裡的哪一張。
+/// 四張裡的哪一張。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sheet {
     LocalRecording,
     CloudReading,
     FrameStorage,
+    AzureTts,
 }
 
 impl Sheet {
-    pub const ALL: [Sheet; 3] = [
+    pub const ALL: [Sheet; 4] = [
         Sheet::LocalRecording,
         Sheet::CloudReading,
         Sheet::FrameStorage,
+        Sheet::AzureTts,
     ];
 
     /// 命令列與設定檔裡的名字。
@@ -98,6 +109,7 @@ impl Sheet {
             Sheet::LocalRecording => "local-recording",
             Sheet::CloudReading => "cloud-reading",
             Sheet::FrameStorage => "frame-storage",
+            Sheet::AzureTts => "azure-tts",
         }
     }
 
@@ -109,6 +121,9 @@ impl Sheet {
                 "我同意把螢幕上的文字原文（OCR 抽出來的字，永不含畫面）交給我在設定裡指定的本機 CLI，由那支程式去做解讀。裡面有什麼就送什麼，不會先遮掉。"
             }
             Sheet::FrameStorage => "我同意保留變化幀的截圖，而不是只留上面的字。",
+            Sheet::AzureTts => {
+                "我同意每次按下 Azure 朗讀時，把當前答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。"
+            }
         }
     }
 
@@ -130,6 +145,7 @@ impl Sheet {
                 "沒有這一張，她一次都不會呼叫那支 CLI；解釋層保持關閉，只累積本機的畫面與文字。正在跑的 sister watch 每看一次就重讀一次同意書，撤回之後它下一次看的時候就停下來，不會再問。"
             }
             Sheet::FrameStorage => "沒有這一張，她只記螢幕上的字，不留截圖。",
+            Sheet::AzureTts => "沒有這一張，她一次都不會呼叫 Azure 語音服務；本機朗讀不受影響。",
         }
     }
 }
@@ -163,6 +179,7 @@ impl Consent {
             Sheet::LocalRecording => self.local_recording,
             Sheet::CloudReading => self.cloud_reading,
             Sheet::FrameStorage => self.frame_storage,
+            Sheet::AzureTts => self.azure_tts,
         }
     }
 
@@ -172,6 +189,7 @@ impl Consent {
             Sheet::LocalRecording => &mut self.local_recording,
             Sheet::CloudReading => &mut self.cloud_reading,
             Sheet::FrameStorage => &mut self.frame_storage,
+            Sheet::AzureTts => &mut self.azure_tts,
         };
         slot.get_or_insert(ts);
         self.version = VERSION;
@@ -182,6 +200,7 @@ impl Consent {
             Sheet::LocalRecording => self.local_recording = None,
             Sheet::CloudReading => self.cloud_reading = None,
             Sheet::FrameStorage => self.frame_storage = None,
+            Sheet::AzureTts => self.azure_tts = None,
         }
     }
 
@@ -217,6 +236,18 @@ impl Consent {
     /// 就 spawn，編不過。
     pub fn cloud_permit(&self) -> Option<CloudAllowed> {
         self.allows_cloud().then_some(CloudAllowed(()))
+    }
+
+    /// 當前條文下，是否已獨立同意把當前答案正文交給 Azure TTS。
+    ///
+    /// 這個 bool 只給顯示；真正出境邊界要 [`AzureTtsAllowed`]。
+    pub fn allows_azure_tts(&self) -> bool {
+        self.current() && self.azure_tts.is_some()
+    }
+
+    /// 交出 Azure TTS 的獨立出境憑證。第二張 `cloud-reading` 絕不能鑄出它。
+    fn azure_tts_permit(&self) -> Option<AzureTtsAllowed> {
+        self.allows_azure_tts().then_some(AzureTtsAllowed(()))
     }
 
     /// 這份設定跑起來，硬碟上**真的**會多出截圖嗎。
@@ -263,11 +294,20 @@ impl Consent {
 #[derive(Debug, Clone, Copy)]
 pub struct CloudAllowed(());
 
+/// 只有 [`begin_azure_tts_admission`] 在 shared consent transaction 裡鑄得出來的
+/// Azure TTS 出境 marker；它只能從 [`AzureTtsAdmissionGuard::permit`] 借用，不能
+/// 複製到 guard 外重放。
+///
+/// 它和 [`CloudAllowed`] 是不同型別：同意把 OCR 原文交給本機 CLI，
+/// 不等於同意把當前答案送到 Microsoft Azure。
+#[derive(Debug)]
+pub struct AzureTtsAllowed(());
+
 pub fn path(data_dir: &Path) -> PathBuf {
     data_dir.join(FILE)
 }
 
-/// 讀回三張同意書。**任何讀不出來的情況都回「三張都沒簽」。**
+/// 讀回四張同意書。**任何讀不出來的情況都回「四張都沒簽」。**
 ///
 /// 和 [`crate::pause::is_paused`] 一樣不回 `Result`：見模組開頭。
 pub fn load(data_dir: &Path) -> Consent {
@@ -325,6 +365,101 @@ impl RecordingStartGuard {
     }
 }
 
+/// Azure TTS 建立 outbound admission 前對第四張同意書的完整判決。
+///
+/// 不能把 `NotAllowed` 和 `Unknown` 壓成同一個 `None`：前者是在 shared transaction
+/// 裡確定第四張沒有生效，後者則是鎖檔或 consent handle 根本無法安全判讀。兩種都
+/// 不得呼叫 Azure，但給人的錯誤與修復方向不同。只有 [`Allowed`](Self::Allowed)
+/// 會交出一份必須活到 caller 完成 request admission 的 shared guard。
+#[derive(Debug)]
+pub enum AzureTtsAdmissionConsent {
+    /// 在 shared `consent.lock` 裡重讀到這一版有效的第四張同意書。
+    Allowed(AzureTtsAdmissionGuard),
+    /// 同意書確定不存在、內容無效，或第四張對目前條文不生效。
+    NotAllowed(Consent),
+    /// 鎖或同意書無法安全開啟／驗證／讀取；不確定時不建立 outbound admission。
+    Unknown(anyhow::Error),
+}
+
+/// 活著就持有 `consent.lock` 的 shared lock，並固定這次 Azure admission 的同意快照。
+///
+/// Caller 至少要先完成自己那一層的 generation／single-flight admission 才能 drop；
+/// desktop 的 Azure transport 會更嚴格地把它保留到 blocking POST 結束。這樣 CLI 或
+/// 另一扇 desktop 正在做的 consent transaction 不是完整排在 admission 前，就是等
+/// 既有 request 結束才成功，不能讓鎖外的舊 `load()` 越過一份已回覆成功的撤回。
+#[derive(Debug)]
+pub struct AzureTtsAdmissionGuard {
+    _file: File,
+    // Windows 藉由不 share write/delete 固定這份已驗證 inode；Unix 則至少固定這次
+    // 鎖內讀到的 opened handle，和 Recorder start 使用同一條安全路徑。
+    _consent_file: Option<File>,
+    data_dir: PathBuf,
+    consent: Consent,
+    signed_at: Millis,
+    permit: AzureTtsAllowed,
+}
+
+impl AzureTtsAdmissionGuard {
+    /// Shared transaction 內固定下來的完整同意快照。
+    pub fn consent(&self) -> &Consent {
+        &self.consent
+    }
+
+    /// 第四張這次生效的原始簽署時間；不是 admission 當下重新捏出的時間。
+    pub const fn signed_at(&self) -> Millis {
+        self.signed_at
+    }
+
+    /// 這份 guard 在 shared lock 內鑄出的 typed permit。
+    ///
+    /// 借用的 marker 不能活得比 shared-lock guard 久；真正 outbound helper 會
+    /// by-value 吃掉整份 guard，而不是把 marker 複製到鎖外重放。
+    pub const fn permit(&self) -> &AzureTtsAllowed {
+        &self.permit
+    }
+
+    /// 防止一份 guard 被誤接到另一個 data dir 的 request coordinator。
+    pub fn belongs_to(&self, data_dir: &Path) -> bool {
+        self.data_dir == data_dir
+    }
+}
+
+/// Blocking 取得 Azure TTS outbound admission 的 shared consent transaction。
+///
+/// 若 writer 正在 commit，這裡會等它完成後才在同一把鎖內重讀；沒有 `Busy` 分支，
+/// 因為 desktop 會在 blocking worker 裡完成這一步，而不是在 UI thread 排隊。
+pub fn begin_azure_tts_admission(data_dir: &Path) -> AzureTtsAdmissionConsent {
+    let file = match open_consent_lock(data_dir) {
+        Ok(file) => file,
+        Err(error) => return AzureTtsAdmissionConsent::Unknown(error),
+    };
+    if let Err(error) = FileExt::lock_shared(&file) {
+        return AzureTtsAdmissionConsent::Unknown(anyhow::Error::from(error).context(format!(
+            "取得 Azure TTS 同意書 shared admission lock {} 失敗",
+            data_dir.join(WRITE_LOCK).display()
+        )));
+    }
+
+    let (consent, consent_file) = match load_for_shared_consent_admission(data_dir) {
+        Ok(loaded) => loaded,
+        Err(error) => return AzureTtsAdmissionConsent::Unknown(error),
+    };
+    let Some(permit) = consent.azure_tts_permit() else {
+        return AzureTtsAdmissionConsent::NotAllowed(consent);
+    };
+    let signed_at = consent
+        .azure_tts
+        .expect("an Azure TTS permit always has a fourth-sheet timestamp");
+    AzureTtsAdmissionConsent::Allowed(AzureTtsAdmissionGuard {
+        _file: file,
+        _consent_file: consent_file,
+        data_dir: data_dir.to_path_buf(),
+        consent,
+        signed_at,
+        permit,
+    })
+}
+
 /// Blocking 取得 recorder start 的 shared consent transaction。
 ///
 /// 給真人顯式 `sister record` 使用：若 writer 正在 commit，等它完成再在鎖內重讀，
@@ -377,7 +512,7 @@ fn recording_start_consent(data_dir: &Path, mode: StartLockMode) -> RecordingSta
         },
     }
 
-    let (consent, consent_file) = match load_for_recording_start(data_dir) {
+    let (consent, consent_file) = match load_for_shared_consent_admission(data_dir) {
         Ok(loaded) => loaded,
         Err(error) => return RecordingStartConsent::Unknown(error),
     };
@@ -394,7 +529,7 @@ fn recording_start_consent(data_dir: &Path, mode: StartLockMode) -> RecordingSta
 
 /// 在 shared transaction 裡從 opened handle 讀同意書。Missing／invalid 是確定的
 /// `NotAllowed`；路徑跟到 symlink／reparse 或 I/O 失敗則是 `Unknown`。
-fn load_for_recording_start(data_dir: &Path) -> Result<(Consent, Option<File>)> {
+fn load_for_shared_consent_admission(data_dir: &Path) -> Result<(Consent, Option<File>)> {
     let consent_path = path(data_dir);
     let mut options = OpenOptions::new();
     options.read(true);
@@ -668,6 +803,59 @@ mod tests {
         assert!(c.cloud_permit().is_none());
     }
 
+    #[test]
+    fn azure_tts_has_its_own_fail_closed_permit() {
+        let mut cli_only = Consent::default();
+        cli_only.grant(Sheet::CloudReading, 1);
+        assert!(cli_only.cloud_permit().is_some());
+        assert!(cli_only.azure_tts_permit().is_none());
+        assert!(!cli_only.allows_azure_tts());
+
+        let mut azure_only = Consent::default();
+        azure_only.grant(Sheet::AzureTts, 2);
+        assert!(azure_only.azure_tts_permit().is_some());
+        assert!(azure_only.allows_azure_tts());
+        assert!(azure_only.cloud_permit().is_none());
+        assert!(!azure_only.allows_cloud());
+
+        azure_only.version = VERSION + 1;
+        assert!(azure_only.azure_tts_permit().is_none());
+        assert!(!azure_only.allows_azure_tts());
+    }
+
+    #[test]
+    fn a_version_three_consent_from_before_azure_keeps_old_grants_but_not_azure() {
+        let old: Consent = toml::from_str(
+            "version = 3\nlocal_recording = 11\ncloud_reading = 12\nframe_storage = 13\n",
+        )
+        .expect("pre-Azure version 3 consent");
+
+        assert_eq!(old.version, VERSION);
+        assert_eq!(old.local_recording, Some(11));
+        assert_eq!(old.cloud_reading, Some(12));
+        assert_eq!(old.frame_storage, Some(13));
+        assert_eq!(old.azure_tts, None);
+        assert!(old.allows_recording());
+        assert!(old.allows_cloud());
+        assert!(old.allows_frames());
+        assert!(old.azure_tts_permit().is_none());
+    }
+
+    #[test]
+    fn azure_wording_names_exactly_what_leaves_and_what_does_not() {
+        let wording = Sheet::AzureTts.wording();
+        for sent in ["當前答案正文原文", "姓名", "電話", "金額", "不會先遮罩"] {
+            assert!(wording.contains(sent), "missing {sent}: {wording}");
+        }
+        for not_sent in ["截圖", "來源連結", "memory id", "整份資料庫", "其他文字"] {
+            assert!(wording.contains(not_sent), "missing {not_sent}: {wording}");
+        }
+
+        let consequence = Sheet::AzureTts.without();
+        assert!(consequence.contains("一次都不會呼叫 Azure"));
+        assert!(consequence.contains("本機朗讀不受影響"));
+    }
+
     /// 全新的機器上，她不准開始錄。
     ///
     /// 這是整個模組的理由。反過來那個版本——「還沒問過，那就先錄著」——
@@ -744,8 +932,10 @@ mod tests {
         let mut c = Consent::default();
         c.grant(Sheet::LocalRecording, 42);
         c.grant(Sheet::FrameStorage, 43);
+        c.grant(Sheet::AzureTts, 44);
         save(&tmp.0, &c).expect("save");
         assert_eq!(load(&tmp.0), c);
+        assert!(load(&tmp.0).azure_tts_permit().is_some());
     }
 
     #[test]
@@ -779,6 +969,106 @@ mod tests {
         assert!(matches!(
             try_begin_recording_start(&tmp.0),
             RecordingStartConsent::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn azure_tts_admission_has_three_non_conflated_outcomes_and_a_bound_permit() {
+        let tmp = Tmp::new("azure-admission-outcomes");
+        match begin_azure_tts_admission(&tmp.0) {
+            AzureTtsAdmissionConsent::NotAllowed(snapshot) => {
+                assert_eq!(snapshot, Consent::default());
+                assert!(!snapshot.allows_azure_tts());
+            }
+            other => panic!("missing fourth sheet must be NotAllowed, got {other:?}"),
+        }
+
+        let mut signed = Consent::default();
+        signed.grant(Sheet::CloudReading, 41);
+        signed.grant(Sheet::AzureTts, 42);
+        save(&tmp.0, &signed).expect("signed Azure consent");
+        let allowed = match begin_azure_tts_admission(&tmp.0) {
+            AzureTtsAdmissionConsent::Allowed(guard) => guard,
+            other => panic!("effective fourth sheet should admit Azure TTS, got {other:?}"),
+        };
+        assert_eq!(allowed.consent(), &signed);
+        assert_eq!(allowed.signed_at(), 42);
+        assert!(allowed.belongs_to(&tmp.0));
+        let _typed_permit: &AzureTtsAllowed = allowed.permit();
+        drop(allowed);
+
+        std::fs::remove_file(tmp.0.join(WRITE_LOCK)).expect("remove unlocked lock file");
+        std::fs::create_dir(tmp.0.join(WRITE_LOCK)).expect("directory-shaped lock");
+        assert!(matches!(
+            begin_azure_tts_admission(&tmp.0),
+            AzureTtsAdmissionConsent::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn invalid_or_stale_azure_consent_is_not_unknown_and_never_mints_a_guard() {
+        let tmp = Tmp::new("invalid-azure-admission");
+        std::fs::write(path(&tmp.0), b"not = [valid toml").expect("invalid consent fixture");
+        match begin_azure_tts_admission(&tmp.0) {
+            AzureTtsAdmissionConsent::NotAllowed(snapshot) => {
+                assert_eq!(snapshot, Consent::default());
+            }
+            other => panic!("invalid consent must fail closed as NotAllowed, got {other:?}"),
+        }
+
+        let mut stale = Consent::default();
+        stale.grant(Sheet::AzureTts, 77);
+        stale.version = VERSION + 1;
+        save(&tmp.0, &stale).expect("stale fourth-sheet fixture");
+        match begin_azure_tts_admission(&tmp.0) {
+            AzureTtsAdmissionConsent::NotAllowed(snapshot) => {
+                assert_eq!(
+                    snapshot.azure_tts,
+                    Some(77),
+                    "signed history remains visible"
+                );
+                assert!(
+                    !snapshot.allows_azure_tts(),
+                    "stale wording cannot authorize"
+                );
+            }
+            other => panic!("stale fourth sheet must be NotAllowed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn azure_admission_guard_holds_the_cross_process_shared_lock_until_drop() {
+        let tmp = Tmp::new("azure-admission-lock");
+        let mut signed = Consent::default();
+        signed.grant(Sheet::AzureTts, 91);
+        save(&tmp.0, &signed).expect("signed Azure consent");
+        let guard = match begin_azure_tts_admission(&tmp.0) {
+            AzureTtsAdmissionConsent::Allowed(guard) => guard,
+            other => panic!("signed fourth sheet should produce a guard, got {other:?}"),
+        };
+
+        let writer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.0.join(WRITE_LOCK))
+            .expect("independent writer handle");
+        assert!(
+            matches!(FileExt::try_lock(&writer), Err(TryLockError::WouldBlock)),
+            "a consent writer must not cross a live Azure admission guard"
+        );
+
+        drop(guard);
+        FileExt::try_lock(&writer).expect("dropping the admission guard releases the writer");
+        drop(writer);
+
+        mutate(&tmp.0, |consent| {
+            consent.revoke(Sheet::AzureTts);
+            Ok(())
+        })
+        .expect("revoke after admission releases its guard");
+        assert!(matches!(
+            begin_azure_tts_admission(&tmp.0),
+            AzureTtsAdmissionConsent::NotAllowed(_)
         ));
     }
 
@@ -898,6 +1188,10 @@ mod tests {
             try_begin_recording_start(&consent_tmp.0),
             RecordingStartConsent::Unknown(_)
         ));
+        assert!(matches!(
+            begin_azure_tts_admission(&consent_tmp.0),
+            AzureTtsAdmissionConsent::Unknown(_)
+        ));
         assert_eq!(
             std::fs::read_to_string(&signed_target).expect("target survives"),
             toml::to_string(&signed).expect("serialize again")
@@ -955,6 +1249,10 @@ mod tests {
         assert_eq!(
             Sheet::from_str("  Frame-Storage ").expect("case and space"),
             Sheet::FrameStorage
+        );
+        assert_eq!(
+            Sheet::from_str("azure_tts").expect("Azure underscore"),
+            Sheet::AzureTts
         );
         assert!(Sheet::from_str("everything").is_err());
     }

@@ -11,21 +11,24 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 
 ## 三件事
 
-**一、畫面不離開這台機器；內建網路能力只有列得出名字的一條。**
+**一、畫面不離開這台機器；內建網路能力只有列得出名字的兩條。**
 沒有帳號、沒有遙測、沒有崩潰回報。`sister.exe` 與 recorder／core／capture／brain／
-hands 沒有 HTTP client 或監聽埠；WebView 也只走 Tauri IPC，CSP 不開 CDN。唯一的
-內建 outbound 能力是 desktop 在你看完揭露、明確按下後，替 Persona 下載一包固定
-公開素材。這不是一句「大致上本機」：`crates/sister-assets` 預設不開 `download`
-feature，只有 desktop 明確啟用；CI 逐棵相依樹與 renderer/CSP 檢查這條邊界
+hands 沒有 HTTP client 或監聽埠；WebView 也只走 Tauri IPC，CSP 不開遠端來源。desktop
+只有兩條內建 outbound：你看完揭露、明確按下後取得 Persona 固定公開素材的 GET；
+以及 alpha.109 預設關閉、簽獨立同意並按 Azure 朗讀後，只送當前答案正文的 TTS POST。
+這不是一句「大致上本機」：`crates/sister-assets` 預設不開 `download`，`crates/sister-tts`
+預設不開 `azure`，只有 desktop 明確啟用；CI 逐棵相依樹與 renderer/CSP 檢查這兩條邊界
 （`scripts/check-no-network.sh`），不是靠我們記得。
 
-螢幕上的**文字**原文（不是畫面）只在你簽了第二張同意書、而且在設定裡寫了
-`[brain] command` 之後，才會交給那支你自己已經在跑的 CLI。沒簽、沒設定，
-一次都不 spawn。外送紀錄只記結構和計數，不抄原文。
+供 L2/L3 解讀的螢幕 **OCR 文字原文**（不是畫面）只在你簽了第二張同意書、而且
+在設定裡寫了 `[brain] command` 之後，才會交給那支你自己已經在跑的 CLI。沒簽、
+沒設定，一次都不 spawn。外送紀錄只記結構和計數，不抄原文。Azure TTS 不取得這份
+OCR corpus；它只取得第四張同意與當下 click 所指的答案正文，但正文自己可能引用或
+逐字重複記憶內容，所以不能把「只送答案」誤寫成「不會含螢幕上的字」。
 
 這條邊界已經擋掉過一個功能：OCR 本來要用 PP-OCRv5，但它的模型下載會把一個
 HTTP client 連進長時間運作的 recorder。最後改用系統內建的 OCR，順帶少了 35MB；
-Persona 的窄下載能力不能拿來替 OCR、brain 或 hands 開例外。
+Persona 與 Azure TTS 的窄能力都不能拿來替 OCR、brain 或 hands 開例外。
 
 **二、暴力要暴在保存，不要暴在生成。**
 她盡可能忠實地把發生過的事記下來（那是不可逆的——沒記到就永遠沒有了），
@@ -39,7 +42,7 @@ Persona 的窄下載能力不能拿來替 OCR、brain 或 hands 開例外。
 
 ---
 
-## Persona 素材的唯一內建網路路徑
+## Persona 素材的固定 GET
 
 四姊妹與 13 位閨密的 17 張角色圖都隨程式提供，不下載也能完整使用；沒有 Neutral
 或字母 fallback。S1 的記錄、搜尋、證據、刪除與匯出一項都不少。開程式、開設定、
@@ -91,19 +94,59 @@ authorization digest，以及最後一次 blocking remove 已結束處理的 set
 撤回活動。它們不進 memory export，也不由 `forget`／`prune` 刪除，因為那會讓另一個
 行程的舊下載在撤回後重新被啟用。
 
-這個當下下載按鈕不是第四張持久同意書，更不藏在下面三張裡；每一個新的 GET 都要
-重新揭露、重新按。角色台詞只在你當下點角色時出聲：四姊妹有已驗證 fixed voice 時
+這個當下下載按鈕不是持久同意書，也不能借用下面第四張 `azure-tts`；每一個新的 GET
+都要重新揭露、重新按。角色台詞只在你當下點角色時出聲：四姊妹有已驗證 fixed voice 時
 優先播放，否則只用 WebView 明確標成 `localService` 的中文系統 voice。答案也必須由你
-另按「用本機聲音朗讀」，且仍只走 localService；沒有本機中文 voice 就靜音，不改用
-remote voice。pack 裡四段會說「今天滿有活力」的聲音不在 click allowlist，因為單純
+另按「用本機聲音朗讀」，那顆按鈕仍只走 localService；沒有本機中文 voice 就靜音，
+不自動改用 Azure。pack 裡四段會說「今天滿有活力」的聲音不在 click allowlist，因為單純
 點角色沒有量到那件事。
 
 ---
 
-## 三張同意書
+## Azure 可選 TTS 的固定 POST
 
-她開始看之前，你要親手打開三個開關。它們**各自獨立、各自隨時撤得掉**，而且
-**沒有一顆「全部同意」的按鈕**——一顆按下去打開三張的按鈕，會讓其中兩張在你
+alpha.109 的 Azure 繁中朗讀是**預設關閉**的第二條內建 outbound，不是本機語音的
+fallback。找不到 `localService` 中文 voice 時仍靜音；Azure 失敗時也不自動改用本機或
+別的雲端。只有這五項同時成立才可請求：設定明確啟用、region／voice 是 typed allowlist、
+Windows Credential Manager 找得到 subscription key、第四張 `azure-tts` 同意有效，
+而且你剛剛親手按了 Azure 朗讀。開 app、開設定、顯示答案、選角色或本機播放都不會
+自動觸發它。
+
+region 嚴格只有 `eastasia`、`southeastasia`、`japaneast`；native Rust 只可對所選
+區域的 `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` 做一個 HTTPS
+`POST`，不跟 redirect、不走 proxy、不 retry。renderer 不能指定 URL，WebView CSP 也
+沒有 Azure host。每次 POST 的唯一使用者內容是**當前答案正文原文**，可能含姓名、
+電話與金額而且不先遮罩；不送截圖、來源連結／出處 chip、memory id、整份資料庫或
+其他文字。它不授權 OCR、歷史答案、問題、Persona 台詞或其他 UI 文字出境。
+
+subscription key 存在目前 Windows 使用者的 Credential Manager，固定 target 是
+`ted-h/AI-Sister/AzureSpeech/v1`；不寫進 `config.toml`、log、DB 或 memory export。
+你輸入時 key 會短暫存在 password 欄位、renderer 記憶體與 Tauri IPC；送到 native 後
+欄位立即清空。之後設定頁只取得 Present／Missing／Unreadable／Unsupported 狀態，不能
+把已存 key 讀回頁面。這保護的是 app 不把 secret 當普通設定；同一 Windows 使用者權限的惡意程式
+仍可能讀取該使用者的 Credential Manager，這不是 OS account compromise 的防線。
+
+程式沒有文字或 MP3 的磁碟 cache，也不保留可重播的記憶體 cache；每次按下都可能產生
+一個新 POST。停止、換題或新播放會立刻讓舊 playback generation 失效，晚回來的 MP3
+不播放、不快取；但已開始的 blocking native POST **不能中途 abort**，仍可能跑到
+45 秒 timeout，而且 Azure 可能已把它計入用量。介面只能說「不再播放」，不能說網路
+請求已經取消。
+
+第四張的送出與撤回會在同一把跨行程鎖裡排序，而且已入場的 request 會把 shared lock
+保留到 transport 結束。因此撤回若剛好碰到正在送的 POST，CLI／設定頁可能等到最多
+45 秒 timeout 才回覆；一旦撤回回覆成功，較早讀到的同意快照不可能在那之後才開始送。
+
+Microsoft 目前公開列出的 Azure Speech F0 neural TTS 額度是每月 0.5 million
+characters；免費與否、可用額度及費用仍以你的 Azure 帳號、resource、方案與 Microsoft
+當下規則為準，AI-Sister 不提供或保證這份額度。見
+[Azure Speech 定價](https://azure.microsoft.com/en-us/pricing/details/speech/)。
+
+---
+
+## 四張同意書
+
+她開始看或把答案正文交給 Azure 之前，你要分別決定四個開關。它們**各自獨立、各自
+隨時撤得掉**，而且**沒有一顆「全部同意」的按鈕**——一顆按下去打開四張的按鈕，會讓其他張在你
 沒有分別想過的情況下被打開。
 
 | 這一張 | 沒簽會怎樣 |
@@ -111,6 +154,7 @@ remote voice。pack 裡四段會說「今天滿有活力」的聲音不在 click
 | 在我的硬碟上記錄我的螢幕 | `sister record` 拒絕啟動 |
 | 把螢幕上的文字原文（OCR 抽出來的字，永不含畫面）交給你設定的本機 CLI | 解釋層一次都不會呼叫那支 CLI |
 | 保留變化幀的截圖，而不是只留上面的字 | 她照樣記，但只記螢幕上的字 |
+| 每次按 Azure 朗讀時，把當前答案正文原文交給所選區域的 Microsoft Azure 語音服務 | 一次都不呼叫 Azure；本機朗讀不受影響 |
 
 - **第一張是硬閘門。** 沒簽的時候 `sister record` 不會開始錄，也不會「印個警告
   然後照錄」。它把該打的那行指令印出來，然後結束
@@ -119,10 +163,15 @@ remote voice。pack 裡四段會說「今天滿有活力」的聲音不在 click
 - **第二張是出境閘門。** 沒簽，解釋層一次都不會 spawn 那支 CLI。而且這扇門
   不是每個呼叫端自己寫的 `if`：送出函式要一個只有檢查同意書才鑄得出來的憑證
   型別。條文改版後舊簽名失效，要重簽。
+- **第四張是另一個出境閘門。** 它只鑄出 Azure TTS permit，不能借第二張、Persona
+  下載按鈕或 `voice_enabled` 代替。條文明講正文可能含姓名、電話與金額且不遮罩，
+  也明講不送截圖、來源連結、memory id、DB 或其他文字；沒簽一次都不 POST。
 - **讀不到就當作沒簽。** 檔案不見、權限不足、TOML 壞掉、版本對不上，一律視為
-  三張都沒簽——和暫停旗標同一條規則：不確定的時候往安全的那邊倒
+  四張都沒簽——和暫停旗標同一條規則：不確定的時候往安全的那邊倒
 - **條文改版，舊簽名一起失效。** 你當初按下去的是那一句話，不是那個欄位的名字。
-  改版之後三張一起要求重新確認，`sister doctor` 會直說「條文改版，舊簽名失效」
+  改版之後四張一起要求重新確認，`sister doctor` 會直說「條文改版，舊簽名失效」。
+  alpha.109 第一次讀到沒有 Azure 欄位的同版本舊檔時，原三張簽名保留，第四張明確
+  遷移成未簽；新增一張不能倒推成使用者以前已同意
 - **「隨時」是真的隨時，不是「下次重開」。** 正在跑的 `sister record` 每 5 秒
   重讀一次同意書；撤回第一張後最多再錄 5 秒加一拍，`capture.min_interval_ms`
   超過 5 秒時，主要會等那一拍，然後停止整場錄製（不是暫停——暫停是「先別
@@ -283,7 +332,8 @@ uninstall 的人工通過證據；那份 checklist 目前仍未勾。
   解參考的程式碼，不然它就只是一個永遠是綠的檢查。
 - 麥克風、攝影機、系統音訊或使用者音訊。Persona pack 的預錄固定台詞是公開素材，
   不是從這台機器錄來的聲音
-- 網路流量、DNS 或封包內容（程式不擷取這些；Persona 單次 GET 本身仍會發生）
+- 網路流量、DNS 或封包內容（程式不擷取這些；明確發起的 Persona GET 與 Azure TTS
+  POST 本身仍會發生）
 - 檔案內容（除非它顯示在螢幕上）
 - 位置、聯絡人、行事曆
 
@@ -315,9 +365,9 @@ staged bytes／frame，不讓它進 dedup、OCR、DB 或 PNG。這是目前能�
 
 ```bash
 sister stats     # 她記了多少、佔多少空間
-sister doctor    # 所有規則、目前失效的保護、schema 版本、三張同意書
+sister doctor    # 所有規則、目前失效的保護、schema 版本、四張同意書
 sister query X   # 查任何東西，每筆都附出處
-sister consent   # 三張同意書現在的狀態；--grant / --revoke 改它
+sister consent   # 四張同意書現在的狀態；--grant / --revoke 改它
 ```
 
 - 設定檔是純文字 TOML，隨你改。**改完 5 秒內生效**，不用重開 `sister record`
@@ -495,8 +545,8 @@ Windows 上用的是系統內建的 OCR（`Windows.Media.Ocr`）。它是本機�
 稽核範圍內。
 
 換來的是：不需要下載模型、不需要外掛 DLL、recorder 執行檔仍然只有一個檔案，
-而且它的相依樹**沒有任何套件把 HTTP client 帶進來**。desktop 的 Persona transport
-是另一個明確、固定且使用者觸發的能力，不屬於 OCR。
+而且它的相依樹**沒有任何套件把 HTTP client 帶進來**。desktop 的 Persona GET 與
+Azure TTS POST 是另外兩個明確、固定且使用者觸發的能力，都不屬於 OCR。
 
 代價是她**只讀得懂你裝了語言包的那些語言**。沒裝中文的話，她會安靜地退回
 英文，然後把滿螢幕的中文讀成空白。`sister doctor` 會直接告訴你實際用的是
@@ -623,8 +673,9 @@ sister --data-dir ~/sister-backup query 電話
 檔通常比原檔小——那不是漏了東西。目的地已經有 `sister.db` 就拒絕，不覆蓋：
 一次打錯路徑的匯出不該蓋掉上一份備份。
 
-沒帶走的是 `consent.toml`（三張同意書的簽名）和 `config.toml`（設定）。那兩份
-是這台機器的設定，不是你的記憶。
+沒帶走的是 `consent.toml`（四張同意書的簽名）和 `config.toml`（設定）。Windows
+Credential Manager 裡的 Azure key 也不在匯出裡。這些是這台機器的授權／設定，
+不是你的記憶。
 
 **這是把整份記憶搬出去的地方，所以講清楚：匯出檔沒有加密。**
 它和原本那份一樣，靠的是這顆硬碟的加密（上面那條）。換句話說它放到哪裡，就
@@ -660,7 +711,7 @@ sister replay import <匯出時印出的 Draft 路徑> --dry-run
 
 這兩個 replay 指令本身不會連網，也不會把資料送給模型商。人工審查後自己把
 Reviewed 檔案複製到別處，和上面的完整備份一樣，是使用者明確做的檔案動作；
-它不會悄悄多開一條網路路徑，也不改寫三張同意書的效力。
+它不會悄悄多開一條網路路徑，也不改寫四張同意書的效力。
 
 同一份 corpus 可以在本機跑評測：
 
@@ -740,10 +791,11 @@ cargo test -p sister-capture --test privacy
 才能在未來多一個欄位、多一張表、多一個索引時仍然抓得到洩漏。
 
 第二條檢查不是再宣稱整個 repo 沒有 HTTP client；它要逐棵證明 root workspace 在
-預設 feature 下仍無 download、recorder／core／capture／brain／hands 沒有 client，
-只有 desktop 能經 `sister-assets/download` 抵達固定 Persona transport。它同時繼續
+預設 feature 下仍無 Persona download 或 Azure transport、recorder／core／capture／
+brain／hands 沒有 client，只有 desktop 能經 `sister-assets/download` 抵達固定 Persona
+GET、經 `sister-tts/azure` 抵達三個 fixed Azure POST。它同時繼續
 拒絕我們自己的 Rust 原始碼直接開任意 TCP／UDP／Unix socket、renderer 的
-`fetch`／WebSocket／遠端資源，以及任何把 CDN 放進 WebView CSP 的改動。Linux X11
+`fetch`／WebSocket／遠端資源，以及任何把 CDN 或 Azure 放進 WebView CSP 的改動。Linux X11
 preflight 使用 pinned `x11rb` dependency 連本機 X server 的 Unix socket；它會在連線前
 拒絕 TCP／SSH `DISPLAY`，不是對外內容路徑，也不是這個 source-level socket gate
 掃描得到的東西。branch CI 用本機 transport/cache 測試守住 0／1 request、固定

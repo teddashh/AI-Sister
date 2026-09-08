@@ -28,6 +28,16 @@ const el = {
   personaRemove: document.querySelector("[data-persona-remove]"),
   personaVoice: document.querySelector("[data-persona-voice]"),
   personaVoiceState: document.querySelector("[data-persona-voice-state]"),
+  azureSection: document.querySelector("[data-azure-section]"),
+  azureEnabled: document.querySelector("[data-azure-enabled]"),
+  azureRegion: document.querySelector("[data-azure-region]"),
+  azureVoice: document.querySelector("[data-azure-voice]"),
+  azureEndpoint: document.querySelector("[data-azure-endpoint]"),
+  azureKey: document.querySelector("[data-azure-key]"),
+  azureKeySave: document.querySelector("[data-azure-key-save]"),
+  azureKeyDelete: document.querySelector("[data-azure-key-delete]"),
+  azureConsent: document.querySelector("[data-azure-consent]"),
+  azureState: document.querySelector("[data-azure-state]"),
   loginStartup: document.querySelector("[data-login-startup]"),
   loginStartupSay: document.querySelector("[data-login-startup-say]"),
   apps: document.querySelector("[data-apps]"),
@@ -1080,6 +1090,298 @@ function isTrustedUserAction(event) {
   return event?.isTrusted === true;
 }
 
+// ---------- Azure 雲端朗讀 ----------
+
+const AZURE_ENDPOINTS = Object.freeze({
+  eastasia: "https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1",
+  southeastasia: "https://southeastasia.tts.speech.microsoft.com/cognitiveservices/v1",
+  japaneast: "https://japaneast.tts.speech.microsoft.com/cognitiveservices/v1",
+});
+const AZURE_VOICES = Object.freeze([
+  "zh-TW-HsiaoChenNeural",
+  "zh-TW-HsiaoYuNeural",
+  "zh-TW-YunJheNeural",
+]);
+const AZURE_CREDENTIAL_STATES = Object.freeze([
+  "present",
+  "missing",
+  "unreadable",
+  "unsupported",
+]);
+
+let azureTtsStatus = null;
+let azureTtsBusy = false;
+let azureTtsRevision = 0;
+let azureTtsRefreshQueued = false;
+
+function azureTtsView(raw) {
+  if (
+    typeof raw !== "object" ||
+    raw === null ||
+    !Number.isSafeInteger(raw.generation) ||
+    raw.generation < 0 ||
+    typeof raw.config_readable !== "boolean" ||
+    !AZURE_CREDENTIAL_STATES.includes(raw.credential) ||
+    (raw.consented !== null && typeof raw.consented !== "boolean") ||
+    (raw.consent_at !== null &&
+      (!Number.isSafeInteger(raw.consent_at) || raw.consent_at < 0)) ||
+    (raw.consented === true ? raw.consent_at === null : raw.consent_at !== null) ||
+    typeof raw.ready !== "boolean" ||
+    (raw.config_error !== null && typeof raw.config_error !== "string")
+  ) {
+    return null;
+  }
+  if (!raw.config_readable) {
+    if (
+      raw.enabled !== null ||
+      raw.region !== null ||
+      raw.voice !== null ||
+      raw.endpoint !== null ||
+      raw.ready !== false ||
+      typeof raw.config_error !== "string" ||
+      raw.config_error === ""
+    ) {
+      return null;
+    }
+    return raw;
+  }
+  if (
+    typeof raw.enabled !== "boolean" ||
+    (raw.region !== null && !Object.hasOwn(AZURE_ENDPOINTS, raw.region)) ||
+    !AZURE_VOICES.includes(raw.voice) ||
+    raw.endpoint !== (raw.region === null ? null : AZURE_ENDPOINTS[raw.region]) ||
+    raw.config_error !== null
+  ) {
+    return null;
+  }
+  const actuallyReady =
+    raw.enabled &&
+    raw.region !== null &&
+    raw.credential === "present" &&
+    raw.consented === true &&
+    raw.consent_at !== null;
+  return raw.ready === actuallyReady ? raw : null;
+}
+
+function paintAzureTts(raw, actionError = "") {
+  if (!el.azureSection || !el.azureState) return;
+  const parsed = azureTtsView(raw);
+  azureTtsStatus = parsed;
+  const configUsable = parsed?.config_readable === true;
+  const credentialUsable =
+    parsed !== null && parsed.credential !== "unsupported";
+
+  if (el.azureEnabled) {
+    el.azureEnabled.checked = configUsable && parsed.enabled === true;
+    el.azureEnabled.disabled = azureTtsBusy || !configUsable;
+  }
+  if (el.azureRegion) {
+    el.azureRegion.value = configUsable ? (parsed.region ?? "") : "";
+    el.azureRegion.disabled = azureTtsBusy || !configUsable;
+  }
+  if (el.azureVoice) {
+    el.azureVoice.value = configUsable ? parsed.voice : AZURE_VOICES[0];
+    el.azureVoice.disabled = azureTtsBusy || !configUsable;
+  }
+  if (el.azureEndpoint) {
+    el.azureEndpoint.textContent =
+      configUsable && parsed.endpoint !== null ? parsed.endpoint : "尚未選擇可讀取的區域";
+  }
+  if (el.azureKey) el.azureKey.disabled = azureTtsBusy || !credentialUsable;
+  if (el.azureKeySave) {
+    el.azureKeySave.disabled =
+      azureTtsBusy || !credentialUsable || (el.azureKey?.value ?? "") === "";
+  }
+  if (el.azureKeyDelete) {
+    el.azureKeyDelete.disabled =
+      azureTtsBusy ||
+      !credentialUsable ||
+      (parsed.credential !== "present" && parsed.credential !== "unreadable");
+  }
+  if (el.azureConsent) el.azureConsent.disabled = azureTtsBusy;
+
+  el.azureState.classList.remove("bad", "ok");
+  let message;
+  if (actionError !== "") {
+    el.azureState.classList.add("bad");
+    message = actionError;
+  } else if (parsed === null) {
+    el.azureState.classList.add("bad");
+    message = "後端沒有回傳可辨識的 Azure 狀態；沒有把未知狀態畫成已可連線。";
+  } else if (!parsed.config_readable) {
+    el.azureState.classList.add("bad");
+    message = `Azure 設定讀不出來，開關、區域與聲音都不算數；沒有送出 request。${
+      typeof parsed.config_error === "string" && parsed.config_error !== ""
+        ? `\n原因：${parsed.config_error}`
+        : ""
+    }`;
+  } else if (parsed.credential === "unsupported") {
+    message = "這份執行檔沒有 Windows Credential Manager；不能保存金鑰，也不能用 Azure。";
+  } else if (parsed.credential === "unreadable") {
+    el.azureState.classList.add("bad");
+    message = "Windows Credential Manager 裡的金鑰狀態讀不出來；沒有把它當成不存在，也沒有送出 request。你仍可刪掉那一格後重存。";
+  } else if (!parsed.enabled) {
+    message = `Azure 雲端朗讀目前關閉；金鑰${
+      parsed.credential === "present" ? "已保存在 Windows Credential Manager" : "尚未保存"
+    }，但不會因此自動連線。`;
+  } else if (parsed.region === null) {
+    message = "Azure 開關已打開，但還沒選金鑰所屬區域；沒有可用 endpoint，也不會送出 request。";
+  } else if (parsed.credential === "missing") {
+    message = "Azure 開關與區域已有設定，但 Windows Credential Manager 裡沒有金鑰；不會送出 request。";
+  } else if (parsed.consented !== true) {
+    message =
+      parsed.consented === false
+        ? "還沒勾第四張 Azure 朗讀同意書；即使開關、區域與金鑰都齊了，也不會送出 request。"
+        : "問不到第四張 Azure 朗讀同意書；在問得到以前不會送出 request。";
+  } else if (parsed.ready) {
+    el.azureState.classList.add("ok");
+    message = "四個條件都齊了。答案下方會顯示 Azure 按鈕；仍只有你親自按下那一下才會送出當前答案正文。";
+  } else {
+    el.azureState.classList.add("bad");
+    message = "Azure 狀態彼此不一致；沒有把它畫成已可連線。";
+  }
+  el.azureState.textContent = message;
+}
+
+async function refreshAzureTts() {
+  if (!el.azureSection) return null;
+  if (invoke === null) {
+    paintAzureTts(null, "這一頁不在 AI-Sister desktop 裡，沒有讀取或保存 Azure 設定。");
+    return null;
+  }
+  if (azureTtsBusy) {
+    azureTtsRefreshQueued = true;
+    return null;
+  }
+  azureTtsRefreshQueued = false;
+  const revision = ++azureTtsRevision;
+  try {
+    const azureStatus = await invoke("azure_tts_read");
+    if (revision !== azureTtsRevision) return null;
+    paintAzureTts(azureStatus);
+    return azureTtsView(azureStatus);
+  } catch (err) {
+    if (revision === azureTtsRevision) {
+      paintAzureTts(null, `問不到 Azure 雲端朗讀狀態；沒有送出 request。${String(err?.message ?? err)}`);
+    }
+    return null;
+  }
+}
+
+async function setAzureTtsConfig(event) {
+  if (!isTrustedUserAction(event) || invoke === null || azureTtsBusy || !azureTtsStatus) {
+    paintAzureTts(azureTtsStatus);
+    return;
+  }
+  const enabled = el.azureEnabled?.checked === true;
+  const region = el.azureRegion?.value ?? "";
+  const voice = el.azureVoice?.value ?? "";
+  if ((region !== "" && !Object.hasOwn(AZURE_ENDPOINTS, region)) || !AZURE_VOICES.includes(voice)) {
+    paintAzureTts(azureTtsStatus, "這不是 alpha.109 允許的 Azure 區域或繁中聲音；沒有保存。");
+    return;
+  }
+  azureTtsBusy = true;
+  const revision = ++azureTtsRevision;
+  paintAzureTts(azureTtsStatus);
+  try {
+    const azureStatus = await invoke("azure_tts_config_set", {
+      enabled,
+      region: region === "" ? null : region,
+      voice,
+    });
+    if (revision === azureTtsRevision) paintAzureTts(azureStatus);
+  } catch (err) {
+    azureTtsBusy = false;
+    if (revision !== azureTtsRevision) {
+      if (azureTtsRefreshQueued) await refreshAzureTts();
+      else paintAzureTts(azureTtsStatus);
+      return;
+    }
+    await refreshAzureTts();
+    paintAzureTts(
+      azureTtsStatus,
+      `Azure 開關、區域與聲音沒有完整存好：${String(err?.message ?? err)}`,
+    );
+    return;
+  }
+  azureTtsBusy = false;
+  if (azureTtsRefreshQueued) {
+    await refreshAzureTts();
+  } else {
+    paintAzureTts(azureTtsStatus);
+  }
+}
+
+async function saveAzureTtsKey(event) {
+  if (!isTrustedUserAction(event) || invoke === null || azureTtsBusy || !el.azureKey) return;
+  const key = el.azureKey.value;
+  // DOM 不保留這串。後端只回 present/missing/unreadable/unsupported，永遠不回 key。
+  el.azureKey.value = "";
+  if (key === "") {
+    paintAzureTts(azureTtsStatus, "金鑰是空的，沒有保存。");
+    return;
+  }
+  azureTtsBusy = true;
+  const revision = ++azureTtsRevision;
+  paintAzureTts(azureTtsStatus);
+  try {
+    const azureStatus = await invoke("azure_tts_key_set", { key });
+    if (revision === azureTtsRevision) paintAzureTts(azureStatus);
+  } catch (err) {
+    azureTtsBusy = false;
+    if (revision !== azureTtsRevision) {
+      if (azureTtsRefreshQueued) await refreshAzureTts();
+      else paintAzureTts(azureTtsStatus);
+      return;
+    }
+    await refreshAzureTts();
+    paintAzureTts(azureTtsStatus, `金鑰沒有保存：${String(err?.message ?? err)}`);
+    return;
+  }
+  azureTtsBusy = false;
+  if (azureTtsRefreshQueued) {
+    await refreshAzureTts();
+  } else {
+    paintAzureTts(azureTtsStatus);
+  }
+}
+
+async function deleteAzureTtsKey(event) {
+  if (!isTrustedUserAction(event) || invoke === null || azureTtsBusy) return;
+  azureTtsBusy = true;
+  const revision = ++azureTtsRevision;
+  paintAzureTts(azureTtsStatus);
+  try {
+    const azureStatus = await invoke("azure_tts_key_delete");
+    if (revision === azureTtsRevision) paintAzureTts(azureStatus);
+  } catch (err) {
+    azureTtsBusy = false;
+    if (revision !== azureTtsRevision) {
+      if (azureTtsRefreshQueued) await refreshAzureTts();
+      else paintAzureTts(azureTtsStatus);
+      return;
+    }
+    await refreshAzureTts();
+    paintAzureTts(azureTtsStatus, `金鑰沒有刪掉：${String(err?.message ?? err)}`);
+    return;
+  }
+  azureTtsBusy = false;
+  if (azureTtsRefreshQueued) {
+    await refreshAzureTts();
+  } else {
+    paintAzureTts(azureTtsStatus);
+  }
+}
+
+async function openAzureConsent(event) {
+  if (!isTrustedUserAction(event) || invoke === null) return;
+  try {
+    await invoke("open_onboarding");
+  } catch (err) {
+    paintAzureTts(azureTtsStatus, `四張同意書開不起來：${String(err?.message ?? err)}`);
+  }
+}
+
 async function installPersonaAssets(event) {
   if (!isTrustedUserAction(event) || invoke === null || personaAssetOperation !== null) return;
   if (personaAssetStatus?.phase !== "available" && personaAssetStatus?.phase !== "repair-needed") {
@@ -1273,7 +1575,7 @@ function paintBrain() {
     // 2. 填了命令，第二張沒勾。
     el.brainSay.classList.add("bad");
     el.brainSay.textContent =
-      "命令有了，但第二張同意書還沒勾：螢幕上的字只留在這台機器，一次都不會交給這支 CLI。去「三張同意書」那一頁勾上雲解讀。";
+      "命令有了，但第二張同意書還沒勾：螢幕上的字只留在這台機器，一次都不會交給這支 CLI。去「四張同意書」那一頁勾上雲解讀。";
     return;
   }
   // 兩個條件都成立。watching 那三個值決定她現在會不會醒——不要自己再發明一個判斷。
@@ -1364,6 +1666,23 @@ function setUnreadable(on) {
     // config，讀壞時不能拿上一次的勾勾冒充現在值。
     personaVoiceKnown = false;
     personaVoiceEnabled = false;
+    // Azure 的開關／區域／聲音也在同一份 config.toml。先讓較早發出的獨立讀取
+    // 失效，不能讓它稍後成功回來，又把壞掉的設定畫成一組可用值。Credential 與
+    // 同意書是獨立狀態，保留已經問到的四態與 effective 結果，刪金鑰出口仍可用。
+    ++azureTtsRevision;
+    paintAzureTts({
+      generation: azureTtsStatus?.generation ?? 0,
+      config_readable: false,
+      enabled: null,
+      region: null,
+      voice: null,
+      endpoint: null,
+      credential: azureTtsStatus?.credential ?? "unreadable",
+      consented: azureTtsStatus?.consented ?? null,
+      consent_at: azureTtsStatus?.consent_at ?? null,
+      ready: false,
+      config_error: "同一份 config.toml 目前讀不出來。",
+    });
   }
   for (const node of [
     el.brainCommand,
@@ -1398,9 +1717,9 @@ function setUnreadable(on) {
   if (el.unreadable) {
     // 這裡是 textContent，不是 markdown——寫 `**…**` 只會印出星號。
     el.unreadable.textContent =
-      "讀不出設定檔，所以角色以下由 config.toml 控制的每一格都不算數：" +
+      "讀不出設定檔，所以角色、Azure 開關／區域／聲音與底下由 config.toml 控制的每一格都不算數：" +
       "底下的空白和沒打勾，不代表那些規則沒生效。正在跑的記錄用的是它上次讀成功的那一份，" +
-      "排除規則和兩道防線都還在擋。上面的 Windows 登入項是獨立狀態，仍可照它自己的回報操作。" +
+      "排除規則和兩道防線都還在擋。Windows 登入項與 Azure credential 是獨立狀態，仍可照各自回報操作。" +
       "修好底下那行錯誤再回來。";
     el.unreadable.hidden = !on;
   }
@@ -1425,10 +1744,11 @@ async function load() {
     say("這一頁不是在 AI-Sister 裡打開的，改了不會存到任何地方。", true);
     return false;
   }
-  // 這兩份都不讀 config。先獨立送出去，不能讓 consent／hotkey 或一份壞掉的
-  // config 擋在前面；後面仍 await，讓呼叫 load() 的人拿到穩定畫面。
+  // 前兩份都不讀 config；Azure 那份即使 config 壞掉也會獨立回報 credential
+  // 狀態。先各自送出去，後面仍 await，讓呼叫 load() 的人拿到穩定畫面。
   const personaAssetsRead = refreshPersonaAssets();
   const loginStartupRead = refreshLoginStartup();
+  const azureTtsRead = refreshAzureTts();
   let ok = false;
   try {
     apply(await invoke("settings_read"));
@@ -1456,6 +1776,30 @@ async function load() {
   // Windows 登入項同樣不在 config.toml 裡。設定檔壞掉時仍要顯示真實 registry
   // 狀態，也仍可由可信點擊立即修改。
   await loginStartupRead;
+  // Azure 金鑰和第四張同意書不屬於頁尾 settings payload；設定檔壞掉時也要
+  // 說得出 credential 是 present、missing、unreadable 還是 unsupported。
+  await azureTtsRead;
+  if (unreadable) {
+    // setUnreadable 已推進 revision，所以開場那份平行 snapshot 不得再合併。重新
+    // 問一次 authoritative native state，只借它獨立的 credential／consent 四態；
+    // 這一輪 settings_read 已經失敗，config projection 仍維持 fail-closed。
+    const azureSnapshot = await refreshAzureTts();
+    if (azureSnapshot !== null) {
+      paintAzureTts({
+        generation: azureSnapshot.generation,
+        config_readable: false,
+        enabled: null,
+        region: null,
+        voice: null,
+        endpoint: null,
+        credential: azureSnapshot.credential,
+        consented: azureSnapshot.consented,
+        consent_at: azureSnapshot.consent_at,
+        ready: false,
+        config_error: "同一份 config.toml 目前讀不出來。",
+      });
+    }
+  }
   // 熱鍵分開讀：它問的不是設定檔裡寫什麼，是**現在真的搶到了沒**——那個答案
   // 只有已經跑起來的那支程式知道。設定讀失敗也不該讓這一格空著。
   await reloadHotkey();
@@ -1492,6 +1836,19 @@ function demo(variant) {
   // 它以前長得跟「你什麼都沒擋、兩道防線都關了」一模一樣。
   if (variant === "broken") {
     setUnreadable(true);
+    paintAzureTts({
+      generation: 0,
+      config_readable: false,
+      enabled: null,
+      region: null,
+      voice: null,
+      endpoint: null,
+      credential: "present",
+      consented: false,
+      consent_at: null,
+      ready: false,
+      config_error: "retention.frames_days 不能是 0",
+    });
     paintPersonaAssets({
       phase: "repair-needed",
       disclosure: {
@@ -1531,6 +1888,35 @@ function demo(variant) {
   });
   personaVoiceKnown = true;
   personaVoiceEnabled = false;
+  paintAzureTts(
+    variant === "azure"
+      ? {
+          generation: 0,
+          config_readable: true,
+          enabled: true,
+          region: "eastasia",
+          voice: "zh-TW-HsiaoChenNeural",
+          endpoint: AZURE_ENDPOINTS.eastasia,
+          credential: "present",
+          consented: true,
+          consent_at: 1_756_000_000_000,
+          ready: true,
+          config_error: null,
+        }
+      : {
+          generation: 0,
+          config_readable: true,
+          enabled: false,
+          region: null,
+          voice: "zh-TW-HsiaoChenNeural",
+          endpoint: null,
+          credential: "missing",
+          consented: false,
+          consent_at: null,
+          ready: false,
+          config_error: null,
+        },
+  );
   paintPersonaAssets({
     phase: "available",
     disclosure: {
@@ -1797,6 +2183,13 @@ el.personaRepair?.addEventListener("click", (event) => void installPersonaAssets
 el.personaCancel?.addEventListener("click", (event) => void cancelPersonaAssetInstall(event));
 el.personaRemove?.addEventListener("click", (event) => void removePersonaAssets(event));
 el.personaVoice?.addEventListener("change", (event) => void setPersonaVoice(event));
+el.azureEnabled?.addEventListener("change", (event) => void setAzureTtsConfig(event));
+el.azureRegion?.addEventListener("change", (event) => void setAzureTtsConfig(event));
+el.azureVoice?.addEventListener("change", (event) => void setAzureTtsConfig(event));
+el.azureKey?.addEventListener("input", () => paintAzureTts(azureTtsStatus));
+el.azureKeySave?.addEventListener("click", (event) => void saveAzureTtsKey(event));
+el.azureKeyDelete?.addEventListener("click", (event) => void deleteAzureTtsKey(event));
+el.azureConsent?.addEventListener("click", (event) => void openAzureConsent(event));
 
 // 下載在後端完成、取消、修復或被另一扇視窗刪除時，這一頁重讀本機真相。
 // 這個事件只會讀 status；不會自己啟動下載。
@@ -1805,6 +2198,25 @@ globalThis.__TAURI__?.event
     void Promise.all([refreshPersonaAssets(), refreshPersonaVoice()]);
   })
   ?.catch?.(() => {});
+
+// 設定、金鑰或第四張同意書由另一扇 WebView 改變時只重讀狀態；事件本身不會
+// 啟動朗讀，也不會把答案送出去。
+const azureTtsChangedListener = globalThis.__TAURI__?.event?.listen?.(
+  "azure-tts-changed",
+  () => {
+    void refreshAzureTts();
+  },
+);
+azureTtsChangedListener?.then?.(
+  () => {
+    // async listener 註冊前若剛好發生 mutation，那個 event 已經丟了；註冊完成
+    // 再補讀一次。busy 中會排進 azureTtsRefreshQueued，不會安靜漏掉。
+    if (new URLSearchParams(globalThis.location.search).get("demo") === null) {
+      void refreshAzureTts();
+    }
+  },
+  () => {},
+);
 
 const variant = new URLSearchParams(globalThis.location.search).get("demo");
 if (variant !== null) {

@@ -202,17 +202,87 @@
         </div>
       </section>
 
+      <section class="azure-tts" data-azure-section>
+        <h2>Azure 雲端朗讀（選配）</h2>
+        <p class="hint">
+          本機聲音仍是預設；這條路預設關閉，也不會成為自動 fallback。Azure Speech
+          F0 公開價目目前列 Neural TTS 每月 50 萬字元免費額度，但帳號、區域、配額與最終帳單
+          都由你的 Azure subscription 決定；AI-Sister 不替你開帳號，也不會假裝查過餘額。
+        </p>
+        <label class="check">
+          <input type="checkbox" data-azure-enabled disabled />
+          <span>
+            顯示「用 Azure 朗讀」按鈕
+            <em>
+              打開後仍只在你親自按答案下方的 Azure 按鈕時送出；不 autoplay、不因角色點擊或
+              本機聲音缺席而連線。
+            </em>
+          </span>
+        </label>
+        <label class="field">
+          <span>金鑰所屬區域</span>
+          <select data-azure-region disabled>
+            <option value="">尚未選擇</option>
+            <option value="eastasia">East Asia（eastasia）</option>
+            <option value="southeastasia">Southeast Asia（southeastasia）</option>
+            <option value="japaneast">Japan East（japaneast）</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>繁中聲音</span>
+          <select data-azure-voice disabled>
+            <option value="zh-TW-HsiaoChenNeural">HsiaoChen</option>
+            <option value="zh-TW-HsiaoYuNeural">HsiaoYu</option>
+            <option value="zh-TW-YunJheNeural">YunJhe</option>
+          </select>
+        </label>
+        <p class="hint">
+          固定 POST 目的地：<code data-azure-endpoint>尚未選擇區域</code>
+        </p>
+        <label class="field">
+          <span>Azure Speech subscription key</span>
+          <input
+            type="password"
+            data-azure-key
+            autocomplete="new-password"
+            spellcheck="false"
+            placeholder="已存的金鑰不會讀回或顯示"
+          />
+        </label>
+        <div class="azure-actions">
+          <button class="primary" type="button" data-azure-key-save disabled>保存金鑰</button>
+          <button class="ghost danger" type="button" data-azure-key-delete disabled>
+            刪除已存金鑰
+          </button>
+          <button class="ghost" type="button" data-azure-consent>開啟四張同意書</button>
+        </div>
+        <p class="state" role="status" aria-live="polite" data-azure-state>
+          正在讀 Azure 雲端朗讀狀態…
+        </p>
+        <p class="hint" data-azure-boundary>
+          每次按 Azure 朗讀，只會送出當前答案正文原文；它可能含姓名、電話與金額，且不先遮罩。
+          不送截圖、來源連結、memory id、整份資料庫、其他文字或角色選擇。你輸入金鑰時，它會
+          短暫經過這頁與 Tauri IPC；保存後欄位立即清空，長期只放 Windows Credential Manager，
+          不寫進 config.toml，也不會把已存值回傳到這一頁。回來的 MP3 只在記憶體播放，
+          不落地快取。取消會停止播放並丟掉晚到的回應；已經開始的 HTTPS POST 可能仍會跑到逾時。
+        </p>
+        <p class="hint">
+          區域、聲音、開關、金鑰與第四張同意書各自立即生效，不跟頁尾的「儲存」混在一起。
+          四個條件缺任何一個，AI-Sister 都不會送出 Azure request。
+        </p>
+      </section>
+
       <!--
-        這一格決定「她看到的字會不會離開這台機器」——比排除規則更外面一層。
+        這一格決定「她看到的螢幕文字會不會交給 CLI」——比排除規則更外面一層。
         排除規則決定她看得到什麼；沒填命令（或第二張同意書沒勾），那些字
-        一次都不會送出去。
+        一次都不會交給 CLI。Azure 那張卡只處理人按下去的當前答案，不收螢幕原文。
       -->
       <section>
         <h2>大腦</h2>
         <p class="hint">
-          這是整頁唯一一個會把螢幕上的字送出這台機器的設定。
+          這是整頁唯一一個會把<strong>螢幕上的字</strong>交給另一支程式的設定。
           它接的是<strong>你自己已經裝好、已經登入的那支 CLI</strong>，
-          不是內建的 HTTP client，也不是內建推論引擎。
+          不是內建推論引擎；Azure 雲端朗讀是上面另一條、只收當前答案的固定 HTTP 路徑。
           送出去的是螢幕文字原文，不會先遮掉。
           <strong>沒填＝解釋層和審閱層一次都不會醒</strong>（不是跑得慢一點）。
           填了還要第二張同意書勾起來才會真的送——兩個條件都要成立。
