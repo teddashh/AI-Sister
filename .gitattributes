@@ -1,3 +1,16 @@
 # This fixture is hashed as embedded release authority. A Windows checkout must
 # not rewrite its bytes before `include_str!` embeds it in the executable.
 crates/sister-assets/tests/fixtures/public-manifest-selected-v2.json text eol=lf
+
+# These Persona manifests, owner notices, and icon recipes are themselves
+# SHA-256-pinned release authority. Keep the checked-out bytes identical on
+# Windows instead of letting core.autocrlf silently create a different grant.
+apps/desktop/ui/persona-reels/manifest.json text eol=lf
+apps/desktop/ui/persona-reels/manifest.js text eol=lf
+apps/desktop/ui/persona-reels/NOTICE.md text eol=lf
+apps/desktop/ui/personas/manifest.json text eol=lf
+apps/desktop/ui/personas/NOTICE.md text eol=lf
+apps/desktop/src-tauri/icons/manifest.json text eol=lf
+apps/desktop/src-tauri/icons/NOTICE.md text eol=lf
+apps/desktop/icon/icon.html text eol=lf
+scripts/make-icons.sh text eol=lf
