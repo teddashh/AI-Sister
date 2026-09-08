@@ -3638,15 +3638,10 @@ mod azure_tts_mapping_tests {
             generation.store(9, Ordering::Release);
         }
         let sent = AtomicBool::new(false);
-        let rejected = run_generation_pinned_azure_transport(
-            &transition,
-            &generation,
-            8,
-            || {
-                sent.store(true, Ordering::Release);
-                Ok(())
-            },
-        );
+        let rejected = run_generation_pinned_azure_transport(&transition, &generation, 8, || {
+            sent.store(true, Ordering::Release);
+            Ok(())
+        });
         assert!(rejected.is_err());
         assert!(!sent.load(Ordering::Acquire));
 
