@@ -1090,15 +1090,25 @@ jobs:
           Set-StrictMode -Version Latest
 
           $setup = (Resolve-Path 'AI-Sister-Setup.exe').Path
+          $portableDesktop = (Resolve-Path 'apps/desktop/src-tauri/target/release/sister-desktop.exe').Path
+          $portableSister = (Resolve-Path 'target/release/sister.exe').Path
           $installDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-smoke'
           $dataDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-memory'
           $configPath = Join-Path $env:RUNNER_TEMP 'ai-sister-installer.toml'
+          $admissionRecordDataDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-admission-record'
+          $lateFixtureDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-late-fixtures'
+          $desktopDefaultRoamingRoot = Join-Path $env:APPDATA 'ted-h\AI-Sister'
+          $desktopDefaultLocalRoot = Join-Path $env:LOCALAPPDATA 'ted-h\AI-Sister'
+          $lifecycleMutexName = 'Global\com.ted-h.ai-sister-install-lifecycle-v1'
+          $productLifecycleEventName = 'Global\com.ted-h.ai-sister-product-lifecycle-v1'
+          $afterScanMutexName = 'Global\com.ted-h.ai-sister-install-after-process-scan-v1'
           $releaseDesktop = Join-Path (Get-Location) 'sister-desktop.exe'
           $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
           $loginRunName = 'AI-Sister'
           $unrelatedRunName = 'AI-Sister-CI-Unrelated'
           $unrelatedRunValue = '"C:\Windows\System32\notepad.exe" --ai-sister-ci-unrelated'
-          if ($installDir -match '\s' -or $dataDir -match '\s' -or $configPath -match '\s') {
+          if ($installDir -match '\s' -or $dataDir -match '\s' -or
+              $configPath -match '\s' -or $admissionRecordDataDir -match '\s') {
             throw 'NSIS /D 與 recorder smoke 使用的暫存路徑不可含空白'
           }
           if (Test-Path -LiteralPath $installDir) {
@@ -1111,6 +1121,104 @@ jobs:
             if ($process.ExitCode -ne $expectedExit) {
               throw "setup exit code 應為 $expectedExit，實際 $($process.ExitCode)"
             }
+          }
+
+          function Start-DiagnosticSetup([string] $environmentName) {
+            $info = [System.Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $setup
+            $info.UseShellExecute = $false
+            $null = $info.ArgumentList.Add('/S')
+            $null = $info.ArgumentList.Add('/NS')
+            $null = $info.ArgumentList.Add("/D=$installDir")
+            $diagnosticValue = switch ($environmentName) {
+              'AI_SISTER_DIAGNOSTIC_INSTALL_DELAY_MS' { '15000' }
+              'AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN_MS' { '5000' }
+              default { throw "unknown installer diagnostic environment: $environmentName" }
+            }
+            $info.EnvironmentVariables[$environmentName] = $diagnosticValue
+            $process = [System.Diagnostics.Process]::Start($info)
+            if ($null -eq $process) {
+              throw "diagnostic setup 無法啟動：$environmentName"
+            }
+            return $process
+          }
+
+          function Wait-NamedMutex(
+            [string] $name,
+            $owner,
+            [string] $failure
+          ) {
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while ([DateTime]::UtcNow -lt $deadline) {
+              try {
+                $probe = [System.Threading.Mutex]::OpenExisting($name)
+                $probe.Dispose()
+                return
+              }
+              catch [System.Threading.WaitHandleCannotBeOpenedException] {
+                if ($null -ne $owner -and $owner.HasExited) {
+                  throw "$failure；owner 已先 exit=$($owner.ExitCode)"
+                }
+                Start-Sleep -Milliseconds 25
+              }
+            }
+            throw $failure
+          }
+
+          function Wait-NamedMutexGone([string] $name, [string] $failure) {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while ([DateTime]::UtcNow -lt $deadline) {
+              try {
+                $probe = [System.Threading.Mutex]::OpenExisting($name)
+                $probe.Dispose()
+                Start-Sleep -Milliseconds 25
+              }
+              catch [System.Threading.WaitHandleCannotBeOpenedException] {
+                return
+              }
+            }
+            throw $failure
+          }
+
+          function Assert-NamedMutexAbsent([string] $name, [string] $failure) {
+            try {
+              $probe = [System.Threading.Mutex]::OpenExisting($name)
+              $probe.Dispose()
+              throw $failure
+            }
+            catch [System.Threading.WaitHandleCannotBeOpenedException] {
+              return
+            }
+          }
+
+          function Stop-DiagnosticProcess($process) {
+            if ($null -eq $process) {
+              return
+            }
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              $process.WaitForExit()
+            }
+            $process.Dispose()
+          }
+
+          function Get-ProductTreeReceipt([string] $root) {
+            if (-not (Test-Path -LiteralPath $root)) {
+              return '<absent>'
+            }
+            $lines = @('<present>')
+            foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force |
+                Sort-Object FullName)) {
+              $relative = [IO.Path]::GetRelativePath($root, $item.FullName)
+              if ($item.PSIsContainer) {
+                $lines += "D|$relative"
+              }
+              else {
+                $hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+                $lines += "F|$relative|$($item.Length)|$hash"
+              }
+            }
+            return ($lines -join "`n")
           }
 
           function Assert-ProductFiles {
@@ -1284,6 +1392,247 @@ jobs:
             throw 'current-user uninstall metadata 沒有對回 exact 版本與 install root'
           }
 
+          # Exact product event 是 alpha.113-aware process 的 authority；舊版 image-name
+          # scanner 不能替它作證。單獨建立 event（沒有任何 sister-named PID）時，Setup
+          # 必須在 .onInit 拒絕，而且不得關閉不屬於自己的 event handle。
+          $createdProductEvent = $false
+          $productEvent = [System.Threading.EventWaitHandle]::new(
+            $false,
+            [System.Threading.EventResetMode]::ManualReset,
+            $productLifecycleEventName,
+            [ref]$createdProductEvent
+          )
+          if (-not $createdProductEvent) {
+            $productEvent.Dispose()
+            throw 'product lifecycle event smoke 起點已有 owner'
+          }
+          try {
+            Run-Setup 32
+            Assert-ProductFiles
+            Assert-ExactFile $desktop $releaseDesktop `
+              'product lifecycle event 拒絕時改動了 installed desktop payload'
+            if ((Get-FileHash $sister -Algorithm SHA256).Hash -ne
+                (Get-FileHash $portableSister -Algorithm SHA256).Hash) {
+              throw 'product lifecycle event 拒絕時改動了 installed sister payload'
+            }
+            Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+              'product lifecycle event 拒絕時改動了登入啟動值'
+            Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+              'product lifecycle event 拒絕時改動了無關 Run value'
+            Assert-NamedMutexAbsent $lifecycleMutexName `
+              'product lifecycle event 拒絕後 installer mutex 沒有釋放'
+          }
+          finally {
+            $productEvent.Dispose()
+          }
+
+          # Installer 先持有 lifecycle mutex、再做第一次 process scan。這個 15 秒窗
+          # 只用來證明兩支**這一輪** binary 的最早入口會拒絕加入；它沒有證明舊版
+          # binary 也懂同一份協定，更沒有把 Rust main 之前的 Windows image mapping
+          # 說成不存在。
+          if (Test-Path -LiteralPath $admissionRecordDataDir) {
+            throw 'installer admission smoke 的 disposable record dir 起點不乾淨'
+          }
+          $desktopRoamingBefore = Get-ProductTreeReceipt $desktopDefaultRoamingRoot
+          $desktopLocalBefore = Get-ProductTreeReceipt $desktopDefaultLocalRoot
+          $admissionSetup = $null
+          $admissionSecondSetup = $null
+          $admissionDesktop = $null
+          $admissionVersion = $null
+          $admissionRecord = $null
+          try {
+            $admissionSetup = Start-DiagnosticSetup 'AI_SISTER_DIAGNOSTIC_INSTALL_DELAY_MS'
+            Wait-NamedMutex $lifecycleMutexName $admissionSetup `
+              'setup 沒有建立 installer lifecycle mutex'
+
+            $secondSetupInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $secondSetupInfo.FileName = $setup
+            $secondSetupInfo.UseShellExecute = $false
+            $null = $secondSetupInfo.ArgumentList.Add('/S')
+            $null = $secondSetupInfo.ArgumentList.Add('/NS')
+            $null = $secondSetupInfo.ArgumentList.Add("/D=$installDir")
+            $admissionSecondSetup = [System.Diagnostics.Process]::Start($secondSetupInfo)
+            if ($null -eq $admissionSecondSetup) {
+              throw 'lifecycle gate 期間第二份 setup 無法啟動'
+            }
+
+            $desktopInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $desktopInfo.FileName = $portableDesktop
+            $desktopInfo.UseShellExecute = $false
+            $null = $desktopInfo.ArgumentList.Add('--ai-sister-login')
+            $admissionDesktop = [System.Diagnostics.Process]::Start($desktopInfo)
+            if ($null -eq $admissionDesktop) {
+              throw 'lifecycle gate 期間 portable desktop 無法啟動'
+            }
+
+            # Rust writes redirected output as UTF-8. Pin a strict decoder here: alpha.111
+            # demonstrated that the Windows runner's ambient native encoding is not evidence.
+            $strictAdmissionUtf8 = [Text.UTF8Encoding]::new($false, $true)
+            $versionInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $versionInfo.FileName = $portableSister
+            $versionInfo.UseShellExecute = $false
+            $versionInfo.CreateNoWindow = $true
+            $versionInfo.RedirectStandardOutput = $true
+            $versionInfo.RedirectStandardError = $true
+            $versionInfo.StandardOutputEncoding = $strictAdmissionUtf8
+            $versionInfo.StandardErrorEncoding = $strictAdmissionUtf8
+            # The job-level developer backtrace setting would append unstable stack text to the
+            # exact early-admission receipt. These two children intentionally prove only stderr.
+            $versionInfo.EnvironmentVariables['RUST_BACKTRACE'] = '0'
+            $versionInfo.EnvironmentVariables['RUST_LIB_BACKTRACE'] = '0'
+            $null = $versionInfo.ArgumentList.Add('--version')
+            $admissionVersion = [System.Diagnostics.Process]::Start($versionInfo)
+            if ($null -eq $admissionVersion) {
+              throw 'lifecycle gate 期間 portable sister --version 無法啟動'
+            }
+
+            $recordInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $recordInfo.FileName = $portableSister
+            $recordInfo.UseShellExecute = $false
+            $recordInfo.CreateNoWindow = $true
+            $recordInfo.RedirectStandardOutput = $true
+            $recordInfo.RedirectStandardError = $true
+            $recordInfo.StandardOutputEncoding = $strictAdmissionUtf8
+            $recordInfo.StandardErrorEncoding = $strictAdmissionUtf8
+            $recordInfo.EnvironmentVariables['RUST_BACKTRACE'] = '0'
+            $recordInfo.EnvironmentVariables['RUST_LIB_BACKTRACE'] = '0'
+            $null = $recordInfo.ArgumentList.Add('--data-dir')
+            $null = $recordInfo.ArgumentList.Add($admissionRecordDataDir)
+            $null = $recordInfo.ArgumentList.Add('record')
+            $null = $recordInfo.ArgumentList.Add('--duration')
+            $null = $recordInfo.ArgumentList.Add('120')
+            $admissionRecord = [System.Diagnostics.Process]::Start($recordInfo)
+            if ($null -eq $admissionRecord) {
+              throw 'lifecycle gate 期間 portable sister record 無法啟動'
+            }
+
+            if (-not $admissionSecondSetup.WaitForExit(20000)) {
+              throw '第二份 setup 沒有被既有 lifecycle owner 收掉'
+            }
+            if ($admissionSecondSetup.ExitCode -ne 32) {
+              throw "並行 setup lifecycle gate exit 應為 32，實際 $($admissionSecondSetup.ExitCode)"
+            }
+            if ($admissionSetup.HasExited) {
+              throw "第二份 setup 被拒絕時，第一份 owner 已意外 exit=$($admissionSetup.ExitCode)"
+            }
+            Assert-ProductFiles
+            Assert-ExactFile $desktop $releaseDesktop `
+              '第二份 setup 被拒絕時改動了 installed desktop payload'
+            if ((Get-FileHash $sister -Algorithm SHA256).Hash -ne
+                (Get-FileHash $portableSister -Algorithm SHA256).Hash) {
+              throw '第二份 setup 被拒絕時改動了 installed sister payload'
+            }
+            Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+              '第二份 setup 被拒絕時改動了登入啟動值'
+            Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+              '第二份 setup 被拒絕時改動了無關 Run value'
+
+            foreach ($candidate in @($admissionDesktop, $admissionVersion, $admissionRecord)) {
+              if (-not $candidate.WaitForExit(10000)) {
+                throw "lifecycle gate 沒在產品狀態前拒絕 PID $($candidate.Id)"
+              }
+            }
+            if ($admissionDesktop.ExitCode -ne 73) {
+              throw "portable desktop lifecycle gate exit 應為 73，實際 $($admissionDesktop.ExitCode)"
+            }
+            $versionOut = $admissionVersion.StandardOutput.ReadToEnd()
+            $versionErr = $admissionVersion.StandardError.ReadToEnd()
+            $recordOutAtGate = $admissionRecord.StandardOutput.ReadToEnd()
+            $recordErrAtGate = $admissionRecord.StandardError.ReadToEnd()
+            $expectedAdmission = '偵測到 AI-Sister 安裝安全鎖；這次沒有進入產品功能，也沒有建立產品 log 或讀寫 AI-Sister 記憶／設定。請在相關操作結束後再試一次。'
+            $expectedAdmissionError = "Error: $expectedAdmission`n"
+            $normalizedVersionErr = $versionErr.Replace("`r`n", "`n").Replace("`r", "`n")
+            $normalizedRecordErr = $recordErrAtGate.Replace("`r`n", "`n").Replace("`r", "`n")
+            if ($admissionVersion.ExitCode -eq 0 -or $versionOut -ne '' -or
+                $normalizedVersionErr -cne $expectedAdmissionError) {
+              throw "sister --version 沒有由 lifecycle gate fail-closed：exit=$($admissionVersion.ExitCode) out=$versionOut err=$versionErr"
+            }
+            if ($admissionRecord.ExitCode -eq 0 -or $recordOutAtGate -ne '' -or
+                $normalizedRecordErr -cne $expectedAdmissionError) {
+              throw "sister record 沒有由 lifecycle gate fail-closed：exit=$($admissionRecord.ExitCode) out=$recordOutAtGate err=$recordErrAtGate"
+            }
+            if (Test-Path -LiteralPath $admissionRecordDataDir) {
+              throw 'lifecycle gate 拒絕 sister record 後仍建立了 disposable data dir'
+            }
+            if ((Get-ProductTreeReceipt $desktopDefaultRoamingRoot) -cne
+                  $desktopRoamingBefore -or
+                (Get-ProductTreeReceipt $desktopDefaultLocalRoot) -cne
+                  $desktopLocalBefore) {
+              throw 'lifecycle gate 拒絕 desktop 後仍改動了 log、config 或其他產品狀態'
+            }
+
+            if (-not $admissionSetup.WaitForExit(180000)) {
+              throw 'lifecycle admission smoke 的 setup 沒有收尾'
+            }
+            if ($admissionSetup.ExitCode -ne 0) {
+              throw "lifecycle admission smoke setup exit=$($admissionSetup.ExitCode)"
+            }
+            Assert-NamedMutexAbsent $lifecycleMutexName `
+              'setup 成功後 installer lifecycle mutex 仍存在'
+            if ((Get-ProductTreeReceipt $desktopDefaultRoamingRoot) -cne
+                  $desktopRoamingBefore -or
+                (Get-ProductTreeReceipt $desktopDefaultLocalRoot) -cne
+                  $desktopLocalBefore) {
+              throw 'lifecycle admission lane 完成後 desktop 產品狀態不再等於起點'
+            }
+          }
+          finally {
+            Stop-DiagnosticProcess $admissionDesktop
+            Stop-DiagnosticProcess $admissionVersion
+            Stop-DiagnosticProcess $admissionRecord
+            Stop-DiagnosticProcess $admissionSecondSetup
+            Stop-DiagnosticProcess $admissionSetup
+          }
+          Assert-ProductFiles
+          Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+            'lifecycle admission reinstall 沒保留 exact 登入啟動值'
+          Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+            'lifecycle admission reinstall 改動了無關 Run value'
+
+          # PRE hook 已掃完之後才放進一支完全不懂 lifecycle mutex 的同名 fixture。
+          # 覆寫後的 stock macro 必須再查 desktop 與 recorder、回 32，而且絕不能
+          # 沿用 Tauri silent path 的 KillProcess。兩個名字分 lane，避免第一支把
+          # 第二支該走的分支一起遮住。
+          $null = New-Item -ItemType Directory -Path $lateFixtureDir
+          foreach ($fixtureName in @('sister-desktop.exe', 'sister.exe')) {
+            $fixturePath = Join-Path $lateFixtureDir $fixtureName
+            Copy-Item -LiteralPath "$env:WINDIR\System32\PING.EXE" -Destination $fixturePath
+            $lateSetup = $null
+            $lateFixture = $null
+            try {
+              $lateSetup = Start-DiagnosticSetup 'AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN_MS'
+              Wait-NamedMutex $afterScanMutexName $lateSetup `
+                "setup 沒有打開 $fixtureName 的 after-process-scan window"
+              $lateFixture = Start-Process -FilePath $fixturePath `
+                -ArgumentList @('127.0.0.1', '-n', '31') -PassThru
+              if ($null -eq $lateFixture -or $lateFixture.HasExited) {
+                throw "$fixtureName late fixture 沒有維持執行"
+              }
+              if (-not $lateSetup.WaitForExit(60000)) {
+                throw "$fixtureName late fixture 出現後 setup 沒有收尾"
+              }
+              if ($lateSetup.ExitCode -ne 32) {
+                throw "$fixtureName late fixture 應讓 setup exit=32，實際 $($lateSetup.ExitCode)"
+              }
+              if ($lateFixture.HasExited) {
+                throw "setup 又走到 stock KillProcess，殺掉了 $fixtureName late fixture"
+              }
+              Assert-NamedMutexAbsent $lifecycleMutexName `
+                "$fixtureName 拒絕後 installer lifecycle mutex 仍存在"
+              Assert-NamedMutexAbsent $afterScanMutexName `
+                "$fixtureName 拒絕後 diagnostic mutex 仍存在"
+            }
+            finally {
+              Stop-DiagnosticProcess $lateFixture
+              Stop-DiagnosticProcess $lateSetup
+            }
+            Assert-ProductFiles
+            Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+              "$fixtureName late-start setup 拒絕時改動了登入啟動值"
+            Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+              "$fixtureName late-start setup 拒絕時改動了無關 Run value"
+          }
+
           # 第一個 owner 拿到 startup guard 後刻意停 5 秒，把官方 receiver 尚未建立的
           # 真實競態放大成可觀察測試窗。四個 interactive secondary 必須等 receiver、
           # 逐一交棒退出；若只靠官方 plugin 的單次 FindWindow，它們會穿過 setup 留成
@@ -1449,6 +1798,57 @@ jobs:
             'same-version reinstall 改動了無關 Run value'
 
           $uninstaller = Join-Path $installDir 'uninstall.exe'
+
+          # Uninstaller 會先自我複製，外層 PID 與 exit code 都不是 inner hook 的可靠
+          # receipt；用 inner 建立／釋放的兩顆 mutex 當邊界。fixture 在 PRE scan 後
+          # 才出現，必須讓覆寫後的 stock macro 拒絕，而且原 PID 要活著。
+          $uninstallLateFixturePath = Join-Path $lateFixtureDir 'sister.exe'
+          $lateUninstaller = $null
+          $uninstallLateFixture = $null
+          try {
+            $uninstallInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $uninstallInfo.FileName = $uninstaller
+            $uninstallInfo.UseShellExecute = $false
+            $null = $uninstallInfo.ArgumentList.Add('/S')
+            $uninstallInfo.EnvironmentVariables['AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN_MS'] = '5000'
+            $lateUninstaller = [System.Diagnostics.Process]::Start($uninstallInfo)
+            if ($null -eq $lateUninstaller) {
+              throw 'after-process-scan diagnostic uninstaller 無法啟動'
+            }
+            Wait-NamedMutex $afterScanMutexName $null `
+              'uninstaller 沒有打開 after-process-scan window'
+            $uninstallLateFixture = Start-Process `
+              -FilePath $uninstallLateFixturePath `
+              -ArgumentList @('127.0.0.1', '-n', '31') -PassThru
+            if ($null -eq $uninstallLateFixture -or $uninstallLateFixture.HasExited) {
+              throw 'uninstall 的 sister.exe late fixture 沒有維持執行'
+            }
+            Wait-NamedMutexGone $lifecycleMutexName `
+              'late fixture 出現後 uninstaller lifecycle mutex 沒有釋放'
+            if (-not $lateUninstaller.HasExited -and
+                -not $lateUninstaller.WaitForExit(60000)) {
+              throw 'late fixture 被拒絕後 uninstaller 外層行程沒有收尾'
+            }
+            if ($uninstallLateFixture.HasExited) {
+              throw 'uninstaller 又走到 stock KillProcess，殺掉了 sister.exe late fixture'
+            }
+            Assert-NamedMutexAbsent $afterScanMutexName `
+              'uninstaller 拒絕後 diagnostic mutex 仍存在'
+            Assert-ProductFiles
+            if (-not (Test-Path -LiteralPath $uninstallKey)) {
+              throw 'late-start uninstaller 宣稱拒絕，卻移除了 HKCU uninstall metadata'
+            }
+            Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+              'late-start uninstaller 拒絕時改動了登入啟動值'
+            Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+              'late-start uninstaller 拒絕時改動了無關 Run value'
+          }
+          finally {
+            Stop-DiagnosticProcess $uninstallLateFixture
+            Stop-DiagnosticProcess $lateUninstaller
+          }
+          Remove-Item -LiteralPath $lateFixtureDir -Recurse -Force
+
           $removed = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
           if ($removed.ExitCode -ne 0) { throw "uninstaller exit=$($removed.ExitCode)" }
           $deadline = [DateTime]::UtcNow.AddSeconds(20)

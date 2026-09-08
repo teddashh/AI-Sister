@@ -625,12 +625,31 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     consent，並用 `export --with-frames` 搬出同 hash 的 synthetic PNG。這證明可匯出的
     evidence file association，不冒充真 OCR、`frame_get` 或 WebView click；正式 artifact 的人工升級
     體驗仍另驗。
+  - ✅ alpha.113 移除**本版產生之 section** 的 Tauri stock forced-kill 選項。Setup 透過
+    pinned `SetContext` 在 `.onInit` 取得 lifecycle mutex，成功路徑跨住
+    `PageLeaveReinstall`、WebView2 與 payload／安裝登錄直到 `POSTINSTALL`；direct
+    uninstaller 在確認頁後的 `PREUNINSTALL` 取得，成功路徑持有到 `POSTUNINSTALL`。拒絕
+    先釋放，取消由 process teardown 關閉。由 Setup 啟動的 alpha.113+ child 會先驗
+    inherited dynamic capability，再借用而不關閉 parent marker；child 自己 OpenMutex 得到的
+    handle 會持有到 `POSTUNINSTALL`，避免 parent 異常退出時讓 fixed object 在 child mutation
+    中途消失。無關的第二份 Setup 看見 existing object 或無法建立時 fail closed。
+    alpha.113-aware desktop／CLI 在 log、DB、WebView 與 AI-Sister 記憶／設定之前執行
+    mutex → product event → mutex 握手，並持有 event 到行程結束；installer 取得 mutex 後
+    只有明確量到 event 不存在才繼續。legacy `FindProcessCurrentUser` 仍掃所有 matching
+    image name，作為向後相容與 pre-main fallback，不是 aware admission authority；reported
+    hit 先釋放 marker、exit 32 且不呼叫 kill，但它沒有 Unknown，
+    snapshot、token 或 SID 查詢失敗會和未找到合併。原生 Windows CI 只走 `/S`，以 exact
+    15 秒 acquire window 與 5 秒 after-scan window 驗新版 early admission、並行 Setup 與
+    一般可列舉 fixture；它沒有執行 PageLeave callback，也沒有驗 scanner error。
   - ⬜ 正式 `AI-Sister-Setup.exe` 的斷網安裝仍待 Ted 實測；在線 CI 與靜態網路邊界
     只證明 WebView2 offline installer 已內嵌、程式沒有 updater／直接 socket。
-  - ⬜ alpha.106 的 hook 後仍有一個窄窗：desktop 若恰在放行後才啟動，Tauri stock
-    silent path 仍可能 kill；recorder 若此時才啟動則不會被 stock 重查，安裝／移除可能
-    只做一部分。要移除 stock killer 或做 installer／app 協調後，才能承諾完整 lifecycle；
-    alpha.106 只承諾檢查當下已活著的 PID。
+  - ⬜ installer late-start 的跨版本完整 lifecycle 仍未完成。舊 binary 不持有 product event，
+    legacy scanner 又可能把列舉／token／SID error 當成未找到；較舊的
+    `PageLeaveReinstall` child 執行時外層 marker 仍會擋 aware product，但 child 保留自己的
+    版本行為，不能由 alpha.113 section 的 no-kill 規則代為保證。即使是 alpha.113-aware
+    binary，Windows loader 仍在 Rust `main` admission 前映射 executable，最後一次 legacy
+    scan 到 NSIS `File` 之間可能撞到 image mapping。
+    尚未有 old-binary bridge 或 file-level exclusion，這格保持未勾。
   - ✅ alpha.107 已接 Windows current-user 登入啟動：設定預設關閉、立即生效，
     `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 是唯一真相。只有 exact quoted
     `"<current sister-desktop.exe>" --ai-sister-login` 算 `enabled`；不存在、不相符、
@@ -702,7 +721,8 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     CLI／desktop `recording.lock`，
     以及各種取消、占用／未知、外部 recorder、desktop crash 與 uninstall。未勾完前不宣稱
     Windows 人工通過。
-  - ⬜ code signing、跨層 master stop、installer late-start 窄窗與官網仍未完成；
+  - ⬜ code signing、跨層 master stop、上述 alpha.112 → alpha.113 installer late-start
+    bridge／最後 scan → `File` 窄窗與官網仍未完成；
     1.0 不內建自動 updater，由使用者手動下載新版 installer。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）

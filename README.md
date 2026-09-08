@@ -35,6 +35,23 @@ alpha.112 把 native CLI stdout 明確固定用 UTF-8 解碼，並把 17 張 bun
 alpha.110 真正安裝後，再由 alpha.112 installer 原地升級；Run absent／enabled 兩條路、
 舊 DB 查詢、四張同意與 synthetic 證據檔關聯都要讀回來，Persona／Azure 非密設定則要
 原 bytes 保留並仍可由新版解析。這不是正式 WebView 點圖或真 OCR 的人工證據。
+alpha.113 讓本版產生的 Setup／uninstaller 覆寫 Tauri stock running-app macro；舊 image
+scanner 回報 `sister-desktop.exe`／`sister.exe` 命中時只拒絕，不提供或執行強制關閉。
+Setup 在 `.onInit` 取得 lifecycle mutex，成功路徑持有到 `POSTINSTALL`；direct uninstall
+則在 `PREUNINSTALL` 取得，成功路徑持有到 `POSTUNINSTALL`。拒絕會先釋放，取消則由
+process teardown 關閉 handle；alpha.113+ 的 `PageLeaveReinstall` child 會驗證
+繼承的動態 capability 再借用 parent marker，並把自己開到的 fixed-mutex handle 持有到
+`POSTUNINSTALL`，所以 parent 異常退出也不會在 child mutation 中途移除 barrier。帶協定的
+desktop／CLI 在產品狀態前依序
+探測 mutex、建立並持有 product event、再探測一次；installer 取得 mutex 後也會 fail-closed
+探測 event。原生 Windows CI 的 `/S` lane 用 15 秒 acquire window 與 5 秒 after-scan
+window 驗 installer-first early exit、第二份 Setup 與一般 reported-hit/no-kill；`/S` 不會
+執行 PageLeave callback，也沒有驗 scanner error。
+舊 scanner 沒有 Unknown，process 列舉或 token／SID 查詢失敗會和「未找到」合併；舊 binary
+也不持有 event。較舊的 PageLeave child 執行時，外層 marker 仍會擋 aware product，但
+child 依然保留自己的版本行為。Windows loader 在 Rust
+`main` 前映射 executable，最後一次 scan 到 NSIS `File` 之間仍有窄窗，所以不能把這版
+寫成跨版本完整原子 lifecycle。
 code signing、跨層 master stop 與 installer late-start 窄窗仍未完成，
 所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
@@ -101,10 +118,26 @@ WAL 工作檔當成每天永久長大，所以**不拿來作 Phase 0 判決**；
 | `sister-desktop.exe` | 桌面角落的姊妹：錄製狀態、搜尋與可點開的出處、時間軸與刪除；也顯示目前推測、Gatekeeper 與 hands 建議，並主動詢問無人值守網址政策 |
 
 installer 沒有內建自動更新。升級時由使用者下載新 `AI-Sister-Setup.exe`，先自行結束
-desktop 並停止 recorder，再原地安裝；安裝檢查開始時已在執行的任一行程會讓這次操作
-拒絕，不會被 hook 強制關閉。alpha.106 尚未封住 hook 檢查後才啟動行程的窄競態：
-late desktop 仍可能被 Tauri 內建 silent check 強制關閉，late recorder 則可能讓安裝／
-移除只做一部分；現在也還沒有 code signing，Windows 可能顯示未簽章警告。
+desktop 並停止 recorder，再原地安裝。alpha.113 起，本版產生的 Setup／uninstaller
+覆寫 Tauri stock running-app macro；current-user scanner **回報命中時**，目前的安裝／移除
+區段只會拒絕，不會提供或執行 kill。Setup 在 `.onInit`、也就是
+`PageLeaveReinstall`、WebView2 與程式檔／登錄之前取得 lifecycle mutex；成功安裝路徑
+持有到 `POSTINSTALL`，direct uninstall 則在確認頁之後、任何移除動作之前取得，成功移除
+路徑持有到 `POSTUNINSTALL`。拒絕會先釋放，取消則由 process teardown 關閉。由 Setup
+啟動的 alpha.113+ uninstaller 會驗證繼承的動態 capability，
+借用 parent marker 而不和 parent 自撞；child 另持自己的 fixed-mutex handle 到
+`POSTUNINSTALL`，parent 異常退出也不會讓 barrier 提早消失。無關的第二份 Setup 不能同時
+進入 lifecycle。
+
+alpha.113-aware desktop／CLI 在產品 log、DB、WebView、記憶或設定之前執行
+mutex → product event → mutex 握手，並把 event 持有到行程結束；installer 取得 mutex 後
+只有明確量到 event 不存在才繼續。舊 binary 沒有 event，只能靠沒有 Unknown 的 legacy
+scanner best-effort 掃描；列舉、token 或 SID 查詢失敗會被它當成未找到。較舊的
+PageLeave child 執行時外層 marker 仍會擋 aware product，但 child 依然保留自己的版本行為，
+不能拿本版 section 的 no-kill 規則替它背書。
+Windows loader 又在 Rust `main` 前映射 executable，最後一次 legacy scan 到 NSIS `File`
+仍有窄窗；所以 installer late-start 與跨版本完整原子 lifecycle 仍未完成。現在也還沒有
+code signing，Windows 可能顯示未簽章警告。
 
 ## 跑起來
 

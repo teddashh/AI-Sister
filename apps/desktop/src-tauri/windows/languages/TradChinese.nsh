@@ -27,4 +27,7 @@ LangString webview2Downloading ${LANG_TRADCHINESE} "正在下載 WebView2 啟動
 LangString webview2InstallError ${LANG_TRADCHINESE} "錯誤：WebView2 安裝失敗，錯誤碼 $1"
 LangString webview2InstallSuccess ${LANG_TRADCHINESE} "WebView2 安裝成功"
 LangString deleteAppData ${LANG_TRADCHINESE} "清除桌面外殼資料（AI-Sister 記憶會保留）"
-LangString aiSisterStillRunning ${LANG_TRADCHINESE} "AI-Sister 仍在執行。請先從系統匣結束桌面程式並停止 recorder，再重新執行。這次操作沒有強制關閉任何程式。"
+LangString aiSisterStillRunning ${LANG_TRADCHINESE} "這次檢查找到目前使用者名為 sister-desktop.exe 或 sister.exe 的行程。目前安裝／移除區段沒有要求關閉偵測到的行程；請自行結束桌面程式並停止 recorder，再試一次。"
+LangString aiSisterInstallBusy ${LANG_TRADCHINESE} "AI-Sister 安裝安全鎖已存在。這次操作已在修改 AI-Sister 程式檔或安裝登錄前停止；請等相關操作結束後再試一次。"
+LangString aiSisterInstallLockUnknown ${LANG_TRADCHINESE} "無法建立或驗證 AI-Sister 安裝安全鎖。這次操作已在修改 AI-Sister 程式檔或安裝登錄前停止；請確認目前狀態後再試一次。"
+LangString aiSisterProductLifecycleBusy ${LANG_TRADCHINESE} "偵測到 AI-Sister 產品生命週期鎖。目前安裝／移除區段沒有繼續，也沒有要求關閉產品行程；請自行結束桌面程式並停止 recorder，再試一次。"

@@ -5192,6 +5192,42 @@ fn primary_logging_plugin<R: tauri::Runtime>(
         .build()
 }
 
+#[cfg(windows)]
+fn enter_product_lifecycle(
+    launch_intent: LaunchIntent,
+) -> sister_core::install_lifecycle::ProductLifecycleGuard {
+    use sister_core::install_lifecycle::{InstallerAdmission, enter_product_lifecycle};
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONSTOP, MB_OK, MessageBoxW};
+    use windows::core::w;
+
+    let admission = match enter_product_lifecycle() {
+        Ok(guard) => return guard,
+        Err(admission) => admission,
+    };
+
+    // 登入啟動撞上安裝／移除時安靜退出；interactive 啟動則把「這次沒有進入產品狀態」
+    // 說清楚。這裡早於 logging、Tauri plugin、WebView、DB 與 recorder admission。
+    if launch_intent == LaunchIntent::Interactive {
+        let body = match admission {
+            InstallerAdmission::InProgress => {
+                w!(
+                    "偵測到 AI-Sister 安裝安全鎖。這次沒有進入產品功能，也沒有建立產品 log 或讀寫 AI-Sister 記憶／設定；請在相關操作結束後再試一次。"
+                )
+            }
+            InstallerAdmission::Uncheckable => w!(
+                "無法確認 AI-Sister 安裝安全鎖是否存在。為避免在程式檔可能變動時進入產品功能，這次沒有建立產品 log，也沒有讀寫 AI-Sister 記憶或設定。"
+            ),
+            InstallerAdmission::Clear => unreachable!("clear admission returned above"),
+        };
+        // SAFETY: 三個字串都是 static、NUL 結尾的 UTF-16 literal；沒有 owner window，
+        // 因為這道 gate 刻意早於 Tauri 建立任何視窗。
+        unsafe {
+            let _ = MessageBoxW(None, body, w!("AI-Sister"), MB_OK | MB_ICONSTOP);
+        }
+    }
+    std::process::exit(73);
+}
+
 fn main() {
     #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
     match macos_ci::requested_directory() {
@@ -5215,6 +5251,9 @@ fn main() {
     let launch_intent = launch_intent(std::env::args_os().skip(1));
     #[cfg(not(windows))]
     let launch_intent = LaunchIntent::Interactive;
+
+    #[cfg(windows)]
+    let _product_lifecycle_guard = enter_product_lifecycle(launch_intent);
 
     let data_dir = sister_core::config::Config::default_data_dir();
     let state_path = data_dir

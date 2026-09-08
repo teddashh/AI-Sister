@@ -234,11 +234,26 @@ for minimum_key in ("minimumWebview2Version", "minimum-webview2-version"):
 nsis = windows.get("nsis")
 if not isinstance(nsis, dict):
     raise SystemExit("✗ merged Windows NSIS config 不存在")
+if nsis.get("installMode") != "currentUser":
+    raise SystemExit(
+        "✗ installer lifecycle 的 SetContext seam 目前只完成 currentUser；"
+        f"NSIS installMode 實際是 {nsis.get('installMode')!r}"
+    )
 for minimum_key in ("minimumWebview2Version", "minimum-webview2-version"):
     if minimum_key in nsis:
         raise SystemExit(f"✗ NSIS {minimum_key} 也會呼叫 EdgeUpdate；這裡不准存在")
 if "template" in nsis:
     raise SystemExit("✗ 自訂 NSIS template 可繞過 offlineInstaller；這裡只准 pinned Tauri template")
+
+# installer hook 覆寫的是 published tauri-cli 2.11.4 內嵌的 exact SetContext seam。
+# CLI crate 與 --locked 缺一個，upstream template 順序都可能變成另一份契約。
+workflow_text = pathlib.Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+expected_tauri_install = "cargo install tauri-cli --version 2.11.4 --locked"
+if workflow_text.count(expected_tauri_install) != 2:
+    raise SystemExit(
+        "✗ macOS／Windows 必須各安裝一次 exact tauri-cli 2.11.4 --locked；"
+        "變更版本前要重驗 SetContext、PageLeave 與四個 hook 的順序"
+    )
 
 expected_hook = "windows/installer-hooks.nsh"
 if nsis.get("installerHooks") != expected_hook:
@@ -291,10 +306,151 @@ def executable_hook_lines(source: str) -> list[str]:
 
 
 expected_hook_lines = [
+    "Var AI_SISTER_INSTALL_LIFECYCLE_HANDLE",
+    "Var AI_SISTER_INSTALL_CAPABILITY_HANDLE",
+    "Var AI_SISTER_INSTALL_LIFECYCLE_BORROWED",
+    "Var AI_SISTER_DIAGNOSTIC_AFTER_SCAN_HANDLE",
+    "!macro AI_SISTER_RELEASE_INSTALL_LIFECYCLE",
+    '${If} $AI_SISTER_INSTALL_LIFECYCLE_BORROWED = "1"',
+    'System::Call \'kernel32::SetEnvironmentVariableW(w "AI_SISTER_INSTALL_LIFECYCLE_CAPABILITY", p 0)\'',
+    '${If} $AI_SISTER_INSTALL_LIFECYCLE_HANDLE != ""',
+    "System::Call 'kernel32::CloseHandle(p $AI_SISTER_INSTALL_LIFECYCLE_HANDLE)'",
+    'StrCpy $AI_SISTER_INSTALL_LIFECYCLE_HANDLE ""',
+    "${EndIf}",
+    'StrCpy $AI_SISTER_INSTALL_LIFECYCLE_BORROWED ""',
+    '${ElseIf} $AI_SISTER_INSTALL_LIFECYCLE_HANDLE != ""',
+    'System::Call \'kernel32::SetEnvironmentVariableW(w "AI_SISTER_INSTALL_LIFECYCLE_CAPABILITY", p 0)\'',
+    '${If} $AI_SISTER_INSTALL_CAPABILITY_HANDLE != ""',
+    "System::Call 'kernel32::CloseHandle(p $AI_SISTER_INSTALL_CAPABILITY_HANDLE)'",
+    'StrCpy $AI_SISTER_INSTALL_CAPABILITY_HANDLE ""',
+    "${EndIf}",
+    "System::Call 'kernel32::CloseHandle(p $AI_SISTER_INSTALL_LIFECYCLE_HANDLE)'",
+    'StrCpy $AI_SISTER_INSTALL_LIFECYCLE_HANDLE ""',
+    "${EndIf}",
+    "!macroend",
+    "!macro AI_SISTER_FAIL_INSTALL_LIFECYCLE message",
+    "!insertmacro AI_SISTER_RELEASE_INSTALL_LIFECYCLE",
+    "${IfNot} ${Silent}",
+    'MessageBox MB_ICONSTOP|MB_OK "$(${message})"',
+    "${EndIf}",
+    "SetErrorLevel 32",
+    "Quit",
+    "!macroend",
+    "!macro AI_SISTER_PROBE_PRODUCT_LIFECYCLE",
+    "System::Call 'kernel32::SetLastError(i 0)'",
+    'System::Call \'kernel32::OpenEventW(i 0x00100000, i 0, w "Global\\com.ted-h.ai-sister-product-lifecycle-v1") p.r0 ?e\'',
+    "Pop $R1",
+    "${If} $0 != 0",
+    "System::Call 'kernel32::CloseHandle(p r0) i.r3'",
+    "${If} $3 = 0",
+    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
+    "${EndIf}",
+    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterProductLifecycleBusy",
+    "${EndIf}",
+    "${If} $R1 != 2",
+    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
+    "${EndIf}",
+    "!macroend",
+    "!macro AI_SISTER_ACQUIRE_INSTALL_LIFECYCLE publishCapability",
+    "System::Call 'kernel32::SetLastError(i 0)'",
+    'System::Call \'kernel32::CreateMutexW(p 0, i 0, w "Global\\com.ted-h.ai-sister-install-lifecycle-v1") p.r0 ?e\'',
+    "Pop $R1",
+    "${If} $0 = 0",
+    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
+    "${EndIf}",
+    "${If} $R1 = 183",
+    "System::Call 'kernel32::CloseHandle(p r0)'",
+    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallBusy",
+    "${EndIf}",
+    "StrCpy $AI_SISTER_INSTALL_LIFECYCLE_HANDLE $0",
+    '!if "${publishCapability}" == "1"',
+    "System::Call 'kernel32::GetCurrentProcessId() i.r2'",
+    'StrCpy $2 "Local\\com.ted-h.ai-sister-install-parent-$2"',
+    "System::Call 'kernel32::SetLastError(i 0)'",
+    "System::Call 'kernel32::CreateEventW(p 0, i 1, i 0, w r2) p.r0 ?e'",
+    "Pop $R1",
+    "${If} $0 = 0",
+    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
+    "${EndIf}",
+    "${If} $R1 = 183",
+    "System::Call 'kernel32::CloseHandle(p r0)'",
+    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
+    "${EndIf}",
+    "StrCpy $AI_SISTER_INSTALL_CAPABILITY_HANDLE $0",
+    'System::Call \'kernel32::SetEnvironmentVariableW(w "AI_SISTER_INSTALL_LIFECYCLE_CAPABILITY", w r2) i.r0\'',
+    "${If} $0 = 0",
+    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
+    "${EndIf}",
+    "!endif",
+    "!insertmacro AI_SISTER_PROBE_PRODUCT_LIFECYCLE",
+    'ReadEnvStr $R0 "AI_SISTER_DIAGNOSTIC_INSTALL_DELAY_MS"',
+    '${If} $R0 = "15000"',
+    "Sleep 15000",
+    "${EndIf}",
+    "!macroend",
+    "!macro AI_SISTER_ENSURE_INSTALL_LIFECYCLE",
+    '${If} $AI_SISTER_INSTALL_LIFECYCLE_HANDLE = ""',
+    "!insertmacro AI_SISTER_ACQUIRE_INSTALL_LIFECYCLE 1",
+    "${EndIf}",
+    "!macroend",
+    "!macro AI_SISTER_ENSURE_UNINSTALL_LIFECYCLE",
+    '${If} $AI_SISTER_INSTALL_LIFECYCLE_HANDLE = ""',
+    '${AndIf} $AI_SISTER_INSTALL_LIFECYCLE_BORROWED != "1"',
+    'ReadEnvStr $2 "AI_SISTER_INSTALL_LIFECYCLE_CAPABILITY"',
+    '${If} $2 = ""',
+    "!insertmacro AI_SISTER_ACQUIRE_INSTALL_LIFECYCLE 0",
+    "${Else}",
+    "System::Call 'kernel32::SetLastError(i 0)'",
+    'System::Call \'kernel32::OpenMutexW(i 0x00100000, i 0, w "Global\\com.ted-h.ai-sister-install-lifecycle-v1") p.r0 ?e\'',
+    "Pop $R1",
+    "${If} $0 = 0",
+    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
+    "${EndIf}",
+    "System::Call 'kernel32::SetLastError(i 0)'",
+    "System::Call 'kernel32::OpenEventW(i 0x00100000, i 0, w r2) p.r3 ?e'",
+    "Pop $R1",
+    "${If} $3 = 0",
+    "System::Call 'kernel32::CloseHandle(p r0)'",
+    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
+    "${EndIf}",
+    "System::Call 'kernel32::CloseHandle(p r3) i.r1'",
+    "${If} $1 = 0",
+    "System::Call 'kernel32::CloseHandle(p r0)'",
+    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
+    "${EndIf}",
+    "StrCpy $AI_SISTER_INSTALL_LIFECYCLE_HANDLE $0",
+    'StrCpy $AI_SISTER_INSTALL_LIFECYCLE_BORROWED "1"',
+    "${EndIf}",
+    "${EndIf}",
+    "!macroend",
+    "!macro AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN",
+    'ReadEnvStr $R0 "AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN_MS"',
+    '${If} $R0 = "5000"',
+    "System::Call 'kernel32::SetLastError(i 0)'",
+    'System::Call \'kernel32::CreateMutexW(p 0, i 0, w "Global\\com.ted-h.ai-sister-install-after-process-scan-v1") p.r0 ?e\'',
+    "Pop $R1",
+    "${If} $0 = 0",
+    "!insertmacro AI_SISTER_RELEASE_INSTALL_LIFECYCLE",
+    "SetErrorLevel 32",
+    "Quit",
+    "${EndIf}",
+    "${If} $R1 = 183",
+    "System::Call 'kernel32::CloseHandle(p r0)'",
+    "!insertmacro AI_SISTER_RELEASE_INSTALL_LIFECYCLE",
+    "SetErrorLevel 32",
+    "Quit",
+    "${EndIf}",
+    "StrCpy $AI_SISTER_DIAGNOSTIC_AFTER_SCAN_HANDLE $0",
+    "Sleep 5000",
+    "System::Call 'kernel32::CloseHandle(p $AI_SISTER_DIAGNOSTIC_AFTER_SCAN_HANDLE)'",
+    'StrCpy $AI_SISTER_DIAGNOSTIC_AFTER_SCAN_HANDLE ""',
+    "${EndIf}",
+    "!macroend",
     "!macro AI_SISTER_REQUIRE_STOPPED executableName",
     'nsis_tauri_utils::FindProcessCurrentUser "${executableName}"',
     "Pop $R0",
     "${If} $R0 = 0",
+    "!insertmacro AI_SISTER_RELEASE_INSTALL_LIFECYCLE",
     "${IfNot} ${Silent}",
     'MessageBox MB_ICONSTOP|MB_OK "$(aiSisterStillRunning)"',
     "${EndIf}",
@@ -302,13 +458,50 @@ expected_hook_lines = [
     "Quit",
     "${EndIf}",
     "!macroend",
-    "!macro NSIS_HOOK_PREINSTALL",
+    "!macroundef SetContext",
+    "!macro SetContext",
+    "!ifndef __UNINSTALL__",
+    "!insertmacro AI_SISTER_ENSURE_INSTALL_LIFECYCLE",
+    '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister-desktop.exe"',
+    '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister.exe"',
+    "!endif",
+    '!if "${INSTALLMODE}" == "currentUser"',
+    "SetShellVarContext current",
+    '!else if "${INSTALLMODE}" == "perMachine"',
+    "SetShellVarContext all",
+    "!endif",
+    "${If} ${RunningX64}",
+    '!if "${ARCH}" == "x64"',
+    "SetRegView 64",
+    '!else if "${ARCH}" == "arm64"',
+    "SetRegView 64",
+    "!else",
+    "SetRegView 32",
+    "!endif",
+    "${EndIf}",
+    "!macroend",
+    "!macroundef CheckIfAppIsRunning",
+    "!macro CheckIfAppIsRunning executableName productName",
     '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister-desktop.exe"',
     '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister.exe"',
     "!macroend",
-    "!macro NSIS_HOOK_PREUNINSTALL",
+    "!macro NSIS_HOOK_PREINSTALL",
+    "!insertmacro AI_SISTER_ENSURE_INSTALL_LIFECYCLE",
     '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister-desktop.exe"',
     '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister.exe"',
+    "!insertmacro AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN",
+    "!macroend",
+    "!macro NSIS_HOOK_POSTINSTALL",
+    "!insertmacro AI_SISTER_RELEASE_INSTALL_LIFECYCLE",
+    "!macroend",
+    "!macro NSIS_HOOK_PREUNINSTALL",
+    "!insertmacro AI_SISTER_ENSURE_UNINSTALL_LIFECYCLE",
+    '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister-desktop.exe"',
+    '!insertmacro AI_SISTER_REQUIRE_STOPPED "sister.exe"',
+    "!insertmacro AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN",
+    "!macroend",
+    "!macro NSIS_HOOK_POSTUNINSTALL",
+    "!insertmacro AI_SISTER_RELEASE_INSTALL_LIFECYCLE",
     "!macroend",
 ]
 
@@ -360,6 +553,26 @@ if actual_hook_lines != expected_hook_lines:
         f"{difference}"
     )
 
+rust_lifecycle = pathlib.Path("crates/sister-core/src/install_lifecycle.rs").read_text(
+    encoding="utf-8"
+)
+expected_rust_mutex = (
+    'pub const INSTALL_LIFECYCLE_MUTEX_NAME: &str = '
+    '"Global\\\\com.ted-h.ai-sister-install-lifecycle-v1";'
+)
+if rust_lifecycle.count(expected_rust_mutex) != 1:
+    raise SystemExit(
+        "✗ Rust 產品入口與 NSIS hook 不再共用 exact installer lifecycle mutex name"
+    )
+expected_rust_product_event = (
+    'pub const PRODUCT_LIFECYCLE_EVENT_NAME: &str = '
+    '"Global\\\\com.ted-h.ai-sister-product-lifecycle-v1";'
+)
+if rust_lifecycle.count(expected_rust_product_event) != 1:
+    raise SystemExit(
+        "✗ Rust 產品 guard 與 NSIS hook 不再共用 exact product lifecycle event name"
+    )
+
 expected_keys = {
     "addOrReinstall", "alreadyInstalled", "alreadyInstalledLong", "appRunning",
     "appRunningOkKill", "chooseMaintenanceOption", "choowHowToInstall", "createDesktop",
@@ -368,6 +581,7 @@ expected_keys = {
     "unableToUninstall", "uninstallApp", "uninstallBeforeInstalling", "unknown",
     "webview2AbortError", "webview2DownloadError", "webview2DownloadSuccess",
     "webview2Downloading", "webview2InstallError", "webview2InstallSuccess", "deleteAppData",
+    "aiSisterInstallBusy", "aiSisterInstallLockUnknown", "aiSisterProductLifecycleBusy",
     "aiSisterStillRunning",
 }
 expected_delete_copy = {
@@ -375,8 +589,20 @@ expected_delete_copy = {
     "English": "Clear desktop-shell data (AI-Sister memories are kept)",
 }
 expected_running_copy = {
-    "TradChinese": "AI-Sister 仍在執行。請先從系統匣結束桌面程式並停止 recorder，再重新執行。這次操作沒有強制關閉任何程式。",
-    "English": "AI-Sister is still running. Exit the desktop app from the tray and stop the recorder, then try again. No process was force-closed.",
+    "TradChinese": "這次檢查找到目前使用者名為 sister-desktop.exe 或 sister.exe 的行程。目前安裝／移除區段沒有要求關閉偵測到的行程；請自行結束桌面程式並停止 recorder，再試一次。",
+    "English": "This check found a current-user process named sister-desktop.exe or sister.exe. The current install or uninstall section did not request that process to close. Exit the desktop app and stop the recorder, then try again.",
+}
+expected_install_busy_copy = {
+    "TradChinese": "AI-Sister 安裝安全鎖已存在。這次操作已在修改 AI-Sister 程式檔或安裝登錄前停止；請等相關操作結束後再試一次。",
+    "English": "The AI-Sister installer safety lock already exists. This operation stopped before changing AI-Sister program files or install registry entries; wait for the related operation to finish, then try again.",
+}
+expected_install_lock_unknown_copy = {
+    "TradChinese": "無法建立或驗證 AI-Sister 安裝安全鎖。這次操作已在修改 AI-Sister 程式檔或安裝登錄前停止；請確認目前狀態後再試一次。",
+    "English": "AI-Sister could not establish or verify its installer safety lock. This operation stopped before changing AI-Sister program files or install registry entries; verify the current state and try again.",
+}
+expected_product_lifecycle_busy_copy = {
+    "TradChinese": "偵測到 AI-Sister 產品生命週期鎖。目前安裝／移除區段沒有繼續，也沒有要求關閉產品行程；請自行結束桌面程式並停止 recorder，再試一次。",
+    "English": "The AI-Sister product lifecycle lock was found. This install or uninstall section did not continue and did not request a product process to close. Exit the desktop app and stop the recorder, then try again.",
 }
 lang_line = re.compile(r'^LangString ([A-Za-z0-9]+) \$\{LANG_([A-Z]+)\} "(.*)"$')
 for language, relative_path in expected_language_files.items():
@@ -405,6 +631,18 @@ for language, relative_path in expected_language_files.items():
         raise SystemExit(f"✗ {path} 又把外殼資料說成 AI-Sister 記憶：{messages['deleteAppData']!r}")
     if messages["aiSisterStillRunning"] != expected_running_copy[language]:
         raise SystemExit(f"✗ {path} 的執行中拒絕文案不再是已稽核版本：{messages['aiSisterStillRunning']!r}")
+    if messages["aiSisterInstallBusy"] != expected_install_busy_copy[language]:
+        raise SystemExit(f"✗ {path} 的並行安裝拒絕文案不再是已稽核版本：{messages['aiSisterInstallBusy']!r}")
+    if messages["aiSisterInstallLockUnknown"] != expected_install_lock_unknown_copy[language]:
+        raise SystemExit(
+            f"✗ {path} 的安裝鎖未知文案不再是已稽核版本："
+            f"{messages['aiSisterInstallLockUnknown']!r}"
+        )
+    if messages["aiSisterProductLifecycleBusy"] != expected_product_lifecycle_busy_copy[language]:
+        raise SystemExit(
+            f"✗ {path} 的產品 lifecycle 拒絕文案不再是已稽核版本："
+            f"{messages['aiSisterProductLifecycleBusy']!r}"
+        )
 
 
 def contains_key(value: object, wanted: str) -> bool:

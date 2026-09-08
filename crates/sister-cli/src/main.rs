@@ -616,6 +616,24 @@ fn main() -> Result<()> {
         return macos_ci::run(&directory);
     }
 
+    #[cfg(windows)]
+    let _product_lifecycle_guard = match sister_core::install_lifecycle::enter_product_lifecycle() {
+        Ok(guard) => guard,
+        Err(sister_core::install_lifecycle::InstallerAdmission::InProgress) => {
+            anyhow::bail!(
+                "偵測到 AI-Sister 安裝安全鎖；這次沒有進入產品功能，也沒有建立產品 log 或讀寫 AI-Sister 記憶／設定。請在相關操作結束後再試一次。"
+            );
+        }
+        Err(sister_core::install_lifecycle::InstallerAdmission::Uncheckable) => {
+            anyhow::bail!(
+                "無法確認 AI-Sister 安裝安全鎖是否存在；為避免在程式檔可能變動時進入產品功能，這次沒有建立產品 log，也沒有讀寫 AI-Sister 記憶或設定。"
+            );
+        }
+        Err(sister_core::install_lifecycle::InstallerAdmission::Clear) => {
+            unreachable!("clear admission is never returned as an error")
+        }
+    };
+
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()

@@ -10,7 +10,7 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.112 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+alpha.113 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
@@ -21,6 +21,47 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
+
+### alpha.113 先驗 installer admission 的實際邊界
+
+alpha.113 產出的 Setup 透過 pinned `SetContext` 在 `.onInit` 取得 lifecycle mutex，早於
+`PageLeaveReinstall`、WiX、WebView2 與 payload／登錄；成功路徑持有到 `POSTINSTALL`。
+direct uninstaller 在確認頁後的 `PREUNINSTALL` 才取得，成功路徑持有到
+`POSTUNINSTALL`；拒絕先釋放，取消由 process teardown 關閉。由 Setup 啟動的
+alpha.113+ child 要驗 inherited dynamic capability，再借用 parent marker。alpha.113-aware
+desktop／CLI 則在產品狀態前做 mutex → product event → mutex 握手，並把 event 持有到行程
+結束；installer 取得 mutex 後只有明確量到 event 不存在才繼續。
+
+本版產生的 sections 不呼叫 kill；舊 binary 仍只靠 `FindProcessCurrentUser` 的 best-effort
+image-name scan。這支 scanner 沒有 Unknown，snapshot、token 或 SID error 會和未找到合併；
+較舊／WiX PageLeave child 也保留自己的版本行為。原生 Windows CI **只跑 `/S`**：acquire
+window 是 exact 15 秒，after-scan window 是 5 秒；它沒有跑 interactive／passive PageLeave，
+也沒有證明 scanner error 會拒絕。下列未勾項才是人工邊界。
+
+- [ ] 先各讓 alpha.113-aware installed desktop／recorder 穩定存活，再跑 silent／interactive
+      Setup；兩種都應拒絕且保留原 PID、install root 與安裝登錄。recorder 活著時另跑 direct
+      uninstaller，確認頁之後仍須拒絕。畫面不可出現 Tauri stock 的「替你關閉再繼續」。若要
+      隔離 event authority，可把同版 CLI 複製成非 allowlist 檔名後用 disposable data dir 執行；
+      Setup 仍應因 product event 拒絕，而不是靠 image-name hit。
+- [ ] 在 `AI_SISTER_DIAGNOSTIC_INSTALL_DELAY_MS=15000` 的 `/S` acquire window 啟動帶協定的
+      portable desktop／CLI，再啟動第二份 Setup。產品必須在 log、DB、WebView、記憶或設定前
+      exit，第二份 Setup 也必須在 mutation 前 exit 32；第一份是唯一 owner。逐檔比對 payload、
+      uninstall metadata、Run value 與無關 registry fixture。
+- [ ] 以已安裝的 alpha.113+ 走 interactive「先移除再安裝」，並在有較新版 artifact 時補跑
+      passive upgrade。PageLeave child 不得因 parent mutex 自撞；child 執行期間 parent marker
+      必須一直存在，而且 child 自己開到的 fixed-mutex handle 必須讓 parent 被終止後仍維持
+      barrier 到 child 完成；正常完成後由 parent 繼續持有。alpha.112／WiX child 不懂 capability；
+      外層 marker 仍會擋 aware product，但不把 child 自己的 no-kill／scanner 行為算成
+      alpha.113 保證。
+- [ ] 在 `AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN_MS=5000` 的 `/S` after-scan window，分兩次
+      放入不懂 event、但 image name 精確是 `sister-desktop.exe`／`sister.exe` 的 bounded fixture。
+      stock-position scan 回報命中後 Setup／uninstaller 必須拒絕且保留原 PID。這只證明一般
+      可列舉 fixture 的 reported-hit/no-kill；elevated／unqueryable process 或 scanner native
+      error 仍可能被當成未找到。
+- [ ] **installer late-start 仍未結案。** 舊 binary 不持有 product event，legacy scan 又可能
+      漏掉 query failure；另把新版 binary 啟動夾在最後一次 scan 與 NSIS `File` 之間時，Windows
+      loader 已可能在 Rust `main` admission 前映射 executable。沒有 old-binary bridge 與
+      file-level exclusion 前，本項保持未勾，不得稱為跨版本完整原子 lifecycle。
 
 ### alpha.112 先驗圖像選角與公開版跨版升級
 
@@ -292,6 +333,8 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
 
 ### alpha.106 先做兩段人工確認
 
+- alpha.106 下列項目保留為歷史 baseline；最新 artifact 的 forced-kill 覆寫與 admission
+  mutex 邊界先照上方 alpha.113 小節驗，不以本節較舊的「檢查當下 PID」範圍取代。
 - **installer：** 先斷網再跑 `AI-Sister-Setup.exe`；WebView2 已內嵌，安裝不應要求
   連線。開起來後再開一次，只能把原視窗叫回來，不能多一份 desktop，也不能讓
   recorder 停掉。先讓 desktop／recorder 穩定活著，再各自重跑 installer：兩次都應

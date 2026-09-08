@@ -27,4 +27,7 @@ LangString webview2Downloading ${LANG_ENGLISH} "Downloading WebView2 bootstrappe
 LangString webview2InstallError ${LANG_ENGLISH} "Error: Installing WebView2 failed with exit code $1"
 LangString webview2InstallSuccess ${LANG_ENGLISH} "WebView2 installed successfully"
 LangString deleteAppData ${LANG_ENGLISH} "Clear desktop-shell data (AI-Sister memories are kept)"
-LangString aiSisterStillRunning ${LANG_ENGLISH} "AI-Sister is still running. Exit the desktop app from the tray and stop the recorder, then try again. No process was force-closed."
+LangString aiSisterStillRunning ${LANG_ENGLISH} "This check found a current-user process named sister-desktop.exe or sister.exe. The current install or uninstall section did not request that process to close. Exit the desktop app and stop the recorder, then try again."
+LangString aiSisterInstallBusy ${LANG_ENGLISH} "The AI-Sister installer safety lock already exists. This operation stopped before changing AI-Sister program files or install registry entries; wait for the related operation to finish, then try again."
+LangString aiSisterInstallLockUnknown ${LANG_ENGLISH} "AI-Sister could not establish or verify its installer safety lock. This operation stopped before changing AI-Sister program files or install registry entries; verify the current state and try again."
+LangString aiSisterProductLifecycleBusy ${LANG_ENGLISH} "The AI-Sister product lifecycle lock was found. This install or uninstall section did not continue and did not request a product process to close. Exit the desktop app and stop the recorder, then try again."

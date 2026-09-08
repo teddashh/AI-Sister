@@ -24,10 +24,20 @@ exact 大小以該 tag 的 asset 為準。正式 artifact 的斷網安裝仍待�
 免安裝使用或診斷 installer 問題時，請把兩個檔放在同一個資料夾。
 
 目前 installer 沒有 code signing，也沒有內建自動 updater。升級是使用者手動下載新版
-`AI-Sister-Setup.exe`，先自行結束 desktop 並停止 recorder，再重新執行；安裝檢查開始時
-已活著的任一行程會讓這次操作拒絕，不會被自訂 hook 強制關閉。alpha.106 尚有一個窄
-競態：desktop 若在 hook 放行後才啟動，Tauri stock silent check 仍可能強制結束它；
-recorder 若此時才啟動則不會被 stock 重查，安裝／移除可能只做一部分。
+`AI-Sister-Setup.exe`，先自行結束 desktop 並停止 recorder，再重新執行。alpha.113 起，本版
+產生的 sections 覆寫 Tauri stock running-app macro；legacy current-user scanner 回報
+`sister-desktop.exe`／`sister.exe` 命中時只拒絕，不提供或執行 forced kill。Setup 在
+`.onInit` 取得 lifecycle mutex，成功路徑持有到 `POSTINSTALL`；direct uninstall 在
+`PREUNINSTALL` 取得，成功路徑持有到 `POSTUNINSTALL`。拒絕先釋放，取消由 process teardown
+關閉；alpha.113+ PageLeave child 驗證 inherited dynamic capability 後借用 parent
+marker。帶協定的 desktop／CLI 以 product event + mutex／event／mutex handshake 在產品狀態前
+和 installer 交接，無關的第二份 Setup 也不能同時進入 lifecycle。
+
+這仍不是跨版本完整原子 lifecycle。legacy scanner 沒有 Unknown，process 列舉或 token／SID
+查詢失敗會和未找到合併；舊 binary 不持有 event。較舊 PageLeave child 執行時外層 marker
+仍會擋 aware product，但 child 仍依自己的版本行為。Windows loader 又在 Rust `main` 前映射
+executable，最後一次 legacy scan 到 NSIS `File` 之間仍有窄窗。installer late-start 因此仍是
+Release 1.0 未完成項。
 
 ```
 sister.exe doctor                 # 先看這個：她在這台機器上做得到什麼
@@ -57,6 +67,50 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
+
+
+## v0.1.0-alpha.113
+
+**這一版讓本版產生的 installer／uninstaller sections 不再走 Tauri forced-kill macro，並為
+alpha.113-aware installer、desktop 與 CLI 加入雙向 admission；舊 binary 與 pre-main
+loader／`File` 窄窗仍不是完整原子 lifecycle。**
+
+自訂 NSIS hook 覆寫 pinned `CheckIfAppIsRunning`。silent／interactive 都會檢查
+`sister-desktop.exe` 與 `sister.exe`；scanner **回報命中時**，目前 section 先釋放自己的
+marker 或結束 borrow，再以 32 拒絕，不顯示「替你關閉」選項，也不呼叫 kill。但 pinned
+`FindProcessCurrentUser` 沒有 Unknown；snapshot、OpenProcess、token 或 SID 查詢失敗會和
+not-found 合併；它仍掃所有 matching image name，作為向後相容與 pre-main fallback，而不是
+aware admission authority。若 Setup 在 PageLeave 執行較舊 installed uninstaller，外層 marker
+仍會擋 aware product；但 child 保留自己的版本行為，不能由本版 no-kill 規則代為保證。
+
+Setup 覆寫 pinned `SetContext`，在 `.onInit` 取得 fixed lifecycle mutex，早於
+`PageLeaveReinstall`、WiX migration、WebView2 與 payload／registry；成功 mutation path 持有到
+`POSTINSTALL`。它建立 per-parent dynamic named event，透過 Setup process environment 把名稱
+傳給後續 child；alpha.113+ PageLeave uninstaller 必須同時驗證 parent mutex 與該 event，才
+借用 marker，而且不關閉 parent handles。child 會把自己 OpenMutex 得到的 handle 持有到
+`POSTUNINSTALL`；即使等待它的 parent 異常退出，fixed object 也不會在 child mutation 中途
+消失。direct uninstaller 則在確認頁後、任何移除動作前的
+`PREUNINSTALL` 自行取得 mutex，成功 mutation path 持有到 `POSTUNINSTALL`。拒絕先釋放；取消
+或 process exit 由 OS 關閉 handle。無關的第二份 Setup 不信任 ambient capability，會在
+`.onInit` fail closed。
+
+alpha.113-aware desktop／CLI 在產品 log、DB、WebView、記憶或設定之前依序探測 installer
+mutex、建立 shared product event、再探測 mutex，並把 event 持有到行程結束。installer 取得
+mutex 後探測 event；只有明確的 missing 才繼續，present、close failure 或其他 native error
+都拒絕。這個 mutex／event／mutex handshake 是 aware-product 的 admission authority，
+image-name scan 不是。
+
+原生 Windows release gate 的 installer lanes 只走 `/S`。acquire window 只接受 exact
+`15000`，after-scan window 只接受 exact `5000`；前者驗 installer-first 的 desktop／CLI early
+exit 與第二份 Setup refusal，後者用一般可列舉的同名 fixture 驗 reported-hit/no-kill。`/S`
+不執行 PageLeave callback，fixture 也沒有製造 snapshot／token／SID error，所以這些 receipts
+不冒充 interactive child handoff 或 legacy scanner fail closed。
+
+Release 1.0 的 installer late-start 格仍維持未勾。舊 binary 不持有 product event；legacy
+scanner 可能漏掉無法查詢的 process。即使是 alpha.113-aware binary，Windows loader 也在
+Rust `main` admission 前先映射 executable，因此最後一次 legacy scan → NSIS `File` 仍可能
+撞到 image mapping。未加入 old-binary bridge 或 file-level exclusion 前，本版不承諾跨版本
+install／uninstall 全段原子。
 
 
 ## v0.1.0-alpha.112
