@@ -29,6 +29,17 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 
+# PowerShell uses Console.OutputEncoding when it turns redirected native stdout
+# and stderr into strings. GitHub's Windows images have not always agreed on
+# that process-wide default, while sister and Python deliberately emit UTF-8.
+# Pin the console for readable logs and $OutputEncoding for the Python scripts
+# piped over stdin. Machine-checked CLI output also goes through the stricter
+# per-process decoder in Invoke-NativeUtf8 below.
+$utf8NoBom = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = $utf8NoBom
+[Console]::InputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
+
 # This is deliberately a CI-only destructive smoke: NSIS owns a fixed current-user
 # uninstall key, and the product owns a fixed HKCU Run value. Keeping that fact in
 # the script prevents somebody from running a "harmless checker" on their daily
@@ -41,6 +52,7 @@ if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
 }
 
 $baselineVersion = '0.1.0-alpha.110'
+$expectedCurrentVersion = '0.1.0-alpha.112'
 $baselineUrl = 'https://github.com/teddashh/AI-Sister/releases/download/v0.1.0-alpha.110/AI-Sister-Setup.exe'
 [int64] $baselineSetupBytes = 305417570
 $baselineSetupSha256 = '3e661803d1b1d867aae0281e56baeb6a165b9178069ad912dc0c8869d1521965'
@@ -145,35 +157,130 @@ function Assert-NsisDesktopPayload([string] $InstalledPath, [string] $PortablePa
   }
 }
 
-function Read-CliVersion([string] $Path, [string] $Label) {
-  $lines = @(& $Path --version 2>&1)
-  $exitCode = $LASTEXITCODE
-  if ($exitCode -ne 0) {
-    throw "$Label --version 失敗，exit=$exitCode output=$($lines -join ' | ')"
+function Invoke-NativeUtf8 {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string] $Path,
+
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]] $Arguments,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateRange(1, 600)]
+    [int] $TimeoutSeconds,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string] $Label
+  )
+
+  # Setting Console.OutputEncoding is necessary for PowerShell's own native
+  # pipeline, but this checker must not silently fall back to a runner code page.
+  # Decode each captured stream as strict UTF-8 and fail on malformed bytes.
+  $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+  $startInfo = [Diagnostics.ProcessStartInfo]::new()
+  $startInfo.FileName = $Path
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  $startInfo.StandardOutputEncoding = $strictUtf8
+  $startInfo.StandardErrorEncoding = $strictUtf8
+  foreach ($argument in $Arguments) {
+    if ($null -eq $argument) {
+      throw "$Label 的 native argument 不得是 null"
+    }
+    $startInfo.ArgumentList.Add($argument)
   }
-  if ($lines.Count -ne 1) {
-    throw "$Label --version 沒有回唯一一行：$($lines -join ' | ')"
+
+  $process = [Diagnostics.Process]::new()
+  $process.StartInfo = $startInfo
+  try {
+    if (-not $process.Start()) {
+      throw "$Label native process 沒有啟動"
+    }
+
+    # Start both drains before waiting so neither full pipe can deadlock the
+    # child. The process wait itself is bounded; a timed-out child is killed as
+    # a tree and gets only another bounded interval to disappear.
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    [int] $timeoutMilliseconds = $TimeoutSeconds * 1000
+    if (-not $process.WaitForExit($timeoutMilliseconds)) {
+      $killFailure = $null
+      try {
+        $process.Kill($true)
+      }
+      catch {
+        $killFailure = $_.Exception.Message
+      }
+      $stoppedAfterKill = $process.WaitForExit(5000)
+      if (-not $stoppedAfterKill) {
+        throw "$Label 超過 $TimeoutSeconds 秒，kill 後 5 秒仍未結束；kill_error=$killFailure"
+      }
+      throw "$Label 超過 $TimeoutSeconds 秒，已終止；kill_error=$killFailure"
+    }
+
+    try {
+      $stdout = $stdoutTask.GetAwaiter().GetResult()
+      $stderr = $stderrTask.GetAwaiter().GetResult()
+    }
+    catch {
+      throw "$Label stdout/stderr 不是合法 UTF-8：$($_.Exception.Message)"
+    }
+
+    return [pscustomobject]@{
+      ExitCode = [int] $process.ExitCode
+      Stdout = [string] $stdout
+      Stderr = [string] $stderr
+    }
   }
-  $match = [regex]::Match([string] $lines[0], '^sister (?<version>[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+)$')
-  if (-not $match.Success) {
-    throw "$Label --version 格式未知：$($lines[0])"
+  finally {
+    $process.Dispose()
   }
-  return $match.Groups['version'].Value
 }
 
-function Assert-AdjacentVersion([string] $OldVersion, [string] $NewVersion) {
-  $pattern = '^(?<base>[0-9]+\.[0-9]+\.[0-9]+-alpha\.)(?<number>[0-9]+)$'
-  $old = [regex]::Match($OldVersion, $pattern)
-  $new = [regex]::Match($NewVersion, $pattern)
-  if (-not $old.Success -or -not $new.Success) {
-    throw "無法證明版本相鄰：old=$OldVersion new=$NewVersion"
+function Assert-NativeUtf8Probe([string] $Python) {
+  # Keep the Python program itself ASCII-only: these are fixed UTF-8 bytes, so
+  # this proves stdout and stderr decoding instead of merely round-tripping the
+  # runner's current code page.
+  $probeSource = 'import os; os.write(1, bytes.fromhex("5554462d38207374646f7574efbc9ae4b8ade88fafe99bbbe4bfa10a")); os.write(2, bytes.fromhex("5554462d3820737464657272efbc9ae5b8b3e596aee69fa5e8a9a20a"))'
+  $result = Invoke-NativeUtf8 `
+    -Path $Python `
+    -Arguments @('-c', $probeSource) `
+    -TimeoutSeconds 15 `
+    -Label 'native UTF-8 雙流 probe'
+  $expectedStdout = "UTF-8 stdout：中華電信`n"
+  $expectedStderr = "UTF-8 stderr：帳單查詢`n"
+  if ($result.ExitCode -ne 0 -or
+      $result.Stdout -cne $expectedStdout -or
+      $result.Stderr -cne $expectedStderr) {
+    throw ("native UTF-8 雙流 probe 不符：exit={0} stdout=<{1}> stderr=<{2}>" -f `
+      $result.ExitCode, $result.Stdout, $result.Stderr)
   }
-  [int] $oldNumber = $old.Groups['number'].Value
-  [int] $newNumber = $new.Groups['number'].Value
-  if ($old.Groups['base'].Value -cne $new.Groups['base'].Value -or
-      $newNumber -ne ($oldNumber + 1)) {
-    throw "升級 baseline 必須是 immutable 直前版，不能把同版 reinstall 或跳版冒充相鄰升級：old=$OldVersion new=$NewVersion"
+}
+
+function Read-CliVersion([string] $Path, [string] $Label) {
+  $result = Invoke-NativeUtf8 `
+    -Path $Path `
+    -Arguments @('--version') `
+    -TimeoutSeconds 15 `
+    -Label "$Label --version"
+  if ($result.ExitCode -ne 0) {
+    throw "$Label --version 失敗，exit=$($result.ExitCode) stdout=$($result.Stdout) stderr=$($result.Stderr)"
   }
+  if (-not [string]::IsNullOrEmpty($result.Stderr)) {
+    throw "$Label --version 成功卻寫入 stderr：$($result.Stderr)"
+  }
+  $versionText = $result.Stdout.TrimEnd([char[]] @("`r", "`n"))
+  $match = [regex]::Match($versionText, '^sister (?<version>[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+)$')
+  if (-not $match.Success) {
+    throw "$Label --version 不是唯一一行已知格式：$($result.Stdout)"
+  }
+  return $match.Groups['version'].Value
 }
 
 function Invoke-Setup([string] $Path, [string] $Destination, [string] $Label) {
@@ -285,11 +392,18 @@ function Assert-TreeManifest([string] $Root, [string[]] $Expected, [string] $Fai
 }
 
 function Assert-BillQuery([string] $Sister, [string] $DataDir, [string] $ConfigPath, [string] $Label) {
-  $output = (& $Sister --data-dir $DataDir --config $ConfigPath query '電話' --json 2>&1 | Out-String)
-  $exitCode = $LASTEXITCODE
-  if ($exitCode -ne 0) {
-    throw "$Label query 失敗，exit=$exitCode output=$output"
+  $result = Invoke-NativeUtf8 `
+    -Path $Sister `
+    -Arguments @('--data-dir', $DataDir, '--config', $ConfigPath, 'query', '電話', '--json') `
+    -TimeoutSeconds 30 `
+    -Label "$Label query"
+  if ($result.ExitCode -ne 0) {
+    throw "$Label query 失敗，exit=$($result.ExitCode) stdout=$($result.Stdout) stderr=$($result.Stderr)"
   }
+  if (-not [string]::IsNullOrEmpty($result.Stderr)) {
+    throw "$Label query 成功卻寫入 stderr：$($result.Stderr)"
+  }
+  $output = $result.Stdout
   try {
     $json = $output | ConvertFrom-Json
   }
@@ -343,11 +457,18 @@ function Get-ConsentSnapshot(
     )
   }
   $arguments += '--json'
-  $raw = (& $Sister @arguments 2>&1 | Out-String)
-  $exitCode = $LASTEXITCODE
-  if ($exitCode -ne 0) {
-    throw "$Label consent --json 失敗，exit=$exitCode output=$raw"
+  $result = Invoke-NativeUtf8 `
+    -Path $Sister `
+    -Arguments $arguments `
+    -TimeoutSeconds 30 `
+    -Label "$Label consent --json"
+  if ($result.ExitCode -ne 0) {
+    throw "$Label consent --json 失敗，exit=$($result.ExitCode) stdout=$($result.Stdout) stderr=$($result.Stderr)"
   }
+  if (-not [string]::IsNullOrEmpty($result.Stderr)) {
+    throw "$Label consent --json 成功卻寫入 stderr：$($result.Stderr)"
+  }
+  $raw = $result.Stdout
   try {
     $json = $raw | ConvertFrom-Json
   }
@@ -562,11 +683,18 @@ function Assert-ExportedSyntheticEvidence(
   if (Test-Path -LiteralPath $ExportDir) {
     throw "export fixture 起點不是空的：$ExportDir"
   }
-  $exportOutput = (& $Sister --data-dir $DataDir --config $ConfigPath `
-    export --to $ExportDir --with-frames 2>&1 | Out-String)
-  $exportExit = $LASTEXITCODE
-  if ($exportExit -ne 0) {
-    throw "current export --with-frames 失敗，exit=$exportExit output=$exportOutput"
+  $exportResult = Invoke-NativeUtf8 `
+    -Path $Sister `
+    -Arguments @(
+      '--data-dir', $DataDir,
+      '--config', $ConfigPath,
+      'export', '--to', $ExportDir, '--with-frames'
+    ) `
+    -TimeoutSeconds 60 `
+    -Label 'current export --with-frames'
+  if ($exportResult.ExitCode -ne 0) {
+    throw ("current export --with-frames 失敗，exit={0} stdout={1} stderr={2}" -f `
+      $exportResult.ExitCode, $exportResult.Stdout, $exportResult.Stderr)
   }
 
   $exportedImage = Join-Path (Join-Path $ExportDir 'frames') $Evidence.RelativePath
@@ -577,11 +705,19 @@ function Assert-ExportedSyntheticEvidence(
     throw "exported frames/ 應只有 exact synthetic PNG，實際：$($exportedFrameFiles.FullName -join ', ')"
   }
   Assert-SyntheticEvidenceDb $Python (Join-Path $ExportDir 'sister.db') 'exported DB'
-  $statsRaw = (& $Sister --data-dir $ExportDir --config $ConfigPath stats --json 2>&1 | Out-String)
-  $statsExit = $LASTEXITCODE
-  if ($statsExit -ne 0) {
-    throw "exported DB stats 失敗，exit=$statsExit output=$statsRaw"
+  $statsResult = Invoke-NativeUtf8 `
+    -Path $Sister `
+    -Arguments @('--data-dir', $ExportDir, '--config', $ConfigPath, 'stats', '--json') `
+    -TimeoutSeconds 30 `
+    -Label 'exported DB stats --json'
+  if ($statsResult.ExitCode -ne 0) {
+    throw ("exported DB stats 失敗，exit={0} stdout={1} stderr={2}" -f `
+      $statsResult.ExitCode, $statsResult.Stdout, $statsResult.Stderr)
   }
+  if (-not [string]::IsNullOrEmpty($statsResult.Stderr)) {
+    throw "exported DB stats 成功卻寫入 stderr：$($statsResult.Stderr)"
+  }
+  $statsRaw = $statsResult.Stdout
   try {
     $stats = $statsRaw | ConvertFrom-Json
   }
@@ -645,8 +781,12 @@ $currentTauriConfigPath = Resolve-RequiredFile $CurrentTauriConfig 'current Taur
 $scenarioPath = Resolve-RequiredFile $Scenario 'replay scenario'
 $evidenceFixturePath = Resolve-RequiredFile $EvidenceFixture 'synthetic evidence source PNG'
 $python = Resolve-Python
+Assert-NativeUtf8Probe $python
 
 $currentVersion = Read-CliVersion $currentSisterPath 'current sister.exe'
+if ($currentVersion -cne $expectedCurrentVersion) {
+  throw "這份 upgrade gate 只替 expected current version 作證：reported=$currentVersion expected=$expectedCurrentVersion"
+}
 try {
   $tauriConfig = Get-Content -LiteralPath $currentTauriConfigPath -Raw | ConvertFrom-Json
 }
@@ -660,7 +800,6 @@ if ($null -eq $tauriConfig.PSObject.Properties['version'] -or
 if ([string] $tauriConfig.version -cne $currentVersion) {
   throw "current CLI 與 installer 版本不一致：CLI=$currentVersion Tauri=$($tauriConfig.version)"
 }
-Assert-AdjacentVersion $baselineVersion $currentVersion
 
 $scratchRoot = Join-Path $env:RUNNER_TEMP ("ai-sister-upgrade-{0}" -f [Guid]::NewGuid().ToString('N'))
 $baselineSetupPath = Join-Path $scratchRoot 'AI-Sister-alpha.110-Setup.exe'
@@ -739,7 +878,6 @@ try {
     throw "下載的 setup 沒有真的安裝舊版：reported=$oldVersion expected=$baselineVersion"
   }
 
-  $utf8NoBom = [Text.UTF8Encoding]::new($false)
   $configText = @'
 [capture]
 enabled = true
@@ -761,9 +899,24 @@ voice = "zh-TW-HsiaoYuNeural"
   [IO.File]::WriteAllText($sentinelPath, "alpha.110 external data`n", $utf8NoBom)
 
   $oldConsent = Get-ConsentSnapshot $absentSister $dataDir $configPath $true 'old installed binary'
-  & $absentSister --data-dir $dataDir --config $configPath replay $scenarioPath --days-ago 3
-  if ($LASTEXITCODE -ne 0) {
-    throw 'old installed sister.exe 建立 replay DB fixture 失敗'
+  $replayResult = Invoke-NativeUtf8 `
+    -Path $absentSister `
+    -Arguments @(
+      '--data-dir', $dataDir,
+      '--config', $configPath,
+      'replay', $scenarioPath, '--days-ago', '3'
+    ) `
+    -TimeoutSeconds 60 `
+    -Label 'old installed sister.exe replay DB fixture'
+  if (-not [string]::IsNullOrEmpty($replayResult.Stdout)) {
+    Write-Host -NoNewline $replayResult.Stdout
+  }
+  if (-not [string]::IsNullOrEmpty($replayResult.Stderr)) {
+    [Console]::Error.Write($replayResult.Stderr)
+  }
+  if ($replayResult.ExitCode -ne 0) {
+    throw ("old installed sister.exe 建立 replay DB fixture 失敗，exit={0} stdout={1} stderr={2}" -f `
+      $replayResult.ExitCode, $replayResult.Stdout, $replayResult.Stderr)
   }
   Assert-BillQuery $absentSister $dataDir $configPath 'old installed binary'
 
@@ -862,7 +1015,7 @@ voice = "zh-TW-HsiaoYuNeural"
   Invoke-UninstallAndWait $enabledInstallDir 'enabled lane'
   $activeInstallDir = $null
 
-  Write-Host "✓ 真相鄰版本 upgrade：$baselineVersion -> $currentVersion；absent/enabled Run 兩面、外部 state、四張 consent、query 與 synthetic evidence export 全部保留"
+  Write-Host "✓ 最後公開 baseline upgrade：$baselineVersion -> $currentVersion；absent/enabled Run 兩面、外部 state、四張 consent、query 與 synthetic evidence export 全部保留"
 }
 finally {
   # Best-effort cleanup on the disposable runner. Do not erase stateRoot: when a

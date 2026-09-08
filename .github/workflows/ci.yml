@@ -1468,11 +1468,11 @@ jobs:
           }
           Remove-ItemProperty -LiteralPath $runKey -Name $unrelatedRunName
 
-      # 這一場不能跟上面的 same-version reinstall 混在一起。它下載上一個 immutable
-      # release，先真的裝出舊 binary 與舊版 DB，再拿這一輪 NSIS 原地升級。腳本會要求
-      # baseline 與 current alpha 編號精確相鄰；版號還沒 bump、或忘了把 baseline 往前移，
-      # 都直接紅，不能把「其實又裝了同一版」印成跨版成功。
-      - name: Installer — pinned previous release to current upgrade preserves memory
+      # 這一場不能跟上面的 same-version reinstall 混在一起。它下載最後一個已公開、
+      # hash/bytes 固定的 immutable release，先真的裝出舊 binary 與舊版 DB，再拿這一輪
+      # NSIS 原地升級。腳本另釘 expected current version；即使中間的 release 沒有公開
+      # installer，也不能把「其實又裝了同一版」印成跨版成功。
+      - name: Installer — pinned last public release to current upgrade preserves memory
         shell: pwsh
         timeout-minutes: 30
         run: |

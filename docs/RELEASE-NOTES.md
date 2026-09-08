@@ -59,10 +59,55 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.112
+
+**alpha.111 tag 沒有公開 release 或下載資產；alpha.112 才是把 17 人圖像選角與
+公開舊版到新版 installer gate 交到使用者手上的版本。**
+
+alpha.111 的同一份 commit 在一般 main Windows run 曾跑完整支升級腳本，但 tag run
+多了一段 tag-only Windows 工作後，PowerShell 依賴 ambient native stdout encoding
+來接 `sister.exe` 的 UTF-8 JSON。舊版查詢回來的電話、frame、chunk、app 與 URL 都符合，
+中文視窗標題卻在進入 JSON parser 前變成 mojibake，因此 exact title assertion 正確變紅；
+流程停在安裝舊版後、真正覆蓋新版之前。這不是「migration 已經失敗」的證據，也不能拿
+main run 冒充 tag path 已通過。Windows job 失敗後 Release job 依 dependency gate 跳過，
+遠端沒有建立 draft，更沒有發布任何 alpha.111 asset。
+
+alpha.112 不刪中文斷言來換綠燈。升級腳本把 console input/output 與 PowerShell
+`$OutputEncoding` 固定為無 BOM UTF-8；需要機器判讀的 native CLI stdout/stderr 另由
+subprocess 分開收回，明確交給會拒絕非法位元組的 UTF-8 decoder。這讓同一份中文字串不再由
+runner 當下 code page 決定，同時保留電話事實的 raw/value、frame/chunk、app、完整繁中
+title 與 URL 全欄 exact compare。
+
+設定頁直接使用已隨程式提供、manifest 逐檔 pin 住的 17 張 WebP，分成四姊妹與
+13 位閨密的 native radio 圖像卡；不增加角色素材，也不在設定頁解碼 402 張 Reel layer。
+卡片可用鍵盤操作，縮圖讀不到時仍保留完整名稱，不會生出 Neutral 或單字母替身。
+點選只換本機預覽，並分清「尚未儲存」與設定檔目前是哪一位；只有頁尾儲存寫入成功
+才嘗試通知主視窗，事件沒送出會明講重開 desktop 後生效。設定頁本身也要成功讀回，
+才會把預覽稱為已存。選角過程不做 Persona GET、Azure POST、語音播放或 rig decode。
+
+升級 baseline 仍是最後一個真的有公開安裝檔、使用者可能正在使用的 alpha.110：Setup
+固定為 305,417,570 bytes、SHA-256
+`3e661803d1b1d867aae0281e56baeb6a165b9178069ad912dc0c8869d1521965`，安裝後的舊
+`sister.exe` 也另驗公開 bytes/hash。alpha.111 沒有 asset，所以腳本不捏造一份舊安裝檔，
+也不依賴會過期的 Actions artifact；它明確只接受 alpha.110 → alpha.112 這組
+last-public-to-current 路徑。這是真 old-binary → new-binary 升級，但不是數字相鄰版本。
+
+Run value 原本不存在與 exact enabled 分兩條 lane；前者不可被自動打開，後者的 REG_SZ
+與完整命令不可被清掉或改寫，無關 Run fixture 也不能動。installer 執行前後逐檔比對
+install root 外的 DB、config、consent、sentinel 與 synthetic evidence；再由新版已安裝
+`sister.exe` 解析舊版電話事實、frame/chunk/app/title 關聯、四張 consent 的原 timestamps，
+以及 Persona／default-off Azure typed region/voice 的非密設定。replay 沒有截圖像素，
+所以 gate 明確把 repo 內 pinned OCR PNG 接到隔離舊版資料庫的一筆 frame，升級後用
+`export --with-frames` 搬出並重驗 hash、DB integrity 與 foreign keys。這證明的是可匯出的
+synthetic evidence file association；沒有執行真人 OCR、`frame_get` 或 WebView2 出處 click。
+正式 artifact 的圖像選角、真資料升級、Run 登入與出處點擊仍列在 Windows 人工清單。
+
+
 ## v0.1.0-alpha.111
 
-**這一版把 17 位角色直接放到設定頁讓人看圖選，也第一次用公開舊版 installer
-跑真正的 old-binary → new-binary 升級。**
+**這個 tag 沒有公開 release 或下載資產。** 它原定把 17 位角色直接放到設定頁讓人看圖選，
+並第一次用公開舊版 installer 跑真正的 old-binary → new-binary 升級；tag-only Windows
+gate 因 ambient native stdout encoding 把繁中標題解錯而失敗，Release job 隨即跳過。
 
 「常駐角色」不再只是一列文字選單。設定頁使用已隨程式提供、manifest 逐檔 pin 住的
 17 張 WebP，分成四姊妹與 13 位閨密的 native radio 圖像卡；不另外增加角色素材，
@@ -73,25 +118,26 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 才會把預覽稱為已存。選角本身不做 IPC、
 Persona GET、Azure POST、語音播放或 rig decode。
 
-Windows CI 新增一支只准在 disposable GitHub Actions runner 執行的跨版閘門。它先下載
+這個 tag 的程式碼新增一支只准在 disposable GitHub Actions runner 執行的跨版閘門。它先下載
 公開 `v0.1.0-alpha.110` 的 `AI-Sister-Setup.exe`，要求精確 305,417,570 bytes 與
 SHA-256 `3e661803d1b1d867aae0281e56baeb6a165b9178069ad912dc0c8869d1521965`，真的安裝並驗出
-舊版 `sister.exe` 後，才拿這一輪 Setup 原地升級。baseline 與 current alpha 編號必須
-相鄰，不能把同版 reinstall 或改 registry 字串冒充升級。
+舊版 `sister.exe` 後，才準備拿這一輪 Setup 原地升級；不能把同版 reinstall 或改
+registry 字串冒充升級。
 
-Run value 原本不存在與 exact enabled 分兩條 old→new lane；前者不可被自動打開，後者的
-REG_SZ 與完整命令不可被清掉或改寫，無關 Run fixture 也不能動。installer 執行前後逐檔
-比對 install root 外的 DB、config、consent、sentinel 與 synthetic evidence，先證明安裝器
-沒有碰使用者狀態；再由新版已安裝 `sister.exe` 開啟資料庫，解析舊版寫入的電話事實、
-frame/chunk/app/title 關聯與四張 consent 的原 timestamps。非密設定包含 Persona 與
-default-off Azure typed region/voice，升級前後保持原 bytes。
+Run value 原本不存在與 exact enabled 原定分兩條 old→new lane；前者不可被自動打開，後者的
+REG_SZ 與完整命令不可被清掉或改寫，無關 Run fixture 也不能動。閘門預定在 installer
+執行前後逐檔比對 install root 外的 DB、config、consent、sentinel 與 synthetic evidence，
+再由新版已安裝 `sister.exe` 開啟資料庫，解析舊版寫入的電話事實、frame/chunk/app/title
+關聯與四張 consent 的原 timestamps。非密設定包含 Persona 與 default-off Azure typed
+region/voice，升級前後應保持原 bytes；alpha.111 tag 沒有跑到這一段。
 
-replay 本身沒有截圖像素，所以測試沒有拿一個非 null `frame_id` 冒充可點證據。它明確把
+replay 本身沒有截圖像素，所以設計沒有拿一個非 null `frame_id` 冒充可點證據。它明確把
 repo 內 pinned OCR PNG 接到隔離舊版資料庫的一筆 frame，標成 synthetic fixture；升級後
 由新版產品的 `export --with-frames` 搬出，重新核對 PNG hash、DB integrity／foreign keys，
-再從匯出資料夾查回同一筆答案。這證明 schema／查詢與可匯出 evidence file association
-跨版仍接得上；沒有執行 `frame_get`。正式 WebView2 的出處 click、真人 OCR、Run 登入與升級操作體驗仍要在
-Windows artifact 人工確認，沒有在 CI 裡冒充完成。
+再從匯出資料夾查回同一筆答案。這是閘門預定驗的 schema／查詢與可匯出 evidence file
+association；alpha.111 tag 在真正升級前已停止，不能把這份設計列成已通過的跨版證據。
+alpha.112 保留完整斷言並修正 stdout 解碼後重新執行。兩版都沒有執行 `frame_get`；正式
+WebView2 的出處 click、真人 OCR、Run 登入與升級操作體驗仍要在 Windows artifact 人工確認。
 
 
 ## v0.1.0-alpha.110

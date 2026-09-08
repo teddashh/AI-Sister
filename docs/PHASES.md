@@ -550,7 +550,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     都在 sanitized manifest；其他服裝、reaction、raw receipt、私有 path 與 debug
     圖不出貨。runtime 只建當前人的 21–26 層，全數解碼成功前繼續顯示
     WebP；任一檔壞掉也不轉成字母 fallback。
-  - ✅ alpha.111 把同一組 17 張 bundled WebP 直接畫成設定頁的圖像 radio 卡，分成
+  - ✅ alpha.112 把同一組 17 張 bundled WebP 直接畫成設定頁的圖像 radio 卡，分成
     四姊妹與 13 位閨密；鍵盤可操作，壞縮圖仍保留完整名稱。點選只換本機未存預覽，
     不做 IPC／GET／TTS 或 Reel decode。`settings_write` 成功後才嘗試通知主視窗；
     事件沒送出會明講重開 desktop 後生效。
@@ -615,8 +615,11 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     自我複製後不保證把 inner exit code 傳回 caller，所以只斷言行程與檔案未動。
     同版 reinstall 也**不是**真 old-binary → new-binary 的升級證據；silent NSIS 不會
     執行版本判斷頁，不能把 registry 改字當作升級測試。
-  - ✅ alpha.111 新增真正的相鄰版本 gate：只接受 bytes／SHA-256 pinned 的公開
-    alpha.110 Setup，先驗已安裝舊 binary，再用 current Setup 原地覆蓋。Run value
+  - ✅ alpha.112 新增從最後一個有公開安裝檔的版本出發的真跨版 gate：只接受
+    bytes／SHA-256 pinned 的公開 alpha.110 Setup，先驗已安裝舊 binary，再用 current
+    Setup 原地覆蓋。alpha.111 tag 的 Windows gate 因依賴 ambient native stdout 編碼
+    而失敗，Release job 跳過且沒有下載資產；因此這裡驗的是使用者實際拿得到的
+    alpha.110 → alpha.112，不把它寫成數字相鄰。Run value
     absent 與 exact enabled 分兩條 old→new lane；installer 本身不得改 install root 外的
     DB／config／consent／證據檔，之後再由新版 binary 開啟資料庫、精確解析舊查詢與四張
     consent，並用 `export --with-frames` 搬出同 hash 的 synthetic PNG。這證明可匯出的

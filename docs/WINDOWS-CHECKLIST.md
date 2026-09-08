@@ -10,7 +10,7 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.111 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+alpha.112 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
@@ -22,16 +22,18 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
 
-### alpha.111 先驗圖像選角與公開版跨版升級
+### alpha.112 先驗圖像選角與公開版跨版升級
 
-CI 會下載 bytes／SHA-256 pinned 的公開 alpha.110 Setup，分別從 Run value absent 與
-exact enabled 做兩次 alpha.110 → alpha.111 原地安裝；新版要重新查回舊 DB、四張同意、
-synthetic PNG 的 export 關聯；Persona／Azure 非密設定的原 bytes 要保留，並仍能由新版解析。
+alpha.111 tag 的 Windows gate 因 ambient native stdout 編碼讓中文標題被錯誤解碼而失敗，
+Release job 跳過，沒有公開 release 或下載資產。CI 因此從最後一個使用者實際拿得到的版本
+開始：下載 bytes／SHA-256 pinned 的公開 alpha.110 Setup，分別從 Run value absent 與
+exact enabled 做兩次 alpha.110 → alpha.112 原地安裝；這是真跨版，但不稱為數字相鄰。
+新版要重新查回舊 DB、四張同意、synthetic PNG 的 export 關聯；Persona／Azure 非密設定的原 bytes 要保留，並仍能由新版解析。
 這不等於真人看過設定頁，也不等於真 Windows
 OCR 或 WebView 出處 click 已通過。
 
 - [ ] 從 alpha.110 安裝版保留一份真的日用資料與原設定，先完整結束 desktop／recorder，
-      再跑 alpha.111 Setup。安裝路徑不變，記憶、四張同意、Persona／Azure 非密設定與
+      再跑 alpha.112 Setup。安裝路徑不變，記憶、四張同意、Persona／Azure 非密設定與
       登入啟動選擇都要保留；舊答案的出處 chip 仍能點開原畫面。Run 原本關著與原本開著
       各做一次，不能自動打開或被清掉。
 - [ ] 設定頁應直接看見四姊妹＋13 位閨密共 17 張圖像卡。鍵盤 Tab／方向鍵／Space 可選；
