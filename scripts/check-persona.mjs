@@ -158,6 +158,8 @@ async function open(personaView = persona(), options = {}) {
             };
           case "recording_state":
             return "recording";
+          case "recorder_supervisor_state":
+            return { phase: "stopped", failures: 0, message: null };
           case "pause_state":
             return false;
           case "last_recording_end":

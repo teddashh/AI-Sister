@@ -20,6 +20,9 @@ use chrono::{Local, Timelike};
 use serde::{Deserialize, Serialize};
 use sister_core::gatekeeper_candidates::CommitmentRef;
 use sister_shell as bounds;
+use sister_shell::login_startup::LaunchIntent;
+#[cfg(windows)]
+use sister_shell::login_startup::launch_intent;
 use sister_shell::{PetState, Rect};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -28,14 +31,17 @@ use std::sync::{
 };
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, PhysicalPosition, WindowEvent};
+use tauri::{Emitter, Manager, PhysicalPosition, WindowEvent};
 
 mod hands;
+mod login_startup;
 #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
 mod macos_ci;
+mod recorder_supervisor;
 #[cfg(any(windows, test))]
 mod single_instance;
 
+use login_startup::{login_startup_read, login_startup_set};
 #[cfg(any(windows, test))]
 use single_instance::RevealWindow;
 #[cfg(windows)]
@@ -57,6 +63,8 @@ static METRICS_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
 static FRAME_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
 #[cfg(windows)]
 static SECOND_INSTANCE_REVEAL_PENDING: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static SECOND_INSTANCE_LOGIN_PENDING: AtomicBool = AtomicBool::new(false);
 
 #[cfg(any(windows, test))]
 impl<R: tauri::Runtime> RevealWindow for tauri::WebviewWindow<R> {
@@ -71,7 +79,29 @@ impl<R: tauri::Runtime> RevealWindow for tauri::WebviewWindow<R> {
 
 #[cfg(windows)]
 fn single_instance_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
-    tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+    tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        if launch_intent(argv.iter().skip(1)) == LaunchIntent::Login {
+            // Windows Run 可能在 primary 已經起來之後才送到。這是一個「把
+            // recorder 叫起來」的 intent，不是「把視窗叫到人面前」；兩種
+            // pending 分開，才不會登入時突然搶走焦點。
+            // 先放 pending 再找 worker，避免 callback 和 setup 正好交錯時把這個
+            // intent 掉在地上。兩邊若同時送到，worker 會序列化並拒絕第二份，
+            // 最壞是重複問一次，不會重複 spawn。
+            SECOND_INSTANCE_LOGIN_PENDING.store(true, Ordering::Release);
+            match deliver_login_start(app) {
+                Ok(true) => {
+                    SECOND_INSTANCE_LOGIN_PENDING.store(false, Ordering::Release);
+                    tracing::info!("第二次登入啟動已交給原本的 desktop；不顯示、不聚焦");
+                }
+                Ok(false) => {
+                    tracing::info!("第二次登入啟動早於 recorder supervisor；setup 完成後再交出去")
+                }
+                Err(error) => {
+                    tracing::error!("第二次登入啟動交不出去：{error}");
+                }
+            }
+            return;
+        }
         // callback 是在**原本那個** app 裡執行；plugin 會讓後來的行程在 setup、
         // tray 與 recorder ownership 建立前退出。這裡只把原視窗叫回來，絕不
         // 呼叫 `app.exit`、`stop_recording` 或系統匣的 quit handler。
@@ -91,6 +121,19 @@ fn single_instance_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> 
             }
         }
     })
+}
+
+#[cfg(windows)]
+fn deliver_login_start<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<bool, String> {
+    let Some(shell) = app.try_state::<Shell>() else {
+        return Ok(false);
+    };
+    let handle = shell.recorder.lock().expect("recorder supervisor").clone();
+    let Some(handle) = handle else {
+        return Ok(false);
+    };
+    handle.login_start()?;
+    Ok(true)
 }
 
 /// 同一扇輔助視窗的非阻塞建立保留。
@@ -124,13 +167,9 @@ struct Shell {
     /// 資料庫連線。**開得很懶**：她可以在完全沒有資料的機器上開起來，
     /// 使用者按下第一個問題之前不必碰硬碟。
     db: Mutex<Option<sister_core::db::Db>>,
-    /// 這個視窗自己開起來的那個 recorder（`None` = 沒開過／已經走了）。
-    ///
-    /// 「已經有一個在跑了嗎」以前只問心跳，而心跳是 recorder **開機做完之後**
-    /// 才蓋的——於是那段開機時間裡它對這道閘門是隱形的，第二下就穿過去了。
-    /// 心跳那一頭已經補好（見 `ops::BootBeat`），但那是靠時間差贏的；握著這個
-    /// 把手就不必賭：行程還活著就是還活著，跟它寫沒寫檔案無關。
-    spawned: Mutex<Option<Spawned>>,
+    /// 唯一握著 desktop-owned recorder child 的 worker。放 `Option` 是因為
+    /// Tauri state 必須先 manage，worker 要等 setup 拿到 AppHandle 才能建立。
+    recorder: Mutex<Option<recorder_supervisor::Handle>>,
     /// Persona omnibus pack 同一時間只准有一個 mutation。Arc 只為了把狀態安全
     /// 帶進 `spawn_blocking`；下載 API 本身不接受 persona、URL 或私人資料。
     asset_operation: Arc<AtomicU8>,
@@ -142,22 +181,32 @@ const ASSET_INSTALLING: u8 = 1;
 const ASSET_REMOVING: u8 = 2;
 const ASSET_SETTING_VOICE: u8 = 3;
 
-/// 我們自己開起來的那個 recorder，**加上它是什麼時候被開起來的**。
-struct Spawned {
-    child: std::process::Child,
-    /// spawn 之前那一刻的牆上時間。
-    ///
-    /// 「結束」那道落刀的閘門靠它分辨心跳檔上那一行是**上一場留下的**還是
-    /// **我這個 child 剛寫的**——見 [`sister_core::heartbeat::safe_to_kill_spawn`]。
-    /// 一台錄過東西的機器上那個檔案永遠都在，所以分得出來的只有時戳。
-    at: sister_core::Millis,
-}
-
 impl Shell {
     fn persist(&self) {
         let snapshot = *self.state.lock().expect("pet state");
         bounds::save(&self.state_path, &snapshot);
     }
+}
+
+fn recorder_handle(shell: &Shell) -> Result<recorder_supervisor::Handle, String> {
+    shell
+        .recorder
+        .lock()
+        .expect("recorder supervisor")
+        .clone()
+        .ok_or_else(|| "recorder supervisor 還沒準備好".to_owned())
+}
+
+/// 成功後把 handle 從 state 拿掉，讓 `app.exit()` 隨後送出的 ExitRequested
+/// 知道 worker 已經完成；失敗則原封不動留下，真人修好原因後還能再試。
+fn quit_recorder(shell: &Shell) -> Result<(), String> {
+    let handle = shell.recorder.lock().expect("recorder supervisor").clone();
+    let Some(handle) = handle else {
+        return Ok(());
+    };
+    handle.quit()?;
+    *shell.recorder.lock().expect("recorder supervisor") = None;
+    Ok(())
 }
 
 /// 一筆答案。這是她說話的全部形狀——**每一筆都帶出處**。
@@ -661,7 +710,7 @@ fn pause_state(shell: tauri::State<'_, Shell>) -> bool {
 /// 判斷靠 recorder 每 5 秒蓋一次的時戳（見 [`sister_core::heartbeat`]），
 /// 不靠 `sessions.ended_at`——那一列在 recorder 當掉的時候永遠停在 NULL。
 ///
-/// # 為什麼回四個字串
+/// # 為什麼回五個字串
 ///
 /// 上一版回 `is_recording` 那個布林，而**它把「正在起來」歸進「沒有人在
 /// 錄」**——於是 `app.js` 那個等她起來的迴圈（`startRecording`）在一顆一年份
@@ -682,6 +731,8 @@ fn recording_state(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> Str
         .as_ref()
         .map(|dir| sister_core::heartbeat::presence(dir, sister_core::now_ms()))
         .unwrap_or(sister_core::heartbeat::Presence::NeverStarted);
+    // `watching_word` 保留 `unreadable`：前者是沒量到，`none` 才是量到沒有
+    // 活的 recorder。Renderer 在 Backoff/GaveUp 只有真的 `none` 才能提供 Retry。
     let now = sister_core::heartbeat::watching_word(presence);
     // 順手把系統匣那兩顆的字改對——手上已經有答案了，不必再讀一次磁碟。這不是
     // 唯一的刷新時機（見 [`refresh_tray`]），是最即時的那一個：視窗開著的時候，
@@ -746,15 +797,370 @@ fn refresh_tray(app: &tauri::AppHandle) {
 /// 收完整 Presence，因為「佔著」有兩種按鍵後果：錄製／開機中能停止，Thinking
 /// 只能等收尾。標籤直接沿用 core 裡 exhaustive 的三向答案。
 fn set_record_labels(app: &tauri::AppHandle, presence: sister_core::heartbeat::Presence) {
+    let phase = app
+        .try_state::<Shell>()
+        .and_then(|shell| recorder_handle(shell.inner()).ok())
+        .map(|handle| handle.view().phase);
     if let Some(item) = app.try_state::<RecordItem>() {
-        let _ = item
-            .0
-            .set_text(sister_core::heartbeat::tray_record_label(presence));
+        item.show(record_menu_presentation(phase, presence));
     }
     if let Some(item) = app.try_state::<QuitItem>() {
-        let _ = item
-            .0
-            .set_text(sister_core::heartbeat::tray_quit_label(presence));
+        let _ = item.0.set_text(quit_menu_label(phase, presence));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordMenuAction {
+    Start,
+    Stop,
+    Wait,
+}
+
+/// 系統匣真正顯示的字，和點下那行字時唯一允許的動作。
+///
+/// 兩個欄位必須由同一次 evidence snapshot 一起生出來；click handler 不可以再讀
+/// 一次磁碟另算 action。否則畫面仍寫「停止記錄」的五秒內，record 若剛好收工，
+/// 那一點會被重新解讀成 Start——使用者按停止，產品反而開始錄。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecordMenuPresentation {
+    action: RecordMenuAction,
+    label: &'static str,
+}
+
+/// 心跳仍是外部 recorder 的真相；supervisor 只覆蓋自己能證明的 child／retry。
+/// Thinking 永遠優先，因為那一段已停止擷取、只能等最後收尾。
+fn record_menu_presentation(
+    phase: Option<recorder_supervisor::SupervisorPhase>,
+    presence: sister_core::heartbeat::Presence,
+) -> RecordMenuPresentation {
+    if phase == Some(recorder_supervisor::SupervisorPhase::StopUndelivered) {
+        return RecordMenuPresentation {
+            action: RecordMenuAction::Stop,
+            label: "再送一次停止要求",
+        };
+    }
+    if matches!(presence, sister_core::heartbeat::Presence::Thinking { .. }) {
+        return RecordMenuPresentation {
+            action: RecordMenuAction::Wait,
+            label: sister_core::heartbeat::tray_record_label(presence),
+        };
+    }
+    match phase {
+        Some(
+            recorder_supervisor::SupervisorPhase::Starting
+            | recorder_supervisor::SupervisorPhase::Running,
+        ) => RecordMenuPresentation {
+            action: RecordMenuAction::Stop,
+            label: "停止記錄",
+        },
+        Some(recorder_supervisor::SupervisorPhase::Cooling) => RecordMenuPresentation {
+            action: RecordMenuAction::Wait,
+            label: "正在確認 recorder 已收工",
+        },
+        Some(recorder_supervisor::SupervisorPhase::StoppingExternal) => RecordMenuPresentation {
+            action: RecordMenuAction::Wait,
+            label: "正在等外部 recorder 收工",
+        },
+        Some(
+            recorder_supervisor::SupervisorPhase::Backoff
+            | recorder_supervisor::SupervisorPhase::GaveUp,
+        ) if matches!(
+            presence,
+            sister_core::heartbeat::Presence::NeverStarted
+                | sister_core::heartbeat::Presence::Stopped { .. }
+                | sister_core::heartbeat::Presence::Stalled { .. }
+        ) =>
+        {
+            RecordMenuPresentation {
+                action: RecordMenuAction::Start,
+                label: if phase == Some(recorder_supervisor::SupervisorPhase::Backoff) {
+                    "現在重試"
+                } else {
+                    "再試一次"
+                },
+            }
+        }
+        Some(
+            recorder_supervisor::SupervisorPhase::Backoff
+            | recorder_supervisor::SupervisorPhase::GaveUp,
+        ) => RecordMenuPresentation {
+            action: RecordMenuAction::Wait,
+            label: "記錄狀態不明",
+        },
+        Some(recorder_supervisor::SupervisorPhase::External) => match presence {
+            sister_core::heartbeat::Presence::Live(_) => RecordMenuPresentation {
+                action: RecordMenuAction::Stop,
+                label: sister_core::heartbeat::tray_record_label(presence),
+            },
+            sister_core::heartbeat::Presence::NeverStarted
+            | sister_core::heartbeat::Presence::Stopped { .. }
+            | sister_core::heartbeat::Presence::Stalled { .. }
+            | sister_core::heartbeat::Presence::Unreadable => RecordMenuPresentation {
+                action: RecordMenuAction::Wait,
+                label: "正在確認外部 recorder 已收工",
+            },
+            sister_core::heartbeat::Presence::Thinking { .. } => {
+                unreachable!("thinking presence is handled before supervisor phase")
+            }
+        },
+        Some(
+            recorder_supervisor::SupervisorPhase::Uncertain
+            | recorder_supervisor::SupervisorPhase::Quitting,
+        ) => RecordMenuPresentation {
+            action: RecordMenuAction::Wait,
+            label: if phase == Some(recorder_supervisor::SupervisorPhase::Quitting) {
+                "正在結束…"
+            } else {
+                "記錄狀態不明"
+            },
+        },
+        Some(recorder_supervisor::SupervisorPhase::StopUndelivered) => {
+            unreachable!("handled before heartbeat precedence")
+        }
+        Some(recorder_supervisor::SupervisorPhase::Stopped) | None => {
+            let action = match sister_core::heartbeat::tray_record_action(presence) {
+                sister_core::heartbeat::TrayRecordAction::Start => RecordMenuAction::Start,
+                sister_core::heartbeat::TrayRecordAction::Stop => RecordMenuAction::Stop,
+                sister_core::heartbeat::TrayRecordAction::WaitForThinking => RecordMenuAction::Wait,
+                sister_core::heartbeat::TrayRecordAction::WaitForUnknown => RecordMenuAction::Wait,
+            };
+            RecordMenuPresentation {
+                action,
+                label: sister_core::heartbeat::tray_record_label(presence),
+            }
+        }
+    }
+}
+
+fn quit_menu_label(
+    phase: Option<recorder_supervisor::SupervisorPhase>,
+    presence: sister_core::heartbeat::Presence,
+) -> &'static str {
+    match phase {
+        Some(
+            recorder_supervisor::SupervisorPhase::Starting
+            | recorder_supervisor::SupervisorPhase::Running,
+        ) => "結束（記錄也會停）",
+        Some(recorder_supervisor::SupervisorPhase::Cooling) => "結束",
+        Some(recorder_supervisor::SupervisorPhase::StoppingExternal) => "結束（正在等記錄停止）",
+        Some(recorder_supervisor::SupervisorPhase::Backoff) => "結束（自動重試也會停）",
+        Some(recorder_supervisor::SupervisorPhase::Quitting) => "正在結束…",
+        Some(recorder_supervisor::SupervisorPhase::StopUndelivered) => "結束（停止要求尚未送達）",
+        Some(
+            recorder_supervisor::SupervisorPhase::Stopped
+            | recorder_supervisor::SupervisorPhase::GaveUp
+            | recorder_supervisor::SupervisorPhase::External
+            | recorder_supervisor::SupervisorPhase::Uncertain,
+        )
+        | None => sister_core::heartbeat::tray_quit_label(presence),
+    }
+}
+
+#[cfg(test)]
+mod recorder_menu_tests {
+    use super::*;
+    use recorder_supervisor::SupervisorPhase as Phase;
+    use sister_core::heartbeat::{Phase as BeatPhase, Presence};
+
+    #[test]
+    fn supervisor_failures_only_offer_retry_after_vacancy_is_proven() {
+        for presence in [
+            Presence::NeverStarted,
+            Presence::Stopped { at: Some(1) },
+            Presence::Stalled {
+                at: 1,
+                phase: BeatPhase::Recording,
+            },
+        ] {
+            let backoff = record_menu_presentation(Some(Phase::Backoff), presence);
+            assert_eq!(backoff.action, RecordMenuAction::Start);
+            assert_eq!(backoff.label, "現在重試");
+
+            let gave_up = record_menu_presentation(Some(Phase::GaveUp), presence);
+            assert_eq!(gave_up.action, RecordMenuAction::Start);
+            assert_eq!(gave_up.label, "再試一次");
+        }
+
+        for presence in [
+            Presence::Live(BeatPhase::Booting),
+            Presence::Live(BeatPhase::Recording),
+            Presence::Unreadable,
+        ] {
+            assert_eq!(
+                record_menu_presentation(Some(Phase::Backoff), presence).action,
+                RecordMenuAction::Wait
+            );
+            assert_eq!(
+                record_menu_presentation(Some(Phase::GaveUp), presence).action,
+                RecordMenuAction::Wait
+            );
+        }
+    }
+
+    #[test]
+    fn owned_child_and_unknown_probe_never_offer_a_second_recorder() {
+        assert_eq!(
+            record_menu_presentation(Some(Phase::Starting), Presence::NeverStarted).action,
+            RecordMenuAction::Stop
+        );
+        assert_eq!(
+            record_menu_presentation(Some(Phase::Uncertain), Presence::NeverStarted).action,
+            RecordMenuAction::Wait
+        );
+
+        for phase in [Some(Phase::Stopped), None] {
+            let shown = record_menu_presentation(phase, Presence::Unreadable);
+            assert_eq!(shown.action, RecordMenuAction::Wait);
+            assert_eq!(shown.label, "記錄狀態不明");
+        }
+    }
+
+    #[test]
+    fn undelivered_stop_always_remains_a_stop_action() {
+        for presence in [
+            Presence::NeverStarted,
+            Presence::Unreadable,
+            Presence::Live(BeatPhase::Booting),
+            Presence::Live(BeatPhase::Recording),
+            Presence::Thinking { at: 1, until: 2 },
+            Presence::Stopped { at: Some(1) },
+            Presence::Stalled {
+                at: 1,
+                phase: BeatPhase::Recording,
+            },
+        ] {
+            let shown = record_menu_presentation(Some(Phase::StopUndelivered), presence);
+            assert_eq!(shown.action, RecordMenuAction::Stop);
+            assert_eq!(shown.label, "再送一次停止要求");
+        }
+    }
+
+    #[test]
+    fn cooling_never_offers_an_action_while_the_old_heartbeat_expires() {
+        for presence in [
+            Presence::NeverStarted,
+            Presence::Unreadable,
+            Presence::Live(BeatPhase::Booting),
+            Presence::Live(BeatPhase::Recording),
+            Presence::Thinking { at: 1, until: 2 },
+            Presence::Stopped { at: Some(1) },
+            Presence::Stalled {
+                at: 1,
+                phase: BeatPhase::Recording,
+            },
+        ] {
+            assert_eq!(
+                record_menu_presentation(Some(Phase::Cooling), presence).action,
+                RecordMenuAction::Wait
+            );
+        }
+    }
+
+    #[test]
+    fn external_recorder_only_delegates_a_live_or_thinking_heartbeat() {
+        for presence in [
+            Presence::Live(BeatPhase::Booting),
+            Presence::Live(BeatPhase::Recording),
+        ] {
+            assert_eq!(
+                record_menu_presentation(Some(Phase::External), presence).action,
+                RecordMenuAction::Stop
+            );
+        }
+
+        assert_eq!(
+            record_menu_presentation(
+                Some(Phase::External),
+                Presence::Thinking { at: 1, until: 2 }
+            )
+            .action,
+            RecordMenuAction::Wait
+        );
+
+        for presence in [
+            Presence::NeverStarted,
+            Presence::Unreadable,
+            Presence::Stopped { at: Some(1) },
+            Presence::Stalled {
+                at: 1,
+                phase: BeatPhase::Recording,
+            },
+        ] {
+            assert_eq!(
+                record_menu_presentation(Some(Phase::External), presence).action,
+                RecordMenuAction::Wait
+            );
+        }
+    }
+
+    #[test]
+    fn stopping_external_never_offers_an_action_before_its_tombstone() {
+        for presence in [
+            Presence::NeverStarted,
+            Presence::Unreadable,
+            Presence::Live(BeatPhase::Booting),
+            Presence::Live(BeatPhase::Recording),
+            Presence::Thinking { at: 1, until: 2 },
+            Presence::Stopped { at: Some(1) },
+            Presence::Stalled {
+                at: 1,
+                phase: BeatPhase::Recording,
+            },
+        ] {
+            let shown = record_menu_presentation(Some(Phase::StoppingExternal), presence);
+            assert_eq!(shown.action, RecordMenuAction::Wait);
+            assert_eq!(shown.label, "正在等外部 recorder 收工");
+        }
+    }
+
+    #[test]
+    fn new_supervisor_phases_keep_the_quit_label_truthful() {
+        assert_eq!(
+            quit_menu_label(Some(Phase::Cooling), Presence::Live(BeatPhase::Recording)),
+            "結束"
+        );
+        assert_eq!(
+            quit_menu_label(
+                Some(Phase::StoppingExternal),
+                Presence::Live(BeatPhase::Recording)
+            ),
+            "結束（正在等記錄停止）"
+        );
+
+        for presence in [
+            Presence::NeverStarted,
+            Presence::Unreadable,
+            Presence::Live(BeatPhase::Booting),
+            Presence::Live(BeatPhase::Recording),
+            Presence::Thinking { at: 1, until: 2 },
+            Presence::Stopped { at: Some(1) },
+            Presence::Stalled {
+                at: 1,
+                phase: BeatPhase::Recording,
+            },
+        ] {
+            assert_eq!(
+                quit_menu_label(Some(Phase::External), presence),
+                sister_core::heartbeat::tray_quit_label(presence)
+            );
+        }
+    }
+
+    #[test]
+    fn a_rendered_stop_action_never_turns_into_start_when_the_disk_changes() {
+        let rendered =
+            record_menu_presentation(Some(Phase::Running), Presence::Live(BeatPhase::Recording));
+        assert_eq!(rendered.label, "停止記錄");
+        assert_eq!(rendered.action, RecordMenuAction::Stop);
+
+        // Click 使用 `RecordItem::action()` 保存的這份 presentation；不拿這個較晚
+        // 的墓碑重算。反向的 stale Start 則仍會撞 heartbeat/OS lease 而 fail closed。
+        let later = Presence::Stopped { at: Some(2) };
+        assert_eq!(
+            record_menu_presentation(Some(Phase::Stopped), later).action,
+            RecordMenuAction::Start
+        );
+        assert_eq!(rendered.action, RecordMenuAction::Stop);
     }
 }
 
@@ -860,138 +1266,40 @@ struct LastRun {
 
 /// 系統匣裡的那一顆開始／停止。理由和 [`PauseItem`] 一樣：一個永遠寫著同一句
 /// 話的切換項目，會讓人按出他沒想要的那個方向。
-struct RecordItem(MenuItem<tauri::Wry>);
+struct RecordItem {
+    item: MenuItem<tauri::Wry>,
+    shown: Mutex<RecordMenuPresentation>,
+}
+
+impl RecordItem {
+    /// Menu mutation 和 click 都在 Tauri 主迴圈上；仍先 disable，讓未來若呼叫端
+    /// 換執行緒，也不會在 label/action 交棒中間留下可按的反向操作。
+    fn show(&self, next: RecordMenuPresentation) {
+        if self.item.set_enabled(false).is_err() {
+            return;
+        }
+        if self.item.set_text(next.label).is_ok() {
+            *self.shown.lock().expect("record menu presentation") = next;
+        }
+        // re-enable 失敗只會留下按不到的安全退化，不會讓 action 與 label 對調。
+        let _ = self.item.set_enabled(true);
+    }
+
+    fn action(&self) -> RecordMenuAction {
+        self.shown.lock().expect("record menu presentation").action
+    }
+}
 struct HandsStopItem(MenuItem<tauri::Wry>);
 struct HandsResumeItem(MenuItem<tauri::Wry>);
 
 /// 系統匣裡的「結束」。存起來的理由見 [`quit_label`]。
 struct QuitItem(MenuItem<tauri::Wry>);
 
-/// `sister.exe` 在哪裡。
-///
-/// 和 `sister-desktop.exe` 同一個資料夾——release 的 zip 裡兩個檔案就是一起
-/// 解出來的。**不去 `PATH` 裡找**：使用者多半沒把它加進去，而在 `PATH` 上撿到
-/// 另一個版本的 sister（舊的 alpha、別的資料目錄）比找不到更糟——那會是一場
-/// 沒有人知道自己在跑哪個版本的錄製。
-fn recorder_path() -> Result<PathBuf, String> {
-    let me = std::env::current_exe().map_err(|e| format!("問不出自己在哪裡：{e}"))?;
-    let dir = me
-        .parent()
-        .ok_or_else(|| "問不出自己在哪個資料夾".to_string())?;
-    let name = if cfg!(windows) {
-        "sister.exe"
-    } else {
-        "sister"
-    };
-    let path = dir.join(name);
-    match path.try_exists() {
-        Ok(true) => Ok(path),
-        _ => Err(format!(
-            "找不到 {name}——它應該和 sister-desktop 放在同一個資料夾（{}）",
-            dir.display()
-        )),
-    }
-}
-
-/// 把 recorder 跑起來。
-///
-/// 字母人在上一版學會了說「沒有人在記錄」，但說完之後使用者唯一的下一步是
-/// 開一個終端機、找到 `sister.exe`、打一行指令。而 Phase 1 的退場條件是
-/// 「自用 7 天」——一個每天早上都要開終端機的東西撐不到第七天，那條退場
-/// 條件就永遠量不到。
-///
-/// 用**另一個行程**而不是把錄製迴圈搬進來，是刻意的：擷取那條路會長時間佔著
-/// CPU、會碰 UIA、會 OCR，而它當掉的時候不該把使用者的問答視窗一起帶走。
-/// 「一個記、一個問」本來就是這兩個執行檔的分工。
+/// 把 recorder start intent 交給唯一的 supervisor worker。worker 才能碰 Child，
+/// 所以按鈕、系統匣、登入啟動與 retry 不會同時各開一份。
 #[tauri::command(async)]
 fn start_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
-    let dir = shell
-        .data_dir
-        .as_ref()
-        .ok_or_else(|| "找不到資料目錄，開不起來".to_string())?;
-    if let Some(why) = sister_core::heartbeat::occupied_why(dir, sister_core::now_ms()) {
-        // 不是錯誤，但也不能安靜地再開一個：兩個 recorder 會各自錄一份，
-        // 而使用者只會看到磁碟用得比講好的快一倍。想最後一段的那一種佔著
-        // 不印「已經有一個在跑了」——心跳這時候說沒在錄，兩句會對打。
-        return Err(why);
-    }
-    // 心跳還沒出現，不代表沒有人在起來。上一下按出去的那個行程可能正卡在
-    // `Db::open` 的 migration 上——它還沒蓋出第一個心跳，所以上面那道閘門
-    // 看不見它。**問行程，不要問它寫的檔案**：這是唯一一條不用賭時間差的路。
-    {
-        let mut spawned = shell.spawned.lock().expect("spawned recorder");
-        match spawned.as_mut().map(|s| s.child.try_wait()) {
-            // 還在跑（`Ok(None)` = 沒退出）。
-            Some(Ok(None)) => {
-                return Err("上一次按的那個還在起來——第一次開資料庫要重建索引，\
-                            大的資料庫可能要幾分鐘。再等一下"
-                    .into());
-            }
-            // 已經走了，或者連問都問不到（handle 壞了）。清掉再開新的。
-            _ => *spawned = None,
-        }
-    }
-    // 同意書那道閘門在 `sister record` 裡面，而我們等一下就要把它的視窗藏起來
-    // ——它印出來的拒絕理由**沒有人看得到**。在這裡先問一次同一個問題，那句
-    // 話才有地方顯示；不然按下去的結果是「閃一下，然後什麼都沒發生」。
-    if !sister_core::consent::load(dir).allows_recording() {
-        // 指路要指得到。這個視窗上沒有 ⚙（只有 ⏸ ▤ ● −），而同意書也不在
-        // 設定頁上——設定頁管的是排除規則、保留天數那些。三張同意書是系統匣
-        // 選單裡自己的一頁。指去一個不存在的按鈕，比不指路更糟。
-        return Err("第一張同意書還沒簽——她不會開始記錄。\
-             在系統匣圖示上按右鍵，選「三張同意書…」簽好再回來"
-            .into());
-    }
-    let exe = recorder_path()?;
-    // 上一次在沒有 recorder 的時候按下的「停止」會留在磁碟上，而那會讓這一場
-    // 在第一個 tick 就自己結束。recorder 自己也清一次（在 `BootBeat::start`
-    // 裡，開機窗打開的那一刻——**不是**在 `Db::open` 之後；那一版會把他在開機
-    // 那幾分鐘按的停止刪掉），這裡再清是因為下一行就是 spawn——清的成本是一次
-    // unlink，漏掉的代價是「按了沒反應」。
-    //
-    // 兩次清理中間夾著一次 spawn，那是幾毫秒的窗；在那之內按停止仍然會被吃
-    // 掉。和以前那個「一顆一年份的資料庫要開好幾分鐘」的窗差了五個數量級，
-    // 而且那幾毫秒裡畫面上還寫著「正在叫她起來」，沒有停止鍵。
-    sister_core::control::clear_stop(dir);
-
-    // 它的 stdout 沒有終端機可以去。丟掉的話，「為什麼她開了三秒就不見了」
-    // 永遠問不出答案——和 desktop.log 同一個理由、同一個作法。
-    let out = start_log_at(dir, "record.log").ok_or_else(|| "寫不出 record.log".to_string())?;
-    let err = out
-        .try_clone()
-        .map_err(|e| format!("寫不出 record.log：{e}"))?;
-
-    let mut cmd = std::process::Command::new(&exe);
-    // 明講 `--data-dir` 而不是讓它自己算：兩邊各算一次的話，有一天它們會算出
-    // 不一樣的答案，而症狀是「她說她在錄，但問什麼都查不到」。
-    cmd.arg("--data-dir")
-        .arg(dir)
-        .arg("record")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::from(out))
-        .stderr(std::process::Stdio::from(err));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW。少了它，每次按「開始記錄」都會彈出一個黑色主控台
-        // ——而那個視窗被關掉就等於 recorder 被殺掉，使用者不會知道那兩件事
-        // 是同一件事。
-        cmd.creation_flags(0x0800_0000);
-    }
-    // **在 spawn 之前讀鐘。** 讀在後面的話，child 有機會在這兩行之間就蓋出第
-    // 一拍，於是那一拍的時戳比 `at` 還小，而「結束」那道閘門會把它讀成「上一
-    // 場留下的」然後放行落刀——她已經開著資料庫了。往前讀最壞只是多不敢砍幾
-    // 毫秒；往後讀最壞是砍掉一場正在錄的。
-    let at = sister_core::now_ms();
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("{} 起不來：{e}", exe.display()))?;
-    // 握著它。不握的話，下一下按進來的時候我們只剩心跳可以問，而開機那幾分鐘
-    // 心跳還不在。順便：`Child` 被 drop 不會殺掉行程，所以她活得比這個視窗久
-    // ——那是刻意的，`stop_recording` 用的是檔案而不是 kill。
-    *shell.spawned.lock().expect("spawned recorder") = Some(Spawned { child, at });
-    tracing::info!("把 recorder 開起來了：{}", exe.display());
-    Ok(())
+    recorder_handle(shell.inner())?.explicit_start()
 }
 
 /// 請 recorder 收工。
@@ -1001,13 +1309,17 @@ fn start_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
 /// 和一個還在說「我在錄」的心跳檔。
 #[tauri::command]
 fn stop_recording(shell: tauri::State<'_, Shell>) -> Result<(), String> {
-    let dir = shell
-        .data_dir
-        .as_ref()
-        .ok_or_else(|| "找不到資料目錄，停不了".to_string())?;
-    sister_core::control::request_stop(dir).map_err(|e| format!("{e:#}"))?;
-    tracing::info!("請 recorder 收工");
-    Ok(())
+    recorder_handle(shell.inner())?.stop()
+}
+
+#[tauri::command]
+fn recorder_supervisor_state(
+    shell: tauri::State<'_, Shell>,
+) -> recorder_supervisor::SupervisorView {
+    recorder_handle(shell.inner())
+        .map_or_else(recorder_supervisor::SupervisorView::unavailable, |handle| {
+            handle.view()
+        })
 }
 
 /// recorder 最後說的那幾句話。
@@ -1069,7 +1381,6 @@ fn toggle_pause(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> Result
 /// 兩個地方都要更新，因為兩個地方都能觸發它——只更新自己那一邊的話，
 /// 從系統匣暫停之後，視窗裡的字母人會繼續一臉「我在聽」。
 fn announce_pause(app: &tauri::AppHandle, paused: bool) {
-    use tauri::Emitter;
     let _ = app.emit("pause-changed", paused);
     if let Some(item) = app.try_state::<PauseItem>() {
         let _ = item.0.set_text(pause_label(paused));
@@ -2470,7 +2781,6 @@ fn persona_asset_manager_view(shell: &Shell) -> Result<PersonaAssetManagerView, 
 }
 
 fn emit_persona_from_disk(app: &tauri::AppHandle, shell: &Shell) {
-    use tauri::Emitter;
     let Ok(path) = config_path() else {
         return;
     };
@@ -2481,7 +2791,6 @@ fn emit_persona_from_disk(app: &tauri::AppHandle, shell: &Shell) {
 }
 
 fn emit_persona_asset_status(app: &tauri::AppHandle, shell: &Shell) {
-    use tauri::Emitter;
     // listener 不採信 event payload，收到後會重叫 status command；即使這一刻讀
     // cache 出錯也要通知另一扇設定頁，讓它顯示那個錯而不是留著舊的 Installed。
     let _ = app.emit(
@@ -2585,7 +2894,6 @@ async fn persona_asset_remove(
             _ => "本機素材已經在刪除。".to_string(),
         })?;
 
-    use tauri::Emitter;
     let _ = app.emit("persona-media-stop", ());
     let voice_save_error = (|| {
         let path = config_path()?;
@@ -2651,7 +2959,6 @@ fn persona_voice_set(
         Ok(())
     })
     .map_err(|e| format!("{e:#}"))?;
-    use tauri::Emitter;
     if !enabled.get() {
         let _ = app.emit("persona-media-stop", ());
     }
@@ -2899,9 +3206,10 @@ fn eval_report_view(contents: String) -> Result<sister_core::eval::MetricsView, 
 /// 圖示），實際上那個行程幾分鐘前就掛了。這句話會替那件事背書。
 #[derive(Serialize)]
 struct WriteOutcome {
-    /// 心跳現在說什麼：`"recording"`／`"booting"`／`"thinking"`／`"none"`。決定那句話怎麼講。
+    /// 心跳現在說什麼：`"recording"`／`"booting"`／`"thinking"`／`"none"`／
+    /// `"unreadable"`。決定那句話怎麼講。
     ///
-    /// **四個值，不是一個布林。** 上一版是 `recording: bool`（`is_recording`），
+    /// **五個值，不是一個布林。** 上一版是 `recording: bool`（`is_recording`），
     /// 於是開機那幾分鐘這一頁說「現在沒有人在錄，所以這一份要等你按下**開始
     /// 記錄**才會生效」——而那顆按鈕在那幾分鐘按下去只會回一句「已經有一個
     /// sister record 在跑了」（見 [`start_recording`] 那道 `is_occupied` 閘
@@ -2947,7 +3255,6 @@ fn settings_write(
     // 存成功才換角色。設定頁和字母人是兩扇 WebView；少了這個事件，畫面會直到
     // 整支 desktop 重開才跟 config.toml 一致。payload 仍只含表達層資料，沒有
     // 排除規則、OCR、答案或 action。
-    use tauri::Emitter;
     let persona_event_emitted = app
         .emit("persona-changed", persona_view(&c, &shell))
         .is_ok();
@@ -3264,7 +3571,6 @@ fn announce_hotkey(app: &tauri::AppHandle, paused: bool) {
 ///
 /// `show()` 不 `set_focus()`，和上面同一個理由。
 fn announce_hands_pulled(app: &tauri::AppHandle, says: &str) {
-    use tauri::Emitter;
     let _ = app.emit("hands-pulled", says.to_string());
     if let Some(win) = app.get_webview_window(PET) {
         let _ = win.show();
@@ -3607,23 +3913,92 @@ fn consent_set(
     use std::str::FromStr;
     let dir = consent_dir(&shell)?;
     let sheet = sister_core::consent::Sheet::from_str(&key)?;
-    let mut c = sister_core::consent::load(dir);
-    // 條文改版之後，舊的那幾張不能跟著新的一起被存成「現在這一版簽的」。
-    // 和 CLI 那邊同一個決定：整份清掉，只留他這次真的按下去的。
-    //
-    // **而且要講出來。** CLI 對這件事印一行 ⚠，這一頁以前完全安靜——他勾了
-    // 一張，另外兩張的「2026 年 7 月 2 日同意過」就從畫面上消失了，看起來像
-    // 這個程式把他的紀錄弄丟了。
-    let reset_by_version = !c.current() && c != sister_core::consent::Consent::default();
-    if !c.current() {
-        c = sister_core::consent::Consent::default();
+    if !granted && sheet == sister_core::consent::Sheet::LocalRecording {
+        // 先送一個零 I/O 的 typed message，讓 worker 在 consent/stop 寫檔可能失敗
+        // 之前就永久取消 pending Login/watchdog。若 worker 已停，不存在 automatic
+        // spawn；若它正忙到十秒沒回，message 仍在唯一 channel 裡，底下 durable
+        // revoke barrier 照常前進，不能因 supervisor 回條慢而拒絕使用者撤回。
+        if let Ok(recorder) = recorder_handle(shell.inner()) {
+            if let Err(error) = recorder.cancel_automatic_for_consent_revoke() {
+                tracing::warn!("撤回前無法即時取得 recorder supervisor 回條：{error}");
+            }
+        }
     }
-    if granted {
-        c.grant(sheet, sister_core::now_ms());
-    } else {
-        c.revoke(sheet);
+    let mut reset_by_version = false;
+    let mut revoking_recording = false;
+    let mut revoke_barrier_written = false;
+    let mut revoke_barrier_clear = None;
+    let committed = sister_core::consent::mutate(dir, |c| {
+        // 這份 c 是拿到跨行程 write lock 後才重讀的；設定頁和 CLI 同時動不同
+        // 張時，後來的 writer 只能接著最新版本改，不能把鎖外舊快照裡的第一張
+        // 簽名蓋回來。
+        let allowed_before = c.allows_recording();
+        // 條文改版之後，舊的那幾張不能跟著新的一起被存成「現在這一版簽的」。
+        // 和 CLI 那邊同一個決定：整份清掉，只留他這次真的按下去的。
+        //
+        // **而且要講出來。** CLI 對這件事印一行 ⚠，這一頁以前完全安靜——他勾了
+        // 一張，另外兩張的「2026 年 7 月 2 日同意過」就從畫面上消失了。
+        reset_by_version = !c.current() && *c != sister_core::consent::Consent::default();
+        if !c.current() {
+            *c = sister_core::consent::Consent::default();
+        }
+        if granted {
+            c.grant(sheet, sister_core::now_ms());
+        } else {
+            c.revoke(sheet);
+        }
+        revoking_recording = allowed_before && !c.allows_recording();
+        if revoking_recording {
+            // 獨立 barrier 在 consent save **之前**先落地；即使後面的 atomic
+            // replace 失敗、舊 consent 仍是 Allowed，所有 start/recorder 也會先
+            // 看見這個 barrier。它不覆寫人工 Stop/DesktopQuit marker。
+            sister_core::control::request_consent_revoke(dir).map_err(|error| {
+                anyhow::anyhow!(
+                    "第一張同意書要撤回，但 durable revoke barrier 寫入沒有完整成功：{error:#}"
+                )
+            })?;
+            revoke_barrier_written = true;
+        }
+        if granted && sheet == sister_core::consent::Sheet::LocalRecording && c.allows_recording() {
+            // 票必須在 consent writer lock 裡、用這次即將 commit 的 snapshot 取得；
+            // 真正清理只能等 mutate 成功後。generation 會擋住較舊 regrant 清掉
+            // 隨後到達的新 revoke。
+            revoke_barrier_clear = sister_core::control::prepare_consent_revoke_barrier_clear(dir)?;
+        }
+        Ok(())
+    });
+    committed.map_err(|error| {
+        if revoke_barrier_written {
+            format!(
+                "撤回 barrier 已留下，但同意書 transaction 沒有完整成功；record/start 仍會被 barrier 擋住：{error:#}"
+            )
+        } else if revoking_recording {
+            format!(
+                "第一張同意書沒有改動，而且撤回 barrier 寫入沒有完整成功；目前無法證明停止條件已可靠落地：{error:#}"
+            )
+        } else {
+            format!("{error:#}")
+        }
+    })?;
+    if let Some(ticket) = revoke_barrier_clear {
+        match ticket.clear_after_commit() {
+            Ok(
+                sister_core::control::ConsentRevokeBarrierClear::Cleared
+                | sister_core::control::ConsentRevokeBarrierClear::AlreadyAbsent,
+            ) => {}
+            Ok(sister_core::control::ConsentRevokeBarrierClear::Superseded) => {
+                return Err(
+                    "第一張同意書已存好，但另一個較新的撤回已取代這張清理票；revoke barrier 仍在，沒有恢復自動記錄。"
+                        .to_owned(),
+                );
+            }
+            Err(error) => {
+                return Err(format!(
+                    "第一張同意書已存好，但 revoke barrier 清不掉；沒有恢復自動記錄：{error:#}"
+                ));
+            }
+        }
     }
-    sister_core::consent::save(dir, &c).map_err(|e| format!("{e:#}"))?;
     Ok(consent_view_after(dir, reset_by_version))
 }
 
@@ -3704,7 +4079,8 @@ struct Erasure {
     /// 是「沒有東西留下來」，`None` 是「這一趟沒有問這個問題」。
     sessions_left: Option<u64>,
     /// 留下來的那一列是誰的：`"live"`（她此刻正在錄）、`"booting"`（有一個
-    /// recorder 正在起來，那一列不是它的）、`"gone"`（沒有人在，她當掉了）。
+    /// recorder 正在起來，那一列不是它的）、`"unreadable"`（心跳讀不懂）、
+    /// `"gone"`（沒有人在，她當掉了）。
     ///
     /// 只有 `sessions_left > 0` 的時候有意義，所以它和上面那一欄要在同一個
     /// `if` 裡讀完——分開讀就會有人拿一個沒問過的值去講一句斷言。
@@ -4112,6 +4488,11 @@ fn main() {
         }
     }
 
+    #[cfg(windows)]
+    let launch_intent = launch_intent(std::env::args_os().skip(1));
+    #[cfg(not(windows))]
+    let launch_intent = LaunchIntent::Interactive;
+
     let data_dir = sister_core::config::Config::default_data_dir();
     let state_path = data_dir
         .clone()
@@ -4135,7 +4516,7 @@ fn main() {
             state_path,
             data_dir,
             db: Mutex::new(None),
-            spawned: Mutex::new(None),
+            recorder: Mutex::new(None),
             asset_operation: Arc::new(AtomicU8::new(ASSET_IDLE)),
             asset_cancel: Arc::new(AtomicBool::new(false)),
         })
@@ -4152,6 +4533,7 @@ fn main() {
             recording_state,
             start_recording,
             stop_recording,
+            recorder_supervisor_state,
             recorder_log_tail,
             last_recording_end,
             has_ever_recorded,
@@ -4164,6 +4546,8 @@ fn main() {
             persona_asset_cancel,
             persona_asset_remove,
             persona_voice_set,
+            login_startup_read,
+            login_startup_set,
             settings_read,
             settings_write,
             eval_report_view,
@@ -4198,11 +4582,30 @@ fn main() {
             ,url_policy_read
             ,url_policy_write
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let win = app
                 .get_webview_window(PET)
                 .expect("pet window is declared in tauri.conf.json");
             let shell = app.state::<Shell>();
+
+            // 先把唯一的 child owner 放進 managed state，才接 login intent。Windows
+            // Run 的 primary 與稍早撞進 single-instance callback 的 secondary 都走
+            // 同一條 channel；登入不顯示視窗，也不自動打開同意書。
+            let recorder = recorder_supervisor::Handle::spawn(
+                app.handle().clone(),
+                shell.data_dir.clone(),
+            );
+            *shell.recorder.lock().expect("recorder supervisor") = Some(recorder.clone());
+            let mut should_start_for_login = launch_intent == LaunchIntent::Login;
+            #[cfg(windows)]
+            {
+                should_start_for_login |= SECOND_INSTANCE_LOGIN_PENDING.swap(false, Ordering::AcqRel);
+            }
+            if should_start_for_login {
+                if let Err(error) = recorder.login_start() {
+                    tracing::error!("Windows 登入啟動交不出去：{error}");
+                }
+            }
 
             // ---- 位置 ----
             let screens = monitors_of(&win);
@@ -4254,7 +4657,11 @@ fn main() {
                 state.x = place.x;
                 state.y = place.y;
             }
-            let _ = win.show();
+            if launch_intent == LaunchIntent::Interactive {
+                let _ = win.show();
+            } else {
+                tracing::info!("Windows 登入啟動：字母人留在系統匣，不彈視窗");
+            }
             #[cfg(windows)]
             if let Some(outcome) =
                 take_deferred_reveal(&SECOND_INSTANCE_REVEAL_PENDING, &win)
@@ -4379,10 +4786,13 @@ fn main() {
                 .as_ref()
                 .map(|dir| sister_core::heartbeat::presence(dir, sister_core::now_ms()))
                 .unwrap_or(sister_core::heartbeat::Presence::NeverStarted);
+            let supervisor_phase_now = Some(recorder.view().phase);
+            let record_presentation =
+                record_menu_presentation(supervisor_phase_now, presence_now);
             let record_item = MenuItem::with_id(
                 app,
                 "record",
-                sister_core::heartbeat::tray_record_label(presence_now),
+                record_presentation.label,
                 true,
                 None::<&str>,
             )?;
@@ -4414,7 +4824,7 @@ fn main() {
             let quit_item = MenuItem::with_id(
                 app,
                 "quit",
-                sister_core::heartbeat::tray_quit_label(presence_now),
+                quit_menu_label(supervisor_phase_now, presence_now),
                 true,
                 None::<&str>,
             )?;
@@ -4450,7 +4860,10 @@ fn main() {
                 )?,
             };
             app.manage(PauseItem(pause_item));
-            app.manage(RecordItem(record_item));
+            app.manage(RecordItem {
+                item: record_item,
+                shown: Mutex::new(record_presentation),
+            });
             app.manage(QuitItem(quit_item));
             app.manage(HandsStopItem(hands_stop_item));
             app.manage(HandsResumeItem(hands_resume_item));
@@ -4500,9 +4913,8 @@ fn main() {
                                     let _ = win.show();
                                     let _ = win.set_focus();
                                 }
-                                use tauri::Emitter;
                                 let _ = app.emit(
-                                    "recorder-failed",
+                                    "hands-pulled",
                                     sister_hands::kill_switch::tray_hands_failure_message(why),
                                 );
                                 refresh_tray(app);
@@ -4510,32 +4922,43 @@ fn main() {
                         }
                     }
                     "record" => {
-                        // 讀當下的真相再做相反的事，不看選單上那行字——那行字
-                        // 最多可能舊了 5 秒（見 `recording_state`），而在那 5 秒
-                        // 裡按下去的人，想要的是他**看到的狀態**的相反。
+                        // 執行使用者實際看到的那行字所綁定的 action，不在 click
+                        // 時重算另一份。尤其 stale「停止記錄」絕不能因 recorder
+                        // 剛好先收工而反轉成 Start；stale Start 則仍會撞 occupancy
+                        // 與 OS lease，安全地失敗。
                         let shell = app.state::<Shell>();
-                        // 「有人佔著」才是這一顆的問題，不是「她在錄嗎」：正在
-                        // 起來的那幾分鐘走 `start_recording` 只會撞上它自己那道
-                        // `is_occupied` 閘門，回一句「已經有一個在跑了」——而他
-                        // 按的是一顆寫著「開始記錄」的按鈕。
+                        let action = app.state::<RecordItem>().action();
+                        // Wait 回條仍讀 click 當下的 presence，只用來說原因；它
+                        // 不得改動上面已綁定的 action。
                         let now = sister_core::now_ms();
                         let presence = shell
                             .data_dir
                             .as_ref()
                             .map(|dir| sister_core::heartbeat::presence(dir, now))
                             .unwrap_or(sister_core::heartbeat::Presence::NeverStarted);
-                        let action = sister_core::heartbeat::tray_record_action(presence);
+                        let supervisor_phase = recorder_handle(shell.inner())
+                            .ok()
+                            .map(|handle| handle.view().phase);
                         let done = match action {
-                            sister_core::heartbeat::TrayRecordAction::Start => {
-                                start_recording(shell.clone())
+                            RecordMenuAction::Start => start_recording(shell.clone()),
+                            RecordMenuAction::Stop => stop_recording(shell.clone()),
+                            RecordMenuAction::Wait => {
+                                let reason = match supervisor_phase {
+                                    Some(recorder_supervisor::SupervisorPhase::Uncertain) => {
+                                        "recorder 狀態不明；為避免重複錄製，沒有再開一個"
+                                            .to_owned()
+                                    }
+                                    Some(recorder_supervisor::SupervisorPhase::Quitting) => {
+                                        "AI-Sister 正在結束，不會再啟動 recorder".to_owned()
+                                    }
+                                    _ => sister_core::heartbeat::occupied_why_of(presence, now)
+                                        .unwrap_or_else(|| {
+                                            "recorder 正在轉換狀態，這一下沒有另開一個"
+                                                .to_owned()
+                                        }),
+                                };
+                                Err(reason)
                             }
-                            sister_core::heartbeat::TrayRecordAction::Stop => {
-                                stop_recording(shell.clone())
-                            }
-                            sister_core::heartbeat::TrayRecordAction::WaitForThinking => Err(
-                                sister_core::heartbeat::occupied_why_of(presence, now)
-                                    .expect("Thinking 一定有 occupied_why"),
-                            ),
                         };
                         match done {
                             // 立刻改字，不等下一次輪詢——按了之後那一顆要當場
@@ -4556,7 +4979,6 @@ fn main() {
                                     let _ = win.show();
                                     let _ = win.set_focus();
                                 }
-                                use tauri::Emitter;
                                 let _ = app.emit("recorder-failed", e);
                             }
                         }
@@ -4580,92 +5002,18 @@ fn main() {
                         // 已經關掉了。這比「她其實沒在錄卻說在聽」更糟：那個是
                         // 少記了，這個是在他以為關掉之後繼續記。
                         //
-                        // 不管那場 recorder 是不是這裡開起來的，都停。要在兩種
-                        // 錯之間選一個的話，「停掉一個終端機裡的 record，而那個
-                        // 終端機會印出是誰叫它停的」，比「安靜地繼續錄」好。
-                        //
-                        // **正在起來的那一個也要停。** 上一版問的是「她在錄
-                        // 嗎」，於是他在那幾分鐘按「結束」，視窗關了，而那個還
-                        // 在開資料庫的行程留在工作管理員裡，幾分鐘後開始錄——
-                        // 這一段註解上面兩行講的正是這件事。
-                        //
-                        // **而「正在起來」還有更早的一段，那一段連心跳都還沒
-                        // 有。** `recording_state` 讀的是 `recording.beat`；從
-                        // `cmd.spawn()` 回來到 child 在 `BootBeat::start` 寫下
-                        // 第一拍之間，那個檔案根本不存在，於是這裡讀到 "none"。
-                        // 平常是幾毫秒，但第一次安裝之後 Defender 要掃一顆
-                        // 6.7 MB 的新 exe，可以是好幾秒——正好是新使用者最會亂
-                        // 按的那一刻。`start_recording` 早就解過同一個缺口了
-                        // （「問行程，不要問它寫的檔案」），只有這裡沒跟上。
-                        //
-                        // 所以先寫檔、再問行程，兩件事都做。
-                        //
-                        // 檔案無條件寫。以前只在 `!= "none"` 的時候寫，但要停的
-                        // 正是那個讀不到心跳的——那個判斷式和要救的情況是相反
-                        // 的。沒人在跑的時候多留一個 `stop.request` 不會傷到下一
-                        // 場：`BootBeat::start` 開機第一行就清掉它，而全 repo 只
-                        // 有錄製迴圈的 `take_stop` 讀這個檔，沒有任何畫面會因為
-                        // 它躺在那裡而說錯話。
-                        if let Err(e) = stop_recording(shell.clone()) {
-                            tracing::error!("結束時停不掉 recorder：{e}");
-                        }
-                        // 但光是檔案不夠。child 自己的 `clear_stop` 就排在它開機
-                        // 的第一行，我們剛寫的這一個很可能被它擦掉——這正是 #61
-                        // 那個修法帶來的副作用，而那個修法是對的。所以還要問一次
-                        // 行程。
-                        //
-                        // 光靠那個檔案還漏一格：`clear_stop` 是 `BootBeat::start`
-                        // 的第一行，所以只要她已經蓋過一拍，這個請求就不會被她自
-                        // 己擦掉；漏掉的是 spawn 回來到她跑到那第一行之間那幾毫秒
-                        // ——child 會把我們剛寫的請求擦掉，然後留一個還在錄的孤
-                        // 兒。那是 #63 的洞。
-                        //
-                        // 補它要落刀，而落刀從來不是問「她在錄嗎」，是問「她還沒
-                        // 走到 `Db::open`，所以磁碟上沒有東西會被我砍壞嗎」。這兩
-                        // 句之間靠一條不變式接起來：**心跳蓋在 `Db::open` 之前**。
-                        //
-                        // 上一版把那個問題寫成 `beat == "none"`，而那句話同時是三
-                        // 件事——她還沒起來（可以砍）、她正在乾淨收工（`stop` 寫
-                        // 在 `rec.finish()` 之前）、她好好的只是這一拍慢了 16 秒。
-                        // 後兩種落刀的代價是 `end_session` 永遠是 NULL，於是
-                        // `doctor` 說「她當掉了」——她沒當掉，是我砍的。而第二種
-                        // 只要按「停止記錄」再按「結束」就會發生，那兩顆按鈕在同
-                        // 一張選單上，中間隔 0.4 秒。所以那一版被整個拿掉了。
-                        //
-                        // 現在 `heartbeat::stop` 留墓碑而不是刪檔，這三件事在
-                        // `Presence` 上是三個不同的值，閘門搬進
-                        // `heartbeat::safe_to_kill_spawn`（那裡有測試，這裡沒有）。
-                        // 它只放行一種：**這個資料目錄上沒有任何東西是在我 spawn
-                        // 之後寫下的**。
-                        //
-                        // 只砍我們自己 spawn 的那個 handle，不照 PID 去找：別人在
-                        // 終端機裡開的那一場不歸這個視窗管。
-                        if let Some(dir) = shell.data_dir.as_deref() {
-                            let mut spawned = shell.spawned.lock().expect("spawned recorder");
-                            if let Some(s) = spawned.as_mut() {
-                                let still_running = matches!(s.child.try_wait(), Ok(None));
-                                if still_running
-                                    && sister_core::heartbeat::safe_to_kill_spawn(
-                                        dir,
-                                        s.at,
-                                        sister_core::now_ms(),
-                                    )
-                                {
-                                    match s.child.kill() {
-                                        Ok(()) => {
-                                            tracing::info!(
-                                                "剛 spawn 出來還沒開資料庫，直接收掉：pid {}",
-                                                s.child.id()
-                                            );
-                                            // 收屍，不然她變 zombie 掛在我們身上。
-                                            let _ = s.child.wait();
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("收不掉剛 spawn 的 recorder：{e}")
-                                        }
-                                    }
-                                }
+                        // durable stop 也會讓終端機開的 recorder 收工；Child 落刀
+                        // 則只碰這個 desktop 自己 spawn、且還沒開資料庫的那一個。
+                        // worker 做完兩步才回來，並先讓所有 retry timer 失效。
+                        if let Err(e) = quit_recorder(shell.inner()) {
+                            tracing::error!("結束時停不掉 recorder；desktop 留著：{e}");
+                            if let Some(win) = app.get_webview_window(PET) {
+                                let _ = win.show();
+                                let _ = win.set_focus();
                             }
+                            let _ = app.emit("recorder-failed", e);
+                            refresh_tray(app);
+                            return;
                         }
                         shell.persist();
                         app.exit(0);
@@ -4744,7 +5092,8 @@ fn main() {
             //
             // 這裡做的是另一件事：`sister record` 拒絕啟動的時候，那句話印在
             // 一個他可能根本沒開的終端機裡。字母人是他看得到的那一面。
-            if !consent_read(app.state::<Shell>())
+            if launch_intent == LaunchIntent::Interactive
+                && !consent_read(app.state::<Shell>())
                 .map(|v| v.allows_recording)
                 .unwrap_or(false)
             {
@@ -4759,8 +5108,23 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("build AI-Sister")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                app.state::<Shell>().persist();
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let shell = app.state::<Shell>();
+                // 系統匣以外的退出（Windows session shutdown 等）也先讓 retry
+                // 失效並留下 durable stop。tray quit 已做過時，第二次只會快速
+                // 看見 handle 已拿掉，不會再送第二次。若 stop 寫不進去，則讓
+                // desktop 留著並說明原因；不能讓唯一可見 UI 消失而 recorder 繼續。
+                if let Err(error) = quit_recorder(shell.inner()) {
+                    api.prevent_exit();
+                    tracing::error!("退出已攔下，因為 recorder 停止意圖寫不進去：{error}");
+                    if let Some(win) = app.get_webview_window(PET) {
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
+                    let _ = app.emit("recorder-failed", error);
+                    return;
+                }
+                shell.persist();
             }
         });
 }

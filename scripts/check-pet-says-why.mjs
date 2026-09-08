@@ -59,6 +59,8 @@ if (!hiddenInHtml("[data-hits]")) {
 }
 
 const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
+const nativeSetInterval = globalThis.setInterval.bind(globalThis);
+const nativeClearInterval = globalThis.clearInterval.bind(globalThis);
 
 /**
  * `Answer` 的形狀，照 main.rs 那個 struct 抄的。
@@ -158,19 +160,27 @@ function gateCard(over = {}) {
   };
 }
 
+/** recorder_supervisor_state 的 IPC/event 形狀。 */
+function supervisor(phase = "stopped", message = null, failures = 0) {
+  return { phase, failures, message };
+}
+
 /**
  * 開一次字母人。`invoke` 收一張 `{ 指令: 回傳值或會丟出來的 Error }` 表；
- * 沒列到的指令回 `null`。函式值會被呼叫（要延遲、要丟例外的用這個）。
+ * 沒列到的指令回 `null`，只有每一扇新 desktop 都必定提供的 supervisor view
+ * 預設成乾淨的 `stopped`。函式值會被呼叫（要延遲、要丟例外的用這個）。
  *
  * `search` 是網址上那串 `?…`。**那幾條 demo 路徑不是裝飾。** 這台機器開不起
  * Tauri，所以 `?asleep=nobeat` 那幾條是這幾格畫面唯一長得出來的地方——他真的
  * 是照著那個網址用眼睛看版面的。以前這裡寫死 `""`，等於整條 demo 路徑沒有
  * 任何測試走過。
  */
-async function open(table = {}, { search = "" } = {}) {
+async function open(table = {}, { search = "", beforeListenerRegistered = null } = {}) {
   // `domOf` 只生得出 index.html 上真的有的東西——見 fake-dom.mjs 開頭那段。
   const node = domOf(HTML);
   const listeners = new Map();
+  const calls = [];
+  const intervals = [];
 
   globalThis.document = fakeDocument(node, {
     // **要是 visible。** 開場那一段對 `recording` 寫死的是 `"recording"`，
@@ -183,18 +193,30 @@ async function open(table = {}, { search = "" } = {}) {
   globalThis.addEventListener = () => {};
   globalThis.removeEventListener = () => {};
   globalThis.matchMedia = () => ({ matches: false, addEventListener() {} });
+  globalThis.setInterval = (fn, ms, ...args) => {
+    const id = nativeSetInterval(fn, ms, ...args);
+    intervals.push({ fn, ms, id });
+    return id;
+  };
+  globalThis.clearInterval = (id) => nativeClearInterval(id);
 
   globalThis.__TAURI__ = {
     core: {
       invoke: async (cmd, arg) => {
-        const v = table[cmd];
+        calls.push(cmd);
+        const v = Object.hasOwn(table, cmd)
+          ? table[cmd]
+          : cmd === "recorder_supervisor_state"
+            ? supervisor()
+            : null;
         if (typeof v === "function") return v(arg);
         if (v instanceof Error) throw v;
-        return v ?? null;
+        return v;
       },
     },
     event: {
       listen: async (name, cb) => {
+        if (beforeListenerRegistered !== null) await beforeListenerRegistered(name);
         listeners.set(name, cb);
         return () => {};
       },
@@ -206,6 +228,7 @@ async function open(table = {}, { search = "" } = {}) {
   await tick();
   return {
     node,
+    calls,
     nonsense,
     line: () => node("[data-state-line]").textContent,
     hits: () => node("[data-hits]"),
@@ -247,6 +270,12 @@ async function open(table = {}, { search = "" } = {}) {
       const cb = listeners.get("pause-changed");
       if (!cb) throw new Error("沒有人在聽 pause-changed——這條測試的前提沒了");
       cb({ payload: false });
+      await tick();
+    },
+    async pollNow() {
+      const interval = intervals.find(({ ms }) => ms === 5000);
+      if (!interval) throw new Error("找不到五秒 recording poll——這條測試的前提沒了");
+      interval.fn();
       await tick();
     },
   };
@@ -488,17 +517,18 @@ console.log("⑮ 她開完資料庫的那一刻，「還在開資料庫，暫停
   //
   // 留著的話畫面是「在聽／她還在開資料庫，暫停鍵現在沒有作用」：上面那行剛說
   // 她開完了，下面那句說她還在開。兩行直接互相矛盾。
-  let beats = 0;
+  let heartbeat = "booting";
   const p = await open({
-    // 開場問一次（ 那一行是同步問的），之後 5 秒一輪。
-    // 所以第一次答 booting，第二次——也就是第一輪輪詢——答 recording。
-    recording_state: () => (++beats > 1 ? "recording" : "booting"),
+    // 狀態由測試明確切換，不拿「第幾次 invoke」代替狀態。listener 註冊完成後
+    // 也會補讀一次；若靠次數，那一次合法的 read 會憑空替 recorder 開完資料庫。
+    recording_state: () => heartbeat,
     toggle_pause: new Error("她還在開資料庫，暫停鍵現在沒有作用"),
   });
   check("開場是正在起來", p.line().includes("正在開資料庫"), p.line());
   await p.click("#pause");
   check("先有那句", p.line().includes("暫停鍵現在沒有作用"), p.line());
-  await tick(5400);
+  heartbeat = "recording";
+  await p.pollNow();
   check("她開完了", p.line().includes("在聽"), p.line());
   check("那句「還在開資料庫」要跟著走", !p.line().includes("還在開資料庫"), p.line());
 }
@@ -845,8 +875,8 @@ console.log("㉚ 拔手熱鍵按下去之後，那句話要真的出現在畫面
 console.log("㉛ 送出去的事件名字，另一邊要真的有人在聽");
 {
   // 上面那一節證的是「事件到了，話就上得了畫面」。它證不到的是**事件會不會
-  // 到**：`main.rs` 那個名字和兩扇 renderer 裡的名字是各自寫死的字串，中間沒
-  // 有共用的常數。實測過——把 `app.emit("hands-pulled", …)` 改成
+  // 到**：native Rust 那個名字和兩扇 renderer 裡的名字是各自寫死的字串，中間
+  // 沒有共用的常數。實測過——把 `app.emit("hands-pulled", …)` 改成
   // `"hands-pulled-x"`，這支腳本、`check-settings-say.mjs`、`check-windows.sh`
   // 全綠，而使用者按下熱鍵之後畫面一個字都不會多。
   //
@@ -858,15 +888,26 @@ console.log("㉛ 送出去的事件名字，另一邊要真的有人在聽");
   // 斷言同時紅（那是這一節唯一的偵測器）；改 `app.js` 那個名字，前面的
   // `fromOutside` 會先丟「沒有人在聽 ⋯」，這一節根本沒跑到。所以「聽的 X
   // 真的有人送」是給**還沒有人驅動的新 listener** 留的後備，不是主力。
-  const RS = read(join(UI, "../src-tauri/src/main.rs"));
-  const emitted = [...RS.matchAll(/\.emit\(\s*"([^"]+)"/g)].map((m) => m[1]);
+  const rustSources = [
+    read(join(UI, "../src-tauri/src/main.rs")),
+    read(join(UI, "../src-tauri/src/recorder_supervisor.rs")),
+  ].join("\n");
+  const eventConstants = new Map(
+    [...rustSources.matchAll(/const\s+(\w+)\s*:\s*&str\s*=\s*"([^"]+)"/g)].map((m) => [
+      m[1],
+      m[2],
+    ]),
+  );
+  const emitted = [...rustSources.matchAll(/\.emit\(\s*(?:"([^"]+)"|(\w+))/g)]
+    .map((m) => m[1] ?? eventConstants.get(m[2]))
+    .filter((name) => name !== undefined);
   // `persona-assets-changed` 的接收者合理地是設定頁，不是 pet；只掃 app.js 會逼
   // 一扇不需要該事件的視窗掛假 listener。聚合兩份真正有 Tauri event 的 renderer。
   const rendererSources = `${read(SRC)}\n${read(join(UI, "settings.js"))}`;
   const heard = [...rendererSources.matchAll(/\.listen\?\.\(\s*"([^"]+)"/g)].map(
     (m) => m[1],
   );
-  check("main.rs 真的有在送事件", emitted.length > 0, `${emitted.length} 個`);
+  check("native backend 真的有在送事件", emitted.length > 0, `${emitted.length} 個`);
   check("renderer 真的有在聽事件", heard.length > 0, `${heard.length} 個`);
   for (const name of new Set(emitted)) {
     check(`送出去的 ${name} 有人在聽`, heard.includes(name), heard.join("、"));
@@ -939,6 +980,481 @@ console.log("㉟ 長網址與 action log 不可以橫向裁掉真正的目標");
     const rule = css.slice(start, end);
     check(`${selector} 允許沒有斷點的字換行`, start >= 0 && rule.includes("overflow-wrap: anywhere"), rule);
   }
+}
+
+console.log("㊱ recorder supervisor 冷啟動會讀，五秒輪詢也會重讀");
+{
+  const p = await open({
+    recording_state: "none",
+    recorder_supervisor_state: supervisor(),
+  });
+  const initialReads = p.calls.filter((cmd) => cmd === "recorder_supervisor_state").length;
+  check("冷啟動已讀過 supervisor", initialReads >= 1, p.calls);
+  await p.pollNow();
+  const afterPoll = p.calls.filter((cmd) => cmd === "recorder_supervisor_state").length;
+  check("下一輪 recording poll 會一起重讀", afterPoll > initialReads, p.calls);
+}
+
+console.log("㊲ Backoff 不可以借尚未過期的舊 heartbeat 說『在聽』");
+{
+  const message =
+    "record 剛剛異常退出（exit code 7）。desktop 仍在；5 秒後做第 2/3 次自動重試。";
+  const p = await open({
+    // hard kill 後的舊 heartbeat 在安全期限內仍可能是 live；supervisor 已經看見
+    // child 退出，這時不能讓那份舊拍蓋過來。
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("backoff", message, 2),
+  });
+  check("Backoff 原因完整可見", p.line().includes(message), p.line());
+  check("沒有冒充仍在聽", !p.line().includes("在聽"), p.line());
+  check("舊 heartbeat 仍佔位時不提供重試", p.node("[data-wake]").hidden === true, p.node("[data-wake]").hidden);
+
+  const vacant = await open({
+    recording_state: "none",
+    recorder_supervisor_state: supervisor("backoff", message, 2),
+  });
+  check("確認不佔位後才顯示現在重試", vacant.node("[data-wake]").hidden === false, vacant.node("[data-wake]").hidden);
+  check("空位時按鈕逐字是現在重試", vacant.node("[data-wake]").textContent === "現在重試", vacant.node("[data-wake]").textContent);
+}
+
+console.log("㊳ GaveUp 要把自動重試真的停了與唯一恢復出口一起端出來");
+{
+  const message =
+    "record 連續失敗 4 次，已停止自動重試；從現在起發生的事她不會知道。按「再試一次」才會重新開始。";
+  const p = await open({
+    recording_state: "none",
+    recorder_supervisor_state: supervisor("gave-up", message, 4),
+  });
+  check("GaveUp 原因可見", p.line().includes(message), p.line());
+  check("沒有人錄時不說在聽", !p.line().includes("在聽"), p.line());
+  check("恢復按鈕看得到", p.node("[data-wake]").hidden === false, p.node("[data-wake]").hidden);
+  check("恢復按鈕逐字是再試一次", p.node("[data-wake]").textContent === "再試一次", p.node("[data-wake]").textContent);
+}
+
+console.log("㊴ supervisor 讀不出來是 Uncertain，不是假裝停止或繼續錄");
+{
+  const p = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: new Error("worker channel closed"),
+  });
+  check("讀取失敗本身看得到", p.line().includes("worker channel closed"), p.line());
+  check("不拿 heartbeat 冒充確定仍在聽", !p.line().includes("在聽"), p.line());
+  check("畫面明講不能確認", p.line().includes("不能確認"), p.line());
+}
+
+console.log("㊵ supervisor event 不可以擦掉使用者剛按下去那一下的回條");
+{
+  const p = await open({
+    recording_state: "none",
+    recorder_supervisor_state: supervisor(),
+    toggle_pause: new Error("暫停鍵這一下沒有作用"),
+  });
+  await p.click("#pause");
+  check("先有按鍵回條", p.line().includes("這一下沒有作用"), p.line());
+  await p.fromOutside(
+    "recorder-supervisor-changed",
+    supervisor("gave-up", "SUPERVISOR-GAVE-UP", 4),
+  );
+  check("event 已套用（按鈕立即換字）", p.node("[data-wake]").textContent === "再試一次", p.node("[data-wake]").textContent);
+  check("但一行文字仍先讓給按鍵回條", p.line().includes("這一下沒有作用"), p.line());
+  check("持續狀態沒有蓋掉 one-shot notice", !p.line().includes("SUPERVISOR-GAVE-UP"), p.line());
+  await p.fromOutside("pause-changed", true);
+  check("下一件事發生後才輪到 supervisor message", p.line().includes("SUPERVISOR-GAVE-UP"), p.line());
+}
+
+console.log("㊶ Running 只證明 child 還活著；沒有新鮮 heartbeat 時不能冒充已在錄");
+{
+  const waiting = await open({
+    recording_state: "none",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  check(
+    "沒有 heartbeat 時只講現在能驗證的事",
+    waiting.line().includes("行程仍活著，但目前沒有可驗證的新鮮錄製心跳"),
+    waiting.line(),
+  );
+  check("不假定這是第一拍", !waiting.line().includes("第一個"), waiting.line());
+  check("沒有 heartbeat 時不說在聽", !waiting.line().includes("在聽"), waiting.line());
+  check("child 已存在時開始鍵藏起來", waiting.node("[data-wake]").hidden === true, waiting.node("[data-wake]").hidden);
+
+  const confirmed = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  check("Recording heartbeat 回來後才顯示在聽", confirmed.line().startsWith("在聽"), confirmed.line());
+
+  const openingDb = await open({
+    recording_state: "booting",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  check("Booting heartbeat 保留開資料庫的精確狀態", openingDb.line().includes("正在開資料庫"), openingDb.line());
+}
+
+console.log("㊷ 第一份 heartbeat 尚未量到時只說正在確認，也不提供可能撞車的開始鍵");
+{
+  const p = await open({
+    recording_state: () => new Promise(() => {}),
+    recorder_supervisor_state: supervisor(),
+  });
+  check("未量到不是在聽", !p.line().includes("在聽"), p.line());
+  check("未量到時逐字說正在確認", p.line().includes("正在確認 recorder"), p.line());
+  check("未量到時不開放開始", p.node("[data-wake]").hidden === true, p.node("[data-wake]").hidden);
+
+  await p.fromOutside(
+    "recorder-supervisor-changed",
+    supervisor("uncertain", "SUPERVISOR-UNKNOWN"),
+  );
+  check("Uncertain 仍不開放開始", p.node("[data-wake]").hidden === true, p.node("[data-wake]").hidden);
+}
+
+console.log("㊸ heartbeat 先回來、supervisor 尚未量到時也不能短暫冒充在聽");
+{
+  const p = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: () => new Promise(() => {}),
+  });
+  check("supervisor 未量到時不借 heartbeat 說在聽", !p.line().includes("在聽"), p.line());
+  check("兩份證據未齊時逐字說正在確認", p.line().includes("正在確認 recorder"), p.line());
+  check("supervisor 未量到時不開放開始", p.node("[data-wake]").hidden === true, p.node("[data-wake]").hidden);
+
+  await p.fromOutside("recorder-supervisor-changed", supervisor("running"));
+  check("event 補齊 supervisor 證據後才顯示在聽", p.line().startsWith("在聽"), p.line());
+}
+
+console.log("㊹ 問答不可以把尚未量到的 recorder 狀態翻成『沒有人在記錄』");
+{
+  const p = await open({
+    recording_state: () => new Promise(() => {}),
+    recorder_supervisor_state: () => new Promise(() => {}),
+    ask: () => new Promise(() => {}),
+  });
+  await p.type("昨天我在做什麼");
+  check("仍說得出她正在回答", p.line().includes("想一下"), p.line());
+  check("括號逐字說證據還在確認", p.line().includes("正在確認 recorder"), p.line());
+  check("沒量到不冒充量到沒人錄", !p.line().includes("沒有人在記錄"), p.line());
+}
+
+console.log("㊺ Uncertain 時問答也必須保留『不能確認』");
+{
+  const p = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("uncertain", "SUPERVISOR-UNKNOWN"),
+    ask: () => new Promise(() => {}),
+  });
+  await p.type("昨天我在做什麼");
+  check("問答仍明講不能確認 recorder", p.line().includes("不能確認 recorder"), p.line());
+  check("Uncertain 沒被降成確定沒人錄", !p.line().includes("沒有人在記錄"), p.line());
+}
+
+console.log("㊻ listener 註冊前遺失的 transition 會由註冊後補讀追回來");
+{
+  let heartbeat = "none";
+  let supervisorView = supervisor();
+  let finishRecorderListener = () => {};
+  const recorderListenerHeld = new Promise((resolve) => {
+    finishRecorderListener = resolve;
+  });
+  const p = await open(
+    {
+      recording_state: () => heartbeat,
+      recorder_supervisor_state: () => supervisorView,
+    },
+    {
+      beforeListenerRegistered: (name) =>
+        name === "recorder-supervisor-changed" ? recorderListenerHeld : undefined,
+    },
+  );
+  check("前提：開場 IPC 讀到舊的停止 snapshot", p.node("[data-wake]").hidden === false, p.line());
+  const readsBeforeRegistration = p.calls.filter(
+    (cmd) => cmd === "recorder_supervisor_state",
+  ).length;
+
+  // transition 落在開場 read 之後、listener 真正註冊之前，所以 event 沒有人收到。
+  heartbeat = "recording";
+  supervisorView = supervisor("running");
+  finishRecorderListener();
+  await tick();
+
+  const readsAfterRegistration = p.calls.filter(
+    (cmd) => cmd === "recorder_supervisor_state",
+  ).length;
+  check("listener ready 後確實補讀 supervisor", readsAfterRegistration > readsBeforeRegistration, p.calls);
+  check("補讀後顯示真實的 recording", p.line().startsWith("在聽"), p.line());
+  check("不把遺失事件前的開始鍵留著", p.node("[data-wake]").hidden === true, p.node("[data-wake]").hidden);
+}
+
+console.log("㊼ Cooling 不借 owned child 的舊 heartbeat，也不提供啟動出口");
+{
+  const p = await open({
+    // child 已退出之後，上一拍仍可能在 heartbeat 的安全期限內。
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("cooling"),
+  });
+  check(
+    "逐字說正在確認 owned recorder 的最後 heartbeat 證據",
+    p.line().includes("owned recorder 已退出，正在確認最後 heartbeat 證據"),
+    p.line(),
+  );
+  check("舊拍不能讓畫面說在聽", !p.line().includes("在聽"), p.line());
+  check("Cooling 不顯示 Start／Retry", p.node("[data-wake]").hidden === true, p.node("[data-wake]").hidden);
+}
+
+console.log("㊽ External 的現在式完整交給 heartbeat，但不提供 retry");
+{
+  const recording = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("external"),
+  });
+  check("External Recording 才說在聽", recording.line().startsWith("在聽"), recording.line());
+  check("External Recording 不顯示 retry", recording.node("[data-wake]").hidden === true, recording.node("[data-wake]").hidden);
+
+  const booting = await open({
+    recording_state: "booting",
+    recorder_supervisor_state: supervisor("external"),
+  });
+  check("External Booting 照實說正在開資料庫", booting.line().includes("正在開資料庫"), booting.line());
+  check("External Booting 不說在聽", !booting.line().includes("在聽"), booting.line());
+  check("External Booting 不顯示 retry", booting.node("[data-wake]").hidden === true, booting.node("[data-wake]").hidden);
+
+  const thinking = await open({
+    recording_state: "thinking",
+    recorder_supervisor_state: supervisor("external"),
+  });
+  check("External Thinking 照實說正在想最後一段", thinking.line().includes("想最後一段"), thinking.line());
+  check("External Thinking 不說在聽", !thinking.line().includes("在聽"), thinking.line());
+  check("External Thinking 不顯示 retry", thinking.node("[data-wake]").hidden === true, thinking.node("[data-wake]").hidden);
+
+  const gone = await open({
+    recording_state: "none",
+    recorder_supervisor_state: supervisor("external"),
+  });
+  check("External 沒有新鮮拍時照實說沒在記錄", gone.line().startsWith("沒有人在記錄"), gone.line());
+  check("等 supervisor 確認離場前仍不顯示 retry", gone.node("[data-wake]").hidden === true, gone.node("[data-wake]").hidden);
+  check(
+    "隱藏按鈕也不殘留 retry 文案",
+    !["現在重試", "再試一次"].includes(gone.node("[data-wake]").textContent),
+    gone.node("[data-wake]").textContent,
+  );
+}
+
+console.log("㊾ Backoff／GaveUp 要等三種 heartbeat 佔位證據全退掉才顯示 retry");
+{
+  for (const phase of ["backoff", "gave-up"]) {
+    for (const heartbeat of ["recording", "booting", "thinking"]) {
+      const p = await open({
+        recording_state: heartbeat,
+        recorder_supervisor_state: supervisor(phase),
+      });
+      check(
+        `${phase} + ${heartbeat} 不顯示 retry`,
+        p.node("[data-wake]").hidden === true,
+        p.node("[data-wake]").hidden,
+      );
+    }
+  }
+}
+
+console.log("㊿ heartbeat 讀壞與外部停止等待都不能冒充空房");
+{
+  for (const phase of ["backoff", "gave-up"]) {
+    const unreadable = await open({
+      recording_state: "unreadable",
+      recorder_supervisor_state: supervisor(phase),
+    });
+    check(
+      `${phase} + unreadable 明講不能確認`,
+      unreadable.line().includes("讀不懂 recording.beat") &&
+        !unreadable.line().includes("沒有人在記錄"),
+      unreadable.line(),
+    );
+    check(
+      `${phase} + unreadable 不顯示 retry`,
+      unreadable.node("[data-wake]").hidden === true,
+      unreadable.node("[data-wake]").hidden,
+    );
+  }
+
+  for (const heartbeat of ["recording", "none"]) {
+    const stopping = await open({
+      recording_state: heartbeat,
+      recorder_supervisor_state: supervisor("stopping-external"),
+    });
+    check(
+      `stopping-external + ${heartbeat} 不說已退出`,
+      stopping.line().includes("已請外部 recorder 收工") &&
+        !stopping.line().includes("recorder 已退出"),
+      stopping.line(),
+    );
+    check(
+      `stopping-external + ${heartbeat} 不提供 Start／Retry`,
+      stopping.node("[data-wake]").hidden === true,
+      stopping.node("[data-wake]").hidden,
+    );
+  }
+}
+
+console.log("50a. StopUndelivered 保留可重送 Stop，不能退化成一般 Uncertain／Start");
+{
+  for (const heartbeat of ["recording", "thinking", "none", "unreadable"]) {
+    const message =
+      "真人已要求停止，但停止要求沒有送達磁碟；目前 recorder 仍可能在跑。修好後可再按一次停止。";
+    const p = await open({
+      recording_state: heartbeat,
+      recorder_supervisor_state: supervisor("stop-undelivered", message),
+      stop_recording: Promise.resolve(null),
+    });
+    check(
+      `${heartbeat} 保留未送達原文`,
+      p.line().includes(message) && !p.line().includes("在聽"),
+      p.line(),
+    );
+    check(
+      `${heartbeat} 顯示重送停止按鈕`,
+      p.node("[data-wake]").hidden === false &&
+        p.node("[data-wake]").textContent === "再送一次停止要求",
+      {
+        hidden: p.node("[data-wake]").hidden,
+        text: p.node("[data-wake]").textContent,
+      },
+    );
+    await p.click("[data-wake]");
+    check(
+      `${heartbeat} 點擊只送 stop_recording`,
+      p.calls.includes("stop_recording") && !p.calls.includes("start_recording"),
+      p.calls,
+    );
+  }
+
+  const overtakesWake = await open({
+    recording_state: "none",
+    start_recording: () => new Promise(() => {}),
+  });
+  await overtakesWake.click("[data-wake]");
+  check("前提：renderer 還在等真人 Start 回條", overtakesWake.line().includes("正在把她叫起來"), overtakesWake.line());
+  await overtakesWake.fromOutside(
+    "recorder-supervisor-changed",
+    supervisor("stop-undelivered", "STOP-DELIVERY-FAILED"),
+  );
+  check(
+    "StopUndelivered event 取代本機 starting 猜測",
+    overtakesWake.line().includes("停止要求尚未送達") &&
+      !overtakesWake.line().includes("正在把她叫起來"),
+    overtakesWake.line(),
+  );
+  check(
+    "取代後仍只提供重送 Stop",
+    overtakesWake.node("[data-wake]").hidden === false &&
+      overtakesWake.node("[data-wake]").textContent === "再送一次停止要求",
+    {
+      hidden: overtakesWake.node("[data-wake]").hidden,
+      text: overtakesWake.node("[data-wake]").textContent,
+    },
+  );
+}
+
+console.log("50b. 第一張同意書撤回先取消 automatic supervisor，再碰 durable I/O");
+{
+  const native = read(join(UI, "../src-tauri/src/main.rs"));
+  const consentSet = native.slice(
+    native.indexOf("fn consent_set("),
+    native.indexOf("fn open_onboarding_window", native.indexOf("fn consent_set(")),
+  );
+  const cancelAt = consentSet.indexOf("cancel_automatic_for_consent_revoke");
+  const mutateAt = consentSet.indexOf("sister_core::consent::mutate");
+  check(
+    "LocalRecording uncheck 的 typed cancellation 排在 consent mutate 前",
+    consentSet.includes("Sheet::LocalRecording") && cancelAt >= 0 && mutateAt > cancelAt,
+    { cancelAt, mutateAt },
+  );
+  const revokeWrites = consentSet.match(/request_consent_revoke\s*\(/g) ?? [];
+  const prepareAt = consentSet.indexOf("prepare_consent_revoke_barrier_clear");
+  const committedAt = consentSet.indexOf("committed.map_err");
+  const clearAt = consentSet.indexOf("clear_after_commit");
+  const barrierWrittenAt = consentSet.indexOf("revoke_barrier_written = true");
+  check(
+    "revoke 只在 consent save 前寫一代 barrier，沒有 post-relatch 蓋過較新 regrant",
+    revokeWrites.length === 1 && consentSet.indexOf("request_consent_revoke") < committedAt,
+    revokeWrites.length,
+  );
+  check(
+    "local regrant 鎖內取票、commit 後才清，Superseded 明確回錯",
+    prepareAt > mutateAt && clearAt > committedAt && consentSet.includes("ConsentRevokeBarrierClear::Superseded") &&
+      /ConsentRevokeBarrierClear::Superseded\)[\s\S]*?return Err/.test(consentSet),
+    { prepareAt, committedAt, clearAt },
+  );
+  check(
+    "只有 revoke barrier API 完整成功後，transaction 錯誤才可以聲稱 barrier 已可靠留下",
+    barrierWrittenAt > consentSet.indexOf("request_consent_revoke") &&
+      barrierWrittenAt < committedAt &&
+      /if revoke_barrier_written \{[\s\S]*?撤回 barrier 已留下[\s\S]*?else if revoking_recording \{[\s\S]*?barrier 寫入沒有完整成功[\s\S]*?無法證明停止條件已可靠落地/.test(
+        consentSet,
+      ),
+    { barrierWrittenAt, committedAt },
+  );
+  check(
+    "regrant 只清獨立 barrier，不碰人工 Stop marker",
+    !consentSet.includes("clear_stop_intent"),
+    consentSet.match(/clear_[a-z_]+/g),
+  );
+}
+
+console.log("51. 叫醒途中讀壞 heartbeat，不可繼續用本機 starting 掩蓋");
+{
+  let heartbeat = "none";
+  const p = await open({
+    recording_state: () => heartbeat,
+    // 把本機 wake 留在飛行中；真實重現是 child 剛 spawn，下一次讀檔回 unreadable。
+    start_recording: () => new Promise(() => {}),
+  });
+  await p.click("[data-wake]");
+  check("前提：本機正在等叫醒", p.line().includes("正在把她叫起來"), p.line());
+
+  heartbeat = "unreadable";
+  await p.pollNow();
+  check("讀壞狀態逐字看得見", p.line().includes("讀不懂 recording.beat"), p.line());
+  check("不再用 starting 假裝還有進度", !p.line().includes("正在把她叫起來"), p.line());
+  check("讀不懂時不提供第二次啟動", p.node("[data-wake]").hidden === true, p.node("[data-wake]").hidden);
+}
+
+console.log("52. 無關的 one-shot notice 不可被 heartbeat transition 擦掉");
+{
+  let heartbeat = "none";
+  const p = await open({
+    recording_state: () => heartbeat,
+    open_timeline: new Error("時間軸這一下開不起來"),
+  });
+  await p.click("#timeline");
+  check("前提：時間軸回條已顯示", p.line().includes("時間軸這一下"), p.line());
+
+  heartbeat = "recording";
+  await p.pollNow();
+  check("狀態已切到在聽", p.line().startsWith("在聽"), p.line());
+  check("但無關回條仍在最高優先度", p.line().includes("時間軸這一下"), p.line());
+}
+
+console.log("53. 拔手失敗不是 recorder 回條，heartbeat transition 不能淘汰");
+{
+  let heartbeat = "booting";
+  const p = await open({ recording_state: () => heartbeat });
+  const failedHands = "拔手開關這一下沒有生效；她的手仍可能會動";
+  await p.fromOutside("hands-pulled", failedHands);
+  check("前提：拔手失敗回條已顯示", p.line().includes("拔手開關"), p.line());
+
+  heartbeat = "recording";
+  await p.pollNow();
+  check("錄製狀態改變後拔手失敗仍在", p.line().includes("拔手開關"), p.line());
+
+  // Windows tray handler 本機跑不到；直接釘住它送的 event 不再混回 recorder-failed。
+  const main = read(join(UI, "../src-tauri/src/main.rs"));
+  const from = main.indexOf('"hands-stop" | "hands-resume" => {');
+  const to = main.indexOf('"record" => {', from);
+  const trayHands = from >= 0 && to > from ? main.slice(from, to) : "";
+  check("tray 拔手分支存在", trayHands !== "", [from, to]);
+  check(
+    "tray 拔手失敗送 hands-pulled",
+    /\.emit\(\s*"hands-pulled"/.test(trayHands) && !/\.emit\(\s*"recorder-failed"/.test(trayHands),
+    trayHands,
+  );
 }
 
 console.log("");

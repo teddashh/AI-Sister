@@ -267,6 +267,17 @@ enum Command {
         /// 錄多久後自動停止（秒）。省略則持續到 Ctrl-C。
         #[arg(long, value_name = "SECS")]
         duration: Option<u64>,
+        /// desktop watchdog 專用；一般 `sister record` 維持 explicit。
+        #[arg(
+            long = "desktop-supervised",
+            alias = "internal-start-mode",
+            value_enum,
+            default_value = "explicit",
+            default_missing_value = "supervised",
+            num_args = 0..=1,
+            hide = true
+        )]
+        start_mode: ops::record::StartMode,
     },
 
     /// 重播一份腳本，把結果寫進資料庫
@@ -636,9 +647,16 @@ fn main() -> Result<()> {
     let config = || load_config(cli.config.as_deref());
 
     match cli.command {
-        Command::Record { duration } => {
-            ops::record::run(&data_dir, config()?, cli.config.clone(), duration)
-        }
+        Command::Record {
+            duration,
+            start_mode,
+        } => ops::record::run(
+            &data_dir,
+            config()?,
+            cli.config.clone(),
+            duration,
+            start_mode,
+        ),
         Command::Replay(args) => match args.action {
             Some(ReplayAction::Export {
                 last,
@@ -943,6 +961,28 @@ fn at_least_one(s: &str) -> std::result::Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_record_stays_explicit_and_the_internal_mode_is_typed() {
+        let plain = Cli::try_parse_from(["sister", "record"]).expect("plain record");
+        assert!(matches!(
+            plain.command,
+            Command::Record {
+                duration: None,
+                start_mode: ops::record::StartMode::Explicit
+            }
+        ));
+
+        let supervised = Cli::try_parse_from(["sister", "record", "--desktop-supervised"])
+            .expect("desktop supervised record");
+        assert!(matches!(
+            supervised.command,
+            Command::Record {
+                duration: None,
+                start_mode: ops::record::StartMode::Supervised
+            }
+        ));
+    }
 
     #[test]
     fn asking_for_zero_rows_is_refused_not_answered_with_an_empty_screen() {

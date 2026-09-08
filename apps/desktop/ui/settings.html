@@ -17,8 +17,9 @@
       </p>
 
       <!--
-        設定檔讀不出來的時候，這一整頁不再宣稱任何事。沒有這一條的話，
-        空的排除框加上沒打勾的防線，讀起來是一個很明確、而且是假的斷言。
+        設定檔讀不出來的時候，由 config.toml 控制的欄位不再宣稱任何事。沒有
+        這一條的話，空的排除框加上沒打勾的防線，讀起來是一個很明確、而且是
+        假的斷言。Windows 登入項是獨立的 registry 狀態，仍會另外讀、另外畫。
       -->
       <p class="health unknown" data-unreadable hidden></p>
 
@@ -41,6 +42,27 @@
         （見 `capabilities::About`），這裡只負責把它放對地方。
       -->
       <p class="health" data-machine hidden></p>
+
+      <section>
+        <h2>Windows 登入後</h2>
+        <label class="check">
+          <input type="checkbox" data-login-startup disabled />
+          <span>
+            登入 Windows 後在背景啟動 AI-Sister
+            <em>
+              不彈出角色或同意書視窗；只有第一張「本機記錄」同意書仍有效時才會開始
+              recorder，也不會解除你已經按下的暫停。
+            </em>
+          </span>
+        </label>
+        <p class="state" role="status" aria-live="polite" data-login-startup-say>
+          正在讀 Windows 登入項…
+        </p>
+        <p class="hint">
+          這顆開關按下就立即變更 Windows 登入項，不跟頁尾的「儲存」一起送。
+          關掉只影響下次登入，不會停止這一輪正在跑的 desktop 或 recorder。
+        </p>
+      </section>
 
       <section>
         <h2>角色</h2>

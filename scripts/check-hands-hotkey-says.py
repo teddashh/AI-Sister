@@ -291,7 +291,10 @@ raw = "map_err(|e| e.to_string())" in arm
 # `format!`——要說的話都在 `kill_switch::` 那一族裡拼好了，log 用
 # `tracing::error!` 自己的格式化（原文本來就該留在 log）。所以整個禁掉。
 spliced = "format!" in arm
-emitted = re.search(r'emit\(\s*"recorder-failed"\s*,\s*([^,\n]+)', arm)
+# alpha.107 把拔手結果拆到自己的 `hands-pulled` event；借
+# `recorder-failed` 會讓一次成功的 pull/release 被事件名說成 recorder 壞了。
+# 這裡守的仍是同一件事：送進 UI 的 payload 只能來自 typed 中文文案。
+emitted = re.search(r'emit\(\s*"hands-pulled"\s*,\s*([^,\n]+)', arm)
 speaks = bool(emitted) and "kill_switch::" in emitted.group(1)
 want(
     "⑧ 作業系統的原文不進中文句子",

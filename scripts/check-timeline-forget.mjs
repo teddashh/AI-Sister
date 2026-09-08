@@ -326,6 +326,18 @@ console.log("⑥ᵇ 想最後一段不是當掉");
   check("不可以說她當掉了", !p.say().includes("她當掉了"), p.say());
 }
 
+console.log("⑥ᶜ heartbeat 讀不懂不是沒有 recorder");
+{
+  const p = await open({
+    forget_range: erasure({ sessions_left: 1, shell_beat: "unreadable" }),
+  });
+  await p.press();
+  await p.press();
+  check("明講 recording.beat 讀不懂", p.say().includes("讀不懂 recording.beat"), p.say());
+  check("不冒充確認沒有 recorder", !p.say().includes("沒有任何 recorder 佔著"), p.say());
+  check("不猜留下的 session 已當掉", !p.say().includes("她當掉了"), p.say());
+}
+
 console.log("⑦ 那一天本來就是空的，重讀又失敗——右邊沒有「那一份」可以指");
 {
   // ④ 和 ⑤ 中間還有一格：讀**成功**了，但那一天什麼都沒有。畫面上留下的是
@@ -582,6 +594,11 @@ console.log("⑩ 字母人那一側真的有動手（不是只有畫面上寫著
   const pre = body("forget_preview");
   check("找得到 forget_range 的函式體", del.length > 0, del.length);
   check("找得到 forget_preview 的函式體", pre.length > 0, pre.length);
+  check(
+    "forget_range 從完整 Presence 推出 shell_beat",
+    del.includes("heartbeat::watching_word") && del.includes("heartbeat::presence"),
+    del.slice(0, 400),
+  );
   // 刪的那一支要真的呼叫共用的那支——CLI 走的是同一個函式。
   check("忘掉這一段要真的刪掉授權書", del.includes("forget_saved_grant"), del.slice(0, 200));
   // 預覽要問「有沒有」，不然畫面上那一句是憑空來的。

@@ -39,6 +39,8 @@ pub mod moments;
 pub mod pause;
 pub mod prompt_fence;
 pub mod question;
+pub mod recorder_lease;
+pub mod recorder_watchdog;
 pub mod redact;
 pub mod replay;
 pub mod retention;

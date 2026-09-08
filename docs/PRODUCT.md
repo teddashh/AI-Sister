@@ -56,6 +56,20 @@
    這不等於產品可省略 Release 1.0 合約要求的 Persona 交付；「使用者可關」和
    「產品沒做」是兩件事。
 
+**常駐不是永久授權。** Windows 登入啟動預設關閉，只能由已驗證的
+current-user 安裝副本在設定頁明確開啟。它在登入後只留在系統匣；沒有
+有效本機記錄同意時不開 recorder，也不自動彈同意頁。既有的 pause 永遠優先，
+不會因登入或 crash retry 被解除。
+
+「崩潰自復」也有邊界：desktop 只重試它自己啟動的 recorder，通過有上限的
+1 秒／5 秒／30 秒 backoff 後在第四次連續失敗放棄。人手停止、撤回同意、
+要求結束 desktop 都贏過重試；但若停止意圖寫不進磁碟，desktop 會取消記憶體裡的
+重試、留在畫面上報錯，不會假裝自己已退出。占用或狀態不明就做得比較少。
+同時從 CLI 與 desktop 按開也只能有一個 recorder 在第一拍前拿到 OS lock。它不接管
+人手或其他程式啟動的 recorder，也沒有另一個 service 在 desktop 自己當掉時把它重開。
+精確的登錄值、五態與 reset 規則見 [SPEC.md](SPEC.md) §14；真 Windows 產品驗收仍以
+[WINDOWS-CHECKLIST.md](WINDOWS-CHECKLIST.md) 的未勾項目為準。
+
 ## 4. Killer Scenarios（按交付順序）
 
 ### S1 — 秒答回憶（Release 1.0 的核心）

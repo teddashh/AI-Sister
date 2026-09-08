@@ -867,11 +867,12 @@ jobs:
 
           # 「開始記錄／停止記錄」。字母人上那顆按鈕在 runner 上按不到，但它
           # 按下去做的事就是這一行做的事——寫一個檔案。這裡驗的是 recorder
-          # 真的會去讀它，而且**乾淨地**收工：心跳換成墓碑、請求吃掉。
+          # 真的會去讀它，而且**乾淨地**收工：心跳換成墓碑、pending request
+          # 搬成帶理由的 durable consumed marker。
           #
           # 沒有這一段的話，整套開始／停止只有一個入口，而那個入口在一個沒有
           # 人測得到的 GUI 按鈕後面。
-          rm -f ./loop/stop.request
+          rm -f ./loop/stop.request ./loop/stop.consumed
           # 「她在錄嗎」有兩個問法，而這一段要用到兩個。
           #
           # `beat_is_live`：那一行**還說不說她在錄**。收工之後拿它問（墓碑的
@@ -971,10 +972,18 @@ jobs:
             && { echo "::error::被叫停之後心跳還在說她在錄（$(cat "$BEAT")）——字母人會說她還在錄"; exit 1; }
           [ -f "$BEAT" ] \
             || { echo "::error::被叫停之後連墓碑都沒留——「檔案不在」又同時是好幾件事了"; exit 1; }
-          # 沒被吃掉的話，下一場錄製會在第一個 tick 就自己結束，而畫面上唯一
-          # 看得到的是她閃了一下就不見了。
-          [ ! -f ./loop/stop.request ] \
-            || { echo "::error::停止請求沒被消費掉——下一場錄製一開始就會自己結束"; exit 1; }
+          # pending 要原子地搬成 durable consumed，不能刪掉就算了：desktop watchdog
+          # 若正好在 child finalize 非零之後醒來，要靠這份 requested 理由知道這是
+          # 人叫停的，絕不能把 recorder 復活。兩個 marker 同時不在會把這兩種狀態
+          # 又壓成同一種「沒有檔案」。
+          [ ! -e ./loop/stop.request ] \
+            || { echo "::error::停止請求仍留在 pending——recorder 沒完成 consume 交棒"; exit 1; }
+          [ -f ./loop/stop.consumed ] \
+            || { echo "::error::停止請求被吃掉後沒有留下 durable consumed——watchdog 會把手動停止誤認成 crash"; exit 1; }
+          CONSUMED_REASON=$(cat ./loop/stop.consumed)
+          CONSUMED_BYTES=$(wc -c < ./loop/stop.consumed | tr -d '[:space:]')
+          [ "$CONSUMED_REASON" = requested ] && [ "$CONSUMED_BYTES" = 9 ] \
+            || { echo "::error::stop.consumed 不是 exact requested（bytes=$CONSUMED_BYTES value=$CONSUMED_REASON）"; exit 1; }
 
           # 那一行字印在終端機上就消失了。**磁碟上也要記得**：明天早上打開
           # 字母人，「沒有人在記錄」底下那句話就是從這裡來的，而「你自己按了
@@ -1054,7 +1063,7 @@ jobs:
       # runner 真的安裝、啟動、再裝與移除，並分別讓 desktop 和 recorder 活著去撞
       # installer。兩場都必須回固定非零，而且原行程仍活著；否則 Tauri 內建的
       # KillProcess 會把「升級」做成強制砍掉錄製中的資料庫。
-      - name: Installer — install, single-instance, refuse live processes, reinstall, uninstall
+      - name: Installer — install, login registry, refuse live processes, reinstall, uninstall
         shell: pwsh
         timeout-minutes: 10
         run: |
@@ -1066,6 +1075,10 @@ jobs:
           $dataDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-memory'
           $configPath = Join-Path $env:RUNNER_TEMP 'ai-sister-installer.toml'
           $releaseDesktop = Join-Path (Get-Location) 'sister-desktop.exe'
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $loginRunName = 'AI-Sister'
+          $unrelatedRunName = 'AI-Sister-CI-Unrelated'
+          $unrelatedRunValue = '"C:\Windows\System32\notepad.exe" --ai-sister-ci-unrelated'
           if ($installDir -match '\s' -or $dataDir -match '\s' -or $configPath -match '\s') {
             throw 'NSIS /D 與 recorder smoke 使用的暫存路徑不可含空白'
           }
@@ -1154,10 +1167,73 @@ jobs:
             }
           }
 
+          function Get-RunValue([string] $name) {
+            $key = Get-Item -LiteralPath $runKey
+            try {
+              if ($key.GetValueNames() -notcontains $name) {
+                return $null
+              }
+              return [pscustomobject]@{
+                Kind = $key.GetValueKind($name)
+                Value = $key.GetValue(
+                  $name,
+                  $null,
+                  [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+              }
+            }
+            finally {
+              $key.Close()
+            }
+          }
+
+          function Assert-RunValueAbsent([string] $name, [string] $failure) {
+            $actual = Get-RunValue $name
+            if ($null -ne $actual) {
+              throw "$failure：kind=$($actual.Kind) value=$($actual.Value)"
+            }
+          }
+
+          function Assert-ExactRunString(
+            [string] $name,
+            [string] $expected,
+            [string] $failure
+          ) {
+            $actual = Get-RunValue $name
+            if ($null -eq $actual -or
+                $actual.Kind -ne [Microsoft.Win32.RegistryValueKind]::String -or
+                $actual.Value -cne $expected) {
+              if ($null -eq $actual) {
+                throw "$failure：value 不在"
+              }
+              throw "$failure：kind=$($actual.Kind) value=$($actual.Value) expected=$expected"
+            }
+          }
+
+          # 先放一筆同 key 的無關值。fresh install／reinstall／真正 uninstall 都只能
+          # 處理 productName 同名的 AI-Sister，不能把整個 Run key 當成自己的。
+          if (-not (Test-Path -LiteralPath $runKey)) {
+            $null = New-Item -Path $runKey -Force
+          }
+          Assert-RunValueAbsent $loginRunName `
+            'installer smoke 起點已有 AI-Sister Run value，驗不到 fresh-install default'
+          Assert-RunValueAbsent $unrelatedRunName `
+            'installer smoke 的 unrelated Run fixture 名稱已被占用'
+          $null = New-ItemProperty -LiteralPath $runKey -Name $unrelatedRunName `
+            -PropertyType String -Value $unrelatedRunValue
+
           Run-Setup 0
           Assert-ProductFiles
+          Assert-RunValueAbsent $loginRunName `
+            'fresh install 預設卻自行打開了 Windows 登入啟動'
+          Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+            'fresh install 動到同一個 Run key 裡的無關值'
           $desktop = Join-Path $installDir 'sister-desktop.exe'
           $sister = Join-Path $installDir 'sister.exe'
+          $expectedLoginRunValue = '"' + $desktop + '" --ai-sister-login'
+          $null = New-ItemProperty -LiteralPath $runKey -Name $loginRunName `
+            -PropertyType String -Value $expectedLoginRunValue
+          Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+            'CI 寫入的 exact 登入啟動 fixture 讀不回原值'
           Assert-Pe $desktop 0x8664 0x20b
           Assert-Pe $sister 0x8664 0x20b
           # NSIS launcher 本身是 32-bit PE；檔名的 x64 指它攜帶的兩個 product payload。
@@ -1183,14 +1259,16 @@ jobs:
           }
           $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AI-Sister'
           $installed = Get-ItemProperty -LiteralPath $uninstallKey
-          if ($installed.DisplayVersion -ne $version -or
-              $installed.InstallLocation.Trim('"') -ne $installDir) {
+          $exactQuotedInstallDir = '"' + $installDir + '"'
+          if ($installed.DisplayVersion -cne $version -or
+              $installed.InstallLocation -cne $exactQuotedInstallDir) {
             throw 'current-user uninstall metadata 沒有對回 exact 版本與 install root'
           }
 
           # 第一個 owner 拿到 startup guard 後刻意停 5 秒，把官方 receiver 尚未建立的
-          # 真實競態放大成可觀察測試窗。四個 secondary 必須等 receiver、逐一交棒退出；
-          # 若只靠官方 plugin 的單次 FindWindow，它們會穿過 setup 留成四份 desktop。
+          # 真實競態放大成可觀察測試窗。四個 interactive secondary 必須等 receiver、
+          # 逐一交棒退出；若只靠官方 plugin 的單次 FindWindow，它們會穿過 setup 留成
+          # 四份 desktop。
           $firstInfo = [System.Diagnostics.ProcessStartInfo]::new()
           $firstInfo.FileName = $desktop
           $firstInfo.UseShellExecute = $false
@@ -1244,6 +1322,10 @@ jobs:
             if ($first.HasExited) {
               throw 'installer 宣稱拒絕，卻仍然殺掉了 desktop'
             }
+            Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+              'installer 拒絕 live desktop 時改動了登入啟動值'
+            Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+              'installer 拒絕 live desktop 時改動了無關 Run value'
           }
           finally {
             foreach ($secondary in $burst) {
@@ -1258,6 +1340,10 @@ jobs:
             }
           }
 
+          # `--ai-sister-login` 的 no-consent 行程檢查仍留給真機 checklist。desktop
+          # 目前兩句 login log 都早於 tray 建立與 setup 結尾；在那裡立刻斷言 hidden／
+          # no-child 再 force-kill，會讓稍後誤彈窗或誤 spawn 的壞法全綠。沒有 post-setup
+          # ready signal 前，不拿任意 sleep 冒充這份證據。
           New-Item -ItemType Directory -Path $dataDir | Out-Null
           Set-Content -LiteralPath $configPath -Encoding ascii -Value @(
             '[capture]',
@@ -1300,6 +1386,10 @@ jobs:
             if (-not (Test-Path -LiteralPath $uninstallKey)) {
               throw 'uninstaller 宣稱拒絕，卻移除了 HKCU uninstall metadata'
             }
+            Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+              'uninstaller 拒絕 live recorder 時改動了登入啟動值'
+            Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+              'uninstaller 拒絕 live recorder 時改動了無關 Run value'
 
             & $sister --data-dir $dataDir stop
             if ($LASTEXITCODE -ne 0) { throw 'installed sister stop 失敗' }
@@ -1334,19 +1424,30 @@ jobs:
           if ($installed.DisplayVersion -ne $version) {
             throw "reinstall 後 registry 版本不是 $version"
           }
+          Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+            'same-version reinstall 沒保留 exact 登入啟動值'
+          Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+            'same-version reinstall 改動了無關 Run value'
 
           $uninstaller = Join-Path $installDir 'uninstall.exe'
           $removed = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
           if ($removed.ExitCode -ne 0) { throw "uninstaller exit=$($removed.ExitCode)" }
           $deadline = [DateTime]::UtcNow.AddSeconds(20)
-          while ((Test-Path -LiteralPath $installDir) -and [DateTime]::UtcNow -lt $deadline) {
+          while (((Test-Path -LiteralPath $installDir) -or
+                  ($null -ne (Get-RunValue $loginRunName))) -and
+                 [DateTime]::UtcNow -lt $deadline) {
             Start-Sleep -Milliseconds 250
           }
           if (Test-Path -LiteralPath $installDir) { throw 'uninstaller 沒移除 install root' }
           if (Test-Path -LiteralPath $uninstallKey) { throw 'uninstaller 沒移除 HKCU uninstall metadata' }
+          Assert-RunValueAbsent $loginRunName `
+            '真正 uninstall 沒移除 AI-Sister 登入啟動值'
+          Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+            '真正 uninstall 改動了同一個 Run key 裡的無關值'
           if ((Get-FileHash $db -Algorithm SHA256).Hash -ne $dbHash) {
             throw '移除程式連 install root 之外的記憶資料庫也刪／改了'
           }
+          Remove-ItemProperty -LiteralPath $runKey -Name $unrelatedRunName
 
       - name: Upload ai-sister.exe
         uses: actions/upload-artifact@v4
@@ -1370,6 +1471,11 @@ jobs:
     needs: [linux, msrv, windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # 同一個 tag 的 rerun 不能和原本那輪同時碰 release。後來排到的那輪會先
+    # 看遠端狀態：不可見的失敗 draft 可以整份重建；已公開的 release 則原封不動。
+    concurrency:
+      group: release-${{ github.repository }}-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -1402,26 +1508,95 @@ jobs:
           ./scripts/release-notes.sh "${GITHUB_REF_NAME}" > notes.md
           cat notes.md
 
-      # alpha 是 prerelease；softprops v2 對 prerelease 不會自動先藏成 draft。若直接
-      # 發布再上傳，後面的 asset API 失敗會在外面留下一份只有半套成品的 release。
-      # 這裡先固定成不可見 draft；下一步從同一個 release ID 讀回、下載並逐 byte 驗完
-      # 三個遠端 asset，最後一個 API 呼叫才公開。
+      # alpha 是 prerelease；資產全數驗完以前必須留在不可見 draft。這裡不用會
+      # 「找到既有 release 就更新」的第三方 action：成功公開後 rerun 時，那種更新會
+      # 直接在公開頁刪除／重傳三檔，任一 upload 中斷就留下一套 partial／mixed 資產。
+      # 同 tag 若只有上一輪失敗留下的 draft，可以安全地整份刪掉重建；若已公開則
+      # 在碰任何遠端資產以前失敗。三檔也刻意逐一上傳，不並行改 release。
       - name: Create draft release and upload installer plus portable executables
         id: create_release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            AI-Sister-Setup.exe
-            sister.exe
-            sister-desktop.exe
-          # 預設 false 只會警告 unmatched local glob；它也管不到「第一個遠端 upload
-          # 成功、第二個失敗」。這裡先讓本機缺檔必紅，遠端 partial 則由 draft +
-          # 下一步的 exact remote verification 隔離在公開 release 之外。
-          fail_on_unmatched_files: true
-          draft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: true
-          body_path: notes.md
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for asset in AI-Sister-Setup.exe sister.exe sister-desktop.exe; do
+            test -s "$asset"
+          done
+
+          release_by_tag="repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}"
+          existing_json="$RUNNER_TEMP/existing-release.json"
+          existing_error="$RUNNER_TEMP/existing-release.error"
+          if gh api "$release_by_tag" > "$existing_json" 2> "$existing_error"; then
+            read -r existing_id existing_state < <(python3 - "$existing_json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          release_id = release.get("id")
+          if not isinstance(release_id, int) or release_id <= 0:
+              raise SystemExit("既有 release 沒有合法 id")
+          print(release_id, "draft" if release.get("draft") is True else "published")
+          PY
+            )
+            if [[ "$existing_state" != draft ]]; then
+              echo "::error::${GITHUB_REF_NAME} 已有公開 release；rerun 不得刪換它的資產"
+              exit 1
+            fi
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/releases/${existing_id}"
+          else
+            if ! grep -q 'HTTP 404' "$existing_error"; then
+              cat "$existing_error" >&2
+              exit 1
+            fi
+          fi
+
+          prerelease=false
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=true; fi
+          create_payload="$RUNNER_TEMP/release-create.json"
+          python3 - "$GITHUB_REF_NAME" "$prerelease" notes.md > "$create_payload" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          tag, prerelease, notes_path = sys.argv[1:]
+          json.dump(
+              {
+                  "tag_name": tag,
+                  "name": tag,
+                  "body": pathlib.Path(notes_path).read_text(encoding="utf-8"),
+                  "draft": True,
+                  "prerelease": prerelease == "true",
+                  "generate_release_notes": True,
+              },
+              sys.stdout,
+              separators=(",", ":"),
+          )
+          PY
+          created_json="$RUNNER_TEMP/created-release.json"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+            --input "$create_payload" > "$created_json"
+          release_id=$(python3 - "$created_json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          release_id = release.get("id")
+          if not isinstance(release_id, int) or release_id <= 0:
+              raise SystemExit("新 draft release 沒有合法 id")
+          if release.get("draft") is not True:
+              raise SystemExit("新 release 建立後不是 draft")
+          print(release_id)
+          PY
+          )
+          echo "id=$release_id" >> "$GITHUB_OUTPUT"
+
+          for asset in AI-Sister-Setup.exe sister.exe sister-desktop.exe; do
+            gh release upload "$GITHUB_REF_NAME" "$asset"
+          done
 
       - name: Verify the exact remote assets, then publish the same release
         id: publish_release

@@ -68,9 +68,14 @@ cache 旁邊另有四種不跟 release 目錄一起刪的協定檔：`persona-as
 | `pause.lock` | 空的跨行程 read/write transaction 鎖；檔案留著，真正的鎖由作業系統 handle 持有 | 執行中不可刪，否則不同 process 可能各鎖到不同檔案；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `hands.stop` | 她的手現在是不是被拔掉。內容只有第一次拔手的毫秒時戳 | 等於安靜地把手接回去，所以任何 forget、prune、export 都刻意不動它 |
 | `consent.toml` | 三張同意書各自是**何時**簽的，加上一個條文版本號 | 等於三張都沒簽，`sister record` 拒絕啟動 |
+| `consent.lock` | 空的跨行程同意 transaction 鎖。CLI／desktop 的 grant／revoke 在 OS whole-file exclusive lock 內重讀最新 `consent.toml`、套當次變更再 atomic save；recorder start 先持 shared guard。CLI 那份跨到第一拍；desktop parent 那份只跨到 `Command::spawn` 回來便立即放掉，child 自己 nonblocking 重拿並跨到第一拍。symlink／non-regular path 拒絕 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
+| `consent-revoke.barrier` | 第一張同意撤回在 atomic save **之前**發布的獨立 durable barrier；內容是 `v1:` 加 fresh 256-bit generation。Recorder 把它視為 `consent-revoked` 停止條件，但不消費；Start 無權清。只有成功 commit 的 local-recording regrant 可用相符 generation ticket 清理，並先確保另有 durable stop intent | 刪掉可能讓失敗的 consent save 留著舊有效同意時重新開錄，也可能讓同一拍內的快速 revoke→regrant 漏掉收工。不要手動刪；損毀時 fail closed，須先關閉所有 AI-Sister 行程再修復 |
 | `pet-window.json` | 字母人視窗的位置與置頂狀態 | 下次開在右下角 |
 | `recording.beat` | `sister record` 每 5 秒蓋一次的時戳，用來告訴字母人「現在真的有人在錄」。收工的時候**不刪檔**，改寫成一塊墓碑（`0 stopped <收工時間>`） | 字母人一樣顯示「沒有人在記錄」；但「這台機器從來沒跑過 recorder」和「她剛剛才收工」會變回同一句話 |
-| `stop.request` | 有人（字母人的選單、`sister stop`）請正在跑的 `record` 收工。內容只有 `stop` 兩個字 | 那次「請你停下來」不會送到，她繼續錄 |
+| `recording.lock` | 空的 recorder 單一擁有者協定檔。每個 CLI／desktop recorder 在第一拍 heartbeat 前 nonblocking 取得 OS whole-file exclusive lock，整場持有；process crash／handle drop 由 OS 釋放。symlink／non-regular path 拒絕 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。檔案本來就可持久留著，刪掉不是「解除占用」；執行中刪除反而可讓不同 process 鎖到不同 inode。所有 AI-Sister 行程關閉後才可修復／重建 |
+| `stop.request` | 尚未交給 recorder 的 durable stop latch；內容是 `desktop-quit`、`requested` 或 `consent-revoked`，舊版 `stop` 仍讀成 `requested`。獨立 revoke barrier 活著時先顯示撤回；成功 regrant 清 barrier 前若原本沒有 stop，會在這裡留下 `consent-revoked`，既有 marker 則原封保留 | 可能讓已排重試在不知使用者已停／已撤回的情況下又啟動；不要手動刪 |
+| `stop.consumed` | recorder 已收到的同一種 durable stop latch。recorder 把 pending 原子搬到這裡，不刪除意圖；內容與強度同上 | 可能讓 child 在 DB finalize 失敗、非零退出後被 watchdog 當 crash 復活；真人顯式 start 可清三種，下一個全新 opt-in login 只可在五分鐘 bounded handoff 與完整 barrier 後清 `desktop-quit`，不要手動刪 |
+| `stop.lock` | 空的跨行程 stop transaction 鎖。request、consume 與 explicit clear 在 OS whole-file exclusive lock 內更新兩顆 marker；probe 只取 shared lock。檔案永久保留，存在不代表有人要求停止 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。執行中不可刪，否則 request 與 clear 可能各鎖到不同 inode、讓停止意圖消失；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `desktop.log` / `desktop.log.1` | 字母人這一輪（與上一輪）自己發生了什麼事 | 沒有影響，下次開會重寫 |
 | `record.log` / `record.log.1` | 從字母人按「開始記錄」跑起來的那個 `record`，它印在終端機上的東西 | 沒有影響，下次開會重寫 |
 | `capabilities.json` | 上一份能力快照：這台機器對每一項是已知可用、已知不可用，還是沒量到；錄製中每分鐘更新 URL 實測證據 | 設定頁改說「還不知道這幾條會不會生效」 |
@@ -89,7 +94,17 @@ stale lock，作業系統會釋放 handle；檔案留在原位是刻意的。
 
 `consent.toml` 存時戳而不是 `true`／`false`，因為「你什麼時候同意的」是一個
 你有權利問、而我們答得出來的問題。讀不到的時候一律倒向「她做得比較少」那一邊：
-暫停控制狀態讀不到當作暫停中，同意書讀不到當作沒簽，心跳讀不到當作沒有人在錄。
+暫停控制狀態讀不到當作暫停中，同意書讀不到當作沒簽；心跳讀不到則明講狀態未知，
+不宣稱正在錄，也不把它折成「沒有人在錄」來開放 Start／retry。
+改同意時不可先在鎖外讀完整份、最後拿舊 snapshot 寫回；那會讓同時在 CLI
+和 desktop 改不同 sheet 時後寫者無聲把先寫者蓋掉。每個 mutation 要先持有
+`consent.lock`，在鎖內重讀、套這次 grant／revoke、atomic save。Recorder start 不寫
+consent，卻必須先拿同一把鎖的 shared guard，在鎖內重讀有效 snapshot。CLI recorder
+把同一份 guard 帶過 stop clear 與第一拍；desktop parent 帶過 preflight／clear 到
+`Command::spawn` 回來便立刻放掉，child 自己 nonblocking 重拿並帶過第一拍，不會讓
+parent 無期限等 heartbeat。atomic replace 保證每一份 guard 看到舊檔或新檔，不是半份
+TOML。lock path 若是
+symlink／non-regular file 或無法取得，mutation fail closed，不跟著鎖到資料目錄外。
 
 `hands.stop` 不在任何刪除路徑上。它沒有使用者打的字，只有一個毫秒時戳；刪掉它
 換不到隱私，卻會把一道阻止執行的牆拿掉。「忘掉」若順手刪它，就等於沒有明講地
@@ -101,6 +116,9 @@ stale lock，作業系統會釋放 handle；檔案留在原位是刻意的。
 人把 `sister record` 跑起來。判斷不能只看資料庫裡的 `sessions.ended_at`：
 recorder 當掉的時候那一列會永遠停在 NULL，「她死了」和「她正在錄」長得一模
 一樣。活著才蓋得動時戳，而停住的時戳自己會過期（16 秒）。
+但 heartbeat 是可觀察狀態，不是原子單一擁有權：兩個 process 可能在第一顆心跳前
+同時看見空房。真正阻止這個 TOCTOU 的是 `recording.lock` 當下由誰持有的 OS lock，
+不是 lock 檔案存不存在。
 
 收工的時候留墓碑而不是刪檔，是因為**「檔案不在」曾經同時是三件事**：她還沒
 起來、她正在乾淨收工、她好好的只是這一拍慢了 16 秒。三件事的下一步不一樣，而
@@ -115,20 +133,41 @@ forward-compat 本身是對的：多寫一個欄位的新版不該讓舊版放�
 的謊。時戳寫 0 之後，舊版走的是「過期」那條路，答案變回正確的「沒有人在錄」。
 真正的收工時間放在第三欄，新版讀得到，舊版看都不會看。
 
-`stop.request` 和 `paused.flag` 是兩件事，刻意沒有合併：暫停是「先別看，但留在
-這裡」，停止是「今天到此為止」——那個行程會結束。把停止做成「一直暫停」會留下
-一個永遠在跑、卻永遠不做事的行程，而你在工作管理員裡看得到它。用檔案而不是去
-`TerminateProcess`，是因為被砍死的 recorder 不會寫完 session、不會收掉心跳、
-可能留下半張截圖；「乾淨地收工」這件事只有它自己做得到。**問到就順手拿走**：
-下一個 tick 不該再讀到同一個請求，而 `record` 起來的時候也會先清一次，不然
-在沒有人在錄的時候按下的那個「停止」會變成一顆地雷。
+`stop.request`／`stop.consumed` 和 pause 三檔是兩件事，刻意沒有合併：
+暫停是「先別看，但留在這裡」，停止是「今天到此為止」——那個行程會結束。
+用檔案而不是 `TerminateProcess`，是因為被砍死的 recorder 不會寫完 session、
+不會收掉心跳，還可能留半張截圖；乾淨收工只有 recorder 自己做得到。
 
-那次清理站在**開機的第一行**，在心跳蓋下去之前——這個先後是協定的一部分，不是
-實作細節。這個檔案裡沒有時戳，所以「這是我起來之前留下的（丟掉）」和「這是衝著
-我來的（照做）」是同一個位元，分得開它們的只有清理的位置。alpha.34 之前它排在
-`Db::open` 後面，於是開機那幾分鐘（一顆存了一年的資料庫要跑好幾分鐘）按下的停
-止會被她自己刪掉——而 `sister stop` 那時候看得見開機心跳，回的是「已經請她收
-工」。兩個畫面都說收到了，她錄一整天。
+新協定不再把「收到」當「意圖可以刪掉」。recorder 只把 pending `stop.request`
+搬成 `stop.consumed`，因此同一輪不會再處理第二次，desktop watchdog 卻仍看得見。
+若 DB finalize 後來失敗、child 非零退出，這顆 consumed latch 會讓 retry 取消，
+不把人手停止當成 crash。獨立 revoke barrier 活著時，觀察結果先呈現
+`consent-revoked`，底下既有的 `requested`／`desktop-quit` marker 仍原封保留。只有一個成功 commit 完整 barrier 的新顯式 start 可處理錯誤後
+清掉 pending 與 consumed；supervised automatic retry 永遠無權清。正常 desktop quit 使用較弱且獨立的
+`desktop-quit`，下一個全新 opt-in Windows login 只可在五分鐘 bounded handoff 與完整
+start barrier 後清這一種；
+人工 `requested` 與 `consent-revoked` 都保留。`consent-revoked` 記的是撤回同意的停止
+條件；不能被文案拿來反推 `consent.toml` 已成功撤回。
+
+撤回 `local-recording` 的 CLI 與 desktop 會在同一個 exclusive `consent.lock`
+transaction 裡、寫 `consent.toml` 前先 atomic publish `consent-revoke.barrier`，並 exact
+readback。這道 barrier 不由 recorder 消費，也不准任何 Start 清除；因此 consent save
+在 replace 前失敗時，舊 consent 即使仍有效，等待中的 Explicit Start 也只能在 writer
+放鎖後讀到 barrier 並失敗。只有成功 commit 的 local-recording regrant 可用先前捕捉的
+generation ticket 清掉同一代；若較新的 revoke 已換代，舊票回 `Superseded` 而不刪。
+清 barrier 前若沒有其他 stop，會先 atomic 留下 `consent-revoked` stop latch；若已有
+`requested`／`desktop-quit`，則一個位元也不改。這讓快速 revoke→regrant 仍先停止目前
+recorder，而且重簽本身不是自動 restart。
+
+任一檔讀不清時 automatic／supervised start fail closed。舊版把一顆無類型 `stop` 在
+開機時直接刪掉的說明已不再是現行行為。
+每個 start 的鎖順序固定是 shared `consent.lock` → `stop.lock` → `recording.lock`／
+舊 heartbeat barrier。revoke writer 先拿 exclusive consent lock 時，start 不可 clear、spawn
+或寫第一拍；start 先拿 shared guard 時則線性排在 revoke 前。Desktop 真人 Start 的
+parent 在 shared consent guard 下進同一個 stop transaction、暫時取得 recorder lease，
+通過 heartbeat 並 commit 後才清；它只持 guard 到 `Command::spawn` 回來便立刻放掉，不等
+heartbeat。child 仍是 supervised，自己 nonblocking 重拿 consent guard 與整場 lease，並在
+第一拍前重讀兩道狀態，所以晚到的 Stop／Quit 不會再被 child 清除。
 
 `desktop.log` 裡**沒有任何一個字來自螢幕**——只有這個殼自己的事：熱鍵搶到了
 沒、視窗開不開得起來、資料庫花了幾毫秒打開。它存在的理由是出貨的
@@ -181,6 +220,58 @@ CLI 可以用全域 `--config <FILE>` 明確改讀另一份，字母人則讀預
 tap-lines 與聲音偏好。這些值會改本機呈現，**不會進 asset request**；四位角色與
 所有狀態的 method／URL／headers／body 必須相同。刪記憶不會重設它們，刪設定檔才會
 回到 Neutral／預設值。素材 cache 本身也不另存一份「目前選誰」。
+
+Windows 的「登入後啟動」**不在 `config.toml`**。它是目前使用者 registry 的
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下一個名為 `AI-Sister` 的
+`REG_SZ`；唯一有效內容是 `"<目前安裝的 sister-desktop.exe>" --ai-sister-login`。
+它不含 OCR、畫面、問題、資料目錄或記憶 ID，但會暴露目前使用者的安裝路徑。
+Run 缺值才是 `disabled`；exact value 是 `enabled`；其他可讀值／型別是
+`mismatch`；無法讀是 `unreadable`；目前副本無法用下述安裝 metadata 精確
+證明時是 `unsupported`。這五種不壓成 bool，也不由「設定檔剛好讀壞」
+影響。
+
+同一位使用者的
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\AI-Sister\InstallLocation`
+是 installer 留下的安裝 metadata；desktop 只讀它，而且只有它的 quoted directory 精確
+對應 current exe parent 才准修改 Run value。portable／診斷副本不寫這兩處。
+真正 uninstall 會清掉 `AI-Sister` Run value；update／reinstall 不應把使用者的
+on／off 選擇清成預設。AI-Sister 不讀寫 Windows 另一份 `StartupApproved`
+metadata；Windows 「啟動應用程式」對它的狀態不是 app 這五態所稱已儲存的資料。
+
+recorder supervisor 的 generation、desktop-owned child handle、連續失敗次數、
+1／5／30 秒 retry deadline、10 分鐘 `Recording` 健康區間、Login preflight 的 500ms
+retry／五分鐘 deadline、已觀察 owner、同一 worker one-shot、取消／逾時 terminal 文案，
+以及 manual Stop 的 automatic-start cancellation／durable-delivery pending-or-failure overlay，
+全在 **desktop 行程 RAM**。這些欄位不是「已成功寫入 stop」或「recorder 已停」的磁碟
+證據；supervisor 自己不把這些 counter／timer 寫進檔案或 DB table。alpha.107 仍新增
+三個空的跨行程協定檔：`recording.lock`、`consent.lock` 與 `stop.lock`，語意與刪除邊界
+逐一列在上表；它們不是 supervisor counter 的持久化。desktop
+結束就沒有 supervisor RAM 狀態；系統也不會因此自行重開 desktop。
+
+Login preflight 每 500ms 完整重查，最長五分鐘且不吃 watchdog failure budget。只有
+磁碟上 typed `desktop-quit` 可做上一輪 shutdown 的 bounded handoff；Absent 下曾看見
+lease／heartbeat owner 就轉 External，同一份 intent 不 takeover。一般 External 的 stale／
+missing／unreadable 仍只由 `stopped` 墓碑完成離場；DesktopQuit 是窄例外。真人
+Stop／Quit／Explicit Start、`requested`／`consent-revoked`、invalid／unknown
+consent／control 會清掉 RAM 裡 pending preflight；同一 worker 之後的 duplicate Login
+仍忽略。deadline 在重試前和 commit 前都檢查，所以 expired timer 不能 late spawn。
+
+十分鐘區間只由新鮮且相對上一個已觀察 `(timestamp, phase)` 樣本真的更新的
+`Recording` heartbeat 推進；worker 在五秒間反覆讀到同一顆不算新證據。一旦觀察到
+missing／stalled／unreadable／`Thinking`，區間就歸零，下一顆 Recording 從頭起算。
+supervisor 讀已列在上面的 `consent.toml`、`stop.request`／`stop.consumed` 與
+`recording.beat` 來決定能否啟動／重試；任一關鍵狀態不明時不開第二個
+recorder。spawn 後仍由 recorder 自己在每道寫入邊界強制上面的 pause 三檔；
+supervisor 沒有 resume 能力。重試的 child 繼續把 stdout／stderr 寫進既有
+`record.log`／`record.log.1`，沒有新的螢幕內容副本或網路請求。
+
+desktop quit 會先寫 durable `desktop-quit` latch，才可以真正退出。這一寫失敗時，
+supervisor 的記憶體狀態仍轉成 `Quitting`、清掉 retry deadline，但 desktop 本身留下、
+顯示錯誤，不接新 start；它不會在無法證明 recorder 會停時只把 UI 關掉。
+Manual Stop 也在 durable write 前先清 Login／retry 並設 automatic-start cancellation；
+write 失敗時 failure overlay 明講 recorder 可能仍在跑，使用者可再 Stop，但 background
+不得重開。只有後來真人 Explicit Start 成功 commit 完整 barrier 才清 cancellation／failure；
+invalid／busy／timeout Start 不會。
 
 沒有遙測、沒有帳號。`sister.exe` 與 recorder／core／capture／brain／hands 沒有
 HTTP client；desktop 唯一內建 outbound 能力是使用者看完揭露並明確按下後，經
@@ -559,7 +650,9 @@ best effort，不是 crash-safe exactly-once。
 分不出來。
 
 `session_end` 的 `detail` 是**這一場錄製為什麼結束**：`duration`（時間到）、
-`requested`（你按了停止）、`interrupted`（Ctrl-C）、`consent-revoked`。沒有
+`requested`（你按了停止）、`desktop-quit`（AI-Sister 正常退出時收工）、
+`interrupted`（Ctrl-C）、`consent-revoked`（本機記錄同意的停止條件生效；不單憑此
+token 宣稱 consent save 已 commit）。沒有
 「當掉」這個值——當掉的那一場寫不了任何東西，它的樣子是 `sessions.ended_at`
 留在 NULL。字母人那句「沒有人在記錄」底下的第二行、`sister doctor` 的
 「上一次錄製」都是從這裡讀的。alpha.17 以前這一欄一律是空的，於是「你自己

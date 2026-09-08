@@ -27,6 +27,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub mod login_startup;
+
 /// 存下來的東西只有位置與置頂與否。視窗是 `resizable: false`，尺寸由
 /// `tauri.conf.json` 說了算，沒有第二個地方可以不同意。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

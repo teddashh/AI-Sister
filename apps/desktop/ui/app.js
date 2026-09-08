@@ -681,6 +681,12 @@ function answerUrlPolicy(key, path) {
  * 更容易嚇到人，而它們一樣快就會被真正的答案蓋掉。
  */
 let recording = true;
+// 開場那個 `true` 只保留既有 state shape；在第一次 `recording_state` 回來前，
+// 它不是一份 heartbeat 證據，畫面只能說正在確認，不能借它宣布在聽。
+let recordingStateKnown = false;
+// IPC 有回不等於 heartbeat 可讀；`unreadable` 必須和真的 `none` 分開。
+let recordingStateReadable = false;
+let recordingStateReadRequest = 0;
 
 /**
  * 有一個 `sister record` 起來了，但它還在開資料庫（心跳的第二欄是 `boot`）。
@@ -703,6 +709,184 @@ let booting = false;
  * 對打。
  */
 let thinkingLast = false;
+
+/**
+ * desktop 自己開的 recorder 現在走到哪裡。
+ *
+ * 這和上面的 heartbeat 是兩份不同證據：heartbeat 說資料目錄最近有沒有拍，
+ * supervisor 說它握著的 child 是否在啟動、等候重試、或已經放棄。尤其 hard kill
+ * 之後，舊 heartbeat 在安全期限內仍可能看起來是 live；這幾秒若只看 heartbeat
+ * 就會印出「在聽」，而真正的 child 已經不在了。
+ *
+ * `null` 只代表這扇 renderer 還沒讀到第一份 view。讀壞不是 null，而是
+ * `uncertain`：沒量到和量到「不確定」不能共用同一個空值。
+ */
+const SUPERVISOR_PHASES = Object.freeze([
+  "stopped",
+  "cooling",
+  "starting",
+  "running",
+  "backoff",
+  "gave-up",
+  "external",
+  "stopping-external",
+  "stop-undelivered",
+  "uncertain",
+  "quitting",
+]);
+
+const SUPERVISOR_FALLBACKS = Object.freeze({
+  stopped: "",
+  cooling:
+    "desktop 自己開的 recorder 已退出；正在等那一輪最後的 heartbeat 證據退場，這期間不會啟動另一個 recorder。",
+  starting: "正在啟動 recorder；這期間還沒有開始記錄。",
+  running: "",
+  backoff: "record 剛剛異常退出；desktop 正在等候下一次自動重試。",
+  "gave-up": "record 已停止自動重試；從現在起發生的事她不會知道。",
+  external: "最近一拍辨識為另一個 recorder；desktop 只照 heartbeat 顯示，不接管或自動重試。",
+  "stopping-external":
+    "已留下停止外部 recorder 的要求；正在等它寫出停止墓碑，desktop 不接管或重啟它。",
+  "stop-undelivered":
+    "真人要求的停止尚未送達磁碟；recorder 仍可能在跑，desktop 不會自動重開。可以再送一次停止要求。",
+  uncertain: "現在讀不出 recorder supervisor 的狀態；不能確認自動重試是否仍在運作。",
+  quitting: "AI-Sister 正在結束；不會再啟動 recorder。",
+});
+
+let recorderSupervisor = null;
+// heartbeat 與 supervisor 是平行 IPC。第一份 heartbeat 先回來時，null 仍只代表
+//「另一份還沒量到」，不能把它當成 stopped，短暫宣布在聽或開放第二次 start。
+let recorderSupervisorStateKnown = false;
+let recorderSupervisorRevision = 0;
+let recorderSupervisorReadRequest = 0;
+
+function normalizeRecorderSupervisor(view) {
+  const phase = SUPERVISOR_PHASES.includes(view?.phase) ? view.phase : "uncertain";
+  const supplied = typeof view?.message === "string" ? view.message.trim() : "";
+  return Object.freeze({
+    phase,
+    failures: Number.isInteger(view?.failures) && view.failures >= 0 ? view.failures : 0,
+    message: supplied || SUPERVISOR_FALLBACKS[phase],
+  });
+}
+
+function receiveRecorderSupervisor(view) {
+  recorderSupervisorStateKnown = true;
+  recorderSupervisor = normalizeRecorderSupervisor(view);
+  if (recorderSupervisor.phase === "stop-undelivered") {
+    // 這是一份比本機 click 猜出的 `starting` 更新、而且方向相反的 supervisor
+    // 證據。保留 starting 會讓 headline 繼續說正在叫醒，掩住真人 Stop 未送達。
+    starting = false;
+  }
+  paint();
+}
+
+function failToReadRecorderSupervisor(error) {
+  const reason = error === null || error === undefined ? "這次 IPC 沒有附原因" : String(error);
+  recorderSupervisorStateKnown = true;
+  recorderSupervisor = normalizeRecorderSupervisor({
+    phase: "uncertain",
+    message: `recorder supervisor 狀態讀不出來：${reason}`,
+  });
+  paint();
+}
+
+function readRecorderSupervisor() {
+  if (invoke === null) return;
+  const revisionWhenStarted = recorderSupervisorRevision;
+  const request = ++recorderSupervisorReadRequest;
+  invoke("recorder_supervisor_state").then(
+    (view) => {
+      // event 比這次磁碟／worker read 晚發生；舊回應不能把新的 Backoff／GaveUp
+      // 蓋回去。下一輪 polling 會用新的 revision 再讀一次。
+      if (
+        recorderSupervisorRevision === revisionWhenStarted &&
+        recorderSupervisorReadRequest === request
+      ) {
+        receiveRecorderSupervisor(view);
+      }
+    },
+    (error) => {
+      if (
+        recorderSupervisorRevision === revisionWhenStarted &&
+        recorderSupervisorReadRequest === request
+      ) {
+        failToReadRecorderSupervisor(error);
+      }
+    },
+  );
+}
+
+function supervisorRunningBeforeHeartbeat() {
+  return (
+    recorderSupervisor?.phase === "running" &&
+    (!recordingStateKnown || (!recording && !booting && !thinkingLast))
+  );
+}
+
+/**
+ * 這幾態都不能拿初值或一份可能尚未過期的舊 heartbeat 宣布「在聽」。
+ * `external` 刻意不在裡面：supervisor 不擁有它，現在有沒有錄只由 heartbeat 作證。
+ */
+function supervisorBlocksListeningClaim() {
+  return (
+    !recordingStateKnown ||
+    !recordingStateReadable ||
+    !recorderSupervisorStateKnown ||
+    supervisorRunningBeforeHeartbeat() ||
+    [
+      "cooling",
+      "starting",
+      "backoff",
+      "gave-up",
+      "stopping-external",
+      "stop-undelivered",
+      "uncertain",
+      "quitting",
+    ].includes(recorderSupervisor?.phase)
+  );
+}
+
+function supervisorHeadline() {
+  if (!recordingStateKnown || !recorderSupervisorStateKnown) {
+    return "正在確認 recorder 是否已開始記錄";
+  }
+  if (!recordingStateReadable) {
+    return "讀不懂 recording.beat；現在不能確認 recorder 是否正在記錄";
+  }
+  switch (recorderSupervisor?.phase) {
+    case "cooling":
+      return "owned recorder 已退出，正在確認最後 heartbeat 證據";
+    case "starting":
+      return "正在啟動 recorder";
+    case "running":
+      return supervisorRunningBeforeHeartbeat()
+        ? "recorder 行程仍活著，但目前沒有可驗證的新鮮錄製心跳"
+        : null;
+    case "backoff":
+      return "record 剛剛中斷，正在等候重試";
+    case "gave-up":
+      return "record 已停止自動重試";
+    case "stopping-external":
+      return "已請外部 recorder 收工，正在等停止墓碑";
+    case "stop-undelivered":
+      return "停止要求尚未送達；現在不能確認 recorder 已停止";
+    case "uncertain":
+      return "現在不能確認 recorder 是否正在記錄";
+    case "quitting":
+      return "AI-Sister 正在結束";
+    default:
+      return null;
+  }
+}
+
+/**
+ * 她可以在 recorder 沒有作證時回答舊記憶，但括號裡只能講目前真的知道的事。
+ * 第一份 IPC 尚未回來、或 supervisor 明說 uncertain，都不是「沒有人在記錄」。
+ */
+function thinkingRecordingQualifier(shown) {
+  if (shown === "paused") return "仍在暫停";
+  return supervisorHeadline() ?? "但沒有人在記錄";
+}
 
 /**
  * 按了「開始記錄」之後、她真的開始之前的那一段。
@@ -789,8 +973,8 @@ let notice = null;
  * 她正在起來的時候**不加**前綴——這一句就是在解釋上面那一行，兩句並排讀成
  * 因果是對的。
  */
-function noticeAboutHer(text) {
-  notice = { text: String(text ?? ""), aboutHer: true };
+function noticeAboutHer(text, expiresOnRecordingChange = false) {
+  notice = { text: String(text ?? ""), aboutHer: true, expiresOnRecordingChange };
 }
 
 /**
@@ -800,8 +984,8 @@ function noticeAboutHer(text) {
  * 起不起得來無關的來源。而那正是他最可能去問問題的那 25 秒——畫面剛剛叫他
  * 等一下。
  */
-function noticeAboutSomethingElse(text) {
-  notice = { text: String(text ?? ""), aboutHer: false };
+function noticeAboutSomethingElse(text, expiresOnRecordingChange = false) {
+  notice = { text: String(text ?? ""), aboutHer: false, expiresOnRecordingChange };
 }
 
 /**
@@ -833,6 +1017,14 @@ function overtakenByEvents() {
 }
 
 /**
+ * Heartbeat transition 只能淘汰「這一次開／停／暫停記錄」的回條。問答、時間軸或
+ * 標記失敗是另一件事；新的 recording shape 不能把它們擦掉。
+ */
+function overtakenByRecordingChange() {
+  if (notice?.expiresOnRecordingChange === true) notice = null;
+}
+
+/**
  * 這一題翻很久了（`null` = 沒有／已經回來了）。見 [`SLOW_MS`]。
  *
  * 一樣是被 `paint()` 蓋掉的那一種：它以前直接寫 `stateLine.textContent`，於是
@@ -860,7 +1052,11 @@ function asleepDetail() {
 function paint() {
   // 順序就是嚴重程度。她沒在看的時候，畫面上絕不可以有一格看起來像在看，
   // 而「被你叫停」要壓過「根本沒人開她」——前者是他做的決定，後者只是狀態。
-  const shown = paused ? "paused" : recording ? state : "asleep";
+  const shown = paused
+    ? "paused"
+    : recording && !supervisorBlocksListeningClaim()
+      ? state
+      : "asleep";
   avatar.dataset.state = shown;
 
   // 暫停時仍然答得出問題——停的是「記錄」，不是「記憶」。所以 thinking
@@ -873,17 +1069,24 @@ function paint() {
   // `slowNote` 插在「想一下…」前面而不是接在後面：它要換掉的就是那三個字。
   // 只在 `state === "thinking"` 的時候看它——`ask()` 回來會把它清成 null，
   // 但清跟重畫之間仍然有順序問題，多這一個條件就不必去猜那個順序。
-  const line = booting
+  const supervisedLine = !paused && state !== "thinking" ? supervisorHeadline() : null;
+  const trustHeartbeat = !supervisorBlocksListeningClaim();
+  const heartbeatUnreadable = recordingStateKnown && !recordingStateReadable;
+  const line = booting && trustHeartbeat
     ? "她起來了，正在開資料庫…（大的記憶要等一下，這期間還沒開始記）"
-    : thinkingLast
+    : thinkingLast && trustHeartbeat
       ? "錄製已停，解釋層還在想最後一段"
-      : starting
-        ? "正在把她叫起來…"
-        : state === "thinking" && slowNote !== null
-          ? slowNote
-          : state === "thinking" && shown !== "thinking"
-            ? `想一下…（${shown === "paused" ? "仍在暫停" : "但沒有人在記錄"}）`
-            : STATE_LINES[shown];
+      : heartbeatUnreadable && supervisedLine !== null
+        ? supervisedLine
+        : starting
+          ? "正在把她叫起來…"
+          : supervisedLine !== null
+            ? supervisedLine
+            : state === "thinking" && slowNote !== null
+              ? slowNote
+              : state === "thinking" && shown !== "thinking"
+                ? `想一下…（${thinkingRecordingQualifier(shown)}）`
+                : STATE_LINES[shown];
   // 灰掉的時候多講一句「上一次是什麼時候、為什麼停的」。換行不換句：那是
   // 同一件事的後半段，而 `.state-line` 的 `pre-line` 讓它自己排。
   //
@@ -926,7 +1129,17 @@ function paint() {
       (starting || booting || thinkingLast) && !notice.aboutHer
         ? `這是另一件事：${notice.text}`
         : notice.text;
-  } else if (!starting && !booting && !thinkingLast && shown === "asleep") {
+  } else if (recorderSupervisor?.message) {
+    // supervisor view 是持續狀態，不借 `notice`。後者講的是使用者剛按的那一下，
+    // 應該永遠先被看見；輪詢／事件只更新這一格，不能把那句回條擦掉。
+    detail = recorderSupervisor.message;
+  } else if (
+    !starting &&
+    !booting &&
+    !thinkingLast &&
+    shown === "asleep" &&
+    recorderSupervisor?.phase !== "running"
+  ) {
     detail = asleepDetail();
   }
   stateLine.textContent = detail === "" ? line : `${line}\n${detail}`;
@@ -941,7 +1154,35 @@ function paint() {
     //
     // `booting` 也不出現，而且理由是同一個：那幾分鐘目錄已經有人佔著，按下去
     // 撞的是 `start_recording` 那道 `is_occupied` 閘門。
-    wakeButton.hidden = shown !== "asleep" || starting || booting || thinkingLast;
+    const phase = recorderSupervisor?.phase;
+    wakeButton.textContent =
+      phase === "stop-undelivered"
+        ? "再送一次停止要求"
+        : phase === "gave-up"
+          ? "再試一次"
+          : phase === "backoff"
+            ? "現在重試"
+            : "開始記錄";
+    const stopCanBeResent = phase === "stop-undelivered";
+    wakeButton.hidden = stopCanBeResent
+      ? false
+      : shown !== "asleep" ||
+        starting ||
+        // Backoff／GaveUp 會刻意壓掉舊 heartbeat 的現在式，但 occupancy gate 仍會
+        // 擋住它。顯示不能採信那顆拍說「在聽」，操作也不能假裝它已經不佔位。
+        recording ||
+        booting ||
+        thinkingLast ||
+        phase === "starting" ||
+        phase === "running" ||
+        phase === "cooling" ||
+        phase === "external" ||
+        phase === "stopping-external" ||
+        phase === "uncertain" ||
+        !recordingStateKnown ||
+        !recordingStateReadable ||
+        !recorderSupervisorStateKnown ||
+        phase === "quitting";
   }
 }
 
@@ -973,21 +1214,30 @@ function setPaused(next) {
  * 心跳說什麼：`"recording"`／`"booting"`／`"thinking"`／`"none"`（見後端的
  * `recording_state`）。
  *
- * **收四個字串，不是一個布林。** 認不得的值一律當成「沒有人在錄」——四種裡
- * 只有它不會替一件沒發生的事背書。`"thinking"` 是錄製已停、腦還在想最後
- * 一段：說「在聽」是謊，說「沒有人在記錄」配一顆開始鍵也是謊。
+ * **收五個字串，不是一個布林。** `"unreadable"` 和認不得的值都保留成讀不懂，
+ * 不能折成 `"none"`。`"thinking"` 是錄製已停、腦還在想最後一段：說「在聽」
+ * 是謊，說「沒有人在記錄」配一顆開始鍵也是謊。
  */
-function setRecording(next) {
+function setRecording(next, observed = true) {
   const was = recording;
   const wasBooting = booting;
   const wasThinking = thinkingLast;
-  recording = next === "recording";
-  booting = next === "booting";
-  thinkingLast = next === "thinking";
+  if (observed) {
+    recordingStateKnown = true;
+    recordingStateReadable = ["recording", "booting", "thinking", "none"].includes(next);
+  }
+  // 讀不懂時撤掉證據，但保留上一個 shape，等下一份可讀回覆才判斷是否真的
+  // transition。否則 event 刻意撤證再讀回同一態，也會被誤當成下一件事，擦掉
+  // 使用者剛按完的 one-shot notice。
+  if (!observed || recordingStateReadable) {
+    recording = next === "recording";
+    booting = next === "booting";
+    thinkingLast = next === "thinking";
+  }
   // 她從別的地方被開起來、或是自己停掉了：一樣是「下一件事發生了」。見
-  // [`overtakenByEvents`]。
+  // [`overtakenByRecordingChange`]。問答／時間軸這些無關回條不跟著消失。
   if (was !== recording || wasBooting !== booting || wasThinking !== thinkingLast) {
-    overtakenByEvents();
+    overtakenByRecordingChange();
   }
   // 她起來了（或是從別的地方被開起來的），那個「正在叫她」的等待就結束了，
   // 而「上一次叫不起來」也就過期了——她現在人在這裡，那句話再留著只會嚇人。
@@ -1002,10 +1252,32 @@ function setRecording(next) {
   //
   // **想最後一段不算停完。** 那一場的 `end_session` 還沒寫。這時候去問
   // 「上一次」會拿到正在收尾的這一場，讀成「沒有好好結束」。
-  const fullyStopped = !recording && !booting && !thinkingLast;
+  const fullyStopped = recordingStateReadable && !recording && !booting && !thinkingLast;
   const wasFullyStopped = !was && !wasBooting && !wasThinking;
   if (!wasFullyStopped && fullyStopped) refreshLastRun();
   paint();
+}
+
+/**
+ * 每次 IPC 都有世代；較早的慢回應不能蓋掉 supervisor event 之後重問的新真相。
+ * 失敗也不是「沿用上一拍」：heartbeat 會過期，舊的 recording=true 不能永久
+ * 替現在作證。
+ */
+async function readRecordingState() {
+  if (invoke === null) return null;
+  const request = ++recordingStateReadRequest;
+  try {
+    const next = await invoke("recording_state");
+    if (request === recordingStateReadRequest) setRecording(next);
+    return next;
+  } catch (error) {
+    if (request === recordingStateReadRequest) {
+      recordingStateKnown = false;
+      recordingStateReadable = false;
+      paint();
+    }
+    throw error;
+  }
 }
 
 /**
@@ -1048,7 +1320,7 @@ async function startRecording() {
     // 直接指派（而不是「只有在還空著的時候才寫」）：上面開頭是清過的，但那次
     // 清距離這裡隔著一整段 `await`，中間他問一題失敗就會再填一句進去。這一句
     // 才是他此刻在等的答案。
-    noticeAboutHer(err?.message ?? err);
+    noticeAboutHer(err?.message ?? err, true);
     starting = false;
     paint();
     return;
@@ -1058,7 +1330,7 @@ async function startRecording() {
     await new Promise((done) => setTimeout(done, WAKE_POLL_MS));
     // `setRecording(true)` 會把 `starting` 關掉，迴圈自己就結束了。
     try {
-      setRecording(await invoke("recording_state"));
+      await readRecordingState();
     } catch {
       // 問不到就下一輪再問。這裡不該因為一次 IPC 失敗就宣告她沒起來。
     }
@@ -1073,17 +1345,41 @@ async function startRecording() {
     // 連記錄檔都讀不到，那就只剩下面那句話。
   }
   const waited = Math.round(WAKE_TIMEOUT_MS / 1000);
+  const unreadable = recordingStateKnown && !recordingStateReadable;
+  const statusUnknown = !recordingStateKnown;
+  const timeoutHeadline = unreadable
+    ? `等了 ${waited} 秒仍讀不懂 recording.beat`
+    : statusUnknown
+      ? `等了 ${waited} 秒仍讀不到 recorder 狀態`
+      : `等了 ${waited} 秒還沒有心跳`;
   noticeAboutHer(
     why
-      ? `等了 ${waited} 秒還沒有心跳。record.log 最後說：\n${why}`
-      : `等了 ${waited} 秒還沒有心跳，record.log 也還是空的。` +
-          "她可能還在起來——再等一下，或去看那個檔案",
+      ? `${timeoutHeadline}。record.log 最後說：\n${why}`
+      : `${timeoutHeadline}，record.log 也還是空的。` +
+          (unreadable || statusUnknown
+            ? "現在不能確認她是否正在記錄——請先看那個檔案"
+            : "她可能還在起來——再等一下，或去看那個檔案"),
+    true,
   );
   starting = false;
   paint();
 }
 
-wakeButton?.addEventListener("click", startRecording);
+async function runWakeAction() {
+  if (recorderSupervisor?.phase !== "stop-undelivered") {
+    return startRecording();
+  }
+  notice = null;
+  paint();
+  try {
+    await invoke?.("stop_recording");
+  } catch (err) {
+    noticeAboutHer(err?.message ?? err, true);
+    paint();
+  }
+}
+
+wakeButton?.addEventListener("click", runWakeAction);
 
 /**
  * 有沒有人在錄，隨時可能變——他會在另一個終端機視窗裡把 `sister record`
@@ -1114,7 +1410,8 @@ let pollTimer = null;
  */
 function pollRecording() {
   if (invoke === null) return;
-  invoke("recording_state").then(setRecording, () => {});
+  void readRecordingState().catch(() => {});
+  readRecorderSupervisor();
   invoke("pause_state").then(setPaused, () => {});
   // 守門員也要一直問下去。**只在開場問一次的話，五點才到期的那張承諾
   // 永遠不會被看到**——而 a 類（顯式時間承諾）正是整個 Phase 5 冷啟動期
@@ -1249,7 +1546,7 @@ pauseButton?.addEventListener("click", async () => {
     // 「寫出來」要寫進 `notice`：直接寫那一格的話，下一輪輪詢（5 秒內，而且
     // 這顆按鈕本身不會重設那個計時器，所以可能是 0 秒）會把它蓋掉，留下的
     // 剛好只有前半句「看起來沒反應」。
-    noticeAboutSomethingElse(err?.message ?? err);
+    noticeAboutSomethingElse(err?.message ?? err, true);
     paint();
   }
 });
@@ -1261,6 +1558,38 @@ pauseButton?.addEventListener("click", async () => {
 globalThis.__TAURI__?.event
   ?.listen?.("pause-changed", (event) => setPaused(event.payload))
   ?.catch?.(() => {});
+
+/**
+ * worker transition 不等下一輪五秒 polling。特別是第四次失敗的 GaveUp：那一刻
+ * 「再試一次」要立即出現，不能讓舊的「正在等候重試」多活五秒。
+ */
+const recorderSupervisorListener = globalThis.__TAURI__?.event?.listen?.(
+  "recorder-supervisor-changed",
+  (event) => {
+    recorderSupervisorRevision += 1;
+    // transition 與上一輪 heartbeat 不是同一個 snapshot。先撤銷舊證據，再立刻
+    // 重讀；正常收工 event 絕不能和五秒前的 recording=true 湊成「在聽」。
+    recordingStateKnown = false;
+    recordingStateReadable = false;
+    receiveRecorderSupervisor(event.payload);
+    void readRecordingState().catch(() => {});
+  },
+);
+recorderSupervisorListener?.then?.(
+  () => {
+    // `listen` 本身是 async：開場兩份 IPC 可能先讀到 stopped/none，接著 worker
+    // 在 listener 真正註冊前切成 running。那個 event 已經丟了，不能讓舊 snapshot
+    // 一直留到五秒 polling。註冊完成後撤掉舊證據，再補讀同一對狀態。
+    recordingStateKnown = false;
+    recordingStateReadable = false;
+    recorderSupervisorStateKnown = false;
+    recorderSupervisor = null;
+    paint();
+    readRecorderSupervisor();
+    void readRecordingState().catch(() => {});
+  },
+  () => {},
+);
 
 /** 設定頁是另一扇 WebView；存成功後立即換成本機 persona，不等整支程式重開。 */
 globalThis.__TAURI__?.event
@@ -1313,8 +1642,9 @@ globalThis.__TAURI__?.event
 /**
  * 從系統匣按「開始記錄」失敗的時候，那句原因沒有地方可以寫。
  *
- * 後端把完整中文放進 payload；除了開始／停止記錄失敗，系統匣拔手失敗也借用
- * 這個事件，而系統匣選單上沒有一格能放字。以前它們只進 `desktop.log`：按下去的
+ * 後端把開始／停止記錄失敗的完整中文放進 payload，而系統匣選單上沒有一格
+ * 能放字。拔手結果走 `hands-pulled`，因為它不能被無關的 recording transition 淘汰。
+ * 以前記錄開關失敗只進 `desktop.log`：按下去的
  * 後果是**什麼都沒發生**，而唯一說得出原因的那句話在一個他不會開的檔案裡。
  *
  * 寫進 [`notice`]，因為那是**每一個狀態下都出得了聲**的那一格。
@@ -1332,9 +1662,8 @@ globalThis.__TAURI__?.event
   ?.listen?.("recorder-failed", (event) => {
     // 直接指派就把上一句蓋掉了：一句早上留下的話不可以擋住這一句。
     //
-    // 這裡也收得到系統匣拔手失敗；payload 本身才是要顯示的完整答案，不能由
-    // 事件名推論它一定在回答記錄是否開始或停止。
-    noticeAboutHer(event.payload);
+    // 這個 event 只回答記錄開關，所以真的 recording transition 可以淘汰它。
+    noticeAboutHer(event.payload, true);
     // **這裡以前還會 `starting = false`，而那一下是在說謊。** 他按了「叫她
     // 起來」、等不及又從系統匣按了一次：那一刻心跳還沒蓋出來，
     // `recording_state` 還是 `"none"`，所以那一顆走 `start_recording`、撞上
@@ -2160,6 +2489,9 @@ setRecording(
       : wanted === "thinking"
         ? "thinking"
         : "recording",
+  // 這一筆是 browser demo 的開場外觀，不是 native heartbeat 回覆。產品沒有 query
+  // string；在 `recording_state` 真正回來前，不能拿這個預設值替 recorder 作證。
+  false,
 );
 setState(
   wanted === "paused" || wanted === "asleep" || wanted === "booting" || wanted === "thinking"
@@ -2174,6 +2506,9 @@ setState(
 // 視窗如果一開始就縮在系統匣裡，那個輪詢是不跑的。
 if (invoke !== null) {
   invoke("pause_state").then(setPaused, () => {});
+  // 即使 Windows 登入 intent 把主視窗留在系統匣，也先取一份 supervisor view；
+  // 顯示中的五秒 poll 會接著重讀。兩次很接近時只有較新的 request 能套用。
+  readRecorderSupervisor();
   // 只問一次，不進輪詢：這個答案只有他自己改得動，而她每 5 秒重問一次
   // 等於每 5 秒重畫一個他已經看過的問題。
   readUrlPolicy();
@@ -2214,6 +2549,7 @@ if (params.get("asleep") === "stopped") {
     "等了 25 秒還沒有心跳。record.log 最後說：\n" +
       "（這一輪還沒寫出東西，以下是上一輪的 record.log）\n" +
       "第一張同意書還沒簽——她不會開始記錄。",
+    true,
   );
   paint();
 }

@@ -28,6 +28,8 @@ const el = {
   personaRemove: document.querySelector("[data-persona-remove]"),
   personaVoice: document.querySelector("[data-persona-voice]"),
   personaVoiceState: document.querySelector("[data-persona-voice-state]"),
+  loginStartup: document.querySelector("[data-login-startup]"),
+  loginStartupSay: document.querySelector("[data-login-startup-say]"),
   apps: document.querySelector("[data-apps]"),
   urls: document.querySelector("[data-urls]"),
   titles: document.querySelector("[data-titles]"),
@@ -76,6 +78,171 @@ function toLines(text) {
     .split("\n")
     .map((s) => s.trim())
     .filter((s) => s !== "");
+}
+
+// ---------- Windows 登入項 ----------
+
+const LOGIN_STARTUP_STATES = Object.freeze([
+  "enabled",
+  "disabled",
+  "mismatch",
+  "unreadable",
+  "unsupported",
+]);
+
+let loginStartupView = null;
+let loginStartupBusy = false;
+let loginStartupReadRevision = 0;
+
+function loginStartupDetail(label, value) {
+  if (typeof value !== "string") return `${label}：後端沒有回報`;
+  return `${label}：${value === "" ? "（空值）" : value}`;
+}
+
+function loginStartupReason(value) {
+  return typeof value === "string" && value !== "" ? `\n原因：${value}` : "";
+}
+
+/**
+ * 畫的是 registry 現況，不是 config.toml 裡的一顆偏好。
+ *
+ * 五態各有一個不同的原生 checkbox 形狀：checked、unchecked、可修復的
+ * indeterminate、不可判定的 disabled+indeterminate，以及這份執行檔根本不能
+ * 管理的 disabled+unchecked。尤其不能把後兩種畫成一顆普通的「關」。
+ */
+function paintLoginStartup(raw, actionError = "") {
+  if (!el.loginStartup || !el.loginStartupSay) return;
+  const known = LOGIN_STARTUP_STATES.includes(raw?.state);
+  const startupView = known
+    ? raw
+    : {
+        state: "unreadable",
+        reason: "後端沒有回傳可辨識的 Windows 登入項狀態。",
+      };
+  loginStartupView = startupView;
+
+  el.loginStartupSay.classList.remove("ok", "bad");
+  el.loginStartup.checked = startupView.state === "enabled";
+  el.loginStartup.indeterminate =
+    startupView.state === "mismatch" || startupView.state === "unreadable";
+  el.loginStartup.disabled =
+    loginStartupBusy ||
+    startupView.state === "unreadable" ||
+    startupView.state === "unsupported";
+
+  let message;
+  switch (startupView.state) {
+    case "enabled":
+      el.loginStartupSay.classList.add("ok");
+      message =
+        "已登錄：Windows 登入項精確符合這一版預期的命令。這只確認登錄值；" +
+        "Windows 工作管理員仍可另外停用登入啟動。";
+      break;
+    case "disabled":
+      message =
+        "未登錄：這個 Windows 登入項目前不存在；下次登入不會由這一項啟動 AI-Sister。";
+      break;
+    case "mismatch":
+      el.loginStartupSay.classList.add("bad");
+      message =
+        "命令不相符：Windows 登入項存在，但不是這一版預期的命令，不能算已開啟。" +
+        "勾一下會修正並啟用。\n" +
+        `${loginStartupDetail("預期", startupView.expected)}\n` +
+        loginStartupDetail("目前", startupView.actual) +
+        loginStartupReason(startupView.reason);
+      break;
+    case "unreadable":
+      el.loginStartupSay.classList.add("bad");
+      message =
+        "狀態未知：讀不出 Windows 登入項，不能把它當成關閉。請按頁尾的「重讀」再試。" +
+        loginStartupReason(startupView.reason);
+      break;
+    case "unsupported":
+    default:
+      message =
+        "免安裝/診斷版需先用 Setup。這份執行檔不管理 Windows 登入項。" +
+        loginStartupReason(startupView.reason);
+      break;
+  }
+
+  if (actionError !== "") {
+    el.loginStartupSay.classList.remove("ok");
+    el.loginStartupSay.classList.add("bad");
+    message = `${actionError}\n重新讀取後：${message}`;
+  }
+  el.loginStartupSay.textContent = message;
+}
+
+/**
+ * 和設定檔並排、但不依賴設定檔的讀取。`load()` 一開始就送出這一趟；即使
+ * settings_read 炸掉，registry 狀態仍要有自己的答案。
+ */
+async function refreshLoginStartup() {
+  if (!el.loginStartup || !el.loginStartupSay) return;
+  if (invoke === null) {
+    paintLoginStartup({
+      state: "unreadable",
+      reason: "這一頁不是在 AI-Sister desktop 裡打開的。",
+    });
+    return;
+  }
+  // 寫入期間以寫入回條／失敗後讀回為準，頁尾重讀不插進去蓋掉它。
+  if (loginStartupBusy) return;
+  const revision = ++loginStartupReadRevision;
+  try {
+    const startupView = await invoke("login_startup_read");
+    if (revision === loginStartupReadRevision) paintLoginStartup(startupView);
+  } catch (err) {
+    if (revision !== loginStartupReadRevision) return;
+    paintLoginStartup({
+      state: "unreadable",
+      reason: String(err?.message ?? err),
+    });
+  }
+}
+
+async function setLoginStartup(event) {
+  if (!el.loginStartup || !el.loginStartupSay || invoke === null) return;
+  // 和素材下載一樣，會改外部狀態的入口只收真人／輔助科技送來的 trusted event。
+  // 假事件甚至不該讓勾勾留在相反那面。
+  if (event?.isTrusted !== true) {
+    if (loginStartupView !== null) paintLoginStartup(loginStartupView);
+    return;
+  }
+  if (loginStartupBusy || el.loginStartup.disabled) return;
+
+  const enabled = el.loginStartup.checked === true;
+  loginStartupBusy = true;
+  ++loginStartupReadRevision;
+  el.loginStartup.disabled = true;
+  el.loginStartupSay.classList.remove("ok", "bad");
+  el.loginStartupSay.textContent = enabled
+    ? "正在登錄 Windows 登入項…"
+    : "正在移除 Windows 登入項…";
+
+  try {
+    const startupView = await invoke("login_startup_set", { enabled });
+    loginStartupBusy = false;
+    paintLoginStartup(startupView);
+  } catch (err) {
+    const actionError = `變更 Windows 登入項失敗：${String(err?.message ?? err)}`;
+    // set 失敗不代表它一定沒改到。再讀一次真相，不能把舊勾勾或使用者剛點的
+    // 那一面當成結果；讀回也失敗才落到正式的 unreadable 態。
+    try {
+      const startupView = await invoke("login_startup_read");
+      loginStartupBusy = false;
+      paintLoginStartup(startupView, actionError);
+    } catch (readErr) {
+      loginStartupBusy = false;
+      paintLoginStartup(
+        {
+          state: "unreadable",
+          reason: `變更後也讀不回 Windows 登入項：${String(readErr?.message ?? readErr)}`,
+        },
+        actionError,
+      );
+    }
+  }
 }
 
 // ---------- 規則檢查 ----------
@@ -609,13 +776,14 @@ let queryLogWas = null;
 let cloudOk = null;
 
 /**
- * 心跳現在說什麼：`"recording"`／`"booting"`／`"thinking"`／`"none"`。
+ * 心跳現在說什麼：`"recording"`／`"booting"`／`"thinking"`／`"none"`／
+ * `"unreadable"`。
  *
  * 和 `WriteOutcome.watching` 同一個判斷，不是另一個。存完用後端剛回的那一份；
  * 開場問 `recording_state`（兩邊都從同一顆 `heartbeat::presence` 推出）。認不得的值走
- * `"none"`：四句裡只有它不會替一件沒發生的事背書。
+ * `"unreadable"`：沒量到不能冒充量到沒有 recorder。
  */
-let watchingNow = "none";
+let watchingNow = "unreadable";
 let savedBrainCommand = "";
 
 function paintPersonaSettings() {
@@ -1108,6 +1276,12 @@ function paintBrain() {
       "命令和同意書都齊了。上一場錄製剛停，解釋層還在把最後一段想完——想完才能再開一場，這時候按「開始記錄」會被擋下來。";
     return;
   }
+  if (watchingNow === "unreadable") {
+    el.brainSay.classList.add("bad");
+    el.brainSay.textContent =
+      "命令和同意書都齊了，但目前讀不懂 recording.beat；不能確認 record 是否正在跑。請按頁尾的「重新讀取」再試。";
+    return;
+  }
   // 3. 填了命令、同意書也勾了，但現在沒有 record 在跑。
   el.brainSay.textContent =
     "命令和同意書都齊了。現在沒有人在錄，等你按下「開始記錄」她才會自己醒。";
@@ -1116,7 +1290,7 @@ function paintBrain() {
 async function refreshBrainFacts() {
   if (invoke === null) {
     cloudOk = null;
-    watchingNow = "none";
+    watchingNow = "unreadable";
     return;
   }
   try {
@@ -1135,15 +1309,19 @@ async function refreshBrainFacts() {
   }
   try {
     const w = await invoke("recording_state");
-    // `recording_state` 回四個字串（見 main.rs 上面那段 doc）。少收一個的
-    // 話它會掉進 `"none"`，而 `"none"` 那句寫著「等你按下『開始記錄』」——
+    // `recording_state` 回五個字串（見 main.rs 上面那段 doc）。少收一個若掉進
+    // `"none"`，那句會寫著「等你按下『開始記錄』」——
     // 想最後一段的那兩分鐘按下去是會被擋的。
     watchingNow =
-      w === "recording" || w === "booting" || w === "thinking" || w === "none"
+      w === "recording" ||
+      w === "booting" ||
+      w === "thinking" ||
+      w === "none" ||
+      w === "unreadable"
         ? w
-        : "none";
+        : "unreadable";
   } catch {
-    watchingNow = "none";
+    watchingNow = "unreadable";
   }
 }
 
@@ -1198,9 +1376,10 @@ function setUnreadable(on) {
   if (el.unreadable) {
     // 這裡是 textContent，不是 markdown——寫 `**…**` 只會印出星號。
     el.unreadable.textContent =
-      "讀不出設定檔，所以這一頁上的每一格都不算數：底下的空白和沒打勾，" +
-      "不代表那些規則沒生效。正在跑的記錄用的是它上次讀成功的那一份，" +
-      "排除規則和兩道防線都還在擋。修好底下那行錯誤再回來。";
+      "讀不出設定檔，所以角色以下由 config.toml 控制的每一格都不算數：" +
+      "底下的空白和沒打勾，不代表那些規則沒生效。正在跑的記錄用的是它上次讀成功的那一份，" +
+      "排除規則和兩道防線都還在擋。上面的 Windows 登入項是獨立狀態，仍可照它自己的回報操作。" +
+      "修好底下那行錯誤再回來。";
     el.unreadable.hidden = !on;
   }
   // 命令框被清空之後，這一格會看起來像「她沒有 CLI 可以叫」。那是假的——
@@ -1224,9 +1403,10 @@ async function load() {
     say("這一頁不是在 AI-Sister 裡打開的，改了不會存到任何地方。", true);
     return false;
   }
-  // 這一份只讀 cache 狀態，不讀 config。先獨立送出去，不能讓 consent／hotkey 或
-  // 一份壞掉的 config 擋在它前面；後面仍 await，讓呼叫 load() 的人拿到穩定畫面。
+  // 這兩份都不讀 config。先獨立送出去，不能讓 consent／hotkey 或一份壞掉的
+  // config 擋在前面；後面仍 await，讓呼叫 load() 的人拿到穩定畫面。
   const personaAssetsRead = refreshPersonaAssets();
+  const loginStartupRead = refreshLoginStartup();
   let ok = false;
   try {
     apply(await invoke("settings_read"));
@@ -1251,6 +1431,9 @@ async function load() {
   // 素材 cache 有自己的狀態檔，不依賴 config.toml。即使上面的設定讀壞了，
   // 使用者仍要看得到並能修復或刪除素材；把這行放進 try 成功臂會把那條出口一起關掉。
   await personaAssetsRead;
+  // Windows 登入項同樣不在 config.toml 裡。設定檔壞掉時仍要顯示真實 registry
+  // 狀態，也仍可由可信點擊立即修改。
+  await loginStartupRead;
   // 熱鍵分開讀：它問的不是設定檔裡寫什麼，是**現在真的搶到了沒**——那個答案
   // 只有已經跑起來的那支程式知道。設定讀失敗也不該讓這一格空著。
   await reloadHotkey();
@@ -1281,6 +1464,8 @@ async function load() {
  * 熱鍵那一格有兩種畫面，而「搶不到」才是這一格存在的理由，所以它也要被看過。
  */
 function demo(variant) {
+  // 這一格不屬於 config demo，但不能讓每張 demo 圖都永遠停在「正在讀」。
+  paintLoginStartup({ state: "enabled" });
   // 設定檔讀不出來的那一頁（`?demo=broken`）。這是最需要被眼睛看過的一種：
   // 它以前長得跟「你什麼都沒擋、兩道防線都關了」一模一樣。
   if (variant === "broken") {
@@ -1507,16 +1692,17 @@ async function save() {
     // 下去只會回一句「已經有一個 sister record 在跑了」。他剛改完排除規則，
     // 而這一頁給了他一條走不通的路。
     //
-    // 認不得的值走「沒有人在錄」那一句：三句裡只有它不會替一件沒發生的事背書。
+    // 認不得的值走 unreadable：不能把沒量到的事情講成沒有 recorder。
     if (
       outcome?.watching === "recording" ||
       outcome?.watching === "booting" ||
       outcome?.watching === "thinking" ||
-      outcome?.watching === "none"
+      outcome?.watching === "none" ||
+      outcome?.watching === "unreadable"
     ) {
       watchingNow = outcome.watching;
     } else {
-      watchingNow = "none";
+      watchingNow = "unreadable";
     }
     const watching =
       watchingNow === "recording"
@@ -1525,7 +1711,9 @@ async function save() {
           ? "存好了。有一個 sister record 正在起來（多半在開資料庫）——它一開始錄就會換上這一份，不必再按「開始記錄」。"
           : watchingNow === "thinking"
             ? "存好了。上一場錄製剛停，解釋層還在把最後一段想完——想完之後，下一場才會用這一份。"
-          : "存好了——不過現在沒有人在錄，所以這一份要等你按下「開始記錄」才會生效。";
+            : watchingNow === "unreadable"
+              ? "存好了。不過目前讀不懂 recording.beat，不能確認這一份何時會由 recorder 讀到；請按「重新讀取」再查。"
+              : "存好了——不過現在沒有人在錄，所以這一份要等你按下「開始記錄」才會生效。";
     // 把題庫關掉只擋**新的**問題。不講的話，「不要記下我問過的問題」讀起來像
     // 「那些問題沒了」——而 `queries` 是這整顆資料庫裡唯一一張存著**他自己打
     // 進去的字**的表（`settings.html` 那一格自己就這樣寫），所以它剛好是最容
@@ -1578,6 +1766,7 @@ async function save() {
 
 el.save?.addEventListener("click", () => void save());
 el.reload?.addEventListener("click", () => void load());
+el.loginStartup?.addEventListener("change", (event) => void setLoginStartup(event));
 el.brainCommand?.addEventListener("input", () => paintBrain());
 el.personaEnabled?.addEventListener("change", paintPersonaSettings);
 el.personaId?.addEventListener("change", paintPersonaSettings);

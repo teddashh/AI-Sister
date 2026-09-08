@@ -418,9 +418,9 @@ impl SystemKind {
 /// 一場錄製為什麼結束。
 ///
 /// 「她停了」和「她**為什麼**停了」是兩個問題，而以前只答得出第一個：
-/// `session_end` 的 `detail` 一律是 `None`，於是「你按了停止」「時間到了」
-/// 「同意書被撤回」在磁碟上長得一模一樣。三件事的下一步完全不同——第一件
-/// 什麼都不用做，第三件是「她從現在起什麼都不會記」。
+/// `session_end` 的 `detail` 一律是 `None`，於是「你按了停止」「desktop 正常退出」
+/// 「時間到了」「同意書被撤回」在磁碟上長得一模一樣。這些事的下一步完全不同——
+/// 人工 Stop 不能被下次 automatic login 清掉，desktop quit 則可以。
 ///
 /// 沒有 `Crashed`：當掉的那一場**寫不了任何東西**。它的樣子是
 /// `sessions.ended_at` 留在 `NULL`（見 [`crate::db::Db::last_session`]），
@@ -431,9 +431,12 @@ pub enum EndReason {
     Duration,
     /// 有人按了停止（字母人上的那一顆、系統匣、或 `sister stop`）。
     Requested,
+    /// Desktop 正常結束這一輪；不是使用者按了「停止記錄」。
+    DesktopQuit,
     /// Ctrl-C。
     Interrupted,
-    /// 第一張同意書在半路上被撤回。
+    /// 本機記錄同意的停止條件生效；可能是同意已無效，也可能是先收到撤回要求。
+    /// 這個 variant 名是既有 storage token，不保證 consent atomic save 已 commit。
     ConsentRevoked,
 }
 
@@ -443,6 +446,7 @@ impl EndReason {
         match self {
             EndReason::Duration => "duration",
             EndReason::Requested => "requested",
+            EndReason::DesktopQuit => "desktop-quit",
             EndReason::Interrupted => "interrupted",
             EndReason::ConsentRevoked => "consent-revoked",
         }
@@ -454,8 +458,9 @@ impl EndReason {
         match text {
             "duration" => "錄滿了你指定的時間",
             "requested" => "你按了停止",
+            "desktop-quit" => "AI-Sister 結束時收工",
             "interrupted" => "在終端機按了 Ctrl-C",
-            "consent-revoked" => "第一張同意書被撤回",
+            "consent-revoked" => "本機記錄同意的停止條件生效",
             other => other,
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "sister-desktop"
-version = "0.1.0-alpha.106"
+version = "0.1.0-alpha.107"
 edition = "2024"
 # 和根 workspace 同一個地板；這是第二個 workspace，所以在下方自己宣告再繼承。
 rust-version.workspace = true
@@ -57,6 +57,7 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_DataExchange",
+    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

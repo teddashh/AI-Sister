@@ -194,28 +194,135 @@ def check_persona_release_gates(workflow_path: pathlib.Path) -> None:
 
 
 def check_atomic_release_workflow(workflow_path: pathlib.Path) -> None:
-    """防止 alpha prerelease 回到「先公開、再上傳」的 partial-release 路徑。"""
+    """防止首次發布或 rerun 留下公開的 partial／mixed asset set。"""
+    workflow_lines = workflow_path.read_text(encoding="utf-8").splitlines()
+    release_start = one_index(workflow_lines, "  release:", "top-level release job")
+    release_end = len(workflow_lines)
+    for index in range(release_start + 1, len(workflow_lines)):
+        if re.fullmatch(r"  [A-Za-z0-9_-]+:", workflow_lines[index]):
+            release_end = index
+            break
+    release_job = workflow_lines[release_start:release_end]
+    concurrency = [
+        "    concurrency:",
+        "      group: release-${{ github.repository }}-${{ github.ref_name }}",
+        "      cancel-in-progress: false",
+    ]
+    concurrency_start = one_index(
+        release_job, concurrency[0], "release job 的同 tag concurrency"
+    )
+    if release_job[concurrency_start : concurrency_start + len(concurrency)] != concurrency:
+        fail("release job 必須以同 repository/tag 的 non-cancelling concurrency 序列化")
+    if any("softprops/action-gh-release" in line for line in release_job):
+        fail("release job 不可再用會更新既有公開 release 的 action-gh-release")
+
     steps = release_job_steps(workflow_path)
     creators = [
         (index, step)
         for index, step in enumerate(steps)
-        if step_scalar(step, "uses") == "softprops/action-gh-release@v2"
+        if step_scalar(step, "id") == "create_release"
     ]
     if len(creators) != 1:
-        fail(f"CI release job 應有唯一 action-gh-release@v2 step，實際 {len(creators)} 個")
+        fail(f"CI release job 應有唯一 create_release step，實際 {len(creators)} 個")
     creator_index, creator = creators[0]
-    if step_scalar(creator, "id") != "create_release":
-        fail("action-gh-release step 必須以 create_release id 暴露同一個 release ID")
-    if nested_scalar(creator, "with", "draft") != "true":
-        fail("action-gh-release 必須固定 draft: true；prerelease 不能先公開再傳 asset")
-    if nested_scalar(creator, "with", "fail_on_unmatched_files") != "true":
-        fail("action-gh-release 必須拒絕 unmatched local asset")
-    if nested_literal_lines(creator, "with", "files") != [
-        "AI-Sister-Setup.exe",
-        "sister.exe",
-        "sister-desktop.exe",
-    ]:
-        fail("action-gh-release 的 local asset 必須恰為 setup 與兩個 portable exe")
+    if step_scalar(creator, "uses") is not None or step_scalar(creator, "shell") != "bash":
+        fail("create_release 必須是可稽核的 bash/API transaction，不可委託第三方 action")
+    if nested_scalar(creator, "env", "GH_TOKEN") != "${{ github.token }}":
+        fail("create_release 沒有使用這一輪 workflow 的 GitHub token")
+    creator_run = run_literal_lines(creator)
+    if not creator_run:
+        fail("create_release 沒有可執行的 run block")
+
+    asset_loop = "for asset in AI-Sister-Setup.exe sister.exe sister-desktop.exe; do"
+    if creator_run.count(asset_loop) != 2:
+        fail("create_release 必須以同一份 exact 三資產清單先驗本機、再逐檔上傳")
+    creator_text = "\n".join(creator_run)
+    require_lines(
+        creator_run,
+        [
+            'release_by_tag="repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}"',
+            '  read -r existing_id existing_state < <(python3 - "$existing_json" <<\'PY\'',
+        ],
+        "既有 release preflight",
+    )
+    existing_state_python = heredoc(
+        creator_run,
+        '  read -r existing_id existing_state < <(python3 - "$existing_json" <<\'PY\'',
+        "既有 release state",
+    )
+    require_lines(
+        [line.strip() for line in existing_state_python if line.strip()],
+        [
+            'release_id = release.get("id")',
+            'if not isinstance(release_id, int) or release_id <= 0:',
+            'print(release_id, "draft" if release.get("draft") is True else "published")',
+        ],
+        "既有 release state",
+    )
+    public_refusal = """  if [[ "$existing_state" != draft ]]; then
+    echo "::error::${GITHUB_REF_NAME} 已有公開 release；rerun 不得刪換它的資產"
+    exit 1
+  fi
+  gh api --method DELETE \\
+    "repos/${GITHUB_REPOSITORY}/releases/${existing_id}"""
+    if public_refusal not in creator_text:
+        fail("既有公開 release 必須在任何 delete/upload 前拒絕；只有 draft 可整份重建")
+    not_found_branch = """else
+  if ! grep -q 'HTTP 404' "$existing_error"; then
+    cat "$existing_error" >&2
+    exit 1
+  fi
+fi"""
+    if not_found_branch not in creator_text:
+        fail("release preflight 只可把明確 HTTP 404 當成尚未建立")
+
+    preflight = 'if gh api "$release_by_tag" > "$existing_json" 2> "$existing_error"; then'
+    public_error = (
+        '    echo "::error::${GITHUB_REF_NAME} 已有公開 release；rerun 不得刪換它的資產"'
+    )
+    delete_draft = '  gh api --method DELETE \\'
+    create_release = 'gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \\'
+    upload_asset = '  gh release upload "$GITHUB_REF_NAME" "$asset"'
+    positions = {
+        label: one_index(creator_run, line, label)
+        for label, line in [
+            ("既有 release preflight", preflight),
+            ("公開 release 拒絕", public_error),
+            ("失敗 draft 刪除", delete_draft),
+            ("新 draft 建立", create_release),
+            ("逐檔上傳", upload_asset),
+        ]
+    }
+    if list(positions.values()) != sorted(positions.values()):
+        fail("release transaction 必須依 preflight → public refusal → draft delete → create → upload")
+
+    create_payload_start = (
+        'python3 - "$GITHUB_REF_NAME" "$prerelease" notes.md > "$create_payload" <<\'PY\''
+    )
+    create_payload_python = heredoc(creator_run, create_payload_start, "create release payload")
+    create_statements = [line.strip() for line in create_payload_python if line.strip()]
+    require_lines(
+        create_statements,
+        [
+            '"tag_name": tag,',
+            '"name": tag,',
+            '"body": pathlib.Path(notes_path).read_text(encoding="utf-8"),',
+            '"draft": True,',
+            '"prerelease": prerelease == "true",',
+            '"generate_release_notes": True,',
+        ],
+        "create release payload",
+    )
+    require_lines(
+        creator_run,
+        [
+            'if release.get("draft") is not True:',
+            'echo "id=$release_id" >> "$GITHUB_OUTPUT"',
+        ],
+        "新 draft readback／output",
+    )
+    if "--clobber" in creator_text:
+        fail("create_release 不得以 --clobber 更新既有 asset")
 
     publishers = [
         (index, step)

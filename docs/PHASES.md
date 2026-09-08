@@ -535,8 +535,8 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     讀滿 73,261,088 bytes 後走同一套整包／逐檔驗證、原子安裝與精準移除。這補的是
     真 Windows transport；設定頁真人點擊、四位立繪／八段播放、撤回 UX 與 packet trace
     仍須在 Ted 的正式 artifact 上實測，不能拿 CI 的成功下載代替。
-- 🔶 發布工程：安裝包／code signing／手動 installer 升級、single-instance、recorder
-  watchdog/backoff、開機自啟、跨 capture／brain／hands 的 master stop、官網一頁，
+- 🔶 發布工程：安裝包／code signing／手動 installer 升級、single-instance、登入啟動、
+  desktop-owned recorder watchdog/backoff、跨 capture／brain／hands 的 master stop、官網一頁，
   以及 Show HN / X 發文帶 benchmark 表。
   - ✅ alpha.68 版本說明。在這之前它是 `ci.yml` 裡寫死的一塊 570 行的字，
     每出一版往裡面疊一節「這一版：⋯⋯」再**整塊**貼上去——alpha.67 那份
@@ -565,8 +565,79 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     silent path 仍可能 kill；recorder 若此時才啟動則不會被 stock 重查，安裝／移除可能
     只做一部分。要移除 stock killer 或做 installer／app 協調後，才能承諾完整 lifecycle；
     alpha.106 只承諾檢查當下已活著的 PID。
-  - ⬜ code signing、真跨版升級、recorder watchdog/backoff、開機自啟、跨層 master
-    stop 與官網仍未完成；1.0 不內建自動 updater，由使用者手動下載新版 installer。
+  - ✅ alpha.107 已接 Windows current-user 登入啟動：設定預設關閉、立即生效，
+    `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 是唯一真相。只有 exact quoted
+    `"<current sister-desktop.exe>" --ai-sister-login` 算 `enabled`；不存在、不相符、
+    讀不到與非安裝副本分別是 `disabled`／`mismatch`／`unreadable`／
+    `unsupported`。後三種不冒充 off；只有 uninstaller `InstallLocation` 精確對應目前
+    exe parent 才能修改，portable 不會碰安裝版。app 不管 `StartupApproved`，所以
+    這只證明 Run value 已登錄，Windows 設定仍可另外停用。
+  - ✅ alpha.107 的 login intent 是 tray-only：不顯示／聚焦字母人、不彈
+    onboarding；同一個 worker 只承接第一份，delayed／secondary duplicate 忽略且不
+    reveal。只有有效
+    `local-recording` consent 才送 start intent，未簽／讀壞不啟動，而且絕不解除
+    既有 pause；同一 worker 的 login 不清人工 Stop／撤回 latch，也不重設
+    backoff／GaveUp。transient preflight 每 500ms 完整重查、最長五分鐘，不吃 watchdog
+    failure budget；重試前與 commit 前都檢查 deadline，逾時不可 late spawn。只有 typed
+    `desktop-quit` 能在期限內等上一輪 shutdown handoff；Absent 下看到 lease、heartbeat
+    或其他 owner 證據就分類 External，該 owner 後來退出也不由這份 Login takeover；一般
+    External 的 stale／missing／unreadable 仍只以 `stopped` 墓碑完成離場，typed
+    `desktop-quit` 是窄 handoff 例外。
+    真人 Stop／Quit／Explicit Start、`requested`／`consent-revoked`、invalid／unknown
+    consent 或 control 都取消 pending Login。正常退出另留 `desktop-quit`，下一個全新
+    opt-in login 只在 bounded handoff 與完整 start barrier 後清這一種。撤回本機記錄同意時
+    在 consent save 前先 atomic publish 獨立的 `consent-revoke.barrier`；它不由 Start
+    清除，save 失敗仍擋住開始。成功 local regrant 才 generation-safe 清同一代 barrier，
+    並保留或補上一顆普通 stop latch，讓重簽本身不會自動 restart。一般關閉登入啟動也只
+    影響下次登入，不停這一輪 recorder。
+  - ✅ alpha.107 的 bounded supervisor 只管 desktop 自己 spawn 的 child。前三次連續
+    失敗分別延後 1 秒／5 秒／30 秒，第四次後放棄。只有新鮮且相對上一個樣本真的更新的
+    `Recording` heartbeat 能把連續健康區間推過 10 分鐘並歸零失敗數；
+    missing／stalled／unreadable／`Thinking` 會把區間歸零。exit 0、手動停止、
+    撤回本機記錄同意、desktop quit 都取消重試。收到真人 Stop 時先取消 Login、timer
+    與所有 automatic spawn，再嘗試 durable write；寫入失敗也不自動復活，並照實保留
+    「現有 recorder 可能仍在跑」，只有成功 commit 的真人 Explicit Start 才解除這道
+    in-memory latch，失敗的 Start 不算。quit 若寫不進 durable stop，
+    in-memory retry 仍已取消，但 desktop 不退出並顯示錯誤；occupancy 或狀態不明時
+    fail closed。它不自行重啟
+    desktop，也不接管外部啟動的 recorder。
+  - ✅ alpha.107 的所有 CLI／desktop recorder 在第一拍 `Booting` heartbeat 前都會
+    nonblocking 拿到 data-dir `recording.lock` 的 OS whole-file exclusive lock，並持有到
+    整場結束。
+    process crash／handle drop 由 OS 自動釋放；空檔 inode 可持久留著，不能用檔案存在
+    猜 occupied；symlink／non-regular path 要 fail closed。這是 simultaneous CLI／desktop
+    start TOCTOU 的最後單一擁有者門；持久空檔、contention、crash release 與拒絕
+    symlink／non-regular 都有專屬 core 測試。
+  - ✅ 所有 recorder Start 的 lock order 固定為 shared `consent.lock` → `stop.lock` →
+    `recording.lock`／舊 heartbeat barrier。CLI recorder 的 guard 活過 explicit clear 與
+    第一拍；desktop parent 的 guard 活過 preflight／clear 到 `Command::spawn` 回來就立即
+    放掉，child 自己 nonblocking 重拿並持到第一拍。Desktop 真人 Start 再以 nonblocking `stop.lock` guard 暫持
+    `recording.lock`，通過 heartbeat barrier 與 timeout commit 後才清舊 latch；spawn child
+    一律維持
+    supervised，重新取得整場 lease 並在第一拍前重讀 stop／consent。Login 只可清上一輪
+    typed `desktop-quit`，retry 不清；因此人工 Stop／撤回與晚到的 Stop／Quit 不會被
+    delayed child 擦掉。consent writer 先取得 exclusive lock 時，start 必須零 clear／
+    heartbeat／spawn；start 先取得 shared guard 時則線性排在 revoke 前，晚到的 durable
+    barrier 仍讓 recorder 收工。
+  - ✅ alpha.107 的 data-dir 新增空的 `consent.lock`。所有 CLI／desktop grant／
+    revoke 都在 OS exclusive lock 內重讀最新 consent、只套這次變更、
+    atomic save，避免 concurrent 更改不同 sheet 時 lost update；revoke 的 pre-save
+    independent barrier 與 regrant 的 post-commit generation ticket 也在同一協定內。鎖內重讀、atomic replace、contention 與拒絕 symlink／non-regular
+    都有專屬 core 測試；CLI／desktop 也已接到同一個 mutation 入口。
+  - ✅ 上述命令／狀態分類、重試與取消轉移、renderer 狀態、recorder lease 與
+    consent transaction 都有純 policy／fixture／core 自動測試；Windows HKCU backend
+    也有只碰 test subkey 的 native 測試。
+    這些不是「真正 Windows 登入事件已啟動正確安裝副本」的產品證據。
+  - ⬜ 正式 alpha.107 `AI-Sister-Setup.exe` 仍待 Ted 在真 Windows 實測 Run 登錄與
+    `StartupApproved` 提示、登入 tray-only／consent／pause、secondary intent、500ms／
+    五分鐘 bounded preflight、typed DesktopQuit handoff 與 Absent-external no-takeover、
+    1／5／30 秒重試／第四次放棄／fresh-heartbeat 10 分鐘 reset 與中斷歸零、consent
+    writer-first／start-first 競態、manual Stop／quit stop-write 失敗、simultaneous
+    CLI／desktop `recording.lock`，
+    以及各種取消、占用／未知、外部 recorder、desktop crash 與 uninstall。未勾完前不宣稱
+    Windows 人工通過。
+  - ⬜ code signing、真跨版升級、跨層 master stop 與官網仍未完成；
+    1.0 不內建自動 updater，由使用者手動下載新版 installer。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）
 - ✅ a `CommitmentDue`：`open_commitments_due_before(now + 40min)`，只收
@@ -595,8 +666,9 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
 **Release 1.0 exit criteria**
 - [ ] Windows GA 走完上方 Release 1.0 合約的 S1 主流程；正式 artifact 可安裝、
       code-signed、可用手動下載的新版 installer 升級、single-instance、可開機常駐。
-      recorder crash 有 bounded
-      watchdog/backoff，升級與 migration 不丟既有資料。最低支援 Windows 10，舊版
+      recorder crash 有 bounded watchdog/backoff，且必須用正式安裝副本真正驗過
+      登入啟動、pause／consent 優先、重試上限與取消、不接管外部 recorder；升級與
+      migration 不丟既有資料。最低支援 Windows 10，舊版
       Windows 不把反向 WTS lock flags 猜成現行語意。
 - [ ] 三張同意書、capture-time 排除、出處、cascade 刪除、export／restore 與
       pause／resume、跨 capture／brain／hands 的 master stop 在 Windows 正式 artifact

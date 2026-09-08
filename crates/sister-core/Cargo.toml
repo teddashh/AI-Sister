@@ -56,6 +56,9 @@ fs4.workspace = true
 # 新進來的這幾個它不認得，別把「它還是綠的」讀成「它看過這幾個了」。
 sister-hands.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Storage_FileSystem",

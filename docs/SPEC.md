@@ -55,8 +55,9 @@ L3 可更新狀態 (State)      — 承諾/未完成事項/實體/偏好；每�
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-現行拓撲〔2026-09-06〕：core 與 shell **邏輯分離**；長時間 recorder 是桌面可啟動的
-sibling process，資料與 UI 生命週期分開。Tauri renderer 直接走 IPC，沒有早期草案的
+現行拓撲〔2026-09-07〕：core 與 shell **邏輯分離**；長時間 recorder 是桌面可啟動的
+sibling process，資料與 UI 生命週期分開。desktop 只 supervision 自己 spawn 的
+child；外部啟動的 recorder 只會被視為占用，不 adopt／kill／restart。Tauri renderer 直接走 IPC，沒有早期草案的
 loopback HTTP/WS、nonce server 或對外 port。hands 已是 Rust crate 與型別隘口，不是
 Node sidecar；若未來真需要更強的 OS process isolation，再用實際 threat model 另立里程碑。
 macOS 的 capture 仍必須住在簽名 `.app` 主程序樹內以維持 TCC identity；這個平台限制
@@ -559,13 +560,112 @@ renderer 顯示文字逐字等於 embedded transcript 的 line 才能進播放 a
 
 ## §14. 非功能需求
 
-- 隨開機自啟、崩潰自復活（core 與 shell 獨立看門）；
+- Windows current-user 安裝版提供 opt-in 登入啟動，**預設關閉**；這是登入時的
+  HKCU Run 登錄，不是 service／updater，不承諾 desktop crash 後 self-relaunch。
+- recorder 復原只由 desktop 對自己啟動的 child 做 bounded watchdog/backoff；
+  core 與 shell 沒有各自復活另一份行程，也不接管外部 recorder。
 - 升級不丟資料（SQLite migration 版本化）；Release 1.0 的 Windows artifact 由使用者
   手動下載新版 installer、結束 desktop／recorder 後原地安裝，不內建自動 updater；
 - i18n：zh-TW / en day one（MAT i18n 骨架）；
 - 可觀測：開發者模式面板（L2 卡片流、回查 log、開口候選與分數）——
   預設關閉〔定案〕；
 - 所有內部 Tauri IPC 使用 strict serde DTO；前端對封閉集合做窮舉檢查。
+
+**Windows 登入與 recorder lifecycle（alpha.107）：**
+
+- 唯一設定真相是
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的 `AI-Sister`。缺值是
+  `disabled`；只有 `"<current sister-desktop.exe>" --ai-sister-login` 完全相符是
+  `enabled`；其他可讀值是 `mismatch`，無法讀取是 `unreadable`，無法用
+  uninstaller `InstallLocation` 精確證明 current exe parent 的 portable／其他副本是
+  `unsupported`。不把 unknown 用 bool off 代替；寫入後必須讀回 desired exact 狀態才算
+  成功。只有已驗證安裝副本可修改，portable 不碰另一份安裝值。
+- app 不讀寫 Windows `StartupApproved`。`enabled` 只代表 exact Run value 已登錄；
+  作業系統「啟動應用程式」仍可另外停用。關閉登入啟動只影響後續登入，
+  不終止這一輪 recorder。
+- `--ai-sister-login` 是窄的 login intent：tray-only，不 show／focus／onboarding。
+  每個 desktop worker 只承接第一份 login intent；delayed／secondary duplicate 忽略且不
+  reveal。有效 `local-recording`
+  consent 才送 recorder start intent；未簽、讀不到或版本失效時不啟動也不彈
+  onboarding。登入啟動與重試都不得解除 pause。`local-recording` 從有效變撤回時，
+  CLI 與 desktop 都在 consent save **前**先 atomic publish 獨立的
+  `consent-revoke.barrier`。它不由 recorder 消費、不准 Start 清除；即使 save 失敗且舊
+  consent 仍有效，也必須阻止 automatic／Explicit start，且只能說停止條件已收到，不能
+  冒充 consent commit。成功 local regrant 才能用 transaction 內捕捉的 generation ticket
+  清同一代；較新 revoke 會令舊票 `Superseded`。清前若沒有普通 stop marker，先留下
+  `consent-revoked` stop latch；既有 `requested`／`desktop-quit` 原封保留。login／retry
+  永不清人工或撤回停止，也不
+  重設同一個 worker 的 backoff／GaveUp。Login transient preflight 每 500ms 完整重查，
+  總期限五分鐘且不計入 watchdog failure budget。每次 attempt 前與最後 commit 前都要
+  檢查 deadline，逾時不得 clear 或 late spawn。只有 typed `desktop-quit` 可在期限內重試
+  上一輪 shutdown handoff；stop 是 Absent 卻觀察到任何 lease／heartbeat owner 證據時
+  必須轉 External，該 owner 之後離場也不得由同一份 Login takeover／restart。一般
+  External 的 stale／missing／unreadable 仍只接受 `stopped` 墓碑為離場證據，
+  `desktop-quit` 是窄例外。Stop、Quit、真人 Explicit Start、`requested`／
+  `consent-revoked`、invalid／unknown consent 或 control 都取消 pending Login；同一 worker
+  不再接受第二份。正常退出另寫 `desktop-quit`，只有下一次全新的 opt-in login 可在
+  bounded handoff 與完整 start barrier 後清它。desktop 在 spawn 前重讀 consent／stop；
+  每個 recorder 在第一拍 heartbeat 前又重讀一次，不拿先前的 allow 結果走進第一拍。
+- 同意更改本身也必須可線性化：所有 CLI／desktop grant／revoke 先對 data-dir
+  空檔 `consent.lock` 取得 OS whole-file exclusive lock，**在鎖內**重讀最新
+  `consent.toml`、只套用當次指定的 sheet 變更，再 atomic save。這條專門防止
+  simultaneous CLI／desktop 各自從舊 snapshot 寫回，把對方已 grant／revoke 的另一張
+  無聲蓋掉。撤回 local-recording 的獨立 barrier 在 locked atomic save 前發布；regrant
+  只有 commit 後才可 generation-safe clear。鎖或 atomic save 失敗就回錯，不謊稱已儲存；已存 lock path 是
+  symlink／non-regular file 時也 fail closed，不跟著鎖到資料目錄外。
+- Recorder start 必須先拿 shared `consent.lock` start guard，再依序拿 `stop.lock`、
+  `recording.lock`／檢查舊 heartbeat。CLI recorder 的 guard 活過 explicit clear 與第一拍；
+  desktop parent 的 guard 活過 preflight／clear 到 `Command::spawn` 回來便立即放掉，child
+  自己 nonblocking 重拿並持到第一拍。revoke writer 先取得 exclusive consent lock 時，
+  這次 start 必須零 clear、零 heartbeat、零 spawn；start 先取得 shared guard 時則明確
+  線性排在 revoke 前，晚到的 barrier 仍使 recorder 收工。不得用鎖外的舊 consent
+  snapshot 穿過 writer，也不得讓 parent 等 child heartbeat 才釋放 writer。
+- desktop-owned child 連續失敗的第一、二、三次分別在 1 秒、5 秒、30 秒
+  後重試；第四次放棄。只有**新鮮且相對上一個已觀察樣本真的更新的
+  `Recording` heartbeat** 能推進連續區間；反覆 poll 同一拍不提供新證據。區間達
+  10 分鐘才 reset failure count；`Booting`、missing／stalled／unreadable／`Thinking`
+  一旦被觀察到就把區間歸零，不能從中斷前繼續累加。exit 0、manual stop、
+  consent revoke 與 desktop quit 取消 retry。worker 一收到 manual Stop 就必須先取消
+  Login、retry timer 與所有 automatic spawn，再嘗試 durable stop write；write failure
+  不得恢復 automatic work，且 UI 不可宣稱現有 recorder 已停。修復後仍可再 Stop；只有
+  真人 Explicit Start 成功 commit 完整 barrier 才解除這道 in-memory latch，failed／busy／
+  invalid／timeout Start 都不算。
+- quit 先留 durable stop 才可讓 desktop 退出。如果 stop write 失敗，worker 仍立刻進
+  in-memory `Quitting` 並取消 timer，但 desktop 必須 prevent exit、顯示／focus 錯誤，
+  不能讓可能仍在錄的 child 留在沒有 UI 的背後。修復磁碟／權限後才能再次
+  stop／quit；這期間不可接新 start 或 retry。
+- retry 前必須重新測 stop intent、consent 與 occupancy。unreadable／unknown 不猜，
+  occupied 不 spawn 第二個；觀察到外部 recorder 後放棄自己的 takeover。desktop
+  本身崩潰時沒有另一個 service 把它重開。
+- owned child exit 的 wall-clock cutoff 以前留下的 fresh heartbeat 不得投影成目前仍在錄，
+  也不得開放 Start／retry；cutoff 之後繼續更新才進 typed `External` observation，取消
+  舊 retry 且只委派 heartbeat 顯示。cutoff 後才變 stale 的一拍證明曾有 external owner，
+  卻不證明它已離場；missing／stalled／unreadable 都維持 external uncertainty，只有明確
+  `stopped` 墓碑才可完成 `ExternalGone`。已送 external stop 時同樣維持
+  `ExternalStopping` 到這份墓碑，不能拿 timeout 當停止證據。`try_wait` error 進
+  child-uncertain 並保留原 handle，後續成功 probe 可回 Running／正常 exit，不可因一次
+  probe error 永久 wedge 或另開 child。
+- `stop.request`／`stop.consumed` 的 request、consume、explicit clear 以永久 `stop.lock`
+  exclusive transaction 線性化；read probe 用 nonblocking shared lock，contention 也是
+  unknown。CLI Explicit start 必須先持 shared consent start guard，再在 recorder lease 前
+  持 stop transaction，通過 lease 與舊 heartbeat barrier 後才 clear。Desktop 真人 Start 做同一件事：parent nonblocking
+  取得 consent guard、stop transaction 與 temporary recorder lease，通過 heartbeat barrier 並
+  commit 後才 clear；spawn 的 child 一律是 supervised，重新取得正式 lease 並在第一拍前
+  重讀 stop／consent，沒有稍後無條件 clear 的能力。Login 只可在全新 worker 以同一套
+  barrier 清上一輪 `desktop-quit`，人工 `requested`／`consent-revoked` 都保留；retry 永不
+  clear。Windows handle 拒絕 delete；Unix Preview 執行中不得 unlink／replace 三個
+  protocol lock path。
+- heartbeat 是診斷與 supervisor 證據，不是 simultaneous start 的原子鎖。每一個 CLI／
+  desktop recorder 都要在第一拍 `Booting` heartbeat 前用 fs4 對 data-dir
+  `recording.lock` 做 nonblocking OS whole-file exclusive lock，整場持有。拿不到或鎖狀態
+  不明就不啟動，已存路徑若是 symlink 或 non-regular file 也拒絕；process
+  crash／handle drop 時由 OS 釋放。空的 lock file 可以留在
+  磁碟，**檔案存在不表示 occupied**，只有當下 OS lock acquisition 的結果才是真相。
+- 純 command／state policy、watchdog 轉移、renderer fixture、recorder lease 與
+  consent locked mutation 有可在 Linux 執行的自動測試；Windows backend 另有只碰
+  test subkey 的 native registry test。這是決策、lock protocol 與 API
+  read／write／readback 的自動證據，**不是**正式 alpha.107 安裝副本真登入、
+  真故障時序或 uninstall 的人工通過紀錄；這些仍待 Windows checklist 勾驗。
 
 ## §15. 技術選型
 
@@ -581,7 +681,7 @@ renderer 顯示文字逐字等於 embedded transcript 的 line 才能進播放 a
 | 向量（選配） | `sqlite-vec` 0.1.9（2026 復活版；256-d int8 MRL，brute-force 在我們規模內互動級） | pre-1.0 格式風險 → 存 model-id+dim，設計成可背景 re-embed |
 | 本地 embedding | 遠期選配；Release 1.0 沒有內嵌推論 runtime | 腦優先 spawn 使用者已登入的 CLI；沒有 HTTP client |
 | 磁碟保護 | SQLite/frame 無應用層加密；依賴 BitLocker／FileVault／LUKS | 未開 OS 全碟加密時，離線竊碟者可讀；PRIVACY／THREAT_MODEL 明講 |
-| UI shell | **Tauri 2** Rust backend + build-free HTML/CSS/ES modules；tray + global-shortcut 已落地 | alpha.106 新增 Windows startup guard + 官方 single-instance receiver，以及 current-user NSIS：exact sidecar + offline WebView2；原生 Windows CI 已驗 install／process refusal／reinstall／uninstall mechanics。顯示與聚焦仍待人工證據，late-process 窄窗、code signing／真跨版升級／autostart／watchdog 仍是 Release 1.0 工作；不內建自動 updater |
+| UI shell | **Tauri 2** Rust backend + build-free HTML/CSS/ES modules；tray + global-shortcut 已落地 | alpha.106 新增 Windows startup guard + 官方 single-instance receiver 與 current-user NSIS；alpha.107 新增預設關閉、installed-copy-only 的 HKCU Run 登入啟動，以及只管 desktop-owned child 的 bounded recorder supervisor。原生 Windows CI 已驗 alpha.106 install mechanics；alpha.107 有 policy／fixture／test-subkey 自動測試，但正式 artifact 的真登入／重試／uninstall 仍待人工證據。late-process 窄窗、code signing／真跨版升級仍是 Release 1.0 工作；不內建自動 updater |
 | Pet overlay | always-on-top 透明無框窗 + `set_ignore_cursor_events` 動態 toggle（輪詢游標；Tauri 無 per-region hit-testing）| 已知坑：macOS production 透明窗 bug 群、全螢幕 space 需動 collectionBehavior、Wayland overlay 品質差 |
 | macOS 權限 | `tauri-plugin-macos-permissions` 2.3（Screen Recording 無 entitlement，純 TCC + hardened runtime + notarization；MAS 不可行，站外發行） | 開發期 `tccutil reset ScreenCapture` 測 onboarding |
 | hands | **Rust crate `sister-hands`**，CLI／desktop 共用 permit 與 target policy | 尚未做獨立 process；需要時另立 threat-model milestone |

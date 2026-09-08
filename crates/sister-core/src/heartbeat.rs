@@ -14,9 +14,10 @@
 //! 所以 recorder 每隔幾秒主動蓋一次時戳。**活著才蓋得動**——當掉、被 kill、
 //! 整台關機，時戳就停在那裡，而停住的時戳自己會過期。
 //!
-//! 和暫停旗標刻意相反的一點：這裡**讀不到就當作沒有人在錄**。暫停那邊
-//! 「不確定就是暫停」是為了少錄；這邊「不確定就是沒在錄」是為了少吹牛。
-//! 兩者是同一個方向——不確定的時候，往「她做得比較少」那邊倒。
+//! 和暫停旗標刻意相反的一點：回答「可不可以對人說她正在錄」時，這裡讀不到
+//! 就回否，避免拿未知狀態吹牛；但 [`Presence::Unreadable`] 仍被保留下來，任何
+//! occupancy、Start 或落刀判決都不得把它冒充成空房。兩者的共同方向是：不確定
+//! 時少講一句、少錄一拍，也不要因此多開或砍掉一個 recorder。
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -32,7 +33,7 @@ const BEAT: &str = "recording.beat";
 /// tick 是什麼時候」。每秒寫一次沒有多回答任何問題，只是多 86,400 次磁碟寫入。
 pub const BEAT_EVERY_MS: i64 = 5_000;
 
-/// 超過這麼久沒蓋，就當作沒有人在錄。
+/// 超過這麼久沒蓋，就不再聲稱目前正在錄；這不等於證明 owner 已離場。
 ///
 /// 抓 `BEAT_EVERY_MS` 的三倍多一點：一次寫入被 OS 排程延後、或者某個 tick
 /// 剛好卡在一張很大的圖上，都不該讓字母人閃一下「沒有人在記錄」。**寧可晚
@@ -335,6 +336,20 @@ pub fn phase(data_dir: &Path, now: Millis) -> Option<Phase> {
     phase_of(presence(data_dir, now))
 }
 
+/// 一份可用來證明「健康 Recording 持續前進」的新鮮 heartbeat。
+///
+/// [`phase`] 只回答目前是不是 live，刻意不帶時戳；supervisor 若每 200ms 重讀
+/// 同一顆五秒 heartbeat，卻每次都拿自己的 monotonic now 推進健康計時，最後一拍
+/// 停在 9:59 時仍可能在 10:00 把 failure budget 清零。這支保留 `(at, phase)`，
+/// 讓呼叫端只在檔案真的換成新一拍時推進。其他所有狀態都是 `None`；對健康區間
+/// 來說，它們共同代表「這次沒有新的 Recording 證據」。
+pub fn live_heartbeat(data_dir: &Path, now: Millis) -> Option<(Millis, Phase)> {
+    match read_record(data_dir)? {
+        Record::Beat(at, phase) if now - at < STALE_AFTER_MS => Some((at, phase)),
+        Record::Beat(_, _) | Record::Thinking { .. } | Record::Tombstone { .. } => None,
+    }
+}
+
 /// [`phase`] 的純函式那一半：同一顆 [`Presence`] 不要讀第二次磁碟。
 pub fn phase_of(p: Presence) -> Option<Phase> {
     match p {
@@ -472,10 +487,10 @@ pub fn tray_record_action(p: Presence) -> TrayRecordAction {
     match p {
         Presence::Live(_) => TrayRecordAction::Stop,
         Presence::Thinking { .. } => TrayRecordAction::WaitForThinking,
-        Presence::NeverStarted
-        | Presence::Unreadable
-        | Presence::Stopped { .. }
-        | Presence::Stalled { .. } => TrayRecordAction::Start,
+        Presence::Unreadable => TrayRecordAction::WaitForUnknown,
+        Presence::NeverStarted | Presence::Stopped { .. } | Presence::Stalled { .. } => {
+            TrayRecordAction::Start
+        }
     }
 }
 
@@ -484,6 +499,7 @@ pub fn tray_record_label(p: Presence) -> &'static str {
     match tray_record_action(p) {
         TrayRecordAction::Stop => "停止記錄",
         TrayRecordAction::WaitForThinking => "還在收尾",
+        TrayRecordAction::WaitForUnknown => "記錄狀態不明",
         TrayRecordAction::Start => "開始記錄",
     }
 }
@@ -500,7 +516,7 @@ pub fn tray_quit_label(p: Presence) -> &'static str {
     }
 }
 
-/// 系統匣那顆記錄鍵按下去會發生的三件事。見 [`tray_record_action`]。
+/// 系統匣那顆記錄鍵按下去會發生的事。見 [`tray_record_action`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayRecordAction {
     /// 沒人佔著：開一個 recorder。
@@ -509,9 +525,11 @@ pub enum TrayRecordAction {
     Stop,
     /// 錄製迴圈已經跳出，解釋層還在想最後一段。再寫 `stop.request` 沒人讀。
     WaitForThinking,
+    /// 心跳檔讀不懂：沒有證據可以開第二個 recorder。
+    WaitForUnknown,
 }
 
-/// 設定頁存完、字母人指示燈、系統匣共用的那四個字。
+/// 設定頁存完、字母人指示燈、系統匣共用的那五個字。
 ///
 /// `"thinking"` 不是 `"none"`：那兩分鐘裡叫他去按「開始記錄」會被擋。
 /// 沒有 `_`。
@@ -520,10 +538,8 @@ pub fn watching_word(p: Presence) -> &'static str {
         Presence::Live(Phase::Recording) => "recording",
         Presence::Live(Phase::Booting) => "booting",
         Presence::Thinking { .. } => "thinking",
-        Presence::NeverStarted
-        | Presence::Unreadable
-        | Presence::Stopped { .. }
-        | Presence::Stalled { .. } => "none",
+        Presence::Unreadable => "unreadable",
+        Presence::NeverStarted | Presence::Stopped { .. } | Presence::Stalled { .. } => "none",
     }
 }
 
@@ -561,6 +577,10 @@ mod tests {
         beat(&t.0, 1_000_000).expect("beat");
         assert!(is_recording(&t.0, 1_000_000));
         assert!(is_recording(&t.0, 1_000_000 + STALE_AFTER_MS - 1));
+        assert_eq!(
+            live_heartbeat(&t.0, 1_000_000 + STALE_AFTER_MS - 1),
+            Some((1_000_000, Phase::Recording))
+        );
     }
 
     /// recorder 被 kill 掉、或整台當機。時戳停在那裡，而停住的時戳會過期
@@ -570,6 +590,11 @@ mod tests {
         let t = Tmp::new("stale");
         beat(&t.0, 1_000_000).expect("beat");
         assert!(!is_recording(&t.0, 1_000_000 + STALE_AFTER_MS));
+        assert_eq!(
+            live_heartbeat(&t.0, 1_000_000 + STALE_AFTER_MS),
+            None,
+            "an expired sample cannot keep advancing watchdog health"
+        );
         assert!(!is_recording(&t.0, 1_000_000 + 3_600_000));
     }
 
@@ -1006,11 +1031,17 @@ mod tests {
             "想最後一段再寫 stop.request，沒有人會讀"
         );
         assert_eq!(tray_record_action(none_p), TrayRecordAction::Start);
+        assert_eq!(
+            tray_record_action(Presence::Unreadable),
+            TrayRecordAction::WaitForUnknown,
+            "讀不懂不是量到沒人佔著"
+        );
 
         assert_eq!(tray_record_label(rec_p), "停止記錄");
         assert_eq!(tray_record_label(boot_p), "停止記錄");
         assert_eq!(tray_record_label(think_p), "還在收尾");
         assert_eq!(tray_record_label(none_p), "開始記錄");
+        assert_eq!(tray_record_label(Presence::Unreadable), "記錄狀態不明");
         assert_ne!(
             tray_record_label(think_p),
             "停止記錄",
@@ -1030,6 +1061,11 @@ mod tests {
         assert_eq!(watching_word(boot_p), "booting");
         assert_eq!(watching_word(think_p), "thinking");
         assert_eq!(watching_word(none_p), "none");
+        assert_eq!(
+            watching_word(Presence::Unreadable),
+            "unreadable",
+            "讀不懂不是量到沒有 recorder"
+        );
         assert_ne!(
             watching_word(think_p),
             "none",

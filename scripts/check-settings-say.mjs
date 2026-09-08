@@ -107,6 +107,15 @@ const HOTKEY = {
   hands_collided: false,
 };
 
+const LOGIN_STARTUP_EXPECTED =
+  '"C:\\Users\\ted\\AppData\\Local\\AI-Sister\\sister-desktop.exe" --ai-sister-login';
+const LOGIN_STARTUP = {
+  state: "disabled",
+  expected: LOGIN_STARTUP_EXPECTED,
+  actual: null,
+  reason: null,
+};
+
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
 async function open({
@@ -121,9 +130,12 @@ async function open({
   onAssetRemove,
   onVoiceSet,
   onPersonaRead,
+  onLoginStartupRead,
+  onLoginStartupSet,
   asset = ASSET_AVAILABLE,
   voice = false,
   hotkey = HOTKEY,
+  loginStartup = LOGIN_STARTUP,
   cloud = false,
   watching = "recording",
 } = {}) {
@@ -145,6 +157,7 @@ async function open({
   let state = { ...config };
   let assetState = { ...asset, disclosure: asset.disclosure ? { ...asset.disclosure } : null };
   let voiceState = voice;
+  let loginStartupState = { ...loginStartup };
   const writes = [];
   const invokes = [];
   const events = new Map();
@@ -212,6 +225,31 @@ async function open({
             };
           case "recording_state":
             return watching;
+          case "login_startup_read":
+            if (onLoginStartupRead) return onLoginStartupRead({ ...loginStartupState });
+            return { ...loginStartupState };
+          case "login_startup_set":
+            if (onLoginStartupSet) {
+              return onLoginStartupSet(
+                arg,
+                { ...loginStartupState },
+                (s) => (loginStartupState = { ...s }),
+              );
+            }
+            loginStartupState = arg.enabled
+              ? {
+                  state: "enabled",
+                  expected: LOGIN_STARTUP_EXPECTED,
+                  actual: LOGIN_STARTUP_EXPECTED,
+                  reason: null,
+                }
+              : {
+                  state: "disabled",
+                  expected: LOGIN_STARTUP_EXPECTED,
+                  actual: null,
+                  reason: null,
+                };
+            return { ...loginStartupState };
           case "persona_asset_status":
             if (onAssetStatus) return onAssetStatus(assetState);
             return {
@@ -318,6 +356,7 @@ async function open({
     handsHotkeySay: () => node("[data-hands-hotkey-say]").textContent,
     brainSay: () => node("[data-brain-say]").textContent,
     brainHidden: () => node("[data-brain-say]").hidden,
+    loginStartupSay: () => node("[data-login-startup-say]").textContent,
     health: () => node("[data-health]").textContent,
     healthHidden: () => node("[data-health]").hidden,
     healthUnknown: () => node("[data-health]").classList.contains("unknown"),
@@ -325,6 +364,17 @@ async function open({
     machine: () => node("[data-machine]").textContent,
     machineHidden: () => node("[data-machine]").hidden,
     machineUnknown: () => node("[data-machine]").classList.contains("unknown"),
+    async changeLoginStartup(checked, { trusted = true } = {}) {
+      const target = node("[data-login-startup]");
+      if (target.disabled) return false;
+      // 原生 checkbox 的 click 會先落到新 checked 值、拿掉 indeterminate，再送
+      // change；假 DOM 要走同一個順序，否則測到的是另一個控制。
+      target.checked = checked;
+      target.indeterminate = false;
+      for (const fn of target.handlers.change ?? []) fn({ isTrusted: trusted });
+      await tick();
+      return true;
+    },
     /** 按那一格 → 進捕捉模式 → 按一組鍵下去。和真人的順序一樣。 */
     async pressCombo(e) {
       for (const fn of node("[data-combo]").handlers.click ?? []) fn();
@@ -351,6 +401,235 @@ function check(name, ok, detail) {
 
 function calls(p, command) {
   return p.invokes.filter(({ cmd }) => cmd === command);
+}
+
+console.log("⓪ Windows 登入項五態不會把 Unknown 畫成 Off");
+{
+  const cases = [
+    {
+      name: "enabled",
+      view: {
+        state: "enabled",
+        expected: LOGIN_STARTUP_EXPECTED,
+        actual: LOGIN_STARTUP_EXPECTED,
+        reason: null,
+      },
+      visual: "true/false/false",
+      says: ["已登錄", "工作管理員仍可另外停用"],
+    },
+    {
+      name: "disabled",
+      view: { ...LOGIN_STARTUP },
+      visual: "false/false/false",
+      says: ["未登錄", "下次登入不會由這一項啟動"],
+    },
+    {
+      name: "mismatch",
+      view: {
+        state: "mismatch",
+        expected: LOGIN_STARTUP_EXPECTED,
+        actual: '"D:\\old\\AI-Sister.exe"',
+        reason: "HKCU Run 不是這一版命令",
+      },
+      visual: "false/true/false",
+      says: [
+        "命令不相符",
+        "不能算已開啟",
+        "預期：",
+        "目前：",
+        "HKCU Run 不是這一版命令",
+      ],
+    },
+    {
+      name: "unreadable",
+      view: {
+        state: "unreadable",
+        expected: LOGIN_STARTUP_EXPECTED,
+        actual: null,
+        reason: "拒絕存取 registry",
+      },
+      visual: "false/true/true",
+      says: ["狀態未知", "不能把它當成關閉", "拒絕存取 registry"],
+    },
+    {
+      name: "unsupported",
+      view: {
+        state: "unsupported",
+        expected: null,
+        actual: null,
+        reason: null,
+      },
+      visual: "false/false/true",
+      says: ["免安裝/診斷版需先用 Setup", "不管理 Windows 登入項"],
+    },
+  ];
+  const sentences = [];
+  const visuals = [];
+  for (const c of cases) {
+    const p = await open({ loginStartup: c.view });
+    const box = p.node("[data-login-startup]");
+    const visual = `${box.checked}/${box.indeterminate}/${box.disabled}`;
+    visuals.push(visual);
+    sentences.push(p.loginStartupSay());
+    check(`${c.name} 的 checkbox 形狀`, visual === c.visual, visual);
+    check(
+      `${c.name} 的文案只描述這一態`,
+      c.says.every((part) => p.loginStartupSay().includes(part)),
+      p.loginStartupSay(),
+    );
+  }
+  check("五態的 checkbox 形狀沒有兩態相同", new Set(visuals).size === 5, visuals);
+  check("五態的完整文字沒有兩態相同", new Set(sentences).size === 5, sentences);
+}
+
+console.log("⓪ᵇ 登入啟動的後果、同意書與暫停都在控制旁邊說清楚");
+{
+  const compact = HTML.replace(/\s+/g, "");
+  check(
+    "只在背景常駐且不彈窗",
+    compact.includes("登入Windows後在背景啟動AI-Sister") &&
+      compact.includes("不彈出角色或同意書視窗"),
+    "settings.html login startup copy",
+  );
+  check(
+    "有效第一張同意書才開始 recorder",
+    compact.includes("只有第一張「本機記錄」同意書仍有效時才會開始recorder"),
+    "settings.html login startup copy",
+  );
+  check(
+    "不解除 pause，關掉也不停本輪",
+    compact.includes("不會解除你已經按下的暫停") &&
+      compact.includes("關掉只影響下次登入，不會停止這一輪正在跑的desktop或recorder"),
+    "settings.html login startup copy",
+  );
+}
+
+console.log("⓪ᶜ config.toml 讀壞仍獨立讀得到、也改得到 Windows 登入項");
+{
+  const p = await open({
+    onRead: () => {
+      throw new Error("config.toml 壞了");
+    },
+  });
+  check("一般儲存已 fail closed", p.node("[data-save]").disabled === true);
+  check("registry 仍讀了一次", calls(p, "login_startup_read").length === 1, p.invokes);
+  check("已知 disabled 仍可操作，不被 config 一起灰掉", p.node("[data-login-startup]").disabled === false);
+  await p.changeLoginStartup(true);
+  const sets = calls(p, "login_startup_set");
+  check(
+    "可信勾選只送 enabled true",
+    sets.length === 1 && JSON.stringify(sets[0].arg) === '{"enabled":true}',
+    sets,
+  );
+  check("寫完依後端回條畫成已登錄", p.node("[data-login-startup]").checked && p.loginStartupSay().includes("已登錄"), p.loginStartupSay());
+}
+
+console.log("⓪ᵈ 一般儲存不會順手改 Windows 登入項");
+{
+  const p = await open();
+  await p.save();
+  check("settings_write 照常發生", p.writes.length === 1, p.writes);
+  check("但 login_startup_set 一次都沒有", calls(p, "login_startup_set").length === 0, p.invokes);
+  check(
+    "settings payload 也沒有夾帶 registry 狀態",
+    !("login_startup" in p.writes[0]) && !("login_startup_enabled" in p.writes[0]),
+    p.writes[0],
+  );
+}
+
+console.log("⓪ᵉ 只有 trusted change 能寫，mismatch 一次勾選會修成 enabled");
+{
+  const mismatch = {
+    state: "mismatch",
+    expected: LOGIN_STARTUP_EXPECTED,
+    actual: '"D:\\old\\AI-Sister.exe"',
+    reason: null,
+  };
+  const p = await open({ loginStartup: mismatch });
+  await p.changeLoginStartup(true, { trusted: false });
+  check("script 假事件沒有寫 registry", calls(p, "login_startup_set").length === 0, p.invokes);
+  check(
+    "假事件也沒有把 Unknown 留成假的 On",
+    p.node("[data-login-startup]").indeterminate && !p.node("[data-login-startup]").checked,
+  );
+  await p.changeLoginStartup(true);
+  check("真人勾選只寫一次", calls(p, "login_startup_set").length === 1, p.invokes);
+  check("mismatch 修成後端確認的 enabled", p.node("[data-login-startup]").checked && !p.node("[data-login-startup]").indeterminate, p.loginStartupSay());
+}
+
+console.log("⓪ᶠ 寫入忙碌時不能重入");
+{
+  let finish = null;
+  const p = await open({
+    onLoginStartupSet: (_arg, _old, store) =>
+      new Promise((resolveSet) => {
+        finish = () => {
+          const enabled = {
+            state: "enabled",
+            expected: LOGIN_STARTUP_EXPECTED,
+            actual: LOGIN_STARTUP_EXPECTED,
+            reason: null,
+          };
+          store(enabled);
+          resolveSet(enabled);
+        };
+      }),
+  });
+  await p.changeLoginStartup(true);
+  check("第一趟還沒完成時開關是灰的", p.node("[data-login-startup]").disabled === true);
+  check("第二下按不到", (await p.changeLoginStartup(false)) === false);
+  check("所以 set 仍只有一趟", calls(p, "login_startup_set").length === 1, p.invokes);
+  finish();
+  await tick();
+  check("完成後依回條恢復可操作的 On", p.node("[data-login-startup]").checked && !p.node("[data-login-startup]").disabled, p.loginStartupSay());
+}
+
+console.log("⓪ᵍ set 失敗後一定重讀，不拿點擊後的勾勾冒充結果");
+{
+  let reads = 0;
+  const p = await open({
+    onLoginStartupRead: () => {
+      reads += 1;
+      return reads === 1
+        ? { ...LOGIN_STARTUP }
+        : {
+            state: "enabled",
+            expected: LOGIN_STARTUP_EXPECTED,
+            actual: LOGIN_STARTUP_EXPECTED,
+            reason: null,
+          };
+    },
+    onLoginStartupSet: () => {
+      throw new Error("寫 registry 時拒絕存取");
+    },
+  });
+  await p.changeLoginStartup(true);
+  check("開場一次、set 失敗後再 read 一次", reads === 2, reads);
+  check("仍保留真正的寫入錯誤", p.loginStartupSay().includes("寫 registry 時拒絕存取"), p.loginStartupSay());
+  check("同時明講重讀後其實已登錄", p.loginStartupSay().includes("重新讀取後：已登錄"), p.loginStartupSay());
+  check("勾勾依 readback，不依 set 的 throw", p.node("[data-login-startup]").checked === true);
+}
+
+{
+  let reads = 0;
+  const p = await open({
+    onLoginStartupRead: () => {
+      if (++reads === 1) return { ...LOGIN_STARTUP };
+      throw new Error("連 readback 也失敗");
+    },
+    onLoginStartupSet: () => {
+      throw new Error("set 失敗");
+    },
+  });
+  await p.changeLoginStartup(true);
+  check(
+    "set 和 readback 都失敗就成為正式 Unknown",
+    p.node("[data-login-startup]").indeterminate &&
+      p.node("[data-login-startup]").disabled &&
+      p.loginStartupSay().includes("set 失敗") &&
+      p.loginStartupSay().includes("連 readback 也失敗"),
+    p.loginStartupSay(),
+  );
 }
 
 console.log("① 題庫本來開著，關掉按儲存");
@@ -451,11 +730,20 @@ console.log("⑦ 沒有人在錄的時候按儲存");
     watching: "none",
     onWrite: (s, commit) => {
       commit(s);
-      return { watching: "idle" };
+      return { watching: "none" };
     },
   });
   await p.save();
   check("留著「等你按下『開始記錄』才會生效」", p.say().includes("開始記錄"), p.say());
+}
+
+console.log("⑦ᵇ heartbeat 讀不懂時，存成功也不能冒充沒有人在錄");
+{
+  const p = await open({ watching: "unreadable" });
+  await p.save();
+  check("保留存成功回條", p.say().includes("存好了"), p.say());
+  check("明講 heartbeat 讀不懂", p.say().includes("讀不懂 recording.beat"), p.say());
+  check("不叫人按一顆可能失敗的開始鍵", !p.say().includes("按下「開始記錄」"), p.say());
 }
 
 // 灰掉一顆按鈕很容易變成「他從此出不去」。⑤ 那條線只有在這一條也成立的時候
@@ -766,10 +1054,20 @@ console.log("⑱ 儲存會送出命令和參數，空白會剪掉");
 console.log("⑲ 桌面後端真的把 Thinking 接到設定頁和系統匣");
 {
   const write = MAIN.match(/fn settings_write\([\s\S]*?struct PrivacyHealth/)?.[0] ?? "";
+  const presentation = MAIN.match(/fn record_menu_presentation\([\s\S]*?fn quit_menu_label/)?.[0] ?? "";
+  const trayClick = MAIN.match(/"record" => \{[\s\S]*?"settings" =>/)?.[0] ?? "";
   check("settings_write 從完整 Presence 推出 watching", write.includes("heartbeat::watching_word") && write.includes("heartbeat::presence"), write);
   check("tray 標籤用 core 的 exhaustive 純函式", MAIN.includes("heartbeat::tray_record_label(presence)") && MAIN.includes("heartbeat::tray_quit_label(presence)"), "tray labels");
   check("tray 按鍵按 core 的三向 action 分流", MAIN.includes("heartbeat::tray_record_action(presence)"), "tray action");
-  check("Thinking 那一向會顯示原因", MAIN.includes("TrayRecordAction::WaitForThinking => Err(") && MAIN.includes("heartbeat::occupied_why_of(presence, now)"), "thinking feedback");
+  check(
+    "Thinking 那一向會顯示原因",
+    presentation.includes("Presence::Thinking { .. }") &&
+      presentation.includes("action: RecordMenuAction::Wait") &&
+      presentation.includes("heartbeat::tray_record_label(presence)") &&
+      trayClick.includes("RecordMenuAction::Wait => {") &&
+      trayClick.includes("heartbeat::occupied_why_of(presence, now)"),
+    "thinking feedback",
+  );
 }
 
 console.log("⑲ᵖ Persona 四格會一起讀寫，關掉角色不會清掉選擇");

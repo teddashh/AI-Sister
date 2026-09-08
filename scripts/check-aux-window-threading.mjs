@@ -339,8 +339,10 @@ if (menuStart >= 0 && menuEnd > menuStart) {
 
 // setup 是 Tauri 文件明列可以同步 build 的時機。守住自動打開同意書
 // 的接線，也證明 gate 沒有把所有 direct internal call 一刀切成紅的。
-const setupStart = CODE.indexOf(".setup(|app|");
-const setupEnd = setupStart < 0 ? -1 : CODE.indexOf(".build(tauri::generate_context!())", setupStart);
+const appBuild = CODE.indexOf(".build(tauri::generate_context!())");
+const setupStart = appBuild < 0 ? -1 : CODE.lastIndexOf(".setup", appBuild);
+const setupOpen = setupStart < 0 ? -1 : CODE.indexOf("{", setupStart);
+const setupEnd = setupOpen < 0 || setupOpen > appBuild ? -1 : closeBrace(setupOpen);
 const setupCode = setupStart < 0 || setupEnd < 0 ? "" : CODE.slice(setupStart, setupEnd);
 check(
   "setup onboarding 保留文件允許的 direct internal helper 例外",

@@ -1429,33 +1429,81 @@ pub mod consent {
         revoke: &[String],
         json: bool,
     ) -> Result<()> {
-        let mut c = sister_core::consent::load(data_dir);
-
         // 先把名字全部解析完再動任何東西。一半成功一半失敗的狀態，會讓
         // 「我剛剛到底同意了什麼」變成一個沒有答案的問題。
         let grant: Vec<Sheet> = parse(grant)?;
         let revoke: Vec<Sheet> = parse(revoke)?;
         let changing = !grant.is_empty() || !revoke.is_empty();
 
-        if changing {
-            // 條文換版之後，舊簽名不算數（`current()` 會是 false）。這時候
-            // 只要他重簽任何一張，其餘沒重簽的就該當作沒簽——所以整份先清掉，
-            // 而不是讓一份半新半舊的檔案留在磁碟上假裝自己是完整的。
-            if !c.current() && c != Consent::default() {
-                println!("⚠  同意書條文已經改版，之前簽的那幾張不再算數，只保留這次指定的。");
-                c = Consent::default();
-            }
+        let mut revoke_barrier_written = false;
+        let mut regrant_ticket = None;
+        let mutation = if changing {
             let now = sister_core::now_ms();
-            for s in &revoke {
-                c.revoke(*s);
+            Some(sister_core::consent::mutate(data_dir, |c| {
+                // **這份 c 是拿到跨行程 write lock 後才重讀的。** desktop 和另一個
+                // CLI 若同時改別張，後來的 writer 必須接著前一份改，不能拿鎖外的
+                // 舊快照把剛撤回的第一張整份蓋回去。
+                //
+                // 條文換版之後，舊簽名不算數（`current()` 會是 false）。這時候
+                // 只要他重簽任何一張，其餘沒重簽的就該當作沒簽——所以整份先清掉。
+                if !c.current() && *c != Consent::default() {
+                    println!("⚠  同意書條文已經改版，之前簽的那幾張不再算數，只保留這次指定的。");
+                    *c = Consent::default();
+                }
+                for s in &revoke {
+                    c.revoke(*s);
+                }
+                for s in &grant {
+                    c.grant(*s, now);
+                }
+                if revoke.contains(&Sheet::LocalRecording) && !c.allows_recording() {
+                    // 先發布不可由 Start 清掉的獨立 barrier，再讓 consent save
+                    // 前進。save 在 replace 前失敗時，舊同意可能仍有效，但等待中的
+                    // Explicit／automatic start 仍會被這道 durable state 擋下來。
+                    sister_core::control::request_consent_revoke(data_dir).with_context(
+                        || "第一張同意書要撤回，但 durable revoke barrier 寫入沒有完整成功",
+                    )?;
+                    revoke_barrier_written = true;
+                }
+                if grant.contains(&Sheet::LocalRecording) && c.allows_recording() {
+                    // 票在 consent exclusive transaction 內捕捉 generation；只有底下
+                    // atomic save 成功之後才可使用，舊票不能清掉較新的 revoke。
+                    regrant_ticket =
+                        sister_core::control::prepare_consent_revoke_barrier_clear(data_dir)?;
+                }
+                Ok(())
+            }))
+        } else {
+            None
+        };
+        let c = match mutation {
+            None => sister_core::consent::load(data_dir),
+            Some(Ok(committed)) => {
+                if let Some(ticket) = regrant_ticket {
+                    match ticket.clear_after_commit().with_context(
+                        || "本機記錄同意已成功寫入，但舊的 durable revoke barrier 清不掉",
+                    )? {
+                        sister_core::control::ConsentRevokeBarrierClear::Cleared
+                        | sister_core::control::ConsentRevokeBarrierClear::AlreadyAbsent => {}
+                        sister_core::control::ConsentRevokeBarrierClear::Superseded => {
+                            anyhow::bail!(
+                                "本機記錄同意已成功寫入，但較新的撤回已經到達；\
+                                 舊 regrant 沒有清掉它的 durable barrier"
+                            );
+                        }
+                    }
+                }
+                committed
             }
-            for s in &grant {
-                c.grant(*s, now);
+            Some(Err(error)) => {
+                if revoke_barrier_written {
+                    return Err(error).context(
+                        "durable revoke barrier 已留下，但同意書 transaction 沒有完整成功",
+                    );
+                }
+                return Err(error);
             }
-            // 撤回全部之後 `version` 還停在舊值沒關係——`allows_*` 看的是
-            // 「有沒有那個時戳」，而三個都 None 的時候答案本來就是不准。
-            sister_core::consent::save(data_dir, &c)?;
-        }
+        };
 
         if json {
             print_json(data_dir, &c, config)
@@ -1596,6 +1644,7 @@ pub mod consent {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::ops::tmp::Tmp;
 
         #[test]
         fn the_signed_second_sheet_does_not_promise_a_deidentification_that_was_removed() {
@@ -1647,6 +1696,128 @@ pub mod consent {
             assert_eq!(
                 cloud_reading_signed_lines(false),
                 &["已同意，但還沒設定 [brain] command，一次都不會呼叫。"]
+            );
+        }
+
+        #[test]
+        fn revoking_local_recording_persists_a_typed_no_restart_intent() {
+            let dir = Tmp::new("consent-revoke-latch");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("signed consent");
+
+            super::run(
+                &dir.0,
+                &Config::default(),
+                &[],
+                &["local-recording".to_string()],
+                false,
+            )
+            .expect("revoke");
+            assert!(!sister_core::consent::load(&dir.0).allows_recording());
+            assert_eq!(
+                sister_core::control::stop_intent(&dir.0),
+                sister_core::control::StopIntent::Pending(
+                    sister_core::control::StopReason::ConsentRevoked
+                )
+            );
+        }
+
+        #[test]
+        fn a_fast_regrant_does_not_clear_the_revoke_latch() {
+            let dir = Tmp::new("consent-fast-regrant");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("signed consent");
+
+            super::run(
+                &dir.0,
+                &Config::default(),
+                &[],
+                &["local-recording".to_string()],
+                false,
+            )
+            .expect("revoke");
+            super::run(
+                &dir.0,
+                &Config::default(),
+                &["local-recording".to_string()],
+                &[],
+                false,
+            )
+            .expect("regrant");
+
+            assert!(sister_core::consent::load(&dir.0).allows_recording());
+            assert_eq!(
+                sister_core::control::stop_intent(&dir.0),
+                sister_core::control::StopIntent::Pending(
+                    sister_core::control::StopReason::ConsentRevoked
+                ),
+                "regrant is permission, not an explicit request to restart"
+            );
+        }
+
+        #[test]
+        fn revoking_an_unrelated_sheet_does_not_stop_the_recorder() {
+            let dir = Tmp::new("consent-cloud-only");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            consent.grant(Sheet::CloudReading, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("signed consent");
+
+            super::run(
+                &dir.0,
+                &Config::default(),
+                &[],
+                &["cloud-reading".to_string()],
+                false,
+            )
+            .expect("revoke cloud only");
+            assert_eq!(
+                sister_core::control::stop_intent(&dir.0),
+                sister_core::control::StopIntent::Absent
+            );
+        }
+
+        #[test]
+        fn granting_another_sheet_after_local_revoke_does_not_restore_the_first_signature() {
+            let dir = Tmp::new("consent-no-lost-revoke");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("signed local consent");
+
+            super::run(
+                &dir.0,
+                &Config::default(),
+                &[],
+                &["local-recording".to_string()],
+                false,
+            )
+            .expect("revoke local");
+            super::run(
+                &dir.0,
+                &Config::default(),
+                &["cloud-reading".to_string()],
+                &[],
+                false,
+            )
+            .expect("grant unrelated sheet");
+
+            let committed = sister_core::consent::load(&dir.0);
+            assert!(
+                committed.allows_cloud(),
+                "the explicit cloud grant must survive"
+            );
+            assert!(
+                !committed.allows_recording(),
+                "an unrelated writer must not carry an old local signature back"
+            );
+            assert_eq!(
+                sister_core::control::stop_intent(&dir.0),
+                sister_core::control::StopIntent::Pending(
+                    sister_core::control::StopReason::ConsentRevoked
+                ),
+                "granting another sheet is not an explicit recorder restart"
             );
         }
     }
@@ -11876,8 +12047,8 @@ pub mod stop {
     /// ——CI 開得起 `sister record`，但開不起字母人。少了這個子命令，開始／停止
     /// 那整套機制唯一的入口會在一個沒有人測得到的 GUI 按鈕後面。
     pub fn run(data_dir: &Path) -> Result<()> {
-        // 先問有沒有人在。沒有人在的時候仍然照寫——下一個起來的 recorder 會先
-        // 清掉這個檔案（`BootBeat::start`），所以留著不會咬人——但要講出來，
+        // 先問有沒有人在。沒有人在的時候仍然照寫——下一次**顯式**開始會先
+        // 清掉 intent，watchdog 的 automatic retry 則會被它擋住。但這仍要講出來，
         // 不然「我按了停止，可是它還在錄」和「我按了停止，本來就沒有東西在
         // 錄」看起來一模一樣。
         //
@@ -11923,7 +12094,7 @@ pub mod stop {
             | sister_core::heartbeat::Presence::Stopped { .. }
             | sister_core::heartbeat::Presence::Stalled { .. } => println!(
                 "■ 目前沒有任何 `sister record` 在跑（心跳是停的）。停止的請求還是\
-                 留下來了，但下一次開始記錄的時候會先把它清掉，不會影響到那一場。"
+                 留下來了，不會被自動重試蓋掉；你下一次明確要求開始時才會清掉。"
             ),
         }
         Ok(())
@@ -17765,8 +17936,8 @@ pub mod doctor {
 
             // 「她停了」後面永遠跟著同一個問題：什麼時候、為什麼。上面那一列
             // 只數得出「有幾段沒收尾」，答不了「上一段是怎麼結束的」——而這兩
-            // 件事的下一步差很多：按了停止什麼都不用做，同意書被撤回的話她從
-            // 現在起什麼都不會記。
+            // 件事的下一步差很多：按了停止什麼都不用做，同意狀態阻止錄製的話
+            // 要先回同意頁檢查；理由本身不能反推 atomic save 一定成功。
             if let Some(last) = db.last_session()? {
                 let (sym, said) = last_session_verdict(&last, &audit);
                 mark(sym, "上一次錄製", &said);
@@ -23803,6 +23974,106 @@ pub mod record {
     use super::*;
     use sister_core::config::Config;
 
+    /// `Explicit` 是這個 CLI 自己承接人的開始意圖；`Supervised` 表示開始意圖與
+    /// stop 清理由 desktop worker 承接（包含登入、按鈕與 retry）。後者這個 child
+    /// 在型別上沒有清 stop intent 的能力。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+    pub enum StartMode {
+        Explicit,
+        Supervised,
+    }
+
+    impl StartMode {
+        fn begin_recording_consent(
+            self,
+            data_dir: &Path,
+        ) -> Result<sister_core::consent::RecordingStartGuard> {
+            let decision = match self {
+                // 真人顯式開始可以等正在 commit 的 writer；等完仍要在 shared lock
+                // 裡重讀，絕不能沿用 `gate` 先前看見的舊快照。
+                Self::Explicit => sister_core::consent::begin_recording_start(data_dir),
+                // Supervised child 可能已被 parent 設了逾時；不能排在 writer 後面，
+                // 等 caller 放棄之後才自己開錄。
+                Self::Supervised => sister_core::consent::try_begin_recording_start(data_dir),
+            };
+            match decision {
+                sister_core::consent::RecordingStartConsent::Allowed(guard) => Ok(guard),
+                sister_core::consent::RecordingStartConsent::NotAllowed(consent) => {
+                    Err(local_recording_gate_error(data_dir, &consent))
+                }
+                sister_core::consent::RecordingStartConsent::Busy => anyhow::bail!(
+                    "{}啟動已取消：同意書正在修改；不確定時不會開始錄",
+                    if self == Self::Supervised {
+                        "監督"
+                    } else {
+                        "錄製"
+                    }
+                ),
+                sister_core::consent::RecordingStartConsent::Unknown(error) => anyhow::bail!(
+                    "{}啟動已取消：無法安全確認第一張同意書；不確定時不會開始錄：{error:#}",
+                    if self == Self::Supervised {
+                        "監督"
+                    } else {
+                        "錄製"
+                    }
+                ),
+            }
+        }
+
+        fn supervised_preflight(self, data_dir: &Path) -> Result<()> {
+            if self == Self::Explicit {
+                return Ok(());
+            }
+            match sister_core::control::stop_intent(data_dir) {
+                sister_core::control::StopIntent::Absent => Ok(()),
+                sister_core::control::StopIntent::Pending(reason)
+                | sister_core::control::StopIntent::Consumed(reason) => anyhow::bail!(
+                    "監督啟動已取消：這個資料目錄仍有 {reason:?} 的停止意圖；\
+                     automatic retry 不可以把它清掉"
+                ),
+                sister_core::control::StopIntent::Uncheckable => anyhow::bail!(
+                    "監督啟動已取消：讀不清楚這個資料目錄的停止意圖；\
+                     不確定時不會自動開始錄"
+                ),
+            }
+        }
+
+        fn validate_immediately_before_boot(
+            self,
+            data_dir: &Path,
+            consent_start: &sister_core::consent::RecordingStartGuard,
+        ) -> Result<()> {
+            // Explicit 的舊 marker 已由 `run` 的 StartTransactionGuard 在 lease 與舊心跳
+            // barrier 都成功後清掉；這裡不能再清一次。Supervised 從不清 marker，
+            // 而且在第一拍 heartbeat 前再檢查，關掉 parent probe→child boot 的窗。
+            if self == Self::Supervised {
+                self.supervised_preflight(data_dir)?;
+            }
+
+            // 不是再做一次 lock 外 `load()`。這份 typed guard 從 stop guard 以前就
+            // 持有同一個 consent.lock shared inode，直到下面第一拍成功才會 drop；
+            // 撤回 writer 只能排在它之後，不能在 clear 與 heartbeat 中間插入。
+            anyhow::ensure!(
+                consent_start.belongs_to(data_dir) && consent_start.consent().allows_recording(),
+                "recorder start consent guard 不屬於這個資料目錄，或沒有有效第一張同意書；沒有蓋第一拍"
+            );
+
+            // 這是 guard clear 之後的反面。stop／revoke 若在 clear 與這裡之間
+            // 到達，這一拍必須看見；之後才到的留給 live loop 在第一個 tick 前
+            // consume。Supervised 同樣再問一次，不能只信 parent 的 preflight。
+            match sister_core::control::stop_intent(data_dir) {
+                sister_core::control::StopIntent::Absent => Ok(()),
+                sister_core::control::StopIntent::Pending(reason)
+                | sister_core::control::StopIntent::Consumed(reason) => {
+                    anyhow::bail!("錄製啟動已取消：真正蓋第一拍前收到 {reason:?} 的停止意圖")
+                }
+                sister_core::control::StopIntent::Uncheckable => anyhow::bail!(
+                    "錄製啟動已取消：真正蓋第一拍前讀不清楚停止意圖；不確定時不開始錄"
+                ),
+            }
+        }
+    }
+
     /// 這台機器上可用的擷取後端名稱。
     pub fn backend_name() -> Option<&'static str> {
         #[cfg(windows)]
@@ -23895,8 +24166,12 @@ pub mod record {
                     sister_core::heartbeat::beat_path(data_dir).display()
                 )
             }
+            sister_core::heartbeat::Presence::Unreadable => anyhow::bail!(
+                "讀不懂 {}；不能確認這個資料目錄是不是已有 recorder。\n\n\
+                 為避免同時開出第二個，這次沒有開始記錄。先確認或移走這個檔案再重試。",
+                sister_core::heartbeat::beat_path(data_dir).display()
+            ),
             sister_core::heartbeat::Presence::NeverStarted
-            | sister_core::heartbeat::Presence::Unreadable
             | sister_core::heartbeat::Presence::Stopped { .. }
             | sister_core::heartbeat::Presence::Stalled { .. } => Ok(()),
         }
@@ -24097,37 +24372,55 @@ pub mod record {
     /// 拆成獨立函式而不是寫在 `run` 裡，是為了讓它在這台 Linux 開發機上跑得到
     /// （`run` 的後半段整段 `#[cfg(windows)]`）。一道只有目標平台才執行得到的
     /// 隱私閘門，等於一道沒有被執行過的閘門。
-    fn gate(data_dir: &Path, mut config: Config) -> Result<(Config, WantsImages)> {
-        let consent = sister_core::consent::load(data_dir);
+    fn local_recording_gate_error(
+        data_dir: &Path,
+        consent: &sister_core::consent::Consent,
+    ) -> anyhow::Error {
+        debug_assert!(!consent.allows_recording());
+        let why = if consent
+            .get(sister_core::consent::Sheet::LocalRecording)
+            .is_some()
+        {
+            format!(
+                "這張同意不是對目前第 {} 版條文簽的，因此現在不生效。",
+                sister_core::consent::VERSION
+            )
+        } else {
+            // `None` 同時涵蓋從未簽、已撤回、檔案不存在與內容損毀；這份
+            // snapshot 只證明「目前無效」，不能替使用者捏造同意歷史。
+            "目前讀不到有效的本機記錄同意；她不會開始記錄。".to_string()
+        };
+        anyhow::anyhow!(
+            "{why}\n\n  「{}」\n\n\
+             要她開始記錄，請跑：\n    \
+             {}\n\n\
+             想連截圖一起留（否則她只記螢幕上的字）：\n    \
+             {}\n\n\
+             看目前簽了哪幾張：\n    \
+             {}\n",
+            sister_core::consent::Sheet::LocalRecording.wording(),
+            cmd(data_dir, "consent --grant local-recording"),
+            cmd(
+                data_dir,
+                "consent --grant local-recording --grant frame-storage"
+            ),
+            cmd(data_dir, "consent")
+        )
+    }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn gate(data_dir: &Path, config: Config) -> Result<(Config, WantsImages)> {
+        let consent = sister_core::consent::load(data_dir);
+        gate_with_consent(data_dir, config, &consent)
+    }
+
+    fn gate_with_consent(
+        data_dir: &Path,
+        mut config: Config,
+        consent: &sister_core::consent::Consent,
+    ) -> Result<(Config, WantsImages)> {
         if !consent.allows_recording() {
-            let why = if consent
-                .get(sister_core::consent::Sheet::LocalRecording)
-                .is_some()
-            {
-                format!(
-                    "同意書條文改版了（現在是第 {} 版），之前簽的那一張不再算數。",
-                    sister_core::consent::VERSION
-                )
-            } else {
-                "還沒有人同意讓她記錄這台機器的螢幕。".to_string()
-            };
-            anyhow::bail!(
-                "{why}\n\n  「{}」\n\n\
-                 要她開始記錄，請跑：\n    \
-                 {}\n\n\
-                 想連截圖一起留（否則她只記螢幕上的字）：\n    \
-                 {}\n\n\
-                 看目前簽了哪幾張：\n    \
-                 {}\n",
-                sister_core::consent::Sheet::LocalRecording.wording(),
-                cmd(data_dir, "consent --grant local-recording"),
-                cmd(
-                    data_dir,
-                    "consent --grant local-recording --grant frame-storage"
-                ),
-                cmd(data_dir, "consent")
-            );
+            return Err(local_recording_gate_error(data_dir, consent));
         }
 
         // 使用者在設定檔裡自己寫的那個意思，**還沒有被同意書修改過**。
@@ -24218,19 +24511,57 @@ pub mod record {
         config: Config,
         config_path: Option<PathBuf>,
         duration: Option<u64>,
+        start_mode: StartMode,
     ) -> Result<()> {
-        // 同意書擋在平台檢查**前面**。沒有同意就不該錄，這件事和這台機器有
-        // 沒有擷取後端無關；而且放後面的話，這道閘門在非 Windows 上永遠碰不到。
-        let (config, wants_images_by_config) = gate(data_dir, config)?;
+        // Shared consent transaction 必須是 start lock order 的第一把鎖。她會在鎖內
+        // 重讀，不信前一次 `load()`，並一直持有到 stop clear 與第一拍 Booting
+        // heartbeat 都完成。沒有同意就不該錄，這件事和平台無關。
+        let consent_start = start_mode.begin_recording_consent(data_dir)?;
+        let (config, wants_images_by_config) =
+            gate_with_consent(data_dir, config, consent_start.consent())?;
+
+        // Explicit start 的「清舊 stop」不能早於 occupancy 判決：若這一場最後被
+        // recorder lease 或舊版 heartbeat 擋下來，舊 marker 仍可能是衝著真正
+        // owner 去的，絕對不能替它清掉。guard 在 lease 前拿 stop.lock，讓同時
+        // 到達的 Quit/stop 和本次 start 由 kernel 排出唯一順序；try_acquire lease
+        // 本身不等待，所以不會和「owner 持 lease、tick 等 stop.lock」死鎖。
+        let explicit_start = match start_mode {
+            StartMode::Explicit => Some(
+                sister_core::control::begin_explicit_start(data_dir)
+                    .with_context(|| "顯式開始前拿不到 stop control transaction")?,
+            ),
+            StartMode::Supervised => None,
+        };
 
         // **一個資料目錄只准一個 recorder。** 這道閘門以前只長在字母人那一邊
         // ——所以從字母人按兩次會被擋，但開兩個終端機各打一次 `sister record`
         // 不會。兩個行程對同一顆資料庫各錄一份，唯一看得出來的症狀是磁碟用得
         // 比講好的快一倍，而使用者會以為是保留期壞了。
         //
-        // 敢直接擋是因為心跳自己會過期：一個當掉的 recorder 留下的時戳
-        // 16 秒後就不算數，所以這裡不會把人鎖在門外。
+        // heartbeat 是給 UI／舊版 recorder 的相容證據，不是原子互斥：兩個新
+        // process 可以同時讀到空白。真正的 ownership 先由 OS whole-file lock
+        // 線性化；拿不到或問不清楚都 fail closed。檔案本身可永久留著，handle
+        // drop／process crash 才是釋放 lease 的事件。
+        let recorder_lease = sister_core::recorder_lease::try_acquire(data_dir)
+            .map_err(anyhow::Error::from)
+            .with_context(|| "開不起 recorder：拿不到這個資料目錄的唯一 recorder lease")?;
+
+        // lease 拿到後仍保留心跳 barrier，擋住不認識 recording.lock 的舊版
+        // recorder。它過期只表示那份相容證據失效，不再代表 ownership 自動讓渡。
         already_recording(data_dir)?;
+
+        // 到這裡兩種 owner 都排除了，才 commit「這是一次新的顯式開始」。clear
+        // 消耗 guard 並在同一把 stop.lock 裡完成；lease/heartbeat 任何較早的 `?`
+        // 都只會 drop guard，原本 marker 一個位元也不動。
+        if let Some(explicit_start) = explicit_start {
+            explicit_start
+                .clear()
+                .with_context(|| "顯式開始前清不掉上一個停止意圖")?;
+        }
+
+        // Linux 測試要走得到 production 的 ordering：consent → occupancy → durable
+        // stop intent → platform/spawn。Windows 的 BootBeat 在真正第一拍前會再查一次。
+        start_mode.supervised_preflight(data_dir)?;
 
         #[cfg(not(windows))]
         {
@@ -24240,6 +24571,8 @@ pub mod record {
                 config_path,
                 duration,
                 wants_images_by_config,
+                recorder_lease,
+                consent_start,
             );
             anyhow::bail!(
                 "這個平台（{}）還沒有擷取後端。\n\n\
@@ -24258,6 +24591,7 @@ pub mod record {
                 config_path,
                 duration,
                 wants_images_by_config,
+                WindowsRecordingStart::new(start_mode, recorder_lease, consent_start),
             )
         }
     }
@@ -24309,19 +24643,46 @@ pub mod record {
     /// 呼叫它的那一行旁邊），而一句註解擋不住下一次搬動——這一族的 bug 已經
     /// 犯過二十幾次，每一次都是「兩行各自都對，湊起來在說謊」。所以讓那個寫
     /// 入拿一個只有 [`BootBeat::hand_off`] 生得出來的東西：搬回上面去就編不過。
+    #[must_use = "recorder lease 必須交給 RecordingBeat，不能在 heartbeat 還活著時先釋放"]
     #[cfg_attr(not(windows), allow(dead_code))]
-    struct HandedOff;
+    struct BootHandoff {
+        lease: sister_core::recorder_lease::RecorderLease,
+    }
 
     #[cfg_attr(not(windows), allow(dead_code))]
     struct BootBeat {
         alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
         dir: PathBuf,
+        lease: Option<sister_core::recorder_lease::RecorderLease>,
         handed_off: bool,
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
     impl BootBeat {
+        #[cfg(test)]
+        fn start(data_dir: &Path) -> Result<Self> {
+            // 這個 helper 只供 heartbeat／handoff 單元測試；production 一律由
+            // `run::gate` 取得真人已簽的同意。讓 fixture 明確具備同意，才不會
+            // 因為新加的第二次 consent gate 而把心跳測試變成測另一件事。
+            sister_core::consent::mutate(data_dir, |consent| {
+                if !consent.allows_recording() {
+                    consent.grant(sister_core::consent::Sheet::LocalRecording, 1);
+                }
+                Ok(())
+            })?;
+            let consent_start = match sister_core::consent::begin_recording_start(data_dir) {
+                sister_core::consent::RecordingStartConsent::Allowed(guard) => guard,
+                other => anyhow::bail!("test fixture cannot acquire recording consent: {other:?}"),
+            };
+            let explicit_start = sister_core::control::begin_explicit_start(data_dir)?;
+            let lease =
+                sister_core::recorder_lease::try_acquire(data_dir).map_err(anyhow::Error::from)?;
+            already_recording(data_dir)?;
+            explicit_start.clear()?;
+            Self::start_in_mode(data_dir, StartMode::Explicit, lease, &consent_start)
+        }
+
         /// **蓋不上第一拍就不要回來。**
         ///
         /// `safe_to_kill_spawn` 的整條命，靠的是「心跳蓋在 `Db::open` 之前」。
@@ -24340,24 +24701,25 @@ pub mod record {
         ///
         /// 一秒是個判斷，不是量出來的：短到使用者不會覺得卡，長到足夠讓防毒
         /// 軟體放開一個三十位元組的檔案。真的是磁碟滿了的話，等多久都一樣。
-        fn start(data_dir: &Path) -> Result<Self> {
+        fn start_in_mode(
+            data_dir: &Path,
+            start_mode: StartMode,
+            lease: sister_core::recorder_lease::RecorderLease,
+            consent_start: &sister_core::consent::RecordingStartGuard,
+        ) -> Result<Self> {
             use std::sync::atomic::{AtomicBool, Ordering};
             use std::time::{Duration, Instant};
 
             let dir = data_dir.to_path_buf();
-            // **舊的停止請求在這裡清掉，不在主迴圈那一邊。**
-            //
-            // `stop.request` 是一個沒有時戳的檔案，它在不在就是全部的協定
-            // （見 `control` 模組）。於是同一個位元要回答兩個問題：「這是我
-            // 起來之前留下的嗎（丟掉）」還是「這是衝著我來的嗎（照做）」。
-            // 分得開它們的**只有時間**——清理排在開機窗打開之前，之後寫進來
-            // 的每一個請求就都是衝著這一場來的。
-            //
-            // 上一版清在 `Db::open` **之後**，於是整段開機是一個洞：他按下
-            // 停止，`sister stop` 看得見這個守衛剛蓋的心跳、回一句「已經請
-            // 她收工」，然後她開完資料庫、把那個請求刪掉、錄一整天。那顆一
-            // 年份的資料庫要開好幾分鐘，所以這個洞不是理論上的。
-            sister_core::control::clear_stop(&dir);
+            anyhow::ensure!(
+                lease.path() == sister_core::recorder_lease::lock_path(&dir),
+                "recorder lease 屬於另一個資料目錄；沒有蓋第一拍 heartbeat"
+            );
+            // **這裡只驗，不清。** Explicit 的舊 intent 已由 `run` 在 lease 與
+            // old-heartbeat barrier 之後 commit clear；Supervised 則永遠沒有清除
+            // 能力。兩條都必須在第一拍 heartbeat 前看到確定的 Absent，之後寫
+            // 進來的 stop 才會原封不動留給本場 recorder 消費。
+            start_mode.validate_immediately_before_boot(&dir, consent_start)?;
             // 第一下蓋在呼叫者這條執行緒上，不是丟給新執行緒去蓋：呼叫的人回
             // 去之後下一行就是 `Db::open`，中間不該留一段「心跳還沒出現」的
             // 空窗——那正是要補的洞。
@@ -24407,16 +24769,22 @@ pub mod record {
                 alive,
                 thread: Some(thread),
                 dir,
+                lease: Some(lease),
                 handed_off: false,
             })
         }
 
         /// 主迴圈接手。之後 drop 不會再把心跳收掉——那是還在跑的 recorder 的
         /// 心跳，不是這個守衛的。
-        fn hand_off(&mut self) -> HandedOff {
+        fn hand_off(&mut self) -> BootHandoff {
             self.handed_off = true;
             self.stop_thread();
-            HandedOff
+            BootHandoff {
+                lease: self
+                    .lease
+                    .take()
+                    .expect("boot owns recorder lease until handoff"),
+            }
         }
 
         fn stop_thread(&mut self) {
@@ -24451,17 +24819,27 @@ pub mod record {
     struct RecordingBeat {
         dir: PathBuf,
         stopped: bool,
+        // 欄位刻意排最後：Drop 先蓋 heartbeat 墓碑，之後 OS lease 才隨 File 關閉。
+        _lease: sister_core::recorder_lease::RecorderLease,
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
     impl RecordingBeat {
-        fn start(data_dir: &Path) -> Self {
+        fn take_over(data_dir: &Path, handoff: BootHandoff) -> Self {
             // 沿用既有語意：第一拍寫不進去不擋錄製，定期拍也只警告。
             let _ = sister_core::heartbeat::beat(data_dir, sister_core::now_ms());
             Self {
                 dir: data_dir.to_path_buf(),
                 stopped: false,
+                _lease: handoff.lease,
             }
+        }
+
+        #[cfg(test)]
+        fn start_for_test(data_dir: &Path) -> Self {
+            let lease =
+                sister_core::recorder_lease::try_acquire(data_dir).expect("test recording lease");
+            Self::take_over(data_dir, BootHandoff { lease })
         }
 
         fn beat(&mut self) -> Result<()> {
@@ -24486,6 +24864,44 @@ pub mod record {
     enum LiveLoopControl {
         Tick(sister_core::model::Millis),
         Stop(sister_core::model::EndReason),
+        /// 控制面不明時不能再 tick，也不能捏造一個 Requested／ConsentRevoked。
+        Fail(anyhow::Error),
+    }
+
+    #[cfg(any(windows, test))]
+    fn external_stop_message(reason: sister_core::control::StopReason) -> &'static str {
+        match reason {
+            sister_core::control::StopReason::DesktopQuit => {
+                "收到 desktop 結束的停止要求，這就收工。"
+            }
+            sister_core::control::StopReason::Requested => "收到停止的請求，這就收工。",
+            // Pre-save barrier 也投影成這個 reason；它不證明 consent atomic save
+            // 成功，也不把一個持久安全條件重新敘述成已完成的真人動作。
+            sister_core::control::StopReason::ConsentRevoked => {
+                "本機記錄同意的停止條件已生效，這就收工。"
+            }
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    fn recording_consent_stop_message() -> &'static str {
+        // `consent::load` 對 missing／unreadable／invalid 都 fail closed；這裡沒有
+        // 足夠證據把其中任何一種說成真人真的按了撤回。
+        "目前讀不到有效的第一張同意書，錄製到此為止。"
+    }
+
+    #[cfg(any(windows, test))]
+    fn external_stop_control(data_dir: &Path, now: sister_core::model::Millis) -> LiveLoopControl {
+        match sister_core::control::consume_stop(data_dir) {
+            Ok(Some(reason)) => {
+                println!("  ■ {}", external_stop_message(reason));
+                LiveLoopControl::Stop(reason.into())
+            }
+            Ok(None) => LiveLoopControl::Tick(now),
+            Err(error) => LiveLoopControl::Fail(
+                error.context("stop control 狀態不明；已立即停止擷取，沒有再跑下一個 tick"),
+            ),
+        }
     }
 
     #[cfg(any(windows, test))]
@@ -24525,6 +24941,7 @@ pub mod record {
             let now = match next() {
                 LiveLoopControl::Tick(now) => now,
                 LiveLoopControl::Stop(reason) => return Ok(reason),
+                LiveLoopControl::Fail(error) => return Err(error),
             };
 
             let was_paused = recorder.is_paused();
@@ -24572,15 +24989,41 @@ pub mod record {
         recorder.finish(reason)
     }
 
-    /// 把開機那份能力報告落地。**只有交棒之後叫得動**（見 [`HandedOff`]）。
+    /// 把開機那份能力報告落地。**只有主迴圈接過 lease 後叫得動**。
     #[cfg(windows)]
     fn write_boot_report(
-        _: &HandedOff,
+        _: &RecordingBeat,
         data_dir: &Path,
         report: &sister_core::capabilities::Report,
     ) {
         if let Err(e) = sister_core::capabilities::write(data_dir, report) {
             eprintln!("⚠  寫不出能力報告（設定頁會說「還不知道」）：{e:#}");
+        }
+    }
+
+    /// 已通過平台無關 start gates、要一起交給 Windows 錄製迴圈的三份能力。
+    ///
+    /// mode、lease 與 consent guard 各自是不同型別，並只由這個 constructor 組成；
+    /// `windows_record` 不再收一排容易在接線時拆散的 start 參數。
+    #[cfg(windows)]
+    struct WindowsRecordingStart {
+        mode: StartMode,
+        lease: sister_core::recorder_lease::RecorderLease,
+        consent: sister_core::consent::RecordingStartGuard,
+    }
+
+    #[cfg(windows)]
+    impl WindowsRecordingStart {
+        fn new(
+            mode: StartMode,
+            lease: sister_core::recorder_lease::RecorderLease,
+            consent: sister_core::consent::RecordingStartGuard,
+        ) -> Self {
+            Self {
+                mode,
+                lease,
+                consent,
+            }
         }
     }
 
@@ -24598,10 +25041,17 @@ pub mod record {
         // 「保留畫面檔 ✗ 否（text-only 模式）」——他關掉了截圖、工具說關掉了，
         // 而她還在一張一張寫。
         mut wants_images_by_config: WantsImages,
+        start: WindowsRecordingStart,
     ) -> Result<()> {
         use sister_capture::windows::{self, Capabilities};
         use std::sync::atomic::Ordering;
         use std::time::{Duration, Instant};
+
+        let WindowsRecordingStart {
+            mode: start_mode,
+            lease: recorder_lease,
+            consent: consent_start,
+        } = start;
 
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create {}", data_dir.display()))?;
@@ -24616,7 +25066,12 @@ pub mod record {
         // 回來，第二下穿過那道 `is_recording` 閘門（recorder 沒有 lock file，
         // 也沒有 single instance），於是兩個 `sister record` 打同一顆資料庫。
         // 唯一的症狀是磁碟用得比講好的快一倍。
-        let mut boot = BootBeat::start(data_dir)?;
+        let mut boot =
+            BootBeat::start_in_mode(data_dir, start_mode, recorder_lease, &consent_start)?;
+        // 第一拍已在 shared consent transaction 裡成功落地。從這一刻開始，撤回
+        // writer 即使取得 exclusive lock，也會先寫 durable ConsentRevoked latch；
+        // 主迴圈在第一個 capture tick 前就會消費它。
+        drop(consent_start);
         let mut db = Db::open(&crate::db_path(data_dir))?;
         // 總開關關著的時候，每個 tick 都直接回 `Disabled`，而摘要的四個
         // 欄位剛好全部是 0——和「錄得好好的、只是螢幕沒變」長得一模一樣。
@@ -24761,7 +25216,7 @@ pub mod record {
         // 這裡把它接過來：交棒之後那個執行緒就停了，心跳從此跟著這個迴圈走
         // ——一個蓋得動心跳但迴圈已經卡死的行程，不該還在說自己在錄。
         let handed_off = boot.hand_off();
-        let mut recording_beat = RecordingBeat::start(data_dir);
+        let mut recording_beat = RecordingBeat::take_over(data_dir, handed_off);
         let mut last_beat = Instant::now();
 
         // 開機那份能力報告寫在這裡，**不是**在上面探測完的那一刻。
@@ -24792,13 +25247,13 @@ pub mod record {
         //
         // 寫不出來不擋錄製：少一行警告，比少一場記錄好。
         //
-        // 那個 `handed_off` 不是裝飾：它是 `hand_off()` 唯一的產物，而這一行
-        // 要用到它。把這段搬回上面去就編不過——一句註解擋不住下一次搬動，
-        // 一個型別可以。
-        write_boot_report(&handed_off, data_dir, &caps.report());
-        // 舊的停止請求**已經清掉了**，清在 `BootBeat::start` 裡——開機窗打開
-        // 的那一刻，不是這裡。清在這裡的話，他在開機那幾分鐘按的停止會被自己
-        // 刪掉；理由寫在那支函式上面。
+        // 那個 `recording_beat` 不是裝飾：它只能吃 `hand_off()` 生出的 lease
+        // ownership，而這一行要借到它。把這段搬回交棒前就編不過——一句註解
+        // 擋不住下一次搬動，一個型別可以。
+        write_boot_report(&recording_beat, data_dir, &caps.report());
+        // start mode 已在第一拍之前處理完：Explicit 清舊 intent，Supervised
+        // 確認它是 Absent。這裡不再碰控制檔；否則開機幾分鐘內按下的停止會被
+        // recorder 自己刪掉。
         //
         // 保留期也吃熱重載（設定頁的 TTL 那一欄），所以它不能再是 `let`。
         let mut retention = retention;
@@ -24829,12 +25284,9 @@ pub mod record {
                 if deadline.is_some_and(|d| Instant::now() >= d) {
                     return LiveLoopControl::Stop(sister_core::model::EndReason::Duration);
                 }
-                // 開機前留下的 request 已由 BootBeat 清掉；這裡看到的一定屬於本場。
-                if sister_core::control::take_stop(data_dir) {
-                    println!("  ■ 收到停止的請求，這就收工。");
-                    return LiveLoopControl::Stop(sister_core::model::EndReason::Requested);
-                }
-                LiveLoopControl::Tick(sister_core::now_ms())
+                // Explicit 開機會清舊 intent；supervised 開機則只在確認 Absent 時
+                // 放行。這裡消費後仍留下 marker，讓 finalize 非零 exit 也不會復活。
+                external_stop_control(data_dir, sister_core::now_ms())
             },
             || guarded_pause_signal(data_dir),
             |rec, ping_brain, recording_beat| {
@@ -24973,9 +25425,21 @@ pub mod record {
                         // ——所以這裡停的是整場錄製，和開機時那道閘門對稱。當成
                         // 暫停處理的話，稽核紀錄上會留下一筆理由是假的 pause。
                         Recheck::Stop => {
+                            // 同意書可能是別的行程或手動編輯改掉的，不一定經過上面
+                            // consent 子命令。補上同一顆 durable latch，讓 watchdog
+                            // 在 recorder 的 DB finalize 失敗後也不會自動復活。
+                            if let Err(error) =
+                                sister_core::control::request_consent_revoke(data_dir)
+                            {
+                                eprintln!(
+                                    "  ⚠ 目前讀不到有效的第一張同意書，錄製會停止；\
+                                     但 durable 停止條件的寫入沒有完整成功：{error:#}"
+                                );
+                            }
                             println!(
-                                "\n⏹ 第一張同意書被撤回了，錄製到此為止。\n  \
+                                "\n⏹ {}\n  \
                              要再開始請跑：{}",
+                                recording_consent_stop_message(),
                                 cmd(data_dir, "consent --grant local-recording")
                             );
                             return Ok(LiveAfterTick::Stop(
@@ -26104,9 +26568,10 @@ pub mod record {
         use super::{
             BootBeat, ConfigWatch, CpuPercent, DiskMeasured, DiskProjection, FootprintElapsedSecs,
             FootprintMeasured, ImageBudgetBytes, LiveAfterTick, LiveLoopControl, RecordingBeat,
-            StoringImages, TickCounts, WantsImages, already_recording, bytes_per_day_at,
-            finalize_live_recording, footprint_context, footprint_lines, ocr_off_words,
-            ocr_work_line, run_live_loop, should_ping_brain,
+            StartMode, StoringImages, TickCounts, WantsImages, already_recording, bytes_per_day_at,
+            external_stop_control, external_stop_message, finalize_live_recording,
+            footprint_context, footprint_lines, ocr_off_words, ocr_work_line,
+            recording_consent_stop_message, run_live_loop, should_ping_brain,
         };
         use crate::ops::tmp::Tmp;
         use anyhow::Result;
@@ -26128,6 +26593,44 @@ pub mod record {
 
         fn budget_bytes(bytes: u64) -> ImageBudgetBytes {
             ImageBudgetBytes::from_raw_bytes(bytes)
+        }
+
+        fn recorder_lease(data_dir: &Path) -> sister_core::recorder_lease::RecorderLease {
+            sister_core::recorder_lease::try_acquire(data_dir).expect("test recorder lease")
+        }
+
+        fn recording_consent(data_dir: &Path) -> sister_core::consent::RecordingStartGuard {
+            sister_core::consent::mutate(data_dir, |consent| {
+                if !consent.allows_recording() {
+                    consent.grant(Sheet::LocalRecording, 1);
+                }
+                Ok(())
+            })
+            .expect("grant test consent");
+            match sister_core::consent::begin_recording_start(data_dir) {
+                sister_core::consent::RecordingStartConsent::Allowed(guard) => guard,
+                other => panic!("test recording consent must be allowed, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn stop_copy_does_not_turn_a_pre_save_latch_into_a_committed_revoke() {
+            assert_eq!(
+                external_stop_message(sister_core::control::StopReason::DesktopQuit),
+                "收到 desktop 結束的停止要求，這就收工。"
+            );
+            assert_eq!(
+                external_stop_message(sister_core::control::StopReason::Requested),
+                "收到停止的請求，這就收工。"
+            );
+            assert_eq!(
+                external_stop_message(sister_core::control::StopReason::ConsentRevoked),
+                "本機記錄同意的停止條件已生效，這就收工。"
+            );
+            assert_eq!(
+                recording_consent_stop_message(),
+                "目前讀不到有效的第一張同意書，錄製到此為止。"
+            );
         }
 
         #[test]
@@ -26185,7 +26688,7 @@ pub mod record {
         fn replay_live_runner_wakes_on_value_and_finalizes_a_consent_exit() {
             let dir = Tmp::new("live-runner-finish");
             let mut recorder = replay_live_recorder();
-            let mut beat = RecordingBeat::start(&dir.0);
+            let mut beat = RecordingBeat::start_for_test(&dir.0);
             let mut controls = 0;
             let mut maintenance = 0;
             let mut pinged = Vec::new();
@@ -26244,7 +26747,7 @@ pub mod record {
                 recorder: &mut Recorder<ReplayBackend>,
                 data_dir: &Path,
             ) -> Result<()> {
-                let mut beat = RecordingBeat::start(data_dir);
+                let mut beat = RecordingBeat::start_for_test(data_dir);
                 let mut first = true;
                 run_live_loop(
                     recorder,
@@ -26280,11 +26783,53 @@ pub mod record {
         }
 
         #[test]
+        fn an_uncheckable_stop_control_exits_before_the_next_capture_tick() {
+            fn run_until_control_failure(
+                recorder: &mut Recorder<ReplayBackend>,
+                data_dir: &Path,
+            ) -> Result<()> {
+                let mut beat = RecordingBeat::start_for_test(data_dir);
+                run_live_loop(
+                    recorder,
+                    &mut beat,
+                    || external_stop_control(data_dir, 1_000),
+                    || sister_capture::PauseSignal::Recording,
+                    |_recorder, _ping_brain, _beat| {
+                        panic!("control error 前不准 capture 或跑 maintenance")
+                    },
+                    || panic!("control error 後不准 sleep"),
+                )?;
+                Ok(())
+            }
+
+            let dir = Tmp::new("live-runner-control-unknown");
+            std::fs::create_dir(sister_core::control::stop_path(&dir.0))
+                .expect("make pending marker uncheckable");
+            let mut recorder = replay_live_recorder();
+            let error = run_until_control_failure(&mut recorder, &dir.0)
+                .expect_err("uncheckable stop control must leave the runner");
+
+            let said = format!("{error:#}");
+            assert!(
+                said.contains("stop control 狀態不明"),
+                "wrong error: {said}"
+            );
+            assert_eq!(recorder.stats().ticks, 0, "不明狀態後一拍都不准再擷取");
+            assert!(
+                matches!(
+                    heartbeat::presence(&dir.0, sister_core::now_ms()),
+                    heartbeat::Presence::Stopped { at: Some(_) }
+                ),
+                "error unwind must drop RecordingBeat and publish a tombstone"
+            );
+        }
+
+        #[test]
         fn replay_live_runner_honors_pause_then_an_external_stop() {
             let dir = Tmp::new("live-runner-pause-stop");
             sister_core::pause::set_paused(&dir.0, true, 900).expect("pause");
             let mut recorder = replay_live_recorder();
-            let mut beat = RecordingBeat::start(&dir.0);
+            let mut beat = RecordingBeat::start_for_test(&dir.0);
             let mut controls = 0;
             let mut pinged = Vec::new();
 
@@ -27364,6 +27909,11 @@ pub mod record {
                 std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(mode))
                     .expect("chmod");
             };
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("consent fixture");
+            std::fs::write(sister_core::recorder_lease::lock_path(&dir.0), b"")
+                .expect("pre-create writable lease file");
             shut(0o500); // 讀得到、進得去，但寫不進去
             let probe = std::fs::write(dir.0.join("probe"), b"x");
             let started = BootBeat::start(&dir.0);
@@ -27398,15 +27948,23 @@ pub mod record {
             let mut boot = BootBeat::start(&dir.0).expect("開機心跳");
             assert!(!heartbeat::is_recording(&dir.0, now()));
 
-            boot.hand_off();
-            // 交棒之後蓋的第一下由主迴圈負責（`windows_record` 進迴圈前那一行）。
-            heartbeat::beat(&dir.0, now()).expect("beat");
+            let handoff = boot.hand_off();
+            let recording = RecordingBeat::take_over(&dir.0, handoff);
             assert!(
                 heartbeat::is_recording(&dir.0, now()),
                 "主迴圈在跑了，這時候才可以說在聽"
             );
             assert!(heartbeat::is_occupied(&dir.0, now()), "在錄的當然也佔著");
+            assert!(matches!(
+                sister_core::recorder_lease::try_acquire(&dir.0),
+                Err(sister_core::recorder_lease::AcquireError::Occupied { .. })
+            ));
             drop(boot);
+            drop(recording);
+            drop(
+                sister_core::recorder_lease::try_acquire(&dir.0)
+                    .expect("RecordingBeat drop releases lease"),
+            );
         }
 
         #[test]
@@ -27432,10 +27990,9 @@ pub mod record {
         }
 
         #[test]
-        fn the_second_recorder_is_stopped_by_run_itself_not_just_by_the_helper() {
-            // 上一條測的是那個判斷；這一條測**它真的被叫到了**。少了這一行，
-            // 閘門會是一支寫得很好、卻沒有人呼叫的函式——那是這個專案獵的
-            // 另一種 bug：讀起來很對，一輩子命中不了任何東西。
+        fn run_itself_acquires_the_atomic_lease_before_platform_dispatch() {
+            // core 已經測 kernel contention；這一條釘的是 production `run` 真的
+            // 取得它。少了接線時，Linux 只會走到「沒有擷取後端」而測試仍可綠。
             //
             // 在 Linux 上 `run` 走完同意書之後會抱怨「這個平台還沒有擷取
             // 後端」。所以斷言不是「有沒有錯」，是**錯的是哪一件**。
@@ -27444,14 +28001,49 @@ pub mod record {
             c.grant(Sheet::LocalRecording, 1);
             sister_core::consent::save(&dir.0, &c).expect("save");
             let _first = BootBeat::start(&dir.0).expect("開機心跳");
+            sister_core::control::request_stop(&dir.0).expect("stop the real owner");
 
-            let err = super::run(&dir.0, Config::default(), None, None)
+            let err = super::run(&dir.0, Config::default(), None, None, StartMode::Explicit)
                 .expect_err("已經有人在錄，第二個不該起得來");
-            let said = format!("{err}");
+            let said = format!("{err:#}");
             assert!(
-                said.contains("已經有一個 sister record"),
-                "擋下來的該是那道閘門，不是平台檢查：{said}"
+                said.contains("recorder lease 已被占用"),
+                "擋下來的該是 OS lease，不是 heartbeat 或平台檢查：{said}"
             );
+            assert!(
+                !said.contains("還沒有擷取後端"),
+                "platform ran too early: {said}"
+            );
+            assert_eq!(
+                sister_core::control::stop_intent(&dir.0),
+                sister_core::control::StopIntent::Pending(
+                    sister_core::control::StopReason::Requested
+                ),
+                "lease failure must drop StartTransactionGuard without clearing the owner's stop"
+            );
+        }
+
+        #[test]
+        fn run_keeps_the_heartbeat_barrier_for_an_older_recorder() {
+            let dir = Tmp::new("run-old-recorder-heartbeat");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("save");
+            heartbeat::beat(&dir.0, sister_core::now_ms()).expect("old recorder heartbeat");
+            sister_core::control::request_stop(&dir.0).expect("stop the old recorder");
+
+            let err = super::run(&dir.0, Config::default(), None, None, StartMode::Explicit)
+                .expect_err("a pre-lease recorder must still be detected");
+            let said = format!("{err:#}");
+            assert!(said.contains("已經有一個 sister record"), "{said}");
+            assert_eq!(
+                sister_core::control::stop_intent(&dir.0),
+                sister_core::control::StopIntent::Pending(
+                    sister_core::control::StopReason::Requested
+                ),
+                "old-heartbeat failure must not clear the existing owner's stop"
+            );
+            drop(recorder_lease(&dir.0));
         }
 
         #[test]
@@ -27476,6 +28068,17 @@ pub mod record {
             let dir = Tmp::new("already-tomb");
             sister_core::heartbeat::stop(&dir.0, sister_core::now_ms());
             already_recording(&dir.0).expect("墓碑不是佔著，更不可以 panic");
+        }
+
+        #[test]
+        fn an_unreadable_heartbeat_is_unknown_not_a_vacant_data_directory() {
+            let dir = Tmp::new("already-unreadable");
+            std::fs::write(sister_core::heartbeat::beat_path(&dir.0), "half a beat")
+                .expect("broken heartbeat fixture");
+            let error = already_recording(&dir.0).expect_err("unknown must fail closed");
+            let said = format!("{error:#}");
+            assert!(said.contains("讀不懂"), "{said}");
+            assert!(said.contains("第二個"), "{said}");
         }
 
         #[test]
@@ -27512,7 +28115,7 @@ pub mod record {
             // 檔案裡仍然寫著 boot。那個狀態的正確答案就是「佔著、還沒在錄」。
             let dir = Tmp::new("boot-handoff");
             let mut boot = BootBeat::start(&dir.0).expect("開機心跳");
-            boot.hand_off();
+            let _handoff = boot.hand_off();
             drop(boot);
             assert!(
                 heartbeat::is_occupied(&dir.0, sister_core::now_ms()),
@@ -27531,9 +28134,9 @@ pub mod record {
             let dir = Tmp::new("stop-during-boot");
             let mut boot = BootBeat::start(&dir.0).expect("開機心跳");
             sister_core::control::request_stop(&dir.0).expect("request");
-            boot.hand_off();
+            let _handoff = boot.hand_off();
             assert!(
-                sister_core::control::take_stop(&dir.0),
+                sister_core::control::take_stop(&dir.0).expect("stop control is checkable"),
                 "開機那幾分鐘按的停止，等她開完就要生效"
             );
         }
@@ -27548,10 +28151,332 @@ pub mod record {
             let dir = Tmp::new("stop-before-boot");
             sister_core::control::request_stop(&dir.0).expect("request");
             let mut boot = BootBeat::start(&dir.0).expect("開機心跳");
-            boot.hand_off();
+            let _handoff = boot.hand_off();
             assert!(
-                !sister_core::control::take_stop(&dir.0),
+                !sister_core::control::take_stop(&dir.0).expect("stop control is checkable"),
                 "起來之前留下的請求要清掉，不然她一開始就自己結束、而畫面上只看到閃一下"
+            );
+        }
+
+        #[test]
+        fn supervised_boot_refuses_pending_and_consumed_stop_intents() {
+            for consumed in [false, true] {
+                let dir = Tmp::new(if consumed {
+                    "supervised-consumed"
+                } else {
+                    "supervised-pending"
+                });
+                sister_core::control::request_stop(&dir.0).expect("request");
+                if consumed {
+                    assert_eq!(
+                        sister_core::control::consume_stop(&dir.0).expect("consume"),
+                        Some(sister_core::control::StopReason::Requested)
+                    );
+                }
+                let before = sister_core::control::stop_intent(&dir.0);
+                let consent_start = recording_consent(&dir.0);
+                let lease = recorder_lease(&dir.0);
+                let error =
+                    BootBeat::start_in_mode(&dir.0, StartMode::Supervised, lease, &consent_start)
+                        .err()
+                        .expect("automatic retry must not clear stop intent");
+                assert!(format!("{error:#}").contains("監督啟動已取消"));
+                assert_eq!(sister_core::control::stop_intent(&dir.0), before);
+                assert_eq!(
+                    heartbeat::presence(&dir.0, sister_core::now_ms()),
+                    heartbeat::Presence::NeverStarted,
+                    "refused boot must not stamp a heartbeat"
+                );
+            }
+        }
+
+        #[test]
+        fn supervised_boot_fails_closed_when_stop_intent_is_uncheckable() {
+            let dir = Tmp::new("supervised-unknown");
+            std::fs::create_dir(sister_core::control::stop_path(&dir.0))
+                .expect("directory-shaped marker");
+            let consent_start = recording_consent(&dir.0);
+            let lease = recorder_lease(&dir.0);
+            let error =
+                BootBeat::start_in_mode(&dir.0, StartMode::Supervised, lease, &consent_start)
+                    .err()
+                    .expect("unknown is not absent");
+            assert!(format!("{error:#}").contains("讀不清楚"));
+            assert_eq!(
+                heartbeat::presence(&dir.0, sister_core::now_ms()),
+                heartbeat::Presence::NeverStarted
+            );
+        }
+
+        #[test]
+        fn a_stop_arriving_after_supervised_preflight_is_not_cleared_by_boot() {
+            let dir = Tmp::new("supervised-stop-race");
+            StartMode::Supervised
+                .supervised_preflight(&dir.0)
+                .expect("first desktop-side probe");
+            sister_core::control::request_stop(&dir.0).expect("stop in the race window");
+            let consent_start = recording_consent(&dir.0);
+            let lease = recorder_lease(&dir.0);
+            let error =
+                BootBeat::start_in_mode(&dir.0, StartMode::Supervised, lease, &consent_start)
+                    .err()
+                    .expect("the recorder-side probe must close the race");
+            assert!(format!("{error:#}").contains("監督啟動已取消"));
+            assert_eq!(
+                sister_core::control::stop_intent(&dir.0),
+                sister_core::control::StopIntent::Pending(
+                    sister_core::control::StopReason::Requested
+                )
+            );
+        }
+
+        #[test]
+        fn run_checks_supervised_stop_after_consent_and_occupancy_before_platform() {
+            let dir = Tmp::new("supervised-production-order");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("consent");
+            sister_core::control::request_consent_revoke(&dir.0).expect("durable latch");
+
+            let error = super::run(&dir.0, Config::default(), None, None, StartMode::Supervised)
+                .expect_err("supervised retry must be refused");
+            let said = format!("{error:#}");
+            assert!(said.contains("監督啟動已取消"), "wrong gate won: {said}");
+            assert!(
+                !said.contains("還沒有擷取後端"),
+                "platform ran too early: {said}"
+            );
+            assert_eq!(
+                sister_core::control::stop_intent(&dir.0),
+                sister_core::control::StopIntent::Pending(
+                    sister_core::control::StopReason::ConsentRevoked
+                )
+            );
+        }
+
+        #[test]
+        fn supervised_start_reports_busy_without_touching_stop_or_heartbeat() {
+            let dir = Tmp::new("supervised-consent-writer-busy");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("initial consent");
+            sister_core::control::request_stop(&dir.0).expect("durable user stop");
+            let before = sister_core::control::stop_intent(&dir.0);
+
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let writer_dir = dir.0.clone();
+            let writer = std::thread::spawn(move || {
+                sister_core::consent::mutate(&writer_dir, |_| {
+                    ready_tx.send(()).expect("announce exclusive consent lock");
+                    release_rx.recv().expect("release exclusive consent lock");
+                    Ok(())
+                })
+            });
+            ready_rx.recv().expect("writer acquired consent.lock");
+
+            let error = super::run(&dir.0, Config::default(), None, None, StartMode::Supervised)
+                .expect_err("supervised start must not wait behind a consent writer");
+            let said = format!("{error:#}");
+            assert!(said.contains("同意書正在修改"), "{said}");
+            assert_eq!(sister_core::control::stop_intent(&dir.0), before);
+            assert_eq!(
+                heartbeat::presence(&dir.0, sister_core::now_ms()),
+                heartbeat::Presence::NeverStarted,
+                "Busy must not clear or stamp a boot heartbeat"
+            );
+
+            release_tx.send(()).expect("release writer");
+            writer.join().expect("join writer").expect("writer commit");
+        }
+
+        #[test]
+        fn explicit_start_waits_out_writer_then_observes_revoke_before_clear_or_heartbeat() {
+            let dir = Tmp::new("explicit-consent-writer-linearization");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("initial consent");
+            sister_core::control::request_stop(&dir.0).expect("preexisting user stop");
+
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let writer_dir = dir.0.clone();
+            let writer = std::thread::spawn(move || {
+                sister_core::consent::mutate(&writer_dir, |current| {
+                    ready_tx.send(()).expect("announce exclusive consent lock");
+                    release_rx.recv().expect("release exclusive consent lock");
+                    sister_core::control::request_consent_revoke(&writer_dir)?;
+                    current.revoke(Sheet::LocalRecording);
+                    Ok(())
+                })
+            });
+            ready_rx.recv().expect("writer acquired consent.lock");
+
+            let (result_tx, result_rx) = std::sync::mpsc::channel();
+            let start_dir = dir.0.clone();
+            let starter = std::thread::spawn(move || {
+                let result = super::run(
+                    &start_dir,
+                    Config::default(),
+                    None,
+                    None,
+                    StartMode::Explicit,
+                );
+                result_tx.send(result).expect("return explicit result");
+            });
+
+            assert!(
+                matches!(
+                    result_rx.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ),
+                "Explicit must wait for the exclusive writer instead of using stale consent"
+            );
+            assert_eq!(
+                sister_core::control::stop_intent(&dir.0),
+                sister_core::control::StopIntent::Pending(
+                    sister_core::control::StopReason::Requested
+                ),
+                "while writer is live, start cannot have reached stop clear"
+            );
+            assert_eq!(
+                heartbeat::presence(&dir.0, sister_core::now_ms()),
+                heartbeat::Presence::NeverStarted
+            );
+
+            release_tx.send(()).expect("let revoke commit");
+            writer.join().expect("join writer").expect("revoke commit");
+            let error = result_rx
+                .recv()
+                .expect("explicit returned")
+                .expect_err("committed revoke must refuse explicit start");
+            starter.join().expect("join explicit start");
+            assert!(format!("{error:#}").contains("目前讀不到有效的本機記錄同意"));
+            assert_eq!(
+                sister_core::control::stop_intent(&dir.0),
+                sister_core::control::StopIntent::Pending(
+                    sister_core::control::StopReason::ConsentRevoked
+                ),
+                "start must not clear the revoke writer's durable latch"
+            );
+            assert_eq!(
+                heartbeat::presence(&dir.0, sister_core::now_ms()),
+                heartbeat::Presence::NeverStarted,
+                "refused start must not stamp a boot heartbeat"
+            );
+        }
+
+        #[test]
+        fn an_allowed_consent_snapshot_cannot_cross_a_failed_revoke_barrier() {
+            let dir = Tmp::new("explicit-revoke-save-failure-state");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("old allowed consent");
+            sister_core::control::request_stop(&dir.0).expect("older manual stop");
+            sister_core::control::request_consent_revoke(&dir.0).expect("pre-save revoke barrier");
+            let barrier_before =
+                std::fs::read(sister_core::control::consent_revoke_barrier_path(&dir.0))
+                    .expect("barrier bytes");
+
+            // 這就是 revoke writer 已立 barrier、consent save 卻在 replace 前失敗
+            // 的可觀察磁碟狀態：第一張舊同意仍有效。產品入口不能因此清 stop、
+            // 走到平台，或寫出一拍 Booting。
+            let error = super::run(&dir.0, Config::default(), None, None, StartMode::Explicit)
+                .expect_err("durable barrier must beat the old Allowed snapshot");
+            let said = format!("{error:#}");
+            assert!(said.contains("barrier"), "wrong gate won: {said}");
+            assert!(
+                !said.contains("還沒有擷取後端"),
+                "platform ran too early: {said}"
+            );
+            assert_eq!(
+                std::fs::read(sister_core::control::consent_revoke_barrier_path(&dir.0))
+                    .expect("barrier remains"),
+                barrier_before
+            );
+            assert_eq!(
+                std::fs::read_to_string(sister_core::control::stop_path(&dir.0))
+                    .expect("manual stop remains"),
+                "requested"
+            );
+            assert_eq!(
+                heartbeat::presence(&dir.0, sister_core::now_ms()),
+                heartbeat::Presence::NeverStarted,
+                "failed revoke state must not stamp even a Booting heartbeat"
+            );
+        }
+
+        #[test]
+        fn explicit_boot_clears_both_pending_and_consumed_latches() {
+            for consumed in [false, true] {
+                let dir = Tmp::new(if consumed {
+                    "explicit-consumed"
+                } else {
+                    "explicit-pending"
+                });
+                sister_core::control::request_consent_revoke(&dir.0).expect("revoke");
+                // 走產品的 regrant transaction：commit consent 後只清獨立 barrier，
+                // 並留下普通 consent-revoked stop latch。直接 save 一份 Allowed
+                // fixture 會正確地被 barrier 擋住，並沒有驗到這條 production handoff。
+                crate::ops::consent::run(
+                    &dir.0,
+                    &Config::default(),
+                    &["local-recording".to_owned()],
+                    &[],
+                    false,
+                )
+                .expect("production regrant");
+                assert_eq!(
+                    sister_core::control::stop_intent(&dir.0),
+                    sister_core::control::StopIntent::Pending(
+                        sister_core::control::StopReason::ConsentRevoked
+                    ),
+                    "regrant is permission, not an implicit recorder restart"
+                );
+                if consumed {
+                    assert_eq!(
+                        sister_core::control::consume_stop(&dir.0).expect("consume"),
+                        Some(sister_core::control::StopReason::ConsentRevoked)
+                    );
+                }
+                drop(BootBeat::start(&dir.0).expect("explicit boot"));
+                assert_eq!(
+                    sister_core::control::stop_intent(&dir.0),
+                    sister_core::control::StopIntent::Absent
+                );
+            }
+        }
+
+        #[test]
+        fn explicit_start_refuses_revoked_consent_before_clearing_stop_or_heartbeat() {
+            let dir = Tmp::new("explicit-consent-race");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            sister_core::consent::save(&dir.0, &consent).expect("initial consent");
+            super::gate(&dir.0, Config::default()).expect("the first gate observed consent");
+
+            sister_core::consent::mutate(&dir.0, |current| {
+                sister_core::control::request_consent_revoke(&dir.0)?;
+                current.revoke(Sheet::LocalRecording);
+                Ok(())
+            })
+            .expect("pre-save barrier then revoke between gate and boot");
+
+            let error = StartMode::Explicit
+                .begin_recording_consent(&dir.0)
+                .expect_err("revoked consent must win before stop transaction");
+            assert!(format!("{error:#}").contains("目前讀不到有效的本機記錄同意"));
+            assert_eq!(
+                heartbeat::presence(&dir.0, sister_core::now_ms()),
+                heartbeat::Presence::NeverStarted,
+                "a revoked start must not stamp even a boot heartbeat"
+            );
+            assert_eq!(
+                sister_core::control::stop_intent(&dir.0),
+                sister_core::control::StopIntent::Pending(
+                    sister_core::control::StopReason::ConsentRevoked
+                ),
+                "failed consent gate must not clear the durable revoke intent"
             );
         }
 
@@ -27612,6 +28537,10 @@ pub mod record {
             let err = super::gate(&dir.0, Config::default()).expect_err("該被擋下來");
             let msg = err.to_string();
             assert!(
+                msg.contains("目前讀不到有效的本機記錄同意") && !msg.contains("還沒有人同意"),
+                "missing 只證明目前無有效同意，不能聲稱歷史上從未簽過：{msg}"
+            );
+            assert!(
                 msg.contains(" consent --grant local-recording"),
                 "擋下來還不夠，要說得出怎麼過去：{msg}"
             );
@@ -27631,6 +28560,33 @@ pub mod record {
                 3,
                 "三個同意書出口都要指回同一個資料目錄：{msg}"
             );
+        }
+
+        #[test]
+        fn revoked_and_corrupt_consent_do_not_claim_nobody_ever_consented() {
+            let revoked = Tmp::new("gate-revoked-wording");
+            let mut consent = Consent::default();
+            consent.grant(Sheet::LocalRecording, 1);
+            consent.revoke(Sheet::LocalRecording);
+            sister_core::consent::save(&revoked.0, &consent).expect("save revoked consent");
+
+            let corrupt = Tmp::new("gate-corrupt-wording");
+            std::fs::write(sister_core::consent::path(&corrupt.0), b"not = [valid toml")
+                .expect("write corrupt consent");
+
+            for dir in [&revoked, &corrupt] {
+                let error = super::gate(&dir.0, Config::default())
+                    .expect_err("invalid current consent must block recording");
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains("目前讀不到有效的本機記錄同意"),
+                    "{message}"
+                );
+                assert!(
+                    !message.contains("還沒有人同意"),
+                    "this snapshot cannot prove consent history: {message}"
+                );
+            }
         }
 
         /// 簽了第一張、沒簽第三張 = 照錄，但一張圖都不寫。
@@ -27727,7 +28683,7 @@ pub mod record {
             sister_core::consent::save(&dir.0, &c).expect("save");
 
             let err = super::gate(&dir.0, Config::default()).expect_err("該被擋下來");
-            assert!(err.to_string().contains("改版"), "{err}");
+            assert!(err.to_string().contains("不是對目前第"), "{err}");
         }
 
         // ---------- 錄到一半撤回 ----------

@@ -128,11 +128,134 @@ click allowlist，因為單純點角色沒有量到那件事。
 
 狀態存在 `consent.toml`（和 `sister.db` 同一個目錄，純文字，看得懂也改得動），
 記的是**何時**簽的而不是一個是非題——所以「你什麼時候同意的」答得出來。
-`sister consent` 和第一次開啟字母人時跳出來的那一頁都從 core 取同一份條文與
+`sister consent` 和使用者第一次開啟字母人時跳出來的那一頁都從 core 取同一份條文與
 未簽後果；`sister doctor` 讀同一個檔案，另外報告目前是否簽署及會發生什麼事。
 
 撤回是 `sister consent --revoke local-recording`，或在那一頁上把勾拿掉。
 撤回**不會刪掉已經記下來的東西**——那是〈忘掉某一段時間〉的工作。
+
+---
+
+## Windows 登入啟動與 recorder 重試
+
+登入啟動是獨立、立即生效且**預設關閉**的 opt-in 設定。它不在
+`config.toml` 另存一個 bool；真相只是目前使用者的
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run\AI-Sister`。缺值是
+`disabled`；只有 `"<目前安裝的 sister-desktop.exe>" --ai-sister-login` 逐字相同
+才是 `enabled`；另一個路徑、少參數或非字串是 `mismatch`，讀不到是
+`unreadable`，portable／非 exact 安裝副本是 `unsupported`。後三種都不可被 UI
+畫成「關閉」。
+
+只有 current-user uninstaller metadata 的 `InstallLocation` 精確對應目前 exe parent，
+這份程式才能修改 Run value；portable 不能替安裝版打開、關閉或修正它。
+AI-Sister 不管 Windows `StartupApproved`；因此 `enabled` 只證明 Run value 已登錄，
+「啟動應用程式」仍可另外停用它。關掉這個設定只影響之後的 Windows 登入；
+它不會擅自停掉這一輪 recorder。
+
+`--ai-sister-login` 啟動後只留在系統匣，不顯示或聚焦字母人；同一個 desktop worker
+只承接第一個 login intent，delayed／secondary duplicate 都忽略且不 reveal。有效的
+`local-recording` 同意才能請 desktop 啟動一個自己擁有的 recorder。同意沒簽、讀不到或版本失效時，
+它不啟動 recorder，**也不自動彈出 onboarding 誘導簽署**。已存在的
+pause 對內容擷取與寫入仍是硬門；login 可以把 recorder 行程開起來，但它必須
+維持暫停。狀態讀壞也是 fail closed，這條路沒有 resume 能力。Login 不是一次真人
+重新開始：它不清人工 Stop／`consent-revoked`，也不重設同一個 worker 的
+backoff／GaveUp。
+
+登入當下若碰到可重試的 transaction 或上一輪 shutdown handoff，preflight 每 500ms
+從 consent、stop、lease 與 heartbeat 重新判定，最多五分鐘；它是獨立的有界等待，
+不增加 watchdog failure count，也不借用 1／5／30 秒 retry budget。正常退出另寫強度
+較弱的 typed `desktop-quit`；**只有這個 reason** 可讓下一次全新的 opt-in login 在
+五分鐘內等舊 lease／fresh heartbeat 退場，再於 lease 已空且 heartbeat 是
+NeverStarted／Stopped／Stalled 時走完整 barrier。stop marker 是 Absent 卻看見任何
+lease／heartbeat owner 證據時就分類為 External；它稍後消失也不讓這份 login intent
+takeover／restart。一般 external 的 stale／missing／unreadable 永遠不是已離場證明，
+仍只接受 `stopped` 墓碑；typed `desktop-quit` 是有正常退出因果的窄 handoff 例外。
+
+deadline 在每次 500ms attempt **之前**與最後 clear／spawn commit **之前**都重查，
+不能在等待或 I/O 後 late spawn。同一 worker 收到真人 Stop、Quit 或 Explicit Start 會先
+取消 pending Login；磁碟上的 `requested`／`consent-revoked`、無效 consent、無法安全
+判讀的 consent／control 也直接取消，不因之後修好而偷偷再試。每一個失敗或逾時的
+barrier 都保留原 stop marker。只有 bounded handoff 完整成功才可清 `desktop-quit`，
+否則正常 shutdown 的 reason 留在磁碟上。
+
+撤回 `local-recording` 時，CLI 與 desktop 都在 exclusive `consent.lock` transaction
+裡、寫同意檔**之前**先 atomic publish 獨立的 `consent-revoke.barrier`，再 exact readback。
+這道 barrier 有 fresh 256-bit generation，不由 recorder 消費，也不准 Explicit Start
+清除；若 consent atomic save 失敗，舊同意可能仍有效，但 automatic／Explicit Start
+仍須尊重這道停止條件，文案也不能反過來宣稱同意書已撤回。成功 commit 的 local
+regrant 才能拿 writer 內捕捉的 generation ticket 清同一代；舊票遇到較新 revoke 只回
+`Superseded`。清 barrier 前若普通 stop marker 確定不存在，先留下
+`consent-revoked` stop latch；若已有 `requested`／`desktop-quit` 則原封保留。於是快速
+revoke→regrant 也不會漏停目前 recorder，重簽本身更不是自動 restart。
+同時改不同張同意也不可以是「後寫的整份蓋掉先寫的」。CLI 與 desktop 的每一次
+grant／revoke 都要先持有 data-dir 空檔 `consent.lock` 的 OS exclusive lock，在鎖內
+重讀最新檔案、只套這次指定的 sheet，再 atomic save。鎖或 save 失敗就報錯；
+撤回第一張的獨立 barrier 必須先於 locked save，成功 regrant 的 generation-safe clear
+則必須晚於 commit。`consent.lock` 若是 symlink／
+non-regular path 或無法取得，這次 mutation fail closed，不跟著鎖到資料目錄外。
+
+Recorder start 也必須跟 consent mutation 有唯一先後，不是只在鎖外 `load()` 兩次。
+CLI／desktop／supervised child 的 lock order 固定為 shared `consent.lock` →
+`stop.lock` → `recording.lock`／舊 heartbeat barrier。CLI recorder 的 shared guard 活過
+stop clear 與第一拍；desktop parent 的 guard 活過 preflight／clear 到
+`Command::spawn` 回來便立即放掉，絕不等待 heartbeat，child 自己 nonblocking 重拿並
+持到第一拍。revoke／grant writer 已先握住 exclusive `consent.lock` 時，nonblocking
+Login／retry／desktop Start 不排在 writer 後面偷跑，這一拍必須是零 clear、零 spawn、
+零 heartbeat；真人 CLI Explicit 則等 writer commit 後在鎖內重讀。反過來若 start 先
+取得 shared guard，它就明確排在 revoke 前；晚到的撤回仍由 durable barrier 與 recorder
+檢查停止。這是線性順序，不是承諾兩邊同時都「贏」。
+
+desktop 只對它自己 spawn 的 recorder child 重試。連續第一、二、三次失敗後
+分別等 1 秒、5 秒、30 秒；第四次後放棄。只有新鮮而且相對上一個已觀察樣本
+真的更新的 `Recording` heartbeat 能推進十分鐘連續區間；反覆 poll 同一拍
+不算新證據。missing／stalled／unreadable／`Thinking` 一旦被觀察到就把區間
+歸零，不從中斷前繼續累加；這才不會拿「child 還活著」冒充十分鐘健康錄製。
+exit 0、人手停止、撤回本機記錄同意或 desktop quit 都取消 retry。真人 Stop 一送進
+worker，就先取消 pending Login、watchdog timer 與之後的 automatic spawn，再做可能
+失敗的 durable stop write；若寫入失敗，畫面必須照實保留「目前 recorder 可能仍在跑」，
+但不能因此把已取消的 retry 復活。使用者仍可修好後再按 Stop；只有下一次真人 Explicit
+Start **成功通過並 commit** 完整 barrier 才解除這道 in-memory automatic-start latch，
+invalid／busy／timeout／spawn 前失敗的 Start 都不算。retry 到時仍要重新
+檢查 stop intent、consent 與 occupancy；狀態不明就放棄，已占用就不開第二個。
+外部啟動的 recorder 不會被接管或重啟；desktop 自己當掉時也沒有 self-relaunch。
+owned child 消失後仍新鮮的舊 heartbeat 只會顯示成「正在確認」，不會冒充現在仍在錄，
+也不開放 retry；後續持續更新的 heartbeat 才能證明是外部 recorder，並取消
+desktop 原本的 retry。外部 recorder 隨後只由 heartbeat 顯示，desktop 不取得它的 Child
+handle。後來變 stale 的一拍、missing 或 unreadable 都不證明 external 已退出；
+Start／retry 繼續關閉，已送 stop 時也維持「正在停止外部 recorder」，直到看見明確的
+`stopped` 墓碑。`try_wait` 本身暫時失敗時也保留原 handle、禁止另開；下一次成功 probe
+才恢復 Running 或處理真正 exit。
+使用者要結束 desktop 時，它同樣先取消 Login／retry，再把 durable stop 寫成功。如果資料目錄權限／磁碟錯誤
+讓這一寫失敗，in-memory retry 會立刻取消，但 desktop **不退出**；它會把字母人
+顯示、取得焦點並說明錯誤，也不接新 start。修好後再停／再結束，不能拿 UI
+已消失冒充 recorder 已停。
+
+heartbeat 檢查不是原子的 simultaneous-start 鎖。所有 CLI 與 desktop recorder 在第一拍
+`Booting` heartbeat 前，都必須 nonblocking 取得 data-dir `recording.lock` 的 OS
+whole-file exclusive lock，整場持有。拿不到或無法判定就不開；process crash／
+handle drop 由 OS 自動釋放。這個空檔可以持久留著；**看到檔案存在不代表
+有人在錄**，只有當下的 lock acquisition 能阻止同時 CLI／desktop 各開一個。
+已存路徑是 symlink 或 non-regular file 時也拒絕，不跟著鎖到資料目錄外或把錯誤
+檔案當正常鎖。
+
+stop request、recorder consume 與下一次顯式 start 的 clear 全由永久空檔 `stop.lock`
+線性化；probe 只做 nonblocking shared lock，鎖正忙或任何內容讀取不明都回 unknown，
+automatic retry 不會因此猜成沒有停止意圖。顯式 start 先持上述 shared consent guard，
+再持 exclusive stop transaction、通過 recorder lease 與舊 heartbeat barrier；全部成功才
+清舊 marker。同時到達的
+stop／quit 因而一定排在 clear 前或後。Desktop 的 parent 先以 nonblocking stop guard
+暫持 recorder lease，通過 heartbeat 且 commit 後才 clear；再放行一律
+supervised 的 child 重新取得整場 lease，並在第一拍前讀 stop／consent。child 無權清掉
+稍後到達的 Stop／Quit。Login 只可在全新 worker 用同一套 barrier 清上一輪
+`desktop-quit`；人工 `requested`／`consent-revoked` 都保留，retry 永不 clear。Windows live lock handle
+拒絕刪除；Unix Preview 的 advisory lock 不阻止 unlink／replace，因此任何 AI-Sister 行程
+仍在時都不可手動刪除或替換 `stop.lock`、`consent.lock`、`recording.lock`。
+
+純命令／五態政策、watchdog 狀態轉移、renderer fixture、recorder lease 與 consent
+locked mutation 有自動測試，Windows backend 也有只碰 test subkey 的 registry test。
+這些只證明政策、lock protocol 與 API
+read／write／readback，不是正式 alpha.107 安裝檔在真 Windows 登入、故障時序與
+uninstall 的人工通過證據；那份 checklist 目前仍未勾。
 
 ---
 

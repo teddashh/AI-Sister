@@ -33,8 +33,12 @@
 //! 「悄悄地把新條款算他同意了」。
 
 use anyhow::{Context, Result};
+use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
+use std::fs::{File, Metadata, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::model::Millis;
 
@@ -51,6 +55,7 @@ use crate::model::Millis;
 pub const VERSION: u32 = 3;
 
 const FILE: &str = "consent.toml";
+const WRITE_LOCK: &str = "consent.lock";
 
 /// 三張同意書。
 ///
@@ -274,12 +279,356 @@ pub fn load(data_dir: &Path) -> Consent {
     toml::from_str(&text).unwrap_or_default()
 }
 
+/// Recorder 開始前對第一張同意書的完整判決。
+///
+/// 這裡不能回 `Option<bool>`：`Busy` 是另一個 consent writer 正握著 exclusive
+/// transaction，`Unknown` 是連鎖檔／同意書都無法安全判讀，兩者都不等於一份
+/// 確定無效的同意書。只有 [`Allowed`](Self::Allowed) 會交出必須活到第一拍
+/// heartbeat 之後的 shared guard。
+#[derive(Debug)]
+pub enum RecordingStartConsent {
+    /// 在 shared `consent.lock` 裡重讀到這一版有效的第一張同意書。
+    Allowed(RecordingStartGuard),
+    /// 同意書確定不存在、內容無效，或第一張對目前條文不生效。
+    NotAllowed(Consent),
+    /// 另一個 consent transaction 正在修改；nonblocking caller 不可以用舊快照開錄。
+    Busy,
+    /// 鎖或同意書無法安全開啟／驗證／讀取；不確定時不開始錄。
+    Unknown(anyhow::Error),
+}
+
+/// 活著就持有 `consent.lock` 的 shared lock，並固定這次 start 使用的同意快照。
+///
+/// Recorder start 的 lock order 只能是：這個 guard → `stop.lock` →
+/// `recording.lock`／舊 heartbeat barrier。Explicit clear 與第一拍 Booting heartbeat
+/// 都要發生在 guard drop 以前；這樣已拿到 consent exclusive lock 的撤回不可能被
+/// 一份較早的 `load()` 結果越過。
+#[derive(Debug)]
+pub struct RecordingStartGuard {
+    _file: File,
+    // Allowed 的 consent.toml opened handle 也留到第一拍；Windows 藉由不 share
+    // write/delete 固定這份已驗證 inode，Unix 則至少確保讀的是 no-follow handle。
+    _consent_file: Option<File>,
+    data_dir: PathBuf,
+    consent: Consent,
+}
+
+impl RecordingStartGuard {
+    /// 在 shared transaction 裡讀到的完整快照；第三張的降級也必須用同一份。
+    pub fn consent(&self) -> &Consent {
+        &self.consent
+    }
+
+    /// 防止一份 guard 被接到另一個資料目錄的 stop／lease／heartbeat barrier。
+    pub fn belongs_to(&self, data_dir: &Path) -> bool {
+        self.data_dir == data_dir
+    }
+}
+
+/// Blocking 取得 recorder start 的 shared consent transaction。
+///
+/// 給真人顯式 `sister record` 使用：若 writer 正在 commit，等它完成再在鎖內重讀，
+/// 不會拿 writer 之前的快照開錄。此入口正常不回 [`RecordingStartConsent::Busy`]。
+pub fn begin_recording_start(data_dir: &Path) -> RecordingStartConsent {
+    recording_start_consent(data_dir, StartLockMode::Blocking)
+}
+
+/// Nonblocking 取得 recorder start 的 shared consent transaction。
+///
+/// 給 supervised child／desktop 使用：writer 正忙時回明確的 `Busy`，絕不排隊後在
+/// caller 已逾時或取消時才偷偷開始。
+pub fn try_begin_recording_start(data_dir: &Path) -> RecordingStartConsent {
+    recording_start_consent(data_dir, StartLockMode::Nonblocking)
+}
+
+#[derive(Clone, Copy)]
+enum StartLockMode {
+    Blocking,
+    Nonblocking,
+}
+
+fn recording_start_consent(data_dir: &Path, mode: StartLockMode) -> RecordingStartConsent {
+    let file = match open_consent_lock(data_dir) {
+        Ok(file) => file,
+        Err(error) => return RecordingStartConsent::Unknown(error),
+    };
+    match mode {
+        StartLockMode::Blocking => {
+            if let Err(error) = FileExt::lock_shared(&file) {
+                return RecordingStartConsent::Unknown(anyhow::Error::from(error).context(
+                    format!(
+                        "取得同意書 shared start lock {} 失敗",
+                        data_dir.join(WRITE_LOCK).display()
+                    ),
+                ));
+            }
+        }
+        StartLockMode::Nonblocking => match FileExt::try_lock_shared(&file) {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return RecordingStartConsent::Busy,
+            Err(TryLockError::Error(error)) => {
+                return RecordingStartConsent::Unknown(anyhow::Error::from(error).context(
+                    format!(
+                        "取得同意書 shared start lock {} 失敗",
+                        data_dir.join(WRITE_LOCK).display()
+                    ),
+                ));
+            }
+        },
+    }
+
+    let (consent, consent_file) = match load_for_recording_start(data_dir) {
+        Ok(loaded) => loaded,
+        Err(error) => return RecordingStartConsent::Unknown(error),
+    };
+    if !consent.allows_recording() {
+        return RecordingStartConsent::NotAllowed(consent);
+    }
+    RecordingStartConsent::Allowed(RecordingStartGuard {
+        _file: file,
+        _consent_file: consent_file,
+        data_dir: data_dir.to_path_buf(),
+        consent,
+    })
+}
+
+/// 在 shared transaction 裡從 opened handle 讀同意書。Missing／invalid 是確定的
+/// `NotAllowed`；路徑跟到 symlink／reparse 或 I/O 失敗則是 `Unknown`。
+fn load_for_recording_start(data_dir: &Path) -> Result<(Consent, Option<File>)> {
+    let consent_path = path(data_dir);
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+        // 開 reparse point 本身再用 handle metadata 拒絕；不 share write/delete，
+        // 讓這份已驗證快照在 guard 活著時不能被 pathname swap。
+        options
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .share_mode(FILE_SHARE_READ.0);
+    }
+    let mut file = match options.open(&consent_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok((Consent::default(), None));
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("開啟同意書 {} 失敗", consent_path.display()));
+        }
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("驗證同意書 {} 失敗", consent_path.display()))?;
+    anyhow::ensure!(
+        opened_lock_is_regular(&metadata),
+        "同意書不是普通的 non-reparse 檔案：{}",
+        consent_path.display()
+    );
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("讀取同意書 {} 失敗", consent_path.display()))?;
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok((Consent::default(), Some(file)));
+    };
+    // 語法壞掉是確定無效的同意，不是可以重試成 Allowed 的 I/O unknown。
+    Ok((toml::from_str(text).unwrap_or_default(), Some(file)))
+}
+
+/// 在同一把跨行程 exclusive lock 裡重讀、修改並原子替換同意書。
+///
+/// 呼叫端不可以自己做 `load` → 修改 → `save`：desktop 與 CLI 若同時改不同張，
+/// 後寫的人會把先寫的人整份舊快照蓋回去。對第一張而言，那會讓一次真的撤回在
+/// 沒有人重簽時復活。closure 一定在取得鎖並重讀磁碟之後才執行；回傳值則是這次
+/// 已經成功落地的完整快照。
+pub fn mutate(
+    data_dir: &Path,
+    mutation: impl FnOnce(&mut Consent) -> Result<()>,
+) -> Result<Consent> {
+    let _lock = ConsentWriteLock::acquire(data_dir)?;
+    let mut consent = load(data_dir);
+    mutation(&mut consent)?;
+    save_atomic_unlocked(data_dir, &consent)?;
+    Ok(consent)
+}
+
+/// 寫入一份已組好的完整快照。
+///
+/// 這支仍供匯入與測試 fixture 使用，並和 [`mutate`] 共用同一把 write lock 與
+/// atomic replace；任何 read-modify-write 則必須使用 [`mutate`]，否則重讀不在鎖內。
 pub fn save(data_dir: &Path, consent: &Consent) -> Result<()> {
+    let _lock = ConsentWriteLock::acquire(data_dir)?;
+    save_atomic_unlocked(data_dir, consent)
+}
+
+/// 寫鎖是 consent 檔的 sibling，不跟著每次 atomic replace 換 inode；檔案本身永久
+/// 保留，任何 consent／forget／prune 路徑都不刪它。handle drop 由作業系統釋放鎖，
+/// 所以 writer crash 不會留下永久占用。
+struct ConsentWriteLock {
+    _file: File,
+}
+
+impl ConsentWriteLock {
+    fn acquire(data_dir: &Path) -> Result<Self> {
+        let path = data_dir.join(WRITE_LOCK);
+        let file = open_consent_lock(data_dir)?;
+        FileExt::lock(&file).with_context(|| format!("取得同意書寫鎖 {}", path.display()))?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// 所有 consent reader／writer 都經過這個 open，才能確定鎖的是同一個安全 inode。
+/// Windows 不 share delete，避免 live transaction 期間 pathname 被換掉；Unix 則在
+/// open syscall 本身用 `O_NOFOLLOW` 關掉 check→open swap window。
+fn open_consent_lock(data_dir: &Path) -> Result<File> {
     std::fs::create_dir_all(data_dir).with_context(|| format!("建立 {}", data_dir.display()))?;
-    let p = path(data_dir);
-    std::fs::write(&p, toml::to_string_pretty(consent)?)
-        .with_context(|| format!("寫入 {}", p.display()))?;
-    Ok(())
+    let path = data_dir.join(WRITE_LOCK);
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0);
+    }
+    let file = options
+        .open(&path)
+        .with_context(|| format!("開啟同意書鎖 {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("驗證同意書鎖 {}", path.display()))?;
+    anyhow::ensure!(
+        opened_lock_is_regular(&metadata),
+        "同意書鎖不是普通的 non-reparse 檔案：{}",
+        path.display()
+    );
+    Ok(file)
+}
+
+fn opened_lock_is_regular(metadata: &Metadata) -> bool {
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn save_atomic_unlocked(data_dir: &Path, consent: &Consent) -> Result<()> {
+    std::fs::create_dir_all(data_dir).with_context(|| format!("建立 {}", data_dir.display()))?;
+    let destination = path(data_dir);
+    let body = toml::to_string_pretty(consent)?;
+    atomic_write(data_dir, &destination, body.as_bytes())
+}
+
+fn atomic_write(data_dir: &Path, destination: &Path, body: &[u8]) -> Result<()> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let mut opened = None;
+    let mut temp_path = None;
+    for _ in 0..128 {
+        let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let candidate = data_dir.join(format!(".consent-tmp-{}-{serial}", std::process::id()));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => {
+                opened = Some(file);
+                temp_path = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("建立同意書暫存檔於 {} 失敗", data_dir.display()));
+            }
+        }
+    }
+    let mut file = opened.context("找不到可用的同意書暫存檔名")?;
+    let temp = temp_path.expect("temp path accompanies opened file");
+    let result = (|| -> Result<()> {
+        file.write_all(body)
+            .with_context(|| format!("寫入 {} 失敗", temp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("同步 {} 失敗", temp.display()))?;
+        drop(file);
+        replace_file_atomically(&temp, destination)?;
+        #[cfg(unix)]
+        File::open(data_dir)
+            .and_then(|dir| dir.sync_all())
+            .with_context(|| format!("同步 {} 目錄失敗", data_dir.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::rename(source, destination).with_context(|| {
+        format!(
+            "原子替換 {} → {} 失敗",
+            source.display(),
+            destination.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(source: &Path, destination: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .with_context(|| {
+        format!(
+            "原子替換 {} → {} 失敗",
+            source.display(),
+            destination.display()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -397,6 +746,203 @@ mod tests {
         c.grant(Sheet::FrameStorage, 43);
         save(&tmp.0, &c).expect("save");
         assert_eq!(load(&tmp.0), c);
+    }
+
+    #[test]
+    fn recording_start_has_four_non_conflated_outcomes() {
+        let tmp = Tmp::new("recording-start-outcomes");
+        assert!(matches!(
+            try_begin_recording_start(&tmp.0),
+            RecordingStartConsent::NotAllowed(_)
+        ));
+
+        let mut consent = Consent::default();
+        consent.grant(Sheet::LocalRecording, 42);
+        save(&tmp.0, &consent).expect("signed consent");
+        let allowed = match try_begin_recording_start(&tmp.0) {
+            RecordingStartConsent::Allowed(guard) => guard,
+            other => panic!("signed consent should be allowed, got {other:?}"),
+        };
+        assert_eq!(allowed.consent(), &consent);
+        assert!(allowed.belongs_to(&tmp.0));
+        drop(allowed);
+
+        let writer = ConsentWriteLock::acquire(&tmp.0).expect("exclusive writer");
+        assert!(matches!(
+            try_begin_recording_start(&tmp.0),
+            RecordingStartConsent::Busy
+        ));
+        drop(writer);
+
+        std::fs::remove_file(tmp.0.join(WRITE_LOCK)).expect("remove unlocked lock file");
+        std::fs::create_dir(tmp.0.join(WRITE_LOCK)).expect("directory-shaped lock");
+        assert!(matches!(
+            try_begin_recording_start(&tmp.0),
+            RecordingStartConsent::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn invalid_consent_is_not_unknown_and_never_mints_a_start_guard() {
+        let tmp = Tmp::new("invalid-start-consent");
+        std::fs::write(path(&tmp.0), b"not = [valid toml").expect("invalid consent fixture");
+        match try_begin_recording_start(&tmp.0) {
+            RecordingStartConsent::NotAllowed(snapshot) => {
+                assert_eq!(snapshot, Consent::default());
+                assert!(!snapshot.allows_recording());
+            }
+            other => panic!("invalid consent must fail closed as NotAllowed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn locked_mutation_reloads_the_previous_commit_instead_of_restoring_a_stale_sheet() {
+        let tmp = Tmp::new("locked-rmw");
+        let mut initial = Consent::default();
+        initial.grant(Sheet::LocalRecording, 1);
+        save(&tmp.0, &initial).expect("initial local consent");
+
+        // 模擬第一個 writer 已拿鎖、撤回第一張但尚未 commit。第二個獨立 handle
+        // 此刻必須真的撞鎖；光讓 save 本身加鎖、把 reload 留在鎖外，擋不住
+        // desktop/CLI 各自拿舊快照覆寫。
+        let first = ConsentWriteLock::acquire(&tmp.0).expect("first writer lock");
+        let mut revoked = load(&tmp.0);
+        revoked.revoke(Sheet::LocalRecording);
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.0.join(WRITE_LOCK))
+            .expect("second lock handle");
+        assert!(
+            matches!(
+                fs4::FileExt::try_lock(&contender),
+                Err(fs4::TryLockError::WouldBlock)
+            ),
+            "另一個 consent writer 不可以穿過 live transaction"
+        );
+        save_atomic_unlocked(&tmp.0, &revoked).expect("commit revoke");
+        drop(first);
+
+        // 後來只簽第二張；它必須在鎖內重讀到第一張已撤回，不能把 initial 那份
+        // local signature 帶回來。
+        let committed = mutate(&tmp.0, |current| {
+            current.grant(Sheet::CloudReading, 2);
+            Ok(())
+        })
+        .expect("unrelated grant");
+        assert!(!committed.allows_recording(), "沒有重簽第一張，不可以復活");
+        assert!(committed.allows_cloud(), "後來明確簽的第二張仍要生效");
+        assert_eq!(load(&tmp.0), committed);
+    }
+
+    #[test]
+    fn atomic_save_replaces_an_existing_consent_without_leaving_a_temp_file() {
+        let tmp = Tmp::new("atomic-replace");
+        let mut first = Consent::default();
+        first.grant(Sheet::LocalRecording, 1);
+        save(&tmp.0, &first).expect("first snapshot");
+
+        let mut second = Consent::default();
+        second.grant(Sheet::CloudReading, 2);
+        save(&tmp.0, &second).expect("replace snapshot");
+        assert_eq!(load(&tmp.0), second);
+        assert!(
+            std::fs::read_dir(&tmp.0)
+                .expect("list data dir")
+                .all(|entry| !entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".consent-tmp-")),
+            "成功 commit 後不該留下暫存檔"
+        );
+    }
+
+    #[test]
+    fn a_non_regular_write_lock_fails_closed() {
+        let tmp = Tmp::new("lock-directory");
+        std::fs::create_dir(tmp.0.join(WRITE_LOCK)).expect("directory-shaped lock");
+        let error = mutate(&tmp.0, |_| Ok(())).expect_err("directory is not a lock file");
+        assert!(format!("{error:#}").contains(WRITE_LOCK), "{error:#}");
+        assert_eq!(load(&tmp.0), Consent::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shared_start_guard_never_follows_a_symlinked_lock_or_consent() {
+        use std::os::unix::fs::symlink;
+
+        let lock_tmp = Tmp::new("shared-lock-symlink");
+        let lock_target = lock_tmp.0.join("not-the-shared-lock");
+        std::fs::write(&lock_target, b"must remain an ordinary unlocked file").expect("target");
+        symlink(&lock_target, lock_tmp.0.join(WRITE_LOCK)).expect("lock symlink");
+        assert!(matches!(
+            try_begin_recording_start(&lock_tmp.0),
+            RecordingStartConsent::Unknown(_)
+        ));
+        let target_handle = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_target)
+            .expect("target handle");
+        FileExt::try_lock(&target_handle).expect("symlink target was never locked");
+
+        let consent_tmp = Tmp::new("shared-consent-symlink");
+        let mut signed = Consent::default();
+        signed.grant(Sheet::LocalRecording, 1);
+        let signed_target = consent_tmp.0.join("not-consent.toml");
+        std::fs::write(&signed_target, toml::to_string(&signed).expect("serialize"))
+            .expect("signed target");
+        symlink(&signed_target, path(&consent_tmp.0)).expect("consent symlink");
+        assert!(matches!(
+            try_begin_recording_start(&consent_tmp.0),
+            RecordingStartConsent::Unknown(_)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&signed_target).expect("target survives"),
+            toml::to_string(&signed).expect("serialize again")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_live_windows_write_lock_cannot_be_unlinked_and_replaced() {
+        let tmp = Tmp::new("lock-deny-delete");
+        let lock = ConsentWriteLock::acquire(&tmp.0).expect("acquire consent write lock");
+        let path = tmp.0.join(WRITE_LOCK);
+
+        std::fs::remove_file(&path)
+            .expect_err("consent lock must deny delete sharing while a transaction owns it");
+        assert!(
+            path.is_file(),
+            "failed deletion must leave the lock pathname intact"
+        );
+
+        drop(lock);
+        std::fs::remove_file(&path).expect("dropping transaction releases delete sharing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_write_lock_is_rejected_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = Tmp::new("lock-symlink");
+        let target = tmp.0.join("not-the-consent-lock");
+        std::fs::write(&target, b"do not lock or rewrite me").expect("target fixture");
+        symlink(&target, tmp.0.join(WRITE_LOCK)).expect("symlink lock fixture");
+
+        let error = mutate(&tmp.0, |consent| {
+            consent.grant(Sheet::LocalRecording, 1);
+            Ok(())
+        })
+        .expect_err("write lock must not follow a symlink");
+        assert!(format!("{error:#}").contains(WRITE_LOCK), "{error:#}");
+        assert_eq!(
+            std::fs::read(&target).expect("target survives"),
+            b"do not lock or rewrite me"
+        );
+        assert!(!load(&tmp.0).allows_recording());
     }
 
     #[test]

@@ -10,8 +10,8 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.106 公開後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
-下載 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
+alpha.107 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（字母人是去隔壁找 `sister.exe` 的）。
 
@@ -21,6 +21,161 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
+
+### alpha.107 先做登入啟動與 bounded recorder 復原
+
+**目前狀態：下面全是待勾項，還沒有 alpha.107 正式安裝檔的 Windows 人工
+通過紀錄。** 純 exact-command／五態 policy、watchdog state machine、renderer fixture、
+recorder lease 與 consent locked mutation 已納入自動測試；Windows registry backend
+也有只碰 test subkey 的 native test。
+那些證明決策與 API read／write／readback，不會讓這一段自動變成勾選。
+
+**登錄值、五態與 installed-copy authority：**
+
+- [ ] 在一個從未安裝 AI-Sister 的 current-user profile 做 fresh install。第一次開設定頁時
+      「登入 Windows 後啟動」必須是 `disabled`，而且下面的 query 要回報找不到
+      `AI-Sister`；「還沒讀到」不可畫成關閉。
+
+      ```powershell
+      Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `
+        -Name 'AI-Sister' -ErrorAction Stop
+      ```
+- [ ] 在設定頁開啟，不按一般「儲存設定」就應立即變 `enabled`。PowerShell
+      讀回的 `REG_SZ` 必須逐字符合下列形狀；exe 沒有空白也不可省雙引號，
+      只有這一個參數。
+
+      ```text
+      "<目前 install root\sister-desktop.exe>" --ai-sister-login
+      ```
+
+      重開設定頁仍要從 registry 讀回，不從 `config.toml` 猜。
+- [ ] 用 Registry Editor 把路徑改成舊路徑、拿掉 `--ai-sister-login`，再測一次非
+      `REG_SZ`。三種都要顯示 `mismatch` 與 actual value/type，不能顯示成 off；
+      從 UI 再開才可修復成 exact value。`unreadable` 用 native test-subkey 和 disposable
+      profile 的權限夾具驗，不要為了這一格破壞日常 profile 的 Run ACL。
+- [ ] 把安裝目錄外的 portable `sister-desktop.exe` 與同版 `sister.exe` 放在一起，開設定
+      頁要是 `unsupported`；它不能開放 toggle，也不得改掉安裝版的 Run value。
+      安裝版判定必須來自 current-user uninstall `InstallLocation` 精確對應 current
+      exe parent，不能只看檔名。
+- [ ] 先故意寫壞 `config.toml`，再重開設定頁。一般設定可以失敗，但這一格仍要
+      從 HKCU 讀出 exact 五態。反過來按一般 Save 不得觸碰 Run value。
+- [ ] 在 Windows 「啟動應用程式」把 AI-Sister 另外停用。設定頁只能說 exact Run
+      value **已登錄**，並明說 `StartupApproved` 可另外擋下它；不能承諾下次
+      登入一定會跑。回 Windows 設定重新啟用後再驗真登入。
+- [ ] 在 recorder 正在跑時從設定關掉登入啟動。Run value 要立即消失，但這一輪
+      recorder 不可停；它只改下一次登入。
+
+**真登入 intent：**
+
+- [ ] Run value 開啟、第一張 `local-recording` 同意未簽時 sign out／sign in。desktop
+      要存活在 tray，主視窗不顯示、不取得焦點，也不彈 consent/onboarding；不得
+      開 recorder、產生新 heartbeat 或寫一輪新 `record.log`。測前先記下舊檔是否存在，
+      別把舊 heartbeat 墓碑當新寫入。
+- [ ] 簽有效 `local-recording` consent 後重新 sign out／sign in。主視窗仍不顯示，
+      5 秒 heartbeat 與工作管理員則要顯示一個由 desktop 啟動的 `sister.exe record
+      --desktop-supervised`。這是 tray-only，不是 no-op。
+- [ ] 簽同意後先明確 pause，再 sign out／sign in。desktop 可啟動 recorder 行程，但 pause
+      不可被解除；期間不得多 PNG／OCR／clipboard／input rows。只有人手 resume 才能再錄。
+- [ ] 用可控的 race fixture 把一次 explicit start 夾在 `local-recording` 撤回的
+      consent save 前後。撤回路徑要在 exclusive `consent.lock` 內、save 前先 atomic
+      publish 有 fresh generation 的 `consent-revoke.barrier`；它不可由 Start 清，也不可
+      由 recorder 消費。把 consent save 固定在 replace 前失敗、再讓等候中的 Explicit
+      繼續：舊 consent 即使仍有效，也必須是零 stop clear、零 spawn、零 `Booting`／
+      `Recording` heartbeat，barrier 仍在。再做成功 regrant：只能 generation-safe 清同一
+      代 barrier，較新 revoke 必須回 `Superseded`；清前要保留既有 `requested`／
+      `desktop-quit`，沒有普通 marker 時則補 `consent-revoked`，所以 regrant 本身不 restart。
+- [ ] 把 `consent.lock` 的 exclusive writer 暫停在 revoke transaction 裡，再分別送
+      desktop Explicit、Login preflight 與已到點的 watchdog retry。lock order 必須是
+      consent shared → stop → recorder lease／heartbeat；writer-first 的三場都要是零
+      stop clear、零 spawn、零 `Booting` heartbeat。反向做 start-first：start 先持 shared
+      guard 時，revoke 必須排在它後面；desktop parent 只持 guard 到 `Command::spawn`
+      回來便立即放掉、不可等 heartbeat，child 自己 nonblocking 重拿並持到第一拍，晚到
+      barrier 仍要讓它收工。不可兩邊各讀一份鎖外 snapshot 都自稱先到。另驗真人 CLI
+      Explicit 等 writer commit 後重讀，writer 撤回時不得啟動。
+- [ ] 用 concurrency fixture 同時從 CLI 與 desktop 各改**不同** consent sheet：先做
+      grant／grant，再做 grant／revoke。兩邊都必須在空的 `consent.lock` OS exclusive lock
+      內重讀最新 `consent.toml`、套當次變更、atomic save；最後要同時看得到兩個
+      操作的結果，不可 last writer wins 丟一張。lock file 本身可持久留空，
+      但執行中不可手動刪。local revoke 場另斷言 pre-save independent barrier 與
+      post-commit regrant ticket，不能再加一個 unlocked post-relatch 製造新 generation。
+      另用 disposable data dir 把 `consent.lock` 做成 symlink／directory；兩種都要
+      fail closed，不能 follow 或寫回 `consent.toml`。
+- [ ] 先開 primary desktop，收起主視窗，再手動開第二個
+      `sister-desktop.exe --ai-sister-login`。secondary 要交付 start intent 後退出，不可把
+      primary 主視窗 reveal／focus，也不可開第二個 recorder。
+
+**500ms／五分鐘 Login preflight 與 ownership：**
+
+- [ ] 正常退出留下 typed `desktop-quit`，並在下一次登入時分別暫時占住 `stop.lock`、
+      `recording.lock`，以及保留上一輪 fresh heartbeat。Login 必須約每 500ms 從 consent、
+      typed stop、lease、heartbeat **完整**重查，不 block 在舊 I/O 後面，也不增加 watchdog
+      failures。依序釋放 lock／讓 heartbeat 變 Stalled 或寫出 `stopped` 墓碑後，只能 spawn
+      一個 child、只清 `desktop-quit`，不得清 `requested`／`consent-revoked`。
+- [ ] 同一組 `desktop-quit` handoff 一直卡過五分鐘。deadline 到點前不得 clear／spawn；
+      到點後才釋放 barrier 也不可 late spawn，terminal 文案要持續說已逾時且沒有清停止
+      意圖。另把最後一次 500ms attempt 卡到 deadline 之後再放行，確認 commit 前的第二次
+      deadline check 一樣擋下。這段 preflight 不得把 watchdog failure count 推到 GaveUp。
+- [ ] stop marker 是 Absent 時，分別提供 occupied lease、`Live`／`Thinking`／`Stalled`
+      heartbeat，以及在 stop.lock 忙時先觀察 owner、之後才讀到 Absent。每一場都要轉成
+      External 並結束這份 Login intent；owner 稍後退出、heartbeat stale／missing／unreadable
+      也不得 takeover／restart，只有 `stopped` 墓碑能完成一般 external 離場證明。
+      不要把 typed `desktop-quit` 的窄 handoff 例外擴大到 Absent。
+- [ ] Login preflight 正在等 transient barrier 時，分別送真人 Stop、Quit、Explicit Start，
+      以及寫入 `requested`、`consent-revoked`、invalid consent、unreadable consent／control。
+      pending timer 都要取消，之後 barrier 恢復也不可啟動；失敗／逾時不得清 marker。
+      同一 worker 再送 delayed／secondary Login 必須忽略，不能重新取得一個五分鐘窗口。
+
+**只管 desktop-owned child 的 bounded supervisor：**
+
+- [ ] 用 disposable data dir 和安裝副本啟動一個 desktop-owned recorder；在工作管理員連續
+      終止 child 四次。第一、二、三次各自要約等 1 秒、5 秒、30 秒才有新 PID；
+      第四次後要明說已放棄，不再出現第五個 PID。`Booting` 多久都不能自動當成
+      健康 reset。
+- [ ] 製造一次非正常退出，讓第一次 1 秒 retry 成功，然後連續保持 `Recording`
+      十分鐘。期間要確認 `recording.beat` 的 timestamp 持續往前；反覆 poll 同一拍不能
+      自己累滿。再終止 child 時必須回到第一次失敗，約 1 秒後重試；不可沿用
+      之前的 5 秒或 30 秒。另做一場在未滿十分鐘時讓 heartbeat 變 missing／
+      stalled／unreadable／`Thinking` 之一，再恢復 Recording；必須從恢復後的新拍重算十分鐘。
+- [ ] 分別在 backoff 期間做三個場次：`sister stop`／系統匣手動停止、撤回
+      `local-recording`、從系統匣正常結束 desktop。每一場都不可在 timer 到點後
+      復活；停止 request 若和 child exit 競態，仍是「停止贏」。另做一場讓正在跑的
+      child 正常 exit 0，這場根本不可排 retry。
+- [ ] 分別在 Backoff timer 已到期前與 owned child Running 時，讓系統匣 manual Stop 的
+      durable write 失敗。worker 必須在 I/O 前先取消 Login／timer／automatic spawn；
+      Backoff 場到點後是零 spawn，Running 場後續再製造 child failure 也不可排 retry。
+      畫面要保留各自 lifecycle truth，並明講 stop 沒送達、目前 recorder 可能仍在跑，
+      不可冒充 Stopped。修好權限後第二次 Stop 仍可送達。
+- [ ] 接續上一項，在 stop-write failure overlay 還在時依次做 invalid-consent、stop.lock busy、
+      occupancy 與十秒 timeout 的 Explicit Start；四種失敗都不能解除 automatic-start
+      cancellation。最後做一次完整成功 commit 的真人 Explicit Start，只有這一次可以清掉
+      cancellation／failure overlay，之後新的 owned crash 才能重新排 1 秒 retry。
+- [ ] 在已排 backoff 或 owned child 還活著時，用 disposable data dir 的權限夾具讓
+      durable stop 寫入失敗，再從系統匣按「結束」。desktop 必須取消 in-memory retry、
+      留在行程中，把字母人顯示／聚焦並寫出 stop error；不可退出後把 recorder
+      留在背後，也不可在 timer 到點時 retry。還原權限後再按 stop／quit 才應正常離開。
+- [ ] 先由終端機人手啟動一個外部 `sister.exe record`，再開 desktop／送 login start
+      intent。desktop 要報 occupied 而不 spawn，不把那個 PID 收成 owned child；外部
+      recorder 後來退出時，desktop 不可替它重開。在 retry probe 中讀到 unknown 也要
+      放棄，不猜成空房。
+- [ ] 用同一個 disposable data dir 同時放行 CLI `sister record` 與 desktop start。只能一個在第一拍
+      `Booting` heartbeat 前 nonblocking 拿到 `recording.lock` 的 OS exclusive lock；另一個要
+      fail closed，不能兩個都開 DB。強制終止勝者後，OS handle drop 要讓新 recorder 能拿鎖。
+      檔案本身應是空的且可留著；只創建空 `recording.lock` 不能讓 UI／CLI 報 occupied，
+      也不要手動刪正被持有的 lock file。另在 disposable data dir 分別把這個路徑做成
+      symlink 和 directory／其他 non-regular file；兩種都要在第一拍前拒絕，不可 follow
+      symlink 去鎖 data dir 外的檔案。
+- [ ] 開著 Run setting 時在當前 Windows session 強制終止 desktop 自己。它不可被重開；
+      HKCU Run 只負責下一次登入，不是 desktop crash service。
+
+**reinstall／uninstall：**
+
+- [ ] 分別在 Run value absent 和 exact enabled 時做同版 reinstall，再在下一個真版本做
+      old-binary → new-binary upgrade。不得把 absent 自動打開，也不得把 exact enabled
+      清掉；若 install path 真的變了，新版必須把舊路徑照實顯示為 `mismatch`，不得猜成 on。
+- [ ] 開啟 exact Run value 後做真正 uninstall（不是 `/UPDATE`）。原本 PID 已按 installer
+      gate 要求先結束；uninstall 完後 `AI-Sister` Run value 要不存在，install root 要移除，
+      `%APPDATA%\ted-h\AI-Sister\data\` 的記憶仍在。`StartupApproved` 是 Windows 另管的
+      metadata；這項只斷言 app 的 Run value 已移除，不假裝 app 會清 OS 的所有歷史。
 
 ### alpha.106 先做兩段人工確認
 
@@ -136,7 +291,7 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 - [ ] 錄到一半在另一個終端機 `sister consent --revoke local-recording`。
       正在跑的 record 每 5 秒重讀同意書，所以撤回後最多再錄 5 秒加一拍；
       `capture.min_interval_ms` 超過 5 秒時，主要會等那一拍。結束理由要是
-      「第一張同意書被撤回」。
+      「本機記錄同意的停止條件生效」。
 
 ## 3. 錄一次，看她抓到什麼
 
@@ -839,7 +994,9 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
       icacls "%D%" /deny "%USERNAME%":(WD)
       ```
 
-      （停止請求 `stop.request` 就是一個新檔案），再從系統匣按「停止記錄」。
+      測前先確認 `stop.request` 不存在（新的顯式 start 本來就該清掉舊的
+      pending／consumed latch），再從系統匣按「停止記錄」；這樣上面的 deny 會擋住
+      這次即將建立的 durable request。
       驗完 `icacls "%D%" /remove:d "%USERNAME%"` 收回去，**這一步不要漏，不然
       她之後一張畫面都存不下來**。
       這裡不要對照某一句特定的話：走到的是 `write …\stop.request: Access is
@@ -1175,8 +1332,10 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
          `sister.exe`，畫面回到「她睡著了」。
 
       alpha.34 為止：那個停止請求會被她自己刪掉——清理排在 `Db::open`
-      **之後**，而 `stop.request` 裡沒有時戳，所以「我起來之前留下的」和「衝
-      著我來的」是同一個檔案。現在清理搬到開機的第一行了。
+      **之後**。現行協定更窄：desktop 的新顯式 start 在 spawn 前處理舊 latch，
+      CLI 顯式 start 在第一拍 heartbeat 前處理；但 supervised child／automatic retry 永遠
+      沒有 clear 能力。clear 後才到的 stop 要留成 `stop.request`，recorder 收到後只搬成
+      `stop.consumed`，不把 durable 意圖刪掉。
 - [ ] **同一件事的 CLI 版，順便驗那句話有沒有變。** 開一個終端機打
       `sister record`，趁它還沒印出第一行，在另一個終端機打 `sister stop`。
       那句話要說「她現在**還在開資料庫**……主迴圈還沒開始——這個請求會留著，
@@ -1186,8 +1345,9 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
       這就收工」，不是開始錄。
 - [ ] **反面（這條別跳過，它顧的是相反的那個錯）：沒有人在跑的時候打一次
       `sister stop`，然後再 `sister record`。** 她要**正常開始錄**，不可以閃
-      一下就不見。那個沒人接的停止請求會留在磁碟上，而開機的第一行就是把它
-      清掉——清錯邊的話症狀是「每次先按停止、再按開始，她就再也起不來」。
+      一下就不見。那個沒人接的 pending latch 會留在磁碟；只有這次**新的
+      顯式 start** 可在第一拍前清掉 pending／consumed，然後還要重讀 consent／stop。
+      automatic retry 不得用這條理由清 latch。
 - [ ] **「停止記錄」按完馬上按「結束」，那一場要算正常收工（alpha.37 修的，
       而弄壞它的是 alpha.36）。** 兩顆按鈕在同一張系統匣選單上，所以這是一
       個很自然的動作，而 alpha.36 會在這裡把她砍掉。做法：
@@ -1219,10 +1379,12 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
       還卡在 `Db::open` 裡、`try_wait()` 一定說她活著——那個判斷式**真的會被問
       到**，而正確答案是「不准砍」（她已經蓋過開機心跳了）。
       **綠的和紅的都是「她最後不見了」，所以要看的不是「有沒有不見」，是
-      「什麼時候不見、以及她走之前說了什麼」。** 「結束」那一下**無條件**先寫
-      一個 `stop.request`（`main.rs` 那個 `quit` 分支，寫在落刀之前），而她開機
-      第一行的 `clear_stop` 已經跑過了，所以那個請求會留著等她——她開完資料
-      庫、進主迴圈、看到請求、收工。**她本來就會走，走是對的。**
+      「什麼時候不見、以及她走之前說了什麼」。**「結束」那一下先請 supervisor
+      寫 durable `stop.request`**（寫在落刀之前），而 supervised child 沒有 clear
+      能力，所以那個請求會留著等她——她開完資料庫、進主迴圈、看到請求、收工。
+      **她本來就會走，走是對的。** 如果 durable write 失敗，這條改走 alpha.107
+      的反面：in-memory retry 已取消，但 desktop 不退出、顯示錯誤；不可繼續做
+      下面的成功落刀路徑。
       要看到的（綠）：
       1. 工作管理員裡那個 `sister.exe` **不會馬上消失**。你那顆大資料庫開多
          久，它就在那裡待多久（記憶體慢慢往上爬）。
