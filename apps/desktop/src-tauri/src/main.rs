@@ -828,7 +828,8 @@ struct RecordMenuPresentation {
 }
 
 /// 心跳仍是外部 recorder 的真相；supervisor 只覆蓋自己能證明的 child／retry。
-/// Thinking 永遠優先，因為那一段已停止擷取、只能等最後收尾。
+/// 未送達的 Stop 與正在等外部墓碑是更精確的 supervisor 證據；其餘狀態遇到
+/// Thinking 時，才由「已停止擷取、只等最後收尾」優先。
 fn record_menu_presentation(
     phase: Option<recorder_supervisor::SupervisorPhase>,
     presence: sister_core::heartbeat::Presence,
@@ -837,6 +838,12 @@ fn record_menu_presentation(
         return RecordMenuPresentation {
             action: RecordMenuAction::Stop,
             label: "再送一次停止要求",
+        };
+    }
+    if phase == Some(recorder_supervisor::SupervisorPhase::StoppingExternal) {
+        return RecordMenuPresentation {
+            action: RecordMenuAction::Wait,
+            label: "正在等外部 recorder 收工",
         };
     }
     if matches!(presence, sister_core::heartbeat::Presence::Thinking { .. }) {
@@ -857,10 +864,9 @@ fn record_menu_presentation(
             action: RecordMenuAction::Wait,
             label: "正在確認 recorder 已收工",
         },
-        Some(recorder_supervisor::SupervisorPhase::StoppingExternal) => RecordMenuPresentation {
-            action: RecordMenuAction::Wait,
-            label: "正在等外部 recorder 收工",
-        },
+        Some(recorder_supervisor::SupervisorPhase::StoppingExternal) => {
+            unreachable!("handled before heartbeat precedence")
+        }
         Some(
             recorder_supervisor::SupervisorPhase::Backoff
             | recorder_supervisor::SupervisorPhase::GaveUp,
