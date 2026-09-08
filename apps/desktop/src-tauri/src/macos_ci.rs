@@ -139,7 +139,7 @@ pub fn run(directory: &Path) -> Result<(), String> {
 
     let child_stdout = create_new_file(&directory.join("child.stdout.log"))?;
     let child_stderr = create_new_file(&directory.join("child.stderr.log"))?;
-    let child_executable = super::recorder_path()?;
+    let child_executable = super::recorder_supervisor::recorder_path()?;
     let child = Command::new(&child_executable)
         .arg("__macos-ci-capture-probe")
         .arg(&directory)

@@ -2242,7 +2242,7 @@ impl Worker {
     }
 }
 
-fn recorder_path() -> Result<PathBuf, String> {
+pub(crate) fn recorder_path() -> Result<PathBuf, String> {
     let me = std::env::current_exe().map_err(|error| format!("問不出自己在哪裡：{error}"))?;
     let directory = me
         .parent()

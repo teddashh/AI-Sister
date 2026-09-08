@@ -4596,11 +4596,10 @@ fn main() {
                 shell.data_dir.clone(),
             );
             *shell.recorder.lock().expect("recorder supervisor") = Some(recorder.clone());
-            let mut should_start_for_login = launch_intent == LaunchIntent::Login;
+            let should_start_for_login = launch_intent == LaunchIntent::Login;
             #[cfg(windows)]
-            {
-                should_start_for_login |= SECOND_INSTANCE_LOGIN_PENDING.swap(false, Ordering::AcqRel);
-            }
+            let should_start_for_login = should_start_for_login
+                || SECOND_INSTANCE_LOGIN_PENDING.swap(false, Ordering::AcqRel);
             if should_start_for_login {
                 if let Err(error) = recorder.login_start() {
                     tracing::error!("Windows 登入啟動交不出去：{error}");
