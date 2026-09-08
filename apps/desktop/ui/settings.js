@@ -9,6 +9,13 @@ const el = {
   brainSay: document.querySelector("[data-brain-say]"),
   personaEnabled: document.querySelector("[data-persona-enabled]"),
   personaId: document.querySelector("[data-persona-id]"),
+  personaPicker: document.querySelector("[data-persona-picker]"),
+  personaChoiceGroups: document.querySelector("[data-persona-choice-groups]"),
+  personaPreview: document.querySelector("[data-persona-preview]"),
+  personaPreviewMedia: document.querySelector("[data-persona-preview-media]"),
+  personaPreviewName: document.querySelector("[data-persona-preview-name]"),
+  personaPreviewGroup: document.querySelector("[data-persona-preview-group]"),
+  personaPreviewState: document.querySelector("[data-persona-preview-state]"),
   personaTagline: document.querySelector("[data-persona-tagline]"),
   personaMotion: document.querySelector("[data-persona-motion]"),
   personaTapLines: document.querySelector("[data-persona-tap-lines]"),
@@ -61,27 +68,63 @@ const el = {
   reload: document.querySelector("[data-reload]"),
 };
 
-// 顯示名／tagline 與桌面上的 allowlist 同一份公開 catalog；這裡只負責讓使用者在
-// 存之前看懂自己選的是誰，不把任何一段 personaContext 或 prompt 送進模型。
-const PERSONA_TAGLINES = Object.freeze({
-  chatgpt: "結構與驗證；固定台詞用「我在」開場。",
-  claude: "論證與邊界；固定台詞用「慢慢來」開場。",
-  gemini: "打開可能；固定台詞用「一起看看」開場。",
-  grok: "直球測試；固定台詞用「收到」開場。",
-  deepseek: "深挖證據與原理。",
-  qwen: "布局、控場與收斂。",
-  mistral: "俐落拆解，減少多餘協調。",
-  venice: "自由、直接、不受拘束。",
-  sakana: "保留變體，試另一條演化路徑。",
-  perplexity: "先查證，再下結論。",
-  glm: "先做出可動的版本。",
-  kimi: "守住前文、脈絡與交接。",
-  hunyuan: "把上下游與被漏掉的人接回來。",
-  minimax: "先讓作品能看、能聽、能感受到。",
-  nemotron: "工程調度與可部署交付。",
-  cohere: "多方溝通、引用與協議。",
-  mimo: "先看人用起來順不順。",
-});
+// 設定頁只吃 classic script 預先放好的純本機公開投影。它沒有 prompt、voice、
+// permission 或 URL；portrait 也必須逐格等於 `./personas/<id>.webp`。這裡驗的是
+// renderer 真正要畫的 shape，不能因為 script 是 bundled 就拿未知欄位冒充可用。
+const PERSONA_GROUPS = Object.freeze(["四姊妹", "13 位閨密"]);
+
+function personaCatalogProjection() {
+  const projection = globalThis.__AI_SISTER_PERSONA_CATALOG__;
+  if (
+    projection?.schema !== "ai-sister/persona-catalog/v1" ||
+    !Array.isArray(projection?.personas) ||
+    projection.personas.length !== 17
+  ) {
+    return Object.freeze([]);
+  }
+
+  const ids = new Set();
+  const groupCounts = new Map(PERSONA_GROUPS.map((group) => [group, 0]));
+  const catalog = [];
+  for (const value of projection.personas) {
+    if (
+      typeof value?.id !== "string" ||
+      !/^[a-z][a-z0-9]*$/u.test(value.id) ||
+      ids.has(value.id) ||
+      typeof value?.alias !== "string" ||
+      value.alias.trim() === "" ||
+      !PERSONA_GROUPS.includes(value?.group) ||
+      typeof value?.tagline !== "string" ||
+      value.tagline.trim() === "" ||
+      value?.portrait !== `./personas/${value.id}.webp`
+    ) {
+      return Object.freeze([]);
+    }
+    ids.add(value.id);
+    groupCounts.set(value.group, groupCounts.get(value.group) + 1);
+    catalog.push(
+      Object.freeze({
+        id: value.id,
+        alias: value.alias,
+        group: value.group,
+        tagline: value.tagline,
+        portrait: value.portrait,
+      }),
+    );
+  }
+  if (groupCounts.get("四姊妹") !== 4 || groupCounts.get("13 位閨密") !== 13) {
+    return Object.freeze([]);
+  }
+  return Object.freeze(catalog);
+}
+
+const PERSONA_CATALOG = personaCatalogProjection();
+const PERSONA_BY_ID = Object.freeze(
+  Object.fromEntries(PERSONA_CATALOG.map((persona) => [persona.id, persona])),
+);
+const PERSONA_TAGLINES = Object.freeze(
+  Object.fromEntries(PERSONA_CATALOG.map((persona) => [persona.id, persona.tagline])),
+);
 
 function say(message, bad = false) {
   el.say.textContent = message;
@@ -807,21 +850,179 @@ let cloudOk = null;
  */
 let watchingNow = "unreadable";
 let savedBrainCommand = "";
+let savedPersonaId = null;
+let personaPreviewId = null;
+const personaChoices = [];
+
+function personaImageWithFallback(persona, imageClass, fallbackClass) {
+  const media = document.createElement("span");
+  media.className = imageClass === "persona-choice-image" ? "persona-choice-media" : "";
+  media.setAttribute("aria-hidden", "true");
+
+  const image = document.createElement("img");
+  image.className = imageClass;
+  image.alt = "";
+  image.decoding = "async";
+  image.draggable = false;
+  image.src = persona.portrait;
+
+  const fallback = document.createElement("span");
+  fallback.className = fallbackClass;
+  fallback.textContent = "圖片讀不到，仍可用名稱選擇";
+  fallback.hidden = true;
+  image.addEventListener("error", () => {
+    image.hidden = true;
+    fallback.hidden = false;
+  });
+  media.append(image, fallback);
+  return { media, image, fallback };
+}
+
+function renderPersonaPreview(persona) {
+  if (!el.personaPreview || !el.personaPreviewMedia) return;
+  if (persona === null) {
+    personaPreviewId = null;
+    el.personaPreviewMedia.replaceChildren();
+    el.personaPreviewGroup.textContent = "";
+    if (typeof el.personaId?.dataset.unrecognizedPersonaId === "string") {
+      el.personaPreviewName.textContent = "角色 ID 不在 17 人名單裡";
+      el.personaPreviewState.textContent =
+        "設定檔回傳了一個非空、但這一版不認得的角色 ID；沒有改成 ChatGPT，也不能儲存。";
+    } else if (PERSONA_CATALOG.length !== 17) {
+      el.personaPreviewName.textContent = "角色名單讀不出來";
+      el.personaPreviewState.textContent =
+        "這一版的本機角色 catalog 不完整；沒有拿預設角色冒充可用。";
+    } else {
+      el.personaPreviewName.textContent = "角色 ID 讀不出來";
+      el.personaPreviewState.textContent =
+        "設定檔沒有回傳可辨識的角色 ID；沒有拿預設角色冒充已存設定。";
+    }
+    return;
+  }
+
+  if (personaPreviewId !== persona.id) {
+    const { media } = personaImageWithFallback(
+      persona,
+      "persona-preview-image",
+      "persona-preview-image-fallback",
+    );
+    // 每次換人都換一整棵 image/fallback。上一張圖較晚 error 時只會改已移出的
+    // 舊節點，不能把目前這位的預覽誤畫成壞圖。
+    el.personaPreviewMedia.replaceChildren(...media.children);
+    personaPreviewId = persona.id;
+  }
+  el.personaPreviewName.textContent = persona.alias;
+  el.personaPreviewGroup.textContent = persona.group;
+
+  const saved = savedPersonaId === null ? null : PERSONA_BY_ID[savedPersonaId] ?? null;
+  if (unreadable) {
+    el.personaPreviewState.textContent = "設定檔讀不出來，不能確認現在存的是哪一位。";
+  } else if (saved === null) {
+    el.personaPreviewState.textContent = "正在讀已存角色；這張圖目前只是在本機預覽。";
+  } else if (saved.id === persona.id) {
+    el.personaPreviewState.textContent = `設定檔目前存的是 ${persona.alias}。`;
+  } else {
+    el.personaPreviewState.textContent =
+      `正在本機預覽 ${persona.alias}，尚未儲存；設定檔目前仍是 ${saved.alias}。`;
+  }
+}
+
+function renderPersonaPicker() {
+  if (!el.personaChoiceGroups || !el.personaId) return;
+  personaChoices.splice(0);
+  if (PERSONA_CATALOG.length !== 17) {
+    el.personaChoiceGroups.textContent =
+      "這一版的 17 人本機角色 catalog 讀不完整；沒有顯示可操作的假名單。";
+    if (el.personaPicker) el.personaPicker.disabled = true;
+    renderPersonaPreview(null);
+    return;
+  }
+
+  const groups = [];
+  for (const groupName of PERSONA_GROUPS) {
+    const section = document.createElement("section");
+    section.className = "persona-choice-group";
+    section.setAttribute("role", "group");
+    section.setAttribute("aria-label", groupName);
+
+    const heading = document.createElement("h3");
+    heading.textContent = groupName;
+    const grid = document.createElement("div");
+    grid.className = "persona-choice-grid";
+
+    for (const persona of PERSONA_CATALOG.filter((item) => item.group === groupName)) {
+      const label = document.createElement("label");
+      label.className = "persona-choice";
+
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "persona-id";
+      input.value = persona.id;
+      input.dataset.personaChoice = persona.id;
+      input.setAttribute("aria-label", `${persona.alias}，${persona.group}`);
+      input.setAttribute("aria-checked", "false");
+
+      const card = document.createElement("span");
+      card.className = "persona-choice-card";
+      const { media } = personaImageWithFallback(
+        persona,
+        "persona-choice-image",
+        "persona-choice-image-fallback",
+      );
+      const copy = document.createElement("span");
+      copy.className = "persona-choice-copy";
+      const name = document.createElement("strong");
+      name.className = "persona-choice-name";
+      name.textContent = persona.alias;
+      const group = document.createElement("span");
+      group.className = "persona-choice-group-name";
+      group.textContent = persona.group;
+      const selected = document.createElement("span");
+      selected.className = "persona-choice-state";
+      selected.setAttribute("aria-hidden", "true");
+      copy.append(name, group, selected);
+      card.append(media, copy);
+      label.append(input, card);
+      grid.append(label);
+
+      input.addEventListener("change", () => {
+        if (!input.checked || input.disabled) return;
+        el.personaId.value = persona.id;
+        paintPersonaSettings();
+      });
+      personaChoices.push({ input, card, selected, persona });
+    }
+    section.append(heading, grid);
+    groups.push(section);
+  }
+  el.personaChoiceGroups.replaceChildren(...groups);
+}
 
 function paintPersonaSettings() {
   if (!el.personaEnabled || !el.personaId) return;
-  const known = Object.hasOwn(PERSONA_TAGLINES, el.personaId.value);
+  const persona = PERSONA_BY_ID[el.personaId.value] ?? null;
+  const known = persona !== null;
   if (el.personaTagline) {
     el.personaTagline.textContent = known
-      ? PERSONA_TAGLINES[el.personaId.value]
+      ? persona.tagline
       : "這個角色 ID 不在這一版的 17 人名單裡。";
   }
 
   // 關掉角色不等於清掉他的選擇：三格只灰掉、值留著，下次打開還是同一位。
   const controlsOff = unreadable || !known || !el.personaEnabled.checked;
   el.personaId.disabled = controlsOff;
+  if (el.personaPicker) el.personaPicker.disabled = controlsOff;
+  for (const choice of personaChoices) {
+    const selected = known && choice.persona.id === persona.id;
+    choice.input.checked = selected;
+    choice.input.disabled = controlsOff;
+    choice.input.setAttribute("aria-checked", String(selected));
+    choice.card.dataset.selected = String(selected);
+    choice.selected.textContent = selected ? "已選" : "";
+  }
   if (el.personaMotion) el.personaMotion.disabled = controlsOff;
   if (el.personaTapLines) el.personaTapLines.disabled = controlsOff;
+  renderPersonaPreview(persona);
 }
 
 const PERSONA_ASSET_PHASES = Object.freeze([
@@ -1504,6 +1705,18 @@ function apply(s) {
   // settings_read 是 Rust typed config 的投影，但 renderer 不能拿那件事替自己的
   // seam 背書。未知／缺少 ID 讓整份設定 unreadable，不可把它靜默畫成 ChatGPT。
   if (typeof s?.persona_id !== "string" || !Object.hasOwn(PERSONA_TAGLINES, s.persona_id)) {
+    if (el.personaId) {
+      if (typeof s?.persona_id === "string" && s.persona_id !== "") {
+        // 真 select 不接受名單外的 value，另外留一份原值供畫面／診斷分清楚
+        // 「讀到未知 ID」和「根本沒讀到」。假 DOM 也會保留 value，守住不能
+        // 被開場 ChatGPT 預覽改寫的那條線。
+        el.personaId.dataset.unrecognizedPersonaId = s.persona_id;
+        el.personaId.value = s.persona_id;
+      } else {
+        delete el.personaId.dataset.unrecognizedPersonaId;
+        el.personaId.value = "";
+      }
+    }
     throw new Error("設定回傳了這一版不認得的角色 ID；沒有套用這份設定。");
   }
   queryLogWas = s.query_log;
@@ -1512,7 +1725,10 @@ function apply(s) {
   if (el.brainCommand) el.brainCommand.value = s.brain_command ?? "";
   if (el.brainArgs) el.brainArgs.value = (s.brain_args ?? []).join("\n");
   if (el.personaEnabled) el.personaEnabled.checked = s.persona_enabled !== false;
-  if (el.personaId) el.personaId.value = s.persona_id ?? "chatgpt";
+  if (el.personaId) {
+    delete el.personaId.dataset.unrecognizedPersonaId;
+    el.personaId.value = s.persona_id;
+  }
   if (el.personaMotion) el.personaMotion.checked = s.persona_motion !== false;
   if (el.personaTapLines) el.personaTapLines.checked = s.persona_tap_lines !== false;
   el.apps.value = s.excluded_apps.join("\n");
@@ -1523,6 +1739,9 @@ function apply(s) {
   el.querylog.checked = s.query_log;
   el.framesDays.value = s.frames_days;
   el.textDays.value = s.text_days;
+  // 只有完整 settings_read 套用到這裡，才有資格把某位叫作「設定檔目前存的」。
+  // 點卡片只會改上面的 hidden select；write 失敗時這個基準不會跟著移動。
+  savedPersonaId = s.persona_id;
   paintPersonaSettings();
 }
 
@@ -1760,8 +1979,9 @@ async function load() {
     await relint();
     ok = true;
   } catch (err) {
-    // `apply` 在 `await` 之後才跑，所以讀失敗的時候**一個欄位都沒被寫過**，
-    // 畫面上留著 settings.html 的預設值：三個空的排除框、兩顆沒打勾的防線。
+    // `apply` 在 `await` 之後才跑，所以讀失敗時不會套用任何可寫設定；唯一可能
+    // 留下的是 hidden select 上那份未知 persona ID，專門用來避免把它改寫成 ChatGPT。
+    // 其餘畫面仍留著 settings.html 的預設值：三個空的排除框、兩顆沒打勾的防線。
     // 而那正好是「什麼都沒擋、兩道防線都關了」長的樣子。
     //
     // 真正在跑的 recorder 這時候用的是舊的那一份（見 `Config::reload`），
@@ -2171,6 +2391,18 @@ async function save() {
     if (!unreadable) el.save.disabled = false;
   }
 }
+
+renderPersonaPicker();
+// 真 DOM 的 hidden select 會取第一個 option；測試 DOM 與損壞 markup 不一定會。
+// 這只決定 settings_read 回來前的本機預覽，savedPersonaId 仍是 null，所以畫面不會
+// 把 ChatGPT 冒充成已存設定。
+if (
+  PERSONA_CATALOG.length === 17 &&
+  (typeof el.personaId?.value !== "string" || el.personaId.value === "")
+) {
+  el.personaId.value = PERSONA_CATALOG[0].id;
+}
+paintPersonaSettings();
 
 el.save?.addEventListener("click", () => void save());
 el.reload?.addEventListener("click", () => void load());

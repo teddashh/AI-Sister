@@ -550,6 +550,11 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     都在 sanitized manifest；其他服裝、reaction、raw receipt、私有 path 與 debug
     圖不出貨。runtime 只建當前人的 21–26 層，全數解碼成功前繼續顯示
     WebP；任一檔壞掉也不轉成字母 fallback。
+  - ✅ alpha.111 把同一組 17 張 bundled WebP 直接畫成設定頁的圖像 radio 卡，分成
+    四姊妹與 13 位閨密；鍵盤可操作，壞縮圖仍保留完整名稱。點選只換本機未存預覽，
+    不做 IPC／GET／TTS 或 Reel decode。`settings_write` 成功後才嘗試通知主視窗；
+    事件沒送出會明講重開 desktop 後生效。
+    設定頁自己也要成功讀回，才會把預覽稱為已存。
   - 四姊妹兩句 fixed tap-line 對得到已核准本機錄音；其餘 13 位可在使用者 opt-in
     後使用 `localService` 中文系統 voice，沒有本機 voice 就保持靜音。
   - 完成共用 omnibus 立繪／固定語音 asset-pack 的 end-to-end pipeline：本機揭露
@@ -610,6 +615,13 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     自我複製後不保證把 inner exit code 傳回 caller，所以只斷言行程與檔案未動。
     同版 reinstall 也**不是**真 old-binary → new-binary 的升級證據；silent NSIS 不會
     執行版本判斷頁，不能把 registry 改字當作升級測試。
+  - ✅ alpha.111 新增真正的相鄰版本 gate：只接受 bytes／SHA-256 pinned 的公開
+    alpha.110 Setup，先驗已安裝舊 binary，再用 current Setup 原地覆蓋。Run value
+    absent 與 exact enabled 分兩條 old→new lane；installer 本身不得改 install root 外的
+    DB／config／consent／證據檔，之後再由新版 binary 開啟資料庫、精確解析舊查詢與四張
+    consent，並用 `export --with-frames` 搬出同 hash 的 synthetic PNG。這證明可匯出的
+    evidence file association，不冒充真 OCR、`frame_get` 或 WebView click；正式 artifact 的人工升級
+    體驗仍另驗。
   - ⬜ 正式 `AI-Sister-Setup.exe` 的斷網安裝仍待 Ted 實測；在線 CI 與靜態網路邊界
     只證明 WebView2 offline installer 已內嵌、程式沒有 updater／直接 socket。
   - ⬜ alpha.106 的 hook 後仍有一個窄窗：desktop 若恰在放行後才啟動，Tauri stock
@@ -687,7 +699,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     CLI／desktop `recording.lock`，
     以及各種取消、占用／未知、外部 recorder、desktop crash 與 uninstall。未勾完前不宣稱
     Windows 人工通過。
-  - ⬜ code signing、真跨版升級、跨層 master stop 與官網仍未完成；
+  - ⬜ code signing、跨層 master stop、installer late-start 窄窗與官網仍未完成；
     1.0 不內建自動 updater，由使用者手動下載新版 installer。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）

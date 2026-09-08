@@ -5,7 +5,7 @@
 換成別人、別套服裝或遠端 URL。
 
 固定選材是四姊妹 Claude、Gemini、Grok、ChatGPT，以及 13 位閨密 DeepSeek、Qwen、
-Mistral、Venice、Sakana、Perplexity、GLM、Kimi、Hunyuan、MiniMax、Nemotron、Cohere、
+Mistral、Llama（stable id: `venice`）、Sakana、Perplexity、GLM、Kimi、Hunyuan、MiniMax、Nemotron、Cohere、
 MiMo；每人只取 `workplace` 的 `v2_parts`。reactions、其他 19 套服裝、舊版 outfit、
 normalized source，以及 GLM 目錄裡的 `_flat.png`／`_bust.png` 都不進 runtime 包。
 

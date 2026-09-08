@@ -201,9 +201,11 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
   已淘汰；沒有下載、下載失敗或撤回舊 pack 時，仍保留所選角色，
   S1 一項功能都不能少。
 - **Release 1.0 要把 persona 當產品面，不是換色彩蛋。** 首批 catalog 是
-  ChatGPT / Claude / Gemini / Grok / DeepSeek / Qwen / Mistral / Venice / Sakana /
+  ChatGPT / Claude / Gemini / Grok / DeepSeek / Qwen / Mistral / Llama（stable id: `venice`）/ Sakana /
   Perplexity / GLM / Kimi / Hunyuan / MiniMax / Nemotron / Cohere / MiMo；使用者可以選人、
-  看角色圖、在自己點角色時聽到固定的非敏感台詞。persona 不得改答案事實、證據、
+  看角色圖、在自己點角色時聽到固定的非敏感台詞。設定頁直接用 17 張 bundled WebP
+  當圖像選擇卡；選擇只改未存預覽，儲存成功才嘗試即時通知主視窗換人，
+  通知失敗則明講要重開 desktop。persona 不得改答案事實、證據、
   同意書、守門員分數或 hands 權限。
 - 舊固定語音走內容定址 omnibus asset pack。下載前先列
   `cdn.ted-h.com`、精確大小 **73,261,088 bytes** 與資料邊界，只有使用者明確按下才可

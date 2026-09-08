@@ -285,7 +285,9 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   預設 ChatGPT。alpha.110 固定選 17 套 workplace 分層 rig（402 PNG、
   35,140,885 bytes），runtime 只建立當前角色的 21–26 層；所有圖層解碼成功
   前都顯示 bundled WebP，任一檔失敗就留在 WebP 且不自動 retry。沒有
-  Neutral，也沒有 code-native 字母 fallback。兩組角色圖的來源、大小、SHA-256
+  Neutral，也沒有 code-native 字母 fallback。設定頁把這 17 張 WebP 畫成 native radio
+  圖像卡；切換只更新未存的本機預覽，`settings_write` 成功後才 emit 給主視窗。
+  兩組角色圖的來源、大小、SHA-256
   與 Apache-2.0 授權排除分開固定在 bundled manifest/NOTICE。舊 optional pack
   只補四姊妹八句預錄固定台詞；
   使用者看見 `cdn.ted-h.com`、精確大小 73,261,088 bytes 與資料邊界後明確按下，
@@ -751,7 +753,7 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
 | 向量（選配） | `sqlite-vec` 0.1.9（2026 復活版；256-d int8 MRL，brute-force 在我們規模內互動級） | pre-1.0 格式風險 → 存 model-id+dim，設計成可背景 re-embed |
 | 本地 embedding | 遠期選配；Release 1.0 沒有內嵌推論 runtime | 腦優先 spawn 使用者已登入的 CLI；沒有 HTTP client |
 | 磁碟保護 | SQLite/frame 無應用層加密；依賴 BitLocker／FileVault／LUKS | 未開 OS 全碟加密時，離線竊碟者可讀；PRIVACY／THREAT_MODEL 明講 |
-| UI shell | **Tauri 2** Rust backend + build-free HTML/CSS/ES modules；tray + global-shortcut 已落地 | alpha.106 新增 Windows startup guard + 官方 single-instance receiver 與 current-user NSIS；alpha.107 新增預設關閉、installed-copy-only 的 HKCU Run 登入啟動，以及只管 desktop-owned child 的 bounded recorder supervisor。原生 Windows CI 已驗 alpha.106 install mechanics；alpha.107 有 policy／fixture／test-subkey 自動測試，但正式 artifact 的真登入／重試／uninstall 仍待人工證據。late-process 窄窗、code signing／真跨版升級仍是 Release 1.0 工作；不內建自動 updater |
+| UI shell | **Tauri 2** Rust backend + build-free HTML/CSS/ES modules；tray + global-shortcut 已落地 | alpha.106 新增 Windows startup guard + 官方 single-instance receiver 與 current-user NSIS；alpha.107 新增預設關閉、installed-copy-only 的 HKCU Run 登入啟動，以及只管 desktop-owned child 的 bounded recorder supervisor。原生 Windows CI 已驗 alpha.106 install mechanics；alpha.107 有 policy／fixture／test-subkey 自動測試，但正式 artifact 的真登入／重試／uninstall 仍待人工證據。alpha.111 加入 pinned alpha.110 → current 的真跨版 installer gate；late-process 窄窗與 code signing 仍是 Release 1.0 工作，不內建自動 updater |
 | Pet overlay | always-on-top 透明無框窗 + `set_ignore_cursor_events` 動態 toggle（輪詢游標；Tauri 無 per-region hit-testing）| 已知坑：macOS production 透明窗 bug 群、全螢幕 space 需動 collectionBehavior、Wayland overlay 品質差 |
 | macOS 權限 | `tauri-plugin-macos-permissions` 2.3（Screen Recording 無 entitlement，純 TCC + hardened runtime + notarization；MAS 不可行，站外發行） | 開發期 `tccutil reset ScreenCapture` 測 onboarding |
 | hands | **Rust crate `sister-hands`**，CLI／desktop 共用 permit 與 target policy | 尚未做獨立 process；需要時另立 threat-model milestone |

@@ -73,9 +73,12 @@
             <em>關掉只拿掉角色與固定台詞；記錄、搜尋、狀態、暫停和時間軸都不變。</em>
           </span>
         </label>
-        <label class="field">
-          <span>常駐角色</span>
-          <select data-persona-id>
+        <!--
+          select 只保留成既有 settings payload 的單一值；真正給人操作的是下面
+          的 native radio group。兩邊由 settings.js 同步，卡片 click 只改未存表單，
+          不送 IPC，也不叫主視窗先換人。
+        -->
+        <select data-persona-id hidden aria-hidden="true" tabindex="-1">
             <optgroup label="四姊妹">
               <option value="chatgpt">ChatGPT</option>
               <option value="claude">Claude</option>
@@ -97,8 +100,27 @@
               <option value="cohere">Cohere</option>
               <option value="mimo">MiMo</option>
             </optgroup>
-          </select>
-        </label>
+        </select>
+        <fieldset class="persona-picker" data-persona-picker>
+          <legend>常駐角色</legend>
+          <p class="hint">
+            用圖片選一位；方向鍵可在角色間移動選擇。這裡只預覽，按頁尾「儲存」成功後
+            主視窗才會換人。
+          </p>
+          <div class="persona-choice-groups" data-persona-choice-groups></div>
+        </fieldset>
+        <figure class="persona-preview" data-persona-preview>
+          <span class="persona-preview-media" data-persona-preview-media aria-hidden="true"></span>
+          <figcaption>
+            <span class="persona-preview-heading">
+              <strong data-persona-preview-name>正在讀角色…</strong>
+              <span data-persona-preview-group></span>
+            </span>
+            <span class="persona-preview-state" data-persona-preview-state aria-live="polite">
+              正在讀已存角色…
+            </span>
+          </figcaption>
+        </figure>
         <p class="persona-tagline" data-persona-tagline></p>
         <p class="hint">
           四姊妹與 13 位閨密是受同名 AI 產品啟發的虛構角色；AI-Sister 是獨立產品，未與這些供應商
@@ -436,6 +458,8 @@
       <button class="ghost" data-reload type="button">重讀</button>
       <button class="primary" data-save type="button">儲存</button>
     </footer>
+    <!-- 純本機公開 catalog；只有 17 個 ID／名稱／分組／tagline／bundled WebP path。 -->
+    <script src="./personas/catalog.js"></script>
     <script type="module" src="./settings.js"></script>
   </body>
 </html>

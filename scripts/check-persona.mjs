@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import { domOf, fakeDocument, fakeEl, loader, read, watchNonsense } from "./fake-dom.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -21,10 +22,14 @@ const SETTINGS_HTML = read(join(UI, "settings.html"));
 const SRC = read(join(UI, "app.js"));
 const STYLES = read(join(UI, "styles.css"));
 const SETTINGS = read(join(UI, "settings.js"));
+const SETTINGS_CATALOG_SOURCE = read(join(UI, "personas/catalog.js"));
 const MAIN = read(join(ROOT, "apps/desktop/src-tauri/src/main.rs"));
 const CONFIG = read(join(ROOT, "crates/sister-core/src/config.rs"));
 const BUNDLED = JSON.parse(read(join(UI, "personas/manifest.json")));
 const REELS = JSON.parse(read(join(UI, "persona-reels/manifest.json")));
+const settingsCatalogContext = {};
+runInNewContext(SETTINGS_CATALOG_SOURCE, settingsCatalogContext);
+const SETTINGS_CATALOG = settingsCatalogContext.__AI_SISTER_PERSONA_CATALOG__;
 const ASSET_PROJECTION = JSON.parse(
   read(join(ROOT, "crates/sister-assets/tests/fixtures/public-manifest-selected-v2.json")),
 );
@@ -452,10 +457,11 @@ check("renderer 沒有字母 glyph 路徑", !SRC.includes("data-persona-glyph"))
 check("bundle manifest 恰好 17 人", BUNDLED.assets.length === 17, BUNDLED.assets.length);
 const expectedIds = Object.keys(EXPECTED).sort();
 const manifestIds = BUNDLED.assets.map((asset) => asset.id).sort();
-const personaSelect = SETTINGS_HTML.match(/<select data-persona-id>[\s\S]*?<\/select>/u)?.[0] ?? "";
+const personaSelect = SETTINGS_HTML.match(/<select[^>]*data-persona-id[^>]*>[\s\S]*?<\/select>/u)?.[0] ?? "";
 const settingsIds = [...personaSelect.matchAll(/<option value="([^"]+)">/gu)]
   .map((match) => match[1])
   .sort();
+const catalogIds = (SETTINGS_CATALOG?.personas ?? []).map((persona) => persona.id).sort();
 check(
   "manifest 是 exact 17 IDs，不只剛好有 17 列",
   JSON.stringify(manifestIds) === JSON.stringify(expectedIds),
@@ -465,6 +471,41 @@ check(
   "設定選單也是同一組 exact 17 IDs",
   JSON.stringify(settingsIds) === JSON.stringify(expectedIds),
   settingsIds,
+);
+check(
+  "圖像選角 projection 也是同一組 exact 17 IDs",
+  SETTINGS_CATALOG?.schema === "ai-sister/persona-catalog/v1" &&
+    JSON.stringify(catalogIds) === JSON.stringify(expectedIds),
+  catalogIds,
+);
+const catalogById = Object.fromEntries(
+  (SETTINGS_CATALOG?.personas ?? []).map((persona) => [persona.id, persona]),
+);
+const sisterIds = new Set(["chatgpt", "claude", "gemini", "grok"]);
+check(
+  "選角 projection 的 alias／group／tagline／WebP path 全部對回 runtime 與 manifest",
+  expectedIds.every((id) => {
+    const persona = catalogById[id];
+    const bundled = BUNDLED.assets.find((asset) => asset.id === id);
+    return (
+      persona?.alias === EXPECTED[id].alias &&
+      persona?.tagline === EXPECTED[id].tagline &&
+      persona?.group === (sisterIds.has(id) ? "四姊妹" : "13 位閨密") &&
+      persona?.portrait === `./personas/${bundled?.file}`
+    );
+  }),
+  catalogById,
+);
+const catalogScript = SETTINGS_HTML.indexOf('<script src="./personas/catalog.js"></script>');
+const settingsScript = SETTINGS_HTML.indexOf('<script type="module" src="./settings.js"></script>');
+check(
+  "設定頁先載純本機 catalog，而且完全不載 Reel manifest",
+  catalogScript >= 0 &&
+    settingsScript > catalogScript &&
+    !SETTINGS_HTML.includes("persona-reels/manifest.js") &&
+    !SETTINGS.includes("persona-reels") &&
+    !/\bfetch\s*\(/u.test(SETTINGS),
+  { catalogScript, settingsScript },
 );
 for (const [id, expected] of Object.entries(EXPECTED)) {
   const p = await open(persona(id));
@@ -479,8 +520,8 @@ for (const [id, expected] of Object.entries(EXPECTED)) {
   check(`${id} alias/tagline`, avatar.title === `${expected.alias}：${expected.tagline}`, avatar.title);
   check(
     `${id} 設定頁 tagline 同步`,
-    SETTINGS.includes(`${id}: ${JSON.stringify(expected.tagline)}`),
-    expected.tagline,
+    catalogById[id]?.tagline === expected.tagline,
+    catalogById[id]?.tagline,
   );
   const actualPalette = [
     p.css.get("--persona-bg"),

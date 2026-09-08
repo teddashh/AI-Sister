@@ -37,6 +37,7 @@ const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui"
 const SRC = process.argv[2] ?? join(UI, "settings.js");
 const HTML = read(join(UI, "settings.html"));
 const boot = loader(read(SRC));
+const catalogBoot = loader(read(join(UI, "personas/catalog.js")));
 const MAIN = read(resolve(UI, "../src-tauri/src/main.rs"));
 
 function settingsWriteWatching(state) {
@@ -395,8 +396,27 @@ async function open({
   };
 
   const nonsense = watchNonsense();
+  // 真 settings.html 會先跑 classic local catalog，再跑 settings.js；fixture 也要
+  // 維持同一個順序，不能讓產品因測試漏載依賴而走一條真人不會走的 fallback。
+  await catalogBoot();
   await boot();
   await tick();
+
+  const descendants = (root) => {
+    const found = [];
+    const walk = (current) => {
+      for (const child of current?.children ?? []) {
+        found.push(child);
+        walk(child);
+      }
+    };
+    walk(root);
+    return found;
+  };
+  const personaRadios = () =>
+    descendants(node("[data-persona-choice-groups]")).filter(
+      (candidate) => candidate.tag === "input" && candidate.type === "radio",
+    );
   return {
     node,
     writes,
@@ -435,6 +455,20 @@ async function open({
       for (const fn of events.get(name) ?? []) fn({ payload });
       await tick();
     },
+    personaRadios,
+    personaImages: () =>
+      descendants(node("[data-persona-choice-groups]")).filter(
+        (candidate) => candidate.tag === "img",
+      ),
+    async choosePersona(id) {
+      const target = personaRadios().find((radio) => radio.value === id);
+      if (!target || target.disabled) return false;
+      target.checked = true;
+      for (const fn of target.handlers.change ?? []) fn({ isTrusted: true });
+      await tick();
+      return true;
+    },
+    previewChildren: () => descendants(node("[data-persona-preview-media]")),
     setAsset(s) {
       assetState = { ...s, disclosure: s.disclosure ? { ...s.disclosure } : null };
     },
@@ -1212,6 +1246,113 @@ console.log("⑲ʳ 未知 Persona ID 讓整份設定 unreadable，不靜默改�
   check("未知 ID 的錯誤有說出來", p.say().includes("不認得的角色 ID"), p.say());
   check("整份 config 表單 fail closed", !p.node("[data-unreadable]").hidden && p.node("[data-save]").disabled);
   check("renderer 沒把未知值改寫成 ChatGPT", p.node("[data-persona-id]").value !== "chatgpt", p.node("[data-persona-id]").value);
+  check(
+    "未知的非空 ID 原值仍被保留",
+    p.node("[data-persona-id]").dataset.unrecognizedPersonaId === "not-in-this-version",
+    p.node("[data-persona-id]").dataset.unrecognizedPersonaId,
+  );
+  check(
+    "未知 ID 不會被誤報成 catalog 壞掉",
+    p.node("[data-persona-preview-state]").textContent.includes("沒有改成 ChatGPT") &&
+      !p.node("[data-persona-preview-state]").textContent.includes("catalog 不完整"),
+    p.node("[data-persona-preview-state]").textContent,
+  );
+}
+
+console.log("⑲ˢ 17 人圖像 radio catalog 只改未存預覽；Save 成功才走既有寫入");
+{
+  const p = await open();
+  const radios = p.personaRadios();
+  const images = p.personaImages();
+  const ids = radios.map((radio) => radio.value);
+  check("恰好 17 個 native radio", radios.length === 17 && radios.every((radio) => radio.type === "radio"), ids);
+  check("同名 native radio 保留 Tab／方向鍵／Space 語意", radios.every((radio) => radio.name === "persona-id"), radios.map((radio) => radio.name));
+  check(
+    "每位只有自己的 bundled WebP 縮圖，不載 Reel layers",
+    images.length === 17 &&
+      images.every((image) => image.src === `./personas/${image.parentNode?.parentNode?.parentNode?.children?.[0]?.value}.webp`) &&
+      !SRC.includes("persona-reels") &&
+      !/\bfetch\s*\(/u.test(SRC),
+    images.map((image) => image.src),
+  );
+  check(
+    "卡片上看得到 alias 與四姊妹／13 位閨密分組",
+    p.node("[data-persona-choice-groups]").textContent.includes("ChatGPT") &&
+      p.node("[data-persona-choice-groups]").textContent.includes("MiMo") &&
+      p.node("[data-persona-choice-groups]").textContent.includes("四姊妹") &&
+      p.node("[data-persona-choice-groups]").textContent.includes("13 位閨密"),
+    p.node("[data-persona-choice-groups]").textContent,
+  );
+  const selectedBefore = radios.filter((radio) => radio.checked);
+  check(
+    "已存角色同時有 checked 與 aria-checked，不只換顏色",
+    selectedBefore.length === 1 &&
+      selectedBefore[0].value === "chatgpt" &&
+      selectedBefore[0].dataset["aria-checked"] === "true" &&
+      p.node("[data-persona-choice-groups]").textContent.includes("已選"),
+    selectedBefore.map((radio) => ({ value: radio.value, aria: radio.dataset["aria-checked"] })),
+  );
+  check(
+    "focus ring 畫在整張卡且使用固定高對比前景色",
+    read(join(UI, "settings.css")).includes(
+      '.persona-choice > input[type="radio"]:focus-visible + .persona-choice-card',
+    ) && read(join(UI, "settings.css")).includes("outline: 3px solid var(--fg)"),
+  );
+
+  const commandsBefore = p.invokes.map(({ cmd }) => cmd);
+  await p.choosePersona("grok");
+  const commandsAfterChoice = p.invokes.map(({ cmd }) => cmd);
+  check("點卡只改 hidden form value", p.node("[data-persona-id]").value === "grok");
+  check("本機預覽立即換成 Grok", p.node("[data-persona-preview-name]").textContent === "Grok");
+  check(
+    "未存狀態逐字分開預覽與設定檔",
+    p.node("[data-persona-preview-state]").textContent.includes("尚未儲存") &&
+      p.node("[data-persona-preview-state]").textContent.includes("仍是 ChatGPT"),
+    p.node("[data-persona-preview-state]").textContent,
+  );
+  check(
+    "選角本身 0 IPC／GET／TTS，也沒有 rig decode",
+    JSON.stringify(commandsAfterChoice) === JSON.stringify(commandsBefore) &&
+      p.writes.length === 0 &&
+      !SRC.includes(".decode("),
+    { before: commandsBefore, after: commandsAfterChoice },
+  );
+  await p.save();
+  check("Save 才把 Grok 放進既有 settings_write", p.writes.length === 1 && p.writes[0].persona_id === "grok", p.writes);
+  check(
+    "成功讀回後才把 Grok 稱作設定檔現值",
+    p.node("[data-persona-preview-state]").textContent === "設定檔目前存的是 Grok。",
+    p.node("[data-persona-preview-state]").textContent,
+  );
+}
+
+console.log("⑲ᵗ Save 失敗保留未存預覽；縮圖壞掉仍有完整名稱可選");
+{
+  const p = await open({
+    onWrite() {
+      throw new Error("config.toml 是唯讀的");
+    },
+  });
+  const grokImage = p.personaImages().find((image) => image.src === "./personas/grok.webp");
+  for (const fn of grokImage?.handlers.error ?? []) fn();
+  check(
+    "broken thumbnail 換成文字回退，不生字母 glyph",
+    grokImage?.hidden === true &&
+      grokImage?.parentNode?.children?.some(
+        (child) => child.hidden === false && child.textContent.includes("仍可用名稱選擇"),
+      ) &&
+      !HTML.includes("data-persona-glyph") &&
+      !SRC.includes("data-persona-glyph"),
+  );
+  check("broken thumbnail 的 Grok radio 仍可選", await p.choosePersona("grok"));
+  await p.save();
+  check("寫失敗說出真正原因", p.say().includes("config.toml 是唯讀的"), p.say());
+  check(
+    "失敗後不冒充已套用，仍說尚未儲存且設定檔是 ChatGPT",
+    p.node("[data-persona-preview-state]").textContent.includes("尚未儲存") &&
+      p.node("[data-persona-preview-state]").textContent.includes("仍是 ChatGPT"),
+    p.node("[data-persona-preview-state]").textContent,
+  );
 }
 
 console.log("⑳ 拔手撞號的純決策真的接回桌面回傳值");

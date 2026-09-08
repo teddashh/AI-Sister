@@ -94,6 +94,204 @@ select {
   cursor: pointer;
 }
 
+.persona-picker {
+  border: 0;
+  margin: 8px 0 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.persona-picker > legend {
+  font-weight: 600;
+  padding: 0;
+}
+
+.persona-choice-groups {
+  display: grid;
+  gap: 12px;
+}
+
+.persona-choice-group {
+  border: 0;
+  padding: 0;
+}
+
+.persona-choice-group h3 {
+  font-size: 12px;
+  margin: 0 0 5px;
+  opacity: 0.72;
+}
+
+.persona-choice-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+}
+
+.persona-choice {
+  cursor: pointer;
+  min-width: 0;
+  position: relative;
+}
+
+/*
+ * radio 不能 display:none：同名 native radio 才會保留 Tab／方向鍵／Space 語意。
+ * 視覺焦點畫在旁邊整張卡上，但真正拿到焦點的仍是原生 input。
+ */
+.persona-choice > input[type="radio"] {
+  block-size: 1px;
+  clip-path: inset(50%);
+  inline-size: 1px;
+  opacity: 0;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+}
+
+.persona-choice-card {
+  align-items: center;
+  background: var(--field);
+  border: 2px solid transparent;
+  border-radius: 10px;
+  display: grid;
+  gap: 5px;
+  grid-template-rows: 72px auto;
+  min-height: 119px;
+  padding: 6px;
+  text-align: center;
+}
+
+.persona-choice:hover .persona-choice-card {
+  background: rgb(246 236 223 / 13%);
+}
+
+.persona-choice > input[type="radio"]:checked + .persona-choice-card {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px rgb(246 236 223 / 28%);
+}
+
+.persona-choice > input[type="radio"]:focus-visible + .persona-choice-card {
+  outline: 3px solid var(--fg);
+  outline-offset: 2px;
+}
+
+.persona-choice > input[type="radio"]:disabled + .persona-choice-card {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.persona-choice-media,
+.persona-choice-image,
+.persona-choice-image-fallback {
+  border-radius: 8px;
+  display: block;
+  height: 72px;
+  width: 100%;
+}
+
+.persona-choice-media {
+  overflow: hidden;
+}
+
+.persona-choice-image {
+  object-fit: cover;
+}
+
+.persona-choice-image-fallback {
+  align-items: center;
+  background: rgb(246 236 223 / 7%);
+  color: var(--warn);
+  display: flex;
+  font-size: 11px;
+  justify-content: center;
+  line-height: 1.35;
+  padding: 6px;
+}
+
+.persona-choice-image-fallback[hidden] {
+  display: none;
+}
+
+.persona-choice-copy {
+  display: grid;
+  line-height: 1.3;
+  min-width: 0;
+}
+
+.persona-choice-name {
+  overflow-wrap: anywhere;
+}
+
+.persona-choice-group-name {
+  font-size: 10.5px;
+  opacity: 0.62;
+}
+
+.persona-choice-state {
+  color: var(--ok);
+  font-size: 10.5px;
+  font-weight: 600;
+  min-height: 1.35em;
+}
+
+.persona-preview {
+  align-items: center;
+  background: rgb(246 236 223 / 5%);
+  border: 1px solid rgb(246 236 223 / 14%);
+  border-radius: 10px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 76px minmax(0, 1fr);
+  margin: 10px 0 7px;
+  padding: 8px;
+}
+
+.persona-preview-media,
+.persona-preview-image,
+.persona-preview-image-fallback {
+  border-radius: 8px;
+  display: block;
+  height: 76px;
+  width: 76px;
+}
+
+.persona-preview-image {
+  object-fit: cover;
+}
+
+.persona-preview-image-fallback {
+  align-items: center;
+  background: rgb(246 236 223 / 7%);
+  color: var(--warn);
+  display: flex;
+  font-size: 11px;
+  justify-content: center;
+  line-height: 1.35;
+  padding: 6px;
+  text-align: center;
+}
+
+.persona-preview-image-fallback[hidden] {
+  display: none;
+}
+
+.persona-preview figcaption,
+.persona-preview-heading {
+  display: grid;
+  min-width: 0;
+}
+
+.persona-preview-heading > span {
+  font-size: 11px;
+  opacity: 0.66;
+}
+
+.persona-preview-state {
+  font-size: 11.5px;
+  line-height: 1.45;
+  margin-top: 4px;
+}
+
 .persona-tagline {
   border-left: 3px solid var(--accent);
   margin: 0 0 9px;

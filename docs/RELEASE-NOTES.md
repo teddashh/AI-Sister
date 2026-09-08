@@ -59,6 +59,41 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.111
+
+**這一版把 17 位角色直接放到設定頁讓人看圖選，也第一次用公開舊版 installer
+跑真正的 old-binary → new-binary 升級。**
+
+「常駐角色」不再只是一列文字選單。設定頁使用已隨程式提供、manifest 逐檔 pin 住的
+17 張 WebP，分成四姊妹與 13 位閨密的 native radio 圖像卡；不另外增加角色素材，
+也不在設定頁解碼 402 張 Reel layer。卡片可用鍵盤操作，縮圖讀不到時仍保留完整名稱，
+不會生出 Neutral 或單字母替身。點選只換本機預覽，畫面會分清「尚未儲存」與設定檔
+目前是哪一位；只有頁尾儲存寫入成功才嘗試把新角色通知主視窗，事件沒送出會明講
+重開 desktop 後生效。設定頁也要成功讀回
+才會把預覽稱為已存。選角本身不做 IPC、
+Persona GET、Azure POST、語音播放或 rig decode。
+
+Windows CI 新增一支只准在 disposable GitHub Actions runner 執行的跨版閘門。它先下載
+公開 `v0.1.0-alpha.110` 的 `AI-Sister-Setup.exe`，要求精確 305,417,570 bytes 與
+SHA-256 `3e661803d1b1d867aae0281e56baeb6a165b9178069ad912dc0c8869d1521965`，真的安裝並驗出
+舊版 `sister.exe` 後，才拿這一輪 Setup 原地升級。baseline 與 current alpha 編號必須
+相鄰，不能把同版 reinstall 或改 registry 字串冒充升級。
+
+Run value 原本不存在與 exact enabled 分兩條 old→new lane；前者不可被自動打開，後者的
+REG_SZ 與完整命令不可被清掉或改寫，無關 Run fixture 也不能動。installer 執行前後逐檔
+比對 install root 外的 DB、config、consent、sentinel 與 synthetic evidence，先證明安裝器
+沒有碰使用者狀態；再由新版已安裝 `sister.exe` 開啟資料庫，解析舊版寫入的電話事實、
+frame/chunk/app/title 關聯與四張 consent 的原 timestamps。非密設定包含 Persona 與
+default-off Azure typed region/voice，升級前後保持原 bytes。
+
+replay 本身沒有截圖像素，所以測試沒有拿一個非 null `frame_id` 冒充可點證據。它明確把
+repo 內 pinned OCR PNG 接到隔離舊版資料庫的一筆 frame，標成 synthetic fixture；升級後
+由新版產品的 `export --with-frames` 搬出，重新核對 PNG hash、DB integrity／foreign keys，
+再從匯出資料夾查回同一筆答案。這證明 schema／查詢與可匯出 evidence file association
+跨版仍接得上；沒有執行 `frame_get`。正式 WebView2 的出處 click、真人 OCR、Run 登入與升級操作體驗仍要在
+Windows artifact 人工確認，沒有在 CI 裡冒充完成。
+
+
 ## v0.1.0-alpha.110
 
 **這一版讓已明確 opt in 的 Azure 在每份最新答案完成後自動朗讀，

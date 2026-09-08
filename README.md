@@ -26,8 +26,13 @@ Manager 金鑰與三個固定區域的 native POST 已接線，正式 Windows ar
 與取消時序仍待人工勾驗。alpha.110 把已明確啟用且重簽第四張的 Azure 改為每份最新
 新答案完成後自動朗讀一次，仍可隨時關閉；alpha.109 的 click-only 第四張不會被沿用。
 同版將 5.2 GB Reel 候選縮成 17 套 workplace 分層 rig：402 張 PNG、
-35,140,885 bytes，只解碼目前角色，並保留原 WebP 當解碼失敗退路。
-code signing、真舊版到新版的升級與跨層 master stop 仍未完成，
+35,140,885 bytes，只解碼目前角色，並保留原 WebP 當解碼失敗退路。alpha.111 再把
+17 張 bundled WebP 直接做成設定頁的圖像選角卡；點選先留在本機預覽，儲存成功才嘗試即時通知
+主視窗換人，通知失敗會明講重開 desktop 後生效。同版 Windows CI 會把 pinned 公開 alpha.110 真正安裝後，再由這一版 installer
+原地升級；Run absent／enabled 兩條路、舊 DB 查詢、四張同意與 synthetic
+證據檔關聯都要讀回來，Persona／Azure 非密設定則要原 bytes 保留並仍可由新版解析。
+這不是正式 WebView 點圖或真 OCR 的人工證據。
+code signing、跨層 master stop 與 installer late-start 窄窗仍未完成，
 所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
