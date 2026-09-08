@@ -45,12 +45,18 @@
             alt="ChatGPT 角色圖"
             draggable="false"
           />
+          <!--
+            選配的本機分層 rig。app.js 只有在目前角色的每一張 PNG 都 load + decode
+            成功後才會一次放進來；之前與任何失敗都繼續顯示上面的 bundled WebP。
+          -->
+          <span class="persona-reel" data-persona-reel aria-hidden="true" hidden></span>
         </span>
       </button>
       <p class="state-line" data-state-line>在聽</p>
       <!-- 只有使用者點上面的 button 才會填字；開場、輪詢與 timer 都不碰這一格。 -->
       <p class="persona-line" data-persona-line aria-live="polite" hidden></p>
-      <!-- 不 autoplay。固定錄音與本機系統語音都只能從同一次 click 播。 -->
+      <!-- 固定錄音與本機系統語音仍只能從 click 播。Azure 只在獨立同意
+           與預設關閉的自動朗讀開關都有效時，播放使用者新提問的最新答案。 -->
       <audio data-persona-audio preload="none" hidden></audio>
       <!--
         只在「沒有人在記錄」的時候出現。她已經說得出那句話了，但說完之後
@@ -106,6 +112,8 @@
       <button class="ask-send" data-ask-send type="button" title="問">→</button>
     </footer>
 
+    <!-- 純資料；不存在或不合契約時 app.js 仍只顯示 bundled WebP。 -->
+    <script src="./persona-reels/manifest.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

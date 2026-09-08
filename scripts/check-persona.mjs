@@ -19,10 +19,12 @@ const UI = join(ROOT, "apps/desktop/ui");
 const HTML = read(join(UI, "index.html"));
 const SETTINGS_HTML = read(join(UI, "settings.html"));
 const SRC = read(join(UI, "app.js"));
+const STYLES = read(join(UI, "styles.css"));
 const SETTINGS = read(join(UI, "settings.js"));
 const MAIN = read(join(ROOT, "apps/desktop/src-tauri/src/main.rs"));
 const CONFIG = read(join(ROOT, "crates/sister-core/src/config.rs"));
 const BUNDLED = JSON.parse(read(join(UI, "personas/manifest.json")));
+const REELS = JSON.parse(read(join(UI, "persona-reels/manifest.json")));
 const ASSET_PROJECTION = JSON.parse(
   read(join(ROOT, "crates/sister-assets/tests/fixtures/public-manifest-selected-v2.json")),
 );
@@ -91,6 +93,8 @@ const EXPECTED = Object.freeze({
 async function open(personaView = persona(), options = {}) {
   let plays = 0;
   const speaks = [];
+  const reelImages = [];
+  const deferredReelLoads = [];
   let finishPersonaRead = null;
   let finishVoiceRead = null;
   const initialPersonaRead = options.deferPersonaRead
@@ -127,9 +131,73 @@ async function open(personaView = persona(), options = {}) {
   const voiceReads = [];
   const nonsense = watchNonsense();
 
+  if (Object.hasOwn(options, "reelManifest")) {
+    globalThis.__AI_SISTER_PERSONA_REELS__ = options.reelManifest;
+  } else {
+    delete globalThis.__AI_SISTER_PERSONA_REELS__;
+  }
+  const reelLayers = new Map();
+  for (const rig of Array.isArray(options.reelManifest?.rigs)
+    ? options.reelManifest.rigs
+    : []) {
+    for (const layer of Array.isArray(rig?.layers) ? rig.layers : []) {
+      reelLayers.set(`./persona-reels/${layer.file}`, { id: rig.id, layer });
+    }
+  }
+
+  const createElement = (tag) => {
+    const element = fakeEl(tag);
+    if (tag !== "img") return element;
+    let src = "";
+    Object.defineProperty(element, "src", {
+      configurable: true,
+      get: () => src,
+      set(value) {
+        src = String(value);
+        const declared = reelLayers.get(src);
+        reelImages.push(element);
+        element.reelId = declared?.id ?? null;
+        element.naturalWidth = declared?.layer?.width ?? 0;
+        element.naturalHeight = declared?.layer?.height ?? 0;
+        element.decodeCalls = 0;
+        element.decode = async () => {
+          element.decodeCalls += 1;
+          if (
+            options.reelFailure?.kind === "decode" &&
+            options.reelFailure?.file === declared?.layer?.file
+          ) {
+            throw new Error("fixture decode failed");
+          }
+        };
+        const finish = () => {
+          if (
+            options.reelFailure?.kind === "load" &&
+            options.reelFailure?.file === declared?.layer?.file
+          ) {
+            element.onerror?.(new Error("fixture load failed"));
+          } else {
+            element.onload?.();
+          }
+        };
+        if (options.deferReelLoads) {
+          deferredReelLoads.push({ id: declared?.id ?? null, finish });
+        } else {
+          queueMicrotask(finish);
+        }
+      },
+    });
+    const removeAttribute = element.removeAttribute.bind(element);
+    element.removeAttribute = (name) => {
+      if (name === "src") src = "";
+      removeAttribute(name);
+    };
+    return element;
+  };
+
   globalThis.document = fakeDocument(node, {
     visibilityState: "visible",
     documentElement: root,
+    createElement,
   });
   globalThis.location = { search: "" };
   globalThis.addEventListener = () => {};
@@ -240,7 +308,14 @@ async function open(personaView = persona(), options = {}) {
     nonsense,
     voiceReads,
     speaks,
+    reelImages,
     plays: () => plays,
+    finishAudio() {
+      node("[data-persona-audio]").onended?.();
+    },
+    failAudio() {
+      node("[data-persona-audio]").onerror?.();
+    },
     async clickAvatar() {
       const button = node("[data-avatar]");
       if (button.disabled) return false;
@@ -293,6 +368,12 @@ async function open(personaView = persona(), options = {}) {
     },
     async resolveVoiceRead() {
       finishVoiceRead?.();
+      await tick();
+    },
+    async settleReel(id) {
+      for (const pending of deferredReelLoads.filter((item) => item.id === id)) {
+        pending.finish();
+      }
       await tick();
     },
   };
@@ -424,6 +505,193 @@ for (const [id, expected] of Object.entries(EXPECTED)) {
   check(`${id} manifest size/hash 對上 shipped bytes`, bytes === bundled?.bytes && digest === bundled?.sha256, { bytes, digest, bundled });
 }
 
+console.log("③ᵇ Reel 只建 active rig；整組 decode 前與任何失敗都保留 WebP");
+{
+  const manifestScript = HTML.indexOf('<script src="./persona-reels/manifest.js"></script>');
+  const appScript = HTML.indexOf('<script type="module" src="./app.js"></script>');
+  check(
+    "本機 manifest 在 app.js 前預載",
+    manifestScript >= 0 && appScript > manifestScript,
+    { manifestScript, appScript },
+  );
+  check("HTML 有 hidden Reel 容器", /data-persona-reel[^>]*hidden/u.test(HTML));
+
+  const noManifest = await open(persona("chatgpt"));
+  check(
+    "沒有 manifest 完全照舊，不建立動態 layer",
+    noManifest.reelImages.length === 0 &&
+      !noManifest.node("[data-persona-portrait]").hidden &&
+      noManifest.node("[data-persona-reel]").hidden,
+    noManifest.reelImages.map((image) => image.src),
+  );
+
+  const pending = await open(persona("chatgpt"), {
+    reelManifest: REELS,
+    deferReelLoads: true,
+  });
+  const chatgptRig = REELS.rigs.find((rig) => rig.id === "chatgpt");
+  check(
+    "只建立 active ChatGPT 的 21–26 層",
+    pending.reelImages.length === chatgptRig.layers.length &&
+      pending.reelImages.every(
+        (image) => image.src.startsWith("./persona-reels/rigs/chatgpt/") && image.reelId === "chatgpt",
+      ),
+    pending.reelImages.map((image) => image.src),
+  );
+  const firstLayer = chatgptRig.layers[0];
+  const firstImage = pending.reelImages[0];
+  check(
+    "layer 位置以 manifest viewport crop 換算，不把完整 1280 canvas 硬塞進頭像",
+    firstImage.style.left ===
+      `${(((firstLayer.x - chatgptRig.viewport.x) / chatgptRig.viewport.width) * 100).toFixed(5)}%` &&
+      firstImage.style.top ===
+        `${(((firstLayer.y - chatgptRig.viewport.y) / chatgptRig.viewport.height) * 100).toFixed(5)}%` &&
+      firstImage.style.width ===
+        `${((firstLayer.width / chatgptRig.viewport.width) * 100).toFixed(5)}%`,
+    { left: firstImage.style.left, top: firstImage.style.top, width: firstImage.style.width },
+  );
+  const reorderedIndex = chatgptRig.layers.findIndex((layer) => layer.render_z !== layer.z);
+  const reorderedLayer = chatgptRig.layers[reorderedIndex];
+  const reorderedImage = pending.reelImages[reorderedIndex];
+  check(
+    "眼部用 canonical render_z 而不是 raw z，role 才能決定眨眼層",
+    reorderedIndex >= 0 &&
+      reorderedImage.style.zIndex === String(reorderedLayer.render_z) &&
+      reorderedImage.dataset.reelRole === reorderedLayer.role &&
+      Object.hasOwn(reorderedImage.dataset, "reelEye") === (reorderedLayer.role === "eye"),
+    { layer: reorderedLayer, zIndex: reorderedImage?.style.zIndex },
+  );
+  check(
+    "全組 load/decode 完成前 WebP 不消失也不露半套 rig",
+    !pending.node("[data-persona-portrait]").hidden &&
+      pending.node("[data-persona-reel]").hidden &&
+      pending.node("[data-persona-reel]").children.length === 0,
+  );
+  await pending.settleReel("chatgpt");
+  check(
+    "每層都 decode 成功後才一次換成完整 rig",
+      pending.reelImages.every((image) => image.decodeCalls === 1) &&
+      pending.node("[data-persona-reel]").children.length === chatgptRig.layers.length &&
+      !pending.node("[data-persona-reel]").hidden &&
+      !pending.node("[data-persona-portrait]").hidden &&
+      pending.node("[data-avatar]").classList.contains("reel-ready") &&
+      pending.node("[data-avatar]").dataset.reel === "ready",
+    {
+      decodes: pending.reelImages.map((image) => image.decodeCalls),
+      children: pending.node("[data-persona-reel]").children.length,
+    },
+  );
+
+  const brokenLayer = chatgptRig.layers[3].file;
+  const broken = await open(persona("chatgpt"), {
+    reelManifest: REELS,
+    reelFailure: { kind: "decode", file: brokenLayer },
+  });
+  check(
+    "任一層 decode 失敗就整組丟掉並保留 WebP",
+    broken.node("[data-persona-reel]").children.length === 0 &&
+      broken.node("[data-persona-reel]").hidden &&
+      !broken.node("[data-persona-portrait]").hidden &&
+      !Object.hasOwn(broken.node("[data-avatar]").dataset, "reel"),
+    brokenLayer,
+  );
+
+  const race = await open(persona("chatgpt"), {
+    reelManifest: REELS,
+    deferReelLoads: true,
+  });
+  await race.fromOutside("persona-changed", persona("claude"));
+  const claudeRig = REELS.rigs.find((rig) => rig.id === "claude");
+  check(
+    "切換只再建立新 active Claude 的 layers",
+    race.reelImages.filter((image) => image.reelId === "chatgpt").length ===
+      chatgptRig.layers.length &&
+      race.reelImages.filter((image) => image.reelId === "claude").length ===
+        claudeRig.layers.length &&
+      race.reelImages
+        .filter((image) => image.reelId === "chatgpt")
+        .every((image) => image.src === "" && image.onload === null && image.onerror === null),
+    race.reelImages.map((image) => image.reelId),
+  );
+  await race.settleReel("claude");
+  check(
+    "新角色先完成就只顯示新角色",
+    race.node("[data-persona-reel]").children.length === claudeRig.layers.length &&
+      race.node("[data-persona-reel]").children.every((image) => image.reelId === "claude"),
+  );
+  await race.settleReel("chatgpt");
+  check(
+    "舊角色晚 load/decode 不會覆蓋新角色",
+    race.node("[data-avatar]").dataset.persona === "claude" &&
+      race.node("[data-persona-reel]").children.length === claudeRig.layers.length &&
+      race.node("[data-persona-reel]").children.every((image) => image.reelId === "claude"),
+  );
+
+  const shippedRigResults = [];
+  for (const id of Object.keys(EXPECTED)) {
+    const page = await open(persona(id), { reelManifest: REELS });
+    const rig = REELS.rigs.find((candidate) => candidate.id === id);
+    shippedRigResults.push({
+      id,
+      expected: rig?.layers.length ?? null,
+      created: page.reelImages.length,
+      published: page.node("[data-persona-reel]").children.length,
+      ready: page.node("[data-avatar]").dataset.reel ?? null,
+    });
+  }
+  check(
+    "出貨的 17 個 rig 都通過同一份 runtime 契約",
+    shippedRigResults.every(
+      ({ expected, created, published, ready }) =>
+        expected >= 21 &&
+        expected <= 26 &&
+        created === expected &&
+        published === expected &&
+        ready === "ready",
+    ),
+    shippedRigResults,
+  );
+
+  const forged = JSON.parse(JSON.stringify(REELS));
+  forged.rigs.find((rig) => rig.id === "chatgpt").layers[0].file =
+    "rigs/chatgpt/../claude/00_back_hair.png";
+  const rejected = await open(persona("chatgpt"), { reelManifest: forged });
+  check(
+    "manifest 路徑不能跨 persona，也不能讓 runtime 建 img",
+    rejected.reelImages.length === 0 && !rejected.node("[data-persona-portrait]").hidden,
+    rejected.reelImages.map((image) => image.src),
+  );
+  const unapproved = await open(persona("chatgpt"), {
+    reelManifest: { ...REELS, rights_review: "pending" },
+  });
+  check(
+    "runtime 只接受已核准的 owner grant 投影",
+    unapproved.reelImages.length === 0 && !unapproved.node("[data-persona-portrait]").hidden,
+  );
+  check(
+    "runtime 沒有 fetch，PNG URL 只能固定 prepend 本機 persona-reels",
+    !/\bfetch\s*\(/u.test(SRC) &&
+      SRC.includes('image.src = `./persona-reels/${layer.file}`') &&
+      SRC.includes('const prefix = `rigs/${id}/`'),
+  );
+  check(
+    "Reel 動畫只在 motion + idle/thinking；paused/asleep 有 blanket stop",
+    STYLES.includes('.motion .avatar[data-state="idle"] .persona-reel-layer[data-reel-eye]') &&
+      STYLES.includes('.motion .avatar[data-state="thinking"] .persona-reel-layer[data-reel-eye]') &&
+      STYLES.includes('.avatar[data-state="paused"] .persona-reel-layer') &&
+      STYLES.includes('.avatar[data-state="asleep"] .persona-reel-layer') &&
+      !STYLES.includes("data-reel-drift") &&
+      !STYLES.includes("data-reel-mouth"),
+  );
+  check(
+    "56px 答案／URL 模式換回 WebP，不拆已 decode rig",
+    STYLES.includes("body.has-hits .avatar.reel-ready .portrait") &&
+      STYLES.includes("body.has-url-policy .avatar.reel-ready .portrait") &&
+      STYLES.includes("body.has-hits .persona-reel") &&
+      STYLES.includes("body.has-url-policy .persona-reel"),
+  );
+}
+
 console.log("④ 關掉 Persona 只拿掉角色，不碰核心 UI");
 {
   const p = await open(persona("grok", { enabled: false }));
@@ -480,6 +748,31 @@ console.log("⑥ fixed-pack seam fail closed；即使假裝已安裝，語音也
   check("click 只向 Rust 取當句 fixed voice", JSON.stringify(p.voiceReads) === JSON.stringify([firstVoiceId]), p.voiceReads);
   check("明確 click 的固定 line 才播一次", p.plays() === 1, p.plays());
   check("播放來源只能是 exact WAV data URL", p.node("[data-persona-audio]").src.startsWith("data:audio/wav;base64,"), p.node("[data-persona-audio]").src);
+  check(
+    "fixed WAV 真正開始播放才進 speaking",
+    p.node("[data-avatar]").classList.contains("speaking"),
+  );
+  p.finishAudio();
+  check(
+    "fixed WAV ended 清掉 speaking",
+    !p.node("[data-avatar]").classList.contains("speaking"),
+  );
+
+  const fixedError = await open(installed);
+  await fixedError.clickAvatar();
+  fixedError.failAudio();
+  check(
+    "fixed WAV error 清掉 speaking",
+    !fixedError.node("[data-avatar]").classList.contains("speaking"),
+  );
+
+  const fixedStopped = await open(installed);
+  await fixedStopped.clickAvatar();
+  await fixedStopped.ask("下一題");
+  check(
+    "換題 stop 清掉 fixed WAV speaking",
+    !fixedStopped.node("[data-avatar]").classList.contains("speaking"),
+  );
   check(
     "display line ID 與 manifest voice ID 分開",
     SRC.includes("voiceLineId: `${id}-greeting`") &&
@@ -543,6 +836,20 @@ console.log("⑥ fixed-pack seam fail closed；即使假裝已安裝，語音也
   check("沒有固定錄音的角色用 localService 中文聲音", local.speaks.length === 1, local.speaks);
   check("系統語音不向 Rust 取任意文字", local.voiceReads.length === 0, local.voiceReads);
   check("系統語音拿到的正是畫面固定台詞", local.speaks[0]?.text === "先看用起來順不順。你可以直接問。", local.speaks[0]?.text);
+  check(
+    "localService 排入 queue 還不算 speaking",
+    !local.node("[data-avatar]").classList.contains("speaking"),
+  );
+  local.speaks[0]?.onstart?.();
+  check(
+    "localService onstart 才進 speaking",
+    local.node("[data-avatar]").classList.contains("speaking"),
+  );
+  local.speaks[0]?.onend?.();
+  check(
+    "localService 最後一段 ended 清掉 speaking",
+    !local.node("[data-avatar]").classList.contains("speaking"),
+  );
 
   const remoteOnly = await open(persona("mimo", { voice_enabled: true }), {
     systemVoices: [{ name: "Remote", lang: "zh-TW", localService: false }],
@@ -559,6 +866,10 @@ console.log("⑥ fixed-pack seam fail closed；即使假裝已安裝，語音也
 
   const pending = await open(installed, { deferVoiceRead: true });
   await pending.clickAvatar();
+  check(
+    "fixed WAV native read 還在飛時不冒充 speaking",
+    !pending.node("[data-avatar]").classList.contains("speaking"),
+  );
   await pending.ask("新問題");
   await pending.resolveVoiceRead();
   check("新問題使較晚回來的 fixed WAV 失效", pending.plays() === 0, pending.plays());
@@ -618,12 +929,21 @@ console.log("⑥ fixed-pack seam fail closed；即使假裝已安裝，語音也
       !spokenAnswer.includes("我本來已經忘了"),
     spokenAnswer,
   );
+  answerLocal.speaks[0]?.onstart?.();
+  check(
+    "前提：答案 localService 已開始 speaking",
+    answerLocal.node("[data-avatar]").classList.contains("speaking"),
+  );
   answerLocal.speaks[0]?.onerror?.({ error: "voice-unavailable" });
   check(
     "本機 TTS async 失敗會明講且不改用雲端",
     answerLocal.node("[data-persona-line]").textContent ===
       "本機聲音這次沒有播成；我沒有改用雲端。",
     answerLocal.node("[data-persona-line]").textContent,
+  );
+  check(
+    "localService error 也清掉 speaking",
+    !answerLocal.node("[data-avatar]").classList.contains("speaking"),
   );
 }
 
@@ -758,4 +1078,4 @@ if (failures > 0) {
   console.log(`✗ ${failures} 條 Persona 契約沒守住。`);
   process.exit(1);
 }
-console.log("✔ Persona v2：17 位本機角色圖、明確點擊語音與素材邊界都守住了。 ");
+console.log("✔ Persona v2 + Reel：17 位本機角色、active-only 分層與三路 speaking 都守住了。");

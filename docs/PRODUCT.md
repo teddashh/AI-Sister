@@ -169,8 +169,8 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
 ## 7. Non-Goals（v1 明確不做）
 
 - ❌ 產品自營的雲端服務 / 帳號系統（local-first；cloud sync 遠期選配、E2EE）。使用者
-  明確按下後從固定 CDN 取一次公開 Persona 素材，是內容交付；alpha.109 的 Azure TTS
-  則是預設關閉、使用者自備 Azure resource/key、獨立同意且逐次按下的表達供應商。
+  明確按下後從固定 CDN 取一次公開 Persona 素材，是內容交付；alpha.110 的 Azure TTS
+  則是預設關閉、使用者自備 Azure resource/key、獨立同意後自動朗讀最新新答案的表達供應商。
   兩者都不是產品帳號、sync、背景推論或遙測服務
 - ❌ 音訊 / 麥克風錄製（Limitless 的死線 + 旁人同意問題最尖銳的地方）
 - ❌ Autopilot（記憶還可能記歪之前，不讓它碰滑鼠；見 PHASES Phase 7 的門檻）
@@ -194,9 +194,12 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
 - 專案名：**AI-Sister**。這不是新造的名字——TokenMonster 的視窗標題本來就是
   "Token Monster (AI-Sister)"，角色資產的 R2 bucket 名就叫 `ai-sister`。
   本專案是這條血脈的正主。
-- 桌面角色：四姊妹與 13 位閨密的 17 張 canonical WebP 全部隨程式離線提供，
-  **ChatGPT 是預設**。Neutral 與 S/T/C/G/X 字母呈現已淘汰；沒有下載、下載失敗或
-  使用者撤回舊 pack 時，仍保留所選真人物圖，S1 一項功能都不能少。
+- 桌面角色：四姊妹與 13 位閨密的 17 套 workplace 分層 rig 全部隨程式
+  離線提供，**ChatGPT 是預設**。只選 402 張 PNG，不夾帶 5.2 GB 候選裡的
+  其他服裝、reaction、raw receipt 或 debug 圖；畫面只解碼當前角色。原本的
+  17 張 WebP 留作每層尚未全部成功時的原圖退路。Neutral 與 S/T/C/G/X 字母呈現
+  已淘汰；沒有下載、下載失敗或撤回舊 pack 時，仍保留所選角色，
+  S1 一項功能都不能少。
 - **Release 1.0 要把 persona 當產品面，不是換色彩蛋。** 首批 catalog 是
   ChatGPT / Claude / Gemini / Grok / DeepSeek / Qwen / Mistral / Venice / Sakana /
   Perplexity / GLM / Kimi / Hunyuan / MiniMax / Nemotron / Cohere / MiMo；使用者可以選人、
@@ -225,13 +228,16 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
 - 聲音不因 idle、capture、記憶或系統事件自己播放。使用者打開聲音後，四姊妹優先用
   已驗證固定錄音，其餘只用 `localService` 中文系統 TTS；答案也要再按一次朗讀才出聲。
   找不到本機 voice 就保持靜音，不自動改用雲端。`prefers-reduced-motion` 與靜音選擇優先。
-- alpha.109 的 Azure 繁中答案朗讀是**另選、預設關閉**的路徑，不是上面本機聲音的
+- alpha.110 的 Azure 繁中答案朗讀是**另選、預設關閉**的路徑，不是上面本機聲音的
   fallback。它要設定啟用、`eastasia`／`southeastasia`／`japaneast` typed region、
   Windows Credential Manager fixed target `ted-h/AI-Sister/AzureSpeech/v1` 的 key、
-  第四張 `azure-tts` 同意與當下 click 全部成立，才由 native Rust 對所選區域 fixed
-  endpoint POST。唯一送出的使用者內容是當前答案正文原文，可能含姓名、電話與金額
-  且不遮罩；不含截圖、來源、memory id、DB 或其他文字。沒有文字／MP3 cache；停止只
-  阻止舊音訊播放，不能 abort 已開始、最長 45 秒的 blocking request。Microsoft 目前
+  現行第四張 `azure-tts` 同意全部成立，才在最新新答案完成後由 native Rust 對所選區域
+  fixed endpoint POST 一次；trusted 手動重播會再 POST。開機、status／設定重讀、舊答案、
+  demo、角色與錄製事件都是 0 POST。唯一送出的使用者內容是該答案正文原文，可能含姓名、電話與金額
+  且不遮罩；不含截圖、來源、memory id、DB 或其他文字。沒有文字／MP3 cache；停止先
+  阻止舊音訊播放，不能 abort 已取得送出權、最長 45 秒的 blocking request。關閉設定、
+  改區域／聲音、存刪 key、改第四張同意或 native cancel 若撞上它可能等待；操作成功
+  回覆後舊 request 不會才送。Microsoft 目前
   公開的 F0 neural TTS 額度是每月 0.5 million characters，但可用性與費用以使用者
   帳號／resource／方案及 Microsoft 當下規則為準，產品不保證免費額度。
 

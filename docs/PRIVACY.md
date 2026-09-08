@@ -15,7 +15,7 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 沒有帳號、沒有遙測、沒有崩潰回報。`sister.exe` 與 recorder／core／capture／brain／
 hands 沒有 HTTP client 或監聽埠；WebView 也只走 Tauri IPC，CSP 不開遠端來源。desktop
 只有兩條內建 outbound：你看完揭露、明確按下後取得 Persona 固定公開素材的 GET；
-以及 alpha.109 預設關閉、簽獨立同意並按 Azure 朗讀後，只送當前答案正文的 TTS POST。
+以及 alpha.110 預設關閉、簽獨立同意並明確啟用後，只替最新新答案或手動重播送正文的 TTS POST。
 這不是一句「大致上本機」：`crates/sister-assets` 預設不開 `download`，`crates/sister-tts`
 預設不開 `azure`，只有 desktop 明確啟用；CI 逐棵相依樹與 renderer/CSP 檢查這兩條邊界
 （`scripts/check-no-network.sh`），不是靠我們記得。
@@ -23,7 +23,7 @@ hands 沒有 HTTP client 或監聽埠；WebView 也只走 Tauri IPC，CSP 不開
 供 L2/L3 解讀的螢幕 **OCR 文字原文**（不是畫面）只在你簽了第二張同意書、而且
 在設定裡寫了 `[brain] command` 之後，才會交給那支你自己已經在跑的 CLI。沒簽、
 沒設定，一次都不 spawn。外送紀錄只記結構和計數，不抄原文。Azure TTS 不取得這份
-OCR corpus；它只取得第四張同意與當下 click 所指的答案正文，但正文自己可能引用或
+OCR corpus；它只取得現行第四張同意允許的新答案／手動重播正文，但正文自己可能引用或
 逐字重複記憶內容，所以不能把「只送答案」誤寫成「不會含螢幕上的字」。
 
 這條邊界已經擋掉過一個功能：OCR 本來要用 PP-OCRv5，但它的模型下載會把一個
@@ -44,8 +44,11 @@ Persona 與 Azure TTS 的窄能力都不能拿來替 OCR、brain 或 hands 開�
 
 ## Persona 素材的固定 GET
 
-四姊妹與 13 位閨密的 17 張角色圖都隨程式提供，不下載也能完整使用；沒有 Neutral
-或字母 fallback。S1 的記錄、搜尋、證據、刪除與匯出一項都不少。開程式、開設定、
+四姊妹與 13 位閨密的 17 套 workplace 分層 rig 與 WebP 退路都隨程式提供，
+不下載也能完整使用；沒有 Neutral 或字母 fallback。Reel 只從 5.2 GB 本機
+候選選出 402 張 PNG（35,140,885 bytes），不夾帶其他服裝、reaction、raw
+receipt、私有 path 或 debug 圖；畫面也只解碼目前那一人。S1 的記錄、搜尋、
+證據、刪除與匯出一項都不少。開程式、開設定、
 hover、切換角色、重開、點角色播放已在本機的聲音，都不授權下載，也不會背景預抓
 或自動更新。系統 TTS 只接受 WebView 明確標成 `localService` 的中文 voice；找不到
 就靜音，不會改用 remote voice。
@@ -105,12 +108,12 @@ authorization digest，以及最後一次 blocking remove 已結束處理的 set
 
 ## Azure 可選 TTS 的固定 POST
 
-alpha.109 的 Azure 繁中朗讀是**預設關閉**的第二條內建 outbound，不是本機語音的
+alpha.110 的 Azure 繁中朗讀仍是**預設關閉**的第二條內建 outbound，不是本機語音的
 fallback。找不到 `localService` 中文 voice 時仍靜音；Azure 失敗時也不自動改用本機或
-別的雲端。只有這五項同時成立才可請求：設定明確啟用、region／voice 是 typed allowlist、
-Windows Credential Manager 找得到 subscription key、第四張 `azure-tts` 同意有效，
-而且你剛剛親手按了 Azure 朗讀。開 app、開設定、顯示答案、選角色或本機播放都不會
-自動觸發它。
+別的雲端。只有這四道 gate 同時成立才可請求：設定明確啟用、region／voice 是 typed allowlist、
+Windows Credential Manager 找得到 subscription key、現行第四張 `azure-tts` 同意有效。
+此時每份使用者新問題的最新答案完成後自動送一次；trusted 手動重播會再送一次。開 app、
+開設定、status 重讀、demo、舊答案重畫、選角色、錄製、記憶事件或本機播放都不會補送答案。
 
 region 嚴格只有 `eastasia`、`southeastasia`、`japaneast`；native Rust 只可對所選
 區域的 `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` 做一個 HTTPS
@@ -126,15 +129,17 @@ subscription key 存在目前 Windows 使用者的 Credential Manager，固定 t
 把已存 key 讀回頁面。這保護的是 app 不把 secret 當普通設定；同一 Windows 使用者權限的惡意程式
 仍可能讀取該使用者的 Credential Manager，這不是 OS account compromise 的防線。
 
-程式沒有文字或 MP3 的磁碟 cache，也不保留可重播的記憶體 cache；每次按下都可能產生
-一個新 POST。停止、換題或新播放會立刻讓舊 playback generation 失效，晚回來的 MP3
-不播放、不快取；但已開始的 blocking native POST **不能中途 abort**，仍可能跑到
+程式沒有文字或 MP3 的磁碟 cache，也不保留可供重播沿用的記憶體 cache；每份新答案與
+每次 trusted 手動重播都可能產生一個新 POST。停止、換題或新播放會立刻讓舊 playback generation 失效，晚回來的 MP3
+不播放、不快取；但已取得送出權的 blocking native POST **不能中途 abort**，仍可能跑到
 45 秒 timeout，而且 Azure 可能已把它計入用量。介面只能說「不再播放」，不能說網路
 請求已經取消。
 
 第四張的送出與撤回會在同一把跨行程鎖裡排序，而且已入場的 request 會把 shared lock
-保留到 transport 結束。因此撤回若剛好碰到正在送的 POST，CLI／設定頁可能等到最多
-45 秒 timeout 才回覆；一旦撤回回覆成功，較早讀到的同意快照不可能在那之後才開始送。
+保留到 transport 結束。native 另把最後一次 generation 檢查與 transport 放在和設定、
+key、consent mutation／cancel 共用的 fence 裡。因此 transport 若先取得送出權，這些操作
+可能等到最多 45 秒 timeout 才回覆；一旦任一操作回覆成功，較早讀到的設定／同意快照
+不可能在那之後才開始送。renderer 仍會在等待 native cancel 時先停止播放。
 
 Microsoft 目前公開列出的 Azure Speech F0 neural TTS 額度是每月 0.5 million
 characters；免費與否、可用額度及費用仍以你的 Azure 帳號、resource、方案與 Microsoft
@@ -154,7 +159,7 @@ characters；免費與否、可用額度及費用仍以你的 Azure 帳號、res
 | 在我的硬碟上記錄我的螢幕 | `sister record` 拒絕啟動 |
 | 把螢幕上的文字原文（OCR 抽出來的字，永不含畫面）交給你設定的本機 CLI | 解釋層一次都不會呼叫那支 CLI |
 | 保留變化幀的截圖，而不是只留上面的字 | 她照樣記，但只記螢幕上的字 |
-| 每次按 Azure 朗讀時，把當前答案正文原文交給所選區域的 Microsoft Azure 語音服務 | 一次都不呼叫 Azure；本機朗讀不受影響 |
+| 在設定開啟 Azure 新答案自動朗讀時，每份新答案完成後把該答案正文原文交給所選區域的 Microsoft Azure 語音服務並自動播放 | 一次都不呼叫 Azure；本機朗讀不受影響 |
 
 - **第一張是硬閘門。** 沒簽的時候 `sister record` 不會開始錄，也不會「印個警告
   然後照錄」。它把該打的那行指令印出來，然後結束
@@ -168,10 +173,10 @@ characters；免費與否、可用額度及費用仍以你的 Azure 帳號、res
   也明講不送截圖、來源連結、memory id、DB 或其他文字；沒簽一次都不 POST。
 - **讀不到就當作沒簽。** 檔案不見、權限不足、TOML 壞掉、版本對不上，一律視為
   四張都沒簽——和暫停旗標同一條規則：不確定的時候往安全的那邊倒
-- **條文改版，舊簽名一起失效。** 你當初按下去的是那一句話，不是那個欄位的名字。
-  改版之後四張一起要求重新確認，`sister doctor` 會直說「條文改版，舊簽名失效」。
-  alpha.109 第一次讀到沒有 Azure 欄位的同版本舊檔時，原三張簽名保留，第四張明確
-  遷移成未簽；新增一張不能倒推成使用者以前已同意
+- **條文改版，對應舊簽名失效。** 你當初按下去的是那一句話，不是那個欄位的名字。
+  前三張共用條文版本；第四張有獨立 terms version。alpha.109 第一次讀到沒有 Azure
+  欄位的同版本舊檔時，原三張簽名保留、第四張未簽；alpha.110 擴大為自動送新答案時，
+  click-only 的第四張顯示為過期、只重簽第四張，前三張不被清掉
 - **「隨時」是真的隨時，不是「下次重開」。** 正在跑的 `sister record` 每 5 秒
   重讀一次同意書；撤回第一張後最多再錄 5 秒加一拍，`capture.min_interval_ms`
   超過 5 秒時，主要會等那一拍，然後停止整場錄製（不是暫停——暫停是「先別
@@ -546,7 +551,7 @@ Windows 上用的是系統內建的 OCR（`Windows.Media.Ocr`）。它是本機�
 
 換來的是：不需要下載模型、不需要外掛 DLL、recorder 執行檔仍然只有一個檔案，
 而且它的相依樹**沒有任何套件把 HTTP client 帶進來**。desktop 的 Persona GET 與
-Azure TTS POST 是另外兩個明確、固定且使用者觸發的能力，都不屬於 OCR。
+Azure TTS POST 是另外兩個明確、固定且由使用者設定／操作授權的能力，都不屬於 OCR。
 
 代價是她**只讀得懂你裝了語言包的那些語言**。沒裝中文的話，她會安靜地退回
 英文，然後把滿螢幕的中文讀成空白。`sister doctor` 會直接告訴你實際用的是

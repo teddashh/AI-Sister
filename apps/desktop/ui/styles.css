@@ -167,6 +167,85 @@ body {
   display: none;
 }
 
+/* Ready 以前 WebP 一直在；ready 後也不改 DOM 的 hidden 語意，讓 56px compact
+ * 模式能只靠 CSS 立刻換回清楚的 WebP，不必拆掉或重載已 decode 的 rig。 */
+.avatar.reel-ready .portrait {
+  visibility: hidden;
+}
+
+/*
+ * 選配 Reel 是 1280×1280 畫布的裁切 PNG 疊圖。每層的位置由已 sanitize 的本機
+ * manifest 換算成百分比；容器本身不接 URL，也不接受 renderer 外傳的路徑。
+ * app.js 會等整組 load + decode 完才一次切換，所以這格 hidden 時 bundled WebP
+ * 仍完整佔著同一個位置，不會閃透明人或露出半套衣服。
+ */
+.persona-reel {
+  border-radius: 28px;
+  inset: 0;
+  isolation: isolate;
+  overflow: hidden;
+  pointer-events: none;
+  position: absolute;
+  z-index: 0;
+}
+
+.persona-reel[hidden] {
+  display: none;
+}
+
+.persona-reel-layer {
+  display: block;
+  max-width: none;
+  pointer-events: none;
+  position: absolute;
+  user-select: none;
+}
+
+/* 只有 updateMotionGate 掛上 `.motion`、而且錄製畫面不是 paused/asleep 才會動；
+ * reduced-motion、視窗 hidden、Persona 動畫關閉都會拿掉那個 class。 */
+.motion .avatar[data-state="idle"] .persona-reel-layer[data-reel-eye],
+.motion .avatar[data-state="thinking"] .persona-reel-layer[data-reel-eye] {
+  animation: reel-eye-blink 6.2s ease-in-out var(--reel-phase, -1700ms) infinite;
+  will-change: transform;
+}
+
+/* speaking 只描述真的已開始的 fixed WAV／localService／Azure playback。整組 rig
+ * 一起微動，不能單獨拉 raw mouth/hair：source_residual 留著稀疏邊緣，拆開動會 ghost。 */
+.motion .avatar.speaking[data-state="idle"] .persona-reel,
+.motion .avatar.speaking[data-state="thinking"] .persona-reel {
+  animation: reel-speaking 360ms ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+.avatar[data-state="paused"] .persona-reel,
+.avatar[data-state="paused"] .persona-reel-layer,
+.avatar[data-state="asleep"] .persona-reel,
+.avatar[data-state="asleep"] .persona-reel-layer {
+  animation: none !important;
+  transform: none !important;
+}
+
+@keyframes reel-eye-blink {
+  0%,
+  44%,
+  48%,
+  100% {
+    transform: scaleY(1);
+  }
+  46% {
+    transform: scaleY(0.08);
+  }
+}
+
+@keyframes reel-speaking {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(0, -0.45px, 0) scale(1.004);
+  }
+}
+
 /* 右上那顆點：她現在是什麼狀態，一眼看得出來。 */
 .face::after {
   background: var(--persona-accent);
@@ -178,6 +257,7 @@ body {
   right: -7px;
   top: -7px;
   width: 18px;
+  z-index: 2;
 }
 
 .state-line {
@@ -477,6 +557,16 @@ body.has-url-policy .face {
 body.has-hits .portrait,
 body.has-url-policy .portrait {
   border-radius: 11px;
+}
+
+body.has-hits .avatar.reel-ready .portrait,
+body.has-url-policy .avatar.reel-ready .portrait {
+  visibility: visible;
+}
+
+body.has-hits .persona-reel,
+body.has-url-policy .persona-reel {
+  display: none;
 }
 
 body.has-hits .face::after,
@@ -802,6 +892,12 @@ body.has-url-policy .stage {
   .motion .face,
   .motion .face::after {
     animation: none !important;
+  }
+
+  .persona-reel,
+  .persona-reel-layer {
+    animation: none !important;
+    transform: none !important;
   }
 }
 

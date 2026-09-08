@@ -310,6 +310,13 @@ async function open(table = {}, { search = "", beforeListenerRegistered = null }
     hitTexts: () => node("[data-hits]").children.map((c) => c.textContent),
     azureButton: () => node("[data-hits]").querySelector(".answer-cloud"),
     audioPlays: () => audioPlays,
+    isSpeaking: () => node("[data-avatar]").classList.contains("speaking"),
+    finishAudio() {
+      audio.onended?.();
+    },
+    failAudio() {
+      audio.onerror?.();
+    },
     localSpeaks: () => localSpeaks,
     urlPolicy: () => node("[data-url-policy]"),
     urlPolicyQuestion: () => node("[data-url-policy-question]").textContent,
@@ -1571,7 +1578,7 @@ function azureCalls(page, command = "azure_tts_speak") {
   return page.invokes.filter(({ cmd }) => cmd === command);
 }
 
-console.log("54. Azure 只有 trusted 答案按鈕能送；失敗不 autoplay、不 fallback");
+console.log("54. Azure ready 時最新答案完成自動送一次；只有 trusted click 能手動重播");
 {
   const p = await open({
     azure_tts_read: AZURE_READY,
@@ -1582,13 +1589,8 @@ console.log("54. Azure 只有 trusted 答案按鈕能送；失敗不 autoplay、
   await p.type("讀這份答案");
   const button = p.azureButton();
   check("ready 狀態才長出 Azure 按鈕", button !== null, p.hitTexts());
-  check("回答完成本身沒有送 request", azureCalls(p).length === 0, p.invokes);
-  check("回答完成也沒有 autoplay", p.audioPlays() === 0 && p.localSpeaks() === 0);
-  await p.clickElement(button, { trusted: false });
-  check("script 合成 click 沒有送 request", azureCalls(p).length === 0, p.invokes);
-  await p.clickElement(button);
   check(
-    "真人 click 恰好送一次正文與剛讀到的完整 gate snapshot",
+    "回答完成自動恰好送一次正文與剛讀到的完整 gate snapshot",
     azureCalls(p).length === 1 &&
       azureCalls(p)[0].arg?.text === "AZURE_HIT_BODY" &&
       JSON.stringify(azureCalls(p)[0].arg?.expected) ===
@@ -1600,6 +1602,14 @@ console.log("54. Azure 只有 trusted 答案按鈕能送；失敗不 autoplay、
           consentAt: AZURE_READY.consent_at,
           credentialPresent: true,
         }),
+    azureCalls(p),
+  );
+  await p.clickElement(button, { trusted: false });
+  check("script 合成 click 不會多送重播", azureCalls(p).length === 1, p.invokes);
+  await p.clickElement(button);
+  check(
+    "自動失敗後真人 click 可以手動重播一次",
+    azureCalls(p).length === 2 && azureCalls(p)[1].arg?.text === "AZURE_HIT_BODY",
     azureCalls(p),
   );
   check("Azure 失敗沒有自動改用本機聲音", p.audioPlays() === 0 && p.localSpeaks() === 0);
@@ -1641,7 +1651,6 @@ console.log("55. Azure payload 是正文 allowlist：hit/chapter 進，所有提
     recording_state: "recording",
   });
   await p.type("範圍題");
-  await p.clickElement(p.azureButton());
   const text = azureCalls(p)[0]?.arg?.text ?? "";
   check("hit 主句會送", text.includes("HIT_BODY_MUST_LEAVE"), text);
   check("chapter 的核心時間與主句會送", text.includes("5 分鐘") && text.includes("Azure 主句章節"), text);
@@ -1676,7 +1685,6 @@ console.log("56. Azure payload 的 fact 與 empty 只送各自主句，不送 so
     recording_state: "recording",
   });
   await facts.type("電話");
-  await facts.clickElement(facts.azureButton());
   const factText = azureCalls(facts)[0]?.arg?.text ?? "";
   check(
     "fact 認知界線、值與原文會送",
@@ -1713,7 +1721,6 @@ console.log("56. Azure payload 的 fact 與 empty 只送各自主句，不送 so
     recording_state: "recording",
   });
   await empty.type("沒有的事");
-  await empty.clickElement(empty.azureButton());
   const emptyText = azureCalls(empty)[0]?.arg?.text ?? "";
   check("empty 主句會送", emptyText === "我記得的東西裡沒有這件事。", emptyText);
   check(
@@ -1727,7 +1734,7 @@ console.log("56. Azure payload 的 fact 與 empty 只送各自主句，不送 so
   );
 }
 
-console.log("57. 取消會送一次 cancel、丟掉晚 response，且不開始第二個 speak");
+console.log("57. 新題會等舊自動朗讀 cancel settle；晚 response 不播，然後只送最新題");
 {
   let finishA = null;
   let finishCancel = null;
@@ -1737,7 +1744,7 @@ console.log("57. 取消會送一次 cancel、丟掉晚 response，且不開始�
     azure_tts_read: () => azureStatus,
     azure_tts_speak: () => {
       speakNumber += 1;
-      if (speakNumber > 1) throw new Error("second request captured");
+      if (speakNumber > 1) throw new Error("new answer captured");
       return new Promise((resolveSpeak) => {
         finishA = resolveSpeak;
       });
@@ -1751,15 +1758,23 @@ console.log("57. 取消會送一次 cancel、丟掉晚 response，且不開始�
           resolveCancel(true);
         };
       }),
-    ask: answer({ hits: [hit({ snippet: "PENDING_AZURE_BODY" })] }),
+    ask: ({ question }) =>
+      answer({
+        hits: [
+          hit({
+            snippet:
+              question === "第二題" ? "LATEST_AFTER_CANCEL_BODY" : "PENDING_AZURE_BODY",
+          }),
+        ],
+      }),
     recording_state: "recording",
   });
-  await p.type("慢一點");
+  await p.type("第一題");
   const button = p.azureButton();
+  check("前提：第一題的自動 speak 在飛", azureCalls(p).length === 1 && typeof finishA === "function");
+  check("Azure POST pending 還不算 speaking", !p.isSpeaking());
   await p.clickElement(button);
-  check("前提：一個 speak 在飛", azureCalls(p).length === 1 && typeof finishA === "function");
-  await p.clickElement(button);
-  check("第二下是 cancel，不是第二個 speak", azureCalls(p).length === 1, azureCalls(p));
+  check("按著正在播的按鈕是 cancel，不是第二個 speak", azureCalls(p).length === 1, azureCalls(p));
   check(
     "cancel IPC 恰好一次且只取消這次 read 綁定的 generation",
     azureCalls(p, "azure_tts_cancel").length === 1 &&
@@ -1768,11 +1783,10 @@ console.log("57. 取消會送一次 cancel、丟掉晚 response，且不開始�
     azureCalls(p, "azure_tts_cancel"),
   );
   check("前提：cancel IPC 被故意卡住", typeof finishCancel === "function");
-  // token-null 路徑若自行 read，下一按會把 cancel 前的同一代 token 撿回來；A cancel
-  // 晚到就可能誤殺這個 B。cancel settle 前不准送第二個 speak。
-  await p.clickElement(button);
-  await p.clickElement(button);
-  check("cancel native 尚未回來時，連按也不會重用 A token 送 B", azureCalls(p).length === 1, azureCalls(p));
+  // 第二題可能快到 cancel IPC 都還沒回。她不能重用 A token，也不能
+  // 就此吃掉已完成的最新答案；只能等 authoritative read 回來後送 B。
+  await p.type("第二題");
+  check("cancel native 尚未回來時，新答案不重用 A token", azureCalls(p).length === 1, azureCalls(p));
   finishA({
     generation: 8,
     content_type: "audio/mpeg",
@@ -1784,31 +1798,56 @@ console.log("57. 取消會送一次 cancel、丟掉晚 response，且不開始�
   check("取消不 fallback 到本機", p.localSpeaks() === 0, p.localSpeaks());
   finishCancel(true);
   await tick(40);
-  await p.clickElement(button);
   check(
-    "cancel settle 並重讀後才准新的 generation 送 B",
-    azureCalls(p).length === 2 && azureCalls(p)[1].arg?.expected?.generation === 9,
+    "cancel settle 並重讀後，自動用新 generation 只送第二題",
+    azureCalls(p).length === 2 &&
+      azureCalls(p)[1].arg?.expected?.generation === 9 &&
+      azureCalls(p)[1].arg?.text === "LATEST_AFTER_CANCEL_BODY",
     azureCalls(p),
   );
 }
 
-console.log("58. 合法 MP3 只在 click response 後播放；malformed response 不 fallback");
+console.log("58. 合法 MP3 會自動播、結束後可 trusted replay；malformed response 不 fallback");
 {
   const ok = await open({
     azure_tts_read: AZURE_READY,
-    azure_tts_speak: {
-      generation: 8,
+    azure_tts_speak: ({ expected }) => ({
+      generation:
+        expected.generation >= Number.MAX_SAFE_INTEGER ? 0 : expected.generation + 1,
       content_type: "audio/mpeg",
       audio_bytes: 3,
       data_url: "data:audio/mpeg;base64,AQID",
-    },
+    }),
     ask: answer({ hits: [hit({ snippet: "PLAY_ME" })] }),
     recording_state: "recording",
   });
   await ok.type("播放");
-  check("按以前仍沒有 autoplay", ok.audioPlays() === 0);
+  check("最新答案的合法 MP3 自動播一次", ok.audioPlays() === 1, ok.audioPlays());
+  check("Azure MP3 真正開始播放才進 speaking", ok.isSpeaking());
+  check("自動朗讀只送一個 speak", azureCalls(ok).length === 1, azureCalls(ok));
+  ok.finishAudio();
+  check("Azure ended 清掉 speaking", !ok.isSpeaking());
+  await ok.clickElement(ok.azureButton(), { trusted: false });
+  check("script 合成 replay 不送", azureCalls(ok).length === 1, azureCalls(ok));
   await ok.clickElement(ok.azureButton());
-  check("可信 click 的合法 MP3 播一次", ok.audioPlays() === 1, ok.audioPlays());
+  check(
+    "真人手動 replay 用下一代 token 再送、再播一次",
+    azureCalls(ok).length === 2 &&
+      azureCalls(ok)[1].arg?.expected?.generation === 8 &&
+      ok.audioPlays() === 2,
+    { calls: azureCalls(ok), plays: ok.audioPlays() },
+  );
+  check("Azure trusted replay 播放時回到 speaking", ok.isSpeaking());
+  ok.failAudio();
+  check("Azure playback error 清掉 speaking", !ok.isSpeaking());
+  await ok.clickElement(ok.azureButton());
+  check("前提：再一次 trusted replay 已開始", azureCalls(ok).length === 3 && ok.isSpeaking());
+  await ok.clickElement(ok.azureButton());
+  check(
+    "Azure 停止鍵清掉 speaking 且不另送 speak",
+    azureCalls(ok).length === 3 && !ok.isSpeaking(),
+    azureCalls(ok),
+  );
 
   const bad = await open({
     azure_tts_read: AZURE_READY,
@@ -1822,7 +1861,6 @@ console.log("58. 合法 MP3 只在 click response 後播放；malformed response
     recording_state: "recording",
   });
   await bad.type("別播放壞回應");
-  await bad.clickElement(bad.azureButton());
   check("malformed audio 不播放", bad.audioPlays() === 0, bad.audioPlays());
   check("malformed audio 不改用本機", bad.localSpeaks() === 0, bad.localSpeaks());
 
@@ -1838,7 +1876,6 @@ console.log("58. 合法 MP3 只在 click response 後播放；malformed response
     recording_state: "recording",
   });
   await staleGeneration.type("別播放舊代回應");
-  await staleGeneration.clickElement(staleGeneration.azureButton());
   check("不是 baseline 精確 +1 的 MP3 也不播放", staleGeneration.audioPlays() === 0);
   check("generation mismatch 仍不 fallback", staleGeneration.localSpeaks() === 0);
 }
@@ -1877,7 +1914,9 @@ console.log("59. changed event 的新狀態不會被較早開始、較晚回來�
   finishOldRead();
   await tick(40);
   check("舊的 off 回應晚到仍不能拿掉新按鈕", p.azureButton() !== null, p.hitTexts());
-  check("四次純 read 都沒有 speak 或 autoplay", azureCalls(p).length === 0 && p.audioPlays() === 0);
+  await p.repaint();
+  await p.pollNow();
+  check("純 read、event、repaint 與 poll 都不會補送舊答案", azureCalls(p).length === 0 && p.audioPlays() === 0);
 }
 
 console.log("60. listener 註冊前遺失的 Azure change 由 ready 後補讀追回來");
@@ -1914,6 +1953,208 @@ console.log("60. listener 註冊前遺失的 Azure change 由 ready 後補讀追
   check("listener ready 後恰好多一次 native read", reads === 2, reads);
   check("補讀追回新 generation/ready，答案按鈕出現", p.azureButton() !== null, p.hitTexts());
   check("補讀本身沒有 speak 或 autoplay", azureCalls(p).length === 0 && p.audioPlays() === 0);
+}
+
+console.log("60a. listener gap + 未知 status 不能把重簽後的新授權借給舊答案");
+{
+  let finishInitialStatus = null;
+  const heldInitialStatus = new Promise((resolveStatus) => {
+    finishInitialStatus = resolveStatus;
+  });
+  let finishAzureListener = () => {};
+  const azureListenerHeld = new Promise((resolveListener) => {
+    finishAzureListener = resolveListener;
+  });
+  let reads = 0;
+  let azure = AZURE_OFF;
+  const p = await open(
+    {
+      azure_tts_read: () => {
+        reads += 1;
+        return reads === 1 ? heldInitialStatus : azure;
+      },
+      azure_tts_speak: new Error("only a post-grant new answer may leave"),
+      ask: ({ question }) =>
+        answer({
+          hits: [
+            hit({
+              snippet:
+                question === "重簽後的新題"
+                  ? "NEW_AFTER_LISTENER_GAP_GRANT"
+                  : "OLD_BEFORE_LISTENER_GAP_GRANT",
+            }),
+          ],
+        }),
+      recording_state: "recording",
+    },
+    {
+      beforeListenerRegistered: (name) =>
+        name === "azure-tts-changed" ? azureListenerHeld : undefined,
+    },
+  );
+  await p.type("重簽前的舊題");
+  check("前提：答案完成時 status 未知且 listener 尚未 ready", reads === 1 && azureCalls(p).length === 0, {
+    reads,
+    calls: azureCalls(p),
+  });
+  // 模擬設定啟用／重簽發生在 listener 空窗；event 遺失，只剩 ready 後補讀。
+  azure = AZURE_READY;
+  finishAzureListener();
+  await tick(40);
+  check(
+    "listener-ready 補讀拿到新授權也不補送簽名前答案",
+    reads === 2 && p.azureButton() !== null && azureCalls(p).length === 0,
+    { reads, calls: azureCalls(p) },
+  );
+  finishInitialStatus(AZURE_OFF);
+  await tick(40);
+  check("較早的 initial read 晚回也不能復活舊題", azureCalls(p).length === 0, azureCalls(p));
+  await p.type("重簽後的新題");
+  check(
+    "重簽後才完成的新答案可以自動送一次",
+    azureCalls(p).length === 1 && azureCalls(p)[0].arg?.text === "NEW_AFTER_LISTENER_GAP_GRANT",
+    azureCalls(p),
+  );
+}
+
+console.log("61. 答案完成時 initial status 未知，不借稍後回來的授權；下一題才送");
+{
+  let finishStatus = null;
+  const heldStatus = new Promise((resolveStatus) => {
+    finishStatus = resolveStatus;
+  });
+  const p = await open({
+    azure_tts_read: () => heldStatus,
+    azure_tts_speak: new Error("post-status new answer captured"),
+    ask: ({ question }) =>
+      answer({
+        hits: [
+          hit({
+            snippet:
+              question === "狀態確認後的新題"
+                ? "NEW_AFTER_STATUS_BODY"
+                : "UNKNOWN_STATUS_OLD_BODY",
+          }),
+        ],
+      }),
+    recording_state: "recording",
+  });
+  await p.type("開窗立刻問");
+  check("status 未知時不用假的預設值送", azureCalls(p).length === 0, p.invokes);
+  finishStatus(AZURE_READY);
+  await tick(40);
+  check(
+    "authoritative ready 稍後回來也不補送 status 未知時完成的舊題",
+    azureCalls(p).length === 0,
+    azureCalls(p),
+  );
+  await p.type("狀態確認後的新題");
+  check(
+    "狀態已知 ready 後完成的下一題才自動送",
+    azureCalls(p).length === 1 && azureCalls(p)[0].arg?.text === "NEW_AFTER_STATUS_BODY",
+    azureCalls(p),
+  );
+}
+
+console.log("61a. initial status 未回時收到 Azure mutation event，舊答案失效；下一題才自動送");
+{
+  let finishInitialStatus = null;
+  const heldInitialStatus = new Promise((resolveStatus) => {
+    finishInitialStatus = resolveStatus;
+  });
+  let reads = 0;
+  const p = await open({
+    azure_tts_read: () => {
+      reads += 1;
+      // 開場 read 和 listener-ready 補讀都卡住；mutation event 後的
+      // 第三次 read 才是新的 authoritative ready。
+      return reads <= 2 ? heldInitialStatus : AZURE_READY;
+    },
+    azure_tts_speak: new Error("post-mutation new answer captured"),
+    ask: ({ question }) =>
+      answer({
+        hits: [
+          hit({
+            snippet:
+              question === "mutation 後的新題"
+                ? "NEW_AFTER_MUTATION_BODY"
+                : "OLD_PENDING_BEFORE_MUTATION",
+          }),
+        ],
+      }),
+    recording_state: "recording",
+  });
+  check("前提：兩份 initial status read 都還在飛", reads === 2, reads);
+  await p.type("mutation 前的舊題");
+  check("舊題完成時 status 未知，還沒有送", azureCalls(p).length === 0, p.invokes);
+
+  await p.fromOutside("azure-tts-changed");
+  check("變更事件只重讀新狀態、長出按鈕，不補送舊題", reads === 3 && p.azureButton() !== null && azureCalls(p).length === 0, {
+    reads,
+    calls: azureCalls(p),
+    button: p.azureButton()?.textContent ?? null,
+  });
+  finishInitialStatus(AZURE_READY);
+  await tick(40);
+  check("變更前的舊 read 晚回 ready 也不能復活舊題", azureCalls(p).length === 0, azureCalls(p));
+
+  await p.type("mutation 後的新題");
+  check(
+    "變更後新完成的題才自動送一次",
+    azureCalls(p).length === 1 && azureCalls(p)[0].arg?.text === "NEW_AFTER_MUTATION_BODY",
+    azureCalls(p),
+  );
+}
+
+console.log("62. 兩題亂序回來時，過期答案不能說話，只最新題自動送一次");
+{
+  let finishFirst = null;
+  let finishSecond = null;
+  const p = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("latest answer captured"),
+    ask: ({ question }) =>
+      new Promise((resolveAsk) => {
+        if (question === "先問的") finishFirst = resolveAsk;
+        else finishSecond = resolveAsk;
+      }),
+    recording_state: "recording",
+  });
+  await p.type("先問的");
+  await p.type("後問的");
+  check("前提：兩題都被故意卡住", typeof finishFirst === "function" && typeof finishSecond === "function");
+  finishSecond(answer({ hits: [hit({ snippet: "LATEST_ANSWER_BODY" })] }));
+  await tick(40);
+  check(
+    "後問的最新題先回來，自動送一次",
+    azureCalls(p).length === 1 && azureCalls(p)[0].arg?.text === "LATEST_ANSWER_BODY",
+    azureCalls(p),
+  );
+  finishFirst(answer({ hits: [hit({ snippet: "STALE_ANSWER_MUST_NOT_LEAVE" })] }));
+  await tick(40);
+  check(
+    "先問的舊題晚回來不會再送、也不會換掉最新答案",
+    azureCalls(p).length === 1 &&
+      !azureCalls(p).some(({ arg }) => arg?.text?.includes("STALE_ANSWER_MUST_NOT_LEAVE")) &&
+      p.hitTexts().some((line) => line.includes("LATEST_ANSWER_BODY")),
+    { calls: azureCalls(p), hits: p.hitTexts() },
+  );
+}
+
+console.log("63. ready 冷啟動只畫 demo 不會送；repaint/poll 也不把 demo 當新答案");
+{
+  const p = await open(
+    {
+      azure_tts_read: AZURE_READY,
+      azure_tts_speak: new Error("demo must not speak"),
+      recording_state: "recording",
+    },
+    { search: "?hits=demo" },
+  );
+  check("demo 當下沒有 speak 或 audio", azureCalls(p).length === 0 && p.audioPlays() === 0, p.invokes);
+  await p.repaint();
+  await p.pollNow();
+  check("demo 重畫與輪詢後仍是零 speak", azureCalls(p).length === 0 && p.audioPlays() === 0, p.invokes);
 }
 
 console.log("");

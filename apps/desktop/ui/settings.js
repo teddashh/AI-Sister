@@ -1235,7 +1235,7 @@ function paintAzureTts(raw, actionError = "") {
         : "問不到第四張 Azure 朗讀同意書；在問得到以前不會送出 request。";
   } else if (parsed.ready) {
     el.azureState.classList.add("ok");
-    message = "四個條件都齊了。答案下方會顯示 Azure 按鈕；仍只有你親自按下那一下才會送出當前答案正文。";
+    message = "四個條件都齊了。每份最新答案完成後會自動送出正文並播放一次；答案下方的 Azure 按鈕可停止或手動重播，重播會再送一次。關閉操作成功回覆後就不再開始新的自動朗讀。";
   } else {
     el.azureState.classList.add("bad");
     message = "Azure 狀態彼此不一致；沒有把它畫成已可連線。";

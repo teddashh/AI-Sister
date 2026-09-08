@@ -7,8 +7,8 @@
 > forgets, an event-driven brain that can admit it's wrong, and a desktop sister
 > who knows when to stay quiet. Screen pixels never leave your machine; after
 > explicit opt-in, OCR text can be handed to the local CLI you configured. A
-> separate, default-off Azure TTS option can send only the current answer body
-> after its own consent and click; local speech remains the default.
+> separate, default-off Azure TTS option can send only each newly completed
+> answer body after its own consent; manual replay sends it again. Local speech remains the default.
 
 **Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Persona
 的四姊妹 fixed voice 與 fixed CDN pack 也已接通，alpha.104 的發版 gate 在真
@@ -23,7 +23,11 @@ desktop 自己啟動之 recorder 的 bounded supervisor；純 policy／狀態機
 的本機中文語音與答案朗讀；這一段仍待正式 Windows artifact 人工聽驗。alpha.109 再加入
 預設關閉、沒有自動 fallback 的 Azure 繁中 TTS：第四張獨立同意、Windows Credential
 Manager 金鑰與三個固定區域的 native POST 已接線，正式 Windows artifact 的語音、封包
-與取消時序仍待人工勾驗。code signing、真舊版到新版的升級與跨層 master stop 仍未完成，
+與取消時序仍待人工勾驗。alpha.110 把已明確啟用且重簽第四張的 Azure 改為每份最新
+新答案完成後自動朗讀一次，仍可隨時關閉；alpha.109 的 click-only 第四張不會被沿用。
+同版將 5.2 GB Reel 候選縮成 17 套 workplace 分層 rig：402 張 PNG、
+35,140,885 bytes，只解碼目前角色，並保留原 WebP 當解碼失敗退路。
+code signing、真舊版到新版的升級與跨層 master stop 仍未完成，
 所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
@@ -48,8 +52,7 @@ consent/TCC lifecycle 與完整 S1 都還沒接。
   沒有這一張，解釋層一次都不會呼叫那支 CLI。畫面永不離開這台機器；出去的是 OCR 抽出來的字，**原文，不遮**——記憶要能跨段把同一個人認出來，代號做不到。要先看清楚會送什麼：`sister interpret --dry-run` 會把那段字整份印出來，一個字都不送。
 - `frame-storage`：「我同意保留變化幀的截圖，而不是只留上面的字。」沒簽不擋錄，
   她會當場說明降級，只記字、一張截圖都不寫；簽了才准依設定保留變化幀。
-- `azure-tts`：「我同意每次按下 Azure 朗讀時，把當前答案正文原文交給我在設定裡
-  選擇區域的 Microsoft Azure 語音服務。正文可能含姓名、電話與金額，不會先遮罩；
+- `azure-tts`：「我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；
   不會送出截圖、來源連結、memory id、整份資料庫或其他文字。」沒有這一張，她一次
   都不會呼叫 Azure 語音服務；本機朗讀不受影響。
 
@@ -57,9 +60,10 @@ consent/TCC lifecycle 與完整 S1 都還沒接。
 `sister consent --grant local-recording --grant frame-storage`。三個介面——
 `sister consent` 和使用者第一次開桌面姊妹時那一頁都從 core 取同一份條文與未簽後果；
 `sister doctor` 讀同一個檔案，另外報告目前是否簽署及會發生什麼事。
-條文改版會讓舊簽名全部失效，檔案讀不到、損壞或版本不符也一律當成沒簽。alpha.109
-讀到尚未有 Azure 欄位的同版本舊檔時，原本三張簽名照舊，第四張維持未簽，不能從
-任何舊同意推定 Azure 已獲授權。CLI
+前三張共同條文改版會讓前三張舊簽名失效；第四張另有自己的條文版本。檔案讀不到、
+損壞或版本不符一律 fail closed。alpha.109 以前沒有 Azure 欄位的舊檔保留前三張、
+第四張未簽；alpha.109 已簽的逐次點擊條文在 alpha.110 也會顯示為過期，只需重簽
+第四張，不能從任何舊同意推定自動朗讀已獲授權。CLI
 指定 `--data-dir` 時，同意書跟著那個資料夾走；桌面姊妹只讀預設資料夾，兩邊不一定是同一份。
 
 **alpha.46 已在 Ted 的真 Windows、1920×1080、正常切換 Better Agent workspace
@@ -185,10 +189,13 @@ exact command／五態、watchdog、recorder lease 與 consent transaction 都�
 
 **目前可以在設定裡直接選四姊妹與 13 位閨密：ChatGPT、Claude、Gemini、Grok、
 DeepSeek、Qwen、Mistral、Llama、Sakana、Perplexity、GLM、Kimi、Hunyuan、MiniMax、
-Nemotron、Cohere、MiMo。** 17 張真人物 WebP（合計 225,082 bytes）隨桌面程式離線
-提供，預設是 ChatGPT；沒有 Neutral，也沒有 S/T/C/G/X 字母 fallback。來源 commit、
-每檔大小與 SHA-256 在 `apps/desktop/ui/personas/manifest.json`，圖像不納入 Apache-2.0
-程式碼授權。
+Nemotron、Cohere、MiMo。** 每人的 workplace 分層 rig 都隨桌面程式離線提供；
+17 rigs 共 402 張 PNG、35,140,885 bytes。畫面只解碼目前角色的 21–26 層，
+全部成功後才切過去；任一圖層失敗就繼續顯示原本的 bundled WebP。
+預設是 ChatGPT；沒有 Neutral，也沒有 S/T/C/G/X 字母 fallback。選材、大小、
+SHA-256 與授權邊界在 `apps/desktop/ui/persona-reels/manifest.json` 與 `NOTICE.md`；
+原 17 張 WebP 的同等資料在 `apps/desktop/ui/personas/`。圖像不納入 Apache-2.0 程式碼授權。
+可重現的 selector 與排除範圍見 [Persona Reel 選材](docs/PERSONA-REELS.md)。
 
 只有你真的按下角色（或在原生按鈕上用 Enter／Space）才會顯示下一句，不叫模型、
 不改答案，也不因開場、輪詢、錄製或記憶事件自己開口。聲音預設關閉；打開後，四姊妹
@@ -196,23 +203,26 @@ Nemotron、Cohere、MiMo。** 17 張真人物 WebP（合計 225,082 bytes）隨�
 中文系統 voice。找不到就保持安靜，不會偷換 remote voice。答案清單底下的「用本機聲音
 朗讀」也只在使用者親手按下後讀畫面文字，不經 Rust IPC 或遠端 TTS。
 
-alpha.109 另提供**可選而且預設關閉**的 Azure 繁中朗讀；它不是本機 voice 的自動
+alpha.110 的 Azure 繁中朗讀仍然**可選而且預設關閉**；它不是本機 voice 的自動
 fallback，本機找不到聲音時仍靜音，Azure 失敗時也不自動改走另一條。啟用 Azure、
 選定 `eastasia`、`southeastasia` 或 `japaneast`、把 subscription key 存進 Windows
 Credential Manager 的固定 target `ted-h/AI-Sister/AzureSpeech/v1`、簽第四張
-`azure-tts`，再親手按 Azure 朗讀，才會由 native Rust 對所選區域的固定
+`azure-tts` 後，每份最新新答案完成時會由 native Rust 對所選區域的固定
 `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` 發出一個 HTTPS
-`POST`。WebView 仍只走 IPC，不能傳 URL，也沒有 redirect、proxy 或 retry。
+`POST` 並自動播放一次；答案下方可停止或 trusted 手動重播，重播會再 POST。關掉
+設定就不再開始新的自動朗讀。開機、設定／狀態重讀、舊答案重畫、demo、角色點擊、
+錄製或記憶事件都不會補送答案。WebView 仍只走 IPC，不能傳 URL，也沒有 redirect、proxy 或 retry。
 
 每次 POST 只含**當前答案正文原文**，可能含姓名、電話與金額且不先遮罩；不含截圖、
 來源連結／出處 chip、memory id、資料庫或任何其他文字。subscription key 不進
 `config.toml`、log、資料庫或 export；你輸入時它會短暫存在 password 欄位與 Tauri IPC，
 保存後頁面立即清空，native 回條只帶 Present／Missing／Unreadable／Unsupported 狀態，
-不會把 secret 讀回 renderer。程式不保存或重播文字／MP3 cache，每次按下都可能是新請求。按停止
-或切到別題會立刻讓這一代音訊失效，晚回來的 MP3 不播放、不快取；但已開始的 blocking
+不會把 secret 讀回 renderer。程式不保存文字／MP3 cache；每份新答案與每次手動重播都可能是新請求。按停止
+或切到別題會立刻讓這一代音訊失效，晚回來的 MP3 不播放、不快取；但已取得送出權的 blocking
 POST **無法中途撤回**，仍可能跑到 45 秒 timeout，而且 Azure 可能已把它計入用量。
-若這時撤回第四張同意，撤回操作可能等既有 POST 結束或逾時才回覆；回覆成功後，舊的
-同意快照不可能才開始另一個 POST。
+若 transport 已先取得送出權，原生取消、關閉開關、改區域／聲音、存刪 key 或修改第四張
+同意可能等它結束或逾時才回覆；畫面上的停播仍先立即發生。任一操作回覆成功後，舊的
+設定／同意快照不可能才開始另一個 POST。
 Microsoft 目前公開列出的 Azure Speech F0 neural TTS 額度是每月 0.5 million characters；
 是否可用、計費與額度仍以你的 Azure 帳號、resource、方案及 Microsoft 當下規則為準，
 AI-Sister 不提供或保證免費額度。見 [Azure Speech 定價](https://azure.microsoft.com/en-us/pricing/details/speech/)。
@@ -517,10 +527,11 @@ sister --data-dir ~/sister-backup query 電話      # 直接就問得到
 躺在旁邊的 `-wal` 檔裡，只複製主檔的備份會安靜地少掉最後那幾小時，而你會在
 真的需要它的那天才發現。
 
-17 位角色的 current WebP 都隨 desktop 離線提供，拒絕下載或舊 cache 壞掉時仍然可用；
-沒有用單一字母冒充角色的 fallback。選配 pack 只補四姊妹的固定語音，而且仍須通過
-public rights projection、整包與 selected-file 驗證才能播放。bundled 圖像另有自己的
-來源 manifest 與授權排除，不能拿「已放進安裝包」替素材權利背書。
+17 位角色的 workplace rig 與 WebP 退路都隨 desktop 離線提供，拒絕下載或
+舊 cache 壞掉時仍然可用；沒有用單一字母冒充角色的 fallback。選配 pack 只補
+四姊妹的固定語音，而且仍須通過 public rights projection、整包與 selected-file
+驗證才能播放。兩套 bundled 圖像另有自己的來源 manifest 與授權排除，
+不能拿「已放進安裝包」替素材權利背書。
 
 先跑 `sister doctor`——它不會宣稱任何東西，只會當場示範給你看：能不能讀到你現在的網址、
 OCR 引擎讀不讀得出內建那張圖上的字、哪幾條隱私規則現在其實不生效。

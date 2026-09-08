@@ -2,10 +2,12 @@
 /*
  * Azure 朗讀跨四層，任何一層各自正確都不代表湊起來是真的：
  *
- *   trusted answer click → native config/consent/credential gates
+ *   latest ask completion / trusted manual replay → shared renderer helper
+ *   → native config/consent/credential gates
  *   → 唯一 typed helper → sister-tts fixed POST → bounded MP3
  *
- * renderer 行為（正文 allowlist、無 autoplay/fallback、取消丟晚回應）由
+ * renderer 行為（正文 allowlist、只有最新 ask 可自動朗讀、status/render/demo
+ * 不得直接送、manual replay 仍需 trusted click、無 fallback、取消丟晚回應）由
  * check-pet-says-why.mjs 直接載入 app.js 驗；設定控制與 key DOM 壽命由
  * check-settings-say.mjs 直接載入 settings.js 驗。這支補兩份 JS 無法執行的
  * Windows/Tauri 接線：typed permit、gate 順序、單一 in-flight、secret projection。
@@ -158,11 +160,27 @@ console.log("② 唯一 outbound command 重讀完整 gate snapshot，再進 sha
   );
 
   const closure = section(speak, "spawn_blocking(move || {", "let bytes = task");
-  const beforePost = section(closure, "spawn_blocking(move || {", "let bytes = synthesize_azure(");
-  const afterPost = section(closure, "let bytes = synthesize_azure(", "Ok(bytes)");
+  const beforePost = section(
+    closure,
+    "spawn_blocking(move || {",
+    "synthesize_azure(consent_guard",
+  );
+  const afterPost = section(closure, "synthesize_azure(consent_guard", "Ok(bytes)");
+  const transportFence = section(
+    MAIN,
+    "fn run_generation_pinned_azure_transport<T>(",
+    "/// 唯一 outbound command",
+  );
   check(
-    "blocking closure 在 POST 前仍比較 generation",
-    beforePost.includes("generation_state.load(Ordering::Acquire) != request_generation"),
+    "blocking closure 經共用 transition fence 原子完成最後檢查與 transport",
+    beforePost.includes("run_generation_pinned_azure_transport(") &&
+      beforePost.includes("&transport_transition") &&
+      ordered(transportFence, [
+        ".lock()",
+        "generation_state.load(Ordering::Acquire) != request_generation",
+        "transport()",
+      ]).ok,
+    { beforePost, transportFence },
   );
   check(
     "POST 後再比較一次，取消的晚 response 不會回 renderer",
@@ -291,7 +309,7 @@ console.log("③ 一次只准一個 POST；cancel/關閉/換區域/刪 key/撤�
     /let\s+([a-z][a-z0-9_]*)\s*=\s*sheet\s*==\s*sister_core::consent::Sheet::AzureTts\s*;/,
   );
   check(
-    "第四張 grant/revoke 都先失效舊 click，再用同一把 admission lock 寫 consent",
+    "第四張 grant/revoke 都先失效舊朗讀意圖，再用同一把 admission lock 寫 consent",
     azureConsentChange !== null &&
       ordered(consentSet, [
         `${azureConsentChange?.[1]}.then(|| azure_tts_admission(&shell))`,
@@ -385,13 +403,36 @@ console.log("④ key 不進 config/log/renderer projection；secret scope 離開
   );
 }
 
-console.log("⑤ app.js 用正文 attribute allowlist；唯一 speak IPC 位於 trusted handler");
+console.log("⑤ app.js 只有最新 ask 完成可自動朗讀；manual replay 仍需 trusted click");
 {
   const extractor = section(APP, "function azureAnswerText()", "function answerReadLine()");
-  const handler = section(APP, "function answerAzureLine()", "/**\n * @param hits");
+  const sharedSpeak = section(
+    APP,
+    "async function speakAzureAnswer(",
+    "function autoSpeakLatestAzureAnswer(",
+  );
+  const autoEntry = section(
+    APP,
+    "function autoSpeakLatestAzureAnswer(",
+    "function settlePendingAzureAutoAnswer(",
+  );
+  const pendingSettle = section(
+    APP,
+    "function settlePendingAzureAutoAnswer(",
+    "function answerAzureLine(",
+  );
+  const manualReplay = section(APP, "function answerAzureLine()", "/**\n * @param hits");
+  const render = section(APP, "function renderHits(", "/**\n * 慢到這個秒數");
+  const ask = section(APP, "async function ask()", "askSend?.addEventListener");
+  const opening = APP.slice(APP.indexOf("// ---------- 開場 ----------"));
   const statusParser = section(APP, "function usableAzureTtsStatus(", "function syncAzureAnswerLine(");
   const statusApply = section(APP, "function applyAzureTtsStatus(", "function readAzureTts(");
   const statusRead = section(APP, "function readAzureTts(", "/**\n * 她有沒有一件事想讓人看見");
+  const changedListener = section(
+    APP,
+    "const azureTtsChangedListener =",
+    "// 關開關、刪金鑰或撤回第四張",
+  );
   const stop = section(APP, "function stopAzureSpeech(", "function stopLocalSpeech(");
   check(
     "Azure extractor 只收 data-azure-answer-body，不做整頁 denylist",
@@ -401,8 +442,18 @@ console.log("⑤ app.js 用正文 attribute allowlist；唯一 speak IPC 位於 
       !/\.hit-source|\.hits-note|button|\ba\b/.test(extractor),
     extractor,
   );
-  const clickOrder = ordered(handler, [
-    "event?.isTrusted !== true",
+  check(
+    "自動新答案與 manual replay 只共用一個 typed speak helper",
+    APP.includes("const AZURE_AUTO_ANSWER = Object.freeze({});") &&
+      APP.includes("const AZURE_TRUSTED_REPLAY = Object.freeze({});") &&
+      sharedSpeak.includes("intent !== AZURE_AUTO_ANSWER && intent !== AZURE_TRUSTED_REPLAY") &&
+      sharedSpeak.includes("const automatic = intent === AZURE_AUTO_ANSWER") &&
+      (APP.match(/invoke\("azure_tts_speak"/g) ?? []).length === 1 &&
+      sharedSpeak.includes('invoke("azure_tts_speak", {'),
+    sharedSpeak,
+  );
+  const sharedOrder = ordered(sharedSpeak, [
+    "if (intent !== AZURE_AUTO_ANSWER && intent !== AZURE_TRUSTED_REPLAY)",
     "if (azureCancelPending)",
     "stopPersonaMedia()",
     "const text = azureAnswerText()",
@@ -411,12 +462,83 @@ console.log("⑤ app.js 用正文 attribute allowlist；唯一 speak IPC 位於 
     "expected: nativeExpected",
   ]);
   check(
-    "trusted click、cancel latch、停止舊播放、抽正文、完整 expected snapshot 的順序固定",
-    clickOrder.ok,
-    clickOrder.positions,
+    "共用 helper 先驗 intent/cancel，再停舊播放、抽正文與固定 expected snapshot",
+    sharedOrder.ok,
+    sharedOrder.positions,
+  );
+  const autoOrder = ordered(autoEntry, [
+    "if (mine !== asking) return",
+    "if (!azureStatusKnown)",
+    "pendingAzureAutoAsk = null",
+    "if (azureCancelPending)",
+    "pendingAzureAutoAsk = mine",
+    "pendingAzureAutoAsk = null",
+    "if (!azureSpeechReady) return",
+    'querySelector?.(".answer-cloud")',
+    "speakAzureAnswer(button, AZURE_AUTO_ANSWER)",
+  ]);
+  check(
+    "自動入口只接受最新 ask；unknown 不借未來授權，只有 cancel 可排隊",
+    autoOrder.ok &&
+      pendingSettle.includes("const mine = pendingAzureAutoAsk") &&
+      pendingSettle.includes("pendingAzureAutoAsk = null") &&
+      pendingSettle.includes(
+        "if (mine === null || azureCancelPending || !azureStatusKnown) return",
+      ) &&
+      pendingSettle.includes("autoSpeakLatestAzureAnswer(mine)"),
+    { autoOrder: autoOrder.positions, pendingSettle },
+  );
+  const askOrder = ordered(ask, [
+    "pendingAzureAutoAsk = null",
+    "const mine = ++asking",
+    'const answer = await invoke("ask"',
+    "if (mine !== asking) return",
+    "renderHits(",
+    "autoSpeakLatestAzureAnswer(mine)",
+  ]);
+  check(
+    "唯一自動來源是 ask() 最新答案完成；status/render/demo 不得直接送",
+    askOrder.ok &&
+      (APP.match(/autoSpeakLatestAzureAnswer\(/g) ?? []).length === 3 &&
+      (ask.match(/autoSpeakLatestAzureAnswer\(/g) ?? []).length === 1 &&
+      !render.includes("autoSpeakLatestAzureAnswer(") &&
+      !render.includes("speakAzureAnswer(") &&
+      !render.includes('invoke("azure_tts_speak"') &&
+      !statusApply.includes("speakAzureAnswer(") &&
+      !statusRead.includes("speakAzureAnswer(") &&
+      !opening.includes("autoSpeakLatestAzureAnswer(") &&
+      !opening.includes("speakAzureAnswer(") &&
+      !opening.includes('invoke("azure_tts_speak"'),
+    { askOrder: askOrder.positions },
   );
   check(
-    "status 嚴格驗 generation/endpoint/consent timestamp/ready，再投影 click snapshot",
+    "listener 註冊空窗的補讀先丟 pending，不能借未來才新增的同意",
+    (changedListener.match(/pendingAzureAutoAsk = null/g) ?? []).length >= 2 &&
+      ordered(changedListener, [
+        "azureTtsChangedListener?.then?.(",
+        "pendingAzureAutoAsk = null",
+        "readAzureTts()",
+      ]).ok,
+    changedListener,
+  );
+  const replayOrder = ordered(manualReplay, [
+    'addEventListener("click"',
+    "event?.isTrusted !== true",
+    "if (azureCancelPending)",
+    "if (azureAnswerButton === button)",
+    "stopPersonaMedia()",
+    "speakAzureAnswer(button, AZURE_TRUSTED_REPLAY)",
+  ]);
+  check(
+    "manual replay 仍只由 trusted click 進共用 helper",
+    replayOrder.ok &&
+      (manualReplay.match(/speakAzureAnswer\(/g) ?? []).length === 1 &&
+      !manualReplay.includes("AZURE_AUTO_ANSWER") &&
+      !manualReplay.includes('invoke("azure_tts_speak"'),
+    replayOrder.positions,
+  );
+  check(
+    "status 嚴格驗 generation/endpoint/consent timestamp/ready，再投影 speak snapshot",
     statusParser.includes("Number.isSafeInteger(raw.generation)") &&
       /raw\.generation\s*(?:<|>=)\s*0/.test(statusParser) &&
       statusParser.includes("raw.endpoint ===") &&
@@ -424,7 +546,9 @@ console.log("⑤ app.js 用正文 attribute allowlist；唯一 speak IPC 位於 
       statusParser.includes("raw.config_error === null") &&
       statusParser.includes("raw.ready ===") &&
       statusApply.includes("consentAt: status.consent_at") &&
-      statusApply.includes('credentialPresent: status.credential === "present"'),
+      statusApply.includes('credentialPresent: status.credential === "present"') &&
+      statusApply.includes("azureSpeechReady = status?.ready === true") &&
+      statusApply.includes("settlePendingAzureAutoAnswer()"),
     { statusParser, statusApply },
   );
   check(
@@ -440,32 +564,36 @@ console.log("⑤ app.js 用正文 attribute allowlist；唯一 speak IPC 位於 
       stop.includes("azureCancelPending = false") &&
       statusApply.includes("if (azureCancelPending)") &&
       statusRead.includes("if (azureCancelPending)") &&
-      handler.includes("if (azureCancelPending)"),
+      sharedSpeak.includes("if (azureCancelPending)") &&
+      autoEntry.includes("if (!azureStatusKnown)") &&
+      autoEntry.includes("if (azureCancelPending)"),
   );
   check(
-    "audio 只接受 baseline 精確 +1，才更新下一個 click token",
-    handler.includes("audio.generation !==") &&
-      handler.includes("nativeGeneration + 1") &&
-      ordered(handler, [
+    "audio 只接受 baseline 精確 +1，才更新下一個 speak token",
+    sharedSpeak.includes("audio.generation !==") &&
+      sharedSpeak.includes("nativeGeneration + 1") &&
+      ordered(sharedSpeak, [
         "audio.generation !==",
         "azureNativeGeneration = audio.generation",
         "generation: audio.generation",
       ]).ok,
   );
   check(
-    "整份 renderer 只有這一個 Azure speak IPC，不存在 boot/event autoplay",
-    (APP.match(/invoke\("azure_tts_speak"/g) ?? []).length === 1,
+    "整份 renderer 只有共用 helper 的一個 Azure speak IPC；只有 auto 與 replay 兩個 caller",
+    (APP.match(/invoke\("azure_tts_speak"/g) ?? []).length === 1 &&
+      (APP.match(/speakAzureAnswer\(/g) ?? []).length === 3,
   );
   check(
     "Azure 失敗路徑不呼叫 localService fallback",
-    !handler.includes("speakWithLocalSystemVoice") &&
-      handler.includes("我沒有自動改用本機或另一個雲端"),
+    !sharedSpeak.includes("speakWithLocalSystemVoice") &&
+      !sharedSpeak.includes("autoSpeakLatestAzureAnswer") &&
+      sharedSpeak.includes("我沒有自動改用本機或另一個雲端"),
   );
 }
 
 console.log("");
 if (failed > 0) {
-  console.log(`✗ ${failed} 條沒過——Azure 朗讀的 typed gate、secret 或單次 click 邊界已分岔。`);
+  console.log(`✗ ${failed} 條沒過——Azure 朗讀的 typed gate、secret 或 ask/replay 入口邊界已分岔。`);
   process.exit(1);
 }
-console.log("✓ Azure 朗讀只從 trusted answer click 穿過四道 native gate與唯一 fixed POST；key 不回 renderer/config/log，取消會丟晚 response，且一次只准一個 in-flight");
+console.log("✓ Azure 朗讀只有 ask() 最新答案完成可自動送、manual replay 需 trusted click；兩者共用四道 native gate 與唯一 fixed POST，status/render/demo 不直接送，取消會丟晚 response，且一次只准一個 in-flight");

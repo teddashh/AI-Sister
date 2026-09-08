@@ -24,7 +24,8 @@ pub const OUTPUT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
 pub const USER_AGENT: &str = "AI-Sister/1 sister-tts";
 
 /// The request body is bounded before transport. Azure documents a ten-minute response cap;
-/// keeping our SSML well below that also bounds accidental egress from a single trusted click.
+/// keeping our SSML well below that also bounds accidental egress from one admitted new-answer
+/// or trusted replay request.
 pub const MAX_SSML_BYTES: usize = 64 * 1024;
 
 /// 24 kHz / 48 kbit MP3 needs about 3.6 MB for Azure's documented ten-minute maximum. Eight MiB

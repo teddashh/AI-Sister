@@ -188,9 +188,10 @@ struct Shell {
     /// 誰先拿到鎖，誰就先完成它的線性化點；mutation 在鎖內先 bump 再落地，
     /// speak 則在鎖內重讀並比對 renderer 帶來的完整 gate snapshot。
     azure_tts_admission: Arc<Mutex<()>>,
-    /// generation／active request／single-flight 三格的極短 transition lock。Cancel
-    /// 只拿這把，不必等 credential／consent I/O；A drop、A cancel 與 B admit 仍不可
-    /// 在兩顆 atomic 中間交錯，舊 cancel 才不會拒掉新的 B click。
+    /// generation／active request／single-flight 與真正 transport commit 共用的鎖。
+    /// mutation/cancel 先拿到就讓 worker 在 POST 前停；worker 先拿到則持有到 blocking
+    /// transport 結束，mutation/cancel 可能等待最長 45 秒，但成功回覆後舊 request
+    /// 絕不可能才開始 POST。A drop、A cancel 與 B admit 也不能在 atomic 間交錯。
     azure_tts_transition: Arc<Mutex<()>>,
 }
 
@@ -3084,7 +3085,7 @@ fn persona_voice_set(
 
 #[derive(Clone, Serialize)]
 struct AzureTtsView {
-    /// 綁住 renderer 看到的狀態與下一次 click。舊 click 若排到 cancel／mutation
+    /// 綁住 renderer 看到的狀態與下一次朗讀意圖。舊意圖若排到 cancel／mutation
     /// 後才進 native，不能把新 generation 收編成自己的。
     generation: u64,
     /// `false` 時下面四個 config projection 都是 `null`，不是假裝成預設關閉。
@@ -3098,9 +3099,9 @@ struct AzureTtsView {
     /// `None` = 這台機器連 data dir 都問不到；`false` 含未簽、壞檔與舊版本。
     consented: Option<bool>,
     /// 只有目前條文有效時才投影第四張的原始簽署時間；未簽、舊版、壞檔與
-    /// 問不到都不能拿一個 0 冒充。下一次 click 會把它原樣帶回來做 TOCTOU 比對。
+    /// 問不到都不能拿一個 0 冒充。下一次朗讀意圖會把它原樣帶回來做 TOCTOU 比對。
     consent_at: Option<sister_core::model::Millis>,
-    /// 只是「按鈕按下後有資格送」；讀這份狀態本身永遠不發 request。
+    /// 只是「下一份新答案或 trusted 手動重播有資格送」；讀這份狀態本身永遠不發 request。
     ready: bool,
     config_error: Option<String>,
 }
@@ -3119,7 +3120,7 @@ struct AzureTtsExpected {
 #[derive(Serialize)]
 struct AzureTtsAudioView {
     /// 這次 admission 消耗 baseline 後的新一代；renderer 只有驗過精確 +1 才能
-    /// 把它當下一個 click 的 token。
+    /// 把它當下一個朗讀意圖的 token。
     generation: u64,
     content_type: &'static str,
     audio_bytes: usize,
@@ -3244,7 +3245,7 @@ fn azure_tts_config_set(
     shell: tauri::State<'_, Shell>,
 ) -> Result<AzureTtsView, String> {
     let _admission = azure_tts_admission(&shell);
-    // 在同一個 admission transaction 裡先讓舊 click 失效，再寫新設定；因此不會
+    // 在同一個 admission transaction 裡先讓舊朗讀意圖失效，再寫新設定；因此不會
     // 出現「新 generation + 舊設定」的可重用 snapshot。即使寫檔失敗，停掉舊
     // 播放也是較安全、且 UI 會明講保存失敗的結果。
     stop_azure_tts_intent(&app, &shell);
@@ -3302,7 +3303,7 @@ fn cancel_azure_tts_generation(
     active_generation: &AtomicU64,
 ) -> bool {
     let next = next_azure_tts_generation(expected_generation);
-    // 還沒 admitted：全域仍停在 click 看見的 baseline，直接消耗它，讓排隊中的
+    // 還沒 admitted：全域仍停在朗讀意圖看見的 baseline，直接消耗它，讓排隊中的
     // speak 第一行失效。
     if generation
         .compare_exchange(
@@ -3385,6 +3386,25 @@ impl Drop for AzureTtsInFlightGuard {
     }
 }
 
+/// 把最後一次 generation 檢查與真正 blocking transport 放在 mutation/cancel 共用的
+/// 同一把 fence 裡。裸 atomic check 後再呼叫 closure 仍有排程縫；這個 helper 的
+/// 線性化規則是：mutation 先拿到就不呼叫 transport，transport 先拿到則 mutation
+/// 等它完成。因而 mutation 成功回覆後，舊 request 不會才開始送出。
+fn run_generation_pinned_azure_transport<T>(
+    transition: &Mutex<()>,
+    generation_state: &AtomicU64,
+    request_generation: u64,
+    transport: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _transport_commit = transition
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if generation_state.load(Ordering::Acquire) != request_generation {
+        return Err("Azure 朗讀已取消；沒有開始 POST。".to_string());
+    }
+    transport()
+}
+
 /// 唯一 outbound command。每次都重讀四道 gate；任何一格缺失都在建立 client 前
 /// 返回。blocking transport 無法被假裝成可中止：取消只推進 generation，closure
 /// 在 POST 前與回應後各檢查一次，已開始的 request 可能仍跑到 45 秒 global timeout。
@@ -3395,14 +3415,14 @@ async fn azure_tts_speak(
     shell: tauri::State<'_, Shell>,
 ) -> Result<AzureTtsAudioView, String> {
     // 整份 expected 來自 renderer 最近一次讀到的 native view，不是在 command 終於
-    // 被 poll 時才現場領一張。舊 click 若排在 cancel／mutation 後面才進來，第一行
+    // 被 poll 時才現場領一張。舊意圖若排在 cancel／mutation 後面才進來，第一行
     // 就拒絕，不能把已經更新的 gate 收編成自己的。
     if shell.azure_tts_generation.load(Ordering::Acquire) != expected.generation {
-        return Err("Azure 朗讀狀態已經變更；舊的 click 沒有送出 POST，請重按。".to_string());
+        return Err("Azure 朗讀狀態已經變更；這次朗讀意圖沒有送出 POST。下一個新答案會使用最新狀態，也可以稍後手動重播。".to_string());
     }
     let _admission = azure_tts_admission(&shell);
     if shell.azure_tts_generation.load(Ordering::Acquire) != expected.generation {
-        return Err("Azure 朗讀狀態已經變更；舊的 click 沒有送出 POST，請重按。".to_string());
+        return Err("Azure 朗讀狀態已經變更；這次朗讀意圖沒有送出 POST。下一個新答案會使用最新狀態，也可以稍後手動重播。".to_string());
     }
     let path = config_path()?;
     let config = sister_core::config::Config::load(&path).map_err(|error| format!("{error:#}"))?;
@@ -3412,7 +3432,7 @@ async fn azure_tts_speak(
         || expected.voice != azure.voice
     {
         return Err(
-            "Azure 開關、區域或聲音已經變更；舊的 click 沒有送出 POST，請重按。".to_string(),
+            "Azure 開關、區域或聲音已經變更；這次朗讀意圖沒有送出 POST。下一個新答案會使用最新狀態，也可以稍後手動重播。".to_string(),
         );
     }
     if !azure.enabled {
@@ -3432,7 +3452,7 @@ async fn azure_tts_speak(
         sister_core::consent::AzureTtsAdmissionConsent::Allowed(guard) => {
             if expected.consent_at != Some(guard.signed_at()) {
                 return Err(
-                    "第四張 Azure 朗讀同意書已經變更；舊的 click 沒有送出 POST，請重按。"
+                    "第四張 Azure 朗讀同意書已經變更；這次朗讀意圖沒有送出 POST。下一個新答案會使用最新狀態，也可以稍後手動重播。"
                         .to_string(),
                 );
             }
@@ -3445,7 +3465,7 @@ async fn azure_tts_speak(
                 .flatten();
             if expected.consent_at != actual_at {
                 return Err(
-                    "第四張 Azure 朗讀同意書已經變更；舊的 click 沒有送出 POST，請重按。"
+                    "第四張 Azure 朗讀同意書已經變更；這次朗讀意圖沒有送出 POST。下一個新答案會使用最新狀態，也可以稍後手動重播。"
                         .to_string(),
                 );
             }
@@ -3462,7 +3482,7 @@ async fn azure_tts_speak(
     let credential_present = matches!(&credential, Ok(Some(_)));
     if expected.credential_present != credential_present {
         return Err(
-            "Windows Credential Manager 裡的 Azure key 狀態已經變更；舊的 click 沒有送出 POST，請重按。"
+            "Windows Credential Manager 裡的 Azure key 狀態已經變更；這次朗讀意圖沒有送出 POST。下一個新答案會使用最新狀態，也可以稍後手動重播。"
                 .to_string(),
         );
     }
@@ -3512,23 +3532,29 @@ async fn azure_tts_speak(
         transition: Arc::clone(&shell.azure_tts_transition),
     };
     let generation_state = Arc::clone(&shell.azure_tts_generation);
+    let transport_transition = Arc::clone(&shell.azure_tts_transition);
     let task = tauri::async_runtime::spawn_blocking(move || {
         let _in_flight_guard = in_flight_guard;
-        if generation_state.load(Ordering::Acquire) != request_generation {
-            return Err("Azure 朗讀已取消；沒有開始 POST。".to_string());
-        }
-        let key = secret.as_str().map_err(|error| error.to_string())?;
-        // Guard 刻意跨完整 blocking transport：CLI 撤回會等這個已在先的 request
-        // 結束才回覆；撤回一旦回覆成功，之後不可能再由這次 admission 開始 POST。
-        let bytes = synthesize_azure(consent_guard, region, azure.voice, key, &text)?;
+        let bytes = run_generation_pinned_azure_transport(
+            &transport_transition,
+            &generation_state,
+            request_generation,
+            || {
+                let key = secret.as_str().map_err(|error| error.to_string())?;
+                // Consent guard 與 transport fence 都跨完整 blocking transport：任何
+                // 設定／key／consent mutation 成功回覆後，這份舊 snapshot 不會才 POST。
+                synthesize_azure(consent_guard, region, azure.voice, key, &text)
+            },
+        )?;
         if generation_state.load(Ordering::Acquire) != request_generation {
             return Err("Azure 朗讀已取消；POST 可能已完成，但回應已丟掉、沒有播放。".to_string());
         }
         Ok(bytes)
     });
-    // process admission 只排到 worker 已拿到 generation-pinned 工作為止；config／
-    // key mutation 不會被 45 秒 transport 卡住。Consent 的跨行程 shared guard 則
-    // 刻意留在 worker 到 transport 結束，讓「撤回已回覆」成為可信邊界。
+    // process admission 只排到 worker 已拿到 generation-pinned 工作為止。真正
+    // transport commit 另與 mutation/cancel 共用 transition fence：它們若輸給已開始的
+    // transport，可能等到最長 45 秒；成功回覆後舊 snapshot 絕不可能才開始 POST。
+    // Consent 的跨行程 shared guard 也留到 transport 結束，涵蓋 CLI 撤回。
     drop(_admission);
     let bytes = task
         .await
@@ -3569,7 +3595,7 @@ mod azure_tts_mapping_tests {
     }
 
     #[test]
-    fn cancel_only_consumes_the_click_or_the_request_that_came_from_it() {
+    fn cancel_only_consumes_the_intent_or_the_request_that_came_from_it() {
         let generation = AtomicU64::new(7);
         let active = AtomicU64::new(AZURE_TTS_NO_ACTIVE_GENERATION);
         assert!(cancel_azure_tts_generation(7, &generation, &active));
@@ -3598,6 +3624,61 @@ mod azure_tts_mapping_tests {
             &active,
         ));
         assert_eq!(generation.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn transport_commit_fence_has_no_check_then_post_window() {
+        use std::sync::mpsc;
+
+        // Mutation already linearized: the transport closure is never reached.
+        let transition = Mutex::new(());
+        let generation = AtomicU64::new(8);
+        {
+            let _mutation = transition.lock().expect("mutation fence");
+            generation.store(9, Ordering::Release);
+        }
+        let sent = AtomicBool::new(false);
+        let rejected = run_generation_pinned_azure_transport(
+            &transition,
+            &generation,
+            8,
+            || {
+                sent.store(true, Ordering::Release);
+                Ok(())
+            },
+        );
+        assert!(rejected.is_err());
+        assert!(!sent.load(Ordering::Acquire));
+
+        // Transport already linearized: the same fence stays held for the entire fake
+        // transport, so a mutation/cancel cannot report success in the middle and leave
+        // a not-yet-started POST behind it.
+        let transition = Arc::new(Mutex::new(()));
+        let generation = Arc::new(AtomicU64::new(12));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker_transition = Arc::clone(&transition);
+        let worker_generation = Arc::clone(&generation);
+        let worker = std::thread::spawn(move || {
+            run_generation_pinned_azure_transport(
+                &worker_transition,
+                &worker_generation,
+                12,
+                || {
+                    entered_tx.send(()).expect("announce fake transport");
+                    release_rx.recv().expect("release fake transport");
+                    Ok(())
+                },
+            )
+        });
+        entered_rx.recv().expect("fake transport entered");
+        assert!(
+            transition.try_lock().is_err(),
+            "transition fence must live across the transport closure"
+        );
+        release_tx.send(()).expect("finish fake transport");
+        assert_eq!(worker.join().expect("worker did not panic"), Ok(()));
+        assert!(transition.try_lock().is_ok());
     }
 }
 
@@ -4523,7 +4604,7 @@ fn consent_view_after(dir: &std::path::Path, reset_by_version: bool) -> ConsentV
                 wording: s.wording().to_string(),
                 without: s.without().to_string(),
                 granted_at: c.get(s),
-                effective: c.current() && c.get(s).is_some(),
+                effective: c.effective(s),
             })
             .collect(),
     }
@@ -4551,9 +4632,9 @@ fn consent_set(
     let changing_azure = sheet == sister_core::consent::Sheet::AzureTts;
     let _azure_admission = changing_azure.then(|| azure_tts_admission(&shell));
     if changing_azure {
-        // 拿到 admission transaction 後，先讓已排隊但還沒 admitted 的舊 click 失效，
+        // 拿到 admission transaction 後，先讓已排隊但還沒 admitted 的舊朗讀意圖失效，
         // 再在同一個 transaction 裡寫同意書。
-        // Grant 也必須做：未簽時按下的舊 click 不能延遲到 grant 後，拿同一代 token
+        // Grant 也必須做：未簽時建立的舊意圖不能延遲到 grant 後，拿同一代 token
         // 借到剛新增的權限才 POST。
         // 寫檔失敗時仍停止舊播放；比讓使用者按了撤回卻在錯誤回條後又聽到聲音安全。
         stop_azure_tts_intent(&app, &shell);

@@ -23,6 +23,7 @@ const STATE_LINES = Object.freeze({
 
 const avatar = document.querySelector("[data-avatar]");
 const personaPortrait = document.querySelector("[data-persona-portrait]");
+const personaReel = document.querySelector("[data-persona-reel]");
 const personaLine = document.querySelector("[data-persona-line]");
 const personaAudio = document.querySelector("[data-persona-audio]");
 const stateLine = document.querySelector("[data-state-line]");
@@ -248,6 +249,14 @@ let personaVoiceEnabled = false;
 let nextTap = 0;
 let voiceRequest = 0;
 let personaRevision = 0;
+// Desktop 開場先用 HTML 的 ChatGPT WebP 當可見 fallback；native persona_read 回來前
+// 還不知道真正 active ID，不能先把 25 張 ChatGPT PNG 解碼、隨即又整組丟掉。
+let personaSelectionKnown = invoke === null;
+let personaReelRevision = 0;
+let personaReelLoadingId = null;
+let personaReelReadyId = null;
+let personaReelPendingImages = [];
+const personaReelFailedIds = new Set();
 
 function fallbackLocalAssets() {
   return Object.freeze({ phase: "unavailable", voiceLineIds: new Set() });
@@ -303,6 +312,233 @@ function clearPersonaLine() {
   stopPersonaMedia();
 }
 
+/**
+ * Reel manifest 是 index.html 在 app.js 前載入的純本機資料。這裡不 fetch，也不把
+ * manifest 裡的字串直接當 URL：只有目前 typed persona 的 exact 目錄、單層 PNG
+ * basename 能被固定接到 frontendDist 的 `./persona-reels/` 下面。
+ */
+function personaReelRig(id) {
+  const manifest = globalThis.__AI_SISTER_PERSONA_REELS__;
+  if (
+    manifest?.schema !== "ai-sister/persona-reels/v1" ||
+    manifest?.rights_review !== "approved-owner-grant" ||
+    manifest?.notice !== "NOTICE.md" ||
+    manifest?.format?.kind !== "layered-png" ||
+    manifest?.format?.canvas_contract !== "see_through_center_pad_v1" ||
+    manifest?.format?.png !== "rgba8-noninterlaced" ||
+    !Array.isArray(manifest?.rigs)
+  ) {
+    return null;
+  }
+  const matching = manifest.rigs.filter((rig) => rig?.id === id);
+  if (matching.length !== 1) return null;
+  const rig = matching[0];
+  if (
+    rig?.theme !== "workplace" ||
+    rig?.canvas?.width !== 1280 ||
+    rig?.canvas?.height !== 1280 ||
+    rig?.viewport?.x !== 320 ||
+    rig?.viewport?.y !== 0 ||
+    rig?.viewport?.width !== 640 ||
+    rig?.viewport?.height !== 640 ||
+    !/^[0-9a-f]{64}$/u.test(rig?.canvas_sha256 ?? "") ||
+    !Array.isArray(rig?.layers) ||
+    rig.layers.length < 21 ||
+    rig.layers.length > 26
+  ) {
+    return null;
+  }
+
+  const tags = new Set();
+  const files = new Set();
+  const renderOrder = new Set();
+  const prefix = `rigs/${id}/`;
+  for (const [index, layer] of rig.layers.entries()) {
+    const basename = typeof layer?.file === "string" ? layer.file.slice(prefix.length) : "";
+    const integers = [
+      layer?.z,
+      layer?.render_z,
+      layer?.x,
+      layer?.y,
+      layer?.width,
+      layer?.height,
+      layer?.center_x,
+      layer?.center_y,
+      layer?.bytes,
+    ];
+    if (
+      !integers.every(Number.isSafeInteger) ||
+      layer.z !== index ||
+      layer.render_z < 0 ||
+      layer.render_z >= rig.layers.length ||
+      renderOrder.has(layer.render_z) ||
+      layer.x < 0 ||
+      layer.y < 0 ||
+      layer.width < 1 ||
+      layer.height < 1 ||
+      layer.x + layer.width > 1280 ||
+      layer.y + layer.height > 1280 ||
+      layer.center_x < layer.x ||
+      layer.center_x > layer.x + layer.width ||
+      layer.center_y < layer.y ||
+      layer.center_y > layer.y + layer.height ||
+      layer.bytes < 1 ||
+      layer.bytes > 8 * 1024 * 1024 ||
+      !/^[a-z][a-z0-9_]*$/u.test(layer?.tag ?? "") ||
+      !["body", "eye", "brow", "mouth"].includes(layer?.role) ||
+      layer.role !== personaReelLayerRole(layer.tag) ||
+      tags.has(layer.tag) ||
+      typeof layer.file !== "string" ||
+      !layer.file.startsWith(prefix) ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*\.png$/u.test(basename) ||
+      layer.file !== `${prefix}${basename}` ||
+      files.has(layer.file) ||
+      !/^[0-9a-f]{64}$/u.test(layer?.sha256 ?? "")
+    ) {
+      return null;
+    }
+    tags.add(layer.tag);
+    files.add(layer.file);
+    renderOrder.add(layer.render_z);
+  }
+  if (
+    ![
+      "face",
+      "mouth",
+      "eyewhite_l",
+      "eyewhite_r",
+      "irides_l",
+      "irides_r",
+      "eyelash_l",
+      "eyelash_r",
+      "eyebrow_l",
+      "eyebrow_r",
+      "source_residual",
+    ].every((tag) => tags.has(tag))
+  ) {
+    return null;
+  }
+  return rig;
+}
+
+function personaReelLayerRole(tag) {
+  if (tag.includes("mouth")) return "mouth";
+  if (tag.includes("brow")) return "brow";
+  if (
+    (tag.includes("eye") && !tag.includes("wear")) ||
+    tag.includes("irid") ||
+    tag.includes("lash") ||
+    tag.includes("pupil")
+  ) {
+    return "eye";
+  }
+  return "body";
+}
+
+function resetPersonaReel() {
+  personaReelRevision += 1;
+  personaReelLoadingId = null;
+  personaReelReadyId = null;
+  disposePersonaReelImages(personaReelPendingImages);
+  personaReelPendingImages = [];
+  disposePersonaReelImages(personaReel?.children ?? []);
+  personaReel?.replaceChildren?.();
+  if (personaReel) personaReel.hidden = true;
+  avatar.classList.remove("reel-ready");
+  delete avatar.dataset.reel;
+}
+
+function disposePersonaReelImages(images) {
+  for (const image of images) {
+    image.onload = null;
+    image.onerror = null;
+    image.removeAttribute?.("src");
+  }
+}
+
+function reelLayerImage(layer, viewport) {
+  const image = document.createElement("img");
+  image.className = "persona-reel-layer";
+  image.alt = "";
+  image.draggable = false;
+  image.decoding = "async";
+  image.dataset.reelTag = layer.tag;
+  image.dataset.reelRole = layer.role;
+  if (layer.role === "eye") image.dataset.reelEye = "";
+  image.style.left = `${(((layer.x - viewport.x) / viewport.width) * 100).toFixed(5)}%`;
+  image.style.top = `${(((layer.y - viewport.y) / viewport.height) * 100).toFixed(5)}%`;
+  image.style.width = `${((layer.width / viewport.width) * 100).toFixed(5)}%`;
+  image.style.height = `${((layer.height / viewport.height) * 100).toFixed(5)}%`;
+  image.style.zIndex = String(layer.render_z);
+  image.style.transformOrigin = `${(((layer.center_x - layer.x) / layer.width) * 100).toFixed(3)}% ${(((layer.center_y - layer.y) / layer.height) * 100).toFixed(3)}%`;
+
+  const ready = new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("persona reel layer unavailable"));
+    };
+    image.onerror = fail;
+    image.onload = async () => {
+      if (settled) return;
+      try {
+        if (typeof image.decode !== "function") throw new Error("decode unavailable");
+        await image.decode();
+        if (image.naturalWidth !== layer.width || image.naturalHeight !== layer.height) {
+          throw new Error("persona reel layer dimensions changed");
+        }
+        settled = true;
+        image.onload = null;
+        image.onerror = null;
+        resolve();
+      } catch {
+        fail();
+      }
+    };
+    image.src = `./persona-reels/${layer.file}`;
+  });
+  return { image, ready };
+}
+
+function loadPersonaReel(id) {
+  if (!personaReel || personaReelFailedIds.has(id)) return;
+  const rig = personaReelRig(id);
+  if (rig === null) return;
+  const revision = ++personaReelRevision;
+  personaReelLoadingId = id;
+  const pending = rig.layers.map((layer) => reelLayerImage(layer, rig.viewport));
+  personaReelPendingImages = pending.map(({ image }) => image);
+  Promise.all(pending.map(({ ready }) => ready)).then(
+    () => {
+      if (
+        revision !== personaReelRevision ||
+        personaReelLoadingId !== id ||
+        activeProfile.id !== id ||
+        !personaEnabled
+      ) {
+        disposePersonaReelImages(pending.map(({ image }) => image));
+        return;
+      }
+      personaReelPendingImages = [];
+      personaReel.replaceChildren(...pending.map(({ image }) => image));
+      personaReelLoadingId = null;
+      personaReelReadyId = id;
+      personaReel.hidden = false;
+      personaPortrait.hidden = false;
+      avatar.classList.add("reel-ready");
+      avatar.dataset.reel = "ready";
+    },
+    () => {
+      disposePersonaReelImages(pending.map(({ image }) => image));
+      if (revision !== personaReelRevision || personaReelLoadingId !== id) return;
+      personaReelFailedIds.add(id);
+      resetPersonaReel();
+      personaPortrait.hidden = !personaEnabled;
+    },
+  );
+}
+
 function paintPersonaPortrait() {
   if (!personaPortrait) return;
   personaPortrait.alt = `${activeProfile.alias} 角色圖`;
@@ -311,6 +547,23 @@ function paintPersonaPortrait() {
   }
   personaPortrait.hidden = !personaEnabled;
   avatar.classList.add("has-portrait");
+  if (!personaSelectionKnown) {
+    resetPersonaReel();
+    return;
+  }
+  if (!personaEnabled) {
+    resetPersonaReel();
+    return;
+  }
+  if (personaReelReadyId === activeProfile.id) {
+    personaPortrait.hidden = false;
+    if (personaReel) personaReel.hidden = false;
+    avatar.classList.add("reel-ready");
+    return;
+  }
+  if (personaReelLoadingId === activeProfile.id) return;
+  resetPersonaReel();
+  loadPersonaReel(activeProfile.id);
 }
 
 function applyPersona(view) {
@@ -357,6 +610,8 @@ let localSpeechRevision = 0;
 let azureSpeechRevision = 0;
 let azureSpeechRequestPending = false;
 let azureSpeechEnabled = false;
+let azureSpeechReady = false;
+let azureStatusKnown = false;
 let azureAnswerLine = null;
 let azureAnswerButton = null;
 let azureStatusReadRevision = 0;
@@ -364,11 +619,44 @@ let azureNativeGeneration = null;
 let azureNativeExpected = null;
 let azurePendingGeneration = null;
 let azureCancelPending = false;
+let pendingAzureAutoAsk = null;
+
+// 一個是第四張同意 + 設定開關授權的新答案，一個是使用者當下按的
+// 重播。用物件 identity，不讓一個拼錯的字串想當哪一種就當哪一種。
+const AZURE_AUTO_ANSWER = Object.freeze({});
+const AZURE_TRUSTED_REPLAY = Object.freeze({});
+
+// 說話微動只跟著「已經開始播放」的那條聲音走，不跟 request、答案完成或 thinking
+// 狀態走。owner identity 讓舊 utterance/audio 的晚 end 不能清掉後來的新聲音。
+const PERSONA_SPEAKING_FIXED = Object.freeze({});
+const PERSONA_SPEAKING_LOCAL = Object.freeze({});
+const PERSONA_SPEAKING_AZURE = Object.freeze({});
+const PERSONA_SPEAKING_OWNERS = Object.freeze([
+  PERSONA_SPEAKING_FIXED,
+  PERSONA_SPEAKING_LOCAL,
+  PERSONA_SPEAKING_AZURE,
+]);
+let personaSpeakingOwner = null;
+
+function setPersonaSpeaking(owner, speaking) {
+  if (!PERSONA_SPEAKING_OWNERS.includes(owner)) return;
+  if (speaking) {
+    personaSpeakingOwner = owner;
+  } else if (personaSpeakingOwner === owner) {
+    personaSpeakingOwner = null;
+  }
+  avatar.classList.toggle("speaking", personaSpeakingOwner !== null);
+}
+
+function clearPersonaSpeaking() {
+  personaSpeakingOwner = null;
+  avatar.classList.remove("speaking");
+}
 
 function resetAzureAnswerButton() {
   if (azureAnswerButton) {
     azureAnswerButton.disabled = false;
-    azureAnswerButton.textContent = "☁ 用 Azure 朗讀（送出這段文字）";
+    azureAnswerButton.textContent = "☁ 用 Azure 朗讀／重播（送出這段文字）";
   }
   azureAnswerButton = null;
 }
@@ -380,6 +668,7 @@ function resetAzureAnswerButton() {
  */
 function stopAzureSpeech({ cancelNative = true } = {}) {
   azureSpeechRevision += 1;
+  setPersonaSpeaking(PERSONA_SPEAKING_AZURE, false);
   const hadPendingRequest = azureSpeechRequestPending;
   const pendingGeneration = azurePendingGeneration;
   const hadAzureMedia = hadPendingRequest || azureAnswerButton !== null;
@@ -423,12 +712,15 @@ function stopAzureSpeech({ cancelNative = true } = {}) {
     // token 作廢並在下面補讀，避免事件後的第一個 click 還拿舊 generation。
     azureNativeGeneration = null;
     azureNativeExpected = null;
+    azureSpeechReady = false;
+    azureStatusKnown = false;
   }
 }
 
 function stopLocalSpeech() {
   localSpeechRevision += 1;
   globalThis.speechSynthesis?.cancel?.();
+  setPersonaSpeaking(PERSONA_SPEAKING_LOCAL, false);
 }
 
 /** 三條聲音共用同一顆 stop；新意圖不能讓本機 WAV、系統 TTS 與 Azure 疊在一起。 */
@@ -442,6 +734,7 @@ function stopPersonaMedia({ cancelAzureNative = true } = {}) {
     personaAudio.onerror = null;
   }
   stopLocalSpeech();
+  clearPersonaSpeaking();
 }
 
 /**
@@ -519,17 +812,27 @@ function speakWithLocalSystemVoice(text) {
   const revision = localSpeechRevision;
   let next = 0;
   const speakNext = () => {
-    if (revision !== localSpeechRevision || next >= chunks.length) return;
+    if (revision !== localSpeechRevision) return;
+    if (next >= chunks.length) {
+      setPersonaSpeaking(PERSONA_SPEAKING_LOCAL, false);
+      return;
+    }
     const utterance = new globalThis.SpeechSynthesisUtterance(chunks[next]);
     next += 1;
     utterance.voice = voice;
     utterance.lang = voice.lang;
     utterance.rate = rate;
     utterance.pitch = pitch;
+    utterance.onstart = () => {
+      if (revision === localSpeechRevision) {
+        setPersonaSpeaking(PERSONA_SPEAKING_LOCAL, true);
+      }
+    };
     utterance.onend = speakNext;
     utterance.onerror = () => {
       if (revision !== localSpeechRevision) return;
       localSpeechRevision += 1;
+      setPersonaSpeaking(PERSONA_SPEAKING_LOCAL, false);
       personaLine.textContent = "本機聲音這次沒有播成；我沒有改用雲端。";
       personaLine.hidden = false;
     };
@@ -560,7 +863,8 @@ async function sayPersonaLine(event) {
     line.voiceLineId === null ||
     !localAssets.voiceLineIds.has(line.voiceLineId) ||
     invoke === null ||
-    !personaAudio
+    !personaAudio ||
+    typeof personaAudio.play !== "function"
   ) {
     speakWithLocalSystemVoice(line.text);
     return;
@@ -587,12 +891,29 @@ async function sayPersonaLine(event) {
     return;
   }
   personaAudio.currentTime = 0;
+  let playbackFinished = false;
+  const finishPlayback = () => {
+    if (request !== voiceRequest) return;
+    playbackFinished = true;
+    setPersonaSpeaking(PERSONA_SPEAKING_FIXED, false);
+    personaAudio.onended = null;
+    personaAudio.onerror = null;
+    personaAudio.removeAttribute?.("src");
+  };
+  personaAudio.onended = finishPlayback;
+  personaAudio.onerror = finishPlayback;
   personaAudio.src = voice.data_url;
   try {
-    await personaAudio.play?.();
+    await personaAudio.play();
+    if (request === voiceRequest && !playbackFinished) {
+      setPersonaSpeaking(PERSONA_SPEAKING_FIXED, true);
+    }
   } catch {
     // WebView 拒絕播放不代表本機 cache 壞了；保留固定台詞與內建角色圖。
-    if (request === voiceRequest) speakWithLocalSystemVoice(line.text);
+    if (request === voiceRequest) {
+      setPersonaSpeaking(PERSONA_SPEAKING_FIXED, false);
+      speakWithLocalSystemVoice(line.text);
+    }
   }
 }
 
@@ -604,7 +925,10 @@ function readPersona() {
   invoke("persona_read").then(
     (view) => {
       // 設定頁事件若先到，它代表比這次 initial read 更新的設定；舊回應不能蓋回去。
-      if (personaRevision === revisionWhenStarted) applyPersona(view);
+      if (personaRevision === revisionWhenStarted) {
+        personaSelectionKnown = true;
+        applyPersona(view);
+      }
     },
     () => {
       // Persona 是選配表達層；設定檔暫時讀不出來不可以連搜尋框一起拖垮。
@@ -669,6 +993,7 @@ function applyAzureTtsStatus(raw) {
     return;
   }
   const status = usableAzureTtsStatus(raw);
+  azureStatusKnown = true;
   azureNativeGeneration = status?.generation ?? null;
   azureNativeExpected = status
     ? Object.freeze({
@@ -681,7 +1006,9 @@ function applyAzureTtsStatus(raw) {
       })
     : null;
   azureSpeechEnabled = status?.enabled === true;
+  azureSpeechReady = status?.ready === true;
   syncAzureAnswerLine();
+  settlePendingAzureAutoAnswer();
 }
 
 function readAzureTts() {
@@ -1937,6 +2264,7 @@ recorderSupervisorListener?.then?.(
 globalThis.__TAURI__?.event
   ?.listen?.("persona-changed", (event) => {
     personaRevision += 1;
+    personaSelectionKnown = true;
     if (!applyPersona(event.payload)) readPersona();
   })
   ?.catch?.(() => {});
@@ -1962,12 +2290,19 @@ globalThis.__TAURI__?.event
 // 不帶答案、不播放，也不會啟動 Azure request。
 const azureTtsChangedListener = globalThis.__TAURI__?.event?.listen?.(
   "azure-tts-changed",
-  () => readAzureTts(),
+  () => {
+    // 這是設定／credential／同意書 mutation 的通知，不是某一題答案完成的證據。
+    // 即使剛好有一題在等冷啟動 read，也不能在事後開啟或重簽時補送那份舊答案。
+    pendingAzureAutoAsk = null;
+    readAzureTts();
+  },
 );
 azureTtsChangedListener?.then?.(
   () => {
     // listen 本身是 async：開場 read 與真正註冊之間若剛好換設定，event 會丟掉。
-    // 註冊完成後再讀一次，revision 會讓較早回來的 snapshot 失效。
+    // 這段空窗無法證明沒有發生 mutation；先丟掉尚未授權的舊答案，再補讀。
+    // 否則簽名前完成的答案可能借到補讀才看見的新同意。
+    pendingAzureAutoAsk = null;
     readAzureTts();
   },
   () => {},
@@ -1977,6 +2312,7 @@ azureTtsChangedListener?.then?.(
 // 推進；已開始的 blocking POST 仍可能跑到 timeout，所以畫面不宣稱 socket 已中止。
 globalThis.__TAURI__?.event
   ?.listen?.("azure-tts-stop", () => {
+    pendingAzureAutoAsk = null;
     stopPersonaMedia({ cancelAzureNative: false });
     readAzureTts();
   })
@@ -2496,18 +2832,182 @@ function answerReadLine() {
   return li;
 }
 
+async function speakAzureAnswer(button, intent) {
+  if (intent !== AZURE_AUTO_ANSWER && intent !== AZURE_TRUSTED_REPLAY) return;
+  const automatic = intent === AZURE_AUTO_ANSWER;
+  if (azureCancelPending) {
+    personaLine.textContent = automatic
+      ? "上一段 Azure 取消還在向 native 確認；這題尚未自動送出，確認完成後會重讀最新狀態。"
+      : "上一段 Azure 取消還在向 native 確認；這次沒有送出 request，確認完成後再重播。";
+    personaLine.hidden = false;
+    return;
+  }
+
+  // 新答案由第四張同意 + 明確設定授權；手動重播則另外要 trusted
+  // click。兩條路只共用這一個 outbound 出口：先停舊播放，再只抽當前正文。
+  stopPersonaMedia();
+  if (invoke === null) {
+    personaLine.textContent = "這一頁不在 AI-Sister desktop 裡，沒有送出 Azure request。";
+    personaLine.hidden = false;
+    return;
+  }
+  const text = azureAnswerText();
+  if (text === "") {
+    personaLine.textContent = "這一題沒有可朗讀的答案正文，沒有送出 Azure request。";
+    personaLine.hidden = false;
+    return;
+  }
+  const nativeExpected = azureNativeExpected;
+  const nativeGeneration = nativeExpected?.generation;
+  if (
+    !Number.isSafeInteger(nativeGeneration) ||
+    nativeGeneration < 0 ||
+    nativeGeneration !== azureNativeGeneration
+  ) {
+    personaLine.textContent =
+      "Azure 狀態正在重讀；這次沒有送出 request。下一個新答案會用最新狀態，也可稍後用按鈕重播。";
+    personaLine.hidden = false;
+    readAzureTts();
+    return;
+  }
+
+  const revision = azureSpeechRevision;
+  azureSpeechRequestPending = true;
+  azurePendingGeneration = nativeGeneration;
+  azureAnswerButton = button;
+  button.textContent = "■ 停止／取消 Azure 朗讀";
+  let audio;
+  try {
+    audio = await invoke("azure_tts_speak", {
+      text,
+      expected: nativeExpected,
+    });
+  } catch (err) {
+    if (revision !== azureSpeechRevision) return;
+    azureSpeechRequestPending = false;
+    azurePendingGeneration = null;
+    resetAzureAnswerButton();
+    personaLine.textContent = `Azure 這次沒有播成：${String(err?.message ?? err)}。我沒有自動改用本機或另一個雲端。`;
+    personaLine.hidden = false;
+    readAzureTts();
+    return;
+  }
+  if (revision !== azureSpeechRevision) return;
+  azureSpeechRequestPending = false;
+  azurePendingGeneration = null;
+  if (
+    !Number.isSafeInteger(audio?.generation) ||
+    audio.generation !==
+      (nativeGeneration >= Number.MAX_SAFE_INTEGER ? 0 : nativeGeneration + 1) ||
+    audio?.content_type !== "audio/mpeg" ||
+    !Number.isSafeInteger(audio?.audio_bytes) ||
+    audio.audio_bytes < 1 ||
+    audio.audio_bytes > 8 * 1024 * 1024 ||
+    typeof audio?.data_url !== "string" ||
+    !audio.data_url.startsWith("data:audio/mpeg;base64,") ||
+    audio.data_url.length > 12 * 1024 * 1024
+  ) {
+    resetAzureAnswerButton();
+    personaLine.textContent = "Azure 回應不是這一版允許的 MP3 形狀；沒有播放，也沒有改用其他聲音。";
+    personaLine.hidden = false;
+    readAzureTts();
+    return;
+  }
+  // Native 每 admitted 一個 request 就消耗一代。只有精確 +1 的回應能成為下一次
+  // 朗讀意圖的 snapshot；其餘欄位仍是這次 native 已逐格比對過的原始狀態。
+  azureNativeGeneration = audio.generation;
+  azureNativeExpected = Object.freeze({
+    ...nativeExpected,
+    generation: audio.generation,
+  });
+  if (!personaAudio || typeof personaAudio.play !== "function") {
+    resetAzureAnswerButton();
+    personaLine.textContent = "這扇視窗沒有可用的本機 audio 元件；Azure MP3 沒有播放，也沒有落地。";
+    personaLine.hidden = false;
+    return;
+  }
+  let playbackFinished = false;
+  const playbackFailed = () => {
+    if (revision !== azureSpeechRevision) return;
+    playbackFinished = true;
+    setPersonaSpeaking(PERSONA_SPEAKING_AZURE, false);
+    resetAzureAnswerButton();
+    personaAudio.onerror = null;
+    personaAudio.onended = null;
+    personaAudio.removeAttribute?.("src");
+    personaLine.textContent =
+      "Azure MP3 已回來，但 WebView 這次沒有播放；沒有落地，也沒有改用其他聲音。";
+    personaLine.hidden = false;
+  };
+  personaAudio.onerror = playbackFailed;
+  // 先裝 error handler 再交出 data URL；即使 decoder 立刻拒絕，也有清除記憶中
+  // MP3 與還原按鈕的出口。
+  personaAudio.currentTime = 0;
+  personaAudio.src = audio.data_url;
+  personaAudio.onended = () => {
+    if (revision !== azureSpeechRevision) return;
+    playbackFinished = true;
+    setPersonaSpeaking(PERSONA_SPEAKING_AZURE, false);
+    resetAzureAnswerButton();
+    personaAudio.onerror = null;
+    personaAudio.onended = null;
+    personaAudio.removeAttribute?.("src");
+  };
+  try {
+    await personaAudio.play();
+    if (revision === azureSpeechRevision && !playbackFinished) {
+      setPersonaSpeaking(PERSONA_SPEAKING_AZURE, true);
+    }
+  } catch {
+    playbackFailed();
+  }
+}
+
+/** 只有 `ask()` 驗過最新那一題後會建立這個一次性意圖。 */
+function autoSpeakLatestAzureAnswer(mine) {
+  if (mine !== asking) return;
+  // 答案完成當下還沒有 authoritative status，就沒有證據證明當時已經 opt in。
+  // 不把題目留下來等未來的設定／重簽；下一份新答案才可使用後來讀到的授權。
+  if (!azureStatusKnown) {
+    pendingAzureAutoAsk = null;
+    return;
+  }
+  // 這一種等待與冷啟動 unknown 不同：它只承接已知 ready 時已開始、正由
+  // native cancel 排序的上一段，cancel settle 後仍用權威新 generation。
+  if (azureCancelPending) {
+    pendingAzureAutoAsk = mine;
+    return;
+  }
+  pendingAzureAutoAsk = null;
+  if (!azureSpeechReady) return;
+  const button = azureAnswerLine?.querySelector?.(".answer-cloud") ?? null;
+  if (button === null) return;
+  void speakAzureAnswer(button, AZURE_AUTO_ANSWER);
+}
+
+/**
+ * 只替「舊題正在 cancel」時完成的當前題補一次。冷啟動 status 未知不排隊，
+ * settings／重簽／status read 不能把未來授權借給先前完成的答案。
+ */
+function settlePendingAzureAutoAnswer() {
+  const mine = pendingAzureAutoAsk;
+  if (mine === null || azureCancelPending || !azureStatusKnown) return;
+  pendingAzureAutoAsk = null;
+  autoSpeakLatestAzureAnswer(mine);
+}
+
 function answerAzureLine() {
   const li = document.createElement("li");
   li.className = "hits-read hits-cloud";
   const button = document.createElement("button");
   button.type = "button";
   button.className = "answer-read answer-cloud";
-  button.textContent = "☁ 用 Azure 朗讀（送出這段文字）";
-  button.addEventListener("click", async (event) => {
+  button.textContent = "☁ 用 Azure 朗讀／重播（送出這段文字）";
+  button.addEventListener("click", (event) => {
     if (event?.isTrusted !== true) return;
     if (azureCancelPending) {
       personaLine.textContent =
-        "上一個 Azure 取消還在向 native 確認；這次沒有送出 request，確認完成後再按一次。";
+        "上一段 Azure 取消還在向 native 確認；這次沒有送出 request，確認完成後再重播。";
       personaLine.hidden = false;
       return;
     }
@@ -2520,117 +3020,7 @@ function answerAzureLine() {
       personaLine.hidden = false;
       return;
     }
-
-    // 這一下是唯一 outbound trigger。先取消所有舊播放，再從目前畫面抽答案正文；
-    // 不傳來源 link、button 文案、memory id 或畫面資料。
-    stopPersonaMedia();
-    if (invoke === null) {
-      personaLine.textContent = "這一頁不在 AI-Sister desktop 裡，沒有送出 Azure request。";
-      personaLine.hidden = false;
-      return;
-    }
-    const text = azureAnswerText();
-    if (text === "") {
-      personaLine.textContent = "這一題沒有可朗讀的答案正文，沒有送出 Azure request。";
-      personaLine.hidden = false;
-      return;
-    }
-    const nativeExpected = azureNativeExpected;
-    const nativeGeneration = nativeExpected?.generation;
-    if (
-      !Number.isSafeInteger(nativeGeneration) ||
-      nativeGeneration < 0 ||
-      nativeGeneration !== azureNativeGeneration
-    ) {
-      personaLine.textContent =
-        "Azure 狀態正在重讀；這次沒有送出 request。等按鈕狀態更新後再按一次。";
-      personaLine.hidden = false;
-      readAzureTts();
-      return;
-    }
-
-    const revision = azureSpeechRevision;
-    azureSpeechRequestPending = true;
-    azurePendingGeneration = nativeGeneration;
-    azureAnswerButton = button;
-    button.textContent = "■ 停止／取消 Azure 朗讀";
-    let audio;
-    try {
-      audio = await invoke("azure_tts_speak", {
-        text,
-        expected: nativeExpected,
-      });
-    } catch (err) {
-      if (revision !== azureSpeechRevision) return;
-      azureSpeechRequestPending = false;
-      azurePendingGeneration = null;
-      resetAzureAnswerButton();
-      personaLine.textContent = `Azure 這次沒有播成：${String(err?.message ?? err)}。我沒有自動改用本機或另一個雲端。`;
-      personaLine.hidden = false;
-      readAzureTts();
-      return;
-    }
-    if (revision !== azureSpeechRevision) return;
-    azureSpeechRequestPending = false;
-    azurePendingGeneration = null;
-    if (
-      !Number.isSafeInteger(audio?.generation) ||
-      audio.generation !==
-        (nativeGeneration >= Number.MAX_SAFE_INTEGER ? 0 : nativeGeneration + 1) ||
-      audio?.content_type !== "audio/mpeg" ||
-      !Number.isSafeInteger(audio?.audio_bytes) ||
-      audio.audio_bytes < 1 ||
-      audio.audio_bytes > 8 * 1024 * 1024 ||
-      typeof audio?.data_url !== "string" ||
-      !audio.data_url.startsWith("data:audio/mpeg;base64,") ||
-      audio.data_url.length > 12 * 1024 * 1024
-    ) {
-      resetAzureAnswerButton();
-      personaLine.textContent = "Azure 回應不是這一版允許的 MP3 形狀；沒有播放，也沒有改用其他聲音。";
-      personaLine.hidden = false;
-      readAzureTts();
-      return;
-    }
-    // Native 每 admitted 一個 request 就消耗一代。只有精確 +1 的回應能成為下一次
-    // click 的 snapshot；其餘欄位仍是這次 native 已逐格比對過的原始狀態。
-    azureNativeGeneration = audio.generation;
-    azureNativeExpected = Object.freeze({
-      ...nativeExpected,
-      generation: audio.generation,
-    });
-    if (!personaAudio) {
-      resetAzureAnswerButton();
-      personaLine.textContent = "這扇視窗沒有可用的本機 audio 元件；Azure MP3 沒有播放，也沒有落地。";
-      personaLine.hidden = false;
-      return;
-    }
-    const playbackFailed = () => {
-      if (revision !== azureSpeechRevision) return;
-      resetAzureAnswerButton();
-      personaAudio.onerror = null;
-      personaAudio.onended = null;
-      personaAudio.removeAttribute?.("src");
-      personaLine.textContent =
-        "Azure MP3 已回來，但 WebView 這次沒有播放；沒有落地，也沒有改用其他聲音。";
-      personaLine.hidden = false;
-    };
-    personaAudio.onerror = playbackFailed;
-    // 先裝 error handler 再交出 data URL；即使 decoder 立刻拒絕，也有清除記憶中
-    // MP3 與還原按鈕的出口。
-    personaAudio.currentTime = 0;
-    personaAudio.src = audio.data_url;
-    personaAudio.onended = () => {
-      if (revision !== azureSpeechRevision) return;
-      resetAzureAnswerButton();
-      personaAudio.onerror = null;
-      personaAudio.onended = null;
-      personaAudio.removeAttribute?.("src");
-    };
-    try {
-      await personaAudio.play?.();
-    } catch {
-      playbackFailed();
-    }
+    void speakAzureAnswer(button, AZURE_TRUSTED_REPLAY);
   });
   li.append(button);
   return li;
@@ -2908,7 +3298,8 @@ function renderHits(
     }
   }
 
-  // 朗讀是另一個明確 click；不 autoplay，也不把答案塞進舊 fixed-voice IPC。
+  // 本機朗讀仍是另一個明確 click。Azure 開關打開且第四張有效時，
+  // `ask()` 只會在最新新答案完成後啟動一次；`renderHits()` 自己不觸發出境。
   hitList.append(answerReadLine());
   if (azureSpeechEnabled) {
     azureAnswerLine = answerAzureLine();
@@ -2949,6 +3340,8 @@ async function ask() {
   const question = askInput.value.trim();
   if (question === "") return;
 
+  // 上一題若還在等開場 status，現在也不再是「最新那題」。
+  pendingAzureAutoAsk = null;
   stopPersonaMedia();
 
   const mine = ++asking;
@@ -2995,6 +3388,9 @@ async function ask() {
     setState("idle");
     // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
     askInput.value = "";
+    // 這是唯一條自動 Azure 入口：native 已經 ready、而且這份仍是最新
+    // ask 的答案，才會把正文送一次。開機 demo、status event 與舊答案重畫不走這裡。
+    autoSpeakLatestAzureAnswer(mine);
   } catch (err) {
     if (mine !== asking) return;
     // 失敗要說出是什麼失敗。「沒有結果」跟「還沒錄過任何東西」跟「資料庫

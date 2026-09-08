@@ -1551,8 +1551,8 @@ pub mod consent {
         );
         for sheet in Sheet::ALL {
             let mark = match c.get(sheet) {
-                // 簽過、但條文換版了 = 還是不算數，而且要看得出來是哪一種。
-                Some(_) if !c.current() => "⟳",
+                // 簽過、但這一張的條文換版了 = 還是不算數，而且要看得出來。
+                Some(_) if !c.effective(sheet) => "⟳",
                 Some(_) => "✓",
                 None => "✗",
             };
@@ -1560,6 +1560,13 @@ pub mod consent {
             match c.get(sheet) {
                 Some(ts) => {
                     println!("      {} 同意", crate::fmt::timestamp(ts));
+                    if !c.effective(sheet) {
+                        println!(
+                            "      這張簽的是舊條文，現在不生效；要重新確認請跑 `{}`。",
+                            cmd(data_dir, &format!("consent --grant {}", sheet.key()))
+                        );
+                        continue;
+                    }
                     // 簽下去之後，第二張在這一頁上和另外兩張長得一模一樣——
                     // 而另外兩張簽下去是真的會改變行為。「這一張還沒有東西
                     // 可以開」那句話只寫在 `without()` 裡，也就是只在**沒簽**
@@ -1622,19 +1629,22 @@ pub mod consent {
             "path": sister_core::consent::path(data_dir).display().to_string(),
             "version": c.version,
             "current": c.current(),
+            "azure_tts_terms_version": c.azure_tts_terms_version,
+            "current_azure_tts_terms_version": sister_core::consent::AZURE_TTS_TERMS_VERSION,
             "allows_recording": c.allows_recording(),
             // `allows_frames` 是同意書說「可以」，`keeps_images` 是硬碟上**真的**
             // 會多出檔案。設定檔關著 `store_images` 的時候這兩個不一樣，而拿
             // 前者去畫 UI 的人會畫錯——所以兩個都給，名字也講清楚是哪一個。
             "allows_frames": c.allows_frames(),
             "allows_cloud": c.allows_cloud(),
+            "allows_azure_tts": c.allows_azure_tts(),
             "keeps_images": c.keeps_images(config),
             "config_store_images": config.capture.store_images,
             "sheets": Sheet::ALL.iter().map(|s| serde_json::json!({
                 "key": s.key(),
                 "granted_at": c.get(*s),
                 // 「簽過」和「現在算數」是兩件事：條文改版之後前者還是 true。
-                "effective": c.current() && c.get(*s).is_some(),
+                "effective": c.effective(*s),
             })).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&out)?);

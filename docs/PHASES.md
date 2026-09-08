@@ -45,7 +45,7 @@
 | Windows 10+ | **正式支援（GA）** | 可安裝、可升級、可開機常駐；走完 S1 主流程並承諾維護與安全修補 | **唯一的平台支援 blocker** |
 | macOS | **Public Preview** | 簽進 `.app` 主程序樹的 ScreenCaptureKit + Vision OCR + AX；TCC／紫點狀態與重新授權 UX 說真話；走得完 S1 | 沒達到就不發該 artifact；缺席不擋 Windows GA |
 | Linux | **X11-only Developer Preview** | 真正的 X11 capture + OCR + S1，不把只能 replay 說成桌面支援；Wayland 明示 unsupported／degraded | 沒達到就不發該 artifact；缺席不擋 Windows GA |
-| Persona | **Release 1.0 角色體驗** | 四姊妹與 13 位閨密共 17 位，角色圖隨程式離線提供；四姊妹 fixed voice pack 從揭露、下載、驗證到啟用完整跑通，其餘可用 localService 中文系統 voice | **Windows GA 產品面 blocker**；使用者選擇關閉角色、聲音或不下載 fixed voice 不是 blocker |
+| Persona | **Release 1.0 角色體驗** | 四姊妹與 13 位閨密共 17 位，bundled workplace 分層 rig 只載當前角色、WebP fail-safe；四姊妹 fixed voice pack 從揭露、下載、驗證到啟用完整跑通，其餘可用 localService 中文系統 voice | **Windows GA 產品面 blocker**；使用者選擇關閉角色、聲音或不下載 fixed voice 不是 blocker |
 
 Windows 的「可升級」不要求把任意網路更新器塞進程式。Release 1.0 採**使用者手動下載
 新版 installer、關掉 desktop／recorder 後原地安裝**；仍必須拿真的舊版 binary → 新版
@@ -72,9 +72,11 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
 ### Persona Release 1.0 合約
 
 - **賣點是角色體驗，不是 CDN**：1.0 的 catalog 是四姊妹與 13 位閨密，共 17 位
-  canonical 角色。17 張角色圖直接隨程式提供；CDN 只補舊 pack 的四姊妹固定錄音，
+  canonical 角色。17 套 workplace 分層 rig 與 WebP 退路直接隨程式提供；CDN 只補
+  舊 pack 的四姊妹固定錄音，
   不能拿「接上 CDN」代替角色選擇、呈現與聲音真的可用。
-- **不下載也完整可用**：17 位每一位都有 bundled WebP，ChatGPT 是預設；Neutral 與
+- **不下載也完整可用**：17 位每一位都有 bundled rig + WebP fail-safe，
+  ChatGPT 是預設；Neutral 與
   S/T/C/G/X 字母 fallback 已淘汰。使用者可關閉 Persona 或永遠不下載舊 pack，S1
   記錄、查詢、出處、刪除與匯出都不能因此降級。
 - **網路一定由人開始，而且能力只住一處**：catalog 與下載前揭露所需 metadata 隨程式
@@ -117,8 +119,8 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
 - **聲音邊界固定**：聲音預設關閉，而且必須由使用者當下操作觸發；不因 capture、
   記憶或系統事件主動出聲。四姊妹優先播放 pack 內預錄、固定且非敏感的台詞，其餘
   只用 WebView 明確標成 `localService` 的中文 voice；找不到就靜音，不可改用 remote。
-  私人答案的本機聲音只能由使用者另外按本機朗讀。alpha.109 的 Azure 按鈕是另一條
-  預設關閉、另行同意且逐次點擊的路徑，不是自動 fallback。現成 pack 的 `active` 台詞會斷言
+  私人答案的本機聲音只能由使用者另外按本機朗讀。alpha.110 的 Azure 是另一條
+  預設關閉、另行同意後自動朗讀最新新答案的路徑，不是自動 fallback。現成 pack 的 `active` 台詞會斷言
   「今天滿有活力」，而單純點角色沒有那份證據，所以 Release 1.0 的 click allowlist
   明確不含那四段；首版每位使用兩句無條件成立的聲音，不拿假第三句湊數。
 - **權利先驗後說**：TokenMonster 現有 image+voice fixed pack 附有可公開嵌入的
@@ -132,29 +134,33 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   pack 下載或聲音，就必須通過完全相同的 authority、cache、撤回與點擊 gate。沒有
   通過時只能關閉額外錄音，不能用未簽章 artifact 冒充受信 trust root。
 
-### Azure 可選 TTS 合約（alpha.109 起）
+### Azure 可選 TTS 合約（alpha.109 起；alpha.110 改為 opt-in 後自動讀新答案）
 
 - **本機仍是預設，沒有自動 fallback**：Azure 預設 disabled、沒有預設 region；本機
-  `localService` 缺席時仍靜音，Azure 失敗時也不自動改走本機或其他 provider。開 app、
-  開設定、答案出現、選 Persona、錄製與記憶事件都是 0 Azure request。
+  `localService` 缺席時仍靜音，Azure 失敗時也不自動改走本機或其他 provider。只有四道
+  gate 齊全時，使用者新提問的**最新答案完成**會自動送一次；開 app、開設定、status
+  重讀、demo、舊答案重畫、選 Persona、錄製與記憶事件都是 0 Azure request。
 - **第四張同意獨立**：設定啟用、typed region／voice、Windows Credential Manager key、
-  當前 `azure-tts` consent 與使用者親手按 Azure 朗讀缺一不可。它不能借第二張
-  `cloud-reading`、Persona 下載點擊或 `voice_enabled`。alpha.109 遷移同版本舊
-  consent 時保留前三張，第四張一律未簽；未知值仍 fail closed。
+  現行 `azure-tts` consent 缺一不可。它不能借第二張 `cloud-reading`、Persona 下載
+  點擊或 `voice_enabled`。alpha.109 的逐次點擊條文不能授權 alpha.110 自動送出；用
+  第四張獨立 terms version 讓它過期，只重簽第四張而保留前三張。未知值仍 fail closed。
 - **目的地只有三個**：`eastasia`、`southeastasia`、`japaneast`，native Rust 只對
   `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` 做一個 HTTPS `POST`。
   不接受 renderer URL，不 redirect／proxy／retry；WebView CSP 保持 IPC-only。
 - **內容只到正文**：唯一的使用者內容是當前答案正文原文，可能含姓名、電話與金額而且
   不遮罩；不送截圖、來源連結／chip、memory id、DB、問題、舊答案或其他文字。第四張
-  條文要逐字說清楚「沒簽就一次都不呼叫 Azure；本機朗讀不受影響」。
+  條文要逐字說清楚設定開啟後不再逐題詢問、每份新答案自動送並播放，以及「沒簽就
+  一次都不呼叫 Azure；本機朗讀不受影響」。trusted 手動重播會把同一正文再送一次。
 - **key 與 cache 分開**：subscription key 長期只進目前 Windows 使用者 Credential
   Manager 的 fixed target `ted-h/AI-Sister/AzureSpeech/v1`，不進 TOML／log／DB／
   export。輸入時會短暫經過 password 欄位與 Tauri IPC；保存後頁面清空，native 回條只見
   Present／Missing／Unreadable／Unsupported，不把 secret 讀回 renderer。文字與 MP3 都不做
-  磁碟或可重播記憶體 cache，每次 click 可能是新 POST。
+  磁碟或可重播記憶體 cache；每份新答案與每次手動重播都可能是新 POST。
 - **取消不說謊**：Stop／換題立即使舊 playback generation 失效，late MP3 不播放、
   不快取；blocking native POST 不能中途 abort，最長仍可能跑到 45 秒 timeout，Azure
-  也可能已計入用量。Microsoft 目前公開 F0 neural TTS 每月 0.5 million characters，
+  也可能已計入用量。最後 generation 檢查與 transport 要和設定／key／consent mutation、
+  native cancel 共用 fence；transport 先取得送出權時操作可以等待，但成功回覆後舊
+  request 不得才送。Microsoft 目前公開 F0 neural TTS 每月 0.5 million characters，
   但是否可用、額度與費用以使用者帳號／resource／方案及 Microsoft 當下規則為準，
   AI-Sister 不提供或保證免費額度。
 
@@ -335,8 +341,8 @@ Wayland 才留到 P8／社群成熟化；Preview 的隱私與資料語意不因�
       另外「離線」是預設：root workspace 不開 `sister-assets/download`，`sister.exe`
       與 recorder／core／capture／brain／hands 沒有 HTTP client，畫面永不離開這台
       機器。desktop 也要等人看完揭露並明確按下載，才可走獨立的單次 Persona pack
-      GET；alpha.109 的 Azure TTS 也預設 disabled，只有第四張同意、key、typed 設定與
-      當下 click 齊全才走 fixed POST。兩者都不影響這條全離線 S1 主流程。簽了第二張
+      GET；alpha.110 的 Azure TTS 也預設 disabled，只有現行第四張同意、key、typed 設定
+      齊全後才替最新新答案走 fixed POST。兩者都不影響這條全離線 S1 主流程。簽了第二張
       同意書且設定了 CLI 之後，螢幕上的
       **字**（原文）才會交給那支本機行程。
 - [x] clone → 跑起來 < 10 分鐘（含 README quickstart 實測）。
@@ -539,6 +545,11 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
   - ✅ alpha.108 將四姊妹與 13 位閨密的 17 張 canonical WebP 全部隨程式提供，
     manifest 逐檔 pin size／SHA-256；選擇入口與 runtime enum 都是同一組 17 IDs。
     Neutral 與所有字母 glyph 路徑、預設圖示都已移除；舊 `neutral` 設定精確遷移。
+  - ✅ alpha.110 將本機 5.2 GB Reel 候選用固定 selector 縮成 17 套 workplace
+    rig：402 張 PNG、35,140,885 bytes，逐檔 bytes/hash/geometry 與 owner grant
+    都在 sanitized manifest；其他服裝、reaction、raw receipt、私有 path 與 debug
+    圖不出貨。runtime 只建當前人的 21–26 層，全數解碼成功前繼續顯示
+    WebP；任一檔壞掉也不轉成字母 fallback。
   - 四姊妹兩句 fixed tap-line 對得到已核准本機錄音；其餘 13 位可在使用者 opt-in
     後使用 `localService` 中文系統 voice，沒有本機 voice 就保持靜音。
   - 完成共用 omnibus 立繪／固定語音 asset-pack 的 end-to-end pipeline：本機揭露
@@ -556,11 +567,11 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     撤回只清 exact release，損毀／離線重開不自動 retry。
   - 語音只由使用者當下操作觸發，不主動出聲。角色台詞優先使用已驗證的固定錄音，
     否則走 localService 中文系統 TTS；私人答案的「本機朗讀」只有使用者另外按下才走
-    localService。alpha.109 的 Azure 答案朗讀是另一顆預設關閉、第四張同意守住的按鈕，
-    不屬於 Persona fallback。CDN 是 fixed voice 的交付機制；角色的選擇、視覺、聲音與
+    localService。alpha.110 的 Azure 答案朗讀是另一條預設關閉、第四張同意守住的新答案
+    自動播放路徑，不屬於 Persona fallback；手動按鈕只負責停止／重播。CDN 是 fixed voice 的交付機制；角色的選擇、視覺、聲音與
     離線退路才是產品面。
   - 下載／修復／撤回 UX、鍵盤可及性、prefers-reduced-motion 與靜音都要真的可用；
-    撤回立刻停掉 fixed voice、保留所選 bundled 角色圖、精準刪除該 release cache，
+    撤回立刻停掉 fixed voice、保留所選 bundled rig 與 WebP 退路、精準刪除該 release cache，
     失敗則留 RepairNeeded 且不連線；未知 ID 不可暗中換成另一位。
   - 每個發布 pack 都要通過 public rights/provenance manifest 審查；只嵌入公開安全
     projection，不把私下收據帶進 repo。現成 pack 可重用，但要先證明 AI-Sister
@@ -703,6 +714,9 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
   payload 只收當前答案正文，不做 cache，cancel 不冒充已 abort blocking request。
   ⬜ 正式 Windows artifact 的三區 packet trace、真 Azure 播放、Credential Manager
   lifecycle、late-response／45 秒 timeout 行為仍要照 WINDOWS-CHECKLIST 人工勾驗。
+- ✅ alpha.110 擴大的是第四張 Azure 授權，不是前三張：alpha.109 click-only 簽名會
+  fail closed，前三張不被清掉。四道 gate ready 時只有最新使用者問題的答案完成會自動
+  POST 一次；startup／status／demo／舊答案重畫不補送，trusted replay 才會再 POST。
 - ✅ alpha.67 來源防線（SPEC §0.4 / §9.4）：`build_prompt` 原本把 OCR 原文、
   視窗標題、host、上一張卡的 activity 原封不動接進 prompt，header 一句
   「這是資料不是指令」都沒有。改成每次重抽 nonce 的圍欄
@@ -735,8 +749,10 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
 - [ ] 若 1.0 artifact 暴露 Azure TTS：預設關閉且本機無自動 fallback；第四張 consent、
       Credential Manager key 與 typed config 缺一時 0 request；packet trace 只見所選的
       `eastasia`／`southeastasia`／`japaneast` fixed POST，而且 payload 只有當前答案
-      正文、不含截圖／來源／memory id／DB／其他文字。重複 click 不讀 cache；Stop／換題
-      不播 late response，也不謊稱已 abort 最長 45 秒的 blocking POST。
+      正文、不含截圖／來源／memory id／DB／其他文字。ready 時每份最新新答案恰好一次，
+      startup／status／demo／舊答案為零；trusted replay 再送一次且不讀 cache。Stop／換題
+      不播 late response，也不謊稱已 abort 最長 45 秒的 blocking POST；設定／key／consent
+      mutation 或 native cancel 成功回覆後，舊 request 不得才開始送。
 - [ ] 任何隨 1.0 發出的 macOS／Linux Preview artifact 各自在原生平台走完 Preview
       最小合約；沒過就不發該 artifact，不因此把 Windows GA 降格或延後。
 
@@ -1994,10 +2010,11 @@ enum 值」。現在四種處境各餵一條真的路徑進去（寫一個壞旗
 - Linux Preview 成熟化：把 Phase 5 的 X11 Developer Preview 往正式支援推；
   Wayland portal 繼續研究，做不到可靠背景擷取就維持明示降級，不在這裡首次假裝落地。
 - Persona 1.0 完成後的成熟化：Phase 5 必須先交付 17 人 catalog、bundled 角色圖、
-  fixed-voice pack、localService TTS 與明確下載／驗證 pipeline；到這裡才增加表情、
-  2.5D reel、更多語言與可及性。alpha.109 已把可選 Azure TTS 另案加入：獨立第四張
-  文字出站同意、Windows Credential Manager、三個 fixed region POST、逐次 click、
-  no-cache 與不自動 fallback 都是既有下限；往後加 provider／語言不能繞過或放寬。
+  fixed-voice pack、localService TTS 與明確下載／驗證 pipeline。alpha.110 已加第一版
+  離線分層 Reel；到這裡再增加更完整表情、pose、更多語言與可及性。alpha.110
+  的可選 Azure TTS 有獨立第四張文字出站
+  同意、Windows Credential Manager、三個 fixed region POST、只自動讀最新新答案、
+  trusted replay、no-cache 與不自動 fallback；往後加 provider／語言不能繞過或放寬。
 - 選配 E2EE 多機同步（獨立審視授權與架構）。
 - 社群治理：issue 模板按「訊號抓不到」分流到 adapter plugin、
   benchmark 語料貢獻管道（去敏審查 gate）。

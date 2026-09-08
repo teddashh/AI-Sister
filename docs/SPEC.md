@@ -282,8 +282,12 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   → 對策：角色動畫用低 fps 靜態立繪 crossfade（TokenMonster 本來的做法，不是巧合），
   提供「不透明小窗」低功耗模式，透明模式的功耗列入 §2.3 電池預算量測。
 - 識別：四姊妹與 13 位閨密共 17 個 canonical 身分，角色圖全部隨 desktop 離線提供，
-  預設 ChatGPT。沒有 Neutral，也沒有 code-native 字母 fallback。角色圖的來源、大小與
-  SHA-256 固定在 bundled manifest。舊 optional pack 只補四姊妹八句預錄固定台詞；
+  預設 ChatGPT。alpha.110 固定選 17 套 workplace 分層 rig（402 PNG、
+  35,140,885 bytes），runtime 只建立當前角色的 21–26 層；所有圖層解碼成功
+  前都顯示 bundled WebP，任一檔失敗就留在 WebP 且不自動 retry。沒有
+  Neutral，也沒有 code-native 字母 fallback。兩組角色圖的來源、大小、SHA-256
+  與 Apache-2.0 授權排除分開固定在 bundled manifest/NOTICE。舊 optional pack
+  只補四姊妹八句預錄固定台詞；
   使用者看見 `cdn.ted-h.com`、精確大小 73,261,088 bytes 與資料邊界後明確按下，
   desktop 才可對內嵌 allowlist 做一次固定 GET，完整驗證成功才原子啟用錄音。
   WebView 本身仍只有 IPC，CSP 不開 CDN。
@@ -292,8 +296,9 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   點角色 → 一句本機 deterministic tap-line；不點不出聲。聲音另行 opt-in：有已驗證
   固定錄音就播放，否則只用 WebView 明確標成 `localService` 的中文系統 voice；沒有就
   靜音，不准自動降級成 remote voice。答案的本機朗讀只能由使用者按「用本機聲音朗讀」
-  後讀出。alpha.109 另有預設關閉的 Azure 繁中朗讀按鈕，須獨立設定、key、第四張
-  consent 與當下 click；它不是本機 voice 的 fallback，兩條也不互相自動切換。
+  後讀出。alpha.110 另有預設關閉的 Azure 繁中新答案自動朗讀，須獨立設定、key 與
+  現行第四張 consent；它不是本機 voice 的 fallback，兩條也不互相自動切換。答案
+  下方的 trusted 按鈕可停止或手動重播，重播會再送一次。
   persona 不得影響答案、證據、同意書、Gatekeeper 或 hands。
 
 ### 8.2 對話（被動答題——永遠可用，這是 Release 1.0 的核心）
@@ -418,14 +423,14 @@ feature 集合沒有 `download`；Azure 答案朗讀收在 `crates/sister-tts`�
    沒簽就一次都不 spawn）。
 3. **畫面暫存**：我同意保留變化幀的截圖，而不是只留上面的字。沒簽仍可記 OCR，
    但一張截圖都不寫。
-4. **Azure TTS**：我同意每次按下 Azure 朗讀時，把當前答案正文原文交給我在設定裡
-   選擇區域的 Microsoft Azure 語音服務。正文可能含姓名、電話與金額，不會先遮罩；
+4. **Azure TTS**：我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；
    不會送出截圖、來源連結、memory id、整份資料庫或其他文字。沒有這一張，她一次都
    不會呼叫 Azure 語音服務；本機朗讀不受影響。
 
 四張各自獨立。第四張只鑄出 Azure TTS permit，不能借第二張、Persona 下載點擊或
 Persona `voice_enabled` 代替。alpha.109 讀同版本、但尚無 Azure 欄位的舊 consent 時，
-前三張簽名保留，第四張明確遷移成未簽；未知／損壞／版本不符仍 fail closed。
+前三張簽名保留，第四張明確遷移成未簽；alpha.110 再以第四張獨立 terms version 讓
+click-only 舊簽名失效，只需重簽第四張。未知／損壞／版本不符仍 fail closed。
 
 ### 11.2 Capture 時排除（不是事後刪）〔定案〕
 
@@ -544,17 +549,20 @@ renderer 顯示文字逐字等於 embedded transcript 的 line 才能進播放 a
 
 ### 11.10 Azure 可選 TTS
 
-alpha.109 加入第二條 desktop 內建 outbound，範圍只限使用者明確要求朗讀的**當前
-答案正文原文**。本機 `localService` 語音仍是預設；Azure 預設 `enabled = false`、
+alpha.109 加入第二條 desktop 內建 outbound；alpha.110 把 opt-in 後的觸發改成每份
+使用者新問題的最新答案完成時，自動朗讀一次**該答案正文原文**。本機 `localService`
+語音仍是預設；Azure 預設 `enabled = false`、
 沒有預設 region，也不會在本機 voice 缺席／失敗時自動 fallback。反方向也一樣：
-Azure 失敗不自動改走本機或其他 provider。開 app、開設定、答案出現、選 Persona、
-錄製或記憶事件都是 0 Azure request。
+Azure 失敗不自動改走本機或其他 provider。Azure 未 ready 時答案完成仍是 0 request；
+不論 ready 與否，開 app、開設定、status 重讀、demo、舊答案重畫、選 Persona、錄製或
+記憶事件本身都是 0 Azure request。
 
 真正 POST 前必須同時具備：設定明確啟用；region 是 `eastasia`、`southeastasia`、
 `japaneast` 之一；voice 是三個 canonical zh-TW allowlist 值之一；目前 Windows 使用者
 Credential Manager 的 fixed target `ted-h/AI-Sister/AzureSpeech/v1` 有 subscription
-key；第四張 `azure-tts` consent 有效；以及使用者剛剛親手按了 Azure 朗讀。缺一項
-就不建立 transport，也不能借 Persona `voice_enabled` 或第二張 `cloud-reading` 通過。
+key；以及現行第四張 `azure-tts` consent 有效。四道 gate 齊全時，只有最新使用者問題
+的答案完成或 trusted 手動重播能建立 transport；前者每題恰好一次，後者會另送一次。
+缺一項就不建立 transport，也不能借 Persona `voice_enabled` 或第二張 `cloud-reading` 通過。
 
 native Rust 只能對所選區域的
 `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` 做一個 HTTPS `POST`。
@@ -570,13 +578,15 @@ Present／Missing／Unreadable／Unsupported，不把已存 secret 讀回 render
 `enabled`、typed `region` 與 typed `voice`。Windows Credential Manager 是目前使用者
 帳號的 OS 邊界，不宣稱能抵擋同使用者權限 malware。
 
-不做文字或 MP3 的磁碟 cache，也沒有可跨 click 重播的記憶體 cache；每次按下都可能
-是新 POST。Stop／換題／新播放會先讓舊 playback generation 失效，晚回的 MP3 不播放、
-不快取；但已開始的 blocking native POST **不能中途 abort**，仍可能跑到 45 秒 timeout，
+不做文字或 MP3 的磁碟 cache，也沒有可供重播沿用的記憶體 cache；每份新答案與每次
+trusted 手動重播都可能是新 POST。Stop／換題／新播放會先讓舊 playback generation 失效，晚回的 MP3 不播放、
+不快取；但已取得送出權的 blocking native POST **不能中途 abort**，仍可能跑到 45 秒 timeout，
 而且 Azure 可能已計入用量。UI 不得把「不再播放」寫成「請求已取消」。
 第四張 consent 的 admission 與 CLI／desktop 撤回共用跨行程 lock，而且該 shared guard
-保留到既有 transport 結束：因此碰到正在送的 request 時，撤回操作本身可能等到 45 秒
-timeout；但撤回一旦回覆成功，舊 snapshot 不可能才開始另一個 POST。
+保留到既有 transport 結束。native 的最後一次 generation 檢查與 transport 另和設定、
+key、consent mutation／cancel 共用同一個 fence：transport 先取得送出權時，這些操作可能
+等到 45 秒 timeout；但任一操作一旦回覆成功，舊 snapshot 不可能才開始另一個 POST。
+renderer 在等待 native cancel 時仍須先停止播放。
 
 Microsoft 目前公開列 Azure Speech F0 neural TTS 每月 0.5 million characters；是否
 可用、實際額度與費用以使用者 Azure 帳號、resource、方案及 Microsoft 當下規則為準。
@@ -746,9 +756,9 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
 | macOS 權限 | `tauri-plugin-macos-permissions` 2.3（Screen Recording 無 entitlement，純 TCC + hardened runtime + notarization；MAS 不可行，站外發行） | 開發期 `tccutil reset ScreenCapture` 測 onboarding |
 | hands | **Rust crate `sister-hands`**，CLI／desktop 共用 permit 與 target policy | 尚未做獨立 process；需要時另立 threat-model milestone |
 | Persona transport | root workspace 的 **`sister-assets`**；預設 feature 集合不含 `download`，desktop 才明確啟用 | API 不接受 renderer 傳入 URL／header／body／persona 或 memory；Persona 的 fixed GET 與 cache contract 見 §11.9 |
-| Azure TTS transport | root workspace 的 **`sister-tts`**；預設 feature 集合不含 `azure`，desktop 才明確啟用 | 預設關閉、第四張 consent、Credential Manager key 與 trusted click 缺一不可；三個 fixed region POST、payload、cache 與 cancel 邊界見 §11.10 |
+| Azure TTS transport | root workspace 的 **`sister-tts`**；預設 feature 集合不含 `azure`，desktop 才明確啟用 | 預設關閉；第四張 consent、Credential Manager key 與 typed config 齊全時只自動讀最新新答案，另有 trusted replay；三個 fixed region POST、payload、cache 與 cancel 邊界見 §11.10 |
 | Schema | Rust serde DTO + 前端封閉集合檢查 | 沒有 Zod／codegen build step |
-| Persona assets | 17 人本機 catalog + bundled WebP（ChatGPT 預設）；內容定址的四姊妹 fixed-voice pack，明確點擊、compact authority 驗證後原子啟用 | recorder/core 保持零網路；WebView CSP 不開 CDN；cache 只存舊 fixed voice，在 default data dir 的 `persona-assets-v1`，不進 memory export／forget／prune |
+| Persona assets | 17 人本機 catalog + bundled workplace 分層 rig（active-only decode）+ WebP fail-safe（ChatGPT 預設）；內容定址的四姊妹 fixed-voice pack，明確點擊、compact authority 驗證後原子啟用 | 402 張 selected PNG = 35,140,885 bytes，逐檔 hash/geometry/rights pin；recorder/core 保持零網路；WebView CSP 不開 CDN；cache 只存舊 fixed voice，在 default data dir 的 `persona-assets-v1`，不進 memory export／forget／prune |
 | hands 元件（Phase 6+） | Agent S3（Apache-2.0）/ UFO²（MIT）/ OmniParser v3 weights（MIT，避開舊 AGPL detector） | 「手」已商品化：用組的，不自己寫 grounding |
 | 參考不引用 | Screenpipe（2026-06 起自訂商業授權，僅參考架構；MIT fork point 在舊版）；Everywhere（BUSL，僅 MCP/API interop） | license 判定見 research/landscape.md |
 

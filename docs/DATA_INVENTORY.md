@@ -31,10 +31,13 @@
 你自己跑 `sister replay export` 時會明確多做一份私有草稿；它是匯出副本，
 不是活資料庫的一部分，要另外刪除。
 
-17 張 current 角色 WebP 是程式本身的靜態資產，位於
-`apps/desktop/ui/personas/`，合計 225,082 bytes；它們不在資料目錄、不是 cache，
-也不受 memory export／forget／prune／Persona cache 撤回影響。來源、大小與 SHA-256
-固定在同目錄的 manifest。
+17 張 current 角色 WebP 與 17 套 workplace 分層 rig 都是程式本身的靜態資產，
+分別位於 `apps/desktop/ui/personas/` 與 `apps/desktop/ui/persona-reels/`。WebP 合計
+225,082 bytes；Reel 只選 402 張 PNG、35,140,885 bytes，畫面只建當前人的
+21–26 層。兩組都不在資料目錄、不是 cache，也不受 memory export／
+forget／prune／Persona cache 撤回影響。來源、大小、SHA-256 與圖像授權
+排除分別固定在同目錄的 manifest/NOTICE。Reel manifest 不含 raw receipt、
+產生時間或本機絕對 path。
 
 另有一個物理上位於預設資料目錄、但**不是記憶**的舊固定錄音素材 cache：
 `Config::default_data_dir()/persona-assets-v1/`。安裝時會短暫有 `.staging-*`；完成後是
@@ -63,12 +66,13 @@ cache 旁邊另有四種不跟 release 目錄一起刪的協定檔：`persona-as
 下載或程式在撤回途中當掉時，舊 release 不會重新被當成可用；所以 memory export／
 `forget`／`prune` 也不碰它們。
 
-alpha.109 的 Azure TTS **不新增答案或 MP3 cache**。每次使用者明確按 Azure 朗讀時，
-當前答案正文、產生的 SSML、從 Credential Manager 短暫讀出的 subscription key，以及
+alpha.110 的 Azure TTS **不新增答案或 MP3 cache**。四道 gate 齊全時，每份最新新答案
+自動朗讀一次；trusted 手動重播會再請求一次。該答案正文、產生的 SSML、從 Credential Manager 短暫讀出的 subscription key，以及
 回傳的 MP3 只在 desktop／TTS 行程 RAM 裡活到該次 request／播放結束；沒有磁碟 cache，
 也沒有可供下一次重播的記憶體 cache。停止或換題會讓舊 playback generation 失效，
-晚回的 MP3 不播放、不保存；已開始的 blocking POST 仍可能留在 RAM 並跑到 45 秒
-timeout。OS paging／crash dump 與同使用者權限程式仍可能觀察行程記憶體，不能把「不
+晚回的 MP3 不播放、不保存；已取得送出權的 blocking POST 仍可能留在 RAM 並跑到 45 秒
+timeout，相關設定／key／consent mutation 或 native cancel 可能等它結束，但回覆成功後
+舊 request 不會才送。OS paging／crash dump 與同使用者權限程式仍可能觀察行程記憶體，不能把「不
 持久化」寫成「那些 bytes 從未進 RAM」。
 
 同一個資料夾裡還有 `replay-drafts/`（它有資料，單獨列在下面），以及幾個
@@ -80,7 +84,7 @@ timeout。OS paging／crash dump 與同使用者權限程式仍可能觀察行�
 | `pause.state` | 最近一代 pause 的 generation、是否仍暫停，以及 pause／resume request 時戳；解除後仍保留，防止一整段 pause→resume 在兩次 recorder 探測之間消失 | 執行中不可刪。所有 AI-Sister 行程關閉後，損毀時才可刪除；會失去這份控制歷史，下次操作會重建 |
 | `pause.lock` | 空的跨行程 read/write transaction 鎖；檔案留著，真正的鎖由作業系統 handle 持有 | 執行中不可刪，否則不同 process 可能各鎖到不同檔案；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `hands.stop` | 她的手現在是不是被拔掉。內容只有第一次拔手的毫秒時戳 | 等於安靜地把手接回去，所以任何 forget、prune、export 都刻意不動它 |
-| `consent.toml` | 四張同意書各自是**何時**簽的，加上一個條文版本號；第四張是獨立的 `azure-tts` | 等於四張都沒簽；`sister record` 拒絕啟動，Azure TTS 一次都不呼叫 |
+| `consent.toml` | 四張同意書各自是**何時**簽的；前三張有共同條文版本，第四張 `azure-tts` 另有獨立 terms version | 等於四張都沒簽；`sister record` 拒絕啟動，Azure TTS 一次都不呼叫 |
 | `consent.lock` | 空的跨行程同意 transaction 鎖。CLI／desktop 的 grant／revoke 在 OS whole-file exclusive lock 內重讀最新 `consent.toml`、套當次變更再 atomic save；recorder start 先持 shared guard。CLI 那份跨到第一拍；desktop parent 那份只跨到 `Command::spawn` 回來便立即放掉，child 自己 nonblocking 重拿並跨到第一拍。symlink／non-regular path 拒絕 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `consent-revoke.barrier` | 第一張同意撤回在 atomic save **之前**發布的獨立 durable barrier；內容是 `v1:` 加 fresh 256-bit generation。Recorder 把它視為 `consent-revoked` 停止條件，但不消費；Start 無權清。只有成功 commit 的 local-recording regrant 可用相符 generation ticket 清理，並先確保另有 durable stop intent | 刪掉可能讓失敗的 consent save 留著舊有效同意時重新開錄，也可能讓同一拍內的快速 revoke→regrant 漏掉收工。不要手動刪；損毀時 fail closed，須先關閉所有 AI-Sister 行程再修復 |
 | `pet-window.json` | 字母人視窗的位置與置頂狀態 | 下次開在右下角 |
@@ -111,7 +115,9 @@ stale lock，作業系統會釋放 handle；檔案留在原位是刻意的。
 不宣稱正在錄，也不把它折成「沒有人在錄」來開放 Start／retry。
 第四張 `azure-tts` 只鑄出 Azure TTS permit，不借用 `cloud-reading`、Persona 下載點擊
 或 Persona 的本機聲音開關。alpha.109 讀到沒有 Azure 欄位的同版本舊 consent 時，
-原三張時戳原樣保留，第四張是 `None`；未知 sheet／欄位或無法解析的值仍 fail closed。
+原三張時戳原樣保留，第四張是 `None`；alpha.110 讀到 click-only 第四張時保留它的歷史
+時戳，但獨立 terms version 不符，所以不能鑄出 permit，重簽第四張才生效。未知 sheet／
+欄位或無法解析的值仍 fail closed。
 改同意時不可先在鎖外讀完整份、最後拿舊 snapshot 寫回；那會讓同時在 CLI
 和 desktop 改不同 sheet 時後寫者無聲把先寫者蓋掉。每個 mutation 要先持有
 `consent.lock`，在鎖內重讀、套這次 grant／revoke、atomic save。Recorder start 不寫
@@ -234,14 +240,17 @@ CLI 可以用全域 `--config <FILE>` 明確改讀另一份，字母人則讀預
 
 `[shell.persona]` 也住在 `config.toml`，保存角色顯示開關、穩定 ID、動態效果、
 tap-lines 與聲音偏好。這些值會改本機呈現，**不會進 asset request**；17 位角色與
-所有狀態的 method／URL／headers／body 必須相同。刪記憶不會重設它們，刪設定檔才會
+所有狀態的 method／URL／headers／body 必須相同。Reel/WebP 都是 bundled 本機
+檔，切人只讀所選角色的圖層，不產生網路 request。刪記憶不會重設它們，刪設定檔才會
 回到 ChatGPT／預設值。舊設定裡的 exact `neutral` 會遷移成 ChatGPT 並關閉聲音；
 其他未知 ID 仍拒絕。素材 cache 本身也不另存一份「目前選誰」。
 
 `[shell.azure_tts]` 也在 `config.toml`，但只存**非機密**設定：`enabled`、`region`、
 `voice`。預設是 `enabled = false`、沒有 region、voice 是
 `zh-TW-HsiaoChenNeural`；它不會因 Persona 的 `voice_enabled` 或找不到本機 voice
-自動打開。region 只接受 `eastasia`、`southeastasia`、`japaneast`；voice 只接受
+自動打開。使用者明確打開且其餘三道 gate 齊全後，每份最新新答案完成時會自動朗讀
+一次；關閉操作成功回覆後便不再開始新的請求。若 transport 已取得送出權，操作可能
+等待完成或最長 45 秒逾時，見本節前述 fence 邊界。region 只接受 `eastasia`、`southeastasia`、`japaneast`；voice 只接受
 `zh-TW-HsiaoChenNeural`、`zh-TW-HsiaoYuNeural`、`zh-TW-YunJheNeural`。這些 typed
 值決定 fixed endpoint／SSML voice；未知值或多餘欄位讓設定讀取失敗，不猜預設、不接受
 自訂 URL。舊設定缺整段時遷移成上述 disabled／unconfigured 預設。
@@ -309,8 +318,9 @@ invalid／busy／timeout Start 不會。
 沒有遙測、沒有產品帳號。`sister.exe` 與 recorder／core／capture／brain／hands 沒有
 HTTP client；desktop 只有兩條內建 outbound：使用者看完揭露並明確按下後，經
 `sister-assets/download` 對固定 Persona pack 發至多一次 GET；以及 Azure 設定、
-Credential Manager key、第四張 consent 與當下按鈕都成立後，經 `sister-tts/azure`
-對 `eastasia`／`southeastasia`／`japaneast` 其中一個 fixed endpoint 發一個 POST。
+Credential Manager key 與現行第四張 consent 都成立後，經 `sister-tts/azure` 只替最新
+新答案或 trusted 手動重播，對 `eastasia`／`southeastasia`／`japaneast` 其中一個 fixed
+endpoint 發一個 POST。
 後者唯一的使用者內容是當前答案正文原文，可能含姓名、電話與金額且不遮罩；不含截圖、
 來源連結、memory id、DB 或其他文字。它不做 cache，cancel 只阻止 late audio 播放，
 無法 abort 已開始、最長 45 秒的 blocking POST。簽了第二張同意書且
@@ -450,7 +460,7 @@ ranking、題目 id、每題 question 與 returned values 都不過這道邊界�
 | 有存密碼嗎？ | 前置檢查確認焦點在敏感欄時不讀內容；所有前景 app 都問，問不出來也不放行。密碼管理員另由 app 規則整段排除；可見背景視窗與換窗 race 見下方「已知缺口」 |
 | 網銀畫面呢？ | **前景**網址命中 blocklist 時不讀內容——但背景視窗與 browser clipboard 的邊界見下方「已知缺口」 |
 | 有存我**問過她**什麼嗎？ | 有——`queries`，只在這台機器上。可用 `privacy.query_log = false` 關掉 |
-| 資料會離開這台機器嗎？ | 畫面 pixel 不會。簽 `cloud-reading` 後，OCR 文字原文會交給你設定的本機 CLI；那支 CLI 是否送給 provider，由它自己的設定與行為決定。另有 Persona fixed GET；以及預設關閉的 Azure TTS：只有設定、Credential Manager key、獨立第四張同意和當下按鈕都成立時，才把當前答案正文原文 POST 到你選的三個固定 Azure region 之一；正文可能含姓名、電話與金額且不遮罩，不含截圖、來源、memory id、DB 或其他文字 |
+| 資料會離開這台機器嗎？ | 畫面 pixel 不會。簽 `cloud-reading` 後，OCR 文字原文會交給你設定的本機 CLI；那支 CLI 是否送給 provider，由它自己的設定與行為決定。另有 Persona fixed GET；以及預設關閉的 Azure TTS：只有設定、Credential Manager key 與現行第四張同意都成立時，才把每份最新新答案的正文原文自動 POST 一次到你選的三個固定 Azure region 之一；trusted 手動重播會再 POST。正文可能含姓名、電話與金額且不遮罩，不含截圖、來源、memory id、DB 或其他文字 |
 
 ---
 

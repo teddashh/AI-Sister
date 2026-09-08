@@ -1615,13 +1615,16 @@ console.log("㉚ᵃ Azure 五態分開畫；只有四道 native gate 齊全才�
 
   const compact = HTML.replace(/\s+/g, "");
   check(
-    "控制旁明講 POST 資料、排除項、credential store 與取消語意",
-    compact.includes("只會送出當前答案正文原文") &&
+    "控制旁明講新答案自動送、重播再送、排除項、credential store 與取消語意",
+    compact.includes("每份新答案完成後只自動送出該題答案正文原文一次") &&
+      compact.includes("Azure重播會再送一次") &&
       compact.includes("不送截圖、來源連結、memoryid、整份資料庫、其他文字或角色選擇") &&
       compact.includes("WindowsCredentialManager") &&
       compact.includes("不寫進config.toml，也不會把已存值回傳到這一頁") &&
       compact.includes("丟掉晚到的回應") &&
-      compact.includes("HTTPSPOST可能仍會跑到逾時"),
+      compact.includes("已進入送出階段的request仍可能跑到逾時") &&
+      compact.includes("可能要等它結束才回覆") &&
+      compact.includes("任一操作回覆成功後，舊request不會才開始送"),
     "settings.html Azure disclosure",
   );
 }

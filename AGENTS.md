@@ -4,7 +4,7 @@
 而且每一句話都點得開證據的本機記錄器。**「本機」指的是錄下的截圖、OCR 與記憶留在
 這台機器**；腦（L2/L3）接的是使用者自己已經裝好的 CLI agent，不是內建的 HTTP
 client。desktop 只有兩條具名、窄化的內建 outbound：Persona 固定素材包的使用者發起
-GET，以及 alpha.109 預設關閉、另行同意與按下才送當前答案正文的 Azure TTS POST。
+GET，以及 alpha.110 預設關閉、另行同意後只替最新新答案或手動重播送正文的 Azure TTS POST。
 它們不能擴散到 recorder／core／capture／brain／hands 或 WebView。
 
 先讀 `docs/PHASES.md`（路線圖，退場條件就是驗收條件）、`docs/SPEC.md`、`docs/PRODUCT.md`。
@@ -37,9 +37,14 @@ GET，以及 alpha.109 預設關閉、另行同意與按下才送當前答案正
 
 ### Persona asset 網路邊界（alpha.102 起）
 
-- alpha.108 起，四姊妹與 13 位閨密的 17 張 current WebP 隨 desktop 一起提供；來源、
-  bytes、SHA-256 與 Apache-2.0 圖像授權排除寫在 `apps/desktop/ui/personas/`。預設 ChatGPT，沒有
-  Neutral，也沒有 S/T/C/G/X glyph fallback。舊 `neutral` 設定只遷移成 ChatGPT 並關聲。
+- alpha.110 起，四姊妹與 13 位閨密各有一套 bundled workplace 分層 rig；
+  只選 402 張 PNG，合計 35,140,885 bytes，不把 5.2 GB 候選、其他服裝、
+  reaction、raw receipt 或 debug 圖塞進 release。畫面只建當前人的 21–26 層；
+  全層解碼成功才從 alpha.108 的 bundled WebP 切過去，任一檔壞掉就留在
+  WebP。兩批素材的來源、bytes、SHA-256、owner grant 與 Apache-2.0
+  圖像授權排除分別寫在 `apps/desktop/ui/personas/` 與
+  `apps/desktop/ui/persona-reels/`。預設 ChatGPT，沒有 Neutral，也沒有
+  S/T/C/G/X glyph fallback。舊 `neutral` 設定只遷移成 ChatGPT 並關聲。
 
 - `crates/sister-assets` 在 root workspace，預設 feature 集合**沒有** `download`；只有
   desktop 明確啟用。不要把 HTTP client 直接加進 `sister-desktop`，更不能加進
@@ -55,18 +60,20 @@ GET，以及 alpha.109 預設關閉、另行同意與按下才送當前答案正
   946 entries；真正使用的 selected entries 再逐檔驗 size／hash／rights binding。
 - cache 固定在 `Config::default_data_dir()/persona-assets-v1`，`--data-dir` 不搬；memory
   export／forget／prune 不碰，Persona 撤回才清 exact release。失敗或損毀只停用舊
-  fixed voice，保留 bundled 角色圖，不得自動連線修復。
+  fixed voice，保留 bundled rig 與 WebP 退路，不得自動連線修復。
 - HTTP 在 native Rust；所有 WebView CSP 繼續只准 IPC，**不要把 CDN 加進
   `connect-src`／`img-src`／`media-src`**。一般 CI 也不打真 CDN。
 - 本機語音只接受 WebView 明確標成 `localService` 的中文 voice；找不到就靜音，不得
-  自動換 remote voice。角色台詞與答案朗讀都要由 trusted click 開始，不 autoplay。
+  自動換 remote voice。角色台詞與**本機**答案朗讀都要由 trusted click 開始，不 autoplay。
 
 ### Azure TTS 網路邊界（alpha.109 起）
 
 - 本機 `localService` 語音仍是預設；Azure 預設關閉，而且兩條路**都不互相自動
   fallback**。只有設定明確啟用、region 與 voice 都是 typed allowlist、Windows
-  Credential Manager 有 key、第四張 `azure-tts` 同意有效，再由使用者親手按 Azure
-  朗讀，才可建立請求。舊三張同意不授權 Azure；同版本舊檔遷移時第四張一律未簽。
+  Credential Manager 有 key、第四張 `azure-tts` 同意有效，最新一次使用者提問的
+  答案完成時才自動建立一個請求；trusted 手動重播會再建立一個。開機、設定／狀態
+  重讀、demo、舊答案重畫、角色、錄製或記憶事件都是 0 POST。alpha.109 的逐次點擊
+  第四張不能授權自動送出，alpha.110 必須只重簽第四張；前三張繼續有效。
 - `crates/sister-tts` 的預設 feature 沒有 Azure HTTP；只有 desktop 明確啟用。region
   嚴格只有 `eastasia`、`southeastasia`、`japaneast`，各自只准 native Rust 對
   `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` 做一個 HTTPS `POST`。
@@ -79,12 +86,14 @@ GET，以及 alpha.109 預設關閉、另行同意與按下才送當前答案正
   `ted-h/AI-Sister/AzureSpeech/v1`；不進 `config.toml`、log、DB 或 export。使用者輸入時
   它會短暫存在 password 欄位與 Tauri IPC；保存後頁面立即清空，native 回條只准帶
   Present／Missing／Unreadable／Unsupported，不能把 secret 讀回 renderer。
-- 不做文字或 MP3 cache；每次 trusted click 都可能重新 POST。停止／換題立即讓 playback
+- 不做文字或 MP3 cache；每份新答案與每次 trusted 手動重播都可能重新 POST。停止／換題立即讓 playback
   generation 失效，晚回來的音訊不得播放或快取；但 blocking native POST 不能中途 abort，
   最長仍可能跑到 45 秒 timeout，且 provider 可能已計入用量。UI 不得把「不再播放」寫成
   「網路請求已取消」。
 - outbound helper 必須 by-value 吃掉跨行程 shared consent guard，並讓它活過完整 transport；
-  所以碰到既有 POST 時，第四張撤回可能等到 timeout，但撤回回覆後舊 snapshot 絕不能才送。
+  最後一次 generation 檢查與 transport 也要握住和設定／key／consent mutation、native cancel
+  共用的 fence。若 transport 先取得 fence，這些操作可能等到最長 45 秒；任何操作回覆成功後，
+  舊 snapshot 絕不能才開始送。
 - Microsoft 目前公開列 Azure Speech F0 neural TTS 每月 0.5 million characters；這是
   provider 方案，不是產品保證。是否可用、額度與費用以使用者 Azure 帳號、resource、
   方案及 Microsoft 當下規則為準。

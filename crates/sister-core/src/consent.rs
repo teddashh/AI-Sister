@@ -5,7 +5,7 @@
 //! 1. **本機記錄**：在這台機器的硬碟上記錄螢幕。
 //! 2. **上雲解讀**：把螢幕上的文字原文交給使用者設定的本機 CLI。
 //! 3. **畫面暫存**：保留變化幀的截圖（相對於「只留 OCR 出來的字」）。
-//! 4. **Azure 朗讀**：只在使用者點下朗讀時，把當前答案正文原文交給 Azure。
+//! 4. **Azure 朗讀**：設定開啟後，每份新答案完成時把當前答案正文原文交給 Azure。
 //!
 //! ## 為什麼它會擋住東西
 //!
@@ -30,9 +30,10 @@
 //!
 //! ## 條文改了要重問
 //!
-//! 存下來的 `version` 對不上 [`VERSION`] 時，整份視為沒簽。一份對著舊條文按下
-//! 的同意，不能拿來涵蓋後來新加的東西——這件事很不方便，而它的替代方案是
-//! 「悄悄地把新條款算他同意了」。
+//! 存下來的 `version` 對不上 [`VERSION`] 時，前三張整份視為沒簽；第四張另看
+//! [`AZURE_TTS_TERMS_VERSION`]，但也要求前三張的共同檔案版本仍可讀。一份對著舊
+//! 條文按下的同意，不能拿來涵蓋後來新加的東西——這件事很不方便，而它的替代
+//! 方案是「悄悄地把新條款算他同意了」。
 
 use anyhow::{Context, Result};
 use fs4::{FileExt, TryLockError};
@@ -44,7 +45,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::model::Millis;
 
-/// 目前的條文版本。**改條文就要 +1**，代價是所有人都要重簽一次。
+/// 前三張共用的條文版本。**改前三張就要 +1**，代價是所有人
+/// 都要重簽這三張。第四張用 [`AZURE_TTS_TERMS_VERSION`] 獨立版本。
 ///
 /// 2：第二張從「送到我指定的模型商」改成「交給我設定的本機 CLI」。
 /// 收件人變了，舊簽名涵蓋不了這件事。
@@ -56,9 +58,15 @@ use crate::model::Millis;
 /// 這三個字能對得起來。去敏等於先拆掉 L3 的地基。）
 ///
 /// alpha.109 新增的 Azure TTS 是第四張**獨立**條文，沒改舊三張的 wording，
-/// 所以不把版本升到 4。舊的 version 3 檔案沒有 `azure_tts`，serde 會讀成
-/// `None`：舊三張的簽名繼續如實生效，但絕對不會順便授權新的出境路徑。
+/// 所以不把這個全局版本升到 4。舊的 version 3 檔案沒有 `azure_tts`，serde 會
+/// 讀成 `None`：舊三張的簽名繼續如實生效，但絕對不會順便授權新的出境路徑。
+/// alpha.110 只擴大第四張，因此用下面獨立版本讓舊 Azure 簽名失效，不把前三張
+/// 一起清掉。
 pub const VERSION: u32 = 3;
+
+/// 第四張的獨立條文版本。沒有這個欄位的 alpha.109 檔案會讀成 0；當時
+/// 簽的是「每次按下才送」，不能授權 alpha.110 的新答案自動送出。
+pub const AZURE_TTS_TERMS_VERSION: u32 = 1;
 
 const FILE: &str = "consent.toml";
 const WRITE_LOCK: &str = "consent.lock";
@@ -84,6 +92,10 @@ pub struct Consent {
     /// 第四張：把當前答案正文原文交給 Azure TTS。
     #[serde(default)]
     pub azure_tts: Option<Millis>,
+    /// 第四張簽的是哪一版條文。0 = alpha.109 的舊「逐次按下」條文，
+    /// 也是舊檔缺欄位時的 fail-closed 值。
+    #[serde(default)]
+    pub azure_tts_terms_version: u32,
 }
 
 /// 四張裡的哪一張。
@@ -122,7 +134,7 @@ impl Sheet {
             }
             Sheet::FrameStorage => "我同意保留變化幀的截圖，而不是只留上面的字。",
             Sheet::AzureTts => {
-                "我同意每次按下 Azure 朗讀時，把當前答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。"
+                "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。"
             }
         }
     }
@@ -135,7 +147,8 @@ impl Sheet {
     ///
     /// 改這幾句**不必**動 [`VERSION`]。他按下去同意的是 [`Self::wording`] 那
     /// 一句；這裡是我們對後果的描述，寫得更準確不代表他同意的東西變了。反過來
-    /// 要是動了 `wording`，那就是另一句話了，`VERSION` 非加不可。
+    /// 要是動了 `wording`，那就是另一句話了：前三張要加 [`VERSION`]，
+    /// 第四張要加 [`AZURE_TTS_TERMS_VERSION`]。
     pub fn without(self) -> &'static str {
         match self {
             Sheet::LocalRecording => {
@@ -183,15 +196,30 @@ impl Consent {
         }
     }
 
-    /// 簽下去。已經簽過的**不會**被蓋掉時戳——「我什麼時候同意的」問的是第一次。
+    /// 簽下去。同版已經簽過的**不會**被蓋掉時戳——「我什麼時候同意的」問的是
+    /// 第一次；但條文改版後重新簽 Azure 時，要換成這次真正同意新句子的時間。
     pub fn grant(&mut self, sheet: Sheet, ts: Millis) {
-        let slot = match sheet {
-            Sheet::LocalRecording => &mut self.local_recording,
-            Sheet::CloudReading => &mut self.cloud_reading,
-            Sheet::FrameStorage => &mut self.frame_storage,
-            Sheet::AzureTts => &mut self.azure_tts,
-        };
-        slot.get_or_insert(ts);
+        match sheet {
+            Sheet::LocalRecording => {
+                self.local_recording.get_or_insert(ts);
+            }
+            Sheet::CloudReading => {
+                self.cloud_reading.get_or_insert(ts);
+            }
+            Sheet::FrameStorage => {
+                self.frame_storage.get_or_insert(ts);
+            }
+            Sheet::AzureTts => {
+                // 舊的 timestamp 是按在舊句子上的。新條文重問時必須記這次的
+                // 時間，不能用 get_or_insert 把 alpha.109 的舊日期冒充新簽名。
+                if self.azure_tts_terms_version != AZURE_TTS_TERMS_VERSION {
+                    self.azure_tts = Some(ts);
+                } else {
+                    self.azure_tts.get_or_insert(ts);
+                }
+                self.azure_tts_terms_version = AZURE_TTS_TERMS_VERSION;
+            }
+        }
         self.version = VERSION;
     }
 
@@ -204,7 +232,7 @@ impl Consent {
         }
     }
 
-    /// 這份同意書是不是對著**現在這一版**條文簽的。
+    /// 這份同意書是不是對著前三張的**現在這一版**共同條文簽的。
     pub fn current(&self) -> bool {
         self.version == VERSION
     }
@@ -242,7 +270,20 @@ impl Consent {
     ///
     /// 這個 bool 只給顯示；真正出境邊界要 [`AzureTtsAllowed`]。
     pub fn allows_azure_tts(&self) -> bool {
-        self.current() && self.azure_tts.is_some()
+        self.current()
+            && self.azure_tts.is_some()
+            && self.azure_tts_terms_version == AZURE_TTS_TERMS_VERSION
+    }
+
+    /// 這張簽名在當前條文下是不是有效。第四張有自己的版本，所以顯示層
+    /// 不能再用 `current() && get(sheet).is_some()` 自己拼一份較寬的答案。
+    pub fn effective(&self, sheet: Sheet) -> bool {
+        match sheet {
+            Sheet::LocalRecording => self.allows_recording(),
+            Sheet::CloudReading => self.allows_cloud(),
+            Sheet::FrameStorage => self.allows_frames(),
+            Sheet::AzureTts => self.allows_azure_tts(),
+        }
     }
 
     /// 交出 Azure TTS 的獨立出境憑證。第二張 `cloud-reading` 絕不能鑄出它。
@@ -842,9 +883,43 @@ mod tests {
     }
 
     #[test]
+    fn alpha_109_click_consent_cannot_authorize_auto_speech_but_old_three_stay_live() {
+        let mut old: Consent = toml::from_str(
+            "version = 3\nlocal_recording = 11\ncloud_reading = 12\nframe_storage = 13\nazure_tts = 14\n",
+        )
+        .expect("alpha.109 click-only Azure consent");
+
+        assert_eq!(old.version, VERSION);
+        assert!(old.allows_recording());
+        assert!(old.allows_cloud());
+        assert!(old.allows_frames());
+        assert_eq!(old.azure_tts, Some(14), "舊簽名的歷史仍看得見");
+        assert_eq!(old.azure_tts_terms_version, 0);
+        assert!(!old.allows_azure_tts());
+        assert!(!old.effective(Sheet::AzureTts));
+        assert!(old.azure_tts_permit().is_none());
+
+        old.grant(Sheet::AzureTts, 99);
+        assert_eq!(old.azure_tts, Some(99), "新條文要記重簽的時間");
+        assert_eq!(old.azure_tts_terms_version, AZURE_TTS_TERMS_VERSION);
+        assert!(old.allows_azure_tts());
+        assert!(old.allows_recording(), "第四張改版不清掉前三張");
+    }
+
+    #[test]
     fn azure_wording_names_exactly_what_leaves_and_what_does_not() {
         let wording = Sheet::AzureTts.wording();
-        for sent in ["當前答案正文原文", "姓名", "電話", "金額", "不會先遮罩"] {
+        for sent in [
+            "Azure 新答案自動朗讀",
+            "每份新答案完成後",
+            "不再逐次詢問",
+            "該答案正文原文",
+            "自動播放",
+            "姓名",
+            "電話",
+            "金額",
+            "不會先遮罩",
+        ] {
             assert!(wording.contains(sent), "missing {sent}: {wording}");
         }
         for not_sent in ["截圖", "來源連結", "memory id", "整份資料庫", "其他文字"] {

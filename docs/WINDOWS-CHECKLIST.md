@@ -10,7 +10,7 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.109 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+alpha.110 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
@@ -22,7 +22,7 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
 
-### alpha.109 先驗 Azure 可選 TTS 邊界
+### alpha.110 先驗 Azure 新答案自動朗讀邊界
 
 **目前狀態：下面全是待勾項。** core config／consent、native transport、Credential
 Manager backend 與 renderer contract 有自動測試，不等於正式 Windows artifact 已用真
@@ -31,12 +31,13 @@ Manager backend 與 renderer contract 有自動測試，不等於正式 Windows 
 - [ ] fresh install／沒有 `[shell.azure_tts]`／沒有 Azure key／第四張未簽時，Azure
       顯示 disabled/unconfigured；「用本機聲音朗讀」仍照 alpha.108 走 `localService`。
       沒有本機中文 voice 時保持靜音，不能自動 POST；Azure 失敗也不能自動改走本機或
-      其他 provider。開 app、開設定、顯示答案、選 Persona、錄製與 idle 都要是 0 Azure
+      其他 provider。開 app、開設定、問完一題、選 Persona、錄製與 idle 都要是 0 Azure
       request。
-- [ ] 從 alpha.108 的 v3 `consent.toml` 升級：原來三張的 timestamps 逐字保留，新增
-      `azure-tts` 顯示未簽。只簽第二張 `cloud-reading`、只開 Persona `voice_enabled`、
-      或只存 key 都必須仍是 0 Azure POST；只簽第四張也不能反過來授權 recording、
-      frame storage 或 CLI 解讀。刪壞／未知／版本不符的 consent 要 fail closed。
+- [ ] 從 alpha.109 的 v3 `consent.toml` 升級：前三張 timestamps 逐字保留；若第四張曾簽
+      click-only 舊條文，它要顯示「同意過，但條文後來改版」，且仍是 0 POST。重簽現行
+      第四張後只有它換成新的簽署時間，前三張不重問。只簽 `cloud-reading`、只開 Persona
+      `voice_enabled`、只存 key 或只有舊第四張都必須仍是 0 POST；只簽現行第四張也不能
+      反過來授權 recording、frame storage 或 CLI 解讀。壞檔／未知／版本不符要 fail closed。
 - [ ] 在 Azure 設定存一支測試 key；用 Windows Credential Manager 確認它只有 generic
       credential target `ted-h/AI-Sister/AzureSpeech/v1`、username
       `Azure Speech subscription key`。`config.toml`、`desktop.log*`、`record.log*`、
@@ -46,27 +47,57 @@ Manager backend 與 renderer contract 有自動測試，不等於正式 Windows 
       target 要真的消失。
       不要把真 key 貼回 issue 或測試紀錄。
 - [ ] `[shell.azure_tts]` 只能選 `eastasia`、`southeastasia`、`japaneast` 與三支
-      canonical zh-TW voice。依序用三區 resource／key 實測並抓封包：每次按 Azure
-      朗讀只有一個 native HTTPS `POST` 到
+      canonical zh-TW voice。依序用三區 resource／key 實測並抓封包：四道 gate 齊全後，
+      每份最新新答案完成時只有一個 native HTTPS `POST` 到
       `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1`；沒有 `HEAD`、
       redirect follow、proxy、retry 或 WebView request。`westus`、大小寫變體、自訂 URL、
       未知 voice／多餘 config key 都要讓設定 fail closed，不能猜成 East Asia。
 - [ ] 準備一個答案正文含唯一測試字串、假姓名／電話／金額，來源 chip、source URL、
-      memory id、問題與另一題各放不同 sentinel。簽第四張並按 Azure 後，native request
+      memory id、問題與另一題各放不同 sentinel。重簽第四張並開啟設定後，問出新答案；native request
       的唯一使用者內容必須是**當前答案正文原文**：正文 sentinel 和未遮罩的假個資在，
       截圖 bytes、來源／chip、memory id、DB、問題、舊答案、Persona 台詞與其他 sentinel
       全不在。不要用真個資做這項測試。
-- [ ] 同一答案連按兩次，應看到兩次獨立 POST，不能命中磁碟或可重播記憶體 cache。
+- [ ] 新答案自動送出一次後，按答案下方手動重播，應看到第二次獨立 POST；script 合成
+      click 不得重播。不能命中磁碟或可重播記憶體 cache。
       播完、失敗、重開 app、`forget`、`prune`、memory export 後搜尋資料目錄，不得多出
       Azure 文字／SSML／MP3 cache；這些動作也不能刪 Credential Manager key。
+- [ ] 開 app／設定頁、status changed/read、重簽、存 key、重畫或顯示一份舊答案、demo
+      都不得補送現有答案。設定已 ready 後問一份**新**答案才恰好一個 POST；快速問兩題、
+      舊題較晚回來時，只准送並播放最新題。關掉 Azure 後下一題回到 0 POST。
 - [ ] 先用自動化的 delayed test transport 驗 late-response state machine；正式 artifact
       則在 POST 已開始後立即按 Stop、換題及開始新播放。舊 playback 要立刻失效，late
       MP3 不得播放或快取；但不要要求 packet trace 當場消失——blocking POST 仍可繼續到
       response 或最長 45 秒 timeout。UI 必須只說不再播放，不可宣稱網路或計費已取消；
       Azure 可能已計入這次字數。
+- [ ] 在正式 WebView2 上驗新答案 MP3 回來後會真的自動播放一次；這一步發生在 async
+      POST 之後，不能拿 renderer fixture 的 `audio.play()` 被呼叫過冒充使用者真的聽得到。
+- [ ] 用 delayed transport 分別讓 transport fence 與關閉開關、改區域／聲音、存刪 key、
+      第四張 consent mutation、native cancel 交錯。mutation／cancel 先贏時必須是 0 POST；
+      transport 先贏時操作可等到 response／45 秒 timeout，但成功回覆後舊 request 不得才送。
+      renderer 的停止按鈕在等待 native cancel 時仍要先停播。
 - [ ] 額度文案只能說 Microsoft **目前公開**列 F0 neural TTS 每月 0.5 million
       characters，並緊接著說是否可用、額度與費用以這個 Azure 帳號／resource／方案及
       Microsoft 當下規則為準。不得顯示成 AI-Sister 附送、保證免費或硬費用上限。
+
+### alpha.110 再驗 17 人離線 Reel
+
+**目前狀態：下面全是待勾項。** selector 與 shipped-byte checker 已驗 17 rigs、
+402 PNG、35,140,885 bytes 與逐檔 hash/geometry；renderer fixture 已驗載入、退路與
+speaking state。這些不等於正式 WebView2 已把 17 人畫對、動對。
+
+- [ ] 斷網開啟 portable 與 installer 版；預設 ChatGPT 要從 WebP 平順切成分層畫面，
+      全程 0 request。逐一切完四姊妹＋13 位閨密，人、服裝、名稱要對得上，
+      沒有半疊圖層、舊人晚回蓋新人、Neutral 或 S/T/C/G/X 字母。
+- [ ] 在 DevTools 確認一次只有當前角色的 21–26 個 reel `<img>`，不是開機就把
+      402 張全解碼進 RAM。切人後舊 rig DOM 要被拿掉；答案模式縮成 56 px 時
+      顯示 WebP，不把整套分層擠成模糊小圖。
+- [ ] 用 portable 副本故意移走目前角色的一張 PNG 再開程式：畫面應保留該人
+      WebP，不公開半套 rig、不變字母、不連網 retry。放回檔案並重開後才恢復。
+- [ ] 在 idle/thinking 看眼睛與整組微動；paused、asleep、設定「角色動作」關閉、
+      Windows 減少動畫與視窗進背景時都不得繼續動。動畫關掉不得停語音本身。
+- [ ] 分別播固定 WAV、本機 SpeechSynthesis、Azure 新答案；只在音訊真正開始後
+      出現說話微動，pending POST/decode 不能先假動。ended、error、Stop、切人與晚回
+      callback 都要清掉。這只是 speaking animation，不冒充 phoneme lip-sync。
 
 ### alpha.108 先看 17 人角色與本機語音
 
@@ -351,7 +382,8 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
       而且開錄時要印出「第三張同意書沒簽：這一次只記螢幕上的字」。
 - [ ] 再簽第三張，錄一分鐘。這次 `frames\` 裡要出現 PNG。
 - [ ] 第四張 `azure-tts` 維持未簽，即使設定 enabled、region／voice 合法且 Credential
-      Manager 有 key，按 Azure 朗讀仍要明講「沒有送出 request」；本機朗讀照常可用。
+      Manager 有 key，新答案仍要是 0 POST；若手動按 Azure 重播，也要明講「沒有送出
+      request」。本機朗讀照常可用。
       反過來只簽第四張，`sister record` 仍要被第一張擋住，CLI 解讀仍要被第二張擋住。
 - [ ] 錄到一半在另一個終端機 `sister consent --revoke local-recording`。
       正在跑的 record 每 5 秒重讀同意書，所以撤回後最多再錄 5 秒加一拍；

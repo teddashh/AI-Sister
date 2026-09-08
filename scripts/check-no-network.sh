@@ -4,7 +4,8 @@
 #
 #     畫面不離機；root 預設與 recorder/core/brain/hands 沒有 HTTP client。desktop
 #     只有兩個窄例外：`sister-assets[download]` 的 fixed Persona GET，以及
-#     `sister-tts[azure]` 在第四張同意書與答案按鈕後的 fixed Azure POST。
+#     `sister-tts[azure]` 在現行第四張同意、enabled 設定下只替最新新答案或
+#     trusted 手動重播走 fixed Azure POST。
 #
 # 這支腳本讓那條界線**由 CI 保證，而不是由記性保證**。
 # 它不替使用者設定的外部 CLI 背書：簽了 cloud-reading 後，OCR 原文會交給

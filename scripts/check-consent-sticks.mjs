@@ -128,9 +128,10 @@ console.log("① 一般狀態：勾勾照著檔案畫");
     boxes.map((b) => b.checked),
   );
   check(
-    "第四張勾著也明講不會自動連線，只認答案按鈕",
-    p.node("[data-cards]").children[3].textContent.includes("不會自動連線") &&
-      p.node("[data-cards]").children[3].textContent.includes("只有你按"),
+    "第四張明講簽名不開設定；設定開著才自動送新答案，重播會再送",
+    p.node("[data-cards]").children[3].textContent.includes("簽名本身不會打開設定") &&
+      p.node("[data-cards]").children[3].textContent.includes("每份新答案完成後會自動送正文") &&
+      p.node("[data-cards]").children[3].textContent.includes("手動重播會再送一次"),
     p.node("[data-cards]").children[3].textContent,
   );
 }

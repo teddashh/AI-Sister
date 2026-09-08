@@ -59,6 +59,53 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.110
+
+**這一版讓已明確 opt in 的 Azure 在每份最新答案完成後自動朗讀，
+也把 5.2 GB 本機 Reel 候選收斂成 17 人、33.5 MiB 的離線分層角色包。**
+
+Azure 仍預設關閉，而且仍要設定開關、typed region/voice、Windows
+Credential Manager 裡的 key 與第四張 `azure-tts` 同意同時有效。差別是這些
+條件齊全後，使用者每次問題、最新那份答案完成時就會送出該答案
+正文並播放，不再要逐次按 Azure 按鈕。關閉設定或撤回第四張的操作成功回覆後，
+之後的新答案不會送。若 transport 已先取得送出權，設定／key／consent mutation 或
+native cancel 可能等到完成或最長 45 秒逾時；renderer 仍先停播，且操作成功回覆後
+舊 request 不會才開始送。按鈕保留為手動重播；每次重播都是新 POST，不是從 cache
+播舊 MP3。
+
+新授權比 alpha.109 的「每次按下才送」寬，所以第四張另有獨立條文版本。
+升級會把 alpha.109 的 Azure 簽名顯示為舊條文、不生效，必須重簽這一張；
+前三張同意與時間原樣保留。第四張現在明寫「每份新答案完成後不再
+逐次詢問」，並繼續明寫正文可能含姓名、電話與金額、不先遮罩；不送
+截圖、來源連結、memory id、整份資料庫或其他文字。
+
+自動入口只在 `ask()` 驗過「仍是最新那題」後建立一次。開機 demo、status
+read、設定變更 event、五秒輪詢與舊答案重畫都不能補送；兩題亂序回來
+時只最新那題能說話。自動與 trusted manual replay 共用同一個 renderer
+outbound helper、native 四道 gate、single-flight 與 generation cancel；晚回 MP3 仍不播、
+不落地、不 fallback。
+
+Reel 沒有把 5.2 GB 整包塞進安裝檔。選材器固定只拿四姊妹與 13 位閨密
+各一套 `workplace` rig：17 rigs、402 張 RGBA PNG，合計 35,140,885 bytes。
+reaction、其餘服裝、raw source/receipt、私有絕對 path 與 debug 圖都排除。
+每檔 bytes、SHA-256、圖層位置與尺寸固定在 sanitized manifest；圖像由
+素材所有人 Ted Huang 明確提供給 AI-Sister source tree 與官方安裝包，
+但不納入 Apache-2.0 程式碼授權。
+
+畫面只建立當前角色的 21–26 個圖層，不會把 17 人同時解碼進 RAM。每張當前
+圖層全部載入成功前繼續顯示 alpha.108 的 WebP；任一檔缺少或解碼失敗就
+留在 WebP，不出現字母 fallback。成功後才切到 1280 canvas 的分層立繪，
+用微小呼吸、眼睛與說話狀態讓她活著；關掉角色動作、切到背景分頁或
+`prefers-reduced-motion` 時動畫停止。所有素材都是隨程式提供的本機檔，WebView
+CSP 沒有加任何 remote `img-src` 或 `connect-src`。
+
+這一版延續借 AIRI 的是可驗證的 pipeline 形狀：分層角色、一個 active owner、
+有 generation 的取消，以及本機 TTS 分段依序播放。沒有把 AIRI 的整套 runtime、
+WebSocket 或偏英語的較重模型帶進來。正式 Windows artifact 的 WebView2 自動播放、
+17 人圖層切換、眨眼／說話微動與真 Azure 帳號的 packet trace 仍列在人工驗收清單，
+沒有在這裡冒充已經實測。
+
+
 ## v0.1.0-alpha.109
 
 **這一版加入可選的 Azure 繁中答案朗讀，但本機聲音仍是預設；Azure 預設關閉，
@@ -86,13 +133,15 @@ subscription key 欄位都 fail closed。刪記憶、設定檔、Persona cache �
 沒有 Azure host。唯一的使用者內容是當前答案正文；來源 chips、問題、舊答案、Persona
 台詞、OCR 集合、截圖、memory id、DB 與其他 UI 文字都不夾帶。
 
-這版不做文字或 MP3 的磁碟 cache，也沒有跨 click 重播的記憶體 cache；每次按 Azure
-朗讀都可能是新 POST。按停止、換題或開始另一段會立即讓舊 playback generation 失效，
-晚回的 MP3 不播放、不快取；但已開始的 blocking native POST **不能中途 abort**，仍
+這版不做文字或 MP3 的磁碟 cache，也沒有跨答案／手動重播沿用的記憶體 cache；每份新答案
+與每次手動重播都可能是新 POST。按停止、換題或開始另一段會立即讓舊 playback generation 失效，
+晚回的 MP3 不播放、不快取；但已取得送出權的 blocking native POST **不能中途 abort**，仍
 可能跑到 45 秒 timeout，Azure 也可能已計入用量。畫面不會把「不再播放」說成「網路
 請求已取消」。
 第四張的 admission 與 CLI／desktop 撤回另由跨行程 shared lock 排序，guard 活過完整
-transport；撤回若撞上既有 POST 可能等到 timeout，但成功回覆後舊 snapshot 不會才送。
+transport。最後 generation 檢查與 transport 也和設定／key／consent mutation、native
+cancel 共用 fence；若 transport 先取得送出權，操作可能等到 timeout，但成功回覆後舊
+snapshot 不會才送。renderer 的停播不等這個 native 回覆。
 
 Microsoft 目前公開列出的 Azure Speech F0 neural TTS 額度是每月 0.5 million
 characters。這不是 AI-Sister 提供或保證的免費額度；能否使用、實際額度與費用仍以
