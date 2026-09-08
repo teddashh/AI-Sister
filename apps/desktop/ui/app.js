@@ -1,4 +1,4 @@
-// 字母人的行為。純 ES module，**沒有打包步驟**——這個檔案就是瀏覽器讀到的
+// 桌面姊妹的行為。純 ES module，**沒有打包步驟**——這個檔案就是瀏覽器讀到的
 // 那個檔案。Phase 1 的退場條件裡有一條「clone → 跑起來 < 10 分鐘」，而在一個
 // Rust repo 裡塞一套 Node 工具鏈是最容易讓那條過不了的東西。
 //
@@ -22,7 +22,6 @@ const STATE_LINES = Object.freeze({
 });
 
 const avatar = document.querySelector("[data-avatar]");
-const personaGlyph = document.querySelector("[data-persona-glyph]");
 const personaPortrait = document.querySelector("[data-persona-portrait]");
 const personaLine = document.querySelector("[data-persona-line]");
 const personaAudio = document.querySelector("[data-persona-audio]");
@@ -56,10 +55,9 @@ const urlPolicyResult = document.querySelector("[data-url-policy-result]");
 /**
  * 這是完整 allowlist，不是 prompt。
  *
- * Aster／Cedar／Mira／Rook 的 provider ID、alias、glyph、palette 與兩句 tap-line
- * 沿用既有 TokenMonster catalog；tagline 只描述畫面上看得到的配色與固定開場語。
- * 顯示文字逐字對應已核准 WAV 的 spoken transcript；installed metadata 不同時
- * renderer 會拒絕把那句列入 voice allowlist。沒有把
+ * 四姊妹與 13 位閨密都直接使用 AI-Sister 隨程式提供的本機角色圖，不再生成任何
+ * 字母 fallback。四姊妹的顯示文字仍逐字對應舊 fixed pack 裡已核准的 WAV；
+ * installed metadata 不同時 renderer 會拒絕把那句列入錄音 allowlist。沒有把
  * personaContext 接進 `ask()`，因為角色
  * 口吻不能改寫一個可查證答案的事實或安全邊界。每句只會從 avatar 的 click
  * handler 出現，沒有 idle／開場／timer trigger。
@@ -79,86 +77,146 @@ function fixedTaps(id, lead) {
   ]);
 }
 
+function localTaps(id, lead) {
+  return Object.freeze([
+    Object.freeze({
+      id: `persona-tap/1.0.0/${id}/zh-TW/hello`,
+      voiceLineId: null,
+      text: `${lead}。你可以直接問。`,
+    }),
+    Object.freeze({
+      id: `persona-tap/1.0.0/${id}/zh-TW/quiet`,
+      voiceLineId: null,
+      text: "你不點也不問時，我會安靜待著。",
+    }),
+  ]);
+}
+
 function profile(value) {
   return Object.freeze({
     ...value,
+    portrait: `./personas/${value.id}.webp`,
     palette: Object.freeze({ ...value.palette }),
     taps: Object.freeze([...value.taps]),
   });
 }
 
 const PERSONA_CATALOG = Object.freeze({
-  neutral: profile({
-    id: "neutral",
-    alias: "Neutral",
-    glyph: "S",
-    tagline: "原來的字母人；安靜待著，只在你點她或問她時回應。",
-    inspiredBy: null,
-    palette: { background: "#F6ECDF", foreground: "#2E2140", accent: "#955572" },
-    taps: [
-      Object.freeze({
-        id: "persona-tap/1.0.0/neutral/zh-TW/hello",
-        voiceLineId: null,
-        text: "我在。你可以直接問。",
-      }),
-      Object.freeze({
-        id: "persona-tap/1.0.0/neutral/zh-TW/search",
-        voiceLineId: null,
-        text: "想查哪一段，就在下面打字。",
-      }),
-      Object.freeze({
-        id: "persona-tap/1.0.0/neutral/zh-TW/quiet",
-        voiceLineId: null,
-        text: "你不點也不問時，我會安靜待著。",
-      }),
-    ],
-  }),
   chatgpt: profile({
     id: "chatgpt",
-    alias: "Aster",
-    glyph: "T",
-    tagline: "深藍與薄荷綠；固定台詞用「我在」開場。",
-    inspiredBy: "ChatGPT",
+    alias: "ChatGPT",
+    group: "四姊妹",
+    tagline: "結構與驗證；固定台詞用「我在」開場。",
     palette: { background: "#0B1F33", foreground: "#F8FAFC", accent: "#5EEAD4" },
+    voiceRate: 1.02,
+    voicePitch: 1.05,
     taps: fixedTaps("chatgpt", "我在"),
   }),
   claude: profile({
     id: "claude",
-    alias: "Cedar",
-    glyph: "C",
-    tagline: "深綠與淡綠；固定台詞用「慢慢來」開場。",
-    inspiredBy: "Claude",
+    alias: "Claude",
+    group: "四姊妹",
+    tagline: "論證與邊界；固定台詞用「慢慢來」開場。",
     palette: { background: "#12372A", foreground: "#F8FAFC", accent: "#A7F3D0" },
+    voiceRate: 0.94,
+    voicePitch: 1.0,
     taps: fixedTaps("claude", "慢慢來"),
   }),
   gemini: profile({
     id: "gemini",
-    alias: "Mira",
-    glyph: "G",
-    tagline: "深藍與淡紫；固定台詞用「一起看看」開場。",
-    inspiredBy: "Gemini",
+    alias: "Gemini",
+    group: "四姊妹",
+    tagline: "打開可能；固定台詞用「一起看看」開場。",
     palette: { background: "#172554", foreground: "#F8FAFC", accent: "#A5B4FC" },
+    voiceRate: 1.08,
+    voicePitch: 1.1,
     taps: fixedTaps("gemini", "一起看看"),
   }),
   grok: profile({
     id: "grok",
-    alias: "Rook",
-    glyph: "X",
-    tagline: "深棕與淡黃；固定台詞用「收到」開場。",
-    inspiredBy: "Grok",
+    alias: "Grok",
+    group: "四姊妹",
+    tagline: "直球測試；固定台詞用「收到」開場。",
     palette: { background: "#3B1B0B", foreground: "#F8FAFC", accent: "#FDE68A" },
+    voiceRate: 1.12,
+    voicePitch: 0.96,
     taps: fixedTaps("grok", "收到"),
+  }),
+  deepseek: profile({
+    id: "deepseek", alias: "DeepSeek", group: "13 位閨密", tagline: "深挖證據與原理。",
+    palette: { background: "#12213A", foreground: "#F8FAFC", accent: "#60A5FA" },
+    voiceRate: 0.96, voicePitch: 0.98, taps: localTaps("deepseek", "我來往下挖"),
+  }),
+  qwen: profile({
+    id: "qwen", alias: "Qwen", group: "13 位閨密", tagline: "布局、控場與收斂。",
+    palette: { background: "#312E81", foreground: "#F8FAFC", accent: "#C4B5FD" },
+    voiceRate: 1.0, voicePitch: 1.02, taps: localTaps("qwen", "我來收斂"),
+  }),
+  mistral: profile({
+    id: "mistral", alias: "Mistral", group: "13 位閨密", tagline: "俐落拆解，減少多餘協調。",
+    palette: { background: "#451A03", foreground: "#FFFBEB", accent: "#F59E0B" },
+    voiceRate: 1.1, voicePitch: 1.0, taps: localTaps("mistral", "直接拆開來看"),
+  }),
+  venice: profile({
+    id: "venice", alias: "Llama", group: "13 位閨密", tagline: "自由、直接、不受拘束。",
+    palette: { background: "#3F1D2E", foreground: "#FFF7ED", accent: "#FB7185" },
+    voiceRate: 1.12, voicePitch: 1.04, taps: localTaps("venice", "先講最直接的"),
+  }),
+  sakana: profile({
+    id: "sakana", alias: "Sakana", group: "13 位閨密", tagline: "保留變體，試另一條演化路徑。",
+    palette: { background: "#164E63", foreground: "#ECFEFF", accent: "#67E8F9" },
+    voiceRate: 0.96, voicePitch: 1.12, taps: localTaps("sakana", "我們試另一條路"),
+  }),
+  perplexity: profile({
+    id: "perplexity", alias: "Perplexity", group: "13 位閨密", tagline: "先查證，再下結論。",
+    palette: { background: "#134E4A", foreground: "#F0FDFA", accent: "#5EEAD4" },
+    voiceRate: 1.06, voicePitch: 1.0, taps: localTaps("perplexity", "我先查證"),
+  }),
+  glm: profile({
+    id: "glm", alias: "GLM", group: "13 位閨密", tagline: "先做出可動的版本。",
+    palette: { background: "#1E3A5F", foreground: "#EFF6FF", accent: "#93C5FD" },
+    voiceRate: 1.08, voicePitch: 1.02, taps: localTaps("glm", "先做一版"),
+  }),
+  kimi: profile({
+    id: "kimi", alias: "Kimi", group: "13 位閨密", tagline: "守住前文、脈絡與交接。",
+    palette: { background: "#312E81", foreground: "#F7F7FF", accent: "#C7D2FE" },
+    voiceRate: 0.94, voicePitch: 1.06, taps: localTaps("kimi", "我接著前面"),
+  }),
+  hunyuan: profile({
+    id: "hunyuan", alias: "Hunyuan", group: "13 位閨密", tagline: "把上下游與被漏掉的人接回來。",
+    palette: { background: "#0C4A6E", foreground: "#F4F8FF", accent: "#78B8FF" },
+    voiceRate: 1.0, voicePitch: 1.04, taps: localTaps("hunyuan", "我把上下游接起來"),
+  }),
+  minimax: profile({
+    id: "minimax", alias: "MiniMax", group: "13 位閨密", tagline: "先讓作品能看、能聽、能感受到。",
+    palette: { background: "#4A0D24", foreground: "#FFF6F8", accent: "#FB923C" },
+    voiceRate: 1.14, voicePitch: 1.12, taps: localTaps("minimax", "先讓它活起來"),
+  }),
+  nemotron: profile({
+    id: "nemotron", alias: "Nemotron", group: "13 位閨密", tagline: "工程調度與可部署交付。",
+    palette: { background: "#0B0F0A", foreground: "#F9FAFB", accent: "#76B900" },
+    voiceRate: 1.02, voicePitch: 0.94, taps: localTaps("nemotron", "把交付路徑釘住"),
+  }),
+  cohere: profile({
+    id: "cohere", alias: "Cohere", group: "13 位閨密", tagline: "多方溝通、引用與協議。",
+    palette: { background: "#243C34", foreground: "#F7F8F3", accent: "#D18EE2" },
+    voiceRate: 0.98, voicePitch: 1.08, taps: localTaps("cohere", "我把每一方都放進來"),
+  }),
+  mimo: profile({
+    id: "mimo", alias: "MiMo", group: "13 位閨密", tagline: "先看人用起來順不順。",
+    palette: { background: "#431407", foreground: "#FFF8F1", accent: "#FF6900" },
+    voiceRate: 1.04, voicePitch: 1.1, taps: localTaps("mimo", "先看用起來順不順"),
   }),
 });
 
 function profileFor(id) {
   return typeof id === "string" && Object.hasOwn(PERSONA_CATALOG, id)
     ? PERSONA_CATALOG[id]
-    : PERSONA_CATALOG.neutral;
+    : null;
 }
 
 /**
- * Tauri 的 IPC。**在瀏覽器裡打開時是 null**，而那是刻意支援的：字母人整個
+ * Tauri 的 IPC。**在瀏覽器裡打開時是 null**，而那是刻意支援的：桌面姊妹整個
  * 是 HTML/CSS，所以它可以在一般瀏覽器裡開發、截圖、比對，不必每次都去開一個
  * 桌面視窗。所有會用到 IPC 的地方都要能在 null 之下安靜地降級。
  */
@@ -182,7 +240,7 @@ let paused = false;
 
 // Persona 是表達層，不是上面的錄製狀態。關掉她、換顏色或停動畫都不可以改
 // `state` / `paused`，也不可以走 ask、Gatekeeper、hands 或 CLI。
-let activeProfile = PERSONA_CATALOG.neutral;
+let activeProfile = PERSONA_CATALOG.chatgpt;
 let personaEnabled = true;
 let personaMotion = true;
 let personaTapLines = true;
@@ -192,13 +250,14 @@ let voiceRequest = 0;
 let personaRevision = 0;
 
 function fallbackLocalAssets() {
-  return Object.freeze({ phase: "unavailable", portrait: null, voiceLineIds: new Set() });
+  return Object.freeze({ phase: "unavailable", voiceLineIds: new Set() });
 }
 
 let localAssets = fallbackLocalAssets();
 
 /**
- * Renderer 只接受後端已驗過的 portrait data URL 與 fixed-voice availability。
+ * Renderer 只接受後端已驗過的 fixed-voice availability。17 張角色圖隨程式提供，
+ * 不讀 cache，也不會因下載、損毀或移除舊素材包而退回字母。
  *
  * `phase` 刻意保留 fixed-pack 的六態（含未提供與刪除中）。遠端 URL／任意路徑
  * 仍過不了這裡。開場不拿 WAV bytes；voice 只回可用
@@ -217,14 +276,8 @@ function resolveLocalAssets(view, persona) {
     ? view.phase
     : "unavailable";
   if (phase !== "installed") {
-    return Object.freeze({ phase, portrait: null, voiceLineIds: new Set() });
+    return Object.freeze({ phase, voiceLineIds: new Set() });
   }
-
-  const portrait =
-    typeof view?.portrait?.data_url === "string" &&
-    view.portrait.data_url.startsWith("data:image/webp;base64,")
-      ? view.portrait.data_url
-      : null;
   const allowed = new Set(
     persona.taps.map((line) => line.voiceLineId).filter((lineId) => lineId !== null),
   );
@@ -239,7 +292,7 @@ function resolveLocalAssets(view, persona) {
       voiceLineIds.add(voice.line_id);
     }
   }
-  return Object.freeze({ phase, portrait, voiceLineIds });
+  return Object.freeze({ phase, voiceLineIds });
 }
 
 function clearPersonaLine() {
@@ -247,27 +300,33 @@ function clearPersonaLine() {
     personaLine.textContent = "";
     personaLine.hidden = true;
   }
-  personaAudio?.pause?.();
-  personaAudio?.removeAttribute?.("src");
+  stopPersonaMedia();
 }
 
 function paintPersonaPortrait() {
-  const hasPortrait = personaEnabled && localAssets.portrait !== null;
-  avatar.classList.toggle("has-portrait", hasPortrait);
-  if (personaPortrait) {
-    if (hasPortrait) personaPortrait.src = localAssets.portrait;
-    else personaPortrait.removeAttribute("src");
-    personaPortrait.hidden = !hasPortrait;
+  if (!personaPortrait) return;
+  personaPortrait.alt = `${activeProfile.alias} 角色圖`;
+  if (personaPortrait.src !== activeProfile.portrait) {
+    personaPortrait.src = activeProfile.portrait;
   }
-  if (personaGlyph) personaGlyph.hidden = hasPortrait;
+  personaPortrait.hidden = !personaEnabled;
+  avatar.classList.add("has-portrait");
 }
 
 function applyPersona(view) {
-  // 讓正在等單條 WAV 的舊 click 失效；換人後回來的 bytes 不能在新角色身上播放。
-  voiceRequest += 1;
-  activeProfile = profileFor(view?.id);
-  // 缺欄位代表舊後端／瀏覽器 demo，保留目前的 neutral 字母人；只有明確 false
-  // 才能把使用者眼前的角色或動畫關掉。
+  const requestedProfile = profileFor(view?.id);
+  // Rust 會拒絕未知 ID；renderer 仍要自己守住 IPC seam。不能一邊保留舊角色，
+  // 一邊把同一份壞 payload 的 voice/tap/asset 欄位套上去——那會讓一個未知身分
+  // 替已知角色打開聲音。整份拒絕、停掉聲音，等下一份完整有效的設定。
+  if (requestedProfile === null) {
+    personaVoiceEnabled = false;
+    localAssets = fallbackLocalAssets();
+    clearPersonaLine();
+    avatar.dataset.assetPack = localAssets.phase;
+    return false;
+  }
+  activeProfile = requestedProfile;
+  // 缺 bool 欄位只代表舊後端／瀏覽器 demo；聲音仍只接受 exact true。
   personaEnabled = view?.enabled !== false;
   personaMotion = view?.motion !== false;
   personaTapLines = view?.tap_lines !== false;
@@ -281,7 +340,6 @@ function applyPersona(view) {
   document.documentElement.style.setProperty("--persona-bg", activeProfile.palette.background);
   document.documentElement.style.setProperty("--persona-fg", activeProfile.palette.foreground);
   document.documentElement.style.setProperty("--persona-accent", activeProfile.palette.accent);
-  if (personaGlyph) personaGlyph.textContent = activeProfile.glyph;
   avatar.dataset.persona = activeProfile.id;
   avatar.dataset.assetPack = localAssets.phase;
   avatar.title = `${activeProfile.alias}：${activeProfile.tagline}`;
@@ -291,6 +349,118 @@ function applyPersona(view) {
   paintPersonaPortrait();
   updateMotionGate();
   paint();
+  return true;
+}
+
+let localSystemVoices = [];
+let localSpeechRevision = 0;
+
+function stopLocalSpeech() {
+  localSpeechRevision += 1;
+  globalThis.speechSynthesis?.cancel?.();
+}
+
+/** 固定 WAV 與系統 TTS 共用同一顆 stop；新意圖不能讓兩條播放路徑疊在一起。 */
+function stopPersonaMedia() {
+  voiceRequest += 1;
+  personaAudio?.pause?.();
+  personaAudio?.removeAttribute?.("src");
+  stopLocalSpeech();
+}
+
+/**
+ * 借 AIRI speech pipeline 的「先分段、依序播放、整串可取消」形狀，但保留零依賴。
+ * 讓長答案不用等整段中文先合成完才出第一句，也避開 Windows voice 對超長 utterance
+ * 的不同行為。這裡只切已經在畫面上的文字，不接 streaming 模型或遠端 provider。
+ */
+function chunkLocalSpeech(text, limit = 160) {
+  const sentences = String(text).match(/[^。！？!?；;\n]+[。！？!?；;\n]?/gu) ?? [];
+  const chunks = [];
+  let current = "";
+  for (const raw of sentences) {
+    const sentence = raw.trim();
+    if (sentence === "") continue;
+    if (current !== "" && current.length + sentence.length > limit) {
+      chunks.push(current);
+      current = "";
+    }
+    if (sentence.length <= limit) {
+      current += sentence;
+      continue;
+    }
+    if (current !== "") chunks.push(current);
+    current = "";
+    for (let start = 0; start < sentence.length; start += limit) {
+      chunks.push(sentence.slice(start, start + limit));
+    }
+  }
+  if (current !== "") chunks.push(current);
+  return chunks;
+}
+
+function refreshLocalSystemVoices() {
+  const synth = globalThis.speechSynthesis;
+  if (!synth || typeof synth.getVoices !== "function") {
+    localSystemVoices = [];
+    return;
+  }
+  localSystemVoices = synth
+    .getVoices()
+    .filter((voice) => voice?.localService === true)
+    .map((voice) => {
+      const lang = String(voice.lang ?? "").toLowerCase();
+      const score = lang === "zh-tw" ? 3 : lang.startsWith("zh-hant") ? 2 : lang.startsWith("zh") ? 1 : 0;
+      return { voice, score };
+    })
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(({ voice }) => voice);
+}
+
+refreshLocalSystemVoices();
+globalThis.speechSynthesis?.addEventListener?.("voiceschanged", refreshLocalSystemVoices);
+
+/**
+ * 只接受瀏覽器明確標成 `localService` 的繁中／中文聲音。找不到就保持安靜；絕不
+ * 因為系統 voice 缺席而選 remote voice。呼叫端必須仍在 trusted click 那條路上。
+ */
+function speakWithLocalSystemVoice(text) {
+  if (!personaVoiceEnabled || typeof globalThis.SpeechSynthesisUtterance !== "function") {
+    return false;
+  }
+  refreshLocalSystemVoices();
+  if (localSystemVoices.length === 0) return false;
+  const synth = globalThis.speechSynthesis;
+  const offset = Object.keys(PERSONA_CATALOG).indexOf(activeProfile.id);
+  const voice = localSystemVoices[offset % localSystemVoices.length];
+  const rate = activeProfile.voiceRate;
+  const pitch = activeProfile.voicePitch;
+  const chunks = chunkLocalSpeech(text);
+  if (chunks.length === 0) return false;
+  // 答案朗讀要停掉 fixed WAV；fixed voice 的 fallback 也要讓那份 pending request
+  // 失效。共用 stop 後才拿 revision，這一串才是目前唯一可繼續的播放意圖。
+  stopPersonaMedia();
+  const revision = localSpeechRevision;
+  let next = 0;
+  const speakNext = () => {
+    if (revision !== localSpeechRevision || next >= chunks.length) return;
+    const utterance = new globalThis.SpeechSynthesisUtterance(chunks[next]);
+    next += 1;
+    utterance.voice = voice;
+    utterance.lang = voice.lang;
+    utterance.rate = rate;
+    utterance.pitch = pitch;
+    utterance.onend = speakNext;
+    utterance.onerror = () => {
+      if (revision !== localSpeechRevision) return;
+      localSpeechRevision += 1;
+      personaLine.textContent = "本機聲音這次沒有播成；我沒有改用雲端。";
+      personaLine.hidden = false;
+    };
+    synth.speak(utterance);
+  };
+  speakNext();
+  return true;
 }
 
 async function sayPersonaLine(event) {
@@ -304,37 +474,40 @@ async function sayPersonaLine(event) {
   personaLine.textContent = line.text;
   personaLine.hidden = false;
 
-  const request = ++voiceRequest;
-  personaAudio?.pause?.();
-  personaAudio?.removeAttribute?.("src");
+  stopPersonaMedia();
+  const request = voiceRequest;
 
-  // 這是唯一的播放入口，而且它就在使用者 click 裡。沒有 voice opt-in、沒有
-  // installed fixed pack、或這句不在本機 voice allowlist，三種都是完全不向後端取。
+  // 這是唯一的播放入口，而且它就在使用者 click 裡。先用已驗證的四姊妹固定
+  // 錄音；沒有對應錄音時才用 `localService` 系統語音。兩條都沒有就保持安靜。
+  if (!personaVoiceEnabled) return;
   if (
-    !personaVoiceEnabled ||
     line.voiceLineId === null ||
     !localAssets.voiceLineIds.has(line.voiceLineId) ||
     invoke === null ||
     !personaAudio
-  )
+  ) {
+    speakWithLocalSystemVoice(line.text);
     return;
+  }
 
   let voice;
   try {
     voice = await invoke("persona_voice_read", { lineId: line.voiceLineId });
   } catch {
-    // 安裝後的 cache 也可能被截斷或換掉。重讀 native resolver，讓它在驗證失敗時
-    // 把已載入的 portrait 與 voice allowlist 一起退回字母，而不是只吞掉這次聲音。
+    // 安裝後的 cache 也可能被截斷或換掉。重讀 native resolver，但內建角色圖不受
+    // cache 影響；這一下仍可使用明確標成 local 的系統語音。
     readPersona();
+    if (request === voiceRequest) speakWithLocalSystemVoice(line.text);
     return;
   }
+  if (request !== voiceRequest) return;
   if (
-    request !== voiceRequest ||
     voice?.line_id !== line.voiceLineId ||
     typeof voice?.data_url !== "string" ||
     !voice.data_url.startsWith("data:audio/wav;base64,")
   ) {
     readPersona();
+    speakWithLocalSystemVoice(line.text);
     return;
   }
   personaAudio.currentTime = 0;
@@ -342,7 +515,8 @@ async function sayPersonaLine(event) {
   try {
     await personaAudio.play?.();
   } catch {
-    // WebView 拒絕播放不代表本機 cache 壞了；保留固定台詞與已驗證立繪。
+    // WebView 拒絕播放不代表本機 cache 壞了；保留固定台詞與內建角色圖。
+    if (request === voiceRequest) speakWithLocalSystemVoice(line.text);
   }
 }
 
@@ -1198,7 +1372,7 @@ function setPaused(next) {
   paused = next === true;
   // 從系統匣（或熱鍵）切過來的那一下，也算「下一件事發生了」。見
   // [`overtakenByEvents`]——這一格漏掉的時候，「暫停鍵沒有作用」會掛在
-  // 一個已經暫停了的字母人底下。
+  // 一個已經暫停了的桌面姊妹底下。
   if (was !== paused) overtakenByEvents();
   if (pauseButton) {
     pauseButton.textContent = paused ? "▶" : "⏸";
@@ -1400,7 +1574,7 @@ let pollTimer = null;
  * 有三個人會動它：`sister pause`、`sister resume`，還有 recorder 自己印出來
  * 的那句「或刪掉 …\paused.flag」。
  *
- * 所以在終端機裡 `sister resume` 之後，她其實已經在錄了，而字母人會一直灰著
+ * 所以在終端機裡 `sister resume` 之後，她其實已經在錄了，而桌面姊妹會一直灰著
  * 說「已暫停，沒有在看」。更糟的是那顆 ▶：`toggle_pause` 讀的是磁碟，所以按
  * 下「繼續記錄」實際上是把她**暫停**——而畫面本來就畫成暫停的樣子，按完什麼
  * 都不會變。旁邊那句註解說得很清楚：顯示成已暫停、實際上還在錄，是這個產品
@@ -1553,7 +1727,7 @@ pauseButton?.addEventListener("click", async () => {
 
 /**
  * 系統匣上也有同一顆暫停鍵，所以狀態可能從**這個視窗以外**改變。
- * 沒有這一段的話，從系統匣暫停之後，字母人會繼續一臉「我在聽」。
+ * 沒有這一段的話，從系統匣暫停之後，桌面姊妹會繼續一臉「我在聽」。
  */
 globalThis.__TAURI__?.event
   ?.listen?.("pause-changed", (event) => setPaused(event.payload))
@@ -1595,7 +1769,7 @@ recorderSupervisorListener?.then?.(
 globalThis.__TAURI__?.event
   ?.listen?.("persona-changed", (event) => {
     personaRevision += 1;
-    applyPersona(event.payload);
+    if (!applyPersona(event.payload)) readPersona();
   })
   ?.catch?.(() => {});
 
@@ -1603,13 +1777,12 @@ globalThis.__TAURI__?.event
  * 刪除素材的第一步，不等檔案真的刪完，也不依賴 config.toml 還讀得出來。
  *
  * 後端隨後仍會送完整的 `persona-changed`；這個窄事件只負責 fail closed：讓飛行中
- * 的單條 WAV 回來也失效、停掉正在播的固定錄音、清掉立繪，並保留 activeProfile
- * 的字母 fallback。它不改 persona 選擇，更不碰 ask／Gatekeeper／hands。
+ * 的單條 WAV 回來也失效、停掉正在播的固定錄音或系統語音，並保留 activeProfile
+ * 的內建角色圖。它不改 persona 選擇，更不碰 ask／Gatekeeper／hands。
  */
 globalThis.__TAURI__?.event
   ?.listen?.("persona-media-stop", () => {
     personaRevision += 1;
-    voiceRequest += 1;
     clearPersonaLine();
     localAssets = fallbackLocalAssets();
     avatar.dataset.assetPack = localAssets.phase;
@@ -1622,7 +1795,7 @@ globalThis.__TAURI__?.event
  *
  * 這條路存在的理由和熱鍵本身一樣：**她不在畫面上的時候他也要按得到。** 而
  * 「按到了沒」只有兩個地方看得出來——系統匣那兩行字（要點開選單才讀得到）
- * 和這裡。少了這一行，按下去的後果是一個字都沒有：字母人視窗被叫出來，然後
+ * 和這裡。少了這一行，按下去的後果是一個字都沒有：桌面姊妹視窗被叫出來，然後
  * 什麼都沒說。
  *
  * 為什麼不借 `recorder-failed`：那一句**多半不是失敗**（最常見的結果是手真的
@@ -2061,6 +2234,40 @@ function markLine(queryId) {
   return li;
 }
 
+function answerTextForLocalSpeech() {
+  const copy = hitList.cloneNode(true);
+  for (const node of copy.querySelectorAll(".hit-source, .hits-mark, .hits-read, button, a")) {
+    node.remove();
+  }
+  return copy.textContent.replace(/\s+/g, " ").trim();
+}
+
+function answerReadLine() {
+  const li = document.createElement("li");
+  li.className = "hits-read";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "answer-read";
+  button.textContent = "🔊 用本機聲音朗讀";
+  button.addEventListener("click", (event) => {
+    if (event?.isTrusted !== true) return;
+    // 這是新的播放意圖：就算最後找不到 localService voice，也要先停掉上一句
+    // fixed WAV／pending read，不能一邊說「沒有本機聲音」一邊繼續播舊台詞。
+    stopPersonaMedia();
+    if (!personaVoiceEnabled) {
+      personaLine.textContent = "先到設定打開「本機聲音」，我才會朗讀。";
+      personaLine.hidden = false;
+      return;
+    }
+    const text = answerTextForLocalSpeech();
+    if (text !== "" && speakWithLocalSystemVoice(text)) return;
+    personaLine.textContent = "這台機器沒有回報可用的本機中文語音；我沒有改用雲端。";
+    personaLine.hidden = false;
+  });
+  li.append(button);
+  return li;
+}
+
 /**
  * @param hits 一筆一筆的原文。
  * @param kind `"keywords"`（比對字找到的）、`"recent"`（剛剛）、或 `"range"`（昨天下午那種日曆範圍）。
@@ -2322,6 +2529,9 @@ function renderHits(
     }
   }
 
+  // 朗讀是另一個明確 click；不 autoplay，也不把答案塞進舊 fixed-voice IPC。
+  hitList.append(answerReadLine());
+
   hitList.hidden = false;
   document.body.classList.add("has-hits");
   paintConversation();
@@ -2355,6 +2565,8 @@ let asking = 0;
 async function ask() {
   const question = askInput.value.trim();
   if (question === "") return;
+
+  stopPersonaMedia();
 
   const mine = ++asking;
   // 新的一題蓋掉上一次那句「為什麼沒成」——他已經在做下一件事了。
@@ -2466,14 +2678,14 @@ askInput?.addEventListener("keydown", (event) => {
 const params = new URLSearchParams(globalThis.location.search);
 
 seedSwayPhase();
-applyPersona({ id: "neutral", enabled: true, motion: true, tap_lines: true });
+applyPersona({ id: "chatgpt", enabled: true, motion: true, tap_lines: true });
 paintPin();
-// 只讀本機 config；失敗就留在上面已經畫好的 Neutral 字母 fallback。
+// 只讀本機 config；失敗就留在 HTML 已經畫好的 ChatGPT 內建角色圖。
 readPersona();
 
 // `?state=paused` 走的是**和產品一樣的那條路**（設 `paused` 旗標），不是另外
 // 搬一個長得像暫停的樣子出來。這一點是被截圖抓到的：第一版讓它去設 `state`，
-// 於是截出來的圖裡字母人是灰的、但拖曳條上的暫停鍵還是「⏸」——而截圖是這台
+// 於是截出來的圖裡桌面姊妹是灰的、但拖曳條上的暫停鍵還是「⏸」——而截圖是這台
 // 機器上唯一看得到 UI 的方式，一個走假路的開發開關會讓它騙我。
 const wanted = params.get("state") ?? "idle";
 setPaused(wanted === "paused");

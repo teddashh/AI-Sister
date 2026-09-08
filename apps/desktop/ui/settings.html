@@ -69,23 +69,39 @@
         <label class="check">
           <input type="checkbox" data-persona-enabled />
           <span>
-            顯示字母人
+            顯示桌面姊妹
             <em>關掉只拿掉角色與固定台詞；記錄、搜尋、狀態、暫停和時間軸都不變。</em>
           </span>
         </label>
         <label class="field">
           <span>常駐角色</span>
           <select data-persona-id>
-            <option value="neutral">Neutral — 原來的 S 字母人</option>
-            <option value="chatgpt">Aster — 受 ChatGPT 啟發</option>
-            <option value="claude">Cedar — 受 Claude 啟發</option>
-            <option value="gemini">Mira — 受 Gemini 啟發</option>
-            <option value="grok">Rook — 受 Grok 啟發</option>
+            <optgroup label="四姊妹">
+              <option value="chatgpt">ChatGPT</option>
+              <option value="claude">Claude</option>
+              <option value="gemini">Gemini</option>
+              <option value="grok">Grok</option>
+            </optgroup>
+            <optgroup label="13 位閨密">
+              <option value="deepseek">DeepSeek</option>
+              <option value="qwen">Qwen</option>
+              <option value="mistral">Mistral</option>
+              <option value="venice">Llama</option>
+              <option value="sakana">Sakana</option>
+              <option value="perplexity">Perplexity</option>
+              <option value="glm">GLM</option>
+              <option value="kimi">Kimi</option>
+              <option value="hunyuan">Hunyuan</option>
+              <option value="minimax">MiniMax</option>
+              <option value="nemotron">Nemotron</option>
+              <option value="cohere">Cohere</option>
+              <option value="mimo">MiMo</option>
+            </optgroup>
           </select>
         </label>
         <p class="persona-tagline" data-persona-tagline></p>
         <p class="hint">
-          四位是受供應商產品啟發的虛構角色；AI-Sister 是獨立產品，未與這些供應商
+          四姊妹與 13 位閨密是受同名 AI 產品啟發的虛構角色；AI-Sister 是獨立產品，未與這些供應商
           合作、隸屬或獲其背書。
         </p>
         <label class="check">
@@ -103,14 +119,15 @@
           </span>
         </label>
         <div class="persona-assets" data-persona-assets>
-          <h3>立繪與固定台詞語音</h3>
+          <h3>角色圖與聲音</h3>
           <p class="state" role="status" aria-live="polite" data-persona-asset-summary>
             正在讀本機素材狀態…
           </p>
           <div class="persona-disclosure" data-persona-disclosure hidden>
             <p>
-              這是一份包含四位角色全部立繪與預錄固定台詞的素材包，不能只下載其中一位。
-              第一次下載不會自行打開語音；若你先前已明確打開，修復成功後會沿用那個設定。
+              17 張角色圖已隨程式安裝，不需下載。這份舊素材包另外提供四姊妹的 8 句
+              預錄固定台詞，不能只下載其中一位。第一次下載不會自行打開聲音；若你先前已
+              明確打開，修復成功後會沿用那個設定。
             </p>
             <dl>
               <div>
@@ -140,7 +157,7 @@
               不 retry、不先 HEAD，也不逐檔連線。DNS 與 CDN 仍會看到一般網路 metadata；
               CDN 會看到來源 IP、時間、TLS、固定 host、path 與 headers，固定路徑也會透露
               素材包版本。請求不會帶角色選擇、角色或記錄狀態、OCR、畫面像素、問題、答案、
-              記憶 ID 或資料庫內容；四位角色的 method、URL、headers 與 body 完全相同。
+              記憶 ID 或資料庫內容；17 位角色的 method、URL、headers 與 body 完全相同。
             </p>
           </div>
           <progress
@@ -167,19 +184,20 @@
           <label class="check persona-voice">
             <input type="checkbox" data-persona-voice disabled />
             <span>
-              點角色時播放固定台詞語音
+              點角色時使用本機聲音
               <em>
-                預設關閉；只在你明確按角色時播放素材包裡的固定錄音，不朗讀問題、答案、
-                OCR 或記憶內容。
+                預設關閉；四姊妹優先播放已驗證固定錄音，其餘只使用 Windows 明確標成
+                localService 的繁中／中文語音。找不到就保持安靜，不會改用遠端聲音。
               </em>
             </span>
           </label>
           <p class="state" aria-live="polite" data-persona-voice-state>
-            固定台詞語音預設關閉。
+            本機聲音預設關閉。
           </p>
           <p class="hint persona-immediate">
-            下載、修復、取消、刪除與語音開關按下後立即執行，不必再按頁尾的「儲存」。
-            沒有素材時仍完整使用字母人；角色選擇不會改變下載請求，也不會改變回答與安全路徑。
+            下載、修復、取消、刪除與聲音開關按下後立即執行，不必再按頁尾的「儲存」。
+            17 張角色圖永遠在本機；移除舊素材包只移除額外錄音，不會改變角色圖。
+            角色選擇不會改變下載請求，也不會改變回答與安全路徑。
           </p>
         </div>
       </section>

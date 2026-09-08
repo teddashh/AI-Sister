@@ -21,7 +21,7 @@
 | Phase | 名字 | 退役的風險 | 週 |
 |---|---|---|---|
 | 0 | 感官與地基 | 「抓不抓得到、扛不扛得動」 | 1–2 |
-| 1 | S1 回憶核心：檔案櫃 + 搜尋框 + 字母人 | 「第一週有沒有魔法時刻」 | 2–3 |
+| 1 | S1 回憶核心：檔案櫃 + 搜尋框 + 桌面姊妹 | 「第一週有沒有魔法時刻」 | 2–3 |
 | 2 | 重播評測 harness | 「辯論 vs 數據」 | 1–2 |
 | 3 | 斷句 + 事實層強化 | 「沒有論文可抄的核心演算法」 | 2–3 |
 | 4 | 理解與記憶（大腦上線） | 「記憶會歪、會腐爛」 | 3–4 |
@@ -45,7 +45,7 @@
 | Windows 10+ | **正式支援（GA）** | 可安裝、可升級、可開機常駐；走完 S1 主流程並承諾維護與安全修補 | **唯一的平台支援 blocker** |
 | macOS | **Public Preview** | 簽進 `.app` 主程序樹的 ScreenCaptureKit + Vision OCR + AX；TCC／紫點狀態與重新授權 UX 說真話；走得完 S1 | 沒達到就不發該 artifact；缺席不擋 Windows GA |
 | Linux | **X11-only Developer Preview** | 真正的 X11 capture + OCR + S1，不把只能 replay 說成桌面支援；Wayland 明示 unsupported／degraded | 沒達到就不發該 artifact；缺席不擋 Windows GA |
-| Persona | **Release 1.0 角色體驗（opt-in assets）** | 四姊妹各自真的有可選立繪與固定語音；同一個 omnibus asset-pack 從揭露、下載、驗證到啟用完整跑通；每位的 code-native 字母 fallback 與 Neutral 永遠離線可用 | **Windows GA 產品面 blocker**；使用者選擇關閉或不下載不是 blocker |
+| Persona | **Release 1.0 角色體驗** | 四姊妹與 13 位閨密共 17 位，角色圖隨程式離線提供；四姊妹 fixed voice pack 從揭露、下載、驗證到啟用完整跑通，其餘可用 localService 中文系統 voice | **Windows GA 產品面 blocker**；使用者選擇關閉角色、聲音或不下載 fixed voice 不是 blocker |
 
 Windows 的「可升級」不要求把任意網路更新器塞進程式。Release 1.0 採**使用者手動下載
 新版 installer、關掉 desktop／recorder 後原地安裝**；仍必須拿真的舊版 binary → 新版
@@ -70,12 +70,12 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
 
 ### Persona Release 1.0 合約
 
-- **賣點是角色體驗，不是 CDN**：1.0 要有至少四位可選姊妹的 catalog；首批名錄為
-  Aster／Cedar／Mira／Rook。CDN 只是把立繪與固定語音 pack 交到本機的機制，
+- **賣點是角色體驗，不是 CDN**：1.0 的 catalog 是四姊妹與 13 位閨密，共 17 位
+  canonical 角色。17 張角色圖直接隨程式提供；CDN 只補舊 pack 的四姊妹固定錄音，
   不能拿「接上 CDN」代替角色選擇、呈現與聲音真的可用。
-- **不下載也完整可用**：每個 catalog 身分都有隨程式提供的 code-native 字母呈現，
-  Neutral 是預設且永遠可選；使用者可關閉 Persona、留在 Neutral，或永遠不下載 pack，
-  S1 記錄、查詢、出處、刪除與匯出都不能因此降級。
+- **不下載也完整可用**：17 位每一位都有 bundled WebP，ChatGPT 是預設；Neutral 與
+  S/T/C/G/X 字母 fallback 已淘汰。使用者可關閉 Persona 或永遠不下載舊 pack，S1
+  記錄、查詢、出處、刪除與匯出都不能因此降級。
 - **網路一定由人開始，而且能力只住一處**：catalog 與下載前揭露所需 metadata 隨程式
   留在本機；只有使用者在揭露畫面上明確按下下載，desktop 才能叫一次 Persona
   installer。自動預抓、背景更新、hover／開設定頁就連線都不算同意。HTTP transport
@@ -87,13 +87,13 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   那條 content-hash path 做至多一次固定 HTTPS `GET`；不跟 redirect、不走 proxy、
   不帶 cookie／credentials／authorization／referrer／query／body，也不做 retry、`HEAD`
   或逐物件請求。asset request 不得夾帶 OCR、畫面、問題、答案、記憶 ID、persona
-  選擇／狀態、資料庫內容或其他私人內容；四位切換時 method／URL／header／body 都相同。
+  選擇／狀態、資料庫內容或其他私人內容；17 位切換時 method／URL／header／body 都相同。
   DNS 與 CDN 仍能看見一般網路 metadata；CDN 會看見來源 IP、時間、TLS、固定 host／
   path／headers，不能寫成「什麼都沒送」。host、大小或邊界有一格未知就停在下載前，
   不用 `0` 或空字串冒充已知。首版 exact URL 是
   `https://cdn.ted-h.com/tokenmonster/characters/v1/packs/ai-sister-media-11-voice55-2026.07.23/7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30.zip`。
 - **驗證完才啟用**：正式簽章的 app 內嵌的是 compact authority——descriptor、exact
-  origin/path allowlist、Aster／Cedar／Mira／Rook 的 selected public rights projection
+  origin/path allowlist、舊 pack 四姊妹的 selected public rights projection
   與八段聲音的核准逐字稿，
   以及完整 schema-v2 manifest 的 canonical SHA-256
   `21e4675653ce66b50b61e91260f1623e6e3005177f900991e3a8eeadaf9e6474`；**不是**把約
@@ -111,11 +111,12 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   export、forget、prune 都不讀、不複製、
   不刪這個目錄。Persona 的撤回才精準刪除該 release cache。全新下載若是半包、損毀
   或 binding 不符，不建立 cache、回 `Available` 並顯示當次錯誤；既有 cache 缺檔／
-  損毀、殘留 staging 或撤回不完整才保持 `RepairNeeded`。兩者都退回目前所選 persona
-  的 code-native 字母呈現，且不自動重抓；ID 不合法才回 Neutral。
-- **聲音邊界固定**：1.0 只播放 pack 內預錄、固定且非敏感的台詞，且必須由使用者
-  當下操作觸發；不因 capture、記憶或系統事件主動出聲，不把私人答案、OCR 或回憶
-  內容念出來，也不以 runtime TTS 繞過這條邊界。現成 pack 的 `active` 台詞會斷言
+  損毀、殘留 staging 或撤回不完整才保持 `RepairNeeded`。兩者都保留目前所選 bundled
+  角色圖，且不自動重抓；設定裡舊 `neutral` 精確遷移成 ChatGPT 並關閉聲音。
+- **聲音邊界固定**：聲音預設關閉，而且必須由使用者當下操作觸發；不因 capture、
+  記憶或系統事件主動出聲。四姊妹優先播放 pack 內預錄、固定且非敏感的台詞，其餘
+  只用 WebView 明確標成 `localService` 的中文 voice；找不到就靜音，不可改用 remote。
+  私人答案只能由使用者另外按朗讀，且仍只走 localService。現成 pack 的 `active` 台詞會斷言
   「今天滿有活力」，而單純點角色沒有那份證據，所以 Release 1.0 的 click allowlist
   明確不含那四段；首版每位使用兩句無條件成立的聲音，不拿假第三句湊數。
 - **權利先驗後說**：TokenMonster 現有 image+voice fixed pack 附有可公開嵌入的
@@ -125,9 +126,9 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   搬進 public repo；接線、byte verification 與逐角色 release review 完成前一律叫
   candidate，不能因另一個產品曾用過就宣稱可出貨。
 - **平台邊界要講名字**：Persona 完整體驗是 Windows GA 的 `1.0` tag blocker。
-  macOS／Linux Preview 至少都帶同一份本機 catalog 與 Neutral；若該 artifact 暴露
+  macOS／Linux Preview 至少都帶同一份 17 人本機 catalog；若該 artifact 暴露
   pack 下載或聲音，就必須通過完全相同的 authority、cache、撤回與點擊 gate。沒有
-  通過時只能標成 Neutral-only Preview，不能用未簽章 artifact 冒充受信 trust root。
+  通過時只能關閉額外錄音，不能用未簽章 artifact 冒充受信 trust root。
 
 ### 不擋 Release 1.0 的項目
 
@@ -135,8 +136,8 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   Public Preview 升正式支援的條件，不是 Windows GA 的條件。
 - Linux Wayland，以及 macOS／Linux Preview artifact 本身的缺席。Preview 沒達
   最小合約時就不發，不能靠降標湊齊平台表格。
-- 使用者選擇關閉 Persona、只用 Neutral 或不下載任何 pack；這是 1.0 必須支援的
-  正常路徑，不等於產品可以省略 catalog、立繪／固定語音交付 pipeline 或驗證 gate。
+- 使用者選擇關閉 Persona、關閉聲音或不下載 fixed-voice pack；這是 1.0 必須支援的
+  正常路徑，不等於產品可以省略 17 人 catalog、bundled 角色圖或 fixed-voice 驗證 gate。
 - ≥100 題真題庫、斷句 F1、A/B +10pt、兩週開口有用率等要靠真資料／時間才會有的
   指標。數字繼續照實公開，但依 Ted 已定方向，不再拿來擋功能發版。
 - P0 的 7 天零 crash、CPU `<3%`、磁碟 `<300MB/天` 與 macOS 電池等舊精確門檻。
@@ -217,14 +218,14 @@ Wayland 才留到 P8／社群成熟化；Preview 的隱私與資料語意不因�
 
 ---
 
-## Phase 1 — S1 回憶核心：檔案櫃 + 搜尋框 + 字母人
+## Phase 1 — S1 回憶核心：檔案櫃 + 搜尋框 + 桌面姊妹
 
 **目標**：那個「這禮拜就能做完、做完當天就會每天用」的產品。被動答題，
 100% 本機可跑。**Phase 末 repo 轉 public（alpha 標示，不宣傳）。**
 
 **Scope**
 - Tauri 2 shell：pet window（TokenMonster 配方：transparent/pin/dragbar/close→tray）、
-  字母人 letter-avatar（day-one 識別）、`idle/paused/thinking` 三狀態。
+  四姊妹＋13 位閨密的 bundled 角色圖（day-one 識別）、`idle/paused/thinking` 三狀態。
 - 對話面板：輸入框 → 檢索 →（選配）一次 LLM 潤句 → 附出處 chips（點開看當時畫面）。
   離線/無 key 模式 = 結構化結果列表，功能完整。
 - 時間軸瀏覽器 v0：按天捲動、縮圖 + OCR 摘錄、框選區間刪除（cascade）。
@@ -500,15 +501,16 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
   production 的 exact-process logind verifier、capture／focus／input／clipboard／OCR
   都還沒接，所以真 X11 目前仍回 Unknown；這不是 Linux 桌面 Preview，也沒有 Linux artifact。
 - ⬜ **Persona Release 1.0 角色體驗（使用者可關閉／可不下載）**：
-  - 隨程式提供離線 Neutral 與 Aster／Cedar／Mira／Rook 的 code-native 字母呈現，以及四姊妹的
-    本機 catalog、選擇入口與可用角色呈現；不把尚未驗證的素材寫成已可發布。
-  - 四位每一位都至少有一幅已核准立繪，而且 UI 兩句 fixed tap-line 都對得到已核准
-    的本機語音；不能用四個名字配一位角色的素材通過。
+  - ✅ alpha.108 將四姊妹與 13 位閨密的 17 張 canonical WebP 全部隨程式提供，
+    manifest 逐檔 pin size／SHA-256；選擇入口與 runtime enum 都是同一組 17 IDs。
+    Neutral 與所有字母 glyph 路徑、預設圖示都已移除；舊 `neutral` 設定精確遷移。
+  - 四姊妹兩句 fixed tap-line 對得到已核准本機錄音；其餘 13 位可在使用者 opt-in
+    後使用 `localService` 中文系統 voice，沒有本機 voice 就保持靜音。
   - 完成共用 omnibus 立繪／固定語音 asset-pack 的 end-to-end pipeline：本機揭露
     `cdn.ted-h.com`／73,261,088 bytes／資料邊界 → 使用者明確點擊 → 唯一固定 GET →
     compact embedded authority cross-binding、整包 hash／大小／946 entry 驗證與
     selected entries 逐檔 hash／大小／rights 驗證 → 原子安裝／啟用；
-    任一步失敗就清掉 staging 並回到所選 persona 的字母呈現，不能留下半包。
+    任一步失敗就清掉 staging；所選 bundled 角色圖不受影響，不能留下半包。
   - 下載前逐包列出實際 host、精確 byte size 與資料邊界；host／大小／邊界未知時
     不連線。請求不得帶出 persona 選擇／狀態、OCR、畫面、問題、答案、記憶 ID 或
     資料庫內容；四位切換不改 request method／URL／header／body。redirect、proxy、
@@ -517,11 +519,13 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
   - `crates/sister-assets` 預設 feature 集合無 download；只有 desktop 啟用。cache 固定在
     `Config::default_data_dir()/persona-assets-v1`，memory export／forget／prune 不碰；
     撤回只清 exact release，損毀／離線重開不自動 retry。
-  - 語音只播由使用者當下操作觸發的固定非敏感台詞；不主動出聲、不朗讀私人答案、
-    OCR 或回憶內容。CDN 是交付機制；角色的選擇、視覺、聲音與離線退路才是產品面。
+  - 語音只由使用者當下操作觸發，不主動出聲。角色台詞優先使用已驗證的固定錄音，
+    否則走 localService 中文系統 TTS；私人答案、OCR 或回憶內容只有使用者另外按下
+    朗讀才會走 localService。CDN 是 fixed voice 的交付機制；角色的選擇、視覺、聲音
+    與離線退路才是產品面。
   - 下載／修復／撤回 UX、鍵盤可及性、prefers-reduced-motion 與靜音都要真的可用；
-    撤回立刻停聲、回所選 persona 的字母呈現、精準刪除該 release cache，失敗則留
-    RepairNeeded 且不連線；ID 不合法才回 Neutral。
+    撤回立刻停掉 fixed voice、保留所選 bundled 角色圖、精準刪除該 release cache，
+    失敗則留 RepairNeeded 且不連線；未知 ID 不可暗中換成另一位。
   - 每個發布 pack 都要通過 public rights/provenance manifest 審查；只嵌入公開安全
     projection，不把私下收據帶進 repo。現成 pack 可重用，但要先證明 AI-Sister
     內嵌的 authority、CDN bytes 與實際播放／呈現用的是同一版。
@@ -572,7 +576,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     `unsupported`。後三種不冒充 off；只有 uninstaller `InstallLocation` 精確對應目前
     exe parent 才能修改，portable 不會碰安裝版。app 不管 `StartupApproved`，所以
     這只證明 Run value 已登錄，Windows 設定仍可另外停用。
-  - ✅ alpha.107 的 login intent 是 tray-only：不顯示／聚焦字母人、不彈
+  - ✅ alpha.107 的 login intent 是 tray-only：不顯示／聚焦桌面姊妹、不彈
     onboarding；同一個 worker 只承接第一份，delayed／secondary duplicate 忽略且不
     reveal。只有有效
     `local-recording` consent 才送 start intent，未簽／讀壞不啟動，而且絕不解除
@@ -674,9 +678,9 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
       pause／resume、跨 capture／brain／hands 的 master stop 在 Windows 正式 artifact
       上走完；隱私腳本與真 Windows smoke 都過。smoke 要覆蓋 WTS active/lock/Unknown、
       slow UIA 後換窗、clipboard copy → switch 與 frame post-check，不拿 compile 當執行證據。
-- [ ] Persona 產品面走完：離線 Neutral、四姊妹 catalog 與選擇入口可用；**每一位**
-      都實際呈現至少一幅通過發布審查的立繪，且兩句 UI fixed tap-line 都能在當下
-      trusted click 後播放相符的已核准語音。共用 omnibus pack 經「本機揭露 →
+- [ ] Persona 產品面走完：四姊妹與 13 位閨密的 17 人離線 catalog 與選擇入口可用；
+      **每一位**都實際呈現至少一幅通過發布審查的 bundled 角色圖，且角色台詞只在
+      trusted click 後出聲。四姊妹的共用 fixed-voice pack 經「本機揭露 →
       明確點擊 → 單一 fixed GET → 驗證 → 原子啟用」完整跑通；切換角色不改網路請求，
       任一額外 GET、redirect、proxy、credential/referrer/query/body 或 retry 都會失敗。
 - [ ] Persona 發布 gate 逐包通過 public rights/provenance manifest 與技術 manifest
@@ -684,8 +688,8 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
       embedded authority 對 canonical manifest hash、73,261,088-byte／946-entry pack 的
       cross-binding 都可查；下載前顯示的 host、總大小、資料邊界和實際請求一致，未驗證的素材
       不進發布 catalog。拒絕下載、關閉、靜音、reduced-motion、撤回／精準清 cache、
-      離線重開、損毀／修復路徑都實測；任何失敗 fail closed 回 code-native 字母呈現
-      （非法 ID 回 Neutral）且 S1 完整。
+      離線重開、損毀／修復路徑都實測；任何 fixed-voice 失敗都保留所選 bundled 角色圖、
+      不自動連線，未知角色 ID 仍 fail closed，而且 S1 完整。
 - [ ] 任何隨 1.0 發出的 macOS／Linux Preview artifact 各自在原生平台走完 Preview
       最小合約；沒過就不發該 artifact，不因此把 Windows GA 降格或延後。
 
@@ -1941,10 +1945,10 @@ enum 值」。現在四種處境各餵一條真的路徑進去（寫一個壞旗
   Everywhere MCP interop；瀏覽器 extension（更準的 URL/DOM）。
 - Linux Preview 成熟化：把 Phase 5 的 X11 Developer Preview 往正式支援推；
   Wayland portal 繼續研究，做不到可靠背景擷取就維持明示降級，不在這裡首次假裝落地。
-- Persona 1.0 完成後的成熟化：Phase 5 必須先交付四姊妹 catalog、立繪／固定語音
-  pack、明確下載與驗證 pipeline；到這裡才增加已取得權利的新角色資產、表情、語言與可及性，
-  不在這裡首次補核心角色體驗。runtime TTS 若未來另案評估，要有新的隱私與同意合約；
-  不能默默取代 1.0「固定非敏感台詞、不主動、不朗讀私人答案」的邊界。
+- Persona 1.0 完成後的成熟化：Phase 5 必須先交付 17 人 catalog、bundled 角色圖、
+  fixed-voice pack、localService TTS 與明確下載／驗證 pipeline；到這裡才增加表情、
+  2.5D reel、更多語言與可及性。雲端 TTS 若另案加入，要有獨立的文字出站揭露、
+  credential 保存與明確 provider 選擇，不能在本機 voice 缺席時自動降級送出答案。
 - 選配 E2EE 多機同步（獨立審視授權與架構）。
 - 社群治理：issue 模板按「訊號抓不到」分流到 adapter plugin、
   benchmark 語料貢獻管道（去敏審查 gate）。

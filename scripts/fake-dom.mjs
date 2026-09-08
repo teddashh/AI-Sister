@@ -45,6 +45,7 @@ export function fakeEl(tag = "div") {
     dataset: {},
     style: { setProperty() {}, removeProperty() {} },
     children: [],
+    parentNode: null,
     handlers: {},
     classList: {
       _s: new Set(),
@@ -67,14 +68,40 @@ export function fakeEl(tag = "div") {
     },
     removeEventListener() {},
     append(...kids) {
+      for (const kid of kids) {
+        if (kid && typeof kid === "object") kid.parentNode = this;
+      }
       this.children.push(...kids);
     },
     appendChild(k) {
+      if (k && typeof k === "object") k.parentNode = this;
       this.children.push(k);
       return k;
     },
     replaceChildren(...kids) {
+      for (const kid of kids) {
+        if (kid && typeof kid === "object") kid.parentNode = this;
+      }
       this.children = kids;
+    },
+    remove() {
+      if (!this.parentNode) return;
+      this.parentNode.children = this.parentNode.children.filter((kid) => kid !== this);
+      this.parentNode = null;
+    },
+    cloneNode(deep = false) {
+      const copy = fakeEl(this.tag);
+      copy._text = this._text;
+      copy.type = this.type;
+      copy.value = this.value;
+      copy.className = this.className;
+      copy.checked = this.checked;
+      copy.disabled = this.disabled;
+      copy.hidden = this.hidden;
+      copy.title = this.title;
+      copy.dataset = { ...this.dataset };
+      if (deep) copy.append(...this.children.map((kid) => kid.cloneNode(true)));
+      return copy;
     },
     setAttribute(name, v) {
       // `aria-label` 是**只有讀螢幕的人收得到**的那一份文字（`paint()` 每次都寫
@@ -93,12 +120,24 @@ export function fakeEl(tag = "div") {
       // 的是 `#text`，而 `renderSnippet` 每一筆命中都會塞好幾個進去。
       return this.children.filter((k) => k.tag !== "#text").length;
     },
-    /** 只認得 `"button"` 這種標籤選擇器，而且是**遞迴**的——`querySelectorAll` 本來就是。 */
+    /** 認得測試用到的 tag、`.class` 與逗號集合，而且是遞迴的。 */
     querySelectorAll(sel) {
       const out = [];
+      const selectors = String(sel)
+        .split(",")
+        .map((part) => part.trim())
+        .filter(Boolean);
+      const matches = (node) =>
+        selectors.some((selector) =>
+          selector.startsWith(".")
+            ? String(node.className)
+                .split(/\s+/u)
+                .includes(selector.slice(1))
+            : node.tag === selector,
+        );
       const walk = (node) => {
         for (const kid of node.children ?? []) {
-          if (kid.tag === sel) out.push(kid);
+          if (matches(kid)) out.push(kid);
           walk(kid);
         }
       };

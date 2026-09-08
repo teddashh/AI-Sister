@@ -47,7 +47,7 @@ L3 可更新狀態 (State)      — 承諾/未完成事項/實體/偏好；每�
 └──────────────────────────────────────────────────────────────────┘
             ▲ sibling process + 共用 data dir；沒有 HTTP／WS／socket
 ┌─ sister-desktop（Tauri 2 Rust backend + 原生 HTML/CSS/ES module）──┐
-│  字母人／姊妹、對話、時間軸、同意書、設定、開發者模式               │
+│  桌面姊妹、對話、時間軸、同意書、設定、開發者模式                     │
 │  renderer 只經 Tauri IPC 呼叫同一行程裡的 Rust                     │
 └──────────────────────────────────────────────────────────────────┘
 ┌─ sister-hands（Rust crate；CLI 與 desktop 共用唯一授權邊界）──────┐
@@ -271,7 +271,7 @@ UI 只有兩個動作：**「結案」**（=dead/done）與**其他一切**（=s
 ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話語境**推斷**，
 不要求使用者標註。
 
-## §8. Expression 表達層（字母人／姊妹）
+## §8. Expression 表達層（桌面姊妹）
 
 ### 8.1 視窗與角色
 
@@ -281,15 +281,18 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   `macos-private-api`+`tauri-nspanel` 且有 DMG 透明失效與 **GPU 功耗 8×** 的已知 issue
   → 對策：角色動畫用低 fps 靜態立繪 crossfade（TokenMonster 本來的做法，不是巧合），
   提供「不透明小窗」低功耗模式，透明模式的功耗列入 §2.3 電池預算量測。
-- 識別：Neutral 與四個 catalog 身分各有 day-one、離線、零資產的 code-native
-  字母 fallback；Neutral 是預設。Release 1.0 提供 Aster／Cedar／Mira／Rook
-  catalog、立繪與固定語音。資產只能由使用者在看見 `cdn.ted-h.com`、精確大小
-  73,261,088 bytes 與資料邊界後明確按下下載；desktop 才可對內嵌 allowlist 做一次
-  固定 GET，完整驗證成功才原子啟用。WebView 本身仍只有 IPC，CSP 不開 CDN。
+- 識別：四姊妹與 13 位閨密共 17 個 canonical 身分，角色圖全部隨 desktop 離線提供，
+  預設 ChatGPT。沒有 Neutral，也沒有 code-native 字母 fallback。角色圖的來源、大小與
+  SHA-256 固定在 bundled manifest。舊 optional pack 只補四姊妹八句預錄固定台詞；
+  使用者看見 `cdn.ted-h.com`、精確大小 73,261,088 bytes 與資料邊界後明確按下，
+  desktop 才可對內嵌 allowlist 做一次固定 GET，完整驗證成功才原子啟用錄音。
+  WebView 本身仍只有 IPC，CSP 不開 CDN。
 - 狀態表達（不彈窗）：`idle`（呼吸）／`paused`（閉眼 = capture 停）／
   `thinking`（微動）／`has-something`（微光 + 一個小點，像未讀）。
-  點角色 → 一句本機 deterministic tap-line；不點不出聲。persona 不得影響答案、
-  證據、同意書、Gatekeeper 或 hands；固定語音不朗讀 OCR／回憶／私人答案。
+  點角色 → 一句本機 deterministic tap-line；不點不出聲。聲音另行 opt-in：有已驗證
+  固定錄音就播放，否則只用 WebView 明確標成 `localService` 的中文系統 voice；沒有就
+  靜音，不准降級成 remote voice。答案只能由使用者按「用本機聲音朗讀」後讀出。
+  persona 不得影響答案、證據、同意書、Gatekeeper 或 hands。
 
 ### 8.2 對話（被動答題——永遠可用，這是 Release 1.0 的核心）
 
@@ -687,7 +690,7 @@ renderer 顯示文字逐字等於 embedded transcript 的 line 才能進播放 a
 | hands | **Rust crate `sister-hands`**，CLI／desktop 共用 permit 與 target policy | 尚未做獨立 process；需要時另立 threat-model milestone |
 | Persona transport | root workspace 的 **`sister-assets`**；預設 feature 集合不含 `download`，desktop 才明確啟用 | API 不接受 renderer 傳入 URL／header／body／persona 或 memory；唯一 fixed GET 與 cache contract 見 §11.9 |
 | Schema | Rust serde DTO + 前端封閉集合檢查 | 沒有 Zod／codegen build step |
-| Persona assets | 本機 catalog + 每位的字母 fallback（Neutral 預設）；內容定址的固定 CDN pack、明確點擊、compact authority 驗證後原子啟用 | recorder/core 保持零網路；WebView CSP 不開 CDN；cache 在 default data dir 的 `persona-assets-v1`，不進 memory export／forget／prune |
+| Persona assets | 17 人本機 catalog + bundled WebP（ChatGPT 預設）；內容定址的四姊妹 fixed-voice pack，明確點擊、compact authority 驗證後原子啟用 | recorder/core 保持零網路；WebView CSP 不開 CDN；cache 只存舊 fixed voice，在 default data dir 的 `persona-assets-v1`，不進 memory export／forget／prune |
 | hands 元件（Phase 6+） | Agent S3（Apache-2.0）/ UFO²（MIT）/ OmniParser v3 weights（MIT，避開舊 AGPL detector） | 「手」已商品化：用組的，不自己寫 grounding |
 | 參考不引用 | Screenpipe（2026-06 起自訂商業授權，僅參考架構；MIT fork point 在舊版）；Everywhere（BUSL，僅 MCP/API interop） | license 判定見 research/landscape.md |
 
@@ -737,7 +740,7 @@ always-on。capture 從 day 1 走 trait 抽象，但「介面同形」不等於�
 - 必備文件（day one）：README（三張同意書宣言 + benchmark 表）、PRIVACY.md
   （含旁人邊界誠實聲明）、THREAT_MODEL.md、DATA_INVENTORY.md
   （TokenMonster 的寫法沿用）；
-- clone → 跑起來 < 10 分鐘是硬指標〔定案：clone 十分鐘要看到字母人動〕。
+- clone → 跑起來 < 10 分鐘是硬指標〔定案：clone 十分鐘要看到桌面姊妹動〕。
 
 ## §17. 由本 spec 拍板的辯論懸案（決策記錄）
 

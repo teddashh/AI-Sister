@@ -31,7 +31,12 @@
 你自己跑 `sister replay export` 時會明確多做一份私有草稿；它是匯出副本，
 不是活資料庫的一部分，要另外刪除。
 
-另有一個物理上位於預設資料目錄、但**不是記憶**的公開素材 cache：
+17 張 current 角色 WebP 是程式本身的靜態資產，位於
+`apps/desktop/ui/personas/`，合計 225,082 bytes；它們不在資料目錄、不是 cache，
+也不受 memory export／forget／prune／Persona cache 撤回影響。來源、大小與 SHA-256
+固定在同目錄的 manifest。
+
+另有一個物理上位於預設資料目錄、但**不是記憶**的舊固定錄音素材 cache：
 `Config::default_data_dir()/persona-assets-v1/`。安裝時會短暫有 `.staging-*`；完成後是
 `ai-sister-media-11-voice55-2026.07.23/objects/` 底下四張 selected WebP、八條 selected
 WAV，以及 `installed-v1.txt`。receipt 只有 schema、release ID、canonical manifest
@@ -40,8 +45,8 @@ object 不留在 cache。這裡不得放 OCR、畫面、問題、答案、記憶
 request-derived IP／response header。`--data-dir` 不搬它；memory export、`sister
 forget`、`sister prune` 都不讀、不複製、不刪它。Persona 撤回才停用並精準刪除該
 release；直接刪掉整個預設資料目錄當然也會連素材一起刪掉。既有 staging 或 cache
-損毀時會落到 `RepairNeeded`／字母 fallback；全新下載在建立 staging 前驗證失敗則
-仍是 `Available`，並顯示當次錯誤。兩者都不會自動連網修復。
+損毀時會落到 `RepairNeeded` 並停用額外固定錄音；全新下載在建立 staging 前驗證失敗
+則仍是 `Available`，並顯示當次錯誤。兩者都保留 bundled 角色圖，也不會自動連網修復。
 
 cache 旁邊另有四種不跟 release 目錄一起刪的協定檔：`persona-assets-v1.lock-v1`
 是空的跨行程鎖；`persona-assets-v1.revocations-v1/` 在第一次安裝嘗試或撤回時建立一個
@@ -217,9 +222,10 @@ CLI 可以用全域 `--config <FILE>` 明確改讀另一份，字母人則讀預
 不會順便改變這個選擇，刪掉或移走設定檔才會讓它回到「還沒問過」。
 
 `[shell.persona]` 也住在 `config.toml`，保存角色顯示開關、穩定 ID、動態效果、
-tap-lines 與聲音偏好。這些值會改本機呈現，**不會進 asset request**；四位角色與
+tap-lines 與聲音偏好。這些值會改本機呈現，**不會進 asset request**；17 位角色與
 所有狀態的 method／URL／headers／body 必須相同。刪記憶不會重設它們，刪設定檔才會
-回到 Neutral／預設值。素材 cache 本身也不另存一份「目前選誰」。
+回到 ChatGPT／預設值。舊設定裡的 exact `neutral` 會遷移成 ChatGPT 並關閉聲音；
+其他未知 ID 仍拒絕。素材 cache 本身也不另存一份「目前選誰」。
 
 Windows 的「登入後啟動」**不在 `config.toml`**。它是目前使用者 registry 的
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下一個名為 `AI-Sister` 的

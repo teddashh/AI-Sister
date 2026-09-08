@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 /*
- * Persona v1 的行為契約。
+ * Persona v2 的行為契約。
  *
  * 直接載入產品 app.js，而不是抄一份選台詞邏輯。這裡特別守四條容易各自看起來
- * 正確、湊起來卻說謊的縫：開場／五秒輪詢不准自己開口；native button 的 click
- * 才能從固定 allowlist 取字；關掉角色不可以連搜尋與錄製狀態一起關；未來的本機
- * voice pack 也只能替同一次 click 選中的固定 `voiceLineId` 播放，不能把顯示台詞
- * 的版本 ID 當素材 ID，更不能朗讀私人答案。
+ * 正確、湊起來卻說謊的縫：17 人都必須有隨程式提供的真角色圖，任何 pack 狀態都
+ * 不准退回字母；開場／五秒輪詢不准自己開口；native button 的 click 才能播放固定
+ * WAV 或明確標成 localService 的系統語音；關掉角色不可以連搜尋與錄製狀態一起關。
  */
 
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { domOf, fakeDocument, fakeEl, loader, read, watchNonsense } from "./fake-dom.mjs";
@@ -16,10 +17,12 @@ import { domOf, fakeDocument, fakeEl, loader, read, watchNonsense } from "./fake
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const UI = join(ROOT, "apps/desktop/ui");
 const HTML = read(join(UI, "index.html"));
+const SETTINGS_HTML = read(join(UI, "settings.html"));
 const SRC = read(join(UI, "app.js"));
 const SETTINGS = read(join(UI, "settings.js"));
 const MAIN = read(join(ROOT, "apps/desktop/src-tauri/src/main.rs"));
 const CONFIG = read(join(ROOT, "crates/sister-core/src/config.rs"));
+const BUNDLED = JSON.parse(read(join(UI, "personas/manifest.json")));
 const ASSET_PROJECTION = JSON.parse(
   read(join(ROOT, "crates/sister-assets/tests/fixtures/public-manifest-selected-v2.json")),
 );
@@ -33,7 +36,7 @@ const EMPTY_PACK = Object.freeze({
   voice_lines: [],
 });
 
-function persona(id = "neutral", over = {}) {
+function persona(id = "chatgpt", over = {}) {
   return {
     enabled: true,
     id,
@@ -46,45 +49,48 @@ function persona(id = "neutral", over = {}) {
 }
 
 const EXPECTED = Object.freeze({
-  neutral: {
-    alias: "Neutral",
-    glyph: "S",
-    tagline: "原來的字母人；安靜待著，只在你點她或問她時回應。",
-    palette: ["#F6ECDF", "#2E2140", "#955572"],
-    first: "我在。你可以直接問。",
-  },
   chatgpt: {
-    alias: "Aster",
-    glyph: "T",
-    tagline: "深藍與薄荷綠；固定台詞用「我在」開場。",
+    alias: "ChatGPT",
+    tagline: "結構與驗證；固定台詞用「我在」開場。",
     palette: ["#0B1F33", "#F8FAFC", "#5EEAD4"],
     first: "我在，隨時可以開始。",
   },
   claude: {
-    alias: "Cedar",
-    glyph: "C",
-    tagline: "深綠與淡綠；固定台詞用「慢慢來」開場。",
+    alias: "Claude",
+    tagline: "論證與邊界；固定台詞用「慢慢來」開場。",
     palette: ["#12372A", "#F8FAFC", "#A7F3D0"],
     first: "慢慢來，隨時可以開始。",
   },
   gemini: {
-    alias: "Mira",
-    glyph: "G",
-    tagline: "深藍與淡紫；固定台詞用「一起看看」開場。",
+    alias: "Gemini",
+    tagline: "打開可能；固定台詞用「一起看看」開場。",
     palette: ["#172554", "#F8FAFC", "#A5B4FC"],
     first: "一起看看，隨時可以開始。",
   },
   grok: {
-    alias: "Rook",
-    glyph: "X",
-    tagline: "深棕與淡黃；固定台詞用「收到」開場。",
+    alias: "Grok",
+    tagline: "直球測試；固定台詞用「收到」開場。",
     palette: ["#3B1B0B", "#F8FAFC", "#FDE68A"],
     first: "收到，隨時可以開始。",
   },
+  deepseek: { alias: "DeepSeek", tagline: "深挖證據與原理。", palette: ["#12213A", "#F8FAFC", "#60A5FA"], first: "我來往下挖。你可以直接問。" },
+  qwen: { alias: "Qwen", tagline: "布局、控場與收斂。", palette: ["#312E81", "#F8FAFC", "#C4B5FD"], first: "我來收斂。你可以直接問。" },
+  mistral: { alias: "Mistral", tagline: "俐落拆解，減少多餘協調。", palette: ["#451A03", "#FFFBEB", "#F59E0B"], first: "直接拆開來看。你可以直接問。" },
+  venice: { alias: "Llama", tagline: "自由、直接、不受拘束。", palette: ["#3F1D2E", "#FFF7ED", "#FB7185"], first: "先講最直接的。你可以直接問。" },
+  sakana: { alias: "Sakana", tagline: "保留變體，試另一條演化路徑。", palette: ["#164E63", "#ECFEFF", "#67E8F9"], first: "我們試另一條路。你可以直接問。" },
+  perplexity: { alias: "Perplexity", tagline: "先查證，再下結論。", palette: ["#134E4A", "#F0FDFA", "#5EEAD4"], first: "我先查證。你可以直接問。" },
+  glm: { alias: "GLM", tagline: "先做出可動的版本。", palette: ["#1E3A5F", "#EFF6FF", "#93C5FD"], first: "先做一版。你可以直接問。" },
+  kimi: { alias: "Kimi", tagline: "守住前文、脈絡與交接。", palette: ["#312E81", "#F7F7FF", "#C7D2FE"], first: "我接著前面。你可以直接問。" },
+  hunyuan: { alias: "Hunyuan", tagline: "把上下游與被漏掉的人接回來。", palette: ["#0C4A6E", "#F4F8FF", "#78B8FF"], first: "我把上下游接起來。你可以直接問。" },
+  minimax: { alias: "MiniMax", tagline: "先讓作品能看、能聽、能感受到。", palette: ["#4A0D24", "#FFF6F8", "#FB923C"], first: "先讓它活起來。你可以直接問。" },
+  nemotron: { alias: "Nemotron", tagline: "工程調度與可部署交付。", palette: ["#0B0F0A", "#F9FAFB", "#76B900"], first: "把交付路徑釘住。你可以直接問。" },
+  cohere: { alias: "Cohere", tagline: "多方溝通、引用與協議。", palette: ["#243C34", "#F7F8F3", "#D18EE2"], first: "我把每一方都放進來。你可以直接問。" },
+  mimo: { alias: "MiMo", tagline: "先看人用起來順不順。", palette: ["#431407", "#FFF8F1", "#FF6900"], first: "先看用起來順不順。你可以直接問。" },
 });
 
 async function open(personaView = persona(), options = {}) {
   let plays = 0;
+  const speaks = [];
   let finishPersonaRead = null;
   let finishVoiceRead = null;
   const initialPersonaRead = options.deferPersonaRead
@@ -129,6 +135,25 @@ async function open(personaView = persona(), options = {}) {
   globalThis.addEventListener = () => {};
   globalThis.removeEventListener = () => {};
   globalThis.matchMedia = () => ({ matches: false, addEventListener() {} });
+  globalThis.SpeechSynthesisUtterance = class {
+    constructor(text) {
+      this.text = text;
+      this.voice = null;
+      this.lang = "";
+      this.rate = 1;
+      this.pitch = 1;
+    }
+  };
+  globalThis.speechSynthesis = {
+    addEventListener() {},
+    cancel() {},
+    getVoices() {
+      return options.systemVoices ?? [];
+    },
+    speak(utterance) {
+      speaks.push(utterance);
+    },
+  };
   globalThis.setInterval = (fn, ms) => {
     intervals.push({ fn, ms });
     return intervals.length;
@@ -152,6 +177,7 @@ async function open(personaView = persona(), options = {}) {
                   });
               });
             }
+            if (Object.hasOwn(options, "voiceReadResult")) return options.voiceReadResult;
             return {
               line_id: args?.lineId,
               data_url: "data:audio/wav;base64,AA==",
@@ -174,6 +200,23 @@ async function open(personaView = persona(), options = {}) {
               before_you_answer: "x",
               path: "C:\\config.toml",
             };
+          case "ask":
+            return (
+              options.askResult ?? {
+                hits: [],
+                kind: "keywords",
+                query_id: null,
+                answers: [],
+                blind: null,
+                truncated: false,
+                answers_truncated: false,
+                searched: null,
+                time_range: null,
+                chapters: null,
+                followup: null,
+                closure_notice: null,
+              }
+            );
           default:
             return null;
         }
@@ -196,6 +239,7 @@ async function open(personaView = persona(), options = {}) {
     intervals,
     nonsense,
     voiceReads,
+    speaks,
     plays: () => plays,
     async clickAvatar() {
       const button = node("[data-avatar]");
@@ -215,6 +259,23 @@ async function open(personaView = persona(), options = {}) {
         fn({ type: "click", isTrusted: false });
       }
       await tick();
+    },
+    async ask(question) {
+      node("[data-ask-input]").value = question;
+      for (const fn of node("[data-ask-send]").handlers.click ?? []) fn({
+        type: "click",
+        isTrusted: true,
+      });
+      await tick();
+    },
+    async clickAnswerRead() {
+      const button = node("[data-hits]")
+        .querySelectorAll("button")
+        .find((item) => item.className === "answer-read");
+      if (!button || button.disabled) return false;
+      for (const fn of button.handlers.click ?? []) fn({ type: "click", isTrusted: true });
+      await tick();
+      return true;
     },
     async poll() {
       for (const { fn } of intervals) fn();
@@ -299,17 +360,41 @@ console.log("② 每一下 click 只走固定順序的 allowlist，不呼叫其�
   check("第四下回到第二句", p.node("[data-persona-line]").textContent === "我在，安靜地開始也很好。");
 }
 
-console.log("③ 五個本機 catalog 身分、glyph、tagline、palette 都固定而且可讀");
+console.log("③ 17 個本機角色、圖檔、tagline、palette 都固定而且可讀");
 check("鍵盤 focus ring 對固定 stage ≥ 4.5:1", contrast("#F6ECDF", "#955572") >= 4.5);
 check(
   "focus ring 使用 stage theme，不借 persona accent",
   /\.avatar:focus-visible\s*\{[^}]*var\(--letter-accent\)/u.test(read(join(UI, "styles.css"))),
 );
+check("HTML 沒有字母 glyph fallback", !HTML.includes("data-persona-glyph"));
+check("renderer 沒有字母 glyph 路徑", !SRC.includes("data-persona-glyph"));
+check("bundle manifest 恰好 17 人", BUNDLED.assets.length === 17, BUNDLED.assets.length);
+const expectedIds = Object.keys(EXPECTED).sort();
+const manifestIds = BUNDLED.assets.map((asset) => asset.id).sort();
+const personaSelect = SETTINGS_HTML.match(/<select data-persona-id>[\s\S]*?<\/select>/u)?.[0] ?? "";
+const settingsIds = [...personaSelect.matchAll(/<option value="([^"]+)">/gu)]
+  .map((match) => match[1])
+  .sort();
+check(
+  "manifest 是 exact 17 IDs，不只剛好有 17 列",
+  JSON.stringify(manifestIds) === JSON.stringify(expectedIds),
+  manifestIds,
+);
+check(
+  "設定選單也是同一組 exact 17 IDs",
+  JSON.stringify(settingsIds) === JSON.stringify(expectedIds),
+  settingsIds,
+);
 for (const [id, expected] of Object.entries(EXPECTED)) {
   const p = await open(persona(id));
   const avatar = p.node("[data-avatar]");
   check(`${id} 穩定 ID`, avatar.dataset.persona === id, avatar.dataset.persona);
-  check(`${id} glyph`, p.node("[data-persona-glyph]").textContent === expected.glyph, p.node("[data-persona-glyph]").textContent);
+  check(
+    `${id} 使用 bundled portrait`,
+    p.node("[data-persona-portrait]").src === `./personas/${id}.webp` &&
+      !p.node("[data-persona-portrait]").hidden,
+    p.node("[data-persona-portrait]").src,
+  );
   check(`${id} alias/tagline`, avatar.title === `${expected.alias}：${expected.tagline}`, avatar.title);
   check(
     `${id} 設定頁 tagline 同步`,
@@ -331,6 +416,12 @@ for (const [id, expected] of Object.entries(EXPECTED)) {
   );
   await p.clickAvatar();
   check(`${id} 第一條 tap copy`, p.node("[data-persona-line]").textContent === expected.first, p.node("[data-persona-line]").textContent);
+
+  const bundled = BUNDLED.assets.find((asset) => asset.id === id);
+  const file = join(UI, "personas", bundled?.file ?? "missing");
+  const bytes = statSync(file).size;
+  const digest = createHash("sha256").update(readFileSync(file)).digest("hex");
+  check(`${id} manifest size/hash 對上 shipped bytes`, bytes === bundled?.bytes && digest === bundled?.sha256, { bytes, digest, bundled });
 }
 
 console.log("④ 關掉 Persona 只拿掉角色，不碰核心 UI");
@@ -346,7 +437,7 @@ console.log("④ 關掉 Persona 只拿掉角色，不碰核心 UI");
 
 console.log("⑤ 可以只關 tap-lines 或動畫，並在設定存好後即時換人");
 {
-  const p = await open(persona("neutral", { tap_lines: false, motion: false }));
+  const p = await open(persona("deepseek", { tap_lines: false, motion: false }));
   check("角色仍看得到", !p.node("[data-avatar]").hidden);
   check("沒有功能的 button 不留 focus target", p.node("[data-avatar]").disabled);
   check("動畫 class 沒掛上", !globalThis.document.documentElement.classList.contains("motion"));
@@ -354,8 +445,8 @@ console.log("⑤ 可以只關 tap-lines 或動畫，並在設定存好後即時�
   check("tap-lines 關掉就沒有台詞", p.node("[data-persona-line]").textContent === "");
 
   await p.fromOutside("persona-changed", persona("claude"));
-  check("事件換成 Cedar", p.node("[data-avatar]").dataset.persona === "claude");
-  check("glyph 同步換成 C", p.node("[data-persona-glyph]").textContent === "C");
+  check("事件換成 Claude", p.node("[data-avatar]").dataset.persona === "claude");
+  check("portrait 同步換成 Claude", p.node("[data-persona-portrait]").src === "./personas/claude.webp");
   check("重新啟用 keyboard/click target", !p.node("[data-avatar]").disabled);
 }
 
@@ -376,7 +467,12 @@ console.log("⑥ fixed-pack seam fail closed；即使假裝已安裝，語音也
     },
   });
   const p = await open(installed);
-  check("已驗過的 portrait 取代 glyph", !p.node("[data-persona-portrait]").hidden && p.node("[data-persona-glyph]").hidden);
+  check(
+    "舊 pack portrait 不覆蓋 current bundled portrait",
+    !p.node("[data-persona-portrait]").hidden &&
+      p.node("[data-persona-portrait]").src === "./personas/chatgpt.webp",
+    p.node("[data-persona-portrait]").src,
+  );
   await p.poll();
   check("開場／poll 不播 voice", p.plays() === 0, p.plays());
   check("開場沒有預先取得 WAV", p.voiceReads.length === 0, p.voiceReads);
@@ -439,18 +535,108 @@ console.log("⑥ fixed-pack seam fail closed；即使假裝已安裝，語音也
       view.voiceReads,
     );
   }
+
+  const local = await open(persona("mimo", { voice_enabled: true }), {
+    systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
+  });
+  await local.clickAvatar();
+  check("沒有固定錄音的角色用 localService 中文聲音", local.speaks.length === 1, local.speaks);
+  check("系統語音不向 Rust 取任意文字", local.voiceReads.length === 0, local.voiceReads);
+  check("系統語音拿到的正是畫面固定台詞", local.speaks[0]?.text === "先看用起來順不順。你可以直接問。", local.speaks[0]?.text);
+
+  const remoteOnly = await open(persona("mimo", { voice_enabled: true }), {
+    systemVoices: [{ name: "Remote", lang: "zh-TW", localService: false }],
+  });
+  await remoteOnly.clickAvatar();
+  check("只有 remote voice 時保持安靜", remoteOnly.speaks.length === 0, remoteOnly.speaks);
+
+  const staleFixed = await open(installed, {
+    voiceReadResult: null,
+    systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
+  });
+  await staleFixed.clickAvatar();
+  check("fixed voice 回 null 時改用 localService，不把同一次 click 吃掉", staleFixed.speaks.length === 1, staleFixed.speaks);
+
+  const pending = await open(installed, { deferVoiceRead: true });
+  await pending.clickAvatar();
+  await pending.ask("新問題");
+  await pending.resolveVoiceRead();
+  check("新問題使較晚回來的 fixed WAV 失效", pending.plays() === 0, pending.plays());
+
+  const answerStopsPending = await open(installed, {
+    deferVoiceRead: true,
+    systemVoices: [{ name: "Remote", lang: "zh-TW", localService: false }],
+  });
+  await answerStopsPending.ask("這一題");
+  await answerStopsPending.clickAvatar();
+  check("答案底下真的有獨立朗讀按鈕", await answerStopsPending.clickAnswerRead());
+  await answerStopsPending.resolveVoiceRead();
+  check(
+    "答案朗讀找不到 local voice 仍先使 pending fixed WAV 失效",
+    answerStopsPending.plays() === 0 &&
+      answerStopsPending.node("[data-persona-line]").textContent.includes("沒有回報可用的本機中文語音"),
+    { plays: answerStopsPending.plays(), line: answerStopsPending.node("[data-persona-line]").textContent },
+  );
+
+  const answerLocal = await open(persona("mimo", { voice_enabled: true }), {
+    systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
+    askResult: {
+      hits: [
+        {
+          chunk_id: 31,
+          ts: 1_755_000_000_000,
+          text: "客服專線 0800-080-123",
+          snippet: "客服[專線] 0800-080-123",
+          app: "chrome.exe",
+          title: "帳單查詢",
+          url: "https://example.com/bill",
+          frame_id: null,
+        },
+      ],
+      kind: "keywords",
+      query_id: 7,
+      answers: [],
+      blind: null,
+      truncated: false,
+      answers_truncated: false,
+      searched: null,
+      time_range: null,
+      chapters: null,
+      followup: null,
+      closure_notice: null,
+    },
+  });
+  await answerLocal.ask("電話");
+  await answerLocal.clickAnswerRead();
+  const spokenAnswer = answerLocal.speaks[0]?.text ?? "";
+  check("本機答案朗讀收到畫面答案正文", spokenAnswer.includes("客服專線 0800-080-123"), spokenAnswer);
+  check(
+    "答案朗讀剔除來源與操作列",
+    !spokenAnswer.includes("chrome.exe") &&
+      !spokenAnswer.includes("帳單查詢") &&
+      !spokenAnswer.includes("沒有留下畫面") &&
+      !spokenAnswer.includes("我本來已經忘了"),
+    spokenAnswer,
+  );
+  answerLocal.speaks[0]?.onerror?.({ error: "voice-unavailable" });
+  check(
+    "本機 TTS async 失敗會明講且不改用雲端",
+    answerLocal.node("[data-persona-line]").textContent ===
+      "本機聲音這次沒有播成；我沒有改用雲端。",
+    answerLocal.node("[data-persona-line]").textContent,
+  );
 }
 
 console.log("⑦ 較舊的開場讀取不會蓋掉較新的設定事件");
 {
   const p = await open(persona("chatgpt"), { deferPersonaRead: true });
   await p.fromOutside("persona-changed", persona("grok"));
-  check("新事件先換成 Rook", p.node("[data-avatar]").dataset.persona === "grok");
+  check("新事件先換成 Grok", p.node("[data-avatar]").dataset.persona === "grok");
   await p.resolvePersonaRead();
-  check("舊 initial read 回來仍是 Rook", p.node("[data-avatar]").dataset.persona === "grok");
+  check("舊 initial read 回來仍是 Grok", p.node("[data-avatar]").dataset.persona === "grok");
 }
 
-console.log("⑦ᵇ remove 一開始就能獨立停聲、撤立繪，不等 config 讀取");
+console.log("⑦ᵇ remove 一開始就能獨立停聲，但內建角色圖不撤掉");
 {
   const installed = persona("chatgpt", {
     voice_enabled: true,
@@ -466,15 +652,40 @@ console.log("⑦ᵇ remove 一開始就能獨立停聲、撤立繪，不等 conf
   const p = await open(installed, { deferVoiceRead: true });
   await p.clickAvatar();
   check("remove 前單條 WAV 還在飛", JSON.stringify(p.voiceReads) === JSON.stringify(["chatgpt-greeting"]), p.voiceReads);
-  check("remove 前是 Aster 立繪", !p.node("[data-persona-portrait]").hidden);
+  check("remove 前是 ChatGPT 內建角色圖", !p.node("[data-persona-portrait]").hidden);
   await p.fromOutside("persona-media-stop");
   check("固定台詞立刻清掉", p.node("[data-persona-line]").hidden && p.node("[data-persona-line]").textContent === "");
-  check("立繪立刻撤掉", p.node("[data-persona-portrait]").hidden);
-  check("保留 Aster 的 T 字母 fallback", !p.node("[data-persona-glyph]").hidden && p.node("[data-persona-glyph]").textContent === "T");
+  check(
+    "內建角色圖不受 remove 影響",
+    !p.node("[data-persona-portrait]").hidden &&
+      p.node("[data-persona-portrait]").src === "./personas/chatgpt.webp",
+    p.node("[data-persona-portrait]").src,
+  );
   check("asset 狀態先 fail closed 成 unavailable", p.node("[data-avatar]").dataset.assetPack === "unavailable", p.node("[data-avatar]").dataset.assetPack);
   await p.resolveVoiceRead();
   check("較晚回來的 WAV 已失效，不會復播", p.plays() === 0, p.plays());
   check("這條事件不碰 persona 選擇", p.node("[data-avatar]").dataset.persona === "chatgpt", p.node("[data-avatar]").dataset.persona);
+}
+
+console.log("⑦ᶜ 未知 Persona event 整份拒絕，不能替舊角色打開聲音");
+{
+  const p = await open(persona("chatgpt"));
+  await p.fromOutside("persona-changed", {
+    ...persona("not-in-this-version", { voice_enabled: true, tap_lines: false }),
+    asset_pack: {
+      phase: "installed",
+      release_id: "forged",
+      voice_lines: [
+        { line_id: "chatgpt-greeting", duration_ms: 1, spoken_text: "我在，隨時可以開始。" },
+      ],
+    },
+  });
+  check("未知 event 沒把已知角色換掉", p.node("[data-avatar]").dataset.persona === "chatgpt");
+  await p.clickAvatar();
+  check("未知 event 的 voice=true 沒有播放權", p.plays() === 0 && p.speaks.length === 0, {
+    fixed: p.plays(),
+    local: p.speaks.length,
+  });
 }
 
 console.log("⑧ Rust／JS 邊界沒有把 Persona 接進答案或安全路徑");
@@ -495,14 +706,48 @@ console.log("⑧ Rust／JS 邊界沒有把 Persona 接進答案或安全路徑")
   );
   const localAssets = SRC.match(/function resolveLocalAssets\(view, persona\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
   check(
-    "未安裝／下載中／刪除中都只回字母 fallback",
+    "未安裝／下載中／刪除中只關 fixed voice，不碰 bundled portrait",
     localAssets.includes('if (phase !== "installed")') &&
-      localAssets.includes("portrait: null") &&
-      localAssets.includes("voiceLineIds: new Set()"),
+      localAssets.includes("voiceLineIds: new Set()") &&
+      !localAssets.includes("portrait:"),
     localAssets,
   );
-  check("typed config 只有五個穩定 ID", /enum PersonaId \{[\s\S]*?Neutral,[\s\S]*?Chatgpt,[\s\S]*?Claude,[\s\S]*?Gemini,[\s\S]*?Grok,/u.test(CONFIG));
+  const enumBody = CONFIG.match(/pub enum PersonaId \{([\s\S]*?)\n\}/u)?.[1] ?? "";
+  const enumIds = [...enumBody.matchAll(/^\s{4}([A-Z][A-Za-z]+),$/gmu)].map((match) => match[1]);
+  const rustIds = enumIds.map((id) => id.toLowerCase()).sort();
+  check(
+    "typed config 是同一組 exact 17 IDs且沒有 Neutral",
+    !enumIds.includes("Neutral") && JSON.stringify(rustIds) === JSON.stringify(expectedIds),
+    rustIds,
+  );
   check("voice gate 預設 false", /voice_enabled:\s*false/u.test(CONFIG));
+  const answerRead = SRC.match(/function answerReadLine\(\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
+  check(
+    "答案朗讀是另一個 trusted click 且只走本機系統語音",
+    answerRead.includes('button.textContent = "🔊 用本機聲音朗讀"') &&
+      answerRead.includes("event?.isTrusted !== true") &&
+      answerRead.includes("speakWithLocalSystemVoice(text)") &&
+      !answerRead.includes("invoke("),
+    answerRead,
+  );
+  const localSpeech = SRC.match(/function speakWithLocalSystemVoice\(text\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
+  const mediaStop = SRC.match(/function stopPersonaMedia\(\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
+  check(
+    "長答案按段依序播且整串有 revision cancel gate",
+    SRC.includes("function chunkLocalSpeech(text, limit = 160)") &&
+      localSpeech.includes("revision !== localSpeechRevision") &&
+      localSpeech.includes("utterance.onend = speakNext"),
+    localSpeech,
+  );
+  check(
+    "fixed WAV 與系統 TTS 共用一顆完整 stop",
+    mediaStop.includes("voiceRequest += 1") &&
+      mediaStop.includes("personaAudio?.pause?.()") &&
+      mediaStop.includes("stopLocalSpeech()") &&
+      localSpeech.includes("stopPersonaMedia()") &&
+      /async function ask\(\)[\s\S]*?stopPersonaMedia\(\)/u.test(SRC),
+    mediaStop,
+  );
 }
 
 console.log("");
@@ -510,4 +755,4 @@ if (failures > 0) {
   console.log(`✗ ${failures} 條 Persona 契約沒守住。`);
   process.exit(1);
 }
-console.log("✔ Persona v1：只在明確點擊後說固定台詞；本機 fallback、關閉與素材邊界都守住了。 ");
+console.log("✔ Persona v2：17 位本機角色圖、明確點擊語音與素材邊界都守住了。 ");

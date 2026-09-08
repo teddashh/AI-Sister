@@ -66,7 +66,7 @@ const BASE = {
   brain_command: "",
   brain_args: [],
   persona_enabled: true,
-  persona_id: "neutral",
+  persona_id: "chatgpt",
   persona_motion: true,
   persona_tap_lines: true,
 };
@@ -286,7 +286,7 @@ async function open({
             return null;
           case "persona_read":
             if (onPersonaRead) return onPersonaRead(voiceState);
-            return { voice_enabled: voiceState };
+            return { id: state.persona_id, voice_enabled: voiceState };
           case "persona_voice_set":
             if (onVoiceSet) {
               return onVoiceSet(arg, (enabled) => (voiceState = enabled));
@@ -1081,18 +1081,18 @@ console.log("⑲ᵖ Persona 四格會一起讀寫，關掉角色不會清掉選�
       persona_tap_lines: true,
     },
   });
-  check("讀回 Aster 的穩定 ID", p.node("[data-persona-id]").value === "chatgpt", p.node("[data-persona-id]").value);
+  check("讀回 ChatGPT 的穩定 ID", p.node("[data-persona-id]").value === "chatgpt", p.node("[data-persona-id]").value);
   check("讀回角色開關", p.node("[data-persona-enabled]").checked === true);
   p.node("[data-persona-id]").value = "grok";
   p.node("[data-persona-motion]").checked = false;
   p.node("[data-persona-tap-lines]").checked = false;
   p.node("[data-persona-enabled]").checked = false;
   for (const fn of p.node("[data-persona-enabled]").handlers.change ?? []) fn();
-  check("關掉只灰掉選擇、值仍是 Rook", p.node("[data-persona-id]").disabled && p.node("[data-persona-id]").value === "grok");
+  check("關掉只灰掉選擇、值仍是 Grok", p.node("[data-persona-id]").disabled && p.node("[data-persona-id]").value === "grok");
   await p.save();
   const sent = p.writes[0];
   check("送出關閉狀態", sent.persona_enabled === false, sent);
-  check("關掉仍保留 Rook", sent.persona_id === "grok", sent);
+  check("關掉仍保留 Grok", sent.persona_id === "grok", sent);
   check("動畫和 tap-lines 各自可關", sent.persona_motion === false && sent.persona_tap_lines === false, sent);
 
   const body = MAIN.match(/fn settings_write\([\s\S]*?struct PrivacyHealth/)?.[0] ?? "";
@@ -1113,6 +1113,14 @@ console.log("⑲ᑫ Persona event 沒送到時，存檔成功與畫面未更新�
   check("不冒充桌面已即時換角", p.say().includes("即時更新事件沒能送出"), p.say());
   check("給得出真的恢復路徑", p.say().includes("重新啟動 AI-Sister desktop"), p.say());
   check("部分套用用警告色", p.bad(), p.say());
+}
+
+console.log("⑲ʳ 未知 Persona ID 讓整份設定 unreadable，不靜默改成 ChatGPT");
+{
+  const p = await open({ config: { ...BASE, persona_id: "not-in-this-version" } });
+  check("未知 ID 的錯誤有說出來", p.say().includes("不認得的角色 ID"), p.say());
+  check("整份 config 表單 fail closed", !p.node("[data-unreadable]").hidden && p.node("[data-save]").disabled);
+  check("renderer 沒把未知值改寫成 ChatGPT", p.node("[data-persona-id]").value !== "chatgpt", p.node("[data-persona-id]").value);
 }
 
 console.log("⑳ 拔手撞號的純決策真的接回桌面回傳值");
@@ -1167,7 +1175,7 @@ console.log("㉑ 素材下載前先把 exact host／path／bytes／資料邊界�
       compactHtml.includes("角色選擇") &&
       compactHtml.includes("OCR") &&
       compactHtml.includes("問題、答案、記憶ID或資料庫內容") &&
-      compactHtml.includes("四位角色的method、URL、headers與body完全相同") &&
+      compactHtml.includes("17位角色的method、URL、headers與body完全相同") &&
       compactHtml.includes("至多一個HTTPSGET") &&
       compactHtml.includes("不retry、不先HEAD"),
     "settings.html disclosure",
@@ -1198,7 +1206,7 @@ console.log("㉑ᵇ cache 路徑問不到不能假裝是尚未下載");
     },
   });
   const summary = p.node("[data-persona-asset-summary]").textContent;
-  check("明說是 cache 路徑問不出來", summary.includes("問不出預設素材 cache 路徑"), summary);
+  check("明說是舊素材包 cache 路徑問不出來", summary.replace(/\s+/g, "").includes("問不出舊素材包的cache路徑"), summary);
   check("不顯示下載鍵", p.node("[data-persona-download]").hidden === true);
   check("不顯示修復或刪除鍵", p.node("[data-persona-repair]").hidden && p.node("[data-persona-remove]").hidden);
   check("開場沒有產生 GET 入口", calls(p, "persona_asset_install").length === 0, p.invokes);
@@ -1215,7 +1223,7 @@ for (const [label, onAssetStatus] of [
   check(`${label}不冒充字母 fallback 已套用`, !summary.includes("角色仍使用內建字母人"), summary);
   check(`${label}明講這一頁不會下載`, summary.includes("不會啟動下載"), summary);
   check(`${label}不把未知素材折成一定不播放`, voice.includes("尚未確認") && !voice.includes("所以不會播放"), voice);
-  check(`${label}時語音開關 fail closed`, p.node("[data-persona-voice]").disabled === true);
+  check(`${label}不會把獨立的本機聲音開關鎖住`, p.node("[data-persona-voice]").disabled === false);
   check(`${label}沒有 GET 入口`, calls(p, "persona_asset_install").length === 0, p.invokes);
 }
 
@@ -1226,7 +1234,7 @@ console.log("㉓ persona 選擇只改本機表單，不會觸發素材下載");
   p.node("[data-persona-id]").value = "grok";
   for (const fn of p.node("[data-persona-id]").handlers.change ?? []) fn({ isTrusted: true });
   await tick();
-  check("Rook tagline 會換", p.node("[data-persona-tagline]").textContent.includes("深棕與淡黃"), p.node("[data-persona-tagline]").textContent);
+  check("Grok tagline 會換", p.node("[data-persona-tagline]").textContent.includes("直球測試"), p.node("[data-persona-tagline]").textContent);
   check("沒有下載", calls(p, "persona_asset_install").length === 0, p.invokes);
   check("連下載 status 都沒有因 persona 另打一份", calls(p, "persona_asset_status").length === statusReads, p.invokes);
 }
@@ -1257,7 +1265,7 @@ console.log("㉔ installing 是不確定進度，且取消也是 trusted、零�
   const cancels = calls(p, "persona_asset_cancel");
   check("真人 click 取消一次", cancels.length === 1, cancels);
   check("cancel 是零參數", cancels[0]?.arg === undefined, cancels[0]);
-  check("取消後回到字母 fallback", p.node("[data-persona-asset-summary]").textContent.includes("目前使用內建字母人"), p.node("[data-persona-asset-summary]").textContent);
+  check("取消後仍使用 17 張內建角色圖", p.node("[data-persona-asset-summary]").textContent.includes("17 張內建角色圖已可使用"), p.node("[data-persona-asset-summary]").textContent);
 }
 
 console.log("㉕ repair-needed 用同一個受揭露保護的 install contract");
@@ -1270,7 +1278,7 @@ console.log("㉕ repair-needed 用同一個受揭露保護的 install contract")
     },
   });
   check("修復鍵看得到", p.node("[data-persona-repair]").hidden === false);
-  check("壞素材不冒充立繪可用", p.node("[data-persona-asset-summary]").textContent.includes("立繪與語音已停用"), p.node("[data-persona-asset-summary]").textContent);
+  check("壞 pack 只停用額外固定錄音", p.node("[data-persona-asset-summary]").textContent.includes("額外固定錄音已停用") && p.node("[data-persona-asset-summary]").textContent.includes("內建角色圖"), p.node("[data-persona-asset-summary]").textContent);
   await p.act("[data-persona-repair]");
   const installs = calls(p, "persona_asset_install");
   check("修復沿用 install 一次", installs.length === 1, installs);
@@ -1291,7 +1299,7 @@ console.log("㉖ 揭露缺一格就 fail closed，不會讓下載按得下去");
   check("按不到也沒有 IPC", (await p.act("[data-persona-download]")) === false && calls(p, "persona_asset_install").length === 0, p.invokes);
 }
 
-console.log("㉗ removing 是正式 fail-closed 態；完成後回字母人");
+console.log("㉗ removing 是正式 fail-closed 態；內建角色圖不受影響");
 {
   let finishRemove = null;
   const installed = {
@@ -1314,15 +1322,15 @@ console.log("㉗ removing 是正式 fail-closed 態；完成後回字母人");
   });
   check("已安裝時可刪除", p.node("[data-persona-remove]").hidden === false);
   await p.act("[data-persona-remove]");
-  check("刪除一開始就畫 removing", p.node("[data-persona-asset-summary]").textContent.includes("正在刪除本機素材"), p.node("[data-persona-asset-summary]").textContent);
-  check("刪除中明講立繪與語音已停用", p.node("[data-persona-asset-summary]").textContent.includes("立繪與語音已停用"), p.node("[data-persona-asset-summary]").textContent);
+  check("刪除一開始就畫 removing", p.node("[data-persona-asset-summary]").textContent.includes("正在刪除舊素材包"), p.node("[data-persona-asset-summary]").textContent);
+  check("刪除中明講只停額外固定錄音", p.node("[data-persona-asset-summary]").textContent.includes("額外固定錄音已停用") && p.node("[data-persona-asset-summary]").textContent.includes("內建角色圖不受影響"), p.node("[data-persona-asset-summary]").textContent);
   check("刪除中也只有不確定進度", p.node("[data-persona-progress]").hidden === false);
   check("刪除中語音不可再操作", p.node("[data-persona-voice]").disabled === true);
   const removes = calls(p, "persona_asset_remove");
   check("remove 是零參數", removes.length === 1 && removes[0].arg === undefined, removes);
   finishRemove();
   await tick();
-  check("完成後回 available 字母人", p.node("[data-persona-asset-summary]").textContent.includes("目前使用內建字母人"), p.node("[data-persona-asset-summary]").textContent);
+  check("完成後仍使用 17 張內建角色圖", p.node("[data-persona-asset-summary]").textContent.includes("17 張內建角色圖已可使用"), p.node("[data-persona-asset-summary]").textContent);
 }
 
 console.log("㉘ config 讀壞不會連素材 status／remove 的出口一起關掉");
@@ -1383,7 +1391,7 @@ console.log("㉙ persona-assets-changed 只重讀真相，不會自行下載");
   });
   await p.emit("persona-assets-changed");
   check("事件後多讀一次 status", calls(p, "persona_asset_status").length === before + 1, p.invokes);
-  check("畫面換成 installed", p.node("[data-persona-asset-summary]").textContent.includes("4 張立繪、8 句"), p.node("[data-persona-asset-summary]").textContent);
+  check("畫面換成 installed 且分清舊圖與固定錄音", p.node("[data-persona-asset-summary]").textContent.includes("4 張舊版立繪（桌面不採用）、8 句固定台詞錄音"), p.node("[data-persona-asset-summary]").textContent);
   check("事件本身不下載", calls(p, "persona_asset_install").length === 0, p.invokes);
 }
 
@@ -1398,7 +1406,7 @@ console.log("㉚ 聲音是另外一次 trusted opt-in，失敗會退回，設定
   };
   const p = await open({ asset: installed });
   check("pack 安裝不會順便打開聲音", p.node("[data-persona-voice]").checked === false);
-  check("已安裝才讓 voice opt-in 可按", p.node("[data-persona-voice]").disabled === false);
+  check("本機聲音 opt-in 可按", p.node("[data-persona-voice]").disabled === false);
   p.node("[data-persona-voice]").checked = true;
   await p.act("[data-persona-voice]", { trusted: false, event: "change" });
   check("假 change 被退回關閉", p.node("[data-persona-voice]").checked === false);
@@ -1408,7 +1416,7 @@ console.log("㉚ 聲音是另外一次 trusted opt-in，失敗會退回，設定
   const voiceSets = calls(p, "persona_voice_set");
   check("真人 opt-in 立刻寫一次，不等頁尾 Save", voiceSets.length === 1 && p.writes.length === 0, { voiceSets, writes: p.writes });
   check("voice IPC 只送 enabled bool", JSON.stringify(voiceSets[0]?.arg) === JSON.stringify({ enabled: true }), voiceSets[0]);
-  check("成功後明講只在按角色時播固定台詞", p.node("[data-persona-voice-state]").textContent.includes("只會在你明確按角色時播放預錄固定台詞"), p.node("[data-persona-voice-state]").textContent);
+  check("成功後分清固定錄音與 localService 聲音", p.node("[data-persona-voice-state]").textContent.includes("四姊妹優先用固定錄音") && p.node("[data-persona-voice-state]").textContent.includes("localService 中文聲音"), p.node("[data-persona-voice-state]").textContent);
   check("設定頁沒有任何 audio play 路徑", !read(SRC).includes(".play("), "settings.js");
   check("opt-in 沒有讀任何語音 bytes", calls(p, "persona_voice_read").length === 0, p.invokes);
 }

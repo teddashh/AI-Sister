@@ -42,7 +42,7 @@ sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 第二行不是形式。**沒簽第一張同意書，`record` 不會開始錄**——不是印個
 警告然後照錄。少簽第三張（`frame-storage`）她照樣記，但只記螢幕上的
 字、一張截圖都不寫。`sister.exe consent` 不帶參數就是看現在簽了哪幾張。
-使用者自己開字母人（`sister-desktop.exe`）的話，它會把那一頁跳出來。
+使用者自己開桌面姊妹（`sister-desktop.exe`）的話，它會把那一頁跳出來。
 alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時自動彈同意頁。
 
 記憶資料放在 `%APPDATA%\ted-h\AI-Sister\data\`，刪掉那個資料夾就等於
@@ -57,6 +57,35 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
+
+
+## v0.1.0-alpha.108
+
+**這一版把單一字母角色整條退場，直接帶四姊妹與 13 位閨密共 17 張角色圖；
+也先接好零模型下載、低負擔的本機中文語音。**
+
+設定頁現在可選 ChatGPT、Claude、Gemini、Grok、DeepSeek、Qwen、Mistral、Llama、
+Sakana、Perplexity、GLM、Kimi、Hunyuan、MiniMax、Nemotron、Cohere、MiMo。17 張
+208×208 WebP 合計 225,082 bytes，全部隨安裝檔離線提供，主視窗與程式圖示預設直接
+顯示 ChatGPT；沒有 Neutral，也沒有 S/T/C/G/X glyph fallback。每張圖的來源 commit、
+byte size 與 SHA-256 都在 bundled manifest，圖像另列 NOTICE、不納入 Apache-2.0
+程式碼授權。舊設定的 exact `neutral` 會遷移成 ChatGPT，但不把歷史殘值冒充語音同意；
+其他未知 ID 仍拒絕。
+
+聲音仍預設關閉、只能由真人 click／鍵盤啟動。四姊妹若已有通過舊 pack 驗證的固定
+錄音就優先播放；沒有固定錄音時，只接受 WebView 明確回報 `localService = true` 的
+繁中／中文系統 voice。只有 remote voice 或沒有中文 voice 時就保持安靜，不自動把
+文字送上網。答案底下新增「用本機聲音朗讀」；它也是另一個明確 click，而且只讀當前
+畫面答案，拿掉來源按鈕與操作列後再交給本機 voice。
+
+長答案採用 AIRI speech pipeline 可重用的形狀：先按句切成短段、依序播放、整串可取消；
+這版用原生 Web Speech 實作，沒有因此帶入模型、套件或背景服務。切換問題、停聲或撤回
+fixed-voice pack 都會使較晚回來的播放失效，舊 pack 的立繪也不再覆蓋 current bundled
+角色圖。
+
+這版**沒有**新增雲端 TTS 出站路徑。本機聲音缺席時不會偷偷降級；免費額度的雲端選項
+會另做 provider 選擇、文字出站揭露與 credential 保存後才接，不能借 Persona 素材那條
+fixed GET 或三張記錄同意書取得權限。
 
 
 ## v0.1.0-alpha.107

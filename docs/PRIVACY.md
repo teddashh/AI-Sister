@@ -41,9 +41,11 @@ Persona 的窄下載能力不能拿來替 OCR、brain 或 hands 開例外。
 
 ## Persona 素材的唯一內建網路路徑
 
-不下載也能使用 Neutral、Aster、Cedar、Mira、Rook 的 code-native 字母呈現，S1 的
-記錄、搜尋、證據、刪除與匯出一項都不少。開程式、開設定、hover、切換角色、重開、
-點角色播放已在本機的聲音，都不授權下載，也不會背景預抓或自動更新。
+四姊妹與 13 位閨密的 17 張角色圖都隨程式提供，不下載也能完整使用；沒有 Neutral
+或字母 fallback。S1 的記錄、搜尋、證據、刪除與匯出一項都不少。開程式、開設定、
+hover、切換角色、重開、點角色播放已在本機的聲音，都不授權下載，也不會背景預抓
+或自動更新。系統 TTS 只接受 WebView 明確標成 `localService` 的中文 voice；找不到
+就靜音，不會改用 remote voice。
 
 只有你在同一個揭露畫面看見下列三件事，再明確按「下載」後，desktop 才可嘗試：
 
@@ -56,7 +58,7 @@ Persona 的窄下載能力不能拿來替 OCR、brain 或 hands 開例外。
 按下後獲准的是**至多一個** HTTPS `GET`，固定到
 `https://cdn.ted-h.com/tokenmonster/characters/v1/packs/ai-sister-media-11-voice55-2026.07.23/7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30.zip`。
 它不跟 redirect、不走 proxy、不送 cookie／credentials／authorization／referrer／
-query／body，不 retry、不先 `HEAD`、也不逐檔連線。四位角色與任何本機狀態都走相同
+query／body，不 retry、不先 `HEAD`、也不逐檔連線。17 位角色與任何本機狀態都走相同
 method／URL／headers／body；下載失敗後要再看揭露、再按一次，程式不能自己重試。
 
 正式簽章的 app 內嵌 compact authority：descriptor、exact origin/path allowlist、四位
@@ -71,12 +73,12 @@ binding；顯示文字不同於核准逐字稿時，那段聲音也不會進播�
 response 的大小/hash，才解析 ZIP；安全路徑、regular-file 集合與
 entry count 全通過，才從同檔案系統 staging 原子啟用。全新 cache 收到半包、缺檔、
 損毀或權利 binding 不符時不會建立可用 cache，畫面保留 `Available` 並顯示那次錯誤；
-既有 cache 損毀、留下 staging 或撤回不完整才是 `RepairNeeded`。兩種都留在所選
-persona 的字母 fallback，而且不自動連線修復。
+既有 cache 損毀、留下 staging 或撤回不完整才是 `RepairNeeded`。兩種都保留隨程式
+提供的所選角色圖，而且不自動連線修復。
 
 cache 固定在 `Config::default_data_dir()/persona-assets-v1`。它是公開素材 cache，不是
 記憶：`--data-dir` 不搬它，memory export、`forget`、`prune` 都不讀、不複製、不刪它；
-Persona 撤回才停聲、回字母呈現並精準刪除該 release。cache 刪不掉就明講
+Persona 撤回才停掉 fixed voice 並精準刪除該 release；bundled 角色圖不受影響。cache 刪不掉就明講
 `RepairNeeded`，不假裝已經撤乾淨，也不因此連網。
 
 cache 旁會保留一個空的跨行程 lock、一個首次安裝嘗試或撤回建立的 OS-random epoch、
@@ -90,9 +92,11 @@ authorization digest，以及最後一次 blocking remove 已結束處理的 set
 行程的舊下載在撤回後重新被啟用。
 
 這個當下下載按鈕不是第四張持久同意書，更不藏在下面三張裡；每一個新的 GET 都要
-重新揭露、重新按。固定語音只在你當下點角色時播放 pack 內預錄的非敏感台詞，不主動
-出聲，也不朗讀 OCR、回憶或私人答案。pack 裡四段會說「今天滿有活力」的聲音不在
-click allowlist，因為單純點角色沒有量到那件事。
+重新揭露、重新按。角色台詞只在你當下點角色時出聲：四姊妹有已驗證 fixed voice 時
+優先播放，否則只用 WebView 明確標成 `localService` 的中文系統 voice。答案也必須由你
+另按「用本機聲音朗讀」，且仍只走 localService；沒有本機中文 voice 就靜音，不改用
+remote voice。pack 裡四段會說「今天滿有活力」的聲音不在 click allowlist，因為單純
+點角色沒有量到那件事。
 
 ---
 

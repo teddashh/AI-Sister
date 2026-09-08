@@ -1,4 +1,4 @@
-// 時間軸。和字母人、設定頁一樣沒有打包步驟——這個檔案就是瀏覽器讀到的那個檔案。
+// 時間軸。和桌面姊妹、設定頁一樣沒有打包步驟——這個檔案就是瀏覽器讀到的那個檔案。
 //
 // 這一頁回答的問題和搜尋不一樣。搜尋回答「我記得的那件事在哪」，時間軸回答
 // **「她到底記了什麼」**——那是使用者決定要不要繼續讓她跑的依據。所以這裡的
@@ -1703,7 +1703,7 @@ function fakeBackend(mode = "1") {
       app: "chrome.exe",
       title: "PHASES.md — AI-Sister",
       url: "github.com/ted-h/AI-Sister/blob/main/docs/PHASES.md",
-      text: "Phase 1：字母人、搜尋框、時間軸瀏覽器 v0、onboarding 三張同意書。",
+      text: "Phase 1：桌面姊妹、搜尋框、時間軸瀏覽器 v0、onboarding 三張同意書。",
       frame_id: 3902,
     },
     {

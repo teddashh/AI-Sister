@@ -1,6 +1,6 @@
 # AI-Sister — Final Product Definition
 
-> 一個站在桌面角落的字母人。她一直都在，看得見你的一天，記得住細節，
+> 一個站在桌面角落的姊妹。她一直都在，看得見你的一天，記得住細節，
 > 95% 的時間安靜，該說話的時候才說話——而且說的每一句都能點開證據。
 
 本文件是 2026-08-17 四模型 roundtable（Claude / Gemini / Grok / ChatGPT × 7 題 × 5 輪）
@@ -13,7 +13,7 @@
 ## 1. 一句話定義
 
 **AI-Sister 是一個 local-first 的桌面陪伴體：一個「絕對不會忘記的本機檔案櫃」+
-一個「事件驅動、會認錯的理解引擎」+ 一個「知道什麼時候閉嘴的字母人」。**
+一個「事件驅動、會認錯的理解引擎」+ 一個「知道什麼時候閉嘴的桌面姊妹」。**
 
 表面上是一個無害的桌面角色；背後是持續落地的原始證據層、偶發喚醒的意圖理解層、
 可結案的記憶層。使用者可以隨時問她兩小時前的事，她秒答並附出處；
@@ -49,8 +49,8 @@
 6. **每句話查得到出處。** 她說的任何事實都能點回本機證據；只有在截圖確實
    被同意保留且尚未過期時才承諾看得到畫面，否則明講只有文字／時間／來源。
    說不確定的時候用「我最後看到的是……」，不說「你還沒做」。
-7. **犯錯要有邊界。** 不做永遠判斷正確的字母人（做不到），
-   做一個就算判斷錯、也只能在明確範圍內犯錯的字母人。
+7. **犯錯要有邊界。** 不做永遠判斷正確的桌面姊妹（做不到），
+   做一個就算判斷錯、也只能在明確範圍內犯錯的桌面姊妹。
 8. **使用時沒有「缺一不可」。** 每個元件都可以被使用者單獨關掉；真正不能因關閉
    而壞掉的只有三樣：出處可查、記憶（連同衍生內容）刪得掉、知道何時閉嘴。
    這不等於產品可省略 Release 1.0 合約要求的 Persona 交付；「使用者可關」和
@@ -191,34 +191,37 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
 - 專案名：**AI-Sister**。這不是新造的名字——TokenMonster 的視窗標題本來就是
   "Token Monster (AI-Sister)"，角色資產的 R2 bucket 名就叫 `ai-sister`。
   本專案是這條血脈的正主。
-- 桌面角色：每個 catalog 身分都有 day-one、永遠離線的 code-native 字母呈現；
-  **Neutral 是預設且永遠可選**。它們零資產依賴、可縮放、可關閉。沒有下載、下載
-  失敗或使用者撤回時，保留所選 persona 的字母呈現，S1 一項功能都不能少。
+- 桌面角色：四姊妹與 13 位閨密的 17 張 canonical WebP 全部隨程式離線提供，
+  **ChatGPT 是預設**。Neutral 與 S/T/C/G/X 字母呈現已淘汰；沒有下載、下載失敗或
+  使用者撤回舊 pack 時，仍保留所選真人物圖，S1 一項功能都不能少。
 - **Release 1.0 要把 persona 當產品面，不是換色彩蛋。** 首批 catalog 是
-  Aster / Cedar / Mira / Rook；使用者可以選人、看立繪、在自己點角色時聽到固定
-  的非敏感台詞。persona 不得改答案事實、證據、同意書、守門員分數或 hands 權限。
-- 完整立繪／固定語音走一個含四位角色的內容定址 omnibus asset pack。下載前先列
+  ChatGPT / Claude / Gemini / Grok / DeepSeek / Qwen / Mistral / Llama / Sakana /
+  Perplexity / GLM / Kimi / Hunyuan / MiniMax / Nemotron / Cohere / MiMo；使用者可以選人、
+  看角色圖、在自己點角色時聽到固定的非敏感台詞。persona 不得改答案事實、證據、
+  同意書、守門員分數或 hands 權限。
+- 舊固定語音走內容定址 omnibus asset pack。下載前先列
   `cdn.ted-h.com`、精確大小 **73,261,088 bytes** 與資料邊界，只有使用者明確按下才可
   做一次 fixed GET；不 redirect／proxy／retry，不帶 cookie／credentials／authorization、
   referrer、query 或 body。請求不帶 persona 選擇／狀態、OCR、畫面、問題、答案或
   記憶內容；切換角色不改 method、URL、header 或 body。**角色體驗是賣點，CDN 只是
   交付機制。**
-- app 只嵌入 compact authority（descriptor、exact allowlist、四位角色 selected public
+- app 只嵌入舊 pack 的 compact authority（descriptor、exact allowlist、四位角色 selected public
   rights projection、八段選用聲音的核准逐字稿、完整 manifest 的 canonical hash），
   不把約 2.1 MB 的完整 11 人
   manifest 塞進執行檔。73,261,088-byte ZIP 的 SHA-256
   `7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30` pin 住全部
   946 項；實際呈現／播放的 selected entries 另逐檔驗大小、hash 與權利 binding，全部
   成功才原子啟用。
-- 首版實際選用四張立繪與八段無條件成立的語音。pack 裡說「今天滿有活力」的四段
+- desktop 不採用 pack 裡的四張舊立繪，只選八段無條件成立的語音。pack 裡說「今天滿有活力」的四段
   `active` 聲音需要產品沒有量到的前提，所以不進 click allowlist；顯示文字與核准
   逐字稿不同時也直接靜音。
 - 素材 cache 在 `Config::default_data_dir()/persona-assets-v1`，不是使用者記憶：memory
   export、forget、prune 不碰它，只有 Persona 撤回精準清該 release。下載能力只由
   desktop 啟用；recorder／core／brain／hands 與 WebView 沒有因此得到 HTTP 能力，
   CSP 也不開 CDN。
-- 聲音不因 idle、capture、記憶或系統事件自己播放，也不朗讀私人答案；runtime TTS、
-  自動招呼與關係養成不在 Release 1.0。`prefers-reduced-motion` 與靜音選擇照樣優先。
+- 聲音不因 idle、capture、記憶或系統事件自己播放。使用者打開聲音後，四姊妹優先用
+  已驗證固定錄音，其餘只用 `localService` 中文系統 TTS；答案也要再按一次朗讀才出聲。
+  找不到本機 voice 就保持靜音，不自動改用雲端。`prefers-reduced-motion` 與靜音選擇優先。
 
 ## 10. 成功指標（產品層）
 

@@ -1,9 +1,6 @@
 /*
- * 字母 fallback 沒有任何圖檔——整個角色是一個字 + 幾條 CSS。
- *
- * 公開 schema-v2 fixed pack 已有可再散布的 projection；素材仍不放進 git，因為它
- * 會由可驗證的選配本機 pack 交付，不是因為權利本身一概不可用。pack 尚未安裝或
- * 驗證失敗時，這個 CSS fallback 仍然離線、可縮放，改色只要換三個變數。
+ * 17 張角色圖隨 desktop frontendDist 一起安裝；沒有字母 fallback，也不靠下載
+ * 才能顯示。舊 fixed pack 現在只替四姊妹補上 8 句預錄固定台詞。
  *
  * 動畫走兩個獨立通道：`transform` 負責呼吸（上下），`rotate` 負責搖晃。
  * 分開是因為同一個 `transform` 上疊兩段 keyframes 會互相覆蓋，得手動把
@@ -11,7 +8,7 @@
  */
 
 :root {
-  /* 這三個顏色是角色的全部外觀。換一組就是換一個人。 */
+  /* 這三色是淺色 stage 的 UI theme；名字保留以避免重寫整份版面。 */
   --letter-bg: #f6ecdf;
   --letter-fg: #2e2140;
   --letter-accent: #955572;
@@ -114,11 +111,11 @@ body {
   cursor: pointer;
   display: grid;
   font: inherit;
-  height: 132px;
+  height: 184px;
   margin: 0;
   padding: 0;
   place-items: center;
-  width: 132px;
+  width: 184px;
 }
 
 /* `.avatar` 自己指定了 display，所以 UA 的 `[hidden]` 壓不過它。Persona 關掉
@@ -145,38 +142,29 @@ body {
 .face {
   align-items: center;
   background: var(--persona-bg);
-  border: 4px solid var(--persona-fg);
-  border-radius: 26px;
+  border: 5px solid var(--persona-fg);
+  border-radius: 34px;
   box-shadow:
     inset 0 -12px 0 rgb(46 33 64 / 6%),
     0 8px 0 var(--persona-fg),
     0 16px 26px rgb(46 33 64 / 18%);
   display: flex;
-  height: 108px;
+  height: 160px;
   justify-content: center;
   position: relative;
-  width: 108px;
+  width: 160px;
 }
 
 .portrait {
-  border-radius: 20px;
+  border-radius: 28px;
   display: block;
   height: 100%;
   object-fit: cover;
   width: 100%;
 }
 
-.portrait[hidden],
-.avatar.has-portrait .glyph {
+.portrait[hidden] {
   display: none;
-}
-
-.glyph {
-  font-size: 52px;
-  font-weight: 900;
-  line-height: 1;
-  /* 字身的視覺重心比字框中心低，扣回來才會真的在中間。 */
-  transform: translateY(-2px);
 }
 
 /* 右上那顆點：她現在是什麼狀態，一眼看得出來。 */
@@ -468,7 +456,7 @@ body {
 /* ---------- 答案 ---------- */
 
 /*
- * 有答案的時候她讓位：字母人縮小、往上，清單佔滿剩下的地方。
+ * 有答案的時候她讓位：角色縮小、往上，清單佔滿剩下的地方。
  * 她不會消失——使用者要看得出來是誰在回答，而且下一句還要對著她問。
  */
 body.has-hits .avatar,
@@ -486,9 +474,9 @@ body.has-url-policy .face {
   width: 56px;
 }
 
-body.has-hits .glyph,
-body.has-url-policy .glyph {
-  font-size: 28px;
+body.has-hits .portrait,
+body.has-url-policy .portrait {
+  border-radius: 11px;
 }
 
 body.has-hits .face::after,
@@ -524,7 +512,7 @@ body.has-url-policy .stage {
  *
  * `[hidden]` 的 `display: none` 來自瀏覽器預設樣式表，權重輸給上面那條
  * `.hits { display: flex }`——所以還沒問過任何問題的時候，這個空的 `<ul>`
- * 照樣是個 flex 容器，而且 `flex: 1` 讓它把下面整片空間都吃掉。字母人因此
+ * 照樣是個 flex 容器，而且 `flex: 1` 讓它把下面整片空間都吃掉。桌面姊妹因此
  * 被擠到上面三分之一，底下留一大塊空白，看起來像畫面沒載完。
  *
  * 這是從 Ted 那台 Windows 的截圖上看出來的，而這台開發機用同一份 CSS
@@ -689,6 +677,29 @@ body.has-url-policy .stage {
   margin: 8px 0 0;
   opacity: 1;
   padding: 0;
+}
+
+.hits-read {
+  display: flex;
+  justify-content: center;
+  list-style: none;
+  margin-top: 2px;
+}
+
+.answer-read {
+  background: var(--letter-bg);
+  border: 1px solid rgb(46 33 64 / 20%);
+  border-radius: 999px;
+  color: var(--letter-fg);
+  cursor: pointer;
+  font: inherit;
+  padding: 6px 12px;
+}
+
+.answer-read:hover,
+.answer-read:focus-visible {
+  border-color: var(--letter-accent);
+  outline: none;
 }
 
 .mark-toggle {

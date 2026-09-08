@@ -1028,7 +1028,7 @@ jobs:
             throw 'externalBin sidecar 不是這一輪通過 Windows smoke 的 exact sister.exe'
           }
 
-      - name: 字母人 — lint, test and build NSIS
+      - name: 桌面姊妹 — lint, test and build NSIS
         working-directory: apps/desktop/src-tauri
         shell: bash
         run: |

@@ -60,17 +60,17 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 這條路不是「反正公開檔案就沒風險」。使用者按下載後，DNS 與 CDN 至少能觀察
 hostname；CDN 會看見來源 IP、時間、TLS、固定 path／headers。程式先在按鈕旁列
 `cdn.ted-h.com`、73,261,088 bytes 與這個邊界，而且請求不帶 persona、使用狀態或
-任何記憶。四位角色共用同一條 hash path，避免 URL 本身變成角色選擇的旁路訊號。
+任何記憶。17 位角色共用同一條 hash path，避免 URL 本身變成角色選擇的旁路訊號。
 
 | 失效方式 | 防線 | 防不住／失敗時 |
 |---|---|---|
 | renderer 或別的 crate 把 fixed GET 擴成任意 URL | HTTP client 只在 `crates/sister-assets` 的非預設 `download` feature；只有 desktop 啟用；API 不收 renderer/config 傳來的 URL、header、body、persona 或 memory；WebView CSP 仍只准 IPC | desktop binary 的供應鏈若被攻破仍在同一信任邊界；因此相依圖與 source boundary 必須由 CI 守 |
-| 隱藏的背景請求、retry、redirect 或 proxy | 開機／開設定／hover／切人都是 0 request；一次 trusted click 至多一個固定 HTTPS GET；redirect、proxy、retry、`HEAD` 與逐物件 request 全禁 | 網路失敗就停在 fallback；使用者要重新看揭露、重新按 |
-| cookie、憑證、referrer 或私人狀態被帶出 | request 沒 cookie／credentials／authorization／referrer／query／body；method、URL、headers、body 對四位角色及所有狀態完全相同 | IP、時間、TLS、固定 host/path/headers 仍會被 CDN 看見，這是明示的 metadata，不假裝消失 |
+| 隱藏的背景請求、retry、redirect 或 proxy | 開機／開設定／hover／切人都是 0 request；一次 trusted click 至多一個固定 HTTPS GET；redirect、proxy、retry、`HEAD` 與逐物件 request 全禁 | 網路失敗只停用額外 fixed voice；使用者要重新看揭露、重新按 |
+| cookie、憑證、referrer 或私人狀態被帶出 | request 沒 cookie／credentials／authorization／referrer／query／body；method、URL、headers、body 對 17 位角色及所有狀態完全相同 | IP、時間、TLS、固定 host/path/headers 仍會被 CDN 看見，這是明示的 metadata，不假裝消失 |
 | CDN、路上攻擊者或壞 cache 換掉 bytes | 正常 TLS；正式簽章 app 內的 compact authority pin exact origin/path、73,261,088-byte ZIP、946 entries、canonical manifest hash 與 pack SHA-256 | 攻擊者最多造成下載失敗／fallback；hash 不符的內容不解析、不啟用 |
 | 惡意 ZIP traversal、symlink、duplicate、zip bomb 或 parser 差異 | response 大小/hash 先驗；之後只收 canonical safe path、regular file、exact entry count/set 與大小上限；同檔案系統 staging，全部成功才 atomic publish | 全新失敗不建立 cache，維持 `Available` 並回報當次錯誤；既有壞 cache 才是 `RepairNeeded`；兩者都不自動重抓 |
 | 完整 manifest 太大而被「簡化」成無法查權利或聲音內容 | app 嵌 descriptor、exact allowlist、四位 selected public rights projection、八段選用聲音的核准逐字稿與完整 manifest canonical hash；**不宣稱嵌入約 2.1 MB 的完整 11 人 manifest** | pack digest 集體 pin 946 項；真正使用的 selected entries 再逐檔對 projection 驗 size/hash/rights binding；顯示文字不同於逐字稿即靜音 |
-| 本機 cache 被換、被截斷或撤回只刪一半 | 每次啟用前按 embedded authority 重驗；撤回先停聲／回字母，再只刪 exact release | 同使用者權限 malware 本來就不在防護範圍；刪不掉必須顯示 `RepairNeeded`，不能報已撤乾淨 |
+| 本機 cache 被換、被截斷或撤回只刪一半 | 每次啟用前按 embedded authority 重驗；撤回先停 fixed voice、保留 bundled 角色圖，再只刪 exact release | 同使用者權限 malware 本來就不在防護範圍；刪不掉必須顯示 `RepairNeeded`，不能報已撤乾淨 |
 
 cache 固定在 `Config::default_data_dir()/persona-assets-v1`，雖然物理上與預設資料目錄
 相鄰，邏輯上不是記憶：`--data-dir` 不搬它，memory export、forget、prune 不碰它。

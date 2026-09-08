@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 #
-# 從 apps/desktop/icon/icon.html 產生應用程式圖示。
+# 從 bundled ChatGPT 角色圖與 apps/desktop/icon/icon.html 產生應用程式圖示。
 #
-# 為什麼圖示要用「跑一次瀏覽器」來做，而不是放一張 PNG 進 repo：
-# 這個專案不能有來路不明的圖。TokenMonster 那批角色圖的權利來源是私下的
-# 書面授權、不在任何 repo 裡（見 PRODUCT §6），所以一張都不能帶過來。
-# 字母人本身是 CSS，圖示就從同一份 CSS 長出來——「這張圖哪來的」這個問題
-# 因此沒有答案需要編：它是我們自己畫的一個字。
+# 角色原檔的來源、digest 與授權邊界固定在 ui/personas/manifest.json 和 NOTICE.md；
+# icon.html 只負責把同一張 shipped asset 裁成 Windows 圖示，不再另外畫一個字母。
 #
 # 產出的檔案是 build 產物，進 .gitignore，不進 repo。CI 在打包前跑這支。
 
@@ -29,11 +26,11 @@ done
 mkdir -p "$OUT"
 
 python3 -m http.server "$PORT" --bind 127.0.0.1 \
-    --directory "$(dirname "$SRC")" >/dev/null 2>&1 &
+    --directory "apps/desktop" >/dev/null 2>&1 &
 server=$!
 trap 'kill "$server" 2>/dev/null || true' EXIT
 for _ in $(seq 20); do
-    curl -fs -o /dev/null "http://127.0.0.1:$PORT/icon.html" && break
+    curl -fs -o /dev/null "http://127.0.0.1:$PORT/icon/icon.html" && break
     sleep 0.1
 done
 
@@ -44,7 +41,7 @@ done
     --window-size=512,512 \
     --virtual-time-budget=1200 \
     --screenshot="$OUT/icon.png" \
-    "http://127.0.0.1:$PORT/icon.html" >/dev/null 2>&1
+    "http://127.0.0.1:$PORT/icon/icon.html" >/dev/null 2>&1
 
 python3 - "$OUT" <<'PY'
 import sys

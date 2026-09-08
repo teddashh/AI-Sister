@@ -1,4 +1,4 @@
-// 設定頁。和字母人一樣沒有打包步驟——這個檔案就是瀏覽器讀到的那個檔案。
+// 設定頁。和桌面姊妹一樣沒有打包步驟——這個檔案就是瀏覽器讀到的那個檔案。
 
 const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
 
@@ -51,14 +51,26 @@ const el = {
   reload: document.querySelector("[data-reload]"),
 };
 
-// alias／tagline 與桌面上的 allowlist 同一份公開 catalog；這裡只負責讓使用者在
+// 顯示名／tagline 與桌面上的 allowlist 同一份公開 catalog；這裡只負責讓使用者在
 // 存之前看懂自己選的是誰，不把任何一段 personaContext 或 prompt 送進模型。
 const PERSONA_TAGLINES = Object.freeze({
-  neutral: "原來的字母人；安靜待著，只在你點她或問她時回應。",
-  chatgpt: "深藍與薄荷綠；固定台詞用「我在」開場。",
-  claude: "深綠與淡綠；固定台詞用「慢慢來」開場。",
-  gemini: "深藍與淡紫；固定台詞用「一起看看」開場。",
-  grok: "深棕與淡黃；固定台詞用「收到」開場。",
+  chatgpt: "結構與驗證；固定台詞用「我在」開場。",
+  claude: "論證與邊界；固定台詞用「慢慢來」開場。",
+  gemini: "打開可能；固定台詞用「一起看看」開場。",
+  grok: "直球測試；固定台詞用「收到」開場。",
+  deepseek: "深挖證據與原理。",
+  qwen: "布局、控場與收斂。",
+  mistral: "俐落拆解，減少多餘協調。",
+  venice: "自由、直接、不受拘束。",
+  sakana: "保留變體，試另一條演化路徑。",
+  perplexity: "先查證，再下結論。",
+  glm: "先做出可動的版本。",
+  kimi: "守住前文、脈絡與交接。",
+  hunyuan: "把上下游與被漏掉的人接回來。",
+  minimax: "先讓作品能看、能聽、能感受到。",
+  nemotron: "工程調度與可部署交付。",
+  cohere: "多方溝通、引用與協議。",
+  mimo: "先看人用起來順不順。",
 });
 
 function say(message, bad = false) {
@@ -417,7 +429,7 @@ function paintHealth(health, hasRules) {
     el.health.classList.add("unknown");
     // 不寫死「還沒有人跑過記錄」。`capabilities::read` 對三件事都回 `None`
     // ——沒有這個檔、讀不出來、或內容不是我們寫的那個形狀——而它的註解說得
-    // 很清楚：對讀的人來說那只是一句「還不知道」。還有第四種：字母人和
+    // 很清楚：對讀的人來說那只是一句「還不知道」。還有第四種：桌面姊妹和
     // `sister record --data-dir X` 指到不同的資料夾，那台機器**天天在錄**，
     // 而「第一次開始記錄之後回來看這裡」那句話永遠不會成真。
     //
@@ -644,7 +656,7 @@ function paintHotkey(view) {
     el.hotkeySay.textContent = `${pretty(view.rejected)} 搶不到，多半是別的程式先拿走了。${now}`;
   } else if (view.wanted === "") {
     el.hotkeySay.textContent =
-      "熱鍵是關掉的。暫停還在系統匣選單和字母人身上，只是要先找到她。";
+      "熱鍵是關掉的。暫停還在系統匣選單和桌面姊妹身上，只是要先找到她。";
   } else if (view.registered) {
     el.hotkeySay.textContent = `搶到了。現在在任何程式裡按 ${pretty(view.wanted)} 都會暫停或繼續。`;
   } else {
@@ -788,14 +800,15 @@ let savedBrainCommand = "";
 
 function paintPersonaSettings() {
   if (!el.personaEnabled || !el.personaId) return;
-  const known = Object.hasOwn(PERSONA_TAGLINES, el.personaId.value)
-    ? el.personaId.value
-    : "neutral";
-  if (known !== el.personaId.value) el.personaId.value = known;
-  if (el.personaTagline) el.personaTagline.textContent = PERSONA_TAGLINES[known];
+  const known = Object.hasOwn(PERSONA_TAGLINES, el.personaId.value);
+  if (el.personaTagline) {
+    el.personaTagline.textContent = known
+      ? PERSONA_TAGLINES[el.personaId.value]
+      : "這個角色 ID 不在這一版的 17 人名單裡。";
+  }
 
   // 關掉角色不等於清掉他的選擇：三格只灰掉、值留著，下次打開還是同一位。
-  const controlsOff = unreadable || !el.personaEnabled.checked;
+  const controlsOff = unreadable || !known || !el.personaEnabled.checked;
   el.personaId.disabled = controlsOff;
   if (el.personaMotion) el.personaMotion.disabled = controlsOff;
   if (el.personaTapLines) el.personaTapLines.disabled = controlsOff;
@@ -878,9 +891,9 @@ function paintPersonaVoice(error = "") {
   const assetPhase = PERSONA_ASSET_PHASES.includes(personaAssetStatus?.phase)
     ? personaAssetStatus.phase
     : null;
-  const installed = assetPhase === "installed";
   el.personaVoice.checked = personaVoiceEnabled;
-  el.personaVoice.disabled = unreadable || !personaVoiceKnown || !installed || personaVoiceBusy;
+  el.personaVoice.disabled =
+    unreadable || !personaVoiceKnown || personaVoiceBusy || personaAssetOperation !== null;
   el.personaVoiceState.classList.toggle("bad", error !== "");
 
   if (error !== "") {
@@ -889,19 +902,19 @@ function paintPersonaVoice(error = "") {
     el.personaVoiceState.textContent =
       "設定檔讀不出來，問不到語音開關；素材仍可在上面獨立修復或刪除。";
   } else if (!personaVoiceKnown) {
-    el.personaVoiceState.textContent = "問不到固定台詞語音開關；在問得到以前不會把它畫成已開啟。";
+    el.personaVoiceState.textContent = "問不到本機聲音開關；在問得到以前不會把它畫成已開啟。";
   } else if (assetPhase === null) {
     el.personaVoiceState.textContent = personaVoiceEnabled
-      ? "語音設定是開啟；本機素材狀態尚未確認，無法判定目前有沒有可播放的固定錄音。"
-      : "固定台詞語音目前關閉；本機素材狀態尚未確認。";
-  } else if (!installed) {
+      ? "本機聲音已開啟；舊素材包狀態尚未確認，四姊妹可能改用 Windows 本機語音。"
+      : "本機聲音目前關閉；舊素材包狀態尚未確認。";
+  } else if (assetPhase !== "installed") {
     el.personaVoiceState.textContent = personaVoiceEnabled
-      ? "語音設定是開啟，但目前沒有一份驗證通過的素材包，所以不會播放。"
-      : "固定台詞語音目前關閉；安裝並驗證素材包後才可另外打開。";
+      ? "本機聲音已開啟；目前沒有已驗證固定錄音，會嘗試 Windows 明確標成 localService 的中文聲音。"
+      : "本機聲音目前關閉；不必下載舊素材包也能另外打開。";
   } else {
     el.personaVoiceState.textContent = personaVoiceEnabled
-      ? "固定台詞語音已開啟；只會在你明確按角色時播放預錄固定台詞。"
-      : "固定台詞語音目前關閉。";
+      ? "本機聲音已開啟；你明確按角色時，四姊妹優先用固定錄音，其餘使用 localService 中文聲音。"
+      : "本機聲音目前關閉。";
   }
 }
 
@@ -932,17 +945,17 @@ function paintPersonaAssets(status, error = "") {
   switch (phase) {
     case "unavailable":
       el.personaAssetSummary.textContent =
-        "這台機器問不出預設素材 cache 路徑；沒有連線，也沒有把未知位置當成尚未下載。字母人仍可使用。";
+        "這台機器問不出舊素材包的 cache 路徑；沒有連線，也沒有把未知位置當成尚未下載。17 張內建角色圖仍可使用。";
       break;
     case "available":
       el.personaAssetSummary.textContent =
-        "目前使用內建字母人；立繪與語音素材尚未下載。記錄、搜尋、證據、刪除與匯出不受影響。";
+        "17 張內建角色圖已可使用；四姊妹的額外固定錄音尚未下載。記錄、搜尋、證據、刪除與匯出不受影響。";
       el.personaDownload.hidden = false;
       el.personaDownload.disabled = !disclosureComplete || personaAssetOperation !== null;
       break;
     case "installing":
       el.personaAssetSummary.textContent =
-        "正在下載並驗證固定素材包；完成以前仍使用內建字母人。";
+        "正在下載並驗證舊素材包；完成以前仍使用所選的內建角色圖。";
       if (el.personaProgress) {
         el.personaProgress.hidden = false;
         el.personaProgress.setAttribute("aria-label", "正在下載並驗證角色素材包");
@@ -952,7 +965,7 @@ function paintPersonaAssets(status, error = "") {
       break;
     case "removing":
       el.personaAssetSummary.textContent =
-        "正在刪除本機素材；立繪與語音已停用，完成以前仍使用內建字母人。";
+        "正在刪除舊素材包；額外固定錄音已停用，內建角色圖不受影響。";
       if (el.personaProgress) {
         el.personaProgress.hidden = false;
         el.personaProgress.setAttribute("aria-label", "正在刪除角色素材包");
@@ -960,7 +973,7 @@ function paintPersonaAssets(status, error = "") {
       break;
     case "repair-needed":
       el.personaAssetSummary.textContent =
-        "本機素材包不完整或驗證失敗；立繪與語音已停用，目前仍使用內建字母人。";
+        "舊素材包不完整或驗證失敗；額外固定錄音已停用，仍使用所選的內建角色圖。";
       el.personaRepair.hidden = false;
       el.personaRepair.disabled = !disclosureComplete || personaAssetOperation !== null;
       el.personaRemove.hidden = false;
@@ -974,7 +987,7 @@ function paintPersonaAssets(status, error = "") {
       const counts =
         portraits === null || voices === null
           ? "後端沒有完整回報立繪或語音數量"
-          : `${portraits} 張立繪、${voices} 句固定台詞語音`;
+          : `${portraits} 張舊版立繪（桌面不採用）、${voices} 句固定台詞錄音`;
       const size =
         assetFileBytes === null
           ? "後端沒有回報素材檔合計大小"
@@ -1045,8 +1058,12 @@ async function refreshPersonaVoice() {
   try {
     const persona = await invoke("persona_read");
     if (revision !== personaVoiceRevision) return;
-    if (typeof persona?.voice_enabled !== "boolean") {
-      throw new Error("後端沒有回報語音開關");
+    if (
+      typeof persona?.voice_enabled !== "boolean" ||
+      typeof persona?.id !== "string" ||
+      !Object.hasOwn(PERSONA_TAGLINES, persona.id)
+    ) {
+      throw new Error("後端沒有回報可辨識的角色與語音開關");
     }
     personaVoiceKnown = true;
     personaVoiceEnabled = persona.voice_enabled;
@@ -1085,7 +1102,7 @@ async function installPersonaAssets(event) {
     personaAssetOperation = null;
     await refreshPersonaAssets();
     showPersonaAssetError(
-      `${repairing ? "修復" : "下載"}沒有完成：${String(err?.message ?? err)}。字母人仍可使用。`,
+      `${repairing ? "修復" : "下載"}沒有完成：${String(err?.message ?? err)}。17 張內建角色圖仍可使用。`,
     );
   }
 }
@@ -1150,7 +1167,7 @@ async function setPersonaVoice(event) {
     if (el.personaVoice) el.personaVoice.checked = personaVoiceEnabled;
     return;
   }
-  if (unreadable || !personaVoiceKnown || personaAssetStatus?.phase !== "installed" || personaVoiceBusy) {
+  if (unreadable || !personaVoiceKnown || personaVoiceBusy) {
     el.personaVoice.checked = personaVoiceEnabled;
     return;
   }
@@ -1182,13 +1199,18 @@ async function setPersonaVoice(event) {
 }
 
 function apply(s) {
+  // settings_read 是 Rust typed config 的投影，但 renderer 不能拿那件事替自己的
+  // seam 背書。未知／缺少 ID 讓整份設定 unreadable，不可把它靜默畫成 ChatGPT。
+  if (typeof s?.persona_id !== "string" || !Object.hasOwn(PERSONA_TAGLINES, s.persona_id)) {
+    throw new Error("設定回傳了這一版不認得的角色 ID；沒有套用這份設定。");
+  }
   queryLogWas = s.query_log;
   savedBrainCommand = (s.brain_command ?? "").trim();
   el.path.textContent = s.path;
   if (el.brainCommand) el.brainCommand.value = s.brain_command ?? "";
   if (el.brainArgs) el.brainArgs.value = (s.brain_args ?? []).join("\n");
   if (el.personaEnabled) el.personaEnabled.checked = s.persona_enabled !== false;
-  if (el.personaId) el.personaId.value = s.persona_id ?? "neutral";
+  if (el.personaId) el.personaId.value = s.persona_id ?? "chatgpt";
   if (el.personaMotion) el.personaMotion.checked = s.persona_motion !== false;
   if (el.personaTapLines) el.personaTapLines.checked = s.persona_tap_lines !== false;
   el.apps.value = s.excluded_apps.join("\n");
@@ -1672,7 +1694,7 @@ async function save() {
         brain_command: (el.brainCommand?.value ?? "").trim(),
         brain_args: toLines(el.brainArgs?.value ?? ""),
         persona_enabled: el.personaEnabled?.checked === true,
-        persona_id: el.personaId?.value ?? "neutral",
+        persona_id: el.personaId?.value ?? "chatgpt",
         persona_motion: el.personaMotion?.checked === true,
         persona_tap_lines: el.personaTapLines?.checked === true,
         // `path` 不送。要寫到哪個檔案由 Rust 那邊算，不是這一頁說了算。

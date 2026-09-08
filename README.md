@@ -4,19 +4,21 @@
 > 95% 的時間安靜，該說話的時候才說話——說的每一句都能點開證據。
 >
 > An open-source, local-first desktop companion: a filing cabinet that never
-> forgets, an event-driven brain that can admit it's wrong, and a letter-person
+> forgets, an event-driven brain that can admit it's wrong, and a desktop sister
 > who knows when to stay quiet. Screen pixels never leave your machine; after
 > explicit opt-in, OCR text can be handed to the local CLI you configured.
 
 **Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Persona
-的四張立繪、八段固定語音與 fixed CDN pack 也已接通，alpha.104 的發版 gate 在真
+的四姊妹 fixed voice 與 fixed CDN pack 也已接通，alpha.104 的發版 gate 在真
 Windows 走完下載、驗證、原子安裝與精準移除。真人設定頁／播放／撤回的正式 artifact
 實測與 packet trace 仍未回收。alpha.106 已接上 Windows current-user 離線安裝包與
 single-instance，並在真 Windows CI 走完 fresh install、行程交棒、已存活行程拒絕、
 同版 reinstall 與移除。alpha.107 再接上預設關閉的 Windows 登入啟動，以及只管理
 desktop 自己啟動之 recorder 的 bounded supervisor；純 policy／狀態機、renderer fixture
 與 Windows registry test-subkey 都有自動測試，但正式 alpha.107 安裝檔的真登入、暫停、
-重試與移除流程仍待 Windows 人工實測，不能寫成已通過。code signing、真舊版到新版的
+重試與移除流程仍待 Windows 人工實測，不能寫成已通過。alpha.108 移除單字母角色，
+直接內建四姊妹＋13 位閨密的 17 張 current 角色圖，並接上 trusted-click、localService-only
+的本機中文語音與答案朗讀；這一段仍待正式 Windows artifact 人工聽驗。code signing、真舊版到新版的
 升級與跨層 master stop 仍未完成，所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
@@ -44,10 +46,10 @@ consent/TCC lifecycle 與完整 S1 都還沒接。
 
 例如要准她在本機記字並保留截圖，要寫
 `sister consent --grant local-recording --grant frame-storage`。三個介面——
-`sister consent` 和使用者第一次開字母人時那一頁都從 core 取同一份條文與未簽後果；
+`sister consent` 和使用者第一次開桌面姊妹時那一頁都從 core 取同一份條文與未簽後果；
 `sister doctor` 讀同一個檔案，另外報告目前是否簽署及會發生什麼事。
 條文改版會讓舊簽名全部失效，檔案讀不到、損壞或版本不符也一律當成沒簽。CLI
-指定 `--data-dir` 時，同意書跟著那個資料夾走；字母人只讀預設資料夾，兩邊不一定是同一份。
+指定 `--data-dir` 時，同意書跟著那個資料夾走；桌面姊妹只讀預設資料夾，兩邊不一定是同一份。
 
 **alpha.46 已在 Ted 的真 Windows、1920×1080、正常切換 Better Agent workspace
 寫程式的 60 秒裡量到 CPU 平均 44.0%、RAM 峰值 73.7MB。** Ted 在 2026-08-23
@@ -73,7 +75,7 @@ WAL 工作檔當成每天永久長大，所以**不拿來作 Phase 0 判決**；
 |---|---|
 | `AI-Sister-Setup.exe` | **一般使用者優先下載這個。** current-user NSIS 會把 exact `sister.exe` sidecar 和 WebView2 offline installer 一起帶進去；設計為安裝時不需連網，代價是安裝包會顯著變大，實際 bytes 見該版 Release asset。正式 artifact 的斷網安裝仍待實測 |
 | `sister.exe` | 錄製、搜尋、重播評測與資料管理；也包含 `interpret`／`review`／`watch`、Gatekeeper 的 `speak`，以及 `do`／`hands`／`url-policy` 的行動與稽核入口 |
-| `sister-desktop.exe` | 桌面角落的字母人：錄製狀態、搜尋與可點開的出處、時間軸與刪除；也顯示目前推測、Gatekeeper 與 hands 建議，並主動詢問無人值守網址政策 |
+| `sister-desktop.exe` | 桌面角落的姊妹：錄製狀態、搜尋與可點開的出處、時間軸與刪除；也顯示目前推測、Gatekeeper 與 hands 建議，並主動詢問無人值守網址政策 |
 
 installer 沒有內建自動更新。升級時由使用者下載新 `AI-Sister-Setup.exe`，先自行結束
 desktop 並停止 recorder，再原地安裝；安裝檢查開始時已在執行的任一行程會讓這次操作
@@ -86,7 +88,7 @@ late desktop 仍可能被 Tauri 內建 silent check 強制關閉，late recorder
 **Windows 10 以上**——從
 [Releases](https://github.com/teddashh/AI-Sister/releases) 優先下載
 `AI-Sister-Setup.exe`；只想跑 CLI 或診斷 installer 問題時，仍可下載兩個免安裝
-執行檔並放在同一個資料夾（字母人是去隔壁找 `sister.exe` 的）。她要先拿到第一張
+執行檔並放在同一個資料夾（桌面姊妹是去隔壁找 `sister.exe` 的）。她要先拿到第一張
 同意書才會動：
 
 ```
@@ -100,7 +102,7 @@ sister record --duration 60
 `doctor` 排在錄之前是有意的：它會當場示範這台機器**現在**讀不讀得到網址、
 OCR 有沒有裝、哪幾條排除規則其實不生效——比錄完 60 秒才發現什麼都沒進去好。
 
-Windows 上第二次開 `sister-desktop.exe` 只會請原本的字母人顯示並取得焦點；它不會
+Windows 上第二次開 `sister-desktop.exe` 只會請原本的桌面姊妹顯示並取得焦點；它不會
 再開一份，也不會因此停止或重啟 recorder。顯示／焦點本身仍列在下方真機人工確認。
 
 alpha.107 的安裝版設定頁另有一個**立即生效、預設關閉**的「登入 Windows 後啟動」
@@ -113,7 +115,7 @@ alpha.107 的安裝版設定頁另有一個**立即生效、預設關閉**的「
 碰安裝版的值。這裡只保證 Run value 已登錄，Windows 的 `StartupApproved` 仍可由
 「啟動應用程式」另外停用。關掉開關只影響之後的登入，不會停止這一輪 recorder。
 
-以 `--ai-sister-login` 進來時只留在系統匣，不顯示或聚焦字母人，也不彈同意書；同一個
+以 `--ai-sister-login` 進來時只留在系統匣，不顯示或聚焦桌面姊妹，也不彈同意書；同一個
 desktop worker 只承接第一個 login intent，之後 delayed／secondary duplicate 都忽略，
 也不 reveal。第一張本機記錄同意有效時，它會要求啟動 desktop 自己擁有的 recorder；
 沒簽、讀不到或版本失效則不啟動。既有 pause 永遠保留，登入與重試都不能替使用者解除；
@@ -170,27 +172,35 @@ exact command／五態、watchdog、recorder lease 與 consent transaction 都�
 正式 alpha.107 安裝檔在真 Windows 登入與故障時序上的人工勾驗仍列在
 [`docs/WINDOWS-CHECKLIST.md`](docs/WINDOWS-CHECKLIST.md)。
 
-**目前可以在設定裡選 Neutral、Aster、Cedar、Mira 或 Rook，也可以關掉角色、
-動畫、點擊台詞或聲音。** 每位的字母、顏色與兩句固定文字仍隨程式離線提供；只有你
-真的按下角色（或在原生按鈕上用 Enter／Space）才會說下一句，不叫模型、不改答案，
-也不因開場、輪詢、錄製或記憶事件自己開口。
+**目前可以在設定裡直接選四姊妹與 13 位閨密：ChatGPT、Claude、Gemini、Grok、
+DeepSeek、Qwen、Mistral、Llama、Sakana、Perplexity、GLM、Kimi、Hunyuan、MiniMax、
+Nemotron、Cohere、MiMo。** 17 張真人物 WebP（合計 225,082 bytes）隨桌面程式離線
+提供，預設是 ChatGPT；沒有 Neutral，也沒有 S/T/C/G/X 字母 fallback。來源 commit、
+每檔大小與 SHA-256 在 `apps/desktop/ui/personas/manifest.json`，圖像不納入 Apache-2.0
+程式碼授權。
 
-完整立繪與預錄固定語音是同一個 optional pack。下載按鈕前會列出
+只有你真的按下角色（或在原生按鈕上用 Enter／Space）才會顯示下一句，不叫模型、
+不改答案，也不因開場、輪詢、錄製或記憶事件自己開口。聲音預設關閉；打開後，四姊妹
+有已驗證固定錄音時優先播放，否則只接受 WebView 明確回報 `localService = true` 的繁中／
+中文系統 voice。找不到就保持安靜，不會偷換 remote voice。答案清單底下的「用本機聲音
+朗讀」也只在使用者親手按下後讀畫面文字，不經 Rust IPC 或遠端 TTS。
+
+四姊妹的八句預錄固定語音仍由舊 optional pack 提供。下載按鈕前會列出
 `cdn.ted-h.com`、**73,261,088 bytes**，以及 CDN 會看見來源 IP、時間、TLS、固定
 path／headers；只有你看完後明確按下，desktop 才可發至多一個 fixed GET。請求不含
 目前選誰、角色狀態、OCR、畫面、問題、答案或記憶，也不 redirect／proxy／retry，
 不帶 cookie／credentials／authorization、referrer、query 或 body。WebView 本身仍只
 走 Tauri IPC，CSP 沒有開 CDN。
 
-目前實際選用的是四張立繪與八段語音。pack 裡另有四段 `active` 聲音會說
+目前 desktop 不採用 pack 內的舊立繪，只選八段語音。pack 裡另有四段 `active` 聲音會說
 「今天滿有活力」，但點角色這件事沒有量到這個事實，所以 app 不選、不存也不播放；
 不拿一段有條件的聲音湊成第三句。
 
 程式先用 compact embedded authority 驗 73,261,088-byte ZIP 的整包 SHA-256
 `7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30`、946 entries，
 再逐檔驗真正會使用的四位角色 projection；不是把約 2.1 MB 的完整 11 人 manifest
-塞進執行檔。全部成功才原子啟用；任何失敗都留在所選角色的 code-native 字母
-fallback，不會背景重抓。cache 在預設資料目錄的 `persona-assets-v1/`，memory export、
+塞進執行檔。全部成功才原子啟用額外錄音；任何失敗都保留所選的 bundled 角色圖，
+不會背景重抓。cache 在預設資料目錄的 `persona-assets-v1/`，memory export、
 `forget`、`prune` 不碰它；Persona 撤回才精準清除該 release。
 
 **alpha.100 多問一個只關於無人值守網址的問題。** 設定尚未回答時，第一次開
@@ -387,12 +397,12 @@ Windows 的系統匣、選檔器與三種載入狀態仍列在實機清單，沒
 而走搜尋的時候，「剛剛」那兩個字**不會跟著進去比對**。中文沒有空白，整句話會被
 當成一整串子字串去找，而沒有人的螢幕上寫著「剛剛那個優惠方案」——所以頭尾的時間
 詞和虛字先剝掉，中間原樣留著。加了「剛剛」之後變成零筆，是這個產品最容易失去信任
-的那種答案。`sister query` 和字母人共用同一份規則，不會一個說有、一個說沒有。
+的那種答案。`sister query` 和桌面姊妹共用同一份規則，不會一個說有、一個說沒有。
 
 問「**電話**」的時候，答案是那串號碼本身（`★ +886800080123`，底下附著螢幕上原本
 那行「客服專線 0800-080-123」和它被看到過幾次），不是一堆剛好提到電話的字。螢幕上
 從來沒有出現過「電話」兩個字，全文比對永遠接不起來——但記下那串數字的時候，它已經
-被標成一支電話號碼了。這一層本來只有終端機有，字母人只會做全文比對：同一句話，
+被標成一支電話號碼了。這一層本來只有終端機有，桌面姊妹只會做全文比對：同一句話，
 `sister query` 答得出來、她說找不到。現在兩邊是同一份程式碼（`sister-core::answer`），
 和上面那個「剛剛」的判斷同一條紀律。
 
@@ -408,7 +418,7 @@ excluded app: keepassxc 3 段）——在那裡面的我本來就不會知道」
 或者 OCR 沒讀出來——最後那一種她連數都數不出來，所以下面那幾行理由永遠不會是
 完整的。和 ★ 上面那句「我最後看到的是：」同一條紀律。
 
-字母人也會告訴你**現在到底有沒有人在錄**，而且那句話底下就是把她開起來的按鈕。
+桌面姊妹也會告訴你**現在到底有沒有人在錄**，而且那句話底下就是把她開起來的按鈕。
 這兩件事以前混在一起：`sister record` 是另一個執行檔，沒有人把它跑起來的時候
 暫停旗標是乾淨的，於是她顯示「在聽」——而她什麼都沒在看。現在沒人開她的時候
 她是灰的，寫著「沒有人在記錄——從現在起發生的事，她不會知道」，並且長出一顆**開始記錄**
@@ -425,7 +435,7 @@ excluded app: keepassxc 3 段）——在那裡面的我本來就不會知道」
 按下去她起不來的話，`record.log` 的最後幾行會直接顯示在她身上（同意書沒簽、
 找不到 `sister.exe`、已經有一個在跑）——那個檔案在 `%APPDATA%` 深處，而正在
 看著一顆沒反應的按鈕的人不會去翻它。停止在系統匣選單裡（那一顆的字會跟著
-現在的狀態換），也可以 `sister stop`。**結束字母人會連記錄一起停**，而正在錄
+現在的狀態換），也可以 `sister stop`。**結束桌面姊妹會連記錄一起停**，而正在錄
 的時候那一項就直接寫成「結束（記錄也會停）」——不然他關掉的是唯一看得見的
 那個視窗，而螢幕還在被記錄。停止走的是一個檔案而不是把行程砍掉：被砍死的
 recorder 不會寫完 session、不會收掉心跳，於是接下來 16 秒她會宣稱自己還在錄。
@@ -433,7 +443,7 @@ recorder 不會寫完 session、不會收掉心跳，於是接下來 16 秒她�
 不記就直接收工（一顆存了一年的資料庫第一次開起來要重建索引，那段時間不短）。
 
 停得掉是這個產品的前提，所以暫停在四個地方都按得到（全域熱鍵 `Ctrl+Alt+P`、
-字母人的 `⏸`、系統匣選單、`sister pause`），而且**不會自己恢復**——會自己醒來的
+桌面姊妹的 `⏸`、系統匣選單、`sister pause`），而且**不會自己恢復**——會自己醒來的
 暫停等於沒有暫停。熱鍵那條路不用先找到她，代價是全域熱鍵先搶先贏：設定頁上會
 直說這一組現在搶到了沒，搶不到就用警告色寫出原因，而不是讓你按了沒反應。暫停期間
 她整個人是灰的，`sister record` 每分鐘會講一次，進出各留一筆稽核紀錄，
@@ -475,10 +485,10 @@ sister --data-dir ~/sister-backup query 電話      # 直接就問得到
 躺在旁邊的 `-wal` 檔裡，只複製主檔的備份會安靜地少掉最後那幾小時，而你會在
 真的需要它的那天才發現。
 
-每個角色的 **code-native fallback 沒有任何圖檔**——是一個字加幾條 CSS，離線、
-可縮放，拒絕下載或 cache 壞掉仍然可用。選配的立繪／固定語音是另一層；只有通過
-public rights projection、整包與 selected-file 驗證的 fixed pack 才能蓋上去，不能
-拿 fallback 沒有圖檔這件事替素材授權背書。
+17 位角色的 current WebP 都隨 desktop 離線提供，拒絕下載或舊 cache 壞掉時仍然可用；
+沒有用單一字母冒充角色的 fallback。選配 pack 只補四姊妹的固定語音，而且仍須通過
+public rights projection、整包與 selected-file 驗證才能播放。bundled 圖像另有自己的
+來源 manifest 與授權排除，不能拿「已放進安裝包」替素材權利背書。
 
 先跑 `sister doctor`——它不會宣稱任何東西，只會當場示範給你看：能不能讀到你現在的網址、
 OCR 引擎讀不讀得出內建那張圖上的字、哪幾條隱私規則現在其實不生效。

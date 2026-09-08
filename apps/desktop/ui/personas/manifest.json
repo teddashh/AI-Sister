@@ -1,0 +1,33 @@
+{
+  "schema": "ai-sister/bundled-personas/v1",
+  "sourceRepository": "https://github.com/teddashh/Multi-Ai-Chatapp",
+  "sourceCommits": [
+    "967e9bea3a58540e8982eb33d7632f215fc945dc",
+    "9d2a410984c8f4eddcbb969c95477ed97e856f7e"
+  ],
+  "ownerGrant": {
+    "grantor": "Ted Huang",
+    "grantedOn": "2026-09-08",
+    "scope": "Unmodified inclusion in the AI-Sister source tree and official builds"
+  },
+  "notice": "NOTICE.md",
+  "assets": [
+    { "id": "chatgpt", "file": "chatgpt.webp", "bytes": 13240, "sha256": "ab86235639ad6965f47a173b95a2e3b9463aaa4eab212f67d9903720a6098fca" },
+    { "id": "claude", "file": "claude.webp", "bytes": 14068, "sha256": "f270e52f77e3f514446dd20e4303c21f8965b34e143f18dd9b71b9e0cc8e64d6" },
+    { "id": "gemini", "file": "gemini.webp", "bytes": 14238, "sha256": "813bdc5fb218ac3e8a30c926cb773a214f9e9cbd17447b6ba66f852bb2dcdbaa" },
+    { "id": "grok", "file": "grok.webp", "bytes": 15610, "sha256": "a033dd7738173709728f5b4e0db2c4c022409ac02b63243af8c9cbad06b3c67a" },
+    { "id": "deepseek", "file": "deepseek.webp", "bytes": 18652, "sha256": "f01ef3024ee9f9aa189003a35d2342617d5e93ec5e554827632bf1b5453b8939" },
+    { "id": "qwen", "file": "qwen.webp", "bytes": 17044, "sha256": "34ac257cdbcecb1f5710b2e79cae3595927c7c9566f00ebdf2eb28fe1c8b3d46" },
+    { "id": "mistral", "file": "mistral.webp", "bytes": 13662, "sha256": "df6b155d45a403137ae9cc5993603360692569df3273659631a023df62cde1b2" },
+    { "id": "venice", "file": "venice.webp", "bytes": 9836, "sha256": "10f1fb4667edf0df43419e391626f3ec4dacb04c711f2568b57ac678abba329f" },
+    { "id": "sakana", "file": "sakana.webp", "bytes": 14648, "sha256": "101e803e70446150963ff79da782ecf4a2a04963c2ee11a92fd0ea15f7fbd594" },
+    { "id": "perplexity", "file": "perplexity.webp", "bytes": 13176, "sha256": "f30a36966801da06f8f7037b98a897c77d1da7561eb2c99cd25e5bdee3bb871c" },
+    { "id": "glm", "file": "glm.webp", "bytes": 13120, "sha256": "73880b969c4d75bdb4e4ef138d5788ad38f3b221204b4e7e99148a2393b84e05" },
+    { "id": "kimi", "file": "kimi.webp", "bytes": 10804, "sha256": "a5adef0bd16da96fd93b8cd72db9ef9ca38f5bf6d2934dd5b986b33d5a95fdef" },
+    { "id": "hunyuan", "file": "hunyuan.webp", "bytes": 12794, "sha256": "03fbaa1bfa28b24d7b1f4ed6b8774821e88144e838ed4c0a165bcc91719e4244" },
+    { "id": "minimax", "file": "minimax.webp", "bytes": 13258, "sha256": "6db2bce6e5e19ddb1ba05b1d87dc0b1796064031a10487e6e3b8d8dba6859170" },
+    { "id": "nemotron", "file": "nemotron.webp", "bytes": 10722, "sha256": "942fd46d9d7dfef19e68391220c9117af4bca7839e89cc8ffb4520c5f66a086a" },
+    { "id": "cohere", "file": "cohere.webp", "bytes": 10866, "sha256": "61a3cd4b7fb539dccac29a34acd025a13e3aa8c33d1e04b58583faf693dc68eb" },
+    { "id": "mimo", "file": "mimo.webp", "bytes": 9344, "sha256": "72ec91aa320834b0eee35459896176c60eb4911b24376f8514edc80aaae725dc" }
+  ]
+}

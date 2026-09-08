@@ -355,18 +355,29 @@ impl Default for ShellConfig {
 
 /// Persona catalog 的穩定 ID。
 ///
-/// 四個非 neutral 的值刻意沿用既有 TokenMonster catalog 的 provider ID；畫面上
-/// 顯示的是 Aster／Cedar／Mira／Rook。把 alias 當設定值會讓未來的固定素材包還得
-/// 再維護一張翻譯表，也容易把「角色叫什麼」和「素材 manifest 指誰」接反。
+/// 這 17 個值直接沿用 AI-Sister 素材庫的 canonical ID。設定檔、畫面與素材用同一個
+/// 名字，避免再維護一張 alias 翻譯表，也讓選到的人和實際載入的素材不會接反。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PersonaId {
     #[default]
-    Neutral,
     Chatgpt,
     Claude,
     Gemini,
     Grok,
+    Deepseek,
+    Qwen,
+    Mistral,
+    Venice,
+    Sakana,
+    Perplexity,
+    Glm,
+    Kimi,
+    Hunyuan,
+    Minimax,
+    Nemotron,
+    Cohere,
+    Mimo,
 }
 
 /// 設定頁的三個 bool 長得一樣，但接反會改變完全不同的事。用不同 newtype 讓
@@ -429,10 +440,9 @@ impl PersonaVoiceEnabled {
 
 /// 只屬於桌面表達層的 Persona 設定。
 ///
-/// `voice_enabled` 是本機 fixed-pack 的 fail-closed 開關。設定頁只在素材完整驗證後
-/// 才讓使用者另外打開；素材存在但少了這個明確選擇，仍然不播。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+/// `voice_enabled` 是本機聲音的 fail-closed 開關。設定頁明確打開後，桌面才會在
+/// trusted click 之下播放已驗證 fixed-pack 錄音，或明確標成 localService 的系統語音。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PersonaConfig {
     pub enabled: bool,
     pub id: PersonaId,
@@ -464,15 +474,101 @@ impl PersonaConfig {
 impl Default for PersonaConfig {
     fn default() -> Self {
         Self {
-            // 保留目前出廠就看得到、會微動的 S 字母人；新增的台詞只會在他明確
-            // 點下角色（原生 button 的 Enter／Space 也會產生 click）後出現。
+            // 出廠就顯示素材庫裡的第一位角色；台詞只會在他明確點下角色
+            // （原生 button 的 Enter／Space 也會產生 click）後出現。
             enabled: true,
-            id: PersonaId::Neutral,
+            id: PersonaId::Chatgpt,
             motion: true,
             tap_lines: true,
-            // 安裝素材不等於同意播放；使用者仍要在設定頁另外打開固定台詞語音。
+            // 有本機 voice 不等於同意播放；使用者仍要在設定頁另外打開聲音。
             voice_enabled: false,
         }
+    }
+}
+
+/// 讀舊設定時先保留 `id` 的原始字串，才能分清楚「本來就是 ChatGPT」和
+/// 「從已刪除的 neutral 遷移過來」。後者以前沒有語音，所以就算舊檔裡殘留
+/// `voice_enabled = true`，也不能在換成真人物後突然開始播放。
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PersonaConfigOnDisk {
+    enabled: bool,
+    id: String,
+    motion: bool,
+    tap_lines: bool,
+    voice_enabled: bool,
+}
+
+impl Default for PersonaConfigOnDisk {
+    fn default() -> Self {
+        let current = PersonaConfig::default();
+        Self {
+            enabled: current.enabled,
+            id: "chatgpt".to_string(),
+            motion: current.motion,
+            tap_lines: current.tap_lines,
+            voice_enabled: current.voice_enabled,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PersonaConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const CURRENT_IDS: &[&str] = &[
+            "chatgpt",
+            "claude",
+            "gemini",
+            "grok",
+            "deepseek",
+            "qwen",
+            "mistral",
+            "venice",
+            "sakana",
+            "perplexity",
+            "glm",
+            "kimi",
+            "hunyuan",
+            "minimax",
+            "nemotron",
+            "cohere",
+            "mimo",
+        ];
+
+        let on_disk = PersonaConfigOnDisk::deserialize(deserializer)?;
+        let migrated_from_neutral = on_disk.id == "neutral";
+        let id = match on_disk.id.as_str() {
+            "neutral" | "chatgpt" => PersonaId::Chatgpt,
+            "claude" => PersonaId::Claude,
+            "gemini" => PersonaId::Gemini,
+            "grok" => PersonaId::Grok,
+            "deepseek" => PersonaId::Deepseek,
+            "qwen" => PersonaId::Qwen,
+            "mistral" => PersonaId::Mistral,
+            "venice" => PersonaId::Venice,
+            "sakana" => PersonaId::Sakana,
+            "perplexity" => PersonaId::Perplexity,
+            "glm" => PersonaId::Glm,
+            "kimi" => PersonaId::Kimi,
+            "hunyuan" => PersonaId::Hunyuan,
+            "minimax" => PersonaId::Minimax,
+            "nemotron" => PersonaId::Nemotron,
+            "cohere" => PersonaId::Cohere,
+            "mimo" => PersonaId::Mimo,
+            unknown => {
+                return Err(serde::de::Error::unknown_variant(unknown, CURRENT_IDS));
+            }
+        };
+
+        Ok(Self {
+            enabled: on_disk.enabled,
+            id,
+            motion: on_disk.motion,
+            tap_lines: on_disk.tap_lines,
+            voice_enabled: !migrated_from_neutral && on_disk.voice_enabled,
+        })
     }
 }
 
@@ -2104,25 +2200,58 @@ mod tests {
     }
 
     #[test]
-    fn old_shell_config_gets_the_quiet_neutral_persona_default() {
+    fn old_shell_config_gets_chatgpt_as_the_persona_default() {
         let old: Config =
             toml::from_str("[shell]\npause_shortcut = \"Ctrl+Alt+P\"\n").expect("old shell config");
         assert_eq!(old.shell.persona, PersonaConfig::default());
         assert!(old.shell.persona.enabled);
-        assert_eq!(old.shell.persona.id, PersonaId::Neutral);
+        assert_eq!(old.shell.persona.id, PersonaId::Chatgpt);
         assert!(old.shell.persona.motion);
         assert!(old.shell.persona.tap_lines);
         assert!(!old.shell.persona.voice_enabled, "舊設定不能自己得到語音");
     }
 
     #[test]
+    fn legacy_neutral_migrates_to_chatgpt_without_enabling_voice() {
+        let old: Config = toml::from_str(
+            "[shell.persona]\nenabled = false\nid = \"neutral\"\nmotion = false\ntap_lines = false\nvoice_enabled = true\n",
+        )
+        .expect("legacy neutral persona");
+
+        assert_eq!(old.shell.persona.id, PersonaId::Chatgpt);
+        assert!(!old.shell.persona.enabled);
+        assert!(!old.shell.persona.motion);
+        assert!(!old.shell.persona.tap_lines);
+        assert!(
+            !old.shell.persona.voice_enabled,
+            "移除 neutral 不得把舊檔裡無效的語音值變成新同意"
+        );
+
+        let migrated = toml::to_string_pretty(&old).expect("serialize migrated persona");
+        assert!(migrated.contains("id = \"chatgpt\""), "{migrated}");
+        assert!(migrated.contains("voice_enabled = false"), "{migrated}");
+    }
+
+    #[test]
     fn every_persona_id_and_local_switch_survives_a_round_trip() {
         for id in [
-            PersonaId::Neutral,
             PersonaId::Chatgpt,
             PersonaId::Claude,
             PersonaId::Gemini,
             PersonaId::Grok,
+            PersonaId::Deepseek,
+            PersonaId::Qwen,
+            PersonaId::Mistral,
+            PersonaId::Venice,
+            PersonaId::Sakana,
+            PersonaId::Perplexity,
+            PersonaId::Glm,
+            PersonaId::Kimi,
+            PersonaId::Hunyuan,
+            PersonaId::Minimax,
+            PersonaId::Nemotron,
+            PersonaId::Cohere,
+            PersonaId::Mimo,
         ] {
             let mut config = Config::default();
             config.shell.persona = PersonaConfig {

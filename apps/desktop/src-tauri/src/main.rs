@@ -2,7 +2,7 @@
 // 而她的賣點是「安靜地待在角落」。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! 字母人的外殼。
+//! 桌面姊妹的外殼。
 //!
 //! 配方照 PHASES.md Phase 1 寫的：透明、置頂、拖曳條、關閉即收進系統匣。
 //! 那份配方來自 TokenMonster（Ted 自己的 repo，MIT），但那邊是 Electron——
@@ -108,16 +108,16 @@ fn single_instance_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> 
         let window = app.get_webview_window(PET);
         match reveal_or_defer(&SECOND_INSTANCE_REVEAL_PENDING, window.as_ref()) {
             ExistingInstanceReveal::Revealed => {
-                tracing::info!("第二次啟動：原本的字母人已顯示並取得焦點")
+                tracing::info!("第二次啟動：原本的桌面姊妹已顯示並取得焦點")
             }
             ExistingInstanceReveal::Missing => {
                 tracing::info!("第二次啟動早於主視窗建立；setup 完成後再顯示並取得焦點")
             }
             ExistingInstanceReveal::ShowFailed(error) => {
-                tracing::error!("第二次啟動：原本的字母人顯示失敗：{error}")
+                tracing::error!("第二次啟動：原本的桌面姊妹顯示失敗：{error}")
             }
             ExistingInstanceReveal::FocusFailed(error) => {
-                tracing::error!("第二次啟動：原本的字母人已顯示，但取得焦點失敗：{error}")
+                tracing::error!("第二次啟動：原本的桌面姊妹已顯示，但取得焦點失敗：{error}")
             }
         }
     })
@@ -2489,8 +2489,8 @@ pub enum PersonaAssetPackPhase {
     Installed,
 }
 
-/// 只有已驗證的本機素材才可以填 portrait data URL；其他狀態都保持空，讓 renderer
-/// 沿同一條 contract 回到 code-native 字母 fallback。
+/// 舊 pack 中只有已驗證的 portrait 才會出現在這個相容欄位。renderer 的 17 張
+/// current portrait 已隨程式提供，不讀這格，也不會因 pack 狀態改成字母。
 #[derive(Clone, Serialize)]
 struct PersonaPortraitView {
     data_url: String,
@@ -2585,12 +2585,115 @@ fn persona_asset_cache_root() -> Option<PathBuf> {
 fn asset_persona(id: sister_core::config::PersonaId) -> Option<sister_assets::Persona> {
     use sister_core::config::PersonaId;
     Some(match id {
-        PersonaId::Neutral => return None,
         PersonaId::Chatgpt => sister_assets::Persona::Chatgpt,
         PersonaId::Claude => sister_assets::Persona::Claude,
         PersonaId::Gemini => sister_assets::Persona::Gemini,
         PersonaId::Grok => sister_assets::Persona::Grok,
+        PersonaId::Deepseek
+        | PersonaId::Qwen
+        | PersonaId::Mistral
+        | PersonaId::Venice
+        | PersonaId::Sakana
+        | PersonaId::Perplexity
+        | PersonaId::Glm
+        | PersonaId::Kimi
+        | PersonaId::Hunyuan
+        | PersonaId::Minimax
+        | PersonaId::Nemotron
+        | PersonaId::Cohere
+        | PersonaId::Mimo => return None,
     })
+}
+
+#[cfg(test)]
+mod persona_asset_mapping_tests {
+    use super::*;
+    use sister_assets::{Persona as AssetPersona, VoiceLine};
+    use sister_core::config::PersonaId;
+
+    #[test]
+    fn only_the_four_sisters_map_into_the_legacy_fixed_voice_pack() {
+        assert_eq!(
+            asset_persona(PersonaId::Chatgpt),
+            Some(AssetPersona::Chatgpt)
+        );
+        assert_eq!(asset_persona(PersonaId::Claude), Some(AssetPersona::Claude));
+        assert_eq!(asset_persona(PersonaId::Gemini), Some(AssetPersona::Gemini));
+        assert_eq!(asset_persona(PersonaId::Grok), Some(AssetPersona::Grok));
+
+        for id in [
+            PersonaId::Deepseek,
+            PersonaId::Qwen,
+            PersonaId::Mistral,
+            PersonaId::Venice,
+            PersonaId::Sakana,
+            PersonaId::Perplexity,
+            PersonaId::Glm,
+            PersonaId::Kimi,
+            PersonaId::Hunyuan,
+            PersonaId::Minimax,
+            PersonaId::Nemotron,
+            PersonaId::Cohere,
+            PersonaId::Mimo,
+        ] {
+            assert_eq!(asset_persona(id), None, "{id:?} must stay on localService");
+        }
+    }
+
+    #[test]
+    fn every_fixed_voice_id_maps_to_the_same_persona_and_asset_line() {
+        let cases = [
+            (
+                PersonaVoiceLineId::ChatgptGreeting,
+                PersonaId::Chatgpt,
+                VoiceLine::ChatgptGreeting,
+            ),
+            (
+                PersonaVoiceLineId::ChatgptQuiet,
+                PersonaId::Chatgpt,
+                VoiceLine::ChatgptQuiet,
+            ),
+            (
+                PersonaVoiceLineId::ClaudeGreeting,
+                PersonaId::Claude,
+                VoiceLine::ClaudeGreeting,
+            ),
+            (
+                PersonaVoiceLineId::ClaudeQuiet,
+                PersonaId::Claude,
+                VoiceLine::ClaudeQuiet,
+            ),
+            (
+                PersonaVoiceLineId::GeminiGreeting,
+                PersonaId::Gemini,
+                VoiceLine::GeminiGreeting,
+            ),
+            (
+                PersonaVoiceLineId::GeminiQuiet,
+                PersonaId::Gemini,
+                VoiceLine::GeminiQuiet,
+            ),
+            (
+                PersonaVoiceLineId::GrokGreeting,
+                PersonaId::Grok,
+                VoiceLine::GrokGreeting,
+            ),
+            (
+                PersonaVoiceLineId::GrokQuiet,
+                PersonaId::Grok,
+                VoiceLine::GrokQuiet,
+            ),
+        ];
+        for (view, persona, asset) in cases {
+            assert!(view.persona() == persona);
+            assert!(view.asset_line() == asset);
+            assert!(PersonaVoiceLineId::from_asset(asset) == view);
+            assert_eq!(
+                asset.persona(),
+                asset_persona(persona).expect("four sisters have pack IDs")
+            );
+        }
+    }
 }
 
 fn local_asset_phase(shell: &Shell) -> Result<PersonaAssetPackPhase, String> {
@@ -2878,7 +2981,8 @@ fn persona_asset_cancel(shell: tauri::State<'_, Shell>) -> bool {
     installing
 }
 
-/// 撤回先讓 renderer 停聲、resolver fail closed，再碰 exact managed cache。
+/// 撤回先讓 renderer 停掉飛行中的錄音、resolver fail closed，再碰 exact managed
+/// cache。本機系統語音的 opt-in 不屬於這個 cache，所以不跟著被改寫。
 #[tauri::command]
 async fn persona_asset_remove(
     app: tauri::AppHandle,
@@ -2896,22 +3000,11 @@ async fn persona_asset_remove(
         )
         .map_err(|running| match running {
             ASSET_INSTALLING => "素材仍在下載；先按停止，等它停下來再刪除。".to_string(),
-            ASSET_SETTING_VOICE => "正在更新固定台詞語音設定；完成後再刪除素材。".to_string(),
+            ASSET_SETTING_VOICE => "正在更新本機聲音設定；完成後再刪除素材。".to_string(),
             _ => "本機素材已經在刪除。".to_string(),
         })?;
 
     let _ = app.emit("persona-media-stop", ());
-    let voice_save_error = (|| {
-        let path = config_path()?;
-        sister_core::config::Config::update(&path, |config| {
-            config
-                .set_persona_voice_from_page(sister_core::config::PersonaVoiceEnabled::new(false));
-            Ok(())
-        })
-        .map_err(|e| format!("{e:#}"))?;
-        Ok::<(), String>(())
-    })()
-    .err();
     emit_persona_asset_status(&app, &shell);
     emit_persona_from_disk(&app, &shell);
 
@@ -2927,15 +3020,11 @@ async fn persona_asset_remove(
     emit_persona_asset_status(&app, &shell);
     emit_persona_from_disk(&app, &shell);
     result.map_err(|error| error.to_string())?;
-    if let Some(error) = voice_save_error {
-        return Err(format!(
-            "本機素材已刪除，但聲音偏好存不回設定檔；目前仍因沒有素材而不會播放：{error}"
-        ));
-    }
     persona_asset_manager_view(&shell)
 }
 
-/// 聲音是和素材下載分開的一次明確選擇。打開不會播放；關掉會先送停聲事件。
+/// 聲音是一次明確選擇。打開不會播放；只有 trusted click 才能播放已驗證固定錄音
+/// 或 WebView 明確標成 localService 的系統語音。關掉會先送停聲事件。
 #[tauri::command]
 fn persona_voice_set(
     enabled: sister_core::config::PersonaVoiceEnabled,
@@ -2951,14 +3040,11 @@ fn persona_voice_set(
             Ordering::Acquire,
         )
         .map_err(|running| match running {
-            ASSET_INSTALLING => "素材仍在下載；完成或停止後再改固定台詞語音。".to_string(),
-            ASSET_REMOVING => "素材正在刪除，固定台詞語音已停用。".to_string(),
-            _ => "另一個固定台詞語音設定仍在寫入。".to_string(),
+            ASSET_INSTALLING => "素材仍在下載；完成或停止後再改本機聲音。".to_string(),
+            ASSET_REMOVING => "素材正在刪除；完成後再改本機聲音。".to_string(),
+            _ => "另一個本機聲音設定仍在寫入。".to_string(),
         })?;
     let _guard = AssetOperationGuard(Arc::clone(&shell.asset_operation));
-    if enabled.get() && local_asset_phase(&shell)? != PersonaAssetPackPhase::Installed {
-        return Err("先下載並驗證素材包，才能打開固定台詞語音。".to_string());
-    }
     let path = config_path()?;
     let (config, ()) = sister_core::config::Config::update(&path, |config| {
         config.set_persona_voice_from_page(enabled);
@@ -4665,7 +4751,7 @@ fn main() {
             if launch_intent == LaunchIntent::Interactive {
                 let _ = win.show();
             } else {
-                tracing::info!("Windows 登入啟動：字母人留在系統匣，不彈視窗");
+                tracing::info!("Windows 登入啟動：桌面姊妹留在系統匣，不彈視窗");
             }
             #[cfg(windows)]
             if let Some(outcome) =
@@ -4673,7 +4759,7 @@ fn main() {
             {
                 match outcome {
                     ExistingInstanceReveal::Revealed => {
-                        tracing::info!("開機中的第二次啟動請求已補做：字母人已顯示並取得焦點")
+                        tracing::info!("開機中的第二次啟動請求已補做：桌面姊妹已顯示並取得焦點")
                     }
                     ExistingInstanceReveal::ShowFailed(error) => {
                         tracing::error!("開機中的第二次啟動請求補做顯示失敗：{error}")

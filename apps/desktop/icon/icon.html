@@ -4,12 +4,9 @@
     <meta charset="utf-8" />
     <title>AI-Sister icon source</title>
     <!--
-      應用程式圖示的「原稿」。它不是一張圖檔，是這一頁——
-      `scripts/make-icons.sh` 用瀏覽器把它渲染成 PNG，再轉成 .ico。
-
-      這樣做的理由跟字母人本身一樣：這個 repo 裡不能有來路不明的圖。
-      角色是 CSS，圖示就從同一份 CSS 長出來，於是「圖示的授權是什麼」
-      這個問題不存在——它是我們自己畫的一個字。
+      應用程式圖示的排版原稿。`scripts/make-icons.sh` 用瀏覽器把 bundled ChatGPT
+      角色圖裁成 PNG，再轉成 .ico。原圖的來源、hash 與權利邊界在
+      `ui/personas/{manifest.json,NOTICE.md}`，這裡不另造一個字母替身。
 
       這一頁**不在** ui/ 底下，因為它不該被打包進應用程式。
     -->
@@ -35,21 +32,20 @@
         box-shadow:
           inset 0 -54px 0 rgb(46 33 64 / 6%),
           0 34px 0 var(--letter-fg);
-        color: var(--letter-fg);
         display: flex;
-        /* 字要大到 32px 的工作列圖示還讀得出來。第一版是 236px（佔 54%），
-           縮到 32 之後只剩一個小點在框裡。 */
-        font: 900 310px/1 "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
         height: 440px;
         justify-content: center;
+        overflow: hidden;
         width: 440px;
       }
-      .glyph {
-        transform: translateY(-8px);
+      img {
+        height: 100%;
+        object-fit: cover;
+        width: 100%;
       }
     </style>
   </head>
   <body>
-    <div class="face"><span class="glyph">S</span></div>
+    <div class="face"><img src="../ui/personas/chatgpt.webp" alt="" /></div>
   </body>
 </html>

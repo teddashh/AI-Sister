@@ -10,10 +10,10 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.107 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+alpha.108 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
-**放同一個資料夾**（字母人是去隔壁找 `sister.exe` 的）。
+**放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
 
 從 §1 開始，順序是有意的：底層錯了上面全部不用看。每一節開頭那句粗體字是
 「這一節在懷疑什麼」——不是懷疑功能沒寫，是懷疑它在真機器上的行為和我們以為
@@ -21,6 +21,22 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
+
+### alpha.108 先看 17 人角色與本機語音
+
+- [ ] fresh install 後主視窗與 app icon 都直接是 ChatGPT 圖，不出現 Neutral 或任何
+      S/T/C/G/X 單字母；設定選單恰好有四姊妹＋13 位閨密，17 位逐一切換都顯示自己的圖。
+- [ ] 不下載舊素材包也能切完 17 位；斷網重開、舊 pack 壞掉或刪掉後角色圖仍在。
+- [ ] 設定的「本機聲音」預設關閉。關著時點角色只顯示文字；打開後，在 Windows 已
+      安裝繁中 voice 的機器上逐一點 13 位，確認 WebView2 真的出聲，且不開任何網路連線。
+- [ ] 在答案底下按「用本機聲音朗讀」；長答案要依序播、按下一題要立刻停。播放期間再
+      點角色，或角色 fixed WAV pending 時再按朗讀，兩條聲音不能重疊，舊請求也不能晚到復播。
+- [ ] 拿一個沒有本機中文 voice、或只回 remote voice 的 profile 做對照：畫面要明講沒有
+      改用雲端，packet capture 仍是 0 request。系統 voice async 失敗時也要顯示失敗，不沉默冒充成功。
+- [ ] 從 alpha.107 帶一份 `id = "neutral"`、`voice_enabled = true` 的 config 升級：角色變
+      ChatGPT，但聲音維持關閉。其他亂寫的 persona ID 必須讓設定不可讀，不能暗中換成 ChatGPT。
+- [ ] 四姊妹舊 pack 已安裝時仍優先播八段 fixed WAV；故意讓 single voice read 回 null／
+      cache stale／audio play 拒絕，確認同一次 trusted click 會嘗試 localService fallback，且不疊音。
 
 ### alpha.107 先做登入啟動與 bounded recorder 復原
 
@@ -190,7 +206,7 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
   old-binary → new-binary 要等下一版。最後移除 app，`%APPDATA%\ted-h\AI-Sister\data\`
   的記憶要仍在；移除安裝檔不是「忘掉」。
 - **Persona：** 用安裝版開設定頁，照 §16 從 fresh cache 與 packet capture 開始。
-  真正按一次下載後，要逐位看到 Aster／Cedar／Mira／Rook 的四張立繪；打開聲音後，
+  先逐位確認四姊妹與 13 位閨密的 17 張 bundled 角色圖；真正按一次下載並打開聲音後，
   逐位點兩次共聽到八段相符固定語音，再做撤回。這才是產品面證據；CI 的 fixed
   GET／hash／安裝成功不能代替真人 click、播放、撤回與「按下前 0 request／按下後
   exact 一個 GET」。
@@ -1838,8 +1854,8 @@ alpha.77 起另有明確的 `--use-grant --unattended` 路徑；它不是把這�
 process／request 的 packet capture 或本機攔截器留下原始結果；摘要寫「看起來只有一個」
 不算。
 
-- [ ] **按下前真的是 0 request。** 冷啟動、開設定、hover 下載區、切換
-      Aster／Cedar／Mira／Rook、重開 desktop、點字母角色各做一次；不可以碰
+- [ ] **按下前真的是 0 request。** 冷啟動、開設定、hover 下載區、切換 17 位角色、
+      重開 desktop、點角色各做一次；不可以碰
       `cdn.ted-h.com`。WebView DevTools 的 network 也只能有本機 Tauri IPC，沒有 CDN。
 - [ ] **揭露的三格不是寫死的另一份答案。** 按鈕旁要逐字看得到
       `cdn.ted-h.com`、`73,261,088 bytes`，以及 CDN 會看到 IP、時間、TLS、固定
@@ -1851,19 +1867,19 @@ process／request 的 packet capture 或本機攔截器留下原始結果；摘�
       的 GET；沒有 `HEAD`、逐物件 request、redirect、retry、query、body、cookie、
       authorization 或 referrer。設定一個環境／系統 proxy 當對照，它也不可以收到
       request。程式合成 click 不算。
-- [ ] **切人不形成旁路識別。** 四位各從同一 fresh state 做一次下載，保存 method、
-      URL、headers、body 的 snapshot；四份要完全相同。選擇／狀態不可以出現在 URL、
+- [ ] **切人不形成旁路識別。** 17 位各從同一 fresh state 做一次下載，保存 method、
+      URL、headers、body 的 snapshot；17 份要完全相同。選擇／狀態不可以出現在 URL、
       header、cache receipt 或 desktop log。
-- [ ] **驗完整才換畫面。** 完成後應顯示通過 rights projection 的四位立繪；兩句
-      fixed tap-line 只在當下點角色時播放對應預錄聲音。從 fresh state 中途斷網、截短
+- [ ] **驗完整才開 fixed voice。** 17 張 bundled 角色圖在任何 pack 狀態都要保持；
+      四姊妹兩句 fixed tap-line 只在當下點角色時播放對應預錄聲音。從 fresh state 中途斷網、截短
       response、改一 byte、塞 traversal／duplicate／symlink／額外 entry，都要維持
-      `Available`、顯示當次錯誤與所選字母 fallback；不得產生半包畫面或自動 retry。
+      `Available`、顯示當次錯誤與所選 bundled 角色圖；不得產生半包聲音或自動 retry。
       已有的 cache 缺檔／損毀或留下 staging 才顯示 `RepairNeeded`，按「修復」後要
       真的能重新驗證並取代壞 release。
 - [ ] **cache 和記憶的刪除是兩條路。** cache 必須在預設資料目錄的
       `persona-assets-v1`；改用 `sister.exe --data-dir .\other` 不搬它。依序跑 memory
       export、`forget`、`prune`，cache digest 不變、export 也不含素材。Persona 撤回則
-      立即停聲、回所選字母，只刪 exact release；故意讓刪除失敗時要留
+      立即停掉 fixed voice、保留所選 bundled 角色圖，只刪 exact release；故意讓刪除失敗時要留
       `RepairNeeded`，不能說已清乾淨或自己重抓。
 - [ ] **離線重開。** 安裝後斷網重開仍使用已驗素材且 0 request；cache 任一必要檔案
-      損毀後重開則退回字母、顯示需修復且 0 request。Neutral 始終不用 pack。
+      損毀後重開仍顯示 bundled 角色圖、標示 fixed voice 需修復且 0 request。

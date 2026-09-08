@@ -37,6 +37,10 @@ capture／brain／hands 或 WebView。
 
 ### Persona asset 網路邊界（alpha.102 起）
 
+- alpha.108 起，四姊妹與 13 位閨密的 17 張 current WebP 隨 desktop 一起提供；來源、
+  bytes、SHA-256 與 Apache-2.0 圖像授權排除寫在 `apps/desktop/ui/personas/`。預設 ChatGPT，沒有
+  Neutral，也沒有 S/T/C/G/X glyph fallback。舊 `neutral` 設定只遷移成 ChatGPT 並關聲。
+
 - `crates/sister-assets` 在 root workspace，預設 feature 集合**沒有** `download`；只有
   desktop 明確啟用。不要把 HTTP client 直接加進 `sister-desktop`，更不能加進
   recorder／core／capture／brain／hands。
@@ -44,16 +48,18 @@ capture／brain／hands 或 WebView。
   對內嵌 allowlist 的 exact hash path 做至多一次 HTTPS `GET`。不 redirect／proxy／
   retry，不送 cookie／credentials／authorization／referrer／query／body，不先 `HEAD`
   或逐物件抓。切換 persona 不改 method／URL／headers／body。
-- embedded authority 是 descriptor + exact origin/path allowlist + Aster／Cedar／Mira／
-  Rook selected public rights projection + 完整 manifest 的 canonical hash；**不是**約
+- embedded authority 是舊 fixed-voice pack 的 descriptor + exact origin/path allowlist +
+  四姊妹 selected public rights projection + 完整 manifest 的 canonical hash；**不是**約
   2.1 MB 的完整 11 人 manifest。73,261,088-byte pack 的 SHA-256 是
   `7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30`，集體 pin
   946 entries；真正使用的 selected entries 再逐檔驗 size／hash／rights binding。
 - cache 固定在 `Config::default_data_dir()/persona-assets-v1`，`--data-dir` 不搬；memory
-  export／forget／prune 不碰，Persona 撤回才清 exact release。失敗或損毀退回所選
-  code-native 字母、不得自動連線修復。
+  export／forget／prune 不碰，Persona 撤回才清 exact release。失敗或損毀只停用舊
+  fixed voice，保留 bundled 角色圖，不得自動連線修復。
 - HTTP 在 native Rust；所有 WebView CSP 繼續只准 IPC，**不要把 CDN 加進
   `connect-src`／`img-src`／`media-src`**。一般 CI 也不打真 CDN。
+- 本機語音只接受 WebView 明確標成 `localService` 的中文 voice；找不到就靜音，不得
+  自動換 remote voice。角色台詞與答案朗讀都要由 trusted click 開始，不 autoplay。
 
 ---
 

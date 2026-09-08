@@ -37,15 +37,20 @@
            否則瀏覽器合成的 click 會讓一個按鍵說兩句。 -->
       <button class="avatar" data-avatar type="button">
         <span class="face">
-          <!-- 只有 native resolver 驗過 fixed pack 才顯示；字母 fallback 不依賴它。 -->
-          <img class="portrait" data-persona-portrait alt="" draggable="false" hidden />
-          <span class="glyph" data-persona-glyph>S</span>
+          <!-- 17 位角色圖都隨程式提供；JS 尚未啟動時也直接顯示 ChatGPT。 -->
+          <img
+            class="portrait"
+            data-persona-portrait
+            src="./personas/chatgpt.webp"
+            alt="ChatGPT 角色圖"
+            draggable="false"
+          />
         </span>
       </button>
       <p class="state-line" data-state-line>在聽</p>
       <!-- 只有使用者點上面的 button 才會填字；開場、輪詢與 timer 都不碰這一格。 -->
       <p class="persona-line" data-persona-line aria-live="polite" hidden></p>
-      <!-- 不 autoplay。未來本機 fixed pack 的固定台詞也只能從同一次 click 播。 -->
+      <!-- 不 autoplay。固定錄音與本機系統語音都只能從同一次 click 播。 -->
       <audio data-persona-audio preload="none" hidden></audio>
       <!--
         只在「沒有人在記錄」的時候出現。她已經說得出那句話了，但說完之後

@@ -74,10 +74,10 @@ if [[ -d "$DESKTOP" ]]; then
         ln -s "$PWD/scripts/fake-llvm-rc.py" "$shim/llvm-rc"
     fi
 
-    echo "▶ cargo check --target $TARGET（字母人）"
+    echo "▶ cargo check --target $TARGET（桌面姊妹）"
     (cd "$DESKTOP" && PATH="$shim:$PATH" cargo check --target "$TARGET" --no-default-features)
 
-    echo "▶ cargo clippy --target $TARGET（字母人）"
+    echo "▶ cargo clippy --target $TARGET（桌面姊妹）"
     (cd "$DESKTOP" && PATH="$shim:$PATH" \
         cargo clippy --target "$TARGET" --no-default-features -- -D warnings)
 fi

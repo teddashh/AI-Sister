@@ -1,13 +1,13 @@
 [package]
 name = "sister-desktop"
-version = "0.1.0-alpha.107"
+version = "0.1.0-alpha.108"
 edition = "2024"
 # 和根 workspace 同一個地板；這是第二個 workspace，所以在下方自己宣告再繼承。
 rust-version.workspace = true
 license = "Apache-2.0"
 repository = "https://github.com/teddashh/AI-Sister"
 authors = ["Ted Huang <ted@ted-h.com>"]
-description = "AI-Sister 的桌面外殼：一個字母人"
+description = "AI-Sister 的桌面外殼：四姊妹與 13 位閨密"
 publish = false
 
 # **自己一個 workspace，故意的。**
