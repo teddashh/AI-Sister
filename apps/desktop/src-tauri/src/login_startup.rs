@@ -10,9 +10,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum LoginStartupState {
+    #[cfg(windows)]
     Enabled,
+    #[cfg(windows)]
     Disabled,
+    #[cfg(windows)]
     Mismatch,
+    #[cfg(windows)]
     Unreadable,
     Unsupported,
 }
@@ -35,6 +39,7 @@ impl LoginStartupView {
         }
     }
 
+    #[cfg(windows)]
     fn unreadable(expected: Option<String>, reason: impl Into<String>) -> Self {
         Self {
             state: LoginStartupState::Unreadable,
