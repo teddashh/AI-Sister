@@ -3,10 +3,13 @@
 //! 設定檔、WebView 回條與 log 都只看得到 [`CredentialState`]，永遠拿不到 key。
 //! 真正朗讀的 native command 才能短暫讀出 blob；離開 scope 時會把那份記憶清零。
 
+#[cfg(windows)]
 const TARGET: &str = "ted-h/AI-Sister/AzureSpeech/v1";
+#[cfg(windows)]
 const USERNAME: &str = "Azure Speech subscription key";
 // 和 sister-tts 的 request validator 同一個上限；Credential Manager 不能收下一串
 // transport 之後一定拒絕的 key，否則 present 和 ready 會變成假話。
+#[cfg(any(windows, test))]
 const MAX_KEY_BYTES: usize = sister_tts::MAX_SUBSCRIPTION_KEY_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,10 +22,13 @@ pub enum CredentialState {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[cfg(any(windows, test))]
     #[error("Azure Speech key 是空的")]
     Empty,
+    #[cfg(any(windows, test))]
     #[error("Azure Speech key 超過 {MAX_KEY_BYTES} bytes")]
     TooLong,
+    #[cfg(any(windows, test))]
     #[error("Azure Speech key 含空白、控制字元或非 ASCII 字元")]
     InvalidCharacters,
     #[cfg_attr(windows, allow(dead_code))]
@@ -39,6 +45,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// 只接受一行可見 ASCII。Azure key 不應含空白；拒絕而不是悄悄 trim，畫面才不會
 /// 說「保存成功」但實際保存的是另一串 bytes。
+#[cfg(any(windows, test))]
 fn validate_key(bytes: &[u8]) -> Result<()> {
     if bytes.is_empty() {
         return Err(Error::Empty);
