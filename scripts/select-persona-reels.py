@@ -56,7 +56,10 @@ HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 SAFE_TAG = re.compile(r"[a-z][a-z0-9_]*\Z")
 WINDOWS_DRIVE = re.compile(r"[A-Za-z]:[\\/]")
 RUNTIME_GLOBAL = "__AI_SISTER_PERSONA_REELS__"
-VIEWPORT = {"x": 320, "y": 0, "width": 640, "height": 640}
+# 每套 source canvas 已經是完整的透明全身立繪。舊版刻意只取上方 640px，
+# 實際畫面因此把這些素材裁成相框裡的半身像；desktop 現在保留整張 canvas，
+# 讓 17 位角色以透明全身浮在舞台上。這仍只是 viewport metadata，沒有增加 PNG。
+VIEWPORT = {"x": 0, "y": 0, "width": 1280, "height": 1280}
 NOTICE_TEMPLATE = """# AI-Sister workplace Persona rigs
 
 這個目錄的 17 套分層 PNG rig 是素材所有人 Ted Huang 於 2026-09-08

@@ -5,8 +5,10 @@
     <title>AI-Sister icon source</title>
     <!--
       應用程式圖示的排版原稿。`scripts/make-icons.sh` 用瀏覽器把 bundled ChatGPT
-      角色圖裁成 PNG，再轉成 .ico。原圖的來源、hash 與權利邊界在
-      `ui/personas/{manifest.json,NOTICE.md}`，這裡不另造一個字母替身。
+      角色圖裁成 PNG，再轉成 .ico。原圖的來源在
+      `ui/personas/{manifest.json,NOTICE.md}`；五個衍生圖示自己的 exact bytes、
+      recipe 與權利邊界在 `src-tauri/icons/{manifest.json,NOTICE.md}`，這裡不另造
+      一個字母替身。
 
       這一頁**不在** ui/ 底下，因為它不該被打包進應用程式。
     -->
@@ -36,12 +38,17 @@
         height: 440px;
         justify-content: center;
         overflow: hidden;
+        position: relative;
         width: 440px;
       }
       img {
-        height: 100%;
-        object-fit: cover;
-        width: 100%;
+        height: 880px;
+        left: 50%;
+        object-fit: contain;
+        position: absolute;
+        top: -8px;
+        transform: translateX(-50%);
+        width: 880px;
       }
     </style>
   </head>

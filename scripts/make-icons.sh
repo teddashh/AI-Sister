@@ -2,10 +2,12 @@
 #
 # 從 bundled ChatGPT 角色圖與 apps/desktop/icon/icon.html 產生應用程式圖示。
 #
-# 角色原檔的來源、digest 與授權邊界固定在 ui/personas/manifest.json 和 NOTICE.md；
-# icon.html 只負責把同一張 shipped asset 裁成 Windows 圖示，不再另外畫一個字母。
+# 角色原檔的來源固定在 ui/personas/manifest.json 和 NOTICE.md；五個衍生圖示的
+# exact digest、recipe 與授權邊界另固定在 src-tauri/icons/manifest.json 和 NOTICE.md。
+# icon.html 只負責把同一張 shipped asset 裁成 Windows 圖示，不另畫字母替身。
 #
-# 產出的檔案是 build 產物，進 .gitignore，不進 repo。CI 在打包前跑這支。
+# 產出的五個檔案是 checked-in Tauri 打包輸入；換角色來源或排版後要明確重生並
+# 一起 review。CI 直接打包這些 bytes，不會在 release job 偷用另一套 encoder 重畫。
 
 set -euo pipefail
 
@@ -63,3 +65,4 @@ print("  " + ", ".join(["icon.png", "32x32.png", "128x128.png", "128x128@2x.png"
 PY
 
 echo "✓ 圖示產在 $OUT"
+python3 scripts/check-app-icons.py

@@ -129,12 +129,17 @@ jobs:
         run: node ./scripts/check-persona.mjs
 
       # 5.2 GB tachie source tree 不能因為一句「17 隻」就整包混進安裝檔。
-      # 這支只驗實際出貨的 17 套 workplace rig：402 個 PNG 的 bytes/hash/
-      # geometry、無多餘檔、sanitized runtime projection 與 owner-grant 授權邊界。
+      # 這裡驗實際出貨的 17 套 workplace rig、WebP preview 的 production source/output
+      # authority、402 個 PNG 的 bytes/hash/geometry、無多餘檔與 owner-grant 邊界。
+      # preview 的 authority tests 不依賴 Pillow，CI 就算沒有 pinned codec 也不會整套假綠；
+      # 同一位 ChatGPT 衍生出的五個 app icon 另有 exact manifest／NOTICE，不借 preview
+      # 授權替未列衍生圖背書。
       - name: Persona reels must be the exact selected local bundle
         run: |
           python3 ./scripts/tests/test_select_persona_reels.py
+          python3 ./scripts/tests/test_select_persona_previews.py
           python3 ./scripts/check-persona-reel-assets.py
+          python3 ./scripts/check-app-icons.py
 
       # 那顆「忘掉這一段」是這整個程式裡唯一一個不可逆的動作，而它是兩段式的。
       # 帶狀態的按鈕只有兩種壞法，兩種都很安靜：停在紅色的「確定刪掉」（下一下

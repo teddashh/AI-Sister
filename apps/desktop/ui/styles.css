@@ -2,7 +2,8 @@
  * 17 張角色圖隨 desktop frontendDist 一起安裝；沒有字母 fallback，也不靠下載
  * 才能顯示。舊 fixed pack 現在只替四姊妹補上 8 句預錄固定台詞。
  *
- * 動畫走兩個獨立通道：`transform` 負責呼吸（上下），`rotate` 負責搖晃。
+ * 17 套 rig 本身都是透明全身立繪；不要再把它裁回頭像，也不要在外面補一個
+ * 假相框。動畫走兩個獨立通道：`transform` 負責呼吸（上下），`rotate` 負責搖晃。
  * 分開是因為同一個 `transform` 上疊兩段 keyframes 會互相覆蓋，得手動把
  * 兩者乘起來——分通道之後瀏覽器自己合成。
  */
@@ -96,11 +97,11 @@ body {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
   justify-content: safe center;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px;
+  padding: 12px 18px 14px;
 }
 
 .avatar {
@@ -111,11 +112,12 @@ body {
   cursor: pointer;
   display: grid;
   font: inherit;
-  height: 184px;
+  border-radius: 44%;
+  height: min(88vw, 300px);
   margin: 0;
   padding: 0;
   place-items: center;
-  width: 184px;
+  width: min(88vw, 300px);
 }
 
 /* `.avatar` 自己指定了 display，所以 UA 的 `[hidden]` 壓不過它。Persona 關掉
@@ -132,34 +134,30 @@ body {
   /* focus ring 落在固定的淺色 stage 上，不是在 persona 的深色 face 裡。深色角色的
    * accent 對 stage 幾乎看不見，所以這一格必須留在可驗證的 UI theme。 */
   outline: 3px solid var(--letter-accent);
-  outline-offset: 2px;
+  outline-offset: -3px;
 }
 
 /*
- * 身體：一張圓角卡片，右下有一道實心投影當「厚度」。那道投影是這個角色
- * 看起來像一個物件而不是一個 div 的全部原因。
+ * 這格只是透明全身 rig 的座標系，不是角色相框。陰影依 PNG 的 alpha 描出
+ * 人形輪廓；不畫底色、邊框或圓角卡片。
  */
 .face {
   align-items: center;
-  background: var(--persona-bg);
-  border: 5px solid var(--persona-fg);
-  border-radius: 34px;
-  box-shadow:
-    inset 0 -12px 0 rgb(46 33 64 / 6%),
-    0 8px 0 var(--persona-fg),
-    0 16px 26px rgb(46 33 64 / 18%);
   display: flex;
-  height: 160px;
+  height: 100%;
   justify-content: center;
   position: relative;
-  width: 160px;
+  width: 100%;
 }
 
+/* WebP 是同一方形全身畫布的 640×640 flatten fallback，只在完整 rig 尚未
+ * ready／已失敗時出現。兩者都撐滿同一座標格，ready 切換時人物不會縮放跳一下；
+ * ready 後不拆 DOM，切換 compact mode 也不必重載。 */
 .portrait {
-  border-radius: 28px;
   display: block;
+  filter: drop-shadow(0 10px 12px rgb(46 33 64 / 18%));
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   width: 100%;
 }
 
@@ -167,23 +165,21 @@ body {
   display: none;
 }
 
-/* Ready 以前 WebP 一直在；ready 後也不改 DOM 的 hidden 語意，讓 56px compact
- * 模式能只靠 CSS 立刻換回清楚的 WebP，不必拆掉或重載已 decode 的 rig。 */
+/* Ready 以前 WebP 一直在；ready 後仍不改 DOM 的 hidden 語意，避免重新載入。 */
 .avatar.reel-ready .portrait {
   visibility: hidden;
 }
 
 /*
- * 選配 Reel 是 1280×1280 畫布的裁切 PNG 疊圖。每層的位置由已 sanitize 的本機
+ * Reel 是 1280×1280 透明全身畫布的 PNG 疊圖。每層的位置由已 sanitize 的本機
  * manifest 換算成百分比；容器本身不接 URL，也不接受 renderer 外傳的路徑。
  * app.js 會等整組 load + decode 完才一次切換，所以這格 hidden 時 bundled WebP
  * 仍完整佔著同一個位置，不會閃透明人或露出半套衣服。
  */
 .persona-reel {
-  border-radius: 28px;
+  filter: drop-shadow(0 12px 11px rgb(46 33 64 / 22%));
   inset: 0;
   isolation: isolate;
-  overflow: hidden;
   pointer-events: none;
   position: absolute;
   z-index: 0;
@@ -246,17 +242,18 @@ body {
   }
 }
 
-/* 右上那顆點：她現在是什麼狀態，一眼看得出來。 */
+/* 狀態點貼在透明人形的右上，不再黏在相框角落。位置落在 1280 canvas 的
+ * 常見頭髮右緣；它仍是獨立狀態語意，不假裝是素材的一部分。 */
 .face::after {
   background: var(--persona-accent);
-  border: 3px solid var(--persona-fg);
+  border: 2px solid rgb(246 236 223 / 96%);
   border-radius: 999px;
   content: "";
-  height: 18px;
+  height: 11px;
   position: absolute;
-  right: -7px;
-  top: -7px;
-  width: 18px;
+  right: 22%;
+  top: 7%;
+  width: 11px;
   z-index: 2;
 }
 
@@ -452,7 +449,7 @@ body {
  * 這兩格是同一張圖。狀態差異必須有一個不靠動畫的版本。
  */
 .avatar[data-state="thinking"] .face::after {
-  background: var(--persona-bg);
+  background: rgb(246 236 223 / 96%);
   box-shadow: inset 0 0 0 4px var(--persona-accent);
 }
 
@@ -490,17 +487,21 @@ body {
 }
 
 .avatar[data-state="paused"] .face::after {
-  background: var(--persona-bg);
+  background: rgb(246 236 223 / 96%);
+  border-color: var(--letter-fg);
 }
 
 .avatar[data-state="paused"]::after {
-  background: var(--persona-fg);
+  background: var(--letter-fg);
   border-radius: 2px;
   content: "";
-  height: 4px;
+  height: 3px;
   position: absolute;
-  transform: translate(46px, -46px) rotate(-45deg);
-  width: 26px;
+  right: calc(22% - 4px);
+  top: calc(7% + 7px);
+  transform: rotate(-45deg);
+  width: 27px;
+  z-index: 4;
 }
 
 .avatar {
@@ -527,9 +528,10 @@ body {
 }
 
 /* 狀態點空心。和 thinking 的空心環不同：這裡沒有那圈 accent 色，
-   因為那個環的意思是「她正在忙」。 */
+   因為那個環的意思是「她正在忙」。深色外圈讓米色圓心在 stage 上仍看得見。 */
 .avatar[data-state="asleep"] .face::after {
-  background: var(--persona-bg);
+  background: rgb(246 236 223 / 96%);
+  border-color: var(--letter-fg);
   box-shadow: none;
 }
 
@@ -541,40 +543,37 @@ body {
  */
 body.has-hits .avatar,
 body.has-url-policy .avatar {
-  height: 64px;
-  width: 64px;
+  height: 88px;
+  width: 88px;
 }
 
 body.has-hits .face,
 body.has-url-policy .face {
-  border-radius: 14px;
-  border-width: 3px;
-  box-shadow: 0 4px 0 var(--persona-fg);
-  height: 56px;
-  width: 56px;
+  height: 88px;
+  width: 88px;
 }
 
 body.has-hits .portrait,
 body.has-url-policy .portrait {
-  border-radius: 11px;
-}
-
-body.has-hits .avatar.reel-ready .portrait,
-body.has-url-policy .avatar.reel-ready .portrait {
-  visibility: visible;
-}
-
-body.has-hits .persona-reel,
-body.has-url-policy .persona-reel {
-  display: none;
+  height: 100%;
+  width: 100%;
 }
 
 body.has-hits .face::after,
 body.has-url-policy .face::after {
-  height: 12px;
-  right: -5px;
-  top: -5px;
-  width: 12px;
+  border-width: 1px;
+  height: 7px;
+  right: 14%;
+  top: 5%;
+  width: 7px;
+}
+
+body.has-hits .avatar[data-state="paused"]::after,
+body.has-url-policy .avatar[data-state="paused"]::after {
+  height: 2px;
+  right: calc(14% - 2px);
+  top: calc(5% + 5px);
+  width: 15px;
 }
 
 body.has-hits .stage,

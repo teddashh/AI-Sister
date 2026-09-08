@@ -32,12 +32,19 @@
 不是活資料庫的一部分，要另外刪除。
 
 17 張 current 角色 WebP 與 17 套 workplace 分層 rig 都是程式本身的靜態資產，
-分別位於 `apps/desktop/ui/personas/` 與 `apps/desktop/ui/persona-reels/`。WebP 合計
-225,082 bytes；Reel 只選 402 張 PNG、35,140,885 bytes，畫面只建當前人的
+分別位於 `apps/desktop/ui/personas/` 與 `apps/desktop/ui/persona-reels/`。17 張
+640×640 透明全身 WebP 合計 1,031,124 bytes；Reel 只選 402 張 PNG、
+35,140,885 bytes，畫面只建當前人的
 21–26 層。兩組都不在資料目錄、不是 cache，也不受 memory export／
 forget／prune／Persona cache 撤回影響。來源、大小、SHA-256 與圖像授權
 排除分別固定在同目錄的 manifest/NOTICE。Reel manifest 不含 raw receipt、
 產生時間或本機絕對 path。
+
+source tree 另有由 exact ChatGPT WebP 裁出的五個平台圖示輸入，共 464,143 bytes；
+它們不是記憶或 cache，也不受上述刪除操作影響。Windows artifact 取其中
+`icon.ico` 編進 executable／installer，macOS config 取 `icon.png`，不是把五個來源檔
+原樣裝到使用者資料夾。圖示的來源、recipe、逐檔 hash 與獨立 owner-grant 範圍固定在
+`apps/desktop/src-tauri/icons/{manifest.json,NOTICE.md}`。
 
 另有一個物理上位於預設資料目錄、但**不是記憶**的舊固定錄音素材 cache：
 `Config::default_data_dir()/persona-assets-v1/`。安裝時會短暫有 `.staging-*`；完成後是

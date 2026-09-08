@@ -52,7 +52,7 @@ if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
 }
 
 $baselineVersion = '0.1.0-alpha.110'
-$expectedCurrentVersion = '0.1.0-alpha.113'
+$expectedCurrentVersion = '0.1.0-alpha.114'
 $baselineUrl = 'https://github.com/teddashh/AI-Sister/releases/download/v0.1.0-alpha.110/AI-Sister-Setup.exe'
 [int64] $baselineSetupBytes = 305417570
 $baselineSetupSha256 = '3e661803d1b1d867aae0281e56baeb6a165b9178069ad912dc0c8869d1521965'

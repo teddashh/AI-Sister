@@ -194,7 +194,8 @@ select {
 }
 
 .persona-choice-image {
-  object-fit: cover;
+  filter: drop-shadow(0 3px 3px rgb(0 0 0 / 24%));
+  object-fit: contain;
 }
 
 .persona-choice-image-fallback {
@@ -256,7 +257,8 @@ select {
 }
 
 .persona-preview-image {
-  object-fit: cover;
+  filter: drop-shadow(0 4px 4px rgb(0 0 0 / 24%));
+  object-fit: contain;
 }
 
 .persona-preview-image-fallback {

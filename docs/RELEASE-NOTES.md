@@ -69,6 +69,53 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.114
+
+**這一版把現有 17 套分層角色從「圓角相框裡的上半身」改成透明全身浮空。**
+
+素材沒有重抓或擴包：alpha.110 起出貨的 17 套 `workplace` rig 原本就是完整
+1280×1280 透明全身，腿與鞋一直在同一批 402 張 PNG 裡。舊 runtime 只把 viewport
+固定在 `320,0,640,640`，因此主動裁掉下半身；CSS 再加上底色、5 px 邊框、
+圓角與厚投影，畫面才會長成頭像卡。
+
+現在 selector、sanitized manifest 與 renderer 同時固定使用完整
+`0,0,1280,1280` viewport。角色座標格不再畫底色、邊框、圓角卡或裁切；投影
+改為跟著 PNG alpha 的人物輪廓。主視窗最高用 300 px 顯示全身；有答案或 URL
+問題時縮成 88 px，仍保留已 decode 的全身 rig，不再切回小相框。idle、thinking、
+paused、asleep、speaking 與 reduced-motion 的狀態邏輯不變；狀態點和暫停斜槓改成
+適合透明人形的尺寸與位置。
+
+這版的 PNG image bytes 仍是 **35,140,885 bytes**，每次仍只解碼目前一人的
+21–26 層。本機 5.2 GB 候選裡其他 19 組服裝與 reaction 沒有順手加入；
+若後續做換裝，要另行精選、固定 hash 與授權邊界，不把整包丟進安裝檔。
+原本 17 張 208×208、不透明方形半身 WebP 已換成由同一組 reel workplace canvas
+縮出的 **640×640 透明全身 WebP**，合計 **1,031,124 bytes**。因此 JS 尚未 ready、
+圖層解碼中、任一圖層損壞與設定頁選角都不會短暫倒回相框半身。這 17 張是固定
+source-canvas hash 的輕量衍生預覽，不是把其他服裝或 reaction 加進來；沒有字母
+fallback，也不連網自動修復。
+
+應用程式圖示也不再沿用舊半身裁圖：五個 checked-in PNG／ICO 現在由同一張
+ChatGPT 透明全身 preview 裁出，共 **464,143 bytes**。它們使用獨立 exact
+manifest／NOTICE，固定 source WebP、`icon.html`／`make-icons.sh` recipe 與五個
+輸出 hash；這份 owner grant 不借 17 張 preview 的文字替其他衍生圖背書。
+
+本機已用 selector 從 canonical 素材樹重生 production manifest；public clone 不含該素材樹，
+所以 CI 不冒充能重生圖。它仍會核對 selector 只接受 exact production Reel authority、
+只准 exact 已審 WebP manifest／NOTICE 出貨，並在有 pinned codec 時另跑 synthetic
+encoder determinism；shipped-byte checker 逐檔核對 402 張 PNG 的 bytes、SHA-256、
+尺寸與授權 projection。另一道
+Rust shipped-byte test 逐張 decode 17 張 WebP，核對 640×640、透明 alpha、上下全身
+跨度、bytes／SHA-256，拒絕 personas 目錄任何第 18 張圖／子目錄／symlink，並交叉綁回
+同角色的 reel manifest 與 canvas hash。app-icon checker 則核 exact 五檔、來源、recipe、
+alpha、尺寸、manifest／NOTICE 與 owner grant。Persona renderer fixture
+另驗完整 viewport、無相框 CSS、active-only
+decode、原子切換、壞圖退路與 compact 全身，並確認 Tauri 不採信 screenshot query。
+Linux Chromium 實際截過 340×560 的 idle、thinking、paused、asleep 主視窗；工具會等
+頁面／人物 decode、核指定狀態與 exact PNG 像素，不再對空頁或未載完設定頁印成功。
+這不等於正式 Windows WebView2 的人工肉眼驗收；該項仍留在
+`docs/WINDOWS-CHECKLIST.md`。
+
+
 ## v0.1.0-alpha.113
 
 **這一版讓本版產生的 installer／uninstaller sections 不再走 Tauri forced-kill macro，並為

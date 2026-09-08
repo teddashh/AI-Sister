@@ -52,6 +52,13 @@ window 驗 installer-first early exit、第二份 Setup 與一般 reported-hit/n
 child 依然保留自己的版本行為。Windows loader 在 Rust
 `main` 前映射 executable，最後一次 scan 到 NSIS `File` 之間仍有窄窗，所以不能把這版
 寫成跨版本完整原子 lifecycle。
+alpha.114 把早已出貨的 17 套完整 1280×1280 透明 rig 從舊的上方
+640×640 crop 還原成全身，移除頭像底色、邊框、圓角與厚投影，改成跟著人物
+alpha 的浮空陰影。原本 17 張不透明半身 WebP 也換成由同一批 workplace canvas
+縮出的 640×640 透明全身預覽，冷啟動、壞圖退路與設定選角都不會倒回相框半身；
+它們合計 1,031,124 bytes。402 張 PNG 仍是 35,140,885 bytes，5.2 GB 裡其他服裝
+和 reaction 仍不出貨。應用程式圖示也改從同一張 ChatGPT 全身預覽裁出；exact 五檔
+另以 manifest／NOTICE 固定來源、recipe、464,143 bytes 與授權範圍。
 code signing、跨層 master stop 與 installer late-start 窄窗仍未完成，
 所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
@@ -232,10 +239,13 @@ exact command／五態、watchdog、recorder lease 與 consent transaction 都�
 DeepSeek、Qwen、Mistral、Llama、Sakana、Perplexity、GLM、Kimi、Hunyuan、MiniMax、
 Nemotron、Cohere、MiMo。** 每人的 workplace 分層 rig 都隨桌面程式離線提供；
 17 rigs 共 402 張 PNG、35,140,885 bytes。畫面只解碼目前角色的 21–26 層，
-全部成功後才切過去；任一圖層失敗就繼續顯示原本的 bundled WebP。
+全部成功後才切過去；完整 1280 canvas 以透明全身浮空呈現，不再裁成
+相框裡的上半身。任一圖層失敗就繼續顯示同一位的透明全身 bundled WebP。
 預設是 ChatGPT；沒有 Neutral，也沒有 S/T/C/G/X 字母 fallback。選材、大小、
 SHA-256 與授權邊界在 `apps/desktop/ui/persona-reels/manifest.json` 與 `NOTICE.md`；
-原 17 張 WebP 的同等資料在 `apps/desktop/ui/personas/`。圖像不納入 Apache-2.0 程式碼授權。
+17 張透明全身 WebP 的同等資料在 `apps/desktop/ui/personas/`。圖像不納入
+Apache-2.0 程式碼授權；由 ChatGPT preview 衍生的五個應用程式圖示另固定在
+`apps/desktop/src-tauri/icons/{manifest.json,NOTICE.md}`，不借前一份 grant 擴張範圍。
 可重現的 selector 與排除範圍見 [Persona Reel 選材](docs/PERSONA-REELS.md)。
 
 只有你真的按下角色（或在原生按鈕上用 Enter／Space）才會顯示下一句，不叫模型、

@@ -1,33 +1,157 @@
 {
-  "schema": "ai-sister/bundled-personas/v1",
-  "sourceRepository": "https://github.com/teddashh/Multi-Ai-Chatapp",
-  "sourceCommits": [
-    "967e9bea3a58540e8982eb33d7632f215fc945dc",
-    "9d2a410984c8f4eddcbb969c95477ed97e856f7e"
+  "assets": [
+    {
+      "bytes": 83960,
+      "file": "claude.webp",
+      "id": "claude",
+      "sha256": "93c01ee271d5088a4714da9c1b8f49d6ff1ea4332432def7b203ed8074de18fd",
+      "sourceCanvasSha256": "c2ad534d6555d35ff111b35f4a6d0707ec8c8b6c2382cb020fdca9e361ee1770"
+    },
+    {
+      "bytes": 82390,
+      "file": "gemini.webp",
+      "id": "gemini",
+      "sha256": "5a6b6475f1b225046ccaf9e710c8b2f8cb97b2ecb07ea34901c4e6f63f2e0e08",
+      "sourceCanvasSha256": "d75f1cf2d1e2b32af9b938efeb6d9849fe02a88c80ad926c6cee768978ec4946"
+    },
+    {
+      "bytes": 54874,
+      "file": "grok.webp",
+      "id": "grok",
+      "sha256": "4ca021a67ed791ab9d1ca7d3fd4425afc71f94decaf29e6dbcfc8e882aff7e68",
+      "sourceCanvasSha256": "db58e7527189424adb3e1e9f5634597c5049f418d0d422ea1fa0a0747d394e35"
+    },
+    {
+      "bytes": 45438,
+      "file": "chatgpt.webp",
+      "id": "chatgpt",
+      "sha256": "ee5a4e1636ad9ec10e90cd684a39899370820682e338fdeabea9e799b4012b81",
+      "sourceCanvasSha256": "0e6896c18e504289324c2d402b3daa858cc7469d22bf80f4640d1c596a78d2b5"
+    },
+    {
+      "bytes": 86430,
+      "file": "deepseek.webp",
+      "id": "deepseek",
+      "sha256": "fda810f5853c16c90f29b21e068655ad9660e0f3b4c78185fa5ad7a60a33dac0",
+      "sourceCanvasSha256": "5adf2a5f90be8569c18c3bb3b41e61be5681b8a6e1ec610d2ae230f1cd865286"
+    },
+    {
+      "bytes": 69612,
+      "file": "qwen.webp",
+      "id": "qwen",
+      "sha256": "037f3e7be2533be6fa78bc24f3c47efd5081a97a154918adecb960aa1c458fcc",
+      "sourceCanvasSha256": "317c9fa7d9a623e4e8230ab169de3bcac8384db677187d5ad8b6369be52a0e70"
+    },
+    {
+      "bytes": 52776,
+      "file": "mistral.webp",
+      "id": "mistral",
+      "sha256": "4a3a2b52f302928e20f005f381f0823f78c8aada0eac95402680d6bbfb640554",
+      "sourceCanvasSha256": "d5d7436d43d4d880449254649f9e8d7a78526310630b07d6362aa96d99fbf2ec"
+    },
+    {
+      "bytes": 47404,
+      "file": "venice.webp",
+      "id": "venice",
+      "sha256": "7c5c6e3549721cedf267963a49eb3ae3f5e91d2966fd1a05d63ac911b687c7ba",
+      "sourceCanvasSha256": "63e6d017f79161467bc7ff8184cad633da4cd859b3a96786d101ab45ab72607b"
+    },
+    {
+      "bytes": 64066,
+      "file": "sakana.webp",
+      "id": "sakana",
+      "sha256": "7c3a584ffba63506d89c6bf5f67717863e7e59e273e54492a0a26bfafff00c21",
+      "sourceCanvasSha256": "334157c137bf3340ce1d62a549fabd6ff0e1709c5cddfb59c037192b760cc596"
+    },
+    {
+      "bytes": 55780,
+      "file": "perplexity.webp",
+      "id": "perplexity",
+      "sha256": "2a509d87f168be7675d2ea703fefb3499ea5cdfa0a8666365a9de6e613cc258e",
+      "sourceCanvasSha256": "c69228cf603b59a17932bf7b542cc17a84e0827f5def8aa18fca46f1bfe01315"
+    },
+    {
+      "bytes": 56294,
+      "file": "glm.webp",
+      "id": "glm",
+      "sha256": "3f5aeb74400d2e639185a887046d511490d41eed63978b59d393546d72848971",
+      "sourceCanvasSha256": "df44ac057dca1a182f70a366a73e71f3b7a145c810e59229662c261969e0cf48"
+    },
+    {
+      "bytes": 56454,
+      "file": "kimi.webp",
+      "id": "kimi",
+      "sha256": "7b1e1f75dddc77459cef46847960d6a541695fc2d81ff49dc6b64edf31a38d42",
+      "sourceCanvasSha256": "0d698c3d5bab7c6cca0507221e6745af652e89c3dbad822b7e8de2921f2c0b94"
+    },
+    {
+      "bytes": 66442,
+      "file": "hunyuan.webp",
+      "id": "hunyuan",
+      "sha256": "9f56870b17e9aabc64f0f223328c0aa5f1ee13a36c92fa41f85556f581776290",
+      "sourceCanvasSha256": "a4d21e5f88d85ebe941e6b034381854a8e7fd9db9cae9383722860ee7856b9db"
+    },
+    {
+      "bytes": 62222,
+      "file": "minimax.webp",
+      "id": "minimax",
+      "sha256": "2b91bb3c2efa5db412e6d04f0aa3ff7cba12762d2c5acc63615da1f6a44241ea",
+      "sourceCanvasSha256": "83e257b8ab242263ddb278f145a6dde6759f80b1bdff5078bf38ea526c1a3840"
+    },
+    {
+      "bytes": 50566,
+      "file": "nemotron.webp",
+      "id": "nemotron",
+      "sha256": "db9009fb04b17c5036155d439989808cea8725b56ca596b502d8de41dbbc143a",
+      "sourceCanvasSha256": "913f84795bf72a9d23cab945872b1a02ea38488f7787b64c71df6c9f3a1293fd"
+    },
+    {
+      "bytes": 50744,
+      "file": "cohere.webp",
+      "id": "cohere",
+      "sha256": "db41bb3adb8585f0c423defa1acae68a2e6bee623f46f0ca209528538ebdeea3",
+      "sourceCanvasSha256": "4685d9e480a231d1ed370a580897bdde0ea2ae7ce16dea88cc19a0b11d037d0c"
+    },
+    {
+      "bytes": 45672,
+      "file": "mimo.webp",
+      "id": "mimo",
+      "sha256": "f1192d9fed70258d3ddf3a99db3eed17b25de1c357651f3de666e65e643a5b7c",
+      "sourceCanvasSha256": "02d5be5b33bf86046aa6fb3d81eda15f0632ae64864be4677d8a67b62b7d2eb8"
+    }
   ],
-  "ownerGrant": {
-    "grantor": "Ted Huang",
-    "grantedOn": "2026-09-08",
-    "scope": "Unmodified inclusion in the AI-Sister source tree and official builds"
+  "encoding": {
+    "alphaQuality": 100,
+    "exactTransparentRgb": true,
+    "format": "webp",
+    "libwebp": "1.5.0",
+    "lossless": false,
+    "method": 6,
+    "pillow": "12.1.1",
+    "quality": 90,
+    "resize": "Pillow.Resampling.LANCZOS"
   },
   "notice": "NOTICE.md",
-  "assets": [
-    { "id": "chatgpt", "file": "chatgpt.webp", "bytes": 13240, "sha256": "ab86235639ad6965f47a173b95a2e3b9463aaa4eab212f67d9903720a6098fca" },
-    { "id": "claude", "file": "claude.webp", "bytes": 14068, "sha256": "f270e52f77e3f514446dd20e4303c21f8965b34e143f18dd9b71b9e0cc8e64d6" },
-    { "id": "gemini", "file": "gemini.webp", "bytes": 14238, "sha256": "813bdc5fb218ac3e8a30c926cb773a214f9e9cbd17447b6ba66f852bb2dcdbaa" },
-    { "id": "grok", "file": "grok.webp", "bytes": 15610, "sha256": "a033dd7738173709728f5b4e0db2c4c022409ac02b63243af8c9cbad06b3c67a" },
-    { "id": "deepseek", "file": "deepseek.webp", "bytes": 18652, "sha256": "f01ef3024ee9f9aa189003a35d2342617d5e93ec5e554827632bf1b5453b8939" },
-    { "id": "qwen", "file": "qwen.webp", "bytes": 17044, "sha256": "34ac257cdbcecb1f5710b2e79cae3595927c7c9566f00ebdf2eb28fe1c8b3d46" },
-    { "id": "mistral", "file": "mistral.webp", "bytes": 13662, "sha256": "df6b155d45a403137ae9cc5993603360692569df3273659631a023df62cde1b2" },
-    { "id": "venice", "file": "venice.webp", "bytes": 9836, "sha256": "10f1fb4667edf0df43419e391626f3ec4dacb04c711f2568b57ac678abba329f" },
-    { "id": "sakana", "file": "sakana.webp", "bytes": 14648, "sha256": "101e803e70446150963ff79da782ecf4a2a04963c2ee11a92fd0ea15f7fbd594" },
-    { "id": "perplexity", "file": "perplexity.webp", "bytes": 13176, "sha256": "f30a36966801da06f8f7037b98a897c77d1da7561eb2c99cd25e5bdee3bb871c" },
-    { "id": "glm", "file": "glm.webp", "bytes": 13120, "sha256": "73880b969c4d75bdb4e4ef138d5788ad38f3b221204b4e7e99148a2393b84e05" },
-    { "id": "kimi", "file": "kimi.webp", "bytes": 10804, "sha256": "a5adef0bd16da96fd93b8cd72db9ef9ca38f5bf6d2934dd5b986b33d5a95fdef" },
-    { "id": "hunyuan", "file": "hunyuan.webp", "bytes": 12794, "sha256": "03fbaa1bfa28b24d7b1f4ed6b8774821e88144e838ed4c0a165bcc91719e4244" },
-    { "id": "minimax", "file": "minimax.webp", "bytes": 13258, "sha256": "6db2bce6e5e19ddb1ba05b1d87dc0b1796064031a10487e6e3b8d8dba6859170" },
-    { "id": "nemotron", "file": "nemotron.webp", "bytes": 10722, "sha256": "942fd46d9d7dfef19e68391220c9117af4bca7839e89cc8ffb4520c5f66a086a" },
-    { "id": "cohere", "file": "cohere.webp", "bytes": 10866, "sha256": "61a3cd4b7fb539dccac29a34acd025a13e3aa8c33d1e04b58583faf693dc68eb" },
-    { "id": "mimo", "file": "mimo.webp", "bytes": 9344, "sha256": "72ec91aa320834b0eee35459896176c60eb4911b24376f8514edc80aaae725dc" }
-  ]
+  "ownerGrant": {
+    "grantedOn": "2026-09-08",
+    "grantor": "Ted Huang",
+    "license": "excluded-from-Apache-2.0",
+    "scope": "Inclusion of the exact 17 derived 640x640 full-body WebP previews source-bound and hash-listed by this manifest in the AI-Sister source tree and official builds, including local fallback and static preview display"
+  },
+  "previewContract": {
+    "alpha": "transparent",
+    "canvas": {
+      "height": 640,
+      "width": 640
+    },
+    "fit": "contain",
+    "subject": "full-body"
+  },
+  "rightsReview": "approved-owner-grant",
+  "schema": "ai-sister/bundled-personas/v2",
+  "sourceReelManifestSha256": "318924b3dd6fb575fdf36d91572b5d7b93ae9c8d6e74f366e93bb1b920b550ce",
+  "totals": {
+    "assets": 17,
+    "webpBytes": 1031124
+  }
 }

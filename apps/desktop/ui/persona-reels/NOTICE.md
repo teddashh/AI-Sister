@@ -11,7 +11,7 @@ source tree 與官方安裝包，並在官方 build 裡做本機分層呈現與�
 path、其他服裝、reaction 與 debug 圖都不在此授權與安裝包內。
 
 這份授權只對下面這份 exact manifest 生效；`manifest.json` 完整 bytes 的 SHA-256 是：
-`676b0d74cf7e49de035ab3153295fddb83e1ddff324e48f52ad75be9a28ec80d`。
+`318924b3dd6fb575fdf36d91572b5d7b93ae9c8d6e74f366e93bb1b920b550ce`。
 
 角色名稱與造型是受同名 AI 產品啟發的虛構角色。AI-Sister 是獨立產品，
 未與相關供應商合作、隸屬或獲其背書。

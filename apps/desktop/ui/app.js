@@ -337,10 +337,10 @@ function personaReelRig(id) {
     rig?.theme !== "workplace" ||
     rig?.canvas?.width !== 1280 ||
     rig?.canvas?.height !== 1280 ||
-    rig?.viewport?.x !== 320 ||
+    rig?.viewport?.x !== 0 ||
     rig?.viewport?.y !== 0 ||
-    rig?.viewport?.width !== 640 ||
-    rig?.viewport?.height !== 640 ||
+    rig?.viewport?.width !== 1280 ||
+    rig?.viewport?.height !== 1280 ||
     !/^[0-9a-f]{64}$/u.test(rig?.canvas_sha256 ?? "") ||
     !Array.isArray(rig?.layers) ||
     rig.layers.length < 21 ||
@@ -2724,7 +2724,8 @@ function markLine(queryId) {
   // 開發用：`?hits=demo&marked=1` 直接看按下去之後長什麼樣。**兩個狀態都要
   // 看得到版面**——按下去那一個字比較長、還多一顆星，而這一頁只有 340 像素
   // 寬。沒有這個開關的話，無頭瀏覽器那一遍只驗得到其中一半。
-  let marked = new URLSearchParams(location.search).get("marked") === "1";
+  let marked =
+    invoke === null && new URLSearchParams(globalThis.location.search).get("marked") === "1";
 
   const paintButton = () => {
     button.textContent = marked ? "★ 記下來了：這件事你本來已經忘了" : "這件事我本來已經忘了";
@@ -3451,10 +3452,30 @@ askInput?.addEventListener("keydown", (event) => {
 // ---------- 開場 ----------
 
 // 開發用的兩個開關：`?state=paused` 直接看某一個狀態，`?hits=demo` 看
-// 有答案時的版面。**Tauri 載入時沒有 query string**，所以這兩條路在產品裡
-// 走不到——它們存在的理由是這台開發機開不起 Tauri 視窗（沒有 webkit2gtk、
+// 有答案時的版面。只有「沒有 Tauri IPC、而且網址明確帶 state」才把這份假狀態
+// 當成可採信的畫面輸入；產品冷啟動在 heartbeat / supervisor 回來前仍然只能說
+// 正在確認。它們存在的理由是這台開發機開不起 Tauri 視窗（沒有 webkit2gtk、
 // 沒有 sudo），而版面對不對不該等到上了 Windows 才第一次看到。
 const params = new URLSearchParams(globalThis.location.search);
+const browserDemoQuery = invoke === null;
+const requestedBrowserState = params.get("state");
+const browserStateFixtures = new Set(["idle", "thinking", "paused", "asleep", "booting"]);
+const authoritativeBrowserStateDemo =
+  browserDemoQuery && browserStateFixtures.has(requestedBrowserState);
+// Query string 不是 native recorder 的輸入。Tauri 視窗即使意外帶著 `?state=`，
+// 或純瀏覽器收到拼錯／外來的值，都只保留「正在確認」的冷啟動畫面，直到真的
+// heartbeat + supervisor 回來；不能先畫一格假的暫停、思考或在聽。
+const wanted = authoritativeBrowserStateDemo ? requestedBrowserState : "idle";
+
+if (authoritativeBrowserStateDemo) {
+  // 這不是 native supervisor 的回覆，只是讓純瀏覽器截圖走同一套 truth gate。用
+  // `running` 能涵蓋 recording / booting；asleep 則明確配 stopped。沒有 `?state=`
+  // 的普通瀏覽器頁也不進來，避免一個預設值冒充量到的 recorder 狀態。
+  recorderSupervisorStateKnown = true;
+  recorderSupervisor = normalizeRecorderSupervisor({
+    phase: wanted === "asleep" ? "stopped" : "running",
+  });
+}
 
 seedSwayPhase();
 applyPersona({ id: "chatgpt", enabled: true, motion: true, tap_lines: true });
@@ -3468,7 +3489,6 @@ readAzureTts();
 // 搬一個長得像暫停的樣子出來。這一點是被截圖抓到的：第一版讓它去設 `state`，
 // 於是截出來的圖裡桌面姊妹是灰的、但拖曳條上的暫停鍵還是「⏸」——而截圖是這台
 // 機器上唯一看得到 UI 的方式，一個走假路的開發開關會讓它騙我。
-const wanted = params.get("state") ?? "idle";
 setPaused(wanted === "paused");
 // `?state=asleep`：沒有人在跑 `sister record`。`?state=booting`：有一個起來
 // 了，但還在開資料庫——那一格畫面上不是「沒有人在記錄」（那句話配著一顆按下
@@ -3479,15 +3499,13 @@ setRecording(
     ? "none"
     : wanted === "booting"
       ? "booting"
-      : wanted === "thinking"
-        ? "thinking"
-        : "recording",
-  // 這一筆是 browser demo 的開場外觀，不是 native heartbeat 回覆。產品沒有 query
-  // string；在 `recording_state` 真正回來前，不能拿這個預設值替 recorder 作證。
-  false,
+      : "recording",
+  // 純瀏覽器明確要求的 state 是可重現截圖的 fixture；Tauri 冷啟動或沒有 state 的
+  // 瀏覽器頁都只是開場 shape，在真正 heartbeat 回來前不能替 recorder 作證。
+  authoritativeBrowserStateDemo,
 );
 setState(
-  wanted === "paused" || wanted === "asleep" || wanted === "booting" || wanted === "thinking"
+  wanted === "paused" || wanted === "asleep" || wanted === "booting"
     ? "idle"
     : wanted,
 );
@@ -3521,21 +3539,21 @@ refreshLastRun();
 
 // `?asleep=stopped` / `?asleep=crashed`：那句灰字底下的第二行。這台機器開不起
 // Tauri，而「她昨晚當掉了」和「你自己按了停止」長得該不一樣——那是要用眼睛看的。
-if (params.get("asleep") === "stopped") {
+if (browserDemoQuery && params.get("asleep") === "stopped") {
   lastRun = {
     started_at: Date.now() - 4 * 3600 * 1000,
     ended_at: Date.now() - 90 * 60 * 1000,
     why: "你按了停止",
   };
   paint();
-} else if (params.get("asleep") === "crashed") {
+} else if (browserDemoQuery && params.get("asleep") === "crashed") {
   lastRun = {
     started_at: Date.now() - 19 * 3600 * 1000,
     ended_at: null,
     why: null,
   };
   paint();
-} else if (params.get("asleep") === "nobeat") {
+} else if (browserDemoQuery && params.get("asleep") === "nobeat") {
   // 叫了、逾時了、還是沒有心跳。這一句要活得比一次輪詢久（以前它被下一個
   // `paint()` 蓋掉），而它換行、比另外兩句長——版面撐不撐得住要用眼睛看。
   noticeAboutHer(
@@ -3547,7 +3565,7 @@ if (params.get("asleep") === "stopped") {
   paint();
 }
 
-if (params.get("hits") === "demo") {
+if (browserDemoQuery && params.get("hits") === "demo") {
   renderHits(
     [
       {
@@ -3615,7 +3633,7 @@ if (params.get("hits") === "demo") {
 // `?hits=recent` 是「剛剛發生什麼事」那條路的版面。分開一個開關而不是共用
 // 上面那組假資料，是因為要看的正是**兩者長得不一樣**：時間問題多了一句說明，
 // 而且答案裡不會有任何一個被標起來的字。
-if (params.get("hits") === "recent") {
+if (browserDemoQuery && params.get("hits") === "recent") {
   renderHits(
     [
       {
@@ -3657,7 +3675,10 @@ if (params.get("hits") === "recent") {
 
 // `?hits=chapters`／`?demo=1`：問「昨天下午在弄什麼」那一版。章節在 facts
 // 前面，標題是 app／title，不是一句「你在專心寫程式」。
-if (params.get("hits") === "chapters" || params.get("demo") === "1") {
+if (
+  browserDemoQuery &&
+  (params.get("hits") === "chapters" || params.get("demo") === "1")
+) {
   const y = new Date();
   y.setDate(y.getDate() - 1);
   y.setHours(12, 0, 0, 0);
@@ -3918,7 +3939,7 @@ const BLIND_DEMOS = {
     paused_truncated: 0,
   },
 };
-if (params.get("hits") === "none") {
+if (browserDemoQuery && params.get("hits") === "none") {
   // `&kind=recent`：同一組空手資料，但問的是時間而不是字。這兩種的**標題**
   // 不一樣，而以前不一樣的方式是錯的——時間那一條寫死了「我什麼都還沒看到
   // ——要先跑 sister record 我才記得住」，於是配上 `&blind=forgotten` 讀起來是

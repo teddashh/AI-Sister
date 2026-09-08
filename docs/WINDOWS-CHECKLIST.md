@@ -10,7 +10,7 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.113 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+alpha.114 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
@@ -146,14 +146,17 @@ Manager backend 與 renderer contract 有自動測試，不等於正式 Windows 
 402 PNG、35,140,885 bytes 與逐檔 hash/geometry；renderer fixture 已驗載入、退路與
 speaking state。這些不等於正式 WebView2 已把 17 人畫對、動對。
 
-- [ ] 斷網開啟 portable 與 installer 版；預設 ChatGPT 要從 WebP 平順切成分層畫面，
-      全程 0 request。逐一切完四姊妹＋13 位閨密，人、服裝、名稱要對得上，
-      沒有半疊圖層、舊人晚回蓋新人、Neutral 或 S/T/C/G/X 字母。
+- [ ] 斷網開啟 portable 與 installer 版；預設 ChatGPT 的透明全身 WebP 要平順切成分層畫面，
+      全程 0 request。逐一切完四姊妹＋13 位閨密，人、服裝、名稱要對得上；
+      每位都要顯示完整腿腳與鞋，透明浮在舞台而不是被裁在圓角相框裡。不得有
+      半疊圖層、舊人晚回蓋新人、Neutral 或 S/T/C/G/X 字母。
 - [ ] 在 DevTools 確認一次只有當前角色的 21–26 個 reel `<img>`，不是開機就把
-      402 張全解碼進 RAM。切人後舊 rig DOM 要被拿掉；答案模式縮成 56 px 時
-      顯示 WebP，不把整套分層擠成模糊小圖。
-- [ ] 用 portable 副本故意移走目前角色的一張 PNG 再開程式：畫面應保留該人
-      WebP，不公開半套 rig、不變字母、不連網 retry。放回檔案並重開後才恢復。
+      402 張全解碼進 RAM。切人後舊 rig DOM 要被拿掉；答案／URL 模式縮成
+      88 px 時仍是已 decode 的透明全身 rig，不得換回圓角相框 WebP。
+- [ ] 用 portable 副本故意移走目前角色的一張 PNG 再開程式：畫面應保留該人的
+      透明全身 WebP，不公開半套 rig、不變字母、不連網 retry。放回檔案並重開後才恢復。
+- [ ] 逐一打開 17 位設定選角卡；縮圖與大預覽都要是有腿腳的透明全身，不得在
+      冷啟動、JS 尚未 ready 或壞圖退路短暫閃回不透明方形半身。
 - [ ] 在 idle/thinking 看眼睛與整組微動；paused、asleep、設定「角色動作」關閉、
       Windows 減少動畫與視窗進背景時都不得繼續動。動畫關掉不得停語音本身。
 - [ ] 分別播固定 WAV、本機 SpeechSynthesis、Azure 新答案；只在音訊真正開始後

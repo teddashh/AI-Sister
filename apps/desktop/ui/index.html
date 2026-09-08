@@ -37,7 +37,8 @@
            否則瀏覽器合成的 click 會讓一個按鍵說兩句。 -->
       <button class="avatar" data-avatar type="button">
         <span class="face">
-          <!-- 17 位角色圖都隨程式提供；JS 尚未啟動時也直接顯示 ChatGPT。 -->
+          <!-- 17 位角色圖都隨程式提供；JS 尚未啟動時也直接顯示 ChatGPT。
+               WebP 只是完整分層立繪載入前／失敗時的本機退路，不是字母替身。 -->
           <img
             class="portrait"
             data-persona-portrait
@@ -46,7 +47,7 @@
             draggable="false"
           />
           <!--
-            選配的本機分層 rig。app.js 只有在目前角色的每一張 PNG 都 load + decode
+            本機分層全身 rig。app.js 只有在目前角色的每一張 PNG 都 load + decode
             成功後才會一次放進來；之前與任何失敗都繼續顯示上面的 bundled WebP。
           -->
           <span class="persona-reel" data-persona-reel aria-hidden="true" hidden></span>

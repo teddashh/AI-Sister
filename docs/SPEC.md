@@ -284,7 +284,9 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
 - 識別：四姊妹與 13 位閨密共 17 個 canonical 身分，角色圖全部隨 desktop 離線提供，
   預設 ChatGPT。alpha.110 固定選 17 套 workplace 分層 rig（402 PNG、
   35,140,885 bytes），runtime 只建立當前角色的 21–26 層；所有圖層解碼成功
-  前都顯示 bundled WebP，任一檔失敗就留在 WebP 且不自動 retry。沒有
+  後以完整透明全身 canvas 呈現，不畫相框或裁掉腿腳。在此之前都顯示由同一
+  workplace canvas 縮出的 640×640 透明全身 bundled WebP，任一檔失敗就留在
+  WebP 且不自動 retry。沒有
   Neutral，也沒有 code-native 字母 fallback。設定頁把這 17 張 WebP 畫成 native radio
   圖像卡；切換只更新未存的本機預覽，`settings_write` 成功後才 emit 給主視窗。
   兩組角色圖的來源、大小、SHA-256

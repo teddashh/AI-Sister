@@ -175,7 +175,7 @@ class PersonaReelSelectorTests(unittest.TestCase):
         self.assertNotIn("private display name", serialized)
         for rig in manifest["rigs"]:
             self.assertEqual(
-                {"x": 320, "y": 0, "width": 640, "height": 640}, rig["viewport"]
+                {"x": 0, "y": 0, "width": 1280, "height": 1280}, rig["viewport"]
             )
             for layer in rig["layers"]:
                 path = PurePosixPath(layer["file"])

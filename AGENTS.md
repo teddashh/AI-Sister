@@ -40,10 +40,14 @@ GET，以及 alpha.110 預設關閉、另行同意後只替最新新答案或手
 - alpha.110 起，四姊妹與 13 位閨密各有一套 bundled workplace 分層 rig；
   只選 402 張 PNG，合計 35,140,885 bytes，不把 5.2 GB 候選、其他服裝、
   reaction、raw receipt 或 debug 圖塞進 release。畫面只建當前人的 21–26 層；
-  全層解碼成功才從 alpha.108 的 bundled WebP 切過去，任一檔壞掉就留在
-  WebP。兩批素材的來源、bytes、SHA-256、owner grant 與 Apache-2.0
+  全層解碼成功才從 bundled WebP 切過去，任一檔壞掉就留在 WebP。alpha.114
+  起這 17 張退路／設定選角圖是同一 workplace canvas 縮出的 640×640 透明全身
+  WebP，合計 1,031,124 bytes，不再是方形半身圖。兩批素材的來源、bytes、
+  SHA-256、owner grant 與 Apache-2.0
   圖像授權排除分別寫在 `apps/desktop/ui/personas/` 與
-  `apps/desktop/ui/persona-reels/`。預設 ChatGPT，沒有 Neutral，也沒有
+  `apps/desktop/ui/persona-reels/`。由 ChatGPT preview 衍生的五個 app icon 另由
+  `apps/desktop/src-tauri/icons/{manifest.json,NOTICE.md}` 固定 exact 464,143 bytes、
+  recipe 與 owner grant。預設 ChatGPT，沒有 Neutral，也沒有
   S/T/C/G/X glyph fallback。舊 `neutral` 設定只遷移成 ChatGPT 並關聲。
 
 - `crates/sister-assets` 在 root workspace，預設 feature 集合**沒有** `download`；只有

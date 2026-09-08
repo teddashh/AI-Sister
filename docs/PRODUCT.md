@@ -196,15 +196,16 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
   本專案是這條血脈的正主。
 - 桌面角色：四姊妹與 13 位閨密的 17 套 workplace 分層 rig 全部隨程式
   離線提供，**ChatGPT 是預設**。只選 402 張 PNG，不夾帶 5.2 GB 候選裡的
-  其他服裝、reaction、raw receipt 或 debug 圖；畫面只解碼當前角色。原本的
-  17 張 WebP 留作每層尚未全部成功時的原圖退路。Neutral 與 S/T/C/G/X 字母呈現
+  其他服裝、reaction、raw receipt 或 debug 圖；畫面只解碼當前角色，並以
+  無相框的透明全身呈現。同一 workplace canvas 另縮成 17 張 640×640 透明全身
+  WebP，供冷啟動、分層失敗與設定選角使用。Neutral 與 S/T/C/G/X 字母呈現
   已淘汰；沒有下載、下載失敗或撤回舊 pack 時，仍保留所選角色，
   S1 一項功能都不能少。
 - **Release 1.0 要把 persona 當產品面，不是換色彩蛋。** 首批 catalog 是
   ChatGPT / Claude / Gemini / Grok / DeepSeek / Qwen / Mistral / Llama（stable id: `venice`）/ Sakana /
   Perplexity / GLM / Kimi / Hunyuan / MiniMax / Nemotron / Cohere / MiMo；使用者可以選人、
   看角色圖、在自己點角色時聽到固定的非敏感台詞。alpha.112 設定頁直接用 17 張
-  bundled WebP 當圖像選擇卡；選擇只改未存預覽，儲存成功才嘗試即時通知主視窗換人，
+  bundled 全身 WebP 當圖像選擇卡；選擇只改未存預覽，儲存成功才嘗試即時通知主視窗換人，
   通知失敗則明講要重開 desktop。persona 不得改答案事實、證據、
   同意書、守門員分數或 hands 權限。
 - 舊固定語音走內容定址 omnibus asset pack。下載前先列

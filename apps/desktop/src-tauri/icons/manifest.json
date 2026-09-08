@@ -1,0 +1,70 @@
+{
+  "assets": [
+    {
+      "bytes": 2929,
+      "file": "32x32.png",
+      "format": "png",
+      "height": 32,
+      "sha256": "a74dfea2756b1b907ed448a5dda5ac67028375971a03f751de5398b540a49e4b",
+      "width": 32
+    },
+    {
+      "bytes": 26828,
+      "file": "128x128.png",
+      "format": "png",
+      "height": 128,
+      "sha256": "3c7b39235bdbdc1e6e7e610f6e96121a0abc8e8bd39063b207a8bde334796b01",
+      "width": 128
+    },
+    {
+      "bytes": 81525,
+      "file": "128x128@2x.png",
+      "format": "png",
+      "height": 256,
+      "sha256": "9ff5db041581484eba6b9d28d23a972e5b92dbdf595f26e81c76770a86a14a96",
+      "width": 256
+    },
+    {
+      "bytes": 224383,
+      "file": "icon.png",
+      "format": "png",
+      "height": 512,
+      "sha256": "bef6d399db5b48b2e87193eaab8969ccd8b2a32e671b96bdd08e3c99e561a744",
+      "width": 512
+    },
+    {
+      "bytes": 128478,
+      "file": "icon.ico",
+      "format": "ico",
+      "sha256": "79a6c4ba30fbe37ed80f2fd0a8ce65cb0ab32cbe5c9f5ff20185ab6341bef10f"
+    }
+  ],
+  "notice": "NOTICE.md",
+  "ownerGrant": {
+    "grantedOn": "2026-09-08",
+    "grantor": "Ted Huang",
+    "license": "excluded-from-Apache-2.0",
+    "scope": "Inclusion of the exact five derived ChatGPT application-icon inputs hash-listed by this manifest in the AI-Sister source tree, and their platform-specific use or embedding by official builds"
+  },
+  "recipe": {
+    "html": {
+      "file": "../../icon/icon.html",
+      "sha256": "ffcb86b766df119e7d56d9122c4b2888df281acae056b5b68089bf39a1cc6099"
+    },
+    "script": {
+      "file": "../../../../scripts/make-icons.sh",
+      "sha256": "4442f52b8cfe03cc629bd414006f8be46298993271cdf68019f1755febacaef4"
+    }
+  },
+  "rightsReview": "approved-owner-grant",
+  "schema": "ai-sister/app-icons/v1",
+  "source": {
+    "file": "../../ui/personas/chatgpt.webp",
+    "personaManifestSha256": "cf8e6e1b22f90f09ba021c092c3e0e9f5ae0dd39cf5644ffdfeb457ff3dd69c0",
+    "sha256": "ee5a4e1636ad9ec10e90cd684a39899370820682e338fdeabea9e799b4012b81"
+  },
+  "totals": {
+    "assets": 5,
+    "bytes": 464143
+  }
+}

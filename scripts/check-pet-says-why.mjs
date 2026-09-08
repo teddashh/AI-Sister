@@ -213,7 +213,10 @@ function supervisor(phase = "stopped", message = null, failures = 0) {
  * 是照著那個網址用眼睛看版面的。以前這裡寫死 `""`，等於整條 demo 路徑沒有
  * 任何測試走過。
  */
-async function open(table = {}, { search = "", beforeListenerRegistered = null } = {}) {
+async function open(
+  table = {},
+  { search = "", beforeListenerRegistered = null, browserOnly = false } = {},
+) {
   // `domOf` 只生得出 index.html 上真的有的東西——見 fake-dom.mjs 開頭那段。
   const node = domOf(HTML);
   const listeners = new Map();
@@ -273,7 +276,7 @@ async function open(table = {}, { search = "", beforeListenerRegistered = null }
   };
   globalThis.clearInterval = (id) => nativeClearInterval(id);
 
-  globalThis.__TAURI__ = {
+  const tauri = {
     core: {
       invoke: async (cmd, arg) => {
         calls.push(cmd);
@@ -296,6 +299,8 @@ async function open(table = {}, { search = "", beforeListenerRegistered = null }
       },
     },
   };
+  if (browserOnly) delete globalThis.__TAURI__;
+  else globalThis.__TAURI__ = tauri;
 
   const nonsense = watchNonsense();
   await boot();
@@ -897,7 +902,7 @@ console.log("㉗ `?asleep=nobeat` 這條 demo 路徑，在 booting 上也不可�
   // 讀到一句叫他別在意的話。
   const p = await open(
     { recording_state: "booting" },
-    { search: "?state=booting&asleep=nobeat" },
+    { search: "?state=booting&asleep=nobeat", browserOnly: true },
   );
   check("前提：她停在正在開資料庫", p.line().includes("正在開資料庫"), p.line());
   check("那句話要在", p.line().includes("等了 25 秒還沒有心跳"), p.line());
@@ -2141,20 +2146,18 @@ console.log("62. 兩題亂序回來時，過期答案不能說話，只最新題
   );
 }
 
-console.log("63. ready 冷啟動只畫 demo 不會送；repaint/poll 也不把 demo 當新答案");
+console.log("63. 純瀏覽器 screenshot demo 有答案外觀，但沒有 native Azure 能力");
 {
   const p = await open(
-    {
-      azure_tts_read: AZURE_READY,
-      azure_tts_speak: new Error("demo must not speak"),
-      recording_state: "recording",
-    },
-    { search: "?hits=demo" },
+    {},
+    { search: "?hits=demo", browserOnly: true },
   );
-  check("demo 當下沒有 speak 或 audio", azureCalls(p).length === 0 && p.audioPlays() === 0, p.invokes);
-  await p.repaint();
-  await p.pollNow();
-  check("demo 重畫與輪詢後仍是零 speak", azureCalls(p).length === 0 && p.audioPlays() === 0, p.invokes);
+  check("demo 確實畫出答案，不是拿空頁證明沒有送", !p.hits().hidden && p.hitTexts().length > 0, p.hitTexts());
+  check(
+    "browser-only demo 沒有 Azure IPC，也沒有 audio autoplay",
+    azureCalls(p).length === 0 && p.audioPlays() === 0 && p.invokes.length === 0,
+    p.invokes,
+  );
 }
 
 console.log("");

@@ -22,11 +22,39 @@ const SETTINGS_HTML = read(join(UI, "settings.html"));
 const SRC = read(join(UI, "app.js"));
 const STYLES = read(join(UI, "styles.css"));
 const SETTINGS = read(join(UI, "settings.js"));
+const SETTINGS_STYLES = read(join(UI, "settings.css"));
 const SETTINGS_CATALOG_SOURCE = read(join(UI, "personas/catalog.js"));
+const SHOT = read(join(ROOT, "scripts/shot.mjs"));
+const SHOOT_AVATAR = read(join(ROOT, "scripts/shoot-avatar.sh"));
 const MAIN = read(join(ROOT, "apps/desktop/src-tauri/src/main.rs"));
 const CONFIG = read(join(ROOT, "crates/sister-core/src/config.rs"));
 const BUNDLED = JSON.parse(read(join(UI, "personas/manifest.json")));
 const REELS = JSON.parse(read(join(UI, "persona-reels/manifest.json")));
+const FACE_CSS = STYLES.match(/(?:^|\n)\.face \{\n(?<body>[\s\S]*?)\n\}/u)?.groups?.body ?? "";
+const PORTRAIT_CSS =
+  STYLES.match(/(?:^|\n)\.portrait \{\n(?<body>[\s\S]*?)\n\}/u)?.groups?.body ?? "";
+const REEL_CSS =
+  STYLES.match(/(?:^|\n)\.persona-reel \{\n(?<body>[\s\S]*?)\n\}/u)?.groups?.body ?? "";
+const PAUSED_MARKER_CSS =
+  STYLES.match(
+    /(?:^|\n)\.avatar\[data-state="paused"\] \.face::after \{\n(?<body>[\s\S]*?)\n\}/u,
+  )?.groups?.body ?? "";
+const ASLEEP_MARKER_CSS =
+  STYLES.match(
+    /(?:^|\n)\.avatar\[data-state="asleep"\] \.face::after \{\n(?<body>[\s\S]*?)\n\}/u,
+  )?.groups?.body ?? "";
+const PAUSED_SLASH_CSS =
+  STYLES.match(
+    /(?:^|\n)\.avatar\[data-state="paused"\]::after \{\n(?<body>[\s\S]*?)\n\}/u,
+  )?.groups?.body ?? "";
+const PERSONA_CHOICE_IMAGE_CSS =
+  SETTINGS_STYLES.match(
+    /(?:^|\n)\.persona-choice-image \{\n(?<body>[\s\S]*?)\n\}/u,
+  )?.groups?.body ?? "";
+const PERSONA_PREVIEW_IMAGE_CSS =
+  SETTINGS_STYLES.match(
+    /(?:^|\n)\.persona-preview-image \{\n(?<body>[\s\S]*?)\n\}/u,
+  )?.groups?.body ?? "";
 const settingsCatalogContext = {};
 runInNewContext(SETTINGS_CATALOG_SOURCE, settingsCatalogContext);
 const SETTINGS_CATALOG = settingsCatalogContext.__AI_SISTER_PERSONA_CATALOG__;
@@ -204,7 +232,7 @@ async function open(personaView = persona(), options = {}) {
     documentElement: root,
     createElement,
   });
-  globalThis.location = { search: "" };
+  globalThis.location = { search: options.search ?? "" };
   globalThis.addEventListener = () => {};
   globalThis.removeEventListener = () => {};
   globalThis.matchMedia = () => ({ matches: false, addEventListener() {} });
@@ -232,7 +260,7 @@ async function open(personaView = persona(), options = {}) {
     return intervals.length;
   };
   globalThis.clearInterval = () => {};
-  globalThis.__TAURI__ = {
+  const tauri = {
     core: {
       invoke: async (cmd, args) => {
         calls.push(cmd);
@@ -256,8 +284,10 @@ async function open(personaView = persona(), options = {}) {
               data_url: "data:audio/wav;base64,AA==",
             };
           case "recording_state":
+            if (options.deferRecorderTruth) return new Promise(() => {});
             return "recording";
           case "recorder_supervisor_state":
+            if (options.deferRecorderTruth) return new Promise(() => {});
             return { phase: "stopped", failures: 0, message: null };
           case "pause_state":
             return false;
@@ -302,6 +332,8 @@ async function open(personaView = persona(), options = {}) {
       },
     },
   };
+  if (options.browserOnly) delete globalThis.__TAURI__;
+  else globalThis.__TAURI__ = tauri;
 
   await boot();
   await tick();
@@ -409,6 +441,98 @@ function contrast(left, right) {
   return (values[0] + 0.05) / (values[1] + 0.05);
 }
 
+function directElementRules(className) {
+  const classPattern = new RegExp(`\\.${className}(?![-\\w])`, "u");
+  return [...STYLES.matchAll(/(?<selector>[^{}]+)\{(?<body>[^{}]*)\}/gu)]
+    .filter(({ groups }) =>
+      groups.selector
+        .split(",")
+        .some((selector) => classPattern.test(selector) && !selector.includes(`.${className}::`)),
+    )
+    .map(({ groups }) => ({ selector: groups.selector.trim(), body: groups.body }));
+}
+
+console.log("⓪ 純瀏覽器明列的 state 才是截圖 fixture；產品冷啟動仍等兩份證據");
+{
+  for (const [requested, state, line] of [
+    ["idle", "idle", "在聽"],
+    ["thinking", "thinking", "想一下…"],
+    ["paused", "paused", "已暫停，沒有在看"],
+    ["asleep", "asleep", "沒有人在記錄"],
+  ]) {
+    const p = await open(persona("chatgpt"), {
+      browserOnly: true,
+      search: `?state=${requested}`,
+    });
+    check(
+      `純瀏覽器 ?state=${requested} 保留指定外觀`,
+      p.node("[data-avatar]").dataset.state === state &&
+        p.node("[data-state-line]").textContent.includes(line),
+      {
+        state: p.node("[data-avatar]").dataset.state,
+        line: p.node("[data-state-line]").textContent,
+      },
+    );
+  }
+
+  const browserWithoutFixture = await open(persona("chatgpt"), { browserOnly: true });
+  check(
+    "純瀏覽器沒有 state 仍不拿預設值冒充 recorder 證據",
+    browserWithoutFixture.node("[data-avatar]").dataset.state === "asleep" &&
+      browserWithoutFixture.node("[data-state-line]").textContent.includes("正在確認"),
+    browserWithoutFixture.node("[data-state-line]").textContent,
+  );
+
+  const tauriColdStart = await open(persona("chatgpt"), { deferRecorderTruth: true });
+  check(
+    "Tauri 冷啟動在 heartbeat / supervisor 回來前仍只說正在確認",
+    tauriColdStart.node("[data-avatar]").dataset.state === "asleep" &&
+      tauriColdStart.node("[data-state-line]").textContent.includes("正在確認"),
+    tauriColdStart.node("[data-state-line]").textContent,
+  );
+
+  const tauriWithDemoQuery = await open(persona("chatgpt"), {
+    deferRecorderTruth: true,
+    search: "?state=paused&asleep=nobeat&hits=demo&demo=1&marked=1",
+  });
+  check(
+    "Tauri 不採信瀏覽器 screenshot query，也不會假裝已按暫停",
+    tauriWithDemoQuery.node("[data-avatar]").dataset.state === "asleep" &&
+      tauriWithDemoQuery.node("[data-state-line]").textContent.includes("正在確認") &&
+      tauriWithDemoQuery.node("#pause").textContent === "⏸" &&
+      tauriWithDemoQuery.node("#pause").title === "暫停記錄" &&
+      tauriWithDemoQuery.node("#pause").dataset["aria-pressed"] === "false" &&
+      tauriWithDemoQuery.node("[data-hits]").hidden === true &&
+      tauriWithDemoQuery.node("[data-hits]").children.length === 0 &&
+      !tauriWithDemoQuery.node("[data-state-line]").textContent.includes("等了 25 秒"),
+    {
+      state: tauriWithDemoQuery.node("[data-avatar]").dataset.state,
+      line: tauriWithDemoQuery.node("[data-state-line]").textContent,
+      pause: tauriWithDemoQuery.node("#pause").textContent,
+      title: tauriWithDemoQuery.node("#pause").title,
+      pressed: tauriWithDemoQuery.node("#pause").dataset["aria-pressed"],
+      hitsHidden: tauriWithDemoQuery.node("[data-hits]").hidden,
+      hitCount: tauriWithDemoQuery.node("[data-hits]").children.length,
+    },
+  );
+
+  const browserWithUnknownFixture = await open(persona("chatgpt"), {
+    browserOnly: true,
+    search: "?state=garbage",
+  });
+  check(
+    "純瀏覽器不採信白名單外的 state",
+    browserWithUnknownFixture.node("[data-avatar]").dataset.state === "asleep" &&
+      browserWithUnknownFixture.node("[data-state-line]").textContent.includes("正在確認") &&
+      browserWithUnknownFixture.node("#pause").dataset["aria-pressed"] === "false",
+    {
+      state: browserWithUnknownFixture.node("[data-avatar]").dataset.state,
+      line: browserWithUnknownFixture.node("[data-state-line]").textContent,
+      pressed: browserWithUnknownFixture.node("#pause").dataset["aria-pressed"],
+    },
+  );
+}
+
 console.log("① Avatar 是 native button；冷啟動與輪詢都不會替使用者點它");
 {
   const tag = HTML.replace(/<!--[\s\S]*?-->/gu, "").match(/<button[^>]*data-avatar[^>]*>/u)?.[0] ?? "";
@@ -454,6 +578,44 @@ check(
 );
 check("HTML 沒有字母 glyph fallback", !HTML.includes("data-persona-glyph"));
 check("renderer 沒有字母 glyph 路徑", !SRC.includes("data-persona-glyph"));
+const bundledBytes = BUNDLED.assets.reduce((total, asset) => total + asset.bytes, 0);
+check(
+  "bundled preview manifest 是透明 640² contain 全身 v2 契約",
+  BUNDLED.schema === "ai-sister/bundled-personas/v2" &&
+    BUNDLED.previewContract?.alpha === "transparent" &&
+    BUNDLED.previewContract?.canvas?.width === 640 &&
+    BUNDLED.previewContract?.canvas?.height === 640 &&
+    BUNDLED.previewContract?.fit === "contain" &&
+    BUNDLED.previewContract?.subject === "full-body",
+  { schema: BUNDLED.schema, previewContract: BUNDLED.previewContract },
+);
+check(
+  "manifest totals 是 exact 17 張／1,031,124 bytes，而且等於逐檔加總",
+  BUNDLED.totals?.assets === 17 &&
+    BUNDLED.totals?.webpBytes === 1_031_124 &&
+    BUNDLED.totals.webpBytes === bundledBytes,
+  { totals: BUNDLED.totals, bundledBytes },
+);
+const bundledManifestDigest = createHash("sha256")
+  .update(readFileSync(join(UI, "personas/manifest.json")))
+  .digest("hex");
+const bundledNoticeDigest = createHash("sha256")
+  .update(readFileSync(join(UI, "personas/NOTICE.md")))
+  .digest("hex");
+check(
+  "bundled preview manifest／owner NOTICE 都是核准的 exact bytes",
+  bundledManifestDigest === "cf8e6e1b22f90f09ba021c092c3e0e9f5ae0dd39cf5644ffdfeb457ff3dd69c0" &&
+    bundledNoticeDigest === "981557ff2db030abf75a644fd6fea2a50e69e7aedb27197406fbc324e05712fc",
+  { bundledManifestDigest, bundledNoticeDigest },
+);
+check(
+  "設定選單與目前角色 preview 都用 contain，不把透明全身圖裁回頭像",
+  PERSONA_CHOICE_IMAGE_CSS.includes("object-fit: contain;") &&
+    PERSONA_PREVIEW_IMAGE_CSS.includes("object-fit: contain;") &&
+    !PERSONA_CHOICE_IMAGE_CSS.includes("object-fit: cover;") &&
+    !PERSONA_PREVIEW_IMAGE_CSS.includes("object-fit: cover;"),
+  { choice: PERSONA_CHOICE_IMAGE_CSS, preview: PERSONA_PREVIEW_IMAGE_CSS },
+);
 check("bundle manifest 恰好 17 人", BUNDLED.assets.length === 17, BUNDLED.assets.length);
 const expectedIds = Object.keys(EXPECTED).sort();
 const manifestIds = BUNDLED.assets.map((asset) => asset.id).sort();
@@ -582,7 +744,7 @@ console.log("③ᵇ Reel 只建 active rig；整組 decode 前與任何失敗都
   const firstLayer = chatgptRig.layers[0];
   const firstImage = pending.reelImages[0];
   check(
-    "layer 位置以 manifest viewport crop 換算，不把完整 1280 canvas 硬塞進頭像",
+    "layer 位置以 manifest 全畫布 viewport 換算，保留透明全身座標",
     firstImage.style.left ===
       `${(((firstLayer.x - chatgptRig.viewport.x) / chatgptRig.viewport.width) * 100).toFixed(5)}%` &&
       firstImage.style.top ===
@@ -590,6 +752,52 @@ console.log("③ᵇ Reel 只建 active rig；整組 decode 前與任何失敗都
       firstImage.style.width ===
         `${((firstLayer.width / chatgptRig.viewport.width) * 100).toFixed(5)}%`,
     { left: firstImage.style.left, top: firstImage.style.top, width: firstImage.style.width },
+  );
+  check(
+    "全身座標格沒有底色／邊框／圓角裁切，陰影跟著人物 alpha",
+    FACE_CSS.includes("height: 100%;") &&
+      FACE_CSS.includes("width: 100%;") &&
+      !/(?:^|\n)\s*(?:background|border|box-shadow|overflow)\s*:/u.test(FACE_CSS) &&
+      REEL_CSS.includes("filter: drop-shadow(") &&
+      !/(?:^|\n)\s*(?:background|border|border-radius|overflow)\s*:/u.test(REEL_CSS),
+    { face: FACE_CSS, reel: REEL_CSS },
+  );
+  check(
+    "flatten WebP 與 rig 都撐滿同一座標格，ready／compact 切換不改人物尺度",
+    PORTRAIT_CSS.includes("height: 100%;") &&
+      PORTRAIT_CSS.includes("width: 100%;") &&
+      STYLES.includes(
+        "body.has-hits .portrait,\nbody.has-url-policy .portrait {\n  height: 100%;\n  width: 100%;\n}",
+      ),
+    PORTRAIT_CSS,
+  );
+  check(
+    "paused／asleep 的米色空心點都有固定深色外圈，不靠人物 palette 或動畫辨識",
+    PAUSED_MARKER_CSS.includes("border-color: var(--letter-fg);") &&
+      ASLEEP_MARKER_CSS.includes("border-color: var(--letter-fg);"),
+    { paused: PAUSED_MARKER_CSS, asleep: ASLEEP_MARKER_CSS },
+  );
+  check(
+    "paused 的斜線是獨立深色 marker；asleep 不借用同一條斜線",
+    PAUSED_SLASH_CSS.includes("content: \"\";") &&
+      PAUSED_SLASH_CSS.includes("background: var(--letter-fg);") &&
+      PAUSED_SLASH_CSS.includes("height: 3px;") &&
+      PAUSED_SLASH_CSS.includes("width: 27px;") &&
+      PAUSED_SLASH_CSS.includes("transform: rotate(-45deg);") &&
+      !STYLES.includes('.avatar[data-state="asleep"]::after'),
+    PAUSED_SLASH_CSS,
+  );
+  const frameProperty =
+    /(?:^|\n)\s*(?:background(?:-color)?|border(?:-radius)?|box-shadow|overflow(?:-[xy])?)\s*:/u;
+  const frameRules = ["face", "portrait", "persona-reel"]
+    .flatMap((className) =>
+      directElementRules(className).map((rule) => ({ className, ...rule })),
+    )
+    .filter(({ body }) => frameProperty.test(body));
+  check(
+    "所有狀態／compact／reduced-motion selector 都不能把相框加回人物容器",
+    frameRules.length === 0,
+    frameRules,
   );
   const reorderedIndex = chatgptRig.layers.findIndex((layer) => layer.render_z !== layer.z);
   const reorderedLayer = chatgptRig.layers[reorderedIndex];
@@ -725,13 +933,43 @@ console.log("③ᵇ Reel 只建 active rig；整組 decode 前與任何失敗都
       !STYLES.includes("data-reel-mouth"),
   );
   check(
-    "56px 答案／URL 模式換回 WebP，不拆已 decode rig",
-    STYLES.includes("body.has-hits .avatar.reel-ready .portrait") &&
-      STYLES.includes("body.has-url-policy .avatar.reel-ready .portrait") &&
-      STYLES.includes("body.has-hits .persona-reel") &&
-      STYLES.includes("body.has-url-policy .persona-reel"),
+    "答案／URL compact 模式仍保留已 decode 全身 rig，不換回相框 WebP",
+    STYLES.includes("body.has-hits .avatar,\nbody.has-url-policy .avatar {\n  height: 88px;") &&
+      STYLES.includes(".avatar.reel-ready .portrait {\n  visibility: hidden;") &&
+      !STYLES.includes("body.has-hits .avatar.reel-ready .portrait") &&
+      !STYLES.includes("body.has-url-policy .avatar.reel-ready .portrait") &&
+      !STYLES.includes("body.has-hits .persona-reel") &&
+      !STYLES.includes("body.has-url-policy .persona-reel"),
   );
 }
+
+check(
+  "截圖工具會導航、等頁面與角色圖 ready，再核對 exact PNG 像素",
+  SHOT.includes('await send("Page.navigate", { url })') &&
+    SHOT.includes('document.readyState === "complete"') &&
+    SHOT.includes('cards.length === 17 && pictures.length === 17') &&
+    SHOT.includes("previewPictures.length === 1") &&
+    SHOT.includes("reelImages.length >= 21 && reelImages.length <= 26") &&
+    SHOT.includes('msg.method === "Runtime.exceptionThrown"') &&
+    SHOT.includes("unlinkSync(out)") &&
+    SHOT.includes('"[data-days]"') &&
+    SHOT.includes('"[data-cards]"') &&
+    SHOT.includes('"[data-shot]"') &&
+    SHOT.includes('"[data-corpus]"') &&
+    SHOT.includes('png.readUInt32BE(16) !== viewportWidth') &&
+    SHOT.includes('png.readUInt32BE(20) !== viewportHeight'),
+);
+check(
+  "角色截圖涵蓋 idle／thinking／paused／asleep，而且每張等 exact state",
+  SHOOT_AVATAR.includes("for state in idle thinking paused asleep; do") &&
+    SHOOT_AVATAR.includes('--expect-js "document.querySelector(\'[data-avatar]\')?.dataset.state === \'$state\'"') &&
+    SHOOT_AVATAR.includes('(\"127.0.0.1\", 0)') &&
+    SHOOT_AVATAR.includes('kill -0 "$server"') &&
+    ["idle", "thinking", "paused", "asleep"].every((state) =>
+      SHOOT_AVATAR.includes(`"$OUT_DIR/${state}.png"`),
+    ) &&
+    !SHOOT_AVATAR.includes("PORT=8731"),
+);
 
 console.log("④ 關掉 Persona 只拿掉角色，不碰核心 UI");
 {

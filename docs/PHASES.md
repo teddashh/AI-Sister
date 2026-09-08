@@ -549,7 +549,10 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     rig：402 張 PNG、35,140,885 bytes，逐檔 bytes/hash/geometry 與 owner grant
     都在 sanitized manifest；其他服裝、reaction、raw receipt、私有 path 與 debug
     圖不出貨。runtime 只建當前人的 21–26 層，全數解碼成功前繼續顯示
-    WebP；任一檔壞掉也不轉成字母 fallback。
+    WebP；任一檔壞掉也不轉成字母 fallback。alpha.114 保留完整透明
+    1280 canvas，移除半身 crop 與圓角相框；並把 17 張 fail-safe／設定選角圖換成
+    同一 workplace canvas 的 640×640 透明全身 WebP。主視窗、冷啟動、壞圖退路、
+    設定頁與 compact 答案狀態都不再倒回相框半身。
   - ✅ alpha.112 把同一組 17 張 bundled WebP 直接畫成設定頁的圖像 radio 卡，分成
     四姊妹與 13 位閨密；鍵盤可操作，壞縮圖仍保留完整名稱。點選只換本機未存預覽，
     不做 IPC／GET／TTS 或 Reel decode。`settings_write` 成功後才嘗試通知主視窗；
