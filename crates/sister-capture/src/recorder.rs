@@ -763,10 +763,16 @@ impl<B: Backend> Recorder<B> {
     /// 本拍 RAM。這裡不拿 boundary：engage 正在等這份 activity reader drop。
     fn master_postcheck(&mut self, ts: Millis, activity: &MasterActivity) -> Result<Option<Tick>> {
         match activity {
-            MasterActivity::Guard(guard) if guard.stop_requested() => {
-                self.master_stop_tick(ts, guard.observed_state()).map(Some)
+            MasterActivity::Guard(guard) => {
+                let started = Instant::now();
+                let observed = guard.stop_requested().then(|| guard.observed_state());
+                self.timings.master_stop.record(started.elapsed());
+                match observed {
+                    Some(observed) => self.master_stop_tick(ts, observed).map(Some),
+                    None => Ok(None),
+                }
             }
-            MasterActivity::Guard(_) | MasterActivity::NotApplicable => Ok(None),
+            MasterActivity::NotApplicable => Ok(None),
         }
     }
 
@@ -781,15 +787,24 @@ impl<B: Backend> Recorder<B> {
             MasterActivity::NotApplicable => Ok(MasterBoundaryCheck::Continue(
                 MasterCommitGuard::NotApplicable,
             )),
-            MasterActivity::Guard(guard) => match guard.boundary() {
-                Some(boundary) => Ok(MasterBoundaryCheck::Continue(MasterCommitGuard::Guard {
-                    _guard: boundary,
-                })),
-                None => {
-                    self.master_stop_tick(ts, guard.observed_state())?;
-                    Ok(MasterBoundaryCheck::Stopped)
+            MasterActivity::Guard(guard) => {
+                let started = Instant::now();
+                let boundary = guard.boundary();
+                let observed = boundary.is_none().then(|| guard.observed_state());
+                self.timings.master_stop.record(started.elapsed());
+                match boundary {
+                    Some(boundary) => Ok(MasterBoundaryCheck::Continue(MasterCommitGuard::Guard {
+                        _guard: boundary,
+                    })),
+                    None => {
+                        self.master_stop_tick(
+                            ts,
+                            observed.expect("missing boundary always observes stop state"),
+                        )?;
+                        Ok(MasterBoundaryCheck::Stopped)
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -1369,19 +1384,24 @@ impl<B: Backend> Recorder<B> {
     ) -> std::result::Result<MasterActivity, sister_hands::master_stop::State> {
         match self.master_stop_source.clone() {
             MasterStopSource::Latch(data_dir) => {
-                let guard = if let Some(guard) = self.master_input_activity.clone() {
+                let started = Instant::now();
+                let outcome = if let Some(guard) = self.master_input_activity.clone() {
                     if guard.stop_requested() {
-                        return Err(guard.observed_state());
+                        Err(guard.observed_state())
+                    } else {
+                        Ok(guard)
                     }
-                    guard
                 } else {
-                    let Some(guard) = sister_hands::master_stop::admit(&data_dir) else {
-                        return Err(sister_hands::master_stop::state(&data_dir));
-                    };
-                    self.master_input_activity = Some(guard.clone());
-                    guard
+                    match sister_hands::master_stop::admit(&data_dir) {
+                        Some(guard) => {
+                            self.master_input_activity = Some(guard.clone());
+                            Ok(guard)
+                        }
+                        None => Err(sister_hands::master_stop::state(&data_dir)),
+                    }
                 };
-                Ok(MasterActivity::Guard(guard))
+                self.timings.master_stop.record(started.elapsed());
+                outcome.map(MasterActivity::Guard)
             }
             MasterStopSource::NotApplicable => Ok(MasterActivity::NotApplicable),
         }
@@ -6496,6 +6516,32 @@ mod tests {
         let after = rec.db().stats().unwrap();
         assert_eq!(after.frames, before.frames, "全停後仍新增畫面");
         assert_eq!(after.chunks, before.chunks, "全停後仍新增文字段落");
+    }
+
+    #[test]
+    fn production_master_stop_checks_are_accounted_as_their_own_stage() {
+        let control = Tmp::new("master-stop-timing");
+        let mut rec = recorder(
+            vec![step(0, "code.exe", "timed", &["正常畫面"])],
+            Config::default(),
+        );
+        rec.set_master_stop_dir(control.0.clone());
+
+        assert!(matches!(
+            rec.tick(0).expect("clear tick"),
+            Tick::Kept { .. }
+        ));
+        assert!(
+            rec.timings().master_stop.calls > 0,
+            "production latch checks disappeared into the unattributed remainder"
+        );
+        assert!(
+            rec.timings()
+                .ranked()
+                .iter()
+                .any(|(name, _)| *name == "全停閘門"),
+            "the timing report must name the newly measured work"
+        );
     }
 
     #[test]

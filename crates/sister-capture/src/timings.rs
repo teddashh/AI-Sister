@@ -60,6 +60,9 @@ pub struct Timings {
     pub tick: Stage,
     /// 讀跨行程暫停控制檔的 snapshot；不含後續 audit／source 封邊界。
     pub pause_probe: Stage,
+    /// 讀跨行程全停 markers、永久鎖與 turnstile boundary；不含後續
+    /// audit／input suspension／clipboard watermark。
+    pub master_stop: Stage,
     /// 向 OS lifecycle source 讀目前鎖定／睡眠狀態；不含驗證與 DB audit。
     pub system_poll: Stage,
     /// 問前景視窗是誰（含 UIA 的跨程序往返）。
@@ -90,6 +93,7 @@ impl Timings {
     pub fn ranked(&self) -> Vec<(&'static str, Stage)> {
         let mut v = vec![
             ("暫停檢查", self.pause_probe),
+            ("全停閘門", self.master_stop),
             ("系統檢查", self.system_poll),
             ("脈絡", self.focus),
             ("剪貼簿", self.clipboard),
