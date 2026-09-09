@@ -658,7 +658,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     event 與 legacy image-name scan 之後、NSIS `File` 之前，對已安裝的 `sister-desktop.exe`
     與 `sister.exe` 各開一個 `GENERIC_WRITE|DELETE`、只分享 delete 的 handle：正在執行的
     image 會讓開檔以 sharing violation 失敗，與行程名字、版本、有沒有持 product event 無關，
-    Setup 因此 exit 32、不 kill、零 payload／登錄 mutation（32／1224 先重試四次、約一秒）。
+    Setup 因此 exit 32、不 kill、零 payload／登錄 mutation（32／1224 先重試八次、約兩秒）。
     拿到 handle 就先把舊檔改名成 `.ai-sister-previous`，handle 持到 `POSTINSTALL` 才刪舊檔、
     關 handle；改名到 `File` 寫完之間原路徑不存在、舊檔被 handle 擋著，Windows loader 沒有
     任何一刻能映射到舊的或半寫的 exe。direct uninstaller 在 `PREUNINSTALL` metadata 重驗後、

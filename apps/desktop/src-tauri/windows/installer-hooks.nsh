@@ -121,7 +121,7 @@ Var AI_SISTER_DIAGNOSTIC_AFTER_EXCLUSION_HANDLE
     System::Call 'kernel32::SetLastError(i 0)'
     System::Call 'kernel32::CreateFileW(w "$INSTDIR\${fileName}", i 0x40010000, i 4, p 0, i 3, i 0x80, p 0) p.r0 ?e'
     Pop $R1
-    ${If} $0 != -1
+    ${If} $0 <> -1
       ${ExitDo}
     ${EndIf}
     ${If} $R1 != 32
@@ -129,12 +129,12 @@ Var AI_SISTER_DIAGNOSTIC_AFTER_EXCLUSION_HANDLE
       ${ExitDo}
     ${EndIf}
     IntOp $R2 $R2 + 1
-    ${If} $R2 >= 4
+    ${If} $R2 >= 8
       ${ExitDo}
     ${EndIf}
     Sleep 250
   ${Loop}
-  ${If} $0 != -1
+  ${If} $0 <> -1
     StrCpy ${handleVar} $0
   ${ElseIf} $R1 = 2
   ${OrIf} $R1 = 3
@@ -153,6 +153,12 @@ Var AI_SISTER_DIAGNOSTIC_AFTER_EXCLUSION_HANDLE
   ${If} ${handleVar} != ""
     System::Call 'kernel32::MoveFileExW(w "$INSTDIR\${fileName}.ai-sister-previous", w "$INSTDIR\${fileName}", i 1) i.r0'
   ${EndIf}
+!macroend
+
+!macro AI_SISTER_RESTORE_PROGRAM_FILES
+  !insertmacro AI_SISTER_RESTORE_PROGRAM_FILE "sister-desktop.exe" $AI_SISTER_PROGRAM_FILE_HANDLE_DESKTOP
+  !insertmacro AI_SISTER_RESTORE_PROGRAM_FILE "sister.exe" $AI_SISTER_PROGRAM_FILE_HANDLE_RECORDER
+  !insertmacro AI_SISTER_RELEASE_PROGRAM_FILES
 !macroend
 
 !macro AI_SISTER_RENAME_PROGRAM_FILE fileName handleVar
@@ -185,14 +191,14 @@ Var AI_SISTER_DIAGNOSTIC_AFTER_EXCLUSION_HANDLE
     System::Call 'kernel32::CreateMutexW(p 0, i 0, w "Global\com.ted-h.ai-sister-install-after-file-exclusion-v1") p.r0 ?e'
     Pop $R1
     ${If} $0 = 0
-      !insertmacro AI_SISTER_RELEASE_PROGRAM_FILES
+      !insertmacro AI_SISTER_RESTORE_PROGRAM_FILES
       !insertmacro AI_SISTER_RELEASE_INSTALL_LIFECYCLE
       SetErrorLevel 32
       Quit
     ${EndIf}
     ${If} $R1 = 183
       System::Call 'kernel32::CloseHandle(p r0)'
-      !insertmacro AI_SISTER_RELEASE_PROGRAM_FILES
+      !insertmacro AI_SISTER_RESTORE_PROGRAM_FILES
       !insertmacro AI_SISTER_RELEASE_INSTALL_LIFECYCLE
       SetErrorLevel 32
       Quit
@@ -294,3 +300,9 @@ Var AI_SISTER_DIAGNOSTIC_AFTER_EXCLUSION_HANDLE
 !macro NSIS_HOOK_POSTUNINSTALL
   !insertmacro AI_SISTER_RELEASE_INSTALL_LIFECYCLE
 !macroend
+
+; NSIS `File` 失敗、Abort 或使用者中止都不會經過 POSTINSTALL；這裡把已改名的舊檔搬回原路徑
+; 再關 handle，讓安裝根目錄回到升級前的樣子。自己的 Quit 路徑不會進來（Quit 不觸發 callback）。
+Function .onInstFailed
+  !insertmacro AI_SISTER_RESTORE_PROGRAM_FILES
+FunctionEnd

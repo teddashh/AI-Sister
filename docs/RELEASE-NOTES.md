@@ -86,10 +86,11 @@ Setup 在 product event 與 legacy image-name scan 之後、NSIS `File` 之前�
 這個開檔以 sharing violation 失敗，與行程叫什麼名字、是哪個版本、有沒有持 product event
 無關；Setup 因此以 exit 32 拒絕，不替使用者 kill，零 payload／安裝登錄 mutation。拒絕的位置
 與既有「程式仍在執行」拒絕相同：在 WebView2 section 之後、任何產品檔或登錄改動之前。防毒
-軟體短暫獨佔會先重試四次（約一秒），之後照實拒絕，重跑 Setup 即可。
+軟體短暫獨佔會先重試八次（約兩秒），之後照實拒絕，重跑 Setup 即可。
 
 拿到 handle 之後，舊檔先改名成 `.ai-sister-previous`，handle 一直持到 `POSTINSTALL` 才刪掉
-舊檔、關閉 handle。改名到 `File` 寫完之間，原路徑不存在、舊檔又被 handle 擋著讀取，Windows
+舊檔、關閉 handle；`File` 寫入失敗或中止時由 `.onInstFailed` 把舊檔搬回原路徑再關 handle（這條
+只有 makensis 編譯檢查，沒有 CI lane）。改名到 `File` 寫完之間，原路徑不存在、舊檔又被 handle 擋著讀取，Windows
 loader 沒有任何一刻能映射到舊的或寫到一半的 exe；成功後 install root 仍是 exact 三檔。direct
 uninstaller 在 `PREUNINSTALL` 重驗 metadata 之後、刪檔之前做同一道開檔，拿不到就拒絕並保留
 三檔與 uninstall 登錄。
