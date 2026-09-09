@@ -2454,6 +2454,134 @@ console.log("67. kind、overview 與作者是封閉契約，錯線不能畫成�
   }
 }
 
+console.log("68. 全停中不可以出現『在聽』");
+{
+  const p = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  check("前提：recording 與 supervisor 證據齊全時顯示在聽", p.line().startsWith("在聽"), p.line());
+  await p.fromOutside("master-stop-changed", true);
+  check(
+    "全停後不再聲稱在聽或正在錄",
+    !p.line().includes("在聽") && !p.line().includes("正在錄"),
+    p.line(),
+  );
+  check("全停後顯示全停主句", p.line().includes("已全停：capture／brain／hands 都不會動"), p.line());
+}
+
+console.log("69. 全停壓過暫停");
+{
+  const p = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  await p.fromOutside("pause-changed", true);
+  check("前提：先顯示暫停", p.line().includes("已暫停，沒有在看"), p.line());
+  await p.fromOutside("master-stop-changed", true);
+  check("全停主句壓過暫停主句", p.line().includes("已全停：capture／brain／hands 都不會動"), p.line());
+  check("全停時不顯示暫停主句", !p.line().includes("已暫停，沒有在看"), p.line());
+}
+
+console.log("70. 解除暫停不可以讓全停畫面消失");
+{
+  const p = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  await p.fromOutside("pause-changed", true);
+  await p.fromOutside("master-stop-changed", true);
+  await p.fromOutside("pause-changed", false);
+  check(
+    "解除暫停後仍顯示全停主句",
+    p.line().includes("已全停：capture／brain／hands 都不會動"),
+    p.line(),
+  );
+  check("解除暫停後仍不聲稱在聽", !p.line().includes("在聽"), p.line());
+}
+
+console.log("71. 全停 detail 講得出正確的解除入口");
+{
+  const p = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  await p.fromOutside("master-stop-changed", true);
+  check("全停 detail 指向解除全停", p.line().includes("要恢復，請從系統匣按「解除全停」"), p.line());
+  check("全停 detail 不指向 pause 恢復鍵", !p.line().includes("▶") && !p.line().includes("繼續"), p.line());
+}
+
+console.log("72. 解除全停之後，原本的暫停要回來");
+{
+  const p = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  await p.fromOutside("pause-changed", true);
+  await p.fromOutside("master-stop-changed", true);
+  check("前提：全停時顯示全停主句", p.line().includes("已全停：capture／brain／hands 都不會動"), p.line());
+  await p.fromOutside("master-stop-changed", false);
+  check("解除全停後回到原本的暫停主句", p.line().includes("已暫停，沒有在看"), p.line());
+  check("解除全停後沒有直接跳回在聽", !p.line().includes("在聽"), p.line());
+}
+
+console.log("73. master-stop-failed 的字要出現在畫面上");
+{
+  const p = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  const failedMasterStop = "全停沒有成功：master.stop 寫不進去";
+  await p.fromOutside("master-stop-failed", failedMasterStop);
+  check("全停失敗 payload 逐字出現在畫面", p.line().includes(failedMasterStop), p.line());
+}
+
+console.log("74. 四顆停止選單項的建立、每個 menu 分支、managed state 與 refresh 都接齊");
+{
+  const main = read(join(UI, "../src-tauri/src/main.rs"));
+  const menuBranches = [...main.matchAll(/Menu::with_items\(\s*app,\s*&\[([\s\S]*?)\],\s*\)\?/g)].map(
+    (match) => match[1],
+  );
+  check("找得到 Menu::with_items 分支", menuBranches.length > 0, `${menuBranches.length} 個`);
+
+  const refreshStart = main.indexOf("fn refresh_tray(app: &tauri::AppHandle)");
+  const refreshEnd = main.indexOf("\n}\n\n/// 從 hands 的三態讀全停", refreshStart);
+  const refreshTray =
+    refreshStart >= 0 && refreshEnd > refreshStart ? main.slice(refreshStart, refreshEnd) : "";
+  check("找得到 refresh_tray 函式", refreshTray !== "", [refreshStart, refreshEnd]);
+
+  const items = [
+    ["master-stop", "master_stop_item", "MasterStopItem"],
+    ["master-resume", "master_resume_item", "MasterResumeItem"],
+    ["hands-stop", "hands_stop_item", "HandsStopItem"],
+    ["hands-resume", "hands_resume_item", "HandsResumeItem"],
+  ];
+  for (const [id, variable, state] of items) {
+    check(
+      `${id} 有用 with_id 建立`,
+      main.includes(`MenuItem::with_id(app, "${id}"`),
+      `缺少 MenuItem::with_id(app, "${id}", …)`,
+    );
+    for (const [index, branch] of menuBranches.entries()) {
+      check(
+        `${id} 出現在第 ${index + 1} 個 Menu::with_items 分支`,
+        branch.includes(`&${variable}`),
+        `第 ${index + 1} 個 Menu::with_items 分支缺少 &${variable}`,
+      );
+    }
+    check(
+      `${id} 有 app.manage(${state})`,
+      main.includes(`app.manage(${state}(${variable}));`),
+      `缺少 app.manage(${state}(${variable}));`,
+    );
+    check(
+      `refresh_tray 讀得到 ${id} 的 ${state}`,
+      refreshTray.includes(`app.try_state::<${state}>()`),
+      `refresh_tray 缺少 app.try_state::<${state}>()`,
+    );
+  }
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——字母人上有話說不出口，或說了活不過下一次輪詢。`);
