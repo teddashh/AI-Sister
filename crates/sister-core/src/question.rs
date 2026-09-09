@@ -61,7 +61,7 @@ pub enum Intent {
 }
 
 impl Intent {
-    /// 題庫與 UI 共用的穩定名稱。
+    /// 呼叫端回傳意圖時使用的穩定名稱。
     pub fn name(self) -> &'static str {
         match self {
             Self::Retrieval(shape) => shape.name(),

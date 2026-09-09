@@ -6271,6 +6271,17 @@ impl Db {
 }
 
 fn map_l2_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<L2CardRow> {
+    let author_raw = row.get::<_, String>(13)?;
+    let author = L2Author::from_str_kind(&author_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            13,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown L2 author {author_raw:?}"),
+            )),
+        )
+    })?;
     Ok(L2CardRow {
         id: row.get(0)?,
         segment_core_start: row.get(1)?,
@@ -6285,8 +6296,7 @@ fn map_l2_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<L2CardRow> {
         evidence_json: row.get(10)?,
         open_questions_json: row.get(11)?,
         created_at: row.get(12)?,
-        author: L2Author::from_str_kind(&row.get::<_, String>(13)?)
-            .unwrap_or(L2Author::Interpreter),
+        author,
         tombstoned_at: row.get(14)?,
     })
 }
@@ -7345,8 +7355,8 @@ pub struct QueryLogEntry<'a> {
     pub ts: Millis,
     /// 他打的**原話**。不做正規化：題庫要的正是真實的用詞。
     pub question: &'a str,
-    /// `"recent"`／`"keywords"`／`"range"`／`"memory_overview"`。走哪條路本身
-    /// 就是一個要驗的判斷（見 [`crate::question::Intent::name`]）。
+    /// `"recent"`／`"keywords"`／`"range"`。走哪條路本身就是一個要驗的判斷
+    /// （見 [`crate::question::shape`]）。
     pub shape: &'a str,
     /// 她一共**給了他幾筆東西**——不是 [`Db::search`] 回了幾筆。
     ///
@@ -8048,6 +8058,26 @@ mod tests {
         assert_eq!(rows[0].id, segment_100_old);
         assert_eq!(rows[0].activity, "100 v1");
         assert!(rows[0].tombstoned_at.is_none());
+    }
+
+    #[test]
+    fn unknown_l2_author_fails_closed_instead_of_becoming_model_authored() {
+        let mut db = test_db();
+        let id = insert_test_l2(&mut db, 100, "unknown author");
+        db.conn
+            .execute(
+                "UPDATE l2_card SET author = 'future-author' WHERE id = ?1",
+                [id],
+            )
+            .expect("corrupt author fixture");
+
+        let error = db
+            .recent_l2_cards(4)
+            .expect_err("unknown author must not be returned as interpreter");
+        assert!(
+            format!("{error:#}").contains("unknown L2 author \"future-author\""),
+            "conversion error must identify the invalid closed-contract value: {error:#}"
+        );
     }
 
     /// **「查到別的網址」和「目前一個網址證據都沒有」不可以是同一個答案。**

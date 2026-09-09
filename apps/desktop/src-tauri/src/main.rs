@@ -1555,6 +1555,479 @@ struct Answer {
     ///
     /// 時間軸和答案端都是活動級。分鐘級 `segment` 在時間軸展開才看得到。
     chapters: Option<Vec<Chapter>>,
+    /// 「她知道了什麼」專用的 L2 總覽。一般檢索題一定是 `None`。
+    ///
+    /// 放在最外層而不是塞進 `hits`：L2 是可修正的假設，不是 OCR 原文。兩種東西
+    /// 共用一個陣列，renderer 遲早會把其中一種畫成另一種。
+    overview: Option<MemoryOverview>,
+}
+
+/// 她已經整理過的記憶，和「沒有整理過」的原因。
+///
+/// `kind` 是封閉合約；不送一個可空的 `cards` 讓 renderer 自己猜「空」是哪一種。
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum MemoryOverview {
+    Ready {
+        cards: Vec<MemoryOverviewCard>,
+        /// 只表示最近四張候選裡，還有一張通過 DB 畫面來源檢查但因三張上限未列。
+        /// 不是「已掃過整顆資料庫，而且更舊的卡也都有圖」。
+        truncated: bool,
+        /// 最近四張候選裡，整張沒有任何 DB 畫面來源可交給 `open_frame` 的卡片數。
+        evidence_unavailable: usize,
+    },
+    RawOnly,
+    Empty,
+    EvidenceMissing {
+        cards: usize,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct MemoryOverviewCard {
+    segment_started_at: i64,
+    activity: String,
+    author: &'static str,
+    model_confidence: f64,
+    evidence: Vec<MemoryOverviewEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+struct MemoryOverviewEvidence {
+    frame_id: i64,
+    label: String,
+}
+
+/// 最近四張 current L2 候選，最多交出三張帶 DB 畫面來源的卡片。
+///
+/// L2 的 ref 只證明卡片當初指向某筆 L0。交給 `open_frame` 前還要再問一次
+/// `frames.image_path`：只記文字、畫面保留期已到、或圖片額度用完時，frame 列仍在，
+/// 但不該長出畫面按鈕。這個查詢只驗 DB 宣稱有相對路徑；實體檔若被外部刪掉，
+/// `open_frame` 仍會照實失敗，這裡不把它承諾成一定打得開。`fact:` 也只在它仍指得回
+/// 一個 frame 時才有畫面資格。
+fn memory_overview_from_db(db: &sister_core::db::Db) -> anyhow::Result<MemoryOverview> {
+    use sister_core::brain::EvidenceRef;
+
+    const CANDIDATES: usize = 4;
+    const SHOWN: usize = 3;
+
+    let candidates = db.recent_l2_cards(CANDIDATES)?;
+    if candidates.is_empty() {
+        return Ok(if db.stats()?.nothing_recorded_left() {
+            MemoryOverview::Empty
+        } else {
+            MemoryOverview::RawOnly
+        });
+    }
+
+    struct Candidate {
+        card: sister_core::db::L2CardRow,
+        evidence: Vec<(i64, String)>,
+    }
+
+    let mut resolved = Vec::with_capacity(candidates.len());
+    let mut all_frame_ids = Vec::new();
+    for card in candidates {
+        let refs: Vec<String> = serde_json::from_str(&card.evidence_json).unwrap_or_default();
+        let mut evidence = Vec::new();
+        for reference in refs.iter().filter_map(|raw| EvidenceRef::parse(raw)) {
+            let mapped = match reference {
+                EvidenceRef::Frame(frame_id) => Some((frame_id, format!("畫面 #{frame_id}"))),
+                EvidenceRef::Fact(fact_id) => db.fact_by_id(fact_id)?.and_then(|fact| {
+                    fact.frame_id.map(|frame_id| {
+                        (frame_id, format!("本機事實 #{fact_id} 的畫面 #{frame_id}"))
+                    })
+                }),
+            };
+            if let Some((frame_id, label)) = mapped {
+                // 同一張畫面可能同時被 `frame:` 和 `fact:` 指到。按鈕的能力相同，
+                // 一張卡裡不必用兩顆看似不同的按鈕冒充兩份畫面證據。
+                if evidence
+                    .iter()
+                    .any(|(known, _): &(i64, String)| *known == frame_id)
+                {
+                    continue;
+                }
+                all_frame_ids.push(frame_id);
+                evidence.push((frame_id, label));
+            }
+        }
+        resolved.push(Candidate { card, evidence });
+    }
+
+    let openable = db.frames_with_image(&all_frame_ids)?;
+    let mut cards = Vec::new();
+    let mut evidence_unavailable = 0;
+    let mut additional_openable = false;
+    for candidate in resolved {
+        let evidence: Vec<MemoryOverviewEvidence> = candidate
+            .evidence
+            .into_iter()
+            .filter(|(frame_id, _)| openable.contains(frame_id))
+            .map(|(frame_id, label)| MemoryOverviewEvidence { frame_id, label })
+            .collect();
+        if evidence.is_empty() {
+            evidence_unavailable += 1;
+            continue;
+        }
+        if cards.len() == SHOWN {
+            additional_openable = true;
+            continue;
+        }
+        cards.push(MemoryOverviewCard {
+            segment_started_at: candidate.card.segment_core_start,
+            activity: candidate.card.activity,
+            author: candidate.card.author.as_str(),
+            model_confidence: candidate.card.model_confidence,
+            evidence,
+        });
+    }
+
+    if cards.is_empty() {
+        Ok(MemoryOverview::EvidenceMissing {
+            cards: evidence_unavailable,
+        })
+    } else {
+        Ok(MemoryOverview::Ready {
+            cards,
+            truncated: additional_openable,
+            evidence_unavailable,
+        })
+    }
+}
+
+/// 建立總覽回答，但不把它冒充成 retrieval query。
+///
+/// `queries`、`query_clicks` 與 `query_marks` 是檢索品質的題庫；總覽讀的是 current
+/// L2，沒有 retrieval rank、chunk click 或可重播的 FTS 問法。這版沒有另一套總覽
+/// 評測 schema，因此 `query_id` 必須明確是 `None`，也不讀 query-log 設定。
+fn memory_overview_answer(
+    db: &sister_core::db::Db,
+    started: std::time::Instant,
+) -> Result<Answer, String> {
+    let overview = memory_overview_from_db(db).map_err(|e| format!("{e:#}"))?;
+    let shown = match &overview {
+        MemoryOverview::Ready { cards, .. } => cards.len(),
+        MemoryOverview::RawOnly
+        | MemoryOverview::Empty
+        | MemoryOverview::EvidenceMissing { .. } => 0,
+    };
+    tracing::info!(
+        "問了一次（記憶總覽）：{} 張帶資料庫畫面來源的理解，{} ms",
+        shown,
+        started.elapsed().as_millis()
+    );
+
+    Ok(Answer {
+        kind: sister_core::question::Intent::MemoryOverview.name(),
+        followup: None,
+        closure_notice: None,
+        searched: None,
+        query_id: None,
+        answers: Vec::new(),
+        hits: Vec::new(),
+        truncated: false,
+        answers_truncated: false,
+        blind: None,
+        time_range: None,
+        chapters: None,
+        overview: Some(overview),
+    })
+}
+
+#[cfg(test)]
+mod memory_overview_tests {
+    use super::*;
+    use sister_core::db::{Db, L2Author, L2Insert};
+    use sister_core::model::{FocusSnapshot, FrameCapture, OcrBlock};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    const SETTINGS_OCR: &str = "這一欄和其他每一欄不一樣：其他的是她看到的東西，這一欄是你自己打進去的字。留著是為了知道她哪些題答不出來——答不出來的那些，才是下一版要修的。時間軸上「忘掉這一段」會一併帶走，過期規則跟文字一樣。";
+
+    fn insert_frame(
+        db: &mut Db,
+        session: i64,
+        ts: i64,
+        text: &str,
+        image_path: Option<&str>,
+    ) -> i64 {
+        let frame = FrameCapture {
+            ts,
+            monitor: 0,
+            width: 1920,
+            height: 1080,
+            dhash: ts as u64,
+            image: None,
+            image_ext: "png",
+            ocr: vec![OcrBlock {
+                text: text.to_string(),
+                x: 0,
+                y: 0,
+                w: 800,
+                h: 40,
+                confidence: 0.9,
+            }],
+            focus: FocusSnapshot {
+                app_id: Some("sister-desktop.exe".into()),
+                window_title: Some("AI-Sister 設定".into()),
+                ..Default::default()
+            },
+        };
+        db.insert_frame(session, &frame, image_path, i64::from(image_path.is_some()))
+            .expect("insert frame")
+            .0
+    }
+
+    fn insert_card(db: &mut Db, segment: i64, activity: &str, refs: &[String]) -> i64 {
+        db.insert_l2_card(&L2Insert {
+            segment_core_start: segment,
+            segment_ref: &format!("segment:{segment}"),
+            activity,
+            entities_json: "[]".into(),
+            continues_json: None,
+            commitments_json: "[]".into(),
+            model_confidence: 0.73,
+            evidence_json: serde_json::to_string(refs).expect("serialize refs"),
+            open_questions_json: "[]".into(),
+            author: L2Author::Interpreter,
+        })
+        .expect("insert L2")
+    }
+
+    fn json(overview: &MemoryOverview) -> serde_json::Value {
+        serde_json::to_value(overview).expect("serialize overview")
+    }
+
+    #[test]
+    fn no_l2_distinguishes_empty_from_raw_only_without_returning_settings_ocr() {
+        let mut db = Db::open_in_memory().expect("open db");
+        assert_eq!(
+            json(&memory_overview_from_db(&db).unwrap())["kind"],
+            "empty"
+        );
+
+        let session = db.start_session("test", "test").expect("start session");
+        insert_frame(&mut db, session, 1_000, SETTINGS_OCR, None);
+        let positive = db.search("知道", 10).expect("positive-control FTS");
+        assert_eq!(positive.len(), 1, "測試必須真的建出舊路徑會撈到的設定 OCR");
+        assert_eq!(positive[0].text, SETTINGS_OCR);
+
+        let overview = memory_overview_from_db(&db).expect("raw-only overview");
+        let serialized = json(&overview);
+        assert_eq!(serialized["kind"], "raw_only");
+        assert!(
+            !serialized.to_string().contains(SETTINGS_OCR),
+            "raw-only 只能說尚未整理，不能把 positive-control OCR 送回去：{serialized}"
+        );
+    }
+
+    #[test]
+    fn overview_answer_never_enters_the_retrieval_query_tables() {
+        let db = Db::open_in_memory().expect("open db");
+        db.log_query(&sister_core::db::QueryLogEntry {
+            ts: 1,
+            question: "既有的檢索題",
+            shape: "keywords",
+            hits: 1,
+            latency_ms: 2,
+            source: sister_core::db::SOURCE_DESKTOP,
+        })
+        .expect("seed retrieval query");
+        let before = db.query_log_stats().expect("stats before overview");
+
+        let answer =
+            memory_overview_answer(&db, std::time::Instant::now()).expect("memory overview answer");
+        let after = db.query_log_stats().expect("stats after overview");
+
+        assert_eq!(answer.kind, "memory_overview");
+        assert_eq!(answer.query_id, None);
+        assert_eq!(after, before, "總覽不可污染 retrieval 的任何分母");
+        assert_eq!(db.query_log(10).expect("query rows").len(), 1);
+    }
+
+    #[test]
+    fn ready_uses_fact_frame_and_never_returns_raw_ocr_as_the_answer() {
+        let mut db = Db::open_in_memory().expect("open db");
+        let session = db.start_session("test", "test").expect("start session");
+        let frame_id = insert_frame(
+            &mut db,
+            session,
+            2_000,
+            &format!("{SETTINGS_OCR}\n客服專線 0800-080-123"),
+            Some("ready.png"),
+        );
+        let positive = db.search("知道", 10).expect("positive-control FTS");
+        assert_eq!(
+            positive.len(),
+            1,
+            "舊的 keywords 路徑在這顆 DB 必須確實命中"
+        );
+        let fact_id = db
+            .fact_sightings("phone", 10)
+            .expect("phone facts")
+            .into_iter()
+            .next()
+            .expect("phone fact")
+            .0
+            .id;
+        insert_card(
+            &mut db,
+            2_000,
+            "正在修安裝更新",
+            &[format!("fact:{fact_id}")],
+        );
+
+        let overview = memory_overview_from_db(&db).expect("ready overview");
+        let serialized = json(&overview);
+        assert_eq!(serialized["kind"], "ready");
+        assert_eq!(serialized["cards"].as_array().map(Vec::len), Some(1));
+        assert_eq!(serialized["cards"][0]["activity"], "正在修安裝更新");
+        assert_eq!(serialized["cards"][0]["evidence"][0]["frame_id"], frame_id);
+        assert!(
+            serialized["cards"][0]["evidence"][0]["label"]
+                .as_str()
+                .is_some_and(|label| label.contains(&format!("本機事實 #{fact_id}"))),
+            "fact ref 的來源身分不能在映成 frame 後消失：{serialized}"
+        );
+        assert!(
+            !serialized.to_string().contains(SETTINGS_OCR),
+            "ready 只送 L2 activity，不送 positive-control OCR：{serialized}"
+        );
+    }
+
+    #[test]
+    fn ready_caps_at_three_and_counts_whole_withheld_cards() {
+        let mut db = Db::open_in_memory().expect("open db");
+        let session = db.start_session("test", "test").expect("start session");
+        for segment in 1..=4 {
+            let frame_id = insert_frame(
+                &mut db,
+                session,
+                segment * 1_000,
+                &format!("card {segment}"),
+                Some("open.png"),
+            );
+            insert_card(
+                &mut db,
+                segment * 1_000,
+                &format!("activity {segment}"),
+                &[format!("frame:{frame_id}")],
+            );
+        }
+        let serialized = json(&memory_overview_from_db(&db).expect("overview"));
+        assert_eq!(serialized["cards"].as_array().map(Vec::len), Some(3));
+        assert_eq!(serialized["truncated"], true);
+        assert_eq!(serialized["evidence_unavailable"], 0);
+
+        let mut db = Db::open_in_memory().expect("open withheld db");
+        let session = db.start_session("test", "test").expect("start session");
+        for segment in 1..=2 {
+            let frame_id =
+                insert_frame(&mut db, session, segment * 1_000, "open", Some("open.png"));
+            insert_card(
+                &mut db,
+                segment * 1_000,
+                &format!("shown {segment}"),
+                &[format!("frame:{frame_id}")],
+            );
+        }
+        insert_card(&mut db, 3_000, "missing refs", &["frame:999999".into()]);
+        insert_card(&mut db, 4_000, "malformed refs", &["not-a-ref".into()]);
+        let serialized = json(&memory_overview_from_db(&db).expect("withheld overview"));
+        assert_eq!(serialized["cards"].as_array().map(Vec::len), Some(2));
+        assert_eq!(serialized["truncated"], false);
+        assert_eq!(
+            serialized["evidence_unavailable"], 2,
+            "算的是整張 withheld 卡，不是卡裡壞了幾個 ref"
+        );
+    }
+
+    #[test]
+    fn invalid_current_version_does_not_revive_a_superseded_card() {
+        let mut db = Db::open_in_memory().expect("open db");
+        let session = db.start_session("test", "test").expect("start session");
+        let frame_id = insert_frame(&mut db, session, 5_000, "old evidence", Some("old.png"));
+        insert_card(
+            &mut db,
+            5_000,
+            "SUPERSEDED_ACTIVITY_MUST_NOT_RETURN",
+            &[format!("frame:{frame_id}")],
+        );
+        insert_card(
+            &mut db,
+            5_000,
+            "current but missing evidence",
+            &["frame:999999".into()],
+        );
+
+        let serialized = json(&memory_overview_from_db(&db).expect("overview"));
+        assert_eq!(serialized["kind"], "evidence_missing");
+        assert_eq!(serialized["cards"], 1);
+        assert!(
+            !serialized
+                .to_string()
+                .contains("SUPERSEDED_ACTIVITY_MUST_NOT_RETURN")
+        );
+    }
+
+    #[test]
+    fn evidence_without_an_openable_image_is_not_an_answer() {
+        let mut db = Db::open_in_memory().expect("open db");
+        let session = db.start_session("test", "test").expect("start session");
+        let frame_id = insert_frame(&mut db, session, 6_000, "text-only", None);
+        insert_card(
+            &mut db,
+            6_000,
+            "card whose frame is text-only",
+            &[format!("frame:{frame_id}")],
+        );
+
+        let serialized = json(&memory_overview_from_db(&db).expect("overview"));
+        assert_eq!(serialized["kind"], "evidence_missing");
+        assert_eq!(serialized["cards"], 1);
+    }
+
+    #[test]
+    fn forgetting_the_evidence_removes_the_overview_card() {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "ai-sister-overview-forget-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("create frame root");
+        std::fs::write(root.join("forgotten.png"), b"pixel").expect("seed image");
+
+        let mut db = Db::open_in_memory().expect("open db");
+        let session = db.start_session("test", "test").expect("start session");
+        let frame_id = insert_frame(
+            &mut db,
+            session,
+            7_000,
+            "forget this source",
+            Some("forgotten.png"),
+        );
+        insert_card(
+            &mut db,
+            7_000,
+            "FORGOTTEN_ACTIVITY_MUST_NOT_RETURN",
+            &[format!("frame:{frame_id}")],
+        );
+        assert_eq!(
+            json(&memory_overview_from_db(&db).expect("before forget"))["kind"],
+            "ready"
+        );
+
+        db.forget(7_000, 7_001, Some(&root)).expect("forget range");
+        let serialized = json(&memory_overview_from_db(&db).expect("after forget"));
+        assert_eq!(serialized["kind"], "empty");
+        assert!(
+            !serialized
+                .to_string()
+                .contains("FORGOTTEN_ACTIVITY_MUST_NOT_RETURN")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 /// [`Answer::time_range`]：回述用的是他原話裡的那一段。
@@ -1647,7 +2120,7 @@ struct Fact {
 
 #[tauri::command(async)]
 fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, String> {
-    use sister_core::question::Shape;
+    use sister_core::question::{Intent, Shape};
     let question = question.trim().to_string();
     if question.is_empty() {
         return Ok(Answer {
@@ -1664,9 +2137,18 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             answers_truncated: false,
             time_range: None,
             chapters: None,
+            overview: None,
         });
     }
     let started = std::time::Instant::now();
+
+    // 先分流，再碰 retrieval。這條順序就是修正本身：「她知道了什麼」不是拿
+    // 「知道」兩字去 FTS 設定頁；總覽也不需要 chapters、blind spots、closure、
+    // follow-up，更不會因此叫 CLI。它只讀已經落地的 current L2 與本機證據。
+    if sister_core::question::intent(&question) == Intent::MemoryOverview {
+        return with_db(&shell, |db| memory_overview_answer(db, started));
+    }
+
     // 章節那一支要寫 `segment`，所以整條改拿可變借用。沒認到時間範圍
     // 時 `chapters_for_question` 立刻回 `None`，不會重算。
     with_db_mut(&shell, |db| {
@@ -1864,6 +2346,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             }),
             chapters: asked_chapters
                 .map(|(_, ch)| ch.into_iter().map(chapter_from_activity).collect()),
+            overview: None,
         })
     })
 }

@@ -193,10 +193,7 @@ impl QuestionSet {
                     .as_ref()
                     .with_context(|| format!("query-log question {} 缺少 observed", question.id))?;
                 ensure!(
-                    matches!(
-                        observed.shape.as_str(),
-                        "recent" | "keywords" | "range" | "memory_overview"
-                    ),
+                    matches!(observed.shape.as_str(), "recent" | "keywords" | "range"),
                     "query-log question {} 的 observed.shape 不認得：{}",
                     question.id,
                     observed.shape
@@ -1955,7 +1952,7 @@ mod tests {
                 id: 41,
                 ts: EVAL_ORIGIN + 100,
                 question: "同一句".into(),
-                shape: "memory_overview".into(),
+                shape: "keywords".into(),
                 hits: 0,
                 latency_ms: 2,
                 source: "desktop".into(),
@@ -1980,11 +1977,6 @@ mod tests {
         assert_eq!(set.questions[0].id, "query-0001");
         assert_eq!(set.questions[1].id, "query-0002");
         assert_eq!(set.questions[0].question, set.questions[1].question);
-        assert_eq!(
-            set.questions[0].observed.as_ref().unwrap().shape,
-            "memory_overview",
-            "總覽是題庫能驗的產品路徑，不是不認得的值"
-        );
         assert!(
             set.questions
                 .iter()
