@@ -228,6 +228,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Windows CI runs process-global production composition in an isolated process"]
     fn production_composition_writes_v2_url_provenance() {
         let _input_lock = input::test_exclusive();
         let data_dir = temp_data_dir("provenance");
@@ -250,6 +251,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Windows CI runs process-global production composition in an isolated process"]
     fn production_composition_blocks_on_the_real_data_dir_latch_before_capture() {
         let _input_lock = input::test_exclusive();
         let data_dir = temp_data_dir("master-stop");
@@ -272,6 +274,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Windows CI runs process-global production composition in an isolated process"]
     fn production_recorder_drop_drains_callbacks_before_stop_can_complete() {
         use std::sync::mpsc;
         use std::time::Duration;

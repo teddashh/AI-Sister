@@ -677,8 +677,8 @@ mod tests {
             .expect("no error")
             .expect("quiet window");
         assert_eq!(quiet.metrics, None);
-        // 這個測試沒有裝 hook（`install_hooks` 的唯一入口 `WindowsInput::start`
-        // 整個 crate 的測試都不會走），所以 `state()` 一定是 `NotStarted`，
+        // unit-test build 的 `install_hooks` 刻意是 inert seam（真 hook 無法在
+        // 共用 test process 裡安全卸載），所以 `state()` 一定是 `NotStarted`，
         // 而 `classify_quiet_window` 對那一態**不看作業系統怎麼回答**——這條
         // 斷言因此是確定的，不是碰運氣。
         //

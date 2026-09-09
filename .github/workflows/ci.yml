@@ -546,6 +546,23 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # production composition 會設 process-global DPI 狀態，而 input hook 本來也是
+      # process-lifetime 資源。不把這三條和 180+ 條並行單測混在同一個
+      # process：每條都從一個乾淨的 native Windows process 建立真正 backend。
+      - name: Windows production recorder composition — isolated native processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p sister-capture \
+            windows::tests::production_composition_writes_v2_url_provenance \
+            -- --exact --ignored --nocapture --test-threads=1
+          cargo test -p sister-capture \
+            windows::tests::production_composition_blocks_on_the_real_data_dir_latch_before_capture \
+            -- --exact --ignored --nocapture --test-threads=1
+          cargo test -p sister-capture \
+            windows::tests::production_recorder_drop_drains_callbacks_before_stop_can_complete \
+            -- --exact --ignored --nocapture --test-threads=1
+
       # fs4 鎖與 downloader feature 都要在真正 Windows 執行一次；這些測試使用
       # 本機 fake transport，平常 push 不連 CDN。
       - name: Persona pack — Windows cache and fixed transport contract
