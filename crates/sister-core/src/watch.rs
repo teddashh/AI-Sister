@@ -448,6 +448,10 @@ pub enum WatchEnd {
     ConsentRevoked {
         tally: Tally,
     },
+    /// 跑到一半收到跨三層的全停要求。
+    MasterStopped {
+        tally: Tally,
+    },
 }
 
 /// 到期那一輪到底有沒有真的問。
@@ -554,7 +558,8 @@ impl WatchEnd {
             | Self::WentQuiet { .. }
             // 撤回的人正在鍵盤前面，但**他不見得知道有一場盯梢在跑**——那可能是
             // 三小時前在另一個視窗開的。他要的是「停下來的時候叫我」，而她停了。
-            | Self::ConsentRevoked { .. } => requested,
+            | Self::ConsentRevoked { .. }
+            | Self::MasterStopped { .. } => requested,
         }
     }
 
@@ -637,6 +642,10 @@ impl WatchEnd {
             Self::ConsentRevoked { tally } => format!(
                 "{}第二張同意書被收回了，所以我停在這裡——**這一輪一個字都沒有送出去**。\
                  這**不是**「沒等到」，是我不再問了。",
+                tally.line()
+            ),
+            Self::MasterStopped { tally } => format!(
+                "{}三層全停已啟用，盯梢現在停下來；沒有再問模型。要恢復請跑 `sister stop-all --off`。",
                 tally.line()
             ),
             Self::WentQuiet {
@@ -891,6 +900,11 @@ mod tests {
     use super::*;
     use crate::brain::ProcessStart;
     use crate::model::SourceKind;
+
+    fn test_not_stopped() -> crate::brain::NotStopped {
+        crate::brain::not_stopped(std::path::Path::new("__sister-core-test-no-master-stop__"))
+            .unwrap()
+    }
 
     fn hit(text: String) -> SearchHit {
         SearchHit {
@@ -1524,6 +1538,7 @@ mod tests {
         let permit = consent.cloud_permit().expect("signed");
         let spawned = crate::brain::spawn_cli(
             permit,
+            test_not_stopped(),
             "完成了嗎",
             "sh",
             &[
@@ -1589,6 +1604,7 @@ mod tests {
         let permit = consent.cloud_permit().expect("signed");
         let noisy = crate::brain::spawn_cli(
             permit,
+            test_not_stopped(),
             "完成了嗎",
             "sh",
             &[
@@ -1796,6 +1812,7 @@ mod tests {
                 last_app: None,
             },
             WatchEnd::ConsentRevoked { tally },
+            WatchEnd::MasterStopped { tally },
         ];
         for end in ends {
             // **這個 match 什麼都不做，而它是承重的——不要刪。**
@@ -1809,7 +1826,8 @@ mod tests {
                 | WatchEnd::Deadline { .. }
                 | WatchEnd::BudgetRanOut { .. }
                 | WatchEnd::WentQuiet { .. }
-                | WatchEnd::ConsentRevoked { .. } => {}
+                | WatchEnd::ConsentRevoked { .. }
+                | WatchEnd::MasterStopped { .. } => {}
             }
             assert!(end.should_notify(true), "要求通知卻漏了 {end:?}");
             assert!(!end.should_notify(false), "沒要求通知卻響了 {end:?}");

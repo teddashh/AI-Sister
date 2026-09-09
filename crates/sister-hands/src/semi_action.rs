@@ -1028,10 +1028,18 @@ pub fn execute_approved_step(
     if let Some(reason) = never_inherited_refusal(approval.by(), class) {
         return Outcome::Refused { reason };
     }
-    if let crate::Attached::No { since_ms } = executor.hands_attached() {
-        return Outcome::Refused {
-            reason: crate::RefusalReason::HandsPulled { since_ms },
-        };
+    match executor.hands_attached() {
+        crate::Attached::Yes => {}
+        crate::Attached::No { since_ms } => {
+            return Outcome::Refused {
+                reason: crate::RefusalReason::HandsPulled { since_ms },
+            };
+        }
+        crate::Attached::MasterStopped { since_ms } => {
+            return Outcome::Refused {
+                reason: crate::RefusalReason::MasterStopped { since_ms },
+            };
+        }
     }
     execute_checked(executor, suggestion)
 }

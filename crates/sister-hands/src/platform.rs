@@ -5,7 +5,9 @@
 //! alpha.100 起 Windows CI 才另外執行它的 unit tests。`target_policy` 搬進
 //! `sister-hands`，是為了讓 CLI 和字母人共用同一份規則，並讓 Linux CI 也跑得到。
 
-use crate::{Attached, Executor, ExecutorError, RefusalReason, Suggestion, kill_switch};
+use crate::{
+    Attached, Executor, ExecutorError, RefusalReason, Suggestion, kill_switch, master_stop,
+};
 use std::path::{Path, PathBuf};
 
 pub struct PlatformExecutor {
@@ -28,6 +30,11 @@ impl Executor for PlatformExecutor {
         // 這裡還是交不出去」。兩道之間是 TOCTOU 窗口，這一道把它縮到只剩
         // `platform_execute` 裡的 ShellExecuteW 本身。走到這裡代表上面那一道
         // 已被繞過；typed `ExecutorError` 會讓它仍落成 Refused，不會謊稱碰過 OS。
+        if master_stop::is_stopped(&self.data_dir) {
+            return Err(ExecutorError::refused(RefusalReason::MasterStopped {
+                since_ms: master_stop::stopped_since(&self.data_dir),
+            }));
+        }
         if kill_switch::is_pulled(&self.data_dir) {
             return Err(ExecutorError::refused(RefusalReason::HandsPulled {
                 since_ms: kill_switch::pulled_since(&self.data_dir),
@@ -37,7 +44,11 @@ impl Executor for PlatformExecutor {
     }
 
     fn hands_attached(&self) -> Attached {
-        if kill_switch::is_pulled(&self.data_dir) {
+        if master_stop::is_stopped(&self.data_dir) {
+            Attached::MasterStopped {
+                since_ms: master_stop::stopped_since(&self.data_dir),
+            }
+        } else if kill_switch::is_pulled(&self.data_dir) {
             Attached::No {
                 since_ms: kill_switch::pulled_since(&self.data_dir),
             }
@@ -155,6 +166,42 @@ mod tests {
         );
         assert!(kill_switch::release(&dir).unwrap());
         assert_eq!(executor.hands_attached(), Attached::Yes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn master_stop_refuses_the_hand_and_names_the_right_lever() {
+        let dir = std::env::temp_dir().join(format!(
+            "sister-platform-master-stop-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        master_stop::engage(&dir, 2_000).unwrap();
+        let mut executor = PlatformExecutor::new(&dir);
+        assert_eq!(
+            executor.hands_attached(),
+            Attached::MasterStopped {
+                since_ms: Some(2_000)
+            }
+        );
+        let suggestion =
+            SuggestionButton::parse_json(r#"{"action":"open_url","url":"https://example.com"}"#)
+                .unwrap()
+                .press();
+        let error = executor.execute(&suggestion).expect_err("全停仍交出動作");
+        let ExecutorError::RefusedBeforeOs {
+            reason: RefusalReason::MasterStopped { .. },
+        } = error
+        else {
+            panic!("拒絕理由沒有指出全停：{error:?}");
+        };
+        assert!(
+            RefusalReason::MasterStopped {
+                since_ms: Some(2_000)
+            }
+            .message()
+            .contains("stop-all --off")
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -1898,7 +1898,7 @@ pub mod interpret {
             return Ok(());
         }
 
-        let result = brain::run(&mut input)?;
+        let result = brain::run(&mut input, data_dir)?;
         if let Some(skip) = &result.skip {
             println!(
                 "{}",
@@ -2316,7 +2316,7 @@ pub mod review {
             );
             return Ok(());
         }
-        let result = reviewer::run(&mut input)?;
+        let result = reviewer::run(&mut input, data_dir)?;
         let stats = input.db.reviewer_recheck_stats()?;
         print!(
             "{}",
@@ -2707,6 +2707,7 @@ pub mod act {
         mismatched: u32,
         wrong_path: u32,
         pulled: u32,
+        master_stopped: u32,
         failed: u32,
     }
 
@@ -2717,6 +2718,7 @@ pub mod act {
             match reason.bucket() {
                 sister_hands::RefusalBucket::Declined => self.declined += 1,
                 sister_hands::RefusalBucket::Pulled => self.pulled += 1,
+                sister_hands::RefusalBucket::MasterStopped => self.master_stopped += 1,
                 sister_hands::RefusalBucket::OutsideGrant => self.blocked += 1,
                 sister_hands::RefusalBucket::TargetNotOnACitedScreen => self.target_not_cited += 1,
                 sister_hands::RefusalBucket::TargetHasNoFrameToCheck => self.target_no_frame += 1,
@@ -2751,6 +2753,12 @@ pub mod act {
             let mut out = String::new();
             if self.pulled > 0 {
                 out.push_str(&format!("，拔手擋掉 {} 步", self.pulled));
+            }
+            if self.master_stopped > 0 {
+                out.push_str(&format!(
+                    "，三層全停擋掉 {} 步（要恢復請跑 `sister stop-all --off`）",
+                    self.master_stopped
+                ));
             }
             if self.target_not_cited > 0 {
                 out.push_str(&format!(
@@ -9054,6 +9062,9 @@ pub mod watch {
             let Some(permit) = sister_core::consent::load(data_dir).cloud_permit() else {
                 break WatchEnd::ConsentRevoked { tally };
             };
+            if brain::not_stopped(data_dir).is_none() {
+                break WatchEnd::MasterStopped { tally };
+            }
 
             let look = match window(last_seen, now) {
                 // 時鐘往回跳了（NTP 校時、睡眠喚醒），這一輪的區間是反的。
@@ -9129,7 +9140,11 @@ pub mod watch {
                             )?;
                         }
                         let sent_hits = &hits[prompt.included_from..];
-                        let spawn = brain::spawn_cli(permit, &prompt.payload, &command, &args);
+                        let Some(not_stopped) = brain::not_stopped(data_dir) else {
+                            break WatchEnd::MasterStopped { tally };
+                        };
+                        let spawn =
+                            brain::spawn_cli(permit, not_stopped, &prompt.payload, &command, &args);
                         let (outcome, verdict) = sister_core::watch::verdict_from_spawn(&spawn);
                         let error = match &verdict {
                             Verdict::NoAnswer { head, .. } if !head.is_empty() => {
@@ -11299,6 +11314,74 @@ pub mod pause {
             (true, false) => println!("▶ 已解除暫停。她從下一個 tick 開始重新記錄。"),
             (false, false) => println!("▶ 本來就沒有暫停，沒有變動。"),
         }
+        if !paused && sister_hands::master_stop::is_stopped(data_dir) {
+            let pause_state = if before {
+                "暫停已解除"
+            } else {
+                "暫停原本就沒有啟用"
+            };
+            println!(
+                "■ {pause_state}，但三層全停還在，capture 仍然停著。要恢復請跑 `{}`。",
+                cmd(data_dir, "stop-all --off")
+            );
+        }
+        Ok(())
+    }
+}
+
+pub mod stop_all {
+    use super::*;
+
+    pub fn run(data_dir: &Path, off: bool) -> Result<()> {
+        if off {
+            sister_hands::master_stop::release(data_dir)
+                .with_context(|| format!("解除不了 {}", data_dir.display()))?;
+            println!(
+                "▶ capture、brain、hands 都已解除全停；是否實際恢復仍要看原本另按的暫停／拔手。"
+            );
+            let paused = sister_core::pause::is_paused(data_dir);
+            let hands = sister_hands::kill_switch::is_pulled(data_dir);
+            match (paused, hands) {
+                (true, true) => println!(
+                    "但你原本自己按的暫停與拔手還在；capture 仍暫停，hands 仍拔著。請分別跑 `{}` 與 `{}`。",
+                    cmd(data_dir, "resume"),
+                    cmd(data_dir, "hands resume")
+                ),
+                (true, false) => println!(
+                    "但你原本自己按的暫停還在；capture 仍暫停。請跑 `{}`。",
+                    cmd(data_dir, "resume")
+                ),
+                (false, true) => println!(
+                    "但你原本自己按的拔手還在；hands 仍拔著。請跑 `{}`。",
+                    cmd(data_dir, "hands resume")
+                ),
+                (false, false) => println!("你原本自己按的暫停／拔手目前都不在。"),
+            }
+            return Ok(());
+        }
+
+        let already = sister_hands::master_stop::is_stopped(data_dir);
+        let since = sister_hands::master_stop::stopped_since(data_dir);
+        sister_hands::master_stop::engage(data_dir, sister_core::now_ms())
+            .with_context(|| format!("寫不進 {}", data_dir.display()))?;
+        if already {
+            match since {
+                Some(ts) => println!(
+                    "■ 三層本來就全停著（從 {} 起），沒有變動；第一次的時間沒有被洗掉。要解除請跑 `{}`。",
+                    crate::fmt::timestamp(ts),
+                    cmd(data_dir, "stop-all --off")
+                ),
+                None => println!(
+                    "■ 三層本來就全停著（開始時間讀不到），沒有變動。要解除請跑 `{}`。",
+                    cmd(data_dir, "stop-all --off")
+                ),
+            }
+        } else {
+            println!(
+                "■ 三層都停了：capture 不再擷取、brain 不再送出、hands 不再執行。全停不會自己恢復；要解除請跑 `{}`。",
+                cmd(data_dir, "stop-all --off")
+            );
+        }
         Ok(())
     }
 }
@@ -12152,10 +12235,23 @@ pub mod hands_switch {
 
     pub(crate) fn resume_with_output(data_dir: &Path, out: &mut impl std::io::Write) -> Result<()> {
         ensure_data_dir(data_dir)?;
-        if sister_hands::kill_switch::release(data_dir)? {
+        let was_pulled = sister_hands::kill_switch::release(data_dir)?;
+        if was_pulled {
             writeln!(out, "已把手接回去。")?;
         } else {
             writeln!(out, "手本來就接著。")?;
+        }
+        if sister_hands::master_stop::is_stopped(data_dir) {
+            let hand_state = if was_pulled {
+                "拔手已解除"
+            } else {
+                "拔手原本就沒有啟用"
+            };
+            writeln!(
+                out,
+                "{hand_state}，但三層全停還在，hands 仍然停著。要恢復請跑 `{}`。",
+                cmd(data_dir, "stop-all --off")
+            )?;
         }
         Ok(())
     }
@@ -17984,7 +18080,32 @@ pub mod doctor {
         // 而且這一行是**不必開始錄就會告訴使用者「你上禮拜按的暫停還開著」的唯一一個地方**。
         // 暫停不會自己過期（見 `sister_core::pause`），所以那條路很真實，而
         // 它的症狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
-        let (sym, said) = watching_verdict(paused_row(data_dir), beat);
+        let master_stopped = sister_hands::master_stop::is_stopped(data_dir);
+        let master_row = master_stopped.then(|| {
+            sister_hands::master_stop::stopped_since(data_dir)
+                .map(|ts| {
+                    format!(
+                        "**三層全停中**（從 {} 起）；不會自己恢復。解除請跑 `{}`",
+                        crate::fmt::timestamp(ts),
+                        cmd(data_dir, "stop-all --off")
+                    )
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "**三層全停中**（開始時間讀不到）；不會自己恢復。解除請跑 `{}`",
+                        cmd(data_dir, "stop-all --off")
+                    )
+                })
+        });
+        mark(
+            if master_stopped { "■" } else { "✓" },
+            "capture／brain／hands 全停",
+            master_row.as_deref().unwrap_or("沒有啟用"),
+        );
+        let (sym, said) = match master_row {
+            Some(said) => ("■", said),
+            None => watching_verdict(paused_row(data_dir), beat),
+        };
         mark(sym, "現在有沒有在看", &said);
         // 題庫是整個資料庫裡唯一一張存著**你自己打進去的字**的表，所以它得
         // 出現在這一頁上。doctor 的工作是把真相攤開，而一張存了東西、卻沒有
@@ -22725,6 +22846,7 @@ pub mod replay {
     }
 
     pub fn evaluate_corpus(
+        data_dir: &Path,
         corpus_path: &Path,
         questions_path: &Path,
         opts: EvaluateOpts<'_>,
@@ -22738,6 +22860,7 @@ pub mod replay {
                 opts.k,
                 opts.runs,
                 opts.brain.as_ref(),
+                data_dir,
             )?
         } else {
             sister_core::eval::evaluate(&corpus, &questions, opts.k, opts.runs)?
@@ -23193,6 +23316,7 @@ pub mod replay {
                 // 執行當下的環境狀態。所以 `Paused` 在這條路上到不了。
                 Tick::Duplicate { .. }
                 | Tick::Disabled
+                | Tick::MasterStopped
                 | Tick::Paused
                 | Tick::Resumed
                 | Tick::Idle => {}
@@ -23677,6 +23801,7 @@ pub mod replay {
             )?;
 
             evaluate_corpus(
+                &tmp.0,
                 &corpus,
                 &questions,
                 EvaluateOpts {
@@ -23700,6 +23825,7 @@ pub mod replay {
 
             assert!(
                 evaluate_corpus(
+                    &tmp.0,
                     &corpus,
                     &questions,
                     EvaluateOpts {
@@ -24503,7 +24629,8 @@ pub mod record {
                 *was_idle = true;
                 false
             }
-            Disabled | Paused | Resumed | SystemChanged | SystemUnknown | ContextChanged => false,
+            Disabled | MasterStopped | Paused | Resumed | SystemChanged | SystemUnknown
+            | ContextChanged => false,
             Kept { .. } | NoScreen => {
                 *was_idle = false;
                 true
@@ -25142,6 +25269,7 @@ pub mod record {
         // 只有 windows 模組內這條 composition 能建立 trusted v2 session。
         // 公開的 Recorder::new 不論 backend 名字為何都只會得到 untrusted provenance。
         let mut rec = windows::recorder(config, db, images)?;
+        rec.set_master_stop_dir(data_dir.to_path_buf());
 
         // **先建後端、再問能力。** 反過來的話，「輸入 hook 裝上了沒」永遠
         // 是在 hook 還沒裝之前問的，於是永遠回報失敗——一則恆假的警告。

@@ -616,9 +616,13 @@ impl Engine {
                 Ok(())
             }
             Some(BrainSkip::NoConsent) => Ok(()),
+            Some(BrainSkip::MasterStopped) => {
+                self.report.last_interpreter_skip = dry.skip.map(|s| s.message());
+                Ok(())
+            }
             Some(BrainSkip::BudgetExhausted { .. }) => {
                 let msg = dry.skip.as_ref().map(|s| s.message());
-                let result = brain::run(&mut input)?;
+                let result = brain::run(&mut input, &self.data_dir)?;
                 self.budget_exhausted = true;
                 self.report.last_interpreter_skip = result.skip.map(|s| s.message()).or(msg);
                 Ok(())
@@ -642,7 +646,7 @@ impl Engine {
                     return Ok(());
                 }
                 self.report.interpreter_wakes += 1;
-                let result = brain::run(&mut input)?;
+                let result = brain::run(&mut input, &self.data_dir)?;
                 self.report.interpreter_jobs += result.ran.len() as u32;
                 self.report.interpreter_cards +=
                     result.ran.iter().filter(|j| j.card.is_some()).count() as u32;
@@ -704,7 +708,7 @@ impl Engine {
                 force: false,
                 now,
             };
-            reviewer::run(&mut input)?
+            reviewer::run(&mut input, &self.data_dir)?
         };
         if let Some(skip) = &result.skip {
             self.report.last_reviewer_skip = Some(skip.message());

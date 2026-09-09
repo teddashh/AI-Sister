@@ -824,13 +824,15 @@ pub fn evaluate_ab(
     k: usize,
     runs: usize,
     brain: Option<&BrainEval>,
+    control_data_dir: &std::path::Path,
 ) -> Result<EvalReport> {
     let mut report = evaluate(corpus, questions, k, runs)?;
     let origin = replay_origin();
     let mut db = Db::open_in_memory()?;
     db.import_replay(corpus, origin)?;
 
-    let (brain_summary, model) = run_brain_for_eval(&mut db, corpus, origin, brain)?;
+    let (brain_summary, model) =
+        run_brain_for_eval(&mut db, corpus, origin, brain, control_data_dir)?;
     let mut treatment = evaluate_on_db(
         &mut db,
         corpus,
@@ -1161,6 +1163,7 @@ fn run_brain_for_eval(
     corpus: &Corpus,
     origin: Millis,
     brain: Option<&BrainEval>,
+    control_data_dir: &std::path::Path,
 ) -> Result<(BrainRunSummary, ModelUsage)> {
     let mut consent = Consent::default();
     consent.grant(Sheet::CloudReading, origin);
@@ -1208,7 +1211,7 @@ fn run_brain_for_eval(
             limit: 80,
             only_core_start: None,
         };
-        brain::run(&mut input)?
+        brain::run(&mut input, control_data_dir)?
     };
     summary.ran = true;
     summary.skip = interpreted.skip.as_ref().map(|s| s.as_str().to_string());
@@ -1230,7 +1233,7 @@ fn run_brain_for_eval(
             force: true,
             now: to_ts,
         };
-        reviewer::run(&mut review_input)?
+        reviewer::run(&mut review_input, control_data_dir)?
     };
     summary.reviewer_ran = reviewed.ran;
     summary.reviewer_skip = reviewed.skip.as_ref().map(|s| s.as_str().to_string());
@@ -2119,7 +2122,15 @@ sys.stdout.buffer.write(out.encode('utf-8'))
     #[test]
     fn ab_without_cli_is_incomplete_and_does_not_shrink_the_set() {
         let (corpus, questions) = fixture();
-        let report = evaluate_ab(&corpus, &questions, 5, 1, None).expect("ab");
+        let report = evaluate_ab(
+            &corpus,
+            &questions,
+            5,
+            1,
+            None,
+            std::path::Path::new("__sister-core-test-no-master-stop__"),
+        )
+        .expect("ab");
         let ab = report.ab.as_ref().expect("ab block");
         assert_eq!(ab.questions_total, 2);
         assert_eq!(ab.questions_graded, 2);
@@ -2148,7 +2159,15 @@ sys.stdout.buffer.write(out.encode('utf-8'))
         let _ = std::fs::remove_file(&sentinel);
         let (corpus, questions) = fixture();
         let brain = fake_eval_cli(&dir, &sentinel);
-        let report = evaluate_ab(&corpus, &questions, 5, 1, Some(&brain)).expect("ab");
+        let report = evaluate_ab(
+            &corpus,
+            &questions,
+            5,
+            1,
+            Some(&brain),
+            std::path::Path::new("__sister-core-test-no-master-stop__"),
+        )
+        .expect("ab");
         let ab = report.ab.as_ref().expect("ab block");
         assert_eq!(ab.questions_total, questions.questions.len());
         assert_eq!(ab.questions_graded, questions.questions.len());

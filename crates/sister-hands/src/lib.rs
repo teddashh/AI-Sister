@@ -18,6 +18,7 @@ use std::{
 
 pub mod commitment_action;
 pub mod kill_switch;
+pub mod master_stop;
 pub mod platform;
 pub mod replay_copy;
 pub mod semi_action;
@@ -383,6 +384,8 @@ pub enum RefusalReason {
     },
     /// 手被拔掉了（`hands.stop`）——這一步沒有交給作業系統。
     HandsPulled { since_ms: Option<i64> },
+    /// 全停開關在（`master.stop`）——這一步沒有交給作業系統。
+    MasterStopped { since_ms: Option<i64> },
 }
 
 /// 同一份清單生出 enum、`ALL`、`COUNT`。加一種就要改這份清單，
@@ -582,6 +585,8 @@ pub enum RefusalBucket {
     Declined,
     /// 拔手開關。
     Pulled,
+    /// 跨三層的全停開關；解除指令和拔手不同。
+    MasterStopped,
     /// 票的五維不涵蓋這一步。放寬 `--apps` / `--allow` / `--minutes` 有用。
     OutsideGrant,
     /// 她還沒問過他那個網址問題。**一個動作就全部解決**（回答它），所以它
@@ -643,6 +648,7 @@ impl RefusalReason {
         match self {
             Self::UserDeclinedThisStep => RefusalBucket::Declined,
             Self::HandsPulled { .. } => RefusalBucket::Pulled,
+            Self::MasterStopped { .. } => RefusalBucket::MasterStopped,
             Self::NotCoveredByGrant { .. } => RefusalBucket::OutsideGrant,
             Self::TargetRejectedBeforeOs { .. } => RefusalBucket::TargetRejectedBeforeOs,
             Self::UnattendedTargetHasNoCitedFrame { why } => match why {
@@ -676,7 +682,7 @@ impl RefusalReason {
 
     /// 非 `UnattendedTargetHasNoCitedFrame` 的種數 + [`TargetFrameGap::COUNT`]。
     /// 測試把「每種各餵一次」綁在這個數字和 [`Self::index`] 上。
-    pub const KIND_COUNT: usize = 9 + TargetFrameGap::COUNT + UrlOriginGap::COUNT;
+    pub const KIND_COUNT: usize = 10 + TargetFrameGap::COUNT + UrlOriginGap::COUNT;
 
     /// 0..KIND_COUNT-1。match 沒有 `_`：漏一種編不過。
     /// `UnattendedTargetHasNoCitedFrame` 占 7..7+COUNT-1，所以加一種
@@ -694,6 +700,7 @@ impl RefusalReason {
             Self::ApprovalWasForAnotherStep { .. } => 7 + TargetFrameGap::COUNT,
             Self::HandsPulled { .. } => 8 + TargetFrameGap::COUNT,
             Self::UnattendedUrlOriginUnknown { why } => 9 + TargetFrameGap::COUNT + why.index(),
+            Self::MasterStopped { .. } => 9 + TargetFrameGap::COUNT + UrlOriginGap::COUNT,
         }
     }
 
@@ -741,6 +748,16 @@ impl RefusalReason {
                 ),
                 None => {
                     format!("手被拔掉了，所以這一步沒有交給作業系統。要接回去請跑 `{resume}`。")
+                }
+            },
+            Self::MasterStopped { since_ms } => match since_ms {
+                Some(since_ms) => format!(
+                    "從 {} 起三層都已全停，所以這一步沒有交給作業系統。要恢復請跑 `sister stop-all --off`。",
+                    replay_copy::at(*since_ms),
+                ),
+                None => {
+                    "三層都已全停，所以這一步沒有交給作業系統。要恢復請跑 `sister stop-all --off`。"
+                        .to_string()
                 }
             },
         }
@@ -828,6 +845,10 @@ pub enum Attached {
     No {
         since_ms: Option<i64>,
     },
+    /// `master.stop` 在；解除它不能用 hands resume。
+    MasterStopped {
+        since_ms: Option<i64>,
+    },
 }
 
 /// **suggest 那條路**的唯一隘口：字母人上那顆按鈕按下去，走這裡。
@@ -877,10 +898,18 @@ pub fn execute_with(
             reason: RefusalReason::NeverInherited { class },
         };
     }
-    if let Attached::No { since_ms } = executor.hands_attached() {
-        return Outcome::Refused {
-            reason: RefusalReason::HandsPulled { since_ms },
-        };
+    match executor.hands_attached() {
+        Attached::Yes => {}
+        Attached::No { since_ms } => {
+            return Outcome::Refused {
+                reason: RefusalReason::HandsPulled { since_ms },
+            };
+        }
+        Attached::MasterStopped { since_ms } => {
+            return Outcome::Refused {
+                reason: RefusalReason::MasterStopped { since_ms },
+            };
+        }
     }
     execute_checked(executor, suggestion)
 }
@@ -1252,6 +1281,7 @@ mod tests {
                 },
                 RefusalReason::ApprovalWasForAnotherStep { .. } => RefusalBucket::ShownStepMismatch,
                 RefusalReason::HandsPulled { .. } => RefusalBucket::Pulled,
+                RefusalReason::MasterStopped { .. } => RefusalBucket::MasterStopped,
                 // 分兩格的理由是「下一步」：沒問過的話要先回答；其他四種要他
                 // 一步一步自己看，回答設定救不了它們。「一律當場按」也不會讓
                 // 無人值守網址放行，所以不能宣稱回答一次就全部解決。
@@ -1299,6 +1329,7 @@ mod tests {
         for why in UrlOriginGap::ALL {
             every_reason.push(RefusalReason::UnattendedUrlOriginUnknown { why });
         }
+        every_reason.push(RefusalReason::MasterStopped { since_ms: Some(1) });
         let mut seen = [false; RefusalReason::KIND_COUNT];
         for reason in &every_reason {
             let i = reason.index();

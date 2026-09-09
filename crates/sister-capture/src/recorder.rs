@@ -35,6 +35,8 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 pub enum Tick {
     /// 總開關關閉——她閉著眼睛。設定檔說的，重開才會變。
     Disabled,
+    /// 跨 capture／brain／hands 的 durable 全停開關正在生效。
+    MasterStopped,
     /// 使用者按了暫停。和 `Disabled` 差在這是**當下**、可以隨時解除的，
     /// 而且進出各留一筆 system event，所以資料裡那個空洞解釋得出來。
     Paused,
@@ -414,6 +416,8 @@ pub struct Recorder<B: Backend> {
     pending_system: Option<PendingSystemObservation>,
     /// 畫面檔的根目錄。`None` = text-only 模式。
     image_dir: Option<PathBuf>,
+    /// Production data dir。replay／第三方 recorder 不自行讀跨行程控制面。
+    master_stop_dir: Option<PathBuf>,
     /// 上一次**真的寫出**畫面檔的時刻。見 `image_min_interval_ms`。
     last_image_ts: Option<Millis>,
     /// 上一次真的去看螢幕的時刻（不管結果是新是舊）。空閒跳過的天花板
@@ -519,6 +523,7 @@ impl<B: Backend> Recorder<B> {
             last_system_transition_sequence: None,
             pending_system: None,
             image_dir,
+            master_stop_dir: None,
             last_image_ts: None,
             last_look_ts: None,
             image_day,
@@ -599,6 +604,11 @@ impl<B: Backend> Recorder<B> {
     /// 每日額度照樣往上加，因為它算的是今天寫出去多少位元組，而不寫就是不加。
     pub fn set_image_dir(&mut self, dir: Option<PathBuf>) {
         self.image_dir = dir;
+    }
+
+    /// 把 production recorder 接到跨行程的全停 latch。
+    pub fn set_master_stop_dir(&mut self, dir: PathBuf) {
+        self.master_stop_dir = Some(dir);
     }
 
     /// 她現在會不會把圖寫下來。
@@ -1139,6 +1149,17 @@ impl<B: Backend> Recorder<B> {
 
         if !self.config.capture.enabled {
             return Ok(Tick::Disabled);
+        }
+
+        if self
+            .master_stop_dir
+            .as_deref()
+            .is_some_and(sister_hands::master_stop::is_stopped)
+        {
+            // 和 pause 一樣，恢復後不能把停止期間的 clipboard／input 尾巴撈回來。
+            let _ = self.establish_clipboard_watermark(ts);
+            let _ = self.suspend_input_source(ts);
+            return Ok(Tick::MasterStopped);
         }
 
         // Production snapshot 也必須在已暫停時讀：這是 recorder 看見 resume，
@@ -5648,6 +5669,26 @@ mod tests {
                 }
             })
             .sum()
+    }
+
+    #[test]
+    fn master_stop_tick_adds_no_frame_or_text_chunk() {
+        let control = Tmp::new("master-stop");
+        let mut rec = recorder(
+            vec![
+                step(0, "code.exe", "A", &["第一段"]),
+                step(1_000, "code.exe", "B", &["第二段"]),
+            ],
+            Config::default(),
+        );
+        rec.set_master_stop_dir(control.0.clone());
+        assert!(matches!(rec.tick(0).unwrap(), Tick::Kept { .. }));
+        let before = rec.db().stats().unwrap();
+        sister_hands::master_stop::engage(&control.0, 500).unwrap();
+        assert_eq!(rec.tick(1_000).unwrap(), Tick::MasterStopped);
+        let after = rec.db().stats().unwrap();
+        assert_eq!(after.frames, before.frames, "全停後仍新增畫面");
+        assert_eq!(after.chunks, before.chunks, "全停後仍新增文字段落");
     }
 
     /// 每次都給一張不一樣的畫面，這樣去重不會把它們併掉。

@@ -67,6 +67,7 @@ pub fn summarized_day(run_at: Millis) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
     NoConsent,
+    MasterStopped,
     NoCommand,
     BudgetExhausted { used: u32, limit: u32 },
     Cadence { last_ago_ms: Millis, min_ms: Millis },
@@ -77,6 +78,7 @@ impl SkipReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             SkipReason::NoConsent => "no_consent",
+            SkipReason::MasterStopped => "master_stopped",
             SkipReason::NoCommand => "no_command",
             SkipReason::BudgetExhausted { .. } => "budget",
             SkipReason::Cadence { .. } => "cadence",
@@ -93,6 +95,7 @@ impl SkipReason {
             SkipReason::NoConsent => format!(
                 "還沒簽第二張同意書（上雲解讀）。審閱層一次都不會呼叫那支 CLI。\n要簽字：{consent_command}"
             ),
+            SkipReason::MasterStopped => "三層全停中：審閱層這一趟沒有問模型，也沒有寫新的 L3。要恢復請跑 `sister stop-all --off`。".to_string(),
             SkipReason::NoCommand => concat!(
                 "還沒設定 [brain] command。審閱層一次都不會呼叫。\n",
                 "（不是今天沒有東西可審——她根本沒有一支 CLI 可以叫。）"
@@ -661,7 +664,7 @@ pub fn parse_due_at(hint: &str, evidence_ts: Millis) -> Option<Millis> {
     None
 }
 
-pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
+pub fn run(input: &mut ReviewInput<'_>, data_dir: &std::path::Path) -> Result<ReviewResult> {
     // `run_day` 是「這一輪是哪一天跑的」（reviewer_run.day_key / 每日預算）。
     // 日摘要要盤點的是昨天，見下面 Eod 分支的 `summarized_day`。兩個不能共用。
     let run_day = brain::local_day_key(input.now).context("算不出今天的日期，不敢審")?;
@@ -675,6 +678,10 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         record_skip(input, SkipReason::NoConsent, &run_day, used, limit)?;
         return Ok(skipped(SkipReason::NoConsent, used, limit));
     }
+    let Some(_) = brain::not_stopped(data_dir) else {
+        record_skip(input, SkipReason::MasterStopped, &run_day, used, limit)?;
+        return Ok(skipped(SkipReason::MasterStopped, used, limit));
+    };
     if input.brain.cli().is_none() {
         record_skip(input, SkipReason::NoCommand, &run_day, used, limit)?;
         return Ok(skipped(SkipReason::NoCommand, used, limit));
@@ -777,6 +784,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
     let mut answers_got = 0u32;
     let mut l2_revisions = 0u32;
     let mut budget_left = remaining;
+    let mut master_stopped_mid_run = false;
 
     let mut recheck_rows: Vec<RecheckInsertOwned> = Vec::new();
     let mut divergence_rows: Vec<(String, String, String, String)> = Vec::new();
@@ -925,11 +933,15 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         );
 
         let (spawn_a, spawn_b) = {
+            let Some(not_stopped) = brain::not_stopped(data_dir) else {
+                master_stopped_mid_run = true;
+                break;
+            };
             let cmd = command.as_str();
             let args = args.as_slice();
             std::thread::scope(|scope| {
-                let ha = scope.spawn(|| spawn_cli(permit, &prompt_a, cmd, args));
-                let hb = scope.spawn(|| spawn_cli(permit, &prompt_b, cmd, args));
+                let ha = scope.spawn(|| spawn_cli(permit, not_stopped, &prompt_a, cmd, args));
+                let hb = scope.spawn(|| spawn_cli(permit, not_stopped, &prompt_b, cmd, args));
                 (
                     ha.join()
                         .unwrap_or_else(|_| empty_spawn("pass A 執行緒炸了")),
@@ -1120,7 +1132,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
 
     let mut completed = 0u32;
     let mut archived = 0u32;
-    if input.kind == ReviewKind::Eod {
+    if input.kind == ReviewKind::Eod && !master_stopped_mid_run {
         let summarized_day =
             summarized_day(input.now).context("算不出被盤點的那一天，不敢寫日摘要")?;
         completed = mark_done_from_originals(input)?;
@@ -1132,7 +1144,7 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         ts: input.now,
         day_key: &run_day,
         kind: input.kind.as_str(),
-        skip_reason: None,
+        skip_reason: master_stopped_mid_run.then_some(SkipReason::MasterStopped.as_str()),
         candidate_count: Some(candidates as i64),
         recheck_count: Some(rechecks as i64),
         wrote_commitments: wrote as i64,
@@ -1166,9 +1178,15 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
             created_at: input.now,
         })?;
     }
+    if master_stopped_mid_run {
+        let reason = SkipReason::MasterStopped;
+        input
+            .db
+            .insert_brain_skip(input.now, reason.as_str(), None, &reason.message())?;
+    }
 
     Ok(ReviewResult {
-        skip: None,
+        skip: master_stopped_mid_run.then_some(SkipReason::MasterStopped),
         ran: true,
         rechecks,
         candidates,
@@ -1185,6 +1203,14 @@ pub fn run(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
         completed,
         detail: String::new(),
     })
+}
+
+#[cfg(test)]
+fn run_for_test(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
+    run(
+        input,
+        std::path::Path::new("__sister-core-test-no-master-stop__"),
+    )
 }
 
 struct RecheckInsertOwned {
@@ -2580,7 +2606,7 @@ mod tests {
                 force: true,
                 now: ts + 500_000,
             };
-            run(&mut input).expect("run")
+            run_for_test(&mut input).expect("run")
         };
         assert!(
             matches!(result.skip, Some(SkipReason::NothingToReview { .. })),
@@ -2686,7 +2712,7 @@ mod tests {
                 force: false,
                 now: second_now,
             };
-            run(&mut input).expect("idle run")
+            run_for_test(&mut input).expect("idle run")
         };
         assert!(
             matches!(second.skip, Some(SkipReason::NothingToReview { .. })),
@@ -2786,7 +2812,7 @@ mod tests {
                 force: false,
                 now: ts + 500_000 + 1,
             };
-            run(&mut input).expect("empty eod")
+            run_for_test(&mut input).expect("empty eod")
         };
         assert_eq!(second.candidates, 0, "第二輪區間裡沒有卡片：{second:?}");
         assert!(second.ran, "沒有候選的日終仍記成一次真正跑過");
@@ -2842,7 +2868,7 @@ mod tests {
                 force: false,
                 now: idle_now,
             };
-            let idle = run(&mut input).expect("idle");
+            let idle = run_for_test(&mut input).expect("idle");
             assert!(
                 matches!(idle.skip, Some(SkipReason::NothingToReview { .. })),
                 "中間那一輪要走沒有東西可審：{:?}",
@@ -2952,7 +2978,7 @@ mod tests {
             force: true,
             now: ts + 500_000,
         };
-        let result = run(&mut input).expect("run");
+        let result = run_for_test(&mut input).expect("run");
         assert!(matches!(result.skip, Some(SkipReason::NoConsent)));
         assert!(!sentinel.exists(), "沒簽卻 spawn 了");
         assert!(db.live_commitments().expect("c").is_empty());
@@ -2994,7 +3020,7 @@ mod tests {
             force: true,
             now: ts + 500_000,
         };
-        let result = run(&mut input).expect("run");
+        let result = run_for_test(&mut input).expect("run");
         assert!(result.skip.is_none(), "{:?}", result.skip);
         assert!(result.rechecks > 0, "有五類卻沒回查");
         assert_eq!(result.wrote_commitments, 1);
@@ -4329,7 +4355,7 @@ mod tests {
                 force: true,
                 now: ts + 22 * min,
             };
-            run(&mut input).expect("run")
+            run_for_test(&mut input).expect("run")
         };
         // 快取軸：舊的 10 分鐘切點那一列消失，而且沒有任何一段蓋住它。
         // 資料軸：focus 和 frame 都還在。講哪句話看資料軸，所以不可以說被忘掉。
@@ -4484,7 +4510,7 @@ mod tests {
                 force: true,
                 now: ts + 22 * min,
             };
-            run(&mut input).expect("run")
+            run_for_test(&mut input).expect("run")
         };
         assert_eq!(result.cards_missing_segment, 1);
         let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
@@ -4738,7 +4764,7 @@ mod tests {
             force: true,
             now: ts + 500_000,
         };
-        let result = run(&mut input).expect("run");
+        let result = run_for_test(&mut input).expect("run");
         assert_eq!(result.wrote_commitments, 0, "分歧還寫進 L3");
         assert!(result.divergences > 0);
         assert!(db.live_commitments().expect("c").is_empty());
@@ -4839,7 +4865,7 @@ mod tests {
                 force: false,
                 now: later + 500_000,
             };
-            run(&mut input).expect("run")
+            run_for_test(&mut input).expect("run")
         };
         // 前提：這一輪確實走到了「有候選、沒問模型」那個形狀。
         // 這兩條是在證明測試還打得到那個洞，不是在規定修法。
@@ -4981,7 +5007,7 @@ mod tests {
                 force: true,
                 now: ts + 22 * min,
             };
-            run(&mut input).expect("run")
+            run_for_test(&mut input).expect("run")
         };
         assert_eq!(result.cards_missing_segment, 1);
         let ReviewerNotes::Some { lines, .. } = db.latest_reviewer_notes().unwrap() else {
@@ -5057,7 +5083,7 @@ mod tests {
                 force: false,
                 now: later + 500_000,
             };
-            run(&mut input).expect("run")
+            run_for_test(&mut input).expect("run")
         };
         // 前提：第二輪確實看過卡片、確實沒問模型。證明這條測試打得到那個洞。
         assert!(second.skip.is_none(), "第二輪要真的跑過：{:?}", second.skip);
@@ -5817,7 +5843,7 @@ mod tests {
             force: true,
             now: ts + 500_000,
         };
-        run(&mut input).expect("run")
+        run_for_test(&mut input).expect("run")
     }
 
     fn refuse_a_step_at(db: &mut Db, tmp: &Tmp, ts: Millis, url: &str) -> i64 {
@@ -6234,7 +6260,7 @@ mod tests {
             force: false,
             now: now + 60_000,
         };
-        let result = run(&mut input).expect("run");
+        let result = run_for_test(&mut input).expect("run");
         assert!(matches!(result.skip, Some(SkipReason::Cadence { .. })));
         assert!(!result.ran);
     }
@@ -6353,7 +6379,7 @@ mod tests {
                 force: true,
                 now: ts + 500_000,
             };
-            let _ = run(&mut input).expect("run");
+            let _ = run_for_test(&mut input).expect("run");
             db.list_brain_outbound(10)
                 .expect("outbound")
                 .into_iter()
@@ -6432,7 +6458,7 @@ mod tests {
             force: false,
             now: tuesday_eod,
         };
-        let result = run(&mut input).expect("eod");
+        let result = run_for_test(&mut input).expect("eod");
         assert!(result.skip.is_none(), "日終被跳過：{:?}", result.skip);
         assert!(result.ran);
 

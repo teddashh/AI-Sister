@@ -459,6 +459,13 @@ enum Command {
     /// 解除暫停。
     Resume,
 
+    /// 一鍵停止 capture／brain／hands；不重用 `stop`（只收掉 record）或 `resume`（只解除暫停），避免看起來全停、其實只停一半。
+    StopAll {
+        /// 解除全停；原本另按的暫停與拔手不會一起解除。
+        #[arg(long)]
+        off: bool,
+    },
+
     /// 「我一個人在跑的時候，可不可以自己按網址？」——看你現在的答案，或回答它。
     ///
     /// 不帶 `--set` 就只是把問題和你現在站的位置端出來。沒回答過不是一個
@@ -705,6 +712,7 @@ fn main() -> Result<()> {
                 brain_command,
                 brain_arg,
             }) => ops::replay::evaluate_corpus(
+                &data_dir,
                 &corpus,
                 &questions,
                 ops::replay::EvaluateOpts {
@@ -846,6 +854,7 @@ fn main() -> Result<()> {
         }
         Command::Pause => ops::pause::run(&data_dir, true),
         Command::Resume => ops::pause::run(&data_dir, false),
+        Command::StopAll { off } => ops::stop_all::run(&data_dir, off),
         Command::Stop => ops::stop::run(&data_dir),
         Command::Watch {
             question,

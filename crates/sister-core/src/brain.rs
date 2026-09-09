@@ -204,6 +204,7 @@ pub const MAX_OCR_SNIPPETS: usize = 40;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
     NoConsent,
+    MasterStopped,
     NoCommand,
     BudgetExhausted { used: u32, limit: u32 },
     NothingWorthInterpreting { remaining: u32 },
@@ -213,6 +214,7 @@ impl SkipReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             SkipReason::NoConsent => "no_consent",
+            SkipReason::MasterStopped => "master_stopped",
             SkipReason::NoCommand => "no_command",
             SkipReason::BudgetExhausted { .. } => "budget",
             SkipReason::NothingWorthInterpreting { .. } => "nothing_worth",
@@ -228,6 +230,7 @@ impl SkipReason {
             SkipReason::NoConsent => format!(
                 "還沒簽第二張同意書（上雲解讀）。解釋層一次都不會呼叫那支 CLI。\n要看她準備送出什麼：sister interpret --dry-run\n要簽字：{consent_command}"
             ),
+            SkipReason::MasterStopped => "三層全停中：這一趟沒有問模型、沒有送出任何字，也沒有寫新卡片。要恢復請跑 `sister stop-all --off`。".to_string(),
             SkipReason::NoCommand => concat!(
                 "還沒設定 [brain] command。一次都不會呼叫。\n",
                 "（不是今天沒有東西可解釋——她根本沒有一支 CLI 可以叫。）\n",
@@ -363,13 +366,23 @@ impl StoredOutboundOutcome {
 ///
 /// 第一個參數的型別是 [`CloudAllowed`]：只有 [`Consent::cloud_permit`] 鑄得
 /// 出來，所以「沒檢查同意書就送出去」是編不過的，不是靠每個呼叫端自己記得。
+/// 第二個參數同理：沒有在真正送出前確認全停未啟用，就拿不到 [`NotStopped`]。
+#[derive(Debug, Clone, Copy)]
+pub struct NotStopped(());
+
+/// 只有當下確定沒有全停時才鑄得出的憑證；判不出來同樣不鑄（fail-closed）。
+pub fn not_stopped(data_dir: &Path) -> Option<NotStopped> {
+    (!sister_hands::master_stop::is_stopped(data_dir)).then_some(NotStopped(()))
+}
+
 pub fn spawn_cli(
     permit: CloudAllowed,
+    not_stopped: NotStopped,
     payload: &str,
     command: &str,
     args: &[String],
 ) -> SpawnOutcome {
-    let _gate = permit;
+    let (_cloud_gate, _stop_gate) = (permit, not_stopped);
     let started = Instant::now();
     let mut child = match Command::new(command)
         .args(args)
@@ -804,8 +817,8 @@ pub fn prepare(input: &mut InterpretInput<'_>) -> Result<DryRun> {
     })
 }
 
-/// 真的跑。沒有 [`CloudAllowed`] 就一次都不 spawn。
-pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
+/// 真的跑。沒有 [`CloudAllowed`]，或在最後送出前鑄不到 [`NotStopped`]，就一次都不 spawn。
+pub fn run(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<InterpretResult> {
     let Some(permit) = input.consent.cloud_permit() else {
         record_skip(input.db, SkipReason::NoConsent)?;
         return Ok(InterpretResult {
@@ -813,6 +826,13 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
             ran: Vec::new(),
         });
     };
+    if not_stopped(data_dir).is_none() {
+        record_skip(input.db, SkipReason::MasterStopped)?;
+        return Ok(InterpretResult {
+            skip: Some(SkipReason::MasterStopped),
+            ran: Vec::new(),
+        });
+    }
     let Some((command, args)) = input.brain.cli() else {
         record_skip(input.db, SkipReason::NoCommand)?;
         return Ok(InterpretResult {
@@ -855,6 +875,14 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
     }
     prepared.truncate(take);
 
+    let Some(not_stopped) = not_stopped(data_dir) else {
+        record_skip(input.db, SkipReason::MasterStopped)?;
+        return Ok(InterpretResult {
+            skip: Some(SkipReason::MasterStopped),
+            ran: Vec::new(),
+        });
+    };
+
     let mut ran = Vec::new();
     std::thread::scope(|scope| {
         let handles: Vec<_> = prepared
@@ -863,7 +891,7 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
                 let command = command.as_str();
                 let args = args.as_slice();
                 let payload = &job.payload;
-                scope.spawn(move || spawn_cli(permit, payload, command, args))
+                scope.spawn(move || spawn_cli(permit, not_stopped, payload, command, args))
             })
             .collect();
         for (job, handle) in prepared.iter().zip(handles) {
@@ -938,6 +966,11 @@ pub fn run(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
         skip: None,
         ran: results,
     })
+}
+
+#[cfg(test)]
+fn run_for_test(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
+    run(input, Path::new("__sister-core-test-no-master-stop__"))
 }
 
 fn classify(
@@ -1193,7 +1226,10 @@ pub fn format_dry_run(report: &DryRun) -> String {
                 out.push('\n');
                 return out;
             }
-            SkipReason::NoCommand | SkipReason::NoConsent | SkipReason::BudgetExhausted { .. } => {
+            SkipReason::NoCommand
+            | SkipReason::NoConsent
+            | SkipReason::MasterStopped
+            | SkipReason::BudgetExhausted { .. } => {
                 out.push('\n');
                 out.push_str("真的跑的話會停在這裡：\n");
                 out.push_str(&skip.message());
@@ -1349,6 +1385,10 @@ mod tests {
     use crate::consent::{Sheet, VERSION};
     use crate::db::Db;
     use std::cell::Cell;
+
+    fn test_not_stopped() -> NotStopped {
+        not_stopped(Path::new("__sister-core-test-no-master-stop__")).unwrap()
+    }
 
     #[test]
     fn latest_version_has_only_its_immediate_predecessor() {
@@ -1652,6 +1692,7 @@ mod tests {
         .expect("write");
         let out = spawn_cli(
             permit,
+            test_not_stopped(),
             &payload,
             "python3",
             &[script.to_string_lossy().into_owned()],
@@ -1679,6 +1720,7 @@ mod tests {
 
         let out = spawn_cli(
             permit,
+            test_not_stopped(),
             &payload,
             "sh",
             &[
@@ -1728,6 +1770,7 @@ mod tests {
 
         let out = spawn_cli(
             permit,
+            test_not_stopped(),
             &payload,
             "sh",
             &["-c".into(), format!("printf '%s' '{json}'")],
@@ -1757,6 +1800,7 @@ mod tests {
         // 真正的擋下機制，就要先讓子行程讀到 EOF，不跟 stdin 寫入擲骰子。
         let out = spawn_cli(
             permit,
+            test_not_stopped(),
             "一張塞得進管子的審閱卡",
             "sh",
             &[
@@ -1801,6 +1845,7 @@ mod tests {
 
         let out = spawn_cli(
             permit,
+            test_not_stopped(),
             &payload,
             "sh",
             &[
@@ -1849,7 +1894,13 @@ mod tests {
         let mut c = Consent::default();
         c.grant(Sheet::CloudReading, 1);
         let permit = c.cloud_permit().expect("signed");
-        let out = spawn_cli(permit, "hi", "sister-no-such-brain-binary-9d3f", &[]);
+        let out = spawn_cli(
+            permit,
+            test_not_stopped(),
+            "hi",
+            "sister-no-such-brain-binary-9d3f",
+            &[],
+        );
         assert_eq!(out.process_start, ProcessStart::NeverStarted);
         assert!(
             out.spawn_error
@@ -2058,7 +2109,7 @@ mod tests {
             limit: 4,
             only_core_start: None,
         };
-        let result = run(&mut input).expect("run");
+        let result = run_for_test(&mut input).expect("run");
         assert!(matches!(result.skip, Some(SkipReason::NoConsent)));
         assert!(!sentinel.exists(), "沒簽同意書 2 卻 spawn 了");
         assert!(
@@ -2116,7 +2167,7 @@ mod tests {
             limit: 4,
             only_core_start: Some(core),
         };
-        let result = run(&mut input).expect("run");
+        let result = run_for_test(&mut input).expect("run");
         assert!(result.skip.is_none(), "{:?}", result.skip);
         assert!(sentinel.exists(), "簽了卻沒 spawn");
         assert_eq!(result.ran.len(), 1);
@@ -2169,7 +2220,7 @@ mod tests {
             args,
             ..Default::default()
         };
-        let result = run(&mut InterpretInput {
+        let result = run_for_test(&mut InterpretInput {
             db: &mut db,
             consent: &consent,
             brain: &brain,
@@ -2198,7 +2249,7 @@ mod tests {
             shown.contains("退出碼 7"),
             "brain log 的原因不完整：{shown}"
         );
-        let second = run(&mut InterpretInput {
+        let second = run_for_test(&mut InterpretInput {
             db: &mut db,
             consent: &consent,
             brain: &brain,
@@ -2231,7 +2282,7 @@ mod tests {
             args: vec![],
             ..Default::default()
         };
-        let result = run(&mut InterpretInput {
+        let result = run_for_test(&mut InterpretInput {
             db: &mut db,
             consent: &consent,
             brain: &brain,
