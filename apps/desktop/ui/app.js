@@ -3027,17 +3027,29 @@ function answerAzureLine() {
   return li;
 }
 
-/** L2 卡片的作者不是答案正文；這一行只留在本機畫面上。 */
-function overviewAuthor(author) {
-  switch (author) {
+/** L2 卡片的作者與信心來源不是答案正文；這一行只留在本機畫面上。 */
+function overviewProvenance(card) {
+  const modelConfidence = () => {
+    const confidence = card.model_confidence;
+    if (
+      typeof confidence !== "number" ||
+      !Number.isFinite(confidence) ||
+      confidence < 0 ||
+      confidence > 1
+    ) {
+      throw new Error("記憶總覽的模型信心不是 0 到 1 的數字");
+    }
+    return confidence.toFixed(2);
+  };
+  switch (card.author) {
     case "interpreter":
-      return "解釋層整理";
+      return `模型整理的假設 · 模型自報信心 ${modelConfidence()}（不是量出來的）`;
     case "reviewer":
-      return "審閱層修訂";
+      return `審閱層修訂 · 原模型自報信心 ${modelConfidence()}（不是量出來的）`;
     case "user":
-      return "你修正過";
+      return "你修正過 · 不是她量出來的，也不是模型說的";
     default:
-      return `作者 ${author ?? "不明"}`;
+      throw new Error(`不認得的記憶總覽作者：${card.author ?? "缺少 author"}`);
   }
 }
 
@@ -3059,15 +3071,42 @@ function renderOverview(overview) {
 
   switch (overview?.kind) {
     case "ready": {
-      if (!Array.isArray(overview.cards) || overview.cards.length === 0) {
-        throw new Error("記憶總覽回了 ready，卻沒有任何卡片");
+      if (
+        !Array.isArray(overview.cards) ||
+        overview.cards.length === 0 ||
+        overview.cards.length > 3
+      ) {
+        throw new Error("記憶總覽的 ready 卡片數不在 1 到 3 張之間");
+      }
+      if (typeof overview.truncated !== "boolean") {
+        throw new Error("記憶總覽的 truncated 不是布林值");
+      }
+      if (
+        !Number.isSafeInteger(overview.evidence_unavailable) ||
+        overview.evidence_unavailable < 0
+      ) {
+        throw new Error("記憶總覽的 evidence_unavailable 不是非負整數");
       }
       line(
-        "我最近整理出這些理解。它們都有畫面可以回查，但仍是可以被你修正的假設，不是確定事實：",
+        "我目前對最近幾段有這些理解。每張下面都有畫面出處按鈕；內容可能由模型整理、審閱層修訂，或由你修正，不是我量到的確定事實：",
       );
       for (const card of overview.cards) {
+        if (typeof card?.activity !== "string" || card.activity.trim() === "") {
+          throw new Error("記憶總覽的 ready 卡片沒有 activity");
+        }
+        if (!Number.isSafeInteger(card.segment_started_at)) {
+          throw new Error("記憶總覽的 segment_started_at 不是安全整數");
+        }
         if (!Array.isArray(card.evidence) || card.evidence.length === 0) {
-          throw new Error("記憶總覽的 ready 卡片沒有畫面證據");
+          throw new Error("記憶總覽的 ready 卡片沒有畫面出處");
+        }
+        for (const item of card.evidence) {
+          if (!Number.isSafeInteger(item?.frame_id) || item.frame_id <= 0) {
+            throw new Error("記憶總覽的 frame_id 不是正整數");
+          }
+          if (typeof item.label !== "string" || item.label.trim() === "") {
+            throw new Error("記憶總覽的畫面出處沒有 label");
+          }
         }
         const li = document.createElement("li");
         li.className = "hit overview-card";
@@ -3080,14 +3119,13 @@ function renderOverview(overview) {
 
         const meta = document.createElement("p");
         meta.className = "hit-source overview-meta";
-        const confidence = Number(card.model_confidence);
-        meta.textContent = `${when(card.segment_started_at)} · ${overviewAuthor(card.author)} · 信心欄位 ${Number.isFinite(confidence) ? confidence.toFixed(2) : "不明"}（不是量出來的）`;
+        meta.textContent = `${when(card.segment_started_at)} · ${overviewProvenance(card)}`;
         li.append(meta);
 
         const evidence = document.createElement("p");
         evidence.className = "hit-source overview-sources";
         const label = document.createElement("span");
-        label.textContent = "畫面證據";
+        label.textContent = "畫面出處";
         evidence.append(label);
         for (const item of card.evidence) {
           const button = document.createElement("button");
@@ -3106,9 +3144,9 @@ function renderOverview(overview) {
       if (overview.truncated) {
         line("這裡只列最近一部分有證據的理解。", "hits-note hits-more", false);
       }
-      if (Number.isInteger(overview.evidence_unavailable) && overview.evidence_unavailable > 0) {
+      if (overview.evidence_unavailable > 0) {
         line(
-          `另外有 ${overview.evidence_unavailable} 張理解卡因畫面證據已不可用，這裡沒有列。`,
+          `另外有 ${overview.evidence_unavailable} 張理解卡目前沒有可點開的畫面出處，這裡沒有列。`,
           "hits-note hits-more",
           false,
         );
@@ -3116,7 +3154,10 @@ function renderOverview(overview) {
       return true;
     }
     case "raw_only":
-      line("我有原始紀錄，但還沒有整理成能直接回答的理解記憶；這次不會拿 OCR 片段冒充答案。", "hits-empty");
+      line(
+        "我有原始紀錄，但還沒有整理成能直接回答的理解記憶；這次不會拿 OCR 片段冒充答案。",
+        "hits-empty",
+      );
       return false;
     case "empty":
       line("我目前還沒有留下能回答這題的記憶。", "hits-empty");
@@ -3126,7 +3167,7 @@ function renderOverview(overview) {
         throw new Error("記憶總覽回了 evidence_missing，卻沒有遺失證據的卡片數");
       }
       line(
-        "我有整理過的理解記憶，但最近這些卡片已沒有可點開的畫面證據；這裡不把它們當成答案。",
+        `我有整理過的理解記憶，但最近這 ${overview.cards} 張卡片目前沒有可點開的畫面出處；這裡不把它們當成答案。`,
         "hits-empty",
       );
       return false;
@@ -3138,9 +3179,10 @@ function renderOverview(overview) {
 
 /**
  * @param hits 一筆一筆的原文。
- * @param kind `"keywords"`（比對字找到的）、`"recent"`（剛剛）、或 `"range"`（昨天下午那種日曆範圍）。
- *   這個字是後端給的，不是這裡判斷的——同一句話在 `sister query` 和這一頁
- *   必須得到同一種答案，所以規則只有一份，在 sister-core 的 `question`。
+ * @param kind `"keywords"`（比對字找到的）、`"recent"`（剛剛）、`"range"`（昨天下午那種日曆範圍），
+ *   或 `"memory_overview"`（只讀 L2 整理結果，不跑一般檢索）。
+ *   這個字是後端給的，不是這裡判斷的。一般檢索在 `sister query` 和這一頁共用
+ *   sister-core 的問題規則；memory overview 是桌面問答外層的窄 intent。
  * @param facts L1 直接答得出來的那幾筆（★）。排在原文前面，因為那才是他問
  *   的東西本身：問「電話」要的是號碼，不是一段剛好提到電話的字。
  * @param blind 兩手空空時，她查得到的那幾個理由（後端給事實，句子在這裡組）。
@@ -3172,6 +3214,15 @@ function renderHits(
   azureAnswerButton = null;
   hitList.replaceChildren();
 
+  const hasOverview = overview !== null && overview !== undefined;
+  if ((kind === "memory_overview") !== hasOverview) {
+    throw new Error(
+      kind === "memory_overview"
+        ? "記憶總覽答案缺少 overview"
+        : `一般 ${kind ?? "未知"} 答案不該帶 overview`,
+    );
+  }
+
   if (closureNotice) {
     const notice = document.createElement("li");
     notice.className = "hits-note";
@@ -3179,7 +3230,7 @@ function renderHits(
     hitList.append(notice);
   }
 
-  if (overview !== null && overview !== undefined) {
+  if (hasOverview) {
     const hasOverviewAnswer = renderOverview(overview);
 
     if (followup) {
@@ -3187,18 +3238,6 @@ function renderHits(
       aside.className = "hits-note";
       aside.textContent = followup;
       hitList.append(aside);
-    }
-
-    if (hasOverviewAnswer) {
-      if (queryId === null || queryId === undefined) {
-        const why = document.createElement("li");
-        why.className = "hits-note hits-more";
-        why.textContent =
-          "（這一題沒進題庫，所以「我本來已經忘了」標不了：可能是設定裡「你問過她什麼」關著，也可能是設定檔讀不回來，還可能是剛剛寫不進資料庫。）";
-        hitList.append(why);
-      } else {
-        hitList.append(markLine(queryId));
-      }
     }
 
     hitList.append(answerReadLine());

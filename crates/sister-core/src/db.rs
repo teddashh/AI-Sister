@@ -3957,6 +3957,35 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// 現在是否還留著至少一列她記下來的原始內容。
+    ///
+    /// 這和 [`Self::ever_stored`] 不同：那個單調旗標回答「以前是否存過」，清空後
+    /// 仍然是 true。也不繞道 [`Self::stats`]：總覽只需要一個布林值，用整表
+    /// `COUNT`／`SUM` 會讓最常見的 no-L2 問法隨資料量變慢；stats 的歷史相容讀法
+    /// 還會把個別 SQL 錯誤壓成 0，正好把「沒量到」冒充成「目前是空的」。
+    ///
+    /// 名單沿用 migration 的 [`CONTENT_TABLES`]；那份名單的範圍由 schema 測試與
+    /// [`DbStats::nothing_recorded_left`] 對齊。每張表只做 `EXISTS`，遇到第一列就停；
+    /// 任一實際執行的 probe 讀壞就直接回錯，不替使用者猜成 Empty。
+    pub fn has_retained_recorded_content(&self) -> Result<bool> {
+        for (table, predicate) in CONTENT_TABLES {
+            let where_clause = predicate.map_or(String::new(), |condition| {
+                format!(
+                    " WHERE {}",
+                    condition
+                        .replace("{q}", "")
+                        .replace("{marks}", &crate::model::SystemKind::session_marks_sql())
+                )
+            });
+            let sql = format!("SELECT EXISTS(SELECT 1 FROM {table}{where_clause})");
+            let found: bool = self.conn.query_row(&sql, [], |row| row.get(0))?;
+            if found {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn latest_l2_before(&self, core_started_at: Millis) -> Result<Option<L2CardRow>> {
         self.conn
             .query_row(
@@ -12229,9 +12258,33 @@ mod tests {
                 !db.ever_stored().expect("stored"),
                 "{table}：起點要是乾淨的"
             );
+            assert!(
+                !db.has_retained_recorded_content().expect("retained"),
+                "{table}：起點不能冒出目前仍有內容"
+            );
             db.conn.execute(sql, []).expect(table);
             assert!(db.ever_stored().expect("stored"), "{table} 沒把旗標按下去");
+            assert!(
+                db.has_retained_recorded_content().expect("retained"),
+                "{table} 有現貨時，快速 probe 沒看到"
+            );
         }
+    }
+
+    #[test]
+    fn retained_content_probe_propagates_sql_failure_instead_of_calling_it_empty() {
+        let db = test_db();
+        db.conn
+            .execute("DROP TABLE frames", [])
+            .expect("break first content table");
+
+        let error = db
+            .has_retained_recorded_content()
+            .expect_err("讀不到內容表不能冒充現在沒有內容");
+        assert!(
+            format!("{error:#}").contains("no such table: frames"),
+            "錯誤要保留真正讀壞的表：{error:#}"
+        );
     }
 
     /// **schema 裡的每一張表，都要有人回答「它算不算她記下來的東西」。**

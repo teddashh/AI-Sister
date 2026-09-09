@@ -10,7 +10,7 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.115 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+alpha.116 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
@@ -642,6 +642,22 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
 
 ## 7. 問她問題
 
+- [ ] 先讓時間軸「她猜的」至少有四段 current L2，其中三張的資料庫仍標有畫面出處；
+      在桌面輸入 `她知道了什麼？`。最多列最近三張合格卡，活動、時間、作者／信心來源
+      與 withheld 數要對得上，每張都要明講是可修正理解而非確定事實。逐一按畫面出處；
+      實體檔仍在時應開啟。若按鈕畫出後才從磁碟外部移走檔案，frame 視窗要顯示讀檔錯誤，
+      不可冒充成功。
+- [ ] 錄到設定頁的真字串 `留著是為了知道她哪些題答不出來`，確認普通全文搜尋確實找
+      得到它，再問 `她知道了什麼？`。總覽不可出現那段設定 OCR，也不可顯示其他 raw OCR。
+- [ ] 問 `你知道客服電話嗎` 與 `她知道了什麼密碼`：兩題都要保留具體主題、走原本
+      facts／FTS；不可忽略主題改列整份 L2。再問 `妳目前記得哪些事情` 才應回總覽。
+- [ ] 分別驗四種資料狀態：有合格 L2；有 frame／OCR 但沒有 L2；目前沒有留下任何記憶
+      內容；有 L2、但最近四張候選目前全都沒有畫面出處。後三種要各自說清楚，不能落回
+      一般檢索的空結果、raw OCR 或無出處 activity。
+- [ ] 總覽不應出現在 `sister queries`、retrieval latency／miss／click 指標或 replay 題庫；
+      點它的畫面出處也不可用假的 `chunk_id` 記成 retrieval click。若 Azure 已完成第四張
+      同意且明確啟用，以測試字串驗固定 POST 只含總覽答案正文；問題、OCR、時間、作者、
+      信心、出處 label／frame id 與 withheld 說明不得送。關掉 Azure 後回到 0 POST。
 - [ ] 打一個問題按 Enter：幾百毫秒內要有答案。第一次開資料庫要跑 migration
       的時候，暫停鍵／系統匣／拖曳**都必須還有反應**（以前整個殼會停住）。
       超過 4 秒她會改口說「還在翻…」。

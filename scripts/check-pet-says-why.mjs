@@ -2191,7 +2191,23 @@ console.log("64. 記憶總覽只畫有證據的 L2 假設；證據要真人按�
         closure_notice: "CLOSURE_MUST_STAY_LOCAL",
         overview: {
           kind: "ready",
-          cards: [overviewCard()],
+          cards: [
+            overviewCard(),
+            overviewCard({
+              segment_started_at: 1_755_000_001_000,
+              activity: "審閱後的更新流程",
+              author: "reviewer",
+              model_confidence: 0.42,
+              evidence: [{ frame_id: 4243, label: "REVIEW_SOURCE_MUST_STAY_LOCAL" }],
+            }),
+            overviewCard({
+              segment_started_at: 1_755_000_002_000,
+              activity: "這是我自己修正的說法",
+              author: "user",
+              model_confidence: 0.88,
+              evidence: [{ frame_id: 4244, label: "USER_SOURCE_MUST_STAY_LOCAL" }],
+            }),
+          ],
           truncated: true,
           evidence_unavailable: 2,
         },
@@ -2204,8 +2220,22 @@ console.log("64. 記憶總覽只畫有證據的 L2 假設；證據要真人按�
   check(
     "ready 明講是可修正的理解／假設，不冒充確定事實",
     p.hitTexts().some(
-      (line) => line.includes("可以被你修正的假設") && line.includes("不是確定事實"),
+      (line) =>
+        line.includes("模型整理") &&
+        line.includes("審閱層修訂") &&
+        line.includes("由你修正") &&
+        line.includes("不是我量到的確定事實"),
     ),
+    p.hitTexts(),
+  );
+  check(
+    "interpreter 信心明講是模型自報，不是假裝量過",
+    p
+      .hitTexts()
+      .some(
+        (line) =>
+          line.includes("模型整理的假設") && line.includes("模型自報信心 0.31（不是量出來的）"),
+      ),
     p.hitTexts(),
   );
   check("L2 activity 畫成答案正文", p.hitTexts().some((line) => line.includes("修好安裝更新")), p.hitTexts());
@@ -2229,7 +2259,34 @@ console.log("64. 記憶總覽只畫有證據的 L2 假設；證據要真人按�
     ),
     p.hitTexts(),
   );
-  check("有答案的 overview 保留題庫標記", p.hits().querySelector(".mark-toggle") !== null, p.hitTexts());
+  check(
+    "reviewer 信心明講沿用原模型自報，不是假裝審閱層量過",
+    p
+      .hitTexts()
+      .some(
+        (line) =>
+          line.includes("審閱層修訂") && line.includes("原模型自報信心 0.42（不是量出來的）"),
+      ),
+    p.hitTexts(),
+  );
+  check(
+    "user 修正不顯示沿用的模型信心",
+    p
+      .hitTexts()
+      .some(
+        (line) =>
+          line.includes("你修正過 · 不是她量出來的，也不是模型說的") &&
+          !line.includes("0.88") &&
+          !line.includes("模型自報"),
+      ),
+    p.hitTexts(),
+  );
+  check(
+    "overview 不冒充 retrieval 題庫，不顯示題庫標記或寫入失敗提示",
+    p.hits().querySelector(".mark-toggle") === null &&
+      !p.hitTexts().some((line) => line.includes("這一題沒進題庫")),
+    p.hitTexts(),
+  );
 
   const evidence = p.hits().querySelector(".overview-evidence");
   check("證據按鈕顯示後端 label", evidence?.textContent === "SOURCE_LABEL_MUST_STAY_LOCAL", evidence?.textContent);
@@ -2247,7 +2304,7 @@ console.log("64. 記憶總覽只畫有證據的 L2 假設；證據要真人按�
   );
 
   const expected =
-    "我最近整理出這些理解。它們都有畫面可以回查，但仍是可以被你修正的假設，不是確定事實：\n修好安裝更新";
+    "我目前對最近幾段有這些理解。每張下面都有畫面出處按鈕；內容可能由模型整理、審閱層修訂，或由你修正，不是我量到的確定事實：\n修好安裝更新\n審閱後的更新流程\n這是我自己修正的說法";
   check("Azure overview payload 恰好只有正文", text === expected, text);
   for (const localOnly of [
     "QUESTION_MUST_STAY_LOCAL",
@@ -2259,8 +2316,16 @@ console.log("64. 記憶總覽只畫有證據的 L2 假設；證據要真人按�
     "CLOSURE_MUST_STAY_LOCAL",
     "99123",
     "4242",
+    "4243",
+    "4244",
     "0.31",
+    "0.42",
+    "0.88",
     "interpreter",
+    "reviewer",
+    "user",
+    "REVIEW_SOURCE_MUST_STAY_LOCAL",
+    "USER_SOURCE_MUST_STAY_LOCAL",
     "另外有 2 張理解卡",
   ]) {
     check(`overview Azure 不送 ${localOnly}`, !text.includes(localOnly), text);
@@ -2280,18 +2345,25 @@ console.log("65. raw-only／empty／證據遺失各自說實話，不掉進一�
     {
       overview: { kind: "raw_only" },
       wanted: "有原始紀錄，但還沒有整理成能直接回答的理解記憶",
+      azure:
+        "我有原始紀錄，但還沒有整理成能直接回答的理解記憶；這次不會拿 OCR 片段冒充答案。",
     },
     {
       overview: { kind: "empty" },
       wanted: "目前還沒有留下能回答這題的記憶",
+      azure: "我目前還沒有留下能回答這題的記憶。",
     },
     {
       overview: { kind: "evidence_missing", cards: 3 },
-      wanted: "已沒有可點開的畫面證據",
+      wanted: "目前沒有可點開的畫面出處",
+      azure:
+        "我有整理過的理解記憶，但最近這 3 張卡片目前沒有可點開的畫面出處；這裡不把它們當成答案。",
     },
   ];
   for (const test of cases) {
     const p = await open({
+      azure_tts_read: AZURE_READY,
+      azure_tts_speak: new Error("captured non-ready overview"),
       ask: answer({
         kind: "memory_overview",
         hits: [hit({ snippet: "RAW_OCR_MUST_NOT_RENDER" })],
@@ -2309,6 +2381,11 @@ console.log("65. raw-only／empty／證據遺失各自說實話，不掉進一�
       p.hitTexts(),
     );
     check(`${test.overview.kind} 沒有可標成答對的卡片`, p.hits().querySelector(".mark-toggle") === null, p.hitTexts());
+    check(
+      `${test.overview.kind} 的 Azure payload 恰好是自己的狀態正文`,
+      azureCalls(p).length === 1 && azureCalls(p)[0].arg?.text === test.azure,
+      azureCalls(p),
+    );
   }
 }
 
@@ -2326,6 +2403,55 @@ console.log("66. 未知 overview kind 是 contract error，不偽裝成沒有記
       !p.hitTexts().some((line) => line.includes("沒有留下能回答")),
     p.hitTexts(),
   );
+}
+
+console.log("67. kind、overview 與作者是封閉契約，錯線不能畫成正常答案");
+{
+  const cases = [
+    answer({ kind: "memory_overview", overview: null }),
+    answer({ kind: "keywords", overview: { kind: "raw_only" } }),
+    answer({
+      kind: "memory_overview",
+      overview: {
+        kind: "ready",
+        cards: [overviewCard({ author: "future_author" })],
+        truncated: false,
+        evidence_unavailable: 0,
+      },
+    }),
+    answer({
+      kind: "memory_overview",
+      overview: {
+        kind: "ready",
+        cards: [overviewCard({ model_confidence: null })],
+        truncated: false,
+        evidence_unavailable: 0,
+      },
+    }),
+    answer({
+      kind: "memory_overview",
+      overview: {
+        kind: "ready",
+        cards: [overviewCard({ evidence: [{ frame_id: 0, label: "not-openable" }] })],
+        truncated: false,
+        evidence_unavailable: 0,
+      },
+    }),
+  ];
+  for (const payload of cases) {
+    const p = await open({ ask: payload, recording_state: "recording" });
+    await p.type("她知道了什麼");
+    check(
+      "contract 錯線明講這題沒答成",
+      p.hitTexts().some((line) => line.includes("這一題我沒答成")),
+      p.hitTexts(),
+    );
+    check(
+      "contract 錯線不顯示成空記憶或正常 activity",
+      !p.hitTexts().some((line) => line.includes("沒有留下能回答") || line.includes("修好安裝更新")),
+      p.hitTexts(),
+    );
+  }
 }
 
 console.log("");

@@ -1613,10 +1613,10 @@ fn memory_overview_from_db(db: &sister_core::db::Db) -> anyhow::Result<MemoryOve
 
     let candidates = db.recent_l2_cards(CANDIDATES)?;
     if candidates.is_empty() {
-        return Ok(if db.stats()?.nothing_recorded_left() {
-            MemoryOverview::Empty
-        } else {
+        return Ok(if db.has_retained_recorded_content()? {
             MemoryOverview::RawOnly
+        } else {
+            MemoryOverview::Empty
         });
     }
 
@@ -1892,6 +1892,40 @@ mod memory_overview_tests {
         assert!(
             !serialized.to_string().contains(SETTINGS_OCR),
             "ready 只送 L2 activity，不送 positive-control OCR：{serialized}"
+        );
+    }
+
+    #[test]
+    fn ready_uses_the_current_user_correction_with_its_inherited_evidence() {
+        let mut db = Db::open_in_memory().expect("open db");
+        let session = db.start_session("test", "test").expect("start session");
+        let frame_id = insert_frame(
+            &mut db,
+            session,
+            3_000,
+            "畫面上的原始脈絡",
+            Some("corrected.png"),
+        );
+        insert_card(
+            &mut db,
+            3_000,
+            "SUPERSEDED_MODEL_ACTIVITY_MUST_NOT_RETURN",
+            &[format!("frame:{frame_id}")],
+        );
+        sister_core::reviewer::correct_l2(&mut db, 3_000, "這是我自己修正的說法")
+            .expect("correct L2");
+
+        let serialized = json(&memory_overview_from_db(&db).expect("corrected overview"));
+        assert_eq!(serialized["kind"], "ready");
+        assert_eq!(serialized["cards"].as_array().map(Vec::len), Some(1));
+        assert_eq!(serialized["cards"][0]["activity"], "這是我自己修正的說法");
+        assert_eq!(serialized["cards"][0]["author"], "user");
+        assert_eq!(serialized["cards"][0]["evidence"][0]["frame_id"], frame_id);
+        assert!(
+            !serialized
+                .to_string()
+                .contains("SUPERSEDED_MODEL_ACTIVITY_MUST_NOT_RETURN"),
+            "總覽只能回 current user version，不能把 superseded model activity 混回來"
         );
     }
 
