@@ -15263,8 +15263,10 @@ pub mod query {
             assert!(out.contains("現在正全停中"), "{out}");
             assert!(out.contains("全停"), "{out}");
             assert!(out.contains("stop-all --off"), "{out}");
+            let rendered_dir =
+                crate::ops::quote_for(crate::ops::platform_shell(), &dir.0.display().to_string());
             assert!(
-                out.contains(&format!("--data-dir {}", dir.0.display())),
+                out.contains(&format!("--data-dir {rendered_dir}")),
                 "解除指令必須指回同一份資料目錄：{out}"
             );
         }
@@ -19240,7 +19242,9 @@ pub mod doctor {
             // `cfg(windows)` 接線在 Linux 不會編譯執行；直接檢查 production body，避免
             // 只測一個實際沒被 caps 使用的 helper。每個原生入口在 body 中只能出現一次，
             // 而且都必須位於 `live.run` closure 的開頭。
-            let source = include_str!("ops.rs");
+            // Windows checkout 可能是 CRLF；這條測的是 Rust 結構，不是 tracked
+            // newline bytes，不可讓同一份原始碼只在 Windows 找不到 marker。
+            let source = include_str!("ops.rs").replace("\r\n", "\n");
             let start = source
                 .find("#[cfg(windows)]\n    fn caps(data_dir")
                 .expect("windows caps start");
