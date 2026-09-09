@@ -30,7 +30,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, PhysicalPosition, WindowEvent};
 
@@ -811,6 +811,142 @@ fn refresh_tray(app: &tauri::AppHandle) {
     if let Some(item) = app.try_state::<HandsResumeItem>() {
         let _ = item.0.set_text(resume);
     }
+    let attached = master_stop_attached(shell.data_dir.as_deref());
+    let (stop, resume) = master_stop_labels(attached);
+    if let Some(item) = app.try_state::<MasterStopItem>() {
+        let _ = item.0.set_text(stop);
+    }
+    if let Some(item) = app.try_state::<MasterResumeItem>() {
+        let _ = item.0.set_text(resume);
+    }
+    if let Some(stopped) = master_stop_active(attached) {
+        let _ = app.emit("master-stop-changed", stopped);
+    }
+}
+
+/// 從 hands 的三態讀全停，不另讀 `master.stop`。
+///
+/// `Attached::No` 只能說明使用者原本拔了手；它和 `Attached::Yes` 一樣都代表
+/// **沒有全停**。只有 `MasterStopped` 能把全停那顆字改成「現在是全停」。這個
+/// 分法同時保證全停不會把拔手那顆偽裝成已拔，解除時也不會碰它。
+fn master_stop_attached(data_dir: Option<&Path>) -> Option<sister_hands::Attached> {
+    data_dir.map(|dir| {
+        let executor = hands::PlatformExecutor::new(dir);
+        sister_hands::Executor::hands_attached(&executor)
+    })
+}
+
+fn master_stop_active(attached: Option<sister_hands::Attached>) -> Option<bool> {
+    attached.map(|attached| matches!(attached, sister_hands::Attached::MasterStopped { .. }))
+}
+
+/// 系統匣是兩個固定方向的動作，不是 toggle。這樣 stale label 最多只會重做同一
+/// 個冪等動作，絕不會把使用者按下的「全部停止」重新解讀成「解除全停」。
+fn master_stop_labels(attached: Option<sister_hands::Attached>) -> (&'static str, &'static str) {
+    match attached {
+        Some(sister_hands::Attached::MasterStopped { .. }) => {
+            ("全部停止（現在是全停）", "解除全停")
+        }
+        Some(sister_hands::Attached::Yes | sister_hands::Attached::No { .. }) => {
+            ("全部停止", "解除全停（現在沒有全停）")
+        }
+        None => ("全部停止", "解除全停"),
+    }
+}
+
+#[tauri::command]
+fn master_stop_state(shell: tauri::State<'_, Shell>) -> Result<bool, String> {
+    master_stop_active(master_stop_attached(shell.data_dir.as_deref()))
+        .ok_or_else(|| "找不到資料目錄，現在不能確認全停狀態".to_owned())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MasterStopAction {
+    Engage,
+    Release,
+}
+
+fn set_master_stop(data_dir: Option<&Path>, action: MasterStopAction) -> Result<(), String> {
+    let dir = data_dir.ok_or_else(|| "找不到資料目錄，全停開關沒有作用".to_owned())?;
+    match action {
+        MasterStopAction::Engage => {
+            sister_hands::master_stop::engage(dir, sister_core::now_ms())
+                .map_err(|error| format!("全部停止失敗：{error}"))
+        }
+        MasterStopAction::Release => sister_hands::master_stop::release(dir)
+            .map_err(|error| format!("解除全停失敗：{error}")),
+    }
+}
+
+fn announce_master_stop_state(app: &tauri::AppHandle) {
+    let Some(shell) = app.try_state::<Shell>() else {
+        return;
+    };
+    if let Some(stopped) = master_stop_active(master_stop_attached(shell.data_dir.as_deref())) {
+        let _ = app.emit("master-stop-changed", stopped);
+    }
+}
+
+#[cfg(test)]
+mod master_stop_desktop_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "sister-desktop-master-stop-{}-{label}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create master-stop test dir");
+        dir
+    }
+
+    #[test]
+    fn labels_use_attached_master_stop_without_hiding_a_pulled_hand() {
+        assert_eq!(
+            master_stop_labels(Some(sister_hands::Attached::Yes)),
+            ("全部停止", "解除全停（現在沒有全停）")
+        );
+        assert_eq!(
+            master_stop_labels(Some(sister_hands::Attached::No {
+                since_ms: Some(10)
+            })),
+            ("全部停止", "解除全停（現在沒有全停）")
+        );
+        assert_eq!(
+            master_stop_labels(Some(sister_hands::Attached::MasterStopped {
+                since_ms: Some(20)
+            })),
+            ("全部停止（現在是全停）", "解除全停")
+        );
+    }
+
+    #[test]
+    fn release_action_preserves_pause_and_hands_switches() {
+        let dir = temp_dir("independent-switches");
+        sister_core::pause::set_paused(&dir, true, 1).expect("pause");
+        sister_hands::kill_switch::pull(&dir, 2).expect("pull hands");
+
+        set_master_stop(Some(&dir), MasterStopAction::Engage).expect("engage master stop");
+        assert!(matches!(
+            master_stop_attached(Some(&dir)),
+            Some(sister_hands::Attached::MasterStopped {
+                since_ms: Some(_)
+            })
+        ));
+        set_master_stop(Some(&dir), MasterStopAction::Release).expect("release master stop");
+
+        assert!(sister_core::pause::is_paused(&dir));
+        assert!(sister_hands::kill_switch::is_pulled(&dir));
+        assert_eq!(
+            master_stop_attached(Some(&dir)),
+            Some(sister_hands::Attached::No { since_ms: Some(2) })
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// 「開始／停止記錄」和「結束」那兩行字。分出來是因為 [`recording_state`] 手上
@@ -1319,6 +1455,8 @@ impl RecordItem {
 }
 struct HandsStopItem(MenuItem<tauri::Wry>);
 struct HandsResumeItem(MenuItem<tauri::Wry>);
+struct MasterStopItem(MenuItem<tauri::Wry>);
+struct MasterResumeItem(MenuItem<tauri::Wry>);
 
 /// 系統匣裡的「結束」。存起來的理由見 [`quit_label`]。
 struct QuitItem(MenuItem<tauri::Wry>);
@@ -1409,6 +1547,9 @@ fn toggle_pause(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> Result
 /// 兩個地方都要更新，因為兩個地方都能觸發它——只更新自己那一邊的話，
 /// 從系統匣暫停之後，視窗裡的字母人會繼續一臉「我在聽」。
 fn announce_pause(app: &tauri::AppHandle, paused: bool) {
+    // 解除 pause 只改 paused.flag。若全停仍在，先把全停真相送回 renderer，
+    // 再送 pause 的新值，畫面就不會在兩個 event 中間短暫冒出「在聽」。
+    announce_master_stop_state(app);
     let _ = app.emit("pause-changed", paused);
     if let Some(item) = app.try_state::<PauseItem>() {
         let _ = item.0.set_text(pause_label(paused));
@@ -5816,6 +5957,7 @@ fn main() {
             mark_query,
             frame_image,
             pause_state,
+            master_stop_state,
             recording_state,
             start_recording,
             stop_recording,
@@ -6065,6 +6207,13 @@ fn main() {
                 MenuItem::with_id(app, "hands-stop", hands_labels.0, true, None::<&str>)?;
             let hands_resume_item =
                 MenuItem::with_id(app, "hands-resume", hands_labels.1, true, None::<&str>)?;
+            let master_labels = master_stop_labels(master_stop_attached(
+                app.state::<Shell>().data_dir.as_deref(),
+            ));
+            let master_stop_item =
+                MenuItem::with_id(app, "master-stop", master_labels.0, true, None::<&str>)?;
+            let master_resume_item =
+                MenuItem::with_id(app, "master-resume", master_labels.1, true, None::<&str>)?;
             // 開始／停止和暫停是兩件事，所以是兩顆。暫停是「先別看，但留在
             // 這裡」，停止是「今天到此為止」——把停止做成「一直暫停」會留下
             // 一個永遠在跑卻永遠不做事的行程，而他在工作管理員裡看得到它。
@@ -6119,6 +6268,10 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
+            // 全停比暫停、停止 recorder、拔手都重；用前後兩條分隔線把它放在
+            // 既有停止類項目之後的獨立區塊，不跟任何一顆排成看似等價的 toggle。
+            let before_master_separator = PredefinedMenuItem::separator(app)?;
+            let after_master_separator = PredefinedMenuItem::separator(app)?;
             let menu = match &metrics_item {
                 Some(metrics_item) => Menu::with_items(
                     app,
@@ -6128,6 +6281,10 @@ fn main() {
                         &pause_item,
                         &hands_stop_item,
                         &hands_resume_item,
+                        &before_master_separator,
+                        &master_stop_item,
+                        &master_resume_item,
+                        &after_master_separator,
                         &timeline_item,
                         &settings_item,
                         &consent_item,
@@ -6143,6 +6300,10 @@ fn main() {
                         &pause_item,
                         &hands_stop_item,
                         &hands_resume_item,
+                        &before_master_separator,
+                        &master_stop_item,
+                        &master_resume_item,
+                        &after_master_separator,
                         &timeline_item,
                         &settings_item,
                         &consent_item,
@@ -6158,6 +6319,8 @@ fn main() {
             app.manage(QuitItem(quit_item));
             app.manage(HandsStopItem(hands_stop_item));
             app.manage(HandsResumeItem(hands_resume_item));
+            app.manage(MasterStopItem(master_stop_item));
+            app.manage(MasterResumeItem(master_resume_item));
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("icon").clone())
@@ -6208,6 +6371,30 @@ fn main() {
                                     "hands-pulled",
                                     sister_hands::kill_switch::tray_hands_failure_message(why),
                                 );
+                                refresh_tray(app);
+                            }
+                        }
+                    }
+                    "master-stop" | "master-resume" => {
+                        // 兩個 id 是固定方向：即使五秒刷新前的舊選單仍留在畫面上，
+                        // 「全部停止」也只會再 engage；絕不在 click 時翻成 release。
+                        let action = if event.id.as_ref() == "master-resume" {
+                            MasterStopAction::Release
+                        } else {
+                            MasterStopAction::Engage
+                        };
+                        let shell = app.state::<Shell>();
+                        match set_master_stop(shell.data_dir.as_deref(), action) {
+                            Ok(()) => {
+                                refresh_tray(app);
+                            }
+                            Err(error) => {
+                                tracing::error!("全停開關切換失敗：{error}");
+                                if let Some(win) = app.get_webview_window(PET) {
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                                let _ = app.emit("master-stop-failed", error);
                                 refresh_tray(app);
                             }
                         }

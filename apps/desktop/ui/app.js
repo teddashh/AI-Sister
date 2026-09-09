@@ -14,6 +14,7 @@ const STATE_LINES = Object.freeze({
   idle: "在聽",
   thinking: "想一下…",
   paused: "已暫停，沒有在看",
+  stopped: "已全停：capture／brain／hands 都不會動",
   // 「她今天不會記得任何事」是一句這一頁證明不了的話：這裡手上只有「現在
   // 沒有人在錄」。早上錄了四小時、中午按停的話，那四小時她記得清清楚楚——
   // 而底下的 `asleepDetail()` 正好會印著「上一次 12:00 停的：你按了停止」，
@@ -226,18 +227,21 @@ const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
 // ---------- 狀態 ----------
 
 /**
- * 兩個獨立的東西，不是三選一：
+ * 三個獨立的東西，不是四選一：
  *
  * - `state` 是她**正在做什麼**（在聽／想一下）。
  * - `paused` 是她**有沒有在看**，而且真相不在這個行程裡，是 data dir 裡的
  *   一個檔案（見 sister-core 的 `pause` 模組）。系統匣、上一次開機、甚至
  *   使用者自己去刪檔案，都能改變它。
+ * - `masterStopped` 是 capture／brain／hands 共用的最重開關。它壓過 paused，
+ *   因為兩者的恢復動作不同；解除 pause 絕不能讓全停畫面消失。
  *
  * 混成一個變數的話會出現一個很難發現的 bug：暫停中問一句話 → 進 thinking →
  * 答完回 idle → **暫停的樣子不見了，但她其實還在暫停**。
  */
 let state = "idle";
 let paused = false;
+let masterStopped = false;
 
 // Persona 是表達層，不是上面的錄製狀態。關掉她、換顏色或停動畫都不可以改
 // `state` / `paused`，也不可以走 ask、Gatekeeper、hands 或 CLI。
@@ -1720,12 +1724,15 @@ function asleepDetail() {
 
 function paint() {
   // 順序就是嚴重程度。她沒在看的時候，畫面上絕不可以有一格看起來像在看，
-  // 而「被你叫停」要壓過「根本沒人開她」——前者是他做的決定，後者只是狀態。
-  const shown = paused
-    ? "paused"
-    : recording && !supervisorBlocksListeningClaim()
-      ? state
-      : "asleep";
+  // 全停要壓過 pause，因為解除 pause 不是解除全停；而「被你叫停」要壓過
+  // 「根本沒人開她」——前者是他做的決定，後者只是狀態。
+  const shown = masterStopped
+    ? "stopped"
+    : paused
+      ? "paused"
+      : recording && !supervisorBlocksListeningClaim()
+        ? state
+        : "asleep";
   avatar.dataset.state = shown;
 
   // 暫停時仍然答得出問題——停的是「記錄」，不是「記憶」。所以 thinking
@@ -1741,21 +1748,23 @@ function paint() {
   const supervisedLine = !paused && state !== "thinking" ? supervisorHeadline() : null;
   const trustHeartbeat = !supervisorBlocksListeningClaim();
   const heartbeatUnreadable = recordingStateKnown && !recordingStateReadable;
-  const line = booting && trustHeartbeat
-    ? "她起來了，正在開資料庫…（大的記憶要等一下，這期間還沒開始記）"
-    : thinkingLast && trustHeartbeat
-      ? "錄製已停，解釋層還在想最後一段"
-      : heartbeatUnreadable && supervisedLine !== null
-        ? supervisedLine
-        : starting
-          ? "正在把她叫起來…"
-          : supervisedLine !== null
-            ? supervisedLine
-            : state === "thinking" && slowNote !== null
-              ? slowNote
-              : state === "thinking" && shown !== "thinking"
-                ? `想一下…（${thinkingRecordingQualifier(shown)}）`
-                : STATE_LINES[shown];
+  const line = masterStopped
+    ? STATE_LINES.stopped
+    : booting && trustHeartbeat
+      ? "她起來了，正在開資料庫…（大的記憶要等一下，這期間還沒開始記）"
+      : thinkingLast && trustHeartbeat
+        ? "錄製已停，解釋層還在想最後一段"
+        : heartbeatUnreadable && supervisedLine !== null
+          ? supervisedLine
+          : starting
+            ? "正在把她叫起來…"
+            : supervisedLine !== null
+              ? supervisedLine
+              : state === "thinking" && slowNote !== null
+                ? slowNote
+                : state === "thinking" && shown !== "thinking"
+                  ? `想一下…（${thinkingRecordingQualifier(shown)}）`
+                  : STATE_LINES[shown];
   // 灰掉的時候多講一句「上一次是什麼時候、為什麼停的」。換行不換句：那是
   // 同一件事的後半段，而 `.state-line` 的 `pre-line` 讓它自己排。
   //
@@ -1793,7 +1802,10 @@ function paint() {
   // 一下正好就是按了「叫她起來」**，那五個字會被讀成在講那一下——在唯一需要它
   // 的狀態下最模糊。「另一件事」講的是關係（跟上面那句無關），不是時序。
   let detail = "";
-  if (notice !== null) {
+  if (masterStopped) {
+    const resume = "要恢復，請從系統匣按「解除全停」";
+    detail = notice === null ? resume : `${resume}\n${notice.text}`;
+  } else if (notice !== null) {
     detail =
       (starting || booting || thinkingLast) && !notice.aboutHer
         ? `這是另一件事：${notice.text}`
@@ -1876,6 +1888,13 @@ function setPaused(next) {
     // 這正是我們要的：不正常的狀態要吵。
     pauseButton.setAttribute("aria-pressed", String(paused));
   }
+  paint();
+}
+
+function setMasterStopped(next) {
+  const was = masterStopped;
+  masterStopped = next === true;
+  if (was !== masterStopped) overtakenByEvents();
   paint();
 }
 
@@ -2082,6 +2101,8 @@ function pollRecording() {
   void readRecordingState().catch(() => {});
   readRecorderSupervisor();
   invoke("pause_state").then(setPaused, () => {});
+  // CLI 也能改 master.stop；renderer 只是鏡子，不能只相信這個 desktop 發的 event。
+  invoke("master_stop_state").then(setMasterStopped, () => {});
   // 守門員也要一直問下去。**只在開場問一次的話，五點才到期的那張承諾
   // 永遠不會被看到**——而 a 類（顯式時間承諾）正是整個 Phase 5 冷啟動期
   // 唯一放行的兩類之一，它不動就等於守門員沒上線。
@@ -2226,6 +2247,17 @@ pauseButton?.addEventListener("click", async () => {
  */
 globalThis.__TAURI__?.event
   ?.listen?.("pause-changed", (event) => setPaused(event.payload))
+  ?.catch?.(() => {});
+
+globalThis.__TAURI__?.event
+  ?.listen?.("master-stop-changed", (event) => setMasterStopped(event.payload))
+  ?.catch?.(() => {});
+
+globalThis.__TAURI__?.event
+  ?.listen?.("master-stop-failed", (event) => {
+    noticeAboutHer(event.payload, true);
+    paint();
+  })
   ?.catch?.(() => {});
 
 /**
@@ -3644,7 +3676,14 @@ askInput?.addEventListener("keydown", (event) => {
 const params = new URLSearchParams(globalThis.location.search);
 const browserDemoQuery = invoke === null;
 const requestedBrowserState = params.get("state");
-const browserStateFixtures = new Set(["idle", "thinking", "paused", "asleep", "booting"]);
+const browserStateFixtures = new Set([
+  "idle",
+  "thinking",
+  "paused",
+  "stopped",
+  "asleep",
+  "booting",
+]);
 const authoritativeBrowserStateDemo =
   browserDemoQuery && browserStateFixtures.has(requestedBrowserState);
 // Query string 不是 native recorder 的輸入。Tauri 視窗即使意外帶著 `?state=`，
@@ -3675,6 +3714,9 @@ readAzureTts();
 // 於是截出來的圖裡桌面姊妹是灰的、但拖曳條上的暫停鍵還是「⏸」——而截圖是這台
 // 機器上唯一看得到 UI 的方式，一個走假路的開發開關會讓它騙我。
 setPaused(wanted === "paused");
+// `?state=stopped` 只替純瀏覽器 fixture 注入 renderer 狀態；產品裡仍只信
+// `master_stop_state` 與 native event。
+setMasterStopped(wanted === "stopped");
 // `?state=asleep`：沒有人在跑 `sister record`。`?state=booting`：有一個起來
 // 了，但還在開資料庫——那一格畫面上不是「沒有人在記錄」（那句話配著一顆按下
 // 去會失敗的按鈕），而他那顆一年份的資料庫每天早上都會停在這裡好幾分鐘。
@@ -3690,7 +3732,7 @@ setRecording(
   authoritativeBrowserStateDemo,
 );
 setState(
-  wanted === "paused" || wanted === "asleep" || wanted === "booting"
+  wanted === "paused" || wanted === "stopped" || wanted === "asleep" || wanted === "booting"
     ? "idle"
     : wanted,
 );
@@ -3702,6 +3744,7 @@ setState(
 // 視窗如果一開始就縮在系統匣裡，那個輪詢是不跑的。
 if (invoke !== null) {
   invoke("pause_state").then(setPaused, () => {});
+  invoke("master_stop_state").then(setMasterStopped, () => {});
   // 即使 Windows 登入 intent 把主視窗留在系統匣，也先取一份 supervisor view；
   // 顯示中的五秒 poll 會接著重讀。兩次很接近時只有較新的 request 能套用。
   readRecorderSupervisor();
