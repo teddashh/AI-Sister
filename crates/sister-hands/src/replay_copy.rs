@@ -785,11 +785,23 @@ mod tests {
             }],
             unreadable: vec![],
         });
+        let by_master_stop = replay_lines(&Replay {
+            events: vec![ActionEvent::Aborted {
+                at_ms: 1,
+                after_completed_steps: 2,
+                by: crate::semi_action::AbortActor::MasterStopped,
+            }],
+            unreadable: vec![],
+        });
         assert!(by_user[0].contains("使用者"), "{by_user:?}");
         assert!(by_system[0].contains("系統"), "{by_system:?}");
         assert!(
             by_pulled_switch[0].contains("外部拔手開關"),
             "{by_pulled_switch:?}"
+        );
+        assert!(
+            by_master_stop[0].contains("外部三層全停開關"),
+            "{by_master_stop:?}"
         );
         assert_ne!(by_user[0], by_system[0]);
     }

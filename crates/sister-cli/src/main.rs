@@ -919,7 +919,7 @@ fn main() -> Result<()> {
             json,
         } => ops::consent::run(&data_dir, &config()?, &grant, &revoke, json),
         Command::Doctor => ops::doctor::run(&data_dir, config(), cli.config.clone()),
-        Command::Bench { rounds } => ops::bench::run(rounds),
+        Command::Bench { rounds } => ops::bench::run(&data_dir, rounds),
     }
 }
 

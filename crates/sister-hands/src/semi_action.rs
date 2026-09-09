@@ -459,6 +459,8 @@ pub enum AbortActor {
     System,
     /// 有人在別的地方拔了手（tray 按鈕、`sister hands stop`）。
     HandsPulled,
+    /// 有人在別的地方啟用了跨 capture／brain／hands 的全停。
+    MasterStopped,
 }
 impl AbortActor {
     const fn name(self) -> &'static str {
@@ -466,6 +468,7 @@ impl AbortActor {
             Self::User => "使用者",
             Self::System => "系統",
             Self::HandsPulled => "外部拔手開關",
+            Self::MasterStopped => "外部三層全停開關",
         }
     }
 }

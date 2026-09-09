@@ -222,15 +222,29 @@ impl SkipReason {
     }
 
     pub fn message(&self) -> String {
-        self.message_with_consent_command("sister consent --grant cloud-reading")
+        self.message_with_commands("sister consent --grant cloud-reading", None)
     }
 
     pub fn message_with_consent_command(&self, consent_command: &str) -> String {
+        self.message_with_commands(consent_command, None)
+    }
+
+    /// 路徑敏感的指令由 CLI 組好再交進來；core 不猜使用者這次用哪個 data dir。
+    pub fn message_with_commands(
+        &self,
+        consent_command: &str,
+        master_stop_command: Option<&str>,
+    ) -> String {
         match self {
             SkipReason::NoConsent => format!(
                 "還沒簽第二張同意書（上雲解讀）。解釋層一次都不會呼叫那支 CLI。\n要看她準備送出什麼：sister interpret --dry-run\n要簽字：{consent_command}"
             ),
-            SkipReason::MasterStopped => "三層全停中：這一趟沒有問模型、沒有送出任何字，也沒有寫新卡片。要恢復請跑 `sister stop-all --off`。".to_string(),
+            SkipReason::MasterStopped => format!(
+                "三層全停中：這一趟沒有問模型、沒有送出任何字，也沒有寫新卡片。{}",
+                master_stop_command
+                    .map(|command| format!("要恢復請跑 `{command}`。"))
+                    .unwrap_or_else(|| "要恢復，請從啟用這份資料目錄的介面解除全停。".into())
+            ),
             SkipReason::NoCommand => concat!(
                 "還沒設定 [brain] command。一次都不會呼叫。\n",
                 "（不是今天沒有東西可解釋——她根本沒有一支 CLI 可以叫。）\n",
@@ -1197,6 +1211,14 @@ fn build_prompt(
 
 /// `sister interpret --dry-run` 的人話。
 pub fn format_dry_run(report: &DryRun) -> String {
+    format_dry_run_with_commands(report, "sister consent --grant cloud-reading", None)
+}
+
+pub fn format_dry_run_with_commands(
+    report: &DryRun,
+    consent_command: &str,
+    master_stop_command: Option<&str>,
+) -> String {
     let mut out = String::new();
     out.push_str("── 不會送出去（--dry-run）──\n\n");
     match &report.command {
@@ -1227,7 +1249,7 @@ pub fn format_dry_run(report: &DryRun) -> String {
         match skip {
             SkipReason::NothingWorthInterpreting { .. } => {
                 out.push('\n');
-                out.push_str(&skip.message());
+                out.push_str(&skip.message_with_commands(consent_command, master_stop_command));
                 out.push('\n');
                 return out;
             }
@@ -1237,7 +1259,7 @@ pub fn format_dry_run(report: &DryRun) -> String {
             | SkipReason::BudgetExhausted { .. } => {
                 out.push('\n');
                 out.push_str("真的跑的話會停在這裡：\n");
-                out.push_str(&skip.message());
+                out.push_str(&skip.message_with_commands(consent_command, master_stop_command));
                 out.push('\n');
             }
         }
@@ -2337,7 +2359,12 @@ mod tests {
             limit: 4,
             only_core_start: None,
         };
-        let before = format_dry_run(&prepare(&mut input, &dir).expect("prepare"));
+        let stop_command = format!("sister --data-dir {} stop-all --off", dir.display());
+        let before = format_dry_run_with_commands(
+            &prepare(&mut input, &dir).expect("prepare"),
+            "consent command",
+            Some(&stop_command),
+        );
         assert!(
             !before.contains("stop-all --off"),
             "還沒全停就講解除：{before}"
@@ -2349,8 +2376,8 @@ mod tests {
             "全停期間 dry-run 沒報全停：{:?}",
             report.skip
         );
-        let text = format_dry_run(&report);
-        assert!(text.contains("stop-all --off"), "沒講解除的辦法：{text}");
+        let text = format_dry_run_with_commands(&report, "consent command", Some(&stop_command));
+        assert!(text.contains(&stop_command), "沒講正確的解除辦法：{text}");
         assert!(!sentinel.exists(), "dry-run 卻 spawn 了");
         let _ = std::fs::remove_dir_all(&dir);
     }

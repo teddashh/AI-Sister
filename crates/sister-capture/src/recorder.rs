@@ -133,6 +133,8 @@ pub struct RecorderStats {
     /// 倍，而且是往「看起來很便宜」的方向差。那個數字唯一的用途就是判斷這
     /// 個迴圈貴不貴，指錯方向等於沒有。
     pub working_ticks: u64,
+    /// 因跨三層全停而在任何畫面擷取前返回的拍數。
+    pub master_stopped_ticks: u64,
     pub kept: u64,
     pub duplicates: u64,
     pub excluded: u64,
@@ -1156,6 +1158,7 @@ impl<B: Backend> Recorder<B> {
             .as_deref()
             .is_some_and(sister_hands::master_stop::is_stopped)
         {
+            self.stats.master_stopped_ticks += 1;
             // 和 pause 一樣，恢復後不能把停止期間的 clipboard／input 尾巴撈回來。
             let _ = self.establish_clipboard_watermark(ts);
             let _ = self.suspend_input_source(ts);
@@ -5686,6 +5689,7 @@ mod tests {
         let before = rec.db().stats().unwrap();
         sister_hands::master_stop::engage(&control.0, 500).unwrap();
         assert_eq!(rec.tick(1_000).unwrap(), Tick::MasterStopped);
+        assert_eq!(rec.stats().master_stopped_ticks, 1);
         let after = rec.db().stats().unwrap();
         assert_eq!(after.frames, before.frames, "全停後仍新增畫面");
         assert_eq!(after.chunks, before.chunks, "全停後仍新增文字段落");
