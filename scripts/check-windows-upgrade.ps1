@@ -926,7 +926,7 @@ enabled = false
       -ArgumentList @(
         '--data-dir', $dataDir,
         '--config', $oldRecorderConfigPath,
-        'record', '--duration', '120'
+        'record', '--duration', '300'
       ) `
       -RedirectStandardOutput $oldRecorderOut `
       -RedirectStandardError $oldRecorderErr `
@@ -1026,7 +1026,13 @@ enabled = false
       $oldRecorder.Dispose()
     }
     if (Test-Path -LiteralPath $oldRecorderLink) {
-      Remove-Item -LiteralPath $oldRecorderLink -Force
+      try {
+        Remove-Item -LiteralPath $oldRecorderLink -Force
+      }
+      catch {
+        # 清 hard link 失敗不該蓋掉上面真正的失敗原因。
+        Write-Warning "清掉 $oldRecorderLink 失敗：$($_.Exception.Message)"
+      }
     }
   }
   $replayResult = Invoke-NativeUtf8 `

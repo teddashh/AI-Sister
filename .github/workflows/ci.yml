@@ -1228,6 +1228,16 @@ jobs:
             throw $failure
           }
 
+          function Assert-NamedMutexPresent([string] $name, [string] $failure) {
+            try {
+              $probe = [System.Threading.Mutex]::OpenExisting($name)
+              $probe.Dispose()
+            }
+            catch [System.Threading.WaitHandleCannotBeOpenedException] {
+              throw $failure
+            }
+          }
+
           function Assert-NamedMutexAbsent([string] $name, [string] $failure) {
             try {
               $probe = [System.Threading.Mutex]::OpenExisting($name)
@@ -1843,6 +1853,9 @@ jobs:
             Assert-CannotStart $desktop 2 'Lane E2 sister-desktop.exe 原路徑'
             Assert-CannotStart "$sister.ai-sister-previous" 32 'Lane E2 sister.exe previous 路徑'
             Assert-CannotStart "$desktop.ai-sister-previous" 32 'Lane E2 sister-desktop.exe previous 路徑'
+            # 四次探測都要落在 5 秒窗內；窗已關的話上面的結果不算數，這裡要另外紅。
+            Assert-NamedMutexPresent $afterFileExclusionMutexName `
+              'Lane E2 四次啟動探測跑完時 file-level exclusion window 已經關閉，本輪觀察無效'
             if (-not $excl.WaitForExit(180000)) {
               throw 'Lane E2 file-level exclusion setup 超過 180 秒仍未收尾'
             }
@@ -1887,11 +1900,17 @@ jobs:
           )
           try {
             # NSIS uninstaller 會自我複製到 temp，外層 exit code 不可靠；只驗證狀態。
+            # temp 副本在 PREUNINSTALL 取得 lifecycle mutex、拒絕時才釋放（中間有約兩秒
+            # 的檔案層重試），所以等 mutex 出現再消失，才拍狀態、才放掉 handle——先放掉
+            # handle 會讓仍在重試的 uninstaller 真的把安裝刪掉，害後面的 lane 紅。
             $uninstallerProcess = Start-Process `
               -FilePath (Join-Path $installDir 'uninstall.exe') `
               -ArgumentList '/S' -Wait -PassThru
             $uninstallerProcess.Dispose()
-            Start-Sleep -Seconds 2
+            Wait-NamedMutex $lifecycleMutexName $null `
+              'Lane E3 temp uninstaller 沒有取得 installer lifecycle mutex'
+            Wait-NamedMutexGone $lifecycleMutexName `
+              'Lane E3 temp uninstaller 30 秒內沒有釋放 installer lifecycle mutex'
             Assert-ProductFiles
             if (-not (Test-Path -LiteralPath $uninstallKey)) {
               throw 'Lane E3 file-level exclusion 拒絕卻移除了 uninstall metadata'
