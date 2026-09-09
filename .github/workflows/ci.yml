@@ -1086,10 +1086,11 @@ jobs:
       # 這裡不是拿「bundle build 成功」冒充「使用者裝得起來」。同一台原生 Windows
       # runner 真的安裝、啟動、再裝與移除，並分別讓 desktop 和 recorder 活著去撞
       # installer。兩場都必須回固定非零，而且原行程仍活著；否則 Tauri 內建的
-      # KillProcess 會把「升級」做成強制砍掉錄製中的資料庫。
+      # KillProcess 會把「升級」做成強制砍掉錄製中的資料庫。file-level exclusion
+      # 的三個 lane 證明拒絕與改名寫檔之間沒有窗，不冒充真人互動驗證。
       - name: Installer — install, login registry, refuse live processes, reinstall, uninstall
         shell: pwsh
-        timeout-minutes: 10
+        timeout-minutes: 12
         run: |
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
@@ -1108,6 +1109,7 @@ jobs:
           $lifecycleMutexName = 'Global\com.ted-h.ai-sister-install-lifecycle-v1'
           $productLifecycleEventName = 'Global\com.ted-h.ai-sister-product-lifecycle-v1'
           $afterScanMutexName = 'Global\com.ted-h.ai-sister-install-after-process-scan-v1'
+          $afterFileExclusionMutexName = 'Global\com.ted-h.ai-sister-install-after-file-exclusion-v1'
           $releaseDesktop = Join-Path (Get-Location) 'sister-desktop.exe'
           $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
           $loginRunName = 'AI-Sister'
@@ -1178,6 +1180,7 @@ jobs:
             $diagnosticValue = switch ($environmentName) {
               'AI_SISTER_DIAGNOSTIC_INSTALL_DELAY_MS' { '15000' }
               'AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN_MS' { '5000' }
+              'AI_SISTER_DIAGNOSTIC_AFTER_FILE_EXCLUSION_MS' { '5000' }
               default { throw "unknown installer diagnostic environment: $environmentName" }
             }
             $info.EnvironmentVariables[$environmentName] = $diagnosticValue
@@ -1233,6 +1236,72 @@ jobs:
             }
             catch [System.Threading.WaitHandleCannotBeOpenedException] {
               return
+            }
+          }
+
+          function Assert-NamedEventAbsent([string] $name, [string] $failure) {
+            try {
+              $probe = [System.Threading.EventWaitHandle]::OpenExisting($name)
+              $probe.Dispose()
+              throw $failure
+            }
+            catch [System.Threading.WaitHandleCannotBeOpenedException] {
+              return
+            }
+          }
+
+          function Assert-NoProductNamedProcess([string] $failure) {
+            $processes = @(Get-Process -Name 'sister-desktop','sister' `
+              -ErrorAction SilentlyContinue)
+            if ($processes.Count -ne 0) {
+              throw "$failure：PID=$($processes.Id -join ', ')"
+            }
+          }
+
+          function Assert-CannotStart(
+            [string] $path,
+            [int] $expectedNativeError,
+            [string] $label
+          ) {
+            $info = [System.Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $path
+            $info.UseShellExecute = $false
+            $info.CreateNoWindow = $true
+            $null = $info.ArgumentList.Add('--version')
+            $started = $null
+            try {
+              $started = [System.Diagnostics.Process]::Start($info)
+              if ($null -ne $started) {
+                if (-not $started.HasExited) {
+                  Stop-Process -Id $started.Id -Force -ErrorAction SilentlyContinue
+                  $started.WaitForExit()
+                }
+                throw "$label 在 file-level exclusion window 內仍成功啟動"
+              }
+              throw "$label 在 file-level exclusion window 內啟動卻沒有回傳行程或錯誤"
+            }
+            catch {
+              # PowerShell 把 .NET 方法丟出的例外包成 MethodInvocationException，
+              # 真正的 Win32Exception 在 InnerException 鏈裡；找不到就是別的失敗，原樣重丟。
+              $win32 = $_.Exception
+              while ($null -ne $win32 -and -not ($win32 -is [System.ComponentModel.Win32Exception])) {
+                $win32 = $win32.InnerException
+              }
+              if ($null -eq $win32) {
+                throw
+              }
+              if ($win32.NativeErrorCode -ne $expectedNativeError) {
+                throw "$label 在 file-level exclusion window 的 Win32 error 應為 $expectedNativeError，實際 $($win32.NativeErrorCode)"
+              }
+            }
+            finally {
+              if ($null -ne $started) {
+                if (-not $started.HasExited) {
+                  Stop-Process -Id $started.Id -Force -ErrorAction SilentlyContinue
+                  $started.WaitForExit()
+                }
+                $started.Dispose()
+              }
             }
           }
 
@@ -1719,6 +1788,128 @@ jobs:
               "$fixtureName late-start setup 拒絕時改動了登入啟動值"
             Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
               "$fixtureName late-start setup 拒絕時改動了無關 Run value"
+          }
+
+          # Lane E1：不持 product event、也沒有 product-named PID，只用不分享 write
+          # 的普通檔案 handle，證明 Setup 的拒絕確實來自 file-level exclusion。
+          Assert-NamedEventAbsent $productLifecycleEventName `
+            'Lane E1 file-level exclusion 起點已有 product lifecycle event'
+          Assert-NoProductNamedProcess `
+            'Lane E1 file-level exclusion 起點仍有 product-named process'
+          foreach ($heldPath in @($desktop, $sister)) {
+            $heldName = [IO.Path]::GetFileName($heldPath)
+            $hold = [IO.File]::Open(
+              $heldPath,
+              [IO.FileMode]::Open,
+              [IO.FileAccess]::Read,
+              [IO.FileShare]::Read
+            )
+            try {
+              Run-Setup 32
+              Assert-ProductFiles
+              Assert-ExactFile $desktop $releaseDesktop `
+                "Lane E1 file-level exclusion 拒絕 $heldName 時改動了 desktop"
+              if ((Get-FileHash $sister -Algorithm SHA256).Hash -ne
+                  (Get-FileHash $portableSister -Algorithm SHA256).Hash) {
+                throw "Lane E1 file-level exclusion 拒絕 $heldName 時改動了 sister.exe"
+              }
+              Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+                "Lane E1 file-level exclusion 拒絕 $heldName 時改動了登入啟動值"
+              Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+                "Lane E1 file-level exclusion 拒絕 $heldName 時改動了無關 Run value"
+              Assert-NamedMutexAbsent $lifecycleMutexName `
+                "Lane E1 file-level exclusion 拒絕 $heldName 後 lifecycle mutex 仍存在"
+              Assert-NamedMutexAbsent $afterFileExclusionMutexName `
+                "Lane E1 file-level exclusion 拒絕 $heldName 後 diagnostic mutex 仍存在"
+              $previous = @(Get-ChildItem -LiteralPath $installDir -File -Force `
+                -Filter '*.ai-sister-previous')
+              if ($previous.Count -ne 0) {
+                throw "Lane E1 file-level exclusion 拒絕 $heldName 卻留下改名檔：$($previous.Name -join ', ')"
+              }
+            }
+            finally {
+              $hold.Dispose()
+            }
+          }
+
+          # Lane E2：兩個原路徑已改名而不存在，兩個 previous 路徑則被獨佔 handle
+          # 擋住；這四個觀察一起證明 exclusion 到 NSIS File 寫入之間沒有執行窗。
+          $excl = $null
+          try {
+            $excl = Start-DiagnosticSetup 'AI_SISTER_DIAGNOSTIC_AFTER_FILE_EXCLUSION_MS'
+            Wait-NamedMutex $afterFileExclusionMutexName $excl `
+              'Lane E2 setup 沒有打開 file-level exclusion window'
+            Assert-CannotStart $sister 2 'Lane E2 sister.exe 原路徑'
+            Assert-CannotStart $desktop 2 'Lane E2 sister-desktop.exe 原路徑'
+            Assert-CannotStart "$sister.ai-sister-previous" 32 'Lane E2 sister.exe previous 路徑'
+            Assert-CannotStart "$desktop.ai-sister-previous" 32 'Lane E2 sister-desktop.exe previous 路徑'
+            if (-not $excl.WaitForExit(180000)) {
+              throw 'Lane E2 file-level exclusion setup 超過 180 秒仍未收尾'
+            }
+            if ($excl.ExitCode -ne 0) {
+              throw "Lane E2 file-level exclusion setup 應 exit=0，實際 $($excl.ExitCode)"
+            }
+            Assert-ProductFiles
+            Assert-ExactFile $desktop $releaseDesktop `
+              'Lane E2 reinstall 後 desktop 不是 exact installer payload'
+            if ((Get-FileHash $sister -Algorithm SHA256).Hash -ne
+                (Get-FileHash $portableSister -Algorithm SHA256).Hash) {
+              throw 'Lane E2 reinstall 後 sister.exe 不是 exact portable payload'
+            }
+            Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+              'Lane E2 reinstall 沒保留 exact 登入啟動值'
+            Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+              'Lane E2 reinstall 改動了無關 Run value'
+            Assert-NamedMutexAbsent $lifecycleMutexName `
+              'Lane E2 reinstall 後 installer lifecycle mutex 仍存在'
+            Assert-NamedMutexAbsent $afterFileExclusionMutexName `
+              'Lane E2 reinstall 後 file-level exclusion diagnostic mutex 仍存在'
+            $reported = & $sister --version
+            if ($LASTEXITCODE -ne 0 -or $reported -ne "sister $version") {
+              throw "Lane E2 reinstall 後 recorder 版本不符：$reported"
+            }
+          }
+          finally {
+            Stop-DiagnosticProcess $excl
+          }
+
+          # Lane E3：沒有 event 或 product-named PID 時，direct uninstaller 也必須因
+          # sister.exe 的 held handle 在 file-level exclusion 拒絕，且不動任何狀態。
+          Assert-NamedEventAbsent $productLifecycleEventName `
+            'Lane E3 file-level exclusion 起點已有 product lifecycle event'
+          Assert-NoProductNamedProcess `
+            'Lane E3 file-level exclusion 起點仍有 product-named process'
+          $hold = [IO.File]::Open(
+            $sister,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+          )
+          try {
+            # NSIS uninstaller 會自我複製到 temp，外層 exit code 不可靠；只驗證狀態。
+            $uninstallerProcess = Start-Process `
+              -FilePath (Join-Path $installDir 'uninstall.exe') `
+              -ArgumentList '/S' -Wait -PassThru
+            $uninstallerProcess.Dispose()
+            Start-Sleep -Seconds 2
+            Assert-ProductFiles
+            if (-not (Test-Path -LiteralPath $uninstallKey)) {
+              throw 'Lane E3 file-level exclusion 拒絕卻移除了 uninstall metadata'
+            }
+            Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+              'Lane E3 file-level exclusion 拒絕卻改動了登入啟動值'
+            Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+              'Lane E3 file-level exclusion 拒絕卻改動了無關 Run value'
+            Assert-NamedMutexAbsent $lifecycleMutexName `
+              'Lane E3 file-level exclusion 拒絕後 installer lifecycle mutex 仍存在'
+            $previous = @(Get-ChildItem -LiteralPath $installDir -File -Force `
+              -Filter '*.ai-sister-previous')
+            if ($previous.Count -ne 0) {
+              throw "Lane E3 file-level exclusion 拒絕卻留下改名檔：$($previous.Name -join ', ')"
+            }
+          }
+          finally {
+            $hold.Dispose()
           }
 
           # 第一個 owner 拿到 startup guard 後刻意停 5 秒，把官方 receiver 尚未建立的

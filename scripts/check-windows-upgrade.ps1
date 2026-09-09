@@ -899,6 +899,136 @@ voice = "zh-TW-HsiaoYuNeural"
   [IO.File]::WriteAllText($sentinelPath, "alpha.110 external data`n", $utf8NoBom)
 
   $oldConsent = Get-ConsentSnapshot $absentSister $dataDir $configPath $true 'old installed binary'
+
+  # alpha.110 用 hard link 換名執行時沒有 product event，image-name scan 也看不到；
+  # current Setup 仍須靠 installed file 的 image mapping 做跨版本 file-level exclusion。
+  $oldRecorderConfigPath = Join-Path $scratchRoot 'old-recorder-config.toml'
+  $oldRecorderConfigText = @'
+[capture]
+enabled = false
+'@
+  [IO.File]::WriteAllText(
+    $oldRecorderConfigPath,
+    "$oldRecorderConfigText`n",
+    $utf8NoBom
+  )
+  $oldRecorderLink = Join-Path $scratchRoot 'old-recorder-under-another-name.exe'
+  $oldRecorderOut = Join-Path $scratchRoot 'old-recorder-under-another-name.stdout.txt'
+  $oldRecorderErr = Join-Path $scratchRoot 'old-recorder-under-another-name.stderr.txt'
+  $oldRecorder = $null
+  try {
+    $null = New-Item -ItemType HardLink -Path $oldRecorderLink -Target $absentSister
+    if ((Get-FileHash -LiteralPath $oldRecorderLink -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+        $baselineSisterSha256) {
+      throw '改名的 alpha.110 recorder hard link 不是 pinned baseline sister.exe'
+    }
+    $oldRecorder = Start-Process -FilePath $oldRecorderLink `
+      -ArgumentList @(
+        '--data-dir', $dataDir,
+        '--config', $oldRecorderConfigPath,
+        'record', '--duration', '120'
+      ) `
+      -RedirectStandardOutput $oldRecorderOut `
+      -RedirectStandardError $oldRecorderErr `
+      -PassThru
+    $beat = Join-Path $dataDir 'recording.beat'
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while (-not (Test-Path -LiteralPath $beat) -and
+           [DateTime]::UtcNow -lt $deadline -and -not $oldRecorder.HasExited) {
+      Start-Sleep -Milliseconds 250
+    }
+    if ($oldRecorder.HasExited -or -not (Test-Path -LiteralPath $beat)) {
+      $stderr = if (Test-Path -LiteralPath $oldRecorderErr) {
+        Get-Content -LiteralPath $oldRecorderErr -Raw
+      }
+      else {
+        '<stderr file absent>'
+      }
+      throw "改名的 alpha.110 recorder 沒有進入 live heartbeat：$stderr"
+    }
+
+    try {
+      $eventProbe = [System.Threading.EventWaitHandle]::OpenExisting(
+        'Global\com.ted-h.ai-sister-product-lifecycle-v1')
+      $eventProbe.Dispose()
+      throw '改名的 alpha.110 recorder 意外持有 product lifecycle event'
+    }
+    catch [System.Threading.WaitHandleCannotBeOpenedException] {
+      # Expected: alpha.110 predates the product lifecycle event.
+    }
+    $productNamed = @(Get-Process -Name 'sister','sister-desktop' `
+      -ErrorAction SilentlyContinue)
+    if ($productNamed.Count -ne 0) {
+      throw "改名的 alpha.110 recorder 不該被 image-name scan 看見：PID=$($productNamed.Id -join ', ')"
+    }
+    if ($oldRecorder.HasExited) {
+      throw '改名的 alpha.110 recorder 在 current Setup 前已退出'
+    }
+
+    $refusedSetup = Start-Process -FilePath $currentSetupPath `
+      -ArgumentList @('/S', '/NS', "/D=$absentInstallDir") -Wait -PassThru
+    try {
+      if ($refusedSetup.ExitCode -ne 32) {
+        throw "current Setup 面對改名的 alpha.110 recorder 應 exit=32，實際 $($refusedSetup.ExitCode)"
+      }
+    }
+    finally {
+      $refusedSetup.Dispose()
+    }
+    if ($oldRecorder.HasExited) {
+      throw 'current Setup file-level exclusion 拒絕後卻殺掉改名的 alpha.110 recorder'
+    }
+    Assert-ProductFiles $absentInstallDir '跨版本無名 file-level exclusion 拒絕'
+    Assert-PublishedFile $absentSister $baselineSisterBytes $baselineSisterSha256 `
+      '跨版本無名 file-level exclusion 後的 alpha.110 sister.exe'
+    Assert-UninstallMetadata $baselineVersion $absentInstallDir `
+      '跨版本無名 file-level exclusion 拒絕'
+    $stillOldVersion = Read-CliVersion $absentSister `
+      '跨版本無名 file-level exclusion 後的 sister.exe'
+    if ($stillOldVersion -cne $baselineVersion) {
+      throw "file-level exclusion 拒絕後 sister.exe 版本改變：$stillOldVersion"
+    }
+    $previous = @(Get-ChildItem -LiteralPath $absentInstallDir -File -Force `
+      -Filter '*.ai-sister-previous')
+    if ($previous.Count -ne 0) {
+      throw "跨版本無名 file-level exclusion 拒絕卻留下改名檔：$($previous.Name -join ', ')"
+    }
+    try {
+      $mutexProbe = [System.Threading.Mutex]::OpenExisting(
+        'Global\com.ted-h.ai-sister-install-lifecycle-v1')
+      $mutexProbe.Dispose()
+      throw '跨版本無名 file-level exclusion 拒絕後 installer lifecycle mutex 仍存在'
+    }
+    catch [System.Threading.WaitHandleCannotBeOpenedException] {
+      # Expected: refused Setup released its lifecycle mutex.
+    }
+
+    & $absentSister --data-dir $dataDir stop
+    if ($LASTEXITCODE -ne 0) {
+      throw '改名的 alpha.110 recorder stop 失敗'
+    }
+    if (-not $oldRecorder.WaitForExit(30000)) {
+      Stop-Process -Id $oldRecorder.Id -Force -ErrorAction SilentlyContinue
+      $oldRecorder.WaitForExit()
+      throw '改名的 alpha.110 recorder 沒有在 stop 後正常收工'
+    }
+    if ($oldRecorder.ExitCode -ne 0) {
+      throw "改名的 alpha.110 recorder exit=$($oldRecorder.ExitCode)"
+    }
+    Write-Host '跨版本、無 product 名稱、無 product event 的舊 recorder 仍由 file-level exclusion 拒絕 current Setup'
+  }
+  finally {
+    if ($null -ne $oldRecorder) {
+      if (-not $oldRecorder.HasExited) {
+        Stop-Process -Id $oldRecorder.Id -Force -ErrorAction SilentlyContinue
+        $oldRecorder.WaitForExit()
+      }
+      $oldRecorder.Dispose()
+    }
+    if (Test-Path -LiteralPath $oldRecorderLink) {
+      Remove-Item -LiteralPath $oldRecorderLink -Force
+    }
+  }
   $replayResult = Invoke-NativeUtf8 `
     -Path $absentSister `
     -Arguments @(
