@@ -169,9 +169,17 @@ pub fn recorder(
     config: Config,
     db: Db,
     image_dir: Option<PathBuf>,
+    master_stop_source: crate::MasterStopSource,
 ) -> Result<Recorder<impl Backend + use<>>> {
     let backend = backend(&config)?;
-    Recorder::new_trusted_windows(backend, db, config, image_dir, backend_token())
+    Recorder::new_trusted_windows(
+        backend,
+        db,
+        config,
+        image_dir,
+        master_stop_source,
+        backend_token(),
+    )
 }
 
 /// 宣告自己認得 per-monitor DPI。
@@ -208,8 +216,13 @@ mod tests {
 
     #[test]
     fn production_composition_writes_v2_url_provenance() {
-        let recorder = recorder(Config::default(), Db::open_in_memory().expect("db"), None)
-            .expect("windows recorder");
+        let recorder = recorder(
+            Config::default(),
+            Db::open_in_memory().expect("db"),
+            None,
+            crate::MasterStopSource::NotApplicable,
+        )
+        .expect("windows recorder");
         let platform: String = recorder
             .db()
             .conn()

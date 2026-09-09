@@ -28,18 +28,43 @@ SISTER = os.environ.get("SISTER", str(ROOT / "target/debug/sister"))
 CORPUS = ROOT / "scenarios/moment-baseline.corpus.json"
 MOMENTS = ROOT / "scenarios/moment-baseline.moments.json"
 
+FORBIDDEN_SESSION_MARKS = {"SessionStart", "SessionEnd"}
+
+
+def system_kinds_from_rust():
+    model = ROOT / "crates/sister-core/src/model.rs"
+    source = model.read_text(encoding="utf-8")
+    marker = "pub const ALL: [SystemKind;"
+    start = source.find(marker)
+    if start < 0:
+        raise SystemExit(f"解析不到 {model} 的 SystemKind::ALL：找不到 {marker!r}")
+    body_start = source.find("[", source.find("=", start))
+    body_end = source.find("];", body_start)
+    if body_start < 0 or body_end < 0:
+        raise SystemExit(f"解析不到 {model} 的 SystemKind::ALL 陣列邊界")
+    kinds = set()
+    for line in source[body_start + 1 : body_end].splitlines():
+        line = line.strip()
+        if not line or line.startswith("//"):
+            continue
+        prefix = "SystemKind::"
+        if not line.startswith(prefix) or not line.endswith(","):
+            raise SystemExit(f"解析不到 {model} 的 SystemKind::ALL 項目：{line!r}")
+        name = line[len(prefix) : -1]
+        if not name or not name.isidentifier():
+            raise SystemExit(f"解析不到 {model} 的 SystemKind 名稱：{line!r}")
+        kinds.add(name)
+    if not kinds:
+        raise SystemExit(f"{model} 的 SystemKind::ALL 解析結果是空集合")
+    return kinds
+
+
 # replay corpus 不准帶 SessionStart／SessionEnd（import 會自己建立）。
 # 其餘每種 SystemKind 都要在場，才能證明「它是 System 也不算通知」。
-REQUIRED_SYSTEM_KINDS = {
-    "Lock",
-    "Unlock",
-    "Sleep",
-    "Wake",
-    "CapturePaused",
-    "CaptureResumed",
-    "Excluded",
-}
-FORBIDDEN_SESSION_MARKS = {"SessionStart", "SessionEnd"}
+ALL_SYSTEM_KINDS = system_kinds_from_rust()
+REQUIRED_SYSTEM_KINDS = ALL_SYSTEM_KINDS - FORBIDDEN_SESSION_MARKS
+if REQUIRED_SYSTEM_KINDS != ALL_SYSTEM_KINDS - FORBIDDEN_SESSION_MARKS:
+    raise SystemExit("REQUIRED_SYSTEM_KINDS 必須由 Rust SystemKind::ALL 減掉 session 邊界算出來")
 
 failed = []
 

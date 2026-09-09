@@ -79,6 +79,18 @@
       "detail": "excluded url"
     },
     {
+      "type": "system",
+      "at_ms": 80000,
+      "kind": "MasterStopEngaged",
+      "detail": null
+    },
+    {
+      "type": "system",
+      "at_ms": 90000,
+      "kind": "MasterStopReleased",
+      "detail": null
+    },
+    {
       "type": "frame",
       "at_ms": 140000,
       "monitor": 0,

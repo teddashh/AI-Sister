@@ -30,7 +30,7 @@ pub mod traits;
 #[cfg(windows)]
 pub mod windows;
 
-pub use recorder::{PauseSignal, Recorder, RecorderStats, Tick};
+pub use recorder::{MasterStopSource, PauseSignal, Recorder, RecorderStats, Tick};
 pub use replay::{ReplayBackend, Scenario, Step};
 pub use traits::{
     Backend, CapturePermit, ClipboardCapture, ClipboardSource, ClipboardWatermark,

@@ -26,6 +26,20 @@ use crate::traits::{
     SystemTransition,
 };
 
+/// 這一台 recorder 要從哪裡讀跨行程的全停控制面。
+///
+/// 沒有預設值：每個建構點都必須明講自己是否受全停控制。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MasterStopSource {
+    /// 產品 recorder：逐拍讀指定 data dir 裡的 durable latch。
+    Latch(PathBuf),
+    /// replay／測試／第三方 recorder：不參與跨行程控制面。
+    ///
+    /// 選這一格的後果是 `sister stop-all` 關不掉這一台 recorder；呼叫端必須能
+    /// 說明為什麼這台 recorder 不屬於產品錄製路徑。
+    NotApplicable,
+}
+
 /// 一天有多少毫秒。畫面額度以 UTC 天為單位重置，和
 /// `frames::relative_path` 的資料夾分層是同一條線。
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -421,8 +435,8 @@ pub struct Recorder<B: Backend> {
     pending_system: Option<PendingSystemObservation>,
     /// 畫面檔的根目錄。`None` = text-only 模式。
     image_dir: Option<PathBuf>,
-    /// Production data dir。replay／第三方 recorder 不自行讀跨行程控制面。
-    master_stop_dir: Option<PathBuf>,
+    /// 全停來源在建構時必填；不能事後忘記接線而 fail-open。
+    master_stop_source: MasterStopSource,
     /// 上一次**確實寫成稽核列**的全停狀態。不能直接拿 latch 當這個值：
     /// audit 寫失敗時必須留在舊狀態，下一拍才知道同一列還要重試。
     master_stopped: bool,
@@ -451,12 +465,18 @@ impl<B: Backend> Recorder<B> {
     /// Backend 只能提供診斷名稱；即使名字逐字等於 Windows trusted 常數，這條
     /// public 路徑仍一律進 `untrusted/` namespace。Windows production recorder
     /// 由 `windows` 模組持有的 private token 走底下另一個 crate-private 入口。
-    pub fn new(backend: B, db: Db, config: Config, image_dir: Option<PathBuf>) -> Result<Self> {
+    pub fn new(
+        backend: B,
+        db: Db,
+        config: Config,
+        image_dir: Option<PathBuf>,
+        master_stop_source: MasterStopSource,
+    ) -> Result<Self> {
         let identity = crate::backend_identity::BackendIdentity::untrusted(
             std::env::consts::OS,
             backend.name(),
         );
-        Self::new_with_identity(backend, db, config, image_dir, identity)
+        Self::new_with_identity(backend, db, config, image_dir, master_stop_source, identity)
     }
 
     #[cfg(windows)]
@@ -465,10 +485,11 @@ impl<B: Backend> Recorder<B> {
         db: Db,
         config: Config,
         image_dir: Option<PathBuf>,
+        master_stop_source: MasterStopSource,
         token: crate::windows::WindowsBackendToken,
     ) -> Result<Self> {
         let identity = crate::backend_identity::BackendIdentity::trusted_windows(token);
-        Self::new_with_identity(backend, db, config, image_dir, identity)
+        Self::new_with_identity(backend, db, config, image_dir, master_stop_source, identity)
     }
 
     fn new_with_identity(
@@ -476,6 +497,7 @@ impl<B: Backend> Recorder<B> {
         mut db: Db,
         config: Config,
         image_dir: Option<PathBuf>,
+        master_stop_source: MasterStopSource,
         identity: crate::backend_identity::BackendIdentity,
     ) -> Result<Self> {
         let platform = identity.session_platform();
@@ -535,7 +557,7 @@ impl<B: Backend> Recorder<B> {
             last_system_transition_sequence: None,
             pending_system: None,
             image_dir,
-            master_stop_dir: None,
+            master_stop_source,
             master_stopped: false,
             master_clipboard_gap: false,
             master_input_gap: false,
@@ -621,9 +643,11 @@ impl<B: Backend> Recorder<B> {
         self.image_dir = dir;
     }
 
-    /// 把 production recorder 接到跨行程的全停 latch。
-    pub fn set_master_stop_dir(&mut self, dir: PathBuf) {
-        self.master_stop_dir = Some(dir);
+    /// 測試可在建構後切換 latch，以覆蓋同一台 recorder 的跨邊界狀態。
+    /// Production 沒有這條接法；產品來源必須在建構時交出。
+    #[cfg(test)]
+    fn set_master_stop_dir(&mut self, dir: PathBuf) {
+        self.master_stop_source = MasterStopSource::Latch(dir);
     }
 
     /// 把這一拍讀到的 durable 全停 latch 轉成 session-local audit。
@@ -1239,10 +1263,10 @@ impl<B: Backend> Recorder<B> {
             return Ok(Tick::Disabled);
         }
 
-        let master_stopped = self
-            .master_stop_dir
-            .as_deref()
-            .is_some_and(sister_hands::master_stop::is_stopped);
+        let master_stopped = match &self.master_stop_source {
+            MasterStopSource::Latch(data_dir) => sister_hands::master_stop::is_stopped(data_dir),
+            MasterStopSource::NotApplicable => false,
+        };
         let master_changed = self.set_master_stopped(master_stopped, ts)?;
         if master_changed && !master_stopped {
             return Ok(Tick::MasterReleased);
@@ -2372,6 +2396,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder");
         (recorder, calls)
@@ -3877,6 +3902,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder");
 
@@ -3929,6 +3955,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder");
 
@@ -4055,6 +4082,7 @@ mod tests {
                 Db::open_in_memory().expect("db"),
                 Config::default(),
                 None,
+                MasterStopSource::NotApplicable,
             )
             .expect("recorder");
             let staged = recorder.stage_input(20_000).expect("stage input");
@@ -4168,7 +4196,14 @@ mod tests {
             input: NullInput,
             ocr: LifecycleOcr(ocr.clone()),
         };
-        let mut rec = Recorder::new(backend, Db::open_in_memory().unwrap(), config, None).unwrap();
+        let mut rec = Recorder::new(
+            backend,
+            Db::open_in_memory().unwrap(),
+            config,
+            None,
+            MasterStopSource::NotApplicable,
+        )
+        .unwrap();
 
         let tick = rec.tick(1_000).unwrap();
         assert!(
@@ -4223,7 +4258,14 @@ mod tests {
             input: NullInput,
             ocr: crate::traits::NullOcr,
         };
-        let mut rec = Recorder::new(backend, Db::open_in_memory().unwrap(), config, None).unwrap();
+        let mut rec = Recorder::new(
+            backend,
+            Db::open_in_memory().unwrap(),
+            config,
+            None,
+            MasterStopSource::NotApplicable,
+        )
+        .unwrap();
 
         assert!(matches!(rec.tick(1_000).unwrap(), Tick::Excluded { .. }));
         assert_eq!(rec.tick(2_000).unwrap(), Tick::NoScreen);
@@ -4279,8 +4321,14 @@ mod tests {
             input: NullInput,
             ocr: LifecycleOcr(ocr.clone()),
         };
-        let mut rec = Recorder::new(backend, Db::open_in_memory().expect("db"), config, None)
-            .expect("recorder");
+        let mut rec = Recorder::new(
+            backend,
+            Db::open_in_memory().expect("db"),
+            config,
+            None,
+            MasterStopSource::NotApplicable,
+        )
+        .expect("recorder");
         rec.db()
             .conn()
             .execute_batch(
@@ -4326,6 +4374,7 @@ mod tests {
             Db::open_in_memory().unwrap(),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .unwrap();
 
@@ -4378,6 +4427,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder");
         rec.db()
@@ -4451,6 +4501,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder");
 
@@ -4491,6 +4542,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder");
         recorder.set_master_stop_dir(control.0.clone());
@@ -4626,6 +4678,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder");
         recorder
@@ -4743,7 +4796,14 @@ mod tests {
             input: NullInput,
             ocr: NullOcr,
         };
-        let mut rec = Recorder::new(backend, Db::open_in_memory().unwrap(), config, None).unwrap();
+        let mut rec = Recorder::new(
+            backend,
+            Db::open_in_memory().unwrap(),
+            config,
+            None,
+            MasterStopSource::NotApplicable,
+        )
+        .unwrap();
 
         for i in 0..12 {
             rec.tick(1_000 + i * 1_000).expect("tick");
@@ -4790,6 +4850,7 @@ mod tests {
             Db::open_in_memory().unwrap(),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .unwrap();
 
@@ -4831,6 +4892,7 @@ mod tests {
             Db::open_in_memory().unwrap(),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .unwrap();
 
@@ -4915,6 +4977,7 @@ mod tests {
             Db::open_in_memory().unwrap(),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .unwrap();
 
@@ -5011,6 +5074,7 @@ mod tests {
             Db::open_in_memory().unwrap(),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .unwrap();
 
@@ -5106,6 +5170,7 @@ mod tests {
             Db::open_in_memory().unwrap(),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .unwrap();
 
@@ -5198,6 +5263,7 @@ mod tests {
             Db::open_in_memory().unwrap(),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .unwrap();
 
@@ -5270,6 +5336,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder")
     }
@@ -5392,6 +5459,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder")
     }
@@ -5503,6 +5571,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder");
 
@@ -5635,6 +5704,7 @@ mod tests {
                 Db::open_in_memory().expect("db"),
                 Config::default(),
                 None,
+                MasterStopSource::NotApplicable,
             )
             .expect("recorder");
 
@@ -5685,8 +5755,14 @@ mod tests {
             input: crate::traits::NullInput,
             ocr: NumberedLines::default(),
         };
-        let mut r =
-            Recorder::new(backend, db, Config::default(), Some(dir.clone())).expect("recorder");
+        let mut r = Recorder::new(
+            backend,
+            db,
+            Config::default(),
+            Some(dir.clone()),
+            MasterStopSource::NotApplicable,
+        )
+        .expect("recorder");
 
         assert!(r.tick(0).is_err(), "寫不進去要往上報");
 
@@ -5805,7 +5881,14 @@ mod tests {
             input: crate::traits::NullInput,
             ocr: LifecycleOcr(ocr.clone()),
         };
-        let mut r = Recorder::new(backend, db, Config::default(), None).expect("recorder");
+        let mut r = Recorder::new(
+            backend,
+            db,
+            Config::default(),
+            None,
+            MasterStopSource::NotApplicable,
+        )
+        .expect("recorder");
 
         // 畫面 A 存進去了
         assert!(matches!(r.tick(0).expect("tick"), Tick::Kept { .. }));
@@ -5865,7 +5948,14 @@ mod tests {
             steps,
         });
         let db = Db::open_in_memory().expect("db");
-        Recorder::new(backend, db, config, image_dir).expect("recorder")
+        Recorder::new(
+            backend,
+            db,
+            config,
+            image_dir,
+            MasterStopSource::NotApplicable,
+        )
+        .expect("recorder")
     }
 
     struct Tmp(PathBuf);
@@ -6194,6 +6284,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             config,
             Some(dir),
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder")
     }
@@ -6347,14 +6438,27 @@ mod tests {
         };
 
         let now = sister_core::now_ms();
-        let mut r =
-            Recorder::new(backend(), db, config.clone(), Some(tmp.0.clone())).expect("recorder");
+        let mut r = Recorder::new(
+            backend(),
+            db,
+            config.clone(),
+            Some(tmp.0.clone()),
+            MasterStopSource::NotApplicable,
+        )
+        .expect("recorder");
         r.tick(now).expect("tick");
         assert_eq!(count_pngs(&tmp.0), 1);
         let db = r.into_db();
 
         // 第二次啟動：這一天已經用掉的量必須從資料庫接回來
-        let r2 = Recorder::new(backend(), db, config, Some(tmp.0.clone())).expect("recorder");
+        let r2 = Recorder::new(
+            backend(),
+            db,
+            config,
+            Some(tmp.0.clone()),
+            MasterStopSource::NotApplicable,
+        )
+        .expect("recorder");
         assert!(
             r2.image_bytes_today > 0,
             "重開之後額度歸零了——那個上限等於不存在"
@@ -6850,6 +6954,7 @@ mod tests {
             Db::open_in_memory().expect("db"),
             Config::default(),
             None,
+            MasterStopSource::NotApplicable,
         )
         .expect("recorder");
         let platform: String = recorder

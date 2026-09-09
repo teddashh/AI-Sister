@@ -11,7 +11,7 @@
 use sister_capture::replay::{
     ReplayBackend, ReplayPrivacyContext, ReplaySystemState, Scenario, Step,
 };
-use sister_capture::{Recorder, Tick};
+use sister_capture::{MasterStopSource, Recorder, Tick};
 use sister_core::config::Config;
 use sister_core::db::Db;
 
@@ -140,7 +140,14 @@ fn run_minefield(name: &str) -> Run {
     let backend = ReplayBackend::new(minefield());
     // 預設設定：使用者不必自己設定任何東西就該是安全的
     let config = Config::default();
-    let mut rec = Recorder::new(backend, db, config, Some(dir.join("frames"))).expect("recorder");
+    let mut rec = Recorder::new(
+        backend,
+        db,
+        config,
+        Some(dir.join("frames")),
+        MasterStopSource::NotApplicable,
+    )
+    .expect("recorder");
 
     // 每秒一格跑完整段腳本
     for ts in (0..=22_000).step_by(1_000) {

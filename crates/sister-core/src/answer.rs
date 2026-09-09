@@ -201,6 +201,12 @@ pub struct BlindSpots {
     /// 這幾段算進了 `paused_episodes` 卻**沒有**算進 `paused_ms`，所以
     /// `paused_ms > 0` 時它是下限而不是精確值。
     pub paused_truncated: i64,
+    /// recorder／brain／hands 三層**此刻**是不是都被 durable latch 停住。
+    ///
+    /// 和 [`master_stopped_open`](Self::master_stopped_open) 分開：稽核列只答得出
+    /// 過去，`master.stop` latch 才答得出現在。recorder 不在跑時按下或解除全停，
+    /// 兩者就會不同。
+    pub master_stopped_now: bool,
     /// recorder／brain／hands 三層一起全停過幾段。
     pub master_stopped_episodes: i64,
     /// 已結束的全停段落總長；有配不起來的段落時是下限。
@@ -269,6 +275,7 @@ impl BlindSpots {
             || self.paused_episodes > 0
             || self.master_stopped_episodes > 0
             || self.paused_now
+            || self.master_stopped_now
             || self.scan_horizon_days.is_some()
     }
 }
@@ -279,10 +286,10 @@ impl BlindSpots {
 /// 「上禮拜二下午」猜錯之後給出的理由，比不給理由更糟。所以講的是「她記過的
 /// 這段期間裡」，而每一條都附得出時間讓人自己去對。
 ///
-/// 要 `data_dir` 和 `query`，是因為有兩個理由資料庫自己答不出來：她**此刻**
-/// 是不是暫停的（那在一個檔案裡，見 [`BlindSpots::paused_now`]），以及這一題
+/// 要 `data_dir` 和 `query`，是因為有三個理由資料庫自己答不出來：她**此刻**
+/// 是不是暫停的、是不是全停的（兩個各自在自己的 durable latch 裡），以及這一題
 /// 有沒有走到那條只看 30 天的掃描（那取決於問了什麼字，見
-/// [`BlindSpots::scan_horizon_days`]）。兩個都放在這裡判，是為了不讓終端機和
+/// [`BlindSpots::scan_horizon_days`]）。三個都放在這裡判，是為了不讓終端機和
 /// 字母人各判一次——同一句話在兩個地方得到兩種答案，是這個專案反覆踩到的坑。
 pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::Result<BlindSpots> {
     let stats = db.stats()?;
@@ -308,6 +315,7 @@ pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::
         paused_open: pauses.open_since.is_some(),
         paused_now: crate::pause::is_paused(data_dir),
         paused_truncated: pauses.truncated,
+        master_stopped_now: sister_hands::master_stop::is_stopped(data_dir),
         master_stopped_episodes: master_stops.episodes,
         master_stopped_ms: master_stops.total_ms,
         master_stopped_open: master_stops.open_since.is_some(),
@@ -749,6 +757,23 @@ mod tests {
         assert_eq!(b.paused_episodes, 0);
         assert!(b.paused_now, "但她現在就是暫停的");
         assert!(b.any(), "而這是一個他可以馬上動手處理的理由");
+    }
+
+    /// recorder 不在跑時按下全停，資料庫不會憑空長出稽核列；durable latch 仍須
+    /// 讓 query 答得出「現在」。這正是 Linux CLI 上能直接發生的產品情境。
+    #[test]
+    fn master_stop_latch_is_visible_without_any_database_audit_row() {
+        let tmp = Tmp::new("master-stop-latch-only");
+        sister_hands::master_stop::engage(&tmp.0, 1_234).expect("按下全停");
+        let db = Db::open_in_memory().expect("db");
+
+        let b = blind_spots(&db, &tmp.0, "電話").expect("blind");
+        assert!(b.master_stopped_now, "durable latch 現在就是開著");
+        assert_eq!(b.master_stopped_episodes, 0, "資料庫沒有全停稽核列");
+        assert_eq!(b.master_stopped_ms, 0, "沒有已結束段落可量");
+        assert!(!b.master_stopped_open, "沒有開始列，不可冒充未收尾段落");
+        assert_eq!(b.master_stopped_truncated, 0, "沒有孤立的解除列");
+        assert!(b.any(), "現在全停本身就是查不到東西的理由");
     }
 
     /// 一個字的查詢只翻得到最近 30 天，而 `text_days` 預設 365。
