@@ -721,11 +721,7 @@ impl<B: Backend> Recorder<B> {
 
     /// 慢來源回來後先看 pending/latch；看見 request 就封掉所有 source 尾巴並丟棄
     /// 本拍 RAM。這裡不拿 boundary：engage 正在等這份 activity reader drop。
-    fn master_postcheck(
-        &mut self,
-        ts: Millis,
-        activity: &MasterActivity,
-    ) -> Result<Option<Tick>> {
+    fn master_postcheck(&mut self, ts: Millis, activity: &MasterActivity) -> Result<Option<Tick>> {
         match activity {
             MasterActivity::Guard(guard) if guard.stop_requested() => {
                 self.master_stop_tick(ts).map(Some)
@@ -1790,11 +1786,10 @@ impl<B: Backend> Recorder<B> {
                     PauseCheck::Paused => return Ok(Tick::Paused),
                     PauseCheck::Resumed => return Ok(Tick::Resumed),
                 };
-                let master_commit_guard =
-                    match self.master_commit_boundary(ts, &master_activity)? {
-                        MasterBoundaryCheck::Continue(guard) => guard,
-                        MasterBoundaryCheck::Stopped => return Ok(Tick::MasterStopped),
-                    };
+                let master_commit_guard = match self.master_commit_boundary(ts, &master_activity)? {
+                    MasterBoundaryCheck::Continue(guard) => guard,
+                    MasterBoundaryCheck::Stopped => return Ok(Tick::MasterStopped),
+                };
                 if let Some(id) = self.last_frame_id {
                     self.db.bump_frame_dup(id)?;
                 }
@@ -2581,7 +2576,10 @@ mod tests {
             );
         }));
 
-        assert_eq!(recorder.tick(200).expect("mid-stop tick"), Tick::MasterStopped);
+        assert_eq!(
+            recorder.tick(200).expect("mid-stop tick"),
+            Tick::MasterStopped
+        );
         join_slot
             .lock()
             .unwrap()

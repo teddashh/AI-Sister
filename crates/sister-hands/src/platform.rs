@@ -236,10 +236,8 @@ mod tests {
             let suggestion = SuggestionButton::parse_json(json)
                 .expect("syntactically valid suggestion")
                 .press();
-            let dir = std::env::temp_dir().join(format!(
-                "sister-platform-validation-{}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir()
+                .join(format!("sister-platform-validation-{}", std::process::id()));
             let error = platform_execute(&dir, &suggestion).expect_err("not a safe file target");
             let ExecutorError::RefusedBeforeOs {
                 reason: RefusalReason::TargetRejectedBeforeOs { why },
@@ -256,10 +254,8 @@ mod tests {
     fn prestopped_fence_never_calls_the_os_closure() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let dir = std::env::temp_dir().join(format!(
-            "sister-platform-prestopped-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sister-platform-prestopped-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         master_stop::engage(&dir, 1).unwrap();
         let called = AtomicBool::new(false);
@@ -303,10 +299,20 @@ mod tests {
             let result = master_stop::engage(&stop_dir, 2);
             stop_done_tx.send(result).unwrap();
         });
-        assert!(stop_done_rx.recv_timeout(Duration::from_millis(40)).is_err());
+        assert!(
+            stop_done_rx
+                .recv_timeout(Duration::from_millis(40))
+                .is_err()
+        );
         leave_tx.send(()).unwrap();
-        call_done_rx.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
-        stop_done_rx.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        call_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        stop_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
         call.join().unwrap();
         stop.join().unwrap();
         std::fs::remove_dir_all(dir).unwrap();

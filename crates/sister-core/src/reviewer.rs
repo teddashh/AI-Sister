@@ -992,14 +992,14 @@ pub fn run(input: &mut ReviewInput<'_>, data_dir: &std::path::Path) -> Result<Re
             "雙 pass 的 prompt 不准提到另一個 pass"
         );
 
-        let (spawn_a, spawn_b) = {
+        let (outbound_admission, spawn_a, spawn_b) = {
             let Some(not_stopped) = brain::not_stopped(data_dir) else {
                 master_stopped_mid_run = true;
                 break;
             };
             let cmd = command.as_str();
             let args = args.as_slice();
-            std::thread::scope(|scope| {
+            let (spawn_a, spawn_b) = std::thread::scope(|scope| {
                 let stop_a = not_stopped.clone();
                 let stop_b = not_stopped.clone();
                 let ha = scope.spawn(|| spawn_cli(permit, stop_a, &prompt_a, cmd, args));
@@ -1010,7 +1010,8 @@ pub fn run(input: &mut ReviewInput<'_>, data_dir: &std::path::Path) -> Result<Re
                     hb.join()
                         .unwrap_or_else(|_| empty_spawn("pass B 執行緒炸了")),
                 )
-            })
+            });
+            (not_stopped, spawn_a, spawn_b)
         };
         calls += 2;
         budget_left = budget_left.saturating_sub(2);
@@ -1019,11 +1020,10 @@ pub fn run(input: &mut ReviewInput<'_>, data_dir: &std::path::Path) -> Result<Re
 
         // 出境稽核永遠留下；模型正文回來後，任何 L2/L3 產品資料則必須重新通過
         // admission + boundary。fake CLI 在最後一刻按全停時，答案只留在 RAM。
-        let Some(product_guard) = brain::not_stopped(data_dir) else {
-            master_stopped_mid_run = true;
-            break;
-        };
-        let Some(_product_boundary) = product_guard.boundary() else {
+        // 原始 admission 活過兩筆 outbound audit；因此 stop-all 成功以前，已送出的
+        // provider request 一定已有 durable audit。再用同一份 guard 取 boundary：
+        // pending 已發佈就丟產品正文，不能把「不再落地」寫成「provider 已取消」。
+        let Some(_product_boundary) = outbound_admission.boundary() else {
             master_stopped_mid_run = true;
             break;
         };
@@ -2699,48 +2699,26 @@ mod tests {
         assert_ne!(before, during);
     }
 
-    /// 第一張卡片的 CLI 在執行途中立起 durable latch；第二張卡片開始前才看見。
-    /// 這條走真正的 `run` 和磁碟資料目錄，並且斷言 `skip_reason IS NULL` 的讀者
-    /// 不會把被截斷的一輪算成完整跑過。
+    /// 唯一（也就是最後）一張卡片的 CLI 在 return 前立起 durable latch。這條不能靠
+    /// 下一次 loop 才看見 stop；它走真正的 `run`，並釘住 product、EOD 與 completed-run
+    /// consumers 都排除這份已回來但不可套用的正文，只有 outbound audit 留下。
     #[test]
-    fn master_stop_mid_run_is_persisted_as_skipped_and_excluded_by_completed_run_queries() {
-        let tmp = Tmp::new("master-stop-mid-run");
+    fn final_only_card_stopped_after_return_is_audited_but_excluded_from_product_and_latest() {
+        let tmp = Tmp::new("master-stop-final-only-card");
         let db_path = tmp.0.join("sister.db");
         let mut db = Db::open(&db_path).expect("db");
         let ts = 1_700_790_000_000;
-        let gap = crate::segment::TIME_CAP_MS + 60_000;
-        let (_first_session, first_fid) =
-            seed(&mut db, ts, "LINE：王小明說五點去接她 17:00");
-        let (_second_session, second_fid) =
-            seed(&mut db, ts + gap, "LINE：王小明說五點去接她 17:00");
-        let segments = db
-            .chapters_for_range(ts, ts + gap + 400_000)
-            .expect("segments");
-        assert!(segments.len() >= 2, "夾具必須準備兩張不同段落的卡片");
-        let first_core = segments.first().expect("first segment").core_started_at;
-        let second_core = segments.last().expect("second segment").core_started_at;
-        assert_ne!(first_core, second_core, "兩張卡片不能落在同一段");
+        let (_session, fid) = seed(&mut db, ts, "LINE：王小明說五點去接她 17:00");
+        let segments = db.chapters_for_range(ts, ts + 400_000).expect("segments");
+        assert_eq!(segments.len(), 1, "夾具必須真的只有最後一張卡片");
+        let core = segments[0].core_started_at;
         let commitments = r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#;
-        write_l2(
-            &mut db,
-            first_core,
-            first_fid,
-            "第一張接人訊息",
-            commitments,
-        );
-        write_l2(
-            &mut db,
-            second_core,
-            second_fid,
-            "第二張接人訊息",
-            commitments,
-        );
+        write_l2(&mut db, core, fid, "唯一一張接人訊息", commitments);
 
         let returned_commitment = format!(
-            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":["王小明"],"confidence":0.8,"evidence_refs":["frame:{first_fid}"],"allowed_next_step":null}}]}}"#
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":["王小明"],"confidence":0.8,"evidence_refs":["frame:{fid}"],"allowed_next_step":null}}]}}"#
         );
-        let (command, args) =
-            fake_cli_engages_master_stop(&tmp.0, &returned_commitment, &tmp.0);
+        let (command, args) = fake_cli_engages_master_stop(&tmp.0, &returned_commitment, &tmp.0);
         let consent = signed();
         let brain = BrainConfig {
             command,
@@ -2753,10 +2731,10 @@ mod tests {
                 consent: &consent,
                 brain: &brain,
                 from_ts: ts,
-                to_ts: ts + gap + 400_000,
-                kind: ReviewKind::Interval,
+                to_ts: ts + 400_000,
+                kind: ReviewKind::Eod,
                 force: true,
-                now: ts + gap + 500_000,
+                now: ts + 500_000,
             };
             run(&mut input, &tmp.0).expect("run")
         };
@@ -2773,7 +2751,7 @@ mod tests {
         let product_rows: i64 = db
             .conn()
             .query_row(
-                "SELECT (SELECT COUNT(*) FROM commitments) + (SELECT COUNT(*) FROM entities)",
+                "SELECT (SELECT COUNT(*) FROM commitments) + (SELECT COUNT(*) FROM entities) + (SELECT COUNT(*) FROM day_summaries)",
                 [],
                 |row| row.get(0),
             )
@@ -2788,6 +2766,15 @@ mod tests {
             )
             .expect("saved reviewer run");
         assert_eq!(skip_reason.as_deref(), Some("master_stopped"));
+        let outbound_rows = db
+            .list_brain_outbound(10)
+            .expect("outbound audit after return");
+        assert_eq!(
+            outbound_rows.len(),
+            2,
+            "dual pass 的兩筆 outbound audit 都要留下"
+        );
+        assert!(outbound_rows.iter().all(|row| row.role == "reviewer"));
         assert_eq!(
             db.last_reviewer_run_at().expect("completed-run reader"),
             None,
@@ -2798,6 +2785,11 @@ mod tests {
         assert_eq!(stats.candidates, None);
         assert_eq!(stats.rechecks, None);
         assert_eq!(stats.last_skip.as_deref(), Some("master_stopped"));
+        assert_eq!(
+            db.last_reviewer_eod_day().expect("latest EOD consumer"),
+            None,
+            "被 stop 截斷的唯一 EOD 卡不可變成最近一次完整日終"
+        );
     }
 
     /// 「沒有東西可審」寫進 notes 不是 detail。手捏 `ReviewerRefusals` 再叫

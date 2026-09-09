@@ -17803,7 +17803,10 @@ pub mod doctor {
         }
 
         fn is_stopped(&self) -> bool {
-            matches!(self, Self::Stopped)
+            match self {
+                Self::Stopped => true,
+                Self::Allowed(guard) => guard.stop_requested(),
+            }
         }
     }
 
@@ -17818,13 +17821,11 @@ pub mod doctor {
         // 那則真的警告一起被忽略。hook 只數次數不看內容，裝一次很便宜。
         // doctor 只想知道 hook 裝不裝得上，聚合視窗多長無關緊要
         let live = LiveProbePolicy::observe(data_dir);
-        let live_stopped = live.is_stopped();
         // `master_stopped` 是 doctor 開頭顯示狀態用的快照；真正授權 live source 的
         // 是上面的 lock admission。兩者若剛好跨過 transition，以 admission 為準。
         let _ = master_stopped;
-        let _input_probe = live.run(|| {
-            WindowsInput::start(sister_core::now_ms(), config.capture.input_window_secs)
-        });
+        let _input_probe = live
+            .run(|| WindowsInput::start(sister_core::now_ms(), config.capture.input_window_secs));
 
         let c = Capabilities::current(config);
         // 順手留一份給設定頁。README 的 quickstart 第一句就是「跑一次 doctor」，
@@ -17887,12 +17888,11 @@ pub mod doctor {
         // `✓ UIA 建得起來` 這句話的價值是零——使用者要知道的是
         // 「我的網銀規則現在到底會不會生效」。
         if let Some((observed, alive)) = live.run(|| {
-                use sister_capture::traits::FocusSource;
-                let mut source = sister_capture::windows::focus::WindowsFocus::new();
-                let observed = source.context(sister_core::now_ms());
-                (observed, source.url_capture_alive())
-        }) {
             use sister_capture::traits::FocusSource;
+            let mut source = sister_capture::windows::focus::WindowsFocus::new();
+            let observed = source.context(sister_core::now_ms());
+            (observed, source.url_capture_alive())
+        }) {
             match observed {
                 Ok(sister_capture::PrivacyObservation::Known {
                     context:
@@ -17975,11 +17975,7 @@ pub mod doctor {
             }
         } else {
             focus_probe = None;
-            url_probe = Some((
-                "■",
-                "讀你現在的網址",
-                "三層全停中，沒有探測".to_string(),
-            ));
+            url_probe = Some(("■", "讀你現在的網址", "三層全停中，沒有探測".to_string()));
         }
 
         if c.ocr == CapabilityState::Available && config.capture.ocr {
@@ -18025,19 +18021,15 @@ pub mod doctor {
             // （同一顆引擎、同一個原生解析度的抓圖），所以「內建圖過了但這關
             // 沒過」就直接指向畫面本身，而不是引擎或語言包。
             let grabbed = live.run(|| {
-                    let mut screen = WindowsScreen::new();
-                    screen.grab(sister_core::now_ms())
+                let mut screen = WindowsScreen::new();
+                screen.grab(sister_core::now_ms())
             });
             let grabbed_edge = match &grabbed {
                 Some(Ok(Some(f))) => Some(f.width.max(f.height)),
                 _ => None,
             };
             let probe = match grabbed {
-                None => (
-                    "■",
-                    "讀你現在的螢幕",
-                    "三層全停中，沒有探測".to_string(),
-                ),
+                None => ("■", "讀你現在的螢幕", "三層全停中，沒有探測".to_string()),
                 Some(Err(e)) => ("✗", "讀你現在的螢幕", format!("抓不到畫面：{e:#}")),
                 Some(Ok(None)) => (
                     "✗",
@@ -18100,6 +18092,10 @@ pub mod doctor {
             }
         }
 
+        // 不能沿用 admission 當下的狀態。若 stop request 落在兩個 probe 之間，後面的
+        // `live.run` 會正確回 None；報告也必須用同一份 guard 的最終觀察，把所有沒量到的
+        // live row 畫成「■ 三層全停中，沒有探測」，不能冒充一般平台失敗。
+        let live_stopped = live.is_stopped();
         Caps {
             live_stopped,
             url: c.url,
@@ -18207,6 +18203,7 @@ pub mod doctor {
             println!("   原因：{why}\n");
         }
         let master_stopped = sister_hands::master_stop::is_stopped(data_dir);
+        let master_engaged = sister_hands::master_stop::is_engaged(data_dir);
         let caps = caps(data_dir, config, master_stopped);
 
         println!("環境");
@@ -18498,6 +18495,12 @@ pub mod doctor {
         // 「資料目錄讀不到；無法判斷」——兩列講同一台機器，不可以一列 `?` 一列 `✓`。
         let readable_dir = std::fs::metadata(data_dir).is_ok_and(|m| m.is_dir());
         let master_row = master_stopped.then(|| {
+            if !master_engaged {
+                return format!(
+                    "**三層停止閘門已生效，但還沒確認舊活動排乾完成**；新活動不會准入。可能正在等待先前已獲准的活動，或協定狀態讀不到。解除請跑 `{}`",
+                    cmd(data_dir, "stop-all --off")
+                );
+            }
             sister_hands::master_stop::stopped_since(data_dir)
                 .map(|ts| {
                     format!(
@@ -18579,9 +18582,7 @@ pub mod doctor {
         // 名稱，所以讀不到名稱的時候它們一條都不生效——而數量照樣是 9。
         let (sym, note) = match (caps.live_stopped, &caps.focus_probe) {
             (true, _) => ("■", "，三層全停中，沒有探測".to_string()),
-            (false, Some((app, _))) if !app.is_empty() => {
-                ("✓", format!("，現在讀到的是 {app}"))
-            }
+            (false, Some((app, _))) if !app.is_empty() => ("✓", format!("，現在讀到的是 {app}")),
             (false, Some(_)) => ("?", "，但現在沒有前景視窗，這一刻測不出來".to_string()),
             (false, None) => (
                 "✗",
@@ -18741,11 +18742,7 @@ pub mod doctor {
                 .iter()
                 .any(|(_, label, _)| *label == "讀你現在的螢幕")
         {
-            mark(
-                "■",
-                "讀你現在的螢幕",
-                "三層全停中，沒有探測",
-            );
+            mark("■", "讀你現在的螢幕", "三層全停中，沒有探測");
         }
 
         println!("\n節奏");
@@ -18966,8 +18963,8 @@ pub mod doctor {
         #[test]
         fn doctor_guard_discards_the_next_live_probe_while_engage_waits() {
             use std::cell::Cell;
-            use std::sync::atomic::{AtomicBool, Ordering};
             use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, Ordering};
             use std::time::Duration;
 
             let dir = crate::ops::tmp::Tmp::new("doctor-live-probe-race");
@@ -18989,10 +18986,54 @@ pub mod doctor {
             let grabbed = Cell::new(false);
             assert!(policy.run(|| grabbed.set(true)).is_none());
             assert!(!grabbed.get(), "pending 發佈後不准再做 screen probe");
+            assert!(
+                policy.is_stopped(),
+                "最後報告必須重算 policy，不能沿用 admission 時的 false"
+            );
             assert!(!returned.load(Ordering::SeqCst));
             drop(policy);
             stop.join().unwrap();
             assert!(returned.load(Ordering::SeqCst));
+        }
+
+        #[test]
+        fn windows_caps_production_routes_every_live_probe_through_the_policy() {
+            // `cfg(windows)` 接線在 Linux 不會編譯執行；直接檢查 production body，避免
+            // 只測一個實際沒被 caps 使用的 helper。每個原生入口在 body 中只能出現一次，
+            // 而且都必須位於 `live.run` closure 的開頭。
+            let source = include_str!("ops.rs");
+            let start = source
+                .find("#[cfg(windows)]\n    fn caps(data_dir")
+                .expect("windows caps start");
+            let end = source[start..]
+                .find("#[cfg(not(windows))]\n    fn caps(data_dir")
+                .map(|offset| start + offset)
+                .expect("windows caps end");
+            let compact: String = source[start..end]
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            for (native, wrapped) in [
+                ("WindowsInput::start", "live.run(||WindowsInput::start"),
+                (
+                    "source.context",
+                    "live.run(||{usesister_capture::traits::FocusSource;letmutsource=sister_capture::windows::focus::WindowsFocus::new();letobserved=source.context",
+                ),
+                (
+                    "screen.grab",
+                    "live.run(||{letmutscreen=WindowsScreen::new();screen.grab",
+                ),
+            ] {
+                assert_eq!(
+                    compact.matches(native).count(),
+                    1,
+                    "production caps 的 {native} 入口數改了；請逐一確認都受 policy 保護"
+                );
+                assert!(
+                    compact.contains(wrapped),
+                    "production caps 的 {native} 繞過 LiveProbePolicy"
+                );
+            }
         }
 
         #[test]
@@ -27198,9 +27239,7 @@ pub mod record {
             skipped_parts.push(format!("{master_stopped_ticks} 拍是三層全停"));
         }
         if master_released_ticks > 0 {
-            skipped_parts.push(format!(
-                "{master_released_ticks} 拍是解除三層全停邊界"
-            ));
+            skipped_parts.push(format!("{master_released_ticks} 拍是解除三層全停邊界"));
         }
         if skipped_parts.is_empty() {
             String::new()

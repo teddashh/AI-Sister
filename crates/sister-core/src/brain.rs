@@ -194,6 +194,9 @@ impl CurrentGuess {
 }
 
 /// 一次 spawn 等多久。CLI 掛住不能把解釋層卡住。
+///
+/// 已送出 stdin 的 interpreter/reviewer 會讓 `stop-all` 等到這個 120 秒 timeout，
+/// 再完成本機 outbound audit 才能回成功；這不是取消或撤回 provider 已收走的 request。
 pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(120);
 /// 整份 prompt 的位元組上限。超過就截斷，並在外送紀錄記 `truncated`。
 pub const MAX_PROMPT_BYTES: usize = 24 * 1024;
@@ -950,7 +953,6 @@ pub fn run(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<InterpretR
             ran.push((job.clone(), outcome));
         }
     });
-    drop(stop_admission);
 
     let day = local_day_key(crate::now_ms()).context("算不出今天的日期，不敢送")?;
     let mut results = Vec::new();
@@ -977,7 +979,10 @@ pub fn run(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<InterpretR
             error: error.as_deref(),
             role: "interpreter",
         })?;
-        let product_boundary = not_stopped(data_dir).and_then(|guard| guard.boundary());
+        // 原始 admission 保留到 classify 與 outbound audit 都完成。stop-all 可能已經
+        // 發佈 pending，但不能在一份實際送出的 audit 落地前回報成功。產品卡片則用
+        // 同一份 guard 的新 boundary 重驗：pending 勝出時只留 audit、不落 L2。
+        let product_boundary = stop_admission.boundary();
         if product_boundary.is_none() {
             master_stopped_after_return = true;
             card = None;
@@ -1010,6 +1015,7 @@ pub fn run(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<InterpretR
             previous,
         });
     }
+    drop(stop_admission);
 
     if master_stopped_after_return {
         record_skip(input.db, SkipReason::MasterStopped)?;
@@ -1767,10 +1773,8 @@ mod tests {
 
     #[test]
     fn stale_not_stopped_permit_never_starts_the_sentinel_child() {
-        let dir = std::env::temp_dir().join(format!(
-            "sister-stale-stop-permit-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sister-stale-stop-permit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let stale = not_stopped(&dir).expect("mint before stop");

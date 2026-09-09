@@ -93,7 +93,7 @@ timeout，相關設定／key／consent mutation 或 native cancel 可能等它�
 | `hands.stop` | 她的手現在是不是被拔掉。內容只有第一次拔手的毫秒時戳 | 等於安靜地把手接回去，所以任何 forget、prune、export 都刻意不動它 |
 | `master.stop` | 三層全停（capture／brain／hands）現在是不是開著。內容只有第一次按下全停的毫秒時戳 | 等於安靜地把三層一起放回去，所以任何 forget、prune、export 都刻意不動它 |
 | `master.stop.pending` | `stop-all` 已在線性化閘門內發佈、正在等舊活動排乾的停止意圖；正常完成 engage 或 release 後會移除 | 不可手動刪；可能讓已經開始的 capture／CLI／OS call 排乾前，新活動誤以為可以進場 |
-| `master.stop.lock` | 空的永久 activity drain 鎖。capture tick、CLI spawn/stdin、reviewer product mutation、hands OS call、doctor/bench live probe 都持 shared handle；engage/release 取 exclusive | 永遠不靠 unlink 解除。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
+| `master.stop.lock` | 空的永久 activity drain 鎖。capture tick、CLI spawn/stdin 與 outbound audit、reviewer product mutation、hands OS call、doctor/bench live probe 都持 shared handle；只有 engage 取 exclusive 排乾，release 不必等舊活動才能恢復 | 永遠不靠 unlink 解除。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `master.stop.turnstile` | 空的永久 admission／不可逆邊界鎖。新活動和最後一次 persistence/spawn/OS call 在 shared lock 內重驗 latch/pending；engage 在 exclusive lock 內發佈 pending | 永遠不靠 unlink 解除。執行中不可刪，否則 admission 與 engage 可能落在不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `consent.toml` | 四張同意書各自是**何時**簽的；前三張有共同條文版本，第四張 `azure-tts` 另有獨立 terms version | 等於四張都沒簽；`sister record` 拒絕啟動，Azure TTS 一次都不呼叫 |
 | `consent.lock` | 空的跨行程同意 transaction 鎖。CLI／desktop 的 grant／revoke 在 OS whole-file exclusive lock 內重讀最新 `consent.toml`、套當次變更再 atomic save；recorder start 先持 shared guard。CLI 那份跨到第一拍；desktop parent 那份只跨到 `Command::spawn` 回來便立即放掉，child 自己 nonblocking 重拿並跨到第一拍。symlink／non-regular path 拒絕 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
@@ -160,6 +160,16 @@ symlink／non-regular file 或無法取得，mutation fail closed，不跟著鎖
 讀不到、根本不是一個目錄的時候，一律當成全停中；資料目錄**整個不存在**則不算全停——
 那是還沒開始用，不是被停下來。一條指向不存在目標的 `master.stop` symlink 也算全停：
 判斷走的是 `symlink_metadata`，目錄項在就算在。
+
+程式有兩個刻意不同的觀察：`master_stop::is_stopped()` 是 operational gate，pending、
+讀不到或協定損壞都算停止；`master_stop::is_engaged()` 只在 drain 完成、durable latch 已
+發佈時才是 true。狀態畫面若要寫「三層都停了」必須接後者；desktop/core BlindSpots
+尚未包含在這一輪的修改範圍，下一次 integration pass 必須改接這個 completed observation，
+不能用前者把「正在等舊活動排乾」說成「已經停完」。
+
+若 interpreter／reviewer 已把 stdin 交給使用者的 CLI，`stop-all` 會等該次 CLI 的
+`SPAWN_TIMEOUT`（目前 120 秒）結束並完成本機 outbound audit，之後才回成功。這只保證
+回條之後不再首次寫出產品記憶；不表示 provider 已收到的 request 被取消或撤回。
 
 `recording.beat` 存在的理由是「暫停」和「根本沒有人開她」是兩件不同的事，
 而字母人以前只分得出前者——暫停旗標乾淨的時候它就顯示「在聽」，即使沒有任何
