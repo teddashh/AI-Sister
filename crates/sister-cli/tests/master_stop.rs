@@ -213,3 +213,32 @@ fn stop_all_twice_preserves_timestamp_and_doctor_never_calls_it_running() {
     assert!(!watching.contains("正在跑"), "全停中卻說正在跑：{watching}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// 打錯 `--data-dir` 的時候，全停不可以安靜地成功。
+///
+/// 對照組是同一顆二進位檔的 `hands stop`：它本來就拒絕。三層裡有一層會拒絕、
+/// 而 `stop-all` 卻印「三層都停了」，那句話就是假的。
+#[test]
+fn stop_all_refuses_a_data_dir_that_is_not_there() {
+    let base = temp("missing");
+    let missing = base.join("not-here");
+
+    let hands = sister(&missing, None, &["hands", "stop"]);
+    assert!(!hands.status.success(), "對照組：hands stop 應該拒絕");
+
+    let out = sister(&missing, None, &["stop-all"]);
+    assert!(
+        !out.status.success(),
+        "全停對著不存在的資料夾成功了：\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let said = String::from_utf8_lossy(&out.stdout) + String::from_utf8_lossy(&out.stderr);
+    assert!(!said.contains("三層都停了"), "宣稱停了卻沒停：{said}");
+    assert!(said.contains("找不到這個資料目錄"), "{said}");
+    assert!(!missing.exists(), "拒絕之後還是把資料夾建出來了");
+
+    let off = sister(&missing, None, &["stop-all", "--off"]);
+    assert!(!off.status.success(), "解除也不該對著不存在的資料夾成功");
+
+    std::fs::remove_dir_all(base).unwrap();
+}

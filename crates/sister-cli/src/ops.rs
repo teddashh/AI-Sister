@@ -11332,7 +11332,26 @@ pub mod pause {
 pub mod stop_all {
     use super::*;
 
+    /// 全停跟著 `hands stop` 走嚴的那一邊，不跟著 `sister pause` 走鬆的那一邊。
+    ///
+    /// `pause` 打錯路徑時會把那個資料夾建出來、回報已暫停；對暫停而言那還算合理
+    /// （你可能在開錄之前就先按）。全停不行：它印的是「三層都停了：capture 不再
+    /// 擷取、brain 不再送出、hands 不再執行」——而真正在跑的那一份讀的是**另一個**
+    /// 資料夾，一層都沒停。那句話會變成假話，而且症狀是「我明明按了」。
+    /// `hands stop` 本來就在同樣的情況下大聲拒絕；三層裡有一層拒絕、整句話卻宣稱
+    /// 三層都停了，本身就不成立。
+    fn require_data_dir(data_dir: &Path) -> Result<()> {
+        if !data_dir.is_dir() {
+            anyhow::bail!(
+                "找不到這個資料目錄：{}\n沒有停任何東西。真正在跑的那一份讀的是別的資料夾，請先確認路徑。",
+                data_dir.display()
+            );
+        }
+        Ok(())
+    }
+
     pub fn run(data_dir: &Path, off: bool) -> Result<()> {
+        require_data_dir(data_dir)?;
         if off {
             sister_hands::master_stop::release(data_dir)
                 .with_context(|| format!("解除不了 {}", data_dir.display()))?;
