@@ -21,6 +21,25 @@ fn success(data_dir: &Path, config: Option<&Path>, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("UTF-8 stdout")
 }
 
+fn shell_quoted_data_dir(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    let needs_quotes = value.is_empty()
+        || !value.chars().all(|c| {
+            c.is_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '/' | ':')
+                || (cfg!(windows) && c == '\\')
+        });
+    if !needs_quotes {
+        return value.into_owned();
+    }
+
+    if cfg!(windows) {
+        format!("'{}'", value.replace('\'', "''"))
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "sister-master-stop-cli-{name}-{}",
@@ -143,7 +162,10 @@ fn master_stop_blocks_brain_bytes_and_cards_and_says_why() {
     );
     assert!(stdout.contains("沒有問模型"), "{stdout}");
     assert!(
-        stdout.contains(&format!("--data-dir {} stop-all --off", dir.display())),
+        stdout.contains(&format!(
+            "--data-dir {} stop-all --off",
+            shell_quoted_data_dir(&dir)
+        )),
         "解除指令沒有帶這一趟真正使用的 data dir：{stdout}"
     );
     std::fs::remove_dir_all(dir).unwrap();
@@ -294,7 +316,10 @@ fn bench_refuses_before_capture_when_master_stop_is_on() {
     );
     assert!(said.contains("bench 沒有抓畫面"), "{said}");
     assert!(
-        said.contains(&format!("--data-dir {} stop-all --off", dir.display())),
+        said.contains(&format!(
+            "--data-dir {} stop-all --off",
+            shell_quoted_data_dir(&dir)
+        )),
         "{said}"
     );
     std::fs::remove_dir_all(dir).unwrap();
