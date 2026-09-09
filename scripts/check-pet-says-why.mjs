@@ -328,6 +328,12 @@ async function open(
     azureButton: () => node("[data-hits]").querySelector(".answer-cloud"),
     audioPlays: () => audioPlays,
     isSpeaking: () => node("[data-avatar]").classList.contains("speaking"),
+    // 圖案和字是兩條路：`paint()` 先算 `shown` 餵給 `avatar.dataset.state`，
+    // 再另外算 `line`。把兩個三元的順序改成不一樣，字會講全停而圖案是暫停的
+    // 斜槓——而 `styles.css` 專門替 `[data-state="stopped"]` 畫了方點加叉號，
+    // 就是為了讓這兩件事長得不一樣。實測過：只改 `shown` 那個三元的順序，
+    // 這支閘門原本 74 個情境全綠。
+    avatarState: () => node("[data-avatar]").dataset.state,
     finishAudio() {
       audio.onended?.();
     },
@@ -2468,6 +2474,7 @@ console.log("68. 全停中不可以出現『在聽』");
     p.line(),
   );
   check("全停後顯示全停主句", p.line().includes("已全停：capture／brain／hands 都不會動"), p.line());
+  check("全停後圖案也是 stopped，不是暫停的斜槓", p.avatarState() === "stopped", p.avatarState());
 }
 
 console.log("69. 全停壓過暫停");
@@ -2481,6 +2488,7 @@ console.log("69. 全停壓過暫停");
   await p.fromOutside("master-stop-changed", true);
   check("全停主句壓過暫停主句", p.line().includes("已全停：capture／brain／hands 都不會動"), p.line());
   check("全停時不顯示暫停主句", !p.line().includes("已暫停，沒有在看"), p.line());
+  check("暫停中再全停，圖案換成 stopped", p.avatarState() === "stopped", p.avatarState());
 }
 
 console.log("70. 解除暫停不可以讓全停畫面消失");
@@ -2498,6 +2506,7 @@ console.log("70. 解除暫停不可以讓全停畫面消失");
     p.line(),
   );
   check("解除暫停後仍不聲稱在聽", !p.line().includes("在聽"), p.line());
+  check("解除暫停後圖案仍是 stopped", p.avatarState() === "stopped", p.avatarState());
 }
 
 console.log("71. 全停 detail 講得出正確的解除入口");
