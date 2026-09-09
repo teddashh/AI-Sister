@@ -9,7 +9,15 @@
  * `paused`），因為她可以「暫停中、同時正在想一個問題的答案」。
  */
 const STATES = Object.freeze(["idle", "thinking"]);
-const MASTER_STOP_PHASES = Object.freeze(["clear", "stopping", "stopped", "uncertain"]);
+// `checking` 只存在 renderer 冷啟動；native 的封閉契約是另外四態。沒量到不是
+// `uncertain`（讀過但讀不懂），也不能先假設 clear。
+const MASTER_STOP_PHASES = Object.freeze([
+  "checking",
+  "clear",
+  "stopping",
+  "stopped",
+  "uncertain",
+]);
 
 const STATE_LINES = Object.freeze({
   idle: "在聽",
@@ -248,7 +256,7 @@ const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
  */
 let state = "idle";
 let paused = false;
-let masterStopPhase = "uncertain";
+let masterStopPhase = "checking";
 // Event 是比已送出 poll 更新的 observation；request id 則讓兩份重疊 poll 只有
 // 最後送出的那份能落地。兩個軸分開，否則舊 false 可以蓋掉剛收到的全停 true。
 let masterStopRevision = 0;
@@ -1737,10 +1745,12 @@ function paint() {
   // 順序就是嚴重程度。她沒在看的時候，畫面上絕不可以有一格看起來像在看，
   // 全停要壓過 pause，因為解除 pause 不是解除全停；而「被你叫停」要壓過
   // 「根本沒人開她」——前者是他做的決定，後者只是狀態。
-  const masterStopBlocksWork = masterStopPhase !== "clear";
-  const shown = masterStopBlocksWork
+  const masterStopHasHeadline = ["stopping", "stopped", "uncertain"].includes(masterStopPhase);
+  const shown = masterStopHasHeadline
     ? "stopped"
-    : paused
+    : masterStopPhase === "checking"
+      ? "asleep"
+      : paused
       ? "paused"
       : recording && !supervisorBlocksListeningClaim()
         ? state
@@ -1760,9 +1770,11 @@ function paint() {
   const supervisedLine = !paused && state !== "thinking" ? supervisorHeadline() : null;
   const trustHeartbeat = !supervisorBlocksListeningClaim();
   const heartbeatUnreadable = recordingStateKnown && !recordingStateReadable;
-  const line = masterStopBlocksWork
+  const line = masterStopHasHeadline
     ? MASTER_STOP_LINES[masterStopPhase]
-    : booting && trustHeartbeat
+    : masterStopPhase === "checking"
+      ? "正在確認錄製與全停狀態…"
+      : booting && trustHeartbeat
       ? "她起來了，正在開資料庫…（大的記憶要等一下，這期間還沒開始記）"
       : thinkingLast && trustHeartbeat
         ? "錄製已停，解釋層還在想最後一段"
@@ -1814,7 +1826,7 @@ function paint() {
   // 一下正好就是按了「叫她起來」**，那五個字會被讀成在講那一下——在唯一需要它
   // 的狀態下最模糊。「另一件事」講的是關係（跟上面那句無關），不是時序。
   let detail = "";
-  if (masterStopBlocksWork) {
+  if (masterStopHasHeadline) {
     const resume =
       masterStopPhase === "uncertain"
         ? "狀態讀不到；可從系統匣按「解除全停」嘗試重設"
@@ -1865,6 +1877,7 @@ function paint() {
     wakeButton.hidden = stopCanBeResent
       ? false
       : shown !== "asleep" ||
+        masterStopPhase !== "clear" ||
         starting ||
         // Backoff／GaveUp 會刻意壓掉舊 heartbeat 的現在式，但 occupancy gate 仍會
         // 擋住它。顯示不能採信那顆拍說「在聽」，操作也不能假裝它已經不佔位。

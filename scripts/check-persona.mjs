@@ -289,6 +289,8 @@ async function open(personaView = persona(), options = {}) {
           case "recorder_supervisor_state":
             if (options.deferRecorderTruth) return new Promise(() => {});
             return { phase: "stopped", failures: 0, message: null };
+          case "master_stop_state":
+            return options.masterStopState ?? "clear";
           case "pause_state":
             return false;
           case "last_recording_end":
