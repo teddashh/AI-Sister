@@ -1102,6 +1102,8 @@ fn system_kind_from_db(value: &str) -> Result<crate::model::SystemKind> {
         "wake" => Ok(SystemKind::Wake),
         "pause" => Ok(SystemKind::CapturePaused),
         "resume" => Ok(SystemKind::CaptureResumed),
+        "master_stop_engaged" => Ok(SystemKind::MasterStopEngaged),
+        "master_stop_released" => Ok(SystemKind::MasterStopReleased),
         "excluded" => Ok(SystemKind::Excluded),
         "session_start" => Ok(SystemKind::SessionStart),
         "session_end" => Ok(SystemKind::SessionEnd),
