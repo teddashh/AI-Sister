@@ -742,16 +742,18 @@ mod tests {
         let target = root.join("real-data");
         let junction = root.join("data-junction");
         std::fs::create_dir_all(&target).unwrap();
-        let command = format!(
-            "mklink /J \"{}\" \"{}\" >nul",
-            junction.display(),
-            target.display()
-        );
-        let status = std::process::Command::new("cmd.exe")
-            .args(["/D", "/S", "/C", &command])
-            .status()
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J", "data-junction", "real-data"])
+            .current_dir(&root)
+            .output()
             .expect("run mklink /J");
-        assert!(status.success(), "mklink /J failed with {status}");
+        assert!(
+            output.status.success(),
+            "mklink /J failed with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         assert_eq!(state(&junction), State::Uncertain);
         assert!(admit(&junction).is_none());
