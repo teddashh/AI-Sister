@@ -62,12 +62,12 @@ alpha.116 另修正桌面問「她知道了什麼」時把「知道」當全文�
 記憶內容與最近候選沒有畫面出處會分開說，不再用 OCR 墊答案。帶主題的
 「妳知道客服電話嗎」仍走一般檢索。這次提問不叫 CLI，也不增加網路能力；Azure 已明確
 啟用時仍只照既有第四張同意送答案正文。
-舊 scanner 沒有 Unknown，process 列舉或 token／SID 查詢失敗會和「未找到」合併；舊 binary
-也不持有 event。已經出貨或複製到 temp 的 alpha.114 uninstaller 不能由新版 retroactively
-改寫；alpha.115 的保證是自己的 Setup 不再啟動它。Windows loader 在 Rust
-`main` 前映射 executable，最後一次 scan 到 NSIS `File` 之間仍有窄窗，所以不能把這版
-寫成跨版本完整原子 lifecycle。
-code signing、跨層 master stop 與 installer late-start 窄窗仍未完成，
+alpha.117 在 legacy scan 之後、NSIS `File` 之前再加一道檔案層獨佔開檔：只要有任何行程
+正在執行已安裝的 `sister-desktop.exe`／`sister.exe`（不論行程名字、版本、有沒有 event），
+Setup／uninstaller 就以 exit 32 拒絕、不 kill；拿到 handle 後舊檔先改名再寫新檔，Windows
+loader 沒有窗可映射。Windows CI 用公開 alpha.110 舊 recorder 的 hard link 別名實測過這件事。
+已經出貨或複製到 temp 的舊 uninstaller 仍不能 retroactively 改寫。
+code signing 與跨層 master stop 仍未完成，
 所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
@@ -148,13 +148,12 @@ process teardown 關閉。無關的第二份 Setup 不能同時進入 lifecycle�
 
 alpha.113-aware desktop／CLI 在產品 log、DB、WebView、記憶或設定之前執行
 mutex → product event → mutex 握手，並把 event 持有到行程結束；installer 取得 mutex 後
-只有明確量到 event 不存在才繼續。舊 binary 沒有 event，只能靠沒有 Unknown 的 legacy
-scanner best-effort 掃描；列舉、token 或 SID 查詢失敗會被它當成未找到。已經出貨或複製到
-temp 的 alpha.114 uninstaller 不能被 alpha.115 retroactively 修改；新版 Setup 只保證不再
-啟動它。
-Windows loader 又在 Rust `main` 前映射 executable，最後一次 legacy scan 到 NSIS `File`
-仍有窄窗；所以 installer late-start 與跨版本完整原子 lifecycle 仍未完成。現在也還沒有
-code signing，Windows 可能顯示未簽章警告。
+只有明確量到 event 不存在才繼續。舊 binary 沒有 event、legacy scanner 也沒有 Unknown，所以
+alpha.117 在最後一次 scan 之後、NSIS `File` 之前再用檔案層獨佔開檔判定：任何行程正在執行
+已安裝的 `sister-desktop.exe`／`sister.exe`，開檔就會以 sharing violation 失敗，Setup／
+uninstaller 拒絕且不 kill；拿到 handle 後舊檔先改名、handle 持到收尾，Windows loader 在這段
+期間映射不到任何版本的 exe。已經出貨或複製到 temp 的舊 uninstaller 仍不能被新版
+retroactively 修改。現在也還沒有 code signing，Windows 可能顯示未簽章警告。
 
 ## 跑起來
 

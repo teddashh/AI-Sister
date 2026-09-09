@@ -68,10 +68,17 @@ alpha.113-aware desktop／CLI 也繼續在產品狀態前做 mutex → product e
       stock-position scan 回報命中後 Setup／uninstaller 必須拒絕且保留原 PID。這只證明一般
       可列舉 fixture 的 reported-hit/no-kill；elevated／unqueryable process 或 scanner native
       error 仍可能被當成未找到。
-- [ ] **installer late-start 仍未結案。** 舊 binary 不持有 product event，legacy scan 又可能
-      漏掉 query failure；另把新版 binary 啟動夾在最後一次 scan 與 NSIS `File` 之間時，Windows
-      loader 已可能在 Rust `main` admission 前映射 executable。沒有 old-binary bridge 與
-      file-level exclusion 前，本項保持未勾，不得稱為跨版本完整原子 lifecycle。
+- [ ] alpha.117 file-level exclusion 的肉眼版。先安裝任一舊版（例如公開 alpha.110），用
+      `mklink /H <別的資料夾>\old-name.exe "<install root>\sister.exe"` 做 hard link（同一個
+      磁碟區；install root 是 Setup 預設裝進使用者本機 AppData 底下的 `AI-Sister` 資料夾，
+      也就是「已安裝的應用程式」顯示的安裝位置），以 disposable `--data-dir` 執行
+      `old-name.exe record`，再跑新版 GUI
+      Setup。畫面必須是「程式檔 … 仍被某個行程開著或執行中（不限行程名稱，也不限版本）」那
+      句、原 PID 存活、三檔與安裝登錄不動，且沒有 Tauri stock 的「替你關閉再繼續」。停掉舊
+      recorder、刪掉 hard link 後再跑一次要成功，install root 只剩 exact 三檔（沒有
+      `.ai-sister-previous`）。CI 已用 `/S` 跑過同一件事，這裡要的是 WebView2／GUI 訊息框。
+- [ ] 檔案層擋不住的照實留著：已出貨或已複製到 temp 的舊 uninstaller 不能 retroactively
+      改寫；安裝根目錄外的 portable 副本不在 installer 管轄。
 
 ### alpha.112 先驗圖像選角與公開版跨版升級
 

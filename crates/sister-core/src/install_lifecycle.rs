@@ -8,8 +8,10 @@
 //! 進入產品狀態與 installer section。
 //!
 //! Windows loader 會在 Rust `main` 前先映射 exe，而且較舊的 binary 不認識這兩顆 object；
-//! 因此這層不能冒充跨舊版的檔案替換已經原子化。NSIS 仍會 best-effort 掃描兩個舊 image，
-//! 但那個 upstream current-user scanner 無法把所有列舉／token 失敗表成 Unknown。
+//! 因此這層本身不是跨舊版檔案替換的最後一道門。NSIS 仍會 best-effort 掃描兩個舊 image（那個
+//! upstream current-user scanner 無法把所有列舉／token 失敗表成 Unknown）；alpha.117 起真正的
+//! 最後一道是 installer hook 在 NSIS `File` 之前對兩個已安裝 exe 的檔案層獨佔開檔：正在執行的
+//! image 不論名字、版本、有沒有這顆 event，都會讓那次開檔以 sharing violation 失敗。
 //!
 //! 這不是 single-instance lock，也不代表 recorder 正在跑。多個產品行程可以各自開啟同一
 //! event；最後一個 handle 關閉後，kernel 才移除 object。

@@ -38,12 +38,12 @@ uninstall string，避免使用者確認移除後已有新版覆蓋，舊確認�
 desktop／CLI 仍以 product event + mutex／event／mutex handshake 在產品狀態前和 installer
 交接，無關的第二份 Setup 也不能同時進入 lifecycle。
 
-這仍不是跨版本完整原子 lifecycle。legacy scanner 沒有 Unknown，process 列舉或 token／SID
-查詢失敗會和未找到合併；舊 binary 不持有 event。已經出貨或已複製到 temp 的 alpha.114
-uninstaller 也無法由新版 retroactively 改寫；alpha.115 能保證的是自己的 Setup 不再啟動那個
-舊 child。Windows loader 又在 Rust `main` 前映射
-executable，最後一次 legacy scan 到 NSIS `File` 之間仍有窄窗。installer late-start 因此仍是
-Release 1.0 未完成項。
+alpha.117 起，Setup 與 uninstaller 在覆寫或刪除程式檔之前，還會對已安裝的
+`sister-desktop.exe`／`sister.exe` 做檔案層獨佔開檔：只要有任何行程正在執行它（不論行程
+名字、版本、有沒有 product event），開檔就會失敗，Setup／uninstaller 以 exit 32 拒絕、不
+kill、不動任何檔案或登錄；拿到 handle 後舊檔先改名、handle 持到收尾，所以最後一次 scan 到
+NSIS `File` 之間沒有窗。已經出貨或已複製到 temp 的舊 uninstaller 仍無法由新版 retroactively
+改寫。
 
 ```
 sister.exe doctor                 # 先看這個：她在這台機器上做得到什麼
@@ -73,6 +73,35 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
+
+
+## v0.1.0-alpha.117
+
+**這一版收掉 installer late-start 的跨版本窄窗：Setup 與 uninstaller 在覆寫或刪除程式檔之前，
+改用 Windows 檔案層的獨佔開檔判定「這個 exe 現在有沒有被任何行程執行」，不再只靠行程名字
+或 alpha.113 才有的版本協定。**
+
+Setup 在 product event 與 legacy image-name scan 之後、NSIS `File` 之前，對已安裝的
+`sister-desktop.exe` 與 `sister.exe` 各開一個不分享讀取的寫入 handle。正在執行的 image 會讓
+這個開檔以 sharing violation 失敗，與行程叫什麼名字、是哪個版本、有沒有持 product event
+無關；Setup 因此以 exit 32 拒絕，不替使用者 kill，零 payload／安裝登錄 mutation。拒絕的位置
+與既有「程式仍在執行」拒絕相同：在 WebView2 section 之後、任何產品檔或登錄改動之前。防毒
+軟體短暫獨佔會先重試四次（約一秒），之後照實拒絕，重跑 Setup 即可。
+
+拿到 handle 之後，舊檔先改名成 `.ai-sister-previous`，handle 一直持到 `POSTINSTALL` 才刪掉
+舊檔、關閉 handle。改名到 `File` 寫完之間，原路徑不存在、舊檔又被 handle 擋著讀取，Windows
+loader 沒有任何一刻能映射到舊的或寫到一半的 exe；成功後 install root 仍是 exact 三檔。direct
+uninstaller 在 `PREUNINSTALL` 重驗 metadata 之後、刪檔之前做同一道開檔，拿不到就拒絕並保留
+三檔與 uninstall 登錄。
+
+這就是先前路線圖寫的 old-binary bridge。Windows CI 把公開 alpha.110 的舊 recorder 用 hard
+link 別名執行——它不持 product event、image-name scan 也看不到那個名字——current Setup 仍
+拒絕，舊 bytes 與 alpha.110 metadata 原封不動；另兩條 lane 證明只持一個讀取 handle（無名、
+無 event）就會被拒絕，以及改名之後、`File` 之前試圖啟動任一個 exe 都以 Win32 error 2／32
+失敗。這些是 `/S` automation，不是 GUI 訊息框的肉眼證據。
+
+仍擋不住、照實留著的：已經出貨或複製到 temp 的舊 uninstaller（不能 retroactively 改寫）、
+安裝根目錄之外的 portable 副本（installer 不管它）。code signing 與跨層 master stop 仍未完成。
 
 
 ## v0.1.0-alpha.116

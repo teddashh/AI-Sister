@@ -654,12 +654,23 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     native automation，不是滑鼠真人互動通過紀錄。
   - ⬜ 正式 `AI-Sister-Setup.exe` 的斷網安裝仍待 Ted 實測；在線 CI 與靜態網路邊界
     只證明 WebView2 offline installer 已內嵌、程式沒有 updater／直接 socket。
-  - ⬜ installer late-start 的跨版本完整 lifecycle 仍未完成。舊 binary 不持有 product event，
-    legacy scanner 又可能把列舉／token／SID error 當成未找到；已經出貨或複製到 temp 的
-    alpha.114 uninstaller 無法由 alpha.115 retroactively 改寫，新版只保證自己的 Setup 不再
-    啟動它。即使是 alpha.113-aware binary，Windows loader 仍在 Rust `main` admission 前映射
-    executable，最後一次 legacy scan 到 NSIS `File` 之間可能撞到 image mapping。
-    尚未有 old-binary bridge 或 file-level exclusion，這格保持未勾。
+  - ✅ alpha.117 file-level exclusion 收掉 installer late-start 的跨版本窄窗。Setup 在 product
+    event 與 legacy image-name scan 之後、NSIS `File` 之前，對已安裝的 `sister-desktop.exe`
+    與 `sister.exe` 各開一個 `GENERIC_WRITE|DELETE`、只分享 delete 的 handle：正在執行的
+    image 會讓開檔以 sharing violation 失敗，與行程名字、版本、有沒有持 product event 無關，
+    Setup 因此 exit 32、不 kill、零 payload／登錄 mutation（32／1224 先重試四次、約一秒）。
+    拿到 handle 就先把舊檔改名成 `.ai-sister-previous`，handle 持到 `POSTINSTALL` 才刪舊檔、
+    關 handle；改名到 `File` 寫完之間原路徑不存在、舊檔被 handle 擋著，Windows loader 沒有
+    任何一刻能映射到舊的或半寫的 exe。direct uninstaller 在 `PREUNINSTALL` metadata 重驗後、
+    刪檔前做同一道開檔，拿不到就拒絕並保留三檔與登錄。這一道就是先前寫的 old-binary bridge：
+    Windows CI 把公開 alpha.110 舊 recorder 以 hard link 別名執行（不持 event、scanner 看不到
+    名字），current Setup 仍拒絕且舊 bytes／metadata 原封不動；另證只持一個讀取 handle
+    （無名、無 event）就被拒絕，以及改名之後、`File` 之前啟動任一 exe 都以 Win32 error 2／32
+    失敗，成功後 install root 仍是 exact 三檔。
+  - ⬜ 檔案層擋不住的照實留著：已出貨或複製到 temp 的舊 uninstaller 不能 retroactively 改寫；
+    安裝根目錄之外的 portable 副本不在 installer 管轄；防毒軟體短暫獨佔會在重試後被當成
+    「仍被開著」而拒絕，使用者重跑即可。正式 artifact 的 GUI 訊息框肉眼版仍在
+    `docs/WINDOWS-CHECKLIST.md`。
   - ✅ alpha.107 已接 Windows current-user 登入啟動：設定預設關閉、立即生效，
     `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 是唯一真相。只有 exact quoted
     `"<current sister-desktop.exe>" --ai-sister-login` 算 `enabled`；不存在、不相符、
@@ -731,8 +742,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     CLI／desktop `recording.lock`，
     以及各種取消、占用／未知、外部 recorder、desktop crash 與 uninstall。未勾完前不宣稱
     Windows 人工通過。
-  - ⬜ code signing、跨層 master stop、上述跨版本 installer late-start
-    bridge／最後 scan → `File` 窄窗與官網仍未完成；
+  - ⬜ code signing、跨層 master stop 與官網仍未完成；
     1.0 不內建自動 updater，由使用者手動下載新版 installer。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）

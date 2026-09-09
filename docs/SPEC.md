@@ -688,12 +688,14 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
   downgrade fixture 斷言在 mutation 前退出。這些是 native automation，不是滑鼠真人互動。
   acquire／after-scan fixtures 仍只證明一般可列舉同名 process 的 reported-hit/no-kill，沒有驗
   scanner 的 snapshot／token／SID error。
-- 這不是跨版本完整 atomic lifecycle。已出貨或已複製到 temp 的 alpha.114 uninstaller 不能由
-  alpha.115 retroactively 改寫；新版只保證自己的 Setup 不再啟動那個舊 child。舊 binary 不持有
-  product event，legacy scanner 可能把 native error 當成未找到；Windows loader 又在 Rust
-  `main` 前映射 executable，因此最後一次 legacy scan 到 NSIS `File` 之間仍可能撞到 image
-  mapping。沒有 old-binary bridge 或 file-level exclusion 前，Release 1.0 的 installer late-start
-  exit criterion 維持未完成。
+- alpha.117 file-level exclusion：Setup 在 legacy scan 之後、NSIS `File` 之前，對兩個已安裝 exe
+  各開一個 `GENERIC_WRITE|DELETE`、只分享 delete 的 handle。正在執行的 image 會讓開檔以
+  sharing violation 失敗（與行程名字、版本、有無 product event 無關）→ exit 32、不 kill、零
+  mutation；拿到就先改名 `.ai-sister-previous`、handle 持到 `POSTINSTALL`，所以最後一次 scan 到
+  `File` 之間 loader 映射不到任何版本的 exe。direct uninstaller 在 `PREUNINSTALL` 重驗後、刪檔前
+  同一道。這補上 old-binary bridge：Windows CI 以 hard link 別名執行不持 event 的公開 alpha.110
+  recorder，current Setup 仍拒絕。仍不能 retroactively 改寫已出貨／temp 裡的舊 uninstaller，也不
+  管安裝根目錄外的 portable 副本。
 
 **Windows 登入與 recorder lifecycle（alpha.107）：**
 
@@ -805,7 +807,7 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
 | 向量（選配） | `sqlite-vec` 0.1.9（2026 復活版；256-d int8 MRL，brute-force 在我們規模內互動級） | pre-1.0 格式風險 → 存 model-id+dim，設計成可背景 re-embed |
 | 本地 embedding | 遠期選配；Release 1.0 沒有內嵌推論 runtime | 腦優先 spawn 使用者已登入的 CLI；沒有 HTTP client |
 | 磁碟保護 | SQLite/frame 無應用層加密；依賴 BitLocker／FileVault／LUKS | 未開 OS 全碟加密時，離線竊碟者可讀；PRIVACY／THREAT_MODEL 明講 |
-| UI shell | **Tauri 2** Rust backend + build-free HTML/CSS/ES modules；tray + global-shortcut 已落地 | alpha.106 新增 Windows startup guard + 官方 single-instance receiver 與 current-user NSIS；alpha.107 新增預設關閉、installed-copy-only 的 HKCU Run 登入啟動，以及只管 desktop-owned child 的 bounded recorder supervisor。原生 Windows CI 已驗 alpha.106 install mechanics；alpha.107 有 policy／fixture／test-subkey 自動測試，但正式 artifact 的真登入／重試／uninstall 仍待人工證據。alpha.112 加入從最後一個有公開安裝檔的 alpha.110 → current 的真跨版 installer gate，並明確以 UTF-8 解碼 native CLI stdout；alpha.111 tag 的 Windows gate 曾因此失敗且沒有公開 release。alpha.115 固定 tauri-bundler 2.9.4 custom NSIS template：Setup 不再巢狀執行 installed NSIS uninstaller，同版 repair／升版綁 exact registry root 原地覆蓋，direct uninstall 在 PRE 重驗 version／root／string；product event + mutex／event／mutex handshake 繼續保護 aware binary，legacy scanner 仍是沒有 Unknown 的 best effort。old-binary bridge、pre-main loader／`File` 窄窗與 code signing 仍是 Release 1.0 工作，不內建自動 updater |
+| UI shell | **Tauri 2** Rust backend + build-free HTML/CSS/ES modules；tray + global-shortcut 已落地 | alpha.106 新增 Windows startup guard + 官方 single-instance receiver 與 current-user NSIS；alpha.107 新增預設關閉、installed-copy-only 的 HKCU Run 登入啟動，以及只管 desktop-owned child 的 bounded recorder supervisor。原生 Windows CI 已驗 alpha.106 install mechanics；alpha.107 有 policy／fixture／test-subkey 自動測試，但正式 artifact 的真登入／重試／uninstall 仍待人工證據。alpha.112 加入從最後一個有公開安裝檔的 alpha.110 → current 的真跨版 installer gate，並明確以 UTF-8 解碼 native CLI stdout；alpha.111 tag 的 Windows gate 曾因此失敗且沒有公開 release。alpha.115 固定 tauri-bundler 2.9.4 custom NSIS template：Setup 不再巢狀執行 installed NSIS uninstaller，同版 repair／升版綁 exact registry root 原地覆蓋，direct uninstall 在 PRE 重驗 version／root／string；product event + mutex／event／mutex handshake 繼續保護 aware binary，legacy scanner 仍是沒有 Unknown 的 best effort。alpha.117 以 `File` 前的檔案層獨佔開檔補上 old-binary bridge 與 loader／`File` 窄窗；code signing 仍是 Release 1.0 工作，不內建自動 updater |
 | Pet overlay | always-on-top 透明無框窗 + `set_ignore_cursor_events` 動態 toggle（輪詢游標；Tauri 無 per-region hit-testing）| 已知坑：macOS production 透明窗 bug 群、全螢幕 space 需動 collectionBehavior、Wayland overlay 品質差 |
 | macOS 權限 | `tauri-plugin-macos-permissions` 2.3（Screen Recording 無 entitlement，純 TCC + hardened runtime + notarization；MAS 不可行，站外發行） | 開發期 `tccutil reset ScreenCapture` 測 onboarding |
 | hands | **Rust crate `sister-hands`**，CLI／desktop 共用 permit 與 target policy | 尚未做獨立 process；需要時另立 threat-model milestone |
