@@ -197,7 +197,7 @@ body {
   user-select: none;
 }
 
-/* 只有 updateMotionGate 掛上 `.motion`、而且錄製畫面不是 paused/asleep 才會動；
+/* 只有 updateMotionGate 掛上 `.motion`、而且錄製畫面不是 paused/stopped/asleep 才會動；
  * reduced-motion、視窗 hidden、Persona 動畫關閉都會拿掉那個 class。 */
 .motion .avatar[data-state="idle"] .persona-reel-layer[data-reel-eye],
 .motion .avatar[data-state="thinking"] .persona-reel-layer[data-reel-eye] {
@@ -215,6 +215,8 @@ body {
 
 .avatar[data-state="paused"] .persona-reel,
 .avatar[data-state="paused"] .persona-reel-layer,
+.avatar[data-state="stopped"] .persona-reel,
+.avatar[data-state="stopped"] .persona-reel-layer,
 .avatar[data-state="asleep"] .persona-reel,
 .avatar[data-state="asleep"] .persona-reel-layer {
   animation: none !important;
@@ -509,6 +511,48 @@ body {
 }
 
 /*
+ * stopped：capture／brain／hands 的 master stop。
+ *
+ * 它不能借 paused 的斜槓：那個符號的下一步是按 ▶，全停卻只能從系統匣的另一顆
+ * 「解除全停」恢復。更低的亮度、方形狀態點與叉號讓它在靜止畫面也自成一態；
+ * 文字則直接把正確的解除入口寫出來。
+ */
+.avatar[data-state="stopped"] .face {
+  animation: none;
+  filter: grayscale(1) brightness(0.72);
+  opacity: 0.42;
+  rotate: 0deg;
+}
+
+.avatar[data-state="stopped"] .face::after {
+  background: var(--letter-fg);
+  border-color: rgb(246 236 223 / 96%);
+  border-radius: 2px;
+  box-shadow: none;
+}
+
+.avatar[data-state="stopped"]::before,
+.avatar[data-state="stopped"]::after {
+  background: var(--letter-fg);
+  border-radius: 2px;
+  content: "";
+  height: 3px;
+  position: absolute;
+  right: calc(22% - 4px);
+  top: calc(7% + 7px);
+  width: 27px;
+  z-index: 4;
+}
+
+.avatar[data-state="stopped"]::before {
+  transform: rotate(45deg);
+}
+
+.avatar[data-state="stopped"]::after {
+  transform: rotate(-45deg);
+}
+
+/*
  * asleep：**沒有人在跑 `sister record`。**
  *
  * 和 paused 是兩件事，所以長得不一樣。以前這一格根本不存在——暫停旗標乾淨
@@ -569,7 +613,11 @@ body.has-url-policy .face::after {
 }
 
 body.has-hits .avatar[data-state="paused"]::after,
-body.has-url-policy .avatar[data-state="paused"]::after {
+body.has-url-policy .avatar[data-state="paused"]::after,
+body.has-hits .avatar[data-state="stopped"]::before,
+body.has-hits .avatar[data-state="stopped"]::after,
+body.has-url-policy .avatar[data-state="stopped"]::before,
+body.has-url-policy .avatar[data-state="stopped"]::after {
   height: 2px;
   right: calc(14% - 2px);
   top: calc(5% + 5px);
