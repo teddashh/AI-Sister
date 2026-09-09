@@ -39,11 +39,13 @@ mod hands;
 mod login_startup;
 #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
 mod macos_ci;
+mod master_stop_dispatch;
 mod recorder_supervisor;
 #[cfg(any(windows, test))]
 mod single_instance;
 
 use login_startup::{login_startup_read, login_startup_set};
+use master_stop_dispatch::{MasterStopAction, master_stop_action_for_menu_id};
 #[cfg(any(windows, test))]
 use single_instance::RevealWindow;
 #[cfg(windows)]
@@ -57,6 +59,8 @@ const ACTION_LOG_SHOWN: usize = 20;
 const PET: &str = "pet";
 const PET_W: i32 = 340;
 const PET_H: i32 = 560;
+const MASTER_STOP_CHANGED_EVENT: &str = "master-stop-changed";
+const MASTER_STOP_FAILED_EVENT: &str = "master-stop-failed";
 
 static SETTINGS_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
 static ONBOARDING_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
@@ -820,7 +824,7 @@ fn refresh_tray(app: &tauri::AppHandle) {
         let _ = item.0.set_text(resume);
     }
     if let Some(stopped) = master_stop_active(attached) {
-        let _ = app.emit("master-stop-changed", stopped);
+        let _ = app.emit(MASTER_STOP_CHANGED_EVENT, stopped);
     }
 }
 
@@ -860,12 +864,6 @@ fn master_stop_state(shell: tauri::State<'_, Shell>) -> Result<bool, String> {
         .ok_or_else(|| "找不到資料目錄，現在不能確認全停狀態".to_owned())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MasterStopAction {
-    Engage,
-    Release,
-}
-
 fn set_master_stop(data_dir: Option<&Path>, action: MasterStopAction) -> Result<(), String> {
     let dir = data_dir.ok_or_else(|| "找不到資料目錄，全停開關沒有作用".to_owned())?;
     match action {
@@ -881,7 +879,28 @@ fn announce_master_stop_state(app: &tauri::AppHandle) {
         return;
     };
     if let Some(stopped) = master_stop_active(master_stop_attached(shell.data_dir.as_deref())) {
-        let _ = app.emit("master-stop-changed", stopped);
+        let _ = app.emit(MASTER_STOP_CHANGED_EVENT, stopped);
+    }
+}
+
+/// Production tray callback 的唯一全停出口。方向只由 menu id policy 決定；成功後
+/// 才 refresh（並 emit authoritative changed state），失敗則把同一個錯誤送進畫面。
+fn dispatch_master_stop_menu(app: &tauri::AppHandle, menu_id: &str) {
+    let Some(action) = master_stop_action_for_menu_id(menu_id) else {
+        return;
+    };
+    let shell = app.state::<Shell>();
+    match set_master_stop(shell.data_dir.as_deref(), action) {
+        Ok(()) => refresh_tray(app),
+        Err(error) => {
+            tracing::error!("全停開關切換失敗：{error}");
+            if let Some(win) = app.get_webview_window(PET) {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+            let _ = app.emit(MASTER_STOP_FAILED_EVENT, error);
+            refresh_tray(app);
+        }
     }
 }
 
@@ -2246,6 +2265,16 @@ struct Blind {
     /// [`sister_core::answer::BlindSpots::paused_now`]。
     paused_now: bool,
     paused_truncated: i64,
+    /// recorder／brain／hands 三層一起全停過幾段。這是資料庫歷史，不是現在式。
+    master_stopped_episodes: i64,
+    /// 已結束的全停段落總長；有 open／truncated 時只是已知下限。
+    master_stopped_ms: i64,
+    /// 最後一段全停沒有對應的解除稽核列；不拿它猜 durable latch 現在是否仍開著。
+    master_stopped_open: bool,
+    /// 有幾段只剩解除列，開頭已被保留期刪除。
+    master_stopped_truncated: i64,
+    /// durable `master.stop` latch 此刻是否仍開著；唯一可行入口是系統匣解除全停。
+    master_stopped_now: bool,
     /// 這一題只翻了最近幾天。`null` = 整顆資料庫都翻過了。見
     /// [`sister_core::answer::BlindSpots::scan_horizon_days`]。
     scan_horizon_days: Option<i64>,
@@ -2260,6 +2289,88 @@ struct Blind {
     /// 少了這一格，開機那幾分鐘字母人會說「先看設定頁的『開始記錄』那一段」，
     /// 對一個什麼都還沒開始的 recorder。
     booting_now: bool,
+}
+
+impl From<sister_core::answer::BlindSpots> for Blind {
+    fn from(blind: sister_core::answer::BlindSpots) -> Self {
+        let ocr_is_dead = blind.ocr_is_dead();
+        Self {
+            chunks: blind.chunks,
+            ocr_is_dead,
+            frames: blind.frames,
+            ever_recorded: blind.ever_recorded,
+            ever_stored: blind.ever_stored,
+            excluded: blind.excluded,
+            paused_episodes: blind.paused_episodes,
+            paused_ms: blind.paused_ms,
+            paused_open: blind.paused_open,
+            paused_now: blind.paused_now,
+            paused_truncated: blind.paused_truncated,
+            master_stopped_episodes: blind.master_stopped_episodes,
+            master_stopped_ms: blind.master_stopped_ms,
+            master_stopped_open: blind.master_stopped_open,
+            master_stopped_truncated: blind.master_stopped_truncated,
+            master_stopped_now: blind.master_stopped_now,
+            scan_horizon_days: blind.scan_horizon_days,
+            recording_now: blind.recording_now,
+            booting_now: blind.booting_now,
+        }
+    }
+}
+
+#[cfg(test)]
+mod blind_dto_tests {
+    use super::*;
+
+    #[test]
+    fn core_blind_spots_serialize_to_the_exact_ipc_fields() {
+        let dto = Blind::from(sister_core::answer::BlindSpots {
+            chunks: 11,
+            ocr_blocks: 12,
+            frames: 13,
+            ever_recorded: true,
+            ever_stored: false,
+            excluded: vec![("excluded app: fixture".to_string(), 14)],
+            paused_episodes: 17,
+            paused_ms: 19,
+            paused_open: false,
+            paused_now: false,
+            paused_truncated: 23,
+            master_stopped_now: true,
+            master_stopped_episodes: 29,
+            master_stopped_ms: 31,
+            master_stopped_open: true,
+            master_stopped_truncated: 37,
+            scan_horizon_days: Some(41),
+            recording_now: true,
+            booting_now: false,
+        });
+
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize Blind IPC DTO"),
+            serde_json::json!({
+                "chunks": 11,
+                "ocr_is_dead": false,
+                "frames": 13,
+                "ever_recorded": true,
+                "ever_stored": false,
+                "excluded": [["excluded app: fixture", 14]],
+                "paused_episodes": 17,
+                "paused_ms": 19,
+                "paused_open": false,
+                "paused_now": false,
+                "paused_truncated": 23,
+                "master_stopped_episodes": 29,
+                "master_stopped_ms": 31,
+                "master_stopped_open": true,
+                "master_stopped_truncated": 37,
+                "master_stopped_now": true,
+                "scan_horizon_days": 41,
+                "recording_now": true,
+                "booting_now": false,
+            })
+        );
+    }
 }
 
 /// 一筆 ★ 答案。
@@ -2430,22 +2541,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 .ok_or_else(|| "找不到資料目錄".to_string())?;
             let b =
                 sister_core::answer::blind_spots(db, dir, asked).map_err(|e| format!("{e:#}"))?;
-            Some(Blind {
-                chunks: b.chunks,
-                ocr_is_dead: b.ocr_is_dead(),
-                frames: b.frames,
-                ever_recorded: b.ever_recorded,
-                ever_stored: b.ever_stored,
-                excluded: b.excluded,
-                paused_episodes: b.paused_episodes,
-                paused_ms: b.paused_ms,
-                paused_open: b.paused_open,
-                paused_now: b.paused_now,
-                paused_truncated: b.paused_truncated,
-                scan_horizon_days: b.scan_horizon_days,
-                recording_now: b.recording_now,
-                booting_now: b.booting_now,
-            })
+            Some(Blind::from(b))
         } else {
             None
         };
@@ -6370,28 +6466,7 @@ fn main() {
                         }
                     }
                     "master-stop" | "master-resume" => {
-                        // 兩個 id 是固定方向：即使五秒刷新前的舊選單仍留在畫面上，
-                        // 「全部停止」也只會再 engage；絕不在 click 時翻成 release。
-                        let action = if event.id.as_ref() == "master-resume" {
-                            MasterStopAction::Release
-                        } else {
-                            MasterStopAction::Engage
-                        };
-                        let shell = app.state::<Shell>();
-                        match set_master_stop(shell.data_dir.as_deref(), action) {
-                            Ok(()) => {
-                                refresh_tray(app);
-                            }
-                            Err(error) => {
-                                tracing::error!("全停開關切換失敗：{error}");
-                                if let Some(win) = app.get_webview_window(PET) {
-                                    let _ = win.show();
-                                    let _ = win.set_focus();
-                                }
-                                let _ = app.emit("master-stop-failed", error);
-                                refresh_tray(app);
-                            }
-                        }
+                        dispatch_master_stop_menu(app, event.id.as_ref());
                     }
                     "record" => {
                         // 執行使用者實際看到的那行字所綁定的 action，不在 click

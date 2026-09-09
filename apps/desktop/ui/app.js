@@ -242,6 +242,10 @@ const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
 let state = "idle";
 let paused = false;
 let masterStopped = false;
+// Event 是比已送出 poll 更新的 observation；request id 則讓兩份重疊 poll 只有
+// 最後送出的那份能落地。兩個軸分開，否則舊 false 可以蓋掉剛收到的全停 true。
+let masterStopRevision = 0;
+let masterStopReadRequest = 0;
 
 // Persona 是表達層，不是上面的錄製狀態。關掉她、換顏色或停動畫都不可以改
 // `state` / `paused`，也不可以走 ask、Gatekeeper、hands 或 CLI。
@@ -1898,6 +1902,20 @@ function setMasterStopped(next) {
   paint();
 }
 
+function readMasterStopState() {
+  if (invoke === null) return;
+  const revisionWhenStarted = masterStopRevision;
+  const request = ++masterStopReadRequest;
+  invoke("master_stop_state").then(
+    (next) => {
+      if (masterStopRevision === revisionWhenStarted && request === masterStopReadRequest) {
+        setMasterStopped(next);
+      }
+    },
+    () => {},
+  );
+}
+
 /**
  * 心跳說什麼：`"recording"`／`"booting"`／`"thinking"`／`"none"`（見後端的
  * `recording_state`）。
@@ -2102,7 +2120,7 @@ function pollRecording() {
   readRecorderSupervisor();
   invoke("pause_state").then(setPaused, () => {});
   // CLI 也能改 master.stop；renderer 只是鏡子，不能只相信這個 desktop 發的 event。
-  invoke("master_stop_state").then(setMasterStopped, () => {});
+  readMasterStopState();
   // 守門員也要一直問下去。**只在開場問一次的話，五點才到期的那張承諾
   // 永遠不會被看到**——而 a 類（顯式時間承諾）正是整個 Phase 5 冷啟動期
   // 唯一放行的兩類之一，它不動就等於守門員沒上線。
@@ -2250,7 +2268,10 @@ globalThis.__TAURI__?.event
   ?.catch?.(() => {});
 
 globalThis.__TAURI__?.event
-  ?.listen?.("master-stop-changed", (event) => setMasterStopped(event.payload))
+  ?.listen?.("master-stop-changed", (event) => {
+    masterStopRevision += 1;
+    setMasterStopped(event.payload);
+  })
   ?.catch?.(() => {});
 
 globalThis.__TAURI__?.event
@@ -2626,7 +2647,10 @@ function blindLines(blind) {
     // 數字，然後被告知「被忘掉了，或是過了保留期」——四個裡唯一假的那個，
     // 也是唯一一個會讓他以為東西被刪了的。底下 excluded / paused 兩段本來
     // 就會講出真正的原因，所以這裡不再提早 return。
-    const blocked = blind.paused_episodes > 0 || blind.excluded?.length > 0;
+    const blocked =
+      blind.paused_episodes > 0 ||
+      blind.master_stopped_episodes > 0 ||
+      blind.excluded?.length > 0;
     if (blind.frames > 0) {
       // 上面那道 ocr_is_dead 已經把「夠多張畫面、一行字都沒有」攔走了，所以
       // 走到這裡的是張數還太少的時候。三張畫面上剛好都沒有字是完全正常的事
@@ -2712,6 +2736,29 @@ function blindLines(blind) {
     // 強調用字本身，不用符號。
     out.push(
       `${out.length ? "而且" : ""}我現在是暫停的（右上角那顆鍵）——這樣繼續錄也不會記到東西。`,
+    );
+  }
+  // 稽核歷史和目前 latch 是兩個答案：recorder 不在跑時 engage／release 不會補
+  // 稽核列，所以兩句可以同時成立，也可以只成立其中一句。不能用 else-if。
+  if (blind.master_stopped_episodes > 0) {
+    const why = [];
+    if (blind.master_stopped_open) why.push("最後一段沒有收尾");
+    if (blind.master_stopped_truncated > 0) {
+      why.push(`有 ${blind.master_stopped_truncated} 段的開頭已被保留期刪掉`);
+    }
+    const howLong =
+      blind.master_stopped_ms === 0 && why.length > 0
+        ? `長度還算不出來（${why.join("、")}）`
+        : why.length === 0
+          ? `一共 ${lasted(blind.master_stopped_ms)}`
+          : `算得出來的加起來 ${lasted(blind.master_stopped_ms)}（${why.join("、")}，所以這個數字算短了）`;
+    out.push(
+      `我也被全停過 ${blind.master_stopped_episodes} 次、${howLong}，那幾段 recorder、解釋層和手都停著。`,
+    );
+  }
+  if (blind.master_stopped_now) {
+    out.push(
+      `${out.length ? "而且" : ""}我現在正全停中（系統匣 → 解除全停）——recorder、解釋層和手都不會工作。`,
     );
   }
   // 「我找不到」和「我沒去找」是兩件事。每個詞都短到索引比不出來的問題
@@ -3744,7 +3791,7 @@ setState(
 // 視窗如果一開始就縮在系統匣裡，那個輪詢是不跑的。
 if (invoke !== null) {
   invoke("pause_state").then(setPaused, () => {});
-  invoke("master_stop_state").then(setMasterStopped, () => {});
+  readMasterStopState();
   // 即使 Windows 登入 intent 把主視窗留在系統匣，也先取一份 supervisor view；
   // 顯示中的五秒 poll 會接著重讀。兩次很接近時只有較新的 request 能套用。
   readRecorderSupervisor();
