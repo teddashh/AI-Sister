@@ -233,8 +233,10 @@ pub trait FocusSource {
 /// 原生作業系統會送出的四種生命週期轉換。
 ///
 /// 平台後端只拿得到這個受限 enum，所以它不可能偽造
-/// `CapturePaused` / `Excluded` / session marker 這些只能由 recorder
-/// 自己建立的稽核事件。
+/// `CapturePaused` / `CaptureResumed` / `MasterStopEngaged` /
+/// `MasterStopReleased` / `Excluded` / session marker 這些只能由 recorder
+/// 自己建立的稽核事件。**這份清單是舉例，規則是「不在這四格裡的都偽造不出來」**——
+/// alpha.118 加了全停那兩格，而這段話原本只點名三種，讀起來像是被想過的就那幾種。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemTransitionKind {
