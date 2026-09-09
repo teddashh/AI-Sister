@@ -1898,19 +1898,29 @@ jobs:
             [IO.FileAccess]::Read,
             [IO.FileShare]::Read
           )
+          $e3Uninstaller = $null
           try {
-            # NSIS uninstaller 會自我複製到 temp，外層 exit code 不可靠；只驗證狀態。
-            # temp 副本在 PREUNINSTALL 取得 lifecycle mutex、拒絕時才釋放（中間有約兩秒
-            # 的檔案層重試），所以等 mutex 出現再消失，才拍狀態、才放掉 handle——先放掉
-            # handle 會讓仍在重試的 uninstaller 真的把安裝刪掉，害後面的 lane 紅。
-            $uninstallerProcess = Start-Process `
-              -FilePath (Join-Path $installDir 'uninstall.exe') `
-              -ArgumentList '/S' -Wait -PassThru
-            $uninstallerProcess.Dispose()
-            Wait-NamedMutex $lifecycleMutexName $null `
-              'Lane E3 temp uninstaller 沒有取得 installer lifecycle mutex'
+            # NSIS uninstaller 會自我複製到 temp，外層 PID／exit code 都不可靠；比照上面的
+            # late-fixture lane，用 after-process-scan diagnostic window 確定 inner 已握著
+            # lifecycle mutex，再等它釋放（拒絕前有約兩秒的檔案層重試），之後才拍狀態、
+            # 才放掉 handle——先放掉會讓仍在重試的 uninstaller 真的把安裝刪掉，害後面的 lane 紅。
+            $e3Info = [System.Diagnostics.ProcessStartInfo]::new()
+            $e3Info.FileName = Join-Path $installDir 'uninstall.exe'
+            $e3Info.UseShellExecute = $false
+            $null = $e3Info.ArgumentList.Add('/S')
+            $e3Info.EnvironmentVariables['AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN_MS'] = '5000'
+            $e3Uninstaller = [System.Diagnostics.Process]::Start($e3Info)
+            if ($null -eq $e3Uninstaller) {
+              throw 'Lane E3 uninstaller 無法啟動'
+            }
+            Wait-NamedMutex $afterScanMutexName $null `
+              'Lane E3 uninstaller 沒有打開 after-process-scan window'
             Wait-NamedMutexGone $lifecycleMutexName `
-              'Lane E3 temp uninstaller 30 秒內沒有釋放 installer lifecycle mutex'
+              'Lane E3 uninstaller 30 秒內沒有釋放 installer lifecycle mutex'
+            if (-not $e3Uninstaller.HasExited -and
+                -not $e3Uninstaller.WaitForExit(60000)) {
+              throw 'Lane E3 uninstaller 拒絕後外層行程沒有收尾'
+            }
             Assert-ProductFiles
             if (-not (Test-Path -LiteralPath $uninstallKey)) {
               throw 'Lane E3 file-level exclusion 拒絕卻移除了 uninstall metadata'
@@ -1929,6 +1939,7 @@ jobs:
           }
           finally {
             $hold.Dispose()
+            Stop-DiagnosticProcess $e3Uninstaller
           }
 
           # 第一個 owner 拿到 startup guard 後刻意停 5 秒，把官方 receiver 尚未建立的
