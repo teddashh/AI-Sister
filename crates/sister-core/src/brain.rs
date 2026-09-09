@@ -2231,14 +2231,14 @@ mod tests {
         let sentinel_during_gap = sentinel.clone();
         let mut consent = Consent::default();
         consent.grant(Sheet::CloudReading, 1);
-        let command_line = format!("more >nul & (echo started)>\"{}\"", sentinel.display());
+        let (command, args) = fake_cli(&dir, "{}", &sentinel);
 
         let outcome = spawn_cli_with_timeout_after_spawn(
             consent.cloud_permit().unwrap(),
             test_not_stopped(),
             "正文",
-            "cmd.exe",
-            &["/D".into(), "/S".into(), "/C".into(), command_line],
+            &command,
+            &args,
             Duration::from_secs(5),
             move |_| {
                 std::thread::sleep(Duration::from_millis(100));
@@ -2261,34 +2261,52 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_spawn_path_drains_a_descendant_that_inherits_output_pipes() {
+        let dir = std::env::temp_dir().join(format!(
+            "sister-provider-descendant-pipes-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("descendant-pipes.py");
+        // The direct Python process exits immediately after spawning a sleeper
+        // that inherits both output pipes. Without Job-wide termination, the
+        // reader joins below take roughly five seconds instead of completing.
+        std::fs::write(
+            &script,
+            concat!(
+                "import subprocess, sys\n",
+                "sys.stdin.buffer.read()\n",
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'])\n",
+                "sys.stdout.buffer.write(b'{}')\n",
+                "sys.stdout.buffer.flush()\n",
+            ),
+        )
+        .unwrap();
         let mut consent = Consent::default();
         consent.grant(Sheet::CloudReading, 1);
         let started = Instant::now();
-        // `start /B` returns from the direct cmd while its child keeps the
-        // inherited stdout/stderr handles. Without Job-wide termination, the
-        // reader joins below take roughly five seconds instead of completing.
-        let command_line = concat!(
-            "more >nul & ",
-            "start \"\" /B cmd.exe /D /S /C \"ping.exe -n 6 127.0.0.1 >nul\" & ",
-            "echo {}"
-        );
+        let args = vec![script.to_string_lossy().into_owned()];
 
         let outcome = spawn_cli_with_timeout(
             consent.cloud_permit().unwrap(),
             test_not_stopped(),
             "正文",
-            "cmd.exe",
-            &["/D".into(), "/S".into(), "/C".into(), command_line.into()],
+            "python3",
+            &args,
             Duration::from_secs(3),
         );
 
-        assert!(!outcome.timed_out, "direct cmd should finish: {outcome:?}");
+        assert!(
+            !outcome.timed_out,
+            "direct Python process should finish: {outcome:?}"
+        );
         assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
         assert!(outcome.stdout.contains("{}"), "{outcome:?}");
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "escaped descendant held an inherited output pipe open"
         );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
