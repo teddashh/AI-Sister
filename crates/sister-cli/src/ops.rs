@@ -17664,6 +17664,9 @@ pub mod doctor {
     /// 探測 OCR 要真的把引擎建起來，所以整份報告只問一次。
     #[derive(Default)]
     struct Caps {
+        /// 這份 doctor 在 live-source admission 得到的是全停；四個 live probe
+        /// 都必須畫成同一句明確的 ■，不能各自冒充平台失敗。
+        live_stopped: bool,
         url: CapabilityState,
         /// 對現在的前景視窗真的問一次網址的結果。`None` = 本平台問不了。
         url_probe: Option<(&'static str, &'static str, String)>,
@@ -17776,8 +17779,32 @@ pub mod doctor {
     }
 
     #[cfg(any(windows, test))]
-    fn should_probe_current_screen(master_stopped: bool) -> bool {
-        !master_stopped
+    enum LiveProbePolicy {
+        Allowed(sister_hands::master_stop::ActivityGuard),
+        Stopped,
+    }
+
+    #[cfg(any(windows, test))]
+    impl LiveProbePolicy {
+        fn observe(data_dir: &Path) -> Self {
+            sister_hands::master_stop::admit(data_dir)
+                .map(Self::Allowed)
+                .unwrap_or(Self::Stopped)
+        }
+
+        fn run<T>(&self, probe: impl FnOnce() -> T) -> Option<T> {
+            match self {
+                Self::Allowed(guard) => {
+                    let _boundary = guard.boundary()?;
+                    Some(probe())
+                }
+                Self::Stopped => None,
+            }
+        }
+
+        fn is_stopped(&self) -> bool {
+            matches!(self, Self::Stopped)
+        }
     }
 
     #[cfg(windows)]
@@ -17790,7 +17817,14 @@ pub mod doctor {
         // 因為它根本沒去裝——那是一則恆真的假警報，而假警報會連坐旁邊
         // 那則真的警告一起被忽略。hook 只數次數不看內容，裝一次很便宜。
         // doctor 只想知道 hook 裝不裝得上，聚合視窗多長無關緊要
-        let _ = WindowsInput::start(sister_core::now_ms(), config.capture.input_window_secs);
+        let live = LiveProbePolicy::observe(data_dir);
+        let live_stopped = live.is_stopped();
+        // `master_stopped` 是 doctor 開頭顯示狀態用的快照；真正授權 live source 的
+        // 是上面的 lock admission。兩者若剛好跨過 transition，以 admission 為準。
+        let _ = master_stopped;
+        let _input_probe = live.run(|| {
+            WindowsInput::start(sister_core::now_ms(), config.capture.input_window_secs)
+        });
 
         let c = Capabilities::current(config);
         // 順手留一份給設定頁。README 的 quickstart 第一句就是「跑一次 doctor」，
@@ -17852,10 +17886,14 @@ pub mod doctor {
         // UIA：一樣不宣稱。真的對現在的前景視窗問一次網址。
         // `✓ UIA 建得起來` 這句話的價值是零——使用者要知道的是
         // 「我的網銀規則現在到底會不會生效」。
-        {
+        if let Some((observed, alive)) = live.run(|| {
+                use sister_capture::traits::FocusSource;
+                let mut source = sister_capture::windows::focus::WindowsFocus::new();
+                let observed = source.context(sister_core::now_ms());
+                (observed, source.url_capture_alive())
+        }) {
             use sister_capture::traits::FocusSource;
-            let mut source = sister_capture::windows::focus::WindowsFocus::new();
-            match source.context(sister_core::now_ms()) {
+            match observed {
                 Ok(sister_capture::PrivacyObservation::Known {
                     context:
                         sister_core::model::PrivacyContext::Known {
@@ -17867,7 +17905,7 @@ pub mod doctor {
                     // 排除規則比對的就是這兩個字串。讀得到才代表那些規則跑得動。
                     focus_probe =
                         Some((app.clone(), focus.window_title.clone().unwrap_or_default()));
-                    url_probe = Some(match (browser_url, source.url_capture_alive()) {
+                    url_probe = Some(match (browser_url, alive) {
                         (sister_core::model::BrowserUrlState::Known(url), _) => (
                             "✓",
                             "讀你現在的網址",
@@ -17919,7 +17957,7 @@ pub mod doctor {
                     url_probe = Some((
                         "?",
                         "讀你現在的網址",
-                        if source.url_capture_alive() {
+                        if alive {
                             "現在讀不到前景視窗，privacy gate 會停止讀取內容".to_string()
                         } else {
                             "UIA 已不可用，privacy gate 會停止讀取內容".to_string()
@@ -17935,6 +17973,13 @@ pub mod doctor {
                     ));
                 }
             }
+        } else {
+            focus_probe = None;
+            url_probe = Some((
+                "■",
+                "讀你現在的網址",
+                "三層全停中，沒有探測".to_string(),
+            ));
         }
 
         if c.ocr == CapabilityState::Available && config.capture.ocr {
@@ -17979,29 +18024,27 @@ pub mod doctor {
             // 第二關：你**現在這台螢幕**讀不讀得到。跟錄製走同一條路
             // （同一顆引擎、同一個原生解析度的抓圖），所以「內建圖過了但這關
             // 沒過」就直接指向畫面本身，而不是引擎或語言包。
-            let grabbed = should_probe_current_screen(master_stopped)
-                .then(|| {
+            let grabbed = live.run(|| {
                     let mut screen = WindowsScreen::new();
                     screen.grab(sister_core::now_ms())
-                })
-                .transpose();
+            });
             let grabbed_edge = match &grabbed {
-                Ok(Some(Some(f))) => Some(f.width.max(f.height)),
+                Some(Ok(Some(f))) => Some(f.width.max(f.height)),
                 _ => None,
             };
             let probe = match grabbed {
-                Ok(None) => (
+                None => (
                     "■",
                     "讀你現在的螢幕",
-                    "三層全停中，doctor 沒有抓畫面，也沒有對畫面做 OCR".to_string(),
+                    "三層全停中，沒有探測".to_string(),
                 ),
-                Err(e) => ("✗", "讀你現在的螢幕", format!("抓不到畫面：{e:#}")),
-                Ok(Some(None)) => (
+                Some(Err(e)) => ("✗", "讀你現在的螢幕", format!("抓不到畫面：{e:#}")),
+                Some(Ok(None)) => (
                     "✗",
                     "讀你現在的螢幕",
                     "抓不到畫面（工作站鎖定時本來就不抓）".to_string(),
                 ),
-                Ok(Some(Some(frame))) => {
+                Some(Ok(Some(frame))) => {
                     let (w, h) = (frame.width, frame.height);
                     // 「讀不出字」和「圖上本來就沒字」在報告裡長得一模一樣。
                     // 亮度範圍把它們分開：全黑的擷取 lo == hi。
@@ -18058,6 +18101,7 @@ pub mod doctor {
         }
 
         Caps {
+            live_stopped,
             url: c.url,
             url_probe,
             focus_probe,
@@ -18080,8 +18124,11 @@ pub mod doctor {
 
     #[cfg(not(windows))]
     fn caps(data_dir: &Path, config: &Config, master_stopped: bool) -> Caps {
-        let _ = (data_dir, config, master_stopped);
-        Caps::default()
+        let _ = (data_dir, config);
+        Caps {
+            live_stopped: master_stopped,
+            ..Default::default()
+        }
     }
 
     /// 「同意書／畫面暫存」那一行的字。
@@ -18530,10 +18577,13 @@ pub mod doctor {
         // 「9 條規則 ✓」是 THREAT_MODEL 明文禁止的那種寫法：規則的**數量**
         // 從來不是問題，規則**會不會命中**才是。這些規則比對的是前景 app
         // 名稱，所以讀不到名稱的時候它們一條都不生效——而數量照樣是 9。
-        let (sym, note) = match &caps.focus_probe {
-            Some((app, _)) if !app.is_empty() => ("✓", format!("，現在讀到的是 {app}")),
-            Some(_) => ("?", "，但現在沒有前景視窗，這一刻測不出來".to_string()),
-            None => (
+        let (sym, note) = match (caps.live_stopped, &caps.focus_probe) {
+            (true, _) => ("■", "，三層全停中，沒有探測".to_string()),
+            (false, Some((app, _))) if !app.is_empty() => {
+                ("✓", format!("，現在讀到的是 {app}"))
+            }
+            (false, Some(_)) => ("?", "，但現在沒有前景視窗，這一刻測不出來".to_string()),
+            (false, None) => (
                 "✗",
                 "（讀不到前景 app，privacy gate 不會把未知狀態當安全放行）".to_string(),
             ),
@@ -18551,15 +18601,16 @@ pub mod doctor {
         // 這就是上一版 `✓ OCR 語言 zh-Hant-TW` 的錯法，只是換了個能力。
         // 所以 ✓ 只給「下面那一列真的讀到了網址」的情況。
         let demonstrated = caps.url_probe.as_ref().is_some_and(|(s, ..)| *s == "✓");
-        let (sym, note) = match (caps.url, demonstrated) {
-            (CapabilityState::Unavailable, _) => (
+        let (sym, note) = match (caps.live_stopped, caps.url, demonstrated) {
+            (true, _, _) => ("■", "（三層全停中，沒有探測）"),
+            (false, CapabilityState::Unavailable, _) => (
                 capability_symbol(caps.url),
                 "（已探測：UIA 不可用，privacy gate 會在讀內容前停下）",
             ),
-            (CapabilityState::Available, true) => (capability_symbol(caps.url), ""),
+            (false, CapabilityState::Available, true) => (capability_symbol(caps.url), ""),
             // UIA 在，但這一刻沒能證明讀得到。可能只是前景不是瀏覽器。
-            (CapabilityState::Available, false) => ("?", "（還沒驗到——見下面那一列）"),
-            (CapabilityState::Unknown, _) => (
+            (false, CapabilityState::Available, false) => ("?", "（還沒驗到——見下面那一列）"),
+            (false, CapabilityState::Unknown, _) => (
                 capability_symbol(caps.url),
                 "（這份報告沒有量到網址擷取能力）",
             ),
@@ -18584,13 +18635,14 @@ pub mod doctor {
         }
         // 標題和 app 來自同一次 snapshot，但**失敗方式不一樣**：有些視窗
         // 讀得到 exe 名稱卻沒有標題。分開報，才不會讓 app 的 ✓ 幫標題背書。
-        let (sym, note) = match &caps.focus_probe {
-            Some((_, title)) if !title.is_empty() => (
+        let (sym, note) = match (caps.live_stopped, &caps.focus_probe) {
+            (true, _) => ("■", "，三層全停中，沒有探測".to_string()),
+            (false, Some((_, title))) if !title.is_empty() => (
                 "✓",
                 format!("，現在讀到的是「{}」", crate::fmt::one_line(title, 40)),
             ),
-            Some(_) => ("?", "，但現在這個視窗沒有標題可比對".to_string()),
-            None => (
+            (false, Some(_)) => ("?", "，但現在這個視窗沒有標題可比對".to_string()),
+            (false, None) => (
                 "✗",
                 "（本平台讀不到視窗標題，這些規則目前不生效）".to_string(),
             ),
@@ -18683,7 +18735,7 @@ pub mod doctor {
                 }
             }
         }
-        if master_stopped
+        if caps.live_stopped
             && !caps
                 .ocr_probes
                 .iter()
@@ -18692,7 +18744,7 @@ pub mod doctor {
             mark(
                 "■",
                 "讀你現在的螢幕",
-                "三層全停中，doctor 沒有抓畫面，也沒有對畫面做 OCR",
+                "三層全停中，沒有探測",
             );
         }
 
@@ -18718,18 +18770,19 @@ pub mod doctor {
                 )
             },
         );
-        match caps.input_hooks {
-            CapabilityState::Available => mark(
+        match (caps.live_stopped, caps.input_hooks) {
+            (true, _) => mark("■", "輸入 hook", "三層全停中，沒有探測"),
+            (false, CapabilityState::Available) => mark(
                 capability_symbol(caps.input_hooks),
                 "輸入 hook",
                 "裝得上（doctor 剛剛真的裝了一次；只數次數，不看按了什麼）",
             ),
-            CapabilityState::Unavailable => mark(
+            (false, CapabilityState::Unavailable) => mark(
                 capability_symbol(caps.input_hooks),
                 "輸入 hook",
                 "已探測：裝不上，打字節奏這一路訊號會是空的",
             ),
-            CapabilityState::Unknown => mark(
+            (false, CapabilityState::Unknown) => mark(
                 capability_symbol(caps.input_hooks),
                 "輸入 hook",
                 &format!(
@@ -18894,9 +18947,52 @@ pub mod doctor {
         use super::*;
 
         #[test]
-        fn master_stop_disables_the_current_screen_probe() {
-            assert!(should_probe_current_screen(false));
-            assert!(!should_probe_current_screen(true));
+        fn master_stop_policy_calls_no_live_input_focus_or_screen_probe() {
+            use std::cell::Cell;
+
+            let dir = crate::ops::tmp::Tmp::new("doctor-live-probe-master-stop");
+            sister_hands::master_stop::engage(&dir.0, 1).unwrap();
+            let policy = LiveProbePolicy::observe(&dir.0);
+            let input = Cell::new(0);
+            let focus = Cell::new(0);
+            let screen = Cell::new(0);
+            let _ = policy.run(|| input.set(input.get() + 1));
+            let _ = policy.run(|| focus.set(focus.get() + 1));
+            let _ = policy.run(|| screen.set(screen.get() + 1));
+            assert!(policy.is_stopped());
+            assert_eq!((input.get(), focus.get(), screen.get()), (0, 0, 0));
+        }
+
+        #[test]
+        fn doctor_guard_discards_the_next_live_probe_while_engage_waits() {
+            use std::cell::Cell;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+            use std::time::Duration;
+
+            let dir = crate::ops::tmp::Tmp::new("doctor-live-probe-race");
+            let policy = LiveProbePolicy::observe(&dir.0);
+            assert!(!policy.is_stopped());
+            let returned = Arc::new(AtomicBool::new(false));
+            let returned_in_thread = Arc::clone(&returned);
+            let stop_dir = dir.0.clone();
+            let stop = std::thread::spawn(move || {
+                sister_hands::master_stop::engage(&stop_dir, 2).unwrap();
+                returned_in_thread.store(true, Ordering::SeqCst);
+            });
+            for _ in 0..500 {
+                if dir.0.join("master.stop.pending").exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let grabbed = Cell::new(false);
+            assert!(policy.run(|| grabbed.set(true)).is_none());
+            assert!(!grabbed.get(), "pending 發佈後不准再做 screen probe");
+            assert!(!returned.load(Ordering::SeqCst));
+            drop(policy);
+            stop.join().unwrap();
+            assert!(returned.load(Ordering::SeqCst));
         }
 
         #[test]
@@ -20514,13 +20610,13 @@ pub mod doctor {
 pub mod bench {
     use super::*;
 
-    fn refuse_while_master_stopped(data_dir: &Path) -> Result<()> {
-        anyhow::ensure!(
-            !sister_hands::master_stop::is_stopped(data_dir),
-            "三層全停中，bench 沒有抓畫面。要恢復請跑 `{}`。",
-            cmd(data_dir, "stop-all --off")
-        );
-        Ok(())
+    fn admit_bench(data_dir: &Path) -> Result<sister_hands::master_stop::ActivityGuard> {
+        sister_hands::master_stop::admit(data_dir).ok_or_else(|| {
+            anyhow::anyhow!(
+                "三層全停中，bench 沒有抓畫面。要恢復請跑 `{}`。",
+                cmd(data_dir, "stop-all --off")
+            )
+        })
     }
 
     #[cfg(any(windows, test))]
@@ -21246,7 +21342,9 @@ pub mod bench {
 
     #[cfg(windows)]
     pub fn run(data_dir: &Path, requested_rounds: Option<u32>) -> Result<()> {
-        refuse_while_master_stopped(data_dir)?;
+        // 最低要求是整份 bench 一張 admission；stop-all 會等這整份 live probe
+        // 跑完才回成功，不可能在成功回覆後又開始下一輪 grab/OCR。
+        let _master_stop_guard = admit_bench(data_dir)?;
         const DEFAULT_GDI_ROUNDS: u32 = 8;
         let rounds = requested_rounds.unwrap_or(DEFAULT_GDI_ROUNDS).max(1);
         if requested_rounds.is_some_and(|n| n != rounds) {
@@ -21322,7 +21420,7 @@ pub mod bench {
 
     #[cfg(not(windows))]
     pub fn run(data_dir: &Path, _rounds: Option<u32>) -> Result<()> {
-        refuse_while_master_stopped(data_dir)?;
+        let _master_stop_guard = admit_bench(data_dir)?;
         // 不是「這台機器很慢」，是「這台機器沒有這條路可以量」。兩者長得
         // 一樣的話，開發機上跑一次會得到一張空表然後被當成「都是 0，很好」。
         println!("這個平台沒有 GDI 擷取後端，沒有東西可以量。這條路目前只有 Windows。");
@@ -24883,6 +24981,7 @@ pub mod record {
             total: u64,
             working: u64,
             master_stopped: u64,
+            master_released: u64,
         }
 
         #[cfg(any(windows, test))]
@@ -24892,6 +24991,7 @@ pub mod record {
                     total: stats.ticks,
                     working: stats.working_ticks,
                     master_stopped: stats.master_stopped_ticks,
+                    master_released: stats.master_released_ticks,
                 }
             }
 
@@ -24907,10 +25007,15 @@ pub mod record {
                 self.total
                     .saturating_sub(self.working)
                     .saturating_sub(self.master_stopped)
+                    .saturating_sub(self.master_released)
             }
 
             pub(super) fn master_stopped(self) -> u64 {
                 self.master_stopped
+            }
+
+            pub(super) fn master_released(self) -> u64 {
+                self.master_released
             }
         }
 
@@ -27084,12 +27189,18 @@ pub mod record {
     fn skipped_tick_summary(counts: TickCounts) -> String {
         let idle_ticks = counts.idle();
         let master_stopped_ticks = counts.master_stopped();
+        let master_released_ticks = counts.master_released();
         let mut skipped_parts = Vec::new();
         if idle_ticks > 0 {
             skipped_parts.push(format!("{idle_ticks} 拍是暫停或關閉"));
         }
         if master_stopped_ticks > 0 {
             skipped_parts.push(format!("{master_stopped_ticks} 拍是三層全停"));
+        }
+        if master_released_ticks > 0 {
+            skipped_parts.push(format!(
+                "{master_released_ticks} 拍是解除三層全停邊界"
+            ));
         }
         if skipped_parts.is_empty() {
             String::new()
@@ -27592,13 +27703,15 @@ pub mod record {
                 ticks: 100,
                 working_ticks: 7,
                 master_stopped_ticks: 11,
+                master_released_ticks: 13,
                 ..Default::default()
             };
             let counts = TickCounts::from_stats(&stats);
             assert_eq!(counts.total(), 100);
             assert_eq!(counts.working(), 7);
             assert_eq!(counts.master_stopped(), 11);
-            assert_eq!(counts.idle(), 82);
+            assert_eq!(counts.master_released(), 13);
+            assert_eq!(counts.idle(), 69);
         }
 
         #[test]
@@ -27607,9 +27720,10 @@ pub mod record {
                 ticks: 100,
                 working_ticks: 7,
                 master_stopped_ticks: 11,
+                master_released_ticks: 13,
                 ..Default::default()
             };
-            assert_eq!(TickCounts::from_stats(&stats).idle(), 82);
+            assert_eq!(TickCounts::from_stats(&stats).idle(), 69);
 
             let broken = sister_capture::RecorderStats {
                 ticks: 7,
@@ -27625,11 +27739,13 @@ pub mod record {
                 ticks: 100,
                 working_ticks: 7,
                 master_stopped_ticks: 11,
+                master_released_ticks: 13,
                 ..Default::default()
             };
             let said = skipped_tick_summary(TickCounts::from_stats(&stats));
-            assert!(said.contains("82 拍是暫停或關閉"), "{said}");
+            assert!(said.contains("69 拍是暫停或關閉"), "{said}");
             assert!(said.contains("11 拍是三層全停"), "{said}");
+            assert!(said.contains("13 拍是解除三層全停邊界"), "{said}");
             assert!(!said.contains("93 拍是暫停或關閉"), "{said}");
         }
 

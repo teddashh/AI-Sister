@@ -92,6 +92,9 @@ timeout，相關設定／key／consent mutation 或 native cancel 可能等它�
 | `pause.lock` | 空的跨行程 read/write transaction 鎖；檔案留著，真正的鎖由作業系統 handle 持有 | 執行中不可刪，否則不同 process 可能各鎖到不同檔案；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `hands.stop` | 她的手現在是不是被拔掉。內容只有第一次拔手的毫秒時戳 | 等於安靜地把手接回去，所以任何 forget、prune、export 都刻意不動它 |
 | `master.stop` | 三層全停（capture／brain／hands）現在是不是開著。內容只有第一次按下全停的毫秒時戳 | 等於安靜地把三層一起放回去，所以任何 forget、prune、export 都刻意不動它 |
+| `master.stop.pending` | `stop-all` 已在線性化閘門內發佈、正在等舊活動排乾的停止意圖；正常完成 engage 或 release 後會移除 | 不可手動刪；可能讓已經開始的 capture／CLI／OS call 排乾前，新活動誤以為可以進場 |
+| `master.stop.lock` | 空的永久 activity drain 鎖。capture tick、CLI spawn/stdin、reviewer product mutation、hands OS call、doctor/bench live probe 都持 shared handle；engage/release 取 exclusive | 永遠不靠 unlink 解除。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
+| `master.stop.turnstile` | 空的永久 admission／不可逆邊界鎖。新活動和最後一次 persistence/spawn/OS call 在 shared lock 內重驗 latch/pending；engage 在 exclusive lock 內發佈 pending | 永遠不靠 unlink 解除。執行中不可刪，否則 admission 與 engage 可能落在不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `consent.toml` | 四張同意書各自是**何時**簽的；前三張有共同條文版本，第四張 `azure-tts` 另有獨立 terms version | 等於四張都沒簽；`sister record` 拒絕啟動，Azure TTS 一次都不呼叫 |
 | `consent.lock` | 空的跨行程同意 transaction 鎖。CLI／desktop 的 grant／revoke 在 OS whole-file exclusive lock 內重讀最新 `consent.toml`、套當次變更再 atomic save；recorder start 先持 shared guard。CLI 那份跨到第一拍；desktop parent 那份只跨到 `Command::spawn` 回來便立即放掉，child 自己 nonblocking 重拿並跨到第一拍。symlink／non-regular path 拒絕 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `consent-revoke.barrier` | 第一張同意撤回在 atomic save **之前**發布的獨立 durable barrier；內容是 `v1:` 加 fresh 256-bit generation。Recorder 把它視為 `consent-revoked` 停止條件，但不消費；Start 無權清。只有成功 commit 的 local-recording regrant 可用相符 generation ticket 清理，並先確保另有 durable stop intent | 刪掉可能讓失敗的 consent save 留著舊有效同意時重新開錄，也可能讓同一拍內的快速 revoke→regrant 漏掉收工。不要手動刪；損毀時 fail closed，須先關閉所有 AI-Sister 行程再修復 |
@@ -141,7 +144,7 @@ symlink／non-regular file 或無法取得，mutation fail closed，不跟著鎖
 把手接回去。這和刪 `grant.json` 不衝突：grant 裡有 `--task` 原文，而且是一張
 仍能拿去執行的票；`hands.stop` 是擋住執行的牆。
 
-`master.stop` 是同一條規則，理由再強一級：這**一個**檔案同時擋著三層。刪掉它不只
+`master.stop` 是同一條規則，理由再強一級：這個 latch 與三顆協定檔同時擋著三層。拿掉 latch 不只
 是把手接回去，還讓 capture 重新開始擷取、讓解釋層重新把字送給雲端模型——而使用者
 按下「全部停止」的時候，要的正是那三件事一起停。所以 `sister forget`、`sister prune`
 和匯出一樣刻意不碰它。匯出也不會把它複製到匯出目錄：那個目錄本身就是一個資料
@@ -149,10 +152,11 @@ symlink／non-regular file 或無法取得，mutation fail closed，不跟著鎖
 
 它不是 `paused.flag` 的另一個名字，兩邊各自保留：`sister resume` 解除不了全停，
 `sister stop-all --off` 也不會順手解除你原本自己按的暫停或拔手。全停沒有 pause 那種
-三檔協定，只有這一個檔案，所以解除有兩條路——
+四檔協定；唯一受支援的解除方式是
 `sister --data-dir <你的資料夾> stop-all --off`（**不是裸的 `sister stop-all --off`**，
-那會去解除預設資料夾的全停，不是正在擋你的那一份），或直接刪掉
-<你的資料夾>/master.stop。讀不到那個檔案本身（權限不足、路徑壞掉），或資料目錄
+那會去解除預設資料夾的全停，不是正在擋你的那一份）。不要直接刪
+<你的資料夾>/master.stop；那會繞過 activity drain 與 turnstile。讀不到 latch／pending／lock
+本身（權限不足、路徑壞掉、不是一般檔案或是 symlink／reparse），或資料目錄
 讀不到、根本不是一個目錄的時候，一律當成全停中；資料目錄**整個不存在**則不算全停——
 那是還沒開始用，不是被停下來。一條指向不存在目標的 `master.stop` symlink 也算全停：
 判斷走的是 `symlink_metadata`，目錄項在就算在。

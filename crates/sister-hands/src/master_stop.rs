@@ -7,9 +7,16 @@
 //! 三條規則和拔手開關相同：不確定就是停止、不會自己過期、第一次停止的時間不能
 //! 被重按洗掉。判定只看檔案在不在；內容只是顯示用，壞掉仍然算停止。
 
+use fs4::FileExt;
+use std::fs::{File, Metadata, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const SWITCH: &str = "master.stop";
+const PENDING: &str = "master.stop.pending";
+pub const ACTIVITY_LOCK: &str = "master.stop.lock";
+pub const TURNSTILE_LOCK: &str = "master.stop.turnstile";
 
 pub fn switch_path(data_dir: &Path) -> PathBuf {
     data_dir.join(SWITCH)
@@ -24,10 +31,15 @@ enum DirState {
 }
 
 fn dir_state(data_dir: &Path) -> DirState {
-    match std::fs::metadata(data_dir) {
-        Ok(metadata) if metadata.is_dir() => DirState::Dir,
+    match std::fs::symlink_metadata(data_dir) {
+        Ok(entry) if entry.file_type().is_symlink() => match std::fs::metadata(data_dir) {
+            Ok(target) if target.is_dir() => DirState::Dir,
+            Ok(_) => DirState::NotADir,
+            Err(_) => DirState::Unreadable,
+        },
+        Ok(entry) if entry.is_dir() => DirState::Dir,
         Ok(_) => DirState::NotADir,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DirState::Absent,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => DirState::Absent,
         Err(_) => DirState::Unreadable,
     }
 }
@@ -64,6 +76,121 @@ fn switch_present(path: &Path) -> Result<bool, ()> {
     }
 }
 
+fn pending_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(PENDING)
+}
+
+fn stop_requested(data_dir: &Path) -> bool {
+    decide_for(data_dir, switch_present(&switch_path(data_dir)))
+        || decide_for(data_dir, switch_present(&pending_path(data_dir)))
+}
+
+fn opened_handle_is_regular(metadata: &Metadata) -> bool {
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn open_lock(data_dir: &Path, name: &str) -> io::Result<File> {
+    std::fs::create_dir_all(data_dir)?;
+    let path = data_dir.join(name);
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0);
+    }
+    let file = options.open(&path)?;
+    let metadata = file.metadata()?;
+    if !opened_handle_is_regular(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} 不是一般、非 reparse 的鎖檔", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
+#[derive(Debug)]
+struct ActivityLease {
+    _file: File,
+}
+
+/// 一份已經在線性化閘門內獲准的活動。
+///
+/// guard 不是 `Copy`；clone 共享同一個活著的 OS file handle，最後一份 drop 前，全停
+/// 的 exclusive drain 都不會完成。
+#[derive(Clone, Debug)]
+pub struct ActivityGuard {
+    lease: Arc<ActivityLease>,
+    data_dir: PathBuf,
+}
+
+/// 一個不可逆邊界。它同時保住 activity reader 與 turnstile reader；因此全停不能在
+/// 邊界檢查之後、實際寫入／spawn／OS call 之前插進來。
+#[derive(Debug)]
+pub struct ActivityBoundary {
+    _lease: Arc<ActivityLease>,
+    _turnstile: File,
+}
+
+impl ActivityGuard {
+    pub fn stop_requested(&self) -> bool {
+        stop_requested(&self.data_dir)
+    }
+
+    pub fn boundary(&self) -> Option<ActivityBoundary> {
+        let turnstile = open_lock(&self.data_dir, TURNSTILE_LOCK).ok()?;
+        FileExt::lock_shared(&turnstile).ok()?;
+        if stop_requested(&self.data_dir) {
+            return None;
+        }
+        Some(ActivityBoundary {
+            _lease: Arc::clone(&self.lease),
+            _turnstile: turnstile,
+        })
+    }
+}
+
+/// 取得一份活動 admission。任何目錄、lock open、handle 驗證或 lock 錯誤都 fail closed。
+pub fn admit(data_dir: &Path) -> Option<ActivityGuard> {
+    let turnstile = open_lock(data_dir, TURNSTILE_LOCK).ok()?;
+    FileExt::lock_shared(&turnstile).ok()?;
+    if stop_requested(data_dir) {
+        return None;
+    }
+    let activity = open_lock(data_dir, ACTIVITY_LOCK).ok()?;
+    FileExt::lock_shared(&activity).ok()?;
+    if stop_requested(data_dir) {
+        return None;
+    }
+    drop(turnstile);
+    Some(ActivityGuard {
+        lease: Arc::new(ActivityLease { _file: activity }),
+        data_dir: data_dir.to_path_buf(),
+    })
+}
+
 /// **這一行沒有任何 Linux 測試守得住，別照 Linux 的綠燈改它。**
 /// 理由整段寫在 [`crate::kill_switch::is_pulled`] 上，一字不改地適用於這裡：
 /// 把它寫成 `switch_path(data_dir).try_exists().unwrap_or(true)` 在 Linux 上
@@ -71,7 +198,7 @@ fn switch_present(path: &Path) -> Result<bool, ()> {
 /// Windows 卻把同一個情境回成 `Ok(false)`，於是那種寫法會說「我確定開關不在」。
 /// 走 `dir_state` 是為了讓 data dir 本人的狀態也進得了判斷。
 pub fn is_stopped(data_dir: &Path) -> bool {
-    decide_for(data_dir, switch_present(&switch_path(data_dir)))
+    stop_requested(data_dir)
 }
 
 pub fn stopped_since(data_dir: &Path) -> Option<i64> {
@@ -83,35 +210,68 @@ pub fn stopped_since(data_dir: &Path) -> Option<i64> {
 }
 
 pub fn engage(data_dir: &Path, now_ms: i64) -> std::io::Result<()> {
-    let path = switch_path(data_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    use std::io::Write;
-    match std::fs::OpenOptions::new()
+    let turnstile = open_lock(data_dir, TURNSTILE_LOCK)?;
+    FileExt::lock(&turnstile)?;
+    let pending = pending_path(data_dir);
+    match OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
+        .open(&pending)
     {
         Ok(mut file) => file.write_all(now_ms.to_string().as_bytes()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }?;
+    // pending 已經在 turnstile 內發佈；先放開 turnstile，讓舊 reader 的下一個
+    // boundary 看見它並丟棄 RAM。若拿著 turnstile 等 activity，兩邊會互等。
+    drop(turnstile);
+
+    let activity = open_lock(data_dir, ACTIVITY_LOCK)?;
+    FileExt::lock(&activity)?;
+    let path = switch_path(data_dir);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => file.write_all(now_ms.to_string().as_bytes()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(error),
     }?;
     // 寫完再問一次閘門自己看不看得到。**一個回報成功卻沒有停下來的全停，
     // 比一個大聲失敗的全停危險得多**——呼叫端會照著印「三層都停了」。
     // 上面每一條路都可能在某種檔案系統形狀下「成功」而閘門仍讀成沒停
     // （斷掉的 symlink 是實測過的一種），所以這裡不推理，直接量。
-    if !is_stopped(data_dir) {
+    if !decide_for(data_dir, switch_present(&path)) {
         return Err(std::io::Error::other(format!(
             "寫完 {} 之後，判斷閘門仍然讀成「沒有全停」；沒有停下任何一層",
             switch_path(data_dir).display()
         )));
     }
+    match std::fs::remove_file(&pending) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    if !is_stopped(data_dir) {
+        return Err(io::Error::other(
+            "移除 pending 後 master.stop latch 不可見；全停維持 fail closed 但沒有回報成功",
+        ));
+    }
     Ok(())
 }
 
 pub fn release(data_dir: &Path) -> std::io::Result<()> {
+    let activity = open_lock(data_dir, ACTIVITY_LOCK)?;
+    FileExt::lock(&activity)?;
+    let turnstile = open_lock(data_dir, TURNSTILE_LOCK)?;
+    FileExt::lock(&turnstile)?;
     match std::fs::remove_file(switch_path(data_dir)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    match std::fs::remove_file(pending_path(data_dir)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
@@ -202,9 +362,89 @@ mod tests {
         // 這條 symlink 之下沒有東西可寫，所以 engage 必須讓呼叫端知道。
         let engaged = engage(&dir, 1_000);
         assert!(
-            engaged.is_ok() || is_stopped(&dir),
+            engaged.is_err() || is_stopped(&dir),
             "engage 回報成功卻沒有停：{engaged:?}"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_parent_symlink_is_unreadable_not_absent() {
+        use std::os::unix::fs::symlink;
+        let root = temp("dangling-parent");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let data_dir = root.join("data-link");
+        symlink(root.join("missing-target"), &data_dir).unwrap();
+        assert_eq!(dir_state(&data_dir), DirState::Unreadable);
+        assert!(is_stopped(&data_dir), "斷掉的 data-dir symlink 不可讀成 absent");
+        assert!(admit(&data_dir).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn engage_drains_an_admitted_reader_before_returning() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = temp("reader-drain");
+        let _ = std::fs::remove_dir_all(&dir);
+        let guard = admit(&dir).expect("reader admitted before stop");
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let engage_dir = dir.clone();
+        let join = std::thread::spawn(move || {
+            let result = engage(&engage_dir, 7);
+            returned_tx.send(result).unwrap();
+        });
+
+        for _ in 0..100 {
+            if pending_path(&dir).exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(pending_path(&dir).exists(), "engage 沒有先發佈 pending");
+        assert!(guard.stop_requested());
+        assert!(guard.boundary().is_none());
+        assert!(returned_rx.recv_timeout(Duration::from_millis(40)).is_err());
+        drop(guard);
+        returned_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("engage should return after reader drops")
+            .unwrap();
+        join.join().unwrap();
+        assert!(is_stopped(&dir));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn release_and_admission_are_linearized() {
+        let dir = temp("release-admit");
+        let _ = std::fs::remove_dir_all(&dir);
+        engage(&dir, 1).unwrap();
+        assert!(admit(&dir).is_none());
+        release(&dir).unwrap();
+        let guard = admit(&dir).expect("release completed before admission");
+        assert!(!guard.stop_requested());
+        assert!(guard.boundary().is_some());
+        drop(guard);
+        assert!(dir.join(ACTIVITY_LOCK).exists());
+        assert!(dir.join(TURNSTILE_LOCK).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_permanent_lock_fails_closed_and_engage_reports_error() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp("symlink-lock");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        symlink(dir.join("outside"), dir.join(TURNSTILE_LOCK)).unwrap();
+        assert!(admit(&dir).is_none(), "O_NOFOLLOW lock open 必須 fail closed");
+        assert!(engage(&dir, 1).is_err(), "壞 lock 不可回報 engage 成功");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

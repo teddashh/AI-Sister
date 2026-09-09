@@ -951,6 +951,14 @@ pub fn run(input: &mut ReviewInput<'_>, data_dir: &std::path::Path) -> Result<Re
         let (ent_json, com_json) = merge_l2_fields(card, &keep_entities, &keep_commits);
         let changed = ent_json != card.entities_json || com_json != card.commitments_json;
         if changed {
+            let Some(product_guard) = brain::not_stopped(data_dir) else {
+                master_stopped_mid_run = true;
+                break;
+            };
+            let Some(_product_boundary) = product_guard.boundary() else {
+                master_stopped_mid_run = true;
+                break;
+            };
             input.db.insert_l2_card(&L2Insert {
                 segment_core_start: card.segment_core_start,
                 segment_ref: &card.segment_ref,
@@ -992,8 +1000,10 @@ pub fn run(input: &mut ReviewInput<'_>, data_dir: &std::path::Path) -> Result<Re
             let cmd = command.as_str();
             let args = args.as_slice();
             std::thread::scope(|scope| {
-                let ha = scope.spawn(|| spawn_cli(permit, not_stopped, &prompt_a, cmd, args));
-                let hb = scope.spawn(|| spawn_cli(permit, not_stopped, &prompt_b, cmd, args));
+                let stop_a = not_stopped.clone();
+                let stop_b = not_stopped.clone();
+                let ha = scope.spawn(|| spawn_cli(permit, stop_a, &prompt_a, cmd, args));
+                let hb = scope.spawn(|| spawn_cli(permit, stop_b, &prompt_b, cmd, args));
                 (
                     ha.join()
                         .unwrap_or_else(|_| empty_spawn("pass A 執行緒炸了")),
@@ -1006,6 +1016,17 @@ pub fn run(input: &mut ReviewInput<'_>, data_dir: &std::path::Path) -> Result<Re
         budget_left = budget_left.saturating_sub(2);
         log_outbound(input.db, &run_day, &command, &args, card, &spawn_a)?;
         log_outbound(input.db, &run_day, &command, &args, card, &spawn_b)?;
+
+        // 出境稽核永遠留下；模型正文回來後，任何 L2/L3 產品資料則必須重新通過
+        // admission + boundary。fake CLI 在最後一刻按全停時，答案只留在 RAM。
+        let Some(product_guard) = brain::not_stopped(data_dir) else {
+            master_stopped_mid_run = true;
+            break;
+        };
+        let Some(_product_boundary) = product_guard.boundary() else {
+            master_stopped_mid_run = true;
+            break;
+        };
 
         // `answers_got` 和後面寫承諾的 match 用同一套判準：提示送完、沒有逾時、
         // CLI 正常退出，stdout 也能 parse，才算問到。
@@ -1185,11 +1206,16 @@ pub fn run(input: &mut ReviewInput<'_>, data_dir: &std::path::Path) -> Result<Re
     let mut completed = 0u32;
     let mut archived = 0u32;
     if input.kind == ReviewKind::Eod && !master_stopped_mid_run {
-        let summarized_day =
-            summarized_day(input.now).context("算不出被盤點的那一天，不敢寫日摘要")?;
-        completed = mark_done_from_originals(input)?;
-        archived = archive_overdue(input.db, input.now)?;
-        write_day_summary(input, &summarized_day)?;
+        let product_boundary = brain::not_stopped(data_dir).and_then(|guard| guard.boundary());
+        if let Some(_boundary) = product_boundary {
+            let summarized_day =
+                summarized_day(input.now).context("算不出被盤點的那一天，不敢寫日摘要")?;
+            completed = mark_done_from_originals(input)?;
+            archived = archive_overdue(input.db, input.now)?;
+            write_day_summary(input, &summarized_day)?;
+        } else {
+            master_stopped_mid_run = true;
+        }
     }
 
     let run_id_val = input.db.insert_reviewer_run(&ReviewerRunInsert {
@@ -2683,8 +2709,10 @@ mod tests {
         let mut db = Db::open(&db_path).expect("db");
         let ts = 1_700_790_000_000;
         let gap = crate::segment::TIME_CAP_MS + 60_000;
-        let (_first_session, first_fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
-        let (_second_session, second_fid) = seed(&mut db, ts + gap, "LINE：五點去接她 17:00");
+        let (_first_session, first_fid) =
+            seed(&mut db, ts, "LINE：王小明說五點去接她 17:00");
+        let (_second_session, second_fid) =
+            seed(&mut db, ts + gap, "LINE：王小明說五點去接她 17:00");
         let segments = db
             .chapters_for_range(ts, ts + gap + 400_000)
             .expect("segments");
@@ -2708,7 +2736,11 @@ mod tests {
             commitments,
         );
 
-        let (command, args) = fake_cli_engages_master_stop(&tmp.0, r#"{"commitments":[]}"#, &tmp.0);
+        let returned_commitment = format!(
+            r#"{{"commitments":[{{"text":"五點去接她","stands":true,"kind":"promise","due_hint":"17:00","due_source":"explicit","people":["王小明"],"confidence":0.8,"evidence_refs":["frame:{first_fid}"],"allowed_next_step":null}}]}}"#
+        );
+        let (command, args) =
+            fake_cli_engages_master_stop(&tmp.0, &returned_commitment, &tmp.0);
         let consent = signed();
         let brain = BrainConfig {
             command,
@@ -2734,6 +2766,19 @@ mod tests {
             "必須走迴圈中的全停，不是開場早退：{:?}",
             result.skip
         );
+        assert_eq!(result.wrote_commitments, 0, "回來才全停的正文不可寫 L3");
+        assert_eq!(result.l2_revisions, 0, "回來才全停不可寫 reviewer L2");
+        assert_eq!(result.completed, 0);
+        assert_eq!(result.archived, 0);
+        let product_rows: i64 = db
+            .conn()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM commitments) + (SELECT COUNT(*) FROM entities)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("product row count");
+        assert_eq!(product_rows, 0, "全停後答案只能留 outbound audit");
         let skip_reason: Option<String> = db
             .conn()
             .query_row(
@@ -2748,6 +2793,11 @@ mod tests {
             None,
             "skip_reason IS NULL 的讀者不可以把中途全停的一輪算成完整跑過"
         );
+        let stats = db.reviewer_recheck_stats().expect("reviewer stats");
+        assert_eq!(stats.runs, None, "中途全停不可混入 completed stats");
+        assert_eq!(stats.candidates, None);
+        assert_eq!(stats.rechecks, None);
+        assert_eq!(stats.last_skip.as_deref(), Some("master_stopped"));
     }
 
     /// 「沒有東西可審」寫進 notes 不是 detail。手捏 `ReviewerRefusals` 再叫

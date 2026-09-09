@@ -30,17 +30,12 @@ impl Executor for PlatformExecutor {
         // 這裡還是交不出去」。兩道之間是 TOCTOU 窗口，這一道把它縮到只剩
         // `platform_execute` 裡的 ShellExecuteW 本身。走到這裡代表上面那一道
         // 已被繞過；typed `ExecutorError` 會讓它仍落成 Refused，不會謊稱碰過 OS。
-        if master_stop::is_stopped(&self.data_dir) {
-            return Err(ExecutorError::refused(RefusalReason::MasterStopped {
-                since_ms: master_stop::stopped_since(&self.data_dir),
-            }));
-        }
         if kill_switch::is_pulled(&self.data_dir) {
             return Err(ExecutorError::refused(RefusalReason::HandsPulled {
                 since_ms: kill_switch::pulled_since(&self.data_dir),
             }));
         }
-        platform_execute(suggestion)
+        platform_execute(&self.data_dir, suggestion)
     }
 
     fn hands_attached(&self) -> Attached {
@@ -60,10 +55,27 @@ impl Executor for PlatformExecutor {
 
 /// 驗證留在平台分支**外面**，讓 Linux CI 也真的跑得到貼著 OS 呼叫的這一道。
 /// Windows 分支裡再驗一次不會多一層保護，只會留下一份 Linux 永遠碰不到的規則。
-fn platform_execute(suggestion: &Suggestion) -> Result<String, ExecutorError> {
+fn with_master_stop_fence<T>(
+    data_dir: &Path,
+    os_call: impl FnOnce() -> Result<T, String>,
+) -> Result<T, ExecutorError> {
+    let guard = master_stop::admit(data_dir).ok_or_else(|| {
+        ExecutorError::refused(RefusalReason::MasterStopped {
+            since_ms: master_stop::stopped_since(data_dir),
+        })
+    })?;
+    let _boundary = guard.boundary().ok_or_else(|| {
+        ExecutorError::refused(RefusalReason::MasterStopped {
+            since_ms: master_stop::stopped_since(data_dir),
+        })
+    })?;
+    os_call().map_err(ExecutorError::platform)
+}
+
+fn platform_execute(data_dir: &Path, suggestion: &Suggestion) -> Result<String, ExecutorError> {
     crate::target_policy::validate_suggestion(suggestion)
         .map_err(|why| ExecutorError::refused(RefusalReason::TargetRejectedBeforeOs { why }))?;
-    platform_execute_validated(suggestion).map_err(ExecutorError::platform)
+    with_master_stop_fence(data_dir, || platform_execute_validated(suggestion))
 }
 
 #[cfg(not(windows))]
@@ -224,7 +236,11 @@ mod tests {
             let suggestion = SuggestionButton::parse_json(json)
                 .expect("syntactically valid suggestion")
                 .press();
-            let error = platform_execute(&suggestion).expect_err("not a safe file target");
+            let dir = std::env::temp_dir().join(format!(
+                "sister-platform-validation-{}",
+                std::process::id()
+            ));
+            let error = platform_execute(&dir, &suggestion).expect_err("not a safe file target");
             let ExecutorError::RefusedBeforeOs {
                 reason: RefusalReason::TargetRejectedBeforeOs { why },
             } = error
@@ -234,5 +250,65 @@ mod tests {
             assert!(why.contains(expected), "{json}: {why}");
             assert!(!why.contains("這台機器上做不到"), "{json}: {why}");
         }
+    }
+
+    #[test]
+    fn prestopped_fence_never_calls_the_os_closure() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = std::env::temp_dir().join(format!(
+            "sister-platform-prestopped-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        master_stop::engage(&dir, 1).unwrap();
+        let called = AtomicBool::new(false);
+        let error = with_master_stop_fence(&dir, || {
+            called.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .expect_err("全停中不應交出 OS call");
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(matches!(error, ExecutorError::RefusedBeforeOs { .. }));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn os_closure_keeps_engage_waiting_until_it_returns() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir().join(format!(
+            "sister-platform-reader-first-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (leave_tx, leave_rx) = mpsc::channel();
+        let (call_done_tx, call_done_rx) = mpsc::channel();
+        let call_dir = dir.clone();
+        let call = std::thread::spawn(move || {
+            let result = with_master_stop_fence(&call_dir, || {
+                entered_tx.send(()).unwrap();
+                leave_rx.recv().unwrap();
+                Ok(())
+            });
+            call_done_tx.send(result).unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let (stop_done_tx, stop_done_rx) = mpsc::channel();
+        let stop_dir = dir.clone();
+        let stop = std::thread::spawn(move || {
+            let result = master_stop::engage(&stop_dir, 2);
+            stop_done_tx.send(result).unwrap();
+        });
+        assert!(stop_done_rx.recv_timeout(Duration::from_millis(40)).is_err());
+        leave_tx.send(()).unwrap();
+        call_done_rx.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        stop_done_rx.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
+        call.join().unwrap();
+        stop.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
