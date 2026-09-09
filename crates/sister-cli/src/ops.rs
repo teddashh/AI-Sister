@@ -1331,7 +1331,10 @@ impl Emptiness {
             });
         }
         Ok(
-            if !db.exclusion_audit()?.is_empty() || db.pause_audit()?.episodes > 0 {
+            if !db.exclusion_audit()?.is_empty()
+                || db.pause_audit()?.episodes > 0
+                || db.master_stop_audit()?.episodes > 0
+            {
                 Self::Blocked
             } else {
                 Self::Fresh
@@ -14437,7 +14440,8 @@ pub mod query {
             // 那是四種原因裡唯一一個假的，也是唯一一個會讓他以為東西被刪了
             // 的。底下 `excluded` 和 `paused_episodes` 兩段本來就會把真正的
             // 原因講出來，所以這裡改成不 return，讓它們接著講。
-            let blocked = b.paused_episodes > 0 || !b.excluded.is_empty();
+            let blocked =
+                b.paused_episodes > 0 || b.master_stopped_episodes > 0 || !b.excluded.is_empty();
             out.push(if b.frames > 0 {
                 // 上面那道 `ocr_is_dead()` 已經把「夠多張畫面、一行字都沒有」
                 // 那一種攔走了，所以走到這裡的是張數還太少的時候。三張畫面上
@@ -14594,6 +14598,31 @@ pub mod query {
             out.push(format!(
                 "{lead}**現在是暫停的**（`{}` 解除）——這樣錄也不會記到東西。",
                 cmd(data_dir, "resume")
+            ));
+        }
+        if b.master_stopped_episodes > 0 {
+            let mut why_short: Vec<String> = Vec::new();
+            if b.master_stopped_open {
+                why_short.push("最後一段沒有收尾".to_string());
+            }
+            if b.master_stopped_truncated > 0 {
+                why_short.push(format!(
+                    "有 {} 段的開頭已被保留期刪掉",
+                    b.master_stopped_truncated
+                ));
+            }
+            let how_long = match (b.master_stopped_ms, why_short.is_empty()) {
+                (0, false) => format!("長度還算不出來（{}）", why_short.join("、")),
+                (ms, true) => format!("一共 {}", crate::fmt::duration_ms(ms)),
+                (ms, false) => format!(
+                    "算得出來的加起來 {}（{}，所以這個數字算短了）",
+                    crate::fmt::duration_ms(ms),
+                    why_short.join("、")
+                ),
+            };
+            out.push(format!(
+                "她也被全停過 {} 次、{how_long}，那幾段 recorder、解釋層和手都停著。",
+                b.master_stopped_episodes
             ));
         }
         // 沒有任何理由的時候只剩一句實話。而「每一段」這三個字要看她這次
@@ -15041,6 +15070,25 @@ pub mod query {
             });
             assert!(out.contains("長度還算不出來"), "{out}");
             assert!(!out.contains("0 秒"), "一段都沒結束，不可以報 0 秒：{out}");
+        }
+
+        #[test]
+        fn a_master_stop_is_not_described_as_an_ordinary_pause() {
+            let out = lines(BlindSpots {
+                chunks: 10,
+                ever_recorded: true,
+                ever_stored: true,
+                master_stopped_episodes: 3,
+                master_stopped_ms: 300_000,
+                master_stopped_open: true,
+                master_stopped_truncated: 1,
+                ..Default::default()
+            });
+            assert!(out.contains("全停過 3 次"), "{out}");
+            assert!(out.contains("recorder、解釋層和手都停著"), "{out}");
+            assert!(out.contains("最後一段沒有收尾"), "{out}");
+            assert!(out.contains("開頭已被保留期刪掉"), "{out}");
+            assert!(!out.contains("暫停過"), "全停不可冒充普通暫停：{out}");
         }
     }
 
@@ -16044,6 +16092,45 @@ pub mod stats {
         }
     }
 
+    fn master_stop_lines(audit: &sister_core::db::MasterStopAudit) -> Vec<String> {
+        if audit.episodes == 0 {
+            return vec!["  全停      這份紀錄裡沒有全停過".to_string()];
+        }
+
+        let cannot_total = audit.open_since.is_some() || audit.truncated > 0;
+        let mut lines = vec![if audit.total_ms == 0 && cannot_total {
+            format!("  全停      {} 段，長度還算不出來", audit.episodes)
+        } else {
+            format!(
+                "  全停      {} 段，已結束的加起來 {}",
+                audit.episodes,
+                crate::fmt::duration_ms(audit.total_ms)
+            )
+        }];
+        if let Some(since) = audit.open_since {
+            lines.push(format!(
+                "            最後一段沒有收尾（{} 起，沒有對應的解除紀錄）",
+                fmt::timestamp(since)
+            ));
+        }
+        if audit.truncated > 0 {
+            lines.push(format!(
+                "            其中 {} 段的開頭已被保留期刪掉，長度算不出來",
+                audit.truncated
+            ));
+        }
+        lines
+    }
+
+    fn master_stop_json(audit: &sister_core::db::MasterStopAudit) -> serde_json::Value {
+        serde_json::json!({
+            "episodes": audit.episodes,
+            "total_ms": audit.total_ms,
+            "open_since": audit.open_since,
+            "truncated": audit.truncated,
+        })
+    }
+
     /// 要 `Config` 是為了底下那一行「遮蔽」。
     ///
     /// `redaction_audit` 數的是「插了旗子的有幾列」，而**旗子只有在
@@ -16123,6 +16210,7 @@ pub mod stats {
         let audit = db.exclusion_audit()?;
         let redaction = db.redaction_audit()?;
         let pauses = db.pause_audit()?;
+        let master_stops = db.master_stop_audit()?;
 
         if json {
             println!(
@@ -16166,6 +16254,7 @@ pub mod stats {
                         "open_since": pauses.open_since,
                         "truncated": pauses.truncated,
                     },
+                    "master_stops": master_stop_json(&master_stops),
                     // 這三個訊號在 Phase 0 沒有讀者，所以也沒有回歸保護：
                     // 哪天 recorder 不再寫 focus_events，`stats` 照樣印一個
                     // 很小的數字，沒有一個測試會紅。`doctor` 會講，但 doctor
@@ -16405,6 +16494,10 @@ pub mod stats {
                     pauses.truncated
                 );
             }
+        }
+
+        for line in master_stop_lines(&master_stops) {
+            println!("{line}");
         }
 
         // 秘密遮蔽。問的不是「旗子插了幾次」，是「插了旗子的那幾列，字還在不在」。
@@ -16696,6 +16789,39 @@ pub mod stats {
                 events_line(&DbStats::default()),
                 "  事件      焦點 0 · 剪貼簿 0 · 輸入 0 · 系統 0"
             );
+        }
+
+        #[test]
+        fn stats_gives_master_stop_its_own_human_and_json_ledger() {
+            let audit = sister_core::db::MasterStopAudit {
+                episodes: 3,
+                total_ms: 600_000,
+                open_since: Some(700_000),
+                truncated: 1,
+            };
+            let human = master_stop_lines(&audit).join("\n");
+            assert!(human.contains("全停      3 段"), "{human}");
+            assert!(human.contains("10 分鐘"), "{human}");
+            assert!(human.contains("最後一段沒有收尾"), "{human}");
+            assert!(human.contains("其中 1 段的開頭已被保留期刪掉"), "{human}");
+            assert!(!human.contains("暫停"), "全停不可冒充普通暫停：{human}");
+
+            assert_eq!(
+                master_stop_json(&audit),
+                serde_json::json!({
+                    "episodes": 3,
+                    "total_ms": 600_000,
+                    "open_since": 700_000,
+                    "truncated": 1,
+                })
+            );
+
+            let none = sister_core::db::MasterStopAudit::default();
+            assert_eq!(
+                master_stop_lines(&none),
+                vec!["  全停      這份紀錄裡沒有全停過"]
+            );
+            assert_eq!(master_stop_json(&none)["episodes"], 0);
         }
     }
 }
@@ -20016,6 +20142,34 @@ pub mod doctor {
                 .expect("of"),
                 Emptiness::Erased,
                 "這時候才輪到「被 forget 忘掉了」"
+            );
+        }
+
+        #[test]
+        fn a_master_stopped_empty_database_is_blocked_not_fresh() {
+            use sister_core::model::{SystemEvent, SystemKind};
+
+            let mut db = Db::open_in_memory().expect("db");
+            let s = db.start_session("test", "0").expect("session");
+            db.insert_system(
+                s,
+                &SystemEvent {
+                    ts: 1_000,
+                    kind: SystemKind::MasterStopEngaged,
+                    detail: None,
+                },
+            )
+            .expect("master stop");
+
+            assert_eq!(
+                Emptiness::of(
+                    &db,
+                    &db.stats().expect("stats"),
+                    Presence::Stopped { at: None }
+                )
+                .expect("of"),
+                Emptiness::Blocked,
+                "三層全停留下的空白有證據，不是什麼都沒發生"
             );
         }
 

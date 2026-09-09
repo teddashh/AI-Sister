@@ -4467,6 +4467,142 @@ mod tests {
     }
 
     #[test]
+    fn master_released_reopens_input_for_the_next_tick() {
+        let control = Tmp::new("master-release-input");
+        let scenario = Scenario {
+            name: "master-release-input-boundary".into(),
+            privacy_context: ReplayPrivacyContext::Clear,
+            system_state: ReplaySystemState::Active,
+            steps: vec![
+                Step {
+                    at_ms: 100,
+                    keystrokes: 7,
+                    ..Default::default()
+                },
+                Step {
+                    at_ms: 2_100,
+                    keystrokes: 3,
+                    ..Default::default()
+                },
+            ],
+        };
+        let mut recorder = Recorder::new(
+            crate::replay::ReplayBackend::new(scenario),
+            Db::open_in_memory().expect("db"),
+            Config::default(),
+            None,
+        )
+        .expect("recorder");
+        recorder.set_master_stop_dir(control.0.clone());
+
+        sister_hands::master_stop::engage(&control.0, 500).expect("engage");
+        assert_eq!(
+            recorder.tick(1_000).expect("stopped tick"),
+            Tick::MasterStopped
+        );
+        sister_hands::master_stop::release(&control.0).expect("release");
+        assert_eq!(
+            recorder.tick(2_000).expect("release boundary"),
+            Tick::MasterReleased
+        );
+        recorder.tick(2_100).expect("post-release tick");
+
+        assert_eq!(
+            stored_keystrokes(&recorder),
+            Some(3),
+            "MasterReleased must reopen the backend; only post-release input may land"
+        );
+    }
+
+    #[test]
+    fn a_failed_master_release_watermark_never_defers_stopped_clipboard_content() {
+        let (mut recorder, calls) = gate_recorder(
+            vec![
+                SystemReply::Value(SystemObservation::active()),
+                SystemReply::Value(SystemObservation::active()),
+                SystemReply::Value(SystemObservation::active()),
+            ],
+            vec![PrivacyReply::Value(clear_privacy())],
+        );
+        recorder.backend.clipboard_watermarks = [
+            ClipboardWatermark::Established,
+            ClipboardWatermark::Unknown,
+            ClipboardWatermark::Unknown,
+        ]
+        .into();
+        recorder
+            .backend
+            .clipboard
+            .push_back(Some(clipboard_sentinel(300)));
+
+        assert!(
+            recorder
+                .set_master_stopped(true, 100)
+                .expect("engage master stop")
+        );
+        assert!(
+            recorder
+                .set_master_stopped(false, 200)
+                .expect("release master stop")
+        );
+        assert!(
+            recorder.master_clipboard_gap,
+            "unknown release watermark must keep clipboard fail closed"
+        );
+
+        recorder.tick(300).expect("ordinary tick after release");
+        assert!(
+            !calls.borrow().order.contains(&"clipboard"),
+            "content must not be read while the master-stop watermark is unknown"
+        );
+        assert_eq!(
+            stored_rows(&recorder, "clipboard_events"),
+            0,
+            "stopped clipboard content must not be picked up after release"
+        );
+    }
+
+    #[test]
+    fn releasing_pause_does_not_reopen_sources_while_master_stop_overlaps() {
+        let (mut recorder, calls) = gate_recorder(Vec::new(), Vec::new());
+        assert!(
+            recorder
+                .set_master_stopped(true, 100)
+                .expect("engage master stop")
+        );
+        assert!(recorder.set_paused(true, 200).expect("pause"));
+        calls.borrow_mut().order.clear();
+
+        assert!(recorder.set_paused(false, 300).expect("release pause"));
+        assert!(!recorder.pause_input_gap);
+        assert!(recorder.master_input_gap);
+        assert!(!recorder.pause_clipboard_gap);
+        assert!(recorder.master_clipboard_gap);
+        assert_eq!(
+            calls.borrow().order,
+            vec!["clipboard-skip", "input-suspend"],
+            "releasing one overlapping reason must not reopen either source"
+        );
+
+        assert!(
+            recorder
+                .set_master_stopped(false, 400)
+                .expect("release final reason")
+        );
+        assert_eq!(
+            calls.borrow().order,
+            vec![
+                "clipboard-skip",
+                "input-suspend",
+                "clipboard-skip",
+                "input-suspend",
+                "input-resume",
+            ],
+            "only the final overlapping reason may reopen input"
+        );
+    }
+
+    #[test]
     fn cancelling_a_failed_pause_still_discards_its_input_tail() {
         let scenario = Scenario {
             name: "failed-pause-input-boundary".into(),
