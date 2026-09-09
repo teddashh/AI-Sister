@@ -815,52 +815,43 @@ fn refresh_tray(app: &tauri::AppHandle) {
     if let Some(item) = app.try_state::<HandsResumeItem>() {
         let _ = item.0.set_text(resume);
     }
-    let attached = master_stop_attached(shell.data_dir.as_deref());
-    let (stop, resume) = master_stop_labels(attached);
+    let phase = master_stop_phase(shell.data_dir.as_deref());
+    let (stop, resume) = master_stop_labels(phase);
     if let Some(item) = app.try_state::<MasterStopItem>() {
         let _ = item.0.set_text(stop);
     }
     if let Some(item) = app.try_state::<MasterResumeItem>() {
         let _ = item.0.set_text(resume);
     }
-    if let Some(stopped) = master_stop_active(attached) {
-        let _ = app.emit(MASTER_STOP_CHANGED_EVENT, stopped);
+    if let Some(phase) = phase {
+        let _ = app.emit(MASTER_STOP_CHANGED_EVENT, phase);
     }
 }
 
-/// 從 hands 的三態讀全停，不另讀 `master.stop`。
-///
-/// `Attached::No` 只能說明使用者原本拔了手；它和 `Attached::Yes` 一樣都代表
-/// **沒有全停**。只有 `MasterStopped` 能把全停那顆字改成「現在是全停」。這個
-/// 分法同時保證全停不會把拔手那顆偽裝成已拔，解除時也不會碰它。
-fn master_stop_attached(data_dir: Option<&Path>) -> Option<sister_hands::Attached> {
-    data_dir.map(|dir| {
-        let executor = hands::PlatformExecutor::new(dir);
-        sister_hands::Executor::hands_attached(&executor)
-    })
-}
-
-fn master_stop_active(attached: Option<sister_hands::Attached>) -> Option<bool> {
-    attached.map(|attached| matches!(attached, sister_hands::Attached::MasterStopped { .. }))
+fn master_stop_phase(data_dir: Option<&Path>) -> Option<sister_hands::master_stop::State> {
+    data_dir.map(sister_hands::master_stop::state)
 }
 
 /// 系統匣是兩個固定方向的動作，不是 toggle。這樣 stale label 最多只會重做同一
 /// 個冪等動作，絕不會把使用者按下的「全部停止」重新解讀成「解除全停」。
-fn master_stop_labels(attached: Option<sister_hands::Attached>) -> (&'static str, &'static str) {
-    match attached {
-        Some(sister_hands::Attached::MasterStopped { .. }) => {
-            ("全部停止（現在是全停）", "解除全停")
-        }
-        Some(sister_hands::Attached::Yes | sister_hands::Attached::No { .. }) => {
-            ("全部停止", "解除全停（現在沒有全停）")
-        }
-        None => ("全部停止", "解除全停"),
+fn master_stop_labels(
+    phase: Option<sister_hands::master_stop::State>,
+) -> (&'static str, &'static str) {
+    use sister_hands::master_stop::State;
+    match phase {
+        Some(State::Stopped) => ("全部停止（現在是全停）", "解除全停"),
+        Some(State::Stopping) => ("全部停止（正在完成）", "解除全停"),
+        Some(State::Clear) => ("全部停止", "解除全停（現在沒有全停）"),
+        Some(State::Uncertain) => ("全部停止（狀態讀不到）", "解除全停（嘗試重設）"),
+        None => ("全部停止（找不到資料目錄）", "解除全停（找不到資料目錄）"),
     }
 }
 
 #[tauri::command]
-fn master_stop_state(shell: tauri::State<'_, Shell>) -> Result<bool, String> {
-    master_stop_active(master_stop_attached(shell.data_dir.as_deref()))
+fn master_stop_state(
+    shell: tauri::State<'_, Shell>,
+) -> Result<sister_hands::master_stop::State, String> {
+    master_stop_phase(shell.data_dir.as_deref())
         .ok_or_else(|| "找不到資料目錄，現在不能確認全停狀態".to_owned())
 }
 
@@ -878,8 +869,8 @@ fn announce_master_stop_state(app: &tauri::AppHandle) {
     let Some(shell) = app.try_state::<Shell>() else {
         return;
     };
-    if let Some(stopped) = master_stop_active(master_stop_attached(shell.data_dir.as_deref())) {
-        let _ = app.emit(MASTER_STOP_CHANGED_EVENT, stopped);
+    if let Some(phase) = master_stop_phase(shell.data_dir.as_deref()) {
+        let _ = app.emit(MASTER_STOP_CHANGED_EVENT, phase);
     }
 }
 
@@ -922,21 +913,36 @@ mod master_stop_desktop_tests {
     }
 
     #[test]
-    fn labels_use_attached_master_stop_without_hiding_a_pulled_hand() {
+    fn labels_distinguish_all_four_master_stop_states() {
+        use sister_hands::master_stop::State;
         assert_eq!(
-            master_stop_labels(Some(sister_hands::Attached::Yes)),
+            master_stop_labels(Some(State::Clear)),
             ("全部停止", "解除全停（現在沒有全停）")
         );
         assert_eq!(
-            master_stop_labels(Some(sister_hands::Attached::No { since_ms: Some(10) })),
-            ("全部停止", "解除全停（現在沒有全停）")
+            master_stop_labels(Some(State::Stopping)),
+            ("全部停止（正在完成）", "解除全停")
         );
         assert_eq!(
-            master_stop_labels(Some(sister_hands::Attached::MasterStopped {
-                since_ms: Some(20)
-            })),
+            master_stop_labels(Some(State::Stopped)),
             ("全部停止（現在是全停）", "解除全停")
         );
+        assert_eq!(
+            master_stop_labels(Some(State::Uncertain)),
+            ("全部停止（狀態讀不到）", "解除全停（嘗試重設）")
+        );
+    }
+
+    #[test]
+    fn native_observation_does_not_call_pending_or_broken_protocol_stopped() {
+        use sister_hands::master_stop::State;
+        let dir = temp_dir("pending-and-uncertain");
+        std::fs::write(dir.join("master.stop.pending"), b"1000").unwrap();
+        assert_eq!(master_stop_phase(Some(&dir)), Some(State::Stopping));
+        std::fs::remove_file(dir.join("master.stop.pending")).unwrap();
+        std::fs::create_dir_all(dir.join(sister_hands::master_stop::ACTIVITY_LOCK)).unwrap();
+        assert_eq!(master_stop_phase(Some(&dir)), Some(State::Uncertain));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -946,17 +952,17 @@ mod master_stop_desktop_tests {
         sister_hands::kill_switch::pull(&dir, 2).expect("pull hands");
 
         set_master_stop(Some(&dir), MasterStopAction::Engage).expect("engage master stop");
-        assert!(matches!(
-            master_stop_attached(Some(&dir)),
-            Some(sister_hands::Attached::MasterStopped { since_ms: Some(_) })
-        ));
+        assert_eq!(
+            master_stop_phase(Some(&dir)),
+            Some(sister_hands::master_stop::State::Stopped)
+        );
         set_master_stop(Some(&dir), MasterStopAction::Release).expect("release master stop");
 
         assert!(sister_core::pause::is_paused(&dir));
         assert!(sister_hands::kill_switch::is_pulled(&dir));
         assert_eq!(
-            master_stop_attached(Some(&dir)),
-            Some(sister_hands::Attached::No { since_ms: Some(2) })
+            master_stop_phase(Some(&dir)),
+            Some(sister_hands::master_stop::State::Clear)
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2273,8 +2279,8 @@ struct Blind {
     master_stopped_open: bool,
     /// 有幾段只剩解除列，開頭已被保留期刪除。
     master_stopped_truncated: i64,
-    /// durable `master.stop` latch 此刻是否仍開著；唯一可行入口是系統匣解除全停。
-    master_stopped_now: bool,
+    /// `clear`／`stopping`／`stopped`／`uncertain`；pending 絕不冒充已排乾完成。
+    master_stop_state: sister_hands::master_stop::State,
     /// 這一題只翻了最近幾天。`null` = 整顆資料庫都翻過了。見
     /// [`sister_core::answer::BlindSpots::scan_horizon_days`]。
     scan_horizon_days: Option<i64>,
@@ -2310,7 +2316,7 @@ impl From<sister_core::answer::BlindSpots> for Blind {
             master_stopped_ms: blind.master_stopped_ms,
             master_stopped_open: blind.master_stopped_open,
             master_stopped_truncated: blind.master_stopped_truncated,
-            master_stopped_now: blind.master_stopped_now,
+            master_stop_state: blind.master_stop_state,
             scan_horizon_days: blind.scan_horizon_days,
             recording_now: blind.recording_now,
             booting_now: blind.booting_now,
@@ -2336,7 +2342,7 @@ mod blind_dto_tests {
             paused_open: false,
             paused_now: false,
             paused_truncated: 23,
-            master_stopped_now: true,
+            master_stop_state: sister_hands::master_stop::State::Stopping,
             master_stopped_episodes: 29,
             master_stopped_ms: 31,
             master_stopped_open: true,
@@ -2364,7 +2370,7 @@ mod blind_dto_tests {
                 "master_stopped_ms": 31,
                 "master_stopped_open": true,
                 "master_stopped_truncated": 37,
-                "master_stopped_now": true,
+                "master_stop_state": "stopping",
                 "scan_horizon_days": 41,
                 "recording_now": true,
                 "booting_now": false,
@@ -6297,7 +6303,7 @@ fn main() {
                 MenuItem::with_id(app, "hands-stop", hands_labels.0, true, None::<&str>)?;
             let hands_resume_item =
                 MenuItem::with_id(app, "hands-resume", hands_labels.1, true, None::<&str>)?;
-            let master_labels = master_stop_labels(master_stop_attached(
+            let master_labels = master_stop_labels(master_stop_phase(
                 app.state::<Shell>().data_dir.as_deref(),
             ));
             let master_stop_item =

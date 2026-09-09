@@ -201,12 +201,12 @@ pub struct BlindSpots {
     /// 這幾段算進了 `paused_episodes` 卻**沒有**算進 `paused_ms`，所以
     /// `paused_ms > 0` 時它是下限而不是精確值。
     pub paused_truncated: i64,
-    /// recorder／brain／hands 三層**此刻**是不是都被 durable latch 停住。
+    /// recorder／brain／hands 三層**此刻**的全停狀態。
     ///
     /// 和 [`master_stopped_open`](Self::master_stopped_open) 分開：稽核列只答得出
     /// 過去，`master.stop` latch 才答得出現在。recorder 不在跑時按下或解除全停，
     /// 兩者就會不同。
-    pub master_stopped_now: bool,
+    pub master_stop_state: sister_hands::master_stop::State,
     /// recorder／brain／hands 三層一起全停過幾段。
     pub master_stopped_episodes: i64,
     /// 已結束的全停段落總長；有配不起來的段落時是下限。
@@ -275,7 +275,7 @@ impl BlindSpots {
             || self.paused_episodes > 0
             || self.master_stopped_episodes > 0
             || self.paused_now
-            || self.master_stopped_now
+            || self.master_stop_state != sister_hands::master_stop::State::Clear
             || self.scan_horizon_days.is_some()
     }
 }
@@ -315,7 +315,7 @@ pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::
         paused_open: pauses.open_since.is_some(),
         paused_now: crate::pause::is_paused(data_dir),
         paused_truncated: pauses.truncated,
-        master_stopped_now: sister_hands::master_stop::is_stopped(data_dir),
+        master_stop_state: sister_hands::master_stop::state(data_dir),
         master_stopped_episodes: master_stops.episodes,
         master_stopped_ms: master_stops.total_ms,
         master_stopped_open: master_stops.open_since.is_some(),
@@ -768,12 +768,30 @@ mod tests {
         let db = Db::open_in_memory().expect("db");
 
         let b = blind_spots(&db, &tmp.0, "電話").expect("blind");
-        assert!(b.master_stopped_now, "durable latch 現在就是開著");
+        assert_eq!(
+            b.master_stop_state,
+            sister_hands::master_stop::State::Stopped,
+            "durable latch 現在已完成排乾"
+        );
         assert_eq!(b.master_stopped_episodes, 0, "資料庫沒有全停稽核列");
         assert_eq!(b.master_stopped_ms, 0, "沒有已結束段落可量");
         assert!(!b.master_stopped_open, "沒有開始列，不可冒充未收尾段落");
         assert_eq!(b.master_stopped_truncated, 0, "沒有孤立的解除列");
         assert!(b.any(), "現在全停本身就是查不到東西的理由");
+    }
+
+    #[test]
+    fn pending_master_stop_reaches_blind_spots_without_becoming_completed() {
+        let tmp = Tmp::new("master-stop-pending-only");
+        std::fs::write(tmp.0.join("master.stop.pending"), b"1234").unwrap();
+        let db = Db::open_in_memory().expect("db");
+
+        let b = blind_spots(&db, &tmp.0, "電話").expect("blind");
+        assert_eq!(
+            b.master_stop_state,
+            sister_hands::master_stop::State::Stopping
+        );
+        assert!(b.any(), "停止中仍是這題查不到東西的一個目前理由");
     }
 
     /// 一個字的查詢只翻得到最近 30 天，而 `text_days` 預設 365。

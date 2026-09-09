@@ -8,6 +8,7 @@
 //! 被重按洗掉。判定只看檔案在不在；內容只是顯示用，壞掉仍然算停止。
 
 use fs4::FileExt;
+use serde::Serialize;
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -32,8 +33,10 @@ enum DirState {
 
 /// 給人看的全停狀態。Operational gate 仍然只問「能不能開始新工作」，但畫面
 /// 必須分得出正在排乾、真的排乾完成，以及根本讀不懂協定三種情況。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum State {
+    #[default]
     Clear,
     Stopping,
     Stopped,
@@ -384,10 +387,16 @@ pub fn release(data_dir: &Path) -> std::io::Result<()> {
         Err(error) => return Err(error),
     }
     match std::fs::remove_file(pending_path(data_dir)) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
+    if state(data_dir) != State::Clear {
+        return Err(io::Error::other(
+            "解除旗標後全停協定仍不是 clear；沒有回報三層已恢復",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -682,6 +691,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(ACTIVITY_LOCK)).unwrap();
         assert!(admit(&dir).is_none(), "directory 不能冒充 activity lock");
         assert!(engage(&dir, 1).is_err(), "non-regular lock 不可回報成功");
+        assert!(release(&dir).is_err(), "協定仍損壞時不可回報三層已恢復");
         assert!(
             dir.join(ACTIVITY_LOCK).is_dir(),
             "協定不可 unlink/replace 壞 lock 來假裝修好"

@@ -178,7 +178,7 @@ function blind(over = {}) {
     master_stopped_ms: 0,
     master_stopped_open: false,
     master_stopped_truncated: 0,
-    master_stopped_now: false,
+    master_stop_state: "clear",
     scan_horizon_days: null,
     recording_now: false,
     booting_now: false,
@@ -224,8 +224,9 @@ function supervisor(phase = "stopped", message = null, failures = 0) {
 
 /**
  * 開一次字母人。`invoke` 收一張 `{ 指令: 回傳值或會丟出來的 Error }` 表；
- * 沒列到的指令回 `null`，只有每一扇新 desktop 都必定提供的 supervisor view
- * 預設成乾淨的 `stopped`。函式值會被呼叫（要延遲、要丟例外的用這個）。
+ * 沒列到的指令回 `null`；每一扇新 desktop 都必定提供的 supervisor view 與
+ * master-stop observation 各預設成乾淨的 `stopped`／`clear`。函式值會被呼叫
+ * （要延遲、要丟例外的用這個）。
  *
  * `search` 是網址上那串 `?…`。**那幾條 demo 路徑不是裝飾。** 這台機器開不起
  * Tauri，所以 `?asleep=nobeat` 那幾條是這幾格畫面唯一長得出來的地方——他真的
@@ -304,7 +305,9 @@ async function open(
           ? table[cmd]
           : cmd === "recorder_supervisor_state"
             ? supervisor()
-            : null;
+            : cmd === "master_stop_state"
+              ? "clear"
+              : null;
         if (typeof v === "function") return v(arg);
         if (v instanceof Error) throw v;
         return v;
@@ -2474,7 +2477,7 @@ console.log("68. 全停中不可以出現『在聽』");
     recorder_supervisor_state: supervisor("running"),
   });
   check("前提：recording 與 supervisor 證據齊全時顯示在聽", p.line().startsWith("在聽"), p.line());
-  await p.fromOutside("master-stop-changed", true);
+  await p.fromOutside("master-stop-changed", "stopped");
   check(
     "全停後不再聲稱在聽或正在錄",
     !p.line().includes("在聽") && !p.line().includes("正在錄"),
@@ -2492,7 +2495,7 @@ console.log("69. 全停壓過暫停");
   });
   await p.fromOutside("pause-changed", true);
   check("前提：先顯示暫停", p.line().includes("已暫停，沒有在看"), p.line());
-  await p.fromOutside("master-stop-changed", true);
+  await p.fromOutside("master-stop-changed", "stopped");
   check("全停主句壓過暫停主句", p.line().includes("已全停：capture／brain／hands 都不會動"), p.line());
   check("全停時不顯示暫停主句", !p.line().includes("已暫停，沒有在看"), p.line());
   check("暫停中再全停，圖案換成 stopped", p.avatarState() === "stopped", p.avatarState());
@@ -2505,7 +2508,7 @@ console.log("70. 解除暫停不可以讓全停畫面消失");
     recorder_supervisor_state: supervisor("running"),
   });
   await p.fromOutside("pause-changed", true);
-  await p.fromOutside("master-stop-changed", true);
+  await p.fromOutside("master-stop-changed", "stopped");
   await p.fromOutside("pause-changed", false);
   check(
     "解除暫停後仍顯示全停主句",
@@ -2522,7 +2525,7 @@ console.log("71. 全停 detail 講得出正確的解除入口");
     recording_state: "recording",
     recorder_supervisor_state: supervisor("running"),
   });
-  await p.fromOutside("master-stop-changed", true);
+  await p.fromOutside("master-stop-changed", "stopped");
   check("全停 detail 指向解除全停", p.line().includes("要恢復，請從系統匣按「解除全停」"), p.line());
   check("全停 detail 不指向 pause 恢復鍵", !p.line().includes("▶") && !p.line().includes("繼續"), p.line());
 }
@@ -2534,9 +2537,9 @@ console.log("72. 解除全停之後，原本的暫停要回來");
     recorder_supervisor_state: supervisor("running"),
   });
   await p.fromOutside("pause-changed", true);
-  await p.fromOutside("master-stop-changed", true);
+  await p.fromOutside("master-stop-changed", "stopped");
   check("前提：全停時顯示全停主句", p.line().includes("已全停：capture／brain／hands 都不會動"), p.line());
-  await p.fromOutside("master-stop-changed", false);
+  await p.fromOutside("master-stop-changed", "clear");
   check("解除全停後回到原本的暫停主句", p.line().includes("已暫停，沒有在看"), p.line());
   check("解除全停後沒有直接跳回在聽", !p.line().includes("在聽"), p.line());
 }
@@ -2561,7 +2564,7 @@ console.log("74. 四顆停止選單項的建立、每個 menu 分支、managed s
   check("找得到 Menu::with_items 分支", menuBranches.length > 0, `${menuBranches.length} 個`);
 
   const refreshStart = main.indexOf("fn refresh_tray(app: &tauri::AppHandle)");
-  const refreshEnd = main.indexOf("\n}\n\n/// 從 hands 的三態讀全停", refreshStart);
+  const refreshEnd = main.indexOf("\n}\n\nfn master_stop_phase", refreshStart);
   const refreshTray =
     refreshStart >= 0 && refreshEnd > refreshStart ? main.slice(refreshStart, refreshEnd) : "";
   check("找得到 refresh_tray 函式", refreshTray !== "", [refreshStart, refreshEnd]);
@@ -2606,11 +2609,11 @@ console.log("75. latch 現在全停、資料庫歷史為零時，blind 說現在
         chunks: 10,
         ever_recorded: true,
         ever_stored: true,
-        master_stopped_now: true,
+        master_stop_state: "stopped",
       }),
     }),
     recording_state: "recording",
-    master_stop_state: true,
+    master_stop_state: "stopped",
   });
   await p.type("找不到的歷史");
   const said = p.hitTexts().join("\n");
@@ -2632,7 +2635,7 @@ console.log("76. latch 已解除時，完整 historical episode 顯示次數與�
       }),
     }),
     recording_state: "recording",
-    master_stop_state: false,
+    master_stop_state: "clear",
   });
   await p.type("找不到的歷史");
   const said = p.hitTexts().join("\n");
@@ -2656,7 +2659,7 @@ console.log("77. historical open/truncated 在 latch 已解除時仍只講稽核
       }),
     }),
     recording_state: "recording",
-    master_stop_state: false,
+    master_stop_state: "clear",
   });
   await p.type("找不到的歷史");
   const said = p.hitTexts().join("\n");
@@ -2676,11 +2679,11 @@ console.log("78. historical 與 live master stop 是兩句可同時成立的事"
         ever_stored: true,
         master_stopped_episodes: 4,
         master_stopped_ms: 9 * 60_000,
-        master_stopped_now: true,
+        master_stop_state: "stopped",
       }),
     }),
     recording_state: "recording",
-    master_stop_state: true,
+    master_stop_state: "stopped",
   });
   await p.type("找不到的歷史");
   const said = p.hitTexts().join("\n");
@@ -2698,15 +2701,15 @@ console.log("79. native stop event 到達後，較早的 poll false 晚回不能
   const p = await open({
     master_stop_state: () => {
       reads += 1;
-      return reads === 2 ? stalePoll : false;
+      return reads === 2 ? stalePoll : "clear";
     },
     recording_state: "recording",
     recorder_supervisor_state: supervisor("running"),
   });
   check("前提：開場與 visible poll 都真的送出", reads === 2 && typeof finishStalePoll === "function", reads);
-  await p.fromOutside("master-stop-changed", true);
+  await p.fromOutside("master-stop-changed", "stopped");
   check("event 先把畫面切成 stopped", p.avatarState() === "stopped", p.line());
-  finishStalePoll(false);
+  finishStalePoll("clear");
   await tick(40);
   check("舊 poll false 晚回後仍是 stopped", p.avatarState() === "stopped", p.line());
 }
@@ -2722,7 +2725,7 @@ console.log("80. 兩個 overlapping master-stop polls 只有最新 request 可 a
     master_stop_state: () => {
       reads += 1;
       if (reads === 3) return olderPoll;
-      return false;
+      return "clear";
     },
     recording_state: "recording",
     recorder_supervisor_state: supervisor("running"),
@@ -2734,7 +2737,7 @@ console.log("80. 兩個 overlapping master-stop polls 只有最新 request 可 a
     reads,
     state: p.avatarState(),
   });
-  finishOlderPoll(true);
+  finishOlderPoll("stopped");
   await tick(40);
   check("更舊的 true 晚回不能蓋掉最新 false", p.avatarState() !== "stopped", p.line());
 }
@@ -2767,7 +2770,7 @@ function desktopTruthSourceErrors(main, dispatch, ui) {
   if (failedNative !== "master-stop-failed" || !listened.includes(failedNative)) {
     errors.push("native/renderer master-stop-failed 名稱不一致");
   }
-  if (!main.includes("app.emit(MASTER_STOP_CHANGED_EVENT, stopped)")) errors.push("native 沒有 emit changed state");
+  if (!main.includes("app.emit(MASTER_STOP_CHANGED_EVENT, phase)")) errors.push("native 沒有 emit changed state");
 
   const mappingStart = main.indexOf("impl From<sister_core::answer::BlindSpots> for Blind");
   const mappingEnd = main.indexOf("\n}\n\n#[cfg(test)]\nmod blind_dto_tests", mappingStart);
@@ -2777,7 +2780,7 @@ function desktopTruthSourceErrors(main, dispatch, ui) {
     "master_stopped_ms",
     "master_stopped_open",
     "master_stopped_truncated",
-    "master_stopped_now",
+    "master_stop_state",
   ]) {
     if (!mapping.includes(`${field}: blind.${field}`)) errors.push(`Blind mapping 丟掉或接錯 ${field}`);
   }
@@ -2786,11 +2789,49 @@ function desktopTruthSourceErrors(main, dispatch, ui) {
   if ((ui.match(/readMasterStopState\(\);/g) ?? []).length < 2) errors.push("startup/poll 沒有共用 master-stop read helper");
   if (!ui.includes("masterStopRevision += 1;")) errors.push("event 沒有推進 master-stop revision");
   if (!ui.includes("request === masterStopReadRequest")) errors.push("poll 沒有只接受最新 request");
-  if (ui.includes('invoke("master_stop_state").then(setMasterStopped')) errors.push("仍有第二條直連 master-stop read");
+  if (ui.includes('invoke("master_stop_state").then(setMasterStopPhase')) errors.push("仍有第二條直連 master-stop read");
+  for (const phase of ["clear", "stopping", "stopped", "uncertain"]) {
+    if (!ui.includes(`"${phase}"`)) errors.push(`renderer 沒有處理 ${phase}`);
+  }
+  if (!main.includes("Result<sister_hands::master_stop::State, String>")) {
+    errors.push("native master_stop_state 仍把四態壓成 bool");
+  }
   return errors;
 }
 
-console.log("81. desktop truth source contract 與三個 production callback self-mutations");
+console.log("81. stopping／uncertain 不冒充已全停，也不准顯示在聽");
+{
+  const p = await open({
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+    master_stop_state: "clear",
+  });
+  await p.fromOutside("master-stop-changed", "stopping");
+  check("停止中明講仍在排乾", p.line().includes("正在完成全停") && p.line().includes("仍在排乾"), p.line());
+  check("停止中不冒充完成", !p.line().includes("已全停") && !p.line().includes("在聽"), p.line());
+  await p.fromOutside("master-stop-changed", "uncertain");
+  check("不確定明講讀不到", p.line().includes("無法確認全停狀態"), p.line());
+  check("不確定也不冒充完成或在聽", !p.line().includes("已全停") && !p.line().includes("在聽"), p.line());
+
+  const blindPending = await open({
+    ask: answer({
+      blind: blind({
+        chunks: 10,
+        ever_recorded: true,
+        ever_stored: true,
+        master_stop_state: "stopping",
+      }),
+    }),
+    recording_state: "recording",
+    master_stop_state: "stopping",
+  });
+  await blindPending.type("找不到的歷史");
+  const said = blindPending.hitTexts().join("\n");
+  check("Blind pending 說新工作已拒絕且仍在排乾", said.includes("新工作已拒絕") && said.includes("仍在排乾"), said);
+  check("Blind pending 沒說三層已停", !said.includes("現在正全停中"), said);
+}
+
+console.log("82. desktop truth source contract 與三個 production callback self-mutations");
 {
   const main = read(MAIN);
   const dispatch = read(MASTER_STOP_DISPATCH);

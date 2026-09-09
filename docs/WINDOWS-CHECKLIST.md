@@ -10,7 +10,7 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.116 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+alpha.118 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
@@ -21,6 +21,29 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
+
+### alpha.118 先驗 master stop 的跨行程排乾
+
+自動測試已覆蓋永久 lock、pending publication、reader-first drain、release／admission／engage
+排序、slow privacy 後丟棄、brain／reviewer／hands 最後邊界與四態 renderer；Windows cross-check
+也會編譯 desktop test targets。這裡要驗的是正式 artifact 上真的有多個行程與 Windows file-lock
+語意，不拿那些綠燈代替。
+
+- [ ] 用同一個 disposable `--data-dir` 啟動 recorder 與 desktop，在另一個終端跑
+      `sister.exe stop-all`。命令回成功後，recorder 不得再新增 frame／OCR／focus／input，
+      新 query／interpret／reviewer 與 hands action 都須明確拒絕；重開 desktop／CLI 後仍維持
+      stopped，且系統匣與問答只指向「解除全停」，不顯示「在聽」。
+- [ ] 讓一份已准入的慢工作仍在跑時按「全部停止」。排乾期間 desktop 必須顯示「正在完成
+      全停」與「舊工作仍在排乾」，不可先寫「已全停」；新工作立刻拒絕。若測的是已送給 CLI
+      agent 的 request，最長可等 120 秒，且畫面不可聲稱 provider request 已取消。舊工作收尾
+      後 stop 才可回成功並切成「已全停」。
+- [ ] 在全停前先各按一次 pause 與 hands stop，再跑 `stop-all`／`stop-all --off`。解除後
+      `paused.flag` 與 `hands.stop` 必須仍在，capture 仍暫停、hands 仍拔著；分別解除後才恢復。
+      連按兩次 stop 的顯示時間必須保留第一次，兩個終端同時按也一樣。
+- [ ] 全部 AI-Sister 行程關閉後，用 disposable data dir 分別把 `master.stop.lock` 換成目錄、
+      把 `master.stop` 換成 dangling symlink／reparse fixture。desktop 必須顯示「狀態讀不到」而
+      不是「在聽」或「已全停」，新工作 fail closed；stop／resume 不得回報虛假的成功。測完
+      刪掉整個 disposable data dir，不要在日用資料目錄手工修 lock。
 
 ### alpha.115 先驗 installer upgrade／uninstall 的實際邊界
 

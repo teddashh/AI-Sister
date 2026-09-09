@@ -599,7 +599,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     真 Windows transport；設定頁真人點擊、四位立繪／八段播放、撤回 UX 與 packet trace
     仍須在 Ted 的正式 artifact 上實測，不能拿 CI 的成功下載代替。
 - 🔶 發布工程：安裝包／code signing／手動 installer 升級、single-instance、登入啟動、
-  desktop-owned recorder watchdog/backoff、跨 capture／brain／hands 的 master stop、官網一頁，
+  desktop-owned recorder watchdog/backoff、官網一頁，
   以及 Show HN / X 發文帶 benchmark 表。
   - ✅ alpha.68 版本說明。在這之前它是 `ci.yml` 裡寫死的一塊 570 行的字，
     每出一版往裡面疊一節「這一版：⋯⋯」再**整塊**貼上去——alpha.67 那份
@@ -671,6 +671,15 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     安裝根目錄之外的 portable 副本不在 installer 管轄；防毒軟體短暫獨佔會在重試後被當成
     「仍被開著」而拒絕，使用者重跑即可。正式 artifact 的 GUI 訊息框肉眼版仍在
     `docs/WINDOWS-CHECKLIST.md`。
+  - ✅ alpha.118 完成跨 capture／brain／hands 的 master stop。`stop-all` 在永久
+    turnstile 內先發佈 pending、拒絕所有新 admission，再以 activity lock 排乾已開始的
+    capture tick、brain CLI／outbound audit、reviewer product mutation 與 hands OS call；
+    durable `master.stop` 可見、pending 移除且 completed observation 驗過後才回成功。
+    `release` 只和 admission／pending publication 在線性化閘門上排序，不等舊 activity，
+    因此不形成 ABBA；concurrent 第二次 stop 保留第一個 pending timestamp。desktop、CLI
+    與 BlindSpots 共用 `clear`／`stopping`／`stopped`／`uncertain` 四態，排乾前不寫「三層
+    都停了」，讀不到時也不退回「在聽」。正式 Windows artifact 的跨行程 smoke 仍列在
+    Release 1.0 exit criteria，不能拿 cross-compile／Linux lock 測試冒充。
   - ✅ alpha.107 已接 Windows current-user 登入啟動：設定預設關閉、立即生效，
     `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 是唯一真相。只有 exact quoted
     `"<current sister-desktop.exe>" --ai-sister-login` 算 `enabled`；不存在、不相符、
@@ -742,7 +751,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     CLI／desktop `recording.lock`，
     以及各種取消、占用／未知、外部 recorder、desktop crash 與 uninstall。未勾完前不宣稱
     Windows 人工通過。
-  - ⬜ code signing、跨層 master stop 與官網仍未完成；
+  - ⬜ code signing 與官網仍未完成；
     1.0 不內建自動 updater，由使用者手動下載新版 installer。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）

@@ -14625,12 +14625,21 @@ pub mod query {
                 b.master_stopped_episodes
             ));
         }
-        if b.master_stopped_now {
-            let lead = if out.is_empty() { "她" } else { "而且她" };
-            out.push(format!(
+        let lead = if out.is_empty() { "她" } else { "而且她" };
+        match b.master_stop_state {
+            sister_hands::master_stop::State::Clear => {}
+            sister_hands::master_stop::State::Stopping => out.push(format!(
+                "{lead}**正在完成全停**——新工作已拒絕，先前開始的工作仍在排乾；`{}` 會解除這次全停。",
+                cmd(data_dir, "stop-all --off")
+            )),
+            sister_hands::master_stop::State::Stopped => out.push(format!(
                 "{lead}**現在正全停中**（`{}` 解除）——recorder、解釋層和手都不會工作。",
                 cmd(data_dir, "stop-all --off")
-            ));
+            )),
+            sister_hands::master_stop::State::Uncertain => out.push(format!(
+                "{lead}**現在讀不到可靠的全停狀態**——為安全起見不會開始新的 recorder、解釋或手部工作；可用 `{}` 嘗試重設。",
+                cmd(data_dir, "stop-all --off")
+            )),
         }
         // 沒有任何理由的時候只剩一句實話。而「每一段」這三個字要看她這次
         // 到底翻了多少：只掃了 30 天卻說「每一段」，是把十二分之一講成全部。
@@ -15115,6 +15124,28 @@ pub mod query {
                 out.contains(&format!("--data-dir {}", dir.0.display())),
                 "解除指令必須指回同一份資料目錄：{out}"
             );
+        }
+
+        #[test]
+        fn pending_and_uncertain_master_stop_states_never_claim_the_drain_finished() {
+            for (state, expected) in [
+                (sister_hands::master_stop::State::Stopping, "正在完成全停"),
+                (
+                    sister_hands::master_stop::State::Uncertain,
+                    "讀不到可靠的全停狀態",
+                ),
+            ] {
+                let out = lines(BlindSpots {
+                    chunks: 10,
+                    ever_recorded: true,
+                    ever_stored: true,
+                    master_stop_state: state,
+                    ..Default::default()
+                });
+                assert!(out.contains(expected), "{state:?}: {out}");
+                assert!(!out.contains("現在正全停中"), "{state:?}: {out}");
+                assert!(!out.contains("三層都停了"), "{state:?}: {out}");
+            }
         }
     }
 

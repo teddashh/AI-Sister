@@ -67,7 +67,10 @@ alpha.117 在 legacy scan 之後、NSIS `File` 之前再加一道檔案層獨佔
 Setup／uninstaller 就以 exit 32 拒絕、不 kill；拿到 handle 後舊檔先改名再寫新檔，Windows
 loader 沒有窗可映射。Windows CI 用公開 alpha.110 舊 recorder 的 hard link 別名實測過這件事。
 已經出貨或複製到 temp 的舊 uninstaller 仍不能 retroactively 改寫。
-code signing 與跨層 master stop 仍未完成，
+alpha.118 再完成跨 capture／brain／hands 的 master stop：`sister stop-all` 先拒絕新工作、
+等已開始的擷取、CLI agent、reviewer 寫入與 hands OS call 排乾，durable latch 真正生效後
+才回成功；系統匣、CLI 與問答分得出正在排乾、已完成、讀不到三種情況，不會提早說「都停了」。
+解除全停不會順手解除原本的暫停或拔手。code signing 仍未完成，
 所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
@@ -167,6 +170,8 @@ retroactively 修改。現在也還沒有 code signing，Windows 可能顯示未
 sister consent --grant local-recording
 sister doctor
 sister record --duration 60
+sister stop-all                 # 三層一起停；不會自己恢復
+sister stop-all --off           # 解除全停，不碰原本的暫停／拔手
 ```
 
 安裝版可直接開 AI-Sister；免安裝用法則開 `sister-desktop.exe`。然後問她剛剛那一分鐘

@@ -498,8 +498,12 @@ Azure TTS 是 §11.10 另外一條只送當前答案正文的明示路徑，不�
 現行 TTL（預設）：畫面 PNG 30 天；OCR/L1 文字 365 天；沒有一個程式其實未產生的
 「90 天縮圖層」。資料庫與 frame **沒有應用層加密**，依賴 BitLocker／FileVault／LUKS
 等 OS 全碟加密；匯出檔也不會自己加密。這個邊界要在產品裡明講，不能再用 SQLCipher
-選型表暗示已防離線竊碟。已有一鍵 pause、時間軸區間刪除與 cascade；panic wipe 與
-跨 capture／brain／hands 的單一「全部停止」是另列的產品／實作工作，未完成前不宣稱。
+選型表暗示已防離線竊碟。已有一鍵 pause、時間軸區間刪除與 cascade；panic wipe 仍是
+另列、未完成的產品工作。alpha.118 已完成跨 capture／brain／hands 的單一「全部停止」：
+命令先拒絕新工作，再等已准入的 capture tick、CLI agent、reviewer product mutation 與
+hands OS call 排乾，durable latch 發佈後才回成功；恢復不會順手解除原本的 pause 或拔手。
+若既有 CLI provider call 已送出，停止會等它最長 120 秒與本機 outbound audit 收尾，
+不宣稱能撤回 provider 已收到的 request。
 
 ### 11.5 旁人問題（誠實聲明）〔定案為無技術完解〕
 

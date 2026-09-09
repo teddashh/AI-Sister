@@ -52,6 +52,8 @@ sister.exe consent --grant local-recording --grant frame-storage
 sister.exe record --duration 60   # 錄一分鐘（省略 --duration 就錄到 Ctrl-C）
 sister.exe stats                  # 記了多少
 sister.exe query 電話             # 查，每筆都附出處
+sister.exe stop-all               # capture／brain／hands 一起停，不會自己恢復
+sister.exe stop-all --off         # 解除全停，不碰原本的 pause／拔手
 sister.exe prune --dry-run        # 保留期現在會刪掉什麼
 ```
 
@@ -73,6 +75,38 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
+
+
+## v0.1.0-alpha.118
+
+**這一版完成跨 capture／brain／hands 的 master stop。`sister stop-all` 不只放一個旗標：
+它先擋住所有新工作，等已獲准的工作跨過最後一個不可逆邊界並排乾，最後才發佈 durable
+`master.stop`、移除 pending 並回報「三層都停了」。**
+
+data dir 新增永久的 activity lock、turnstile lock 與只在排乾期間存在的
+`master.stop.pending`。capture 的整拍 admission、privacy／截圖／OCR 後的 persistence，brain
+的 CLI spawn、stdin 與 outbound audit，reviewer 的 L2／day-summary product mutation，以及
+hands 最後的 OS call 都走同一份 guard。全停先在 turnstile 內發佈 pending，再放開 turnstile
+等 activity readers 排乾，避免 boundary 與 engage 互等；解除只在線性化閘門內清 latch／pending，
+不拿 activity exclusive，因此和 admission／engage 沒有 ABBA lock cycle。兩個同時送出的 stop
+會沿用第一份 pending timestamp，不會把第一次停止時間洗成第二次。
+
+「拒絕新工作」和「舊工作已排乾」現在是兩個答案。desktop IPC、系統匣、CLI query 與
+BlindSpots 共用 `clear`／`stopping`／`stopped`／`uncertain` 四態：pending 只顯示「正在完成
+全停」，broken／symlink／non-regular protocol state 明講讀不到並 fail closed；只有 durable
+latch 完成才顯示「已全停」。事件仍以 revision 壓過較早的 poll，重疊 poll 也只有最新 request
+可落地。解除全停只清這組旗標，原本的 pause 與 hands stop 都保留。
+
+若 interpreter／reviewer 已把原文交給使用者安裝的 CLI agent，`stop-all` 會等該次最長
+120 秒的 CLI timeout 與本機 outbound audit 收尾後才回成功；這保證成功回條之後不會首次
+寫出新的產品記憶，不表示 provider 已收到的 request 被取消或撤回。doctor／bench 在全停時
+也不再探測 live focus、網址或螢幕。
+
+自動驗證包含 reader-first drain、32 輪 release／admission／engage 排程、慢 privacy 後丟棄、
+stale brain permit、模型回來後停止、最後唯一 reviewer card、hands OS closure、doctor production
+wiring、measured release tick、四態 renderer 與八刀定點 mutation；Windows desktop／CLI 的
+cross-check 與 lint 已通過。這些仍不是正式 `AI-Sister-Setup.exe` 上的跨行程人工 smoke；
+那一格繼續留在 Release 1.0 checklist。code signing 與官網也仍未完成。
 
 
 ## v0.1.0-alpha.117

@@ -162,10 +162,10 @@ symlink／non-regular file 或無法取得，mutation fail closed，不跟著鎖
 判斷走的是 `symlink_metadata`，目錄項在就算在。
 
 程式有兩個刻意不同的觀察：`master_stop::is_stopped()` 是 operational gate，pending、
-讀不到或協定損壞都算停止；`master_stop::is_engaged()` 只在 drain 完成、durable latch 已
-發佈時才是 true。狀態畫面若要寫「三層都停了」必須接後者；desktop/core BlindSpots
-尚未包含在這一輪的修改範圍，下一次 integration pass 必須改接這個 completed observation，
-不能用前者把「正在等舊活動排乾」說成「已經停完」。
+讀不到或協定損壞都算停止；`master_stop::state()` 則把畫面要講的事分成 `clear`、
+`stopping`、`stopped`、`uncertain`。desktop 與 core BlindSpots 都直傳這個 enum：只有
+`stopped` 能寫「三層都停了」，`stopping` 只說新工作已拒絕、舊工作仍在排乾；
+`uncertain` 明講讀不到，不能退回「在聽」。
 
 若 interpreter／reviewer 已把 stdin 交給使用者的 CLI，`stop-all` 會等該次 CLI 的
 `SPAWN_TIMEOUT`（目前 120 秒）結束並完成本機 outbound audit，之後才回成功。這只保證
