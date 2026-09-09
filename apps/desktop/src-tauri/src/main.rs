@@ -869,10 +869,8 @@ enum MasterStopAction {
 fn set_master_stop(data_dir: Option<&Path>, action: MasterStopAction) -> Result<(), String> {
     let dir = data_dir.ok_or_else(|| "找不到資料目錄，全停開關沒有作用".to_owned())?;
     match action {
-        MasterStopAction::Engage => {
-            sister_hands::master_stop::engage(dir, sister_core::now_ms())
-                .map_err(|error| format!("全部停止失敗：{error}"))
-        }
+        MasterStopAction::Engage => sister_hands::master_stop::engage(dir, sister_core::now_ms())
+            .map_err(|error| format!("全部停止失敗：{error}")),
         MasterStopAction::Release => sister_hands::master_stop::release(dir)
             .map_err(|error| format!("解除全停失敗：{error}")),
     }
@@ -911,9 +909,7 @@ mod master_stop_desktop_tests {
             ("全部停止", "解除全停（現在沒有全停）")
         );
         assert_eq!(
-            master_stop_labels(Some(sister_hands::Attached::No {
-                since_ms: Some(10)
-            })),
+            master_stop_labels(Some(sister_hands::Attached::No { since_ms: Some(10) })),
             ("全部停止", "解除全停（現在沒有全停）")
         );
         assert_eq!(
@@ -933,9 +929,7 @@ mod master_stop_desktop_tests {
         set_master_stop(Some(&dir), MasterStopAction::Engage).expect("engage master stop");
         assert!(matches!(
             master_stop_attached(Some(&dir)),
-            Some(sister_hands::Attached::MasterStopped {
-                since_ms: Some(_)
-            })
+            Some(sister_hands::Attached::MasterStopped { since_ms: Some(_) })
         ));
         set_master_stop(Some(&dir), MasterStopAction::Release).expect("release master stop");
 
