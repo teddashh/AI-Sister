@@ -628,30 +628,33 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     consent，並用 `export --with-frames` 搬出同 hash 的 synthetic PNG。這證明可匯出的
     evidence file association，不冒充真 OCR、`frame_get` 或 WebView click；正式 artifact 的人工升級
     體驗仍另驗。
-  - ✅ alpha.113 移除**本版產生之 section** 的 Tauri stock forced-kill 選項。Setup 透過
-    pinned `SetContext` 在 `.onInit` 取得 lifecycle mutex，成功路徑跨住
-    `PageLeaveReinstall`、WebView2 與 payload／安裝登錄直到 `POSTINSTALL`；direct
-    uninstaller 在確認頁後的 `PREUNINSTALL` 取得，成功路徑持有到 `POSTUNINSTALL`。拒絕
-    先釋放，取消由 process teardown 關閉。由 Setup 啟動的 alpha.113+ child 會先驗
-    inherited dynamic capability，再借用而不關閉 parent marker；child 自己 OpenMutex 得到的
-    handle 會持有到 `POSTUNINSTALL`，避免 parent 異常退出時讓 fixed object 在 child mutation
-    中途消失。無關的第二份 Setup 看見 existing object 或無法建立時 fail closed。
-    alpha.113-aware desktop／CLI 在 log、DB、WebView 與 AI-Sister 記憶／設定之前執行
-    mutex → product event → mutex 握手，並持有 event 到行程結束；installer 取得 mutex 後
-    只有明確量到 event 不存在才繼續。legacy `FindProcessCurrentUser` 仍掃所有 matching
-    image name，作為向後相容與 pre-main fallback，不是 aware admission authority；reported
-    hit 先釋放 marker、exit 32 且不呼叫 kill，但它沒有 Unknown，
-    snapshot、token 或 SID 查詢失敗會和未找到合併。原生 Windows CI 只走 `/S`，以 exact
-    15 秒 acquire window 與 5 秒 after-scan window 驗新版 early admission、並行 Setup 與
-    一般可列舉 fixture；它沒有執行 PageLeave callback，也沒有驗 scanner error。
+  - ✅ alpha.113 移除**本版產生之 section** 的 Tauri stock forced-kill 選項；legacy
+    `FindProcessCurrentUser` reported hit 只拒絕，不呼叫 kill。alpha.115 針對真人升級時
+    PageLeave child 把自己當 direct uninstall、撞上 parent lifecycle mutex 的失敗，固定使用
+    pinned tauri-bundler 2.9.4 custom NSIS template：Setup 不再巢狀執行已安裝的 NSIS
+    uninstaller，也不再依賴 inherited capability／borrow。
+  - ✅ 同版 repair 或由舊版升新版時，alpha.115 Setup 在 `.onInit` 取得 lifecycle mutex，
+    綁定 current-user 產品鍵所記的 exact root 原地覆蓋，並與 uninstall key 交叉核對，成功路徑持有到
+    `POSTINSTALL`。GUI、passive `/P` 與 silent `/S` 都在 WebView2、payload 或安裝登錄
+    mutation 前重驗 installed `DisplayVersion`、root 與 quoted `UninstallString`；downgrade
+    不執行新版 uninstaller，須關閉 Setup 後從 Windows「已安裝的應用程式」分開移除。
+    direct uninstaller 在確認頁後的 `PREUNINSTALL` 取得 mutex，再重驗 exact version、root
+    與 string，避免 stale confirmation 刪掉期間已覆蓋的新版；成功路徑持有到
+    `POSTUNINSTALL`。拒絕先釋放，取消由 process teardown 關閉。
+  - ✅ alpha.113-aware desktop／CLI 繼續在 log、DB、WebView 與 AI-Sister 記憶／設定之前
+    執行 mutex → product event → mutex 握手，並持有 event 到行程結束；installer 取得 mutex
+    後只有明確量到 event 不存在才繼續。legacy scanner 仍只作向後相容與 pre-main fallback，
+    沒有 Unknown，snapshot、token 或 SID 查詢失敗會和未找到合併。原生 Windows CI 新增
+    真正進入 `PageReinstall` 的 `/P` lane，以 alternate `/D` + `PING.EXE` child witness 驗
+    registry-root 原地覆蓋且 child 未執行；另以 `/S` 驗 downgrade 在 mutation 前退出。這是
+    native automation，不是滑鼠真人互動通過紀錄。
   - ⬜ 正式 `AI-Sister-Setup.exe` 的斷網安裝仍待 Ted 實測；在線 CI 與靜態網路邊界
     只證明 WebView2 offline installer 已內嵌、程式沒有 updater／直接 socket。
   - ⬜ installer late-start 的跨版本完整 lifecycle 仍未完成。舊 binary 不持有 product event，
-    legacy scanner 又可能把列舉／token／SID error 當成未找到；較舊的
-    `PageLeaveReinstall` child 執行時外層 marker 仍會擋 aware product，但 child 保留自己的
-    版本行為，不能由 alpha.113 section 的 no-kill 規則代為保證。即使是 alpha.113-aware
-    binary，Windows loader 仍在 Rust `main` admission 前映射 executable，最後一次 legacy
-    scan 到 NSIS `File` 之間可能撞到 image mapping。
+    legacy scanner 又可能把列舉／token／SID error 當成未找到；已經出貨或複製到 temp 的
+    alpha.114 uninstaller 無法由 alpha.115 retroactively 改寫，新版只保證自己的 Setup 不再
+    啟動它。即使是 alpha.113-aware binary，Windows loader 仍在 Rust `main` admission 前映射
+    executable，最後一次 legacy scan 到 NSIS `File` 之間可能撞到 image mapping。
     尚未有 old-binary bridge 或 file-level exclusion，這格保持未勾。
   - ✅ alpha.107 已接 Windows current-user 登入啟動：設定預設關閉、立即生效，
     `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 是唯一真相。只有 exact quoted
@@ -724,7 +727,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     CLI／desktop `recording.lock`，
     以及各種取消、占用／未知、外部 recorder、desktop crash 與 uninstall。未勾完前不宣稱
     Windows 人工通過。
-  - ⬜ code signing、跨層 master stop、上述 alpha.112 → alpha.113 installer late-start
+  - ⬜ code signing、跨層 master stop、上述跨版本 installer late-start
     bridge／最後 scan → `File` 窄窗與官網仍未完成；
     1.0 不內建自動 updater，由使用者手動下載新版 installer。
 

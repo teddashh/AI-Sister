@@ -1098,6 +1098,7 @@ jobs:
           $portableDesktop = (Resolve-Path 'apps/desktop/src-tauri/target/release/sister-desktop.exe').Path
           $portableSister = (Resolve-Path 'target/release/sister.exe').Path
           $installDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-smoke'
+          $alternateInstallDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-must-not-use'
           $dataDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-memory'
           $configPath = Join-Path $env:RUNNER_TEMP 'ai-sister-installer.toml'
           $admissionRecordDataDir = Join-Path $env:RUNNER_TEMP 'ai-sister-installer-admission-record'
@@ -1112,12 +1113,16 @@ jobs:
           $loginRunName = 'AI-Sister'
           $unrelatedRunName = 'AI-Sister-CI-Unrelated'
           $unrelatedRunValue = '"C:\Windows\System32\notepad.exe" --ai-sister-ci-unrelated'
-          if ($installDir -match '\s' -or $dataDir -match '\s' -or
+          if ($installDir -match '\s' -or $alternateInstallDir -match '\s' -or
+              $dataDir -match '\s' -or
               $configPath -match '\s' -or $admissionRecordDataDir -match '\s') {
             throw 'NSIS /D 與 recorder smoke 使用的暫存路徑不可含空白'
           }
           if (Test-Path -LiteralPath $installDir) {
             throw "installer smoke 起點不是 fresh install root：$installDir"
+          }
+          if (Test-Path -LiteralPath $alternateInstallDir) {
+            throw "installer smoke 起點已有 alternate install root：$alternateInstallDir"
           }
 
           function Run-Setup([int] $expectedExit) {
@@ -1125,6 +1130,41 @@ jobs:
               -ArgumentList @('/S', '/NS', "/D=$installDir") -Wait -PassThru
             if ($process.ExitCode -ne $expectedExit) {
               throw "setup exit code 應為 $expectedExit，實際 $($process.ExitCode)"
+            }
+          }
+
+          function Run-PassiveSetup(
+            [int] $expectedExit,
+            [string] $label,
+            [string] $requestedDir = $installDir
+          ) {
+            $info = [System.Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $setup
+            $info.UseShellExecute = $false
+            $null = $info.ArgumentList.Add('/P')
+            $null = $info.ArgumentList.Add('/NS')
+            $null = $info.ArgumentList.Add("/D=$requestedDir")
+            $process = [System.Diagnostics.Process]::Start($info)
+            if ($null -eq $process) {
+              throw "$label 無法啟動 passive Setup"
+            }
+            try {
+              if (-not $process.WaitForExit(240000)) {
+                # 只終止這個 disposable Setup 的 captured process tree；壞版會在巢狀
+                # uninstaller MessageBox 無限等待，不能讓整個 Windows job 靠總 timeout 收尾。
+                & "$env:WINDIR\System32\taskkill.exe" /PID $process.Id /T /F 2>&1 | Out-Null
+                throw "$label 超過 240 秒；可能又卡在巢狀 uninstaller"
+              }
+              if ($process.ExitCode -ne $expectedExit) {
+                throw "$label exit code 應為 $expectedExit，實際 $($process.ExitCode)"
+              }
+            }
+            finally {
+              if (-not $process.HasExited) {
+                & "$env:WINDIR\System32\taskkill.exe" /PID $process.Id /T /F 2>&1 | Out-Null
+                $null = $process.WaitForExit(30000)
+              }
+              $process.Dispose()
             }
           }
 
@@ -1224,6 +1264,49 @@ jobs:
               }
             }
             return ($lines -join "`n")
+          }
+
+          function Get-RegistryReceipt([string] $path, [string[]] $selectedNames) {
+            $key = Get-Item -LiteralPath $path
+            try {
+              $availableNames = @($key.GetValueNames())
+              $names = if ($selectedNames.Count -eq 0) {
+                @($availableNames | Sort-Object)
+              }
+              else {
+                @($selectedNames | Sort-Object)
+              }
+              $lines = @()
+              foreach ($name in $names) {
+                $encodedName = [Convert]::ToBase64String(
+                  [Text.Encoding]::UTF8.GetBytes($name))
+                if ($availableNames -notcontains $name) {
+                  $lines += "A|$encodedName"
+                  continue
+                }
+                $kind = $key.GetValueKind($name)
+                $value = $key.GetValue(
+                  $name,
+                  $null,
+                  [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                $serialized = if ($value -is [byte[]]) {
+                  [Convert]::ToBase64String($value)
+                }
+                elseif ($value -is [string[]]) {
+                  $value | ConvertTo-Json -Compress
+                }
+                else {
+                  [Convert]::ToString($value, [Globalization.CultureInfo]::InvariantCulture)
+                }
+                $encodedValue = [Convert]::ToBase64String(
+                  [Text.Encoding]::UTF8.GetBytes($serialized))
+                $lines += "V|$encodedName|$kind|$($value.GetType().FullName)|$encodedValue"
+              }
+              return ($lines -join "`n")
+            }
+            finally {
+              $key.Close()
+            }
           }
 
           function Assert-ProductFiles {
@@ -1802,7 +1885,195 @@ jobs:
           Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
             'same-version reinstall 改動了無關 Run value'
 
+          # `/S` 會跳過 PageReinstall，所以 downgrade 必須在真正寫入 payload 前由
+          # EarlyChecks 自己判定。把登錄版本暫時抬高後，整棵 product tree、兩筆 Run
+          # value 與 uninstall metadata 都必須逐值不動；結束再恢復目前版本供後續案例使用。
+          Set-ItemProperty -LiteralPath $uninstallKey -Name DisplayVersion -Value '9.0.0'
+          $downgradeTreeBefore = Get-ProductTreeReceipt $installDir
+          $downgradeRunBefore = Get-RegistryReceipt `
+            $runKey @($loginRunName, $unrelatedRunName)
+          $downgradeMetadataBefore = Get-RegistryReceipt $uninstallKey @()
+          try {
+            Run-Setup 1
+            if ((Get-ProductTreeReceipt $installDir) -cne $downgradeTreeBefore) {
+              throw 'silent downgrade 拒絕時改動了 installed product payload'
+            }
+            if ((Get-RegistryReceipt `
+                  $runKey @($loginRunName, $unrelatedRunName)) -cne $downgradeRunBefore) {
+              throw 'silent downgrade 拒絕時改動了 product／unrelated Run value'
+            }
+            if ((Get-RegistryReceipt $uninstallKey @()) -cne $downgradeMetadataBefore) {
+              throw 'silent downgrade 拒絕時改動了 uninstall metadata'
+            }
+            if ((Get-FileHash $db -Algorithm SHA256).Hash -ne $dbHash) {
+              throw 'silent downgrade 拒絕時改動了 install root 外的記憶資料庫'
+            }
+          }
+          finally {
+            if (Test-Path -LiteralPath $uninstallKey) {
+              Set-ItemProperty -LiteralPath $uninstallKey -Name DisplayVersion -Value $version
+            }
+          }
+          $installed = Get-ItemProperty -LiteralPath $uninstallKey
+          if ($installed.DisplayVersion -cne $version) {
+            throw "silent downgrade fixture 沒恢復目前版本：$($installed.DisplayVersion)"
+          }
+
+          # nsis_tauri_utils v0.5.3 把 valid-vs-malformed 也回成 1，不能拿同一個 1
+          # 同時表示「已安裝舊版」與「根本沒解析版本」。EarlyChecks 先用最低合法
+          # SemVer 做 parse sentinel；非空壞字串必須 exit 32 且全程零 mutation。
+          Set-ItemProperty -LiteralPath $uninstallKey -Name DisplayVersion `
+            -Value 'not-a-semver'
+          $invalidVersionTreeBefore = Get-ProductTreeReceipt $installDir
+          $invalidVersionRunBefore = Get-RegistryReceipt `
+            $runKey @($loginRunName, $unrelatedRunName)
+          $invalidVersionMetadataBefore = Get-RegistryReceipt $uninstallKey @()
+          try {
+            Run-Setup 32
+            if ((Get-ProductTreeReceipt $installDir) -cne $invalidVersionTreeBefore) {
+              throw 'malformed installed version 拒絕時改動了 installed product payload'
+            }
+            if ((Get-RegistryReceipt `
+                  $runKey @($loginRunName, $unrelatedRunName)) -cne
+                $invalidVersionRunBefore) {
+              throw 'malformed installed version 拒絕時改動了 product／unrelated Run value'
+            }
+            if ((Get-RegistryReceipt $uninstallKey @()) -cne
+                $invalidVersionMetadataBefore) {
+              throw 'malformed installed version 拒絕時改動了 uninstall metadata'
+            }
+            if ((Get-FileHash $db -Algorithm SHA256).Hash -ne $dbHash) {
+              throw 'malformed installed version 拒絕時改動了 install root 外的記憶資料庫'
+            }
+            Assert-NamedMutexAbsent $lifecycleMutexName `
+              'malformed installed version 拒絕後 installer lifecycle mutex 仍存在'
+          }
+          finally {
+            if (Test-Path -LiteralPath $uninstallKey) {
+              Set-ItemProperty -LiteralPath $uninstallKey -Name DisplayVersion -Value $version
+            }
+          }
+          $installed = Get-ItemProperty -LiteralPath $uninstallKey
+          if ($installed.DisplayVersion -cne $version) {
+            throw "malformed version fixture 沒恢復目前版本：$($installed.DisplayVersion)"
+          }
+
+          # 真正執行 PageReinstall 的 passive lane。stock Tauri 在同版、沒有 radio HWND 時
+          # 會把 state=0 當成「解除安裝」，再從持有 lifecycle mutex 的 Setup 巢狀啟動
+          # uninstaller；alpha.113/114 的真機失敗就卡在這裡。保留 exact registered
+          # UninstallString，但把它指到的檔案內容換成會失敗的 PING.EXE；同時故意用另一個
+          # `/D`。pinned template 必須不執行舊 child、綁回已登錄 root 原地修復。
           $uninstaller = Join-Path $installDir 'uninstall.exe'
+          $expectedUninstallString = '"' + $uninstaller + '"'
+          $installed = Get-ItemProperty -LiteralPath $uninstallKey
+          if ($installed.DisplayVersion -cne $version -or
+              $installed.InstallLocation -cne $exactQuotedInstallDir -or
+              $installed.UninstallString -cne $expectedUninstallString) {
+            throw 'passive in-place fixture 起點沒有 exact registered install binding'
+          }
+          $passiveMetadataBefore = Get-RegistryReceipt $uninstallKey @()
+          $passiveRunBefore = Get-RegistryReceipt `
+            $runKey @($loginRunName, $unrelatedRunName)
+          $ping = Join-Path $env:WINDIR 'System32\PING.EXE'
+          $pingHash = (Get-FileHash -LiteralPath $ping -Algorithm SHA256).Hash
+          Copy-Item -LiteralPath $ping -Destination $uninstaller -Force
+          if ((Get-FileHash -LiteralPath $uninstaller -Algorithm SHA256).Hash -cne $pingHash) {
+            throw 'passive in-place fixture 沒有把 registered uninstaller 換成 exact PING.EXE'
+          }
+          Run-PassiveSetup 0 'same-version PageReinstall in-place lane' $alternateInstallDir
+          if (Test-Path -LiteralPath $alternateInstallDir) {
+            throw 'passive in-place repair 使用了呼叫端的 alternate /D，沒有綁回 registered root'
+          }
+          Assert-ProductFiles
+          Assert-ExactFile $desktop $releaseDesktop `
+            'passive in-place repair 後的 desktop 不再是 exact installer payload'
+          if ((Get-FileHash $sister -Algorithm SHA256).Hash -ne
+              (Get-FileHash $portableSister -Algorithm SHA256).Hash) {
+            throw 'passive in-place repair 後的 sister 不再是 exact installer payload'
+          }
+          Assert-Pe $uninstaller 0x014c 0x10b
+          if ((Get-FileHash -LiteralPath $uninstaller -Algorithm SHA256).Hash -ceq $pingHash) {
+            throw 'passive in-place repair 沒有把 PING fixture 換回 NSIS x86 uninstaller'
+          }
+          if ((Get-FileHash $db -Algorithm SHA256).Hash -ne $dbHash) {
+            throw 'passive in-place repair 改動了 install root 之外的既有記憶資料庫'
+          }
+          if ((Get-RegistryReceipt `
+                $runKey @($loginRunName, $unrelatedRunName)) -cne $passiveRunBefore) {
+            throw 'passive in-place repair 改動了 product／unrelated Run value'
+          }
+          if ((Get-RegistryReceipt $uninstallKey @()) -cne $passiveMetadataBefore) {
+            throw 'passive in-place repair 沒保留 exact uninstall metadata'
+          }
+          $installed = Get-ItemProperty -LiteralPath $uninstallKey
+          if ($installed.DisplayVersion -cne $version -or
+              $installed.InstallLocation -cne $exactQuotedInstallDir -or
+              $installed.UninstallString -cne $expectedUninstallString) {
+            throw "passive in-place repair 沒保留 exact metadata：version=$($installed.DisplayVersion) root=$($installed.InstallLocation) uninstall=$($installed.UninstallString)"
+          }
+          Assert-NamedMutexAbsent $lifecycleMutexName `
+            'passive in-place repair 結束後 installer lifecycle mutex 仍存在'
+          Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+            'passive in-place repair 沒保留 exact 登入啟動值'
+          Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+            'passive in-place repair 改動了無關 Run value'
+
+          # alpha.115 的 uninstaller 必須在取得 lifecycle lock、完成 process scan 後重新
+          # 核對 identity。用較新的登錄版本模擬「舊移除視窗開著時已完成更新」：inner
+          # uninstaller 可以收尾，但不得刪除或改寫較新的 product、metadata、Run 或 DB。
+          $staleUninstaller = $null
+          Set-ItemProperty -LiteralPath $uninstallKey -Name DisplayVersion -Value '9.0.0'
+          $staleUninstallTreeBefore = Get-ProductTreeReceipt $installDir
+          $staleUninstallMetadataBefore = Get-RegistryReceipt $uninstallKey @()
+          $staleUninstallRunBefore = Get-RegistryReceipt `
+            $runKey @($loginRunName, $unrelatedRunName)
+          $staleUninstallDbBefore = (Get-FileHash $db -Algorithm SHA256).Hash
+          try {
+            $staleUninstallInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $staleUninstallInfo.FileName = $uninstaller
+            $staleUninstallInfo.UseShellExecute = $false
+            $null = $staleUninstallInfo.ArgumentList.Add('/S')
+            $staleUninstallInfo.EnvironmentVariables['AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN_MS'] = '5000'
+            $staleUninstaller = [System.Diagnostics.Process]::Start($staleUninstallInfo)
+            if ($null -eq $staleUninstaller) {
+              throw 'stale identity diagnostic uninstaller 無法啟動'
+            }
+            Wait-NamedMutex $afterScanMutexName $null `
+              'stale identity uninstaller 沒有進入 after-process-scan window'
+            Wait-NamedMutexGone $lifecycleMutexName `
+              'stale identity uninstaller 沒有 fail-closed 並釋放 lifecycle mutex'
+            if (-not $staleUninstaller.HasExited -and
+                -not $staleUninstaller.WaitForExit(60000)) {
+              throw 'stale identity 被拒絕後 uninstaller 外層行程沒有收尾'
+            }
+            Assert-NamedMutexAbsent $afterScanMutexName `
+              'stale identity uninstaller 收尾後 diagnostic mutex 仍存在'
+            if ((Get-ProductTreeReceipt $installDir) -cne $staleUninstallTreeBefore) {
+              throw 'stale identity uninstaller 改動了較新的 installed product payload'
+            }
+            if ((Get-RegistryReceipt $uninstallKey @()) -cne
+                $staleUninstallMetadataBefore) {
+              throw 'stale identity uninstaller 改動了較新的 uninstall metadata'
+            }
+            if ((Get-RegistryReceipt `
+                  $runKey @($loginRunName, $unrelatedRunName)) -cne
+                $staleUninstallRunBefore) {
+              throw 'stale identity uninstaller 改動了 product／unrelated Run value'
+            }
+            if ((Get-FileHash $db -Algorithm SHA256).Hash -ne $staleUninstallDbBefore) {
+              throw 'stale identity uninstaller 改動了 install root 外的記憶資料庫'
+            }
+          }
+          finally {
+            Stop-DiagnosticProcess $staleUninstaller
+            if (Test-Path -LiteralPath $uninstallKey) {
+              Set-ItemProperty -LiteralPath $uninstallKey -Name DisplayVersion -Value $version
+            }
+          }
+          $installed = Get-ItemProperty -LiteralPath $uninstallKey
+          if ($installed.DisplayVersion -cne $version) {
+            throw "stale identity fixture 沒恢復目前版本：$($installed.DisplayVersion)"
+          }
 
           # Uninstaller 會先自我複製，外層 PID 與 exit code 都不是 inner hook 的可靠
           # receipt；用 inner 建立／釋放的兩顆 mutex 當邊界。fixture 在 PRE scan 後
@@ -1873,11 +2144,11 @@ jobs:
           }
           Remove-ItemProperty -LiteralPath $runKey -Name $unrelatedRunName
 
-      # 這一場不能跟上面的 same-version reinstall 混在一起。它下載最後一個已公開、
-      # hash/bytes 固定的 immutable release，先真的裝出舊 binary 與舊版 DB，再拿這一輪
-      # NSIS 原地升級。腳本另釘 expected current version；即使中間的 release 沒有公開
-      # installer，也不能把「其實又裝了同一版」印成跨版成功。
-      - name: Installer — pinned last public release to current upgrade preserves memory
+      # 這一場不能跟上面的 same-version reinstall 混在一起。它固定下載 alpha.110
+      # compatibility baseline，先真的裝出舊 binary 與舊版 DB，再拿這一輪 NSIS 原地升級。
+      # alpha.110 不是目前最後一個公開版本；保留它是為了持續驗證較長距離的格式相容。
+      # 腳本另釘 expected current version，不能把「其實又裝了同一版」印成跨版成功。
+      - name: Installer — pinned alpha.110 compatibility baseline to current preserves memory
         shell: pwsh
         timeout-minutes: 30
         run: |

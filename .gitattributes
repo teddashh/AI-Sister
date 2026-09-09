@@ -14,3 +14,7 @@ apps/desktop/src-tauri/icons/manifest.json text eol=lf
 apps/desktop/src-tauri/icons/NOTICE.md text eol=lf
 apps/desktop/icon/icon.html text eol=lf
 scripts/make-icons.sh text eol=lf
+
+# The complete NSIS template is a reviewed, SHA-256-pinned mutation authority.
+# Windows checkout must not rewrite it before the installer is rendered.
+apps/desktop/src-tauri/windows/installer.nsi text eol=lf

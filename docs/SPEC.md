@@ -645,46 +645,46 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
   預設關閉〔定案〕；
 - 所有內部 Tauri IPC 使用 strict serde DTO；前端對封閉集合做窮舉檢查。
 
-**Windows installer admission（alpha.113）：**
+**Windows installer admission（alpha.115）：**
 
 - Tauri stock `CheckIfAppIsRunning` macro 必須由產品 hook 覆寫。本版產生的 Setup／uninstaller
-  無論 silent／interactive，對 legacy scan 的 **reported hit** 都只准拒絕，不顯示「替你關閉」
-  選項，也不呼叫 kill。`FindProcessCurrentUser` 只有 found／not-found，沒有 Unknown；process
-  snapshot、OpenProcess、token 或 SID 查詢失敗會和未找到合併。它仍掃所有 matching image
-  name，作為向後相容與 pre-main fallback，不能當 alpha.113-aware admission 的 authority。
-- Setup 透過覆寫 pinned `SetContext`，在 `.onInit` 建立固定名稱的 installer mutex，早於
-  `PageLeaveReinstall`、WiX migration、WebView2 與任何 AI-Sister payload／安裝登錄 section，
-  成功 mutation path 持有到 `POSTINSTALL`。它另建立 per-parent dynamic named event，透過
-  Setup process environment 把名稱傳給後續 child；alpha.113+ PageLeave uninstaller 必須
-  同時驗證 fixed parent mutex 與該 event，
-  才能借用 marker，而且不得關閉 parent handles；它把自己 OpenMutex 得到的 handle 持到
-  `POSTUNINSTALL`，讓 parent 異常退出也不會在 child mutation 中途移除 fixed object。無關的
-  第二份 Setup 不得信任 ambient
-  capability，看到 existing mutex 或任何 native error 都以 32 fail closed。
-- direct uninstaller 讓確認頁先完成，在任何移除 mutation 前的 `PREUNINSTALL` 才自行取得 mutex，
-  成功 mutation path 持有到 `POSTUNINSTALL`；若它是上述 PageLeave child，則走已驗證的 borrow。
-  scan hit 必須先
-  釋放自己的 marker 或結束 borrow，再顯示「請先停止」並 exit 32，讓使用者之後仍能另跑 CLI stop。
-  其他拒絕路徑也先關閉自己取得的 handles；使用者取消或 process 結束時由 OS 回收。
-- alpha.113-aware desktop 先解析窄的 launch intent，接著在 logging、data-dir、Tauri
+  無論 GUI、passive 或 silent，對 legacy scan 的 **reported hit** 都只准拒絕，不顯示
+  「替你關閉」選項，也不呼叫 kill。`FindProcessCurrentUser` 只有 found／not-found，沒有
+  Unknown；process snapshot、OpenProcess、token 或 SID 查詢失敗會和未找到合併。它仍掃所有
+  matching image name，作為向後相容與 pre-main fallback，不能當 aware admission authority。
+- Windows bundle 固定使用 pinned tauri-bundler 2.9.4 custom NSIS template。Setup 在 `.onInit`
+  建立固定名稱的 lifecycle mutex，成功 mutation path 持有到 `POSTINSTALL`；它**絕不巢狀執行
+  已安裝的 NSIS uninstaller**。同版 repair 或由舊版升新版時，install root 只能綁定
+  current-user `${MANUPRODUCTKEY}` 的 exact root，再由 Setup 原地覆蓋；版本與移除程式則由
+  `${UNINSTKEY}` 的 `DisplayVersion`／`UninstallString` 交叉核對，不接受命令列 `/D` 把既有安裝搬到別處。
+- GUI、passive `/P` 與 silent `/S` 都須在 WebView2、payload 或安裝登錄 mutation 前，重新讀取
+  並核對 installed `DisplayVersion`、exact install root 與 exact quoted `UninstallString`。
+  metadata 缺失、改變或互不對應時 fail closed；若 Setup 版本低於已安裝版本也不得啟動新版
+  uninstaller，使用者必須關閉 Setup，再從 Windows「已安裝的應用程式」分開移除。
+- direct uninstaller 讓確認頁先完成，在任何移除 mutation 前的 `PREUNINSTALL` 才取得 mutex，
+  並重新核對自己編入的 exact version、目前 executable parent root 與 quoted uninstall string；
+  成功 mutation path 持有到 `POSTUNINSTALL`。因此使用者停在確認頁時若另一份 Setup 已完成
+  升級，舊 confirmation 不能接著刪除新版。scan hit 或 metadata refusal 都必須先釋放自己取得的
+  handles；使用者取消或 process 結束時由 OS 回收。
+- alpha.113-aware desktop 仍先解析窄的 launch intent，接著在 logging、data-dir、Tauri
   plugin／WebView、DB 與 recorder admission 前依序「探測 installer mutex → 建立 shared
   product event → 再探測 mutex」，成功後持有 event 到行程結束；`sister.exe` 在 clap、logging、
   data-dir、config、DB 與 AI-Sister 記憶／設定之前做同一件事。installer 取得 mutex 後探測
   product event；只有 kernel 明確回答對向 object 不存在才繼續，present、close failure 或其他
   native error 都 fail closed。這個 mutex／event／mutex handshake 才是 aware-product 的雙向
   admission；image-name scan 不是。
-- 原生 Windows release gate 的 installer lanes 都使用 `/S`。acquire window 只接受 exact
-  `AI_SISTER_DIAGNOSTIC_INSTALL_DELAY_MS=15000`，after-scan window 只接受 exact `5000`；它們驗
-  installer-first 的 desktop／CLI early rejection、第二份 Setup refusal，以及一般可列舉同名
-  fixture 的 reported-hit/no-kill。`/S` 不執行 PageLeave callback，ordinary fixture 也沒有驗
-  scanner 的 snapshot／token／SID error；不得把這些 CI receipts 外推成 interactive handoff 或
-  legacy scan fail closed。
-- 這不是跨版本完整 atomic lifecycle。舊 binary 不持有 product event；legacy scanner 可能把
-  native error 當成未找到。較舊的 PageLeave child 執行時，外層 marker 仍排除 aware product，
-  但 child 依然保留自己的 forced-kill／scan 行為。
-  Windows loader 又在 Rust `main` 前映射 executable，因此最後一次 legacy scan 到 NSIS `File`
-  之間仍可能撞到 image mapping。沒有 old-binary bridge 或 file-level exclusion 前，Release 1.0
-  的 installer late-start exit criterion 維持未完成。
+- 原生 Windows release gate 除既有 `/S` admission lanes，另以 `/P` 真正進入
+  `PageReinstall`，使用 alternate `/D` 並把已安裝 `uninstall.exe` 換成 `PING.EXE` child witness，
+  斷言 Setup 綁回 registry root、沒有執行 child，且原地恢復正確 payload／metadata；另以 `/S`
+  downgrade fixture 斷言在 mutation 前退出。這些是 native automation，不是滑鼠真人互動。
+  acquire／after-scan fixtures 仍只證明一般可列舉同名 process 的 reported-hit/no-kill，沒有驗
+  scanner 的 snapshot／token／SID error。
+- 這不是跨版本完整 atomic lifecycle。已出貨或已複製到 temp 的 alpha.114 uninstaller 不能由
+  alpha.115 retroactively 改寫；新版只保證自己的 Setup 不再啟動那個舊 child。舊 binary 不持有
+  product event，legacy scanner 可能把 native error 當成未找到；Windows loader 又在 Rust
+  `main` 前映射 executable，因此最後一次 legacy scan 到 NSIS `File` 之間仍可能撞到 image
+  mapping。沒有 old-binary bridge 或 file-level exclusion 前，Release 1.0 的 installer late-start
+  exit criterion 維持未完成。
 
 **Windows 登入與 recorder lifecycle（alpha.107）：**
 
@@ -796,7 +796,7 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
 | 向量（選配） | `sqlite-vec` 0.1.9（2026 復活版；256-d int8 MRL，brute-force 在我們規模內互動級） | pre-1.0 格式風險 → 存 model-id+dim，設計成可背景 re-embed |
 | 本地 embedding | 遠期選配；Release 1.0 沒有內嵌推論 runtime | 腦優先 spawn 使用者已登入的 CLI；沒有 HTTP client |
 | 磁碟保護 | SQLite/frame 無應用層加密；依賴 BitLocker／FileVault／LUKS | 未開 OS 全碟加密時，離線竊碟者可讀；PRIVACY／THREAT_MODEL 明講 |
-| UI shell | **Tauri 2** Rust backend + build-free HTML/CSS/ES modules；tray + global-shortcut 已落地 | alpha.106 新增 Windows startup guard + 官方 single-instance receiver 與 current-user NSIS；alpha.107 新增預設關閉、installed-copy-only 的 HKCU Run 登入啟動，以及只管 desktop-owned child 的 bounded recorder supervisor。原生 Windows CI 已驗 alpha.106 install mechanics；alpha.107 有 policy／fixture／test-subkey 自動測試，但正式 artifact 的真登入／重試／uninstall 仍待人工證據。alpha.112 加入從最後一個有公開安裝檔的 alpha.110 → current 的真跨版 installer gate，並明確以 UTF-8 解碼 native CLI stdout；alpha.111 tag 的 Windows gate 曾因此失敗且沒有公開 release。alpha.113 讓 Setup 從 `.onInit` 持 mutex、PageLeave child 驗 capability 後借用、direct uninstall 從 PRE 持有，並以 product event + mutex／event／mutex handshake 保護 aware binary；legacy scanner 仍是沒有 Unknown 的 best effort。old-binary bridge、pre-main loader／`File` 窄窗與 code signing 仍是 Release 1.0 工作，不內建自動 updater |
+| UI shell | **Tauri 2** Rust backend + build-free HTML/CSS/ES modules；tray + global-shortcut 已落地 | alpha.106 新增 Windows startup guard + 官方 single-instance receiver 與 current-user NSIS；alpha.107 新增預設關閉、installed-copy-only 的 HKCU Run 登入啟動，以及只管 desktop-owned child 的 bounded recorder supervisor。原生 Windows CI 已驗 alpha.106 install mechanics；alpha.107 有 policy／fixture／test-subkey 自動測試，但正式 artifact 的真登入／重試／uninstall 仍待人工證據。alpha.112 加入從最後一個有公開安裝檔的 alpha.110 → current 的真跨版 installer gate，並明確以 UTF-8 解碼 native CLI stdout；alpha.111 tag 的 Windows gate 曾因此失敗且沒有公開 release。alpha.115 固定 tauri-bundler 2.9.4 custom NSIS template：Setup 不再巢狀執行 installed NSIS uninstaller，同版 repair／升版綁 exact registry root 原地覆蓋，direct uninstall 在 PRE 重驗 version／root／string；product event + mutex／event／mutex handshake 繼續保護 aware binary，legacy scanner 仍是沒有 Unknown 的 best effort。old-binary bridge、pre-main loader／`File` 窄窗與 code signing 仍是 Release 1.0 工作，不內建自動 updater |
 | Pet overlay | always-on-top 透明無框窗 + `set_ignore_cursor_events` 動態 toggle（輪詢游標；Tauri 無 per-region hit-testing）| 已知坑：macOS production 透明窗 bug 群、全螢幕 space 需動 collectionBehavior、Wayland overlay 品質差 |
 | macOS 權限 | `tauri-plugin-macos-permissions` 2.3（Screen Recording 無 entitlement，純 TCC + hardened runtime + notarization；MAS 不可行，站外發行） | 開發期 `tccutil reset ScreenCapture` 測 onboarding |
 | hands | **Rust crate `sister-hands`**，CLI／desktop 共用 permit 與 target policy | 尚未做獨立 process；需要時另立 threat-model milestone |

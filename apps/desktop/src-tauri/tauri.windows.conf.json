@@ -10,6 +10,7 @@
       },
       "nsis": {
         "installMode": "currentUser",
+        "template": "windows/installer.nsi",
         "installerIcon": "icons/icon.ico",
         "languages": ["TradChinese", "English"],
         "customLanguageFiles": {

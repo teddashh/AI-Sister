@@ -31,3 +31,6 @@ LangString aiSisterStillRunning ${LANG_TRADCHINESE} "這次檢查找到目前使
 LangString aiSisterInstallBusy ${LANG_TRADCHINESE} "AI-Sister 安裝安全鎖已存在。這次操作已在修改 AI-Sister 程式檔或安裝登錄前停止；請等相關操作結束後再試一次。"
 LangString aiSisterInstallLockUnknown ${LANG_TRADCHINESE} "無法建立或驗證 AI-Sister 安裝安全鎖。這次操作已在修改 AI-Sister 程式檔或安裝登錄前停止；請確認目前狀態後再試一次。"
 LangString aiSisterProductLifecycleBusy ${LANG_TRADCHINESE} "偵測到 AI-Sister 產品生命週期鎖。目前安裝／移除區段沒有繼續，也沒有要求關閉產品行程；請自行結束桌面程式並停止 recorder，再試一次。"
+LangString aiSisterSeparateUninstall ${LANG_TRADCHINESE} "Setup 不會在自己持有安裝安全鎖時巢狀執行另一支移除程式。請關閉 Setup，再從 Windows「已安裝的應用程式」移除目前版本；安裝較新版不必先移除，直接執行較新版 Setup 就會原地更新。"
+LangString aiSisterInstallMetadataChanged ${LANG_TRADCHINESE} "AI-Sister 找到既有安裝，但 Setup 的目標位置、已登錄的安裝位置與移除程式無法確認為同一處。這次已在修改 WebView2、程式檔或安裝登錄前停止；請關閉 Setup，從 Windows「已安裝的應用程式」處理現有版本後再試。"
+LangString aiSisterUninstallMetadataChanged ${LANG_TRADCHINESE} "AI-Sister 移除程式無法確認目前登錄的版本與安裝位置仍精確指向自己。這次已在刪除程式檔或安裝登錄前停止；請關閉這支移除程式，再從 Windows「已安裝的應用程式」重新開始。"

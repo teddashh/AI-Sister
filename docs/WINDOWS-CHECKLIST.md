@@ -10,7 +10,7 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.114 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+alpha.115 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
@@ -22,21 +22,26 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
 
-### alpha.113 先驗 installer admission 的實際邊界
+### alpha.115 先驗 installer upgrade／uninstall 的實際邊界
 
-alpha.113 產出的 Setup 透過 pinned `SetContext` 在 `.onInit` 取得 lifecycle mutex，早於
-`PageLeaveReinstall`、WiX、WebView2 與 payload／登錄；成功路徑持有到 `POSTINSTALL`。
-direct uninstaller 在確認頁後的 `PREUNINSTALL` 才取得，成功路徑持有到
-`POSTUNINSTALL`；拒絕先釋放，取消由 process teardown 關閉。由 Setup 啟動的
-alpha.113+ child 要驗 inherited dynamic capability，再借用 parent marker。alpha.113-aware
-desktop／CLI 則在產品狀態前做 mutex → product event → mutex 握手，並把 event 持有到行程
-結束；installer 取得 mutex 後只有明確量到 event 不存在才繼續。
+alpha.115 固定使用 tauri-bundler 2.9.4 custom NSIS template。Setup 在 `.onInit` 取得
+lifecycle mutex，成功路徑持有到 `POSTINSTALL`，但不再巢狀執行已安裝的 NSIS
+uninstaller。同版 repair 或由舊版升新版時，它只綁 current-user 產品鍵所記的 exact
+root 原地覆蓋，並與 uninstall key 交叉核對；GUI、passive `/P` 與 silent `/S` 都在 WebView2、payload 或安裝登錄 mutation
+前重驗 installed `DisplayVersion`、root 與 quoted `UninstallString`。downgrade 必須關閉
+Setup，再從 Windows「已安裝的應用程式」分開移除目前版本。
 
-本版產生的 sections 不呼叫 kill；舊 binary 仍只靠 `FindProcessCurrentUser` 的 best-effort
-image-name scan。這支 scanner 沒有 Unknown，snapshot、token 或 SID error 會和未找到合併；
-較舊／WiX PageLeave child 也保留自己的版本行為。原生 Windows CI **只跑 `/S`**：acquire
-window 是 exact 15 秒，after-scan window 是 5 秒；它沒有跑 interactive／passive PageLeave，
-也沒有證明 scanner error 會拒絕。下列未勾項才是人工邊界。
+direct uninstaller 在確認頁後的 `PREUNINSTALL` 才取得 mutex，接著重驗 exact version、root
+與 uninstall string；成功路徑持有到 `POSTUNINSTALL`。本版 sections 繼續不呼叫 kill；
+alpha.113-aware desktop／CLI 也繼續在產品狀態前做 mutex → product event → mutex 握手。
+舊 binary 的 `FindProcessCurrentUser` scanner 沒有 Unknown，snapshot、token 或 SID error 會和
+未找到合併；已出貨或已複製到 temp 的 alpha.114 uninstaller 也不能被新版 retroactively
+修改。alpha.115 保證的是自己的 Setup 不再啟動那個舊 child。
+
+原生 Windows CI 已新增會真正進入 `PageReinstall` 的 `/P` lane，以 alternate `/D` 和
+`PING.EXE` child witness 驗 registry-root 原地覆蓋且沒有執行 child，另用 `/S` 驗 downgrade
+在 mutation 前退出；既有 acquire／after-scan lanes 繼續驗 admission 與 reported-hit/no-kill。
+這些仍是 automation，不是滑鼠真人互動。下列未勾項才是人工邊界。
 
 - [ ] 先各讓 alpha.113-aware installed desktop／recorder 穩定存活，再跑 silent／interactive
       Setup；兩種都應拒絕且保留原 PID、install root 與安裝登錄。recorder 活著時另跑 direct
@@ -47,12 +52,17 @@ window 是 exact 15 秒，after-scan window 是 5 秒；它沒有跑 interactive
       portable desktop／CLI，再啟動第二份 Setup。產品必須在 log、DB、WebView、記憶或設定前
       exit，第二份 Setup 也必須在 mutation 前 exit 32；第一份是唯一 owner。逐檔比對 payload、
       uninstall metadata、Run value 與無關 registry fixture。
-- [ ] 以已安裝的 alpha.113+ 走 interactive「先移除再安裝」，並在有較新版 artifact 時補跑
-      passive upgrade。PageLeave child 不得因 parent mutex 自撞；child 執行期間 parent marker
-      必須一直存在，而且 child 自己開到的 fixed-mutex handle 必須讓 parent 被終止後仍維持
-      barrier 到 child 完成；正常完成後由 parent 繼續持有。alpha.112／WiX child 不懂 capability；
-      外層 marker 仍會擋 aware product，但不把 child 自己的 no-kill／scanner 行為算成
-      alpha.113 保證。
+- [ ] 先安裝 alpha.114，完全結束 desktop／recorder，再以 alpha.115 GUI Setup 升級。不可再
+      跳出「先移除再安裝」或啟動舊 uninstaller；install root 必須保持原路徑，三個 payload
+      與 uninstall metadata 換成新版，install root 外的 DB／config／consent／證據檔不動。
+      這一步才是針對 Ted 實際遇到的互動失敗做真人回歸；CI `/P` 不能代替。
+- [ ] 有下一版 artifact 時，在 alpha.115 direct uninstaller 的確認頁停住，另跑新版 Setup 完成
+      升級，再回舊確認按移除。stale uninstaller 必須在 `PREUNINSTALL` 重驗後拒絕，保留新版
+      payload、metadata、Run value 與 install root。接著關閉它，再從 Windows「已安裝的
+      應用程式」重新開始移除，才應成功。
+- [ ] 已安裝 alpha.115 時執行版本更舊的 Setup。GUI 必須要求關閉 Setup 並從 Windows
+      「已安裝的應用程式」分開移除，不可巢狀啟動新版 uninstaller；取消後現有 payload、
+      metadata、Run value 與 install root 都不動。
 - [ ] 在 `AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN_MS=5000` 的 `/S` after-scan window，分兩次
       放入不懂 event、但 image name 精確是 `sister-desktop.exe`／`sister.exe` 的 bounded fixture。
       stock-position scan 回報命中後 Setup／uninstaller 必須拒絕且保留原 PID。這只證明一般
@@ -328,7 +338,8 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
 
 - [ ] 分別在 Run value absent 和 exact enabled 時做同版 reinstall，再在下一個真版本做
       old-binary → new-binary upgrade。不得把 absent 自動打開，也不得把 exact enabled
-      清掉；若 install path 真的變了，新版必須把舊路徑照實顯示為 `mismatch`，不得猜成 on。
+      清掉；既有 NSIS install root 必須綁 registry 原地覆蓋，命令列 alternate `/D` 不得把它
+      搬走。若 metadata 不再精確對應，Setup 應在 mutation 前拒絕，不得猜路徑。
 - [ ] 開啟 exact Run value 後做真正 uninstall（不是 `/UPDATE`）。原本 PID 已按 installer
       gate 要求先結束；uninstall 完後 `AI-Sister` Run value 要不存在，install root 要移除，
       `%APPDATA%\ted-h\AI-Sister\data\` 的記憶仍在。`StartupApproved` 是 Windows 另管的
@@ -337,7 +348,7 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
 ### alpha.106 先做兩段人工確認
 
 - alpha.106 下列項目保留為歷史 baseline；最新 artifact 的 forced-kill 覆寫與 admission
-  mutex 邊界先照上方 alpha.113 小節驗，不以本節較舊的「檢查當下 PID」範圍取代。
+  mutex 邊界先照上方 alpha.115 小節驗，不以本節較舊的「檢查當下 PID」範圍取代。
 - **installer：** 先斷網再跑 `AI-Sister-Setup.exe`；WebView2 已內嵌，安裝不應要求
   連線。開起來後再開一次，只能把原視窗叫回來，不能多一份 desktop，也不能讓
   recorder 停掉。先讓 desktop／recorder 穩定活著，再各自重跑 installer：兩次都應

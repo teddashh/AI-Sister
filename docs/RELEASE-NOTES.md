@@ -24,18 +24,24 @@ exact 大小以該 tag 的 asset 為準。正式 artifact 的斷網安裝仍待�
 免安裝使用或診斷 installer 問題時，請把兩個檔放在同一個資料夾。
 
 目前 installer 沒有 code signing，也沒有內建自動 updater。升級是使用者手動下載新版
-`AI-Sister-Setup.exe`，先自行結束 desktop 並停止 recorder，再重新執行。alpha.113 起，本版
-產生的 sections 覆寫 Tauri stock running-app macro；legacy current-user scanner 回報
-`sister-desktop.exe`／`sister.exe` 命中時只拒絕，不提供或執行 forced kill。Setup 在
-`.onInit` 取得 lifecycle mutex，成功路徑持有到 `POSTINSTALL`；direct uninstall 在
-`PREUNINSTALL` 取得，成功路徑持有到 `POSTUNINSTALL`。拒絕先釋放，取消由 process teardown
-關閉；alpha.113+ PageLeave child 驗證 inherited dynamic capability 後借用 parent
-marker。帶協定的 desktop／CLI 以 product event + mutex／event／mutex handshake 在產品狀態前
-和 installer 交接，無關的第二份 Setup 也不能同時進入 lifecycle。
+`AI-Sister-Setup.exe`，先自行結束 desktop 並停止 recorder，再重新執行。alpha.115 起，Setup
+使用 pinned tauri-bundler 2.9.4 custom NSIS template；它不再巢狀執行已安裝的 NSIS
+uninstaller。同版 repair 或舊版升新版會在 Setup 持有 lifecycle mutex 時，綁定 current-user
+產品鍵所記的 exact install root 原地覆蓋，並與 uninstall key 交叉核對；GUI、`/P` 與 `/S` 都會在 WebView2、payload
+或安裝登錄 mutation 前重新核對 `DisplayVersion`、root 與 quoted `UninstallString`。若 Setup
+版本比已安裝版本舊，請關閉 Setup，再從 Windows「已安裝的應用程式」分開移除目前版本。
+direct uninstaller 在 `PREUNINSTALL` 取得 mutex 後，也會重新核對 exact version、root 與
+uninstall string，避免使用者確認移除後已有新版覆蓋，舊確認卻接著刪除新版。
+
+本版產生的 sections 繼續覆寫 Tauri stock running-app macro；legacy current-user scanner
+回報 `sister-desktop.exe`／`sister.exe` 命中時只拒絕，不提供或執行 forced kill。帶協定的
+desktop／CLI 仍以 product event + mutex／event／mutex handshake 在產品狀態前和 installer
+交接，無關的第二份 Setup 也不能同時進入 lifecycle。
 
 這仍不是跨版本完整原子 lifecycle。legacy scanner 沒有 Unknown，process 列舉或 token／SID
-查詢失敗會和未找到合併；舊 binary 不持有 event。較舊 PageLeave child 執行時外層 marker
-仍會擋 aware product，但 child 仍依自己的版本行為。Windows loader 又在 Rust `main` 前映射
+查詢失敗會和未找到合併；舊 binary 不持有 event。已經出貨或已複製到 temp 的 alpha.114
+uninstaller 也無法由新版 retroactively 改寫；alpha.115 能保證的是自己的 Setup 不再啟動那個
+舊 child。Windows loader 又在 Rust `main` 前映射
 executable，最後一次 legacy scan 到 NSIS `File` 之間仍有窄窗。installer late-start 因此仍是
 Release 1.0 未完成項。
 
@@ -67,6 +73,36 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
+
+
+## v0.1.0-alpha.115
+
+**這一版修正「新版 Setup 先啟動已安裝 uninstaller，child 卻撞上 parent lifecycle mutex，
+最後只能從 Windows 程式管理員移除舊版」的升級路徑。**
+
+alpha.113 的 inherited dynamic capability／borrow 設計沒有在這次真人互動流程成立；舊
+Setup 的 child 把自己視為 direct uninstall，看到 parent 已持有 mutex 就停住。這一版不再
+依賴那條 parent-child 傳遞，也不猜測傳遞在哪一層消失：pinned tauri-bundler 2.9.4 custom
+NSIS template 讓 Setup **永遠不巢狀執行已安裝的 NSIS uninstaller**。
+
+同版 repair 與舊版升新版改為由 Setup 在 lifecycle mutex 下原地覆蓋，而且 install root
+只能來自 current-user 產品鍵，並與 uninstall key 交叉核對。GUI、passive `/P` 與 silent `/S` 都會在
+WebView2、payload 或安裝登錄 mutation 前重新核對已安裝的 `DisplayVersion`、exact root 與
+quoted `UninstallString`；metadata 不再精確對應就先停。若這份 Setup 比已安裝版本舊，也不
+執行新版 uninstaller：請關閉 Setup，從 Windows「已安裝的應用程式」分開移除，再自行執行
+較舊 Setup。
+
+direct uninstaller 仍在確認頁之後、任何移除 mutation 前的 `PREUNINSTALL` 取得 lifecycle
+mutex，並再次核對 exact version、root 與 uninstall string。若使用者停在確認頁期間另一份
+Setup 已把產品升級，它會拒絕，不讓舊確認刪掉新版。legacy scanner reported hit 繼續只拒絕；
+本版 sections 不顯示或執行 forced kill。
+
+Windows CI 新增會真正進入 `PageReinstall` 的 `/P` lane：以 alternate `/D` 加上把現有
+uninstaller 換成 `PING.EXE` 的 child witness，證明 repair 綁回 registry root、沒有執行
+child；另以 `/S` 驗 downgrade 在 mutation 前退出。這些是 native automation，不是滑鼠真人
+互動通過紀錄。已經出貨或已複製到 temp 的 alpha.114 uninstaller 無法由本版 retroactively
+改寫；本版修的是 alpha.115 Setup 不再啟動它。舊 binary scanner 沒有 Unknown、Windows
+loader 到 `File` 的窄競態、code signing 與跨版本完整原子 lifecycle 仍未完成。
 
 
 ## v0.1.0-alpha.114

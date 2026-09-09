@@ -185,6 +185,7 @@ done
 echo "▶ 檢查 Windows installer 不需要執行期網路"
 if ! python3 - <<'PY'
 import difflib
+import hashlib
 import json
 import pathlib
 import re
@@ -242,11 +243,26 @@ if nsis.get("installMode") != "currentUser":
 for minimum_key in ("minimumWebview2Version", "minimum-webview2-version"):
     if minimum_key in nsis:
         raise SystemExit(f"✗ NSIS {minimum_key} 也會呼叫 EdgeUpdate；這裡不准存在")
-if "template" in nsis:
-    raise SystemExit("✗ 自訂 NSIS template 可繞過 offlineInstaller；這裡只准 pinned Tauri template")
+expected_template = "windows/installer.nsi"
+if nsis.get("template") != expected_template:
+    raise SystemExit(
+        f"✗ NSIS template 必須精確是 {expected_template!r}，實際：{nsis.get('template')!r}"
+    )
+template_path = root / expected_template
+if not template_path.is_file():
+    raise SystemExit(f"✗ 缺少 pinned NSIS template：{template_path}")
+expected_template_sha256 = "ea308c634060aedf74b6d1ce189f26f2e9bd30ec2ab13cf95b65051f96d03f08"
+actual_template_sha256 = hashlib.sha256(template_path.read_bytes()).hexdigest()
+if actual_template_sha256 != expected_template_sha256:
+    raise SystemExit(
+        "✗ pinned NSIS template bytes 改變；它能改寫 WebView2／payload／registry 與 "
+        "PageLeave 流程，必須重新逐段稽核後才可更新 hash："
+        f"expected={expected_template_sha256} actual={actual_template_sha256}"
+    )
 
-# installer hook 覆寫的是 published tauri-cli 2.11.4 內嵌的 exact SetContext seam。
-# CLI crate 與 --locked 缺一個，upstream template 順序都可能變成另一份契約。
+# installer hook 覆寫的是從 published tauri-cli 2.11.4 依賴複製並 fixed-hash 的
+# tauri-bundler 2.9.4 SetContext seam。CLI crate、--locked、template hash 缺一個，
+# PageLeave 與四個 hook 的順序都可能變成另一份契約。
 workflow_text = pathlib.Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 expected_tauri_install = "cargo install tauri-cli --version 2.11.4 --locked"
 if workflow_text.count(expected_tauri_install) != 2:
@@ -307,23 +323,9 @@ def executable_hook_lines(source: str) -> list[str]:
 
 expected_hook_lines = [
     "Var AI_SISTER_INSTALL_LIFECYCLE_HANDLE",
-    "Var AI_SISTER_INSTALL_CAPABILITY_HANDLE",
-    "Var AI_SISTER_INSTALL_LIFECYCLE_BORROWED",
     "Var AI_SISTER_DIAGNOSTIC_AFTER_SCAN_HANDLE",
     "!macro AI_SISTER_RELEASE_INSTALL_LIFECYCLE",
-    '${If} $AI_SISTER_INSTALL_LIFECYCLE_BORROWED = "1"',
-    'System::Call \'kernel32::SetEnvironmentVariableW(w "AI_SISTER_INSTALL_LIFECYCLE_CAPABILITY", p 0)\'',
     '${If} $AI_SISTER_INSTALL_LIFECYCLE_HANDLE != ""',
-    "System::Call 'kernel32::CloseHandle(p $AI_SISTER_INSTALL_LIFECYCLE_HANDLE)'",
-    'StrCpy $AI_SISTER_INSTALL_LIFECYCLE_HANDLE ""',
-    "${EndIf}",
-    'StrCpy $AI_SISTER_INSTALL_LIFECYCLE_BORROWED ""',
-    '${ElseIf} $AI_SISTER_INSTALL_LIFECYCLE_HANDLE != ""',
-    'System::Call \'kernel32::SetEnvironmentVariableW(w "AI_SISTER_INSTALL_LIFECYCLE_CAPABILITY", p 0)\'',
-    '${If} $AI_SISTER_INSTALL_CAPABILITY_HANDLE != ""',
-    "System::Call 'kernel32::CloseHandle(p $AI_SISTER_INSTALL_CAPABILITY_HANDLE)'",
-    'StrCpy $AI_SISTER_INSTALL_CAPABILITY_HANDLE ""',
-    "${EndIf}",
     "System::Call 'kernel32::CloseHandle(p $AI_SISTER_INSTALL_LIFECYCLE_HANDLE)'",
     'StrCpy $AI_SISTER_INSTALL_LIFECYCLE_HANDLE ""',
     "${EndIf}",
@@ -351,7 +353,7 @@ expected_hook_lines = [
     "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
     "${EndIf}",
     "!macroend",
-    "!macro AI_SISTER_ACQUIRE_INSTALL_LIFECYCLE publishCapability",
+    "!macro AI_SISTER_ACQUIRE_INSTALL_LIFECYCLE",
     "System::Call 'kernel32::SetLastError(i 0)'",
     'System::Call \'kernel32::CreateMutexW(p 0, i 0, w "Global\\com.ted-h.ai-sister-install-lifecycle-v1") p.r0 ?e\'',
     "Pop $R1",
@@ -363,25 +365,6 @@ expected_hook_lines = [
     "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallBusy",
     "${EndIf}",
     "StrCpy $AI_SISTER_INSTALL_LIFECYCLE_HANDLE $0",
-    '!if "${publishCapability}" == "1"',
-    "System::Call 'kernel32::GetCurrentProcessId() i.r2'",
-    'StrCpy $2 "Local\\com.ted-h.ai-sister-install-parent-$2"',
-    "System::Call 'kernel32::SetLastError(i 0)'",
-    "System::Call 'kernel32::CreateEventW(p 0, i 1, i 0, w r2) p.r0 ?e'",
-    "Pop $R1",
-    "${If} $0 = 0",
-    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
-    "${EndIf}",
-    "${If} $R1 = 183",
-    "System::Call 'kernel32::CloseHandle(p r0)'",
-    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
-    "${EndIf}",
-    "StrCpy $AI_SISTER_INSTALL_CAPABILITY_HANDLE $0",
-    'System::Call \'kernel32::SetEnvironmentVariableW(w "AI_SISTER_INSTALL_LIFECYCLE_CAPABILITY", w r2) i.r0\'',
-    "${If} $0 = 0",
-    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
-    "${EndIf}",
-    "!endif",
     "!insertmacro AI_SISTER_PROBE_PRODUCT_LIFECYCLE",
     'ReadEnvStr $R0 "AI_SISTER_DIAGNOSTIC_INSTALL_DELAY_MS"',
     '${If} $R0 = "15000"',
@@ -390,37 +373,12 @@ expected_hook_lines = [
     "!macroend",
     "!macro AI_SISTER_ENSURE_INSTALL_LIFECYCLE",
     '${If} $AI_SISTER_INSTALL_LIFECYCLE_HANDLE = ""',
-    "!insertmacro AI_SISTER_ACQUIRE_INSTALL_LIFECYCLE 1",
+    "!insertmacro AI_SISTER_ACQUIRE_INSTALL_LIFECYCLE",
     "${EndIf}",
     "!macroend",
     "!macro AI_SISTER_ENSURE_UNINSTALL_LIFECYCLE",
     '${If} $AI_SISTER_INSTALL_LIFECYCLE_HANDLE = ""',
-    '${AndIf} $AI_SISTER_INSTALL_LIFECYCLE_BORROWED != "1"',
-    'ReadEnvStr $2 "AI_SISTER_INSTALL_LIFECYCLE_CAPABILITY"',
-    '${If} $2 = ""',
-    "!insertmacro AI_SISTER_ACQUIRE_INSTALL_LIFECYCLE 0",
-    "${Else}",
-    "System::Call 'kernel32::SetLastError(i 0)'",
-    'System::Call \'kernel32::OpenMutexW(i 0x00100000, i 0, w "Global\\com.ted-h.ai-sister-install-lifecycle-v1") p.r0 ?e\'',
-    "Pop $R1",
-    "${If} $0 = 0",
-    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
-    "${EndIf}",
-    "System::Call 'kernel32::SetLastError(i 0)'",
-    "System::Call 'kernel32::OpenEventW(i 0x00100000, i 0, w r2) p.r3 ?e'",
-    "Pop $R1",
-    "${If} $3 = 0",
-    "System::Call 'kernel32::CloseHandle(p r0)'",
-    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
-    "${EndIf}",
-    "System::Call 'kernel32::CloseHandle(p r3) i.r1'",
-    "${If} $1 = 0",
-    "System::Call 'kernel32::CloseHandle(p r0)'",
-    "!insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown",
-    "${EndIf}",
-    "StrCpy $AI_SISTER_INSTALL_LIFECYCLE_HANDLE $0",
-    'StrCpy $AI_SISTER_INSTALL_LIFECYCLE_BORROWED "1"',
-    "${EndIf}",
+    "!insertmacro AI_SISTER_ACQUIRE_INSTALL_LIFECYCLE",
     "${EndIf}",
     "!macroend",
     "!macro AI_SISTER_DIAGNOSTIC_AFTER_PROCESS_SCAN",
@@ -582,7 +540,8 @@ expected_keys = {
     "webview2AbortError", "webview2DownloadError", "webview2DownloadSuccess",
     "webview2Downloading", "webview2InstallError", "webview2InstallSuccess", "deleteAppData",
     "aiSisterInstallBusy", "aiSisterInstallLockUnknown", "aiSisterProductLifecycleBusy",
-    "aiSisterStillRunning",
+    "aiSisterInstallMetadataChanged", "aiSisterSeparateUninstall", "aiSisterStillRunning",
+    "aiSisterUninstallMetadataChanged",
 }
 expected_delete_copy = {
     "TradChinese": "清除桌面外殼資料（AI-Sister 記憶會保留）",
@@ -603,6 +562,18 @@ expected_install_lock_unknown_copy = {
 expected_product_lifecycle_busy_copy = {
     "TradChinese": "偵測到 AI-Sister 產品生命週期鎖。目前安裝／移除區段沒有繼續，也沒有要求關閉產品行程；請自行結束桌面程式並停止 recorder，再試一次。",
     "English": "The AI-Sister product lifecycle lock was found. This install or uninstall section did not continue and did not request a product process to close. Exit the desktop app and stop the recorder, then try again.",
+}
+expected_separate_uninstall_copy = {
+    "TradChinese": "Setup 不會在自己持有安裝安全鎖時巢狀執行另一支移除程式。請關閉 Setup，再從 Windows「已安裝的應用程式」移除目前版本；安裝較新版不必先移除，直接執行較新版 Setup 就會原地更新。",
+    "English": "Setup does not nest another uninstaller while holding the installation safety lock. Close Setup, then remove the current version from Windows Installed apps. Installing a newer version does not require removal; run the newer Setup to update in place.",
+}
+expected_install_metadata_changed_copy = {
+    "TradChinese": "AI-Sister 找到既有安裝，但 Setup 的目標位置、已登錄的安裝位置與移除程式無法確認為同一處。這次已在修改 WebView2、程式檔或安裝登錄前停止；請關閉 Setup，從 Windows「已安裝的應用程式」處理現有版本後再試。",
+    "English": "AI-Sister found an existing installation, but Setup's target, the registered install location, and the uninstaller could not be confirmed as the same location. This operation stopped before changing WebView2, program files, or install registry entries; close Setup, handle the existing version in Windows Installed apps, then try again.",
+}
+expected_uninstall_metadata_changed_copy = {
+    "TradChinese": "AI-Sister 移除程式無法確認目前登錄的版本與安裝位置仍精確指向自己。這次已在刪除程式檔或安裝登錄前停止；請關閉這支移除程式，再從 Windows「已安裝的應用程式」重新開始。",
+    "English": "The AI-Sister uninstaller could not confirm that the currently registered version and install location still point exactly to itself. This operation stopped before deleting program files or install registry entries; close this uninstaller, then start again from Windows Installed apps.",
 }
 lang_line = re.compile(r'^LangString ([A-Za-z0-9]+) \$\{LANG_([A-Z]+)\} "(.*)"$')
 for language, relative_path in expected_language_files.items():
@@ -642,6 +613,21 @@ for language, relative_path in expected_language_files.items():
         raise SystemExit(
             f"✗ {path} 的產品 lifecycle 拒絕文案不再是已稽核版本："
             f"{messages['aiSisterProductLifecycleBusy']!r}"
+        )
+    if messages["aiSisterSeparateUninstall"] != expected_separate_uninstall_copy[language]:
+        raise SystemExit(
+            f"✗ {path} 的分開移除文案不再是已稽核版本："
+            f"{messages['aiSisterSeparateUninstall']!r}"
+        )
+    if messages["aiSisterInstallMetadataChanged"] != expected_install_metadata_changed_copy[language]:
+        raise SystemExit(
+            f"✗ {path} 的既有安裝 metadata 拒絕文案不再是已稽核版本："
+            f"{messages['aiSisterInstallMetadataChanged']!r}"
+        )
+    if messages["aiSisterUninstallMetadataChanged"] != expected_uninstall_metadata_changed_copy[language]:
+        raise SystemExit(
+            f"✗ {path} 的 stale uninstaller 拒絕文案不再是已稽核版本："
+            f"{messages['aiSisterUninstallMetadataChanged']!r}"
         )
 
 
