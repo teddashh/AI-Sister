@@ -25239,6 +25239,11 @@ pub mod record {
                  什麼都不會記錄。改成 true 才會真的開始錄。"
             );
         }
+        // 全停排在暫停前面：它是比較重的那一根，而且兩者一起在的時候，
+        // 先解除暫停也不會讓她回來。同樣不會自己過期，同樣會讓摘要永遠是 0。
+        if let Some(warning) = master_stop_warning(data_dir) {
+            println!("⚠  {warning}");
+        }
         // 暫停是**不會自己過期**的（見 `pause` 模組），所以「上禮拜按了暫停、
         // 這禮拜開起來發現整週都沒錄」是一條真實的路。開場就要講，而且要講
         // 從什麼時候開始——不然使用者只會看到一個永遠是 0 的摘要。
@@ -25813,6 +25818,34 @@ pub mod record {
         }
     }
 
+    /// `sister record` 開場那一行的全停版本。
+    ///
+    /// 沒有它的話，全停中開錄會印出一模一樣的正常開場，然後每一拍什麼都不做——
+    /// 使用者看到的是一個永遠是 0 的摘要，和「程式壞了」長得一模一樣。這正是
+    /// alpha.78 替暫停修過的那件事（見 [`pause_warning`]），全停有同一個洞。
+    ///
+    /// 判定沿用 `master_stop::is_stopped` 的 fail-closed 規則，所以「資料目錄
+    /// 讀不到」也會走到這裡；那種情況下 `stopped_since` 讀不出時間，句子要照實
+    /// 說讀不到，不要編一個時間出來。
+    #[cfg(any(windows, test))]
+    fn master_stop_warning(data_dir: &Path) -> Option<String> {
+        if !sister_hands::master_stop::is_stopped(data_dir) {
+            return None;
+        }
+        let release = cmd(data_dir, "stop-all --off");
+        Some(match sister_hands::master_stop::stopped_since(data_dir) {
+            Some(ts) => format!(
+                "目前是三層全停狀態（從 {} 起）：capture 不會擷取、brain 不會送出、hands 不會執行。\
+                 它**不會自己過期**，而且解除暫停或把手接回去都救不了它——要她回來請跑 `{release}`。",
+                crate::fmt::timestamp(ts)
+            ),
+            None => format!(
+                "目前是三層全停狀態（開始時間讀不到）：capture 不會擷取、brain 不會送出、hands 不會執行。\
+                 它**不會自己過期**，而且解除暫停或把手接回去都救不了它——要她回來請跑 `{release}`。"
+            ),
+        })
+    }
+
     #[cfg(any(windows, test))]
     fn pause_warning(data_dir: &Path) -> Option<String> {
         use sister_core::pause::PauseState;
@@ -25864,6 +25897,23 @@ pub mod record {
     #[cfg(test)]
     mod pause_warning_tests {
         use super::*;
+
+        /// 全停中開錄，開場那一行必須自己講出來，而且要和暫停那一行分得開。
+        /// 對照組是同一個資料夾在全停前的樣子：那時候一個字都不該印。
+        #[test]
+        fn record_opening_line_says_when_the_master_stop_is_on() {
+            let dir = crate::ops::tmp::Tmp::new("record-master-stop-warning");
+            assert_eq!(master_stop_warning(&dir.0), None, "還沒全停就先講了");
+            sister_hands::master_stop::engage(&dir.0, 1_700_000_000_000).expect("engage");
+            let said = master_stop_warning(&dir.0).expect("全停中卻沒有開場警告");
+            assert!(said.contains("三層全停"), "{said}");
+            assert!(said.contains("不會自己過期"), "{said}");
+            assert!(said.contains("stop-all --off"), "{said}");
+            // 這一行不可以叫他去按暫停或接手——那兩顆都救不了全停。
+            assert!(!said.contains("`sister resume`"), "{said}");
+            // 而且它不是暫停：同一個資料夾此刻並沒有被暫停。
+            assert_eq!(pause_warning(&dir.0), None, "全停被誤報成暫停");
+        }
 
         #[test]
         fn production_pause_probe_keeps_the_guard_and_every_snapshot_state() {
