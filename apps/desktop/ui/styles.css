@@ -665,6 +665,35 @@ body.has-url-policy .stage {
   opacity: 0.8;
 }
 
+/* 「我知道了什麼」的 L2 卡。activity 是答案；時間、作者、信心與證據都是
+   本機出處，所以和一般 hit 共用 `.hit-source` 的層級。 */
+.overview-card .hit-text {
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+.overview-sources {
+  align-items: center;
+  margin-top: 5px;
+}
+
+.overview-evidence {
+  appearance: none;
+  background: rgb(255 255 255 / 45%);
+  border: 1px solid rgb(46 33 64 / 20%);
+  border-radius: 999px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 3px 7px;
+}
+
+.overview-evidence:hover,
+.overview-evidence:focus-visible {
+  border-color: var(--letter-accent);
+  outline: none;
+}
+
 /* ★ 那幾筆。他問「電話」要的是號碼本身，不是一段剛好提到電話的字——所以
    這一列要看得出來是**答案**，不是又一筆搜尋結果：值放大、邊框加深。
 

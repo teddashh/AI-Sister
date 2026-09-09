@@ -86,6 +86,7 @@ function answer(over = {}) {
     chapters: null,
     followup: null,
     closure_notice: null,
+    overview: null,
     ...over,
   };
 }
@@ -142,6 +143,17 @@ function chapter(over = {}) {
     edit_id: null,
     segment_count: 2,
     core_ms: 300_000,
+    ...over,
+  };
+}
+
+function overviewCard(over = {}) {
+  return {
+    segment_started_at: 1_755_000_000_000,
+    activity: "修好安裝更新",
+    author: "interpreter",
+    model_confidence: 0.31337,
+    evidence: [{ frame_id: 4242, label: "SOURCE_LABEL_MUST_STAY_LOCAL" }],
     ...over,
   };
 }
@@ -2157,6 +2169,162 @@ console.log("63. 純瀏覽器 screenshot demo 有答案外觀，但沒有 native
     "browser-only demo 沒有 Azure IPC，也沒有 audio autoplay",
     azureCalls(p).length === 0 && p.audioPlays() === 0 && p.invokes.length === 0,
     p.invokes,
+  );
+}
+
+console.log("64. 記憶總覽只畫有證據的 L2 假設；證據要真人按才開");
+{
+  let asks = 0;
+  const p = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("captured"),
+    ask: () => {
+      asks += 1;
+      if (asks > 1) throw new Error("SECOND_QUERY_FAILED");
+      return answer({
+        kind: "memory_overview",
+        query_id: 99123,
+        searched: "SEARCHED_MUST_STAY_LOCAL",
+        hits: [hit({ snippet: "OCR_MUST_STAY_LOCAL" })],
+        answers: [fact({ value: "FACT_MUST_STAY_LOCAL" })],
+        followup: "FOLLOWUP_MUST_STAY_LOCAL",
+        closure_notice: "CLOSURE_MUST_STAY_LOCAL",
+        overview: {
+          kind: "ready",
+          cards: [overviewCard()],
+          truncated: true,
+          evidence_unavailable: 2,
+        },
+      });
+    },
+    recording_state: "recording",
+  });
+  await p.type("QUESTION_MUST_STAY_LOCAL");
+  const text = azureCalls(p)[0]?.arg?.text ?? "";
+  check(
+    "ready 明講是可修正的理解／假設，不冒充確定事實",
+    p.hitTexts().some(
+      (line) => line.includes("可以被你修正的假設") && line.includes("不是確定事實"),
+    ),
+    p.hitTexts(),
+  );
+  check("L2 activity 畫成答案正文", p.hitTexts().some((line) => line.includes("修好安裝更新")), p.hitTexts());
+  check(
+    "closure、follow-up、截斷與 withheld 計數仍留在畫面",
+    [
+      "CLOSURE_MUST_STAY_LOCAL",
+      "FOLLOWUP_MUST_STAY_LOCAL",
+      "只列最近一部分",
+      "另外有 2 張理解卡",
+    ].every((wanted) => p.hitTexts().some((line) => line.includes(wanted))),
+    p.hitTexts(),
+  );
+  check(
+    "overview 不會再跑 generic FTS/fact/empty renderer",
+    !p.hitTexts().some(
+      (line) =>
+        line.includes("OCR_MUST_STAY_LOCAL") ||
+        line.includes("FACT_MUST_STAY_LOCAL") ||
+        line.includes("我記得的東西裡沒有"),
+    ),
+    p.hitTexts(),
+  );
+  check("有答案的 overview 保留題庫標記", p.hits().querySelector(".mark-toggle") !== null, p.hitTexts());
+
+  const evidence = p.hits().querySelector(".overview-evidence");
+  check("證據按鈕顯示後端 label", evidence?.textContent === "SOURCE_LABEL_MUST_STAY_LOCAL", evidence?.textContent);
+  await p.clickElement(evidence, { trusted: false });
+  check(
+    "script 合成的 evidence click 不會開畫面",
+    !p.invokes.some(({ cmd }) => cmd === "open_frame"),
+    p.invokes,
+  );
+  await p.clickElement(evidence);
+  check(
+    "真人 evidence click 只用 typed frame id 開畫面",
+    p.invokes.some(({ cmd, arg }) => cmd === "open_frame" && arg?.frameId === 4242),
+    p.invokes,
+  );
+
+  const expected =
+    "我最近整理出這些理解。它們都有畫面可以回查，但仍是可以被你修正的假設，不是確定事實：\n修好安裝更新";
+  check("Azure overview payload 恰好只有正文", text === expected, text);
+  for (const localOnly of [
+    "QUESTION_MUST_STAY_LOCAL",
+    "OCR_MUST_STAY_LOCAL",
+    "FACT_MUST_STAY_LOCAL",
+    "SOURCE_LABEL_MUST_STAY_LOCAL",
+    "SEARCHED_MUST_STAY_LOCAL",
+    "FOLLOWUP_MUST_STAY_LOCAL",
+    "CLOSURE_MUST_STAY_LOCAL",
+    "99123",
+    "4242",
+    "0.31",
+    "interpreter",
+    "另外有 2 張理解卡",
+  ]) {
+    check(`overview Azure 不送 ${localOnly}`, !text.includes(localOnly), text);
+  }
+
+  await p.type("第二題會失敗");
+  check(
+    "有證據 overview 算一份正在顯示的答案",
+    p.hitTexts().some((line) => line.includes("上一題的，先收起來了")),
+    p.hitTexts(),
+  );
+}
+
+console.log("65. raw-only／empty／證據遺失各自說實話，不掉進一般空結果");
+{
+  const cases = [
+    {
+      overview: { kind: "raw_only" },
+      wanted: "有原始紀錄，但還沒有整理成能直接回答的理解記憶",
+    },
+    {
+      overview: { kind: "empty" },
+      wanted: "目前還沒有留下能回答這題的記憶",
+    },
+    {
+      overview: { kind: "evidence_missing", cards: 3 },
+      wanted: "已沒有可點開的畫面證據",
+    },
+  ];
+  for (const test of cases) {
+    const p = await open({
+      ask: answer({
+        kind: "memory_overview",
+        hits: [hit({ snippet: "RAW_OCR_MUST_NOT_RENDER" })],
+        overview: test.overview,
+      }),
+      recording_state: "recording",
+    });
+    await p.type("你知道了什麼");
+    check(`${test.overview.kind} 有自己的答案`, p.hitTexts().some((line) => line.includes(test.wanted)), p.hitTexts());
+    check(
+      `${test.overview.kind} 不顯示 OCR 或 generic empty`,
+      !p.hitTexts().some(
+        (line) => line.includes("RAW_OCR_MUST_NOT_RENDER") || line.includes("我記得的東西裡沒有這件事"),
+      ),
+      p.hitTexts(),
+    );
+    check(`${test.overview.kind} 沒有可標成答對的卡片`, p.hits().querySelector(".mark-toggle") === null, p.hitTexts());
+  }
+}
+
+console.log("66. 未知 overview kind 是 contract error，不偽裝成沒有記憶");
+{
+  const p = await open({
+    ask: answer({ kind: "memory_overview", overview: { kind: "future_state" } }),
+    recording_state: "recording",
+  });
+  await p.type("你知道了什麼");
+  check("錯誤原因點名未知狀態", p.line().includes("future_state"), p.line());
+  check(
+    "畫面說這題沒答成，不說沒有記憶",
+    p.hitTexts().some((line) => line.includes("沒答成")) &&
+      !p.hitTexts().some((line) => line.includes("沒有留下能回答")),
+    p.hitTexts(),
   );
 }
 

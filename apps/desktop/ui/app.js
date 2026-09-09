@@ -3027,6 +3027,115 @@ function answerAzureLine() {
   return li;
 }
 
+/** L2 卡片的作者不是答案正文；這一行只留在本機畫面上。 */
+function overviewAuthor(author) {
+  switch (author) {
+    case "interpreter":
+      return "解釋層整理";
+    case "reviewer":
+      return "審閱層修訂";
+    case "user":
+      return "你修正過";
+    default:
+      return `作者 ${author ?? "不明"}`;
+  }
+}
+
+/**
+ * 「我知道了什麼」不能再退回 FTS，把設定頁或問題本身的 OCR 片段當答案。
+ * 這裡只畫後端已經封閉分類的 L2 總覽；未知 kind 是前後端 contract 壞掉，不能
+ * 默默落進一般空結果，否則一個程式錯誤會被說成「沒有記憶」。
+ *
+ * @returns 這次是否真的畫出了有證據的答案卡片。
+ */
+function renderOverview(overview) {
+  const line = (text, className = "hits-note", speak = true) => {
+    const li = document.createElement("li");
+    li.className = className;
+    if (speak) li.dataset.azureAnswerBody = "";
+    li.textContent = text;
+    hitList.append(li);
+  };
+
+  switch (overview?.kind) {
+    case "ready": {
+      if (!Array.isArray(overview.cards) || overview.cards.length === 0) {
+        throw new Error("記憶總覽回了 ready，卻沒有任何卡片");
+      }
+      line(
+        "我最近整理出這些理解。它們都有畫面可以回查，但仍是可以被你修正的假設，不是確定事實：",
+      );
+      for (const card of overview.cards) {
+        if (!Array.isArray(card.evidence) || card.evidence.length === 0) {
+          throw new Error("記憶總覽的 ready 卡片沒有畫面證據");
+        }
+        const li = document.createElement("li");
+        li.className = "hit overview-card";
+
+        const activity = document.createElement("p");
+        activity.className = "hit-text";
+        activity.dataset.azureAnswerBody = "";
+        activity.textContent = card.activity;
+        li.append(activity);
+
+        const meta = document.createElement("p");
+        meta.className = "hit-source overview-meta";
+        const confidence = Number(card.model_confidence);
+        meta.textContent = `${when(card.segment_started_at)} · ${overviewAuthor(card.author)} · 信心欄位 ${Number.isFinite(confidence) ? confidence.toFixed(2) : "不明"}（不是量出來的）`;
+        li.append(meta);
+
+        const evidence = document.createElement("p");
+        evidence.className = "hit-source overview-sources";
+        const label = document.createElement("span");
+        label.textContent = "畫面證據";
+        evidence.append(label);
+        for (const item of card.evidence) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "overview-evidence";
+          button.textContent = item.label;
+          button.addEventListener("click", (event) => {
+            if (event?.isTrusted !== true) return;
+            void invoke?.("open_frame", { frameId: item.frame_id });
+          });
+          evidence.append(button);
+        }
+        li.append(evidence);
+        hitList.append(li);
+      }
+      if (overview.truncated) {
+        line("這裡只列最近一部分有證據的理解。", "hits-note hits-more", false);
+      }
+      if (Number.isInteger(overview.evidence_unavailable) && overview.evidence_unavailable > 0) {
+        line(
+          `另外有 ${overview.evidence_unavailable} 張理解卡因畫面證據已不可用，這裡沒有列。`,
+          "hits-note hits-more",
+          false,
+        );
+      }
+      return true;
+    }
+    case "raw_only":
+      line("我有原始紀錄，但還沒有整理成能直接回答的理解記憶；這次不會拿 OCR 片段冒充答案。", "hits-empty");
+      return false;
+    case "empty":
+      line("我目前還沒有留下能回答這題的記憶。", "hits-empty");
+      return false;
+    case "evidence_missing": {
+      if (!Number.isInteger(overview.cards) || overview.cards <= 0) {
+        throw new Error("記憶總覽回了 evidence_missing，卻沒有遺失證據的卡片數");
+      }
+      line(
+        "我有整理過的理解記憶，但最近這些卡片已沒有可點開的畫面證據；這裡不把它們當成答案。",
+        "hits-empty",
+      );
+      return false;
+    }
+    default:
+      throw new Error(`不認得的記憶總覽狀態：${overview?.kind ?? "缺少 kind"}`);
+  }
+}
+
 /**
  * @param hits 一筆一筆的原文。
  * @param kind `"keywords"`（比對字找到的）、`"recent"`（剛剛）、或 `"range"`（昨天下午那種日曆範圍）。
@@ -3042,6 +3151,7 @@ function answerAzureLine() {
  * @param chapters 那段時間切成的活動級段落。`null` = 沒算過；`[]` = 算過但切不出來。
  * @param followup 使用者先開口後，回答尾端才可附上的低頻確認。
  * @param closureNotice 文字結案是否成功；認不出來時也要明講沒有動卡片。
+ * @param overview 「我知道了什麼」專用的 L2 總覽；`null` 代表一般檢索題。
  */
 function renderHits(
   hits,
@@ -3056,6 +3166,7 @@ function renderHits(
   chapters = null,
   followup = null,
   closureNotice = null,
+  overview = null,
 ) {
   azureAnswerLine = null;
   azureAnswerButton = null;
@@ -3066,6 +3177,40 @@ function renderHits(
     notice.className = "hits-note";
     notice.textContent = closureNotice;
     hitList.append(notice);
+  }
+
+  if (overview !== null && overview !== undefined) {
+    const hasOverviewAnswer = renderOverview(overview);
+
+    if (followup) {
+      const aside = document.createElement("li");
+      aside.className = "hits-note";
+      aside.textContent = followup;
+      hitList.append(aside);
+    }
+
+    if (hasOverviewAnswer) {
+      if (queryId === null || queryId === undefined) {
+        const why = document.createElement("li");
+        why.className = "hits-note hits-more";
+        why.textContent =
+          "（這一題沒進題庫，所以「我本來已經忘了」標不了：可能是設定裡「你問過她什麼」關著，也可能是設定檔讀不回來，還可能是剛剛寫不進資料庫。）";
+        hitList.append(why);
+      } else {
+        hitList.append(markLine(queryId));
+      }
+    }
+
+    hitList.append(answerReadLine());
+    if (azureSpeechEnabled) {
+      azureAnswerLine = answerAzureLine();
+      hitList.append(azureAnswerLine);
+    }
+    hitList.hidden = false;
+    document.body.classList.add("has-hits");
+    paintConversation();
+    showingAnswer = hasOverviewAnswer;
+    return;
   }
 
   // **她找的字不一定是他打的字。**
@@ -3385,6 +3530,7 @@ async function ask() {
       answer.chapters,
       answer.followup,
       answer.closure_notice,
+      answer.overview,
     );
     setState("idle");
     // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
