@@ -11499,8 +11499,16 @@ pub mod stop_all {
     pub fn run(data_dir: &Path, off: bool) -> Result<()> {
         require_data_dir(data_dir)?;
         if off {
-            sister_hands::master_stop::release(data_dir)
-                .with_context(|| format!("解除不了 {}", data_dir.display()))?;
+            // 出錯的是 `<資料目錄>/master.stop` 那個檔案，不是資料目錄本身。
+            // 指到資料目錄的話，`master.stop` 剛好是一個目錄的時候會印出
+            // 「解除不了 <資料目錄>：Is a directory」——而資料目錄本來就該是
+            // 目錄，那句話讀起來像程式壞了，真正該去看的那個路徑一個字都沒提。
+            sister_hands::master_stop::release(data_dir).with_context(|| {
+                format!(
+                    "解除不了 {}",
+                    sister_hands::master_stop::switch_path(data_dir).display()
+                )
+            })?;
             println!(
                 "▶ capture、brain、hands 都已解除全停；是否實際恢復仍要看原本另按的暫停／拔手。"
             );
@@ -11527,8 +11535,12 @@ pub mod stop_all {
 
         let already = sister_hands::master_stop::is_stopped(data_dir);
         let since = sister_hands::master_stop::stopped_since(data_dir);
-        sister_hands::master_stop::engage(data_dir, sister_core::now_ms())
-            .with_context(|| format!("寫不進 {}", data_dir.display()))?;
+        sister_hands::master_stop::engage(data_dir, sister_core::now_ms()).with_context(|| {
+            format!(
+                "寫不進 {}",
+                sister_hands::master_stop::switch_path(data_dir).display()
+            )
+        })?;
         if already {
             match since {
                 Some(ts) => println!(
@@ -18278,6 +18290,14 @@ pub mod doctor {
         // 而且這一行不必開始錄，就必須告訴使用者「你上禮拜按的暫停還開著」。
         // 暫停不會自己過期（見 `sister_core::pause`），所以那條路很真實，而
         // 它的症狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
+        // 資料目錄根本不在的時候，這一列不可以印一個自信的 `✓ 沒有啟用`。
+        //
+        // `master_stop::is_stopped` 對 `DirState::Absent` 刻意回 false——那是對的，
+        // 一台還沒開始用的機器不算「被停下來」。可是「沒有被停下來」和「我去看了
+        // 那個開關，它是關的」是兩句話，而 `✓ 沒有啟用` 只說得出後面那句。同一份
+        // 報告往上一列，手那一列（`hands_status`）遇到同一個資料目錄已經誠實寫著
+        // 「資料目錄讀不到；無法判斷」——兩列講同一台機器，不可以一列 `?` 一列 `✓`。
+        let readable_dir = std::fs::metadata(data_dir).is_ok_and(|m| m.is_dir());
         let master_row = master_stopped.then(|| {
             sister_hands::master_stop::stopped_since(data_dir)
                 .map(|ts| {
@@ -18295,9 +18315,17 @@ pub mod doctor {
                 })
         });
         mark(
-            if master_stopped { "■" } else { "✓" },
+            match (master_stopped, readable_dir) {
+                (true, _) => "■",
+                (false, true) => "✓",
+                (false, false) => "?",
+            },
             "capture／brain／hands 全停",
-            master_row.as_deref().unwrap_or("沒有啟用"),
+            match (&master_row, readable_dir) {
+                (Some(row), _) => row.as_str(),
+                (None, true) => "沒有啟用",
+                (None, false) => "資料目錄讀不到；無法判斷是不是三層全停",
+            },
         );
         let paused = paused_row(data_dir);
         let (sym, said) = match (master_row, paused) {
