@@ -1116,25 +1116,10 @@ mod tests {
 
     #[test]
     fn baseline_corpus_drafts_datetime_and_dwell_and_zero_notifications() {
-        let mut source: Corpus = serde_json::from_str(include_str!(
+        let source: Corpus = serde_json::from_str(include_str!(
             "../../../scenarios/moment-baseline.corpus.json"
         ))
         .expect("baseline corpus");
-        // 舊 baseline fixture 沒有 recorder 後來才新增的全停邊界；在單元測試
-        // 補齊，讓完整 draft path 仍實際看過每一種非 session system event。
-        source.events.extend([
-            Event::System {
-                at_ms: 80_000,
-                kind: SystemKind::MasterStopEngaged,
-                detail: None,
-            },
-            Event::System {
-                at_ms: 90_000,
-                kind: SystemKind::MasterStopReleased,
-                detail: None,
-            },
-        ]);
-        source.events.sort_by_key(Event::at_ms);
         source.validate().expect("valid corpus");
         let kinds: Vec<_> = source
             .events

@@ -2033,6 +2033,28 @@ mod tests {
         )
     }
 
+    fn fake_cli_engages_master_stop(
+        dir: &std::path::Path,
+        json: &str,
+        data_dir: &std::path::Path,
+    ) -> (String, Vec<String>) {
+        let script = dir.join("fake-reviewer-master-stop.py");
+        std::fs::write(
+            &script,
+            format!(
+                "import pathlib, sys\nsys.stdin.buffer.read()\nlatch = pathlib.Path(sys.argv[1]) / 'master.stop'\ntry:\n    latch.write_text('1234')\nexcept OSError:\n    pass\nsys.stdout.buffer.write({json:?}.encode('utf-8'))\n"
+            ),
+        )
+        .expect("script");
+        (
+            "python3".into(),
+            vec![
+                script.to_string_lossy().into_owned(),
+                data_dir.to_string_lossy().into_owned(),
+            ],
+        )
+    }
+
     fn fake_cli_split(
         dir: &std::path::Path,
         json_a: &str,
@@ -2649,6 +2671,83 @@ mod tests {
         assert!(during.contains("寫入 2 筆 L3 承諾"), "{during}");
         assert!(!during.contains("這一趟沒有問模型"), "{during}");
         assert_ne!(before, during);
+    }
+
+    /// 第一張卡片的 CLI 在執行途中立起 durable latch；第二張卡片開始前才看見。
+    /// 這條走真正的 `run` 和磁碟資料目錄，並且斷言 `skip_reason IS NULL` 的讀者
+    /// 不會把被截斷的一輪算成完整跑過。
+    #[test]
+    fn master_stop_mid_run_is_persisted_as_skipped_and_excluded_by_completed_run_queries() {
+        let tmp = Tmp::new("master-stop-mid-run");
+        let db_path = tmp.0.join("sister.db");
+        let mut db = Db::open(&db_path).expect("db");
+        let ts = 1_700_790_000_000;
+        let gap = crate::segment::TIME_CAP_MS + 60_000;
+        let (_first_session, first_fid) = seed(&mut db, ts, "LINE：五點去接她 17:00");
+        let (_second_session, second_fid) = seed(&mut db, ts + gap, "LINE：五點去接她 17:00");
+        let segments = db
+            .chapters_for_range(ts, ts + gap + 400_000)
+            .expect("segments");
+        assert!(segments.len() >= 2, "夾具必須準備兩張不同段落的卡片");
+        let first_core = segments.first().expect("first segment").core_started_at;
+        let second_core = segments.last().expect("second segment").core_started_at;
+        assert_ne!(first_core, second_core, "兩張卡片不能落在同一段");
+        let commitments = r#"[{"text":"五點去接她","source":"LINE","due_hint":"17:00"}]"#;
+        write_l2(
+            &mut db,
+            first_core,
+            first_fid,
+            "第一張接人訊息",
+            commitments,
+        );
+        write_l2(
+            &mut db,
+            second_core,
+            second_fid,
+            "第二張接人訊息",
+            commitments,
+        );
+
+        let (command, args) = fake_cli_engages_master_stop(&tmp.0, r#"{"commitments":[]}"#, &tmp.0);
+        let consent = signed();
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let result = {
+            let mut input = ReviewInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: ts,
+                to_ts: ts + gap + 400_000,
+                kind: ReviewKind::Interval,
+                force: true,
+                now: ts + gap + 500_000,
+            };
+            run(&mut input, &tmp.0).expect("run")
+        };
+
+        assert!(
+            matches!(result.skip, Some(SkipReason::MasterStoppedMidRun { .. })),
+            "必須走迴圈中的全停，不是開場早退：{:?}",
+            result.skip
+        );
+        let skip_reason: Option<String> = db
+            .conn()
+            .query_row(
+                "SELECT skip_reason FROM reviewer_run ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("saved reviewer run");
+        assert_eq!(skip_reason.as_deref(), Some("master_stopped"));
+        assert_eq!(
+            db.last_reviewer_run_at().expect("completed-run reader"),
+            None,
+            "skip_reason IS NULL 的讀者不可以把中途全停的一輪算成完整跑過"
+        );
     }
 
     /// 「沒有東西可審」寫進 notes 不是 detail。手捏 `ReviewerRefusals` 再叫

@@ -2,7 +2,7 @@
   "format_version": 1,
   "name": "synthetic-moment-baseline-moments",
   "review": "reviewed",
-  "corpus_fingerprint": "fnv1a64:3d5e8741cd002e24",
+  "corpus_fingerprint": "fnv1a64:fd36da2f9e9afc87",
   "moments": [
     {
       "id": "moment-hand-0001",
@@ -10,7 +10,7 @@
       "candidate": "hand_picked",
       "evidence": [
         {
-          "event_index": 8
+          "event_index": 10
         }
       ],
       "label": {
@@ -27,10 +27,10 @@
           "event_index": 0
         },
         {
-          "event_index": 8
+          "event_index": 10
         },
         {
-          "event_index": 9
+          "event_index": 11
         }
       ],
       "label": {
@@ -45,7 +45,7 @@
       "candidate": "date_time_mention",
       "evidence": [
         {
-          "event_index": 10
+          "event_index": 12
         }
       ],
       "label": {
@@ -60,7 +60,7 @@
       "candidate": "date_time_mention",
       "evidence": [
         {
-          "event_index": 11
+          "event_index": 13
         }
       ],
       "label": {

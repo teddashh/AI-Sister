@@ -14625,6 +14625,13 @@ pub mod query {
                 b.master_stopped_episodes
             ));
         }
+        if b.master_stopped_now {
+            let lead = if out.is_empty() { "她" } else { "而且她" };
+            out.push(format!(
+                "{lead}**現在正全停中**（`{}` 解除）——recorder、解釋層和手都不會工作。",
+                cmd(data_dir, "stop-all --off")
+            ));
+        }
         // 沒有任何理由的時候只剩一句實話。而「每一段」這三個字要看她這次
         // 到底翻了多少：只掃了 30 天卻說「每一段」，是把十二分之一講成全部。
         if out.is_empty() {
@@ -15089,6 +15096,25 @@ pub mod query {
             assert!(out.contains("最後一段沒有收尾"), "{out}");
             assert!(out.contains("開頭已被保留期刪掉"), "{out}");
             assert!(!out.contains("暫停過"), "全停不可冒充普通暫停：{out}");
+        }
+
+        #[test]
+        fn a_live_master_stop_latch_is_named_even_without_an_audit_row() {
+            let dir = crate::ops::tmp::Tmp::new("query-master-stop-now");
+            sister_hands::master_stop::engage(&dir.0, 1_234).expect("按下全停");
+            let db = sister_core::Db::open_in_memory().expect("db");
+            let blind =
+                sister_core::answer::blind_spots(&db, &dir.0, "查不到的詞").expect("blind spots");
+
+            assert_eq!(blind.master_stopped_episodes, 0, "資料庫刻意沒有稽核列");
+            let out = blind_lines_for(&dir.0, &blind).join("\n");
+            assert!(out.contains("現在正全停中"), "{out}");
+            assert!(out.contains("全停"), "{out}");
+            assert!(out.contains("stop-all --off"), "{out}");
+            assert!(
+                out.contains(&format!("--data-dir {}", dir.0.display())),
+                "解除指令必須指回同一份資料目錄：{out}"
+            );
         }
     }
 
@@ -23722,7 +23748,13 @@ pub mod replay {
         }
 
         let backend = ReplayBackend::with_origin(scenario, origin);
-        let mut rec = Recorder::new(backend, db, config, image_dir)?;
+        let mut rec = Recorder::new(
+            backend,
+            db,
+            config,
+            image_dir,
+            sister_capture::MasterStopSource::NotApplicable,
+        )?;
 
         let mut offset = 0i64;
         loop {
@@ -25716,8 +25748,12 @@ pub mod record {
         let capability_config = config.clone();
         // 只有 windows 模組內這條 composition 能建立 trusted v2 session。
         // 公開的 Recorder::new 不論 backend 名字為何都只會得到 untrusted provenance。
-        let mut rec = windows::recorder(config, db, images)?;
-        rec.set_master_stop_dir(data_dir.to_path_buf());
+        let mut rec = windows::recorder(
+            config,
+            db,
+            images,
+            sister_capture::MasterStopSource::Latch(data_dir.to_path_buf()),
+        )?;
 
         // **先建後端、再問能力。** 反過來的話，「輸入 hook 裝上了沒」永遠
         // 是在 hook 還沒裝之前問的，於是永遠回報失敗——一則恆假的警告。
@@ -27357,6 +27393,7 @@ pub mod record {
                 sister_core::Db::open_in_memory().expect("db"),
                 Config::default(),
                 None,
+                sister_capture::MasterStopSource::NotApplicable,
             )
             .expect("replay recorder")
         }
