@@ -68,17 +68,36 @@ pub fn summarized_day(run_at: Millis) -> Option<String> {
 pub enum SkipReason {
     NoConsent,
     MasterStopped,
+    MasterStoppedMidRun {
+        calls_used: u32,
+        wrote_commitments: u32,
+    },
     NoCommand,
-    BudgetExhausted { used: u32, limit: u32 },
-    Cadence { last_ago_ms: Millis, min_ms: Millis },
-    NothingToReview { remaining: u32 },
+    BudgetExhausted {
+        used: u32,
+        limit: u32,
+    },
+    Cadence {
+        last_ago_ms: Millis,
+        min_ms: Millis,
+    },
+    NothingToReview {
+        remaining: u32,
+    },
+}
+
+fn master_stopped_mid_run_reason(calls_used: u32, wrote_commitments: u32) -> SkipReason {
+    SkipReason::MasterStoppedMidRun {
+        calls_used,
+        wrote_commitments,
+    }
 }
 
 impl SkipReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             SkipReason::NoConsent => "no_consent",
-            SkipReason::MasterStopped => "master_stopped",
+            SkipReason::MasterStopped | SkipReason::MasterStoppedMidRun { .. } => "master_stopped",
             SkipReason::NoCommand => "no_command",
             SkipReason::BudgetExhausted { .. } => "budget",
             SkipReason::Cadence { .. } => "cadence",
@@ -87,15 +106,39 @@ impl SkipReason {
     }
 
     pub fn message(&self) -> String {
-        self.message_with_consent_command("sister consent --grant cloud-reading")
+        self.message_with_commands("sister consent --grant cloud-reading", None)
     }
 
     pub fn message_with_consent_command(&self, consent_command: &str) -> String {
+        self.message_with_commands(consent_command, None)
+    }
+
+    /// 路徑敏感的指令由 CLI 組好再交進來；core 不猜使用者這次用哪個 data dir。
+    pub fn message_with_commands(
+        &self,
+        consent_command: &str,
+        master_stop_command: Option<&str>,
+    ) -> String {
+        let recovery = || {
+            master_stop_command
+                .map(|command| format!("要恢復請跑 `{command}`。"))
+                .unwrap_or_else(|| "要恢復，請從啟用這份資料目錄的介面解除全停。".into())
+        };
         match self {
             SkipReason::NoConsent => format!(
                 "還沒簽第二張同意書（上雲解讀）。審閱層一次都不會呼叫那支 CLI。\n要簽字：{consent_command}"
             ),
-            SkipReason::MasterStopped => "三層全停中：審閱層這一趟沒有問模型，也沒有寫新的 L3。要恢復請跑 `sister stop-all --off`。".to_string(),
+            SkipReason::MasterStopped => format!(
+                "三層全停在審閱開始前就已啟用：這一趟沒有問模型，也沒有寫新的 L3。{}",
+                recovery()
+            ),
+            SkipReason::MasterStoppedMidRun {
+                calls_used,
+                wrote_commitments,
+            } => format!(
+                "審閱跑到一半才遇到三層全停：停止前已問模型 {calls_used} 次、寫入 {wrote_commitments} 筆 L3 承諾；全停後沒有再問或再寫。{}",
+                recovery()
+            ),
             SkipReason::NoCommand => concat!(
                 "還沒設定 [brain] command。審閱層一次都不會呼叫。\n",
                 "（不是今天沒有東西可審——她根本沒有一支 CLI 可以叫。）"
@@ -159,14 +202,23 @@ pub fn format_review_result_with_consent_command(
     stats: &RecheckStats,
     consent_command: &str,
 ) -> String {
+    format_review_result_with_commands(r, stats, consent_command, None)
+}
+
+pub fn format_review_result_with_commands(
+    r: &ReviewResult,
+    stats: &RecheckStats,
+    consent_command: &str,
+    master_stop_command: Option<&str>,
+) -> String {
     let mut out = String::new();
     if let Some(skip) = &r.skip {
         if r.ran {
-            out.push_str(&skip.message_with_consent_command(consent_command));
+            out.push_str(&skip.message_with_commands(consent_command, master_stop_command));
             out.push('\n');
         } else {
             out.push_str("真的跑的話會停在這裡：\n");
-            out.push_str(&skip.message_with_consent_command(consent_command));
+            out.push_str(&skip.message_with_commands(consent_command, master_stop_command));
             out.push('\n');
         }
     } else {
@@ -1179,14 +1231,14 @@ pub fn run(input: &mut ReviewInput<'_>, data_dir: &std::path::Path) -> Result<Re
         })?;
     }
     if master_stopped_mid_run {
-        let reason = SkipReason::MasterStopped;
+        let reason = master_stopped_mid_run_reason(calls, wrote);
         input
             .db
             .insert_brain_skip(input.now, reason.as_str(), None, &reason.message())?;
     }
 
     Ok(ReviewResult {
-        skip: master_stopped_mid_run.then_some(SkipReason::MasterStopped),
+        skip: master_stopped_mid_run.then(|| master_stopped_mid_run_reason(calls, wrote)),
         ran: true,
         rechecks,
         candidates,
@@ -2580,6 +2632,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn master_stop_before_and_during_review_report_different_measured_work() {
+        let command = Some("sister --data-dir /tmp/reviewer-real stop-all --off");
+        let before = SkipReason::MasterStopped.message_with_commands("consent command", command);
+        let during =
+            master_stopped_mid_run_reason(4, 2).message_with_commands("consent command", command);
+
+        assert!(before.contains("開始前"), "{before}");
+        assert!(before.contains("沒有問模型"), "{before}");
+        assert!(!before.contains("跑到一半"), "{before}");
+        assert!(during.contains("跑到一半"), "{during}");
+        assert!(during.contains("已問模型 4 次"), "{during}");
+        assert!(during.contains("寫入 2 筆 L3 承諾"), "{during}");
+        assert!(!during.contains("這一趟沒有問模型"), "{during}");
+        assert_ne!(before, during);
     }
 
     /// 「沒有東西可審」寫進 notes 不是 detail。手捏 `ReviewerRefusals` 再叫

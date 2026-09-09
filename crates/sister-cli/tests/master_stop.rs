@@ -142,6 +142,10 @@ fn master_stop_blocks_brain_bytes_and_cards_and_says_why() {
         "沒有把沒問模型的理由講出來：{stdout}"
     );
     assert!(stdout.contains("沒有問模型"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("--data-dir {} stop-all --off", dir.display())),
+        "解除指令沒有帶這一趟真正使用的 data dir：{stdout}"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -214,6 +218,89 @@ fn stop_all_twice_preserves_timestamp_and_doctor_never_calls_it_running() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn doctor_reports_master_pause_and_pull_without_hiding_any_state() {
+    let master_only = temp("doctor-master-only");
+    success(&master_only, None, &["stop-all"]);
+    let doctor = success(&master_only, None, &["doctor"]);
+    let hand = doctor
+        .lines()
+        .find(|line| line.contains("手 "))
+        .expect("doctor hands row");
+    assert!(hand.contains("手沒有拔掉"), "{hand}");
+    assert!(hand.contains("三層全停"), "{hand}");
+    let screen = doctor
+        .lines()
+        .find(|line| line.contains("讀你現在的螢幕"))
+        .expect("doctor current-screen row");
+    assert!(screen.contains("沒有抓畫面"), "{screen}");
+    assert!(screen.contains("沒有對畫面做 OCR"), "{screen}");
+
+    let paused = temp("doctor-master-pause");
+    success(&paused, None, &["pause"]);
+    success(&paused, None, &["stop-all"]);
+    let doctor = success(&paused, None, &["doctor"]);
+    let watching = doctor
+        .lines()
+        .find(|line| line.contains("現在有沒有在看"))
+        .expect("doctor watching row");
+    assert!(watching.contains("三層全停中"), "{watching}");
+    assert!(watching.contains("暫停也還在"), "{watching}");
+    assert!(
+        watching.contains("解除全停後 capture 仍不會看"),
+        "{watching}"
+    );
+
+    let both = temp("doctor-master-hands");
+    success(&both, None, &["hands", "stop"]);
+    success(&both, None, &["stop-all"]);
+    let doctor = success(&both, None, &["doctor"]);
+    let hand = doctor
+        .lines()
+        .find(|line| line.contains("手 "))
+        .expect("doctor hands row");
+    assert!(hand.contains("拔手與三層全停都在"), "{hand}");
+    assert!(hand.contains("hands resume"), "{hand}");
+    assert!(hand.contains("stop-all --off"), "{hand}");
+
+    std::fs::remove_dir_all(master_only).unwrap();
+    std::fs::remove_dir_all(paused).unwrap();
+    std::fs::remove_dir_all(both).unwrap();
+}
+
+#[test]
+fn pause_during_master_stop_says_resume_alone_cannot_restore_capture() {
+    let dir = temp("pause-during-master");
+    success(&dir, None, &["stop-all"]);
+    let out = success(&dir, None, &["pause"]);
+    assert!(out.contains("已暫停"), "{out}");
+    assert!(out.contains("三層全停也還在"), "{out}");
+    assert!(out.contains("只會解除暫停、救不了全停"), "{out}");
+    assert!(out.contains("resume"), "{out}");
+    assert!(out.contains("stop-all --off"), "{out}");
+    assert!(!out.contains("要她繼續請跑"), "{out}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn bench_refuses_before_capture_when_master_stop_is_on() {
+    let dir = temp("bench");
+    success(&dir, None, &["stop-all"]);
+    let output = sister(&dir, None, &["bench", "--rounds", "1"]);
+    assert!(!output.status.success(), "全停中 bench 不該成功");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(said.contains("bench 沒有抓畫面"), "{said}");
+    assert!(
+        said.contains(&format!("--data-dir {} stop-all --off", dir.display())),
+        "{said}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// 打錯 `--data-dir` 的時候，全停不可以安靜地成功。
 ///
 /// 對照組是同一顆二進位檔的 `hands stop`：它本來就拒絕。三層裡有一層會拒絕、
@@ -235,6 +322,10 @@ fn stop_all_refuses_a_data_dir_that_is_not_there() {
     let said = String::from_utf8_lossy(&out.stdout) + String::from_utf8_lossy(&out.stderr);
     assert!(!said.contains("三層都停了"), "宣稱停了卻沒停：{said}");
     assert!(said.contains("找不到這個資料目錄"), "{said}");
+    assert!(
+        !said.contains("真正在跑"),
+        "不存在的路徑不能證明另有一份正在跑：{said}"
+    );
     assert!(!missing.exists(), "拒絕之後還是把資料夾建出來了");
 
     let off = sister(&missing, None, &["stop-all", "--off"]);

@@ -705,11 +705,16 @@ impl RefusalReason {
     }
 
     pub fn message(&self) -> String {
-        self.message_with_hands_resume("sister hands resume")
+        self.message_with_commands("sister hands resume", None)
     }
 
     /// 呼叫端把這一次資料目錄的 resume 指令交進來；這個 crate 不猜預設目錄。
     pub fn message_with_hands_resume(&self, resume: &str) -> String {
+        self.message_with_commands(resume, None)
+    }
+
+    /// 兩條解除指令都由最外層依這次使用的 data dir 組好；hands 不猜路徑。
+    pub fn message_with_commands(&self, resume: &str, master_stop_command: Option<&str>) -> String {
         match self {
             Self::UserDeclinedThisStep => "你說不要，所以這一步沒有做。".to_string(),
             Self::ObserveHasNoHands => {
@@ -752,12 +757,21 @@ impl RefusalReason {
             },
             Self::MasterStopped { since_ms } => match since_ms {
                 Some(since_ms) => format!(
-                    "從 {} 起三層都已全停，所以這一步沒有交給作業系統。要恢復請跑 `sister stop-all --off`。",
+                    "從 {} 起三層都已全停，所以這一步沒有交給作業系統。{}",
                     replay_copy::at(*since_ms),
+                    master_stop_command
+                        .map(|command| format!("要恢復請跑 `{command}`。"))
+                        .unwrap_or_else(|| "要恢復，請從啟用這份資料目錄的介面解除全停。".into()),
                 ),
                 None => {
-                    "三層都已全停，所以這一步沒有交給作業系統。要恢復請跑 `sister stop-all --off`。"
-                        .to_string()
+                    format!(
+                        "三層都已全停，所以這一步沒有交給作業系統。{}",
+                        master_stop_command
+                            .map(|command| format!("要恢復請跑 `{command}`。"))
+                            .unwrap_or_else(
+                                || "要恢復，請從啟用這份資料目錄的介面解除全停。".into()
+                            )
+                    )
                 }
             },
         }

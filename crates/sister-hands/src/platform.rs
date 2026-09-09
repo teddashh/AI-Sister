@@ -195,12 +195,13 @@ mod tests {
         else {
             panic!("拒絕理由沒有指出全停：{error:?}");
         };
+        let command = ["sister --data-dir /tmp/real", "stop-all --off"].join(" ");
         assert!(
             RefusalReason::MasterStopped {
                 since_ms: Some(2_000)
             }
-            .message()
-            .contains("stop-all --off")
+            .message_with_commands("hands resume command", Some(&command))
+            .contains(&command)
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

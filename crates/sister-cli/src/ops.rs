@@ -1894,7 +1894,14 @@ pub mod interpret {
 
         if dry_run {
             let report = brain::prepare(&mut input, data_dir)?;
-            print!("{}", brain::format_dry_run(&report));
+            print!(
+                "{}",
+                brain::format_dry_run_with_commands(
+                    &report,
+                    &cmd(data_dir, "consent --grant cloud-reading"),
+                    Some(&cmd(data_dir, "stop-all --off")),
+                )
+            );
             return Ok(());
         }
 
@@ -1902,7 +1909,10 @@ pub mod interpret {
         if let Some(skip) = &result.skip {
             println!(
                 "{}",
-                skip.message_with_consent_command(&cmd(data_dir, "consent --grant cloud-reading"))
+                skip.message_with_commands(
+                    &cmd(data_dir, "consent --grant cloud-reading"),
+                    Some(&cmd(data_dir, "stop-all --off")),
+                )
             );
             return Ok(());
         }
@@ -2320,10 +2330,11 @@ pub mod review {
         let stats = input.db.reviewer_recheck_stats()?;
         print!(
             "{}",
-            reviewer::format_review_result_with_consent_command(
+            reviewer::format_review_result_with_commands(
                 &result,
                 &stats,
-                &cmd(data_dir, "consent --grant cloud-reading")
+                &cmd(data_dir, "consent --grant cloud-reading"),
+                Some(&cmd(data_dir, "stop-all --off")),
             )
         );
         let divergences = input.db.latest_dual_pass_divergences()?;
@@ -2749,15 +2760,15 @@ pub mod act {
         /// `NotCoveredByGrant` 那一種是「把 `--apps` / `--allow` 放寬」能解的。
         /// 尤其 `ApprovalWasForAnotherStep`：放寬授權不但沒用，還剛好會去拆掉
         /// 唯一擋住它的那道門。所以那一句刻意比別格長、也比別格兇。
-        fn refusal_clauses(&self, answer_cmd: &str) -> String {
+        fn refusal_clauses(&self, answer_cmd: &str, master_stop_cmd: &str) -> String {
             let mut out = String::new();
             if self.pulled > 0 {
                 out.push_str(&format!("，拔手擋掉 {} 步", self.pulled));
             }
             if self.master_stopped > 0 {
                 out.push_str(&format!(
-                    "，三層全停擋掉 {} 步（要恢復請跑 `sister stop-all --off`）",
-                    self.master_stopped
+                    "，三層全停擋掉 {} 步（要恢復請跑 `{master_stop_cmd}`）",
+                    self.master_stopped,
                 ));
             }
             if self.target_not_cited > 0 {
@@ -3479,29 +3490,45 @@ pub mod act {
         out: &mut impl std::io::Write,
     ) -> Result<()> {
         let pulled_at_start = sister_hands::kill_switch::is_pulled(data_dir);
-        if pulled_at_start {
-            let since = sister_hands::kill_switch::pulled_since(data_dir)
+        let master_stopped_at_start = sister_hands::master_stop::is_stopped(data_dir);
+        if pulled_at_start || master_stopped_at_start {
+            let pulled_since = sister_hands::kill_switch::pulled_since(data_dir)
                 .map(|value| format!("（從 {} 起）", crate::fmt::timestamp(value)))
                 .unwrap_or_else(|| "（拔手時間讀不到）".into());
+            let master_since = sister_hands::master_stop::stopped_since(data_dir)
+                .map(|value| format!("（從 {} 起）", crate::fmt::timestamp(value)))
+                .unwrap_or_else(|| "（全停時間讀不到）".into());
+            let hands_resume = cmd(data_dir, "hands resume");
+            let master_resume = cmd(data_dir, "stop-all --off");
+            let blockers = match (pulled_at_start, master_stopped_at_start) {
+                (true, true) => format!(
+                    "手目前被拔掉了{pulled_since}，而且三層全停也開著{master_since}；要真的交出動作，兩個都要解除：先後跑 `{hands_resume}` 與 `{master_resume}`"
+                ),
+                (true, false) => {
+                    format!("手目前被拔掉了{pulled_since}；要接回去請跑 `{hands_resume}`")
+                }
+                (false, true) => {
+                    format!("三層全停目前開著{master_since}；要恢復請跑 `{master_resume}`")
+                }
+                (false, false) => unreachable!("outer condition checked"),
+            };
             if opts.dry_run {
                 writeln!(
                     out,
-                    "手目前被拔掉了{since}；下面這些是她會問的，真的跑起來的時候一步都交不出去，除非先 `{}`。",
-                    cmd(data_dir, "hands resume")
+                    "{blockers}。下面這些是她會問的；目前真的跑起來時一步都交不出去。"
                 )?;
             } else {
-                writeln!(
-                    out,
-                    "手目前被拔掉了{since}；沒有動作會交給作業系統。要接回去請跑 `{}`。",
-                    cmd(data_dir, "hands resume")
-                )?;
+                writeln!(out, "{blockers}。沒有動作會交給作業系統。")?;
                 if opts.save_grant {
-                    writeln!(out, "這一趟沒有存 `--save-grant`；把手接回去後請重打一次。")?;
+                    writeln!(
+                        out,
+                        "這一趟沒有存 `--save-grant`；解除上面列出的停止狀態後請重打一次。"
+                    )?;
                 }
                 if opts.use_grant {
                     writeln!(
                         out,
-                        "這一趟沒有使用 `--use-grant`；把手接回去後請重打一次。"
+                        "這一趟沒有使用 `--use-grant`；解除上面列出的停止狀態後請重打一次。"
                     )?;
                 }
                 return Ok(());
@@ -3727,7 +3754,10 @@ pub mod act {
                             writeln!(
                                 out,
                                 "沒有做，也沒有交給作業系統：{}",
-                                reason.message_with_hands_resume(&cmd(data_dir, "hands resume"))
+                                reason.message_with_commands(
+                                    &cmd(data_dir, "hands resume"),
+                                    Some(&cmd(data_dir, "stop-all --off")),
+                                )
                             )?;
                             log.append(&ActionEvent::Refused {
                                 at_ms: clock(),
@@ -3841,7 +3871,10 @@ pub mod act {
                         writeln!(
                             out,
                             "沒有做，也沒有交給作業系統：{}",
-                            reason.message_with_hands_resume(&cmd(data_dir, "hands resume"))
+                            reason.message_with_commands(
+                                &cmd(data_dir, "hands resume"),
+                                Some(&cmd(data_dir, "stop-all --off")),
+                            )
                         )?;
                         ActionEvent::Refused {
                             at_ms: clock(),
@@ -3873,13 +3906,20 @@ pub mod act {
                     }
                 };
                 log.append(&event)?;
-                if matches!(
-                    outcome,
+                let stopped_by = match outcome {
                     Outcome::Refused {
-                        reason: RefusalReason::HandsPulled { .. }
-                    }
-                ) {
-                    let event = run.abort(clock(), AbortActor::HandsPulled);
+                        reason: RefusalReason::HandsPulled { .. },
+                    } => Some((AbortActor::HandsPulled, "手被拔掉，所以這一輪到此為止。")),
+                    Outcome::Refused {
+                        reason: RefusalReason::MasterStopped { .. },
+                    } => Some((
+                        AbortActor::MasterStopped,
+                        "三層全停已啟用，所以這一輪到此為止。",
+                    )),
+                    _ => None,
+                };
+                if let Some((actor, message)) = stopped_by {
+                    let event = run.abort(clock(), actor);
                     log.append(&event)?;
                     terminal = Some(match event {
                         ActionEvent::Aborted {
@@ -3892,7 +3932,7 @@ pub mod act {
                         },
                         _ => unreachable!("abort always returns Aborted"),
                     });
-                    writeln!(out, "手被拔掉，所以這一輪到此為止。")?;
+                    writeln!(out, "{message}")?;
                     break;
                 }
                 if matches!(outcome, Outcome::Done { .. }) {
@@ -3964,7 +4004,10 @@ pub mod act {
                 },
             })?,
         }
-        let refusals = tally.refusal_clauses(&url_policy_cmd(opts.url_policy_config.as_deref()));
+        let refusals = tally.refusal_clauses(
+            &url_policy_cmd(opts.url_policy_config.as_deref()),
+            &cmd(data_dir, "stop-all --off"),
+        );
         if opts.unattended {
             writeln!(
                 out,
@@ -4152,7 +4195,7 @@ pub mod act {
             );
             assert_eq!(tally.mismatched, 1, "警報那一格要自己數");
 
-            let clauses = tally.refusal_clauses("sister url-policy");
+            let clauses = tally.refusal_clauses("sister url-policy", "解除全停指令");
             assert!(
                 !clauses.contains("授權擋掉"),
                 "警報那一句自己也講成「授權擋掉」的話，等於沒有拆：{clauses}"
@@ -4178,7 +4221,7 @@ pub mod act {
                 class: sister_hands::NeverInherited::Pay,
             });
 
-            let clauses = tally.refusal_clauses("sister url-policy");
+            let clauses = tally.refusal_clauses("sister url-policy", "解除全停指令");
             assert!(
                 clauses.contains("1 步要你當場按（票帶不動這一類）"),
                 "缺當場核准的這一趟要叫使用者重跑並按下去：{clauses}"
@@ -5077,7 +5120,7 @@ pub mod act {
             let clause = |why: G| {
                 let mut tally = Tally::default();
                 tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame { why });
-                tally.refusal_clauses("sister url-policy")
+                tally.refusal_clauses("sister url-policy", "解除全停指令")
             };
 
             let no_target = clause(G::NoTargetRecorded);
@@ -5121,7 +5164,7 @@ pub mod act {
             tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame {
                 why: G::NoTargetRecorded,
             });
-            let clause = tally.refusal_clauses("sister url-policy");
+            let clause = tally.refusal_clauses("sister url-policy", "解除全停指令");
 
             // 逐步那一行是同一次拒絕在畫面上的另一半。
             let step_line = G::NoTargetRecorded.unattended_message(None, None, None);
@@ -5153,7 +5196,7 @@ pub mod act {
             assert_eq!(tally.target_no_frame, 0);
             assert_eq!(tally.target_gone, 0);
             assert_eq!(tally.recorded_before_this_check, 0);
-            let clauses = tally.refusal_clauses("sister url-policy");
+            let clauses = tally.refusal_clauses("sister url-policy", "解除全停指令");
             assert!(
                 !clauses.contains("沒有引用"),
                 "只有一個 pass 指過時畫面是有被引用的：{clauses}"
@@ -5253,7 +5296,7 @@ pub mod act {
                 let mut tally = Tally::default();
                 tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame { why });
                 assert_eq!(count_of(&tally), 1, "{why:?} 計數必須等於餵進去的筆數");
-                let clauses = tally.refusal_clauses("sister url-policy");
+                let clauses = tally.refusal_clauses("sister url-policy", "解除全停指令");
                 assert!(
                     clauses.contains(must),
                     "{why:?} 的收尾必須含整句（含數字和行動）：{clauses}"
@@ -5278,7 +5321,7 @@ pub mod act {
             tally.count_refusal(&RefusalReason::UnattendedTargetHasNoCitedFrame {
                 why: sister_hands::TargetFrameGap::NoTargetRecorded,
             });
-            let clauses = tally.refusal_clauses("sister url-policy");
+            let clauses = tally.refusal_clauses("sister url-policy", "解除全停指令");
             assert!(
                 clauses.contains("請在終端機裡自己看過再按"),
                 "沒有可核對的目標時，下一步是回終端機自己看過再按：{clauses}"
@@ -5293,7 +5336,7 @@ pub mod act {
             });
             assert_eq!(tally.target_not_cited, 0);
             assert_eq!(tally.recorded_before_this_check, 1);
-            let clauses = tally.refusal_clauses("sister url-policy");
+            let clauses = tally.refusal_clauses("sister url-policy", "解除全停指令");
             assert!(clauses.contains("記在加這道檢查之前"), "{clauses}");
             assert!(
                 !clauses.contains("請在終端機裡自己看過再按"),
@@ -5753,6 +5796,36 @@ pub mod act {
             assert!(!ActionLog::in_data_dir(&dir.0).path().exists());
         }
 
+        #[test]
+        fn master_stop_at_opening_names_every_active_lever_and_writes_no_completion() {
+            let dir = crate::ops::tmp::Tmp::new("act-master-before-start");
+            sister_hands::kill_switch::pull(&dir.0, 1_234).unwrap();
+            sister_hands::master_stop::engage(&dir.0, 2_345).unwrap();
+            let mut input = std::io::Cursor::new("好\n".as_bytes());
+            let mut executor = Fake::default();
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &opts("任務", &["chrome.exe"], 2, 5, false),
+                &one_card(),
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .unwrap();
+
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("兩個都要解除"), "{out}");
+            assert!(out.contains("hands resume"), "{out}");
+            assert!(out.contains("stop-all --off"), "{out}");
+            assert!(executor.calls.is_empty());
+            assert!(
+                !ActionLog::in_data_dir(&dir.0).path().exists(),
+                "開場就被全停擋住，不可以留下 Completed 或任何假執行紀錄"
+            );
+        }
+
         struct PullAfterFirst {
             data_dir: std::path::PathBuf,
             calls: Vec<ActionSnapshot>,
@@ -5831,6 +5904,58 @@ pub mod act {
                     since_ms: Some(5555),
                 }
             }
+        }
+
+        struct MasterStoppedAtGate;
+        impl sister_hands::Executor for MasterStoppedAtGate {
+            fn execute(
+                &mut self,
+                _: &sister_hands::Suggestion,
+            ) -> std::result::Result<String, sister_hands::ExecutorError> {
+                panic!("全停後不可以執行")
+            }
+            fn hands_attached(&self) -> sister_hands::Attached {
+                sister_hands::Attached::MasterStopped {
+                    since_ms: Some(6_666),
+                }
+            }
+        }
+
+        #[test]
+        fn master_stop_at_the_last_gate_aborts_instead_of_recording_completed() {
+            let dir = crate::ops::tmp::Tmp::new("act-master-at-last-gate");
+            let mut executor = MasterStoppedAtGate;
+            let mut input = std::io::Cursor::new("好\n".as_bytes());
+            let mut out = Vec::new();
+            run_with_output(
+                &dir.0,
+                &opts("任務", &["chrome.exe"], 2, 5, false),
+                &one_card(),
+                &mut input,
+                &mut executor,
+                &mut ticking(1_700_000_000_000),
+                &mut out,
+            )
+            .unwrap();
+
+            let replay = ActionLog::in_data_dir(&dir.0).replay().unwrap();
+            assert!(matches!(
+                replay.events.last(),
+                Some(ActionEvent::Aborted {
+                    by: AbortActor::MasterStopped,
+                    ..
+                })
+            ));
+            assert!(!replay.events.iter().any(|event| matches!(
+                event,
+                ActionEvent::Concluded {
+                    conclusion: RunConclusionRecord::Completed { .. },
+                    ..
+                }
+            )));
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("三層全停已啟用，所以這一輪到此為止"), "{out}");
+            assert!(!out.contains("步驟都問完了"), "{out}");
         }
 
         #[test]
@@ -9253,7 +9378,11 @@ pub mod watch {
             }
             sleep(every);
         };
-        writeln!(out, "{}", end.message())?;
+        writeln!(
+            out,
+            "{}",
+            end.message_with_master_stop_command(&cmd(data_dir, "stop-all --off"))
+        )?;
         if end.should_notify(opts.notify) {
             // **這一聲失敗不算這一場失敗。**
             //
@@ -11296,25 +11425,41 @@ pub mod pause {
         let before = sister_core::pause::is_paused(data_dir);
         sister_core::pause::set_paused(data_dir, paused, sister_core::now_ms())
             .with_context(|| format!("寫不進 {}", data_dir.display()))?;
+        let master_stopped = sister_hands::master_stop::is_stopped(data_dir);
 
         // 「本來就是這樣」和「剛剛被我改掉」要分得出來。前者常常代表使用者
         // 記錯了自己上次按了什麼，而那正是需要講清楚的時刻。
         match (before, paused) {
-            (false, true) => println!(
+            (false, true) if !master_stopped => println!(
                 "⏸ 已暫停。正在跑的 `sister record` 會在下一個 tick 停下來，\
                  而且**不會自己恢復**——要她繼續請跑 `{}`。",
                 cmd(data_dir, "resume")
             ),
-            (true, true) => {
+            (false, true) => println!(
+                "⏸ 已暫停，而且三層全停也還在。`{}` 只會解除暫停、救不了全停；要讓 capture 恢復，兩個都要解除，請再跑 `{}`。",
+                cmd(data_dir, "resume"),
+                cmd(data_dir, "stop-all --off")
+            ),
+            (true, true) if !master_stopped => {
                 let since = sister_core::pause::paused_since(data_dir)
                     .map(|ts| format!("（從 {} 起）", crate::fmt::timestamp(ts)))
                     .unwrap_or_default();
                 println!("⏸ 本來就在暫停中{since}，沒有變動。");
             }
+            (true, true) => {
+                let since = sister_core::pause::paused_since(data_dir)
+                    .map(|ts| format!("（從 {} 起）", crate::fmt::timestamp(ts)))
+                    .unwrap_or_default();
+                println!(
+                    "⏸ 本來就在暫停中{since}，而且三層全停也還在。`{}` 只會解除暫停、救不了全停；要讓 capture 恢復，請再跑 `{}`。",
+                    cmd(data_dir, "resume"),
+                    cmd(data_dir, "stop-all --off")
+                );
+            }
             (true, false) => println!("▶ 已解除暫停。她從下一個 tick 開始重新記錄。"),
             (false, false) => println!("▶ 本來就沒有暫停，沒有變動。"),
         }
-        if !paused && sister_hands::master_stop::is_stopped(data_dir) {
+        if !paused && master_stopped {
             let pause_state = if before {
                 "暫停已解除"
             } else {
@@ -11336,14 +11481,15 @@ pub mod stop_all {
     ///
     /// `pause` 打錯路徑時會把那個資料夾建出來、回報已暫停；對暫停而言那還算合理
     /// （你可能在開錄之前就先按）。全停不行：它印的是「三層都停了：capture 不再
-    /// 擷取、brain 不再送出、hands 不再執行」——而真正在跑的那一份讀的是**另一個**
-    /// 資料夾，一層都沒停。那句話會變成假話，而且症狀是「我明明按了」。
+    /// 擷取、brain 不再送出、hands 不再執行」——但這個路徑不存在，程式無法知道
+    /// 是否另有一份正在跑、更不知道它讀哪個資料夾。那句話會變成假話，而且症狀
+    /// 可能是「我明明按了」。
     /// `hands stop` 本來就在同樣的情況下大聲拒絕；三層裡有一層拒絕、整句話卻宣稱
     /// 三層都停了，本身就不成立。
     fn require_data_dir(data_dir: &Path) -> Result<()> {
         if !data_dir.is_dir() {
             anyhow::bail!(
-                "找不到這個資料目錄：{}\n沒有停任何東西。真正在跑的那一份讀的是別的資料夾，請先確認路徑。",
+                "找不到這個資料目錄：{}\n沒有停任何東西。請先確認是否有 AI-Sister 在跑，以及它使用的資料目錄。",
                 data_dir.display()
             );
         }
@@ -11353,8 +11499,16 @@ pub mod stop_all {
     pub fn run(data_dir: &Path, off: bool) -> Result<()> {
         require_data_dir(data_dir)?;
         if off {
-            sister_hands::master_stop::release(data_dir)
-                .with_context(|| format!("解除不了 {}", data_dir.display()))?;
+            // 出錯的是 `<資料目錄>/master.stop` 那個檔案，不是資料目錄本身。
+            // 指到資料目錄的話，`master.stop` 剛好是一個目錄的時候會印出
+            // 「解除不了 <資料目錄>：Is a directory」——而資料目錄本來就該是
+            // 目錄，那句話讀起來像程式壞了，真正該去看的那個路徑一個字都沒提。
+            sister_hands::master_stop::release(data_dir).with_context(|| {
+                format!(
+                    "解除不了 {}",
+                    sister_hands::master_stop::switch_path(data_dir).display()
+                )
+            })?;
             println!(
                 "▶ capture、brain、hands 都已解除全停；是否實際恢復仍要看原本另按的暫停／拔手。"
             );
@@ -11381,8 +11535,12 @@ pub mod stop_all {
 
         let already = sister_hands::master_stop::is_stopped(data_dir);
         let since = sister_hands::master_stop::stopped_since(data_dir);
-        sister_hands::master_stop::engage(data_dir, sister_core::now_ms())
-            .with_context(|| format!("寫不進 {}", data_dir.display()))?;
+        sister_hands::master_stop::engage(data_dir, sister_core::now_ms()).with_context(|| {
+            format!(
+                "寫不進 {}",
+                sister_hands::master_stop::switch_path(data_dir).display()
+            )
+        })?;
         if already {
             match since {
                 Some(ts) => println!(
@@ -16579,7 +16737,25 @@ pub mod doctor {
         if !std::fs::metadata(data_dir).is_ok_and(|m| m.is_dir()) {
             return ("?", "資料目錄讀不到；無法判斷手目前接著還是拔著".into());
         }
-        if !sister_hands::kill_switch::is_pulled(data_dir) {
+        let pulled = sister_hands::kill_switch::is_pulled(data_dir);
+        let master_stopped = sister_hands::master_stop::is_stopped(data_dir);
+        if master_stopped {
+            let master = cmd(data_dir, "stop-all --off");
+            if pulled {
+                return (
+                    "■",
+                    format!(
+                        "拔手與三層全停都在；要能執行，兩個都要解除：`{}` 與 `{master}`",
+                        cmd(data_dir, "hands resume")
+                    ),
+                );
+            }
+            return (
+                "■",
+                format!("手沒有拔掉，但三層全停在，執行隘口仍會拒絕；要恢復請跑 `{master}`"),
+            );
+        }
+        if !pulled {
             return ("✓", "接著；執行隘口可以把核准的動作交給作業系統".into());
         }
         match sister_hands::kill_switch::pulled_since(data_dir) {
@@ -16702,7 +16878,7 @@ pub mod doctor {
         beat: sister_core::heartbeat::Presence,
     ) -> (&'static str, String) {
         use sister_core::heartbeat::{Phase, Presence};
-        // 這一行是**不必開始錄就會告訴使用者「你上禮拜按的暫停還開著」的唯一一個地方**。暫停
+        // 這一行不必開始錄，就必須告訴使用者「你上禮拜按的暫停還開著」。暫停
         // 不會自己過期（見 `sister_core::pause`），所以那條路很真實，而它的症
         // 狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
         if let Some(said) = paused {
@@ -17358,7 +17534,7 @@ pub mod doctor {
         /// 刻意在這裡就判定完、只留下要印的字，是為了把平台專屬的型別
         /// （`WindowsOcr`、`RawFrame`…）全部關在 `caps()` 裡面。
         /// doctor 的輸出段落不該長出一堆 `#[cfg]`。
-        ocr_probes: Vec<(bool, &'static str, String)>,
+        ocr_probes: Vec<(&'static str, &'static str, String)>,
         /// 記了不該記的（排除規則失效）
         broken_privacy: Vec<String>,
         /// 其實什麼都沒記住，但你不會發現
@@ -17447,8 +17623,13 @@ pub mod doctor {
         }
     }
 
+    #[cfg(any(windows, test))]
+    fn should_probe_current_screen(master_stopped: bool) -> bool {
+        !master_stopped
+    }
+
     #[cfg(windows)]
-    fn caps(data_dir: &Path, config: &Config) -> Caps {
+    fn caps(data_dir: &Path, config: &Config, master_stopped: bool) -> Caps {
         use sister_capture::traits::{Ocr, ScreenSource};
         use sister_capture::windows::input::WindowsInput;
         use sister_capture::windows::{Capabilities, ocr::WindowsOcr, screen::WindowsScreen};
@@ -17617,19 +17798,19 @@ pub mod doctor {
                         .collect();
                     probes.push(if lines.is_empty() {
                         (
-                            false,
+                            "✗",
                             "內建圖自我測試",
                             "一行都沒讀到——引擎建得起來，但它讀不出字".to_string(),
                         )
                     } else if missing.is_empty() {
                         (
-                            true,
+                            "✓",
                             "內建圖自我測試",
                             format!("{} 行，內容正確 {}", lines.len(), sample(&lines)),
                         )
                     } else {
                         (
-                            false,
+                            "✗",
                             "內建圖自我測試",
                             format!(
                                 "讀到 {} 行，但少了 {:?}——讀得到字，讀錯了。實際：{}",
@@ -17640,26 +17821,35 @@ pub mod doctor {
                         )
                     });
                 }
-                Err(e) => probes.push((false, "內建圖自我測試", format!("失敗：{e:#}"))),
+                Err(e) => probes.push(("✗", "內建圖自我測試", format!("失敗：{e:#}"))),
             }
 
             // 第二關：你**現在這台螢幕**讀不讀得到。跟錄製走同一條路
             // （同一顆引擎、同一個原生解析度的抓圖），所以「內建圖過了但這關
             // 沒過」就直接指向畫面本身，而不是引擎或語言包。
-            let mut screen = WindowsScreen::new();
-            let grabbed = screen.grab(sister_core::now_ms());
+            let grabbed = should_probe_current_screen(master_stopped)
+                .then(|| {
+                    let mut screen = WindowsScreen::new();
+                    screen.grab(sister_core::now_ms())
+                })
+                .transpose();
             let grabbed_edge = match &grabbed {
-                Ok(Some(f)) => Some(f.width.max(f.height)),
+                Ok(Some(Some(f))) => Some(f.width.max(f.height)),
                 _ => None,
             };
             let probe = match grabbed {
-                Err(e) => (false, "讀你現在的螢幕", format!("抓不到畫面：{e:#}")),
                 Ok(None) => (
-                    false,
+                    "■",
+                    "讀你現在的螢幕",
+                    "三層全停中，doctor 沒有抓畫面，也沒有對畫面做 OCR".to_string(),
+                ),
+                Err(e) => ("✗", "讀你現在的螢幕", format!("抓不到畫面：{e:#}")),
+                Ok(Some(None)) => (
+                    "✗",
                     "讀你現在的螢幕",
                     "抓不到畫面（工作站鎖定時本來就不抓）".to_string(),
                 ),
-                Ok(Some(frame)) => {
+                Ok(Some(Some(frame))) => {
                     let (w, h) = (frame.width, frame.height);
                     // 「讀不出字」和「圖上本來就沒字」在報告裡長得一模一樣。
                     // 亮度範圍把它們分開：全黑的擷取 lo == hi。
@@ -17674,7 +17864,7 @@ pub mod doctor {
                     };
                     match ocr.recognize(&frame) {
                         Ok(lines) if lines.is_empty() => (
-                            false,
+                            "✗",
                             "讀你現在的螢幕",
                             format!(
                                 "{w}×{h} → 0 行。錄製會照跑、畫面會留下，\
@@ -17684,13 +17874,13 @@ pub mod doctor {
                         Ok(lines) => {
                             let texts: Vec<String> = lines.into_iter().map(|b| b.text).collect();
                             (
-                                true,
+                                "✓",
                                 "讀你現在的螢幕",
                                 format!("{w}×{h} → {} 行 {}", texts.len(), sample(&texts)),
                             )
                         }
                         Err(e) => (
-                            false,
+                            "✗",
                             "讀你現在的螢幕",
                             format!("{w}×{h} 辨識失敗：{e:#}{contrast}"),
                         ),
@@ -17708,7 +17898,7 @@ pub mod doctor {
             let limit = ocr.max_dimension();
             if let Some(edge) = grabbed_edge.filter(|edge| *edge > limit) {
                 probes.push((
-                    false,
+                    "✗",
                     "影像尺寸上限",
                     format!("剛剛抓到的畫面長邊 {edge} 超過引擎上限 {limit}：每一張畫面都會被拒絕"),
                 ));
@@ -17737,8 +17927,8 @@ pub mod doctor {
     }
 
     #[cfg(not(windows))]
-    fn caps(data_dir: &Path, config: &Config) -> Caps {
-        let _ = (data_dir, config);
+    fn caps(data_dir: &Path, config: &Config, master_stopped: bool) -> Caps {
+        let _ = (data_dir, config, master_stopped);
         Caps::default()
     }
 
@@ -17817,7 +18007,8 @@ pub mod doctor {
             println!("   不是你寫的那一份。修好它之前，那幾行不能拿來判斷你的規則有沒有生效。");
             println!("   原因：{why}\n");
         }
-        let caps = caps(data_dir, config);
+        let master_stopped = sister_hands::master_stop::is_stopped(data_dir);
+        let caps = caps(data_dir, config, master_stopped);
 
         println!("環境");
         line(
@@ -18096,10 +18287,17 @@ pub mod doctor {
         // 排在最前面，因為它壓過底下每一條：暫停的時候，那些規則生不生效
         // 都無所謂——她根本沒在看。
         //
-        // 而且這一行是**不必開始錄就會告訴使用者「你上禮拜按的暫停還開著」的唯一一個地方**。
+        // 而且這一行不必開始錄，就必須告訴使用者「你上禮拜按的暫停還開著」。
         // 暫停不會自己過期（見 `sister_core::pause`），所以那條路很真實，而
         // 它的症狀是「所有數字都是 0」——最容易被讀成「程式壞了」。
-        let master_stopped = sister_hands::master_stop::is_stopped(data_dir);
+        // 資料目錄根本不在的時候，這一列不可以印一個自信的 `✓ 沒有啟用`。
+        //
+        // `master_stop::is_stopped` 對 `DirState::Absent` 刻意回 false——那是對的，
+        // 一台還沒開始用的機器不算「被停下來」。可是「沒有被停下來」和「我去看了
+        // 那個開關，它是關的」是兩句話，而 `✓ 沒有啟用` 只說得出後面那句。同一份
+        // 報告往上一列，手那一列（`hands_status`）遇到同一個資料目錄已經誠實寫著
+        // 「資料目錄讀不到；無法判斷」——兩列講同一台機器，不可以一列 `?` 一列 `✓`。
+        let readable_dir = std::fs::metadata(data_dir).is_ok_and(|m| m.is_dir());
         let master_row = master_stopped.then(|| {
             sister_hands::master_stop::stopped_since(data_dir)
                 .map(|ts| {
@@ -18117,13 +18315,29 @@ pub mod doctor {
                 })
         });
         mark(
-            if master_stopped { "■" } else { "✓" },
+            match (master_stopped, readable_dir) {
+                (true, _) => "■",
+                (false, true) => "✓",
+                (false, false) => "?",
+            },
             "capture／brain／hands 全停",
-            master_row.as_deref().unwrap_or("沒有啟用"),
+            match (&master_row, readable_dir) {
+                (Some(row), _) => row.as_str(),
+                (None, true) => "沒有啟用",
+                (None, false) => "資料目錄讀不到；無法判斷是不是三層全停",
+            },
         );
-        let (sym, said) = match master_row {
-            Some(said) => ("■", said),
-            None => watching_verdict(paused_row(data_dir), beat),
+        let paused = paused_row(data_dir);
+        let (sym, said) = match (master_row, paused) {
+            (Some(master), Some(_)) => (
+                "■",
+                format!(
+                    "{master}；**暫停也還在**，解除全停後 capture 仍不會看。解除暫停請跑 `{}`。",
+                    cmd(data_dir, "resume")
+                ),
+            ),
+            (Some(master), None) => ("■", master),
+            (None, paused) => watching_verdict(paused, beat),
         };
         mark(sym, "現在有沒有在看", &said);
         // 題庫是整個資料庫裡唯一一張存著**你自己打進去的字**的表，所以它得
@@ -18311,11 +18525,23 @@ pub mod doctor {
                         line(true, "已安裝的語言", &caps.ocr_available.join("、"));
                     }
                     // 上面兩行講的都是「引擎建得起來」。下面這些是真的去讀了。
-                    for (ok, label, detail) in &caps.ocr_probes {
-                        line(*ok, label, detail);
+                    for (symbol, label, detail) in &caps.ocr_probes {
+                        mark(symbol, label, detail);
                     }
                 }
             }
+        }
+        if master_stopped
+            && !caps
+                .ocr_probes
+                .iter()
+                .any(|(_, label, _)| *label == "讀你現在的螢幕")
+        {
+            mark(
+                "■",
+                "讀你現在的螢幕",
+                "三層全停中，doctor 沒有抓畫面，也沒有對畫面做 OCR",
+            );
         }
 
         println!("\n節奏");
@@ -18514,6 +18740,32 @@ pub mod doctor {
     #[cfg(test)]
     mod doctor_tests {
         use super::*;
+
+        #[test]
+        fn master_stop_disables_the_current_screen_probe() {
+            assert!(should_probe_current_screen(false));
+            assert!(!should_probe_current_screen(true));
+        }
+
+        #[test]
+        fn hands_row_distinguishes_pull_master_stop_and_both() {
+            let dir = crate::ops::tmp::Tmp::new("doctor-hands-master-states");
+            assert_eq!(hands_status(&dir.0).0, "✓");
+
+            sister_hands::master_stop::engage(&dir.0, 1_000).unwrap();
+            let master = hands_status(&dir.0);
+            assert_eq!(master.0, "■");
+            assert!(master.1.contains("手沒有拔掉"), "{}", master.1);
+            assert!(master.1.contains("執行隘口仍會拒絕"), "{}", master.1);
+            assert!(master.1.contains("stop-all --off"), "{}", master.1);
+
+            sister_hands::kill_switch::pull(&dir.0, 2_000).unwrap();
+            let both = hands_status(&dir.0);
+            assert_eq!(both.0, "■");
+            assert!(both.1.contains("拔手與三層全停都在"), "{}", both.1);
+            assert!(both.1.contains("hands resume"), "{}", both.1);
+            assert!(both.1.contains("stop-all --off"), "{}", both.1);
+        }
         use sister_core::capabilities::{CapabilityState, Report, UrlCapture};
         use sister_core::heartbeat::{Phase, Presence};
 
@@ -20082,6 +20334,15 @@ pub mod doctor {
 pub mod bench {
     use super::*;
 
+    fn refuse_while_master_stopped(data_dir: &Path) -> Result<()> {
+        anyhow::ensure!(
+            !sister_hands::master_stop::is_stopped(data_dir),
+            "三層全停中，bench 沒有抓畫面。要恢復請跑 `{}`。",
+            cmd(data_dir, "stop-all --off")
+        );
+        Ok(())
+    }
+
     #[cfg(any(windows, test))]
     use sister_capture::traits::Ocr;
 
@@ -20804,7 +21065,8 @@ pub mod bench {
     }
 
     #[cfg(windows)]
-    pub fn run(requested_rounds: Option<u32>) -> Result<()> {
+    pub fn run(data_dir: &Path, requested_rounds: Option<u32>) -> Result<()> {
+        refuse_while_master_stopped(data_dir)?;
         const DEFAULT_GDI_ROUNDS: u32 = 8;
         let rounds = requested_rounds.unwrap_or(DEFAULT_GDI_ROUNDS).max(1);
         if requested_rounds.is_some_and(|n| n != rounds) {
@@ -20879,7 +21141,8 @@ pub mod bench {
     }
 
     #[cfg(not(windows))]
-    pub fn run(_rounds: Option<u32>) -> Result<()> {
+    pub fn run(data_dir: &Path, _rounds: Option<u32>) -> Result<()> {
+        refuse_while_master_stopped(data_dir)?;
         // 不是「這台機器很慢」，是「這台機器沒有這條路可以量」。兩者長得
         // 一樣的話，開發機上跑一次會得到一張空表然後被當成「都是 0，很好」。
         println!("這個平台沒有 GDI 擷取後端，沒有東西可以量。這條路目前只有 Windows。");
@@ -24433,6 +24696,7 @@ pub mod record {
         pub(super) struct TickCounts {
             total: u64,
             working: u64,
+            master_stopped: u64,
         }
 
         #[cfg(any(windows, test))]
@@ -24441,6 +24705,7 @@ pub mod record {
                 Self {
                     total: stats.ticks,
                     working: stats.working_ticks,
+                    master_stopped: stats.master_stopped_ticks,
                 }
             }
 
@@ -24453,7 +24718,13 @@ pub mod record {
             }
 
             pub(super) fn idle(self) -> u64 {
-                self.total.saturating_sub(self.working)
+                self.total
+                    .saturating_sub(self.working)
+                    .saturating_sub(self.master_stopped)
+            }
+
+            pub(super) fn master_stopped(self) -> u64 {
+                self.master_stopped
             }
         }
 
@@ -25242,13 +25513,11 @@ pub mod record {
         }
         // 全停排在暫停前面：它是比較重的那一根，而且兩者一起在的時候，
         // 先解除暫停也不會讓她回來。同樣不會自己過期，同樣會讓摘要永遠是 0。
-        if let Some(warning) = master_stop_warning(data_dir) {
-            println!("⚠  {warning}");
-        }
+        let stop_warnings = record_stop_warnings(data_dir);
         // 暫停是**不會自己過期**的（見 `pause` 模組），所以「上禮拜按了暫停、
         // 這禮拜開起來發現整週都沒錄」是一條真實的路。開場就要講，而且要講
         // 從什麼時候開始——不然使用者只會看到一個永遠是 0 的摘要。
-        if let Some(warning) = pause_warning(data_dir) {
+        for warning in stop_warnings {
             println!("⚠  {warning}");
         }
         // doctor 會挑出「寫了也不會命中」的網址規則，但一個只跑 record 的人
@@ -25895,6 +26164,22 @@ pub mod record {
         }
     }
 
+    #[cfg(any(windows, test))]
+    fn record_stop_warnings(data_dir: &Path) -> Vec<String> {
+        if let Some(master) = master_stop_warning(data_dir) {
+            let mut warnings = vec![master];
+            if sister_core::pause::is_paused(data_dir) {
+                warnings.push(format!(
+                    "原本的暫停也還在；解除全停後 capture 仍會停著。解除暫停請跑 `{}`。",
+                    cmd(data_dir, "resume")
+                ));
+            }
+            warnings
+        } else {
+            pause_warning(data_dir).into_iter().collect()
+        }
+    }
+
     #[cfg(test)]
     mod pause_warning_tests {
         use super::*;
@@ -25914,6 +26199,22 @@ pub mod record {
             assert!(!said.contains("`sister resume`"), "{said}");
             // 而且它不是暫停：同一個資料夾此刻並沒有被暫停。
             assert_eq!(pause_warning(&dir.0), None, "全停被誤報成暫停");
+        }
+
+        #[test]
+        fn record_opening_combines_master_stop_and_pause_without_cloud_contradiction() {
+            let dir = crate::ops::tmp::Tmp::new("record-master-stop-and-pause");
+            sister_core::pause::set_paused(&dir.0, true, 1_000).expect("pause");
+            sister_hands::master_stop::engage(&dir.0, 2_000).expect("master stop");
+
+            let said = record_stop_warnings(&dir.0).join("\n");
+            assert!(said.contains("brain 不會送出"), "{said}");
+            assert!(said.contains("暫停也還在"), "{said}");
+            assert!(said.contains("解除全停後 capture 仍會停著"), "{said}");
+            assert!(
+                !said.contains("還是可能送給雲端模型"),
+                "全停與暫停文案互相矛盾：{said}"
+            );
         }
 
         #[test]
@@ -26589,6 +26890,24 @@ pub mod record {
     /// tick 時間只對應 0.27 秒 CPU，三分之二是卡在顯示驅動裡等。所以標題
     /// 那行要把 CPU 秒數一起印出來——不然一份拆得很細的耗時表會被讀成
     /// 「CPU 花在哪裡」，而使用者抱怨的明明是後者。
+    #[cfg(any(windows, test))]
+    fn skipped_tick_summary(counts: TickCounts) -> String {
+        let idle_ticks = counts.idle();
+        let master_stopped_ticks = counts.master_stopped();
+        let mut skipped_parts = Vec::new();
+        if idle_ticks > 0 {
+            skipped_parts.push(format!("{idle_ticks} 拍是暫停或關閉"));
+        }
+        if master_stopped_ticks > 0 {
+            skipped_parts.push(format!("{master_stopped_ticks} 拍是三層全停"));
+        }
+        if skipped_parts.is_empty() {
+            String::new()
+        } else {
+            format!("（其中 {}，沒做事）", skipped_parts.join("、"))
+        }
+    }
+
     #[cfg(windows)]
     fn report_timings(
         t: &sister_capture::timings::Timings,
@@ -26613,12 +26932,7 @@ pub mod record {
         // 回來，把它們算進分母只會讓這個迴圈看起來比實際便宜——一段暫停了
         // 七小時的錄製會印出「每 tick 8 ms」，而真的做事的那一拍要 60 ms，
         // 於是這個數字把調查指向別的地方。
-        let idle_ticks = counts.idle();
-        let skipped = if idle_ticks > 0 {
-            format!("（其中 {idle_ticks} 拍是暫停或關閉，沒做事）")
-        } else {
-            String::new()
-        };
+        let skipped = skipped_tick_summary(counts);
         println!(
             "  時間：{ticks} tick{skipped} 佔了 {:.1} 秒（做事的每拍 {:.0} ms）{cpu}",
             total.as_secs_f64(),
@@ -26779,7 +27093,7 @@ pub mod record {
             StartMode, StoringImages, TickCounts, WantsImages, already_recording, bytes_per_day_at,
             external_stop_control, external_stop_message, finalize_live_recording,
             footprint_context, footprint_lines, ocr_off_words, ocr_work_line,
-            recording_consent_stop_message, run_live_loop, should_ping_brain,
+            recording_consent_stop_message, run_live_loop, should_ping_brain, skipped_tick_summary,
         };
         use crate::ops::tmp::Tmp;
         use anyhow::Result;
@@ -27086,11 +27400,14 @@ pub mod record {
             let stats = sister_capture::RecorderStats {
                 ticks: 100,
                 working_ticks: 7,
+                master_stopped_ticks: 11,
                 ..Default::default()
             };
             let counts = TickCounts::from_stats(&stats);
             assert_eq!(counts.total(), 100);
             assert_eq!(counts.working(), 7);
+            assert_eq!(counts.master_stopped(), 11);
+            assert_eq!(counts.idle(), 82);
         }
 
         #[test]
@@ -27098,9 +27415,10 @@ pub mod record {
             let stats = sister_capture::RecorderStats {
                 ticks: 100,
                 working_ticks: 7,
+                master_stopped_ticks: 11,
                 ..Default::default()
             };
-            assert_eq!(TickCounts::from_stats(&stats).idle(), 93);
+            assert_eq!(TickCounts::from_stats(&stats).idle(), 82);
 
             let broken = sister_capture::RecorderStats {
                 ticks: 7,
@@ -27108,6 +27426,20 @@ pub mod record {
                 ..Default::default()
             };
             assert_eq!(TickCounts::from_stats(&broken).idle(), 0);
+        }
+
+        #[test]
+        fn record_summary_gives_master_stopped_ticks_their_own_bucket() {
+            let stats = sister_capture::RecorderStats {
+                ticks: 100,
+                working_ticks: 7,
+                master_stopped_ticks: 11,
+                ..Default::default()
+            };
+            let said = skipped_tick_summary(TickCounts::from_stats(&stats));
+            assert!(said.contains("82 拍是暫停或關閉"), "{said}");
+            assert!(said.contains("11 拍是三層全停"), "{said}");
+            assert!(!said.contains("93 拍是暫停或關閉"), "{said}");
         }
 
         /// OCR 其實開著時不能因為留圖或擷取關閉，就騙使用者說讀字已關閉。
