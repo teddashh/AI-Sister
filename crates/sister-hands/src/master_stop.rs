@@ -46,6 +46,12 @@ fn decide_for(data_dir: &Path, child: Result<bool, ()>) -> bool {
     decide(child, dir_state(data_dir))
 }
 
+/// **這一行沒有任何 Linux 測試守得住，別照 Linux 的綠燈改它。**
+/// 理由整段寫在 [`crate::kill_switch::is_pulled`] 上，一字不改地適用於這裡：
+/// 把它寫成 `switch_path(data_dir).try_exists().unwrap_or(true)` 在 Linux 上
+/// 觀察不出差別（child 查詢要穿過 data dir 本人，所以一定先回 `Err`），
+/// Windows 卻把同一個情境回成 `Ok(false)`，於是那種寫法會說「我確定開關不在」。
+/// 走 `dir_state` 是為了讓 data dir 本人的狀態也進得了判斷。
 pub fn is_stopped(data_dir: &Path) -> bool {
     decide_for(data_dir, switch_path(data_dir).try_exists().map_err(|_| ()))
 }
