@@ -194,6 +194,9 @@ impl CurrentGuess {
 }
 
 /// 一次 spawn 等多久。CLI 掛住不能把解釋層卡住。
+///
+/// 已送出 stdin 的 interpreter/reviewer 會讓 `stop-all` 等到這個 120 秒 timeout，
+/// 再完成本機 outbound audit 才能回成功；這不是取消或撤回 provider 已收走的 request。
 pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(120);
 /// 整份 prompt 的位元組上限。超過就截斷，並在外送紀錄記 `truncated`。
 pub const MAX_PROMPT_BYTES: usize = 24 * 1024;
@@ -381,12 +384,18 @@ impl StoredOutboundOutcome {
 /// 第一個參數的型別是 [`CloudAllowed`]：只有 [`Consent::cloud_permit`] 鑄得
 /// 出來，所以「沒檢查同意書就送出去」是編不過的，不是靠每個呼叫端自己記得。
 /// 第二個參數同理：沒有在真正送出前確認全停未啟用，就拿不到 [`NotStopped`]。
-#[derive(Debug, Clone, Copy)]
-pub struct NotStopped(());
+#[derive(Debug, Clone)]
+pub struct NotStopped(sister_hands::master_stop::ActivityGuard);
+
+impl NotStopped {
+    pub fn boundary(&self) -> Option<sister_hands::master_stop::ActivityBoundary> {
+        self.0.boundary()
+    }
+}
 
 /// 只有當下確定沒有全停時才鑄得出的憑證；判不出來同樣不鑄（fail-closed）。
 pub fn not_stopped(data_dir: &Path) -> Option<NotStopped> {
-    (!sister_hands::master_stop::is_stopped(data_dir)).then_some(NotStopped(()))
+    sister_hands::master_stop::admit(data_dir).map(NotStopped)
 }
 
 pub fn spawn_cli(
@@ -396,8 +405,22 @@ pub fn spawn_cli(
     command: &str,
     args: &[String],
 ) -> SpawnOutcome {
-    let (_cloud_gate, _stop_gate) = (permit, not_stopped);
+    let _cloud_gate = permit;
     let started = Instant::now();
+    // 這道 boundary 貼著 spawn；舊 permit 不能跨過後來發佈的 pending。它一路保留到
+    // stdin 完整寫完，stop-all 的成功回覆因此一定排在舊 payload 出境之後。
+    let Some(stop_boundary) = not_stopped.boundary() else {
+        return SpawnOutcome {
+            payload_chars_written: 0,
+            duration_ms: started.elapsed().as_millis() as u64,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            spawn_error: Some("三層全停已在 CLI 啟動前生效；沒有啟動子行程".into()),
+            exit_code: None,
+            process_start: ProcessStart::NeverStarted,
+        };
+    };
     let mut child = match Command::new(command)
         .args(args)
         .stdin(Stdio::piped())
@@ -427,6 +450,8 @@ pub fn spawn_cli(
         },
         None => (0, Some("stdin 管線沒開成".into())),
     };
+    drop(stop_boundary);
+    drop(not_stopped);
     if let Some(error) = stdin_error {
         // **送不完整就不要用那個答案。** 半份提示問出來的回答會被當成整份的
         // 回答收下去，那比沒有答案糟。所以這裡收手，而且 `spawn_error` 一定
@@ -894,7 +919,7 @@ pub fn run(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<InterpretR
     }
     prepared.truncate(take);
 
-    let Some(not_stopped) = not_stopped(data_dir) else {
+    let Some(stop_admission) = not_stopped(data_dir) else {
         record_skip(input.db, SkipReason::MasterStopped)?;
         return Ok(InterpretResult {
             skip: Some(SkipReason::MasterStopped),
@@ -910,7 +935,8 @@ pub fn run(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<InterpretR
                 let command = command.as_str();
                 let args = args.as_slice();
                 let payload = &job.payload;
-                scope.spawn(move || spawn_cli(permit, not_stopped, payload, command, args))
+                let stop_gate = stop_admission.clone();
+                scope.spawn(move || spawn_cli(permit, stop_gate, payload, command, args))
             })
             .collect();
         for (job, handle) in prepared.iter().zip(handles) {
@@ -930,8 +956,9 @@ pub fn run(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<InterpretR
 
     let day = local_day_key(crate::now_ms()).context("算不出今天的日期，不敢送")?;
     let mut results = Vec::new();
+    let mut master_stopped_after_return = false;
     for (job, spawn) in ran {
-        let (kind, card, error) = classify(&job, &spawn, input.db)?;
+        let (kind, mut card, error) = classify(&job, &spawn, input.db)?;
         // 外送已經發生；這支輔助查詢即使遇到損壞的資料庫，也不能擋住下面的
         // 出境稽核與卡片。未知 outcome token 本身不是錯誤，會原樣帶回。
         let previous = input
@@ -952,7 +979,15 @@ pub fn run(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<InterpretR
             error: error.as_deref(),
             role: "interpreter",
         })?;
-        if let Some(card) = &card {
+        // 原始 admission 保留到 classify 與 outbound audit 都完成。stop-all 可能已經
+        // 發佈 pending，但不能在一份實際送出的 audit 落地前回報成功。產品卡片則用
+        // 同一份 guard 的新 boundary 重驗：pending 勝出時只留 audit、不落 L2。
+        let product_boundary = stop_admission.boundary();
+        if product_boundary.is_none() {
+            master_stopped_after_return = true;
+            card = None;
+        }
+        if let (Some(card), Some(_boundary)) = (&card, product_boundary) {
             let evidence: Vec<String> = card.evidence_refs.iter().map(|r| r.as_str()).collect();
             input.db.insert_l2_card(&L2Insert {
                 segment_core_start: job.core_started_at,
@@ -980,9 +1015,14 @@ pub fn run(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<InterpretR
             previous,
         });
     }
+    drop(stop_admission);
+
+    if master_stopped_after_return {
+        record_skip(input.db, SkipReason::MasterStopped)?;
+    }
 
     Ok(InterpretResult {
-        skip: None,
+        skip: master_stopped_after_return.then_some(SkipReason::MasterStopped),
         ran: results,
     })
 }
@@ -1729,6 +1769,85 @@ mod tests {
         assert_eq!(out.payload_chars_written, payload.chars().count());
         assert!(out.stdout.contains("segment_ref"), "{}", out.stdout);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_not_stopped_permit_never_starts_the_sentinel_child() {
+        let dir =
+            std::env::temp_dir().join(format!("sister-stale-stop-permit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = not_stopped(&dir).expect("mint before stop");
+        std::fs::write(sister_hands::master_stop::switch_path(&dir), b"1").unwrap();
+        let sentinel = dir.join("spawned");
+        let (command, args) = fake_cli(&dir, "{}", &sentinel);
+        let mut consent = Consent::default();
+        consent.grant(Sheet::CloudReading, 1);
+
+        let outcome = spawn_cli(
+            consent.cloud_permit().unwrap(),
+            stale,
+            "不可出境",
+            &command,
+            &args,
+        );
+        assert_eq!(outcome.process_start, ProcessStart::NeverStarted);
+        assert_eq!(outcome.payload_chars_written, 0);
+        assert!(!sentinel.exists(), "舊 permit 竟然啟動了 sentinel child");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn interpreter_discards_a_good_card_when_stop_arrives_before_cli_return() {
+        let dir = std::env::temp_dir().join(format!(
+            "sister-interpreter-return-stop-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_000_175_000;
+        let frame_id = seed(&mut db, ts);
+        let core = db.chapters_for_range(ts, ts + 400_000).unwrap()[0].core_started_at;
+        let script = dir.join("stop-before-answer.py");
+        let json = format!(
+            r#"{{"segment_ref":"segment:{core}","activity":"不可落地的答案","entities":[],"confidence":0.8,"evidence_refs":["frame:{frame_id}"],"open_questions":[]}}"#
+        );
+        std::fs::write(
+            &script,
+            format!(
+                "import pathlib, sys\nsys.stdin.buffer.read()\n(pathlib.Path(sys.argv[1]) / 'master.stop').write_text('2')\nsys.stdout.buffer.write({json:?}.encode('utf-8'))\n"
+            ),
+        )
+        .unwrap();
+        let mut consent = Consent::default();
+        consent.grant(Sheet::CloudReading, 1);
+        let brain = BrainConfig {
+            command: "python3".into(),
+            args: vec![
+                script.to_string_lossy().into_owned(),
+                dir.to_string_lossy().into_owned(),
+            ],
+            ..Default::default()
+        };
+        let result = run(
+            &mut InterpretInput {
+                db: &mut db,
+                consent: &consent,
+                brain: &brain,
+                from_ts: ts,
+                to_ts: ts + 400_000,
+                limit: 1,
+                only_core_start: Some(core),
+            },
+            &dir,
+        )
+        .expect("run");
+        assert!(matches!(result.skip, Some(SkipReason::MasterStopped)));
+        assert!(result.ran.iter().all(|job| job.card.is_none()));
+        assert!(db.l2_in_range(ts, ts + 400_000).unwrap().is_empty());
+        assert_eq!(db.list_brain_outbound(10).unwrap().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 那支 CLI 沒把提示讀完就退場 → **它印出來的東西不是我們這一題的答案。**

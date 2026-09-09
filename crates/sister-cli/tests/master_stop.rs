@@ -233,8 +233,7 @@ fn doctor_reports_master_pause_and_pull_without_hiding_any_state() {
         .lines()
         .find(|line| line.contains("讀你現在的螢幕"))
         .expect("doctor current-screen row");
-    assert!(screen.contains("沒有抓畫面"), "{screen}");
-    assert!(screen.contains("沒有對畫面做 OCR"), "{screen}");
+    assert_eq!(screen.trim(), "■ 讀你現在的螢幕   三層全停中，沒有探測");
 
     let paused = temp("doctor-master-pause");
     success(&paused, None, &["pause"]);

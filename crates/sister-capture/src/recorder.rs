@@ -40,6 +40,23 @@ pub enum MasterStopSource {
     NotApplicable,
 }
 
+enum MasterActivity {
+    Guard(sister_hands::master_stop::ActivityGuard),
+    NotApplicable,
+}
+
+enum MasterCommitGuard {
+    Guard {
+        _guard: sister_hands::master_stop::ActivityBoundary,
+    },
+    NotApplicable,
+}
+
+enum MasterBoundaryCheck {
+    Continue(MasterCommitGuard),
+    Stopped,
+}
+
 /// 一天有多少毫秒。畫面額度以 UTC 天為單位重置，和
 /// `frames::relative_path` 的資料夾分層是同一條線。
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -152,6 +169,8 @@ pub struct RecorderStats {
     pub working_ticks: u64,
     /// 因跨三層全停而在任何畫面擷取前返回的拍數。
     pub master_stopped_ticks: u64,
+    /// recorder 親眼看見 latch 解除、寫好 release audit 並刻意不工作的拍數。
+    pub master_released_ticks: u64,
     pub kept: u64,
     pub duplicates: u64,
     pub excluded: u64,
@@ -690,6 +709,48 @@ impl<B: Backend> Recorder<B> {
             self.close_master_stop_gaps(ts);
         }
         Ok(true)
+    }
+
+    fn master_stop_tick(&mut self, ts: Millis) -> Result<Tick> {
+        self.set_master_stopped(true, ts)?;
+        self.stats.master_stopped_ticks += 1;
+        let _ = self.establish_clipboard_watermark(ts);
+        let _ = self.suspend_input_source(ts);
+        Ok(Tick::MasterStopped)
+    }
+
+    /// 慢來源回來後先看 pending/latch；看見 request 就封掉所有 source 尾巴並丟棄
+    /// 本拍 RAM。這裡不拿 boundary：engage 正在等這份 activity reader drop。
+    fn master_postcheck(&mut self, ts: Millis, activity: &MasterActivity) -> Result<Option<Tick>> {
+        match activity {
+            MasterActivity::Guard(guard) if guard.stop_requested() => {
+                self.master_stop_tick(ts).map(Some)
+            }
+            MasterActivity::Guard(_) | MasterActivity::NotApplicable => Ok(None),
+        }
+    }
+
+    /// 真正寫 DB/PNG 前的 turnstile boundary。request 若剛好落在 postcheck 後，
+    /// boundary 會輸；呼叫端不能把 `Stopped` 當成一個空 guard 繼續寫。
+    fn master_commit_boundary(
+        &mut self,
+        ts: Millis,
+        activity: &MasterActivity,
+    ) -> Result<MasterBoundaryCheck> {
+        match activity {
+            MasterActivity::NotApplicable => Ok(MasterBoundaryCheck::Continue(
+                MasterCommitGuard::NotApplicable,
+            )),
+            MasterActivity::Guard(guard) => match guard.boundary() {
+                Some(boundary) => Ok(MasterBoundaryCheck::Continue(MasterCommitGuard::Guard {
+                    _guard: boundary,
+                })),
+                None => {
+                    self.master_stop_tick(ts)?;
+                    Ok(MasterBoundaryCheck::Stopped)
+                }
+            },
+        }
     }
 
     /// 她現在會不會把圖寫下來。
@@ -1263,22 +1324,21 @@ impl<B: Backend> Recorder<B> {
             return Ok(Tick::Disabled);
         }
 
-        let master_stopped = match &self.master_stop_source {
-            MasterStopSource::Latch(data_dir) => sister_hands::master_stop::is_stopped(data_dir),
-            MasterStopSource::NotApplicable => false,
+        // Production tick 在碰任何 live source 前取得一份真正活著的 shared file lock。
+        // `NotApplicable` 是 replay/單測的明確分支，不可偽造一份空 guard。
+        let master_activity = match self.master_stop_source.clone() {
+            MasterStopSource::Latch(data_dir) => {
+                let Some(guard) = sister_hands::master_stop::admit(&data_dir) else {
+                    return self.master_stop_tick(ts);
+                };
+                MasterActivity::Guard(guard)
+            }
+            MasterStopSource::NotApplicable => MasterActivity::NotApplicable,
         };
-        let master_changed = self.set_master_stopped(master_stopped, ts)?;
-        if master_changed && !master_stopped {
+        let master_changed = self.set_master_stopped(false, ts)?;
+        if master_changed {
+            self.stats.master_released_ticks += 1;
             return Ok(Tick::MasterReleased);
-        }
-        if master_stopped {
-            // 解除的那一拍走上面那條 `MasterReleased` 早退，不會走到這裡，
-            // 所以這個計數器數的一直都是「這一拍真的停著」。
-            self.stats.master_stopped_ticks += 1;
-            // 和 pause 一樣，恢復後不能把停止期間的 clipboard／input 尾巴撈回來。
-            let _ = self.establish_clipboard_watermark(ts);
-            let _ = self.suspend_input_source(ts);
-            return Ok(Tick::MasterStopped);
         }
 
         // Production snapshot 也必須在已暫停時讀：這是 recorder 看見 resume，
@@ -1335,6 +1395,9 @@ impl<B: Backend> Recorder<B> {
             }
         };
         self.timings.focus.record(t.elapsed());
+        if let Some(tick) = self.master_postcheck(ts, &master_activity)? {
+            return Ok(tick);
+        }
         let (privacy_context, permit) = match privacy_observation {
             PrivacyObservation::Known { context, permit } => (context, Some(permit)),
             PrivacyObservation::Unknown => (sister_core::model::PrivacyContext::Unknown, None),
@@ -1396,6 +1459,9 @@ impl<B: Backend> Recorder<B> {
                 } else {
                     None
                 };
+            if let Some(tick) = self.master_postcheck(ts, &master_activity)? {
+                return Ok(tick);
+            }
             if let Some(boundary) = pause_boundary_tick(self.observe_pause_request(pause_probe)?) {
                 return Ok(boundary);
             }
@@ -1414,6 +1480,10 @@ impl<B: Backend> Recorder<B> {
                 PauseCheck::Continue(guard) => guard,
                 PauseCheck::Paused => return Ok(Tick::Paused),
                 PauseCheck::Resumed => return Ok(Tick::Resumed),
+            };
+            let master_commit_guard = match self.master_commit_boundary(ts, &master_activity)? {
+                MasterBoundaryCheck::Continue(guard) => guard,
+                MasterBoundaryCheck::Stopped => return Ok(Tick::MasterStopped),
             };
 
             self.stats.excluded += 1;
@@ -1437,6 +1507,7 @@ impl<B: Backend> Recorder<B> {
             // Exclusion audit/input persistence is now entirely before a waiting pause
             // writer, or entirely after it. Do not carry the lock into the next tick.
             drop(pause_commit_guard);
+            drop(master_commit_guard);
             return Ok(Tick::Excluded {
                 reason: reason.to_string(),
             });
@@ -1481,6 +1552,9 @@ impl<B: Backend> Recorder<B> {
             } else {
                 None
             };
+        if let Some(tick) = self.master_postcheck(ts, &master_activity)? {
+            return Ok(tick);
+        }
         if let Some(boundary) = pause_boundary_tick(self.observe_pause_request(pause_probe)?) {
             return Ok(boundary);
         }
@@ -1512,10 +1586,17 @@ impl<B: Backend> Recorder<B> {
                 return Err(error).context("revalidate capture permit before persistence");
             }
         }
+        if let Some(tick) = self.master_postcheck(ts, &master_activity)? {
+            return Ok(tick);
+        }
         let pause_commit_guard = match self.observe_pause_request(pause_probe)? {
             PauseCheck::Continue(guard) => guard,
             PauseCheck::Paused => return Ok(Tick::Paused),
             PauseCheck::Resumed => return Ok(Tick::Resumed),
+        };
+        let master_commit_guard = match self.master_commit_boundary(ts, &master_activity)? {
+            MasterBoundaryCheck::Continue(guard) => guard,
+            MasterBoundaryCheck::Stopped => return Ok(Tick::MasterStopped),
         };
 
         // Clipboard 的 permit + system post-check 通過後才記 focus/event。
@@ -1528,6 +1609,7 @@ impl<B: Backend> Recorder<B> {
         // 只保護上面這組 content writes；idle/screen/OCR 都可能很慢，不能拿
         // shared lock 包住它們，否則暫停按鈕會卡在 recorder 的工作後面。
         drop(pause_commit_guard);
+        drop(master_commit_guard);
 
         // 6) 先問一個不用碰螢幕就答得出來的問題：有人動過嗎？
         //
@@ -1594,6 +1676,9 @@ impl<B: Backend> Recorder<B> {
         let t = Instant::now();
         let grabbed = self.backend.grab_screen(ts, permit);
         self.timings.grab.record(t.elapsed());
+        if let Some(tick) = self.master_postcheck(ts, &master_activity)? {
+            return Ok(tick);
+        }
 
         // 這條路上的每一個退出點都不必手動退回去重基準：`check` 不會推進
         // 它，推進的是 `keep_frame` 裡真的存完之後那一句 `kept`。這裡曾經
@@ -1644,6 +1729,9 @@ impl<B: Backend> Recorder<B> {
                 return Err(error).context("revalidate capture permit after screen capture");
             }
         }
+        if let Some(tick) = self.master_postcheck(ts, &master_activity)? {
+            return Ok(tick);
+        }
         if let Some(boundary) = pause_boundary_tick(self.observe_pause_request(pause_probe)?) {
             return Ok(boundary);
         }
@@ -1654,7 +1742,14 @@ impl<B: Backend> Recorder<B> {
                 if self.config.capture.ocr {
                     match self.backend.recheck_ocr_dhash_duplicate(&frame) {
                         DhashRecheck::Changed(attempt) => {
-                            return self.keep_frame(ts, frame, focus, Some(attempt), pause_probe);
+                            return self.keep_frame(
+                                ts,
+                                frame,
+                                focus,
+                                Some(attempt),
+                                pause_probe,
+                                &master_activity,
+                            );
                         }
                         DhashRecheck::Duplicate {
                             gate_elapsed,
@@ -1683,10 +1778,17 @@ impl<B: Backend> Recorder<B> {
                         }
                     }
                 }
+                if let Some(tick) = self.master_postcheck(ts, &master_activity)? {
+                    return Ok(tick);
+                }
                 let pause_commit_guard = match self.observe_pause_request(pause_probe)? {
                     PauseCheck::Continue(guard) => guard,
                     PauseCheck::Paused => return Ok(Tick::Paused),
                     PauseCheck::Resumed => return Ok(Tick::Resumed),
+                };
+                let master_commit_guard = match self.master_commit_boundary(ts, &master_activity)? {
+                    MasterBoundaryCheck::Continue(guard) => guard,
+                    MasterBoundaryCheck::Stopped => return Ok(Tick::MasterStopped),
                 };
                 if let Some(id) = self.last_frame_id {
                     self.db.bump_frame_dup(id)?;
@@ -1696,9 +1798,12 @@ impl<B: Backend> Recorder<B> {
                 self.deduper.duplicate();
                 self.stats.duplicates += 1;
                 drop(pause_commit_guard);
+                drop(master_commit_guard);
                 Ok(Tick::Duplicate { run })
             }
-            FrameVerdict::New => self.keep_frame(ts, frame, focus, None, pause_probe),
+            FrameVerdict::New => {
+                self.keep_frame(ts, frame, focus, None, pause_probe, &master_activity)
+            }
         }
     }
 
@@ -1734,6 +1839,7 @@ impl<B: Backend> Recorder<B> {
         focus: FocusSnapshot,
         prepared_ocr: Option<OcrAttempt>,
         pause_probe: &mut dyn FnMut() -> PauseSignal,
+        master_activity: &MasterActivity,
     ) -> Result<Tick> {
         let (ocr, ocr_committable) = if self.config.capture.ocr {
             // OCR 失敗不擋錄製，但要留下計數——見 `RecorderStats::ocr_failures`
@@ -1768,6 +1874,10 @@ impl<B: Backend> Recorder<B> {
             (Vec::new(), false)
         };
 
+        if let Some(tick) = self.master_postcheck(ts, master_activity)? {
+            return Ok(tick);
+        }
+
         // OCR 是這條路最慢的一步（真機約 2.4 秒）。pause 若在它執行期間到達，
         // 先丟掉辨識結果與 frame，再談 PNG encode；不能讓另一個慢步驟把反應再拖長。
         if let Some(boundary) = pause_boundary_tick(self.observe_pause_request(pause_probe)?) {
@@ -1782,6 +1892,10 @@ impl<B: Backend> Recorder<B> {
             PauseCheck::Continue(guard) => guard,
             PauseCheck::Paused => return Ok(Tick::Paused),
             PauseCheck::Resumed => return Ok(Tick::Resumed),
+        };
+        let master_commit_guard = match self.master_commit_boundary(ts, master_activity)? {
+            MasterBoundaryCheck::Continue(guard) => guard,
+            MasterBoundaryCheck::Stopped => return Ok(Tick::MasterStopped),
         };
 
         let (image_path, image_bytes) = match prepared_image.and_then(|prepared| {
@@ -1841,6 +1955,7 @@ impl<B: Backend> Recorder<B> {
         // PNG 與指向它的 DB row 已一起排在 pause writer 前面；此後只有
         // recorder 的 RAM baseline/stats，不再需要阻擋跨行程 pause。
         drop(pause_commit_guard);
+        drop(master_commit_guard);
 
         // 到這裡才推進去重基準：畫面、文字、那一列都已經落地了。
         // 寫不進去時上面那個 `?` 會直接帶著錯誤離開，而基準原封不動——
@@ -2201,6 +2316,7 @@ mod tests {
         input: std::collections::VecDeque<Option<InputTick>>,
         screen: std::collections::VecDeque<ScreenCapture>,
         pause_during_ocr: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+        privacy_hook: Option<Box<dyn FnOnce()>>,
     }
 
     impl Backend for GateBackend {
@@ -2226,6 +2342,9 @@ mod tests {
 
         fn privacy_context(&mut self, _ts: Millis) -> Result<PrivacyObservation> {
             self.calls.borrow_mut().order.push("privacy");
+            if let Some(hook) = self.privacy_hook.take() {
+                hook();
+            }
             match self.privacy.pop_front().expect("scripted privacy answer") {
                 PrivacyReply::Value(context) => Ok(observed(context)),
                 PrivacyReply::Error(message) => anyhow::bail!(message),
@@ -2390,6 +2509,7 @@ mod tests {
             input: std::collections::VecDeque::new(),
             screen: std::collections::VecDeque::new(),
             pause_during_ocr: None,
+            privacy_hook: None,
         };
         let recorder = Recorder::new(
             backend,
@@ -2410,6 +2530,78 @@ mod tests {
                 calls.order
             );
         }
+    }
+
+    #[test]
+    fn master_stop_arriving_during_slow_privacy_discards_the_tick_before_persistence() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let control = Tmp::new("master-mid-privacy");
+        let images = Tmp::new("master-mid-privacy-images");
+        let (mut recorder, calls) = gate_recorder(
+            vec![SystemReply::Value(SystemObservation::active())],
+            vec![PrivacyReply::Value(clear_privacy())],
+        );
+        recorder.set_master_stop_dir(control.0.clone());
+        recorder.set_image_dir(Some(images.0.clone()));
+
+        let returned = Arc::new(AtomicBool::new(false));
+        let join_slot = Arc::new(Mutex::new(None));
+        let stop_dir = control.0.clone();
+        let returned_in_thread = Arc::clone(&returned);
+        let returned_in_hook = Arc::clone(&returned);
+        let join_slot_in_hook = Arc::clone(&join_slot);
+        recorder.backend.privacy_hook = Some(Box::new(move || {
+            let engage_dir = stop_dir.clone();
+            let join = std::thread::spawn(move || {
+                sister_hands::master_stop::engage(&engage_dir, 150).expect("engage");
+                returned_in_thread.store(true, Ordering::SeqCst);
+            });
+            *join_slot_in_hook.lock().unwrap() = Some(join);
+            for _ in 0..500 {
+                if stop_dir.join("master.stop.pending").exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                stop_dir.join("master.stop.pending").exists(),
+                "slow callback 沒等到 pending"
+            );
+            assert!(
+                !returned_in_hook.load(Ordering::SeqCst),
+                "activity guard 還活著，engage 不可先回成功"
+            );
+        }));
+
+        assert_eq!(
+            recorder.tick(200).expect("mid-stop tick"),
+            Tick::MasterStopped
+        );
+        join_slot
+            .lock()
+            .unwrap()
+            .take()
+            .expect("engage thread")
+            .join()
+            .unwrap();
+        assert!(returned.load(Ordering::SeqCst));
+        assert_eq!(stored_rows(&recorder, "frames"), 0);
+        assert_eq!(stored_rows(&recorder, "text_chunks"), 0);
+        assert!(
+            std::fs::read_dir(&images.0)
+                .expect("image directory")
+                .next()
+                .is_none(),
+            "stop request 後不准留下 PNG"
+        );
+        assert!(
+            !calls.borrow().order.contains(&"screen"),
+            "privacy 回來後看見 pending 就不可再 grab：{:?}",
+            calls.borrow().order
+        );
     }
 
     #[test]
@@ -4557,6 +4749,10 @@ mod tests {
             recorder.tick(2_000).expect("release boundary"),
             Tick::MasterReleased
         );
+        assert_eq!(recorder.stats().ticks, 2);
+        assert_eq!(recorder.stats().master_stopped_ticks, 1);
+        assert_eq!(recorder.stats().master_released_ticks, 1);
+        assert_eq!(recorder.stats().working_ticks, 0);
         recorder.tick(2_100).expect("post-release tick");
 
         assert_eq!(

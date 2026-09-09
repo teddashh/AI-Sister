@@ -1290,7 +1290,9 @@ version = "0.1.0-alpha.117"
 dependencies = [
  "anyhow",
  "chrono",
+ "fs4",
  "global-hotkey",
+ "libc",
  "serde",
  "serde_json",
  "windows",
