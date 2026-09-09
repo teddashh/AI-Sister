@@ -46,6 +46,24 @@ fn decide_for(data_dir: &Path, child: Result<bool, ()>) -> bool {
     decide(child, dir_state(data_dir))
 }
 
+/// 開關在不在。**用 `symlink_metadata`，不要用 `try_exists`。**
+///
+/// `try_exists` 會**跟著 symlink 走**，所以一條指向不存在目標的 symlink
+/// 會回 `Ok(false)`＝「我確定開關不在」。那是 fail-open，而且是可以從外面
+/// 佈置的：先在 data dir 放一條斷掉的 `master.stop` symlink，之後那個關就再也關不上，
+/// 而 `create_new` 又會因為那條路徑已存在而回 `AlreadyExists`（被當成「本來就關著」），
+/// 於是命令說「已經關了」、閘門說「沒關」，兩句話同時印在同一個產品裡。
+/// alpha.118 實測重現過。
+///
+/// `symlink_metadata` 不跟著走：目錄項存在就算存在，這才符合「不確定就是關」。
+fn switch_present(path: &Path) -> Result<bool, ()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(()),
+    }
+}
+
 /// **這一行沒有任何 Linux 測試守得住，別照 Linux 的綠燈改它。**
 /// 理由整段寫在 [`crate::kill_switch::is_pulled`] 上，一字不改地適用於這裡：
 /// 把它寫成 `switch_path(data_dir).try_exists().unwrap_or(true)` 在 Linux 上
@@ -53,7 +71,7 @@ fn decide_for(data_dir: &Path, child: Result<bool, ()>) -> bool {
 /// Windows 卻把同一個情境回成 `Ok(false)`，於是那種寫法會說「我確定開關不在」。
 /// 走 `dir_state` 是為了讓 data dir 本人的狀態也進得了判斷。
 pub fn is_stopped(data_dir: &Path) -> bool {
-    decide_for(data_dir, switch_path(data_dir).try_exists().map_err(|_| ()))
+    decide_for(data_dir, switch_present(&switch_path(data_dir)))
 }
 
 pub fn stopped_since(data_dir: &Path) -> Option<i64> {
@@ -78,7 +96,18 @@ pub fn engage(data_dir: &Path, now_ms: i64) -> std::io::Result<()> {
         Ok(mut file) => file.write_all(now_ms.to_string().as_bytes()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(error),
+    }?;
+    // 寫完再問一次閘門自己看不看得到。**一個回報成功卻沒有停下來的全停，
+    // 比一個大聲失敗的全停危險得多**——呼叫端會照著印「三層都停了」。
+    // 上面每一條路都可能在某種檔案系統形狀下「成功」而閘門仍讀成沒停
+    // （斷掉的 symlink 是實測過的一種），所以這裡不推理，直接量。
+    if !is_stopped(data_dir) {
+        return Err(std::io::Error::other(format!(
+            "寫完 {} 之後，判斷閘門仍然讀成「沒有全停」；沒有停下任何一層",
+            switch_path(data_dir).display()
+        )));
     }
+    Ok(())
 }
 
 pub fn release(data_dir: &Path) -> std::io::Result<()> {
@@ -153,6 +182,30 @@ mod tests {
         assert!(decide(Ok(false), DirState::NotADir));
         assert!(!decide(Ok(false), DirState::Dir));
         assert!(!decide(Ok(false), DirState::Absent));
+    }
+
+    /// 一條指向不存在目標的 symlink 佈在 `master.stop` 上，全停就再也關不上——
+    /// 而且 `stop-all` 會回報成功。`try_exists` 跟著 symlink 走是成因。
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_in_place_of_the_switch_is_still_stopped() {
+        use std::os::unix::fs::symlink;
+        let dir = temp("dangling");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        symlink(dir.join("nowhere-at-all"), switch_path(&dir)).unwrap();
+        assert!(
+            is_stopped(&dir),
+            "斷掉的 symlink 被讀成「我確定開關不在」＝fail-open"
+        );
+        // 而且 engage 不可以安靜地回成功——呼叫端會照著印「三層都停了」。
+        // 這條 symlink 之下沒有東西可寫，所以 engage 必須讓呼叫端知道。
+        let engaged = engage(&dir, 1_000);
+        assert!(
+            engaged.is_ok() || is_stopped(&dir),
+            "engage 回報成功卻沒有停：{engaged:?}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

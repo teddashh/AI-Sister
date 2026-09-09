@@ -52,6 +52,24 @@ fn decide_for(data_dir: &Path, child: Result<bool, ()>) -> bool {
     decide(child, dir_state(data_dir))
 }
 
+/// 開關在不在。**用 `symlink_metadata`，不要用 `try_exists`。**
+///
+/// `try_exists` 會**跟著 symlink 走**，所以一條指向不存在目標的 symlink
+/// 會回 `Ok(false)`＝「我確定開關不在」。那是 fail-open，而且是可以從外面
+/// 佈置的：先在 data dir 放一條斷掉的 `hands.stop` symlink，之後那個關就再也關不上，
+/// 而 `create_new` 又會因為那條路徑已存在而回 `AlreadyExists`（被當成「本來就關著」），
+/// 於是命令說「已經關了」、閘門說「沒關」，兩句話同時印在同一個產品裡。
+/// alpha.118 實測重現過。
+///
+/// `symlink_metadata` 不跟著走：目錄項存在就算存在，這才符合「不確定就是關」。
+fn switch_present(path: &Path) -> Result<bool, ()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(()),
+    }
+}
+
 /// **這一行沒有任何 Linux 測試守得住，別照 Linux 的綠燈改它。**
 ///
 /// 把它改回 `switch_path(data_dir).try_exists().unwrap_or(true)`，Linux 上
@@ -64,7 +82,7 @@ fn decide_for(data_dir: &Path, child: Result<bool, ()>) -> bool {
 /// Windows CI 上才走得到那一格（alpha.75 就是被它擋下來的）。下面那些
 /// `decide` 的單元測試證明的是規則對，不是這一行有照著規則走。
 pub fn is_pulled(data_dir: &Path) -> bool {
-    decide_for(data_dir, switch_path(data_dir).try_exists().map_err(|_| ()))
+    decide_for(data_dir, switch_present(&switch_path(data_dir)))
 }
 
 pub fn pull(data_dir: &Path, at_ms: i64) -> std::io::Result<bool> {
@@ -372,6 +390,23 @@ mod tests {
     /// 它從 `Ok(false)` 那條路過關，而那正是 alpha.75 之前會 fail-open 的格子
     /// ——這條測試就是在 Windows CI 上把那個 bug 擋下來的人。別因為下面的
     /// `decide` 單元測試看起來涵蓋一樣的規則就刪掉它，那些測試碰不到薄殼。
+    /// 斷掉的 symlink 佈在 `hands.stop` 上，拔手開關就再也拔不掉。
+    ///
+    /// 這條在 alpha.117 之前是紅的（`try_exists` 跟著 symlink 走，回 `Ok(false)`）：
+    /// `sister hands stop` 說「手本來就拔著」，同一次 `sister doctor` 說
+    /// 「✓ 手 接著；執行隘口可以把核准的動作交給作業系統」——兩句話同時是產品的輸出。
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_in_place_of_the_switch_is_pulled_fail_closed() {
+        use std::os::unix::fs::symlink;
+        let tmp = Tmp::new("dangling");
+        symlink(tmp.0.join("nowhere-at-all"), switch_path(&tmp.0)).unwrap();
+        assert!(
+            is_pulled(&tmp.0),
+            "斷掉的 symlink 被讀成「我確定開關不在」＝fail-open"
+        );
+    }
+
     #[test]
     fn unreadable_path_is_pulled_fail_closed() {
         let tmp = Tmp::new("fail-closed");
