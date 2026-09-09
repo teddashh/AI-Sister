@@ -49,6 +49,27 @@ pub enum Shape {
     Range,
 }
 
+/// 一個問題該走檢索，還是回答她已經整理過的記憶。
+///
+/// [`Shape`] 只描述檢索內部要拿字還是拿時間；「妳知道了什麼」根本不是一個
+/// 檢索詞，不能硬塞成第四種 `Shape`。把外層意圖另立型別，呼叫端才不會先跑
+/// FTS、撈到設定頁上的「知道」兩字，再把那段 OCR 冒充成她知道的事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Intent {
+    Retrieval(Shape),
+    MemoryOverview,
+}
+
+impl Intent {
+    /// 題庫與 UI 共用的穩定名稱。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Retrieval(shape) => shape.name(),
+            Self::MemoryOverview => "memory_overview",
+        }
+    }
+}
+
 impl Shape {
     /// 寫出去的時候叫什麼。
     ///
@@ -169,6 +190,38 @@ pub fn shape(question: &str) -> Shape {
         Shape::Recent
     } else {
         Shape::Keywords
+    }
+}
+
+/// 判斷問題的最外層意圖。
+///
+/// 總覽刻意只認完整問法，不用「知道」「記得」做子字串比對。「妳知道昨天的
+/// 電話嗎」有明確主題，應該照原話檢索；把它誤送總覽會直接無視使用者問的字。
+/// 尾端常見問號可以省略，但句子內容不做改寫或模糊比對。
+pub fn intent(question: &str) -> Intent {
+    let compact: String = question.chars().filter(|c| !c.is_whitespace()).collect();
+    let normalized =
+        compact.trim_end_matches(|c: char| c.is_ascii_punctuation() || is_cjk_punct(c));
+
+    let rest = ["你", "妳", "她"]
+        .iter()
+        .find_map(|subject| normalized.strip_prefix(subject))
+        .unwrap_or(normalized);
+    let rest = ["現在", "目前", "到底"]
+        .iter()
+        .find_map(|adverb| rest.strip_prefix(adverb))
+        .unwrap_or(rest);
+    let rest = ["知道", "記得"]
+        .iter()
+        .find_map(|verb| rest.strip_prefix(verb));
+    let overview = rest.is_some_and(|rest| {
+        let rest = rest.strip_prefix('了').unwrap_or(rest);
+        matches!(rest, "什麼" | "哪些事" | "哪些事情")
+    });
+    if overview {
+        Intent::MemoryOverview
+    } else {
+        Intent::Retrieval(shape(question))
     }
 }
 
@@ -549,6 +602,43 @@ mod tests {
     #[test]
     fn the_question_from_the_screenshot() {
         assert_eq!(shape("剛剛發生什麼事"), Shape::Recent);
+    }
+
+    #[test]
+    fn memory_overview_recognizes_only_the_small_written_grammar() {
+        for q in [
+            "她知道了什麼？",
+            "妳目前記得哪些事情",
+            "你 到底 知道 哪些事？！",
+            "現在記得了什麼",
+            "知道哪些事",
+        ] {
+            assert_eq!(
+                intent(q),
+                Intent::MemoryOverview,
+                "{q:?} 應該問整理過的記憶"
+            );
+            assert_eq!(intent(q).name(), "memory_overview");
+        }
+    }
+
+    /// 只要多了一個主題字就是檢索。這條分界若做寬，「知道」會把
+    /// 設定頁 OCR 和真正的主題問題一起吞掉。
+    #[test]
+    fn a_memory_word_with_a_topic_is_still_retrieval() {
+        for q in [
+            "你知道客服電話嗎",
+            "她知道了什麼密碼",
+            "妳知道 Azure 的什麼",
+            "其他的是看到的東西，是自己打進去的字",
+            "what do you know about me",
+        ] {
+            let Intent::Retrieval(actual) = intent(q) else {
+                panic!("{q:?} 有其他內容，不可忽略它改答總覽");
+            };
+            assert_eq!(actual, shape(q));
+            assert_eq!(intent(q).name(), shape(q).name());
+        }
     }
 
     #[test]

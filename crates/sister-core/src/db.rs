@@ -3931,6 +3931,32 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// 最近的 L2 記憶，每個 segment 只回當下最新的活著版本。
+    ///
+    /// 這不是「最近 N 列」：同一段的編輯歷史不可以把其他段擠掉。
+    /// 先在每個 `segment_core_start` 裡剔掉墓碑、取 `(version, id)` 最新的
+    /// 那列，再按 segment 由新到舊排序和套 limit。
+    pub fn recent_l2_cards(&self, limit: usize) -> Result<Vec<L2CardRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{L2_SELECT}
+             FROM l2_card AS card
+             WHERE card.tombstoned_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM l2_card AS newer
+                   WHERE newer.segment_core_start = card.segment_core_start
+                     AND newer.tombstoned_at IS NULL
+                     AND (newer.version > card.version
+                          OR (newer.version = card.version AND newer.id > card.id))
+               )
+             ORDER BY card.segment_core_start DESC, card.version DESC, card.id DESC
+             LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map([limit as i64], map_l2_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn latest_l2_before(&self, core_started_at: Millis) -> Result<Option<L2CardRow>> {
         self.conn
             .query_row(
@@ -7319,8 +7345,8 @@ pub struct QueryLogEntry<'a> {
     pub ts: Millis,
     /// 他打的**原話**。不做正規化：題庫要的正是真實的用詞。
     pub question: &'a str,
-    /// `"recent"`／`"keywords"`／`"range"`。走哪條路本身就是一個要驗的判斷
-    /// （見 [`crate::question::shape`]）。
+    /// `"recent"`／`"keywords"`／`"range"`／`"memory_overview"`。走哪條路本身
+    /// 就是一個要驗的判斷（見 [`crate::question::Intent::name`]）。
     pub shape: &'a str,
     /// 她一共**給了他幾筆東西**——不是 [`Db::search`] 回了幾筆。
     ///
@@ -7950,6 +7976,78 @@ mod tests {
 
     fn test_db() -> Db {
         Db::open_in_memory().expect("open in-memory db")
+    }
+
+    fn insert_test_l2(db: &mut Db, segment: Millis, activity: &str) -> i64 {
+        db.insert_l2_card(&L2Insert {
+            segment_core_start: segment,
+            segment_ref: &format!("segment:{segment}"),
+            activity,
+            entities_json: "[]".into(),
+            continues_json: None,
+            commitments_json: "[]".into(),
+            model_confidence: 0.8,
+            evidence_json: "[]".into(),
+            open_questions_json: "[]".into(),
+            author: L2Author::Interpreter,
+        })
+        .expect("insert test L2")
+    }
+
+    #[test]
+    fn recent_l2_cards_returns_one_latest_version_per_segment_before_limiting() {
+        let mut db = test_db();
+        insert_test_l2(&mut db, 100, "100 v1");
+        let segment_100_latest = insert_test_l2(&mut db, 100, "100 v2");
+        let segment_200_latest = insert_test_l2(&mut db, 200, "200 v1");
+        insert_test_l2(&mut db, 300, "300 v1");
+        insert_test_l2(&mut db, 300, "300 v2");
+        let segment_300_latest = insert_test_l2(&mut db, 300, "300 v3");
+
+        let rows = db.recent_l2_cards(20).expect("recent cards");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![segment_300_latest, segment_200_latest, segment_100_latest],
+            "每段只能有最新版，且 segment 由新到舊"
+        );
+        assert_eq!(
+            db.recent_l2_cards(2)
+                .expect("limited recent cards")
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![segment_300_latest, segment_200_latest],
+            "limit 應用在每段選完之後，不是被同一段的舊版擠掉"
+        );
+        assert!(db.recent_l2_cards(0).expect("zero limit").is_empty());
+    }
+
+    #[test]
+    fn recent_l2_cards_uses_the_latest_live_version_and_hides_dead_segments() {
+        let mut db = test_db();
+        let segment_100_old = insert_test_l2(&mut db, 100, "100 v1");
+        let segment_100_dead_latest = insert_test_l2(&mut db, 100, "100 v2");
+        let segment_200_v1 = insert_test_l2(&mut db, 200, "200 v1");
+        let segment_200_v2 = insert_test_l2(&mut db, 200, "200 v2");
+
+        db.conn
+            .execute(
+                "UPDATE l2_card SET tombstoned_at = 900 WHERE id = ?1",
+                [segment_100_dead_latest],
+            )
+            .expect("tombstone newest version only");
+        db.conn
+            .execute(
+                "UPDATE l2_card SET tombstoned_at = 900 WHERE id IN (?1, ?2)",
+                params![segment_200_v1, segment_200_v2],
+            )
+            .expect("tombstone whole segment");
+
+        let rows = db.recent_l2_cards(20).expect("recent live cards");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, segment_100_old);
+        assert_eq!(rows[0].activity, "100 v1");
+        assert!(rows[0].tombstoned_at.is_none());
     }
 
     /// **「查到別的網址」和「目前一個網址證據都沒有」不可以是同一個答案。**
