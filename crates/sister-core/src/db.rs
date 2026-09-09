@@ -2093,9 +2093,9 @@ impl Db {
     /// 暫停稽核：她總共閉眼多久。
     ///
     /// 存在的理由和 `exclusion_audit` 完全一樣，而且是**照著同一次教訓寫的**：
-    /// `capture_paused` / `capture_resumed` 這兩個 kind 從 schema v1 就寫在
-    /// DATA_INVENTORY 裡，卻一路到 alpha.12 才有程式碼寫得出它們——如果現在
-    /// 只寫不讀，那就是把同一個坑挖第二次，只是換一張表。
+    /// 稽核事件光是落庫不算有產品能力，必須有查詢把空白解釋給使用者。這一支
+    /// 只讀使用者按下的普通暫停；全停是另一種控制、另一個恢復動作，由
+    /// [`Self::master_stop_audit`] 分開回答。
     ///
     /// **在 Rust 這邊配對而不是用 SQL window function**，因為配不起來的情況
     /// 才是重點：最後一段沒有 `resume`（現在還在暫停，或錄製在暫停中被砍掉），
@@ -2123,6 +2123,49 @@ impl Db {
                     }
                     // 開頭那筆被保留期刪掉了。算一段，但長度不知道——
                     // 猜一個數字進去會讓「總共暫停多久」悄悄變短。
+                    None => {
+                        audit.episodes += 1;
+                        audit.truncated += 1;
+                    }
+                },
+                _ => {}
+            }
+        }
+        if let Some(start) = open {
+            audit.episodes += 1;
+            audit.open_since = Some(start);
+        }
+        Ok(audit)
+    }
+
+    /// 全停稽核：三層一起停止過幾段、已結束的段落總共多久。
+    ///
+    /// **不併進 [`Self::pause_audit`]。** 普通暫停只停 recorder，解除用
+    /// `sister resume`；全停會連 brain／hands 一起擋住，解除用
+    /// `sister stop-all --off`。把兩者相加後印成「她閉眼多久」，會讓使用者
+    /// 看不出是哪一個控制仍在生效，也會給出錯的恢復動作。
+    ///
+    /// 配對規則和普通暫停一致：孤兒 `master_stop_released` 算一段但長度未知，
+    /// 完整的一對算入 `total_ms`，最後沒有 released 的 engaged 則放在
+    /// `open_since`。這三種都必須留下明確答案，不能把配不起來的列靜靜略過。
+    pub fn master_stop_audit(&self) -> Result<MasterStopAudit> {
+        let mut stmt = self.conn.prepare(
+            "SELECT kind, ts FROM system_events
+             WHERE kind IN ('master_stop_engaged', 'master_stop_released') ORDER BY ts, id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Millis>(1)?)))?;
+
+        let mut audit = MasterStopAudit::default();
+        let mut open: Option<Millis> = None;
+        for row in rows {
+            let (kind, ts) = row?;
+            match kind.as_str() {
+                "master_stop_engaged" if open.is_none() => open = Some(ts),
+                "master_stop_released" => match open.take() {
+                    Some(start) => {
+                        audit.episodes += 1;
+                        audit.total_ms += (ts - start).max(0);
+                    }
                     None => {
                         audit.episodes += 1;
                         audit.truncated += 1;
@@ -7781,6 +7824,19 @@ pub struct PauseAudit {
     pub truncated: i64,
 }
 
+/// 使用者把 recorder／brain／hands 三層一起停下來的紀錄。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MasterStopAudit {
+    /// 全停過幾段（含還沒結束的那一段）。
+    pub episodes: i64,
+    /// **已經結束的**段落總長；不含 `open_since`，也不猜孤兒 released 的起點。
+    pub total_ms: i64,
+    /// 最後一筆 engaged 沒有配到 released。
+    pub open_since: Option<Millis>,
+    /// 開頭已被保留期刪掉、只剩 released 的段數。
+    pub truncated: i64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameContext {
     pub frame_id: i64,
@@ -12866,6 +12922,44 @@ mod tests {
     fn a_database_that_was_never_paused_says_so_plainly() {
         let db = test_db();
         assert_eq!(db.pause_audit().expect("audit"), PauseAudit::default());
+    }
+
+    /// 全停也要把孤兒 released、完整配對、尚未 released 三種情況分開交代。
+    #[test]
+    fn the_master_stop_ledger_admits_the_episodes_it_cannot_measure() {
+        let mut db = test_db();
+        let s = db.start_session("test", "0.0.1").expect("session");
+        let mut put = |kind, ts| {
+            db.insert_system(
+                s,
+                &SystemEvent {
+                    ts,
+                    kind,
+                    detail: None,
+                },
+            )
+            .expect("insert");
+        };
+
+        put(SystemKind::MasterStopReleased, 1_000);
+        put(SystemKind::MasterStopEngaged, 2_000);
+        put(SystemKind::MasterStopReleased, 602_000);
+        put(SystemKind::MasterStopEngaged, 700_000);
+
+        let audit = db.master_stop_audit().expect("audit");
+        assert_eq!(audit.episodes, 3, "三段都要算進來");
+        assert_eq!(audit.total_ms, 600_000, "只加總完整配對的那一段");
+        assert_eq!(audit.open_since, Some(700_000));
+        assert_eq!(audit.truncated, 1, "孤兒 released 要明講長度未知");
+    }
+
+    #[test]
+    fn a_database_that_was_never_master_stopped_says_so_plainly() {
+        let db = test_db();
+        assert_eq!(
+            db.master_stop_audit().expect("audit"),
+            MasterStopAudit::default()
+        );
     }
 
     /// 時間軸問「今天」，答案裡要有那段昨天按下、今天還沒解除的暫停。

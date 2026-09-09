@@ -201,6 +201,14 @@ pub struct BlindSpots {
     /// 這幾段算進了 `paused_episodes` 卻**沒有**算進 `paused_ms`，所以
     /// `paused_ms > 0` 時它是下限而不是精確值。
     pub paused_truncated: i64,
+    /// recorder／brain／hands 三層一起全停過幾段。
+    pub master_stopped_episodes: i64,
+    /// 已結束的全停段落總長；有配不起來的段落時是下限。
+    pub master_stopped_ms: i64,
+    /// 最後一段全停沒有對應的解除紀錄。這只描述資料庫，不猜現在的 latch。
+    pub master_stopped_open: bool,
+    /// 有幾段全停的開頭已被保留期刪掉，只剩 released。
+    pub master_stopped_truncated: i64,
     /// 這一題她只看了最近幾天。`None` = 看完了整顆資料庫。
     ///
     /// 見 [`Db::scan_horizon_days`]：產不出相鄰雙字的查詢（最常見的是一個字
@@ -259,6 +267,7 @@ impl BlindSpots {
             || self.ocr_is_dead()
             || !self.excluded.is_empty()
             || self.paused_episodes > 0
+            || self.master_stopped_episodes > 0
             || self.paused_now
             || self.scan_horizon_days.is_some()
     }
@@ -278,6 +287,7 @@ impl BlindSpots {
 pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::Result<BlindSpots> {
     let stats = db.stats()?;
     let pauses = db.pause_audit()?;
+    let master_stops = db.master_stop_audit()?;
     // **心跳只讀一次。** 底下那兩個布林是同一次讀的兩半，所以它們不可能同時
     // 為真，也不可能同時為假而其實有人在。分兩次讀的話，兩次之間她可以從
     // `Booting` 跳到 `Recording`——同一句話的兩個前提描述兩個不同的瞬間。
@@ -298,6 +308,10 @@ pub fn blind_spots(db: &Db, data_dir: &std::path::Path, query: &str) -> anyhow::
         paused_open: pauses.open_since.is_some(),
         paused_now: crate::pause::is_paused(data_dir),
         paused_truncated: pauses.truncated,
+        master_stopped_episodes: master_stops.episodes,
+        master_stopped_ms: master_stops.total_ms,
+        master_stopped_open: master_stops.open_since.is_some(),
+        master_stopped_truncated: master_stops.truncated,
         scan_horizon_days: db.scan_horizon_days(query)?,
         recording_now: beat == Some(crate::heartbeat::Phase::Recording),
         booting_now: beat == Some(crate::heartbeat::Phase::Booting),
@@ -580,6 +594,35 @@ mod tests {
         );
         assert_eq!(b.paused_episodes, 1);
         assert_eq!(b.paused_ms, 5_000);
+    }
+
+    #[test]
+    fn master_stop_is_reported_as_its_own_blind_spot() {
+        let mut db = Db::open_in_memory().expect("db");
+        let s = db.start_session("test", "0.0.1").expect("session");
+        for (kind, ts) in [
+            (SystemKind::MasterStopReleased, 1_000),
+            (SystemKind::MasterStopEngaged, 2_000),
+            (SystemKind::MasterStopReleased, 7_000),
+            (SystemKind::MasterStopEngaged, 9_000),
+        ] {
+            db.insert_system(
+                s,
+                &SystemEvent {
+                    ts,
+                    kind,
+                    detail: None,
+                },
+            )
+            .expect("master-stop event");
+        }
+
+        let b = blind_spots(&db, nowhere(), "電話").expect("blind");
+        assert_eq!(b.master_stopped_episodes, 3);
+        assert_eq!(b.master_stopped_ms, 5_000);
+        assert!(b.master_stopped_open);
+        assert_eq!(b.master_stopped_truncated, 1);
+        assert_eq!(b.paused_episodes, 0, "全停不可以冒充普通暫停");
     }
 
     /// 自建暫存目錄。不引 `tempfile` 的理由見 `retention.rs`。
