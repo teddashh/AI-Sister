@@ -1893,7 +1893,7 @@ pub mod interpret {
         };
 
         if dry_run {
-            let report = brain::prepare(&mut input)?;
+            let report = brain::prepare(&mut input, data_dir)?;
             print!("{}", brain::format_dry_run(&report));
             return Ok(());
         }
@@ -26798,6 +26798,7 @@ pub mod record {
             assert!(!should_ping_brain(&Tick::Paused, &mut idle));
             assert!(!should_ping_brain(&Tick::Resumed, &mut idle));
             assert!(!should_ping_brain(&Tick::Disabled, &mut idle));
+            assert!(!should_ping_brain(&Tick::MasterStopped, &mut idle));
         }
 
         fn replay_live_recorder() -> Recorder<ReplayBackend> {

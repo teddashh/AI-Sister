@@ -609,7 +609,7 @@ impl Engine {
             limit: self.brain.concurrency_slots() as usize,
             only_core_start: None,
         };
-        let dry = brain::prepare(&mut input)?;
+        let dry = brain::prepare(&mut input, &self.data_dir)?;
         match &dry.skip {
             Some(BrainSkip::NoCommand) => {
                 self.report.armed = false;

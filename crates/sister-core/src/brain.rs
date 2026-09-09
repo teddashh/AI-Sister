@@ -779,7 +779,7 @@ pub struct InterpretInput<'a> {
     pub only_core_start: Option<Millis>,
 }
 
-pub fn prepare(input: &mut InterpretInput<'_>) -> Result<DryRun> {
+pub fn prepare(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<DryRun> {
     let configured = input.brain.cli();
     let used = today_used(input.db)?;
     let remaining = input.brain.daily_budget.saturating_sub(used);
@@ -790,6 +790,11 @@ pub fn prepare(input: &mut InterpretInput<'_>) -> Result<DryRun> {
         Some(SkipReason::NoCommand)
     } else if input.consent.cloud_permit().is_none() {
         Some(SkipReason::NoConsent)
+    } else if not_stopped(data_dir).is_none() {
+        // `run` 也在同一個位置擋（同意書之後、預算之前）。這裡不擋的話，
+        // `sister interpret --dry-run`——也就是「看她準備送出什麼」那支工具——
+        // 會在全停期間照樣宣告「真的跑的話會送出 N 段」，而實際上一段都不會送。
+        Some(SkipReason::MasterStopped)
     } else if remaining == 0 && !jobs.is_empty() {
         Some(SkipReason::BudgetExhausted {
             used,
@@ -2300,6 +2305,56 @@ mod tests {
         assert_eq!(logs[0].chars_sent, 0);
     }
 
+    /// 全停期間的 dry-run 就是「看她準備送出什麼」那支工具本人。它照舊印出那段字，
+    /// 但必須說清楚真的跑也不會送——否則它會在她一段都不會送的時候宣告要送 N 段。
+    ///
+    /// 前面那半是對照組：沒有全停時同一份輸入不會印出解除指令，所以下面那句
+    /// 命中證明的是全停，不是這段文案本來就在。
+    #[test]
+    fn dry_run_during_master_stop_says_nothing_will_be_sent() {
+        let dir =
+            std::env::temp_dir().join(format!("sister-brain-dry-stopped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let sentinel = dir.join("spawned");
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_000_200_000;
+        let _ = seed(&mut db, ts);
+        let (command, args) = fake_cli(&dir, "{}", &sentinel);
+        let mut consent = Consent::default();
+        consent.grant(Sheet::CloudReading, ts);
+        let brain = crate::config::BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let mut input = InterpretInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &brain,
+            from_ts: ts,
+            to_ts: ts + 400_000,
+            limit: 4,
+            only_core_start: None,
+        };
+        let before = format_dry_run(&prepare(&mut input, &dir).expect("prepare"));
+        assert!(
+            !before.contains("stop-all --off"),
+            "還沒全停就講解除：{before}"
+        );
+        sister_hands::master_stop::engage(&dir, ts).expect("engage");
+        let report = prepare(&mut input, &dir).expect("prepare");
+        assert!(
+            matches!(report.skip, Some(SkipReason::MasterStopped)),
+            "全停期間 dry-run 沒報全停：{:?}",
+            report.skip
+        );
+        let text = format_dry_run(&report);
+        assert!(text.contains("stop-all --off"), "沒講解除的辦法：{text}");
+        assert!(!sentinel.exists(), "dry-run 卻 spawn 了");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn dry_run_shows_the_text_and_does_not_spawn() {
         let dir = std::env::temp_dir().join(format!("sister-brain-dry-{}", std::process::id()));
@@ -2325,7 +2380,8 @@ mod tests {
             limit: 4,
             only_core_start: None,
         };
-        let report = prepare(&mut input).expect("prepare");
+        let report =
+            prepare(&mut input, Path::new("__sister-core-test-no-master-stop__")).expect("prepare");
         let text = format_dry_run(&report);
         assert!(text.contains("不會送出去"), "{text}");
         // dry-run 的用處就是讓他在簽字前**看到真的會送出去的那段字**。
