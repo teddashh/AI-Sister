@@ -27,6 +27,8 @@ import { domOf, fakeDocument, hiddenIn, loader, read, watchNonsense } from "./fa
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui");
 const SRC = process.argv[2] ?? join(UI, "app.js");
+const MAIN = join(UI, "../src-tauri/src/main.rs");
+const MASTER_STOP_DISPATCH = join(UI, "../src-tauri/src/master_stop_dispatch.rs");
 const LADDER_WORDS = [
   ["glimmer", "微光形式沒有獨立分支"],
   ["one_line", "一行形式沒有獨立分支"],
@@ -172,6 +174,11 @@ function blind(over = {}) {
     paused_open: false,
     paused_now: false,
     paused_truncated: 0,
+    master_stopped_episodes: 0,
+    master_stopped_ms: 0,
+    master_stopped_open: false,
+    master_stopped_truncated: 0,
+    master_stopped_now: false,
     scan_horizon_days: null,
     recording_now: false,
     booting_now: false,
@@ -2547,7 +2554,7 @@ console.log("73. master-stop-failed 的字要出現在畫面上");
 
 console.log("74. 四顆停止選單項的建立、每個 menu 分支、managed state 與 refresh 都接齊");
 {
-  const main = read(join(UI, "../src-tauri/src/main.rs"));
+  const main = read(MAIN);
   const menuBranches = [...main.matchAll(/Menu::with_items\(\s*app,\s*&\[([\s\S]*?)\],\s*\)\?/g)].map(
     (match) => match[1],
   );
@@ -2589,6 +2596,228 @@ console.log("74. 四顆停止選單項的建立、每個 menu 分支、managed s
       `refresh_tray 缺少 app.try_state::<${state}>()`,
     );
   }
+}
+
+console.log("75. latch 現在全停、資料庫歷史為零時，blind 說現在與可行入口");
+{
+  const p = await open({
+    ask: answer({
+      blind: blind({
+        chunks: 10,
+        ever_recorded: true,
+        ever_stored: true,
+        master_stopped_now: true,
+      }),
+    }),
+    recording_state: "recording",
+    master_stop_state: true,
+  });
+  await p.type("找不到的歷史");
+  const said = p.hitTexts().join("\n");
+  check("現在全停有自己的句子", said.includes("我現在正全停中"), said);
+  check("現在全停指向系統匣解除入口", said.includes("系統匣 → 解除全停"), said);
+  check("歷史為零不捏造全停 episode", !said.includes("被全停過"), said);
+}
+
+console.log("76. latch 已解除時，完整 historical episode 顯示次數與完整 duration");
+{
+  const p = await open({
+    ask: answer({
+      blind: blind({
+        chunks: 10,
+        ever_recorded: true,
+        ever_stored: true,
+        master_stopped_episodes: 2,
+        master_stopped_ms: 5 * 60_000,
+      }),
+    }),
+    recording_state: "recording",
+    master_stop_state: false,
+  });
+  await p.type("找不到的歷史");
+  const said = p.hitTexts().join("\n");
+  check("released 歷史顯示 episode 數", said.includes("被全停過 2 次"), said);
+  check("完整歷史顯示完整 duration", said.includes("一共 5 分鐘"), said);
+  check("已解除不冒充現在全停", !said.includes("現在正全停中"), said);
+}
+
+console.log("77. historical open/truncated 在 latch 已解除時仍只講稽核歷史");
+{
+  const p = await open({
+    ask: answer({
+      blind: blind({
+        chunks: 10,
+        ever_recorded: true,
+        ever_stored: true,
+        master_stopped_episodes: 3,
+        master_stopped_ms: 7 * 60_000,
+        master_stopped_open: true,
+        master_stopped_truncated: 1,
+      }),
+    }),
+    recording_state: "recording",
+    master_stop_state: false,
+  });
+  await p.type("找不到的歷史");
+  const said = p.hitTexts().join("\n");
+  check("未收尾歷史明講最後一段沒有收尾", said.includes("最後一段沒有收尾"), said);
+  check("截斷歷史明講一段開頭被刪", said.includes("有 1 段的開頭已被保留期刪掉"), said);
+  check("有缺口的 duration 明講只是下限", said.includes("所以這個數字算短了"), said);
+  check("歷史 open 不冒充 live latch", !said.includes("現在正全停中"), said);
+}
+
+console.log("78. historical 與 live master stop 是兩句可同時成立的事");
+{
+  const p = await open({
+    ask: answer({
+      blind: blind({
+        chunks: 10,
+        ever_recorded: true,
+        ever_stored: true,
+        master_stopped_episodes: 4,
+        master_stopped_ms: 9 * 60_000,
+        master_stopped_now: true,
+      }),
+    }),
+    recording_state: "recording",
+    master_stop_state: true,
+  });
+  await p.type("找不到的歷史");
+  const said = p.hitTexts().join("\n");
+  check("同一份 blind 同時顯示歷史", said.includes("被全停過 4 次"), said);
+  check("同一份 blind 同時顯示現在", said.includes("現在正全停中"), said);
+}
+
+console.log("79. native stop event 到達後，較早的 poll false 晚回不能蓋掉 stopped");
+{
+  let reads = 0;
+  let finishStalePoll = null;
+  const stalePoll = new Promise((resolvePoll) => {
+    finishStalePoll = resolvePoll;
+  });
+  const p = await open({
+    master_stop_state: () => {
+      reads += 1;
+      return reads === 2 ? stalePoll : false;
+    },
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  check("前提：開場與 visible poll 都真的送出", reads === 2 && typeof finishStalePoll === "function", reads);
+  await p.fromOutside("master-stop-changed", true);
+  check("event 先把畫面切成 stopped", p.avatarState() === "stopped", p.line());
+  finishStalePoll(false);
+  await tick(40);
+  check("舊 poll false 晚回後仍是 stopped", p.avatarState() === "stopped", p.line());
+}
+
+console.log("80. 兩個 overlapping master-stop polls 只有最新 request 可 apply");
+{
+  let reads = 0;
+  let finishOlderPoll = null;
+  const olderPoll = new Promise((resolvePoll) => {
+    finishOlderPoll = resolvePoll;
+  });
+  const p = await open({
+    master_stop_state: () => {
+      reads += 1;
+      if (reads === 3) return olderPoll;
+      return false;
+    },
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  await p.pollNow();
+  check("前提：較早的第三份 read 被 hold", reads === 3 && typeof finishOlderPoll === "function", reads);
+  await p.pollNow();
+  check("較新的第四份 false 已套用", reads === 4 && p.avatarState() !== "stopped", {
+    reads,
+    state: p.avatarState(),
+  });
+  finishOlderPoll(true);
+  await tick(40);
+  check("更舊的 true 晚回不能蓋掉最新 false", p.avatarState() !== "stopped", p.line());
+}
+
+function desktopTruthSourceErrors(main, dispatch, ui) {
+  const errors = [];
+  const callback = /"master-stop" \| "master-resume" => \{([\s\S]*?)\n\s*\}/.exec(main)?.[1] ?? "";
+  if (!callback.includes("dispatch_master_stop_menu(app, event.id.as_ref());")) {
+    errors.push("production callback 沒有呼叫唯一 dispatch helper");
+  }
+
+  const helperStart = main.indexOf("fn dispatch_master_stop_menu(");
+  const helperEnd = main.indexOf("\n}\n\n#[cfg(test)]", helperStart);
+  const helper = helperStart >= 0 && helperEnd > helperStart ? main.slice(helperStart, helperEnd) : "";
+  if (!helper.includes("master_stop_action_for_menu_id(menu_id)")) errors.push("helper 沒有走 fixed-direction policy");
+  if (!helper.includes("set_master_stop(shell.data_dir.as_deref(), action)")) errors.push("helper 沒有呼叫 setter");
+  if (!helper.includes("Ok(()) => refresh_tray(app)")) errors.push("成功沒有 refresh tray/changed state");
+  if (!helper.includes("app.emit(MASTER_STOP_FAILED_EVENT, error)")) errors.push("失敗沒有 emit master-stop-failed");
+
+  if (!dispatch.includes('"master-stop" => Some(MasterStopAction::Engage)')) errors.push("master-stop 方向不是 Engage");
+  if (!dispatch.includes('"master-resume" => Some(MasterStopAction::Release)')) errors.push("master-resume 方向不是 Release");
+  if (!dispatch.includes("_ => None")) errors.push("未知 menu id 沒有拒絕");
+
+  const changedNative = /const MASTER_STOP_CHANGED_EVENT: &str = "([^"]+)";/.exec(main)?.[1];
+  const failedNative = /const MASTER_STOP_FAILED_EVENT: &str = "([^"]+)";/.exec(main)?.[1];
+  const listened = [...ui.matchAll(/\.listen\?\.\("([^"]+)"/g)].map((match) => match[1]);
+  if (changedNative !== "master-stop-changed" || !listened.includes(changedNative)) {
+    errors.push("native/renderer master-stop-changed 名稱不一致");
+  }
+  if (failedNative !== "master-stop-failed" || !listened.includes(failedNative)) {
+    errors.push("native/renderer master-stop-failed 名稱不一致");
+  }
+  if (!main.includes("app.emit(MASTER_STOP_CHANGED_EVENT, stopped)")) errors.push("native 沒有 emit changed state");
+
+  const mappingStart = main.indexOf("impl From<sister_core::answer::BlindSpots> for Blind");
+  const mappingEnd = main.indexOf("\n}\n\n#[cfg(test)]\nmod blind_dto_tests", mappingStart);
+  const mapping = mappingStart >= 0 && mappingEnd > mappingStart ? main.slice(mappingStart, mappingEnd) : "";
+  for (const field of [
+    "master_stopped_episodes",
+    "master_stopped_ms",
+    "master_stopped_open",
+    "master_stopped_truncated",
+    "master_stopped_now",
+  ]) {
+    if (!mapping.includes(`${field}: blind.${field}`)) errors.push(`Blind mapping 丟掉或接錯 ${field}`);
+  }
+  if (!main.includes("Some(Blind::from(b))")) errors.push("ask 沒有走 tested Blind mapping");
+
+  if ((ui.match(/readMasterStopState\(\);/g) ?? []).length < 2) errors.push("startup/poll 沒有共用 master-stop read helper");
+  if (!ui.includes("masterStopRevision += 1;")) errors.push("event 沒有推進 master-stop revision");
+  if (!ui.includes("request === masterStopReadRequest")) errors.push("poll 沒有只接受最新 request");
+  if (ui.includes('invoke("master_stop_state").then(setMasterStopped')) errors.push("仍有第二條直連 master-stop read");
+  return errors;
+}
+
+console.log("81. desktop truth source contract 與三個 production callback self-mutations");
+{
+  const main = read(MAIN);
+  const dispatch = read(MASTER_STOP_DISPATCH);
+  const ui = read(SRC);
+  const actual = desktopTruthSourceErrors(main, dispatch, ui);
+  check("production source contract 全部接齊", actual.length === 0, actual);
+
+  const withoutCallback = main.replace("dispatch_master_stop_menu(app, event.id.as_ref());", "");
+  check(
+    "self-mutation：刪 callback helper call 會紅",
+    desktopTruthSourceErrors(withoutCallback, dispatch, ui).some((line) => line.includes("production callback")),
+  );
+  const swapped = dispatch
+    .replace('"master-stop" => Some(MasterStopAction::Engage)', '"master-stop" => Some(MasterStopAction::Release)')
+    .replace('"master-resume" => Some(MasterStopAction::Release)', '"master-resume" => Some(MasterStopAction::Engage)');
+  check(
+    "self-mutation：swap stop/resume 會紅",
+    desktopTruthSourceErrors(main, swapped, ui).some((line) => line.includes("方向")),
+  );
+  const renamedNative = main.replace(
+    'const MASTER_STOP_CHANGED_EVENT: &str = "master-stop-changed";',
+    'const MASTER_STOP_CHANGED_EVENT: &str = "master-stop-renamed";',
+  );
+  check(
+    "self-mutation：只改 native event 名會紅",
+    desktopTruthSourceErrors(renamedNative, dispatch, ui).some((line) => line.includes("名稱不一致")),
+  );
 }
 
 console.log("");

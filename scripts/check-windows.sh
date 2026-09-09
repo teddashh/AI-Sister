@@ -74,12 +74,16 @@ if [[ -d "$DESKTOP" ]]; then
         ln -s "$PWD/scripts/fake-llvm-rc.py" "$shim/llvm-rc"
     fi
 
-    echo "▶ cargo check --target $TARGET（桌面姊妹）"
-    (cd "$DESKTOP" && PATH="$shim:$PATH" cargo check --target "$TARGET" --no-default-features)
-
-    echo "▶ cargo clippy --target $TARGET（桌面姊妹）"
+    # `--all-targets` 讓 desktop 的 #[cfg(test)] 接線至少在 Linux cross-check 裡編譯。
+    # 斷言仍只有 native Windows/macOS cargo test 會執行，但不能讓新測試到 CI 才
+    # 第一次發現自己連型別都不對。
+    echo "▶ cargo check --target $TARGET（桌面姊妹，含 test target）"
     (cd "$DESKTOP" && PATH="$shim:$PATH" \
-        cargo clippy --target "$TARGET" --no-default-features -- -D warnings)
+        cargo check --target "$TARGET" --no-default-features --all-targets)
+
+    echo "▶ cargo clippy --target $TARGET（桌面姊妹，含 test target）"
+    (cd "$DESKTOP" && PATH="$shim:$PATH" \
+        cargo clippy --target "$TARGET" --no-default-features --all-targets -- -D warnings)
 fi
 
 echo "✓ Windows 端編譯與 lint 都過了（行為仍需在 Windows 上驗證）"
