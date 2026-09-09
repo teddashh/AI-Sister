@@ -37,6 +37,9 @@ pub enum Tick {
     Disabled,
     /// 跨 capture／brain／hands 的 durable 全停開關正在生效。
     MasterStopped,
+    /// 這一拍觀察到全停解除，已寫好稽核並關閉 source 空洞；和 pause resume
+    /// 一樣，刻意留到下一拍才重新讀內容。
+    MasterReleased,
     /// 使用者按了暫停。和 `Disabled` 差在這是**當下**、可以隨時解除的，
     /// 而且進出各留一筆 system event，所以資料裡那個空洞解釋得出來。
     Paused,
@@ -418,6 +421,13 @@ pub struct Recorder<B: Backend> {
     image_dir: Option<PathBuf>,
     /// Production data dir。replay／第三方 recorder 不自行讀跨行程控制面。
     master_stop_dir: Option<PathBuf>,
+    /// 上一次**確實寫成稽核列**的全停狀態。不能直接拿 latch 當這個值：
+    /// audit 寫失敗時必須留在舊狀態，下一拍才知道同一列還要重試。
+    master_stopped: bool,
+    /// 全停 request 到確實解除之間，剪貼簿與輸入來源各自有一段不可補撿的空洞。
+    /// 和 pause 分開記，兩種停止重疊時解除其中一種才不會把另一種也打開。
+    master_clipboard_gap: bool,
+    master_input_gap: bool,
     /// 上一次**真的寫出**畫面檔的時刻。見 `image_min_interval_ms`。
     last_image_ts: Option<Millis>,
     /// 上一次真的去看螢幕的時刻（不管結果是新是舊）。空閒跳過的天花板
@@ -524,6 +534,9 @@ impl<B: Backend> Recorder<B> {
             pending_system: None,
             image_dir,
             master_stop_dir: None,
+            master_stopped: false,
+            master_clipboard_gap: false,
+            master_input_gap: false,
             last_image_ts: None,
             last_look_ts: None,
             image_day,
@@ -609,6 +622,48 @@ impl<B: Backend> Recorder<B> {
     /// 把 production recorder 接到跨行程的全停 latch。
     pub fn set_master_stop_dir(&mut self, dir: PathBuf) {
         self.master_stop_dir = Some(dir);
+    }
+
+    /// 把這一拍讀到的 durable 全停 latch 轉成 session-local audit。
+    ///
+    /// 和 pause 一樣，先封 source、再清掉較早的 pending native transition、寫成
+    /// event 後才承認狀態改變。`stop-all --off` 若在 recorder 沒執行時發生，
+    /// `MasterStopReleased` 仍沒有人能寫；這裡只記得到 recorder 親眼看見的邊界。
+    fn set_master_stopped(&mut self, stopped: bool, ts: Millis) -> Result<bool> {
+        if self.master_stopped == stopped {
+            if !stopped {
+                self.close_master_stop_gaps(ts);
+            }
+            return Ok(false);
+        }
+        if stopped {
+            // latch 已經生效，稽核成敗都不能讓這一拍留下可跨越的 source 尾巴。
+            self.seal_master_stop_gap(ts);
+        }
+        if self.pending_system.is_some() {
+            self.commit_pending_system()
+                .context("commit pending system transition audit before master-stop change")?;
+        }
+        self.db
+            .insert_system(
+                self.session_id,
+                &SystemEvent {
+                    ts,
+                    kind: if stopped {
+                        SystemKind::MasterStopEngaged
+                    } else {
+                        SystemKind::MasterStopReleased
+                    },
+                    detail: None,
+                },
+            )
+            .context("write master-stop transition audit")?;
+        self.master_stopped = stopped;
+        if !stopped {
+            // 稽核成功後、下一拍放行前，再切一次停止期間兩個 source 的尾巴。
+            self.close_master_stop_gaps(ts);
+        }
+        Ok(true)
     }
 
     /// 她現在會不會把圖寫下來。
@@ -749,11 +804,28 @@ impl<B: Backend> Recorder<B> {
         let _ = self.suspend_input_source(ts);
     }
 
+    fn seal_master_stop_gap(&mut self, ts: Millis) {
+        self.deduper.reset();
+        self.last_frame_id = None;
+        self.backend.reset_ocr();
+        self.master_clipboard_gap = true;
+        self.master_input_gap = true;
+        let _ = self.establish_clipboard_watermark(ts);
+        let _ = self.suspend_input_source(ts);
+    }
+
     fn close_pause_gaps(&mut self, ts: Millis) {
         if self.pause_clipboard_gap && self.establish_clipboard_watermark(ts) {
             self.pause_clipboard_gap = false;
         }
         self.close_pause_input_gap(ts);
+    }
+
+    fn close_master_stop_gaps(&mut self, ts: Millis) {
+        if self.master_clipboard_gap && self.establish_clipboard_watermark(ts) {
+            self.master_clipboard_gap = false;
+        }
+        self.close_master_stop_input_gap(ts);
     }
 
     fn establish_clipboard_watermark(&mut self, ts: Millis) -> bool {
@@ -787,7 +859,7 @@ impl<B: Backend> Recorder<B> {
             return;
         }
         self.pause_input_gap = false;
-        if !self.system_input_gap {
+        if !self.system_input_gap && !self.master_input_gap {
             if let Err(error) = self.backend.resume_input(ts) {
                 self.pause_input_gap = true;
                 tracing::warn!(error = %error, "input source could not resume after pause; keeping input fail closed");
@@ -801,10 +873,24 @@ impl<B: Backend> Recorder<B> {
             return;
         }
         self.system_input_gap = false;
-        if !self.pause_input_gap {
+        if !self.pause_input_gap && !self.master_input_gap {
             if let Err(error) = self.backend.resume_input(ts) {
                 self.system_input_gap = true;
                 tracing::warn!(error = %error, "input source could not resume after system gap; keeping input fail closed");
+            }
+        }
+    }
+
+    /// 關掉 master-stop 這一個 reason；pause／system 任一仍在就不開 source。
+    fn close_master_stop_input_gap(&mut self, ts: Millis) {
+        if !self.master_input_gap || !self.suspend_input_source(ts) {
+            return;
+        }
+        self.master_input_gap = false;
+        if !self.pause_input_gap && !self.system_input_gap {
+            if let Err(error) = self.backend.resume_input(ts) {
+                self.master_input_gap = true;
+                tracing::warn!(error = %error, "input source could not resume after master stop; keeping input fail closed");
             }
         }
     }
@@ -1151,11 +1237,15 @@ impl<B: Backend> Recorder<B> {
             return Ok(Tick::Disabled);
         }
 
-        if self
+        let master_stopped = self
             .master_stop_dir
             .as_deref()
-            .is_some_and(sister_hands::master_stop::is_stopped)
-        {
+            .is_some_and(sister_hands::master_stop::is_stopped);
+        let master_changed = self.set_master_stopped(master_stopped, ts)?;
+        if master_changed && !master_stopped {
+            return Ok(Tick::MasterReleased);
+        }
+        if master_stopped {
             // 和 pause 一樣，恢復後不能把停止期間的 clipboard／input 尾巴撈回來。
             let _ = self.establish_clipboard_watermark(ts);
             let _ = self.suspend_input_source(ts);
@@ -1271,11 +1361,12 @@ impl<B: Backend> Recorder<B> {
 
             // 排除期間仍保留不含內容的節奏，但先只 drain 到 RAM。系統可能
             // 正好在 atomic drain 時鎖定；下一道 post-check 不通過就整份丟掉。
-            let staged_input = if !self.pause_input_gap && !self.system_input_gap {
-                self.stage_input(ts)?
-            } else {
-                None
-            };
+            let staged_input =
+                if !self.pause_input_gap && !self.master_input_gap && !self.system_input_gap {
+                    self.stage_input(ts)?
+                } else {
+                    None
+                };
             if let Some(boundary) = pause_boundary_tick(self.observe_pause_request(pause_probe)?) {
                 return Ok(boundary);
             }
@@ -1339,6 +1430,7 @@ impl<B: Backend> Recorder<B> {
         // 5) 剪貼簿。只有在沒被排除時才碰——不然密碼管理員裡複製的
         //    密碼會從這裡漏進資料庫。
         let clipboard_ready = !self.pause_clipboard_gap
+            && !self.master_clipboard_gap
             && !self.exclusion_clipboard_gap
             && !self.system_clipboard_gap;
         let staged_clipboard = if clipboard_ready {
@@ -1354,11 +1446,12 @@ impl<B: Backend> Recorder<B> {
                 return Ok(Tick::ContextChanged);
             }
         };
-        let staged_input = if !self.pause_input_gap && !self.system_input_gap {
-            self.stage_input(ts)?
-        } else {
-            None
-        };
+        let staged_input =
+            if !self.pause_input_gap && !self.master_input_gap && !self.system_input_gap {
+                self.stage_input(ts)?
+            } else {
+                None
+            };
         if let Some(boundary) = pause_boundary_tick(self.observe_pause_request(pause_probe)?) {
             return Ok(boundary);
         }
@@ -5689,6 +5782,210 @@ mod tests {
         let after = rec.db().stats().unwrap();
         assert_eq!(after.frames, before.frames, "全停後仍新增畫面");
         assert_eq!(after.chunks, before.chunks, "全停後仍新增文字段落");
+    }
+
+    #[test]
+    fn master_stop_gap_is_bracketed_by_distinct_database_events() {
+        let control = Tmp::new("master-stop-bracket");
+        let mut rec = recorder(
+            vec![
+                step(0, "code.exe", "before", &["全停前"]),
+                step(5_000, "code.exe", "after", &["全停後"]),
+            ],
+            Config::default(),
+        );
+        rec.set_master_stop_dir(control.0.clone());
+
+        assert!(matches!(rec.tick(0).expect("before"), Tick::Kept { .. }));
+        sister_hands::master_stop::engage(&control.0, 1_000).expect("engage");
+        for ts in [1_000, 2_000, 3_000] {
+            assert_eq!(rec.tick(ts).expect("stopped tick"), Tick::MasterStopped);
+        }
+        sister_hands::master_stop::release(&control.0).expect("release");
+        assert_eq!(
+            rec.tick(4_000).expect("release boundary"),
+            Tick::MasterReleased
+        );
+        assert!(matches!(rec.tick(5_000).expect("after"), Tick::Kept { .. }));
+
+        let events: Vec<(String, Millis)> = {
+            let mut statement = rec
+                .db()
+                .conn()
+                .prepare(
+                    "SELECT kind, ts FROM system_events
+                     WHERE kind LIKE 'master_stop_%' ORDER BY ts, id",
+                )
+                .expect("query master-stop events");
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("map master-stop events")
+                .map(|row| row.expect("master-stop event"))
+                .collect()
+        };
+        assert_eq!(
+            events,
+            vec![
+                ("master_stop_engaged".into(), 1_000),
+                ("master_stop_released".into(), 4_000),
+            ],
+            "the two durable rows must explain and bracket the empty interval"
+        );
+        let frame_times: Vec<Millis> = {
+            let mut statement = rec
+                .db()
+                .conn()
+                .prepare("SELECT ts FROM frames ORDER BY ts, id")
+                .expect("query frames");
+            statement
+                .query_map([], |row| row.get(0))
+                .expect("map frames")
+                .map(|row| row.expect("frame timestamp"))
+                .collect()
+        };
+        assert_eq!(frame_times, vec![0, 5_000]);
+        assert!(
+            frame_times
+                .iter()
+                .all(|ts| *ts < events[0].1 || *ts > events[1].1),
+            "no captured frame may occupy the audited master-stop gap"
+        );
+    }
+
+    #[test]
+    fn pause_and_master_stop_leave_four_distinguishable_rows() {
+        let control = Tmp::new("pause-and-master-stop");
+        let mut rec = recorder(Vec::new(), Config::default());
+        rec.set_master_stop_dir(control.0.clone());
+
+        assert!(rec.set_paused(true, 100).expect("pause"));
+        assert!(rec.set_paused(false, 200).expect("resume"));
+        sister_hands::master_stop::engage(&control.0, 300).expect("engage");
+        assert_eq!(rec.tick(300).expect("master stop"), Tick::MasterStopped);
+        sister_hands::master_stop::release(&control.0).expect("release");
+        assert_eq!(rec.tick(400).expect("master release"), Tick::MasterReleased);
+
+        let kinds: Vec<String> = {
+            let mut statement = rec
+                .db()
+                .conn()
+                .prepare(
+                    "SELECT kind FROM system_events
+                     WHERE kind IN ('pause', 'resume',
+                                    'master_stop_engaged', 'master_stop_released')
+                     ORDER BY ts, id",
+                )
+                .expect("query stop kinds");
+            statement
+                .query_map([], |row| row.get(0))
+                .expect("map stop kinds")
+                .map(|row| row.expect("stop kind"))
+                .collect()
+        };
+        assert_eq!(
+            kinds,
+            vec![
+                "pause",
+                "resume",
+                "master_stop_engaged",
+                "master_stop_released",
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_master_stop_audit_stays_fail_closed_and_retries_next_tick() {
+        let control = Tmp::new("master-stop-audit-retry");
+        let mut rec = recorder(
+            vec![step(1_000, "code.exe", "private", &["不准擷取"])],
+            Config::default(),
+        );
+        rec.set_master_stop_dir(control.0.clone());
+        rec.db()
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER fail_master_stop_audit
+                 BEFORE INSERT ON system_events
+                 WHEN NEW.kind = 'master_stop_engaged'
+                 BEGIN SELECT RAISE(ABORT, 'simulated master-stop audit failure'); END;",
+            )
+            .expect("install failure trigger");
+        sister_hands::master_stop::engage(&control.0, 500).expect("engage");
+
+        let error = rec.tick(1_000).expect_err("audit insert must fail");
+        assert!(
+            format!("{error:#}").contains("write master-stop transition audit"),
+            "{error:#}"
+        );
+        assert!(
+            !rec.master_stopped,
+            "failed audit cannot acknowledge the transition"
+        );
+        assert_eq!(
+            rec.db()
+                .conn()
+                .query_row("SELECT COUNT(*) FROM frames", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("count frames after failure"),
+            0,
+            "an audit failure must not reverse the fail-closed stop"
+        );
+
+        rec.db()
+            .conn()
+            .execute_batch("DROP TRIGGER fail_master_stop_audit;")
+            .expect("remove failure trigger");
+        assert_eq!(
+            rec.tick(2_000).expect("retry same latch"),
+            Tick::MasterStopped
+        );
+        assert!(rec.master_stopped, "successful retry acknowledges the stop");
+        assert_eq!(
+            rec.db()
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM system_events
+                     WHERE kind = 'master_stop_engaged'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count retried audit"),
+            1
+        );
+        assert_eq!(
+            rec.db()
+                .conn()
+                .query_row("SELECT COUNT(*) FROM frames", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("count frames after retry"),
+            0,
+            "the retry tick must still capture nothing"
+        );
+    }
+
+    #[test]
+    fn unchanged_master_stop_ticks_do_not_duplicate_the_audit() {
+        let control = Tmp::new("master-stop-no-duplicates");
+        let mut rec = recorder(Vec::new(), Config::default());
+        rec.set_master_stop_dir(control.0.clone());
+        sister_hands::master_stop::engage(&control.0, 500).expect("engage");
+
+        for ts in [1_000, 2_000, 3_000, 4_000] {
+            assert_eq!(rec.tick(ts).expect("stopped tick"), Tick::MasterStopped);
+        }
+        assert_eq!(
+            rec.db()
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM system_events
+                     WHERE kind = 'master_stop_engaged'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count engaged audit"),
+            1,
+            "only the first observation of an unchanged latch is an event"
+        );
     }
 
     /// 每次都給一張不一樣的畫面，這樣去重不會把它們併掉。

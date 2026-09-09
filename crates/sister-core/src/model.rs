@@ -331,6 +331,10 @@ pub enum SystemKind {
     Wake,
     CapturePaused,
     CaptureResumed,
+    /// 跨 capture／brain／hands 的 durable 全停開關開始生效。
+    MasterStopEngaged,
+    /// 跨 capture／brain／hands 的 durable 全停開關解除。
+    MasterStopReleased,
     /// 因排除規則而略過一段擷取（SPEC §11.2，capture 當下就排除）。
     Excluded,
     SessionStart,
@@ -340,13 +344,15 @@ pub enum SystemKind {
 impl SystemKind {
     /// 每一種。`session_marks_sql` 從這裡長出來，所以少列一種就是少扣一種。
     /// 有 `all_lists_every_kind` 這條測試釘住（新增一種會讓它編不過）。
-    pub const ALL: [SystemKind; 9] = [
+    pub const ALL: [SystemKind; 11] = [
         SystemKind::Lock,
         SystemKind::Unlock,
         SystemKind::Sleep,
         SystemKind::Wake,
         SystemKind::CapturePaused,
         SystemKind::CaptureResumed,
+        SystemKind::MasterStopEngaged,
+        SystemKind::MasterStopReleased,
         SystemKind::Excluded,
         SystemKind::SessionStart,
         SystemKind::SessionEnd,
@@ -357,7 +363,7 @@ impl SystemKind {
     /// `Recorder::new` 開場寫一列 `SessionStart`、`finish` 收尾寫一列
     /// `SessionEnd`。兩列都不是她「記下來的東西」——它們是那個容器上的標籤，
     /// 和 `sessions` 那一列是同一種東西。所以凡是在問「她記下來的還剩不剩」
-    /// 的地方都要把它們扣掉。其餘七種（鎖定、睡眠、暫停、被規則擋掉……）講
+    /// 的地方都要把它們扣掉。其餘種類（鎖定、睡眠、暫停、全停、被規則擋掉……）講
     /// 的是他那天真的發生過的事，要算。
     ///
     /// 少了這個區分會出兩件事，而兩件都出過：
@@ -383,6 +389,8 @@ impl SystemKind {
             | SystemKind::Wake
             | SystemKind::CapturePaused
             | SystemKind::CaptureResumed
+            | SystemKind::MasterStopEngaged
+            | SystemKind::MasterStopReleased
             | SystemKind::Excluded => false,
         }
     }
@@ -408,6 +416,8 @@ impl SystemKind {
             SystemKind::Wake => "wake",
             SystemKind::CapturePaused => "pause",
             SystemKind::CaptureResumed => "resume",
+            SystemKind::MasterStopEngaged => "master_stop_engaged",
+            SystemKind::MasterStopReleased => "master_stop_released",
             SystemKind::Excluded => "excluded",
             SystemKind::SessionStart => "session_start",
             SystemKind::SessionEnd => "session_end",
@@ -651,9 +661,11 @@ mod tests {
                 SystemKind::Wake => 3,
                 SystemKind::CapturePaused => 4,
                 SystemKind::CaptureResumed => 5,
-                SystemKind::Excluded => 6,
-                SystemKind::SessionStart => 7,
-                SystemKind::SessionEnd => 8,
+                SystemKind::MasterStopEngaged => 6,
+                SystemKind::MasterStopReleased => 7,
+                SystemKind::Excluded => 8,
+                SystemKind::SessionStart => 9,
+                SystemKind::SessionEnd => 10,
             }
         }
         for (i, k) in SystemKind::ALL.iter().enumerate() {

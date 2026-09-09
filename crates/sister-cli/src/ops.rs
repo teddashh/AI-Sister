@@ -23336,6 +23336,7 @@ pub mod replay {
                 Tick::Duplicate { .. }
                 | Tick::Disabled
                 | Tick::MasterStopped
+                | Tick::MasterReleased
                 | Tick::Paused
                 | Tick::Resumed
                 | Tick::Idle => {}
@@ -24648,8 +24649,8 @@ pub mod record {
                 *was_idle = true;
                 false
             }
-            Disabled | MasterStopped | Paused | Resumed | SystemChanged | SystemUnknown
-            | ContextChanged => false,
+            Disabled | MasterStopped | MasterReleased | Paused | Resumed | SystemChanged
+            | SystemUnknown | ContextChanged => false,
             Kept { .. } | NoScreen => {
                 *was_idle = false;
                 true

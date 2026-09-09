@@ -191,6 +191,9 @@ pub struct BlindSpots {
     /// - `!paused_open && paused_now`：反過來，按下暫停的那一刻沒有人在錄，
     ///   所以紀錄裡看不到。而下一次 `sister record` 會什麼都記不到。
     ///
+    /// 全停也有同一個行程邊界：若 `sister stop-all --off` 時 recorder 沒在跑，
+    /// `MasterStopReleased` 就沒有人寫；這一版沒有假裝能替離線行程補那一列。
+    ///
     /// 只有旗標答得出「現在」，只有資料庫答得出「那三個小時」。
     pub paused_now: bool,
     /// 有幾段暫停的開頭已經被保留期刪掉，只剩 `resume`。
@@ -607,6 +610,8 @@ mod tests {
     /// 解除。解除的那一刻沒有人在跑 recorder，`CaptureResumed` 就沒有人寫，
     /// 那一段從此永遠配不到對。把它講成「她此刻就是閉著眼睛的」，是一則
     /// 再也不會消失的假警報——而假警報會連坐旁邊那則真的一起被忽略。
+    /// 全停也有同一個洞：若 `sister stop-all --off` 時 recorder 沒在跑，
+    /// `MasterStopReleased` 同樣沒有人能寫；這一版沒有補做跨行程離線稽核。
     #[test]
     fn a_pause_nobody_closed_is_not_the_same_as_being_blind_right_now() {
         let tmp = Tmp::new("dangling");
