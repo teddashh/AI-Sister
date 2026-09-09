@@ -912,8 +912,7 @@ mod tests {
     use crate::model::SourceKind;
 
     fn test_not_stopped() -> crate::brain::NotStopped {
-        crate::brain::not_stopped(std::path::Path::new("__sister-core-test-no-master-stop__"))
-            .unwrap()
+        crate::brain::not_stopped(crate::brain::test_unstopped_data_dir()).unwrap()
     }
 
     fn hit(text: String) -> SearchHit {

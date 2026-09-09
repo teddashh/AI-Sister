@@ -1285,10 +1285,7 @@ pub fn run(input: &mut ReviewInput<'_>, data_dir: &std::path::Path) -> Result<Re
 
 #[cfg(test)]
 fn run_for_test(input: &mut ReviewInput<'_>) -> Result<ReviewResult> {
-    run(
-        input,
-        std::path::Path::new("__sister-core-test-no-master-stop__"),
-    )
+    run(input, crate::brain::test_unstopped_data_dir())
 }
 
 struct RecheckInsertOwned {

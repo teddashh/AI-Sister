@@ -1029,7 +1029,23 @@ pub fn run(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<InterpretR
 
 #[cfg(test)]
 fn run_for_test(input: &mut InterpretInput<'_>) -> Result<InterpretResult> {
-    run(input, Path::new("__sister-core-test-no-master-stop__"))
+    run(input, test_unstopped_data_dir())
+}
+
+/// 共用測試只需要一個「確定沒有全停」的真 data dir。放在 OS temp；master-stop
+/// admission 會建立永久 lock，若用相對路徑會把測試產物留在 source tree。
+#[cfg(test)]
+pub(crate) fn test_unstopped_data_dir() -> &'static Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!(
+            "sister-core-test-no-master-stop-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create shared unstopped test data dir");
+        dir
+    })
+    .as_path()
 }
 
 fn classify(
@@ -1454,7 +1470,7 @@ mod tests {
     use std::cell::Cell;
 
     fn test_not_stopped() -> NotStopped {
-        not_stopped(Path::new("__sister-core-test-no-master-stop__")).unwrap()
+        not_stopped(test_unstopped_data_dir()).unwrap()
     }
 
     #[test]
@@ -2526,8 +2542,7 @@ mod tests {
             limit: 4,
             only_core_start: None,
         };
-        let report =
-            prepare(&mut input, Path::new("__sister-core-test-no-master-stop__")).expect("prepare");
+        let report = prepare(&mut input, test_unstopped_data_dir()).expect("prepare");
         let text = format_dry_run(&report);
         assert!(text.contains("不會送出去"), "{text}");
         // dry-run 的用處就是讓他在簽字前**看到真的會送出去的那段字**。

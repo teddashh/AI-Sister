@@ -2128,7 +2128,7 @@ sys.stdout.buffer.write(out.encode('utf-8'))
             5,
             1,
             None,
-            std::path::Path::new("__sister-core-test-no-master-stop__"),
+            crate::brain::test_unstopped_data_dir(),
         )
         .expect("ab");
         let ab = report.ab.as_ref().expect("ab block");
@@ -2165,7 +2165,7 @@ sys.stdout.buffer.write(out.encode('utf-8'))
             5,
             1,
             Some(&brain),
-            std::path::Path::new("__sister-core-test-no-master-stop__"),
+            crate::brain::test_unstopped_data_dir(),
         )
         .expect("ab");
         let ab = report.ab.as_ref().expect("ab block");
