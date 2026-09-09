@@ -176,8 +176,8 @@ fn resume_during_master_stop_names_both_true_states_and_the_lever() {
     success(&dir, None, &["stop-all"]);
     let out = success(&dir, None, &["resume"]);
     assert!(out.contains("暫停已解除"), "{out}");
-    assert!(out.contains("三層全停還在"), "{out}");
-    assert!(out.contains("capture 仍然停著"), "{out}");
+    assert!(out.contains("全停閘門仍在擋新工作"), "{out}");
+    assert!(out.contains("capture 不會開始新一拍"), "{out}");
     assert!(out.contains("stop-all --off"), "{out}");
     assert!(!sister_core::pause::is_paused(&dir));
     assert!(sister_hands::master_stop::is_stopped(&dir));
@@ -191,8 +191,8 @@ fn hands_resume_during_master_stop_does_not_claim_hands_can_act() {
     success(&dir, None, &["stop-all"]);
     let out = success(&dir, None, &["hands", "resume"]);
     assert!(out.contains("已把手接回去"), "{out}");
-    assert!(out.contains("三層全停還在"), "{out}");
-    assert!(out.contains("hands 仍然停著"), "{out}");
+    assert!(out.contains("全停閘門仍在擋新工作"), "{out}");
+    assert!(out.contains("hands 不會執行"), "{out}");
     assert!(out.contains("stop-all --off"), "{out}");
     assert!(!sister_hands::kill_switch::is_pulled(&dir));
     assert!(sister_hands::master_stop::is_stopped(&dir));
@@ -233,7 +233,7 @@ fn doctor_reports_master_pause_and_pull_without_hiding_any_state() {
         .lines()
         .find(|line| line.contains("讀你現在的螢幕"))
         .expect("doctor current-screen row");
-    assert_eq!(screen.trim(), "■ 讀你現在的螢幕   三層全停中，沒有探測");
+    assert_eq!(screen.trim(), "■ 讀你現在的螢幕   全停閘門擋住，沒有探測");
 
     let paused = temp("doctor-master-pause");
     success(&paused, None, &["pause"]);
@@ -273,7 +273,7 @@ fn pause_during_master_stop_says_resume_alone_cannot_restore_capture() {
     success(&dir, None, &["stop-all"]);
     let out = success(&dir, None, &["pause"]);
     assert!(out.contains("已暫停"), "{out}");
-    assert!(out.contains("三層全停也還在"), "{out}");
+    assert!(out.contains("全停閘門也還在擋新工作"), "{out}");
     assert!(out.contains("只會解除暫停、救不了全停"), "{out}");
     assert!(out.contains("resume"), "{out}");
     assert!(out.contains("stop-all --off"), "{out}");
@@ -331,4 +331,40 @@ fn stop_all_refuses_a_data_dir_that_is_not_there() {
     assert!(!off.status.success(), "解除也不該對著不存在的資料夾成功");
 
     std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn malformed_completion_latch_never_earns_a_stop_all_success_claim() {
+    let dir = temp("malformed-latch");
+    std::fs::write(
+        sister_hands::master_stop::switch_path(&dir),
+        b"not-a-millisecond-timestamp",
+    )
+    .unwrap();
+    assert_eq!(
+        sister_hands::master_stop::state(&dir),
+        sister_hands::master_stop::State::Uncertain
+    );
+
+    let output = sister(&dir, None, &["stop-all"]);
+    assert!(
+        !output.status.success(),
+        "壞 latch 不可被 stop-all 洗成成功"
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!said.contains("三層都停了"), "壞 latch 卻宣稱完成：{said}");
+    assert!(!said.contains("現在已等到三層全停完成"), "{said}");
+    assert!(!said.contains("這次重新完成並驗到三層全停"), "{said}");
+    assert!(said.contains("毫秒時戳讀不懂"), "{said}");
+    assert_eq!(
+        sister_hands::master_stop::state(&dir),
+        sister_hands::master_stop::State::Uncertain
+    );
+
+    success(&dir, None, &["stop-all", "--off"]);
+    std::fs::remove_dir_all(dir).unwrap();
 }

@@ -92,9 +92,10 @@ timeout，相關設定／key／consent mutation 或 native cancel 可能等它�
 | `pause.lock` | 空的跨行程 read/write transaction 鎖；檔案留著，真正的鎖由作業系統 handle 持有 | 執行中不可刪，否則不同 process 可能各鎖到不同檔案；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `hands.stop` | 她的手現在是不是被拔掉。內容只有第一次拔手的毫秒時戳 | 等於安靜地把手接回去，所以任何 forget、prune、export 都刻意不動它 |
 | `master.stop` | 三層全停（capture／brain／hands）現在是不是開著。內容只有第一次按下全停的毫秒時戳 | 等於安靜地把三層一起放回去，所以任何 forget、prune、export 都刻意不動它 |
-| `master.stop.pending` | `stop-all` 已在線性化閘門內發佈、正在等舊活動排乾的停止意圖；正常完成 engage 或 release 後會移除 | 不可手動刪；可能讓已經開始的 capture／CLI／OS call 排乾前，新活動誤以為可以進場 |
-| `master.stop.lock` | 空的永久 activity drain 鎖。capture tick、CLI spawn/stdin 與 outbound audit、reviewer product mutation、hands OS call、doctor/bench live probe 都持 shared handle；只有 engage 取 exclusive 排乾，release 不必等舊活動才能恢復 | 永遠不靠 unlink 解除。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
+| `master.stop.pending` | `stop-all` 已在線性化閘門內發佈、正在等舊活動排乾的停止意圖；只有同時量到 live `master.stop.owner` exclusive owner 才呈現 `stopping`，孤立或格式壞掉則是 `uncertain` | 不可手動刪；可能讓已經開始的 capture／CLI／OS call 排乾前，新活動誤以為可以進場。正常 engage 完成或排在它後面的 release 會移除 |
+| `master.stop.lock` | 空的永久 activity drain 鎖。capture tick、CLI spawn/stdin 與 outbound audit、reviewer product mutation、hands OS call、doctor/bench live probe 都持 shared handle；engage 取 exclusive 排乾。release 不直接拿這把鎖，但若前面已有 engage，會先等該 engage 排乾完成 | 永遠不靠 unlink 解除。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `master.stop.turnstile` | 空的永久 admission／不可逆邊界鎖。新活動和最後一次 persistence/spawn/OS call 在 shared lock 內重驗 latch/pending；engage 在 exclusive lock 內發佈 pending | 永遠不靠 unlink 解除。執行中不可刪，否則 admission 與 engage 可能落在不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
+| `master.stop.owner` | 空的永久 engage／release 排序鎖。engage 全程持 exclusive；release 排在同一把鎖後面，所以成功解除後，較舊 engage 不可能才補寫 latch。它也讓 reader 分得出 live `stopping` 與孤立 pending | 永遠不靠 unlink 解除。執行中不可刪，否則 stop／release 可能各鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `consent.toml` | 四張同意書各自是**何時**簽的；前三張有共同條文版本，第四張 `azure-tts` 另有獨立 terms version | 等於四張都沒簽；`sister record` 拒絕啟動，Azure TTS 一次都不呼叫 |
 | `consent.lock` | 空的跨行程同意 transaction 鎖。CLI／desktop 的 grant／revoke 在 OS whole-file exclusive lock 內重讀最新 `consent.toml`、套當次變更再 atomic save；recorder start 先持 shared guard。CLI 那份跨到第一拍；desktop parent 那份只跨到 `Command::spawn` 回來便立即放掉，child 自己 nonblocking 重拿並跨到第一拍。symlink／non-regular path 拒絕 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `consent-revoke.barrier` | 第一張同意撤回在 atomic save **之前**發布的獨立 durable barrier；內容是 `v1:` 加 fresh 256-bit generation。Recorder 把它視為 `consent-revoked` 停止條件，但不消費；Start 無權清。只有成功 commit 的 local-recording regrant 可用相符 generation ticket 清理，並先確保另有 durable stop intent | 刪掉可能讓失敗的 consent save 留著舊有效同意時重新開錄，也可能讓同一拍內的快速 revoke→regrant 漏掉收工。不要手動刪；損毀時 fail closed，須先關閉所有 AI-Sister 行程再修復 |
@@ -144,22 +145,26 @@ symlink／non-regular file 或無法取得，mutation fail closed，不跟著鎖
 把手接回去。這和刪 `grant.json` 不衝突：grant 裡有 `--task` 原文，而且是一張
 仍能拿去執行的票；`hands.stop` 是擋住執行的牆。
 
-`master.stop` 是同一條規則，理由再強一級：這個 latch 與三顆協定檔同時擋著三層。拿掉 latch 不只
+`master.stop` 是同一條規則，理由再強一級：這個 latch、pending 與三顆永久鎖同時擋著三層。拿掉 latch 不只
 是把手接回去，還讓 capture 重新開始擷取、讓解釋層重新把字送給雲端模型——而使用者
 按下「全部停止」的時候，要的正是那三件事一起停。所以 `sister forget`、`sister prune`
 和匯出一樣刻意不碰它。匯出也不會把它複製到匯出目錄：那個目錄本身就是一個資料
 目錄，帶一個全停 latch 過去，會讓那份備份看起來像壞掉了。
 
 它不是 `paused.flag` 的另一個名字，兩邊各自保留：`sister resume` 解除不了全停，
-`sister stop-all --off` 也不會順手解除你原本自己按的暫停或拔手。全停沒有 pause 那種
-四檔協定；唯一受支援的解除方式是
+`sister stop-all --off` 也不會順手解除你原本自己按的暫停或拔手。唯一受支援的解除方式是
 `sister --data-dir <你的資料夾> stop-all --off`（**不是裸的 `sister stop-all --off`**，
 那會去解除預設資料夾的全停，不是正在擋你的那一份）。不要直接刪
-<你的資料夾>/master.stop；那會繞過 activity drain 與 turnstile。讀不到 latch／pending／lock
+<你的資料夾>/master.stop；那會繞過 owner／activity drain／turnstile 的排序。讀不到 latch／pending／lock
 本身（權限不足、路徑壞掉、不是一般檔案或是 symlink／reparse），或資料目錄
 讀不到、根本不是一個目錄的時候，一律當成全停中；資料目錄**整個不存在**則不算全停——
 那是還沒開始用，不是被停下來。一條指向不存在目標的 `master.stop` symlink 也算全停：
 判斷走的是 `symlink_metadata`，目錄項在就算在。
+data dir 這個目錄項本身若已是 symlink／Windows reparse，也一律 `uncertain` 並拒絕操作，
+不沿著現成的間接入口開始協定。ActivityGuard 保存的是路徑而非 directory handle；這不是
+pathname namespace pin。同權限程式在行程存活時 rename／替換該路徑，或改指任一 ancestor，
+仍可讓 admission 與 stop 落到不同鎖組，屬於既有「同權限惡意程式不防禦」邊界。移動或修復
+資料目錄前，必須先關閉所有 AI-Sister 行程。
 
 程式有兩個刻意不同的觀察：`master_stop::is_stopped()` 是 operational gate，pending、
 讀不到或協定損壞都算停止；`master_stop::state()` 則把畫面要講的事分成 `clear`、
@@ -167,9 +172,25 @@ symlink／non-regular file 或無法取得，mutation fail closed，不跟著鎖
 `stopped` 能寫「三層都停了」，`stopping` 只說新工作已拒絕、舊工作仍在排乾；
 `uncertain` 明講讀不到，不能退回「在聽」。
 
-若 interpreter／reviewer 已把 stdin 交給使用者的 CLI，`stop-all` 會等該次 CLI 的
-`SPAWN_TIMEOUT`（目前 120 秒）結束並完成本機 outbound audit，之後才回成功。這只保證
-回條之後不再首次寫出產品記憶；不表示 provider 已收到的 request 被取消或撤回。
+若 interpreter／reviewer 已把 stdin 交給使用者的 CLI，`stop-all` 會等該次 CLI；timeout
+判定目前是 120 秒，到點後還要終止同一個 Unix process group／Windows Job Object、收完
+繼承的 pipe 並完成本機 outbound audit，之後才回成功。120 秒不是 stop 總等待上限。這只
+保證回條之後不再首次寫出產品記憶；不表示 provider 已收到的 request 被取消或撤回。
+
+Desktop 問答與守門員判決也從碰 DB 前取得同一份 activity guard；守門員回應會改
+`utterance`，所以同樣先 admission。問答／守門員 view 與 reaction 回到 native 後不立刻把 guard
+放掉，而是附一個 presentation id：renderer 先在 turnstile 內 `begin` 重驗、同步畫完才
+`end`。五秒內從未 begin 的回條會回收；已 begin 的只由 end、pet window destroy 或
+process teardown 釋放。因而 `stop-all` 成功後不會才第一次畫出舊答案或主動卡；全停先
+贏時，那份晚回條直接丟掉。
+
+本機答案朗讀的 presentation lease 會活到最後一段 ended／error／Stop；Azure 答案朗讀取得的
+activity guard 先跨完整 blocking POST 活到 response／error，再由同一份 guard 接成本機 MP3
+播放 lease，直到 ended／error／Stop。全停仍可先發佈 pending 並拒絕新工作；POST transport
+本身最長 45 秒，但 stop 總等待還包含已准入的本機播放，renderer 已 begin 後不能承諾總上限。
+另一份已排在 Azure transition 後面的朗讀，拿到 fence 後還要過最後 turnstile boundary；
+若 pending 已先發佈就不會開始 POST。這同樣不表示已送到 Azure 的 request 可被取消或
+不計費。
 
 `recording.beat` 存在的理由是「暫停」和「根本沒有人開她」是兩件不同的事，
 而字母人以前只分得出前者——暫停旗標乾淨的時候它就顯示「在聽」，即使沒有任何

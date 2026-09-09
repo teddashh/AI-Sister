@@ -675,10 +675,21 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     turnstile 內先發佈 pending、拒絕所有新 admission，再以 activity lock 排乾已開始的
     capture tick、brain CLI／outbound audit、reviewer product mutation 與 hands OS call；
     durable `master.stop` 可見、pending 移除且 completed observation 驗過後才回成功。
-    `release` 只和 admission／pending publication 在線性化閘門上排序，不等舊 activity，
-    因此不形成 ABBA；concurrent 第二次 stop 保留第一個 pending timestamp。desktop、CLI
+    Desktop 問答、守門員判決／回應在碰 DB 前 admission，答案、主動卡與 reaction 另以 native
+    presentation lease 跨 renderer begin／同步呈現／end；未 begin 五秒回收，已 begin 只由
+    end、window destroy 或 process teardown 釋放。本機答案朗讀與 Azure MP3 播放也把 lease
+    保留到 ended／error／Stop。Azure 朗讀的 activity guard 先跨完整 blocking transport，再交給
+    本機播放 lease；pending 可先發佈並拒絕新工作。POST transport 自己最長 45 秒，但 stop 的
+    總等待還可能包含已准入播放，renderer 已 begin 後沒有可誠實承諾的總上限。排隊中的第二份
+    request 在拿到 Azure fence 後仍須過最後 turnstile boundary。
+    `release` 與 engage 共用永久 owner 鎖排序；它不直接取得 activity lock，但前面已有 engage
+    時會等該 engage 排乾完成，成功解除後舊 engage 不會才補寫 latch。engage 等 activity 時不持
+    turnstile，因此不形成 ABBA；concurrent 第二次 stop 保留第一個 pending timestamp。desktop、CLI
     與 BlindSpots 共用 `clear`／`stopping`／`stopped`／`uncertain` 四態，排乾前不寫「三層
-    都停了」，讀不到時也不退回「在聽」。正式 Windows artifact 的跨行程 smoke 仍列在
+    都停了」，讀不到時也不退回「在聽」。data dir 目錄項本身若已是 symlink／Windows
+    reparse 也固定拒絕，不會沿著它開始協定；這不是 namespace pin，同權限程式在行程存活時
+    rename／替換路徑或改指 ancestor 仍在既有 threat-model 邊界外，移動／修復資料目錄前須先關閉
+    所有 AI-Sister 行程。正式 Windows artifact 的跨行程 smoke 仍列在
     Release 1.0 exit criteria，不能拿 cross-compile／Linux lock 測試冒充。
   - ✅ alpha.107 已接 Windows current-user 登入啟動：設定預設關閉、立即生效，
     `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 是唯一真相。只有 exact quoted

@@ -3505,13 +3505,13 @@ pub mod act {
             let master_resume = cmd(data_dir, "stop-all --off");
             let blockers = match (pulled_at_start, master_stopped_at_start) {
                 (true, true) => format!(
-                    "手目前被拔掉了{pulled_since}，而且三層全停也開著{master_since}；要真的交出動作，兩個都要解除：先後跑 `{hands_resume}` 與 `{master_resume}`"
+                    "手目前被拔掉了{pulled_since}，而且全停閘門也擋著新工作{master_since}；要真的交出動作，兩個都要解除：先後跑 `{hands_resume}` 與 `{master_resume}`"
                 ),
                 (true, false) => {
                     format!("手目前被拔掉了{pulled_since}；要接回去請跑 `{hands_resume}`")
                 }
                 (false, true) => {
-                    format!("三層全停目前開著{master_since}；要恢復請跑 `{master_resume}`")
+                    format!("全停閘門目前擋著新工作{master_since}；要恢復請跑 `{master_resume}`")
                 }
                 (false, false) => unreachable!("outer condition checked"),
             };
@@ -3917,7 +3917,7 @@ pub mod act {
                         reason: RefusalReason::MasterStopped { .. },
                     } => Some((
                         AbortActor::MasterStopped,
-                        "三層全停已啟用，所以這一輪到此為止。",
+                        "全停閘門已生效，所以這一輪到此為止。",
                     )),
                     _ => None,
                 };
@@ -5957,7 +5957,7 @@ pub mod act {
                 }
             )));
             let out = String::from_utf8(out).unwrap();
-            assert!(out.contains("三層全停已啟用，所以這一輪到此為止"), "{out}");
+            assert!(out.contains("全停閘門已生效，所以這一輪到此為止"), "{out}");
             assert!(!out.contains("步驟都問完了"), "{out}");
         }
 
@@ -9194,6 +9194,10 @@ pub mod watch {
                 break WatchEnd::MasterStopped { tally };
             }
 
+            // 有 provider 的那一輪會把 final boundary 存在這裡，一路保到 audit、
+            // tally 與最後一行輸出都完成。若 stop pending 已先發佈，就不產出一個
+            // `Happened`，讓 stop 回來後才冒出來。
+            let mut asked_output_boundary = None;
             let look = match window(last_seen, now) {
                 // 時鐘往回跳了（NTP 校時、睡眠喚醒），這一輪的區間是反的。
                 // 不查，也不要把一次沒查過的空手講成「她確實正在錄」。
@@ -9271,8 +9275,13 @@ pub mod watch {
                         let Some(not_stopped) = brain::not_stopped(data_dir) else {
                             break WatchEnd::MasterStopped { tally };
                         };
-                        let spawn =
-                            brain::spawn_cli(permit, not_stopped, &prompt.payload, &command, &args);
+                        let spawn = brain::spawn_cli(
+                            permit,
+                            not_stopped.clone(),
+                            &prompt.payload,
+                            &command,
+                            &args,
+                        );
                         let (outcome, verdict) = sister_core::watch::verdict_from_spawn(&spawn);
                         let error = match &verdict {
                             Verdict::NoAnswer { head, .. } if !head.is_empty() => {
@@ -9293,6 +9302,10 @@ pub mod watch {
                             error,
                             role: "watcher",
                         })?;
+                        let Some(output_boundary) = not_stopped.boundary() else {
+                            break WatchEnd::MasterStopped { tally };
+                        };
+                        asked_output_boundary = Some(output_boundary);
                         Look::Asked {
                             available_chunks: hits.len(),
                             available_capped: more,
@@ -9328,6 +9341,7 @@ pub mod watch {
                 sister_core::model::stamp(now),
                 look.message_with_resume_command(&cmd(data_dir, "resume"))
             )?;
+            drop(asked_output_boundary);
             if let Look::Asked {
                 verdict: Verdict::Happened { .. },
                 ..
@@ -9535,6 +9549,107 @@ pub mod watch {
                 dry_run: false,
                 notify,
             }
+        }
+
+        /// 這不是只測 `spawn_cli` 的 guard；它走完整個 watch 接線，釘住「模型已經
+        /// 回了 happened，但全停先進 pending」時不能先把 `★ 等到了` 端出去。
+        #[test]
+        fn an_admitted_watch_round_drains_before_stop_and_does_not_publish_after_pending() {
+            let (tmp, mut config) = prepared("watch-master-stop-drain", "完成", true);
+            let started = tmp.0.join("brain-started");
+            let release_brain = tmp.0.join("release-brain");
+            config.brain.args = vec![
+                "-c".into(),
+                "cat >/dev/null; touch \"$1\"; while ! test -e \"$2\"; do sleep 0.01; done; printf '%s' '{\"happened\":true,\"because\":\"畫面上出現完成\"}'".into(),
+                "sister-test-brain".into(),
+                started.to_string_lossy().into_owned(),
+                release_brain.to_string_lossy().into_owned(),
+            ];
+
+            let watch_dir = tmp.0.clone();
+            let (watch_tx, watch_rx) = std::sync::mpsc::channel();
+            let watch = std::thread::spawn(move || {
+                let mut ticks = [100_000_i64, 100_000].into_iter();
+                let mut out = Vec::new();
+                let result = run_with(
+                    &watch_dir,
+                    &config,
+                    &opts(false),
+                    &mut || ticks.next().expect("fake clock ran out"),
+                    &mut |_| {},
+                    &mut out,
+                );
+                watch_tx.send((result, out)).expect("return watch result");
+            });
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !started.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                started.exists(),
+                "fake brain never reached its blocking point"
+            );
+
+            let stop_dir = tmp.0.clone();
+            let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+            let stopper = std::thread::spawn(move || {
+                let result = sister_hands::master_stop::engage(&stop_dir, 123_456);
+                stop_tx.send(result).expect("return stop result");
+            });
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while sister_hands::master_stop::state(&tmp.0)
+                != sister_hands::master_stop::State::Stopping
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let stopping = sister_hands::master_stop::state(&tmp.0);
+            if stopping != sister_hands::master_stop::State::Stopping {
+                std::fs::write(&release_brain, b"release").expect("release stuck fake brain");
+                let _ = watch_rx.recv_timeout(std::time::Duration::from_secs(5));
+                let _ = stop_rx.recv_timeout(std::time::Duration::from_secs(5));
+                watch.join().expect("join watch");
+                stopper.join().expect("join stop");
+                panic!("stop never published Stopping; final state was {stopping:?}");
+            }
+            assert!(
+                matches!(
+                    watch_rx.recv_timeout(std::time::Duration::from_millis(50)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ),
+                "watch returned while its admitted CLI child was still live"
+            );
+            assert!(
+                matches!(
+                    stop_rx.recv_timeout(std::time::Duration::from_millis(50)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ),
+                "master stop completed before the admitted CLI child drained"
+            );
+
+            std::fs::write(&release_brain, b"release").expect("release fake brain");
+            let (result, out) = watch_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("watch did not return after its child drained");
+            result.expect("watch result");
+            stop_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("master stop did not complete after drain")
+                .expect("engage master stop");
+            watch.join().expect("join watch");
+            stopper.join().expect("join stop");
+
+            let printed = String::from_utf8(out).expect("watch output is UTF-8");
+            assert!(printed.contains("全停閘門已生效"), "{printed}");
+            assert!(printed.contains("可能仍在排乾"), "{printed}");
+            assert!(!printed.contains("★ 等到了"), "{printed}");
+            assert!(!printed.contains("等到了。"), "{printed}");
+
+            let db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+            let rows = db.list_brain_outbound(10).expect("outbound log");
+            assert_eq!(rows.len(), 1, "已經送出的那一輪仍須留一列 audit：{rows:?}");
         }
 
         /// 真的走 watch 出口：CLI 讀完 stdin、說出可操作的登入提示，再以唯一的
@@ -11439,7 +11554,7 @@ pub mod pause {
                 cmd(data_dir, "resume")
             ),
             (false, true) => println!(
-                "⏸ 已暫停，而且三層全停也還在。`{}` 只會解除暫停、救不了全停；要讓 capture 恢復，兩個都要解除，請再跑 `{}`。",
+                "⏸ 已暫停，而且全停閘門也還在擋新工作。`{}` 只會解除暫停、救不了全停；要讓 capture 恢復，兩個都要解除，請再跑 `{}`。",
                 cmd(data_dir, "resume"),
                 cmd(data_dir, "stop-all --off")
             ),
@@ -11454,13 +11569,17 @@ pub mod pause {
                     .map(|ts| format!("（從 {} 起）", crate::fmt::timestamp(ts)))
                     .unwrap_or_default();
                 println!(
-                    "⏸ 本來就在暫停中{since}，而且三層全停也還在。`{}` 只會解除暫停、救不了全停；要讓 capture 恢復，請再跑 `{}`。",
+                    "⏸ 本來就在暫停中{since}，而且全停閘門也還在擋新工作。`{}` 只會解除暫停、救不了全停；要讓 capture 恢復，請再跑 `{}`。",
                     cmd(data_dir, "resume"),
                     cmd(data_dir, "stop-all --off")
                 );
             }
-            (true, false) => println!("▶ 已解除暫停。她從下一個 tick 開始重新記錄。"),
-            (false, false) => println!("▶ 本來就沒有暫停，沒有變動。"),
+            (true, false) if !master_stopped => {
+                println!("▶ 已解除暫停。她從下一個 tick 開始重新記錄。")
+            }
+            (true, false) => println!("▶ 已解除暫停；全停閘門仍在擋新工作。"),
+            (false, false) if !master_stopped => println!("▶ 本來就沒有暫停，沒有變動。"),
+            (false, false) => println!("▶ 暫停原本就沒有啟用；全停閘門仍在擋新工作。"),
         }
         if !paused && master_stopped {
             let pause_state = if before {
@@ -11469,7 +11588,7 @@ pub mod pause {
                 "暫停原本就沒有啟用"
             };
             println!(
-                "■ {pause_state}，但三層全停還在，capture 仍然停著。要恢復請跑 `{}`。",
+                "■ {pause_state}，但全停閘門仍在擋新工作，capture 不會開始新一拍。要恢復請跑 `{}`。",
                 cmd(data_dir, "stop-all --off")
             );
         }
@@ -11536,16 +11655,18 @@ pub mod stop_all {
             return Ok(());
         }
 
-        let already = sister_hands::master_stop::is_stopped(data_dir);
-        let since = sister_hands::master_stop::stopped_since(data_dir);
+        let before = sister_hands::master_stop::state(data_dir);
+        let since = (before == sister_hands::master_stop::State::Stopped)
+            .then(|| sister_hands::master_stop::stopped_since(data_dir))
+            .flatten();
         sister_hands::master_stop::engage(data_dir, sister_core::now_ms()).with_context(|| {
             format!(
                 "寫不進 {}",
                 sister_hands::master_stop::switch_path(data_dir).display()
             )
         })?;
-        if already {
-            match since {
+        match before {
+            sister_hands::master_stop::State::Stopped => match since {
                 Some(ts) => println!(
                     "■ 三層本來就全停著（從 {} 起），沒有變動；第一次的時間沒有被洗掉。要解除請跑 `{}`。",
                     crate::fmt::timestamp(ts),
@@ -11555,12 +11676,19 @@ pub mod stop_all {
                     "■ 三層本來就全停著（開始時間讀不到），沒有變動。要解除請跑 `{}`。",
                     cmd(data_dir, "stop-all --off")
                 ),
-            }
-        } else {
-            println!(
+            },
+            sister_hands::master_stop::State::Stopping => println!(
+                "■ 這次送出時另一個全停正在排乾；現在已等到三層全停完成。要解除請跑 `{}`。",
+                cmd(data_dir, "stop-all --off")
+            ),
+            sister_hands::master_stop::State::Uncertain => println!(
+                "■ 這次送出前的全停協定讀不可靠；這次重新完成並驗到三層全停。要解除請跑 `{}`。",
+                cmd(data_dir, "stop-all --off")
+            ),
+            sister_hands::master_stop::State::Clear => println!(
                 "■ 三層都停了：capture 不再擷取、brain 不再送出、hands 不再執行。全停不會自己恢復；要解除請跑 `{}`。",
                 cmd(data_dir, "stop-all --off")
-            );
+            ),
         }
         Ok(())
     }
@@ -12429,7 +12557,7 @@ pub mod hands_switch {
             };
             writeln!(
                 out,
-                "{hand_state}，但三層全停還在，hands 仍然停著。要恢復請跑 `{}`。",
+                "{hand_state}，但全停閘門仍在擋新工作，hands 不會執行。要恢復請跑 `{}`。",
                 cmd(data_dir, "stop-all --off")
             )?;
         }
@@ -14675,6 +14803,21 @@ pub mod query {
             !text.trim().is_empty(),
             "要查什麼？例如：sister query 客服電話"
         );
+        // query 會做 closure、follow-up 與 query-log mutation，不是純讀。這份 guard
+        // 保到整份答案與稽核都完成；全停後送來的新題在開 DB 前就拒絕。
+        let _master_stop_admission =
+            sister_hands::master_stop::admit(data_dir).ok_or_else(|| {
+                let detail = match sister_hands::master_stop::state(data_dir) {
+                    sister_hands::master_stop::State::Stopping => "正在完成全停；舊工作仍在排乾",
+                    sister_hands::master_stop::State::Stopped => "三層全停已完成",
+                    sister_hands::master_stop::State::Uncertain => "全停協定目前讀不到可靠狀態",
+                    sister_hands::master_stop::State::Clear => "全停 admission 取得失敗",
+                };
+                anyhow::anyhow!(
+                    "{detail}，這一題沒有開始。要恢復請跑 `{}`。",
+                    cmd(data_dir, "stop-all --off")
+                )
+            })?;
         let mut db = open_existing(data_dir)?;
 
         let now = sister_core::now_ms();
@@ -15516,6 +15659,22 @@ pub mod query {
             let db = Db::open(&path).unwrap();
             let stats = db.query_log_stats().unwrap();
             assert_eq!((stats.total, stats.empty), (1, 1));
+        }
+
+        #[test]
+        fn master_stop_rejects_query_before_reviewer_or_query_log_mutation() {
+            let dir = crate::ops::tmp::Tmp::new("query-blocked-by-master-stop");
+            let path = crate::db_path(&dir.0);
+            Db::open(&path).unwrap();
+            sister_hands::master_stop::engage(&dir.0, 1_000).unwrap();
+
+            let error = run(&dir.0, "電話", 10, false, true)
+                .expect_err("completed master stop must reject a new query")
+                .to_string();
+            assert!(error.contains("三層全停已完成"), "{error}");
+            let db = Db::open(&path).unwrap();
+            assert!(db.query_log(10).unwrap().is_empty());
+            assert_eq!(db.query_log_stats().unwrap().total, 0);
         }
 
         #[test]
@@ -16921,22 +17080,63 @@ pub mod doctor {
             return ("?", "資料目錄讀不到；無法判斷手目前接著還是拔著".into());
         }
         let pulled = sister_hands::kill_switch::is_pulled(data_dir);
-        let master_stopped = sister_hands::master_stop::is_stopped(data_dir);
-        if master_stopped {
-            let master = cmd(data_dir, "stop-all --off");
-            if pulled {
+        let master_state = sister_hands::master_stop::state(data_dir);
+        let master = cmd(data_dir, "stop-all --off");
+        match master_state {
+            sister_hands::master_stop::State::Stopping => {
+                let hands = if pulled {
+                    "手也拔著；"
+                } else {
+                    "手沒有拔掉；"
+                };
                 return (
                     "■",
                     format!(
-                        "拔手與三層全停都在；要能執行，兩個都要解除：`{}` 與 `{master}`",
-                        cmd(data_dir, "hands resume")
+                        "{hands}全停已拒絕新工作、舊工作仍在排乾，還不能說三層已停完；要恢復請跑 `{master}`{}",
+                        if pulled {
+                            format!("，並跑 `{}`", cmd(data_dir, "hands resume"))
+                        } else {
+                            String::new()
+                        }
                     ),
                 );
             }
-            return (
-                "■",
-                format!("手沒有拔掉，但三層全停在，執行隘口仍會拒絕；要恢復請跑 `{master}`"),
-            );
+            sister_hands::master_stop::State::Stopped => {
+                if pulled {
+                    return (
+                        "■",
+                        format!(
+                            "拔手與三層全停都在；要能執行，兩個都要解除：`{}` 與 `{master}`",
+                            cmd(data_dir, "hands resume")
+                        ),
+                    );
+                }
+                return (
+                    "■",
+                    format!(
+                        "手沒有拔掉，但三層全停已完成，執行隘口仍會拒絕；要恢復請跑 `{master}`"
+                    ),
+                );
+            }
+            sister_hands::master_stop::State::Uncertain => {
+                let hands = if pulled {
+                    "手也拔著；"
+                } else {
+                    "手沒有拔掉；"
+                };
+                return (
+                    "?",
+                    format!(
+                        "{hands}全停協定讀不到可靠狀態，執行隘口會 fail closed，但不能宣稱三層已停完；可跑 `{master}` 嘗試重設{}",
+                        if pulled {
+                            format!("，並跑 `{}`", cmd(data_dir, "hands resume"))
+                        } else {
+                            String::new()
+                        }
+                    ),
+                );
+            }
+            sister_hands::master_stop::State::Clear => {}
         }
         if !pulled {
             return ("✓", "接著；執行隘口可以把核准的動作交給作業系統".into());
@@ -18006,7 +18206,7 @@ pub mod doctor {
             }
         } else {
             focus_probe = None;
-            url_probe = Some(("■", "讀你現在的網址", "三層全停中，沒有探測".to_string()));
+            url_probe = Some(("■", "讀你現在的網址", "全停閘門擋住，沒有探測".to_string()));
         }
 
         if c.ocr == CapabilityState::Available && config.capture.ocr {
@@ -18060,7 +18260,7 @@ pub mod doctor {
                 _ => None,
             };
             let probe = match grabbed {
-                None => ("■", "讀你現在的螢幕", "三層全停中，沒有探測".to_string()),
+                None => ("■", "讀你現在的螢幕", "全停閘門擋住，沒有探測".to_string()),
                 Some(Err(e)) => ("✗", "讀你現在的螢幕", format!("抓不到畫面：{e:#}")),
                 Some(Ok(None)) => (
                     "✗",
@@ -18125,7 +18325,8 @@ pub mod doctor {
 
         // 不能沿用 admission 當下的狀態。若 stop request 落在兩個 probe 之間，後面的
         // `live.run` 會正確回 None；報告也必須用同一份 guard 的最終觀察，把所有沒量到的
-        // live row 畫成「■ 三層全停中，沒有探測」，不能冒充一般平台失敗。
+        // live row 畫成「■ 全停閘門擋住，沒有探測」，不能冒充一般平台失敗，
+        // 也不能把 Stopping／Uncertain 說成已排乾完成。
         let live_stopped = live.is_stopped();
         Caps {
             live_stopped,
@@ -18233,8 +18434,8 @@ pub mod doctor {
             println!("   不是你寫的那一份。修好它之前，那幾行不能拿來判斷你的規則有沒有生效。");
             println!("   原因：{why}\n");
         }
-        let master_stopped = sister_hands::master_stop::is_stopped(data_dir);
-        let master_engaged = sister_hands::master_stop::is_engaged(data_dir);
+        let master_state = sister_hands::master_stop::state(data_dir);
+        let master_stopped = master_state != sister_hands::master_stop::State::Clear;
         let caps = caps(data_dir, config, master_stopped);
 
         println!("環境");
@@ -18525,33 +18726,40 @@ pub mod doctor {
         // 報告往上一列，手那一列（`hands_status`）遇到同一個資料目錄已經誠實寫著
         // 「資料目錄讀不到；無法判斷」——兩列講同一台機器，不可以一列 `?` 一列 `✓`。
         let readable_dir = std::fs::metadata(data_dir).is_ok_and(|m| m.is_dir());
-        let master_row = master_stopped.then(|| {
-            if !master_engaged {
-                return format!(
-                    "**三層停止閘門已生效，但還沒確認舊活動排乾完成**；新活動不會准入。可能正在等待先前已獲准的活動，或協定狀態讀不到。解除請跑 `{}`",
-                    cmd(data_dir, "stop-all --off")
-                );
-            }
-            sister_hands::master_stop::stopped_since(data_dir)
-                .map(|ts| {
-                    format!(
-                        "**三層全停中**（從 {} 起）；不會自己恢復。解除請跑 `{}`",
-                        crate::fmt::timestamp(ts),
-                        cmd(data_dir, "stop-all --off")
-                    )
-                })
-                .unwrap_or_else(|| {
-                    format!(
-                        "**三層全停中**（開始時間讀不到）；不會自己恢復。解除請跑 `{}`",
-                        cmd(data_dir, "stop-all --off")
-                    )
-                })
-        });
+        let master_row = match master_state {
+            sister_hands::master_stop::State::Clear => None,
+            sister_hands::master_stop::State::Stopping => Some(format!(
+                "**全停正在排乾**；新活動已拒絕，先前准入的工作還沒全部收完。解除請跑 `{}`",
+                cmd(data_dir, "stop-all --off")
+            )),
+            sister_hands::master_stop::State::Uncertain => Some(format!(
+                "**全停協定讀不到可靠狀態**；新活動會 fail closed，但不能宣稱三層已排乾完成。可跑 `{}` 嘗試重設",
+                cmd(data_dir, "stop-all --off")
+            )),
+            sister_hands::master_stop::State::Stopped => Some(
+                sister_hands::master_stop::stopped_since(data_dir)
+                    .map(|ts| {
+                        format!(
+                            "**三層全停中**（從 {} 起）；不會自己恢復。解除請跑 `{}`",
+                            crate::fmt::timestamp(ts),
+                            cmd(data_dir, "stop-all --off")
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            "**三層全停中**（開始時間讀不到）；不會自己恢復。解除請跑 `{}`",
+                            cmd(data_dir, "stop-all --off")
+                        )
+                    }),
+            ),
+        };
         mark(
-            match (master_stopped, readable_dir) {
-                (true, _) => "■",
-                (false, true) => "✓",
-                (false, false) => "?",
+            match (master_state, readable_dir) {
+                (sister_hands::master_stop::State::Stopped, _) => "■",
+                (sister_hands::master_stop::State::Stopping, _) => "■",
+                (sister_hands::master_stop::State::Uncertain, _) => "?",
+                (sister_hands::master_stop::State::Clear, true) => "✓",
+                (sister_hands::master_stop::State::Clear, false) => "?",
             },
             "capture／brain／hands 全停",
             match (&master_row, readable_dir) {
@@ -18612,7 +18820,7 @@ pub mod doctor {
         // 從來不是問題，規則**會不會命中**才是。這些規則比對的是前景 app
         // 名稱，所以讀不到名稱的時候它們一條都不生效——而數量照樣是 9。
         let (sym, note) = match (caps.live_stopped, &caps.focus_probe) {
-            (true, _) => ("■", "，三層全停中，沒有探測".to_string()),
+            (true, _) => ("■", "，全停閘門擋住，沒有探測".to_string()),
             (false, Some((app, _))) if !app.is_empty() => ("✓", format!("，現在讀到的是 {app}")),
             (false, Some(_)) => ("?", "，但現在沒有前景視窗，這一刻測不出來".to_string()),
             (false, None) => (
@@ -18634,7 +18842,7 @@ pub mod doctor {
         // 所以 ✓ 只給「下面那一列真的讀到了網址」的情況。
         let demonstrated = caps.url_probe.as_ref().is_some_and(|(s, ..)| *s == "✓");
         let (sym, note) = match (caps.live_stopped, caps.url, demonstrated) {
-            (true, _, _) => ("■", "（三層全停中，沒有探測）"),
+            (true, _, _) => ("■", "（全停閘門擋住，沒有探測）"),
             (false, CapabilityState::Unavailable, _) => (
                 capability_symbol(caps.url),
                 "（已探測：UIA 不可用，privacy gate 會在讀內容前停下）",
@@ -18668,7 +18876,7 @@ pub mod doctor {
         // 標題和 app 來自同一次 snapshot，但**失敗方式不一樣**：有些視窗
         // 讀得到 exe 名稱卻沒有標題。分開報，才不會讓 app 的 ✓ 幫標題背書。
         let (sym, note) = match (caps.live_stopped, &caps.focus_probe) {
-            (true, _) => ("■", "，三層全停中，沒有探測".to_string()),
+            (true, _) => ("■", "，全停閘門擋住，沒有探測".to_string()),
             (false, Some((_, title))) if !title.is_empty() => (
                 "✓",
                 format!("，現在讀到的是「{}」", crate::fmt::one_line(title, 40)),
@@ -18773,7 +18981,7 @@ pub mod doctor {
                 .iter()
                 .any(|(_, label, _)| *label == "讀你現在的螢幕")
         {
-            mark("■", "讀你現在的螢幕", "三層全停中，沒有探測");
+            mark("■", "讀你現在的螢幕", "全停閘門擋住，沒有探測");
         }
 
         println!("\n節奏");
@@ -18799,7 +19007,7 @@ pub mod doctor {
             },
         );
         match (caps.live_stopped, caps.input_hooks) {
-            (true, _) => mark("■", "輸入 hook", "三層全停中，沒有探測"),
+            (true, _) => mark("■", "輸入 hook", "全停閘門擋住，沒有探測"),
             (false, CapabilityState::Available) => mark(
                 capability_symbol(caps.input_hooks),
                 "輸入 hook",
@@ -25052,7 +25260,7 @@ pub mod record {
         pub(super) struct TickCounts {
             total: u64,
             working: u64,
-            master_stopped: u64,
+            master_blocked: u64,
             master_released: u64,
         }
 
@@ -25062,7 +25270,7 @@ pub mod record {
                 Self {
                     total: stats.ticks,
                     working: stats.working_ticks,
-                    master_stopped: stats.master_stopped_ticks,
+                    master_blocked: stats.master_blocked_ticks,
                     master_released: stats.master_released_ticks,
                 }
             }
@@ -25078,12 +25286,12 @@ pub mod record {
             pub(super) fn idle(self) -> u64 {
                 self.total
                     .saturating_sub(self.working)
-                    .saturating_sub(self.master_stopped)
+                    .saturating_sub(self.master_blocked)
                     .saturating_sub(self.master_released)
             }
 
-            pub(super) fn master_stopped(self) -> u64 {
-                self.master_stopped
+            pub(super) fn master_blocked(self) -> u64 {
+                self.master_blocked
             }
 
             pub(super) fn master_released(self) -> u64 {
@@ -25925,12 +26133,7 @@ pub mod record {
         let capability_config = config.clone();
         // 只有 windows 模組內這條 composition 能建立 trusted v2 session。
         // 公開的 Recorder::new 不論 backend 名字為何都只會得到 untrusted provenance。
-        let mut rec = windows::recorder(
-            config,
-            db,
-            images,
-            sister_capture::MasterStopSource::Latch(data_dir.to_path_buf()),
-        )?;
+        let mut rec = windows::recorder(config, db, images, data_dir.to_path_buf())?;
 
         // **先建後端、再問能力。** 反過來的話，「輸入 hook 裝上了沒」永遠
         // 是在 hook 還沒裝之前問的，於是永遠回報失敗——一則恆假的警告。
@@ -26461,26 +26664,35 @@ pub mod record {
     /// 使用者看到的是一個永遠是 0 的摘要，和「程式壞了」長得一模一樣。這正是
     /// alpha.78 替暫停修過的那件事（見 [`pause_warning`]），全停有同一個洞。
     ///
-    /// 判定沿用 `master_stop::is_stopped` 的 fail-closed 規則，所以「資料目錄
-    /// 讀不到」也會走到這裡；那種情況下 `stopped_since` 讀不出時間，句子要照實
-    /// 說讀不到，不要編一個時間出來。
+    /// 判定直接保留 `master_stop::State` 四態；只有 `Stopped` 才讀完成時間並宣稱
+    /// 三層已停。資料目錄或協定讀不到時走 `Uncertain`，照實說 fail closed。
     #[cfg(any(windows, test))]
     fn master_stop_warning(data_dir: &Path) -> Option<String> {
-        if !sister_hands::master_stop::is_stopped(data_dir) {
-            return None;
-        }
         let release = cmd(data_dir, "stop-all --off");
-        Some(match sister_hands::master_stop::stopped_since(data_dir) {
-            Some(ts) => format!(
-                "目前是三層全停狀態（從 {} 起）：capture 不會擷取、brain 不會送出、hands 不會執行。\
-                 它**不會自己過期**，而且解除暫停或把手接回去都救不了它——要她回來請跑 `{release}`。",
-                crate::fmt::timestamp(ts)
-            ),
-            None => format!(
-                "目前是三層全停狀態（開始時間讀不到）：capture 不會擷取、brain 不會送出、hands 不會執行。\
-                 它**不會自己過期**，而且解除暫停或把手接回去都救不了它——要她回來請跑 `{release}`。"
-            ),
-        })
+        match sister_hands::master_stop::state(data_dir) {
+            sister_hands::master_stop::State::Clear => None,
+            sister_hands::master_stop::State::Stopping => Some(format!(
+                "全停正在排乾：新一拍不會開始，但先前准入的工作還沒全部收完，現在不能宣稱三層已停。\
+                 要恢復請跑 `{release}`；解除會等這次排乾線性化後才回來。"
+            )),
+            sister_hands::master_stop::State::Stopped => {
+                Some(match sister_hands::master_stop::stopped_since(data_dir) {
+                    Some(ts) => format!(
+                        "目前是三層全停狀態（從 {} 起）：capture 不會擷取、brain 不會送出、hands 不會執行。\
+                         它**不會自己過期**，而且解除暫停或把手接回去都救不了它——要她回來請跑 `{release}`。",
+                        crate::fmt::timestamp(ts)
+                    ),
+                    None => format!(
+                        "目前是三層全停狀態（開始時間讀不到）：capture 不會擷取、brain 不會送出、hands 不會執行。\
+                         它**不會自己過期**，而且解除暫停或把手接回去都救不了它——要她回來請跑 `{release}`。"
+                    ),
+                })
+            }
+            sister_hands::master_stop::State::Uncertain => Some(format!(
+                "全停協定目前讀不到可靠狀態：capture 會 fail closed、不開始新一拍，但不能宣稱 brain／hands 已排乾完成。\
+                 可跑 `{release}` 嘗試重設。"
+            )),
+        }
     }
 
     #[cfg(any(windows, test))]
@@ -27260,14 +27472,14 @@ pub mod record {
     #[cfg(any(windows, test))]
     fn skipped_tick_summary(counts: TickCounts) -> String {
         let idle_ticks = counts.idle();
-        let master_stopped_ticks = counts.master_stopped();
+        let master_blocked_ticks = counts.master_blocked();
         let master_released_ticks = counts.master_released();
         let mut skipped_parts = Vec::new();
         if idle_ticks > 0 {
             skipped_parts.push(format!("{idle_ticks} 拍是暫停或關閉"));
         }
-        if master_stopped_ticks > 0 {
-            skipped_parts.push(format!("{master_stopped_ticks} 拍是三層全停"));
+        if master_blocked_ticks > 0 {
+            skipped_parts.push(format!("{master_blocked_ticks} 拍被全停閘門擋住"));
         }
         if master_released_ticks > 0 {
             skipped_parts.push(format!("{master_released_ticks} 拍是解除三層全停邊界"));
@@ -27772,14 +27984,14 @@ pub mod record {
             let stats = sister_capture::RecorderStats {
                 ticks: 100,
                 working_ticks: 7,
-                master_stopped_ticks: 11,
+                master_blocked_ticks: 11,
                 master_released_ticks: 13,
                 ..Default::default()
             };
             let counts = TickCounts::from_stats(&stats);
             assert_eq!(counts.total(), 100);
             assert_eq!(counts.working(), 7);
-            assert_eq!(counts.master_stopped(), 11);
+            assert_eq!(counts.master_blocked(), 11);
             assert_eq!(counts.master_released(), 13);
             assert_eq!(counts.idle(), 69);
         }
@@ -27789,7 +28001,7 @@ pub mod record {
             let stats = sister_capture::RecorderStats {
                 ticks: 100,
                 working_ticks: 7,
-                master_stopped_ticks: 11,
+                master_blocked_ticks: 11,
                 master_released_ticks: 13,
                 ..Default::default()
             };
@@ -27804,17 +28016,18 @@ pub mod record {
         }
 
         #[test]
-        fn record_summary_gives_master_stopped_ticks_their_own_bucket() {
+        fn record_summary_calls_fail_closed_ticks_blocked_not_completed() {
             let stats = sister_capture::RecorderStats {
                 ticks: 100,
                 working_ticks: 7,
-                master_stopped_ticks: 11,
+                master_blocked_ticks: 11,
                 master_released_ticks: 13,
                 ..Default::default()
             };
             let said = skipped_tick_summary(TickCounts::from_stats(&stats));
             assert!(said.contains("69 拍是暫停或關閉"), "{said}");
-            assert!(said.contains("11 拍是三層全停"), "{said}");
+            assert!(said.contains("11 拍被全停閘門擋住"), "{said}");
+            assert!(!said.contains("11 拍是三層全停"), "{said}");
             assert!(said.contains("13 拍是解除三層全停邊界"), "{said}");
             assert!(!said.contains("93 拍是暫停或關閉"), "{said}");
         }

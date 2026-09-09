@@ -765,7 +765,7 @@ impl RefusalReason {
                 ),
                 None => {
                     format!(
-                        "三層都已全停，所以這一步沒有交給作業系統。{}",
+                        "全停閘門已拒絕新工作；可能仍在排乾，或協定狀態讀不到，所以這一步沒有交給作業系統。{}",
                         master_stop_command
                             .map(|command| format!("要恢復請跑 `{command}`。"))
                             .unwrap_or_else(
@@ -860,6 +860,7 @@ pub enum Attached {
         since_ms: Option<i64>,
     },
     /// `master.stop` 在；解除它不能用 hands resume。
+    /// `since_ms: None` 也可能是 Stopping／Uncertain，不能據此宣稱三層已排乾。
     MasterStopped {
         since_ms: Option<i64>,
     },

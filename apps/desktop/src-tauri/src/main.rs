@@ -25,9 +25,10 @@ use sister_shell::login_startup::LaunchIntent;
 #[cfg(windows)]
 use sister_shell::login_startup::launch_intent;
 use sister_shell::{PetState, Rect};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -45,7 +46,7 @@ mod recorder_supervisor;
 mod single_instance;
 
 use login_startup::{login_startup_read, login_startup_set};
-use master_stop_dispatch::{MasterStopAction, master_stop_action_for_menu_id};
+use master_stop_dispatch::{MasterStopAction, master_stop_action_for_menu_id, run_fifo};
 #[cfg(any(windows, test))]
 use single_instance::RevealWindow;
 #[cfg(windows)]
@@ -67,6 +68,10 @@ static ONBOARDING_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
 static TIMELINE_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
 static METRICS_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
 static FRAME_WINDOW_OPENING: AtomicBool = AtomicBool::new(false);
+static MASTER_STOP_QUEUE: OnceLock<std::sync::mpsc::Sender<MasterStopJob>> = OnceLock::new();
+static NEXT_PRESENTATION_ID: AtomicU64 = AtomicU64::new(1);
+static MASTER_STOP_PRESENTATIONS: OnceLock<Mutex<HashMap<u64, PresentationLease>>> =
+    OnceLock::new();
 #[cfg(windows)]
 static SECOND_INSTANCE_REVEAL_PENDING: AtomicBool = AtomicBool::new(false);
 #[cfg(windows)]
@@ -283,6 +288,9 @@ struct GatekeeperView {
     display: Option<GateDisplay>,
     developer: Option<GatekeeperDeveloper>,
     action_log: Vec<String>,
+    /// Native activity guard 留到 renderer 在另一個 IPC round-trip 裡確認要畫這份
+    /// view。字串避免 JS `Number` 精度把 u64 lease id 改掉。
+    presentation_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -290,6 +298,147 @@ struct GatekeeperDeveloper {
     points_spent: u32,
     points_limit: u32,
     holds: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct GatekeeperReactionView {
+    message: String,
+    presentation_id: String,
+}
+
+const PRESENTATION_LEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+struct PresentationLease {
+    guard: sister_hands::master_stop::ActivityGuard,
+    begun: bool,
+}
+
+fn presentation_leases() -> &'static Mutex<HashMap<u64, PresentationLease>> {
+    MASTER_STOP_PRESENTATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn expire_pending_presentation(id: u64) {
+    let mut leases = presentation_leases()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if leases.get(&id).is_some_and(|lease| !lease.begun) {
+        leases.remove(&id);
+    }
+}
+
+fn clear_presentations() {
+    presentation_leases()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+/// IPC response 回到 renderer 並不代表 JS 已經把它畫完。若外部 CLI 恰好在兩者
+/// 之間完成 `stop-all`，晚來的 Promise continuation 會在成功回條之後才顯示新答案。
+/// 把 activity guard 暫存在 native，renderer 以 begin → 同步 render → end 完成最後
+/// 一小段 commit。尚未 begin 的 response lease 五秒自行回收；begin 之後只由 end、
+/// pet window destroy 或 process teardown 釋放，不能讓 timeout 重開 post-success race。
+fn hold_presentation(guard: sister_hands::master_stop::ActivityGuard) -> String {
+    let id = NEXT_PRESENTATION_ID.fetch_add(1, Ordering::Relaxed);
+    presentation_leases()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            id,
+            PresentationLease {
+                guard,
+                begun: false,
+            },
+        );
+    std::thread::spawn(move || {
+        std::thread::sleep(PRESENTATION_LEASE_TIMEOUT);
+        // begin 已回 true 之後不可按時間回收：renderer event loop 若剛好卡住，
+        // timeout → stop success → Promise continuation render 會重開同一條競態。
+        // Begun 只由 renderer end、window destroy 或 process teardown 釋放。
+        expire_pending_presentation(id);
+    });
+    id.to_string()
+}
+
+fn begin_presentation(id: &str) -> Result<bool, String> {
+    let id = id
+        .parse::<u64>()
+        .map_err(|_| "renderer 回傳的 presentation id 讀不懂；沒有顯示晚回覆".to_string())?;
+    let mut leases = presentation_leases()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let allowed = leases
+        .get(&id)
+        .and_then(|lease| lease.guard.boundary())
+        .is_some();
+    if !allowed {
+        leases.remove(&id);
+    } else if let Some(lease) = leases.get_mut(&id) {
+        lease.begun = true;
+    }
+    Ok(allowed)
+}
+
+fn finish_presentation(id: &str) -> Result<(), String> {
+    let id = id
+        .parse::<u64>()
+        .map_err(|_| "renderer 回傳的 presentation id 讀不懂".to_string())?;
+    presentation_leases()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&id);
+    Ok(())
+}
+
+#[tauri::command]
+fn master_stop_presentation_begin(presentation_id: String) -> Result<bool, String> {
+    begin_presentation(&presentation_id)
+}
+
+#[tauri::command]
+fn master_stop_presentation_end(presentation_id: String) -> Result<(), String> {
+    finish_presentation(&presentation_id)
+}
+
+#[derive(Serialize)]
+struct MasterStopPresentationView {
+    presentation_id: String,
+}
+
+/// 本機答案朗讀仍是使用者 trusted click，但它也是 brain answer 的產品輸出。
+/// 先由 native admission 鑄一份 lease，renderer begin 後一路留到 utterance
+/// end／error／cancel；外部 CLI stop 才能真的等它排乾。
+#[tauri::command]
+fn answer_local_speech_admit(
+    shell: tauri::State<'_, Shell>,
+) -> Result<MasterStopPresentationView, String> {
+    let guard = admit_desktop_brain(shell.data_dir.as_deref(), "這次本機答案朗讀")?;
+    Ok(MasterStopPresentationView {
+        presentation_id: hold_presentation(guard),
+    })
+}
+
+fn admit_desktop_brain(
+    data_dir: Option<&Path>,
+    work: &str,
+) -> Result<sister_hands::master_stop::ActivityGuard, String> {
+    let data_dir = data_dir.ok_or_else(|| format!("找不到資料目錄，{work}沒有開始"))?;
+    sister_hands::master_stop::admit(data_dir).ok_or_else(|| {
+        match sister_hands::master_stop::state(data_dir) {
+            sister_hands::master_stop::State::Stopping => {
+                format!("正在完成全停，{work}沒有開始；排乾完成後可從系統匣解除全停")
+            }
+            sister_hands::master_stop::State::Stopped => {
+                format!("現在是三層全停，{work}沒有開始；要繼續請從系統匣解除全停")
+            }
+            sister_hands::master_stop::State::Uncertain => format!(
+                "全停協定目前讀不到可靠狀態，為安全起見{work}沒有開始；可從系統匣嘗試解除全停"
+            ),
+            sister_hands::master_stop::State::Clear => {
+                format!("全停 admission 取得失敗，{work}沒有開始")
+            }
+        }
+    })
 }
 
 /// action log 的「兩種零」在還看得到檔案的這一層分開。`Replay::default()` 同時
@@ -332,6 +481,10 @@ fn action_log_lines(data_dir: Option<&Path>) -> Result<Vec<String>, String> {
 /// 4. 擋下的理由**變了**才記一列。同一個理由連續輪詢不重複寫。
 #[tauri::command(async)]
 fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, String> {
+    // Gatekeeper 會寫每次判決與可能的 spoke 列，所以不是一份無害的 status poll。
+    // guard 從候選讀取一路留到 view 交給 presentation lease；全停成功回條之後，
+    // 這一輪不會才新增產品帳或第一次畫出一張主動卡。
+    let master_stop_admission = admit_desktop_brain(shell.data_dir.as_deref(), "守門員這一輪")?;
     let now = sister_core::now_ms();
     let day_key = sister_core::local_day::local_day_key(now)
         .ok_or_else(|| "現在時間無法換成本地日期".to_string())?;
@@ -346,7 +499,7 @@ fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, St
         .as_ref()
         .map(|d| sister_core::heartbeat::presence(d, now))
         .unwrap_or(sister_core::heartbeat::Presence::NeverStarted);
-    with_db_mut(&shell, |db| {
+    let mut view = with_db_mut(&shell, |db| {
         let candidates =
             sister_core::gatekeeper_candidates::collect(db, now).map_err(|e| format!("{e:#}"))?;
         let first = db
@@ -518,8 +671,11 @@ fn gatekeeper_check(shell: tauri::State<'_, Shell>) -> Result<GatekeeperView, St
             display,
             developer,
             action_log,
+            presentation_id: None,
         })
-    })
+    })?;
+    view.presentation_id = Some(hold_presentation(master_stop_admission));
+    Ok(view)
 }
 
 #[cfg(test)]
@@ -674,8 +830,10 @@ fn gatekeeper_react(
     utterance_id: i64,
     close: bool,
     shell: tauri::State<'_, Shell>,
-) -> Result<String, String> {
-    with_db_mut(&shell, |db| {
+) -> Result<GatekeeperReactionView, String> {
+    let master_stop_admission =
+        admit_desktop_brain(shell.data_dir.as_deref(), "這次守門員回應")?;
+    let message = with_db_mut(&shell, |db| {
         let reaction = if close {
             sister_core::gatekeeper::Reaction::Close
         } else {
@@ -694,6 +852,10 @@ fn gatekeeper_react(
             }
         }
         .to_string())
+    })?;
+    Ok(GatekeeperReactionView {
+        message,
+        presentation_id: hold_presentation(master_stop_admission),
     })
 }
 
@@ -855,14 +1017,30 @@ fn master_stop_state(
         .ok_or_else(|| "找不到資料目錄，現在不能確認全停狀態".to_owned())
 }
 
-fn set_master_stop(data_dir: Option<&Path>, action: MasterStopAction) -> Result<(), String> {
+fn set_master_stop_with_observer<F>(
+    data_dir: Option<&Path>,
+    action: MasterStopAction,
+    pending_observer: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
     let dir = data_dir.ok_or_else(|| "找不到資料目錄，全停開關沒有作用".to_owned())?;
     match action {
-        MasterStopAction::Engage => sister_hands::master_stop::engage(dir, sister_core::now_ms())
-            .map_err(|error| format!("全部停止失敗：{error}")),
+        MasterStopAction::Engage => sister_hands::master_stop::engage_with_pending_observer(
+            dir,
+            sister_core::now_ms(),
+            pending_observer,
+        )
+        .map_err(|error| format!("全部停止失敗：{error}")),
         MasterStopAction::Release => sister_hands::master_stop::release(dir)
             .map_err(|error| format!("解除全停失敗：{error}")),
     }
+}
+
+#[cfg(test)]
+fn set_master_stop(data_dir: Option<&Path>, action: MasterStopAction) -> Result<(), String> {
+    set_master_stop_with_observer(data_dir, action, || {})
 }
 
 fn announce_master_stop_state(app: &tauri::AppHandle) {
@@ -874,24 +1052,73 @@ fn announce_master_stop_state(app: &tauri::AppHandle) {
     }
 }
 
-/// Production tray callback 的唯一全停出口。方向只由 menu id policy 決定；成功後
-/// 才 refresh（並 emit authoritative changed state），失敗則把同一個錯誤送進畫面。
+fn finish_master_stop_menu(app: &tauri::AppHandle, result: Result<(), String>) {
+    if let Err(error) = result {
+        tracing::error!("全停開關切換失敗：{error}");
+        if let Some(win) = app.get_webview_window(PET) {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        let _ = app.emit(MASTER_STOP_FAILED_EVENT, error);
+    }
+    refresh_tray(app);
+}
+
+struct MasterStopJob {
+    app: tauri::AppHandle,
+    data_dir: Option<PathBuf>,
+    action: MasterStopAction,
+}
+
+fn run_master_stop_job(job: MasterStopJob) {
+    let stopping_app = job.app.clone();
+    let result = set_master_stop_with_observer(job.data_dir.as_deref(), job.action, move || {
+        let on_main = stopping_app.clone();
+        if stopping_app
+            .run_on_main_thread(move || refresh_tray(&on_main))
+            .is_err()
+        {
+            tracing::error!("全停已開始排乾，但 tray 主迴圈已經結束，無法顯示 Stopping");
+        }
+    });
+    let on_main = job.app.clone();
+    if job
+        .app
+        .run_on_main_thread(move || finish_master_stop_menu(&on_main, result))
+        .is_err()
+    {
+        tracing::error!("全停 worker 已收尾，但 tray 主迴圈已經結束，無法顯示結果");
+    }
+}
+
+fn master_stop_queue() -> &'static std::sync::mpsc::Sender<MasterStopJob> {
+    MASTER_STOP_QUEUE.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || run_fifo(receiver, run_master_stop_job));
+        sender
+    })
+}
+
+/// Production tray callback 的唯一全停出口。方向只由 menu id policy 決定。真正的
+/// drain 進背景 worker；不然一份 120 秒才收尾的 brain 工作會把 tray 主迴圈整段凍住，
+/// 使用者也永遠看不到已經安全發佈的 `Stopping`。
 fn dispatch_master_stop_menu(app: &tauri::AppHandle, menu_id: &str) {
     let Some(action) = master_stop_action_for_menu_id(menu_id) else {
         return;
     };
-    let shell = app.state::<Shell>();
-    match set_master_stop(shell.data_dir.as_deref(), action) {
-        Ok(()) => refresh_tray(app),
-        Err(error) => {
-            tracing::error!("全停開關切換失敗：{error}");
-            if let Some(win) = app.get_webview_window(PET) {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-            let _ = app.emit(MASTER_STOP_FAILED_EVENT, error);
-            refresh_tray(app);
-        }
+    let data_dir = app.state::<Shell>().data_dir.clone();
+    if master_stop_queue()
+        .send(MasterStopJob {
+            app: app.clone(),
+            data_dir,
+            action,
+        })
+        .is_err()
+    {
+        finish_master_stop_menu(
+            app,
+            Err("全停 worker 已經結束，這次按鍵沒有執行".to_string()),
+        );
     }
 }
 
@@ -938,8 +1165,9 @@ mod master_stop_desktop_tests {
         use sister_hands::master_stop::State;
         let dir = temp_dir("pending-and-uncertain");
         std::fs::write(dir.join("master.stop.pending"), b"1000").unwrap();
-        assert_eq!(master_stop_phase(Some(&dir)), Some(State::Stopping));
+        assert_eq!(master_stop_phase(Some(&dir)), Some(State::Uncertain));
         std::fs::remove_file(dir.join("master.stop.pending")).unwrap();
+        std::fs::remove_file(dir.join(sister_hands::master_stop::ACTIVITY_LOCK)).unwrap();
         std::fs::create_dir_all(dir.join(sister_hands::master_stop::ACTIVITY_LOCK)).unwrap();
         assert_eq!(master_stop_phase(Some(&dir)), Some(State::Uncertain));
         let _ = std::fs::remove_dir_all(dir);
@@ -964,6 +1192,107 @@ mod master_stop_desktop_tests {
             master_stop_phase(Some(&dir)),
             Some(sister_hands::master_stop::State::Clear)
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fifo_worker_keeps_a_queued_release_after_a_blocked_engage() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = temp_dir("fifo-engage-release");
+        let active = sister_hands::master_stop::admit(&dir).expect("hold old activity");
+        let (job_tx, job_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_dir = dir.clone();
+        let worker = std::thread::spawn(move || {
+            run_fifo(job_rx, |action| {
+                let result = set_master_stop(Some(&worker_dir), action);
+                done_tx.send((action, result)).unwrap();
+            });
+        });
+
+        job_tx.send(MasterStopAction::Engage).unwrap();
+        for _ in 0..500 {
+            if sister_hands::master_stop::state(&dir)
+                == sister_hands::master_stop::State::Stopping
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            sister_hands::master_stop::state(&dir),
+            sister_hands::master_stop::State::Stopping
+        );
+        job_tx.send(MasterStopAction::Release).unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(40)).is_err());
+        drop(active);
+
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (MasterStopAction::Engage, Ok(()))
+        );
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (MasterStopAction::Release, Ok(()))
+        );
+        drop(job_tx);
+        worker.join().unwrap();
+        assert_eq!(
+            sister_hands::master_stop::state(&dir),
+            sister_hands::master_stop::State::Clear,
+            "second click must be the final state"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn begun_renderer_presentation_keeps_stop_from_finishing_until_end() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = temp_dir("renderer-presentation");
+        let guard = sister_hands::master_stop::admit(&dir).expect("admit answer");
+        let presentation_id = hold_presentation(guard);
+        assert!(begin_presentation(&presentation_id).unwrap());
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let stop_dir = dir.clone();
+        let stop = std::thread::spawn(move || {
+            done_tx
+                .send(sister_hands::master_stop::engage(&stop_dir, 9))
+                .unwrap();
+        });
+        for _ in 0..500 {
+            if sister_hands::master_stop::state(&dir)
+                == sister_hands::master_stop::State::Stopping
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            sister_hands::master_stop::state(&dir),
+            sister_hands::master_stop::State::Stopping
+        );
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(40)).is_err(),
+            "stop succeeded before renderer ended the begun presentation"
+        );
+
+        // Pending timeout 只准回收尚未 begin 的 lease；直接呼叫同一支 expiry seam
+        // 模擬五秒 timer，begun guard 仍必須活著。
+        expire_pending_presentation(presentation_id.parse().unwrap());
+        assert!(done_rx.recv_timeout(Duration::from_millis(40)).is_err());
+        finish_presentation(&presentation_id).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        stop.join().unwrap();
+        assert_eq!(
+            sister_hands::master_stop::state(&dir),
+            sister_hands::master_stop::State::Stopped
+        );
+        sister_hands::master_stop::release(&dir).unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 }
@@ -1652,6 +1981,9 @@ fn with_db_mut<T>(
 /// query` 和這一頁必須對同一句話給同一種答案，各抄一份遲早會變成兩種行為。
 #[derive(Serialize)]
 struct Answer {
+    /// Native guard 不能在 IPC response serialize 完就放掉；renderer 先 begin、同步
+    /// 畫完，再 end。外部 CLI 的 stop-all 才不會在 Promise continuation 前先回成功。
+    presentation_id: Option<String>,
     kind: &'static str,
     followup: Option<String>,
     closure_notice: Option<String>,
@@ -1879,6 +2211,7 @@ fn memory_overview_answer(
     );
 
     Ok(Answer {
+        presentation_id: None,
         kind: sister_core::question::Intent::MemoryOverview.name(),
         followup: None,
         closure_notice: None,
@@ -2410,6 +2743,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
     let question = question.trim().to_string();
     if question.is_empty() {
         return Ok(Answer {
+            presentation_id: None,
             kind: "keywords",
             followup: None,
             closure_notice: None,
@@ -2426,18 +2760,24 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             overview: None,
         });
     }
+    // 問答不只是讀：closure、follow-up 與 query log 都可能寫 DB。整份 admission
+    // 活到 renderer 同步畫完，讓 stop-all 能先發佈 Stopping、再等這一題收乾淨；
+    // 全停後來的新題連 retrieval 都不進。
+    let master_stop_admission = admit_desktop_brain(shell.data_dir.as_deref(), "這一題")?;
     let started = std::time::Instant::now();
 
     // 先分流，再碰 retrieval。這條順序就是修正本身：「她知道了什麼」不是拿
     // 「知道」兩字去 FTS 設定頁；總覽也不需要 chapters、blind spots、closure、
     // follow-up，更不會因此叫 CLI。它只讀已經落地的 current L2 與本機證據。
     if sister_core::question::intent(&question) == Intent::MemoryOverview {
-        return with_db(&shell, |db| memory_overview_answer(db, started));
+        let mut answer = with_db(&shell, |db| memory_overview_answer(db, started))?;
+        answer.presentation_id = Some(hold_presentation(master_stop_admission));
+        return Ok(answer);
     }
 
     // 章節那一支要寫 `segment`，所以整條改拿可變借用。沒認到時間範圍
     // 時 `chapters_for_question` 立刻回 `None`，不會重算。
-    with_db_mut(&shell, |db| {
+    let mut answer = with_db_mut(&shell, |db| {
         let now = sister_core::now_ms();
         let close = sister_core::reviewer::close_from_message(db, &question, now)
             .map_err(|e| format!("{e:#}"))?;
@@ -2563,6 +2903,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             db.frames_with_image(&ids).map_err(|e| format!("{e:#}"))?
         };
         Ok(Answer {
+            presentation_id: None,
             kind: shape.name(),
             followup,
             closure_notice,
@@ -2619,7 +2960,9 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 .map(|(_, ch)| ch.into_iter().map(chapter_from_activity).collect()),
             overview: None,
         })
-    })
+    })?;
+    answer.presentation_id = Some(hold_presentation(master_stop_admission));
+    Ok(answer)
 }
 
 /// 時間軸上的一天。
@@ -3879,6 +4222,9 @@ struct AzureTtsAudioView {
     content_type: &'static str,
     audio_bytes: usize,
     data_url: String,
+    /// POST 完成不等於 renderer 已開始（或完成）播放。這份 native lease 讓
+    /// master stop 排乾一路跨到 WebView 的 begin／playback end。
+    presentation_id: String,
 }
 
 fn azure_credential_word(state: azure_credential::CredentialState) -> &'static str {
@@ -4168,6 +4514,13 @@ async fn azure_tts_speak(
     expected: AzureTtsExpected,
     shell: tauri::State<'_, Shell>,
 ) -> Result<AzureTtsAudioView, String> {
+    let data_dir = shell.data_dir.as_deref().ok_or_else(|| {
+        "找不到資料目錄，問不到第四張同意書；沒有送出 request。".to_string()
+    })?;
+    // Azure 也是答案正文出境，不可借「本機朗讀」的名字繞過 master stop。
+    // 這份 activity guard 活過完整 blocking transport：stop 可先發佈 pending、
+    // 立刻拒絕後續工作，但成功回條一定等這份 stop 前已准入的 POST 收尾。
+    let master_stop_admission = admit_desktop_brain(Some(data_dir), "這次 Azure 朗讀")?;
     // 整份 expected 來自 renderer 最近一次讀到的 native view，不是在 command 終於
     // 被 poll 時才現場領一張。舊意圖若排在 cancel／mutation 後面才進來，第一行
     // 就拒絕，不能把已經更新的 gate 收編成自己的。
@@ -4198,10 +4551,6 @@ async fn azure_tts_speak(
     // 空白／過大／XML 非法在 consent、credential 與 transport 之前就停。
     sister_tts::build_ssml(transport_voice(azure.voice), &text)
         .map_err(|error| error.to_string())?;
-    let data_dir = shell
-        .data_dir
-        .as_deref()
-        .ok_or_else(|| "找不到資料目錄，問不到第四張同意書；沒有送出 request。".to_string())?;
     let consent_guard = match sister_core::consent::begin_azure_tts_admission(data_dir) {
         sister_core::consent::AzureTtsAdmissionConsent::Allowed(guard) => {
             if expected.consent_at != Some(guard.signed_at()) {
@@ -4249,8 +4598,16 @@ async fn azure_tts_speak(
         })?;
 
     let request_generation = next_azure_tts_generation(expected.generation);
+    let master_stop_boundary;
     {
         let _transition = azure_tts_transition(&shell);
+        // `azure_tts_transition` 可能正在等前一份 blocking transport 最長 45 秒；
+        // 等它時只持 activity，不持 turnstile。否則第二份 speak 會讓 stop 連 pending
+        // 都發佈不了。拿到 Azure fence 後才走最後 master boundary：若 stop 已先
+        // pending，這份排隊中的 POST 就在 generation/in-flight mutation 前退出。
+        master_stop_boundary = master_stop_admission.boundary().ok_or_else(|| {
+            "全停已在 Azure POST 排程前生效；這次朗讀沒有送出 request。".to_string()
+        })?;
         shell
             .azure_tts_in_flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -4303,14 +4660,19 @@ async fn azure_tts_speak(
         if generation_state.load(Ordering::Acquire) != request_generation {
             return Err("Azure 朗讀已取消；POST 可能已完成，但回應已丟掉、沒有播放。".to_string());
         }
-        Ok(bytes)
+        // Activity guard 跟 bytes 一起交回 async command；不能在 worker 結束時先
+        // drop，否則 stop-all 可能先回成功，renderer 才收到 MP3 並第一次播放。
+        Ok((bytes, master_stop_admission))
     });
+    // worker 已排進 executor；此後它是已准入的舊工作。放 turnstile 讓 stop 發佈
+    // pending，activity guard 則留在 worker 到 response／error 全部收乾淨。
+    drop(master_stop_boundary);
     // process admission 只排到 worker 已拿到 generation-pinned 工作為止。真正
     // transport commit 另與 mutation/cancel 共用 transition fence：它們若輸給已開始的
     // transport，可能等到最長 45 秒；成功回覆後舊 snapshot 絕不可能才開始 POST。
     // Consent 的跨行程 shared guard 也留到 transport 結束，涵蓋 CLI 撤回。
     drop(_admission);
-    let bytes = task
+    let (bytes, master_stop_admission) = task
         .await
         .map_err(|_| "Azure 朗讀工作沒有完成；沒有可播放的回應。".to_string())??;
     let audio_bytes = bytes.len();
@@ -4320,6 +4682,7 @@ async fn azure_tts_speak(
         content_type: sister_tts::AUDIO_CONTENT_TYPE,
         audio_bytes,
         data_url: format!("data:{};base64,{encoded}", sister_tts::AUDIO_CONTENT_TYPE),
+        presentation_id: hold_presentation(master_stop_admission),
     })
 }
 
@@ -6054,6 +6417,9 @@ fn main() {
             frame_image,
             pause_state,
             master_stop_state,
+            master_stop_presentation_begin,
+            master_stop_presentation_end,
+            answer_local_speech_admit,
             recording_state,
             start_recording,
             stop_recording,
@@ -6634,6 +7000,11 @@ fn main() {
                     state.x = pos.x;
                     state.y = pos.y;
                 }
+                WindowEvent::Destroyed => {
+                    // Renderer 已不存在，不可能再 commit 晚回覆；把 Begun lease 一次
+                    // 放掉。一般 Alt+F4 只 hide、會被上面的 prevent_close 攔住。
+                    clear_presentations();
+                }
                 _ => {}
             });
 
@@ -6677,6 +7048,10 @@ fn main() {
                     let _ = app.emit("recorder-failed", error);
                     return;
                 }
+                // 到這裡才確定沒有 prevent_exit；renderer 不會再有機會送
+                // presentation end。若上面的 durable stop 寫不進去而留在 app，
+                // 提早 clear 會放掉仍可能繼續 Promise／playback 的 activity guard。
+                clear_presentations();
                 shell.persist();
             }
         });

@@ -11,7 +11,7 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -398,6 +398,175 @@ pub fn not_stopped(data_dir: &Path) -> Option<NotStopped> {
     sister_hands::master_stop::admit(data_dir).map(NotStopped)
 }
 
+#[cfg(unix)]
+fn configure_provider_process_tree(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn configure_provider_process_tree(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    use windows::Win32::System::Threading::CREATE_SUSPENDED;
+
+    // AssignProcessToJobObject after an ordinary spawn has a real race: the
+    // provider can create a descendant before the parent enters our Job, and
+    // that descendant may keep inherited pipes open forever. Start the primary
+    // thread suspended; ProviderProcessTree::resume is the only opening point.
+    command.creation_flags(CREATE_SUSPENDED.0);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_provider_process_tree(_command: &mut Command) {}
+
+/// Provider 可能再生子行程，而且那些 descendants 會繼承 stdout/stderr pipe。
+/// 只 kill direct child 仍會讓 reader join 無限等；把整棵 invocation 放進可終止的
+/// process group／Job Object，正常 direct child 退出時也清掉它遺留的 descendants。
+#[cfg(unix)]
+struct ProviderProcessTree {
+    process_group: i32,
+}
+
+#[cfg(unix)]
+impl ProviderProcessTree {
+    fn attach(child: &Child) -> std::io::Result<Self> {
+        let process_group = i32::try_from(child.id()).map_err(|_| {
+            std::io::Error::other("provider child pid 超過可管理的 process-group 範圍")
+        })?;
+        Ok(Self { process_group })
+    }
+
+    fn terminate(&self, child: &mut Child) {
+        // `process_group(0)` 讓 child 成為新 group leader。負 pid 會向整組送訊號；
+        // direct child 若已退出，仍可關掉繼承 pipe 的 descendants。
+        unsafe {
+            libc::kill(-self.process_group, libc::SIGKILL);
+        }
+        let _ = child.kill();
+    }
+
+    fn resume(&self, _child: &Child) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+struct ProviderProcessTree {
+    job: windows::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl ProviderProcessTree {
+    fn attach(child: &Child) -> std::io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        unsafe {
+            let job = CreateJobObjectW(None, windows::core::PCWSTR::null())
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if let Err(error) = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            ) {
+                let _ = CloseHandle(job);
+                return Err(std::io::Error::other(error.to_string()));
+            }
+            let process = HANDLE(child.as_raw_handle());
+            if let Err(error) = AssignProcessToJobObject(job, process) {
+                let _ = CloseHandle(job);
+                return Err(std::io::Error::other(error.to_string()));
+            }
+            Ok(Self { job })
+        }
+    }
+
+    fn terminate(&self, child: &mut Child) {
+        use windows::Win32::System::JobObjects::TerminateJobObject;
+        unsafe {
+            let _ = TerminateJobObject(self.job, 1);
+        }
+        let _ = child.kill();
+    }
+
+    fn resume(&self, child: &Child) -> std::io::Result<()> {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+        };
+        use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let result = (|| {
+                let mut entry = THREADENTRY32 {
+                    dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                    ..Default::default()
+                };
+                Thread32First(snapshot, &mut entry)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                loop {
+                    if entry.th32OwnerProcessID == child.id() {
+                        let thread = OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
+                            .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        let previous = ResumeThread(thread);
+                        let _ = CloseHandle(thread);
+                        if previous == u32::MAX {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        return Ok(());
+                    }
+                    if Thread32Next(snapshot, &mut entry).is_err() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "找不到 suspended provider 的 primary thread",
+                        ));
+                    }
+                }
+            })();
+            let _ = CloseHandle(snapshot);
+            result
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProviderProcessTree {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::CloseHandle;
+        unsafe {
+            let _ = CloseHandle(self.job);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+struct ProviderProcessTree;
+
+#[cfg(not(any(unix, windows)))]
+impl ProviderProcessTree {
+    fn attach(_child: &Child) -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    fn terminate(&self, child: &mut Child) {
+        let _ = child.kill();
+    }
+
+    fn resume(&self, _child: &Child) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 pub fn spawn_cli(
     permit: CloudAllowed,
     not_stopped: NotStopped,
@@ -405,6 +574,32 @@ pub fn spawn_cli(
     command: &str,
     args: &[String],
 ) -> SpawnOutcome {
+    spawn_cli_with_timeout(permit, not_stopped, payload, command, args, SPAWN_TIMEOUT)
+}
+
+fn spawn_cli_with_timeout(
+    permit: CloudAllowed,
+    not_stopped: NotStopped,
+    payload: &str,
+    command: &str,
+    args: &[String],
+    timeout: Duration,
+) -> SpawnOutcome {
+    spawn_cli_with_timeout_after_spawn(permit, not_stopped, payload, command, args, timeout, |_| {})
+}
+
+fn spawn_cli_with_timeout_after_spawn<F>(
+    permit: CloudAllowed,
+    not_stopped: NotStopped,
+    payload: &str,
+    command: &str,
+    args: &[String],
+    timeout: Duration,
+    after_spawn_before_attach: F,
+) -> SpawnOutcome
+where
+    F: FnOnce(&Child),
+{
     let _cloud_gate = permit;
     let started = Instant::now();
     // 這道 boundary 貼著 spawn；舊 permit 不能跨過後來發佈的 pending。它一路保留到
@@ -421,13 +616,14 @@ pub fn spawn_cli(
             process_start: ProcessStart::NeverStarted,
         };
     };
-    let mut child = match Command::new(command)
+    let mut child_command = Command::new(command);
+    child_command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    configure_provider_process_tree(&mut child_command);
+    let mut child = match child_command.spawn() {
         Ok(c) => c,
         Err(e) => {
             return SpawnOutcome {
@@ -442,43 +638,41 @@ pub fn spawn_cli(
             };
         }
     };
-
-    let (payload_chars_written, stdin_error) = match child.stdin.take() {
-        Some(mut stdin) => match write_payload(&mut stdin, payload) {
-            Ok(written) => (written, None),
-            Err((written, error)) => (written, Some(format!("寫入 CLI stdin 失敗：{error}"))),
-        },
-        None => (0, Some("stdin 管線沒開成".into())),
+    // Test seam at the only dangerous Windows interval. The production
+    // callback is empty; the spawned primary thread must already be suspended
+    // before this point, and Job attachment below is its only route to resume.
+    after_spawn_before_attach(&child);
+    let process_tree = match ProviderProcessTree::attach(&child) {
+        Ok(tree) => tree,
+        Err(error) => {
+            let _ = child.kill();
+            let exit_code = child.wait().ok().and_then(|status| status.code());
+            return SpawnOutcome {
+                payload_chars_written: 0,
+                duration_ms: started.elapsed().as_millis() as u64,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                spawn_error: Some(format!(
+                    "無法把 `{command}` 放進可排乾的子行程範圍；已停止 direct child：{error}"
+                )),
+                exit_code,
+                process_start: ProcessStart::Started,
+            };
+        }
     };
-    drop(stop_boundary);
-    drop(not_stopped);
-    if let Some(error) = stdin_error {
-        // **送不完整就不要用那個答案。** 半份提示問出來的回答會被當成整份的
-        // 回答收下去，那比沒有答案糟。所以這裡收手，而且 `spawn_error` 一定
-        // 要設起來——不設的話下游會照 stdout 的內容去分類，於是「我們只送出
-        // 去一半」這件事就不見了。
-        //
-        // **但它自己說了什麼要留著。** 這條路最常見的成因是那支 CLI 立刻就
-        // 退了（沒登入、參數不對），於是我們的寫入撞上一根斷掉的管子。真正
-        // 有用的那句話是它印出來的，不是我們的「Broken pipe」。先把管子裡剩
-        // 的字讀乾淨再收工——`kill` 之後兩端都關了，讀不會卡住。
-        let _ = child.kill();
-        let mut stdout = String::new();
-        if let Some(mut pipe) = child.stdout.take() {
-            let _ = pipe.read_to_string(&mut stdout);
-        }
-        let mut stderr = String::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
-        }
+    if let Err(error) = process_tree.resume(&child) {
+        process_tree.terminate(&mut child);
         let exit_code = child.wait().ok().and_then(|status| status.code());
         return SpawnOutcome {
-            payload_chars_written,
+            payload_chars_written: 0,
             duration_ms: started.elapsed().as_millis() as u64,
-            stdout,
-            stderr,
+            stdout: String::new(),
+            stderr: String::new(),
             timed_out: false,
-            spawn_error: Some(error),
+            spawn_error: Some(format!(
+                "`{command}` 已放進子行程範圍，但 suspended primary thread 無法啟動：{error}"
+            )),
             exit_code,
             process_start: ProcessStart::Started,
         };
@@ -487,15 +681,16 @@ pub fn spawn_cli(
     let mut stdout_pipe = match child.stdout.take() {
         Some(p) => p,
         None => {
-            let _ = child.kill();
+            process_tree.terminate(&mut child);
+            let exit_code = child.wait().ok().and_then(|status| status.code());
             return SpawnOutcome {
-                payload_chars_written,
+                payload_chars_written: 0,
                 duration_ms: started.elapsed().as_millis() as u64,
                 stdout: String::new(),
                 stderr: String::new(),
                 timed_out: false,
                 spawn_error: Some("stdout 管線沒開成".into()),
-                exit_code: None,
+                exit_code,
                 process_start: ProcessStart::Started,
             };
         }
@@ -515,33 +710,95 @@ pub fn spawn_cli(
         buf
     });
 
-    let timed_out = loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break false,
-            Ok(None) if started.elapsed() >= SPAWN_TIMEOUT => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break true;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => {
-                return SpawnOutcome {
-                    payload_chars_written,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    timed_out: false,
-                    spawn_error: Some(format!("等 CLI 結束失敗：{e}")),
-                    exit_code: None,
-                    process_start: ProcessStart::Started,
-                };
+    // stdin writer 必須與 supervision／stdout drain 並行。同步 write 會讓一支完全
+    // 不讀 stdin 的 CLI 在 pipe buffer 填滿後卡死，連 120 秒 timeout 都走不到。
+    let (stdin_done_tx, stdin_done_rx) = std::sync::mpsc::channel();
+    let mut stdin_thread = child.stdin.take().map(|mut stdin| {
+        let payload = payload.to_owned();
+        std::thread::spawn(move || {
+            let result = match write_payload(&mut stdin, &payload) {
+                Ok(written) => (written, None),
+                Err((written, error)) => (written, Some(format!("寫入 CLI stdin 失敗：{error}"))),
+            };
+            let _ = stdin_done_tx.send(());
+            result
+        })
+    });
+    let mut stdin_result = stdin_thread
+        .is_none()
+        .then(|| (0, Some("stdin 管線沒開成".to_string())));
+    let mut stop_boundary = Some(stop_boundary);
+    if stdin_result.is_some() {
+        drop(stop_boundary.take());
+    }
+    let _active_until_child_settles = not_stopped;
+
+    let mut direct_status: Option<ExitStatus> = None;
+    let mut timed_out = false;
+    let mut wait_error = None;
+    loop {
+        if stdin_result.is_none() {
+            match stdin_done_rx.try_recv() {
+                Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    stdin_result = Some(
+                        stdin_thread
+                            .take()
+                            .and_then(|join| join.join().ok())
+                            .unwrap_or_else(|| (0, Some("CLI stdin writer 沒有完成".to_string()))),
+                    );
+                    // irreversible stdin 邊界完成後才放 turnstile；activity guard
+                    // 仍一路保到 direct child、descendants 與兩條 output pipe 收乾淨。
+                    drop(stop_boundary.take());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-    };
+        if let Some((_, Some(error))) = &stdin_result {
+            wait_error = Some(error.clone());
+            break;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                direct_status = Some(status);
+                break;
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                timed_out = true;
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => {
+                wait_error = Some(format!("等 CLI 結束失敗：{error}"));
+                break;
+            }
+        }
+    }
+
+    // 不論 direct child 是正常退出、寫入失敗或逾時，都終止同一 invocation 留下的
+    // descendants，之後 reader join 才有明確上界。這不會把 provider 已收走的
+    // request 說成取消；它只讓本機 CLI process tree 確實排乾。
+    process_tree.terminate(&mut child);
+    let waited_status = child.wait().ok();
+    if stdin_result.is_none() {
+        stdin_result = Some(
+            stdin_thread
+                .take()
+                .and_then(|join| join.join().ok())
+                .unwrap_or_else(|| (0, Some("CLI stdin writer 沒有完成".to_string()))),
+        );
+        drop(stop_boundary.take());
+    }
+    let (payload_chars_written, late_stdin_error) =
+        stdin_result.unwrap_or_else(|| (0, Some("CLI stdin writer 沒有結果".to_string())));
+    if wait_error.is_none() {
+        wait_error = late_stdin_error;
+    }
 
     let stdout = String::from_utf8_lossy(&stdout_thread.join().unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&stderr_thread.join().unwrap_or_default()).into_owned();
-    let exit_code = child.wait().ok().and_then(|s| s.code());
+    let exit_code = direct_status
+        .or(waited_status)
+        .and_then(|status| status.code());
 
     SpawnOutcome {
         payload_chars_written,
@@ -549,7 +806,7 @@ pub fn spawn_cli(
         stdout,
         stderr,
         timed_out,
-        spawn_error: None,
+        spawn_error: wait_error,
         exit_code,
         process_start: ProcessStart::Started,
     }
@@ -1811,6 +2068,227 @@ mod tests {
         assert_eq!(outcome.payload_chars_written, 0);
         assert!(!sentinel.exists(), "舊 permit 竟然啟動了 sentinel child");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn admitted_cli_child_keeps_master_stop_stopping_until_the_process_settles() {
+        use std::sync::mpsc;
+
+        let dir =
+            std::env::temp_dir().join(format!("sister-cli-child-drain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("blocking-cli.py");
+        let started = dir.join("child-started");
+        let release_child = dir.join("release-child");
+        std::fs::write(
+            &script,
+            concat!(
+                "import pathlib, sys, time\n",
+                "root = pathlib.Path(sys.argv[1])\n",
+                "sys.stdin.buffer.read()\n",
+                "(root / 'child-started').write_text('started')\n",
+                "while not (root / 'release-child').exists(): time.sleep(0.01)\n",
+                "sys.stdout.buffer.write(b'{}')\n",
+            ),
+        )
+        .unwrap();
+        let mut consent = Consent::default();
+        consent.grant(Sheet::CloudReading, 1);
+        let permit = consent.cloud_permit().unwrap();
+        let admission = not_stopped(&dir).expect("admit before stop");
+        let command_args = vec![
+            script.to_string_lossy().into_owned(),
+            dir.to_string_lossy().into_owned(),
+        ];
+        let cli = std::thread::spawn(move || {
+            spawn_cli(permit, admission, "正文", "python3", &command_args)
+        });
+
+        for _ in 0..500 {
+            if started.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if !started.exists() {
+            std::fs::write(&release_child, b"release").unwrap();
+            let outcome = cli.join().unwrap();
+            panic!("blocking child never started: {outcome:?}");
+        }
+
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let stop_dir = dir.clone();
+        let stop = std::thread::spawn(move || {
+            stopped_tx
+                .send(sister_hands::master_stop::engage(&stop_dir, 2))
+                .unwrap();
+        });
+        for _ in 0..500 {
+            if sister_hands::master_stop::state(&dir) == sister_hands::master_stop::State::Stopping
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            sister_hands::master_stop::state(&dir),
+            sister_hands::master_stop::State::Stopping
+        );
+        assert!(
+            stopped_rx.recv_timeout(Duration::from_millis(40)).is_err(),
+            "stop returned while the admitted provider child was still running"
+        );
+
+        std::fs::write(release_child, b"release").unwrap();
+        let outcome = cli.join().unwrap();
+        assert!(outcome.completed_the_ask(), "{outcome:?}");
+        stopped_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        stop.join().unwrap();
+        assert_eq!(
+            sister_hands::master_stop::state(&dir),
+            sister_hands::master_stop::State::Stopped
+        );
+        sister_hands::master_stop::release(&dir).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_still_runs_when_provider_never_reads_a_pipe_filling_stdin() {
+        let mut consent = Consent::default();
+        consent.grant(Sheet::CloudReading, 1);
+        let payload = "問".repeat(256 * 1024);
+        let started = Instant::now();
+
+        let outcome = spawn_cli_with_timeout(
+            consent.cloud_permit().unwrap(),
+            test_not_stopped(),
+            &payload,
+            "sh",
+            &["-c".into(), "sleep 60".into()],
+            Duration::from_millis(100),
+        );
+
+        assert!(
+            outcome.timed_out,
+            "blocking stdin bypassed timeout: {outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stdin writer did not settle after process-tree termination"
+        );
+        assert!(outcome.payload_chars_written < payload.chars().count());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_output_pipe_in_a_descendant_cannot_hold_the_invocation_open() {
+        let mut consent = Consent::default();
+        consent.grant(Sheet::CloudReading, 1);
+        let started = Instant::now();
+
+        let outcome = spawn_cli_with_timeout(
+            consent.cloud_permit().unwrap(),
+            test_not_stopped(),
+            "正文",
+            "sh",
+            &[
+                "-c".into(),
+                "cat >/dev/null; (sleep 60) & printf '%s' '{}'".into(),
+            ],
+            Duration::from_millis(500),
+        );
+
+        assert!(
+            !outcome.timed_out,
+            "direct child itself should finish: {outcome:?}"
+        );
+        assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+        assert_eq!(outcome.stdout, "{}", "{outcome:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "descendant kept inherited stdout open after direct child exited"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_provider_cannot_run_before_job_assignment() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir =
+            std::env::temp_dir().join(format!("sister-provider-suspended-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sentinel = dir.join("provider-ran");
+        let ran_before_attach = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&ran_before_attach);
+        let sentinel_during_gap = sentinel.clone();
+        let mut consent = Consent::default();
+        consent.grant(Sheet::CloudReading, 1);
+        let command_line = format!("more >nul & (echo started)>\"{}\"", sentinel.display());
+
+        let outcome = spawn_cli_with_timeout_after_spawn(
+            consent.cloud_permit().unwrap(),
+            test_not_stopped(),
+            "正文",
+            "cmd.exe",
+            &["/D".into(), "/S".into(), "/C".into(), command_line],
+            Duration::from_secs(5),
+            move |_| {
+                std::thread::sleep(Duration::from_millis(100));
+                observed.store(sentinel_during_gap.exists(), Ordering::Release);
+            },
+        );
+
+        assert!(
+            !ran_before_attach.load(Ordering::Acquire),
+            "production spawn path executed before Job attachment"
+        );
+        assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+        assert!(
+            sentinel.exists(),
+            "assigned and resumed provider never executed"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_spawn_path_drains_a_descendant_that_inherits_output_pipes() {
+        let mut consent = Consent::default();
+        consent.grant(Sheet::CloudReading, 1);
+        let started = Instant::now();
+        // `start /B` returns from the direct cmd while its child keeps the
+        // inherited stdout/stderr handles. Without Job-wide termination, the
+        // reader joins below take roughly five seconds instead of completing.
+        let command_line = concat!(
+            "more >nul & ",
+            "start \"\" /B cmd.exe /D /S /C \"ping.exe -n 6 127.0.0.1 >nul\" & ",
+            "echo {}"
+        );
+
+        let outcome = spawn_cli_with_timeout(
+            consent.cloud_permit().unwrap(),
+            test_not_stopped(),
+            "正文",
+            "cmd.exe",
+            &["/D".into(), "/S".into(), "/C".into(), command_line.into()],
+            Duration::from_secs(3),
+        );
+
+        assert!(!outcome.timed_out, "direct cmd should finish: {outcome:?}");
+        assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+        assert!(outcome.stdout.contains("{}"), "{outcome:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "escaped descendant held an inherited output pipe open"
+        );
     }
 
     #[test]

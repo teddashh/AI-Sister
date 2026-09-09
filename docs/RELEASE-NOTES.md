@@ -83,28 +83,42 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 它先擋住所有新工作，等已獲准的工作跨過最後一個不可逆邊界並排乾，最後才發佈 durable
 `master.stop`、移除 pending 並回報「三層都停了」。**
 
-data dir 新增永久的 activity lock、turnstile lock 與只在排乾期間存在的
+data dir 新增永久的 activity lock、turnstile lock、engage／release owner lock，以及排乾意圖
 `master.stop.pending`。capture 的整拍 admission、privacy／截圖／OCR 後的 persistence，brain
 的 CLI spawn、stdin 與 outbound audit，reviewer 的 L2／day-summary product mutation，以及
-hands 最後的 OS call 都走同一份 guard。全停先在 turnstile 內發佈 pending，再放開 turnstile
-等 activity readers 排乾，避免 boundary 與 engage 互等；解除只在線性化閘門內清 latch／pending，
-不拿 activity exclusive，因此和 admission／engage 沒有 ABBA lock cycle。兩個同時送出的 stop
+hands 最後的 OS call 都走同一份 guard；desktop 問答、守門員判決／回應與 Azure TTS 也在
+碰產品狀態或送出前 admission。全停先在 turnstile 內發佈 pending，再放開 turnstile
+等 activity readers 排乾，避免 boundary 與 engage 互等；解除和 engage 共用 owner 排隊，再在
+turnstile 內清 latch／pending。它不拿 activity exclusive，但若前面已有 engage，會先等那次排乾，
+所以解除成功後舊 engage 不會才補寫 latch，也不會形成 ABBA lock cycle。兩個同時送出的 stop
 會沿用第一份 pending timestamp，不會把第一次停止時間洗成第二次。
 
 「拒絕新工作」和「舊工作已排乾」現在是兩個答案。desktop IPC、系統匣、CLI query 與
 BlindSpots 共用 `clear`／`stopping`／`stopped`／`uncertain` 四態：pending 只顯示「正在完成
-全停」，broken／symlink／non-regular protocol state 明講讀不到並 fail closed；只有 durable
+全停」，孤立 pending、broken／symlink／non-regular protocol state 明講讀不到並 fail closed；只有 durable
 latch 完成才顯示「已全停」。事件仍以 revision 壓過較早的 poll，重疊 poll 也只有最新 request
 可落地。解除全停只清這組旗標，原本的 pause 與 hands stop 都保留。
+data dir 目錄項本身若已是 symlink／Windows reparse，也固定進 `uncertain` 並拒絕 admission，
+不會沿著現成的間接入口開始協定。這不是 pathname namespace pin：同權限程式在行程存活時
+rename／替換該路徑或改指 ancestor 仍在既有 threat-model 邊界外；移動／修復資料目錄前須先關閉
+所有 AI-Sister 行程。
 
-若 interpreter／reviewer 已把原文交給使用者安裝的 CLI agent，`stop-all` 會等該次最長
-120 秒的 CLI timeout 與本機 outbound audit 收尾後才回成功；這保證成功回條之後不會首次
-寫出新的產品記憶，不表示 provider 已收到的 request 被取消或撤回。doctor／bench 在全停時
-也不再探測 live focus、網址或螢幕。
+若 interpreter／reviewer 已把原文交給使用者安裝的 CLI agent，CLI timeout 判定是 120 秒；
+到點後還會終止整個 Unix process group／Windows Job Object、收完繼承 pipe 與本機 outbound
+audit，所以 120 秒不是 stop 總等待上限。成功回條保證之後不會首次寫出新的產品記憶，不表示
+provider 已收到的 request 被取消或撤回。Desktop 答案、守門員主動卡與 reaction 另用 native
+presentation lease 跨到 renderer 的 begin／同步呈現／end，避免 IPC 回條晚到而在 stop 成功後
+才顯示；未 begin 回條五秒回收，已 begin 的只在 end、window destroy 或 process teardown
+釋放。本機答案朗讀持 lease 到 ended／error／Stop；已准入的 Azure POST 先持 activity guard
+到完整 transport，再把它交給本機 MP3 playback lease。pending 可先發佈、新朗讀立刻拒絕；
+POST transport 自己最長 45 秒，但 stop 還可能等待播放，不能承諾總上限。
+doctor／bench 在全停時也不再探測 live focus、網址或螢幕。
 
 自動驗證包含 reader-first drain、32 輪 release／admission／engage 排程、慢 privacy 後丟棄、
-stale brain permit、模型回來後停止、最後唯一 reviewer card、hands OS closure、doctor production
-wiring、measured release tick、四態 renderer 與八刀定點 mutation；Windows desktop／CLI 的
+stale brain permit、完整 watch child 排乾、模型回來後停止、最後唯一 reviewer card、hands OS
+closure、Gatekeeper／reaction／答案 presentation、本機與 Azure playback、Azure transport、
+Windows provider suspended-before-Job composition、doctor production wiring、measured
+release tick、四態 renderer 與定點 mutation；Windows desktop／CLI 的
 cross-check 與 lint 已通過。這些仍不是正式 `AI-Sister-Setup.exe` 上的跨行程人工 smoke；
 那一格繼續留在 Release 1.0 checklist。code signing 與官網也仍未完成。
 

@@ -125,6 +125,8 @@ const EXPECTED = Object.freeze({
 
 async function open(personaView = persona(), options = {}) {
   let plays = 0;
+  let cancels = 0;
+  const mediaTrace = [];
   const speaks = [];
   const reelImages = [];
   const deferredReelLoads = [];
@@ -138,7 +140,7 @@ async function open(personaView = persona(), options = {}) {
   const node = domOf(HTML, (selector) => {
     const element = fakeEl(selector);
     if (selector === "[data-persona-audio]") {
-      element.pause = () => {};
+      element.pause = () => mediaTrace.push("pause");
       element.play = () => {
         plays += 1;
         return Promise.resolve();
@@ -221,7 +223,10 @@ async function open(personaView = persona(), options = {}) {
     });
     const removeAttribute = element.removeAttribute.bind(element);
     element.removeAttribute = (name) => {
-      if (name === "src") src = "";
+      if (name === "src") {
+        src = "";
+        mediaTrace.push("remove-src");
+      }
       removeAttribute(name);
     };
     return element;
@@ -247,7 +252,10 @@ async function open(personaView = persona(), options = {}) {
   };
   globalThis.speechSynthesis = {
     addEventListener() {},
-    cancel() {},
+    cancel() {
+      cancels += 1;
+      mediaTrace.push("cancel-local");
+    },
     getVoices() {
       return options.systemVoices ?? [];
     },
@@ -290,7 +298,21 @@ async function open(personaView = persona(), options = {}) {
             if (options.deferRecorderTruth) return new Promise(() => {});
             return { phase: "stopped", failures: 0, message: null };
           case "master_stop_state":
-            return options.masterStopState ?? "clear";
+            return typeof options.masterStopState === "function"
+              ? options.masterStopState()
+              : (options.masterStopState ?? "clear");
+          case "master_stop_presentation_begin":
+            return typeof options.masterStopPresentationBegin === "function"
+              ? options.masterStopPresentationBegin(args)
+              : (options.masterStopPresentationBegin ?? true);
+          case "master_stop_presentation_end":
+            mediaTrace.push(`end:${args?.presentationId ?? "missing"}`);
+            return null;
+          case "answer_local_speech_admit":
+            if (options.localSpeechAdmission instanceof Error) {
+              throw options.localSpeechAdmission;
+            }
+            return options.localSpeechAdmission ?? { presentation_id: "local-answer" };
           case "pause_state":
             return false;
           case "last_recording_end":
@@ -308,6 +330,7 @@ async function open(personaView = persona(), options = {}) {
           case "ask":
             return (
               options.askResult ?? {
+                presentation_id: null,
                 hits: [],
                 kind: "keywords",
                 query_id: null,
@@ -349,6 +372,8 @@ async function open(personaView = persona(), options = {}) {
     speaks,
     reelImages,
     plays: () => plays,
+    cancels: () => cancels,
+    mediaTrace: () => [...mediaTrace],
     finishAudio() {
       node("[data-persona-audio]").onended?.();
     },
@@ -1170,9 +1195,7 @@ console.log("⑥ fixed-pack seam fail closed；即使假裝已安裝，語音也
     { plays: answerStopsPending.plays(), line: answerStopsPending.node("[data-persona-line]").textContent },
   );
 
-  const answerLocal = await open(persona("mimo", { voice_enabled: true }), {
-    systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
-    askResult: {
+  const answerAskResult = {
       hits: [
         {
           chunk_id: 31,
@@ -1196,12 +1219,26 @@ console.log("⑥ fixed-pack seam fail closed；即使假裝已安裝，語音也
       chapters: null,
       followup: null,
       closure_notice: null,
-    },
+  };
+  let localMasterStopState = "clear";
+  const answerLocal = await open(persona("mimo", { voice_enabled: true }), {
+    systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
+    askResult: answerAskResult,
+    masterStopState: () => localMasterStopState,
   });
   await answerLocal.ask("電話");
   await answerLocal.clickAnswerRead();
   const spokenAnswer = answerLocal.speaks[0]?.text ?? "";
+  const localLeaseEnds = () =>
+    answerLocal.calls.filter((cmd) => cmd === "master_stop_presentation_end").length;
   check("本機答案朗讀收到畫面答案正文", spokenAnswer.includes("客服專線 0800-080-123"), spokenAnswer);
+  check(
+    "本機答案朗讀先取得 native admission/begin，播放中 lease 尚未 end",
+    answerLocal.calls.includes("answer_local_speech_admit") &&
+      answerLocal.calls.includes("master_stop_presentation_begin") &&
+      localLeaseEnds() === 0,
+    answerLocal.calls,
+  );
   check(
     "答案朗讀剔除來源與操作列",
     !spokenAnswer.includes("chrome.exe") &&
@@ -1224,7 +1261,54 @@ console.log("⑥ fixed-pack seam fail closed；即使假裝已安裝，語音也
   );
   check(
     "localService error 也清掉 speaking",
-    !answerLocal.node("[data-avatar]").classList.contains("speaking"),
+    !answerLocal.node("[data-avatar]").classList.contains("speaking") && localLeaseEnds() === 1,
+    { calls: answerLocal.calls, ends: localLeaseEnds() },
+  );
+
+  await answerLocal.ask("再念一次");
+  await answerLocal.clickAnswerRead();
+  check("第二次播放中仍沒提早 end 新 lease", localLeaseEnds() === 1, answerLocal.calls);
+  answerLocal.speaks[1]?.onend?.();
+  check("本機答案最後一段 ended 才 end lease", localLeaseEnds() === 2, answerLocal.calls);
+
+  await answerLocal.ask("播放中全停");
+  await answerLocal.clickAnswerRead();
+  answerLocal.speaks[2]?.onstart?.();
+  const cancelsBeforeStop = answerLocal.cancels();
+  const traceBeforeStop = answerLocal.mediaTrace().length;
+  localMasterStopState = "stopping";
+  await answerLocal.poll();
+  const stopTrace = answerLocal.mediaTrace().slice(traceBeforeStop);
+  const cancelAt = stopTrace.indexOf("cancel-local");
+  const endAt = stopTrace.indexOf("end:local-answer");
+  check(
+    "外部 CLI 的 poll 觀察到 Stopping，先 cancel 本機答案 TTS 再 end lease",
+    answerLocal.cancels() > cancelsBeforeStop &&
+      localLeaseEnds() === 3 &&
+      !answerLocal.node("[data-avatar]").classList.contains("speaking") &&
+      cancelAt >= 0 &&
+      endAt > cancelAt,
+    {
+      calls: answerLocal.calls,
+      cancels: answerLocal.cancels(),
+      ends: localLeaseEnds(),
+      stopTrace,
+    },
+  );
+
+  const boundaryBlocked = await open(persona("mimo", { voice_enabled: true }), {
+    systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
+    askResult: answerAskResult,
+    localSpeechAdmission: { presentation_id: "local-blocked" },
+    masterStopPresentationBegin: ({ presentationId }) => presentationId !== "local-blocked",
+  });
+  await boundaryBlocked.ask("邊界拒絕");
+  await boundaryBlocked.clickAnswerRead();
+  check(
+    "本機答案 begin=false 時不 speak 且收回 lease",
+    boundaryBlocked.speaks.length === 0 &&
+      boundaryBlocked.calls.includes("master_stop_presentation_end"),
+    { speaks: boundaryBlocked.speaks, calls: boundaryBlocked.calls },
   );
 }
 
@@ -1324,14 +1408,22 @@ console.log("⑧ Rust／JS 邊界沒有把 Persona 接進答案或安全路徑")
   check("voice gate 預設 false", /voice_enabled:\s*false/u.test(CONFIG));
   const answerRead = SRC.match(/function answerReadLine\(\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
   check(
-    "答案朗讀是另一個 trusted click 且只走本機系統語音",
+    "答案朗讀是 trusted click、本機系統語音，且先取得 master-stop presentation admission",
     answerRead.includes('button.textContent = "🔊 用本機聲音朗讀"') &&
       answerRead.includes("event?.isTrusted !== true") &&
-      answerRead.includes("speakWithLocalSystemVoice(text)") &&
-      !answerRead.includes("invoke("),
+      answerRead.includes('invoke("answer_local_speech_admit")') &&
+      answerRead.includes("beginNativePresentation(presentation)") &&
+      answerRead.includes("speakWithLocalSystemVoice(text, presentation)"),
     answerRead,
   );
-  const localSpeech = SRC.match(/function speakWithLocalSystemVoice\(text\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
+  check(
+    "native local-answer admission command 有註冊且只鑄 presentation id",
+    MAIN.includes("fn answer_local_speech_admit(") &&
+      MAIN.includes('admit_desktop_brain(shell.data_dir.as_deref(), "這次本機答案朗讀")') &&
+      MAIN.includes("answer_local_speech_admit,") &&
+      MAIN.includes("struct MasterStopPresentationView"),
+  );
+  const localSpeech = SRC.match(/function speakWithLocalSystemVoice\(text, presentation = null\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
   const mediaStop =
     SRC.match(
       /^function stopPersonaMedia\(\{ cancelAzureNative = true \} = \{\}\) \{[\s\S]*?^\}$/mu,
@@ -1340,7 +1432,8 @@ console.log("⑧ Rust／JS 邊界沒有把 Persona 接進答案或安全路徑")
     "長答案按段依序播且整串有 revision cancel gate",
     SRC.includes("function chunkLocalSpeech(text, limit = 160)") &&
       localSpeech.includes("revision !== localSpeechRevision") &&
-      localSpeech.includes("utterance.onend = speakNext"),
+      localSpeech.includes("utterance.onend = speakNext") &&
+      localSpeech.includes("releaseNativePresentation(presentation)"),
     localSpeech,
   );
   check(

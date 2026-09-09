@@ -169,7 +169,7 @@ pub fn recorder(
     config: Config,
     db: Db,
     image_dir: Option<PathBuf>,
-    master_stop_source: crate::MasterStopSource,
+    data_dir: PathBuf,
 ) -> Result<Recorder<impl Backend + use<>>> {
     let backend = backend(&config)?;
     Recorder::new_trusted_windows(
@@ -177,7 +177,7 @@ pub fn recorder(
         db,
         config,
         image_dir,
-        master_stop_source,
+        crate::MasterStopSource::Latch(data_dir),
         backend_token(),
     )
 }
@@ -198,6 +198,19 @@ fn enable_dpi_awareness() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn temp_data_dir(label: &str) -> PathBuf {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "sister-windows-recorder-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp data dir");
+        dir
+    }
 
     #[test]
     fn only_the_windows_module_token_mints_v2_url_provenance() {
@@ -216,11 +229,13 @@ mod tests {
 
     #[test]
     fn production_composition_writes_v2_url_provenance() {
+        let _input_lock = input::test_exclusive();
+        let data_dir = temp_data_dir("provenance");
         let recorder = recorder(
             Config::default(),
             Db::open_in_memory().expect("db"),
             None,
-            crate::MasterStopSource::NotApplicable,
+            data_dir.clone(),
         )
         .expect("windows recorder");
         let platform: String = recorder
@@ -231,6 +246,91 @@ mod tests {
             })
             .expect("platform");
         assert_eq!(platform, sister_core::db::TRUSTED_URL_ORIGIN_PLATFORM);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn production_composition_blocks_on_the_real_data_dir_latch_before_capture() {
+        let _input_lock = input::test_exclusive();
+        let data_dir = temp_data_dir("master-stop");
+        sister_hands::master_stop::engage(&data_dir, 1_000).expect("engage master stop");
+        let mut recorder = recorder(
+            Config::default(),
+            Db::open_in_memory().expect("db"),
+            None,
+            data_dir.clone(),
+        )
+        .expect("windows recorder");
+
+        assert_eq!(
+            recorder.tick(2_000).expect("gated tick"),
+            crate::Tick::MasterStopped
+        );
+        assert_eq!(recorder.stats().master_blocked_ticks, 1);
+        assert_eq!(recorder.stats().working_ticks, 0);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn production_recorder_drop_drains_callbacks_before_stop_can_complete() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let _input_lock = input::test_exclusive();
+        let data_dir = temp_data_dir("drop-drain");
+        let mut recorder = recorder(
+            Config::default(),
+            Db::open_in_memory().expect("db"),
+            None,
+            data_dir.clone(),
+        )
+        .expect("windows recorder");
+        assert!(
+            !input::callback_gate_open_for_test(),
+            "production construction must cold-start the callback gate closed"
+        );
+
+        // Admission happens before any fallible live source poll. The runner's
+        // desktop state may make that poll suspend input again, so reopen the
+        // same production static gate explicitly to model the active interval
+        // just before a maintenance error drops this recorder.
+        let _ = recorder.tick(sister_core::now_ms());
+        input::open_callback_gate_for_test();
+        assert!(
+            input::callback_gate_open_for_test(),
+            "a clear admitted recorder must open callbacks"
+        );
+
+        let stop_dir = data_dir.clone();
+        let (tx, rx) = mpsc::channel();
+        let stopper = std::thread::spawn(move || {
+            tx.send(sister_hands::master_stop::engage(&stop_dir, 1_000))
+                .unwrap();
+        });
+        for _ in 0..500 {
+            if data_dir.join("master.stop.pending").exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(data_dir.join("master.stop.pending").exists());
+        assert!(
+            rx.recv_timeout(Duration::from_millis(40)).is_err(),
+            "stop completed while the between-tick callback source was live"
+        );
+
+        // This is the same destruction path used by `windows_record` when a
+        // maintenance `?` exits before the explicit finalize block.
+        drop(recorder);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("stop did not finish after recorder drop")
+            .expect("engage after recorder drop");
+        stopper.join().unwrap();
+        assert!(
+            !input::callback_gate_open_for_test(),
+            "stop success must not precede callback suspension"
+        );
+        std::fs::remove_dir_all(data_dir).unwrap();
     }
 
     /// 一台什麼都做得到的機器。測試從這裡出發，只改要測的那一項，

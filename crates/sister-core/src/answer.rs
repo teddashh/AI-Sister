@@ -781,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_master_stop_reaches_blind_spots_without_becoming_completed() {
+    fn orphan_pending_master_stop_reaches_blind_spots_as_uncertain() {
         let tmp = Tmp::new("master-stop-pending-only");
         std::fs::write(tmp.0.join("master.stop.pending"), b"1234").unwrap();
         let db = Db::open_in_memory().expect("db");
@@ -789,9 +789,9 @@ mod tests {
         let b = blind_spots(&db, &tmp.0, "電話").expect("blind");
         assert_eq!(
             b.master_stop_state,
-            sister_hands::master_stop::State::Stopping
+            sister_hands::master_stop::State::Uncertain
         );
-        assert!(b.any(), "停止中仍是這題查不到東西的一個目前理由");
+        assert!(b.any(), "讀不到可靠狀態仍是這題查不到東西的一個目前理由");
     }
 
     /// 一個字的查詢只翻得到最近 30 天，而 `text_days` 預設 365。

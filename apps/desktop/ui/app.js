@@ -261,6 +261,7 @@ let masterStopPhase = "checking";
 // 最後送出的那份能落地。兩個軸分開，否則舊 false 可以蓋掉剛收到的全停 true。
 let masterStopRevision = 0;
 let masterStopReadRequest = 0;
+let gatekeeperReadRequest = 0;
 
 // Persona 是表達層，不是上面的錄製狀態。關掉她、換顏色或停動畫都不可以改
 // `state` / `paused`，也不可以走 ask、Gatekeeper、hands 或 CLI。
@@ -630,6 +631,7 @@ function applyPersona(view) {
 
 let localSystemVoices = [];
 let localSpeechRevision = 0;
+let localSpeechPresentation = null;
 let azureSpeechRevision = 0;
 let azureSpeechRequestPending = false;
 let azureSpeechEnabled = false;
@@ -643,6 +645,7 @@ let azureNativeExpected = null;
 let azurePendingGeneration = null;
 let azureCancelPending = false;
 let pendingAzureAutoAsk = null;
+let azurePlaybackPresentation = null;
 
 // 一個是第四張同意 + 設定開關授權的新答案，一個是使用者當下按的
 // 重播。用物件 identity，不讓一個拼錯的字串想當哪一種就當哪一種。
@@ -704,6 +707,10 @@ function stopAzureSpeech({ cancelNative = true } = {}) {
     personaAudio.onended = null;
     personaAudio.onerror = null;
   }
+  // Native master-stop activity guard 跨完整播放；先確實停掉本機 media，再交還
+  // presentation lease。外部 CLI stop 沒有 Tauri event，五秒 poll 走到這裡時
+  // stop-all 會等這個 end，而不會先回成功、聲音才在後面繼續。
+  releaseAzurePlaybackPresentation();
   if (
     cancelNative &&
     hadPendingRequest &&
@@ -744,6 +751,11 @@ function stopLocalSpeech() {
   localSpeechRevision += 1;
   globalThis.speechSynthesis?.cancel?.();
   setPersonaSpeaking(PERSONA_SPEAKING_LOCAL, false);
+  if (localSpeechPresentation !== null) {
+    const presentation = localSpeechPresentation;
+    localSpeechPresentation = null;
+    releaseNativePresentation(presentation);
+  }
 }
 
 /** 三條聲音共用同一顆 stop；新意圖不能讓本機 WAV、系統 TTS 與 Azure 疊在一起。 */
@@ -816,7 +828,7 @@ globalThis.speechSynthesis?.addEventListener?.("voiceschanged", refreshLocalSyst
  * 只接受瀏覽器明確標成 `localService` 的繁中／中文聲音。找不到就保持安靜；絕不
  * 因為系統 voice 缺席而選 remote voice。呼叫端必須仍在 trusted click 那條路上。
  */
-function speakWithLocalSystemVoice(text) {
+function speakWithLocalSystemVoice(text, presentation = null) {
   if (!personaVoiceEnabled || typeof globalThis.SpeechSynthesisUtterance !== "function") {
     return false;
   }
@@ -832,12 +844,17 @@ function speakWithLocalSystemVoice(text) {
   // 答案朗讀要停掉 fixed WAV；fixed voice 的 fallback 也要讓那份 pending request
   // 失效。共用 stop 後才拿 revision，這一串才是目前唯一可繼續的播放意圖。
   stopPersonaMedia();
+  localSpeechPresentation = presentation;
   const revision = localSpeechRevision;
   let next = 0;
   const speakNext = () => {
     if (revision !== localSpeechRevision) return;
     if (next >= chunks.length) {
       setPersonaSpeaking(PERSONA_SPEAKING_LOCAL, false);
+      if (localSpeechPresentation === presentation) {
+        localSpeechPresentation = null;
+        releaseNativePresentation(presentation);
+      }
       return;
     }
     const utterance = new globalThis.SpeechSynthesisUtterance(chunks[next]);
@@ -856,10 +873,18 @@ function speakWithLocalSystemVoice(text) {
       if (revision !== localSpeechRevision) return;
       localSpeechRevision += 1;
       setPersonaSpeaking(PERSONA_SPEAKING_LOCAL, false);
+      if (localSpeechPresentation === presentation) {
+        localSpeechPresentation = null;
+        releaseNativePresentation(presentation);
+      }
       personaLine.textContent = "本機聲音這次沒有播成；我沒有改用雲端。";
       personaLine.hidden = false;
     };
-    synth.speak(utterance);
+    try {
+      synth.speak(utterance);
+    } catch {
+      utterance.onerror?.();
+    }
   };
   speakNext();
   return true;
@@ -1165,16 +1190,31 @@ function renderGatekeeper(view) {
 
 function reactToGatekeeper(close) {
   if (invoke === null || activeUtteranceId === null) return;
-  invoke("gatekeeper_react", { utteranceId: activeUtteranceId, close }).then(
-    (message) => {
-      // 三個後端結果分別是「這張記憶不會再提了」、「先收起來，之後再說」、
-      // 「收到你的回饋；這一則沒有可結案或延後的承諾」。不在前端猜類別。
-      utteranceResult.textContent = message;
-      utteranceActions.hidden = true;
-      hasSomething = false;
-      avatar.classList.remove("has-something");
+  const reactedUtterance = activeUtteranceId;
+  invoke("gatekeeper_react", { utteranceId: reactedUtterance, close }).then(
+    (view) => {
+      if (activeUtteranceId !== reactedUtterance || masterStopPhase !== "clear") {
+        releaseNativePresentation(view);
+        return;
+      }
+      void commitNativePresentation(view, () => {
+        // 三個後端結果分別是「這張記憶不會再提了」、「先收起來，之後再說」、
+        // 「收到你的回饋；這一則沒有可結案或延後的承諾」。不在前端猜類別。
+        utteranceResult.textContent = view.message;
+        utteranceActions.hidden = true;
+        hasSomething = false;
+        avatar.classList.remove("has-something");
+      }).catch((error) => {
+        if (activeUtteranceId === reactedUtterance && masterStopPhase === "clear") {
+          utteranceResult.textContent = String(error);
+        }
+      });
     },
-    (error) => { utteranceResult.textContent = String(error); },
+    (error) => {
+      if (activeUtteranceId === reactedUtterance && masterStopPhase === "clear") {
+        utteranceResult.textContent = String(error);
+      }
+    },
   );
 }
 
@@ -1298,6 +1338,77 @@ function receiveGatekeeper(view) {
   gatekeeperReadError = null;
   latestGatekeeperView = view;
   paintConversation();
+}
+
+function presentationIdOf(view) {
+  return typeof view?.presentation_id === "string" ? view.presentation_id : null;
+}
+
+function releaseNativePresentation(view) {
+  const presentationId = presentationIdOf(view);
+  if (invoke !== null && presentationId !== null) {
+    void invoke("master_stop_presentation_end", { presentationId }).catch(() => {});
+  }
+}
+
+function releaseAzurePlaybackPresentation(view = azurePlaybackPresentation) {
+  if (view === null) return;
+  if (azurePlaybackPresentation === view) azurePlaybackPresentation = null;
+  releaseNativePresentation(view);
+}
+
+async function beginNativePresentation(view) {
+  const presentationId = presentationIdOf(view);
+  if (presentationId === null) {
+    // 純瀏覽器與舊 fixture 沒有 native lease；產品 IPC 回覆一定帶。
+    return masterStopPhase === "clear";
+  }
+  const allowed = await invoke("master_stop_presentation_begin", { presentationId });
+  return allowed === true && masterStopPhase === "clear";
+}
+
+/**
+ * Native IPC 回傳與這段 JS 真正畫完之間還有一個排程縫。外部 CLI 的 stop-all
+ * 沒有 Tauri event；只看五秒 poll，會讓 stop 成功後才跑到晚 Promise。Native
+ * lease 把 activity guard 留在 Rust：begin 在 turnstile 內重驗，render 同步完成
+ * 後 end。尚未 begin 的回覆五秒後回收；begun lease 只由 end 或 window/process
+ * teardown 釋放，timeout 不能插在 stop success 與晚 render 中間。
+ */
+async function commitNativePresentation(view, render) {
+  try {
+    const allowed = await beginNativePresentation(view);
+    if (!allowed) {
+      readMasterStopState();
+      return false;
+    }
+    render();
+    return true;
+  } finally {
+    releaseNativePresentation(view);
+  }
+}
+
+function readGatekeeper() {
+  if (invoke === null || masterStopPhase !== "clear") return;
+  const request = ++gatekeeperReadRequest;
+  invoke("gatekeeper_check").then(
+    (view) => {
+      if (request !== gatekeeperReadRequest || masterStopPhase !== "clear") {
+        releaseNativePresentation(view);
+        return;
+      }
+      void commitNativePresentation(view, () => receiveGatekeeper(view)).catch((error) => {
+        if (request === gatekeeperReadRequest && masterStopPhase === "clear") {
+          failToReceiveGatekeeper(error);
+        }
+      });
+    },
+    (error) => {
+      if (request === gatekeeperReadRequest && masterStopPhase === "clear") {
+        failToReceiveGatekeeper(error);
+      }
+    },
+  );
 }
 
 function failToReceiveGatekeeper(error) {
@@ -1931,8 +2042,29 @@ function normalizeMasterStopPhase(next) {
 function setMasterStopPhase(next) {
   const was = masterStopPhase;
   masterStopPhase = normalizeMasterStopPhase(next);
+  if (masterStopPhase !== "clear" && was !== masterStopPhase) {
+    // native admission 保到 Answer 回傳為止；但 Promise continuation 還沒畫答案、
+    // 還沒決定 Azure 自動朗讀。全停事件若插在這個縫裡，讓既有 ask generation
+    // 當場失效，晚答案連 render 都不能進，更不能在 Stopped 之後才 POST。
+    asking += 1;
+    pendingAzureAutoAsk = null;
+    slowNote = null;
+    stopPersonaMedia();
+    if (state === "thinking") state = "idle";
+    // Gatekeeper 是 brain 的產品寫入／主動說話面。外部 CLI stop 沒有 renderer
+    // event 時由 poll 補上；一旦觀察到非 clear，舊 poll 失效、卡片立即撤掉。
+    gatekeeperReadRequest += 1;
+    latestGatekeeperView = null;
+    gatekeeperReadError = null;
+    renderGatekeeper(null);
+  }
   if (was !== masterStopPhase) overtakenByEvents();
   paint();
+  paintConversation();
+  // 冷啟動的 visible poll 可能發生在 master-stop read 還是 checking 時；那一輪
+  // Gatekeeper 刻意不進。第一次確定 clear（或解除全停）就在這裡補問，不必等
+  // 下一個五秒 tick，也不會在 stopping／uncertain 下寫 utterance 帳。
+  if (masterStopPhase === "clear" && was !== "clear") readGatekeeper();
 }
 
 function readMasterStopState() {
@@ -2165,7 +2297,7 @@ function pollRecording() {
   // 每 5 秒問一次不會把預算燒掉：後端那一側同一件事今天只記一次帳，
   // 已經開口而人還沒回應的那一句是繼續顯示、不重扣。理由寫在
   // `main.rs` 的 `gatekeeper_check` 上面。
-  invoke("gatekeeper_check").then(receiveGatekeeper, failToReceiveGatekeeper);
+  readGatekeeper();
 }
 
 /**
@@ -2309,6 +2441,9 @@ globalThis.__TAURI__?.event
     masterStopRevision += 1;
     setMasterStopPhase(event.payload);
   })
+  // 開場 read 和 listener 真正 ready 中間，CLI 可能剛好切了 durable latch；那一個
+  // event 沒有 listener 可收。註冊完成後重讀一次磁碟，才封得住這個缺口。
+  ?.then?.(() => readMasterStopState())
   ?.catch?.(() => {});
 
 globalThis.__TAURI__?.event
@@ -2938,7 +3073,7 @@ function answerReadLine() {
   button.type = "button";
   button.className = "answer-read";
   button.textContent = "🔊 用本機聲音朗讀";
-  button.addEventListener("click", (event) => {
+  button.addEventListener("click", async (event) => {
     if (event?.isTrusted !== true) return;
     // 這是新的播放意圖：就算最後找不到 localService voice，也要先停掉上一句
     // fixed WAV／pending read，不能一邊說「沒有本機聲音」一邊繼續播舊台詞。
@@ -2949,7 +3084,35 @@ function answerReadLine() {
       return;
     }
     const text = answerTextForLocalSpeech();
-    if (text !== "" && speakWithLocalSystemVoice(text)) return;
+    if (text === "") return;
+    if (invoke === null) {
+      if (speakWithLocalSystemVoice(text)) return;
+    } else {
+      const localIntent = localSpeechRevision;
+      let presentation;
+      try {
+        presentation = await invoke("answer_local_speech_admit");
+        const allowed = await beginNativePresentation(presentation);
+        if (
+          !allowed ||
+          localIntent !== localSpeechRevision ||
+          masterStopPhase !== "clear"
+        ) {
+          releaseNativePresentation(presentation);
+          if (localIntent === localSpeechRevision) readMasterStopState();
+          return;
+        }
+        if (speakWithLocalSystemVoice(text, presentation)) return;
+        releaseNativePresentation(presentation);
+      } catch (error) {
+        releaseNativePresentation(presentation);
+        if (localIntent !== localSpeechRevision || masterStopPhase !== "clear") return;
+        personaLine.textContent = `本機答案朗讀沒有開始：${String(error?.message ?? error)}`;
+        personaLine.hidden = false;
+        readMasterStopState();
+        return;
+      }
+    }
     personaLine.textContent = "這台機器沒有回報可用的本機中文語音；我沒有改用雲端。";
     personaLine.hidden = false;
   });
@@ -3017,7 +3180,10 @@ async function speakAzureAnswer(button, intent) {
     readAzureTts();
     return;
   }
-  if (revision !== azureSpeechRevision) return;
+  if (revision !== azureSpeechRevision) {
+    releaseNativePresentation(audio);
+    return;
+  }
   azureSpeechRequestPending = false;
   azurePendingGeneration = null;
   if (
@@ -3030,8 +3196,11 @@ async function speakAzureAnswer(button, intent) {
     audio.audio_bytes > 8 * 1024 * 1024 ||
     typeof audio?.data_url !== "string" ||
     !audio.data_url.startsWith("data:audio/mpeg;base64,") ||
-    audio.data_url.length > 12 * 1024 * 1024
+    audio.data_url.length > 12 * 1024 * 1024 ||
+    typeof audio?.presentation_id !== "string" ||
+    audio.presentation_id === ""
   ) {
+    releaseNativePresentation(audio);
     resetAzureAnswerButton();
     personaLine.textContent = "Azure 回應不是這一版允許的 MP3 形狀；沒有播放，也沒有改用其他聲音。";
     personaLine.hidden = false;
@@ -3046,20 +3215,49 @@ async function speakAzureAnswer(button, intent) {
     generation: audio.generation,
   });
   if (!personaAudio || typeof personaAudio.play !== "function") {
+    releaseNativePresentation(audio);
     resetAzureAnswerButton();
     personaLine.textContent = "這扇視窗沒有可用的本機 audio 元件；Azure MP3 沒有播放，也沒有落地。";
     personaLine.hidden = false;
     return;
   }
+  let presentationAllowed;
+  try {
+    presentationAllowed = await beginNativePresentation(audio);
+  } catch (err) {
+    releaseNativePresentation(audio);
+    resetAzureAnswerButton();
+    personaLine.textContent = `Azure MP3 已回來，但播放邊界確認失敗；沒有播放：${String(err?.message ?? err)}`;
+    personaLine.hidden = false;
+    readMasterStopState();
+    return;
+  }
+  if (revision !== azureSpeechRevision) {
+    releaseNativePresentation(audio);
+    return;
+  }
+  if (!presentationAllowed) {
+    releaseNativePresentation(audio);
+    resetAzureAnswerButton();
+    personaLine.textContent = "全停閘門已在播放前生效；Azure MP3 沒有播放，也沒有落地。";
+    personaLine.hidden = false;
+    readMasterStopState();
+    return;
+  }
+  // begin 成功後 guard 不能像答案文字那樣在同步 render 後立刻 end：播放本身
+  // 還在 WebView 的本機 media pipeline 裡。ended／error／Stop 才是這份 activity
+  // 真正排乾；window/process teardown 則由 native 一次清掉。
+  azurePlaybackPresentation = audio;
   let playbackFinished = false;
   const playbackFailed = () => {
-    if (revision !== azureSpeechRevision) return;
+    if (revision !== azureSpeechRevision || playbackFinished) return;
     playbackFinished = true;
     setPersonaSpeaking(PERSONA_SPEAKING_AZURE, false);
     resetAzureAnswerButton();
     personaAudio.onerror = null;
     personaAudio.onended = null;
     personaAudio.removeAttribute?.("src");
+    releaseAzurePlaybackPresentation(audio);
     personaLine.textContent =
       "Azure MP3 已回來，但 WebView 這次沒有播放；沒有落地，也沒有改用其他聲音。";
     personaLine.hidden = false;
@@ -3070,13 +3268,14 @@ async function speakAzureAnswer(button, intent) {
   personaAudio.currentTime = 0;
   personaAudio.src = audio.data_url;
   personaAudio.onended = () => {
-    if (revision !== azureSpeechRevision) return;
+    if (revision !== azureSpeechRevision || playbackFinished) return;
     playbackFinished = true;
     setPersonaSpeaking(PERSONA_SPEAKING_AZURE, false);
     resetAzureAnswerButton();
     personaAudio.onerror = null;
     personaAudio.onended = null;
     personaAudio.removeAttribute?.("src");
+    releaseAzurePlaybackPresentation(audio);
   };
   try {
     await personaAudio.play();
@@ -3679,28 +3878,38 @@ async function ask() {
     if (invoke === null) throw new Error("這一頁不是在 AI-Sister 裡打開的");
     const answer = await invoke("ask", { question });
     // 這一份過期了。畫面歸還在跑的那一次管，這裡連 idle 都不要設。
-    if (mine !== asking) return;
-    renderHits(
-      answer.hits,
-      answer.kind,
-      answer.query_id,
-      answer.answers,
-      answer.blind,
-      answer.truncated,
-      answer.answers_truncated,
-      answer.searched,
-      answer.time_range,
-      answer.chapters,
-      answer.followup,
-      answer.closure_notice,
-      answer.overview,
-    );
-    setState("idle");
-    // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
-    askInput.value = "";
-    // 這是唯一條自動 Azure 入口：native 已經 ready、而且這份仍是最新
-    // ask 的答案，才會把正文送一次。開機 demo、status event 與舊答案重畫不走這裡。
-    autoSpeakLatestAzureAnswer(mine);
+    if (mine !== asking) {
+      releaseNativePresentation(answer);
+      return;
+    }
+    const presented = await commitNativePresentation(answer, () => {
+      // begin 成功後 native guard 仍活著；這一段同步畫完才 end。外部 CLI 即使
+      // 已發佈 pending，也只能在畫完之後回報全停成功。
+      renderHits(
+        answer.hits,
+        answer.kind,
+        answer.query_id,
+        answer.answers,
+        answer.blind,
+        answer.truncated,
+        answer.answers_truncated,
+        answer.searched,
+        answer.time_range,
+        answer.chapters,
+        answer.followup,
+        answer.closure_notice,
+        answer.overview,
+      );
+      setState("idle");
+      // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
+      askInput.value = "";
+      // 這是唯一條自動 Azure 入口：native 已經 ready、而且這份仍是最新
+      // ask 的答案，才會把正文送一次。開機 demo、status event 與舊答案重畫不走這裡。
+      autoSpeakLatestAzureAnswer(mine);
+    });
+    if (!presented && mine === asking) {
+      setState("idle");
+    }
   } catch (err) {
     if (mine !== asking) return;
     // 失敗要說出是什麼失敗。「沒有結果」跟「還沒錄過任何東西」跟「資料庫

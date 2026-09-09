@@ -167,8 +167,8 @@ pub struct RecorderStats {
     /// 倍，而且是往「看起來很便宜」的方向差。那個數字唯一的用途就是判斷這
     /// 個迴圈貴不貴，指錯方向等於沒有。
     pub working_ticks: u64,
-    /// 因跨三層全停而在任何畫面擷取前返回的拍數。
-    pub master_stopped_ticks: u64,
+    /// 因全停閘門（Stopping／Stopped／Uncertain）而在任何畫面擷取前返回的拍數。
+    pub master_blocked_ticks: u64,
     /// recorder 親眼看見 latch 解除、寫好 release audit 並刻意不工作的拍數。
     pub master_released_ticks: u64,
     pub kept: u64,
@@ -456,6 +456,10 @@ pub struct Recorder<B: Backend> {
     image_dir: Option<PathBuf>,
     /// 全停來源在建構時必填；不能事後忘記接線而 fail-open。
     master_stop_source: MasterStopSource,
+    /// Windows input hook 在 tick 間仍持續累積，所以它開著多久，這份跨行程
+    /// activity lease 就必須活多久。只在單一 tick 的 stack 上拿 guard，會讓
+    /// stop-all 在 sleep 期間回成功，但 hook 仍繼續數新的鍵鼠事件。
+    master_input_activity: Option<sister_hands::master_stop::ActivityGuard>,
     /// 上一次**確實寫成稽核列**的全停狀態。不能直接拿 latch 當這個值：
     /// audit 寫失敗時必須留在舊狀態，下一拍才知道同一列還要重試。
     master_stopped: bool,
@@ -552,6 +556,7 @@ impl<B: Backend> Recorder<B> {
             .image_bytes_since(image_day * DAY_MS)
             .context("今天用掉多少畫面額度，問不出來")?;
 
+        let master_input_gap = matches!(&master_stop_source, MasterStopSource::Latch(_));
         Ok(Self {
             backend,
             db,
@@ -577,9 +582,13 @@ impl<B: Backend> Recorder<B> {
             pending_system: None,
             image_dir,
             master_stop_source,
+            master_input_activity: None,
             master_stopped: false,
             master_clipboard_gap: false,
-            master_input_gap: false,
+            // Production Windows input cold-starts suspended.  The first clear
+            // admission closes this internal gap and resumes it under the
+            // persistent activity lease above.
+            master_input_gap,
             last_image_ts: None,
             last_look_ts: None,
             image_day,
@@ -666,6 +675,12 @@ impl<B: Backend> Recorder<B> {
     /// Production 沒有這條接法；產品來源必須在建構時交出。
     #[cfg(test)]
     fn set_master_stop_dir(&mut self, dir: PathBuf) {
+        // Tests switch a recorder from the explicit NotApplicable composition
+        // into the production gate after construction. Recreate the same cold
+        // boundary at the next supplied tick timestamp. Calling suspend with
+        // wall-clock time here would consume an entire deterministic replay.
+        self.master_input_gap = true;
+        self.master_input_activity = None;
         self.master_stop_source = MasterStopSource::Latch(dir);
     }
 
@@ -711,11 +726,36 @@ impl<B: Backend> Recorder<B> {
         Ok(true)
     }
 
-    fn master_stop_tick(&mut self, ts: Millis) -> Result<Tick> {
-        self.set_master_stopped(true, ts)?;
-        self.stats.master_stopped_ticks += 1;
+    fn master_stop_tick(
+        &mut self,
+        ts: Millis,
+        observed: sister_hands::master_stop::State,
+    ) -> Result<Tick> {
+        let audit =
+            if observed == sister_hands::master_stop::State::Stopped {
+                self.set_master_stopped(true, ts).map(|_| ())
+            } else {
+                // pending／壞協定都要擋這一拍、封 source 尾巴，但不能寫成
+                // MasterStopEngaged。那一列的意思是三層已排乾完成；此刻 recorder
+                // 自己這份 activity guard 可能正是 engage 還在等的最後一份。
+                self.seal_master_stop_gap(ts);
+                if self.pending_system.is_some() {
+                    self.commit_pending_system().context(
+                    "commit pending system transition audit before incomplete master-stop gate",
+                ).map(|_| ())
+                } else {
+                    Ok(())
+                }
+            };
+        // This must run even when the audit write above failed. Once callbacks
+        // are closed and drained, release the between-tick lease so engage can
+        // finish. If suspension itself fails, retain the lease and fail closed.
+        if self.suspend_input_source(ts) {
+            self.master_input_activity = None;
+        }
+        audit?;
+        self.stats.master_blocked_ticks += 1;
         let _ = self.establish_clipboard_watermark(ts);
-        let _ = self.suspend_input_source(ts);
         Ok(Tick::MasterStopped)
     }
 
@@ -724,7 +764,7 @@ impl<B: Backend> Recorder<B> {
     fn master_postcheck(&mut self, ts: Millis, activity: &MasterActivity) -> Result<Option<Tick>> {
         match activity {
             MasterActivity::Guard(guard) if guard.stop_requested() => {
-                self.master_stop_tick(ts).map(Some)
+                self.master_stop_tick(ts, guard.observed_state()).map(Some)
             }
             MasterActivity::Guard(_) | MasterActivity::NotApplicable => Ok(None),
         }
@@ -746,7 +786,7 @@ impl<B: Backend> Recorder<B> {
                     _guard: boundary,
                 })),
                 None => {
-                    self.master_stop_tick(ts)?;
+                    self.master_stop_tick(ts, guard.observed_state())?;
                     Ok(MasterBoundaryCheck::Stopped)
                 }
             },
@@ -830,6 +870,13 @@ impl<B: Backend> Recorder<B> {
     /// [`EndReason`]），而讓呼叫端有辦法說「不知道」，等於保證某一條路上
     /// 遲早會沒有人填。
     pub fn finish(&mut self, reason: EndReason) -> Result<()> {
+        // A recorder may finish between ticks while the Windows hook is open.
+        // Close callbacks before dropping the persistent activity lease, so a
+        // concurrent successful stop-all can never be followed by new counts.
+        if self.master_input_activity.is_some() && self.suspend_input_source(sister_core::now_ms())
+        {
+            self.master_input_activity = None;
+        }
         // 前一拍的 system source 可能已經交出 transition，但 audit transaction
         // 當時失敗。record loop 會在下一輪一開始重試；然而 duration／Ctrl-C／
         // 外部停止請求也在下一輪 tick 之前判斷，若直接收尾，行程明明還活著卻
@@ -1328,8 +1375,22 @@ impl<B: Backend> Recorder<B> {
         // `NotApplicable` 是 replay/單測的明確分支，不可偽造一份空 guard。
         let master_activity = match self.master_stop_source.clone() {
             MasterStopSource::Latch(data_dir) => {
-                let Some(guard) = sister_hands::master_stop::admit(&data_dir) else {
-                    return self.master_stop_tick(ts);
+                let guard = if let Some(guard) = self.master_input_activity.clone() {
+                    // A stop requested between ticks cannot complete while this
+                    // lease lives. Observe it before touching any live source,
+                    // close the hook, then let the exclusive drain finish.
+                    if guard.stop_requested() {
+                        let observed = guard.observed_state();
+                        return self.master_stop_tick(ts, observed);
+                    }
+                    guard
+                } else {
+                    let Some(guard) = sister_hands::master_stop::admit(&data_dir) else {
+                        let observed = sister_hands::master_stop::state(&data_dir);
+                        return self.master_stop_tick(ts, observed);
+                    };
+                    self.master_input_activity = Some(guard.clone());
+                    guard
                 };
                 MasterActivity::Guard(guard)
             }
@@ -2317,6 +2378,7 @@ mod tests {
         screen: std::collections::VecDeque<ScreenCapture>,
         pause_during_ocr: Option<std::rc::Rc<std::cell::Cell<bool>>>,
         privacy_hook: Option<Box<dyn FnOnce()>>,
+        suspend_hook: Option<Box<dyn FnOnce()>>,
     }
 
     impl Backend for GateBackend {
@@ -2381,6 +2443,9 @@ mod tests {
 
         fn suspend_input(&mut self, _ts: Millis) -> Result<()> {
             self.calls.borrow_mut().order.push("input-suspend");
+            if let Some(hook) = self.suspend_hook.take() {
+                hook();
+            }
             Ok(())
         }
 
@@ -2510,6 +2575,7 @@ mod tests {
             screen: std::collections::VecDeque::new(),
             pause_during_ocr: None,
             privacy_hook: None,
+            suspend_hook: None,
         };
         let recorder = Recorder::new(
             backend,
@@ -2580,6 +2646,19 @@ mod tests {
             recorder.tick(200).expect("mid-stop tick"),
             Tick::MasterStopped
         );
+        assert_eq!(
+            recorder
+                .db()
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM system_events WHERE kind = 'master_stop_engaged'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "pending only closes this tick; it must not claim all three layers already drained"
+        );
         join_slot
             .lock()
             .unwrap()
@@ -2588,6 +2667,23 @@ mod tests {
             .join()
             .unwrap();
         assert!(returned.load(Ordering::SeqCst));
+        assert_eq!(
+            recorder.tick(250).expect("observe completed latch"),
+            Tick::MasterStopped
+        );
+        assert_eq!(
+            recorder
+                .db()
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM system_events WHERE kind = 'master_stop_engaged'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "only a later observation of State::Stopped earns the completed audit"
+        );
         assert_eq!(stored_rows(&recorder, "frames"), 0);
         assert_eq!(stored_rows(&recorder, "text_chunks"), 0);
         assert!(
@@ -2602,6 +2698,154 @@ mod tests {
             "privacy 回來後看見 pending 就不可再 grab：{:?}",
             calls.borrow().order
         );
+    }
+
+    #[test]
+    fn corrupt_master_stop_protocol_blocks_capture_without_writing_completed_history() {
+        let control = Tmp::new("master-corrupt-protocol-audit");
+        std::fs::create_dir_all(control.0.join(sister_hands::master_stop::ACTIVITY_LOCK)).unwrap();
+        let (mut recorder, calls) = gate_recorder(
+            vec![SystemReply::Value(SystemObservation::active())],
+            vec![PrivacyReply::Value(clear_privacy())],
+        );
+        recorder.set_master_stop_dir(control.0.clone());
+
+        assert_eq!(recorder.tick(100).unwrap(), Tick::MasterStopped);
+        assert_eq!(
+            recorder
+                .db()
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM system_events WHERE kind = 'master_stop_engaged'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_no_content_after_gate(&calls.borrow());
+    }
+
+    #[test]
+    fn master_stop_cannot_finish_until_the_pending_tick_drains_input_callbacks() {
+        use std::sync::mpsc;
+
+        let control = Tmp::new("master-stop-suspend-order");
+        let (mut recorder, _) = gate_recorder(
+            std::iter::repeat_with(|| SystemReply::Value(SystemObservation::active()))
+                .take(8)
+                .collect(),
+            vec![PrivacyReply::Value(clear_privacy())],
+        );
+        recorder.set_master_stop_dir(control.0.clone());
+        let _ = recorder
+            .tick(100)
+            .expect("admit and open between-tick input");
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        recorder.backend.suspend_hook = Some(Box::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+
+        let stop_dir = control.0.clone();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let stopper = std::thread::spawn(move || {
+            stop_tx
+                .send(sister_hands::master_stop::engage(&stop_dir, 150))
+                .unwrap();
+        });
+        for _ in 0..500 {
+            if control.0.join("master.stop.pending").exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(control.0.join("master.stop.pending").exists());
+
+        let observer = std::thread::spawn(move || {
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("tick never entered input suspension");
+            assert!(
+                stop_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+                "stop returned before the in-progress input suspension drained"
+            );
+            release_tx.send(()).unwrap();
+            stop_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("stop did not finish after suspension")
+        });
+
+        assert_eq!(recorder.tick(200).unwrap(), Tick::MasterStopped);
+        observer
+            .join()
+            .unwrap()
+            .expect("engage after tick suspension");
+        stopper.join().unwrap();
+    }
+
+    #[test]
+    fn finish_cannot_release_the_master_lease_before_input_callbacks_drain() {
+        use std::sync::mpsc;
+
+        let control = Tmp::new("master-stop-finish-suspend-order");
+        let (mut recorder, _) = gate_recorder(
+            std::iter::repeat_with(|| SystemReply::Value(SystemObservation::active()))
+                .take(8)
+                .collect(),
+            vec![PrivacyReply::Value(clear_privacy())],
+        );
+        recorder.set_master_stop_dir(control.0.clone());
+        let _ = recorder
+            .tick(100)
+            .expect("admit and open between-tick input");
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        recorder.backend.suspend_hook = Some(Box::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+
+        let stop_dir = control.0.clone();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let stopper = std::thread::spawn(move || {
+            stop_tx
+                .send(sister_hands::master_stop::engage(&stop_dir, 150))
+                .unwrap();
+        });
+        for _ in 0..500 {
+            if control.0.join("master.stop.pending").exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(control.0.join("master.stop.pending").exists());
+
+        let observer = std::thread::spawn(move || {
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("finish never entered input suspension");
+            assert!(
+                stop_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+                "stop returned before finish drained input callbacks"
+            );
+            release_tx.send(()).unwrap();
+            stop_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("stop did not finish after finish suspension")
+        });
+
+        recorder
+            .finish(sister_core::model::EndReason::Duration)
+            .expect("finish recorder");
+        observer
+            .join()
+            .unwrap()
+            .expect("engage after finish suspension");
+        stopper.join().unwrap();
     }
 
     #[test]
@@ -4750,7 +4994,7 @@ mod tests {
             Tick::MasterReleased
         );
         assert_eq!(recorder.stats().ticks, 2);
-        assert_eq!(recorder.stats().master_stopped_ticks, 1);
+        assert_eq!(recorder.stats().master_blocked_ticks, 1);
         assert_eq!(recorder.stats().master_released_ticks, 1);
         assert_eq!(recorder.stats().working_ticks, 0);
         recorder.tick(2_100).expect("post-release tick");
@@ -6193,6 +6437,9 @@ mod tests {
 
     #[test]
     fn master_stop_tick_adds_no_frame_or_text_chunk() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         let control = Tmp::new("master-stop");
         let mut rec = recorder(
             vec![
@@ -6204,9 +6451,31 @@ mod tests {
         rec.set_master_stop_dir(control.0.clone());
         assert!(matches!(rec.tick(0).unwrap(), Tick::Kept { .. }));
         let before = rec.db().stats().unwrap();
-        sister_hands::master_stop::engage(&control.0, 500).unwrap();
+
+        // The input source remains live between ticks, so its activity lease
+        // must make engage wait until the next tick closes and drains it.
+        let stop_dir = control.0.clone();
+        let returned = Arc::new(AtomicBool::new(false));
+        let returned_in_thread = Arc::clone(&returned);
+        let engage = std::thread::spawn(move || {
+            sister_hands::master_stop::engage(&stop_dir, 500).unwrap();
+            returned_in_thread.store(true, Ordering::SeqCst);
+        });
+        for _ in 0..500 {
+            if control.0.join("master.stop.pending").exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(control.0.join("master.stop.pending").exists());
+        assert!(
+            !returned.load(Ordering::SeqCst),
+            "between-tick input lease must keep stop-all from returning while callbacks are open"
+        );
         assert_eq!(rec.tick(1_000).unwrap(), Tick::MasterStopped);
-        assert_eq!(rec.stats().master_stopped_ticks, 1);
+        engage.join().unwrap();
+        assert!(returned.load(Ordering::SeqCst));
+        assert_eq!(rec.stats().master_blocked_ticks, 1);
         let after = rec.db().stats().unwrap();
         assert_eq!(after.frames, before.frames, "全停後仍新增畫面");
         assert_eq!(after.chunks, before.chunks, "全停後仍新增文字段落");
@@ -6225,8 +6494,19 @@ mod tests {
         rec.set_master_stop_dir(control.0.clone());
 
         assert!(matches!(rec.tick(0).expect("before"), Tick::Kept { .. }));
-        sister_hands::master_stop::engage(&control.0, 1_000).expect("engage");
-        for ts in [1_000, 2_000, 3_000] {
+        let stop_dir = control.0.clone();
+        let engage = std::thread::spawn(move || {
+            sister_hands::master_stop::engage(&stop_dir, 1_000).expect("engage")
+        });
+        for _ in 0..500 {
+            if control.0.join("master.stop.pending").exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(rec.tick(1_000).expect("drain tick"), Tick::MasterStopped);
+        engage.join().expect("engage thread");
+        for ts in [2_000, 3_000] {
             assert_eq!(rec.tick(ts).expect("stopped tick"), Tick::MasterStopped);
         }
         sister_hands::master_stop::release(&control.0).expect("release");
@@ -6254,7 +6534,10 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                ("master_stop_engaged".into(), 1_000),
+                // The first tick sees pending and drains this recorder's own
+                // between-tick lease. Only the following observation may say
+                // all layers have completed the stop.
+                ("master_stop_engaged".into(), 2_000),
                 ("master_stop_released".into(), 4_000),
             ],
             "the two durable rows must explain and bracket the empty interval"

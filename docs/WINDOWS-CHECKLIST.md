@@ -35,15 +35,31 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
       stopped，且系統匣與問答只指向「解除全停」，不顯示「在聽」。
 - [ ] 讓一份已准入的慢工作仍在跑時按「全部停止」。排乾期間 desktop 必須顯示「正在完成
       全停」與「舊工作仍在排乾」，不可先寫「已全停」；新工作立刻拒絕。若測的是已送給 CLI
-      agent 的 request，最長可等 120 秒，且畫面不可聲稱 provider request 已取消。舊工作收尾
-      後 stop 才可回成功並切成「已全停」。
+      agent 的 request，timeout 判定是 120 秒，之後還要排乾整個 process group／Job、pipe 與
+      outbound audit；不可把 120 秒寫成 stop 總上限，也不可聲稱 provider request 已取消。
+      舊工作收尾後 stop 才可回成功並切成「已全停」。
+- [ ] 用 delayed desktop fixture 把 `ask` 或 `gatekeeper_check` 的 native 回條卡在 renderer
+      Promise continuation 前，另一個終端同時跑 `stop-all`。未 begin 的回條不可顯示，五秒後
+      自行回收；begin 已成功則 stop 要等同步 render 與 end，成功回條後不能才冒出答案或主動卡。
+      `gatekeeper_react` 在全停 pending／stopped／uncertain 時也不得改 `utterance`。
+- [ ] Azure 四道 gate 齊全後，讓一份 POST 已開始再按 `stop-all`：畫面先進 stopping、新朗讀
+      立即拒絕；POST transport 本身可跑到 response 或最長 45 秒 timeout，但 MP3 回來並 begin
+      播放後，stop 還須等 ended／error／Stop／window teardown，不能拿 45 秒當總上限，也不可
+      宣稱 provider request 已取消。再讓第二份朗讀排在 Azure fence 後面，pending 先贏時它
+      必須在最後 boundary 停住、0 POST。
+- [ ] 播放一份本機答案朗讀時從另一個行程按 `stop-all`：renderer 看見 stopping 後要立即
+      cancel utterance 並 end 同一份 presentation lease；stop 成功後不得再開始下一段。另讓
+      renderer 故意不 end，確認畫面只說仍在排乾，不虛構 45／120 秒總上限。
 - [ ] 在全停前先各按一次 pause 與 hands stop，再跑 `stop-all`／`stop-all --off`。解除後
       `paused.flag` 與 `hands.stop` 必須仍在，capture 仍暫停、hands 仍拔著；分別解除後才恢復。
       連按兩次 stop 的顯示時間必須保留第一次，兩個終端同時按也一樣。
-- [ ] 全部 AI-Sister 行程關閉後，用 disposable data dir 分別把 `master.stop.lock` 換成目錄、
-      把 `master.stop` 換成 dangling symlink／reparse fixture。desktop 必須顯示「狀態讀不到」而
+- [ ] 全部 AI-Sister 行程關閉後，用 disposable data dir 分別把 `master.stop.lock` 或
+      `master.stop.owner` 換成目錄、把 `master.stop` 換成 dangling symlink／reparse fixture，並另造
+      一顆沒有 live owner 的 `master.stop.pending`。desktop 必須顯示「狀態讀不到」而
       不是「在聽」或「已全停」，新工作 fail closed；stop／resume 不得回報虛假的成功。測完
       刪掉整個 disposable data dir，不要在日用資料目錄手工修 lock。
+- [ ] 另把 disposable data dir 目錄項本身做成指向正常目錄的 symlink／junction；狀態仍須是
+      `uncertain`，admission、stop 與 resume 都拒絕，target 內不得被建立另一組協定檔。
 
 ### alpha.115 先驗 installer upgrade／uninstall 的實際邊界
 

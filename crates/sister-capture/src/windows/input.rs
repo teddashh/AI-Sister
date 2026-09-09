@@ -24,7 +24,9 @@ use anyhow::Result;
 use sister_core::model::{
     HookHealth, InputListening, InputMetrics, InputTick, Millis, classify_quiet_window,
 };
+#[cfg(not(test))]
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+#[cfg(not(test))]
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, HHOOK, MSG, MSLLHOOKSTRUCT,
     SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN,
@@ -55,7 +57,10 @@ static HAVE_POS: AtomicBool = AtomicBool::new(false);
 /// 後者先就讓 callback 當場放棄。兩者之間沒有漏縫。
 const INPUT_DISABLED: u64 = 1 << 63;
 const INPUT_IN_FLIGHT_MASK: u64 = !INPUT_DISABLED;
-static INPUT_GATE: AtomicU64 = AtomicU64::new(0);
+// Hook thread may start before the recorder has admitted itself through the
+// cross-process master-stop gate.  Cold-start disabled: the recorder is the
+// only layer allowed to open this after it owns a live activity lease.
+static INPUT_GATE: AtomicU64 = AtomicU64::new(INPUT_DISABLED);
 
 /// 最後一次輸入的 tick（`GetTickCount64` 的毫秒）。0 = 從來沒有過。
 static LAST_INPUT_TICK: AtomicU64 = AtomicU64::new(0);
@@ -85,6 +90,7 @@ pub enum HookState {
 }
 
 /// 中斷多久算是新的一段打字。
+#[cfg(not(test))]
 const BURST_GAP_MS: u64 = 2_000;
 
 pub struct WindowsInput {
@@ -93,17 +99,47 @@ pub struct WindowsInput {
     window_ms: i64,
 }
 
+#[cfg(test)]
+static TEST_GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Windows input callbacks write process-global atomics. Every Windows test
+/// that constructs the production backend or touches those atomics must share
+/// this lock, including sibling-module composition tests.
+#[cfg(test)]
+pub(super) fn test_exclusive() -> std::sync::MutexGuard<'static, ()> {
+    TEST_GLOBALS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+#[cfg(test)]
+pub(super) fn callback_gate_open_for_test() -> bool {
+    InputCallbackGuard::enter().is_some()
+}
+
+#[cfg(test)]
+pub(super) fn open_callback_gate_for_test() {
+    INPUT_GATE.store(0, Release);
+}
+
 impl WindowsInput {
-    /// 裝上 hook 並開始累積。失敗不致命——沒有節奏訊號比沒有記憶好。
+    /// 裝上 hook，但先維持停止。Recorder 取得跨行程全停 activity lease 後才會
+    /// 透過 `InputSource::resume` 開始累積。失敗不致命——沒有節奏訊號比沒有記憶好。
     pub fn start(now: Millis, window_secs: u64) -> Self {
         install_hooks();
+        Self::cold_start_suspended(now, window_secs)
+    }
+
+    fn cold_start_suspended(now: Millis, window_secs: u64) -> Self {
         let mut input = Self {
             window_start: now,
             window_ms: (window_secs as i64) * 1000,
         };
         // 一個 process 只有一組 static callback 狀態；若同行程重開
-        // recorder，不能繼承上一場未滿視窗的計數或 suspended 狀態。
-        input.restart_accumulation(now);
+        // recorder，不能繼承上一場未滿視窗的計數。更重要的是，backend 比
+        // recorder 早建立，這裡若直接 resume，既存的全停 latch 還來不及被
+        // 看見就會開始數鍵鼠。入口保持關閉，由 recorder admission 後再開。
+        input.suspend_accumulation(now);
         input
     }
 
@@ -162,10 +198,15 @@ impl WindowsInput {
         self.discard_accumulated(ts);
         INPUT_GATE.store(0, Release);
     }
+}
 
-    fn restart_accumulation(&mut self, ts: Millis) {
-        self.suspend_accumulation(ts);
-        self.resume_accumulation(ts);
+impl Drop for WindowsInput {
+    fn drop(&mut self) {
+        // Recorder can leave its live loop through a maintenance/control error
+        // before `finish()`. Backend is the first Recorder field to drop, so
+        // close and drain the process-global callback gate here before the
+        // later ActivityGuard field releases stop-all's exclusive drain.
+        self.suspend_accumulation(sister_core::now_ms());
     }
 }
 
@@ -318,6 +359,7 @@ fn tick_now() -> u64 {
 ///
 /// low-level hook 的事件是送到**安裝它的那條執行緒**的訊息佇列，所以那條
 /// 執行緒必須一直在抽訊息。錄製迴圈自己在忙別的事，不能兼任。
+#[cfg(not(test))]
 fn install_hooks() {
     if HOOK_START_ATTEMPTED.swap(true, Relaxed) {
         return; // 一個程序一組就夠。裝兩次會讓每個按鍵被數兩下。
@@ -360,10 +402,19 @@ fn install_hooks() {
     }
 }
 
+/// Unit tests share one process and these hooks have no uninstall path. A real
+/// install would permanently mutate hook health and let OS callbacks race every
+/// later exact-counter test. Non-test Windows builds above still compile and
+/// execute the real installer; test builds exercise the public constructor and
+/// callback gate with this inert process-lifetime seam.
+#[cfg(test)]
+fn install_hooks() {}
+
 /// 鍵盤 hook。**只加一，不看按了什麼。**
 ///
 /// `lparam` 指向 `KBDLLHOOKSTRUCT`（含 `vkCode`）。這裡刻意不解參考它：
 /// 按鍵內容從來沒有進入過這個程序的記憶體，這比任何過濾都可靠。
+#[cfg(not(test))]
 unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32
         && (wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize)
@@ -383,6 +434,7 @@ unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 }
 
 /// 滑鼠 hook。讀座標（位置不是內容），不讀其它任何東西。
+#[cfg(not(test))]
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         if let Some(_guard) = InputCallbackGuard::enter() {
@@ -415,29 +467,11 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
-
-    /// 底下每一條都在動同一組**行程層級**的計數器（`KEYSTROKES` 那幾個
-    /// static），而 `cargo test` 預設是多執行緒。
-    ///
-    /// 兩條同時跑的時候，一條的 `drain` 會用 `swap(0)` 把另一條剛 `store`
-    /// 進去的數字取走；被害的那條看到的是「視窗滿了卻沒出列」，而 `drain`
-    /// 在計數器全 0 時本來就回 `None`。錯誤訊息會指著一個根本沒壞的
-    /// early return。
-    ///
-    /// 這在 CI 上真的發生過，而且它擋掉的不只是一次測試——Release 那一步接
-    /// 在測試後面，所以那一版的 exe 直接沒有產出。一條每 n 次紅一次的測試，
-    /// 最後的下場是被人習慣性地重跑，而它哪天講了真話也不會有人相信。
-    ///
-    /// 這是測試的問題，不是 `drain` 的問題：那幾個 static 是 Win32 hook 的
-    /// callback 唯一能寫進去的地方（回呼函式沒有 `self`），改成可注入的話，
-    /// 被測的就不再是真的跑在機器上的那條路了。
-    static COUNTERS: Mutex<()> = Mutex::new(());
 
     /// 中毒了照樣往下走：前一條 panic 過的意思是它已經報告過自己了，不需要
     /// 讓後面每一條都跟著死一次、還死在一個看不懂的地方。
-    fn exclusive() -> MutexGuard<'static, ()> {
-        COUNTERS.lock().unwrap_or_else(|e| e.into_inner())
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        test_exclusive()
     }
 
     /// **`HookState` 翻成 `HookHealth` 的那三臂，每一臂都要是對的。**
@@ -712,6 +746,45 @@ mod tests {
         assert_eq!(metrics.scroll_ticks, 0);
         assert_eq!(metrics.mouse_px, 0);
         assert_eq!(metrics.typing_bursts, 1);
+    }
+
+    #[test]
+    fn cold_start_does_not_open_callbacks_before_master_stop_admission() {
+        let _lock = exclusive();
+        INPUT_GATE.store(0, Release);
+        KEYSTROKES.store(7, Relaxed);
+
+        // The test-only installer is inert because Windows hooks cannot be
+        // uninstalled from this shared test process. Still call the public
+        // production constructor: an accidental resume appended in `start()`
+        // must make this test fail.
+        let _input = WindowsInput::start(9_000, 10);
+
+        assert_eq!(INPUT_GATE.load(Acquire), INPUT_DISABLED);
+        assert_eq!(KEYSTROKES.load(Relaxed), 0);
+        assert!(
+            InputCallbackGuard::enter().is_none(),
+            "backend construction must not admit callbacks before recorder admission"
+        );
+    }
+
+    #[test]
+    fn dropping_the_input_source_closes_and_drains_callbacks() {
+        let _lock = exclusive();
+        let mut input = WindowsInput::cold_start_suspended(9_000, 10);
+        input.resume(9_000).unwrap();
+        assert!(
+            callback_gate_open_for_test(),
+            "precondition: callbacks open"
+        );
+
+        drop(input);
+
+        assert_eq!(INPUT_GATE.load(Acquire), INPUT_DISABLED);
+        assert!(
+            !callback_gate_open_for_test(),
+            "an error-path backend drop must close callbacks before its master-stop lease drops"
+        );
     }
 
     #[test]

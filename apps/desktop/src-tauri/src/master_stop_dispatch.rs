@@ -14,6 +14,17 @@ pub(crate) fn master_stop_action_for_menu_id(id: &str) -> Option<MasterStopActio
     }
 }
 
+/// 單一 receiver 是 tray click 順序的線性化點。不能每次 click 各 spawn 一條 thread
+/// 再搶 Mutex：Mutex 沒有 FIFO 保證，Resume→Stop 可能反過來跑成最後是 Clear。
+pub(crate) fn run_fifo<T>(
+    receiver: std::sync::mpsc::Receiver<T>,
+    mut run: impl FnMut(T),
+) {
+    for job in receiver {
+        run(job);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

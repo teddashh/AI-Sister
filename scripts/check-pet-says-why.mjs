@@ -76,6 +76,7 @@ const nativeClearInterval = globalThis.clearInterval.bind(globalThis);
  */
 function answer(over = {}) {
   return {
+    presentation_id: null,
     kind: "keywords",
     searched: null,
     query_id: 7,
@@ -203,7 +204,7 @@ function urlPolicy(over = {}) {
 
 /** gatekeeper_check 的 IPC 形狀。`display: null` 是量過的沒有，不是 command 沒跑。 */
 function gatekeeper(display = null, actionLog = ["還沒有任何動作紀錄。她從來沒有把一個動作端到你面前過。"]) {
-  return { display, developer: null, action_log: actionLog };
+  return { display, developer: null, action_log: actionLog, presentation_id: null };
 }
 
 function gateCard(over = {}) {
@@ -244,7 +245,9 @@ async function open(
   const invokes = [];
   const intervals = [];
   let audioPlays = 0;
+  let audioPauses = 0;
   let localSpeaks = 0;
+  const playbackTrace = [];
 
   // fake-dom 的 selector 子集刻意很小；這一頁新增的 Azure allowlist 是 attribute
   // selector。只在真正的 [data-hits] 子樹補上這一種，避免測試自己用 class
@@ -265,7 +268,15 @@ async function open(
   };
 
   const audio = node("[data-persona-audio]");
-  audio.pause = () => {};
+  audio.pause = () => {
+    audioPauses += 1;
+    playbackTrace.push("pause");
+  };
+  const removeAudioAttribute = audio.removeAttribute.bind(audio);
+  audio.removeAttribute = (name) => {
+    if (name === "src") playbackTrace.push("remove-src");
+    removeAudioAttribute(name);
+  };
   audio.play = async () => {
     audioPlays += 1;
   };
@@ -301,12 +312,17 @@ async function open(
       invoke: async (cmd, arg) => {
         calls.push(cmd);
         invokes.push({ cmd, arg });
+        if (cmd === "master_stop_presentation_end") {
+          playbackTrace.push(`end:${arg?.presentationId ?? "missing"}`);
+        }
         const v = Object.hasOwn(table, cmd)
           ? table[cmd]
           : cmd === "recorder_supervisor_state"
             ? supervisor()
             : cmd === "master_stop_state"
               ? "clear"
+              : cmd === "master_stop_presentation_begin"
+                ? true
               : null;
         if (typeof v === "function") return v(arg);
         if (v instanceof Error) throw v;
@@ -337,6 +353,8 @@ async function open(
     hitTexts: () => node("[data-hits]").children.map((c) => c.textContent),
     azureButton: () => node("[data-hits]").querySelector(".answer-cloud"),
     audioPlays: () => audioPlays,
+    audioPauses: () => audioPauses,
+    playbackTrace: () => [...playbackTrace],
     isSpeaking: () => node("[data-avatar]").classList.contains("speaking"),
     // 圖案和字是兩條路：`paint()` 先算 `shown` 餵給 `avatar.dataset.state`，
     // 再另外算 `line`。把兩個三元的順序改成不一樣，字會講全停而圖案是暫停的
@@ -1825,6 +1843,7 @@ console.log("57. 新題會等舊自動朗讀 cancel settle；晚 response 不播
     content_type: "audio/mpeg",
     audio_bytes: 3,
     data_url: "data:audio/mpeg;base64,AQID",
+    presentation_id: "5701",
   });
   await tick(40);
   check("取消後的晚 MP3 不播放", p.audioPlays() === 0, p.audioPlays());
@@ -1850,6 +1869,7 @@ console.log("58. 合法 MP3 會自動播、結束後可 trusted replay；malform
       content_type: "audio/mpeg",
       audio_bytes: 3,
       data_url: "data:audio/mpeg;base64,AQID",
+      presentation_id: `580${expected.generation}`,
     }),
     ask: answer({ hits: [hit({ snippet: "PLAY_ME" })] }),
     recording_state: "recording",
@@ -1858,8 +1878,24 @@ console.log("58. 合法 MP3 會自動播、結束後可 trusted replay；malform
   check("最新答案的合法 MP3 自動播一次", ok.audioPlays() === 1, ok.audioPlays());
   check("Azure MP3 真正開始播放才進 speaking", ok.isSpeaking());
   check("自動朗讀只送一個 speak", azureCalls(ok).length === 1, azureCalls(ok));
+  const azurePresentationEnds = () =>
+    ok.invokes.filter(
+      ({ cmd, arg }) =>
+        cmd === "master_stop_presentation_end" &&
+        typeof arg?.presentationId === "string" &&
+        arg.presentationId.startsWith("580"),
+    );
+  check(
+    "播放還活著時 native lease 尚未 end",
+    azurePresentationEnds().length === 0,
+    azurePresentationEnds(),
+  );
   ok.finishAudio();
-  check("Azure ended 清掉 speaking", !ok.isSpeaking());
+  check(
+    "Azure ended 清掉 speaking 並 end playback lease",
+    !ok.isSpeaking() && azurePresentationEnds().length === 1,
+    azurePresentationEnds(),
+  );
   await ok.clickElement(ok.azureButton(), { trusted: false });
   check("script 合成 replay 不送", azureCalls(ok).length === 1, azureCalls(ok));
   await ok.clickElement(ok.azureButton());
@@ -1871,15 +1907,23 @@ console.log("58. 合法 MP3 會自動播、結束後可 trusted replay；malform
     { calls: azureCalls(ok), plays: ok.audioPlays() },
   );
   check("Azure trusted replay 播放時回到 speaking", ok.isSpeaking());
+  check("第二次播放中 lease 仍活著", azurePresentationEnds().length === 1);
   ok.failAudio();
-  check("Azure playback error 清掉 speaking", !ok.isSpeaking());
+  check(
+    "Azure playback error 清掉 speaking 並 end lease",
+    !ok.isSpeaking() && azurePresentationEnds().length === 2,
+    azurePresentationEnds(),
+  );
   await ok.clickElement(ok.azureButton());
   check("前提：再一次 trusted replay 已開始", azureCalls(ok).length === 3 && ok.isSpeaking());
   await ok.clickElement(ok.azureButton());
   check(
-    "Azure 停止鍵清掉 speaking 且不另送 speak",
-    azureCalls(ok).length === 3 && !ok.isSpeaking(),
-    azureCalls(ok),
+    "Azure 停止鍵先停本機 media、end lease，且不另送 speak",
+    azureCalls(ok).length === 3 &&
+      !ok.isSpeaking() &&
+      azurePresentationEnds().length === 3 &&
+      ok.audioPauses() > 0,
+    { calls: azureCalls(ok), ends: azurePresentationEnds(), pauses: ok.audioPauses() },
   );
 
   const bad = await open({
@@ -1889,6 +1933,7 @@ console.log("58. 合法 MP3 會自動播、結束後可 trusted replay；malform
       content_type: "audio/wav",
       audio_bytes: 3,
       data_url: "data:audio/wav;base64,AQID",
+      presentation_id: "5808",
     },
     ask: answer({ hits: [hit({ snippet: "DO_NOT_PLAY" })] }),
     recording_state: "recording",
@@ -1904,6 +1949,7 @@ console.log("58. 合法 MP3 會自動播、結束後可 trusted replay；malform
       content_type: "audio/mpeg",
       audio_bytes: 3,
       data_url: "data:audio/mpeg;base64,AQID",
+      presentation_id: "5807",
     },
     ask: answer({ hits: [hit({ snippet: "STALE_GENERATION_MUST_NOT_PLAY" })] }),
     recording_state: "recording",
@@ -2613,7 +2659,7 @@ console.log("75. latch 現在全停、資料庫歷史為零時，blind 說現在
       }),
     }),
     recording_state: "recording",
-    master_stop_state: "stopped",
+    master_stop_state: "clear",
   });
   await p.type("找不到的歷史");
   const said = p.hitTexts().join("\n");
@@ -2683,7 +2729,7 @@ console.log("78. historical 與 live master stop 是兩句可同時成立的事"
       }),
     }),
     recording_state: "recording",
-    master_stop_state: "stopped",
+    master_stop_state: "clear",
   });
   await p.type("找不到的歷史");
   const said = p.hitTexts().join("\n");
@@ -2701,17 +2747,64 @@ console.log("79. native stop event 到達後，較早的 poll false 晚回不能
   const p = await open({
     master_stop_state: () => {
       reads += 1;
-      return reads === 2 ? stalePoll : "clear";
+      return reads === 3 ? stalePoll : "clear";
     },
     recording_state: "recording",
     recorder_supervisor_state: supervisor("running"),
   });
-  check("前提：開場與 visible poll 都真的送出", reads === 2 && typeof finishStalePoll === "function", reads);
+  check("前提：開場、visible poll 與 listener-ready 補讀都真的送出", reads === 3 && typeof finishStalePoll === "function", reads);
   await p.fromOutside("master-stop-changed", "stopped");
   check("event 先把畫面切成 stopped", p.avatarState() === "stopped", p.line());
   finishStalePoll("clear");
   await tick(40);
   check("舊 poll false 晚回後仍是 stopped", p.avatarState() === "stopped", p.line());
+}
+
+console.log("79a. listener 安裝缺口會補讀；event 後的舊 poll rejection 也不能倒退狀態");
+{
+  let phase = "clear";
+  let releaseListener = () => {};
+  const listenerHeld = new Promise((resolve) => {
+    releaseListener = resolve;
+  });
+  const gap = await open(
+    {
+      master_stop_state: () => phase,
+      recording_state: "recording",
+      recorder_supervisor_state: supervisor("running"),
+    },
+    {
+      beforeListenerRegistered: (name) =>
+        name === "master-stop-changed" ? listenerHeld : undefined,
+    },
+  );
+  const readsBeforeReady = gap.calls.filter((cmd) => cmd === "master_stop_state").length;
+  phase = "stopped";
+  releaseListener();
+  await tick(40);
+  const readsAfterReady = gap.calls.filter((cmd) => cmd === "master_stop_state").length;
+  check("listener ready 後確實補讀 durable master-stop state", readsAfterReady > readsBeforeReady, gap.calls);
+  check("缺口裡遺失的 stopped transition 被追回", gap.avatarState() === "stopped", gap.line());
+
+  let reads = 0;
+  let rejectOldPoll = () => {};
+  const oldPoll = new Promise((_, reject) => {
+    rejectOldPoll = reject;
+  });
+  const rejection = await open({
+    master_stop_state: () => {
+      reads += 1;
+      return reads === 4 ? oldPoll : "clear";
+    },
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+  });
+  await rejection.pollNow();
+  check("前提：較舊的 poll rejection 被 hold", reads === 4, reads);
+  await rejection.fromOutside("master-stop-changed", "stopped");
+  rejectOldPoll(new Error("old read failed"));
+  await tick(40);
+  check("event 後才回來的舊 rejection 不可改成 uncertain", rejection.avatarState() === "stopped", rejection.line());
 }
 
 console.log("80. 兩個 overlapping master-stop polls 只有最新 request 可 apply");
@@ -2724,16 +2817,16 @@ console.log("80. 兩個 overlapping master-stop polls 只有最新 request 可 a
   const p = await open({
     master_stop_state: () => {
       reads += 1;
-      if (reads === 3) return olderPoll;
+      if (reads === 4) return olderPoll;
       return "clear";
     },
     recording_state: "recording",
     recorder_supervisor_state: supervisor("running"),
   });
   await p.pollNow();
-  check("前提：較早的第三份 read 被 hold", reads === 3 && typeof finishOlderPoll === "function", reads);
+  check("前提：較早的第四份 read 被 hold", reads === 4 && typeof finishOlderPoll === "function", reads);
   await p.pollNow();
-  check("較新的第四份 false 已套用", reads === 4 && p.avatarState() !== "stopped", {
+  check("較新的第五份 false 已套用", reads === 5 && p.avatarState() !== "stopped", {
     reads,
     state: p.avatarState(),
   });
@@ -2753,9 +2846,18 @@ function desktopTruthSourceErrors(main, dispatch, ui) {
   const helperEnd = main.indexOf("\n}\n\n#[cfg(test)]", helperStart);
   const helper = helperStart >= 0 && helperEnd > helperStart ? main.slice(helperStart, helperEnd) : "";
   if (!helper.includes("master_stop_action_for_menu_id(menu_id)")) errors.push("helper 沒有走 fixed-direction policy");
-  if (!helper.includes("set_master_stop(shell.data_dir.as_deref(), action)")) errors.push("helper 沒有呼叫 setter");
-  if (!helper.includes("Ok(()) => refresh_tray(app)")) errors.push("成功沒有 refresh tray/changed state");
-  if (!helper.includes("app.emit(MASTER_STOP_FAILED_EVENT, error)")) errors.push("失敗沒有 emit master-stop-failed");
+  if (!helper.includes("master_stop_queue()") || !helper.includes(".send(MasterStopJob")) {
+    errors.push("helper 沒有把 click 依序送進單一背景 queue");
+  }
+  if (!main.includes("MASTER_STOP_QUEUE") || !main.includes("run_fifo(receiver, run_master_stop_job)")) {
+    errors.push("背景全停不是 FIFO single worker");
+  }
+  if (!main.includes("set_master_stop_with_observer")) errors.push("worker 沒有在 pending publication 接 Stopping observer");
+  if (!main.includes("run_on_main_thread")) errors.push("worker 結果沒有 marshal 回 tray 主迴圈");
+  if (!main.includes("fn finish_master_stop_menu") || !main.includes("app.emit(MASTER_STOP_FAILED_EVENT, error)")) {
+    errors.push("失敗沒有 emit master-stop-failed");
+  }
+  if (!main.includes("refresh_tray(app);")) errors.push("完成沒有 refresh tray/changed state");
 
   if (!dispatch.includes('"master-stop" => Some(MasterStopAction::Engage)')) errors.push("master-stop 方向不是 Engage");
   if (!dispatch.includes('"master-resume" => Some(MasterStopAction::Release)')) errors.push("master-resume 方向不是 Release");
@@ -2786,7 +2888,26 @@ function desktopTruthSourceErrors(main, dispatch, ui) {
   }
   if (!main.includes("Some(Blind::from(b))")) errors.push("ask 沒有走 tested Blind mapping");
 
-  if ((ui.match(/readMasterStopState\(\);/g) ?? []).length < 2) errors.push("startup/poll 沒有共用 master-stop read helper");
+  if (!main.includes('admit_desktop_brain(shell.data_dir.as_deref(), "守門員這一輪")')) {
+    errors.push("gatekeeper_check 沒有在 DB 判決／寫入前取得 master-stop admission");
+  }
+  if (!main.includes("view.presentation_id = Some(hold_presentation(master_stop_admission));")) {
+    errors.push("gatekeeper native guard 沒有跨到 renderer presentation lease");
+  }
+  if (!main.includes("answer.presentation_id = Some(hold_presentation(master_stop_admission));")) {
+    errors.push("ask native guard 沒有跨到 renderer presentation lease");
+  }
+  if (!main.includes('admit_desktop_brain(Some(data_dir), "這次 Azure 朗讀")')) {
+    errors.push("Azure speak 沒有取得 master-stop activity admission");
+  }
+  if (!main.includes("master_stop_admission.boundary()") || !main.includes("Ok((bytes, master_stop_admission))")) {
+    errors.push("Azure speak 沒有在排程前重驗 boundary 並把 activity guard 帶過 transport");
+  }
+  if (!main.includes("presentation_id: hold_presentation(master_stop_admission)")) {
+    errors.push("Azure transport guard 沒有跨 IPC 變成 renderer presentation lease");
+  }
+
+  if ((ui.match(/readMasterStopState\(\)/g) ?? []).length < 4) errors.push("startup/poll/listener-ready 沒有共用 master-stop read helper");
   if (!ui.includes("masterStopRevision += 1;")) errors.push("event 沒有推進 master-stop revision");
   if (!ui.includes("request === masterStopReadRequest")) errors.push("poll 沒有只接受最新 request");
   if (ui.includes('invoke("master_stop_state").then(setMasterStopPhase')) errors.push("仍有第二條直連 master-stop read");
@@ -2796,6 +2917,17 @@ function desktopTruthSourceErrors(main, dispatch, ui) {
   if (!main.includes("Result<sister_hands::master_stop::State, String>")) {
     errors.push("native master_stop_state 仍把四態壓成 bool");
   }
+  const handlers = /\.invoke_handler\(tauri::generate_handler!\[([\s\S]*?)\]\)/.exec(main)?.[1] ?? "";
+  if (!handlers.includes("master_stop_state")) errors.push("master_stop_state 沒有註冊進 Tauri handler");
+  for (const command of ["master_stop_presentation_begin", "master_stop_presentation_end"]) {
+    if (!handlers.includes(command)) errors.push(`${command} 沒有註冊進 Tauri handler`);
+  }
+  if (!ui.includes("commitNativePresentation(answer")) errors.push("ask Promise 沒有走 native presentation commit");
+  if (!ui.includes("commitNativePresentation(view")) errors.push("gatekeeper Promise 沒有走 native presentation commit");
+  if (!ui.includes("azurePlaybackPresentation = audio") || !ui.includes("releaseAzurePlaybackPresentation(audio)")) {
+    errors.push("Azure presentation lease 沒有跨到 playback ended/error");
+  }
+  if (!ui.includes("gatekeeperReadRequest += 1;")) errors.push("非 clear master stop 沒有讓 gatekeeper poll 失效");
   return errors;
 }
 
@@ -2823,12 +2955,295 @@ console.log("81. stopping／uncertain 不冒充已全停，也不准顯示在聽
       }),
     }),
     recording_state: "recording",
-    master_stop_state: "stopping",
+    master_stop_state: "clear",
   });
   await blindPending.type("找不到的歷史");
   const said = blindPending.hitTexts().join("\n");
   check("Blind pending 說新工作已拒絕且仍在排乾", said.includes("新工作已拒絕") && said.includes("仍在排乾"), said);
   check("Blind pending 沒說三層已停", !said.includes("現在正全停中"), said);
+}
+
+console.log("81a. 全停事件夾在 native Answer 與 renderer continuation 之間時，晚答案與 Azure 都失效");
+{
+  let finishAsk = () => {};
+  const heldAsk = new Promise((resolve) => {
+    finishAsk = resolve;
+  });
+  const p = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("不該送到這裡"),
+    ask: () => heldAsk,
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+    master_stop_state: "clear",
+  });
+  void p.type("全停前開始的慢題");
+  await tick(40);
+  check("前提：native ask 已經在飛", p.calls.filter((cmd) => cmd === "ask").length === 1, p.calls);
+  await p.fromOutside("master-stop-changed", "stopping");
+  finishAsk(answer({ hits: [hit({ snippet: "LATE_MASTER_STOP_ANSWER" })] }));
+  await tick(40);
+  const rendered = p.hitTexts().join("\n");
+  check("Stopping 之後回來的答案不 render", !rendered.includes("LATE_MASTER_STOP_ANSWER"), rendered);
+  check("同一份晚答案不建立 Azure POST", azureCalls(p).length === 0, azureCalls(p));
+  check("畫面仍是全停正在排乾，不退回 idle 答案", p.avatarState() === "stopped" && p.line().includes("正在完成全停"), p.line());
+}
+
+console.log("81b. 外部 CLI stop 沒有 event：native presentation boundary 拒絕就不能畫答案或送 Azure");
+{
+  const p = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("不該送到這裡"),
+    ask: answer({
+      presentation_id: "4101",
+      hits: [hit({ snippet: "EXTERNAL_STOP_LATE_ANSWER" })],
+    }),
+    master_stop_presentation_begin: false,
+    master_stop_presentation_end: null,
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+    master_stop_state: "clear",
+  });
+  await p.type("外部終端剛按全停");
+  await tick(40);
+  const rendered = p.hitTexts().join("\n");
+  check("boundary 拒絕的 native answer 不 render", !rendered.includes("EXTERNAL_STOP_LATE_ANSWER"), rendered);
+  check("boundary 拒絕的 answer 不建立 Azure POST", azureCalls(p).length === 0, azureCalls(p));
+  check(
+    "renderer 有 begin 也有 end native lease",
+    p.calls.includes("master_stop_presentation_begin") && p.calls.includes("master_stop_presentation_end"),
+    p.calls,
+  );
+}
+
+console.log("81c. Gatekeeper 也是 brain：external pending 拒絕 presentation 就不能冒出新主動卡");
+{
+  const view = {
+    ...gatekeeper(gateCard({ text: "EXTERNAL_STOP_GATEKEEPER_CARD" })),
+    presentation_id: "4102",
+  };
+  const p = await open({
+    gatekeeper_check: view,
+    master_stop_presentation_begin: false,
+    master_stop_presentation_end: null,
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+    master_stop_state: "clear",
+  });
+  await tick(40);
+  check("boundary 拒絕後沒有 gatekeeper 卡", p.utterance().hidden === true, p.utterance().textContent);
+  check(
+    "Gatekeeper presentation lease 有收尾",
+    p.calls.includes("master_stop_presentation_begin") && p.calls.includes("master_stop_presentation_end"),
+    p.calls,
+  );
+}
+
+console.log("81d. 正常 Answer／Gatekeeper 都在可見內容完成後才 end native lease");
+{
+  let gateSequence = 0;
+  let answerVisibleAtEnd = false;
+  let gateVisibleAtEnd = false;
+  const p = await open({
+    ask: answer({
+      presentation_id: "normal-answer",
+      hits: [hit({ snippet: "NORMAL_ANSWER_VISIBLE" })],
+    }),
+    gatekeeper_check: () => ({
+      ...gatekeeper(gateCard({ text: "NORMAL_GATE_VISIBLE" })),
+      presentation_id: `normal-gate-${++gateSequence}`,
+    }),
+    master_stop_presentation_begin: true,
+    master_stop_presentation_end: ({ presentationId }) => {
+      if (presentationId === "normal-answer") {
+        answerVisibleAtEnd = globalThis.document
+          .querySelector("[data-hits]")
+          .textContent.includes("NORMAL_ANSWER_VISIBLE");
+      }
+      if (presentationId.startsWith("normal-gate-")) {
+        gateVisibleAtEnd = globalThis.document
+          .querySelector("[data-utterance-text]")
+          .textContent.includes("NORMAL_GATE_VISIBLE");
+      }
+      return null;
+    },
+    recording_state: "recording",
+    recorder_supervisor_state: supervisor("running"),
+    master_stop_state: "clear",
+  });
+  await p.type("正常 commit");
+  const answerLeaseCalls = p.invokes.filter(
+    ({ cmd, arg }) =>
+      ["master_stop_presentation_begin", "master_stop_presentation_end"].includes(cmd) &&
+      arg?.presentationId === "normal-answer",
+  );
+  const gateLeaseCalls = p.invokes.filter(
+    ({ cmd, arg }) =>
+      ["master_stop_presentation_begin", "master_stop_presentation_end"].includes(cmd) &&
+      arg?.presentationId?.startsWith("normal-gate-"),
+  );
+  check(
+    "Answer begin=true 後真的顯示，且 end 當下內容已可見",
+    p.hitTexts().join("\n").includes("NORMAL_ANSWER_VISIBLE") &&
+      answerVisibleAtEnd &&
+      answerLeaseCalls.map(({ cmd }) => cmd).join(",") ===
+        "master_stop_presentation_begin,master_stop_presentation_end",
+    { answerVisibleAtEnd, answerLeaseCalls },
+  );
+  check(
+    "Gatekeeper begin=true 後真的顯示，且每份 lease 都有 begin/end",
+    gateVisibleAtEnd &&
+      gateLeaseCalls.length >= 2 &&
+      gateLeaseCalls.filter(({ cmd }) => cmd === "master_stop_presentation_begin").length ===
+        gateLeaseCalls.filter(({ cmd }) => cmd === "master_stop_presentation_end").length,
+    { gateVisibleAtEnd, gateLeaseCalls },
+  );
+}
+
+console.log("81e. Gatekeeper reaction 也要過 presentation boundary；拒絕不改卡，成功才收卡");
+{
+  const blocked = await open({
+    gatekeeper_check: {
+      ...gatekeeper(gateCard({ text: "REACTION_CARD_STAYS" })),
+      presentation_id: "reaction-card-blocked",
+    },
+    gatekeeper_react: {
+      message: "BLOCKED_REACTION_MUST_NOT_APPEAR",
+      presentation_id: "reaction-blocked",
+    },
+    master_stop_presentation_begin: ({ presentationId }) =>
+      presentationId !== "reaction-blocked",
+    master_stop_presentation_end: null,
+    recording_state: "recording",
+    master_stop_state: "clear",
+  });
+  await blocked.click("[data-utterance-close]");
+  check(
+    "reaction boundary 拒絕後原卡仍在、結果沒冒出來",
+    !blocked.utterance().hidden &&
+      blocked.node("[data-utterance-text]").textContent.includes("REACTION_CARD_STAYS") &&
+      !blocked.node("[data-utterance-result]").textContent.includes("BLOCKED_REACTION_MUST_NOT_APPEAR") &&
+      !blocked.node("[data-utterance-actions]").hidden,
+    {
+      card: blocked.node("[data-utterance-text]").textContent,
+      result: blocked.node("[data-utterance-result]").textContent,
+    },
+  );
+  check(
+    "被拒 reaction lease 仍有 end",
+    blocked.invokes.some(
+      ({ cmd, arg }) =>
+        cmd === "master_stop_presentation_end" && arg?.presentationId === "reaction-blocked",
+    ),
+    blocked.invokes,
+  );
+
+  let reactionVisibleAtEnd = false;
+  const allowed = await open({
+    gatekeeper_check: {
+      ...gatekeeper(gateCard({ text: "REACTION_CARD_CLOSES" })),
+      presentation_id: "reaction-card-allowed",
+    },
+    gatekeeper_react: {
+      message: "REACTION_COMMITTED",
+      presentation_id: "reaction-allowed",
+    },
+    master_stop_presentation_begin: true,
+    master_stop_presentation_end: ({ presentationId }) => {
+      if (presentationId === "reaction-allowed") {
+        reactionVisibleAtEnd = globalThis.document
+          .querySelector("[data-utterance-result]")
+          .textContent.includes("REACTION_COMMITTED");
+      }
+      return null;
+    },
+    recording_state: "recording",
+    master_stop_state: "clear",
+  });
+  await allowed.click("[data-utterance-close]");
+  check(
+    "reaction begin=true 才寫結果並收起 actions，end 時結果已可見",
+    allowed.node("[data-utterance-result]").textContent.includes("REACTION_COMMITTED") &&
+      allowed.node("[data-utterance-actions]").hidden &&
+      reactionVisibleAtEnd,
+    { text: allowed.node("[data-utterance-result]").textContent, reactionVisibleAtEnd },
+  );
+}
+
+console.log("81f. Azure response 也要過 native playback boundary；拒絕時一個 frame 都不播");
+{
+  const p = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: {
+      generation: 8,
+      content_type: "audio/mpeg",
+      audio_bytes: 3,
+      data_url: "data:audio/mpeg;base64,AQID",
+      presentation_id: "azure-playback-blocked",
+    },
+    ask: answer({ hits: [hit({ snippet: "AZURE_BOUNDARY_BODY" })] }),
+    master_stop_presentation_begin: ({ presentationId }) =>
+      presentationId !== "azure-playback-blocked",
+    master_stop_presentation_end: null,
+    recording_state: "recording",
+    master_stop_state: "clear",
+  });
+  await p.type("Azure boundary");
+  await tick(40);
+  check("Azure playback boundary=false 時沒有 play", p.audioPlays() === 0, p.audioPlays());
+  check(
+    "被拒的 Azure playback lease 有 begin/end",
+    p.invokes.some(
+      ({ cmd, arg }) =>
+        cmd === "master_stop_presentation_begin" &&
+        arg?.presentationId === "azure-playback-blocked",
+    ) &&
+      p.invokes.some(
+        ({ cmd, arg }) =>
+          cmd === "master_stop_presentation_end" &&
+          arg?.presentationId === "azure-playback-blocked",
+      ),
+    p.invokes,
+  );
+}
+
+console.log("81g. Azure 播放中觀察到外部 Stopping，先 pause/remove source 再 end lease");
+{
+  let masterStopState = "clear";
+  const p = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: {
+      generation: 8,
+      content_type: "audio/mpeg",
+      audio_bytes: 3,
+      data_url: "data:audio/mpeg;base64,AQID",
+      presentation_id: "azure-stop-event",
+    },
+    ask: answer({ hits: [hit({ snippet: "AZURE_STOP_EVENT_BODY" })] }),
+    master_stop_presentation_begin: true,
+    master_stop_presentation_end: null,
+    recording_state: "recording",
+    master_stop_state: () => masterStopState,
+  });
+  await p.type("播放中全停");
+  check("前提：Azure 已開始播放且 lease 尚未 end", p.audioPlays() === 1 && p.isSpeaking());
+  const pausesBefore = p.audioPauses();
+  const traceBefore = p.playbackTrace().length;
+  masterStopState = "stopping";
+  await p.pollNow();
+  const stopTrace = p.playbackTrace().slice(traceBefore);
+  const pauseAt = stopTrace.indexOf("pause");
+  const removeAt = stopTrace.indexOf("remove-src");
+  const endAt = stopTrace.indexOf("end:azure-stop-event");
+  check(
+    "外部 CLI 的 poll 觀察到 Stopping，依 pause→remove→end 停播並交還 lease",
+    p.audioPauses() > pausesBefore &&
+      !p.isSpeaking() &&
+      pauseAt >= 0 &&
+      removeAt > pauseAt &&
+      endAt > removeAt,
+    { pauses: p.audioPauses(), stopTrace, invokes: p.invokes },
+  );
 }
 
 console.log("82. desktop truth source contract 與三個 production callback self-mutations");
@@ -2858,6 +3273,24 @@ console.log("82. desktop truth source contract 與三個 production callback sel
   check(
     "self-mutation：只改 native event 名會紅",
     desktopTruthSourceErrors(renamedNative, dispatch, ui).some((line) => line.includes("名稱不一致")),
+  );
+  const unregistered = main.replace("            master_stop_state,\n", "");
+  check(
+    "self-mutation：刪 Tauri command registration 會紅",
+    desktopTruthSourceErrors(unregistered, dispatch, ui).some((line) => line.includes("沒有註冊")),
+  );
+  const ungatedGatekeeper = main.replace(
+    '    let master_stop_admission = admit_desktop_brain(shell.data_dir.as_deref(), "守門員這一輪")?;\n',
+    "",
+  );
+  check(
+    "self-mutation：刪 Gatekeeper admission 會紅",
+    desktopTruthSourceErrors(ungatedGatekeeper, dispatch, ui).some((line) => line.includes("gatekeeper_check")),
+  );
+  const noPresentationCommit = ui.replace("commitNativePresentation(answer", "commitWithoutFence(answer");
+  check(
+    "self-mutation：ask 繞過 renderer presentation commit 會紅",
+    desktopTruthSourceErrors(main, dispatch, noPresentationCommit).some((line) => line.includes("ask Promise")),
   );
 }
 

@@ -645,7 +645,7 @@ impl WatchEnd {
                 tally.line()
             ),
             Self::MasterStopped { tally } => format!(
-                "{}三層全停已啟用，盯梢現在停下來；沒有再問模型。要恢復，請從啟用這份資料目錄的介面解除全停。",
+                "{}全停閘門已生效，盯梢現在停下來；沒有再問模型。它可能仍在排乾，或協定狀態讀不到。要恢復，請從啟用這份資料目錄的介面解除全停。",
                 tally.line()
             ),
             Self::WentQuiet {
@@ -677,7 +677,7 @@ impl WatchEnd {
     pub fn message_with_master_stop_command(&self, command: &str) -> String {
         match self {
             Self::MasterStopped { tally } => format!(
-                "{}三層全停已啟用，盯梢現在停下來；沒有再問模型。要恢復請跑 `{command}`。",
+                "{}全停閘門已生效，盯梢現在停下來；沒有再問模型。它可能仍在排乾，或協定狀態讀不到。要恢復請跑 `{command}`。",
                 tally.line()
             ),
             _ => self.message(),

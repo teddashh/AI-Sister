@@ -159,13 +159,21 @@ console.log("② 唯一 outbound command 重讀完整 gate snapshot，再進 sha
       speak.includes("expected.credential_present != credential_present"),
   );
 
-  const closure = section(speak, "spawn_blocking(move || {", "let bytes = task");
+  const closure = section(
+    speak,
+    "spawn_blocking(move || {",
+    "let (bytes, master_stop_admission) = task",
+  );
   const beforePost = section(
     closure,
     "spawn_blocking(move || {",
     "synthesize_azure(consent_guard",
   );
-  const afterPost = section(closure, "synthesize_azure(consent_guard", "Ok(bytes)");
+  const afterPost = section(
+    closure,
+    "synthesize_azure(consent_guard",
+    "Ok((bytes, master_stop_admission))",
+  );
   const transportFence = section(
     MAIN,
     "fn run_generation_pinned_azure_transport<T>(",
@@ -185,7 +193,8 @@ console.log("② 唯一 outbound command 重讀完整 gate snapshot，再進 sha
   check(
     "POST 後再比較一次，取消的晚 response 不會回 renderer",
     afterPost.includes("generation_state.load(Ordering::Acquire) != request_generation") &&
-      afterPost.includes("回應已丟掉、沒有播放"),
+      afterPost.includes("回應已丟掉、沒有播放") &&
+      closure.includes("Ok((bytes, master_stop_admission))"),
   );
 
   const helper = section(MAIN, "fn synthesize_azure(", "struct AzureTtsInFlightGuard");
@@ -370,6 +379,7 @@ console.log("④ key 不進 config/log/renderer projection；secret scope 離開
     "content_type",
     "audio_bytes",
     "data_url",
+    "presentation_id",
   ]);
   const config = exactFields(CONFIG, "AzureTtsConfig", ["enabled", "region", "voice"]);
   check("status DTO 只有非密 projection", view.ok, view.actual);
@@ -380,7 +390,7 @@ console.log("④ key 不進 config/log/renderer projection；secret scope 離開
       MAIN,
     ),
   );
-  check("speak DTO 只回下一代與 bounded audio metadata/data", audio.ok, audio.actual);
+  check("speak DTO 只回下一代、bounded audio 與 native presentation lease", audio.ok, audio.actual);
   check("config.toml 只有 enabled/typed region/typed voice", config.ok, config.actual);
   check(
     "key command 只回 AzureTtsView",
@@ -492,7 +502,7 @@ console.log("⑤ app.js 只有最新 ask 完成可自動朗讀；manual replay �
     "pendingAzureAutoAsk = null",
     "const mine = ++asking",
     'const answer = await invoke("ask"',
-    "if (mine !== asking) return",
+    "if (mine !== asking) {",
     "renderHits(",
     "autoSpeakLatestAzureAnswer(mine)",
   ]);
