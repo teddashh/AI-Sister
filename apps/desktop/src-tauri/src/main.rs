@@ -423,8 +423,8 @@ fn admit_desktop_brain(
     work: &str,
 ) -> Result<sister_hands::master_stop::ActivityGuard, String> {
     let data_dir = data_dir.ok_or_else(|| format!("找不到資料目錄，{work}沒有開始"))?;
-    sister_hands::master_stop::admit(data_dir).ok_or_else(|| {
-        match sister_hands::master_stop::state(data_dir) {
+    sister_hands::master_stop::admit(data_dir).ok_or_else(
+        || match sister_hands::master_stop::state(data_dir) {
             sister_hands::master_stop::State::Stopping => {
                 format!("正在完成全停，{work}沒有開始；排乾完成後可從系統匣解除全停")
             }
@@ -437,8 +437,8 @@ fn admit_desktop_brain(
             sister_hands::master_stop::State::Clear => {
                 format!("全停 admission 取得失敗，{work}沒有開始")
             }
-        }
-    })
+        },
+    )
 }
 
 /// action log 的「兩種零」在還看得到檔案的這一層分開。`Replay::default()` 同時
@@ -831,8 +831,7 @@ fn gatekeeper_react(
     close: bool,
     shell: tauri::State<'_, Shell>,
 ) -> Result<GatekeeperReactionView, String> {
-    let master_stop_admission =
-        admit_desktop_brain(shell.data_dir.as_deref(), "這次守門員回應")?;
+    let master_stop_admission = admit_desktop_brain(shell.data_dir.as_deref(), "這次守門員回應")?;
     let message = with_db_mut(&shell, |db| {
         let reaction = if close {
             sister_core::gatekeeper::Reaction::Close
@@ -1214,8 +1213,7 @@ mod master_stop_desktop_tests {
 
         job_tx.send(MasterStopAction::Engage).unwrap();
         for _ in 0..500 {
-            if sister_hands::master_stop::state(&dir)
-                == sister_hands::master_stop::State::Stopping
+            if sister_hands::master_stop::state(&dir) == sister_hands::master_stop::State::Stopping
             {
                 break;
             }
@@ -1265,8 +1263,7 @@ mod master_stop_desktop_tests {
                 .unwrap();
         });
         for _ in 0..500 {
-            if sister_hands::master_stop::state(&dir)
-                == sister_hands::master_stop::State::Stopping
+            if sister_hands::master_stop::state(&dir) == sister_hands::master_stop::State::Stopping
             {
                 break;
             }
@@ -1286,7 +1283,10 @@ mod master_stop_desktop_tests {
         expire_pending_presentation(presentation_id.parse().unwrap());
         assert!(done_rx.recv_timeout(Duration::from_millis(40)).is_err());
         finish_presentation(&presentation_id).unwrap();
-        done_rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
         stop.join().unwrap();
         assert_eq!(
             sister_hands::master_stop::state(&dir),
@@ -4514,9 +4514,10 @@ async fn azure_tts_speak(
     expected: AzureTtsExpected,
     shell: tauri::State<'_, Shell>,
 ) -> Result<AzureTtsAudioView, String> {
-    let data_dir = shell.data_dir.as_deref().ok_or_else(|| {
-        "找不到資料目錄，問不到第四張同意書；沒有送出 request。".to_string()
-    })?;
+    let data_dir = shell
+        .data_dir
+        .as_deref()
+        .ok_or_else(|| "找不到資料目錄，問不到第四張同意書；沒有送出 request。".to_string())?;
     // Azure 也是答案正文出境，不可借「本機朗讀」的名字繞過 master stop。
     // 這份 activity guard 活過完整 blocking transport：stop 可先發佈 pending、
     // 立刻拒絕後續工作，但成功回條一定等這份 stop 前已准入的 POST 收尾。

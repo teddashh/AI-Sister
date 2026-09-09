@@ -1360,6 +1360,42 @@ impl<B: Backend> Recorder<B> {
         out
     }
 
+    /// Acquire the process-lifetime input lease before a production tick may
+    /// touch any live source. A recorder whose Windows hook remains open keeps
+    /// the same guard between ticks; a pending stop is observed through that
+    /// guard instead of trying to enter through the now-closed turnstile.
+    fn begin_master_activity(
+        &mut self,
+    ) -> std::result::Result<MasterActivity, sister_hands::master_stop::State> {
+        match self.master_stop_source.clone() {
+            MasterStopSource::Latch(data_dir) => {
+                let guard = if let Some(guard) = self.master_input_activity.clone() {
+                    if guard.stop_requested() {
+                        return Err(guard.observed_state());
+                    }
+                    guard
+                } else {
+                    let Some(guard) = sister_hands::master_stop::admit(&data_dir) else {
+                        return Err(sister_hands::master_stop::state(&data_dir));
+                    };
+                    self.master_input_activity = Some(guard.clone());
+                    guard
+                };
+                Ok(MasterActivity::Guard(guard))
+            }
+            MasterStopSource::NotApplicable => Ok(MasterActivity::NotApplicable),
+        }
+    }
+
+    /// Windows composition tests use the exact production admission seam but
+    /// deliberately stop before UIA/GDI/clipboard polling. Those unrelated OS
+    /// sources have their own native tests and are unsafe to invoke from this
+    /// parallel unit-test process merely to arrange a drop-order fixture.
+    #[cfg(all(test, windows))]
+    pub(crate) fn admit_master_input_for_test(&mut self) -> bool {
+        matches!(self.begin_master_activity(), Ok(MasterActivity::Guard(_)))
+    }
+
     fn tick_inner(
         &mut self,
         ts: Millis,
@@ -1373,28 +1409,9 @@ impl<B: Backend> Recorder<B> {
 
         // Production tick 在碰任何 live source 前取得一份真正活著的 shared file lock。
         // `NotApplicable` 是 replay/單測的明確分支，不可偽造一份空 guard。
-        let master_activity = match self.master_stop_source.clone() {
-            MasterStopSource::Latch(data_dir) => {
-                let guard = if let Some(guard) = self.master_input_activity.clone() {
-                    // A stop requested between ticks cannot complete while this
-                    // lease lives. Observe it before touching any live source,
-                    // close the hook, then let the exclusive drain finish.
-                    if guard.stop_requested() {
-                        let observed = guard.observed_state();
-                        return self.master_stop_tick(ts, observed);
-                    }
-                    guard
-                } else {
-                    let Some(guard) = sister_hands::master_stop::admit(&data_dir) else {
-                        let observed = sister_hands::master_stop::state(&data_dir);
-                        return self.master_stop_tick(ts, observed);
-                    };
-                    self.master_input_activity = Some(guard.clone());
-                    guard
-                };
-                MasterActivity::Guard(guard)
-            }
-            MasterStopSource::NotApplicable => MasterActivity::NotApplicable,
+        let master_activity = match self.begin_master_activity() {
+            Ok(activity) => activity,
+            Err(observed) => return self.master_stop_tick(ts, observed),
         };
         let master_changed = self.set_master_stopped(false, ts)?;
         if master_changed {

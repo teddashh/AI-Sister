@@ -51,6 +51,11 @@ cargo clippy --target "$TARGET" --workspace --no-default-features --all-targets 
 # 它只影響資源檔（執行檔的圖示），而 check 與 clippy 都不連結。
 DESKTOP=apps/desktop/src-tauri
 if [[ -d "$DESKTOP" ]]; then
+    # desktop 是獨立 workspace；root 的 `cargo fmt --all` 不會走到它。
+    # alpha.118 曾因此本機 28 條全綠，macOS CI 才第一次報格式差異。
+    echo "▶ cargo fmt --check（桌面姊妹）"
+    cargo fmt --manifest-path "$DESKTOP/Cargo.toml" -- --check
+
     shim="$(mktemp -d)"
     # Tauri 會在 build script 階段確認 externalBin 的 target-suffixed 路徑存在，
     # 即使 `cargo check` 根本不會打包或讀它的 PE 內容。正式 Windows job 會把

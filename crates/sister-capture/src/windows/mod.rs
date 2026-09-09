@@ -290,11 +290,15 @@ mod tests {
             "production construction must cold-start the callback gate closed"
         );
 
-        // Admission happens before any fallible live source poll. The runner's
-        // desktop state may make that poll suspend input again, so reopen the
-        // same production static gate explicitly to model the active interval
-        // just before a maintenance error drops this recorder.
-        let _ = recorder.tick(sister_core::now_ms());
+        // Use the exact admission helper called by a production tick, but do
+        // not poll unrelated UIA/GDI/clipboard sources merely to build this
+        // drop-order fixture. The first alpha.118 main run access-violated while
+        // this new test and another mutex waiter were the only unfinished unit
+        // tests; its full live-source tick was unrelated to the asserted fact.
+        assert!(
+            recorder.admit_master_input_for_test(),
+            "production recorder did not retain its between-tick activity lease"
+        );
         input::open_callback_gate_for_test();
         assert!(
             input::callback_gate_open_for_test(),
