@@ -85,7 +85,7 @@ impl std::error::Error for AcquireError {
 /// 活著就代表這個 process 仍持有 recorder lease。
 ///
 /// 不實作 `Clone`，避免同一個 ownership 意圖散成多份不清楚誰負責保存的 handle。
-/// Drop 只需關閉底層 [`File`]；正常 drop 與行程被終止都由 OS 自動釋放 lock。
+/// Drop 會先明確解鎖再關閉底層 [`File`]；行程被終止時仍由 OS 自動釋放 lock。
 #[derive(Debug)]
 pub struct RecorderLease {
     _file: File,
@@ -95,6 +95,14 @@ pub struct RecorderLease {
 impl RecorderLease {
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl Drop for RecorderLease {
+    fn drop(&mut self) {
+        // Make reacquisition immediately observable before the handle itself is closed. A process
+        // exit still releases the kernel lock even when this destructor cannot run.
+        let _ = FileExt::unlock(&self._file);
     }
 }
 
