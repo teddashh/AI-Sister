@@ -2575,12 +2575,12 @@ jobs:
           $fixtureSetup = Join-Path `
             'apps/desktop/src-tauri/target/release/bundle/nsis' `
             "AI-Sister_${version}_x64-setup.exe"
-          $fixtureDesktop = 'apps/desktop/src-tauri/target/release/sister-desktop.exe'
-          $fixtureSidecar = 'target/release/sister-x86_64-pc-windows-msvc.exe'
+          # tauri-bundler 為了下一種 bundle type 會刻意還原 build-tree main binary；
+          # 真正出貨的 signed main／sidecar 是 NSIS 裡的 payload，安裝後再驗 exact 四層。
           ./scripts/windows-signing.ps1 `
             -Action VerifyExpected `
             -PlanPath $env:AI_SISTER_WINDOWS_SIGNING_SELF_TEST_PLAN `
-            -Path @($fixtureSetup, $fixtureDesktop, $fixtureSidecar)
+            -Path @($fixtureSetup)
 
           $installDir = Join-Path $env:RUNNER_TEMP 'ai-sister-signing-self-test-install'
           if ($installDir -match '\s') {

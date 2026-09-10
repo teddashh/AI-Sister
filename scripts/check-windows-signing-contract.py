@@ -92,6 +92,8 @@ def main() -> None:
         "-Action Receipt `",
         "-Action PrepareSelfTest `",
         '--config "$AI_SISTER_WINDOWS_SIGNING_SELF_TEST_CONFIG"',
+        "-Path @($fixtureSetup)",
+        "-Path @($fixtureSetup, $installedDesktop, $installedSister, $uninstaller)",
         "python3 ./scripts/check-windows-signing-receipt.py \\",
         "if: always()",
     )
