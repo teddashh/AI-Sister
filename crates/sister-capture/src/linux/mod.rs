@@ -1732,7 +1732,6 @@ mod tests {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
             Err(error) => panic!("start xmessage: {error}"),
         };
-        std::thread::sleep(std::time::Duration::from_millis(350));
         let attempt = (|| -> Result<String> {
             anyhow::ensure!(
                 message.try_wait()?.is_none(),
@@ -1743,17 +1742,28 @@ mod tests {
                     "exact verifier did not produce an available transport"
                 ));
             };
-            let frame = capture_x11(&ready.connection, ready.screen_index, 123)?;
-            let rgba = frame
-                .rgba
-                .as_deref()
-                .ok_or_else(|| anyhow!("captured X11 frame has no pixels"))?;
-            let first = rgba.get(..4).unwrap_or(&[]);
-            let changed_pixels = rgba.chunks_exact(4).filter(|pixel| *pixel != first).count();
-            anyhow::ensure!(
-                changed_pixels > 1_000,
-                "captured X11 frame has only {changed_pixels} pixels distinct from its first pixel"
-            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let frame = loop {
+                let frame = capture_x11(&ready.connection, ready.screen_index, 123)?;
+                let rgba = frame
+                    .rgba
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("captured X11 frame has no pixels"))?;
+                let first = rgba.get(..4).unwrap_or(&[]);
+                let changed_pixels = rgba.chunks_exact(4).filter(|pixel| *pixel != first).count();
+                if changed_pixels > 1_000 {
+                    break frame;
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "captured X11 frame has only {changed_pixels} pixels distinct from its first pixel"
+                );
+                anyhow::ensure!(
+                    message.try_wait()?.is_none(),
+                    "xmessage exited before its window was painted"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            };
             let languages = TesseractOcr::select_languages(&["en-US".to_owned()], &installed)
                 .ok_or_else(|| anyhow!("installed eng language disappeared"))?;
             let blocks = TesseractOcr::Enabled { languages }.recognize(&frame)?;
