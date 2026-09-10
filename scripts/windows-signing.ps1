@@ -200,7 +200,7 @@ function Get-FileProjection([string] $InputPath, $Plan) {
         throw "fixture Authenticode 不是 exact untrusted-root 狀態：$resolved status=$fixtureStatus message=$($signature.StatusMessage)"
       }
       $untrustedRootPattern = `
-        '(?i)(root certificate.+not trusted|certificate chain.+authority.+not trusted)'
+        '(?i)(root\s+certificate[\s\S]+not\s+trusted|certificate\s+chain[\s\S]+authority[\s\S]+not\s+trusted)'
       if ($signature.StatusMessage -notmatch $untrustedRootPattern) {
         throw "fixture Authenticode 失敗不是 untrusted root：$resolved message=$($signature.StatusMessage)"
       }
