@@ -10,7 +10,7 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.119 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+alpha.120 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
@@ -21,6 +21,20 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
+
+### alpha.120 先驗官網 → Release 的同一份安裝包
+
+- [ ] 開 <https://teddashh.github.io/AI-Sister/>。頁首與底部都要顯示
+      `v0.1.0-alpha.120`，兩顆 Windows 下載鈕都要直接下載 alpha.120 Release 的
+      `AI-Sister-Setup.exe`，不是 Releases 列表、舊 tag 或網頁檔。
+- [ ] 桌面寬度與手機寬度各看一次；首屏產品卡、四格數字、三張記憶能力卡、17 人選角、
+      四段本機資料流程與三步開始都完整顯示，不能橫向溢位。逐一點過 17 人，首屏角色圖、
+      名稱與選中框要同步；重整回到 ChatGPT。
+- [ ] alpha.120 三個公開 exe 的 `Get-AuthenticodeSignature` 都要回 `NotSigned`，與 Windows
+      signing receipt 的 unsigned mode 一致，不能只有 Setup 或其中一個 payload 多出簽章。
+      第一個 production-signed tag 則改照
+      [`WINDOWS-CODE-SIGNING.md`](WINDOWS-CODE-SIGNING.md) 驗四層皆為 `Valid`、同 publisher，
+      且每層都有 `TimeStamperCertificate`。
 
 ### alpha.119 先驗 17 人 bundled 日常對話
 

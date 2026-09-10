@@ -71,10 +71,12 @@ alpha.118 再完成跨 capture／brain／hands 的 master stop：`sister stop-al
 才回成功；系統匣、CLI 與問答分得出正在排乾、已完成、讀不到三種情況，不會提早說「都停了」。
 解除全停不會順手解除原本的暫停或拔手。alpha.119 把 17 位角色的本機日常語音完整隨程式
 安裝：每人基本 8 句＋擴充 24 句，共 544 段；exact 日常短句直接使用目前角色的錄音，
-其餘問題維持既有記憶／CLI 大腦。code signing 仍未完成，
+其餘問題維持既有記憶／CLI 大腦。Windows production signing pipeline 已完整接到
+四層 Authenticode 驗證與發版 receipt；正式 CA 發行憑證尚未配置，現行公開 alpha 仍是 unsigned，
 所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
-可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
+可以先看 [官方網站](https://teddashh.github.io/AI-Sister/)，或直接從
+[Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
 
 macOS 現在有一條 **feature-gated 原生診斷，不是產品擷取後端或 Preview**：alpha.105
 的 `macos-15` Apple Silicon job 由 LaunchServices 啟動 ad-hoc signed、hardened `.app`，
@@ -157,7 +159,8 @@ alpha.117 在最後一次 scan 之後、NSIS `File` 之前再用檔案層獨佔�
 已安裝的 `sister-desktop.exe`／`sister.exe`，開檔就會以 sharing violation 失敗，Setup／
 uninstaller 拒絕且不 kill；拿到 handle 後舊檔先改名、handle 持到收尾，Windows loader 在這段
 期間映射不到任何版本的 exe。已經出貨或複製到 temp 的舊 uninstaller 仍不能被新版
-retroactively 修改。現在也還沒有 code signing，Windows 可能顯示未簽章警告。
+retroactively 修改。Windows 簽章與發版規則見
+[`docs/WINDOWS-CODE-SIGNING.md`](docs/WINDOWS-CODE-SIGNING.md)；現行公開 alpha 尚未簽署。
 
 ## 跑起來
 

@@ -702,7 +702,19 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     CLI／desktop `recording.lock`，
     以及各種取消、占用／未知、外部 recorder、desktop crash 與 uninstall。未勾完前不宣稱
     Windows 人工通過。
-  - ⬜ code signing 與官網仍未完成；
+  - 🔶 Windows code-signing 的 production pipeline 已接完：tag runner 從 encrypted
+    secrets 匯入 public-CA PFX，同一張憑證以 SHA-256＋固定 RFC 3161 timestamp 簽
+    `sister.exe`、desktop、NSIS uninstaller 與 Setup；Windows 原生 CI 驗四層 trust，release
+    job 再以 exact 三檔 size／hash／publisher／thumbprint／timestamp receipt 擋在 draft 之前。
+    branch 與未配置憑證的 alpha 另在公開檔 staging 後，用 throwaway trusted PFX 重建、安裝、
+    驗完四層再清除，不能拿 self-signed fixture 冒充 release。正式 CA 憑證與第一份實際簽署的
+    公開 artifact 尚未加入；stable tag 無憑證會直接失敗。操作合約見
+    [`WINDOWS-CODE-SIGNING.md`](WINDOWS-CODE-SIGNING.md)。
+  - ✅ alpha.120 完成官方一頁網站：桌面／手機 responsive 版面直接呈現 S1 秒答＋出處、
+    17 位離線角色、544 段語音、自帶 CLI 大腦與四張獨立同意；沒有 analytics、外部字型或
+    第三方 runtime 素材。build 從 root 版號產生 exact tag／Setup URL，逐檔重驗 17 張 WebP
+    的 manifest bytes／hash／總量；只有同一輪 Release 公開後，獨立 Pages job 才部署
+    <https://teddashh.github.io/AI-Sister/>。
     1.0 不內建自動 updater，由使用者手動下載新版 installer。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）

@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AI-Sister 是 Windows 上的 local-first 桌面記憶：安靜記住你的一天，提問時秒答，每一句都能點回本機證據。"
+    />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <meta name="theme-color" content="#f4eadb" />
+    <title>AI-Sister — 記得你昨天在做什麼</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要內容</a>
+
+    <header class="topbar">
+      <a class="wordmark" href="#top" aria-label="AI-Sister 首頁">
+        <span class="wordmark-mark" aria-hidden="true">AI·S</span>
+        <span>AI-Sister</span>
+      </a>
+      <nav aria-label="主要導覽">
+        <a href="#memory">記憶</a>
+        <a href="#personas">角色</a>
+        <a href="#privacy">本機邊界</a>
+        <a class="nav-download" href="__DOWNLOAD_URL__">下載</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div class="hero-copy">
+          <p class="eyebrow"><span></span> Windows · local-first</p>
+          <h1>你昨天在忙什麼，<br /><em>問她就知道。</em></h1>
+          <p class="hero-lede">
+            AI-Sister 安靜看著你的工作，把畫面上的細節留在這台電腦。等你想找電話、金額、
+            網址，或昨天卡住的地方，她秒答，而且每一句都點得開證據。
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="__DOWNLOAD_URL__">
+              <span>下載 Windows 安裝包</span>
+              <span aria-hidden="true">↓</span>
+            </a>
+            <a class="button button-quiet" href="https://github.com/teddashh/AI-Sister">
+              看原始碼 <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+          <p class="release-line">__TAG__ · Windows 10+ · Apache-2.0</p>
+        </div>
+
+        <div class="hero-product" aria-label="AI-Sister 產品介面預覽">
+          <div class="orbit orbit-one" aria-hidden="true"></div>
+          <div class="orbit orbit-two" aria-hidden="true"></div>
+          <article class="desktop-card">
+            <header class="desktop-chrome">
+              <span>AI-Sister</span>
+              <span class="chrome-status"><i></i> 在聽</span>
+              <span aria-hidden="true">—　×</span>
+            </header>
+            <div class="desktop-body">
+              <figure class="hero-persona">
+                <img
+                  data-hero-persona
+                  src="./assets/personas/chatgpt.webp"
+                  alt="ChatGPT 角色全身圖"
+                  width="640"
+                  height="640"
+                />
+                <figcaption data-hero-persona-name>ChatGPT</figcaption>
+              </figure>
+              <div class="memory-answer">
+                <p class="question">昨天付款頁最後弄到哪？</p>
+                <div class="answer-card">
+                  <span class="answer-kicker">她記得</span>
+                  <p>你把 webhook 重送接好了；最後一筆畫面顯示測試通過，下一步是補退款情境。</p>
+                  <div class="evidence-list">
+                    <span>昨天 16:08 · VS Code</span>
+                    <span>昨天 16:21 · Terminal</span>
+                  </div>
+                </div>
+                <div class="ask-preview">
+                  <span>再問一件事…</span><b aria-hidden="true">→</b>
+                </div>
+              </div>
+            </div>
+          </article>
+          <aside class="proof-note proof-note-top" aria-hidden="true">
+            <b>每句都有出處</b><span>不是一段猜測</span>
+          </aside>
+          <aside class="proof-note proof-note-bottom" aria-hidden="true">
+            <b>95% 安靜</b><span>需要時才開口</span>
+          </aside>
+        </div>
+      </section>
+
+      <section class="trust-strip" aria-label="產品重點">
+        <p><b>0</b><span>張截圖上雲</span></p>
+        <p><b>&lt;100ms</b><span>本機記憶檢索目標</span></p>
+        <p><b>17</b><span>位離線角色</span></p>
+        <p><b>544</b><span>段內建日常語音</span></p>
+      </section>
+
+      <section class="section memory-section" id="memory">
+        <div class="section-heading">
+          <p class="eyebrow"><span></span> 不是另一個聊天視窗</p>
+          <h2>她的工作不是陪你重問，<br />是替你<span>記住。</span></h2>
+          <p>原始證據不經模型改寫。理解可以修正、記憶可以結案；你點開的畫面才是最後依據。</p>
+        </div>
+
+        <div class="memory-grid">
+          <article class="feature-card feature-evidence">
+            <span class="feature-index">01</span>
+            <div class="mini-timeline" aria-hidden="true">
+              <span><i></i><b>14:06</b> 客服專線 0800-…</span>
+              <span><i></i><b>15:32</b> 發票金額 NT$ 4,280</span>
+              <span><i></i><b>16:21</b> webhook tests passed</span>
+            </div>
+            <h3>先存證據，再談理解</h3>
+            <p>OCR、電話、金額、網址與時間留在 SQLite；答案附上可點開的本機畫面。</p>
+          </article>
+
+          <article class="feature-card feature-brain">
+            <span class="feature-index">02</span>
+            <div class="brain-switch" aria-label="支援的 CLI 大腦">
+              <span>Claude Code</span><span>Codex</span><span>Gemini</span><span>Grok</span>
+            </div>
+            <h3>大腦用你已經裝好的 CLI</h3>
+            <p>AI-Sister 不綁一家模型。事實檢索留在本機；需要整理語意時，才交給你指定的 CLI agent。</p>
+          </article>
+
+          <article class="feature-card feature-quiet">
+            <span class="feature-index">03</span>
+            <div class="quiet-meter" aria-hidden="true">
+              <span class="quiet-block active"></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span><b>95% quiet</b>
+            </div>
+            <h3>沉默是產品能力</h3>
+            <p>有證據、值得打斷、沒有超過預算，才開口。其他時間，她待在桌面角落。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section persona-section" id="personas">
+        <div class="persona-copy">
+          <p class="eyebrow"><span></span> 四姊妹 + 13 位閨密</p>
+          <h2>同一份記憶，<br /><span>選你想見的她。</span></h2>
+          <p>
+            17 套透明全身 workplace rig、17 張退路圖與每人 32 段日常語音都隨程式安裝。
+            換角色不改答案事實，也不改證據。
+          </p>
+          <div class="persona-counts"><b>8</b> 基本包 <i>+</i> <b>24</b> 擴充包 <i>×</i> <b>17</b> 人</div>
+        </div>
+
+        <div class="persona-picker" aria-label="選擇角色預覽">
+          <p>點一位看看</p>
+          <div class="persona-buttons">
+            <button class="selected" type="button" data-persona="chatgpt" data-name="ChatGPT" aria-pressed="true"><img src="./assets/personas/chatgpt.webp" alt="ChatGPT" width="640" height="640" /></button>
+            <button type="button" data-persona="claude" data-name="Claude" aria-pressed="false"><img src="./assets/personas/claude.webp" alt="Claude" width="640" height="640" /></button>
+            <button type="button" data-persona="gemini" data-name="Gemini" aria-pressed="false"><img src="./assets/personas/gemini.webp" alt="Gemini" width="640" height="640" /></button>
+            <button type="button" data-persona="grok" data-name="Grok" aria-pressed="false"><img src="./assets/personas/grok.webp" alt="Grok" width="640" height="640" /></button>
+            <button type="button" data-persona="deepseek" data-name="DeepSeek" aria-pressed="false"><img src="./assets/personas/deepseek.webp" alt="DeepSeek" width="640" height="640" /></button>
+            <button type="button" data-persona="qwen" data-name="Qwen" aria-pressed="false"><img src="./assets/personas/qwen.webp" alt="Qwen" width="640" height="640" /></button>
+            <button type="button" data-persona="mistral" data-name="Mistral" aria-pressed="false"><img src="./assets/personas/mistral.webp" alt="Mistral" width="640" height="640" /></button>
+            <button type="button" data-persona="venice" data-name="Llama" aria-pressed="false"><img src="./assets/personas/venice.webp" alt="Llama" width="640" height="640" /></button>
+            <button type="button" data-persona="sakana" data-name="Sakana" aria-pressed="false"><img src="./assets/personas/sakana.webp" alt="Sakana" width="640" height="640" /></button>
+            <button type="button" data-persona="perplexity" data-name="Perplexity" aria-pressed="false"><img src="./assets/personas/perplexity.webp" alt="Perplexity" width="640" height="640" /></button>
+            <button type="button" data-persona="glm" data-name="GLM" aria-pressed="false"><img src="./assets/personas/glm.webp" alt="GLM" width="640" height="640" /></button>
+            <button type="button" data-persona="kimi" data-name="Kimi" aria-pressed="false"><img src="./assets/personas/kimi.webp" alt="Kimi" width="640" height="640" /></button>
+            <button type="button" data-persona="hunyuan" data-name="Hunyuan" aria-pressed="false"><img src="./assets/personas/hunyuan.webp" alt="Hunyuan" width="640" height="640" /></button>
+            <button type="button" data-persona="minimax" data-name="MiniMax" aria-pressed="false"><img src="./assets/personas/minimax.webp" alt="MiniMax" width="640" height="640" /></button>
+            <button type="button" data-persona="nemotron" data-name="Nemotron" aria-pressed="false"><img src="./assets/personas/nemotron.webp" alt="Nemotron" width="640" height="640" /></button>
+            <button type="button" data-persona="cohere" data-name="Cohere" aria-pressed="false"><img src="./assets/personas/cohere.webp" alt="Cohere" width="640" height="640" /></button>
+            <button type="button" data-persona="mimo" data-name="MiMo" aria-pressed="false"><img src="./assets/personas/mimo.webp" alt="MiMo" width="640" height="640" /></button>
+          </div>
+          <p class="picker-note"><span data-picker-name>ChatGPT</span> · 圖像與固定聲音都在本機</p>
+        </div>
+      </section>
+
+      <section class="section privacy-section" id="privacy">
+        <div class="section-heading privacy-heading">
+          <p class="eyebrow light"><span></span> 你看得到邊界</p>
+          <h2>記憶留在這台電腦。<br />每一扇門<span>分開開、隨時關。</span></h2>
+        </div>
+
+        <div class="privacy-flow">
+          <article>
+            <span class="flow-number">1</span>
+            <h3>眼睛</h3>
+            <p>畫面、OCR、時間與視窗脈絡留在本機。</p>
+            <b>本機資料</b>
+          </article>
+          <i aria-hidden="true">→</i>
+          <article>
+            <span class="flow-number">2</span>
+            <h3>記憶</h3>
+            <p>SQLite 檢索先回答；原始畫面不經模型改寫。</p>
+            <b>零模型也能查</b>
+          </article>
+          <i aria-hidden="true">→</i>
+          <article>
+            <span class="flow-number">3</span>
+            <h3>大腦</h3>
+            <p>你明確同意後，OCR 原文才交給指定 CLI 整理。</p>
+            <b>自帶 CLI</b>
+          </article>
+          <i aria-hidden="true">→</i>
+          <article>
+            <span class="flow-number">4</span>
+            <h3>聲音</h3>
+            <p>角色語音離線；Azure 新答案朗讀另有獨立開關。</p>
+            <b>不互相 fallback</b>
+          </article>
+        </div>
+
+        <div class="consent-line">
+          <span>本機記錄</span><span>CLI 解讀</span><span>畫面保存</span><span>Azure 朗讀</span>
+          <p>四張同意，四個獨立邊界。</p>
+        </div>
+      </section>
+
+      <section class="section start-section" id="download">
+        <div class="start-copy">
+          <p class="eyebrow"><span></span> 三步開始</p>
+          <h2>裝好，授權，<span>然後問她。</span></h2>
+        </div>
+        <ol class="steps">
+          <li><span>01</span><div><b>下載安裝包</b><p>current-user 安裝，不需要系統管理員。</p></div></li>
+          <li><span>02</span><div><b>選擇要開的同意</b><p>先開本機記錄；畫面保存與 CLI 解讀各自決定。</p></div></li>
+          <li><span>03</span><div><b>開始問</b><p>「昨天我在做什麼？」每筆事實都附出處。</p></div></li>
+        </ol>
+        <div class="download-panel">
+          <div><span>目前版本</span><b>__VERSION__</b></div>
+          <a class="button button-primary" href="__DOWNLOAD_URL__">下載 AI-Sister <span aria-hidden="true">↓</span></a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="footer-brand">
+        <span class="wordmark-mark" aria-hidden="true">AI·S</span>
+        <div><b>AI-Sister</b><p>一個記得住、查得到、停得下來的桌面姊妹。</p></div>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/teddashh/AI-Sister">GitHub</a>
+        <a href="https://github.com/teddashh/AI-Sister/releases">Releases</a>
+        <a href="https://github.com/teddashh/AI-Sister/blob/main/docs/PRIVACY.md">隱私邊界</a>
+        <a href="https://github.com/teddashh/AI-Sister/blob/main/docs/WINDOWS-CODE-SIGNING.md">簽章</a>
+        <a href="./assets/personas/NOTICE.md">角色素材</a>
+      </div>
+      <p class="footer-meta">Open source · Local-first · Built for Windows</p>
+    </footer>
+  </body>
+</html>

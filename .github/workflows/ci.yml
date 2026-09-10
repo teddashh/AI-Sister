@@ -31,6 +31,16 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then args+=(--tag "${GITHUB_REF_NAME}"); fi
           python3 ./scripts/check-release-version.py "${args[@]}"
 
+      - name: Windows signing — stable tags require one exact signed three-file receipt
+        run: |
+          python3 ./scripts/check-windows-signing-contract.py
+          python3 -m unittest \
+            scripts/tests/test_windows_signing_plan.py \
+            scripts/tests/test_windows_signing_receipt.py
+
+      - name: Website — current release link and exact persona set
+        run: python3 -m unittest scripts/tests/test_build_website.py
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -544,6 +554,19 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
+      # 正式 PFX 只在 tag runner 匯入 CurrentUser/My。alpha 沒有憑證時維持可核對的
+      # unsigned artifact；任何不帶 prerelease suffix 的正式 tag 則直接拒絕 unsigned。
+      # PFX 與密碼只經 encrypted secrets 進這一步，不出現在 config、artifact 或 log。
+      - name: Windows signing — select policy and import the release certificate
+        shell: pwsh
+        env:
+          AI_SISTER_WINDOWS_PFX_BASE64: ${{ secrets.AI_SISTER_WINDOWS_PFX_BASE64 }}
+          AI_SISTER_WINDOWS_PFX_PASSWORD: ${{ secrets.AI_SISTER_WINDOWS_PFX_PASSWORD }}
+        run: |
+          ./scripts/windows-signing.ps1 `
+            -Action Prepare `
+            -PlanPath (Join-Path $env:RUNNER_TEMP 'windows-signing-plan.json')
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -651,6 +674,16 @@ jobs:
 
       - name: Build release
         run: cargo build --release -p sister-cli
+
+      # recorder 是獨立公開下載檔，也是 NSIS sidecar。正式 tag 有憑證時先在這裡
+      # 簽同一個 exact binary；Tauri 後面看到 signed sidecar 只會驗證並沿用。
+      - name: Windows signing — sign or prove unsigned sister.exe
+        shell: pwsh
+        run: |
+          ./scripts/windows-signing.ps1 `
+            -Action SignExpected `
+            -PlanPath $env:AI_SISTER_WINDOWS_SIGNING_PLAN `
+            -Path ./target/release/sister.exe
 
       # Phase 0 的 exit criteria，在真正的 Windows 上驗一次：
       # 「sister query 電話 能撈回三天前畫面上的電話，附出處」。
@@ -1084,7 +1117,11 @@ jobs:
           # rust-cache 可以帶回上一個版號的 bundle output；只清 generated NSIS
           # directory，不碰 target 裡已編好的依賴或這輪剛綁定的 root sidecar。
           rm -rf -- target/release/bundle/nsis
-          cargo tauri build --bundles nsis --ci -- --locked
+          signing=()
+          if [[ "$AI_SISTER_WINDOWS_SIGNING_MODE" == production ]]; then
+            signing+=(--config "$AI_SISTER_WINDOWS_TAURI_SIGNING_CONFIG")
+          fi
+          cargo tauri build --bundles nsis --ci "${signing[@]}" -- --locked
 
       # Tauri 的版本化檔名留在 build tree；對外只有一個固定名字，release job 才能
       # 對「恰好三個 asset」做 exact set 驗證。不能用 glob 直接餵 release：舊 setup
@@ -1452,12 +1489,62 @@ jobs:
             }
           }
 
+          function Get-PeContentWithoutAuthenticode([string] $path) {
+            [byte[]] $bytes = [IO.File]::ReadAllBytes($path)
+            if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+              throw "$path 不是可正規化的 MZ executable"
+            }
+            $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+            if ($pe -lt 0 -or $pe + 26 -gt $bytes.Length -or
+                $bytes[$pe] -ne 0x50 -or $bytes[$pe + 1] -ne 0x45 -or
+                $bytes[$pe + 2] -ne 0 -or $bytes[$pe + 3] -ne 0) {
+              throw "$path 沒有可正規化的 PE header"
+            }
+            $optional = $pe + 24
+            $magic = [BitConverter]::ToUInt16($bytes, $optional)
+            $securityEntry = if ($magic -eq 0x10b) {
+              $optional + 128
+            }
+            elseif ($magic -eq 0x20b) {
+              $optional + 144
+            }
+            else {
+              throw "$path PE optional header magic 不支援：$magic"
+            }
+            if ($securityEntry + 8 -gt $bytes.Length -or $optional + 68 -gt $bytes.Length) {
+              throw "$path PE header 被截斷"
+            }
+
+            [uint32] $certificateOffset = [BitConverter]::ToUInt32($bytes, $securityEntry)
+            [uint32] $certificateSize = [BitConverter]::ToUInt32($bytes, $securityEntry + 4)
+            if (($certificateOffset -eq 0) -ne ($certificateSize -eq 0)) {
+              throw "$path Authenticode directory 只有 offset 或 size"
+            }
+            $contentLength = $bytes.Length
+            if ($certificateOffset -ne 0) {
+              [uint64] $certificateEnd = [uint64] $certificateOffset + [uint64] $certificateSize
+              if ($certificateOffset -le $securityEntry + 8 -or
+                  $certificateEnd -ne [uint64] $bytes.Length) {
+                throw "$path Authenticode table 不是唯一的末端附加區"
+              }
+              $contentLength = [int] $certificateOffset
+            }
+
+            [byte[]] $normalized = [byte[]]::new($contentLength)
+            [Array]::Copy($bytes, 0, $normalized, 0, $contentLength)
+            # Authenticode 不涵蓋 checksum 與 certificate directory；兩份不同 marker
+            # 會得到不同 PKCS#7 bytes，所以先精確拿掉這兩個欄位與末端 certificate table。
+            [Array]::Clear($normalized, $optional + 64, 4)
+            [Array]::Clear($normalized, $securityEntry, 8)
+            return ,$normalized
+          }
+
           function Assert-NsisDesktopPayload([string] $installedPath, [string] $portablePath) {
             # tauri-bundler 會在打進 NSIS 前，把 main binary 裡唯一的 fixed-width
             # package marker 從 UNK 改成 NSS，完成後再把 target/release 還原成
-            # portable 的 UNK。兩檔因此不應 hash 相同，但除這三個 bytes 外也不准
-            # 有任何差異；直接比 synthetic expected hash，不能拿「同版」代替。
-            [byte[]] $expected = [IO.File]::ReadAllBytes($portablePath)
+            # portable 的 UNK。簽章模式下兩份各有一個與正文綁定的末端 PKCS#7；把
+            # Authenticode table 與它不涵蓋的兩欄正規化後，仍只能差這三個 marker bytes。
+            [byte[]] $expected = Get-PeContentWithoutAuthenticode $portablePath
             $latin1 = [Text.Encoding]::Latin1.GetString($expected)
             $unknown = '__TAURI_BUNDLE_TYPE_VAR_UNK'
             $nsis = '__TAURI_BUNDLE_TYPE_VAR_NSS'
@@ -1472,7 +1559,7 @@ jobs:
             }
             [Array]::Copy($replacement, 0, $expected, $marker, $replacement.Length)
 
-            [byte[]] $actual = [IO.File]::ReadAllBytes($installedPath)
+            [byte[]] $actual = Get-PeContentWithoutAuthenticode $installedPath
             $expectedHash = [Convert]::ToHexString(
               [Security.Cryptography.SHA256]::HashData($expected))
             $actualHash = [Convert]::ToHexString(
@@ -1555,6 +1642,13 @@ jobs:
           # NSIS launcher 本身是 32-bit PE；檔名的 x64 指它攜帶的兩個 product payload。
           Assert-Pe $setup 0x014c 0x10b
           Assert-Pe (Join-Path $installDir 'uninstall.exe') 0x014c 0x10b
+          # 同一份 policy 同時驗公開 Setup、兩個 payload 與 NSIS 在 build 中間產生的
+          # uninstaller。正式模式四層都要是同一 signer 且有 RFC 3161 timestamp；
+          # alpha unsigned 模式則四層都必須真的沒有 Authenticode，不能混成半套。
+          & ./scripts/windows-signing.ps1 `
+            -Action VerifyExpected `
+            -PlanPath $env:AI_SISTER_WINDOWS_SIGNING_PLAN `
+            -Path @($setup, $desktop, $sister, (Join-Path $installDir 'uninstall.exe'))
           if ((Get-FileHash $sister -Algorithm SHA256).Hash -ne
               (Get-FileHash 'target/release/sister.exe' -Algorithm SHA256).Hash) {
             throw '安裝後的 sister.exe 不是這一輪通過 smoke 的 exact recorder'
@@ -2403,6 +2497,21 @@ jobs:
             -Scenario ./scenarios/bill-lookup.json `
             -EvidenceFixture ./crates/sister-capture/assets/ocr-selftest-en.png
 
+      # Release job 在 Linux，不能重跑 Windows trust policy；這份 receipt 綁 exact
+      # 三檔 bytes/hash 與 Windows 剛驗過的 signer/timestamp projection，不對外發布。
+      - name: Windows signing — bind the exact three release files to one receipt
+        shell: pwsh
+        run: |
+          ./scripts/windows-signing.ps1 `
+            -Action Receipt `
+            -PlanPath $env:AI_SISTER_WINDOWS_SIGNING_PLAN `
+            -ReceiptPath (Join-Path $env:RUNNER_TEMP 'windows-signing-receipt.json') `
+            -Path @(
+              './AI-Sister-Setup.exe',
+              './sister-desktop.exe',
+              './target/release/sister.exe'
+            )
+
       - name: Upload ai-sister.exe
         uses: actions/upload-artifact@v4
         with:
@@ -2418,6 +2527,104 @@ jobs:
           path: AI-Sister-Setup.exe
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload Windows signing receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-signing-receipt
+          path: ${{ runner.temp }}/windows-signing-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # 沒有正式憑證的 branch／alpha 仍要執行簽章接線本身。release 三檔已在上面
+      # staging 並上傳；以下另建一次只活在 runner 的 self-signed copy，絕不進 release。
+      - name: Windows signing — create an isolated trusted CI fixture
+        shell: pwsh
+        run: |
+          if ($env:AI_SISTER_WINDOWS_SIGNING_MODE -ceq 'unsigned') {
+            ./scripts/windows-signing.ps1 `
+              -Action PrepareSelfTest `
+              -PlanPath (Join-Path $env:RUNNER_TEMP 'windows-signing-self-test-plan.json')
+          }
+
+      - name: Windows signing — exercise Tauri main, sidecar, uninstaller and Setup signing
+        working-directory: apps/desktop/src-tauri
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$AI_SISTER_WINDOWS_SIGNING_MODE" != unsigned ]]; then
+            exit 0
+          fi
+          rm -rf -- target/release/bundle/nsis
+          cargo tauri build --bundles nsis --ci \
+            --config "$AI_SISTER_WINDOWS_SIGNING_SELF_TEST_CONFIG" -- --locked
+
+      - name: Windows signing — install and verify every fixture layer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          if ($env:AI_SISTER_WINDOWS_SIGNING_MODE -cne 'unsigned') {
+            exit 0
+          }
+
+          $version = (Get-Content 'apps/desktop/src-tauri/tauri.conf.json' -Raw |
+            ConvertFrom-Json).version
+          $fixtureSetup = Join-Path `
+            'apps/desktop/src-tauri/target/release/bundle/nsis' `
+            "AI-Sister_${version}_x64-setup.exe"
+          $fixtureDesktop = 'apps/desktop/src-tauri/target/release/sister-desktop.exe'
+          $fixtureSidecar = 'target/release/sister-x86_64-pc-windows-msvc.exe'
+          ./scripts/windows-signing.ps1 `
+            -Action VerifyExpected `
+            -PlanPath $env:AI_SISTER_WINDOWS_SIGNING_SELF_TEST_PLAN `
+            -Path @($fixtureSetup, $fixtureDesktop, $fixtureSidecar)
+
+          $installDir = Join-Path $env:RUNNER_TEMP 'ai-sister-signing-self-test-install'
+          if ($installDir -match '\s') {
+            throw "signing fixture install path 不可含空白：$installDir"
+          }
+          if (Test-Path -LiteralPath $installDir) {
+            throw "signing fixture install root 起點不乾淨：$installDir"
+          }
+          $installed = Start-Process -FilePath $fixtureSetup `
+            -ArgumentList @('/S', '/NS', "/D=$installDir") -Wait -PassThru
+          if ($installed.ExitCode -ne 0) {
+            throw "signed fixture Setup exit=$($installed.ExitCode)"
+          }
+
+          $installedDesktop = Join-Path $installDir 'sister-desktop.exe'
+          $installedSister = Join-Path $installDir 'sister.exe'
+          $uninstaller = Join-Path $installDir 'uninstall.exe'
+          ./scripts/windows-signing.ps1 `
+            -Action VerifyExpected `
+            -PlanPath $env:AI_SISTER_WINDOWS_SIGNING_SELF_TEST_PLAN `
+            -Path @($fixtureSetup, $installedDesktop, $installedSister, $uninstaller)
+
+          $removed = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+          if ($removed.ExitCode -ne 0) {
+            throw "signed fixture uninstaller exit=$($removed.ExitCode)"
+          }
+          $deadline = [DateTime]::UtcNow.AddSeconds(20)
+          while ((Test-Path -LiteralPath $installDir) -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+          }
+          if (Test-Path -LiteralPath $installDir) {
+            throw 'signed fixture uninstaller 沒移除 install root'
+          }
+
+      - name: Windows signing — remove imported certificates
+        if: always()
+        shell: pwsh
+        run: |
+          $productionPlan = Join-Path $env:RUNNER_TEMP 'windows-signing-plan.json'
+          if (Test-Path -LiteralPath $productionPlan -PathType Leaf) {
+            ./scripts/windows-signing.ps1 -Action Cleanup -PlanPath $productionPlan
+          }
+          $fixturePlan = Join-Path $env:RUNNER_TEMP 'windows-signing-self-test-plan.json'
+          if (Test-Path -LiteralPath $fixturePlan -PathType Leaf) {
+            ./scripts/windows-signing.ps1 -Action Cleanup -PlanPath $fixturePlan
+          }
 
   # 打 tag 才發 release，這樣才有一個不用登入就能下載的連結。
   release:
@@ -2443,6 +2650,19 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ai-sister-installer-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-signing-receipt
+
+      # Windows job 已用 Authenticode trust policy 驗過三個公開檔；release runner 再把
+      # receipt 對目前 tag 與下載回來的 exact bytes/hash 重算一次。正式 tag 若不是
+      # production signature，或三檔任何一個被換過，draft release 不會建立。
+      - name: Windows signing — verify receipt against the exact release files
+        run: |
+          python3 ./scripts/check-windows-signing-receipt.py \
+            --receipt ./windows-signing-receipt.json \
+            --root . \
+            --tag "${GITHUB_REF_NAME}"
 
       # 在這一步之前，release 說明是這個檔案裡寫死的一塊 570 行的字，每出一版
       # 就往裡面疊一節「這一版：⋯⋯」然後**整塊**貼上去。到 alpha.67 為止，
@@ -2637,3 +2857,33 @@ jobs:
           )
           PY
           gh api --method PATCH "$release_api" --input "$publish_payload" >/dev/null
+
+  # 官網只在同一輪 release 已經公開後更新；首頁的固定下載 URL 因此不會先指到
+  # 尚不存在的 tag。部署檔只含三個 website source files、17 張已核准 WebP 與 NOTICE。
+  website:
+    name: Website
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the release-bound static site
+        run: |
+          python3 -m unittest scripts/tests/test_build_website.py
+          python3 ./scripts/build-website.py --output ./_site
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ./_site
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

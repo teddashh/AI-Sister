@@ -23,7 +23,10 @@ exact 大小以該 tag 的 asset 為準。正式 artifact 的斷網安裝仍待�
 `sister-desktop.exe`，只想跑 CLI、
 免安裝使用或診斷 installer 問題時，請把兩個檔放在同一個資料夾。
 
-目前 installer 沒有 code signing，也沒有內建自動 updater。升級是使用者手動下載新版
+Windows tag 的完整簽章路徑會以同一張 public-CA 憑證簽 recorder、desktop、uninstaller
+與 Setup，逐檔驗 SHA-256 Authenticode 與 RFC 3161 timestamp，再由 release job 把三個公開檔
+綁到 exact receipt。stable tag 缺憑證會停止發版；目前公開 alpha 尚未簽署。installer 沒有
+內建自動 updater。升級是使用者手動下載新版
 `AI-Sister-Setup.exe`，先自行結束 desktop 並停止 recorder，再重新執行。alpha.115 起，Setup
 使用 pinned tauri-bundler 2.9.4 custom NSIS template；它不再巢狀執行已安裝的 NSIS
 uninstaller。同版 repair 或舊版升新版會在 Setup 持有 lifecycle mutex 時，綁定 current-user
@@ -75,6 +78,29 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
+
+
+## v0.1.0-alpha.120
+
+**AI-Sister 現在有正式的一頁官網；Windows 發版流程也完整接上四層 Authenticode
+簽章與發布前 receipt。**
+
+官網把「昨天我在做什麼」的秒答回憶、可點證據、17 位離線角色、544 段日常語音、
+自帶 CLI 大腦與四張獨立同意集中在一頁。桌面與手機版都用正式的透明全身角色素材；
+17 人可逐一點選預覽。每次 tag 的網站 build 直接讀目前 Cargo 版號，把下載鈕綁到該版
+`AI-Sister-Setup.exe`；只有同一輪 Release 公開後才部署到 GitHub Pages，因此不會先指向
+尚未存在的安裝檔。網站沒有 analytics、外部字型或第三方 runtime 資源。
+
+Windows tag runner 現在可從 GitHub encrypted secrets 匯入一張 public-CA PFX，用同一身份
+簽 `sister.exe`、`sister-desktop.exe`、NSIS `uninstall.exe` 與 `AI-Sister-Setup.exe`。
+四層都要通過 Windows trust policy；production 另要求 SHA-256 與固定 RFC 3161 timestamp。
+Release job 在建立 draft 前，會再拿 Windows receipt 重算三個公開檔的名稱、bytes、SHA-256、
+publisher、thumbprint 與 timestamp。stable tag 缺任一憑證 secret 會直接拒絕。
+
+alpha.120 沒有配置正式發行憑證，三個公開 exe 維持 unsigned。CI 在公開檔 staging 完成後，
+另用 throwaway PFX 重建、安裝並驗證 main、sidecar、uninstaller 與 Setup 的完整簽章接線；
+fixture 隨 runner 清除，不進 Release。正式憑證的設定與驗證命令集中在
+[`docs/WINDOWS-CODE-SIGNING.md`](https://github.com/teddashh/AI-Sister/blob/main/docs/WINDOWS-CODE-SIGNING.md)。
 
 
 ## v0.1.0-alpha.119
