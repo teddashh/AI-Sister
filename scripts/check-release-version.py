@@ -34,6 +34,18 @@ def local_sister_versions(lock_path: pathlib.Path) -> dict[str, str]:
     }
 
 
+def powershell_single_quoted_assignment(path: pathlib.Path, variable: str) -> str:
+    pattern = re.compile(rf"^\${re.escape(variable)} = '([^']+)'$")
+    values = [
+        match.group(1)
+        for line in path.read_text(encoding="utf-8-sig").splitlines()
+        if (match := pattern.fullmatch(line))
+    ]
+    if len(values) != 1:
+        fail(f"{path.relative_to(ROOT)} 應有唯一 ${variable} exact assignment，實際 {len(values)} 個")
+    return values[0]
+
+
 def release_job_steps(workflow_path: pathlib.Path) -> list[list[str]]:
     """取 release job 的 step blocks；只解析這份 workflow 用到的縮排結構。"""
     lines = workflow_path.read_text(encoding="utf-8").splitlines()
@@ -446,6 +458,11 @@ def main() -> None:
         "Cargo.toml [workspace.package]": root_version,
         "apps/desktop/src-tauri/Cargo.toml": desktop_version,
         "apps/desktop/src-tauri/tauri.conf.json": tauri_version,
+        "scripts/check-windows-upgrade.ps1::$expectedCurrentVersion": (
+            powershell_single_quoted_assignment(
+                ROOT / "scripts/check-windows-upgrade.ps1", "expectedCurrentVersion"
+            )
+        ),
         **{
             f"Cargo.lock::{name}": version
             for name, version in local_sister_versions(ROOT / "Cargo.lock").items()
