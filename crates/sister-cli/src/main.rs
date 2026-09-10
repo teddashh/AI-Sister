@@ -263,14 +263,6 @@ enum HandsAction {
 
 #[derive(Subcommand)]
 enum Command {
-    /// desktop 內部使用：把 stdin 交給已選定的 CLI provider。
-    #[command(hide = true)]
-    BrainCliBridge {
-        #[arg(value_parser = parse_brain_provider)]
-        provider: sister_core::provider_cli::BrainProvider,
-        executable: PathBuf,
-    },
-
     /// 開始錄製（需要平台擷取後端）
     Record {
         /// 錄多久後自動停止（秒）。省略則持續到 Ctrl-C。
@@ -650,17 +642,18 @@ fn main() -> Result<()> {
         }
     };
 
-    let cli = Cli::parse();
-
-    // 這條只搬運 stdin，不讀 config／data dir，也不建立產品 log。desktop 的
-    // probe 和 recorder 都走同一條，測通的就是真正會跑的那條。
-    if let Command::BrainCliBridge {
-        provider,
-        executable,
-    } = &cli.command
-    {
-        return provider_bridge::run(*provider, executable);
+    // 這條不進一般 Clap command graph：Windows 的 executable stack 只有 1 MB，
+    // 原本已很大的產品 Command enum 再加入一個內部 variant，會讓 replay 在
+    // 進入真正分支前就溢位。固定 bridge grammar 在這裡先收掉，也確保它不讀
+    // config／data dir、不建立產品 log。Windows 上面的 lifecycle guard 仍然
+    // 活過 provider 完整呼叫，installer 不能和 bridge 同時換掉 executable。
+    let early_args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some(request) = provider_bridge_request(&early_args) {
+        let (provider, executable) = request.map_err(anyhow::Error::msg)?;
+        return provider_bridge::run(provider, &executable);
     }
+
+    let cli = Cli::parse();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -691,7 +684,6 @@ fn main() -> Result<()> {
     let config = || load_config(cli.config.as_deref());
 
     match cli.command {
-        Command::BrainCliBridge { .. } => unreachable!("bridge 已在資料目錄之前處理"),
         Command::Record {
             duration,
             start_mode,
@@ -943,9 +935,32 @@ fn main() -> Result<()> {
     }
 }
 
-fn parse_brain_provider(value: &str) -> Result<sister_core::provider_cli::BrainProvider, String> {
-    sister_core::provider_cli::BrainProvider::from_id(value)
-        .ok_or_else(|| format!("不認得的 CLI provider：{value}"))
+fn provider_bridge_request(
+    args: &[std::ffi::OsString],
+) -> Option<Result<(sister_core::provider_cli::BrainProvider, PathBuf), String>> {
+    use std::ffi::OsStr;
+
+    if args.first().map(std::ffi::OsString::as_os_str)
+        != Some(OsStr::new(sister_core::provider_cli::BRIDGE_COMMAND))
+    {
+        return None;
+    }
+    Some(match args {
+        [_, provider, executable] => {
+            let provider = provider
+                .to_str()
+                .and_then(sister_core::provider_cli::BrainProvider::from_id)
+                .ok_or_else(|| "不認得的 CLI provider".to_owned());
+            provider.and_then(|provider| {
+                if executable.is_empty() {
+                    Err("CLI executable 是空的".to_owned())
+                } else {
+                    Ok((provider, PathBuf::from(executable)))
+                }
+            })
+        }
+        _ => Err("brain-cli-bridge 只接受 provider 與 executable".to_owned()),
+    })
 }
 
 fn load_config(explicit: Option<&std::path::Path>) -> Result<Config> {
@@ -1013,6 +1028,35 @@ fn at_least_one(s: &str) -> std::result::Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_bridge_is_an_exact_early_route_not_a_clap_variant() {
+        let request = provider_bridge_request(&[
+            "brain-cli-bridge".into(),
+            "codex".into(),
+            r"C:\Tools\codex.exe".into(),
+        ])
+        .expect("bridge route")
+        .expect("valid bridge route");
+        assert_eq!(request.0, sister_core::provider_cli::BrainProvider::Codex);
+        assert_eq!(request.1, PathBuf::from(r"C:\Tools\codex.exe"));
+
+        assert!(provider_bridge_request(&["replay".into()]).is_none());
+        assert!(
+            provider_bridge_request(&["brain-cli-bridge".into(), "codex".into()])
+                .expect("bridge route")
+                .is_err()
+        );
+        assert!(
+            provider_bridge_request(&[
+                "brain-cli-bridge".into(),
+                "unknown".into(),
+                "provider.exe".into(),
+            ])
+            .expect("bridge route")
+            .is_err()
+        );
+    }
 
     #[test]
     fn plain_record_stays_explicit_and_the_internal_mode_is_typed() {

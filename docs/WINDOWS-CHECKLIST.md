@@ -22,7 +22,7 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
 
-### alpha.122 先驗四支 CLI 大腦登入
+### alpha.123 先驗四支 CLI 大腦登入
 
 - [ ] 安裝正式 Setup 後開設定。大腦區只能看到 Claude Code、Codex、Gemini CLI、Grok CLI
       四張卡與「測試目前大腦」；不能看到 command／args 輸入框。已安裝 CLI 要顯示實際

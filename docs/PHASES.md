@@ -92,7 +92,7 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   模型 cache、QC 工作檔與 private receipt 都留在 voice-lab 外。發布前 544 段全部通過格式、
   音量、長度、雙 ASR 與 speaker-identity QC，CI 再驗 shipped bytes/hash/inventory。
 
-### CLI 大腦登入合約（alpha.122 起）
+### CLI 大腦登入合約（alpha.123 起）
 
 - **四個入口，沒有手填命令列**：設定頁固定列 Claude Code、Codex、Gemini CLI、Grok CLI；
   native 端從 `PATH` 與 Windows 標準安裝位置找 executable，以有界 version probe 顯示
@@ -433,7 +433,7 @@ Wayland 才留到 P8／社群成熟化；Preview 的隱私與資料語意不因�
   SPEC §11.3 的去識別化管線 2026-08-26 拿掉：代號跨段對不起來，
   會把 §6 承諾表和 entities 的地基拆掉〕
 - 模型接入：spawn 使用者已登入的 CLI（2026-08-21 定案；不是 BYOK HTTP、
-  也不是內建推論引擎）。alpha.122 由設定頁偵測 Claude Code／Codex／Gemini CLI／Grok CLI，
+  也不是內建推論引擎）。alpha.123 由設定頁偵測 Claude Code／Codex／Gemini CLI／Grok CLI，
   完成 provider 官方登入與 bundled bridge 實測後，才把固定 bridge 寫進
   `[brain] command` / `args`。
 - **A/B gate**：harness 跑 `+interpreter` vs 不跑——照〔定案〕沒贏就保持預設關。
@@ -736,7 +736,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     的 manifest bytes／hash／總量；只有同一輪 Release 公開後，獨立 Pages job 才部署
     <https://teddashh.github.io/AI-Sister/>。
     1.0 不內建自動 updater，由使用者手動下載新版 installer。
-  - ✅ alpha.122 完成四支 CLI 大腦登入：設定頁直接偵測 Claude Code、Codex、Gemini CLI、
+  - ✅ alpha.123 完成四支 CLI 大腦登入：設定頁直接偵測 Claude Code、Codex、Gemini CLI、
     Grok CLI 與版本，從 trusted click 啟動 provider 官方登入，接著用 bundled bridge 跑固定
     probe；只有整條通過才原子切換。測試、取消、逾時與失敗都不覆蓋原大腦，取消會收掉
     整個 process tree。runtime prompt 不進 argv，provider 在一次性空 private workspace
