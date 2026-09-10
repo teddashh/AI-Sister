@@ -1099,32 +1099,19 @@ function paintPersonaDisclosure(status) {
 
 function paintPersonaVoice(error = "") {
   if (!el.personaVoice || !el.personaVoiceState) return;
-  const assetPhase = PERSONA_ASSET_PHASES.includes(personaAssetStatus?.phase)
-    ? personaAssetStatus.phase
-    : null;
   el.personaVoice.checked = personaVoiceEnabled;
-  el.personaVoice.disabled =
-    unreadable || !personaVoiceKnown || personaVoiceBusy || personaAssetOperation !== null;
+  el.personaVoice.disabled = unreadable || !personaVoiceKnown || personaVoiceBusy;
   el.personaVoiceState.classList.toggle("bad", error !== "");
 
   if (error !== "") {
     el.personaVoiceState.textContent = error;
   } else if (unreadable) {
-    el.personaVoiceState.textContent =
-      "設定檔讀不出來，問不到語音開關；素材仍可在上面獨立修復或刪除。";
+    el.personaVoiceState.textContent = "設定讀取失敗。修正設定檔後重新讀取。";
   } else if (!personaVoiceKnown) {
-    el.personaVoiceState.textContent = "問不到本機聲音開關；在問得到以前不會把它畫成已開啟。";
-  } else if (assetPhase === null) {
-    el.personaVoiceState.textContent = personaVoiceEnabled
-      ? "本機聲音已開啟；舊素材包狀態尚未確認，四姊妹可能改用 Windows 本機語音。"
-      : "本機聲音目前關閉；舊素材包狀態尚未確認。";
-  } else if (assetPhase !== "installed") {
-    el.personaVoiceState.textContent = personaVoiceEnabled
-      ? "本機聲音已開啟；目前沒有已驗證固定錄音，會嘗試 Windows 明確標成 localService 的中文聲音。"
-      : "本機聲音目前關閉；不必下載舊素材包也能另外打開。";
+    el.personaVoiceState.textContent = "正在讀本機聲音設定…";
   } else {
     el.personaVoiceState.textContent = personaVoiceEnabled
-      ? "本機聲音已開啟；你明確按角色時，四姊妹優先用固定錄音，其餘使用 localService 中文聲音。"
+      ? "本機角色聲音已開啟。"
       : "本機聲音目前關閉。";
   }
 }

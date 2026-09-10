@@ -1383,251 +1383,27 @@ console.log("⑳ 拔手撞號的純決策真的接回桌面回傳值");
   );
 }
 
-console.log("㉑ 素材下載前先把 exact host／path／bytes／資料邊界攤開");
+console.log("㉑ 17 人日常語音隨程式完整安裝，不再出現舊素材下載流程");
 {
   const p = await open();
   const compactHtml = HTML.replace(/\s+/g, "");
-  check("available 會顯示下載鍵", p.node("[data-persona-download]").hidden === false);
-  check("揭露區不是藏著", p.node("[data-persona-disclosure]").hidden === false);
-  check("host 一字不改", p.node("[data-persona-host]").textContent === ASSET_DISCLOSURE.host);
-  check("固定 path 一字不改", p.node("[data-persona-pack-path]").textContent === ASSET_DISCLOSURE.path);
   check(
-    "完整 byte 數看得到，不只是一個四捨五入 MB",
-    p.node("[data-persona-size]").textContent.includes("123,456,789 bytes"),
-    p.node("[data-persona-size]").textContent,
+    "主畫面列出 17 人、544 段與基本／擴充包",
+    compactHtml.includes("17位角色、544段固定語音已隨程式安裝") &&
+      compactHtml.includes("<dt>基本包</dt><dd>每人8句</dd>") &&
+      compactHtml.includes("<dt>擴充包</dt><dd>每人24句</dd>"),
+    "settings.html persona voice pack",
   );
+  check("舊素材操作不再出現在可見設定介面", !compactHtml.includes("下載完整素材包"));
   check(
-    "後端回的資料邊界一字不改",
-    p.node("[data-persona-boundary]").textContent === ASSET_DISCLOSURE.boundary,
-    p.node("[data-persona-boundary]").textContent,
+    "開場不會下載舊素材包",
+    calls(p, "persona_asset_status").length === 1 &&
+      calls(p, "persona_asset_install").length === 0,
+    p.invokes,
   );
-  check(
-    "固定文案明講 CDN metadata 與不能帶出的私人資料",
-    compactHtml.includes("來源IP、時間、TLS") &&
-      compactHtml.includes("角色選擇") &&
-      compactHtml.includes("OCR") &&
-      compactHtml.includes("問題、答案、記憶ID或資料庫內容") &&
-      compactHtml.includes("17位角色的method、URL、headers與body完全相同") &&
-      compactHtml.includes("至多一個HTTPSGET") &&
-      compactHtml.includes("不retry、不先HEAD"),
-    "settings.html disclosure",
-  );
-  check("開場只讀 status，沒有自己下載", calls(p, "persona_asset_install").length === 0, p.invokes);
-  check("status 是零參數 IPC", calls(p, "persona_asset_status").every((c) => c.arg === undefined), calls(p, "persona_asset_status"));
   check("語音出廠畫成關閉", p.node("[data-persona-voice]").checked === false);
 }
-
-console.log("㉒ 下載只有 trusted click 能開始，而且 IPC 不帶 persona 或私人資料");
-{
-  const p = await open();
-  await p.act("[data-persona-download]", { trusted: false });
-  check("script 送的假 click 不下載", calls(p, "persona_asset_install").length === 0, p.invokes);
-  await p.act("[data-persona-download]");
-  const installs = calls(p, "persona_asset_install");
-  check("真人 click 恰好下載一次", installs.length === 1, installs);
-  check("install 是零參數，角色選擇不可能混進 request", installs[0]?.arg === undefined, installs[0]);
-  check("完成後重讀成 installed", p.node("[data-persona-asset-summary]").textContent.includes("已安裝並驗證"), p.node("[data-persona-asset-summary]").textContent);
-}
-
-console.log("㉑ᵇ cache 路徑問不到不能假裝是尚未下載");
-{
-  const p = await open({
-    asset: {
-      ...ASSET_AVAILABLE,
-      phase: "unavailable",
-    },
-  });
-  const summary = p.node("[data-persona-asset-summary]").textContent;
-  check("明說是舊素材包 cache 路徑問不出來", summary.replace(/\s+/g, "").includes("問不出舊素材包的cache路徑"), summary);
-  check("不顯示下載鍵", p.node("[data-persona-download]").hidden === true);
-  check("不顯示修復或刪除鍵", p.node("[data-persona-repair]").hidden && p.node("[data-persona-remove]").hidden);
-  check("開場沒有產生 GET 入口", calls(p, "persona_asset_install").length === 0, p.invokes);
-}
-
-console.log("㉑ᶜ 素材 status 失敗或陌生時保持 unknown，不宣稱正在用 fallback 或一定不會播放");
-for (const [label, onAssetStatus] of [
-  ["讀取失敗", () => { throw new Error("cache 暫時讀不到"); }],
-  ["陌生 phase", (status) => ({ ...status, phase: "future-pack-state" })],
-]) {
-  const p = await open({ voice: true, onAssetStatus });
-  const summary = p.node("[data-persona-asset-summary]").textContent;
-  const voice = p.node("[data-persona-voice-state]").textContent;
-  check(`${label}不冒充字母 fallback 已套用`, !summary.includes("角色仍使用內建字母人"), summary);
-  check(`${label}明講這一頁不會下載`, summary.includes("不會啟動下載"), summary);
-  check(`${label}不把未知素材折成一定不播放`, voice.includes("尚未確認") && !voice.includes("所以不會播放"), voice);
-  check(`${label}不會把獨立的本機聲音開關鎖住`, p.node("[data-persona-voice]").disabled === false);
-  check(`${label}沒有 GET 入口`, calls(p, "persona_asset_install").length === 0, p.invokes);
-}
-
-console.log("㉓ persona 選擇只改本機表單，不會觸發素材下載");
-{
-  const p = await open();
-  const statusReads = calls(p, "persona_asset_status").length;
-  p.node("[data-persona-id]").value = "grok";
-  for (const fn of p.node("[data-persona-id]").handlers.change ?? []) fn({ isTrusted: true });
-  await tick();
-  check("Grok tagline 會換", p.node("[data-persona-tagline]").textContent.includes("直球測試"), p.node("[data-persona-tagline]").textContent);
-  check("沒有下載", calls(p, "persona_asset_install").length === 0, p.invokes);
-  check("連下載 status 都沒有因 persona 另打一份", calls(p, "persona_asset_status").length === statusReads, p.invokes);
-}
-
-console.log("㉔ installing 是不確定進度，且取消也是 trusted、零參數");
-{
-  let settleInstall = null;
-  const p = await open({
-    onAssetInstall: () =>
-      new Promise((resolveInstall) => {
-        settleInstall = resolveInstall;
-      }),
-    onAssetCancel: (_status, store) => {
-      store({ ...ASSET_AVAILABLE, disclosure: { ...ASSET_DISCLOSURE } });
-      settleInstall?.();
-      return null;
-    },
-  });
-  await p.act("[data-persona-download]");
-  check("等待整包完成時畫 installing", p.node("[data-persona-asset-summary]").textContent.includes("正在下載並驗證"), p.node("[data-persona-asset-summary]").textContent);
-  check("不確定 progress 看得到", p.node("[data-persona-progress]").hidden === false);
-  const progressTag = HTML.match(/<progress[\s\S]*?<\/progress>/)?.[0] ?? "";
-  check("沒有虛構 chunk 百分比", !/\bvalue\s*=|\bmax\s*=/.test(progressTag), progressTag);
-  check("下載中只有取消鍵是這條路的出口", p.node("[data-persona-cancel]").hidden === false);
-  await p.act("[data-persona-cancel]", { trusted: false });
-  check("假 click 不取消", calls(p, "persona_asset_cancel").length === 0);
-  await p.act("[data-persona-cancel]");
-  const cancels = calls(p, "persona_asset_cancel");
-  check("真人 click 取消一次", cancels.length === 1, cancels);
-  check("cancel 是零參數", cancels[0]?.arg === undefined, cancels[0]);
-  check("取消後仍使用 17 張內建角色圖", p.node("[data-persona-asset-summary]").textContent.includes("17 張內建角色圖已可使用"), p.node("[data-persona-asset-summary]").textContent);
-}
-
-console.log("㉕ repair-needed 用同一個受揭露保護的 install contract");
-{
-  const p = await open({
-    asset: {
-      ...ASSET_AVAILABLE,
-      phase: "repair-needed",
-      asset_file_bytes: 42,
-    },
-  });
-  check("修復鍵看得到", p.node("[data-persona-repair]").hidden === false);
-  check("壞 pack 只停用額外固定錄音", p.node("[data-persona-asset-summary]").textContent.includes("額外固定錄音已停用") && p.node("[data-persona-asset-summary]").textContent.includes("內建角色圖"), p.node("[data-persona-asset-summary]").textContent);
-  await p.act("[data-persona-repair]");
-  const installs = calls(p, "persona_asset_install");
-  check("修復沿用 install 一次", installs.length === 1, installs);
-  check("修復同樣不送參數", installs[0]?.arg === undefined, installs[0]);
-}
-
-console.log("㉖ 揭露缺一格就 fail closed，不會讓下載按得下去");
-{
-  const p = await open({
-    asset: {
-      ...ASSET_AVAILABLE,
-      disclosure: { ...ASSET_DISCLOSURE, bytes: null },
-    },
-  });
-  check("仍把缺的那格畫成沒有回報", p.node("[data-persona-size]").textContent === "沒有回報", p.node("[data-persona-size]").textContent);
-  check("下載鍵是灰的", p.node("[data-persona-download]").disabled === true);
-  check("明講是大小缺失，不是假裝網路壞", p.node("[data-persona-asset-error]").textContent.includes("缺少大小"), p.node("[data-persona-asset-error]").textContent);
-  check("按不到也沒有 IPC", (await p.act("[data-persona-download]")) === false && calls(p, "persona_asset_install").length === 0, p.invokes);
-}
-
-console.log("㉗ removing 是正式 fail-closed 態；內建角色圖不受影響");
-{
-  let finishRemove = null;
-  const installed = {
-    phase: "installed",
-    disclosure: { ...ASSET_DISCLOSURE },
-    asset_file_bytes: 100000000,
-    portrait_count: 4,
-    voice_count: 8,
-  };
-  const p = await open({
-    asset: installed,
-    voice: true,
-    onAssetRemove: (_status, store) =>
-      new Promise((resolveRemove) => {
-        finishRemove = () => {
-          store({ ...ASSET_AVAILABLE, disclosure: { ...ASSET_DISCLOSURE } });
-          resolveRemove();
-        };
-      }),
-  });
-  check("已安裝時可刪除", p.node("[data-persona-remove]").hidden === false);
-  await p.act("[data-persona-remove]");
-  check("刪除一開始就畫 removing", p.node("[data-persona-asset-summary]").textContent.includes("正在刪除舊素材包"), p.node("[data-persona-asset-summary]").textContent);
-  check("刪除中明講只停額外固定錄音", p.node("[data-persona-asset-summary]").textContent.includes("額外固定錄音已停用") && p.node("[data-persona-asset-summary]").textContent.includes("內建角色圖不受影響"), p.node("[data-persona-asset-summary]").textContent);
-  check("刪除中也只有不確定進度", p.node("[data-persona-progress]").hidden === false);
-  check("刪除中語音不可再操作", p.node("[data-persona-voice]").disabled === true);
-  const removes = calls(p, "persona_asset_remove");
-  check("remove 是零參數", removes.length === 1 && removes[0].arg === undefined, removes);
-  finishRemove();
-  await tick();
-  check("完成後仍使用 17 張內建角色圖", p.node("[data-persona-asset-summary]").textContent.includes("17 張內建角色圖已可使用"), p.node("[data-persona-asset-summary]").textContent);
-}
-
-console.log("㉘ config 讀壞不會連素材 status／remove 的出口一起關掉");
-{
-  const p = await open({
-    onRead: () => {
-      throw new Error("config.toml 壞了");
-    },
-    asset: {
-      phase: "installed",
-      disclosure: { ...ASSET_DISCLOSURE },
-      asset_file_bytes: 100000000,
-      portrait_count: 4,
-      voice_count: 8,
-    },
-  });
-  check("一般儲存確實因 config 壞掉而關閉", p.node("[data-save]").disabled === true);
-  check("asset status 仍獨立讀到了", calls(p, "persona_asset_status").length === 1, p.invokes);
-  check("刪除素材沒有跟著灰掉", p.node("[data-persona-remove]").disabled === false);
-  await p.act("[data-persona-remove]");
-  check("config 壞掉仍送得出 remove", calls(p, "persona_asset_remove").length === 1, p.invokes);
-  check("語音設定不冒充可讀可寫", p.node("[data-persona-voice]").disabled === true);
-}
-
-{
-  const p = await open({
-    onRead: () => {
-      throw new Error("config.toml 壞了");
-    },
-    asset: {
-      phase: "installed",
-      disclosure: { ...ASSET_DISCLOSURE },
-      asset_file_bytes: 100000000,
-      portrait_count: 4,
-      voice_count: 8,
-    },
-    onAssetRemove: (_status, store) => {
-      store({ ...ASSET_AVAILABLE, disclosure: { ...ASSET_DISCLOSURE } });
-      throw new Error("本機素材已刪除，但聲音偏好存不回設定檔");
-    },
-  });
-  await p.act("[data-persona-remove]");
-  const line = p.node("[data-persona-asset-error]").textContent;
-  check("cache 刪完但 config 寫壞時不會反過來宣稱刪除失敗", line.includes("本機素材現在已移除") && !line.startsWith("刪除失敗"), line);
-  check("部分成功的真正錯誤仍完整可見", line.includes("聲音偏好存不回設定檔"), line);
-}
-
-console.log("㉙ persona-assets-changed 只重讀真相，不會自行下載");
-{
-  const p = await open();
-  const before = calls(p, "persona_asset_status").length;
-  p.setAsset({
-    phase: "installed",
-    disclosure: { ...ASSET_DISCLOSURE },
-    asset_file_bytes: 100000000,
-    portrait_count: 4,
-    voice_count: 8,
-  });
-  await p.emit("persona-assets-changed");
-  check("事件後多讀一次 status", calls(p, "persona_asset_status").length === before + 1, p.invokes);
-  check("畫面換成 installed 且分清舊圖與固定錄音", p.node("[data-persona-asset-summary]").textContent.includes("4 張舊版立繪（桌面不採用）、8 句固定台詞錄音"), p.node("[data-persona-asset-summary]").textContent);
-  check("事件本身不下載", calls(p, "persona_asset_install").length === 0, p.invokes);
-}
-
-console.log("㉚ 聲音是另外一次 trusted opt-in，失敗會退回，設定頁永遠不播放");
+console.log("㉚ Bundled 聲音是獨立 trusted opt-in，失敗會退回，設定頁永遠不播放");
 {
   const installed = {
     phase: "installed",
@@ -1637,7 +1413,7 @@ console.log("㉚ 聲音是另外一次 trusted opt-in，失敗會退回，設定
     voice_count: 8,
   };
   const p = await open({ asset: installed });
-  check("pack 安裝不會順便打開聲音", p.node("[data-persona-voice]").checked === false);
+  check("bundled 語音預設不會自行打開", p.node("[data-persona-voice]").checked === false);
   check("本機聲音 opt-in 可按", p.node("[data-persona-voice]").disabled === false);
   p.node("[data-persona-voice]").checked = true;
   await p.act("[data-persona-voice]", { trusted: false, event: "change" });
@@ -1648,7 +1424,7 @@ console.log("㉚ 聲音是另外一次 trusted opt-in，失敗會退回，設定
   const voiceSets = calls(p, "persona_voice_set");
   check("真人 opt-in 立刻寫一次，不等頁尾 Save", voiceSets.length === 1 && p.writes.length === 0, { voiceSets, writes: p.writes });
   check("voice IPC 只送 enabled bool", JSON.stringify(voiceSets[0]?.arg) === JSON.stringify({ enabled: true }), voiceSets[0]);
-  check("成功後分清固定錄音與 localService 聲音", p.node("[data-persona-voice-state]").textContent.includes("四姊妹優先用固定錄音") && p.node("[data-persona-voice-state]").textContent.includes("localService 中文聲音"), p.node("[data-persona-voice-state]").textContent);
+  check("成功後直接回報本機角色聲音已開啟", p.node("[data-persona-voice-state]").textContent === "本機角色聲音已開啟。", p.node("[data-persona-voice-state]").textContent);
   check("設定頁沒有任何 audio play 路徑", !read(SRC).includes(".play("), "settings.js");
   check("opt-in 沒有讀任何語音 bytes", calls(p, "persona_voice_read").length === 0, p.invokes);
 }
@@ -1756,16 +1532,18 @@ console.log("㉚ᵃ Azure 五態分開畫；只有四道 native gate 齊全才�
 
   const compact = HTML.replace(/\s+/g, "");
   check(
-    "控制旁明講新答案自動送、重播再送、排除項、credential store 與取消語意",
-    compact.includes("每份新答案完成後只自動送出該題答案正文原文一次") &&
-      compact.includes("Azure重播會再送一次") &&
+    "主控制保持簡短，完整 Azure 邊界集中在頁尾條款",
+    compact.includes("<detailsclass=\"product-details\">") &&
+      compact.indexOf("<detailsclass=\"product-details\">") >
+        compact.indexOf("<sectionclass=\"azure-tts\"") &&
+      compact.includes("Azure每份新答案只送出該題答案正文原文一次") &&
+      compact.includes("手動重播會再送一次") &&
       compact.includes("不送截圖、來源連結、memoryid、整份資料庫、其他文字或角色選擇") &&
       compact.includes("WindowsCredentialManager") &&
-      compact.includes("不寫進config.toml，也不會把已存值回傳到這一頁") &&
-      compact.includes("丟掉晚到的回應") &&
-      compact.includes("已進入送出階段的request仍可能跑到逾時") &&
-      compact.includes("可能要等它結束才回覆") &&
-      compact.includes("任一操作回覆成功後，舊request不會才開始送"),
+      compact.includes("不寫入config.toml、log、資料庫或export") &&
+      compact.includes("不會回傳顯示") &&
+      compact.includes("停止朗讀會丟掉晚到的音訊") &&
+      compact.includes("已開始的請求最長可執行45秒"),
     "settings.html Azure disclosure",
   );
 }

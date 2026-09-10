@@ -1,6 +1,6 @@
 /*
- * 17 張角色圖隨 desktop frontendDist 一起安裝；沒有字母 fallback，也不靠下載
- * 才能顯示。舊 fixed pack 現在只替四姊妹補上 8 句預錄固定台詞。
+ * 17 張角色圖與每人 32 句日常語音隨 desktop frontendDist 一起安裝；沒有字母
+ * fallback，也不靠下載才能顯示或說話。
  *
  * 17 套 rig 本身都是透明全身立繪；不要再把它裁回頭像，也不要在外面補一個
  * 假相框。動畫走兩個獨立通道：`transform` 負責呼吸（上下），`rotate` 負責搖晃。
@@ -792,6 +792,16 @@ body.has-url-policy .stage {
   opacity: 0.6;
   padding: 12px 4px;
   text-align: center;
+}
+
+.persona-dialogue {
+  background: rgb(255 255 255 / 78%);
+  border-left: 3px solid var(--persona-accent);
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 1.55;
+  padding: 10px 12px;
+  user-select: text;
 }
 
 /* 「我沒看到過」底下那幾句「但也可能是因為……」。比那句話再淡一階：它們是

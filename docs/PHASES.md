@@ -37,7 +37,7 @@
 「Windows 1.0」改叫 **Release 1.0**，但不把三個平台假裝成同一種完成度。
 1.0 的必要產品迴路仍是 PRODUCT §4 的 S1：同意後記錄 → OCR／L0／L1 →
 被動提問 → 附出處回答 → 暫停／忘掉／匯出。主動開口、hands 與接手可以各自
-關掉，不拿其中任何一個冒充回憶核心。Persona 也必須可關閉、可完全不下載，
+關掉，不拿其中任何一個冒充回憶核心。Persona 也必須可關閉、固定語音可完全不連網，
 但**角色體驗本身是 Release 1.0 的產品 blocker**，不是可有可無的 Preview。
 
 | 對象 | Release 1.0 身分 | 最小合約 | 對 `1.0` tag 的關係 |
@@ -45,7 +45,7 @@
 | Windows 10+ | **正式支援（GA）** | 可安裝、可升級、可開機常駐；走完 S1 主流程並承諾維護與安全修補 | **唯一的平台支援 blocker** |
 | macOS | **Public Preview** | 簽進 `.app` 主程序樹的 ScreenCaptureKit + Vision OCR + AX；TCC／紫點狀態與重新授權 UX 說真話；走得完 S1 | 沒達到就不發該 artifact；缺席不擋 Windows GA |
 | Linux | **X11-only Developer Preview** | 真正的 X11 capture + OCR + S1，不把只能 replay 說成桌面支援；Wayland 明示 unsupported／degraded | 沒達到就不發該 artifact；缺席不擋 Windows GA |
-| Persona | **Release 1.0 角色體驗** | 四姊妹與 13 位閨密共 17 位，bundled workplace 分層 rig 只載當前角色、WebP fail-safe；四姊妹 fixed voice pack 從揭露、下載、驗證到啟用完整跑通，其餘可用 localService 中文系統 voice | **Windows GA 產品面 blocker**；使用者選擇關閉角色、聲音或不下載 fixed voice 不是 blocker |
+| Persona | **Release 1.0 角色體驗** | 四姊妹與 13 位閨密共 17 位，bundled workplace 分層 rig 只載當前角色、WebP fail-safe；每位 bundled 基本語音 8 句＋擴充語音 24 句 | **Windows GA 產品面 blocker**；使用者選擇關閉角色或聲音不是 blocker |
 
 Windows 的「可升級」不要求把任意網路更新器塞進程式。Release 1.0 採**使用者手動下載
 新版 installer、關掉 desktop／recorder 後原地安裝**；仍必須拿真的舊版 binary → 新版
@@ -71,68 +71,26 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
 
 ### Persona Release 1.0 合約
 
-- **賣點是角色體驗，不是 CDN**：1.0 的 catalog 是四姊妹與 13 位閨密，共 17 位
-  canonical 角色。17 套 workplace 分層 rig 與 WebP 退路直接隨程式提供；CDN 只補
-  舊 pack 的四姊妹固定錄音，
-  不能拿「接上 CDN」代替角色選擇、呈現與聲音真的可用。
-- **不下載也完整可用**：17 位每一位都有 bundled rig + WebP fail-safe，
-  ChatGPT 是預設；Neutral 與
-  S/T/C/G/X 字母 fallback 已淘汰。使用者可關閉 Persona 或永遠不下載舊 pack，S1
-  記錄、查詢、出處、刪除與匯出都不能因此降級。
-- **網路一定由人開始，而且能力只住一處**：catalog 與下載前揭露所需 metadata 隨程式
-  留在本機；只有使用者在揭露畫面上明確按下下載，desktop 才能叫一次 Persona
-  installer。自動預抓、背景更新、hover／開設定頁就連線都不算同意。HTTP transport
-  只准在 `crates/sister-assets` 的 `download` feature；root workspace 預設不開，只有
-  desktop 明確啟用。`sister.exe`、recorder／core／capture／brain／hands 與 WebView
-  都不能因此取得任意 HTTP 能力；CSP 仍只准 IPC，不加入 CDN。
-- **按下下載前把邊界說完**：畫面列出實際 host `cdn.ted-h.com`、精確大小
-  **73,261,088 bytes**，以及會送出的資料邊界。這張 Persona 揭露唯一授權的網路動作是對內嵌 allowlist
-  那條 content-hash path 做至多一次固定 HTTPS `GET`；不跟 redirect、不走 proxy、
-  不帶 cookie／credentials／authorization／referrer／query／body，也不做 retry、`HEAD`
-  或逐物件請求。asset request 不得夾帶 OCR、畫面、問題、答案、記憶 ID、persona
-  選擇／狀態、資料庫內容或其他私人內容；17 位切換時 method／URL／header／body 都相同。
-  DNS 與 CDN 仍能看見一般網路 metadata；CDN 會看見來源 IP、時間、TLS、固定 host／
-  path／headers，不能寫成「什麼都沒送」。host、大小或邊界有一格未知就停在下載前，
-  不用 `0` 或空字串冒充已知。首版 exact URL 是
-  `https://cdn.ted-h.com/tokenmonster/characters/v1/packs/ai-sister-media-11-voice55-2026.07.23/7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30.zip`。
-- **驗證完才啟用**：正式簽章的 app 內嵌的是 compact authority——descriptor、exact
-  origin/path allowlist、舊 pack 四姊妹的 selected public rights projection
-  與八段聲音的核准逐字稿，
-  以及完整 schema-v2 manifest 的 canonical SHA-256
-  `21e4675653ce66b50b61e91260f1623e6e3005177f900991e3a8eeadaf9e6474`；**不是**把約
-  2.1 MB 的完整 11 人 manifest 塞進執行檔。descriptor 把 release ID、canonical
-  manifest hash、73,261,088 bytes、946 entries 與整包 SHA-256
-  `7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30` 綁在一起；整包
-  hash pin 住 946 項，實際會呈現／播放的 selected entries 再逐檔對內嵌 projection
-  驗大小、hash、rights binding；renderer 顯示文字也要逐字等於該聲音的核准逐字稿。
-  這組 authority 是固定 release 的 trust root，不再
-  發明一把沒有更新流程的第二套 manifest signing key。ZIP 的 entry count／安全路徑／
-  regular-file 集合、大小與 hash 全部通過後才可啟用。
-- **cache 不是記憶**：未驗 response 不得成為可用檔；整包通過後，selected entries
-  才寫進 `Config::default_data_dir()/persona-assets-v1` 內的同檔案系統 staging，完整
-  重驗後原子 publish，73,261,088-byte ZIP 本身不留存。`--data-dir` 不搬它；memory
-  export、forget、prune 都不讀、不複製、
-  不刪這個目錄。Persona 的撤回才精準刪除該 release cache。全新下載若是半包、損毀
-  或 binding 不符，不建立 cache、回 `Available` 並顯示當次錯誤；既有 cache 缺檔／
-  損毀、殘留 staging 或撤回不完整才保持 `RepairNeeded`。兩者都保留目前所選 bundled
-  角色圖，且不自動重抓；設定裡舊 `neutral` 精確遷移成 ChatGPT 並關閉聲音。
-- **聲音邊界固定**：聲音預設關閉，而且必須由使用者當下操作觸發；不因 capture、
-  記憶或系統事件主動出聲。四姊妹優先播放 pack 內預錄、固定且非敏感的台詞，其餘
-  只用 WebView 明確標成 `localService` 的中文 voice；找不到就靜音，不可改用 remote。
-  私人答案的本機聲音只能由使用者另外按本機朗讀。alpha.110 的 Azure 是另一條
-  預設關閉、另行同意後自動朗讀最新新答案的路徑，不是自動 fallback。現成 pack 的 `active` 台詞會斷言
-  「今天滿有活力」，而單純點角色沒有那份證據，所以 Release 1.0 的 click allowlist
-  明確不含那四段；首版每位使用兩句無條件成立的聲音，不拿假第三句湊數。
-- **權利先驗後說**：TokenMonster 現有 image+voice fixed pack 附有可公開嵌入的
-  schema-v2 manifest；它投影每項資產的內容／品牌／聲音來源審查狀態與 public-use／
-  redistribution 宣告。這證明公開 release metadata 存在，**不等於 AI-Sister 已完成
-  發布審查**。AI-Sister 只重用這份 public projection，不把私下收據或 owner ledger
-  搬進 public repo；接線、byte verification 與逐角色 release review 完成前一律叫
-  candidate，不能因另一個產品曾用過就宣稱可出貨。
-- **平台邊界要講名字**：Persona 完整體驗是 Windows GA 的 `1.0` tag blocker。
-  macOS／Linux Preview 至少都帶同一份 17 人本機 catalog；若該 artifact 暴露
-  pack 下載或聲音，就必須通過完全相同的 authority、cache、撤回與點擊 gate。沒有
-  通過時只能關閉額外錄音，不能用未簽章 artifact 冒充受信 trust root。
+- **完整角色體驗隨程式安裝**：1.0 的 catalog 是四姊妹與 13 位閨密，共 17 位 canonical
+  角色。每位都有 workplace 分層 rig、WebP fail-safe、基本語音 8 句與擴充語音 24 句；
+  ChatGPT 是預設，Neutral 與 S/T/C/G/X 字母 fallback 已淘汰。
+- **544 段是一份原子產品素材**：catalog 展開必須恰好是 17×32；manifest 逐檔綁定 persona、
+  line、pack、用途、顯示文字、trigger、相對路徑、bytes、SHA-256 與 duration。runtime
+  全份驗證才啟用，不允許半個角色或少一段的資料庫進入播放路徑。
+- **基本包與擴充包都能直接用**：每位兩句 avatar tap-line，加上 30 句早安、晚安、感謝、
+  疲累、卡住、完成、陪伴等 exact-intent reply。日常問題只做 NFKC、trim 與句尾標點
+  正規化後的 exact match；未命中就完整走既有記憶／CLI 路徑，不能以固定回覆冒充答案。
+- **聲音只由當下操作開始**：聲音預設關閉。角色點擊／Enter／Space 或使用者送出收錄短句
+  才能播放 bundled Ogg；開機、poll、capture、記憶、角色切換與設定重讀都是零播放。
+  所有固定語音都不叫 CLI、不連網，也不借 `localService` 系統 voice。
+- **動態回答保留既有出口**：私人答案仍要使用者另按「用本機聲音朗讀」，才交給 WebView
+  明確標成 `localService` 的中文 voice。Azure 是另一條預設關閉、另行同意後朗讀最新新答案
+  的路徑，不能自動接管固定語音或本機朗讀失敗。
+- **停止是一條共同邊界**：固定 Ogg、動態本機朗讀與 Azure 不能疊播；換題、關聲或 master
+  stop 先停播放並歸還 native presentation lease，晚回來的 admission 或 audio 不得復活。
+- **權利與生成來源隨素材固定**：正式樹只收最終 Ogg、manifest 與 NOTICE；WAV、reference、
+  模型 cache、QC 工作檔與 private receipt 都留在 voice-lab 外。發布前 544 段全部通過格式、
+  音量、長度、雙 ASR 與 speaker-identity QC，CI 再驗 shipped bytes/hash/inventory。
 
 ### Azure 可選 TTS 合約（alpha.109 起；alpha.110 改為 opt-in 後自動讀新答案）
 
@@ -170,8 +128,8 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   Public Preview 升正式支援的條件，不是 Windows GA 的條件。
 - Linux Wayland，以及 macOS／Linux Preview artifact 本身的缺席。Preview 沒達
   最小合約時就不發，不能靠降標湊齊平台表格。
-- 使用者選擇關閉 Persona、關閉聲音或不下載 fixed-voice pack；這是 1.0 必須支援的
-  正常路徑，不等於產品可以省略 17 人 catalog、bundled 角色圖或 fixed-voice 驗證 gate。
+- 使用者選擇關閉 Persona 或關閉聲音；這是 1.0 必須支援的正常路徑，不等於產品可以
+  省略 17 人 catalog、bundled 角色圖或 544 段 bundled 語音驗證 gate。
 - 使用者維持 Azure TTS 關閉、沒有 Azure 帳號／key 或不簽第四張；本機朗讀與 S1 仍須
   完整。若 artifact 暴露 Azure 選項，上述目的地、payload、credential、consent、cache
   與 cancel 合約就是發布 gate，不能因它是選配而放寬。
@@ -562,32 +520,14 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     不做 IPC／GET／TTS 或 Reel decode。`settings_write` 成功後才嘗試通知主視窗；
     事件沒送出會明講重開 desktop 後生效。
     設定頁自己也要成功讀回，才會把預覽稱為已存。
-  - 四姊妹兩句 fixed tap-line 對得到已核准本機錄音；其餘 13 位可在使用者 opt-in
-    後使用 `localService` 中文系統 voice，沒有本機 voice 就保持靜音。
-  - 完成共用 omnibus 立繪／固定語音 asset-pack 的 end-to-end pipeline：本機揭露
-    `cdn.ted-h.com`／73,261,088 bytes／資料邊界 → 使用者明確點擊 → 唯一固定 GET →
-    compact embedded authority cross-binding、整包 hash／大小／946 entry 驗證與
-    selected entries 逐檔 hash／大小／rights 驗證 → 原子安裝／啟用；
-    任一步失敗就清掉 staging；所選 bundled 角色圖不受影響，不能留下半包。
-  - 下載前逐包列出實際 host、精確 byte size 與資料邊界；host／大小／邊界未知時
-    不連線。請求不得帶出 persona 選擇／狀態、OCR、畫面、問題、答案、記憶 ID 或
-    資料庫內容；四位切換不改 request method／URL／header／body。redirect、proxy、
-    cookie／credentials／authorization、referrer、query、body、retry、`HEAD` 與逐物件
-    fetch 都拒絕；WebView CSP 不開 CDN。
-  - `crates/sister-assets` 預設 feature 集合無 download；只有 desktop 啟用。cache 固定在
-    `Config::default_data_dir()/persona-assets-v1`，memory export／forget／prune 不碰；
-    撤回只清 exact release，損毀／離線重開不自動 retry。
-  - 語音只由使用者當下操作觸發，不主動出聲。角色台詞優先使用已驗證的固定錄音，
-    否則走 localService 中文系統 TTS；私人答案的「本機朗讀」只有使用者另外按下才走
-    localService。alpha.110 的 Azure 答案朗讀是另一條預設關閉、第四張同意守住的新答案
-    自動播放路徑，不屬於 Persona fallback；手動按鈕只負責停止／重播。CDN 是 fixed voice 的交付機制；角色的選擇、視覺、聲音與
-    離線退路才是產品面。
-  - 下載／修復／撤回 UX、鍵盤可及性、prefers-reduced-motion 與靜音都要真的可用；
-    撤回立刻停掉 fixed voice、保留所選 bundled rig 與 WebP 退路、精準刪除該 release cache，
-    失敗則留 RepairNeeded 且不連線；未知 ID 不可暗中換成另一位。
-  - 每個發布 pack 都要通過 public rights/provenance manifest 審查；只嵌入公開安全
-    projection，不把私下收據帶進 repo。現成 pack 可重用，但要先證明 AI-Sister
-    內嵌的 authority、CDN bytes 與實際播放／呈現用的是同一版。
+  - ✅ alpha.119 為 17 位角色各自提供 bundled 基本包 8 句與擴充包 24 句，總計
+    544 段 Ogg Opus、8,918,728 bytes。每人兩句 tap-line、30 句 exact-intent reply；固定語音完全不依賴
+    CDN、Azure、CLI 或 `localService`。未命中的問題仍走既有記憶／CLI 大腦。
+  - ✅ alpha.119 runtime 對 manifest 做整庫 fail-closed 驗證；設定頁直接列出 17×32，
+    不再露出舊素材下載流程。播放由 trusted 操作開始，與本機答案／Azure 共用停止及
+    master-stop presentation lease。CI 逐檔驗 catalog、路徑、bytes、SHA-256、Ogg Opus
+    header、duration、rights 與 JS projection；發版素材另先全數通過雙 ASR、聲紋、
+    音量與長度 QC。
   - ✅ alpha.102 已完成這一包的 AI-Sister selection review：四張 exact-hash WebP
     逐角色打開確認，八段 exact-hash WAV 逐句對到顯示文字；public projection
     的 public/commercial/modify/redistribute、brand/content/release 全部是 approved。
@@ -811,16 +751,13 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
       slow UIA 後換窗、clipboard copy → switch 與 frame post-check，不拿 compile 當執行證據。
 - [ ] Persona 產品面走完：四姊妹與 13 位閨密的 17 人離線 catalog 與選擇入口可用；
       **每一位**都實際呈現至少一幅通過發布審查的 bundled 角色圖，且角色台詞只在
-      trusted click 後出聲。四姊妹的共用 fixed-voice pack 經「本機揭露 →
-      明確點擊 → 單一 fixed GET → 驗證 → 原子啟用」完整跑通；切換角色不改網路請求，
-      任一額外 GET、redirect、proxy、credential/referrer/query/body 或 retry 都會失敗。
-- [ ] Persona 發布 gate 逐包通過 public rights/provenance manifest 與技術 manifest
-      驗證：selected projection 的允許用途／散布範圍、檔案 hash／大小，及 compact
-      embedded authority 對 canonical manifest hash、73,261,088-byte／946-entry pack 的
-      cross-binding 都可查；下載前顯示的 host、總大小、資料邊界和實際請求一致，未驗證的素材
-      不進發布 catalog。拒絕下載、關閉、靜音、reduced-motion、撤回／精準清 cache、
-      離線重開、損毀／修復路徑都實測；任何 fixed-voice 失敗都保留所選 bundled 角色圖、
-      不自動連線，未知角色 ID 仍 fail closed，而且 S1 完整。
+      trusted click 後出聲。正式 Windows artifact 要逐一抽聽 17 位的 bundled tap-line，
+      再驗 exact 日常短句命中、一般記憶題不被固定台詞攔截、靜音、reduced-motion、
+      斷網重開與 master stop；整條固定語音路徑不得建立網路 request。
+- [x] Persona 發布 gate：544 段逐檔通過文字／用途／pack／path／hash／大小／duration／
+      rights manifest，正式樹只有 Ogg、manifest 與 NOTICE；WAV、reference、QC 工作檔與
+      private receipt 不進 repo。CI 由 catalog 推導 exact 17×32 inventory，runtime 同樣
+      整庫驗證，缺檔或 malformed manifest 不得改走系統或遠端聲音。
 - [ ] 若 1.0 artifact 暴露 Azure TTS：預設關閉且本機無自動 fallback；第四張 consent、
       Credential Manager key 與 typed config 缺一時 0 request；packet trace 只見所選的
       `eastasia`／`southeastasia`／`japaneast` fixed POST，而且 payload 只有當前答案

@@ -69,43 +69,262 @@ const urlPolicyResult = document.querySelector("[data-url-policy-result]");
 // ---------- Persona catalog ----------
 
 /**
- * 這是完整 allowlist，不是 prompt。
- *
- * 四姊妹與 13 位閨密都直接使用 AI-Sister 隨程式提供的本機角色圖，不再生成任何
- * 字母 fallback。四姊妹的顯示文字仍逐字對應舊 fixed pack 裡已核准的 WAV；
- * installed metadata 不同時 renderer 會拒絕把那句列入錄音 allowlist。沒有把
- * personaContext 接進 `ask()`，因為角色
- * 口吻不能改寫一個可查證答案的事實或安全邊界。每句只會從 avatar 的 click
- * handler 出現，沒有 idle／開場／timer trigger。
+ * 17 位角色共用同一份封閉的本機語音契約：每人基本包 8 句、擴充包 24 句。
+ * Manifest 在 build 前逐檔驗過 Ogg、bytes、SHA-256、時長、文字與人聲；renderer
+ * 仍只接受 exact roster、exact path 與 exact trigger，不能把任意 URL 當語音來源。
  */
-function fixedTaps(id, lead) {
-  return Object.freeze([
-    Object.freeze({
-      id: `fixed-line/1.0.0/${id}/zh-TW/greeting/general`,
-      voiceLineId: `${id}-greeting`,
-      text: `${lead}，隨時可以開始。`,
-    }),
-    Object.freeze({
-      id: `fixed-line/1.0.0/${id}/zh-TW/greeting/quiet`,
-      voiceLineId: `${id}-quiet`,
-      text: `${lead}，安靜地開始也很好。`,
-    }),
-  ]);
+const DIALOGUE_PERSONA_IDS = Object.freeze([
+  "chatgpt",
+  "claude",
+  "gemini",
+  "grok",
+  "deepseek",
+  "qwen",
+  "mistral",
+  "venice",
+  "sakana",
+  "perplexity",
+  "glm",
+  "kimi",
+  "hunyuan",
+  "minimax",
+  "nemotron",
+  "cohere",
+  "mimo",
+]);
+const DIALOGUE_PACK_LINES = Object.freeze({
+  base: Object.freeze([
+    "tap-general",
+    "tap-quiet",
+    "good-morning",
+    "good-evening",
+    "welcome-back",
+    "choose-topic",
+    "start-small",
+    "good-night",
+  ]),
+  extension: Object.freeze([
+    "good-afternoon",
+    "how-are-you",
+    "thanks",
+    "apology",
+    "compliment",
+    "tired",
+    "stressed",
+    "stuck",
+    "unfocused",
+    "ready-to-start",
+    "keep-going",
+    "task-done",
+    "drink-water",
+    "hungry",
+    "ate",
+    "lonely",
+    "miss-you",
+    "bored",
+    "bad-day",
+    "good-day",
+    "small-win",
+    "back-from-break",
+    "leaving",
+    "see-you",
+  ]),
+});
+
+function hasExactKeys(value, keys) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).sort().join("\0") === [...keys].sort().join("\0")
+  );
 }
 
-function localTaps(id, lead) {
-  return Object.freeze([
-    Object.freeze({
-      id: `persona-tap/1.0.0/${id}/zh-TW/hello`,
-      voiceLineId: null,
-      text: `${lead}。你可以直接問。`,
-    }),
-    Object.freeze({
-      id: `persona-tap/1.0.0/${id}/zh-TW/quiet`,
-      voiceLineId: null,
-      text: "你不點也不問時，我會安靜待著。",
-    }),
-  ]);
+function sameStrings(left, right) {
+  return (
+    Array.isArray(left) &&
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function normalizeDailyPhrase(value) {
+  return String(value)
+    .normalize("NFKC")
+    .trim()
+    .replace(/[。！？!?～~]+$/u, "")
+    .trim();
+}
+
+function dialogueVoiceLibrary(raw) {
+  const empty = Object.freeze({ byPersona: new Map(), exactReplies: new Map() });
+  if (
+    !hasExactKeys(raw, [
+      "schema",
+      "locale",
+      "roster",
+      "engine",
+      "rightsReview",
+      "ownerGrant",
+      "notice",
+      "packs",
+      "clips",
+      "totals",
+    ]) ||
+    raw?.schema !== "ai-sister/persona-voices/v1" ||
+    raw?.locale !== "zh-TW" ||
+    raw?.roster !== "four-sisters-plus-thirteen-besties" ||
+    !hasExactKeys(raw?.engine, ["name", "modelSnapshot", "license"]) ||
+    raw.engine.name !== "MediaTek-Research/BreezyVoice-300M" ||
+    raw.engine.modelSnapshot !== "e33b502e0ac21c16b0ee0d00df66ac3fa737393d" ||
+    raw.engine.license !== "Apache-2.0" ||
+    raw?.rightsReview !== "approved-owner-grant" ||
+    !hasExactKeys(raw?.ownerGrant, ["grantedOn", "grantor", "license", "scope"]) ||
+    raw.ownerGrant.grantedOn !== "2026-09-09" ||
+    raw.ownerGrant.grantor !== "Ted Huang" ||
+    raw.ownerGrant.license !== "excluded-from-Apache-2.0" ||
+    raw.ownerGrant.scope !==
+      "Unmodified inclusion of the 544 generated fixed-dialogue clips hash-listed by this manifest in the AI-Sister source tree and official builds" ||
+    raw?.notice !== "NOTICE.md" ||
+    !hasExactKeys(raw?.totals, [
+      "personas",
+      "baseLinesPerPersona",
+      "extensionLinesPerPersona",
+      "clips",
+      "oggBytes",
+      "durationMs",
+    ]) ||
+    raw?.totals?.personas !== 17 ||
+    raw?.totals?.baseLinesPerPersona !== 8 ||
+    raw?.totals?.extensionLinesPerPersona !== 24 ||
+    raw?.totals?.clips !== 544 ||
+    raw?.totals?.oggBytes !== 8918728 ||
+    raw?.totals?.durationMs !== 1780686 ||
+    !Array.isArray(raw?.packs) ||
+    raw.packs.length !== 2 ||
+    !Array.isArray(raw?.clips)
+  ) {
+    return empty;
+  }
+  const packLines = new Map();
+  for (const [index, id] of ["base", "extension"].entries()) {
+    const pack = raw.packs[index];
+    const expectedLines = DIALOGUE_PACK_LINES[id];
+    if (
+      !hasExactKeys(pack, ["id", "delivery", "lineIds"]) ||
+      pack?.id !== id ||
+      pack?.delivery !== "bundled" ||
+      !sameStrings(pack?.lineIds, expectedLines)
+    ) {
+      return empty;
+    }
+    packLines.set(id, new Set(pack.lineIds));
+  }
+  if (raw.clips.length !== 544) return empty;
+
+  const byPersona = new Map(DIALOGUE_PERSONA_IDS.map((id) => [id, new Map()]));
+  const exactReplies = new Map();
+  let totalBytes = 0;
+  let totalDurationMs = 0;
+  for (const value of raw.clips) {
+    const personaLines = byPersona.get(value?.persona);
+    const allowedLines = packLines.get(value?.pack);
+    const expectedFile = `${value?.pack}/${value?.persona}/${value?.lineId}.ogg`;
+    const personaIndex = DIALOGUE_PERSONA_IDS.indexOf(value?.persona);
+    const expectedUse = ["tap-general", "tap-quiet"].includes(value?.lineId)
+      ? "avatar-tap"
+      : "exact-intent-reply";
+    if (
+      !hasExactKeys(value, [
+        "persona",
+        "group",
+        "lineId",
+        "pack",
+        "use",
+        "text",
+        "triggers",
+        "file",
+        "bytes",
+        "sha256",
+        "durationMs",
+      ]) ||
+      personaLines === undefined ||
+      value?.group !== (personaIndex < 4 ? "sister" : "bestie") ||
+      allowedLines === undefined ||
+      !allowedLines.has(value?.lineId) ||
+      personaLines.has(value.lineId) ||
+      value?.use !== expectedUse ||
+      typeof value?.text !== "string" ||
+      value.text.length < 2 ||
+      value.text.length > 100 ||
+      !Array.isArray(value?.triggers) ||
+      value?.file !== expectedFile ||
+      !Number.isSafeInteger(value?.bytes) ||
+      value.bytes < 1 ||
+      typeof value?.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(value.sha256) ||
+      !Number.isSafeInteger(value?.durationMs) ||
+      value.durationMs < 700 ||
+      value.durationMs > 12000
+    ) {
+      return empty;
+    }
+    totalBytes += value.bytes;
+    totalDurationMs += value.durationMs;
+    const clip = Object.freeze({
+      id: `persona-dialogue/v1/${value.persona}/${value.lineId}`,
+      persona: value.persona,
+      lineId: value.lineId,
+      pack: value.pack,
+      use: value.use,
+      text: value.text,
+      triggers: Object.freeze([...value.triggers]),
+      file: `./persona-voices/v1/${value.file}`,
+    });
+    personaLines.set(value.lineId, clip);
+    if (value.use === "avatar-tap") {
+      if (value.triggers.length !== 0) return empty;
+      continue;
+    }
+    if (value.triggers.length === 0) return empty;
+    for (const trigger of value.triggers) {
+      const normalized = normalizeDailyPhrase(trigger);
+      if (
+        typeof trigger !== "string" ||
+        trigger !== trigger.trim() ||
+        normalized === "" ||
+        (exactReplies.has(normalized) && exactReplies.get(normalized) !== value.lineId)
+      ) {
+        return empty;
+      }
+      exactReplies.set(normalized, value.lineId);
+    }
+  }
+  for (const lines of byPersona.values()) {
+    if (lines.size !== 32) return empty;
+    const taps = [...lines.values()].filter((clip) => clip.use === "avatar-tap");
+    const replies = [...lines.values()].filter((clip) => clip.use === "exact-intent-reply");
+    if (taps.length !== 2 || replies.length !== 30) return empty;
+  }
+  if (totalBytes !== raw.totals.oggBytes || totalDurationMs !== raw.totals.durationMs) {
+    return empty;
+  }
+  return Object.freeze({ byPersona, exactReplies });
+}
+
+const DIALOGUE_VOICES = dialogueVoiceLibrary(globalThis.__AI_SISTER_PERSONA_VOICES__);
+
+function dialogueTaps(id) {
+  return Object.freeze(
+    [...(DIALOGUE_VOICES.byPersona.get(id)?.values() ?? [])].filter(
+      (clip) => clip.use === "avatar-tap",
+    ),
+  );
+}
+
+function dailyDialogueReply(question, personaId) {
+  const lineId = DIALOGUE_VOICES.exactReplies.get(normalizeDailyPhrase(question));
+  return lineId === undefined ? null : DIALOGUE_VOICES.byPersona.get(personaId)?.get(lineId) ?? null;
 }
 
 function profile(value) {
@@ -126,7 +345,7 @@ const PERSONA_CATALOG = Object.freeze({
     palette: { background: "#0B1F33", foreground: "#F8FAFC", accent: "#5EEAD4" },
     voiceRate: 1.02,
     voicePitch: 1.05,
-    taps: fixedTaps("chatgpt", "我在"),
+    taps: dialogueTaps("chatgpt"),
   }),
   claude: profile({
     id: "claude",
@@ -136,7 +355,7 @@ const PERSONA_CATALOG = Object.freeze({
     palette: { background: "#12372A", foreground: "#F8FAFC", accent: "#A7F3D0" },
     voiceRate: 0.94,
     voicePitch: 1.0,
-    taps: fixedTaps("claude", "慢慢來"),
+    taps: dialogueTaps("claude"),
   }),
   gemini: profile({
     id: "gemini",
@@ -146,7 +365,7 @@ const PERSONA_CATALOG = Object.freeze({
     palette: { background: "#172554", foreground: "#F8FAFC", accent: "#A5B4FC" },
     voiceRate: 1.08,
     voicePitch: 1.1,
-    taps: fixedTaps("gemini", "一起看看"),
+    taps: dialogueTaps("gemini"),
   }),
   grok: profile({
     id: "grok",
@@ -156,72 +375,72 @@ const PERSONA_CATALOG = Object.freeze({
     palette: { background: "#3B1B0B", foreground: "#F8FAFC", accent: "#FDE68A" },
     voiceRate: 1.12,
     voicePitch: 0.96,
-    taps: fixedTaps("grok", "收到"),
+    taps: dialogueTaps("grok"),
   }),
   deepseek: profile({
     id: "deepseek", alias: "DeepSeek", group: "13 位閨密", tagline: "深挖證據與原理。",
     palette: { background: "#12213A", foreground: "#F8FAFC", accent: "#60A5FA" },
-    voiceRate: 0.96, voicePitch: 0.98, taps: localTaps("deepseek", "我來往下挖"),
+    voiceRate: 0.96, voicePitch: 0.98, taps: dialogueTaps("deepseek"),
   }),
   qwen: profile({
     id: "qwen", alias: "Qwen", group: "13 位閨密", tagline: "布局、控場與收斂。",
     palette: { background: "#312E81", foreground: "#F8FAFC", accent: "#C4B5FD" },
-    voiceRate: 1.0, voicePitch: 1.02, taps: localTaps("qwen", "我來收斂"),
+    voiceRate: 1.0, voicePitch: 1.02, taps: dialogueTaps("qwen"),
   }),
   mistral: profile({
     id: "mistral", alias: "Mistral", group: "13 位閨密", tagline: "俐落拆解，減少多餘協調。",
     palette: { background: "#451A03", foreground: "#FFFBEB", accent: "#F59E0B" },
-    voiceRate: 1.1, voicePitch: 1.0, taps: localTaps("mistral", "直接拆開來看"),
+    voiceRate: 1.1, voicePitch: 1.0, taps: dialogueTaps("mistral"),
   }),
   venice: profile({
     id: "venice", alias: "Llama", group: "13 位閨密", tagline: "自由、直接、不受拘束。",
     palette: { background: "#3F1D2E", foreground: "#FFF7ED", accent: "#FB7185" },
-    voiceRate: 1.12, voicePitch: 1.04, taps: localTaps("venice", "先講最直接的"),
+    voiceRate: 1.12, voicePitch: 1.04, taps: dialogueTaps("venice"),
   }),
   sakana: profile({
     id: "sakana", alias: "Sakana", group: "13 位閨密", tagline: "保留變體，試另一條演化路徑。",
     palette: { background: "#164E63", foreground: "#ECFEFF", accent: "#67E8F9" },
-    voiceRate: 0.96, voicePitch: 1.12, taps: localTaps("sakana", "我們試另一條路"),
+    voiceRate: 0.96, voicePitch: 1.12, taps: dialogueTaps("sakana"),
   }),
   perplexity: profile({
     id: "perplexity", alias: "Perplexity", group: "13 位閨密", tagline: "先查證，再下結論。",
     palette: { background: "#134E4A", foreground: "#F0FDFA", accent: "#5EEAD4" },
-    voiceRate: 1.06, voicePitch: 1.0, taps: localTaps("perplexity", "我先查證"),
+    voiceRate: 1.06, voicePitch: 1.0, taps: dialogueTaps("perplexity"),
   }),
   glm: profile({
     id: "glm", alias: "GLM", group: "13 位閨密", tagline: "先做出可動的版本。",
     palette: { background: "#1E3A5F", foreground: "#EFF6FF", accent: "#93C5FD" },
-    voiceRate: 1.08, voicePitch: 1.02, taps: localTaps("glm", "先做一版"),
+    voiceRate: 1.08, voicePitch: 1.02, taps: dialogueTaps("glm"),
   }),
   kimi: profile({
     id: "kimi", alias: "Kimi", group: "13 位閨密", tagline: "守住前文、脈絡與交接。",
     palette: { background: "#312E81", foreground: "#F7F7FF", accent: "#C7D2FE" },
-    voiceRate: 0.94, voicePitch: 1.06, taps: localTaps("kimi", "我接著前面"),
+    voiceRate: 0.94, voicePitch: 1.06, taps: dialogueTaps("kimi"),
   }),
   hunyuan: profile({
     id: "hunyuan", alias: "Hunyuan", group: "13 位閨密", tagline: "把上下游與被漏掉的人接回來。",
     palette: { background: "#0C4A6E", foreground: "#F4F8FF", accent: "#78B8FF" },
-    voiceRate: 1.0, voicePitch: 1.04, taps: localTaps("hunyuan", "我把上下游接起來"),
+    voiceRate: 1.0, voicePitch: 1.04, taps: dialogueTaps("hunyuan"),
   }),
   minimax: profile({
     id: "minimax", alias: "MiniMax", group: "13 位閨密", tagline: "先讓作品能看、能聽、能感受到。",
     palette: { background: "#4A0D24", foreground: "#FFF6F8", accent: "#FB923C" },
-    voiceRate: 1.14, voicePitch: 1.12, taps: localTaps("minimax", "先讓它活起來"),
+    voiceRate: 1.14, voicePitch: 1.12, taps: dialogueTaps("minimax"),
   }),
   nemotron: profile({
     id: "nemotron", alias: "Nemotron", group: "13 位閨密", tagline: "工程調度與可部署交付。",
     palette: { background: "#0B0F0A", foreground: "#F9FAFB", accent: "#76B900" },
-    voiceRate: 1.02, voicePitch: 0.94, taps: localTaps("nemotron", "把交付路徑釘住"),
+    voiceRate: 1.02, voicePitch: 0.94, taps: dialogueTaps("nemotron"),
   }),
   cohere: profile({
     id: "cohere", alias: "Cohere", group: "13 位閨密", tagline: "多方溝通、引用與協議。",
     palette: { background: "#243C34", foreground: "#F7F8F3", accent: "#D18EE2" },
-    voiceRate: 0.98, voicePitch: 1.08, taps: localTaps("cohere", "我把每一方都放進來"),
+    voiceRate: 0.98, voicePitch: 1.08, taps: dialogueTaps("cohere"),
   }),
   mimo: profile({
     id: "mimo", alias: "MiMo", group: "13 位閨密", tagline: "先看人用起來順不順。",
     palette: { background: "#431407", foreground: "#FFF8F1", accent: "#FF6900" },
-    voiceRate: 1.04, voicePitch: 1.1, taps: localTaps("mimo", "先看用起來順不順"),
+    voiceRate: 1.04, voicePitch: 1.1, taps: dialogueTaps("mimo"),
   }),
 });
 
@@ -632,6 +851,7 @@ function applyPersona(view) {
 let localSystemVoices = [];
 let localSpeechRevision = 0;
 let localSpeechPresentation = null;
+let bundledVoicePresentation = null;
 let azureSpeechRevision = 0;
 let azureSpeechRequestPending = false;
 let azureSpeechEnabled = false;
@@ -758,7 +978,7 @@ function stopLocalSpeech() {
   }
 }
 
-/** 三條聲音共用同一顆 stop；新意圖不能讓本機 WAV、系統 TTS 與 Azure 疊在一起。 */
+/** 三條聲音共用同一顆 stop；新意圖不能讓 bundled Ogg、系統 TTS 與 Azure 疊在一起。 */
 function stopPersonaMedia({ cancelAzureNative = true } = {}) {
   stopAzureSpeech({ cancelNative: cancelAzureNative });
   voiceRequest += 1;
@@ -767,6 +987,11 @@ function stopPersonaMedia({ cancelAzureNative = true } = {}) {
   if (personaAudio) {
     personaAudio.onended = null;
     personaAudio.onerror = null;
+  }
+  if (bundledVoicePresentation !== null) {
+    const presentation = bundledVoicePresentation;
+    bundledVoicePresentation = null;
+    releaseNativePresentation(presentation);
   }
   stopLocalSpeech();
   clearPersonaSpeaking();
@@ -841,8 +1066,8 @@ function speakWithLocalSystemVoice(text, presentation = null) {
   const pitch = activeProfile.voicePitch;
   const chunks = chunkLocalSpeech(text);
   if (chunks.length === 0) return false;
-  // 答案朗讀要停掉 fixed WAV；fixed voice 的 fallback 也要讓那份 pending request
-  // 失效。共用 stop 後才拿 revision，這一串才是目前唯一可繼續的播放意圖。
+  // 答案朗讀要停掉 bundled Ogg，也要讓 pending 固定語音失效。共用 stop 後才拿
+  // revision，這一串才是目前唯一可繼續的播放意圖。
   stopPersonaMedia();
   localSpeechPresentation = presentation;
   const revision = localSpeechRevision;
@@ -877,7 +1102,7 @@ function speakWithLocalSystemVoice(text, presentation = null) {
         localSpeechPresentation = null;
         releaseNativePresentation(presentation);
       }
-      personaLine.textContent = "本機聲音這次沒有播成；我沒有改用雲端。";
+      personaLine.textContent = "本機朗讀失敗。再按一次重播。";
       personaLine.hidden = false;
     };
     try {
@@ -902,67 +1127,70 @@ async function sayPersonaLine(event) {
   personaLine.hidden = false;
 
   stopPersonaMedia();
-  const request = voiceRequest;
+  if (personaVoiceEnabled) void playBundledPersonaLine(line);
+}
 
-  // 這是唯一的播放入口，而且它就在使用者 click 裡。先用已驗證的四姊妹固定
-  // 錄音；沒有對應錄音時才用 `localService` 系統語音。兩條都沒有就保持安靜。
-  if (!personaVoiceEnabled) return;
+async function playBundledPersonaLine(line) {
   if (
-    line.voiceLineId === null ||
-    !localAssets.voiceLineIds.has(line.voiceLineId) ||
+    !personaVoiceEnabled ||
+    line?.persona !== activeProfile.id ||
+    DIALOGUE_VOICES.byPersona.get(activeProfile.id)?.get(line.lineId) !== line ||
     invoke === null ||
     !personaAudio ||
     typeof personaAudio.play !== "function"
   ) {
-    speakWithLocalSystemVoice(line.text);
-    return;
+    return false;
   }
-
-  let voice;
+  const request = voiceRequest;
+  let presentation;
   try {
-    voice = await invoke("persona_voice_read", { lineId: line.voiceLineId });
+    presentation = await invoke("persona_fixed_voice_admit");
+    const allowed = await beginNativePresentation(presentation);
+    if (
+      !allowed ||
+      request !== voiceRequest ||
+      line.persona !== activeProfile.id ||
+      masterStopPhase !== "clear"
+    ) {
+      releaseNativePresentation(presentation);
+      return false;
+    }
   } catch {
-    // 安裝後的 cache 也可能被截斷或換掉。重讀 native resolver，但內建角色圖不受
-    // cache 影響；這一下仍可使用明確標成 local 的系統語音。
-    readPersona();
-    if (request === voiceRequest) speakWithLocalSystemVoice(line.text);
-    return;
+    releaseNativePresentation(presentation);
+    return false;
   }
-  if (request !== voiceRequest) return;
-  if (
-    voice?.line_id !== line.voiceLineId ||
-    typeof voice?.data_url !== "string" ||
-    !voice.data_url.startsWith("data:audio/wav;base64,")
-  ) {
-    readPersona();
-    speakWithLocalSystemVoice(line.text);
-    return;
-  }
+  bundledVoicePresentation = presentation;
   personaAudio.currentTime = 0;
   let playbackFinished = false;
   const finishPlayback = () => {
-    if (request !== voiceRequest) return;
+    if (playbackFinished) return;
     playbackFinished = true;
-    setPersonaSpeaking(PERSONA_SPEAKING_FIXED, false);
+    if (request === voiceRequest) setPersonaSpeaking(PERSONA_SPEAKING_FIXED, false);
     personaAudio.onended = null;
     personaAudio.onerror = null;
     personaAudio.removeAttribute?.("src");
+    if (bundledVoicePresentation === presentation) bundledVoicePresentation = null;
+    releaseNativePresentation(presentation);
   };
   personaAudio.onended = finishPlayback;
-  personaAudio.onerror = finishPlayback;
-  personaAudio.src = voice.data_url;
+  personaAudio.onerror = () => {
+    finishPlayback();
+    if (request === voiceRequest) {
+      personaLine.textContent = "語音播放失敗。再按一次重播。";
+      personaLine.hidden = false;
+    }
+  };
+  personaAudio.src = line.file;
   try {
     await personaAudio.play();
     if (request === voiceRequest && !playbackFinished) {
       setPersonaSpeaking(PERSONA_SPEAKING_FIXED, true);
+      return true;
     }
   } catch {
-    // WebView 拒絕播放不代表本機 cache 壞了；保留固定台詞與內建角色圖。
-    if (request === voiceRequest) {
-      setPersonaSpeaking(PERSONA_SPEAKING_FIXED, false);
-      speakWithLocalSystemVoice(line.text);
-    }
+    personaAudio.onerror?.();
   }
+  return false;
 }
 
 avatar?.addEventListener("click", sayPersonaLine);
@@ -3076,7 +3304,7 @@ function answerReadLine() {
   button.addEventListener("click", async (event) => {
     if (event?.isTrusted !== true) return;
     // 這是新的播放意圖：就算最後找不到 localService voice，也要先停掉上一句
-    // fixed WAV／pending read，不能一邊說「沒有本機聲音」一邊繼續播舊台詞。
+    // bundled Ogg／pending read，不能一邊說「沒有本機聲音」一邊繼續播舊台詞。
     stopPersonaMedia();
     if (!personaVoiceEnabled) {
       personaLine.textContent = "先到設定打開「本機聲音」，我才會朗讀。";
@@ -3107,13 +3335,13 @@ function answerReadLine() {
       } catch (error) {
         releaseNativePresentation(presentation);
         if (localIntent !== localSpeechRevision || masterStopPhase !== "clear") return;
-        personaLine.textContent = `本機答案朗讀沒有開始：${String(error?.message ?? error)}`;
+        personaLine.textContent = "本機朗讀未開始。解除全停後再重播。";
         personaLine.hidden = false;
         readMasterStopState();
         return;
       }
     }
-    personaLine.textContent = "這台機器沒有回報可用的本機中文語音；我沒有改用雲端。";
+    personaLine.textContent = "找不到本機中文語音。請先在 Windows 安裝中文語音。";
     personaLine.hidden = false;
   });
   li.append(button);
@@ -3122,11 +3350,8 @@ function answerReadLine() {
 
 async function speakAzureAnswer(button, intent) {
   if (intent !== AZURE_AUTO_ANSWER && intent !== AZURE_TRUSTED_REPLAY) return;
-  const automatic = intent === AZURE_AUTO_ANSWER;
   if (azureCancelPending) {
-    personaLine.textContent = automatic
-      ? "上一段 Azure 取消還在向 native 確認；這題尚未自動送出，確認完成後會重讀最新狀態。"
-      : "上一段 Azure 取消還在向 native 確認；這次沒有送出 request，確認完成後再重播。";
+    personaLine.textContent = "Azure 正在停止上一段朗讀。完成後再重播。";
     personaLine.hidden = false;
     return;
   }
@@ -3135,13 +3360,13 @@ async function speakAzureAnswer(button, intent) {
   // click。兩條路只共用這一個 outbound 出口：先停舊播放，再只抽當前正文。
   stopPersonaMedia();
   if (invoke === null) {
-    personaLine.textContent = "這一頁不在 AI-Sister desktop 裡，沒有送出 Azure request。";
+    personaLine.textContent = "請從 AI-Sister 桌面程式使用 Azure 朗讀。";
     personaLine.hidden = false;
     return;
   }
   const text = azureAnswerText();
   if (text === "") {
-    personaLine.textContent = "這一題沒有可朗讀的答案正文，沒有送出 Azure request。";
+    personaLine.textContent = "這一題沒有可朗讀的正文。";
     personaLine.hidden = false;
     return;
   }
@@ -3152,8 +3377,7 @@ async function speakAzureAnswer(button, intent) {
     nativeGeneration < 0 ||
     nativeGeneration !== azureNativeGeneration
   ) {
-    personaLine.textContent =
-      "Azure 狀態正在重讀；這次沒有送出 request。下一個新答案會用最新狀態，也可稍後用按鈕重播。";
+    personaLine.textContent = "Azure 狀態更新中。更新後再重播。";
     personaLine.hidden = false;
     readAzureTts();
     return;
@@ -3175,7 +3399,7 @@ async function speakAzureAnswer(button, intent) {
     azureSpeechRequestPending = false;
     azurePendingGeneration = null;
     resetAzureAnswerButton();
-    personaLine.textContent = `Azure 這次沒有播成：${String(err?.message ?? err)}。我沒有自動改用本機或另一個雲端。`;
+    personaLine.textContent = "Azure 朗讀失敗。請檢查語音設定後重播。";
     personaLine.hidden = false;
     readAzureTts();
     return;
@@ -3202,7 +3426,7 @@ async function speakAzureAnswer(button, intent) {
   ) {
     releaseNativePresentation(audio);
     resetAzureAnswerButton();
-    personaLine.textContent = "Azure 回應不是這一版允許的 MP3 形狀；沒有播放，也沒有改用其他聲音。";
+    personaLine.textContent = "Azure 回傳的音訊無法播放。請再重播一次。";
     personaLine.hidden = false;
     readAzureTts();
     return;
@@ -3217,7 +3441,7 @@ async function speakAzureAnswer(button, intent) {
   if (!personaAudio || typeof personaAudio.play !== "function") {
     releaseNativePresentation(audio);
     resetAzureAnswerButton();
-    personaLine.textContent = "這扇視窗沒有可用的本機 audio 元件；Azure MP3 沒有播放，也沒有落地。";
+    personaLine.textContent = "這個視窗無法播放音訊。請重開 AI-Sister。";
     personaLine.hidden = false;
     return;
   }
@@ -3227,7 +3451,7 @@ async function speakAzureAnswer(button, intent) {
   } catch (err) {
     releaseNativePresentation(audio);
     resetAzureAnswerButton();
-    personaLine.textContent = `Azure MP3 已回來，但播放邊界確認失敗；沒有播放：${String(err?.message ?? err)}`;
+    personaLine.textContent = "Azure 音訊未開始播放。請重開 AI-Sister 後重播。";
     personaLine.hidden = false;
     readMasterStopState();
     return;
@@ -3239,7 +3463,7 @@ async function speakAzureAnswer(button, intent) {
   if (!presentationAllowed) {
     releaseNativePresentation(audio);
     resetAzureAnswerButton();
-    personaLine.textContent = "全停閘門已在播放前生效；Azure MP3 沒有播放，也沒有落地。";
+    personaLine.textContent = "Azure 音訊未開始播放。解除全停後再重播。";
     personaLine.hidden = false;
     readMasterStopState();
     return;
@@ -3258,8 +3482,7 @@ async function speakAzureAnswer(button, intent) {
     personaAudio.onended = null;
     personaAudio.removeAttribute?.("src");
     releaseAzurePlaybackPresentation(audio);
-    personaLine.textContent =
-      "Azure MP3 已回來，但 WebView 這次沒有播放；沒有落地，也沒有改用其他聲音。";
+    personaLine.textContent = "Azure 音訊播放失敗。請再重播一次。";
     personaLine.hidden = false;
   };
   personaAudio.onerror = playbackFailed;
@@ -3330,17 +3553,13 @@ function answerAzureLine() {
   button.addEventListener("click", (event) => {
     if (event?.isTrusted !== true) return;
     if (azureCancelPending) {
-      personaLine.textContent =
-        "上一段 Azure 取消還在向 native 確認；這次沒有送出 request，確認完成後再重播。";
+      personaLine.textContent = "Azure 正在停止上一段朗讀。完成後再重播。";
       personaLine.hidden = false;
       return;
     }
     if (azureAnswerButton === button) {
-      const wasPending = azureSpeechRequestPending;
       stopPersonaMedia();
-      personaLine.textContent = wasPending
-        ? "Azure 朗讀已取消；已經開始的 HTTPS POST 可能仍跑到逾時，晚回應不會播放。"
-        : "Azure 朗讀已停止。";
+      personaLine.textContent = "Azure 朗讀已停止。";
       personaLine.hidden = false;
       return;
     }
@@ -3844,7 +4063,22 @@ const SLOW_MS = 4000;
  */
 let asking = 0;
 
-async function ask() {
+function renderDailyDialogue(line) {
+  azureAnswerLine = null;
+  azureAnswerButton = null;
+  const reply = document.createElement("li");
+  reply.className = "persona-dialogue";
+  reply.textContent = line.text;
+  hitList.replaceChildren(reply);
+  hitList.hidden = false;
+  document.body.classList.add("has-hits");
+  personaLine.textContent = line.text;
+  personaLine.hidden = false;
+  showingAnswer = true;
+  paintConversation();
+}
+
+async function ask(event = null) {
   const question = askInput.value.trim();
   if (question === "") return;
 
@@ -3856,6 +4090,17 @@ async function ask() {
   // 新的一題蓋掉上一次那句「為什麼沒成」——他已經在做下一件事了。
   notice = null;
   slowNote = null;
+  const dailyReply =
+    event?.isTrusted === true && personaEnabled
+      ? dailyDialogueReply(question, activeProfile.id)
+      : null;
+  if (dailyReply !== null) {
+    renderDailyDialogue(dailyReply);
+    askInput.value = "";
+    setState("idle");
+    if (personaVoiceEnabled) void playBundledPersonaLine(dailyReply);
+    return;
+  }
   setState("thinking");
   const slow = setTimeout(() => {
     // 這個 timer 只量到一件事：這一題已經等了 4 秒。它沒有問資料庫是不是
@@ -3958,13 +4203,13 @@ async function ask() {
   }
 }
 
-askSend?.addEventListener("click", () => void ask());
+askSend?.addEventListener("click", (event) => void ask(event));
 askInput?.addEventListener("keydown", (event) => {
   // 選字中的 Enter 是「就選這個字」，不是「問出去」。注音打「剛剛發生什麼事」
   // 一路上會按好幾次 Enter，少了這一行，第一次選字就把半句話送出去了。
   // `keyCode === 229` 是舊的那條路，有些 IME 只給得出這個。
   if (event.isComposing || event.keyCode === 229) return;
-  if (event.key === "Enter") void ask();
+  if (event.key === "Enter") void ask(event);
 });
 
 // ---------- 開場 ----------

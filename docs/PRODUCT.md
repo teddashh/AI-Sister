@@ -208,29 +208,16 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
   bundled 全身 WebP 當圖像選擇卡；選擇只改未存預覽，儲存成功才嘗試即時通知主視窗換人，
   通知失敗則明講要重開 desktop。persona 不得改答案事實、證據、
   同意書、守門員分數或 hands 權限。
-- 舊固定語音走內容定址 omnibus asset pack。下載前先列
-  `cdn.ted-h.com`、精確大小 **73,261,088 bytes** 與資料邊界，只有使用者明確按下才可
-  做一次 fixed GET；不 redirect／proxy／retry，不帶 cookie／credentials／authorization、
-  referrer、query 或 body。請求不帶 persona 選擇／狀態、OCR、畫面、問題、答案或
-  記憶內容；切換角色不改 method、URL、header 或 body。**角色體驗是賣點，CDN 只是
-  交付機制。**
-- app 只嵌入舊 pack 的 compact authority（descriptor、exact allowlist、四位角色 selected public
-  rights projection、八段選用聲音的核准逐字稿、完整 manifest 的 canonical hash），
-  不把約 2.1 MB 的完整 11 人
-  manifest 塞進執行檔。73,261,088-byte ZIP 的 SHA-256
-  `7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30` pin 住全部
-  946 項；實際呈現／播放的 selected entries 另逐檔驗大小、hash 與權利 binding，全部
-  成功才原子啟用。
-- desktop 不採用 pack 裡的四張舊立繪，只選八段無條件成立的語音。pack 裡說「今天滿有活力」的四段
-  `active` 聲音需要產品沒有量到的前提，所以不進 click allowlist；顯示文字與核准
-  逐字稿不同時也直接靜音。
-- 素材 cache 在 `Config::default_data_dir()/persona-assets-v1`，不是使用者記憶：memory
-  export、forget、prune 不碰它，只有 Persona 撤回精準清該 release。下載能力只由
-  desktop 啟用；recorder／core／brain／hands 與 WebView 沒有因此得到 HTTP 能力，
-  CSP 也不開 CDN。
-- 聲音不因 idle、capture、記憶或系統事件自己播放。使用者打開聲音後，四姊妹優先用
-  已驗證固定錄音，其餘只用 `localService` 中文系統 TTS；答案也要再按一次朗讀才出聲。
-  找不到本機 voice 就保持靜音，不自動改用雲端。`prefers-reduced-motion` 與靜音選擇優先。
+- 17 位角色各有隨程式安裝的基本包 8 句與擴充包 24 句，共 544 段 Ogg Opus。
+  每人兩句由點角色觸發，另外 30 句對應固定日常短句；文字、角色、pack、路徑、bytes、
+  SHA-256、duration 與權利綁在同一份 manifest。runtime 必須完整驗過 17×32 的 manifest
+  才啟用整庫，不能缺一段後只讓部分角色說話。
+- 日常短句只做 NFKC、trim 與句尾標點正規化後的 exact match。命中後直接顯示目前角色
+  對應的固定回覆並播放同一段 bundled Ogg，不叫 CLI、不查記憶、不建立網路 request；
+  未命中則完整走一般答案路徑，不能用固定台詞冒充動態回答。
+- 聲音不因 idle、capture、記憶或系統事件自己播放。使用者打開聲音後，固定角色台詞只由
+  trusted click／Enter／Space 或送出日常短句啟動。動態答案另由「用本機聲音朗讀」按鈕
+  交給 `localService` 中文系統 TTS。`prefers-reduced-motion` 與靜音選擇優先。
 - alpha.110 的 Azure 繁中答案朗讀是**另選、預設關閉**的路徑，不是上面本機聲音的
   fallback。它要設定啟用、`eastasia`／`southeastasia`／`japaneast` typed region、
   Windows Credential Manager fixed target `ted-h/AI-Sister/AzureSpeech/v1` 的 key、

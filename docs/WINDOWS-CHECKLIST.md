@@ -10,7 +10,7 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.118 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+alpha.119 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
@@ -21,6 +21,23 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
+
+### alpha.119 先驗 17 人 bundled 日常對話
+
+- [ ] 斷網安裝正式 `AI-Sister-Setup.exe`，開設定。角色語音卡要直接顯示 17 人、
+      544 段、每人基本 8 句／擴充 24 句；開啟「角色聲音」後不要求下載模型、素材包或
+      系統中文 voice。
+- [ ] 依序選過四姊妹與 13 位閨密，每位都點角色兩次。畫面台詞、聲音與當前角色必須
+      一致，不能串角色、播到前一人或退回 WebView `speechSynthesis`。
+- [ ] 目前角色開聲音後送出「早安。」，要立即顯示並播放該角色的早安回覆。再送「我好累」、
+      「謝謝」與「晚安！」，分別驗擴充包、重複觸發與句尾標點正規化。
+- [ ] 送出「早安，昨天我在做什麼」，必須走原本的 memory／CLI 問答並帶可點證據，不能因含有
+      「早安」就播固定早安回覆。「我好累，昨天呢」也要同樣走動態路徑。
+- [ ] 正在播固定對話時，分別驗關閉角色聲音、開始另一段播放、關視窗與另一行程執行
+      `sister.exe stop-all`。舊聲音要立即停；`stop-all` 只能在 native playback lease 結束後回成功，成功後
+      不得再冒出延遲播放。
+- [ ] 全程留 packet trace。開 app、開設定、切 17 人、點角色與觸發上述固定對話時，不得因這份
+      bundled 語音出現 DNS、HTTP 或 HTTPS request。
 
 ### alpha.118 先驗 master stop 的跨行程排乾
 

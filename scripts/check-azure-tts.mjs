@@ -433,7 +433,7 @@ console.log("⑤ app.js 只有最新 ask 完成可自動朗讀；manual replay �
   );
   const manualReplay = section(APP, "function answerAzureLine()", "/**\n * @param hits");
   const render = section(APP, "function renderHits(", "/**\n * 慢到這個秒數");
-  const ask = section(APP, "async function ask()", "askSend?.addEventListener");
+  const ask = section(APP, "async function ask(event = null)", "askSend?.addEventListener");
   const opening = APP.slice(APP.indexOf("// ---------- 開場 ----------"));
   const statusParser = section(APP, "function usableAzureTtsStatus(", "function syncAzureAnswerLine(");
   const statusApply = section(APP, "function applyAzureTtsStatus(", "function readAzureTts(");
@@ -454,10 +454,9 @@ console.log("⑤ app.js 只有最新 ask 完成可自動朗讀；manual replay �
   );
   check(
     "自動新答案與 manual replay 只共用一個 typed speak helper",
-    APP.includes("const AZURE_AUTO_ANSWER = Object.freeze({});") &&
+      APP.includes("const AZURE_AUTO_ANSWER = Object.freeze({});") &&
       APP.includes("const AZURE_TRUSTED_REPLAY = Object.freeze({});") &&
       sharedSpeak.includes("intent !== AZURE_AUTO_ANSWER && intent !== AZURE_TRUSTED_REPLAY") &&
-      sharedSpeak.includes("const automatic = intent === AZURE_AUTO_ANSWER") &&
       (APP.match(/invoke\("azure_tts_speak"/g) ?? []).length === 1 &&
       sharedSpeak.includes('invoke("azure_tts_speak", {'),
     sharedSpeak,
@@ -596,8 +595,7 @@ console.log("⑤ app.js 只有最新 ask 完成可自動朗讀；manual replay �
   check(
     "Azure 失敗路徑不呼叫 localService fallback",
     !sharedSpeak.includes("speakWithLocalSystemVoice") &&
-      !sharedSpeak.includes("autoSpeakLatestAzureAnswer") &&
-      sharedSpeak.includes("我沒有自動改用本機或另一個雲端"),
+      !sharedSpeak.includes("autoSpeakLatestAzureAnswer"),
   );
 }
 

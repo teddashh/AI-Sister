@@ -77,6 +77,28 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.119
+
+**四姊妹與 13 位閨密現在各有一套隨程式安裝的日常對話語音：每人基本包 8 句、
+擴充包 24 句，合計 544 段 Ogg Opus、8,918,728 bytes。**
+
+點角色會播放該角色自己的兩句台詞；開啟聲音後，「早安」、「我好累」、「謝謝」、
+「晚安」等 30 組常用短句會直接顯示並播放目前角色的固定回覆。觸發是嚴格的 exact
+match：只做 Unicode NFKC、頭尾空白與句尾標點正規化；帶有追問、記憶主題或其他文字的
+句子繼續走原本的 memory 檢索與使用者已安裝 CLI agent，不用固定聲音冒充動態答案。
+
+544 段是一份原子素材：runtime 會先驗完整份 manifest 的 17×32 roster、persona、pack、
+用途、逐字稿、path、bytes、SHA-256、duration 與 rights binding，全部通過才啟用；任一段不合
+就整套停用。發布前 544 段逐檔通過 OpusHead／decode、duration、RMS／peak、CAM++ 說話者
+一致性、Whisper large-v3 與 Breeze-ASR-25 的全集文字驗收；CI 會重算素材數量、大小與每檔
+hash。
+
+固定對話只讀 WebView 同源的 bundled Ogg，不需要系統語音、CLI、Azure 或網路。播放仍由
+當下的 trusted 角色點擊或送出問題啟動，並持有 native presentation lease；「全部停止」、關聲音、
+換題或新播放會停掉舊播放。設定主畫面現在直接顯示 17 人、544 段與 8+24 分包；產品與
+Azure 技術細節收在頁底同一個可展開區塊，操作流程只保留當下需要的選項與恢復動作。
+
+
 ## v0.1.0-alpha.118
 
 **這一版完成跨 capture／brain／hands 的 master stop。`sister stop-all` 不只放一個旗標：

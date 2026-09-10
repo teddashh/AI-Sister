@@ -11,9 +11,8 @@
 > answer body after its own consent; manual replay sends it again. Local speech remains the default.
 
 **Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Persona
-的四姊妹 fixed voice 與 fixed CDN pack 也已接通，alpha.104 的發版 gate 在真
-Windows 走完下載、驗證、原子安裝與精準移除。真人設定頁／播放／撤回的正式 artifact
-實測與 packet trace 仍未回收。alpha.106 已接上 Windows current-user 離線安裝包與
+的 17 位角色圖、workplace rig 與 544 段日常語音全部隨程式安裝。alpha.106 已接上
+Windows current-user 離線安裝包與
 single-instance，並在真 Windows CI 走完 fresh install、行程交棒、已存活行程拒絕、
 同版 reinstall 與移除。alpha.107 再接上預設關閉的 Windows 登入啟動，以及只管理
 desktop 自己啟動之 recorder 的 bounded supervisor；純 policy／狀態機、renderer fixture
@@ -70,7 +69,9 @@ loader 沒有窗可映射。Windows CI 用公開 alpha.110 舊 recorder 的 hard
 alpha.118 再完成跨 capture／brain／hands 的 master stop：`sister stop-all` 先拒絕新工作、
 等已開始的擷取、CLI agent、reviewer 寫入與 hands OS call 排乾，durable latch 真正生效後
 才回成功；系統匣、CLI 與問答分得出正在排乾、已完成、讀不到三種情況，不會提早說「都停了」。
-解除全停不會順手解除原本的暫停或拔手。code signing 仍未完成，
+解除全停不會順手解除原本的暫停或拔手。alpha.119 把 17 位角色的本機日常語音完整隨程式
+安裝：每人基本 8 句＋擴充 24 句，共 544 段；exact 日常短句直接使用目前角色的錄音，
+其餘問題維持既有記憶／CLI 大腦。code signing 仍未完成，
 所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
 可以從 [Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
@@ -263,11 +264,18 @@ Apache-2.0 程式碼授權；由 ChatGPT preview 衍生的五個應用程式圖�
 `apps/desktop/src-tauri/icons/{manifest.json,NOTICE.md}`，不借前一份 grant 擴張範圍。
 可重現的 selector 與排除範圍見 [Persona Reel 選材](docs/PERSONA-REELS.md)。
 
-只有你真的按下角色（或在原生按鈕上用 Enter／Space）才會顯示下一句，不叫模型、
-不改答案，也不因開場、輪詢、錄製或記憶事件自己開口。聲音預設關閉；打開後，四姊妹
-有已驗證固定錄音時優先播放，否則只接受 WebView 明確回報 `localService = true` 的繁中／
-中文系統 voice。找不到就保持安靜，不會偷換 remote voice。答案清單底下的「用本機聲音
-朗讀」也只在使用者親手按下後讀畫面文字，不經 Rust IPC 或遠端 TTS。
+本機日常語音也隨 desktop 一起安裝：17 位角色各有基本包 8 句、擴充包 24 句，
+合計 **544 段 Ogg Opus、8,918,728 bytes**。每人兩句用於點角色，另外 30 句對應早安、晚安、累了、
+卡住了、做完了、想聊天等固定日常短句；同一句會播放目前角色自己的錄音。日常短句
+只做 NFKC、前後空白與句尾標點正規化後的 exact match，不做 substring 或模糊猜測。
+沒有精確命中的問題仍走原本的本機記憶／CLI 大腦，不用固定台詞冒充動態答案。
+
+聲音預設關閉。只有你按下角色、按送出或用原生鍵盤操作時才會播放，不因開場、輪詢、
+錄製或記憶事件自己開口；固定日常語音不連網、不叫 CLI，也不借系統 voice。動態答案下方
+的「用本機聲音朗讀」仍由使用者另外按下，並只接受 WebView 明確回報
+`localService = true` 的繁中／中文系統 voice。
+語音來源、逐檔 hash、權利範圍與完整 inventory 在
+`apps/desktop/ui/persona-voices/v1/{manifest.json,NOTICE.md}`。
 
 alpha.110 的 Azure 繁中朗讀仍然**可選而且預設關閉**；它不是本機 voice 的自動
 fallback，本機找不到聲音時仍靜音，Azure 失敗時也不自動改走另一條。啟用 Azure、
@@ -292,24 +300,6 @@ POST **無法中途撤回**，仍可能跑到 45 秒 timeout，而且 Azure 可�
 Microsoft 目前公開列出的 Azure Speech F0 neural TTS 額度是每月 0.5 million characters；
 是否可用、計費與額度仍以你的 Azure 帳號、resource、方案及 Microsoft 當下規則為準，
 AI-Sister 不提供或保證免費額度。見 [Azure Speech 定價](https://azure.microsoft.com/en-us/pricing/details/speech/)。
-
-四姊妹的八句預錄固定語音仍由舊 optional pack 提供。下載按鈕前會列出
-`cdn.ted-h.com`、**73,261,088 bytes**，以及 CDN 會看見來源 IP、時間、TLS、固定
-path／headers；只有你看完後明確按下，desktop 才可發至多一個 fixed GET。請求不含
-目前選誰、角色狀態、OCR、畫面、問題、答案或記憶，也不 redirect／proxy／retry，
-不帶 cookie／credentials／authorization、referrer、query 或 body。WebView 本身仍只
-走 Tauri IPC，CSP 沒有開 CDN。
-
-目前 desktop 不採用 pack 內的舊立繪，只選八段語音。pack 裡另有四段 `active` 聲音會說
-「今天滿有活力」，但點角色這件事沒有量到這個事實，所以 app 不選、不存也不播放；
-不拿一段有條件的聲音湊成第三句。
-
-程式先用 compact embedded authority 驗 73,261,088-byte ZIP 的整包 SHA-256
-`7d98e0d18c470f82818e8ada67208847c3cf4ff5c10cb5f99f9215191e981f30`、946 entries，
-再逐檔驗真正會使用的四位角色 projection；不是把約 2.1 MB 的完整 11 人 manifest
-塞進執行檔。全部成功才原子啟用額外錄音；任何失敗都保留所選的 bundled 角色圖，
-不會背景重抓。cache 在預設資料目錄的 `persona-assets-v1/`，memory export、
-`forget`、`prune` 不碰它；Persona 撤回才精準清除該 release。
 
 **alpha.100 多問一個只關於無人值守網址的問題。** 設定尚未回答時，第一次開
 `sister-desktop.exe` 會直接問：「有時候我讀到的東西裡會有一個網址。你不在的時候，

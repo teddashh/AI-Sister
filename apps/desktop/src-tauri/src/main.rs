@@ -418,6 +418,18 @@ fn answer_local_speech_admit(
     })
 }
 
+/// 隨程式提供的固定台詞不叫 CLI、不連網；播放仍跨 native master-stop lease，
+/// 因此外部 stop-all 會先等正在說的這一句真正停下來。
+#[tauri::command]
+fn persona_fixed_voice_admit(
+    shell: tauri::State<'_, Shell>,
+) -> Result<MasterStopPresentationView, String> {
+    let guard = admit_desktop_brain(shell.data_dir.as_deref(), "這次 Persona 本機固定語音")?;
+    Ok(MasterStopPresentationView {
+        presentation_id: hold_presentation(guard),
+    })
+}
+
 fn admit_desktop_brain(
     data_dir: Option<&Path>,
     work: &str,
@@ -4142,8 +4154,8 @@ async fn persona_asset_remove(
     persona_asset_manager_view(&shell)
 }
 
-/// 聲音是一次明確選擇。打開不會播放；只有 trusted click 才能播放已驗證固定錄音
-/// 或 WebView 明確標成 localService 的系統語音。關掉會先送停聲事件。
+/// 聲音是一次明確選擇。打開不會播放；角色日常對話使用 bundled 固定錄音，
+/// 動態答案只有另一顆 trusted 按鈕能交給 localService 系統語音。關掉會先送停聲事件。
 #[tauri::command]
 fn persona_voice_set(
     enabled: sister_core::config::PersonaVoiceEnabled,
@@ -6421,6 +6433,7 @@ fn main() {
             master_stop_presentation_begin,
             master_stop_presentation_end,
             answer_local_speech_admit,
+            persona_fixed_voice_admit,
             recording_state,
             start_recording,
             stop_recording,

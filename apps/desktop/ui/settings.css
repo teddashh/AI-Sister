@@ -313,6 +313,29 @@ select {
   margin: 0;
 }
 
+.persona-dialogue-packs {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 10px 0 0;
+}
+
+.persona-dialogue-packs > div {
+  background: rgb(246 236 223 / 5%);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.persona-dialogue-packs dt {
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.persona-dialogue-packs dd {
+  font-weight: 650;
+  margin: 2px 0 0;
+}
+
 .persona-disclosure {
   background: rgb(246 236 223 / 4%);
   border-left: 3px solid var(--accent);
@@ -575,6 +598,22 @@ button:focus-visible {
 .days em {
   font-style: normal;
   opacity: 0.62;
+}
+
+.product-details {
+  border-top: 1px solid rgb(246 236 223 / 10%);
+  color: rgb(246 236 223 / 72%);
+  padding: 14px 0 18px;
+}
+
+.product-details summary {
+  color: var(--fg);
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.product-details p {
+  margin: 10px 0 0;
 }
 
 /* ---------- 底下那一條 ---------- */

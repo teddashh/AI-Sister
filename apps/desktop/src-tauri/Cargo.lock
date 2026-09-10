@@ -3381,7 +3381,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "sister-assets"
-version = "0.1.0-alpha.118"
+version = "0.1.0-alpha.119"
 dependencies = [
  "fs4",
  "getrandom 0.2.17",
@@ -3392,7 +3392,7 @@ dependencies = [
 
 [[package]]
 name = "sister-core"
-version = "0.1.0-alpha.118"
+version = "0.1.0-alpha.119"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3413,7 +3413,7 @@ dependencies = [
 
 [[package]]
 name = "sister-desktop"
-version = "0.1.0-alpha.118"
+version = "0.1.0-alpha.119"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3437,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "sister-hands"
-version = "0.1.0-alpha.118"
+version = "0.1.0-alpha.119"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3451,7 +3451,7 @@ dependencies = [
 
 [[package]]
 name = "sister-shell"
-version = "0.1.0-alpha.118"
+version = "0.1.0-alpha.119"
 dependencies = [
  "serde",
  "serde_json",
@@ -3460,7 +3460,7 @@ dependencies = [
 
 [[package]]
 name = "sister-tts"
-version = "0.1.0-alpha.118"
+version = "0.1.0-alpha.119"
 dependencies = [
  "serde",
  "ureq",

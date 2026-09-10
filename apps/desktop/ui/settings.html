@@ -122,10 +122,6 @@
           </figcaption>
         </figure>
         <p class="persona-tagline" data-persona-tagline></p>
-        <p class="hint">
-          四姊妹與 13 位閨密是受同名 AI 產品啟發的虛構角色；AI-Sister 是獨立產品，未與這些供應商
-          合作、隸屬或獲其背書。
-        </p>
         <label class="check">
           <input type="checkbox" data-persona-motion />
           <span>
@@ -141,104 +137,59 @@
           </span>
         </label>
         <div class="persona-assets" data-persona-assets>
-          <h3>角色圖與聲音</h3>
-          <p class="state" role="status" aria-live="polite" data-persona-asset-summary>
-            正在讀本機素材狀態…
-          </p>
-          <div class="persona-disclosure" data-persona-disclosure hidden>
-            <p>
-              17 張角色圖已隨程式安裝，不需下載。這份舊素材包另外提供四姊妹的 8 句
-              預錄固定台詞，不能只下載其中一位。第一次下載不會自行打開聲音；若你先前已
-              明確打開，修復成功後會沿用那個設定。
-            </p>
-            <dl>
-              <div>
-                <dt>版本</dt>
-                <dd><code data-persona-release>—</code></dd>
-              </div>
-              <div>
-                <dt>連線主機</dt>
-                <dd><code data-persona-host>—</code></dd>
-              </div>
-              <div>
-                <dt>固定路徑</dt>
-                <dd><code data-persona-pack-path>—</code></dd>
-              </div>
-              <div>
-                <dt>完整大小</dt>
-                <dd data-persona-size>—</dd>
-              </div>
-              <div>
-                <dt>會離開這台機器的資料</dt>
-                <dd data-persona-boundary>—</dd>
-              </div>
-            </dl>
-            <p class="hint">
-              按下後只允許對上面的固定路徑做至多一個 HTTPS GET；不跟 redirect、不走
-              proxy，不帶 cookie、credentials、authorization、referrer、query 或 body，
-              不 retry、不先 HEAD，也不逐檔連線。DNS 與 CDN 仍會看到一般網路 metadata；
-              CDN 會看到來源 IP、時間、TLS、固定 host、path 與 headers，固定路徑也會透露
-              素材包版本。請求不會帶角色選擇、角色或記錄狀態、OCR、畫面像素、問題、答案、
-              記憶 ID 或資料庫內容；17 位角色的 method、URL、headers 與 body 完全相同。
-            </p>
-          </div>
-          <progress
-            class="persona-progress"
-            data-persona-progress
-            aria-label="正在處理角色素材包"
-            hidden
-          ></progress>
-          <p class="state bad" role="alert" data-persona-asset-error hidden></p>
-          <div class="persona-asset-actions">
-            <button class="primary" type="button" data-persona-download hidden>
-              下載完整素材包
-            </button>
-            <button class="primary" type="button" data-persona-repair hidden>
-              修復素材包
-            </button>
-            <button class="ghost" type="button" data-persona-cancel hidden>
-              取消下載
-            </button>
-            <button class="ghost danger" type="button" data-persona-remove hidden>
-              刪除本機素材
-            </button>
-          </div>
+          <h3>本機日常語音</h3>
+          <p class="state">17 位角色、544 段固定語音已隨程式安裝。</p>
+          <dl class="persona-dialogue-packs">
+            <div>
+              <dt>基本包</dt>
+              <dd>每人 8 句</dd>
+            </div>
+            <div>
+              <dt>擴充包</dt>
+              <dd>每人 24 句</dd>
+            </div>
+          </dl>
           <label class="check persona-voice">
             <input type="checkbox" data-persona-voice disabled />
             <span>
-              點角色時使用本機聲音
-              <em>
-                預設關閉；四姊妹優先播放已驗證固定錄音，其餘只使用 Windows 明確標成
-                localService 的繁中／中文語音。找不到就保持安靜，不會改用遠端聲音。
-              </em>
+              日常對話使用角色聲音
+              <em>點角色，或輸入收錄的日常短句時，播放所選角色的本機固定語音。</em>
             </span>
           </label>
           <p class="state" aria-live="polite" data-persona-voice-state>
             本機聲音預設關閉。
           </p>
-          <p class="hint persona-immediate">
-            下載、修復、取消、刪除與聲音開關按下後立即執行，不必再按頁尾的「儲存」。
-            17 張角色圖永遠在本機；移除舊素材包只移除額外錄音，不會改變角色圖。
-            角色選擇不會改變下載請求，也不會改變回答與安全路徑。
-          </p>
+          <p class="hint persona-immediate">聲音開關按下後立即生效；角色選擇在頁尾儲存。</p>
+          <div hidden aria-hidden="true">
+            <p data-persona-asset-summary></p>
+            <div data-persona-disclosure>
+              <code data-persona-release></code>
+              <code data-persona-host></code>
+              <code data-persona-pack-path></code>
+              <span data-persona-size></span>
+              <span data-persona-boundary></span>
+            </div>
+            <progress data-persona-progress></progress>
+            <p data-persona-asset-error></p>
+            <button type="button" data-persona-download></button>
+            <button type="button" data-persona-repair></button>
+            <button type="button" data-persona-cancel></button>
+            <button type="button" data-persona-remove></button>
+          </div>
         </div>
       </section>
 
       <section class="azure-tts" data-azure-section>
         <h2>Azure 雲端朗讀（選配）</h2>
         <p class="hint">
-          本機聲音仍是預設；這條路預設關閉，也不會成為自動 fallback。Azure Speech
-          F0 公開價目目前列 Neural TTS 每月 50 萬字元免費額度，但帳號、區域、配額與最終帳單
-          都由你的 Azure subscription 決定；AI-Sister 不替你開帳號，也不會假裝查過餘額。
+          預設關閉。啟用後使用你的 Azure Speech 金鑰朗讀新答案。
         </p>
         <label class="check">
           <input type="checkbox" data-azure-enabled disabled />
           <span>
             新答案完成後自動用 Azure 朗讀
             <em>
-              打開且第四張同意、區域與金鑰都有效時，每份最新答案會自動送出並播放一次；
-              不因角色點擊、本機聲音缺席、開啟視窗或重畫舊答案而連線。關閉操作成功回覆後
-              就不再開始新的自動朗讀。
+              第四張同意、區域與金鑰齊全後，每份最新答案自動播放一次。
             </em>
           </span>
         </label>
@@ -282,21 +233,7 @@
         <p class="state" role="status" aria-live="polite" data-azure-state>
           正在讀 Azure 雲端朗讀狀態…
         </p>
-        <p class="hint" data-azure-boundary>
-          每份新答案完成後只自動送出該題答案正文原文一次；按答案下方的 Azure 重播會再送一次。
-          正文可能含姓名、電話與金額，且不先遮罩。不送截圖、來源連結、memory id、整份資料庫、
-          其他文字或角色選擇。你輸入金鑰時，它會
-          短暫經過這頁與 Tauri IPC；保存後欄位立即清空，長期只放 Windows Credential Manager，
-          不寫進 config.toml，也不會把已存值回傳到這一頁。回來的 MP3 只在記憶體播放，
-          不落地快取。取消會先停止播放並丟掉晚到的回應；已進入送出階段的 request 仍可能跑到逾時，
-          此時關閉開關、改區域／聲音、存刪金鑰、改第四張同意或原生取消，可能要等它結束才回覆。
-          任一操作回覆成功後，舊 request 不會才開始送。
-        </p>
-        <p class="hint">
-          區域、聲音、開關、金鑰與第四張同意書各自儲存，不跟頁尾的「儲存」混在一起。
-          沒有 request 正在送時會立即生效；若撞上既有 request，可能等它結束或最長 45 秒逾時。
-          操作成功後，四個條件缺任何一個，AI-Sister 都不會再送出新的 Azure request。
-        </p>
+        <p class="hint">這一區的設定各自立即儲存。</p>
       </section>
 
       <!--
@@ -451,6 +388,22 @@
           它消失的時候 PNG 一定得跟著走。
         </p>
       </section>
+
+      <details class="product-details">
+        <summary>產品與資料條款</summary>
+        <p>
+          四姊妹與 13 位閨密是受同名 AI 產品啟發的虛構角色；AI-Sister 是獨立產品，
+          未與這些供應商合作、隸屬或獲其背書。
+        </p>
+        <p data-azure-boundary>
+          Azure 每份新答案只送出該題答案正文原文一次；手動重播會再送一次。正文可能含姓名、
+          電話與金額，且不先遮罩。不送截圖、來源連結、memory id、整份資料庫、其他文字或角色選擇。
+          金鑰長期只存於 Windows Credential Manager，不寫入 config.toml、log、資料庫或 export，
+          也不會回傳顯示。回傳的 MP3 只在記憶體播放。停止朗讀會丟掉晚到的音訊；已開始的請求
+          最長可執行 45 秒，設定操作會在它結束後生效。Azure Speech 的供應、配額與計費依
+          Microsoft 與你的 subscription 為準。
+        </p>
+      </details>
     </main>
 
     <footer class="bar">

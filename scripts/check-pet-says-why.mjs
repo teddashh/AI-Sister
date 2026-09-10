@@ -1665,8 +1665,9 @@ console.log("54. Azure ready 時最新答案完成自動送一次；只有 trust
   );
   check("Azure 失敗沒有自動改用本機聲音", p.audioPlays() === 0 && p.localSpeaks() === 0);
   check(
-    "失敗回條明講沒有 fallback",
-    p.node("[data-persona-line]").textContent.includes("沒有自動改用本機或另一個雲端"),
+    "失敗回條直接給設定與重播出口",
+    p.node("[data-persona-line]").textContent ===
+      "Azure 朗讀失敗。請檢查語音設定後重播。",
     p.node("[data-persona-line]").textContent,
   );
 }

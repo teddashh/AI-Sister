@@ -290,17 +290,17 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   Neutral，也沒有 code-native 字母 fallback。設定頁把這 17 張 WebP 畫成 native radio
   圖像卡；切換只更新未存的本機預覽，`settings_write` 成功後才 emit 給主視窗。
   兩組角色圖的來源、大小、SHA-256
-  與 Apache-2.0 授權排除分開固定在 bundled manifest/NOTICE。舊 optional pack
-  只補四姊妹八句預錄固定台詞；
-  使用者看見 `cdn.ted-h.com`、精確大小 73,261,088 bytes 與資料邊界後明確按下，
-  desktop 才可對內嵌 allowlist 做一次固定 GET，完整驗證成功才原子啟用錄音。
-  WebView 本身仍只有 IPC，CSP 不開 CDN。
+  與 Apache-2.0 授權排除分開固定在 bundled manifest/NOTICE。17 位角色的日常聲音庫
+  也隨 desktop 離線提供；每位基本包 8 句、擴充包 24 句，共 544 段 Ogg Opus。
+  WebView 只從同源 bundled path 播放，CSP 的網路出口仍只有 IPC。
 - 狀態表達（不彈窗）：`idle`（呼吸）／`paused`（閉眼 = capture 停）／
   `thinking`（微動）／`has-something`（微光 + 一個小點，像未讀）。
-  點角色 → 一句本機 deterministic tap-line；不點不出聲。聲音另行 opt-in：有已驗證
-  固定錄音就播放，否則只用 WebView 明確標成 `localService` 的中文系統 voice；沒有就
-  靜音，不准自動降級成 remote voice。答案的本機朗讀只能由使用者按「用本機聲音朗讀」
-  後讀出。alpha.110 另有預設關閉的 Azure 繁中新答案自動朗讀，須獨立設定、key 與
+  點角色 → 一句本機 deterministic tap-line；輸入收錄的日常短句 → 目前角色對應的固定
+  回覆。兩條都必須來自 trusted 操作、只播放 bundled Ogg，不叫 CLI、不連網。日常短句
+  只做 NFKC、trim 與句尾標點正規化後的 exact match；未命中就完整走一般問題路徑。
+  聲音另行 opt-in。動態答案的本機朗讀只能由使用者按「用本機聲音朗讀」後交給 WebView
+  明確標成 `localService` 的中文系統 voice。alpha.110 另有預設關閉的 Azure 繁中新答案
+  自動朗讀，須獨立設定、key 與
   現行第四張 consent；它不是本機 voice 的 fallback，兩條也不互相自動切換。答案
   下方的 trusted 按鈕可停止或手動重播，重播會再送一次。
   persona 不得影響答案、證據、同意書、Gatekeeper 或 hands。
@@ -533,17 +533,19 @@ Azure TTS 的當前答案正文與一般網路 metadata 交給 Microsoft 後，�
 
 ### 11.8 資料主權（Rewind 的教訓：closed product 的退場 = 記憶滅絕）
 
-**開放資料格式**：SQLite schema 公開文件化、`sister export` 全量匯出。S1 記憶功能
-與已下載素材不依賴我們的伺服器；Persona 首次取得固定 pack 需要使用者明確發起 CDN
-下載。就算本專案或 CDN 消失，既有記憶仍可讀、匯出，已驗本機素材也仍可用。
+**開放資料格式**：SQLite schema 公開文件化、`sister export` 全量匯出。S1 記憶功能、
+17 套角色圖與 544 段日常語音不依賴我們的伺服器；它們都隨 desktop 安裝。舊 Persona
+素材 pack 的取得仍須使用者明確發起 CDN 下載。就算本專案或 CDN 消失，既有記憶仍可讀、
+匯出，bundled 與已驗本機素材也仍可用。
 素材 cache 固定在 `Config::default_data_dir()/persona-assets-v1`，不隨 `--data-dir`
 搬動，也不是記憶 export 的一部分；`sister forget`／`prune`／memory export 都不碰它，
 只有 Persona 撤回流程精準刪除該 release。
 
 ### 11.9 遙測
 
-**零遙測。** Release 1.0 不內建 Cloudflare D1 或其他 usage counter。Persona 的固定
-asset-pack GET 是使用者當下發起的內容下載，不是遙測；它仍須在按鈕前揭露 DNS／CDN
+**零遙測。** Release 1.0 不內建 Cloudflare D1 或其他 usage counter。544 段 bundled
+日常語音只走同源本機檔案，不建立 request。舊 Persona 的固定 asset-pack GET 是使用者
+當下發起的內容下載，不是遙測；它仍須在按鈕前揭露 DNS／CDN
 能看到的一般網路 metadata：CDN 會看到來源 IP、時間、TLS、固定 host／path／headers。
 請求不得夾帶角色選擇、使用狀態、OCR、畫面、問題、答案、記憶 ID 或資料庫內容。
 首版四位角色共用同一個 omnibus pack 與 exact hash path，切換 persona 不改 method、
@@ -818,7 +820,7 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
 | Persona transport | root workspace 的 **`sister-assets`**；預設 feature 集合不含 `download`，desktop 才明確啟用 | API 不接受 renderer 傳入 URL／header／body／persona 或 memory；Persona 的 fixed GET 與 cache contract 見 §11.9 |
 | Azure TTS transport | root workspace 的 **`sister-tts`**；預設 feature 集合不含 `azure`，desktop 才明確啟用 | 預設關閉；第四張 consent、Credential Manager key 與 typed config 齊全時只自動讀最新新答案，另有 trusted replay；三個 fixed region POST、payload、cache 與 cancel 邊界見 §11.10 |
 | Schema | Rust serde DTO + 前端封閉集合檢查 | 沒有 Zod／codegen build step |
-| Persona assets | 17 人本機 catalog + bundled workplace 分層 rig（active-only decode）+ WebP fail-safe（ChatGPT 預設）；內容定址的四姊妹 fixed-voice pack，明確點擊、compact authority 驗證後原子啟用 | 402 張 selected PNG = 35,140,885 bytes，逐檔 hash/geometry/rights pin；recorder/core 保持零網路；WebView CSP 不開 CDN；cache 只存舊 fixed voice，在 default data dir 的 `persona-assets-v1`，不進 memory export／forget／prune |
+| Persona assets | 17 人本機 catalog + bundled workplace 分層 rig（active-only decode）+ WebP fail-safe（ChatGPT 預設）+ 每人基本 8／擴充 24 的 bundled 日常語音 | 402 張 selected PNG = 35,140,885 bytes；544 段 Ogg = 8,918,728 bytes，逐檔 pin text/path/bytes/hash/duration/rights；WebView 只從同源 bundled path 播放；recorder/core 保持零網路 |
 | hands 元件（Phase 6+） | Agent S3（Apache-2.0）/ UFO²（MIT）/ OmniParser v3 weights（MIT，避開舊 AGPL detector） | 「手」已商品化：用組的，不自己寫 grounding |
 | 參考不引用 | Screenpipe（2026-06 起自訂商業授權，僅參考架構；MIT fork point 在舊版）；Everywhere（BUSL，僅 MCP/API interop） | license 判定見 research/landscape.md |
 

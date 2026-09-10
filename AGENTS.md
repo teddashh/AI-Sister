@@ -10,6 +10,30 @@ GET，以及 alpha.110 預設關閉、另行同意後只替最新新答案或手
 先讀 `docs/PHASES.md`（路線圖，退場條件就是驗收條件）、`docs/SPEC.md`、`docs/PRODUCT.md`。
 **現在該做什麼看 .handoff/PLAN.md**（刻意不進 git，只在工作目錄裡）。
 
+## 零、全域交付與產品文案規則（所有功能、所有 surface）
+
+這不是某一頁或某一項功能的例外規則。它套用到整個 repo：主視窗、設定、安裝／升級、
+錯誤與空狀態、CLI、網站、文件、release note，以及之後新增的每一條能力。
+
+- **一條能力要嘛端到端做好再露出，要嘛整條留在產品外。** 不把半成品、占位選項、
+  暫時設定、temporary guard、未接完的按鈕或「之後會補」文字交給使用者。完整是指正常路、
+  失敗路、停止／取消、重開後狀態與對應測試一起成立；不是畫面先出現再用說明補洞。
+- **產品介面不講開發過程。** `defect`、`harness`、workaround、尚在更新、可能缺設定、
+  尚未驗證、內部 guard、實作限制與 agent 的自我辯護都不是使用者下一步，不能塞進主流程。
+  開發中的精確證據留在測試、commit 與必要的 handoff；只記會影響接手或驗收的事，短寫，
+  不替未完成的 surface 寫一篇但書。
+- **不把責任推回使用者。** 不用「請自行確認／自行承擔／可能是你的設定／你可以研究」替產品
+  沒做完的部分收尾。能由程式判斷、修復、保留或拒絕的，就由程式做完；需要使用者決定時，
+  只呈現真正會改變結果的選擇與直接後果。
+- **主流程 concise，細節一處完整。** 每個 surface 優先只說「目前狀態、可做動作、動作結果」；
+  短句、明確按鈕、沒有旁枝。法律條款、資料邊界、第三方條件與完整技術說明集中在安裝畫面
+  最下方的單一連結或獨立最後一頁，不能沿途重複轟炸。隱私同意仍須在真正授權動作前完整、
+  可讀且 fail-closed，但不要散落成每一頁的免責聲明。
+- **錯誤訊息是修復入口，不是辯護稿。** 說清楚哪個動作沒完成、目前資料有沒有改變、唯一可用的
+  下一步；不猜原因、不列一串使用者無法採取的內部可能性。診斷細節進可展開的詳細頁或 log。
+- **完成後才寫對外說明。** 先把垂直切片推到底、跑完 gate、在正式 artifact 上驗收，再一次寫準
+  文件與 release note。不得用大量 disclaimer 代替完成度，也不得為了寫說明停在半套狀態。
+
 ---
 
 ## 一、方針（負責人 Ted，2026-08-22 定案）
@@ -49,6 +73,13 @@ GET，以及 alpha.110 預設關閉、另行同意後只替最新新答案或手
   `apps/desktop/src-tauri/icons/{manifest.json,NOTICE.md}` 固定 exact 464,143 bytes、
   recipe 與 owner grant。預設 ChatGPT，沒有 Neutral，也沒有
   S/T/C/G/X glyph fallback。舊 `neutral` 設定只遷移成 ChatGPT 並關聲。
+
+- alpha.119 起，17 位角色每位都有 bundled 基本語音 8 句＋擴充語音 24 句，恰好
+  544 段 Ogg Opus、8,918,728 bytes。runtime 必須完整驗過 manifest 的 17×32 roster、
+  line/pack/use/text/triggers/path/bytes/hash/duration 才啟用整庫；固定語音只由 trusted
+  角色操作或 exact 日常短句啟動，不叫 CLI、不連網、不借 `localService`。一般問題照舊
+  走記憶／CLI；動態答案只有另一顆本機朗讀按鈕能用 `localService`。WAV、reference、
+  QC report 與 voice-lab 工作檔永遠不進 repo。
 
 - `crates/sister-assets` 在 root workspace，預設 feature 集合**沒有** `download`；只有
   desktop 明確啟用。不要把 HTTP client 直接加進 `sister-desktop`，更不能加進

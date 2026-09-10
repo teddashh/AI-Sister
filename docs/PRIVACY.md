@@ -42,16 +42,20 @@ Persona 與 Azure TTS 的窄能力都不能拿來替 OCR、brain 或 hands 開�
 
 ---
 
-## Persona 素材的固定 GET
+## Persona 本機素材與固定 GET
 
 四姊妹與 13 位閨密的 17 套 workplace 分層 rig 與 WebP 退路都隨程式提供，
 不下載也能完整使用；沒有 Neutral 或字母 fallback。Reel 只從 5.2 GB 本機
 候選選出 402 張 PNG（35,140,885 bytes），不夾帶其他服裝、reaction、raw
 receipt、私有 path 或 debug 圖；畫面也只解碼目前那一人。S1 的記錄、搜尋、
-證據、刪除與匯出一項都不少。開程式、開設定、
-hover、切換角色、重開、點角色播放已在本機的聲音，都不授權下載，也不會背景預抓
-或自動更新。系統 TTS 只接受 WebView 明確標成 `localService` 的中文 voice；找不到
-就靜音，不會改用 remote voice。
+證據、刪除與匯出一項都不少。
+
+17 人的日常對話也隨 desktop 安裝：每人基本包 8 句、擴充包 24 句，共 544 段
+Ogg Opus、8,918,728 bytes。開程式、開設定、hover、切換角色、重開、點角色與
+播放這些同源聲音，都不授權下載，也不會背景預抓或自動更新。角色點擊與 exact
+日常短句只會讀本機 bundled Ogg，不會呼叫系統 TTS、CLI、Azure 或其他網路服務。
+一般動態答案的手動本機朗讀繼續只接受 WebView 明確標成 `localService` 的中文 voice；
+找不到就靜音，不會改用 remote voice。
 
 只有你在同一個揭露畫面看見下列三件事，再明確按「下載」後，desktop 才可嘗試：
 
@@ -98,11 +102,9 @@ authorization digest，以及最後一次 blocking remove 已結束處理的 set
 行程的舊下載在撤回後重新被啟用。
 
 這個當下下載按鈕不是持久同意書，也不能借用下面第四張 `azure-tts`；每一個新的 GET
-都要重新揭露、重新按。角色台詞只在你當下點角色時出聲：四姊妹有已驗證 fixed voice 時
-優先播放，否則只用 WebView 明確標成 `localService` 的中文系統 voice。答案也必須由你
-另按「用本機聲音朗讀」，那顆按鈕仍只走 localService；沒有本機中文 voice 就靜音，
-不自動改用 Azure。pack 裡四段會說「今天滿有活力」的聲音不在 click allowlist，因為單純
-點角色沒有量到那件事。
+都要重新揭露、重新按。舊包的下載授權不會變成 bundled 日常對話、Azure 或任何其他請求的授權。
+動態答案必須由你另按「用本機聲音朗讀」，那顆按鈕仍只走 localService；沒有本機中文 voice
+就靜音，不自動改用 Azure。
 
 ---
 
