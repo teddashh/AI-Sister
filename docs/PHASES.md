@@ -704,10 +704,11 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     Windows 人工通過。
   - 🔶 Windows code-signing 的 production pipeline 已接完：tag runner 從 encrypted
     secrets 匯入 public-CA PFX，同一張憑證以 SHA-256＋固定 RFC 3161 timestamp 簽
-    `sister.exe`、desktop、NSIS uninstaller 與 Setup；Windows 原生 CI 驗四層 trust，release
+    `sister.exe`、desktop、NSIS uninstaller 與 Setup；正式模式的 Windows 原生 CI 驗四層 trust，release
     job 再以 exact 三檔 size／hash／publisher／thumbprint／timestamp receipt 擋在 draft 之前。
-    branch 與未配置憑證的 alpha 另在公開檔 staging 後，用 throwaway trusted PFX 重建、安裝、
-    驗完四層再清除，不能拿 self-signed fixture 冒充 release。正式 CA 憑證與第一份實際簽署的
+    branch 與未配置憑證的 alpha 另在公開檔 staging 後，用 throwaway self-signed PFX
+    重建、安裝，逐層驗 exact untrusted-root 狀態、固定 signer，並以 in-process custom root
+    建完整鏈再清除；不改 Windows root store，也不能拿 self-signed fixture 冒充 release。正式 CA 憑證與第一份實際簽署的
     公開 artifact 尚未加入；stable tag 無憑證會直接失敗。操作合約見
     [`WINDOWS-CODE-SIGNING.md`](WINDOWS-CODE-SIGNING.md)。
   - ✅ alpha.120 完成官方一頁網站：桌面／手機 responsive 版面直接呈現 S1 秒答＋出處、

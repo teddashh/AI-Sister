@@ -93,12 +93,13 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 
 Windows tag runner 現在可從 GitHub encrypted secrets 匯入一張 public-CA PFX，用同一身份
 簽 `sister.exe`、`sister-desktop.exe`、NSIS `uninstall.exe` 與 `AI-Sister-Setup.exe`。
-四層都要通過 Windows trust policy；production 另要求 SHA-256 與固定 RFC 3161 timestamp。
+正式模式的四層都要通過 Windows trust policy，並且要用 SHA-256 與固定 RFC 3161 timestamp。
 Release job 在建立 draft 前，會再拿 Windows receipt 重算三個公開檔的名稱、bytes、SHA-256、
 publisher、thumbprint 與 timestamp。stable tag 缺任一憑證 secret 會直接拒絕。
 
 alpha.120 沒有配置正式發行憑證，三個公開 exe 維持 unsigned。CI 在公開檔 staging 完成後，
-另用 throwaway PFX 重建、安裝並驗證 main、sidecar、uninstaller 與 Setup 的完整簽章接線；
+另用 throwaway self-signed PFX 重建、安裝，再以 fixed signer、exact untrusted-root
+狀態與 in-process custom root 驗證 main、sidecar、uninstaller 與 Setup 的完整簽章接線；
 fixture 隨 runner 清除，不進 Release。正式憑證的設定與驗證命令集中在
 [`docs/WINDOWS-CODE-SIGNING.md`](https://github.com/teddashh/AI-Sister/blob/main/docs/WINDOWS-CODE-SIGNING.md)。
 

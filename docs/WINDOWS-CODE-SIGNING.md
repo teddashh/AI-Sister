@@ -55,8 +55,11 @@ Branches never import the release identity.
   public release asset.
 
 Unsigned branch and prerelease runs still exercise the complete Tauri signing path with an isolated,
-throwaway trusted certificate after the public files have been staged. CI rebuilds, installs and
-verifies the signed main executable, sidecar, uninstaller and Setup, then removes the fixture.
+throwaway self-signed certificate after the public files have been staged. CI round-trips the PFX,
+rebuilds and installs the package, rejects every Authenticode result except the exact untrusted-root
+state, then verifies the fixed signer, Code Signing EKU and complete chain against an in-process custom
+root. This covers the main executable, sidecar, uninstaller and Setup without changing the runner's
+Windows root store. The fixture is removed afterward.
 
 ## Local verification
 

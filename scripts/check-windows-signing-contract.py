@@ -66,7 +66,7 @@ def main() -> None:
             "- name: Upload ai-sister.exe",
             "- name: Upload offline Windows installer",
             "- name: Upload Windows signing receipt",
-            "- name: Windows signing — create an isolated trusted CI fixture",
+            "- name: Windows signing — create an isolated CI fixture",
             "- name: Windows signing — exercise Tauri main, sidecar, uninstaller and Setup signing",
             "- name: Windows signing — install and verify every fixture layer",
             "- name: Windows signing — remove imported certificates",
@@ -103,11 +103,12 @@ def main() -> None:
         "$timestampUrl = 'http://timestamp.digicert.com'",
         "Where-Object { $_.ObjectId -ceq $codeSigningEku }",
         "Import-PfxCertificate",
-        "[Security.Cryptography.X509Certificates.X509Store]::new(",
-        "[Security.Cryptography.X509Certificates.StoreName]::Root",
-        "[Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser",
-        "$rootStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)",
-        "$rootStore.Add($rootCertificate)",
+        "[Security.Cryptography.X509Certificates.X509ChainTrustMode]::CustomRootTrust",
+        "$chain.ChainPolicy.CustomTrustStore.Add($Certificate)",
+        "@('UnknownError', 'NotTrusted') -cnotcontains $fixtureStatus",
+        "$signToolOutput = @(& $signTool verify /pa /all /v $resolved 2>&1)",
+        "$signToolExit -eq 0 -or $signToolMessage -notmatch $untrustedRootPattern",
+        "'verified-self-signed-fixture'",
         "Assert-CertificateUsable $certificate",
         "/fd SHA256 /sha1 $thumbprint /d AI-Sister /tr $timestampUrl /td SHA256",
         "certificateThumbprint = $thumbprint",
@@ -120,10 +121,17 @@ def main() -> None:
     for fragment in required_signing_fragments:
         if fragment not in signing:
             fail(f"Windows signing implementation 缺少 `{fragment}`")
+    for forbidden in (
+        "Cert:\\CurrentUser\\Root",
+        "[Security.Cryptography.X509Certificates.StoreName]::Root",
+        "$rootStore.Add(",
+    ):
+        if forbidden in signing:
+            fail(f"CI fixture 不得改寫 Windows root trust store：`{forbidden}`")
     if ".ObjectId.Value" in signing:
         fail("Certificate Provider 的 EnhancedKeyUsageList.ObjectId 已是字串，不得再取 .Value")
 
-    print("✓ Windows signing：PFX → 三層 build → 四層 trust → receipt → release")
+    print("✓ Windows signing：PFX → 三層 build → 四層簽章驗證 → receipt → release")
 
 
 if __name__ == "__main__":

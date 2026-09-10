@@ -93,9 +93,13 @@ function Get-Certificate([string] $Thumbprint, [string] $Store = 'My') {
   return Get-Item -LiteralPath $certificatePath
 }
 
-function Assert-CertificateUsable($Certificate, [switch] $AllowSelfSigned) {
+function Assert-CertificateUsable(
+  $Certificate,
+  [switch] $AllowSelfSigned,
+  [switch] $PublicOnly
+) {
   $now = Get-Date
-  if (-not $Certificate.HasPrivateKey) {
+  if (-not $PublicOnly -and -not $Certificate.HasPrivateKey) {
     throw '簽章 certificate 沒有 private key'
   }
   if (-not (Has-CodeSigningEku $Certificate)) {
@@ -106,6 +110,40 @@ function Assert-CertificateUsable($Certificate, [switch] $AllowSelfSigned) {
   }
   if (-not $AllowSelfSigned -and $Certificate.Subject -ceq $Certificate.Issuer) {
     throw '正式 Windows release 不接受 self-signed certificate'
+  }
+}
+
+function Assert-FixtureCertificateChain($Certificate, [string] $ExpectedThumbprint) {
+  Assert-CertificateUsable $Certificate -AllowSelfSigned -PublicOnly
+  if ($Certificate.Subject -cne $Certificate.Issuer) {
+    throw 'fixture signer 不是隔離的 self-signed certificate'
+  }
+
+  $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
+  try {
+    $chain.ChainPolicy.TrustMode = `
+      [Security.Cryptography.X509Certificates.X509ChainTrustMode]::CustomRootTrust
+    $chain.ChainPolicy.RevocationMode = `
+      [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+    $chain.ChainPolicy.VerificationFlags = `
+      [Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+    $chain.ChainPolicy.DisableCertificateDownloads = $true
+    $null = $chain.ChainPolicy.CustomTrustStore.Add($Certificate)
+
+    if (-not $chain.Build($Certificate)) {
+      $failures = @($chain.ChainStatus | ForEach-Object { $_.Status.ToString() }) -join ','
+      throw "fixture signer 的 custom trust chain 失敗：$failures"
+    }
+    if ($chain.ChainStatus.Count -ne 0 -or $chain.ChainElements.Count -ne 1) {
+      throw 'fixture signer 的 custom trust chain 不是 exact self-signed root'
+    }
+    $chainThumbprint = Normalize-Thumbprint $chain.ChainElements[0].Certificate.Thumbprint
+    if ($chainThumbprint -cne $ExpectedThumbprint) {
+      throw "fixture custom trust root 不符：expected=$ExpectedThumbprint actual=$chainThumbprint"
+    }
+  }
+  finally {
+    $chain.Dispose()
   }
 }
 
@@ -133,9 +171,6 @@ function Get-FileProjection([string] $InputPath, $Plan) {
   }
   elseif ($expectedMode -in @('production', 'fixture')) {
     $expectedThumbprint = Normalize-Thumbprint ([string] $Plan.certificate_thumbprint)
-    if ($signature.Status.ToString() -cne 'Valid') {
-      throw "Authenticode 驗證失敗：$resolved status=$($signature.Status) message=$($signature.StatusMessage)"
-    }
     if ($null -eq $signature.SignerCertificate) {
       throw "Authenticode 沒有 signer certificate：$resolved"
     }
@@ -143,14 +178,44 @@ function Get-FileProjection([string] $InputPath, $Plan) {
     if ($actualThumbprint -cne $expectedThumbprint) {
       throw "Authenticode signer 不符：$resolved expected=$expectedThumbprint actual=$actualThumbprint"
     }
-    if ($expectedMode -ceq 'production' -and $null -eq $signature.TimeStamperCertificate) {
-      throw "正式 Authenticode 沒有 RFC 3161 timestamp：$resolved"
-    }
+    if ($expectedMode -ceq 'production') {
+      if ($signature.Status.ToString() -cne 'Valid') {
+        throw "Authenticode 驗證失敗：$resolved status=$($signature.Status) message=$($signature.StatusMessage)"
+      }
+      if ($null -eq $signature.TimeStamperCertificate) {
+        throw "正式 Authenticode 沒有 RFC 3161 timestamp：$resolved"
+      }
 
-    $signTool = Find-SignTool
-    & $signTool verify /pa /all /v $resolved
-    if ($LASTEXITCODE -ne 0) {
-      throw "signtool verify 失敗：$resolved exit=$LASTEXITCODE"
+      $signTool = Find-SignTool
+      & $signTool verify /pa /all /v $resolved
+      if ($LASTEXITCODE -ne 0) {
+        throw "signtool verify 失敗：$resolved exit=$LASTEXITCODE"
+      }
+    }
+    else {
+      # Hosted runner 不允許無 UI 寫入 CurrentUser/Root。隔離 fixture 因此必須
+      # 呈現為「簽章完整、只差系統不信任該臨時根」，再以 custom root 驗完整鏈。
+      $fixtureStatus = $signature.Status.ToString()
+      if (@('UnknownError', 'NotTrusted') -cnotcontains $fixtureStatus) {
+        throw "fixture Authenticode 不是 exact untrusted-root 狀態：$resolved status=$fixtureStatus message=$($signature.StatusMessage)"
+      }
+      $untrustedRootPattern = `
+        '(?i)(root certificate.+not trusted|certificate chain.+authority.+not trusted)'
+      if ($signature.StatusMessage -notmatch $untrustedRootPattern) {
+        throw "fixture Authenticode 失敗不是 untrusted root：$resolved message=$($signature.StatusMessage)"
+      }
+      if ($null -ne $signature.TimeStamperCertificate) {
+        throw "fixture Authenticode 不應出現 timestamp：$resolved"
+      }
+
+      $signTool = Find-SignTool
+      $signToolOutput = @(& $signTool verify /pa /all /v $resolved 2>&1)
+      $signToolExit = $LASTEXITCODE
+      $signToolMessage = $signToolOutput -join [Environment]::NewLine
+      if ($signToolExit -eq 0 -or $signToolMessage -notmatch $untrustedRootPattern) {
+        throw "fixture signtool 沒有只因 untrusted root 失敗：$resolved exit=$signToolExit output=$signToolMessage"
+      }
+      Assert-FixtureCertificateChain $signature.SignerCertificate $expectedThumbprint
     }
 
     $timestampPublisher = $null
@@ -158,7 +223,11 @@ function Get-FileProjection([string] $InputPath, $Plan) {
       $timestampPublisher = $signature.TimeStamperCertificate.Subject
     }
     $signatureProjection = [ordered]@{
-      state = if ($expectedMode -ceq 'production') { 'trusted-rfc3161' } else { 'trusted-fixture' }
+      state = if ($expectedMode -ceq 'production') {
+        'trusted-rfc3161'
+      } else {
+        'verified-self-signed-fixture'
+      }
       publisher = $signature.SignerCertificate.Subject
       certificate_thumbprint = $actualThumbprint.ToLowerInvariant()
       timestamp_publisher = $timestampPublisher
@@ -312,14 +381,12 @@ function Prepare-SelfTest([string] $Destination) {
     -NotAfter (Get-Date).AddDays(2)
   Assert-CertificateUsable $certificate -AllowSelfSigned
 
-  $publicCertificate = Join-Path $env:RUNNER_TEMP 'ai-sister-signing-fixture.cer'
   $fixturePfx = Join-Path $env:RUNNER_TEMP 'ai-sister-signing-fixture.pfx'
   $fixturePasswordText = [Guid]::NewGuid().ToString('N')
   $fixturePassword = ConvertTo-SecureString -String $fixturePasswordText -AsPlainText -Force
   $thumbprint = Normalize-Thumbprint $certificate.Thumbprint
   try {
-    Write-Host 'signing fixture: export public certificate and PFX'
-    $null = Export-Certificate -Cert $certificate -FilePath $publicCertificate -Force
+    Write-Host 'signing fixture: export PFX'
     $null = Export-PfxCertificate `
       -Cert $certificate `
       -FilePath $fixturePfx `
@@ -346,33 +413,9 @@ function Prepare-SelfTest([string] $Destination) {
     if ((Normalize-Thumbprint $certificate.Thumbprint) -cne $thumbprint) {
       throw 'fixture PFX round-trip 改變了 certificate thumbprint'
     }
-    # 直接寫 CurrentUser store；X509Store 不會開 Certificate Import Wizard，也不需要提升
-    # 到 LocalMachine。寫完再從 Certificate Provider 讀回同一 thumbprint。
-    Write-Host 'signing fixture: trust public certificate for current user'
-    $rootCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
-      $publicCertificate
-    )
-    $rootStore = [Security.Cryptography.X509Certificates.X509Store]::new(
-      [Security.Cryptography.X509Certificates.StoreName]::Root,
-      [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-    )
-    try {
-      $rootStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-      $rootStore.Add($rootCertificate)
-    }
-    finally {
-      $rootStore.Close()
-      $rootCertificate.Dispose()
-    }
-    if (-not (Test-Path -LiteralPath "Cert:\CurrentUser\Root\$thumbprint" -PathType Leaf)) {
-      throw 'fixture certificate 沒有進入 CurrentUser/Root'
-    }
     Write-Host 'signing fixture: certificate round-trip complete'
   }
   finally {
-    if (Test-Path -LiteralPath $publicCertificate) {
-      Remove-Item -LiteralPath $publicCertificate -Force
-    }
     if (Test-Path -LiteralPath $fixturePfx) {
       Remove-Item -LiteralPath $fixturePfx -Force
     }
@@ -400,7 +443,7 @@ function Prepare-SelfTest([string] $Destination) {
     timestamp_url = $null
     certificate_subject = $certificate.Subject
     certificate_thumbprint = $thumbprint.ToLowerInvariant()
-    remove_from = @('My', 'Root')
+    remove_from = @('My')
   }
   Write-Utf8Json $Destination $plan
   Add-GitHubEnvironment 'AI_SISTER_WINDOWS_SIGNING_SELF_TEST_PLAN' $Destination

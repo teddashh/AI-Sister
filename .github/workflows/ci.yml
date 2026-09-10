@@ -2539,7 +2539,7 @@ jobs:
 
       # 沒有正式憑證的 branch／alpha 仍要執行簽章接線本身。release 三檔已在上面
       # staging 並上傳；以下另建一次只活在 runner 的 self-signed copy，絕不進 release。
-      - name: Windows signing — create an isolated trusted CI fixture
+      - name: Windows signing — create an isolated CI fixture
         shell: pwsh
         timeout-minutes: 5
         run: |
