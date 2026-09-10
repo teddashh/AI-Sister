@@ -1440,6 +1440,8 @@ function outboundOutcome(value) {
       return "CLI 跑完但沒有回答";
     case "bad_json":
       return "拿回的 JSON 不能用，沒寫卡片";
+    case "cancelled":
+      return "已取消";
     default:
       return value || "（結局不明）";
   }
@@ -1449,6 +1451,7 @@ function outboundRole(value) {
   if (value === "reviewer") return "審閱層";
   if (value === "interpreter") return "解釋層";
   if (value === "watcher") return "盯梢層";
+  if (value === "answer") return "答題層";
   return `不認得的層別（${value || "空值"}）`;
 }
 

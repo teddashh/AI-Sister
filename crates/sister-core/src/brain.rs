@@ -12,6 +12,10 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -202,6 +206,25 @@ pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(120);
 pub const MAX_PROMPT_BYTES: usize = 24 * 1024;
 /// OCR 摘錄最多帶幾段。不是設定項：超過就截，說得出來。
 pub const MAX_OCR_SNIPPETS: usize = 40;
+
+/// 一次 CLI invocation 的取消訊號。desktop 開始新題時會取消上一題；真正的
+/// supervision loop 收到後終止整個 process group／Windows Job tree。
+#[derive(Debug, Clone, Default)]
+pub struct Cancellation(Arc<AtomicBool>);
+
+impl Cancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 /// 為什麼這一趟沒送出去。每一種印出來的字都不一樣。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -581,6 +604,25 @@ pub fn spawn_cli(
     spawn_cli_with_timeout(permit, not_stopped, payload, command, args, SPAWN_TIMEOUT)
 }
 
+pub fn spawn_cli_cancellable(
+    permit: CloudAllowed,
+    not_stopped: NotStopped,
+    payload: &str,
+    command: &str,
+    args: &[String],
+    cancellation: &Cancellation,
+) -> SpawnOutcome {
+    spawn_cli_with_timeout_and_cancellation(
+        permit,
+        not_stopped,
+        payload,
+        command,
+        args,
+        SPAWN_TIMEOUT,
+        cancellation,
+    )
+}
+
 fn spawn_cli_with_timeout(
     permit: CloudAllowed,
     not_stopped: NotStopped,
@@ -589,8 +631,51 @@ fn spawn_cli_with_timeout(
     args: &[String],
     timeout: Duration,
 ) -> SpawnOutcome {
-    spawn_cli_with_timeout_after_spawn(permit, not_stopped, payload, command, args, timeout, |_| {})
+    let cancellation = Cancellation::default();
+    spawn_cli_with_timeout_after_spawn(
+        permit,
+        not_stopped,
+        payload,
+        command,
+        args,
+        SpawnSupervision {
+            timeout,
+            cancellation: &cancellation,
+            after_spawn_before_attach: no_op_after_spawn,
+        },
+    )
 }
+
+fn spawn_cli_with_timeout_and_cancellation(
+    permit: CloudAllowed,
+    not_stopped: NotStopped,
+    payload: &str,
+    command: &str,
+    args: &[String],
+    timeout: Duration,
+    cancellation: &Cancellation,
+) -> SpawnOutcome {
+    spawn_cli_with_timeout_after_spawn(
+        permit,
+        not_stopped,
+        payload,
+        command,
+        args,
+        SpawnSupervision {
+            timeout,
+            cancellation,
+            after_spawn_before_attach: no_op_after_spawn,
+        },
+    )
+}
+
+struct SpawnSupervision<'a, F> {
+    timeout: Duration,
+    cancellation: &'a Cancellation,
+    after_spawn_before_attach: F,
+}
+
+fn no_op_after_spawn(_: &Child) {}
 
 fn spawn_cli_with_timeout_after_spawn<F>(
     permit: CloudAllowed,
@@ -598,14 +683,30 @@ fn spawn_cli_with_timeout_after_spawn<F>(
     payload: &str,
     command: &str,
     args: &[String],
-    timeout: Duration,
-    after_spawn_before_attach: F,
+    supervision: SpawnSupervision<'_, F>,
 ) -> SpawnOutcome
 where
     F: FnOnce(&Child),
 {
+    let SpawnSupervision {
+        timeout,
+        cancellation,
+        after_spawn_before_attach,
+    } = supervision;
     let _cloud_gate = permit;
     let started = Instant::now();
+    if cancellation.is_cancelled() {
+        return SpawnOutcome {
+            payload_chars_written: 0,
+            duration_ms: started.elapsed().as_millis() as u64,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            spawn_error: Some("CLI invocation 在啟動前已取消".into()),
+            exit_code: None,
+            process_start: ProcessStart::NeverStarted,
+        };
+    }
     // 這道 boundary 貼著 spawn；舊 permit 不能跨過後來發佈的 pending。它一路保留到
     // stdin 完整寫完，stop-all 的成功回覆因此一定排在舊 payload 出境之後。
     let Some(stop_boundary) = not_stopped.boundary() else {
@@ -759,6 +860,10 @@ where
         }
         if let Some((_, Some(error))) = &stdin_result {
             wait_error = Some(error.clone());
+            break;
+        }
+        if cancellation.is_cancelled() {
+            wait_error = Some("CLI invocation 已取消".into());
             break;
         }
         match child.try_wait() {
@@ -2190,6 +2295,60 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn cancellation_terminates_the_provider_and_its_descendants() {
+        let dir =
+            std::env::temp_dir().join(format!("sister-cli-cancel-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = dir.join("started");
+        let escaped = dir.join("escaped");
+        let script = format!(
+            "cat >/dev/null; touch '{}'; (sleep 0.4; touch '{}') & sleep 60",
+            started.display(),
+            escaped.display()
+        );
+        let mut consent = Consent::default();
+        consent.grant(Sheet::CloudReading, 1);
+        let cancellation = Cancellation::default();
+        let worker_cancellation = cancellation.clone();
+        let worker = std::thread::spawn(move || {
+            spawn_cli_cancellable(
+                consent.cloud_permit().unwrap(),
+                test_not_stopped(),
+                "正文",
+                "sh",
+                &["-c".into(), script],
+                &worker_cancellation,
+            )
+        });
+
+        for _ in 0..500 {
+            if started.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(started.exists(), "provider did not start");
+        cancellation.cancel();
+        let outcome = worker.join().unwrap();
+        assert!(!outcome.completed_the_ask(), "{outcome:?}");
+        assert!(
+            outcome
+                .spawn_error
+                .as_deref()
+                .is_some_and(|error| error.contains("取消")),
+            "{outcome:?}"
+        );
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            !escaped.exists(),
+            "provider descendant survived cancellation"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn inherited_output_pipe_in_a_descendant_cannot_hold_the_invocation_open() {
         let mut consent = Consent::default();
         consent.grant(Sheet::CloudReading, 1);
@@ -2236,6 +2395,7 @@ mod tests {
         let mut consent = Consent::default();
         consent.grant(Sheet::CloudReading, 1);
         let (command, args) = fake_cli(&dir, "{}", &sentinel);
+        let cancellation = Cancellation::default();
 
         let outcome = spawn_cli_with_timeout_after_spawn(
             consent.cloud_permit().unwrap(),
@@ -2243,10 +2403,13 @@ mod tests {
             "正文",
             &command,
             &args,
-            Duration::from_secs(5),
-            move |_| {
-                std::thread::sleep(Duration::from_millis(100));
-                observed.store(sentinel_during_gap.exists(), Ordering::Release);
+            SpawnSupervision {
+                timeout: Duration::from_secs(5),
+                cancellation: &cancellation,
+                after_spawn_before_attach: move |_: &Child| {
+                    std::thread::sleep(Duration::from_millis(100));
+                    observed.store(sentinel_during_gap.exists(), Ordering::Release);
+                },
             },
         );
 

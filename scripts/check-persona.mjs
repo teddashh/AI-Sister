@@ -355,6 +355,8 @@ async function open(personaView = persona(), options = {}) {
                 chapters: null,
                 followup: null,
                 closure_notice: null,
+                overview: null,
+                synthesis: null,
               }
             );
           default:
@@ -1100,6 +1102,7 @@ console.log("⑥ 17 人固定語音與日常短句都走 bundled Ogg，不借系
   await daily.ask("早安。");
   check("精確日常短句直接顯示角色回覆", daily.node("[data-hits]").textContent.includes("早安。"));
   check("日常短句不叫 CLI 大腦", !daily.calls.includes("ask"), daily.calls);
+  check("精確日常短句先取消仍在跑的動態答題", daily.calls.includes("answer_cli_cancel"), daily.calls);
   check(
     "日常短句播放同一角色同一句 bundled Ogg",
     daily.playedSources()[0] === "./persona-voices/v1/base/kimi/good-morning.ogg",
@@ -1176,6 +1179,8 @@ console.log("⑥ 17 人固定語音與日常短句都走 bundled Ogg，不借系
       chapters: null,
       followup: null,
       closure_notice: null,
+      overview: null,
+      synthesis: null,
   };
   let localMasterStopState = "clear";
   const answerLocal = await open(persona("mimo", { voice_enabled: true }), {
@@ -1204,6 +1209,7 @@ console.log("⑥ 17 人固定語音與日常短句都走 bundled Ogg，不借系
       !spokenAnswer.includes("我本來已經忘了"),
     spokenAnswer,
   );
+
   answerLocal.speaks[0]?.onstart?.();
   check(
     "前提：答案 localService 已開始 speaking",
@@ -1251,6 +1257,35 @@ console.log("⑥ 17 人固定語音與日常短句都走 bundled Ogg，不借系
       ends: localLeaseEnds(),
       stopTrace,
     },
+  );
+
+  const groundedLocal = await open(persona("mimo", { voice_enabled: true }), {
+    systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
+    askResult: {
+      ...answerAskResult,
+      hits: [
+        {
+          ...answerAskResult.hits[0],
+          snippet: "RAW_OCR_MUST_NOT_BE_SPOKEN",
+        },
+      ],
+      synthesis: {
+        sentences: [
+          {
+            text: "只念這一句整理後的答案。",
+            sources: [{ ref: "chunk:31", label: "文字 #31", frame_id: null }],
+          },
+        ],
+      },
+    },
+  });
+  await groundedLocal.ask("整理後再念");
+  await groundedLocal.clickAnswerRead();
+  check(
+    "本機朗讀有 RAG 成句時只念成句正文",
+    groundedLocal.speaks[0]?.text === "只念這一句整理後的答案。" &&
+      !groundedLocal.speaks[0]?.text.includes("RAW_OCR_MUST_NOT_BE_SPOKEN"),
+    groundedLocal.speaks[0]?.text,
   );
 
   const boundaryBlocked = await open(persona("mimo", { voice_enabled: true }), {

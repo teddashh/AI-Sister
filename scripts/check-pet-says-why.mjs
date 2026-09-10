@@ -90,6 +90,7 @@ function answer(over = {}) {
     followup: null,
     closure_notice: null,
     overview: null,
+    synthesis: null,
     ...over,
   };
 }
@@ -118,6 +119,7 @@ function hit(over = {}) {
 
 function fact(over = {}) {
   return {
+    fact_id: 9,
     value: "+886800080123",
     raw: "客服專線 0800-080-123",
     sightings: 2,
@@ -1784,6 +1786,120 @@ console.log("56. Azure payload 的 fact 與 empty 只送各自主句，不送 so
       !emptyText.includes("8008"),
     emptyText,
   );
+}
+
+console.log("56a. RAG 成句逐句帶本機出處，Azure 只收到成句正文");
+{
+  const p = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("captured"),
+    ask: answer({
+      query_id: 7007,
+      answers: [fact({ frame_id: 42, chunk_id: 31 })],
+      hits: [
+        hit({
+          chunk_id: 77,
+          frame_id: 84,
+          snippet: "RAW_OCR_MUST_STAY_LOCAL",
+          app: "SOURCE_APP_MUST_STAY_LOCAL",
+          title: "SOURCE_TITLE_MUST_STAY_LOCAL",
+        }),
+      ],
+      synthesis: {
+        sentences: [
+          {
+            text: "客服電話是 0800-080-123。",
+            sources: [{ ref: "fact:9", label: "畫面 #42", frame_id: 42 }],
+          },
+          {
+            text: "昨天的筆記也提到客服流程。",
+            sources: [{ ref: "chunk:77", label: "畫面 #84", frame_id: 84 }],
+          },
+        ],
+      },
+    }),
+    recording_state: "recording",
+  });
+  await p.type("客服電話和流程");
+  const sentences = p.hits().querySelectorAll(".grounded-text");
+  const sources = p.hits().querySelectorAll(".grounded-source");
+  check(
+    "兩句成句與兩顆本機來源都畫出來",
+    sentences.map((node) => node.textContent).join("|") ===
+      "客服電話是 0800-080-123。|昨天的筆記也提到客服流程。" &&
+      sources.map((node) => node.textContent).join("|") === "畫面 #42|畫面 #84",
+    p.hitTexts(),
+  );
+  const azureText = azureCalls(p)[0]?.arg?.text ?? "";
+  check(
+    "Azure 只收兩句成句正文",
+    azureText === "客服電話是 0800-080-123。\n昨天的筆記也提到客服流程。",
+    azureText,
+  );
+  for (const localOnly of [
+    "RAW_OCR_MUST_STAY_LOCAL",
+    "SOURCE_APP_MUST_STAY_LOCAL",
+    "SOURCE_TITLE_MUST_STAY_LOCAL",
+    "fact:9",
+    "chunk:77",
+    "畫面 #42",
+    "畫面 #84",
+  ]) {
+    check(`RAG Azure payload 不送 ${localOnly}`, !azureText.includes(localOnly), azureText);
+  }
+
+  const frameCallsBefore = p.invokes.filter(({ cmd }) => cmd === "open_frame").length;
+  await p.clickElement(sources[0], { trusted: false });
+  check(
+    "合成的 source click 不開圖也不記點擊",
+    p.invokes.filter(({ cmd }) => cmd === "open_frame").length === frameCallsBefore &&
+      p.invokes.filter(({ cmd }) => cmd === "log_click").length === 0,
+    p.invokes,
+  );
+  await p.clickElement(sources[0]);
+  const opened = p.invokes.filter(({ cmd }) => cmd === "open_frame").at(-1);
+  const logged = p.invokes.filter(({ cmd }) => cmd === "log_click").at(-1);
+  check(
+    "真人按 fact source 開 exact frame 並記 exact query/chunk/rank",
+    JSON.stringify(opened?.arg) === JSON.stringify({ frameId: 42 }) &&
+      JSON.stringify(logged?.arg) ===
+        JSON.stringify({ queryId: 7007, chunkId: 31, rank: 0 }),
+    { opened, logged },
+  );
+}
+
+console.log("56b. RAG IPC 來源對不上本機候選時整份拒絕");
+{
+  for (const synthesis of [
+    {
+      sentences: [
+        {
+          text: "不存在的來源。",
+          sources: [{ ref: "chunk:999", label: "文字 #999", frame_id: null }],
+        },
+      ],
+    },
+    {
+      sentences: [
+        {
+          text: "畫面編號被換掉。",
+          sources: [{ ref: "fact:9", label: "畫面 #999", frame_id: 999 }],
+        },
+      ],
+    },
+  ]) {
+    const p = await open({
+      ask: answer({ answers: [fact()], synthesis }),
+      recording_state: "recording",
+    });
+    await p.type("壞掉的合約");
+    check(
+      "不把來源不一致的內容畫成正常答案",
+      p.hits().querySelectorAll(".grounded-text").length === 0 &&
+        (p.line().includes("成句答案找不到") || p.line().includes("畫面來源不一致")),
+      { line: p.line(), hits: p.hitTexts() },
+    );
+  }
 }
 
 console.log("57. 新題會等舊自動朗讀 cancel settle；晚 response 不播，然後只送最新題");

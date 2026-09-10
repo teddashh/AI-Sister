@@ -11,7 +11,7 @@
 
 守三件事：
 
-1. `spawn_cli` 的第一個參數是 `CloudAllowed`。這個型別只有
+1. `spawn_cli`／`spawn_cli_cancellable` 的第一個參數都是 `CloudAllowed`。這個型別只有
    `Consent::cloud_permit` 鑄得出來（`CloudAllowed(())` 只准出現在
    `consent.rs`）。
 2. `brain_outbound` 那張表沒有原文欄位——記結構和計數就好，
@@ -90,12 +90,13 @@ def check_cloud_allowed(consent: str, brain: str) -> None:
             if re.search(r"CloudAllowed\s*\(\s*\(\s*\)\s*\)", code):
                 fail(f"{path.relative_to(ROOT)}:{n} 自己鑄了 CloudAllowed")
 
-    spawn = body_of(brain, "spawn_cli", BRAIN)
-    sig = spawn.split("{", 1)[0]
-    if "CloudAllowed" not in sig:
-        fail("spawn_cli 的簽章沒有 CloudAllowed——沒簽同意書 2 也能編過")
-    if not re.search(r"\b_?permit\s*:\s*CloudAllowed\b", sig):
-        fail("spawn_cli 第一個憑證參數不叫 permit: CloudAllowed，閘門對不上")
+    for name in ("spawn_cli", "spawn_cli_cancellable"):
+        spawn = body_of(brain, name, BRAIN)
+        sig = spawn.split("{", 1)[0]
+        if "CloudAllowed" not in sig:
+            fail(f"{name} 的簽章沒有 CloudAllowed——沒簽同意書 2 也能編過")
+        if not re.search(r"\b_?permit\s*:\s*CloudAllowed\b", sig):
+            fail(f"{name} 第一個憑證參數不叫 permit: CloudAllowed，閘門對不上")
 
 
 def check_outbound_schema(db: str) -> None:
@@ -174,6 +175,17 @@ def self_check() -> None:
         cloud,
         "spawn_cli 改收 bool",
     )
+    cancellable_at = brain.index("pub fn spawn_cli_cancellable")
+    broken_cancellable = (
+        brain[:cancellable_at]
+        + brain[cancellable_at:].replace("permit: CloudAllowed", "permit: bool", 1)
+    )
+    try:
+        cloud(broken_cancellable)
+    except GateFail:
+        pass
+    else:
+        fail("自我檢查沒抓到「spawn_cli_cancellable 改收 bool」")
 
     def schema(src: str) -> None:
         check_outbound_schema(src)
@@ -197,7 +209,7 @@ def main() -> None:
     check_no_http_in_brain(brain)
     self_check()
     print(
-        "出境路徑：spawn_cli 要 CloudAllowed；"
+        "出境路徑：兩支 spawn_cli 都要 CloudAllowed；"
         "憑證只在 consent.rs 鑄；brain_outbound 不含原文；"
         "自我檢查改壞三行都會紅"
     )

@@ -742,6 +742,41 @@ body.has-url-policy .stage {
   outline: none;
 }
 
+.grounded-answer {
+  background: rgb(255 255 255 / 82%);
+  border-left-color: var(--letter-accent);
+}
+
+.grounded-text {
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.grounded-sources {
+  align-items: center;
+  margin-top: 6px;
+}
+
+.grounded-source {
+  appearance: none;
+  background: rgb(255 255 255 / 48%);
+  border: 1px solid rgb(46 33 64 / 20%);
+  border-radius: 999px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 3px 7px;
+}
+
+.grounded-source:hover,
+.grounded-source:focus-visible {
+  border-color: var(--letter-accent);
+  outline: none;
+}
+
 /* ★ 那幾筆。他問「電話」要的是號碼本身，不是一段剛好提到電話的字——所以
    這一列要看得出來是**答案**，不是又一筆搜尋結果：值放大、邊框加深。
 

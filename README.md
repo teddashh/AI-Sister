@@ -76,7 +76,11 @@ Windows production signing pipeline。alpha.123 再把大腦設定收斂成 Clau
 Gemini CLI、Grok CLI 四張卡：偵測本機版本、啟動 provider 官方登入、經 bundled bridge
 實際測通，成功才切換；測試、取消與失敗都保留原本的大腦。prompt 不進 argv，provider
 每次在新建的空 private workspace 執行，帳號憑證仍只由各 CLI 保存。簽第二張同意前，
-AI-Sister 一次都不會把 OCR 文字交給它。Windows production signing pipeline 已完整接到
+AI-Sister 一次都不會把 OCR 文字交給它。alpha.124 把同一支 CLI 接進 S1 問答：facts 與
+全文檢索先在本機挑出最多 12 筆來源，CLI 只把這一題講成 1–3 句；每一句都必須引用這次
+真的選中的本機來源，畫面上的「本機出處」可直接回到原畫面。沒有 CLI、沒有第二張同意、
+輸出不合契約或取消時，完整的本機結果列表照常回答；新題會終止舊題的整棵 CLI 行程樹。
+Windows production signing pipeline 已完整接到
 四層 Authenticode 驗證與發版 receipt；正式 CA 發行憑證尚未配置，現行公開 alpha 仍是 unsigned，
 所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。

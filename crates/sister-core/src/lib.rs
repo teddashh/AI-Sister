@@ -32,6 +32,7 @@ pub mod facts;
 pub mod followup;
 pub mod gatekeeper;
 pub mod gatekeeper_candidates;
+pub mod grounded_answer;
 pub mod heartbeat;
 pub mod install_lifecycle;
 pub mod local_day;

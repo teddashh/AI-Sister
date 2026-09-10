@@ -307,8 +307,22 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
 
 ### 8.2 對話（被動答題——永遠可用，這是 Release 1.0 的核心）
 
-- 輸入框隨時可問。一般題目的查詢管線：意圖解析（1 次 LLM 或規則）→
-  L1/FTS/（選配向量）檢索 → 附出處作答（1 次 LLM 潤句；離線模式退化為結果列表）。
+- 輸入框隨時可問。一般題目的查詢管線：typed 規則分流 → 本機 L1 facts／FTS 檢索 →
+  附出處作答（已接 CLI 時至多 1 次成句；沒有這層時完整保留結果列表）。目前沒有向量索引。
+- alpha.124 的 S1 成句只吃本機已排序的候選，facts 優先、合計最多 12 筆。送進 CLI 的
+  問題副本最多 2 KiB；nonce 圍欄內的問題與來源資料合計最多 12 KiB，單筆來源正文最多
+  4 KiB，app／title／URL 也各自有界。來源裡的控制字元與指令樣文字一律是資料，不能改寫
+  回答契約。
+- CLI 只可回 strict JSON：1–3 句、每句最多 240 字、至少一個來源，而且來源只能逐字引用
+  這一輪提供的 `fact:<id>`／`chunk:<id>`。native 再把每個 ref 映回同一份本機答案；未知
+  ref、來源／畫面不一致、空句、超長、額外欄位或壞 JSON 都整份拒絕，不把部分輸出混進
+  正常答案。
+- 沒有候選不叫 CLI；沒設定 CLI、第二張同意未簽、全停、spawn／timeout／空回覆、輸出不合
+  契約或稽核沒寫成時，facts／原文仍是完整答案。每個非空新問題接管唯一的回答槽並終止
+  舊題 process group／Windows Job tree；exact 日常固定回覆也先取消舊題。過期結果不可畫、
+  不可朗讀。
+- 有成句時，本機朗讀與 Azure 的答案正文只取這 1–3 句，不重複朗讀底下的 facts／OCR，
+  也不帶 source ref、按鈕文字或 metadata；沒有成句時維持原本的本機結果朗讀。
 - alpha.116 起，「她／妳／你知道了什麼／記得哪些事」是窄文法的本機 L2 記憶總覽，
   不是拿「知道／記得」去搜 OCR。這條先由 typed intent 分流，只讀 current L2；不跑
   FTS、facts、CLI、時間章節或 blind diagnostic。最多列最近三張帶畫面出處的可修正
@@ -430,6 +444,11 @@ feature 集合沒有 `download`；Azure 答案朗讀收在 `crates/sister-tts`�
   四張 provider 卡中冒充「正在使用」。從設定頁選定任一 provider 後，就改由上述固定
   bridge 管理。brain／core／recorder 沒有 HTTP client；帳號與 token 由 provider CLI 自己
   保存，AI-Sister 不接收也不保存。
+- **alpha.124 的 S1 runtime**：desktop 先以既有 `TextAndFacts` profile 在 SQLite 完成本機
+  retrieval，再把當前問題與最多 12 筆已選來源交給同一個 configured CLI。這是一次性的
+  bounded RAG prompt，不建立 embedding、向量庫、prompt cache 或第二份記憶。有效輸出必須
+  是逐句引用本機 ref 的 strict JSON；`brain_outbound.role = answer` 記這次呼叫的結構、字數、
+  duration 與 outcome，不存 prompt／問題／來源原文。
 - **角色→模型對映**（可配置，附預設）：interpreter=cheap tier；reviewer=mid tier
   （夜間 batch 半價）；chat=使用者選；hands=使用者訂閱的 coding agent。
   實際選哪一個模型，是那支 CLI 自己的事。

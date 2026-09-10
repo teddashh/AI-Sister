@@ -109,6 +109,20 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   空 private working directory 執行，結束後移除。brain／core／recorder 仍無 HTTP client；
   真正的 provider 連線只存在使用者已安裝的那支 CLI 裡。
 
+### S1 本機 RAG 成句合約（alpha.124 起）
+
+- 一般問題先走既有本機 `TextAndFacts` retrieval；facts 優先，從既有 SQLite 記憶選最多
+  12 筆來源。這一層不建 embedding、向量庫、prompt cache 或另一份永久記憶。
+- 第二張同意有效且大腦已接好時，當前問題與選中來源才會送給那支 CLI。問題副本最多
+  2 KiB，nonce 圍欄內資料合計最多 12 KiB；畫面 bytes 永遠不進 prompt。
+- 只接受 1–3 句 strict JSON；每句最多 240 字，而且每句至少引用一個這輪真的提供的
+  `fact:<id>`／`chunk:<id>`。native 與 renderer 都把 ref 對回同一份本機結果；任一不一致就
+  捨棄整份成句，原 facts／原文列表仍完整呈現。
+- 每個非空新問題與 exact 日常固定回覆都會取消舊回答；Unix process group／Windows Job tree
+  一起終止。舊回覆、停止後才回來的回覆與 presentation boundary 外的回覆都不能畫或朗讀。
+- 成句存在時，兩條動態朗讀只取成句正文；來源 ref、metadata 與底下重複的 facts／OCR 不送
+  Azure。`brain_outbound` 以 `role=answer` 記 outcome 與時間，不存送出的原文。
+
 ### Azure 可選 TTS 合約（alpha.109 起；alpha.110 改為 opt-in 後自動讀新答案）
 
 - **本機仍是預設，沒有自動 fallback**：Azure 預設 disabled、沒有預設 region；本機
@@ -304,7 +318,9 @@ Wayland 才留到 P8／社群成熟化；Preview 的隱私與資料語意不因�
 - [ ] 檢索 < 100ms、成句 < 3s（> 3s 視為 bug）。
       量法：`sister queries` 那一行延遲（中位數／p95／超過門檻的題數）。數字
       來自**真實提問**的題庫，不是另外跑一份 benchmark——那條路只會量到我
-      挑出來的問題。成句目前沒有東西可量（還沒有任何 LLM 路徑）。
+      挑出來的問題。alpha.124 的 query latency 在 CLI 之前落地，只量本機 retrieval；
+      成句另由 `brain_outbound role=answer` 的 `duration_ms` 逐次實測，不能把兩個時間混成
+      一個數。真帳號、真 CLI 與真資料上的 `<3s` 還沒有回收，所以這格維持未勾。
 - [ ] 全離線模式（同意書 2 全關）走完全部主流程。
       終端機那一半走完了（當時的乾淨資料目錄 → `consent` 三張全空 → `record` 被擋掉
       並且回非零 → 簽第一張 → `replay` → `query`／`facts`／`queries`／`stats` →
@@ -435,7 +451,8 @@ Wayland 才留到 P8／社群成熟化；Preview 的隱私與資料語意不因�
 - 模型接入：spawn 使用者已登入的 CLI（2026-08-21 定案；不是 BYOK HTTP、
   也不是內建推論引擎）。alpha.123 由設定頁偵測 Claude Code／Codex／Gemini CLI／Grok CLI，
   完成 provider 官方登入與 bundled bridge 實測後，才把固定 bridge 寫進
-  `[brain] command` / `args`。
+  `[brain] command` / `args`。alpha.124 把一般 S1 問答接上同一 bridge：本機 retrieval
+  選來源，CLI 只成句，逐句 exact ref 驗證後才呈現。
 - **A/B gate**：harness 跑 `+interpreter` vs 不跑——照〔定案〕沒贏就保持預設關。
 
 **Exit criteria**
@@ -741,6 +758,10 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     probe；只有整條通過才原子切換。測試、取消、逾時與失敗都不覆蓋原大腦，取消會收掉
     整個 process tree。runtime prompt 不進 argv，provider 在一次性空 private workspace
     執行，結束後清除；帳號憑證仍完全由各 CLI 保存。
+  - ✅ alpha.124 完成 S1 本機 RAG 成句：既有 facts／FTS 先在本機選最多 12 筆來源，configured
+    CLI 只回 1–3 句 strict JSON；每句 exact ref 由 native 與 renderer 雙層對回本機證據，來源
+    按鈕直接開原畫面。所有無 CLI、無同意、取消、失敗與壞輸出路徑都保留完整本機列表；新題、
+    固定日常回覆與全停收掉舊 CLI tree。朗讀只取成句正文，不夾帶 ref 或重複 OCR。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）
 - ✅ a `CommitmentDue`：`open_commitments_due_before(now + 40min)`，只收

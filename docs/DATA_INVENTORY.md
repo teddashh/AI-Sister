@@ -384,10 +384,23 @@ endpoint 發一個 POST。
 來源連結、memory id、DB 或其他文字。它不做 cache，cancel 只阻止 late audio 播放，
 無法 abort 已開始、最長 45 秒的 blocking POST。簽了第二張同意書且
 設定了 `[brain] command` 之後，螢幕文字原文會交給那支本機 CLI；外送紀錄在
-`brain_outbound`（結構與計數，不含原文；`role` 分解釋層／審閱層／盯梢層——
-`interpreter`／`reviewer`／`watcher`，最後一個是 alpha.71 的 `sister watch`；
+`brain_outbound`（結構與計數，不含原文；`role` 分答題層／解釋層／審閱層／盯梢層——
+`answer`／`interpreter`／`reviewer`／`watcher`，最後一個是 alpha.71 的 `sister watch`；
 送出去的是原文），假設卡片在 `l2_card`（append-only 版本鏈，`author` 是 interpreter／reviewer／user，刪 L0 時 tombstone 而不是實刪——列留著，
 卡片上的字清掉）。桌面時間軸的「外送」頁讀這兩張表和 `meta.ever_brain_outbound`。
+
+alpha.124 的 S1 RAG 不增加 schema 或永久資料。每一題先從同一顆 SQLite 的 L1 facts 與
+FTS hits 選最多 12 筆；當前問題、選中來源正文與時間／app／title／URL metadata 只在
+desktop RAM 和 CLI stdin 的 bounded prompt 裡存在。問題副本最多 2 KiB，圍欄內資料最多
+12 KiB，單筆來源正文最多 4 KiB；CLI 結束後不另存 prompt、回覆 cache、embedding 或向量
+索引。Claude／Codex／Gemini 從 stdin 讀 prompt；Grok bridge 使用目前使用者限定讀取、
+handle 關閉即刪的 private prompt file，四者都在一次性空 private working directory 執行。
+有效的 1–3 句回答只在當次 Tauri reply／renderer DOM 存活；永久留下的仍只有原本的 query
+log（若 `privacy.query_log` 開啟）與不含原文的 `brain_outbound role=answer` 稽核列。
+`queries.latency_ms` 在 CLI 前寫入，只量本機 retrieval；成句耗時是同筆 answer outbound 的
+`duration_ms`。已取得 CLI 設定與第二張同意、進入 spawn supervision 的呼叫會留下 outcome，
+即使它在建立 process 前被取消或啟動失敗；在這之前因沒有 CLI、同意或候選而結束的題目
+沒有 outbound 列。原 facts／hits 不另複製。
 
 Microsoft 目前公開列 Azure Speech F0 neural TTS 每月 0.5 million characters；這是
 帳號／resource／方案層的 provider 額度，不是本機資料，也不寫進 DB。能否使用與費用

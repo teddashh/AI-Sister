@@ -1214,7 +1214,7 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "sister-assets"
-version = "0.1.0-alpha.123"
+version = "0.1.0-alpha.124"
 dependencies = [
  "fs4",
  "getrandom 0.2.17",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "sister-capture"
-version = "0.1.0-alpha.123"
+version = "0.1.0-alpha.124"
 dependencies = [
  "anyhow",
  "apple-metal",
@@ -1246,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "sister-cli"
-version = "0.1.0-alpha.123"
+version = "0.1.0-alpha.124"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "sister-core"
-version = "0.1.0-alpha.123"
+version = "0.1.0-alpha.124"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "sister-hands"
-version = "0.1.0-alpha.123"
+version = "0.1.0-alpha.124"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "sister-shell"
-version = "0.1.0-alpha.123"
+version = "0.1.0-alpha.124"
 dependencies = [
  "serde",
  "serde_json",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "sister-tts"
-version = "0.1.0-alpha.123"
+version = "0.1.0-alpha.124"
 dependencies = [
  "serde",
  "serde_json",

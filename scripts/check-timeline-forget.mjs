@@ -502,6 +502,17 @@ console.log("⑨ 外送紀錄：兩種空、沒送出去的原因、原文沒遮
           role: "watcher",
         },
         {
+          ts: D1 + 3_550_000,
+          command: "codex",
+          args: ["exec"],
+          chars_sent: 87,
+          truncated: false,
+          outcome: "cancelled",
+          duration_ms: 25,
+          error: null,
+          role: "answer",
+        },
+        {
           ts: D1 + 3_500_000,
           command: "claude",
           args: ["-p"],
@@ -532,6 +543,8 @@ console.log("⑨ 外送紀錄：兩種空、沒送出去的原因、原文沒遮
   const rolesText = roles.node("[data-outbound]").textContent;
   check("盯梢層那一列講得出自己是哪一層", rolesText.includes("盯梢層"), rolesText);
   check("盯梢層不會印成英文的 watcher", !rolesText.includes("watcher"), rolesText);
+  check("答題層與取消結局都用產品文字顯示", rolesText.includes("答題層") && rolesText.includes("已取消"), rolesText);
+  check("答題層不會印成英文代號", !rolesText.includes("answer") && !rolesText.includes("cancelled"), rolesText);
   // 斷言要打在「它說了自己不認得」上，不是打在那個怪值有沒有印出來上——
   // 怪值兩版都會印出來。
   check("不認得的層別要說出自己不認得", rolesText.includes("不認得"), rolesText);

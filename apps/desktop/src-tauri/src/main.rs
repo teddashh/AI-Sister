@@ -206,6 +206,9 @@ struct Shell {
     /// CLI 官方登入與固定 probe 共用一個槽。取消只影響這條使用者發起的工作，
     /// 不會改 config，也不會碰 recorder 正在跑的 brain invocation。
     brain_cli_state: Arc<std::sync::atomic::AtomicU8>,
+    /// 對話一次只保留最新題的 CLI invocation。新題會先取消舊題的完整 process
+    /// tree；本機檢索不共用這個槽，所以 CLI 不可用時 S1 仍完整回答。
+    answer_cli: Mutex<Option<sister_core::brain::Cancellation>>,
 }
 
 const ASSET_IDLE: u8 = 0;
@@ -220,6 +223,93 @@ impl Shell {
     fn persist(&self) {
         let snapshot = *self.state.lock().expect("pet state");
         bounds::save(&self.state_path, &snapshot);
+    }
+}
+
+struct AnswerCliClaim<'a> {
+    slot: &'a Mutex<Option<sister_core::brain::Cancellation>>,
+    cancellation: sister_core::brain::Cancellation,
+}
+
+impl AnswerCliClaim<'_> {
+    fn cancellation(&self) -> &sister_core::brain::Cancellation {
+        &self.cancellation
+    }
+}
+
+impl Drop for AnswerCliClaim<'_> {
+    fn drop(&mut self) {
+        let mut slot = self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot
+            .as_ref()
+            .is_some_and(|active| active.is_same(&self.cancellation))
+        {
+            slot.take();
+        }
+    }
+}
+
+fn begin_answer_cli_slot(
+    slot: &Mutex<Option<sister_core::brain::Cancellation>>,
+) -> AnswerCliClaim<'_> {
+    let cancellation = sister_core::brain::Cancellation::default();
+    let mut active = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(previous) = active.replace(cancellation.clone()) {
+        previous.cancel();
+    }
+    drop(active);
+    AnswerCliClaim { slot, cancellation }
+}
+
+fn begin_answer_cli(shell: &Shell) -> AnswerCliClaim<'_> {
+    begin_answer_cli_slot(&shell.answer_cli)
+}
+
+#[cfg(test)]
+mod answer_cli_claim_tests {
+    use super::*;
+
+    #[test]
+    fn a_new_claim_cancels_the_previous_one_and_old_drop_cannot_clear_new() {
+        let slot = Mutex::new(None);
+        let first = begin_answer_cli_slot(&slot);
+        let first_signal = first.cancellation().clone();
+        assert!(!first_signal.is_cancelled());
+
+        let second = begin_answer_cli_slot(&slot);
+        let second_signal = second.cancellation().clone();
+        assert!(first_signal.is_cancelled());
+        assert!(!second_signal.is_cancelled());
+        drop(first);
+        assert!(
+            slot.lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|active| active.is_same(&second_signal))
+        );
+
+        drop(second);
+        assert!(slot.lock().unwrap().is_none());
+    }
+}
+
+#[tauri::command]
+fn answer_cli_cancel(shell: tauri::State<'_, Shell>) -> bool {
+    let active = shell
+        .answer_cli
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(active) = active {
+        active.cancel();
+        true
+    } else {
+        false
     }
 }
 
@@ -2068,6 +2158,26 @@ struct Answer {
     /// 放在最外層而不是塞進 `hits`：L2 是可修正的假設，不是 OCR 原文。兩種東西
     /// 共用一個陣列，renderer 遲早會把其中一種畫成另一種。
     overview: Option<MemoryOverview>,
+    /// 本機候選經 CLI 成句後的答案。`None` 時畫面直接使用下面的本機 facts／hits。
+    synthesis: Option<GroundedSynthesis>,
+}
+
+#[derive(Debug, Serialize)]
+struct GroundedSynthesis {
+    sentences: Vec<GroundedSentence>,
+}
+
+#[derive(Debug, Serialize)]
+struct GroundedSentence {
+    text: String,
+    sources: Vec<GroundedSource>,
+}
+
+#[derive(Debug, Serialize)]
+struct GroundedSource {
+    r#ref: String,
+    label: String,
+    frame_id: Option<i64>,
 }
 
 /// 她已經整理過的記憶，和「沒有整理過」的原因。
@@ -2241,6 +2351,7 @@ fn memory_overview_answer(
         time_range: None,
         chapters: None,
         overview: Some(overview),
+        synthesis: None,
     })
 }
 
@@ -2731,6 +2842,7 @@ mod blind_dto_tests {
 /// 一筆 ★ 答案。
 #[derive(Serialize)]
 struct Fact {
+    fact_id: i64,
     /// 正規化後的值——`+886800080123`，不是螢幕上那串 `0800-080-123`。
     value: String,
     /// 螢幕上真正長的樣子。兩個都給：正規化後的值認得出來，原文才認得出**場景**。
@@ -2751,6 +2863,240 @@ struct Fact {
     app: Option<String>,
     title: Option<String>,
     url: Option<String>,
+}
+
+fn synthesis_from_grounded(
+    grounded: sister_core::grounded_answer::GroundedAnswer,
+    facts: &[Fact],
+    hits: &[Hit],
+) -> Result<GroundedSynthesis, String> {
+    use sister_core::grounded_answer::SourceRef;
+
+    let sentences = grounded
+        .sentences
+        .into_iter()
+        .map(|sentence| {
+            let sources = sentence
+                .sources
+                .into_iter()
+                .map(|reference| match reference {
+                    SourceRef::Fact(id) => {
+                        let fact = facts
+                            .iter()
+                            .find(|fact| fact.fact_id == id)
+                            .ok_or_else(|| format!("找不到回答引用的本機事實 #{id}"))?;
+                        Ok(GroundedSource {
+                            r#ref: reference.as_str(),
+                            label: fact.frame_id.map_or_else(
+                                || format!("事實 #{id}"),
+                                |frame| format!("畫面 #{frame}"),
+                            ),
+                            frame_id: fact.frame_id,
+                        })
+                    }
+                    SourceRef::Chunk(id) => {
+                        let hit = hits
+                            .iter()
+                            .find(|hit| hit.chunk_id == id)
+                            .ok_or_else(|| format!("找不到回答引用的本機文字 #{id}"))?;
+                        Ok(GroundedSource {
+                            r#ref: reference.as_str(),
+                            label: hit.frame_id.map_or_else(
+                                || format!("文字 #{id}"),
+                                |frame| format!("畫面 #{frame}"),
+                            ),
+                            frame_id: hit.frame_id,
+                        })
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(GroundedSentence {
+                text: sentence.text,
+                sources,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(GroundedSynthesis { sentences })
+}
+
+#[cfg(test)]
+mod grounded_synthesis_tests {
+    use super::*;
+    use sister_core::grounded_answer::{GroundedAnswer, GroundedSentence, SourceRef};
+
+    fn fact() -> Fact {
+        Fact {
+            fact_id: 9,
+            value: "+886800080123".into(),
+            raw: "客服專線 0800-080-123".into(),
+            sightings: 2,
+            ts: 100,
+            chunk_id: Some(31),
+            frame_id: Some(42),
+            app: Some("chrome.exe".into()),
+            title: Some("帳單".into()),
+            url: None,
+        }
+    }
+
+    fn hit() -> Hit {
+        Hit {
+            chunk_id: 77,
+            ts: 200,
+            text: "昨天完成匯出".into(),
+            snippet: "昨天完成匯出".into(),
+            app: Some("notes.exe".into()),
+            title: Some("工作筆記".into()),
+            url: None,
+            frame_id: None,
+        }
+    }
+
+    #[test]
+    fn grounded_refs_map_only_to_the_same_local_answer_sources() {
+        let synthesis = synthesis_from_grounded(
+            GroundedAnswer {
+                sentences: vec![GroundedSentence {
+                    text: "客服電話是 0800-080-123。".into(),
+                    sources: vec![SourceRef::Fact(9), SourceRef::Chunk(77)],
+                }],
+            },
+            &[fact()],
+            &[hit()],
+        )
+        .unwrap();
+        assert_eq!(synthesis.sentences.len(), 1);
+        assert_eq!(synthesis.sentences[0].sources[0].r#ref, "fact:9");
+        assert_eq!(synthesis.sentences[0].sources[0].frame_id, Some(42));
+        assert_eq!(synthesis.sentences[0].sources[1].r#ref, "chunk:77");
+        assert_eq!(synthesis.sentences[0].sources[1].frame_id, None);
+    }
+
+    #[test]
+    fn a_ref_missing_from_the_local_answer_rejects_the_whole_synthesis() {
+        let grounded = GroundedAnswer {
+            sentences: vec![GroundedSentence {
+                text: "沒有這筆來源。".into(),
+                sources: vec![SourceRef::Chunk(999)],
+            }],
+        };
+        assert!(synthesis_from_grounded(grounded, &[fact()], &[hit()]).is_err());
+    }
+}
+
+/// CLI 是可選的成句層；本機 retrieval 已經完成，所以每一條失敗路都直接保留
+/// facts／hits。真的啟動 CLI 的那條路仍經第二張同意書、master stop 與 outbound audit。
+fn synthesize_grounded_answer(
+    shell: &tauri::State<'_, Shell>,
+    local: &Answer,
+    prepared: &sister_core::grounded_answer::Prepared,
+    cancellation: &sister_core::brain::Cancellation,
+    presentation: &sister_hands::master_stop::ActivityGuard,
+) -> Option<GroundedSynthesis> {
+    let run = || -> Result<Option<GroundedSynthesis>, String> {
+        if cancellation.is_cancelled() {
+            return Ok(None);
+        }
+        let data_dir = shell
+            .data_dir
+            .as_deref()
+            .ok_or_else(|| "找不到資料目錄".to_owned())?;
+        let path = config_path()?;
+        let config =
+            sister_core::config::Config::load(&path).map_err(|error| format!("{error:#}"))?;
+        let Some((command, args)) = config.brain.cli() else {
+            return Ok(None);
+        };
+        let command = command.to_owned();
+        let args = args.to_vec();
+        let consent = sister_core::consent::load(data_dir);
+        let Some(permit) = consent.cloud_permit() else {
+            return Ok(None);
+        };
+        let day = sister_core::brain::local_day_key(sister_core::now_ms())
+            .ok_or_else(|| "算不出外送日期".to_owned())?;
+        let Some(not_stopped) = sister_core::brain::not_stopped(data_dir) else {
+            return Ok(None);
+        };
+
+        let spawn = sister_core::brain::spawn_cli_cancellable(
+            permit,
+            not_stopped,
+            &prepared.payload,
+            &command,
+            &args,
+            cancellation,
+        );
+        let (mut outcome, mut synthesis, mut error) = if cancellation.is_cancelled() {
+            ("cancelled", None, None)
+        } else if spawn.timed_out {
+            ("timeout", None, None)
+        } else if !spawn.completed_the_ask() {
+            let error = spawn.spawn_error.clone().or_else(|| {
+                Some(format!(
+                    "CLI 結束碼 {}",
+                    spawn
+                        .exit_code
+                        .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+                ))
+            });
+            ("spawn_failed", None, error)
+        } else if spawn.stdout.trim().is_empty() {
+            ("no_answer", None, None)
+        } else {
+            match sister_core::grounded_answer::parse(&spawn.stdout, &prepared.sources) {
+                Ok(answer) => match synthesis_from_grounded(answer, &local.answers, &local.hits) {
+                    Ok(answer) => ("success", Some(answer), None),
+                    Err(error) => ("bad_json", None, Some(error)),
+                },
+                Err(error) => ("bad_json", None, Some(error)),
+            }
+        };
+
+        if cancellation.is_cancelled() {
+            outcome = "cancelled";
+            synthesis = None;
+            error = None;
+        }
+
+        let audit = with_db_mut(shell, |db| {
+            db.insert_brain_outbound(&sister_core::db::OutboundInsert {
+                ts: sister_core::now_ms(),
+                day_key: &day,
+                command: &command,
+                args: &args,
+                segment_core_start: None,
+                chars_sent: spawn.payload_chars_written as i64,
+                truncated: prepared.truncated,
+                outcome,
+                duration_ms: spawn.duration_ms as i64,
+                error: error.as_deref(),
+                role: "answer",
+            })
+            .map_err(|error| format!("{error:#}"))?;
+            Ok(())
+        });
+        if let Err(error) = audit {
+            tracing::error!("答題層外送稽核沒有寫成：{error}");
+            return Ok(None);
+        }
+
+        let Some(synthesis) = synthesis else {
+            return Ok(None);
+        };
+        if cancellation.is_cancelled() || presentation.boundary().is_none() {
+            return Ok(None);
+        }
+        Ok(Some(synthesis))
+    };
+
+    match run() {
+        Ok(answer) => answer,
+        Err(error) => {
+            tracing::warn!("答題層沒有成句，保留本機結果：{error}");
+            None
+        }
+    }
 }
 
 #[tauri::command(async)]
@@ -2774,8 +3120,12 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             time_range: None,
             chapters: None,
             overview: None,
+            synthesis: None,
         });
     }
+    // 每個非空問題都接管「最新題」槽。即使這一題隨後被全停擋住，也不能讓
+    // 上一題的 provider 繼續在背景跑完。
+    let answer_cli_claim = begin_answer_cli(&shell);
     // 問答不只是讀：closure、follow-up 與 query log 都可能寫 DB。整份 admission
     // 活到 renderer 同步畫完，讓 stop-all 能先發佈 Stopping、再等這一題收乾淨；
     // 全停後來的新題連 retrieval 都不進。
@@ -2793,7 +3143,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
 
     // 章節那一支要寫 `segment`，所以整條改拿可變借用。沒認到時間範圍
     // 時 `chapters_for_question` 立刻回 `None`，不會重算。
-    let mut answer = with_db_mut(&shell, |db| {
+    let (mut answer, prepared) = with_db_mut(&shell, |db| {
         let now = sister_core::now_ms();
         let close = sister_core::reviewer::close_from_message(db, &question, now)
             .map_err(|e| format!("{e:#}"))?;
@@ -2844,6 +3194,8 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         let truncated = retrieval.hits_truncated;
         let asked_chapters = db
             .chapters_for_question(&question, sister_core::now_ms())
+            .map_err(|e| format!("{e:#}"))?;
+        let prepared = sister_core::grounded_answer::prepare(&question, &facts, &hits)
             .map_err(|e| format!("{e:#}"))?;
         // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
         // 足以回答「她是不是又卡住了」，而問題本身是他的東西，不是我的。
@@ -2918,7 +3270,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 .collect();
             db.frames_with_image(&ids).map_err(|e| format!("{e:#}"))?
         };
-        Ok(Answer {
+        let answer = Answer {
             presentation_id: None,
             kind: shape.name(),
             followup,
@@ -2943,6 +3295,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             answers: facts
                 .into_iter()
                 .map(|a| Fact {
+                    fact_id: a.latest.id,
                     value: a.latest.normalized,
                     raw: a.latest.raw,
                     sightings: a.sightings,
@@ -2975,8 +3328,19 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             chapters: asked_chapters
                 .map(|(_, ch)| ch.into_iter().map(chapter_from_activity).collect()),
             overview: None,
-        })
+            synthesis: None,
+        };
+        Ok((answer, prepared))
     })?;
+    if let Some(prepared) = prepared {
+        answer.synthesis = synthesize_grounded_answer(
+            &shell,
+            &answer,
+            &prepared,
+            answer_cli_claim.cancellation(),
+            &master_stop_admission,
+        );
+    }
     answer.presentation_id = Some(hold_presentation(master_stop_admission));
     Ok(answer)
 }
@@ -6456,12 +6820,14 @@ fn main() {
             azure_tts_admission: Arc::new(Mutex::new(())),
             azure_tts_transition: Arc::new(Mutex::new(())),
             brain_cli_state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            answer_cli: Mutex::new(None),
         })
         .manage(Hotkey(Mutex::new(HotkeyView::default())))
         .invoke_handler(tauri::generate_handler![
             toggle_pin,
             hide_to_tray,
             ask,
+            answer_cli_cancel,
             open_frame,
             log_click,
             mark_query,

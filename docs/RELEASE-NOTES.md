@@ -80,6 +80,31 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.124
+
+**一般回憶問題現在由本機記憶先找證據，再由已登入的 CLI 大腦講成可直接讀的答案。**
+既有 facts 與 FTS 在本機完成檢索、排序並選出最多 12 筆來源；CLI 只接收當前問題與這批
+有界來源，回傳 1–3 句 strict JSON。每一句都必須引用這輪真的提供過的
+`fact:<id>`／`chunk:<id>`，native 再把 ref 對回同一份本機結果，畫面上的「本機出處」
+按鈕可直接回到原畫面或原文。
+
+任一句缺來源、引用未知 ref、對到不同 frame、超過 240 字、帶額外欄位或不是契約 JSON，
+整份成句都不採用；原本的 facts／原文列表仍完整回答。沒有本機候選不叫 CLI，沒有設定
+大腦、沒有第二張同意、全停、spawn 失敗、timeout、空回覆與稽核寫入失敗也走同一條本機
+結果路徑。每一筆進入答題 CLI supervision 的嘗試都以 `brain_outbound role=answer` 記字數、
+時間與 outcome；在 process 建立前取消或啟動失敗時，字數就是實際送出的 0。這些列不保存
+問題、來源或 prompt 原文。
+
+每個非空新問題都會取消前一題，連同 Unix process group 或 Windows Job tree 一起終止；
+exact 日常固定回覆也先取消正在跑的動態答案。過期、取消或 master stop 之後才回來的內容
+不能呈現或朗讀。有成句時，本機朗讀與 Azure 都只取那 1–3 句正文，不把 source ref、metadata
+或底下重複的 OCR／facts 送進語音路徑。
+
+這一版沒有新增向量資料庫或第二份記憶。永久記憶仍是既有 SQLite L0／L1／L2／L3；RAG
+只在當前題目的 RAM／CLI stdin 裡組合，問題副本最多 2 KiB、圍欄內資料最多 12 KiB、單筆
+來源正文最多 4 KiB。畫面 bytes 不會交給 CLI。
+
+
 ## v0.1.0-alpha.123
 
 **alpha.122 tag 沒有公開 release 或下載資產；alpha.123 才是把四支 CLI 大腦登入交到

@@ -22,6 +22,24 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
 
+### alpha.124 先驗 S1 本機 RAG 成句
+
+- [ ] 安裝正式 Setup，接好任一支 CLI 並簽第二張同意。先錄一段含電話、金額與工作進度的
+      可辨識文字，再從桌面分別提問。每題頂端要出現 1–3 句答案，每句下面至少一顆
+      「本機出處」；點有畫面的來源要開 exact 原畫面，點只有文字的來源要移到同一筆原文。
+- [ ] 同一題底下仍須保留原本的 ★ facts 與 OCR 原文列表。讓 provider 回未知 ref、缺來源、
+      不合 JSON 與超長句各一次，頂端成句要整份消失，但本機列表與可點證據照常存在，不能
+      顯示半份模型答案。
+- [ ] 快速連問兩題，第一題的 CLI parent／child 都要結束，畫面只能出現第二題。動態回答尚在
+      跑時再送 exact 日常短句，也只能留下固定角色回覆；`stop-all` 成功後不得冒出舊答案或聲音。
+- [ ] 開本機朗讀與 Azure 各驗一次。有成句時，只能讀那 1–3 句，不得再讀 facts、OCR、
+      「本機出處」、source ref 或 app／title／URL。packet trace 的 Azure body 也只能是成句正文。
+- [ ] 撤回第二張同意後再問同一題：0 provider request，完整本機列表仍能回答。重新簽回後，
+      以 process monitor 驗 prompt 不在 argv、working directory 是一次性空目錄；CLI 收到的是
+      當前問題與最多 12 筆來源文字／metadata，沒有 screenshot bytes 或圖片路徑。
+- [ ] `sister.exe brain log` 要把答題呼叫標成「答題層」，並分得出成功、取消、timeout、壞 JSON；
+      外送列不可含問題或來源原文。題庫 latency 只算本機 retrieval，答題層 duration 另列。
+
 ### alpha.123 先驗四支 CLI 大腦登入
 
 - [ ] 安裝正式 Setup 後開設定。大腦區只能看到 Claude Code、Codex、Gemini CLI、Grok CLI

@@ -2899,12 +2899,12 @@ function lasted(ms) {
   return m === 0 ? `${h} 小時` : `${h} 小時 ${m} 分`;
 }
 
-function chapterHit(ch) {
+function chapterHit(ch, speak = true) {
   const li = document.createElement("li");
   li.className = "hit chapter";
   const whenEl = document.createElement("p");
   whenEl.className = "chapter-when";
-  whenEl.dataset.azureAnswerBody = "";
+  if (speak) whenEl.dataset.azureAnswerBody = "";
   // 答案講的是核心時間。start_ts／end_ts 在時間軸上含 5 秒 margin，
   // 相加會把相鄰段的邊界算兩次。
   const start = ch.core_start_ts ?? ch.start_ts;
@@ -2932,12 +2932,12 @@ function chapterHit(ch) {
     title.textContent = visibleTitle;
     // Window title 是這段答案的主句；host 只是沒有 title 時的出處 fallback，
     // 畫面照常顯示但不因 Azure click 出境。
-    if (ch.title) title.dataset.azureAnswerBody = "";
+    if (speak && ch.title) title.dataset.azureAnswerBody = "";
     what.append(title);
   }
   if (!ch.app && !visibleTitle) {
     const fallback = document.createElement("span");
-    fallback.dataset.azureAnswerBody = "";
+    if (speak) fallback.dataset.azureAnswerBody = "";
     fallback.textContent = "一段紀錄";
     what.append(fallback);
   }
@@ -3273,6 +3273,11 @@ function markLine(queryId) {
 }
 
 function answerTextForLocalSpeech() {
+  const grounded = [...hitList.querySelectorAll(".grounded-text")]
+    .map((node) => node.textContent.replace(/\s+/g, " ").trim())
+    .filter((line) => line !== "")
+    .join(" ");
+  if (grounded !== "") return grounded;
   const copy = hitList.cloneNode(true);
   for (const node of copy.querySelectorAll(
     ".hit-source, .hits-mark, .hits-read, .hits-cloud, button, a",
@@ -3720,6 +3725,105 @@ function renderOverview(overview) {
 }
 
 /**
+ * CLI 只能替本機候選成句；每一句的 source ref 都已由 native 對本次候選做過
+ * exact 驗證。按有畫面的來源直接開圖；只有文字的來源則移到下方原文。
+ */
+function renderGrounded(synthesis, facts, hits, queryId) {
+  if (synthesis === null || synthesis === undefined) return false;
+  if (
+    !Array.isArray(synthesis.sentences) ||
+    synthesis.sentences.length < 1 ||
+    synthesis.sentences.length > 3
+  ) {
+    throw new Error("成句答案必須是 1 到 3 句");
+  }
+
+  const sourceTarget = (reference) => {
+    if (reference.startsWith("fact:")) {
+      const id = Number(reference.slice("fact:".length));
+      const index = facts.findIndex((fact) => fact.fact_id === id);
+      return index < 0 ? null : { item: facts[index], rank: index };
+    }
+    if (reference.startsWith("chunk:")) {
+      const id = Number(reference.slice("chunk:".length));
+      const index = hits.findIndex((hit) => hit.chunk_id === id);
+      return index < 0
+        ? null
+        : { item: hits[index], rank: facts.length + index };
+    }
+    return null;
+  };
+
+  for (const sentence of synthesis.sentences) {
+    if (typeof sentence?.text !== "string" || sentence.text.trim() === "") {
+      throw new Error("成句答案裡有空句");
+    }
+    if (!Array.isArray(sentence.sources) || sentence.sources.length === 0) {
+      throw new Error("成句答案裡有一句沒有本機出處");
+    }
+    const li = document.createElement("li");
+    li.className = "hit grounded-answer";
+    const text = document.createElement("p");
+    text.className = "grounded-text";
+    text.dataset.azureAnswerBody = "";
+    text.textContent = sentence.text;
+    li.append(text);
+
+    const sourceLine = document.createElement("p");
+    sourceLine.className = "hit-source grounded-sources";
+    const lead = document.createElement("span");
+    lead.textContent = "本機出處";
+    sourceLine.append(lead);
+    for (const source of sentence.sources) {
+      if (
+        typeof source?.ref !== "string" ||
+        typeof source.label !== "string" ||
+        source.label.trim() === ""
+      ) {
+        throw new Error("成句答案的本機出處不完整");
+      }
+      const target = sourceTarget(source.ref);
+      if (target === null) throw new Error(`成句答案找不到 ${source.ref}`);
+      const targetFrame = target.item.frame_id ?? null;
+      const sourceFrame = source.frame_id ?? null;
+      if (sourceFrame !== targetFrame) {
+        throw new Error(`成句答案的 ${source.ref} 畫面來源不一致`);
+      }
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "grounded-source";
+      button.textContent = source.label;
+      button.addEventListener("click", (event) => {
+        if (event?.isTrusted !== true) return;
+        if (Number.isSafeInteger(targetFrame) && targetFrame > 0) {
+          void invoke?.("open_frame", { frameId: targetFrame });
+          if (
+            queryId !== null &&
+            queryId !== undefined &&
+            target.item.chunk_id !== null &&
+            target.item.chunk_id !== undefined
+          ) {
+            void invoke?.("log_click", {
+              queryId,
+              chunkId: target.item.chunk_id,
+              rank: target.rank,
+            })?.catch?.(() => {});
+          }
+          return;
+        }
+        hitList
+          .querySelector?.(`[data-evidence-ref="${source.ref}"]`)
+          ?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+      });
+      sourceLine.append(button);
+    }
+    li.append(sourceLine);
+    hitList.append(li);
+  }
+  return true;
+}
+
+/**
  * @param hits 一筆一筆的原文。
  * @param kind `"keywords"`（比對字找到的）、`"recent"`（剛剛）、`"range"`（昨天下午那種日曆範圍），
  *   或 `"memory_overview"`（只讀 L2 整理結果，不跑一般檢索）。
@@ -3736,6 +3840,7 @@ function renderOverview(overview) {
  * @param followup 使用者先開口後，回答尾端才可附上的低頻確認。
  * @param closureNotice 文字結案是否成功；認不出來時也要明講沒有動卡片。
  * @param overview 「我知道了什麼」專用的 L2 總覽；`null` 代表一般檢索題。
+ * @param synthesis 本機候選經已登入 CLI 成句後的逐句出處答案；失敗或未啟用時是 `null`。
  */
 function renderHits(
   hits,
@@ -3751,6 +3856,7 @@ function renderHits(
   followup = null,
   closureNotice = null,
   overview = null,
+  synthesis = null,
 ) {
   azureAnswerLine = null;
   azureAnswerButton = null;
@@ -3793,6 +3899,8 @@ function renderHits(
     showingAnswer = hasOverviewAnswer;
     return;
   }
+
+  const hasGroundedAnswer = renderGrounded(synthesis, facts, hits, queryId);
 
   // **她找的字不一定是他打的字。**
   //
@@ -3848,7 +3956,7 @@ function renderHits(
         count.textContent = `那段時間分成 ${chapters.length} 段：`;
         hitList.append(count);
         for (const ch of chapters) {
-          hitList.append(chapterHit(ch));
+          hitList.append(chapterHit(ch, !hasGroundedAnswer));
         }
       }
     }
@@ -3870,7 +3978,7 @@ function renderHits(
     note.className = "hits-note";
     // 這一句是事實答案必要的認知界線，不是操作提示；逐一 allow，而不是把
     // `.hits-note` 整類送出去。
-    note.dataset.azureAnswerBody = "";
+    if (!hasGroundedAnswer) note.dataset.azureAnswerBody = "";
     note.textContent = "我最後看到的是：";
     hitList.append(note);
   }
@@ -3881,7 +3989,7 @@ function renderHits(
 
     const value = document.createElement("p");
     value.className = "fact-value";
-    value.dataset.azureAnswerBody = "";
+    if (!hasGroundedAnswer) value.dataset.azureAnswerBody = "";
     value.textContent = fact.value;
     // 1 次和 12 次是強度不同的答案。她自己不下判斷，只把數字講出來。
     if (fact.sightings > 1) {
@@ -3898,7 +4006,8 @@ function renderHits(
     // 要的，`客服專線 0800-080-123` 才是他記得的那一行。兩個都給。
     const raw = document.createElement("p");
     raw.className = "hit-text fact-raw";
-    raw.dataset.azureAnswerBody = "";
+    if (!hasGroundedAnswer) raw.dataset.azureAnswerBody = "";
+    li.dataset.evidenceRef = `fact:${fact.fact_id}`;
     raw.textContent = fact.raw;
     li.append(raw);
 
@@ -3971,7 +4080,8 @@ function renderHits(
 
     const text = document.createElement("p");
     text.className = "hit-text";
-    text.dataset.azureAnswerBody = "";
+    if (!hasGroundedAnswer) text.dataset.azureAnswerBody = "";
+    li.dataset.evidenceRef = `chunk:${hit.chunk_id}`;
     renderSnippet(text, hit.snippet || hit.text);
     li.append(text);
 
@@ -4040,7 +4150,7 @@ function renderHits(
   // 是上一題的」，而空手而回的那一次底下躺的是「我記得的東西裡沒有這件事。」
   // 加上幾行理由——一筆都沒有。寫死 `true` 的話，下一題失敗會請他去看幾筆
   // 不存在的東西，而**空手而回正是他最可能連問第二次的那一種結果**。
-  showingAnswer = hits.length > 0 || facts.length > 0 || hasChapters;
+  showingAnswer = hasGroundedAnswer || hits.length > 0 || facts.length > 0 || hasChapters;
 }
 
 /**
@@ -4095,6 +4205,7 @@ async function ask(event = null) {
       ? dailyDialogueReply(question, activeProfile.id)
       : null;
   if (dailyReply !== null) {
+    if (invoke !== null) void invoke("answer_cli_cancel").catch(() => {});
     renderDailyDialogue(dailyReply);
     askInput.value = "";
     setState("idle");
@@ -4144,6 +4255,7 @@ async function ask(event = null) {
         answer.followup,
         answer.closure_notice,
         answer.overview,
+        answer.synthesis,
       );
       setState("idle");
       // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
