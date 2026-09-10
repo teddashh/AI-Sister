@@ -36,6 +36,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, PhysicalPosition, WindowEvent};
 
 mod azure_credential;
+mod brain_cli;
 mod hands;
 mod login_startup;
 #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
@@ -202,6 +203,9 @@ struct Shell {
     /// transport 結束，mutation/cancel 可能等待最長 45 秒，但成功回覆後舊 request
     /// 絕不可能才開始 POST。A drop、A cancel 與 B admit 也不能在 atomic 間交錯。
     azure_tts_transition: Arc<Mutex<()>>,
+    /// CLI 官方登入與固定 probe 共用一個槽。取消只影響這條使用者發起的工作，
+    /// 不會改 config，也不會碰 recorder 正在跑的 brain invocation。
+    brain_cli_state: Arc<std::sync::atomic::AtomicU8>,
 }
 
 const ASSET_IDLE: u8 = 0;
@@ -4813,9 +4817,8 @@ mod azure_tts_mapping_tests {
 /// 改了要重開 `record` 才生效（見 `Recorder::set_privacy`）——一個按了儲存卻
 /// 要等重開才生效、而且沒說的欄位，比沒有那個欄位更糟。
 ///
-/// `[brain]` 的每日預算、併發、審閱預算同樣沒畫：它們有 `check()` 在守
-/// （concurrency 1..=8），而且改錯了的後果是悄悄降級，不是看得見的東西。
-/// 這一頁只動 `command` / `args`；另外三個必須在「先讀再改再寫」之後原封不動。
+/// `[brain]` 由上面的 CLI 登入卡獨立、原子地寫；頁尾「儲存」完全不碰它。
+/// 這樣登入測通後，不會被一張較早載入的設定表用舊值蓋回去。
 #[derive(Serialize, Deserialize)]
 struct Settings {
     excluded_apps: Vec<String>,
@@ -4826,12 +4829,6 @@ struct Settings {
     query_log: bool,
     frames_days: u32,
     text_days: u32,
-    /// `[brain] command`。空字串＝沒設定＝一次都不 spawn。
-    #[serde(default)]
-    brain_command: String,
-    /// `[brain] args`。一行一個；prompt 走 stdin，不在這裡。
-    #[serde(default)]
-    brain_args: Vec<String>,
     persona_enabled: sister_core::config::PersonaVisible,
     persona_id: sister_core::config::PersonaId,
     persona_motion: sister_core::config::PersonaMotionEnabled,
@@ -4862,14 +4859,58 @@ fn settings_read() -> Result<Settings, String> {
         query_log: c.privacy.query_log,
         frames_days: c.retention.frames_days,
         text_days: c.retention.text_days,
-        brain_command: c.brain.command,
-        brain_args: c.brain.args,
         persona_enabled: c.shell.persona.visible(),
         persona_id: c.shell.persona.id,
         persona_motion: c.shell.persona.motion_enabled(),
         persona_tap_lines: c.shell.persona.tap_lines_enabled(),
         path: path.display().to_string(),
     })
+}
+
+#[tauri::command(async)]
+async fn brain_cli_read(shell: tauri::State<'_, Shell>) -> Result<brain_cli::BrainCliView, String> {
+    let path = config_path()?;
+    let state = Arc::clone(&shell.brain_cli_state);
+    tauri::async_runtime::spawn_blocking(move || brain_cli::read_view(&path, &state))
+        .await
+        .map_err(|error| format!("讀取 CLI 狀態：{error}"))?
+}
+
+#[tauri::command(async)]
+async fn brain_cli_connect(
+    provider: String,
+    shell: tauri::State<'_, Shell>,
+) -> Result<brain_cli::BrainCliOutcome, String> {
+    let provider = sister_core::provider_cli::BrainProvider::from_id(&provider)
+        .ok_or_else(|| format!("不認得的 CLI：{provider}"))?;
+    let path = config_path()?;
+    let sister = recorder_supervisor::recorder_path()?;
+    let state = Arc::clone(&shell.brain_cli_state);
+    // 在 blocking worker 排入佇列之前就占住槽；取消不會落在 worker 尚未
+    // 啟動的空窗，下一筆登入也不能同時穿過去。
+    let claim = brain_cli::begin(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        brain_cli::connect(provider, &path, &sister, claim)
+    })
+    .await
+    .map_err(|error| format!("CLI 登入工作中止：{error}"))?
+}
+
+#[tauri::command(async)]
+async fn brain_cli_test(
+    shell: tauri::State<'_, Shell>,
+) -> Result<brain_cli::BrainCliOutcome, String> {
+    let path = config_path()?;
+    let state = Arc::clone(&shell.brain_cli_state);
+    let claim = brain_cli::begin(&state)?;
+    tauri::async_runtime::spawn_blocking(move || brain_cli::test_selected(&path, claim))
+        .await
+        .map_err(|error| format!("CLI 測試工作中止：{error}"))?
+}
+
+#[tauri::command]
+fn brain_cli_cancel(shell: tauri::State<'_, Shell>) -> bool {
+    brain_cli::cancel(&shell.brain_cli_state)
 }
 
 /// 她問「我一個人在跑的時候，可不可以自己按網址」那一格（PHASES #42）。
@@ -5085,10 +5126,6 @@ fn settings_write(
             settings.persona_motion,
             settings.persona_tap_lines,
         );
-        // 只動這兩格。daily_budget / concurrency / reviewer_daily_budget 這一頁
-        // 沒畫，從頭組一份 BrainConfig 會把它們重設成預設值。守這一點的測試是
-        // `a_settings_page_write_must_not_reset_unexposed_brain_fields`。
-        c.set_brain_cli_from_page(settings.brain_command, settings.brain_args);
         Ok(())
     })
     .map_err(|e| format!("{e:#}"))?;
@@ -6418,6 +6455,7 @@ fn main() {
             )),
             azure_tts_admission: Arc::new(Mutex::new(())),
             azure_tts_transition: Arc::new(Mutex::new(())),
+            brain_cli_state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         })
         .manage(Hotkey(Mutex::new(HotkeyView::default())))
         .invoke_handler(tauri::generate_handler![
@@ -6460,6 +6498,10 @@ fn main() {
             login_startup_set,
             settings_read,
             settings_write,
+            brain_cli_read,
+            brain_cli_connect,
+            brain_cli_test,
+            brain_cli_cancel,
             eval_report_view,
             lint_url_rules,
             privacy_health,

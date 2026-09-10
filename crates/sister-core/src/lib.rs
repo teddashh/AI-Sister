@@ -39,6 +39,7 @@ pub mod model;
 pub mod moments;
 pub mod pause;
 pub mod prompt_fence;
+pub mod provider_cli;
 pub mod question;
 pub mod recorder_lease;
 pub mod recorder_watchdog;

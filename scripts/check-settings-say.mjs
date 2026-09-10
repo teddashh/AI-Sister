@@ -64,13 +64,38 @@ const BASE = {
   query_log: true,
   frames_days: 14,
   text_days: 90,
-  brain_command: "",
-  brain_args: [],
   persona_enabled: true,
   persona_id: "chatgpt",
   persona_motion: true,
   persona_tap_lines: true,
 };
+
+function brainView(selected = null, { busy = false, custom = false } = {}) {
+  const versions = {
+    claude: "2.1.266",
+    codex: "codex-cli 0.153.2",
+    gemini: null,
+    grok: "grok 1.0.13",
+  };
+  const labels = {
+    claude: "Claude Code",
+    codex: "Codex CLI",
+    gemini: "Gemini CLI",
+    grok: "Grok CLI",
+  };
+  return {
+    selected,
+    custom_configured: custom,
+    busy,
+    providers: ["claude", "codex", "gemini", "grok"].map((id) => ({
+      id,
+      label: labels[id],
+      installed: id !== "gemini",
+      version: versions[id],
+      selected: id === selected,
+    })),
+  };
+}
 
 const ASSET_DISCLOSURE = {
   release_id: "persona-pack-v1",
@@ -162,11 +187,16 @@ async function open({
   onAzureConfigSet,
   onAzureKeySet,
   onAzureKeyDelete,
+  onBrainRead,
+  onBrainConnect,
+  onBrainTest,
+  onBrainCancel,
   asset = ASSET_AVAILABLE,
   azure = AZURE_OFF,
   voice = false,
   hotkey = HOTKEY,
   loginStartup = LOGIN_STARTUP,
+  brain = brainView(),
   cloud = false,
   watching = "recording",
 } = {}) {
@@ -190,6 +220,7 @@ async function open({
   let voiceState = voice;
   let loginStartupState = { ...loginStartup };
   let azureState = { ...azure };
+  let brainState = structuredClone(brain);
   const writes = [];
   const invokes = [];
   const events = new Map();
@@ -206,6 +237,37 @@ async function open({
             if (onWrite) return onWrite(arg.settings, (s) => (state = { ...state, ...s }));
             state = { ...state, ...arg.settings };
             return { watching: settingsWriteWatching(watching) };
+          case "brain_cli_read":
+            if (onBrainRead) return onBrainRead(structuredClone(brainState));
+            return structuredClone(brainState);
+          case "brain_cli_connect": {
+            if (onBrainConnect) {
+              return onBrainConnect(
+                arg.provider,
+                structuredClone(brainState),
+                (next) => (brainState = structuredClone(next)),
+              );
+            }
+            brainState = brainView(arg.provider);
+            return {
+              provider: arg.provider,
+              label: brainState.providers.find((item) => item.id === arg.provider).label,
+              brain: structuredClone(brainState),
+            };
+          }
+          case "brain_cli_test": {
+            if (onBrainTest) return onBrainTest(structuredClone(brainState));
+            const current = brainState.providers.find((item) => item.selected);
+            if (!current) throw new Error("還沒選大腦");
+            return {
+              provider: current.id,
+              label: current.label,
+              brain: structuredClone(brainState),
+            };
+          }
+          case "brain_cli_cancel":
+            if (onBrainCancel) return onBrainCancel();
+            return true;
           case "lint_url_rules":
             return [];
           case "privacy_health":
@@ -990,47 +1052,39 @@ console.log("⑪ 存不進去，而且退回去的那一組現在也搶不到了
 }
 
 const SENTENCE = {
-  noCommand:
-    "還沒填命令：解釋層和審閱層一次都不會醒。空著就是關，不是跑得慢一點。",
-  noConsent:
-    "命令有了，但第二張同意書還沒勾：螢幕上的字只留在這台機器，一次都不會交給這支 CLI。去「四張同意書」那一頁勾上雲解讀。",
-  readyIdle:
-    "命令和同意書都齊了。現在沒有人在錄，等你按下「開始記錄」她才會自己醒。",
-  readyBooting:
-    "命令和同意書都齊了。有一個 sister record 正在起來（多半在開資料庫）——它一開始錄，她就會自己醒，不必再按「開始記錄」。",
-  live: "命令和同意書都齊了，而且正在錄：她會自己醒。",
-  readyThinking:
-    "命令和同意書都齊了。上一場錄製剛停，解釋層還在把最後一段想完——想完才能再開一場，這時候按「開始記錄」會被擋下來。",
+  noCli: "選一個已安裝的 CLI。",
+  noConsent: "Claude Code 已接好。完成「四張同意書」的雲端解讀後啟用。",
+  readyIdle: "Claude Code 已接好。開始記錄後使用。",
+  readyBooting: "Claude Code 已接好，記錄啟動後使用。",
+  live: "Claude Code 已接好，正在使用。",
+  readyThinking: "Claude Code 已接好，正在完成上一段記憶。",
 };
 
-console.log("⑫ 大腦：沒填命令（同意書勾了、正在錄也不算）");
+console.log("⑫ 大腦：四支 CLI 都由 native 偵測，未選時只有一個下一步");
 {
   const p = await open({ cloud: true, watching: "recording" });
-  check("就是那一句", p.brainSay() === SENTENCE.noCommand, p.brainSay());
-  check("句子裡沒有「同意書」（那是另一種修法）", !p.brainSay().includes("同意書"), p.brainSay());
+  check("就是那一句", p.brainSay() === SENTENCE.noCli, p.brainSay());
+  check("沒安裝的 Gemini 不能按", p.node("[data-brain-gemini-action]").disabled, "gemini");
+  check("已安裝的 Claude 可以按", !p.node("[data-brain-claude-action]").disabled, "claude");
+  check("開頁只讀狀態，沒有啟動登入", calls(p, "brain_cli_connect").length === 0, p.invokes);
 }
 
-console.log("⑬ 大腦：填了命令，第二張沒勾（正在錄也不算）");
+console.log("⑬ 大腦：CLI 已接好、第二張同意書沒勾");
 {
   const p = await open({
-    config: { ...BASE, brain_command: "claude", brain_args: ["-p"] },
+    brain: brainView("claude"),
     cloud: false,
     watching: "recording",
   });
   check("就是那一句", p.brainSay() === SENTENCE.noConsent, p.brainSay());
   check("指得出去哪裡勾", p.brainSay().includes("四張同意書"), p.brainSay());
-  check(
-    "不是「還沒填命令」那句",
-    p.brainSay() !== SENTENCE.noCommand,
-    p.brainSay(),
-  );
-  check("是紅的", p.node("[data-brain-say]").classList.contains("bad"), p.brainSay());
+  check("Claude 卡片顯示使用中", p.node("[data-brain-claude-status]").textContent.includes("使用中"), p.node("[data-brain-claude-status]").textContent);
 }
 
-console.log("⑭ 大腦：命令和同意書都齊，沒有人在錄");
+console.log("⑭ 大腦：CLI 和同意書都齊，沒有人在錄");
 {
   const p = await open({
-    config: { ...BASE, brain_command: "claude" },
+    brain: brainView("claude"),
     cloud: true,
     watching: "none",
   });
@@ -1041,7 +1095,7 @@ console.log("⑭ 大腦：命令和同意書都齊，沒有人在錄");
 console.log("⑮ 大腦：兩個都成立而且正在錄");
 {
   const p = await open({
-    config: { ...BASE, brain_command: "claude" },
+    brain: brainView("claude"),
     cloud: true,
     watching: "recording",
   });
@@ -1052,7 +1106,7 @@ console.log("⑮ 大腦：兩個都成立而且正在錄");
 console.log("⑯ 大腦：兩個都齊，record 正在起來");
 {
   const p = await open({
-    config: { ...BASE, brain_command: "claude" },
+    brain: brainView("claude"),
     cloud: true,
     watching: "booting",
   });
@@ -1064,16 +1118,10 @@ console.log("⑯ 大腦：兩個都齊，record 正在起來");
   );
 }
 
-/*
- * `recording_state` 回**四**個字串，而這一頁的白名單只收前三個的話，
- * `"thinking"` 會掉進 `"none"` ——於是收工那兩分鐘裡這一格說「等你按下
- * 『開始記錄』」，而那顆按鈕這時候按下去只會回一句「還在想最後一段」。
- * 和 ⑯ 守 booting 的理由一模一樣，只是換一個狀態。
- */
 console.log("⑯ᵇ 大腦：兩個都齊，上一場剛停、腦還在想最後一段");
 {
   const p = await open({
-    config: { ...BASE, brain_command: "claude" },
+    brain: brainView("claude"),
     cloud: true,
     watching: "thinking",
   });
@@ -1098,24 +1146,29 @@ console.log("⑯ᶜ 存檔回條：上一場剛停時不可以叫他按一顆會
   check("沒有叫他按開始記錄", !p.say().includes("等你按下「開始記錄」"), p.say());
 }
 
-console.log("⑯ᵈ 沒存的命令不可以改寫現在的出境狀態");
+console.log("⑯ᵈ 登入成功才獨立保存，不經頁尾 settings_write");
 {
   const p = await open({
-    config: { ...BASE, brain_command: "claude" },
-    cloud: true,
-    watching: "recording",
+    onBrainConnect: (provider, _current, set) => {
+      const next = brainView(provider);
+      set(next);
+      return {
+        provider,
+        label: "Codex CLI",
+        brain: next,
+      };
+    },
   });
-  check("開場照已存檔值說正在錄", p.brainSay() === SENTENCE.live, p.brainSay());
-  p.node("[data-brain-command]").value = "";
-  for (const fn of p.node("[data-brain-command]").handlers.input ?? []) fn();
-  check("清空但沒存時只說這是未存改動", p.brainSay().includes("這是還沒存的改動，按下儲存才算數"), p.brainSay());
-  check("不可以宣布解釋層一次都不會醒", !p.brainSay().includes("一次都不會醒"), p.brainSay());
-  check("確實沒有送 settings_write", p.writes.length === 0, p.writes);
+  await p.act("[data-brain-codex-action]");
+  check("只送一趟 provider connect", calls(p, "brain_cli_connect").length === 1, p.invokes);
+  check("沒有借頁尾 settings_write", p.writes.length === 0, p.writes);
+  check("成功後直接顯示 Codex 使用中", p.node("[data-brain-codex-status]").textContent.includes("使用中"), p.node("[data-brain-codex-status]").textContent);
+  check("成功句沒有被重讀抹掉", p.brainSay() === "Codex CLI 已登入、測通並設為大腦。", p.brainSay());
 }
 
 {
   const four = [
-    SENTENCE.noCommand,
+    SENTENCE.noCli,
     SENTENCE.noConsent,
     SENTENCE.readyIdle,
     SENTENCE.live,
@@ -1128,52 +1181,74 @@ console.log("⑯ᵈ 沒存的命令不可以改寫現在的出境狀態");
   check("連 booting、thinking 六句都沒有兩句一樣", new Set(all).size === 6, all);
 }
 
-console.log("⑰ 打字當下要標成未存改動——而且不可以把同意書那句警告一起吞掉");
+console.log("⑰ 已選的大腦可以單獨測試");
 {
-  const p = await open({ cloud: false, watching: "none" });
-  check("開場是沒填命令", p.brainSay() === SENTENCE.noCommand, p.brainSay());
-  p.node("[data-brain-command]").value = "claude";
-  for (const fn of p.node("[data-brain-command]").handlers.input ?? []) fn();
-  check("立刻說這是未存改動", p.brainSay().includes("還沒存的改動"), p.brainSay());
-  // 同意書勾了沒是**磁碟上的事實**，跟這個框無關。一句「還沒存」替代掉一句
-  // 警告不叫少講一句——他存下去之後，擋住他的就是它。
-  check(
-    "同意書那句警告還在",
-    p.brainSay().includes("第二張同意書還沒勾"),
-    p.brainSay(),
-  );
-  check(
-    "而且是紅的",
-    p.node("[data-brain-say]").classList.contains("bad"),
-    p.brainSay(),
-  );
+  const p = await open({ brain: brainView("grok") });
+  check("測試鍵看得到", !p.node("[data-brain-test]").hidden, "test");
+  await p.act("[data-brain-test]");
+  check("只送一趟固定測試", calls(p, "brain_cli_test").length === 1, p.invokes);
+  check("通過後說出 provider", p.brainSay() === "Grok CLI 測試通過。", p.brainSay());
 }
 
-console.log("⑰ᵇ 勾了同意書的時候，未存改動不用扛那句警告");
+console.log("⑰ᵇ 登入失敗不改畫面上的選擇");
 {
-  const p = await open({ cloud: true, watching: "none" });
-  p.node("[data-brain-command]").value = "claude";
-  for (const fn of p.node("[data-brain-command]").handlers.input ?? []) fn();
-  check(
-    "只說未存，不無中生有一句同意書警告",
-    p.brainSay() === "這是還沒存的改動，按下儲存才算數。",
-    p.brainSay(),
-  );
+  const p = await open({
+    brain: brainView("claude"),
+    onBrainConnect: () => {
+      throw new Error("Codex CLI 登入沒有完成；原本的大腦沒有改");
+    },
+  });
+  await p.act("[data-brain-codex-action]");
+  check("Claude 仍是使用中", p.node("[data-brain-claude-status]").textContent.includes("使用中"), p.node("[data-brain-claude-status]").textContent);
+  check("失敗句是紅的", p.node("[data-brain-say]").classList.contains("bad"), p.brainSay());
+  check("說原本選擇沒改", p.brainSay().includes("原本的大腦沒有改"), p.brainSay());
 }
 
-console.log("⑱ 儲存會送出命令和參數，空白會剪掉");
+console.log("⑰ᶜ CLI 登入、測試、取消都只接受 trusted click");
 {
-  const p = await open();
-  p.node("[data-brain-command]").value = "  gemini  ";
-  p.node("[data-brain-args]").value = "-m\n\nflash\n";
+  const p = await open({ brain: brainView("claude") });
+  await p.act("[data-brain-codex-action]", { trusted: false });
+  await p.act("[data-brain-test]", { trusted: false });
+  check(
+    "假事件沒有啟動登入或測試",
+    calls(p, "brain_cli_connect").length === 0 && calls(p, "brain_cli_test").length === 0,
+    p.invokes,
+  );
+
+  let finishConnect;
+  const held = await open({
+    brain: brainView("claude"),
+    onBrainConnect: () =>
+      new Promise((_resolve, reject) => {
+        finishConnect = () => reject(new Error("登入已取消；原本的大腦沒有改"));
+      }),
+    onBrainCancel: () => {
+      setTimeout(finishConnect, 0);
+      return true;
+    },
+  });
+  void held.act("[data-brain-codex-action]");
+  await tick();
+  await held.act("[data-brain-cancel]", { trusted: false });
+  check("假取消沒有送 IPC", calls(held, "brain_cli_cancel").length === 0, held.invokes);
+  await held.act("[data-brain-cancel]");
+  await tick();
+  check("真人取消只送一次", calls(held, "brain_cli_cancel").length === 1, held.invokes);
+  check(
+    "取消完成後仍是 Claude 使用中",
+    held.node("[data-brain-claude-status]").textContent.includes("使用中"),
+    held.node("[data-brain-claude-status]").textContent,
+  );
+  check("取消結果沒有被正在取消覆蓋", held.brainSay().includes("登入已取消"), held.brainSay());
+}
+
+console.log("⑱ 頁尾儲存不會用較早讀到的值蓋掉 CLI 選擇");
+{
+  const p = await open({ brain: brainView("codex") });
   await p.save();
   const sent = p.writes[0];
-  check("送了剪過空白的命令", sent.brain_command === "gemini", sent.brain_command);
-  check(
-    "參數一行一個、空行丟掉",
-    JSON.stringify(sent.brain_args) === JSON.stringify(["-m", "flash"]),
-    sent.brain_args,
-  );
+  check("settings payload 沒有 brain_command", !Object.hasOwn(sent, "brain_command"), sent);
+  check("settings payload 沒有 brain_args", !Object.hasOwn(sent, "brain_args"), sent);
 }
 
 console.log("⑲ 桌面後端真的把 Thinking 接到設定頁和系統匣");

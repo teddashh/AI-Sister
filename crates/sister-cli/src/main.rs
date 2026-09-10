@@ -10,6 +10,7 @@ mod fmt;
 #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
 mod macos_ci;
 mod ops;
+mod provider_bridge;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -262,6 +263,14 @@ enum HandsAction {
 
 #[derive(Subcommand)]
 enum Command {
+    /// desktop 內部使用：把 stdin 交給已選定的 CLI provider。
+    #[command(hide = true)]
+    BrainCliBridge {
+        #[arg(value_parser = parse_brain_provider)]
+        provider: sister_core::provider_cli::BrainProvider,
+        executable: PathBuf,
+    },
+
     /// 開始錄製（需要平台擷取後端）
     Record {
         /// 錄多久後自動停止（秒）。省略則持續到 Ctrl-C。
@@ -643,6 +652,16 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // 這條只搬運 stdin，不讀 config／data dir，也不建立產品 log。desktop 的
+    // probe 和 recorder 都走同一條，測通的就是真正會跑的那條。
+    if let Command::BrainCliBridge {
+        provider,
+        executable,
+    } = &cli.command
+    {
+        return provider_bridge::run(*provider, executable);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -672,6 +691,7 @@ fn main() -> Result<()> {
     let config = || load_config(cli.config.as_deref());
 
     match cli.command {
+        Command::BrainCliBridge { .. } => unreachable!("bridge 已在資料目錄之前處理"),
         Command::Record {
             duration,
             start_mode,
@@ -921,6 +941,11 @@ fn main() -> Result<()> {
         Command::Doctor => ops::doctor::run(&data_dir, config(), cli.config.clone()),
         Command::Bench { rounds } => ops::bench::run(&data_dir, rounds),
     }
+}
+
+fn parse_brain_provider(value: &str) -> Result<sister_core::provider_cli::BrainProvider, String> {
+    sister_core::provider_cli::BrainProvider::from_id(value)
+        .ok_or_else(|| format!("不認得的 CLI provider：{value}"))
 }
 
 fn load_config(explicit: Option<&std::path::Path>) -> Result<Config> {

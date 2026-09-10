@@ -71,6 +71,12 @@ current-user 安裝副本在設定頁明確開啟。它在登入後只留在系�
 精確的登錄值、五態與 reset 規則見 [SPEC.md](SPEC.md) §14；真 Windows 產品驗收仍以
 [WINDOWS-CHECKLIST.md](WINDOWS-CHECKLIST.md) 的未勾項目為準。
 
+大腦在設定頁直接列 Claude Code、Codex、Gemini CLI、Grok CLI。AI-Sister 會找出已安裝
+版本，從一顆登入按鈕進入 provider 自己的驗證，再用真正的 bundled bridge 測通；全部成功
+才把它設成大腦。帳號憑證由 CLI 保存，AI-Sister 只保存 provider 與 executable 的固定接法。
+本機檢索、排序、出處與截圖始終留在這台機器；第二張同意成立後，只有這次工作所需的
+OCR 文字會交給選定 CLI，畫面不會交出去。
+
 ## 4. Killer Scenarios（按交付順序）
 
 ### S1 — 秒答回憶（Release 1.0 的核心）

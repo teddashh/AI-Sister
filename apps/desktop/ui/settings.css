@@ -563,14 +563,65 @@ button:focus-visible {
 
 /* ---------- 大腦 ---------- */
 
-.field {
-  display: block;
-  margin-bottom: 10px;
+.brain-cli-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.field > span {
+.brain-cli {
+  align-items: center;
+  background: var(--field);
+  border: 1px solid rgb(246 236 223 / 12%);
+  border-radius: 10px;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-height: 72px;
+  padding: 10px;
+}
+
+.brain-cli.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px rgb(246 236 223 / 18%);
+}
+
+.brain-cli strong,
+.brain-cli span {
   display: block;
-  margin-bottom: 4px;
+}
+
+.brain-cli span {
+  font-size: 11.5px;
+  margin-top: 2px;
+  opacity: 0.62;
+  overflow-wrap: anywhere;
+}
+
+.brain-cli.active span {
+  color: var(--ok);
+  opacity: 1;
+}
+
+.brain-cli button {
+  flex: 0 0 auto;
+  padding-inline: 10px;
+}
+
+.brain-cli-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.brain-cli-actions [hidden] {
+  display: none;
+}
+
+@media (max-width: 520px) {
+  .brain-cli-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ---------- 天數 ---------- */

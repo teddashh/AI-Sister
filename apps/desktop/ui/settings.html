@@ -244,27 +244,50 @@
       <section>
         <h2>大腦</h2>
         <p class="hint">
-          這是整頁唯一一個會把<strong>螢幕上的字</strong>交給另一支程式的設定。
-          它接的是<strong>你自己已經裝好、已經登入的那支 CLI</strong>，
-          不是內建推論引擎；Azure 雲端朗讀是上面另一條、只收當前答案的固定 HTTP 路徑。
-          送出去的是螢幕文字原文，不會先遮掉。
-          <strong>沒填＝解釋層和審閱層一次都不會醒</strong>（不是跑得慢一點）。
-          填了還要第二張同意書勾起來才會真的送——兩個條件都要成立。
+          選擇這台電腦已安裝的 CLI。完成官方登入後，AI-Sister 會實際測通並保存。
         </p>
-        <label class="field">
-          <span>命令</span>
-          <input
-            type="text"
-            data-brain-command
-            spellcheck="false"
-            autocomplete="off"
-          />
-        </label>
-        <label class="field">
-          <span>參數</span>
-          <textarea data-brain-args rows="3" spellcheck="false"></textarea>
-        </label>
-        <p class="hint">一行一個。prompt 走 stdin，不寫在這裡。</p>
+        <div class="brain-cli-grid">
+          <article class="brain-cli" data-brain-claude-card>
+            <div>
+              <strong>Claude Code</strong>
+              <span data-brain-claude-status>正在偵測…</span>
+            </div>
+            <button class="ghost" data-brain-claude-action type="button" disabled>
+              登入並使用
+            </button>
+          </article>
+          <article class="brain-cli" data-brain-codex-card>
+            <div>
+              <strong>Codex CLI</strong>
+              <span data-brain-codex-status>正在偵測…</span>
+            </div>
+            <button class="ghost" data-brain-codex-action type="button" disabled>
+              登入並使用
+            </button>
+          </article>
+          <article class="brain-cli" data-brain-gemini-card>
+            <div>
+              <strong>Gemini CLI</strong>
+              <span data-brain-gemini-status>正在偵測…</span>
+            </div>
+            <button class="ghost" data-brain-gemini-action type="button" disabled>
+              登入並使用
+            </button>
+          </article>
+          <article class="brain-cli" data-brain-grok-card>
+            <div>
+              <strong>Grok CLI</strong>
+              <span data-brain-grok-status>正在偵測…</span>
+            </div>
+            <button class="ghost" data-brain-grok-action type="button" disabled>
+              登入並使用
+            </button>
+          </article>
+        </div>
+        <div class="brain-cli-actions">
+          <button class="ghost" data-brain-test type="button" hidden>測試目前大腦</button>
+          <button class="ghost" data-brain-cancel type="button" hidden>取消</button>
+        </div>
         <p class="state" data-brain-say></p>
       </section>
 
@@ -394,6 +417,11 @@
         <p>
           四姊妹與 13 位閨密是受同名 AI 產品啟發的虛構角色；AI-Sister 是獨立產品，
           未與這些供應商合作、隸屬或獲其背書。
+        </p>
+        <p>
+          大腦登入由你選擇的 Claude Code、Codex、Gemini 或 Grok CLI 自己完成；AI-Sister
+          不收也不保存該服務的密碼或 token。連線測試只送固定測試句。第二張同意書生效後，
+          解釋層與審閱層才會把選出的螢幕文字原文交給該 CLI；不送畫面檔。
         </p>
         <p data-azure-boundary>
           Azure 每份新答案只送出該題答案正文原文一次；手動重播會再送一次。正文可能含姓名、

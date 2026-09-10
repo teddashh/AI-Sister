@@ -399,44 +399,48 @@ pub fn not_stopped(data_dir: &Path) -> Option<NotStopped> {
 }
 
 #[cfg(unix)]
-fn configure_provider_process_tree(command: &mut Command) {
+pub fn configure_managed_process(command: &mut Command, _visible_console: bool) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
 
 #[cfg(windows)]
-fn configure_provider_process_tree(command: &mut Command) {
+pub fn configure_managed_process(command: &mut Command, visible_console: bool) {
     use std::os::windows::process::CommandExt;
-    use windows::Win32::System::Threading::CREATE_SUSPENDED;
+    use windows::Win32::System::Threading::{CREATE_NEW_CONSOLE, CREATE_SUSPENDED};
 
     // AssignProcessToJobObject after an ordinary spawn has a real race: the
     // provider can create a descendant before the parent enters our Job, and
     // that descendant may keep inherited pipes open forever. Start the primary
-    // thread suspended; ProviderProcessTree::resume is the only opening point.
-    command.creation_flags(CREATE_SUSPENDED.0);
+    // thread suspended; ManagedProcessTree::resume is the only opening point.
+    let mut flags = CREATE_SUSPENDED.0;
+    if visible_console {
+        flags |= CREATE_NEW_CONSOLE.0;
+    }
+    command.creation_flags(flags);
 }
 
 #[cfg(not(any(unix, windows)))]
-fn configure_provider_process_tree(_command: &mut Command) {}
+pub fn configure_managed_process(_command: &mut Command, _visible_console: bool) {}
 
 /// Provider 可能再生子行程，而且那些 descendants 會繼承 stdout/stderr pipe。
 /// 只 kill direct child 仍會讓 reader join 無限等；把整棵 invocation 放進可終止的
 /// process group／Job Object，正常 direct child 退出時也清掉它遺留的 descendants。
 #[cfg(unix)]
-struct ProviderProcessTree {
+pub struct ManagedProcessTree {
     process_group: i32,
 }
 
 #[cfg(unix)]
-impl ProviderProcessTree {
-    fn attach(child: &Child) -> std::io::Result<Self> {
+impl ManagedProcessTree {
+    pub fn attach(child: &Child) -> std::io::Result<Self> {
         let process_group = i32::try_from(child.id()).map_err(|_| {
             std::io::Error::other("provider child pid 超過可管理的 process-group 範圍")
         })?;
         Ok(Self { process_group })
     }
 
-    fn terminate(&self, child: &mut Child) {
+    pub fn terminate(&self, child: &mut Child) {
         // `process_group(0)` 讓 child 成為新 group leader。負 pid 會向整組送訊號；
         // direct child 若已退出，仍可關掉繼承 pipe 的 descendants。
         unsafe {
@@ -445,19 +449,19 @@ impl ProviderProcessTree {
         let _ = child.kill();
     }
 
-    fn resume(&self, _child: &Child) -> std::io::Result<()> {
+    pub fn resume(&self, _child: &Child) -> std::io::Result<()> {
         Ok(())
     }
 }
 
 #[cfg(windows)]
-struct ProviderProcessTree {
+pub struct ManagedProcessTree {
     job: windows::Win32::Foundation::HANDLE,
 }
 
 #[cfg(windows)]
-impl ProviderProcessTree {
-    fn attach(child: &Child) -> std::io::Result<Self> {
+impl ManagedProcessTree {
+    pub fn attach(child: &Child) -> std::io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
         use windows::Win32::Foundation::{CloseHandle, HANDLE};
         use windows::Win32::System::JobObjects::{
@@ -489,7 +493,7 @@ impl ProviderProcessTree {
         }
     }
 
-    fn terminate(&self, child: &mut Child) {
+    pub fn terminate(&self, child: &mut Child) {
         use windows::Win32::System::JobObjects::TerminateJobObject;
         unsafe {
             let _ = TerminateJobObject(self.job, 1);
@@ -497,7 +501,7 @@ impl ProviderProcessTree {
         let _ = child.kill();
     }
 
-    fn resume(&self, child: &Child) -> std::io::Result<()> {
+    pub fn resume(&self, child: &Child) -> std::io::Result<()> {
         use windows::Win32::Foundation::CloseHandle;
         use windows::Win32::System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
@@ -540,7 +544,7 @@ impl ProviderProcessTree {
 }
 
 #[cfg(windows)]
-impl Drop for ProviderProcessTree {
+impl Drop for ManagedProcessTree {
     fn drop(&mut self) {
         use windows::Win32::Foundation::CloseHandle;
         unsafe {
@@ -550,19 +554,19 @@ impl Drop for ProviderProcessTree {
 }
 
 #[cfg(not(any(unix, windows)))]
-struct ProviderProcessTree;
+pub struct ManagedProcessTree;
 
 #[cfg(not(any(unix, windows)))]
-impl ProviderProcessTree {
-    fn attach(_child: &Child) -> std::io::Result<Self> {
+impl ManagedProcessTree {
+    pub fn attach(_child: &Child) -> std::io::Result<Self> {
         Ok(Self)
     }
 
-    fn terminate(&self, child: &mut Child) {
+    pub fn terminate(&self, child: &mut Child) {
         let _ = child.kill();
     }
 
-    fn resume(&self, _child: &Child) -> std::io::Result<()> {
+    pub fn resume(&self, _child: &Child) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -622,7 +626,7 @@ where
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    configure_provider_process_tree(&mut child_command);
+    configure_managed_process(&mut child_command, false);
     let mut child = match child_command.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -642,7 +646,7 @@ where
     // callback is empty; the spawned primary thread must already be suspended
     // before this point, and Job attachment below is its only route to resume.
     after_spawn_before_attach(&child);
-    let process_tree = match ProviderProcessTree::attach(&child) {
+    let process_tree = match ManagedProcessTree::attach(&child) {
         Ok(tree) => tree,
         Err(error) => {
             let _ = child.kill();

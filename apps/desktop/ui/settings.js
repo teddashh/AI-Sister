@@ -4,9 +4,31 @@ const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
 
 const el = {
   path: document.querySelector("[data-path]"),
-  brainCommand: document.querySelector("[data-brain-command]"),
-  brainArgs: document.querySelector("[data-brain-args]"),
   brainSay: document.querySelector("[data-brain-say]"),
+  brainTest: document.querySelector("[data-brain-test]"),
+  brainCancel: document.querySelector("[data-brain-cancel]"),
+  brainProviders: Object.freeze({
+    claude: Object.freeze({
+      card: document.querySelector("[data-brain-claude-card]"),
+      status: document.querySelector("[data-brain-claude-status]"),
+      action: document.querySelector("[data-brain-claude-action]"),
+    }),
+    codex: Object.freeze({
+      card: document.querySelector("[data-brain-codex-card]"),
+      status: document.querySelector("[data-brain-codex-status]"),
+      action: document.querySelector("[data-brain-codex-action]"),
+    }),
+    gemini: Object.freeze({
+      card: document.querySelector("[data-brain-gemini-card]"),
+      status: document.querySelector("[data-brain-gemini-status]"),
+      action: document.querySelector("[data-brain-gemini-action]"),
+    }),
+    grok: Object.freeze({
+      card: document.querySelector("[data-brain-grok-card]"),
+      status: document.querySelector("[data-brain-grok-status]"),
+      action: document.querySelector("[data-brain-grok-action]"),
+    }),
+  }),
   personaEnabled: document.querySelector("[data-persona-enabled]"),
   personaId: document.querySelector("[data-persona-id]"),
   personaPicker: document.querySelector("[data-persona-picker]"),
@@ -849,7 +871,10 @@ let cloudOk = null;
  * `"unreadable"`：沒量到不能冒充量到沒有 recorder。
  */
 let watchingNow = "unreadable";
-let savedBrainCommand = "";
+let brainCliView = null;
+let brainCliBusy = false;
+let brainCliMessage = null;
+let brainCliMessageBad = false;
 let savedPersonaId = null;
 let personaPreviewId = null;
 const personaChoices = [];
@@ -1707,10 +1732,7 @@ function apply(s) {
     throw new Error("設定回傳了這一版不認得的角色 ID；沒有套用這份設定。");
   }
   queryLogWas = s.query_log;
-  savedBrainCommand = (s.brain_command ?? "").trim();
   el.path.textContent = s.path;
-  if (el.brainCommand) el.brainCommand.value = s.brain_command ?? "";
-  if (el.brainArgs) el.brainArgs.value = (s.brain_args ?? []).join("\n");
   if (el.personaEnabled) el.personaEnabled.checked = s.persona_enabled !== false;
   if (el.personaId) {
     delete el.personaId.dataset.unrecognizedPersonaId;
@@ -1732,89 +1754,187 @@ function apply(s) {
   paintPersonaSettings();
 }
 
-/**
- * 大腦這一格現在到底是開是關。四種，不是兩種。
- *
- * 「她沒有 CLI 可以叫」和「她有 CLI 但你沒許可」修法完全不同（一個去填框，
- * 一個去勾同意書）。印成同一句就是這個 repo 犯過四十次的那個錯。
- */
+const BRAIN_PROVIDER_IDS = Object.freeze(["claude", "codex", "gemini", "grok"]);
+
+function validBrainCliView(next) {
+  if (
+    !Array.isArray(next?.providers) ||
+    next.providers.length !== BRAIN_PROVIDER_IDS.length ||
+    (!BRAIN_PROVIDER_IDS.includes(next?.selected) && next?.selected !== null) ||
+    typeof next?.custom_configured !== "boolean" ||
+    typeof next?.busy !== "boolean"
+  ) {
+    return false;
+  }
+  return next.providers.every(
+    (provider, index) =>
+      provider?.id === BRAIN_PROVIDER_IDS[index] &&
+      typeof provider.label === "string" &&
+      typeof provider.installed === "boolean" &&
+      (provider.version === null || typeof provider.version === "string") &&
+      typeof provider.selected === "boolean" &&
+      provider.selected === (next.selected === provider.id),
+  );
+}
+
+function setBrainCliView(next) {
+  if (!validBrainCliView(next)) {
+    throw new Error("CLI 狀態格式不符合這一版 AI-Sister");
+  }
+  brainCliView = next;
+  brainCliBusy = next.busy;
+}
+
 function paintBrain() {
+  const selected = brainCliView?.selected ?? null;
+  const busy = brainCliBusy || brainCliView?.busy === true;
+  for (const providerId of BRAIN_PROVIDER_IDS) {
+    const nodes = el.brainProviders[providerId];
+    const provider = brainCliView?.providers?.find((item) => item.id === providerId);
+    const installed = provider?.installed === true;
+    const active = selected === providerId;
+    nodes.card?.classList.toggle("active", active);
+    if (nodes.status) {
+      nodes.status.textContent = !provider
+        ? "正在偵測…"
+        : !installed
+          ? "未安裝"
+          : active
+            ? provider.version
+              ? `使用中 · ${provider.version}`
+              : "使用中"
+            : provider.version ?? "已安裝";
+    }
+    if (nodes.action) {
+      nodes.action.textContent = active ? "重新登入" : "登入並使用";
+      nodes.action.disabled = unreadable || busy || !installed;
+    }
+  }
+
+  if (el.brainTest) {
+    el.brainTest.hidden = selected === null;
+    el.brainTest.disabled = unreadable || busy || selected === null;
+  }
+  if (el.brainCancel) {
+    el.brainCancel.hidden = !busy;
+    el.brainCancel.disabled = false;
+  }
   if (!el.brainSay) return;
   if (unreadable) {
-    el.brainSay.textContent = "";
-    el.brainSay.classList.remove("bad", "ok");
     el.brainSay.hidden = true;
     return;
   }
   el.brainSay.hidden = false;
   el.brainSay.classList.remove("bad", "ok");
-  const cmd = (el.brainCommand?.value ?? "").trim();
-  if (cmd !== savedBrainCommand) {
-    // 這個框裡的字還沒進 config.toml，所以不可以拿它宣布機器**現在**在做
-    // 什麼——這是整頁唯一一個會把螢幕上的字送出這台機器的設定，講錯的方向
-    // 是「說它關了而它還在送」。
-    //
-    // 但「第二張同意書勾了沒」是**磁碟上的事實**，跟這個框無關，所以那句
-    // 警告不准跟著被吞掉：他存下去之後，擋住他的就是它。一句「還沒存」
-    // 替代掉一句警告，不叫少講一句。
-    if (cloudOk === false) {
-      el.brainSay.classList.add("bad");
-      el.brainSay.textContent =
-        "這是還沒存的改動，按下儲存才算數。而且第二張同意書還沒勾：就算存了，螢幕上的字也一次都不會交給這支 CLI。";
-      return;
-    }
-    el.brainSay.textContent = "這是還沒存的改動，按下儲存才算數。";
+  if (brainCliMessage !== null) {
+    el.brainSay.textContent = brainCliMessage;
+    if (brainCliMessageBad) el.brainSay.classList.add("bad");
+    else if (!busy) el.brainSay.classList.add("ok");
     return;
   }
-  if (!cmd) {
-    // 1. 沒填命令（不管同意書勾了沒）。
-    el.brainSay.textContent =
-      "還沒填命令：解釋層和審閱層一次都不會醒。空著就是關，不是跑得慢一點。";
+  if (selected === null) {
+    el.brainSay.textContent = brainCliView?.custom_configured
+      ? "選一個 CLI，接好後會取代目前的自訂大腦。"
+      : "選一個已安裝的 CLI。";
     return;
   }
+  const label =
+    brainCliView.providers.find((provider) => provider.id === selected)?.label ?? selected;
   if (cloudOk === null) {
-    el.brainSay.textContent =
-      "命令有了，但問不到第二張同意書勾了沒。在問得到之前，不能當成會送。同意書那一頁看得到同一份答案。";
+    el.brainSay.textContent = `${label} 已接好。`;
     return;
   }
   if (cloudOk === false) {
-    // 2. 填了命令，第二張沒勾。
-    el.brainSay.classList.add("bad");
-    el.brainSay.textContent =
-      "命令有了，但第二張同意書還沒勾：螢幕上的字只留在這台機器，一次都不會交給這支 CLI。去「四張同意書」那一頁勾上雲解讀。";
+    el.brainSay.textContent = `${label} 已接好。完成「四張同意書」的雲端解讀後啟用。`;
     return;
   }
-  // 兩個條件都成立。watching 那三個值決定她現在會不會醒——不要自己再發明一個判斷。
   if (watchingNow === "recording") {
-    // 4. 兩個都成立而且正在錄。
     el.brainSay.classList.add("ok");
-    el.brainSay.textContent = "命令和同意書都齊了，而且正在錄：她會自己醒。";
+    el.brainSay.textContent = `${label} 已接好，正在使用。`;
     return;
   }
   if (watchingNow === "booting") {
-    el.brainSay.textContent =
-      "命令和同意書都齊了。有一個 sister record 正在起來（多半在開資料庫）——它一開始錄，她就會自己醒，不必再按「開始記錄」。";
+    el.brainSay.textContent = `${label} 已接好，記錄啟動後使用。`;
     return;
   }
   if (watchingNow === "thinking") {
-    // 收工那兩分鐘：錄製迴圈已經停了，解釋層還在把最後一段想完
-    // （`heartbeat::Presence::Thinking`）。她確實沒在錄——但底下那句
-    // 「等你按下『開始記錄』」會指著一顆這時候按下去只會回一句
-    // 「還在想最後一段，最多還要 N 秒」的按鈕。和 `WriteOutcome.watching`
-    // 當初為了 booting 拆出第三個值是同一個理由。
-    el.brainSay.textContent =
-      "命令和同意書都齊了。上一場錄製剛停，解釋層還在把最後一段想完——想完才能再開一場，這時候按「開始記錄」會被擋下來。";
+    el.brainSay.textContent = `${label} 已接好，正在完成上一段記憶。`;
     return;
   }
   if (watchingNow === "unreadable") {
     el.brainSay.classList.add("bad");
-    el.brainSay.textContent =
-      "命令和同意書都齊了，但目前讀不懂 recording.beat；不能確認 record 是否正在跑。請按頁尾的「重新讀取」再試。";
+    el.brainSay.textContent = `${label} 已接好；目前讀不到記錄狀態。按「重讀」再查。`;
     return;
   }
-  // 3. 填了命令、同意書也勾了，但現在沒有 record 在跑。
-  el.brainSay.textContent =
-    "命令和同意書都齊了。現在沒有人在錄，等你按下「開始記錄」她才會自己醒。";
+  el.brainSay.textContent = `${label} 已接好。開始記錄後使用。`;
+}
+
+async function refreshBrainCli() {
+  if (invoke === null) return null;
+  const next = await invoke("brain_cli_read");
+  setBrainCliView(next);
+  brainCliMessage = null;
+  brainCliMessageBad = false;
+  paintBrain();
+  return next;
+}
+
+async function connectBrainCli(providerId, event) {
+  if (event?.isTrusted !== true || invoke === null || brainCliBusy || unreadable) return;
+  brainCliBusy = true;
+  brainCliMessageBad = false;
+  brainCliMessage =
+    providerId === "gemini"
+      ? "Gemini 登入視窗已開啟。完成 Google 登入後輸入 /quit；接著會自動測試。"
+      : "登入視窗已開啟；完成後會自動測試。";
+  paintBrain();
+  try {
+    const outcome = await invoke("brain_cli_connect", { provider: providerId });
+    setBrainCliView(outcome.brain);
+    brainCliMessage = `${outcome.label} 已登入、測通並設為大腦。`;
+    brainCliMessageBad = false;
+  } catch (err) {
+    brainCliMessage = String(err?.message ?? err);
+    brainCliMessageBad = true;
+  } finally {
+    brainCliBusy = false;
+    paintBrain();
+  }
+}
+
+async function testBrainCli(event) {
+  if (event?.isTrusted !== true || invoke === null || brainCliBusy || unreadable) return;
+  brainCliBusy = true;
+  brainCliMessage = "正在測試目前的大腦…";
+  brainCliMessageBad = false;
+  paintBrain();
+  try {
+    const outcome = await invoke("brain_cli_test");
+    setBrainCliView(outcome.brain);
+    brainCliMessage = `${outcome.label} 測試通過。`;
+    brainCliMessageBad = false;
+  } catch (err) {
+    brainCliMessage = String(err?.message ?? err);
+    brainCliMessageBad = true;
+  } finally {
+    brainCliBusy = false;
+    paintBrain();
+  }
+}
+
+async function cancelBrainCli(event) {
+  if (event?.isTrusted !== true || invoke === null || !brainCliBusy) return;
+  el.brainCancel.disabled = true;
+  try {
+    const accepted = await invoke("brain_cli_cancel");
+    brainCliMessage = accepted ? "正在取消…" : "登入或測試已經結束。";
+    brainCliMessageBad = false;
+  } catch (err) {
+    brainCliMessage = String(err?.message ?? err);
+    brainCliMessageBad = true;
+    el.brainCancel.disabled = false;
+  }
+  paintBrain();
 }
 
 async function refreshBrainFacts() {
@@ -1891,8 +2011,8 @@ function setUnreadable(on) {
     });
   }
   for (const node of [
-    el.brainCommand,
-    el.brainArgs,
+    ...BRAIN_PROVIDER_IDS.map((providerId) => el.brainProviders[providerId].action),
+    el.brainTest,
     el.personaEnabled,
     el.personaId,
     el.personaMotion,
@@ -1909,7 +2029,7 @@ function setUnreadable(on) {
   ]) {
     if (node) node.disabled = on;
   }
-  for (const box of [el.brainCommand, el.brainArgs, el.apps, el.urls, el.titles]) {
+  for (const box of [el.apps, el.urls, el.titles]) {
     if (!box) continue;
     if (on) {
       box.value = "";
@@ -1929,8 +2049,6 @@ function setUnreadable(on) {
       "修好底下那行錯誤再回來。";
     el.unreadable.hidden = !on;
   }
-  // 命令框被清空之後，這一格會看起來像「她沒有 CLI 可以叫」。那是假的——
-  // 正在跑的那一份我們讀不到。藏起來，讓上面那句「都不算數」說話。
   paintBrain();
   paintPersonaSettings();
   paintPersonaVoice();
@@ -1961,6 +2079,7 @@ async function load() {
     setUnreadable(false);
     say("");
     await refreshPersonaVoice();
+    await refreshBrainCli();
     await refreshBrainFacts();
     paintBrain();
     await relint();
@@ -2086,8 +2205,6 @@ function demo(variant) {
     query_log: true,
     frames_days: 30,
     text_days: 365,
-    brain_command: "",
-    brain_args: [],
     persona_enabled: true,
     persona_id: "chatgpt",
     persona_motion: true,
@@ -2224,27 +2341,48 @@ function demo(variant) {
             config_unreadable: null,
           },
   );
-  // 大腦那一格的四張臉。預設是「沒填命令」——那是產品出廠的樣子（A/B 沒贏
-  // 保持預設關）。另外三張要指名才畫得出來。
-  if (variant === "brain") {
-    if (el.brainCommand) el.brainCommand.value = "claude";
-    if (el.brainArgs) el.brainArgs.value = "-p";
-    cloudOk = false;
-    watchingNow = "recording";
-  } else if (variant === "brainready") {
-    if (el.brainCommand) el.brainCommand.value = "claude";
-    if (el.brainArgs) el.brainArgs.value = "-p";
-    cloudOk = true;
-    watchingNow = "none";
-  } else if (variant === "brainon") {
-    if (el.brainCommand) el.brainCommand.value = "claude";
-    if (el.brainArgs) el.brainArgs.value = "-p";
-    cloudOk = true;
-    watchingNow = "recording";
-  } else {
-    cloudOk = false;
-    watchingNow = "none";
-  }
+  const selected = ["brain", "brainready", "brainon"].includes(variant)
+    ? "claude"
+    : null;
+  setBrainCliView({
+    selected,
+    custom_configured: false,
+    busy: false,
+    providers: [
+      {
+        id: "claude",
+        label: "Claude Code",
+        installed: true,
+        version: "2.1.266",
+        selected: selected === "claude",
+      },
+      {
+        id: "codex",
+        label: "Codex CLI",
+        installed: true,
+        version: "codex-cli 0.153.2",
+        selected: false,
+      },
+      {
+        id: "gemini",
+        label: "Gemini CLI",
+        installed: false,
+        version: null,
+        selected: false,
+      },
+      {
+        id: "grok",
+        label: "Grok CLI",
+        installed: true,
+        version: "grok 1.0.13",
+        selected: false,
+      },
+    ],
+  });
+  brainCliMessage = null;
+  brainCliMessageBad = false;
+  cloudOk = variant === "brainready" || variant === "brainon";
+  watchingNow = variant === "brainon" ? "recording" : "none";
   paintBrain();
   say("這是 demo 版面，沒有讀任何真的設定。");
 }
@@ -2284,8 +2422,6 @@ async function save() {
         query_log: el.querylog.checked,
         frames_days: days(el.framesDays, "畫面"),
         text_days: days(el.textDays, "文字"),
-        brain_command: (el.brainCommand?.value ?? "").trim(),
-        brain_args: toLines(el.brainArgs?.value ?? ""),
         persona_enabled: el.personaEnabled?.checked === true,
         persona_id: el.personaId?.value ?? "chatgpt",
         persona_motion: el.personaMotion?.checked === true,
@@ -2394,7 +2530,13 @@ paintPersonaSettings();
 el.save?.addEventListener("click", () => void save());
 el.reload?.addEventListener("click", () => void load());
 el.loginStartup?.addEventListener("change", (event) => void setLoginStartup(event));
-el.brainCommand?.addEventListener("input", () => paintBrain());
+for (const providerId of BRAIN_PROVIDER_IDS) {
+  el.brainProviders[providerId].action?.addEventListener("click", (event) =>
+    void connectBrainCli(providerId, event),
+  );
+}
+el.brainTest?.addEventListener("click", (event) => void testBrainCli(event));
+el.brainCancel?.addEventListener("click", (event) => void cancelBrainCli(event));
 el.personaEnabled?.addEventListener("change", paintPersonaSettings);
 el.personaId?.addEventListener("change", paintPersonaSettings);
 el.personaDownload?.addEventListener("click", (event) => void installPersonaAssets(event));

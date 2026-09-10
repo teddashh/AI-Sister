@@ -71,7 +71,12 @@ alpha.118 再完成跨 capture／brain／hands 的 master stop：`sister stop-al
 才回成功；系統匣、CLI 與問答分得出正在排乾、已完成、讀不到三種情況，不會提早說「都停了」。
 解除全停不會順手解除原本的暫停或拔手。alpha.119 把 17 位角色的本機日常語音完整隨程式
 安裝：每人基本 8 句＋擴充 24 句，共 544 段；exact 日常短句直接使用目前角色的錄音，
-其餘問題維持既有記憶／CLI 大腦。Windows production signing pipeline 已完整接到
+其餘問題維持既有記憶／CLI 大腦。alpha.120 完成同版 Release 才部署的一頁官網與
+Windows production signing pipeline。alpha.121 再把大腦設定收斂成 Claude Code、Codex、
+Gemini CLI、Grok CLI 四張卡：偵測本機版本、啟動 provider 官方登入、經 bundled bridge
+實際測通，成功才切換；測試、取消與失敗都保留原本的大腦。prompt 不進 argv，provider
+每次在新建的空 private workspace 執行，帳號憑證仍只由各 CLI 保存。簽第二張同意前，
+AI-Sister 一次都不會把 OCR 文字交給它。Windows production signing pipeline 已完整接到
 四層 Authenticode 驗證與發版 receipt；正式 CA 發行憑證尚未配置，現行公開 alpha 仍是 unsigned，
 所以現在還不是 Release 1.0。** Windows 10+
 會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。

@@ -92,6 +92,23 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   模型 cache、QC 工作檔與 private receipt 都留在 voice-lab 外。發布前 544 段全部通過格式、
   音量、長度、雙 ASR 與 speaker-identity QC，CI 再驗 shipped bytes/hash/inventory。
 
+### CLI 大腦登入合約（alpha.121 起）
+
+- **四個入口，沒有手填命令列**：設定頁固定列 Claude Code、Codex、Gemini CLI、Grok CLI；
+  native 端從 `PATH` 與 Windows 標準安裝位置找 executable，以有界 version probe 顯示
+  實際版本。未安裝的選項不提供登入動作，舊 raw brain 設定也不會冒充其中一張卡已接好。
+- **provider 自己登入，AI-Sister 驗最終通路**：trusted click 才會開所選 CLI 的官方登入；
+  登入結束後，同一筆操作必須再經 bundled `sister.exe brain-cli-bridge` 回 exact 固定 token。
+  只有登入、bridge、provider 三者都通過，才 atomic 寫入新大腦。AI-Sister 不接收或保存
+  provider 密碼、token、cookie。
+- **失敗不切換，取消要收完整**：同時只准一筆登入／測試。登入失敗、probe 失敗、逾時、
+  儲存失敗與使用者取消都保留原設定；取消會終止整個 process group／Windows Job tree，
+  不能只關 parent 後把 browser helper 或 CLI child 留著。
+- **prompt 不進 argv，也不看專案目錄**：Claude／Codex／Gemini 從 stdin 收 prompt；Grok
+  使用 owner-only、handle 關閉即刪的 private prompt file。四支 provider 都在每次新建的
+  空 private working directory 執行，結束後移除。brain／core／recorder 仍無 HTTP client；
+  真正的 provider 連線只存在使用者已安裝的那支 CLI 裡。
+
 ### Azure 可選 TTS 合約（alpha.109 起；alpha.110 改為 opt-in 後自動讀新答案）
 
 - **本機仍是預設，沒有自動 fallback**：Azure 預設 disabled、沒有預設 region；本機
@@ -416,7 +433,9 @@ Wayland 才留到 P8／社群成熟化；Preview 的隱私與資料語意不因�
   SPEC §11.3 的去識別化管線 2026-08-26 拿掉：代號跨段對不起來，
   會把 §6 承諾表和 entities 的地基拆掉〕
 - 模型接入：spawn 使用者已登入的 CLI（2026-08-21 定案；不是 BYOK HTTP、
-  也不是內建推論引擎）。設定在 `[brain] command` / `args`。
+  也不是內建推論引擎）。alpha.121 由設定頁偵測 Claude Code／Codex／Gemini CLI／Grok CLI，
+  完成 provider 官方登入與 bundled bridge 實測後，才把固定 bridge 寫進
+  `[brain] command` / `args`。
 - **A/B gate**：harness 跑 `+interpreter` vs 不跑——照〔定案〕沒贏就保持預設關。
 
 **Exit criteria**
@@ -717,6 +736,11 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     的 manifest bytes／hash／總量；只有同一輪 Release 公開後，獨立 Pages job 才部署
     <https://teddashh.github.io/AI-Sister/>。
     1.0 不內建自動 updater，由使用者手動下載新版 installer。
+  - ✅ alpha.121 完成四支 CLI 大腦登入：設定頁直接偵測 Claude Code、Codex、Gemini CLI、
+    Grok CLI 與版本，從 trusted click 啟動 provider 官方登入，接著用 bundled bridge 跑固定
+    probe；只有整條通過才原子切換。測試、取消、逾時與失敗都不覆蓋原大腦，取消會收掉
+    整個 process tree。runtime prompt 不進 argv，provider 在一次性空 private workspace
+    執行，結束後清除；帳號憑證仍完全由各 CLI 保存。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）
 - ✅ a `CommitmentDue`：`open_commitments_due_before(now + 40min)`，只收

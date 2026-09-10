@@ -413,10 +413,23 @@ feature 集合沒有 `download`；Azure 答案朗讀收在 `crates/sister-tts`�
 集合沒有 `azure`。只有 desktop 明確啟用這兩個窄 transport；它們都不把 HTTP 能力
 交給 brain，Azure TTS 也不是模型接入或 OCR 出境路徑。
 
-- **這一版落地的**：`[brain] command` + `args`。沒設定就一次都不呼叫。
-- **還沒做的**：(a) 訂閱登入的 OAuth 輔助（MAT `signin.ts`）——使用者自己
-  在那支 CLI 裡登入即可；(b) 本地 Ollama 偵測。兩者都還是 spawn CLI，不是
-  把 HTTP client 拉進相依樹。
+- **alpha.121 的設定入口**：設定頁固定列 Claude Code、Codex、Gemini CLI、Grok CLI
+  四張卡。native 端從 `PATH` 與各 CLI 的 Windows 標準安裝位置找 executable，並以
+  有界 `--version` probe 顯示實際版本；未安裝的選項不能按登入。
+- **登入與選用是同一筆 transaction**：trusted click 才會開該 provider 自己的登入流程；
+  登入結束後，desktop 立即透過 bundled `sister.exe brain-cli-bridge` 要求 exact 固定
+  token。只有 bridge、provider 與既有登入三者一起測通，才 atomic 寫入新大腦；登入、
+  probe、儲存失敗或取消都保留原設定。任一時刻只准一筆登入／測試；取消會終止整個
+  process tree。
+- **runtime bridge**：`config.toml` 仍以 `[brain] command` + `args` 保存，但設定頁只會
+  寫入 bundled sister executable、固定 bridge 子命令、typed provider 與已偵測的 executable，
+  不接受使用者把 prompt 或任意參數拼進介面。Claude／Codex／Gemini 從 stdin 收 prompt；
+  Grok 使用只有目前使用者可讀、handle 關閉即刪的 private prompt file。四支 provider 都在
+  每次新建的空 private working directory 執行，結束後整個移除；OCR 原文不進 argv。
+- **舊自訂設定**：既有 raw `[brain] command` / `args` 繼續可由 recorder 使用，但不會在
+  四張 provider 卡中冒充「正在使用」。從設定頁選定任一 provider 後，就改由上述固定
+  bridge 管理。brain／core／recorder 沒有 HTTP client；帳號與 token 由 provider CLI 自己
+  保存，AI-Sister 不接收也不保存。
 - **角色→模型對映**（可配置，附預設）：interpreter=cheap tier；reviewer=mid tier
   （夜間 batch 半價）；chat=使用者選；hands=使用者訂閱的 coding agent。
   實際選哪一個模型，是那支 CLI 自己的事。

@@ -10,7 +10,7 @@ task 裡，而八張都寫著「去 Windows 上測」的紙條，效果等於零
 
 ## 怎麼用
 
-alpha.120 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+最新 artifact 產出後，從 [Releases](https://github.com/teddashh/AI-Sister/releases)
 下載對應 tag 的 `AI-Sister-Setup.exe` 並優先走安裝版。只有要跑 portable／CLI、或診斷
 installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，並把兩個檔
 **放同一個資料夾**（桌面姊妹是去隔壁找 `sister.exe` 的）。
@@ -21,6 +21,26 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
+
+### alpha.121 先驗四支 CLI 大腦登入
+
+- [ ] 安裝正式 Setup 後開設定。大腦區只能看到 Claude Code、Codex、Gemini CLI、Grok CLI
+      四張卡與「測試目前大腦」；不能看到 command／args 輸入框。已安裝 CLI 要顯示實際
+      版本，未安裝者顯示「未安裝」且登入鈕不可按。
+- [ ] 依序選可用的 provider。登入鈕要開該 CLI 自己的登入流程；Gemini 在瀏覽器完成後回
+      視窗輸入 `/quit`。登入結束後應自動跑 bridge probe，成功顯示「已登入、測通並設為
+      大腦」。完全退出再重開設定，仍只有最後成功者標成「使用中」。
+- [ ] 按「測試目前大腦」，固定 probe 必須由目前選定的 bundled bridge 完整跑過；測試不能
+      修改 provider 或其他設定。開設定、重整狀態、切換角色與儲存其他設定都不得自行叫 CLI。
+- [ ] 在登入中與 bridge probe 中各按一次取消。登入視窗與它啟動的 child process 都要結束，
+      目前大腦維持取消前那一支；完全重開 desktop 後仍相同。另讓登入非零退出、probe 回錯
+      token 與 executable 消失各跑一次，也都不能覆蓋舊設定。
+- [ ] 簽第二張同意並錄一段可辨識文字，讓 L2 使用新選定 provider。`sister.exe brain log`
+      應記到該輪呼叫與結果，外送紀錄只含 OCR 文字；不得出現截圖 bytes、圖片路徑或 prompt
+      argv。以 process monitor 確認 provider working directory 是一次性空目錄，結束後消失。
+- [ ] 留 packet trace。未按登入或測試前，開 app、開設定、版本偵測與設定重讀都是 0 provider
+      request；按登入後只有 provider 官方驗證與固定 probe，不能把本機記憶或 OCR 夾進登入
+      probe。
 
 ### alpha.120 先驗官網 → Release 的同一份安裝包
 
