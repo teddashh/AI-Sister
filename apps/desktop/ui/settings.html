@@ -43,7 +43,7 @@
       -->
       <p class="health" data-machine hidden></p>
 
-      <section>
+      <section data-login-startup-section hidden>
         <h2>Windows 登入後</h2>
         <label class="check">
           <input type="checkbox" data-login-startup disabled />
@@ -62,6 +62,21 @@
           這顆開關按下就立即變更 Windows 登入項，不跟頁尾的「儲存」一起送。
           關掉只影響下次登入，不會停止這一輪正在跑的 desktop 或 recorder。
         </p>
+      </section>
+
+      <section data-platform-access-section hidden>
+        <h2>macOS 螢幕記憶</h2>
+        <div class="platform-access-row">
+          <span>螢幕錄製</span>
+          <strong data-platform-screen-state>正在讀取…</strong>
+          <button class="ghost" type="button" data-platform-screen-open>開啟設定</button>
+        </div>
+        <div class="platform-access-row">
+          <span>輔助使用</span>
+          <strong data-platform-ax-state>正在讀取…</strong>
+          <button class="ghost" type="button" data-platform-ax-open>開啟設定</button>
+        </div>
+        <p class="state" role="status" aria-live="polite" data-platform-access-say></p>
       </section>
 
       <section>

@@ -10,92 +10,19 @@
 > separate, default-off Azure TTS option can send only each newly completed
 > answer body after its own consent; manual replay sends it again. Local speech remains the default.
 
-**Status: Windows alpha 已經從記錄、L2/L3、Gatekeeper 接到 Phase 6 的手；Persona
-的 17 位角色圖、workplace rig 與 544 段日常語音全部隨程式安裝。alpha.106 已接上
-Windows current-user 離線安裝包與
-single-instance，並在真 Windows CI 走完 fresh install、行程交棒、已存活行程拒絕、
-同版 reinstall 與移除。alpha.107 再接上預設關閉的 Windows 登入啟動，以及只管理
-desktop 自己啟動之 recorder 的 bounded supervisor；純 policy／狀態機、renderer fixture
-與 Windows registry test-subkey 都有自動測試，但正式 alpha.107 安裝檔的真登入、暫停、
-重試與移除流程仍待 Windows 人工實測，不能寫成已通過。alpha.108 移除單字母角色，
-直接內建四姊妹＋13 位閨密的 17 張 current 角色圖，並接上 trusted-click、localService-only
-的本機中文語音與答案朗讀；這一段仍待正式 Windows artifact 人工聽驗。alpha.109 再加入
-預設關閉、沒有自動 fallback 的 Azure 繁中 TTS：第四張獨立同意、Windows Credential
-Manager 金鑰與三個固定區域的 native POST 已接線，正式 Windows artifact 的語音、封包
-與取消時序仍待人工勾驗。alpha.110 把已明確啟用且重簽第四張的 Azure 改為每份最新
-新答案完成後自動朗讀一次，仍可隨時關閉；alpha.109 的 click-only 第四張不會被沿用。
-同版將 5.2 GB Reel 候選縮成 17 套 workplace 分層 rig：402 張 PNG、
-35,140,885 bytes，只解碼目前角色，並保留原 WebP 當解碼失敗退路。alpha.111 tag
-原定加入圖像選角與跨版安裝驗證，但 tag-only Windows gate 依賴 ambient native stdout
-編碼，中文標題被錯誤解碼後失敗；Release job 因此跳過，沒有公開 release 或下載資產。
-alpha.112 把 native CLI stdout 明確固定用 UTF-8 解碼，並把 17 張 bundled WebP
-做成設定頁的圖像選角卡；點選先留在本機預覽，儲存成功才嘗試即時通知主視窗換人，
-通知失敗會明講重開 desktop 後生效。同版 Windows CI 從最後一個有公開安裝檔的
-alpha.110 真正安裝後，再由 alpha.112 installer 原地升級；Run absent／enabled 兩條路、
-舊 DB 查詢、四張同意與 synthetic 證據檔關聯都要讀回來，Persona／Azure 非密設定則要
-原 bytes 保留並仍可由新版解析。這不是正式 WebView 點圖或真 OCR 的人工證據。
-alpha.113 先讓本版產生的 Setup／uninstaller 覆寫 Tauri stock running-app macro；舊 image
-scanner 回報 `sister-desktop.exe`／`sister.exe` 命中時只拒絕，不提供或執行強制關閉。
-alpha.114 把早已出貨的 17 套完整 1280×1280 透明 rig 從舊的上方
-640×640 crop 還原成全身，移除頭像底色、邊框、圓角與厚投影，改成跟著人物
-alpha 的浮空陰影。原本 17 張不透明半身 WebP 也換成由同一批 workplace canvas
-縮出的 640×640 透明全身預覽，冷啟動、壞圖退路與設定選角都不會倒回相框半身；
-它們合計 1,031,124 bytes。402 張 PNG 仍是 35,140,885 bytes，5.2 GB 裡其他服裝
-和 reaction 仍不出貨。應用程式圖示也改從同一張 ChatGPT 全身預覽裁出；exact 五檔
-另以 manifest／NOTICE 固定來源、recipe、464,143 bytes 與授權範圍。
-alpha.115 再改用 pinned tauri-bundler 2.9.4 custom NSIS template，修掉真人升級時
-PageLeave child 把自己當 direct uninstall、撞上 parent lifecycle mutex 的路徑。Setup 現在
-絕不巢狀執行已安裝的 NSIS uninstaller；同版 repair 或舊版升新版會在 mutex 下綁定
-current-user 產品鍵所記的 exact root 原地覆蓋，並與 uninstall key 交叉核對。GUI、passive `/P` 與 silent `/S`
-都在 WebView2、payload 或安裝登錄 mutation 前重驗 `DisplayVersion`、root 與 quoted
-`UninstallString`；downgrade 要關閉 Setup，再從 Windows「已安裝的應用程式」分開移除。
-direct uninstaller 在 `PREUNINSTALL` 後也重驗 exact version／root／string，避免停在確認頁的
-舊 uninstaller 隨後刪掉已覆蓋的新版。帶協定的 desktop／CLI 與 installer 仍用 product event
-及 mutex／event／mutex handshake 交接。
-原生 Windows CI 除既有 `/S` admission lanes，另用真正進入 `PageReinstall` 的 `/P`、
-alternate `/D` 與 `PING.EXE` child witness 驗證沒有巢狀執行，再用 `/S` 驗 downgrade 在
-mutation 前退出；這仍不是滑鼠真人互動證據。
-alpha.116 另修正桌面問「她知道了什麼」時把「知道」當全文關鍵字、撈到設定頁 OCR 的
-答非所問：這組窄問法現在直接讀本機 current L2，最多列三張來自最近四張候選、資料庫
-仍標有畫面出處的理解卡；每張都是可修正假設，不是確定事實。只有原始紀錄、目前沒有
-記憶內容與最近候選沒有畫面出處會分開說，不再用 OCR 墊答案。帶主題的
-「妳知道客服電話嗎」仍走一般檢索。這次提問不叫 CLI，也不增加網路能力；Azure 已明確
-啟用時仍只照既有第四張同意送答案正文。
-alpha.117 在 legacy scan 之後、NSIS `File` 之前再加一道檔案層獨佔開檔：只要有任何行程
-正在執行已安裝的 `sister-desktop.exe`／`sister.exe`（不論行程名字、版本、有沒有 event），
-Setup／uninstaller 就以 exit 32 拒絕、不 kill；拿到 handle 後舊檔先改名再寫新檔，Windows
-loader 沒有窗可映射。Windows CI 用公開 alpha.110 舊 recorder 的 hard link 別名實測過這件事。
-已經出貨或複製到 temp 的舊 uninstaller 仍不能 retroactively 改寫。
-alpha.118 再完成跨 capture／brain／hands 的 master stop：`sister stop-all` 先拒絕新工作、
-等已開始的擷取、CLI agent、reviewer 寫入與 hands OS call 排乾，durable latch 真正生效後
-才回成功；系統匣、CLI 與問答分得出正在排乾、已完成、讀不到三種情況，不會提早說「都停了」。
-解除全停不會順手解除原本的暫停或拔手。alpha.119 把 17 位角色的本機日常語音完整隨程式
-安裝：每人基本 8 句＋擴充 24 句，共 544 段；exact 日常短句直接使用目前角色的錄音，
-其餘問題維持既有記憶／CLI 大腦。alpha.120 完成同版 Release 才部署的一頁官網與
-Windows production signing pipeline。alpha.123 再把大腦設定收斂成 Claude Code、Codex、
-Gemini CLI、Grok CLI 四張卡：偵測本機版本、啟動 provider 官方登入、經 bundled bridge
-實際測通，成功才切換；測試、取消與失敗都保留原本的大腦。prompt 不進 argv，provider
-每次在新建的空 private workspace 執行，帳號憑證仍只由各 CLI 保存。簽第二張同意前，
-AI-Sister 一次都不會把 OCR 文字交給它。alpha.124 把同一支 CLI 接進 S1 問答：facts 與
-全文檢索先在本機挑出最多 12 筆來源，CLI 只把這一題講成 1–3 句；每一句都必須引用這次
-真的選中的本機來源，畫面上的「本機出處」可直接回到原畫面。沒有 CLI、沒有第二張同意、
-輸出不合契約或取消時，完整的本機結果列表照常回答；新題會終止舊題的整棵 CLI 行程樹。
-Windows production signing pipeline 已完整接到
-四層 Authenticode 驗證與發版 receipt；正式 CA 發行憑證尚未配置，現行公開 alpha 仍是 unsigned，
-所以現在還不是 Release 1.0。** Windows 10+
-會是 1.0 的正式支援平台；macOS 與 Linux X11 先走 Preview。
-可以先看 [官方網站](https://teddashh.github.io/AI-Sister/)，或直接從
-[Releases](https://github.com/teddashh/AI-Sister/releases) 下載目前的 alpha。
+**Status: v0.1.0-alpha.125**
 
-macOS 現在有一條 **feature-gated 原生診斷，不是產品擷取後端或 Preview**：alpha.105
-的 `macos-15` Apple Silicon job 由 LaunchServices 啟動 ad-hoc signed、hardened `.app`，
-再以 live PPID 與 `proc_pidpath` 對回 `sister-desktop` → bundle 內 exact `sister`。那場
-runner shell 的 CoreGraphics preflight 是 true，exact child 則回
-`not_granted_or_undetermined`／`not_attempted`，因此沒有呼叫 ScreenCaptureKit capture。
-這證明的是原生 app-tree 拓撲與「未授權就停」的 diagnostic fail-closed 路徑，**沒有
-執行 pixel path，也不是 macOS Preview**。七天 Actions artifact 雖可下載，名稱明標
-`NOT-PREVIEW`，不是 release asset；production `record`、Vision／AX、產品
-consent/TCC lifecycle 與完整 S1 都還沒接。
+AI-Sister 已完成本機記錄、OCR、L0–L3 記憶、本機 RAG、逐句可點出處，以及 Claude Code、
+Codex、Gemini CLI、Grok CLI 四種大腦登入。四姊妹與 13 位閨密共 17 位；角色圖、
+workplace rig 與每人基本 8 句＋擴充 24 句語音都隨程式安裝。
+
+- Windows 10+：Setup、桌面程式、常駐 recorder 與完整 S1。
+- Ubuntu 24.04 X11：`.deb`、原生 X11 擷取、AT-SPI 隱私脈絡、本機 Tesseract 與完整 S1。
+- macOS 14+：ScreenCaptureKit、Vision OCR、AX 隱私脈絡與 TCC 設定介面已接進 product build；
+  公開下載在 Developer ID notarization 與原生 TCC/S1 驗收完成後加入 Release。
+
+下載請到 [官方網站](https://teddashh.github.io/AI-Sister/) 或
+[Releases](https://github.com/teddashh/AI-Sister/releases)。
 
 她開始看或把答案文字交給 Azure 之前有**四張各自獨立、隨時撤得掉的同意書**，條文和效力就是：
 
@@ -143,7 +70,7 @@ WAL 工作檔當成每天永久長大，所以**不拿來作 Phase 0 判決**；
 
 | | 做什麼 |
 |---|---|
-| `AI-Sister-Setup.exe` | **一般使用者優先下載這個。** current-user NSIS 會把 exact `sister.exe` sidecar 和 WebView2 offline installer 一起帶進去；設計為安裝時不需連網，代價是安裝包會顯著變大，實際 bytes 見該版 Release asset。正式 artifact 的斷網安裝仍待實測 |
+| `AI-Sister-Setup.exe` | **一般使用者優先下載這個。** current-user NSIS 會把 exact `sister.exe` sidecar 和 WebView2 offline installer 一起帶進去；安裝時不需連網，安裝包 bytes 見該版 Release asset |
 | `sister.exe` | 錄製、搜尋、重播評測與資料管理；也包含 `interpret`／`review`／`watch`、Gatekeeper 的 `speak`，以及 `do`／`hands`／`url-policy` 的行動與稽核入口 |
 | `sister-desktop.exe` | 桌面角落的姊妹：錄製狀態、搜尋與可點開的出處、時間軸與刪除；也顯示目前推測、Gatekeeper 與 hands 建議，並主動詢問無人值守網址政策 |
 
@@ -329,13 +256,22 @@ AI-Sister 不提供或保證免費額度。見 [Azure Speech 定價](https://azu
 升級後要讓 v2 recorder 實際看過該站一次。**同 host 只是一筆來源紀錄，不證明網址
 安全或由你主動開啟，也不證明 path、redirect 或站內內容可信。**
 
-**從原始碼**——Linux/macOS 也跑得起來，只是還沒有產品擷取後端，所以第一次不能叫她
-錄；改用 repo 裡那份腳本重播一遍（CI 每次 push 走的是同一條路）：
+**Linux X11（Ubuntu 24.04）安裝**——從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+下載 `AI-Sister-Linux-X11-amd64.deb`：
+
+```bash
+sudo apt install ./AI-Sister-Linux-X11-amd64.deb
+```
+
+安裝包同時安裝桌面程式、`sister` CLI、AT-SPI 與繁中／英文 Tesseract。
+
+**從原始碼**——Windows、macOS 與 Linux 都可建置同一支 CLI。下面先用
+repo 內的確定性腳本重播一遍：
 
 ```
 git clone https://github.com/teddashh/AI-Sister.git
 cd AI-Sister
-cargo build --release -p sister-cli
+cargo build --release -p sister-cli --locked
 ./target/release/sister --data-dir ./data replay scenarios/bill-lookup.json
 ./target/release/sister --data-dir ./data query 電話
 ```

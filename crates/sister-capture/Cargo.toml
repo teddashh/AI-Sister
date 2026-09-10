@@ -9,15 +9,26 @@ authors.workspace = true
 description = "AI-Sister capture layer: platform traits, replay backend, recording loop"
 
 [features]
-default = ["bundled-sqlite"]
+default = ["bundled-sqlite", "macos"]
 bundled-sqlite = ["sister-core/bundled-sqlite"]
-# 只給原生 macOS CI 的 app-tree diagnostic。shipping build 不啟用，這也還不是
-# production capture backend。
-macos-ci-spike = [
+# macOS 14+ production backend：ScreenCaptureKit 擷取、Vision OCR 與 AX privacy gate。
+macos = [
     "dep:apple-metal",
+    "dep:accessibility",
+    "dep:accessibility-sys",
+    "dep:core-foundation",
+    "dep:cocoa",
+    "dep:objc",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-application-services",
     "dep:objc2-core-graphics",
+    "dep:objc2-foundation",
+    "dep:objc2-vision",
     "dep:screencapturekit",
 ]
+# 原生 app-tree smoke 額外打開私有 probe argument；正式 artifact 只用 `macos`。
+macos-ci-spike = ["macos"]
 
 [dependencies]
 sister-core.workspace = true
@@ -63,11 +74,24 @@ windows = { version = "0.62", features = [
 # xinput／xfixes 等尚未實作的能力一起帶進來。
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "=0.13.2", default-features = false, features = ["image", "randr"] }
+atspi-common = { version = "=0.13.0", default-features = false, features = ["zbus"] }
+zbus = { version = "=5.12.0", default-features = true }
+wait-timeout = "=0.2.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # ScreenCaptureKit 9.0.1 supports apple-metal >=0.6,<0.9. Versions after
 # 0.6.0 compile macOS 26 Metal state APIs even when only the macOS 14 SCK
 # feature is enabled, so they require an SDK newer than the macOS 15 runner.
 apple-metal = { version = "=0.6.0", default-features = false, optional = true }
+accessibility = { version = "=0.2.0", optional = true }
+accessibility-sys = { version = "=0.2.0", optional = true }
+core-foundation = { version = "=0.10.1", optional = true }
+cocoa = { version = "=0.26.1", optional = true }
+objc = { version = "=0.2.7", optional = true }
+objc2 = { version = "=0.6.2", optional = true }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSRunningApplication", "NSWorkspace", "libc"], optional = true }
+objc2-application-services = { version = "=0.3.2", default-features = false, features = ["AXError", "AXUIElement", "HIServices", "libc"], optional = true }
 objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGDirectDisplay", "CGWindow"], optional = true }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSObject", "NSString"], optional = true }
+objc2-vision = { version = "=0.3.2", default-features = false, features = ["VNObservation", "VNRecognizeTextRequest", "VNRequest", "VNRequestHandler", "VNTypes", "objc2-core-foundation"], optional = true }
 screencapturekit = { version = "=9.0.1", default-features = false, features = ["macos_14_0"], optional = true }

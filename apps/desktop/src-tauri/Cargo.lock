@@ -2306,6 +2306,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-application-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69282c2b5bc58fba07cb9de2113619532eb551e98efe3d8d695509ef45fbd53b"
+dependencies = [
+ "bitflags 2.13.1",
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "objc2-cloud-kit"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3381,7 +3391,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "sister-assets"
-version = "0.1.0-alpha.124"
+version = "0.1.0-alpha.125"
 dependencies = [
  "fs4",
  "getrandom 0.2.17",
@@ -3392,7 +3402,7 @@ dependencies = [
 
 [[package]]
 name = "sister-core"
-version = "0.1.0-alpha.124"
+version = "0.1.0-alpha.125"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3413,11 +3423,14 @@ dependencies = [
 
 [[package]]
 name = "sister-desktop"
-version = "0.1.0-alpha.124"
+version = "0.1.0-alpha.125"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "objc2-application-services",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "serde",
  "serde_json",
  "sister-assets",
@@ -3437,7 +3450,7 @@ dependencies = [
 
 [[package]]
 name = "sister-hands"
-version = "0.1.0-alpha.124"
+version = "0.1.0-alpha.125"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3451,7 +3464,7 @@ dependencies = [
 
 [[package]]
 name = "sister-shell"
-version = "0.1.0-alpha.124"
+version = "0.1.0-alpha.125"
 dependencies = [
  "serde",
  "serde_json",
@@ -3460,7 +3473,7 @@ dependencies = [
 
 [[package]]
 name = "sister-tts"
-version = "0.1.0-alpha.124"
+version = "0.1.0-alpha.125"
 dependencies = [
  "serde",
  "ureq",

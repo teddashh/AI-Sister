@@ -18,10 +18,14 @@
 
 Windows 預設下載 `AI-Sister-Setup.exe`。這是 current-user 安裝包，內嵌 WebView2
 offline installer 與同版 `sister.exe`，設計為安裝時不需連網；代價是安裝包顯著變大，
-exact 大小以該 tag 的 asset 為準。正式 artifact 的斷網安裝仍待實測。Release 也保留
+exact 大小以該 tag 的 asset 為準。Release 也保留
 `sister.exe` 與
 `sister-desktop.exe`，只想跑 CLI、
 免安裝使用或診斷 installer 問題時，請把兩個檔放在同一個資料夾。
+
+Linux X11 下載 `AI-Sister-Linux-X11-amd64.deb`，在 Ubuntu 24.04 建置與驗收。
+用 `sudo apt install ./AI-Sister-Linux-X11-amd64.deb` 安裝桌面程式、`sister` CLI
+與本機 OCR 依賴。
 
 Windows tag 的完整簽章路徑會以同一張 public-CA 憑證簽 recorder、desktop、uninstaller
 與 Setup，逐檔驗 SHA-256 Authenticode 與 RFC 3161 timestamp，再由 release job 把三個公開檔
@@ -78,6 +82,36 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
+
+
+## v0.1.0-alpha.125
+
+**Linux X11 現在有可直接安裝的桌面版，macOS 錄製後端也已接進同一條
+S1 生命週期。**
+
+Linux production preflight 以目前 process ID 查 logind，只接受 active、local、
+exact display 的 X11 session；核准後繼續使用 verifier 看過的同一條 Unix X11
+connection，不重連。每拍用 EWMH 固定前景 PID／視窗，AT-SPI 讀焦點密碼欄
+與瀏覽器位址，擷圖前後再比對同一份 permit。畫面由 X11 GetImage 轉成
+RGBA，OCR 把 RAM 內 PNG 透過 stdin 交給本機 Tesseract，不寫中間檔。Wayland
+在任何內容來源開啟前就結束。
+
+Linux 和 macOS 共用 Windows 已有的 consent transaction、recorder lease、pause／resume、
+master stop、設定熱重載、retention、heartbeat、足跡報告與 CLI 大腦喚醒；
+SIGINT／SIGTERM 只通知主迴圈，資料庫仍由主線程收尾。Release 新增在
+Ubuntu 24.04 產生的 `AI-Sister-Linux-X11-amd64.deb`，內含同版 desktop 與
+CLI；CI 實際將 Xvfb RGBA 畫面送入 Tesseract 讀回固定文字，再解出 `.deb`、
+檢查動態相依與兩個執行檔，並在 D-Bus + Xvfb 工作階段啟動桌面程式。
+
+macOS 14+ 的預設 product build 現在含 ScreenCaptureKit 前景顯示器 RGBA、Vision accurate
+OCR、AX 前景 app／視窗／密碼欄／瀏覽器位址，以及 PID + title 的擷取前後
+重驗。設定頁顯示 Screen Recording 與 Accessibility 當下狀態，從使用者按鈕
+要求系統權限並開啟對應的 System Settings，切回後自動重讀。Apple Silicon CI 繼續驗
+hardened ad-hoc `.app` 與 exact bundled sidecar；公開 macOS artifact 留在 Developer ID
+notarization 與原生 TCC/S1 驗收同時成立的 release gate 後面。
+
+官網同版新增 Windows 與 Linux X11 兩個固定 release URL。WebView 仍只走 IPC；
+recorder、core、capture、brain 與 hands 沒有新增 HTTP client。
 
 
 ## v0.1.0-alpha.124

@@ -42,12 +42,14 @@ mod login_startup;
 #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
 mod macos_ci;
 mod master_stop_dispatch;
+mod platform_access;
 mod recorder_supervisor;
 #[cfg(any(windows, test))]
 mod single_instance;
 
 use login_startup::{login_startup_read, login_startup_set};
 use master_stop_dispatch::{MasterStopAction, master_stop_action_for_menu_id, run_fifo};
+use platform_access::{platform_access_open, platform_access_read};
 #[cfg(any(windows, test))]
 use single_instance::RevealWindow;
 #[cfg(windows)]
@@ -6862,6 +6864,8 @@ fn main() {
             azure_tts_speak,
             login_startup_read,
             login_startup_set,
+            platform_access_read,
+            platform_access_open,
             settings_read,
             settings_write,
             brain_cli_read,

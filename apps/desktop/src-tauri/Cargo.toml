@@ -1,6 +1,6 @@
 [package]
 name = "sister-desktop"
-version = "0.1.0-alpha.124"
+version = "0.1.0-alpha.125"
 edition = "2024"
 # 和根 workspace 同一個地板；這是第二個 workspace，所以在下方自己宣告再繼承。
 rust-version.workspace = true
@@ -26,11 +26,12 @@ resolver = "3"
 rust-version = "1.85"
 
 [features]
-default = ["bundled-sqlite"]
+default = ["bundled-sqlite", "macos"]
 # 見 sister-core 的同名 feature：關掉它才能從 Linux 對 Windows `cargo check`。
 bundled-sqlite = ["sister-core/bundled-sqlite"]
-# 只存在於 macOS CI 的 signed app-tree diagnostic；公開 build 不帶這個入口。
-macos-ci-spike = []
+# `macos` 是正式原生 sidecar composition；spike 只多出 CI 私有 probe argument。
+macos = []
+macos-ci-spike = ["macos"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -66,6 +67,11 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-application-services = { version = "=0.3.2", default-features = false, features = ["AXUIElement", "HIServices"] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["CFDictionary", "CFNumber"] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGWindow"] }
 
 [profile.release]
 lto = "thin"

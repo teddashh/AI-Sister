@@ -882,6 +882,12 @@ nav a:focus-visible {
   font: 700 23px Georgia, serif;
 }
 
+.download-panel > .download-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+}
+
 footer {
   align-items: start;
   border-top: 1px solid var(--line);
@@ -1127,6 +1133,11 @@ footer {
     align-items: stretch;
     flex-direction: column;
     gap: 18px;
+  }
+
+  .download-panel > .download-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   footer {

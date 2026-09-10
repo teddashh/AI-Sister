@@ -265,9 +265,9 @@ if actual_template_sha256 != expected_template_sha256:
 # PageLeave 與四個 hook 的順序都可能變成另一份契約。
 workflow_text = pathlib.Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 expected_tauri_install = "cargo install tauri-cli --version 2.11.4 --locked"
-if workflow_text.count(expected_tauri_install) != 2:
+if workflow_text.count(expected_tauri_install) != 3:
     raise SystemExit(
-        "✗ macOS／Windows 必須各安裝一次 exact tauri-cli 2.11.4 --locked；"
+        "✗ Linux／macOS／Windows 必須各安裝一次 exact tauri-cli 2.11.4 --locked；"
         "變更版本前要重驗 SetContext、PageLeave 與四個 hook 的順序"
     )
 

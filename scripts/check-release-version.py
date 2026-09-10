@@ -245,9 +245,12 @@ def check_atomic_release_workflow(workflow_path: pathlib.Path) -> None:
     if not creator_run:
         fail("create_release 沒有可執行的 run block")
 
-    asset_loop = "for asset in AI-Sister-Setup.exe sister.exe sister-desktop.exe; do"
+    asset_loop = (
+        "for asset in AI-Sister-Setup.exe sister.exe sister-desktop.exe "
+        "AI-Sister-Linux-X11-amd64.deb; do"
+    )
     if creator_run.count(asset_loop) != 2:
-        fail("create_release 必須以同一份 exact 三資產清單先驗本機、再逐檔上傳")
+        fail("create_release 必須以同一份 exact 四資產清單先驗本機、再逐檔上傳")
     creator_text = "\n".join(creator_run)
     require_lines(
         creator_run,
@@ -370,9 +373,13 @@ fi"""
             'if release.get("tag_name") != expected_tag:',
             'assets = release.get("assets")',
             'if not isinstance(assets, list):',
-            'expected_names = {"AI-Sister-Setup.exe", "sister.exe", "sister-desktop.exe"}',
+            'expected_names = {',
+            '"AI-Sister-Setup.exe",',
+            '"sister.exe",',
+            '"sister-desktop.exe",',
+            '"AI-Sister-Linux-X11-amd64.deb",',
             'names = [asset.get("name") for asset in assets if isinstance(asset, dict)]',
-            'if len(assets) != 3 or len(names) != 3 or set(names) != expected_names:',
+            'if len(assets) != 4 or len(names) != 4 or set(names) != expected_names:',
             'for asset in sorted(assets, key=lambda item: item["name"]):',
             'asset_id = asset.get("id")',
             'size = asset.get("size")',
@@ -388,7 +395,7 @@ fi"""
     )
 
     # 不只比 API metadata：逐檔把 draft asset 讀回、先比遠端 size，再 bit-for-bit
-    # 比 CI 剛下載的 Windows artifact。這三個命令必須都在同一個 asset-plan loop 裡。
+    # 比 CI 剛下載的 release artifact。這三個命令必須都在同一個 asset-plan loop 裡。
     loop_start = "while IFS=$'\\t' read -r asset_id asset_name asset_size; do"
     loop_end = 'done < "$asset_plan"'
     start_index = one_index(run, loop_start, "遠端 asset download loop 起點")

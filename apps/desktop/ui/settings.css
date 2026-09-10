@@ -61,6 +61,19 @@ section {
   padding: 14px 0;
 }
 
+.platform-access-row {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  margin-top: 9px;
+}
+
+.platform-access-row strong {
+  color: var(--ok);
+  font-size: 12px;
+}
+
 h2 {
   font-size: 14px;
   margin: 0 0 4px;

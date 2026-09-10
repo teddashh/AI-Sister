@@ -84,6 +84,11 @@ alpha.124 已把這條接進一般 S1 問答。本機 facts 與 FTS 先完成檢
 這沒有新增向量資料庫或第二份記憶：永久資料仍是既有 SQLite L0／L1／L2／L3，RAG 只在
 這一題的記憶體裡組合。新問題、固定日常回覆與全停會使舊回答失效並收掉 CLI 行程樹。
 
+alpha.125 把同一條 S1 擴到 Linux X11 與 macOS 14+ 原生後端。Linux 以
+logind + X11 + AT-SPI + 本機 Tesseract 提供 Ubuntu 24.04 `.deb`；macOS 以
+ScreenCaptureKit + Vision + AX 進入 product build，設定頁直接處理兩項 TCC 權限。
+三個平台共用同意、暫停、忘掉、匯出、本機 RAG 與 CLI 大腦，不分裂第二套記憶。
+
 ## 4. Killer Scenarios（按交付順序）
 
 ### S1 — 秒答回憶（Release 1.0 的核心）

@@ -28,6 +28,10 @@ class WebsiteBuildTests(unittest.TestCase):
             self.assertIn(
                 f"/releases/download/v{version}/AI-Sister-Setup.exe", html
             )
+            self.assertIn(
+                f"/releases/download/v{version}/AI-Sister-Linux-X11-amd64.deb",
+                html,
+            )
             self.assertFalse(any(token in html for token in MODULE.TOKENS))
 
             personas = sorted((output / "assets/personas").glob("*.webp"))

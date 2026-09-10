@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AI-Sister",
-  "version": "0.1.0-alpha.124",
+  "version": "0.1.0-alpha.125",
   "identifier": "com.ted-h.ai-sister",
   "build": {
     "frontendDist": "../ui"
@@ -38,6 +38,6 @@
     ],
     "copyright": "Copyright (c) Ted Huang",
     "shortDescription": "四姊妹與 13 位閨密住在你的螢幕角落",
-    "longDescription": "AI-Sister 桌面外殼：17 位內建角色、本機記憶搜尋與可點證據。畫面像素不離機；WebView 只走 IPC，額外固定錄音只在明確揭露與點擊後由原生端固定下載。"
+    "longDescription": "AI-Sister 桌面應用程式：17 位內建角色、544 段本機角色語音、本機記憶搜尋與可點證據。畫面像素、OCR 與記憶留在這台電腦；大腦使用你選擇的 CLI agent。"
   }
 }

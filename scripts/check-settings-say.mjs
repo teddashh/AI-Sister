@@ -167,6 +167,12 @@ const LOGIN_STARTUP = {
   reason: null,
 };
 
+const PLATFORM_WINDOWS = {
+  platform: "windows",
+  screen_recording: null,
+  accessibility: null,
+};
+
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
 async function open({
@@ -183,6 +189,8 @@ async function open({
   onPersonaRead,
   onLoginStartupRead,
   onLoginStartupSet,
+  onPlatformAccessRead,
+  onPlatformAccessOpen,
   onAzureRead,
   onAzureConfigSet,
   onAzureKeySet,
@@ -196,6 +204,7 @@ async function open({
   voice = false,
   hotkey = HOTKEY,
   loginStartup = LOGIN_STARTUP,
+  platformAccess = PLATFORM_WINDOWS,
   brain = brainView(),
   cloud = false,
   watching = "recording",
@@ -210,8 +219,10 @@ async function open({
   // 那顆按鍵監聽掛在 window 上，不是掛在那一格上（理由見 settings.js：捕捉
   // 模式底下要吃掉 Tab / Enter，不然瀏覽器會先拿去換焦點）。所以要在這裡接。
   const keys = [];
+  const windowEvents = new Map();
   globalThis.addEventListener = (ev, fn) => {
     if (ev === "keydown") keys.push(fn);
+    else (windowEvents.get(ev) ?? windowEvents.set(ev, []).get(ev)).push(fn);
   };
   globalThis.removeEventListener = () => {};
 
@@ -219,6 +230,7 @@ async function open({
   let assetState = { ...asset, disclosure: asset.disclosure ? { ...asset.disclosure } : null };
   let voiceState = voice;
   let loginStartupState = { ...loginStartup };
+  let platformAccessState = { ...platformAccess };
   let azureState = { ...azure };
   let brainState = structuredClone(brain);
   const writes = [];
@@ -351,6 +363,20 @@ async function open({
                   reason: null,
                 };
             return { ...loginStartupState };
+          case "platform_access_read":
+            if (onPlatformAccessRead) {
+              return onPlatformAccessRead({ ...platformAccessState });
+            }
+            return { ...platformAccessState };
+          case "platform_access_open":
+            if (onPlatformAccessOpen) {
+              return onPlatformAccessOpen(
+                arg.kind,
+                { ...platformAccessState },
+                (next) => (platformAccessState = { ...next }),
+              );
+            }
+            return { ...platformAccessState };
           case "persona_asset_status":
             if (onAssetStatus) return onAssetStatus(assetState);
             return {
@@ -544,6 +570,7 @@ async function open({
     brainSay: () => node("[data-brain-say]").textContent,
     brainHidden: () => node("[data-brain-say]").hidden,
     loginStartupSay: () => node("[data-login-startup-say]").textContent,
+    platformAccessSay: () => node("[data-platform-access-say]").textContent,
     health: () => node("[data-health]").textContent,
     healthHidden: () => node("[data-health]").hidden,
     healthUnknown: () => node("[data-health]").classList.contains("unknown"),
@@ -561,6 +588,13 @@ async function open({
       for (const fn of target.handlers.change ?? []) fn({ isTrusted: trusted });
       await tick();
       return true;
+    },
+    setPlatformAccess(next) {
+      platformAccessState = { ...next };
+    },
+    async emitWindow(name) {
+      for (const fn of windowEvents.get(name) ?? []) fn();
+      await tick();
     },
     /** 按那一格 → 進捕捉模式 → 按一組鍵下去。和真人的順序一樣。 */
     async pressCombo(e) {
@@ -588,6 +622,51 @@ function check(name, ok, detail) {
 
 function calls(p, command) {
   return p.invokes.filter(({ cmd }) => cmd === command);
+}
+
+console.log("⓪ᴍ macOS 權限是原生真值、trusted click 與回到視窗後重讀");
+{
+  const denied = {
+    platform: "macos",
+    screen_recording: false,
+    accessibility: false,
+  };
+  const p = await open({
+    platformAccess: denied,
+    onPlatformAccessOpen: (kind, current, store) => {
+      const next = {
+        ...current,
+        screen_recording: kind === "screen-recording" ? true : current.screen_recording,
+        accessibility: kind === "accessibility" ? true : current.accessibility,
+      };
+      store(next);
+      return next;
+    },
+  });
+  check("macOS 只顯示自己的權限區", p.node("[data-platform-access-section]").hidden === false && p.node("[data-login-startup-section]").hidden === true);
+  check("兩項 native false 都畫成未開啟", p.node("[data-platform-screen-state]").textContent === "未開啟" && p.node("[data-platform-ax-state]").textContent === "未開啟");
+  await p.act("[data-platform-screen-open]", { trusted: false });
+  check("script 假 click 不會要求 TCC 或開設定", calls(p, "platform_access_open").length === 0, p.invokes);
+  await p.act("[data-platform-screen-open]");
+  await p.act("[data-platform-ax-open]");
+  check(
+    "兩個真人按鈕只送 exact typed 權限項目",
+    JSON.stringify(calls(p, "platform_access_open").map(({ arg }) => arg)) ===
+      '[{"kind":"screen-recording"},{"kind":"accessibility"}]',
+    p.invokes,
+  );
+  check("後端回條把兩項都畫成已開啟", p.node("[data-platform-screen-state]").textContent === "已開啟" && p.node("[data-platform-ax-state]").textContent === "已開啟");
+  p.setPlatformAccess({ ...denied, screen_recording: true, accessibility: true });
+  await p.emitWindow("focus");
+  check("切回設定頁會重讀 native truth", calls(p, "platform_access_read").length === 2, p.invokes);
+  check("兩項都成立才顯示就緒", p.platformAccessSay() === "畫面、讀字與隱私排除已就緒。", p.platformAccessSay());
+}
+
+{
+  const p = await open({
+    platformAccess: { platform: "linux", screen_recording: null, accessibility: null },
+  });
+  check("Linux 不顯示 Windows 或 macOS 專屬控制", p.node("[data-login-startup-section]").hidden === true && p.node("[data-platform-access-section]").hidden === true);
 }
 
 console.log("⓪ Windows 登入項五態不會把 Unknown 畫成 Off");

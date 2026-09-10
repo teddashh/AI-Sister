@@ -67,6 +67,7 @@ mod tests {
     fn every_browser_in_the_list_is_demonstrated_by_a_real_exe_name() {
         // 字根 → 真實世界裡會出現的 app_key
         let witnesses = [
+            ("safari", "com.apple.Safari"),
             ("chrome", "chrome.exe"),
             ("msedge", "msedge.exe"),
             ("firefox", "firefox.exe"),

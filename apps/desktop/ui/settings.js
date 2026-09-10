@@ -69,6 +69,13 @@ const el = {
   azureState: document.querySelector("[data-azure-state]"),
   loginStartup: document.querySelector("[data-login-startup]"),
   loginStartupSay: document.querySelector("[data-login-startup-say]"),
+  loginStartupSection: document.querySelector("[data-login-startup-section]"),
+  platformAccessSection: document.querySelector("[data-platform-access-section]"),
+  platformScreenState: document.querySelector("[data-platform-screen-state]"),
+  platformScreenOpen: document.querySelector("[data-platform-screen-open]"),
+  platformAxState: document.querySelector("[data-platform-ax-state]"),
+  platformAxOpen: document.querySelector("[data-platform-ax-open]"),
+  platformAccessSay: document.querySelector("[data-platform-access-say]"),
   apps: document.querySelector("[data-apps]"),
   urls: document.querySelector("[data-urls]"),
   titles: document.querySelector("[data-titles]"),
@@ -180,6 +187,7 @@ const LOGIN_STARTUP_STATES = Object.freeze([
 let loginStartupView = null;
 let loginStartupBusy = false;
 let loginStartupReadRevision = 0;
+let platformAccessView = null;
 
 function loginStartupDetail(label, value) {
   if (typeof value !== "string") return `${label}：後端沒有回報`;
@@ -329,6 +337,64 @@ async function setLoginStartup(event) {
         actionError,
       );
     }
+  }
+}
+
+// ---------- macOS 擷取權限 ----------
+
+function paintPlatformAccess(access, message = "", bad = false) {
+  const mac = access?.platform === "macos";
+  const windows = access?.platform === "windows";
+  if (el.loginStartupSection) el.loginStartupSection.hidden = !windows;
+  if (el.platformAccessSection) el.platformAccessSection.hidden = !mac;
+  if (!mac) return;
+
+  platformAccessView = access;
+
+  const screenReady = access?.screen_recording === true;
+  const axReady = access?.accessibility === true;
+  if (el.platformScreenState) {
+    el.platformScreenState.textContent =
+      access?.screen_recording === null ? "讀不到" : screenReady ? "已開啟" : "未開啟";
+  }
+  if (el.platformAxState) {
+    el.platformAxState.textContent =
+      access?.accessibility === null ? "讀不到" : axReady ? "已開啟" : "未開啟";
+  }
+  if (el.platformScreenOpen) el.platformScreenOpen.hidden = screenReady;
+  if (el.platformAxOpen) el.platformAxOpen.hidden = axReady;
+  if (el.platformAccessSay) {
+    el.platformAccessSay.classList.toggle("bad", bad);
+    el.platformAccessSay.classList.toggle("ok", !bad && screenReady && axReady);
+    el.platformAccessSay.textContent =
+      message || (screenReady && axReady ? "畫面、讀字與隱私排除已就緒。" : "開啟兩項後即可開始記憶。");
+  }
+}
+
+async function refreshPlatformAccess() {
+  if (invoke === null) return;
+  try {
+    paintPlatformAccess(await invoke("platform_access_read"));
+  } catch (err) {
+    if (el.platformAccessSection?.hidden === false) {
+      paintPlatformAccess(platformAccessView, String(err?.message ?? err), true);
+    }
+  }
+}
+
+async function openPlatformAccess(kind, event) {
+  if (event?.isTrusted !== true || invoke === null) return;
+  const button =
+    kind === "screen-recording" ? el.platformScreenOpen : el.platformAxOpen;
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  try {
+    const next = await invoke("platform_access_open", { kind });
+    paintPlatformAccess(next, "已開啟 macOS 設定；授權後切回這裡會自動更新。");
+  } catch (err) {
+    paintPlatformAccess(platformAccessView, String(err?.message ?? err), true);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -2072,6 +2138,7 @@ async function load() {
   // 狀態。先各自送出去，後面仍 await，讓呼叫 load() 的人拿到穩定畫面。
   const personaAssetsRead = refreshPersonaAssets();
   const loginStartupRead = refreshLoginStartup();
+  const platformAccessRead = refreshPlatformAccess();
   const azureTtsRead = refreshAzureTts();
   let ok = false;
   try {
@@ -2102,6 +2169,7 @@ async function load() {
   // Windows 登入項同樣不在 config.toml 裡。設定檔壞掉時仍要顯示真實 registry
   // 狀態，也仍可由可信點擊立即修改。
   await loginStartupRead;
+  await platformAccessRead;
   // Azure 金鑰和第四張同意書不屬於頁尾 settings payload；設定檔壞掉時也要
   // 說得出 credential 是 present、missing、unreadable 還是 unsupported。
   await azureTtsRead;
@@ -2530,6 +2598,13 @@ paintPersonaSettings();
 el.save?.addEventListener("click", () => void save());
 el.reload?.addEventListener("click", () => void load());
 el.loginStartup?.addEventListener("change", (event) => void setLoginStartup(event));
+el.platformScreenOpen?.addEventListener("click", (event) =>
+  void openPlatformAccess("screen-recording", event),
+);
+el.platformAxOpen?.addEventListener("click", (event) =>
+  void openPlatformAccess("accessibility", event),
+);
+globalThis.addEventListener("focus", () => void refreshPlatformAccess());
 for (const providerId of BRAIN_PROVIDER_IDS) {
   el.brainProviders[providerId].action?.addEventListener("click", (event) =>
     void connectBrainCli(providerId, event),

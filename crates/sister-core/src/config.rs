@@ -771,6 +771,7 @@ const SCREENSHARE_APPS: &[&str] = &[
 /// clipboard source gate 使用；兩邊各抄一份會讓「畫面認得、剪貼簿不認得」
 /// 變成一個安靜的漏擋。
 pub const BROWSER_APP_ROOTS: &[&str] = &[
+    "safari",
     "chrome",
     "msedge",
     "firefox",
@@ -788,6 +789,7 @@ pub const BROWSER_APP_ROOTS: &[&str] = &[
 ];
 
 pub fn app_is_browser(app_key: &str) -> bool {
+    let app_key = app_key.to_ascii_lowercase();
     BROWSER_APP_ROOTS.iter().any(|root| {
         app_key.match_indices(root).any(|(at, _)| {
             app_key[..at]

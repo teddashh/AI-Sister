@@ -16,7 +16,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "site"
 PERSONAS = ROOT / "apps/desktop/ui/personas"
 REPOSITORY = "https://github.com/teddashh/AI-Sister"
-TOKENS = {"__VERSION__", "__TAG__", "__DOWNLOAD_URL__"}
+TOKENS = {
+    "__VERSION__",
+    "__TAG__",
+    "__WINDOWS_DOWNLOAD_URL__",
+    "__LINUX_DOWNLOAD_URL__",
+}
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -38,7 +43,10 @@ def build(destination: pathlib.Path) -> None:
 
     version = product_version()
     tag = f"v{version}"
-    download_url = f"{REPOSITORY}/releases/download/{tag}/AI-Sister-Setup.exe"
+    windows_download_url = f"{REPOSITORY}/releases/download/{tag}/AI-Sister-Setup.exe"
+    linux_download_url = (
+        f"{REPOSITORY}/releases/download/{tag}/AI-Sister-Linux-X11-amd64.deb"
+    )
     destination.mkdir(parents=True)
 
     template = (SOURCE / "index.html").read_text(encoding="utf-8")
@@ -48,7 +56,8 @@ def build(destination: pathlib.Path) -> None:
     rendered = (
         template.replace("__VERSION__", version)
         .replace("__TAG__", tag)
-        .replace("__DOWNLOAD_URL__", download_url)
+        .replace("__WINDOWS_DOWNLOAD_URL__", windows_download_url)
+        .replace("__LINUX_DOWNLOAD_URL__", linux_download_url)
     )
     if any(token in rendered for token in TOKENS):
         raise ValueError("website template 還有未展開 token")

@@ -512,33 +512,22 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
   - 「沒有摘要」拆成 `DayNoteState` 四格。那天一張 L2 卡都沒有 → **不開口**
     （答應了只生得出一份空的）；他自己按過忘記 → **不開口**（提議寫回來等於
     問他要不要撤銷自己的刪除）。
-- ⬜ **macOS Public Preview**：ScreenCaptureKit + Vision OCR + AX API + TCC/紫點 UX 文案。
-  capture 必須住在簽進 `.app` 的主程序樹；Preview 至少要走完同意、錄製、OCR、
-  提問、出處、暫停、刪除與匯出。完整 P0／P1 足跡與電池數字留作升 GA 條件，
-  不擋 Release 1.0。目前先放進一條 `macos-15` Apple Silicon 原生 CI diagnostic：
-  feature-gated CLI child 只在 CoreGraphics preflight 明確為 true 時呼叫一次
-  ScreenCaptureKit，Tauri 用 ad-hoc identity 把 exact child 包進 hardened `.app`；
-  workflow 會另查 live PID／PPID／`proc_pidpath`、簽章、架構與 bundle metadata，
-  並檢查 immediate probe directory 沒有列入檢查的圖片或資料庫檔。
-  [2026-09-07 main CI 的 macOS job](https://github.com/teddashh/AI-Sister/actions/runs/34128562116/job/101762914414)
-  已在 macOS 15.7.9 ARM64、Xcode 16.4／SDK 15.5 跑到底：Rust 1.85 編過 root child
-  與 desktop；LaunchServices 啟動的 live PPID 與 `proc_pidpath` 對回
-  `sister-desktop` → bundle 內 exact `sister`，兩者都是 arm64、minOS 14.0、ad-hoc
-  hardened runtime。child 回報 code 0 並被回收；LaunchServices 等待結束後兩個已觀察
-  PID 都不存在。runner shell 的 CoreGraphics preflight 是 true，但 exact child 回
-  `not_granted_or_undetermined`／`not_attempted`，因此沒有呼叫 ScreenCaptureKit
-  capture。這是原生 app-tree 拓撲與 diagnostic fail-closed 路徑的執行證據，**沒有
-  ScreenCaptureKit pixel-path 執行證據，也不是 Preview**。`launchctl procinfo` 雖把
-  desktop 列為 responsible path，收據也明標那只是 diagnostic text 的 inference，不是
-  production TCC identity API。七天 Actions artifact 明標 `NOT-PREVIEW`、不進 release；
-  Vision／AX、產品同意書與 TCC lifecycle、production `record` 及完整 S1 都還沒接，
-  所以這格不勾。
-- ⬜ **Linux X11 Developer Preview**：先接通 X11 capture + OCR + S1 主流程；
-  Wayland 明示 unsupported／degraded，不用 portal 的半套能力冒充背景常駐。
-  alpha.104 已落第一層 fail-closed preflight：Wayland／headless 與 Unknown 分開，
-  只准本機 Unix X11 transport，且 verifier 看過的 exact connection 會原樣留給後端。
-  production 的 exact-process logind verifier、capture／focus／input／clipboard／OCR
-  都還沒接，所以真 X11 目前仍回 Unknown；這不是 Linux 桌面 Preview，也沒有 Linux artifact。
+- 🔶 **macOS Public Preview**：alpha.125 已接完預設編譯的 production
+  `record` 路徑：ScreenCaptureKit 取 RGBA、Vision accurate OCR、AX 前景／密碼欄／
+  瀏覽器位址與擷取前後 permit 重驗，並共用 Windows 已有的同意、暫停、
+  忘掉、匯出、本機 RAG 與 CLI 大腦生命週期。設定頁直接顯示 Screen Recording
+  與 Accessibility 真實狀態，可從 trusted click 開到 exact macOS 設定頁。
+  Apple Silicon CI 會將 exact sidecar 包進 hardened ad-hoc `.app`，驗過簽章、
+  app → child 行程樹、TCC facts 與未授權時零擷取；授權已有時才跑同一條
+  RGBA pixel path。這格等 Developer ID notarized artifact 與原生 TCC/S1 驗收後勾選；
+  目前不把 ad-hoc 證據檔發成公開 Preview。
+- ✅ **Linux X11 Developer Preview**：alpha.125 將 production exact-process logind
+  session 驗證、同一條本機 Unix X11 connection、EWMH 前景身分、AT-SPI
+  密碼欄／瀏覽器位址、擷取前後 permit、RGBA 擷圖與本機 Tesseract OCR
+  接進共用 S1 錄製生命週期。Wayland 在開內容來源前直接回不支援。
+  CI 將 Xvfb 真 RGBA 幀交給本機 Tesseract 讀回固定文字，並從成品 `.deb`
+  解出、動態連結、啟動桌面行程。公開 release 提供
+  在 Ubuntu 24.04 建置與驗收的 `AI-Sister-Linux-X11-amd64.deb`。
 - ⬜ **Persona Release 1.0 角色體驗（使用者可關閉／可不下載）**：
   - ✅ alpha.108 將四姊妹與 13 位閨密的 17 張 canonical WebP 全部隨程式提供，
     manifest 逐檔 pin size／SHA-256；選擇入口與 runtime enum 都是同一組 17 IDs。

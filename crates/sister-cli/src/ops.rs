@@ -25067,7 +25067,19 @@ pub mod record {
         {
             Some("windows-gdi")
         }
-        #[cfg(not(windows))]
+        #[cfg(all(target_os = "macos", feature = "macos"))]
+        {
+            Some("macos-screencapturekit")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Some("linux-x11")
+        }
+        #[cfg(not(any(
+            windows,
+            target_os = "linux",
+            all(target_os = "macos", feature = "macos")
+        )))]
         {
             None
         }
@@ -25187,7 +25199,7 @@ pub mod record {
                 Self(config.capture.store_images)
             }
 
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
             pub(super) fn from_reloaded_config(config: &Config) -> Self {
                 Self(config.capture.store_images)
             }
@@ -25215,7 +25227,7 @@ pub mod record {
 
         #[cfg_attr(not(windows), allow(dead_code))]
         impl StoringImages {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
             pub(super) fn from_recorder<B: sister_capture::Backend>(
                 rec: &sister_capture::Recorder<B>,
             ) -> Self {
@@ -25259,7 +25271,7 @@ pub mod record {
         /// 欄位留在這個子 module 裡；父 module 寫 `TickCounts { .. }` 會得到
         /// E0451，只能走統計來源的建構子。建構子內的欄位對應仍可能寫錯，
         /// 但有 Linux 也會跑的測試守住；`check-windows.sh` 本身只編譯。
-        #[cfg(any(windows, test))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub(super) struct TickCounts {
             total: u64,
@@ -25268,7 +25280,7 @@ pub mod record {
             master_released: u64,
         }
 
-        #[cfg(any(windows, test))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
         impl TickCounts {
             pub(super) fn from_stats(stats: &sister_capture::RecorderStats) -> Self {
                 Self {
@@ -25310,12 +25322,12 @@ pub mod record {
         ///
         /// 建構子有 Linux 也會跑的測試，fixture 把每個 `u64`
         /// 統計欄位設成不同值，守住摘要拿到的是真正圖片 bytes。
-        #[cfg(any(windows, test))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         #[cfg_attr(not(windows), allow(dead_code))]
         pub(super) struct ImageBytesWritten(u64);
 
-        #[cfg(any(windows, test))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
         #[cfg_attr(not(windows), allow(dead_code))]
         impl ImageBytesWritten {
             pub(super) fn from_stats(stats: &sister_capture::RecorderStats) -> Self {
@@ -25338,12 +25350,12 @@ pub mod record {
         /// 而產物與 [`ImageBytesWritten`] 不同型，對調兩個引數會得到 E0308。
         /// `from_mb` 仍接受裸 `u64`，所以擋不住傳入語意錯誤但同型的 MB 數值；
         /// 但 MB 到 bytes 的換算與「0 代表不設限」都有 Linux 會跑的寫死值斷言。
-        #[cfg(any(windows, test))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         #[cfg_attr(not(windows), allow(dead_code))]
         pub(super) struct ImageBudgetBytes(u64);
 
-        #[cfg(any(windows, test))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
         #[cfg_attr(not(windows), allow(dead_code))]
         impl ImageBudgetBytes {
             pub(super) fn from_mb(mb: u64) -> Self {
@@ -25361,9 +25373,9 @@ pub mod record {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     use record_meanings::OcrEnabled;
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     use record_meanings::{ImageBudgetBytes, ImageBytesWritten, TickCounts};
 
     use record_meanings::{StoringImages, WantsImages};
@@ -25487,7 +25499,7 @@ pub mod record {
     /// - 新畫面（`Kept`）或鎖屏（`NoScreen`）：段落可能剛關上。
     /// - 剛從 `Idle` 恢復：SPEC §5.1「長停留後恢復」。
     /// - `Idle` 本身不叫——她還在閉眼，沒有新的資訊價值。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn should_ping_brain(tick: &sister_capture::Tick, was_idle: &mut bool) -> bool {
         use sister_capture::Tick::*;
         match tick {
@@ -25566,7 +25578,11 @@ pub mod record {
         // stop intent → platform/spawn。Windows 的 BootBeat 在真正第一拍前會再查一次。
         start_mode.supervised_preflight(data_dir)?;
 
-        #[cfg(not(windows))]
+        #[cfg(not(any(
+            windows,
+            target_os = "linux",
+            all(target_os = "macos", feature = "macos")
+        )))]
         {
             let _ = (
                 data_dir,
@@ -25588,13 +25604,76 @@ pub mod record {
         }
         #[cfg(windows)]
         {
-            windows_record(
+            native_record(
                 data_dir,
                 config,
                 config_path,
                 duration,
                 wants_images_by_config,
-                WindowsRecordingStart::new(start_mode, recorder_lease, consent_start),
+                NativeRecordingStart::new(start_mode, recorder_lease, consent_start),
+                NativePlatform {
+                    make_recorder: |config, db, images, data_dir| {
+                        sister_capture::windows::recorder(config, db, images, data_dir)
+                    },
+                    probe_capabilities: |config: &Config| {
+                        let caps = sister_capture::windows::Capabilities::current(config);
+                        NativeCapabilities {
+                            report: caps.report(),
+                            broken: caps.broken_privacy_rules(&config.privacy),
+                            degraded: caps.silently_degraded(config),
+                        }
+                    },
+                },
+            )
+        }
+        #[cfg(all(target_os = "macos", feature = "macos"))]
+        {
+            native_record(
+                data_dir,
+                config,
+                config_path,
+                duration,
+                wants_images_by_config,
+                NativeRecordingStart::new(start_mode, recorder_lease, consent_start),
+                NativePlatform {
+                    make_recorder: |config, db, images, data_dir| {
+                        sister_capture::macos::recorder(config, db, images, data_dir)
+                    },
+                    probe_capabilities: |config: &Config| {
+                        let caps = sister_capture::macos::Capabilities::current();
+                        let report = caps.report();
+                        NativeCapabilities {
+                            broken: report.broken_privacy_rules(&config.privacy),
+                            report,
+                            degraded: Vec::new(),
+                        }
+                    },
+                },
+            )
+        }
+        #[cfg(target_os = "linux")]
+        {
+            native_record(
+                data_dir,
+                config,
+                config_path,
+                duration,
+                wants_images_by_config,
+                NativeRecordingStart::new(start_mode, recorder_lease, consent_start),
+                NativePlatform {
+                    make_recorder: |config, db, images, data_dir| {
+                        sister_capture::linux::recorder(config, db, images, data_dir)
+                    },
+                    probe_capabilities: |config: &Config| {
+                        let caps = sister_capture::linux::Capabilities::current(config);
+                        let report = caps.report();
+                        NativeCapabilities {
+                            broken: report.broken_privacy_rules(&config.privacy),
+                            report,
+                            degraded: Vec::new(),
+                        }
+                    },
+                },
             )
         }
     }
@@ -25603,7 +25682,11 @@ pub mod record {
     ///
     /// console handler 跑在另一條執行緒上，在那裡碰資料庫等於在 SQLite
     /// 交易中間插隊。設一個 bool 是這裡唯一安全的動作。
-    #[cfg(windows)]
+    #[cfg(any(
+        windows,
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos")
+    ))]
     static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     #[cfg(windows)]
@@ -25623,6 +25706,18 @@ pub mod record {
             }
         }
         let _ = unsafe { SetConsoleCtrlHandler(Some(handler), true) };
+    }
+
+    #[cfg(any(target_os = "linux", all(target_os = "macos", feature = "macos")))]
+    fn install_ctrl_c_handler() {
+        unsafe extern "C" fn handler(_: libc::c_int) {
+            STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        // SIGINT/SIGTERM 只設 atomic；SQLite 收尾仍在主迴圈完成。
+        unsafe {
+            libc::signal(libc::SIGINT, handler as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, handler as *const () as libc::sighandler_t);
+        }
     }
 
     /// 開機那一段的心跳。
@@ -25863,7 +25958,7 @@ pub mod record {
         }
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     enum LiveLoopControl {
         Tick(sister_core::model::Millis),
         Stop(sister_core::model::EndReason),
@@ -25871,7 +25966,7 @@ pub mod record {
         Fail(anyhow::Error),
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn external_stop_message(reason: sister_core::control::StopReason) -> &'static str {
         match reason {
             sister_core::control::StopReason::DesktopQuit => {
@@ -25886,14 +25981,14 @@ pub mod record {
         }
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn recording_consent_stop_message() -> &'static str {
         // `consent::load` 對 missing／unreadable／invalid 都 fail closed；這裡沒有
         // 足夠證據把其中任何一種說成真人真的按了撤回。
         "目前讀不到有效的第一張同意書，錄製到此為止。"
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn external_stop_control(data_dir: &Path, now: sister_core::model::Millis) -> LiveLoopControl {
         match sister_core::control::consume_stop(data_dir) {
             Ok(Some(reason)) => {
@@ -25907,7 +26002,7 @@ pub mod record {
         }
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     enum LiveAfterTick {
         Continue,
         Stop(sister_core::model::EndReason),
@@ -25919,7 +26014,7 @@ pub mod record {
     /// pause snapshot，`after_tick` 是可熱重載的 maintenance hooks。runner 統一
     /// recorder tick、pause transition 與 brain wake 判斷；caller 擁有 heartbeat
     /// RAII，production 的 `?` 會立刻退出它的 scope，錯誤路徑因此也會蓋墓碑。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn run_live_loop<B, Next, Pause, After, Sleep>(
         recorder: &mut sister_capture::Recorder<B>,
         recording_beat: &mut RecordingBeat,
@@ -25981,7 +26076,7 @@ pub mod record {
         }
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn finalize_live_recording<B: sister_capture::Backend>(
         recorder: &mut sister_capture::Recorder<B>,
         reason: sister_core::model::EndReason,
@@ -25993,7 +26088,11 @@ pub mod record {
     }
 
     /// 把開機那份能力報告落地。**只有主迴圈接過 lease 後叫得動**。
-    #[cfg(windows)]
+    #[cfg(any(
+        windows,
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos")
+    ))]
     fn write_boot_report(
         _: &RecordingBeat,
         data_dir: &Path,
@@ -26004,19 +26103,27 @@ pub mod record {
         }
     }
 
-    /// 已通過平台無關 start gates、要一起交給 Windows 錄製迴圈的三份能力。
+    /// 已通過平台無關 start gates、要一起交給原生錄製迴圈的三份能力。
     ///
     /// mode、lease 與 consent guard 各自是不同型別，並只由這個 constructor 組成；
-    /// `windows_record` 不再收一排容易在接線時拆散的 start 參數。
-    #[cfg(windows)]
-    struct WindowsRecordingStart {
+    /// `native_record` 不再收一排容易在接線時拆散的 start 參數。
+    #[cfg(any(
+        windows,
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos")
+    ))]
+    struct NativeRecordingStart {
         mode: StartMode,
         lease: sister_core::recorder_lease::RecorderLease,
         consent: sister_core::consent::RecordingStartGuard,
     }
 
-    #[cfg(windows)]
-    impl WindowsRecordingStart {
+    #[cfg(any(
+        windows,
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos")
+    ))]
+    impl NativeRecordingStart {
         fn new(
             mode: StartMode,
             lease: sister_core::recorder_lease::RecorderLease,
@@ -26030,8 +26137,46 @@ pub mod record {
         }
     }
 
-    #[cfg(windows)]
-    fn windows_record(
+    #[cfg(any(
+        windows,
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos")
+    ))]
+    struct NativeCapabilities {
+        report: sister_core::capabilities::Report,
+        broken: Vec<sister_core::capabilities::Broken>,
+        degraded: Vec<String>,
+    }
+
+    #[cfg(any(
+        windows,
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos")
+    ))]
+    impl NativeCapabilities {
+        fn report(&self) -> sister_core::capabilities::Report {
+            let mut report = self.report.clone();
+            report.at = sister_core::now_ms();
+            report
+        }
+    }
+
+    #[cfg(any(
+        windows,
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos")
+    ))]
+    struct NativePlatform<MakeRecorder, ProbeCapabilities> {
+        make_recorder: MakeRecorder,
+        probe_capabilities: ProbeCapabilities,
+    }
+
+    #[cfg(any(
+        windows,
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos")
+    ))]
+    fn native_record<B, MakeRecorder, ProbeCapabilities>(
         data_dir: &Path,
         config: Config,
         config_path: Option<PathBuf>,
@@ -26044,13 +26189,19 @@ pub mod record {
         // 「保留畫面檔 ✗ 否（text-only 模式）」——他關掉了截圖、工具說關掉了，
         // 而她還在一張一張寫。
         mut wants_images_by_config: WantsImages,
-        start: WindowsRecordingStart,
-    ) -> Result<()> {
-        use sister_capture::windows::{self, Capabilities};
+        start: NativeRecordingStart,
+        platform: NativePlatform<MakeRecorder, ProbeCapabilities>,
+    ) -> Result<()>
+    where
+        B: sister_capture::Backend,
+        MakeRecorder:
+            FnOnce(Config, Db, Option<PathBuf>, PathBuf) -> Result<sister_capture::Recorder<B>>,
+        ProbeCapabilities: FnOnce(&Config) -> NativeCapabilities,
+    {
         use std::sync::atomic::Ordering;
         use std::time::{Duration, Instant};
 
-        let WindowsRecordingStart {
+        let NativeRecordingStart {
             mode: start_mode,
             lease: recorder_lease,
             consent: consent_start,
@@ -26137,19 +26288,19 @@ pub mod record {
         let capability_config = config.clone();
         // 只有 windows 模組內這條 composition 能建立 trusted v2 session。
         // 公開的 Recorder::new 不論 backend 名字為何都只會得到 untrusted provenance。
-        let mut rec = windows::recorder(config, db, images, data_dir.to_path_buf())?;
+        let mut rec = (platform.make_recorder)(config, db, images, data_dir.to_path_buf())?;
 
         // **先建後端、再問能力。** 反過來的話，「輸入 hook 裝上了沒」永遠
         // 是在 hook 還沒裝之前問的，於是永遠回報失敗——一則恆假的警告。
         // 缺席的能力會讓某些排除規則整組失效，或讓她其實什麼都沒記住。
         // 這兩件事都要在開始錄之前講，不是藏在 doctor 裡等使用者自己去發現。
-        let caps = Capabilities::current(&capability_config);
+        let caps = (platform.probe_capabilities)(&capability_config);
         // **這裡不寫能力報告。** 它排在底下 `boot.hand_off()` 之後，理由寫在
         // 那裡——這個順序是有意義的，不是誰順手擺的。
-        for warning in caps.broken_privacy_rules(&capability_config.privacy) {
+        for warning in &caps.broken {
             println!("⚠  {}", warning.message);
         }
-        for warning in caps.silently_degraded(&capability_config) {
+        for warning in &caps.degraded {
             println!("⚠  {warning}");
         }
 
@@ -26166,7 +26317,7 @@ pub mod record {
         let deadline = duration.map(|d| Instant::now() + Duration::from_secs(d));
         println!(
             "● 錄製中（{}），每 {} ms 一次。Ctrl-C 停止。",
-            backend_name().unwrap_or("?"),
+            sister_capture::Backend::name(rec.backend()),
             interval.as_millis()
         );
 
@@ -26651,7 +26802,7 @@ pub mod record {
     ///
     /// `any(windows, test)` 讓 Linux 單元測試也能真的造出 guard；否則這段接線只會
     /// 在 cross-check 編譯，沒有測試能證明 indeterminate state 仍送進 recorder。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn guarded_pause_signal(data_dir: &Path) -> sister_capture::PauseSignal {
         let guard = sister_core::pause::snapshot_guard(data_dir);
         sister_capture::PauseSignal::Snapshot {
@@ -26670,7 +26821,7 @@ pub mod record {
     ///
     /// 判定直接保留 `master_stop::State` 四態；只有 `Stopped` 才讀完成時間並宣稱
     /// 三層已停。資料目錄或協定讀不到時走 `Uncertain`，照實說 fail closed。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn master_stop_warning(data_dir: &Path) -> Option<String> {
         let release = cmd(data_dir, "stop-all --off");
         match sister_hands::master_stop::state(data_dir) {
@@ -26699,7 +26850,7 @@ pub mod record {
         }
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn pause_warning(data_dir: &Path) -> Option<String> {
         use sister_core::pause::PauseState;
         let flag = sister_core::pause::flag_path(data_dir);
@@ -26747,7 +26898,7 @@ pub mod record {
         }
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn record_stop_warnings(data_dir: &Path) -> Vec<String> {
         if let Some(master) = master_stop_warning(data_dir) {
             let mut warnings = vec![master];
@@ -26992,9 +27143,9 @@ pub mod record {
     /// 實測那次是 RAM 401 MB、磁碟 11.4 GB/天，而摘要照樣平鋪直敘地印出來，
     /// 沒有任何一個字說「超過哪條仍有效的門」——要靠讀的人自己記得預算，
     /// 再自己心算。她應該自己講。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     const BUDGET_RSS_BYTES: u64 = 400 * 1024 * 1024;
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     const BUDGET_DISK_PER_DAY: f64 = 300.0 * 1024.0 * 1024.0;
 
     /// 磁碟外推的三個數字，圖那一半已經夾在它自己的天花板上。
@@ -27013,7 +27164,7 @@ pub mod record {
     /// 整個是 Windows 限定的，而這段算術是它唯一會算錯的地方。跟著一起
     /// 關在 Windows 門後的話，開發機一次都跑不到，也就沒有任何一個回退
     /// 測試驗得了它——上面那個 11.4 GB 的錯就是這樣活下來的。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct DiskProjection {
         /// 一天總量，圖那一半已經夾過。
@@ -27024,7 +27175,7 @@ pub mod record {
         images_raw: Option<f64>,
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     impl DiskProjection {
         /// `cap_bytes` = 0 代表不設限（和 `max_image_mb_per_day = 0` 同義）。
         fn clamp(raw_total: f64, raw_images: Option<f64>, cap_bytes: ImageBudgetBytes) -> Self {
@@ -27054,7 +27205,7 @@ pub mod record {
     /// 足跡回報必須自己帶著量測條件走。沒有畫面時明講量不到，不能讓 `0×0`
     /// 同時表示「真的解析度是零」和「這場沒抓到畫面」。負載則不是程式能從
     /// 畫面推知的事，留一個明確待填欄位，讓貼回來的人不能只貼漂亮的數字。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn footprint_context(version: &str, frame_size: Option<(u32, u32)>) -> String {
         let screen = match frame_size {
             Some((width, height)) => format!("最後一次抓到的畫面 {width}×{height}"),
@@ -27064,17 +27215,17 @@ pub mod record {
     }
 
     /// CPU 平均值的百分比。獨立型別讓它和其他 `f64` 接錯時直接編譯失敗。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
     struct CpuPercent(f64);
 
     /// 足跡凍結時已經過的牆上秒數。建構子自己問 `Footprint`，不讓 Windows
     /// 接線層把同樣是 `f64` 的 CPU 秒數塞進每日外推分母。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
     struct FootprintElapsedSecs(f64);
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     impl FootprintElapsedSecs {
         fn from_footprint(f: &sister_capture::footprint::Footprint) -> Self {
             Self(f.elapsed_secs())
@@ -27084,7 +27235,7 @@ pub mod record {
     /// 這一場量到的所有數字。相同 primitive、不同意思的欄位各自包成 newtype，
     /// 對調會是型別錯誤；同型別 getter 接錯則由
     /// `measure_wires_stats_timings_and_scalars_to_their_fields` 釘住。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct FootprintMeasured {
         /// 最後一次抓到的畫面大小。`None` = 這場一張都沒抓到（不是 0×0）。
@@ -27098,7 +27249,7 @@ pub mod record {
 
     /// 磁碟那三個數字。全部是**這段期間的實測位元組**，不是速率——
     /// 換算成「一天」是 `footprint_lines` 的 `per_day` 參數的事。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct DiskMeasured {
         /// 這段期間磁碟淨長了多少。**可能是負的**：保留期清理跑過
@@ -27133,7 +27284,7 @@ pub mod record {
     /// `any(windows, test)` 而不是 `windows`：整個 `report_footprint` 是
     /// Windows 限定的，而它裡面每一個 ⚠ 判斷在開發機上一次都跑不到。
     /// 對抗式稽核在這一段做了 22 次改壞，17 次四道閘門全綠。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn footprint_lines(m: &FootprintMeasured, per_day: impl Fn(u64) -> Option<f64>) -> String {
         let FootprintMeasured {
             frame_size,
@@ -27321,7 +27472,7 @@ pub mod record {
         lines.join("\n")
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     impl FootprintMeasured {
         /// 把這一場的量測接成一份 `FootprintMeasured`。
         ///
@@ -27357,14 +27508,14 @@ pub mod record {
 
     /// 用已凍結的足跡時間換算每日增長。60 秒以前不外推；`ElapsedSecs` 是
     /// newtype，呼叫端不能把 CPU 秒數或別的 `f64` 對調進來。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn bytes_per_day_at(elapsed: FootprintElapsedSecs, bytes: u64) -> Option<f64> {
         (elapsed.0 >= 60.0).then(|| bytes as f64 / elapsed.0 * 86_400.0)
     }
 
     /// Windows 這一層只負責印已經排好的字；快照、來源接線與每日換算都在
     /// `any(windows, test)` 的純邏輯裡，Linux 測試能真的執行。
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     fn report_footprint(report: &str) {
         println!("{report}");
     }
@@ -27373,7 +27524,7 @@ pub mod record {
     ///
     /// `images_throttled` 一定要講出來，因為使用者遲早會點到一筆沒有圖的
     /// 搜尋結果，然後合理地以為壞掉了。講出來它是設計，不講它就是 bug。
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     fn report_images(
         stats: &sister_capture::RecorderStats,
         timings: &sister_capture::timings::Timings,
@@ -27473,7 +27624,7 @@ pub mod record {
     /// tick 時間只對應 0.27 秒 CPU，三分之二是卡在顯示驅動裡等。所以標題
     /// 那行要把 CPU 秒數一起印出來——不然一份拆得很細的耗時表會被讀成
     /// 「CPU 花在哪裡」，而使用者抱怨的明明是後者。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn skipped_tick_summary(counts: TickCounts) -> String {
         let idle_ticks = counts.idle();
         let master_blocked_ticks = counts.master_blocked();
@@ -27495,7 +27646,7 @@ pub mod record {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     fn report_timings(
         t: &sister_capture::timings::Timings,
         counts: TickCounts,
@@ -27579,7 +27730,7 @@ pub mod record {
     /// 拆出來、而且在測試建置下也編得到：`report_ocr` 只在 Windows 上存在，
     /// 而一句只有目標平台才驗得到的話，等於一句沒有被驗過的話。同一個理由
     /// 和同一個 `any(windows, test)` 見 [`DiskProjection`]。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn ocr_off_words(stores_images: StoringImages) -> &'static str {
         if stores_images.enabled() {
             "畫面留下了，但上面的字沒有進資料庫"
@@ -27592,7 +27743,7 @@ pub mod record {
     ///
     /// 像素比例一定拿實際累計相除，不用「幾個 crop」猜：三個小角落和三張
     /// 幾乎全幅的圖，crop 數完全一樣，成本卻不是同一件事。
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
     fn ocr_work_line(stats: &sister_capture::RecorderStats) -> Option<String> {
         let successful = stats.ocr_full_frames + stats.ocr_region_frames + stats.ocr_reused_frames;
         if successful == 0
@@ -27638,7 +27789,7 @@ pub mod record {
         ))
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     fn report_ocr(
         stats: &sister_capture::RecorderStats,
         ocr_enabled: OcrEnabled,

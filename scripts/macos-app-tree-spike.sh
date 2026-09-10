@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# macOS ARM64 diagnostic only: verify the .app/sibling process tree, then permit one
-# ScreenCaptureKit probe. It never writes or uploads captured pixels.
+# macOS ARM64 diagnostic: verify the .app/sibling process tree, then read the recorder's
+# permission facts. When TCC grants access, it also runs the exact ScreenCaptureKit RGBA path.
 
 set -euo pipefail
 
@@ -337,46 +337,48 @@ report = json.loads(capture_path.read_text(encoding="utf-8"))
 app_exit = json.loads(exit_path.read_text(encoding="utf-8"))
 if app_exit != {"schema": 1, "success": True, "code": 0}:
     raise SystemExit(f"app did not report one clean child exit: {app_exit!r}")
-if report.get("schema") != 1:
+if report.get("schema") != 2:
     raise SystemExit(f"capture report schema mismatch: {report!r}")
-preflight = report.get("preflight")
+screen = report.get("screen_recording")
+accessibility = report.get("accessibility")
 capture = report.get("capture")
 if not isinstance(capture, dict):
     raise SystemExit(f"capture outcome is not an object: {capture!r}")
 outcome = capture.get("outcome")
-if preflight == "not_granted_or_undetermined":
+if accessibility not in {"granted", "not_granted_or_undetermined"}:
+    raise SystemExit(f"unknown Accessibility result: {accessibility!r}")
+if screen == "not_granted_or_undetermined":
     if outcome != "not_attempted":
         raise SystemExit("non-granted preflight still attempted ScreenCaptureKit")
-elif preflight == "granted":
+elif screen == "granted":
     if outcome == "not_attempted":
         raise SystemExit("granted preflight did not attempt ScreenCaptureKit")
 else:
-    raise SystemExit(f"unknown preflight result: {preflight!r}")
+    raise SystemExit(f"unknown screen recording result: {screen!r}")
 
 if outcome == "captured":
-    width, height = capture.get("width"), capture.get("height")
+    width, height, rgba_bytes = capture.get("width"), capture.get("height"), capture.get("rgba_bytes")
     if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
         raise SystemExit(f"captured dimensions are not positive: {width!r}x{height!r}")
+    if rgba_bytes != width * height * 4:
+        raise SystemExit(f"captured RGBA byte count is wrong: {rgba_bytes!r}")
 elif outcome in {"not_attempted", "no_display", "failed"}:
     pass
-elif outcome == "invalid_image_dimensions":
-    raise SystemExit(f"ScreenCaptureKit returned an invalid image: {capture!r}")
 else:
     raise SystemExit(f"unknown capture outcome: {outcome!r}")
 
 with summary_path.open("a", encoding="utf-8") as summary:
-    summary.write("## macOS ARM64 diagnostic (not Preview)\n\n")
-    summary.write(f"- TCC preflight: `{preflight}`\n")
+    summary.write("## macOS ARM64 app-tree capture diagnostic\n\n")
+    summary.write(f"- Screen Recording: `{screen}`\n")
+    summary.write(f"- Accessibility: `{accessibility}`\n")
     summary.write(f"- ScreenCaptureKit outcome: `{outcome}`\n")
     if outcome == "captured":
-        summary.write(f"- Returned CGImage: `{capture['width']}×{capture['height']}`\n")
-    if outcome == "failed":
         summary.write(
-            "- Failure kind is the ScreenCaptureKit crate wrapper variant; it is not a "
-            "claim about the native root cause.\n"
+            f"- Returned RGBA frame: `{capture['width']}×{capture['height']}` / "
+            f"`{capture['rgba_bytes']}` bytes\n"
         )
 if outcome != "captured":
-    print(f"::warning::macOS diagnostic produced {outcome}; this run does not prove a pixel path")
+    print(f"::warning::macOS app-tree diagnostic produced {outcome}")
 PY
 
 if find "$probe" -maxdepth 1 -type f \
@@ -411,7 +413,7 @@ if hasattr(os, "O_NOFOLLOW"):
     flags |= os.O_NOFOLLOW
 fd = os.open(path, flags, 0o600)
 try:
-    payload = json.dumps({"schema": 1, "all_checks_completed": True}, indent=2) + "\n"
+    payload = json.dumps({"schema": 2, "all_checks_completed": True}, indent=2) + "\n"
     os.write(fd, payload.encode("utf-8"))
     os.fsync(fd)
 finally:

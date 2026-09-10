@@ -15,7 +15,7 @@ jobs:
   # Linux 上跑的是平台無關的那一半：核心邏輯、L1 抽取、replay、隱私驗證。
   linux:
     name: Linux — test, lint, privacy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -23,6 +23,9 @@ jobs:
           components: clippy, rustfmt
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux native build headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
 
       - name: Release version — workspaces, locks, Tauri config and tag agree
         shell: bash
@@ -363,6 +366,114 @@ jobs:
       - name: Cross-check the Windows half
         run: ./scripts/check-windows.sh
 
+  linux_preview:
+    name: Linux X11 — native capture, OCR and .deb
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install X11, local OCR and desktop build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            at-spi2-core dbus-x11 libayatana-appindicator3-dev librsvg2-dev \
+            libwebkit2gtk-4.1-dev patchelf tesseract-ocr tesseract-ocr-chi-tra \
+            tesseract-ocr-eng x11-utils xfonts-base xvfb
+
+      - name: Exact retained X11 frame runs through local Tesseract
+        env:
+          AI_SISTER_REQUIRE_LINUX_OCR_SMOKE: "1"
+        run: cargo test -p sister-capture linux::tests::x11_frame_runs_through_local_tesseract --locked -- --nocapture
+
+      - name: Build the native recorder sidecar
+        run: |
+          set -euo pipefail
+          cargo build --release -p sister-cli --locked
+          cp target/release/sister target/release/sister-x86_64-unknown-linux-gnu
+          test -x target/release/sister-x86_64-unknown-linux-gnu
+
+      - name: Build the Debian desktop package
+        run: cargo install tauri-cli --version 2.11.4 --locked
+
+      - name: Bundle the Debian desktop package
+        working-directory: apps/desktop/src-tauri
+        run: cargo tauri build --bundles deb --config tauri.linux.conf.json
+
+      - name: Verify installed payload, dependencies and native desktop launch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(find apps/desktop/src-tauri/target/release/bundle/deb \
+            -maxdepth 1 -type f -name '*.deb' -print)
+          test "${#packages[@]}" -eq 1
+          package=${packages[0]}
+          public="$RUNNER_TEMP/AI-Sister-Linux-X11-amd64.deb"
+          cp "$package" "$public"
+          test -s "$public"
+          dpkg-deb --info "$public" > "$RUNNER_TEMP/linux-deb-info.txt"
+          for dependency in at-spi2-core tesseract-ocr tesseract-ocr-chi-tra tesseract-ocr-eng; do
+            grep -q "$dependency" "$RUNNER_TEMP/linux-deb-info.txt"
+          done
+          payload="$RUNNER_TEMP/linux-deb-payload"
+          mkdir "$payload"
+          dpkg-deb --extract "$public" "$payload"
+          test -x "$payload/usr/bin/sister"
+          test -x "$payload/usr/bin/sister-desktop"
+          test -x /usr/bin/tesseract
+          "$payload/usr/bin/sister" --version
+          if ldd "$payload/usr/bin/sister" "$payload/usr/bin/sister-desktop" | grep -q 'not found'; then
+            ldd "$payload/usr/bin/sister" "$payload/usr/bin/sister-desktop"
+            exit 1
+          fi
+          sudo apt-get install -y "$public"
+          test -x /usr/bin/sister
+          test -x /usr/bin/sister-desktop
+          /usr/bin/sister --version
+          export AI_SISTER_LINUX_DESKTOP=/usr/bin/sister-desktop
+          export AI_SISTER_LINUX_SMOKE="$RUNNER_TEMP/linux-desktop-smoke"
+          mkdir "$AI_SISTER_LINUX_SMOKE"
+          dbus-run-session -- bash -euo pipefail <<'SH'
+          Xvfb :91 -screen 0 1280x720x24 -nolisten tcp >"$AI_SISTER_LINUX_SMOKE/xvfb.log" 2>&1 &
+          xvfb_pid=$!
+          app_pid=
+          cleanup() {
+            if [[ "$app_pid" =~ ^[0-9]+$ ]] && kill -0 "$app_pid" 2>/dev/null; then
+              kill "$app_pid" 2>/dev/null || true
+              wait "$app_pid" 2>/dev/null || true
+            fi
+            kill "$xvfb_pid" 2>/dev/null || true
+            wait "$xvfb_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          export DISPLAY=:91
+          for _ in {1..50}; do
+            xdpyinfo >/dev/null 2>&1 && break
+            sleep 0.1
+          done
+          xdpyinfo >/dev/null
+          export XDG_CONFIG_HOME="$AI_SISTER_LINUX_SMOKE/config"
+          export XDG_DATA_HOME="$AI_SISTER_LINUX_SMOKE/data"
+          export WEBKIT_DISABLE_COMPOSITING_MODE=1
+          "$AI_SISTER_LINUX_DESKTOP" >"$AI_SISTER_LINUX_SMOKE/desktop.stdout" \
+            2>"$AI_SISTER_LINUX_SMOKE/desktop.stderr" &
+          app_pid=$!
+          sleep 5
+          kill -0 "$app_pid"
+          SH
+
+      - name: Upload Linux X11 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-sister-linux-x11-amd64
+          path: ${{ runner.temp }}/AI-Sister-Linux-X11-amd64.deb
+          if-no-files-found: error
+          retention-days: 14
+
   # `rust-version` 不是只給 resolver 看的標籤：用宣告的最低版真的編兩個
   # workspace。desktop 放在 Windows 跑，因為 Linux runner 沒有 Tauri 的 GTK
   # 系統函式庫；這格只證明 1.85 能編，不冒充 Windows 行為測試。
@@ -381,6 +492,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux native build headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
 
       - name: Root workspace compiles on the declared minimum
         run: cargo check --workspace --all-targets --locked
@@ -401,11 +516,10 @@ jobs:
         working-directory: apps/desktop/src-tauri
         run: cargo check --all-targets --locked
 
-  # 第一個原生 macOS 證據只回答一個窄問題：一棵 ad-hoc signed Apple Silicon
-  # app tree 能不能由 LaunchServices 啟動 exact bundled child，並在 preflight
-  # 明確為 true 時嘗試一次 ScreenCaptureKit。它不寫像素／DB，也沒有產品同意書、
-  # Vision OCR、query/evidence 或 TCC 撤回生命週期，所以 job 與 artifact 都明講
-  # NOT PREVIEW；這格失敗也不擋 Windows release。
+  # macOS product backend 與共用 S1 loop 都在這棵 app tree 編譯。CI 另開一個
+  # 無持久化 probe，精確驗 app → bundled child 身分、TCC facts，以及權限已有時
+  # 和 recorder 相同的 ScreenCaptureKit RGBA 路徑。Hosted runner 無法代替公開版的
+  # Developer ID notarization 與真人 TCC/S1 驗收，所以 artifact 仍只是 NOT PREVIEW 證據。
   macos_spike:
     name: macOS ARM64 — signed app-tree capture diagnostic (not Preview)
     runs-on: macos-15
@@ -439,11 +553,12 @@ jobs:
           test "$(rustup run 1.85.0 rustc -vV | sed -n 's/^host: //p')" = aarch64-apple-darwin
           test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-apple-darwin
 
-      - name: Native macOS capture feature compiles on Rust 1.85
+      - name: Native macOS recorder compiles by default on Rust 1.85
         shell: bash
         run: |
           set -euo pipefail
-          cargo +1.85.0 check -p sister-capture --all-targets --features macos-ci-spike --locked
+          cargo +1.85.0 check -p sister-capture --all-targets --locked
+          cargo +1.85.0 check -p sister-cli --all-targets --locked
           cargo +1.85.0 check -p sister-cli --all-targets --features macos-ci-spike --locked
 
       - name: Native macOS capture feature — format, lint and test
@@ -456,7 +571,7 @@ jobs:
           cargo test -p sister-capture --all-targets --features macos-ci-spike --locked
           cargo test -p sister-cli --all-targets --features macos-ci-spike --locked
 
-      - name: Build the exact feature-gated sidecar
+      - name: Build the exact product sidecar plus private probe entry
         shell: bash
         run: |
           set -euo pipefail
@@ -498,7 +613,7 @@ jobs:
           import sys
 
           record = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          expected = {"schema": 1, "all_checks_completed": True}
+          expected = {"schema": 2, "all_checks_completed": True}
           if record != expected:
               raise SystemExit(f"macOS diagnostic did not complete every check: {record!r}")
           PY
@@ -2631,7 +2746,7 @@ jobs:
   # 打 tag 才發 release，這樣才有一個不用登入就能下載的連結。
   release:
     name: Release
-    needs: [linux, msrv, windows]
+    needs: [linux, linux_preview, msrv, windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     # 同一個 tag 的 rerun 不能和原本那輪同時碰 release。後來排到的那輪會先
@@ -2655,6 +2770,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: windows-signing-receipt
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai-sister-linux-x11-amd64
 
       # Windows job 已用 Authenticode trust policy 驗過三個公開檔；release runner 再把
       # receipt 對目前 tag 與下載回來的 exact bytes/hash 重算一次。正式 tag 若不是
@@ -2686,9 +2804,9 @@ jobs:
 
       # alpha 是 prerelease；資產全數驗完以前必須留在不可見 draft。這裡不用會
       # 「找到既有 release 就更新」的第三方 action：成功公開後 rerun 時，那種更新會
-      # 直接在公開頁刪除／重傳三檔，任一 upload 中斷就留下一套 partial／mixed 資產。
+      # 直接在公開頁刪除／重傳四檔，任一 upload 中斷就留下一套 partial／mixed 資產。
       # 同 tag 若只有上一輪失敗留下的 draft，可以安全地整份刪掉重建；若已公開則
-      # 在碰任何遠端資產以前失敗。三檔也刻意逐一上傳，不並行改 release。
+      # 在碰任何遠端資產以前失敗。四檔也刻意逐一上傳，不並行改 release。
       - name: Create draft release and upload installer plus portable executables
         id: create_release
         shell: bash
@@ -2696,7 +2814,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for asset in AI-Sister-Setup.exe sister.exe sister-desktop.exe; do
+          for asset in AI-Sister-Setup.exe sister.exe sister-desktop.exe AI-Sister-Linux-X11-amd64.deb; do
             test -s "$asset"
           done
 
@@ -2770,7 +2888,7 @@ jobs:
           )
           echo "id=$release_id" >> "$GITHUB_OUTPUT"
 
-          for asset in AI-Sister-Setup.exe sister.exe sister-desktop.exe; do
+          for asset in AI-Sister-Setup.exe sister.exe sister-desktop.exe AI-Sister-Linux-X11-amd64.deb; do
             gh release upload "$GITHUB_REF_NAME" "$asset"
           done
 
@@ -2786,6 +2904,7 @@ jobs:
           test -s AI-Sister-Setup.exe
           test -s sister.exe
           test -s sister-desktop.exe
+          test -s AI-Sister-Linux-X11-amd64.deb
 
           release_api="repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}"
           release_json="$RUNNER_TEMP/release-before-publish.json"
@@ -2811,10 +2930,15 @@ jobs:
           assets = release.get("assets")
           if not isinstance(assets, list):
               raise SystemExit("GitHub release assets 不是 list")
-          expected_names = {"AI-Sister-Setup.exe", "sister.exe", "sister-desktop.exe"}
+          expected_names = {
+              "AI-Sister-Setup.exe",
+              "sister.exe",
+              "sister-desktop.exe",
+              "AI-Sister-Linux-X11-amd64.deb",
+          }
           names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
-          if len(assets) != 3 or len(names) != 3 or set(names) != expected_names:
-              raise SystemExit(f"遠端 release asset 必須恰為 setup 與兩個 portable exe，實際：{names!r}")
+          if len(assets) != 4 or len(names) != 4 or set(names) != expected_names:
+              raise SystemExit(f"遠端 release asset 必須恰為 Windows 三檔與 Linux X11 deb，實際：{names!r}")
 
           for asset in sorted(assets, key=lambda item: item["name"]):
               asset_id = asset.get("id")
@@ -2832,8 +2956,8 @@ jobs:
               print(f"{asset_id}\t{asset['name']}\t{size}")
           PY
 
-          # 用 release asset API 把 draft 裡的三檔真的讀回來；size 相等不代表內容相等，
-          # 所以最後仍和剛通過 Windows job 的本機 artifact 做 byte-for-byte compare。
+          # 用 release asset API 把 draft 裡的四檔真的讀回來；size 相等不代表內容相等，
+          # 所以最後仍和剛通過各原生 job 的本機 artifact 做 byte-for-byte compare。
           while IFS=$'\t' read -r asset_id asset_name asset_size; do
             downloaded="$RUNNER_TEMP/remote-${asset_name}"
             gh api \
@@ -2861,7 +2985,7 @@ jobs:
           gh api --method PATCH "$release_api" --input "$publish_payload" >/dev/null
 
   # 官網只在同一輪 release 已經公開後更新；首頁的固定下載 URL 因此不會先指到
-  # 尚不存在的 tag。部署檔只含三個 website source files、17 張已核准 WebP 與 NOTICE。
+  # 尚不存在的 tag。部署檔只含 website source files、17 張已核准 WebP 與 NOTICE。
   website:
     name: Website
     needs: [release]

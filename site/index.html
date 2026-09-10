@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="AI-Sister 是 Windows 上的 local-first 桌面記憶：安靜記住你的一天，提問時秒答，每一句都能點回本機證據。"
+      content="AI-Sister 是 Windows 與 Ubuntu 24.04 X11 上的 local-first 桌面記憶：安靜記住你的一天，提問時秒答，每一句都能點回本機證據。"
     />
     <meta
       http-equiv="Content-Security-Policy"
@@ -28,29 +28,32 @@
         <a href="#memory">記憶</a>
         <a href="#personas">角色</a>
         <a href="#privacy">本機邊界</a>
-        <a class="nav-download" href="__DOWNLOAD_URL__">下載</a>
+        <a class="nav-download" href="#download">下載</a>
       </nav>
     </header>
 
     <main id="main">
       <section class="hero" id="top">
         <div class="hero-copy">
-          <p class="eyebrow"><span></span> Windows · local-first</p>
+          <p class="eyebrow"><span></span> Windows + Linux X11 · local-first</p>
           <h1>你昨天在忙什麼，<br /><em>問她就知道。</em></h1>
           <p class="hero-lede">
             AI-Sister 安靜看著你的工作，把畫面上的細節留在這台電腦。等你想找電話、金額、
             網址，或昨天卡住的地方，她秒答，而且每一句都點得開證據。
           </p>
           <div class="hero-actions">
-            <a class="button button-primary" href="__DOWNLOAD_URL__">
+            <a class="button button-primary" href="__WINDOWS_DOWNLOAD_URL__">
               <span>下載 Windows 安裝包</span>
               <span aria-hidden="true">↓</span>
+            </a>
+            <a class="button button-quiet" href="__LINUX_DOWNLOAD_URL__">
+              Linux X11 .deb <span aria-hidden="true">↓</span>
             </a>
             <a class="button button-quiet" href="https://github.com/teddashh/AI-Sister">
               看原始碼 <span aria-hidden="true">↗</span>
             </a>
           </div>
-          <p class="release-line">__TAG__ · Windows 10+ · Apache-2.0</p>
+          <p class="release-line">__TAG__ · Windows 10+ · Ubuntu 24.04 X11 · Apache-2.0</p>
         </div>
 
         <div class="hero-product" aria-label="AI-Sister 產品介面預覽">
@@ -229,13 +232,16 @@
           <h2>裝好，授權，<span>然後問她。</span></h2>
         </div>
         <ol class="steps">
-          <li><span>01</span><div><b>下載安裝包</b><p>current-user 安裝，不需要系統管理員。</p></div></li>
+          <li><span>01</span><div><b>下載安裝包</b><p>Windows 用 Setup；Ubuntu 24.04 X11 用 .deb。</p></div></li>
           <li><span>02</span><div><b>選擇要開的同意</b><p>先開本機記錄；畫面保存與 CLI 解讀各自決定。</p></div></li>
           <li><span>03</span><div><b>開始問</b><p>「昨天我在做什麼？」每筆事實都附出處。</p></div></li>
         </ol>
         <div class="download-panel">
           <div><span>目前版本</span><b>__VERSION__</b></div>
-          <a class="button button-primary" href="__DOWNLOAD_URL__">下載 AI-Sister <span aria-hidden="true">↓</span></a>
+          <div class="download-actions">
+            <a class="button button-primary" href="__WINDOWS_DOWNLOAD_URL__">Windows <span aria-hidden="true">↓</span></a>
+            <a class="button button-quiet" href="__LINUX_DOWNLOAD_URL__">Linux X11 <span aria-hidden="true">↓</span></a>
+          </div>
         </div>
       </section>
     </main>
@@ -252,7 +258,7 @@
         <a href="https://github.com/teddashh/AI-Sister/blob/main/docs/WINDOWS-CODE-SIGNING.md">簽章</a>
         <a href="./assets/personas/NOTICE.md">角色素材</a>
       </div>
-      <p class="footer-meta">Open source · Local-first · Built for Windows</p>
+      <p class="footer-meta">Open source · Local-first · Windows + Linux X11</p>
     </footer>
   </body>
 </html>

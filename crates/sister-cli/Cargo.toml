@@ -13,9 +13,10 @@ name = "sister"
 path = "src/main.rs"
 
 [features]
-default = ["bundled-sqlite"]
+default = ["bundled-sqlite", "macos"]
 bundled-sqlite = ["sister-core/bundled-sqlite", "sister-capture/bundled-sqlite"]
-macos-ci-spike = ["sister-capture/macos-ci-spike"]
+macos = ["sister-capture/macos"]
+macos-ci-spike = ["macos", "sister-capture/macos-ci-spike"]
 
 [dependencies]
 sister-core.workspace = true
@@ -48,3 +49,6 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
