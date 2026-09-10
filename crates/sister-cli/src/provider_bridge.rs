@@ -256,7 +256,13 @@ mod tests {
             run_prompt(provider, &executable, &prompt).unwrap();
             assert_eq!(std::fs::read_to_string(&output).unwrap(), prompt);
             let cwd = PathBuf::from(std::fs::read_to_string(&cwd_output).unwrap().trim());
-            assert!(cwd.starts_with(std::env::temp_dir().join("AI-Sister")));
+            // macOS 的 `temp_dir()` 會給 `/var/...`，而 child 的 `pwd` 會把同一條
+            // 路徑實體化成 `/private/var/...`。先把共同的既存 parent 正規化，
+            // 比較的才是同一個目錄，不是兩種字面拼法。
+            let expected_parent = std::fs::canonicalize(std::env::temp_dir())
+                .unwrap()
+                .join("AI-Sister");
+            assert!(cwd.starts_with(expected_parent));
             assert_ne!(cwd, root);
             assert!(
                 !cwd.exists(),

@@ -413,7 +413,7 @@ feature 集合沒有 `download`；Azure 答案朗讀收在 `crates/sister-tts`�
 集合沒有 `azure`。只有 desktop 明確啟用這兩個窄 transport；它們都不把 HTTP 能力
 交給 brain，Azure TTS 也不是模型接入或 OCR 出境路徑。
 
-- **alpha.121 的設定入口**：設定頁固定列 Claude Code、Codex、Gemini CLI、Grok CLI
+- **alpha.122 的設定入口**：設定頁固定列 Claude Code、Codex、Gemini CLI、Grok CLI
   四張卡。native 端從 `PATH` 與各 CLI 的 Windows 標準安裝位置找 executable，並以
   有界 `--version` probe 顯示實際版本；未安裝的選項不能按登入。
 - **登入與選用是同一筆 transaction**：trusted click 才會開該 provider 自己的登入流程；

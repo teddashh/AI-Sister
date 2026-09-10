@@ -80,7 +80,12 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
-## v0.1.0-alpha.121
+## v0.1.0-alpha.122
+
+**alpha.121 tag 沒有公開 release 或下載資產；alpha.122 才是把四支 CLI 大腦登入交到
+使用者手上的版本。** macOS runner 的暫存目錄同時有 `/var/...` 與 canonical
+`/private/var/...` 兩種名稱；alpha.121 的隔離工作目錄測試直接比較字串，因此正確紅燈並讓
+Release job 停住。alpha.122 對既存 temp parent 做 canonical compare，保留同一條隔離斷言。
 
 **大腦現在能在設定頁直接接好 Claude Code、Codex、Gemini CLI 或 Grok CLI：找得到、登得入、
 真正測得通，才會設為目前大腦。**
@@ -99,6 +104,38 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 設定頁不再露出 raw command／args。舊自訂 brain 設定仍能照原配置執行，但不會在四張卡裡
 冒充已接好的 provider；重新選一支並通過 probe 後才換成固定 bridge。brain／core／recorder
 依然沒有 HTTP client，第二張同意沒有成立時也不會把 OCR 原文交給 CLI。
+
+
+## v0.1.0-alpha.121
+
+**這個 tag 沒有公開 release 或下載資產。** 它已包含四支 CLI 大腦登入；tag 的 macOS job
+在隔離工作目錄測試裡把 `/var/...` 與同一目錄的 canonical `/private/var/...` 當成不同位置，
+因此 Release job 跳過。alpha.122 保留功能並修正這條跨平台路徑比較。
+
+<details>
+<summary>alpha.121 原定交付內容</summary>
+
+<br />
+
+**大腦現在能在設定頁直接接好 Claude Code、Codex、Gemini CLI 或 Grok CLI：找得到、登得入、
+真正測得通，才會設為目前大腦。**
+
+四張 provider 卡會顯示本機安裝狀態與實際版本；未安裝的選項不能啟動。按登入後走各 CLI
+自己的官方登入流程，結束時再由 bundled `sister.exe brain-cli-bridge` 要求一個固定 probe。
+登入、bridge 與 provider 全部成功，設定才原子切換；非零退出、錯誤回覆、逾時、儲存失敗或
+取消都保留原本的大腦。使用者也能隨時獨立測試目前大腦；同時只會有一筆登入或測試。
+
+取消會終止完整 process group／Windows Job tree。Claude Code、Codex 與 Gemini 的 prompt
+從 stdin 送入；Grok 使用 owner-only、關閉即刪的 private prompt file。四支 provider 每次都
+在新建的空 private workspace 執行，結束後整個清除，OCR 文字不會出現在 process argv，
+也不會因目前專案目錄被 provider 自動帶入。AI-Sister 不接收或保存 provider 密碼與 token；
+帳號狀態仍由使用者已安裝的 CLI 管理。
+
+設定頁不再露出 raw command／args。舊自訂 brain 設定仍能照原配置執行，但不會在四張卡裡
+冒充已接好的 provider；重新選一支並通過 probe 後才換成固定 bridge。brain／core／recorder
+依然沒有 HTTP client，第二張同意沒有成立時也不會把 OCR 原文交給 CLI。
+
+</details>
 
 
 ## v0.1.0-alpha.120
