@@ -349,7 +349,7 @@ function Prepare-SelfTest([string] $Destination) {
     # Certificate Provider 對 Root store 的互動模式受 host 影響；certutil 的 user + force
     # 路徑是明確非互動，並且不需要提升到 LocalMachine。
     Write-Host 'signing fixture: trust public certificate for current user'
-    & certutil.exe -user -f -addstore Root $publicCertificate
+    & certutil.exe -user -f -silent -addstore Root $publicCertificate
     if ($LASTEXITCODE -ne 0) {
       throw "fixture Root trust import 失敗：certutil exit=$LASTEXITCODE"
     }
