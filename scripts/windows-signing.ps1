@@ -346,12 +346,26 @@ function Prepare-SelfTest([string] $Destination) {
     if ((Normalize-Thumbprint $certificate.Thumbprint) -cne $thumbprint) {
       throw 'fixture PFX round-trip 改變了 certificate thumbprint'
     }
-    # Certificate Provider 對 Root store 的互動模式受 host 影響；certutil 的 user + force
-    # 路徑是明確非互動，並且不需要提升到 LocalMachine。
+    # 直接寫 CurrentUser store；X509Store 不會開 Certificate Import Wizard，也不需要提升
+    # 到 LocalMachine。寫完再從 Certificate Provider 讀回同一 thumbprint。
     Write-Host 'signing fixture: trust public certificate for current user'
-    & certutil.exe -user -f -silent -addstore Root $publicCertificate
-    if ($LASTEXITCODE -ne 0) {
-      throw "fixture Root trust import 失敗：certutil exit=$LASTEXITCODE"
+    $rootCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+      $publicCertificate
+    )
+    $rootStore = [Security.Cryptography.X509Certificates.X509Store]::new(
+      [Security.Cryptography.X509Certificates.StoreName]::Root,
+      [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+    )
+    try {
+      $rootStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+      $rootStore.Add($rootCertificate)
+    }
+    finally {
+      $rootStore.Close()
+      $rootCertificate.Dispose()
+    }
+    if (-not (Test-Path -LiteralPath "Cert:\CurrentUser\Root\$thumbprint" -PathType Leaf)) {
+      throw 'fixture certificate 沒有進入 CurrentUser/Root'
     }
     Write-Host 'signing fixture: certificate round-trip complete'
   }
