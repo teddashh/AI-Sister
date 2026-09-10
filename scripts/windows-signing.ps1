@@ -77,7 +77,7 @@ function Normalize-Thumbprint([string] $Value) {
 function Has-CodeSigningEku($Certificate) {
   return @(
     $Certificate.EnhancedKeyUsageList |
-      Where-Object { $_.ObjectId.Value -ceq $codeSigningEku }
+      Where-Object { $_.ObjectId -ceq $codeSigningEku }
   ).Count -gt 0
 }
 

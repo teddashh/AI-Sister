@@ -101,6 +101,7 @@ def main() -> None:
 
     required_signing_fragments = (
         "$timestampUrl = 'http://timestamp.digicert.com'",
+        "Where-Object { $_.ObjectId -ceq $codeSigningEku }",
         "Import-PfxCertificate",
         "Assert-CertificateUsable $certificate",
         "/fd SHA256 /sha1 $thumbprint /d AI-Sister /tr $timestampUrl /td SHA256",
@@ -114,6 +115,8 @@ def main() -> None:
     for fragment in required_signing_fragments:
         if fragment not in signing:
             fail(f"Windows signing implementation 缺少 `{fragment}`")
+    if ".ObjectId.Value" in signing:
+        fail("Certificate Provider 的 EnhancedKeyUsageList.ObjectId 已是字串，不得再取 .Value")
 
     print("✓ Windows signing：PFX → 三層 build → 四層 trust → receipt → release")
 
