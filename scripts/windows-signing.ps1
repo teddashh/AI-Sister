@@ -200,7 +200,7 @@ function Get-FileProjection([string] $InputPath, $Plan) {
         throw "fixture Authenticode 不是 exact untrusted-root 狀態：$resolved status=$fixtureStatus message=$($signature.StatusMessage)"
       }
       $untrustedRootPattern = `
-        '(?i)(root\s+certificate[\s\S]+not\s+trusted|certificate\s+chain[\s\S]+authority[\s\S]+not\s+trusted)'
+        '(?i)(certificate\s+chain[\s\S]+terminated[\s\S]+root\s+certificate[\s\S]+not\s+trusted|certificate\s+chain[\s\S]+authority[\s\S]+not\s+trusted)'
       if ($signature.StatusMessage -notmatch $untrustedRootPattern) {
         throw "fixture Authenticode 失敗不是 untrusted root：$resolved message=$($signature.StatusMessage)"
       }
@@ -209,11 +209,22 @@ function Get-FileProjection([string] $InputPath, $Plan) {
       }
 
       $signTool = Find-SignTool
-      $signToolOutput = @(& $signTool verify /pa /all /v $resolved 2>&1)
-      $signToolExit = $LASTEXITCODE
-      $signToolMessage = $signToolOutput -join [Environment]::NewLine
-      if ($signToolExit -eq 0 -or $signToolMessage -notmatch $untrustedRootPattern) {
-        throw "fixture signtool 沒有只因 untrusted root 失敗：$resolved exit=$signToolExit output=$signToolMessage"
+      $signToolErrorPath = Join-Path `
+        $env:RUNNER_TEMP `
+        "ai-sister-signtool-$([Guid]::NewGuid().ToString('N')).stderr"
+      try {
+        $signToolOutput = @(& $signTool verify /pa /all /v $resolved 2> $signToolErrorPath)
+        $signToolExit = $LASTEXITCODE
+        $signToolError = [IO.File]::ReadAllText($signToolErrorPath)
+      }
+      finally {
+        if (Test-Path -LiteralPath $signToolErrorPath) {
+          Remove-Item -LiteralPath $signToolErrorPath -Force
+        }
+      }
+      if ($signToolExit -eq 0 -or $signToolError -notmatch $untrustedRootPattern) {
+        $signToolMessage = $signToolOutput -join [Environment]::NewLine
+        throw "fixture signtool 沒有只因 untrusted root 失敗：$resolved exit=$signToolExit stdout=$signToolMessage stderr=$signToolError"
       }
       Assert-FixtureCertificateChain $signature.SignerCertificate $expectedThumbprint
     }
