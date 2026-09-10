@@ -103,6 +103,7 @@ def main() -> None:
         "$timestampUrl = 'http://timestamp.digicert.com'",
         "Where-Object { $_.ObjectId -ceq $codeSigningEku }",
         "Import-PfxCertificate",
+        "& certutil.exe -user -f -addstore Root $publicCertificate",
         "Assert-CertificateUsable $certificate",
         "/fd SHA256 /sha1 $thumbprint /d AI-Sister /tr $timestampUrl /td SHA256",
         "certificateThumbprint = $thumbprint",

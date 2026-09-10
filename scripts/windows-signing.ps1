@@ -300,6 +300,7 @@ function Prepare-Production([string] $Destination) {
 
 function Prepare-SelfTest([string] $Destination) {
   $subject = "CN=AI-Sister CI signing fixture $([Guid]::NewGuid().ToString('N'))"
+  Write-Host 'signing fixture: create certificate'
   $certificate = New-SelfSignedCertificate `
     -Type CodeSigningCert `
     -Subject $subject `
@@ -317,6 +318,7 @@ function Prepare-SelfTest([string] $Destination) {
   $fixturePassword = ConvertTo-SecureString -String $fixturePasswordText -AsPlainText -Force
   $thumbprint = Normalize-Thumbprint $certificate.Thumbprint
   try {
+    Write-Host 'signing fixture: export public certificate and PFX'
     $null = Export-Certificate -Cert $certificate -FilePath $publicCertificate -Force
     $null = Export-PfxCertificate `
       -Cert $certificate `
@@ -327,6 +329,7 @@ function Prepare-SelfTest([string] $Destination) {
 
     # 隔離演練不是直接沿用剛建立的 certificate。先移除，再走和正式 release
     # 相同的 PFX -> CurrentUser/My import，才能抓到 PFX 密碼、private key 與 store 接線。
+    Write-Host 'signing fixture: remove source certificate and import PFX'
     Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -Force
     $imported = @(
       Import-PfxCertificate -FilePath $fixturePfx -CertStoreLocation 'Cert:\CurrentUser\My' `
@@ -343,8 +346,14 @@ function Prepare-SelfTest([string] $Destination) {
     if ((Normalize-Thumbprint $certificate.Thumbprint) -cne $thumbprint) {
       throw 'fixture PFX round-trip 改變了 certificate thumbprint'
     }
-    $null = Import-Certificate -FilePath $publicCertificate `
-      -CertStoreLocation 'Cert:\CurrentUser\Root'
+    # Certificate Provider 對 Root store 的互動模式受 host 影響；certutil 的 user + force
+    # 路徑是明確非互動，並且不需要提升到 LocalMachine。
+    Write-Host 'signing fixture: trust public certificate for current user'
+    & certutil.exe -user -f -addstore Root $publicCertificate
+    if ($LASTEXITCODE -ne 0) {
+      throw "fixture Root trust import 失敗：certutil exit=$LASTEXITCODE"
+    }
+    Write-Host 'signing fixture: certificate round-trip complete'
   }
   finally {
     if (Test-Path -LiteralPath $publicCertificate) {
