@@ -7,7 +7,7 @@
 // 一個只驗證得了初始狀態的工具，會讓人以為沒截到的那半是好的。
 //
 //   node scripts/shot.mjs <url> <out.png> [w] [h] [selector ...]
-//       [--expect-js '回傳 truthy 的頁面內 JS']
+//       [--init-js '在每次頁面載入前跑的 JS'] [--expect-js '回傳 truthy 的頁面內 JS']
 //
 // 最後那幾個參數是要依序點的 CSS selector，每一下之間等 250ms。
 // 需要先自己起一個 http server（CSP 的 `script-src 'self'` 在 file:// 上會
@@ -20,23 +20,28 @@ import { join } from "node:path";
 const [url, out, w = "980", h = "720", ...actions] = process.argv.slice(2);
 if (!url || !out) {
   console.error(
-    "用法：node scripts/shot.mjs <url> <out.png> [w] [h] [selector...] [--expect-js JS]",
+    "用法：node scripts/shot.mjs <url> <out.png> [w] [h] [selector...] [--init-js JS] [--expect-js JS]",
   );
   process.exit(2);
 }
 
 const clicks = [];
+let initialPageScript = null;
 let expectedPageState = null;
 for (let i = 0; i < actions.length; i += 1) {
-  if (actions[i] !== "--expect-js") {
+  if (actions[i] !== "--init-js" && actions[i] !== "--expect-js") {
     clicks.push(actions[i]);
     continue;
   }
-  if (expectedPageState !== null || i + 1 >= actions.length) {
-    console.error("--expect-js 必須剛好出現一次，後面接一段頁面內 JS");
+  const option = actions[i];
+  const alreadySet = option === "--init-js" ? initialPageScript !== null : expectedPageState !== null;
+  if (alreadySet || i + 1 >= actions.length) {
+    console.error(`${option} 必須剛好出現一次，後面接一段頁面內 JS`);
     process.exit(2);
   }
-  expectedPageState = actions[(i += 1)];
+  const script = actions[(i += 1)];
+  if (option === "--init-js") initialPageScript = script;
+  else expectedPageState = script;
 }
 
 const viewportWidth = Number(w);
@@ -146,6 +151,11 @@ await send("Emulation.setDeviceMetricsOverride", {
 });
 await send("Page.enable");
 await send("Runtime.enable");
+if (initialPageScript !== null) {
+  // DevTools 在 document script 之前注入。這條只有截圖 CLI 能用；產品
+  // URL 不增加 query fixture，也不讓純瀏覽器網頁把假回覆當成 native 狀態。
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: initialPageScript });
+}
 const navigation = await send("Page.navigate", { url });
 if (navigation.errorText) {
   throw new Error(`頁面無法載入：${navigation.errorText}`);

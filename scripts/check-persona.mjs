@@ -997,6 +997,9 @@ console.log("③ᵇ Reel 只建 active rig；整組 decode 前與任何失敗都
 check(
   "截圖工具會導航、等頁面與角色圖 ready，再核對 exact PNG 像素",
   SHOT.includes('await send("Page.navigate", { url })') &&
+    SHOT.includes(
+      'await send("Page.addScriptToEvaluateOnNewDocument", { source: initialPageScript })',
+    ) &&
     SHOT.includes('document.readyState === "complete"') &&
     SHOT.includes('cards.length === 17 && pictures.length === 17') &&
     SHOT.includes("previewPictures.length === 1") &&
