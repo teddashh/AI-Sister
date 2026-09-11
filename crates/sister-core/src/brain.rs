@@ -430,7 +430,9 @@ pub fn configure_managed_process(command: &mut Command, _visible_console: bool) 
 #[cfg(windows)]
 pub fn configure_managed_process(command: &mut Command, visible_console: bool) {
     use std::os::windows::process::CommandExt;
-    use windows::Win32::System::Threading::{CREATE_NEW_CONSOLE, CREATE_SUSPENDED};
+    use windows::Win32::System::Threading::{
+        CREATE_NEW_CONSOLE, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+    };
 
     // AssignProcessToJobObject after an ordinary spawn has a real race: the
     // provider can create a descendant before the parent enters our Job, and
@@ -439,6 +441,11 @@ pub fn configure_managed_process(command: &mut Command, visible_console: bool) {
     let mut flags = CREATE_SUSPENDED.0;
     if visible_console {
         flags |= CREATE_NEW_CONSOLE.0;
+    } else {
+        // 登入流程需要看得見 provider 的互動式終端機；其餘 probe、查詢與回答
+        // 都是由 desktop 管理 stdin/stdout 的背景工作，不該在儲存設定或發問後
+        // 閃出黑色 cmd 視窗。這是 Win32 的 echo-off 等價行為，不改送給 CLI 的字。
+        flags |= CREATE_NO_WINDOW.0;
     }
     command.creation_flags(flags);
 }

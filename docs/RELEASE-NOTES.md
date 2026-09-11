@@ -87,6 +87,28 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.127
+
+**Grok 已登入卻不回答的那條路，現在會在原對話補完真正缺的同意，再把原問題交回 Grok。**
+
+alpha.126 擴大第二張 `cloud-reading` 條文後，舊簽名依法失效；當時主視窗只顯示本機結果與
+「第二張尚未授權」，看起來就像已選 Grok 沒有接管。本版把尚未回答的四張直接放進角色上方
+同一顆對話氣泡，依序顯示 native 完整條文與未簽後果。使用者在原輸入框回答「同意」或
+「不同意」，每張 atomic 保存成功才前進；不同意不取得權限，但會獨立記住目前條文已回答，
+不在每次開機追問。條文改版只重問真正變動的張數。若原問題已被 `consent_required` 擋住，
+回答完成後會把完全相同的問題自動重送目前選定的 CLI。
+
+17 位角色各有四段 bundled 同意書朗讀，共 68 段 Ogg Opus、4,535,704 bytes。錄音逐字稿必須和 core 當下
+`Sheet::wording()` 完全相同，整庫 text／path／bytes／hash／duration／rights 驗證通過才啟用；
+不同就停用，不拿舊錄音念新授權。聲音只在使用者按當張「念給我聽」後播放，不 autoplay、
+不叫 CLI、不走 Azure 或系統 voice。WAV、reference 與 QC report 保留在 private voice-lab，
+release 只帶最終 Ogg、manifest 與 NOTICE。
+
+主視窗拖曳列新增設定齒輪；設定與系統匣仍保留完整四張卡片供查看、重簽與撤回。Windows
+背景的 CLI 版本探測、測試、記憶查詢與回答現在都加上 `CREATE_NO_WINDOW`，儲存設定或問答
+不再閃出黑色 console；只有 provider 官方登入保留看得見、可互動的終端機。原本透明全身
+角色與指向角色的答案氣泡尺寸不變。
+
 ## v0.1.0-alpha.126
 
 **Windows 升級不必再因為 AI-Sister 還在系統匣而關掉 Setup 重來。**

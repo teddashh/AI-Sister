@@ -108,6 +108,21 @@ pub struct Consent {
     /// 也是舊檔缺欄位時的 fail-closed 值。
     #[serde(default)]
     pub azure_tts_terms_version: u32,
+    /// 第一張曾在目前共同條文版本下被明確回答。0 = 尚未回答。
+    ///
+    /// 這和 `local_recording` 分開：使用者回答「不同意」時沒有簽名，但產品也
+    /// 不該在每次開機把同一題當成從未問過。
+    #[serde(default)]
+    pub local_recording_reviewed_version: u32,
+    /// 第二張曾在目前獨立條文版本下被明確回答。0 = 尚未回答。
+    #[serde(default)]
+    pub cloud_reading_reviewed_terms_version: u32,
+    /// 第三張曾在目前共同條文版本下被明確回答。0 = 尚未回答。
+    #[serde(default)]
+    pub frame_storage_reviewed_version: u32,
+    /// 第四張曾在目前獨立條文版本下被明確回答。0 = 尚未回答。
+    #[serde(default)]
+    pub azure_tts_reviewed_terms_version: u32,
 }
 
 /// 四張裡的哪一張。
@@ -214,6 +229,7 @@ impl Consent {
         match sheet {
             Sheet::LocalRecording => {
                 self.local_recording.get_or_insert(ts);
+                self.local_recording_reviewed_version = VERSION;
             }
             Sheet::CloudReading => {
                 // 舊 timestamp 是按在「本機先選候選、CLI 只成句」那句上的。現在
@@ -224,9 +240,11 @@ impl Consent {
                     self.cloud_reading.get_or_insert(ts);
                 }
                 self.cloud_reading_terms_version = CLOUD_READING_TERMS_VERSION;
+                self.cloud_reading_reviewed_terms_version = CLOUD_READING_TERMS_VERSION;
             }
             Sheet::FrameStorage => {
                 self.frame_storage.get_or_insert(ts);
+                self.frame_storage_reviewed_version = VERSION;
             }
             Sheet::AzureTts => {
                 // 舊的 timestamp 是按在舊句子上的。新條文重問時必須記這次的
@@ -237,6 +255,7 @@ impl Consent {
                     self.azure_tts.get_or_insert(ts);
                 }
                 self.azure_tts_terms_version = AZURE_TTS_TERMS_VERSION;
+                self.azure_tts_reviewed_terms_version = AZURE_TTS_TERMS_VERSION;
             }
         }
         self.version = VERSION;
@@ -244,10 +263,42 @@ impl Consent {
 
     pub fn revoke(&mut self, sheet: Sheet) {
         match sheet {
-            Sheet::LocalRecording => self.local_recording = None,
-            Sheet::CloudReading => self.cloud_reading = None,
-            Sheet::FrameStorage => self.frame_storage = None,
-            Sheet::AzureTts => self.azure_tts = None,
+            Sheet::LocalRecording => {
+                self.local_recording = None;
+                self.local_recording_reviewed_version = VERSION;
+            }
+            Sheet::CloudReading => {
+                self.cloud_reading = None;
+                self.cloud_reading_reviewed_terms_version = CLOUD_READING_TERMS_VERSION;
+            }
+            Sheet::FrameStorage => {
+                self.frame_storage = None;
+                self.frame_storage_reviewed_version = VERSION;
+            }
+            Sheet::AzureTts => {
+                self.azure_tts = None;
+                self.azure_tts_reviewed_terms_version = AZURE_TTS_TERMS_VERSION;
+            }
+        }
+        self.version = VERSION;
+    }
+
+    /// 這張在目前條文下是否已被明確回答。有效簽名也一定算回答過；後面的
+    /// version 欄則保留「回答不同意」而沒有 timestamp 的狀態。
+    pub fn reviewed(&self, sheet: Sheet) -> bool {
+        if self.effective(sheet) {
+            return true;
+        }
+        if !self.current() {
+            return false;
+        }
+        match sheet {
+            Sheet::LocalRecording => self.local_recording_reviewed_version == VERSION,
+            Sheet::CloudReading => {
+                self.cloud_reading_reviewed_terms_version == CLOUD_READING_TERMS_VERSION
+            }
+            Sheet::FrameStorage => self.frame_storage_reviewed_version == VERSION,
+            Sheet::AzureTts => self.azure_tts_reviewed_terms_version == AZURE_TTS_TERMS_VERSION,
         }
     }
 
@@ -1020,6 +1071,51 @@ mod tests {
         assert!(!c.allows_frames());
         c.grant(Sheet::FrameStorage, 999);
         assert_eq!(c.frame_storage, Some(999));
+    }
+
+    #[test]
+    fn declining_is_reviewed_without_becoming_permission() {
+        let mut c = Consent::default();
+        for sheet in Sheet::ALL {
+            assert!(!c.reviewed(sheet));
+            c.revoke(sheet);
+            assert!(c.reviewed(sheet));
+            assert!(!c.effective(sheet));
+        }
+        assert_eq!(c.version, VERSION);
+        assert!(c.cloud_permit().is_none());
+        assert!(c.azure_tts_permit().is_none());
+    }
+
+    #[test]
+    fn old_effective_signatures_count_as_reviewed_but_stale_outbound_terms_do_not() {
+        let old: Consent = toml::from_str(
+            "version = 3\nlocal_recording = 11\ncloud_reading = 12\nframe_storage = 13\n",
+        )
+        .expect("pre-guided consent");
+        assert!(old.reviewed(Sheet::LocalRecording));
+        assert!(!old.reviewed(Sheet::CloudReading));
+        assert!(old.reviewed(Sheet::FrameStorage));
+        assert!(!old.reviewed(Sheet::AzureTts));
+    }
+
+    #[test]
+    fn reviewed_versions_round_trip_without_inventing_a_signature() {
+        let tmp = Tmp::new("reviewed-roundtrip");
+        let mut c = Consent::default();
+        c.revoke(Sheet::LocalRecording);
+        c.grant(Sheet::CloudReading, 22);
+        c.revoke(Sheet::FrameStorage);
+        c.revoke(Sheet::AzureTts);
+        save(&tmp.0, &c).expect("save reviewed decisions");
+
+        let loaded = load(&tmp.0);
+        assert_eq!(loaded, c);
+        assert!(Sheet::ALL.into_iter().all(|sheet| loaded.reviewed(sheet)));
+        assert!(loaded.cloud_permit().is_some());
+        assert!(!loaded.allows_recording());
+        assert!(!loaded.allows_frames());
+        assert!(!loaded.allows_azure_tts());
     }
 
     #[test]

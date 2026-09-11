@@ -10,7 +10,7 @@
 > separate, default-off Azure TTS option can send only each newly completed
 > answer body after its own consent; manual replay sends it again. Local speech remains the default.
 
-**Status: v0.1.0-alpha.126**
+**Status: v0.1.0-alpha.127**
 
 AI-Sister 已完成本機記錄、OCR、L0–L3 記憶、本機 RAG、逐句可點出處，以及 Claude Code、
 Codex、Gemini CLI、Grok CLI 四種大腦登入。四姊妹與 13 位閨密共 17 位；角色圖、
@@ -22,7 +22,9 @@ AI-Sister 在本機執行最多三條查詢，再把命中的文字與出處交�
 找到的本機來源。
 
 桌面主視窗是透明全身桌寵：角色大小不因答案出現而縮放，回答與可點證據收在指向角色的
-單一對話氣泡裡，沒有米白色整窗背景框。
+單一對話氣泡裡，沒有米白色整窗背景框。第一次開啟時，四張同意書也在這顆對話氣泡逐張
+詢問；使用者在原本的輸入框回答「同意」或「不同意」，答完仍可從上方齒輪進設定查看或
+更改。若一題因新條文而被第二張擋住，完成回答後會保留並自動重送原問題給目前選定的 CLI。
 
 - Windows 10+：Setup、桌面程式、常駐 recorder 與完整 S1。
 - Ubuntu 24.04 X11：`.deb`、原生 X11 擷取、AT-SPI 隱私脈絡、本機 Tesseract 與完整 S1。
@@ -74,8 +76,9 @@ AI-Sister 仍會在本機記下這次問題。若 agent 正被 AI-Sister 當成 
 
 例如要准她在本機記字並保留截圖，要寫
 `sister consent --grant local-recording --grant frame-storage`。三個介面——
-`sister consent` 和使用者第一次開桌面姊妹時那一頁都從 core 取同一份條文與未簽後果；
-`sister doctor` 讀同一個檔案，另外報告目前是否簽署及會發生什麼事。
+桌面主對話、設定裡的完整四張卡片與 `sister consent` 都從 core 取同一份條文與未簽後果；
+`sister doctor` 讀同一個檔案，另外報告目前是否簽署及會發生什麼事。回答「不同意」會保持
+功能關閉，但也會記住這張已問過；下次啟動不會反覆追問。條文改版時只重問真正變動的那張。
 前三張共同條文改版會讓前三張舊簽名失效；第二張與第四張也各有自己的條文版本。檔案讀不到、
 損壞或版本不符一律 fail closed。alpha.109 以前沒有 Azure 欄位的舊檔保留前三張、
 第四張未簽；alpha.109 已簽的逐次點擊條文在 alpha.110 也會顯示為過期，只需重簽
@@ -240,16 +243,21 @@ Apache-2.0 程式碼授權；由 ChatGPT preview 衍生的五個應用程式圖�
 可重現的 selector 與排除範圍見 [Persona Reel 選材](docs/PERSONA-REELS.md)。
 
 本機角色語音也隨 desktop 一起安裝：17 位角色各有基本包 8 句、擴充包 24 句，
-合計 **544 段 Ogg Opus、8,918,728 bytes**。目前只有使用者點角色時會播放該角色的
+合計 **544 段 Ogg Opus、8,918,728 bytes**；另有每位四張、合計
+**68 段同意書朗讀、4,535,704 bytes**。
+目前只有使用者點角色時會播放該角色的
 固定台詞；輸入框送出的短句與一般問題一樣，全部交給已選 CLI 與本機記憶路徑，
 不用固定台詞繞過大腦或冒充動態答案。
 
 聲音預設關閉。只有你按下角色才會播放固定角色台詞，不因開場、輪詢、輸入文字、
-錄製或記憶事件自己開口；固定角色語音不連網、不叫 CLI，也不借系統 voice。動態答案下方
+錄製或記憶事件自己開口；同意書也只有你在當張條文上按「念給我聽」才播放目前角色的
+bundled 錄音，不會 autoplay。錄音逐字稿若與 native 當下條文不同，該段直接停用。
+這些固定角色語音不連網、不叫 CLI，也不借系統 voice。動態答案下方
 的「用本機聲音朗讀」仍由使用者另外按下，並只接受 WebView 明確回報
 `localService = true` 的繁中／中文系統 voice。
 語音來源、逐檔 hash、權利範圍與完整 inventory 在
-`apps/desktop/ui/persona-voices/v1/{manifest.json,NOTICE.md}`。
+`apps/desktop/ui/persona-voices/v1/{manifest.json,NOTICE.md}` 與
+`apps/desktop/ui/persona-consent-voices/v1/{manifest.json,NOTICE.md}`。
 
 alpha.110 的 Azure 繁中朗讀仍然**可選而且預設關閉**；它不是本機 voice 的自動
 fallback，本機找不到聲音時仍靜音，Azure 失敗時也不自動改走另一條。啟用 Azure、

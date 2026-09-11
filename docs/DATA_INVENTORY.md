@@ -96,7 +96,7 @@ timeout，相關設定／key／consent mutation 或 native cancel 可能等它�
 | `master.stop.lock` | 空的永久 activity drain 鎖。capture tick、CLI spawn/stdin 與 outbound audit、reviewer product mutation、hands OS call、doctor/bench live probe 都持 shared handle；engage 取 exclusive 排乾。release 不直接拿這把鎖，但若前面已有 engage，會先等該 engage 排乾完成 | 永遠不靠 unlink 解除。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `master.stop.turnstile` | 空的永久 admission／不可逆邊界鎖。新活動和最後一次 persistence/spawn/OS call 在 shared lock 內重驗 latch/pending；engage 在 exclusive lock 內發佈 pending | 永遠不靠 unlink 解除。執行中不可刪，否則 admission 與 engage 可能落在不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `master.stop.owner` | 空的永久 engage／release 排序鎖。engage 全程持 exclusive；release 排在同一把鎖後面，所以成功解除後，較舊 engage 不可能才補寫 latch。它也讓 reader 分得出 live `stopping` 與孤立 pending | 永遠不靠 unlink 解除。執行中不可刪，否則 stop／release 可能各鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
-| `consent.toml` | 四張同意書各自是**何時**簽的；前三張有共同條文版本，第四張 `azure-tts` 另有獨立 terms version | 等於四張都沒簽；`sister record` 拒絕啟動，Azure TTS 一次都不呼叫 |
+| `consent.toml` | 四張同意書各自是**何時**簽的，另存各張目前條文是否已明確回答；前三張有共同條文版本，第二、第四張另有獨立 terms version。回答不同意只有 reviewed version，沒有簽署時戳或 permit | 等於四張都沒簽、也都尚未回答；`sister record` 拒絕啟動，CLI／Azure 一次都不呼叫，主對話會重新逐張詢問 |
 | `consent.lock` | 空的跨行程同意 transaction 鎖。CLI／desktop 的 grant／revoke 在 OS whole-file exclusive lock 內重讀最新 `consent.toml`、套當次變更再 atomic save；recorder start 先持 shared guard。CLI 那份跨到第一拍；desktop parent 那份只跨到 `Command::spawn` 回來便立即放掉，child 自己 nonblocking 重拿並跨到第一拍。symlink／non-regular path 拒絕 | Windows 的 live handle 會拒絕刪除；Unix Preview 的 advisory lock 擋不住 unlink／replace。執行中不可刪，否則不同 process 可能鎖到不同 inode；所有 AI-Sister 行程關閉後才可修復／重建 |
 | `consent-revoke.barrier` | 第一張同意撤回在 atomic save **之前**發布的獨立 durable barrier；內容是 `v1:` 加 fresh 256-bit generation。Recorder 把它視為 `consent-revoked` 停止條件，但不消費；Start 無權清。只有成功 commit 的 local-recording regrant 可用相符 generation ticket 清理，並先確保另有 durable stop intent | 刪掉可能讓失敗的 consent save 留著舊有效同意時重新開錄，也可能讓同一拍內的快速 revoke→regrant 漏掉收工。不要手動刪；損毀時 fail closed，須先關閉所有 AI-Sister 行程再修復 |
 | `pet-window.json` | 字母人視窗的位置與置頂狀態 | 下次開在右下角 |
@@ -124,7 +124,9 @@ stale lock，作業系統會釋放 handle；檔案留在原位是刻意的。
 `consent.toml` 存時戳而不是 `true`／`false`，因為「你什麼時候同意的」是一個
 你有權利問、而我們答得出來的問題。讀不到的時候一律倒向「她做得比較少」那一邊：
 暫停控制狀態讀不到當作暫停中，同意書讀不到當作沒簽；心跳讀不到則明講狀態未知，
-不宣稱正在錄，也不把它折成「沒有人在錄」來開放 Start／retry。
+不宣稱正在錄，也不把它折成「沒有人在錄」來開放 Start／retry。alpha.127 另存四個
+reviewed version，讓明確回答「不同意」不會被壓成「從未問過」；它不取代簽署時戳，
+也不能鑄出任何權限。條文版本變更時，舊 reviewed version 和舊簽名一樣不涵蓋新句子。
 第四張 `azure-tts` 只鑄出 Azure TTS permit，不借用 `cloud-reading`、Persona 下載點擊
 或 Persona 的本機聲音開關。alpha.109 讀到沒有 Azure 欄位的同版本舊 consent 時，
 原三張時戳原樣保留，第四張是 `None`；alpha.110 讀到 click-only 第四張時保留它的歷史

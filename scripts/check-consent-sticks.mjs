@@ -45,6 +45,7 @@ function view(granted = [true, false, true, true]) {
       without: `沒有第 ${i + 1} 張會怎樣`,
       granted_at: granted[i] ? 1_755_000_000_000 : null,
       effective: granted[i],
+      reviewed: true,
     })),
   };
 }

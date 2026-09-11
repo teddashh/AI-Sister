@@ -293,6 +293,7 @@ function demoView(current, storeImages = true, mode = "1") {
       // 簽過**而且**條文沒改版才算數。`current` 是整份的屬性——改版時四張
       // 一起失效，不會有一張有效、另一張同時顯示「條文改版了」。
       effective: current && at[i] !== null,
+      reviewed: current,
     })),
   };
 }

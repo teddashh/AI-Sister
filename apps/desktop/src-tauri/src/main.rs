@@ -6298,6 +6298,9 @@ struct SheetView {
     granted_at: Option<i64>,
     /// 現在算不算數。簽過但條文改版了的話，`granted_at` 有值而這裡是 false。
     effective: bool,
+    /// 目前條文是否已被明確回答；不同意時 `effective` 仍是 false，但不會在
+    /// 每次啟動重新追問。授權與「問過了」不能共用同一個 bool。
+    reviewed: bool,
 }
 
 #[derive(Serialize)]
@@ -6374,6 +6377,7 @@ fn consent_view_after(dir: &std::path::Path, reset_by_version: bool) -> ConsentV
                 without: s.without().to_string(),
                 granted_at: c.get(s),
                 effective: c.effective(s),
+                reviewed: c.reviewed(s),
             })
             .collect(),
     }
@@ -7675,24 +7679,9 @@ fn main() {
                 _ => {}
             });
 
-            // ---- 還沒簽同意書就先問 ----
-            //
-            // 這一支不會擋住字母人，因為她本來就只是**讀**資料庫——沒有同意書
-            // 也讀得到已經存在的東西，而擋掉只會讓一個想來撤回同意的人進不來。
-            // 真正的閘門在 `sister record`（見 `ops::record::gate`）。
-            //
-            // 這裡做的是另一件事：`sister record` 拒絕啟動的時候，那句話印在
-            // 一個他可能根本沒開的終端機裡。字母人是他看得到的那一面。
-            if launch_intent == LaunchIntent::Interactive
-                && !consent_read(app.state::<Shell>())
-                .map(|v| v.allows_recording)
-                .unwrap_or(false)
-            {
-                match open_onboarding_window(app.handle().clone()) {
-                    Ok(()) => {}
-                    Err(e) => tracing::error!("同意書開不起來：{e}"),
-                }
-            }
+            // 還沒回答的同意書由主視窗逐張問；不再另外彈一扇視窗，讓使用者
+            // 打完「同意／不同意」後原本的問題能在同一條對話裡繼續。設定頁與
+            // 系統匣仍保留完整四張卡片，供日後查看、重簽與撤回。
 
             Ok(())
         })

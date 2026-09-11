@@ -48,6 +48,14 @@ const pinButton = document.querySelector("#pin");
 const hideButton = document.querySelector("#hide");
 const pauseButton = document.querySelector("#pause");
 const timelineButton = document.querySelector("#timeline");
+const settingsButton = document.querySelector("#settings");
+const consentGuide = document.querySelector("[data-consent-guide]");
+const consentProgress = document.querySelector("[data-consent-progress]");
+const consentWording = document.querySelector("[data-consent-wording]");
+const consentWithout = document.querySelector("[data-consent-without]");
+const consentListen = document.querySelector("[data-consent-listen]");
+const consentPrompt = document.querySelector("[data-consent-prompt]");
+const consentResult = document.querySelector("[data-consent-result]");
 const wakeButton = document.querySelector("[data-wake]");
 const utterance = document.querySelector("[data-utterance]");
 const utteranceText = document.querySelector("[data-utterance-text]");
@@ -313,6 +321,125 @@ function dialogueVoiceLibrary(raw) {
 }
 
 const DIALOGUE_VOICES = dialogueVoiceLibrary(globalThis.__AI_SISTER_PERSONA_VOICES__);
+
+const CONSENT_SHEETS = Object.freeze([
+  "local-recording",
+  "cloud-reading",
+  "frame-storage",
+  "azure-tts",
+]);
+
+/**
+ * 同意書錄音和 544 句日常台詞分成兩包：條文改版時只換這 68 段，也不會讓
+ * 「早安」之類的 exact route 誤觸法律文字。真正顯示的條文仍只讀 native；
+ * 播放前還會逐字比對，任何版本不一致都保持靜音。
+ */
+function consentVoiceLibrary(raw) {
+  const empty = Object.freeze({ byPersona: new Map() });
+  if (
+    !hasExactKeys(raw, [
+      "schema",
+      "locale",
+      "roster",
+      "engine",
+      "rightsReview",
+      "ownerGrant",
+      "notice",
+      "sheets",
+      "clips",
+      "totals",
+    ]) ||
+    raw?.schema !== "ai-sister/persona-consent-voices/v1" ||
+    raw?.locale !== "zh-TW" ||
+    raw?.roster !== "four-sisters-plus-thirteen-besties" ||
+    !hasExactKeys(raw?.engine, ["name", "modelSnapshot", "license"]) ||
+    raw.engine.name !== "MediaTek-Research/BreezyVoice-300M" ||
+    raw.engine.modelSnapshot !== "e33b502e0ac21c16b0ee0d00df66ac3fa737393d" ||
+    raw.engine.license !== "Apache-2.0" ||
+    raw?.rightsReview !== "approved-owner-grant" ||
+    !hasExactKeys(raw?.ownerGrant, ["grantedOn", "grantor", "license", "scope"]) ||
+    raw.ownerGrant.grantedOn !== "2026-09-11" ||
+    raw.ownerGrant.grantor !== "Ted Huang" ||
+    raw.ownerGrant.license !== "excluded-from-Apache-2.0" ||
+    raw.ownerGrant.scope !==
+      "Unmodified inclusion of the 68 generated consent-reading clips hash-listed by this manifest in the AI-Sister source tree and official builds" ||
+    raw?.notice !== "NOTICE.md" ||
+    !sameStrings(raw?.sheets, CONSENT_SHEETS) ||
+    !hasExactKeys(raw?.totals, [
+      "personas",
+      "sheetsPerPersona",
+      "clips",
+      "oggBytes",
+      "durationMs",
+    ]) ||
+    raw.totals.personas !== 17 ||
+    raw.totals.sheetsPerPersona !== 4 ||
+    raw.totals.clips !== 68 ||
+    !Array.isArray(raw?.clips) ||
+    raw.clips.length !== 68
+  ) {
+    return empty;
+  }
+
+  const byPersona = new Map(DIALOGUE_PERSONA_IDS.map((id) => [id, new Map()]));
+  let totalBytes = 0;
+  let totalDurationMs = 0;
+  for (const value of raw.clips) {
+    const personaSheets = byPersona.get(value?.persona);
+    const personaIndex = DIALOGUE_PERSONA_IDS.indexOf(value?.persona);
+    const expectedFile = `${value?.persona}/${value?.sheet}.ogg`;
+    if (
+      !hasExactKeys(value, [
+        "persona",
+        "group",
+        "sheet",
+        "text",
+        "file",
+        "bytes",
+        "sha256",
+        "durationMs",
+      ]) ||
+      personaSheets === undefined ||
+      value?.group !== (personaIndex < 4 ? "sister" : "bestie") ||
+      !CONSENT_SHEETS.includes(value?.sheet) ||
+      personaSheets.has(value.sheet) ||
+      typeof value?.text !== "string" ||
+      value.text.length < 10 ||
+      value.text.length > 320 ||
+      value?.file !== expectedFile ||
+      !Number.isSafeInteger(value?.bytes) ||
+      value.bytes < 1 ||
+      typeof value?.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(value.sha256) ||
+      !Number.isSafeInteger(value?.durationMs) ||
+      value.durationMs < 700 ||
+      value.durationMs > 90000
+    ) {
+      return empty;
+    }
+    totalBytes += value.bytes;
+    totalDurationMs += value.durationMs;
+    personaSheets.set(
+      value.sheet,
+      Object.freeze({
+        persona: value.persona,
+        sheet: value.sheet,
+        text: value.text,
+        file: `./persona-consent-voices/v1/${value.file}`,
+      }),
+    );
+  }
+  if (
+    [...byPersona.values()].some((sheets) => sheets.size !== 4) ||
+    totalBytes !== raw.totals.oggBytes ||
+    totalDurationMs !== raw.totals.durationMs
+  ) {
+    return empty;
+  }
+  return Object.freeze({ byPersona });
+}
+
+const CONSENT_VOICES = consentVoiceLibrary(globalThis.__AI_SISTER_CONSENT_VOICES__);
 
 function dialogueTaps(id) {
   return Object.freeze(
@@ -838,6 +965,12 @@ function applyPersona(view) {
   avatar.disabled = !personaEnabled || !personaTapLines;
   clearPersonaLine();
   paintPersonaPortrait();
+  if (consentGuideSheet !== null && consentListen) {
+    const clip = consentClipFor(consentGuideSheet);
+    consentListen.disabled = clip === null;
+    consentListen.title =
+      clip === null ? "這一版條文沒有相符的本機錄音" : "用目前角色的聲音朗讀";
+  }
   updateMotionGate();
   paint();
   return true;
@@ -1188,6 +1321,242 @@ async function playBundledPersonaLine(line) {
   return false;
 }
 
+// ---------- 主對話裡的四張同意書 ----------
+
+let consentGuideView = null;
+let consentGuideSheet = null;
+let consentGuideBusy = false;
+let pendingConsentQuestion = null;
+
+function usableConsentView(raw) {
+  if (
+    raw === null ||
+    typeof raw !== "object" ||
+    !Array.isArray(raw.sheets) ||
+    raw.sheets.length !== 4
+  ) {
+    return null;
+  }
+  for (const [index, sheet] of raw.sheets.entries()) {
+    if (
+      sheet?.key !== CONSENT_SHEETS[index] ||
+      typeof sheet?.wording !== "string" ||
+      sheet.wording.trim() === "" ||
+      typeof sheet?.without !== "string" ||
+      sheet.without.trim() === "" ||
+      typeof sheet?.effective !== "boolean" ||
+      typeof sheet?.reviewed !== "boolean" ||
+      (sheet.granted_at !== null && !Number.isSafeInteger(sheet.granted_at))
+    ) {
+      return null;
+    }
+  }
+  return raw;
+}
+
+function nextConsentSheet(view) {
+  return view?.sheets?.find((sheet) => sheet.reviewed !== true) ?? null;
+}
+
+function consentClipFor(sheet) {
+  const clip = CONSENT_VOICES.byPersona.get(activeProfile.id)?.get(sheet?.key) ?? null;
+  // 顯示文字只信 native；錄音逐字稿不同就不播，不能讓舊錄音替新條文說話。
+  return clip?.text === sheet?.wording ? clip : null;
+}
+
+function setConsentGuideInput(enabled) {
+  if (!askInput || !askSend) return;
+  askInput.disabled = !enabled;
+  askSend.disabled = !enabled;
+  askInput.placeholder = consentGuideSheet
+    ? "輸入「同意」或「不同意」…"
+    : "問我一件事…";
+}
+
+function showConsentGuide(view) {
+  consentGuideView = view;
+  consentGuideSheet = nextConsentSheet(view);
+  if (consentGuideSheet === null) return false;
+  const index = view.sheets.indexOf(consentGuideSheet);
+  consentProgress.textContent = `同意書 ${index + 1} / 4`;
+  consentWording.textContent = consentGuideSheet.wording;
+  consentWithout.textContent = consentGuideSheet.without;
+  consentPrompt.textContent = "請在下面輸入「同意」或「不同意」。";
+  consentResult.textContent = "";
+  consentResult.classList.remove("bad");
+  consentGuide.hidden = false;
+  hitList.hidden = true;
+  document.body.classList.remove("has-hits");
+  document.body.classList.add("has-consent-guide");
+  const clip = consentClipFor(consentGuideSheet);
+  consentListen.disabled = clip === null;
+  consentListen.title = clip === null ? "這一版條文沒有相符的本機錄音" : "用目前角色的聲音朗讀";
+  setConsentGuideInput(!consentGuideBusy);
+  paintConversation();
+  return true;
+}
+
+function hideConsentGuide() {
+  consentGuideView = null;
+  consentGuideSheet = null;
+  consentGuideBusy = false;
+  consentGuide.hidden = true;
+  document.body.classList.remove("has-consent-guide");
+  setConsentGuideInput(true);
+}
+
+function showConsentCompletion(view) {
+  const message = document.createElement("li");
+  message.className = "persona-dialogue";
+  message.textContent = view.allows_recording
+    ? "四張都問完了。日後可從上方齒輪查看或更改；按「開始記錄」後，我才會開始看。"
+    : "四張都問完了。沒有同意的功能維持關閉；日後可從上方齒輪查看或更改。";
+  hitList.replaceChildren(message);
+  hitList.hidden = false;
+  document.body.classList.add("has-hits");
+  showingAnswer = false;
+  paintConversation();
+}
+
+async function finishConsentGuide(view) {
+  const queued = pendingConsentQuestion;
+  pendingConsentQuestion = null;
+  hideConsentGuide();
+  if (queued !== null) {
+    askInput.value = queued;
+    await ask();
+    return;
+  }
+  showConsentCompletion(view);
+}
+
+async function handleConsentReply() {
+  if (consentGuideSheet === null || consentGuideBusy || invoke === null) return;
+  const reply = askInput.value
+    .normalize("NFKC")
+    .trim()
+    .replace(/[。！？!?]+$/u, "")
+    .trim();
+  const granted = reply === "同意" || reply === "我同意";
+  const declined = reply === "不同意" || reply === "我不同意" || reply === "先不要";
+  if (!granted && !declined) {
+    consentResult.textContent = "請只輸入「同意」或「不同意」；其他文字不會改動同意書。";
+    consentResult.classList.add("bad");
+    askInput.select?.();
+    return;
+  }
+
+  stopPersonaMedia();
+  const answeredKey = consentGuideSheet.key;
+  consentGuideBusy = true;
+  askInput.value = "";
+  consentResult.textContent = "正在保存…";
+  consentResult.classList.remove("bad");
+  setConsentGuideInput(false);
+  try {
+    const next = usableConsentView(
+      await invoke("consent_set", { key: answeredKey, granted }),
+    );
+    if (next === null) throw new Error("保存後沒有讀回完整的四張同意書");
+    const answered = next.sheets.find((sheet) => sheet.key === answeredKey);
+    if (
+      answered?.reviewed !== true ||
+      answered.effective !== granted ||
+      (granted && answered.granted_at === null)
+    ) {
+      throw new Error("同意書保存結果和剛才的回答不同");
+    }
+    consentGuideBusy = false;
+    if (!showConsentGuide(next)) await finishConsentGuide(next);
+  } catch (error) {
+    consentGuideBusy = false;
+    consentResult.textContent = `這一張沒有保存：${String(error?.message ?? error)}`;
+    consentResult.classList.add("bad");
+    setConsentGuideInput(true);
+    askInput.focus?.();
+  }
+}
+
+async function readConsentGuide() {
+  if (invoke === null) return;
+  setConsentGuideInput(false);
+  try {
+    const view = usableConsentView(await invoke("consent_read"));
+    if (view === null) throw new Error("沒有讀回完整的四張同意書");
+    if (!showConsentGuide(view)) hideConsentGuide();
+  } catch (error) {
+    hideConsentGuide();
+    noticeAboutSomethingElse(`同意書讀不到；這一輪不會替你做任何授權：${String(error?.message ?? error)}`);
+    paint();
+  }
+}
+
+async function playConsentSheet(event) {
+  if (event?.isTrusted !== true || consentGuideSheet === null || consentGuideBusy) return;
+  const clip = consentClipFor(consentGuideSheet);
+  if (
+    clip === null ||
+    !personaAudio ||
+    typeof personaAudio.play !== "function" ||
+    invoke === null
+  ) {
+    return;
+  }
+  stopPersonaMedia();
+  const request = voiceRequest;
+  let presentation;
+  try {
+    presentation = await invoke("persona_fixed_voice_admit");
+    const allowed = await beginNativePresentation(presentation);
+    if (
+      !allowed ||
+      request !== voiceRequest ||
+      clip !== consentClipFor(consentGuideSheet) ||
+      masterStopPhase !== "clear"
+    ) {
+      releaseNativePresentation(presentation);
+      return;
+    }
+  } catch (error) {
+    releaseNativePresentation(presentation);
+    consentResult.textContent = `現在不能朗讀：${String(error?.message ?? error)}`;
+    consentResult.classList.add("bad");
+    return;
+  }
+  bundledVoicePresentation = presentation;
+  personaAudio.currentTime = 0;
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    if (request === voiceRequest) setPersonaSpeaking(PERSONA_SPEAKING_FIXED, false);
+    personaAudio.onended = null;
+    personaAudio.onerror = null;
+    personaAudio.removeAttribute?.("src");
+    if (bundledVoicePresentation === presentation) bundledVoicePresentation = null;
+    releaseNativePresentation(presentation);
+  };
+  personaAudio.onended = finish;
+  personaAudio.onerror = () => {
+    finish();
+    if (request === voiceRequest) {
+      consentResult.textContent = "這段本機錄音播放失敗；可以直接讀文字後回答。";
+      consentResult.classList.add("bad");
+    }
+  };
+  personaAudio.src = clip.file;
+  try {
+    await personaAudio.play();
+    if (request === voiceRequest && !finished) {
+      setPersonaSpeaking(PERSONA_SPEAKING_FIXED, true);
+    }
+  } catch {
+    personaAudio.onerror?.();
+  }
+}
+
+consentListen?.addEventListener("click", (event) => void playConsentSheet(event));
+
 avatar?.addEventListener("click", sayPersonaLine);
 
 function readPersona() {
@@ -1489,6 +1858,14 @@ function showUrlPolicy(shown) {
 function paintConversation() {
   if (!urlPolicy) return;
   if (latestGatekeeperView !== null) renderGatekeeper(latestGatekeeperView);
+
+  // 同意書是使用者此刻正在回答的問題；這四張沒走完以前，不把守門員或 URL
+  // 題疊在同一顆氣泡裡。它們都沒有消失，完成後下一輪會照原狀回來。
+  if (consentGuideSheet !== null) {
+    if (gatekeeperClaimsConversation()) utterance.hidden = true;
+    showUrlPolicy(false);
+    return;
+  }
 
   const ownsWhileWriting = ["writing", "failed", "confirmed"].includes(urlPolicyWriteState);
   const userIsTalking = state === "thinking" || document.body.classList.contains("has-hits");
@@ -2626,6 +3003,15 @@ timelineButton?.addEventListener("click", async () => {
   } catch (err) {
     // 時間軸開不起來和她起不起得來是兩件事——她正在起來的時候這一句要自己
     // 帶主詞，不然會被讀成「她就是因為這個沒起來」。
+    noticeAboutSomethingElse(err?.message ?? err);
+    paint();
+  }
+});
+
+settingsButton?.addEventListener("click", async () => {
+  try {
+    await invoke?.("open_settings");
+  } catch (err) {
     noticeAboutSomethingElse(err?.message ?? err);
     paint();
   }
@@ -3885,7 +4271,7 @@ function renderHits(
       no_sources: `${provider} 已查過本機記憶；目前沒有可引用的內容。`,
       answer_failed: `${provider} 沒有完成回答；下方保留它查到的本機記憶。到設定按「測試目前大腦」即可重測。`,
       search_failed: `${provider} 這次沒有完成查詢；下方是依原問題找到的本機記憶。到設定按「測試目前大腦」即可重測。`,
-      consent_required: `到設定完成第二張「雲端解讀」後，${provider} 才能使用你的問題與本機記憶文字。`,
+      consent_required: `這題只顯示本機結果；第二張「雲端解讀」目前沒有授權 ${provider} 接手。`,
       not_configured: "到設定選一個 CLI，大腦才會接手文字問題。",
     };
     const text = messages[brain.state];
@@ -4195,6 +4581,10 @@ let asking = 0;
 async function ask(event = null) {
   const question = askInput.value.trim();
   if (question === "") return;
+  if (consentGuideSheet !== null) {
+    await handleConsentReply();
+    return;
+  }
 
   // 上一題若還在等開場 status，現在也不再是「最新那題」。
   pendingAzureAutoAsk = null;
@@ -4229,6 +4619,27 @@ async function ask(event = null) {
     if (mine !== asking) {
       releaseNativePresentation(answer);
       return;
+    }
+    // 啟動後若條文剛好改版，開場那次 consent read 可能早於這份新狀態。
+    // 先重讀真正的四張；只有「尚未回答」才接進對話，不把使用者明確回答過的
+    // 不同意又問一次。這一份本機 fallback 尚未畫出，先歸還 presentation lease。
+    if (answer?.brain?.state === "consent_required") {
+      let view = null;
+      try {
+        view = usableConsentView(await invoke("consent_read"));
+      } catch {
+        // 本機答案已經拿到了；同意書這次讀不到不能把它一起丟掉，也不能猜成
+        // 未回答。照原本的 fail-closed 狀態畫出本機結果即可。
+      }
+      if (view !== null && nextConsentSheet(view) !== null) {
+        releaseNativePresentation(answer);
+        pendingConsentQuestion = question;
+        askInput.value = "";
+        consentGuideBusy = false;
+        showConsentGuide(view);
+        setState("idle");
+        return;
+      }
     }
     const presented = await commitNativePresentation(answer, () => {
       // begin 成功後 native guard 仍活著；這一段同步畫完才 end。外部 CLI 即使
@@ -4359,6 +4770,8 @@ paintPin();
 readPersona();
 // 只讀開關／region／credential 四態／第四張同意書，不會合成，也不會連 Azure。
 readAzureTts();
+// 還沒回答的同意書直接在這顆對話氣泡逐張問；完整卡片仍留在設定入口。
+void readConsentGuide();
 
 // `?state=paused` 走的是**和產品一樣的那條路**（設 `paused` 旗標），不是另外
 // 搬一個長得像暫停的樣子出來。這一點是被截圖抓到的：第一版讓它去設 `state`，

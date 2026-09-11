@@ -91,6 +91,9 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
 - **權利與生成來源隨素材固定**：正式樹只收最終 Ogg、manifest 與 NOTICE；WAV、reference、
   模型 cache、QC 工作檔與 private receipt 都留在 voice-lab 外。發布前 544 段全部通過格式、
   音量、長度、雙 ASR 與 speaker-identity QC，CI 再驗 shipped bytes/hash/inventory。
+- **同意書朗讀是另一份原子素材**：17 位角色各四段，共 68 段 bundled Ogg；不併入 544 段
+  日常 trigger。逐字稿必須等於 native `Sheet::wording()`，整份 manifest 驗過才可由當張
+  「念給我聽」的 trusted click 播放；開場不 autoplay，條文改版而錄音未換時保持靜音。
 
 ### CLI 大腦登入合約（alpha.123 起）
 
@@ -123,6 +126,20 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   一起終止。舊回覆、停止後才回來的回覆與 presentation boundary 外的回覆都不能畫或朗讀。
 - 成句存在時，兩條動態朗讀只取成句正文；來源 ref、metadata 與底下重複的 facts／OCR 不送
   Azure。`brain_outbound` 以 `role=answer_search`／`role=answer` 分記 outcome 與時間，不存原文。
+
+### 主對話同意書合約（alpha.127 起）
+
+- 初次互動在原本的答案氣泡依序顯示四張 native 條文與未簽後果；同一個輸入框只接受
+  「同意／我同意」或「不同意／我不同意／先不要」。每張 atomic 保存成功才前進，失敗
+  停在原張；沒有「全部同意」。完整四張卡片仍留在上方齒輪與系統匣設定入口。
+- 授權 timestamp 與 reviewed terms version 分開保存。不同意不會鑄出 permit，但目前條文
+  已問過，不得每次開機追問；條文版本變更只讓對應 reviewed version 失效。舊有效簽名
+  仍算已回答，不能要求使用者無理由重簽。
+- 問題已送進本機 ask、才遇到第二張 `consent_required` 時，renderer 釋放該份 presentation、
+  保留原問題並開始補問；全部回答後只重送完全相同的原問題給當下設定選定的 CLI。
+  consent read 失敗或使用者已明確拒絕時維持 fail-closed 本機結果，不猜成未回答。
+- Windows 上只有 provider 官方登入使用可見 console；版本 probe、測試、查詢與回答一律以
+  `CREATE_NO_WINDOW` 啟動，儲存設定或發問後不閃 cmd 視窗。
 
 ### Azure 可選 TTS 合約（alpha.109 起；alpha.110 改為 opt-in 後自動讀新答案）
 
@@ -761,6 +778,9 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
   - ✅ alpha.126 將順序改成 CLI-directed retrieval：每個文字問題都先交給設定頁最後登入、
     測通並選用的 CLI，由它要求最多三條自然語言查詢；AI-Sister 在本機 SQLite 代查，再把
     命中來源交回同一支 CLI 成句。舊 raw command 不接管輸入框，角色與日常短句也沒有旁路。
+  - ✅ alpha.127 將四張同意書改成主對話逐張詢問：文字回答逐張 atomic 保存，不同意與未回答
+    分開，設定仍可查看／撤回；第二張擋住既有問題時會答完後重送同一句給已選 CLI。上方新增
+    設定齒輪，17 位角色另有 68 段 trusted-click-only 條文朗讀；Windows 背景 CLI 不再彈 console。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）
 - ✅ a `CommitmentDue`：`open_commitments_due_before(now + 40min)`，只收

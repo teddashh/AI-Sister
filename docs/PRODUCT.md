@@ -87,6 +87,13 @@ alpha.126 已把這條改成 CLI-directed S1 問答。CLI 的查詢在本機完�
 這一題的記憶體裡組合。每個新文字問題與全停都會使舊回答失效並收掉 CLI 行程樹；
 沒有命中也不會在查詢規劃前跳過 CLI。
 
+第一次開啟時，還沒回答的四張同意書直接在主對話氣泡逐張詢問，使用者以原輸入框回答
+「同意」或「不同意」；每張保存成功才前進，完整卡片仍留在上方齒輪與系統匣的設定裡。
+不同意只讓對應功能維持關閉，另行保存「目前條文已回答」，不會每次開機反覆追問。一題
+若因第二張條文改版被擋，原問題會保留，完成該張後自動重送目前選定的 CLI。Windows 上
+所有背景 probe、記憶查詢與回答行程都不建立 console 視窗；只有 provider 官方登入保留
+看得見的互動式終端機。
+
 alpha.125 把同一條 S1 擴到 Linux X11 與 macOS 14+ 原生後端。Linux 以
 logind + X11 + AT-SPI + 本機 Tesseract 提供 Ubuntu 24.04 `.deb`；macOS 以
 ScreenCaptureKit + Vision + AX 進入 product build，設定頁直接處理兩項 TCC 權限。
@@ -229,7 +236,8 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
   bundled 全身 WebP 當圖像選擇卡；選擇只改未存預覽，儲存成功才嘗試即時通知主視窗換人，
   通知失敗則明講要重開 desktop。persona 不得改答案事實、證據、
   同意書、守門員分數或 hands 權限。
-- 17 位角色各有隨程式安裝的基本包 8 句與擴充包 24 句，共 544 段 Ogg Opus。
+- 17 位角色各有隨程式安裝的基本包 8 句與擴充包 24 句，共 544 段 Ogg Opus；另有
+  每位四張、共 68 段同意書朗讀。
   runtime 目前只把每人兩句 `avatar-tap` 暴露給角色點擊，其餘段落不接輸入框；文字、角色、pack、路徑、bytes、
   SHA-256、duration 與權利綁在同一份 manifest。runtime 必須完整驗過 17×32 的 manifest
   才啟用整庫，不能缺一段後只讓部分角色說話。
@@ -237,7 +245,9 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
   不得用固定角色台詞繞過大腦或冒充動態答案。
 - 聲音不因 idle、capture、記憶或系統事件自己播放。使用者打開聲音後，固定角色台詞只由
   角色 button 的 trusted click／Enter／Space 啟動。動態答案另由「用本機聲音朗讀」按鈕
-  交給 `localService` 中文系統 TTS。`prefers-reduced-motion` 與靜音選擇優先。
+  交給 `localService` 中文系統 TTS。同意書則只由當張「念給我聽」的 trusted click 播放
+  目前角色的 bundled Ogg；逐字稿必須和 native 當下條文完全相同，否則停用。
+  `prefers-reduced-motion` 與靜音選擇優先。
 - alpha.110 的 Azure 繁中答案朗讀是**另選、預設關閉**的路徑，不是上面本機聲音的
   fallback。它要設定啟用、`eastasia`／`southeastasia`／`japaneast` typed region、
   Windows Credential Manager fixed target `ted-h/AI-Sister/AzureSpeech/v1` 的 key、

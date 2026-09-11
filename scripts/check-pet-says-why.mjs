@@ -226,6 +226,99 @@ function supervisor(phase = "stopped", message = null, failures = 0) {
   return { phase, failures, message };
 }
 
+/** `consent_read` 的 IPC 形狀；預設表示四張都已回答，避免每個既有案例被導覽接管。 */
+function consentView(
+  reviewed = [true, true, true, true],
+  effective = [true, true, true, false],
+) {
+  const keys = ["local-recording", "cloud-reading", "frame-storage", "azure-tts"];
+  return {
+    path: "C:\\Users\\ted\\AppData\\Roaming\\AI-Sister\\consent.toml",
+    current: true,
+    allows_recording: effective[0],
+    allows_frames: effective[2],
+    store_images: true,
+    capture_enabled: true,
+    reset_by_version: false,
+    sheets: keys.map((key, index) => ({
+      key,
+      wording: `第 ${index + 1} 張完整而且可讀的同意條文。`,
+      without: `沒有第 ${index + 1} 張的直接後果`,
+      granted_at: effective[index] ? 1_755_000_000_000 + index : null,
+      effective: effective[index],
+      reviewed: reviewed[index],
+    })),
+  };
+}
+
+function consentVoiceManifest() {
+  const personas = [
+    "chatgpt",
+    "claude",
+    "gemini",
+    "grok",
+    "deepseek",
+    "qwen",
+    "mistral",
+    "venice",
+    "sakana",
+    "perplexity",
+    "glm",
+    "kimi",
+    "hunyuan",
+    "minimax",
+    "nemotron",
+    "cohere",
+    "mimo",
+  ];
+  const view = consentView([false, false, false, false], [false, false, false, false]);
+  const clips = [];
+  for (const [personaIndex, persona] of personas.entries()) {
+    for (const [sheetIndex, sheet] of view.sheets.entries()) {
+      clips.push({
+        persona,
+        group: personaIndex < 4 ? "sister" : "bestie",
+        sheet: sheet.key,
+        text: sheet.wording,
+        file: `${persona}/${sheet.key}.ogg`,
+        bytes: 100 + sheetIndex,
+        sha256: `${(personaIndex + 1).toString(16).padStart(2, "0")}${(sheetIndex + 1)
+          .toString(16)
+          .padStart(2, "0")}${"a".repeat(60)}`,
+        durationMs: 1000 + sheetIndex,
+      });
+    }
+  }
+  return {
+    schema: "ai-sister/persona-consent-voices/v1",
+    locale: "zh-TW",
+    roster: "four-sisters-plus-thirteen-besties",
+    engine: {
+      name: "MediaTek-Research/BreezyVoice-300M",
+      modelSnapshot: "e33b502e0ac21c16b0ee0d00df66ac3fa737393d",
+      license: "Apache-2.0",
+    },
+    rightsReview: "approved-owner-grant",
+    ownerGrant: {
+      grantedOn: "2026-09-11",
+      grantor: "Ted Huang",
+      license: "excluded-from-Apache-2.0",
+      scope:
+        "Unmodified inclusion of the 68 generated consent-reading clips hash-listed by this manifest in the AI-Sister source tree and official builds",
+    },
+    notice: "NOTICE.md",
+    sheets: view.sheets.map(({ key }) => key),
+    clips,
+    totals: {
+      personas: 17,
+      sheetsPerPersona: 4,
+      clips: 68,
+      oggBytes: clips.reduce((sum, clip) => sum + clip.bytes, 0),
+      durationMs: clips.reduce((sum, clip) => sum + clip.durationMs, 0),
+    },
+  };
+}
+
 /**
  * 開一次字母人。`invoke` 收一張 `{ 指令: 回傳值或會丟出來的 Error }` 表；
  * 沒列到的指令回 `null`；每一扇新 desktop 都必定提供的 supervisor view 與
@@ -239,7 +332,12 @@ function supervisor(phase = "stopped", message = null, failures = 0) {
  */
 async function open(
   table = {},
-  { search = "", beforeListenerRegistered = null, browserOnly = false } = {},
+  {
+    search = "",
+    beforeListenerRegistered = null,
+    browserOnly = false,
+    consentVoices = null,
+  } = {},
 ) {
   // `domOf` 只生得出 index.html 上真的有的東西——見 fake-dom.mjs 開頭那段。
   const node = domOf(HTML);
@@ -309,6 +407,8 @@ async function open(
     return id;
   };
   globalThis.clearInterval = (id) => nativeClearInterval(id);
+  if (consentVoices === null) delete globalThis.__AI_SISTER_CONSENT_VOICES__;
+  else globalThis.__AI_SISTER_CONSENT_VOICES__ = consentVoices;
 
   const tauri = {
     core: {
@@ -324,6 +424,8 @@ async function open(
             ? supervisor()
             : cmd === "master_stop_state"
               ? "clear"
+              : cmd === "consent_read"
+                ? consentView()
               : cmd === "master_stop_presentation_begin"
                 ? true
               : null;
@@ -354,6 +456,12 @@ async function open(
     line: () => node("[data-state-line]").textContent,
     hits: () => node("[data-hits]"),
     hitTexts: () => node("[data-hits]").children.map((c) => c.textContent),
+    consentGuide: () => node("[data-consent-guide]"),
+    consentProgress: () => node("[data-consent-progress]").textContent,
+    consentWording: () => node("[data-consent-wording]").textContent,
+    consentResult: () => node("[data-consent-result]").textContent,
+    consentListen: () => node("[data-consent-listen]"),
+    input: () => node("[data-ask-input]"),
     azureButton: () => node("[data-hits]").querySelector(".answer-cloud"),
     audioPlays: () => audioPlays,
     audioPauses: () => audioPauses,
@@ -3475,6 +3583,156 @@ console.log("82. desktop truth source contract 與三個 production callback sel
   check(
     "self-mutation：ask 繞過 renderer presentation commit 會紅",
     desktopTruthSourceErrors(main, dispatch, noPresentationCommit).some((line) => line.includes("ask Promise")),
+  );
+}
+
+console.log("83. 第一次開啟直接在主對話逐張問；無效回答不寫入，不同意也不會下次再追問");
+{
+  let state = consentView([false, false, false, false], [false, false, false, false]);
+  const writes = [];
+  const p = await open({
+    consent_read: () => structuredClone(state),
+    consent_set: ({ key, granted }) => {
+      writes.push({ key, granted });
+      const sheet = state.sheets.find((candidate) => candidate.key === key);
+      if (!sheet) throw new Error("不存在的同意書");
+      sheet.reviewed = true;
+      sheet.effective = granted;
+      sheet.granted_at = granted ? 1_755_000_010_000 + writes.length : null;
+      state.allows_recording = state.sheets[0].effective;
+      state.allows_frames = state.sheets[2].effective;
+      return structuredClone(state);
+    },
+  });
+  check(
+    "開場就是第一張完整條文，輸入框明講兩個答案",
+    !p.consentGuide().hidden &&
+      p.consentProgress() === "同意書 1 / 4" &&
+      p.consentWording() === state.sheets[0].wording &&
+      p.input().placeholder.includes("同意"),
+    {
+      hidden: p.consentGuide().hidden,
+      progress: p.consentProgress(),
+      wording: p.consentWording(),
+      placeholder: p.input().placeholder,
+    },
+  );
+  await p.type("也許");
+  check(
+    "不是精確答案就不寫入任何權限",
+    writes.length === 0 && p.consentResult().includes("不會改動同意書"),
+    { writes, result: p.consentResult() },
+  );
+  await p.type("不同意");
+  await p.type("同意");
+  await p.type("我同意");
+  await p.type("先不要");
+  check(
+    "四張依固定順序各寫一次，第一、第四張拒絕仍算已回答但權限保持關閉",
+    JSON.stringify(writes) ===
+      JSON.stringify([
+        { key: "local-recording", granted: false },
+        { key: "cloud-reading", granted: true },
+        { key: "frame-storage", granted: true },
+        { key: "azure-tts", granted: false },
+      ]) &&
+      state.sheets.every((sheet) => sheet.reviewed) &&
+      state.sheets[0].effective === false &&
+      state.sheets[3].effective === false,
+    { writes, sheets: state.sheets },
+  );
+  check(
+    "問完收起導覽並留下齒輪可再查看的完成訊息",
+    p.consentGuide().hidden &&
+      p.hitTexts().some((line) => line.includes("上方齒輪查看或更改")),
+    { guideHidden: p.consentGuide().hidden, hits: p.hitTexts() },
+  );
+}
+
+console.log("84. CLI 回 consent_required 時保留原問題；補答後同一句自動重送給 Grok");
+{
+  const state = consentView();
+  const asked = [];
+  let first = true;
+  const p = await open({
+    consent_read: () => structuredClone(state),
+    consent_set: ({ key, granted }) => {
+      const sheet = state.sheets.find((candidate) => candidate.key === key);
+      sheet.reviewed = true;
+      sheet.effective = granted;
+      sheet.granted_at = granted ? 1_755_000_020_000 : null;
+      return structuredClone(state);
+    },
+    ask: ({ question }) => {
+      asked.push(question);
+      if (first) {
+        first = false;
+        state.sheets[1].reviewed = false;
+        state.sheets[1].effective = false;
+        state.sheets[1].granted_at = null;
+        return answer({ brain: { state: "consent_required", provider: "Grok CLI" } });
+      }
+      return answer({
+        brain: { state: "used", provider: "Grok CLI" },
+        hits: [hit({ snippet: "GROK_RETRIED_THE_ORIGINAL_QUESTION" })],
+      });
+    },
+  });
+  await p.type("我昨天在做什麼");
+  check(
+    "第二張失效時改問第二張，原問題沒有先被清掉或改寫",
+    p.consentProgress() === "同意書 2 / 4" &&
+      asked.length === 1 &&
+      asked[0] === "我昨天在做什麼",
+    { progress: p.consentProgress(), asked },
+  );
+  await p.type("同意");
+  check(
+    "答完後 Grok 收到完全相同的原問題第二次，畫面換成它完成的答案",
+    JSON.stringify(asked) === JSON.stringify(["我昨天在做什麼", "我昨天在做什麼"]) &&
+      p.hitTexts().some((line) => line.includes("GROK_RETRIED_THE_ORIGINAL_QUESTION")) &&
+      p.hitTexts().some((line) => line.includes("Grok CLI · 已使用本機記憶")),
+    { asked, hits: p.hitTexts() },
+  );
+}
+
+console.log("85. 條文錄音只能由 trusted click 播，而且逐字稿必須等於 native 條文");
+{
+  const p = await open(
+    {
+      consent_read: consentView([false, false, false, false], [false, false, false, false]),
+      persona_fixed_voice_admit: { presentation_id: "consent-voice" },
+      master_stop_presentation_begin: true,
+      master_stop_presentation_end: null,
+    },
+    { consentVoices: consentVoiceManifest() },
+  );
+  await p.clickElement(p.consentListen(), { trusted: false });
+  check(
+    "合成 click 不取得 native admission、也不播放",
+    p.audioPlays() === 0 &&
+      !p.invokes.some(({ cmd }) => cmd === "persona_fixed_voice_admit"),
+    { plays: p.audioPlays(), invokes: p.invokes },
+  );
+  await p.clickElement(p.consentListen());
+  check(
+    "使用者明確按朗讀才播放目前角色的第一張錄音",
+    p.audioPlays() === 1 &&
+      p.node("[data-persona-audio]").src ===
+        "./persona-consent-voices/v1/chatgpt/local-recording.ogg" &&
+      p.invokes.some(({ cmd }) => cmd === "persona_fixed_voice_admit"),
+    { plays: p.audioPlays(), src: p.node("[data-persona-audio]").src, invokes: p.invokes },
+  );
+}
+
+console.log("86. 主視窗齒輪直接開設定，不必再去系統匣找");
+{
+  const p = await open({ open_settings: null });
+  await p.click("#settings");
+  check(
+    "齒輪只呼叫既有 open_settings command",
+    p.invokes.filter(({ cmd }) => cmd === "open_settings").length === 1,
+    p.invokes,
   );
 }
 

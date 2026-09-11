@@ -1,0 +1,713 @@
+{
+  "schema": "ai-sister/persona-consent-voices/v1",
+  "locale": "zh-TW",
+  "roster": "four-sisters-plus-thirteen-besties",
+  "engine": {
+    "name": "MediaTek-Research/BreezyVoice-300M",
+    "modelSnapshot": "e33b502e0ac21c16b0ee0d00df66ac3fa737393d",
+    "license": "Apache-2.0"
+  },
+  "rightsReview": "approved-owner-grant",
+  "ownerGrant": {
+    "grantedOn": "2026-09-11",
+    "grantor": "Ted Huang",
+    "license": "excluded-from-Apache-2.0",
+    "scope": "Unmodified inclusion of the 68 generated consent-reading clips hash-listed by this manifest in the AI-Sister source tree and official builds"
+  },
+  "notice": "NOTICE.md",
+  "sheets": [
+    "local-recording",
+    "cloud-reading",
+    "frame-storage",
+    "azure-tts"
+  ],
+  "clips": [
+    {
+      "persona": "chatgpt",
+      "group": "sister",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "chatgpt/local-recording.ogg",
+      "bytes": 15807,
+      "sha256": "afa7525edd29f28af0b01663d277e91541842aba801f56cf8350a8987b3f1857",
+      "durationMs": 3106
+    },
+    {
+      "persona": "chatgpt",
+      "group": "sister",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "chatgpt/cloud-reading.ogg",
+      "bytes": 95573,
+      "sha256": "dc345efcf9da959574d196868517a498f95c37505b4cd340aaa66b29e6c8ee2c",
+      "durationMs": 18904
+    },
+    {
+      "persona": "chatgpt",
+      "group": "sister",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "chatgpt/frame-storage.ogg",
+      "bytes": 23207,
+      "sha256": "a96a94063bc55e65b81f31fef7b2e3113bdd3fc89c9439f53f6fda6f39a9199c",
+      "durationMs": 4871
+    },
+    {
+      "persona": "chatgpt",
+      "group": "sister",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "chatgpt/azure-tts.ogg",
+      "bytes": 109030,
+      "sha256": "07c9070b07646466b7efe67345155c57b15a6173322d074738074ac8555d7f7f",
+      "durationMs": 22022
+    },
+    {
+      "persona": "claude",
+      "group": "sister",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "claude/local-recording.ogg",
+      "bytes": 17081,
+      "sha256": "b260636d2545d1dabd1bd6bb0fac3029ef513f27e85b6d6b80d01e01da76c296",
+      "durationMs": 3420
+    },
+    {
+      "persona": "claude",
+      "group": "sister",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "claude/cloud-reading.ogg",
+      "bytes": 104312,
+      "sha256": "26adfd9ac362a76344455fca1aa3830f131ef78915d3b04d08d4c04f83dd78c3",
+      "durationMs": 20515
+    },
+    {
+      "persona": "claude",
+      "group": "sister",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "claude/frame-storage.ogg",
+      "bytes": 19969,
+      "sha256": "ed8ee3c080f5305f70ac03554e7442fdea3acd776d3a0b5faa14bd677f59194b",
+      "durationMs": 3861
+    },
+    {
+      "persona": "claude",
+      "group": "sister",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "claude/azure-tts.ogg",
+      "bytes": 123983,
+      "sha256": "6c865d880c16fc5e72824ab20fa0c2e0816d29dc88d50c0cd3e067bec8cd1120",
+      "durationMs": 24449
+    },
+    {
+      "persona": "gemini",
+      "group": "sister",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "gemini/local-recording.ogg",
+      "bytes": 10671,
+      "sha256": "1b7774988d70c174247a7fd7b17fe7538788aa6d0097f33dcbd10e52f2dca393",
+      "durationMs": 2131
+    },
+    {
+      "persona": "gemini",
+      "group": "sister",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "gemini/cloud-reading.ogg",
+      "bytes": 92021,
+      "sha256": "9078bb08eb6d5320c43be979cf278385b90a50ed05c7dfe386d478a2732f0728",
+      "durationMs": 18453
+    },
+    {
+      "persona": "gemini",
+      "group": "sister",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "gemini/frame-storage.ogg",
+      "bytes": 20832,
+      "sha256": "8a6eb80d36b692cc22558f1d115ac40fc8e9611c2e4a5e7f94e99fa65e413344",
+      "durationMs": 4221
+    },
+    {
+      "persona": "gemini",
+      "group": "sister",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "gemini/azure-tts.ogg",
+      "bytes": 112704,
+      "sha256": "3e19bd7099ebe8b8c1caeae0cad04e1bc244ff781bd198d7847525674d034d4c",
+      "durationMs": 22566
+    },
+    {
+      "persona": "grok",
+      "group": "sister",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "grok/local-recording.ogg",
+      "bytes": 11360,
+      "sha256": "92c90fc72f239987ad7e8d8d9834f194fde80692a0307d2dbed5cdc59dc62c1c",
+      "durationMs": 2212
+    },
+    {
+      "persona": "grok",
+      "group": "sister",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "grok/cloud-reading.ogg",
+      "bytes": 105955,
+      "sha256": "edd2af83cf5e55d1b55efe38569c82e0414fcd12781ececc3183e70737e09536",
+      "durationMs": 20877
+    },
+    {
+      "persona": "grok",
+      "group": "sister",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "grok/frame-storage.ogg",
+      "bytes": 20263,
+      "sha256": "b871003d619d718a3767e459f704864dd3c8d332615e42b98937efca3fabe46d",
+      "durationMs": 3989
+    },
+    {
+      "persona": "grok",
+      "group": "sister",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "grok/azure-tts.ogg",
+      "bytes": 111809,
+      "sha256": "7071a1e507499fab52676e45eb172c55bb7e83ac393e82487e2f5be87828ad15",
+      "durationMs": 21563
+    },
+    {
+      "persona": "deepseek",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "deepseek/local-recording.ogg",
+      "bytes": 17998,
+      "sha256": "abf8dd55a48df83c8b206eae0ca4a0efccae0dbda34d8b80bc53efa57a6d226f",
+      "durationMs": 3513
+    },
+    {
+      "persona": "deepseek",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "deepseek/cloud-reading.ogg",
+      "bytes": 103186,
+      "sha256": "65d7d0505d7cecf7110b999c7481387764ef38c844f93da270787808ab425413",
+      "durationMs": 20258
+    },
+    {
+      "persona": "deepseek",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "deepseek/frame-storage.ogg",
+      "bytes": 20620,
+      "sha256": "96f3336ae4fdbf37e3b9ca85273aa869dbf0bedfe7ff5cc85d4a0aa3d6daf18f",
+      "durationMs": 4024
+    },
+    {
+      "persona": "deepseek",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "deepseek/azure-tts.ogg",
+      "bytes": 113928,
+      "sha256": "7a2a0c8c32cba4a4f3be7df784a4742b2b3193b3b365a68afd81c5a403ab3290",
+      "durationMs": 22408
+    },
+    {
+      "persona": "qwen",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "qwen/local-recording.ogg",
+      "bytes": 13492,
+      "sha256": "01ea050353ee46433c4509510162c5d81f025625ee645c63295b4fcf6f5fd57e",
+      "durationMs": 2700
+    },
+    {
+      "persona": "qwen",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "qwen/cloud-reading.ogg",
+      "bytes": 94708,
+      "sha256": "685a7602ba11805be215e8f40d8670efc444f2bd040832790db9d8ec4b4d98b2",
+      "durationMs": 18568
+    },
+    {
+      "persona": "qwen",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "qwen/frame-storage.ogg",
+      "bytes": 21676,
+      "sha256": "0ddf8e118e91dacbfe78188491aef3b2fca4eeb829115c093801a30fa5f98efd",
+      "durationMs": 4384
+    },
+    {
+      "persona": "qwen",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "qwen/azure-tts.ogg",
+      "bytes": 114448,
+      "sha256": "a047e6fb53e441b9232a02e219a97c4e295061ee28f1b9d70f4879f527af8374",
+      "durationMs": 22458
+    },
+    {
+      "persona": "mistral",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "mistral/local-recording.ogg",
+      "bytes": 17408,
+      "sha256": "d853364410b6e8ae219d0b0badb90bffae96bf8dc275970e234a648d82cc231b",
+      "durationMs": 3431
+    },
+    {
+      "persona": "mistral",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "mistral/cloud-reading.ogg",
+      "bytes": 100183,
+      "sha256": "4cbe59a6c71dbb6757394eaa9e76cb872d48c3e6e5501891d34f711908e193a5",
+      "durationMs": 19763
+    },
+    {
+      "persona": "mistral",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "mistral/frame-storage.ogg",
+      "bytes": 26422,
+      "sha256": "faa677e463f95302eaca8bbb0abb5b6e2595dad5e02c1a687909c72080011736",
+      "durationMs": 5231
+    },
+    {
+      "persona": "mistral",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "mistral/azure-tts.ogg",
+      "bytes": 120841,
+      "sha256": "c4d358d77a7d19d5afd218482b13a62396e0500e7af8647884bd20817188e6be",
+      "durationMs": 23926
+    },
+    {
+      "persona": "venice",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "venice/local-recording.ogg",
+      "bytes": 13904,
+      "sha256": "d0b7d2eea82d389bb9ea13ee869df35fad3aa9ee2504926bbeae76ad6c9a8917",
+      "durationMs": 2909
+    },
+    {
+      "persona": "venice",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "venice/cloud-reading.ogg",
+      "bytes": 103803,
+      "sha256": "9f80e84a6edd0adf47a6bc98048dfe4c489e9c10715a7f31c3e72614f2295121",
+      "durationMs": 22139
+    },
+    {
+      "persona": "venice",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "venice/frame-storage.ogg",
+      "bytes": 22067,
+      "sha256": "11a8134085ba3174ec13765b717699eb85822e9b205d05123f96cc636199756d",
+      "durationMs": 4662
+    },
+    {
+      "persona": "venice",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "venice/azure-tts.ogg",
+      "bytes": 116789,
+      "sha256": "5617104b01b18fa027c17b226344fc3e3ddd840b3e09ef236c476939723e7295",
+      "durationMs": 24154
+    },
+    {
+      "persona": "sakana",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "sakana/local-recording.ogg",
+      "bytes": 20784,
+      "sha256": "4f7de30437d1fc8c409e679a5134545f78a9d0403dbc1f5c744f4f17a7422ecd",
+      "durationMs": 4198
+    },
+    {
+      "persona": "sakana",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "sakana/cloud-reading.ogg",
+      "bytes": 121200,
+      "sha256": "37ed7acc60790e5516c33fefc53ad66527e8916d31df5691cbe0e1c7dea75a40",
+      "durationMs": 24557
+    },
+    {
+      "persona": "sakana",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "sakana/frame-storage.ogg",
+      "bytes": 32003,
+      "sha256": "773c48b43f3ddc6bfffc612847aa1356a657287f33f9a59e1219a1a000887294",
+      "durationMs": 6520
+    },
+    {
+      "persona": "sakana",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "sakana/azure-tts.ogg",
+      "bytes": 143514,
+      "sha256": "a374b152a307682dd889a201e8f2f6c2f616f9f02460287f9d0281cf5456cb61",
+      "durationMs": 28826
+    },
+    {
+      "persona": "perplexity",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "perplexity/local-recording.ogg",
+      "bytes": 10764,
+      "sha256": "dca6568b38a7c1673ead157b6346ebc971d9629f0c9212a8b828e5b9bb5a444f",
+      "durationMs": 2085
+    },
+    {
+      "persona": "perplexity",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "perplexity/cloud-reading.ogg",
+      "bytes": 89751,
+      "sha256": "9d28ed82936280f037d3835e2d31038eb900daf6ac41d008f3bfc38661145b46",
+      "durationMs": 17959
+    },
+    {
+      "persona": "perplexity",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "perplexity/frame-storage.ogg",
+      "bytes": 15758,
+      "sha256": "7b16f08d334fa4286178acfeacf508b3faa6a6c38880c575c3474d61e3a52c27",
+      "durationMs": 3141
+    },
+    {
+      "persona": "perplexity",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "perplexity/azure-tts.ogg",
+      "bytes": 106679,
+      "sha256": "b0e75c22a90c14703c480f42e63771f7eb1f5d048134ec3b6e550eb923b0bc51",
+      "durationMs": 21217
+    },
+    {
+      "persona": "glm",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "glm/local-recording.ogg",
+      "bytes": 17695,
+      "sha256": "52dae986ef97952dfb70cc305e12d49760d6acd67bf63a7abe588c8bb6cf6064",
+      "durationMs": 3524
+    },
+    {
+      "persona": "glm",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "glm/cloud-reading.ogg",
+      "bytes": 110695,
+      "sha256": "7595ce93cf3e92ada36619347e8172baf711e1bd6b9d1552247d465ab0fa69ca",
+      "durationMs": 21978
+    },
+    {
+      "persona": "glm",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "glm/frame-storage.ogg",
+      "bytes": 23352,
+      "sha256": "92205f8e4cfbf7cee181460f34a38ebf282e6722cfb157ddf179c99351aa2599",
+      "durationMs": 4662
+    },
+    {
+      "persona": "glm",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "glm/azure-tts.ogg",
+      "bytes": 132133,
+      "sha256": "1c92a4ddbad1fcd5f4fa5e9e9e4aee40ad9d309831bf2c7cf58e4a1af3bbf2ba",
+      "durationMs": 26587
+    },
+    {
+      "persona": "kimi",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "kimi/local-recording.ogg",
+      "bytes": 16060,
+      "sha256": "f46fa6c8b06f117a1d06cbb9adec8ca5291a3e3f7700b02ca21094b6914734e8",
+      "durationMs": 3281
+    },
+    {
+      "persona": "kimi",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "kimi/cloud-reading.ogg",
+      "bytes": 114998,
+      "sha256": "87bb6213b7671b1472ead3798c58afe7ac954be5095975b97c07e706a0daa47c",
+      "durationMs": 23147
+    },
+    {
+      "persona": "kimi",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "kimi/frame-storage.ogg",
+      "bytes": 22053,
+      "sha256": "71dbf9a840e83b97ba176b7b0645798e0dda781a52124a502699adf625ac065d",
+      "durationMs": 4453
+    },
+    {
+      "persona": "kimi",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "kimi/azure-tts.ogg",
+      "bytes": 129027,
+      "sha256": "4e7d43b8d9d4a48cf1afe71f14c9f0446934cbc9e75a6680e252231dc92aaaa3",
+      "durationMs": 26167
+    },
+    {
+      "persona": "hunyuan",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "hunyuan/local-recording.ogg",
+      "bytes": 14367,
+      "sha256": "373b14be19a93341c70bf571a9ecab43be51f536465839ab074cb14df891f843",
+      "durationMs": 2805
+    },
+    {
+      "persona": "hunyuan",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "hunyuan/cloud-reading.ogg",
+      "bytes": 125854,
+      "sha256": "99bebd69e8a598efdec31d3dbd3673ac58b77abe65eacfd06c150c3b29107842",
+      "durationMs": 24032
+    },
+    {
+      "persona": "hunyuan",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "hunyuan/frame-storage.ogg",
+      "bytes": 24860,
+      "sha256": "7c04c0e8f35e1942d84cc848a373aaed390210daa6d4dd2d310b4919b22036ec",
+      "durationMs": 4918
+    },
+    {
+      "persona": "hunyuan",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "hunyuan/azure-tts.ogg",
+      "bytes": 132624,
+      "sha256": "571b79c021740debd5fb4e11dd36d0834bae05d066da356715b749bff927c59b",
+      "durationMs": 25345
+    },
+    {
+      "persona": "minimax",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "minimax/local-recording.ogg",
+      "bytes": 14440,
+      "sha256": "a3cce74d1c5724a9460994e4288830f72f3c6ed8b69ab629a9ca93c5388d7299",
+      "durationMs": 2839
+    },
+    {
+      "persona": "minimax",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "minimax/cloud-reading.ogg",
+      "bytes": 114251,
+      "sha256": "cba8bad2fb15432f5814e4328663ef12716c75b4f1cb6875cfa007f44fadc7ce",
+      "durationMs": 22737
+    },
+    {
+      "persona": "minimax",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "minimax/frame-storage.ogg",
+      "bytes": 23009,
+      "sha256": "6eae9f43619908e7c1e08a6fa89bbca3e1432be96bb6c99a08f044474ed7fe3d",
+      "durationMs": 4558
+    },
+    {
+      "persona": "minimax",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "minimax/azure-tts.ogg",
+      "bytes": 120628,
+      "sha256": "0464d8f1f0812da1671982016b9500b4a7890a4e9fe135cc605bb638864ef6dc",
+      "durationMs": 23570
+    },
+    {
+      "persona": "nemotron",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "nemotron/local-recording.ogg",
+      "bytes": 18332,
+      "sha256": "339e85abcb7144ee8f22594fb74cd2bff4eaba0e5acbc429be800813ed680d2e",
+      "durationMs": 3513
+    },
+    {
+      "persona": "nemotron",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "nemotron/cloud-reading.ogg",
+      "bytes": 120739,
+      "sha256": "d5d1b6d9c5baac00aa57154e1847147493f68c2ab4494b32f67ea906ab94d86f",
+      "durationMs": 23478
+    },
+    {
+      "persona": "nemotron",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "nemotron/frame-storage.ogg",
+      "bytes": 26035,
+      "sha256": "7cf47c6316cbf33e4434edf1d3255b5e9155bcf847af0c76fbdde715291f74c5",
+      "durationMs": 5068
+    },
+    {
+      "persona": "nemotron",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "nemotron/azure-tts.ogg",
+      "bytes": 142790,
+      "sha256": "7c070bf639bb14f32fc0616cfc1478588a4ffe3df3fc1ac2febb0602bbfb120e",
+      "durationMs": 27869
+    },
+    {
+      "persona": "cohere",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "cohere/local-recording.ogg",
+      "bytes": 12395,
+      "sha256": "1d32bef9420b3d73621a3768c693f648bf9562f0fb75105ec666cfcd002f44b9",
+      "durationMs": 2433
+    },
+    {
+      "persona": "cohere",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "cohere/cloud-reading.ogg",
+      "bytes": 105780,
+      "sha256": "edfb46f1ca658af95d0cfa470e32c9931d12ac4ec54e2fc69047e1085f615d58",
+      "durationMs": 20852
+    },
+    {
+      "persona": "cohere",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "cohere/frame-storage.ogg",
+      "bytes": 17793,
+      "sha256": "7e00b2b953cb8963f3b4a7f6964ea7fb79fcd6d6d7a5e52fce0479bf69c355e1",
+      "durationMs": 3513
+    },
+    {
+      "persona": "cohere",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "cohere/azure-tts.ogg",
+      "bytes": 120310,
+      "sha256": "7adaa7a6a776aa101512a8c48ef4ee3ea3af5524c35c1bbe2cfb20426a04182b",
+      "durationMs": 23696
+    },
+    {
+      "persona": "mimo",
+      "group": "bestie",
+      "sheet": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。",
+      "file": "mimo/local-recording.ogg",
+      "bytes": 20033,
+      "sha256": "fd417e5556e3aee731d5d22e4575e4f3c570b3695d4dfa80b9820ac83338a448",
+      "durationMs": 3954
+    },
+    {
+      "persona": "mimo",
+      "group": "bestie",
+      "sheet": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
+      "file": "mimo/cloud-reading.ogg",
+      "bytes": 119458,
+      "sha256": "95ab4533e85ea86b5d21305804aeb02dbb04a7182295c1354f4a226e2a47614e",
+      "durationMs": 23638
+    },
+    {
+      "persona": "mimo",
+      "group": "bestie",
+      "sheet": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
+      "file": "mimo/frame-storage.ogg",
+      "bytes": 17999,
+      "sha256": "f25ca64ba10b211a1ebd98fa24c46a1f2aa3282037122153edc1025233ec4591",
+      "durationMs": 3490
+    },
+    {
+      "persona": "mimo",
+      "group": "bestie",
+      "sheet": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
+      "file": "mimo/azure-tts.ogg",
+      "bytes": 121491,
+      "sha256": "128035cdd8efef21ad1c33fc9d09fbe7f3d5f41e9af37b0d8a6ed5bf731214e5",
+      "durationMs": 23734
+    }
+  ],
+  "totals": {
+    "personas": 17,
+    "sheetsPerPersona": 4,
+    "clips": 68,
+    "oggBytes": 4535704,
+    "durationMs": 900032
+  }
+}

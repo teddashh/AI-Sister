@@ -292,12 +292,16 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   兩組角色圖的來源、大小、SHA-256
   與 Apache-2.0 授權排除分開固定在 bundled manifest/NOTICE。17 位角色的日常聲音庫
   也隨 desktop 離線提供；每位基本包 8 句、擴充包 24 句，共 544 段 Ogg Opus。
+  同意書另有每位四張、共 68 段 bundled Ogg、4,535,704 bytes；逐段逐字稿必須等於 core 當下的
+  `Sheet::wording()`，不同就停用，不可用舊錄音念新條文。
   WebView 只從同源 bundled path 播放，CSP 的網路出口仍只有 IPC。
 - 狀態表達（不彈窗）：`idle`（呼吸）／`paused`（閉眼 = capture 停）／
   `thinking`（微動）／`has-something`（微光 + 一個小點，像未讀）。
   點角色 → 一句本機 deterministic tap-line，必須來自 trusted 操作、只播放 bundled Ogg，
   不叫 CLI、不連網。輸入框的每個文字問題都走目前選定的 CLI 與本機記憶路徑，包括
   早安、晚安等短句；不得用固定台詞繞過 CLI 或冒充動態回答。
+  同意書朗讀也只接受當張「念給我聽」的 trusted click，不 autoplay、不借 Azure 或
+  `localService`；使用者仍在原輸入框以文字回答。
   聲音另行 opt-in。動態答案的本機朗讀只能由使用者按「用本機聲音朗讀」後交給 WebView
   明確標成 `localService` 的中文系統 voice。alpha.110 另有預設關閉的 Azure 繁中新答案
   自動朗讀，須獨立設定、key 與
@@ -322,6 +326,9 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   未簽、全停、spawn／timeout／空回覆、輸出不合契約或稽核沒寫成時，facts／原文仍是完整
   本機結果。每個非空新問題接管唯一的回答槽並終止舊題 process group／Windows Job tree；
   過期結果不可畫、不可朗讀。
+- CLI 回報第二張尚未授權且該張在目前條文下真的尚未回答時，主對話接手逐張詢問並保留
+  原問題；全部回答後自動把完全相同的問題重送目前選定的 CLI。明確回答「不同意」只維持
+  功能關閉，不可每次啟動重問，也不可把本機 fallback 冒充 CLI 答案。
 - 有成句時，本機朗讀與 Azure 的答案正文只取這 1–3 句，不重複朗讀底下的 facts／OCR，
   也不帶 source ref、按鈕文字或 metadata；沒有成句時維持原本的本機結果朗讀。
 - alpha.116 的本機 L2 記憶總覽保留為沒有可用 CLI 時的離線結果。只要已選 CLI、第二張
@@ -459,7 +466,7 @@ feature 集合沒有 `download`；Azure 答案朗讀收在 `crates/sister-tts`�
 
 ## §11. 隱私與安全（產品的第一賣點，工程上與功能同權重）
 
-### 11.1 四張同意書〔定案〕（onboarding 四個獨立開關，README 第一段公開承諾）
+### 11.1 四張同意書〔定案〕（主對話逐張詢問，設定保留四個獨立開關）
 
 1. **本機記錄**：我同意在我的硬碟上記錄我的螢幕。這張只授權本機記錄，不授權
    上傳畫面或文字；不簽第二張時 S1 仍可完全離線運作。Persona 的選配素材下載是
@@ -478,6 +485,11 @@ feature 集合沒有 `download`；Azure 答案朗讀收在 `crates/sister-tts`�
 Persona `voice_enabled` 代替。alpha.109 讀同版本、但尚無 Azure 欄位的舊 consent 時，
 前三張簽名保留，第四張明確遷移成未簽；alpha.110 再以第四張獨立 terms version 讓
 click-only 舊簽名失效，只需重簽第四張。未知／損壞／版本不符仍 fail closed。
+第一次互動時，主視窗在既有對話氣泡依序顯示 native 條文與未簽後果，只接受輸入框中的
+「同意／我同意」或「不同意／我不同意／先不要」。每張回答立即走既有 atomic consent
+transaction；保存成功才前進，失敗留在原張。授權 timestamp 與「目前條文已回答」分開
+保存，因此不同意不會取得 permit，也不會每次開機反覆追問。設定齒輪與系統匣仍可開完整
+四張卡片查看、重簽或撤回；條文版本變更只令對應的 reviewed version 失效。
 
 ### 11.2 Capture 時排除（不是事後刪）〔定案〕
 
@@ -568,7 +580,7 @@ Azure TTS 的當前答案正文與一般網路 metadata 交給 Microsoft 後，�
 ### 11.8 資料主權（Rewind 的教訓：closed product 的退場 = 記憶滅絕）
 
 **開放資料格式**：SQLite schema 公開文件化、`sister export` 全量匯出。S1 記憶功能、
-17 套角色圖與 544 段日常語音不依賴我們的伺服器；它們都隨 desktop 安裝。舊 Persona
+17 套角色圖、544 段日常語音與 68 段（4,535,704 bytes）同意書朗讀不依賴我們的伺服器；它們都隨 desktop 安裝。舊 Persona
 素材 pack 的取得仍須使用者明確發起 CDN 下載。就算本專案或 CDN 消失，既有記憶仍可讀、
 匯出，bundled 與已驗本機素材也仍可用。
 素材 cache 固定在 `Config::default_data_dir()/persona-assets-v1`，不隨 `--data-dir`
@@ -578,7 +590,7 @@ Azure TTS 的當前答案正文與一般網路 metadata 交給 Microsoft 後，�
 ### 11.9 遙測
 
 **零遙測。** Release 1.0 不內建 Cloudflare D1 或其他 usage counter。544 段 bundled
-日常語音只走同源本機檔案，不建立 request。舊 Persona 的固定 asset-pack GET 是使用者
+日常語音與 68 段同意書朗讀只走同源本機檔案，不建立 request。舊 Persona 的固定 asset-pack GET 是使用者
 當下發起的內容下載，不是遙測；它仍須在按鈕前揭露 DNS／CDN
 能看到的一般網路 metadata：CDN 會看到來源 IP、時間、TLS、固定 host／path／headers。
 請求不得夾帶角色選擇、使用狀態、OCR、畫面、問題、答案、記憶 ID 或資料庫內容。
@@ -858,7 +870,7 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
 | Persona transport | root workspace 的 **`sister-assets`**；預設 feature 集合不含 `download`，desktop 才明確啟用 | API 不接受 renderer 傳入 URL／header／body／persona 或 memory；Persona 的 fixed GET 與 cache contract 見 §11.9 |
 | Azure TTS transport | root workspace 的 **`sister-tts`**；預設 feature 集合不含 `azure`，desktop 才明確啟用 | 預設關閉；第四張 consent、Credential Manager key 與 typed config 齊全時只自動讀最新新答案，另有 trusted replay；三個 fixed region POST、payload、cache 與 cancel 邊界見 §11.10 |
 | Schema | Rust serde DTO + 前端封閉集合檢查 | 沒有 Zod／codegen build step |
-| Persona assets | 17 人本機 catalog + bundled workplace 分層 rig（active-only decode）+ WebP fail-safe（ChatGPT 預設）+ 每人基本 8／擴充 24 的 bundled 日常語音 | 402 張 selected PNG = 35,140,885 bytes；544 段 Ogg = 8,918,728 bytes，逐檔 pin text/path/bytes/hash/duration/rights；WebView 只從同源 bundled path 播放；recorder/core 保持零網路 |
+| Persona assets | 17 人本機 catalog + bundled workplace 分層 rig（active-only decode）+ WebP fail-safe（ChatGPT 預設）+ 每人基本 8／擴充 24 的日常語音 + 每人四段同意書朗讀 | 402 張 selected PNG = 35,140,885 bytes；544 段日常 Ogg = 8,918,728 bytes，另有 68 段 consent Ogg；逐檔 pin text/path/bytes/hash/duration/rights；WebView 只從同源 bundled path 播放；recorder/core 保持零網路 |
 | hands 元件（Phase 6+） | Agent S3（Apache-2.0）/ UFO²（MIT）/ OmniParser v3 weights（MIT，避開舊 AGPL detector） | 「手」已商品化：用組的，不自己寫 grounding |
 | 參考不引用 | Screenpipe（2026-06 起自訂商業授權，僅參考架構；MIT fork point 在舊版）；Everywhere（BUSL，僅 MCP/API interop） | license 判定見 research/landscape.md |
 

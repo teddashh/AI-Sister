@@ -39,6 +39,7 @@ const HTML = read(join(UI, "settings.html"));
 const boot = loader(read(SRC));
 const catalogBoot = loader(read(join(UI, "personas/catalog.js")));
 const MAIN = read(resolve(UI, "../src-tauri/src/main.rs"));
+const BRAIN = read(resolve(UI, "../../../crates/sister-core/src/brain.rs"));
 
 function settingsWriteWatching(state) {
   const body = MAIN.match(/fn settings_write\([\s\S]*?struct PrivacyHealth/)?.[0] ?? "";
@@ -1162,6 +1163,20 @@ for (const watching of ["none", "recording", "booting", "thinking"]) {
   const p = await open({ brain: brainView("claude"), cloud: true, watching });
   check(`${watching} 都是同一個已選大腦`, p.brainSay() === SENTENCE.ready, p.brainSay());
   check(`${watching} 都是綠的`, p.node("[data-brain-say]").classList.contains("ok"), p.brainSay());
+}
+
+console.log("⑯ᵇ Windows 背景 CLI 不彈 console；只有互動式登入保留可見終端機");
+{
+  const managed = BRAIN.match(
+    /#\[cfg\(windows\)\][\s\S]*?pub fn configure_managed_process[\s\S]*?command\.creation_flags\(flags\);/,
+  )?.[0] ?? "";
+  check(
+    "visible branch 用 CREATE_NEW_CONSOLE，background branch 用 CREATE_NO_WINDOW",
+    /if visible_console\s*\{[\s\S]*CREATE_NEW_CONSOLE[\s\S]*\}\s*else\s*\{[\s\S]*CREATE_NO_WINDOW/.test(
+      managed,
+    ),
+    managed,
+  );
 }
 
 console.log("⑯ᶜ 存檔回條：上一場剛停時不可以叫他按一顆會被擋的開始鍵");

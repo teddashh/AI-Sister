@@ -1,0 +1,47 @@
+{
+  "schema": "ai-sister/persona-consent-voice-catalog/v1",
+  "locale": "zh-TW",
+  "roster": "four-sisters-plus-thirteen-besties",
+  "personas": [
+    { "id": "chatgpt", "group": "sister" },
+    { "id": "claude", "group": "sister" },
+    { "id": "gemini", "group": "sister" },
+    { "id": "grok", "group": "sister" },
+    { "id": "deepseek", "group": "bestie" },
+    { "id": "qwen", "group": "bestie" },
+    { "id": "mistral", "group": "bestie" },
+    { "id": "venice", "group": "bestie" },
+    { "id": "sakana", "group": "bestie" },
+    { "id": "perplexity", "group": "bestie" },
+    { "id": "glm", "group": "bestie" },
+    { "id": "kimi", "group": "bestie" },
+    { "id": "hunyuan", "group": "bestie" },
+    { "id": "minimax", "group": "bestie" },
+    { "id": "nemotron", "group": "bestie" },
+    { "id": "cohere", "group": "bestie" },
+    { "id": "mimo", "group": "bestie" }
+  ],
+  "sheets": [
+    {
+      "key": "local-recording",
+      "text": "我同意在我的硬碟上記錄我的螢幕。"
+    },
+    {
+      "key": "cloud-reading",
+      "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。"
+    },
+    {
+      "key": "frame-storage",
+      "text": "我同意保留變化幀的截圖，而不是只留上面的字。"
+    },
+    {
+      "key": "azure-tts",
+      "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。"
+    }
+  ],
+  "totals": {
+    "personas": 17,
+    "sheetsPerPersona": 4,
+    "audioClips": 68
+  }
+}
