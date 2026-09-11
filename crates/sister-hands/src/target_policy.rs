@@ -201,14 +201,13 @@ pub fn host_of(url: &str) -> Option<String> {
             // 這種；也可能是 `example.com:8080/x`。用「冒號後面是不是全數字」
             // 分辨——是就當 port，不是就當 scheme 而且沒有 authority。
             let head = v.split(['/', '?', '#']).next().unwrap_or(v);
-            if let Some((before, after)) = head.split_once(':') {
-                if !before.is_empty()
-                    && !after.is_empty()
-                    && !after.chars().all(|c| c.is_ascii_digit())
-                    && !before.starts_with('[')
-                {
-                    return None;
-                }
+            if let Some((before, after)) = head.split_once(':')
+                && !before.is_empty()
+                && !after.is_empty()
+                && !after.chars().all(|c| c.is_ascii_digit())
+                && !before.starts_with('[')
+            {
+                return None;
             }
             (v, false)
         }

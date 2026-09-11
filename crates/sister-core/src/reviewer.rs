@@ -743,30 +743,31 @@ pub fn run(input: &mut ReviewInput<'_>, data_dir: &std::path::Path) -> Result<Re
         record_skip(input, reason.clone(), &run_day, used, limit)?;
         return Ok(skipped(reason, used, limit));
     }
-    if !input.force && input.kind == ReviewKind::Interval {
-        if let Some(last) = input.db.last_reviewer_run_at()? {
-            let ago = input.now.saturating_sub(last);
-            if ago < MIN_INTERVAL_MS {
-                let reason = SkipReason::Cadence {
-                    last_ago_ms: ago,
-                    min_ms: MIN_INTERVAL_MS,
-                };
-                record_skip(input, reason.clone(), &run_day, used, limit)?;
-                return Ok(skipped(reason, used, limit));
-            }
+    if !input.force
+        && input.kind == ReviewKind::Interval
+        && let Some(last) = input.db.last_reviewer_run_at()?
+    {
+        let ago = input.now.saturating_sub(last);
+        if ago < MIN_INTERVAL_MS {
+            let reason = SkipReason::Cadence {
+                last_ago_ms: ago,
+                min_ms: MIN_INTERVAL_MS,
+            };
+            record_skip(input, reason.clone(), &run_day, used, limit)?;
+            return Ok(skipped(reason, used, limit));
         }
     }
-    if input.kind == ReviewKind::Eod {
-        if let Some(prev) = input.db.last_reviewer_eod_day()? {
-            if prev == run_day && !input.force {
-                let reason = SkipReason::Cadence {
-                    last_ago_ms: 0,
-                    min_ms: MIN_INTERVAL_MS,
-                };
-                record_skip(input, reason.clone(), &run_day, used, limit)?;
-                return Ok(skipped(reason, used, limit));
-            }
-        }
+    if input.kind == ReviewKind::Eod
+        && let Some(prev) = input.db.last_reviewer_eod_day()?
+        && prev == run_day
+        && !input.force
+    {
+        let reason = SkipReason::Cadence {
+            last_ago_ms: 0,
+            min_ms: MIN_INTERVAL_MS,
+        };
+        record_skip(input, reason.clone(), &run_day, used, limit)?;
+        return Ok(skipped(reason, used, limit));
     }
 
     let cards = latest_unreviewed(input.db, input.from_ts, input.to_ts)?;
@@ -1786,11 +1787,11 @@ fn mark_done_from_originals(input: &mut ReviewInput<'_>) -> Result<u32> {
         let refs: Vec<String> = serde_json::from_str(&c.evidence_json).unwrap_or_default();
         let mut done = false;
         for r in refs.iter().filter_map(|s| EvidenceRef::parse(s)) {
-            if let Some(orig) = input.db.l0_original(&r)? {
-                if looks_completed(&orig.text) {
-                    done = true;
-                    break;
-                }
+            if let Some(orig) = input.db.l0_original(&r)?
+                && looks_completed(&orig.text)
+            {
+                done = true;
+                break;
             }
         }
         if done {
@@ -1939,16 +1940,16 @@ pub fn kill_commitment(db: &mut Db, id: i64, note: &str, now: Millis) -> Result<
 /// 使用者按「其他一切」= snooze + 降權。這是 status=snoozed 的真路徑。
 pub fn snooze_commitment(db: &mut Db, id: i64, now: Millis) -> Result<u64> {
     let n = db.update_commitment_status(l3_write(), id, "snoozed", None, now)?;
-    if n > 0 {
-        if let Some(c) = db.commitment_by_id(id)? {
-            db.upsert_preference(
-                l3_write(),
-                &format!("snoozed_kind:{}", c.kind),
-                "1",
-                &format!("commitment:{id}"),
-                now,
-            )?;
-        }
+    if n > 0
+        && let Some(c) = db.commitment_by_id(id)?
+    {
+        db.upsert_preference(
+            l3_write(),
+            &format!("snoozed_kind:{}", c.kind),
+            "1",
+            &format!("commitment:{id}"),
+            now,
+        )?;
     }
     Ok(n)
 }

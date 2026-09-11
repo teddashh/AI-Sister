@@ -1176,19 +1176,19 @@ impl Backend for LinuxBackend {
             return Ok(SystemObservation::Unknown);
         }
         let mut transitions = Vec::new();
-        if let Some(previous) = self.last_locked {
-            if previous != facts.locked {
-                self.transition_sequence = self.transition_sequence.saturating_add(1);
-                transitions.push(SystemTransition {
-                    sequence: self.transition_sequence,
-                    ts,
-                    kind: if facts.locked {
-                        SystemTransitionKind::Lock
-                    } else {
-                        SystemTransitionKind::Unlock
-                    },
-                });
-            }
+        if let Some(previous) = self.last_locked
+            && previous != facts.locked
+        {
+            self.transition_sequence = self.transition_sequence.saturating_add(1);
+            transitions.push(SystemTransition {
+                sequence: self.transition_sequence,
+                ts,
+                kind: if facts.locked {
+                    SystemTransitionKind::Lock
+                } else {
+                    SystemTransitionKind::Unlock
+                },
+            });
         }
         self.last_locked = Some(facts.locked);
         Ok(SystemObservation::Known {
@@ -1676,12 +1676,13 @@ mod tests {
         assert_eq!((frame.width, frame.height), (64, 64));
         assert_eq!(frame.ts, 123);
         assert_eq!(frame.rgba.as_ref().map(Vec::len), Some(64 * 64 * 4));
-        assert!(
-            frame
-                .rgba
-                .as_ref()
-                .is_some_and(|pixels| { pixels.chunks_exact(4).all(|pixel| pixel[3] == 255) })
-        );
+        assert!(frame.rgba.as_ref().is_some_and(|pixels| {
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255)
+        }));
     }
 
     #[test]
@@ -1750,7 +1751,12 @@ mod tests {
                     .as_deref()
                     .ok_or_else(|| anyhow!("captured X11 frame has no pixels"))?;
                 let first = rgba.get(..4).unwrap_or(&[]);
-                let changed_pixels = rgba.chunks_exact(4).filter(|pixel| *pixel != first).count();
+                let changed_pixels = rgba
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .filter(|pixel| pixel.as_slice() != first)
+                    .count();
                 if changed_pixels > 1_000 {
                     break frame;
                 }

@@ -204,11 +204,11 @@ pub fn save(path: &Path, state: &PetState) {
     let Ok(text) = serde_json::to_string(state) else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            tracing::warn!("建不出設定目錄，位置記不住：{err}");
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!("建不出設定目錄，位置記不住：{err}");
+        return;
     }
     if let Err(err) = std::fs::write(path, text) {
         tracing::warn!("寫不進視窗位置：{err}");
