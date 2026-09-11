@@ -26534,14 +26534,7 @@ pub mod record {
                     }
                 }
 
-                // 同意書也吃熱重載，而且它比設定檔更不能等。PRIVACY.md 上寫的是
-                // 「各自獨立、各自隨時撤得掉」——只在開機時讀一次的話，那句話真正
-                // 的意思是「下次重開的時候才撤得掉」，而剛按下撤回的那個人，正是
-                // 最不該被要求等待的那一個。
-                //
-                // 不做 mtime 去抖：這個檔案是幾百個位元組，而 `consent::load` 的
-                // 失敗方向是「當作沒簽」。少一層快取就少一種「檔案已經變了、我還
-                // 拿著舊答案」的可能。
+                // 心跳是蓋給別的行程看的一句話，內容只有
                 // 「我還活著」。**暫停中也要蓋**——暫停是她閉著眼睛，不是她走了，
                 // 而字母人要分得出這兩件事：一個要按「繼續」，一個要去開 recorder。
                 if last_beat.elapsed().as_millis() as i64 >= sister_core::heartbeat::BEAT_EVERY_MS {
@@ -26566,6 +26559,14 @@ pub mod record {
                     let _ = sister_core::capabilities::write(data_dir, &report);
                 }
 
+                // 同意書也吃熱重載，而且它比設定檔更不能等。PRIVACY.md 上寫的是
+                // 「各自獨立、各自隨時撤得掉」——只在開機時讀一次的話，那句話真正
+                // 的意思是「下次重開的時候才撤得掉」，而剛按下撤回的那個人，正是
+                // 最不該被要求等待的那一個。
+                //
+                // 不做 mtime 去抖：這個檔案是幾百個位元組，而 `consent::load` 的
+                // 失敗方向是「當作沒簽」。少一層快取就少一種「檔案已經變了、我還
+                // 拿著舊答案」的可能。
                 if consent_dirty || last_consent_check.elapsed() >= CONSENT_EVERY {
                     let by_config = std::mem::take(&mut consent_dirty);
                     last_consent_check = Instant::now();
