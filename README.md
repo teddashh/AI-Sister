@@ -6,15 +6,23 @@
 > An open-source, local-first desktop companion: a filing cabinet that never
 > forgets, an event-driven brain that can admit it's wrong, and a desktop sister
 > who knows when to stay quiet. Screen pixels never leave your machine; after
-> explicit opt-in, OCR text can be handed to the local CLI you configured. A
+> explicit opt-in, your selected CLI directs local-memory searches and receives only the matching text. A
 > separate, default-off Azure TTS option can send only each newly completed
 > answer body after its own consent; manual replay sends it again. Local speech remains the default.
 
-**Status: v0.1.0-alpha.125**
+**Status: v0.1.0-alpha.126**
 
 AI-Sister 已完成本機記錄、OCR、L0–L3 記憶、本機 RAG、逐句可點出處，以及 Claude Code、
 Codex、Gemini CLI、Grok CLI 四種大腦登入。四姊妹與 13 位閨密共 17 位；角色圖、
 workplace rig 與每人基本 8 句＋擴充 24 句語音都隨程式安裝。
+
+選好並登入 CLI、完成第二張同意後，**每個文字問題**都先由該 CLI 決定要查哪些記憶；
+AI-Sister 在本機執行最多三條查詢，再把命中的文字與出處交回同一支 CLI 作答。CLI 不會
+取得 SQLite 路徑或整份資料庫；沒有命中時也不會跳過 CLI。每句答案仍必須引用本輪真的
+找到的本機來源。
+
+桌面主視窗是透明全身桌寵：角色大小不因答案出現而縮放，回答與可點證據收在指向角色的
+單一對話氣泡裡，沒有米白色整窗背景框。
 
 - Windows 10+：Setup、桌面程式、常駐 recorder 與完整 S1。
 - Ubuntu 24.04 X11：`.deb`、原生 X11 擷取、AT-SPI 隱私脈絡、本機 Tesseract 與完整 S1。
@@ -24,14 +32,40 @@ workplace rig 與每人基本 8 句＋擴充 24 句語音都隨程式安裝。
 下載請到 [官方網站](https://teddashh.github.io/AI-Sister/) 或
 [Releases](https://github.com/teddashh/AI-Sister/releases)。
 
+## Claude Code / Codex Skill
+
+repo 內有同一條 AI-Sister 記憶查詢 skill 的兩個正式入口：
+
+- [Claude Code skill](.claude/skills/ai-sister-memory/SKILL.md)：project 路徑是
+  `.claude/skills/ai-sister-memory/`，個人安裝路徑是
+  `~/.claude/skills/ai-sister-memory/`，用 `/ai-sister-memory` 叫它。
+- [Codex skill](.agents/skills/ai-sister-memory/SKILL.md)：project 路徑是
+  `.agents/skills/ai-sister-memory/`，個人安裝路徑是
+  `~/.agents/skills/ai-sister-memory/`，用 `$ai-sister-memory` 叫它。
+
+從 clone 下來的 repo 安裝到目前帳號，可以在 PowerShell 執行：
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.claude\skills", "$HOME\.agents\skills"
+Copy-Item -Recurse -Force .\.claude\skills\ai-sister-memory "$HOME\.claude\skills\"
+Copy-Item -Recurse -Force .\.agents\skills\ai-sister-memory "$HOME\.agents\skills\"
+```
+
+兩個入口都只在使用者明確要求查自己的 AI-Sister 記憶時執行
+`sister query --json`，並把時間、app、視窗標題與 frame／chunk 來源一起帶回來；它們不會
+替使用者簽同意、開始錄製、刪除記憶或執行 hands。查詢回傳的文字與來源欄位會進入目前的
+Claude Code／Codex 對話，但 skill 不讀 screenshot bytes。`privacy.query_log` 開啟時，
+AI-Sister 仍會在本機記下這次問題。若 agent 正被 AI-Sister 當成 L2/L3 大腦呼叫，skill
+明確禁止再反向執行 `sister`，避免遞迴。
+
 她開始看或把答案文字交給 Azure 之前有**四張各自獨立、隨時撤得掉的同意書**，條文和效力就是：
 
 - `local-recording`：「我同意在我的硬碟上記錄我的螢幕。」沒有這一張，`sister record`
   不會開始錄；錄到一半撤回，正在跑的 record 每 5 秒重讀同意書，最多再錄 5 秒加一拍；
   `capture.min_interval_ms` 超過 5 秒時，主要會等那一拍。沒簽時拒絕啟動、回非零；
   簽了才准在本機記錄。
-- `cloud-reading`：「我同意把螢幕上的文字原文（OCR 抽出來的字，永不含畫面）交給我在設定裡指定的本機 CLI，由那支程式去做解讀。裡面有什麼就送什麼，不會先遮掉。」
-  沒有這一張，解釋層一次都不會呼叫那支 CLI。畫面永不離開這台機器；出去的是 OCR 抽出來的字，**原文，不遮**——記憶要能跨段把同一個人認出來，代號做不到。要先看清楚會送什麼：`sister interpret --dry-run` 會把那段字整份印出來，一個字都不送。
+- `cloud-reading`：「我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。」
+  沒有這一張，問題與記憶文字都不會交給 CLI，仍可在本機查看原始搜尋結果。畫面永不離開這台機器；出去的是問題和命中的 OCR 文字與出處，**原文，不遮**。CLI 不會取得資料庫路徑、整份資料庫或 screenshot bytes。
 - `frame-storage`：「我同意保留變化幀的截圖，而不是只留上面的字。」沒簽不擋錄，
   她會當場說明降級，只記字、一張截圖都不寫；簽了才准依設定保留變化幀。
 - `azure-tts`：「我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；
@@ -42,7 +76,7 @@ workplace rig 與每人基本 8 句＋擴充 24 句語音都隨程式安裝。
 `sister consent --grant local-recording --grant frame-storage`。三個介面——
 `sister consent` 和使用者第一次開桌面姊妹時那一頁都從 core 取同一份條文與未簽後果；
 `sister doctor` 讀同一個檔案，另外報告目前是否簽署及會發生什麼事。
-前三張共同條文改版會讓前三張舊簽名失效；第四張另有自己的條文版本。檔案讀不到、
+前三張共同條文改版會讓前三張舊簽名失效；第二張與第四張也各有自己的條文版本。檔案讀不到、
 損壞或版本不符一律 fail closed。alpha.109 以前沒有 Azure 欄位的舊檔保留前三張、
 第四張未簽；alpha.109 已簽的逐次點擊條文在 alpha.110 也會顯示為過期，只需重簽
 第四張，不能從任何舊同意推定自動朗讀已獲授權。CLI
@@ -74,8 +108,10 @@ WAL 工作檔當成每天永久長大，所以**不拿來作 Phase 0 判決**；
 | `sister.exe` | 錄製、搜尋、重播評測與資料管理；也包含 `interpret`／`review`／`watch`、Gatekeeper 的 `speak`，以及 `do`／`hands`／`url-policy` 的行動與稽核入口 |
 | `sister-desktop.exe` | 桌面角落的姊妹：錄製狀態、搜尋與可點開的出處、時間軸與刪除；也顯示目前推測、Gatekeeper 與 hands 建議，並主動詢問無人值守網址政策 |
 
-installer 沒有內建自動更新。升級時由使用者下載新 `AI-Sister-Setup.exe`，先自行結束
-desktop 並停止 recorder，再原地安裝。alpha.115 使用 pinned tauri-bundler 2.9.4 custom
+installer 沒有內建自動更新。升級時由使用者下載新 `AI-Sister-Setup.exe` 原地安裝；若
+alpha.113 之後的 desktop 或 recorder 還活著，GUI Setup 會停在「重試／取消」，直接指出從系統匣選
+「結束 AI-Sister」或回終端機停止指令。等程序收工後按「重試」就會重新量產品鎖，不必關掉
+再重開 Setup，也不會強殺 recorder；silent `/S` 維持 exit 32。alpha.115 使用 pinned tauri-bundler 2.9.4 custom
 NSIS template；Setup 絕不巢狀執行已安裝的 NSIS uninstaller。同版 repair 或舊版升新版時，
 它在 `.onInit` 取得 lifecycle mutex，綁定 current-user 產品鍵所記的 exact root，
 並原地覆蓋。GUI、passive `/P` 與 silent `/S` 都會在 WebView2、程式檔或安裝登錄前重驗
@@ -203,14 +239,13 @@ Apache-2.0 程式碼授權；由 ChatGPT preview 衍生的五個應用程式圖�
 `apps/desktop/src-tauri/icons/{manifest.json,NOTICE.md}`，不借前一份 grant 擴張範圍。
 可重現的 selector 與排除範圍見 [Persona Reel 選材](docs/PERSONA-REELS.md)。
 
-本機日常語音也隨 desktop 一起安裝：17 位角色各有基本包 8 句、擴充包 24 句，
-合計 **544 段 Ogg Opus、8,918,728 bytes**。每人兩句用於點角色，另外 30 句對應早安、晚安、累了、
-卡住了、做完了、想聊天等固定日常短句；同一句會播放目前角色自己的錄音。日常短句
-只做 NFKC、前後空白與句尾標點正規化後的 exact match，不做 substring 或模糊猜測。
-沒有精確命中的問題仍走原本的本機記憶／CLI 大腦，不用固定台詞冒充動態答案。
+本機角色語音也隨 desktop 一起安裝：17 位角色各有基本包 8 句、擴充包 24 句，
+合計 **544 段 Ogg Opus、8,918,728 bytes**。目前只有使用者點角色時會播放該角色的
+固定台詞；輸入框送出的短句與一般問題一樣，全部交給已選 CLI 與本機記憶路徑，
+不用固定台詞繞過大腦或冒充動態答案。
 
-聲音預設關閉。只有你按下角色、按送出或用原生鍵盤操作時才會播放，不因開場、輪詢、
-錄製或記憶事件自己開口；固定日常語音不連網、不叫 CLI，也不借系統 voice。動態答案下方
+聲音預設關閉。只有你按下角色才會播放固定角色台詞，不因開場、輪詢、輸入文字、
+錄製或記憶事件自己開口；固定角色語音不連網、不叫 CLI，也不借系統 voice。動態答案下方
 的「用本機聲音朗讀」仍由使用者另外按下，並只接受 WebView 明確回報
 `localService = true` 的繁中／中文系統 voice。
 語音來源、逐檔 hash、權利範圍與完整 inventory 在
@@ -264,6 +299,11 @@ sudo apt install ./AI-Sister-Linux-X11-amd64.deb
 ```
 
 安裝包同時安裝桌面程式、`sister` CLI、AT-SPI 與繁中／英文 Tesseract。
+
+**macOS 14+ 狀態**——目前沒有可公開下載的 `.app` 或 `.dmg`。ScreenCaptureKit、Vision OCR、
+AX 隱私脈絡與 TCC 設定介面已在同一份 product build；等 Developer ID notarization 與 Apple
+Silicon 真機的 TCC／S1 驗收一起通過，才會在 [Releases](https://github.com/teddashh/AI-Sister/releases)
+加入公開安裝檔。CI 的 hardened ad-hoc app-tree diagnostic 不是 Preview，不提供一般安裝。
 
 **從原始碼**——Windows、macOS 與 Linux 都可建置同一支 CLI。下面先用
 repo 內的確定性腳本重播一遍：
@@ -437,8 +477,9 @@ Windows 的系統匣、選檔器與三種載入狀態仍列在實機清單，沒
 三張 current L2 理解卡；每張都明講是可修正的假設，保留作者、信心來源與畫面出處按鈕。
 有原始紀錄、但還沒整理出 L2 時，她會直接這樣說；最近候選目前沒有畫面出處時，也不拿
 無出處的卡或 OCR 片段補位。這個窄 intent 只認完整問法，所以「妳知道客服電話嗎」仍照
-「客服電話」搜尋。總覽本身不會叫 configured CLI，也不寫入既有 retrieval query log；
-既有 L2 則可能是先前在第二張同意下，由使用者設定的 CLI 整理出來的。
+「客服電話」搜尋。已選 CLI 與第二張同意都有效時，總覽問法也先交給該 CLI 決定查詢；
+只有大腦未選、未同意或查詢失敗時才顯示本機 L2 總覽退路。既有 L2 可能是先前在第二張
+同意下，由使用者選定的 CLI 整理出來的。
 
 問她「**剛剛發生什麼事**」會得到答案，而不是「我記得的東西裡沒有這件事」。那句話
 問的是時間、不是關鍵字，所以她不會拿那七個字去比對——她直接把最後看到的幾件事列

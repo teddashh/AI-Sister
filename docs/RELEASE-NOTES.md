@@ -31,7 +31,10 @@ Windows tag 的完整簽章路徑會以同一張 public-CA 憑證簽 recorder、
 與 Setup，逐檔驗 SHA-256 Authenticode 與 RFC 3161 timestamp，再由 release job 把三個公開檔
 綁到 exact receipt。stable tag 缺憑證會停止發版；目前公開 alpha 尚未簽署。installer 沒有
 內建自動 updater。升級是使用者手動下載新版
-`AI-Sister-Setup.exe`，先自行結束 desktop 並停止 recorder，再重新執行。alpha.115 起，Setup
+`AI-Sister-Setup.exe` 原地安裝。帶 product lifecycle event 的 desktop／CLI 還活著時，GUI
+與 passive Setup 顯示「重試／取消」；使用者從系統匣結束 AI-Sister 或回終端機停止指令後，
+在同一個 dialog 按 Retry 即可重新檢查，不會強殺 recorder。silent `/S` 維持 exit 32。
+alpha.115 起，Setup
 使用 pinned tauri-bundler 2.9.4 custom NSIS template；它不再巢狀執行已安裝的 NSIS
 uninstaller。同版 repair 或舊版升新版會在 Setup 持有 lifecycle mutex 時，綁定 current-user
 產品鍵所記的 exact install root 原地覆蓋，並與 uninstall key 交叉核對；GUI、`/P` 與 `/S` 都會在 WebView2、payload
@@ -82,6 +85,47 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 [THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
+
+
+## v0.1.0-alpha.126
+
+**Windows 升級不必再因為 AI-Sister 還在系統匣而關掉 Setup 重來。**
+
+帶 lifecycle event 的 desktop 或 CLI 還活著時，GUI／passive Setup 現在顯示
+「重試／取消」，直接指向系統匣「結束 AI-Sister」或原本的終端機。Setup 在 dialog 期間
+持續握住 installer mutex；產品收工後按 Retry 會重新 `OpenEvent`，只有這一次明確量到
+Missing 才繼續，不沿用先前的 busy 結果。Cancel 先釋放 mutex 再 exit 32；silent `/S`
+維持原本的立即 exit 32，所有路徑都不要求或執行 forced kill。Windows native gate 以真
+product event 卡住 `/P`，釋放 owner 後送出 `IDRETRY`，並重驗同一支 Setup 原地完成、三個
+payload、登入啟動值與無關 registry fixture 都不漂移。
+
+官網現在把三個平台狀態放在下載主流程：Windows 10+ 與 Ubuntu 24.04 X11 有公開安裝包；
+macOS 14+ 明確標成尚無公開安裝檔，並說明 Developer ID notarization 與 Apple Silicon 真機
+TCC／S1 驗收是加入 Release 前的條件，沒有放不能用的下載按鈕。
+
+repo 新增 `ai-sister-memory` 的 Claude Code 與 Codex 兩個 skill 入口，分別位於
+`.claude/skills/` 與 `.agents/skills/`。兩份都只在使用者明確要求查自己的 AI-Sister 記憶時
+執行 `sister query --json`，保留時間、app、視窗標題與 frame／chunk 來源；不會簽同意、
+開錄、刪記憶、執行 hands 或讀 screenshot bytes。查詢文字會進入目前的 agent 對話，這個
+邊界在官網與 README 都直接顯示。provider bridge prompt 會拒絕反向呼叫 `sister`，不形成遞迴。
+
+**已選的 CLI 現在會接手每個文字問題，並主導本機記憶檢索。** 每題先把問題交給 Claude
+Code／Codex／Gemini／Grok 中目前選定的一支，由它回傳最多三條自然語言查詢；AI-Sister
+在本機 SQLite 執行、去重，再把命中的文字與出處交回同一支 CLI 成句。CLI 不取得資料庫
+路徑、SQL、整份資料庫或畫面檔。沒有任何命中時，CLI 也已經處理並規劃過問題，只是不允許
+生成沒有本機來源的事實答案。早安等短句與「你記得什麼」也不再用固定回覆或本機總覽繞過
+已接好的 CLI；只有使用者直接點角色仍播放 bundled 固定台詞。
+
+第二張 `cloud-reading` 同意書同步改成精確揭露「問題 → CLI 查詢計畫 → 本機代查 → 命中
+文字與出處回到同一支 CLI」。alpha.125 以前的第二張簽名只涵蓋既有候選成句，因此本版只
+讓第二張顯示為過期並要求重簽；第一、第三與第四張不受影響。設定頁不再用「正在使用」冒充
+實際答題，只顯示已選用，並明講它會接手每個文字問題。
+
+桌面主視窗改成透明全身桌寵：角色站在桌面上，回答前後維持同一大小，不再縮成頭像；
+答案、來源與操作收進指向角色的單一對話氣泡，整窗米白底與常駐行動紀錄框都已移除。
+
+這一版沒有替 recorder、core、capture、brain 或 hands 新增 HTTP client；官網 CSP 仍是
+`connect-src 'none'` 與 `media-src 'none'`。
 
 
 ## v0.1.0-alpha.125

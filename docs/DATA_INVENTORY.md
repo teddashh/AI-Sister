@@ -383,24 +383,27 @@ endpoint 發一個 POST。
 後者唯一的使用者內容是當前答案正文原文，可能含姓名、電話與金額且不遮罩；不含截圖、
 來源連結、memory id、DB 或其他文字。它不做 cache，cancel 只阻止 late audio 播放，
 無法 abort 已開始、最長 45 秒的 blocking POST。簽了第二張同意書且
-設定了 `[brain] command` 之後，螢幕文字原文會交給那支本機 CLI；外送紀錄在
-`brain_outbound`（結構與計數，不含原文；`role` 分答題層／解釋層／審閱層／盯梢層——
-`answer`／`interpreter`／`reviewer`／`watcher`，最後一個是 alpha.71 的 `sister watch`；
+選好一支 CLI 後，每個文字問題先交給目前選定的 CLI 產生最多三條自然語言查詢；
+AI-Sister 在 SQLite 本機執行，再把命中的螢幕文字原文與出處交回同一支 CLI。CLI 不取得
+DB path、SQL、整份資料庫或畫面。外送紀錄在
+`brain_outbound`（結構與計數，不含原文；`role` 分答題查詢／答題成句／解釋層／審閱層／盯梢層——
+`answer_search`／`answer`／`interpreter`／`reviewer`／`watcher`，最後一個是 alpha.71 的 `sister watch`；
 送出去的是原文），假設卡片在 `l2_card`（append-only 版本鏈，`author` 是 interpreter／reviewer／user，刪 L0 時 tombstone 而不是實刪——列留著，
 卡片上的字清掉）。桌面時間軸的「外送」頁讀這兩張表和 `meta.ever_brain_outbound`。
 
-alpha.124 的 S1 RAG 不增加 schema 或永久資料。每一題先從同一顆 SQLite 的 L1 facts 與
-FTS hits 選最多 12 筆；當前問題、選中來源正文與時間／app／title／URL metadata 只在
-desktop RAM 和 CLI stdin 的 bounded prompt 裡存在。問題副本最多 2 KiB，圍欄內資料最多
+alpha.126 的 S1 agent retrieval 不增加 schema 或永久資料。每一題先把問題交給當下選定的
+CLI，AI-Sister 再依其最多三條查詢從同一顆 SQLite 的 L1 facts 與 FTS hits 選最多 12 筆；
+當前問題、選中來源正文與時間／app／title／URL metadata 只在 desktop RAM 和 CLI stdin
+的 bounded prompt 裡存在。問題副本最多 2 KiB，圍欄內資料最多
 12 KiB，單筆來源正文最多 4 KiB；CLI 結束後不另存 prompt、回覆 cache、embedding 或向量
 索引。Claude／Codex／Gemini 從 stdin 讀 prompt；Grok bridge 使用目前使用者限定讀取、
 handle 關閉即刪的 private prompt file，四者都在一次性空 private working directory 執行。
 有效的 1–3 句回答只在當次 Tauri reply／renderer DOM 存活；永久留下的仍只有原本的 query
-log（若 `privacy.query_log` 開啟）與不含原文的 `brain_outbound role=answer` 稽核列。
-`queries.latency_ms` 在 CLI 前寫入，只量本機 retrieval；成句耗時是同筆 answer outbound 的
-`duration_ms`。已取得 CLI 設定與第二張同意、進入 spawn supervision 的呼叫會留下 outcome，
-即使它在建立 process 前被取消或啟動失敗；在這之前因沒有 CLI、同意或候選而結束的題目
-沒有 outbound 列。原 facts／hits 不另複製。
+log（若 `privacy.query_log` 開啟）與不含原文的 `brain_outbound role=answer_search`／`answer`
+稽核列。`queries.latency_ms` 量本機 retrieval 與本題本機工作；CLI 查詢規劃與成句耗時各在
+自己的 outbound `duration_ms`。已取得 CLI 設定與第二張同意、進入 spawn supervision 的
+呼叫會留下 outcome，即使它在建立 process 前被取消或啟動失敗；沒有 CLI 或同意時沒有
+outbound 列。零候選仍有 `answer_search`，但不建立無來源的 `answer` 呼叫。原 facts／hits 不另複製。
 
 Microsoft 目前公開列 Azure Speech F0 neural TTS 每月 0.5 million characters；這是
 帳號／resource／方案層的 provider 額度，不是本機資料，也不寫進 DB。能否使用與費用
@@ -532,7 +535,7 @@ ranking、題目 id、每題 question 與 returned values 都不過這道邊界�
 | 有存密碼嗎？ | 前置檢查確認焦點在敏感欄時不讀內容；所有前景 app 都問，問不出來也不放行。密碼管理員另由 app 規則整段排除；可見背景視窗與換窗 race 見下方「已知缺口」 |
 | 網銀畫面呢？ | **前景**網址命中 blocklist 時不讀內容——但背景視窗與 browser clipboard 的邊界見下方「已知缺口」 |
 | 有存我**問過她**什麼嗎？ | 有——`queries`，只在這台機器上。可用 `privacy.query_log = false` 關掉 |
-| 資料會離開這台機器嗎？ | 畫面 pixel 不會。簽 `cloud-reading` 後，OCR 文字原文會交給你設定的本機 CLI；那支 CLI 是否送給 provider，由它自己的設定與行為決定。另有 Persona fixed GET；以及預設關閉的 Azure TTS：只有設定、Credential Manager key 與現行第四張同意都成立時，才把每份最新新答案的正文原文自動 POST 一次到你選的三個固定 Azure region 之一；trusted 手動重播會再 POST。正文可能含姓名、電話與金額且不遮罩，不含截圖、來源、memory id、DB 或其他文字 |
+| 資料會離開這台機器嗎？ | 畫面 pixel 不會。簽 `cloud-reading` 後，輸入的問題與本機查詢命中的 OCR 文字／出處會交給目前選定的 CLI；CLI 不取得 DB path 或整份資料庫，那支 CLI 是否送給 provider，由它自己的設定與行為決定。另有 Persona fixed GET；以及預設關閉的 Azure TTS：只有設定、Credential Manager key 與現行第四張同意都成立時，才把每份最新新答案的正文原文自動 POST 一次到你選的三個固定 Azure region 之一；trusted 手動重播會再 POST。正文可能含姓名、電話與金額且不遮罩，不含截圖、來源、memory id、DB 或其他文字 |
 
 ---
 

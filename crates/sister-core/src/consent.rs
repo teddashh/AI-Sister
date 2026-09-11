@@ -3,7 +3,7 @@
 //! 每一件事各自獨立、各自可以撤回：
 //!
 //! 1. **本機記錄**：在這台機器的硬碟上記錄螢幕。
-//! 2. **上雲解讀**：把螢幕上的文字原文交給使用者設定的本機 CLI。
+//! 2. **上雲解讀**：把使用者問題與本機記憶查詢命中的文字原文交給使用者設定的 CLI。
 //! 3. **畫面暫存**：保留變化幀的截圖（相對於「只留 OCR 出來的字」）。
 //! 4. **Azure 朗讀**：設定開啟後，每份新答案完成時把當前答案正文原文交給 Azure。
 //!
@@ -30,8 +30,9 @@
 //!
 //! ## 條文改了要重問
 //!
-//! 存下來的 `version` 對不上 [`VERSION`] 時，前三張整份視為沒簽；第四張另看
-//! [`AZURE_TTS_TERMS_VERSION`]，但也要求前三張的共同檔案版本仍可讀。一份對著舊
+//! 存下來的 `version` 對不上 [`VERSION`] 時，前三張整份視為沒簽；第二、第四張另看
+//! [`CLOUD_READING_TERMS_VERSION`]／[`AZURE_TTS_TERMS_VERSION`]，但也要求前三張的
+//! 共同檔案版本仍可讀。一份對著舊
 //! 條文按下的同意，不能拿來涵蓋後來新加的東西——這件事很不方便，而它的替代
 //! 方案是「悄悄地把新條款算他同意了」。
 
@@ -57,12 +58,20 @@ use crate::model::Millis;
 /// 每次呼叫重編的，跨段對不起來——承諾表和 entities 要的正是「王小明」
 /// 這三個字能對得起來。去敏等於先拆掉 L3 的地基。）
 ///
+/// alpha.126 將第二張改成由 CLI 先決定本機記憶查詢，再接收命中的文字；它有
+/// [`CLOUD_READING_TERMS_VERSION`] 獨立版本，只讓舊第二張失效，不連帶拿掉仍完全相同的
+/// 第一／第三張。
+///
 /// alpha.109 新增的 Azure TTS 是第四張**獨立**條文，沒改舊三張的 wording，
 /// 所以不把這個全局版本升到 4。舊的 version 3 檔案沒有 `azure_tts`，serde 會
 /// 讀成 `None`：舊三張的簽名繼續如實生效，但絕對不會順便授權新的出境路徑。
 /// alpha.110 只擴大第四張，因此用下面獨立版本讓舊 Azure 簽名失效，不把前三張
 /// 一起清掉。
 pub const VERSION: u32 = 3;
+
+/// 第二張的獨立條文版本。沒有這個欄位的舊檔會讀成 0；當時只涵蓋把既有本機
+/// 候選交給 CLI 成句，不能授權先把每一題交給 CLI 決定要查哪些本機記憶。
+pub const CLOUD_READING_TERMS_VERSION: u32 = 1;
 
 /// 第四張的獨立條文版本。沒有這個欄位的 alpha.109 檔案會讀成 0；當時
 /// 簽的是「每次按下才送」，不能授權 alpha.110 的新答案自動送出。
@@ -83,9 +92,12 @@ pub struct Consent {
     /// 第一張：在我的硬碟上記錄我的螢幕。
     #[serde(default)]
     pub local_recording: Option<Millis>,
-    /// 第二張：把螢幕上的文字原文交給我設定的本機 CLI。
+    /// 第二張：把問題與本機記憶查詢命中的文字原文交給我設定的 CLI。
     #[serde(default)]
     pub cloud_reading: Option<Millis>,
+    /// 第二張簽的是哪一版條文。0 = alpha.125 以前的「本機先選候選、CLI 只成句」。
+    #[serde(default)]
+    pub cloud_reading_terms_version: u32,
     /// 第三張：保留變化幀截圖。
     #[serde(default)]
     pub frame_storage: Option<Millis>,
@@ -130,7 +142,7 @@ impl Sheet {
         match self {
             Sheet::LocalRecording => "我同意在我的硬碟上記錄我的螢幕。",
             Sheet::CloudReading => {
-                "我同意把螢幕上的文字原文（OCR 抽出來的字，永不含畫面）交給我在設定裡指定的本機 CLI，由那支程式去做解讀。裡面有什麼就送什麼，不會先遮掉。"
+                "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。"
             }
             Sheet::FrameStorage => "我同意保留變化幀的截圖，而不是只留上面的字。",
             Sheet::AzureTts => {
@@ -155,7 +167,7 @@ impl Sheet {
                 "沒有這一張，sister record 不會開始錄；錄到一半撤回，正在跑的 record 每 5 秒重讀同意書，最多再錄 5 秒加一拍；capture.min_interval_ms 超過 5 秒時，主要會等那一拍。"
             }
             Sheet::CloudReading => {
-                "沒有這一張，她一次都不會呼叫那支 CLI；解釋層保持關閉，只累積本機的畫面與文字。正在跑的 sister watch 每看一次就重讀一次同意書，撤回之後它下一次看的時候就停下來，不會再問。"
+                "沒有這一張，她不會把問題或本機記憶文字交給那支 CLI；你仍可在本機查看原始搜尋結果。正在跑的 sister watch 每看一次就重讀一次同意書，撤回之後它下一次看的時候就停下來，不會再問。"
             }
             Sheet::FrameStorage => "沒有這一張，她只記螢幕上的字，不留截圖。",
             Sheet::AzureTts => "沒有這一張，她一次都不會呼叫 Azure 語音服務；本機朗讀不受影響。",
@@ -204,7 +216,14 @@ impl Consent {
                 self.local_recording.get_or_insert(ts);
             }
             Sheet::CloudReading => {
-                self.cloud_reading.get_or_insert(ts);
+                // 舊 timestamp 是按在「本機先選候選、CLI 只成句」那句上的。現在
+                // CLI 先收到問題並決定查詢，新條文重問時要記這次的真正簽署時間。
+                if self.cloud_reading_terms_version != CLOUD_READING_TERMS_VERSION {
+                    self.cloud_reading = Some(ts);
+                } else {
+                    self.cloud_reading.get_or_insert(ts);
+                }
+                self.cloud_reading_terms_version = CLOUD_READING_TERMS_VERSION;
             }
             Sheet::FrameStorage => {
                 self.frame_storage.get_or_insert(ts);
@@ -255,7 +274,9 @@ impl Consent {
     /// [`Self::cloud_permit`] 鑄得出來。這一格是三張裡唯一一張「猜錯的方向
     /// 不對稱」的：另外兩張猜錯了是少記東西，這張猜錯了是東西送出去了。
     pub fn allows_cloud(&self) -> bool {
-        self.current() && self.cloud_reading.is_some()
+        self.current()
+            && self.cloud_reading.is_some()
+            && self.cloud_reading_terms_version == CLOUD_READING_TERMS_VERSION
     }
 
     /// 交出出境憑證。沒簽、條文改版、檔案讀不出來，都是 `None`。
@@ -865,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn a_version_three_consent_from_before_azure_keeps_old_grants_but_not_azure() {
+    fn old_version_three_consent_keeps_recording_and_frames_but_not_new_outbound_terms() {
         let old: Consent = toml::from_str(
             "version = 3\nlocal_recording = 11\ncloud_reading = 12\nframe_storage = 13\n",
         )
@@ -877,13 +898,13 @@ mod tests {
         assert_eq!(old.frame_storage, Some(13));
         assert_eq!(old.azure_tts, None);
         assert!(old.allows_recording());
-        assert!(old.allows_cloud());
+        assert!(!old.allows_cloud());
         assert!(old.allows_frames());
         assert!(old.azure_tts_permit().is_none());
     }
 
     #[test]
-    fn alpha_109_click_consent_cannot_authorize_auto_speech_but_old_three_stay_live() {
+    fn old_cloud_and_azure_click_terms_both_fail_closed_without_revoking_local_grants() {
         let mut old: Consent = toml::from_str(
             "version = 3\nlocal_recording = 11\ncloud_reading = 12\nframe_storage = 13\nazure_tts = 14\n",
         )
@@ -891,7 +912,7 @@ mod tests {
 
         assert_eq!(old.version, VERSION);
         assert!(old.allows_recording());
-        assert!(old.allows_cloud());
+        assert!(!old.allows_cloud());
         assert!(old.allows_frames());
         assert_eq!(old.azure_tts, Some(14), "舊簽名的歷史仍看得見");
         assert_eq!(old.azure_tts_terms_version, 0);

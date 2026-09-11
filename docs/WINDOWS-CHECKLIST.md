@@ -22,23 +22,28 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
 **壞掉的那一項比全部通過有價值。** 看到不對的就停下來，把那一段原樣貼回來
 （包含前後幾行），不要摘要。
 
-### alpha.124 先驗 S1 本機 RAG 成句
+### alpha.126 先驗「最後選用的 CLI」接管 S1 問答與本機檢索
 
-- [ ] 安裝正式 Setup，接好任一支 CLI 並簽第二張同意。先錄一段含電話、金額與工作進度的
-      可辨識文字，再從桌面分別提問。每題頂端要出現 1–3 句答案，每句下面至少一顆
-      「本機出處」；點有畫面的來源要開 exact 原畫面，點只有文字的來源要移到同一筆原文。
+- [ ] 安裝正式 Setup，先登入並選用 Grok CLI、簽第二張同意。錄一段含電話、金額與工作進度的
+      可辨識文字，再從桌面分別提問。每題頂端先顯示「Grok CLI · 已使用本機記憶」，接著出現
+      1–3 句答案；每句下面至少一顆「本機出處」。點有畫面的來源要開 exact 原畫面，點只有
+      文字的來源要移到同一筆原文。再登入並選用另一支已安裝 CLI，重問後狀態與
+      `sister.exe brain log` 都只能出現新選擇，不能仍綁著 Grok。
+- [ ] 問一題完全沒有命中的問題。畫面要指名目前 CLI「已查過本機記憶；目前沒有可引用的內容」，
+      `brain log` 要有該題的「答題查詢」呼叫；不能因本機零命中就完全跳過 CLI。
 - [ ] 同一題底下仍須保留原本的 ★ facts 與 OCR 原文列表。讓 provider 回未知 ref、缺來源、
       不合 JSON 與超長句各一次，頂端成句要整份消失，但本機列表與可點證據照常存在，不能
       顯示半份模型答案。
 - [ ] 快速連問兩題，第一題的 CLI parent／child 都要結束，畫面只能出現第二題。動態回答尚在
-      跑時再送 exact 日常短句，也只能留下固定角色回覆；`stop-all` 成功後不得冒出舊答案或聲音。
+      跑時再送日常短句，也必須完整交給目前選定的 CLI；`stop-all` 成功後不得冒出舊答案或聲音。
 - [ ] 開本機朗讀與 Azure 各驗一次。有成句時，只能讀那 1–3 句，不得再讀 facts、OCR、
       「本機出處」、source ref 或 app／title／URL。packet trace 的 Azure body 也只能是成句正文。
 - [ ] 撤回第二張同意後再問同一題：0 provider request，完整本機列表仍能回答。重新簽回後，
       以 process monitor 驗 prompt 不在 argv、working directory 是一次性空目錄；CLI 收到的是
       當前問題與最多 12 筆來源文字／metadata，沒有 screenshot bytes 或圖片路徑。
-- [ ] `sister.exe brain log` 要把答題呼叫標成「答題層」，並分得出成功、取消、timeout、壞 JSON；
-      外送列不可含問題或來源原文。題庫 latency 只算本機 retrieval，答題層 duration 另列。
+- [ ] `sister.exe brain log` 要把第一階段標成「答題查詢」、第二階段標成「答題層」，並分得出
+      成功、取消、timeout、壞 JSON；外送列不可含問題或來源原文。題庫 latency 只算本機
+      retrieval，兩階段 CLI duration 各自另列。
 
 ### alpha.123 先驗四支 CLI 大腦登入
 
@@ -47,7 +52,7 @@ installer 本身時，才另外下載 `sister.exe` 和 `sister-desktop.exe`，�
       版本，未安裝者顯示「未安裝」且登入鈕不可按。
 - [ ] 依序選可用的 provider。登入鈕要開該 CLI 自己的登入流程；Gemini 在瀏覽器完成後回
       視窗輸入 `/quit`。登入結束後應自動跑 bridge probe，成功顯示「已登入、測通並設為
-      大腦」。完全退出再重開設定，仍只有最後成功者標成「使用中」。
+      大腦」。完全退出再重開設定，仍只有最後成功者標成「已選用」。
 - [ ] 按「測試目前大腦」，固定 probe 必須由目前選定的 bundled bridge 完整跑過；測試不能
       修改 provider 或其他設定。開設定、重整狀態、切換角色與儲存其他設定都不得自行叫 CLI。
 - [ ] 在登入中與 bridge probe 中各按一次取消。登入視窗與它啟動的 child process 都要結束，
@@ -152,8 +157,11 @@ alpha.113-aware desktop／CLI 也繼續在產品狀態前做 mutex → product e
 這些仍是 automation，不是滑鼠真人互動。下列未勾項才是人工邊界。
 
 - [ ] 先各讓 alpha.113-aware installed desktop／recorder 穩定存活，再跑 silent／interactive
-      Setup；兩種都應拒絕且保留原 PID、install root 與安裝登錄。recorder 活著時另跑 direct
-      uninstaller，確認頁之後仍須拒絕。畫面不可出現 Tauri stock 的「替你關閉再繼續」。若要
+      Setup；silent 應在 mutation 前 exit 32，interactive 應顯示「重試／取消」並保留原 PID、
+      install root 與安裝登錄。從系統匣選「結束 AI-Sister」或回終端機停掉 recorder，等它收工
+      後在同一個 dialog 按 Retry，Setup 才應原地完成；Cancel 則釋放 mutex、保留舊安裝。
+      recorder 活著時另跑 direct uninstaller，確認頁之後仍須拒絕。畫面不可出現 Tauri stock
+      的「替你關閉再繼續」。若要
       隔離 event authority，可把同版 CLI 複製成非 allowlist 檔名後用 disposable data dir 執行；
       Setup 仍應因 product event 拒絕，而不是靠 image-name hit。
 - [ ] 在 `AI_SISTER_DIAGNOSTIC_INSTALL_DELAY_MS=15000` 的 `/S` acquire window 啟動帶協定的
@@ -1490,7 +1498,7 @@ recorder lease 與 consent locked mutation 已納入自動測試；Windows regis
 
 **同意書**
 
-- [ ] 勾第二張（上雲解讀）。那張卡片底下要說「勾了之後，螢幕上的字會原封不動交給你在設定裡指定的那支 CLI」，而不是和
+- [ ] 勾第二張（上雲解讀）。那張卡片底下要說「勾了之後，每個文字問題會先交給設定裡已登入並選用的 CLI；AI-Sister 在本機代查，再把命中的文字與出處交回同一支 CLI。」，而不是和
       另外兩張一樣只印一個時戳。
 - [ ] 設定檔打壞的情況下開 onboarding：底部那句要是紅的、要說她不會開始錄。
       以前它說「簽好了。接下來跑 sister record 她才會開始」——而 `record`

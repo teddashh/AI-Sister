@@ -1,8 +1,9 @@
-//! S1 問答的本機 RAG 成句層。
+//! S1 問答的 CLI-directed 本機檢索與成句層。
 //!
-//! 檢索、排序與來源選擇都已在本機完成。這個模組只把**這一題選中的文字**整理成
-//! 有界 prompt，交給使用者已登入的 CLI 後，再驗回來的每一句都有這次候選裡的
-//! exact source ref。模型不能新增來源，也不能把沒有來源的句子塞進答案。
+//! 第一階段只把問題交給使用者選用的 CLI，驗回最多三條自然語言查詢；AI-Sister
+//! 在本機執行後，第二階段才把**這一題命中的文字**整理成有界 prompt 交回同一支
+//! CLI。每一句都必須引用這次候選裡的 exact source ref；模型不能新增來源，也不能
+//! 把沒有來源的句子塞進答案。
 
 use std::collections::HashSet;
 
@@ -27,6 +28,11 @@ const MAX_SOURCE_META_JSON_BYTES: usize = 512;
 pub const MAX_SENTENCES: usize = 3;
 /// 單句上限，避免 CLI 把一篇文章塞進一格。
 pub const MAX_SENTENCE_CHARS: usize = 240;
+/// The selected CLI can ask AI-Sister to run at most this many local-memory searches for one
+/// question. The CLI never receives a database path and never opens the SQLite file itself.
+pub const MAX_SEARCH_QUERIES: usize = 3;
+/// A search is natural-language input to the same retrieval path as `sister query`.
+pub const MAX_SEARCH_QUERY_CHARS: usize = 240;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SourceRef {
@@ -124,6 +130,76 @@ struct PromptSource<'a> {
     url: Option<&'a str>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelSearchPlan {
+    queries: Vec<String>,
+}
+
+/// Ask the configured CLI which local-memory lookups it needs before it writes an answer.
+///
+/// Only the user's current question is present at this stage. The CLI returns bounded search
+/// strings; AI-Sister executes them against its own database and supplies only matching rows to
+/// the answer stage. This gives the CLI control of retrieval without handing an opaque third-party
+/// process the database file or the rest of the user's filesystem.
+pub fn prepare_search_plan(question: &str) -> Result<String> {
+    ensure!(!question.trim().is_empty(), "記憶查詢問題不可為空");
+    let (question, _) = bounded_json_string(question, MAX_QUESTION_BYTES, MAX_QUESTION_JSON_BYTES);
+    let data = serde_json::to_string(&PromptQuestion {
+        question: &question,
+    })?;
+    let (fenced, _) = crate::prompt_fence::fence_question_and_evidence(&data, MAX_DATA_BYTES)?;
+    let header = concat!(
+        "你是 AI-Sister 的本機記憶查詢代理。先決定要如何搜尋使用者自己的本機記憶，不要回答問題。\n",
+        "只輸出一個 JSON 物件，不要 markdown、不要前後解說。\n",
+        "契約：{\"queries\":[\"一條可直接交給 AI-Sister 記憶搜尋的問句\"]}\n",
+        "queries 必須有 1 到 3 條；每條用具體關鍵字或清楚的中文時間問法，例如『剛剛發生什麼事』或『昨天下午在做什麼』。\n",
+        "保留姓名、產品名、號碼與時間範圍；可以增加同義詞查詢，但不要放命令、路徑、SQL 或答案。\n",
+        "如果原問句已經適合搜尋，直接把它列為第一條。\n\n",
+    );
+    Ok(format!("{header}{fenced}"))
+}
+
+/// Parse the CLI's requested local-memory searches. Unknown fields, empty strings, excessive
+/// counts and oversized queries reject the whole plan rather than widening it silently.
+pub fn parse_search_plan(stdout: &str) -> std::result::Result<Vec<String>, String> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())
+        .map_err(|error| format!("stdout 不是單一 JSON 物件：{error}"))?;
+    if !value.is_object() {
+        return Err("stdout 不是單一 JSON 物件".to_owned());
+    }
+    let model: ModelSearchPlan =
+        serde_json::from_value(value).map_err(|error| format!("JSON 對不上查詢契約：{error}"))?;
+    if model.queries.is_empty() || model.queries.len() > MAX_SEARCH_QUERIES {
+        return Err(format!(
+            "queries 必須是 1 到 {MAX_SEARCH_QUERIES} 條，實際是 {}",
+            model.queries.len()
+        ));
+    }
+
+    let mut queries = Vec::with_capacity(model.queries.len());
+    let mut seen = HashSet::new();
+    for raw in model.queries {
+        let query = raw.trim();
+        if query.is_empty() {
+            return Err("queries 裡有空問句".to_owned());
+        }
+        if query.chars().any(char::is_control) {
+            return Err("queries 裡有控制字元".to_owned());
+        }
+        if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
+            return Err(format!("單條 query 超過 {MAX_SEARCH_QUERY_CHARS} 字"));
+        }
+        if seen.insert(query.to_owned()) {
+            queries.push(query.to_owned());
+        }
+    }
+    if queries.is_empty() {
+        return Err("queries 去重後是空的".to_owned());
+    }
+    Ok(queries)
+}
+
 /// JSON string 可能把一個 control byte 展開成六個 ASCII bytes。只守 raw UTF-8
 /// 上限仍可能讓第一筆來源完全放不進 payload，所以每個自由字串也守 encoded size。
 fn bounded_json_string(value: &str, raw_bytes: usize, encoded_bytes: usize) -> (String, bool) {
@@ -169,7 +245,8 @@ fn bound_source(mut source: Source) -> (Source, bool) {
 
 /// 把本機已排好的 facts／hits 收成一次有界 RAG prompt。
 ///
-/// 回傳 `None` 代表本機沒有任何候選；那時純本機空結果就是完整答案，不呼叫 CLI。
+/// 回傳 `None` 代表本機沒有任何候選；查詢規劃 CLI 在這之前仍已處理問題，這裡只是不再
+/// 要求它憑空生成一份沒有本機出處的答案。
 pub fn prepare(
     question: &str,
     facts: &[FactAnswer],
@@ -420,8 +497,32 @@ mod tests {
     }
 
     #[test]
-    fn no_local_candidate_means_no_cli_prompt() {
+    fn no_local_candidate_means_no_unsupported_answer_prompt() {
         assert!(prepare("沒有的東西", &[], &[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn every_question_can_become_a_cli_directed_memory_search() {
+        let prompt = prepare_search_plan("昨天在做什麼？").unwrap();
+        assert!(prompt.contains("昨天在做什麼？"));
+        assert!(prompt.contains("\"queries\""));
+        assert!(prompt.contains("BEGIN QUESTION AND SCREEN DATA nonce="));
+        assert!(!prompt.contains("sister.db"));
+    }
+
+    #[test]
+    fn search_plans_are_strict_bounded_and_deduplicated() {
+        assert_eq!(
+            parse_search_plan(r#"{"queries":["昨天在做什麼", "帳單 客服", "昨天在做什麼"]}"#)
+                .unwrap(),
+            ["昨天在做什麼", "帳單 客服"]
+        );
+        assert!(parse_search_plan(r#"{"queries":[]}"#).is_err());
+        assert!(parse_search_plan(r#"{"queries":["a","b","c","d"]}"#).is_err());
+        assert!(parse_search_plan(r#"{"queries":["ok"],"answer":"no"}"#).is_err());
+        assert!(parse_search_plan("```json\n{\"queries\":[\"ok\"]}\n```").is_err());
+        let too_long = "查".repeat(MAX_SEARCH_QUERY_CHARS + 1);
+        assert!(parse_search_plan(&format!(r#"{{"queries":["{too_long}"]}}"#)).is_err());
     }
 
     #[test]

@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI-Sister Memory"
+  short_description: "Search local AI-Sister memory with grounded sources"
+  default_prompt: "Use $ai-sister-memory to find what I was working on yesterday."

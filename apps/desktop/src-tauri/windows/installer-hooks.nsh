@@ -32,20 +32,34 @@ Var AI_SISTER_DIAGNOSTIC_AFTER_EXCLUSION_HANDLE
 
 !macro AI_SISTER_PROBE_PRODUCT_LIFECYCLE
   ; Missing is the only clear result. Success means an alpha.113-aware product is alive;
-  ; every other native error fails closed instead of becoming a fake absence.
-  System::Call 'kernel32::SetLastError(i 0)'
-  System::Call 'kernel32::OpenEventW(i 0x00100000, i 0, w "Global\com.ted-h.ai-sister-product-lifecycle-v1") p.r0 ?e'
-  Pop $R1
-  ${If} $0 != 0
-    System::Call 'kernel32::CloseHandle(p r0) i.r3'
-    ${If} $3 = 0
+  ; every other native error fails closed instead of becoming a fake absence. An interactive
+  ; operation keeps its mutex while the person exits AI-Sister, then measures the event again;
+  ; Retry never continues from the stale result that produced the dialog. Silent Setup keeps
+  ; the existing non-interactive exit=32 contract.
+  ${Do}
+    System::Call 'kernel32::SetLastError(i 0)'
+    System::Call 'kernel32::OpenEventW(i 0x00100000, i 0, w "Global\com.ted-h.ai-sister-product-lifecycle-v1") p.r0 ?e'
+    Pop $R1
+    ${If} $0 != 0
+      System::Call 'kernel32::CloseHandle(p r0) i.r3'
+      ${If} $3 = 0
+        !insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown
+      ${EndIf}
+      ${If} ${Silent}
+        !insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterProductLifecycleBusy
+      ${Else}
+        ; Retry falls through to Continue. Cancel (including the window close button) skips that
+        ; one Goto and enters the ordinary fail path, which releases the installer mutex first.
+        MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL "$(aiSisterProductLifecycleBusy)" IDCANCEL +2
+        ${Continue}
+        !insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterProductLifecycleBusy
+      ${EndIf}
+    ${ElseIf} $R1 != 2
       !insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown
+    ${Else}
+      ${ExitDo}
     ${EndIf}
-    !insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterProductLifecycleBusy
-  ${EndIf}
-  ${If} $R1 != 2
-    !insertmacro AI_SISTER_FAIL_INSTALL_LIFECYCLE aiSisterInstallLockUnknown
-  ${EndIf}
+  ${Loop}
 !macroend
 
 !macro AI_SISTER_ACQUIRE_INSTALL_LIFECYCLE

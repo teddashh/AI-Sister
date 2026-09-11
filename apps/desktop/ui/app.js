@@ -322,11 +322,6 @@ function dialogueTaps(id) {
   );
 }
 
-function dailyDialogueReply(question, personaId) {
-  const lineId = DIALOGUE_VOICES.exactReplies.get(normalizeDailyPhrase(question));
-  return lineId === undefined ? null : DIALOGUE_VOICES.byPersona.get(personaId)?.get(lineId) ?? null;
-}
-
 function profile(value) {
   return Object.freeze({
     ...value,
@@ -3841,6 +3836,7 @@ function renderGrounded(synthesis, facts, hits, queryId) {
  * @param closureNotice 文字結案是否成功；認不出來時也要明講沒有動卡片。
  * @param overview 「我知道了什麼」專用的 L2 總覽；`null` 代表一般檢索題。
  * @param synthesis 本機候選經已登入 CLI 成句後的逐句出處答案；失敗或未啟用時是 `null`。
+ * @param brain 已選 CLI 實際處理這題的結果；畫面不靠 `synthesis === null` 猜原因。
  */
 function renderHits(
   hits,
@@ -3857,6 +3853,7 @@ function renderHits(
   closureNotice = null,
   overview = null,
   synthesis = null,
+  brain = null,
 ) {
   azureAnswerLine = null;
   azureAnswerButton = null;
@@ -3876,6 +3873,28 @@ function renderHits(
     notice.className = "hits-note";
     notice.textContent = closureNotice;
     hitList.append(notice);
+  }
+
+  if (brain && typeof brain.state === "string") {
+    const provider =
+      typeof brain.provider === "string" && brain.provider.trim() !== ""
+        ? brain.provider.trim()
+        : "CLI 大腦";
+    const messages = {
+      used: `${provider} · 已使用本機記憶`,
+      no_sources: `${provider} 已查過本機記憶；目前沒有可引用的內容。`,
+      answer_failed: `${provider} 沒有完成回答；下方保留它查到的本機記憶。到設定按「測試目前大腦」即可重測。`,
+      search_failed: `${provider} 這次沒有完成查詢；下方是依原問題找到的本機記憶。到設定按「測試目前大腦」即可重測。`,
+      consent_required: `到設定完成第二張「雲端解讀」後，${provider} 才能使用你的問題與本機記憶文字。`,
+      not_configured: "到設定選一個 CLI，大腦才會接手文字問題。",
+    };
+    const text = messages[brain.state];
+    if (text) {
+      const status = document.createElement("li");
+      status.className = `brain-note brain-${brain.state}`;
+      status.textContent = text;
+      hitList.append(status);
+    }
   }
 
   if (hasOverview) {
@@ -4173,21 +4192,6 @@ const SLOW_MS = 4000;
  */
 let asking = 0;
 
-function renderDailyDialogue(line) {
-  azureAnswerLine = null;
-  azureAnswerButton = null;
-  const reply = document.createElement("li");
-  reply.className = "persona-dialogue";
-  reply.textContent = line.text;
-  hitList.replaceChildren(reply);
-  hitList.hidden = false;
-  document.body.classList.add("has-hits");
-  personaLine.textContent = line.text;
-  personaLine.hidden = false;
-  showingAnswer = true;
-  paintConversation();
-}
-
 async function ask(event = null) {
   const question = askInput.value.trim();
   if (question === "") return;
@@ -4200,18 +4204,6 @@ async function ask(event = null) {
   // 新的一題蓋掉上一次那句「為什麼沒成」——他已經在做下一件事了。
   notice = null;
   slowNote = null;
-  const dailyReply =
-    event?.isTrusted === true && personaEnabled
-      ? dailyDialogueReply(question, activeProfile.id)
-      : null;
-  if (dailyReply !== null) {
-    if (invoke !== null) void invoke("answer_cli_cancel").catch(() => {});
-    renderDailyDialogue(dailyReply);
-    askInput.value = "";
-    setState("idle");
-    if (personaVoiceEnabled) void playBundledPersonaLine(dailyReply);
-    return;
-  }
   setState("thinking");
   const slow = setTimeout(() => {
     // 這個 timer 只量到一件事：這一題已經等了 4 秒。它沒有問資料庫是不是
@@ -4256,6 +4248,7 @@ async function ask(event = null) {
         answer.closure_notice,
         answer.overview,
         answer.synthesis,
+        answer.brain,
       );
       setState("idle");
       // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
@@ -4315,13 +4308,13 @@ async function ask(event = null) {
   }
 }
 
-askSend?.addEventListener("click", (event) => void ask(event));
+askSend?.addEventListener("click", () => void ask());
 askInput?.addEventListener("keydown", (event) => {
   // 選字中的 Enter 是「就選這個字」，不是「問出去」。注音打「剛剛發生什麼事」
   // 一路上會按好幾次 Enter，少了這一行，第一次選字就把半句話送出去了。
   // `keyCode === 229` 是舊的那條路，有些 IME 只給得出這個。
   if (event.isComposing || event.keyCode === 229) return;
-  if (event.key === "Enter") void ask(event);
+  if (event.key === "Enter") void ask();
 });
 
 // ---------- 開場 ----------
@@ -4515,6 +4508,13 @@ if (browserDemoQuery && params.get("hits") === "demo") {
     // 這一半比空手那一半更需要看一眼：一串看起來像正常答案的東西配上一句
     // 「我找的不是你打的字」，兩者要能同時讀得下去才算對。
     params.get("glued"),
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    { state: "used", provider: "Grok CLI" },
   );
 }
 

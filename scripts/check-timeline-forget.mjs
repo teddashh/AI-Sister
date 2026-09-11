@@ -513,6 +513,17 @@ console.log("⑨ 外送紀錄：兩種空、沒送出去的原因、原文沒遮
           role: "answer",
         },
         {
+          ts: D1 + 3_525_000,
+          command: "grok",
+          args: ["--verbatim"],
+          chars_sent: 42,
+          truncated: false,
+          outcome: "success",
+          duration_ms: 21,
+          error: null,
+          role: "answer_search",
+        },
+        {
           ts: D1 + 3_500_000,
           command: "claude",
           args: ["-p"],
@@ -544,7 +555,8 @@ console.log("⑨ 外送紀錄：兩種空、沒送出去的原因、原文沒遮
   check("盯梢層那一列講得出自己是哪一層", rolesText.includes("盯梢層"), rolesText);
   check("盯梢層不會印成英文的 watcher", !rolesText.includes("watcher"), rolesText);
   check("答題層與取消結局都用產品文字顯示", rolesText.includes("答題層") && rolesText.includes("已取消"), rolesText);
-  check("答題層不會印成英文代號", !rolesText.includes("answer") && !rolesText.includes("cancelled"), rolesText);
+  check("答題查詢有自己的中文層別", rolesText.includes("答題查詢"), rolesText);
+  check("兩種答題層不會印成英文代號", !rolesText.includes("answer") && !rolesText.includes("cancelled"), rolesText);
   // 斷言要打在「它說了自己不認得」上，不是打在那個怪值有沒有印出來上——
   // 怪值兩版都會印出來。
   check("不認得的層別要說出自己不認得", rolesText.includes("不認得"), rolesText);

@@ -168,7 +168,7 @@
             <input type="checkbox" data-persona-voice disabled />
             <span>
               日常對話使用角色聲音
-              <em>點角色，或輸入收錄的日常短句時，播放所選角色的本機固定語音。</em>
+              <em>點角色時，播放所選角色的本機固定語音。文字問題一律交給目前選定的 CLI。</em>
             </span>
           </label>
           <p class="state" aria-live="polite" data-persona-voice-state>
@@ -259,7 +259,8 @@
       <section>
         <h2>大腦</h2>
         <p class="hint">
-          選擇這台電腦已安裝的 CLI。完成官方登入後，AI-Sister 會實際測通並保存。
+          選擇這台電腦已安裝的 CLI。完成官方登入與測試後，它就會接手每個文字問題；
+          不綁角色，也不寫死成某一支 CLI。
         </p>
         <div class="brain-cli-grid">
           <article class="brain-cli" data-brain-claude-card>
@@ -268,7 +269,7 @@
               <span data-brain-claude-status>正在偵測…</span>
             </div>
             <button class="ghost" data-brain-claude-action type="button" disabled>
-              登入並使用
+              登入並選用
             </button>
           </article>
           <article class="brain-cli" data-brain-codex-card>
@@ -277,7 +278,7 @@
               <span data-brain-codex-status>正在偵測…</span>
             </div>
             <button class="ghost" data-brain-codex-action type="button" disabled>
-              登入並使用
+              登入並選用
             </button>
           </article>
           <article class="brain-cli" data-brain-gemini-card>
@@ -286,7 +287,7 @@
               <span data-brain-gemini-status>正在偵測…</span>
             </div>
             <button class="ghost" data-brain-gemini-action type="button" disabled>
-              登入並使用
+              登入並選用
             </button>
           </article>
           <article class="brain-cli" data-brain-grok-card>
@@ -295,7 +296,7 @@
               <span data-brain-grok-status>正在偵測…</span>
             </div>
             <button class="ghost" data-brain-grok-action type="button" disabled>
-              登入並使用
+              登入並選用
             </button>
           </article>
         </div>
@@ -436,7 +437,8 @@
         <p>
           大腦登入由你選擇的 Claude Code、Codex、Gemini 或 Grok CLI 自己完成；AI-Sister
           不收也不保存該服務的密碼或 token。連線測試只送固定測試句。第二張同意書生效後，
-          解釋層與審閱層才會把選出的螢幕文字原文交給該 CLI；不送畫面檔。
+          每個文字問題先由該 CLI 決定要查哪些記憶；AI-Sister 在本機代查，再把命中的文字與
+          出處交回同一支 CLI 作答。不送畫面檔，也不把資料庫檔案交給 CLI。
         </p>
         <p data-azure-boundary>
           Azure 每份新答案只送出該題答案正文原文一次；手動重播會再送一次。正文可能含姓名、

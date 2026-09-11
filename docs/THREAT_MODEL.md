@@ -34,7 +34,7 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 | **拿到未鎖機器的人** | 讀檔案、跑 `sister query` | **部分防禦**：靠 OS 帳號隔離。目前資料庫**未加密** |
 | **同機的惡意程式** | 以使用者身分讀任何檔案 | **不防禦**。同權限即同讀取權，這是 OS 邊界 |
 | **偷走硬碟的人** | 離線讀取 | **依賴 BitLocker/LUKS**。應用層無額外加密 |
-| **遠端攻擊者** | 網路 | **部分防禦**：本程式沒有監聽埠；`sister.exe`、recorder/core/capture/brain/hands 與 WebView 無任意 HTTP 能力。desktop 只有使用者揭露後按下的 Persona fixed-pack GET，以及設定啟用、獨立現行 consent、Credential Manager key 全成立後，只替最新新答案／trusted replay 走的 Azure TTS fixed POST；簽 cloud-reading 後另會把 OCR 原文交給使用者設定的本機 CLI，後續網路與供應商邊界屬於那支 CLI |
+| **遠端攻擊者** | 網路 | **部分防禦**：本程式沒有監聽埠；`sister.exe`、recorder/core/capture/brain/hands 與 WebView 無任意 HTTP 能力。desktop 只有使用者揭露後按下的 Persona fixed-pack GET，以及設定啟用、獨立現行 consent、Credential Manager key 全成立後，只替最新新答案／trusted replay 走的 Azure TTS fixed POST；簽 cloud-reading 後另會把使用者問題與本機查詢命中的 OCR 原文／出處交給使用者設定的 CLI，後續網路與供應商邊界屬於那支 CLI；CLI 不取得 DB path 或畫面 |
 | **供應鏈** | 汙染相依套件 | **部分**：`Cargo.lock` 鎖定；未做 vendoring 或 reproducible build |
 | **好奇的旁人** | 看你的螢幕 | 不適用（他本來就看得到） |
 | **被記錄的第三方** | 無 | **這是最重要的一項，見下方** |
@@ -48,8 +48,8 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 
 - 會議 app 前景時自動暫停（Zoom / Teams / Meet / WebEx / TeamViewer 等）
 - 任何 app 可一鍵加入 blocklist
-- 畫面 pixels 永不離開本機；沒簽 cloud-reading 時 OCR 文字也不交給外部 CLI。簽署後，
-  OCR 原文會交給使用者設定的本機 CLI，並受那支 CLI 與其供應商的邊界約束
+- 畫面 pixels 永不離開本機；沒簽 cloud-reading 時問題與 OCR 文字都不交給外部 CLI。簽署後，
+  問題與本機查詢命中的 OCR 原文／出處會交給使用者設定的 CLI，並受那支 CLI 與其供應商的邊界約束
 - 選用 Azure TTS 時，當前答案正文可能也逐字含有第三方資料。第四張同意會明示不遮罩；
   不願把這段文字交給 Azure 時，維持預設關閉並使用本機朗讀
 

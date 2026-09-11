@@ -357,6 +357,7 @@ async function open(personaView = persona(), options = {}) {
                 closure_notice: null,
                 overview: null,
                 synthesis: null,
+                brain: { state: "not_configured", provider: null },
               }
             );
           default:
@@ -810,12 +811,11 @@ console.log("③ᵇ Reel 只建 active rig；整組 decode 前與任何失敗都
     { face: FACE_CSS, reel: REEL_CSS },
   );
   check(
-    "flatten WebP 與 rig 都撐滿同一座標格，ready／compact 切換不改人物尺度",
+    "flatten WebP 與 rig 都撐滿同一座標格，回答出現也不改人物尺度",
     PORTRAIT_CSS.includes("height: 100%;") &&
       PORTRAIT_CSS.includes("width: 100%;") &&
-      STYLES.includes(
-        "body.has-hits .portrait,\nbody.has-url-policy .portrait {\n  height: 100%;\n  width: 100%;\n}",
-      ),
+      /\.avatar\s*\{[^}]*height:\s*300px;[^}]*width:\s*300px;/su.test(STYLES) &&
+      !STYLES.includes("body.has-hits .avatar"),
     PORTRAIT_CSS,
   );
   check(
@@ -980,13 +980,17 @@ console.log("③ᵇ Reel 只建 active rig；整組 decode 前與任何失敗都
       !STYLES.includes("data-reel-mouth"),
   );
   check(
-    "答案／URL compact 模式仍保留已 decode 全身 rig，不換回相框 WebP",
-    STYLES.includes("body.has-hits .avatar,\nbody.has-url-policy .avatar {\n  height: 88px;") &&
-      STYLES.includes(".avatar.reel-ready .portrait {\n  visibility: hidden;") &&
+    "答案／URL 氣泡仍保留同尺寸已 decode 全身 rig，不換回相框 WebP",
+    STYLES.includes(".avatar.reel-ready .portrait {\n  visibility: hidden;") &&
+      STYLES.includes("body.has-hits .answer-bubble") &&
       !STYLES.includes("body.has-hits .avatar.reel-ready .portrait") &&
       !STYLES.includes("body.has-url-policy .avatar.reel-ready .portrait") &&
       !STYLES.includes("body.has-hits .persona-reel") &&
       !STYLES.includes("body.has-url-policy .persona-reel"),
+  );
+  check(
+    "回答氣泡出現時根頁不會捲動到把上下控制列推出視窗",
+    /html,\s*\nbody\s*\{[^}]*overflow:\s*hidden;[^}]*overflow-anchor:\s*none;/su.test(STYLES),
   );
 }
 
@@ -1100,14 +1104,9 @@ console.log("⑥ 17 人固定語音與日常短句都走 bundled Ogg，不借系
 
   const daily = await open(persona("kimi", { voice_enabled: true }));
   await daily.ask("早安。");
-  check("精確日常短句直接顯示角色回覆", daily.node("[data-hits]").textContent.includes("早安。"));
-  check("日常短句不叫 CLI 大腦", !daily.calls.includes("ask"), daily.calls);
-  check("精確日常短句先取消仍在跑的動態答題", daily.calls.includes("answer_cli_cancel"), daily.calls);
-  check(
-    "日常短句播放同一角色同一句 bundled Ogg",
-    daily.playedSources()[0] === "./persona-voices/v1/base/kimi/good-morning.ogg",
-    daily.playedSources(),
-  );
+  check("精確日常短句也交給 CLI／記憶路徑", daily.calls.includes("ask"), daily.calls);
+  check("文字問題不再用固定角色台詞繞過大腦", !daily.calls.includes("answer_cli_cancel"), daily.calls);
+  check("文字問題不播固定 Ogg 冒充大腦答案", daily.plays() === 0, daily.playedSources());
 
   const normal = await open(persona("kimi", { voice_enabled: true }));
   await normal.ask("早安，昨天我在做什麼");
@@ -1357,16 +1356,14 @@ console.log("⑦ᶜ 未知 Persona event 整份拒絕，不能替舊角色打開
   });
 }
 
-console.log("⑧ Persona 只接 exact 日常短句；一般答案與安全路徑不改寫");
+console.log("⑧ Persona 點擊台詞獨立；所有文字問題都走大腦與記憶路徑");
 {
-  const askBody = SRC.match(/async function ask\(event = null\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
+  const askBody = SRC.match(/async function ask\([^)]*\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
   const gateBody = SRC.match(/function renderGatekeeper\(view\) \{[\s\S]*?\n\}/u)?.[0] ?? "";
   check(
-    "ask 只在 exact daily branch 讀 persona，其他問題仍 invoke native ask",
-    askBody.includes("dailyDialogueReply(question, activeProfile.id)") &&
-      askBody.includes('const answer = await invoke("ask", { question })') &&
-      askBody.indexOf("dailyDialogueReply(question, activeProfile.id)") <
-        askBody.indexOf('const answer = await invoke("ask", { question })'),
+    "ask 沒有日常短句旁路，每個文字問題都 invoke native ask",
+    !askBody.includes("dailyDialogueReply") &&
+      askBody.includes('const answer = await invoke("ask", { question })'),
     askBody,
   );
   check("Gatekeeper 不會觸發 tap-line", !/sayPersonaLine|personaLine|personaAudio/u.test(gateBody), gateBody);
@@ -1432,7 +1429,7 @@ console.log("⑧ Persona 只接 exact 日常短句；一般答案與安全路徑
       mediaStop.includes("bundledVoicePresentation") &&
       mediaStop.includes("stopLocalSpeech()") &&
       localSpeech.includes("stopPersonaMedia()") &&
-      /async function ask\(event = null\)[\s\S]*?stopPersonaMedia\(\)/u.test(SRC),
+      /async function ask\([^)]*\)[\s\S]*?stopPersonaMedia\(\)/u.test(SRC),
     mediaStop,
   );
 }
@@ -1442,4 +1439,4 @@ if (failures > 0) {
   console.log(`✗ ${failures} 條 Persona 契約沒守住。`);
   process.exit(1);
 }
-console.log("✔ Persona v3：17 位本機角色、544 段 bundled 語音、exact 日常分流與三路 speaking 都守住了。");
+console.log("✔ Persona v3：17 位本機角色、544 段 bundled 語音、文字題全走大腦與三路 speaking 都守住了。");

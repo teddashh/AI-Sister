@@ -1448,10 +1448,11 @@ function outboundOutcome(value) {
 }
 
 function outboundRole(value) {
+  if (value === "answer_search") return "答題查詢";
+  if (value === "answer") return "答題層";
   if (value === "reviewer") return "審閱層";
   if (value === "interpreter") return "解釋層";
   if (value === "watcher") return "盯梢層";
-  if (value === "answer") return "答題層";
   return `不認得的層別（${value || "空值"}）`;
 }
 
@@ -2173,7 +2174,7 @@ function fakeBackend(mode = "1") {
               ts: at(8, 5),
               reason: "no_consent",
               detail:
-                "還沒簽第二張同意書（上雲解讀）。解釋層一次都不會呼叫那支 CLI。",
+                "還沒簽第二張同意書（上雲解讀），所以不會把這段記憶文字交給 CLI。",
             },
             {
               ts: at(11, 0),

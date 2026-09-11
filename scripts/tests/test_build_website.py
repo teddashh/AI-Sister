@@ -32,7 +32,27 @@ class WebsiteBuildTests(unittest.TestCase):
                 f"/releases/download/v{version}/AI-Sister-Linux-X11-amd64.deb",
                 html,
             )
+            self.assertIn("macOS 14+", html)
+            self.assertIn("尚無公開安裝檔", html)
+            self.assertIn(
+                f"/tree/v{version}/.claude/skills/ai-sister-memory", html
+            )
+            self.assertIn(
+                f"/tree/v{version}/.agents/skills/ai-sister-memory", html
+            )
             self.assertFalse(any(token in html for token in MODULE.TOKENS))
+
+            claude_skill = (
+                MODULE.ROOT / ".claude/skills/ai-sister-memory/SKILL.md"
+            ).read_text(encoding="utf-8")
+            codex_skill = (
+                MODULE.ROOT / ".agents/skills/ai-sister-memory/SKILL.md"
+            ).read_text(encoding="utf-8")
+            for skill in (claude_skill, codex_skill):
+                self.assertIn("name: ai-sister-memory", skill)
+                self.assertIn("sister query --limit 10 --json", skill)
+                self.assertIn("Do not read `sister.db` or `frames/` directly", skill)
+                self.assertNotIn("[TODO:", skill)
 
             personas = sorted((output / "assets/personas").glob("*.webp"))
             self.assertEqual(len(personas), 17)

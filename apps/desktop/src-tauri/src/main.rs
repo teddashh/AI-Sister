@@ -25,7 +25,7 @@ use sister_shell::login_startup::LaunchIntent;
 #[cfg(windows)]
 use sister_shell::login_startup::launch_intent;
 use sister_shell::{PetState, Rect};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -2162,6 +2162,24 @@ struct Answer {
     overview: Option<MemoryOverview>,
     /// 本機候選經 CLI 成句後的答案。`None` 時畫面直接使用下面的本機 facts／hits。
     synthesis: Option<GroundedSynthesis>,
+    /// 已選的大腦有沒有實際接手這題。畫面只用它給可採取的下一步，不猜 CLI 狀態。
+    brain: BrainAnswer,
+}
+
+#[derive(Debug, Serialize)]
+struct BrainAnswer {
+    state: &'static str,
+    provider: Option<String>,
+}
+
+impl BrainAnswer {
+    fn new(state: &'static str, provider: Option<String>) -> Self {
+        Self { state, provider }
+    }
+
+    fn not_configured() -> Self {
+        Self::new("not_configured", None)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2354,6 +2372,7 @@ fn memory_overview_answer(
         chapters: None,
         overview: Some(overview),
         synthesis: None,
+        brain: BrainAnswer::not_configured(),
     })
 }
 
@@ -2986,12 +3005,198 @@ mod grounded_synthesis_tests {
     }
 }
 
-/// CLI 是可選的成句層；本機 retrieval 已經完成，所以每一條失敗路都直接保留
-/// facts／hits。真的啟動 CLI 的那條路仍經第二張同意書、master stop 與 outbound audit。
+#[derive(Debug, Clone)]
+struct ConfiguredAnswerCli {
+    command: String,
+    args: Vec<String>,
+    label: String,
+}
+
+#[derive(Debug)]
+struct PlannedAnswerSearches {
+    cli: ConfiguredAnswerCli,
+    queries: Vec<String>,
+}
+
+fn answer_cli_from_config(config: &sister_core::config::Config) -> Option<ConfiguredAnswerCli> {
+    let (command, args) = config.brain.cli()?;
+    // 互動問答只接受設定頁完成登入、固定 probe 並明確選用的 bridge。舊 raw
+    // command 仍留給 recorder 相容使用，但不能在沒有選用 provider 的情況下
+    // 悄悄接管輸入框。
+    let (provider, _) = sister_core::provider_cli::parse_bridge_args(args)?;
+    let label = provider.label().to_owned();
+    Some(ConfiguredAnswerCli {
+        command: command.to_owned(),
+        args: args.to_vec(),
+        label,
+    })
+}
+
+fn configured_answer_cli() -> Result<Option<ConfiguredAnswerCli>, String> {
+    let path = config_path()?;
+    let config = sister_core::config::Config::load(&path).map_err(|error| format!("{error:#}"))?;
+    Ok(answer_cli_from_config(&config))
+}
+
+#[cfg(test)]
+mod answer_cli_selection_tests {
+    use super::*;
+    use sister_core::provider_cli::{BrainProvider, bridge_args};
+
+    #[test]
+    fn the_last_provider_selected_in_config_is_the_answer_cli() {
+        let mut config = sister_core::config::Config::default();
+        config.set_brain_cli_from_page(
+            "sister".into(),
+            bridge_args(BrainProvider::Claude, Path::new("claude")),
+        );
+        assert_eq!(
+            answer_cli_from_config(&config).unwrap().label,
+            "Claude Code"
+        );
+
+        config.set_brain_cli_from_page(
+            "sister".into(),
+            bridge_args(BrainProvider::Grok, Path::new("grok")),
+        );
+        let selected = answer_cli_from_config(&config).unwrap();
+        assert_eq!(selected.label, "Grok CLI");
+        assert_eq!(selected.command, "sister");
+        assert_eq!(
+            sister_core::provider_cli::parse_bridge_args(&selected.args)
+                .map(|(provider, _)| provider),
+            Some(BrainProvider::Grok)
+        );
+
+        config.set_brain_cli_from_page("custom-agent".into(), vec!["--raw".into()]);
+        assert!(answer_cli_from_config(&config).is_none());
+    }
+}
+
+fn record_answer_outbound(
+    shell: &tauri::State<'_, Shell>,
+    cli: &ConfiguredAnswerCli,
+    spawn: &sister_core::brain::SpawnOutcome,
+    truncated: bool,
+    outcome: &str,
+    error: Option<&str>,
+    role: &str,
+) -> Result<(), String> {
+    let day = sister_core::brain::local_day_key(sister_core::now_ms())
+        .ok_or_else(|| "算不出外送日期".to_owned())?;
+    with_db_mut(shell, |db| {
+        db.insert_brain_outbound(&sister_core::db::OutboundInsert {
+            ts: sister_core::now_ms(),
+            day_key: &day,
+            command: &cli.command,
+            args: &cli.args,
+            segment_core_start: None,
+            chars_sent: spawn.payload_chars_written as i64,
+            truncated,
+            outcome,
+            duration_ms: spawn.duration_ms as i64,
+            error,
+            role,
+        })
+        .map_err(|error| format!("{error:#}"))?;
+        Ok(())
+    })
+}
+
+/// 每個問題先讓已選 CLI 寫出最多三條本機記憶查詢。CLI 只收到問題；SQLite 路徑、
+/// SQL 與整顆資料庫都不交出去，查詢由 AI-Sister 在本機執行。
+fn plan_answer_searches(
+    shell: &tauri::State<'_, Shell>,
+    question: &str,
+    cancellation: &sister_core::brain::Cancellation,
+) -> (BrainAnswer, Option<PlannedAnswerSearches>) {
+    let cli = match configured_answer_cli() {
+        Ok(Some(cli)) => cli,
+        Ok(None) => return (BrainAnswer::not_configured(), None),
+        Err(error) => {
+            tracing::warn!("讀不到答題 CLI 設定：{error}");
+            return (BrainAnswer::new("search_failed", None), None);
+        }
+    };
+    let status = |state| BrainAnswer::new(state, Some(cli.label.clone()));
+    let Some(data_dir) = shell.data_dir.as_deref() else {
+        return (status("search_failed"), None);
+    };
+    let consent = sister_core::consent::load(data_dir);
+    let Some(permit) = consent.cloud_permit() else {
+        return (status("consent_required"), None);
+    };
+    let payload = match sister_core::grounded_answer::prepare_search_plan(question) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!("答題大腦無法準備記憶查詢：{error:#}");
+            return (status("search_failed"), None);
+        }
+    };
+    let Some(not_stopped) = sister_core::brain::not_stopped(data_dir) else {
+        return (status("search_failed"), None);
+    };
+    let spawn = sister_core::brain::spawn_cli_cancellable(
+        permit,
+        not_stopped,
+        &payload,
+        &cli.command,
+        &cli.args,
+        cancellation,
+    );
+
+    let (outcome, queries, error) = if cancellation.is_cancelled() {
+        ("cancelled", None, None)
+    } else if spawn.timed_out {
+        ("timeout", None, None)
+    } else if !spawn.completed_the_ask() {
+        let error = spawn.spawn_error.clone().or_else(|| {
+            Some(format!(
+                "CLI 結束碼 {}",
+                spawn
+                    .exit_code
+                    .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+            ))
+        });
+        ("spawn_failed", None, error)
+    } else if spawn.stdout.trim().is_empty() {
+        ("no_answer", None, None)
+    } else {
+        match sister_core::grounded_answer::parse_search_plan(&spawn.stdout) {
+            Ok(queries) => ("success", Some(queries), None),
+            Err(error) => ("bad_json", None, Some(error)),
+        }
+    };
+
+    if let Err(audit_error) = record_answer_outbound(
+        shell,
+        &cli,
+        &spawn,
+        question.len() > sister_core::grounded_answer::MAX_QUESTION_BYTES,
+        outcome,
+        error.as_deref(),
+        "answer_search",
+    ) {
+        tracing::error!("答題大腦的記憶查詢紀錄沒有寫成：{audit_error}");
+        return (status("search_failed"), None);
+    }
+
+    match queries {
+        Some(queries) => (
+            status("searching"),
+            Some(PlannedAnswerSearches { cli, queries }),
+        ),
+        None => (status("search_failed"), None),
+    }
+}
+
+/// CLI 已經決定並完成本機 retrieval；這一段只讓同一支 CLI 根據命中的證據成句。
+/// 每一條失敗路都保留 facts／hits，而且第二次送出仍重新通過 consent 與 master stop。
 fn synthesize_grounded_answer(
     shell: &tauri::State<'_, Shell>,
     local: &Answer,
     prepared: &sister_core::grounded_answer::Prepared,
+    cli: &ConfiguredAnswerCli,
     cancellation: &sister_core::brain::Cancellation,
     presentation: &sister_hands::master_stop::ActivityGuard,
 ) -> Option<GroundedSynthesis> {
@@ -3003,20 +3208,10 @@ fn synthesize_grounded_answer(
             .data_dir
             .as_deref()
             .ok_or_else(|| "找不到資料目錄".to_owned())?;
-        let path = config_path()?;
-        let config =
-            sister_core::config::Config::load(&path).map_err(|error| format!("{error:#}"))?;
-        let Some((command, args)) = config.brain.cli() else {
-            return Ok(None);
-        };
-        let command = command.to_owned();
-        let args = args.to_vec();
         let consent = sister_core::consent::load(data_dir);
         let Some(permit) = consent.cloud_permit() else {
             return Ok(None);
         };
-        let day = sister_core::brain::local_day_key(sister_core::now_ms())
-            .ok_or_else(|| "算不出外送日期".to_owned())?;
         let Some(not_stopped) = sister_core::brain::not_stopped(data_dir) else {
             return Ok(None);
         };
@@ -3025,8 +3220,8 @@ fn synthesize_grounded_answer(
             permit,
             not_stopped,
             &prepared.payload,
-            &command,
-            &args,
+            &cli.command,
+            &cli.args,
             cancellation,
         );
         let (mut outcome, mut synthesis, mut error) = if cancellation.is_cancelled() {
@@ -3061,23 +3256,15 @@ fn synthesize_grounded_answer(
             error = None;
         }
 
-        let audit = with_db_mut(shell, |db| {
-            db.insert_brain_outbound(&sister_core::db::OutboundInsert {
-                ts: sister_core::now_ms(),
-                day_key: &day,
-                command: &command,
-                args: &args,
-                segment_core_start: None,
-                chars_sent: spawn.payload_chars_written as i64,
-                truncated: prepared.truncated,
-                outcome,
-                duration_ms: spawn.duration_ms as i64,
-                error: error.as_deref(),
-                role: "answer",
-            })
-            .map_err(|error| format!("{error:#}"))?;
-            Ok(())
-        });
+        let audit = record_answer_outbound(
+            shell,
+            cli,
+            &spawn,
+            prepared.truncated,
+            outcome,
+            error.as_deref(),
+            "answer",
+        );
         if let Err(error) = audit {
             tracing::error!("答題層外送稽核沒有寫成：{error}");
             return Ok(None);
@@ -3123,6 +3310,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             chapters: None,
             overview: None,
             synthesis: None,
+            brain: BrainAnswer::not_configured(),
         });
     }
     // 每個非空問題都接管「最新題」槽。即使這一題隨後被全停擋住，也不能讓
@@ -3132,16 +3320,27 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
     // 活到 renderer 同步畫完，讓 stop-all 能先發佈 Stopping、再等這一題收乾淨；
     // 全停後來的新題連 retrieval 都不進。
     let master_stop_admission = admit_desktop_brain(shell.data_dir.as_deref(), "這一題")?;
+    let (brain, planned_searches) =
+        plan_answer_searches(&shell, &question, answer_cli_claim.cancellation());
+    // 題庫 latency 只量本機問答工作；CLI 查詢規劃已另記在
+    // brain_outbound role=answer_search，不能把兩段時間混成一個數字。
     let started = std::time::Instant::now();
 
-    // 先分流，再碰 retrieval。這條順序就是修正本身：「她知道了什麼」不是拿
-    // 「知道」兩字去 FTS 設定頁；總覽也不需要 chapters、blind spots、closure、
-    // follow-up，更不會因此叫 CLI。它只讀已經落地的 current L2 與本機證據。
-    if sister_core::question::intent(&question) == Intent::MemoryOverview {
+    // 沒有可用 CLI 時仍保留純本機的 L2 總覽；只要已選 CLI 且這題的查詢計畫
+    // 完成，總覽問法也走同一條 CLI-directed retrieval，不再繞過大腦。
+    if sister_core::question::intent(&question) == Intent::MemoryOverview
+        && planned_searches.is_none()
+    {
         let mut answer = with_db(&shell, |db| memory_overview_answer(db, started))?;
+        answer.brain = brain;
         answer.presentation_id = Some(hold_presentation(master_stop_admission));
         return Ok(answer);
     }
+
+    let retrieval_questions = planned_searches
+        .as_ref()
+        .map_or_else(|| vec![question.clone()], |planned| planned.queries.clone());
+    let cli_directed = planned_searches.is_some();
 
     // 章節那一支要寫 `segment`，所以整條改拿可變借用。沒認到時間範圍
     // 時 `chapters_for_question` 立刻回 `None`，不會重算。
@@ -3178,25 +3377,53 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             sister_core::followup::FollowupDecision::NoEligibleCommitment
             | sister_core::followup::FollowupDecision::CoolingDown { .. } => None,
         };
-        // 和 CLI、replay harness 共用同一條產品接線。字母人原本就是 facts 10
-        // 筆、原文 20 筆，兩個上限各自保留，不為了共用函式偷偷改畫面密度。
+        // 每條都是已選 CLI 要求的自然語言查詢，由 AI-Sister 在本機執行。多條
+        // 查詢會依 CLI 給的順序合併並去重，最後仍守原本 facts 10／原文 20 的上限。
         const FACTS: usize = 10;
         const HITS: usize = 20;
-        let retrieval = sister_core::retrieval::RetrievalProfile::TextAndFacts
-            .retrieve_with_limits(
-                db,
-                &question,
-                sister_core::retrieval::RetrievalLimits::new(FACTS, HITS),
-            )
-            .map_err(|e| format!("{e:#}"))?;
-        let shape = retrieval.shape;
-        let facts = retrieval.answers;
-        let facts_truncated = retrieval.answers_truncated;
-        let hits = retrieval.hits;
-        let truncated = retrieval.hits_truncated;
-        let asked_chapters = db
-            .chapters_for_question(&question, sister_core::now_ms())
-            .map_err(|e| format!("{e:#}"))?;
+        let mut shape = Shape::Keywords;
+        let mut facts = Vec::new();
+        let mut hits = Vec::new();
+        let mut fact_ids = HashSet::new();
+        let mut chunk_ids = HashSet::new();
+        let mut facts_truncated = false;
+        let mut truncated = false;
+        for (index, retrieval_question) in retrieval_questions.iter().enumerate() {
+            let retrieval = sister_core::retrieval::RetrievalProfile::TextAndFacts
+                .retrieve_with_limits(
+                    db,
+                    retrieval_question,
+                    sister_core::retrieval::RetrievalLimits::new(FACTS, HITS),
+                )
+                .map_err(|e| format!("{e:#}"))?;
+            if index == 0 {
+                shape = retrieval.shape;
+            }
+            facts_truncated |= retrieval.answers_truncated;
+            truncated |= retrieval.hits_truncated;
+            facts.extend(
+                retrieval
+                    .answers
+                    .into_iter()
+                    .filter(|answer| fact_ids.insert(answer.latest.id)),
+            );
+            hits.extend(
+                retrieval
+                    .hits
+                    .into_iter()
+                    .filter(|hit| chunk_ids.insert(hit.chunk_id)),
+            );
+        }
+        facts_truncated |= facts.len() > FACTS;
+        truncated |= hits.len() > HITS;
+        facts.truncate(FACTS);
+        hits.truncate(HITS);
+        let asked_chapters = if retrieval_questions.len() == 1 {
+            db.chapters_for_question(&retrieval_questions[0], sister_core::now_ms())
+                .map_err(|e| format!("{e:#}"))?
+        } else {
+            None
+        };
         let prepared = sister_core::grounded_answer::prepare(&question, &facts, &hits)
             .map_err(|e| format!("{e:#}"))?;
         // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
@@ -3247,7 +3474,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         let blind = if facts.is_empty() && hits.is_empty() {
             // 比對用的是 `terms`，掃描界線也照 `terms` 判——理由和
             // `sister query` 那邊同一條。
-            let asked = sister_core::question::terms(&question);
+            let asked = sister_core::question::terms(&retrieval_questions[0]);
             // 不給空路徑當退路：`pause::is_paused` 的規矩是「問不出來就當成
             // 暫停」，而 `Path::new("")` 會讓它去工作目錄找一個不存在的旗標、
             // 然後回一個很有把握的「沒有暫停」。寧可這一段沒有理由可講。
@@ -3282,13 +3509,16 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             // 一個切片）。`Shape::Recent` 根本沒走比對那條路，所以也不送。
             searched: match shape {
                 Shape::Recent | Shape::Range => None,
-                Shape::Keywords => {
+                Shape::Keywords if !cli_directed => {
                     // 只在**黏過**的時候送。剝掉「剛剛那個」留下「優惠方案」是
                     // 剝對了，每次都報一句只會讓人學會忽略它；黏出「個板」才是
                     // 她找了一個不是詞的東西。
                     let (t, glued) = sister_core::question::terms_with_retreat(&question);
                     glued.then(|| t.to_string())
                 }
+                // CLI 已經改寫過查詢時，原問句的 `terms` 不再是實際拿去比對的字；
+                // 不能把它畫成這一輪的搜尋真相。
+                Shape::Keywords => None,
             },
             query_id,
             blind,
@@ -3331,17 +3561,28 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 .map(|(_, ch)| ch.into_iter().map(chapter_from_activity).collect()),
             overview: None,
             synthesis: None,
+            brain,
         };
         Ok((answer, prepared))
     })?;
-    if let Some(prepared) = prepared {
-        answer.synthesis = synthesize_grounded_answer(
-            &shell,
-            &answer,
-            &prepared,
-            answer_cli_claim.cancellation(),
-            &master_stop_admission,
-        );
+    if let Some(planned) = planned_searches {
+        if let Some(prepared) = prepared {
+            answer.synthesis = synthesize_grounded_answer(
+                &shell,
+                &answer,
+                &prepared,
+                &planned.cli,
+                answer_cli_claim.cancellation(),
+                &master_stop_admission,
+            );
+            answer.brain.state = if answer.synthesis.is_some() {
+                "used"
+            } else {
+                "answer_failed"
+            };
+        } else {
+            answer.brain.state = "no_sources";
+        }
     }
     answer.presentation_id = Some(hold_presentation(master_stop_admission));
     Ok(answer)

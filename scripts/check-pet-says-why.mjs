@@ -91,6 +91,7 @@ function answer(over = {}) {
     closure_notice: null,
     overview: null,
     synthesis: null,
+    brain: { state: "not_configured", provider: null },
     ...over,
   };
 }
@@ -1900,6 +1901,72 @@ console.log("56b. RAG IPC 來源對不上本機候選時整份拒絕");
       { line: p.line(), hits: p.hitTexts() },
     );
   }
+}
+
+console.log("56c. 畫面說出實際接手的 CLI，而且零命中也不能假裝沒交給它");
+{
+  const used = await open({
+    ask: answer({
+      brain: { state: "used", provider: "Grok CLI" },
+      hits: [hit()],
+    }),
+    recording_state: "recording",
+  });
+  await used.type("昨天做了什麼");
+  check(
+    "成功時說出 Grok CLI 已使用本機記憶",
+    used.hits().querySelector(".brain-note")?.textContent === "Grok CLI · 已使用本機記憶",
+    used.hitTexts(),
+  );
+
+  const empty = await open({
+    ask: answer({
+      brain: { state: "no_sources", provider: "Codex CLI" },
+      blind: blind({ ever_recorded: true, chunks: 12 }),
+    }),
+    recording_state: "recording",
+  });
+  await empty.type("沒有命中的題目");
+  check(
+    "零命中仍明講 Codex 已處理並查過",
+    empty.hits().querySelector(".brain-note")?.textContent ===
+      "Codex CLI 已查過本機記憶；目前沒有可引用的內容。",
+    empty.hitTexts(),
+  );
+}
+
+console.log("56d. 答題路由每題重讀最後選用的 CLI，沒有 Grok 專用分支");
+{
+  const main = read(MAIN);
+  const selection = main.slice(
+    main.indexOf("fn answer_cli_from_config("),
+    main.indexOf("#[cfg(test)]\nmod answer_cli_selection_tests"),
+  );
+  const routing = main.slice(
+    main.indexOf("fn plan_answer_searches("),
+    main.indexOf("/// 時間軸上的一天。", main.indexOf("fn plan_answer_searches(")),
+  );
+  check(
+    "每題從 config.brain.cli 取得目前選擇",
+    selection.includes("config.brain.cli()") &&
+      selection.includes("let config = sister_core::config::Config::load(&path)") &&
+      routing.includes("plan_answer_searches(&shell, &question"),
+    { selection, routing },
+  );
+  check(
+    "同一份已選 CLI 同時規劃查詢與完成回答",
+    routing.includes("Some(PlannedAnswerSearches { cli, queries })") &&
+      routing.includes("&planned.cli"),
+    routing,
+  );
+  check(
+    "回答路徑沒有針對 Grok、Claude、Codex 或 Gemini 寫分支",
+    !routing.includes("BrainProvider::Grok") &&
+      !routing.includes("BrainProvider::Claude") &&
+      !routing.includes("BrainProvider::Codex") &&
+      !routing.includes("BrainProvider::Gemini"),
+    routing,
+  );
 }
 
 console.log("57. 新題會等舊自動朗讀 cancel settle；晚 response 不播，然後只送最新題");

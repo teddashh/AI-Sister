@@ -77,11 +77,11 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
 - **544 段是一份原子產品素材**：catalog 展開必須恰好是 17×32；manifest 逐檔綁定 persona、
   line、pack、用途、顯示文字、trigger、相對路徑、bytes、SHA-256 與 duration。runtime
   全份驗證才啟用，不允許半個角色或少一段的資料庫進入播放路徑。
-- **基本包與擴充包都能直接用**：每位兩句 avatar tap-line，加上 30 句早安、晚安、感謝、
-  疲累、卡住、完成、陪伴等 exact-intent reply。日常問題只做 NFKC、trim 與句尾標點
-  正規化後的 exact match；未命中就完整走既有記憶／CLI 路徑，不能以固定回覆冒充答案。
-- **聲音只由當下操作開始**：聲音預設關閉。角色點擊／Enter／Space 或使用者送出收錄短句
-  才能播放 bundled Ogg；開機、poll、capture、記憶、角色切換與設定重讀都是零播放。
+- **基本包與擴充包完整隨附**：每位兩句 avatar tap-line，加上 30 句已核准的語音素材；
+  runtime 只把 tap-line 接到角色操作。輸入框送出的日常短句與一般問題一樣，全部交給目前
+  選定的 CLI，不得用固定回覆繞過大腦。
+- **聲音只由當下角色操作開始**：聲音預設關閉。只有角色點擊／Enter／Space 才能播放
+  bundled Ogg；開機、poll、capture、記憶、輸入框、角色切換與設定重讀都是零固定語音播放。
   所有固定語音都不叫 CLI、不連網，也不借 `localService` 系統 voice。
 - **動態回答保留既有出口**：私人答案仍要使用者另按「用本機聲音朗讀」，才交給 WebView
   明確標成 `localService` 的中文 voice。Azure 是另一條預設關閉、另行同意後朗讀最新新答案
@@ -109,19 +109,20 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   空 private working directory 執行，結束後移除。brain／core／recorder 仍無 HTTP client；
   真正的 provider 連線只存在使用者已安裝的那支 CLI 裡。
 
-### S1 本機 RAG 成句合約（alpha.124 起）
+### S1 CLI-directed 本機記憶問答合約（alpha.126 起）
 
-- 一般問題先走既有本機 `TextAndFacts` retrieval；facts 優先，從既有 SQLite 記憶選最多
-  12 筆來源。這一層不建 embedding、向量庫、prompt cache 或另一份永久記憶。
-- 第二張同意有效且大腦已接好時，當前問題與選中來源才會送給那支 CLI。問題副本最多
-  2 KiB，nonce 圍欄內資料合計最多 12 KiB；畫面 bytes 永遠不進 prompt。
+- 第二張同意有效且大腦已接好時，每個文字問題先交給那支 CLI。CLI 只能要求 1–3 條
+  自然語言記憶查詢；AI-Sister 在 SQLite 本機執行、去重，再選最多 12 筆來源交回同一支
+  CLI 成句。CLI 不取得 DB path、SQL、整份資料庫或畫面 bytes。
+- 問題副本最多 2 KiB，nonce 圍欄內資料合計最多 12 KiB；這一層不建 embedding、向量庫、
+  prompt cache 或另一份永久記憶。零命中時 CLI 仍已處理並規劃這題，但不生成無來源答案。
 - 只接受 1–3 句 strict JSON；每句最多 240 字，而且每句至少引用一個這輪真的提供的
   `fact:<id>`／`chunk:<id>`。native 與 renderer 都把 ref 對回同一份本機結果；任一不一致就
   捨棄整份成句，原 facts／原文列表仍完整呈現。
-- 每個非空新問題與 exact 日常固定回覆都會取消舊回答；Unix process group／Windows Job tree
+- 每個非空新問題都會取消舊回答；Unix process group／Windows Job tree
   一起終止。舊回覆、停止後才回來的回覆與 presentation boundary 外的回覆都不能畫或朗讀。
 - 成句存在時，兩條動態朗讀只取成句正文；來源 ref、metadata 與底下重複的 facts／OCR 不送
-  Azure。`brain_outbound` 以 `role=answer` 記 outcome 與時間，不存送出的原文。
+  Azure。`brain_outbound` 以 `role=answer_search`／`role=answer` 分記 outcome 與時間，不存原文。
 
 ### Azure 可選 TTS 合約（alpha.109 起；alpha.110 改為 opt-in 後自動讀新答案）
 
@@ -617,6 +618,12 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     真正進入 `PageReinstall` 的 `/P` lane，以 alternate `/D` + `PING.EXE` child witness 驗
     registry-root 原地覆蓋且 child 未執行；另以 `/S` 驗 downgrade 在 mutation 前退出。這是
     native automation，不是滑鼠真人互動通過紀錄。
+  - ✅ alpha.126 把 product event 的互動式拒絕改成「重試／取消」：GUI／`/P` 持續握住
+    installer mutex，直接指向系統匣「結束 AI-Sister」或原本的終端機；使用者停掉產品後按
+    Retry，Setup 重新 `OpenEvent`，只有新量到 Missing 才繼續，不沿用舊 busy snapshot。
+    Cancel 先釋放 mutex 再 exit 32，silent `/S` 維持立即 exit 32。Windows native lane 會以
+    真 product event 卡住 `/P`，釋放 owner 後送 `IDRETRY`，驗同一支 Setup 原地完成且 payload／
+    Run value／無關 registry fixture 都不漂移。
   - ⬜ 正式 `AI-Sister-Setup.exe` 的斷網安裝仍待 Ted 實測；在線 CI 與靜態網路邊界
     只證明 WebView2 offline installer 已內嵌、程式沒有 updater／直接 socket。
   - ✅ alpha.117 file-level exclusion 收掉 installer late-start 的跨版本窄窗。Setup 在 product
@@ -751,6 +758,9 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     CLI 只回 1–3 句 strict JSON；每句 exact ref 由 native 與 renderer 雙層對回本機證據，來源
     按鈕直接開原畫面。所有無 CLI、無同意、取消、失敗與壞輸出路徑都保留完整本機列表；新題、
     固定日常回覆與全停收掉舊 CLI tree。朗讀只取成句正文，不夾帶 ref 或重複 OCR。
+  - ✅ alpha.126 將順序改成 CLI-directed retrieval：每個文字問題都先交給設定頁最後登入、
+    測通並選用的 CLI，由它要求最多三條自然語言查詢；AI-Sister 在本機 SQLite 代查，再把
+    命中來源交回同一支 CLI 成句。舊 raw command 不接管輸入框，角色與日常短句也沒有旁路。
 
 **訊號源盤點**（守門員判得再好，沒有候選就等於沒上線）
 - ✅ a `CommitmentDue`：`open_commitments_due_before(now + 40min)`，只收
@@ -799,7 +809,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
 - [ ] Persona 產品面走完：四姊妹與 13 位閨密的 17 人離線 catalog 與選擇入口可用；
       **每一位**都實際呈現至少一幅通過發布審查的 bundled 角色圖，且角色台詞只在
       trusted click 後出聲。正式 Windows artifact 要逐一抽聽 17 位的 bundled tap-line，
-      再驗 exact 日常短句命中、一般記憶題不被固定台詞攔截、靜音、reduced-motion、
+      再驗日常短句也完整走 CLI／記憶問答、不被固定台詞攔截、靜音、reduced-motion、
       斷網重開與 master stop；整條固定語音路徑不得建立網路 request。
 - [x] Persona 發布 gate：544 段逐檔通過文字／用途／pack／path／hash／大小／duration／
       rights manifest，正式樹只有 Ogg、manifest 與 NOTICE；WAV、reference、QC 工作檔與

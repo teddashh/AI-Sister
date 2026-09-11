@@ -295,9 +295,9 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   WebView 只從同源 bundled path 播放，CSP 的網路出口仍只有 IPC。
 - 狀態表達（不彈窗）：`idle`（呼吸）／`paused`（閉眼 = capture 停）／
   `thinking`（微動）／`has-something`（微光 + 一個小點，像未讀）。
-  點角色 → 一句本機 deterministic tap-line；輸入收錄的日常短句 → 目前角色對應的固定
-  回覆。兩條都必須來自 trusted 操作、只播放 bundled Ogg，不叫 CLI、不連網。日常短句
-  只做 NFKC、trim 與句尾標點正規化後的 exact match；未命中就完整走一般問題路徑。
+  點角色 → 一句本機 deterministic tap-line，必須來自 trusted 操作、只播放 bundled Ogg，
+  不叫 CLI、不連網。輸入框的每個文字問題都走目前選定的 CLI 與本機記憶路徑，包括
+  早安、晚安等短句；不得用固定台詞繞過 CLI 或冒充動態回答。
   聲音另行 opt-in。動態答案的本機朗讀只能由使用者按「用本機聲音朗讀」後交給 WebView
   明確標成 `localService` 的中文系統 voice。alpha.110 另有預設關閉的 Azure 繁中新答案
   自動朗讀，須獨立設定、key 與
@@ -307,26 +307,26 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
 
 ### 8.2 對話（被動答題——永遠可用，這是 Release 1.0 的核心）
 
-- 輸入框隨時可問。一般題目的查詢管線：typed 規則分流 → 本機 L1 facts／FTS 檢索 →
-  附出處作答（已接 CLI 時至多 1 次成句；沒有這層時完整保留結果列表）。目前沒有向量索引。
-- alpha.124 的 S1 成句只吃本機已排序的候選，facts 優先、合計最多 12 筆。送進 CLI 的
-  問題副本最多 2 KiB；nonce 圍欄內的問題與來源資料合計最多 12 KiB，單筆來源正文最多
-  4 KiB，app／title／URL 也各自有界。來源裡的控制字元與指令樣文字一律是資料，不能改寫
-  回答契約。
+- 輸入框隨時可問。第二張同意有效且大腦已接好時，每個文字問題先交給該 CLI；它只可回
+  1–3 條自然語言查詢，不能指定 SQL、路徑或命令。AI-Sister 用既有 `TextAndFacts` profile
+  在 SQLite 本機執行並跨查詢去重，總上限 facts 10／原文 20。CLI 不取得 DB path、整份
+  資料庫或 screenshot bytes；目前沒有向量索引。
+- 命中的 facts／原文依既有順序選最多 12 筆，再交回同一支 CLI 成句。送進 CLI 的問題
+  副本最多 2 KiB；nonce 圍欄內的問題與來源資料合計最多 12 KiB，單筆來源正文最多 4 KiB，
+  app／title／URL 也各自有界。來源裡的控制字元與指令樣文字一律是資料，不能改寫回答契約。
 - CLI 只可回 strict JSON：1–3 句、每句最多 240 字、至少一個來源，而且來源只能逐字引用
   這一輪提供的 `fact:<id>`／`chunk:<id>`。native 再把每個 ref 映回同一份本機答案；未知
   ref、來源／畫面不一致、空句、超長、額外欄位或壞 JSON 都整份拒絕，不把部分輸出混進
   正常答案。
-- 沒有候選不叫 CLI；沒設定 CLI、第二張同意未簽、全停、spawn／timeout／空回覆、輸出不合
-  契約或稽核沒寫成時，facts／原文仍是完整答案。每個非空新問題接管唯一的回答槽並終止
-  舊題 process group／Windows Job tree；exact 日常固定回覆也先取消舊題。過期結果不可畫、
-  不可朗讀。
+- 零命中時 CLI 仍已處理並規劃這題，但不生成沒有來源的事實答案。沒設定 CLI、第二張同意
+  未簽、全停、spawn／timeout／空回覆、輸出不合契約或稽核沒寫成時，facts／原文仍是完整
+  本機結果。每個非空新問題接管唯一的回答槽並終止舊題 process group／Windows Job tree；
+  過期結果不可畫、不可朗讀。
 - 有成句時，本機朗讀與 Azure 的答案正文只取這 1–3 句，不重複朗讀底下的 facts／OCR，
   也不帶 source ref、按鈕文字或 metadata；沒有成句時維持原本的本機結果朗讀。
-- alpha.116 起，「她／妳／你知道了什麼／記得哪些事」是窄文法的本機 L2 記憶總覽，
-  不是拿「知道／記得」去搜 OCR。這條先由 typed intent 分流，只讀 current L2；不跑
-  FTS、facts、CLI、時間章節或 blind diagnostic。最多列最近三張帶畫面出處的可修正
-  理解，並明標作者與模型自報信心來源。問句多出具體主題時仍走一般檢索。
+- alpha.116 的本機 L2 記憶總覽保留為沒有可用 CLI 時的離線結果。只要已選 CLI、第二張
+  同意有效且查詢計畫完成，「她／妳／你知道了什麼／記得哪些事」也走同一條 CLI-directed
+  本機檢索，不再繞過大腦。
 - 總覽目前沒有任何記憶內容、有原始紀錄但尚未整理出 L2、或有 L2 但最近候選目前
   沒有畫面出處時，要各自說明。任何一格都不得 fallback 成 OCR 或把無出處 L2 當答案。
   它也不寫入既有 retrieval
@@ -441,14 +441,15 @@ feature 集合沒有 `download`；Azure 答案朗讀收在 `crates/sister-tts`�
   Grok 使用只有目前使用者可讀、handle 關閉即刪的 private prompt file。四支 provider 都在
   每次新建的空 private working directory 執行，結束後整個移除；OCR 原文不進 argv。
 - **舊自訂設定**：既有 raw `[brain] command` / `args` 繼續可由 recorder 使用，但不會在
-  四張 provider 卡中冒充「正在使用」。從設定頁選定任一 provider 後，就改由上述固定
-  bridge 管理。brain／core／recorder 沒有 HTTP client；帳號與 token 由 provider CLI 自己
-  保存，AI-Sister 不接收也不保存。
-- **alpha.124 的 S1 runtime**：desktop 先以既有 `TextAndFacts` profile 在 SQLite 完成本機
-  retrieval，再把當前問題與最多 12 筆已選來源交給同一個 configured CLI。這是一次性的
-  bounded RAG prompt，不建立 embedding、向量庫、prompt cache 或第二份記憶。有效輸出必須
-  是逐句引用本機 ref 的 strict JSON；`brain_outbound.role = answer` 記這次呼叫的結構、字數、
-  duration 與 outcome，不存 prompt／問題／來源原文。
+  四張 provider 卡中冒充「已選用」，也不會接管桌面輸入框。從設定頁登入、測通並選定任一
+  provider 後，互動問答才改由上述固定 bridge 管理。brain／core／recorder 沒有 HTTP client；
+  帳號與 token 由 provider CLI 自己保存，AI-Sister 不接收也不保存。
+- **alpha.126 的 S1 runtime**：每題先由 configured CLI 回 1–3 條自然語言查詢，desktop
+  在 SQLite 用 `TextAndFacts` 執行、去重，再把當前問題與最多 12 筆命中來源交回同一支 CLI。
+  這是有界的 host-mediated agent retrieval，不把 SQLite path 或 SQL 能力交給 provider，也不
+  建 embedding、向量庫、prompt cache 或第二份記憶。有效答案必須逐句引用本機 ref；
+  `brain_outbound` 以 `answer_search`／`answer` 分開記兩階段的結構、字數、duration 與 outcome，
+  不存 prompt／問題／來源原文。
 - **角色→模型對映**（可配置，附預設）：interpreter=cheap tier；reviewer=mid tier
   （夜間 batch 半價）；chat=使用者選；hands=使用者訂閱的 coding agent。
   實際選哪一個模型，是那支 CLI 自己的事。
@@ -463,16 +464,17 @@ feature 集合沒有 `download`；Azure 答案朗讀收在 `crates/sister-tts`�
 1. **本機記錄**：我同意在我的硬碟上記錄我的螢幕。這張只授權本機記錄，不授權
    上傳畫面或文字；不簽第二張時 S1 仍可完全離線運作。Persona 的選配素材下載是
    另一個當下揭露、當下按鈕，不藏在這張同意書裡。
-2. **上雲解讀**：我同意把**螢幕上的文字原文**（OCR 抽出來的字，永不含
-   pixel）交給我在設定裡指定的本機 CLI，由那支程式去做解讀（預設關 →
-   沒簽就一次都不 spawn）。
+2. **上雲解讀**：我同意把在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定
+   要查哪些本機記憶；AI-Sister 在本機執行，再把命中的螢幕文字原文、時間、app、
+   視窗標題與網址交回同一支 CLI 作答。永不送 pixel，原文不遮；沒簽就一次都不 spawn。
 3. **畫面暫存**：我同意保留變化幀的截圖，而不是只留上面的字。沒簽仍可記 OCR，
    但一張截圖都不寫。
 4. **Azure TTS**：我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；
    不會送出截圖、來源連結、memory id、整份資料庫或其他文字。沒有這一張，她一次都
    不會呼叫 Azure 語音服務；本機朗讀不受影響。
 
-四張各自獨立。第四張只鑄出 Azure TTS permit，不能借第二張、Persona 下載點擊或
+四張各自獨立。第二張以獨立 terms version 讓 alpha.126 前只涵蓋既有候選成句的簽名失效，
+不撤回第一／第三張；第四張只鑄出 Azure TTS permit，不能借第二張、Persona 下載點擊或
 Persona `voice_enabled` 代替。alpha.109 讀同版本、但尚無 Azure 欄位的舊 consent 時，
 前三張簽名保留，第四張明確遷移成未簽；alpha.110 再以第四張獨立 terms version 讓
 click-only 舊簽名失效，只需重簽第四張。未知／損壞／版本不符仍 fail closed。
@@ -720,6 +722,10 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
   product event；只有 kernel 明確回答對向 object 不存在才繼續，present、close failure 或其他
   native error 都 fail closed。這個 mutex／event／mutex handshake 才是 aware-product 的雙向
   admission；image-name scan 不是。
+- installer 探到 product event 時，silent `/S` 仍在 mutation 前 exit 32。GUI 與 passive `/P`
+  顯示「重試／取消」：Setup 持續握住 installer mutex，使用者從系統匣結束 desktop（或回終端機
+  停掉 AI-Sister 指令）後按重試，Setup 必須重新 `OpenEvent`；只有新量到 Missing 才繼續。
+  取消先釋放 mutex 再 exit 32。這條路不要求、也不執行 forced kill。
 - 原生 Windows release gate 除既有 `/S` admission lanes，另以 `/P` 真正進入
   `PageReinstall`，使用 alternate `/D` 並把已安裝 `uninstall.exe` 換成 `PING.EXE` child witness，
   斷言 Setup 綁回 registry root、沒有執行 child，且原地恢復正確 payload／metadata；另以 `/S`

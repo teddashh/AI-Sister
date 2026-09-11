@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="AI-Sister 是 Windows 與 Ubuntu 24.04 X11 上的 local-first 桌面記憶：安靜記住你的一天，提問時秒答，每一句都能點回本機證據。"
+      content="AI-Sister 是 local-first 桌面記憶：Windows 與 Ubuntu 24.04 X11 已有公開安裝包；macOS 14+ 原生版目前尚無公開安裝檔。"
     />
     <meta
       http-equiv="Content-Security-Policy"
@@ -28,6 +28,7 @@
         <a href="#memory">記憶</a>
         <a href="#personas">角色</a>
         <a href="#privacy">本機邊界</a>
+        <a href="#skills">Agent Skills</a>
         <a class="nav-download" href="#download">下載</a>
       </nav>
     </header>
@@ -35,7 +36,7 @@
     <main id="main">
       <section class="hero" id="top">
         <div class="hero-copy">
-          <p class="eyebrow"><span></span> Windows + Linux X11 · local-first</p>
+          <p class="eyebrow"><span></span> Windows + Linux X11 · macOS 14+ 尚無安裝檔</p>
           <h1>你昨天在忙什麼，<br /><em>問她就知道。</em></h1>
           <p class="hero-lede">
             AI-Sister 安靜看著你的工作，把畫面上的細節留在這台電腦。等你想找電話、金額、
@@ -49,11 +50,14 @@
             <a class="button button-quiet" href="__LINUX_DOWNLOAD_URL__">
               Linux X11 .deb <span aria-hidden="true">↓</span>
             </a>
+            <a class="button button-quiet" href="#platforms">
+              macOS 狀態 <span aria-hidden="true">→</span>
+            </a>
             <a class="button button-quiet" href="https://github.com/teddashh/AI-Sister">
               看原始碼 <span aria-hidden="true">↗</span>
             </a>
           </div>
-          <p class="release-line">__TAG__ · Windows 10+ · Ubuntu 24.04 X11 · Apache-2.0</p>
+          <p class="release-line">__TAG__ · Windows 10+ · Ubuntu 24.04 X11 · macOS 14+ 尚無公開安裝檔 · Apache-2.0</p>
         </div>
 
         <div class="hero-product" aria-label="AI-Sister 產品介面預覽">
@@ -133,7 +137,7 @@
               <span>Claude Code</span><span>Codex</span><span>Gemini</span><span>Grok</span>
             </div>
             <h3>大腦用你已經裝好的 CLI</h3>
-            <p>AI-Sister 不綁一家模型。事實檢索留在本機；需要整理語意時，才交給你指定的 CLI agent。</p>
+            <p>AI-Sister 不綁一家模型。每個文字問題先交給最後選用的 CLI；它決定查法，AI-Sister 在本機代查。</p>
           </article>
 
           <article class="feature-card feature-quiet">
@@ -201,14 +205,14 @@
           <article>
             <span class="flow-number">2</span>
             <h3>記憶</h3>
-            <p>SQLite 檢索先回答；原始畫面不經模型改寫。</p>
-            <b>零模型也能查</b>
+            <p>SQLite 留在本機；CLI 只能要求自然語言查詢。</p>
+            <b>本機代查</b>
           </article>
           <i aria-hidden="true">→</i>
           <article>
             <span class="flow-number">3</span>
             <h3>大腦</h3>
-            <p>你明確同意後，OCR 原文才交給指定 CLI 整理。</p>
+            <p>你明確同意後，問題與命中原文才交給已選 CLI。</p>
             <b>自帶 CLI</b>
           </article>
           <i aria-hidden="true">→</i>
@@ -226,16 +230,66 @@
         </div>
       </section>
 
+      <section class="section skills-section" id="skills">
+        <div class="section-heading">
+          <p class="eyebrow"><span></span> Claude Code + Codex</p>
+          <h2>從 coding agent 問，<br />來源<span>一起帶回來。</span></h2>
+          <p>
+            兩個入口都呼叫你電腦上的 <code>sister query --json</code>，把相關文字、時間、app、
+            視窗標題與 frame 編號整理回目前的對話。
+          </p>
+        </div>
+
+        <div class="skill-grid">
+          <article class="skill-card">
+            <span class="skill-agent">Anthropic</span>
+            <h3>Claude Code Skill</h3>
+            <p>安裝後輸入 <code>/ai-sister-memory</code>，再說你想找哪段記憶。</p>
+            <code class="skill-path">~/.claude/skills/ai-sister-memory/</code>
+            <a class="button button-primary" href="https://github.com/teddashh/AI-Sister/tree/__TAG__/.claude/skills/ai-sister-memory">
+              Claude Code 入口 <span aria-hidden="true">↗</span>
+            </a>
+          </article>
+          <article class="skill-card">
+            <span class="skill-agent">OpenAI</span>
+            <h3>Codex Skill</h3>
+            <p>安裝後輸入 <code>$ai-sister-memory</code>，再說你想找哪段記憶。</p>
+            <code class="skill-path">~/.agents/skills/ai-sister-memory/</code>
+            <a class="button button-primary" href="https://github.com/teddashh/AI-Sister/tree/__TAG__/.agents/skills/ai-sister-memory">
+              Codex 入口 <span aria-hidden="true">↗</span>
+            </a>
+          </article>
+        </div>
+        <p class="skill-boundary">
+          Skill 只在你明確要求查 AI-Sister 記憶時執行；不會簽同意、開錄、刪除或操作電腦。
+          查詢回傳的文字與來源欄位會進入目前的 agent 對話，不包含截圖位元組。
+        </p>
+      </section>
+
       <section class="section start-section" id="download">
         <div class="start-copy">
           <p class="eyebrow"><span></span> 三步開始</p>
           <h2>裝好，授權，<span>然後問她。</span></h2>
         </div>
         <ol class="steps">
-          <li><span>01</span><div><b>下載安裝包</b><p>Windows 用 Setup；Ubuntu 24.04 X11 用 .deb。</p></div></li>
+          <li><span>01</span><div><b>下載安裝包</b><p>Windows 用 Setup；Ubuntu 24.04 X11 用 .deb。macOS 目前沒有公開安裝檔。</p></div></li>
           <li><span>02</span><div><b>選擇要開的同意</b><p>先開本機記錄；畫面保存與 CLI 解讀各自決定。</p></div></li>
           <li><span>03</span><div><b>開始問</b><p>「昨天我在做什麼？」每筆事實都附出處。</p></div></li>
         </ol>
+        <div class="platform-grid" id="platforms" aria-label="平台下載狀態">
+          <article class="platform-card">
+            <div><h3>Windows 10+</h3><span class="platform-ready">可下載</span></div>
+            <p>Setup 內含桌面程式、CLI 與 WebView2 offline installer。</p>
+          </article>
+          <article class="platform-card">
+            <div><h3>Ubuntu 24.04 X11</h3><span class="platform-ready">可下載</span></div>
+            <p>.deb 內含桌面程式、CLI、AT-SPI 與本機 Tesseract。</p>
+          </article>
+          <article class="platform-card platform-macos">
+            <div><h3>macOS 14+</h3><span>尚無公開安裝檔</span></div>
+            <p>原生版要通過 Developer ID notarization 與真機權限／記憶驗收，才會加入 Release。</p>
+          </article>
+        </div>
         <div class="download-panel">
           <div><span>目前版本</span><b>__VERSION__</b></div>
           <div class="download-actions">
@@ -258,7 +312,7 @@
         <a href="https://github.com/teddashh/AI-Sister/blob/main/docs/WINDOWS-CODE-SIGNING.md">簽章</a>
         <a href="./assets/personas/NOTICE.md">角色素材</a>
       </div>
-      <p class="footer-meta">Open source · Local-first · Windows + Linux X11</p>
+      <p class="footer-meta">Open source · Local-first · Windows + Linux X11 · macOS 14+ status</p>
     </footer>
   </body>
 </html>

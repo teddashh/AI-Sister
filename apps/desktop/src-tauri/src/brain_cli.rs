@@ -81,7 +81,7 @@ pub fn read_view(config_path: &Path, state: &Arc<AtomicU8>) -> Result<BrainCliVi
     let configured = config.brain.cli();
     let bridge = configured.and_then(|(_, args)| parse_bridge_args(args));
     // 只有這一版自己寫入、而且 connect 當下真的跑過固定 probe 的 bridge，才叫
-    // 「使用中」。舊版手填的 `claude -p` 仍會由 recorder 照原設定使用，但它沒有
+    // 「已選用」。舊版手填的 `claude -p` 仍會由 recorder 照原設定使用，但它沒有
     // 通過這條登入流程，不能只看檔名就替它補上一個「已接好」。
     let selected = bridge.as_ref().map(|(provider, _)| *provider);
     let custom_configured = configured.is_some() && selected.is_none();

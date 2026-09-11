@@ -1132,11 +1132,8 @@ console.log("⑪ 存不進去，而且退回去的那一組現在也搶不到了
 
 const SENTENCE = {
   noCli: "選一個已安裝的 CLI。",
-  noConsent: "Claude Code 已接好。完成「四張同意書」的雲端解讀後啟用。",
-  readyIdle: "Claude Code 已接好。開始記錄後使用。",
-  readyBooting: "Claude Code 已接好，記錄啟動後使用。",
-  live: "Claude Code 已接好，正在使用。",
-  readyThinking: "Claude Code 已接好，正在完成上一段記憶。",
+  noConsent: "Claude Code 已接好。完成第二張「雲端解讀」後，文字問題才會交給它。",
+  ready: "Claude Code 已接好，會接手每個文字問題並查本機記憶。",
 };
 
 console.log("⑫ 大腦：四支 CLI 都由 native 偵測，未選時只有一個下一步");
@@ -1156,65 +1153,15 @@ console.log("⑬ 大腦：CLI 已接好、第二張同意書沒勾");
     watching: "recording",
   });
   check("就是那一句", p.brainSay() === SENTENCE.noConsent, p.brainSay());
-  check("指得出去哪裡勾", p.brainSay().includes("四張同意書"), p.brainSay());
-  check("Claude 卡片顯示使用中", p.node("[data-brain-claude-status]").textContent.includes("使用中"), p.node("[data-brain-claude-status]").textContent);
+  check("指得出要完成第二張", p.brainSay().includes("第二張「雲端解讀」"), p.brainSay());
+  check("Claude 卡片顯示已選用", p.node("[data-brain-claude-status]").textContent.includes("已選用"), p.node("[data-brain-claude-status]").textContent);
 }
 
-console.log("⑭ 大腦：CLI 和同意書都齊，沒有人在錄");
-{
-  const p = await open({
-    brain: brainView("claude"),
-    cloud: true,
-    watching: "none",
-  });
-  check("就是那一句", p.brainSay() === SENTENCE.readyIdle, p.brainSay());
-  check("不是正在錄那句", p.brainSay() !== SENTENCE.live, p.brainSay());
-}
-
-console.log("⑮ 大腦：兩個都成立而且正在錄");
-{
-  const p = await open({
-    brain: brainView("claude"),
-    cloud: true,
-    watching: "recording",
-  });
-  check("就是那一句", p.brainSay() === SENTENCE.live, p.brainSay());
-  check("是綠的", p.node("[data-brain-say]").classList.contains("ok"), p.brainSay());
-}
-
-console.log("⑯ 大腦：兩個都齊，record 正在起來");
-{
-  const p = await open({
-    brain: brainView("claude"),
-    cloud: true,
-    watching: "booting",
-  });
-  check("就是那一句", p.brainSay() === SENTENCE.readyBooting, p.brainSay());
-  check(
-    "不是「按開始記錄」那句（那顆按鈕這時候按下去會說已經有人在跑）",
-    !p.brainSay().includes("等你按下「開始記錄」"),
-    p.brainSay(),
-  );
-}
-
-console.log("⑯ᵇ 大腦：兩個都齊，上一場剛停、腦還在想最後一段");
-{
-  const p = await open({
-    brain: brainView("claude"),
-    cloud: true,
-    watching: "thinking",
-  });
-  check("就是那一句", p.brainSay() === SENTENCE.readyThinking, p.brainSay());
-  check(
-    "沒有掉回「沒有人在錄」那句",
-    p.brainSay() !== SENTENCE.readyIdle,
-    p.brainSay(),
-  );
-  check(
-    "不是「按開始記錄」那句（這時候按下去會被擋）",
-    !p.brainSay().includes("等你按下「開始記錄」"),
-    p.brainSay(),
-  );
+console.log("⑭–⑯ 大腦：選用後接手每個文字問題，不綁 recorder 狀態");
+for (const watching of ["none", "recording", "booting", "thinking"]) {
+  const p = await open({ brain: brainView("claude"), cloud: true, watching });
+  check(`${watching} 都是同一個已選大腦`, p.brainSay() === SENTENCE.ready, p.brainSay());
+  check(`${watching} 都是綠的`, p.node("[data-brain-say]").classList.contains("ok"), p.brainSay());
 }
 
 console.log("⑯ᶜ 存檔回條：上一場剛停時不可以叫他按一顆會被擋的開始鍵");
@@ -1228,6 +1175,7 @@ console.log("⑯ᶜ 存檔回條：上一場剛停時不可以叫他按一顆會
 console.log("⑯ᵈ 登入成功才獨立保存，不經頁尾 settings_write");
 {
   const p = await open({
+    brain: brainView("claude"),
     onBrainConnect: (provider, _current, set) => {
       const next = brainView(provider);
       set(next);
@@ -1241,7 +1189,8 @@ console.log("⑯ᵈ 登入成功才獨立保存，不經頁尾 settings_write");
   await p.act("[data-brain-codex-action]");
   check("只送一趟 provider connect", calls(p, "brain_cli_connect").length === 1, p.invokes);
   check("沒有借頁尾 settings_write", p.writes.length === 0, p.writes);
-  check("成功後直接顯示 Codex 使用中", p.node("[data-brain-codex-status]").textContent.includes("使用中"), p.node("[data-brain-codex-status]").textContent);
+  check("成功後直接顯示 Codex 已選用", p.node("[data-brain-codex-status]").textContent.includes("已選用"), p.node("[data-brain-codex-status]").textContent);
+  check("Claude 同時不再是已選用", !p.node("[data-brain-claude-status]").textContent.includes("已選用"), p.node("[data-brain-claude-status]").textContent);
   check("成功句沒有被重讀抹掉", p.brainSay() === "Codex CLI 已登入、測通並設為大腦。", p.brainSay());
 }
 
@@ -1249,15 +1198,10 @@ console.log("⑯ᵈ 登入成功才獨立保存，不經頁尾 settings_write");
   const four = [
     SENTENCE.noCli,
     SENTENCE.noConsent,
-    SENTENCE.readyIdle,
-    SENTENCE.live,
+    SENTENCE.ready,
   ];
   const unique = new Set(four);
-  check("C 的四句話沒有兩句一樣", unique.size === 4, four);
-  // booting 和 thinking 都是「兩個條件都齊、但現在不會醒」的變體，最容易
-  // 被寫成同一句——而它們的下一步不一樣（一個等一下就好，一個要等她想完）。
-  const all = [...four, SENTENCE.readyBooting, SENTENCE.readyThinking];
-  check("連 booting、thinking 六句都沒有兩句一樣", new Set(all).size === 6, all);
+  check("未選、未同意、已可用三種狀態沒有混在一起", unique.size === 3, four);
 }
 
 console.log("⑰ 已選的大腦可以單獨測試");
@@ -1278,7 +1222,7 @@ console.log("⑰ᵇ 登入失敗不改畫面上的選擇");
     },
   });
   await p.act("[data-brain-codex-action]");
-  check("Claude 仍是使用中", p.node("[data-brain-claude-status]").textContent.includes("使用中"), p.node("[data-brain-claude-status]").textContent);
+  check("Claude 仍是已選用", p.node("[data-brain-claude-status]").textContent.includes("已選用"), p.node("[data-brain-claude-status]").textContent);
   check("失敗句是紅的", p.node("[data-brain-say]").classList.contains("bad"), p.brainSay());
   check("說原本選擇沒改", p.brainSay().includes("原本的大腦沒有改"), p.brainSay());
 }
@@ -1314,8 +1258,8 @@ console.log("⑰ᶜ CLI 登入、測試、取消都只接受 trusted click");
   await tick();
   check("真人取消只送一次", calls(held, "brain_cli_cancel").length === 1, held.invokes);
   check(
-    "取消完成後仍是 Claude 使用中",
-    held.node("[data-brain-claude-status]").textContent.includes("使用中"),
+    "取消完成後仍是 Claude 已選用",
+    held.node("[data-brain-claude-status]").textContent.includes("已選用"),
     held.node("[data-brain-claude-status]").textContent,
   );
   check("取消結果沒有被正在取消覆蓋", held.brainSay().includes("登入已取消"), held.brainSay());

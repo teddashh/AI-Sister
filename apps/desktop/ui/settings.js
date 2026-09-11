@@ -1867,12 +1867,12 @@ function paintBrain() {
           ? "未安裝"
           : active
             ? provider.version
-              ? `使用中 · ${provider.version}`
-              : "使用中"
+              ? `已選用 · ${provider.version}`
+              : "已選用"
             : provider.version ?? "已安裝";
     }
     if (nodes.action) {
-      nodes.action.textContent = active ? "重新登入" : "登入並使用";
+      nodes.action.textContent = active ? "重新登入" : "登入並選用";
       nodes.action.disabled = unreadable || busy || !installed;
     }
   }
@@ -1911,28 +1911,11 @@ function paintBrain() {
     return;
   }
   if (cloudOk === false) {
-    el.brainSay.textContent = `${label} 已接好。完成「四張同意書」的雲端解讀後啟用。`;
+    el.brainSay.textContent = `${label} 已接好。完成第二張「雲端解讀」後，文字問題才會交給它。`;
     return;
   }
-  if (watchingNow === "recording") {
-    el.brainSay.classList.add("ok");
-    el.brainSay.textContent = `${label} 已接好，正在使用。`;
-    return;
-  }
-  if (watchingNow === "booting") {
-    el.brainSay.textContent = `${label} 已接好，記錄啟動後使用。`;
-    return;
-  }
-  if (watchingNow === "thinking") {
-    el.brainSay.textContent = `${label} 已接好，正在完成上一段記憶。`;
-    return;
-  }
-  if (watchingNow === "unreadable") {
-    el.brainSay.classList.add("bad");
-    el.brainSay.textContent = `${label} 已接好；目前讀不到記錄狀態。按「重讀」再查。`;
-    return;
-  }
-  el.brainSay.textContent = `${label} 已接好。開始記錄後使用。`;
+  el.brainSay.classList.add("ok");
+  el.brainSay.textContent = `${label} 已接好，會接手每個文字問題並查本機記憶。`;
 }
 
 async function refreshBrainCli() {

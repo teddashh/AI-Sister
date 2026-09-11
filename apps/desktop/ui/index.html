@@ -96,9 +96,12 @@
         <p class="asked-result" data-url-policy-result aria-live="polite"></p>
       </section>
       <aside class="gate-debug" data-gate-debug hidden></aside>
-      <aside class="hands-log" data-hands-log aria-label="行動紀錄"></aside>
-      <!-- 每一筆答案都掛著出處。沒有出處的那一行不會出現在這裡。 -->
-      <ul class="hits" data-hits hidden></ul>
+      <!-- 文字回答收進同一顆指向角色的氣泡；角色本身維持透明全身大小。 -->
+      <section class="answer-bubble" aria-label="AI-Sister 的回答">
+        <aside class="hands-log" data-hands-log aria-label="行動紀錄"></aside>
+        <!-- 每一筆答案都掛著出處。沒有出處的那一行不會出現在這裡。 -->
+        <ul class="hits" data-hits hidden></ul>
+      </section>
     </main>
 
     <footer class="ask">

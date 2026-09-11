@@ -859,6 +859,127 @@ nav a:focus-visible {
   margin: 2px 0 0;
 }
 
+.skills-section {
+  border-top: 1px solid var(--line);
+}
+
+.skill-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 58px;
+}
+
+.skill-card {
+  background: var(--cream);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  min-height: 330px;
+  padding: 30px;
+}
+
+.skill-agent {
+  color: var(--berry);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.skill-card h3 {
+  font-family: Georgia, "Noto Serif TC", "Microsoft JhengHei", serif;
+  font-size: 29px;
+  margin: 24px 0 8px;
+}
+
+.skill-card p {
+  color: var(--ink-soft);
+  margin: 0 0 20px;
+}
+
+.skill-card code,
+.skills-section .section-heading code {
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
+.skill-path {
+  background: var(--paper-deep);
+  border-radius: 10px;
+  display: block;
+  font-size: 12px;
+  margin-bottom: 25px;
+  overflow-wrap: anywhere;
+  padding: 10px 12px;
+}
+
+.skill-card .button {
+  align-self: flex-start;
+  margin-top: auto;
+}
+
+.skill-boundary {
+  border-left: 3px solid var(--peach);
+  color: var(--ink-soft);
+  font-size: 13px;
+  margin: 24px 0 0;
+  max-width: 900px;
+  padding-left: 16px;
+}
+
+.platform-grid {
+  display: grid;
+  gap: 14px;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.platform-card {
+  background: rgb(255 250 242 / 56%);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 22px;
+}
+
+.platform-card > div {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.platform-card h3 {
+  font-size: 17px;
+  margin: 0;
+}
+
+.platform-card span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--berry-dark);
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+.platform-card .platform-ready {
+  background: var(--mint);
+  border-color: transparent;
+  color: var(--ink);
+}
+
+.platform-card p {
+  color: var(--ink-soft);
+  font-size: 12px;
+  margin: 14px 0 0;
+}
+
+.platform-macos {
+  border-style: dashed;
+}
+
 .download-panel {
   align-items: center;
   background: var(--paper-deep);
@@ -958,6 +1079,10 @@ footer {
   }
 
   .memory-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .platform-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1126,6 +1251,10 @@ footer {
   }
 
   .start-section {
+    grid-template-columns: 1fr;
+  }
+
+  .skill-grid {
     grid-template-columns: 1fr;
   }
 

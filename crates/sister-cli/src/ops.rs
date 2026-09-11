@@ -2119,6 +2119,8 @@ pub mod brain {
 
     fn outbound_role_label(role: &str) -> String {
         match role {
+            "answer_search" => "答題查詢".into(),
+            "answer" => "答題層".into(),
             "interpreter" => "解釋層".into(),
             "reviewer" => "審閱層".into(),
             "watcher" => "盯梢層".into(),
@@ -2129,6 +2131,7 @@ pub mod brain {
     fn outbound_segment_cell(role: &str, segment: Option<sister_core::Millis>) -> String {
         match (role, segment) {
             ("watcher", None) => "（盯梢問的是時間區間，本來就沒有段落）".into(),
+            ("answer_search" | "answer", None) => "（桌面問答，本來就沒有段落）".into(),
             (_, Some(ts)) => ts.to_string(),
             (_, None) => "（沒有對上段落）".into(),
         }
@@ -2203,6 +2206,8 @@ pub mod brain {
 
         #[test]
         fn every_role_the_product_writes_has_a_chinese_label() {
+            assert_eq!(outbound_role_label("answer_search"), "答題查詢");
+            assert_eq!(outbound_role_label("answer"), "答題層");
             assert_eq!(outbound_role_label("interpreter"), "解釋層");
             assert_eq!(outbound_role_label("reviewer"), "審閱層");
             assert_eq!(outbound_role_label("watcher"), "盯梢層");
@@ -2226,6 +2231,14 @@ pub mod brain {
                 cell.contains("本來就沒有段落"),
                 "把正常的無段落寫成異常：{cell}"
             );
+        }
+
+        #[test]
+        fn answer_rows_say_they_have_no_segment_by_design() {
+            for role in ["answer_search", "answer"] {
+                let cell = outbound_segment_cell(role, None);
+                assert!(cell.contains("桌面問答"), "{role}: {cell}");
+            }
         }
 
         #[test]

@@ -73,16 +73,19 @@ current-user 安裝副本在設定頁明確開啟。它在登入後只留在系�
 
 大腦在設定頁直接列 Claude Code、Codex、Gemini CLI、Grok CLI。AI-Sister 會找出已安裝
 版本，從一顆登入按鈕進入 provider 自己的驗證，再用真正的 bundled bridge 測通；全部成功
-才把它設成大腦。帳號憑證由 CLI 保存，AI-Sister 只保存 provider 與 executable 的固定接法。
-本機檢索、排序、出處與截圖始終留在這台機器；第二張同意成立後，只有這次工作所需的
-OCR 文字會交給選定 CLI，畫面不會交出去。
+才把它設成目前大腦。帳號憑證由 CLI 保存；AI-Sister 每題重讀最後選用的 provider 與
+登入時偵測、測通的 executable，不把回答綁在 Grok、Claude、Codex 或 Gemini 任一支上。
+SQLite 檔案、實際查詢、出處與截圖始終留在這台機器；第二張同意成立後，每個文字問題
+先交給選定 CLI 決定最多三條本機記憶查詢，AI-Sister 代查後只把命中 OCR 文字與出處
+交回同一支 CLI。畫面、DB path、SQL 與整份資料庫都不會交出去。
 
-alpha.124 已把這條接進一般 S1 問答。本機 facts 與 FTS 先完成檢索、排序並選出最多
-12 筆來源，再把這次問題與選中來源交給目前大腦成句。回來的答案只接受 1–3 句，且每句
+alpha.126 已把這條改成 CLI-directed S1 問答。CLI 的查詢在本機完成、去重並選出最多
+12 筆來源，再把命中來源交回目前大腦成句。回來的答案只接受 1–3 句，且每句
 至少引用一筆這次真的存在的 `fact:<id>`／`chunk:<id>`；「本機出處」按鈕會回到同一筆
 本機證據。有任何一句不合契約就整份不採用，畫面仍完整呈現原本的本機 facts／原文列表。
 這沒有新增向量資料庫或第二份記憶：永久資料仍是既有 SQLite L0／L1／L2／L3，RAG 只在
-這一題的記憶體裡組合。新問題、固定日常回覆與全停會使舊回答失效並收掉 CLI 行程樹。
+這一題的記憶體裡組合。每個新文字問題與全停都會使舊回答失效並收掉 CLI 行程樹；
+沒有命中也不會在查詢規劃前跳過 CLI。
 
 alpha.125 把同一條 S1 擴到 Linux X11 與 macOS 14+ 原生後端。Linux 以
 logind + X11 + AT-SPI + 本機 Tesseract 提供 Ubuntu 24.04 `.deb`；macOS 以
@@ -227,14 +230,13 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
   通知失敗則明講要重開 desktop。persona 不得改答案事實、證據、
   同意書、守門員分數或 hands 權限。
 - 17 位角色各有隨程式安裝的基本包 8 句與擴充包 24 句，共 544 段 Ogg Opus。
-  每人兩句由點角色觸發，另外 30 句對應固定日常短句；文字、角色、pack、路徑、bytes、
+  runtime 目前只把每人兩句 `avatar-tap` 暴露給角色點擊，其餘段落不接輸入框；文字、角色、pack、路徑、bytes、
   SHA-256、duration 與權利綁在同一份 manifest。runtime 必須完整驗過 17×32 的 manifest
   才啟用整庫，不能缺一段後只讓部分角色說話。
-- 日常短句只做 NFKC、trim 與句尾標點正規化後的 exact match。命中後直接顯示目前角色
-  對應的固定回覆並播放同一段 bundled Ogg，不叫 CLI、不查記憶、不建立網路 request；
-  未命中則完整走一般答案路徑，不能用固定台詞冒充動態回答。
+- 輸入框送出的每個文字問題都走已選 CLI 與本機記憶路徑，包括早安、晚安等短句；
+  不得用固定角色台詞繞過大腦或冒充動態答案。
 - 聲音不因 idle、capture、記憶或系統事件自己播放。使用者打開聲音後，固定角色台詞只由
-  trusted click／Enter／Space 或送出日常短句啟動。動態答案另由「用本機聲音朗讀」按鈕
+  角色 button 的 trusted click／Enter／Space 啟動。動態答案另由「用本機聲音朗讀」按鈕
   交給 `localService` 中文系統 TTS。`prefers-reduced-motion` 與靜音選擇優先。
 - alpha.110 的 Azure 繁中答案朗讀是**另選、預設關閉**的路徑，不是上面本機聲音的
   fallback。它要設定啟用、`eastasia`／`southeastasia`／`japaneast` typed region、

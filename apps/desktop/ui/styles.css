@@ -36,14 +36,14 @@ body {
   background: transparent;
   height: 100%;
   margin: 0;
+  overflow: hidden;
+  overflow-anchor: none;
 }
 
 body {
   color: var(--letter-fg);
-  display: flex;
-  flex-direction: column;
   font: 14px/1.5 "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
-  overflow: hidden;
+  position: relative;
   user-select: none;
 }
 
@@ -52,12 +52,20 @@ body {
 .dragbar {
   align-items: center;
   background: var(--chrome);
-  border-radius: var(--radius) var(--radius) 0 0;
+  border: 1px solid rgb(246 236 223 / 16%);
+  border-radius: 999px;
+  box-shadow: 0 7px 18px rgb(20 12 31 / 20%);
   color: var(--chrome-fg);
   display: flex;
-  flex: 0 0 32px;
   gap: 4px;
+  height: 34px;
+  left: auto;
   padding: 0 6px;
+  position: absolute;
+  right: 7px;
+  top: 7px;
+  width: 220px;
+  z-index: 20;
 }
 
 .brand {
@@ -92,16 +100,10 @@ body {
 /* ---------- 舞台 ---------- */
 
 .stage {
-  align-items: center;
-  background: rgb(246 236 223 / 92%);
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 10px;
-  justify-content: safe center;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 12px 18px 14px;
+  background: transparent;
+  inset: 0;
+  overflow: hidden;
+  position: absolute;
 }
 
 .avatar {
@@ -113,11 +115,15 @@ body {
   display: grid;
   font: inherit;
   border-radius: 44%;
-  height: min(88vw, 300px);
+  bottom: 54px;
+  height: 300px;
   margin: 0;
   padding: 0;
   place-items: center;
-  width: min(88vw, 300px);
+  position: absolute;
+  right: -5px;
+  width: 300px;
+  z-index: 3;
 }
 
 /* `.avatar` 自己指定了 display，所以 UA 的 `[hidden]` 壓不過它。Persona 關掉
@@ -260,28 +266,56 @@ body {
 }
 
 .state-line {
+  background: rgb(255 255 255 / 82%);
+  border: 1px solid rgb(46 33 64 / 13%);
+  border-radius: 999px;
+  bottom: 310px;
+  box-shadow: 0 5px 14px rgb(46 33 64 / 10%);
   color: var(--letter-fg);
   font-size: 12px;
   letter-spacing: 0.08em;
   margin: 0;
+  max-width: 190px;
   opacity: 0.6;
+  padding: 3px 10px;
+  position: absolute;
+  right: 75px;
   /* 起不來的時候，這裡會放 record.log 的最後幾行——那是真的有換行的東西，
    * 擠成一長條就等於沒印。`pre-line` 保留 \n 但仍然摺疊多餘空白。 */
   text-align: center;
   white-space: pre-line;
+  z-index: 5;
 }
 
 /* Persona 台詞和狀態分格：前者只在按角色後出現；後者仍只描述錄製真相。 */
 .persona-line {
-  background: color-mix(in srgb, var(--letter-accent) 12%, transparent);
-  border-left: 3px solid var(--letter-accent);
-  border-radius: 8px;
+  background: rgb(255 255 255 / 94%);
+  border: 1px solid rgb(46 33 64 / 16%);
+  border-radius: 14px;
+  bottom: 315px;
+  box-shadow: 0 8px 20px rgb(46 33 64 / 16%);
   color: var(--letter-fg);
   font-size: 12px;
-  margin: -4px 0 0;
-  max-width: 260px;
+  left: 8px;
+  margin: 0;
+  max-width: 230px;
   padding: 7px 10px;
+  position: absolute;
   text-align: left;
+  z-index: 8;
+}
+
+.persona-line::after {
+  background: inherit;
+  border-bottom: 1px solid rgb(46 33 64 / 16%);
+  border-right: 1px solid rgb(46 33 64 / 16%);
+  bottom: -6px;
+  content: "";
+  height: 11px;
+  position: absolute;
+  right: 24px;
+  rotate: 45deg;
+  width: 11px;
 }
 
 .persona-line[hidden] {
@@ -303,8 +337,12 @@ body {
   font: inherit;
   font-size: 12px;
   letter-spacing: 0.08em;
-  margin-top: 4px;
+  bottom: 315px;
+  left: 112px;
+  margin: 0;
   padding: 6px 16px;
+  position: absolute;
+  z-index: 8;
 }
 
 .wake:hover {
@@ -349,8 +387,15 @@ body {
   background: rgb(255 255 255 / 72%);
   border: 1px solid rgb(46 33 64 / 18%);
   border-radius: 14px;
+  left: 8px;
+  max-height: 260px;
+  overflow-y: auto;
   padding: 10px;
-  width: min(280px, 90%);
+  position: absolute;
+  right: 8px;
+  top: 49px;
+  width: auto;
+  z-index: 10;
 }
 
 .utterance[data-form="one_line"] { border-color: transparent; background: transparent; }
@@ -372,8 +417,15 @@ body {
   background: rgb(255 255 255 / 72%);
   border: 1px solid rgb(46 33 64 / 18%);
   border-radius: 14px;
+  left: 8px;
+  max-height: 300px;
+  overflow-y: auto;
   padding: 10px;
-  width: min(280px, 90%);
+  position: absolute;
+  right: 8px;
+  top: 49px;
+  width: auto;
+  z-index: 11;
 }
 .asked[hidden] { display: none; }
 .asked-question { font-size: 13px; font-weight: 600; line-height: 1.5; margin: 0; }
@@ -412,12 +464,12 @@ body {
 }
 /* `pre-line` 不是裝飾：這一欄是用 `\n` 接起來的，少了它整份紀錄會擠成一行。 */
 .hands-log {
-  display: block;
+  display: none;
   font: 11px/1.5 monospace;
   opacity: .75;
   overflow-wrap: anywhere;
   white-space: pre-line;
-  margin-top: 8px;
+  margin: 0 0 8px;
   width: 100%;
 }
 .hands-log:empty { display: none; }
@@ -506,10 +558,6 @@ body {
   z-index: 4;
 }
 
-.avatar {
-  position: relative;
-}
-
 /*
  * stopped：capture／brain／hands 的 master stop。
  *
@@ -581,54 +629,38 @@ body {
 
 /* ---------- 答案 ---------- */
 
-/*
- * 有答案的時候她讓位：角色縮小、往上，清單佔滿剩下的地方。
- * 她不會消失——使用者要看得出來是誰在回答，而且下一句還要對著她問。
- */
-body.has-hits .avatar,
-body.has-url-policy .avatar {
-  height: 88px;
-  width: 88px;
+/* 回答是指向角色的單一氣泡；角色不再因回答出現而縮成頭像。 */
+.answer-bubble {
+  background: rgb(255 255 255 / 94%);
+  border: 1px solid rgb(46 33 64 / 16%);
+  border-radius: 17px;
+  bottom: 315px;
+  box-shadow: 0 12px 30px rgb(46 33 64 / 19%);
+  display: none;
+  flex-direction: column;
+  left: 8px;
+  padding: 11px;
+  position: absolute;
+  right: 8px;
+  top: 49px;
+  z-index: 9;
 }
 
-body.has-hits .face,
-body.has-url-policy .face {
-  height: 88px;
-  width: 88px;
-}
-
-body.has-hits .portrait,
-body.has-url-policy .portrait {
-  height: 100%;
-  width: 100%;
-}
-
-body.has-hits .face::after,
-body.has-url-policy .face::after {
-  border-width: 1px;
-  height: 7px;
-  right: 14%;
-  top: 5%;
-  width: 7px;
-}
-
-body.has-hits .avatar[data-state="paused"]::after,
-body.has-url-policy .avatar[data-state="paused"]::after,
-body.has-hits .avatar[data-state="stopped"]::before,
-body.has-hits .avatar[data-state="stopped"]::after,
-body.has-url-policy .avatar[data-state="stopped"]::before,
-body.has-url-policy .avatar[data-state="stopped"]::after {
-  height: 2px;
-  right: calc(14% - 2px);
-  top: calc(5% + 5px);
+.answer-bubble::after {
+  background: rgb(255 255 255 / 94%);
+  border-bottom: 1px solid rgb(46 33 64 / 16%);
+  border-right: 1px solid rgb(46 33 64 / 16%);
+  bottom: -8px;
+  content: "";
+  height: 15px;
+  position: absolute;
+  right: 78px;
+  rotate: 45deg;
   width: 15px;
 }
 
-body.has-hits .stage,
-body.has-url-policy .stage {
-  gap: 8px;
-  justify-content: flex-start;
-  padding: 12px 10px;
+body.has-hits .answer-bubble {
+  display: flex;
 }
 
 .hits {
@@ -640,7 +672,7 @@ body.has-url-policy .stage {
   margin: 0;
   min-height: 0;
   overflow-y: auto;
-  padding: 0;
+  padding: 0 3px 0 0;
   width: 100%;
 }
 
@@ -660,7 +692,7 @@ body.has-url-policy .stage {
 }
 
 .hit {
-  background: rgb(255 255 255 / 55%);
+  background: rgb(246 236 223 / 54%);
   border-left: 3px solid var(--letter-accent);
   border-radius: 8px;
   padding: 7px 9px;
@@ -861,6 +893,27 @@ body.has-url-policy .stage {
   padding: 2px 0 2px 8px;
 }
 
+.brain-note {
+  background: color-mix(in srgb, var(--letter-accent) 10%, transparent);
+  border-radius: 999px;
+  font-size: 10.5px;
+  line-height: 1.45;
+  padding: 5px 9px;
+}
+
+.brain-used {
+  align-self: flex-start;
+  color: var(--letter-accent);
+}
+
+.brain-answer_failed,
+.brain-search_failed,
+.brain-consent_required,
+.brain-not_configured {
+  border: 1px solid rgb(46 33 64 / 13%);
+  border-radius: 10px;
+}
+
 /* 捲到底那一句。`.hits-note` 那條左邊的粗線是給開頭那一句用的（「我把它
    當成時間問題了」——先講再給答案）；這一句在最下面，長成一樣會看起來
    像下面還有一段。它要像句收尾的小字，不像個標題。 */
@@ -957,18 +1010,25 @@ body.has-url-policy .stage {
 
 .ask {
   background: var(--chrome);
-  border-radius: 0 0 var(--radius) var(--radius);
+  border: 1px solid rgb(246 236 223 / 16%);
+  border-radius: 999px;
+  bottom: 7px;
+  box-shadow: 0 8px 24px rgb(20 12 31 / 24%);
   display: flex;
-  flex: 0 0 46px;
   gap: 6px;
+  height: 46px;
+  left: 7px;
   padding: 7px;
+  position: absolute;
+  right: 7px;
+  z-index: 20;
 }
 
 .ask-input {
   appearance: none;
   background: rgb(246 236 223 / 12%);
   border: 0;
-  border-radius: 10px;
+  border-radius: 999px;
   color: var(--chrome-fg);
   flex: 1;
   font: inherit;
@@ -992,7 +1052,7 @@ body.has-url-policy .stage {
   appearance: none;
   background: var(--letter-accent);
   border: 0;
-  border-radius: 10px;
+  border-radius: 999px;
   color: var(--chrome-fg);
   cursor: pointer;
   font: inherit;

@@ -1443,6 +1443,71 @@ jobs:
             }
           }
 
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          using System.Text;
+
+          public static class AiSisterInstallerDialog {
+              private delegate bool EnumWindowsProc(IntPtr window, IntPtr state);
+
+              [DllImport("user32.dll")]
+              private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr state);
+
+              [DllImport("user32.dll")]
+              private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+              private static extern int GetClassName(IntPtr window, StringBuilder className, int capacity);
+
+              [DllImport("user32.dll")]
+              private static extern bool IsWindowVisible(IntPtr window);
+
+              [DllImport("user32.dll")]
+              private static extern bool PostMessage(IntPtr window, uint message, IntPtr word, IntPtr data);
+
+              public static IntPtr FindVisibleDialog(int wantedProcessId) {
+                  IntPtr found = IntPtr.Zero;
+                  EnumWindows(delegate (IntPtr window, IntPtr state) {
+                      uint processId;
+                      GetWindowThreadProcessId(window, out processId);
+                      if (processId != (uint)wantedProcessId || !IsWindowVisible(window)) {
+                          return true;
+                      }
+                      StringBuilder className = new StringBuilder(32);
+                      if (GetClassName(window, className, className.Capacity) > 0 &&
+                          className.ToString() == "#32770") {
+                          found = window;
+                          return false;
+                      }
+                      return true;
+                  }, IntPtr.Zero);
+                  return found;
+              }
+
+              public static bool Retry(IntPtr dialog) {
+                  const uint WM_COMMAND = 0x0111;
+                  const int IDRETRY = 4;
+                  return PostMessage(dialog, WM_COMMAND, new IntPtr(IDRETRY), IntPtr.Zero);
+              }
+          }
+          '@
+
+          function Wait-InstallerDialog($owner, [string] $failure) {
+            $deadline = [DateTime]::UtcNow.AddSeconds(20)
+            while ([DateTime]::UtcNow -lt $deadline) {
+              $dialog = [AiSisterInstallerDialog]::FindVisibleDialog($owner.Id)
+              if ($dialog -ne [IntPtr]::Zero) {
+                return $dialog
+              }
+              if ($owner.HasExited) {
+                throw "$failure；Setup 已先 exit=$($owner.ExitCode)"
+              }
+              Start-Sleep -Milliseconds 25
+            }
+            throw $failure
+          }
+
           function Assert-CannotStart(
             [string] $path,
             [int] $expectedNativeError,
@@ -1820,6 +1885,51 @@ jobs:
               'product lifecycle event 拒絕時改動了無關 Run value'
             Assert-NamedMutexAbsent $lifecycleMutexName `
               'product lifecycle event 拒絕後 installer mutex 沒有釋放'
+
+            # GUI／passive 走的是同一個互動分支：產品退出後按 Retry，必須重新
+            # OpenEvent 才能往下，不能沿用剛才的 busy snapshot，也不必重開 Setup。
+            $retryInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $retryInfo.FileName = $setup
+            $retryInfo.UseShellExecute = $false
+            $null = $retryInfo.ArgumentList.Add('/P')
+            $null = $retryInfo.ArgumentList.Add('/NS')
+            $null = $retryInfo.ArgumentList.Add("/D=$installDir")
+            $retrySetup = [System.Diagnostics.Process]::Start($retryInfo)
+            if ($null -eq $retrySetup) {
+              throw 'product lifecycle Retry lane 無法啟動 passive Setup'
+            }
+            try {
+              Wait-NamedMutex $lifecycleMutexName $retrySetup `
+                'product lifecycle Retry lane 沒有取得 installer mutex'
+              $retryDialog = Wait-InstallerDialog $retrySetup `
+                'product lifecycle Retry lane 沒有顯示 Retry/Cancel dialog'
+              $productEvent.Dispose()
+              if (-not [AiSisterInstallerDialog]::Retry($retryDialog)) {
+                throw 'product lifecycle Retry lane 無法送出 IDRETRY'
+              }
+              if (-not $retrySetup.WaitForExit(240000)) {
+                throw 'product lifecycle Retry lane 超過 240 秒沒有收尾'
+              }
+              if ($retrySetup.ExitCode -ne 0) {
+                throw "product lifecycle Retry lane 應原地完成，實際 exit=$($retrySetup.ExitCode)"
+              }
+            }
+            finally {
+              Stop-DiagnosticProcess $retrySetup
+            }
+            Assert-NamedMutexAbsent $lifecycleMutexName `
+              'product lifecycle Retry 成功後 installer mutex 仍存在'
+            Assert-ProductFiles
+            Assert-ExactFile $desktop $releaseDesktop `
+              'product lifecycle Retry 後 installed desktop payload 不符'
+            if ((Get-FileHash $sister -Algorithm SHA256).Hash -ne
+                (Get-FileHash $portableSister -Algorithm SHA256).Hash) {
+              throw 'product lifecycle Retry 後 installed sister payload 不符'
+            }
+            Assert-ExactRunString $loginRunName $expectedLoginRunValue `
+              'product lifecycle Retry 沒保留登入啟動值'
+            Assert-ExactRunString $unrelatedRunName $unrelatedRunValue `
+              'product lifecycle Retry 改動了無關 Run value'
           }
           finally {
             $productEvent.Dispose()
