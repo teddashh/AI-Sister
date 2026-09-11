@@ -211,6 +211,10 @@ struct Shell {
     /// 對話一次只保留最新題的 CLI invocation。新題會先取消舊題的完整 process
     /// tree；本機檢索不共用這個槽，所以 CLI 不可用時 S1 仍完整回答。
     answer_cli: Mutex<Option<sister_core::brain::Cancellation>>,
+    /// renderer 回報的「畫了東西的地方」，視窗座標、CSS 像素。輪詢執行緒拿它
+    /// 決定游標底下要不要讓點擊穿透過去。空的代表**還沒收到回報**，那時候
+    /// `sister_shell::hit::is_solid_at` 會一律回實心——見那支函式的說明。
+    hit_solid: Mutex<Vec<bounds::Rect>>,
 }
 
 const ASSET_IDLE: u8 = 0;
@@ -978,6 +982,37 @@ fn toggle_pin(app: tauri::AppHandle, shell: tauri::State<'_, Shell>) -> bool {
     }
     shell.persist();
     pinned
+}
+
+/// renderer 回報：現在畫面上哪幾塊是實心的。
+///
+/// 只有 renderer 知道這件事——泡泡冒出來、她換角色、輸入列長高，都會改。所以
+/// 真相從那邊推過來，Rust 這邊只存著最後一次的答案。
+///
+/// 座標是視窗座標的 CSS 像素，和 `getBoundingClientRect()` 同一套；輪詢那邊會
+/// 拿 `scale_factor()` 把實體游標座標換算成同一套再比。
+#[tauri::command]
+fn pet_solid_set(solid: Vec<SolidRect>, shell: tauri::State<'_, Shell>) {
+    let rects = solid
+        .into_iter()
+        .map(|r| bounds::Rect {
+            x: r.x,
+            y: r.y,
+            w: r.w,
+            h: r.h,
+        })
+        .collect();
+    *shell.hit_solid.lock().expect("hit solid") = rects;
+}
+
+/// IPC 上的長方形。`sister_shell::Rect` 自己不 derive `Deserialize`——它是給
+/// 螢幕幾何用的內部型別，不該因為這條線就變成對 renderer 開放的輸入格式。
+#[derive(serde::Deserialize)]
+struct SolidRect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
 }
 
 /// 她現在有沒有在看。
@@ -6885,6 +6920,103 @@ struct FrameView {
     url: Option<String>,
 }
 
+/// 游標在窗內的時候多久看一次；在窗外就用 `POLL_AWAY_MS`。
+///
+/// 她整天掛在螢幕角落，而使用者絕大多數時間在別的視窗工作。兩段間隔的差別
+/// 就是那件事：手在她身上的時候要跟得上（40ms 大約比「移過去再按下去」快一
+/// 個數量級），手不在的時候沒有人需要這個答案，少醒來幾次就少耗一點電。
+const POLL_NEAR_MS: u64 = 40;
+const POLL_AWAY_MS: u64 = 160;
+
+/// 游標離視窗多遠還算「附近」。留一圈是因為間隔是在**上一次**的位置決定的：
+/// 貼著邊界切換的話，快速移進來的那一下會用到慢的那一段。
+const POLL_NEAR_MARGIN: i32 = 120;
+
+/// 游標現在在視窗座標的哪裡，CSS 像素。
+///
+/// `cursor_position` 給的是整個桌面的實體像素，`inner_position` 是視窗左上角
+/// 的實體像素，兩者相減再除以縮放比才會和 renderer 的 `getBoundingClientRect()`
+/// 同一套。問不出來就回 `None`——那是「不知道」，不是「在原點」。
+fn cursor_in_window(win: &tauri::WebviewWindow) -> Option<(i32, i32)> {
+    let cursor = win.cursor_position().ok()?;
+    let origin = win.inner_position().ok()?;
+    let scale = win.scale_factor().ok()?;
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let x = (cursor.x - f64::from(origin.x)) / scale;
+    let y = (cursor.y - f64::from(origin.y)) / scale;
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    // f64 -> i32 在 Rust 是飽和轉換，不會 UB 也不會 panic。
+    Some((x.floor() as i32, y.floor() as i32))
+}
+
+/// 讓看不見的地方點得過去。
+///
+/// 這扇窗整片透明，但作業系統照整個 340×560 的矩形做命中判定，所以她頭頂
+/// 上方那塊什麼都沒畫的區域會把點擊吃掉——底下的視窗收不到。`set_ignore_
+/// cursor_events` 是整扇窗的開關，不是逐像素的，所以只能一直問「游標底下
+/// 現在算不算實心」再翻那個開關。
+///
+/// 三個「不知道就維持可點」的出口，方向都一樣：**寧可多擋住一點桌面，也不要
+/// 讓她整個人點不到**。兩邊壞掉的代價不對稱：多擋住的那塊使用者看得見自己在
+/// 點什麼，挪一下視窗就好；整個人點不到的話，畫面上明明有她、滑鼠卻穿過去，
+/// 那看起來就是當掉了。她 `skipTaskbar`，所以工作列上也沒有東西可以點回來——
+/// 系統匣的選單還在（見 `refresh_tray`），真要救救得回來，但那要使用者先想到
+/// 「是這扇窗的問題」再去翻系統匣。那不是一條會有人自己走到的路。
+fn spawn_click_through(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut last: Option<bool> = None;
+        let mut nap = POLL_NEAR_MS;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(nap));
+            // 視窗沒了就收工。這是這條執行緒唯一的出口。
+            let Some(win) = app.get_webview_window(PET) else {
+                return;
+            };
+            // 收進系統匣的時候不必算，但要確保「再打開」一定是可點的狀態：
+            // 不然她被藏起來時停在穿透，再叫出來的頭幾十毫秒是點不到的。
+            if !win.is_visible().unwrap_or(true) {
+                nap = POLL_AWAY_MS;
+                if last != Some(false) && win.set_ignore_cursor_events(false).is_ok() {
+                    last = Some(false);
+                }
+                continue;
+            }
+            let here = cursor_in_window(&win);
+            nap = match here {
+                Some((x, y))
+                    if x >= -POLL_NEAR_MARGIN
+                        && y >= -POLL_NEAR_MARGIN
+                        && x < PET_W + POLL_NEAR_MARGIN
+                        && y < PET_H + POLL_NEAR_MARGIN =>
+                {
+                    POLL_NEAR_MS
+                }
+                _ => POLL_AWAY_MS,
+            };
+            let ignore = match here {
+                Some((x, y)) => {
+                    let solid = app
+                        .state::<Shell>()
+                        .hit_solid
+                        .lock()
+                        .expect("hit solid")
+                        .clone();
+                    !bounds::hit::is_solid_at(&solid, x, y)
+                }
+                // 問不出游標在哪就別動開關。
+                None => false,
+            };
+            if last != Some(ignore) && win.set_ignore_cursor_events(ignore).is_ok() {
+                last = Some(ignore);
+            }
+        }
+    });
+}
+
 /// 把視窗現在的位置記進記憶體（不寫檔）。
 ///
 /// 拖曳的時候 `Moved` 每幾毫秒就來一次，每次都寫硬碟是拿一個常駐程式去
@@ -7068,10 +7200,12 @@ fn main() {
             azure_tts_transition: Arc::new(Mutex::new(())),
             brain_cli_state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             answer_cli: Mutex::new(None),
+            hit_solid: Mutex::new(Vec::new()),
         })
         .manage(Hotkey(Mutex::new(HotkeyView::default())))
         .invoke_handler(tauri::generate_handler![
             toggle_pin,
+            pet_solid_set,
             hide_to_tray,
             ask,
             answer_cli_cancel,
@@ -7218,6 +7352,7 @@ fn main() {
 
             let _ = win.set_position(PhysicalPosition::new(place.x, place.y));
             let _ = win.set_always_on_top(saved.pinned);
+            spawn_click_through(app.handle().clone());
             {
                 let mut state = shell.state.lock().expect("pet state");
                 state.x = place.x;

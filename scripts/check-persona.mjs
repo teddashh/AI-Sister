@@ -167,6 +167,8 @@ async function open(personaView = persona(), options = {}) {
   const listeners = new Map();
   const intervals = [];
   const calls = [];
+  const solidPushes = [];
+  const windowHandlers = {};
   const voiceReads = [];
   const nonsense = watchNonsense();
 
@@ -245,9 +247,27 @@ async function open(personaView = persona(), options = {}) {
     createElement,
   });
   globalThis.location = { search: options.search ?? "" };
-  globalThis.addEventListener = () => {};
+  // 記下來而不是丟掉。行為沒變——沒有人去 fire 的話，記著和 no-op 一樣；
+  // 但「拖完之後整扇窗要收回來」那條路只掛在 globalThis 上，丟掉就驗不到。
+  globalThis.addEventListener = (ev, fn) => {
+    (windowHandlers[ev] ??= []).push(fn);
+  };
   globalThis.removeEventListener = () => {};
   globalThis.matchMedia = () => ({ matches: false, addEventListener() {} });
+  // 她那扇窗是固定的 340×560（`resizable: false`，見 tauri.conf.json）。
+  // 假瀏覽器要報得出視窗大小，app.js 才算得出「拖曳中整扇窗都算實心」那一塊。
+  globalThis.innerWidth = 340;
+  globalThis.innerHeight = 560;
+  // app.js 靠它盯住畫面變化，好重算「哪裡是實心的」再送回 Rust（`pet_solid_set`）。
+  // 這個假瀏覽器不模擬 DOM 變動，所以 observe 不必真的做事；但它得**存在**——
+  // 少了它，app.js 一載入就 ReferenceError，整支閘門連第一條斷言都跑不到。
+  globalThis.MutationObserver = class {
+    observe() {}
+    disconnect() {}
+    takeRecords() {
+      return [];
+    }
+  };
   globalThis.SpeechSynthesisUtterance = class {
     constructor(text) {
       this.text = text;
@@ -279,6 +299,7 @@ async function open(personaView = persona(), options = {}) {
     core: {
       invoke: async (cmd, args) => {
         calls.push(cmd);
+        if (cmd === "pet_solid_set") solidPushes.push(args?.solid ?? []);
         switch (cmd) {
           case "persona_read":
             return initialPersonaRead;
@@ -381,6 +402,11 @@ async function open(personaView = persona(), options = {}) {
     node,
     css,
     calls,
+    solidPushes,
+    /* 對著 globalThis 發事件——「手放開了」這件事只有那裡收得到。 */
+    fireWindow(ev, arg) {
+      for (const fn of windowHandlers[ev] ?? []) fn(arg);
+    },
     intervals,
     nonsense,
     voiceReads,
@@ -657,6 +683,51 @@ console.log("②b 拖她的時候不會順便讓她說話，拖完之後還戳�
     p2.node("[data-persona-line]").textContent === "我在，隨時可以開始。",
     p2.node("[data-persona-line]").textContent,
   );
+}
+
+console.log("②c 拖完之後，透明的地方要再變得點得過去");
+{
+  // 她那扇窗整片透明，可是作業系統照整個 340×560 的矩形收點擊，所以 renderer
+  // 要一直回報「哪裡真的畫了東西」，Rust 才翻得動 `set_ignore_cursor_events`。
+  //
+  // 按住她的那一刻整扇窗都要算實心，不然拖到一半開關被翻成穿透就斷在半路。
+  // 問題出在怎麼把它收回來：`startDragging()` 一發動，作業系統就接管拖曳迴圈，
+  // webview **通常收不到 pointerup**（同一份檔案 `draggedThisPress` 那段註解講的
+  // 是同一件事）。只掛 pointerup 的話，他拖她一次之後整扇窗就永遠留在實心，
+  // 這條線從此靜悄悄地失效——而「拖她」正是他最先會做的那件事。
+  //
+  // 所以第二條刻意**不送 pointerup**，只送一個沒按著鍵的 pointermove。
+  const settle = () => new Promise((done) => setTimeout(done, 200));
+  const whole = (push) =>
+    Array.isArray(push) && push.length === 1 && push[0].w >= 340 && push[0].h >= 560;
+
+  const p = await open(persona("chatgpt"));
+  await settle();
+  check("開場就回報過一次（Rust 那邊空清單＝一律實心，會擋住整片桌面）", p.solidPushes.length > 0, p.solidPushes.length);
+  check(
+    "平常回報的不是整扇窗，透明的地方才點得過去",
+    !whole(p.solidPushes.at(-1)),
+    p.solidPushes.at(-1)?.length,
+  );
+
+  const avatarEl = p.node("[data-avatar]");
+  for (const fn of avatarEl.handlers.pointerdown ?? []) fn({ button: 0, clientX: 10, clientY: 10 });
+  check("按住她的時候整扇窗都算實心，拖曳才不會斷在半路", whole(p.solidPushes.at(-1)), p.solidPushes.at(-1));
+
+  // 作業系統把 pointerup 吃掉了——只有滑鼠回到窗上這一個訊號。
+  p.fireWindow("pointermove", { buttons: 0 });
+  await settle();
+  check(
+    "就算 pointerup 被作業系統吃掉，整扇窗也要收得回來",
+    !whole(p.solidPushes.at(-1)),
+    p.solidPushes.at(-1)?.length,
+  );
+
+  // 還按著的時候不可以提早收——那會在拖曳途中把開關翻掉。
+  for (const fn of avatarEl.handlers.pointerdown ?? []) fn({ button: 0, clientX: 10, clientY: 10 });
+  p.fireWindow("pointermove", { buttons: 1 });
+  await settle();
+  check("手還按著就不算拖完，整扇窗要繼續實心", whole(p.solidPushes.at(-1)), p.solidPushes.at(-1));
 }
 
 console.log("② 每一下 click 只走固定順序的 allowlist，不呼叫其他能力");

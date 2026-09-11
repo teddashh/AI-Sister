@@ -393,6 +393,20 @@ async function open(
   globalThis.addEventListener = () => {};
   globalThis.removeEventListener = () => {};
   globalThis.matchMedia = () => ({ matches: false, addEventListener() {} });
+  // 她那扇窗是固定的 340×560（`resizable: false`，見 tauri.conf.json）。
+  // 假瀏覽器要報得出視窗大小，app.js 才算得出「拖曳中整扇窗都算實心」那一塊。
+  globalThis.innerWidth = 340;
+  globalThis.innerHeight = 560;
+  // app.js 靠它盯住畫面變化，好重算「哪裡是實心的」再送回 Rust（`pet_solid_set`）。
+  // 這個假瀏覽器不模擬 DOM 變動，所以 observe 不必真的做事；但它得**存在**——
+  // 少了它，app.js 一載入就 ReferenceError，整支閘門連第一條斷言都跑不到。
+  globalThis.MutationObserver = class {
+    observe() {}
+    disconnect() {}
+    takeRecords() {
+      return [];
+    }
+  };
   globalThis.speechSynthesis = {
     getVoices: () => [],
     addEventListener() {},

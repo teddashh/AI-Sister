@@ -27,6 +27,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub mod hit;
 pub mod login_startup;
 
 /// 存下來的東西只有位置與置頂與否。視窗是 `resizable: false`，尺寸由

@@ -1626,6 +1626,237 @@ avatar?.addEventListener("click", (event) => {
   return sayPersonaLine(event);
 });
 
+/* ---------- 讓看不見的地方點得過去 ---------- */
+
+/*
+ * 這扇窗 340×560、整片透明，可是作業系統是照**整個矩形**做命中判定的：她頭頂
+ * 上方那塊一百多像素高、什麼都沒畫的帶狀區域仍然會把點擊吃掉，底下的視窗收不
+ * 到。對一個永遠置頂、整天掛在角落的東西來說，那是一塊跟著她移動的隱形擋板。
+ *
+ * Rust 那邊用 `set_ignore_cursor_events` 翻整扇窗的開關，但「現在哪裡是實心的」
+ * 只有這裡知道——泡泡冒出來、換角色、輸入列長高，每一件都會改。所以真相從這邊
+ * 推過去。
+ *
+ * 兩條原則：
+ *
+ * - **寧可多報實心。** 兩邊壞掉的代價不對稱：多報一塊只是多擋一點桌面，使用者
+ *   看得見自己在點什麼；少報一塊是畫面上明明有她、滑鼠卻穿過去，那看起來就是
+ *   當掉了（系統匣救得回來，但那要先想到是這扇窗的問題）。所以「有沒有畫東西」用的是
+ *   一個寬鬆的規則（底色、背景圖、邊框，或本來就是控制項），而且每一塊都再往
+ *   外撐 `SOLID_DILATE_PX`，蓋住文字陰影和反鋸齒。
+ * - **不要每一幅都算。** 她一直在呼吸和搖晃（`breathe` + `sway`），拿她當下的
+ *   外框去量會變成 60fps 的 IPC。所以量的是 `.avatar` 這個**不動**的座標格，
+ *   剪影再往外撐一圈蓋住動畫走得到的範圍。
+ */
+
+/** 文字陰影、反鋸齒、focus ring 都會畫到 `getBoundingClientRect()` 外面一點。 */
+const SOLID_DILATE_PX = 2;
+
+/*
+ * 剪影往外撐多少。動畫最遠走到哪是算得出來的，不是猜的：
+ * `breathe` 往上 6px、放大 1.015（半徑 150px ⇒ 2.3px），`sway` 轉 ±2.2°
+ * （150 × 2.2° 的弧度 ⇒ 5.8px）。加起來約 14px，取 16 留一點餘裕。
+ */
+const FIGURE_DILATE_PX = 16;
+
+/** 剪影取樣的格子大小。300px 的框切成 4px 一格＝75×75，夠細也夠便宜。 */
+const FIGURE_CELL_PX = 4;
+
+/** 這些本來就是要給人點的，就算它自己沒有底色也算實心。 */
+const SOLID_TAGS = new Set(["BUTTON", "INPUT", "TEXTAREA", "SELECT", "A", "AUDIO"]);
+
+let solidPushTimer = null;
+let figureMask = null;
+let solidWholeWindow = false;
+
+/** `rgba(…)` 的第四個數字；`rgb(…)` 沒有第四個就是不透明。 */
+function alphaOf(color) {
+  if (typeof color !== "string" || color === "transparent") return 0;
+  const parts = color.match(/[\d.]+/gu);
+  if (parts === null) return 0;
+  return parts.length >= 4 ? Number(parts[3]) : 1;
+}
+
+function hasVisibleBorder(style) {
+  return (
+    style.borderStyle !== "none" &&
+    style.borderStyle !== "" &&
+    Number.parseFloat(style.borderTopWidth || "0") +
+      Number.parseFloat(style.borderBottomWidth || "0") +
+      Number.parseFloat(style.borderLeftWidth || "0") +
+      Number.parseFloat(style.borderRightWidth || "0") >
+      0
+  );
+}
+
+/**
+ * 畫面上所有「畫了東西」的長方形，不含她本人。
+ *
+ * 用一條寬鬆的通則掃整棵 DOM，而不是列一張選擇器清單：清單漏掉一個新泡泡，
+ * 那個泡泡就點不到，而且是安靜地點不到。通則多報幾塊的代價只是多擋一點桌面。
+ */
+function paintedRects() {
+  const out = [];
+  for (const el of document.body.querySelectorAll("*")) {
+    // 她自己走剪影那條路；`.avatar` 是 button，會被 `SOLID_TAGS` 收進來，
+    // 那就等於把 300×300 的空框整塊算成實心，這條線就白做了。
+    if (avatar !== null && (el === avatar || avatar.contains(el))) continue;
+    // SVG 的內部節點跟著它的 <svg>／按鈕走，不必各自報一次。
+    if (el.closest("svg") !== null) continue;
+    const style = getComputedStyle(el);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      Number.parseFloat(style.opacity || "1") === 0
+    ) {
+      continue;
+    }
+    const painted =
+      alphaOf(style.backgroundColor) > 0 ||
+      style.backgroundImage !== "none" ||
+      hasVisibleBorder(style) ||
+      SOLID_TAGS.has(el.tagName);
+    if (!painted) continue;
+    const box = el.getBoundingClientRect();
+    if (box.width > 0 && box.height > 0) out.push(box);
+  }
+  return out;
+}
+
+/**
+ * 她的剪影，切成一列一列的橫條（格子座標）。
+ *
+ * 量的是 bundled WebP，不是完整 rig：兩者依契約撐滿同一個座標格（`check-persona`
+ * 有一條在守這件事），所以 WebP 的輪廓對 rig 也夠準，而且它一定在——rig 還沒
+ * load 完、或整組 decode 失敗的時候都還是它在畫。這樣換 rig 也不必重算。
+ *
+ * 量不到就回 `null`，呼叫端會退回整個外框：canvas 被 taint（`getImageData` 丟
+ * SecurityError）、圖還沒 decode、瀏覽器不給 2d context 都算量不到。
+ */
+function figureMaskOf(img) {
+  if (img === null || !img.complete || !img.naturalWidth) return null;
+  if (figureMask !== null && figureMask.src === img.currentSrc) return figureMask;
+  try {
+    const cells = Math.max(1, Math.round(300 / FIGURE_CELL_PX));
+    const canvas = document.createElement("canvas");
+    canvas.width = cells;
+    canvas.height = cells;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (ctx === null) return null;
+    ctx.drawImage(img, 0, 0, cells, cells);
+    const { data } = ctx.getImageData(0, 0, cells, cells);
+    const spans = [];
+    for (let row = 0; row < cells; row += 1) {
+      let start = -1;
+      for (let col = 0; col <= cells; col += 1) {
+        // alpha 門檻壓低：立繪邊緣是半透明的，切太高會把輪廓削掉一圈。
+        const solid = col < cells && data[(row * cells + col) * 4 + 3] > 16;
+        if (solid && start < 0) start = col;
+        if (!solid && start >= 0) {
+          spans.push([row, start, col]);
+          start = -1;
+        }
+      }
+    }
+    figureMask = { src: img.currentSrc, cells, spans };
+    return figureMask;
+  } catch {
+    // taint 或任何一種量不到，都退回外框——多擋一點桌面，不讓她點不到。
+    return null;
+  }
+}
+
+function figureRects() {
+  if (avatar === null || avatar.hidden) return [];
+  const box = avatar.getBoundingClientRect();
+  if (box.width <= 0 || box.height <= 0) return [];
+  const mask = figureMaskOf(document.querySelector("[data-persona-portrait]"));
+  if (mask === null) return [box];
+  const cellW = box.width / mask.cells;
+  const cellH = box.height / mask.cells;
+  return mask.spans.map(([row, start, end]) => ({
+    left: box.left + start * cellW - FIGURE_DILATE_PX,
+    top: box.top + row * cellH - FIGURE_DILATE_PX,
+    width: (end - start) * cellW + FIGURE_DILATE_PX * 2,
+    height: cellH + FIGURE_DILATE_PX * 2,
+  }));
+}
+
+function toSolid(box, grow) {
+  return {
+    x: Math.floor(box.left - grow),
+    y: Math.floor(box.top - grow),
+    w: Math.ceil(box.width + grow * 2),
+    h: Math.ceil(box.height + grow * 2),
+  };
+}
+
+function pushSolid() {
+  if (invoke === null) return;
+  // 拖曳期間整扇窗都算實心。`startDragging()` 之後作業系統接管，這邊看不到
+  // 游標；萬一那一瞬間輪詢把開關翻成穿透，拖到一半會斷在半路。
+  const solid = solidWholeWindow
+    ? [{ x: 0, y: 0, w: Math.ceil(globalThis.innerWidth), h: Math.ceil(globalThis.innerHeight) }]
+    : [
+        ...paintedRects().map((box) => toSolid(box, SOLID_DILATE_PX)),
+        ...figureRects().map((box) => toSolid(box, 0)),
+      ];
+  invoke("pet_solid_set", { solid }).catch(() => {
+    // 推不過去就維持上一次的答案；Rust 那邊空清單＝一律實心，不會變成點不到。
+  });
+}
+
+function scheduleSolidPush() {
+  if (solidPushTimer !== null) return;
+  solidPushTimer = setTimeout(() => {
+    solidPushTimer = null;
+    pushSolid();
+  }, 80);
+}
+
+if (invoke !== null) {
+  // 畫面上任何一塊東西出現、消失、換位置都要重算。用通用的 observer 而不是在
+  // 每個顯示／隱藏的地方各補一行：後者漏掉一處就是一塊點不到的泡泡。
+  new MutationObserver(scheduleSolidPush).observe(document.body, {
+    attributes: true,
+    attributeFilter: ["hidden", "class", "style"],
+    childList: true,
+    characterData: true,
+    subtree: true,
+  });
+  globalThis.addEventListener("resize", scheduleSolidPush);
+  document.querySelector("[data-persona-portrait]")?.addEventListener("load", () => {
+    figureMask = null;
+    scheduleSolidPush();
+  });
+  avatar?.addEventListener("pointerdown", () => {
+    solidWholeWindow = true;
+    pushSolid();
+  });
+  // 拖曳結束之後要把「整扇窗都實心」收回來，但**不能只靠 pointerup**：
+  // `startDragging()` 之後作業系統接管拖曳迴圈，webview 通常收不到後續的
+  // pointerup（上面 `draggedThisPress` 那段註解講的是同一件事）。只掛 pointerup
+  // 的話，他拖她一次之後這個旗標就再也沒有人清，整條線從此靜悄悄地失效——而
+  // 「拖她」正是他最先會做的那件事。
+  //
+  // 所以真正把它收回來的是**下一個沒有按著鍵的 pointermove**：那代表事件又回到
+  // 這個 webview、而且手已經放開了。滑鼠沒回到她身上的時候旗標留著也無妨，那段
+  // 期間整扇窗是實心的，pointermove 一定收得到，自己會好。
+  const releaseWholeWindow = () => {
+    if (!solidWholeWindow) return;
+    solidWholeWindow = false;
+    scheduleSolidPush();
+  };
+  for (const done of ["pointerup", "pointercancel"]) {
+    globalThis.addEventListener(done, releaseWholeWindow);
+  }
+  globalThis.addEventListener("pointermove", (event) => {
+    if ((event?.buttons ?? 0) !== 0) return;
+    releaseWholeWindow();
+  });
+  scheduleSolidPush();
+}
+
 function readPersona() {
   if (invoke === null) return;
   const revisionWhenStarted = personaRevision;
