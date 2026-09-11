@@ -445,6 +445,7 @@ function Get-ConsentSnapshot(
   [string] $DataDir,
   [string] $ConfigPath,
   [bool] $GrantAll,
+  [bool] $ExpectCloudEffective,
   [string] $Label
 ) {
   $arguments = @('--data-dir', $DataDir, '--config', $ConfigPath, 'consent')
@@ -487,14 +488,22 @@ function Get-ConsentSnapshot(
       throw "$Label consent $($sheet.key) 沒有 granted_at；不能拿 null 冒充已簽"
     }
     [int64] $grantedAt = $sheet.granted_at
-    if ($grantedAt -le 0 -or $sheet.effective -ne $true) {
-      throw "$Label consent $($sheet.key) 不是真正有效：granted_at=$grantedAt effective=$($sheet.effective)"
+    $expectedEffective = if ($sheet.key -ceq 'cloud-reading') {
+      $ExpectCloudEffective
+    } else {
+      $true
+    }
+    if ($grantedAt -le 0 -or $sheet.effective -ne $expectedEffective) {
+      throw "$Label consent $($sheet.key) 狀態不符：granted_at=$grantedAt effective=$($sheet.effective) expected=$expectedEffective"
     }
   }
-  foreach ($flag in @('current', 'allows_recording', 'allows_frames', 'allows_cloud', 'allows_azure_tts', 'keeps_images')) {
+  foreach ($flag in @('current', 'allows_recording', 'allows_frames', 'allows_azure_tts', 'keeps_images')) {
     if ($json.$flag -ne $true) {
       throw "$Label consent $flag 不是 true：$($json.$flag)"
     }
+  }
+  if ($json.allows_cloud -ne $ExpectCloudEffective) {
+    throw "$Label consent allows_cloud 不符：actual=$($json.allows_cloud) expected=$ExpectCloudEffective"
   }
   if ([int64] $json.version -le 0) {
     throw "$Label consent version 不是已知正值：$($json.version)"
@@ -505,7 +514,7 @@ function Get-ConsentSnapshot(
   }
 
   $grantFingerprint = @($sheets | ForEach-Object {
-    "$($_.key):$([int64] $_.granted_at):$($_.effective)"
+    "$($_.key):$([int64] $_.granted_at)"
   }) -join '|'
   return [pscustomobject]@{
     Version = [int64] $json.version
@@ -898,7 +907,7 @@ voice = "zh-TW-HsiaoYuNeural"
   $sentinelPath = Join-Path $dataDir 'installer-preservation-sentinel.txt'
   [IO.File]::WriteAllText($sentinelPath, "alpha.110 external data`n", $utf8NoBom)
 
-  $oldConsent = Get-ConsentSnapshot $absentSister $dataDir $configPath $true 'old installed binary'
+  $oldConsent = Get-ConsentSnapshot $absentSister $dataDir $configPath $true $true 'old installed binary'
 
   # alpha.110 用 hard link 換名執行時沒有 product event，image-name scan 也看不到；
   # current Setup 仍須靠 installed file 的 image mapping 做跨版本 file-level exclusion。
@@ -1098,7 +1107,10 @@ enabled = false
   # schema 19, so this does not claim a schema step ran when none was needed.
   Assert-BillQuery $currentInstalledSister $dataDir $configPath 'current binary after open/migrate'
   Assert-SyntheticEvidenceDb $python $dbPath 'current DB after open/migrate'
-  $currentConsent = Get-ConsentSnapshot $currentInstalledSister $dataDir $configPath $false 'current binary'
+  # Installer 與 migration 要保留四張的原始簽署時間；但 alpha.110 的第二張
+  # 只授權「本機先挑候選、CLI 後成句」，不得被 current binary 當成新的
+  # 「每題先交 CLI 規劃查詢」授權。所以只有 cloud-reading 必須 fail closed。
+  $currentConsent = Get-ConsentSnapshot $currentInstalledSister $dataDir $configPath $false $false 'current binary'
   Assert-SameConsentSnapshot $oldConsent $currentConsent 'current binary 沒保留四張 consent 的 exact timestamps/terms'
   Assert-SameFileState $configPath $configBefore 'current query 改動了外部 config'
   Assert-SameFileState $consentPath $consentBefore 'current query 改動了外部 consent'
