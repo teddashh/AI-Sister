@@ -12,9 +12,9 @@
  * 的 metrics 不為了過 gate 多開一扇 command；系統匣只能經過內含
  * `std::thread::spawn` 的 `spawn_window`。
  *
- * onboarding 在 `.setup(...)` 裡的第一次自動開窗是 Tauri 文件列出的安全
- * 例外；那裡可以直接呼叫 `open_onboarding_window`。離開 setup 之後不靠這個
- * 例外放行系統匣。
+ * alpha.127 起，第一次同意直接在主對話逐張問；`.setup(...)` 不再另開
+ * onboarding 視窗。完整四張仍可由 async IPC wrapper 或系統匣的 separate
+ * thread 開啟。
  */
 
 import { dirname, join, resolve } from "node:path";
@@ -253,13 +253,12 @@ check(
   undefined,
 );
 
-// function 定義本身也長得像 `open_*_window(`，所以期望值包含它。wrapper
-// 各一個 call；onboarding 另外有 setup 的文件允許例外；metrics 只有 tray
-// function pointer，沒有直接 call。這個總數把未來新增在另一個同步 handler
-// 裡的漏網 direct call 也變成紅燈。
+// function 定義本身也長得像 `open_*_window(`，所以期望值包含它。四個
+// command wrapper 各一個 call；metrics 只有 tray function pointer，沒有直接
+// call。這個總數把未來新增在另一個同步 handler 裡的漏網 direct call 也變成紅燈。
 for (const [name, expected] of [
   ["settings", 2],
-  ["onboarding", 3],
+  ["onboarding", 2],
   ["timeline", 2],
   ["metrics", 1],
   ["frame", 2],
@@ -337,16 +336,15 @@ if (menuStart >= 0 && menuEnd > menuStart) {
   }
 }
 
-// setup 是 Tauri 文件明列可以同步 build 的時機。守住自動打開同意書
-// 的接線，也證明 gate 沒有把所有 direct internal call 一刀切成紅的。
+// 第一次同意已搬進主對話，setup 不能再偷偷彈回獨立 onboarding 視窗。
 const appBuild = CODE.indexOf(".build(tauri::generate_context!())");
 const setupStart = appBuild < 0 ? -1 : CODE.lastIndexOf(".setup", appBuild);
 const setupOpen = setupStart < 0 ? -1 : CODE.indexOf("{", setupStart);
 const setupEnd = setupOpen < 0 || setupOpen > appBuild ? -1 : closeBrace(setupOpen);
 const setupCode = setupStart < 0 || setupEnd < 0 ? "" : CODE.slice(setupStart, setupEnd);
 check(
-  "setup onboarding 保留文件允許的 direct internal helper 例外",
-  /\bopen_onboarding_window\s*\(/.test(setupCode),
+  "setup 不再自動另開 onboarding 視窗",
+  setupCode !== "" && !/\bopen_onboarding_window\s*\(/.test(setupCode),
   setupCode === "" ? "setup 範圍找不到" : undefined,
 );
 
