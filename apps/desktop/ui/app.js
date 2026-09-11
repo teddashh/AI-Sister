@@ -1737,6 +1737,13 @@ function figureMaskOf(img) {
   if (img === null || !img.complete || !img.naturalWidth) return null;
   if (figureMask !== null && figureMask.src === img.currentSrc) return figureMask;
   try {
+    // `drawImage(img, 0, 0, cells, cells)` 是**拉伸**，CSS 那邊卻是
+    // `object-fit: contain`（會留黑邊）。兩者只有在來源是正方形、而且容器也是
+    // 正方形的時候才會對齊——現在兩邊都成立：17 張 bundled preview 都是 640×640
+    // （`check-persona.mjs` 的「bundled preview manifest 是透明 640² contain 全身
+    // v2 契約」和 `select-persona-previews.py` 的 640x640 RGBA contract 兩道在守
+    // 它），而 `.avatar` 是 300×300。**哪一邊變成非正方形，這張遮罩就會歪**，而歪
+    // 掉的方向是「她有一塊點不到」。真要改的話這裡得先照 contain 自己算出留白。
     const cells = Math.max(1, Math.round(300 / FIGURE_CELL_PX));
     const canvas = document.createElement("canvas");
     canvas.width = cells;
