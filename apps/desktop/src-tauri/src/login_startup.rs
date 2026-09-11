@@ -433,13 +433,15 @@ mod platform {
                 reason: format!("registry type {}，預期 REG_SZ", value_type.0),
             };
         }
-        if bytes.len() < 2 || bytes.len() % 2 != 0 {
+        if bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
             return RegistryValue::Other {
                 reason: "REG_SZ 長度不是含結尾 NUL 的 UTF-16".to_owned(),
             };
         }
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
         if units.last() != Some(&0) || units[..units.len() - 1].contains(&0) {

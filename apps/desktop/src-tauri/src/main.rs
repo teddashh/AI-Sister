@@ -6417,10 +6417,10 @@ fn consent_set(
         // 之前就永久取消 pending Login/watchdog。若 worker 已停，不存在 automatic
         // spawn；若它正忙到十秒沒回，message 仍在唯一 channel 裡，底下 durable
         // revoke barrier 照常前進，不能因 supervisor 回條慢而拒絕使用者撤回。
-        if let Ok(recorder) = recorder_handle(shell.inner()) {
-            if let Err(error) = recorder.cancel_automatic_for_consent_revoke() {
-                tracing::warn!("撤回前無法即時取得 recorder supervisor 回條：{error}");
-            }
+        if let Ok(recorder) = recorder_handle(shell.inner())
+            && let Err(error) = recorder.cancel_automatic_for_consent_revoke()
+        {
+            tracing::warn!("撤回前無法即時取得 recorder supervisor 回條：{error}");
         }
     }
     let mut reset_by_version = false;
@@ -7167,10 +7167,10 @@ fn main() {
             #[cfg(windows)]
             let should_start_for_login = should_start_for_login
                 || SECOND_INSTANCE_LOGIN_PENDING.swap(false, Ordering::AcqRel);
-            if should_start_for_login {
-                if let Err(error) = recorder.login_start() {
-                    tracing::error!("Windows 登入啟動交不出去：{error}");
-                }
+            if should_start_for_login
+                && let Err(error) = recorder.login_start()
+            {
+                tracing::error!("Windows 登入啟動交不出去：{error}");
             }
 
             // ---- 位置 ----

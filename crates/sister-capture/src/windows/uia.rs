@@ -424,10 +424,10 @@ fn read_browser_url(
     }
 
     if let Some((_, element)) = cached.as_ref() {
-        if belongs_to_root(automation, element, root).is_some() {
-            if let Some(state) = read_cached_address(element) {
-                return state;
-            }
+        if belongs_to_root(automation, element, root).is_some()
+            && let Some(state) = read_cached_address(element)
+        {
+            return state;
         }
         *cached = None;
     }

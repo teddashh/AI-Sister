@@ -1970,17 +1970,17 @@ impl Worker {
     }
 
     fn publish_from_policy(&self, override_message: Option<String>) {
-        if matches!(self.policy, policy::State::Quitting { .. }) {
-            if let Some(error) = self.quit_failure.as_deref() {
-                self.publish_custom(SupervisorView {
-                    phase: SupervisorPhase::Uncertain,
-                    failures: self.policy.failures().get(),
-                    message: Some(format!(
-                        "{error}。AI-Sister 沒有退出，因為無法證明 recorder 會停下來。"
-                    )),
-                });
-                return;
-            }
+        if matches!(self.policy, policy::State::Quitting { .. })
+            && let Some(error) = self.quit_failure.as_deref()
+        {
+            self.publish_custom(SupervisorView {
+                phase: SupervisorPhase::Uncertain,
+                failures: self.policy.failures().get(),
+                message: Some(format!(
+                    "{error}。AI-Sister 沒有退出，因為無法證明 recorder 會停下來。"
+                )),
+            });
+            return;
         }
         if self.stop_delivery_pending {
             self.publish_custom(stop_delivery_pending_view(self.policy));

@@ -627,7 +627,9 @@ mod tests {
                 return 0;
             };
             let (lo, hi) = px
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .fold((255u8, 0u8), |(lo, hi), p| (lo.min(p[0]), hi.max(p[0])));
             hi - lo
         };
