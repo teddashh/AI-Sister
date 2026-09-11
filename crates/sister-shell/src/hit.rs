@@ -45,6 +45,35 @@ pub fn is_solid_at(solid: &[Rect], x: i32, y: i32) -> bool {
     solid.iter().any(|r| contains(*r, x, y))
 }
 
+/// 這一刻該不該讓點擊穿過去。
+///
+/// `window` 是這扇窗自己的矩形，左上角是 `(0, 0)`；`at` 是游標在同一套座標裡的
+/// 位置，`None` 代表問不出來。輪詢那條執行緒的整個判斷就是這一句。
+///
+/// ## 游標在窗外的時候，答案是「維持可點」而不是「穿透」
+///
+/// 這句反直覺，也是這支函式比 [`is_solid_at`] 多做的唯一一件事。開關是**整扇窗**
+/// 的，而游標現在不在窗上——所以這一刻它不影響任何一次點擊。它唯一的作用，是決定
+/// **下一個瞬間游標進來時**用哪一邊；而輪詢有間隔，那個瞬間我們看不到。
+///
+/// 兩種猜錯的代價不對稱：
+///
+/// * 猜「穿透」、而使用者把游標移到她身上按下去 → 那一下掉到底下的視窗。畫面上
+///   明明有她，滑鼠卻穿過去，看起來就是當掉了。
+/// * 猜「可點」、而使用者按的是她旁邊的空白 → 那一下被這扇窗吃掉。使用者看得見
+///   自己按在哪裡，而且那正是這條線修好之前的行為。
+///
+/// 所以停在可點的那一邊：把一輪輪詢的延遲挪到便宜的那一格。
+pub fn should_pass_through(window: Rect, solid: &[Rect], at: Option<(i32, i32)>) -> bool {
+    let Some((x, y)) = at else {
+        return false;
+    };
+    if !contains(window, x, y) {
+        return false;
+    }
+    !is_solid_at(solid, x, y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +145,64 @@ mod tests {
         // debug build 直接 panic，而 panic 在輪詢執行緒裡是整條線靜悄悄死掉。
         assert!(is_solid_at(&[r(i32::MAX - 2, 0, 10, 10)], i32::MAX - 1, 5));
         assert!(!is_solid_at(&[r(0, 0, 10, 10)], i32::MAX, 5));
+    }
+    #[test]
+    fn a_cursor_outside_the_window_leaves_it_clickable() {
+        // 這是 `should_pass_through` 唯一比 `is_solid_at` 多做的事，也是最容易
+        // 寫反的一格：同一個點，底層說「不是實心」，而正確答案是不要穿透。
+        let win = r(0, 0, 340, 560);
+        let her = r(45, 206, 300, 300);
+        assert!(
+            !is_solid_at(&[her], -125, 300),
+            "底層看到的是：那裡沒畫東西"
+        );
+        assert!(
+            !should_pass_through(win, &[her], Some((-125, 300))),
+            "但它在窗外——下一瞬間游標進來時要是可點的"
+        );
+        assert!(!should_pass_through(win, &[her], Some((170, -3))), "上方");
+        assert!(
+            !should_pass_through(win, &[her], Some((340, 300))),
+            "右邊界外"
+        );
+        assert!(
+            !should_pass_through(win, &[her], Some((170, 560))),
+            "下邊界外"
+        );
+    }
+
+    #[test]
+    fn an_unknown_cursor_leaves_the_window_clickable() {
+        let win = r(0, 0, 340, 560);
+        assert!(!should_pass_through(win, &[r(45, 206, 300, 300)], None));
+    }
+
+    #[test]
+    fn an_empty_report_never_passes_anything_through() {
+        // 和 `empty_means_unknown_so_the_window_stays_clickable` 同一條規則，
+        // 但走的是真正接到輪詢上的那個出口。
+        let win = r(0, 0, 340, 560);
+        assert!(!should_pass_through(win, &[], Some((170, 120))));
+        assert!(!should_pass_through(win, &[], Some((170, 300))));
+    }
+
+    #[test]
+    fn inside_the_window_it_still_follows_her_silhouette() {
+        let win = r(0, 0, 340, 560);
+        let pill = r(80, 7, 250, 34);
+        let her = r(45, 206, 300, 300);
+        let painted = [pill, her];
+        assert!(
+            should_pass_through(win, &painted, Some((170, 120))),
+            "頭頂上方那塊要穿透"
+        );
+        assert!(
+            !should_pass_through(win, &painted, Some((170, 20))),
+            "控制列"
+        );
+        assert!(
+            !should_pass_through(win, &painted, Some((170, 300))),
+            "她自己"
+        );
     }
 }

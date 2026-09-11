@@ -6960,12 +6960,17 @@ fn cursor_in_window(win: &tauri::WebviewWindow) -> Option<(i32, i32)> {
 /// cursor_events` 是整扇窗的開關，不是逐像素的，所以只能一直問「游標底下
 /// 現在算不算實心」再翻那個開關。
 ///
-/// 三個「不知道就維持可點」的出口，方向都一樣：**寧可多擋住一點桌面，也不要
-/// 讓她整個人點不到**。兩邊壞掉的代價不對稱：多擋住的那塊使用者看得見自己在
-/// 點什麼，挪一下視窗就好；整個人點不到的話，畫面上明明有她、滑鼠卻穿過去，
-/// 那看起來就是當掉了。她 `skipTaskbar`，所以工作列上也沒有東西可以點回來——
-/// 系統匣的選單還在（見 `refresh_tray`），真要救救得回來，但那要使用者先想到
-/// 「是這扇窗的問題」再去翻系統匣。那不是一條會有人自己走到的路。
+/// 每一個「不知道」的出口都倒向維持可點：**寧可多擋住一點桌面，也不要讓她整
+/// 個人點不到**。兩邊壞掉的代價不對稱：多擋住的那塊使用者看得見自己在點什麼，
+/// 挪一下視窗就好；整個人點不到的話，畫面上明明有她、滑鼠卻穿過去，那看起來
+/// 就是當掉了。她 `skipTaskbar`，所以工作列上也沒有東西可以點回來——系統匣的
+/// 選單還在（見 `refresh_tray`），真要救救得回來，但那要使用者先想到「是這扇
+/// 窗的問題」再去翻系統匣。那不是一條會有人自己走到的路。
+///
+/// 「游標現在在窗外」也算一種不知道，而且是最容易寫反的那一種——底層會照實說
+/// 那個座標沒畫東西，可是我們要的不是那一刻的答案，是游標**進來的那一瞬間**該
+/// 用哪一邊，而那一瞬間落在兩次輪詢之間。判斷整個在
+/// [`bounds::hit::should_pass_through`] 裡，理由也寫在那裡。
 fn spawn_click_through(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last: Option<bool> = None;
@@ -6997,24 +7002,56 @@ fn spawn_click_through(app: tauri::AppHandle) {
                 }
                 _ => POLL_AWAY_MS,
             };
-            let ignore = match here {
-                Some((x, y)) => {
-                    let solid = app
-                        .state::<Shell>()
-                        .hit_solid
-                        .lock()
-                        .expect("hit solid")
-                        .clone();
-                    !bounds::hit::is_solid_at(&solid, x, y)
-                }
-                // 問不出游標在哪就別動開關。
-                None => false,
+            let ignore = {
+                let shell = app.state::<Shell>();
+                let solid = shell.hit_solid.lock().expect("hit solid");
+                // 鎖在這個區塊裡就還掉，不跨到下面那句 `set_ignore_cursor_events`。
+                bounds::hit::should_pass_through(
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        w: PET_W,
+                        h: PET_H,
+                    },
+                    &solid,
+                    here,
+                )
             };
             if last != Some(ignore) && win.set_ignore_cursor_events(ignore).is_ok() {
                 last = Some(ignore);
             }
         }
     });
+}
+
+#[cfg(test)]
+mod click_through_tests {
+    use super::*;
+
+    /// `PET_W`／`PET_H` 從「開機時擺在哪」升級成命中判定的視窗矩形了，所以它
+    /// 們現在必須真的等於視窗尺寸。
+    ///
+    /// 兩邊漂開不會有任何錯誤訊息。視窗變大而常數沒跟上，多出來的那一條永遠
+    /// 算「窗外」＝永遠可點，她旁邊的空白又開始吃點擊——等於把這一版修好的事
+    /// 悄悄還原回去。反過來則是把一塊不存在的區域設成穿透，沒有後果但也是假的。
+    #[test]
+    fn the_hit_test_rectangle_is_the_real_window_size() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let pet = conf["app"]["windows"]
+            .as_array()
+            .expect("windows")
+            .iter()
+            .find(|w| w["label"] == PET)
+            .expect("pet window");
+        assert_eq!(pet["width"].as_i64(), Some(i64::from(PET_W)), "寬");
+        assert_eq!(pet["height"].as_i64(), Some(i64::from(PET_H)), "高");
+        assert_eq!(
+            pet["resizable"].as_bool(),
+            Some(false),
+            "能拉大小的話，一個常數就講不出視窗現在多大"
+        );
+    }
 }
 
 /// 把視窗現在的位置記進記憶體（不寫檔）。
