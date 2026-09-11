@@ -213,7 +213,7 @@ struct Shell {
     answer_cli: Mutex<Option<sister_core::brain::Cancellation>>,
     /// renderer 回報的「畫了東西的地方」，視窗座標、CSS 像素。輪詢執行緒拿它
     /// 決定游標底下要不要讓點擊穿透過去。空的代表**還沒收到回報**，那時候
-    /// `sister_shell::hit::is_solid_at` 會一律回實心——見那支函式的說明。
+    /// `sister_shell::hit::poll_step` 會當成整片實心、維持可點——見那支函式的說明。
     hit_solid: Mutex<Vec<bounds::Rect>>,
 }
 
@@ -6920,18 +6920,6 @@ struct FrameView {
     url: Option<String>,
 }
 
-/// 游標在窗內的時候多久看一次；在窗外就用 `POLL_AWAY_MS`。
-///
-/// 她整天掛在螢幕角落，而使用者絕大多數時間在別的視窗工作。兩段間隔的差別
-/// 就是那件事：手在她身上的時候要跟得上（40ms 大約比「移過去再按下去」快一
-/// 個數量級），手不在的時候沒有人需要這個答案，少醒來幾次就少耗一點電。
-const POLL_NEAR_MS: u64 = 40;
-const POLL_AWAY_MS: u64 = 160;
-
-/// 游標離視窗多遠還算「附近」。留一圈是因為間隔是在**上一次**的位置決定的：
-/// 貼著邊界切換的話，快速移進來的那一下會用到慢的那一段。
-const POLL_NEAR_MARGIN: i32 = 120;
-
 /// 游標現在在視窗座標的哪裡，CSS 像素。
 ///
 /// `cursor_position` 給的是整個桌面的實體像素，`inner_position` 是視窗左上角
@@ -6969,44 +6957,34 @@ fn cursor_in_window(win: &tauri::WebviewWindow) -> Option<(i32, i32)> {
 ///
 /// 「游標現在在窗外」也算一種不知道，而且是最容易寫反的那一種——底層會照實說
 /// 那個座標沒畫東西，可是我們要的不是那一刻的答案，是游標**進來的那一瞬間**該
-/// 用哪一邊，而那一瞬間落在兩次輪詢之間。判斷整個在
-/// [`bounds::hit::should_pass_through`] 裡，理由也寫在那裡。
+/// 用哪一邊，而那一瞬間落在兩次輪詢之間。
+///
+/// 決定本身一行都不在這裡：`visible`、游標位置和那份實心清單交給
+/// [`bounds::hit::poll_step`]，這支函式只負責問得出那三樣、以及把答案交出去。
+/// 這樣切是因為 `apps/desktop` 是另一個 workspace，根目錄的 `cargo test
+/// --workspace` 走不到——留在這個檔案裡的判斷等於沒有人守。
 fn spawn_click_through(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last: Option<bool> = None;
-        let mut nap = POLL_NEAR_MS;
+        let mut nap = bounds::hit::POLL_NEAR_MS;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(nap));
             // 視窗沒了就收工。這是這條執行緒唯一的出口。
             let Some(win) = app.get_webview_window(PET) else {
                 return;
             };
-            // 收進系統匣的時候不必算，但要確保「再打開」一定是可點的狀態：
-            // 不然她被藏起來時停在穿透，再叫出來的頭幾十毫秒是點不到的。
-            if !win.is_visible().unwrap_or(true) {
-                nap = POLL_AWAY_MS;
-                if last != Some(false) && win.set_ignore_cursor_events(false).is_ok() {
-                    last = Some(false);
-                }
-                continue;
-            }
-            let here = cursor_in_window(&win);
-            nap = match here {
-                Some((x, y))
-                    if x >= -POLL_NEAR_MARGIN
-                        && y >= -POLL_NEAR_MARGIN
-                        && x < PET_W + POLL_NEAR_MARGIN
-                        && y < PET_H + POLL_NEAR_MARGIN =>
-                {
-                    POLL_NEAR_MS
-                }
-                _ => POLL_AWAY_MS,
+            // 看不見的時候不必問游標在哪——`poll_step` 那一臂本來就不看它。
+            let visible = win.is_visible().unwrap_or(true);
+            let here = if visible {
+                cursor_in_window(&win)
+            } else {
+                None
             };
-            let ignore = {
+            let step = {
                 let shell = app.state::<Shell>();
                 let solid = shell.hit_solid.lock().expect("hit solid");
                 // 鎖在這個區塊裡就還掉，不跨到下面那句 `set_ignore_cursor_events`。
-                bounds::hit::should_pass_through(
+                bounds::hit::poll_step(
                     Rect {
                         x: 0,
                         y: 0,
@@ -7014,11 +6992,15 @@ fn spawn_click_through(app: tauri::AppHandle) {
                         h: PET_H,
                     },
                     &solid,
+                    visible,
                     here,
                 )
             };
-            if last != Some(ignore) && win.set_ignore_cursor_events(ignore).is_ok() {
-                last = Some(ignore);
+            nap = step.next_poll_ms;
+            if last != Some(step.pass_through)
+                && win.set_ignore_cursor_events(step.pass_through).is_ok()
+            {
+                last = Some(step.pass_through);
             }
         }
     });

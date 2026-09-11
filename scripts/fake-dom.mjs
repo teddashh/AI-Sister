@@ -70,7 +70,7 @@ export function fakeEl(tag = "div") {
     // 有它不是為了讓誰去斷言座標——是因為 app.js 要算「畫面上哪裡是實心的」
     // 再送回 Rust（`pet_solid_set`），少了這支，整支閘門在第一次防手震到期
     // 的時候就 TypeError 死掉。全 0 是個誠實的答案：寬高是 0 的長方形不會讓
-    // 任何一點變成實心（見 sister-shell 的 `hit::is_solid_at`），所以假瀏覽器
+    // 任何一點變成實心（見 sister-shell 的 `hit::poll_step`），所以假瀏覽器
     // 送出去的東西不會假裝成一塊量得出來的區域。
     getBoundingClientRect() {
       return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
