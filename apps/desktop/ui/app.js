@@ -1557,7 +1557,74 @@ async function playConsentSheet(event) {
 
 consentListen?.addEventListener("click", (event) => void playConsentSheet(event));
 
-avatar?.addEventListener("click", sayPersonaLine);
+/*
+ * 把她拖來拖去。
+ *
+ * 這扇窗是 340×560、`decorations: false` 的透明視窗，所以「拖她」就是拖視窗；
+ * 位置的記憶已經是免費的——`main.rs` 的 `WindowEvent::Moved` 會把座標寫進
+ * pet state，重開時 `bounds::nudge_onto` 再把她拉回看得見的螢幕上。
+ *
+ * 不能直接在角色上掛 `data-tauri-drag-region`：那個屬性在 mousedown 當下就把
+ * 事件交給作業系統，點一下會說話的那條路（`sayPersonaLine`）就再也不會發生。
+ * 所以這裡自己分辨——**按下去之後移動超過門檻才算拖**，沒超過就還是戳她一下。
+ *
+ * `startDragging()` 一旦發動，作業系統接管整個拖曳迴圈，webview 通常收不到
+ * 後續的 pointerup／click。所以旗標是在**下一次 pointerdown** 清掉的，不是在
+ * pointerup：留著一個沒人清的 true，下一次真正的點擊就會被無聲吃掉。
+ */
+const DRAG_THRESHOLD_PX = 4;
+const petWindow = globalThis.__TAURI__?.window?.getCurrentWindow?.() ?? null;
+let dragOrigin = null;
+let draggedThisPress = false;
+
+function startWindowDrag() {
+  avatar?.classList.add("dragging");
+  // 沒有 native 的時候（瀏覽器裡開 demo）就只是不會動，不要炸掉整條 UI。
+  Promise.resolve(petWindow?.startDragging?.()).catch(() => {
+    avatar?.classList.remove("dragging");
+  });
+}
+
+avatar?.addEventListener("pointerdown", (event) => {
+  // 只收主鍵。右鍵和中鍵不是「抓住她」。
+  if (event.button !== undefined && event.button !== 0) return;
+  if (avatar.disabled) return;
+  dragOrigin = { x: event.clientX ?? 0, y: event.clientY ?? 0 };
+  draggedThisPress = false;
+});
+
+avatar?.addEventListener("pointermove", (event) => {
+  if (dragOrigin === null || draggedThisPress) return;
+  const dx = (event.clientX ?? 0) - dragOrigin.x;
+  const dy = (event.clientY ?? 0) - dragOrigin.y;
+  if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+  draggedThisPress = true;
+  startWindowDrag();
+});
+
+avatar?.addEventListener("pointerup", () => {
+  dragOrigin = null;
+  avatar?.classList.remove("dragging");
+});
+
+avatar?.addEventListener("pointercancel", () => {
+  dragOrigin = null;
+  draggedThisPress = false;
+  avatar?.classList.remove("dragging");
+});
+
+avatar?.addEventListener("click", (event) => {
+  // 拖完手放開，瀏覽器仍可能補一個 click。那一下是「我剛把她搬到這裡」，
+  // 不是「我想聽她說話」。
+  if (draggedThisPress) {
+    event?.preventDefault?.();
+    return;
+  }
+  // 事件要原封不動傳下去：`sayPersonaLine` 用 `event.isTrusted` 擋掉程式合成的
+  // 點擊，那是「角色台詞只在真人點擊後出聲」那條產品規則的唯一守衛。這裡少寫
+  // 一個參數，等於把它整個關掉。
+  return sayPersonaLine(event);
+});
 
 function readPersona() {
   if (invoke === null) return;
@@ -2623,7 +2690,9 @@ function setPaused(next) {
   // 一個已經暫停了的桌面姊妹底下。
   if (was !== paused) overtakenByEvents();
   if (pauseButton) {
-    pauseButton.textContent = paused ? "▶" : "⏸";
+    // 圖示不在這裡換。兩個狀態的 SVG 都在按鈕裡，由底下那行 `aria-pressed`
+    // 經 CSS 選一個顯示——寫 `textContent` 會把 SVG 整個洗掉，而且會讓「現在
+    // 是哪個狀態」同時存在字形和 aria 兩份。
     pauseButton.title = paused ? "繼續記錄" : "暫停記錄";
     // 「按下去了」= 暫停中。CSS 會把沒按下的那顆調淡，所以暫停時它最亮——
     // 這正是我們要的：不正常的狀態要吵。
@@ -2976,7 +3045,7 @@ function seedSwayPhase() {
 let pinned = true;
 
 function paintPin() {
-  pinButton.textContent = pinned ? "●" : "○";
+  // 同 `setPaused`：實心／空心兩顆 SVG 都在按鈕裡，`aria-pressed` 決定顯示哪一顆。
   pinButton.setAttribute("aria-pressed", String(pinned));
   pinButton.title = pinned ? "取消置頂" : "保持在最上層";
 }

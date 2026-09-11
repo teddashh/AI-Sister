@@ -97,6 +97,27 @@ body {
   opacity: 0.45;
 }
 
+/* 圖示是 inline SVG（見 index.html 上面那段說明）。`currentColor` 讓它跟著
+ * `.control` 的 `color: inherit` 走，所以深色膠囊換色的時候圖示自己會跟上。 */
+.icon {
+  display: block;
+  fill: currentColor;
+  height: 14px;
+  pointer-events: none;
+  width: 14px;
+}
+
+/* 兩態 toggle：`aria-pressed` 是唯一的真相來源，圖示只是它的投影。
+ * 暫停鍵 pressed=true 代表「已暫停」，要顯示的是「繼續」那顆三角形。 */
+.control .icon-on,
+.control[aria-pressed="true"] .icon-off {
+  display: none;
+}
+
+.control[aria-pressed="true"] .icon-on {
+  display: block;
+}
+
 /* ---------- 舞台 ---------- */
 
 .stage {
@@ -126,10 +147,56 @@ body {
   z-index: 3;
 }
 
+/*
+ * 接地陰影。在這之前她是「貼」在桌面上的一張圖：`.portrait` 的 drop-shadow 沿著
+ * alpha 描輪廓，那是打在她身上的光，不是她落在桌面上的影子，所以人看起來浮著。
+ * 這一格是腳邊的一灘軟影，radial-gradient 邊緣化開——畫成實心橢圓會變成另一張
+ * 貼紙。定位用 absolute 而不是 grid item：`.avatar` 是 `place-items: center`，
+ * 進了 flow 會把 `.face` 擠開。
+ */
+.avatar::before {
+  background: radial-gradient(
+    ellipse at center,
+    rgb(46 33 64 / 30%) 0%,
+    rgb(46 33 64 / 17%) 42%,
+    rgb(46 33 64 / 0%) 72%
+  );
+  bottom: 6px;
+  content: "";
+  height: 24px;
+  left: 50%;
+  pointer-events: none;
+  position: absolute;
+  transform: translateX(-50%);
+  width: 140px;
+  z-index: 0;
+}
+
+/*
+ * 她吸氣上浮 6px 的時候影子要跟著縮。時長與 easing 必須和 `breathe` 一模一樣，
+ * 否則兩段動畫會慢慢跑掉相位，變成影子自己在抽動。
+ */
+.motion .avatar[data-state="idle"]::before {
+  animation: contact-shadow 4.6s ease-in-out infinite;
+}
+
 /* `.avatar` 自己指定了 display，所以 UA 的 `[hidden]` 壓不過它。Persona 關掉
  * 不是變透明：要真的拿掉圖像和 focus target，底下搜尋／狀態仍照常存在。 */
 .avatar[hidden] {
   display: none;
+}
+
+/*
+ * 她是可以拖的。`grab`／`grabbing` 是這件事唯一的提示——沒有邊框、沒有把手，
+ * 所以游標就是說明書。真正發動拖曳的是 app.js：滑鼠按下後移動超過門檻才算拖，
+ * 沒超過就還是「戳她一下」，兩件事不能互相吃掉。
+ */
+.avatar:not(:disabled) {
+  cursor: grab;
+}
+
+.avatar.dragging {
+  cursor: grabbing;
 }
 
 .avatar:disabled {
@@ -250,8 +317,18 @@ body {
   }
 }
 
-/* 狀態點貼在透明人形的右上，不再黏在相框角落。位置落在 1280 canvas 的
- * 常見頭髮右緣；它仍是獨立狀態語意，不假裝是素材的一部分。 */
+/*
+ * 狀態點貼在透明人形的右上，不再黏在相框角落；它仍是獨立狀態語意，不假裝是
+ * 素材的一部分。
+ *
+ * `right` 這個數字是量出來的，不是估的。掃過出貨的 17 張 640×640 全身圖，
+ * 在 `top: 7%` 那一列各自找最右邊的不透明像素，得到人物右緣落在
+ * `right: 24%`（deepseek，最窄）到 `right: 40.5%`（kimi，最寬），中位數 35%。
+ * 舊值 22% 比**每一位**角色的右緣都還要靠外，所以那顆點對 17 位全部都飄在
+ * 空白處，看起來像畫壞的雜點而不是狀態燈。點連邊框寬 15px＝容器的 5%，
+ * 所以 `right: 37%` 讓它對 17 位全部都壓在剪影上（37 + 5 > 40.5）。
+ * 要改這個數字之前先重量一次，不要用看的。
+ */
 .face::after {
   background: var(--persona-accent);
   border: 2px solid rgb(246 236 223 / 96%);
@@ -259,17 +336,24 @@ body {
   content: "";
   height: 11px;
   position: absolute;
-  right: 22%;
+  right: 37%;
   top: 7%;
   width: 11px;
   z-index: 2;
 }
 
+/*
+ * 這顆徽章原本在 `bottom: 310px`，而她的方框上緣在 `bottom: 354px`——差 44px，
+ * 正好落在頭髮和眼鏡上，而且緊貼著 `.face::after` 那顆狀態點，兩個講同一件事的
+ * 東西擠成一團。移到頭頂上方那片空白，並用 `right` + `translateX(50%)` 把中心
+ * 釘在她的中線上：徽章寬度會隨內容變（失敗時放的是 record.log 的尾巴），
+ * 只釘一邊的話字一多就自己歪掉。
+ */
 .state-line {
   background: rgb(255 255 255 / 82%);
   border: 1px solid rgb(46 33 64 / 13%);
   border-radius: 999px;
-  bottom: 310px;
+  bottom: 366px;
   box-shadow: 0 5px 14px rgb(46 33 64 / 10%);
   color: var(--letter-fg);
   font-size: 12px;
@@ -279,7 +363,8 @@ body {
   opacity: 0.6;
   padding: 3px 10px;
   position: absolute;
-  right: 75px;
+  right: 145px;
+  transform: translateX(50%);
   /* 起不來的時候，這裡會放 record.log 的最後幾行——那是真的有換行的東西，
    * 擠成一長條就等於沒印。`pre-line` 保留 \n 但仍然摺疊多餘空白。 */
   text-align: center;
@@ -481,6 +566,18 @@ body {
   }
   50% {
     transform: translate3d(0, -6px, 0) scale(1.015);
+  }
+}
+
+@keyframes contact-shadow {
+  0%,
+  100% {
+    opacity: 1;
+    transform: translateX(-50%) scaleX(1);
+  }
+  50% {
+    opacity: 0.76;
+    transform: translateX(-50%) scaleX(0.93);
   }
 }
 
@@ -1155,7 +1252,8 @@ body.has-consent-guide .answer-bubble {
  */
 @media (prefers-reduced-motion: reduce) {
   .motion .face,
-  .motion .face::after {
+  .motion .face::after,
+  .motion .avatar::before {
     animation: none !important;
   }
 

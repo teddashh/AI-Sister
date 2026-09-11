@@ -3736,6 +3736,56 @@ console.log("86. 主視窗齒輪直接開設定，不必再去系統匣找");
   );
 }
 
+console.log("87. 圖示不靠字型，拖她的時候不會順便讓她說話");
+{
+  // 起因：alpha.127 的 `⚙`（U+2699）在 Ted 的 WebView2 上整顆沒畫出來，而同一份
+  // HTML 在無頭 Chromium 上看得到。CSP 是 `default-src 'none'` 又沒有 `font-src`，
+  // 這個視窗一個字型都載不進來，所以符號顯不顯示得出來完全看那台機器的系統字型。
+  // 改成 inline SVG 之後這個問題沒有了——但只要有人改回 `textContent`，SVG 會被
+  // 整個洗掉、而且畫面在**這台**機器上看起來還是對的。所以要用原始碼守。
+  const html = read(join(UI, "index.html"));
+  const css = read(join(UI, "styles.css"));
+  const js = read(SRC);
+  const capabilities = read(join(UI, "../src-tauri/capabilities/pet-drag.json"));
+  const errors = [];
+
+  for (const id of ["pause", "timeline", "settings", "pin", "hide"]) {
+    const button = new RegExp(`<button[^>]*id="${id}"[\\s\\S]*?</button>`).exec(html)?.[0] ?? "";
+    if (!button) errors.push(`#${id} 這顆按鈕不見了`);
+    else if (!button.includes("<svg")) errors.push(`#${id} 又變回字型符號了`);
+  }
+  for (const id of ["pause", "pin"]) {
+    const button = new RegExp(`<button[^>]*id="${id}"[\\s\\S]*?</button>`).exec(html)?.[0] ?? "";
+    if (!button.includes("icon-off") || !button.includes("icon-on")) {
+      errors.push(`#${id} 是 toggle，兩個狀態的圖示都要在按鈕裡`);
+    }
+  }
+  // 這兩行正是會把 SVG 洗掉的那一種寫法。
+  if (/pauseButton\.textContent\s*=/.test(js)) errors.push("pauseButton 又用 textContent 換圖示了");
+  if (/pinButton\.textContent\s*=/.test(js)) errors.push("pinButton 又用 textContent 換圖示了");
+  // `aria-pressed` 是兩態的唯一真相來源，CSS 只是它的投影。
+  if (!css.includes('.control[aria-pressed="true"] .icon-on')) {
+    errors.push("CSS 沒有用 aria-pressed 選圖示");
+  }
+
+  // 拖曳。`core:window` 的 default 不含 start-dragging，少了這張白名單，
+  // 角色身上的拖曳會安靜地什麼都不做。
+  if (!capabilities.includes("core:window:allow-start-dragging")) {
+    errors.push("pet-drag capability 沒有給 start-dragging");
+  }
+  if (!js.includes("DRAG_THRESHOLD_PX")) errors.push("拖曳沒有移動門檻，點一下就會被當成拖");
+  if (!js.includes("startDragging")) errors.push("沒有人真的發動視窗拖曳");
+  if (!css.includes("cursor: grab")) errors.push("沒有游標提示，使用者不會知道她拖得動");
+
+  check("圖示與拖曳的接線都還在", errors.length === 0, errors);
+}
+
+// 拖曳／點擊的**行為**測試在 `check-persona.mjs` 的 ②b，不在這裡。這支 gate 的
+// 夾具餵不出台詞：`dialogueTaps()` 要求語音 manifest 每位角色剛好 32 句（2 tap、
+// 30 reply）且時長與位元組對得上，湊不齊就回空的，於是「拖她不會說話」會變成
+// 兩個空字串相等的假綠。要加拖曳的行為斷言就去 `check-persona.mjs`，那邊的
+// `persona("chatgpt")` 本來就有真台詞。上面第 87 節守的是接線還在。
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——字母人上有話說不出口，或說了活不過下一次輪詢。`);

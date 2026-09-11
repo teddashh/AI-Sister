@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet-drag",
+  "description": "把她從身上拖著走。`core:window` 的 default 只給唯讀查詢（位置、大小、螢幕），不含 `allow-start-dragging`，所以少了這一張，角色身上的拖曳會安靜地什麼都不做——和同意書那顆「好」少了 allow-close 是同一種失敗。只發給 `pet`：`frame` 那扇窗沒有人會去拖，白名單不順手放寬。",
+  "windows": ["pet"],
+  "permissions": ["core:window:allow-start-dragging"]
+}

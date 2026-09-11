@@ -403,6 +403,23 @@ async function open(personaView = persona(), options = {}) {
       await tick();
       return true;
     },
+    /* 一次完整的手勢：按下 → （可選）移動 → 放開 → 補一個 click。
+     * 拖曳和戳她共用同一顆按鈕，所以這兩件事只能靠「移動了多少」分辨。 */
+    async avatarGesture({ dx = 0, dy = 0 } = {}) {
+      const button = node("[data-avatar]");
+      if (button.disabled) return false;
+      const fire = (ev, arg) => {
+        for (const fn of button.handlers[ev] ?? []) fn(arg);
+      };
+      fire("pointerdown", { button: 0, clientX: 100, clientY: 100 });
+      if (dx !== 0 || dy !== 0) {
+        fire("pointermove", { clientX: 100 + dx, clientY: 100 + dy });
+      }
+      fire("pointerup", {});
+      fire("click", { type: "click", isTrusted: true });
+      await tick();
+      return true;
+    },
     async forceAvatarHandler() {
       for (const fn of node("[data-avatar]").handlers.click ?? []) {
         fn({ type: "click", isTrusted: true });
@@ -486,7 +503,11 @@ function contrast(left, right) {
 
 function directElementRules(className) {
   const classPattern = new RegExp(`\\.${className}(?![-\\w])`, "u");
-  return [...STYLES.matchAll(/(?<selector>[^{}]+)\{(?<body>[^{}]*)\}/gu)]
+  // `[^{}]+` 會把規則前面那整段註解一起收進 selector，於是註解裡提到的任何
+  // class 名字都算命中——`.avatar::before` 的說明寫了「會把 `.face` 擠開」，
+  // 這道閘門就報它是 `.face` 加了底色。註解不是 selector，先剝掉再比。
+  const withoutComments = STYLES.replaceAll(/\/\*[\s\S]*?\*\//gu, "");
+  return [...withoutComments.matchAll(/(?<selector>[^{}]+)\{(?<body>[^{}]*)\}/gu)]
     .filter(({ groups }) =>
       groups.selector
         .split(",")
@@ -542,7 +563,6 @@ console.log("⓪ 純瀏覽器明列的 state 才是截圖 fixture；產品冷啟
     "Tauri 不採信瀏覽器 screenshot query，也不會假裝已按暫停",
     tauriWithDemoQuery.node("[data-avatar]").dataset.state === "asleep" &&
       tauriWithDemoQuery.node("[data-state-line]").textContent.includes("正在確認") &&
-      tauriWithDemoQuery.node("#pause").textContent === "⏸" &&
       tauriWithDemoQuery.node("#pause").title === "暫停記錄" &&
       tauriWithDemoQuery.node("#pause").dataset["aria-pressed"] === "false" &&
       tauriWithDemoQuery.node("[data-hits]").hidden === true &&
@@ -551,7 +571,6 @@ console.log("⓪ 純瀏覽器明列的 state 才是截圖 fixture；產品冷啟
     {
       state: tauriWithDemoQuery.node("[data-avatar]").dataset.state,
       line: tauriWithDemoQuery.node("[data-state-line]").textContent,
-      pause: tauriWithDemoQuery.node("#pause").textContent,
       title: tauriWithDemoQuery.node("#pause").title,
       pressed: tauriWithDemoQuery.node("#pause").dataset["aria-pressed"],
       hitsHidden: tauriWithDemoQuery.node("[data-hits]").hidden,
@@ -593,6 +612,51 @@ console.log("① Avatar 是 native button；冷啟動與輪詢都不會替使用
   check("程式合成的 click 仍然是空的", p.node("[data-persona-line]").textContent === "");
   check("沒有自動播放", p.plays() === 0, p.plays());
   check("畫面上沒出現 undefined / NaN", p.nonsense().length === 0, p.nonsense());
+}
+
+console.log("②b 拖她的時候不會順便讓她說話，拖完之後還戳得動");
+{
+  // 這支夾具每次都送得出 pointerup，真機器上常常送不出——`startDragging()` 一發動
+  // 作業系統就接管，webview 收不到後續事件。所以這裡比真實情況嚴格：把旗標改成
+  // 清在 pointerup 會被第二條抓到，而那個寫法在真機器上反而看不出症狀（她只是不
+  // 說話）。四刀突變實測會紅的組合：拿掉門檻／門檻改 0 → 第四條；pointerdown 不
+  // 重設旗標 → 第三條；click 不看旗標 → 第二、三條。
+  // 她是可以拖著走的桌寵，而拖曳和戳她共用同一顆按鈕。分辨錯了有兩種壞法：
+  // 拖完她突然開口，或者從此再也戳不動。第三條就是在守後面那種——旗標必須在
+  // **下一次 pointerdown** 清掉，不能清在 pointerup：`startDragging()` 一發動，
+  // 作業系統就接管拖曳迴圈，webview 根本收不到 pointerup。
+  const p = await open(persona("chatgpt"));
+
+  await p.avatarGesture();
+  check(
+    "按下去沒移動＝戳她一下，要說話",
+    p.node("[data-persona-line]").textContent === "我在，隨時可以開始。",
+    p.node("[data-persona-line]").textContent,
+  );
+
+  const beforeDrag = p.node("[data-persona-line]").textContent;
+  await p.avatarGesture({ dx: 40, dy: 60 });
+  check(
+    "移動超過門檻＝拖，補上來的那個 click 不可以讓她說話",
+    p.node("[data-persona-line]").textContent === beforeDrag,
+    { before: beforeDrag, after: p.node("[data-persona-line]").textContent },
+  );
+
+  await p.avatarGesture();
+  check(
+    "拖完之後，下一次真正的戳還要有效",
+    p.node("[data-persona-line]").textContent === "我在，安靜地開始也很好。",
+    p.node("[data-persona-line]").textContent,
+  );
+
+  // 手指抖一下不算拖。門檻底下的移動仍然是「戳她」。
+  const p2 = await open(persona("chatgpt"));
+  await p2.avatarGesture({ dx: 2, dy: 1 });
+  check(
+    "門檻以下的微小移動仍然算戳她",
+    p2.node("[data-persona-line]").textContent === "我在，隨時可以開始。",
+    p2.node("[data-persona-line]").textContent,
+  );
 }
 
 console.log("② 每一下 click 只走固定順序的 allowlist，不呼叫其他能力");
