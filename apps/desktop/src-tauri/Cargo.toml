@@ -23,7 +23,7 @@ publish = false
 resolver = "3"
 
 [workspace.package]
-rust-version = "1.85"
+rust-version = "1.88"
 
 [features]
 default = ["bundled-sqlite", "macos"]

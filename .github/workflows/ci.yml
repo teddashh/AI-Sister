@@ -479,9 +479,9 @@ jobs:
 
   # `rust-version` 不是只給 resolver 看的標籤：用宣告的最低版真的編兩個
   # workspace。desktop 放在 Windows 跑，因為 Linux runner 沒有 Tauri 的 GTK
-  # 系統函式庫；這格只證明 1.85 能編，不冒充 Windows 行為測試。
+  # 系統函式庫；這格只證明 1.88 能編，不冒充 Windows 行為測試。
   msrv:
-    name: Rust 1.85 — ${{ matrix.label }} compiles
+    name: Rust 1.88 — ${{ matrix.label }} compiles
     strategy:
       fail-fast: false
       matrix:
@@ -493,7 +493,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Linux native build headers
@@ -531,7 +531,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -544,7 +544,7 @@ jobs:
           {
             uname -a
             sw_vers
-            rustup run 1.85.0 rustc -vV
+            rustup run 1.88.0 rustc -vV
             rustc -vV
             xcodebuild -version
             printf 'macos_sdk='; xcrun --sdk macosx --show-sdk-version
@@ -553,16 +553,16 @@ jobs:
           } > "$RUNNER_TEMP/macos-environment.txt"
           cat "$RUNNER_TEMP/macos-environment.txt"
           test "$(uname -m)" = arm64
-          test "$(rustup run 1.85.0 rustc -vV | sed -n 's/^host: //p')" = aarch64-apple-darwin
+          test "$(rustup run 1.88.0 rustc -vV | sed -n 's/^host: //p')" = aarch64-apple-darwin
           test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-apple-darwin
 
-      - name: Native macOS recorder compiles by default on Rust 1.85
+      - name: Native macOS recorder compiles by default on Rust 1.88
         shell: bash
         run: |
           set -euo pipefail
-          cargo +1.85.0 check -p sister-capture --all-targets --locked
-          cargo +1.85.0 check -p sister-cli --all-targets --locked
-          cargo +1.85.0 check -p sister-cli --all-targets --features macos-ci-spike --locked
+          cargo +1.88.0 check -p sister-capture --all-targets --locked
+          cargo +1.88.0 check -p sister-cli --all-targets --locked
+          cargo +1.88.0 check -p sister-cli --all-targets --features macos-ci-spike --locked
 
       - name: Native macOS capture feature — format, lint and test
         shell: bash
@@ -578,15 +578,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo +1.85.0 build --release -p sister-cli --features macos-ci-spike --locked
+          cargo +1.88.0 build --release -p sister-cli --features macos-ci-spike --locked
           cp target/release/sister target/release/sister-aarch64-apple-darwin
           test "$(lipo -archs target/release/sister-aarch64-apple-darwin)" = arm64
 
-      - name: Desktop app-tree feature compiles on 1.85, then lint and test it
+      - name: Desktop app-tree feature compiles on 1.88, then lint and test it
         shell: bash
         run: |
           set -euo pipefail
-          cargo +1.85.0 check --manifest-path apps/desktop/src-tauri/Cargo.toml \
+          cargo +1.88.0 check --manifest-path apps/desktop/src-tauri/Cargo.toml \
             --all-targets --features macos-ci-spike --locked
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
           cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml \

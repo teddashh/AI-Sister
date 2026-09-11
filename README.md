@@ -337,8 +337,8 @@ cargo build --release -p sister-cli --locked
 ```
 
 **clone 到第一個答案實測 33 秒**（乾淨的 `CARGO_HOME`：抓 108 MB 相依 + build 32 秒。
-16 核開發機，GitHub 的 runner 大約是這裡的 2.1 倍）。需要 Rust 1.85 以上——這份
-程式是 edition 2024；CI 會用 Rust 1.85.0 對根目錄與 desktop 兩個 workspace 做
+16 核開發機，GitHub 的 runner 大約是這裡的 2.1 倍）。需要 Rust 1.88 以上——這份
+程式是 edition 2024；CI 會用 Rust 1.88.0 對根目錄與 desktop 兩個 workspace 做
 `cargo check`。整條路上沒有 `sudo`、沒有服務、沒有帳號。
 
 這一步**一個像素都沒讀你的螢幕**，所以它不用簽同意書：`replay` 讀的是 repo 裡那份
