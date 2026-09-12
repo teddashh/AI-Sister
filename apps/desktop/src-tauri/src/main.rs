@@ -3181,11 +3181,19 @@ fn diagnose_export(
         ))
     })
     .unwrap_or_else(|_| {
+        // `with_db` 把「還沒有任何記憶」和「開不起來」收成同一個字串，而這份
+        // 報告存在的理由就是分得出這兩件事：一格印「問不出來」而真相是「他還
+        // 沒錄過」，正好是它自己反對的那種話。所以這裡自己看一眼那個檔在不在。
+        let why = if sister_core::config::Config::db_path(&data_dir).exists() {
+            sister_core::diagnose::Absent::QueryFailed
+        } else {
+            sister_core::diagnose::Absent::NotThere
+        };
         sister_core::diagnose::collect_from(
             &data_dir,
             "桌面版設定頁",
             env!("CARGO_PKG_VERSION"),
-            Err(sister_core::diagnose::Absent::QueryFailed),
+            Err(why),
         )
     });
 

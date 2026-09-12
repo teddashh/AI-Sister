@@ -1679,6 +1679,10 @@ fn render_ledger(head_chars: usize, tail_chars: usize, s: &Snapshot) -> String {
     ));
     o.push_str("  那 log 過了一次遮蔽，只換掉認得出來的路徑和使用者名稱——那是一份黑名單，\n");
     o.push_str("  不是保證。所以線以下請你自己看一眼再貼。\n");
+    // 這個檔刻意寫在資料目錄外面（放進去，三條刪除路就各要接一次）。代價是
+    // `forget` 掃不到它，而那句話要自己講——一份講究「刪得掉」的產品，多出
+    // 一個沒人管的檔案卻不說，那是最難看的一種。
+    o.push_str("  這個檔在資料目錄外面，`sister forget` 掃不到它。不要了就自己刪掉。\n");
     o
 }
 
@@ -1908,6 +1912,20 @@ mod tests {
                 "{absent:?} 沒有說出理由：\n{report}"
             );
         }
+    }
+
+    /// 這個檔在刪除路外面，報告要自己講。
+    ///
+    /// 整個產品的前提是「刪得掉」（`forget`／`export`／`prune` 三條路）。這份
+    /// 報告刻意寫在資料目錄外面——放進去，三條路就各要多接一次——代價是
+    /// `forget` 掃不到它。多出一個沒人管的檔案卻不說，是最難看的那一種。
+    #[test]
+    fn the_report_admits_that_forget_cannot_reach_it() {
+        let report = render(&snapshot());
+        assert!(
+            report.contains("`sister forget` 掃不到它"),
+            "報告沒講它自己在刪除路外面：\n{report}"
+        );
     }
 
     /// ④ 印的那個字數必須是真的量出來的，不是一句好聽的話。
