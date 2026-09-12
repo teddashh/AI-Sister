@@ -13082,95 +13082,29 @@ pub mod prune {
     }
 }
 
-/// 把記憶整份帶走。
-///
-/// SPEC §11.8（資料主權）寫著「`sister export` 全量匯出……就算本專案死了，
-/// 你的記憶還是你的」，而那個指令不存在。PRIVACY.md 給的替代說法是「整份記憶
-/// 就是一個 `sister.db` 檔加一個 `frames/` 目錄」——**那句話在她正在錄的時候
-/// 是錯的。** 資料庫跑在 WAL 模式，最近寫進去的東西還躺在旁邊的
-/// `sister.db-wal` 裡；照那句話去複製一個檔案，備份會安靜地少掉最後那一段。
-///
-/// 而「安靜地少掉最近那一段」是備份最不該有的失效模式：他要等到真的需要那份
-/// 備份的那一天才會發現。
-///
-/// 匯出的目的地**就是一個資料目錄**——不是另一種格式，是同一種。所以「還原」
-/// 這個動作不需要任何工具：`sister --data-dir <匯出的目錄> query …` 直接就問
-/// 得到。一個要靠原廠程式才讀得回來的匯出檔，不算資料主權。
 /// 把已經在磁碟上的東西讀成一份可以貼給別人看的字。
 ///
-/// 這一層只負責**讀**：哪些檔案、哪幾張表、取多長。長什麼樣子、哪一格准放
-/// 什麼，全在 [`sister_core::diagnose`] 裡——那邊 `cargo test --workspace`
-/// 跑得到，這邊只有整支 CLI 跑起來才跑得到。桌面版那顆鈕走的也是那一份
-/// `render`，所以兩邊印出來的是同一份東西，不是兩份會分家的東西。
+/// 讀什麼、印什麼全在 [`sister_core::diagnose`]——桌面版那顆鈕走的是同一支
+/// `collect` 加同一支 `render`，所以兩邊印出來的是同一份東西。這裡只剩命令列
+/// 自己的事：檔名、覆不覆蓋、印哪一句到終端機。
 pub mod diagnose {
     use super::*;
-    use sister_core::config::Config;
     use sister_core::diagnose as report;
 
-    /// 讀幾趟外送。40 趟大約是二十題——夠看出「哪一趟慢」的形狀，
-    /// 又不會讓報告長到沒有人讀。
-    const LEGS: usize = 40;
-    /// 「沒問」那幾列只折成計數，多讀一點不佔版面。
-    const SKIPS: usize = 400;
-    const LOG_LINES: usize = 120;
-    const LOG_LINE_CHARS: usize = 400;
-    /// 只從檔尾讀這麼多位元組。一個跑了三個禮拜的 `record.log` 可以到幾百
-    /// MB，而我們要的只有最後那幾行——整個讀進記憶體只是為了丟掉。
-    const LOG_TAIL_BYTES: u64 = 512 * 1024;
     /// 報告的第一行。決定「這個檔可不可以覆蓋」用的也是它。
     const BANNER: &str = "AI-Sister 診斷報告";
 
     pub fn run(data_dir: &Path, out: Option<&Path>) -> Result<()> {
-        let now = sister_core::now_ms();
-        let default_name = default_out_name(now);
-        let out = out.map_or_else(|| PathBuf::from(&default_name), Path::to_path_buf);
+        let out = out.map_or_else(
+            || PathBuf::from(report::file_name(sister_core::now_ms())),
+            Path::to_path_buf,
+        );
         refuse_to_clobber(&out)?;
 
-        let mut scrub = report::Scrubber::new();
-        scrub.hide_paths(data_dir, home_dir().as_deref(), user_name().as_deref());
-
-        let db_path = crate::db_path(data_dir);
-        let db = if db_path.exists() {
-            match Db::open(&db_path) {
-                Ok(db) => Ok(db),
-                Err(_) => Err(report::Absent::QueryFailed),
-            }
-        } else {
-            Err(report::Absent::NotThere)
-        };
-
-        let snapshot = report::Snapshot {
-            at: now,
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
-            platform: std::env::consts::OS.to_string(),
-            source: "sister diagnose".to_string(),
-            // 命令列不知道桌面版那一輪什麼時候開的，而**猜一個**比不知道更糟：
-            // 自檢那一節的涵蓋範圍會跟著錯。
-            run_started_at: None,
-            data_dir_shown: where_it_lives(data_dir),
-            consent: report::ConsentLines::load(data_dir),
-            doctor: sister_core::capabilities::read(data_dir).ok_or(report::Absent::NotThere),
-            db: ask(&db, |db| db.stats().ok()),
-            legs: ask(&db, |db| {
-                db.list_brain_outbound(LEGS)
-                    .ok()
-                    .map(|rows| rows.iter().map(report::Leg::from_row).collect())
-            }),
-            skips: ask(&db, |db| {
-                db.list_brain_skip(SKIPS)
-                    .ok()
-                    .map(|rows| report::SkipCount::fold(&rows))
-            }),
-            // 畫面那七件事只有畫面自己量得到，答案原文也只有畫面手上有
-            // （她的答案沒有被存進任何一張表）。這兩節在這裡是「沒量」，
-            // 不是「沒問題」——`render` 會把這句話印出來。
-            self_check: Err(report::Absent::NotHere),
-            answers: Err(report::Absent::NotHere),
-            logs: ["desktop.log", "desktop.log.1", "record.log", "record.log.1"]
-                .iter()
-                .map(|name| log_tail(data_dir, name, &scrub))
-                .collect(),
-        };
+        // 這一支不補畫面那兩節：命令列量不到，而**猜一個**比不知道更糟——自檢
+        // 的涵蓋範圍會跟著錯。`collect` 把它們留在 `Absent::NotHere`，`render`
+        // 會印出「這不是『沒問題』，是『沒量』」。
+        let snapshot = report::collect(data_dir, "sister diagnose", env!("CARGO_PKG_VERSION"));
 
         let text = report::render(&snapshot);
         std::fs::write(&out, &text).with_context(|| format!("寫不進 {}", out.display()))?;
@@ -13181,31 +13115,6 @@ pub mod diagnose {
         );
         println!("  線以下是她的答案原文和 log 尾巴，貼之前自己看一眼，不想給就整段刪掉。");
         Ok(())
-    }
-
-    /// 資料庫問不出來的時候，回答的是「為什麼問不出來」，不是 `None`。
-    ///
-    /// 一格空白讀起來像「沒問題」，而這份報告存在的理由正是要分得出
-    /// 「量到 0」和「沒量到」。
-    fn ask<T>(
-        db: &std::result::Result<Db, report::Absent>,
-        f: impl FnOnce(&Db) -> Option<T>,
-    ) -> report::Got<T> {
-        match db {
-            Err(absent) => Err(*absent),
-            Ok(db) => f(db).ok_or(report::Absent::QueryFailed),
-        }
-    }
-
-    /// 檔名帶時間，跑第二次不會蓋掉第一次。
-    fn default_out_name(now: sister_core::model::Millis) -> String {
-        use chrono::{Local, TimeZone};
-        let when = Local
-            .timestamp_millis_opt(now)
-            .single()
-            .map(|dt| dt.format("%Y%m%d-%H%M%S").to_string())
-            .unwrap_or_else(|| now.to_string());
-        format!("sister-diagnose-{when}.txt")
     }
 
     /// 覆蓋之前先看一眼那個檔是什麼。
@@ -13226,94 +13135,22 @@ pub mod diagnose {
             out.display()
         )
     }
-
-    /// 講位置，不講路徑。「在不在預設的地方」才是診斷要的資訊；
-    /// 完整路徑只會把使用者名稱帶出去。
-    fn where_it_lives(data_dir: &Path) -> String {
-        match Config::default_data_dir() {
-            Some(default) if default == data_dir => "預設位置".to_string(),
-            Some(_) => "自訂位置（--data-dir）".to_string(),
-            None => "問不出預設位置在哪".to_string(),
-        }
-    }
-
-    fn home_dir() -> Option<PathBuf> {
-        for key in ["USERPROFILE", "HOME"] {
-            if let Some(value) = std::env::var_os(key).filter(|v| !v.is_empty()) {
-                return Some(PathBuf::from(value));
-            }
-        }
-        None
-    }
-
-    fn user_name() -> Option<String> {
-        for key in ["USERNAME", "USER"] {
-            if let Ok(value) = std::env::var(key)
-                .map(|v| v.trim().to_string())
-                .and_then(|v| {
-                    if v.is_empty() {
-                        Err(std::env::VarError::NotPresent)
-                    } else {
-                        Ok(v)
-                    }
-                })
-            {
-                return Some(value);
-            }
-        }
-        None
-    }
-
-    fn log_tail(data_dir: &Path, name: &str, scrub: &report::Scrubber) -> report::LogTail {
-        let lines = match read_tail(&data_dir.join(name), LOG_TAIL_BYTES) {
-            Ok(text) => Ok(scrub.apply(&text)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Err(report::Absent::NotThere)
-            }
-            Err(error) => Err(report::Absent::Unreadable(error.kind())),
-        };
-        match lines {
-            Err(absent) => report::LogTail {
-                name: name.to_string(),
-                lines: Err(absent),
-                total_lines: 0,
-            },
-            Ok(text) => {
-                let (lines, total) = report::tail_lines(&text, LOG_LINES, LOG_LINE_CHARS);
-                report::LogTail {
-                    name: name.to_string(),
-                    lines: Ok(lines),
-                    total_lines: total,
-                }
-            }
-        }
-    }
-
-    /// 檔案最後 `bytes` 個位元組，掐頭去掉那半行。
-    ///
-    /// 從中間切開一定會切在某個字元中間，`from_utf8_lossy` 會把它變成一個
-    /// `�`。丟掉第一個換行之前的東西就沒有這個問題——那半行本來也讀不懂。
-    fn read_tail(path: &Path, bytes: u64) -> std::io::Result<String> {
-        use std::io::{Read, Seek, SeekFrom};
-        let mut file = std::fs::File::open(path)?;
-        let len = file.metadata()?.len();
-        let whole = len <= bytes;
-        if !whole {
-            file.seek(SeekFrom::Start(len - bytes))?;
-        }
-        let mut buf = Vec::with_capacity(bytes.min(len) as usize);
-        file.read_to_end(&mut buf)?;
-        let text = String::from_utf8_lossy(&buf).into_owned();
-        if whole {
-            return Ok(text);
-        }
-        Ok(match text.find('\n') {
-            Some(at) => text[at + 1..].to_string(),
-            None => text,
-        })
-    }
 }
 
+/// 把記憶整份帶走。
+///
+/// SPEC §11.8（資料主權）寫著「`sister export` 全量匯出……就算本專案死了，
+/// 你的記憶還是你的」，而那個指令不存在。PRIVACY.md 給的替代說法是「整份記憶
+/// 就是一個 `sister.db` 檔加一個 `frames/` 目錄」——**那句話在她正在錄的時候
+/// 是錯的。** 資料庫跑在 WAL 模式，最近寫進去的東西還躺在旁邊的
+/// `sister.db-wal` 裡；照那句話去複製一個檔案，備份會安靜地少掉最後那一段。
+///
+/// 而「安靜地少掉最近那一段」是備份最不該有的失效模式：他要等到真的需要那份
+/// 備份的那一天才會發現。
+///
+/// 匯出的目的地**就是一個資料目錄**——不是另一種格式，是同一種。所以「還原」
+/// 這個動作不需要任何工具：`sister --data-dir <匯出的目錄> query …` 直接就問
+/// 得到。一個要靠原廠程式才讀得回來的匯出檔，不算資料主權。
 pub mod export {
     use super::*;
     use sister_core::config::Config;

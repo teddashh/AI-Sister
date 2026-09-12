@@ -347,6 +347,11 @@ pub enum Verdict {
     Off,
     /// 這一輪沒發生過，量不到。**不是「沒問題」。**
     NotSeen,
+    /// 機器判不了這一格。
+    ///
+    /// 「她講話像不像朋友」沒有一個數字答得出來，而**硬給一個 ✓ 比留白更糟**
+    /// ——它會讓讀的人以為有人驗過了。
+    CantJudge,
 }
 
 impl Verdict {
@@ -355,6 +360,7 @@ impl Verdict {
             Verdict::AsAsked => "✓",
             Verdict::Off => "✗",
             Verdict::NotSeen => "－",
+            Verdict::CantJudge => "？",
         }
     }
 
@@ -363,6 +369,7 @@ impl Verdict {
             Verdict::AsAsked => "照你要的",
             Verdict::Off => "不對",
             Verdict::NotSeen => "這一輪沒發生過，量不到",
+            Verdict::CantJudge => "機器判不了，答案原文在線下面 ⑤，你自己看",
         }
     }
 }
@@ -382,6 +389,10 @@ pub struct SelfCheck {
     pub at: Millis,
     /// 這一輪什麼時候開的。自檢只看得到這之後發生的事。
     pub run_started_at: Millis,
+    /// 自檢真的看得到的起點。擠掉過觀測的話，它比 `run_started_at` 晚。
+    pub covers_from: Millis,
+    /// 擠掉了幾則觀測。
+    pub dropped: usize,
     pub items: Vec<Item>,
 }
 
@@ -593,7 +604,681 @@ pub fn tail_lines(text: &str, max_lines: usize, max_chars_per_line: usize) -> (V
     (lines, total)
 }
 
-// ───────────────────────────── 印出來 ─────────────────────────────
+// ───────────────────────── 畫面送回來的觀測 ─────────────────────────
+
+/// 畫面量到的一則觀測。
+///
+/// **中文標籤不在這裡。** 每一格叫什麼、算不算「照你要的」，全由
+/// [`Notebook::items`] 這一邊決定；畫面只送得出數字、旗標和一個 `lineId`。
+/// 這樣「機制那一節沒有畫面上的字」就不是一條要人記得的紀律，是型別——
+/// 唯一的自由文字欄位是 [`Note::Answered`] 的句子，而那一節在線的下面。
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Note {
+    /// 這一輪開機了。自檢的涵蓋範圍從這一刻算起，所以**只送一次**。
+    Started { at: Millis },
+    /// 現在這個角色手上有幾句閒話。開機送一次，換角色再送一次。
+    ///
+    /// 和 [`Note::Started`] 分開的理由：換角色不代表這一輪重新開始，而把兩件
+    /// 事塞進同一則，「涵蓋範圍」就會在他換一次角色的時候悄悄往前跳。
+    Persona {
+        at: Millis,
+        taps: u32,
+        giggles: u32,
+        beats: u32,
+    },
+    /// 上面那一槓的狀態。開機時也送一次，這樣「平常是收起來的」才有證據。
+    Bar {
+        at: Millis,
+        open: bool,
+        /// 那一槓現在的 `visibility` 是不是 `hidden`。
+        dragbar_hidden: bool,
+    },
+    /// 一顆答案氣泡量到的幾何。**單位是 CSS 像素。**
+    Bubble {
+        at: Millis,
+        bubble_h: f64,
+        bubble_bottom: f64,
+        content_h: f64,
+        /// 捲動容器看得見的高度。
+        client_h: f64,
+        /// `scrollTop = 99999` 之後讀回來的值。0 = 沒有東西被捲走。
+        ///
+        /// 不看 `scrollHeight - clientHeight`：那兩個數字在「內容捲得動」和
+        /// 「內容直接溢出去」兩種情況下**一模一樣**，量不出差別。
+        can_scroll_to: f64,
+        /// 捲軸實際佔幾像素。headless Chromium 量到 0，WebView2 不一定。
+        scrollbar_px: f64,
+        window_h: f64,
+    },
+    /// 戳了一下。
+    Poke {
+        at: Millis,
+        /// 抖動的 class 真的掛上去了嗎。
+        moved: bool,
+        /// 她講了哪一句。一句都沒講就是 `None`。
+        clip: Option<String>,
+        /// 那一句**真的出聲了**嗎。
+        ///
+        /// 和「有沒有講話」分開：語音關著的時候她照樣講話，只是沒有聲音。
+        /// 合成一格的話，一台把語音關掉的機器讀起來會像壞了。
+        voiced: bool,
+    },
+    /// 沒事笑了一下。
+    Giggle {
+        at: Millis,
+        clip: Option<String>,
+        voiced: bool,
+    },
+    /// 答完一題。
+    Answered {
+        at: Millis,
+        /// 他打了幾個字。**問題原文不送**，那是他的話。
+        question_chars: u32,
+        /// 從按下去到畫面上出現。
+        took_ms: i64,
+        /// 她講的句子。這是唯一一個自由文字欄位，只會出現在線的下面。
+        sentences: Vec<String>,
+        sources: Vec<String>,
+    },
+}
+
+impl Note {
+    /// 這一則是什麼時候的事。用來算「自檢真的看得到哪一段」。
+    fn at(&self) -> Millis {
+        match self {
+            Note::Started { at }
+            | Note::Persona { at, .. }
+            | Note::Bar { at, .. }
+            | Note::Bubble { at, .. }
+            | Note::Poke { at, .. }
+            | Note::Giggle { at, .. }
+            | Note::Answered { at, .. } => *at,
+        }
+    }
+}
+
+/// 留最近幾則。上限存在的理由是這本簿子活在記憶體裡，而她可以開一整天。
+const NOTES_KEPT: usize = 400;
+/// 線下面留她最後幾段答案。
+const ANSWERS_KEPT: usize = 3;
+/// 一題超過幾毫秒就算慢。Ted 列的第 4 項問的就是這個數字。
+const SLOW_ANSWER_MS: i64 = 4_000;
+
+/// 這一輪畫面說過的話。
+///
+/// **只在記憶體裡。** 資料目錄裡每多一個檔案，`forget`／`export`／`prune`
+/// 三條刪除路就各要接一次，而且它自己會變成一個新的隱私面。代價是重開機
+/// 之後這本簿子是空的——報告會把那句話印出來，不會假裝它涵蓋更久。
+#[derive(Debug, Clone, Default)]
+pub struct Notebook {
+    notes: Vec<Note>,
+    /// 這一輪什麼時候開的。
+    ///
+    /// **刻意不放在 `notes` 裡。** 那條清單只留得下最後 [`NOTES_KEPT`] 則，而
+    /// 開機那一則永遠是第一則——他多戳幾百下就會把它擠掉，於是整節自檢變成
+    /// 「沒量」，而簿子其實是滿的。一份為了分辨「量到 0」和「沒量到」而存在的
+    /// 報告，最不該犯的就是這一個。
+    started_at: Option<Millis>,
+    /// 擠掉了幾則。涵蓋範圍要跟著縮，不然「只涵蓋 X 之後」那句話會說謊。
+    dropped: usize,
+}
+
+impl Notebook {
+    pub fn new() -> Notebook {
+        Notebook::default()
+    }
+
+    pub fn note(&mut self, note: Note) {
+        // 頁面重新載入會再送一次，以最後一次為準。
+        //
+        // **不清空** `notes`：清空要靠畫面先送 `started` 再送別的，而那個順序
+        // 是另一層的事（`applyPersona` 就可能先到）。少了幾則觀測不會有人發現，
+        // 而這本簿子存在的理由正好是「說得出剛剛發生什麼」。
+        if let Note::Started { at } = note {
+            self.started_at = Some(at);
+        }
+        self.notes.push(note);
+        if self.notes.len() > NOTES_KEPT {
+            let drop = self.notes.len() - NOTES_KEPT;
+            self.notes.drain(..drop);
+            self.dropped += drop;
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.notes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.notes.is_empty()
+    }
+
+    /// 這一輪什麼時候開的。畫面還沒說過話就是 `None`。
+    pub fn started_at(&self) -> Option<Millis> {
+        self.started_at
+    }
+
+    /// 自檢**真正**看得到的起點。
+    ///
+    /// 就是最舊的那一則觀測。通常等於開機那一刻，但擠掉過之後就晚了——更早的
+    /// 事已經不在簿子裡，還說「涵蓋開機之後」等於把沒看到的那一段算成「沒發生」。
+    pub fn covers_from(&self) -> Option<Millis> {
+        self.notes.first().map(Note::at).or(self.started_at)
+    }
+
+    /// 擠掉了幾則觀測。
+    pub fn dropped(&self) -> usize {
+        self.dropped
+    }
+
+    /// 把畫面那兩節補進快照。
+    ///
+    /// 命令列補不了，於是那兩節留在 [`Absent::NotHere`]——而 `render` 會把
+    /// 「這不是『沒問題』，是『沒量』」印出來。
+    pub fn fill(&self, snapshot: &mut Snapshot, at: Millis) {
+        snapshot.run_started_at = self.started_at();
+        snapshot.answers = Ok(self.answers());
+        snapshot.self_check = match self.started_at() {
+            None => Err(Absent::NotHere),
+            Some(run_started_at) => Ok(SelfCheck {
+                at,
+                run_started_at,
+                covers_from: self.covers_from().unwrap_or(run_started_at),
+                dropped: self.dropped,
+                items: self.items(),
+            }),
+        };
+    }
+
+    /// 最後幾段答案，舊的在前。
+    pub fn answers(&self) -> Vec<Answer> {
+        let mut out: Vec<Answer> = self
+            .notes
+            .iter()
+            .rev()
+            .filter_map(|note| match note {
+                Note::Answered {
+                    at,
+                    question_chars,
+                    took_ms,
+                    sentences,
+                    sources,
+                } => Some(Answer {
+                    at: *at,
+                    question_chars: *question_chars as usize,
+                    sentences: sentences.clone(),
+                    sources: sources.clone(),
+                    took_ms: Some(*took_ms),
+                }),
+                _ => None,
+            })
+            .take(ANSWERS_KEPT)
+            .collect();
+        out.reverse();
+        out
+    }
+
+    fn pack(&self) -> (u32, u32, u32) {
+        self.notes
+            .iter()
+            .rev()
+            .find_map(|note| match note {
+                Note::Persona {
+                    taps,
+                    giggles,
+                    beats,
+                    ..
+                } => Some((*taps, *giggles, *beats)),
+                _ => None,
+            })
+            .unwrap_or((0, 0, 0))
+    }
+
+    /// 一段 clip 的代號，過 [`Word`] 那一關。過不了就當成沒有——畫面送不出
+    /// 螢幕上的字，不是因為它不想，是因為這裡收不下。
+    fn clips(&self, giggle: bool) -> Vec<(&str, bool)> {
+        self.notes
+            .iter()
+            .filter_map(|note| match (note, giggle) {
+                (Note::Poke { clip, voiced, .. }, false)
+                | (Note::Giggle { clip, voiced, .. }, true) => {
+                    clip.as_deref().map(|clip| (clip, *voiced))
+                }
+                _ => None,
+            })
+            .filter(|(raw, _)| Word::new(raw).is_some())
+            .collect()
+    }
+
+    fn distinct(values: &[(&str, bool)]) -> usize {
+        let mut seen: Vec<&str> = Vec::new();
+        for (value, _) in values {
+            if !seen.contains(value) {
+                seen.push(value);
+            }
+        }
+        seen.len()
+    }
+
+    /// Ted 列的那七件事，一件一格。
+    ///
+    /// 標籤與判準都寫在這裡，不是畫面送過來的。
+    fn items(&self) -> Vec<Item> {
+        let (taps, giggle_lines, _beats) = self.pack();
+        let mut items = Vec::new();
+
+        // ① 上面那一槓
+        let bars: Vec<(bool, bool)> = self
+            .notes
+            .iter()
+            .filter_map(|note| match note {
+                Note::Bar {
+                    open,
+                    dragbar_hidden,
+                    ..
+                } => Some((*open, *dragbar_hidden)),
+                _ => None,
+            })
+            .collect();
+        let closed_seen = bars.iter().filter(|(open, _)| !open).count();
+        let closed_but_showing = bars
+            .iter()
+            .filter(|(open, hidden)| !open && !hidden)
+            .count();
+        items.push(Item {
+            number: 1,
+            asked: "上面那一槓平常不在，按一個鍵才跑出來".into(),
+            measured: vec![
+                m("翻過幾次", MeasureValue::Int(bars.len() as i64)),
+                m(
+                    "現在開著嗎",
+                    MeasureValue::Flag(bars.last().map(|(open, _)| *open).unwrap_or(false)),
+                ),
+                m(
+                    "收起來的時候量過幾次",
+                    MeasureValue::Int(closed_seen as i64),
+                ),
+                m(
+                    "其中那一槓還看得見的",
+                    MeasureValue::Int(closed_but_showing as i64),
+                ),
+            ],
+            verdict: if bars.is_empty() {
+                Verdict::NotSeen
+            } else if closed_but_showing > 0 {
+                Verdict::Off
+            } else {
+                Verdict::AsAsked
+            },
+        });
+
+        // ② 戳一下會動也會講話
+        let pokes: Vec<(bool, bool, bool)> = self
+            .notes
+            .iter()
+            .filter_map(|note| match note {
+                Note::Poke {
+                    moved,
+                    clip,
+                    voiced,
+                    ..
+                } => Some((*moved, clip.is_some(), *voiced)),
+                _ => None,
+            })
+            .collect();
+        let moved = pokes.iter().filter(|(moved, ..)| *moved).count();
+        let spoke = pokes.iter().filter(|(_, spoke, _)| *spoke).count();
+        let voiced = pokes.iter().filter(|(.., voiced)| *voiced).count();
+        items.push(Item {
+            number: 2,
+            asked: "戳一下就會動一下，然後講個話".into(),
+            measured: vec![
+                m("戳了幾下", MeasureValue::Int(pokes.len() as i64)),
+                m("有動的", MeasureValue::Int(moved as i64)),
+                m("有講話的", MeasureValue::Int(spoke as i64)),
+                m("真的出聲的", MeasureValue::Int(voiced as i64)),
+            ],
+            // 出聲數 0 不算壞：語音是可以關的，而報告上面那一行已經講清楚了。
+            // 「動了沒」和「講了沒」才是他要的那兩件事。
+            verdict: if pokes.is_empty() {
+                Verdict::NotSeen
+            } else if moved < pokes.len() || spoke == 0 {
+                Verdict::Off
+            } else {
+                Verdict::AsAsked
+            },
+        });
+
+        // ③ 不要只有兩句
+        let poke_clips = self.clips(false);
+        let poke_distinct = Self::distinct(&poke_clips);
+        items.push(Item {
+            number: 3,
+            asked: "按著要隨機講一些，不要一直講同兩句".into(),
+            measured: vec![
+                m("用過幾句不同的", MeasureValue::Int(poke_distinct as i64)),
+                m("這個角色手上有幾句", MeasureValue::Int(taps as i64)),
+            ],
+            verdict: if poke_clips.len() < 2 {
+                Verdict::NotSeen
+            } else if poke_distinct < 2 {
+                Verdict::Off
+            } else {
+                Verdict::AsAsked
+            },
+        });
+
+        // ④ 一題幾秒
+        let took: Vec<i64> = self
+            .notes
+            .iter()
+            .filter_map(|note| match note {
+                Note::Answered { took_ms, .. } => Some(*took_ms),
+                _ => None,
+            })
+            .collect();
+        let slowest = took.iter().copied().max();
+        let middle = median(took.clone());
+        items.push(Item {
+            number: 4,
+            asked: "問一題不該超過四秒".into(),
+            measured: vec![
+                m("答了幾題", MeasureValue::Int(took.len() as i64)),
+                m("中位數毫秒", MeasureValue::Int(middle.unwrap_or_default())),
+                m("最慢那一題", MeasureValue::Int(slowest.unwrap_or_default())),
+            ],
+            verdict: match middle {
+                None => Verdict::NotSeen,
+                Some(ms) if ms > SLOW_ANSWER_MS => Verdict::Off,
+                Some(_) => Verdict::AsAsked,
+            },
+        });
+
+        // ⑤ 氣泡框
+        let bubble = self.notes.iter().rev().find_map(|note| match note {
+            Note::Bubble {
+                bubble_h,
+                bubble_bottom,
+                content_h,
+                client_h,
+                can_scroll_to,
+                scrollbar_px,
+                window_h,
+                ..
+            } => Some((
+                *bubble_h,
+                *bubble_bottom,
+                *content_h,
+                *client_h,
+                *can_scroll_to,
+                *scrollbar_px,
+                *window_h,
+            )),
+            _ => None,
+        });
+        let (measured, verdict) = match bubble {
+            None => (Vec::new(), Verdict::NotSeen),
+            Some((h, bottom, content, client, scroll, bar, window)) => (
+                vec![
+                    m("氣泡高", MeasureValue::Num(h)),
+                    m("氣泡底邊", MeasureValue::Num(bottom)),
+                    m("視窗高", MeasureValue::Num(window)),
+                    m("內容高", MeasureValue::Num(content)),
+                    m("看得見的高", MeasureValue::Num(client)),
+                    m("捲得到（0 就是沒被切掉）", MeasureValue::Num(scroll)),
+                    m("捲軸佔幾像素", MeasureValue::Num(bar)),
+                ],
+                // 捲得到 > 0 就是有東西被切在框外面，而那正是他說「不好看」
+                // 的那個畫面。底邊掉出視窗也一樣。
+                if scroll > 0.5 || bottom > window + 0.5 {
+                    Verdict::Off
+                } else {
+                    Verdict::AsAsked
+                },
+            ),
+        };
+        items.push(Item {
+            number: 5,
+            asked: "回答的介面要像漫畫的氣泡框".into(),
+            measured,
+            verdict,
+        });
+
+        // ⑥ 沒事也笑幾下
+        let giggle_clips = self.clips(true);
+        items.push(Item {
+            number: 6,
+            asked: "沒事也可以呵呵嘻嘻笑幾下".into(),
+            measured: vec![
+                m("笑了幾次", MeasureValue::Int(giggle_clips.len() as i64)),
+                m(
+                    "幾句不同的",
+                    MeasureValue::Int(Self::distinct(&giggle_clips) as i64),
+                ),
+                m(
+                    "真的出聲的",
+                    MeasureValue::Int(
+                        giggle_clips.iter().filter(|(_, voiced)| *voiced).count() as i64
+                    ),
+                ),
+                m("這個角色手上有幾句", MeasureValue::Int(giggle_lines as i64)),
+            ],
+            verdict: if giggle_clips.is_empty() {
+                Verdict::NotSeen
+            } else {
+                Verdict::AsAsked
+            },
+        });
+
+        // ⑦ 講話像不像朋友
+        items.push(Item {
+            number: 7,
+            asked: "回答要像朋友講話，不要像機器人念出處".into(),
+            measured: vec![m(
+                "線下面有幾段",
+                MeasureValue::Int(self.answers().len() as i64),
+            )],
+            verdict: Verdict::CantJudge,
+        });
+
+        items
+    }
+}
+
+fn m(label: &str, value: MeasureValue) -> Measure {
+    Measure {
+        label: label.to_string(),
+        value,
+    }
+}
+
+// ───────────────────────── 從磁碟上讀起來 ─────────────────────────
+
+/// 讀幾趟外送。40 趟大約是二十題——夠看出「哪一趟慢」的形狀，又不會讓報告
+/// 長到沒有人讀。
+pub const LEGS: usize = 40;
+/// 「沒問」那幾列只折成計數，多讀一點不佔版面。
+pub const SKIPS: usize = 400;
+/// log 尾巴：每個檔最多幾行、每行最多幾字。
+pub const LOG_LINES: usize = 120;
+pub const LOG_LINE_CHARS: usize = 400;
+/// 只從檔尾讀這麼多位元組。一個跑了三個禮拜的 `record.log` 可以到幾百 MB，
+/// 而我們要的只有最後那幾行——整個讀進記憶體只是為了丟掉。
+pub const LOG_TAIL_BYTES: u64 = 512 * 1024;
+/// 會去翻的那幾個 log。
+pub const LOGS: [&str; 4] = ["desktop.log", "desktop.log.1", "record.log", "record.log.1"];
+
+/// 報告的檔名。帶時間，跑第二次不會蓋掉第一次。
+///
+/// 命令列和桌面版那顆鈕用的是同一支：兩邊各取各的名字，他就得在兩種檔名
+/// 之間猜哪一份是新的。
+pub fn file_name(now: Millis) -> String {
+    use chrono::{Local, TimeZone};
+    let when = Local
+        .timestamp_millis_opt(now)
+        .single()
+        .map(|dt| dt.format("%Y%m%d-%H%M%S").to_string())
+        .unwrap_or_else(|| now.to_string());
+    format!("sister-diagnose-{when}.txt")
+}
+
+/// 把磁碟上該讀的都讀起來。
+///
+/// **命令列和桌面版那顆鈕走的是同一支。** 「哪些檔案、哪幾張表、取多長」是一
+/// 條規則，這個 repo 已經在「一條規則寫兩個地方」上栽過很多次；兩份會在某一
+/// 版分家，而分家的症狀是兩邊印出來的報告講不同的話。
+///
+/// 畫面那兩節（自檢、答案原文）這裡填不了——只有畫面自己量得到。桌面版拿到
+/// 這份快照之後用 [`Notebook::fill`] 補上去；命令列補不了，於是那兩節印
+/// [`Absent::NotHere`]。
+pub fn collect(data_dir: &Path, source: &str, app_version: &str) -> Snapshot {
+    let db_path = crate::config::Config::db_path(data_dir);
+    let db = if db_path.exists() {
+        crate::db::Db::open(&db_path).map_err(|_| Absent::QueryFailed)
+    } else {
+        Err(Absent::NotThere)
+    };
+    collect_from(data_dir, source, app_version, db.as_ref().map_err(|e| *e))
+}
+
+/// 同一支，但資料庫連線由呼叫端給。
+///
+/// 桌面版手上已經有一條開著的連線了。再開第二條不是不行（WAL 讀得動），但
+/// 那條路上有一次 migration 檢查，而她可能正在寫——一份**只有在忙的時候才
+/// 查不出來**的診斷報告，剛好在最需要它的那一刻失效。
+pub fn collect_from(
+    data_dir: &Path,
+    source: &str,
+    app_version: &str,
+    db: std::result::Result<&crate::db::Db, Absent>,
+) -> Snapshot {
+    let mut scrub = Scrubber::new();
+    scrub.hide_paths(data_dir, home_dir().as_deref(), user_name().as_deref());
+
+    Snapshot {
+        at: crate::now_ms(),
+        app_version: app_version.to_string(),
+        platform: std::env::consts::OS.to_string(),
+        source: source.to_string(),
+        run_started_at: None,
+        data_dir_shown: where_it_lives(data_dir),
+        consent: ConsentLines::load(data_dir),
+        doctor: crate::capabilities::read(data_dir).ok_or(Absent::NotThere),
+        db: ask(db, |db| db.stats().ok()),
+        legs: ask(db, |db| {
+            db.list_brain_outbound(LEGS)
+                .ok()
+                .map(|rows| rows.iter().map(Leg::from_row).collect())
+        }),
+        skips: ask(db, |db| {
+            db.list_brain_skip(SKIPS)
+                .ok()
+                .map(|rows| SkipCount::fold(&rows))
+        }),
+        self_check: Err(Absent::NotHere),
+        answers: Err(Absent::NotHere),
+        logs: LOGS
+            .iter()
+            .map(|name| log_tail(data_dir, name, &scrub))
+            .collect(),
+    }
+}
+
+/// 資料庫問不出來的時候，回答的是「為什麼問不出來」，不是 `None`。
+///
+/// 一格空白讀起來像「沒問題」，而這份報告存在的理由正是要分得出「量到 0」
+/// 和「沒量到」。
+fn ask<T>(
+    db: std::result::Result<&crate::db::Db, Absent>,
+    f: impl FnOnce(&crate::db::Db) -> Option<T>,
+) -> Got<T> {
+    match db {
+        Err(absent) => Err(absent),
+        Ok(db) => f(db).ok_or(Absent::QueryFailed),
+    }
+}
+
+/// 講位置，不講路徑。「在不在預設的地方」才是診斷要的資訊；完整路徑只會把
+/// 使用者名稱帶出去。
+fn where_it_lives(data_dir: &Path) -> String {
+    match crate::config::Config::default_data_dir() {
+        Some(default) if default == data_dir => "預設位置".to_string(),
+        Some(_) => "自訂位置".to_string(),
+        None => "問不出預設位置在哪".to_string(),
+    }
+}
+
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    for key in ["USERPROFILE", "HOME"] {
+        if let Some(value) = std::env::var_os(key).filter(|v| !v.is_empty()) {
+            return Some(std::path::PathBuf::from(value));
+        }
+    }
+    None
+}
+
+pub fn user_name() -> Option<String> {
+    for key in ["USERNAME", "USER"] {
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn log_tail(data_dir: &Path, name: &str, scrub: &Scrubber) -> LogTail {
+    let text = match read_tail(&data_dir.join(name), LOG_TAIL_BYTES) {
+        Ok(text) => Ok(scrub.apply(&text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(Absent::NotThere),
+        Err(error) => Err(Absent::Unreadable(error.kind())),
+    };
+    match text {
+        Err(absent) => LogTail {
+            name: name.to_string(),
+            lines: Err(absent),
+            total_lines: 0,
+        },
+        Ok(text) => {
+            let (lines, total) = tail_lines(&text, LOG_LINES, LOG_LINE_CHARS);
+            LogTail {
+                name: name.to_string(),
+                lines: Ok(lines),
+                total_lines: total,
+            }
+        }
+    }
+}
+
+/// 檔案最後 `bytes` 個位元組，掐頭去掉那半行。
+///
+/// 從中間切開一定會切在某個字元中間，`from_utf8_lossy` 會把它變成一個 `�`。
+/// 丟掉第一個換行之前的東西就沒有這個問題——那半行本來也讀不懂。
+fn read_tail(path: &Path, bytes: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let whole = len <= bytes;
+    if !whole {
+        file.seek(SeekFrom::Start(len - bytes))?;
+    }
+    let mut buf = Vec::with_capacity(bytes.min(len) as usize);
+    file.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if whole {
+        return Ok(text);
+    }
+    Ok(match text.find('\n') {
+        Some(at) => text[at + 1..].to_string(),
+        None => text,
+    })
+}
+
+// ───────────────────────── 印出來 ─────────────────────────
 
 /// 終端機裡一個中日韓字元佔兩格。
 ///
@@ -712,8 +1397,29 @@ pub fn render(snapshot: &Snapshot) -> String {
     let head_chars = head.chars().count();
     let tail_chars = tail.chars().count();
 
+    /* ④ 自己也在線的上面，所以「線以上幾個字」這個數字**要把印它的那幾行算
+     * 進去**。
+     *
+     * 第一版只算了 ①～③，於是報告說「線以上 658 個字」而線以上真的有 900。
+     * 在一份靠數字取信於人的東西裡，標題叫「這份報告帶走了什麼」的那一節少報
+     * 了四分之一——那比不印還糟。
+     *
+     * 這個數字會改變自己的長度（999 變 1,003 就多兩格），所以收斂到不動點再
+     * 印。它單調往上又有上界，跑不了幾輪；跑不出來就維持最後那一版，不會卡住。 */
+    let mut above = head_chars;
+    let mut ledger = render_ledger(above, tail_chars, snapshot);
+    for _ in 0..8 {
+        // `+ 1` 是分隔線前面那個換行——它也在線的上面。
+        let settled = head_chars + ledger.chars().count() + 1;
+        if settled == above {
+            break;
+        }
+        above = settled;
+        ledger = render_ledger(above, tail_chars, snapshot);
+    }
+
     let mut out = head;
-    out.push_str(&render_ledger(head_chars, tail_chars, snapshot));
+    out.push_str(&ledger);
     out.push('\n');
     out.push_str(DIVIDER);
     out.push('\n');
@@ -868,10 +1574,26 @@ fn render_head(s: &Snapshot) -> String {
         Err(absent) => o.push_str(&format!("  {}\n", absent.say())),
         Ok(check) => {
             o.push_str(&format!(
-                "  量的時候 {}，只涵蓋 {} 之後發生的事\n",
+                "  量的時候 {}，這一輪 {} 開的\n",
                 stamp(check.at),
                 stamp(check.run_started_at),
             ));
+            // 沒擠掉就照實說涵蓋整輪；擠掉過就講真正看得到的那一段，並且把
+            // 「有一段沒看到」講出來——底下每一格的「0 次」都要照這個讀。
+            if check.dropped == 0 {
+                o.push_str(&format!(
+                    "  底下只涵蓋 {} 之後發生的事\n",
+                    stamp(check.run_started_at)
+                ));
+            } else {
+                o.push_str(&format!(
+                    "  簿子只留得下最後 {} 則，更早的 {} 則已經滾掉了——\n\
+                     \x20 所以底下只涵蓋 {} 之後，不是整輪\n",
+                    group(NOTES_KEPT as i64),
+                    group(check.dropped as i64),
+                    stamp(check.covers_from),
+                ));
+            }
             for item in &check.items {
                 o.push_str(&format!(
                     "  {} 第 {} 項　{}　{}\n",
@@ -1201,14 +1923,16 @@ mod tests {
         }]);
         let report = render(&snap);
 
-        let ledger_at = report.find("\n④ 這份報告帶走了什麼").expect("要有 ④");
-        let above = report[..ledger_at].chars().count();
+        // 量的是那句話**宣稱**的東西——「這條線以上」——不是它背後的某一段。
+        // 上一版量到 ④ 的標題就停了，於是 ④ 自己那幾行沒被算進去，數字少了
+        // 四分之一而這條測試是綠的。
+        let divider_at = report.find(DIVIDER).expect("要有那條線");
+        let above = report[..divider_at].chars().count();
         assert!(
             report.contains(&format!("這條線以上 {} 個字", group(above as i64))),
-            "④ 講的字數和 ① 到 ③ 實際的字數對不上（實際 {above}）：\n{report}"
+            "④ 講的字數和線以上實際的字數對不上（實際 {above}）：\n{report}"
         );
 
-        let divider_at = report.find(DIVIDER).expect("要有那條線");
         // 分隔線自己那個換行算在線上，不算在「線以下」。
         let below_at = divider_at + report[divider_at..].find('\n').expect("線後面要有換行") + 1;
         let below = report[below_at..].chars().count();
@@ -1611,5 +2335,382 @@ mod token_tests {
         let report = render(&snap);
         assert!(!report.contains(screen), "{report}");
         assert!(report.contains("?（17 字）"), "{report}");
+    }
+}
+
+#[cfg(test)]
+mod notebook_tests {
+    use super::*;
+
+    const SCREEN_TEXT: &str = "王小明的帳號密碼是 hunter2";
+
+    fn started() -> Note {
+        Note::Started {
+            at: 1_789_222_000_000,
+        }
+    }
+
+    fn persona() -> Note {
+        Note::Persona {
+            at: 1_789_222_000_000,
+            taps: 10,
+            giggles: 5,
+            beats: 5,
+        }
+    }
+
+    fn poke(at: Millis, moved: bool, clip: Option<&str>) -> Note {
+        Note::Poke {
+            at,
+            moved,
+            clip: clip.map(str::to_string),
+            voiced: clip.is_some(),
+        }
+    }
+
+    /// 開機那兩則永遠在最前面——真的跑起來也是這個順序。
+    fn book(notes: Vec<Note>) -> Notebook {
+        let mut book = Notebook::new();
+        book.note(persona());
+        for note in notes {
+            book.note(note);
+        }
+        book
+    }
+
+    fn item(book: &Notebook, number: u8) -> Item {
+        book.items()
+            .into_iter()
+            .find(|item| item.number == number)
+            .unwrap_or_else(|| panic!("要有第 {number} 項"))
+    }
+
+    fn value(item: &Item, label: &str) -> MeasureValue {
+        item.measured
+            .iter()
+            .find(|m| m.label == label)
+            .unwrap_or_else(|| panic!("要有「{label}」：{:?}", item.measured))
+            .value
+            .clone()
+    }
+
+    /// 這一輪沒發生過的事，要印「沒量」，不可以印成 ✓。
+    ///
+    /// 這是這份自檢最容易犯的錯：七格全綠，而其中五格根本沒有樣本。
+    #[test]
+    fn nothing_observed_is_not_the_same_as_nothing_wrong() {
+        let book = book(vec![started()]);
+        for number in [1, 2, 3, 4, 5, 6] {
+            assert_eq!(
+                item(&book, number).verdict,
+                Verdict::NotSeen,
+                "第 {number} 項沒有樣本卻不是「沒量」"
+            );
+        }
+        // 第 7 項永遠是「機器判不了」——它沒有一個數字答得出來。
+        assert_eq!(item(&book, 7).verdict, Verdict::CantJudge);
+    }
+
+    /// 上面那一槓收起來了，卻還看得見——這正是第 1 項要抓的失敗。
+    #[test]
+    fn a_bar_that_is_closed_but_still_visible_is_off() {
+        let good = book(vec![
+            started(),
+            Note::Bar {
+                at: 1,
+                open: false,
+                dragbar_hidden: true,
+            },
+        ]);
+        assert_eq!(item(&good, 1).verdict, Verdict::AsAsked);
+
+        let bad = book(vec![
+            started(),
+            Note::Bar {
+                at: 1,
+                open: false,
+                dragbar_hidden: false,
+            },
+        ]);
+        assert_eq!(item(&bad, 1).verdict, Verdict::Off);
+        assert_eq!(
+            value(&item(&bad, 1), "其中那一槓還看得見的"),
+            MeasureValue::Int(1)
+        );
+    }
+
+    /// 戳了會動但不出聲，和戳了不會動，是兩種不一樣的壞。兩種都要抓到。
+    #[test]
+    fn a_poke_that_moves_but_never_speaks_is_off() {
+        let silent = book(vec![started(), poke(1, true, None), poke(2, true, None)]);
+        assert_eq!(item(&silent, 2).verdict, Verdict::Off);
+        assert_eq!(value(&item(&silent, 2), "有動的"), MeasureValue::Int(2));
+        assert_eq!(value(&item(&silent, 2), "有講話的"), MeasureValue::Int(0));
+
+        // 講了話但語音關著，不算壞——那是他自己關的。
+        let muted = book(vec![
+            started(),
+            Note::Poke {
+                at: 1,
+                moved: true,
+                clip: Some("poke-aiyo".into()),
+                voiced: false,
+            },
+        ]);
+        assert_eq!(item(&muted, 2).verdict, Verdict::AsAsked);
+        assert_eq!(value(&item(&muted, 2), "真的出聲的"), MeasureValue::Int(0));
+
+        let still = book(vec![
+            started(),
+            poke(1, false, Some("poke-aiyo")),
+            poke(2, true, Some("poke-stop")),
+        ]);
+        assert_eq!(item(&still, 2).verdict, Verdict::Off);
+
+        let good = book(vec![
+            started(),
+            poke(1, true, Some("poke-aiyo")),
+            poke(2, true, Some("poke-stop")),
+        ]);
+        assert_eq!(item(&good, 2).verdict, Verdict::AsAsked);
+    }
+
+    /// 「按來按去只會一直講兩句話」——第 3 項就是為了這句話存在的。
+    #[test]
+    fn always_the_same_line_is_off() {
+        let same = book(vec![
+            started(),
+            poke(1, true, Some("poke-aiyo")),
+            poke(2, true, Some("poke-aiyo")),
+            poke(3, true, Some("poke-aiyo")),
+        ]);
+        assert_eq!(item(&same, 3).verdict, Verdict::Off);
+        assert_eq!(
+            value(&item(&same, 3), "用過幾句不同的"),
+            MeasureValue::Int(1)
+        );
+        assert_eq!(
+            value(&item(&same, 3), "這個角色手上有幾句"),
+            MeasureValue::Int(10)
+        );
+
+        let varied = book(vec![
+            started(),
+            poke(1, true, Some("poke-aiyo")),
+            poke(2, true, Some("poke-stop")),
+        ]);
+        assert_eq!(item(&varied, 3).verdict, Verdict::AsAsked);
+    }
+
+    /// 「問了一題竟然超過四秒？」
+    #[test]
+    fn a_median_answer_over_four_seconds_is_off() {
+        let answered = |took_ms| Note::Answered {
+            at: 1,
+            question_chars: 7,
+            took_ms,
+            sentences: vec!["喏，在這裡。".into()],
+            sources: vec!["文字#5443".into()],
+        };
+        let slow = book(vec![started(), answered(4_500), answered(6_200)]);
+        assert_eq!(item(&slow, 4).verdict, Verdict::Off);
+        assert_eq!(
+            value(&item(&slow, 4), "最慢那一題"),
+            MeasureValue::Int(6_200)
+        );
+
+        let quick = book(vec![started(), answered(2_100), answered(3_900)]);
+        assert_eq!(item(&quick, 4).verdict, Verdict::AsAsked);
+        // 邊界：剛好四秒還算過。
+        let edge = book(vec![started(), answered(4_000)]);
+        assert_eq!(item(&edge, 4).verdict, Verdict::AsAsked);
+    }
+
+    /// 幾何要看「捲得到多少」，不是看 `scrollHeight - clientHeight`。
+    ///
+    /// 那兩個數字在「內容捲得動」和「內容整個溢出去」兩種情況下一模一樣，
+    /// 而那正是這一格要分辨的兩件事。
+    #[test]
+    fn a_bubble_with_content_scrolled_out_of_sight_is_off() {
+        let bubble = |can_scroll_to, bottom| Note::Bubble {
+            at: 1,
+            bubble_h: 235.0,
+            bubble_bottom: bottom,
+            content_h: 554.0,
+            client_h: 207.0,
+            can_scroll_to,
+            scrollbar_px: 0.0,
+            window_h: 560.0,
+        };
+        let clipped = book(vec![started(), bubble(347.0, 245.0)]);
+        assert_eq!(item(&clipped, 5).verdict, Verdict::Off);
+        assert_eq!(
+            value(&item(&clipped, 5), "捲得到（0 就是沒被切掉）"),
+            MeasureValue::Num(347.0)
+        );
+
+        let whole = book(vec![started(), bubble(0.0, 245.0)]);
+        assert_eq!(item(&whole, 5).verdict, Verdict::AsAsked);
+
+        // 一整顆氣泡掉到視窗外面也是壞的，即使裡面沒有東西被捲走。
+        let overflowing = book(vec![started(), bubble(0.0, 592.0)]);
+        assert_eq!(item(&overflowing, 5).verdict, Verdict::Off);
+    }
+
+    /// 畫面送過來的 clip 代號要過 `Word` 那一關。過不了就當成沒出聲。
+    #[test]
+    fn a_clip_id_that_is_not_a_word_is_dropped() {
+        let book = book(vec![
+            started(),
+            poke(1, true, Some(SCREEN_TEXT)),
+            poke(2, true, Some("poke-aiyo")),
+        ]);
+        // 兩下都算「戳了」，但只有一句過得了關。
+        assert_eq!(value(&item(&book, 2), "戳了幾下"), MeasureValue::Int(2));
+        assert_eq!(
+            value(&item(&book, 3), "用過幾句不同的"),
+            MeasureValue::Int(1)
+        );
+
+        let mut snapshot = tests::snapshot();
+        book.fill(&mut snapshot, 2_000);
+        assert!(
+            !render(&snapshot).contains(SCREEN_TEXT),
+            "clip 代號漏進報告了"
+        );
+    }
+
+    /// 只留最後三段答案，而且舊的在前——讀的人是照時間往下看的。
+    #[test]
+    fn only_the_last_three_answers_are_kept_oldest_first() {
+        let answered = |at: Millis, text: &str| Note::Answered {
+            at,
+            question_chars: 5,
+            took_ms: 1_000,
+            sentences: vec![text.to_string()],
+            sources: vec!["文字#1".into()],
+        };
+        let book = book(vec![
+            started(),
+            answered(1, "第一"),
+            answered(2, "第二"),
+            answered(3, "第三"),
+            answered(4, "第四"),
+        ]);
+        let answers = book.answers();
+        assert_eq!(answers.len(), 3);
+        assert_eq!(answers[0].sentences[0], "第二");
+        assert_eq!(answers[2].sentences[0], "第四");
+    }
+
+    /// 畫面還沒說過話的時候，自檢是「沒量」，不是一份全綠的報告。
+    #[test]
+    fn a_notebook_that_never_heard_from_the_window_reports_nothing_measured() {
+        let mut snapshot = tests::snapshot();
+        Notebook::new().fill(&mut snapshot, 2_000);
+        assert_eq!(snapshot.self_check.as_ref().err(), Some(&Absent::NotHere));
+        assert_eq!(snapshot.run_started_at, None);
+        let report = render(&snapshot);
+        assert!(report.contains("這不是「沒問題」，是「沒量」"), "{report}");
+    }
+
+    /// 簿子有上限，因為它活在記憶體裡而她可以開一整天。
+    #[test]
+    fn the_notebook_forgets_the_oldest_notes() {
+        let mut book = Notebook::new();
+        book.note(started());
+        // 時間戳用真的往前走的值：這條測試要看「涵蓋範圍有沒有跟著縮」，
+        // 拿迴圈索引當時間會讓每一則都落在開機之前。
+        for i in 0..(NOTES_KEPT as i64 + 50) {
+            book.note(poke(1_789_222_000_000 + i, true, Some("poke-aiyo")));
+        }
+        assert_eq!(book.len(), NOTES_KEPT);
+        // 開機那一則被擠掉了，但「這一輪什麼時候開的」不可以跟著不見。
+        //
+        // 上一版它就是跟著不見的：`started_at()` 去 `notes` 裡面找，而那一則
+        // 永遠是第一則。他多戳幾百下，整節自檢就變成「沒量」——而簿子是滿的。
+        // 一份為了分辨「量到 0」和「沒量到」而存在的報告，這是最不該犯的那種錯。
+        assert_eq!(book.started_at(), Some(1_789_222_000_000));
+        assert_eq!(book.dropped(), 51);
+        // 涵蓋範圍要跟著縮：最舊的那幾則已經不在了。
+        assert!(
+            book.covers_from() > book.started_at(),
+            "擠掉了 {} 則，涵蓋範圍卻還是從開機算起",
+            book.dropped()
+        );
+    }
+
+    /// 這一輪的涵蓋範圍要印在自檢那一節的第一行。
+    /// 簿子擠滿了，自檢那一節還是要在。
+    ///
+    /// 上一版它會整節消失：`started_at()` 去 `notes` 裡找開機那一則，而那一則
+    /// 永遠是第一則、第一個被擠掉。於是他戳了幾百下之後匯出，讀到的是
+    /// 「這不是『沒問題』，是『沒量』」——而簿子是滿的。
+    #[test]
+    fn a_full_notebook_still_gets_a_self_check() {
+        let report = render(&filled(NOTES_KEPT as i64 + 50));
+        assert!(
+            !report.contains("這不是「沒問題」，是「沒量」"),
+            "簿子是滿的，自檢卻整節說沒量：\n{report}"
+        );
+        assert!(report.contains("第 2 項"), "自檢那幾格不見了：\n{report}");
+    }
+
+    /// 擠掉過就不可以再說「涵蓋整輪」。
+    ///
+    /// 那句話決定他怎麼讀底下每一格的「0 次」：是「真的沒發生」還是「沒看到」。
+    #[test]
+    fn a_full_notebook_admits_it_lost_the_early_part() {
+        let report = render(&filled(NOTES_KEPT as i64 + 50));
+        assert!(
+            report.contains("已經滾掉了"),
+            "沒承認漏掉那一段：\n{report}"
+        );
+        assert!(
+            !report.contains("底下只涵蓋 2026-09-12 03:26:40 之後發生的事"),
+            "擠掉過還在說涵蓋整輪：\n{report}"
+        );
+
+        // 對照組：沒擠掉的簿子照樣說涵蓋整輪，那句話不會平白多出來。
+        let small = render(&filled(3));
+        assert!(small.contains("底下只涵蓋"), "{small}");
+        assert!(
+            !small.contains("已經滾掉了"),
+            "什麼都沒擠掉卻說滾掉了：\n{small}"
+        );
+    }
+
+    /// 戳 `pokes` 下的一本簿子，已經 `fill` 進快照。
+    fn filled(pokes: i64) -> Snapshot {
+        let mut book = Notebook::new();
+        book.note(started());
+        book.note(persona());
+        for i in 0..pokes {
+            book.note(poke(1_789_222_000_000 + i, true, Some("poke-aiyo")));
+        }
+        let mut snapshot = tests::snapshot();
+        book.fill(&mut snapshot, 1_789_225_320_000);
+        snapshot
+    }
+
+    #[test]
+    fn the_report_says_how_far_back_the_self_check_can_see() {
+        let mut book = Notebook::new();
+        book.note(started());
+        // 動了、沒出聲——第 2 項要印 ✗。
+        book.note(poke(1_789_222_100_000, true, None));
+        let mut snapshot = tests::snapshot();
+        book.fill(&mut snapshot, 1_789_225_320_000);
+        let report = render(&snapshot);
+        assert!(report.contains("底下只涵蓋 2026-09-12"), "{report}");
+        assert!(
+            report.contains("✗ 第 2 項"),
+            "只戳一下沒出聲，第 2 項要是 ✗：\n{report}"
+        );
+        assert!(report.contains("？ 第 7 項"), "{report}");
+        assert!(
+            report.contains("－ 第 5 項"),
+            "沒有氣泡就要印「沒量」：\n{report}"
+        );
     }
 }

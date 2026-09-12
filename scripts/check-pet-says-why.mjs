@@ -343,6 +343,7 @@ async function open(
   const node = domOf(HTML);
   const listeners = new Map();
   const calls = [];
+  const diagnoseNotes = [];
   const invokes = [];
   const intervals = [];
   let audioPlays = 0;
@@ -427,6 +428,19 @@ async function open(
   const tauri = {
     core: {
       invoke: async (cmd, arg) => {
+        /* 診斷觀測不是產品指令。
+         *
+         * `diagnose_note` 在 Rust 那邊就只是 `Mutex<Notebook>` 上的一次 push：
+         * 不回傳東西、不碰任何狀態、沒有人 await 它。而底下好幾條契約的形狀是
+         * 「做完這個動作，`calls` 該是空的」——把一條純觀測混進同一條清單，會讓
+         * 那些契約在產品行為一個字都沒變的情況下變紅。
+         *
+         * 記到另一條清單上，不是丟掉：`diagnoseNotes` 自己有斷言，所以「濾掉」
+         * 不會變成「沒人看」。 */
+        if (cmd === "diagnose_note") {
+          diagnoseNotes.push(arg?.note);
+          return;
+        }
         calls.push(cmd);
         invokes.push({ cmd, arg });
         if (cmd === "master_stop_presentation_end") {
@@ -465,6 +479,7 @@ async function open(
   return {
     node,
     calls,
+    diagnoseNotes,
     invokes,
     nonsense,
     line: () => node("[data-state-line]").textContent,

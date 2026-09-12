@@ -231,6 +231,7 @@ async function open(personaView = persona(), options = {}) {
   const intervals = [];
   const slowTimers = [];
   const calls = [];
+  const diagnoseNotes = [];
   const solidPushes = [];
   const windowHandlers = {};
   const voiceReads = [];
@@ -402,6 +403,19 @@ async function open(personaView = persona(), options = {}) {
   const tauri = {
     core: {
       invoke: async (cmd, args) => {
+        /* 診斷觀測不是產品指令。
+         *
+         * `diagnose_note` 在 Rust 那邊就只是 `Mutex<Notebook>` 上的一次 push：
+         * 不回傳東西、不碰任何狀態、沒有人 await 它。而底下好幾條契約的形狀是
+         * 「做完這個動作，`calls` 該是空的」——把一條純觀測混進同一條清單，會讓
+         * 那些契約在產品行為一個字都沒變的情況下變紅。
+         *
+         * 記到另一條清單上，不是丟掉：`diagnoseNotes` 自己有斷言（見 ⑨），所以
+         * 「濾掉」不會變成「沒人看」。 */
+        if (cmd === "diagnose_note") {
+          diagnoseNotes.push(args?.note);
+          return;
+        }
         calls.push(cmd);
         if (cmd === "pet_solid_set") solidPushes.push(args?.solid ?? []);
         switch (cmd) {
@@ -509,6 +523,7 @@ async function open(personaView = persona(), options = {}) {
     body,
     css,
     calls,
+    diagnoseNotes,
     solidPushes,
     /* 模擬「`document.body` 的 class 換了一次」，叫醒真的會收到這一則的那幾個
      * observer。真瀏覽器會在當下自己跑，這裡沒有版面引擎，所以由測試在改完之後補
@@ -2322,6 +2337,84 @@ console.log("⑧ Persona 點擊台詞獨立；所有文字問題都走大腦與�
       /async function ask\([^)]*\)[\s\S]*?stopPersonaMedia\(\)/u.test(SRC),
     mediaStop,
   );
+}
+
+console.log("⑨ 診斷觀測送得出數字，送不出螢幕上的字");
+{
+  /* 這一節守的是上面那個 `invoke` stub 裡的過濾。
+   *
+   * 那幾行把 `diagnose_note` 從 `calls` 移到 `diagnoseNotes`，理由是「觀測不是
+   * 產品指令」。但「濾掉」和「刪掉偵測器」在通過的測試上長得一模一樣，所以這
+   * 一節要證兩件事：那條路還活著（正向），而且它送出去的東西真的只有數字。 */
+  const p = await open(persona("chatgpt"));
+  const beforePoke = p.diagnoseNotes.length;
+  await p.forceAvatarHandler();
+  const poked = p.diagnoseNotes.slice(beforePoke);
+  check(
+    "戳一下真的留下一則觀測——濾掉不等於沒人看",
+    poked.length === 1 && poked[0]?.kind === "poke",
+    JSON.stringify(poked),
+  );
+  const said = p.node("[data-persona-line]").textContent;
+  check("前提：她真的講了一句話", said !== "", said);
+  check(
+    "那一則觀測裡沒有她剛剛講的那句話",
+    said !== "" && !JSON.stringify(poked).includes(said),
+    JSON.stringify(poked),
+  );
+
+  /* 語音開著走的是另一條臂（等 `playBundledPersonaLine` 回話才記），而那條臂
+   * 和上面那條吐出來的 note 幾乎一模一樣——只差一個 `voiced`。兩臂長得像的時
+   * 候，先假設分辨它們的那個條件沒人守，所以兩邊各跑一次。 */
+  const loud = await open(persona("kimi", { voice_enabled: true }));
+  const beforeLoudPoke = loud.diagnoseNotes.length;
+  await loud.forceAvatarHandler();
+  const loudPokes = loud.diagnoseNotes.slice(beforeLoudPoke).filter((note) => note?.kind === "poke");
+  check("語音開著，戳一下一樣留得下觀測", loudPokes.length === 1, JSON.stringify(loudPokes));
+  check(
+    "語音開著時那一則說得出「真的出聲了」",
+    loudPokes[0]?.voiced === true,
+    JSON.stringify(loudPokes),
+  );
+  check(
+    "語音關著時那一則說的是「沒出聲」——兩臂分得開",
+    poked[0]?.voiced === false,
+    JSON.stringify(poked),
+  );
+
+  const beforeBar = p.diagnoseNotes.length;
+  await p.clickChromeToggle();
+  check(
+    "上面那一槓開合也留得下觀測",
+    p.diagnoseNotes.slice(beforeBar).some((note) => note?.kind === "bar"),
+    JSON.stringify(p.diagnoseNotes.slice(beforeBar)),
+  );
+
+  await p.ask("我的銀行密碼是 hunter2，昨天在幹嘛？");
+  check(
+    "他打的問題只留下字數，不留原文",
+    !p.diagnoseNotes.some((note) => JSON.stringify(note).includes("hunter2")),
+    JSON.stringify(p.diagnoseNotes.filter((note) => note?.kind === "answered")),
+  );
+
+  /* 機械掃一遍：除了 `answered`（她自己的答案，報告把那一節放在那條線的下面，
+   * 他可以整段刪掉），沒有一則觀測帶得動自由文字。
+   *
+   * 這一條是給**還沒寫出來的** note 種類看的：以後誰在 `Note` 上加一個字串欄
+   * 位，這裡當場紅，不必等到有人讀報告才發現螢幕上的字被送出去了。`clip` 是
+   * 語音檔的 lineId，所以另外釘它的形狀，免得有人拿它夾帶。 */
+  const CARRIES_HER_ANSWER = "answered";
+  const smuggled = [];
+  for (const note of [...p.diagnoseNotes, ...loud.diagnoseNotes]) {
+    if (note?.kind === CARRIES_HER_ANSWER) continue;
+    for (const [key, value] of Object.entries(note ?? {})) {
+      if (typeof value !== "string") continue;
+      if (key === "kind") continue;
+      if (key === "clip" && /^[a-z0-9_-]+$/u.test(value)) continue;
+      smuggled.push({ kind: note?.kind, key, value });
+    }
+  }
+  check("除了她的答案，沒有一則觀測帶自由文字", smuggled.length === 0, JSON.stringify(smuggled));
 }
 
 console.log("");

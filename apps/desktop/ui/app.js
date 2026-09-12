@@ -737,6 +737,145 @@ function profileFor(id) {
  */
 const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
 
+/*
+ * ---------- 診斷回報 ----------
+ *
+ * 她整個產品的前提之一是「出了事說得出來」，而 `desktop.log` 躺在
+ * `%APPDATA%` 深處，沒有人會開。這幾行做的只有一件事：把**只有畫面量得到**
+ * 的東西交給 native 存著（上面那一槓現在在不在、氣泡有沒有把字切掉、戳了幾
+ * 下出了幾次聲），等他按「匯出診斷」的時候一起寫進報告。
+ *
+ * **這一頁不參與判斷。** 每一格叫什麼名字、算不算「照你要的」，都在 Rust 那
+ * 一邊（`sister_core::diagnose::Notebook::items`）。這裡送得出去的只有數字、
+ * 旗標和 `lineId`——`Note` 那個型別收不下螢幕上的字，那不是紀律，是型別。
+ * 唯一的自由文字是她自己的答案句子，而報告把那一節放在線的下面。
+ *
+ * 整條路 fire-and-forget：一則診斷觀測沒送成，不可以讓她的畫面出事。
+ */
+function noteForDiagnosis(note) {
+  if (invoke === null) return;
+  try {
+    invoke("diagnose_note", { note }).catch(() => {});
+  } catch {
+    // 連送都送不出去，也不可以往外丟。
+  }
+}
+
+/*
+ * 把一支量測包成「絕對不會往外丟」。
+ *
+ * 這不是防禦性潔癖，是真的出過事：`noteTheAnswer` 掛在答案落地的 callback
+ * 裡，它用了 `requestAnimationFrame`，而版面驗證用的假 DOM 沒有那個函式——
+ * 一個 ReferenceError 就把它底下那一聲「找到了」和整段朗讀全部帶走了，而畫面
+ * 上看起來只是「她答完就不出聲了」。
+ *
+ * 量一件事不可以改變它，更不可以取消它。順帶擋掉 `invoke === null`：這一頁在
+ * 一般瀏覽器裡也會被打開，沒有人在收的時候，`noteTheBubble` 一次都不該去碰
+ * `scrollTop`。
+ */
+function observation(measure) {
+  return (...args) => {
+    if (invoke === null) return;
+    try {
+      measure(...args);
+    } catch {
+      // 量不到就算了。診斷是配角，配角不可以把主角帶走。
+    }
+  };
+}
+
+/*
+ * 她剛剛答了什麼、花了多久、氣泡長什麼樣。
+ *
+ * 送出去的句子是**她自己的話**，所以報告把這一節放在那條線的下面，而且和
+ * log 尾巴分成兩節——他可以只刪掉其中一節。他打的問題不送，只送字數：那是
+ * 他的話，不是她的。
+ */
+const noteTheAnswer = observation((question, answer, tookMs) => {
+  const sentences = [];
+  const sources = [];
+  for (const sentence of answer?.synthesis?.sentences ?? []) {
+    if (typeof sentence?.text !== "string") continue;
+    sentences.push(sentence.text);
+    sources.push(
+      (sentence.sources ?? [])
+        .map((source) => source?.label)
+        .filter((label) => typeof label === "string")
+        .join("、"),
+    );
+  }
+  noteForDiagnosis({
+    kind: "answered",
+    at: Date.now(),
+    question_chars: [...String(question ?? "")].length,
+    took_ms: tookMs,
+    sentences,
+    sources,
+  });
+  // 版面要等瀏覽器把這一幀排完才量得準；沒有 rAF 的環境就只是不量版面，上面
+  // 那一則已經送出去了。
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(noteTheBubble);
+});
+
+/** 這一輪這個角色手上有幾句閒話。角色換了要重送一次。 */
+const noteThePersonaPack = observation(() => {
+  noteForDiagnosis({
+    kind: "persona",
+    at: Date.now(),
+    taps: activeProfile.taps.length,
+    giggles: activeProfile.giggles.length,
+    beats: activeProfile.beats.length,
+  });
+});
+
+/** 上面那一槓現在的樣子。收起來的時候它該是 `visibility: hidden`。 */
+const noteTheChromeBar = observation(() => {
+  const open = document.body.classList.contains("chrome-open");
+  let hidden = false;
+  try {
+    hidden = getComputedStyle(chromeBar).visibility === "hidden";
+  } catch {
+    // 量不到就當成看得見——這一格 fail-open 才會讓真的問題浮出來。
+  }
+  noteForDiagnosis({
+    kind: "bar",
+    at: Date.now(),
+    open,
+    dragbar_hidden: hidden,
+  });
+});
+
+/*
+ * 氣泡的幾何。
+ *
+ * 「捲得到多少」是把 `scrollTop` 推到底再讀回來，不是 `scrollHeight -
+ * clientHeight`：那兩個數字在「內容捲得動」和「內容整個溢出去看不見」兩種
+ * 情況下**一模一樣**，而那正是這一格要分辨的兩件事。
+ *
+ * 量完一定要把 `scrollTop` 放回去。少了那一行，他問完第一眼看到的是被捲到
+ * 底的答案——量一件事不可以改變它。
+ */
+const noteTheBubble = observation(() => {
+  const bubble = document.querySelector(".answer-bubble");
+  if (bubble === null || hitList === null) return;
+  const box = bubble.getBoundingClientRect();
+  const before = hitList.scrollTop;
+  hitList.scrollTop = 99999;
+  const canScrollTo = hitList.scrollTop;
+  hitList.scrollTop = before;
+  noteForDiagnosis({
+    kind: "bubble",
+    at: Date.now(),
+    bubble_h: box.height,
+    bubble_bottom: box.bottom,
+    content_h: hitList.scrollHeight,
+    client_h: hitList.clientHeight,
+    can_scroll_to: canScrollTo,
+    scrollbar_px: hitList.offsetWidth - hitList.clientWidth,
+    window_h: window.innerHeight,
+  });
+});
+
 // ---------- 狀態 ----------
 
 /**
@@ -1103,6 +1242,7 @@ function applyPersona(view) {
     return false;
   }
   activeProfile = requestedProfile;
+  noteThePersonaPack();
   // 缺 bool 欄位只代表舊後端／瀏覽器 demo；聲音仍只接受 exact true。
   personaEnabled = view?.enabled !== false;
   personaMotion = view?.motion !== false;
@@ -1461,15 +1601,44 @@ async function sayPersonaLine(event) {
   // 抖那一下不看 `personaTapLines`。那個開關管的是「她說不說話」，不是「她理不
   // 理你」——戳下去整個人一動也不動，那不是安靜，那是當掉。
   joltHer();
-  if (!personaTapLines) return;
+  const moved = avatar?.classList?.contains?.("poked") === true;
+  if (!personaTapLines) {
+    noteForDiagnosis({ kind: "poke", at: Date.now(), moved, clip: null, voiced: false });
+    return;
+  }
   const line = pickBanter(activeProfile.taps);
-  if (line === null) return;
+  if (line === null) {
+    noteForDiagnosis({ kind: "poke", at: Date.now(), moved, clip: null, voiced: false });
+    return;
+  }
   lastSpokenLineId = line.lineId;
   personaLine.textContent = line.text;
   personaLine.hidden = false;
 
   stopPersonaMedia();
-  if (personaVoiceEnabled) void playBundledPersonaLine(line);
+  // 「講了話」和「真的出聲了」是兩件事：語音關著的時候她照樣講話，只是沒有
+  // 聲音。報告要分得出來，不然一台把語音關掉的機器讀起來會像壞了。
+  if (personaVoiceEnabled) {
+    void playBundledPersonaLine(line)
+      .catch(() => false)
+      .then((voiced) => {
+        noteForDiagnosis({
+          kind: "poke",
+          at: Date.now(),
+          moved,
+          clip: line.lineId,
+          voiced: voiced === true,
+        });
+      });
+  } else {
+    noteForDiagnosis({
+      kind: "poke",
+      at: Date.now(),
+      moved,
+      clip: line.lineId,
+      voiced: false,
+    });
+  }
 }
 
 /**
@@ -1620,7 +1789,25 @@ function giggleIfNothingIsHappening() {
     personaLine.textContent = "";
     personaLine.hidden = true;
   }, IDLE_GIGGLE_LINGER_MS);
-  if (personaVoiceEnabled) void playBundledPersonaLine(line);
+  if (personaVoiceEnabled) {
+    void playBundledPersonaLine(line)
+      .catch(() => false)
+      .then((voiced) => {
+        noteForDiagnosis({
+          kind: "giggle",
+          at: Date.now(),
+          clip: line.lineId,
+          voiced: voiced === true,
+        });
+      });
+  } else {
+    noteForDiagnosis({
+      kind: "giggle",
+      at: Date.now(),
+      clip: line.lineId,
+      voiced: false,
+    });
+  }
 }
 
 scheduleIdleGiggle();
@@ -5291,6 +5478,7 @@ async function ask(event = null) {
     }
   }, SLOW_MS);
 
+  const askedAt = Date.now();
   try {
     if (invoke === null) throw new Error("這一頁不是在 AI-Sister 裡打開的");
     const answer = await invoke("ask", { question });
@@ -5340,6 +5528,9 @@ async function ask(event = null) {
         answer.synthesis,
         answer.brain,
       );
+      // 畫完了才量得到。這一段不改任何東西——`noteTheBubble` 量完會把
+      // `scrollTop` 放回去，他看到的第一眼仍是最上面那一句。
+      noteTheAnswer(question, answer, Date.now() - askedAt);
       setState("idle");
       // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
       askInput.value = "";
@@ -5418,6 +5609,7 @@ askSend?.addEventListener("click", () => void ask());
 function setChromeOpen(open) {
   document.body.classList.toggle("chrome-open", open);
   chromeToggle?.setAttribute?.("aria-expanded", open ? "true" : "false");
+  noteTheChromeBar();
 }
 
 // 這顆不擋 `isTrusted`。上面那五顆（暫停、置頂、收起來…）也都沒擋——會擋的
@@ -6050,3 +6242,16 @@ if (browserDemoQuery && params.get("hits") === "none") {
     params.get("glued"),
   );
 }
+
+/*
+ * 開機這三則。
+ *
+ * 「這一輪什麼時候開的」只送一次——換角色不代表重新開始，而把兩件事塞進同
+ * 一則，自檢那一節的涵蓋範圍會在他換一次角色的時候悄悄往前跳。
+ *
+ * 那一槓也要在這裡送一次：它的預設狀態是「不在」，而**沒有人回報過的預設
+ * 狀態，在報告上和「沒量過」長得一模一樣**。
+ */
+noteForDiagnosis({ kind: "started", at: Date.now() });
+noteThePersonaPack();
+noteTheChromeBar();

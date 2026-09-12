@@ -215,6 +215,10 @@ struct Shell {
     /// 決定游標底下要不要讓點擊穿透過去。空的代表**還沒收到回報**，那時候
     /// `sister_shell::hit::poll_step` 會當成整片實心、維持可點——見那支函式的說明。
     hit_solid: Mutex<Vec<bounds::Rect>>,
+    /// 這一輪畫面回報過的觀測。**只在記憶體裡**——資料目錄裡每多一個檔案，
+    /// forget／export／prune 三條刪除路就各要接一次，而且它自己會變成一個新
+    /// 的隱私面。代價是重開機之後這本簿子是空的，而報告會把那句話印出來。
+    diagnostics: Mutex<sister_core::diagnose::Notebook>,
     /// renderer 說「游標剛動了，現在就去看」。
     ///
     /// 和 `hit_solid` 是兩件事：那個是**算答案的材料**，這個是**該重算了的
@@ -3132,6 +3136,90 @@ mod answer_cli_selection_tests {
         config.set_brain_cli_from_page("custom-agent".into(), vec!["--raw".into()]);
         assert!(answer_cli_from_config(&config).is_none());
     }
+}
+
+/// 畫面回報一則觀測。
+///
+/// **native 只存，不算。** 這一格叫什麼、算不算「照你要的」，全在
+/// [`sister_core::diagnose::Notebook::items`] 那一邊；畫面送得出來的只有數字、
+/// 旗標和一個 `lineId`（見 `Note` 的型別）。少了這條分工，畫面就變成報告的第
+/// 二個寫入端，而那份報告裡有一半的字會是它說了算——那正好是這份報告最不該
+/// 有的性質。
+///
+/// 不回錯誤：一則診斷觀測沒記成，不可以讓她的畫面出事。
+#[tauri::command]
+fn diagnose_note(shell: tauri::State<'_, Shell>, note: sister_core::diagnose::Note) {
+    if let Ok(mut book) = shell.diagnostics.lock() {
+        book.note(note);
+    }
+}
+
+/// 把這一輪寫成一個可以貼出去的檔案，回傳它在哪。
+///
+/// 讀什麼、印什麼和 `sister diagnose` 是同一支 `collect_from` 加同一支
+/// `render`；這裡多的只有畫面那兩節（自檢、答案原文），以及「寫到哪」。
+#[tauri::command]
+fn diagnose_export(
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+) -> Result<String, String> {
+    let data_dir = shell
+        .data_dir
+        .clone()
+        .ok_or_else(|| "這台機器上問不出資料目錄，寫不出診斷報告。".to_string())?;
+    let now = sister_core::now_ms();
+
+    // 用她已經開著的那條連線。再開第二條會在她正在寫的時候撞上 migration
+    // 檢查，而一份「只有在忙的時候才查不出來」的診斷報告，剛好在最需要它的
+    // 那一刻失效。開不起來也不是致命的——那幾格會誠實地說自己查不出來。
+    let mut snapshot = with_db(&shell, |db| {
+        Ok(sister_core::diagnose::collect_from(
+            &data_dir,
+            "桌面版設定頁",
+            env!("CARGO_PKG_VERSION"),
+            Ok(db),
+        ))
+    })
+    .unwrap_or_else(|_| {
+        sister_core::diagnose::collect_from(
+            &data_dir,
+            "桌面版設定頁",
+            env!("CARGO_PKG_VERSION"),
+            Err(sister_core::diagnose::Absent::QueryFailed),
+        )
+    });
+
+    if let Ok(book) = shell.diagnostics.lock() {
+        book.fill(&mut snapshot, now);
+    }
+
+    let text = sister_core::diagnose::render(&snapshot);
+    let path = diagnose_report_dir(&app).join(sister_core::diagnose::file_name(now));
+    std::fs::write(&path, &text).map_err(|error| format!("寫不進 {}：{error}", path.display()))?;
+    tracing::info!("診斷報告寫到 {}", path.display());
+    Ok(path.display().to_string())
+}
+
+/// 報告寫到看得到的地方。
+///
+/// 最後才退到暫存資料夾，**不退到 data dir**：那裡每多一個檔案，三條刪除路
+/// 就各要接一次。
+fn diagnose_report_dir(app: &tauri::AppHandle) -> PathBuf {
+    let resolver = app.path();
+    for dir in [
+        resolver.desktop_dir(),
+        resolver.download_dir(),
+        resolver.document_dir(),
+        resolver.home_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if dir.is_dir() {
+            return dir;
+        }
+    }
+    std::env::temp_dir()
 }
 
 fn record_answer_outbound(
@@ -7255,6 +7343,7 @@ fn main() {
             azure_tts_transition: Arc::new(Mutex::new(())),
             brain_cli_state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             answer_cli: Mutex::new(None),
+            diagnostics: Mutex::new(sister_core::diagnose::Notebook::new()),
             hit_solid: Mutex::new(Vec::new()),
             hit_wake: std::sync::Arc::new((Mutex::new(false), std::sync::Condvar::new())),
         })
@@ -7263,6 +7352,8 @@ fn main() {
             toggle_pin,
             pet_solid_set,
             pet_pointer_moved,
+            diagnose_note,
+            diagnose_export,
             hide_to_tray,
             ask,
             answer_cli_cancel,

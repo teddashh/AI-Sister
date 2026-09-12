@@ -2637,6 +2637,43 @@ azureTtsChangedListener?.then?.(
   () => {},
 );
 
+/*
+ * ---------- 匯出診斷 ----------
+ *
+ * 寫檔那件事整條在 native（`diagnose_export`）：讀什麼、印什麼和
+ * `sister diagnose` 是同一支，所以命令列和這顆鍵印出來的是同一份東西。
+ * 這一頁只負責按下去、把路徑講出來、以及**在他還沒貼之前再提醒一次**線以下
+ * 是他自己的東西。
+ *
+ * 路徑印出來就好，不去開檔案總管：開東西是另一種能力，這顆鍵不需要它。
+ */
+const diagnoseButton = document.querySelector("[data-diagnose-export]");
+const diagnoseSay = document.querySelector("[data-diagnose-say]");
+
+function sayAboutDiagnose(text) {
+  if (diagnoseSay === null) return;
+  diagnoseSay.textContent = text;
+}
+
+diagnoseButton?.addEventListener("click", async () => {
+  if (invoke === null) {
+    sayAboutDiagnose("這一頁不是在 AI-Sister 裡打開的，寫不出檔案。");
+    return;
+  }
+  diagnoseButton.disabled = true;
+  sayAboutDiagnose("正在讀…");
+  try {
+    const path = await invoke("diagnose_export");
+    sayAboutDiagnose(
+      `寫好了：${path}　貼之前先看一眼那條線以下的兩節，不想給就整段刪掉。`,
+    );
+  } catch (error) {
+    sayAboutDiagnose(`寫不出來：${error}`);
+  } finally {
+    diagnoseButton.disabled = false;
+  }
+});
+
 const variant = new URLSearchParams(globalThis.location.search).get("demo");
 if (variant !== null) {
   demo(variant);
