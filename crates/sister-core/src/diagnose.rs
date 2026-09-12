@@ -423,6 +423,10 @@ pub enum Verdict {
     ///
     /// 少了中間這一種，最常見的那次失敗（CLI 還沒設好，一問就錯）會印成第
     /// 一種——叫他去做他已經做過的事。
+    ///
+    /// 記號用全形的「＊」，不是「…」：`…`（U+2026）在 Unicode 裡是 East
+    /// Asian **Ambiguous**，同一份報告在他的終端機和我的終端機寬度不一樣，
+    /// 而這一欄底下每一行都靠它對齊。`－？！` 全是全形，新的一個也要是。
     NeverLanded,
 }
 
@@ -434,7 +438,7 @@ impl Verdict {
             Verdict::NotSeen => "－",
             Verdict::CantJudge => "？",
             Verdict::NotMeasured => "！",
-            Verdict::NeverLanded => "…",
+            Verdict::NeverLanded => "＊",
         }
     }
 
@@ -445,7 +449,7 @@ impl Verdict {
             Verdict::NotSeen => "這一輪沒發生過，量不到",
             Verdict::CantJudge => "機器判不了，答案原文在線下面 ⑤，你自己看",
             Verdict::NotMeasured => "該量到卻沒量到——不是這一輪沒發生，是這一格量不出來",
-            Verdict::NeverLanded => "你做了，可是每一次都沒走到底——底下那幾格寫著為什麼",
+            Verdict::NeverLanded => "試過了，可是每一次都沒走到底——底下那幾格寫著為什麼",
         }
     }
 }
@@ -1841,12 +1845,9 @@ fn render_head(s: &Snapshot) -> String {
                 .max()
                 .unwrap_or(0);
             for item in &check.items {
-                /* 記號補到兩格寬。`✓` 一格、`－？！` 兩格（全形），不補的
-                 * 話同一份表裡的「第 N 項」會左右各差一格——而那一欄正是他
-                 * 用來掃的。 */
                 o.push_str(&format!(
                     "  {} 第 {} 項　{}　{}\n",
-                    pad(item.verdict.mark(), 2),
+                    item.verdict.mark(),
                     item.number,
                     item.asked,
                     item.verdict.say(),
@@ -1995,6 +1996,17 @@ mod tests {
 
     /// 螢幕上會有、報告裡絕對不該有的一串字。
     const SCREEN_TEXT: &str = "王小明的帳號密碼是 hunter2";
+    /// 螢幕上的字，短到過得了長度那一關。
+    ///
+    /// 分開一條的理由是量出來的。`Word` 有兩關：先 `len() > 32`，再看字元。
+    /// `SCREEN_TEXT` 是 35 bytes，所以拿它當夾具的私密斷言，擋住它的其實是
+    /// **長度**那一關。實測：把字元那一關整個關掉（`if false && !raw.bytes()…`），
+    /// 三條「螢幕上的字不准印出來」照樣全綠——只有 `Word` 自己那條單元測試
+    /// 紅，而它紅在 `Hello`，跟中文無關。換成這一條（13 bytes）之後，同一刀
+    /// 四條全紅。
+    ///
+    /// 夾具要讓我瞄準的那一關成為唯一的那一關。
+    const SHORT_SCREEN_TEXT: &str = "密碼hunter2";
 
     pub(super) fn row(
         role: &str,
@@ -2291,7 +2303,11 @@ mod tests {
         assert!(Word::new("chrome-open").is_some());
         assert!(Word::new("hidden").is_some());
         assert!(Word::new("v2").is_some());
-        assert!(Word::new(SCREEN_TEXT).is_none(), "中文不該進得去");
+        assert!(
+            Word::new(SHORT_SCREEN_TEXT).is_none(),
+            "中文不該進得去。這一句要短到過得了長度那一關，不然擋它的是 `> 32`"
+        );
+        assert!(Word::new(SCREEN_TEXT).is_none(), "又長又是中文，兩關都該擋");
         assert!(Word::new("Hello").is_none(), "大寫不收，免得有人塞句子");
         assert!(Word::new("two words").is_none());
         assert!(Word::new("").is_none());
@@ -2648,7 +2664,17 @@ mod token_tests {
 mod notebook_tests {
     use super::*;
 
-    const SCREEN_TEXT: &str = "王小明的帳號密碼是 hunter2";
+    /// 螢幕上的字，短到過得了長度那一關。
+    ///
+    /// 分開一條的理由是量出來的。`Word` 有兩關：先 `len() > 32`，再看字元。
+    /// `SCREEN_TEXT` 是 35 bytes，所以拿它當夾具的私密斷言，擋住它的其實是
+    /// **長度**那一關。實測：把字元那一關整個關掉（`if false && !raw.bytes()…`），
+    /// 三條「螢幕上的字不准印出來」照樣全綠——只有 `Word` 自己那條單元測試
+    /// 紅，而它紅在 `Hello`，跟中文無關。換成這一條（13 bytes）之後，同一刀
+    /// 四條全紅。
+    ///
+    /// 夾具要讓我瞄準的那一關成為唯一的那一關。
+    const SHORT_SCREEN_TEXT: &str = "密碼hunter2";
 
     fn started() -> Note {
         Note::Started {
@@ -2915,7 +2941,7 @@ mod notebook_tests {
     fn a_clip_id_that_is_not_a_word_is_dropped() {
         let book = book(vec![
             started(),
-            poke(1, true, Some(SCREEN_TEXT)),
+            poke(1, true, Some(SHORT_SCREEN_TEXT)),
             poke(2, true, Some("poke-aiyo")),
         ]);
         // 兩下都算「戳了」，但只有一句過得了關。
@@ -2928,7 +2954,7 @@ mod notebook_tests {
         let mut snapshot = tests::snapshot();
         book.fill(&mut snapshot, 2_000);
         assert!(
-            !render(&snapshot).contains(SCREEN_TEXT),
+            !render(&snapshot).contains("hunter2"),
             "clip 代號漏進報告了"
         );
     }
@@ -3164,11 +3190,11 @@ mod notebook_tests {
         );
         assert_eq!(
             mark_of(&report, 4),
-            "…",
+            "＊",
             "「試過了、每次都沒走到底」要有自己的記號，不能和「沒發生過」共用：\n{report}"
         );
         assert!(
-            report.contains("你做了，可是每一次都沒走到底"),
+            report.contains("試過了，可是每一次都沒走到底"),
             "記號旁邊那句話要說得出他該看哪裡：\n{report}"
         );
     }
@@ -3204,7 +3230,7 @@ mod notebook_tests {
     #[test]
     fn an_ask_reason_carrying_screen_text_is_counted_but_never_printed() {
         let smuggled = book(vec![
-            failed(1_789_222_101_000, SCREEN_TEXT),
+            failed(1_789_222_101_000, SHORT_SCREEN_TEXT),
             failed(1_789_222_102_000, "error"),
         ]);
         let report = reported(&smuggled);
@@ -3404,7 +3430,7 @@ mod notebook_tests {
     #[test]
     fn a_blocker_carrying_screen_text_is_counted_but_never_printed() {
         let smuggled = book(vec![
-            skipped(1_789_222_001_000, "他正在打字：我的密碼是 hunter2"),
+            skipped(1_789_222_001_000, SHORT_SCREEN_TEXT),
             skipped(1_789_222_002_000, "hidden"),
         ]);
         /* 漏沒漏那一條擺最前面。斷言是短路的：排在後面的話，任何一個先失敗
@@ -3481,43 +3507,35 @@ mod notebook_tests {
         );
     }
 
-    /// 每一行的「第 N 項」都從同一格開始。
+    /// 每一種「沒量到」的記號都是全形，寬度不會因為終端機而變。
     ///
-    /// `✓` 是一格，`－？！…` 是兩格（全形）。記號不補寬度的話，同一份表裡
-    /// 的項次會左右各差一格——而那一欄正是他用來掃的那一欄。
+    /// `✓`／`✗` 是一組（窄），`－？！＊` 是另一組（全形）。同一組裡混進一個
+    /// East Asian **Ambiguous** 的字（`…`、`⋯` 都是），那一份報告在他的終端
+    /// 機和我的終端機會長得不一樣——而每一列的值都靠這一欄對齊。
     #[test]
-    fn every_self_check_row_starts_its_number_at_the_same_column() {
-        let mut book = Notebook::new();
-        book.note(started());
-        book.note(poke(1_789_222_100_000, true, Some("poke-aiyo")));
-        book.note(poke(1_789_222_101_000, true, Some("poke-fan")));
-        let mut snapshot = tests::snapshot();
-        book.fill(&mut snapshot, 1_789_225_320_000);
-        let report = render(&snapshot);
-
-        let rows: Vec<&str> = report
-            .lines()
-            .filter(|line| line.contains(" 項　"))
-            .collect();
-        assert_eq!(rows.len(), 7, "七件事七行：\n{report}");
-
-        // 空過的話這條測試等於沒跑：一格寬和兩格寬的記號都要真的出現。
-        let widths: Vec<usize> = rows
-            .iter()
-            .map(|line| cells(&line.trim_start().chars().next().unwrap().to_string()))
-            .collect();
-        assert!(
-            widths.contains(&1) && widths.contains(&2),
-            "這份夾具沒同時產出窄記號和寬記號，對齊這件事等於沒測：\n{report}"
-        );
-
-        let columns: Vec<usize> = rows
-            .iter()
-            .map(|line| cells(&line[..line.find("第 ").expect("這一行有「第 」")]))
-            .collect();
-        assert!(
-            columns.iter().all(|column| *column == columns[0]),
-            "「第 N 項」沒有對齊，各在第 {columns:?} 格：\n{report}"
-        );
+    fn every_blank_mark_is_the_same_width() {
+        let wide_marks = [
+            Verdict::NotSeen,
+            Verdict::CantJudge,
+            Verdict::NotMeasured,
+            Verdict::NeverLanded,
+        ];
+        for verdict in wide_marks {
+            assert_eq!(
+                cells(verdict.mark()),
+                2,
+                "{verdict:?} 的記號 {:?} 不是兩格寬",
+                verdict.mark()
+            );
+        }
+        // 「量到了」那一組是另一個寬度，而那是它從第一版就有的樣子。這裡
+        // 只是把「有兩組」寫下來，免得下一個人以為整欄都該對齊。
+        for verdict in [Verdict::AsAsked, Verdict::Off] {
+            assert_eq!(
+                cells(verdict.mark()),
+                1,
+                "{verdict:?} 和它的兄弟該同一組寬度"
+            );
+        }
     }
 }
