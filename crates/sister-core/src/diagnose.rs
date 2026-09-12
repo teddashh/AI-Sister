@@ -1,0 +1,1615 @@
+//! 一份跑完可以直接貼出來的診斷報告。
+//!
+//! ## 為什麼是報告，不是「再多記一點 log」
+//!
+//! 這台機器上該記的東西幾乎都已經在記了：`desktop.log`／`record.log` 有
+//! tracing 的每一行，`brain_outbound` 有**每一趟**外送的毫秒數、字數與結局
+//! （答題那兩趟還分得出來是哪一趟，見 `role`），`brain_skip` 有每一次「沒
+//! 問」的理由，`capabilities.json` 有上一場錄製量到的能力。缺的從來不是資
+//! 料，是**有人把它們讀出來**——和 [`crate::capabilities`] 開頭那句「那個檔案
+//! 沒有人會開」是同一個病。
+//!
+//! 所以這裡不新增第二套記錄，只做一件事：把已經在磁碟上的東西讀成一份人看得
+//! 懂、而且可以整份貼給別人的字。
+//!
+//! ## 兩半
+//!
+//! - **被動**：上面那些檔案與資料表。跨得過重開機，因為它們在磁碟上。
+//! - **主動自檢**：畫面自己量自己（氣泡多高、捲得到捲不到、上面那一槓現在
+//!   看不看得見）。這一半只有桌面版按下那顆鈕才有——命令列量不到畫面，那時
+//!   候這一節會印 [`Absent::NotHere`] 而不是安靜消失。一節不見了，和一節沒問
+//!   題，在紙上長得一模一樣。
+//!
+//! ## 哪幾格可能有你的東西
+//!
+//! 報告分成兩半，中間有一條線。線以上**放不下**螢幕上的內容——不是因為有人
+//! 記得要遮，是因為那幾個型別沒有能裝它的欄位：
+//!
+//! - [`Leg`] 有 `duration_ms`、`chars_sent`、`outcome`，**沒有 `error: String`**。
+//!   `outcome` 留原字是因為它每一個值都是我們自己原始碼裡的字面值
+//!   （`kind.as_str()`、`"success"`、`"bad_json"`…）；`error` 不是——它是
+//!   `format!` 把 CLI 回來的東西包進去組出來的，serde 的 `invalid type: string
+//!   "…"` 就會把模型吐的字帶進來。所以 `error` 在這裡只剩
+//!   [`ErrorKind`] 一個代號加上字數。
+//! - [`SkipCount`] 只有代號和次數，不是 `SkipReason::message()` 那句話。
+//! - [`Measure`] 的字串值是 [`Word`]，而 `Word` 只收得下 `[a-z0-9_-]{1,32}`。
+//!   中文一個字都進不去。
+//!
+//! 線以下兩節就會有：她的答案原文（Ted 要看她講話像不像朋友，那非看原文不
+//! 可）和 log 尾巴。兩節各自獨立、各自可以整段刪掉，而且**報告自己會把兩邊
+//! 的字數印出來**——不是宣稱「上面很乾淨」，是把數字放在那裡讓人自己看。
+//!
+//! log 尾巴會過一次 [`Scrubber`]：認得出來的路徑和使用者名稱換成代號。這是
+//! 一份**黑名單**，黑名單永遠不是保證，所以報告裡就這樣寫。
+//!
+//! ## 為什麼資料目錄裡不會多一個檔案
+//!
+//! 報告寫到使用者指定的地方，不寫進 data dir。data dir 裡每多一個檔案，
+//! `forget`／`export`／`prune` 三條路就各要接一次，而且它自己會變成一個新的
+//! 隱私面。跑這一輪才發生的事情放在記憶體裡（見 [`Snapshot::run_started_at`]），
+//! 報告會明講那一段只涵蓋這一次開機。
+
+use std::path::Path;
+
+use crate::capabilities;
+use crate::consent::{self, Consent, Sheet};
+use crate::db::{DbStats, OutboundRow, SkipRow};
+use crate::model::{Millis, stamp};
+
+/// 報告格式的版本。貼回來的人和讀報告的人不一定同一版，第一行就要講清楚。
+pub const REPORT_VERSION: u32 = 1;
+
+/// 線以上／線以下的分隔。整段刪掉的人照著這一行刪。
+const DIVIDER: &str =
+    "════ 以下是你自己的東西。貼之前先看一眼；不想給就從這一行往下整段刪掉。 ════";
+
+/// 一節為什麼不在。
+///
+/// 刻意是封閉的 enum 而不是 `String`：`io::Error` 的 `Display` 裡帶著完整路
+/// 徑，而路徑裡有使用者名稱。要講「讀不到」不需要把路徑一起講出去。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Absent {
+    /// 檔案／資料庫根本不在。
+    NotThere,
+    /// 在，但讀壞了。帶 `io::ErrorKind`——那也是一個封閉的 enum。
+    Unreadable(std::io::ErrorKind),
+    /// 資料庫打得開，但這一格查不出來。
+    QueryFailed,
+    /// 這個管道量不到（命令列量不到畫面）。
+    NotHere,
+}
+
+impl Absent {
+    fn say(self) -> String {
+        match self {
+            Absent::NotThere => "沒有這個檔案".to_string(),
+            Absent::Unreadable(kind) => format!("讀不到（{kind:?}）"),
+            Absent::QueryFailed => "資料庫在，但這一格查不出來".to_string(),
+            Absent::NotHere => "這個管道量不到".to_string(),
+        }
+    }
+}
+
+/// 有值，或者沒有值而且說得出為什麼。
+///
+/// `Option` 不夠用：`None` 印出來是一片空白，而一片空白讀起來像「沒問題」。
+pub type Got<T> = Result<T, Absent>;
+
+// ───────────────────────────── 外送那幾趟 ─────────────────────────────
+
+/// 一趟外送。`brain_outbound` 的一列，扣掉裝得下原文的那個欄位。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Leg {
+    pub ts: Millis,
+    /// `answer_search`／`answer`／`interpreter`。產品自己的字面值。
+    pub role: String,
+    /// `success`／`bad_json`／`spawn_failed`／`no_answer`／`cancelled`…
+    /// 每一個都來自我們自己原始碼裡的字面值（`kind.as_str()` 或直接寫死）。
+    pub outcome: String,
+    pub duration_ms: i64,
+    pub chars_sent: i64,
+    pub truncated: bool,
+    /// 出錯的話是哪一類。**不帶錯誤原文**，理由見模組開頭。
+    pub error: Option<ErrorSummary>,
+}
+
+/// 一則錯誤剩下來可以講的部分。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorSummary {
+    pub kind: ErrorKind,
+    /// 原始錯誤字串有多少字。留著是因為「700 字的 bad_json」和「20 字的
+    /// bad_json」是兩件不同的事（前者多半是模型把整篇文章塞進來了）。
+    pub chars: usize,
+}
+
+/// 錯誤的類別。
+///
+/// 分類器比對的是我們自己原始碼裡那幾句錯誤訊息的**開頭**。認不出來就是
+/// [`ErrorKind::Other`]——安全，只是比較沒用，所以底下有一條測試盯著
+/// `grounded_answer.rs`：那邊長出新的錯誤句而這裡沒跟上，測試會紅。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// 子行程根本沒有啟動：啟動前就被取消，或者三層全停已經生效。
+    /// 和 [`ErrorKind::CliFailed`] 分開，因為「沒去問」和「問了沒成」
+    /// 要修的是兩件不同的事。
+    NeverStarted,
+    /// CLI 起不來、放不進行程樹、管線沒開成，或者非零結束碼。
+    CliFailed,
+    /// stdout 根本不是 JSON。
+    NotJson,
+    /// 是 JSON，但欄位對不上契約。
+    ContractMismatch,
+    /// 句子本身違規：空句、超長、一格塞多句、沒有來源。
+    BadSentence,
+    /// 引用了看不懂的、或者這次根本沒提供的來源。
+    BadSource,
+    /// 查本機記憶的那份計畫違規：空問句、控制字元、超長、去重後是空的。
+    BadPlan,
+    /// 以上都不是。
+    Other,
+}
+
+impl ErrorKind {
+    /// 認得出來的開頭。**這裡是唯一一份清單**，測試拿它去對 `grounded_answer.rs`。
+    const PREFIXES: &'static [(&'static str, ErrorKind)] = &[
+        ("CLI invocation 在啟動前已取消", ErrorKind::NeverStarted),
+        ("三層全停已在 CLI 啟動前生效", ErrorKind::NeverStarted),
+        ("CLI 結束碼", ErrorKind::CliFailed),
+        ("叫不起", ErrorKind::CliFailed),
+        ("stdout 管線沒開成", ErrorKind::CliFailed),
+        ("工作執行緒炸了", ErrorKind::CliFailed),
+        ("無法把", ErrorKind::CliFailed),
+        ("stdout 不是單一 JSON 物件", ErrorKind::NotJson),
+        ("JSON 對不上回答契約", ErrorKind::ContractMismatch),
+        ("JSON 對不上查詢契約", ErrorKind::BadPlan),
+        ("回答缺少", ErrorKind::ContractMismatch),
+        ("回答裡有空句", ErrorKind::BadSentence),
+        ("回答單句超過", ErrorKind::BadSentence),
+        ("回答把多句或控制字元", ErrorKind::BadSentence),
+        ("回答裡有一句沒有來源", ErrorKind::BadSentence),
+        ("回答引用了看不懂的來源", ErrorKind::BadSource),
+        ("回答引用了這次沒有提供的來源", ErrorKind::BadSource),
+        ("queries 裡有空問句", ErrorKind::BadPlan),
+        ("queries 裡有控制字元", ErrorKind::BadPlan),
+        ("queries 去重後是空的", ErrorKind::BadPlan),
+        ("單條 query 超過", ErrorKind::BadPlan),
+    ];
+
+    /// 開頭是動態的那幾句。
+    ///
+    /// `` `{command}` 已放進子行程範圍，但… `` 的第一個字就是使用者機器上的
+    /// 執行檔路徑——那句話沒有固定的開頭可以比。這一格順便說明了為什麼
+    /// `error` 原文不能印：它的第一個字就可能是一條路徑。
+    const CONTAINS: &'static [(&'static str, ErrorKind)] = &[
+        ("已放進子行程範圍", ErrorKind::CliFailed),
+        ("suspended primary thread", ErrorKind::CliFailed),
+    ];
+
+    pub fn classify(error: &str) -> ErrorKind {
+        let trimmed = error.trim_start();
+        for (prefix, kind) in Self::PREFIXES {
+            if trimmed.starts_with(prefix) {
+                return *kind;
+            }
+        }
+        for (needle, kind) in Self::CONTAINS {
+            if trimmed.contains(needle) {
+                return *kind;
+            }
+        }
+        ErrorKind::Other
+    }
+
+    fn say(self) -> &'static str {
+        match self {
+            ErrorKind::NeverStarted => "根本沒啟動",
+            ErrorKind::CliFailed => "CLI 沒跑成",
+            ErrorKind::NotJson => "回來的不是 JSON",
+            ErrorKind::ContractMismatch => "JSON 對不上契約",
+            ErrorKind::BadSentence => "句子違規",
+            ErrorKind::BadSource => "出處引錯",
+            ErrorKind::BadPlan => "查詢計畫違規",
+            ErrorKind::Other => "其他",
+        }
+    }
+}
+
+/// `role` 與 `outcome` 原樣印出來的前提是「每一個值都是我們自己原始碼裡的
+/// 字面值」。那句話今天是真的（`kind.as_str()`、`"success"`、`"bad_json"`…），
+/// 但它是一句**假設**，而假設會過期：多一個寫入端、或者資料庫被別的東西改
+/// 過，這一格就變成一條沒有人守的通道。
+///
+/// 所以這裡把它變成有人守的：不長這個樣子的值不印出來，只講它有多長。
+/// 代價是萬一真的有人加了一個帶大寫的 token，報告會印成 `?（12 字）`——
+/// 那是一則看得見的怪，比一句看不見的原文好。
+fn token_or_length(raw: &str) -> String {
+    let shaped = !raw.is_empty()
+        && raw.len() <= 32
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    if shaped {
+        raw.to_string()
+    } else {
+        format!("?（{} 字）", raw.chars().count())
+    }
+}
+
+impl Leg {
+    /// 從一列稽核紀錄轉過來。**這是 `error` 唯一的入口**，而它在這裡就被
+    /// 壓成代號了——換句話說，`Leg` 拿不到原文不是紀律問題，是它沒有那個欄位。
+    pub fn from_row(row: &OutboundRow) -> Leg {
+        Leg {
+            ts: row.ts,
+            role: token_or_length(&row.role),
+            outcome: token_or_length(&row.outcome),
+            duration_ms: row.duration_ms,
+            chars_sent: row.chars_sent,
+            truncated: row.truncated,
+            error: row.error.as_deref().map(|error| ErrorSummary {
+                kind: ErrorKind::classify(error),
+                chars: error.chars().count(),
+            }),
+        }
+    }
+}
+
+/// 「沒問」的一種理由，和它出現幾次。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkipCount {
+    /// `no_consent`／`budget_exhausted`／… 代號，不是那句話。
+    pub reason: String,
+    pub times: usize,
+}
+
+impl SkipCount {
+    /// 把最近幾列折成計數。時間順序在這裡沒有意義，會不會發生才有。
+    pub fn fold(rows: &[SkipRow]) -> Vec<SkipCount> {
+        let mut out: Vec<SkipCount> = Vec::new();
+        for row in rows {
+            let reason = token_or_length(&row.reason);
+            match out.iter_mut().find(|c| c.reason == reason) {
+                Some(existing) => existing.times += 1,
+                None => out.push(SkipCount {
+                    reason: token_or_length(&row.reason),
+                    times: 1,
+                }),
+            }
+        }
+        out.sort_by(|a, b| b.times.cmp(&a.times).then_with(|| a.reason.cmp(&b.reason)));
+        out
+    }
+}
+
+// ───────────────────────────── 自檢 ─────────────────────────────
+
+/// 自檢裡一個字串值。
+///
+/// 存在的唯一理由是**讓畫面那半沒有辦法**把 `textContent` 送進來。
+/// `[a-z0-9_-]{1,32}`：`open`、`hidden`、`chrome-open` 進得來，
+/// 螢幕上的字一個都進不來。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Word(String);
+
+impl Word {
+    pub fn new(raw: &str) -> Option<Word> {
+        if raw.is_empty() || raw.len() > 32 {
+            return None;
+        }
+        if !raw
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        {
+            return None;
+        }
+        Some(Word(raw.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 自檢量到的一個值。
+#[derive(Debug, Clone, PartialEq)]
+pub enum MeasureValue {
+    Int(i64),
+    /// 像素、秒這種會有小數的。
+    Num(f64),
+    Flag(bool),
+    Word(Word),
+}
+
+impl MeasureValue {
+    fn say(&self) -> String {
+        match self {
+            MeasureValue::Int(v) => group(*v),
+            MeasureValue::Num(v) => format!("{v:.1}"),
+            MeasureValue::Flag(true) => "是".to_string(),
+            MeasureValue::Flag(false) => "否".to_string(),
+            MeasureValue::Word(w) => w.as_str().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Measure {
+    pub label: String,
+    pub value: MeasureValue,
+}
+
+/// 一項自檢的結論。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// 量到了，而且是預期的樣子。
+    AsAsked,
+    /// 量到了，不是預期的樣子。
+    Off,
+    /// 這一輪沒發生過，量不到。**不是「沒問題」。**
+    NotSeen,
+}
+
+impl Verdict {
+    fn mark(self) -> &'static str {
+        match self {
+            Verdict::AsAsked => "✓",
+            Verdict::Off => "✗",
+            Verdict::NotSeen => "－",
+        }
+    }
+
+    fn say(self) -> &'static str {
+        match self {
+            Verdict::AsAsked => "照你要的",
+            Verdict::Off => "不對",
+            Verdict::NotSeen => "這一輪沒發生過，量不到",
+        }
+    }
+}
+
+/// 自檢的一項。編號對著 Ted 當初列的那七件事。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Item {
+    pub number: u8,
+    /// 他當初那句話的縮寫。放在報告裡，讀的人才知道這一格在回答什麼。
+    pub asked: String,
+    pub measured: Vec<Measure>,
+    pub verdict: Verdict,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelfCheck {
+    pub at: Millis,
+    /// 這一輪什麼時候開的。自檢只看得到這之後發生的事。
+    pub run_started_at: Millis,
+    pub items: Vec<Item>,
+}
+
+// ───────────────────────────── 線以下 ─────────────────────────────
+
+/// 她講過的一段話。**只有她講的**——問題是他打的，這裡只帶字數。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    pub at: Millis,
+    pub question_chars: usize,
+    pub sentences: Vec<String>,
+    /// 每一句掛的出處代號，例如 `文字#5443`。
+    pub sources: Vec<String>,
+    /// 從按下去到畫面上出現，一共多久。
+    pub took_ms: Option<i64>,
+}
+
+/// 一個 log 檔的尾巴。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogTail {
+    pub name: String,
+    pub lines: Got<Vec<String>>,
+    /// 原本一共幾行。截掉多少，讀的人有權知道。
+    pub total_lines: usize,
+}
+
+// ───────────────────────────── 整份 ─────────────────────────────
+
+// `PartialEq` 沒有 derive：`capabilities::Report` 沒有，而整份快照從來不用
+// 相等比較——測試比的是印出來的字，不是結構。
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub at: Millis,
+    pub app_version: String,
+    /// `windows`／`linux`／`macos`。
+    pub platform: String,
+    /// 從哪裡跑出來的：`sister diagnose` 還是桌面版那顆鈕。
+    pub source: String,
+    /// 這一輪什麼時候開的。`None` = 不知道（命令列跑的時候本來就不知道）。
+    pub run_started_at: Option<Millis>,
+    /// 資料夾路徑，已經 scrub 過。
+    pub data_dir_shown: String,
+    pub consent: ConsentLines,
+    pub doctor: Got<capabilities::Report>,
+    pub db: Got<DbStats>,
+    pub legs: Got<Vec<Leg>>,
+    pub skips: Got<Vec<SkipCount>>,
+    pub self_check: Got<SelfCheck>,
+    pub answers: Got<Vec<Answer>>,
+    pub logs: Vec<LogTail>,
+}
+
+/// 四張同意書現在的樣子。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentLines {
+    pub sheets: Vec<(String, Option<Millis>, bool)>,
+    pub file_version: u32,
+    pub cloud_terms_version: u32,
+    pub azure_terms_version: u32,
+}
+
+impl ConsentLines {
+    pub fn of(consent: &Consent) -> ConsentLines {
+        ConsentLines {
+            sheets: Sheet::ALL
+                .iter()
+                .map(|sheet| {
+                    (
+                        sheet.key().to_string(),
+                        consent.get(*sheet),
+                        consent.effective(*sheet),
+                    )
+                })
+                .collect(),
+            file_version: consent.version,
+            cloud_terms_version: consent.cloud_reading_terms_version,
+            azure_terms_version: consent.azure_tts_terms_version,
+        }
+    }
+
+    /// 直接從 data dir 讀。讀不到就是沒簽——和 [`consent::load`] 同一條紀律。
+    pub fn load(data_dir: &Path) -> ConsentLines {
+        ConsentLines::of(&consent::load(data_dir))
+    }
+}
+
+// ───────────────────────────── 遮蔽 ─────────────────────────────
+
+/// 把認得出來的路徑與名字換成代號。
+///
+/// **這是黑名單，不是保證。** 它只換得掉我知道要找的東西——報告裡就是這樣寫
+/// 的，因為一句「已遮蔽」會讓人不再自己看一眼，而那正是這種東西最貴的失敗
+/// 方式。
+#[derive(Debug, Clone, Default)]
+pub struct Scrubber {
+    needles: Vec<(String, String)>,
+}
+
+impl Scrubber {
+    pub fn new() -> Scrubber {
+        Scrubber::default()
+    }
+
+    /// 加一個要藏的東西。路徑會自動連 `/` 與 `\` 兩種寫法一起收。
+    pub fn hide(&mut self, needle: &str, as_: &str) {
+        let needle = needle.trim();
+        if needle.len() < 3 {
+            // 兩個字元的「針」會把整份報告打成馬賽克，反而看不出發生什麼事。
+            return;
+        }
+        for variant in [needle.replace('\\', "/"), needle.replace('/', "\\")] {
+            if !self.needles.iter().any(|(n, _)| *n == variant) {
+                self.needles.push((variant, as_.to_string()));
+            }
+        }
+        // 長的先換：data dir 這根針把家目錄整個含在裡面，順序反了就只剩半截。
+        self.needles
+            .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+    }
+
+    /// 家目錄、資料夾、使用者名稱這三根針一次補齊。
+    pub fn hide_paths(&mut self, data_dir: &Path, home: Option<&Path>, user: Option<&str>) {
+        self.hide(&data_dir.display().to_string(), "<資料夾>");
+        if let Some(home) = home {
+            self.hide(&home.display().to_string(), "<家目錄>");
+        }
+        if let Some(user) = user {
+            self.hide(user, "<使用者>");
+        }
+    }
+
+    pub fn apply(&self, text: &str) -> String {
+        if self.needles.is_empty() {
+            return text.to_string();
+        }
+        // 找的時候用一份「小寫 + 斜線統一」的副本。兩種轉換都不改位元組長度
+        // （ASCII 大小寫等長、`\` 換 `/` 等長），所以偏移量和原字串對得起來，
+        // 可以照原樣切。Windows 的路徑大小寫不一定，這樣才收得到。
+        let hay = normalize(text);
+        let hay = hay.as_bytes();
+        // 針只正規化一次。順序沿用 `hide` 排好的「長的在前」。
+        let needles: Vec<(Vec<u8>, &str)> = self
+            .needles
+            .iter()
+            .map(|(needle, replacement)| (normalize(needle).into_bytes(), replacement.as_str()))
+            .collect();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0usize;
+        'outer: while i < text.len() {
+            for (needle, replacement) in &needles {
+                if needle.is_empty() || i + needle.len() > hay.len() {
+                    continue;
+                }
+                // **比位元組，不要切字串。** `hay[i..i + n]` 在 `i + n` 落在
+                // 一個中文字中間的時候會直接 panic——而報告裡到處是中文。
+                // 位元組比不會，而且不會誤判：`i` 永遠停在 char 邊界上，
+                // UTF-8 又是自同步的，所以從邊界開始比中一整根合法的針，
+                // 結尾也一定落在邊界上。
+                if &hay[i..i + needle.len()] == needle.as_slice() {
+                    out.push_str(replacement);
+                    i += needle.len();
+                    continue 'outer;
+                }
+            }
+            // 一次推進一個 char，不然會切壞 UTF-8。
+            let ch = text[i..].chars().next().expect("i 落在 char 邊界上");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        out
+    }
+}
+
+fn normalize(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c == '\\' {
+                '/'
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
+/// 取最後幾行，而且每一行都有上限。
+///
+/// 兩個上限都要：一份 log 可能只有三行，但其中一行是三十萬字的 JSON dump。
+pub fn tail_lines(text: &str, max_lines: usize, max_chars_per_line: usize) -> (Vec<String>, usize) {
+    let all: Vec<&str> = text.lines().collect();
+    let total = all.len();
+    let start = total.saturating_sub(max_lines);
+    let lines = all[start..]
+        .iter()
+        .map(|line| {
+            let line = line.trim_end_matches('\r');
+            let chars = line.chars().count();
+            if chars <= max_chars_per_line {
+                line.to_string()
+            } else {
+                let kept: String = line.chars().take(max_chars_per_line).collect();
+                format!(
+                    "{kept}…（這一行還有 {} 字沒印）",
+                    chars - max_chars_per_line
+                )
+            }
+        })
+        .collect();
+    (lines, total)
+}
+
+// ───────────────────────────── 印出來 ─────────────────────────────
+
+/// 終端機裡一個中日韓字元佔兩格。
+///
+/// `{:<10}` 數的是 char，所以「本機記錄」（4 char／8 格）和「Azure 朗讀」
+/// （8 char／12 格）用同一個 `{:<10}` 排出來會歪掉——而這份報告有好幾張表，
+/// 歪掉的表比沒有表更難讀。
+fn wide(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x115F | 0x2E80..=0x303E | 0x3041..=0x33FF | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF | 0xA000..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE6F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F | 0x20000..=0x3FFFD)
+}
+
+fn cells(text: &str) -> usize {
+    text.chars().map(|c| if wide(c) { 2 } else { 1 }).sum()
+}
+
+/// 靠左，補到 `to` 格寬。已經超過就不截——截掉的那截才是他要看的東西。
+fn pad(text: &str, to: usize) -> String {
+    let mut out = text.to_string();
+    for _ in cells(text)..to {
+        out.push(' ');
+    }
+    out
+}
+
+/// 靠右。數字欄用。
+fn rpad(text: &str, to: usize) -> String {
+    let mut out = String::new();
+    for _ in cells(text)..to {
+        out.push(' ');
+    }
+    out.push_str(text);
+    out
+}
+
+/// ② 那張表的欄寬。表頭和每一列都從這裡算，不各寫一份——兩份遲早分家，
+/// 而分家的症狀就是一張對不齊的表。
+const COL_TIME: usize = 20;
+const COL_ROLE: usize = 16;
+const COL_OUTCOME: usize = 14;
+const COL_MS: usize = 9;
+const COL_CHARS: usize = 11;
+
+fn leg_line(time: &str, role: &str, outcome: &str, ms: &str, chars: &str) -> String {
+    format!(
+        "  {}{}{}{}{}",
+        pad(time, COL_TIME),
+        pad(role, COL_ROLE),
+        pad(outcome, COL_OUTCOME),
+        rpad(ms, COL_MS),
+        rpad(chars, COL_CHARS),
+    )
+}
+
+fn group(v: i64) -> String {
+    let neg = v < 0;
+    let digits = v.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if neg { format!("-{out}") } else { out }
+}
+
+fn bytes(v: i64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = v as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{v} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// 中位數。空的回 `None`——「沒有樣本」和「0 毫秒」是兩件事。
+fn median(mut values: Vec<i64>) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    Some(values[values.len() / 2])
+}
+
+fn sheet_label(key: &str) -> &str {
+    match key {
+        "local-recording" => "本機記錄",
+        "cloud-reading" => "上雲解讀",
+        "frame-storage" => "畫面暫存",
+        "azure-tts" => "Azure 朗讀",
+        other => other,
+    }
+}
+
+fn cap(state: capabilities::CapabilityState) -> &'static str {
+    match state {
+        capabilities::CapabilityState::Available => "可用",
+        capabilities::CapabilityState::Unavailable => "做不到",
+        capabilities::CapabilityState::Unknown => "沒量到",
+    }
+}
+
+/// 整份報告。
+pub fn render(snapshot: &Snapshot) -> String {
+    let head = render_head(snapshot);
+    let tail = render_tail(snapshot);
+    let head_chars = head.chars().count();
+    let tail_chars = tail.chars().count();
+
+    let mut out = head;
+    out.push_str(&render_ledger(head_chars, tail_chars, snapshot));
+    out.push('\n');
+    out.push_str(DIVIDER);
+    out.push('\n');
+    out.push_str(&tail);
+    out
+}
+
+fn render_head(s: &Snapshot) -> String {
+    let mut o = String::new();
+    o.push_str("AI-Sister 診斷報告\n");
+    o.push_str(&format!(
+        "產生時間  {}\n版本      {}（報告格式 v{}，{}）\n平台      {}\n資料夾    {}\n",
+        stamp(s.at),
+        s.app_version,
+        REPORT_VERSION,
+        s.source,
+        s.platform,
+        s.data_dir_shown,
+    ));
+    match s.run_started_at {
+        Some(at) => o.push_str(&format!(
+            "這一輪    {} 開的（自檢那一節只看得到這之後的事）\n",
+            stamp(at)
+        )),
+        None => o.push_str("這一輪    不知道什麼時候開的（命令列跑的，看不到桌面版那一輪）\n"),
+    }
+
+    o.push_str("\n① 這台機器\n");
+    o.push_str("  同意書\n");
+    for (key, signed, effective) in &s.consent.sheets {
+        let when = signed.map_or_else(|| "沒簽".to_string(), stamp);
+        let note = match (signed.is_some(), effective) {
+            (true, true) => "生效中",
+            // 簽過但不生效，只有一個原因：條文改版了，那份簽名涵蓋不了新條文。
+            (true, false) => "簽過但不生效（條文改版了，要重簽）",
+            (false, _) => "—",
+        };
+        o.push_str(&format!(
+            "    {}{}{}\n",
+            pad(sheet_label(key), 14),
+            pad(&when, 24),
+            note
+        ));
+    }
+    o.push_str(&format!(
+        "    條文版本  檔案 {}、上雲 {}、Azure {}\n",
+        s.consent.file_version, s.consent.cloud_terms_version, s.consent.azure_terms_version,
+    ));
+
+    o.push_str("  上一場錄製量到的能力\n");
+    match &s.doctor {
+        Err(absent) => o.push_str(&format!("    {}\n", absent.say())),
+        Ok(report) => {
+            o.push_str(&format!(
+                "    量的時候    {}\n    位址列      {}\n    輸入 hook   {}\n",
+                stamp(report.at),
+                cap(report.url),
+                cap(report.input_hook),
+            ));
+            o.push_str(&format!(
+                "    瀏覽器拍數  {}，其中真的讀到網址 {}\n",
+                group(report.browser_ticks as i64),
+                group(report.url_reads as i64),
+            ));
+            if report.url_capture.gave_up {
+                o.push_str("    ⚠ 位址列讀取中途永久放棄了，那之後 excluded_urls 一條都沒生效\n");
+            }
+            if report.url_capture.password_check_broken {
+                o.push_str("    ⚠ 問不出焦點在不在密碼欄\n");
+            }
+        }
+    }
+
+    o.push_str("  資料庫\n");
+    match &s.db {
+        Err(absent) => o.push_str(&format!("    {}\n", absent.say())),
+        Ok(st) => {
+            o.push_str(&format!(
+                "    {} 幀（其中 {} 張圖真的躺在硬碟上）、{} 段文字、{} 個事實、{} 題你問過的話\n",
+                group(st.frames),
+                group(st.frames_with_image),
+                group(st.chunks),
+                group(st.facts),
+                group(st.queries),
+            ));
+            o.push_str(&format!(
+                "    資料庫 {}、畫面檔 {}\n",
+                bytes(st.db_bytes),
+                bytes(st.image_bytes),
+            ));
+            match (st.first_ts, st.last_ts) {
+                (Some(first), Some(last)) => o.push_str(&format!(
+                    "    最早 {}、最晚 {}\n",
+                    stamp(first),
+                    stamp(last)
+                )),
+                _ => o.push_str("    還沒有記到任何東西\n"),
+            }
+        }
+    }
+
+    o.push_str("\n② 她問 CLI 的每一趟（磁碟上本來就有，只是沒有人讀）\n");
+    match &s.legs {
+        Err(absent) => o.push_str(&format!("  {}\n", absent.say())),
+        Ok(legs) if legs.is_empty() => {
+            o.push_str("  一趟都沒有。她從開始到現在沒有把任何東西交出去過。\n")
+        }
+        Ok(legs) => {
+            o.push_str(&leg_line("時間", "角色", "結局", "毫秒", "送出字數"));
+            o.push_str("  註\n");
+            for leg in legs {
+                let error = match &leg.error {
+                    None => String::new(),
+                    Some(summary) => {
+                        format!("{}（{} 字，沒印出來）", summary.kind.say(), summary.chars)
+                    }
+                };
+                o.push_str(&leg_line(
+                    &stamp(leg.ts),
+                    &leg.role,
+                    &leg.outcome,
+                    &group(leg.duration_ms),
+                    &group(leg.chars_sent),
+                ));
+                o.push_str(&format!(
+                    "  {}{}\n",
+                    if leg.truncated { "（截斷）" } else { "" },
+                    error,
+                ));
+            }
+            o.push_str(&render_leg_summary(legs));
+        }
+    }
+
+    o.push_str("\n  沒問的那幾次（brain_skip）\n");
+    match &s.skips {
+        Err(absent) => o.push_str(&format!("    {}\n", absent.say())),
+        Ok(skips) if skips.is_empty() => o.push_str("    沒有。\n"),
+        Ok(skips) => {
+            for skip in skips {
+                o.push_str(&format!("    {}{} 次\n", pad(&skip.reason, 26), skip.times));
+            }
+        }
+    }
+
+    o.push_str("\n③ 自檢：你列的那七件事，這一輪各量到什麼\n");
+    match &s.self_check {
+        Err(Absent::NotHere) => o.push_str(
+            "  命令列量不到畫面。要這一節就從桌面版設定頁按「匯出診斷」。\n\
+             \x20 這不是「沒問題」，是「沒量」。\n",
+        ),
+        Err(absent) => o.push_str(&format!("  {}\n", absent.say())),
+        Ok(check) => {
+            o.push_str(&format!(
+                "  量的時候 {}，只涵蓋 {} 之後發生的事\n",
+                stamp(check.at),
+                stamp(check.run_started_at),
+            ));
+            for item in &check.items {
+                o.push_str(&format!(
+                    "  {} 第 {} 項　{}　{}\n",
+                    item.verdict.mark(),
+                    item.number,
+                    item.asked,
+                    item.verdict.say(),
+                ));
+                for measure in &item.measured {
+                    o.push_str(&format!(
+                        "      {}{}\n",
+                        pad(&measure.label, 24),
+                        measure.value.say()
+                    ));
+                }
+            }
+        }
+    }
+    o
+}
+
+/// 一題兩趟：把「哪一趟慢」算出來，不要讓讀的人自己加。
+fn render_leg_summary(legs: &[Leg]) -> String {
+    let took = |role: &str| -> Vec<i64> {
+        legs.iter()
+            .filter(|l| l.role == role)
+            .map(|l| l.duration_ms)
+            .collect()
+    };
+    let search = took("answer_search");
+    let answer = took("answer");
+    let mut o = String::new();
+    if search.is_empty() && answer.is_empty() {
+        return o;
+    }
+    o.push_str("  ── 答題那兩趟 ──\n");
+    if let Some(m) = median(search.clone()) {
+        o.push_str(&format!(
+            "    先問它要查什麼   {} 趟，中位數 {} 毫秒\n",
+            search.len(),
+            group(m)
+        ));
+    }
+    if let Some(m) = median(answer.clone()) {
+        o.push_str(&format!(
+            "    再請它寫成一句   {} 趟，中位數 {} 毫秒\n",
+            answer.len(),
+            group(m)
+        ));
+    }
+    // 兩個中位數相加不是「一題的中位數」，但它回答的正是那個問題：一題要
+    // 等多久、而那些時間花在哪一趟。加起來這件事要講明白，不要讓它看起來
+    // 像量到的。
+    if let (Some(a), Some(b)) = (median(search), median(answer)) {
+        o.push_str(&format!(
+            "    兩個中位數加起來 {} 毫秒（不是量到的「一題的中位數」，是兩趟各自的中位數相加）\n",
+            group(a + b)
+        ));
+    }
+    o
+}
+
+fn render_ledger(head_chars: usize, tail_chars: usize, s: &Snapshot) -> String {
+    let mut o = String::new();
+    o.push_str("\n④ 這份報告帶走了什麼\n");
+    o.push_str(&format!(
+        "  這條線以上 {} 個字。裡面沒有一個字是螢幕上的內容，理由不是有人記得要遮，\n",
+        group(head_chars as i64)
+    ));
+    o.push_str("  是上面每一格能放的東西都在型別裡寫死了：時間、次數、結局代號、毫秒、版本。\n");
+    o.push_str("  CLI 回來的錯誤只留了類別和字數，錯誤原文一個字都沒有帶。\n");
+    let answer_count = s.answers.as_ref().map(|a| a.len()).unwrap_or(0);
+    // 找了幾個檔和真的讀到幾個是兩件事。「4 個 log 檔的尾巴」配上四行
+    // 「沒有這個檔案」，就是這份報告最不該犯的那種話。
+    let read = s.logs.iter().filter(|l| l.lines.is_ok()).count();
+    o.push_str(&format!(
+        "  這條線以下 {} 個字：她的 {} 段答案原文，加上 {} 個 log 檔（找了 {} 個）。\n",
+        group(tail_chars as i64),
+        answer_count,
+        read,
+        s.logs.len(),
+    ));
+    o.push_str("  那 log 過了一次遮蔽，只換掉認得出來的路徑和使用者名稱——那是一份黑名單，\n");
+    o.push_str("  不是保證。所以線以下請你自己看一眼再貼。\n");
+    o
+}
+
+fn render_tail(s: &Snapshot) -> String {
+    let mut o = String::new();
+    o.push_str("\n⑤ 她最後幾句答案的原文\n");
+    o.push_str("  （你打的問題沒有帶，只帶字數。要我看問題的話你自己貼。）\n");
+    match &s.answers {
+        Err(absent) => o.push_str(&format!("  {}\n", absent.say())),
+        Ok(answers) if answers.is_empty() => o.push_str("  這一輪她一句都還沒答。\n"),
+        Ok(answers) => {
+            for answer in answers {
+                o.push_str(&format!(
+                    "\n  {}　你打了 {} 個字{}\n",
+                    stamp(answer.at),
+                    answer.question_chars,
+                    answer
+                        .took_ms
+                        .map(|ms| format!("，她花了 {} 毫秒", group(ms)))
+                        .unwrap_or_default(),
+                ));
+                for (i, sentence) in answer.sentences.iter().enumerate() {
+                    let source = answer.sources.get(i).map(String::as_str).unwrap_or("");
+                    o.push_str(&format!("    {sentence}\n"));
+                    if !source.is_empty() {
+                        o.push_str(&format!("      出處 {source}\n"));
+                    }
+                }
+            }
+        }
+    }
+
+    o.push_str("\n⑥ log 尾巴\n");
+    if s.logs.is_empty() {
+        o.push_str("  一個 log 都沒讀到。\n");
+    }
+    for log in &s.logs {
+        match &log.lines {
+            Err(absent) => o.push_str(&format!("\n  {}：{}\n", log.name, absent.say())),
+            Ok(lines) => {
+                o.push_str(&format!(
+                    "\n  {}（一共 {} 行，這裡是最後 {} 行）\n",
+                    log.name,
+                    group(log.total_lines as i64),
+                    lines.len()
+                ));
+                for line in lines {
+                    o.push_str("    ");
+                    o.push_str(line);
+                    o.push('\n');
+                }
+            }
+        }
+    }
+    o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::OutboundRow;
+
+    /// 螢幕上會有、報告裡絕對不該有的一串字。
+    const SCREEN_TEXT: &str = "王小明的帳號密碼是 hunter2";
+
+    pub(super) fn row(
+        role: &str,
+        outcome: &str,
+        duration_ms: i64,
+        error: Option<&str>,
+    ) -> OutboundRow {
+        OutboundRow {
+            id: 1,
+            ts: 1_789_222_440_000,
+            day_key: "2026-09-12".into(),
+            command: "sister".into(),
+            args_json: "[]".into(),
+            segment_core_start: None,
+            chars_sent: 4_212,
+            truncated: false,
+            outcome: outcome.into(),
+            duration_ms,
+            error: error.map(str::to_string),
+            role: role.into(),
+        }
+    }
+
+    pub(super) fn snapshot() -> Snapshot {
+        Snapshot {
+            at: 1_789_225_320_000,
+            app_version: "0.1.0-alpha.133".into(),
+            platform: "windows".into(),
+            source: "sister diagnose".into(),
+            run_started_at: Some(1_789_222_000_000),
+            data_dir_shown: "<資料夾>".into(),
+            consent: ConsentLines::of(&Consent::default()),
+            doctor: Err(Absent::NotThere),
+            db: Err(Absent::NotThere),
+            legs: Ok(Vec::new()),
+            skips: Ok(Vec::new()),
+            self_check: Err(Absent::NotHere),
+            answers: Ok(Vec::new()),
+            logs: Vec::new(),
+        }
+    }
+
+    /// 這條測試斷言的是**結局**：那串字不在報告裡。不是「我們有記得呼叫
+    /// 分類器」——那是機制，而機制斷言擋不住下一個人多印一個欄位。
+    #[test]
+    fn the_error_text_never_reaches_the_report() {
+        let leaky = format!("JSON 對不上回答契約：invalid type: string \"{SCREEN_TEXT}\"");
+        let mut snap = snapshot();
+        snap.legs = Ok(vec![Leg::from_row(&row(
+            "answer",
+            "bad_json",
+            3_118,
+            Some(&leaky),
+        ))]);
+
+        let report = render(&snap);
+        assert!(
+            !report.contains(SCREEN_TEXT),
+            "外送紀錄的錯誤原文漏進報告了：\n{report}"
+        );
+        assert!(
+            !report.contains("invalid type"),
+            "serde 的訊息也算原文的一部分：\n{report}"
+        );
+        // 但診斷價值不能一起丟掉：類別和長度要留著。
+        assert!(report.contains("JSON 對不上契約"), "{report}");
+        assert!(
+            report.contains(&format!("{} 字，沒印出來", leaky.chars().count())),
+            "{report}"
+        );
+    }
+
+    /// 那句 `叫不起 \`{{command}}\`：{{e}}` 的第一個字就是使用者機器上的路徑。
+    #[test]
+    fn a_spawn_error_carrying_a_path_is_reduced_to_a_kind() {
+        let leaky = "叫不起 `C:\\Users\\小明\\AppData\\Local\\sister\\grok.exe`：找不到檔案";
+        let mut snap = snapshot();
+        snap.legs = Ok(vec![Leg::from_row(&row(
+            "answer_search",
+            "spawn_failed",
+            12,
+            Some(leaky),
+        ))]);
+        let report = render(&snap);
+        assert!(
+            !report.contains("小明"),
+            "路徑裡的使用者名稱漏了：\n{report}"
+        );
+        assert!(!report.contains("grok.exe"), "{report}");
+        assert!(report.contains("CLI 沒跑成"), "{report}");
+    }
+
+    #[test]
+    fn the_two_answer_legs_are_told_apart() {
+        let mut snap = snapshot();
+        snap.legs = Ok(vec![
+            Leg::from_row(&row("answer_search", "success", 1_100, None)),
+            Leg::from_row(&row("answer", "success", 3_000, None)),
+            Leg::from_row(&row("answer_search", "success", 1_200, None)),
+            Leg::from_row(&row("answer", "success", 3_400, None)),
+        ]);
+        let report = render(&snap);
+        assert!(
+            report.contains("先問它要查什麼   2 趟，中位數 1,200 毫秒"),
+            "{report}"
+        );
+        assert!(
+            report.contains("再請它寫成一句   2 趟，中位數 3,400 毫秒"),
+            "{report}"
+        );
+        assert!(report.contains("兩個中位數加起來 4,600 毫秒"), "{report}");
+    }
+
+    /// 沒有樣本的那一趟不可以印成「0 毫秒」——那是一句假話，而且它剛好長得
+    /// 像「這一趟很快」。
+    #[test]
+    fn a_leg_with_no_samples_is_not_printed_as_zero() {
+        let mut snap = snapshot();
+        snap.legs = Ok(vec![Leg::from_row(&row(
+            "answer_search",
+            "success",
+            900,
+            None,
+        ))]);
+        let report = render(&snap);
+        assert!(report.contains("先問它要查什麼"), "{report}");
+        assert!(
+            !report.contains("再請它寫成一句"),
+            "沒有樣本的那一趟不該有一行：\n{report}"
+        );
+        assert!(!report.contains("兩個中位數加起來"), "{report}");
+    }
+
+    /// `Absent` 的每一種都要在紙上留下一行。一節不見了和一節沒問題，
+    /// 在紙上長得一模一樣——這是這份報告最容易犯的錯。
+    #[test]
+    fn a_section_that_could_not_be_read_says_so_instead_of_vanishing() {
+        for absent in [
+            Absent::NotThere,
+            Absent::Unreadable(std::io::ErrorKind::PermissionDenied),
+            Absent::QueryFailed,
+            Absent::NotHere,
+        ] {
+            let mut snap = snapshot();
+            snap.db = Err(absent);
+            snap.legs = Err(absent);
+            snap.skips = Err(absent);
+            snap.answers = Err(absent);
+            let report = render(&snap);
+            for heading in [
+                "① 這台機器",
+                "② 她問 CLI 的每一趟",
+                "③ 自檢",
+                "⑤ 她最後幾句答案的原文",
+            ] {
+                assert!(
+                    report.contains(heading),
+                    "{absent:?} 把整節弄不見了：\n{report}"
+                );
+            }
+            assert!(
+                report.contains(&absent.say()) || matches!(absent, Absent::NotHere),
+                "{absent:?} 沒有說出理由：\n{report}"
+            );
+        }
+    }
+
+    /// ④ 印的那個字數必須是真的量出來的，不是一句好聽的話。
+    #[test]
+    fn the_ledger_counts_what_it_claims_to_count() {
+        let mut snap = snapshot();
+        snap.legs = Ok(vec![Leg::from_row(&row("answer", "success", 3_000, None))]);
+        snap.answers = Ok(vec![Answer {
+            at: 1_789_225_000_000,
+            question_chars: 7,
+            sentences: vec!["喔你十點十四分要求 Codex agent 交接。".into()],
+            sources: vec!["文字#5443".into()],
+            took_ms: Some(4_100),
+        }]);
+        let report = render(&snap);
+
+        let ledger_at = report.find("\n④ 這份報告帶走了什麼").expect("要有 ④");
+        let above = report[..ledger_at].chars().count();
+        assert!(
+            report.contains(&format!("這條線以上 {} 個字", group(above as i64))),
+            "④ 講的字數和 ① 到 ③ 實際的字數對不上（實際 {above}）：\n{report}"
+        );
+
+        let divider_at = report.find(DIVIDER).expect("要有那條線");
+        // 分隔線自己那個換行算在線上，不算在「線以下」。
+        let below_at = divider_at + report[divider_at..].find('\n').expect("線後面要有換行") + 1;
+        let below = report[below_at..].chars().count();
+        assert!(
+            report.contains(&format!("這條線以下 {} 個字", group(below as i64))),
+            "④ 講的線下字數對不上（實際 {below}）：\n{report}"
+        );
+    }
+
+    /// Ted 要能整段刪掉再貼。所以答案原文和 log 一定要在線的下面，
+    /// 而機制那幾節一定要在線的上面。
+    #[test]
+    fn the_answers_are_below_the_line_and_the_mechanism_is_above() {
+        let mut snap = snapshot();
+        snap.legs = Ok(vec![Leg::from_row(&row("answer", "success", 3_118, None))]);
+        snap.answers = Ok(vec![Answer {
+            at: 1_789_225_000_000,
+            question_chars: 7,
+            sentences: vec![SCREEN_TEXT.into()],
+            sources: vec!["文字#5443".into()],
+            took_ms: None,
+        }]);
+        snap.logs = vec![LogTail {
+            name: "desktop.log".into(),
+            lines: Ok(vec!["INFO 開始".into()]),
+            total_lines: 1,
+        }];
+        let report = render(&snap);
+
+        let divider = report.find(DIVIDER).expect("要有那條線");
+        assert!(
+            report.find("3,118").expect("毫秒") < divider,
+            "機制掉到線下面了"
+        );
+        assert!(
+            report.find(SCREEN_TEXT).expect("答案") > divider,
+            "答案原文跑到線上面了"
+        );
+        assert!(
+            report.find("INFO 開始").expect("log") > divider,
+            "log 跑到線上面了"
+        );
+        // 兩節各有自己的標題，才能只刪一節。
+        assert!(report.contains("⑤ 她最後幾句答案的原文"), "{report}");
+        assert!(report.contains("⑥ log 尾巴"), "{report}");
+    }
+
+    #[test]
+    fn a_word_cannot_carry_screen_content() {
+        assert!(Word::new("chrome-open").is_some());
+        assert!(Word::new("hidden").is_some());
+        assert!(Word::new("v2").is_some());
+        assert!(Word::new(SCREEN_TEXT).is_none(), "中文不該進得去");
+        assert!(Word::new("Hello").is_none(), "大寫不收，免得有人塞句子");
+        assert!(Word::new("two words").is_none());
+        assert!(Word::new("").is_none());
+        assert!(Word::new(&"a".repeat(33)).is_none());
+        assert!(Word::new(&"a".repeat(32)).is_some());
+    }
+
+    /// 資料夾路徑把家目錄整個含在裡面。順序反了就只換掉半截，剩下
+    /// `<家目錄>/AI-Sister/data`——而那半截裡就有使用者名稱。
+    #[test]
+    fn the_longer_needle_wins() {
+        let mut scrub = Scrubber::new();
+        scrub.hide_paths(
+            Path::new("/home/xiaoming/.local/share/sister"),
+            Some(Path::new("/home/xiaoming")),
+            Some("xiaoming"),
+        );
+        let out = scrub.apply("開啟 /home/xiaoming/.local/share/sister/sister.db 失敗");
+        assert_eq!(out, "開啟 <資料夾>/sister.db 失敗");
+        assert!(!out.contains("xiaoming"));
+    }
+
+    #[test]
+    fn both_separators_and_ascii_case_are_covered() {
+        let mut scrub = Scrubber::new();
+        scrub.hide_paths(
+            Path::new(r"C:\Users\Ted\AppData\Local\sister"),
+            None,
+            Some("Ted"),
+        );
+        for line in [
+            r"讀不到 C:\Users\Ted\AppData\Local\sister\sister.db",
+            r"讀不到 c:\users\ted\appdata\local\sister\sister.db",
+            "讀不到 C:/Users/Ted/AppData/Local/sister/sister.db",
+        ] {
+            let out = scrub.apply(line);
+            assert!(out.contains("<資料夾>"), "沒換到：{out}");
+            assert!(
+                !out.to_ascii_lowercase().contains("ted"),
+                "還看得到名字：{out}"
+            );
+        }
+    }
+
+    /// 遮蔽是按位元組推進的。中文夾在針的旁邊時不可以切壞。
+    #[test]
+    fn scrubbing_does_not_split_a_multibyte_char() {
+        let mut scrub = Scrubber::new();
+        scrub.hide("/home/ted", "<家目錄>");
+        let out = scrub.apply("在這裡：/home/ted／找不到，請看說明。");
+        assert_eq!(out, "在這裡：<家目錄>／找不到，請看說明。");
+    }
+
+    /// 兩個字元的針會把整份報告打成馬賽克。使用者名稱短到那個地步的時候，
+    /// 寧可不換——換了反而看不出發生什麼事，而那正是這份報告的用途。
+    #[test]
+    fn a_needle_too_short_to_be_safe_is_refused() {
+        let mut scrub = Scrubber::new();
+        scrub.hide("ab", "<x>");
+        assert_eq!(scrub.apply("about"), "about");
+    }
+
+    #[test]
+    fn tail_lines_caps_both_axes() {
+        let text = format!("a\nb\nc\n{}\ne", "x".repeat(500));
+        let (lines, total) = tail_lines(&text, 3, 40);
+        assert_eq!(total, 5);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "c");
+        assert!(
+            lines[1].ends_with("…（這一行還有 460 字沒印）"),
+            "{}",
+            lines[1]
+        );
+        assert_eq!(
+            lines[1].chars().count(),
+            40 + "…（這一行還有 460 字沒印）".chars().count()
+        );
+        assert_eq!(lines[2], "e");
+    }
+
+    /// Windows 上 checkout 出來的東西是 CRLF。留著 `\r` 會讓貼出來的報告
+    /// 每一行後面多一個看不見的字元。
+    #[test]
+    fn tail_lines_strips_carriage_returns() {
+        let (lines, _) = tail_lines("一\r\n二\r\n", 5, 80);
+        assert_eq!(lines, vec!["一".to_string(), "二".to_string()]);
+    }
+
+    #[test]
+    fn skips_fold_into_counts_sorted_by_how_often() {
+        let mk = |reason: &str| SkipRow {
+            id: 0,
+            ts: 0,
+            reason: reason.into(),
+            segment_core_start: None,
+            detail: "這句話不該出現在報告裡".into(),
+        };
+        let folded = SkipCount::fold(&[
+            mk("budget_exhausted"),
+            mk("no_consent"),
+            mk("no_consent"),
+            mk("no_consent"),
+        ]);
+        assert_eq!(
+            folded,
+            vec![
+                SkipCount {
+                    reason: "no_consent".into(),
+                    times: 3
+                },
+                SkipCount {
+                    reason: "budget_exhausted".into(),
+                    times: 1
+                },
+            ]
+        );
+        let mut snap = snapshot();
+        snap.skips = Ok(folded);
+        let report = render(&snap);
+        assert!(report.contains("no_consent"), "{report}");
+        assert!(
+            !report.contains("這句話不該出現在報告裡"),
+            "`detail` 不該進報告——它是 `reason.message()`，會跟著文案改：\n{report}"
+        );
+    }
+
+    /// 簽過、但條文改版了，所以不生效。這兩件事在紙上要分得出來：
+    /// 一個「沒簽」和一個「簽過但要重簽」，要修的動作不一樣。
+    #[test]
+    fn a_signature_against_older_terms_reads_as_needing_a_resign() {
+        let mut consent = Consent::default();
+        consent.grant(Sheet::LocalRecording, 1_789_000_000_000);
+        consent.version = crate::consent::VERSION - 1;
+        let mut snap = snapshot();
+        snap.consent = ConsentLines::of(&consent);
+        let report = render(&snap);
+        assert!(
+            report.contains("簽過但不生效（條文改版了，要重簽）"),
+            "{report}"
+        );
+    }
+
+    /// `grounded_answer.rs` 長出新的錯誤句而這裡沒跟上的話，報告會把它印成
+    /// 「其他」——安全，但那正是他最需要看清楚的那一格。
+    ///
+    /// 掃得到的形狀只有這四種寫法（`Err("…"`、`Err(format!("…"`、
+    /// `map_err(|error| format!("…"`、`ok_or_else(|| format!("…"`）。換一種寫法
+    /// 就掃不到，所以底下還釘了一個下限：句子總數掉下去也會紅。
+    #[test]
+    fn every_error_sentence_in_grounded_answer_has_a_kind() {
+        const SOURCE: &str = include_str!("grounded_answer.rs");
+        const MARKERS: [&str; 4] = [
+            "Err(\"",
+            "Err(format!(\"",
+            "map_err(|error| format!(\"",
+            "ok_or_else(|| format!(\"",
+        ];
+        let mut found: Vec<String> = Vec::new();
+        for marker in MARKERS {
+            let mut from = 0;
+            while let Some(hit) = SOURCE[from..].find(marker) {
+                let start = from + hit + marker.len();
+                let literal: String = SOURCE[start..]
+                    .chars()
+                    .take_while(|c| *c != '"' && *c != '{')
+                    .collect();
+                let literal = literal.trim().to_string();
+                if !literal.is_empty() && !found.contains(&literal) {
+                    found.push(literal);
+                }
+                from = start;
+            }
+        }
+        assert!(
+            found.len() >= 12,
+            "只掃到 {} 句錯誤訊息；`grounded_answer.rs` 換了寫法，這條測試就瞎了：{found:?}",
+            found.len()
+        );
+        let unclassified: Vec<&String> = found
+            .iter()
+            .filter(|literal| ErrorKind::classify(literal) == ErrorKind::Other)
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "這幾句錯誤訊息在報告裡只會印「其他」，請補進 ErrorKind::PREFIXES：{unclassified:?}"
+        );
+    }
+
+    /// 分類器不可以什麼都認得——那樣它就沒有在分類了。
+    #[test]
+    fn an_unknown_error_falls_back_instead_of_guessing() {
+        assert_eq!(ErrorKind::classify("完全沒見過的東西"), ErrorKind::Other);
+        assert_eq!(ErrorKind::classify(""), ErrorKind::Other);
+        assert_eq!(
+            ErrorKind::classify("CLI invocation 在啟動前已取消"),
+            ErrorKind::NeverStarted
+        );
+        assert_eq!(
+            ErrorKind::classify(
+                "`/opt/x/grok` 已放進子行程範圍，但 suspended primary thread 無法啟動：5"
+            ),
+            ErrorKind::CliFailed
+        );
+    }
+
+    #[test]
+    fn numbers_read_like_numbers() {
+        assert_eq!(group(0), "0");
+        assert_eq!(group(999), "999");
+        assert_eq!(group(1_000), "1,000");
+        assert_eq!(group(1_234_567), "1,234,567");
+        assert_eq!(group(-1_234), "-1,234");
+        assert_eq!(bytes(512), "512 B");
+        assert_eq!(bytes(1_536), "1.5 KB");
+        assert_eq!(median(vec![]), None);
+        assert_eq!(median(vec![3, 1, 2]), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn a_cjk_char_counts_as_two_cells() {
+        assert_eq!(cells("abc"), 3);
+        assert_eq!(cells("本機記錄"), 8);
+        assert_eq!(cells("Azure 朗讀"), 10);
+        assert_eq!(cells(""), 0);
+    }
+
+    /// 「Azure 朗讀」和「本機記錄」的 char 數差一倍，格寬只差 2。
+    /// 用 `{:<10}` 排的話這兩行會歪掉，而它們就上下相鄰。
+    #[test]
+    fn padding_lines_up_names_of_different_char_counts() {
+        let a = pad("本機記錄", 14);
+        let b = pad("Azure 朗讀", 14);
+        assert_eq!(cells(&a), 14);
+        assert_eq!(cells(&b), 14);
+        assert_ne!(a.chars().count(), b.chars().count(), "char 數本來就不一樣");
+    }
+
+    /// 超過欄寬的時候不要截。截掉的那截多半正是他要看的東西。
+    #[test]
+    fn padding_never_truncates() {
+        assert_eq!(
+            pad("超級無敵長的一個角色名稱", 4),
+            "超級無敵長的一個角色名稱"
+        );
+    }
+
+    #[test]
+    fn right_aligned_numbers_end_at_the_same_column() {
+        assert_eq!(cells(&rpad("1", 9)), 9);
+        assert_eq!(cells(&rpad("123,456", 9)), 9);
+    }
+
+    /// 表頭和資料列在**印出來的那份報告裡**要對得齊。
+    ///
+    /// 前一版這條測試自己呼叫 `leg_line` 兩次再比——那只證明了 `leg_line`
+    /// 和自己一致，產品那邊改回手寫 `{:<18}` 它照樣綠。要證的是印出來的字，
+    /// 就得去讀印出來的字。
+    #[test]
+    fn the_rendered_table_lines_up() {
+        let mut snap = tests::snapshot();
+        snap.legs = Ok(vec![Leg::from_row(&tests::row(
+            "answer_search",
+            "success",
+            1_204,
+            None,
+        ))]);
+        let report = render(&snap);
+
+        let header = report
+            .lines()
+            .find(|line| line.contains("送出字數"))
+            .expect("要有表頭");
+        let row = report
+            .lines()
+            .find(|line| line.contains("answer_search"))
+            .expect("要有資料列");
+        // 表頭最後多一欄「註」，資料列那一欄是空的。扣掉之後兩邊要一樣寬。
+        let header_width = cells(header.strip_suffix("  註").expect("表頭結尾是「  註」"));
+        assert_eq!(
+            header_width,
+            cells(row.trim_end()),
+            "表頭和資料列對不齊：\n{header}|\n{row}|"
+        );
+        // 而且真的有補到寬——不是兩邊剛好都是原字串。
+        assert!(
+            header_width > cells("時間角色結局毫秒送出字數"),
+            "根本沒有補寬"
+        );
+    }
+
+    /// 找了四個檔、一個都沒讀到，就不可以寫「加上 4 個 log 檔的尾巴」。
+    #[test]
+    fn the_ledger_counts_logs_it_actually_read() {
+        let mut snap = tests::snapshot();
+        snap.logs = vec![
+            LogTail {
+                name: "desktop.log".into(),
+                lines: Err(Absent::NotThere),
+                total_lines: 0,
+            },
+            LogTail {
+                name: "record.log".into(),
+                lines: Ok(vec!["INFO".into()]),
+                total_lines: 1,
+            },
+        ];
+        let report = render(&snap);
+        assert!(report.contains("加上 1 個 log 檔（找了 2 個）"), "{report}");
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    /// `role`／`outcome` 原樣印出來的前提是「每一個寫入端都是字面值」。
+    /// 那是一句假設，而這條測試讓它變成一句有人守的話。
+    #[test]
+    fn a_field_that_does_not_look_like_a_token_is_reduced_to_its_length() {
+        assert_eq!(token_or_length("answer_search"), "answer_search");
+        assert_eq!(token_or_length("bad_json"), "bad_json");
+        assert_eq!(token_or_length("future_token"), "future_token");
+        assert_eq!(token_or_length("王小明的帳號密碼是 hunter2"), "?（17 字）");
+        assert_eq!(token_or_length(""), "?（0 字）");
+        assert_eq!(token_or_length(&"a".repeat(33)), "?（33 字）");
+    }
+
+    /// 一列被外面改過的稽核紀錄，也不可以把內容印進報告。
+    #[test]
+    fn a_tampered_audit_row_still_cannot_put_content_in_the_report() {
+        let screen = "王小明的帳號密碼是 hunter2";
+        let mut snap = tests::snapshot();
+        snap.legs = Ok(vec![Leg::from_row(&tests::row(screen, screen, 12, None))]);
+        snap.skips = Ok(SkipCount::fold(&[SkipRow {
+            id: 1,
+            ts: 0,
+            reason: screen.into(),
+            segment_core_start: None,
+            detail: String::new(),
+        }]));
+        let report = render(&snap);
+        assert!(!report.contains(screen), "{report}");
+        assert!(report.contains("?（17 字）"), "{report}");
+    }
+}

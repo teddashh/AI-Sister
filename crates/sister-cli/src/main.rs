@@ -375,6 +375,23 @@ enum Command {
         dry_run: bool,
     },
 
+    /// 把「剛剛到底發生了什麼」寫成一個可以直接貼出去的檔案。
+    ///
+    /// 不新記任何東西——`desktop.log`、`record.log`、外送稽核（含答題那兩趟
+    /// 各自的毫秒數）、跳過的理由、上一場量到的能力，這些本來就在硬碟上，
+    /// 只是沒有人會去開。這個子命令把它們讀成一份人看得懂的字。
+    ///
+    /// 報告中間有一條線。線以上放不下螢幕上的內容（那幾格的型別就沒有能裝
+    /// 它的欄位）；線以下是 log 尾巴，遮蔽只是黑名單，貼之前請自己看一眼。
+    ///
+    /// 畫面那一半（氣泡多高、上面那一槓現在看不看得見）命令列量不到，
+    /// 要從桌面版設定頁按那顆鈕。
+    Diagnose {
+        /// 寫到哪個檔。不給的話寫成 `sister-diagnose-<日期時間>.txt`。
+        #[arg(long, value_name = "檔案")]
+        out: Option<PathBuf>,
+    },
+
     /// 把記憶整份帶走（SPEC §11.8 資料主權）。
     ///
     /// **不要自己複製 `sister.db`。** 資料庫跑在 WAL 模式，她正在錄的時候，
@@ -832,6 +849,7 @@ fn main() -> Result<()> {
         Command::Stats { json } => ops::stats::run(&data_dir, &config()?, json),
         Command::Prune { dry_run } => ops::prune::run(&data_dir, &config()?, dry_run),
         Command::Export { to, with_frames } => ops::export::run(&data_dir, &to, with_frames),
+        Command::Diagnose { out } => ops::diagnose::run(&data_dir, out.as_deref()),
         Command::Forget { last, yes } => ops::forget::run(&data_dir, &last, yes),
         Command::Do {
             task,

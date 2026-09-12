@@ -26,6 +26,7 @@ pub mod consent;
 pub mod control;
 pub mod db;
 pub mod dedup;
+pub mod diagnose;
 mod dir_state;
 pub mod eval;
 pub mod facts;
