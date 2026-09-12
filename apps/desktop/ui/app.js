@@ -747,8 +747,9 @@ const invoke = globalThis.__TAURI__?.core?.invoke ?? null;
  *
  * **這一頁不參與判斷。** 每一格叫什麼名字、算不算「照你要的」，都在 Rust 那
  * 一邊（`sister_core::diagnose::Notebook::items`）。這裡送得出去的只有數字、
- * 旗標和 `lineId`——`Note` 那個型別收不下螢幕上的字，那不是紀律，是型別。
- * 唯一的自由文字是她自己的答案句子，而報告把那一節放在線的下面。
+ * 旗標和幾個代號（`lineId`、擋下那一聲笑的理由、一題為什麼沒答成）——`Note`
+ * 那個型別收不下螢幕上的字，那不是紀律，是型別。唯一的自由文字是她自己的答
+ * 案句子，而報告把那一節放在線的下面。
  *
  * 整條路 fire-and-forget：一則診斷觀測沒送成，不可以讓她的畫面出事。
  */
@@ -815,6 +816,25 @@ const noteTheAnswer = observation((question, answer, tookMs) => {
   // 版面要等瀏覽器把這一幀排完才量得準；沒有 rAF 的環境就只是不量版面，上面
   // 那一則已經送出去了。
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(noteTheBubble);
+});
+
+/*
+ * 他問了，可是沒有答案落地。
+ *
+ * 少了這一則，最常見的那一種失敗——他選的那支 CLI 還沒設好、一問就錯——在
+ * 報告上和「他根本沒去問」長得一模一樣：④⑤ 兩格都印「這一輪沒發生過，量不
+ * 到」，而那句話叫他去做他已經做過的事。兩件事要他做的事是相反的。
+ *
+ * `why` 是代號不是訊息。錯誤訊息裡有路徑、有時候有他打的字；那一整句留在畫
+ * 面上和 log 尾巴那一節，不進這條線以上。
+ */
+const noteTheAskThatFailed = observation((question, why) => {
+  noteForDiagnosis({
+    kind: "ask_failed",
+    at: Date.now(),
+    question_chars: [...String(question ?? "")].length,
+    why,
+  });
 });
 
 /** 這一輪這個角色手上有幾句閒話。角色換了要重送一次。 */
@@ -5499,11 +5519,22 @@ async function ask(event = null) {
   }, SLOW_MS);
 
   const askedAt = Date.now();
+  /* 這一題為什麼沒有答案。`null` = 有答案。
+   *
+   * 一個變數、一個記錄點（底下那個 `finally`），不是每條出口各記各的。離開
+   * 這支函式的路現在有五條（過期、同意書、畫完了／沒畫成、catch 裡的過期、
+   * catch），以後還會有第六條——記在 `finally` 的話，新出口就算沒人寫這一行
+   * 也還是會留下一則，只是 `why` 是 `unknown`，而那正是我要看到的東西。
+   *
+   * 它追的是**產品的流程**（畫面上有沒有出現一份答案），不是簿子有沒有記
+   * 到。簿子壞掉是另一件事，⑤ 的「！」為那一種留著。 */
+  let gaveUp = "unknown";
   try {
     if (invoke === null) throw new Error("這一頁不是在 AI-Sister 裡打開的");
     const answer = await invoke("ask", { question });
     // 這一份過期了。畫面歸還在跑的那一次管，這裡連 idle 都不要設。
     if (mine !== asking) {
+      gaveUp = "superseded";
       releaseNativePresentation(answer);
       return;
     }
@@ -5519,6 +5550,7 @@ async function ask(event = null) {
         // 未回答。照原本的 fail-closed 狀態畫出本機結果即可。
       }
       if (view !== null && nextConsentSheet(view) !== null) {
+        gaveUp = "consent_asked";
         releaseNativePresentation(answer);
         pendingConsentQuestion = question;
         askInput.value = "";
@@ -5551,6 +5583,8 @@ async function ask(event = null) {
       // 畫完了才量得到。這一段不改任何東西——`noteTheBubble` 量完會把
       // `scrollTop` 放回去，他看到的第一眼仍是最上面那一句。
       noteTheAnswer(question, answer, Date.now() - askedAt);
+      // 畫出來了就不算沒答成。
+      gaveUp = null;
       setState("idle");
       // 答完才清掉。失敗的時候留著，他才不用把整句話重打一次。
       askInput.value = "";
@@ -5560,11 +5594,20 @@ async function ask(event = null) {
       // 語音是情境用的，回答歸回答：她出的是「找到了」，答案本文照舊用讀的。
       playAnswerBeat();
     });
+    if (!presented) {
+      // 過期的那一份也要記。`mine !== asking` 只擋畫面，不擋簿子——他連按兩
+      // 次 Enter 就是兩題，報告上要看得到兩題。
+      gaveUp = "not_presented";
+    }
     if (!presented && mine === asking) {
       setState("idle");
     }
   } catch (err) {
-    if (mine !== asking) return;
+    if (mine !== asking) {
+      gaveUp = "superseded";
+      return;
+    }
+    gaveUp = "error";
     // 失敗要說出是什麼失敗。「沒有結果」跟「還沒錄過任何東西」跟「資料庫
     // 打不開」是三件不同的事，混成一句「查不到」等於把問題藏起來。
     //
@@ -5601,6 +5644,7 @@ async function ask(event = null) {
     paintConversation();
   } finally {
     clearTimeout(slow);
+    if (gaveUp !== null) noteTheAskThatFailed(question, gaveUp);
     // **過期的那一份不准動畫面，包括這裡。** 他多按了幾次 Enter、先送的後回，
     // 那一次走到這裡的時候還在跑的是別題——清掉的會是**那一題**的那句慢話。
     // `asking` 那個編號存在的理由就是這個，上面兩條路都問過了，這一條也要問。

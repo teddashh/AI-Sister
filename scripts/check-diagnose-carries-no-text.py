@@ -20,6 +20,11 @@
   沒有那個函式）。所以它對「以後有人在 `Bubble` 上加一個字串欄位」是瞎的。
 
 這一支不看夾具，所以不會有那種盲區。三道各守一段，缺一段就有洞。
+
+**例外的鑰匙是（變體, 欄位），不是欄位。** 第一版只用欄位名，於是我隔一天
+加了一個 `AskFailed { why: String }`，它安靜地被 `GiggleSkipped` 那條例外收
+下了——而那條例外寫的理由是「擋下那一聲笑的代號」，和新欄位一點關係都沒有。
+一條例外只該保護它自己指名的那一格。
 """
 
 from __future__ import annotations
@@ -35,14 +40,16 @@ PLAIN = {"Millis", "u32", "u64", "i64", "usize", "f64", "bool"}
 
 # 例外，以及它為什麼可以是例外。
 #
-# 每一條都要說得出「那段字最後去了哪裡」。前兩條是代號，指名之前過 `Word`
+# 每一條都要說得出「那段字最後去了哪裡」。前三條是代號，指名之前過 `Word`
 # （`[a-z0-9_-]{1,32}`），螢幕上的字進不來；後兩條是她自己的答案，報告把它們
 # 整段放在那條線的**下面**，而④ 會告訴他那一段是什麼、可以整段刪掉。
 ALLOWED = {
-    "clip": "語音檔的 lineId，`clips()` 指名之前過 `Word`",
-    "why": "擋下那一聲笑的代號，指名之前過 `Word`",
-    "sentences": "她自己的答案，只出現在那條線的下面（⑤）",
-    "sources": "她自己的答案，只出現在那條線的下面（⑤）",
+    ("Poke", "clip"): "語音檔的 lineId，`clips()` 指名之前過 `Word`",
+    ("Giggle", "clip"): "語音檔的 lineId，`clips()` 指名之前過 `Word`",
+    ("GiggleSkipped", "why"): "擋下那一聲笑的代號，指名之前過 `Word`",
+    ("AskFailed", "why"): "一題沒答成的代號，指名之前過 `Word`",
+    ("Answered", "sentences"): "她自己的答案，只出現在那條線的下面（⑤）",
+    ("Answered", "sources"): "她自己的答案，只出現在那條線的下面（⑤）",
 }
 
 
@@ -67,30 +74,66 @@ def strip_comments(block: str) -> str:
 
 
 FIELD = re.compile(r"([a-z_][a-z0-9_]*)\s*:\s*([A-Za-z0-9_]+(?:<[^>]*>)?)")
-VARIANT = re.compile(r"[A-Z][A-Za-z0-9_]*\s*\{")
+VARIANT = re.compile(r"([A-Z][A-Za-z0-9_]*)\s*\{")
+UNIT_VARIANT = re.compile(r"^[A-Z][A-Za-z0-9_]*$")
 
 
-def fields_of(block: str) -> list[tuple[str, str]]:
-    """`Note` 上每一個欄位。
+def fields_of(block: str) -> list[tuple[str, str, str]]:
+    """`Note` 上每一個欄位，連它住在哪個變體裡。
 
     這支剖析器必須把整塊吃乾淨。第一版只認縮排八格的行，於是單行寫法的
     `Started { at: Millis },` 整個被跳過——而它不吵，看起來就像那個變體沒有
     欄位。真正的問題不是漏掉 `at`（那是個數字），是**下一個人如果單行寫一個
     `Whatever { text: String }`，它一樣安靜地放過**。
 
-    所以這裡不只是抓，還要證明抓完了：把抓到的、變體名、以及大括號逗號空白
-    全部拿掉之後，剩下的必須是空的。剩下任何東西＝有一段我沒看懂，那就不准
-    印綠燈。
+    所以這裡不只是抓，還要證明抓完了，而且要證明兩層：每個變體的大括號裡沒
+    有看不懂的東西，以及大括號**外面**除了變體本身沒有別的東西。剩下任何東西
+    ＝有一段我沒看懂，那就不准印綠燈。
     """
-    found = FIELD.findall(block)
-    rest = FIELD.sub("", block)
-    rest = VARIANT.sub("", rest)
-    rest = re.sub(r"[{},\s]", "", rest)
-    if rest:
-        raise SystemExit(
-            f"✗ `Note` 裡有一段這支檢查看不懂：{rest!r}\n"
-            "  看不懂就不能說「線以上放不下字」。先把剖析改對。"
-        )
+    found: list[tuple[str, str, str]] = []
+    spans: list[tuple[int, int]] = []
+    for match in VARIANT.finditer(block):
+        if any(a <= match.start() < b for a, b in spans):
+            continue
+        name = match.group(1)
+        open_at = block.index("{", match.start())
+        depth = 0
+        end = None
+        for i in range(open_at, len(block)):
+            if block[i] == "{":
+                depth += 1
+            elif block[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end is None:
+            raise SystemExit(f"✗ 變體 `{name}` 的大括號沒有結尾——剖析壞了。")
+        spans.append((match.start(), end))
+        body = block[open_at + 1 : end - 1]
+        for field, ty in FIELD.findall(body):
+            found.append((name, field, ty))
+        leftover = re.sub(r"[{},\s]", "", FIELD.sub("", body))
+        if leftover:
+            raise SystemExit(
+                f"✗ 變體 `{name}` 裡有一段這支檢查看不懂：{leftover!r}\n"
+                "  看不懂就不能說「線以上放不下字」。先把剖析改對。"
+            )
+
+    outside = []
+    last = 0
+    for a, b in sorted(spans):
+        outside.append(block[last:a])
+        last = b
+    outside.append(block[last:])
+    for chunk in re.split(r"[,\s]+", "".join(outside)):
+        # 沒有欄位的變體（`Foo,`）放得下的東西是零個，所以它不必被看懂。
+        # 其他任何殘渣——tuple 變體、屬性、巨集——都要當場停下來。
+        if chunk and not UNIT_VARIANT.match(chunk):
+            raise SystemExit(
+                f"✗ `Note` 的變體外面有一段這支檢查看不懂：{chunk!r}\n"
+                "  看不懂就不能說「線以上放不下字」。先把剖析改對。"
+            )
     return found
 
 
@@ -106,22 +149,22 @@ def main() -> int:
 
     problems = []
     used = set()
-    for name, ty in fields:
+    for variant, name, ty in fields:
         ty = ty.strip()
         if ty in PLAIN:
             continue
-        if name in ALLOWED:
-            used.add(name)
+        if (variant, name) in ALLOWED:
+            used.add((variant, name))
             continue
-        problems.append(f"    `{name}: {ty}`")
+        problems.append(f"    `{variant}.{name}: {ty}`")
 
     # 清單枯掉也是一種洞：欄位被改名或刪掉，這裡的例外就永遠不會被用到，而
     # 下一個人會以為那個名字仍然被守著。
     stale = sorted(set(ALLOWED) - used)
 
     print(f"掃了 `Note` 的 {variants} 個變體、{len(fields)} 個欄位。")
-    for name in sorted(used):
-        print(f"  例外 `{name}`：{ALLOWED[name]}")
+    for variant, name in sorted(used):
+        print(f"  例外 `{variant}.{name}`：{ALLOWED[(variant, name)]}")
 
     if problems:
         print("\n✗ 這幾個欄位放得下螢幕上的字，而報告說線以上放不下：")
@@ -133,7 +176,8 @@ def main() -> int:
         return 1
 
     if stale:
-        print(f"\n✗ ALLOWED 裡這幾個名字在 `Note` 上已經不存在了：{'、'.join(stale)}")
+        listed = "、".join(f"{variant}.{name}" for variant, name in stale)
+        print(f"\n✗ ALLOWED 裡這幾格在 `Note` 上已經不存在了：{listed}")
         print("  留著會讓下一個人以為它還被守著。刪掉它。")
         return 1
 

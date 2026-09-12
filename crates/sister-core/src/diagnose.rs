@@ -324,6 +324,13 @@ pub enum MeasureValue {
     /// 裝的還是 [`Word`]——畫面那半一樣送不進自由文字——只是印出來的時候換
     /// 成他讀得懂的話。中文是這一邊自己的字典，不是對面送來的。
     Blocker(Word),
+    /// 一題為什麼沒答成。
+    ///
+    /// 和 [`MeasureValue::Blocker`] 分成兩個變體，不是共用一本字典：兩邊各
+    /// 有一個 `consent_sheet`／`consent_asked`，意思不一樣（一個是「同意書
+    /// 開著所以她不笑」，一個是「答案回來之後才跳出同意書」）。合成一本的
+    /// 話，下一次撞名不會編譯錯誤，只會安靜印錯那一句。
+    AskWhy(Word),
 }
 
 impl MeasureValue {
@@ -335,6 +342,7 @@ impl MeasureValue {
             MeasureValue::Flag(false) => "否".to_string(),
             MeasureValue::Word(w) => w.as_str().to_string(),
             MeasureValue::Blocker(w) => giggle_blocker(w.as_str()).to_string(),
+            MeasureValue::AskWhy(w) => ask_why(w.as_str()).to_string(),
         }
     }
 }
@@ -356,6 +364,24 @@ fn giggle_blocker(word: &str) -> &str {
         "voice_sheet" => "正在試聽語音",
         "typing" => "你正在打字",
         "no_line_picked" => "抽不到還沒講過的句子",
+        other => other,
+    }
+}
+
+/// 一題為什麼沒答成，翻成他讀得懂的話。
+///
+/// 和 [`giggle_blocker`] 一樣：認不得就原樣印代號，不要印「不明」。
+///
+/// `unknown` 那一條是留給**還沒寫進來的出口**的。`ask()` 只有一個記錄點
+/// （那個 `finally`），所以以後誰加第六條出口而忘了設 `gaveUp`，報告上會
+/// 出現「畫面那半有一條出口沒講它是哪一條」——那句話指名的是我，不是他。
+fn ask_why(word: &str) -> &str {
+    match word {
+        "error" => "出錯了，錯誤訊息在畫面上和底下的 log 尾巴",
+        "consent_asked" => "先跳出同意書，這一題還沒答",
+        "superseded" => "你又送了下一題，這一題不算了",
+        "not_presented" => "畫面那關沒讓它畫出來",
+        "unknown" => "畫面那半有一條出口沒講它是哪一條",
         other => other,
     }
 }
@@ -386,6 +412,18 @@ pub enum Verdict {
     /// 下，「沒跑起來」是叫我去修。兩個都印成空白的話，看報告的人只會做前
     /// 面那件事，而錯的是後面那件。
     NotMeasured,
+    /// 試過了，可是每一次都沒走到底。
+    ///
+    /// 空白有三種，這是第三種。三種要他做的事都不一樣：
+    ///
+    /// * [`Verdict::NotSeen`]——他還沒去做那件事。多玩一會兒再匯出。
+    /// * [`Verdict::NeverLanded`]——他做了，每一次都被別的事情擋掉。原因就
+    ///   在底下那幾格，而那個原因決定該改的是設定還是我。
+    /// * [`Verdict::NotMeasured`]——事情發生了，是這一格量不出來。我去修。
+    ///
+    /// 少了中間這一種，最常見的那次失敗（CLI 還沒設好，一問就錯）會印成第
+    /// 一種——叫他去做他已經做過的事。
+    NeverLanded,
 }
 
 impl Verdict {
@@ -396,6 +434,7 @@ impl Verdict {
             Verdict::NotSeen => "－",
             Verdict::CantJudge => "？",
             Verdict::NotMeasured => "！",
+            Verdict::NeverLanded => "…",
         }
     }
 
@@ -406,6 +445,7 @@ impl Verdict {
             Verdict::NotSeen => "這一輪沒發生過，量不到",
             Verdict::CantJudge => "機器判不了，答案原文在線下面 ⑤，你自己看",
             Verdict::NotMeasured => "該量到卻沒量到——不是這一輪沒發生，是這一格量不出來",
+            Verdict::NeverLanded => "你做了，可是每一次都沒走到底——底下那幾格寫著為什麼",
         }
     }
 }
@@ -716,6 +756,21 @@ pub enum Note {
         /// 最先擋下來的那一條的代號。過 [`Word`] 那一關，所以帶不動螢幕上的字。
         why: String,
     },
+    /// 問了一題，可是沒有答案落地。
+    ///
+    /// 沒有這一則，④⑤ 兩格在「問了三題、三題都出錯」的時候印的是「這一輪
+    /// 沒發生過」——和「他根本沒去問」一模一樣，而那兩件事要他做的事相反。
+    ///
+    /// 記在畫面那半唯一的那個 `finally` 裡，所以 `answered + ask_failed`
+    /// 等於他真的送出去的題數；以後多一條出口而沒人設代號，這裡會收到
+    /// `unknown`，那句話指名的是我。
+    AskFailed {
+        at: Millis,
+        /// 他打了幾個字。**問題原文不送。**
+        question_chars: u32,
+        /// 為什麼沒答成的代號。過 [`Word`] 那一關，帶不動螢幕上的字。
+        why: String,
+    },
     /// 答完一題。
     Answered {
         at: Millis,
@@ -740,6 +795,7 @@ impl Note {
             | Note::Poke { at, .. }
             | Note::Giggle { at, .. }
             | Note::GiggleSkipped { at, .. }
+            | Note::AskFailed { at, .. }
             | Note::Answered { at, .. } => *at,
         }
     }
@@ -913,6 +969,20 @@ impl Notebook {
             .collect()
     }
 
+    /// 沒答成的那幾題，各是為什麼。
+    ///
+    /// 和 [`Notebook::giggle_skips`] 同一個理由不過 [`Word`]：數量夾帶不了
+    /// 東西，濾掉只會讓「幾題沒答成」少報。指名之前才過那一關。
+    fn ask_failures(&self) -> Vec<&str> {
+        self.notes
+            .iter()
+            .filter_map(|note| match note {
+                Note::AskFailed { why, .. } => Some(why.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// 出現最多次的那一個。平手就取先出現的。
     fn commonest<'a>(values: &[&'a str]) -> Option<&'a str> {
         let mut best: Option<(&str, usize)> = None;
@@ -923,6 +993,19 @@ impl Notebook {
             }
         }
         best.map(|(value, _)| value)
+    }
+
+    /// 出現最多次的那一個，而且它得是個 [`Word`]。
+    ///
+    /// **`Word` 那一關擋在指名這一步，不擋在數的那一步。** 一個數字夾帶不了
+    /// 螢幕上的字，一個名字會；濾在數的那一步只會讓次數少報。
+    fn named_commonest(values: &[&str]) -> Option<Word> {
+        let named: Vec<&str> = values
+            .iter()
+            .copied()
+            .filter(|value| Word::new(value).is_some())
+            .collect();
+        Self::commonest(&named).and_then(Word::new)
     }
 
     fn distinct(values: &[(&str, bool)]) -> usize {
@@ -1062,18 +1145,33 @@ impl Notebook {
                 _ => None,
             })
             .collect();
+        let flops = self.ask_failures();
         let slowest = took.iter().copied().max();
         let middle = median(took.clone());
+        let mut answer_measured = vec![
+            m("答了幾題", MeasureValue::Int(took.len() as i64)),
+            m("中位數毫秒", MeasureValue::Int(middle.unwrap_or_default())),
+            m("最慢那一題", MeasureValue::Int(slowest.unwrap_or_default())),
+            /* 「沒答成幾題」無條件出現，0 也要印。
+             *
+             * 它是 ④⑤ 兩格分得出「他還沒去問」和「他問了、一題都沒答成」的
+             * 唯一根據；只在大於零的時候才印的話，讀報告的人看到一片空白仍然
+             * 分不出那兩件事——而那正是這一格存在的理由。 */
+            m("問了沒答成的", MeasureValue::Int(flops.len() as i64)),
+        ];
+        if let Some(top) = Self::named_commonest(&flops) {
+            answer_measured.push(m("最常沒答成的原因", MeasureValue::AskWhy(top)));
+        }
         items.push(Item {
             number: 4,
             asked: "問一題不該超過四秒".into(),
-            measured: vec![
-                m("答了幾題", MeasureValue::Int(took.len() as i64)),
-                m("中位數毫秒", MeasureValue::Int(middle.unwrap_or_default())),
-                m("最慢那一題", MeasureValue::Int(slowest.unwrap_or_default())),
-            ],
+            measured: answer_measured,
             verdict: match middle {
-                None => Verdict::NotSeen,
+                None if flops.is_empty() => Verdict::NotSeen,
+                /* 他問了，一題都沒答成。最常見的那一種是他選的那支 CLI 還沒
+                 * 設好——印成「這一輪沒發生過」的話，報告等於叫他去做他剛剛
+                 * 才做過的事。 */
+                None => Verdict::NeverLanded,
                 Some(ms) if ms > SLOW_ANSWER_MS => Verdict::Off,
                 Some(_) => Verdict::AsAsked,
             },
@@ -1104,7 +1202,14 @@ impl Notebook {
         let answered = self.answers().len();
         let (measured, verdict) = match bubble {
             // 一題都沒問過，這一格本來就沒東西可量。
-            None if answered == 0 => (Vec::new(), Verdict::NotSeen),
+            None if answered == 0 && flops.is_empty() => (Vec::new(), Verdict::NotSeen),
+            /* 問了，可是一題都沒答成。沒有答案就沒有氣泡——所以這一格既不是
+             * 「他沒去做」也不是「量不出來」，是「還輪不到量」。為什麼沒答成
+             * 寫在 ④ 那兩格，這裡只給他數字，不重複那本字典。 */
+            None if answered == 0 => (
+                vec![m("問了沒答成的", MeasureValue::Int(flops.len() as i64))],
+                Verdict::NeverLanded,
+            ),
             /* 問過題卻一次都沒量到，那不是「沒發生」：氣泡跟著答案出現，而答
              * 案就在這本簿子裡。兩種成因，兩種都要他去看一眼：
              *
@@ -1165,21 +1270,20 @@ impl Notebook {
              * 測太短，不是她壞了。 */
             m("時候到了卻跳過", MeasureValue::Int(skips.len() as i64)),
         ];
-        // 指名之前才過 `Word`：報告上寫得出來的只有代號，螢幕上的字進不來。
-        let named: Vec<&str> = skips
-            .iter()
-            .copied()
-            .filter(|why| Word::new(why).is_some())
-            .collect();
-        if let Some(top) = Self::commonest(&named).and_then(Word::new) {
+        if let Some(top) = Self::named_commonest(&skips) {
             giggle_measured.push(m("最常擋下來的", MeasureValue::Blocker(top)));
         }
         items.push(Item {
             number: 6,
             asked: "沒事也可以呵呵嘻嘻笑幾下".into(),
             measured: giggle_measured,
-            verdict: if giggle_clips.is_empty() {
+            verdict: if giggle_clips.is_empty() && skips.is_empty() {
                 Verdict::NotSeen
+            } else if giggle_clips.is_empty() {
+                /* 計時器響過，每一次都被擋掉。這一格的摘要不可以說「沒發生
+                 * 過」——底下兩格明明寫著它試了幾次、最常被什麼擋的。摘要和
+                 * 自己的明細打架的時候，讀報告的人信的是摘要。 */
+                Verdict::NeverLanded
             } else {
                 Verdict::AsAsked
             },
@@ -1737,9 +1841,12 @@ fn render_head(s: &Snapshot) -> String {
                 .max()
                 .unwrap_or(0);
             for item in &check.items {
+                /* 記號補到兩格寬。`✓` 一格、`－？！` 兩格（全形），不補的
+                 * 話同一份表裡的「第 N 項」會左右各差一格——而那一欄正是他
+                 * 用來掃的。 */
                 o.push_str(&format!(
                     "  {} 第 {} 項　{}　{}\n",
-                    item.verdict.mark(),
+                    pad(item.verdict.mark(), 2),
                     item.number,
                     item.asked,
                     item.verdict.say(),
@@ -2574,6 +2681,24 @@ mod notebook_tests {
         }
     }
 
+    fn failed(at: Millis, why: &str) -> Note {
+        Note::AskFailed {
+            at,
+            question_chars: 8,
+            why: why.to_string(),
+        }
+    }
+
+    fn answered(at: Millis, took_ms: i64) -> Note {
+        Note::Answered {
+            at,
+            question_chars: 12,
+            took_ms,
+            sentences: vec!["她講的話".to_string()],
+            sources: vec![],
+        }
+    }
+
     /// 開機那兩則永遠在最前面——真的跑起來也是這個順序。
     ///
     /// 上一版只推了 `persona()`，於是這個 helper 做出來的簿子沒有開機那一則，
@@ -2956,6 +3081,151 @@ mod notebook_tests {
         );
     }
 
+    /// 他問了三題、三題都沒答成——那不是「他沒問過」。
+    ///
+    /// 這是他實測時最可能遇到的一種：選的那支 CLI 還沒設好，一問就錯。少了
+    /// 這一則，④⑤ 兩格印的都是「這一輪沒發生過，量不到」，而那句話的意思是
+    /// 「你多玩一下就有了」——他剛剛已經做過了，做再多次也不會變。
+    #[test]
+    fn asks_that_all_failed_are_not_asks_that_never_happened() {
+        /* 第一則、最後一則、最多的那一則各不相同，`commonest` 才真的被考到。 */
+        let flopped = book(vec![
+            failed(1_789_222_101_000, "consent_asked"),
+            failed(1_789_222_102_000, "error"),
+            failed(1_789_222_103_000, "error"),
+            failed(1_789_222_104_000, "superseded"),
+        ]);
+
+        let fourth = item(&flopped, 4);
+        assert_eq!(
+            fourth.verdict,
+            Verdict::NeverLanded,
+            "問了四題一題都沒答成，不可以說成「這一輪沒發生過」"
+        );
+        assert_eq!(value(&fourth, "答了幾題"), MeasureValue::Int(0));
+        assert_eq!(value(&fourth, "問了沒答成的"), MeasureValue::Int(4));
+        assert_eq!(
+            value(&fourth, "最常沒答成的原因"),
+            MeasureValue::AskWhy(Word::new("error").expect("error 過得了 Word")),
+            "四題裡兩題是出錯，指的要是那一條"
+        );
+
+        let fifth = item(&flopped, 5);
+        assert_eq!(
+            fifth.verdict,
+            Verdict::NeverLanded,
+            "沒有答案就沒有氣泡；這一格不是「他沒去做」，也不是「量壞了」"
+        );
+        assert_eq!(value(&fifth, "問了沒答成的"), MeasureValue::Int(4));
+
+        // 對照組：一題都沒送出去過，那才是真的沒發生。
+        let never = book(vec![]);
+        assert_eq!(item(&never, 4).verdict, Verdict::NotSeen);
+        assert_eq!(item(&never, 5).verdict, Verdict::NotSeen);
+        assert_eq!(
+            value(&item(&never, 4), "問了沒答成的"),
+            MeasureValue::Int(0),
+            "0 也要印出來——不印的話，一片空白仍然分不出那兩件事"
+        );
+    }
+
+    /// 有幾題答成了，沒答成的那幾題還是要看得見。
+    ///
+    /// 這一格不是只在「全軍覆沒」的時候才有話講：五題壞兩題也是他要知道的
+    /// 事，而 ④ 的判定看的是答成那幾題的中位數，不會提到它。
+    #[test]
+    fn answers_that_landed_do_not_hide_the_ones_that_did_not() {
+        let mixed = book(vec![
+            answered(1_789_222_101_000, 900),
+            failed(1_789_222_102_000, "error"),
+            answered(1_789_222_103_000, 1_100),
+        ]);
+        let fourth = item(&mixed, 4);
+        assert_eq!(
+            fourth.verdict,
+            Verdict::AsAsked,
+            "答成的那兩題都在四秒內，這一格就是照他要的"
+        );
+        assert_eq!(value(&fourth, "答了幾題"), MeasureValue::Int(2));
+        assert_eq!(
+            value(&fourth, "問了沒答成的"),
+            MeasureValue::Int(1),
+            "✓ 不可以把壞掉的那一題吃掉"
+        );
+    }
+
+    /// 那一格要印他讀得懂的話，而且記號要換一個。
+    #[test]
+    fn the_report_says_in_words_why_the_asks_never_landed() {
+        let report = reported(&book(vec![failed(1_789_222_101_000, "error")]));
+        assert!(
+            report.contains("出錯了，錯誤訊息在畫面上和底下的 log 尾巴"),
+            "沒答成的原因要翻成中文，不要只印代號：\n{report}"
+        );
+        assert_eq!(
+            mark_of(&report, 4),
+            "…",
+            "「試過了、每次都沒走到底」要有自己的記號，不能和「沒發生過」共用：\n{report}"
+        );
+        assert!(
+            report.contains("你做了，可是每一次都沒走到底"),
+            "記號旁邊那句話要說得出他該看哪裡：\n{report}"
+        );
+    }
+
+    /// 畫面那半多一條出口而忘了說是哪一條，報告要指名我，不是指名他。
+    ///
+    /// `ask()` 只有一個記錄點（那個 `finally`），`gaveUp` 的預設值就是
+    /// `unknown`。所以「沒人設代號」不會變成「這一題沒被記到」，會變成一句
+    /// 我讀得出來的話。
+    #[test]
+    fn an_exit_that_forgot_to_say_why_points_at_me() {
+        let report = reported(&book(vec![failed(1_789_222_101_000, "unknown")]));
+        assert!(
+            report.contains("畫面那半有一條出口沒講它是哪一條"),
+            "`unknown` 是我的疏漏，不是他的操作：\n{report}"
+        );
+    }
+
+    /// 這一邊不認得的代號，原樣印出來，不要印「不明」。
+    #[test]
+    fn an_ask_reason_this_side_does_not_know_still_names_itself() {
+        let report = reported(&book(vec![failed(1_789_222_101_000, "port-in-use")]));
+        assert!(
+            report.contains("port-in-use"),
+            "認不得就原樣印代號——「不明」會把「我沒跟上」講成「不知道為什麼」：\n{report}"
+        );
+    }
+
+    /// 帶著螢幕上的字的代號，算得進次數，但一個字都不准印出來。
+    ///
+    /// 私密那條斷言排第一。排第二的話，一個「`Word` 什麼都收」的突變會先撞
+    /// 到底下那條指名的斷言而紅，我就會以為這一條守住了——而它沒有。
+    #[test]
+    fn an_ask_reason_carrying_screen_text_is_counted_but_never_printed() {
+        let smuggled = book(vec![
+            failed(1_789_222_101_000, SCREEN_TEXT),
+            failed(1_789_222_102_000, "error"),
+        ]);
+        let report = reported(&smuggled);
+        assert!(
+            !report.contains("hunter2"),
+            "螢幕上的字沿著代號那一格溜進報告了：\n{report}"
+        );
+
+        let fourth = item(&smuggled, 4);
+        assert_eq!(
+            value(&fourth, "問了沒答成的"),
+            MeasureValue::Int(2),
+            "濾在數的那一步只會讓次數少報——一個數字夾帶不了任何東西"
+        );
+        assert_eq!(
+            value(&fourth, "最常沒答成的原因"),
+            MeasureValue::AskWhy(Word::new("error").expect("error 過得了 Word")),
+            "指名只能指得出過得了 `Word` 的那幾個"
+        );
+    }
+
     /// 擠掉過就不可以指控那一槓的量測壞了。
     ///
     /// 開機那一則存在欄位裡、不會被擠；那一槓的那一則存在清單裡、會。所以
@@ -3063,6 +3333,11 @@ mod notebook_tests {
             "一次都沒試過就不可以指認兇手：{:?}",
             sixth.measured
         );
+        assert_eq!(
+            sixth.verdict,
+            Verdict::NotSeen,
+            "一次都沒響過才是「這一輪沒發生過」"
+        );
 
         /* 順序是挑過的：第一則、最後一則、最多的那一則各是不同的代號。三個
          * 都一樣的話，一支「回傳第一個」或「回傳最後一個」的 `commonest` 照樣
@@ -3081,10 +3356,11 @@ mod notebook_tests {
             MeasureValue::Blocker(Word::new("typing").expect("typing 過得了 Word")),
             "四次裡兩次是打字，指的要是那一條"
         );
+        assert_ne!(sixth.verdict, Verdict::AsAsked, "被擋掉不等於做對了");
         assert_eq!(
             sixth.verdict,
-            Verdict::NotSeen,
-            "被擋掉不等於做對了，那一格還是「沒發生過」"
+            Verdict::NeverLanded,
+            "計時器響過四次，摘要就不可以說「這一輪沒發生過」——底下兩格明明寫著它試了四次"
         );
     }
 
@@ -3165,6 +3441,23 @@ mod notebook_tests {
         snapshot
     }
 
+    /// 「第 N 項」那一行開頭的記號。
+    ///
+    /// 不比整段字串：記號那一欄補過寬度，寫死空白數的斷言會在下一次調版面時
+    /// 紅得莫名其妙，而它要守的其實只是「這一項判成什麼」。
+    fn mark_of(report: &str, number: u8) -> String {
+        let needle = format!("第 {number} 項");
+        let line = report
+            .lines()
+            .find(|line| line.contains(&needle))
+            .unwrap_or_else(|| panic!("報告裡沒有第 {number} 項：\n{report}"));
+        line.trim_start()
+            .chars()
+            .next()
+            .expect("那一行不會是空的")
+            .to_string()
+    }
+
     #[test]
     fn the_report_says_how_far_back_the_self_check_can_see() {
         let mut book = Notebook::new();
@@ -3175,14 +3468,56 @@ mod notebook_tests {
         book.fill(&mut snapshot, 1_789_225_320_000);
         let report = render(&snapshot);
         assert!(report.contains("底下只涵蓋 2026-09-12"), "{report}");
-        assert!(
-            report.contains("✗ 第 2 項"),
+        assert_eq!(
+            mark_of(&report, 2),
+            "✗",
             "只戳一下沒出聲，第 2 項要是 ✗：\n{report}"
         );
-        assert!(report.contains("？ 第 7 項"), "{report}");
+        assert_eq!(mark_of(&report, 7), "？", "{report}");
+        assert_eq!(
+            mark_of(&report, 5),
+            "－",
+            "沒問過就沒有氣泡可量：\n{report}"
+        );
+    }
+
+    /// 每一行的「第 N 項」都從同一格開始。
+    ///
+    /// `✓` 是一格，`－？！…` 是兩格（全形）。記號不補寬度的話，同一份表裡
+    /// 的項次會左右各差一格——而那一欄正是他用來掃的那一欄。
+    #[test]
+    fn every_self_check_row_starts_its_number_at_the_same_column() {
+        let mut book = Notebook::new();
+        book.note(started());
+        book.note(poke(1_789_222_100_000, true, Some("poke-aiyo")));
+        book.note(poke(1_789_222_101_000, true, Some("poke-fan")));
+        let mut snapshot = tests::snapshot();
+        book.fill(&mut snapshot, 1_789_225_320_000);
+        let report = render(&snapshot);
+
+        let rows: Vec<&str> = report
+            .lines()
+            .filter(|line| line.contains(" 項　"))
+            .collect();
+        assert_eq!(rows.len(), 7, "七件事七行：\n{report}");
+
+        // 空過的話這條測試等於沒跑：一格寬和兩格寬的記號都要真的出現。
+        let widths: Vec<usize> = rows
+            .iter()
+            .map(|line| cells(&line.trim_start().chars().next().unwrap().to_string()))
+            .collect();
         assert!(
-            report.contains("－ 第 5 項"),
-            "沒有氣泡就要印「沒量」：\n{report}"
+            widths.contains(&1) && widths.contains(&2),
+            "這份夾具沒同時產出窄記號和寬記號，對齊這件事等於沒測：\n{report}"
+        );
+
+        let columns: Vec<usize> = rows
+            .iter()
+            .map(|line| cells(&line[..line.find("第 ").expect("這一行有「第 」")]))
+            .collect();
+        assert!(
+            columns.iter().all(|column| *column == columns[0]),
+            "「第 N 項」沒有對齊，各在第 {columns:?} 格：\n{report}"
         );
     }
 }

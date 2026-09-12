@@ -3142,7 +3142,9 @@ mod answer_cli_selection_tests {
 ///
 /// **native 只存，不算。** 這一格叫什麼、算不算「照你要的」，全在
 /// [`sister_core::diagnose::Notebook::items`] 那一邊；畫面送得出來的只有數字、
-/// 旗標和一個 `lineId`（見 `Note` 的型別）。少了這條分工，畫面就變成報告的第
+/// 旗標和幾個代號——`lineId`、擋下那一聲笑的理由、一題為什麼沒答成——而每
+/// 一個代號在被指名印出來之前都要先過 `Word`（見 `Note` 的型別，以及
+/// `scripts/check-diagnose-carries-no-text.py`）。少了這條分工，畫面就變成報告的第
 /// 二個寫入端，而那份報告裡有一半的字會是它說了算——那正好是這份報告最不該
 /// 有的性質。
 ///

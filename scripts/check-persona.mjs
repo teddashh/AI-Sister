@@ -492,6 +492,9 @@ async function open(personaView = persona(), options = {}) {
               path: "C:\\config.toml",
             };
           case "ask":
+            // 一問就錯是他最可能遇到的那一種（選的 CLI 還沒設好），而那條路
+            // 上一版沒有任何夾具走過。
+            if (options.askThrows) throw new Error(options.askThrows);
             return (
               options.askResult ?? {
                 presentation_id: null,
@@ -2429,6 +2432,38 @@ console.log("⑨ 診斷觀測送得出數字，送不出螢幕上的字");
     JSON.stringify(p.diagnoseNotes.filter((note) => note?.kind === "answered")),
   );
 
+  /* 問了、沒答成，也要留下一則。
+   *
+   * 那一則是報告 ④⑤ 分得出「他還沒去問」和「他問了、一題都沒答成」的唯一根
+   * 據，而後者正是他實測時最可能遇到的那一種：選的那支 CLI 還沒設好，一問就
+   * 錯。少了它，兩件事在報告上長得一樣，而它們要他做的事相反。 */
+  const broken = await open(persona("chatgpt"), {
+    askThrows: "資料庫打不開：D:\\私人\\sister.db",
+  });
+  const beforeFlop = broken.diagnoseNotes.length;
+  await broken.ask("昨天在幹嘛");
+  const flopped = broken.diagnoseNotes.slice(beforeFlop);
+  const flops = flopped.filter((note) => note?.kind === "ask_failed");
+  check("問了沒答成，也留得下一則", flops.length === 1, JSON.stringify(flopped));
+  check("那一則說得出是哪一種沒答成", flops[0]?.why === "error", JSON.stringify(flopped));
+  check(
+    "沒答成就不會同時留下一則「答完了」",
+    flopped.every((note) => note?.kind !== "answered"),
+    JSON.stringify(flopped),
+  );
+  check(
+    "錯誤訊息本身沒有跟著那一則出去",
+    !JSON.stringify(flopped).includes("私人"),
+    JSON.stringify(flopped),
+  );
+  /* 對照組。少了它，一支「每題都記一則沒答成」的實作照樣全綠——而那會讓報告
+   * 上永遠掛著一個非零的失敗數。 */
+  check(
+    "答成的那一題不會留下「沒答成」",
+    p.diagnoseNotes.every((note) => note?.kind !== "ask_failed"),
+    JSON.stringify(p.diagnoseNotes.filter((note) => note?.kind === "ask_failed")),
+  );
+
   /* 機械掃一遍：除了 `answered`（她自己的答案，報告把那一節放在那條線的下面，
    * 他可以整段刪掉），沒有一則觀測帶得動自由文字。
    *
@@ -2439,8 +2474,13 @@ console.log("⑨ 診斷觀測送得出數字，送不出螢幕上的字");
    *
    * 這一條是給**還沒寫出來的** note 種類看的：以後誰在 `Note` 上加一個字串欄
    * 位，這裡當場紅，不必等到有人讀報告才發現螢幕上的字被送出去了。`clip` 是
-   * 語音檔的 lineId，`why` 是擋下那一聲笑的代號，所以另外釘它們的形狀，免得有
-   * 人拿它夾帶。 */
+   * 語音檔的 lineId，`why` 是一個代號（擋下那一聲笑的，或是一題為什麼沒答成
+   * 的），所以另外釘它們的形狀，免得有人拿它夾帶。
+   *
+   * 這一條仍然只看得到這一輪夾具真的產得出來的種類（九種裡八種，`bubble` 那
+   * 一種排在 `requestAnimationFrame` 上而假 DOM 沒有那個函式）。守著「還沒寫
+   * 出來的欄位」那句話的是 `scripts/check-diagnose-carries-no-text.py`，它讀
+   * 型別不讀夾具。 */
   const CARRIES_HER_ANSWER = "answered";
   const smuggled = [];
   for (const note of everyDiagnoseNote) {
