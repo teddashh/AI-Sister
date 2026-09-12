@@ -1135,12 +1135,27 @@ pub fn file_name(now: Millis) -> String {
 /// [`Absent::NotHere`]。
 pub fn collect(data_dir: &Path, source: &str, app_version: &str) -> Snapshot {
     let db_path = crate::config::Config::db_path(data_dir);
-    let db = if db_path.exists() {
-        crate::db::Db::open(&db_path).map_err(|_| Absent::QueryFailed)
-    } else {
-        Err(Absent::NotThere)
+    // 檔案不在就**不要** `open`：那支會 `create_dir_all` 再建一個空的出來，於是
+    // 一份只該讀的診斷變成寫入端，而報告會說「0 幀」而不是「還沒有這個檔案」。
+    let db = match why_no_db(data_dir) {
+        Absent::NotThere => Err(Absent::NotThere),
+        _ => crate::db::Db::open(&db_path).map_err(|_| Absent::QueryFailed),
     };
     collect_from(data_dir, source, app_version, db.as_ref().map_err(|e| *e))
+}
+
+/// 資料庫問不出來的時候，是「還沒有」還是「開不起來」。
+///
+/// 兩個呼叫端都要回答這一題——命令列自己開連線，桌面版沿用她已經開著的那條
+/// ——而答錯的後果一樣：一格印「問不出來」而真相是「他還沒錄過」，正好是這份
+/// 報告存在的理由所反對的那句話。同一個判準寫兩處而不同步是看不見的，所以只
+/// 寫一次。
+pub fn why_no_db(data_dir: &Path) -> Absent {
+    if crate::config::Config::db_path(data_dir).exists() {
+        Absent::QueryFailed
+    } else {
+        Absent::NotThere
+    }
 }
 
 /// 同一支，但資料庫連線由呼叫端給。
@@ -1912,6 +1927,45 @@ mod tests {
                 "{absent:?} 沒有說出理由：\n{report}"
             );
         }
+    }
+
+    /// 一份只該讀的東西，不可以在空機器上造出一個資料庫。
+    ///
+    /// `Db::open` 會 `create_dir_all` 再把 schema 建起來。少了那道 `exists()`
+    /// 閘門，他還沒錄過就跑 `sister diagnose`，報告會印「0 幀」——而那句話是
+    /// 這次執行自己造出來的，不是他機器上本來的狀態。
+    #[test]
+    fn diagnosing_an_empty_machine_does_not_create_a_database() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ai-sister-diagnose-empty-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let snapshot = collect(&dir, "測試", "0.0.0-test");
+        let made_one = crate::config::Config::db_path(&dir).exists();
+        let report = render(&snapshot);
+        let why = why_no_db(&dir);
+        let db = format!("{:?}", snapshot.db);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(why, Absent::NotThere, "空資料夾應該是「還沒有這個檔案」");
+        assert!(
+            matches!(snapshot.db, Err(Absent::NotThere)),
+            "空機器上那一格要說「沒有這個檔案」，不是「問不出來」：{db}"
+        );
+        assert!(
+            !made_one,
+            "跑一次診斷就把資料庫建出來了——那是寫入端，不是診斷"
+        );
+        assert!(
+            !report.contains("0 幀"),
+            "報告印了「0 幀」，而那是它自己造出來的數字：\n{report}"
+        );
     }
 
     /// 這個檔在刪除路外面，報告要自己講。
