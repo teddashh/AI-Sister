@@ -2759,10 +2759,17 @@ mod notebook_tests {
     ///
     /// 這是這份自檢最容易犯的錯：七格全綠，而其中五格根本沒有樣本。
     ///
-    /// 「沒量」還分兩種，而分法決定他該做什麼：② ③ ④ ⑥ 是「你還沒去做那件
-    /// 事」，多玩一下就有了；① 是「開機一定會送一則那一槓的觀測，一則都沒有
-    /// ＝那一格量不出來」，那要我去修。⑤ 兩種都可能，看他問過題沒有——這裡
-    /// 一題都沒問，所以是前者。
+    /// 「沒量」還分三種，而分法決定他該做什麼。這一本簿子裡只有開機那一則，
+    /// 所以每一格都該落在最單純的那一種：
+    ///
+    /// * ② ③ ④ ⑤ ⑥ ＝「你還沒去做那件事」，多玩一下就有了。
+    /// * ① ＝「開機一定會送一則那一槓的觀測，一則都沒有就是那一格量不出來」，
+    ///   那要我去修。
+    ///
+    /// 第三種（`NeverLanded`，試過了但每次都沒走到底）在這一本裡到不了——它
+    /// 要有 `ask_failed` 或 `giggle_skipped`，而這裡一則都沒有。守它的是
+    /// `asks_that_all_failed_are_not_asks_that_never_happened` 和
+    /// `a_run_with_no_giggles_says_which_kind_of_zero_it_is`。
     #[test]
     fn nothing_observed_is_not_the_same_as_nothing_wrong() {
         let book = book(vec![started()]);
