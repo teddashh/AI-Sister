@@ -8,7 +8,7 @@
  * 器不會因為他剛按了按鈕就重設，所以「0 秒」是真的會發生的。
  *
  * 這一族在 alpha.38 之前有五個（開始記錄失敗、問問題失敗、暫停切不動、時間軸
- * 開不起來、「還在翻…」），其中兩個的原始碼註解自己就在描述這個 bug：
+ * 開不起來、那句「超過 4 秒」），其中兩個的原始碼註解自己就在描述這個 bug：
  * `wakeFailed` 那個欄位上面整段講的就是它，而暫停那條寫著「寧可看起來沒反應，
  * 然後把原因寫出來」——輪詢一到，只剩下前半句。
  *
@@ -601,11 +601,11 @@ console.log("③ 這一題翻很久（SLOW_MS）");
   });
   void p.type("三天前那通電話");
   await tick(4300);
-  check("換成「還在翻…」了", p.line().includes("還在翻"), p.line());
+  check("換成那句「超過 4 秒」了", p.line().includes("超過 4 秒"), p.line());
   await p.repaint();
-  check("輪詢過後沒有被換回「想一下…」", p.line().includes("還在翻"), p.line());
+  check("輪詢過後沒有被換回「想一下…」", p.line().includes("超過 4 秒"), p.line());
   await tick(1200);
-  check("答案回來就不講了", !p.line().includes("還在翻"), p.line());
+  check("答案回來就不講了", !p.line().includes("超過 4 秒"), p.line());
 }
 
 console.log("④ 暫停鍵切不動");
@@ -707,7 +707,7 @@ console.log("⑩ 答成過一次之後再失敗，才輪得到那句「先收起
   check("這次說得出「上一題」", p.hitTexts().some((t) => t.includes("上一題")), p.hitTexts());
 }
 
-console.log("⑪ 上一題的「還在翻…」不可以蓋到半秒前才送出的新題目上");
+console.log("⑪ 上一題那句「超過 4 秒」不可以蓋到半秒前才送出的新題目上");
 {
   // 時間軸（SLOW_MS = 4000）：
   //   t=0     第一題送出，永遠不回來
@@ -726,7 +726,7 @@ console.log("⑪ 上一題的「還在翻…」不可以蓋到半秒前才送出
   void p.type("第二題");
   await tick(500);
   check("還在想第二題", p.line().includes("想一下") || p.line().includes("在聽"), p.line());
-  check("而且沒被上一題的計時器蓋掉", !p.line().includes("還在翻"), p.line());
+  check("而且沒被上一題的計時器蓋掉", !p.line().includes("超過 4 秒"), p.line());
 }
 
 console.log("⑫ 整場下來，畫面上沒有出現過 NaN / undefined");

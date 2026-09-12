@@ -2,11 +2,18 @@
 /*
  * Persona v2 的行為契約。
  *
- * 直接載入產品 app.js，而不是抄一份選台詞邏輯。這裡特別守四條容易各自看起來
+ * 直接載入產品 app.js，而不是抄一份選台詞邏輯。這裡特別守五條容易各自看起來
  * 正確、湊起來卻說謊的縫：17 人都必須有隨程式提供的真角色圖，任何 pack 狀態都
  * 不准退回字母；開場／五秒輪詢不准自己開口；native button 的 click 才能播放固定
- * Ogg；一般答案才用明確標成 localService 的系統語音。關掉角色不可以連搜尋與
+ * Ogg；一般答案才用明確標成 localService 的系統語音；日常與閒話兩包語音各自
+ * fail closed，壞一包不可以連累另一包、也不可以互相背書。關掉角色不可以連搜尋與
  * 錄製狀態一起關。
+ *
+ * alpha.132 之後多守兩件事。一是她**沒有人碰也會開口**（`idle-giggle`／
+ * `answer-beat`）：那是整個程式裡唯一一條自己出聲的路，所以底下每一道閘門都要有
+ * 自己的斷言。二是上面那條膠囊平常收起來（②ᵈ）——那一格的規則橫跨 CSS、app.js、
+ * HTML 和 Rust 的系統匣選單四個地方，而「看不見」和「點得穿」是分開寫的兩句話，
+ * 只改一句不會有任何畫面上的症狀。
  */
 
 import { createHash } from "node:crypto";
@@ -32,6 +39,7 @@ const CONFIG = read(join(ROOT, "crates/sister-core/src/config.rs"));
 const BUNDLED = JSON.parse(read(join(UI, "personas/manifest.json")));
 const REELS = JSON.parse(read(join(UI, "persona-reels/manifest.json")));
 const VOICES = JSON.parse(read(join(UI, "persona-voices/v1/manifest.json")));
+const BANTER = JSON.parse(read(join(UI, "persona-banter-voices/v1/manifest.json")));
 const FACE_CSS = STYLES.match(/(?:^|\n)\.face \{\n(?<body>[\s\S]*?)\n\}/u)?.groups?.body ?? "";
 const PORTRAIT_CSS =
   STYLES.match(/(?:^|\n)\.portrait \{\n(?<body>[\s\S]*?)\n\}/u)?.groups?.body ?? "";
@@ -125,6 +133,57 @@ const EXPECTED = Object.freeze({
   mimo: { alias: "MiMo", tagline: "先看人用起來順不順。", palette: ["#431407", "#FFF8F1", "#FF6900"], first: "先看用起來順不順，隨時可以開始。" },
 });
 
+/*
+ * 她挑台詞是隨機的（`pickBanter`），而「隨機」本身很難斷言：拿真的 `Math.random`
+ * 去跑統計，等於在 CI 上擲骰子——這個 repo 已經被那種測試咬過兩次。所以這裡把
+ * 骰子接管起來。產品碼一個字都不必為了測試改，是測試自己決定骰子擲出什麼。
+ *
+ * 預設仍是真的亂數；只有明確 `scriptRandom()` / `scriptRandomSequence()` 的區段
+ * 才被接管，用完 `stopScriptingRandom()` 還回去。
+ */
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
+const realRandom = Math.random;
+let scriptedRandom = null;
+Math.random = () => (scriptedRandom === null ? realRandom() : scriptedRandom());
+
+/** 每次都擲出同一個值的骰子。用來逼出「連兩下不准講同一句」那條規則。 */
+function scriptRandom(value) {
+  scriptedRandom = () => value;
+}
+
+/**
+ * 固定種子的 PRNG（mulberry32）。它是「真的有鋪開」而不是「碰運氣」：同一顆種子
+ * 在任何機器上算出來的序列一模一樣，所以「戳 40 下會出現幾種台詞」是個定值，
+ * 不是機率。
+ */
+function scriptRandomSequence(seed) {
+  let state = seed >>> 0;
+  scriptedRandom = () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function stopScriptingRandom() {
+  scriptedRandom = null;
+}
+
+/**
+ * 一個角色被戳的時候講得出來的每一句話：日常那包的兩句 + 閒話那包的每一句。
+ *
+ * 從兩份 manifest 算出來，不在這裡抄一份清單——抄的那份會漂，而且漂了還是綠的。
+ */
+function pokePool(id) {
+  return [
+    ...VOICES.clips.filter((clip) => clip.persona === id && clip.use === "avatar-tap"),
+    ...BANTER.clips.filter((clip) => clip.persona === id && clip.use === "avatar-poke"),
+  ].map((clip) => clip.text);
+}
+
 async function open(personaView = persona(), options = {}) {
   let plays = 0;
   let cancels = 0;
@@ -155,6 +214,10 @@ async function open(personaView = persona(), options = {}) {
     return element;
   });
   const root = fakeEl("html");
+  // `document.body` 的 class 是三塊畫面共用的開關（上面那條膠囊、答案氣泡讓不讓
+  // 位、她是不是停著），所以要拿得到同一顆節點才驗得到。`fakeDocument` 自己也會
+  // 生一個，但那一顆沒有人能引用。
+  const body = fakeEl("body");
   const css = new Map();
   root.style = {
     setProperty(name, value) {
@@ -166,6 +229,7 @@ async function open(personaView = persona(), options = {}) {
   };
   const listeners = new Map();
   const intervals = [];
+  const slowTimers = [];
   const calls = [];
   const solidPushes = [];
   const windowHandlers = {};
@@ -180,6 +244,9 @@ async function open(personaView = persona(), options = {}) {
   globalThis.__AI_SISTER_PERSONA_VOICES__ = Object.hasOwn(options, "voiceManifest")
     ? options.voiceManifest
     : VOICES;
+  globalThis.__AI_SISTER_PERSONA_BANTER__ = Object.hasOwn(options, "banterManifest")
+    ? options.banterManifest
+    : BANTER;
   const reelLayers = new Map();
   for (const rig of Array.isArray(options.reelManifest?.rigs)
     ? options.reelManifest.rigs
@@ -242,8 +309,9 @@ async function open(personaView = persona(), options = {}) {
   };
 
   globalThis.document = fakeDocument(node, {
-    visibilityState: "visible",
+    visibilityState: options.visibilityState ?? "visible",
     documentElement: root,
+    body,
     createElement,
   });
   globalThis.location = { search: options.search ?? "" };
@@ -258,12 +326,27 @@ async function open(personaView = persona(), options = {}) {
   // 假瀏覽器要報得出視窗大小，app.js 才算得出「拖曳中整扇窗都算實心」那一塊。
   globalThis.innerWidth = 340;
   globalThis.innerHeight = 560;
-  // app.js 靠它盯住畫面變化，好重算「哪裡是實心的」再送回 Rust（`pet_solid_set`）。
-  // 這個假瀏覽器不模擬 DOM 變動，所以 observe 不必真的做事；但它得**存在**——
-  // 少了它，app.js 一載入就 ReferenceError，整支閘門連第一條斷言都跑不到。
+  // app.js 掛了兩個：一個重算「哪裡是實心的」再送回 Rust（`pet_solid_set`），一個
+  // 把上面那條膠囊的 `aria-hidden` 跟著 body 的 class 一起翻。這個假瀏覽器沒有版面
+  // 引擎，不會自己偵測到任何變動，所以回呼記下來讓測試自己叫（`fireMutations()`）；
+  // 這個類別本身則得**存在**，少了它 app.js 一載入就 ReferenceError，整支閘門連第
+  // 一條斷言都跑不到。
+  //
+  // 記下 `observe()` 的目標而不是丟掉：掛錯節點的 observer 在真機器上永遠收不到
+  // body 的 class 變化，而讀原始碼分不出「有掛」和「掛對地方」。
+  const mutationWatchers = [];
   globalThis.MutationObserver = class {
-    observe() {}
-    disconnect() {}
+    constructor(callback) {
+      this.callback = callback;
+    }
+    observe(target, init) {
+      mutationWatchers.push({ callback: this.callback, target, init });
+    }
+    disconnect() {
+      for (let i = mutationWatchers.length - 1; i >= 0; i -= 1) {
+        if (mutationWatchers[i].callback === this.callback) mutationWatchers.splice(i, 1);
+      }
+    }
     takeRecords() {
       return [];
     }
@@ -295,6 +378,27 @@ async function open(personaView = persona(), options = {}) {
     return intervals.length;
   };
   globalThis.clearInterval = () => {};
+  // 「沒事的時候自己笑一下」排在兩到五分鐘之後，那一句在畫面上再留六秒；測試
+  // 不可能真的等。所以慢的那些被記下來讓測試自己叫，快的（tick、抖那一下、
+  // 4 秒那句話）照樣交給真的 setTimeout。
+  //
+  // 門檻取六秒是量出來的，不是猜的：app.js 裡比它慢的只有這兩個閒話計時器
+  // （`grep -n "setTimeout(" app.js` 共七處，其餘最長 5000）。
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    if (typeof ms === "number" && ms >= 6_000) {
+      slowTimers.push({ fn, ms, cancelled: false });
+      return { slowTimer: slowTimers.length };
+    }
+    return realSetTimeout(fn, ms, ...rest);
+  };
+  globalThis.clearTimeout = (handle) => {
+    if (handle !== null && typeof handle === "object" && "slowTimer" in handle) {
+      const entry = slowTimers[handle.slowTimer - 1];
+      if (entry) entry.cancelled = true;
+      return;
+    }
+    realClearTimeout(handle);
+  };
   const tauri = {
     core: {
       invoke: async (cmd, args) => {
@@ -347,7 +451,9 @@ async function open(personaView = persona(), options = {}) {
             }
             return options.fixedSpeechAdmission ?? { presentation_id: "persona-fixed" };
           case "pause_state":
-            return false;
+            return options.pauseState === true;
+          case "azure_tts_read":
+            return options.azureStatus ?? null;
           case "last_recording_end":
             return null;
           case "gatekeeper_check":
@@ -400,14 +506,45 @@ async function open(personaView = persona(), options = {}) {
   await tick();
   return {
     node,
+    body,
     css,
     calls,
     solidPushes,
+    /* 模擬「`document.body` 的 class 換了一次」，叫醒真的會收到這一則的那幾個
+     * observer。真瀏覽器會在當下自己跑，這裡沒有版面引擎，所以由測試在改完之後補
+     * 一次；回傳跑了幾個，0 就是「沒有人在看 body 的 class」，那條線在真機器上也是
+     * 死的。
+     *
+     * 要照 `attributeFilter` 過濾，不可以一律全叫：這份清單漏掉 `"class"` 的
+     * observer 在真機器上收不到這一則，而一律全叫會讓它在這裡照樣跑，於是漏了也
+     * 是綠的。 */
+    fireMutations() {
+      const watching = mutationWatchers.filter(
+        (entry) =>
+          entry.target === body &&
+          entry.init?.attributes === true &&
+          (entry.init.attributeFilter ?? ["class"]).includes("class"),
+      );
+      for (const entry of watching) entry.callback([], null);
+      return watching.length;
+    },
     /* 對著 globalThis 發事件——「手放開了」這件事只有那裡收得到。 */
     fireWindow(ev, arg) {
       for (const fn of windowHandlers[ev] ?? []) fn(arg);
     },
     intervals,
+    slowTimers,
+    /* 叫起還沒被取消的長計時器。她「沒事自己笑一下」和「那一句留六秒」都掛在
+     * 那上面，而兩者會互相接龍（笑完會排下一次），所以要挑得出來。 */
+    async fireSlowTimers(pick = () => true) {
+      const pending = slowTimers.filter((timer) => !timer.cancelled && pick(timer));
+      for (const timer of pending) {
+        timer.cancelled = true;
+        timer.fn();
+      }
+      await tick();
+      return pending.length;
+    },
     nonsense,
     voiceReads,
     speaks,
@@ -443,6 +580,15 @@ async function open(personaView = persona(), options = {}) {
       }
       fire("pointerup", {});
       fire("click", { type: "click", isTrusted: true });
+      await tick();
+      return true;
+    },
+    /* 那顆「⋯」。`isTrusted` 是可選的，因為這一頁唯一的版面驗證工具
+     * （`scripts/shot.mjs`）用的是 `element.click()`，那是合成事件。 */
+    async clickChromeToggle({ isTrusted = true } = {}) {
+      const button = node("[data-chrome-toggle]");
+      if (button.disabled) return false;
+      for (const fn of button.handlers.click ?? []) fn({ type: "click", isTrusted });
       await tick();
       return true;
     },
@@ -651,14 +797,15 @@ console.log("②b 拖她的時候不會順便讓她說話，拖完之後還戳�
   // 拖完她突然開口，或者從此再也戳不動。第三條就是在守後面那種——旗標必須在
   // **下一次 pointerdown** 清掉，不能清在 pointerup：`startDragging()` 一發動，
   // 作業系統就接管拖曳迴圈，webview 根本收不到 pointerup。
+  // 這一段問的是「拖還是戳」，不是「講了哪一句」——她講的話現在是隨機的
+  // （見 ② 那一段）。所以這裡只斷言「有沒有開口」，而且開的口必須是這位角色
+  // 真的有的那幾句，不能是空字串或別人的台詞。
+  const pool = pokePool("chatgpt");
   const p = await open(persona("chatgpt"));
 
   await p.avatarGesture();
-  check(
-    "按下去沒移動＝戳她一下，要說話",
-    p.node("[data-persona-line]").textContent === "我在，隨時可以開始。",
-    p.node("[data-persona-line]").textContent,
-  );
+  const poked = p.node("[data-persona-line]").textContent;
+  check("按下去沒移動＝戳她一下，要說話", poked !== "" && pool.includes(poked), poked);
 
   const beforeDrag = p.node("[data-persona-line]").textContent;
   await p.avatarGesture({ dx: 40, dy: 60 });
@@ -669,20 +816,18 @@ console.log("②b 拖她的時候不會順便讓她說話，拖完之後還戳�
   );
 
   await p.avatarGesture();
+  const afterDrag = p.node("[data-persona-line]").textContent;
   check(
     "拖完之後，下一次真正的戳還要有效",
-    p.node("[data-persona-line]").textContent === "我在，安靜地開始也很好。",
-    p.node("[data-persona-line]").textContent,
+    afterDrag !== "" && pool.includes(afterDrag) && afterDrag !== beforeDrag,
+    { beforeDrag, afterDrag },
   );
 
   // 手指抖一下不算拖。門檻底下的移動仍然是「戳她」。
   const p2 = await open(persona("chatgpt"));
   await p2.avatarGesture({ dx: 2, dy: 1 });
-  check(
-    "門檻以下的微小移動仍然算戳她",
-    p2.node("[data-persona-line]").textContent === "我在，隨時可以開始。",
-    p2.node("[data-persona-line]").textContent,
-  );
+  const nudged = p2.node("[data-persona-line]").textContent;
+  check("門檻以下的微小移動仍然算戳她", nudged !== "" && pool.includes(nudged), nudged);
 }
 
 console.log("②c 拖完之後，透明的地方要再變得點得過去");
@@ -730,22 +875,291 @@ console.log("②c 拖完之後，透明的地方要再變得點得過去");
   check("手還按著就不算拖完，整扇窗要繼續實心", whole(p.solidPushes.at(-1)), p.solidPushes.at(-1));
 }
 
-console.log("② 每一下 click 只走固定順序的 allowlist，不呼叫其他能力");
+console.log("②ᵈ 上面那條膠囊平常不在，也不擋滑鼠；她真的停下來才自己出現");
 {
+  /*
+   * 他的原話：「上面那一槓 可不可以改成從下面按一個鍵才跑出來 平常上面也是
+   * 透明的?」所以預設是「不在」，而「不在」是兩件事：看不到，而且點得穿。
+   *
+   * 這兩件事由**兩份檔案**合起來成立：CSS 收起來用的是 `visibility: hidden`，
+   * 而 `paintedRects()` 明文跳過那一種。任何一邊自己改掉都編得過、畫面也看不
+   * 出差別——留下的是她頭頂一塊看不見的擋板，底下的桌面點不下去，而使用者
+   * 只會覺得「這裡怪怪的」，回報不出來。所以兩邊各釘一條。
+   *
+   * 另一半是那顆暫停鍵住在裡面。她整個產品的前提是「你隨時停得掉」，所以「藏
+   * 起來」不可以連「她停著的時候也藏起來」一起藏：`body.she-is-stopped` 那一格
+   * 不歸這顆鍵管，按下去也關不掉。
+   */
+  const dragbarRules = directElementRules("dragbar");
+  const collapsed = dragbarRules.find((rule) => rule.selector.includes(":not(.chrome-open)"));
+  check(
+    "收起來的規則在，而且只在 body 兩個 class 都沒有的時候才套",
+    collapsed?.selector === "body:not(.chrome-open):not(.she-is-stopped) .dragbar",
+    collapsed?.selector ?? dragbarRules.map((rule) => rule.selector),
+  );
+  check(
+    "收起來用的是 visibility: hidden，不是只把顏色調透明",
+    /visibility:\s*hidden/u.test(collapsed?.body ?? ""),
+    collapsed?.body,
+  );
+  const paintedRectsBody =
+    SRC.match(/\nfunction paintedRects\(\) \{\n(?<body>[\s\S]*?)\n\}/u)?.groups?.body ?? "";
+  check(
+    "另一半：`paintedRects()` 明文跳過 visibility: hidden，「看不見」才等於「點得穿」",
+    /style\.visibility === "hidden"/u.test(paintedRectsBody),
+    paintedRectsBody.slice(0, 400),
+  );
+
+  const barMarkup = HTML.match(/<header class="dragbar"[\s\S]*?<\/header>/u)?.[0] ?? "";
+  const toggleTag = HTML.match(/<button\b[^>]*data-chrome-toggle[^>]*>/u)?.[0] ?? "";
+  check("暫停鍵住在那條膠囊裡", /id="pause"/u.test(barMarkup), barMarkup.slice(0, 120));
+  check(
+    "那顆「⋯」不可以也住在膠囊裡——收起來之後就沒有東西按得到了",
+    toggleTag !== "" && !barMarkup.includes("data-chrome-toggle"),
+    { toggleTag, inBar: barMarkup.includes("data-chrome-toggle") },
+  );
+  check(
+    "出貨的開場值就是收起來的（那顆鍵不在開場路徑上，這一格只有 HTML 說得算）",
+    /aria-expanded="false"/u.test(toggleTag),
+    toggleTag,
+  );
+  check(
+    "`aria-controls` 指到的就是那條膠囊",
+    /aria-controls="chrome-bar"/u.test(toggleTag) && /id="chrome-bar"/u.test(barMarkup),
+    { toggleTag, barId: /id="[^"]*"/u.exec(barMarkup)?.[0] },
+  );
+  // 把這一排藏起來的前提是「還有另一條路停得掉她」。那條路是系統匣，而那個選單
+  // 有**兩種**組合（有沒有 metrics 那一項），所以要兩臂都數過——只改一臂是這個
+  // 檔案裡犯過好幾次的形狀，而漏掉的那一臂在畫面上長得一模一樣。
+  const trayArms = [
+    ...MAIN.matchAll(/Menu::with_items\(\s*\n\s*app,\s*\n\s*&\[(?<items>[\s\S]*?)\],\s*\n\s*\)\?/gu),
+  ].map(({ groups }) => groups.items);
+  check(
+    "系統匣那條保險：每一種選單組合都含著暫停（這才敢把上面那一排收起來）",
+    trayArms.length >= 2 && trayArms.every((items) => items.includes("&pause_item")),
+    { arms: trayArms.length, withPause: trayArms.filter((i) => i.includes("&pause_item")).length },
+  );
+
+  const bubbleShift = directElementRules("answer-bubble").find(
+    (rule) => rule.selector.includes(".chrome-open") && rule.selector.includes(".she-is-stopped"),
+  );
+  check(
+    "膠囊出來的時候氣泡要讓開，而且兩種出現的理由都要讓",
+    bubbleShift !== undefined && /top:\s*\d/u.test(bubbleShift.body),
+    bubbleShift ?? directElementRules("answer-bubble").map((rule) => rule.selector),
+  );
+
+  const settle = () => new Promise((done) => setTimeout(done, 200));
+  const p = await open(persona("chatgpt"));
+  const expanded = () => p.node("[data-chrome-toggle]").dataset["aria-expanded"];
+  check("開機一律是收起來的", !p.body.classList.contains("chrome-open"), [
+    ...p.body.classList._s,
+  ]);
+  check(
+    "還在確認她起來沒的時候不算「停著」——不然她一開機就把膠囊掛在他桌面上",
+    !p.body.classList.contains("she-is-stopped"),
+    [...p.body.classList._s],
+  );
+
+  const beforeToggle = p.calls.length;
+  await p.clickChromeToggle();
+  check(
+    "從下面按一下就跑出來",
+    p.body.classList.contains("chrome-open") && expanded() === "true",
+    { classes: [...p.body.classList._s], expanded: expanded() },
+  );
+  await p.clickChromeToggle();
+  check(
+    "再按一下收回去",
+    !p.body.classList.contains("chrome-open") && expanded() === "false",
+    { classes: [...p.body.classList._s], expanded: expanded() },
+  );
+  const wrote = p.calls.slice(beforeToggle).filter((cmd) => cmd !== "pet_solid_set");
+  check(
+    "開關它不存任何設定——重開一律回到收起來，不必去猜畫面會長什麼樣",
+    wrote.length === 0,
+    wrote,
+  );
+
+  // 開場自己排了一次推送（`scheduleSolidPush()` 在接線的最後一行），防手震
+  // 80 毫秒。不先把它放掉的話，下面量到的那一次是**它**，而不是 class 換掉造成
+  // 的那一次——實測就是這樣：把 `"class"` 從 `attributeFilter` 拿掉，這一條照樣
+  // 綠。所以先等它落地，再取基準。
+  await settle();
+  const beforePushes = p.solidPushes.length;
+  await p.clickChromeToggle();
+  await settle();
+  check(
+    "前提：沒有人通知的話，光是改 class 不會自己推一次——下一條量到的才是那個 observer",
+    p.solidPushes.length === beforePushes,
+    { before: beforePushes, after: p.solidPushes.length },
+  );
+  const watching = p.fireMutations();
+  await settle();
+  check(
+    "class 一換就重算一次實心區，不然膠囊出來了還是點不到",
+    watching > 0 && p.solidPushes.length > beforePushes,
+    { watching, before: beforePushes, after: p.solidPushes.length },
+  );
+  check(
+    "叫出來之後，裡面那五顆鍵對讀螢幕的人也回到 Tab 順序上",
+    p.node("[data-chrome-bar]").dataset["aria-hidden"] === "false",
+    p.node("[data-chrome-bar]").dataset["aria-hidden"],
+  );
+  await p.clickChromeToggle();
+  p.fireMutations();
+  check(
+    "收回去的時候它們也要一起離開 Tab 順序",
+    p.node("[data-chrome-bar]").dataset["aria-hidden"] === "true",
+    p.node("[data-chrome-bar]").dataset["aria-hidden"],
+  );
+
+  // `scripts/shot.mjs` 用的是 `element.click()`（`isTrusted === false`）。這顆
+  // 擋了 `isTrusted` 的話，這一頁唯一的版面驗證工具就只看得到收起來那一種。
+  const synthetic = await open(persona("chatgpt"));
+  await synthetic.clickChromeToggle({ isTrusted: false });
+  check(
+    "合成的 click 也開得起來，不然唯一的版面驗證工具永遠只看得到收起來的樣子",
+    synthetic.body.classList.contains("chrome-open"),
+    [...synthetic.body.classList._s],
+  );
+  check(
+    "`scripts/shot.mjs` 真的是用 element.click()（上一條的前提）",
+    /\.click\(\)/u.test(SHOT),
+    SHOT.match(/.*\.click\(\).*/u)?.[0],
+  );
+
+  // 她停下來的時候那條膠囊自己要出現，而且那顆鍵關不掉它。看不到她在錄和看不到
+  // 她停著在畫面上是同一種樣子，而後者要一眼看得出來——「繼續」也要一下按得到。
+  for (const [name, options] of [
+    ["按了暫停", { pauseState: true }],
+    ["整個停下來", { masterStopState: "stopped" }],
+    ["正在停", { masterStopState: "stopping" }],
+    ["停成什麼樣不確定", { masterStopState: "uncertain" }],
+  ]) {
+    const halted = await open(persona("chatgpt"), options);
+    await halted.poll();
+    check(
+      `${name}的時候，那條膠囊自己出現——不用先找那顆點點鍵`,
+      halted.body.classList.contains("she-is-stopped"),
+      [...halted.body.classList._s],
+    );
+    await halted.clickChromeToggle();
+    await halted.clickChromeToggle();
+    check(
+      `${name}的時候，那顆點點鍵關不掉它`,
+      halted.body.classList.contains("she-is-stopped") &&
+        !halted.body.classList.contains("chrome-open"),
+      [...halted.body.classList._s],
+    );
+    halted.fireMutations();
+    check(
+      `${name}的時候，裡面那顆「繼續」對讀螢幕的人也要在`,
+      halted.node("[data-chrome-bar]").dataset["aria-hidden"] === "false",
+      halted.node("[data-chrome-bar]").dataset["aria-hidden"],
+    );
+  }
+
+  const running = await open(persona("chatgpt"));
+  await running.poll();
+  check(
+    "她好好在跑的時候它不在——不然「平常上面也是透明的」就沒了",
+    !running.body.classList.contains("she-is-stopped"),
+    [...running.body.classList._s],
+  );
+}
+
+console.log("② 每一下 click 只走 allowlist；講哪一句是隨機的，而且不連兩次同一句");
+{
+  // 這一段以前守的是「第一句固定、第二句固定、第三下回到第一句」。那個契約
+  // 就是他實際看到的毛病：「目前按來按去只會一直講兩句話」。桌寵被戳的時候
+  // 該像個活人——阿唷、煩耶、幹嘛啦——所以契約換成三條：
+  //
+  //   1. 講出來的一定是這位角色自己有的那幾句（不會憑空生字，也不會借別人的）
+  //   2. 連著兩下不准講同一句（`pickBanter` 的 filter）
+  //   3. 骰子鋪開的時候，講得出來的句子要真的鋪開（不是兩句在那裡輪）
+  //
+  // 亂數在這裡是被接管的，所以上面三條都是定值，不是機率。
+  const pool = pokePool("chatgpt");
+  check(
+    "被戳的時候她講得出來的話不只那兩句",
+    pool.length >= 12,
+    { pool: pool.length, sample: pool.slice(0, 3) },
+  );
+
   const p = await open(persona("chatgpt"));
   const before = p.calls.length;
   const stateBefore = p.node("[data-state-line]").textContent;
+  scriptRandom(0);
   await p.clickAvatar();
-  check("第一句固定", p.node("[data-persona-line]").textContent === "我在，隨時可以開始。", p.node("[data-persona-line]").textContent);
+  check(
+    "第一句是這位角色自己的日常台詞",
+    p.node("[data-persona-line]").textContent === "我在，隨時可以開始。",
+    p.node("[data-persona-line]").textContent,
+  );
   check("點了才顯示", !p.node("[data-persona-line]").hidden);
   check("沒改錄製狀態字", p.node("[data-state-line]").textContent === stateBefore, p.node("[data-state-line]").textContent);
   check("沒叫 ask／CLI／Gatekeeper／hands", p.calls.length === before, p.calls.slice(before));
-  await p.clickAvatar();
-  check("第二句固定", p.node("[data-persona-line]").textContent === "我在，安靜地開始也很好。");
-  await p.clickAvatar();
-  check("第三下確定性回到第一句", p.node("[data-persona-line]").textContent === "我在，隨時可以開始。");
-  await p.clickAvatar();
-  check("第四下回到第二句", p.node("[data-persona-line]").textContent === "我在，安靜地開始也很好。");
+
+  // 骰子卡死在同一格——這是「不連兩次同一句」唯一逼得出來的情況。少了那道
+  // filter，底下這 12 下會是同一句話講 12 次。
+  const stuck = [];
+  for (let i = 0; i < 12; i += 1) {
+    await p.clickAvatar();
+    stuck.push(p.node("[data-persona-line]").textContent);
+  }
+  check(
+    "骰子擲出同一格，她也不會連著講同一句",
+    stuck.every((line, i) => i === 0 || line !== stuck[i - 1]),
+    stuck,
+  );
+  check("卡死的骰子講出來的仍然都是她的話", stuck.every((line) => pool.includes(line)), stuck);
+
+  // 換成真的有鋪開的骰子（固定種子，所以這個數字在任何機器上都一樣）。
+  const spread = await open(persona("chatgpt"));
+  scriptRandomSequence(20260912);
+  const heard = [];
+  for (let i = 0; i < 40; i += 1) {
+    await spread.clickAvatar();
+    heard.push(spread.node("[data-persona-line]").textContent);
+  }
+  stopScriptingRandom();
+  const distinct = new Set(heard);
+  check("戳 40 下至少聽得到 8 種不同的話", distinct.size >= 8, [...distinct]);
+  check("每一句都在她自己的清單裡", heard.every((line) => pool.includes(line)), [...distinct]);
+  check(
+    "任何一下都不會複誦上一下",
+    heard.every((line, i) => i === 0 || line !== heard[i - 1]),
+    heard,
+  );
+  check(
+    "阿唷／煩耶／幹嘛啦這種話真的會出現",
+    ["阿唷，會痛耶。", "煩耶。", "幹嘛啦。"].some((line) => distinct.has(line)),
+    [...distinct],
+  );
+
+  // 戳下去要**看得到**她動一下，而且那一下不歸「固定台詞」那個開關管。那個開關
+  // 管的是她說不說話，不是她理不理你——關掉台詞之後戳下去整個人一動也不動，
+  // 那不是安靜，那是當掉。所以這兩條要分開問：一條問有沒有字，一條問有沒有動。
+  const jolted = await open(persona("chatgpt"));
+  await jolted.clickAvatar();
+  check(
+    "戳一下她整個人會抖一下",
+    jolted.node("[data-avatar]").classList.contains("poked"),
+    [...jolted.node("[data-avatar]").classList._s],
+  );
+
+  const quietButAlive = await open(persona("chatgpt", { tap_lines: false }));
+  await quietButAlive.forceAvatarHandler();
+  check(
+    "關掉台詞她不說話，但還是理你",
+    quietButAlive.node("[data-persona-line]").textContent === "" &&
+      quietButAlive.node("[data-avatar]").classList.contains("poked"),
+    {
+      line: quietButAlive.node("[data-persona-line]").textContent,
+      classes: [...quietButAlive.node("[data-avatar]").classList._s],
+    },
+  );
 }
 
 console.log("③ 17 個本機角色、圖檔、tagline、palette 都固定而且可讀");
@@ -876,7 +1290,11 @@ for (const [id, expected] of Object.entries(EXPECTED)) {
     !p.css.has("--letter-bg") && !p.css.has("--letter-fg") && !p.css.has("--letter-accent"),
     [...p.css.entries()],
   );
+  // 骰子釘在第一格，才問得出「這位角色的日常台詞是不是她自己的」。她被戳的
+  // 時候實際會隨機挑一句（見 ②）；這裡要驗的是 17 份逐字稿沒有互相串位。
+  scriptRandom(0);
   await p.clickAvatar();
+  stopScriptingRandom();
   check(`${id} 第一條 tap copy`, p.node("[data-persona-line]").textContent === expected.first, p.node("[data-persona-line]").textContent);
 
   const bundled = BUNDLED.assets.find((asset) => asset.id === id);
@@ -892,13 +1310,17 @@ console.log("③ᵇ Reel 只建 active rig；整組 decode 前與任何失敗都
   const voiceManifestScript = HTML.indexOf(
     '<script src="./persona-voices/v1/manifest.js"></script>',
   );
+  const banterManifestScript = HTML.indexOf(
+    '<script src="./persona-banter-voices/v1/manifest.js"></script>',
+  );
   const appScript = HTML.indexOf('<script type="module" src="./app.js"></script>');
   check(
-    "角色圖與語音 manifest 都在 app.js 前預載",
+    "角色圖與兩包語音 manifest 都在 app.js 前預載",
     manifestScript >= 0 &&
       voiceManifestScript > manifestScript &&
-      appScript > voiceManifestScript,
-    { manifestScript, voiceManifestScript, appScript },
+      banterManifestScript > voiceManifestScript &&
+      appScript > banterManifestScript,
+    { manifestScript, voiceManifestScript, banterManifestScript, appScript },
   );
   check("HTML 有 hidden Reel 容器", /data-persona-reel[^>]*hidden/u.test(HTML));
 
@@ -1202,7 +1624,9 @@ console.log("⑥ 17 人固定語音與日常短句都走 bundled Ogg，不借系
   });
   await p.poll();
   check("開場／poll 不自行播放", p.plays() === 0, p.plays());
+  scriptRandom(0);
   await p.clickAvatar();
+  stopScriptingRandom();
   check(
     "trusted click 只播 manifest 裡的 exact bundled Ogg",
     JSON.stringify(p.playedSources()) ===
@@ -1228,9 +1652,32 @@ console.log("⑥ 17 人固定語音與日常短句都走 bundled Ogg，不借系
 
   for (const [id, expected] of Object.entries(EXPECTED)) {
     const view = await open(persona(id, { voice_enabled: true }));
+    scriptRandom(0);
     await view.clickAvatar();
+    stopScriptingRandom();
     check(`${id} 有自己的 bundled tap voice`, view.plays() === 1, view.playedSources());
     check(`${id} 第一段文字逐字一致`, view.node("[data-persona-line]").textContent === expected.first);
+  }
+
+  // 閒話那包也要真的播得出來：隨機挑到的如果是閒話那一段，一樣要走 bundled Ogg，
+  // 不可以掉回系統語音，也不可以安靜地什麼都不播。
+  for (const [id] of Object.entries(EXPECTED)) {
+    const view = await open(persona(id, { voice_enabled: true }), {
+      systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
+    });
+    scriptRandomSequence(20260912);
+    const sources = new Set();
+    for (let i = 0; i < 12; i += 1) {
+      await view.clickAvatar();
+      sources.add(view.playedSources().at(-1));
+      view.finishAudio();
+    }
+    stopScriptingRandom();
+    const banterPlayed = [...sources].filter((src) =>
+      src?.startsWith(`./persona-banter-voices/v1/banter/${id}/`),
+    );
+    check(`${id} 閒話那包也走 bundled Ogg`, banterPlayed.length >= 4, [...sources]);
+    check(`${id} 沒有借系統語音`, view.speaks.length === 0, view.speaks);
   }
 
   const off = await open(persona("mimo", { voice_enabled: false }), {
@@ -1240,46 +1687,186 @@ console.log("⑥ 17 人固定語音與日常短句都走 bundled Ogg，不借系
   check("voice 關閉仍顯示台詞但完全不取播放權", off.plays() === 0 && !off.calls.includes("persona_fixed_voice_admit"));
   check("voice 關閉不借系統聲音", off.speaks.length === 0, off.speaks);
 
+  // 這兩條守的是「她不可以拿一句罐頭台詞頂替大腦的答案」。alpha.132 之後問完
+  // 一題會多一聲墊話（`playAnswerBeat`），所以「什麼都不准播」這個寫法會誤傷
+  // 它——但**不能因此就放寬成「隨便播什麼都行」**。收緊成兩句話：日常那 544 段
+  // 和同意書那 68 段一段都不准出現，而唯一准播的那一聲必須真的是 answer-beat。
+  const answerBeatFiles = new Set(
+    BANTER.clips
+      .filter((clip) => clip.use === "answer-beat")
+      .map((clip) => `./persona-banter-voices/v1/${clip.file}`),
+  );
+  const onlyAnswerBeat = (sources) =>
+    sources.every(
+      (src) =>
+        !src.startsWith("./persona-voices/v1/") &&
+        !src.startsWith("./persona-consent-voices/v1/") &&
+        answerBeatFiles.has(src),
+    );
+
   const daily = await open(persona("kimi", { voice_enabled: true }));
   await daily.ask("早安。");
   check("精確日常短句也交給 CLI／記憶路徑", daily.calls.includes("ask"), daily.calls);
   check("文字問題不再用固定角色台詞繞過大腦", !daily.calls.includes("answer_cli_cancel"), daily.calls);
-  check("文字問題不播固定 Ogg 冒充大腦答案", daily.plays() === 0, daily.playedSources());
+  check(
+    "文字問題不播固定 Ogg 冒充大腦答案（那一聲只能是 answer-beat）",
+    onlyAnswerBeat(daily.playedSources()),
+    daily.playedSources(),
+  );
+  check("答案落地那一聲真的響了", daily.plays() === 1, daily.playedSources());
 
   const normal = await open(persona("kimi", { voice_enabled: true }));
   await normal.ask("早安，昨天我在做什麼");
   check("不是 exact trigger 的問題仍完整交給 CLI／記憶路徑", normal.calls.includes("ask"), normal.calls);
-  check("一般記憶問題不播固定語音冒充動態答案", normal.plays() === 0, normal.playedSources());
+  check(
+    "一般記憶問題不播固定語音冒充動態答案（那一聲只能是 answer-beat）",
+    onlyAnswerBeat(normal.playedSources()),
+    normal.playedSources(),
+  );
 
-  const malformed = { ...VOICES, clips: VOICES.clips.slice(0, 543) };
-  const closed = await open(persona("chatgpt", { voice_enabled: true }), {
-    voiceManifest: malformed,
-    systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
-  });
-  await closed.clickAvatar();
-  check("不完整 manifest 整包拒絕且不借系統聲音", closed.plays() === 0 && closed.speaks.length === 0);
+  /*
+   * 兩包語音各自 fail closed，而且**互相不背書**。
+   *
+   * 以前這四條寫成「戳下去什麼都不准播」，因為那時候戳她只播得到日常那一包。
+   * 現在戳她的台詞是兩包合起來的，所以那個寫法會把「日常壞掉、閒話還好好的」
+   * 誤判成迴歸。改成指名道姓：壞掉那一包的檔案一個都不准出現。
+   *
+   * 但只改一半就是把閘門放鬆。每一種壞法都要問兩次——壞日常的時候閒話還在，
+   * 壞閒話的時候日常還在——不然「其中一包的完整性檢查其實沒接上」看起來會和
+   * 「兩包都好」一模一樣。
+   */
+  const dialoguePlayed = (view) =>
+    view.playedSources().filter((src) => src.startsWith("./persona-voices/v1/"));
+  const banterPlayed = (view) =>
+    view.playedSources().filter((src) => src.startsWith("./persona-banter-voices/v1/"));
 
-  const unapprovedVoices = { ...VOICES, rightsReview: "pending" };
-  const rightsClosed = await open(persona("chatgpt", { voice_enabled: true }), {
-    voiceManifest: unapprovedVoices,
-  });
-  await rightsClosed.clickAvatar();
-  check("未核准權利投影讓整份語音 manifest fail closed", rightsClosed.plays() === 0);
+  /*
+   * 骰子釘在**最後**一格，不是第一格。這一格是踩過坑才知道的：`taps` 是
+   * 「日常兩句 + 閒話十句」接起來的，第一格永遠是日常那句，所以拿第一格去問
+   * 「閒話那包停用了沒有」，答案不管閘門在不在都是「沒播閒話」——那兩條斷言
+   * 會**恆真**。兩刀突變（拿掉閒話 manifest 的權利審查、拿掉「每個人都要有
+   * 整包」）當場示範了這件事：兩刀都活下來，而整支閘門是綠的。
+   *
+   * 釘在最後一格之後，同一顆骰子在四種狀態下指向不同的包：
+   *   兩包都好      → 閒話（12 句裡的第 12 句）
+   *   日常壞掉      → 閒話（只剩 10 句）
+   *   閒話壞掉      → 日常（只剩 2 句，第 2 句）
+   * 所以底下那條 control 不是裝飾，它證明這顆骰子真的走得到閒話那一包。
+   */
+  const pokeWithBrokenPack = async (name, override) => {
+    const view = await open(persona("chatgpt", { voice_enabled: true }), {
+      ...override,
+      systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
+    });
+    scriptRandom(0.999);
+    await view.clickAvatar();
+    stopScriptingRandom();
+    return { name, view };
+  };
 
-  const wrongTotal = { ...VOICES, totals: { ...VOICES.totals, oggBytes: 8918727 } };
-  const totalClosed = await open(persona("chatgpt", { voice_enabled: true }), {
-    voiceManifest: wrongTotal,
-  });
-  await totalClosed.clickAvatar();
-  check("總 bytes 漂移讓 544 段全部停用", totalClosed.plays() === 0);
+  const bothPacksFine = await pokeWithBrokenPack("兩包都好", {});
+  check(
+    "前提：這顆骰子在兩包都好的時候真的挑到閒話那一包",
+    banterPlayed(bothPacksFine.view).length === 1 &&
+      dialoguePlayed(bothPacksFine.view).length === 0,
+    bothPacksFine.view.playedSources(),
+  );
 
-  const wrongGroup = JSON.parse(JSON.stringify(VOICES));
-  wrongGroup.clips[0].group = "bestie";
-  const groupClosed = await open(persona("chatgpt", { voice_enabled: true }), {
-    voiceManifest: wrongGroup,
-  });
-  await groupClosed.clickAvatar();
-  check("角色分組漂移不能只停一段，必須整份停用", groupClosed.plays() === 0);
+  const dialogueBreakage = [
+    ["不完整 manifest", { voiceManifest: { ...VOICES, clips: VOICES.clips.slice(0, 543) } }],
+    ["未核准權利投影", { voiceManifest: { ...VOICES, rightsReview: "pending" } }],
+    ["總 bytes 漂移", { voiceManifest: { ...VOICES, totals: { ...VOICES.totals, oggBytes: 8918727 } } }],
+    [
+      "角色分組漂移",
+      {
+        voiceManifest: (() => {
+          const wrong = JSON.parse(JSON.stringify(VOICES));
+          wrong.clips[0].group = "bestie";
+          return wrong;
+        })(),
+      },
+    ],
+  ];
+  for (const [label, override] of dialogueBreakage) {
+    const { view } = await pokeWithBrokenPack(label, override);
+    check(
+      `${label}讓 544 段整份停用，一段都不播`,
+      dialoguePlayed(view).length === 0 && view.speaks.length === 0,
+      { played: view.playedSources(), speaks: view.speaks },
+    );
+    check(
+      `${label}不會連閒話那包一起判死`,
+      banterPlayed(view).length === 1,
+      view.playedSources(),
+    );
+  }
+
+  const banterBreakage = [
+    ["不完整 manifest", { banterManifest: { ...BANTER, clips: BANTER.clips.slice(0, 339) } }],
+    ["未核准權利投影", { banterManifest: { ...BANTER, rightsReview: "pending" } }],
+    ["總 bytes 漂移", { banterManifest: { ...BANTER, totals: { ...BANTER.totals, oggBytes: 1 } } }],
+    [
+      "角色分組漂移",
+      {
+        banterManifest: (() => {
+          const wrong = JSON.parse(JSON.stringify(BANTER));
+          wrong.clips[0].group = "bestie";
+          return wrong;
+        })(),
+      },
+    ],
+    [
+      // 這一份要**只**踩到「每個人都要有整包」那一格。第一版沒做到：它把搬走的
+      // 那一句換成一句 lineId 對不上檔名的假貨，於是先被路徑檢查擋掉，而突變
+      // 把完整性檢查整個拿掉之後閘門照樣是綠的。所以這裡連 bytes、durationMs
+      // 和檔名全部湊成合法的——mimo 少一句、chatgpt 多一句，其餘一格不動。
+      "少一個人整包不要",
+      {
+        banterManifest: (() => {
+          const wrong = JSON.parse(JSON.stringify(BANTER));
+          const victim = wrong.clips.findIndex((clip) => clip.persona === "mimo");
+          const [moved] = wrong.clips.splice(victim, 1);
+          wrong.clips.push({
+            ...moved,
+            persona: "chatgpt",
+            group: "sister",
+            lineId: "poke-extra",
+            file: "banter/chatgpt/poke-extra.ogg",
+          });
+          return wrong;
+        })(),
+      },
+    ],
+    [
+      // 兄弟條款：人數對、每個人句數也對，但有人整整少掉一種用途。那個人會
+      // 「被戳有反應、答案落地卻沒有那一聲」，比十七個人都沒有難解釋得多。
+      "有人少一整種用途",
+      {
+        banterManifest: (() => {
+          const wrong = JSON.parse(JSON.stringify(BANTER));
+          for (const clip of wrong.clips) {
+            if (clip.persona === "mimo" && clip.use === "answer-beat") {
+              clip.use = "avatar-poke";
+            }
+          }
+          return wrong;
+        })(),
+      },
+    ],
+  ];
+  for (const [label, override] of banterBreakage) {
+    const { view } = await pokeWithBrokenPack(`閒話 ${label}`, override);
+    check(
+      `閒話那包${label}讓 340 段整份停用，一段都不播`,
+      banterPlayed(view).length === 0 && view.speaks.length === 0,
+      { played: view.playedSources(), speaks: view.speaks },
+    );
+    check(
+      `閒話那包${label}不會連日常那 544 段一起判死`,
+      dialoguePlayed(view).length === 1,
+      view.playedSources(),
+    );
+  }
 
   const blocked = await open(persona("chatgpt", { voice_enabled: true }), {
     fixedSpeechAdmission: { presentation_id: "fixed-blocked" },
@@ -1328,8 +1915,12 @@ console.log("⑥ 17 人固定語音與日常短句都走 bundled Ogg，不借系
   await answerLocal.ask("電話");
   await answerLocal.clickAnswerRead();
   const spokenAnswer = answerLocal.speaks[0]?.text ?? "";
+  // 只數**答案那一份**租約被還回去幾次。以前這裡數的是所有 `…_end`，而
+  // alpha.132 之後每問一題會先響一聲墊話（`playAnswerBeat`），它自己借還一次，
+  // 於是總數整個偏掉。改成看 presentation id——這比舊的寫法更嚴：舊的分不出
+  // 「還回來的是哪一份租約」，還錯了它也數得到一。
   const localLeaseEnds = () =>
-    answerLocal.calls.filter((cmd) => cmd === "master_stop_presentation_end").length;
+    answerLocal.mediaTrace().filter((event) => event === "end:local-answer").length;
   check("本機答案朗讀收到畫面答案正文", spokenAnswer.includes("客服專線 0800-080-123"), spokenAnswer);
   check(
     "本機答案朗讀先取得 native admission/begin，播放中 lease 尚未 end",
@@ -1439,6 +2030,167 @@ console.log("⑥ 17 人固定語音與日常短句都走 bundled Ogg，不借系
       boundaryBlocked.calls.includes("master_stop_presentation_end"),
     { speaks: boundaryBlocked.speaks, calls: boundaryBlocked.calls },
   );
+}
+
+console.log("⑥ᵈ 沒事的時候她會自己笑一下；答案落地也有一聲。全停與每一個開關照樣壓得住");
+{
+  // 這一段守的是產品裡**唯一**一條「沒有人碰她、她自己開口」的路。
+  //
+  // `docs/PRODUCT.md` 原本寫的是「聲音不因 idle、capture、記憶或系統事件自己
+  // 播放」，這一版把 idle 那一項換掉了——他要的就是這個（「沒事也可以 呵呵
+  // 嘻嘻 笑幾下 比較有互動感」）。換掉一條寫在文件裡的界線，代價是這裡要把
+  // 剩下每一道閘門逐條釘住：全停、暫停、關角色、關台詞、視窗看不見、他正在
+  // 打字。少釘一條，那條界線就是真的鬆了，而不是被搬過。
+  const GIGGLES = BANTER.clips.filter((clip) => clip.use === "idle-giggle");
+  const BEATS = BANTER.clips.filter((clip) => clip.use === "answer-beat");
+  check(
+    "閒話那包 17 人各 20 句、三種用途齊全",
+    BANTER.totals?.personas === 17 &&
+      BANTER.totals?.linesPerPersona === 20 &&
+      BANTER.clips.length === 340 &&
+      GIGGLES.length === 85 &&
+      BEATS.length === 85,
+    BANTER.totals,
+  );
+
+  const quiet = await open(persona("chatgpt", { voice_enabled: true }));
+  await quiet.poll();
+  await quiet.poll();
+  check(
+    "開場與輪詢都不會讓她自己開口",
+    quiet.node("[data-persona-line]").textContent === "" && quiet.plays() === 0,
+    { line: quiet.node("[data-persona-line]").textContent, plays: quiet.plays() },
+  );
+
+  // 固定週期的東西兩次之後就變成節拍器。間隔要是隨機的，而且落在兩到五分鐘。
+  scriptRandom(0);
+  const soonest = await open(persona("chatgpt"));
+  scriptRandom(0.999);
+  const latest = await open(persona("chatgpt"));
+  stopScriptingRandom();
+  const gapOf = (view) => view.slowTimers.find((timer) => timer.ms >= 60_000)?.ms ?? null;
+  check(
+    "自己笑的間隔是兩到五分鐘之間的隨機值，不是節拍器",
+    gapOf(soonest) === 120_000 && gapOf(latest) > 290_000 && gapOf(latest) <= 300_000,
+    { soonest: gapOf(soonest), latest: gapOf(latest) },
+  );
+
+  const giggling = await open(persona("chatgpt", { voice_enabled: true }), {
+    systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
+  });
+  const fired = await giggling.fireSlowTimers((timer) => timer.ms >= 60_000);
+  const giggled = giggling.node("[data-persona-line]").textContent;
+  check("時間到了她真的自己笑一句", fired === 1 && GIGGLES.some((clip) => clip.text === giggled), {
+    fired,
+    giggled,
+  });
+  check(
+    "自己笑那一句走 bundled Ogg，不借系統語音",
+    giggling.playedSources().length === 1 &&
+      giggling.playedSources()[0].startsWith("./persona-banter-voices/v1/banter/chatgpt/giggle-") &&
+      giggling.speaks.length === 0,
+    { played: giggling.playedSources(), speaks: giggling.speaks },
+  );
+  check(
+    "笑一下也要先跟 native 拿播放權",
+    giggling.calls.includes("persona_fixed_voice_admit") &&
+      giggling.calls.includes("master_stop_presentation_begin"),
+    giggling.calls,
+  );
+  check(
+    "笑完會排下一次，不會只笑這一次",
+    giggling.slowTimers.filter((timer) => timer.ms >= 60_000).length === 2,
+    giggling.slowTimers.map((timer) => timer.ms),
+  );
+  giggling.finishAudio();
+  await giggling.fireSlowTimers((timer) => timer.ms < 60_000);
+  check(
+    "那一句六秒後自己收掉，畫面不會留著一個「嘻嘻」",
+    giggling.node("[data-persona-line]").textContent === "" &&
+      giggling.node("[data-persona-line]").hidden,
+    giggling.node("[data-persona-line]").textContent,
+  );
+
+  // 每一道閘門各關一次。這裡刻意一條一條開夾具而不是共用一個，因為「哪一條
+  // 擋住的」才是這段要證的事——合成一個夾具的話，其中一條失效看不出來。
+  const gated = [
+    ["全停中", persona("chatgpt", { voice_enabled: true }), { masterStopState: "stopping" }],
+    ["暫停中", persona("chatgpt", { voice_enabled: true }), { pauseState: true }],
+    ["關掉角色", persona("chatgpt", { enabled: false, voice_enabled: true }), {}],
+    ["關掉台詞", persona("chatgpt", { tap_lines: false, voice_enabled: true }), {}],
+    ["視窗看不見", persona("chatgpt", { voice_enabled: true }), { visibilityState: "hidden" }],
+  ];
+  for (const [name, view, options] of gated) {
+    const shut = await open(view, options);
+    await shut.poll();
+    const before = shut.slowTimers.length;
+    await shut.fireSlowTimers((timer) => timer.ms >= 60_000);
+    check(
+      `${name}的時候她不會自己開口`,
+      shut.node("[data-persona-line]").textContent === "" && shut.plays() === 0,
+      { line: shut.node("[data-persona-line]").textContent, plays: shut.plays() },
+    );
+    check(
+      `${name}只是跳過這一輪，之後仍然排得回來`,
+      shut.slowTimers.length > before,
+      { before, after: shut.slowTimers.length },
+    );
+  }
+
+  // 他正在打字的時候插一句「嘻嘻」不是陪伴，是打斷。
+  const typing = await open(persona("chatgpt", { voice_enabled: true }));
+  globalThis.document.activeElement = typing.node("[data-ask-input]");
+  await typing.fireSlowTimers((timer) => timer.ms >= 60_000);
+  check(
+    "他正在打字的時候不插嘴",
+    typing.node("[data-persona-line]").textContent === "" && typing.plays() === 0,
+    typing.node("[data-persona-line]").textContent,
+  );
+
+  // 答案落地那一聲。
+  const beating = await open(persona("chatgpt", { voice_enabled: true }));
+  await beating.ask("剛剛在幹嘛");
+  const beatSources = beating
+    .playedSources()
+    .filter((src) => src.startsWith("./persona-banter-voices/v1/banter/chatgpt/beat-"));
+  check("答案落地會有一聲「找到了」", beatSources.length === 1, beating.playedSources());
+  check(
+    "那一聲是 answer-beat 那一類，不是隨便挑一句閒話",
+    BEATS.some((clip) => `./persona-banter-voices/v1/banter/${clip.persona}/${clip.lineId}.ogg` === beatSources[0]),
+    beatSources,
+  );
+
+  const azureReady = await open(persona("chatgpt", { voice_enabled: true }), {
+    azureStatus: {
+      generation: 1,
+      config_readable: true,
+      enabled: true,
+      region: "eastasia",
+      voice: "zh-TW-HsiaoChenNeural",
+      endpoint: "https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1",
+      credential: "present",
+      consented: true,
+      consent_at: 1_755_000_000_000,
+      config_error: null,
+      ready: true,
+    },
+  });
+  await azureReady.ask("剛剛在幹嘛");
+  check(
+    "Azure 朗讀開著就把這一聲讓出去，不疊兩個聲音",
+    azureReady
+      .playedSources()
+      .every((src) => !src.startsWith("./persona-banter-voices/v1/banter/")),
+    azureReady.playedSources(),
+  );
+
+  const muted = await open(persona("chatgpt", { voice_enabled: false }));
+  await muted.ask("剛剛在幹嘛");
+  await muted.fireSlowTimers((timer) => timer.ms >= 60_000);
+  check("關掉語音就完全不取播放權", muted.plays() === 0 && !muted.calls.includes("persona_fixed_voice_admit"), {
+    plays: muted.plays(),
+    calls: muted.calls,
+  });
 }
 
 console.log("⑦ 較舊的開場讀取不會蓋掉較新的設定事件");
@@ -1577,4 +2329,6 @@ if (failures > 0) {
   console.log(`✗ ${failures} 條 Persona 契約沒守住。`);
   process.exit(1);
 }
-console.log("✔ Persona v3：17 位本機角色、544 段 bundled 語音、文字題全走大腦與三路 speaking 都守住了。");
+console.log(
+  "✔ Persona v3：17 位本機角色、544+68+340 段 bundled 語音、文字題全走大腦與三路 speaking 都守住了。",
+);
