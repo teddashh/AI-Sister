@@ -129,6 +129,15 @@ jobs:
       - name: The pet must be able to say why something failed — and still be saying it 5s later
         run: node ./scripts/check-pet-says-why.mjs
 
+      # 她那扇窗整片透明，作業系統卻照整個 340×560 的矩形吃點擊。Rust 一條執行緒
+      # 輪詢游標再翻 `set_ignore_cursor_events`，而游標在她 120 像素以外的時候
+      # 那條執行緒最久睡 160 毫秒——從遠處把滑鼠甩到她旁邊的空白上按下去，那一
+      # 下就被這扇窗吃掉了。能救的只有 renderer：游標進來的那一瞬間窗還是可點
+      # 的，webview 收得到 pointermove。這支驗它真的喊了、只喊一聲、不帶自己算
+      # 的答案，而且喊的那個閘門就是輪詢在等的那個。
+      - name: A pointer entering her window must wake the click-through poll, not wait 160ms
+        run: node ./scripts/check-pet-nudges-rust.mjs
+
       # 上兩支直接載入 settings.js / app.js，驗只有 latest ask 會自動送、trusted replay、
       # 正文 allowlist、無 fallback 與取消後晚 MP3 不播放；這支再釘 Windows/Tauri 那半邊：
       # 四道 native gate、shared-consent guard、單一 in-flight、generation 與 secret projection。

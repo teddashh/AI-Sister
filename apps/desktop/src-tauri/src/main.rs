@@ -215,6 +215,13 @@ struct Shell {
     /// 決定游標底下要不要讓點擊穿透過去。空的代表**還沒收到回報**，那時候
     /// `sister_shell::hit::poll_step` 會當成整片實心、維持可點——見那支函式的說明。
     hit_solid: Mutex<Vec<bounds::Rect>>,
+    /// renderer 說「游標剛動了，現在就去看」。
+    ///
+    /// 和 `hit_solid` 是兩件事：那個是**算答案的材料**，這個是**該重算了的
+    /// 訊號**。renderer 一樣不參與判斷，它只是把輪詢執行緒從睡眠裡叫起來——
+    /// 游標進到這扇窗的那一瞬間 webview 收得到 `pointermove`（那時候窗還是
+    /// 可點的），比下一次輪詢早最多 `POLL_AWAY_MS` 毫秒。
+    hit_wake: std::sync::Arc<bounds::hit::PollGate>,
 }
 
 const ASSET_IDLE: u8 = 0;
@@ -1003,6 +1010,25 @@ fn pet_solid_set(solid: Vec<SolidRect>, shell: tauri::State<'_, Shell>) {
         })
         .collect();
     *shell.hit_solid.lock().expect("hit solid") = rects;
+}
+
+/// renderer 回報：游標在這扇窗裡動了。
+///
+/// 不帶座標，也不帶答案。判斷整套仍然留在輪詢執行緒裡——它會自己去問
+/// `cursor_position()`，那是唯一權威的來源。這條指令唯一的作用是讓那一拍
+/// **現在**就發生，而不是等最多 `hit::POLL_AWAY_MS` 毫秒。
+///
+/// 為什麼不讓 renderer 自己翻開關：那會變成第二個記著「上一次翻到哪一邊」的
+/// 人，其中一邊翻完另一邊不知道，開關就會停在那裡不再送出。而且同步 command
+/// 跑在主執行緒上，輪詢執行緒的 `set_ignore_cursor_events` 要 dispatch 回主
+/// 執行緒——兩邊搶同一把鎖會死鎖。
+///
+/// 只有「可點」的時候 renderer 才收得到 `pointermove`，所以這條線只加速
+/// 「可點 → 穿透」那一個方向。反方向（已經穿透中、游標移到她身上）webview
+/// 是瞎的，仍然只有輪詢救得回來，節奏是 `hit::POLL_NEAR_MS`。
+#[tauri::command]
+fn pet_pointer_moved(shell: tauri::State<'_, Shell>) {
+    bounds::hit::nudge(&shell.hit_wake);
 }
 
 /// IPC 上的長方形。`sister_shell::Rect` 自己不 derive `Deserialize`——它是給
@@ -6959,16 +6985,25 @@ fn cursor_in_window(win: &tauri::WebviewWindow) -> Option<(i32, i32)> {
 /// 那個座標沒畫東西，可是我們要的不是那一刻的答案，是游標**進來的那一瞬間**該
 /// 用哪一邊，而那一瞬間落在兩次輪詢之間。
 ///
+/// 這條執行緒有**兩種**醒來的理由：睡飽了，或者 renderer 喊了一聲
+/// （`pet_pointer_moved`）。喊的那一聲只決定這一拍**什麼時候**發生，不決定
+/// 它算出什麼——醒來之後照樣自己去問 `cursor_position()`。renderer 送過來
+/// 的座標會是第二份真相，而它和這裡量的是不同的東西（它沒有
+/// `scale_factor()`，也不知道視窗被搬到哪）；更重要的是，讓它參與判斷就等於
+/// 多一個翻開關的人，見 `pet_pointer_moved` 上面那段。
+///
 /// 決定本身一行都不在這裡：`visible`、游標位置和那份實心清單交給
 /// [`bounds::hit::poll_step`]，這支函式只負責問得出那三樣、以及把答案交出去。
 /// 這樣切是因為 `apps/desktop` 是另一個 workspace，根目錄的 `cargo test
 /// --workspace` 走不到——留在這個檔案裡的判斷等於沒有人守。
 fn spawn_click_through(app: tauri::AppHandle) {
     std::thread::spawn(move || {
+        // Arc 先抄一份出來：`app.state()` 借來的東西不能跨過底下那個等待。
+        let wake = app.state::<Shell>().hit_wake.clone();
         let mut last: Option<bool> = None;
         let mut nap = bounds::hit::POLL_NEAR_MS;
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(nap));
+            bounds::hit::wait_for_next_poll(&wake, nap);
             // 視窗沒了就收工。這是這條執行緒唯一的出口。
             let Some(win) = app.get_webview_window(PET) else {
                 return;
@@ -7220,11 +7255,13 @@ fn main() {
             brain_cli_state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             answer_cli: Mutex::new(None),
             hit_solid: Mutex::new(Vec::new()),
+            hit_wake: std::sync::Arc::new((Mutex::new(false), std::sync::Condvar::new())),
         })
         .manage(Hotkey(Mutex::new(HotkeyView::default())))
         .invoke_handler(tauri::generate_handler![
             toggle_pin,
             pet_solid_set,
+            pet_pointer_moved,
             hide_to_tray,
             ask,
             answer_cli_cancel,

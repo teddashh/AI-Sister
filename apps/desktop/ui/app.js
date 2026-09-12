@@ -1861,6 +1861,37 @@ if (invoke !== null) {
     if ((event?.buttons ?? 0) !== 0) return;
     releaseWholeWindow();
   });
+
+  /*
+   * 游標一進到這扇窗，就把 Rust 那條輪詢執行緒叫起來。
+   *
+   * 它平常最久睡 160 毫秒（`hit::POLL_AWAY_MS`，游標離她 120 像素以外時用的
+   * 那一段）。從遠處一口氣把滑鼠甩到她旁邊的**空白**上按下去，那一下就會在
+   * 這扇窗裡被吃掉，底下的視窗收不到。可是那個瞬間 webview 是收得到
+   * `pointermove` 的——窗那時候還是可點的，事件就是送到這裡來的——所以這邊喊
+   * 一聲，比等它睡飽快兩個數量級。
+   *
+   * 只喊一聲，不送座標也不送答案。判斷整套留在 Rust，它醒來之後自己去問游標
+   * 在哪。所以這邊多喊、少喊、喊錯時機，都只會讓那一拍早一點或晚一點發生，
+   * 不會讓答案變錯——這條線壞掉的上限是「退回原本的輪詢」。
+   *
+   * 節流用的是**前緣**：第一次動就喊，之後 `NUDGE_EVERY_MS` 內的不喊。
+   * `requestAnimationFrame` 會等到下一幀才喊，而那最多就是 16 毫秒——正好是
+   * 這條線要省掉的東西；它在視窗隱藏時還會整個停掉。時間戳相減會被系統時鐘
+   * 往回跳卡住，所以這裡連時鐘都不看。
+   */
+  const NUDGE_EVERY_MS = 16;
+  let nudgeCoolingDown = false;
+  globalThis.addEventListener("pointermove", () => {
+    if (nudgeCoolingDown) return;
+    nudgeCoolingDown = true;
+    setTimeout(() => {
+      nudgeCoolingDown = false;
+    }, NUDGE_EVERY_MS);
+    invoke("pet_pointer_moved").catch(() => {
+      // 叫不醒就等它自己睡飽。那是慢，不是壞。
+    });
+  });
   scheduleSolidPush();
 }
 

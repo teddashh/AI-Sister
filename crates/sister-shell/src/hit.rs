@@ -159,6 +159,65 @@ pub fn poll_step(window: Rect, solid: &[Rect], visible: bool, at: Option<(i32, i
     }
 }
 
+/// 兩次判斷之間的地板。被叫醒也不會比這個更快。
+///
+/// [`wait_for_next_poll`] 讓 renderer 可以把輪詢執行緒提早叫起來，而
+/// `pointermove` 一秒可以來上千次。地板讓那條執行緒在 renderer 壞掉狂叫的
+/// 時候最快也只跑 1000/`POLL_FLOOR_MS` 次；正常情況它只是把「被叫醒」的反應
+/// 時間從 0 墊到這個數字，而這個數字比 [`POLL_NEAR_MS`] 小一個量級。
+pub const POLL_FLOOR_MS: u64 = 8;
+const _: () = assert!(POLL_FLOOR_MS < POLL_NEAR_MS);
+
+/// 「該再看一次了」的閘門：旗標 ＋ condvar。`true` 代表有人叫過而還沒被收走。
+pub type PollGate = (std::sync::Mutex<bool>, std::sync::Condvar);
+
+/// 睡到該再看一次為止。回來的時候旗標一定是 `false`。
+///
+/// 三種回來的理由：睡滿 `nap_ms`、有人在睡之前就叫過了、睡到一半被叫醒。
+/// 呼叫端不必分辨是哪一種——它回來之後做的事永遠是同一套 [`poll_step`]，而且
+/// 是自己去問游標在哪，不採信叫它的人給的任何座標。**叫的人只能影響那一拍
+/// 什麼時候發生，不能影響它算出什麼。**
+///
+/// 為什麼需要這個：游標離她 [`POLL_NEAR_MARGIN`] 以外的時候，下一拍要
+/// [`POLL_AWAY_MS`] 才到。使用者從遠處一口氣把滑鼠甩到她旁邊的空白上按下去，
+/// 那一下會被那扇窗吃掉。而那個瞬間 renderer 是收得到 `pointermove` 的——窗
+/// 那時候還是可點的——所以讓它喊一聲，比等這條執行緒睡飽快兩個數量級。
+///
+/// 先無條件睡滿 [`POLL_FLOOR_MS`] 再開始等，那一段誰叫都不動。這段期間來的
+/// 呼叫不會漏掉：旗標留在那裡，接下來的等待會立刻看到它。
+pub fn wait_for_next_poll(gate: &PollGate, nap_ms: u64) {
+    let (flag, cv) = gate;
+    std::thread::sleep(std::time::Duration::from_millis(POLL_FLOOR_MS));
+
+    let rest = std::time::Duration::from_millis(nap_ms.saturating_sub(POLL_FLOOR_MS));
+    let deadline = std::time::Instant::now() + rest;
+    let mut woken = flag.lock().expect("poll gate");
+    while !*woken {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        // condvar 會有偽喚醒，所以要看著 deadline 重算剩餘時間再等一次；
+        // `wait_timeout` 回一次就當成時間到的話，這支函式會提早回去，而
+        // 「提早」在這裡等於整條線變成忙迴圈。
+        let (next, _) = cv.wait_timeout(woken, left).expect("poll gate");
+        woken = next;
+    }
+    *woken = false;
+}
+
+/// 叫醒在 [`wait_for_next_poll`] 裡等著的那條執行緒。
+///
+/// 和 `wait_for_next_poll` 是同一個協定的兩半，所以擺在一起：分開寫的話，
+/// 叫的那一端很容易少掉 `notify_one()`——旗標立起來了、可是沒人被戳醒，於是
+/// 那條執行緒照舊睡滿整覺，而**看起來完全正常**（它終究會醒，只是晚了）。
+/// 那種失敗沒有任何症狀可以指認。
+pub fn nudge(gate: &PollGate) {
+    let (flag, cv) = gate;
+    *flag.lock().expect("poll gate") = true;
+    cv.notify_one();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +407,94 @@ mod tests {
         assert_eq!(ms(170, 300), POLL_NEAR_MS, "手在她身上要用快的那一段");
         assert_eq!(ms(-1000, 300), POLL_AWAY_MS, "手在遠處用慢的那一段");
         // 「快的真的比慢的快」不在這裡斷言——那是編譯期的 `const _` 在守。
+    }
+
+    /* ---------- 被叫醒的那一拍 ---------- */
+
+    /// 一個乾淨的閘門；`raised` 代表「有人在開始等之前就叫過了」，而那一聲
+    /// 同樣走產品的 [`nudge`]。
+    fn gate(raised: bool) -> PollGate {
+        let g = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+        if raised {
+            nudge(&g);
+        }
+        g
+    }
+
+    fn raised(gate: &PollGate) -> bool {
+        *gate.0.lock().expect("poll gate")
+    }
+
+    /// 時間斷言一律留大餘裕：CI runner 比開發機慢兩倍，而這幾條要問的是
+    /// 「有沒有等滿那一覺」這種量級的事，不是精確的毫秒數。
+    const WAY_LESS_THAN_THE_NAP: std::time::Duration = std::time::Duration::from_secs(1);
+    const A_NAP_NOBODY_WOULD_WAIT_OUT: u64 = 10_000;
+
+    #[test]
+    fn a_nudge_that_arrived_first_is_not_lost() {
+        let g = gate(true);
+        let started = std::time::Instant::now();
+        wait_for_next_poll(&g, A_NAP_NOBODY_WOULD_WAIT_OUT);
+        assert!(
+            started.elapsed() < WAY_LESS_THAN_THE_NAP,
+            "旗標在開始等之前就立起來了，卻還是睡滿了整覺——地板那段 sleep 期間\
+             來的呼叫被吃掉了，而那正是最容易發生的時機"
+        );
+    }
+
+    #[test]
+    fn waking_up_clears_the_flag() {
+        let g = gate(true);
+        wait_for_next_poll(&g, A_NAP_NOBODY_WOULD_WAIT_OUT);
+        assert!(
+            !raised(&g),
+            "叫過一次之後旗標沒收回去。留著的話下一圈會立刻又回來，整條執行緒\
+             變成以地板為週期的忙迴圈"
+        );
+    }
+
+    #[test]
+    fn nobody_nudging_means_it_sleeps() {
+        let g = gate(false);
+        let started = std::time::Instant::now();
+        wait_for_next_poll(&g, POLL_FLOOR_MS + 40);
+        let slept = started.elapsed();
+        assert!(
+            slept >= std::time::Duration::from_millis(POLL_FLOOR_MS),
+            "沒人叫，卻連地板都沒睡滿（只睡了 {slept:?}）"
+        );
+    }
+
+    #[test]
+    fn a_nudge_from_another_thread_cuts_the_nap_short() {
+        let g = std::sync::Arc::new(gate(false));
+        let caller = std::sync::Arc::clone(&g);
+        let nudger = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            // 用產品自己那一半，不要在測試裡手抄一份 condvar 協定：抄的那份
+            // 少一句 `notify_one()` 也照樣會綠，而產品少那一句就是這條線失效。
+            nudge(&caller);
+        });
+        let started = std::time::Instant::now();
+        wait_for_next_poll(&g, A_NAP_NOBODY_WOULD_WAIT_OUT);
+        let waited = started.elapsed();
+        nudger.join().expect("nudger");
+        assert!(
+            waited < WAY_LESS_THAN_THE_NAP,
+            "睡到一半被叫，卻等了 {waited:?} 才回來——`notify_one` 沒有把它從\
+             `wait_timeout` 裡撈出來，那條執行緒只是照舊睡滿"
+        );
+    }
+
+    #[test]
+    fn the_floor_is_not_skippable() {
+        let g = gate(true);
+        let started = std::time::Instant::now();
+        wait_for_next_poll(&g, 0);
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(POLL_FLOOR_MS),
+            "旗標立著、`nap_ms` 是 0，就整個不睡了。renderer 每秒叫一千次的時候\
+             這條執行緒會跟著跑一千圈"
+        );
     }
 }
