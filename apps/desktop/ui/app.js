@@ -256,8 +256,8 @@ function dialogueVoiceLibrary(raw) {
     raw?.totals?.baseLinesPerPersona !== 8 ||
     raw?.totals?.extensionLinesPerPersona !== 24 ||
     raw?.totals?.clips !== 544 ||
-    raw?.totals?.oggBytes !== 8920503 ||
-    raw?.totals?.durationMs !== 1762554 ||
+    raw?.totals?.oggBytes !== 8895060 ||
+    raw?.totals?.durationMs !== 1756905 ||
     !Array.isArray(raw?.packs) ||
     raw.packs.length !== 2 ||
     !Array.isArray(raw?.clips)

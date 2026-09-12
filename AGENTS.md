@@ -75,7 +75,7 @@ GET，以及 alpha.110 預設關閉、另行同意後只替最新新答案或手
   S/T/C/G/X glyph fallback。舊 `neutral` 設定只遷移成 ChatGPT 並關聲。
 
 - alpha.119 起，17 位角色每位都有 bundled 基本語音 8 句＋擴充語音 24 句，恰好
-  544 段 Ogg Opus、8,920,503 bytes。runtime 必須完整驗過 manifest 的 17×32 roster、
+  544 段 Ogg Opus、8,895,060 bytes。runtime 必須完整驗過 manifest 的 17×32 roster、
   line/pack/use/text/triggers/path/bytes/hash/duration 才啟用整庫；固定語音只由 trusted
   角色操作或 exact 日常短句啟動，不叫 CLI、不連網、不借 `localService`。一般問題照舊
   走記憶／CLI；動態答案只有另一顆本機朗讀按鈕能用 `localService`。WAV、reference、

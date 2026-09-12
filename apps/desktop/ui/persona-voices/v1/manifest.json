@@ -306,11 +306,11 @@
         "妳好厲害"
       ],
       "file": "extension/chatgpt/compliment.ogg",
-      "bytes": 10902,
-      "sha256": "f3d47daf94c5e37592a91a0761a828d32ff3dae98e373bf590438551f842e188",
-      "integratedLufs": -23.17,
-      "truePeakDbtp": -9.36,
-      "durationMs": 2131
+      "bytes": 12286,
+      "sha256": "50856a199b1dc270941c20b90d5594b6bb9199702209a92d0b17a0fae2996ffe",
+      "integratedLufs": -23.16,
+      "truePeakDbtp": -6.44,
+      "durationMs": 2387
     },
     {
       "persona": "chatgpt",
@@ -651,11 +651,11 @@
         "我要走了"
       ],
       "file": "extension/chatgpt/leaving.ogg",
-      "bytes": 14243,
-      "sha256": "9ba7208e1a06523a969a499926f2489cb6f250744aff33d75a70542a2e9e4f42",
-      "integratedLufs": -23.16,
-      "truePeakDbtp": -7.91,
-      "durationMs": 2770
+      "bytes": 12310,
+      "sha256": "e33e6fd7f8ec119ede748f5a35a6c65a44baa8821f3aa8722039666406726535",
+      "integratedLufs": -23.11,
+      "truePeakDbtp": -7.73,
+      "durationMs": 2385
     },
     {
       "persona": "chatgpt",
@@ -796,11 +796,11 @@
         "不知道怎麼開始"
       ],
       "file": "base/claude/start-small.ogg",
-      "bytes": 24076,
-      "sha256": "46eb4da982f13fad140d63b4047951dd041df97c1057605dffb8b2c5f430f3d1",
-      "integratedLufs": -23.18,
-      "truePeakDbtp": -4.39,
-      "durationMs": 4743
+      "bytes": 18296,
+      "sha256": "592af5664253ede9210cc6c5b2f624067268dd06b81d858e4a40eb7d18c9ed8a",
+      "integratedLufs": -22.97,
+      "truePeakDbtp": -6.07,
+      "durationMs": 3582
     },
     {
       "persona": "claude",
@@ -1256,11 +1256,11 @@
         "我要走了"
       ],
       "file": "extension/claude/leaving.ogg",
-      "bytes": 12510,
-      "sha256": "3b877a9386ef329a740700429c8e3e79d17868ab18dede402e05f9f7e97bd8e5",
-      "integratedLufs": -22.97,
-      "truePeakDbtp": -7.64,
-      "durationMs": 2445
+      "bytes": 14172,
+      "sha256": "769e8d4a842e45493ab4ba0a8a5b630528ba41173376a7b2ab825390be58ad59",
+      "integratedLufs": -23.04,
+      "truePeakDbtp": -7.27,
+      "durationMs": 2781
     },
     {
       "persona": "claude",
@@ -1324,11 +1324,11 @@
         "早"
       ],
       "file": "base/gemini/good-morning.ogg",
-      "bytes": 25577,
-      "sha256": "dde9e4d132017a38bae8b0a490059e02efb09b6ee5811d24f01d9e0b5257f7f1",
-      "integratedLufs": -23.18,
-      "truePeakDbtp": -2.33,
-      "durationMs": 5126
+      "bytes": 18192,
+      "sha256": "3a01cc2db0c18b1a9d348dafdedf56cdb45c2d6ddd4ba7cff2388a76e9463adc",
+      "integratedLufs": -23.16,
+      "truePeakDbtp": -3.19,
+      "durationMs": 3606
     },
     {
       "persona": "gemini",
@@ -1477,11 +1477,11 @@
         "多謝"
       ],
       "file": "extension/gemini/thanks.ogg",
-      "bytes": 12656,
-      "sha256": "c66eb957dad62307fadf8ace965a924befb39be10688d52edddf289bae205595",
-      "integratedLufs": -23.0,
-      "truePeakDbtp": -4.69,
-      "durationMs": 2491
+      "bytes": 9413,
+      "sha256": "0c8ebeb7e1f3811b914d635d03bd4d877cf33ae110b27b8a1be757cc087c78f0",
+      "integratedLufs": -23.23,
+      "truePeakDbtp": -5.76,
+      "durationMs": 1829
     },
     {
       "persona": "gemini",
@@ -1632,11 +1632,11 @@
         "再做一下"
       ],
       "file": "extension/gemini/keep-going.ogg",
-      "bytes": 10276,
-      "sha256": "9c758a93872d33dd66b79e8b4d67c652cf6d0f25d1a62396e430d55ee820d1cc",
-      "integratedLufs": -23.25,
-      "truePeakDbtp": -8.04,
-      "durationMs": 1992
+      "bytes": 12197,
+      "sha256": "bedac17eb919195f2f6ec2e002585ffc46cb2a795825069a36c565375dcc26df",
+      "integratedLufs": -23.19,
+      "truePeakDbtp": -5.84,
+      "durationMs": 2410
     },
     {
       "persona": "gemini",
@@ -2687,11 +2687,11 @@
         "多謝"
       ],
       "file": "extension/deepseek/thanks.ogg",
-      "bytes": 10462,
-      "sha256": "593a9d91d197dbfee29ec44b0b5b9ea560ea7b830aa9ddd34393eb86457753dc",
-      "integratedLufs": -23.09,
-      "truePeakDbtp": -5.23,
-      "durationMs": 2027
+      "bytes": 10719,
+      "sha256": "4be613ee07f43bf77aa98a5ece02a99429618f427405ee8984c66ccef31d8b73",
+      "integratedLufs": -23.12,
+      "truePeakDbtp": -3.29,
+      "durationMs": 2073
     },
     {
       "persona": "deepseek",
@@ -2899,11 +2899,11 @@
         "肚子餓"
       ],
       "file": "extension/deepseek/hungry.ogg",
-      "bytes": 23354,
-      "sha256": "3b207954ef000fd3d4b1b622cb319b25f8bc31fc61a7c3ff71f01d38d303aba5",
-      "integratedLufs": -23.06,
-      "truePeakDbtp": -5.22,
-      "durationMs": 4627
+      "bytes": 25210,
+      "sha256": "5b763e257d01d2bed1c45a82a2b3920af5cd82d03e865e805e3f9d27b534ed00",
+      "integratedLufs": -23.07,
+      "truePeakDbtp": -6.88,
+      "durationMs": 4964
     },
     {
       "persona": "deepseek",
@@ -3014,11 +3014,11 @@
         "今天很開心"
       ],
       "file": "extension/deepseek/good-day.ogg",
-      "bytes": 16944,
-      "sha256": "856e661945b6da690ea08ac38f010e8c8983ef754c887529e41b0b1da9b0eee9",
+      "bytes": 18159,
+      "sha256": "5686617e5576accbf33f3eec419ffe443b3b4ddbb7d2315d435e3bf85438561b",
       "integratedLufs": -23.01,
-      "truePeakDbtp": -5.83,
-      "durationMs": 3350
+      "truePeakDbtp": -5.6,
+      "durationMs": 3594
     },
     {
       "persona": "deepseek",
@@ -3033,11 +3033,11 @@
         "我做到了"
       ],
       "file": "extension/deepseek/small-win.ogg",
-      "bytes": 12849,
-      "sha256": "5142770df2ddc12a0ed7faf1bdc1fcc25a79c05464163866c219693257f092ed",
-      "integratedLufs": -23.11,
-      "truePeakDbtp": -6.15,
-      "durationMs": 2514
+      "bytes": 12990,
+      "sha256": "39f302d4f34b78d68911c79d463506b7d6c435823e5cfd2feef0269da14d9717",
+      "integratedLufs": -23.08,
+      "truePeakDbtp": -6.18,
+      "durationMs": 2526
     },
     {
       "persona": "deepseek",
@@ -3840,11 +3840,11 @@
         "我去睡了"
       ],
       "file": "base/mistral/good-night.ogg",
-      "bytes": 19554,
-      "sha256": "420686365c3130f51cabe54074304aabe8aeb25b3898adac66dac54485f04532",
-      "integratedLufs": -23.07,
-      "truePeakDbtp": -5.5,
-      "durationMs": 3733
+      "bytes": 17354,
+      "sha256": "c49f417dc7d2c0b4901886fe617b422bc33e562d3b5ca20cdda23ff4937c87ad",
+      "integratedLufs": -23.05,
+      "truePeakDbtp": -4.65,
+      "durationMs": 3466
     },
     {
       "persona": "mistral",
@@ -4243,11 +4243,11 @@
         "我做到了"
       ],
       "file": "extension/mistral/small-win.ogg",
-      "bytes": 16282,
-      "sha256": "3f4842f4f91182a0e2ffb00eaa50d608d66cadf6d8c828d8f0e0ff47e44589bd",
-      "integratedLufs": -23.07,
-      "truePeakDbtp": -4.73,
-      "durationMs": 3164
+      "bytes": 15474,
+      "sha256": "3f00b308a97a89323c4607b4d7b41232b4ea3aec350acba237df5e245d102d20",
+      "integratedLufs": -23.1,
+      "truePeakDbtp": -5.41,
+      "durationMs": 3025
     },
     {
       "persona": "mistral",
@@ -4281,11 +4281,11 @@
         "我要走了"
       ],
       "file": "extension/mistral/leaving.ogg",
-      "bytes": 16295,
-      "sha256": "12c6e7ad89594cf4124620ec108373c792e66fccb27e6dd2ffa3164f18e5679d",
-      "integratedLufs": -23.06,
-      "truePeakDbtp": -3.24,
-      "durationMs": 3211
+      "bytes": 17497,
+      "sha256": "33defad69fedaf3f45117faf221a205cc09bf676a4eae4207fb7696c530e210d",
+      "integratedLufs": -23.11,
+      "truePeakDbtp": -5.83,
+      "durationMs": 3408
     },
     {
       "persona": "mistral",
@@ -4349,11 +4349,11 @@
         "早"
       ],
       "file": "base/venice/good-morning.ogg",
-      "bytes": 24219,
-      "sha256": "dfa1cb5d56408b5925af16712e024ebc10947aef9ffb1a0271b3b416910883fc",
-      "integratedLufs": -23.03,
-      "truePeakDbtp": -7.07,
-      "durationMs": 5356
+      "bytes": 21377,
+      "sha256": "452c8ae57a24c0e66510f8fc403332d1cfd0a2878e729a740d23b40cdc530c4f",
+      "integratedLufs": -22.96,
+      "truePeakDbtp": -5.44,
+      "durationMs": 4604
     },
     {
       "persona": "venice",
@@ -4580,11 +4580,11 @@
         "好焦慮"
       ],
       "file": "extension/venice/stressed.ogg",
-      "bytes": 18405,
-      "sha256": "22da1ef2467f0de7dc77d2cbbeb8e9acef9cb6946f2ca7aca8a667ac35bcc3b4",
-      "integratedLufs": -23.0,
-      "truePeakDbtp": -6.37,
-      "durationMs": 4306
+      "bytes": 14462,
+      "sha256": "39f977f56d0bf70c97a5782e038f32231153ee786884da30a6c70dde027928ab",
+      "integratedLufs": -23.14,
+      "truePeakDbtp": -4.98,
+      "durationMs": 2944
     },
     {
       "persona": "venice",
@@ -6058,11 +6058,11 @@
         "我做到了"
       ],
       "file": "extension/perplexity/small-win.ogg",
-      "bytes": 14548,
-      "sha256": "28d15f0116e99d76a5c8c88324c6b2167b6e816edf252422c1590fb10ba742f5",
-      "integratedLufs": -23.07,
-      "truePeakDbtp": -3.63,
-      "durationMs": 2897
+      "bytes": 13797,
+      "sha256": "f79e773115a91251496616b742cd6525e749720d537b6b3287cdd3b972f6d838",
+      "integratedLufs": -23.09,
+      "truePeakDbtp": -3.08,
+      "durationMs": 2758
     },
     {
       "persona": "perplexity",
@@ -6145,11 +6145,11 @@
       "text": "先做一版，安靜地開始也很好。",
       "triggers": [],
       "file": "base/glm/tap-quiet.ogg",
-      "bytes": 15245,
-      "sha256": "dbe5a13fcf40cf21939b522d8f80b349ea54743fb20f37c900bb0ca646bbb9c2",
-      "integratedLufs": -23.02,
-      "truePeakDbtp": -2.49,
-      "durationMs": 3026
+      "bytes": 12556,
+      "sha256": "9a6748ff34531b026ecd93cf6b0da5a386f81e4fee421398ec294bbbcb0d5224",
+      "integratedLufs": -23.05,
+      "truePeakDbtp": -2.7,
+      "durationMs": 2468
     },
     {
       "persona": "glm",
@@ -6663,11 +6663,11 @@
         "我做到了"
       ],
       "file": "extension/glm/small-win.ogg",
-      "bytes": 19648,
-      "sha256": "c4d2bc1df8d2f481a326640754fafe5553a81edab19aee6fc215b4c827c9664a",
-      "integratedLufs": -23.08,
-      "truePeakDbtp": -3.92,
-      "durationMs": 3942
+      "bytes": 11961,
+      "sha256": "739d9a6296eb94d5f42c62180ad9f7c4f951fe3c103906429b817b0b658a4c21",
+      "integratedLufs": -23.24,
+      "truePeakDbtp": -5.11,
+      "durationMs": 2352
     },
     {
       "persona": "glm",
@@ -7000,11 +7000,11 @@
         "好焦慮"
       ],
       "file": "extension/kimi/stressed.ogg",
-      "bytes": 23744,
-      "sha256": "14b1cff6b8cb0bc1902214f535ba1f174ce079d6fa04ce0ac8f85a818035a76a",
-      "integratedLufs": -23.01,
-      "truePeakDbtp": -6.76,
-      "durationMs": 4697
+      "bytes": 20497,
+      "sha256": "b4a9c4eba00d745127e1fa831f724634e4027ab14e74014d3fb13c76caa1f8db",
+      "integratedLufs": -22.98,
+      "truePeakDbtp": -4.92,
+      "durationMs": 4082
     },
     {
       "persona": "kimi",
@@ -7115,11 +7115,11 @@
         "喝水"
       ],
       "file": "extension/kimi/drink-water.ogg",
-      "bytes": 19267,
-      "sha256": "6980bfa5dc15e2af5fdf6fa5b05f8f9274c7b830dd0e3e1f014c383d43aeb3e2",
-      "integratedLufs": -22.99,
-      "truePeakDbtp": -4.49,
-      "durationMs": 3776
+      "bytes": 16992,
+      "sha256": "fa0205e3348d1086a3542d313cad130b40076862b24d84a0e48c56abcc988fd5",
+      "integratedLufs": -23.02,
+      "truePeakDbtp": -7.45,
+      "durationMs": 3339
     },
     {
       "persona": "kimi",
@@ -7249,11 +7249,11 @@
         "今天很開心"
       ],
       "file": "extension/kimi/good-day.ogg",
-      "bytes": 18818,
-      "sha256": "84d7315c21e3ca0177c9adad899df5f3c56219adc33f45b8be50b428ed7e74e6",
-      "integratedLufs": -23.0,
-      "truePeakDbtp": -8.53,
-      "durationMs": 3617
+      "bytes": 19899,
+      "sha256": "cf224d78928d032edf5db3c19539109f117d05012f07089de65486b18b27d296",
+      "integratedLufs": -22.99,
+      "truePeakDbtp": -7.38,
+      "durationMs": 3954
     },
     {
       "persona": "kimi",
@@ -7355,11 +7355,11 @@
       "text": "我把上下游接起來，安靜地開始也很好。",
       "triggers": [],
       "file": "base/hunyuan/tap-quiet.ogg",
-      "bytes": 18526,
-      "sha256": "393ead512b7fe94a88b4a2f0baea587b93657a133183111f1dc3c129b433d5b4",
-      "integratedLufs": -22.94,
-      "truePeakDbtp": -3.36,
-      "durationMs": 3640
+      "bytes": 22689,
+      "sha256": "65c09b31691b9f05b21a60c2a0d07980a2ab78e49522376fcc04abc904af1e04",
+      "integratedLufs": -23.15,
+      "truePeakDbtp": -3.83,
+      "durationMs": 4384
     },
     {
       "persona": "hunyuan",
@@ -8075,11 +8075,11 @@
         "我去睡了"
       ],
       "file": "base/minimax/good-night.ogg",
-      "bytes": 16940,
-      "sha256": "a711bbf36b5b83e53fe5408a6da0d90c73e5aaf36274c73b5098ad4b03d2f00d",
-      "integratedLufs": -23.02,
-      "truePeakDbtp": -5.49,
-      "durationMs": 3292
+      "bytes": 14746,
+      "sha256": "3c604deb189db5545a634a5d121304169e72f766a8ee57e2b5c2b6b16161e262",
+      "integratedLufs": -23.08,
+      "truePeakDbtp": -6.31,
+      "durationMs": 2874
     },
     {
       "persona": "minimax",
@@ -8642,11 +8642,11 @@
         "跟我聊聊"
       ],
       "file": "base/nemotron/choose-topic.ogg",
-      "bytes": 21029,
-      "sha256": "38d240e694ff2aaa0ca947d40d1be92e4048792e87e6c65be547aa84fdcc5951",
-      "integratedLufs": -23.03,
-      "truePeakDbtp": -7.99,
-      "durationMs": 4070
+      "bytes": 19215,
+      "sha256": "ed91a028a07496e7c2ae860bad351bf7d37f9c7d267cb3ef66b0ef6faead7a87",
+      "integratedLufs": -23.0,
+      "truePeakDbtp": -7.53,
+      "durationMs": 3733
     },
     {
       "persona": "nemotron",
@@ -8661,11 +8661,11 @@
         "不知道怎麼開始"
       ],
       "file": "base/nemotron/start-small.ogg",
-      "bytes": 21477,
-      "sha256": "aa195e6afa49c97bcb6035a99286d2537535a89860656b01ab23a31c6071c661",
+      "bytes": 26377,
+      "sha256": "591264c7c6a52d3282bba4b36888ad198b9de31c09a6d470f4ff40184e0d3e10",
       "integratedLufs": -23.01,
-      "truePeakDbtp": -5.33,
-      "durationMs": 4151
+      "truePeakDbtp": -5.64,
+      "durationMs": 5126
     },
     {
       "persona": "nemotron",
@@ -8698,11 +8698,11 @@
         "下午好"
       ],
       "file": "extension/nemotron/good-afternoon.ogg",
-      "bytes": 28305,
-      "sha256": "4ce38206f69df80738e2f570ef0fee713fa7839674f30487bd98e4fea104b437",
-      "integratedLufs": -23.0,
-      "truePeakDbtp": -5.39,
-      "durationMs": 5510
+      "bytes": 29211,
+      "sha256": "370951d6f8cf275e3a82e579f84b1e88203b3f3538db7f49dbda7a6122903afd",
+      "integratedLufs": -23.21,
+      "truePeakDbtp": -7.05,
+      "durationMs": 5730
     },
     {
       "persona": "nemotron",
@@ -8776,11 +8776,11 @@
         "妳好厲害"
       ],
       "file": "extension/nemotron/compliment.ogg",
-      "bytes": 14361,
-      "sha256": "1b4eaf67400669279551fb6e011a7db5f6ab53fb6740717696913882b2075015",
-      "integratedLufs": -23.01,
-      "truePeakDbtp": -6.73,
-      "durationMs": 2746
+      "bytes": 13011,
+      "sha256": "8c6248f5fa986e2c0e72752ae794e5564d5d55fe1950595c3c0884066a15525e",
+      "integratedLufs": -23.02,
+      "truePeakDbtp": -6.4,
+      "durationMs": 2491
     },
     {
       "persona": "nemotron",
@@ -8795,11 +8795,11 @@
         "累了"
       ],
       "file": "extension/nemotron/tired.ogg",
-      "bytes": 24100,
-      "sha256": "14db495fae2a33488a715d397658f302669cdd715b322a6599dadbc6dd45b426",
-      "integratedLufs": -22.99,
-      "truePeakDbtp": -4.99,
-      "durationMs": 4674
+      "bytes": 21621,
+      "sha256": "86a4b42822dc17bb9978cbe91717420e9e777425684a48be954b9d06e8afb7ff",
+      "integratedLufs": -23.05,
+      "truePeakDbtp": -6.15,
+      "durationMs": 4209
     },
     {
       "persona": "nemotron",
@@ -8834,11 +8834,11 @@
         "不知道怎麼辦"
       ],
       "file": "extension/nemotron/stuck.ogg",
-      "bytes": 25371,
-      "sha256": "aa205e66ee5e14b8370618bd31f71736bd712b684c35c888afba2fbe5f57b415",
-      "integratedLufs": -23.01,
-      "truePeakDbtp": -5.25,
-      "durationMs": 4964
+      "bytes": 32003,
+      "sha256": "86dc6b201e98a1d687e6c16606d52e94013b86783a939e362c181eadcfce866d",
+      "integratedLufs": -22.96,
+      "truePeakDbtp": -5.79,
+      "durationMs": 6229
     },
     {
       "persona": "nemotron",
@@ -9083,11 +9083,11 @@
         "我做到了"
       ],
       "file": "extension/nemotron/small-win.ogg",
-      "bytes": 16952,
-      "sha256": "c4555fdc450410f65a8fa0e48418f13ec03caded40fc2f13e3af60300004b500",
-      "integratedLufs": -23.02,
-      "truePeakDbtp": -6.11,
-      "durationMs": 3269
+      "bytes": 17399,
+      "sha256": "f1f8df33a0836b96d7758be16fdc75acc0c4cd17c5dc11e5b319e43c1ef6622a",
+      "integratedLufs": -23.03,
+      "truePeakDbtp": -6.42,
+      "durationMs": 3327
     },
     {
       "persona": "nemotron",
@@ -9812,11 +9812,11 @@
         "晚安嗎"
       ],
       "file": "base/mimo/good-evening.ogg",
-      "bytes": 19298,
-      "sha256": "a89eff820719311f1cd539843d6ac22a07e7a038115d39e23dde8eb0038b28db",
-      "integratedLufs": -23.13,
-      "truePeakDbtp": -7.27,
-      "durationMs": 3815
+      "bytes": 24282,
+      "sha256": "9dd27706ed860c1357e9f827eaa9542d26613ef9659abe55dda6033dedc79e59",
+      "integratedLufs": -23.12,
+      "truePeakDbtp": -6.03,
+      "durationMs": 4813
     },
     {
       "persona": "mimo",
@@ -9832,11 +9832,11 @@
         "回来了"
       ],
       "file": "base/mimo/welcome-back.ogg",
-      "bytes": 16343,
-      "sha256": "25a63c161d5f591e29189df7fb4570a9ffcc9e304d7e9601f9e56abc8f8a0d7b",
-      "integratedLufs": -23.11,
-      "truePeakDbtp": -7.14,
-      "durationMs": 3211
+      "bytes": 19202,
+      "sha256": "e1b30bb75ed5d6da0e9d2336a58c2d7d5dd15e4969694baf3c79c100bd3ac66f",
+      "integratedLufs": -23.12,
+      "truePeakDbtp": -8.02,
+      "durationMs": 3791
     },
     {
       "persona": "mimo",
@@ -10064,11 +10064,11 @@
         "專心不了"
       ],
       "file": "extension/mimo/unfocused.ogg",
-      "bytes": 15214,
-      "sha256": "57705035a3220e029a83d8dd2b3de30ab2d6547a81203f4b5ece84aeedce9d62",
-      "integratedLufs": -23.09,
-      "truePeakDbtp": -6.3,
-      "durationMs": 3014
+      "bytes": 21333,
+      "sha256": "b0fb416987044057d00b1e51811bcc6fc6b21534e6d4f448de7bfa26e3e27eea",
+      "integratedLufs": -23.1,
+      "truePeakDbtp": -6.93,
+      "durationMs": 4256
     },
     {
       "persona": "mimo",
@@ -10140,11 +10140,11 @@
         "喝水"
       ],
       "file": "extension/mimo/drink-water.ogg",
-      "bytes": 16386,
-      "sha256": "627b7c67cfd9efbb3a8a62ebf6c04ca80e45c17a9b48227516fe29ad81d2b614",
-      "integratedLufs": -23.12,
-      "truePeakDbtp": -8.58,
-      "durationMs": 3188
+      "bytes": 10974,
+      "sha256": "8995dc7f593b48db313abd9f6bccc0aa6c902c58199fbf9d89173ee321f4453a",
+      "integratedLufs": -23.11,
+      "truePeakDbtp": -7.14,
+      "durationMs": 2154
     },
     {
       "persona": "mimo",
@@ -10159,11 +10159,11 @@
         "肚子餓"
       ],
       "file": "extension/mimo/hungry.ogg",
-      "bytes": 19136,
-      "sha256": "f998e599126236ae17ebdb06fb176287a191fc3624ab1b465ac4c0eb7793f371",
-      "integratedLufs": -23.12,
-      "truePeakDbtp": -1.49,
-      "durationMs": 3846
+      "bytes": 20643,
+      "sha256": "3ece2357b2a8db07f8162836d33020b11c9eb8517cd4ef1a93da54a6372b075b",
+      "integratedLufs": -23.1,
+      "truePeakDbtp": -5.13,
+      "durationMs": 4117
     },
     {
       "persona": "mimo",
@@ -10293,11 +10293,11 @@
         "我做到了"
       ],
       "file": "extension/mimo/small-win.ogg",
-      "bytes": 16783,
-      "sha256": "a574d5b91c51e0004079ec5593688c3200082efc9452e0d6a2b9748265a571cf",
-      "integratedLufs": -23.12,
-      "truePeakDbtp": -5.81,
-      "durationMs": 3315
+      "bytes": 12887,
+      "sha256": "18e0a14b6827e2dde4e8bf5ade1f9495304a6bc34e128f3fa1425dafe8d019df",
+      "integratedLufs": -23.09,
+      "truePeakDbtp": -6.27,
+      "durationMs": 2538
     },
     {
       "persona": "mimo",
@@ -10312,11 +10312,11 @@
         "我回來工作了"
       ],
       "file": "extension/mimo/back-from-break.ogg",
-      "bytes": 23926,
-      "sha256": "f3c7c79482060ec99f7b0bb2ab38863730e2c7e1016f2937edf5c6421ada9e5d",
-      "integratedLufs": -23.15,
-      "truePeakDbtp": -7.03,
-      "durationMs": 4709
+      "bytes": 17175,
+      "sha256": "f9fc918a9781e9c2f7718d350ddddaafb5fba20e6d3c37a8d9f10cb569763c8f",
+      "integratedLufs": -23.16,
+      "truePeakDbtp": -5.19,
+      "durationMs": 3397
     },
     {
       "persona": "mimo",
@@ -10362,7 +10362,7 @@
     "baseLinesPerPersona": 8,
     "extensionLinesPerPersona": 24,
     "clips": 544,
-    "oggBytes": 8920503,
-    "durationMs": 1762554
+    "oggBytes": 8895060,
+    "durationMs": 1756905
   }
 }

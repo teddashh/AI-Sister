@@ -104,11 +104,11 @@
       "use": "avatar-poke",
       "text": "好啦好啦。",
       "file": "banter/chatgpt/poke-okay.ogg",
-      "bytes": 6282,
-      "sha256": "a626e59970e705665f0987382defd6e5e315fbfa320e7f4c0b8630223f223032",
-      "integratedLufs": -23.24,
-      "truePeakDbtp": -4.46,
-      "durationMs": 1226
+      "bytes": 5648,
+      "sha256": "212b958bf79076005109a514a7a108beb4c54a55e97c3b6f81104574d7b34cc9",
+      "integratedLufs": -23.01,
+      "truePeakDbtp": -10.82,
+      "durationMs": 1086
     },
     {
       "persona": "chatgpt",
@@ -370,11 +370,11 @@
       "use": "avatar-poke",
       "text": "你又戳我。",
       "file": "banter/claude/poke-again.ogg",
-      "bytes": 8525,
-      "sha256": "4e9dca899a5c802e626e99633c062c0423231eda0d8d1928ff570830a1e86de4",
-      "integratedLufs": -23.18,
-      "truePeakDbtp": -11.12,
-      "durationMs": 1678
+      "bytes": 5119,
+      "sha256": "1030fb4de493354298fdce58e1940583546134417dc6cc402b5c4685dc2bb0cd",
+      "integratedLufs": -23.08,
+      "truePeakDbtp": -10.25,
+      "durationMs": 1005
     },
     {
       "persona": "claude",
@@ -636,11 +636,11 @@
       "use": "avatar-poke",
       "text": "欸，會癢。",
       "file": "banter/gemini/poke-itch.ogg",
-      "bytes": 4660,
-      "sha256": "2070f4cc115c7b1e98054690a0f6d952a1a0522b3f47843a1b0f8f287a202a36",
-      "integratedLufs": -23.04,
-      "truePeakDbtp": -9.18,
-      "durationMs": 889
+      "bytes": 6975,
+      "sha256": "dce2bcfdd264d31621e217b38cd50749d37e083a78d33817f1c1004e93b6b7a0",
+      "integratedLufs": -23.89,
+      "truePeakDbtp": -1.75,
+      "durationMs": 1423
     },
     {
       "persona": "gemini",
@@ -650,11 +650,11 @@
       "use": "avatar-poke",
       "text": "你又戳我。",
       "file": "banter/gemini/poke-again.ogg",
-      "bytes": 5927,
-      "sha256": "f9207c7a7cd29b25babc83d9c59432f7c74d664192da6173d49908fb39e8bb04",
-      "integratedLufs": -23.11,
-      "truePeakDbtp": -4.45,
-      "durationMs": 1121
+      "bytes": 4708,
+      "sha256": "db39f8397606609f417efa42af7fdf7be396e61456a406d5a6ba8322cfdfa4d8",
+      "integratedLufs": -23.08,
+      "truePeakDbtp": -11.98,
+      "durationMs": 889
     },
     {
       "persona": "gemini",
@@ -1602,11 +1602,11 @@
       "use": "idle-giggle",
       "text": "哈哈，想到好笑的。",
       "file": "banter/qwen/giggle-haha.ogg",
-      "bytes": 9082,
-      "sha256": "ab4edda79a4d89fdc8b71279976559e6d47d1f758431c1b27900fe67ee140578",
-      "integratedLufs": -24.01,
-      "truePeakDbtp": -5.13,
-      "durationMs": 1799
+      "bytes": 9157,
+      "sha256": "2ebaf79f39e5360f31de8e5095cc69043d044c32fc30486a67f09f7e146762c3",
+      "integratedLufs": -22.95,
+      "truePeakDbtp": -7.72,
+      "durationMs": 1800
     },
     {
       "persona": "qwen",
@@ -2414,11 +2414,11 @@
       "use": "idle-giggle",
       "text": "呵呵，我在旁邊喔。",
       "file": "banter/sakana/giggle-hehe.ogg",
-      "bytes": 14746,
-      "sha256": "d5fcdeb7f89f3e1dd1fad9de079ea579368b62a88abbb30e7039a40cc7e7877b",
-      "integratedLufs": -22.99,
-      "truePeakDbtp": -5.14,
-      "durationMs": 2979
+      "bytes": 9712,
+      "sha256": "a1afc6c582e63aadc3262063384109229e41929fe291cc81382ed5e9af5840a7",
+      "integratedLufs": -23.17,
+      "truePeakDbtp": -2.73,
+      "durationMs": 1945
     },
     {
       "persona": "sakana",
@@ -2666,11 +2666,11 @@
       "use": "avatar-poke",
       "text": "你很閒喔。",
       "file": "banter/perplexity/poke-free.ogg",
-      "bytes": 4381,
-      "sha256": "f1bc563846c986bd91111d358efc5f41d5977060ccfa52c9f3158850e904ea33",
-      "integratedLufs": -23.1,
-      "truePeakDbtp": -7.82,
-      "durationMs": 808
+      "bytes": 6874,
+      "sha256": "0059c1df10669459eb0178a0bddd7f8b783d6d5ea855056e08e5f6c97faeb4f4",
+      "integratedLufs": -22.93,
+      "truePeakDbtp": -6.57,
+      "durationMs": 1377
     },
     {
       "persona": "perplexity",
@@ -2694,11 +2694,11 @@
       "use": "idle-giggle",
       "text": "呵呵，我在旁邊喔。",
       "file": "banter/perplexity/giggle-hehe.ogg",
-      "bytes": 9515,
-      "sha256": "3142120a2a5e26c87032734ca7ba14086a706c302c0b2c6e83bff3d7ddb05655",
-      "integratedLufs": -23.03,
-      "truePeakDbtp": -6.67,
-      "durationMs": 1864
+      "bytes": 6640,
+      "sha256": "e6270eefacbac91fa0833c03045af3f8c215fcc455987462233470776084ce73",
+      "integratedLufs": -23.07,
+      "truePeakDbtp": -8.75,
+      "durationMs": 1284
     },
     {
       "persona": "perplexity",
@@ -2778,11 +2778,11 @@
       "use": "answer-beat",
       "text": "找到了，就是這個。",
       "file": "banter/perplexity/beat-found.ogg",
-      "bytes": 12321,
-      "sha256": "804aa9fab269b1b2eb832af4a9d099dc3e0fee384a13169a5568f358c17d072d",
-      "integratedLufs": -23.05,
-      "truePeakDbtp": -6.16,
-      "durationMs": 2468
+      "bytes": 6802,
+      "sha256": "1ce52cae423b5eb5124af14fe8355c1a72560085457a7d3175515f3f02ac4fd7",
+      "integratedLufs": -23.01,
+      "truePeakDbtp": -6.83,
+      "durationMs": 1307
     },
     {
       "persona": "perplexity",
@@ -2904,11 +2904,11 @@
       "use": "avatar-poke",
       "text": "好啦好啦。",
       "file": "banter/glm/poke-okay.ogg",
-      "bytes": 5982,
-      "sha256": "5e98d3ef555958cf4e93aa2faeb133f93dd84127ed20b293c7a83862db8f9974",
-      "integratedLufs": -23.15,
-      "truePeakDbtp": -4.14,
-      "durationMs": 1202
+      "bytes": 5365,
+      "sha256": "eac3577da180186304ad013347f9eb7ce7d1b04bf2f6f61155553b89bb84efea",
+      "integratedLufs": -23.08,
+      "truePeakDbtp": -4.24,
+      "durationMs": 1028
     },
     {
       "persona": "glm",
@@ -3002,11 +3002,11 @@
       "use": "idle-giggle",
       "text": "哈哈，想到好笑的。",
       "file": "banter/glm/giggle-haha.ogg",
-      "bytes": 15899,
-      "sha256": "d5bffdcadda634931eacbece78e5eaf0fa415f26a430fa0b4f7d9388ff5049c1",
-      "integratedLufs": -22.86,
-      "truePeakDbtp": -4.44,
-      "durationMs": 3186
+      "bytes": 13899,
+      "sha256": "2ad0acfb2e0c35f81b6adb8d108f6bdd1b3f9ee341f6772f92c418b3ef9d8ae9",
+      "integratedLufs": -23.24,
+      "truePeakDbtp": -5.55,
+      "durationMs": 2770
     },
     {
       "persona": "glm",
@@ -3142,11 +3142,11 @@
       "use": "avatar-poke",
       "text": "幹嘛啦。",
       "file": "banter/kimi/poke-what.ogg",
-      "bytes": 7489,
-      "sha256": "c0aafcaa47bc158d79b2b3df85b9cde232e2ff54f0c4113a7132531f44103d57",
-      "integratedLufs": -23.07,
-      "truePeakDbtp": -6.85,
-      "durationMs": 1539
+      "bytes": 5494,
+      "sha256": "f3bed1b5fa0c5d00d9e38c6bfe716ab0c1e6c1ac2fb30c0de32a858781e1c5b5",
+      "integratedLufs": -23.17,
+      "truePeakDbtp": -5.0,
+      "durationMs": 1075
     },
     {
       "persona": "kimi",
@@ -3352,11 +3352,11 @@
       "use": "answer-beat",
       "text": "喏，在這裡。",
       "file": "banter/kimi/beat-here.ogg",
-      "bytes": 13547,
-      "sha256": "54ce4b6a4b90d1859149b3edf468dd6fbf6f1123c15d9283acbe6c21acb464c0",
-      "integratedLufs": -22.96,
-      "truePeakDbtp": -7.66,
-      "durationMs": 2479
+      "bytes": 11772,
+      "sha256": "2f2012670166631de756723a08b30c820db255a4dcfdb4522dc20e3d4bf81b21",
+      "integratedLufs": -23.1,
+      "truePeakDbtp": -4.82,
+      "durationMs": 2259
     },
     {
       "persona": "kimi",
@@ -4038,11 +4038,11 @@
       "use": "avatar-poke",
       "text": "我在啦。",
       "file": "banter/nemotron/poke-here.ogg",
-      "bytes": 5026,
-      "sha256": "d67699845ed8172e2c78139e90d049ad48cf20b0fe381df736550e98ac048173",
-      "integratedLufs": -22.97,
-      "truePeakDbtp": -7.7,
-      "durationMs": 924
+      "bytes": 4148,
+      "sha256": "f295a3082607fc46c7df03f2a90d89efbc91eac7ce0291ab13e9b97aa4559da0",
+      "integratedLufs": -23.24,
+      "truePeakDbtp": -7.59,
+      "durationMs": 750
     },
     {
       "persona": "nemotron",
@@ -4080,11 +4080,11 @@
       "use": "avatar-poke",
       "text": "嗯？怎樣。",
       "file": "banter/nemotron/poke-hmm.ogg",
-      "bytes": 7685,
-      "sha256": "1bc4433836311f675661a3e490e0e1e5ba9401cb8db528bd15c09c841d548d5d",
-      "integratedLufs": -22.85,
-      "truePeakDbtp": -9.58,
-      "durationMs": 1469
+      "bytes": 5888,
+      "sha256": "68f7044c41ae04a85c387ba889c13d0d1bd0fadabb604d00f1f38d7c432a3e77",
+      "integratedLufs": -23.17,
+      "truePeakDbtp": -9.25,
+      "durationMs": 1109
     },
     {
       "persona": "nemotron",
@@ -4304,11 +4304,11 @@
       "use": "avatar-poke",
       "text": "好啦好啦。",
       "file": "banter/cohere/poke-okay.ogg",
-      "bytes": 5837,
-      "sha256": "82de8a6ced1d95615b803d9d2908c5ca1c947b20ca49586bbfce9e853ec9ce09",
-      "integratedLufs": -22.62,
-      "truePeakDbtp": -7.21,
-      "durationMs": 1098
+      "bytes": 3535,
+      "sha256": "39bdec85a2a5bd0690bc774fee2636cf9864924edaa95418bef084b28beafc90",
+      "integratedLufs": -23.04,
+      "truePeakDbtp": -8.5,
+      "durationMs": 657
     },
     {
       "persona": "cohere",
@@ -4402,11 +4402,11 @@
       "use": "idle-giggle",
       "text": "哈哈，想到好笑的。",
       "file": "banter/cohere/giggle-haha.ogg",
-      "bytes": 7858,
-      "sha256": "14f830c852ae195bafca6ecc71014f11ea5b07a21eca12f150e288054d17405e",
-      "integratedLufs": -22.91,
-      "truePeakDbtp": -5.73,
-      "durationMs": 1493
+      "bytes": 8301,
+      "sha256": "8047aceeb47d3701409094972289628720658eef1da097d215db92fffb0fc105",
+      "integratedLufs": -23.03,
+      "truePeakDbtp": -5.13,
+      "durationMs": 1632
     },
     {
       "persona": "cohere",
@@ -4752,11 +4752,11 @@
       "use": "answer-beat",
       "text": "喏，在這裡。",
       "file": "banter/mimo/beat-here.ogg",
-      "bytes": 6367,
-      "sha256": "821023e91e15fc8ea75ac41496beb492f11a311b081e53c497840fe94dbbd21c",
-      "integratedLufs": -23.16,
-      "truePeakDbtp": -8.86,
-      "durationMs": 1237
+      "bytes": 6293,
+      "sha256": "0c595f6fcdcbfff3dc681bd003516ca0f58ac3f839efd50240efbcadc75097c8",
+      "integratedLufs": -23.14,
+      "truePeakDbtp": -5.84,
+      "durationMs": 1249
     },
     {
       "persona": "mimo",
@@ -4780,18 +4780,18 @@
       "use": "answer-beat",
       "text": "我想起來了。",
       "file": "banter/mimo/beat-remember.ogg",
-      "bytes": 7797,
-      "sha256": "f5a5a0d2277e86b97da9122d4ac6c6a2487d688366153743791b7d791550c5a7",
-      "integratedLufs": -23.25,
-      "truePeakDbtp": -8.57,
-      "durationMs": 1527
+      "bytes": 5904,
+      "sha256": "02ea18eccd2b1cd8c3bc1e942d7f529a317330d277d6bde855b19be535e8d546",
+      "integratedLufs": -23.21,
+      "truePeakDbtp": -7.67,
+      "durationMs": 1156
     }
   ],
   "totals": {
     "personas": 17,
     "linesPerPersona": 20,
     "clips": 340,
-    "oggBytes": 2276313,
-    "durationMs": 443668
+    "oggBytes": 2249621,
+    "durationMs": 438483
   }
 }

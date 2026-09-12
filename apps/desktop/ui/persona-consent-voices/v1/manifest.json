@@ -289,11 +289,11 @@
       "sheet": "cloud-reading",
       "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
       "file": "qwen/cloud-reading.ogg",
-      "bytes": 94860,
-      "sha256": "8f651b1bb7b4006f974a861f54b55e8acf160dc279ae9ee0dbe7b59c077466ff",
-      "integratedLufs": -26.01,
-      "truePeakDbtp": -4.96,
-      "durationMs": 18568
+      "bytes": 96302,
+      "sha256": "ac532e72f79cf7bf75fa02b33c766aa04f05e5742bb855e6457742e78cc0b451",
+      "integratedLufs": -25.53,
+      "truePeakDbtp": -1.53,
+      "durationMs": 18879
     },
     {
       "persona": "qwen",
@@ -409,11 +409,11 @@
       "sheet": "azure-tts",
       "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
       "file": "venice/azure-tts.ogg",
-      "bytes": 116285,
-      "sha256": "6cb7c0e5ecbe0b03ce890953dacc8fed1bf6ba6298c98443de68e81be4e3fa27",
-      "integratedLufs": -22.96,
-      "truePeakDbtp": -3.34,
-      "durationMs": 24154
+      "bytes": 118987,
+      "sha256": "0d3cb7860a6e4cd7336b7e40aa2b8a4578f4912a311144423e7f554696e4cf20",
+      "integratedLufs": -23.09,
+      "truePeakDbtp": -4.62,
+      "durationMs": 24502
     },
     {
       "persona": "sakana",
@@ -481,11 +481,11 @@
       "sheet": "cloud-reading",
       "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
       "file": "perplexity/cloud-reading.ogg",
-      "bytes": 88515,
-      "sha256": "7b9e726c9ed5639dc9ca0c9bb8d03de4c454e08480de87e4d98a42c23db0e901",
-      "integratedLufs": -23.12,
-      "truePeakDbtp": -3.47,
-      "durationMs": 17959
+      "bytes": 88520,
+      "sha256": "bc9cff125099802ace5d4a55794601d879f9ce6ab363d901ee89a78395d52e1a",
+      "integratedLufs": -23.09,
+      "truePeakDbtp": -1.71,
+      "durationMs": 17829
     },
     {
       "persona": "perplexity",
@@ -505,11 +505,11 @@
       "sheet": "azure-tts",
       "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
       "file": "perplexity/azure-tts.ogg",
-      "bytes": 104217,
-      "sha256": "332bcc576ede11e5e52b9f11cf8e0bdf6b36e2e90b930e018a539cb42e912018",
-      "integratedLufs": -23.03,
-      "truePeakDbtp": -6.01,
-      "durationMs": 21217
+      "bytes": 95778,
+      "sha256": "c89f8fd598bcdd02fbe2c397f9cdbf6e126639f3ea274d8bff44fc52c0e3fcd4",
+      "integratedLufs": -23.1,
+      "truePeakDbtp": -3.06,
+      "durationMs": 19109
     },
     {
       "persona": "glm",
@@ -649,11 +649,11 @@
       "sheet": "azure-tts",
       "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
       "file": "hunyuan/azure-tts.ogg",
-      "bytes": 133092,
-      "sha256": "c6dc8d9c3339bbf3587fc642647643c73cda2785ff05801490714a0c490e2fb4",
-      "integratedLufs": -23.71,
-      "truePeakDbtp": -2.66,
-      "durationMs": 25345
+      "bytes": 127438,
+      "sha256": "e236a7400c3f1614a8984aa78d569779664d4c7124703a21a420a40b0dd8e6a5",
+      "integratedLufs": -23.02,
+      "truePeakDbtp": -3.65,
+      "durationMs": 25114
     },
     {
       "persona": "minimax",
@@ -697,11 +697,11 @@
       "sheet": "azure-tts",
       "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
       "file": "minimax/azure-tts.ogg",
-      "bytes": 120628,
-      "sha256": "9bc364b3e749718ee105d224bd8a772c64e492ba298aef9ac8ef75bb4e1320ae",
-      "integratedLufs": -23.49,
-      "truePeakDbtp": -0.96,
-      "durationMs": 23570
+      "bytes": 121482,
+      "sha256": "41846520be9088fe7f171495b985437532561533a6c5cba1a2535ba895379e66",
+      "integratedLufs": -23.1,
+      "truePeakDbtp": -1.83,
+      "durationMs": 23861
     },
     {
       "persona": "nemotron",
@@ -721,11 +721,11 @@
       "sheet": "cloud-reading",
       "text": "我同意把我在 AI-Sister 輸入的問題交給設定裡選定的 CLI，讓它決定要查哪些本機記憶；AI-Sister 會在本機執行查詢，再把命中的螢幕文字原文、時間、app、視窗標題與網址交回同一支 CLI 作答。永不送出畫面檔；文字裡有什麼就送什麼，不會先遮掉。",
       "file": "nemotron/cloud-reading.ogg",
-      "bytes": 120368,
-      "sha256": "2f35a0c8719f42b3a6215269f423d7cf089fc26c898f6b1711c35c834dd00802",
-      "integratedLufs": -23.02,
-      "truePeakDbtp": -5.21,
-      "durationMs": 23478
+      "bytes": 128705,
+      "sha256": "6c1dd2c924b8034af93d3cebe19a1d55fbd3a5e8798918853a74f32ed3860f1c",
+      "integratedLufs": -23.01,
+      "truePeakDbtp": -4.6,
+      "durationMs": 25284
     },
     {
       "persona": "nemotron",
@@ -733,11 +733,11 @@
       "sheet": "frame-storage",
       "text": "我同意保留變化幀的截圖，而不是只留上面的字。",
       "file": "nemotron/frame-storage.ogg",
-      "bytes": 26021,
-      "sha256": "d6e9cd72273f04ef58bd76d4979495bea8aa3c9bae291490c76255d64053dfa7",
-      "integratedLufs": -22.99,
-      "truePeakDbtp": -3.92,
-      "durationMs": 5068
+      "bytes": 33844,
+      "sha256": "4a731b381497655b5e2e8a0949804dfcc131bc92e95c4ae0f4d22031991a41c4",
+      "integratedLufs": -23.01,
+      "truePeakDbtp": -4.47,
+      "durationMs": 6555
     },
     {
       "persona": "nemotron",
@@ -745,11 +745,11 @@
       "sheet": "azure-tts",
       "text": "我同意在設定裡開啟 Azure 新答案自動朗讀時，每份新答案完成後不再逐次詢問，就把該答案正文原文交給我在設定裡選擇區域的 Microsoft Azure 語音服務並自動播放。正文可能含姓名、電話與金額，不會先遮罩；不會送出截圖、來源連結、memory id、整份資料庫或其他文字。",
       "file": "nemotron/azure-tts.ogg",
-      "bytes": 142611,
-      "sha256": "09c9083934e5c549183c20f2845f95ed168228e4808dbcaa2d03a618c0e9020c",
-      "integratedLufs": -23.01,
-      "truePeakDbtp": -4.67,
-      "durationMs": 27869
+      "bytes": 138854,
+      "sha256": "9c548c405ca1baddab9814933687b857f63f592261aae5bae9e02831409f73c1",
+      "integratedLufs": -23.0,
+      "truePeakDbtp": -4.44,
+      "durationMs": 27204
     },
     {
       "persona": "cohere",
@@ -852,7 +852,7 @@
     "personas": 17,
     "sheetsPerPersona": 4,
     "clips": 68,
-    "oggBytes": 4538740,
-    "durationMs": 898170
+    "oggBytes": 4542053,
+    "durationMs": 899279
   }
 }
