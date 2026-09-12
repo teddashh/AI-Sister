@@ -25,7 +25,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Linux native build headers
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config ffmpeg
 
       - name: Release version — workspaces, locks, Tauri config and tag agree
         shell: bash
@@ -180,6 +180,18 @@ jobs:
 
       - name: Banter must be the exact 17 by 20 local bundle
         run: python3 ./scripts/check-persona-banter-voice-assets.py
+
+      # 上面那三條守的是「檔案沒被換掉」。這一條守的是「聽起來一樣大聲」——
+      # 它把 952 個 Opus 真的解開來重量一次，而那正是使用者聽得到的那個東西。
+      # 需要 ffmpeg，所以裝在上面那一步。
+      - name: Every shipped clip must decode to the same loudness and never clip
+        run: python3 ./scripts/check-persona-voice-loudness.py
+
+      # 每換一次語音包，README／AGENTS／SPEC／PRIVACY 裡那幾個位元組數就一起過期，
+      # 而它們過期是安靜的。這一條要求文件上寫的每一個 bytes 都對得上 repo 自己
+      # 釘住的某一份 manifest（版本區段的歷史數字不掃，那些改掉才會變成假話）。
+      - name: Byte counts in the living docs must match a manifest in this repo
+        run: python3 ./scripts/check-doc-byte-counts.py
 
       # 那顆「忘掉這一段」是這整個程式裡唯一一個不可逆的動作，而它是兩段式的。
       # 帶狀態的按鈕只有兩種壞法，兩種都很安靜：停在紅色的「確定刪掉」（下一下

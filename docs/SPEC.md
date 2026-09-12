@@ -292,7 +292,7 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   兩組角色圖的來源、大小、SHA-256
   與 Apache-2.0 授權排除分開固定在 bundled manifest/NOTICE。17 位角色的日常聲音庫
   也隨 desktop 離線提供；每位基本包 8 句、擴充包 24 句，共 544 段 Ogg Opus。
-  同意書另有每位四張、共 68 段 bundled Ogg、4,535,704 bytes；逐段逐字稿必須等於 core 當下的
+  同意書另有每位四張、共 68 段 bundled Ogg、4,543,148 bytes；逐段逐字稿必須等於 core 當下的
   `Sheet::wording()`，不同就停用，不可用舊錄音念新條文。
   WebView 只從同源 bundled path 播放，CSP 的網路出口仍只有 IPC。
 - 狀態表達（不彈窗）：`idle`（呼吸）／`paused`（閉眼 = capture 停）／
@@ -580,7 +580,7 @@ Azure TTS 的當前答案正文與一般網路 metadata 交給 Microsoft 後，�
 ### 11.8 資料主權（Rewind 的教訓：closed product 的退場 = 記憶滅絕）
 
 **開放資料格式**：SQLite schema 公開文件化、`sister export` 全量匯出。S1 記憶功能、
-17 套角色圖、544 段日常語音與 68 段（4,535,704 bytes）同意書朗讀不依賴我們的伺服器；它們都隨 desktop 安裝。舊 Persona
+17 套角色圖、544 段日常語音與 68 段（4,543,148 bytes）同意書朗讀不依賴我們的伺服器；它們都隨 desktop 安裝。舊 Persona
 素材 pack 的取得仍須使用者明確發起 CDN 下載。就算本專案或 CDN 消失，既有記憶仍可讀、
 匯出，bundled 與已驗本機素材也仍可用。
 素材 cache 固定在 `Config::default_data_dir()/persona-assets-v1`，不隨 `--data-dir`
@@ -870,7 +870,7 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
 | Persona transport | root workspace 的 **`sister-assets`**；預設 feature 集合不含 `download`，desktop 才明確啟用 | API 不接受 renderer 傳入 URL／header／body／persona 或 memory；Persona 的 fixed GET 與 cache contract 見 §11.9 |
 | Azure TTS transport | root workspace 的 **`sister-tts`**；預設 feature 集合不含 `azure`，desktop 才明確啟用 | 預設關閉；第四張 consent、Credential Manager key 與 typed config 齊全時只自動讀最新新答案，另有 trusted replay；三個 fixed region POST、payload、cache 與 cancel 邊界見 §11.10 |
 | Schema | Rust serde DTO + 前端封閉集合檢查 | 沒有 Zod／codegen build step |
-| Persona assets | 17 人本機 catalog + bundled workplace 分層 rig（active-only decode）+ WebP fail-safe（ChatGPT 預設）+ 每人基本 8／擴充 24 的日常語音 + 每人四段同意書朗讀 | 402 張 selected PNG = 35,140,885 bytes；544 段日常 Ogg = 8,918,728 bytes，另有 68 段 consent Ogg；逐檔 pin text/path/bytes/hash/duration/rights；WebView 只從同源 bundled path 播放；recorder/core 保持零網路 |
+| Persona assets | 17 人本機 catalog + bundled workplace 分層 rig（active-only decode）+ WebP fail-safe（ChatGPT 預設）+ 每人基本 8／擴充 24 的日常語音 + 每人四段同意書朗讀 | 402 張 selected PNG = 35,140,885 bytes；544 段日常 Ogg = 8,977,603 bytes，另有 68 段 consent Ogg；逐檔 pin text/path/bytes/hash/duration/rights；WebView 只從同源 bundled path 播放；recorder/core 保持零網路 |
 | hands 元件（Phase 6+） | Agent S3（Apache-2.0）/ UFO²（MIT）/ OmniParser v3 weights（MIT，避開舊 AGPL detector） | 「手」已商品化：用組的，不自己寫 grounding |
 | 參考不引用 | Screenpipe（2026-06 起自訂商業授權，僅參考架構；MIT fork point 在舊版）；Everywhere（BUSL，僅 MCP/API interop） | license 判定見 research/landscape.md |
 

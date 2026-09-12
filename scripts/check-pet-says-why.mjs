@@ -288,11 +288,25 @@ function consentVoiceManifest() {
           .toString(16)
           .padStart(2, "0")}${"a".repeat(60)}`,
         durationMs: 1000 + sheetIndex,
+        integratedLufs: -23.0,
+        truePeakDbtp: -1.2,
       });
     }
   }
   return {
     schema: "ai-sister/persona-consent-voices/v1",
+    // 出貨的 manifest 帶著整平的契約，`consentVoiceLibrary()` 會驗它。
+    // 見 apps/desktop/ui/persona-consent-voices/v1/manifest.json。
+    postProcessing: {
+      loudness: {
+        standard: "EBU R128",
+        targetLufs: -23.0,
+        ceilingDbtp: -1.0,
+        toleranceLu: 0.6,
+        method:
+          "one constant gain per clip; no compression, limiting, or other dynamics processing",
+      },
+    },
     locale: "zh-TW",
     roster: "four-sisters-plus-thirteen-besties",
     engine: {

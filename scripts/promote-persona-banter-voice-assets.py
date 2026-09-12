@@ -163,6 +163,10 @@ def main() -> None:
             ):
                 raise RuntimeError(f"candidate Ogg changed after QC: {key}")
             probe = probe_ogg(source)
+            if not isinstance(checked.get("integratedLufs"), (int, float)) or not isinstance(
+                checked.get("truePeakDbtp"), (int, float)
+            ):
+                raise RuntimeError(f"QC report predates the loudness gate: {key}")
             if abs(probe["durationMs"] - checked["durationMs"]) > 100:
                 raise RuntimeError(f"Ogg/WAV duration mismatch: {key}")
             relative = Path(row["pack"]) / row["persona"] / f"{row['lineId']}.ogg"
@@ -175,12 +179,29 @@ def main() -> None:
                     "file": relative.as_posix(),
                     "bytes": destination.stat().st_size,
                     "sha256": sha256(destination),
+                    # 這一版起，出貨的 manifest 帶著品管量到的響度。這不是裝飾：
+                    # 它是「每一支都對齊過」那句話唯一在 repo 裡查得到的依據，而
+                    # `scripts/check-persona-voice-loudness.py` 會拿真的 Ogg 重量
+                    # 一次去對它——寫在這裡的數字要對得上解出來的聲音。
+                    "integratedLufs": checked["integratedLufs"],
+                    "truePeakDbtp": checked["truePeakDbtp"],
                     **probe,
                 }
             )
 
         manifest = {
             "schema": "ai-sister/persona-banter-voices/v1",
+            # 出貨的音檔在錄音那邊做過什麼。寫進 manifest 而不是只寫在 NOTICE
+            # 裡，是因為「沒有做過壓縮」這種話要有人守得住——閘門讀得到才守得住。
+            "postProcessing": {
+                "loudness": {
+                    "standard": "EBU R128",
+                    "targetLufs": qc["limits"]["targetLufs"],
+                    "ceilingDbtp": qc["limits"]["ceilingDbtp"],
+                    "toleranceLu": qc["limits"]["loudnessTolerance"],
+                    "method": "one constant gain per clip; no compression, limiting, or other dynamics processing",
+                },
+            },
             "locale": "zh-TW",
             "roster": "four-sisters-plus-thirteen-besties",
             "engine": {
@@ -223,6 +244,11 @@ def main() -> None:
             f"The {total} Ogg Opus files in this directory were generated locally with "
             "MediaTek Research's BreezyVoice-300M model. The model and inference code "
             "are available under Apache-2.0.\n\n"
+            "Before they were hash-listed, the clips were levelled in the voice lab: one "
+            "constant gain each to EBU R128 -23 LUFS under a -1 dBTP true-peak "
+            "ceiling, a 3 ms fade at each edge, and a trimmed tail on the clips where "
+            "speech recognition heard words the written line does not contain. No "
+            "compression, limiting, or other dynamics processing was applied.\n\n"
             "The generated persona voice files are excluded from this repository's "
             "Apache-2.0 license. Ted Huang granted AI-Sister permission on 2026-09-12 "
             "to include the exact, unmodified files listed by `manifest.json` in the "

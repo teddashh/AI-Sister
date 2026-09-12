@@ -167,8 +167,51 @@ function normalizeDailyPhrase(value) {
     .trim();
 }
 
+function loudnessBand(raw) {
+  // 出貨前這些錄音在語音實驗室裡整平過（見各包 NOTICE.md）。manifest 要說得出它
+  // 對齊到哪裡，每一支也要帶著自己量到的數字——不然「每隻一樣大聲」只是一句話。
+  // 這裡只收「有人真的量得回來」的欄位：淡入淡出那 3 毫秒在出貨的 Opus 上量不
+  // 回來，所以它留在 NOTICE 的說明裡，不進 manifest。
+  const post = raw?.postProcessing;
+  const band = post?.loudness;
+  if (
+    !hasExactKeys(post, ["loudness"]) ||
+    !hasExactKeys(band, [
+      "standard",
+      "targetLufs",
+      "ceilingDbtp",
+      "toleranceLu",
+      "method",
+    ]) ||
+    band.standard !== "EBU R128" ||
+    !Number.isFinite(band.targetLufs) ||
+    !Number.isFinite(band.ceilingDbtp) ||
+    !Number.isFinite(band.toleranceLu) ||
+    band.toleranceLu <= 0 ||
+    typeof band.method !== "string" ||
+    !band.method.includes("no compression")
+  ) {
+    return null;
+  }
+  return band;
+}
+
+function clipLevelOk(value, band) {
+  // 這裡只擋使用者聽得到的那兩種錯：比別支大聲、以及會削掉。比目標小聲也可能是
+  // 對的（波形自己的峰值先撞到天花板，再推就削），而那個理由在單一張 manifest
+  // 上看不出來——守它的是 scripts/check-persona-voice-loudness.py，那支解得開
+  // 每一個 Opus，也比得了整包。
+  return (
+    Number.isFinite(value?.integratedLufs) &&
+    Number.isFinite(value?.truePeakDbtp) &&
+    value.integratedLufs <= band.targetLufs + band.toleranceLu &&
+    value.truePeakDbtp <= band.ceilingDbtp + 0.1
+  );
+}
+
 function dialogueVoiceLibrary(raw) {
   const empty = Object.freeze({ byPersona: new Map(), exactReplies: new Map() });
+  const band = loudnessBand(raw);
   if (
     !hasExactKeys(raw, [
       "schema",
@@ -181,7 +224,9 @@ function dialogueVoiceLibrary(raw) {
       "packs",
       "clips",
       "totals",
+      "postProcessing",
     ]) ||
+    band === null ||
     raw?.schema !== "ai-sister/persona-voices/v1" ||
     raw?.locale !== "zh-TW" ||
     raw?.roster !== "four-sisters-plus-thirteen-besties" ||
@@ -209,8 +254,8 @@ function dialogueVoiceLibrary(raw) {
     raw?.totals?.baseLinesPerPersona !== 8 ||
     raw?.totals?.extensionLinesPerPersona !== 24 ||
     raw?.totals?.clips !== 544 ||
-    raw?.totals?.oggBytes !== 8918728 ||
-    raw?.totals?.durationMs !== 1780686 ||
+    raw?.totals?.oggBytes !== 8977603 ||
+    raw?.totals?.durationMs !== 1777496 ||
     !Array.isArray(raw?.packs) ||
     raw.packs.length !== 2 ||
     !Array.isArray(raw?.clips)
@@ -258,7 +303,10 @@ function dialogueVoiceLibrary(raw) {
         "bytes",
         "sha256",
         "durationMs",
+        "integratedLufs",
+        "truePeakDbtp",
       ]) ||
+      !clipLevelOk(value, band) ||
       personaLines === undefined ||
       value?.group !== (personaIndex < 4 ? "sister" : "bestie") ||
       allowedLines === undefined ||
@@ -339,6 +387,7 @@ const CONSENT_SHEETS = Object.freeze([
  */
 function consentVoiceLibrary(raw) {
   const empty = Object.freeze({ byPersona: new Map() });
+  const band = loudnessBand(raw);
   if (
     !hasExactKeys(raw, [
       "schema",
@@ -351,7 +400,9 @@ function consentVoiceLibrary(raw) {
       "sheets",
       "clips",
       "totals",
+      "postProcessing",
     ]) ||
+    band === null ||
     raw?.schema !== "ai-sister/persona-consent-voices/v1" ||
     raw?.locale !== "zh-TW" ||
     raw?.roster !== "four-sisters-plus-thirteen-besties" ||
@@ -401,7 +452,10 @@ function consentVoiceLibrary(raw) {
         "bytes",
         "sha256",
         "durationMs",
+        "integratedLufs",
+        "truePeakDbtp",
       ]) ||
+      !clipLevelOk(value, band) ||
       personaSheets === undefined ||
       value?.group !== (personaIndex < 4 ? "sister" : "bestie") ||
       !CONSENT_SHEETS.includes(value?.sheet) ||
@@ -472,6 +526,7 @@ const BANTER_USES = Object.freeze(["avatar-poke", "idle-giggle", "answer-beat"])
 
 function banterVoiceLibrary(raw) {
   const empty = Object.freeze({ byPersona: new Map() });
+  const band = loudnessBand(raw);
   if (
     !hasExactKeys(raw, [
       "schema",
@@ -484,7 +539,9 @@ function banterVoiceLibrary(raw) {
       "pack",
       "clips",
       "totals",
+      "postProcessing",
     ]) ||
+    band === null ||
     raw?.schema !== "ai-sister/persona-banter-voices/v1" ||
     raw?.locale !== "zh-TW" ||
     raw?.roster !== "four-sisters-plus-thirteen-besties" ||
@@ -534,7 +591,10 @@ function banterVoiceLibrary(raw) {
         "bytes",
         "sha256",
         "durationMs",
+        "integratedLufs",
+        "truePeakDbtp",
       ]) ||
+      !clipLevelOk(value, band) ||
       personaLines === undefined ||
       value?.group !== (personaIndex < 4 ? "sister" : "bestie") ||
       value?.pack !== "banter" ||
