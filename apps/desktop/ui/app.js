@@ -171,7 +171,9 @@ function loudnessBand(raw) {
   // 出貨前這些錄音在語音實驗室裡整平過（見各包 NOTICE.md）。manifest 要說得出它
   // 對齊到哪裡，每一支也要帶著自己量到的數字——不然「每隻一樣大聲」只是一句話。
   // 這裡只收「有人真的量得回來」的欄位：淡入淡出那 3 毫秒在出貨的 Opus 上量不
-  // 回來，所以它留在 NOTICE 的說明裡，不進 manifest。
+  // 回來，所以它留在 NOTICE 的說明裡，不進 manifest。alpha.138 切掉的頭尾空白
+  // 同理——出貨的檔上看不出「這一支被切過 130 毫秒」，看得出的只有切完剩多少，
+  // 而守那件事的是 scripts/check-persona-voice-edges.py，不是這裡的欄位。
   const post = raw?.postProcessing;
   const band = post?.loudness;
   if (
@@ -254,8 +256,8 @@ function dialogueVoiceLibrary(raw) {
     raw?.totals?.baseLinesPerPersona !== 8 ||
     raw?.totals?.extensionLinesPerPersona !== 24 ||
     raw?.totals?.clips !== 544 ||
-    raw?.totals?.oggBytes !== 8977603 ||
-    raw?.totals?.durationMs !== 1777496 ||
+    raw?.totals?.oggBytes !== 8920503 ||
+    raw?.totals?.durationMs !== 1762554 ||
     !Array.isArray(raw?.packs) ||
     raw.packs.length !== 2 ||
     !Array.isArray(raw?.clips)

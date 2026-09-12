@@ -187,6 +187,12 @@ jobs:
       - name: Every shipped clip must decode to the same loudness and never clip
         run: python3 ./scripts/check-persona-voice-loudness.py
 
+      # 同一批 Opus，這一條問的是另一件使用者說過的事：「前後文都沒有切乾淨。」
+      # 開口之前、講完之後掛著的房間噪聲，在出貨的檔上量得回來，所以守得住。
+      # 它守不住「切到台詞了」——那要重新轉寫，要 GPU，留在錄音那邊的 QC。
+      - name: No shipped clip may open or close on a long stretch of dead air
+        run: python3 ./scripts/check-persona-voice-edges.py
+
       # 每換一次語音包，README／AGENTS／SPEC／PRIVACY 裡那幾個位元組數就一起過期，
       # 而它們過期是安靜的。這一條要求文件上寫的每一個 bytes 都對得上 repo 自己
       # 釘住的某一份 manifest（版本區段的歷史數字不掃，那些改掉才會變成假話）。
