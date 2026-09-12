@@ -14,15 +14,27 @@
 這支不 pin 常數，改問等式：把 promote 腳本裡那段 NOTICE 常數求值，和出貨的
 .md 逐字比。兩邊一起改是正當的（那就是改文案），只改一邊就會紅。
 
+順帶守第二件事：**repo 裡不准有沒人守的 NOTICE**。數過一次（2026-09-12），
+git 追蹤的出貨 NOTICE 有六份——這三份走上面的等式，另外三份走 sha256 pin
+（icons → check-app-icons.py、reels → check-persona-reel-assets.py、personas →
+check-persona.mjs）。website 那份不在 repo 裡，是 build-website.py 從 personas
+那份 copy2 出去的，跟著 personas 的 pin 走。這份清單寫成註解只會逼人看一眼，
+所以下面直接算：新加一份 NOTICE 而沒有人守，這條就紅。
+
 **它擋不住什麼**（寫在這裡，因為不寫下來我下次會以為它守得比實際多）：
   - NOTICE 裡的句子是不是真的。它只保證「出貨的字＝產地的字」，不保證那些字
     對應到做過的事——那要靠各自的量測（loudness/edges/QC 收據）。
   - 腳本和 .md 一起被改成假話。
-  - 這三包以外的 NOTICE（icon／reel 走 sha256 pin，website 那份沒人守）。
+  - 「有人守」只問得出「有沒有一支 checker 拿它的 sha256 當常數」，問不出那支
+    checker 有沒有真的比對**這個路徑**。實際做過一刀：把 reels 那份 NOTICE
+    原封不動複製到一個新資料夾，這條照樣印綠（7 份都有人守），而沒有任何
+    checker 認得那個新路徑。
 """
 import ast
+import hashlib
 import json
 import pathlib
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -77,6 +89,28 @@ def notice_source(script):
     return found[0]
 
 
+def unguarded_notices():
+    """git 追蹤的每一份 NOTICE.md，要嘛在 PAIRS 裡，要嘛有人拿它的 sha256 當常數。"""
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "*NOTICE.md"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    ).stdout.split("\0")
+    mine = {f"{base}/NOTICE.md" for _, base in PAIRS}
+    checkers = "\n".join(
+        p.read_text(encoding="utf-8", errors="replace")
+        for p in sorted((ROOT / "scripts").iterdir())
+        if p.suffix in (".py", ".mjs", ".js") and p.name != pathlib.Path(__file__).name
+    )
+    out = []
+    for rel in listed:
+        if not rel or rel in mine:
+            continue
+        digest = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
+        if digest not in checkers:
+            out.append(rel)
+    return len(listed) - 1, out
+
+
 def main():
     problems = []
     for script, base in PAIRS:
@@ -101,6 +135,17 @@ def main():
                 break
         else:
             problems.append(f"    行數不同：產地 {want.count(chr(10))} 行、出貨 {got.count(chr(10))} 行")
+
+    try:
+        total, orphans = unguarded_notices()
+    except (subprocess.CalledProcessError, OSError) as exc:
+        problems.append(f"數不出 repo 裡有幾份 NOTICE：{exc}")
+    else:
+        if orphans:
+            problems.append("這幾份 NOTICE 沒有人守——要嘛接上這支閘門，要嘛在某支 checker 裡 pin 它的 sha256：")
+            problems += [f"    {o}" for o in orphans]
+        else:
+            print(f"  ✓ git 追蹤的 {total} 份 NOTICE 都有人守（這三份比產地，其餘 sha256 pin）")
 
     if problems:
         print("\n出貨的 NOTICE 和它自己的產地對不上：", file=sys.stderr)
