@@ -190,6 +190,14 @@ jobs:
       - name: Shipped asset folders may hold nothing but their manifest's files
         run: python3 ./scripts/check-shipped-asset-trees-hold-nothing-else.py
 
+      # 出貨的 NOTICE 是一份權利與隱私聲明，讀它的人只能相信它和產地是同一份
+      # 文字。icon 與 reel 那兩包各自 pin 了 sha256，語音這三包卻只檢查
+      # 「manifest 的 notice 欄位寫著 NOTICE.md」——檔案裡寫什麼都可以。
+      # 這一條把 promote 腳本裡那段文案求值，和出貨的 .md 逐字比：兩邊一起改
+      # 是正當的，只改一邊就會紅。
+      - name: Each voice pack's NOTICE must be exactly what its promote script emits
+        run: python3 ./scripts/check-notice-matches-its-generator.py
+
       # 上面那三條守的是「檔案沒被換掉」。這一條守的是「聽起來一樣大聲」——
       # 它把 952 個 Opus 真的解開來重量一次，而那正是使用者聽得到的那個東西。
       # 需要 ffmpeg，所以裝在上面那一步。
