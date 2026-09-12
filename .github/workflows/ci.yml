@@ -185,9 +185,10 @@ jobs:
       # 「資料夾裡的 Ogg」，看不見不是 Ogg 的東西。實測把 refs.json、一支 .wav
       # 和一份 QC 收據丟進那三個資料夾，六條檢查全部照樣印綠，而它們在
       # `git status` 裡是 untracked：一次 `git add -A` 就進 public repo 了。
-      # 這一條列舉整棵樹，只准 Ogg（照 manifest）＋兩份 manifest＋NOTICE.md。
-      - name: The shipped voice folders may hold nothing but Ogg, manifests and NOTICE
-        run: python3 ./scripts/check-persona-voice-tree-is-only-ogg.py
+      # 拿同一把刀試過每一棵兄弟樹：reels 和 icons 各自那條抓得到，personas
+      # 抓不到。這一條列舉那四棵沒人守的樹，只准 manifest 自己列的檔案＋說明檔。
+      - name: Shipped asset folders may hold nothing but their manifest's files
+        run: python3 ./scripts/check-shipped-asset-trees-hold-nothing-else.py
 
       # 上面那三條守的是「檔案沒被換掉」。這一條守的是「聽起來一樣大聲」——
       # 它把 952 個 Opus 真的解開來重量一次，而那正是使用者聽得到的那個東西。
