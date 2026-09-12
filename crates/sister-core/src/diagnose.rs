@@ -1723,6 +1723,19 @@ fn render_head(s: &Snapshot) -> String {
                     stamp(check.covers_from),
                 ));
             }
+            /* 欄寬從最長的標籤算，不寫死。
+             *
+             * 上一版寫死 24，而「捲得到（0 就是沒被切掉）」剛好就是 24 格——
+             * `pad` 於是一個空白都補不上，那一行印出來是「…被切掉）0.0」。
+             * 一個寫死的寬度會被下一個標籤再撞一次，而撞到的樣子是「值黏在字
+             * 上」，不是編譯錯誤。 */
+            let widest = check
+                .items
+                .iter()
+                .flat_map(|item| item.measured.iter())
+                .map(|measure| cells(&measure.label))
+                .max()
+                .unwrap_or(0);
             for item in &check.items {
                 o.push_str(&format!(
                     "  {} 第 {} 項　{}　{}\n",
@@ -1734,7 +1747,7 @@ fn render_head(s: &Snapshot) -> String {
                 for measure in &item.measured {
                     o.push_str(&format!(
                         "      {}{}\n",
-                        pad(&measure.label, 24),
+                        pad(&measure.label, widest + 2),
                         measure.value.say()
                     ));
                 }
@@ -2971,6 +2984,62 @@ mod notebook_tests {
             Verdict::NotMeasured,
             "什麼都沒滾掉、開機那一則卻沒帶出那一槓＝那支量測沒跑"
         );
+    }
+
+    /// 自檢每一列的值都要和標籤隔開。
+    ///
+    /// 上一版欄寬寫死 24，而「捲得到（0 就是沒被切掉）」**剛好就是 24 格**，
+    /// 於是 `pad` 一個空白都補不上，那一行印出來是「…被切掉）0.0」。一個寫死
+    /// 的寬度會被下一個標籤再撞一次，而撞到的樣子是值黏在字上，不是編譯錯誤。
+    /// 所以這裡不釘那一個標籤，整節每一列都量。
+    #[test]
+    fn every_self_check_row_keeps_its_value_off_the_label() {
+        let mut book = Notebook::new();
+        book.note(started());
+        book.note(persona());
+        book.note(Note::Bar {
+            at: 1_789_222_000_000,
+            open: false,
+            dragbar_hidden: true,
+        });
+        book.note(poke(1_789_222_100_000, true, Some("tap-aiyo")));
+        book.note(skipped(1_789_222_260_000, "typing"));
+        book.note(Note::Answered {
+            at: 1_789_222_700_000,
+            question_chars: 9,
+            took_ms: 2_780,
+            sentences: vec!["她的答案".to_string()],
+            sources: vec![],
+        });
+        // ⑤ 那幾列只有量到氣泡才印得出來，而最長的標籤就在那裡面。
+        book.note(Note::Bubble {
+            at: 1_789_222_700_100,
+            bubble_h: 182.0,
+            bubble_bottom: 431.0,
+            content_h: 207.0,
+            client_h: 207.0,
+            can_scroll_to: 0.0,
+            scrollbar_px: 0.0,
+            window_h: 560.0,
+        });
+        let report = reported(&book);
+
+        let rows: Vec<&str> = report
+            .lines()
+            .filter(|line| line.starts_with("      ") && !line.starts_with("       "))
+            .collect();
+        assert!(
+            rows.len() >= 20,
+            "只抓到 {} 列，自檢那一節沒印出來——這條測試在空跑：\n{report}",
+            rows.len()
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("捲得到")),
+            "最長那個標籤不在裡面，這條測試沒量到它要量的東西：\n{report}"
+        );
+        for row in rows {
+            assert!(row.trim_start().contains("  "), "值黏在標籤上了：{row:?}");
+        }
     }
 
     /// 「笑了 0 次」要說得出是哪一種 0。
