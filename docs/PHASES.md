@@ -90,7 +90,9 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   stop 先停播放並歸還 native presentation lease，晚回來的 admission 或 audio 不得復活。
 - **權利與生成來源隨素材固定**：正式樹只收最終 Ogg、manifest 與 NOTICE；WAV、reference、
   模型 cache、QC 工作檔與 private receipt 都留在 voice-lab 外。發布前 544 段全部通過格式、
-  音量、長度、雙 ASR 與 speaker-identity QC，CI 再驗 shipped bytes/hash/inventory。
+  響度、長度、雙 ASR 與 speaker-identity QC，CI 再驗 shipped bytes/hash/inventory。alpha.137
+  起響度那一關量的是**解出來的 Opus**（EBU R128，−23 LUFS／−1 dBTP，不做壓縮或限幅），
+  manifest 逐段帶著量到的值，CI 把每一段重新解碼對回去。
 - **同意書朗讀是另一份原子素材**：17 位角色各四段，共 68 段 bundled Ogg；不併入 544 段
   日常 trigger。逐字稿必須等於 native `Sheet::wording()`，整份 manifest 驗過才可由當張
   「念給我聽」的 trusted click 播放；開場不 autoplay，條文改版而錄音未換時保持靜音。
