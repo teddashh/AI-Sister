@@ -218,7 +218,10 @@ minimax  同意書「我同意在設定裡開啟 Azure⋯」  W10/B2 → W5/B6
 
 **七、這一版動到的檔案。**
 
-8 支 `.ogg`、互動短句那包的 manifest 與 `manifest.js`、三份 NOTICE.md。
+出貨的語音資產：8 支 `.ogg`、互動短句那包的 manifest 與 `manifest.js`、三份
+NOTICE.md——比對過，git 說變了哪 8 支 `.ogg`，就是重骰收下的那 8 支，完全相同。
+其餘都在 repo 內部：三支 promote 腳本（NOTICE 的模板在那裡）、`docs/PHASES.md`、
+這份 release notes，以及版號那 17 個位置。**產品的程式碼一行都沒動。**
 
 ```text
 固定台詞   8,895,060 bytes（不變，544 支）
