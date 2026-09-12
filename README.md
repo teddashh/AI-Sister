@@ -245,20 +245,26 @@ Apache-2.0 程式碼授權；由 ChatGPT preview 衍生的五個應用程式圖�
 
 本機角色語音也隨 desktop 一起安裝：17 位角色各有基本包 8 句、擴充包 24 句，
 合計 **544 段 Ogg Opus、8,895,060 bytes**；另有每位四張、合計
-**68 段同意書朗讀、4,542,053 bytes**。
-目前只有使用者點角色時會播放該角色的
-固定台詞；輸入框送出的短句與一般問題一樣，全部交給已選 CLI 與本機記憶路徑，
-不用固定台詞繞過大腦或冒充動態答案。
+**68 段同意書朗讀、4,542,053 bytes**；再加每位 20 句、合計
+**340 段閒話短句、2,249,872 bytes**。
+輸入框送出的短句與一般問題一樣，全部交給已選 CLI 與本機記憶路徑，
+不用固定台詞繞過大腦或冒充動態答案；閒話也不進答案，它不算回答、不引用出處。
 
-聲音預設關閉。只有你按下角色才會播放固定角色台詞，不因開場、輪詢、輸入文字、
-錄製或記憶事件自己開口；同意書也只有你在當張條文上按「念給我聽」才播放目前角色的
-bundled 錄音，不會 autoplay。錄音逐字稿若與 native 當下條文不同，該段直接停用。
+聲音預設關閉。固定角色台詞只有你按下角色才會播放。alpha.132 起多了一包閒話，
+**那是唯一一條不必先被點到就會出聲的路**，而且只有兩個出口：沒事的時候自己笑一下
+（隨機 2–5 分鐘，而且要視窗看得見、她不在忙、沒有暫停、你沒有正在打字），以及答案
+落地那一刻的一聲墊話（Azure 朗讀開著時不出，兩個聲音疊起來兩個都聽不清）。開場、
+輪詢、錄製與記憶事件仍然不會讓她開口；全停與關掉角色兩個出口都擋，關掉固定台詞
+只擋自己笑那一個，答案墊話跟著聲音開關走。聲音關著的時候她仍然會把自己笑的那一句
+用文字放在旁邊六秒——那是畫面不是聲音。同意書則只有你在當張條文上按「念給我聽」
+才播放目前角色的 bundled 錄音，不會 autoplay。錄音逐字稿若與 native 當下條文不同，該段直接停用。
 這些固定角色語音不連網、不叫 CLI，也不借系統 voice。動態答案下方
 的「用本機聲音朗讀」仍由使用者另外按下，並只接受 WebView 明確回報
 `localService = true` 的繁中／中文系統 voice。
 語音來源、逐檔 hash、權利範圍與完整 inventory 在
-`apps/desktop/ui/persona-voices/v1/{manifest.json,NOTICE.md}` 與
-`apps/desktop/ui/persona-consent-voices/v1/{manifest.json,NOTICE.md}`。
+`apps/desktop/ui/persona-voices/v1/{manifest.json,NOTICE.md}`、
+`apps/desktop/ui/persona-consent-voices/v1/{manifest.json,NOTICE.md}` 與
+`apps/desktop/ui/persona-banter-voices/v1/{manifest.json,NOTICE.md}`。
 
 alpha.110 的 Azure 繁中朗讀仍然**可選而且預設關閉**；它不是本機 voice 的自動
 fallback，本機找不到聲音時仍靜音，Azure 失敗時也不自動改走另一條。啟用 Azure、
