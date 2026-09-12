@@ -435,10 +435,20 @@ async function open(
          * 「做完這個動作，`calls` 該是空的」——把一條純觀測混進同一條清單，會讓
          * 那些契約在產品行為一個字都沒變的情況下變紅。
          *
-         * 記到另一條清單上，不是丟掉：`diagnoseNotes` 自己有斷言，所以「濾掉」
-         * 不會變成「沒人看」。 */
+         * 記到另一條清單上，不是丟掉。上一版這裡寫著「`diagnoseNotes` 自己有
+         * 斷言」——**那句話在這個檔案裡是假的**：這支從頭到尾沒有一行讀它，所
+         * 以「濾掉」在這一輪真的就是「沒人看」。守它的三道各在別處：
+         *
+         *   1. `check-persona.mjs` ⑨——執行期真的送出去的每一則，形狀和內容。
+         *   2. `scripts/check-diagnose-carries-no-text.py`——`Note` 的型別，
+         *      不看夾具，所以夾具產不出來的種類也蓋得到。
+         *   3. 底下那一條——這一支自己的接線還活著。
+         *
+         * 第三條要留著：前兩道證明得了「送出去的東西乾淨」，證明不了「這一條
+         * 路在這個夾具上還通」，而那正是這幾行過濾隨手就會弄斷的東西。 */
         if (cmd === "diagnose_note") {
           diagnoseNotes.push(arg?.note);
+          everyDiagnoseNote.push(arg?.note);
           return;
         }
         calls.push(cmd);
@@ -564,6 +574,9 @@ async function open(
 }
 
 let failed = 0;
+/** 這一輪所有夾具送出去的診斷觀測，不分是哪一個 view。 */
+const everyDiagnoseNote = [];
+
 function check(name, ok, detail) {
   console.log(`  ${ok ? "✔" : "✗"} ${name}`);
   if (!ok) {
@@ -3814,6 +3827,17 @@ console.log("87. 圖示不靠字型，拖她的時候不會順便讓她說話");
 // 30 reply）且時長與位元組對得上，湊不齊就回空的，於是「拖她不會說話」會變成
 // 兩個空字串相等的假綠。要加拖曳的行為斷言就去 `check-persona.mjs`，那邊的
 // `persona("chatgpt")` 本來就有真台詞。上面第 87 節守的是接線還在。
+
+/* 上面那幾行把 `diagnose_note` 從 `calls` 濾掉了。濾掉和刪掉偵測器只差一步，
+ * 所以這裡量一次那條路還在：實測這一輪會經過 started／persona／bar／answered
+ * 四種。只斷言「有東西」不夠——四種裡剩一種也是「有東西」。 */
+check(
+  "診斷觀測那條路沒有被過濾掉",
+  ["started", "persona", "bar", "answered"].every((kind) =>
+    everyDiagnoseNote.some((note) => note?.kind === kind),
+  ),
+  [...new Set(everyDiagnoseNote.map((note) => note?.kind))].sort(),
+);
 
 console.log("");
 if (failed > 0) {

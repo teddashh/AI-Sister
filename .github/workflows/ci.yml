@@ -107,6 +107,13 @@ jobs:
       - name: Privacy — the keyboard hook must never read what was typed
         run: python3 ./scripts/check-no-keylogging.py
 
+      # 診斷報告自己寫著「這條線以上沒有一個字是螢幕上的內容，理由是每一格能
+      # 放的東西都在型別裡寫死了」。守那句話的是這一支：它看 `Note` 的型別，
+      # 不看夾具。既有那道 JS 機械掃描只看得到夾具真的產生過的種類——八種裡它
+      # 看得到七種，`bubble` 那一種一則都到不了它手上。
+      - name: Privacy — the diagnostic report cannot carry what is on screen
+        run: python3 ./scripts/check-diagnose-carries-no-text.py
+
       # 設定頁按下「儲存」之後有沒有說話。從這一頁出生到 alpha.37 為止，
       # 每一句「存好了」都在幾毫秒後被自己的重讀抹成空白——而失敗那條路
       # 好好的，所以症狀是「存壞了會說話，存好了什麼都不說」。
