@@ -776,11 +776,11 @@
       "use": "idle-giggle",
       "text": "呵，沒事。",
       "file": "banter/gemini/giggle-nothing.ogg",
-      "bytes": 5195,
-      "sha256": "a8afb842ae4bad8f0324f559f92ac633d3947b07ec38067fca52ec3d381bb993",
-      "integratedLufs": -23.23,
-      "truePeakDbtp": -10.81,
-      "durationMs": 982
+      "bytes": 6367,
+      "sha256": "1d9aeca232a43d4a4f2da64f5a3e69bb3c39fd494601b98a19161b91b4d3ea04",
+      "integratedLufs": -23.04,
+      "truePeakDbtp": -2.35,
+      "durationMs": 1272
     },
     {
       "persona": "gemini",
@@ -1868,11 +1868,11 @@
       "use": "idle-giggle",
       "text": "嘻嘻，我自己笑的。",
       "file": "banter/mistral/giggle-hihi.ogg",
-      "bytes": 8701,
-      "sha256": "3b07b8b651df5ebca6070915d5e9efb44377c00f1c45f91779fbb599aeb68f14",
-      "integratedLufs": -22.95,
-      "truePeakDbtp": -4.39,
-      "durationMs": 1667
+      "bytes": 9024,
+      "sha256": "a39f4499a4f1d1026de1c78ca58a605a3727986fc68fc3bfe072a41f49811821",
+      "integratedLufs": -23.22,
+      "truePeakDbtp": -7.35,
+      "durationMs": 1748
     },
     {
       "persona": "mistral",
@@ -2568,11 +2568,11 @@
       "use": "avatar-poke",
       "text": "煩耶。",
       "file": "banter/perplexity/poke-annoying.ogg",
-      "bytes": 3915,
-      "sha256": "431693690f4aba1bb05ff4b906a9adcf0d30820943e0ef0f7ddd218ad681298c",
-      "integratedLufs": -23.41,
-      "truePeakDbtp": -1.37,
-      "durationMs": 738
+      "bytes": 3220,
+      "sha256": "d10fe93922431b28189e6539d78572812737da1539df729f2f2925f03f97d6d9",
+      "integratedLufs": -23.19,
+      "truePeakDbtp": -5.36,
+      "durationMs": 616
     },
     {
       "persona": "perplexity",
@@ -2638,11 +2638,11 @@
       "use": "avatar-poke",
       "text": "我在啦。",
       "file": "banter/perplexity/poke-here.ogg",
-      "bytes": 4458,
-      "sha256": "20c69bf1363151f3449188460868c7658671f9aaa7a0ae3900e01dee59217068",
-      "integratedLufs": -23.17,
-      "truePeakDbtp": -5.49,
-      "durationMs": 842
+      "bytes": 3917,
+      "sha256": "cdcab604d79b1c8a3c939173c009f40e79f3a5fe871ae1dc2017671784a879e5",
+      "integratedLufs": -23.15,
+      "truePeakDbtp": -5.31,
+      "durationMs": 703
     },
     {
       "persona": "perplexity",
@@ -3982,11 +3982,11 @@
       "use": "avatar-poke",
       "text": "幹嘛啦。",
       "file": "banter/nemotron/poke-what.ogg",
-      "bytes": 6880,
-      "sha256": "8e564ee294fcf65e45c802e9440ee064b9df59094fcf9749b445da6559a7892f",
-      "integratedLufs": -23.03,
-      "truePeakDbtp": -6.67,
-      "durationMs": 1353
+      "bytes": 6524,
+      "sha256": "af17071a739c10556956a3ad5656f5068076ce250ad774c2312a82907ea1490c",
+      "integratedLufs": -23.22,
+      "truePeakDbtp": -7.69,
+      "durationMs": 1226
     },
     {
       "persona": "nemotron",
@@ -4136,11 +4136,11 @@
       "use": "idle-giggle",
       "text": "呵，沒事。",
       "file": "banter/nemotron/giggle-nothing.ogg",
-      "bytes": 6227,
-      "sha256": "7fc68fece933110d5600e065144589eb4eeefa5faa8a19e9022cdf5cd5dcf75d",
-      "integratedLufs": -22.99,
-      "truePeakDbtp": -7.06,
-      "durationMs": 1144
+      "bytes": 6533,
+      "sha256": "fd69049d73689f83b654141c9efcb256415bd6f50507cc1441841c45c6325c14",
+      "integratedLufs": -23.05,
+      "truePeakDbtp": -4.96,
+      "durationMs": 1214
     },
     {
       "persona": "nemotron",
@@ -4430,11 +4430,11 @@
       "use": "idle-giggle",
       "text": "噗。好啦。",
       "file": "banter/cohere/giggle-pff.ogg",
-      "bytes": 8994,
-      "sha256": "b3fa3988fbe9c2d92629579ed41d30973eb82c4be3145db6f0ae580633e660b3",
-      "integratedLufs": -23.15,
-      "truePeakDbtp": -3.45,
-      "durationMs": 1794
+      "bytes": 8883,
+      "sha256": "9086289e16f96987985281e0a16a65b34d5e08f4ed4e859b24f43d21319b5dfe",
+      "integratedLufs": -23.12,
+      "truePeakDbtp": -4.42,
+      "durationMs": 1713
     },
     {
       "persona": "cohere",
@@ -4556,11 +4556,11 @@
       "use": "avatar-poke",
       "text": "欸，會癢。",
       "file": "banter/mimo/poke-itch.ogg",
-      "bytes": 4433,
-      "sha256": "8715f751cda7dc6793107d0442cd3f8ec7a9bf8d16e00c00fedd23316dec0139",
-      "integratedLufs": -23.08,
-      "truePeakDbtp": -7.53,
-      "durationMs": 854
+      "bytes": 4586,
+      "sha256": "53d5d7f2bdb2ef67b09586e4fa8a9200f64c0db649367c0e016bc77d36b9529a",
+      "integratedLufs": -23.09,
+      "truePeakDbtp": -5.06,
+      "durationMs": 877
     },
     {
       "persona": "mimo",
@@ -4791,7 +4791,7 @@
     "personas": 17,
     "linesPerPersona": 20,
     "clips": 340,
-    "oggBytes": 2249621,
-    "durationMs": 438483
+    "oggBytes": 2249872,
+    "durationMs": 438478
   }
 }
