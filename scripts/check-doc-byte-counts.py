@@ -16,10 +16,25 @@ AGENTS、SPEC、PRIVACY 六個地方——我是靠 `grep` 一個一個找出來
 改一個字（`8,895,060` → `8,895,068`）也紅。（alpha.138 和 alpha.139 各換過一次
 語音包，兩次都重打了同樣的三刀，數字換成當版的，結果一樣。）
 
-擋不住的（打過一刀 `want=綠` 確認過，不是猜的）：**張冠李戴**。把語音包的
-`8,895,060` 換成 persona-reels 裡的 `1,431,301`，這一條照樣綠——它只問「這個數字
-在 repo 裡存不存在」，不問「它屬不屬於這一包」。要守後者得知道每一句話講的是哪
-一包，而那是散文，這裡讀不出來。另外整句話被刪掉也擋不住（不會留下數字可以查）。
+**2026-09-12：張冠李戴那個洞補上了。** 舊版檔頭寫著它擋不住——把語音包的
+`8,895,060` 換成 persona-reels 裡的 `1,431,301` 照樣綠，因為它只問「這個數字在
+repo 裡存不存在」。當時的理由是「要知道每一句話講的是哪一包，而那是散文」。
+散文其實讀得出來：每個數字旁邊都寫著它是哪一包（「同意書」「閒話」「日常」
+「PNG」「WebP」「app icon」「ZIP」）。所以第二層改問**這個數字有沒有被那一包
+自己的 manifest 釘住**。
+
+配對法是「離數字最近的那個包名」，前後都找，但兩邊的邊界不一樣：
+往前找到 `；。|：` 為止（同一句話裡的前一段還算數），往後只找到 `，；。|：`
+為止（後面的包名只有在緊貼著數字時才算，例如「68 段（4,542,053 bytes）同意書
+朗讀」）。距離量的是**包名結尾到數字的空隙**，不是包名開頭——量開頭會讓
+「consent Ogg（4,542,053」輸給後面十個字外的「banter」。實測 23 個數字全部
+配對成功、零錯配。
+
+配不到包名的數字直接紅，不退回舊的寬鬆比對：退回去等於這一層可以被一句沒寫
+包名的話繞過，而繞過的時候沒有人會知道。新的一類資產要在 `PACKS` 加一行。
+
+還是擋不住的：整句話被刪掉（不會留下數字可以查）；以及同一包內部張冠李戴
+（把 `oggBytes` 寫成某一支 clip 的 `bytes`，兩個都由同一份 manifest 釘著）。
 """
 
 from __future__ import annotations
@@ -41,6 +56,47 @@ DOCS = ("README.md", "AGENTS.md", "docs/SPEC.md", "docs/PRIVACY.md")
 
 FIGURE = re.compile(r"([\d,]{7,})\s*bytes")
 BYTES_KEY = re.compile(r"bytes$", re.IGNORECASE)
+
+# 每個數字旁邊都寫著它是哪一包。左邊是散文裡會出現的說法，右邊是有資格釘住
+# 這個數字的來源路徑前綴。
+PACKS = (
+    ("同意書朗讀", ("同意書", "consent"), "apps/desktop/ui/persona-consent-voices/"),
+    ("閒話短句", ("閒話", "banter"), "apps/desktop/ui/persona-banter-voices/"),
+    ("日常台詞", ("日常", "基本包", "基本語音"), "apps/desktop/ui/persona-voices/"),
+    ("角色 reel", ("PNG", "rig", "reel", "Reel"), "apps/desktop/ui/persona-reels/"),
+    ("WebP 退路", ("WebP",), "apps/desktop/ui/personas/"),
+    ("app icon", ("app icon", "icons"), "apps/desktop/src-tauri/icons/"),
+    ("下載包 ZIP", ("ZIP", "cdn.ted-h.com", "entries"), "crates/sister-assets/tests/fixtures/"),
+)
+BACK_DELIM = "；。|："
+FORWARD_DELIM = "，；。|："
+CLAUSE_MAX = 160
+
+
+def whose_number(flat: str, start: int, end: int) -> tuple[str, str] | None:
+    """離這個數字最近的那個包名。回 (包名, 來源路徑前綴)，找不到回 None。"""
+    lo = start
+    while lo > 0 and start - lo < CLAUSE_MAX and flat[lo - 1] not in BACK_DELIM:
+        lo -= 1
+    hi = end
+    while hi < len(flat) and hi - end < CLAUSE_MAX and flat[hi] not in FORWARD_DELIM:
+        hi += 1
+    back, forward = flat[lo:start], flat[end:hi]
+
+    best: tuple[int, str, str] | None = None
+    for label, words, prefix in PACKS:
+        for word in words:
+            at = back.rfind(word)
+            # 量的是包名**結尾**到數字的空隙。量開頭會讓「consent Ogg（4,542,053」
+            # 輸給十個字以外的「banter」，那正好是 SPEC 那一列的形狀。
+            if at >= 0:
+                gap = len(back) - (at + len(word))
+                if best is None or gap < best[0]:
+                    best = (gap, label, prefix)
+            at = forward.find(word)
+            if at >= 0 and (best is None or at < best[0]):
+                best = (at, label, prefix)
+    return None if best is None else (best[1], best[2])
 
 
 def pinned_values() -> dict[int, list[str]]:
@@ -74,19 +130,38 @@ def main() -> int:
 
     problems: list[str] = []
     checked = 0
+    per_pack: dict[str, int] = {}
     for name in DOCS:
-        path = ROOT / name
-        for number, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
-            for match in FIGURE.finditer(line):
-                checked += 1
-                value = int(match.group(1).replace(",", ""))
-                if value not in pins:
-                    problems.append(
-                        f"{name}:{number} 寫的 {match.group(1)} bytes 不是 repo 裡任何一份"
-                        f" manifest 釘住的值——它多半是上一版的數字")
+        text = (ROOT / name).read_text(encoding="utf-8")
+        # 文件會折行，同一句話常常跨兩行；配對包名要看整句，所以攤平之後再找，
+        # 行號另外由前面有幾個換行算回來。
+        flat = text.replace("\n", " ")
+        for match in FIGURE.finditer(flat):
+            checked += 1
+            number = text.count("\n", 0, match.start()) + 1
+            value = int(match.group(1).replace(",", ""))
+            if value not in pins:
+                problems.append(
+                    f"{name}:{number} 寫的 {match.group(1)} bytes 不是 repo 裡任何一份"
+                    f" manifest 釘住的值——它多半是上一版的數字")
+                continue
+            owner = whose_number(flat, match.start(), match.end())
+            if owner is None:
+                problems.append(
+                    f"{name}:{number} 的 {match.group(1)} bytes 附近沒有寫是哪一包——"
+                    f"這一條就沒辦法確認它沒有張冠李戴。句子裡寫上包名，或在 PACKS 加一行")
+                continue
+            label, prefix = owner
+            per_pack[label] = per_pack.get(label, 0) + 1
+            if not any(src.startswith(prefix) for src in pins[value]):
+                problems.append(
+                    f"{name}:{number} 的 {match.group(1)} bytes 講的是「{label}」，"
+                    f"但釘住這個數字的是 {sorted(pins[value])}——張冠李戴")
 
     print(f"對了 {checked} 個 bytes 數字，來源是 {len(PIN_SOURCES)} 份 manifest／fixture "
           f"裡的 {len(pins)} 個值。")
+    if per_pack:
+        print("  各包：" + "、".join(f"{k} {v}" for k, v in sorted(per_pack.items())))
     if problems:
         print(f"\n✗ {len(problems)} 個對不上：")
         for line in problems:
