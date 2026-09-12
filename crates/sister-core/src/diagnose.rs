@@ -380,6 +380,12 @@ pub enum Verdict {
     /// 「她講話像不像朋友」沒有一個數字答得出來，而**硬給一個 ✓ 比留白更糟**
     /// ——它會讓讀的人以為有人驗過了。
     CantJudge,
+    /// 條件到了，可是量測本身沒跑起來。
+    ///
+    /// 和 [`Verdict::NotSeen`] 差在他該做什麼：「沒發生過」是叫他再多玩一
+    /// 下，「沒跑起來」是叫我去修。兩個都印成空白的話，看報告的人只會做前
+    /// 面那件事，而錯的是後面那件。
+    NotMeasured,
 }
 
 impl Verdict {
@@ -389,6 +395,7 @@ impl Verdict {
             Verdict::Off => "✗",
             Verdict::NotSeen => "－",
             Verdict::CantJudge => "？",
+            Verdict::NotMeasured => "！",
         }
     }
 
@@ -398,6 +405,7 @@ impl Verdict {
             Verdict::Off => "不對",
             Verdict::NotSeen => "這一輪沒發生過，量不到",
             Verdict::CantJudge => "機器判不了，答案原文在線下面 ⑤，你自己看",
+            Verdict::NotMeasured => "該量到卻沒量到——不是這一輪沒發生，是這一格量不出來",
         }
     }
 }
@@ -971,7 +979,17 @@ impl Notebook {
                 ),
             ],
             verdict: if bars.is_empty() {
-                Verdict::NotSeen
+                /* 開機那一段一定會送一則（`noteTheChromeBar()` 就排在 `started`
+                 * 後面兩行），所以「這一輪開過機、卻一則都沒有」＝那支量測沒
+                 * 跑起來，不是他還沒去翻那一槓。
+                 *
+                 * 但簿子擠掉過就不能這樣講：開機那一則存在欄位裡不會被擠，那
+                 * 一槓的卻會。分不出來的時候講回「沒量到」，不要指控。 */
+                if self.started_at.is_some() && self.dropped == 0 {
+                    Verdict::NotMeasured
+                } else {
+                    Verdict::NotSeen
+                }
             } else if closed_but_showing > 0 {
                 Verdict::Off
             } else {
@@ -1083,8 +1101,25 @@ impl Notebook {
             )),
             _ => None,
         });
+        let answered = self.answers().len();
         let (measured, verdict) = match bubble {
-            None => (Vec::new(), Verdict::NotSeen),
+            // 一題都沒問過，這一格本來就沒東西可量。
+            None if answered == 0 => (Vec::new(), Verdict::NotSeen),
+            /* 問過題卻一次都沒量到，那不是「沒發生」：氣泡跟著答案出現，而答
+             * 案就在這本簿子裡。兩種成因，兩種都要他去看一眼：
+             *
+             * 一是畫面上根本沒有 `.answer-bubble`——那就是他第五件事本人壞了。
+             * 二是量測自己沒跑起來：`noteTheBubble` 排在 `requestAnimationFrame`
+             * 上，而 `observation()` 會把它丟出來的例外吞掉（不吞的話，會連答
+             * 案落地那一聲和整段朗讀一起帶走）。吞掉的代價就是這一格靜靜地空
+             * 著。所以那句話只講「量不出來」，不替它挑成因。
+             *
+             * 滾掉不會造成這一格說謊：簿子從最舊的那一頭擠，而氣泡那一則永遠
+             * 排在它那一題的後面——答案還在，它就還在。 */
+            None => (
+                vec![m("答過幾題", MeasureValue::Int(answered as i64))],
+                Verdict::NotMeasured,
+            ),
             Some((h, bottom, content, client, scroll, bar, window)) => (
                 vec![
                     m("氣泡高", MeasureValue::Num(h)),
@@ -2559,16 +2594,34 @@ mod notebook_tests {
     /// 這一輪沒發生過的事，要印「沒量」，不可以印成 ✓。
     ///
     /// 這是這份自檢最容易犯的錯：七格全綠，而其中五格根本沒有樣本。
+    ///
+    /// 「沒量」還分兩種，而分法決定他該做什麼：② ③ ④ ⑥ 是「你還沒去做那件
+    /// 事」，多玩一下就有了；① 是「開機一定會送一則那一槓的觀測，一則都沒有
+    /// ＝那一格量不出來」，那要我去修。⑤ 兩種都可能，看他問過題沒有——這裡
+    /// 一題都沒問，所以是前者。
     #[test]
     fn nothing_observed_is_not_the_same_as_nothing_wrong() {
         let book = book(vec![started()]);
-        for number in [1, 2, 3, 4, 5, 6] {
+        // 原本那條斷言就是這一句：沒有樣本，一格都不准是 ✓。
+        for number in [1, 2, 3, 4, 5, 6, 7] {
+            assert_ne!(
+                item(&book, number).verdict,
+                Verdict::AsAsked,
+                "第 {number} 項沒有樣本卻印成 ✓"
+            );
+        }
+        for number in [2, 3, 4, 5, 6] {
             assert_eq!(
                 item(&book, number).verdict,
                 Verdict::NotSeen,
-                "第 {number} 項沒有樣本卻不是「沒量」"
+                "第 {number} 項沒有樣本，要說「這一輪沒發生過」"
             );
         }
+        assert_eq!(
+            item(&book, 1).verdict,
+            Verdict::NotMeasured,
+            "開機一定會送一則那一槓的觀測，一則都沒有不是他沒去翻"
+        );
         // 第 7 項永遠是「機器判不了」——它沒有一個數字答得出來。
         assert_eq!(item(&book, 7).verdict, Verdict::CantJudge);
     }
@@ -2847,6 +2900,77 @@ mod notebook_tests {
         let mut snapshot = tests::snapshot();
         book.fill(&mut snapshot, 1_789_225_320_000);
         render(&snapshot)
+    }
+
+    /// 他問過題，第五格卻一次都沒量到——那不是「沒發生」。
+    ///
+    /// 氣泡是跟著答案出現的，答案就在同一本簿子裡。所以這一格空著只有兩種
+    /// 成因，兩種都要有人去看：畫面上根本沒有那個氣泡（他第五件事本人壞
+    /// 了），或者量測被 `observation()` 吞掉的例外擋住了。印成「這一輪沒發生
+    /// 過」的話，他讀到的是「多玩一下就有了」，而那是錯的建議。
+    #[test]
+    fn a_bubble_that_was_never_measured_is_not_a_bubble_that_never_happened() {
+        let answered_only = book(vec![Note::Answered {
+            at: 1_789_222_100_000,
+            question_chars: 12,
+            took_ms: 1_200,
+            sentences: vec!["她講的話".to_string()],
+            sources: vec![],
+        }]);
+        let fifth = item(&answered_only, 5);
+        assert_eq!(
+            fifth.verdict,
+            Verdict::NotMeasured,
+            "答過題卻沒量到氣泡，不可以說成「這一輪沒發生過」"
+        );
+        assert_eq!(
+            value(&fifth, "答過幾題"),
+            MeasureValue::Int(1),
+            "要說得出「該量到幾次」，不然他不知道這一格為什麼該有東西"
+        );
+
+        // 對照組：一題都沒問過，那就真的只是沒發生。
+        assert_eq!(
+            item(&book(vec![]), 5).verdict,
+            Verdict::NotSeen,
+            "一題都沒問過還指控量測壞了，那是誣賴"
+        );
+
+        let report = reported(&answered_only);
+        assert!(
+            report.contains("！ 第 5 項"),
+            "第 5 項要用得出「該量到卻沒量到」那個記號：\n{report}"
+        );
+    }
+
+    /// 擠掉過就不可以指控那一槓的量測壞了。
+    ///
+    /// 開機那一則存在欄位裡、不會被擠；那一槓的那一則存在清單裡、會。所以
+    /// 「有開機、沒有那一槓」在簿子滿了的時候是正常的，而在沒滿的時候才是
+    /// 故障。分不出來就講回「沒量到」——指控要有把握。
+    #[test]
+    fn a_full_notebook_does_not_accuse_the_chrome_bar_probe() {
+        let mut rolled = Notebook::new();
+        rolled.note(started());
+        for i in 0..(NOTES_KEPT as i64 + 50) {
+            rolled.note(poke(1_789_222_000_000 + i, true, Some("poke-aiyo")));
+        }
+        assert!(rolled.dropped() > 0, "前提：這本簿子真的擠掉過");
+        assert_eq!(
+            item(&rolled, 1).verdict,
+            Verdict::NotSeen,
+            "擠掉過就分不出是壞了還是滾掉了，不可以指控"
+        );
+
+        // 對照組：沒擠掉過的同一種簿子，就要指得出來。
+        let mut kept = Notebook::new();
+        kept.note(started());
+        kept.note(poke(1_789_222_000_000, true, Some("poke-aiyo")));
+        assert_eq!(
+            item(&kept, 1).verdict,
+            Verdict::NotMeasured,
+            "什麼都沒滾掉、開機那一則卻沒帶出那一槓＝那支量測沒跑"
+        );
     }
 
     /// 「笑了 0 次」要說得出是哪一種 0。
