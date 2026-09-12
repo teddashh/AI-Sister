@@ -2191,6 +2191,16 @@ struct Answer {
     /// （「答對我自己都忘掉的東西」）也是拿她量的。
     answers: Vec<Fact>,
     hits: Vec<Hit>,
+    /// 她自己稍早想過、而這一題用得到的那幾段。
+    ///
+    /// 送到畫面上不是為了畫它——畫面現在一列都不印。送它是因為成句答案的
+    /// 每一顆出處鍵都要**回查得到它指的東西**（`renderGrounded` 的
+    /// `sourceTarget`），而 `card:` 這一種以前不存在。少了這一欄，那顆鍵會
+    /// 找不到落點，整份答案被丟掉。
+    ///
+    /// 和 `overview` 分開的理由跟它自己寫的一樣：那一欄是「她知道了什麼」的
+    /// 專用總覽，這一欄是這一題的出處清單。
+    readings: Vec<Reading>,
     /// 底下還有，只是沒送過來。
     ///
     /// `20 筆` 和「一共就這 20 筆」在畫面上長得一模一樣——終端機那邊為了這件
@@ -2256,6 +2266,16 @@ struct GroundedSynthesis {
 struct GroundedSentence {
     text: String,
     sources: Vec<GroundedSource>,
+}
+
+/// 一張她自己的判讀，送到畫面上只為了讓出處鍵回查得到。
+///
+/// 不帶 `activity`：那句話已經在答案本文裡了（模型把它寫成句子），再送一份
+/// 只會給 renderer 一個可以印出來、而沒有人在守的第二份文字。
+#[derive(Debug, Serialize)]
+struct Reading {
+    card_id: i64,
+    frame_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2430,6 +2450,7 @@ fn memory_overview_answer(
         query_id: None,
         answers: Vec::new(),
         hits: Vec::new(),
+        readings: Vec::new(),
         truncated: false,
         answers_truncated: false,
         blind: None,
@@ -2953,6 +2974,7 @@ struct Fact {
 
 fn synthesis_from_grounded(
     grounded: sister_core::grounded_answer::GroundedAnswer,
+    readings: &[Reading],
     facts: &[Fact],
     hits: &[Hit],
 ) -> Result<GroundedSynthesis, String> {
@@ -2992,6 +3014,23 @@ fn synthesis_from_grounded(
                                 |frame| format!("畫面 #{frame}"),
                             ),
                             frame_id: hit.frame_id,
+                        })
+                    }
+                    SourceRef::Card(id) => {
+                        let reading = readings
+                            .iter()
+                            .find(|reading| reading.card_id == id)
+                            .ok_or_else(|| format!("找不到回答引用的判讀 #{id}"))?;
+                        // **標籤不可以印成「畫面 #42」**，就算這張卡真的掛著
+                        // 第 42 張畫面。那顆鍵點下去確實會開那張圖，但標籤說
+                        // 的是「這句話是從哪裡來的」——而它是從她想的東西來
+                        // 的，不是從螢幕上的字。兩者在這一版第一次分家：她現
+                        // 在講得出一句螢幕上沒寫過的話，所以出處也要講得出
+                        // 「這句是我判斷的」。
+                        Ok(GroundedSource {
+                            r#ref: reference.as_str(),
+                            label: "我的判讀".to_owned(),
+                            frame_id: reading.frame_id,
                         })
                     }
                 })
@@ -3047,6 +3086,7 @@ mod grounded_synthesis_tests {
                     sources: vec![SourceRef::Fact(9), SourceRef::Chunk(77)],
                 }],
             },
+            &[],
             &[fact()],
             &[hit()],
         )
@@ -3066,7 +3106,58 @@ mod grounded_synthesis_tests {
                 sources: vec![SourceRef::Chunk(999)],
             }],
         };
-        assert!(synthesis_from_grounded(grounded, &[fact()], &[hit()]).is_err());
+        assert!(synthesis_from_grounded(grounded, &[], &[fact()], &[hit()]).is_err());
+    }
+
+    fn reading() -> Reading {
+        Reading {
+            card_id: 5,
+            frame_id: Some(42),
+        }
+    }
+
+    /// 一句判讀的出處，標籤要說它是判讀——就算它指得到一張真的畫面。
+    ///
+    /// 這是這一版第一次出現「螢幕上沒寫過、而她講得出來」的句子。點下去開得
+    /// 到那張圖是**額外**的好處（她是看著它想的），不是那句話的出處性質。
+    /// 印成「畫面 #42」等於宣稱螢幕上寫過這句話。
+    #[test]
+    fn a_reading_is_labelled_as_a_reading_even_when_it_points_at_a_real_frame() {
+        let synthesis = synthesis_from_grounded(
+            GroundedAnswer {
+                sentences: vec![GroundedSentence {
+                    text: "你早上在追一個天氣警報。".into(),
+                    sources: vec![SourceRef::Card(5)],
+                }],
+            },
+            &[reading()],
+            &[fact()],
+            &[hit()],
+        )
+        .unwrap();
+        let source = &synthesis.sentences[0].sources[0];
+        assert_eq!(source.r#ref, "card:5");
+        assert_eq!(source.frame_id, Some(42), "她是看著那張畫面想的，點得開");
+        assert_eq!(
+            source.label, "我的判讀",
+            "標籤說的是這句話從哪來的，而它不是從螢幕上的字來的"
+        );
+        assert_ne!(
+            source.label, "畫面 #42",
+            "印成畫面就等於宣稱螢幕上寫過這句話"
+        );
+    }
+
+    /// 引用一張這一題沒送出去的判讀，整份答案作廢——和另外兩種一樣。
+    #[test]
+    fn a_reading_the_question_never_carried_rejects_the_whole_synthesis() {
+        let grounded = GroundedAnswer {
+            sentences: vec![GroundedSentence {
+                text: "我覺得你在忙別的。".into(),
+                sources: vec![SourceRef::Card(999)],
+            }],
+        };
+        assert!(synthesis_from_grounded(grounded, &[reading()], &[fact()], &[hit()]).is_err());
     }
 }
 
@@ -3400,7 +3491,12 @@ fn synthesize_grounded_answer(
             ("no_answer", None, None)
         } else {
             match sister_core::grounded_answer::parse(&spawn.stdout, &prepared.sources) {
-                Ok(answer) => match synthesis_from_grounded(answer, &local.answers, &local.hits) {
+                Ok(answer) => match synthesis_from_grounded(
+                    answer,
+                    &local.readings,
+                    &local.answers,
+                    &local.hits,
+                ) {
                     Ok(answer) => ("success", Some(answer), None),
                     Err(error) => ("bad_json", None, Some(error)),
                 },
@@ -3460,6 +3556,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             query_id: None,
             answers: Vec::new(),
             hits: Vec::new(),
+            readings: Vec::new(),
             // 空字串不是「問了但沒找到」，是根本沒問。
             blind: None,
             truncated: false,
@@ -3582,9 +3679,31 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         } else {
             None
         };
-        let prepared =
-            sister_core::grounded_answer::prepare(&question, &facts, &hits, sister_core::now_ms())
-                .map_err(|e| format!("{e:#}"))?;
+        // **她已經想過的那幾段，排在證據最前面。**
+        //
+        // 解釋層平常沒事就會自己醒過來，看著剛過去那一段寫一張卡。以前答題
+        // 這條路完全不讀它——於是每一題都是從二十行 OCR 開始重新想一遍，
+        // 慢，而且想出來的東西就是二十行 OCR 排成中文。
+        //
+        // 撈不到判讀不是失敗：那只是這一段她還沒想過（或者她根本沒被開起
+        // 來）。空的照樣往下走，答案就是舊的那個形狀。
+        let readings = match sister_core::grounded_answer::evidence_window(&facts, &hits) {
+            None => Vec::new(),
+            Some((from, to)) => db
+                .readings_covering(from, to, sister_core::grounded_answer::MAX_READINGS)
+                .map_err(|e| format!("{e:#}"))?
+                .iter()
+                .map(sister_core::grounded_answer::Reading::from_card)
+                .collect(),
+        };
+        let prepared = sister_core::grounded_answer::prepare(
+            &question,
+            &readings,
+            &facts,
+            &hits,
+            sister_core::now_ms(),
+        )
+        .map_err(|e| format!("{e:#}"))?;
         // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
         // 足以回答「她是不是又卡住了」，而問題本身是他的東西，不是我的。
         tracing::info!(
@@ -3655,6 +3774,10 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                 .iter()
                 .filter_map(|h| h.frame_id)
                 .chain(facts.iter().filter_map(|a| a.latest.frame_id))
+                // 判讀那幾張也要問。少了這一段，一句判讀底下的「我的判讀」
+                // 點下去會叫 `open_frame` 去開一張已經被保留期清掉的圖——
+                // 而那顆鍵的整個承諾就是「按下去看得到當時的畫面」。
+                .chain(readings.iter().filter_map(|r| r.frame_id))
                 .collect();
             db.frames_with_image(&ids).map_err(|e| format!("{e:#}"))?
         };
@@ -3709,6 +3832,13 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                     title: h.window_title,
                     url: h.url,
                     frame_id: h.frame_id.filter(|id| openable.contains(id)),
+                })
+                .collect(),
+            readings: readings
+                .iter()
+                .map(|r| Reading {
+                    card_id: r.card_id,
+                    frame_id: r.frame_id.filter(|id| openable.contains(id)),
                 })
                 .collect(),
             time_range: asked_chapters.as_ref().map(|(r, _)| AskedTimeRange {

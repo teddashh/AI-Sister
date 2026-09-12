@@ -82,6 +82,8 @@ function answer(over = {}) {
     query_id: 7,
     answers: [],
     hits: [],
+    // 她自己稍早想過、而這一題用得到的那幾段。出處鍵回查得到 `card:` 靠它。
+    readings: [],
     truncated: false,
     answers_truncated: false,
     blind: null,
@@ -493,6 +495,13 @@ async function open(
     invokes,
     nonsense,
     line: () => node("[data-state-line]").textContent,
+    // 輸入框上面那一格。`null` = 它不在畫面上。**藏起來要回 `null` 不是
+    // 空字串**：`hidden` 沒被拿掉而字還留著，讀 `textContent` 會拿到上一題
+    // 的秒數，而那一格明明看不見——那正是這幾條要抓的錯。
+    thinking: () => {
+      const el = node("[data-ask-thinking]");
+      return el.hidden ? null : el.textContent;
+    },
     hits: () => node("[data-hits]"),
     hitTexts: () => node("[data-hits]").children.map((c) => c.textContent),
     consentGuide: () => node("[data-consent-guide]"),
@@ -620,7 +629,7 @@ console.log("② 第一題就答不成（資料庫打不開）");
   check("輪詢過後那句原因還在", p.line().includes("database is locked"), p.line());
 }
 
-console.log("③ 這一題翻很久（SLOW_MS）");
+console.log("③ 送出去了他就看得到，等久了才多一個秒數");
 {
   const p = await open({
     // 5 秒才回，比 SLOW_MS（4 秒）久。
@@ -628,12 +637,21 @@ console.log("③ 這一題翻很久（SLOW_MS）");
     recording_state: "recording",
   });
   void p.type("三天前那通電話");
+  // 這一格的整個理由：**他按完 Enter 的下一刻**就要看得到，不是四秒之後。
+  // 四秒是一段長到足夠讓人以為自己沒按到的時間。
+  await tick(60);
+  check("按下去就看得到「思考中…」", p.thinking() === "思考中…", p.thinking());
+  check("而她的泡泡裡還是她自己的話", p.line().includes("想一下"), p.line());
   await tick(4300);
-  check("換成那句「超過 4 秒」了", p.line().includes("超過 4 秒"), p.line());
+  const late = p.thinking();
+  check("等久了會多一個秒數", /^思考中… \d+ 秒$/u.test(late ?? ""), late);
+  check("那個秒數是真的在數", Number(/(\d+)/u.exec(late ?? "")?.[1] ?? 0) >= 4, late);
   await p.repaint();
-  check("輪詢過後沒有被換回「想一下…」", p.line().includes("超過 4 秒"), p.line());
+  check("輪詢過後那一格還在", /^思考中…/u.test(p.thinking() ?? ""), p.thinking());
+  // 她的泡泡從頭到尾都沒被拿去講儀表板。
+  check("她從頭到尾沒解釋自己為什麼慢", !/秒|CLI|多半/u.test(p.line()), p.line());
   await tick(1200);
-  check("答案回來就不講了", !p.line().includes("超過 4 秒"), p.line());
+  check("答案回來那一格就不在了", p.thinking() === null, p.thinking());
 }
 
 console.log("④ 暫停鍵切不動");
@@ -735,26 +753,56 @@ console.log("⑩ 答成過一次之後再失敗，才輪得到那句「先收起
   check("這次說得出「上一題」", p.hitTexts().some((t) => t.includes("上一題")), p.hitTexts());
 }
 
-console.log("⑪ 上一題那句「超過 4 秒」不可以蓋到半秒前才送出的新題目上");
+console.log("⑪ 那個秒數數的是這一題，不是上一題");
 {
   // 時間軸（SLOW_MS = 4000）：
   //   t=0     第一題送出，永遠不回來
   //   t=3800  第二題送出（第一題還掛著，`state` 一直是 thinking）
-  //   t=4000  **第一題**的計時器響。`state === "thinking"` 是真的——那是第二題的。
-  //   t=4300  看畫面：第二題才半秒大，不可以說「這一題已經超過 4 秒」
+  //   t=4300  看畫面：第二題才半秒大，那一格不可以印出一個四以上的數字
+  //
+  // 舊版這裡守的是一句話（「超過 4 秒」有沒有蓋上去）。換成秒數之後，同一個
+  // 錯會長成另一個樣子：**數字繼續從第一題算**。那更難看得出來——它不是一句
+  // 突然冒出來的話，是一個看起來很合理、只是講錯題目的數字。
+  //
+  // **兩個取樣點，不是一個。** 第一版只在 t=4300 看一眼，而那一刀（起算點不
+  // 跟著新題目走）照樣是綠的——因為第二題送出的那一刻自己畫了一次「思考中…」，
+  // 而下一次重畫要等它的計時器，落在 t=4800。畫面在那之間根本沒動過，所以
+  // 「看起來對」量到的是**沒有重畫**，不是算對了。第二個取樣點跨過那一拍，
+  // 而且斷言的是一個確切的數字：算錯起算點會多印，計時器死掉會少印。
   const p = await open({
     ask: (arg) =>
       arg.question === "第一題"
         ? new Promise(() => {})
-        : new Promise((r) => setTimeout(() => r(answer()), 2200)),
+        : new Promise((r) => setTimeout(() => r(answer()), 8000)),
     recording_state: "recording",
   });
   void p.type("第一題");
   await tick(3800);
   void p.type("第二題");
-  await tick(500);
+  await tick(1200); // t=5000：第二題才 1.2 秒大，還不到那條四秒線
   check("還在想第二題", p.line().includes("想一下") || p.line().includes("在聽"), p.line());
-  check("而且沒被上一題的計時器蓋掉", !p.line().includes("超過 4 秒"), p.line());
+  check("第二題還沒到四秒，就不該有數字", p.thinking() === "思考中…", p.thinking());
+  await tick(3600); // t=8600：第二題 4.8 秒大——第一題已經 8.6 秒了
+  check("過線之後數的是第二題那 4 秒", p.thinking() === "思考中… 4 秒", p.thinking());
+}
+
+console.log("⑪b 全停下來的時候，那個秒數不可以繼續數");
+{
+  // 全停會把 `asking` 加一，讓還在飛的那一題失效。**於是它的 `finally` 那條
+  // `mine === asking` 是假的，`stopThinking()` 不會跑**——那條判斷是為了「他
+  // 又送了下一題」寫的，而全停不是下一題，是沒有下一題了。少了補的那一行，
+  // 畫面會停在「思考中… 41 秒」一路數下去，而她已經停了。
+  const p = await open({
+    ask: () => new Promise(() => {}),
+    recording_state: "recording",
+  });
+  void p.type("這一題永遠不會回來");
+  await tick(60);
+  check("前提：那一格真的在數", p.thinking() !== null, p.thinking());
+  await p.fromOutside("master-stop-changed", "stopped");
+  await tick(60);
+  check("全停之後那一格就不在了", p.thinking() === null, p.thinking());
+  check("而畫面講的是全停", p.line().includes("全停"), p.line());
 }
 
 console.log("⑫ 整場下來，畫面上沒有出現過 NaN / undefined");
@@ -2051,6 +2099,92 @@ console.log("56b. RAG IPC 來源對不上本機候選時整份拒絕");
       { line: p.line(), hits: p.hitTexts() },
     );
   }
+}
+
+console.log("56e. 一句判讀的出處說得出它是判讀");
+{
+  // 這一版她第一次講得出一句**螢幕上沒寫過**的話。那一句底下的出處鍵不可以
+  // 印成「畫面 #42」——那顆鍵按下去確實會開第 42 張圖（她是看著它想的），但
+  // 標籤講的是「這句話從哪來的」，而它是從她想的東西來的。
+  const p = await open({
+    ask: answer({
+      query_id: 7007,
+      answers: [fact({ frame_id: 42, chunk_id: 31 })],
+      readings: [{ card_id: 5, frame_id: 42 }],
+      synthesis: {
+        sentences: [
+          {
+            text: "你早上在追一個天氣警報。",
+            sources: [{ ref: "card:5", label: "我的判讀", frame_id: 42 }],
+          },
+        ],
+      },
+    }),
+    recording_state: "recording",
+  });
+  await p.type("剛剛在幹嘛");
+  const sources = p.hits().querySelectorAll(".grounded-source");
+  check(
+    "判讀那一句畫得出來",
+    p
+      .hits()
+      .querySelectorAll(".grounded-text")
+      .map((node) => node.textContent)
+      .join("|") === "你早上在追一個天氣警報。",
+    p.hitTexts(),
+  );
+  check("出處印的是「我的判讀」", sources[0]?.textContent === "我的判讀", p.hitTexts());
+  check(
+    "不是「畫面 #42」",
+    !p.hitTexts().some((t) => t.includes("畫面 #42")),
+    p.hitTexts(),
+  );
+
+  // 點得開那張圖（她是看著它想的），但**不記點擊**：判讀不是檢索排出來的
+  // 一筆，沒有 chunk_id、也沒有名次。記一筆假的名次會污染題庫。
+  await p.clickElement(sources[0]);
+  const opened = p.invokes.filter(({ cmd }) => cmd === "open_frame").at(-1);
+  check(
+    "按下去開得到她看著想的那張畫面",
+    JSON.stringify(opened?.arg) === JSON.stringify({ frameId: 42 }),
+    opened,
+  );
+  check(
+    "而且不記進題庫的點擊排名",
+    p.invokes.filter(({ cmd }) => cmd === "log_click").length === 0,
+    p.invokes.filter(({ cmd }) => cmd === "log_click"),
+  );
+
+  const azureText = azureCalls(p)[0]?.arg?.text ?? "";
+  for (const localOnly of ["card:5", "我的判讀", "畫面 #42"]) {
+    check(`判讀的 Azure payload 不送 ${localOnly}`, !azureText.includes(localOnly), azureText);
+  }
+}
+
+console.log("56f. 引用一張這一題沒送出去的判讀，整份拒絕");
+{
+  const p = await open({
+    ask: answer({
+      answers: [fact()],
+      readings: [{ card_id: 5, frame_id: 42 }],
+      synthesis: {
+        sentences: [
+          {
+            text: "我覺得你在忙別的。",
+            sources: [{ ref: "card:6", label: "我的判讀", frame_id: null }],
+          },
+        ],
+      },
+    }),
+    recording_state: "recording",
+  });
+  await p.type("剛剛在幹嘛");
+  check(
+    "沒送出去的判讀不可以被引用",
+    p.hits().querySelectorAll(".grounded-text").length === 0 &&
+      p.line().includes("成句答案找不到"),
+    { line: p.line(), hits: p.hitTexts() },
+  );
 }
 
 console.log("56c. 畫面說出實際接手的 CLI，而且零命中也不能假裝沒交給它");

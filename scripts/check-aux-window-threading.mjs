@@ -348,26 +348,99 @@ check(
   setupCode === "" ? "setup 範圍找不到" : undefined,
 );
 
-console.log("④ 4 秒慢訊息只說它真的量到的事");
+console.log("⑤ 一句判讀的出處標籤，不可以說它是螢幕上的字");
+// 這一條和 `main.rs` 裡那條單元測試守同一件事，而它們跑在不同的機器上：
+// 那條測試在 macOS CI（`apps/desktop` 是另一個 workspace，本機連編都編不
+// 起來——缺 libdbus-1-dev，這台沒有 sudo），這一條在每一次本機閘門。
+//
+// 守的是這一版第一次出現的東西：她講得出一句**螢幕上沒寫過**的話。那一句
+// 底下的出處鍵點下去會開一張真的圖（她是看著它想的），所以把標籤寫成
+// 「畫面 #42」看起來完全合理，而且不會有任何症狀——按下去照樣開得對。它只
+// 是說謊：那句話不在那張圖上。
+{
+  const synth = functionNamed("synthesis_from_grounded");
+  check("`synthesis_from_grounded` 還在", synth.found, synth);
+  const cardArm = (() => {
+    if (!synth.found) return "";
+    const at = synth.source.indexOf("SourceRef::Card(");
+    if (at < 0) return "";
+    const open = synth.source.indexOf("{", at);
+    let depth = 0;
+    for (let i = open; i < synth.source.length; i++) {
+      if (synth.source[i] === "{") depth++;
+      if (synth.source[i] === "}" && --depth === 0) return synth.source.slice(at, i + 1);
+    }
+    return "";
+  })();
+  check("判讀那一臂還在", cardArm !== "", undefined);
+  check(
+    "標籤說的是「我的判讀」",
+    /label:\s*"我的判讀"\.to_owned\(\)/.test(cardArm),
+    cardArm,
+  );
+  // 註解要先拿掉：那一臂的註解裡就寫著「標籤不可以印成「畫面 #42」」，而那
+  // 句話正是該留著的東西。整行都是註解的才砍，程式碼那幾行不會長成那樣。
+  // （`synth.code` 不能用——`maskRust` 連字串一起抹掉，上面那條就沒東西可看了。）
+  const cardArmCode = cardArm
+    .split("\n")
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join("\n");
+  check("而不是把它印成一張畫面", !cardArmCode.includes("畫面 #"), cardArmCode);
+  // 開得到那張圖仍然要成立——這一條不是要把那顆鍵變死的。
+  check("frame_id 仍然接著那張卡自己的證據", /frame_id:\s*reading\.frame_id/.test(cardArm), cardArm);
+}
+
+console.log("④ 等的時候只說它真的量到的事");
 check(
   "app.js 不再宣稱第一次開資料庫要整理索引",
   !APP.includes("第一次打開資料庫要先整理索引"),
   undefined,
 );
 check("slow gate 仍然是 4 秒", /\bconst\s+SLOW_MS\s*=\s*4000\s*;/.test(APP), undefined);
-const slowMessages = [...APP.matchAll(/\bslowNote\s*=\s*(["'`])([^\n]*?)\1\s*;/g)]
+// 這一節守的東西 alpha.136 換了形狀：以前是「四秒到了換一句話講」，那句話
+// 已經整段拿掉。現在守的是**那一格只印得出兩種字**——三個字，或三個字加一個
+// 秒數。任何人想在這裡補一句解釋（哪一趟在等、為什麼要兩趟、資料庫在幹嘛），
+// 都得先過這道。
+const thinkingBody = (() => {
+  // `closeBrace` 數的是 `CODE`（Rust 那半）。這裡要數的是 app.js，所以自己數。
+  const at = APP.indexOf("function paintThinking(");
+  if (at < 0) return "";
+  let depth = 0;
+  for (let i = APP.indexOf("{", at); i < APP.length; i++) {
+    if (APP[i] === "{") depth++;
+    if (APP[i] === "}" && --depth === 0) return APP.slice(at, i + 1);
+  }
+  return "";
+})();
+check("`paintThinking` 還在", thinkingBody !== "", undefined);
+const thinkingStrings = [...thinkingBody.matchAll(/(["'`])((?:[^\\\n]|\\.)*?)\1/g)]
   .map((match) => match[2])
-  .filter((message) => message !== "");
-check("4 秒訊息只有一份", slowMessages.length === 1, slowMessages);
-if (slowMessages.length === 1) {
-  const message = slowMessages[0];
-  check("4 秒訊息明說已經超過 4 秒", /超過\s*4\s*秒/.test(message), message);
-  check(
-    "4 秒訊息沒猜原因或處理階段",
-    !/\b(?:because|index|database)\b|(?:因為|索引|資料庫|第一次|整理|重建|升級|移轉)/u.test(message),
-    message,
-  );
-}
+  .filter((text) => text !== "");
+check(
+  "等的時候印得出來的字只有「思考中…」和一個秒數",
+  thinkingStrings.length > 0 &&
+    thinkingStrings.every((text) => /^思考中…(?: \$\{[^}]*\} 秒)?$/u.test(text)),
+  thinkingStrings,
+);
+check(
+  "等的時候不猜原因或處理階段",
+  !/(?:因為|多半|索引|資料庫|第一次|整理|重建|升級|移轉|CLI)/u.test(thinkingBody),
+  thinkingBody,
+);
+// 那句話真的不在了——包括被搬去別處。整支 app.js 掃一次，不只掃這支函式。
+//
+// **註解要先拿掉。** 那句話現在被引用在兩段註解裡（在講「以前是這樣、為什麼
+// 改掉」），而那正是該留著的東西——這道閘門管的是**畫面上印得出來的字**。
+// 只砍掉「整行都是註解」的行：這一頁的區塊註解每一行都以 ` * ` 開頭，而程式
+// 碼那幾行不可能長成這樣，所以這一刀切不到不該切的地方。
+const APP_CODE = APP.split("\n")
+  .filter((line) => !/^\s*(?:\/\/|\*|\/\*)/.test(line))
+  .join("\n");
+check(
+  "那段「多半是在等你選的 CLI」沒有搬到別的地方去",
+  !/多半是在等你選的/u.test(APP_CODE),
+  undefined,
+);
 
 console.log("");
 if (failed > 0) {

@@ -1306,6 +1306,37 @@ body.has-consent-guide .answer-bubble {
 
 /* ---------- 輸入 ---------- */
 
+/*
+ * 「思考中…」。
+ *
+ * 它不在她的泡泡裡，理由是那個泡泡是她講話的地方。一句「超過 4 秒了，多半
+ * 是在等你選的 CLI——一題要來回兩趟…」每個字都是真的，可是那不是朋友在
+ * 講話，那是程式在解釋自己。他要知道的只有一件事：**送出去了嗎**。
+ *
+ * 秒數只有在等超過 [`SLOW_MS`] 之後才出現。三個字不動地停在那裡，跟她整個
+ * 卡死長得一模一樣——那正是這一格當初要修的畫面；一個會跳的數字證明她還活著，
+ * 而且它沒有宣稱任何它量不到的事（哪一段在等、為什麼慢，這裡都不知道）。
+ */
+.ask-thinking {
+  background: var(--chrome);
+  border: 1px solid rgb(246 236 223 / 16%);
+  border-radius: 999px;
+  bottom: 58px;
+  box-shadow: 0 6px 18px rgb(20 12 31 / 22%);
+  color: rgb(246 236 223 / 78%);
+  font-size: 12px;
+  left: 14px;
+  line-height: 1;
+  margin: 0;
+  padding: 6px 11px;
+  position: absolute;
+  z-index: 20;
+}
+
+.ask-thinking[hidden] {
+  display: none;
+}
+
 .ask {
   background: var(--chrome);
   border: 1px solid rgb(246 236 223 / 16%);

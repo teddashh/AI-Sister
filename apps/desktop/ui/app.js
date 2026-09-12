@@ -43,6 +43,7 @@ const personaLine = document.querySelector("[data-persona-line]");
 const personaAudio = document.querySelector("[data-persona-audio]");
 const stateLine = document.querySelector("[data-state-line]");
 const askInput = document.querySelector("[data-ask-input]");
+const askThinking = document.querySelector("[data-ask-thinking]");
 const askSend = document.querySelector("[data-ask-send]");
 const pinButton = document.querySelector("#pin");
 const hideButton = document.querySelector("#hide");
@@ -3310,14 +3311,57 @@ function overtakenByRecordingChange() {
 }
 
 /**
- * 這一題等很久了（`null` = 沒有／已經回來了）。見 [`SLOW_MS`]。
+ * 這一題是什麼時候送出去的（`null` = 現在沒有題目在等）。
  *
- * 一樣是被 `paint()` 蓋掉的那一種：它以前直接寫 `stateLine.textContent`，於是
- * 那句話在畫面上閃一下就被輪詢換回「想一下…」——而「想一下…」不動地停在
- * 那裡，正是這一句話當初要修的那個畫面。修法變成看起來像 glitch，比不修
- * 更糟。（那句話的內容 alpha.132 改過，見 `SLOW_MS` 那一段。）
+ * 這個值只給輸入框上面那一格看。**她的泡泡不碰。** 以前那句話是寫進狀態列
+ * 的，於是四秒一到，她嘴裡就冒出「超過 4 秒了。多半是在等你選的 CLI——一題
+ * 要來回兩趟：先問它要查什麼，再請它把查到的寫成一句。」——每個字都是真的，
+ * 而沒有一個字是朋友會說的。他要知道的只有「送出去了嗎」。
  */
-let slowNote = null;
+let thinkingSince = null;
+
+/** 那個每秒重畫一次的計時器。同一時間只准有一個。 */
+let thinkingTick = null;
+
+/**
+ * 輸入框上面那一格：送出去的那一刻就在，答案回來（或沒回來）就不在。
+ *
+ * 前 [`SLOW_MS`] 秒只有三個字。**那三個字不動地停在那裡，跟她整個卡死長得
+ * 一模一樣**——所以等過那條線之後才補一個會跳的秒數。那個數字唯一宣稱的事
+ * 就是它量到的那一件：從按下去到現在過了幾秒。哪一段在等、為什麼慢，這一頁
+ * 不知道，也就不准講。
+ */
+function paintThinking() {
+  if (askThinking === null) return;
+  if (thinkingSince === null) {
+    askThinking.hidden = true;
+    askThinking.textContent = "";
+    return;
+  }
+  const waited = Date.now() - thinkingSince;
+  askThinking.textContent =
+    waited < SLOW_MS ? "思考中…" : `思考中… ${Math.floor(waited / 1000)} 秒`;
+  askThinking.hidden = false;
+}
+
+/** 這一題送出去了。上一題的秒數（連同它的計時器）在這裡結束。 */
+function startThinking() {
+  thinkingSince = Date.now();
+  if (thinkingTick !== null) clearInterval(thinkingTick);
+  // 一秒一次就夠：這一格只印到秒。
+  thinkingTick = setInterval(paintThinking, 1000);
+  paintThinking();
+}
+
+/** 不等了。**呼叫端要先確認自己還是最新那一題**，理由和 `paint()` 那邊一樣。 */
+function stopThinking() {
+  thinkingSince = null;
+  if (thinkingTick !== null) {
+    clearInterval(thinkingTick);
+    thinkingTick = null;
+  }
+  paintThinking();
+}
 
 /** 灰掉那一刻要說的第二句話。她在錄的時候不講——那是現在式，不是回顧。 */
 function asleepDetail() {
@@ -3369,9 +3413,9 @@ function paint() {
   // 到心跳**才說的，而且說得出她卡在哪裡。他那顆一年份的資料庫要開好幾分鐘，
   // 一句「正在把她叫起來…」在第三分鐘讀起來像當掉了。
   //
-  // `slowNote` 插在「想一下…」前面而不是接在後面：它要換掉的就是那三個字。
-  // 只在 `state === "thinking"` 的時候看它——`ask()` 回來會把它清成 null，
-  // 但清跟重畫之間仍然有順序問題，多這一個條件就不必去猜那個順序。
+  // 「想一下…」現在就只是「想一下…」。這一行以前會被一句「超過 4 秒了⋯」
+  // 換掉，而那句話已經搬去輸入框上面那一格了（見 `paintThinking`）——她的
+  // 泡泡裡不放儀表板。
   const supervisedLine = !paused && state !== "thinking" ? supervisorHeadline() : null;
   const trustHeartbeat = !supervisorBlocksListeningClaim();
   const heartbeatUnreadable = recordingStateKnown && !recordingStateReadable;
@@ -3389,9 +3433,7 @@ function paint() {
             ? "正在把她叫起來…"
             : supervisedLine !== null
               ? supervisedLine
-              : state === "thinking" && slowNote !== null
-                ? slowNote
-                : state === "thinking" && shown !== "thinking"
+              : state === "thinking" && shown !== "thinking"
                   ? `想一下…（${thinkingRecordingQualifier(shown)}）`
                   : STATE_LINES[shown];
   // 灰掉的時候多講一句「上一次是什麼時候、為什麼停的」。換行不換句：那是
@@ -3544,7 +3586,12 @@ function setMasterStopPhase(next) {
     // 當場失效，晚答案連 render 都不能進，更不能在 Stopped 之後才 POST。
     asking += 1;
     pendingAzureAutoAsk = null;
-    slowNote = null;
+    // **這裡一定要自己關掉那個秒數。** 上面那行 `asking += 1` 讓還在飛的那一
+    // 題變成「不是最新的」，於是它走到 `finally` 的時候會跳過 `stopThinking()`
+    // ——那條 `mine === asking` 是為了「他又送了下一題」寫的，而全停不是下一
+    // 題，是沒有下一題了。少了這一行，畫面會停在「思考中… 41 秒」一路數下去，
+    // 而她其實已經停了。
+    stopThinking();
     stopPersonaMedia();
     if (state === "thinking") state = "idle";
     // Gatekeeper 是 brain 的產品寫入／主動說話面。外部 CLI stop 沒有 renderer
@@ -5005,7 +5052,7 @@ function renderOverview(overview) {
  * CLI 只能替本機候選成句；每一句的 source ref 都已由 native 對本次候選做過
  * exact 驗證。按有畫面的來源直接開圖；只有文字的來源則移到下方原文。
  */
-function renderGrounded(synthesis, facts, hits, queryId) {
+function renderGrounded(synthesis, readings, facts, hits, queryId) {
   if (synthesis === null || synthesis === undefined) return false;
   if (
     !Array.isArray(synthesis.sentences) ||
@@ -5027,6 +5074,15 @@ function renderGrounded(synthesis, facts, hits, queryId) {
       return index < 0
         ? null
         : { item: hits[index], rank: facts.length + index };
+    }
+    if (reference.startsWith("card:")) {
+      // 她自己想過的那一段。**沒有 rank**：這一筆不是檢索排出來的，它是一
+      // 句判讀；而下面那個 `log_click` 只在 `chunk_id` 有值的時候才發，判讀
+      // 沒有 `chunk_id`，所以那個欄位永遠不會被讀到。給一個 `0` 反而會在
+      // 某一版變成「他點的是第一名」那種假資料。
+      const id = Number(reference.slice("card:".length));
+      const index = readings.findIndex((reading) => reading.card_id === id);
+      return index < 0 ? null : { item: readings[index], rank: null };
     }
     return null;
   };
@@ -5136,6 +5192,7 @@ function renderHits(
   overview = null,
   synthesis = null,
   brain = null,
+  readings = [],
 ) {
   azureAnswerLine = null;
   azureAnswerButton = null;
@@ -5201,7 +5258,7 @@ function renderHits(
     return;
   }
 
-  const hasGroundedAnswer = renderGrounded(synthesis, facts, hits, queryId);
+  const hasGroundedAnswer = renderGrounded(synthesis, readings, facts, hits, queryId);
 
   // **她找的字不一定是他打的字。**
   //
@@ -5455,13 +5512,18 @@ function renderHits(
 }
 
 /**
- * 慢到這個秒數還沒回來，就得換一句話講。
+ * 慢到這個秒數還沒回來，輸入框上面那一格就開始印秒數。
  *
  * 「想一下…」不動地停在那裡，跟她整個卡死長得一模一樣——這正是她第一次跑在
  * 真 Windows 上時發生的事：第一個問題觸發了資料庫升級（要把整張表重算一次
  * bigram），畫面就停在「想一下…」，看不出是還在跑還是死了。那個成因已經修掉
  * 了（命令離開了主執行緒，而且開機就先去開資料庫），但「久到沒話講」這件事
  * 本身仍然要有出口。
+ *
+ * **出口從「換一句話講」改成「補一個會跳的數字」。** 以前這條線一到，她嘴裡
+ * 就冒出一整段解釋（哪一趟在等、為什麼要兩趟）；那段話裡「多半」兩個字自己
+ * 就承認了它是推的，而這一頁根本量不到是哪一段在等。數字不會推，它只印它量
+ * 到的那一件事。
  */
 const SLOW_MS = 4000;
 
@@ -5489,34 +5551,11 @@ async function ask(event = null) {
   const mine = ++asking;
   // 新的一題蓋掉上一次那句「為什麼沒成」——他已經在做下一件事了。
   notice = null;
-  slowNote = null;
   setState("thinking");
-  const slow = setTimeout(() => {
-    // 這個 timer 只量到一件事：這一題已經等了 4 秒。它沒有問資料庫是不是
-    // 第一次開、有沒有 migration，也沒有看索引進度。以前那句「第一次打開
-    // 資料庫要先整理索引」在任何慢查詢都會出現，這次甚至把 WebView2 deadlock
-    // 講成索引。給人看的話只能說程式真的量到的那半。
-    //
-    // **`state === "thinking"` 不夠。** 他多按了幾次 Enter 的話，第一題的計時器
-    // 會在第二題送出之後才響，而那時候 `state` 還是 `thinking`（是**第二題**
-    // 的）——於是一句「這一題已經超過 4 秒」蓋在一個一百毫秒前才送出去的
-    // 問題上。底下那個 `finally` 為了同一件事已經多問了一次
-    // `mine === asking`；這裡是它漏掉的兄弟。
-    if (mine === asking && state === "thinking") {
-      // 舊版說「還在翻…」，而那是假的：四秒那個位置她幾乎一定不在翻本機
-      // 資料庫，而是在等**使用者自己選的那支 CLI**。一題要來回兩趟——先問
-      // 它「這題要查什麼」（`prepare_search_plan`），本機查完再請它「把查到
-      // 的寫成一句」（`prepare`）——兩趟各是一次冷啟動加一次模型呼叫，本機
-      // 檢索在旁邊是毫秒級的。講成「翻」會讓人以為是她的資料庫慢，然後去
-      // 刪東西。
-      //
-      // 「多半」不是客套：這個計時器只量到「等了四秒」，沒有問是哪一段在等。
-      // 真的要指名是哪一趟，得讓 native 在中間也送狀態出來，那是另一條線。
-      slowNote =
-        "超過 4 秒了。多半是在等你選的 CLI——一題要來回兩趟：先問它要查什麼，再請它把查到的寫成一句。";
-      paint();
-    }
-  }, SLOW_MS);
+  // 送出去的那一刻就要看得見，不是四秒之後。這一行擺在任何 `await` 前面，
+  // 也擺在同意書那一關前面——**他按的那一下有沒有出去，跟後面走到哪一關是
+  // 兩件事**，而後者要等下一次 `paint()` 才說得出口。
+  startThinking();
 
   const askedAt = Date.now();
   /* 這一題為什麼沒有答案。`null` = 有答案。
@@ -5579,6 +5618,7 @@ async function ask(event = null) {
         answer.overview,
         answer.synthesis,
         answer.brain,
+        answer.readings ?? [],
       );
       // 畫完了才量得到。這一段不改任何東西——`noteTheBubble` 量完會把
       // `scrollTop` 放回去，他看到的第一眼仍是最上面那一句。
@@ -5643,13 +5683,12 @@ async function ask(event = null) {
     document.body.classList.add("has-hits");
     paintConversation();
   } finally {
-    clearTimeout(slow);
     if (gaveUp !== null) noteTheAskThatFailed(question, gaveUp);
     // **過期的那一份不准動畫面，包括這裡。** 他多按了幾次 Enter、先送的後回，
-    // 那一次走到這裡的時候還在跑的是別題——清掉的會是**那一題**的那句慢話。
+    // 那一次走到這裡的時候還在跑的是別題——關掉的會是**那一題**的那個秒數。
     // `asking` 那個編號存在的理由就是這個，上面兩條路都問過了，這一條也要問。
     if (mine === asking) {
-      slowNote = null;
+      stopThinking();
       paint();
     }
   }

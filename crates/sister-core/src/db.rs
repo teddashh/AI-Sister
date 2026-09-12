@@ -4031,6 +4031,55 @@ impl Db {
         Ok(false)
     }
 
+    /// 落在某一段時間裡的那幾張判讀，每個 segment 只取當下最新的活著版本。
+    ///
+    /// 答題那條路用它。判準是「她想過的那幾段，和這一題翻出來的證據落在同一
+    /// 段時間」——不是「最近幾張」：他問的可能是上禮拜二。
+    ///
+    /// **它比對的是那一段的開始時刻，不是那一段蓋到哪裡。** 一張卡只掛著
+    /// `segment_core_start`；一段活動延伸到什麼時候，這張表答不出來。所以在
+    /// `from` 之前開始、一路蓋過 `from` 的那一段，這支查詢看不到——呼叫端要
+    /// 靠把 `from` 往前放寬來吃下這件事
+    /// （[`crate::grounded_answer::READING_SLACK_MS`]）。
+    ///
+    /// 第一版想得聰明一點：窗裡沒撈滿就往前補一張最近的。**那條沒有下界**
+    /// ——三天前那一段照樣被補進來，而它和這一題毫無關係。要做對得去問
+    /// `segment.core_ended_at`，而那張表是快取（`replace_segments` 每次打開
+    /// 時間軸都先刪再插），沒打開過就沒有列。放寬一個窗是誠實的近似；一個
+    /// 沒有下界的「往前補」不是。
+    ///
+    /// 回傳由新到舊。
+    pub fn readings_covering(
+        &self,
+        from: Millis,
+        to: Millis,
+        limit: usize,
+    ) -> Result<Vec<L2CardRow>> {
+        if limit == 0 || to < from {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(&format!(
+            "{L2_SELECT}
+             FROM l2_card AS card
+             WHERE card.tombstoned_at IS NULL
+               AND card.segment_core_start >= ?1
+               AND card.segment_core_start < ?2
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM l2_card AS newer
+                   WHERE newer.segment_core_start = card.segment_core_start
+                     AND newer.tombstoned_at IS NULL
+                     AND (newer.version > card.version
+                          OR (newer.version = card.version AND newer.id > card.id))
+               )
+             ORDER BY card.segment_core_start DESC, card.version DESC, card.id DESC
+             LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![from, to, limit as i64], map_l2_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn latest_l2_before(&self, core_started_at: Millis) -> Result<Option<L2CardRow>> {
         self.conn
             .query_row(
@@ -8089,6 +8138,79 @@ mod tests {
             author: L2Author::Interpreter,
         })
         .expect("insert test L2")
+    }
+
+    /// 蓋住那段時間的判讀，每段只給最新的活著版本。
+    #[test]
+    fn readings_covering_gives_the_latest_live_card_per_segment_in_the_window() {
+        let mut db = test_db();
+        insert_test_l2(&mut db, 100, "太早了");
+        insert_test_l2(&mut db, 500, "500 v1");
+        let five_hundred = insert_test_l2(&mut db, 500, "500 v2");
+        let six_hundred = insert_test_l2(&mut db, 600, "600 v1");
+        insert_test_l2(&mut db, 900, "太晚了");
+
+        let rows = db.readings_covering(400, 700, 10).expect("covering");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![six_hundred, five_hundred],
+            "窗內每段一張最新版，由新到舊"
+        );
+    }
+
+    /// 窗外的那一段不算，哪怕窗裡一張都沒有。
+    ///
+    /// 這一條守的是我自己第一版寫錯的東西。當時的想法是「窗裡沒撈滿就往前
+    /// 補一張最近的」，理由寫得很好聽（一段活動掛在它開始那一刻上，剛剛那
+    /// 一段可能還沒結束）——**而那條路沒有下界**：三天前那一張照樣被補進
+    /// 來，冒充成「你剛剛在做的事」。他讀到的會是一句自信、具體、而且講錯
+    /// 日子的判讀。放寬窗是呼叫端的事，這裡只回答窗裡有什麼。
+    #[test]
+    fn a_stretch_that_started_before_the_window_is_not_pulled_in() {
+        let mut db = test_db();
+        insert_test_l2(&mut db, 100, "三天前那一段");
+
+        assert!(
+            db.readings_covering(400, 700, 10)
+                .expect("covering")
+                .is_empty(),
+            "窗外的判讀不可以冒充成這一題的判讀"
+        );
+    }
+
+    #[test]
+    fn readings_covering_respects_its_limit() {
+        let mut db = test_db();
+        insert_test_l2(&mut db, 500, "500");
+        let six_hundred = insert_test_l2(&mut db, 600, "600");
+
+        assert_eq!(
+            db.readings_covering(400, 700, 1)
+                .expect("covering")
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![six_hundred],
+            "撈滿就停，而且留下的是最新那一段"
+        );
+        assert!(db.readings_covering(400, 700, 0).expect("zero").is_empty());
+    }
+
+    /// 墓碑掉的那一張不算，往前補的那一張也一樣不算。
+    #[test]
+    fn a_tombstoned_reading_is_not_offered_to_the_answer() {
+        let mut db = test_db();
+        let dead = insert_test_l2(&mut db, 500, "被忘掉的那一段");
+        db.conn
+            .execute("UPDATE l2_card SET tombstoned_at = 1 WHERE id = ?1", [dead])
+            .expect("tombstone");
+
+        assert!(
+            db.readings_covering(400, 700, 10)
+                .expect("covering")
+                .is_empty(),
+            "他叫她忘掉的東西，不可以從答案的出處裡繞回來"
+        );
     }
 
     #[test]
