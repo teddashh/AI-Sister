@@ -3485,8 +3485,9 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         } else {
             None
         };
-        let prepared = sister_core::grounded_answer::prepare(&question, &facts, &hits)
-            .map_err(|e| format!("{e:#}"))?;
+        let prepared =
+            sister_core::grounded_answer::prepare(&question, &facts, &hits, sister_core::now_ms())
+                .map_err(|e| format!("{e:#}"))?;
         // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
         // 足以回答「她是不是又卡住了」，而問題本身是他的東西，不是我的。
         tracing::info!(

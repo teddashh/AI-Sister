@@ -243,11 +243,18 @@ Permitted Purpose 裡，我們沒有那個緩衝，一路到 2030 年 Change Dat
   才啟用整庫，不能缺一段後只讓部分角色說話。
 - 輸入框送出的每個文字問題都走已選 CLI 與本機記憶路徑，包括早安、晚安等短句；
   不得用固定角色台詞繞過大腦或冒充動態答案。
-- 聲音不因 idle、capture、記憶或系統事件自己播放。使用者打開聲音後，固定角色台詞只由
+- 聲音不因 capture、記憶或系統事件自己播放。使用者打開聲音後，固定角色台詞由
   角色 button 的 trusted click／Enter／Space 啟動。動態答案另由「用本機聲音朗讀」按鈕
   交給 `localService` 中文系統 TTS。同意書則只由當張「念給我聽」的 trusted click 播放
   目前角色的 bundled Ogg；逐字稿必須和 native 當下條文完全相同，否則停用。
   `prefers-reduced-motion` 與靜音選擇優先。
+- **alpha.132 起，「閒話」那一包是唯一一條不必先被點到就會出聲的路**，而且只有兩個
+  出口：沒事的時候自己笑一下（`idle-giggle`，隨機 2–5 分鐘），以及答案落地那一刻的
+  一聲墊話（`answer-beat`）。這一條是 Ted 明確要求的（「沒事也可以呵呵嘻嘻笑幾下」
+  「語音是情境用的，回答歸回答」），不是為了方便而放寬——上一版這裡寫的是「聲音不因
+  **idle**、capture、記憶或系統事件自己播放」。仍然守住的是：全停、角色關閉、台詞關閉、
+  靜音、視窗看不見的時候不出聲、他正在打字的時候不出聲、Azure 朗讀開著時不疊聲音，
+  以及一次只有一個聲音。閒話**不進**答案：它不算回答、不引用出處、也不會被當成答案朗讀。
 - alpha.110 的 Azure 繁中答案朗讀是**另選、預設關閉**的路徑，不是上面本機聲音的
   fallback。它要設定啟用、`eastasia`／`southeastasia`／`japaneast` typed region、
   Windows Credential Manager fixed target `ted-h/AI-Sister/AzureSpeech/v1` 的 key、

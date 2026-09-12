@@ -120,10 +120,15 @@ struct PromptQuestion<'a> {
     question: &'a str,
 }
 
+/// 送進 prompt 的一筆來源。
+///
+/// 時間欄位是 `at` 而不是原始的 epoch 毫秒，理由是使用者讀得到的那句話：模型
+/// 拿到 `1757556873000` 講不出「你早上 10:14 要求…」，只講得出「你要求過…」。
+/// 格式借 [`crate::model::stamp`]，那是這個專案唯一一份「時刻長什麼樣」。
 #[derive(Serialize)]
 struct PromptSource<'a> {
     r#ref: String,
-    ts: Millis,
+    at: String,
     text: &'a str,
     app: Option<&'a str>,
     title: Option<&'a str>,
@@ -247,10 +252,15 @@ fn bound_source(mut source: Source) -> (Source, bool) {
 ///
 /// 回傳 `None` 代表本機沒有任何候選；查詢規劃 CLI 在這之前仍已處理問題，這裡只是不再
 /// 要求它憑空生成一份沒有本機出處的答案。
+///
+/// `now` 是「現在幾點」，要當參數傳而不是在這裡讀時鐘：一次回答只該有一個
+/// 「現在」（呼叫端那一次 `now_ms()`），而且測試要問得出「她把哪一刻當成現在」。
+/// 模型需要它才講得出「昨天下午」——沒有現在，來源上的 `at` 只能被讀成日期。
 pub fn prepare(
     question: &str,
     facts: &[FactAnswer],
     hits: &[SearchHit],
+    now: Millis,
 ) -> Result<Option<Prepared>> {
     ensure!(!question.trim().is_empty(), "RAG 問題不可為空");
 
@@ -276,7 +286,7 @@ pub fn prepare(
         truncated |= source_truncated;
         let line = serde_json::to_string(&PromptSource {
             r#ref: source.reference.as_str(),
-            ts: source.ts,
+            at: crate::model::stamp(source.ts),
             text: &source.text,
             app: source.app.as_deref(),
             title: source.title.as_deref(),
@@ -295,12 +305,31 @@ pub fn prepare(
     let (fenced, fence_truncated) =
         crate::prompt_fence::fence_question_and_evidence(&data, MAX_DATA_BYTES)?;
     debug_assert!(!fence_truncated, "prepare 已先守住資料上限");
-    let header = concat!(
-        "你是本機記憶的回答層。只根據下面這一題的本機檢索來源回答。\n",
-        "只輸出一個 JSON 物件，不要 markdown、不要前後解說。\n",
-        "契約：{\"sentences\":[{\"text\":\"一句繁體中文答案\",\"sources\":[\"fact:1\",\"chunk:2\"]}]}\n",
-        "sentences 必須是 1 到 3 句；每一項只放一句話、必須有至少一個 sources；sources 只能逐字使用下面列出的 ref。\n",
-        "資料不足就只說來源能支持的範圍；不要補來源裡沒有的姓名、數字、完成狀態或原因。\n\n",
+    // 這一段是「她開口像不像朋友」的唯一出處。
+    //
+    // 舊版只說「你是本機記憶的回答層」，於是模型把自己當成一個看螢幕的旁觀者，
+    // 講出來是「畫面上可見有人要求 Codex Agent 寫交接檔」。每個字都對，
+    // 沒有一個字是朋友會說的——朋友會說「你早上 10:14 要求 Codex agent 交接」。
+    // 差別有兩層，兩層都要在這裡講明：人稱（「有人」vs「你」）和時刻
+    // （來源一直帶著時間，只是從來沒有人叫她拿出來用）。
+    //
+    // 底下的來源紀律一個字都沒有放寬：句子還是只能引用列出的 ref，時間還是
+    // 只能用來源自己的 `at`。這一段換的是語氣，不是證據。
+    let header = format!(
+        concat!(
+            "你是使用者自己的 AI 夥伴，正在幫他回想他自己那台電腦上發生過的事。\n",
+            "問這一題的人就是這些畫面的主人：講到他做的事一律用「你」，講到自己看到的用「我」。\n",
+            "像朋友在講話，不要像在描述一個畫面——不要用「畫面上可見」「根據紀錄」「使用者」「有人」這種旁白說法。\n",
+            "只根據下面這一題的本機檢索來源回答。\n",
+            "只輸出一個 JSON 物件，不要 markdown、不要前後解說。\n",
+            "契約：{{\"sentences\":[{{\"text\":\"一句繁體中文答案\",\"sources\":[\"fact:1\",\"chunk:2\"]}}]}}\n",
+            "sentences 必須是 1 到 3 句；每一項只放一句話、必須有至少一個 sources；sources 只能逐字使用下面列出的 ref。\n",
+            "現在是 {now}。每一筆來源都帶 at，那是那件事發生在這台電腦上的時間。\n",
+            "句子指到某一刻就把時刻講進句子裡（「你早上 10:14 要求…」「你昨天下午在…」）；at 以外的時間一個字都不要編。\n",
+            "畫面上如果是別人說的話或別人寫的東西，就講清楚那是誰的，不要算到「你」頭上。\n",
+            "資料不足就只說來源能支持的範圍；不要補來源裡沒有的姓名、數字、完成狀態或原因。\n\n",
+        ),
+        now = crate::model::stamp(now),
     );
     Ok(Some(Prepared {
         payload: format!("{header}{fenced}"),
@@ -439,6 +468,12 @@ mod tests {
     use crate::db::FactRow;
     use crate::model::SourceKind;
 
+    /// 測試裡的「現在」。挑一個 2026 年 9 月的真實 epoch，而不是 `now_ms()`：
+    /// 一次回答只該有一個現在，測試要問得出那是哪一刻。**不要在斷言裡寫死
+    /// 它渲染出來的字串**——開發機是 EDT、CI 是 UTC，那個字串兩邊不一樣。
+    /// 要比就跟 [`crate::model::stamp`] 比，那是產品自己用的同一支。
+    const NOW: Millis = 1_789_136_073_000;
+
     fn fact() -> FactAnswer {
         FactAnswer {
             latest: FactRow {
@@ -475,7 +510,7 @@ mod tests {
 
     #[test]
     fn local_candidates_become_a_bounded_fenced_prompt() {
-        let prepared = prepare("客服電話是什麼", &[fact()], &[hit(31, "請撥客服專線")])
+        let prepared = prepare("客服電話是什麼", &[fact()], &[hit(31, "請撥客服專線")], NOW)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -496,9 +531,93 @@ mod tests {
         assert!(!prepared.truncated);
     }
 
+    /// 來源上的時刻要以人看得懂的樣子進 prompt，原始的 epoch 毫秒不要進去。
+    ///
+    /// 這一條守的是使用者真的讀到的那句話。她說得出「你早上 10:14 要求…」的
+    /// 前提是模型手上拿得到「10:14」；拿到 `1789136073000` 它只講得出
+    /// 「你要求過…」，那正是 Ted 說「跟機器人一樣」的那一版。
+    #[test]
+    fn every_source_carries_a_clock_time_not_an_epoch_number() {
+        let four_hours = 4 * 60 * 60 * 1000;
+        let mut fact = fact();
+        fact.latest.ts = NOW - four_hours;
+        let mut hit = hit(31, "交接檔");
+        hit.ts = NOW - four_hours / 2;
+        let prepared = prepare("剛剛在幹嘛", &[fact.clone()], &[hit.clone()], NOW)
+            .unwrap()
+            .unwrap();
+        let payload = prepared.payload;
+
+        for ts in [fact.latest.ts, hit.ts] {
+            let stamp = crate::model::stamp(ts);
+            // 產品自己那支格式化，不手抄一份會漂的字串：開發機是 EDT、CI 是 UTC。
+            assert!(
+                stamp.len() == "2026-09-11 10:14:33".len()
+                    && stamp.as_bytes()[10] == b' '
+                    && stamp.as_bytes()[13] == b':',
+                "stamp 不再是人讀得懂的時刻：{stamp}"
+            );
+            assert!(payload.contains(&stamp), "prompt 裡沒有 {stamp}");
+            assert!(
+                !payload.contains(&ts.to_string()),
+                "prompt 裡還留著原始毫秒 {ts}"
+            );
+        }
+    }
+
+    /// 「現在幾點」要跟著問題一起送出去，而且是呼叫端給的那一刻。
+    ///
+    /// 沒有現在，來源上的 `at` 只能被讀成一個日期；有了現在，「昨天下午」
+    /// 才算得出來。這一條同時釘住它是**參數**不是這裡自己讀的時鐘——
+    /// 改成 `now_ms()` 這條會紅。
+    #[test]
+    fn the_prompt_says_which_moment_counts_as_now() {
+        let prepared = prepare("剛剛在幹嘛", &[fact()], &[], NOW).unwrap().unwrap();
+        assert!(
+            prepared
+                .payload
+                .contains(&format!("現在是 {}。", crate::model::stamp(NOW))),
+            "prompt 沒說現在是哪一刻"
+        );
+        assert!(!prepared.payload.contains(&NOW.to_string()));
+    }
+
+    /// 語氣那幾條指示還在。
+    ///
+    /// **這一條擋得住的只有「有人把它整段刪掉／改寫掉」**，擋不住模型不照做——
+    /// 沒有任何本機測試能證明模型的輸出像朋友。真正的驗收在 Ted 的機器上按一次。
+    /// 針取的是整句承諾，不是單一個字：`「你」` 這種短針在這份檔案裡到處都是。
+    #[test]
+    fn the_prompt_still_asks_her_to_talk_like_a_friend_not_a_narrator() {
+        let payload = prepare("剛剛在幹嘛", &[fact()], &[], NOW)
+            .unwrap()
+            .unwrap()
+            .payload;
+        for promise in [
+            // 這一句是招牌。舊版寫「你是本機記憶的回答層」，模型就照著當旁觀者，
+            // 講出「畫面上可見有人要求…」。突變測試證實過：只把它換回去，
+            // 底下四條全都還在、11 條測試全綠——所以它得自己有一條針。
+            "你是使用者自己的 AI 夥伴",
+            "講到他做的事一律用「你」，講到自己看到的用「我」",
+            "不要用「畫面上可見」「根據紀錄」「使用者」「有人」這種旁白說法",
+            "句子指到某一刻就把時刻講進句子裡",
+            "at 以外的時間一個字都不要編",
+            "畫面上如果是別人說的話或別人寫的東西，就講清楚那是誰的",
+        ] {
+            assert!(payload.contains(promise), "prompt 少了這一條：{promise}");
+        }
+        assert!(
+            !payload.contains("本機記憶的回答層"),
+            "prompt 又把她定位成一個看螢幕的旁觀者"
+        );
+        // 換語氣不准放寬證據。這兩條和舊版逐字一樣。
+        assert!(payload.contains("sources 只能逐字使用下面列出的 ref"));
+        assert!(payload.contains("不要補來源裡沒有的姓名、數字、完成狀態或原因"));
+    }
+
     #[test]
     fn no_local_candidate_means_no_unsupported_answer_prompt() {
-        assert!(prepare("沒有的東西", &[], &[]).unwrap().is_none());
+        assert!(prepare("沒有的東西", &[], &[], NOW).unwrap().is_none());
     }
 
     #[test]
@@ -527,7 +646,7 @@ mod tests {
 
     #[test]
     fn every_sentence_must_cite_only_this_retrieval() {
-        let prepared = prepare("客服電話", &[fact()], &[hit(31, "客服")])
+        let prepared = prepare("客服電話", &[fact()], &[hit(31, "客服")], NOW)
             .unwrap()
             .unwrap();
         let answer = parse(
@@ -555,7 +674,7 @@ mod tests {
 
     #[test]
     fn malformed_or_oversized_answers_are_rejected_as_a_whole() {
-        let prepared = prepare("客服電話", &[fact()], &[]).unwrap().unwrap();
+        let prepared = prepare("客服電話", &[fact()], &[], NOW).unwrap().unwrap();
         assert!(parse("not json", &prepared.sources).is_err());
         assert!(
             parse(
@@ -588,7 +707,7 @@ mod tests {
         let hits = (1..=30)
             .map(|id| hit(id, &"一段很長的本機文字".repeat(300)))
             .collect::<Vec<_>>();
-        let prepared = prepare("昨天在做什麼", &[], &hits).unwrap().unwrap();
+        let prepared = prepare("昨天在做什麼", &[], &hits, NOW).unwrap().unwrap();
         assert!(prepared.sources.len() <= MAX_SOURCES);
         assert!(prepared.truncated);
         assert!(prepared.payload.len() < MAX_DATA_BYTES + 2_000);
@@ -601,7 +720,7 @@ mod tests {
         huge.app_id = Some(controls.clone());
         huge.window_title = Some(controls.clone());
         huge.url = Some(controls);
-        let prepared = prepare(&"\u{2}".repeat(MAX_DATA_BYTES), &[], &[huge])
+        let prepared = prepare(&"\u{2}".repeat(MAX_DATA_BYTES), &[], &[huge], NOW)
             .unwrap()
             .unwrap();
         assert_eq!(prepared.sources.len(), 1);

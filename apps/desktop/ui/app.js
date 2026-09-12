@@ -49,6 +49,8 @@ const hideButton = document.querySelector("#hide");
 const pauseButton = document.querySelector("#pause");
 const timelineButton = document.querySelector("#timeline");
 const settingsButton = document.querySelector("#settings");
+const chromeBar = document.querySelector("[data-chrome-bar]");
+const chromeToggle = document.querySelector("[data-chrome-toggle]");
 const consentGuide = document.querySelector("[data-consent-guide]");
 const consentProgress = document.querySelector("[data-consent-progress]");
 const consentWording = document.querySelector("[data-consent-wording]");
@@ -441,6 +443,157 @@ function consentVoiceLibrary(raw) {
 
 const CONSENT_VOICES = consentVoiceLibrary(globalThis.__AI_SISTER_CONSENT_VOICES__);
 
+/*
+ * 第三包：閒話。
+ *
+ * 前兩包（544 句日常 + 68 段同意書）都是「她要說一件事」；這一包不是。
+ * 「阿唷」「煩耶」「呵呵」不是答案，是反應——**聲音不必等於回答**。所以它
+ * 自成一包、自己一套 use，而且刻意不帶 `{lead}`／`{approach}` 模板：一句
+ * 感嘆詞在誰嘴裡都是同一個字，讓它變成她的是那個聲音，不是那句話。
+ *
+ * 三種用途各有各的出口：
+ *   avatar-poke  戳她的時候（`sayPersonaLine`）
+ *   idle-giggle  沒事的時候自己笑一下（`scheduleIdleGiggle`）
+ *   answer-beat  答案落地那一刻的墊話（`playAnswerBeat`）
+ *
+ * 時長下限是 250 毫秒，不是日常那包的 700——「阿唷。」實測最短 406 毫秒，
+ * 用日常那個門檻會把整包最想要的那幾句全擋掉。上限 4 秒：閒話講超過 4 秒
+ * 就不是閒話，而是模型跑掉了。
+ *
+ * 三句笑聲刻意都帶著一句話（「呵呵，我在旁邊喔。」而不是「呵呵。」）。理由不是
+ * 文案，是驗得出來或驗不出來：光一聲笑的說話人嵌入幾乎不帶身分——量出來對自己
+ * 那份參考音 0.276，對「完全另一個人」是 0.23，兩者差 0.05。也就是說一句裸的
+ * 「哈哈。」是誰笑的，機器分不出來，那一格就沒有人在守。加上幾個字之後同一個
+ * 度量回到 0.57，和其他每一句一樣守得住。
+ */
+const BANTER_USES = Object.freeze(["avatar-poke", "idle-giggle", "answer-beat"]);
+
+function banterVoiceLibrary(raw) {
+  const empty = Object.freeze({ byPersona: new Map() });
+  if (
+    !hasExactKeys(raw, [
+      "schema",
+      "locale",
+      "roster",
+      "engine",
+      "rightsReview",
+      "ownerGrant",
+      "notice",
+      "pack",
+      "clips",
+      "totals",
+    ]) ||
+    raw?.schema !== "ai-sister/persona-banter-voices/v1" ||
+    raw?.locale !== "zh-TW" ||
+    raw?.roster !== "four-sisters-plus-thirteen-besties" ||
+    !hasExactKeys(raw?.engine, ["name", "modelSnapshot", "license"]) ||
+    raw.engine.name !== "MediaTek-Research/BreezyVoice-300M" ||
+    raw.engine.modelSnapshot !== "e33b502e0ac21c16b0ee0d00df66ac3fa737393d" ||
+    raw.engine.license !== "Apache-2.0" ||
+    raw?.rightsReview !== "approved-owner-grant" ||
+    !hasExactKeys(raw?.ownerGrant, ["grantedOn", "grantor", "license", "scope"]) ||
+    raw.ownerGrant.grantor !== "Ted Huang" ||
+    raw.ownerGrant.license !== "excluded-from-Apache-2.0" ||
+    raw?.notice !== "NOTICE.md" ||
+    raw?.pack !== "banter" ||
+    !hasExactKeys(raw?.totals, [
+      "personas",
+      "linesPerPersona",
+      "clips",
+      "oggBytes",
+      "durationMs",
+    ]) ||
+    raw?.totals?.personas !== DIALOGUE_PERSONA_IDS.length ||
+    !Number.isSafeInteger(raw?.totals?.linesPerPersona) ||
+    raw.totals.linesPerPersona < 1 ||
+    raw?.totals?.clips !== raw.totals.personas * raw.totals.linesPerPersona ||
+    !Array.isArray(raw?.clips) ||
+    raw.clips.length !== raw.totals.clips
+  ) {
+    return empty;
+  }
+
+  const byPersona = new Map(DIALOGUE_PERSONA_IDS.map((id) => [id, new Map()]));
+  let totalBytes = 0;
+  let totalDurationMs = 0;
+  for (const value of raw.clips) {
+    const personaLines = byPersona.get(value?.persona);
+    const personaIndex = DIALOGUE_PERSONA_IDS.indexOf(value?.persona);
+    const expectedFile = `banter/${value?.persona}/${value?.lineId}.ogg`;
+    if (
+      !hasExactKeys(value, [
+        "persona",
+        "group",
+        "lineId",
+        "pack",
+        "use",
+        "text",
+        "file",
+        "bytes",
+        "sha256",
+        "durationMs",
+      ]) ||
+      personaLines === undefined ||
+      value?.group !== (personaIndex < 4 ? "sister" : "bestie") ||
+      value?.pack !== "banter" ||
+      personaLines.has(value.lineId) ||
+      !BANTER_USES.includes(value?.use) ||
+      typeof value?.text !== "string" ||
+      value.text.length < 2 ||
+      value.text.length > 20 ||
+      value?.file !== expectedFile ||
+      !Number.isSafeInteger(value?.bytes) ||
+      value.bytes < 1 ||
+      typeof value?.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(value.sha256) ||
+      !Number.isSafeInteger(value?.durationMs) ||
+      value.durationMs < 250 ||
+      value.durationMs > 4000
+    ) {
+      return empty;
+    }
+    totalBytes += value.bytes;
+    totalDurationMs += value.durationMs;
+    personaLines.set(
+      value.lineId,
+      Object.freeze({
+        id: `persona-banter/v1/${value.persona}/${value.lineId}`,
+        persona: value.persona,
+        lineId: value.lineId,
+        pack: "banter",
+        use: value.use,
+        text: value.text,
+        triggers: Object.freeze([]),
+        file: `./persona-banter-voices/v1/${value.file}`,
+      }),
+    );
+  }
+  // 每個角色都要有整包。少一個人就整包不要——「其他十六個人會扭會笑，換到她
+  // 就變回木頭」比十七個人都不會動難解釋得多。
+  for (const lines of byPersona.values()) {
+    if (lines.size !== raw.totals.linesPerPersona) return empty;
+  }
+  for (const use of BANTER_USES) {
+    for (const lines of byPersona.values()) {
+      if (![...lines.values()].some((clip) => clip.use === use)) return empty;
+    }
+  }
+  if (totalBytes !== raw.totals.oggBytes || totalDurationMs !== raw.totals.durationMs) {
+    return empty;
+  }
+  return Object.freeze({ byPersona });
+}
+
+const BANTER_VOICES = banterVoiceLibrary(globalThis.__AI_SISTER_PERSONA_BANTER__);
+
+function banterClips(id, use) {
+  return Object.freeze(
+    [...(BANTER_VOICES.byPersona.get(id)?.values() ?? [])].filter(
+      (clip) => clip.use === use,
+    ),
+  );
+}
+
 function dialogueTaps(id) {
   return Object.freeze(
     [...(DIALOGUE_VOICES.byPersona.get(id)?.values() ?? [])].filter(
@@ -454,7 +607,11 @@ function profile(value) {
     ...value,
     portrait: `./personas/${value.id}.webp`,
     palette: Object.freeze({ ...value.palette }),
-    taps: Object.freeze([...value.taps]),
+    // 戳她的時候可以講的話 = 日常那包的兩句 + 閒話那包的每一句。合成一份
+    // 是刻意的：`sayPersonaLine` 只要隨機挑一句，不必知道它從哪一包來。
+    taps: Object.freeze([...value.taps, ...banterClips(value.id, "avatar-poke")]),
+    giggles: banterClips(value.id, "idle-giggle"),
+    beats: banterClips(value.id, "answer-beat"),
   });
 }
 
@@ -610,8 +767,9 @@ let activeProfile = PERSONA_CATALOG.chatgpt;
 let personaEnabled = true;
 let personaMotion = true;
 let personaTapLines = true;
+/** 上一句講過的 lineId。見 `pickBanter`：不連兩次同一句。 */
+let lastSpokenLineId = null;
 let personaVoiceEnabled = false;
-let nextTap = 0;
 let voiceRequest = 0;
 let personaRevision = 0;
 // Desktop 開場先用 HTML 的 ChatGPT WebP 當可見 fallback；native persona_read 回來前
@@ -949,7 +1107,7 @@ function applyPersona(view) {
   personaMotion = view?.motion !== false;
   personaTapLines = view?.tap_lines !== false;
   personaVoiceEnabled = view?.voice_enabled === true;
-  nextTap = 0;
+  lastSpokenLineId = null;
   localAssets = resolveLocalAssets(view?.asset_pack, activeProfile);
 
   // Persona 只改 avatar 自己的三色。`--letter-*` 是整個淺色 stage 的 UI theme；
@@ -1243,14 +1401,69 @@ function speakWithLocalSystemVoice(text, presentation = null) {
   return true;
 }
 
+/*
+ * 隨機挑一句，而且不會連兩次同一句。
+ *
+ * 舊版是 `taps[nextTap++ % taps.length]`，而那時候整包只有兩句——所以「按來按去
+ * 只會一直講兩句話」不是感覺，是規格寫死的。句子變多之後順序也不該再是固定的：
+ * 一個照順序輪的東西，按到第三下就露餡。
+ *
+ * 「不連兩次同一句」比「純隨機」重要。純隨機在十二句裡連兩次的機率是十二分之一，
+ * 一分鐘按十下就會遇到一次，而那一下讀起來就是她壞掉了。
+ */
+
+function pickBanter(clips) {
+  if (clips.length === 0) return null;
+  const pool = clips.filter((clip) => clip.lineId !== lastSpokenLineId);
+  const choices = pool.length > 0 ? pool : clips;
+  return choices[Math.floor(Math.random() * choices.length)] ?? choices[0];
+}
+
+/** 被戳之後那一下抖動有多久。CSS 的 `poke-jolt` 是同一個數字。 */
+const POKE_JOLT_MS = 460;
+let pokeJoltTimer = null;
+
+/*
+ * 戳一下，她扭一下。
+ *
+ * 動畫掛在 `.avatar` 上而不是 `.face`：`.face` 的 `transform` 是呼吸、`rotate`
+ * 是搖晃，兩個通道都有人了，第三段疊上去會把前兩段整組換掉（`animation` 是同一
+ * 個屬性）。`.avatar` 本身沒有動畫，而 `scale`／`translate` 是獨立屬性，不會
+ * 互相覆蓋。
+ *
+ * 動畫期間 `getBoundingClientRect()` 會跟著變，而剪影是照那個框算的——最多偏
+ * 六個百分點，`FIGURE_DILATE_PX`（16px）吃得下，而且動畫結束再推一次就準了。
+ *
+ * 清 class 用計時器不用 `animationend`：`prefers-reduced-motion` 之下那段動畫
+ * 根本不會跑，`animationend` 永遠不來，class 就會黏在上面。
+ */
+function joltHer() {
+  if (avatar === null) return;
+  // 要重播同一段動畫，得先讓瀏覽器看到一次「沒有這個 class」的樣子。少了中間
+  // 那一次 reflow，連按兩下的第二下不會動。
+  avatar.classList.remove("poked");
+  void avatar.offsetWidth;
+  avatar.classList.add("poked");
+  if (pokeJoltTimer !== null) clearTimeout(pokeJoltTimer);
+  pokeJoltTimer = setTimeout(() => {
+    pokeJoltTimer = null;
+    avatar.classList.remove("poked");
+  }, POKE_JOLT_MS);
+}
+
 async function sayPersonaLine(event) {
   // `.click()` / `dispatchEvent()` 也能走進同一個 DOM handler，但那不是「使用者
   // 當下操作」。鍵盤在原生 button 上產生的 click 仍是 trusted，所以 Enter／Space
   // 可用；程式合成的事件則連文字都不說，更不可能沿這條路取得語音播放權。
   if (event?.isTrusted !== true) return;
-  if (!personaEnabled || !personaTapLines || activeProfile.taps.length === 0) return;
-  const line = activeProfile.taps[nextTap % activeProfile.taps.length];
-  nextTap += 1;
+  if (!personaEnabled) return;
+  // 抖那一下不看 `personaTapLines`。那個開關管的是「她說不說話」，不是「她理不
+  // 理你」——戳下去整個人一動也不動，那不是安靜，那是當掉。
+  joltHer();
+  if (!personaTapLines) return;
+  const line = pickBanter(activeProfile.taps);
+  if (line === null) return;
+  lastSpokenLineId = line.lineId;
   personaLine.textContent = line.text;
   personaLine.hidden = false;
 
@@ -1258,11 +1471,26 @@ async function sayPersonaLine(event) {
   if (personaVoiceEnabled) void playBundledPersonaLine(line);
 }
 
+/**
+ * 這段錄音真的是這個角色的、而且真的來自我們自己驗過的那兩包嗎。
+ *
+ * 比的是**物件本身**不是 lineId：外面遞進來一個長得很像的字面量也過不了。
+ * 日常那包和閒話那包各查一次；兩包的 lineId 不重疊，但就算重疊，`=== line`
+ * 也讓它無害。
+ */
+function bundledClipOf(personaId, line) {
+  if (line === null || line === undefined) return null;
+  for (const library of [DIALOGUE_VOICES, BANTER_VOICES]) {
+    if (library.byPersona.get(personaId)?.get(line.lineId) === line) return line;
+  }
+  return null;
+}
+
 async function playBundledPersonaLine(line) {
   if (
     !personaVoiceEnabled ||
     line?.persona !== activeProfile.id ||
-    DIALOGUE_VOICES.byPersona.get(activeProfile.id)?.get(line.lineId) !== line ||
+    bundledClipOf(activeProfile.id, line) === null ||
     invoke === null ||
     !personaAudio ||
     typeof personaAudio.play !== "function"
@@ -1319,6 +1547,96 @@ async function playBundledPersonaLine(line) {
     personaAudio.onerror?.();
   }
   return false;
+}
+
+/* ---------- 沒事的時候，和答案落地的那一刻 ---------- */
+
+/*
+ * 這一段做的是 Ted 說的那件事：「其實出的語音不見得要跟回答的答案一樣，
+ * 語音是情境用的，回答歸回答。」
+ *
+ * 所以閒話那一包有兩個出口和答案完全無關：
+ *   - `idle-giggle`：沒事的時候自己笑一下。
+ *   - `answer-beat`：答案落地那一刻的一聲墊話（「找到了。」），文字答案照舊
+ *     用讀的，不是用念的。
+ *
+ * **這改了一條寫在 PRODUCT.md 上的界線。** 舊版寫「聲音不因 idle、capture、
+ * 記憶或系統事件自己播放」，而「沒事也可以呵呵嘻嘻笑幾下」正是那條禁止的事。
+ * 文件已經跟著改（PRODUCT.md／PHASES.md），不是偷偷放寬。真正還在守的是這些：
+ * 全停、`personaEnabled`／`personaTapLines`、靜音、視窗看不見的時候不出聲，
+ * 以及「一次只有一個聲音」。
+ */
+
+/** 兩次自己笑之間的隨機間隔。固定週期的東西兩次之後就變成節拍器。 */
+const IDLE_GIGGLE_MIN_MS = 120_000;
+const IDLE_GIGGLE_MAX_MS = 300_000;
+/** 自己笑那一句在畫面上留多久。戳出來的台詞不清，這一句要清。 */
+const IDLE_GIGGLE_LINGER_MS = 6_000;
+let idleGiggleTimer = null;
+let idleGiggleClearTimer = null;
+
+/** 現在適不適合出聲。任何一條不成立就跳過這一輪，不重排也不補。 */
+function idleEnoughToGiggle() {
+  return (
+    personaEnabled &&
+    personaTapLines &&
+    document.visibilityState === "visible" &&
+    state === "idle" &&
+    !paused &&
+    masterStopPhase === "clear" &&
+    consentGuideSheet === null &&
+    bundledVoicePresentation === null &&
+    // 他正在打字。這時候插一句「嘻嘻」不是陪伴，是打斷。
+    document.activeElement !== askInput
+  );
+}
+
+function scheduleIdleGiggle() {
+  if (idleGiggleTimer !== null) clearTimeout(idleGiggleTimer);
+  const span = IDLE_GIGGLE_MAX_MS - IDLE_GIGGLE_MIN_MS;
+  idleGiggleTimer = setTimeout(
+    () => {
+      idleGiggleTimer = null;
+      giggleIfNothingIsHappening();
+      scheduleIdleGiggle();
+    },
+    IDLE_GIGGLE_MIN_MS + Math.floor(Math.random() * span),
+  );
+}
+
+function giggleIfNothingIsHappening() {
+  if (!idleEnoughToGiggle()) return;
+  const line = pickBanter(activeProfile.giggles);
+  if (line === null) return;
+  lastSpokenLineId = line.lineId;
+  personaLine.textContent = line.text;
+  personaLine.hidden = false;
+  if (idleGiggleClearTimer !== null) clearTimeout(idleGiggleClearTimer);
+  idleGiggleClearTimer = setTimeout(() => {
+    idleGiggleClearTimer = null;
+    // 只清掉自己那一句。這段期間他要是戳了她，那一句是他要的，不要蓋掉。
+    if (personaLine.textContent !== line.text) return;
+    personaLine.textContent = "";
+    personaLine.hidden = true;
+  }, IDLE_GIGGLE_LINGER_MS);
+  if (personaVoiceEnabled) void playBundledPersonaLine(line);
+}
+
+scheduleIdleGiggle();
+
+/**
+ * 答案落地那一刻的一聲。
+ *
+ * Azure 朗讀開著的時候不出這一聲——兩個聲音疊在一起，兩個都聽不清楚。
+ * 那條路念的是答案本文，這一聲只是「找到了」，本來就該讓給它。
+ */
+function playAnswerBeat() {
+  if (!personaEnabled || !personaVoiceEnabled || azureSpeechReady) return;
+  if (masterStopPhase !== "clear") return;
+  const line = pickBanter(activeProfile.beats);
+  if (line === null) return;
+  lastSpokenLineId = line.lineId;
+  void playBundledPersonaLine(line);
 }
 
 // ---------- 主對話裡的四張同意書 ----------
@@ -2803,6 +3121,18 @@ function paint() {
         ? state
         : "asleep";
   avatar.dataset.state = shown;
+  // 她**被你停下來**的時候，上面那條膠囊自己要出現——不管使用者有沒有按過那顆
+  // 點點鍵。整片透明的桌寵上，「看不到她在錄」和「看不到她停著」是同一種畫面，
+  // 而後者要一眼看得出來，「繼續」也要一下按得到。這一格不歸那顆鍵管（見
+  // `setChromeOpen`）。
+  //
+  // `asleep` 刻意不算：那不是他做的決定，而且沒有什麼「繼續」好按——那一格的
+  // 話已經寫在她底下那句狀態列了。加進來的話，她開機還在確認的那幾秒就會先把
+  // 一條膠囊掛在他桌面上，而「平常上面也是透明的」正是他要的。
+  document.body.classList.toggle(
+    "she-is-stopped",
+    shown === "paused" || shown === "stopped",
+  );
 
   // 暫停時仍然答得出問題——停的是「記錄」，不是「記憶」。所以 thinking
   // 要講出來，只是講在文字上，不動那個灰掉的身體。沒在錄的時候同理：
@@ -4945,7 +5275,17 @@ async function ask(event = null) {
     // 問題上。底下那個 `finally` 為了同一件事已經多問了一次
     // `mine === asking`；這裡是它漏掉的兄弟。
     if (mine === asking && state === "thinking") {
-      slowNote = "還在翻…（這一題已經超過 4 秒）";
+      // 舊版說「還在翻…」，而那是假的：四秒那個位置她幾乎一定不在翻本機
+      // 資料庫，而是在等**使用者自己選的那支 CLI**。一題要來回兩趟——先問
+      // 它「這題要查什麼」（`prepare_search_plan`），本機查完再請它「把查到
+      // 的寫成一句」（`prepare`）——兩趟各是一次冷啟動加一次模型呼叫，本機
+      // 檢索在旁邊是毫秒級的。講成「翻」會讓人以為是她的資料庫慢，然後去
+      // 刪東西。
+      //
+      // 「多半」不是客套：這個計時器只量到「等了四秒」，沒有問是哪一段在等。
+      // 真的要指名是哪一趟，得讓 native 在中間也送狀態出來，那是另一條線。
+      slowNote =
+        "超過 4 秒了。多半是在等你選的 CLI——一題要來回兩趟：先問它要查什麼，再請它把查到的寫成一句。";
       paint();
     }
   }, SLOW_MS);
@@ -5005,6 +5345,8 @@ async function ask(event = null) {
       // 這是唯一條自動 Azure 入口：native 已經 ready、而且這份仍是最新
       // ask 的答案，才會把正文送一次。開機 demo、status event 與舊答案重畫不走這裡。
       autoSpeakLatestAzureAnswer(mine);
+      // 語音是情境用的，回答歸回答：她出的是「找到了」，答案本文照舊用讀的。
+      playAnswerBeat();
     });
     if (!presented && mine === asking) {
       setState("idle");
@@ -5058,6 +5400,41 @@ async function ask(event = null) {
 }
 
 askSend?.addEventListener("click", () => void ask());
+
+/*
+ * 上面那條深色膠囊的開關。
+ *
+ * 平常它不在，也不擋滑鼠——收起來的規則是 CSS 的 `visibility: hidden`，而
+ * `paintedRects()` 明文跳過那一種，所以「看不見」和「點得穿」是同一件事，
+ * 不必在這裡另外推一次實心區。class 一換，那個 MutationObserver 就會排一次
+ * `pet_solid_set`。
+ *
+ * **開機一律是收起來的。** 這是刻意的：那條膠囊唯一的預設狀態就是「不在」，
+ * 所以重開之後畫面長什麼樣不必去猜，也不必再存一份設定。要用的人按一下就有，
+ * 而她真的停下來的時候（`body.she-is-stopped`）它自己會出現——那一格不歸這顆
+ * 鍵管，按下去也關不掉。
+ */
+function setChromeOpen(open) {
+  document.body.classList.toggle("chrome-open", open);
+  chromeToggle?.setAttribute?.("aria-expanded", open ? "true" : "false");
+}
+
+// 這顆不擋 `isTrusted`。上面那五顆（暫停、置頂、收起來…）也都沒擋——會擋的
+// 是「講話」和「開東西」那幾條，因為那些有產品規則要求必須是真人當下的動作。
+// 翻一個自己的 class 不在那一類，而擋了它就等於這一頁唯一的版面驗證工具
+// （`scripts/shot.mjs` 用的是 `element.click()`）看不到收起來以外的樣子。
+chromeToggle?.addEventListener("click", () => {
+  setChromeOpen(!document.body.classList.contains("chrome-open"));
+});
+
+// 收起來的時候裡面那五顆鍵不能還在 Tab 順序上。`visibility: hidden` 本來就
+// 會把它們拿掉，這裡是給沒有跟著走的環境（以及讀螢幕的人）一個明講的答案。
+new MutationObserver(() => {
+  const shown =
+    document.body.classList.contains("chrome-open") ||
+    document.body.classList.contains("she-is-stopped");
+  chromeBar?.setAttribute?.("aria-hidden", shown ? "false" : "true");
+}).observe(document.body, { attributes: true, attributeFilter: ["class"] });
 askInput?.addEventListener("keydown", (event) => {
   // 選字中的 Enter 是「就選這個字」，不是「問出去」。注音打「剛剛發生什麼事」
   // 一路上會按好幾次 Enter，少了這一行，第一次選字就把半句話送出去了。
@@ -5309,6 +5686,78 @@ if (browserDemoQuery && params.get("hits") === "recent") {
     // 句話本身就是假的（沒有人寫不進資料庫），而這一頁是這台機器上唯一驗得到
     // 版面的路徑。上一次只補了那一邊，這一邊留在原地。
     88,
+  );
+}
+
+/*
+ * `?hits=grounded`：**已選 CLI 成句**的那一版。
+ *
+ * 這一格以前沒有 demo，而它正是使用者抱怨的那一頁——Ted 那張截圖上「畫面上
+ * 可見有人要求 Codex Agent 寫交接檔…本機出處[文字#5443]」就是從這裡畫出來的。
+ * 沒有 demo 的意思是：這台開發機上沒有任何辦法看到它長什麼樣，只能改完等他
+ * 裝一次。所以先把它補上。
+ *
+ * 底下那兩句**不是手寫的**：把 `grounded_answer::prepare` 對這兩筆來源組出來的
+ * prompt 餵給一支真的 CLI（2026-09-12 用 Grok 跑的），回來的就是這兩句，而且
+ * 原封不動走得過產品自己那支 `parse`。手寫的樣本只證明版面畫得出那幾個字；
+ * 真的輸出才量得到真正的長度——「你早上 10:14 在 Codex 裡要求…」比「有人要求…」
+ * 長得多，會不會換行、尾巴那幾顆出處鍵會不會被擠掉，用眼睛看比用想的準。
+ */
+if (browserDemoQuery && params.get("hits") === "grounded") {
+  const t = (h, m) => {
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    return d.getTime();
+  };
+  renderHits(
+    [
+      {
+        ts: t(10, 14),
+        snippet: "請幫我寫一份交接文件，把這幾天的進度、踩過的坑、決定都寫清楚",
+        text: "",
+        app: "WindowsTerminal.exe",
+        title: "codex — AI-Sister",
+        url: null,
+        chunk_id: 5443,
+        frame_id: 5443,
+      },
+      {
+        ts: t(10, 31),
+        snippet: "HANDOFF.md 已更新：真正的方向與接下來要做的事",
+        text: "",
+        app: "code.exe",
+        title: "HANDOFF.md",
+        url: null,
+        chunk_id: 5429,
+        frame_id: 5429,
+      },
+    ],
+    "recent",
+    93,
+    [],
+    null,
+    false,
+    false,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    {
+      sentences: [
+        {
+          text: "你今天早上 10:14 在 Codex 裡要求寫一份交接文件，要把這幾天的進度、踩過的坑、決定，還有真正的方向跟接下來要做的事都寫清楚。",
+          sources: [
+            { ref: "chunk:5443", label: "文字#5443", frame_id: 5443 },
+          ],
+        },
+        {
+          text: "你早上 10:31 在編輯器打開 HANDOFF.md，裡面寫著已更新真正的方向與接下來要做的事。",
+          sources: [{ ref: "chunk:5429", label: "文字#5429", frame_id: 5429 }],
+        },
+      ],
+    },
   );
 }
 

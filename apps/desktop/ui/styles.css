@@ -64,8 +64,25 @@ body {
   position: absolute;
   right: 7px;
   top: 7px;
+  transition:
+    opacity 140ms ease,
+    translate 140ms ease,
+    visibility 140ms;
   width: 250px;
   z-index: 20;
+}
+
+/*
+ * 平常收起來。
+ *
+ * `visibility: hidden` 不只是視覺——`paintedRects()` 明文跳過它，所以收起來
+ * 的那一條同時也不再算實心，滑鼠從她頭頂穿得過去。改成 `opacity: 0` 以外的
+ * 任何寫法之前先讀那支函式：只把顏色調透明會留下一塊看不見的擋板。
+ */
+body:not(.chrome-open):not(.she-is-stopped) .dragbar {
+  opacity: 0;
+  translate: 0 -8px;
+  visibility: hidden;
 }
 
 .brand {
@@ -592,6 +609,45 @@ body {
 }
 
 /*
+ * 戳一下，她扭一下。
+ *
+ * 掛在 `.avatar` 上，不是 `.face`：`.face` 的 `transform` 是呼吸、`rotate` 是
+ * 搖晃，兩個通道都有人了，第三段接上去會把前兩段整組換掉（同一個 `animation`
+ * 屬性）。`.avatar` 本身沒有動畫，而 `scale` 和 `translate` 是獨立屬性，跟
+ * `transform`／`rotate` 互不干涉。
+ *
+ * 先往下沉再彈回來——被戳的是身體，不是頭。時間和 app.js 的 `POKE_JOLT_MS`
+ * 是同一個數字（460ms）；那邊用計時器清 class，因為關掉動態效果的時候這段
+ * 根本不會跑，`animationend` 不會來。
+ */
+.motion .avatar.poked {
+  animation: poke-jolt 460ms cubic-bezier(0.34, 1.3, 0.64, 1);
+}
+
+@keyframes poke-jolt {
+  0% {
+    scale: 1 1;
+    translate: 0 0;
+  }
+  18% {
+    scale: 1.05 0.94;
+    translate: 3px 4px;
+  }
+  42% {
+    scale: 0.97 1.04;
+    translate: -4px -5px;
+  }
+  66% {
+    scale: 1.02 0.98;
+    translate: 2px 2px;
+  }
+  100% {
+    scale: 1 1;
+    translate: 0 0;
+  }
+}
+
+/*
  * thinking：呼吸變快，狀態點從實心變成空心環。
  *
  * 那個環不是多餘的。第一版只有「呼吸快一點 + 點在閃」，兩者都是動畫——
@@ -726,34 +782,65 @@ body {
 
 /* ---------- 答案 ---------- */
 
-/* 回答是指向角色的單一氣泡；角色不再因回答出現而縮成頭像。 */
+/*
+ * 回答是指向角色的單一氣泡；角色不再因回答出現而縮成頭像。
+ *
+ * 畫成漫畫對白框，不是一張卡片。差別不是裝飾——**一個框說「這是她在講話」，
+ * 一疊卡片說「這是查詢結果」**，而她整個賣點就是前者。所以邊框是實心墨線
+ * （不是若有似無的 16% 灰）、圓角大、尖尾巴指向她的頭，而框裡面的句子不再
+ * 各自帶底色和左邊那條線——框本身就是容器了，裡面再包一層卡片只會把「她在
+ * 講話」讀成「這裡有兩筆資料」。
+ *
+ * 高度跟著內容走（`height` 不設、只給 `max-height`）。舊版 `top` + `bottom`
+ * 兩邊都釘死，等於不管她講幾個字都撐出同一個大方塊；一句話配一個半個畫面高
+ * 的空框，看起來像沒載完。上限算到她的頭頂為止（她從 y=245 開始）。
+ */
 .answer-bubble {
-  background: rgb(255 255 255 / 94%);
-  border: 1px solid rgb(46 33 64 / 16%);
-  border-radius: 17px;
-  bottom: 315px;
-  box-shadow: 0 12px 30px rgb(46 33 64 / 19%);
+  background: rgb(255 255 255 / 96%);
+  border: 2px solid rgb(46 33 64 / 82%);
+  border-radius: 20px;
+  box-shadow: 0 10px 26px rgb(46 33 64 / 22%);
   display: none;
   flex-direction: column;
   left: 8px;
-  padding: 11px;
+  max-height: calc(100% - 325px);
+  padding: 12px 13px;
   position: absolute;
   right: 8px;
-  top: 49px;
+  top: 10px;
   z-index: 9;
 }
 
+/* 上面那條膠囊叫出來的時候，氣泡讓開；尾巴仍然停在她頭頂。 */
+body.chrome-open .answer-bubble,
+body.she-is-stopped .answer-bubble {
+  max-height: calc(100% - 364px);
+  top: 49px;
+}
+
+/*
+ * 尾巴。兩層疊出「墨線 + 白底」：外面那一顆是實心的墨色三角，裡面那一顆
+ * 白的往上蓋 2px，剛好讓框底那條線在尾巴的位置斷開。單用一個帶邊框的方塊
+ * 轉 45 度做不到這件事——它會把框自己的底線一起畫過去。
+ */
+.answer-bubble::before,
 .answer-bubble::after {
-  background: rgb(255 255 255 / 94%);
-  border-bottom: 1px solid rgb(46 33 64 / 16%);
-  border-right: 1px solid rgb(46 33 64 / 16%);
-  bottom: -8px;
   content: "";
-  height: 15px;
+  height: 16px;
   position: absolute;
-  right: 78px;
+  right: 74px;
   rotate: 45deg;
-  width: 15px;
+  width: 16px;
+}
+
+.answer-bubble::before {
+  background: rgb(46 33 64 / 82%);
+  bottom: -9px;
+}
+
+.answer-bubble::after {
+  background: rgb(255 255 255 / 96%);
+  bottom: -6px;
 }
 
 body.has-hits .answer-bubble {
@@ -844,6 +931,10 @@ body.has-consent-guide .answer-bubble {
   opacity: 0.45;
 }
 
+/*
+ * 答案比氣泡高的時候這一格會捲動。捲動條要看得見——不然最底下那一行被切一半
+ * 的樣子，在一個圓角氣泡裡讀起來像畫壞了，而不是像「底下還有」。
+ */
 .hits {
   display: flex;
   flex: 1;
@@ -854,6 +945,8 @@ body.has-consent-guide .answer-bubble {
   min-height: 0;
   overflow-y: auto;
   padding: 0 3px 0 0;
+  scrollbar-color: rgb(46 33 64 / 34%) transparent;
+  scrollbar-width: thin;
   width: 100%;
 }
 
@@ -955,33 +1048,57 @@ body.has-consent-guide .answer-bubble {
   outline: none;
 }
 
+/*
+ * 她講的那幾句話。
+ *
+ * 刻意不繼承 `.hit` 的卡片樣子（底色、左邊那條線）——框外面已經是一顆對白
+ * 泡泡了，裡面再切成一張一張卡片會把「她在說話」讀成「這是搜尋結果」。
+ * 多句之間用一條淡到幾乎看不見的線分開就夠，而第一句上面不要有線。
+ */
 .grounded-answer {
-  background: rgb(255 255 255 / 82%);
-  border-left-color: var(--letter-accent);
+  background: none;
+  border-left: 0;
+  border-radius: 0;
+  padding: 0;
+}
+
+.grounded-answer + .grounded-answer {
+  border-top: 1px solid rgb(46 33 64 / 10%);
+  padding-top: 8px;
 }
 
 .grounded-text {
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: 14.5px;
+  letter-spacing: 0.01em;
+  line-height: 1.62;
   margin: 0;
   overflow-wrap: anywhere;
   user-select: text;
 }
 
+/* 出處要小、要安靜。它是可以按的，不是要人先讀的——先讀的是上面那句話。 */
 .grounded-sources {
   align-items: center;
-  margin-top: 6px;
+  font-size: 10.5px;
+  margin-top: 5px;
+  opacity: 0.62;
+}
+
+.grounded-answer:hover .grounded-sources,
+.grounded-answer:focus-within .grounded-sources {
+  opacity: 1;
 }
 
 .grounded-source {
   appearance: none;
-  background: rgb(255 255 255 / 48%);
-  border: 1px solid rgb(46 33 64 / 20%);
+  background: rgb(46 33 64 / 6%);
+  border: 1px solid rgb(46 33 64 / 14%);
   border-radius: 999px;
   color: inherit;
   cursor: pointer;
   font: inherit;
-  padding: 3px 7px;
+  font-size: 10.5px;
+  padding: 2px 7px;
 }
 
 .grounded-source:hover,
@@ -1229,6 +1346,31 @@ body.has-consent-guide .answer-bubble {
   outline-offset: 1px;
 }
 
+/* 上排控制的開關。和送出鍵同一顆大小，只是安靜——它不是主要動作。 */
+.ask-chrome {
+  align-items: center;
+  appearance: none;
+  background: rgb(246 236 223 / 12%);
+  border: 0;
+  border-radius: 999px;
+  color: var(--chrome-fg);
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  opacity: 0.6;
+  width: 32px;
+}
+
+.ask-chrome:hover,
+.ask-chrome[aria-expanded="true"] {
+  opacity: 1;
+}
+
+.ask-chrome:focus-visible {
+  outline: 2px solid var(--letter-accent);
+  outline-offset: 1px;
+}
+
 .ask-send {
   appearance: none;
   background: var(--letter-accent);
@@ -1261,6 +1403,14 @@ body.has-consent-guide .answer-bubble {
   .persona-reel-layer {
     animation: none !important;
     transform: none !important;
+  }
+
+  /* 戳的那一下也算動畫。`.motion` 本來就已經擋住了，這裡是第二道——
+     `scale`／`translate` 是獨立屬性，不會被上面那條 `transform: none` 收掉。 */
+  .avatar.poked {
+    animation: none !important;
+    scale: none !important;
+    translate: none !important;
   }
 }
 

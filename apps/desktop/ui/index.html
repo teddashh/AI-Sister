@@ -18,7 +18,16 @@
   <body>
     <!-- 拖曳條。Tauri 只有一個 webview，所以拖曳是 `data-tauri-drag-region`
          的事，不像 Electron 要另外開一層 chrome。 -->
-    <header class="dragbar" data-tauri-drag-region>
+    <!--
+      平常這條膠囊不在。她整天掛在桌面角落，頭頂上那一條深色的東西是唯一
+      一塊「不是她」的畫素——收起來之後那塊同時也點得穿（`paintedRects()`
+      跳過 `visibility: hidden`）。要用的時候從**下面**那顆點點鍵叫它出來。
+
+      暫停鍵藏在裡面，而「你隨時停得掉」是這個產品的前提，所以有兩條保險：
+      系統匣選單永遠有「暫停」，而且她真的停下來的時候這條膠囊會自己出現
+      （`body.she-is-stopped`）——看不到她在錄，也就看不到她停著，那才是最壞的。
+    -->
+    <header class="dragbar" id="chrome-bar" data-chrome-bar data-tauri-drag-region>
       <span class="brand" data-tauri-drag-region>AI-Sister</span>
       <!-- 暫停排在最前面。她整個產品的前提是「你隨時停得掉」，那顆鍵就不該
            藏在設定裡——它跟置頂、收起來是同一級的東西。 -->
@@ -157,6 +166,23 @@
     </main>
 
     <footer class="ask">
+      <!-- 上排控制的唯一入口。放在這一列是因為手已經在這裡（要問她事情的
+           地方就在旁邊），而她的頭頂要留給桌面。 -->
+      <button
+        class="ask-chrome"
+        data-chrome-toggle
+        type="button"
+        title="顯示上排控制（暫停、時間軸、設定）"
+        aria-label="顯示上排控制（暫停、時間軸、設定）"
+        aria-expanded="false"
+        aria-controls="chrome-bar"
+      >
+        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <circle cx="3.4" cy="8" r="1.35" />
+          <circle cx="8" cy="8" r="1.35" />
+          <circle cx="12.6" cy="8" r="1.35" />
+        </svg>
+      </button>
       <input
         class="ask-input"
         data-ask-input
@@ -172,6 +198,7 @@
     <script src="./persona-reels/manifest.js"></script>
     <script src="./persona-voices/v1/manifest.js"></script>
     <script src="./persona-consent-voices/v1/manifest.js"></script>
+    <script src="./persona-banter-voices/v1/manifest.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

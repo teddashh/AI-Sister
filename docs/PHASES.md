@@ -828,7 +828,8 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
       slow UIA 後換窗、clipboard copy → switch 與 frame post-check，不拿 compile 當執行證據。
 - [ ] Persona 產品面走完：四姊妹與 13 位閨密的 17 人離線 catalog 與選擇入口可用；
       **每一位**都實際呈現至少一幅通過發布審查的 bundled 角色圖，且角色台詞只在
-      trusted click 後出聲。正式 Windows artifact 要逐一抽聽 17 位的 bundled tap-line，
+      trusted click 後出聲（alpha.132 起，閒話那一包的 `idle-giggle`／`answer-beat`
+      是唯一例外，界線見 PRODUCT.md）。正式 Windows artifact 要逐一抽聽 17 位的 bundled tap-line，
       再驗日常短句也完整走 CLI／記憶問答、不被固定台詞攔截、靜音、reduced-motion、
       斷網重開與 master stop；整條固定語音路徑不得建立網路 request。
 - [x] Persona 發布 gate：544 段逐檔通過文字／用途／pack／path／hash／大小／duration／

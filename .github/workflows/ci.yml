@@ -171,6 +171,9 @@ jobs:
       - name: Consent readings must be the exact 17 by 4 local bundle
         run: python3 ./scripts/check-persona-consent-voice-assets.py
 
+      - name: Banter must be the exact 17 by 20 local bundle
+        run: python3 ./scripts/check-persona-banter-voice-assets.py
+
       # 那顆「忘掉這一段」是這整個程式裡唯一一個不可逆的動作，而它是兩段式的。
       # 帶狀態的按鈕只有兩種壞法，兩種都很安靜：停在紅色的「確定刪掉」（下一下
       # 刪掉他沒看過的一段），或刪完之後停在灰的（重讀清單失敗，而解開它的

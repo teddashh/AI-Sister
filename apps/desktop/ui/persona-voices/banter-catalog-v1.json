@@ -1,0 +1,186 @@
+{
+  "schema": "ai-sister/persona-banter-catalog/v1",
+  "locale": "zh-TW",
+  "roster": "four-sisters-plus-thirteen-besties",
+  "pack": "banter",
+  "personas": [
+    {
+      "id": "chatgpt",
+      "group": "sister"
+    },
+    {
+      "id": "claude",
+      "group": "sister"
+    },
+    {
+      "id": "gemini",
+      "group": "sister"
+    },
+    {
+      "id": "grok",
+      "group": "sister"
+    },
+    {
+      "id": "deepseek",
+      "group": "bestie"
+    },
+    {
+      "id": "qwen",
+      "group": "bestie"
+    },
+    {
+      "id": "mistral",
+      "group": "bestie"
+    },
+    {
+      "id": "venice",
+      "group": "bestie"
+    },
+    {
+      "id": "sakana",
+      "group": "bestie"
+    },
+    {
+      "id": "perplexity",
+      "group": "bestie"
+    },
+    {
+      "id": "glm",
+      "group": "bestie"
+    },
+    {
+      "id": "kimi",
+      "group": "bestie"
+    },
+    {
+      "id": "hunyuan",
+      "group": "bestie"
+    },
+    {
+      "id": "minimax",
+      "group": "bestie"
+    },
+    {
+      "id": "nemotron",
+      "group": "bestie"
+    },
+    {
+      "id": "cohere",
+      "group": "bestie"
+    },
+    {
+      "id": "mimo",
+      "group": "bestie"
+    }
+  ],
+  "lines": [
+    {
+      "id": "poke-aiyo",
+      "use": "avatar-poke",
+      "text": "阿唷，會痛耶。"
+    },
+    {
+      "id": "poke-annoying",
+      "use": "avatar-poke",
+      "text": "煩耶。"
+    },
+    {
+      "id": "poke-what",
+      "use": "avatar-poke",
+      "text": "幹嘛啦。"
+    },
+    {
+      "id": "poke-itch",
+      "use": "avatar-poke",
+      "text": "欸，會癢。"
+    },
+    {
+      "id": "poke-again",
+      "use": "avatar-poke",
+      "text": "你又戳我。"
+    },
+    {
+      "id": "poke-okay",
+      "use": "avatar-poke",
+      "text": "好啦好啦。"
+    },
+    {
+      "id": "poke-here",
+      "use": "avatar-poke",
+      "text": "我在啦。"
+    },
+    {
+      "id": "poke-stop",
+      "use": "avatar-poke",
+      "text": "不要戳了。"
+    },
+    {
+      "id": "poke-free",
+      "use": "avatar-poke",
+      "text": "你很閒喔。"
+    },
+    {
+      "id": "poke-hmm",
+      "use": "avatar-poke",
+      "text": "嗯？怎樣。"
+    },
+    {
+      "id": "giggle-hehe",
+      "use": "idle-giggle",
+      "text": "呵呵，我在旁邊喔。"
+    },
+    {
+      "id": "giggle-hihi",
+      "use": "idle-giggle",
+      "text": "嘻嘻，我自己笑的。"
+    },
+    {
+      "id": "giggle-haha",
+      "use": "idle-giggle",
+      "text": "哈哈，想到好笑的。"
+    },
+    {
+      "id": "giggle-nothing",
+      "use": "idle-giggle",
+      "text": "呵，沒事。"
+    },
+    {
+      "id": "giggle-pff",
+      "use": "idle-giggle",
+      "text": "噗。好啦。"
+    },
+    {
+      "id": "beat-let-me-see",
+      "use": "answer-beat",
+      "text": "我看看喔。"
+    },
+    {
+      "id": "beat-found",
+      "use": "answer-beat",
+      "text": "找到了，就是這個。"
+    },
+    {
+      "id": "beat-here",
+      "use": "answer-beat",
+      "text": "喏，在這裡。"
+    },
+    {
+      "id": "beat-hmm",
+      "use": "answer-beat",
+      "text": "嗯，這個啊。"
+    },
+    {
+      "id": "beat-remember",
+      "use": "answer-beat",
+      "text": "我想起來了。"
+    }
+  ],
+  "totals": {
+    "personas": 17,
+    "linesPerPersona": 20,
+    "avatarPoke": 10,
+    "idleGiggle": 5,
+    "answerBeat": 5,
+    "audioClips": 340
+  }
+}
