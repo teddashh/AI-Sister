@@ -1745,20 +1745,30 @@ const IDLE_GIGGLE_LINGER_MS = 6_000;
 let idleGiggleTimer = null;
 let idleGiggleClearTimer = null;
 
-/** 現在適不適合出聲。任何一條不成立就跳過這一輪，不重排也不補。 */
-function idleEnoughToGiggle() {
-  return (
-    personaEnabled &&
-    personaTapLines &&
-    document.visibilityState === "visible" &&
-    state === "idle" &&
-    !paused &&
-    masterStopPhase === "clear" &&
-    consentGuideSheet === null &&
-    bundledVoicePresentation === null &&
-    // 他正在打字。這時候插一句「嘻嘻」不是陪伴，是打斷。
-    document.activeElement !== askInput
-  );
+/**
+ * 現在適不適合出聲。過得了回 `null`，過不了回**擋下來的那一條**。
+ *
+ * 回代號而不回布林，是為了診斷報告的第六格。時候到了她卻沒笑，有兩種完全
+ * 不同的原因——「這一輪還沒到兩分鐘」和「到了五次、每一次他都正在打字」
+ * ——而在一份寫著「笑了 0 次」的報告上，這兩件事長得一模一樣。第一種是他
+ * 測得太短，第二種才是要改的東西。
+ *
+ * 每個代號都是寫死的 ASCII 字，不含畫面上的任何一個字（見 `Word`）。
+ * 順序就是原本那串 `&&` 的短路順序，所以同時成立好幾條的時候，報告指的
+ * 是「最先擋下來的那一條」，而不是隨便一條。
+ */
+function whyNotGiggle() {
+  if (!personaEnabled) return "persona_off";
+  if (!personaTapLines) return "no_lines";
+  if (document.visibilityState !== "visible") return "hidden";
+  if (state !== "idle") return "busy";
+  if (paused) return "paused";
+  if (masterStopPhase !== "clear") return "stopping";
+  if (consentGuideSheet !== null) return "consent_sheet";
+  if (bundledVoicePresentation !== null) return "voice_sheet";
+  // 他正在打字。這時候插一句「嘻嘻」不是陪伴，是打斷。
+  if (document.activeElement === askInput) return "typing";
+  return null;
 }
 
 function scheduleIdleGiggle() {
@@ -1775,9 +1785,19 @@ function scheduleIdleGiggle() {
 }
 
 function giggleIfNothingIsHappening() {
-  if (!idleEnoughToGiggle()) return;
+  /* 跳過的時候也記一則。計時器每響一次就恰好留下一則觀測——笑了就是
+   * `giggle`，沒笑就是 `giggle_skipped`——所以報告上「笑 0 次、跳過 0 次」
+   * 的意思是「這一輪根本還沒響過」，和「響了但被擋住」分得開。 */
+  const blocked = whyNotGiggle();
+  if (blocked !== null) {
+    noteForDiagnosis({ kind: "giggle_skipped", at: Date.now(), why: blocked });
+    return;
+  }
   const line = pickBanter(activeProfile.giggles);
-  if (line === null) return;
+  if (line === null) {
+    noteForDiagnosis({ kind: "giggle_skipped", at: Date.now(), why: "no_line_picked" });
+    return;
+  }
   lastSpokenLineId = line.lineId;
   personaLine.textContent = line.text;
   personaLine.hidden = false;

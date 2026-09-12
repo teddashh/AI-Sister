@@ -184,6 +184,16 @@ function pokePool(id) {
   ].map((clip) => clip.text);
 }
 
+/* 這一輪所有夾具送出去的診斷觀測，不分是哪一個 view。
+ *
+ * ⑨ 那條機械掃描本來只掃兩個 view 的 `diagnoseNotes`，而它的說明寫著「這一條
+ * 是給還沒寫出來的 note 種類看的」——那句話當時是假的：那兩個 view 從來不讓
+ * 閒話計時器響，所以 `giggle_skipped` 整個種類它一則都看不到。實測過：把擋下
+ * 來的理由改成夾帶輸入框裡的字，六條指名的斷言紅了一條，掃描那條全綠。 */
+const everyDiagnoseNote = [];
+/** ⑨ 掃到第幾則。收尾時比一次，證明它真的是最後一節。 */
+let sweptSoFar = -1;
+
 async function open(personaView = persona(), options = {}) {
   let plays = 0;
   let cancels = 0;
@@ -414,6 +424,7 @@ async function open(personaView = persona(), options = {}) {
          * 「濾掉」不會變成「沒人看」。 */
         if (cmd === "diagnose_note") {
           diagnoseNotes.push(args?.note);
+          everyDiagnoseNote.push(args?.note);
           return;
         }
         calls.push(cmd);
@@ -2128,17 +2139,21 @@ console.log("⑥ᵈ 沒事的時候她會自己笑一下；答案落地也有一
 
   // 每一道閘門各關一次。這裡刻意一條一條開夾具而不是共用一個，因為「哪一條
   // 擋住的」才是這段要證的事——合成一個夾具的話，其中一條失效看不出來。
+  /* 每一列多帶一個代號：診斷報告第六格印「笑了 0 次」的時候，要說得出是哪一
+   * 條擋的。六條長得一模一樣（都是「沒開口」），所以每一條各自釘自己那個代
+   * 號——只斷言「有一則 skip」的話，六條全部指到同一個 bug 也是綠的。 */
   const gated = [
-    ["全停中", persona("chatgpt", { voice_enabled: true }), { masterStopState: "stopping" }],
-    ["暫停中", persona("chatgpt", { voice_enabled: true }), { pauseState: true }],
-    ["關掉角色", persona("chatgpt", { enabled: false, voice_enabled: true }), {}],
-    ["關掉台詞", persona("chatgpt", { tap_lines: false, voice_enabled: true }), {}],
-    ["視窗看不見", persona("chatgpt", { voice_enabled: true }), { visibilityState: "hidden" }],
+    ["全停中", persona("chatgpt", { voice_enabled: true }), { masterStopState: "stopping" }, "stopping"],
+    ["暫停中", persona("chatgpt", { voice_enabled: true }), { pauseState: true }, "paused"],
+    ["關掉角色", persona("chatgpt", { enabled: false, voice_enabled: true }), {}, "persona_off"],
+    ["關掉台詞", persona("chatgpt", { tap_lines: false, voice_enabled: true }), {}, "no_lines"],
+    ["視窗看不見", persona("chatgpt", { voice_enabled: true }), { visibilityState: "hidden" }, "hidden"],
   ];
-  for (const [name, view, options] of gated) {
+  for (const [name, view, options, why] of gated) {
     const shut = await open(view, options);
     await shut.poll();
     const before = shut.slowTimers.length;
+    const beforeNotes = shut.diagnoseNotes.length;
     await shut.fireSlowTimers((timer) => timer.ms >= 60_000);
     check(
       `${name}的時候她不會自己開口`,
@@ -2150,16 +2165,33 @@ console.log("⑥ᵈ 沒事的時候她會自己笑一下；答案落地也有一
       shut.slowTimers.length > before,
       { before, after: shut.slowTimers.length },
     );
+    const skips = shut.diagnoseNotes
+      .slice(beforeNotes)
+      .filter((note) => note?.kind === "giggle_skipped");
+    check(
+      `${name}的時候診斷說得出是「${why}」擋的`,
+      skips.length === 1 && skips[0]?.why === why,
+      JSON.stringify(skips),
+    );
   }
 
   // 他正在打字的時候插一句「嘻嘻」不是陪伴，是打斷。
   const typing = await open(persona("chatgpt", { voice_enabled: true }));
   globalThis.document.activeElement = typing.node("[data-ask-input]");
+  const beforeTyping = typing.diagnoseNotes.length;
   await typing.fireSlowTimers((timer) => timer.ms >= 60_000);
   check(
     "他正在打字的時候不插嘴",
     typing.node("[data-persona-line]").textContent === "" && typing.plays() === 0,
     typing.node("[data-persona-line]").textContent,
+  );
+  const typingSkips = typing.diagnoseNotes
+    .slice(beforeTyping)
+    .filter((note) => note?.kind === "giggle_skipped");
+  check(
+    "他正在打字的時候診斷說得出是「typing」擋的",
+    typingSkips.length === 1 && typingSkips[0]?.why === "typing",
+    JSON.stringify(typingSkips),
   );
 
   // 答案落地那一聲。
@@ -2400,22 +2432,40 @@ console.log("⑨ 診斷觀測送得出數字，送不出螢幕上的字");
   /* 機械掃一遍：除了 `answered`（她自己的答案，報告把那一節放在那條線的下面，
    * 他可以整段刪掉），沒有一則觀測帶得動自由文字。
    *
+   * 掃的是 `everyDiagnoseNote`——**這一輪每一個夾具**送出去的每一則，不是眼前
+   * 這兩個 view 的。差別是整個種類的可見度：上面那幾個 view 從來不讓閒話計時
+   * 器響，所以只掃它們的話，`giggle_skipped` 一則都進不了這個迴圈，而這一段的
+   * 說明卻寫著它守得住「還沒寫出來的」欄位。
+   *
    * 這一條是給**還沒寫出來的** note 種類看的：以後誰在 `Note` 上加一個字串欄
    * 位，這裡當場紅，不必等到有人讀報告才發現螢幕上的字被送出去了。`clip` 是
-   * 語音檔的 lineId，所以另外釘它的形狀，免得有人拿它夾帶。 */
+   * 語音檔的 lineId，`why` 是擋下那一聲笑的代號，所以另外釘它們的形狀，免得有
+   * 人拿它夾帶。 */
   const CARRIES_HER_ANSWER = "answered";
   const smuggled = [];
-  for (const note of [...p.diagnoseNotes, ...loud.diagnoseNotes]) {
+  for (const note of everyDiagnoseNote) {
     if (note?.kind === CARRIES_HER_ANSWER) continue;
     for (const [key, value] of Object.entries(note ?? {})) {
       if (typeof value !== "string") continue;
       if (key === "kind") continue;
       if (key === "clip" && /^[a-z0-9_-]+$/u.test(value)) continue;
+      // `why` 是「哪一條擋掉這一聲笑」的代號，形狀跟 Rust 那邊的 `Word` 對齊。
+      if (key === "why" && /^[a-z0-9_-]{1,32}$/u.test(value)) continue;
       smuggled.push({ kind: note?.kind, key, value });
     }
   }
   check("除了她的答案，沒有一則觀測帶自由文字", smuggled.length === 0, JSON.stringify(smuggled));
+  sweptSoFar = everyDiagnoseNote.length;
 }
+
+/* 上面那一遍掃的是「到目前為止」。它必須是最後一節，否則後面新加的夾具送出去
+ * 的觀測沒有人看——而那正是它剛剛才修好的那個洞。所以這裡不是寫註解拜託別人
+ * 保持順序，是真的量一次。 */
+check(
+  "自由文字掃描是最後一節，後面沒有人再送觀測",
+  sweptSoFar === everyDiagnoseNote.length,
+  { 掃過: sweptSoFar, 全部: everyDiagnoseNote.length },
+);
 
 console.log("");
 if (failures > 0) {

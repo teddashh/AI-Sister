@@ -319,6 +319,11 @@ pub enum MeasureValue {
     Num(f64),
     Flag(bool),
     Word(Word),
+    /// 一條擋下來的理由。
+    ///
+    /// 裝的還是 [`Word`]——畫面那半一樣送不進自由文字——只是印出來的時候換
+    /// 成他讀得懂的話。中文是這一邊自己的字典，不是對面送來的。
+    Blocker(Word),
 }
 
 impl MeasureValue {
@@ -329,7 +334,29 @@ impl MeasureValue {
             MeasureValue::Flag(true) => "是".to_string(),
             MeasureValue::Flag(false) => "否".to_string(),
             MeasureValue::Word(w) => w.as_str().to_string(),
+            MeasureValue::Blocker(w) => giggle_blocker(w.as_str()).to_string(),
         }
+    }
+}
+
+/// 擋下那一聲笑的理由，翻成他讀得懂的話。
+///
+/// 認不得就原樣把代號印出來，**不要印「不明」**。畫面那半新加一條條件而這裡
+/// 忘了跟上的時候，代號至少還說得出是哪一條；「不明」會把「我沒跟上」講成
+/// 「不知道為什麼」——而這一格存在的理由正好是要說出為什麼。
+fn giggle_blocker(word: &str) -> &str {
+    match word {
+        "persona_off" => "角色關著",
+        "no_lines" => "這個角色沒有台詞",
+        "hidden" => "視窗不在前面",
+        "busy" => "她正在忙別的",
+        "paused" => "暫停中",
+        "stopping" => "正在全部停下來",
+        "consent_sheet" => "同意書開著",
+        "voice_sheet" => "正在試聽語音",
+        "typing" => "你正在打字",
+        "no_line_picked" => "抽不到還沒講過的句子",
+        other => other,
     }
 }
 
@@ -671,6 +698,16 @@ pub enum Note {
         clip: Option<String>,
         voiced: bool,
     },
+    /// 時候到了，可是條件不成立，所以這一輪沒笑。
+    ///
+    /// 沒有這一則，⑥ 印「笑了 0 次」只讀得出一種意思——這功能沒做——而最
+    /// 常見的其實是另一種：計時器響了好幾次，每一次他都正在打字。兩件事在
+    /// 報告上長得一樣，可是一個要他測久一點，另一個要我改東西。
+    GiggleSkipped {
+        at: Millis,
+        /// 最先擋下來的那一條的代號。過 [`Word`] 那一關，所以帶不動螢幕上的字。
+        why: String,
+    },
     /// 答完一題。
     Answered {
         at: Millis,
@@ -694,6 +731,7 @@ impl Note {
             | Note::Bubble { at, .. }
             | Note::Poke { at, .. }
             | Note::Giggle { at, .. }
+            | Note::GiggleSkipped { at, .. }
             | Note::Answered { at, .. } => *at,
         }
     }
@@ -850,6 +888,33 @@ impl Notebook {
             })
             .filter(|(raw, _)| Word::new(raw).is_some())
             .collect()
+    }
+
+    /// 時候到了卻沒笑的那幾則，各是哪一條擋的。
+    ///
+    /// **這裡刻意不過 [`Word`]。** 數量是個整數，它夾帶不了任何東西；把不合
+    /// 格的代號一起丟掉，只會讓「跳過幾次」少報，而那個數字正是這一格要回答
+    /// 的問題。收不收得下自由文字是**指名**那一關的事，見底下的 `Word::new`。
+    fn giggle_skips(&self) -> Vec<&str> {
+        self.notes
+            .iter()
+            .filter_map(|note| match note {
+                Note::GiggleSkipped { why, .. } => Some(why.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 出現最多次的那一個。平手就取先出現的。
+    fn commonest<'a>(values: &[&'a str]) -> Option<&'a str> {
+        let mut best: Option<(&str, usize)> = None;
+        for value in values {
+            let count = values.iter().filter(|other| *other == value).count();
+            if best.is_none_or(|(_, seen)| count > seen) {
+                best = Some((value, count));
+            }
+        }
+        best.map(|(value, _)| value)
     }
 
     fn distinct(values: &[(&str, bool)]) -> usize {
@@ -1048,23 +1113,36 @@ impl Notebook {
 
         // ⑥ 沒事也笑幾下
         let giggle_clips = self.clips(true);
+        let skips = self.giggle_skips();
+        let mut giggle_measured = vec![
+            m("笑了幾次", MeasureValue::Int(giggle_clips.len() as i64)),
+            m(
+                "幾句不同的",
+                MeasureValue::Int(Self::distinct(&giggle_clips) as i64),
+            ),
+            m(
+                "真的出聲的",
+                MeasureValue::Int(giggle_clips.iter().filter(|(_, voiced)| *voiced).count() as i64),
+            ),
+            m("這個角色手上有幾句", MeasureValue::Int(giggle_lines as i64)),
+            /* 這一格是「笑了 0 次」的解釋。她每兩到五分鐘試一次，試一次就在這
+             * 兩格之一留下一筆，所以兩格都是 0 的意思是「這一輪還沒試過」——他
+             * 測太短，不是她壞了。 */
+            m("時候到了卻跳過", MeasureValue::Int(skips.len() as i64)),
+        ];
+        // 指名之前才過 `Word`：報告上寫得出來的只有代號，螢幕上的字進不來。
+        let named: Vec<&str> = skips
+            .iter()
+            .copied()
+            .filter(|why| Word::new(why).is_some())
+            .collect();
+        if let Some(top) = Self::commonest(&named).and_then(Word::new) {
+            giggle_measured.push(m("最常擋下來的", MeasureValue::Blocker(top)));
+        }
         items.push(Item {
             number: 6,
             asked: "沒事也可以呵呵嘻嘻笑幾下".into(),
-            measured: vec![
-                m("笑了幾次", MeasureValue::Int(giggle_clips.len() as i64)),
-                m(
-                    "幾句不同的",
-                    MeasureValue::Int(Self::distinct(&giggle_clips) as i64),
-                ),
-                m(
-                    "真的出聲的",
-                    MeasureValue::Int(
-                        giggle_clips.iter().filter(|(_, voiced)| *voiced).count() as i64
-                    ),
-                ),
-                m("這個角色手上有幾句", MeasureValue::Int(giggle_lines as i64)),
-            ],
+            measured: giggle_measured,
             verdict: if giggle_clips.is_empty() {
                 Verdict::NotSeen
             } else {
@@ -2441,9 +2519,20 @@ mod notebook_tests {
         }
     }
 
+    fn skipped(at: Millis, why: &str) -> Note {
+        Note::GiggleSkipped {
+            at,
+            why: why.to_string(),
+        }
+    }
+
     /// 開機那兩則永遠在最前面——真的跑起來也是這個順序。
+    ///
+    /// 上一版只推了 `persona()`，於是這個 helper 做出來的簿子沒有開機那一則，
+    /// 而少了它 `fill` 就不掛自檢——註解說兩則、程式碼推一則，測試看不出來。
     fn book(notes: Vec<Note>) -> Notebook {
         let mut book = Notebook::new();
+        book.note(started());
         book.note(persona());
         for note in notes {
             book.note(note);
@@ -2750,6 +2839,123 @@ mod notebook_tests {
         assert!(
             !small.contains("已經滾掉了"),
             "什麼都沒擠掉卻說滾掉了：\n{small}"
+        );
+    }
+
+    /// 把一本簿子印成報告。`filled` 走的也是這條路。
+    fn reported(book: &Notebook) -> String {
+        let mut snapshot = tests::snapshot();
+        book.fill(&mut snapshot, 1_789_225_320_000);
+        render(&snapshot)
+    }
+
+    /// 「笑了 0 次」要說得出是哪一種 0。
+    ///
+    /// 她每兩到五分鐘試一次，試不成也留一則，所以這兩格加起來就是「響了幾
+    /// 次」。「笑 0、跳過 0」＝這一輪還沒響過，他測太短；「笑 0、跳過 5」＝
+    /// 響了五次、每次都被同一件事擋住，那才是要我改的東西。沒有這一格，兩
+    /// 種在報告上是同一句話，而它們要他做的事完全相反。
+    #[test]
+    fn a_run_with_no_giggles_says_which_kind_of_zero_it_is() {
+        let never = book(vec![]);
+        let sixth = item(&never, 6);
+        assert_eq!(value(&sixth, "笑了幾次"), MeasureValue::Int(0));
+        assert_eq!(
+            value(&sixth, "時候到了卻跳過"),
+            MeasureValue::Int(0),
+            "一次都沒響過就是 0，不是「沒這個欄位」"
+        );
+        assert!(
+            sixth.measured.iter().all(|m| m.label != "最常擋下來的"),
+            "一次都沒試過就不可以指認兇手：{:?}",
+            sixth.measured
+        );
+
+        /* 順序是挑過的：第一則、最後一則、最多的那一則各是不同的代號。三個
+         * 都一樣的話，一支「回傳第一個」或「回傳最後一個」的 `commonest` 照樣
+         * 會綠——而那支是錯的。 */
+        let blocked = book(vec![
+            skipped(1_789_222_001_000, "hidden"),
+            skipped(1_789_222_002_000, "typing"),
+            skipped(1_789_222_003_000, "typing"),
+            skipped(1_789_222_004_000, "paused"),
+        ]);
+        let sixth = item(&blocked, 6);
+        assert_eq!(value(&sixth, "笑了幾次"), MeasureValue::Int(0));
+        assert_eq!(value(&sixth, "時候到了卻跳過"), MeasureValue::Int(4));
+        assert_eq!(
+            value(&sixth, "最常擋下來的"),
+            MeasureValue::Blocker(Word::new("typing").expect("typing 過得了 Word")),
+            "四次裡兩次是打字，指的要是那一條"
+        );
+        assert_eq!(
+            sixth.verdict,
+            Verdict::NotSeen,
+            "被擋掉不等於做對了，那一格還是「沒發生過」"
+        );
+    }
+
+    /// 那一格要印他讀得懂的話，不是印代號。
+    ///
+    /// 代號是給型別看的（[`Word`] 只收 `[a-z0-9_-]`），報告是給他看的。
+    #[test]
+    fn the_report_names_the_blocker_in_words_he_reads() {
+        let blocked = book(vec![skipped(1_789_222_001_000, "typing")]);
+        let report = reported(&blocked);
+        assert!(
+            report.contains("你正在打字"),
+            "報告要說得出是哪一條擋的：\n{report}"
+        );
+        assert!(
+            !report.contains("typing"),
+            "代號漏到報告上了，那一行是給人讀的：\n{report}"
+        );
+    }
+
+    /// 認不得的代號原樣印出來，不要印「不明」。
+    ///
+    /// 畫面那半新加一條條件而這一邊忘了跟上的時候，代號至少還說得出是哪一
+    /// 條。「不明」會把「我沒跟上」講成「不知道為什麼」——而這一格存在的理
+    /// 由正好是要說出為什麼。
+    #[test]
+    fn a_blocker_this_side_does_not_know_still_names_itself() {
+        let blocked = book(vec![skipped(1_789_222_001_000, "some-new-gate")]);
+        let report = reported(&blocked);
+        assert!(
+            report.contains("some-new-gate"),
+            "認不得就原樣印，不要吞掉：\n{report}"
+        );
+        assert!(!report.contains("不明"), "「不明」比代號還沒用：\n{report}");
+    }
+
+    /// 擋下來的理由那一格，一樣收不下螢幕上的字。
+    ///
+    /// 而**次數要照數**：整數夾帶不了東西，把它一起丟掉只會讓「跳過幾次」
+    /// 少報，而那正是這一格要回答的問題。
+    #[test]
+    fn a_blocker_carrying_screen_text_is_counted_but_never_printed() {
+        let smuggled = book(vec![
+            skipped(1_789_222_001_000, "他正在打字：我的密碼是 hunter2"),
+            skipped(1_789_222_002_000, "hidden"),
+        ]);
+        /* 漏沒漏那一條擺最前面。斷言是短路的：排在後面的話，任何一個先失敗
+         * 的斷言都會讓它整條不被執行，而「證明過了」和「沒跑到」在綠燈上長得
+         * 一模一樣。 */
+        let report = reported(&smuggled);
+        assert!(
+            !report.contains("hunter2"),
+            "螢幕上的字從這一格漏出去了：\n{report}"
+        );
+        let sixth = item(&smuggled, 6);
+        assert_eq!(
+            value(&sixth, "時候到了卻跳過"),
+            MeasureValue::Int(2),
+            "兩次就是兩次，代號不合格不代表那一次沒發生"
+        );
+        assert_eq!(
+            value(&sixth, "最常擋下來的"),
+            MeasureValue::Blocker(Word::new("hidden").expect("hidden 過得了 Word")),
+            "指名只能從過得了 Word 的那些裡面挑"
         );
     }
 
