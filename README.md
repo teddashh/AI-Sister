@@ -151,6 +151,7 @@ sister doctor
 sister record --duration 60
 sister stop-all                 # 三層一起停；不會自己恢復
 sister stop-all --off           # 解除全停，不碰原本的暫停／拔手
+sister diagnose                 # 出了事，寫成一份可以整份貼出來的字
 ```
 
 安裝版可直接開 AI-Sister；免安裝用法則開 `sister-desktop.exe`。然後問她剛剛那一分鐘

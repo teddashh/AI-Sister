@@ -65,6 +65,7 @@ sister.exe query 電話             # 查，每筆都附出處
 sister.exe stop-all               # capture／brain／hands 一起停，不會自己恢復
 sister.exe stop-all --off         # 解除全停，不碰原本的 pause／拔手
 sister.exe prune --dry-run        # 保留期現在會刪掉什麼
+sister.exe diagnose               # 出了事，寫成一份可以整份貼出來的字
 ```
 
 第二行不是形式。**沒簽第一張同意書，`record` 不會開始錄**——不是印個
