@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""文件裡寫的 bytes，必須是 repo 自己釘住的那個數字。
+r"""文件裡寫的 bytes，必須是 repo 自己釘住的那個數字。
 
 alpha.137 把 952 段語音全部重做，三包的總量都變了。同一組數字散在 README、
 AGENTS、SPEC、PRIVACY 六個地方——我是靠 `grep` 一個一個找出來的，而 `grep` 只找
