@@ -184,7 +184,13 @@ def main() -> int:
                 f"——整包多半沒切過頭尾。最長的幾支：{worst_few}")
 
     if total:
-        print(f"量了 {total} 支。最長的一端是 {worst[0]} 的 {worst[1]} ms。")
+        # 硬上限的餘裕。它和上面每包那條「還能再壞幾支」互不涵蓋：比例那條可以
+        # 一直綠著，而只要有一支的一端長過 HARD_MS 就紅，不管那一包多乾淨。
+        # 兩個都印，哪一個先撐不住讓輸出自己講。
+        gap = HARD_MS - worst[1]
+        against = (f"離 {HARD_MS} ms 的硬上限還有 {gap} ms" if gap >= 0
+                   else f"已經過了 {HARD_MS} ms 的硬上限 {-gap} ms")
+        print(f"量了 {total} 支。最長的一端是 {worst[0]} 的 {worst[1]} ms，{against}。")
 
     if problems:
         print(f"\n✗ {len(problems)} 個問題：")

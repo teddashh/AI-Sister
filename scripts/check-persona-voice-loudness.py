@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -170,8 +171,10 @@ def main() -> int:
 
         if clips:
             share = in_band / len(clips)
+            # 還能再掉幾支才會低於 IN_BAND_MIN。0 就是「下一支掉出帶子這條就紅」。
+            slack = in_band - math.ceil(IN_BAND_MIN * len(clips) - 1e-9)
             print(f"  {label}：{len(clips)} 支，{in_band} 支落在 "
-                  f"{target}±{tolerance} LUFS（{share:.1%}）")
+                  f"{target}±{tolerance} LUFS（{share:.1%}），還能再掉 {max(slack, 0)} 支")
             if share < IN_BAND_MIN:
                 problems.append(
                     f"{label}：只有 {share:.1%} 落在帶子裡，低於 {IN_BAND_MIN:.0%}"
@@ -182,12 +185,20 @@ def main() -> int:
         spread = measured_all[-1] - measured_all[0]
         print(f"量了 {total} 支。解出來的整合響度 {measured_all[0]:.1f} … {measured_all[-1]:.1f} LUFS"
               f"（散度 {spread:.1f} LU）。")
-        # 兩條硬線的餘裕。這兩個數字比「幾成落在帶子裡」更早撐不住：帶子外面
-        # 還有 MAX_QUIET_LU 可以掉，但掉完就是紅的，而且只要一支。
+        # 兩條硬線的餘裕。它們和上面每包那條「還能再掉幾支」互不涵蓋：帶子外面
+        # 還有 MAX_QUIET_LU 可以掉，所以一支可以出了帶子還離底線好幾 LU；反過來
+        # 只要一支撞到底線就紅，不管那一包落在帶子裡的比例多漂亮。兩個都印，哪
+        # 一個先撐不住讓輸出自己講。
         floor = -23.0 - MAX_QUIET_LU
-        print(f"  最靜的一支 {measured_all[0]:.1f} LUFS，離 {floor:.1f} 的底線還有 "
-              f"{measured_all[0] - floor:.1f} LU；最高的真實峰值 {max(peaks_all):+.2f} dBTP，"
-              f"離 {SHIPPED_CEILING_DBTP:+.1f} 的天花板還有 {SHIPPED_CEILING_DBTP - max(peaks_all):.2f} dB。")
+        room = measured_all[0] - floor
+        headroom = SHIPPED_CEILING_DBTP - max(peaks_all)
+        print(f"  最靜的一支 {measured_all[0]:.1f} LUFS，"
+              + (f"離 {floor:.1f} 的底線還有 {room:.1f} LU"
+                 if room >= 0 else f"已經低過 {floor:.1f} 的底線 {-room:.1f} LU")
+              + f"；最高的真實峰值 {max(peaks_all):+.2f} dBTP，"
+              + (f"離 {SHIPPED_CEILING_DBTP:+.1f} 的天花板還有 {headroom:.2f} dB。"
+                 if headroom >= 0
+                 else f"已經超過 {SHIPPED_CEILING_DBTP:+.1f} 的天花板 {-headroom:.2f} dB。"))
 
     if problems:
         print(f"\n✗ {len(problems)} 個問題：")
