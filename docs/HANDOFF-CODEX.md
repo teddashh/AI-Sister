@@ -4,6 +4,10 @@
 路線圖。路線圖在 `docs/PHASES.md`，規格在 `docs/SPEC.md`，產品定義在
 `docs/PRODUCT.md`，工作紀律在 `AGENTS.md`。四份都要讀，順序就是這個順序。
 
+> **接手更正（2026-09-13）：**這份交接的第 4.2 節與原步驟 3 把 #42 誤寫成尚未
+> 實作。實際上它已由 `fbb61e2` 與 `85f6f16` 在 alpha.100 完成並出貨；PHASES 同一段
+> 後文也有完整收據。下方已改成不再指示下一位重做。
+
 ---
 
 ## 0. 這是什麼專案
@@ -124,17 +128,20 @@ Developer ID、notarization 與真機 TCC 收據。
 - **23 顆 commit 沒出貨。** `v0.1.0-alpha.140` 之後累積的東西全部只在 `main` 上。
   Ted 的節奏是「有執行檔他就下載測，沒有就繼續推；做完一段就切 tag」。
 
-### 4.2 產品面最大的一塊：#42 的 URL 設定
+### 4.2 交接更正：#42 的 URL 設定已完成
 
-在 `docs/PHASES.md` 的 Phase 6 那一節，搜 `#42 沒關`。
+`docs/PHASES.md` 的 Phase 6 那一節先保留「#42 沒關」的歷史問題，後文再記錄
+**alpha.100 落地**。交接時只讀到前半段，因而把已完成能力誤列成下一步。
 
-Ted 已經定案設計，**但一行都還沒做**：
+- `crates/sister-hands/src/url_policy.rs` 有兩個答案與 `Option` 三態；`None` 是「還沒
+  問過」，型別上和「你說了要當場按」分開。
+- `apps/desktop/ui/app.js` 會在主對話主動提出問題；`sister url-policy` 是同一題的 CLI
+  入口。
+- `Grant::authorize_unattended` 在唯一 standing-grant 授權邊界執行 host provenance
+  規則；當場按的路徑維持另一種明確同意。
 
-- 「螢幕上被埋的 URL 指過去會執行」這件事本身還在。目標來自別的 app 時授權書會擋，
-  但被埋的 URL 如果就在已授權那個 app 的畫面上，照樣會執行。
-- **〔Ted 定案 2026-09-06〕不由產品替他選，做成使用者選的**，而且**由她開口問**，
-  不是躺在設定頁裡等人發現。她問的那一句、兩個答案的精確語意、以及「第三種狀態是
-  『還沒問過』不是預設值」都已經逐字寫在 PHASES 那一段。照抄，不要重新設計。
+這一塊已經包含在 alpha.100 之後的公開版本，**不要再做一次**。Phase 6 的 injection
+exit criterion 仍未勾，是因為同站 path、redirect 與當場按的邊界，不是缺這個設定。
 
 ### 4.3 已知但刻意沒做的
 
@@ -196,14 +203,12 @@ gh run list --limit 3 --json headSha,status,conclusion \
 假紅）。打完 tag 要回頭確認 release job 真的跑了——linux job 一紅，release job 會
 被靜靜跳過。
 
-### 步驟 3：接 #42 的 URL 設定第一刀
+### 步驟 3：不要重做 #42；把正式 artifact 交給 Ted 實測
 
-從**她問的那一句**開始，不要從設定頁開始。文字逐字抄 `docs/PHASES.md` 裡搜 `#42 沒關`
-那一段（Ted 定案過的）。第三種狀態是「還沒問過」，型別上要和「你說了不要」分得開。
-
-**驗收**：新增的邏輯放在 `crates/`（不是 `apps/desktop/src-tauri/src/main.rs`，理由
-見第 6 節），`cargo test --workspace` 蓋得到，而且對新分支各打**兩種**突變（整條刪
-掉、以及把它算出來的值換成隔壁那一臂的值）。
+#42 已在 alpha.100 完成，證據見第 4.2 節。alpha.141 的 release job 公開四個 artifact
+後，下一個產品驗收點是讓 Ted 下載正式 `AI-Sister-Setup.exe`，照
+`docs/WINDOWS-CHECKLIST.md` 走尚未勾掉的真 Windows 項目；不要拿另一輪 source gate
+代替正式安裝副本上的結果。
 
 ---
 

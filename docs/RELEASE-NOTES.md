@@ -88,6 +88,50 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
 
+## v0.1.0-alpha.141
+
+**產品程式與 952 支 Ogg 沒有變；這一版把它們隨附的聲明與同意書朗讀證據鏈收完整。**
+
+alpha.140 的音檔、manifest 與 runtime 接線原封不動。這一版改的是「下載頁和 NOTICE
+寫的每一句，能不能在出貨當下重新證明」，以及「他看到的新條文，會不會仍播放一份更舊的
+錄音」。
+
+**一、六份出貨 NOTICE 的 69 句，現在每一句都有明確的證據種類。**
+
+| 種類 | 句數 | 怎麼負責 |
+|---|---:|---|
+| MEASURED | 22 | 當場從 manifest、檔案 bytes／hash 或出貨 Ogg 重新量 |
+| GATE | 9 | 由另一條既有出貨閘門直接驗 |
+| LAB | 15 | 只能由不進 public repo 的錄音實驗室收據證明，公開閘門不冒充量得到 |
+| PROSE | 23 | 授權、商標、範圍與解釋文字，不偽裝成素材量測 |
+
+多一句沒被分類會紅；刪一句讓某個分類變成死資料也會紅。三份語音 NOTICE 另由各自的
+promote 腳本產生並逐位元組比對，不能只改出貨副本或只改產地模板。
+
+**二、NOTICE 印出的聲音數字，現在直接對回使用者真的會聽到的檔案。**
+
+CI 會把 952 支 Ogg Opus 全部解碼，逐支把 integrated loudness 與 true peak 對回
+manifest；NOTICE 的實測範圍由 manifest 計算，不再手抄。這一輪也補上先前漏掉的
+true-peak 欄位：改掉任一支 manifest 的峰值，閘門會在那一支直接失敗。
+
+三個正式語音目錄現在只准有 manifest 列出的 Ogg、`manifest.json`、`manifest.js` 與
+`NOTICE.md`。repo 全域另掃一次 tracked files，WAV 母帶、reference、`refs.json` 與
+private QC receipt 即使放在正式目錄外，也不能混進 public repo。
+
+**三、同意書的字改過，朗讀不能留在舊版。**
+
+原有閘門已把 native 條文、onboarding 顯示文字、catalog 與 68 段錄音的 manifest
+逐字稿對齊；但那只證明四份文字相同，證明不了聲音裡真的唸的是那一版。新閘門因此查
+git 歷史：目前四張條文最後一次實質變更是 `aad5fe4`，68 支 Ogg 最後一次實質變更是
+後來的 `4a3420d`。往後若條文比錄音新，或 shallow clone 讓這個順序無法證明，發版會停。
+
+**四、這一版沒有偷偷換內容。**
+
+三包共 952 支 Ogg、15,686,985 bytes，和 alpha.140 完全相同；manifest 也沒有變。
+這一版只有驗證腳本、CI 接線、NOTICE／公開文件、repo 忽略規則與版號變更，沒有產品
+程式碼變更。
+
+
 ## v0.1.0-alpha.140
 
 **上一版留下 8 支沒換成，而我把成因寫錯了。判準換掉之後，8 支全部換得動。**
