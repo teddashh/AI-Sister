@@ -289,8 +289,28 @@ VOICE_CLAIMS = (
      "哪幾支重錄過、當時兩個引擎各聽到什麼，都在 QC 收據裡"),
     ("Each was re-synthesised until the two models no longer agreed", LAB,
      "重錄的收斂條件與「不比被換掉那支差」的比較，都在 QC 收據裡"),
-    ("No compression, limiting, or other dynamics processing was applied", GATE,
-     "check-persona-voice-loudness.py（它讀 manifest 的 postProcessing.method）"),
+    # 2026-09-13 從 GATE 降級成 LAB，而降級的理由是量出來的，不是想出來的。
+    #
+    # 舊分類指向 check-persona-voice-loudness.py，而那一條做的事是
+    # `"no compression" not in band["method"]`——讀 manifest 上流水線**自己寫的
+    # 一句話**。那是同步檢查（manifest 和 NOTICE 不准各說各話），不是證據。
+    #
+    # 那能不能改成從出貨的 Ogg 量？拿最像的儀器 crest（真峰值 − 整合響度）試過，
+    # 取樣 10 支橫跨整個分佈，各自「解開 → 處理 → 重新整平到 −23／−1 → 重編
+    # Opus」，對照組是同一條路但不處理：
+    #
+    #   限幅 alimiter(−1 dBTP)：crest 變化 −0.52 … +0.81 dB，正負都有，和對照組
+    #     的重編雜訊（≤0.17 dB）同一個量級。**不是靈敏度不夠，是它真的沒做事**：
+    #     每一支的增益本來就選成峰值不過 −1 dBTP，限幅器夾不到任何東西。
+    #   壓縮 acompressor(4:1)：10 支全往下掉（−0.63 … −6.19 dB），但落點
+    #     9.29 … 25.44 和出貨的 11.10 … 26.60 幾乎整段重疊，只有 1 支掉到出貨的
+    #     最小值以下。任何一條逐支的地板都會漏掉另外 9 支。
+    #
+    # 所以這句話在出貨的位元組上量不回來，證據在錄音那邊的整平腳本與收據裡。
+    # 老實歸到 LAB，不要把一條抓不到東西的閘門掛在它名下。
+    ("No compression, limiting, or other dynamics processing was applied", LAB,
+     "整平腳本每支只乘一個常數增益，證據在錄音那邊；"
+     "出貨的 Ogg 上量不回來（crest 對限幅完全無感、對壓縮和現況重疊）"),
     ("This directory holds only the Ogg files", GATE,
      "check-shipped-asset-trees-hold-nothing-else.py（第一件事）"),
     ("stay in the voice lab and are not published", GATE,

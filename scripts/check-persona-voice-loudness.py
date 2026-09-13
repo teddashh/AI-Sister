@@ -52,6 +52,12 @@ Opus，需要 ffmpeg。分開就分開，不要讓便宜那三條被貴的這條
 這一條當場紅，點名「差 +2.07 dB，超過 0.5」；改成 −8.32（只差 0.40）**照舊印綠**
 ——那一刀 `want=綠`，證明上面「±0.5 以內手打得過去」不是我替它寫的一句好聽話，
 而那 0.40 有出現在摘要那行的「真峰值最多差」上，所以它在紅之前就看得見。
+
+第十二、十三刀打在 `DYNAMICS_PROMISE` 那一條上（同日）。第十二刀把 method 老實改
+成「4:1 compression before the gain」→ 紅，這是它該做的事。第十三刀把 method 改成
+只剩「no compression」、限幅和其他動態處理那半整段刪掉——**當時的針只有「no
+compression」六個字，於是它印綠**，而 NOTICE 對使用者講的是三件事。針改成整個
+承諾片語之後同一刀就紅了。
 """
 
 from __future__ import annotations
@@ -95,6 +101,12 @@ DRIFT_LU = 0.5
 # 是這一欄的最大值，所以那句話帶著同樣的 ±0.5。真正「不准破音」那條線量的是解出
 # 來的聲音（規則 2），不經過 manifest。
 DRIFT_DBTP = 0.5
+
+# manifest 的 postProcessing.loudness.method 要整句寫著這個。NOTICE 對使用者講的
+# 就是這三件事（「No compression, limiting, or other dynamics processing was
+# applied」），所以針要取**整個承諾片語**——第一版只 grep「no compression」，實測
+# 把 method 改成只剩那兩個字、限幅和其他動態處理那半整段刪掉，這一條照樣印綠。
+DYNAMICS_PROMISE = "no compression, limiting, or other dynamics processing"
 
 # 使用者聽得到的那條線。超過這裡，播放端就會削掉。
 SHIPPED_CEILING_DBTP = 0.0
@@ -151,8 +163,20 @@ def main() -> int:
         ):
             problems.append(f"{label}：manifest 沒有 postProcessing.loudness，說不出它對齊到哪裡")
             continue
-        if "no compression" not in str(band.get("method", "")):
-            problems.append(f"{label}：postProcessing.loudness.method 沒講「沒做過壓縮」")
+        # 這一行是**同步檢查，不是證據**。它讀的是流水線自己寫在 manifest 上的一
+        # 句話，而出貨的 NOTICE 也寫著同一件事（「No compression, limiting, or
+        # other dynamics processing was applied」）——兩邊不准各說各話，改了流水線
+        # 就會被逼著兩邊一起改。它證不了那句話是真的。
+        #
+        # 為什麼不從出貨的 Ogg 量：試過了，量不回來。詳細數字寫在
+        # check-notice-claims-are-accounted-for.py 那一條的分類註解裡，結論是限幅
+        # 在這批素材上根本沒東西可夾（增益本來就選成峰值不過 −1 dBTP），而壓縮壓
+        # 出來的 crest 和現況幾乎整段重疊。
+        if DYNAMICS_PROMISE not in str(band.get("method", "")):
+            problems.append(
+                f"{label}：postProcessing.loudness.method 沒有整句寫著"
+                f"「{DYNAMICS_PROMISE}」——NOTICE 對使用者講的是這三件事，"
+                f"manifest 不可以只認其中一件")
 
         clips = manifest.get("clips", [])
         total += len(clips)
