@@ -8,7 +8,8 @@ GET，以及 alpha.110 預設關閉、另行同意後只替最新新答案或手
 它們不能擴散到 recorder／core／capture／brain／hands 或 WebView。
 
 先讀 `docs/PHASES.md`（路線圖，退場條件就是驗收條件）、`docs/SPEC.md`、`docs/PRODUCT.md`。
-**現在該做什麼看 .handoff/PLAN.md**（刻意不進 git，只在工作目錄裡）。
+**接手先讀 `docs/HANDOFF-CODEX.md`**（交接紀錄，含目前狀態與下一步）。
+更早的 living plan 在 `.handoff/PLAN.md`（刻意不進 git，只在工作目錄裡）。
 
 ## 零、全域交付與產品文案規則（所有功能、所有 surface）
 
