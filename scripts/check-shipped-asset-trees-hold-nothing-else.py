@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""出貨的資產資料夾裡，只准有它自己 manifest 列的檔案，加上幾份說明檔。
+"""錄音那邊的私有素材，一個都不可以在這個 public repo 裡。
 
 **這一條守的是隱私，不是品質。** 產生那 952 支語音的流程在錄音那邊，那裡有一堆
 不可以進 public repo 的東西：WAV 母帶、聲音是照著誰的錄音生出來的那份參考
@@ -39,11 +39,51 @@ reels 那條用的正是這個形狀（`rglob("*")` ＋ 從 manifest 算出准�
 
 順帶一個做對的小地方：**某一棵樹有問題的時候，那一棵不印「544 支，一切正常」**。
 紅的行被綠的行蓋過去，讀的人會以為只是別棵樹的事。
+
+---
+
+**第二件事（後補）：上面那四棵樹之外，一樣一個都不可以。** 上面整段講的是
+「資料夾裡不准有多的東西」，而那句話的主詞是四個資料夾。實測把同樣三種私有
+檔案放在六個地方——repo 根目錄、`docs/`、`apps/desktop/ui/`，以及
+`apps/desktop/ui/persona-voices/`、`persona-consent-voices/refs/`、
+`persona-banter-voices/` 這三個**只差一層、就在出貨資料夾上面**的位置——
+把 `scripts/check-*.py` 和 `check-*.mjs` 全部跑一遍，**沒有任何一條紅**
+（唯一那條紅的 `check-windows-signing-receipt.py` 是缺參數，對照組一樣紅）。
+`.gitignore` 那時也沒有任何一行和聲音有關。
+
+所以再加一道，掃的是 `git ls-files`（追蹤中的檔案，不是工作區）：
+
+1. **副檔名白名單。** 出貨的音檔只有 Ogg，別種音訊格式一個都沒有。
+   **這裡刻意寫成白名單**：黑名單只看得到我今天想得到的形狀，而錄音那邊還有
+   mp3、BreezyVoice 的 `.dur`、模型 cache。白名單逼下一個人在這裡寫下「這是
+   什麼、為什麼可以出貨」，不是只逼他看一眼。
+2. **共用副檔名的那幾種名字。** `refs.json`、`refs/` 底下的東西、品管收據
+   （`*-qc.json`、`qc-*.json`）、`*.visemes.json`、`*-argmax.json` 都是 `.json`，
+   白名單看不見它們。
+
+**它擋不住什麼**（每一條都做出來跑過，`want=綠`）：
+
+```text
+docs/sample.ogg（把私有 WAV 改名成 .ogg 放在四棵樹外面）  → 綠。副檔名合法、
+    路徑不在任何一棵樹裡，這條看不出它是什麼。
+把一份收據的內容貼進 RELEASE-NOTES.md                     → 綠。它看檔名不看內容。
+`git add -f` 之前的工作區                                  → 看不到。它掃的是
+    追蹤中的檔案，未追蹤的那半由 `.gitignore` 顧（而 `.gitignore` 擋不住 -f）。
+```
+
+前兩條是真的洞，記在這裡而不是假裝沒有；第三條是分工，兩邊合起來才是完整的
+——**預防在 `.gitignore`，證明在這裡**。對 public repo 來說 CI 抓到已經晚了
+（推上去的那一刻 blob 就在 GitHub 上了），所以兩半都要有。
+
+驗收（這一段，四刀）：`refs.json`／`x.wav`／`banter-voice-v1-qc.json` 各 `git add`
+一次 → 各自紅、逐檔點名說出它是什麼；`git rm --cached` 還原 → 綠。
 """
 from __future__ import annotations
 
 import json
 import pathlib
+import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -60,11 +100,76 @@ TREES = (
      ("manifest.json", "catalog.js", "NOTICE.md")),
 )
 
+# 追蹤中的檔案只准是這些副檔名。要加一種就要在這裡寫下它是什麼——寫不出來
+# 就是它不該出貨。（`.gitignore`／`.gitattributes`／`LICENSE` 沒有副檔名，走
+# 下面 ALLOWED_NAMES。）
+ALLOWED_SUFFIXES = {
+    ".ogg": "出貨的語音，三包共 952 支——**音檔只有這一種**",
+    ".png": "角色 reel 的畫格與 app icon",
+    ".webp": "頭像的退路圖",
+    ".ico": "Windows 的 app icon",
+    ".rs": "Rust",
+    ".py": "腳本與閘門",
+    ".mjs": "node 寫的閘門",
+    ".js": "WebView 的前端與 manifest 的 JS 版",
+    ".json": "manifest、catalog、夾具",
+    ".md": "文件",
+    ".html": "WebView 的頁面與 site/",
+    ".css": "WebView 的樣式",
+    ".toml": "Cargo",
+    ".lock": "Cargo.lock（兩份）",
+    ".sh": "腳本",
+    ".ps1": "Windows 那半的 PowerShell",
+    ".nsh": "NSIS 的 hook 與語系字串",
+    ".nsi": "NSIS 安裝檔模板",
+    ".yml": "GitHub Actions",
+    ".yaml": "skill 的 agent 設定",
+    ".plist": "macOS 的 Info.plist",
+}
+ALLOWED_NAMES = {".gitignore", ".gitattributes", "LICENSE"}
+
+# 白名單看不見的那幾種：它們和出貨的檔案共用 `.json`。
+PRIVATE_SHAPES = (
+    (re.compile(r"(^|/)refs\.json$"), "聲音是照著誰的錄音生出來的那份參考"),
+    (re.compile(r"(^|/)refs/"), "參考錄音（`refs/*.wav`）"),
+    (re.compile(r"(^|/)([^/]*[-_.])?qc([-_.][^/]*)?\.json$"), "逐骰記著 ASR 聽到什麼的品管收據"),
+    (re.compile(r"\.visemes\.json$"), "reel 對嘴用的中間產物"),
+    (re.compile(r"-argmax\.json$"), "聲紋比對的中間產物"),
+)
+
 problems: list[str] = []
 
 
 def fail(message: str) -> None:
     problems.append(message)
+
+
+def private_material_tracked_anywhere() -> None:
+    """四棵樹之外也要掃一次。掃的是追蹤中的檔案，不是工作區。"""
+    listed = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT, check=True,
+        capture_output=True, text=True).stdout
+    tracked = [name for name in listed.split("\0") if name]
+    if not tracked:
+        # 空結果分不出「真的是 0」和「我問錯了」，所以它要吵。
+        fail("`git ls-files` 一個檔案都沒回，這條檢查等於沒跑")
+        return
+    before = len(problems)
+    for name in tracked:
+        path = pathlib.PurePosixPath(name)
+        if path.name not in ALLOWED_NAMES and path.suffix not in ALLOWED_SUFFIXES:
+            fail(f"{name}：`{path.suffix or path.name}` 不在准許出貨的副檔名裡"
+                 f"——如果它真的該出貨，去 ALLOWED_SUFFIXES 寫下它是什麼")
+            continue
+        for pattern, what in PRIVATE_SHAPES:
+            if pattern.search(name):
+                fail(f"{name}：{what}，留在錄音那邊")
+                break
+    if len(problems) == before:
+        print(f"  整個 repo {len(tracked)} 個追蹤檔，"
+              f"{len(ALLOWED_SUFFIXES)} 種准許的副檔名，沒有錄音那邊的東西")
+    else:
+        print(f"  整個 repo 有 {len(problems) - before} 個問題（見下）")
 
 
 def main() -> None:
@@ -98,8 +203,10 @@ def main() -> None:
         else:
             print(f"  {label} 有 {len(problems) - before} 個問題（見下）")
 
+    private_material_tracked_anywhere()
+
     if problems:
-        print("\n✘ 出貨的資產資料夾裡有不該出現的東西：", file=sys.stderr)
+        print("\n✘ 有不該出現在這個 public repo 裡的東西：", file=sys.stderr)
         for line in problems:
             print(f"    {line}", file=sys.stderr)
         print(
@@ -108,7 +215,7 @@ def main() -> None:
             file=sys.stderr,
         )
         raise SystemExit(1)
-    print("✔ 四棵樹都只有 manifest 列的檔案和那幾份說明。")
+    print("✔ 四棵樹都只有 manifest 列的檔案和那幾份說明，樹外面也沒有錄音那邊的東西。")
 
 
 if __name__ == "__main__":

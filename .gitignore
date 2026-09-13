@@ -64,3 +64,24 @@ replay-drafts/
 RESULT.md
 RESULT*.md
 TASK*.md
+
+# 語音是在錄音那邊（voice lab）產生的，出貨的只有 Ogg。那裡有一萬三千多支 WAV
+# 母帶、`refs.json` 與 `refs/*.wav`（聲音是照著誰的錄音生出來的）、逐骰記著 ASR
+# 聽到什麼的品管收據——一個都不可以進這個 public repo。
+#
+# 實測過：把 `refs.json`、一支 `.wav`、一份 `qc-receipt.json` 放在四棵出貨資產樹
+# **外面**（含 `apps/desktop/ui/persona-voices/` 這種只差一層的位置），
+# `scripts/check-*.py` 與 `check-*.mjs` 全部跑一遍，**沒有任何一條紅**。
+#
+# ⚠ 底下這幾行只擋 `git add`，擋不住 `git add -f`，也管不到已經追蹤的檔案。
+#   那半由 `check-shipped-asset-trees-hold-nothing-else.py` 掃 `git ls-files` 守。
+#   **預防在這裡，證明在那裡**——對 public repo 來說只有 CI 抓到已經晚了。
+*.wav
+*.flac
+*.aiff
+*.aif
+*.mp3
+*.m4a
+*.dur
+refs.json
+refs/
