@@ -198,6 +198,15 @@ jobs:
       - name: Each voice pack's NOTICE must be exactly what its promote script emits
         run: python3 ./scripts/check-notice-matches-its-generator.py
 
+      # 上一條保證出貨的 NOTICE ＝ 產地的文字，但兩邊一起改成假話它看不出來。
+      # 我在同一段文案裡抓過兩句照字面讀是假的全稱句（trim 那句 30% 不成立、
+      # 「−23 LUFS／−1 dBTP」出貨實測 −28.0…−22.8、4 支峰值在 −1 之上），兩次
+      # 都是我剛好讀到才發現的。這一條把六份 NOTICE 切成句子，每一句都要落進
+      # MEASURED／GATE／LAB／PROSE 其中一格：多一句沒人認領就紅，刪一句讓分類
+      # 變死也紅，MEASURED 那幾格當場對出貨的檔案量一次。
+      - name: Every sentence in every shipped NOTICE must be accounted for
+        run: python3 ./scripts/check-notice-claims-are-accounted-for.py
+
       # 上面那三條守的是「檔案沒被換掉」。這一條守的是「聽起來一樣大聲」——
       # 它把 952 個 Opus 真的解開來重量一次，而那正是使用者聽得到的那個東西。
       # 需要 ffmpeg，所以裝在上面那一步。
