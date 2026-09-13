@@ -234,14 +234,29 @@ def main() -> None:
             f"globalThis.__AI_SISTER_PERSONA_VOICES__ = {minified};\n",
             encoding="utf-8",
         )
+        loudness = manifest["postProcessing"]["loudness"]
+        # NOTICE 裡的數字不要手抄。target／ceiling 是品管報告訂的門檻，
+        # quietest／loudest／peak 是**出貨的這一批**量到的——兩者不一樣，
+        # 而讀 NOTICE 的人有權知道差多少。
+        target = f"{loudness['targetLufs']:g}"
+        ceiling = f"{loudness['ceilingDbtp']:g}"
+        quietest = f"{min(row['integratedLufs'] for row in clips):.1f}"
+        loudest = f"{max(row['integratedLufs'] for row in clips):.1f}"
+        peak = f"{max(row['truePeakDbtp'] for row in clips):.2f}"
         (staging / "NOTICE.md").write_text(
             "# Bundled persona dialogue voices\n\n"
             "The 544 Ogg Opus files in this directory were generated locally with "
             "MediaTek Research's BreezyVoice-300M model. The model and inference code "
             "are available under Apache-2.0.\n\n"
             "Before they were hash-listed, the clips were levelled in the voice lab: one "
-            "constant gain each to EBU R128 -23 LUFS under a -1 dBTP true-peak "
-            "ceiling and a 3 ms fade at each edge. Some clips were also trimmed at one "
+            f"constant gain each towards EBU R128 {target} LUFS under a {ceiling} dBTP "
+            "true-peak ceiling, and a 3 ms fade at each edge. Those two figures are what "
+            "the gain aimed at, not a measurement of the files in this directory: a clip "
+            "whose peaks would have crossed the ceiling was given less gain than the "
+            "target asked for, and encoding to Opus moves both numbers again. Measured "
+            f"on these Ogg files the integrated loudness runs from {quietest} to "
+            f"{loudest} LUFS and the loudest true peak is {peak} dBTP. "
+            "Some clips were also trimmed at one "
             "end: a tail where speech recognition heard words the written line does not "
             "contain, or a head or a tail where the clip opened or closed on a stretch "
             "of room tone more than 35 dB below its own loudest moment. Each trim leaves "

@@ -29,6 +29,13 @@ check-persona.mjs）。website 那份不在 repo 裡，是 build-website.py 從 
     checker 有沒有真的比對**這個路徑**。實際做過一刀：把 reels 那份 NOTICE
     原封不動複製到一個新資料夾，這條照樣印綠（7 份都有人守），而沒有任何
     checker 認得那個新路徑。
+  - **promote 腳本自己那幾行算錯**。2026-09-12 NOTICE 開始帶出貨那批量到的
+    響度區間（`{quietest}`／`{loudest}`／`{peak}`），而下面的 `bindings()`
+    是**自己從 manifest 重算一次**，不是讀腳本算它們的那幾行。實際做過一刀
+    （`want=綠`）：把腳本裡 `f"{min(...):.1f}"` 的精度改成 `.2f`，這條照樣
+    印綠——因為出貨的 .md 沒變，而閘門拿的是自己算的 `.1f`。
+    這是刻意的：它守的是**出貨的那份字**對不對，而腳本真的漂了，下一次
+    promote 寫出來的 .md 就會和這裡對不上、當場紅。
 """
 import ast
 import hashlib
@@ -71,6 +78,24 @@ def literal(node, names):
                 raise ValueError(f"NOTICE 文案裡有這支閘門不認得的內插：{ast.dump(part)[:80]}")
         return "".join(out)
     raise ValueError(f"NOTICE 文案不是單純的字串：{type(node).__name__}")
+
+
+def bindings(manifest):
+    """NOTICE 文案裡准許內插的名字，全部**從出貨的 manifest 重新算一次**。
+
+    這裡刻意不去讀 promote 腳本算它們的那幾行——那就變成抄它、它錯我也錯。
+    兩邊各自從同一份出貨資料推導，對不上就是有一邊漂了。
+    """
+    clips = manifest["clips"]
+    loudness = manifest["postProcessing"]["loudness"]
+    return {
+        "total": len(clips),
+        "target": f"{loudness['targetLufs']:g}",
+        "ceiling": f"{loudness['ceilingDbtp']:g}",
+        "quietest": f"{min(row['integratedLufs'] for row in clips):.1f}",
+        "loudest": f"{max(row['integratedLufs'] for row in clips):.1f}",
+        "peak": f"{max(row['truePeakDbtp'] for row in clips):.2f}",
+    }
 
 
 def notice_source(script):
@@ -117,7 +142,7 @@ def main():
         pack = ROOT / base
         try:
             manifest = json.loads((pack / "manifest.json").read_text(encoding="utf-8"))
-            want = literal(notice_source(script), {"total": len(manifest["clips"])})
+            want = literal(notice_source(script), bindings(manifest))
         except (ValueError, KeyError, OSError) as exc:
             problems.append(f"{script}：讀不出產地文案——{exc}")
             continue
