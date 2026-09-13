@@ -17,7 +17,12 @@ jobs:
     name: Linux — test, lint, privacy
     runs-on: ubuntu-24.04
     steps:
+      # fetch-depth: 0 是給 check-spoken-consent-is-not-older-than-the-words.py 的。
+      # 它問的是「同意書的字最後一次真的變，和她唸的那 68 支最後一次真的換，哪個
+      # 在前」——那是歷史問題，淺 clone 答不出來，而那一條把「答不出來」當紅。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -177,6 +182,15 @@ jobs:
 
       - name: Consent readings must be the exact 17 by 4 local bundle
         run: python3 ./scripts/check-persona-consent-voice-assets.py
+
+      # 上面那一條把 manifest 的 `text` 對回 consent.rs，而 `text` 是一個欄位，
+      # 不是聲音。實測把四句話同步改在 consent.rs、onboarding.js、catalog 與
+      # manifest 的 text 上、音檔一個位元組都不動，六條同意書相關閘門全部印綠
+      # ——他讀到的是新句子，她唸出來的是舊句子。時長是唯一不用模型的儀器，而
+      # 最危險的改法是等長的（「永不送出畫面檔」→「會送出畫面檔」只差一個字），
+      # 所以量不回來。這一條改問歷史：聲音是不是在文案之後才生出來的。
+      - name: The consent she reads aloud must not be older than the words he agrees to
+        run: python3 ./scripts/check-spoken-consent-is-not-older-than-the-words.py
 
       - name: Banter must be the exact 17 by 20 local bundle
         run: python3 ./scripts/check-persona-banter-voice-assets.py
