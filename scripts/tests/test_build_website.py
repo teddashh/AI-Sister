@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import re
 import pathlib
 import tempfile
 import unittest
@@ -64,6 +66,48 @@ class WebsiteBuildTests(unittest.TestCase):
                 source_manifest["totals"]["webpBytes"],
             )
             self.assertTrue((output / ".nojekyll").is_file())
+
+    def test_the_notice_the_public_downloads_is_still_true_where_it_lands(self) -> None:
+        """網站那份 NOTICE 說「這份授權只對下面這份 exact manifest 生效」。
+
+        `build-website.py` 是 `copy2` 兩個檔案過去的（manifest 與 NOTICE），
+        那句話因此在**新的位置**重新被宣稱一次。`check-notice-claims-are-
+        accounted-for.py` 掃的是 git 追蹤的檔案，掃不到建出來的網站；上面那條
+        既有測試只比 17 張的**總 bytes**，也完全沒讀那份 NOTICE。
+
+        「總和看不出哪一張被換掉」是量出來的，不是推的：讓 build 把 kimi 和
+        grok 兩張的內容互換（總 bytes 一個位元組都沒變），既有那條**綠的**，
+        這一條紅在 `kimi.webp 不是 manifest 列的那一份`。公開的網站上兩個角色
+        的臉會對調，而舊斷言看不見。
+        """
+        with tempfile.TemporaryDirectory() as raw:
+            output = pathlib.Path(raw) / "site"
+            MODULE.build(output)
+            shipped = output / "assets/personas"
+            manifest = json.loads((shipped / "manifest.json").read_text(encoding="utf-8"))
+            notice = (shipped / "NOTICE.md").read_text(encoding="utf-8")
+
+            quoted = re.findall(r"\b[0-9a-f]{64}\b", notice)
+            self.assertEqual(
+                quoted,
+                [hashlib.sha256((shipped / "manifest.json").read_bytes()).hexdigest()],
+                "網站那份 NOTICE 引的 SHA-256 不是它旁邊那份 manifest 的",
+            )
+
+            said = re.search(r"的 (\d+) 張 WebP", notice)
+            self.assertIsNotNone(said, "網站那份 NOTICE 沒說幾張，等於沒有這個宣稱")
+            listed = {row["file"]: row["sha256"] for row in manifest["assets"]}
+            self.assertEqual(int(said.group(1)), len(listed))
+
+            for name, want in sorted(listed.items()):
+                got = hashlib.sha256((shipped / name).read_bytes()).hexdigest()
+                self.assertEqual(got, want, f"網站上的 {name} 不是 manifest 列的那一份")
+
+            self.assertEqual(
+                sorted(p.name for p in shipped.iterdir()),
+                sorted([*listed, "NOTICE.md", "manifest.json"]),
+                "NOTICE 說這裡只有那些檔案，而公開的資料夾裡不是",
+            )
 
     def test_existing_output_is_never_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
