@@ -105,6 +105,7 @@ def main() -> int:
 
     problems: list[str] = []
     measured_all: list[float] = []
+    peaks_all: list[float] = []
     total = 0
 
     for label, directory in SETS:
@@ -143,6 +144,7 @@ def main() -> int:
                 problems.append(f"{name}：manifest 上沒有量到的響度")
                 continue
             measured_all.append(integrated)
+            peaks_all.append(true_peak)
             if abs(integrated - claimed) > DRIFT_LU:
                 problems.append(
                     f"{name}：manifest 說 {claimed:.1f} LUFS，解出來是 {integrated:.1f}"
@@ -180,6 +182,12 @@ def main() -> int:
         spread = measured_all[-1] - measured_all[0]
         print(f"量了 {total} 支。解出來的整合響度 {measured_all[0]:.1f} … {measured_all[-1]:.1f} LUFS"
               f"（散度 {spread:.1f} LU）。")
+        # 兩條硬線的餘裕。這兩個數字比「幾成落在帶子裡」更早撐不住：帶子外面
+        # 還有 MAX_QUIET_LU 可以掉，但掉完就是紅的，而且只要一支。
+        floor = -23.0 - MAX_QUIET_LU
+        print(f"  最靜的一支 {measured_all[0]:.1f} LUFS，離 {floor:.1f} 的底線還有 "
+              f"{measured_all[0] - floor:.1f} LU；最高的真實峰值 {max(peaks_all):+.2f} dBTP，"
+              f"離 {SHIPPED_CEILING_DBTP:+.1f} 的天花板還有 {SHIPPED_CEILING_DBTP - max(peaks_all):.2f} dB。")
 
     if problems:
         print(f"\n✗ {len(problems)} 個問題：")

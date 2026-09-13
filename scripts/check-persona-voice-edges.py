@@ -87,9 +87,11 @@ REL_DB = -35.0
 LIMIT_MS = 300
 
 # 每一包至少這個比例要兩端都在 LIMIT_MS 以內。alpha.139 實測 99.3%／100%／99.7%
-# （alpha.138 是 99.4%／100%／99.4%，alpha.137 是 94.7%／98.5%／95.6%）。留的餘裕：
-# 固定台詞現在超標 4 支，再多 1 支還是綠的，第 6 支才紅；互動短句現在 1 支，第 4
-# 支才紅（它只有 340 支）。
+# （alpha.138 是 99.4%／100%／99.4%，alpha.137 是 94.7%／98.5%／95.6%）。
+#
+# 餘裕以前寫在這裡，是手算的，而且會過期。現在每一包自己印「還能再壞幾支」——
+# 換聲音之前那個數字才是要看的東西（同意書只有 68 支，比例的分母小，一支就是
+# 1.5%，所以它的餘裕常常是 0）。
 SHARE_MIN = 0.99
 
 # 沒有任何一支可以超過這裡。alpha.138 和 alpha.139 實測最長的一端都是同一支的
@@ -168,8 +170,10 @@ def main() -> int:
 
         share = clean / len(clips)
         over = len(clips) - clean
+        # 還能再壞幾支才會低於 SHARE_MIN。0 就是「下一支掉出去這條就紅」。
+        slack = len(clips) - math.ceil(SHARE_MIN * len(clips) - 1e-9) - over
         print(f"  {label}：{len(clips)} 支，{clean} 支兩端的空白都在 {LIMIT_MS} ms 以內"
-              f"（{share:.1%}），超標 {over} 支")
+              f"（{share:.1%}），超標 {over} 支，還能再壞 {max(slack, 0)} 支")
         if share < SHARE_MIN:
             listed = sorted(
                 (max(h, t), f"{c.get('persona')}/{Path(c['file']).stem}")
