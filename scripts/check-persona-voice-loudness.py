@@ -11,10 +11,18 @@
 
 所以這一支問的是後者，而且**問的是真的出貨的那個檔**：
 
-1. **manifest 上寫的響度，要對得上解出來的聲音。** 兩者差超過 `DRIFT_LU` 就紅。
-   這一條守的是「那個數字是量出來的，不是打上去的」——manifest 是 promote 從
-   品管收據抄過來的，而收據上的數字是品管**把同一個 Opus 解開來**量的。所以這
-   裡量到的應該幾乎一樣；不一樣就代表有人動過檔案、或者有人用手打了數字。
+1. **manifest 上寫的響度和真實峰值，兩個都要對得上解出來的聲音。** 響度差超過
+   `DRIFT_LU`、峰值差超過 `DRIFT_DBTP` 就紅。這一條守的是「那兩個數字是量出來
+   的，不是打上去的」——manifest 是 promote 從品管收據抄過來的，而收據上的數字
+   是品管**把同一個 Opus 解開來**量的。所以這裡量到的應該幾乎一樣；不一樣就代
+   表有人動過檔案、或者有人用手打了數字。
+
+   **峰值那半是 2026-09-13 才補上的，而在那之前這句話是假的。** 它從第一版就寫
+   著「響度」，讀起來像 manifest 上量到的數字都有人對過，實際上程式只比對
+   `integratedLufs`；`truePeakDbtp` 從頭到尾沒有任何一道閘門拿它對過聲音。實測
+   把一支的 `truePeakDbtp` 改掉（`manifest.json` 與 `manifest.js` 一起改、保持
+   一致），九道相關閘門**全綠**——而那一欄的最大值正是出貨的 NOTICE 印給使用者
+   看的那個數字（「the loudest true peak is −0.96 dBTP」）。
 2. **解出來不准超過 0 dBTP。** 這是使用者聽得到的那件事：破音。整平的天花板壓
    在 −1 dBTP、而且壓的就是 Opus 這一端（Opus 40 kbps VOIP 會把峰值往上推，實
    測最多 +1.24 dB，所以壓 WAV 沒有用）。這裡守的是那條使用者的線。
@@ -30,7 +38,7 @@
 （雜湊）與「清單長得對」，跑起來一秒鐘、不需要任何外部工具。這一支要解 952 個
 Opus，需要 ffmpeg。分開就分開，不要讓便宜那三條被貴的這條拖著。
 
-驗收（九刀，全部從檔案備份還原、還原後逐位元組比對過）：把一支出貨的 Ogg 加大
+驗收（十一刀，全部從檔案備份還原、還原後逐位元組比對過）：把一支出貨的 Ogg 加大
 4 dB 重編、手打一個 manifest 響度、整塊拿掉 `postProcessing`、把 method 裡的
 「no compression」換掉、拿掉一支的 `integratedLufs`、把宣告的帶子縮到 ±0.05、
 把一支調小 1.5 dB 而 manifest 誠實照抄（只紅在底線那一條）、manifest 自己寫一個
@@ -38,6 +46,12 @@ Opus，需要 ffmpeg。分開就分開，不要讓便宜那三條被貴的這條
 +8 dB 只推到 −0.07 dBTP，紅的是別條規則；改成 +12 dB（+0.91 dBTP）才真的打中。
 `want=綠` 的對照是現況最小聲的那支（banter sakana/poke-annoying，−28.0 LUFS，
 比目標低 5.0 LU）：它是峰值先撞天花板才停在那裡的，這一條不可以判它死。
+
+第十、十一刀打在 2026-09-13 補的峰值那半上，靶是 banter chatgpt/poke-aiyo（解出
+來是 −7.92 dBTP），`manifest.json` 與 `manifest.js` 一起改、保持一致：改成 −9.99
+這一條當場紅，點名「差 +2.07 dB，超過 0.5」；改成 −8.32（只差 0.40）**照舊印綠**
+——那一刀 `want=綠`，證明上面「±0.5 以內手打得過去」不是我替它寫的一句好聽話，
+而那 0.40 有出現在摘要那行的「真峰值最多差」上，所以它在紅之前就看得見。
 """
 
 from __future__ import annotations
@@ -68,6 +82,19 @@ SETS = (
 # 我拿 68 支取樣量到最多漂 1.85 LU。後來把 952 支全量一遍，最大漂到 3.49 LU，
 # 這道閘門本來會當場紅。真正的修法不是把門開大，是讓兩邊量同一個檔。
 DRIFT_LU = 0.5
+
+# manifest 寫的真實峰值和這裡量的差多少還算同一支。理由和 DRIFT_LU 同一條（兩邊
+# 量的是同一份位元組，只剩 ffmpeg 版本差），所以取同一個數量級。
+#
+# 先量儀器自己的雜訊再挑門檻：這台機器上把 952 支全解一遍對回 manifest，響度和
+# 峰值的 |差| 最大都是 0.000、中位數 0.000，超過 0.1 的 0 支。所以 0.5 整個是留給
+# CI 那一版 ffmpeg 的餘裕，不是留給資料的——真的漂到 0.1 就該去查，不該等它紅。
+# 底下的摘要每次都把「現在最多差多少」印出來，就是為了讓那件事在紅之前看得到。
+#
+# 它擋不住什麼：一個手打的峰值只要落在真值 ±0.5 dB 以內就過得去，而 NOTICE 印的
+# 是這一欄的最大值，所以那句話帶著同樣的 ±0.5。真正「不准破音」那條線量的是解出
+# 來的聲音（規則 2），不經過 manifest。
+DRIFT_DBTP = 0.5
 
 # 使用者聽得到的那條線。超過這裡，播放端就會削掉。
 SHIPPED_CEILING_DBTP = 0.0
@@ -107,6 +134,8 @@ def main() -> int:
     problems: list[str] = []
     measured_all: list[float] = []
     peaks_all: list[float] = []
+    worst_drift_lu = 0.0
+    worst_drift_tp = 0.0
     total = 0
 
     for label, directory in SETS:
@@ -146,10 +175,17 @@ def main() -> int:
                 continue
             measured_all.append(integrated)
             peaks_all.append(true_peak)
+            worst_drift_lu = max(worst_drift_lu, abs(integrated - claimed))
+            worst_drift_tp = max(worst_drift_tp, abs(true_peak - claimed_peak))
             if abs(integrated - claimed) > DRIFT_LU:
                 problems.append(
                     f"{name}：manifest 說 {claimed:.1f} LUFS，解出來是 {integrated:.1f}"
                     f"（差 {integrated - claimed:+.1f} LU，超過 {DRIFT_LU}）")
+            if abs(true_peak - claimed_peak) > DRIFT_DBTP:
+                problems.append(
+                    f"{name}：manifest 說真實峰值 {claimed_peak:+.2f} dBTP，解出來是 "
+                    f"{true_peak:+.2f}（差 {true_peak - claimed_peak:+.2f} dB，"
+                    f"超過 {DRIFT_DBTP}）")
             if true_peak > SHIPPED_CEILING_DBTP:
                 problems.append(
                     f"{name}：解出來的真實峰值 {true_peak:+.2f} dBTP，超過 "
@@ -199,6 +235,11 @@ def main() -> int:
               + (f"離 {SHIPPED_CEILING_DBTP:+.1f} 的天花板還有 {headroom:.2f} dB。"
                  if headroom >= 0
                  else f"已經超過 {SHIPPED_CEILING_DBTP:+.1f} 的天花板 {-headroom:.2f} dB。"))
+        # 規則 1 的餘裕。上面那兩行講的是聲音本身離硬線多遠，這一行講的是
+        # **manifest 有沒有在漂**——那是完全不同的一件事，而且是先漂才會出錯。
+        print(f"  manifest 對得上解出來的：響度最多差 {worst_drift_lu:.2f} LU"
+              f"（門檻 {DRIFT_LU}）、真峰值最多差 {worst_drift_tp:.2f} dB"
+              f"（門檻 {DRIFT_DBTP}）。")
 
     if problems:
         print(f"\n✗ {len(problems)} 個問題：")
@@ -208,7 +249,7 @@ def main() -> int:
             print(f"    …還有 {len(problems) - 40} 個")
         return 1
 
-    print("✔ 每一支的響度都對得上 manifest，沒有一支解出來會破音。")
+    print("✔ 每一支的響度和真實峰值都對得上 manifest，沒有一支解出來會破音。")
     return 0
 
 

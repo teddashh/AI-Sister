@@ -92,7 +92,9 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   模型 cache、QC 工作檔與 private receipt 都留在 voice-lab 外。發布前 544 段全部通過格式、
   響度、長度、雙 ASR 與 speaker-identity QC，CI 再驗 shipped bytes/hash/inventory。alpha.137
   起響度那一關量的是**解出來的 Opus**（EBU R128，−23 LUFS／−1 dBTP 是整平時瞄準的
-  目標，不做壓縮或限幅），manifest 逐段帶著量到的值，CI 把每一段重新解碼對回去。
+  目標，不做壓縮或限幅），manifest 逐段帶著量到的值，CI 把每一段重新解碼對回去——
+  **響度和真峰值兩個都對**（峰值那一欄一度沒有人守，而 NOTICE 印給使用者看的正是
+  它的最大值）。
   **瞄準的和量到的不是同一件事**：峰值會被 ceiling 夾住的那一段拿到的增益就少於
   −23，而 Opus 重編又會把兩個數字再推一次，所以出貨的 952 段實測是 −28.0 … −22.8
   LUFS、最高真峰值 −0.96 dBTP（有 4 段在 −1 之上）。CI 那一關因此對出貨的 Opus
