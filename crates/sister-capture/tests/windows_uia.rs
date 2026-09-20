@@ -289,6 +289,7 @@ fn native_edge_reader_visible_paragraphs_scroll_and_privacy() {
         &mut recorder,
         &fixture.dir,
         "reader.html",
+        "document",
         &[
             (top_frame, "0800-333-444", "02-7766-5544"),
             (bottom_frame, "02-7766-5544", "0800-333-444"),
@@ -336,11 +337,12 @@ fn assert_browser_sources(
     recorder: &mut Recorder<impl Backend>,
     dir: &std::path::Path,
     document: &str,
+    role: &str,
     records: &[(i64, &str, &str)],
 ) {
     for &(id, phone, excluded) in records {
         let blocks = recorder.db().assistive_blocks(id).unwrap();
-        let body = text(&blocks, "document");
+        let body = text(&blocks, role);
         assert!(body.contains(phone));
         assert!(!body.contains(excluded));
         let image_path: String = recorder
@@ -389,7 +391,7 @@ fn native_edge_pdf_pages_keep_text_and_evidence_together() {
     fixture.show("top");
     let mut focus = WindowsFocus::new();
     let permit = fixture.observe(&mut focus, SensitiveFieldState::Clear);
-    let first = text(&focus.assistive_text(permit), "document");
+    let first = text(&focus.assistive_text(permit), "document-region");
     println!(
         "Edge PDF first-page provider: {}",
         std::fs::read_to_string(fixture.dir.join("metadata")).unwrap()
@@ -407,7 +409,7 @@ fn native_edge_pdf_pages_keep_text_and_evidence_together() {
 
     fixture.show("bottom");
     let next_permit = fixture.observe(&mut focus, SensitiveFieldState::Clear);
-    let second = text(&focus.assistive_text(next_permit), "document");
+    let second = text(&focus.assistive_text(next_permit), "document-region");
     println!(
         "Edge PDF second-page provider: {}",
         std::fs::read_to_string(fixture.dir.join("metadata")).unwrap()
@@ -423,6 +425,7 @@ fn native_edge_pdf_pages_keep_text_and_evidence_together() {
         &mut recorder,
         &fixture.dir,
         "reader.pdf",
+        "document-region",
         &[
             (first_frame, "0800-444-555", "02-6655-4433"),
             (second_frame, "02-6655-4433", "0800-444-555"),

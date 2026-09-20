@@ -34,13 +34,57 @@ impl ReadWindow {
 pub(crate) enum TextRole {
     Edit,
     Document,
+    DocumentRegion,
 }
 impl TextRole {
     fn as_str(self) -> &'static str {
         match self {
             Self::Edit => "edit",
             Self::Document => "document",
+            Self::DocumentRegion => "document-region",
         }
+    }
+}
+
+/// Screen coordinates, including providers whose page container extends below
+/// the viewport. Every captured text rectangle must fit the current frame.
+#[derive(Clone, Copy)]
+pub(crate) struct TextRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+impl TextRect {
+    fn valid(self) -> bool {
+        [
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            self.x + self.width,
+            self.y + self.height,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+            && self.width > 0.0
+            && self.height > 0.0
+    }
+    pub(crate) fn contains(self, other: Self) -> bool {
+        self.valid()
+            && other.valid()
+            && other.x >= self.x
+            && other.y >= self.y
+            && other.x + other.width <= self.x + self.width
+            && other.y + other.height <= self.y + self.height
+    }
+    pub(crate) fn overlaps(self, other: Self) -> bool {
+        self.valid()
+            && other.valid()
+            && self.x < other.x + other.width
+            && other.x < self.x + self.width
+            && self.y < other.y + other.height
+            && other.y < self.y + self.height
     }
 }
 
@@ -139,6 +183,60 @@ pub(crate) fn clip_visible<T: TextRange>(range: &T, scope: &T) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_rectangles_must_fit_the_frame_and_window() {
+        let screen = TextRect {
+            x: -100.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+        };
+        let visible = TextRect {
+            x: -90.0,
+            y: 20.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        assert!(screen.contains(visible));
+        assert!(screen.overlaps(visible));
+        assert!(!screen.overlaps(TextRect { x: 0.0, ..visible }));
+        assert!(!screen.overlaps(TextRect {
+            y: f64::NAN,
+            ..visible
+        }));
+        for invalid in [
+            TextRect {
+                x: -110.0,
+                ..visible
+            },
+            TextRect {
+                x: -10.0,
+                ..visible
+            },
+            TextRect { y: -1.0, ..visible },
+            TextRect { y: 70.0, ..visible },
+            TextRect {
+                width: 0.0,
+                ..visible
+            },
+            TextRect {
+                height: -1.0,
+                ..visible
+            },
+            TextRect {
+                x: f64::NAN,
+                ..visible
+            },
+            TextRect {
+                width: f64::INFINITY,
+                ..visible
+            },
+        ] {
+            assert!(!screen.contains(invalid));
+            assert!(!invalid.contains(visible));
+        }
+    }
 
     struct Range {
         start: std::cell::Cell<usize>,
@@ -262,7 +360,7 @@ mod tests {
     }
     #[test]
     fn password_offscreen_and_unknown_role_never_read() {
-        for (role, value) in [TextRole::Edit, TextRole::Document]
+        for (role, value) in [TextRole::Edit, TextRole::Document, TextRole::DocumentRegion]
             .into_iter()
             .flat_map(|role| [Some(true), None].map(|value| (role, value)))
         {
@@ -297,7 +395,7 @@ mod tests {
     }
     #[test]
     fn late_result_or_focus_change_discards_everything() {
-        for (role, cancelled) in [TextRole::Edit, TextRole::Document]
+        for (role, cancelled) in [TextRole::Edit, TextRole::Document, TextRole::DocumentRegion]
             .into_iter()
             .flat_map(|role| [false, true].map(|cancelled| (role, cancelled)))
         {
