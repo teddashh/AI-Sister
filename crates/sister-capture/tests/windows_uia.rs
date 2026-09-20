@@ -399,13 +399,19 @@ fn assert_browser_sources(
     let rag = grounded_answer::prepare("phone", &[], &got.answers, &got.hits, 3000)
         .unwrap()
         .unwrap();
-    assert_eq!(rag.sources.len(), records.len());
+    // A literal "phone" in the PDF can match both its fact and its text chunk.
+    // Count distinct frames, and verify every source, including either kind.
+    assert!(!rag.sources.is_empty());
     assert!(rag.sources.iter().all(|s| s.origin.as_str() == "assistive"));
     let mut ids: Vec<_> = rag.sources.iter().map(|s| s.frame_id.unwrap()).collect();
     ids.sort_unstable();
+    ids.dedup();
     assert_eq!(ids, records.iter().map(|r| r.0).collect::<Vec<_>>());
-    for &(id, phone, excluded) in records {
-        let source = rag.sources.iter().find(|s| s.frame_id == Some(id)).unwrap();
+    for source in &rag.sources {
+        let &(_, phone, excluded) = records
+            .iter()
+            .find(|r| source.frame_id == Some(r.0))
+            .expect("every source must refer to one of the observed frames");
         assert!(source.text.contains(phone));
         assert!(!source.text.contains(excluded));
         assert!(
