@@ -204,11 +204,66 @@ fn native_uia_reads_visible_edits_and_documents_and_rejects_excluded_text() {
     assert!(document.contains("DOCUMENT-SECOND-PARAGRAPH"));
     assert!(!document.contains("DOCUMENT-BOTTOM"));
 
+    let mut recorder = native_recorder(fixture.dir.clone());
+    let reads_before_pause = (
+        recorder.timings().grab.calls,
+        recorder.timings().ocr.calls,
+        recorder.timings().assistive.calls,
+    );
+    assert!(recorder.set_paused(true, 2000).unwrap());
+
+    assert_eq!(recorder.tick(3000).unwrap(), Tick::Paused);
+    assert_eq!(
+        (
+            recorder.timings().grab.calls,
+            recorder.timings().ocr.calls,
+            recorder.timings().assistive.calls
+        ),
+        reads_before_pause
+    );
+    assert!(recorder.set_paused(false, 4000).unwrap());
+    let first_frame = retained(recorder.tick(5000).unwrap());
+    assert_native_screenshot(
+        &mut recorder,
+        &fixture.dir,
+        first_frame,
+        "0800-222-333",
+        "02-9988-7766",
+        FixtureDocument::Wpf,
+    );
+    let top_blocks = text(
+        &recorder.db().assistive_blocks(first_frame).unwrap(),
+        "document",
+    );
+    assert!(top_blocks.contains("0800-222-333"));
+    assert!(!top_blocks.contains("02-9988-7766"));
     fixture.show("document-scrolled");
     let scrolled = text(&focus.assistive_text(document_permit), "document");
     assert!(scrolled.contains("DOCUMENT-BOTTOM 02-9988-7766"));
     assert!(!scrolled.contains("0800-222-333"));
     assert!(!scrolled.contains("DOCUMENT-SECOND-PARAGRAPH"));
+
+    let bottom_frame = retained(recorder.tick(6000).unwrap());
+    assert_ne!(first_frame, bottom_frame);
+    assert_native_screenshot(
+        &mut recorder,
+        &fixture.dir,
+        bottom_frame,
+        "02-9988-7766",
+        "0800-222-333",
+        FixtureDocument::Wpf,
+    );
+    let bottom_blocks = text(
+        &recorder.db().assistive_blocks(bottom_frame).unwrap(),
+        "document",
+    );
+    assert!(bottom_blocks.contains("02-9988-7766"));
+    assert!(!bottom_blocks.contains("0800-222-333"));
+    let reads_before_password = (
+        recorder.timings().grab.calls,
+        recorder.timings().ocr.calls,
+        recorder.timings().assistive.calls,
+    );
 
     fixture.show("password");
     assert!(!focus.is_current(document_permit).unwrap());
@@ -217,6 +272,24 @@ fn native_uia_reads_visible_edits_and_documents_and_rejects_excluded_text() {
     assert!(focus.assistive_text(permit).is_empty());
     let password_permit = fixture.observe(&mut focus, SensitiveFieldState::Focused);
     assert!(focus.assistive_text(password_permit).is_empty());
+
+    assert!(!matches!(recorder.tick(7000).unwrap(), Tick::Kept { .. }));
+    assert_eq!(
+        (
+            recorder.timings().grab.calls,
+            recorder.timings().ocr.calls,
+            recorder.timings().assistive.calls
+        ),
+        reads_before_password
+    );
+    assert_eq!(
+        recorder
+            .db()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM frames", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
 
     fixture.show("button");
     let button_permit = fixture.observe(&mut focus, SensitiveFieldState::Clear);
@@ -231,7 +304,7 @@ fn native_uia_reads_visible_edits_and_documents_and_rejects_excluded_text() {
     let other_permit = fixture.observe(&mut focus, SensitiveFieldState::Clear);
     assert!(text(&focus.assistive_text(other_permit), "edit").contains("OTHER-WINDOW-SENTINEL"));
     println!(
-        "SISTER-UIA: VERIFIED visible-chinese fresh-text document-paragraphs document-scroll no-offscreen no-password no-button stale-window-denied"
+        "SISTER-UIA: VERIFIED visible-chinese fresh-text document-paragraphs document-scroll native-screenshots native-ocr same-frame-rag pause-resume no-offscreen no-password no-button stale-window-denied"
     );
 }
 
@@ -270,6 +343,34 @@ fn browser_recorder(dir: PathBuf) -> Recorder<impl Backend> {
     )
     .unwrap()
 }
+fn native_recorder(dir: PathBuf) -> Recorder<impl Backend> {
+    let mut config = Config::default();
+    config.capture.image_min_interval_ms = 0;
+    let ocr = WindowsOcr::new(&["en-US".into()]);
+    assert!(
+        ocr.is_available(),
+        "native screenshot verification requires OCR"
+    );
+    // Only system activity, clipboard and input are synthetic here. Both the
+    // screen pixels and OCR come from the production Windows implementations.
+    Recorder::new(
+        CompositeBackend {
+            name: "native screenshot and OCR fixture".into(),
+            system: FixtureSystem,
+            screen: WindowsScreen::new(),
+            focus: WindowsFocus::new(),
+            clipboard: NullClipboard,
+            input: NullInput,
+            ocr: ChangedRegionOcr::new(ocr),
+        },
+        Db::open_in_memory().unwrap(),
+        config,
+        Some(dir),
+        MasterStopSource::NotApplicable,
+    )
+    .unwrap()
+}
+
 fn retained(tick: Tick) -> i64 {
     match tick {
         Tick::Kept { frame_id, .. } => frame_id,
@@ -448,36 +549,16 @@ fn native_edge_pdf_scroll_keeps_uia_ocr_and_screenshot_evidence_together() {
         !first.contains("PDF-SECOND"),
         "offscreen PDF page: {first:?}"
     );
-    let mut config = Config::default();
-    config.capture.image_min_interval_ms = 0;
-    let ocr = WindowsOcr::new(&["en-US".into()]);
-    assert!(ocr.is_available(), "native PDF verification requires OCR");
-    // Only system activity, clipboard and input are synthetic here. Both the
-    // screen pixels and OCR come from the production Windows implementations.
-    let mut recorder = Recorder::new(
-        CompositeBackend {
-            name: "Edge PDF / native screenshot and OCR fixture".into(),
-            system: FixtureSystem,
-            screen: WindowsScreen::new(),
-            focus: WindowsFocus::new(),
-            clipboard: NullClipboard,
-            input: NullInput,
-            ocr: ChangedRegionOcr::new(ocr),
-        },
-        Db::open_in_memory().unwrap(),
-        config,
-        Some(fixture.dir.clone()),
-        MasterStopSource::NotApplicable,
-    )
-    .unwrap();
+    let mut recorder = native_recorder(fixture.dir.clone());
     let first_frame = retained(recorder.tick(1000).unwrap());
 
-    assert_pdf_screenshot(
+    assert_native_screenshot(
         &mut recorder,
         &fixture.dir,
         first_frame,
         "0800-444-555",
         "02-6655-4433",
+        FixtureDocument::Pdf,
     );
     assert!(
         text(
@@ -502,12 +583,13 @@ fn native_edge_pdf_scroll_keeps_uia_ocr_and_screenshot_evidence_together() {
             .unwrap()
             .is_empty()
     );
-    assert_pdf_screenshot(
+    assert_native_screenshot(
         &mut recorder,
         &fixture.dir,
         bottom_frame,
         "02-6655-4433",
         "0800-444-555",
+        FixtureDocument::Pdf,
     );
 
     let ocr_calls = recorder.timings().ocr.calls;
@@ -533,15 +615,35 @@ fn native_edge_pdf_scroll_keeps_uia_ocr_and_screenshot_evidence_together() {
     );
 }
 
+enum FixtureDocument {
+    Pdf,
+    Wpf,
+}
+impl FixtureDocument {
+    fn assert_source(&self, title: Option<&str>, url: Option<&str>) {
+        match self {
+            Self::Pdf => {
+                assert!(title.is_some_and(|title| title.contains("reader.pdf")));
+                assert!(url.is_some_and(|url| url.ends_with("reader.pdf")));
+            }
+            Self::Wpf => {
+                assert_eq!(title, Some("AI-Sister UIA native fixture"));
+                assert_eq!(url, None, "WPF evidence must not borrow a browser URL");
+            }
+        }
+    }
+}
+
 // Check stored OCR, the actual saved screenshot, and every returned RAG source.
 // Reading the saved PNG again catches a source attached to the previous page's
 // picture even if the DB text itself is correct.
-fn assert_pdf_screenshot(
+fn assert_native_screenshot(
     recorder: &mut Recorder<impl Backend>,
     dir: &std::path::Path,
     frame_id: i64,
     phone: &str,
     excluded: &str,
+    document: FixtureDocument,
 ) {
     let body = recorder
         .db()
@@ -553,12 +655,13 @@ fn assert_pdf_screenshot(
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
         .join("\n");
-    assert!(body.contains(phone), "PDF screenshot OCR: {body:?}");
+    assert!(body.contains(phone), "screenshot OCR: {body:?}");
     assert!(
         !body.contains(excluded),
         "previous/hidden page OCR: {body:?}"
     );
     let context = recorder.db().frame_context(frame_id).unwrap().unwrap();
+    document.assert_source(context.window_title.as_deref(), context.url.as_deref());
     let path = context
         .image_path
         .expect("this frame must have its own screenshot");
@@ -577,7 +680,7 @@ fn assert_pdf_screenshot(
         .map(|b| b.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(visible.contains(phone), "saved PDF screenshot: {visible:?}");
+    assert!(visible.contains(phone), "saved screenshot: {visible:?}");
     assert!(
         !visible.contains(excluded),
         "saved screenshot belongs to another page"
@@ -594,16 +697,17 @@ fn assert_pdf_screenshot(
         rag.sources.iter().any(|s| s.origin.as_str() == "ocr"),
         "OCR provenance required"
     );
+    if matches!(document, FixtureDocument::Wpf) {
+        assert!(
+            rag.sources.iter().any(|s| s.origin.as_str() == "assistive"),
+            "WPF UIA provenance required"
+        );
+    }
     for source in &rag.sources {
         assert_eq!(source.frame_id, Some(frame_id));
         assert!(matches!(source.origin.as_str(), "ocr" | "assistive"));
         assert!(source.text.contains(phone));
         assert!(!source.text.contains(excluded));
-        assert!(
-            source
-                .url
-                .as_deref()
-                .is_some_and(|url| url.ends_with("reader.pdf"))
-        );
+        document.assert_source(source.title.as_deref(), source.url.as_deref());
     }
 }
