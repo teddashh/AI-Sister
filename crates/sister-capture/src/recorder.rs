@@ -1866,7 +1866,10 @@ impl<B: Backend> Recorder<B> {
             return Ok(Tick::ContextChanged);
         }
 
-        let verdict = if !assistive.is_empty() && assistive != self.last_assistive {
+        // PDF 翻頁後，UIA 焦點可能仍留在畫面外的舊頁，於是回傳空文字。
+        // 這也是一次來源改變：讓新畫面走正常 OCR，不能讓相近 dHash 吞掉。
+        // 提交後 last_assistive 也變空；持續缺席不會每拍強迫重讀。
+        let verdict = if assistive != self.last_assistive {
             FrameVerdict::New
         } else {
             self.deduper.check(frame.dhash)

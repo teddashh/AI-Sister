@@ -262,3 +262,91 @@ fn pause_or_context_change_during_assistive_read_discards_text_and_frame() {
         assert_eq!(frames, 0);
     }
 }
+
+#[test]
+fn losing_assistive_text_refreshes_ocr_once_even_when_the_image_hash_matches() {
+    struct DisappearingText(Focus);
+    impl FocusSource for DisappearingText {
+        fn context(&mut self, ts: i64) -> Result<PrivacyObservation> {
+            self.0.context(ts)
+        }
+        fn is_current(&mut self, permit: CapturePermit) -> Result<bool> {
+            self.0.is_current(permit)
+        }
+        fn assistive_text(&mut self, permit: CapturePermit) -> Vec<AssistiveBlock> {
+            if self.0.calls.get() == 0 {
+                self.0.assistive_text(permit)
+            } else {
+                Vec::new()
+            }
+        }
+    }
+    struct PageOcr;
+    impl Ocr for PageOcr {
+        fn recognize(&mut self, frame: &RawFrame) -> Result<Vec<sister_core::model::OcrBlock>> {
+            Ok(vec![sister_core::model::OcrBlock {
+                text: if frame.ts == 1000 {
+                    "phone 0800-123-456"
+                } else {
+                    "phone 02-6655-4433"
+                }
+                .into(),
+                x: 0,
+                y: 0,
+                w: 8,
+                h: 8,
+                confidence: -1.0,
+            }])
+        }
+    }
+    let mut rec = Recorder::new(
+        CompositeBackend {
+            name: "assistive disappearance / synthetic OCR".into(),
+            system: System,
+            screen: Screen,
+            focus: DisappearingText(focus()),
+            clipboard: NullClipboard,
+            input: NullInput,
+            ocr: PageOcr,
+        },
+        Db::open_in_memory().unwrap(),
+        Config::default(),
+        None,
+        MasterStopSource::NotApplicable,
+    )
+    .unwrap();
+    assert!(matches!(rec.tick(1000).unwrap(), Tick::Kept { .. }));
+    let next = match rec.tick(2000).unwrap() {
+        Tick::Kept { frame_id, .. } => frame_id,
+        other => panic!("lost UIA must give OCR a fresh chance: {other:?}"),
+    };
+    assert!(rec.db().assistive_blocks(next).unwrap().is_empty());
+    let got = RetrievalProfile::TextAndFacts
+        .retrieve(rec.db_mut(), "02-6655-4433", 10)
+        .unwrap();
+    let rag = grounded_answer::prepare("02-6655-4433", &[], &got.answers, &got.hits, 2000)
+        .unwrap()
+        .unwrap();
+    assert!(!rag.sources.is_empty());
+    for source in rag.sources {
+        assert_eq!(source.origin.as_str(), "ocr");
+        assert_eq!(source.frame_id, Some(next));
+        assert!(source.text.contains("02-6655-4433"));
+        assert!(!source.text.contains("0800-123-456"));
+    }
+    for ts in [3000, 4000, 5000] {
+        assert!(matches!(rec.tick(ts).unwrap(), Tick::Duplicate { .. }));
+    }
+    assert_eq!(
+        rec.timings().ocr.calls,
+        2,
+        "continued UIA absence must not keep forcing OCR"
+    );
+    assert_eq!(
+        rec.db()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM frames", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
