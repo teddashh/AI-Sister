@@ -89,7 +89,8 @@ impl TextRect {
 }
 
 /// `eligible` must positively establish exact foreground ownership, unchanged focus,
-/// an Edit or Document control, IsPassword=false and IsOffscreen=false. Unknown is rejection.
+/// an Edit, Document or scoped document region, IsPassword=false and
+/// IsOffscreen=false. Unknown is rejection.
 pub(crate) trait VisibleText {
     fn context_matches(&mut self) -> bool;
     fn role(&mut self) -> Option<TextRole>;

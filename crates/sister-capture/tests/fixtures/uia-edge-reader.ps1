@@ -133,30 +133,24 @@ window.addEventListener('keydown', event => {
                     # Wait for the native PDF accessibility provider to expose
                     # its document. Do not accept or manufacture captured text.
                     $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-                    $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
-                    $docs = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document))
-                    $pdfLoaded = $false
-                    $pageVisible = $false
                     $expectedPage = if ($mode -eq 'top') { 'PDF-FIRST' } else { 'PDF-SECOND' }
-                    foreach ($doc in $docs) {
-                        $metadata += "doc name=$($doc.Current.Name) rect=$($doc.Current.BoundingRectangle) offscreen=$($doc.Current.IsOffscreen) text=$($doc.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty))"
-                        if ($doc.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
-                            $pattern = $doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-                            $body = $pattern.DocumentRange.GetText(1024)
-                            $metadata += "  document=[$body]"
-                            if ($body.Contains('PDF-FIRST')) { $pdfLoaded = $true }
-                            $pageText = (@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|'
-                            $metadata += "  visible=[$pageText]"
-                            if ($pageText.Contains($expectedPage)) { $pageVisible = $true }
+                    $pageReady = $false
+                    if ($focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group -and -not $focused.Current.IsOffscreen) {
+                        $parent = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($focused)
+                        if ($parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
+                            $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                            $scope = $pattern.RangeFromChild($focused).GetText(1024)
+                            $visible = (@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|'
+                            $pageReady = $scope.Contains($expectedPage) -and $visible.Contains($expectedPage)
+                            $metadata += "focused-page=[$scope] visible=[$visible]"
                         }
                     }
                     [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
-                    if (-not $pdfLoaded -or -not $pageVisible -or $focused.Current.IsOffscreen -or $focused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Group) {
+                    if (-not $pageReady) {
                         $sent = ''
                         Start-Sleep -Milliseconds 100
                         continue
                     }
-                    Start-Sleep -Milliseconds 300
                 }
                 [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
                 [IO.File]::WriteAllText((Join-Path $StateDir 'ready'), $mode)

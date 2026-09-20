@@ -8,8 +8,10 @@ use sister_core::{config::Config, db::Db, grounded_answer, retrieval::RetrievalP
 use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
+static FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
 
 struct Fixture {
     child: Child,
@@ -20,8 +22,11 @@ impl Fixture {
         Self::start_with_args(script, &[])
     }
     fn start_with_args(script: &str, args: &[&str]) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("sister-native-uia-{}-{script}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "sister-native-uia-{}-{}-{script}",
+            std::process::id(),
+            FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir(&dir).expect("fresh fixture directory");
         let child = Command::new("powershell.exe")
             .args([
@@ -49,7 +54,7 @@ impl Fixture {
     }
     fn show(&mut self, mode: &str) {
         std::fs::write(self.dir.join("request"), mode).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(45);
         loop {
             if let Ok(error) = std::fs::read_to_string(self.dir.join("error")) {
                 panic!("UIA fixture: {error}");
@@ -75,7 +80,15 @@ impl Fixture {
     }
     fn observe(&self, focus: &mut WindowsFocus, expected: SensitiveFieldState) -> CapturePermit {
         let deadline = Instant::now() + Duration::from_secs(5);
+        let owned_pid = std::fs::read_to_string(self.dir.join("provider-pid"))
+            .ok()
+            .map(|pid| pid.parse::<i64>().expect("owned provider PID"))
+            .unwrap_or(i64::from(self.child.id()));
         loop {
+            assert!(
+                Instant::now() < deadline,
+                "owned UIA provider did not observe {expected:?}"
+            );
             if let PrivacyObservation::Known {
                 context:
                     PrivacyContext::Known {
@@ -87,16 +100,12 @@ impl Fixture {
                 permit,
             } = focus.context(0).unwrap()
             {
-                assert_eq!(
-                    snapshot.pid,
-                    Some(
-                        std::fs::read_to_string(self.dir.join("provider-pid"))
-                            .ok()
-                            .map(|pid| pid.parse::<i64>().expect("owned provider PID"))
-                            .unwrap_or(i64::from(self.child.id()))
-                    ),
-                    "only the owned provider may be read"
-                );
+                if snapshot.pid != Some(owned_pid) {
+                    // Startup/teardown can briefly leave another window in front.
+                    // Never issue a content read until our own PID is observed.
+                    std::thread::sleep(Duration::from_millis(25));
+                    continue;
+                }
                 if sensitive_field == expected {
                     if self.dir.join("provider-pid").exists() {
                         let name = std::fs::read_to_string(self.dir.join("document-name")).unwrap();

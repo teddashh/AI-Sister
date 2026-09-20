@@ -1,5 +1,6 @@
-//! Only the focused, visible, non-password Edit or Document control. No full-document/tree dump,
-//! ValuePattern fallback, focus changes, content cache or event/keystroke listener.
+//! Focused, visible, non-password Edit/Document text, or a Group scoped to its
+//! direct Document parent. No full-document/tree dump, ValuePattern fallback,
+//! focus changes, content cache or event/keystroke listener.
 use crate::assistive::{self, ReadWindow, TextEnd, TextRange, TextRect, TextRole, VisibleText};
 use sister_core::model::AssistiveBlock;
 use windows::{
@@ -64,6 +65,14 @@ struct FocusedText<'a> {
     group: bool,
 }
 impl FocusedText<'_> {
+    fn range_in_frame(&self, range: &IUIAutomationTextRange) -> Option<bool> {
+        if !self.group {
+            return Some(true);
+        }
+        let (_, monitor) = super::screen::focused_monitor(self.hwnd)?;
+        let root = unsafe { self.root.CurrentBoundingRectangle() }.ok()?;
+        range_inside(range, monitor, root)
+    }
     fn matches(&self) -> Option<bool> {
         unsafe {
             if GetForegroundWindow() != self.hwnd
@@ -257,14 +266,11 @@ impl VisibleText for FocusedText<'_> {
             {
                 return Some(String::new());
             }
-            if self.group {
-                let (_, monitor) = super::screen::focused_monitor(self.hwnd)?;
-                let root = self.root.CurrentBoundingRectangle().ok()?;
-                if !range_inside(&range, monitor, root)? {
-                    return None;
-                }
+            if !self.range_in_frame(&range)? {
+                return None;
             }
-            Some(range.GetText(i32::try_from(limit).ok()?).ok()?.to_string())
+            let text = range.GetText(i32::try_from(limit).ok()?).ok()?.to_string();
+            self.range_in_frame(&range)?.then_some(text)
         }
     }
 }
