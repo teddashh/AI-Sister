@@ -32,7 +32,11 @@ impl Fixture {
             .args([
                 "-NoProfile",
                 "-NonInteractive",
-                "-STA",
+                if script == "uia-visible-text.ps1" {
+                    "-STA"
+                } else {
+                    "-MTA"
+                },
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
@@ -72,7 +76,8 @@ impl Fixture {
             }
             assert!(
                 Instant::now() < deadline,
-                "UIA fixture did not focus its {mode} control: {}",
+                "UIA fixture did not focus its {mode} control: {} / {}",
+                std::fs::read_to_string(self.dir.join("stage")).unwrap_or_default(),
                 std::fs::read_to_string(self.dir.join("metadata")).unwrap_or_default()
             );
             std::thread::sleep(Duration::from_millis(25));
@@ -132,6 +137,18 @@ impl Drop for Fixture {
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
+        }
+        if self.child.try_wait().ok().flatten().is_none()
+            && let Ok(pid) = std::fs::read_to_string(self.dir.join("provider-pid"))
+            && let Ok(pid) = pid.parse::<u32>()
+        {
+            // A stalled native UIA call must not leave this fixture's isolated
+            // browser alive after its broker is killed. Never target by exe name.
+            let _ = Command::new("taskkill.exe")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
