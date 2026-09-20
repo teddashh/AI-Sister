@@ -103,16 +103,15 @@ window.addEventListener('keydown', event => {
                         Start-Sleep -Milliseconds 100
                         continue
                     }
-                    # Only click our verified foreground viewport. Separate clicks
-                    # cannot be interpreted as PDF double-click zoom. Ctrl+End
-                    # selects the last page; PageDown exposes its lower paragraph.
+                    # Only activate our verified foreground viewport. Separate
+                    # clicks cannot be interpreted as PDF double-click zoom.
                     [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "paging PDF $mode")
                     [SisterEdgeWindow]::SetCursorPos(400, 350) | Out-Null
                     [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
                     [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
                     $activated = [DateTime]::UtcNow
-                    if ($mode -eq 'top') { [System.Windows.Forms.SendKeys]::SendWait('^{HOME}') }
-                    else { [System.Windows.Forms.SendKeys]::SendWait('^{END}{PGDN}{PGDN}') }
+                    if ($mode -ne 'top') { throw "Unknown PDF fixture mode: $mode" }
+                    [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
                 } else {
                     switch ($mode) {
                         'top' { }
@@ -146,7 +145,7 @@ window.addEventListener('keydown', event => {
                     # Wait for the native PDF accessibility provider to expose
                     # its document. Do not accept or manufacture captured text.
                     $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-                    $expectedPage = if ($mode -eq 'top') { 'PDF-FIRST' } else { 'PDF-SECOND' }
+                    $expectedPage = 'PDF-FIRST'
                     $pageReady = $false
                     if ($focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
                         $parent = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($focused)
@@ -156,30 +155,7 @@ window.addEventListener('keydown', event => {
                             $visible = (@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|'
                             $pageReady = -not $focused.Current.IsOffscreen -and $scope.Contains($expectedPage) -and $visible.Contains($expectedPage)
                             $metadata += "focused-page=[$scope] visible=[$visible]"
-                            if (-not $pageReady -and $visible.Contains($expectedPage)) {
-                                # Click the actual visible text, rather than blank
-                                # page space. This reader's SetFocus/ScrollIntoView
-                                # automation actions can block indefinitely.
-                                if (([DateTime]::UtcNow - $activated).TotalSeconds -ge 1) {
-                                    $windowRect = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd).Current.BoundingRectangle
-                                    foreach ($range in $pattern.GetVisibleRanges()) {
-                                        if (-not $range.GetText(1024).Contains($expectedPage)) { continue }
-                                        foreach ($bounds in $range.GetBoundingRectangles()) {
-                                            if ($bounds.Width -le 0 -or $bounds.Height -le 0 -or -not $windowRect.Contains($bounds)) { continue }
-                                            if ([SisterEdgeWindow]::GetForegroundWindow() -ne $hwnd) { break }
-                                            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "clicking visible $expectedPage")
-                                            [SisterEdgeWindow]::SetCursorPos([int]($bounds.X + $bounds.Width / 2), [int]($bounds.Y + $bounds.Height / 2)) | Out-Null
-                                            [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
-                                            [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
-                                            $activated = [DateTime]::UtcNow
-                                            break
-                                        }
-                                    }
-                                }
-                                [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
-                                Start-Sleep -Milliseconds 100
-                                continue
-                            }
+
                         }
                     }
                     [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))

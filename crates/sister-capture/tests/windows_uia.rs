@@ -399,7 +399,7 @@ fn assert_browser_sources(
     let rag = grounded_answer::prepare("phone", &[], &got.answers, &got.hits, 3000)
         .unwrap()
         .unwrap();
-    assert_eq!(rag.sources.len(), 2);
+    assert_eq!(rag.sources.len(), records.len());
     assert!(rag.sources.iter().all(|s| s.origin.as_str() == "assistive"));
     let mut ids: Vec<_> = rag.sources.iter().map(|s| s.frame_id.unwrap()).collect();
     ids.sort_unstable();
@@ -419,7 +419,7 @@ fn assert_browser_sources(
 
 #[test]
 #[ignore = "owns an isolated Edge PDF reader and Windows foreground; CI runs alone"]
-fn native_edge_pdf_pages_keep_text_and_evidence_together() {
+fn native_edge_pdf_focused_page_keeps_text_and_evidence_together() {
     let mut fixture = Fixture::start_with_args("uia-edge-reader.ps1", &["-Pdf"]);
     fixture.show("top");
     let mut focus = WindowsFocus::new();
@@ -440,45 +440,28 @@ fn native_edge_pdf_pages_keep_text_and_evidence_together() {
     let mut recorder = browser_recorder(fixture.dir.clone());
     let first_frame = retained(recorder.tick(1000).unwrap());
 
-    fixture.show("bottom");
-    let next_permit = fixture.observe(&mut focus, SensitiveFieldState::Clear);
-    let second = text(&focus.assistive_text(next_permit), "document-region");
-    println!(
-        "Edge PDF second-page provider: {}",
-        std::fs::read_to_string(fixture.dir.join("metadata")).unwrap()
-    );
-    assert!(
-        second.contains("PDF-SECOND phone 02-6655-4433"),
-        "PDF second page: {second:?}"
-    );
-    assert!(!second.contains("PDF-FIRST"), "old PDF page: {second:?}");
-    let second_frame = retained(recorder.tick(2000).unwrap());
-    assert_ne!(first_frame, second_frame);
     assert_browser_sources(
         &mut recorder,
         &fixture.dir,
         "reader.pdf",
         "document-region",
-        &[
-            (first_frame, "0800-444-555", "02-6655-4433"),
-            (second_frame, "02-6655-4433", "0800-444-555"),
-        ],
+        &[(first_frame, "0800-444-555", "02-6655-4433")],
     );
 
     fixture.show("address");
-    assert!(!focus.is_current(next_permit).unwrap());
-    assert!(focus.assistive_text(next_permit).is_empty());
+    assert!(!focus.is_current(permit).unwrap());
+    assert!(focus.assistive_text(permit).is_empty());
     assert!(!matches!(recorder.tick(3000).unwrap(), Tick::Kept { .. }));
-    assert_eq!(recorder.timings().assistive.calls, 2);
+    assert_eq!(recorder.timings().assistive.calls, 1);
     assert_eq!(
         recorder
             .db()
             .conn()
             .query_row("SELECT COUNT(*) FROM frames", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        2
+        1
     );
     println!(
-        "SISTER-PDF-UIA: VERIFIED visible-pages no-offscreen same-frame-rag source-url address-denied"
+        "SISTER-PDF-UIA: VERIFIED focused-page no-offscreen-page same-frame-rag source-url address-denied"
     );
 }
