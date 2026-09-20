@@ -157,19 +157,24 @@ window.addEventListener('keydown', event => {
                             $pageReady = -not $focused.Current.IsOffscreen -and $scope.Contains($expectedPage) -and $visible.Contains($expectedPage)
                             $metadata += "focused-page=[$scope] visible=[$visible]"
                             if (-not $pageReady -and $visible.Contains($expectedPage)) {
-                                # Scrolling can leave accessibility focus on the
-                                # old page even after clicking the new viewport.
-                                # Focus only an already-visible direct page child;
-                                # the provider's ScrollIntoView can block forever.
-                                $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-                                $page = $walker.GetFirstChild($parent)
-                                for ($index = 0; $index -lt 16 -and $null -ne $page; $index++) {
-                                    if ($page.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group -and -not $page.Current.IsOffscreen -and $pattern.RangeFromChild($page).GetText(1024).Contains($expectedPage)) {
-                                        [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "focusing visible $expectedPage")
-                                        $page.SetFocus()
-                                        break
+                                # Click the actual visible text, rather than blank
+                                # page space. This reader's SetFocus/ScrollIntoView
+                                # automation actions can block indefinitely.
+                                if (([DateTime]::UtcNow - $activated).TotalSeconds -ge 1) {
+                                    $windowRect = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd).Current.BoundingRectangle
+                                    foreach ($range in $pattern.GetVisibleRanges()) {
+                                        if (-not $range.GetText(1024).Contains($expectedPage)) { continue }
+                                        foreach ($bounds in $range.GetBoundingRectangles()) {
+                                            if ($bounds.Width -le 0 -or $bounds.Height -le 0 -or -not $windowRect.Contains($bounds)) { continue }
+                                            if ([SisterEdgeWindow]::GetForegroundWindow() -ne $hwnd) { break }
+                                            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "clicking visible $expectedPage")
+                                            [SisterEdgeWindow]::SetCursorPos([int]($bounds.X + $bounds.Width / 2), [int]($bounds.Y + $bounds.Height / 2)) | Out-Null
+                                            [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+                                            [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+                                            $activated = [DateTime]::UtcNow
+                                            break
+                                        }
                                     }
-                                    $page = $walker.GetNextSibling($page)
                                 }
                                 [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
                                 Start-Sleep -Milliseconds 100
