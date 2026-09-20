@@ -148,14 +148,33 @@ window.addEventListener('keydown', event => {
                     $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
                     $expectedPage = if ($mode -eq 'top') { 'PDF-FIRST' } else { 'PDF-SECOND' }
                     $pageReady = $false
-                    if ($focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group -and -not $focused.Current.IsOffscreen) {
+                    if ($focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
                         $parent = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($focused)
                         if ($parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
                             $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
                             $scope = $pattern.RangeFromChild($focused).GetText(1024)
                             $visible = (@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|'
-                            $pageReady = $scope.Contains($expectedPage) -and $visible.Contains($expectedPage)
+                            $pageReady = -not $focused.Current.IsOffscreen -and $scope.Contains($expectedPage) -and $visible.Contains($expectedPage)
                             $metadata += "focused-page=[$scope] visible=[$visible]"
+                            if (-not $pageReady -and $visible.Contains($expectedPage)) {
+                                # Scrolling can leave accessibility focus on the
+                                # old page even after clicking the new viewport.
+                                # Focus only an already-visible direct page child;
+                                # the provider's ScrollIntoView can block forever.
+                                $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+                                $page = $walker.GetFirstChild($parent)
+                                for ($index = 0; $index -lt 16 -and $null -ne $page; $index++) {
+                                    if ($page.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group -and -not $page.Current.IsOffscreen -and $pattern.RangeFromChild($page).GetText(1024).Contains($expectedPage)) {
+                                        [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "focusing visible $expectedPage")
+                                        $page.SetFocus()
+                                        break
+                                    }
+                                    $page = $walker.GetNextSibling($page)
+                                }
+                                [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
+                                Start-Sleep -Milliseconds 100
+                                continue
+                            }
                         }
                     }
                     [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
