@@ -56,6 +56,7 @@ try {
 <style>body{font:20px sans-serif;margin:24px}main{height:280px;overflow:auto;border:1px solid;padding:8px}p{margin:16px 0}</style>
 <main id="reader" role="document" tabindex="0" autofocus>
 <p>&#x7db2;&#x9801;&#x96fb;&#x8a71; 0800-333-444</p><p>EDGE-SECOND-PARAGRAPH</p>
+<div id="unsupported" role="group" tabindex="0">GROUP-PARENT-SENTINEL</div>
 <div style="height:4000px">padding</div><p>EDGE-BOTTOM 02-7766-5544</p>
 <p hidden>HIDDEN-SENTINEL</p></main>
 <p>SIBLING-SENTINEL 0800-999-000</p>
@@ -66,6 +67,7 @@ window.addEventListener('load', () => { reader.focus(); document.title='Sister E
 window.addEventListener('keydown', event => {
   if (event.key==='F8') { event.preventDefault(); reader.scrollTop=reader.scrollHeight; document.title='Sister Edge bottom'; }
   if (event.key==='F9') { event.preventDefault(); document.getElementById('secret').focus(); document.title='Sister Edge password'; }
+  if (event.key==='F10') { event.preventDefault(); document.getElementById('unsupported').focus(); document.title='Sister Edge group'; }
 });
 </script>
 '@
@@ -131,6 +133,7 @@ window.addEventListener('keydown', event => {
                         'top' { }
                         'bottom' { [System.Windows.Forms.SendKeys]::SendWait('{F8}') }
                         'password' { [System.Windows.Forms.SendKeys]::SendWait('{F9}') }
+                        'group' { [System.Windows.Forms.SendKeys]::SendWait('{F10}') }
                         'address' { [System.Windows.Forms.SendKeys]::SendWait('^l') }
                         default { throw "Unknown fixture mode: $mode" }
                     }

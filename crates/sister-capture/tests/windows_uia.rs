@@ -305,6 +305,13 @@ fn native_edge_reader_visible_paragraphs_scroll_and_privacy() {
         ],
     );
 
+    fixture.show("group");
+    let unsupported_group = fixture.observe(&mut focus, SensitiveFieldState::Clear);
+    assert!(
+        focus.assistive_text(unsupported_group).is_empty(),
+        "a group must not skip its direct Document parent to borrow an outer provider"
+    );
+
     fixture.show("password");
     assert!(!focus.is_current(permit).unwrap());
     assert!(focus.assistive_text(permit).is_empty());
