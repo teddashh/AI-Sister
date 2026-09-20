@@ -135,15 +135,19 @@ window.addEventListener('keydown', event => {
                     $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
                     $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
                     $docs = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document))
+                    $pdfLoaded = $false
                     foreach ($doc in $docs) {
                         $metadata += "doc name=$($doc.Current.Name) rect=$($doc.Current.BoundingRectangle) offscreen=$($doc.Current.IsOffscreen) text=$($doc.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty))"
                         if ($doc.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
                             $pattern = $doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                            $body = $pattern.DocumentRange.GetText(1024)
+                            $metadata += "  document=[$body]"
+                            if ($body.Contains('PDF-FIRST')) { $pdfLoaded = $true }
                             $metadata += "  visible=[$((@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|')]"
                         }
                     }
                     [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
-                    if ($focused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document) {
+                    if (-not $pdfLoaded -or $focused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document) {
                         $sent = ''
                         Start-Sleep -Milliseconds 100
                         continue
