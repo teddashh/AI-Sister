@@ -12,10 +12,39 @@ public static class SisterEdgeWindow {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
-    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);
 }
 '@
+# Drive only our generated PDF through its native UIA provider. TextRange's
+# ScrollIntoView waits on a real reader operation; repeated mouse clicks can
+# instead toggle PDF zoom, and Ctrl+End can leave focus on a hidden old page.
+function Show-PdfPage([IntPtr]$hwnd, [string]$mode) {
+    $expected = if ($mode -eq 'top') { 'PDF-FIRST' } else { 'PDF-SECOND' }
+    $excluded = if ($mode -eq 'top') { 'PDF-SECOND' } else { 'PDF-FIRST' }
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+    $docs = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document))
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    foreach ($doc in $docs) {
+        if (-not $doc.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) { continue }
+        $pattern = $doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+        $child = $walker.GetFirstChild($doc)
+        for ($index = 0; $index -lt 16 -and $null -ne $child; $index++) {
+            if ($child.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
+                $range = $pattern.RangeFromChild($child)
+                $body = $range.GetText(1024)
+                if ($body.Contains($expected) -and -not $body.Contains($excluded)) {
+                    $line = $range.FindText($expected, $false, $false)
+                    if ($null -ne $line) {
+                        $child.SetFocus()
+                        $line.ScrollIntoView($true)
+                        return $true
+                    }
+                }
+            }
+            $child = $walker.GetNextSibling($child)
+        }
+    }
+    return $false
+}
 $browser = $null
 try {
     $edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -96,19 +125,15 @@ window.addEventListener('keydown', event => {
             if ($foreground -ne $hwnd -or $foregroundPid -ne $browser.Id) { Start-Sleep -Milliseconds 40; continue }
             if ($sent -ne $mode) {
                 if ($Pdf -and $mode -ne 'address') {
-                    # A click in the owned PDF viewport gives the native reader
-                    # keyboard focus. Foreground HWND/PID were checked above.
-                    if (-not $browser.MainWindowTitle.Contains('reader.pdf')) { Start-Sleep -Milliseconds 40; continue }
-                    [SisterEdgeWindow]::SetCursorPos(400, 350) | Out-Null
-                    [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
-                    [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
-                }
-                switch ($mode) {
-                    'top' { if ($Pdf) { [System.Windows.Forms.SendKeys]::SendWait('^{HOME}') } }
-                    'bottom' { if ($Pdf) { [System.Windows.Forms.SendKeys]::SendWait('^{END}') } else { [System.Windows.Forms.SendKeys]::SendWait('{F8}') } }
-                    'password' { [System.Windows.Forms.SendKeys]::SendWait('{F9}') }
-                    'address' { [System.Windows.Forms.SendKeys]::SendWait('^l') }
-                    default { throw "Unknown fixture mode: $mode" }
+                    if (-not (Show-PdfPage $hwnd $mode)) { Start-Sleep -Milliseconds 100; continue }
+                } else {
+                    switch ($mode) {
+                        'top' { }
+                        'bottom' { [System.Windows.Forms.SendKeys]::SendWait('{F8}') }
+                        'password' { [System.Windows.Forms.SendKeys]::SendWait('{F9}') }
+                        'address' { [System.Windows.Forms.SendKeys]::SendWait('^l') }
+                        default { throw "Unknown fixture mode: $mode" }
+                    }
                 }
                 $sent = $mode
             }
