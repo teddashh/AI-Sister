@@ -116,6 +116,7 @@ window.addEventListener('keydown', event => {
                     [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
                     $activated = [DateTime]::UtcNow
                     if ($mode -ne 'top') { throw "Unknown PDF fixture mode: $mode" }
+                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'sending PDF Home')
                     [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
                 } else {
                     switch ($mode) {
@@ -133,28 +134,26 @@ window.addEventListener('keydown', event => {
             if ($Pdf -or $mode -eq 'address' -or $browser.MainWindowTitle.StartsWith("Sister Edge $mode")) {
                 # Only describe metadata under this owned foreground window. This
                 # makes a native provider mismatch diagnosable without product logging.
+                [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading focused metadata')
                 $node = [System.Windows.Automation.AutomationElement]::FocusedElement
                 $metadata = @()
                 for ($depth = 0; $depth -lt 8 -and $null -ne $node; $depth++) {
                     $current = $node.Current
                     $metadata += "$depth type=$($current.ControlType.ProgrammaticName) class=$($current.ClassName) rect=$($current.BoundingRectangle) password=$($current.IsPassword) offscreen=$($current.IsOffscreen) focused=$($current.HasKeyboardFocus) text=$($node.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty))"
-                    if ($Pdf -and $node.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
-                        $pattern = $node.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-                        $visible = @($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })
-                        $metadata += "  visible=[$($visible -join '|')]"
-                    }
                     if ($current.NativeWindowHandle -eq $hwnd.ToInt64()) { break }
                     $node = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($node)
                 }
                 if ($Pdf -and $mode -ne 'address') {
                     # Wait for the native PDF accessibility provider to expose
                     # its document. Do not accept or manufacture captured text.
+                    [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
                     $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
                     $expectedPage = if ($mode -eq 'bottom') { 'PDF-SECOND' } else { 'PDF-FIRST' }
                     $pageReady = $false
                     if ($focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
                         $parent = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($focused)
                         if ($parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
+                            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading direct PDF document')
                             $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
                             $scope = $pattern.RangeFromChild($focused).GetText(1024)
                             $visible = (@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|'
