@@ -121,14 +121,28 @@ window.addEventListener('keydown', event => {
                 for ($depth = 0; $depth -lt 8 -and $null -ne $node; $depth++) {
                     $current = $node.Current
                     $metadata += "$depth type=$($current.ControlType.ProgrammaticName) class=$($current.ClassName) rect=$($current.BoundingRectangle) password=$($current.IsPassword) offscreen=$($current.IsOffscreen) focused=$($current.HasKeyboardFocus) text=$($node.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty))"
+                    if ($Pdf -and $node.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
+                        $pattern = $node.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                        $visible = @($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })
+                        $metadata += "  visible=[$($visible -join '|')]"
+                    }
                     if ($current.NativeWindowHandle -eq $hwnd.ToInt64()) { break }
                     $node = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($node)
                 }
-                [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
                 if ($Pdf -and $mode -ne 'address') {
                     # Wait for the native PDF accessibility provider to expose
                     # its document. Do not accept or manufacture captured text.
                     $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+                    $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+                    $docs = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document))
+                    foreach ($doc in $docs) {
+                        $metadata += "doc name=$($doc.Current.Name) rect=$($doc.Current.BoundingRectangle) offscreen=$($doc.Current.IsOffscreen) text=$($doc.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty))"
+                        if ($doc.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
+                            $pattern = $doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                            $metadata += "  visible=[$((@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|')]"
+                        }
+                    }
+                    [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
                     if ($focused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document) {
                         $sent = ''
                         Start-Sleep -Milliseconds 100
@@ -136,6 +150,7 @@ window.addEventListener('keydown', event => {
                     }
                     Start-Sleep -Milliseconds 300
                 }
+                [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
                 [IO.File]::WriteAllText((Join-Path $StateDir 'ready'), $mode)
                 $last = $mode
             }
