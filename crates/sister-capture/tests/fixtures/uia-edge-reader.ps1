@@ -1,5 +1,5 @@
-# Owned Edge profile + local HTML. Only the fixture process tree is controlled.
-param([Parameter(Mandatory=$true)][string]$StateDir)
+# Owned Edge profile + local HTML/PDF. Only the fixture process tree is controlled.
+param([Parameter(Mandatory=$true)][string]$StateDir, [switch]$Pdf)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName UIAutomationClient
@@ -12,6 +12,8 @@ public static class SisterEdgeWindow {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);
 }
 '@
 $browser = $null
@@ -38,9 +40,40 @@ window.addEventListener('keydown', event => {
 });
 </script>
 '@
-    $htmlPath = Join-Path $StateDir 'reader.html'
-    [IO.File]::WriteAllText($htmlPath, $html, [Text.UTF8Encoding]::new($false))
-    $uri = ([Uri]$htmlPath).AbsoluteUri
+    if ($Pdf) {
+        # Original two-page, text-only PDF. Exact ASCII stream lengths and xref
+        # offsets; no downloaded sample, embedded scripts, forms or external links.
+        $streams = @(
+            "BT /F1 20 Tf 60 680 Td (PDF-FIRST phone 0800-444-555) Tj ET`n",
+            "BT /F1 20 Tf 60 120 Td (PDF-SECOND phone 02-6655-4433) Tj ET`n"
+        )
+        $objects = @(
+            '<< /Type /Catalog /Pages 2 0 R >>',
+            '<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
+            '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 6 0 R >>',
+            '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>',
+            '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+            "<< /Length $($streams[0].Length) >>`nstream`n$($streams[0])endstream",
+            "<< /Length $($streams[1].Length) >>`nstream`n$($streams[1])endstream"
+        )
+        $pdfBody = "%PDF-1.4`n"
+        $offsets = @()
+        for ($index = 0; $index -lt $objects.Count; $index++) {
+            $offsets += $pdfBody.Length
+            $pdfBody += "$($index + 1) 0 obj`n$($objects[$index])`nendobj`n"
+        }
+        $xref = $pdfBody.Length
+        $pdfBody += "xref`n0 8`n0000000000 65535 f `n"
+        foreach ($offset in $offsets) { $pdfBody += ('{0:D10} 00000 n ' -f $offset) + "`n" }
+        $pdfBody += "trailer`n<< /Size 8 /Root 1 0 R >>`nstartxref`n$xref`n%%EOF`n"
+        $documentPath = Join-Path $StateDir 'reader.pdf'
+        [IO.File]::WriteAllText($documentPath, $pdfBody, [Text.Encoding]::ASCII)
+    } else {
+        $documentPath = Join-Path $StateDir 'reader.html'
+        [IO.File]::WriteAllText($documentPath, $html, [Text.UTF8Encoding]::new($false))
+    }
+    [IO.File]::WriteAllText((Join-Path $StateDir 'document-name'), [IO.Path]::GetFileName($documentPath))
+    $uri = ([Uri]$documentPath).AbsoluteUri
     $profile = Join-Path $StateDir 'edge-profile'
     $browser = Start-Process -FilePath $edge -ArgumentList @("--user-data-dir=`"$profile`"", '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-component-update', '--disable-sync', '--force-renderer-accessibility', '--new-window', "`"$uri`"") -PassThru
     [IO.File]::WriteAllText((Join-Path $StateDir 'provider-pid'), [string]$browser.Id)
@@ -62,9 +95,17 @@ window.addEventListener('keydown', event => {
             [SisterEdgeWindow]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid) | Out-Null
             if ($foreground -ne $hwnd -or $foregroundPid -ne $browser.Id) { Start-Sleep -Milliseconds 40; continue }
             if ($sent -ne $mode) {
+                if ($Pdf -and $mode -ne 'address') {
+                    # A click in the owned PDF viewport gives the native reader
+                    # keyboard focus. Foreground HWND/PID were checked above.
+                    if (-not $browser.MainWindowTitle.Contains('reader.pdf')) { Start-Sleep -Milliseconds 40; continue }
+                    [SisterEdgeWindow]::SetCursorPos(400, 350) | Out-Null
+                    [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+                    [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+                }
                 switch ($mode) {
-                    'top' { }
-                    'bottom' { [System.Windows.Forms.SendKeys]::SendWait('{F8}') }
+                    'top' { if ($Pdf) { [System.Windows.Forms.SendKeys]::SendWait('^{HOME}') } }
+                    'bottom' { if ($Pdf) { [System.Windows.Forms.SendKeys]::SendWait('^{END}') } else { [System.Windows.Forms.SendKeys]::SendWait('{F8}') } }
                     'password' { [System.Windows.Forms.SendKeys]::SendWait('{F9}') }
                     'address' { [System.Windows.Forms.SendKeys]::SendWait('^l') }
                     default { throw "Unknown fixture mode: $mode" }
@@ -72,7 +113,7 @@ window.addEventListener('keydown', event => {
                 $sent = $mode
             }
             $browser.Refresh()
-            if ($mode -eq 'address' -or $browser.MainWindowTitle.StartsWith("Sister Edge $mode")) {
+            if ($Pdf -or $mode -eq 'address' -or $browser.MainWindowTitle.StartsWith("Sister Edge $mode")) {
                 # Only describe metadata under this owned foreground window. This
                 # makes a native provider mismatch diagnosable without product logging.
                 $node = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -84,6 +125,17 @@ window.addEventListener('keydown', event => {
                     $node = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($node)
                 }
                 [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
+                if ($Pdf -and $mode -ne 'address') {
+                    # Wait for the native PDF accessibility provider to expose
+                    # its document. Do not accept or manufacture captured text.
+                    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+                    if ($focused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document) {
+                        $sent = ''
+                        Start-Sleep -Milliseconds 100
+                        continue
+                    }
+                    Start-Sleep -Milliseconds 300
+                }
                 [IO.File]::WriteAllText((Join-Path $StateDir 'ready'), $mode)
                 $last = $mode
             }

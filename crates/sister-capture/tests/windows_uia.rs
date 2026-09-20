@@ -17,6 +17,9 @@ struct Fixture {
 }
 impl Fixture {
     fn start(script: &str) -> Self {
+        Self::start_with_args(script, &[])
+    }
+    fn start_with_args(script: &str, args: &[&str]) -> Self {
         let dir =
             std::env::temp_dir().join(format!("sister-native-uia-{}-{script}", std::process::id()));
         std::fs::create_dir(&dir).expect("fresh fixture directory");
@@ -36,6 +39,7 @@ impl Fixture {
             )
             .arg("-StateDir")
             .arg(&dir)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -63,7 +67,8 @@ impl Fixture {
             }
             assert!(
                 Instant::now() < deadline,
-                "UIA fixture did not focus its {mode} control"
+                "UIA fixture did not focus its {mode} control: {}",
+                std::fs::read_to_string(self.dir.join("metadata")).unwrap_or_default()
             );
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -94,9 +99,10 @@ impl Fixture {
                 );
                 if sensitive_field == expected {
                     if self.dir.join("provider-pid").exists() {
+                        let name = std::fs::read_to_string(self.dir.join("document-name")).unwrap();
                         assert!(
                             matches!(browser_url,
-                            sister_core::model::BrowserUrlState::Known(ref url) if url.contains("reader.html")),
+                            sister_core::model::BrowserUrlState::Known(ref url) if url.ends_with(&name)),
                             "owned browser URL must be known: {browser_url:?}"
                         );
                     }
@@ -279,40 +285,15 @@ fn native_edge_reader_visible_paragraphs_scroll_and_privacy() {
     assert!(!bottom.contains("SIBLING-SENTINEL"));
     let bottom_frame = retained(recorder.tick(2000).unwrap());
     assert_ne!(top_frame, bottom_frame);
-    for (id, phone, excluded) in [
-        (top_frame, "0800-333-444", "02-7766-5544"),
-        (bottom_frame, "02-7766-5544", "0800-333-444"),
-    ] {
-        let blocks = recorder.db().assistive_blocks(id).unwrap();
-        let body = text(&blocks, "document");
-        assert!(body.contains(phone));
-        assert!(!body.contains(excluded));
-        let image_path: String = recorder
-            .db()
-            .conn()
-            .query_row("SELECT image_path FROM frames WHERE id=?1", [id], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(
-            image::open(fixture.dir.join(image_path))
-                .unwrap()
-                .to_rgba8()
-                .as_raw(),
-            &vec![255; 8 * 8 * 4]
-        );
-    }
-    let got = RetrievalProfile::TextAndFacts
-        .retrieve(recorder.db_mut(), "phone", 10)
-        .unwrap();
-    let rag = grounded_answer::prepare("phone", &[], &got.answers, &got.hits, 3000)
-        .unwrap()
-        .unwrap();
-    assert_eq!(rag.sources.len(), 2);
-    assert!(rag.sources.iter().all(|s| s.origin.as_str() == "assistive"));
-    let mut ids: Vec<_> = rag.sources.iter().map(|s| s.frame_id.unwrap()).collect();
-    ids.sort_unstable();
-    assert_eq!(ids, vec![top_frame, bottom_frame]);
+    assert_browser_sources(
+        &mut recorder,
+        &fixture.dir,
+        "reader.html",
+        &[
+            (top_frame, "0800-333-444", "02-7766-5544"),
+            (bottom_frame, "02-7766-5544", "0800-333-444"),
+        ],
+    );
 
     fixture.show("password");
     assert!(!focus.is_current(permit).unwrap());
@@ -348,5 +329,120 @@ fn native_edge_reader_visible_paragraphs_scroll_and_privacy() {
     assert_eq!(count, 2);
     println!(
         "SISTER-EDGE-UIA: VERIFIED visible-chinese scroll same-frame-rag no-hidden no-password address-unknown"
+    );
+}
+
+fn assert_browser_sources(
+    recorder: &mut Recorder<impl Backend>,
+    dir: &std::path::Path,
+    document: &str,
+    records: &[(i64, &str, &str)],
+) {
+    for &(id, phone, excluded) in records {
+        let blocks = recorder.db().assistive_blocks(id).unwrap();
+        let body = text(&blocks, "document");
+        assert!(body.contains(phone));
+        assert!(!body.contains(excluded));
+        let image_path: String = recorder
+            .db()
+            .conn()
+            .query_row("SELECT image_path FROM frames WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            image::open(dir.join(image_path))
+                .unwrap()
+                .to_rgba8()
+                .as_raw(),
+            &vec![255; 8 * 8 * 4]
+        );
+    }
+    let got = RetrievalProfile::TextAndFacts
+        .retrieve(recorder.db_mut(), "phone", 10)
+        .unwrap();
+    let rag = grounded_answer::prepare("phone", &[], &got.answers, &got.hits, 3000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rag.sources.len(), 2);
+    assert!(rag.sources.iter().all(|s| s.origin.as_str() == "assistive"));
+    let mut ids: Vec<_> = rag.sources.iter().map(|s| s.frame_id.unwrap()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, records.iter().map(|r| r.0).collect::<Vec<_>>());
+    for &(id, phone, excluded) in records {
+        let source = rag.sources.iter().find(|s| s.frame_id == Some(id)).unwrap();
+        assert!(source.text.contains(phone));
+        assert!(!source.text.contains(excluded));
+        assert!(
+            source
+                .url
+                .as_deref()
+                .is_some_and(|url| url.ends_with(document))
+        );
+    }
+}
+
+#[test]
+#[ignore = "owns an isolated Edge PDF reader and Windows foreground; CI runs alone"]
+fn native_edge_pdf_pages_keep_text_and_evidence_together() {
+    let mut fixture = Fixture::start_with_args("uia-edge-reader.ps1", &["-Pdf"]);
+    fixture.show("top");
+    let mut focus = WindowsFocus::new();
+    let permit = fixture.observe(&mut focus, SensitiveFieldState::Clear);
+    let first = text(&focus.assistive_text(permit), "document");
+    println!(
+        "Edge PDF first-page provider: {}",
+        std::fs::read_to_string(fixture.dir.join("metadata")).unwrap()
+    );
+    assert!(
+        first.contains("PDF-FIRST phone 0800-444-555"),
+        "PDF first page: {first:?}"
+    );
+    assert!(
+        !first.contains("PDF-SECOND"),
+        "offscreen PDF page: {first:?}"
+    );
+    let mut recorder = browser_recorder(fixture.dir.clone());
+    let first_frame = retained(recorder.tick(1000).unwrap());
+
+    fixture.show("bottom");
+    let next_permit = fixture.observe(&mut focus, SensitiveFieldState::Clear);
+    let second = text(&focus.assistive_text(next_permit), "document");
+    println!(
+        "Edge PDF second-page provider: {}",
+        std::fs::read_to_string(fixture.dir.join("metadata")).unwrap()
+    );
+    assert!(
+        second.contains("PDF-SECOND phone 02-6655-4433"),
+        "PDF second page: {second:?}"
+    );
+    assert!(!second.contains("PDF-FIRST"), "old PDF page: {second:?}");
+    let second_frame = retained(recorder.tick(2000).unwrap());
+    assert_ne!(first_frame, second_frame);
+    assert_browser_sources(
+        &mut recorder,
+        &fixture.dir,
+        "reader.pdf",
+        &[
+            (first_frame, "0800-444-555", "02-6655-4433"),
+            (second_frame, "02-6655-4433", "0800-444-555"),
+        ],
+    );
+
+    fixture.show("address");
+    assert!(!focus.is_current(next_permit).unwrap());
+    assert!(focus.assistive_text(next_permit).is_empty());
+    assert!(!matches!(recorder.tick(3000).unwrap(), Tick::Kept { .. }));
+    assert_eq!(recorder.timings().assistive.calls, 2);
+    assert_eq!(
+        recorder
+            .db()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM frames", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    println!(
+        "SISTER-PDF-UIA: VERIFIED visible-pages no-offscreen same-frame-rag source-url address-denied"
     );
 }
