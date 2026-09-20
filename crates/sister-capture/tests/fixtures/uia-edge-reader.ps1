@@ -16,41 +16,6 @@ public static class SisterEdgeWindow {
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);
 }
 '@
-# Drive only our generated PDF through its native UIA provider. TextRange's
-# ScrollIntoView waits on a real reader operation; repeated mouse clicks can
-# instead toggle PDF zoom, and Ctrl+End can leave focus on a hidden old page.
-function Show-PdfPage([IntPtr]$hwnd, [string]$mode) {
-    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "finding PDF $mode")
-    $expected = if ($mode -eq 'top') { 'PDF-FIRST' } else { 'PDF-SECOND' }
-    $excluded = if ($mode -eq 'top') { 'PDF-SECOND' } else { 'PDF-FIRST' }
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
-    $docs = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document))
-    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "PDF documents=$($docs.Count)")
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-    foreach ($doc in $docs) {
-        if (-not $doc.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) { continue }
-        $pattern = $doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-        $child = $walker.GetFirstChild($doc)
-        for ($index = 0; $index -lt 16 -and $null -ne $child; $index++) {
-            if ($child.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
-                $range = $pattern.RangeFromChild($child)
-                $body = $range.GetText(1024)
-                if ($body.Contains($expected) -and -not $body.Contains($excluded)) {
-                    $line = $range.FindText($expected, $false, $false)
-                    if ($null -ne $line) {
-                        [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "focusing $expected")
-                        $child.SetFocus()
-                        [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "scrolling $expected")
-                        $line.ScrollIntoView($true)
-                        return $true
-                    }
-                }
-            }
-            $child = $walker.GetNextSibling($child)
-        }
-    }
-    return $false
-}
 $browser = $null
 try {
     $edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -134,18 +99,20 @@ window.addEventListener('keydown', event => {
             if ($foreground -ne $hwnd -or $foregroundPid -ne $browser.Id) { Start-Sleep -Milliseconds 40; continue }
             if ($sent -ne $mode) {
                 if ($Pdf -and $mode -ne 'address') {
-                    if (-not (Show-PdfPage $hwnd $mode)) {
-                        # The reader lazily creates its page providers on first
-                        # activation. Space clicks apart so they cannot zoom it.
-                        if (([DateTime]::UtcNow - $activated).TotalSeconds -ge 1) {
-                            [SisterEdgeWindow]::SetCursorPos(400, 350) | Out-Null
-                            [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
-                            [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
-                            $activated = [DateTime]::UtcNow
-                        }
+                    if (-not $browser.MainWindowTitle.Contains('reader.pdf') -or ([DateTime]::UtcNow - $activated).TotalSeconds -lt 1) {
                         Start-Sleep -Milliseconds 100
                         continue
                     }
+                    # Only click our verified foreground viewport. Separate clicks
+                    # cannot be interpreted as PDF double-click zoom. Ctrl+End
+                    # selects the last page; PageDown exposes its lower paragraph.
+                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "paging PDF $mode")
+                    [SisterEdgeWindow]::SetCursorPos(400, 350) | Out-Null
+                    [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+                    [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+                    $activated = [DateTime]::UtcNow
+                    if ($mode -eq 'top') { [System.Windows.Forms.SendKeys]::SendWait('^{HOME}') }
+                    else { [System.Windows.Forms.SendKeys]::SendWait('^{END}{PGDN}{PGDN}') }
                 } else {
                     switch ($mode) {
                         'top' { }
