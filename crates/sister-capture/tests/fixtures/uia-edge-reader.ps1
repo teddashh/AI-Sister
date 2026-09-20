@@ -98,7 +98,12 @@ window.addEventListener('keydown', event => {
             [SisterEdgeWindow]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid) | Out-Null
             if ($foreground -ne $hwnd -or $foregroundPid -ne $browser.Id) { Start-Sleep -Milliseconds 40; continue }
             if ($sent -ne $mode) {
-                if ($Pdf -and $mode -ne 'address') {
+                if ($Pdf -and $mode -eq 'bottom') {
+                    # Scroll without transferring accessibility focus. Edge can
+                    # leave it on the old, now offscreen page; OCR must continue.
+                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'scrolling PDF bottom with old focus')
+                    [System.Windows.Forms.SendKeys]::SendWait('^{END}{PGDN}{PGDN}')
+                } elseif ($Pdf -and $mode -ne 'address') {
                     if (-not $browser.MainWindowTitle.Contains('reader.pdf') -or ([DateTime]::UtcNow - $activated).TotalSeconds -lt 1) {
                         Start-Sleep -Milliseconds 100
                         continue
@@ -145,7 +150,7 @@ window.addEventListener('keydown', event => {
                     # Wait for the native PDF accessibility provider to expose
                     # its document. Do not accept or manufacture captured text.
                     $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-                    $expectedPage = 'PDF-FIRST'
+                    $expectedPage = if ($mode -eq 'bottom') { 'PDF-SECOND' } else { 'PDF-FIRST' }
                     $pageReady = $false
                     if ($focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
                         $parent = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($focused)
@@ -153,14 +158,18 @@ window.addEventListener('keydown', event => {
                             $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
                             $scope = $pattern.RangeFromChild($focused).GetText(1024)
                             $visible = (@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|'
-                            $pageReady = -not $focused.Current.IsOffscreen -and $scope.Contains($expectedPage) -and $visible.Contains($expectedPage)
+                            if ($mode -eq 'bottom') {
+                                $pageReady = $focused.Current.IsOffscreen -and $scope.Contains('PDF-FIRST') -and $visible.Contains($expectedPage) -and -not $visible.Contains('PDF-FIRST')
+                            } else {
+                                $pageReady = -not $focused.Current.IsOffscreen -and $scope.Contains($expectedPage) -and $visible.Contains($expectedPage)
+                            }
                             $metadata += "focused-page=[$scope] visible=[$visible]"
 
                         }
                     }
                     [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
                     if (-not $pageReady) {
-                        $sent = ''
+                        if ($mode -ne 'bottom') { $sent = '' }
                         Start-Sleep -Milliseconds 100
                         continue
                     }

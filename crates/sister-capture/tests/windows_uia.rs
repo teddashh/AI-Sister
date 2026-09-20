@@ -2,7 +2,12 @@
 //! fixture deliberately owns the foreground. It does not inspect a user's apps.
 #![cfg(windows)]
 
-use sister_capture::{MasterStopSource, Recorder, Tick, traits::*, windows::focus::WindowsFocus};
+use sister_capture::{
+    MasterStopSource, Recorder, Tick,
+    ocr_regions::ChangedRegionOcr,
+    traits::*,
+    windows::{focus::WindowsFocus, ocr::WindowsOcr, screen::WindowsScreen},
+};
 use sister_core::model::{AssistiveBlock, PrivacyContext, SensitiveFieldState};
 use sister_core::{config::Config, db::Db, grounded_answer, retrieval::RetrievalProfile};
 use std::{
@@ -425,7 +430,7 @@ fn assert_browser_sources(
 
 #[test]
 #[ignore = "owns an isolated Edge PDF reader and Windows foreground; CI runs alone"]
-fn native_edge_pdf_focused_page_keeps_text_and_evidence_together() {
+fn native_edge_pdf_scroll_keeps_uia_ocr_and_screenshot_evidence_together() {
     let mut fixture = Fixture::start_with_args("uia-edge-reader.ps1", &["-Pdf"]);
     fixture.show("top");
     let mut focus = WindowsFocus::new();
@@ -443,31 +448,162 @@ fn native_edge_pdf_focused_page_keeps_text_and_evidence_together() {
         !first.contains("PDF-SECOND"),
         "offscreen PDF page: {first:?}"
     );
-    let mut recorder = browser_recorder(fixture.dir.clone());
+    let mut config = Config::default();
+    config.capture.image_min_interval_ms = 0;
+    let ocr = WindowsOcr::new(&["en-US".into()]);
+    assert!(ocr.is_available(), "native PDF verification requires OCR");
+    // Only system activity, clipboard and input are synthetic here. Both the
+    // screen pixels and OCR come from the production Windows implementations.
+    let mut recorder = Recorder::new(
+        CompositeBackend {
+            name: "Edge PDF / native screenshot and OCR fixture".into(),
+            system: FixtureSystem,
+            screen: WindowsScreen::new(),
+            focus: WindowsFocus::new(),
+            clipboard: NullClipboard,
+            input: NullInput,
+            ocr: ChangedRegionOcr::new(ocr),
+        },
+        Db::open_in_memory().unwrap(),
+        config,
+        Some(fixture.dir.clone()),
+        MasterStopSource::NotApplicable,
+    )
+    .unwrap();
     let first_frame = retained(recorder.tick(1000).unwrap());
 
-    assert_browser_sources(
+    assert_pdf_screenshot(
         &mut recorder,
         &fixture.dir,
-        "reader.pdf",
-        "document-region",
-        &[(first_frame, "0800-444-555", "02-6655-4433")],
+        first_frame,
+        "0800-444-555",
+        "02-6655-4433",
+    );
+    assert!(
+        text(
+            &recorder.db().assistive_blocks(first_frame).unwrap(),
+            "document-region"
+        )
+        .contains("0800-444-555")
     );
 
+    fixture.show("bottom");
+    let bottom_permit = fixture.observe(&mut focus, SensitiveFieldState::Clear);
+    assert!(
+        focus.assistive_text(bottom_permit).is_empty(),
+        "the offscreen first-page focus must not authorize second-page UIA text"
+    );
+    let bottom_frame = retained(recorder.tick(6000).unwrap());
+    assert_ne!(first_frame, bottom_frame);
+    assert!(
+        recorder
+            .db()
+            .assistive_blocks(bottom_frame)
+            .unwrap()
+            .is_empty()
+    );
+    assert_pdf_screenshot(
+        &mut recorder,
+        &fixture.dir,
+        bottom_frame,
+        "02-6655-4433",
+        "0800-444-555",
+    );
+
+    let ocr_calls = recorder.timings().ocr.calls;
+    let grab_calls = recorder.timings().grab.calls;
     fixture.show("address");
     assert!(!focus.is_current(permit).unwrap());
     assert!(focus.assistive_text(permit).is_empty());
-    assert!(!matches!(recorder.tick(3000).unwrap(), Tick::Kept { .. }));
-    assert_eq!(recorder.timings().assistive.calls, 1);
+    assert!(!matches!(recorder.tick(7000).unwrap(), Tick::Kept { .. }));
+    assert_eq!(recorder.timings().assistive.calls, 2);
+    assert!(ocr_calls >= 2);
+    assert_eq!(recorder.timings().ocr.calls, ocr_calls);
+    assert_eq!(recorder.timings().grab.calls, grab_calls);
     assert_eq!(
         recorder
             .db()
             .conn()
             .query_row("SELECT COUNT(*) FROM frames", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1
+        2
     );
     println!(
-        "SISTER-PDF-UIA: VERIFIED focused-page no-offscreen-page same-frame-rag source-url address-denied"
+        "SISTER-PDF-UIA: VERIFIED native-screenshots native-ocr scroll old-focus-denied same-frame-rag source-url address-denied"
     );
+}
+
+// Check stored OCR, the actual saved screenshot, and every returned RAG source.
+// Reading the saved PNG again catches a source attached to the previous page's
+// picture even if the DB text itself is correct.
+fn assert_pdf_screenshot(
+    recorder: &mut Recorder<impl Backend>,
+    dir: &std::path::Path,
+    frame_id: i64,
+    phone: &str,
+    excluded: &str,
+) {
+    let body = recorder
+        .db()
+        .conn()
+        .prepare("SELECT text FROM ocr_blocks WHERE frame_id=?1 ORDER BY id")
+        .unwrap()
+        .query_map([frame_id], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    assert!(body.contains(phone), "PDF screenshot OCR: {body:?}");
+    assert!(
+        !body.contains(excluded),
+        "previous/hidden page OCR: {body:?}"
+    );
+    let context = recorder.db().frame_context(frame_id).unwrap().unwrap();
+    let path = context
+        .image_path
+        .expect("this frame must have its own screenshot");
+    let pixels = image::open(dir.join(path)).unwrap().to_rgba8();
+    let (width, height) = pixels.dimensions();
+    assert!(
+        width > 100 && height > 100,
+        "real screen dimensions required"
+    );
+    let saved = RawFrame::from_rgba(context.ts, 0, width, height, pixels.into_raw());
+    let blocks = WindowsOcr::new(&["en-US".into()])
+        .recognize(&saved)
+        .unwrap();
+    let visible = blocks
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(visible.contains(phone), "saved PDF screenshot: {visible:?}");
+    assert!(
+        !visible.contains(excluded),
+        "saved screenshot belongs to another page"
+    );
+
+    let got = RetrievalProfile::TextAndFacts
+        .retrieve(recorder.db_mut(), phone, 10)
+        .unwrap();
+    let rag = grounded_answer::prepare(phone, &[], &got.answers, &got.hits, 3000)
+        .unwrap()
+        .unwrap();
+    assert!(!rag.sources.is_empty());
+    assert!(
+        rag.sources.iter().any(|s| s.origin.as_str() == "ocr"),
+        "OCR provenance required"
+    );
+    for source in &rag.sources {
+        assert_eq!(source.frame_id, Some(frame_id));
+        assert!(matches!(source.origin.as_str(), "ocr" | "assistive"));
+        assert!(source.text.contains(phone));
+        assert!(!source.text.contains(excluded));
+        assert!(
+            source
+                .url
+                .as_deref()
+                .is_some_and(|url| url.ends_with("reader.pdf"))
+        );
+    }
 }
