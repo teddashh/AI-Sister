@@ -1293,9 +1293,12 @@ console.log("㉛ 送出去的事件名字，另一邊要真的有人在聽");
   // 斷言同時紅（那是這一節唯一的偵測器）；改 `app.js` 那個名字，前面的
   // `fromOutside` 會先丟「沒有人在聽 ⋯」，這一節根本沒跑到。所以「聽的 X
   // 真的有人送」是給**還沒有人驅動的新 listener** 留的後備，不是主力。
+  // `local-tts-changed`／`local-tts-stop` 寫在 local_tts.rs，跟
+  // recorder_supervisor.rs 一樣要掃進來，不然這一節看不見。
   const rustSources = [
     read(join(UI, "../src-tauri/src/main.rs")),
     read(join(UI, "../src-tauri/src/recorder_supervisor.rs")),
+    read(join(UI, "../src-tauri/src/local_tts.rs")),
   ].join("\n");
   const eventConstants = new Map(
     [...rustSources.matchAll(/const\s+(\w+)\s*:\s*&str\s*=\s*"([^"]+)"/g)].map((m) => [
