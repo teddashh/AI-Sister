@@ -36,14 +36,27 @@ function Get-SisterPdfPage {
     try {
         $focused = Get-SisterFocusedElement
         if ($null -eq $focused) { return $null }
-        if ($focused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Group) { return $null }
-        $parent = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($focused)
-        if ($null -eq $parent) { return $null }
-        if ($parent.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document) { return $null }
-        if (-not $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) { return $null }
-        $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-        $scope = $pattern.RangeFromChild($focused).GetText(1024)
+        $type = $focused.Current.ControlType
+        $doc = $null
+        if ($type -eq [System.Windows.Automation.ControlType]::Group) {
+            $parent = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($focused)
+            if ($null -eq $parent) { return $null }
+            if ($parent.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document) { return $null }
+            if (-not $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) { return $null }
+            $doc = $parent
+        } elseif ($type -eq [System.Windows.Automation.ControlType]::Document) {
+            if (-not $focused.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) { return $null }
+            $doc = $focused
+        } else {
+            return $null
+        }
+        $pattern = $doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
         $visible = (@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|'
+        $scope = if ($type -eq [System.Windows.Automation.ControlType]::Group) {
+            $pattern.RangeFromChild($focused).GetText(1024)
+        } else {
+            $visible
+        }
         return [pscustomobject]@{
             Offscreen = [bool]$focused.Current.IsOffscreen
             Scope = $scope
@@ -303,7 +316,9 @@ window.addEventListener('keydown', event => {
                         ($null -ne $live) -or ($page.Top -lt -100)
                     )
                 } else {
-                    $ready = -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and $page.Visible.Contains('PDF-FIRST')
+                    $ready = -not $page.Offscreen -and (
+                        $page.Scope.Contains('PDF-FIRST') -or $page.Visible.Contains('PDF-FIRST')
+                    )
                 }
             } else {
                 $extra += 'focused-page=none'
