@@ -68,67 +68,65 @@ function Get-SisterPdfPage {
         return $null
     }
 }
+function Get-SisterFirstChild($node) {
+    if ($null -eq $node) { return $null }
+    try { return [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetFirstChild($node) } catch { return $null }
+}
+function Get-SisterNextSibling($node) {
+    if ($null -eq $node) { return $null }
+    try { return [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetNextSibling($node) } catch { return $null }
+}
 function Find-SisterPdfPageGroup {
-    param($Root, [string]$Needle, [string]$Exclude)
+    param($Start, [string]$Needle, [string]$Exclude)
     $script:SisterPdfGroupScan = 'scanned=0 picked=none'
-    if ($null -eq $Root) { return $null }
+    if ($null -eq $Start) { return $null }
     try {
-        $documentType = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-            [System.Windows.Automation.ControlType]::Document
-        )
-        $groupType = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-            [System.Windows.Automation.ControlType]::Group
-        )
-        $documents = @()
-        if ($Root.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document) {
-            $documents += $Root
+        $seeds = @()
+        $node = $Start
+        for ($depth = 0; $depth -lt 8 -and $null -ne $node; $depth++) {
+            $seeds += $node
+            $node = Get-SisterParentElement $node
         }
-        $documents += @($Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $documentType))
+        $queue = New-Object System.Collections.Queue
+        foreach ($seed in $seeds) { $queue.Enqueue($seed) }
         $scanned = 0
-        foreach ($doc in $documents) {
+        $max = 64
+        while ($queue.Count -gt 0 -and $scanned -lt $max) {
+            $current = $queue.Dequeue()
+            $scanned++
             try {
-                if (-not $doc.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) { continue }
-                $pattern = $doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-                foreach ($group in @($doc.FindAll([System.Windows.Automation.TreeScope]::Descendants, $groupType))) {
-                    $scanned++
-                    try {
-                        $text = $pattern.RangeFromChild($group).GetText(1024)
-                        if ($text.Contains($Needle) -and -not $text.Contains($Exclude) -and -not [bool]$group.Current.IsOffscreen) {
+                if ($current.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
+                    $parent = Get-SisterParentElement $current
+                    if ($null -ne $parent -and $parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
+                        $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                        $text = $pattern.RangeFromChild($current).GetText(1024)
+                        if ($text.Contains($Needle) -and -not $text.Contains($Exclude) -and -not [bool]$current.Current.IsOffscreen) {
                             $script:SisterPdfGroupScan = "scanned=$scanned picked=group"
-                            return $group
+                            return $current
                         }
-                    } catch {}
+                    }
                 }
             } catch {}
+            $child = Get-SisterFirstChild $current
+            while ($null -ne $child) {
+                $queue.Enqueue($child)
+                $child = Get-SisterNextSibling $child
+            }
         }
-        $script:SisterPdfGroupScan = "scanned=$scanned picked=none"
+        $script:SisterPdfGroupScan = "scanned=$scanned picked=none queued=$($queue.Count)"
     } catch {
         $script:SisterPdfGroupScan = 'error'
     }
     return $null
 }
 function Invoke-SisterPdfFirstPageGroupFocus {
-    param([IntPtr]$Hwnd)
     try {
         $page = Get-SisterPdfPage
         if ($null -ne $page -and $page.Kind -eq 'Group' -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND') -and -not $page.Offscreen) {
             return
         }
-        $root = $null
-        if ($Hwnd -ne [IntPtr]::Zero) {
-            try { $root = [System.Windows.Automation.AutomationElement]::FromHandle($Hwnd) } catch {}
-        }
-        if ($null -eq $root) { $root = Get-SisterFocusedElement }
-        $group = Find-SisterPdfPageGroup -Root $root -Needle 'PDF-FIRST' -Exclude 'PDF-SECOND'
+        $group = Find-SisterPdfPageGroup -Start (Get-SisterFocusedElement) -Needle 'PDF-FIRST' -Exclude 'PDF-SECOND'
         if ($null -eq $group) { return }
-        try {
-            $rect = $group.Current.BoundingRectangle
-            if ($rect.Width -gt 1 -and $rect.Height -gt 1) {
-                Invoke-SisterViewportClick ([int]($rect.X + $rect.Width / 2)) ([int]($rect.Y + $rect.Height / 2))
-            }
-        } catch {}
         $group.SetFocus() | Out-Null
     } catch {}
 }
@@ -320,7 +318,7 @@ window.addEventListener('keydown', event => {
                 [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'activating PDF viewport')
                 Invoke-SisterViewportClick 400 350
                 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
-                Invoke-SisterPdfFirstPageGroupFocus -Hwnd $hwnd
+                Invoke-SisterPdfFirstPageGroupFocus
                 $acted = $true
             } else {
                 switch ($mode) {
@@ -351,7 +349,7 @@ window.addEventListener('keydown', event => {
             # the wrong PDF page. Do not poke a document that is already the
             # provider we want while its text pattern is still filling in.
             if ($Pdf -and $mode -eq 'top') {
-                Invoke-SisterPdfFirstPageGroupFocus -Hwnd $hwnd
+                Invoke-SisterPdfFirstPageGroupFocus
                 $page = Get-SisterPdfPage
                 if ($null -eq $page -or $page.Kind -ne 'Group' -or $page.Scope.Contains('PDF-SECOND')) {
                     [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'PDF focus is not a page group; activating again')
@@ -370,8 +368,9 @@ window.addEventListener('keydown', event => {
         $extra = @()
         if ($Pdf -and $mode -ne 'address') {
             [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading direct PDF document')
+            Write-SisterUiaMetadata -Hwnd $hwnd -Extra @("group-scan=before $($script:SisterPdfGroupScan)")
             if ($mode -eq 'top') {
-                Invoke-SisterPdfFirstPageGroupFocus -Hwnd $hwnd
+                Invoke-SisterPdfFirstPageGroupFocus
             }
             $page = Get-SisterPdfPage
             $ancestors = @(Get-SisterLivePdfVisible)
