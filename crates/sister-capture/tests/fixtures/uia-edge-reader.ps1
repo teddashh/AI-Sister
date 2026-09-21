@@ -137,10 +137,6 @@ function Invoke-SisterPdfFirstPageGroupFocus {
         if ($null -ne $page -and $page.Kind -eq 'Group' -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND') -and -not $page.Offscreen) {
             return
         }
-        if ($null -ne $script:SisterPdfClick) {
-            Invoke-SisterViewportClick $script:SisterPdfClick.X $script:SisterPdfClick.Y
-            return
-        }
         $group = Find-SisterPdfPageGroup -Start (Get-SisterFocusedElement) -Needle 'PDF-FIRST' -Exclude 'PDF-SECOND'
         if ($null -eq $group) { return }
         $target = $group

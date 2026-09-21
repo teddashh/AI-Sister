@@ -42,7 +42,7 @@ impl Fixture {
             .args([
                 "-NoProfile",
                 "-NonInteractive",
-                if script == "uia-visible-text.ps1" {
+                if script == "uia-visible-text.ps1" || script == "uia-edge-reader.ps1" {
                     "-STA"
                 } else {
                     "-MTA"
