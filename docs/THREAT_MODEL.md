@@ -34,7 +34,7 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 | **拿到未鎖機器的人** | 讀檔案、跑 `sister query` | **部分防禦**：靠 OS 帳號隔離。目前資料庫**未加密** |
 | **同機的惡意程式** | 以使用者身分讀任何檔案 | **不防禦**。同權限即同讀取權，這是 OS 邊界 |
 | **偷走硬碟的人** | 離線讀取 | **依賴 BitLocker/LUKS**。應用層無額外加密 |
-| **遠端攻擊者** | 網路 | **部分防禦**：本程式沒有監聽埠；`sister.exe`、recorder/core/capture/brain/hands 與 WebView 無任意 HTTP 能力。desktop 只有使用者揭露後按下的 Persona fixed-pack GET，以及設定啟用、獨立現行 consent、Credential Manager key 全成立後，只替最新新答案／trusted replay 走的 Azure TTS fixed POST；簽 cloud-reading 後另會把使用者問題與本機查詢命中的 OCR 原文／出處交給使用者設定的 CLI，後續網路與供應商邊界屬於那支 CLI；CLI 不取得 DB path 或畫面 |
+| **遠端攻擊者** | 網路 | **部分防禦**：本程式沒有監聽埠；`sister.exe`、recorder/core/capture/brain/hands 與 WebView 無任意 HTTP 能力。desktop 只有使用者揭露後按下的 Persona fixed-pack GET；設定啟用、獨立現行 consent、Credential Manager key 全成立後只替最新新答案／trusted replay 走的 Azure TTS fixed POST；預設關閉的 127.0.0.1:8231 BreezyVoice loopback；以及設定明確開啟後對 LimitReset 固定 status／latest 的 GET。簽 cloud-reading 後另會把使用者問題與本機查詢命中的 OCR 原文／出處交給使用者設定的 CLI，後續網路與供應商邊界屬於那支 CLI；CLI 不取得 DB path 或畫面 |
 | **供應鏈** | 汙染相依套件 | **部分**：`Cargo.lock` 鎖定；未做 vendoring 或 reproducible build |
 | **好奇的旁人** | 看你的螢幕 | 不適用（他本來就看得到） |
 | **被記錄的第三方** | 無 | **這是最重要的一項，見下方** |
@@ -285,10 +285,11 @@ Windows 10 是 Release 1.0 最低支援版本；不把 Windows 7／Server 2008 R
   但其實記不住東西**」，不報「N 條規則 ✓」
 - 承諾能被機器檢查的就交給機器：`scripts/check-no-network.sh` 在 CI 上逐棵檢查
   root workspace 預設無 Persona download 或 Azure transport、recorder／core／capture／
-  brain／hands 無 HTTP client，且只有三條核准的 reverse dependency path：
+  brain／hands 無 HTTP client，且只有三條核准的 ureq reverse dependency path：
   `client → sister-assets[download] → sister-desktop`、
   `client → sister-tts[azure] → sister-desktop` 與
-  `client → sister-usage[public-status] → sister-desktop`；renderer/CSP 仍無遠端出口。
+  `client → sister-usage[public-status] → sister-desktop`；BreezyVoice 是
+  `sister-tts[local]` 的 std TCP loopback，不用 ureq。renderer/CSP 仍無遠端出口。
   這讓 PRIVACY.md 的能力邊界由建置保證而不是由記性保證。缺口通常不是人手動
   打開的，是相依套件或 feature 默默帶進來的
 - 平台相關的假設要在**那個平台上**驗，不能只靠推理：OCR 有一個 CI 步驟真的

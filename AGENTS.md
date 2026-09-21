@@ -3,8 +3,9 @@
 一句話：**AI-Sister 是一個在 Windows 上安靜看著螢幕、事後答得出「我昨天在幹嘛」、
 而且每一句話都點得開證據的本機記錄器。**「本機」指的是錄下的截圖、OCR 與記憶留在
 這台機器**；腦（L2/L3）接的是使用者自己已經裝好的 CLI agent，不是內建的 HTTP
-client。desktop 只有三條具名、窄化的內建 outbound：Persona 固定素材包的使用者發起
+client。desktop 只有四條具名、窄化的內建 outbound：Persona 固定素材包的使用者發起
 GET；alpha.110 預設關閉、另行同意後只替最新新答案或手動重播送正文的 Azure TTS POST；
+預設關閉的本機 BreezyVoice loopback（只連 127.0.0.1:8231 的 GET /health 與 POST /tts）；
 以及預設關閉、設定頁明確開啟後對 LimitReset 固定 status／latest 的公開看板 GET。
 它們不能擴散到 recorder／core／capture／brain／hands 或 WebView。
 
@@ -139,6 +140,13 @@ GET；alpha.110 預設關閉、另行同意後只替最新新答案或手動重�
 - WebView CSP 繼續只准 IPC，**不要把 Azure host 加進 `connect-src` 或 `media-src`**。
   一般 CI 不打真 Azure。
 
+### 本機台灣語音（BreezyVoice loopback）
+
+- `crates/sister-tts` 的 `local` feature **沒有** ureq；desktop 才啟用。目的地釘死
+  `127.0.0.1:8231` 的 GET `/health` 與 POST `/tts`。設定檔不准寫 endpoint／host／port。
+  預設關閉；服務未就緒時設定頁不得畫成可用開關。失敗不得改走 `localService` 或 Azure。
+- WebView CSP 繼續只准 IPC，**不要把 loopback 加進 `connect-src` 或 `media-src`**。
+
 ### 公開重置看板與本機用量（usage）
 
 - `crates/sister-usage` 預設 feature **沒有** `public-status`；只有 desktop 明確啟用。
@@ -219,7 +227,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ./scripts/check-windows.sh          # 動到 windows/ 或 apps/desktop/ 才需要，但很便宜
-./scripts/check-no-network.sh       # 隱私：只准 desktop 的 Persona GET、Azure TTS POST、LimitReset 公開看板 GET；其餘無 client/socket，WebView 無遠端來源
+./scripts/check-no-network.sh       # 隱私：只准 desktop 的 Persona GET、Azure TTS POST、BreezyVoice loopback、LimitReset 公開看板 GET；其餘無 client/socket，WebView 無遠端來源
 ```
 
 CI（`.github/workflows/ci.yml`）另外還跑十幾支 `scripts/check-*.{py,mjs,sh}`，

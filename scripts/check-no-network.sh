@@ -1079,4 +1079,4 @@ if [ -n "$skipped" ]; then
     echo "⚠ 有東西沒檢查到（未安裝 target）：$skipped"
     echo "  底下這句話只涵蓋真的跑過的那幾棵樹。出貨的是 Windows 執行檔。"
 fi
-echo "✓ 未授權網路邊界成立：root 預設與 recorder/core/brain/hands 無 HTTP client，desktop 只有 fixed Persona GET、fixed Azure POST，以及 sister-tts[local] 對 127.0.0.1:8231 的 std TCP GET /health 與 POST /tts；installer 內嵌離線 WebView2、無 updater，WebView 只准 IPC"
+echo "✓ 未授權網路邊界成立：root 預設與 recorder/core/brain/hands 無 HTTP client，desktop 只有 fixed Persona GET、fixed Azure POST、sister-tts[local] 對 127.0.0.1:8231 的 std TCP GET /health 與 POST /tts，以及 sister-usage[public-status] 對 LimitReset 固定 status/latest GET；installer 內嵌離線 WebView2、無 updater，WebView 只准 IPC"

@@ -377,11 +377,13 @@ write 失敗時 failure overlay 明講 recorder 可能仍在跑，使用者可�
 invalid／busy／timeout Start 不會。
 
 沒有遙測、沒有產品帳號。`sister.exe` 與 recorder／core／capture／brain／hands 沒有
-HTTP client；desktop 只有兩條內建 outbound：使用者看完揭露並明確按下後，經
-`sister-assets/download` 對固定 Persona pack 發至多一次 GET；以及 Azure 設定、
+HTTP client；desktop 只有四條內建 outbound：使用者看完揭露並明確按下後，經
+`sister-assets/download` 對固定 Persona pack 發至多一次 GET；Azure 設定、
 Credential Manager key 與現行第四張 consent 都成立後，經 `sister-tts/azure` 只替最新
 新答案或 trusted 手動重播，對 `eastasia`／`southeastasia`／`japaneast` 其中一個 fixed
-endpoint 發一個 POST。
+endpoint 發一個 POST；設定啟用且 loopback 就緒後，經 `sister-tts/local` 對
+`127.0.0.1:8231` 發 GET `/health` 與 POST `/tts`；以及設定明確開啟後，經
+`sister-usage/public-status` 對 LimitReset 固定 `status`／`latest` 發 GET。
 後者唯一的使用者內容是當前答案正文原文，可能含姓名、電話與金額且不遮罩；不含截圖、
 來源連結、memory id、DB 或其他文字。它不做 cache，cancel 只阻止 late audio 播放，
 無法 abort 已開始、最長 45 秒的 blocking POST。簽了第二張同意書且
