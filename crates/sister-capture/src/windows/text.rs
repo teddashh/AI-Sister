@@ -153,7 +153,7 @@ impl FocusedText<'_> {
         let mut found: Option<IUIAutomationTextRange> = None;
         while let Some((current, depth)) = pending.pop() {
             scanned += 1;
-            if scanned > 40 {
+            if scanned > 128 {
                 return found;
             }
             let is_page = unsafe { current.CurrentControlType() }.ok()
@@ -172,7 +172,7 @@ impl FocusedText<'_> {
                 }
                 found = Some(range);
             }
-            if depth < 4
+            if depth < 6
                 && let Ok(mut child) = unsafe { walker.GetFirstChildElement(&current) }
             {
                 loop {

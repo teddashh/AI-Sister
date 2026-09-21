@@ -77,7 +77,7 @@ function Get-SisterNextSibling($node) {
     try { return [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetNextSibling($node) } catch { return $null }
 }
 function Find-SisterPdfPageGroup {
-    param($Start, [string]$Needle, [string]$Exclude)
+    param($Start, [string]$Needle, [string]$Exclude, [switch]$AllowOffscreen)
     $script:SisterPdfGroupScan = 'scanned=0 picked=none'
     if ($null -eq $Start) { return $null }
     try {
@@ -101,7 +101,10 @@ function Find-SisterPdfPageGroup {
                 if ($current.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
                     $groups++
                     $rect = $current.Current.BoundingRectangle
-                    if ($rect.Width -ge 200 -and $rect.Height -ge 80 -and -not [bool]$current.Current.IsOffscreen) {
+                    $offscreen = [bool]$current.Current.IsOffscreen
+                    $pageSized = $rect.Width -ge 200 -and $rect.Height -ge 80
+                    $scrolledAway = $offscreen -or $rect.Y -lt -100
+                    if (($pageSized -and -not $offscreen) -or ($AllowOffscreen -and $scrolledAway)) {
                         $large++
                         $parent = Get-SisterParentElement $current
                         if ($null -ne $parent -and $parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
@@ -237,6 +240,8 @@ function Invoke-SisterViewportClick {
 }
 $script:SisterPdfGroupScan = 'unscanned'
 $script:SisterPdfClick = $null
+$script:SisterPdfMarked = $null
+$script:SisterPdfMarkAt = $null
 $browser = $null
 $backdrop = $null
 . (Join-Path $PSScriptRoot 'uia-backdrop.ps1')
@@ -421,13 +426,26 @@ window.addEventListener('keydown', event => {
                 $extra += (@($ancestors | ForEach-Object { "ancestor$($_.Depth) offscreen=$($_.Offscreen) visible=[$($_.Visible)]" }))
                 if ($mode -eq 'bottom') {
                     $live = $ancestors | Where-Object { $_.Visible.Contains('PDF-SECOND') -and -not $_.Visible.Contains('PDF-FIRST') } | Select-Object -First 1
+                    if ($null -eq $script:SisterPdfMarkAt -or ((Get-Date) - $script:SisterPdfMarkAt).TotalSeconds -ge 0.5) {
+                        $script:SisterPdfMarked = Find-SisterPdfPageGroup -Start (Get-SisterFocusedElement) -Needle 'PDF-FIRST' -Exclude 'PDF-SECOND' -AllowOffscreen
+                        $script:SisterPdfMarkAt = Get-Date
+                    }
+                    $markedOff = $false
+                    $markedTop = 0
+                    if ($null -ne $script:SisterPdfMarked) {
+                        $markedOff = [bool]$script:SisterPdfMarked.Current.IsOffscreen
+                        $markedTop = [int]$script:SisterPdfMarked.Current.BoundingRectangle.Y
+                    }
+                    $extra += "marked-page offscreen=$markedOff top=$markedTop"
                     $groupOffscreen = $page.Kind -eq 'Group' -and $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and (
                         ($null -ne $live) -or ($page.Top -lt -100)
                     )
-                    # Focus may stay on the Document. The visible page is ready
-                    # when its ranges show only the second page.
+                    # Focus may stay on the Document. Ctrl+End moves the
+                    # first-page Group above the viewport while visible ranges
+                    # still omit PDF-SECOND.
+                    $pageMoved = $null -ne $script:SisterPdfMarked -and ($markedOff -or $markedTop -lt -100)
                     $documentScrolled = $page.Kind -eq 'Document' -and -not $page.Offscreen -and $page.Visible.Contains('PDF-SECOND')
-                    $ready = $groupOffscreen -or $documentScrolled
+                    $ready = $groupOffscreen -or $documentScrolled -or $pageMoved
                 } else {
                     $groupTop = $page.Kind -eq 'Group' -and -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND') -and $page.Visible.Contains('PDF-FIRST')
                     $documentTop = $page.Kind -eq 'Document' -and -not $page.Offscreen -and (
