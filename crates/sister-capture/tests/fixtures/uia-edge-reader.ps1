@@ -400,7 +400,6 @@ window.addEventListener('keydown', event => {
                 [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'activating PDF viewport')
                 Invoke-SisterViewportClick 400 350
                 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
-                Invoke-SisterPdfFirstPageGroupFocus
                 $acted = $true
             } else {
                 switch ($mode) {
@@ -437,7 +436,6 @@ window.addEventListener('keydown', event => {
                 )
                 $groupReady = $null -ne $page -and $page.Kind -eq 'Group' -and -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND')
                 if (-not $documentReady -and -not $groupReady) {
-                    Invoke-SisterPdfFirstPageGroupFocus
                     $activated = [DateTime]::UtcNow
                     [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'PDF focus is not a page group; activating again')
                     $sent = ''
