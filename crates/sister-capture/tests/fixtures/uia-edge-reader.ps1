@@ -13,7 +13,7 @@ public static class SisterEdgeWindow {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint x, uint y, int data, UIntPtr extra);
 }
 '@
 function Get-SisterFocusedElement {
@@ -258,11 +258,23 @@ function Invoke-SisterViewportClick {
     [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
     [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 }
+function Invoke-SisterWheelDown {
+    param([int]$Notches = 12)
+    # Ctrl+End leaves Document GetVisibleRanges blocked on native CI.
+    # Wheel the PDF viewport instead.
+    [SisterEdgeWindow]::SetCursorPos(400, 400) | Out-Null
+    for ($i = 0; $i -lt $Notches; $i++) {
+        [SisterEdgeWindow]::mouse_event(0x0800, 0, 0, -120, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 40
+    }
+    $script:SisterPdfWheelAt = [DateTime]::UtcNow
+}
 $script:SisterPdfGroupScan = 'unscanned'
 $script:SisterPdfClick = $null
 $script:SisterPdfMarked = $null
 $script:SisterPdfMarkAt = $null
 $script:SisterPdfPageElement = $null
+$script:SisterPdfWheelAt = $null
 $browser = $null
 $backdrop = $null
 . (Join-Path $PSScriptRoot 'uia-backdrop.ps1')
@@ -371,7 +383,7 @@ window.addEventListener('keydown', event => {
                 # Scroll without transferring accessibility focus. Edge can
                 # leave it on the old, now offscreen page; OCR must continue.
                 [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'scrolling PDF bottom with old focus')
-                [System.Windows.Forms.SendKeys]::SendWait('^{END}{PGDN}{PGDN}')
+                Invoke-SisterWheelDown
                 $acted = $true
             } elseif ($Pdf -and $mode -ne 'address') {
                 if (-not $browser.MainWindowTitle.Contains('reader.pdf')) {
@@ -426,9 +438,6 @@ window.addEventListener('keydown', event => {
                     $sent = ''
                     continue
                 }
-            } elseif ($Pdf -and $mode -eq 'bottom') {
-                [System.Windows.Forms.SendKeys]::SendWait('^{END}{PGDN}{PGDN}')
-                $activated = [DateTime]::UtcNow
             } elseif ($mode -in @('top', 'bottom') -and -not $Pdf) {
                 if (-not (Test-SisterHtmlInnerDocumentFocused)) {
                     [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'HTML descendant Group; focusing inner Document')
@@ -454,6 +463,11 @@ window.addEventListener('keydown', event => {
                 } catch {
                     $extra += 'marked-page stale'
                 }
+            } elseif ($null -ne $script:SisterPdfWheelAt -and (([DateTime]::UtcNow - $script:SisterPdfWheelAt).TotalSeconds -ge 1)) {
+                # This Edge tree had no page-sized Group (full walk, large=0).
+                # The wheel already happened; do not call GetVisibleRanges here.
+                $extra += 'marked-page wheel'
+                $ready = $true
             } else {
                 $extra += 'marked-page missing'
             }
