@@ -113,6 +113,7 @@ function Find-SisterPdfPageGroup {
                                 $text = $pattern.RangeFromChild($current).GetText(1024)
                                 if ($text.Contains($Needle) -and -not $text.Contains($Exclude)) {
                                     $script:SisterPdfGroupScan = "scanned=$scanned groups=$groups large=$large picked=group"
+                                    $script:SisterPdfPageElement = $current
                                     return $current
                                 }
                             } catch {
@@ -242,6 +243,7 @@ $script:SisterPdfGroupScan = 'unscanned'
 $script:SisterPdfClick = $null
 $script:SisterPdfMarked = $null
 $script:SisterPdfMarkAt = $null
+$script:SisterPdfPageElement = $null
 $browser = $null
 $backdrop = $null
 . (Join-Path $PSScriptRoot 'uia-backdrop.ps1')
@@ -405,6 +407,9 @@ window.addEventListener('keydown', event => {
                     $sent = ''
                     continue
                 }
+            } elseif ($Pdf -and $mode -eq 'bottom') {
+                [System.Windows.Forms.SendKeys]::SendWait('^{END}{PGDN}{PGDN}')
+                $activated = [DateTime]::UtcNow
             } elseif ($mode -in @('top', 'bottom') -and -not $Pdf) {
                 if (-not (Test-SisterHtmlInnerDocumentFocused)) {
                     [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'HTML descendant Group; focusing inner Document')
@@ -415,44 +420,38 @@ window.addEventListener('keydown', event => {
         $browser.Refresh()
         $ready = $false
         $extra = @()
-        if ($Pdf -and $mode -ne 'address') {
+        if ($Pdf -and $mode -eq 'bottom') {
+            # After Ctrl+End, GetVisibleRanges on this Document does not return.
+            # The first-page Group's rectangle is the scroll signal.
+            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading scrolled PDF page group')
+            $extra += "group-scan=$script:SisterPdfGroupScan"
+            if ($null -ne $script:SisterPdfPageElement) {
+                try {
+                    $markedOff = [bool]$script:SisterPdfPageElement.Current.IsOffscreen
+                    $markedRect = $script:SisterPdfPageElement.Current.BoundingRectangle
+                    $markedTop = [int]$markedRect.Y
+                    $extra += "marked-page offscreen=$markedOff top=$markedTop h=$([int]$markedRect.Height)"
+                    $ready = $markedOff -or ($markedTop -lt -100)
+                } catch {
+                    $extra += 'marked-page stale'
+                }
+            } else {
+                $extra += 'marked-page missing'
+            }
+        } elseif ($Pdf -and $mode -ne 'address') {
             [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading direct PDF document')
             Write-SisterUiaMetadata -Hwnd $hwnd -Extra @("group-scan=$script:SisterPdfGroupScan")
             $page = Get-SisterPdfPage
-            $ancestors = if ($mode -eq 'bottom') { @(Get-SisterLivePdfVisible) } else { @() }
+            $ancestors = @()
             $extra += "group-scan=$script:SisterPdfGroupScan"
             if ($null -ne $page) {
                 $extra += "focused-page kind=$($page.Kind) scope=[$($page.Scope)] visible=[$($page.Visible)] offscreen=$($page.Offscreen) top=$($page.Top)"
                 $extra += (@($ancestors | ForEach-Object { "ancestor$($_.Depth) offscreen=$($_.Offscreen) visible=[$($_.Visible)]" }))
-                if ($mode -eq 'bottom') {
-                    $live = $ancestors | Where-Object { $_.Visible.Contains('PDF-SECOND') -and -not $_.Visible.Contains('PDF-FIRST') } | Select-Object -First 1
-                    if ($null -eq $script:SisterPdfMarkAt -or ((Get-Date) - $script:SisterPdfMarkAt).TotalSeconds -ge 0.5) {
-                        $script:SisterPdfMarked = Find-SisterPdfPageGroup -Start (Get-SisterFocusedElement) -Needle 'PDF-FIRST' -Exclude 'PDF-SECOND' -AllowOffscreen
-                        $script:SisterPdfMarkAt = Get-Date
-                    }
-                    $markedOff = $false
-                    $markedTop = 0
-                    if ($null -ne $script:SisterPdfMarked) {
-                        $markedOff = [bool]$script:SisterPdfMarked.Current.IsOffscreen
-                        $markedTop = [int]$script:SisterPdfMarked.Current.BoundingRectangle.Y
-                    }
-                    $extra += "marked-page offscreen=$markedOff top=$markedTop"
-                    $groupOffscreen = $page.Kind -eq 'Group' -and $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and (
-                        ($null -ne $live) -or ($page.Top -lt -100)
-                    )
-                    # Focus may stay on the Document. Ctrl+End moves the
-                    # first-page Group above the viewport while visible ranges
-                    # still omit PDF-SECOND.
-                    $pageMoved = $null -ne $script:SisterPdfMarked -and ($markedOff -or $markedTop -lt -100)
-                    $documentScrolled = $page.Kind -eq 'Document' -and -not $page.Offscreen -and $page.Visible.Contains('PDF-SECOND')
-                    $ready = $groupOffscreen -or $documentScrolled -or $pageMoved
-                } else {
-                    $groupTop = $page.Kind -eq 'Group' -and -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND') -and $page.Visible.Contains('PDF-FIRST')
-                    $documentTop = $page.Kind -eq 'Document' -and -not $page.Offscreen -and (
-                        $page.Scope.Contains('PDF-FIRST') -or $page.Visible.Contains('PDF-FIRST')
-                    )
-                    $ready = $groupTop -or $documentTop
-                }
+                $groupTop = $page.Kind -eq 'Group' -and -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND') -and $page.Visible.Contains('PDF-FIRST')
+                $documentTop = $page.Kind -eq 'Document' -and -not $page.Offscreen -and (
+                    $page.Scope.Contains('PDF-FIRST') -or $page.Visible.Contains('PDF-FIRST')
+                )
+                $ready = $groupTop -or $documentTop
             } else {
                 $extra += 'focused-page=none'
             }
