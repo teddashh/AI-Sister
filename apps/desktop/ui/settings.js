@@ -1812,60 +1812,60 @@ async function openAzureConsent(event) {
 
 let usageStatus = null;
 
-function paintUsage(view, actionError = "") {
+function paintUsage(raw, actionError = "") {
   if (!el.usageState) return;
-  usageStatus = view;
+  usageStatus = raw;
   if (el.usageEndpoint) {
-    el.usageEndpoint.textContent = view?.endpoint || "https://limitreset.net/api/v1/status";
+    el.usageEndpoint.textContent = raw?.endpoint || "https://limitreset.net/api/v1/status";
   }
   if (el.usageAttribution) {
-    el.usageAttribution.textContent = view?.attribution || "LimitReset（limitreset.net），CC BY 4.0";
+    el.usageAttribution.textContent = raw?.attribution || "LimitReset（limitreset.net），CC BY 4.0";
   }
-  if (el.usageLocalEnabled && typeof view?.local_sessions_enabled === "boolean") {
-    el.usageLocalEnabled.checked = view.local_sessions_enabled;
+  if (el.usageLocalEnabled && typeof raw?.local_sessions_enabled === "boolean") {
+    el.usageLocalEnabled.checked = raw.local_sessions_enabled;
   }
-  if (el.usagePublicEnabled && typeof view?.enabled === "boolean") {
-    el.usagePublicEnabled.checked = view.enabled;
+  if (el.usagePublicEnabled && typeof raw?.enabled === "boolean") {
+    el.usagePublicEnabled.checked = raw.enabled;
   }
-  if (el.usageReaction && typeof view?.reaction_enabled === "boolean") {
-    el.usageReaction.checked = view.reaction_enabled;
+  if (el.usageReaction && typeof raw?.reaction_enabled === "boolean") {
+    el.usageReaction.checked = raw.reaction_enabled;
   }
-  if (el.usageLocalDir && typeof view?.local_sessions_dir === "string") {
-    el.usageLocalDir.value = view.local_sessions_dir;
+  if (el.usageLocalDir && typeof raw?.local_sessions_dir === "string") {
+    el.usageLocalDir.value = raw.local_sessions_dir;
   }
-  if (el.usageRefresh) el.usageRefresh.disabled = view?.enabled !== true || view?.stopped === true;
+  if (el.usageRefresh) el.usageRefresh.disabled = raw?.enabled !== true || raw?.stopped === true;
   el.usageState.classList.remove("bad", "ok");
   let message;
   if (actionError) {
     el.usageState.classList.add("bad");
     message = actionError;
-  } else if (!view?.config_readable) {
+  } else if (!raw?.config_readable) {
     el.usageState.classList.add("bad");
     message = "用量設定讀不出來。";
-  } else if (view.stopped) {
+  } else if (raw.stopped) {
     message = "全停中，公開看板不會連線。";
-  } else if (!view.enabled) {
+  } else if (!raw.enabled) {
     message = "公開看板關閉，不會送出 GET。";
-  } else if (view.fetch_error) {
+  } else if (raw.fetch_error) {
     el.usageState.classList.add("bad");
-    message = `公開看板這次沒查到：${view.fetch_error}`;
-  } else if (view.board_live) {
+    message = `公開看板這次沒查到：${raw.fetch_error}`;
+  } else if (raw.board_live) {
     el.usageState.classList.add("ok");
     message = "已讀到公開看板。這是全球產品公告，不是你的帳號重置證明。";
   } else {
     message = "公開看板已開啟，尚無即時結果。";
   }
-  if (view?.local_error) {
-    message += `\n本機用量：${view.local_error}`;
-  } else if (view?.local_sessions_enabled && view.local_scan_complete === false) {
+  if (raw?.local_error) {
+    message += `\n本機用量：${raw.local_error}`;
+  } else if (raw?.local_sessions_enabled && raw.local_scan_complete === false) {
     message += "\n本機用量是部分掃描。";
-  } else if (view?.local_sessions_enabled && (!view.local_products || view.local_products.length === 0)) {
+  } else if (raw?.local_sessions_enabled && (!raw.local_products || raw.local_products.length === 0)) {
     message += "\n本機用量：未知。";
   }
   el.usageState.textContent = message;
   if (!el.usageBoard) return;
   const rows = [];
-  for (const local of view?.local_products || []) {
+  for (const local of raw?.local_products || []) {
     const observed =
       local.observed_tokens == null ? "已觀察 token：未知" : `已觀察 token：${local.observed_tokens}（本機記錄，不是帳單）`;
     const remaining = "剩餘 token：未知";
@@ -1877,7 +1877,7 @@ function paintUsage(view, actionError = "") {
         : `額度快照已用 ${local.quota_used_percent}%`;
     rows.push(`${local.name} ${observed}；${remaining}；${quota}${when}`);
   }
-  for (const product of view?.products || []) {
+  for (const product of raw?.products || []) {
     let reset = "公開看板沒有已驗證重置事件";
     if (product.reset === "confirmed") {
       reset = `已驗證重置 ${product.announced_at || ""}`.trim();
@@ -1900,9 +1900,9 @@ async function refreshUsage() {
     return null;
   }
   try {
-    const view = await invoke("usage_status_read");
-    paintUsage(view);
-    return view;
+    const raw = await invoke("usage_status_read");
+    paintUsage(raw);
+    return raw;
   } catch (err) {
     paintUsage(null, `問不到用量狀態：${String(err?.message ?? err)}`);
     return null;
@@ -1912,13 +1912,13 @@ async function refreshUsage() {
 async function setUsageConfig(event) {
   if (!isTrustedUserAction(event) || invoke === null) return;
   try {
-    const view = await invoke("usage_public_status_set", {
+    const raw = await invoke("usage_public_status_set", {
       enabled: el.usagePublicEnabled?.checked === true,
       reactionEnabled: el.usageReaction?.checked === true,
       localSessionsEnabled: el.usageLocalEnabled?.checked === true,
       localSessionsDir: el.usageLocalDir?.value ?? "",
     });
-    paintUsage(view);
+    paintUsage(raw);
   } catch (err) {
     paintUsage(usageStatus, `用量設定沒有存好：${String(err?.message ?? err)}`);
   }
@@ -1927,8 +1927,8 @@ async function setUsageConfig(event) {
 async function refreshUsageBoard(event) {
   if (!isTrustedUserAction(event) || invoke === null) return;
   try {
-    const view = await invoke("usage_public_status_refresh");
-    paintUsage(view);
+    const raw = await invoke("usage_public_status_refresh");
+    paintUsage(raw);
   } catch (err) {
     paintUsage(usageStatus, `公開看板沒有查到：${String(err?.message ?? err)}`);
   }
