@@ -346,6 +346,10 @@ pub struct ShellConfig {
     /// 開其中一邊不會順手打開另一邊。密鑰不放在 TOML，由 desktop 放進
     /// 作業系統的 credential store。
     pub azure_tts: AzureTtsConfig,
+    /// 可選的本機 BreezyVoice 動態朗讀。沒有 endpoint／host／port 欄位：
+    /// 目的地由 sister-tts 釘死在 127.0.0.1:8231。預設關閉；服務未就緒時
+    /// desktop 不得把它畫成可用開關。
+    pub local_tts: LocalTtsConfig,
 }
 
 impl Default for ShellConfig {
@@ -358,6 +362,7 @@ impl Default for ShellConfig {
             developer_mode: false,
             persona: PersonaConfig::default(),
             azure_tts: AzureTtsConfig::default(),
+            local_tts: LocalTtsConfig::default(),
         }
     }
 }
@@ -461,6 +466,32 @@ impl AzureTtsEnabled {
     }
 }
 
+/// 可選本機 BreezyVoice 動態朗讀的非密密設定。
+///
+/// `enabled = true` 只是使用者的偏好。真正朗讀還要 loopback 健康檢查為
+/// ready，而且不得改走 Azure 或系統 `localService`。目的地不進設定檔。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LocalTtsConfig {
+    pub enabled: bool,
+}
+
+/// 設定頁的本機台灣語音開關。和 Azure／Persona 聲音開關同型別但接反後果
+/// 完全不同，所以 IPC 不傳裸 bool。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LocalTtsEnabled(bool);
+
+impl LocalTtsEnabled {
+    pub const fn new(value: bool) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> bool {
+        self.0
+    }
+}
+
 /// Persona catalog 的穩定 ID。
 ///
 /// 這 17 個值直接沿用 AI-Sister 素材庫的 canonical ID。設定檔、畫面與素材用同一個
@@ -486,6 +517,50 @@ pub enum PersonaId {
     Nemotron,
     Cohere,
     Mimo,
+}
+
+impl PersonaId {
+    pub const ALL: [Self; 17] = [
+        Self::Chatgpt,
+        Self::Claude,
+        Self::Gemini,
+        Self::Grok,
+        Self::Deepseek,
+        Self::Qwen,
+        Self::Mistral,
+        Self::Venice,
+        Self::Sakana,
+        Self::Perplexity,
+        Self::Glm,
+        Self::Kimi,
+        Self::Hunyuan,
+        Self::Minimax,
+        Self::Nemotron,
+        Self::Cohere,
+        Self::Mimo,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chatgpt => "chatgpt",
+            Self::Claude => "claude",
+            Self::Gemini => "gemini",
+            Self::Grok => "grok",
+            Self::Deepseek => "deepseek",
+            Self::Qwen => "qwen",
+            Self::Mistral => "mistral",
+            Self::Venice => "venice",
+            Self::Sakana => "sakana",
+            Self::Perplexity => "perplexity",
+            Self::Glm => "glm",
+            Self::Kimi => "kimi",
+            Self::Hunyuan => "hunyuan",
+            Self::Minimax => "minimax",
+            Self::Nemotron => "nemotron",
+            Self::Cohere => "cohere",
+            Self::Mimo => "mimo",
+        }
+    }
 }
 
 /// 設定頁的三個 bool 長得一樣，但接反會改變完全不同的事。用不同 newtype 讓
@@ -1239,6 +1314,14 @@ impl Config {
             enabled: enabled.get(),
             region,
             voice,
+        };
+    }
+
+    /// 本機台灣語音開關立即存檔；不重建 `ShellConfig`，所以 Persona／Azure／熱鍵
+    /// 不會被一扇開很久的設定頁蓋掉。
+    pub fn set_local_tts_from_page(&mut self, enabled: LocalTtsEnabled) {
+        self.shell.local_tts = LocalTtsConfig {
+            enabled: enabled.get(),
         };
     }
 }
@@ -2345,6 +2428,8 @@ mod tests {
         assert!(!old.shell.azure_tts.enabled);
         assert_eq!(old.shell.azure_tts.region, None);
         assert_eq!(old.shell.azure_tts.voice, AzureTtsVoice::HsiaoChen);
+        assert_eq!(old.shell.local_tts, LocalTtsConfig::default());
+        assert!(!old.shell.local_tts.enabled);
         assert!(!old.shell.persona.voice_enabled);
     }
 
@@ -2429,6 +2514,41 @@ mod tests {
         let back: Config = toml::from_str(&text).expect("deserialize Azure TTS");
         assert_eq!(back.shell.azure_tts, config.shell.azure_tts);
         assert!(back.shell.persona.voice_enabled);
+    }
+
+    #[test]
+    fn local_tts_round_trips_without_an_endpoint_field_or_touching_azure() {
+        let mut config = Config::default();
+        config.shell.persona.voice_enabled = true;
+        let azure_before = config.shell.azure_tts;
+        config.set_local_tts_from_page(LocalTtsEnabled::new(true));
+        assert!(config.shell.local_tts.enabled);
+        assert_eq!(config.shell.azure_tts, azure_before);
+        let text = toml::to_string_pretty(&config).expect("serialize local TTS");
+        assert!(text.contains("[shell.local_tts]"), "{text}");
+        assert!(text.contains("enabled = true"), "{text}");
+        assert!(!text.contains("endpoint"), "{text}");
+        assert!(!text.contains("8231"), "{text}");
+        assert!(!text.contains("127.0.0.1"), "{text}");
+        let back: Config = toml::from_str(&text).expect("deserialize local TTS");
+        assert_eq!(back.shell.local_tts, config.shell.local_tts);
+        assert!(back.shell.persona.voice_enabled);
+    }
+
+    #[test]
+    fn unknown_local_tts_endpoint_host_or_port_is_rejected() {
+        for (text, offending) in [
+            (
+                "[shell.local_tts]\nendpoint = \"http://127.0.0.1:8231/tts\"\n",
+                "endpoint",
+            ),
+            ("[shell.local_tts]\nhost = \"127.0.0.1\"\n", "host"),
+            ("[shell.local_tts]\nport = 8231\n", "port"),
+        ] {
+            let error = toml::from_str::<Config>(text)
+                .expect_err("local TTS must not accept destination fields");
+            assert!(error.to_string().contains(offending), "{error:#}");
+        }
     }
 
     #[test]

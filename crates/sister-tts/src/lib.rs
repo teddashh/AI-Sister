@@ -12,11 +12,23 @@ use std::fmt;
 use std::io::Read;
 use std::time::Duration;
 
+mod local;
+
 #[cfg(feature = "azure")]
 mod native;
 
 #[cfg(feature = "azure")]
 pub use native::AzureClient;
+
+pub use local::{
+    HEALTH_ENDPOINT, HEALTH_PATH, LOCAL_HOST, LOCAL_PORT, LOCAL_TTS_AUDIO_CONTENT_TYPE,
+    LOCAL_TTS_MAX_AUDIO_BYTES, LOCAL_TTS_MAX_TEXT_BYTES, LOCAL_TTS_USER_AGENT, LocalAudio,
+    LocalError, LocalPersona, LocalRequest, LocalServiceStatus, LocalTransport,
+    LocalTransportFailure, LocalTransportResponse, TTS_ENDPOINT, TTS_PATH, health_with_transport,
+    speak_allowed, synthesize_local_with_transport, tts_request,
+};
+
+pub use local::LoopbackClient;
 
 pub const SSML_CONTENT_TYPE: &str = "application/ssml+xml";
 pub const AUDIO_CONTENT_TYPE: &str = "audio/mpeg";

@@ -479,6 +479,33 @@ async function open(personaView = persona(), options = {}) {
             return options.pauseState === true;
           case "azure_tts_read":
             return options.azureStatus ?? null;
+          case "local_tts_read":
+            return (
+              options.localTtsStatus ?? {
+                generation: 0,
+                config_readable: true,
+                enabled: false,
+                endpoint: "http://127.0.0.1:8231/tts",
+                health_endpoint: "http://127.0.0.1:8231/health",
+                service: "missing",
+                persona: "chatgpt",
+                ready: false,
+                config_error: null,
+              }
+            );
+          case "local_tts_speak":
+            if (options.localTtsSpeakThrows) throw new Error(options.localTtsSpeakThrows);
+            return (
+              options.localTtsSpeakResult ?? {
+                generation: 1,
+                content_type: "audio/wav",
+                audio_bytes: 8,
+                data_url: "data:audio/wav;base64,AA==",
+                presentation_id: "breezy-answer",
+              }
+            );
+          case "local_tts_cancel":
+            return true;
           case "last_recording_end":
             return null;
           case "gatekeeper_check":
@@ -2139,6 +2166,48 @@ console.log("⑥ 17 人固定語音與日常短句都走 bundled Ogg，不借系
     groundedLocal.speaks[0]?.text,
   );
 
+  const breezyReady = {
+    generation: 0,
+    config_readable: true,
+    enabled: true,
+    endpoint: "http://127.0.0.1:8231/tts",
+    health_endpoint: "http://127.0.0.1:8231/health",
+    service: "ready",
+    persona: "mimo",
+    ready: true,
+    config_error: null,
+  };
+  const breezyFail = await open(persona("mimo", { voice_enabled: true }), {
+    systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
+    askResult: {
+      ...answerAskResult,
+      synthesis: {
+        sentences: [
+          {
+            text: "只念這一句整理後的答案。",
+            sources: [{ ref: "chunk:31", label: "文字 #31", frame_id: null }],
+          },
+        ],
+      },
+    },
+    localTtsStatus: breezyReady,
+    localTtsSpeakThrows: "daemon down",
+  });
+  await breezyFail.ask("Breezy 失敗");
+  await breezyFail.clickAnswerRead();
+  check(
+    "已選 BreezyVoice 失敗不改走 localService 或 Azure",
+    breezyFail.speaks.length === 0 &&
+      breezyFail.calls.includes("local_tts_speak") &&
+      !breezyFail.calls.includes("azure_tts_speak") &&
+      breezyFail.node("[data-persona-line]").textContent.includes("沒有改用系統語音或 Azure"),
+    {
+      speaks: breezyFail.speaks.length,
+      line: breezyFail.node("[data-persona-line]").textContent,
+      calls: breezyFail.calls,
+    },
+  );
+
   const boundaryBlocked = await open(persona("mimo", { voice_enabled: true }), {
     systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }],
     askResult: answerAskResult,
@@ -2451,7 +2520,7 @@ console.log("⑧ Persona 點擊台詞獨立；所有文字問題都走大腦與�
     )?.[0] ?? "";
   const mediaStop =
     SRC.match(
-      /^function stopPersonaMedia\(\{ cancelAzureNative = true \} = \{\}\) \{[\s\S]*?^\}$/mu,
+      /^function stopPersonaMedia\(\{ cancelAzureNative = true, cancelLocalTtsNative = true \} = \{\}\) \{[\s\S]*?^\}$/mu,
     )?.[0] ?? "";
   check(
     "長答案按段依序播且整串有 revision cancel gate",
@@ -2466,6 +2535,7 @@ console.log("⑧ Persona 點擊台詞獨立；所有文字問題都走大腦與�
     mediaStop.includes("voiceRequest += 1") &&
       mediaStop.includes("personaAudio?.pause?.()") &&
       mediaStop.includes("bundledVoicePresentation") &&
+      mediaStop.includes("stopLocalTts(") &&
       mediaStop.includes("stopLocalSpeech()") &&
       localSpeech.includes("stopPersonaMedia()") &&
       /async function ask\([^)]*\)[\s\S]*?stopPersonaMedia\(\)/u.test(SRC),

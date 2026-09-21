@@ -57,6 +57,10 @@ const el = {
   personaRemove: document.querySelector("[data-persona-remove]"),
   personaVoice: document.querySelector("[data-persona-voice]"),
   personaVoiceState: document.querySelector("[data-persona-voice-state]"),
+  localTtsSection: document.querySelector("[data-local-tts-section]"),
+  localTtsEnabled: document.querySelector("[data-local-tts-enabled]"),
+  localTtsEndpoint: document.querySelector("[data-local-tts-endpoint]"),
+  localTtsState: document.querySelector("[data-local-tts-state]"),
   azureSection: document.querySelector("[data-azure-section]"),
   azureEnabled: document.querySelector("[data-azure-enabled]"),
   azureRegion: document.querySelector("[data-azure-region]"),
@@ -1388,6 +1392,141 @@ const AZURE_CREDENTIAL_STATES = Object.freeze([
   "unsupported",
 ]);
 
+const LOCAL_TTS_ENDPOINT = "http://127.0.0.1:8231/tts";
+const LOCAL_TTS_HEALTH = "http://127.0.0.1:8231/health";
+const LOCAL_TTS_SERVICES = Object.freeze(["missing", "not_ready", "ready", "protocol"]);
+
+let localTtsStatus = null;
+let localTtsBusy = false;
+let localTtsRevision = 0;
+let localTtsRefreshQueued = false;
+
+function localTtsView(raw) {
+  if (
+    typeof raw !== "object" ||
+    raw === null ||
+    !Number.isSafeInteger(raw.generation) ||
+    raw.generation < 0 ||
+    typeof raw.config_readable !== "boolean" ||
+    !LOCAL_TTS_SERVICES.includes(raw.service) ||
+    typeof raw.ready !== "boolean" ||
+    (raw.config_error !== null && typeof raw.config_error !== "string")
+  ) {
+    return null;
+  }
+  if (!raw.config_readable) {
+    if (
+      raw.enabled !== null ||
+      raw.endpoint !== null ||
+      raw.health_endpoint !== null ||
+      raw.persona !== null ||
+      raw.ready !== false ||
+      typeof raw.config_error !== "string" ||
+      raw.config_error === ""
+    ) {
+      return null;
+    }
+    return raw;
+  }
+  if (
+    typeof raw.enabled !== "boolean" ||
+    raw.endpoint !== LOCAL_TTS_ENDPOINT ||
+    raw.health_endpoint !== LOCAL_TTS_HEALTH ||
+    (raw.persona !== null && typeof raw.persona !== "string") ||
+    raw.config_error !== null
+  ) {
+    return null;
+  }
+  const actuallyReady = raw.enabled === true && raw.service === "ready";
+  return raw.ready === actuallyReady ? raw : null;
+}
+
+function paintLocalTts(raw, actionError = "") {
+  if (!el.localTtsSection || !el.localTtsState) return;
+  const parsed = localTtsView(raw);
+  localTtsStatus = parsed;
+  const configUsable = parsed?.config_readable === true;
+  const serviceReady = parsed?.service === "ready";
+  const enabled = configUsable && parsed.enabled === true;
+  if (el.localTtsEnabled) {
+    el.localTtsEnabled.checked = enabled;
+    el.localTtsEnabled.disabled =
+      localTtsBusy || !configUsable || (!serviceReady && !enabled);
+  }
+  if (el.localTtsEndpoint) {
+    el.localTtsEndpoint.textContent = LOCAL_TTS_ENDPOINT;
+  }
+  el.localTtsState.classList.remove("bad", "ok");
+  let message;
+  if (actionError !== "") {
+    el.localTtsState.classList.add("bad");
+    message = actionError;
+  } else if (parsed === null) {
+    el.localTtsState.classList.add("bad");
+    message = "後端沒有回傳可辨識的本機台灣語音狀態。";
+  } else if (!parsed.config_readable) {
+    el.localTtsState.classList.add("bad");
+    message = "本機台灣語音設定讀不出來；沒有把它畫成可用。";
+  } else if (!serviceReady && !enabled) {
+    message = "沒有偵測到本機台灣語音服務。啟動本機 BreezyVoice 後才可選用。";
+  } else if (!enabled) {
+    message = "本機台灣語音服務已就緒，目前關閉。答案朗讀仍用系統語音。";
+  } else if (!serviceReady) {
+    el.localTtsState.classList.add("bad");
+    message = "本機台灣語音已打開，但服務沒有回應。沒有改用系統語音或 Azure。";
+  } else if (parsed.ready) {
+    el.localTtsState.classList.add("ok");
+    message = `將用目前角色（${parsed.persona ?? "未知"}）的本機台灣語音朗讀答案。`;
+  } else {
+    el.localTtsState.classList.add("bad");
+    message = "本機台灣語音狀態不一致；沒有把它畫成已可連線。";
+  }
+  el.localTtsState.textContent = message;
+}
+
+async function refreshLocalTts() {
+  if (!el.localTtsSection) return null;
+  if (invoke === null) {
+    paintLocalTts(null, "這一頁不在 AI-Sister desktop 裡，沒有讀取本機台灣語音。");
+    return null;
+  }
+  const revision = ++localTtsRevision;
+  try {
+    const status = await invoke("local_tts_read");
+    if (revision === localTtsRevision) paintLocalTts(status);
+    return status;
+  } catch (err) {
+    if (revision === localTtsRevision) {
+      paintLocalTts(null, "問不到本機台灣語音狀態。");
+    }
+    return null;
+  }
+}
+
+async function setLocalTtsConfig(event) {
+  if (event?.isTrusted !== true) return;
+  if (!el.localTtsEnabled || localTtsBusy) return;
+  localTtsBusy = true;
+  el.localTtsEnabled.disabled = true;
+  const enabled = el.localTtsEnabled.checked === true;
+  const revision = localTtsRevision;
+  try {
+    const status = await invoke("local_tts_config_set", { enabled });
+    if (revision === localTtsRevision) paintLocalTts(status);
+  } catch (err) {
+    await refreshLocalTts();
+    paintLocalTts(localTtsStatus, "本機台灣語音設定沒有保存。");
+  } finally {
+    localTtsBusy = false;
+    if (localTtsRefreshQueued) {
+      localTtsRefreshQueued = false;
+      await refreshLocalTts();
+    } else {
+      paintLocalTts(localTtsStatus);
+    }
+  }
+}
+
 let azureTtsStatus = null;
 let azureTtsBusy = false;
 let azureTtsRevision = 0;
@@ -2044,6 +2183,18 @@ function setUnreadable(on) {
     // Azure 的開關／區域／聲音也在同一份 config.toml。先讓較早發出的獨立讀取
     // 失效，不能讓它稍後成功回來，又把壞掉的設定畫成一組可用值。Credential 與
     // 同意書是獨立狀態，保留已經問到的四態與 effective 結果，刪金鑰出口仍可用。
+    ++localTtsRevision;
+    paintLocalTts({
+      generation: localTtsStatus?.generation ?? 0,
+      config_readable: false,
+      enabled: null,
+      endpoint: null,
+      health_endpoint: null,
+      service: "missing",
+      persona: null,
+      ready: false,
+      config_error: "同一份 config.toml 目前讀不出來。",
+    });
     ++azureTtsRevision;
     paintAzureTts({
       generation: azureTtsStatus?.generation ?? 0,
@@ -2122,6 +2273,7 @@ async function load() {
   const personaAssetsRead = refreshPersonaAssets();
   const loginStartupRead = refreshLoginStartup();
   const platformAccessRead = refreshPlatformAccess();
+  const localTtsRead = refreshLocalTts();
   const azureTtsRead = refreshAzureTts();
   let ok = false;
   try {
@@ -2155,6 +2307,7 @@ async function load() {
   await platformAccessRead;
   // Azure 金鑰和第四張同意書不屬於頁尾 settings payload；設定檔壞掉時也要
   // 說得出 credential 是 present、missing、unreadable 還是 unsupported。
+  await localTtsRead;
   await azureTtsRead;
   if (unreadable) {
     // setUnreadable 已推進 revision，所以開場那份平行 snapshot 不得再合併。重新
@@ -2602,6 +2755,7 @@ el.personaRepair?.addEventListener("click", (event) => void installPersonaAssets
 el.personaCancel?.addEventListener("click", (event) => void cancelPersonaAssetInstall(event));
 el.personaRemove?.addEventListener("click", (event) => void removePersonaAssets(event));
 el.personaVoice?.addEventListener("change", (event) => void setPersonaVoice(event));
+el.localTtsEnabled?.addEventListener("change", (event) => void setLocalTtsConfig(event));
 el.azureEnabled?.addEventListener("change", (event) => void setAzureTtsConfig(event));
 el.azureRegion?.addEventListener("change", (event) => void setAzureTtsConfig(event));
 el.azureVoice?.addEventListener("change", (event) => void setAzureTtsConfig(event));
@@ -2620,6 +2774,12 @@ globalThis.__TAURI__?.event
 
 // 設定、金鑰或第四張同意書由另一扇 WebView 改變時只重讀狀態；事件本身不會
 // 啟動朗讀，也不會把答案送出去。
+globalThis.__TAURI__?.event
+  ?.listen?.("local-tts-changed", () => {
+    void refreshLocalTts();
+  })
+  ?.catch?.(() => {});
+
 const azureTtsChangedListener = globalThis.__TAURI__?.event?.listen?.(
   "azure-tts-changed",
   () => {

@@ -1391,6 +1391,17 @@ let azurePendingGeneration = null;
 let azureCancelPending = false;
 let pendingAzureAutoAsk = null;
 let azurePlaybackPresentation = null;
+let localTtsSpeechRevision = 0;
+let localTtsRequestPending = false;
+let localTtsEnabled = false;
+let localTtsReady = false;
+let localTtsStatusKnown = false;
+let localTtsStatusReadRevision = 0;
+let localTtsNativeGeneration = null;
+let localTtsNativeExpected = null;
+let localTtsPendingGeneration = null;
+let localTtsCancelPending = false;
+let localTtsPlaybackPresentation = null;
 
 // 一個是第四張同意 + 設定開關授權的新答案，一個是使用者當下按的
 // 重播。用物件 identity，不讓一個拼錯的字串想當哪一種就當哪一種。
@@ -1607,9 +1618,63 @@ function stopLocalSpeech() {
   }
 }
 
+function releaseLocalTtsPlaybackPresentation(expected) {
+  const presentation = localTtsPlaybackPresentation;
+  if (presentation === null) return;
+  if (expected && presentation !== expected) return;
+  localTtsPlaybackPresentation = null;
+  releaseNativePresentation(presentation);
+}
+
+function stopLocalTts({ cancelNative = true } = {}) {
+  localTtsSpeechRevision += 1;
+  setPersonaSpeaking(PERSONA_SPEAKING_LOCAL, false);
+  const hadPendingRequest = localTtsRequestPending;
+  const pendingGeneration = localTtsPendingGeneration;
+  localTtsRequestPending = false;
+  localTtsPendingGeneration = null;
+  resetLocalAnswerButton();
+  if (personaAudio && (hadPendingRequest || localTtsPlaybackPresentation !== null)) {
+    personaAudio.pause?.();
+    personaAudio.removeAttribute?.("src");
+    personaAudio.onended = null;
+    personaAudio.onerror = null;
+  }
+  releaseLocalTtsPlaybackPresentation();
+  if (
+    cancelNative &&
+    hadPendingRequest &&
+    Number.isSafeInteger(pendingGeneration) &&
+    pendingGeneration >= 0 &&
+    invoke !== null
+  ) {
+    localTtsNativeGeneration = null;
+    localTtsNativeExpected = null;
+    localTtsCancelPending = true;
+    localTtsStatusReadRevision += 1;
+    const finishCancel = () => {
+      localTtsCancelPending = false;
+      readLocalTts();
+    };
+    try {
+      Promise.resolve(
+        invoke("local_tts_cancel", { expectedGeneration: pendingGeneration }),
+      ).then(finishCancel, finishCancel);
+    } catch {
+      finishCancel();
+    }
+  } else if (!cancelNative) {
+    localTtsNativeGeneration = null;
+    localTtsNativeExpected = null;
+    localTtsReady = false;
+    localTtsStatusKnown = false;
+  }
+}
+
 /** 三條聲音共用同一顆 stop；新意圖不能讓 bundled Ogg、系統 TTS 與 Azure 疊在一起。 */
-function stopPersonaMedia({ cancelAzureNative = true } = {}) {
+function stopPersonaMedia({ cancelAzureNative = true, cancelLocalTtsNative = true } = {}) {
   stopAzureSpeech({ cancelNative: cancelAzureNative });
+  stopLocalTts({ cancelNative: cancelLocalTtsNative });
   voiceRequest += 1;
   invalidateMediaPlay();
   personaAudio?.pause?.();
@@ -4423,6 +4488,19 @@ globalThis.__TAURI__?.event
   })
   ?.catch?.(() => {});
 
+globalThis.__TAURI__?.event
+  ?.listen?.("local-tts-changed", () => {
+    readLocalTts();
+  })
+  ?.catch?.(() => {});
+
+globalThis.__TAURI__?.event
+  ?.listen?.("local-tts-stop", () => {
+    stopPersonaMedia({ cancelLocalTtsNative: false });
+    readLocalTts();
+  })
+  ?.catch?.(() => {});
+
 /**
  * 拔手熱鍵按下去之後那一句。
  *
@@ -4975,6 +5053,23 @@ function answerReadLine() {
       personaLine.hidden = false;
       return;
     }
+    if (localTtsEnabled) {
+      localAnswerButton = button;
+      button.textContent = ANSWER_READ_STOP;
+      if (localTtsCancelPending) {
+        personaLine.textContent = "本機台灣語音正在停止。完成後再重播。";
+        personaLine.hidden = false;
+        return;
+      }
+      if (!localTtsReady) {
+        resetLocalAnswerButton();
+        personaLine.textContent = "本機台灣語音未就緒。沒有改用系統語音或 Azure。";
+        personaLine.hidden = false;
+        return;
+      }
+      void speakBreezyAnswer(button);
+      return;
+    }
     const text = answerTextForLocalSpeech();
     if (text === "") return;
     // 鍵面在 admit 還在飛的時候就要寫停止，否則 pending 期間再按一下會開第二段。
@@ -5022,6 +5117,211 @@ function answerReadLine() {
   });
   li.append(button);
   return li;
+}
+
+function usableLocalTtsStatus(raw) {
+  return typeof raw === "object" &&
+    raw !== null &&
+    Number.isSafeInteger(raw.generation) &&
+    raw.generation >= 0 &&
+    raw.config_readable === true &&
+    typeof raw.enabled === "boolean" &&
+    raw.endpoint === "http://127.0.0.1:8231/tts" &&
+    raw.health_endpoint === "http://127.0.0.1:8231/health" &&
+    ["missing", "not_ready", "ready", "protocol"].includes(raw.service) &&
+    (raw.persona === null || typeof raw.persona === "string") &&
+    raw.ready === (raw.enabled && raw.service === "ready")
+    ? raw
+    : null;
+}
+
+function applyLocalTtsStatus(raw) {
+  if (localTtsCancelPending) {
+    localTtsNativeGeneration = null;
+    localTtsNativeExpected = null;
+    return;
+  }
+  const status = usableLocalTtsStatus(raw);
+  localTtsStatusKnown = true;
+  localTtsNativeGeneration = status?.generation ?? null;
+  localTtsNativeExpected = status
+    ? Object.freeze({
+        generation: status.generation,
+        enabled: status.enabled,
+        persona: status.persona,
+      })
+    : null;
+  localTtsEnabled = status?.enabled === true;
+  localTtsReady = status?.ready === true;
+}
+
+function readLocalTts() {
+  if (localTtsCancelPending) {
+    localTtsStatusReadRevision += 1;
+    return;
+  }
+  const revision = ++localTtsStatusReadRevision;
+  if (invoke === null) {
+    applyLocalTtsStatus(null);
+    return;
+  }
+  invoke("local_tts_read").then(
+    (status) => {
+      if (revision === localTtsStatusReadRevision) applyLocalTtsStatus(status);
+    },
+    () => {
+      if (revision === localTtsStatusReadRevision) applyLocalTtsStatus(null);
+    },
+  );
+}
+
+async function speakBreezyAnswer(button) {
+  if (invoke === null) {
+    resetLocalAnswerButton();
+    personaLine.textContent = "請從 AI-Sister 桌面程式使用本機台灣語音。";
+    personaLine.hidden = false;
+    return;
+  }
+  const tagged = azureAnswerText();
+  const grounded = [...hitList.querySelectorAll(".grounded-text")]
+    .map((node) => node.textContent.replace(/\s+/g, " ").trim())
+    .filter((line) => line !== "")
+    .join(" ");
+  const text = tagged !== "" ? tagged : grounded;
+  if (text === "") {
+    resetLocalAnswerButton();
+    personaLine.textContent = "這一題沒有可朗讀的正文。";
+    personaLine.hidden = false;
+    return;
+  }
+  const nativeExpected = localTtsNativeExpected;
+  const nativeGeneration = nativeExpected?.generation;
+  if (
+    !Number.isSafeInteger(nativeGeneration) ||
+    nativeGeneration < 0 ||
+    nativeGeneration !== localTtsNativeGeneration
+  ) {
+    resetLocalAnswerButton();
+    personaLine.textContent = "本機台灣語音狀態更新中。";
+    personaLine.hidden = false;
+    readLocalTts();
+    return;
+  }
+  const revision = localTtsSpeechRevision;
+  localTtsRequestPending = true;
+  localTtsPendingGeneration = nativeGeneration;
+  localAnswerButton = button;
+  button.textContent = ANSWER_READ_STOP;
+  let audio;
+  try {
+    audio = await invoke("local_tts_speak", {
+      text,
+      expected: nativeExpected,
+    });
+  } catch {
+    if (revision !== localTtsSpeechRevision) return;
+    localTtsRequestPending = false;
+    localTtsPendingGeneration = null;
+    resetLocalAnswerButton();
+    personaLine.textContent = "本機台灣語音失敗。沒有改用系統語音或 Azure。";
+    personaLine.hidden = false;
+    readLocalTts();
+    return;
+  }
+  if (revision !== localTtsSpeechRevision) {
+    releaseNativePresentation(audio);
+    return;
+  }
+  localTtsRequestPending = false;
+  localTtsPendingGeneration = null;
+  if (
+    !Number.isSafeInteger(audio?.generation) ||
+    audio.generation !==
+      (nativeGeneration >= Number.MAX_SAFE_INTEGER ? 0 : nativeGeneration + 1) ||
+    audio?.content_type !== "audio/wav" ||
+    !Number.isSafeInteger(audio?.audio_bytes) ||
+    audio.audio_bytes < 1 ||
+    audio.audio_bytes > 16 * 1024 * 1024 ||
+    typeof audio?.data_url !== "string" ||
+    !audio.data_url.startsWith("data:audio/wav;base64,") ||
+    typeof audio?.presentation_id !== "string" ||
+    audio.presentation_id === ""
+  ) {
+    releaseNativePresentation(audio);
+    resetLocalAnswerButton();
+    personaLine.textContent = "本機台灣語音回傳的音訊無法播放。";
+    personaLine.hidden = false;
+    readLocalTts();
+    return;
+  }
+  localTtsNativeGeneration = audio.generation;
+  localTtsNativeExpected = Object.freeze({
+    ...nativeExpected,
+    generation: audio.generation,
+  });
+  if (!personaAudio || typeof personaAudio.play !== "function") {
+    releaseNativePresentation(audio);
+    resetLocalAnswerButton();
+    personaLine.textContent = "這個視窗無法播放音訊。";
+    personaLine.hidden = false;
+    return;
+  }
+  let presentationAllowed;
+  try {
+    presentationAllowed = await beginNativePresentation(audio);
+  } catch {
+    releaseNativePresentation(audio);
+    resetLocalAnswerButton();
+    personaLine.textContent = "本機台灣語音未開始播放。";
+    personaLine.hidden = false;
+    return;
+  }
+  if (revision !== localTtsSpeechRevision) {
+    releaseNativePresentation(audio);
+    return;
+  }
+  if (!presentationAllowed) {
+    releaseNativePresentation(audio);
+    resetLocalAnswerButton();
+    personaLine.textContent = "本機台灣語音未開始播放。解除全停後再重播。";
+    personaLine.hidden = false;
+    return;
+  }
+  localTtsPlaybackPresentation = audio;
+  let playbackFinished = false;
+  const playbackFailed = () => {
+    if (revision !== localTtsSpeechRevision || playbackFinished) return;
+    playbackFinished = true;
+    setPersonaSpeaking(PERSONA_SPEAKING_LOCAL, false);
+    resetLocalAnswerButton();
+    personaAudio.onerror = null;
+    personaAudio.onended = null;
+    personaAudio.removeAttribute?.("src");
+    releaseLocalTtsPlaybackPresentation(audio);
+    personaLine.textContent = "本機台灣語音播放失敗。";
+    personaLine.hidden = false;
+  };
+  personaAudio.onerror = playbackFailed;
+  personaAudio.currentTime = 0;
+  personaAudio.src = audio.data_url;
+  personaAudio.onended = () => {
+    if (revision !== localTtsSpeechRevision || playbackFinished) return;
+    playbackFinished = true;
+    setPersonaSpeaking(PERSONA_SPEAKING_LOCAL, false);
+    resetLocalAnswerButton();
+    personaAudio.onerror = null;
+    personaAudio.onended = null;
+    personaAudio.removeAttribute?.("src");
+    releaseLocalTtsPlaybackPresentation(audio);
+  };
+  try {
+    await personaAudio.play();
+    if (revision === localTtsSpeechRevision && !playbackFinished) {
+      setPersonaSpeaking(PERSONA_SPEAKING_LOCAL, true);
+    }
+  } catch {
+    playbackFailed();
+  }
 }
 
 async function speakAzureAnswer(button, intent) {
@@ -6171,6 +6471,7 @@ paintPin();
 readPersona();
 // 只讀開關／region／credential 四態／第四張同意書，不會合成，也不會連 Azure。
 readAzureTts();
+readLocalTts();
 // 還沒回答的同意書直接在這顆對話氣泡逐張問；完整卡片仍留在設定入口。
 void readConsentGuide();
 

@@ -38,6 +38,7 @@ use tauri::{Emitter, Manager, PhysicalPosition, WindowEvent};
 mod azure_credential;
 mod brain_cli;
 mod hands;
+mod local_tts;
 mod login_startup;
 #[cfg(all(target_os = "macos", feature = "macos-ci-spike"))]
 mod macos_ci;
@@ -205,6 +206,8 @@ struct Shell {
     /// transport 結束，mutation/cancel 可能等待最長 45 秒，但成功回覆後舊 request
     /// 絕不可能才開始 POST。A drop、A cancel 與 B admit 也不能在 atomic 間交錯。
     azure_tts_transition: Arc<Mutex<()>>,
+    /// 本機 BreezyVoice loopback TTS。和 Azure 分開的 generation／socket cancel。
+    local_tts: local_tts::Runtime,
     /// CLI 官方登入與固定 probe 共用一個槽。取消只影響這條使用者發起的工作，
     /// 不會改 config，也不會碰 recorder 正在跑的 brain invocation。
     brain_cli_state: Arc<std::sync::atomic::AtomicU8>,
@@ -5137,6 +5140,7 @@ fn persona_voice_set(
     })
     .map_err(|e| format!("{e:#}"))?;
     if !enabled.get() {
+        local_tts::invalidate(&app, &shell);
         let _ = app.emit("persona-media-stop", ());
     }
     let view = persona_view(&config, &shell);
@@ -6058,6 +6062,9 @@ fn settings_write(
     shell: tauri::State<'_, Shell>,
 ) -> Result<WriteOutcome, String> {
     let path = config_path()?;
+    let previous_persona = sister_core::config::Config::load(&path)
+        .ok()
+        .map(|config| config.shell.persona.id);
     // **先讀再改再寫**，不是從空白組一份出來。設定檔裡有這一頁沒有畫出來的
     // 欄位（截圖間隔、每日畫面額度……），從頭組一份會把它們全部重設成預設值
     // ——使用者只是改了個保留天數，磁碟預算卻被悄悄換掉了。
@@ -6082,6 +6089,9 @@ fn settings_write(
     // 存成功才換角色。設定頁和字母人是兩扇 WebView；少了這個事件，畫面會直到
     // 整支 desktop 重開才跟 config.toml 一致。payload 仍只含表達層資料，沒有
     // 排除規則、OCR、答案或 action。
+    if previous_persona != Some(c.shell.persona.id) {
+        local_tts::invalidate(&app, &shell);
+    }
     let persona_event_emitted = app
         .emit("persona-changed", persona_view(&c, &shell))
         .is_ok();
@@ -7538,6 +7548,7 @@ fn main() {
             )),
             azure_tts_admission: Arc::new(Mutex::new(())),
             azure_tts_transition: Arc::new(Mutex::new(())),
+            local_tts: local_tts::Runtime::new(),
             brain_cli_state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             answer_cli: Mutex::new(None),
             diagnostics: Mutex::new(sister_core::diagnose::Notebook::new()),
@@ -7586,6 +7597,10 @@ fn main() {
             azure_tts_key_delete,
             azure_tts_cancel,
             azure_tts_speak,
+            local_tts::local_tts_read,
+            local_tts::local_tts_config_set,
+            local_tts::local_tts_cancel,
+            local_tts::local_tts_speak,
             login_startup_read,
             login_startup_set,
             platform_access_read,

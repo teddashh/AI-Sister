@@ -48,7 +48,7 @@ sister-core = { path = "../../../crates/sister-core", default-features = false }
 sister-shell = { path = "../../../crates/sister-shell" }
 sister-hands = { path = "../../../crates/sister-hands" }
 sister-assets = { path = "../../../crates/sister-assets", features = ["download"] }
-sister-tts = { path = "../../../crates/sister-tts", features = ["azure"] }
+sister-tts = { path = "../../../crates/sister-tts", features = ["azure", "local"] }
 tauri-plugin-global-shortcut = "2"
 base64 = "0.22"
 thiserror = "2"

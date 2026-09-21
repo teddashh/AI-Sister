@@ -3,9 +3,10 @@
 # PRIVACY.md 現在守的是一條**能力邊界**：
 #
 #     畫面不離機；root 預設與 recorder/core/brain/hands 沒有 HTTP client。desktop
-#     只有兩個窄例外：`sister-assets[download]` 的 fixed Persona GET，以及
+#     只有三個窄例外：`sister-assets[download]` 的 fixed Persona GET、
 #     `sister-tts[azure]` 在現行第四張同意、enabled 設定下只替最新新答案或
-#     trusted 手動重播走 fixed Azure POST。
+#     trusted 手動重播走 fixed Azure POST，以及 `sister-tts[local]` 對
+#     127.0.0.1:8231 的 std TCP GET /health 與 POST /tts（無 ureq、無 proxy）。
 #
 # 這支腳本讓那條界線**由 CI 保證，而不是由記性保證**。
 # 它不替使用者設定的外部 CLI 背書：簽了 cloud-reading 後，OCR 原文會交給
@@ -121,6 +122,10 @@ grep -qF 'azure = ["dep:ureq"]' crates/sister-tts/Cargo.toml || {
     echo "✗ sister-tts 的 azure feature 不再是唯一 ureq 開關"
     fail=1
 }
+grep -qE '^local = \[\]$' crates/sister-tts/Cargo.toml || {
+    echo "✗ sister-tts 的 local feature 必須是空的，不得打開 ureq 或任意 client"
+    fail=1
+}
 grep -qF 'ureq = { workspace = true, optional = true }' crates/sister-tts/Cargo.toml || {
     echo "✗ ureq 不再是 sister-tts 的 optional dependency"
     fail=1
@@ -140,8 +145,8 @@ grep -qF 'sister-assets = { path = "../../../crates/sister-assets", features = [
     echo "✗ desktop 沒有經 sister-assets[download] 取得唯一 transport"
     fail=1
 }
-grep -qF 'sister-tts = { path = "../../../crates/sister-tts", features = ["azure"] }' apps/desktop/src-tauri/Cargo.toml || {
-    echo "✗ desktop 沒有經 sister-tts[azure] 取得 Azure transport"
+grep -qF 'sister-tts = { path = "../../../crates/sister-tts", features = ["azure", "local"] }' apps/desktop/src-tauri/Cargo.toml || {
+    echo "✗ desktop 沒有經 sister-tts[azure, local] 取得 Azure 與 loopback TTS"
     fail=1
 }
 
@@ -157,6 +162,38 @@ if [ -z "$ureq_source" ] || [ -n "$unexpected_ureq" ]; then
     echo "✗ ureq source 不只存在於 fixed Persona GET 與 Azure POST transport："
     printf '%s\n' "${unexpected_ureq:-（兩個 transport 裡都找不到）}" | sed 's/^/    /'
     fail=1
+fi
+
+echo "▶ 檢查本機 BreezyVoice loopback 邊界"
+LOCAL_TTS=crates/sister-tts/src/local.rs
+if [ ! -f "$LOCAL_TTS" ]; then
+    echo "✗ 找不到 sister-tts local adapter"
+    fail=1
+else
+    grep -qF 'pub const LOCAL_PORT: u16 = 8231' "$LOCAL_TTS" || {
+        echo "✗ local TTS 沒有釘死 port 8231"
+        fail=1
+    }
+    grep -qF 'http://127.0.0.1:8231/tts' "$LOCAL_TTS" || {
+        echo "✗ local TTS 沒有釘死 127.0.0.1:8231/tts"
+        fail=1
+    }
+    grep -qF 'SocketAddr::from((LOCAL_HOST, LOCAL_PORT))' "$LOCAL_TTS" || {
+        echo "✗ local TTS 沒有只連 IPv4 loopback 常數"
+        fail=1
+    }
+    grep -qF 'ureq' "$LOCAL_TTS" && {
+        echo "✗ local TTS 不准使用 ureq"
+        fail=1
+    }
+    grep -qF 'pub const TTS_PATH: &str = "/tts"' "$LOCAL_TTS" || {
+        echo "✗ local TTS 的 POST path 必須是 /tts"
+        fail=1
+    }
+    grep -qE 'PATH.*= "/clone"' "$LOCAL_TTS" && {
+        echo "✗ local TTS 不准呼叫 /clone"
+        fail=1
+    }
 fi
 
 for target in "" "x86_64-pc-windows-msvc"; do
@@ -826,13 +863,35 @@ if [ "$rc" -gt 1 ]; then
     echo "  在修好之前，「沒有監聽埠」這句話沒有任何東西守著。"
     fail=1
 fi
-if [ -n "$sockets" ]; then
-    echo "✗ 原始碼裡出現了 socket："
-    echo "$sockets" | sed 's/^/    /'
+unexpected_sockets=$(printf '%s\n' "$sockets" \
+    | grep -vE '^crates/sister-tts/src/local.rs:' || true)
+if [ -n "$unexpected_sockets" ]; then
+    echo "✗ 原始碼裡出現了未允許的 socket："
+    echo "$unexpected_sockets" | sed 's/^/    /'
     echo
-    echo "  THREAT_MODEL.md 說 AI-Sister 沒有監聽埠；Persona 只能用受限 client，"
-    echo "  使用者設定的外部 CLI 也不是替本程式開 raw socket 的例外。"
+    echo "  THREAT_MODEL.md 說 AI-Sister 沒有監聽埠；唯一允許的 raw TCP 是"
+    echo "  sister-tts local adapter 連 127.0.0.1:8231，不得擴散。"
     fail=1
+fi
+if [ -n "$sockets" ]; then
+    if ! python3 - <<'PY'
+from pathlib import Path
+text = Path("crates/sister-tts/src/local.rs").read_text(encoding="utf-8")
+marker = "#[cfg(test)]\nmod tests"
+if marker not in text:
+    raise SystemExit("local.rs 沒有可切開的 tests 模組，無法證明 TcpListener 不在產品路徑")
+prod, _, tests = text.partition(marker)
+if "TcpListener" in prod:
+    raise SystemExit("產品路徑出現 TcpListener；本機 TTS 只能連 loopback，不能聽埠")
+if "to_socket_addrs" in prod or "lookup_host" in prod:
+    raise SystemExit("產品路徑出現 DNS 查詢")
+if "SocketAddr::from((LOCAL_HOST, LOCAL_PORT))" not in prod:
+    raise SystemExit("產品路徑沒有釘死 IPv4 loopback connect")
+print("loopback TcpStream 只在 sister-tts local adapter；TcpListener 僅測試")
+PY
+    then
+        fail=1
+    fi
 fi
 
 # 上面兩段只看 Rust。`--include='*.rs'` 這幾個字讓字母人的**畫面那一半**整個
@@ -1000,4 +1059,4 @@ if [ -n "$skipped" ]; then
     echo "⚠ 有東西沒檢查到（未安裝 target）：$skipped"
     echo "  底下這句話只涵蓋真的跑過的那幾棵樹。出貨的是 Windows 執行檔。"
 fi
-echo "✓ 未授權網路邊界成立：root 預設與 recorder/core/brain/hands 無 HTTP client，desktop 只有 fixed Persona GET 與 fixed Azure POST；installer 內嵌離線 WebView2、無 updater，原始碼無直接 socket API，WebView 只准 IPC"
+echo "✓ 未授權網路邊界成立：root 預設與 recorder/core/brain/hands 無 HTTP client，desktop 只有 fixed Persona GET、fixed Azure POST，以及 sister-tts[local] 對 127.0.0.1:8231 的 std TCP GET /health 與 POST /tts；installer 內嵌離線 WebView2、無 updater，WebView 只准 IPC"

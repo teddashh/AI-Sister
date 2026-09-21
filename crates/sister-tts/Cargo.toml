@@ -14,10 +14,11 @@ default = []
 # The default graph is pure request/response policy. Only the desktop integration that has
 # collected explicit Azure consent should enable this native HTTP implementation.
 azure = ["dep:ureq"]
+# Loopback BreezyVoice adapter. Empty on purpose: it uses std::net to 127.0.0.1:8231
+# and must not grow a generic HTTP client or share Azure's ureq path.
+local = []
 
 [dependencies]
 serde.workspace = true
-ureq = { workspace = true, optional = true }
-
-[dev-dependencies]
 serde_json.workspace = true
+ureq = { workspace = true, optional = true }

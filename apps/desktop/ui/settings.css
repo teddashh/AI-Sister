@@ -412,6 +412,7 @@ select {
   margin-top: 9px;
 }
 
+.local-tts,
 .azure-tts {
   background: rgb(246 236 223 / 2%);
 }

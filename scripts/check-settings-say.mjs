@@ -114,6 +114,18 @@ const ASSET_AVAILABLE = {
   voice_count: 0,
 };
 
+const LOCAL_TTS_OFF = {
+  generation: 3,
+  config_readable: true,
+  enabled: false,
+  endpoint: "http://127.0.0.1:8231/tts",
+  health_endpoint: "http://127.0.0.1:8231/health",
+  service: "missing",
+  persona: "chatgpt",
+  ready: false,
+  config_error: null,
+};
+
 const AZURE_OFF = {
   generation: 7,
   config_readable: true,
@@ -202,6 +214,7 @@ async function open({
   onBrainCancel,
   asset = ASSET_AVAILABLE,
   azure = AZURE_OFF,
+  localTts = LOCAL_TTS_OFF,
   voice = false,
   hotkey = HOTKEY,
   loginStartup = LOGIN_STARTUP,
@@ -233,6 +246,7 @@ async function open({
   let loginStartupState = { ...loginStartup };
   let platformAccessState = { ...platformAccess };
   let azureState = { ...azure };
+  let localTtsState = { ...localTts };
   let brainState = structuredClone(brain);
   const writes = [];
   const invokes = [];
@@ -421,6 +435,15 @@ async function open({
             }
             voiceState = arg.enabled;
             return { voice_enabled: voiceState };
+          case "local_tts_read":
+            return { ...localTtsState };
+          case "local_tts_config_set":
+            localTtsState = {
+              ...localTtsState,
+              enabled: arg.enabled,
+              ready: arg.enabled === true && localTtsState.service === "ready",
+            };
+            return { ...localTtsState };
           case "azure_tts_read":
             if (onAzureRead) return onAzureRead({ ...azureState });
             return { ...azureState };
@@ -1610,6 +1633,39 @@ console.log("㉚ Bundled 聲音是獨立 trusted opt-in，失敗會退回，設�
     checked: p.node("[data-persona-voice]").checked,
     disabled: p.node("[data-persona-voice]").disabled,
   });
+}
+
+console.log("㉚⁰ 本機台灣語音：服務未就緒時不露出可用開關");
+{
+  const p = await open();
+  check("missing 不勾", p.node("[data-local-tts-enabled]").checked === false);
+  check(
+    "missing 不能當可用開關",
+    p.node("[data-local-tts-enabled]").disabled === true,
+  );
+  check(
+    "說明未就緒",
+    p.node("[data-local-tts-state]").textContent.includes("沒有偵測到"),
+    p.node("[data-local-tts-state]").textContent,
+  );
+
+  const q = await open({
+    localTts: { ...LOCAL_TTS_OFF, service: "ready", enabled: false, ready: false },
+  });
+  check(
+    "服務就緒才讓人打開",
+    q.node("[data-local-tts-enabled]").disabled === false,
+  );
+  await q.act("[data-local-tts-enabled]", { trusted: false, event: "change" });
+  check("假 change 不寫本機台灣語音", calls(q, "local_tts_config_set").length === 0);
+  q.node("[data-local-tts-enabled]").checked = true;
+  await q.act("[data-local-tts-enabled]", { event: "change" });
+  const writes = calls(q, "local_tts_config_set");
+  check(
+    "trusted change 才保存 enabled",
+    writes.length === 1 && writes[0].arg.enabled === true,
+    writes,
+  );
 }
 
 console.log("㉚ᵃ Azure 五態分開畫；只有四道 native gate 齊全才說 ready");

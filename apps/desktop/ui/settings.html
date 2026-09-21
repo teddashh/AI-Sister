@@ -203,6 +203,29 @@
         </div>
       </section>
 
+      <section class="local-tts" data-local-tts-section>
+        <h2>本機台灣語音（BreezyVoice）</h2>
+        <p class="hint">
+          預設關閉。只連這台電腦的 <code>127.0.0.1:8231</code>，不經雲端、不下載模型。
+        </p>
+        <label class="check">
+          <input type="checkbox" data-local-tts-enabled disabled />
+          <span>
+            用本機台灣語音朗讀答案
+            <em>
+              服務就緒後，「用本機聲音朗讀」改走目前角色的 BreezyVoice。失敗不會改用系統語音或 Azure。
+            </em>
+          </span>
+        </label>
+        <p class="hint">
+          固定本機目的地：<code data-local-tts-endpoint>http://127.0.0.1:8231/tts</code>
+        </p>
+        <p class="state" role="status" aria-live="polite" data-local-tts-state>
+          正在讀本機台灣語音狀態…
+        </p>
+        <p class="hint">這一區的設定按下就立即儲存。</p>
+      </section>
+
       <section class="azure-tts" data-azure-section>
         <h2>Azure 雲端朗讀（選配）</h2>
         <p class="hint">

@@ -3584,6 +3584,7 @@ name = "sister-tts"
 version = "0.1.0-alpha.145"
 dependencies = [
  "serde",
+ "serde_json",
  "ureq",
 ]
 
