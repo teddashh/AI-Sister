@@ -7,9 +7,9 @@ use sister_core::config::{
     UsageLocalSessionsEnabled, UsagePublicStatusEnabled, UsageResetReactionEnabled,
 };
 use sister_usage::{
-    AUTO_POLL_INTERVAL_MS, ConfiguredSessionAdapter, DedupStore, HOST, LocalUsageAdapter,
-    Measured, PublicReset, SOURCE_ATTRIBUTION, SOURCE_LICENSE, SOURCE_NAME, SOURCE_URL,
-    STATUS_URL, RefreshReason, ResetReaction, ServedFrom,
+    AUTO_POLL_INTERVAL_MS, ConfiguredSessionAdapter, DedupStore, HOST, LocalUsageAdapter, Measured,
+    PublicReset, RefreshReason, ResetReaction, SOURCE_ATTRIBUTION, SOURCE_LICENSE, SOURCE_NAME,
+    SOURCE_URL, STATUS_URL, ServedFrom,
 };
 use std::path::Path;
 use std::sync::{
@@ -59,6 +59,7 @@ pub struct LocalProductView {
     pub name: &'static str,
     pub observed_tokens: Option<u64>,
     pub remaining_tokens: Option<u64>,
+    pub observed_at_unix_ms: Option<i64>,
     pub quota_used_percent: Option<f64>,
     pub quota_window_minutes: Option<i64>,
     pub quota_resets_at_unix: Option<i64>,
@@ -78,7 +79,10 @@ pub struct UsageStatusView {
     pub fetch_error: Option<String>,
     pub local_error: Option<String>,
     pub local_files_read: u32,
+    pub local_files_found: u32,
+    pub local_files_capped: u32,
     pub local_skipped_auth: u32,
+    pub local_scan_complete: bool,
     pub local_products: Vec<LocalProductView>,
     pub local_unknown_reason: &'static str,
     pub board_live: bool,
@@ -113,11 +117,11 @@ pub fn stop_intent(runtime: &Runtime) {
         .transition
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _ = runtime.generation.fetch_update(
-        Ordering::AcqRel,
-        Ordering::Acquire,
-        |current| Some(next_generation(current)),
-    );
+    let _ = runtime
+        .generation
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            Some(next_generation(current))
+        });
 }
 
 pub fn read_view(runtime: &Runtime, data_dir: Option<&Path>, stopped: bool) -> UsageStatusView {
@@ -131,10 +135,21 @@ pub fn read_view(runtime: &Runtime, data_dir: Option<&Path>, stopped: bool) -> U
         Err(error) => return unreadable(generation, stopped, &format!("{error:#}")),
     };
     let usage = config.shell.usage;
-    let store = data_dir
-        .map(DedupStore::load)
-        .and_then(Result::ok)
-        .unwrap_or_else(DedupStore::empty);
+    let store = match data_dir {
+        None => {
+            return unreadable(generation, stopped, "找不到資料目錄。");
+        }
+        Some(dir) => match DedupStore::load(dir) {
+            Ok(store) => store,
+            Err(_) => {
+                return unreadable(
+                    generation,
+                    stopped,
+                    "公開看板狀態讀不出來。刪掉該檔後再查。",
+                );
+            }
+        },
+    };
     let local = ConfiguredSessionAdapter::from_config(
         usage.local_sessions_enabled,
         &usage.local_sessions_dir,
@@ -156,7 +171,10 @@ pub fn read_view(runtime: &Runtime, data_dir: Option<&Path>, stopped: bool) -> U
             ServedFrom::CooldownCache
         },
         None,
-        usage.public_status_enabled.then(|| store.cached_board.clone()).flatten(),
+        usage
+            .public_status_enabled
+            .then(|| store.cached_board.clone())
+            .flatten(),
         false,
     )
 }
@@ -180,7 +198,7 @@ pub fn refresh_blocking(
             unreadable(
                 runtime.generation.load(Ordering::Acquire),
                 stopped,
-                "找不到資料目錄，公開看板狀態沒有地方可放。",
+                "找不到資料目錄。",
             ),
             None,
         ));
@@ -192,11 +210,14 @@ pub fn refresh_blocking(
                 unreadable(
                     runtime.generation.load(Ordering::Acquire),
                     stopped,
-                    "本機公開看板狀態讀不出來；沒有連線，也沒有用空檔假裝沒看過舊事件。",
+                    "公開看板狀態讀不出來。刪掉該檔後再查。",
                 ),
                 None,
             ));
         }
+    };
+    let Some(_admit) = sister_hands::master_stop::admit(dir) else {
+        return Ok((read_view(runtime, data_dir, true), None));
     };
     let _admission = runtime
         .admission
@@ -239,8 +260,20 @@ pub fn refresh_blocking(
                 .store(NO_ACTIVE_GENERATION, Ordering::Release);
             return Ok((read_view(runtime, data_dir, stopped), None));
         }
+        if sister_hands::master_stop::is_stopped(dir)
+            || runtime.generation.load(Ordering::Acquire) != expected_generation
+        {
+            runtime.in_flight.store(false, Ordering::Release);
+            runtime
+                .active_generation
+                .store(NO_ACTIVE_GENERATION, Ordering::Release);
+            return Ok((read_view(runtime, data_dir, true), None));
+        }
         let client = sister_usage::PublicStatusClient::new();
-        let outcome = sister_usage::refresh_board(&client, &mut store, &adapter, request);
+        let outcome = sister_usage::refresh_board(&client, &mut store, &adapter, request, || {
+            sister_hands::master_stop::is_stopped(dir)
+                || runtime.generation.load(Ordering::Acquire) != expected_generation
+        });
         runtime.in_flight.store(false, Ordering::Release);
         runtime
             .active_generation
@@ -315,8 +348,8 @@ pub fn set_from_page(
     local_sessions: UsageLocalSessionsEnabled,
     local_sessions_dir: String,
 ) -> Result<(), String> {
-    let path =
-        sister_core::config::Config::default_path().ok_or_else(|| "找不到設定檔路徑".to_string())?;
+    let path = sister_core::config::Config::default_path()
+        .ok_or_else(|| "找不到設定檔路徑".to_string())?;
     sister_core::config::Config::update(&path, |config| {
         config.set_usage_from_page(
             public_status,
@@ -343,9 +376,12 @@ fn unreadable(generation: u64, stopped: bool, error: &str) -> UsageStatusView {
         fetch_error: None,
         local_error: None,
         local_files_read: 0,
+        local_files_found: 0,
+        local_files_capped: 0,
         local_skipped_auth: 0,
+        local_scan_complete: true,
         local_products: Vec::new(),
-        local_unknown_reason: "本機用量目錄未指定或讀不到；未知不是量到 0。",
+        local_unknown_reason: "剩餘 token 未知。",
         board_live: false,
         board_updated_at: None,
         products: Vec::new(),
@@ -360,6 +396,7 @@ fn unreadable(generation: u64, stopped: bool, error: &str) -> UsageStatusView {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn project(
     generation: u64,
     config_readable: bool,
@@ -387,6 +424,7 @@ fn project(
                 Measured::Unknown => None,
                 Measured::Observed(amount) => Some(amount.get()),
             },
+            observed_at_unix_ms: row.observed_at_unix_ms,
             quota_used_percent: match &row.quota {
                 Measured::Observed(snapshot) => Some(snapshot.used_percent),
                 Measured::Unknown => None,
@@ -439,7 +477,10 @@ fn project(
                         public_event_count: row.public_event_count,
                         forecast_p24: row.forecast.as_ref().map(|forecast| forecast.p24),
                         forecast_p48: row.forecast.as_ref().map(|forecast| forecast.p48),
-                        forecast_basis: row.forecast.as_ref().map(|forecast| forecast.basis.clone()),
+                        forecast_basis: row
+                            .forecast
+                            .as_ref()
+                            .map(|forecast| forecast.basis.clone()),
                     }
                 })
                 .collect()
@@ -457,9 +498,12 @@ fn project(
         fetch_error,
         local_error: local.error,
         local_files_read: local.files_read,
+        local_files_found: local.files_found,
+        local_files_capped: local.files_capped,
         local_skipped_auth: local.skipped_auth_files,
+        local_scan_complete: local.scan_complete,
         local_products,
-        local_unknown_reason: "剩餘 token 未知。公開看板與已用百分比都不能換成帳號剩餘額度。本機數字是 session 記錄，不是帳單。",
+        local_unknown_reason: "剩餘 token 未知。",
         board_live,
         board_updated_at: board.as_ref().map(|board| board.updated_at.clone()),
         products,

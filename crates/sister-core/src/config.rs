@@ -455,7 +455,7 @@ impl Default for AzureTtsConfig {
 }
 
 /// 本機用量與公開重置看板。兩個開關彼此獨立；開看板不會打開本機讀取。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UsageConfig {
     pub public_status_enabled: bool,
@@ -463,17 +463,6 @@ pub struct UsageConfig {
     pub local_sessions_enabled: bool,
     /// 空字串 = 還沒指定。必須是絕對路徑才會讀；程式不補 `~` 或家目錄。
     pub local_sessions_dir: String,
-}
-
-impl Default for UsageConfig {
-    fn default() -> Self {
-        Self {
-            public_status_enabled: false,
-            reset_reaction: false,
-            local_sessions_enabled: false,
-            local_sessions_dir: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

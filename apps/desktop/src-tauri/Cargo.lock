@@ -3546,6 +3546,7 @@ dependencies = [
  "sister-hands",
  "sister-shell",
  "sister-tts",
+ "sister-usage",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",
@@ -3583,6 +3584,16 @@ dependencies = [
 name = "sister-tts"
 version = "0.1.0-alpha.145"
 dependencies = [
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "sister-usage"
+version = "0.1.0-alpha.145"
+dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "ureq",

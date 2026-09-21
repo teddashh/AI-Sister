@@ -126,6 +126,37 @@ const LOCAL_TTS_OFF = {
   config_error: null,
 };
 
+const USAGE_OFF = {
+  generation: 0,
+  config_readable: true,
+  enabled: false,
+  reaction_enabled: false,
+  local_sessions_enabled: false,
+  local_sessions_dir: "",
+  stopped: false,
+  served_from: "disabled",
+  fetch_error: null,
+  local_error: null,
+  local_files_read: 0,
+  local_files_found: 0,
+  local_files_capped: 0,
+  local_skipped_auth: 0,
+  local_scan_complete: true,
+  local_products: [],
+  local_unknown_reason: "剩餘 token 未知。",
+  board_live: false,
+  board_updated_at: null,
+  products: [],
+  attribution: "LimitReset（limitreset.net），CC BY 4.0",
+  source_name: "LimitReset",
+  source_url: "https://limitreset.net/",
+  license: "CC BY 4.0",
+  endpoint: "https://limitreset.net/api/v1/status",
+  host: "limitreset.net",
+  last_success_unix_ms: null,
+  config_error: null,
+};
+
 const AZURE_OFF = {
   generation: 7,
   config_readable: true,
@@ -247,6 +278,7 @@ async function open({
   let platformAccessState = { ...platformAccess };
   let azureState = { ...azure };
   let localTtsState = { ...localTts };
+  let usageState = { ...USAGE_OFF };
   let brainState = structuredClone(brain);
   const writes = [];
   const invokes = [];
@@ -484,36 +516,58 @@ async function open({
               azureState.enabled && azureState.region !== null && azureState.consented === true;
             return { ...azureState };
           case "usage_status_read":
-            return {
-              generation: 0,
-              config_readable: true,
-              enabled: false,
-              reaction_enabled: false,
-              local_sessions_enabled: false,
-              local_sessions_dir: "",
-              stopped: false,
-              served_from: "disabled",
-              fetch_error: null,
-              local_error: null,
-              local_files_read: 0,
-              local_skipped_auth: 0,
-              local_products: [],
-              local_unknown_reason: "剩餘 token 未知。",
-              board_live: false,
-              board_updated_at: null,
-              products: [],
-              attribution: "LimitReset（limitreset.net），CC BY 4.0",
-              source_name: "LimitReset",
-              source_url: "https://limitreset.net/",
-              license: "CC BY 4.0",
-              endpoint: "https://limitreset.net/api/v1/status",
-              host: "limitreset.net",
-              last_success_unix_ms: null,
-              config_error: null,
-            };
+            return { ...usageState };
           case "usage_public_status_set":
+            usageState = {
+              ...usageState,
+              enabled: arg.enabled,
+              reaction_enabled: arg.reactionEnabled,
+              local_sessions_enabled: arg.localSessionsEnabled,
+              local_sessions_dir: arg.localSessionsDir,
+              served_from: arg.enabled ? "network" : "disabled",
+              board_live: false,
+            };
+            return { ...usageState };
           case "usage_public_status_refresh":
-            return null;
+            if (usageState.stopped) {
+              return { ...usageState, served_from: "stopped", fetch_error: null };
+            }
+            if (!usageState.enabled) {
+              return { ...usageState, served_from: "disabled" };
+            }
+            usageState = {
+              ...usageState,
+              served_from: "network",
+              board_live: true,
+              fetch_error: null,
+              products: [
+                {
+                  id: "codex",
+                  name: "Codex",
+                  reset: "confirmed",
+                  event_id: "codex:2026-09-12",
+                  announced_at: "2026-09-12T03:20:36.000Z",
+                  public_event_count: 32,
+                  forecast_p24: 0,
+                  forecast_p48: 0.27,
+                  forecast_basis: "empirical",
+                },
+              ],
+              local_products: [
+                {
+                  id: "codex",
+                  name: "Codex",
+                  observed_tokens: 125,
+                  remaining_tokens: null,
+                  observed_at_unix_ms: 1_757_644_836_000,
+                  quota_used_percent: 12,
+                  quota_window_minutes: 300,
+                  quota_resets_at_unix: 1783800000,
+                  provenance: "codex-session-jsonl",
+                },
+              ],
+            };
+            return { ...usageState };
           case "azure_tts_key_delete":
             if (onAzureKeyDelete) {
               return onAzureKeyDelete(
@@ -614,6 +668,9 @@ async function open({
     previewChildren: () => descendants(node("[data-persona-preview-media]")),
     setAsset(s) {
       assetState = { ...s, disclosure: s.disclosure ? { ...s.disclosure } : null };
+    },
+    setUsage(s) {
+      usageState = { ...USAGE_OFF, ...s };
     },
     setAzure(s) {
       azureState = { ...s };
@@ -2071,6 +2128,67 @@ console.log("㉛ 能力報告的 Unknown 不會被畫成可用或不可用");
   );
   check("privacy_health 整個問不到時 hook 仍畫 Unknown", !unaskable.machineHidden() && unaskable.machineUnknown(), unaskable.machine());
   check("問不到不會留住或藏成 hook 可用", unaskable.machine().includes("還不知道") && !unaskable.machine().includes("已探測"), unaskable.machine());
+}
+
+console.log("㉛ Usage 開關、停止、錯誤與公開重置不把剩餘畫成 0");
+{
+  const p = await open();
+  check(
+    "出廠關閉，重新查詢是灰的",
+    p.node("[data-usage-refresh]").disabled === true,
+  );
+  check(
+    "關閉時不宣稱已連線",
+    p.node("[data-usage-state]").textContent.includes("關閉"),
+    p.node("[data-usage-state]").textContent,
+  );
+  await p.act("[data-usage-public-enabled]", { trusted: false, event: "change" });
+  check("假 change 不寫公開看板", calls(p, "usage_public_status_set").length === 0);
+  p.node("[data-usage-public-enabled]").checked = true;
+  await p.act("[data-usage-public-enabled]", { event: "change" });
+  check("真人開啟只送一次 set", calls(p, "usage_public_status_set").length === 1);
+  p.node("[data-usage-refresh]").disabled = false;
+  await p.act("[data-usage-refresh]");
+  const board = p.node("[data-usage-board]").textContent;
+  check("公開重置有寫出產品", board.includes("Codex") && board.includes("已驗證重置"), board);
+  check("剩餘 token 保持未知", board.includes("剩餘 token：未知"), board);
+  check("已觀察 token 不是 0 冒充", board.includes("已觀察 token：125"), board);
+  check("額度快照不是剩餘", board.includes("額度快照已用 12%") && !board.includes("剩餘 token：0"), board);
+}
+
+{
+  const p = await open();
+  p.setUsage({
+    enabled: true,
+    stopped: true,
+    served_from: "stopped",
+    config_readable: true,
+  });
+  await p.emit("usage-status-changed");
+  check(
+    "全停時說明沒有查詢",
+    p.node("[data-usage-state]").textContent.includes("全停"),
+    p.node("[data-usage-state]").textContent,
+  );
+  check("全停時查詢鍵不能按", p.node("[data-usage-refresh]").disabled === true);
+}
+
+{
+  const p = await open();
+  p.setUsage({
+    enabled: true,
+    config_readable: true,
+    fetch_error: "連線逾時",
+    served_from: "network-error",
+    local_scan_complete: false,
+    local_sessions_enabled: true,
+    local_files_capped: 3,
+  });
+  await p.emit("usage-status-changed");
+  const text = p.node("[data-usage-state]").textContent;
+  check("網路錯誤說得出沒查到", text.includes("沒查到") && text.includes("連線逾時"), text);
+  check("部分掃描會講出來", text.includes("部分掃描"), text);
+  check("錯誤是紅的", p.node("[data-usage-state]").classList.contains("bad"));
 }
 
 console.log("");

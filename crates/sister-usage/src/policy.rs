@@ -37,7 +37,7 @@ pub struct DedupStore {
     pub last_attempt_unix_ms: Option<i64>,
     #[serde(default)]
     pub cached_updated_at: Option<String>,
-    #[serde(default, skip)]
+    #[serde(default)]
     pub cached_board: Option<PublicBoard>,
 }
 
@@ -84,20 +84,36 @@ impl DedupStore {
     pub fn save(&self, data_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(data_dir).map_err(|_| Error::StoreUnwritable)?;
         let bytes = serde_json::to_vec_pretty(self).map_err(|_| Error::StoreUnwritable)?;
-        std::fs::write(Self::path(data_dir), bytes).map_err(|_| Error::StoreUnwritable)
+        let final_path = Self::path(data_dir);
+        let tmp = data_dir.join(format!("{STORE_FILE_NAME}.tmp"));
+        std::fs::write(&tmp, &bytes).map_err(|_| Error::StoreUnwritable)?;
+        std::fs::rename(&tmp, final_path).map_err(|_| Error::StoreUnwritable)
     }
 
     fn remember_board(&mut self, board: &PublicBoard) {
         for row in &board.products {
             if let Some(event) = row.reset.confirmed() {
-                self.seen.insert(
-                    row.product.as_str().to_owned(),
-                    SeenEvent {
-                        id: event.event_id.clone(),
-                        announced_at: event.announced_at.clone(),
-                        announced_unix_ms: event.announced_unix_ms,
-                    },
-                );
+                let key = row.product.as_str().to_owned();
+                let raise = match self.seen.get(&key) {
+                    Some(seen) if event.announced_unix_ms < seen.announced_unix_ms => false,
+                    Some(seen)
+                        if event.announced_unix_ms == seen.announced_unix_ms
+                            && seen.id != event.event_id =>
+                    {
+                        false
+                    }
+                    _ => true,
+                };
+                if raise {
+                    self.seen.insert(
+                        key,
+                        SeenEvent {
+                            id: event.event_id.clone(),
+                            announced_at: event.announced_at.clone(),
+                            announced_unix_ms: event.announced_unix_ms,
+                        },
+                    );
+                }
             }
         }
         self.cached_board = Some(board.clone());
@@ -131,10 +147,11 @@ pub fn refresh_board(
     store: &mut DedupStore,
     local: &impl LocalUsageAdapter,
     request: RefreshRequest,
+    is_stopped: impl Fn() -> bool,
 ) -> RefreshOutcome {
     let local_report = local.report();
     let local_usage = local_report.primary();
-    if request.stopped {
+    if request.stopped || is_stopped() {
         return RefreshOutcome {
             view: stopped_view(store, local_usage, local_report.clone(), request),
             reaction: ResetReaction::None,
@@ -174,9 +191,23 @@ pub fn refresh_board(
         };
     }
 
+    if is_stopped() {
+        return RefreshOutcome {
+            view: stopped_view(store, local_usage, local_report, request),
+            reaction: ResetReaction::None,
+            did_get: false,
+        };
+    }
     store.last_attempt_unix_ms = Some(request.now_unix_ms);
     match fetch_status(transport) {
         Ok(board) => {
+            if is_stopped() {
+                return RefreshOutcome {
+                    view: stopped_view(store, local_usage, local_report, request),
+                    reaction: ResetReaction::None,
+                    did_get: true,
+                };
+            }
             let reaction = apply_board(store, &board, request);
             store.last_success_unix_ms = Some(request.now_unix_ms);
             store.remember_board(&board);
@@ -242,12 +273,15 @@ fn apply_board(
     board: &PublicBoard,
     request: RefreshRequest,
 ) -> ResetReaction {
-    let baseline = match request.reason {
-        RefreshReason::Enable => true,
-        RefreshReason::Startup => !store.baseline_complete || store.seen.is_empty(),
-        RefreshReason::Manual | RefreshReason::Poll => false,
-        RefreshReason::Disable => return ResetReaction::None,
-    };
+    if request.reason == RefreshReason::Disable {
+        return ResetReaction::None;
+    }
+    let baseline = !store.baseline_complete
+        || store.seen.is_empty()
+        || matches!(
+            request.reason,
+            RefreshReason::Enable | RefreshReason::Startup
+        );
 
     let mut newly = Vec::new();
     for row in &board.products {
@@ -255,6 +289,11 @@ fn apply_board(
             continue;
         };
         if is_duplicate_or_stale(store, row.product, event) {
+            continue;
+        }
+        if request.now_unix_ms >= 1_577_836_800_000
+            && event.announced_unix_ms > request.now_unix_ms.saturating_add(60_000)
+        {
             continue;
         }
         if !baseline {
@@ -450,6 +489,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Enable, true, 1_000),
+            || false,
         );
         assert!(outcome.did_get);
         assert_eq!(outcome.reaction, ResetReaction::None);
@@ -468,6 +508,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Enable, true, 1_000),
+            || false,
         );
         let second = FakeTransport::body(&confirmed_board());
         let outcome = refresh_board(
@@ -475,6 +516,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Poll, true, 1_000 + MIN_GET_INTERVAL_MS),
+            || false,
         );
         assert_eq!(outcome.reaction, ResetReaction::None);
         assert_eq!(second.calls.get(), 1);
@@ -489,6 +531,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Enable, true, 1_000),
+            || false,
         );
         let older = FakeTransport::body(&confirmed_board());
         let outcome = refresh_board(
@@ -496,6 +539,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Poll, true, 1_000 + MIN_GET_INTERVAL_MS),
+            || false,
         );
         assert_eq!(outcome.reaction, ResetReaction::None);
     }
@@ -509,6 +553,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Enable, true, 1_000),
+            || false,
         );
         let second = FakeTransport::body(&newer_board());
         let muted = refresh_board(
@@ -516,6 +561,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Poll, false, 1_000 + MIN_GET_INTERVAL_MS),
+            || false,
         );
         assert_eq!(muted.reaction, ResetReaction::None);
 
@@ -526,6 +572,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Enable, true, 1_000),
+            || false,
         );
         let second = FakeTransport::body(&newer_board());
         let outcome = refresh_board(
@@ -533,6 +580,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Poll, true, 1_000 + MIN_GET_INTERVAL_MS),
+            || false,
         );
         match outcome.reaction {
             ResetReaction::NewlyConfirmed { product, event } => {
@@ -552,6 +600,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Startup, true, 1_000),
+            || false,
         );
         assert_eq!(outcome.reaction, ResetReaction::None);
     }
@@ -565,16 +614,18 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Enable, true, 1_000),
+            || false,
         );
         let persisted = serde_json::to_vec(&store).unwrap();
         let mut restored = DedupStore::parse_bytes(&persisted).unwrap();
-        restored.cached_board = Some(parse_status_board(&confirmed_board()).unwrap());
+        assert!(restored.cached_board.is_some());
         let second = FakeTransport::body(&confirmed_board());
         let outcome = refresh_board(
             &second,
             &mut restored,
             &UnavailableLocalUsage,
             request(RefreshReason::Startup, true, 1_000 + MIN_GET_INTERVAL_MS),
+            || false,
         );
         assert_eq!(outcome.reaction, ResetReaction::None);
     }
@@ -594,6 +645,7 @@ mod tests {
                 now_unix_ms: 1,
                 reason: RefreshReason::Disable,
             },
+            || false,
         );
         assert!(!disabled.did_get);
         assert_eq!(disabled.view.served_from, ServedFrom::Disabled);
@@ -610,6 +662,7 @@ mod tests {
                 now_unix_ms: 1,
                 reason: RefreshReason::Poll,
             },
+            || false,
         );
         assert!(!stopped.did_get);
         assert_eq!(stopped.view.served_from, ServedFrom::Stopped);
@@ -625,6 +678,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Enable, true, 1_000),
+            || false,
         );
         let failing = FakeTransport::fail(Error::Transport(crate::TransportFailure::Timeout));
         let outcome = refresh_board(
@@ -632,6 +686,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Poll, true, 1_000 + MIN_GET_INTERVAL_MS),
+            || false,
         );
         assert!(outcome.did_get);
         assert_eq!(outcome.reaction, ResetReaction::None);
@@ -654,6 +709,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Enable, true, 1_000),
+            || false,
         );
         let second = FakeTransport::body(&newer_board());
         let outcome = refresh_board(
@@ -661,6 +717,7 @@ mod tests {
             &mut store,
             &UnavailableLocalUsage,
             request(RefreshReason::Manual, true, 1_000 + 10),
+            || false,
         );
         assert!(!outcome.did_get);
         assert_eq!(outcome.view.served_from, ServedFrom::CooldownCache);
@@ -690,5 +747,136 @@ mod tests {
             board.product(ProductId::Claude).unwrap().reset,
             PublicReset::Confirmed(_)
         ));
+    }
+
+    #[test]
+    fn first_poll_without_seen_ids_is_baseline() {
+        let transport = FakeTransport::body(&confirmed_board());
+        let mut store = DedupStore::empty();
+        let outcome = refresh_board(
+            &transport,
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, 1_000),
+            || false,
+        );
+        assert_eq!(outcome.reaction, ResetReaction::None);
+        assert!(store.baseline_complete);
+    }
+
+    #[test]
+    fn newer_then_older_then_same_newer_does_not_react_twice() {
+        let mut store = DedupStore::empty();
+        refresh_board(
+            &FakeTransport::body(&confirmed_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Enable, true, 1_000),
+            || false,
+        );
+        let first = refresh_board(
+            &FakeTransport::body(&newer_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, 1_000 + MIN_GET_INTERVAL_MS),
+            || false,
+        );
+        assert!(matches!(
+            first.reaction,
+            ResetReaction::NewlyConfirmed { .. }
+        ));
+        let older = refresh_board(
+            &FakeTransport::body(&confirmed_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, 1_000 + 2 * MIN_GET_INTERVAL_MS),
+            || false,
+        );
+        assert_eq!(older.reaction, ResetReaction::None);
+        let again = refresh_board(
+            &FakeTransport::body(&newer_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, 1_000 + 3 * MIN_GET_INTERVAL_MS),
+            || false,
+        );
+        assert_eq!(again.reaction, ResetReaction::None);
+        assert_eq!(store.seen.get("codex").unwrap().id, "codex:2026-09-21");
+    }
+
+    #[test]
+    fn stop_during_get_discards_reaction() {
+        let stopped = std::cell::Cell::new(false);
+        let transport = FakeTransport::body(&newer_board());
+        let mut store = DedupStore::empty();
+        refresh_board(
+            &FakeTransport::body(&confirmed_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Enable, true, 1_000),
+            || false,
+        );
+        stopped.set(true);
+        let outcome = refresh_board(
+            &transport,
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, 1_000 + MIN_GET_INTERVAL_MS),
+            || stopped.get(),
+        );
+        assert!(!outcome.did_get);
+        assert_eq!(outcome.view.served_from, ServedFrom::Stopped);
+        assert_eq!(outcome.reaction, ResetReaction::None);
+        assert_eq!(transport.calls.get(), 0);
+    }
+
+    #[test]
+    fn future_announcement_does_not_react() {
+        let mut store = DedupStore::empty();
+        let now = 1_757_644_836_000;
+        refresh_board(
+            &FakeTransport::body(&confirmed_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Enable, true, now),
+            || false,
+        );
+        let future = String::from_utf8(confirmed_board())
+            .unwrap()
+            .replace("codex:2026-09-12", "codex:2099-01-01")
+            .replace("2026-09-12T03:20:36.000Z", "2099-01-01T00:00:00.000Z");
+        let outcome = refresh_board(
+            &FakeTransport::body(future.as_bytes()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, now + MIN_GET_INTERVAL_MS),
+            || false,
+        );
+        assert_eq!(outcome.reaction, ResetReaction::None);
+    }
+
+    #[test]
+    fn persisted_board_serves_cooldown_after_reload() {
+        let mut store = DedupStore::empty();
+        refresh_board(
+            &FakeTransport::body(&confirmed_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Enable, true, 1_000),
+            || false,
+        );
+        let bytes = serde_json::to_vec(&store).unwrap();
+        let mut restored = DedupStore::parse_bytes(&bytes).unwrap();
+        let second = FakeTransport::body(&newer_board());
+        let outcome = refresh_board(
+            &second,
+            &mut restored,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Manual, true, 1_000 + 10),
+            || false,
+        );
+        assert!(!outcome.did_get);
+        assert_eq!(outcome.view.served_from, ServedFrom::CooldownCache);
+        assert_eq!(second.calls.get(), 0);
     }
 }

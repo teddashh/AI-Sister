@@ -1286,7 +1286,10 @@ fn dispatch_master_stop_menu(app: &tauri::AppHandle, menu_id: &str) {
     if matches!(action, MasterStopAction::Engage) {
         let shell = app.state::<Shell>();
         usage_status::stop_intent(&shell.usage);
-        let _ = app.emit("usage-status-changed", usage_status::read_view(&shell.usage, shell.data_dir.as_deref(), true));
+        let _ = app.emit(
+            "usage-status-changed",
+            usage_status::read_view(&shell.usage, shell.data_dir.as_deref(), true),
+        );
     }
     let data_dir = app.state::<Shell>().data_dir.clone();
     if master_stop_queue()
@@ -5821,56 +5824,60 @@ fn usage_is_stopped(shell: &Shell) -> bool {
 fn start_usage_poll_thread(app: tauri::AppHandle) {
     std::thread::Builder::new()
         .name("usage-public-status-poll".into())
-        .spawn(move || loop {
-            std::thread::sleep(usage_status::poll_interval());
-            let Some(shell) = app.try_state::<Shell>() else {
-                continue;
-            };
-            let stopped = usage_is_stopped(&shell);
-            if stopped {
-                continue;
-            }
-            let Ok(path) = config_path() else {
-                continue;
-            };
-            let Ok(config) = sister_core::config::Config::load(&path) else {
-                continue;
-            };
-            if !config.shell.usage.public_status_enabled {
-                continue;
-            }
-            if !usage_status::due_for_poll(shell.data_dir.as_deref(), sister_core::now_ms()) {
-                continue;
-            }
-            let generation = shell.usage.generation.load(Ordering::Acquire);
-            let data_dir = shell.data_dir.clone();
-            let runtime_generation = generation;
-            drop(shell);
-            let app_clone = app.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || {
-                let Some(shell) = app_clone.try_state::<Shell>() else {
-                    return;
+        .spawn(move || {
+            loop {
+                std::thread::sleep(usage_status::poll_interval());
+                let Some(shell) = app.try_state::<Shell>() else {
+                    continue;
                 };
-                if let Ok((view, reaction)) = usage_status::refresh_blocking(
-                    &shell.usage,
-                    data_dir.as_deref(),
-                    usage_is_stopped(&shell),
-                    sister_usage::RefreshReason::Poll,
-                    runtime_generation,
-                ) {
-                    let _ = app_clone.emit("usage-status-changed", view);
-                    if let Some(reaction) = reaction {
-                        let _ = app_clone.emit("usage-reset-reaction", reaction);
-                    }
+                let stopped = usage_is_stopped(&shell);
+                if stopped {
+                    continue;
                 }
-            });
+                let Ok(path) = config_path() else {
+                    continue;
+                };
+                let Ok(config) = sister_core::config::Config::load(&path) else {
+                    continue;
+                };
+                if !config.shell.usage.public_status_enabled {
+                    continue;
+                }
+                if !usage_status::due_for_poll(shell.data_dir.as_deref(), sister_core::now_ms()) {
+                    continue;
+                }
+                let generation = shell.usage.generation.load(Ordering::Acquire);
+                let data_dir = shell.data_dir.clone();
+                let app_clone = app.clone();
+                std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+                    let Some(shell) = app_clone.try_state::<Shell>() else {
+                        return;
+                    };
+                    if let Ok((view, reaction)) = usage_status::refresh_blocking(
+                        &shell.usage,
+                        data_dir.as_deref(),
+                        usage_is_stopped(&shell),
+                        sister_usage::RefreshReason::Poll,
+                        generation,
+                    ) {
+                        let _ = app_clone.emit("usage-status-changed", view);
+                        if let Some(reaction) = reaction {
+                            let _ = app_clone.emit("usage-reset-reaction", reaction);
+                        }
+                    }
+                }));
+            }
         })
         .ok();
 }
 
 #[tauri::command]
 fn usage_status_read(shell: tauri::State<'_, Shell>) -> usage_status::UsageStatusView {
-    usage_status::read_view(&shell.usage, shell.data_dir.as_deref(), usage_is_stopped(&shell))
+    usage_status::read_view(
+        &shell.usage,
+        shell.data_dir.as_deref(),
+        usage_is_stopped(&shell),
+    )
 }
 
 #[tauri::command]

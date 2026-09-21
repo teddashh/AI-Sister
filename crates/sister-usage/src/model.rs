@@ -22,10 +22,15 @@ pub const MAX_BODY_BYTES: usize = 256 * 1024;
 pub const MIN_GET_INTERVAL_MS: i64 = 60_000;
 pub const AUTO_POLL_INTERVAL_MS: i64 = 300_000;
 
+#[cfg(feature = "public-status")]
 pub const RESOLVE_TIMEOUT_SECS: u64 = 5;
+#[cfg(feature = "public-status")]
 pub const CONNECT_TIMEOUT_SECS: u64 = 10;
+#[cfg(feature = "public-status")]
 pub const SEND_TIMEOUT_SECS: u64 = 10;
+#[cfg(feature = "public-status")]
 pub const RECEIVE_TIMEOUT_SECS: u64 = 15;
+#[cfg(feature = "public-status")]
 pub const GLOBAL_TIMEOUT_SECS: u64 = 20;
 
 /// Allowlisted LimitReset product identifiers. Paths are built only from these.
@@ -221,7 +226,12 @@ pub struct LocalUsageReport {
     pub configured: bool,
     pub products: Vec<LocalProductUsage>,
     pub skipped_auth_files: u32,
+    pub files_found: u32,
     pub files_read: u32,
+    pub files_skipped_large: u32,
+    pub files_capped: u32,
+    pub truncated_lines: u32,
+    pub scan_complete: bool,
     pub error: Option<String>,
     pub adapter: LocalAdapterKind,
 }
@@ -233,7 +243,12 @@ impl LocalUsageReport {
             configured: false,
             products: Vec::new(),
             skipped_auth_files: 0,
+            files_found: 0,
             files_read: 0,
+            files_skipped_large: 0,
+            files_capped: 0,
+            truncated_lines: 0,
+            scan_complete: true,
             error: None,
             adapter: LocalAdapterKind::Unavailable,
         }
@@ -245,7 +260,12 @@ impl LocalUsageReport {
             configured: false,
             products: Vec::new(),
             skipped_auth_files: 0,
+            files_found: 0,
             files_read: 0,
+            files_skipped_large: 0,
+            files_capped: 0,
+            truncated_lines: 0,
+            scan_complete: false,
             error: Some(message.to_owned()),
             adapter: LocalAdapterKind::Unavailable,
         }
@@ -285,7 +305,7 @@ pub struct ConfirmedReset {
     pub announced_unix_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PublicReset {
     NoneRecorded,
     Unverified {
@@ -309,7 +329,7 @@ impl PublicReset {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Forecast {
     pub p24: f64,
     pub p48: f64,
@@ -318,7 +338,7 @@ pub struct Forecast {
     pub computed_at: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PublicProductStatus {
     pub product: ProductId,
     pub reset: PublicReset,
@@ -327,10 +347,15 @@ pub struct PublicProductStatus {
     pub forecast: Option<Forecast>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+fn board_attribution() -> &'static str {
+    SOURCE_ATTRIBUTION
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PublicBoard {
     pub updated_at: String,
     pub products: Vec<PublicProductStatus>,
+    #[serde(skip, default = "board_attribution")]
     pub attribution: &'static str,
 }
 

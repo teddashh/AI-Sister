@@ -324,4 +324,28 @@ mod tests {
         assert!(row.reset.confirmed().is_some());
         assert_eq!(row.public_event_count, Some(32));
     }
+
+    #[test]
+    fn public_status_fixture_matches_live_schema_without_filling_quota() {
+        let bytes = include_bytes!("../tests/fixtures/limitreset-status.json");
+        let board = parse_status_board(bytes).unwrap();
+        assert_eq!(board.updated_at, "2026-09-21T01:00:22.000Z");
+        assert!(
+            board
+                .product(ProductId::Codex)
+                .unwrap()
+                .reset
+                .confirmed()
+                .is_some()
+        );
+        assert!(matches!(
+            board.product(ProductId::Claude).unwrap().reset,
+            PublicReset::NoneRecorded
+        ));
+        assert_eq!(
+            board.product(ProductId::Claude).unwrap().public_event_count,
+            Some(0)
+        );
+        assert!(board.attribution.contains("CC BY 4.0"));
+    }
 }

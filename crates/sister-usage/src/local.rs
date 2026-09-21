@@ -85,7 +85,12 @@ impl LocalUsageAdapter for SyntheticLocalUsage {
             configured: true,
             products,
             skipped_auth_files: 0,
+            files_found: 0,
             files_read: 0,
+            files_skipped_large: 0,
+            files_capped: 0,
+            truncated_lines: 0,
+            scan_complete: true,
             error: None,
             adapter: LocalAdapterKind::SyntheticFixture,
         }

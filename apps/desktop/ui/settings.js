@@ -1841,7 +1841,7 @@ function paintUsage(view, actionError = "") {
     message = actionError;
   } else if (!view?.config_readable) {
     el.usageState.classList.add("bad");
-    message = "用量設定讀不出來；沒有連線，也沒有把未知畫成 0。";
+    message = "用量設定讀不出來。";
   } else if (view.stopped) {
     message = "全停中，公開看板不會連線。";
   } else if (!view.enabled) {
@@ -1857,8 +1857,10 @@ function paintUsage(view, actionError = "") {
   }
   if (view?.local_error) {
     message += `\n本機用量：${view.local_error}`;
+  } else if (view?.local_sessions_enabled && view.local_scan_complete === false) {
+    message += "\n本機用量是部分掃描。";
   } else if (view?.local_sessions_enabled && (!view.local_products || view.local_products.length === 0)) {
-    message += "\n本機用量：未知（還沒讀到 token_count，不是量到 0）。";
+    message += "\n本機用量：未知。";
   }
   el.usageState.textContent = message;
   if (!el.usageBoard) return;
@@ -1867,11 +1869,13 @@ function paintUsage(view, actionError = "") {
     const observed =
       local.observed_tokens == null ? "已觀察 token：未知" : `已觀察 token：${local.observed_tokens}（本機記錄，不是帳單）`;
     const remaining = "剩餘 token：未知";
+    const when =
+      local.observed_at_unix_ms == null ? "" : `；時間 ${local.observed_at_unix_ms}`;
     const quota =
       local.quota_used_percent == null
         ? "額度快照：未知"
-        : `額度快照已用 ${local.quota_used_percent}%（不是剩餘額度）`;
-    rows.push(`<p><strong>${local.name}</strong> ${observed}；${remaining}；${quota}</p>`);
+        : `額度快照已用 ${local.quota_used_percent}%`;
+    rows.push(`${local.name} ${observed}；${remaining}；${quota}${when}`);
   }
   for (const product of view?.products || []) {
     let reset = "公開看板沒有已驗證重置事件";
@@ -1884,9 +1888,9 @@ function paintUsage(view, actionError = "") {
       product.forecast_p24 == null
         ? "無預測"
         : `預測 24h ${Math.round(product.forecast_p24 * 100)}%／48h ${Math.round((product.forecast_p48 || 0) * 100)}%（不是確認）`;
-    rows.push(`<p><strong>${product.name}</strong> ${reset}。${forecast}</p>`);
+    rows.push(`${product.name} ${reset}。${forecast}`);
   }
-  el.usageBoard.innerHTML = rows.join("");
+  el.usageBoard.textContent = rows.join("\n");
 }
 
 async function refreshUsage() {

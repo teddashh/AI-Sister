@@ -10,9 +10,11 @@ use crate::model::{
 };
 use crate::{Error, Result};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 pub const MAX_JSONL_FILES: usize = 64;
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -60,25 +62,35 @@ fn read_configured_root(root: &Path) -> Result<LocalUsageReport> {
     }
     let mut skipped_auth = 0_u32;
     let mut files = Vec::new();
-    collect_jsonl(&canonical, &canonical, 0, &mut files, &mut skipped_auth)?;
-    files.sort();
+    collect_jsonl(&canonical, 0, &mut files, &mut skipped_auth)?;
+    files.sort_by(|a, b| b.mtime.cmp(&a.mtime).then(a.path.cmp(&b.path)));
+    let files_found = files.len() as u32;
+    let files_capped = files.len().saturating_sub(MAX_JSONL_FILES) as u32;
     files.truncate(MAX_JSONL_FILES);
 
-    let mut total_bytes = 0_u64;
+    let mut bytes_budget = MAX_TOTAL_BYTES;
     let mut files_read = 0_u32;
+    let mut files_skipped_large = 0_u32;
+    let mut truncated_lines = 0_u32;
+    let mut hit_byte_cap = false;
     let mut codex = ProductAcc::new(ProductId::Codex, "codex-session-jsonl");
     let mut claude = ProductAcc::new(ProductId::Claude, "claude-session-jsonl");
 
-    for path in &files {
-        let meta = fs::metadata(path).map_err(|_| Error::LocalIo)?;
+    for file in &files {
+        let meta = fs::metadata(&file.path).map_err(|_| Error::LocalIo)?;
         if meta.len() > MAX_FILE_BYTES {
+            files_skipped_large += 1;
             continue;
         }
-        total_bytes = total_bytes.saturating_add(meta.len());
-        if total_bytes > MAX_TOTAL_BYTES {
+        if bytes_budget == 0 {
+            hit_byte_cap = true;
             break;
         }
-        parse_jsonl_file(path, &mut codex, &mut claude)?;
+        let scan = parse_jsonl_file(&file.path, &mut bytes_budget, &mut codex, &mut claude)?;
+        truncated_lines += scan.truncated_lines;
+        if scan.hit_file_cap {
+            hit_byte_cap = true;
+        }
         files_read += 1;
         codex.flush_file();
         claude.flush_file();
@@ -91,26 +103,39 @@ fn read_configured_root(root: &Path) -> Result<LocalUsageReport> {
     if let Some(row) = claude.finish() {
         products.push(row);
     }
+    let unread = files.len().saturating_sub(files_read as usize) as u32;
+    let files_capped = files_capped.saturating_add(unread.saturating_sub(files_skipped_large));
+    let scan_complete =
+        files_capped == 0 && files_skipped_large == 0 && truncated_lines == 0 && !hit_byte_cap;
 
     Ok(LocalUsageReport {
         enabled: true,
         configured: true,
         products,
         skipped_auth_files: skipped_auth,
+        files_found,
         files_read,
+        files_skipped_large,
+        files_capped,
+        truncated_lines,
+        scan_complete,
         error: None,
         adapter: LocalAdapterKind::ConfiguredSessions,
     })
 }
 
+struct FoundFile {
+    path: PathBuf,
+    mtime: u64,
+}
+
 fn collect_jsonl(
-    _root: &Path,
     dir: &Path,
     depth: u32,
-    files: &mut Vec<PathBuf>,
+    files: &mut Vec<FoundFile>,
     skipped_auth: &mut u32,
 ) -> Result<()> {
-    if depth > MAX_WALK_DEPTH || files.len() >= MAX_JSONL_FILES {
+    if depth > MAX_WALK_DEPTH {
         return Ok(());
     }
     let entries = fs::read_dir(dir).map_err(|_| Error::LocalIo)?;
@@ -131,16 +156,19 @@ fn collect_jsonl(
             continue;
         }
         if file_type.is_dir() {
-            collect_jsonl(_root, &path, depth + 1, files, skipped_auth)?;
+            collect_jsonl(&path, depth + 1, files, skipped_auth)?;
             continue;
         }
         if !name.ends_with(".jsonl") {
             continue;
         }
-        if files.len() >= MAX_JSONL_FILES {
-            break;
-        }
-        files.push(path);
+        let mtime = fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|when| when.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        files.push(FoundFile { path, mtime });
     }
     Ok(())
 }
@@ -153,29 +181,87 @@ fn is_auth_name(name: &str) -> bool {
         || lower.ends_with(".token")
 }
 
-fn parse_jsonl_file(path: &Path, codex: &mut ProductAcc, claude: &mut ProductAcc) -> Result<()> {
-    let file = File::open(path).map_err(|_| Error::LocalIo)?;
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
+struct FileScan {
+    truncated_lines: u32,
+    hit_file_cap: bool,
+}
+
+fn parse_jsonl_file(
+    path: &Path,
+    bytes_budget: &mut u64,
+    codex: &mut ProductAcc,
+    claude: &mut ProductAcc,
+) -> Result<FileScan> {
+    let mut file = File::open(path).map_err(|_| Error::LocalIo)?;
+    let mut buf = [0_u8; 4096];
+    let mut line = Vec::new();
+    let mut file_consumed = 0_u64;
+    let mut truncated_lines = 0_u32;
+    let mut skipping_line = false;
+    let mut hit_file_cap = false;
     loop {
-        line.clear();
-        let read = reader.read_line(&mut line).map_err(|_| Error::LocalIo)?;
+        if *bytes_budget == 0 || file_consumed >= MAX_FILE_BYTES {
+            hit_file_cap = true;
+            break;
+        }
+        let read = file.read(&mut buf).map_err(|_| Error::LocalIo)?;
         if read == 0 {
             break;
         }
-        if line.len() > MAX_LINE_BYTES {
-            continue;
+        let allowed = (*bytes_budget)
+            .min(MAX_FILE_BYTES.saturating_sub(file_consumed))
+            .min(read as u64) as usize;
+        if allowed < read {
+            hit_file_cap = true;
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+        *bytes_budget = bytes_budget.saturating_sub(allowed as u64);
+        file_consumed = file_consumed.saturating_add(allowed as u64);
+        for &byte in &buf[..allowed] {
+            if skipping_line {
+                if byte == b'\n' {
+                    skipping_line = false;
+                    line.clear();
+                }
+                continue;
+            }
+            if byte == b'\n' {
+                ingest_bytes(&line, codex, claude);
+                line.clear();
+                continue;
+            }
+            if line.len() >= MAX_LINE_BYTES {
+                truncated_lines += 1;
+                skipping_line = true;
+                line.clear();
+                continue;
+            }
+            line.push(byte);
         }
-        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        ingest_line(&value, codex, claude);
+        if hit_file_cap {
+            break;
+        }
     }
-    Ok(())
+    if !skipping_line && !line.is_empty() {
+        ingest_bytes(&line, codex, claude);
+    }
+    Ok(FileScan {
+        truncated_lines,
+        hit_file_cap,
+    })
+}
+
+fn ingest_bytes(line: &[u8], codex: &mut ProductAcc, claude: &mut ProductAcc) {
+    let Ok(text) = std::str::from_utf8(line) else {
+        return;
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return;
+    };
+    ingest_line(&value, codex, claude);
 }
 
 fn ingest_line(value: &Value, codex: &mut ProductAcc, claude: &mut ProductAcc) {
@@ -232,6 +318,11 @@ fn ingest_claude(value: &Value, acc: &mut ProductAcc) -> bool {
             .pointer("/message/usage")
             .or_else(|| value.get("usage"))
     {
+        if let Some(id) = claude_message_id(value)
+            && !acc.note_message_id(id)
+        {
+            return true;
+        }
         acc.add_tokens(claude_tokens(usage), observed_at);
         return true;
     }
@@ -258,6 +349,15 @@ fn token_total(value: Option<&Value>) -> Option<u64> {
     // Official TokenUsage.total_tokens already includes the parts. Cache is a
     // subset of input and reasoning is a subset of output — never add them.
     as_nonneg_int(value.get("total_tokens"))
+}
+
+fn claude_message_id(value: &Value) -> Option<String> {
+    value
+        .pointer("/message/id")
+        .or_else(|| value.get("uuid"))
+        .or_else(|| value.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 fn claude_tokens(usage: &Value) -> Option<u64> {
@@ -341,6 +441,7 @@ struct ProductAcc {
     file_last_fallback: Option<u64>,
     observed_at: Option<i64>,
     quota: Option<QuotaSnapshot>,
+    message_ids: HashSet<String>,
     saw_event: bool,
 }
 
@@ -354,8 +455,20 @@ impl ProductAcc {
             file_last_fallback: None,
             observed_at: None,
             quota: None,
+            message_ids: HashSet::new(),
             saw_event: false,
         }
+    }
+
+    fn touch_time(&mut self, at: Option<i64>) {
+        self.observed_at = match (self.observed_at, at) {
+            (Some(old), Some(new)) => Some(old.max(new)),
+            (None, other) | (other, None) => other,
+        };
+    }
+
+    fn note_message_id(&mut self, id: String) -> bool {
+        self.message_ids.insert(id)
     }
 
     fn add_tokens(&mut self, tokens: Option<u64>, at: Option<i64>) {
@@ -364,13 +477,13 @@ impl ProductAcc {
         };
         self.saw_event = true;
         self.across_files = self.across_files.saturating_add(tokens);
-        self.observed_at = at.or(self.observed_at);
+        self.touch_time(at);
     }
 
     fn set_file_total(&mut self, tokens: u64, at: Option<i64>) {
         self.saw_event = true;
         self.file_total = Some(tokens);
-        self.observed_at = at.or(self.observed_at);
+        self.touch_time(at);
     }
 
     fn set_file_last_fallback(&mut self, tokens: u64, at: Option<i64>) {
@@ -379,7 +492,7 @@ impl ProductAcc {
         }
         self.saw_event = true;
         self.file_last_fallback = Some(tokens);
-        self.observed_at = at.or(self.observed_at);
+        self.touch_time(at);
     }
 
     fn flush_file(&mut self) {
@@ -395,7 +508,15 @@ impl ProductAcc {
             return;
         };
         self.saw_event = true;
-        self.quota = Some(quota);
+        let newer = match (&self.quota, quota.observed_at_unix_ms) {
+            (None, _) => true,
+            (_, None) => true,
+            (Some(old), Some(at)) => at >= old.observed_at_unix_ms.unwrap_or(i64::MIN),
+        };
+        if newer {
+            self.touch_time(quota.observed_at_unix_ms);
+            self.quota = Some(quota);
+        }
     }
 
     fn finish(mut self) -> Option<LocalProductUsage> {
@@ -709,6 +830,94 @@ mod tests {
         assert_eq!(report.skipped_auth_files, 1);
         assert_eq!(report.files_read, 0);
         assert!(report.products.is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn used_percent_0_half_1_and_100_are_not_rescaled() {
+        for percent in ["0", "0.5", "1", "100"] {
+            let dir = scratch();
+            write(
+                &dir,
+                "p.jsonl",
+                &format!("{}\n", codex_event(10, 10, percent)),
+            );
+            let report = read_sessions(LocalReadRequest {
+                enabled: true,
+                root: Some(&dir),
+            });
+            let quota = match &report.products[0].quota {
+                Measured::Observed(snapshot) => snapshot.used_percent,
+                other => panic!("{percent}: {other:?}"),
+            };
+            let expected: f64 = percent.parse().unwrap();
+            assert!(
+                (quota - expected).abs() < f64::EPSILON,
+                "{percent} became {quota}"
+            );
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn duplicate_claude_message_ids_count_once() {
+        let dir = scratch();
+        let line = r#"{"type":"assistant","uuid":"msg-1","timestamp":"2026-09-12T04:00:00.000Z","message":{"id":"msg-1","usage":{"input_tokens":11,"output_tokens":7}}}"#;
+        write(&dir, "dup.jsonl", &format!("{line}\n{line}\n"));
+        let report = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        assert_eq!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(18))
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn newer_quota_snapshot_wins_over_later_older_file() {
+        let dir = scratch();
+        write(
+            &dir,
+            "older.jsonl",
+            r#"{"timestamp":"2026-09-12T01:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":10}},"rate_limits":{"primary":{"used_percent":90,"window_minutes":300}}}}
+"#,
+        );
+        write(
+            &dir,
+            "newer.jsonl",
+            r#"{"timestamp":"2026-09-12T05:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":11}},"rate_limits":{"primary":{"used_percent":12,"window_minutes":300}}}}
+"#,
+        );
+        let report = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        let quota = match &report.products[0].quota {
+            Measured::Observed(snapshot) => snapshot,
+            other => panic!("{other:?}"),
+        };
+        assert!((quota.used_percent - 12.0).abs() < f64::EPSILON);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn oversized_file_is_partial_not_a_total() {
+        let dir = scratch();
+        write(&dir, "ok.jsonl", &format!("{}\n", codex_event(7, 7, "4")));
+        let huge = dir.join("huge.jsonl");
+        fs::write(&huge, vec![b'x'; (MAX_FILE_BYTES as usize) + 8]).unwrap();
+        let report = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        assert!(!report.scan_complete);
+        assert!(report.files_skipped_large >= 1);
+        assert_eq!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(7))
+        );
         fs::remove_dir_all(&dir).ok();
     }
 }
