@@ -137,15 +137,39 @@ function Invoke-SisterPdfFirstPageGroupFocus {
         if ($null -ne $page -and $page.Kind -eq 'Group' -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND') -and -not $page.Offscreen) {
             return
         }
+        if ($null -ne $script:SisterPdfClick) {
+            Invoke-SisterViewportClick $script:SisterPdfClick.X $script:SisterPdfClick.Y
+            return
+        }
         $group = Find-SisterPdfPageGroup -Start (Get-SisterFocusedElement) -Needle 'PDF-FIRST' -Exclude 'PDF-SECOND'
         if ($null -eq $group) { return }
+        $target = $group
         try {
-            $rect = $group.Current.BoundingRectangle
-            if ($rect.Width -gt 1 -and $rect.Height -gt 1) {
-                Invoke-SisterViewportClick ([int]($rect.X + ($rect.Width / 2))) ([int]($rect.Y + ($rect.Height / 2)))
+            if (-not $group.Current.IsKeyboardFocusable) {
+                $child = Get-SisterFirstChild $group
+                $seen = 0
+                while ($null -ne $child -and $seen -lt 16) {
+                    $seen++
+                    if ($child.Current.IsKeyboardFocusable) { $target = $child; break }
+                    $deeper = Get-SisterFirstChild $child
+                    if ($null -ne $deeper) { $child = $deeper; continue }
+                    $child = Get-SisterNextSibling $child
+                }
             }
         } catch {}
-        $group.SetFocus() | Out-Null
+        try {
+            $rect = $target.Current.BoundingRectangle
+            $script:SisterPdfGroupScan = "$script:SisterPdfGroupScan focusable=$($target.Current.IsKeyboardFocusable) rect=$([int]$rect.X),$([int]$rect.Y),$([int]$rect.Width),$([int]$rect.Height)"
+            if ($rect.Width -gt 1 -and $rect.Height -gt 1) {
+                # Top of the page, not the center: PDF-FIRST is near the top,
+                # and a center click has left GetVisibleRanges blocked.
+                $script:SisterPdfClick = [pscustomobject]@{
+                    X = [int]($rect.X + [Math]::Min(40, $rect.Width / 2))
+                    Y = [int]($rect.Y + [Math]::Min(48, $rect.Height / 2))
+                }
+            }
+        } catch {}
+        $target.SetFocus() | Out-Null
     } catch {}
 }
 function Get-SisterParentElement($node) {
@@ -216,6 +240,7 @@ function Invoke-SisterViewportClick {
     [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 }
 $script:SisterPdfGroupScan = 'unscanned'
+$script:SisterPdfClick = $null
 $browser = $null
 $backdrop = $null
 . (Join-Path $PSScriptRoot 'uia-backdrop.ps1')
@@ -391,8 +416,9 @@ window.addEventListener('keydown', event => {
         $extra = @()
         if ($Pdf -and $mode -ne 'address') {
             [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading direct PDF document')
+            Write-SisterUiaMetadata -Hwnd $hwnd -Extra @("group-scan=$script:SisterPdfGroupScan")
             $page = Get-SisterPdfPage
-            $ancestors = @(Get-SisterLivePdfVisible)
+            $ancestors = if ($mode -eq 'bottom') { @(Get-SisterLivePdfVisible) } else { @() }
             $extra += "group-scan=$script:SisterPdfGroupScan"
             if ($null -ne $page) {
                 $extra += "focused-page kind=$($page.Kind) scope=[$($page.Scope)] visible=[$($page.Visible)] offscreen=$($page.Offscreen) top=$($page.Top)"
