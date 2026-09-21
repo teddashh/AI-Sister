@@ -76,6 +76,29 @@ function Get-SisterNextSibling($node) {
     if ($null -eq $node) { return $null }
     try { return [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetNextSibling($node) } catch { return $null }
 }
+function Test-SisterPdfPageGroup {
+    param($Current, [string]$Needle, [string]$Exclude, [bool]$AllowOffscreen, [ref]$Groups, [ref]$Large, [ref]$Errors)
+    try {
+        if ($null -eq $Current) { return $null }
+        if ($Current.Current.ControlType -ne [System.Windows.Automation.ControlType]::Group) { return $null }
+        $Groups.Value++
+        $rect = $Current.Current.BoundingRectangle
+        $offscreen = [bool]$Current.Current.IsOffscreen
+        $pageSized = $rect.Width -ge 200 -and $rect.Height -ge 80
+        $scrolledAway = $offscreen -or $rect.Y -lt -100
+        if (-not (($pageSized -and -not $offscreen) -or ($AllowOffscreen -and $scrolledAway))) { return $null }
+        $Large.Value++
+        $parent = Get-SisterParentElement $Current
+        if ($null -eq $parent -or $parent.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document) { return $null }
+        if (-not $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) { return $null }
+        $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+        $text = $pattern.RangeFromChild($Current).GetText(1024)
+        if ($text.Contains($Needle) -and -not $text.Contains($Exclude)) { return $Current }
+    } catch {
+        $Errors.Value++
+    }
+    return $null
+}
 function Find-SisterPdfPageGroup {
     param($Start, [string]$Needle, [string]$Exclude, [switch]$AllowOffscreen)
     $script:SisterPdfGroupScan = 'scanned=0 picked=none'
@@ -93,36 +116,32 @@ function Find-SisterPdfPageGroup {
         $groups = 0
         $large = 0
         $errors = 0
-        $max = 128
+        # The page Group is a direct child of a Document. Check those before
+        # the wider walk, which can fill its budget with text runs.
+        foreach ($seed in $seeds) {
+            $direct = Get-SisterFirstChild $seed
+            $siblings = 0
+            while ($null -ne $direct -and $siblings -lt 80) {
+                $siblings++
+                $hit = Test-SisterPdfPageGroup $direct $Needle $Exclude ([bool]$AllowOffscreen) ([ref]$groups) ([ref]$large) ([ref]$errors)
+                if ($null -ne $hit) {
+                    $script:SisterPdfGroupScan = "direct siblings=$siblings groups=$groups large=$large picked=group"
+                    $script:SisterPdfPageElement = $hit
+                    return $hit
+                }
+                $direct = Get-SisterNextSibling $direct
+            }
+        }
+        $max = 256
         while ($queue.Count -gt 0 -and $scanned -lt $max) {
             $current = $queue.Dequeue()
             $scanned++
-            try {
-                if ($current.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
-                    $groups++
-                    $rect = $current.Current.BoundingRectangle
-                    $offscreen = [bool]$current.Current.IsOffscreen
-                    $pageSized = $rect.Width -ge 200 -and $rect.Height -ge 80
-                    $scrolledAway = $offscreen -or $rect.Y -lt -100
-                    if (($pageSized -and -not $offscreen) -or ($AllowOffscreen -and $scrolledAway)) {
-                        $large++
-                        $parent = Get-SisterParentElement $current
-                        if ($null -ne $parent -and $parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
-                            try {
-                                $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-                                $text = $pattern.RangeFromChild($current).GetText(1024)
-                                if ($text.Contains($Needle) -and -not $text.Contains($Exclude)) {
-                                    $script:SisterPdfGroupScan = "scanned=$scanned groups=$groups large=$large picked=group"
-                                    $script:SisterPdfPageElement = $current
-                                    return $current
-                                }
-                            } catch {
-                                $errors++
-                            }
-                        }
-                    }
-                }
-            } catch {}
+            $hit = Test-SisterPdfPageGroup $current $Needle $Exclude ([bool]$AllowOffscreen) ([ref]$groups) ([ref]$large) ([ref]$errors)
+            if ($null -ne $hit) {
+                $script:SisterPdfGroupScan = "scanned=$scanned groups=$groups large=$large picked=group"
+                $script:SisterPdfPageElement = $hit
+                return $hit
+            }
             $child = Get-SisterFirstChild $current
             while ($null -ne $child) {
                 $queue.Enqueue($child)
