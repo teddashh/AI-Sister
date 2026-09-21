@@ -68,54 +68,67 @@ function Get-SisterPdfPage {
         return $null
     }
 }
-function Get-SisterPdfTextDocument($from) {
-    if ($null -eq $from) { return $null }
-    try {
-        if ($from.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $from.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
-            return $from
-        }
-        if ($from.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
-            $parent = Get-SisterParentElement $from
-            if ($null -ne $parent -and $parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
-                return $parent
-            }
-        }
-        return Get-SisterAncestorTextDocument $from
-    } catch {
-        return $null
-    }
-}
 function Find-SisterPdfPageGroup {
-    param($Doc, [string]$Needle)
+    param($Root, [string]$Needle, [string]$Exclude)
+    $script:SisterPdfGroupScan = 'scanned=0 picked=none'
+    if ($null -eq $Root) { return $null }
     try {
-        $pattern = $Doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-        $condition = New-Object System.Windows.Automation.PropertyCondition(
+        $documentType = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Document
+        )
+        $groupType = New-Object System.Windows.Automation.PropertyCondition(
             [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
             [System.Windows.Automation.ControlType]::Group
         )
-        foreach ($scope in @([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.TreeScope]::Descendants)) {
-            foreach ($group in @($Doc.FindAll($scope, $condition))) {
-                try {
-                    $text = $pattern.RangeFromChild($group).GetText(1024)
-                    if ($text.Contains($Needle) -and -not [bool]$group.Current.IsOffscreen) {
-                        return $group
-                    }
-                } catch {}
-            }
+        $documents = @()
+        if ($Root.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document) {
+            $documents += $Root
         }
-    } catch {}
+        $documents += @($Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $documentType))
+        $scanned = 0
+        foreach ($doc in $documents) {
+            try {
+                if (-not $doc.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) { continue }
+                $pattern = $doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                foreach ($group in @($doc.FindAll([System.Windows.Automation.TreeScope]::Descendants, $groupType))) {
+                    $scanned++
+                    try {
+                        $text = $pattern.RangeFromChild($group).GetText(1024)
+                        if ($text.Contains($Needle) -and -not $text.Contains($Exclude) -and -not [bool]$group.Current.IsOffscreen) {
+                            $script:SisterPdfGroupScan = "scanned=$scanned picked=group"
+                            return $group
+                        }
+                    } catch {}
+                }
+            } catch {}
+        }
+        $script:SisterPdfGroupScan = "scanned=$scanned picked=none"
+    } catch {
+        $script:SisterPdfGroupScan = 'error'
+    }
     return $null
 }
 function Invoke-SisterPdfFirstPageGroupFocus {
+    param([IntPtr]$Hwnd)
     try {
         $page = Get-SisterPdfPage
-        if ($null -ne $page -and $page.Kind -eq 'Group' -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Offscreen) {
+        if ($null -ne $page -and $page.Kind -eq 'Group' -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND') -and -not $page.Offscreen) {
             return
         }
-        $doc = Get-SisterPdfTextDocument (Get-SisterFocusedElement)
-        if ($null -eq $doc) { return }
-        $group = Find-SisterPdfPageGroup -Doc $doc -Needle 'PDF-FIRST'
+        $root = $null
+        if ($Hwnd -ne [IntPtr]::Zero) {
+            try { $root = [System.Windows.Automation.AutomationElement]::FromHandle($Hwnd) } catch {}
+        }
+        if ($null -eq $root) { $root = Get-SisterFocusedElement }
+        $group = Find-SisterPdfPageGroup -Root $root -Needle 'PDF-FIRST' -Exclude 'PDF-SECOND'
         if ($null -eq $group) { return }
+        try {
+            $rect = $group.Current.BoundingRectangle
+            if ($rect.Width -gt 1 -and $rect.Height -gt 1) {
+                Invoke-SisterViewportClick ([int]($rect.X + $rect.Width / 2)) ([int]($rect.Y + $rect.Height / 2))
+            }
+        } catch {}
         $group.SetFocus() | Out-Null
     } catch {}
 }
@@ -186,6 +199,7 @@ function Invoke-SisterViewportClick {
     [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
     [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 }
+$script:SisterPdfGroupScan = 'unscanned'
 $browser = $null
 $backdrop = $null
 . (Join-Path $PSScriptRoot 'uia-backdrop.ps1')
@@ -306,7 +320,7 @@ window.addEventListener('keydown', event => {
                 [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'activating PDF viewport')
                 Invoke-SisterViewportClick 400 350
                 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
-                Invoke-SisterPdfFirstPageGroupFocus
+                Invoke-SisterPdfFirstPageGroupFocus -Hwnd $hwnd
                 $acted = $true
             } else {
                 switch ($mode) {
@@ -337,9 +351,9 @@ window.addEventListener('keydown', event => {
             # the wrong PDF page. Do not poke a document that is already the
             # provider we want while its text pattern is still filling in.
             if ($Pdf -and $mode -eq 'top') {
-                Invoke-SisterPdfFirstPageGroupFocus
+                Invoke-SisterPdfFirstPageGroupFocus -Hwnd $hwnd
                 $page = Get-SisterPdfPage
-                if ($null -eq $page -or $page.Kind -ne 'Group') {
+                if ($null -eq $page -or $page.Kind -ne 'Group' -or $page.Scope.Contains('PDF-SECOND')) {
                     [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'PDF focus is not a page group; activating again')
                     $sent = ''
                     continue
@@ -357,10 +371,11 @@ window.addEventListener('keydown', event => {
         if ($Pdf -and $mode -ne 'address') {
             [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading direct PDF document')
             if ($mode -eq 'top') {
-                Invoke-SisterPdfFirstPageGroupFocus
+                Invoke-SisterPdfFirstPageGroupFocus -Hwnd $hwnd
             }
             $page = Get-SisterPdfPage
             $ancestors = @(Get-SisterLivePdfVisible)
+            $extra += "group-scan=$script:SisterPdfGroupScan"
             if ($null -ne $page) {
                 $extra += "focused-page kind=$($page.Kind) scope=[$($page.Scope)] visible=[$($page.Visible)] offscreen=$($page.Offscreen) top=$($page.Top)"
                 $extra += (@($ancestors | ForEach-Object { "ancestor$($_.Depth) offscreen=$($_.Offscreen) visible=[$($_.Visible)]" }))
@@ -373,7 +388,7 @@ window.addEventListener('keydown', event => {
                         ($null -ne $live) -or ($page.Top -lt -100)
                     )
                 } else {
-                    $ready = $page.Kind -eq 'Group' -and -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and $page.Visible.Contains('PDF-FIRST')
+                    $ready = $page.Kind -eq 'Group' -and -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND') -and $page.Visible.Contains('PDF-FIRST')
                 }
             } else {
                 $extra += 'focused-page=none'
