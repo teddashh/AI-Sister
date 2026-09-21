@@ -90,19 +90,31 @@ function Find-SisterPdfPageGroup {
         $queue = New-Object System.Collections.Queue
         foreach ($seed in $seeds) { $queue.Enqueue($seed) }
         $scanned = 0
-        $max = 64
+        $groups = 0
+        $large = 0
+        $errors = 0
+        $max = 128
         while ($queue.Count -gt 0 -and $scanned -lt $max) {
             $current = $queue.Dequeue()
             $scanned++
             try {
                 if ($current.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
-                    $parent = Get-SisterParentElement $current
-                    if ($null -ne $parent -and $parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
-                        $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-                        $text = $pattern.RangeFromChild($current).GetText(1024)
-                        if ($text.Contains($Needle) -and -not $text.Contains($Exclude) -and -not [bool]$current.Current.IsOffscreen) {
-                            $script:SisterPdfGroupScan = "scanned=$scanned picked=group"
-                            return $current
+                    $groups++
+                    $rect = $current.Current.BoundingRectangle
+                    if ($rect.Width -ge 200 -and $rect.Height -ge 80 -and -not [bool]$current.Current.IsOffscreen) {
+                        $large++
+                        $parent = Get-SisterParentElement $current
+                        if ($null -ne $parent -and $parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
+                            try {
+                                $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                                $text = $pattern.RangeFromChild($current).GetText(1024)
+                                if ($text.Contains($Needle) -and -not $text.Contains($Exclude)) {
+                                    $script:SisterPdfGroupScan = "scanned=$scanned groups=$groups large=$large picked=group"
+                                    return $current
+                                }
+                            } catch {
+                                $errors++
+                            }
                         }
                     }
                 }
@@ -113,7 +125,7 @@ function Find-SisterPdfPageGroup {
                 $child = Get-SisterNextSibling $child
             }
         }
-        $script:SisterPdfGroupScan = "scanned=$scanned picked=none queued=$($queue.Count)"
+        $script:SisterPdfGroupScan = "scanned=$scanned groups=$groups large=$large errors=$errors picked=none queued=$($queue.Count)"
     } catch {
         $script:SisterPdfGroupScan = 'error'
     }
@@ -368,10 +380,6 @@ window.addEventListener('keydown', event => {
         $extra = @()
         if ($Pdf -and $mode -ne 'address') {
             [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading direct PDF document')
-            Write-SisterUiaMetadata -Hwnd $hwnd -Extra @("group-scan=before $($script:SisterPdfGroupScan)")
-            if ($mode -eq 'top') {
-                Invoke-SisterPdfFirstPageGroupFocus
-            }
             $page = Get-SisterPdfPage
             $ancestors = @(Get-SisterLivePdfVisible)
             $extra += "group-scan=$script:SisterPdfGroupScan"
