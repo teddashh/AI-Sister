@@ -58,6 +58,7 @@ function Get-SisterPdfPage {
             $visible
         }
         return [pscustomobject]@{
+            Kind = if ($type -eq [System.Windows.Automation.ControlType]::Group) { 'Group' } else { 'Document' }
             Offscreen = [bool]$focused.Current.IsOffscreen
             Scope = $scope
             Visible = $visible
@@ -66,6 +67,57 @@ function Get-SisterPdfPage {
     } catch {
         return $null
     }
+}
+function Get-SisterPdfTextDocument($from) {
+    if ($null -eq $from) { return $null }
+    try {
+        if ($from.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $from.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
+            return $from
+        }
+        if ($from.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
+            $parent = Get-SisterParentElement $from
+            if ($null -ne $parent -and $parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
+                return $parent
+            }
+        }
+        return Get-SisterAncestorTextDocument $from
+    } catch {
+        return $null
+    }
+}
+function Find-SisterPdfPageGroup {
+    param($Doc, [string]$Needle)
+    try {
+        $pattern = $Doc.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+        $condition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Group
+        )
+        foreach ($scope in @([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.TreeScope]::Descendants)) {
+            foreach ($group in @($Doc.FindAll($scope, $condition))) {
+                try {
+                    $text = $pattern.RangeFromChild($group).GetText(1024)
+                    if ($text.Contains($Needle) -and -not [bool]$group.Current.IsOffscreen) {
+                        return $group
+                    }
+                } catch {}
+            }
+        }
+    } catch {}
+    return $null
+}
+function Invoke-SisterPdfFirstPageGroupFocus {
+    try {
+        $page = Get-SisterPdfPage
+        if ($null -ne $page -and $page.Kind -eq 'Group' -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Offscreen) {
+            return
+        }
+        $doc = Get-SisterPdfTextDocument (Get-SisterFocusedElement)
+        if ($null -eq $doc) { return }
+        $group = Find-SisterPdfPageGroup -Doc $doc -Needle 'PDF-FIRST'
+        if ($null -eq $group) { return }
+        $group.SetFocus() | Out-Null
+    } catch {}
 }
 function Get-SisterParentElement($node) {
     if ($null -eq $node) { return $null }
@@ -254,6 +306,7 @@ window.addEventListener('keydown', event => {
                 [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'activating PDF viewport')
                 Invoke-SisterViewportClick 400 350
                 [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
+                Invoke-SisterPdfFirstPageGroupFocus
                 $acted = $true
             } else {
                 switch ($mode) {
@@ -284,8 +337,9 @@ window.addEventListener('keydown', event => {
             # the wrong PDF page. Do not poke a document that is already the
             # provider we want while its text pattern is still filling in.
             if ($Pdf -and $mode -eq 'top') {
+                Invoke-SisterPdfFirstPageGroupFocus
                 $page = Get-SisterPdfPage
-                if ($null -eq $page) {
+                if ($null -eq $page -or $page.Kind -ne 'Group') {
                     [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'PDF focus is not a page group; activating again')
                     $sent = ''
                     continue
@@ -302,23 +356,24 @@ window.addEventListener('keydown', event => {
         $extra = @()
         if ($Pdf -and $mode -ne 'address') {
             [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading direct PDF document')
+            if ($mode -eq 'top') {
+                Invoke-SisterPdfFirstPageGroupFocus
+            }
             $page = Get-SisterPdfPage
             $ancestors = @(Get-SisterLivePdfVisible)
             if ($null -ne $page) {
-                $extra += "focused-page=[$($page.Scope)] visible=[$($page.Visible)] offscreen=$($page.Offscreen) top=$($page.Top)"
+                $extra += "focused-page kind=$($page.Kind) scope=[$($page.Scope)] visible=[$($page.Visible)] offscreen=$($page.Offscreen) top=$($page.Top)"
                 $extra += (@($ancestors | ForEach-Object { "ancestor$($_.Depth) offscreen=$($_.Offscreen) visible=[$($_.Visible)]" }))
                 if ($mode -eq 'bottom') {
                     $live = $ancestors | Where-Object { $_.Visible.Contains('PDF-SECOND') -and -not $_.Visible.Contains('PDF-FIRST') } | Select-Object -First 1
                     # Native CI leaves TextPattern visible-ranges on the old page
                     # (empty or still PDF-FIRST). The first-page Group moving fully
                     # above the viewport is the scroll; product UIA still refuses it.
-                    $ready = $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and (
+                    $ready = $page.Kind -eq 'Group' -and $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and (
                         ($null -ne $live) -or ($page.Top -lt -100)
                     )
                 } else {
-                    $ready = -not $page.Offscreen -and (
-                        $page.Scope.Contains('PDF-FIRST') -or $page.Visible.Contains('PDF-FIRST')
-                    )
+                    $ready = $page.Kind -eq 'Group' -and -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and $page.Visible.Contains('PDF-FIRST')
                 }
             } else {
                 $extra += 'focused-page=none'

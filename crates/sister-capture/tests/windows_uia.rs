@@ -167,7 +167,16 @@ fn text(blocks: &[AssistiveBlock], role: &str) -> String {
     assert!(
         blocks
             .iter()
-            .all(|block| block.role == role && block.bbox.is_none())
+            .all(|block| block.role == role && block.bbox.is_none()),
+        "assistive blocks for {role}: {:?}",
+        blocks
+            .iter()
+            .map(|block| (
+                block.role.as_str(),
+                block.bbox,
+                block.text.chars().take(48).collect::<String>()
+            ))
+            .collect::<Vec<_>>(),
     );
     blocks
         .iter()
