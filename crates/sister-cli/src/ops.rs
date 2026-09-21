@@ -13104,6 +13104,22 @@ pub mod diagnose {
     const BANNER: &str = "AI-Sister 診斷報告";
 
     pub fn run(data_dir: &Path, out: Option<&Path>) -> Result<()> {
+        // Windows 主執行緒只有 1MB。debug 版把有稽核列的報告組出來會超過。
+        // 報告內容不變，只是換一條比較大的堆疊來組。
+        let data_dir = data_dir.to_path_buf();
+        let out = out.map(Path::to_path_buf);
+        let built = std::thread::Builder::new()
+            .name("sister-diagnose".to_string())
+            .stack_size(4 * 1024 * 1024)
+            .spawn(move || diagnose_report(&data_dir, out.as_deref()))
+            .context("開不了診斷執行緒")?;
+        match built.join() {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    fn diagnose_report(data_dir: &Path, out: Option<&Path>) -> Result<()> {
         let out = out.map_or_else(
             || PathBuf::from(report::file_name(sister_core::now_ms())),
             Path::to_path_buf,
