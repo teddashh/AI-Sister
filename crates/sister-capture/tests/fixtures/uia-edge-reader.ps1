@@ -139,6 +139,12 @@ function Invoke-SisterPdfFirstPageGroupFocus {
         }
         $group = Find-SisterPdfPageGroup -Start (Get-SisterFocusedElement) -Needle 'PDF-FIRST' -Exclude 'PDF-SECOND'
         if ($null -eq $group) { return }
+        try {
+            $rect = $group.Current.BoundingRectangle
+            if ($rect.Width -gt 1 -and $rect.Height -gt 1) {
+                Invoke-SisterViewportClick ([int]($rect.X + ($rect.Width / 2))) ([int]($rect.Y + ($rect.Height / 2)))
+            }
+        } catch {}
         $group.SetFocus() | Out-Null
     } catch {}
 }
@@ -362,10 +368,15 @@ window.addEventListener('keydown', event => {
             # provider we want while its text pattern is still filling in.
             if ($Pdf -and $mode -eq 'top') {
                 Invoke-SisterPdfFirstPageGroupFocus
+                $activated = [DateTime]::UtcNow
                 $page = Get-SisterPdfPage
                 if ($null -eq $page -or $page.Kind -ne 'Group' -or $page.Scope.Contains('PDF-SECOND')) {
-                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'PDF focus is not a page group; activating again')
-                    $sent = ''
+                    # Ctrl+Home puts focus back on the TextPattern Document.
+                    # Once a page Group is found, only click that Group again.
+                    if ($script:SisterPdfGroupScan -notlike '*picked=group*') {
+                        [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'PDF focus is not a page group; activating again')
+                        $sent = ''
+                    }
                     continue
                 }
             } elseif ($mode -in @('top', 'bottom') -and -not $Pdf) {
