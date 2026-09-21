@@ -3,10 +3,12 @@
 # PRIVACY.md 現在守的是一條**能力邊界**：
 #
 #     畫面不離機；root 預設與 recorder/core/brain/hands 沒有 HTTP client。desktop
-#     只有三個窄例外：`sister-assets[download]` 的 fixed Persona GET、
+#     只有四個窄例外：`sister-assets[download]` 的 fixed Persona GET、
 #     `sister-tts[azure]` 在現行第四張同意、enabled 設定下只替最新新答案或
-#     trusted 手動重播走 fixed Azure POST，以及 `sister-tts[local]` 對
-#     127.0.0.1:8231 的 std TCP GET /health 與 POST /tts（無 ureq、無 proxy）。
+#     trusted 手動重播走 fixed Azure POST、`sister-tts[local]` 對
+#     127.0.0.1:8231 的 std TCP GET /health 與 POST /tts（無 ureq、無 proxy），
+#     以及 `sister-usage[public-status]` 在使用者明確開啟後對 LimitReset
+#     固定 status/latest 的 GET。
 #
 # 這支腳本讓那條界線**由 CI 保證，而不是由記性保證**。
 # 它不替使用者設定的外部 CLI 背書：簽了 cloud-reading 後，OCR 原文會交給
@@ -83,7 +85,7 @@ for manifest in "${MANIFESTS[@]}"; do
             if [ -n "$network" ]; then
                 echo "✗ sister.exe／root workspace 的相依樹出現了 HTTP client（$label）："
                 echo "$network" | sed 's/^/    /'
-                echo "  Persona／Azure transport 只能存在 desktop 的兩個窄 feature 路徑。"
+                echo "  Persona／Azure／公開看板 transport 只能存在 desktop 的三個窄 feature 路徑。"
                 fail=1
             fi
         else
@@ -97,17 +99,22 @@ for manifest in "${MANIFESTS[@]}"; do
     done
 done
 
-# 允許 client 不等於讓它散進整個 desktop。manifest 與 source 都要證明兩條反向
-# 路徑恰好是 ureq → sister-assets[download] → sister-desktop，與
-# ureq → sister-tts[azure] → sister-desktop；core、capture、hands 與 renderer
+# 允許 client 不等於讓它散進整個 desktop。manifest 與 source 都要證明三條反向
+# 路徑恰好是 ureq → sister-assets[download] → sister-desktop，
+# ureq → sister-tts[azure] → sister-desktop，與
+# ureq → sister-usage[public-status] → sister-desktop；core、capture、hands 與 renderer
 # 都拿不到 request builder。
-echo "▶ 檢查 Persona GET 與 Azure POST 的 crate／feature 邊界"
+echo "▶ 檢查 Persona GET、Azure POST 與公開看板 GET 的 crate／feature 邊界"
 grep -qF 'sister-assets = { path = "crates/sister-assets", default-features = false }' Cargo.toml || {
     echo "✗ root workspace 沒有把 sister-assets 的預設 feature 關掉"
     fail=1
 }
 grep -qF 'sister-tts = { path = "crates/sister-tts", default-features = false }' Cargo.toml || {
     echo "✗ root workspace 沒有把 sister-tts 的預設 feature 關掉"
+    fail=1
+}
+grep -qF 'sister-usage = { path = "crates/sister-usage", default-features = false }' Cargo.toml || {
+    echo "✗ root workspace 沒有把 sister-usage 的預設 feature 關掉"
     fail=1
 }
 grep -qF 'download = ["dep:ureq"]' crates/sister-assets/Cargo.toml || {
@@ -130,14 +137,23 @@ grep -qF 'ureq = { workspace = true, optional = true }' crates/sister-tts/Cargo.
     echo "✗ ureq 不再是 sister-tts 的 optional dependency"
     fail=1
 }
+grep -qF 'public-status = ["dep:ureq"]' crates/sister-usage/Cargo.toml || {
+    echo "✗ sister-usage 的 public-status feature 不再是唯一 ureq 開關"
+    fail=1
+}
+grep -qF 'ureq = { workspace = true, optional = true }' crates/sister-usage/Cargo.toml || {
+    echo "✗ ureq 不再是 sister-usage 的 optional dependency"
+    fail=1
+}
 ureq_manifest_lines=$(grep -rhE '^[[:space:]]*ureq[[:space:]]*=' . \
     --include='Cargo.toml' --exclude-dir=target --exclude-dir=.git | sort)
 expected_ureq_manifest_lines=$(printf '%s\n' \
     'ureq = { version = "=3.4.1", default-features = false, features = ["native-tls"] }' \
     'ureq = { workspace = true, optional = true }' \
+    'ureq = { workspace = true, optional = true }' \
     'ureq = { workspace = true, optional = true }' | sort)
 if [ "$ureq_manifest_lines" != "$expected_ureq_manifest_lines" ]; then
-    echo "✗ ureq 的 Cargo manifest 宣告不再只有 workspace pin 與兩個窄 optional dependency："
+    echo "✗ ureq 的 Cargo manifest 宣告不再只有 workspace pin 與三個窄 optional dependency："
     printf '%s\n' "${ureq_manifest_lines:-（沒有找到）}" | sed 's/^/    /'
     fail=1
 fi
@@ -149,6 +165,10 @@ grep -qF 'sister-tts = { path = "../../../crates/sister-tts", features = ["azure
     echo "✗ desktop 沒有經 sister-tts[azure, local] 取得 Azure 與 loopback TTS"
     fail=1
 }
+grep -qF 'sister-usage = { path = "../../../crates/sister-usage", features = ["public-status"] }' apps/desktop/src-tauri/Cargo.toml || {
+    echo "✗ desktop 沒有經 sister-usage[public-status] 取得公開看板 transport"
+    fail=1
+}
 
 rc=0
 ureq_source=$(grep -rnE '\bureq::' crates/ apps/ --include='*.rs') || rc=$?
@@ -157,9 +177,9 @@ if [ "$rc" -gt 1 ]; then
     fail=1
 fi
 unexpected_ureq=$(printf '%s\n' "$ureq_source" \
-    | grep -vE '^crates/sister-(assets/src/download|tts/src/native)\.rs:' || true)
+    | grep -vE '^crates/sister-(assets/src/download|tts/src/native|usage/src/native)\.rs:' || true)
 if [ -z "$ureq_source" ] || [ -n "$unexpected_ureq" ]; then
-    echo "✗ ureq source 不只存在於 fixed Persona GET 與 Azure POST transport："
+    echo "✗ ureq source 不只存在於 fixed Persona GET、Azure POST 與公開看板 GET transport："
     printf '%s\n' "${unexpected_ureq:-（兩個 transport 裡都找不到）}" | sed 's/^/    /'
     fail=1
 fi
@@ -206,9 +226,9 @@ for target in "" "x86_64-pc-windows-msvc"; do
     fi
     reverse=$(cargo "${args[@]}" 2>/dev/null \
         | sed -E 's/^([0-9]+)([^ ]+).*/\1\2/')
-    expected=$(printf '%s\n' 0ureq 1sister-assets 2sister-desktop 1sister-tts 2sister-desktop)
+    expected=$(printf '%s\n' 0ureq 1sister-assets 2sister-desktop 1sister-tts 2sister-desktop 1sister-usage 2sister-desktop)
     if [ "$reverse" != "$expected" ]; then
-        echo "✗ ureq 的 exact 反向相依路徑不是兩個窄 crate → sister-desktop（$label）："
+        echo "✗ ureq 的 exact 反向相依路徑不是三個窄 crate → sister-desktop（$label）："
         printf '%s\n' "$reverse" | sed 's/^/    /'
         fail=1
     fi

@@ -11,13 +11,14 @@ AI-Sister 每一拍做完後預設等 400ms 再看；沒有人動鍵盤滑鼠時
 
 ## 三件事
 
-**一、畫面不離開這台機器；內建網路能力只有列得出名字的兩條。**
+**一、畫面不離開這台機器；內建網路能力只有列得出名字的三條。**
 沒有帳號、沒有遙測、沒有崩潰回報。`sister.exe` 與 recorder／core／capture／brain／
 hands 沒有 HTTP client 或監聽埠；WebView 也只走 Tauri IPC，CSP 不開遠端來源。desktop
-只有兩條內建 outbound：你看完揭露、明確按下後取得 Persona 固定公開素材的 GET；
-以及 alpha.110 預設關閉、簽獨立同意並明確啟用後，只替最新新答案或手動重播送正文的 TTS POST。
+只有三條內建 outbound：你看完揭露、明確按下後取得 Persona 固定公開素材的 GET；
+alpha.110 預設關閉、簽獨立同意並明確啟用後，只替最新新答案或手動重播送正文的 TTS POST；
+以及預設關閉、設定頁明確開啟後，對 LimitReset 固定 `status`／`latest` 的公開重置看板 GET。
 這不是一句「大致上本機」：`crates/sister-assets` 預設不開 `download`，`crates/sister-tts`
-預設不開 `azure`，只有 desktop 明確啟用；CI 逐棵相依樹與 renderer/CSP 檢查這兩條邊界
+預設不開 `azure`，`crates/sister-usage` 預設不開 `public-status`，只有 desktop 明確啟用；CI 逐棵相依樹與 renderer/CSP 檢查這三條邊界
 （`scripts/check-no-network.sh`），不是靠我們記得。
 
 供 L2/L3 解讀、背景理解、一次歷史補讀與 S1 問答成句的螢幕 **OCR 文字原文**（不是畫面）

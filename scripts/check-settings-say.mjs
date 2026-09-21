@@ -483,6 +483,37 @@ async function open({
             azureState.ready =
               azureState.enabled && azureState.region !== null && azureState.consented === true;
             return { ...azureState };
+          case "usage_status_read":
+            return {
+              generation: 0,
+              config_readable: true,
+              enabled: false,
+              reaction_enabled: false,
+              local_sessions_enabled: false,
+              local_sessions_dir: "",
+              stopped: false,
+              served_from: "disabled",
+              fetch_error: null,
+              local_error: null,
+              local_files_read: 0,
+              local_skipped_auth: 0,
+              local_products: [],
+              local_unknown_reason: "剩餘 token 未知。",
+              board_live: false,
+              board_updated_at: null,
+              products: [],
+              attribution: "LimitReset（limitreset.net），CC BY 4.0",
+              source_name: "LimitReset",
+              source_url: "https://limitreset.net/",
+              license: "CC BY 4.0",
+              endpoint: "https://limitreset.net/api/v1/status",
+              host: "limitreset.net",
+              last_success_unix_ms: null,
+              config_error: null,
+            };
+          case "usage_public_status_set":
+          case "usage_public_status_refresh":
+            return null;
           case "azure_tts_key_delete":
             if (onAzureKeyDelete) {
               return onAzureKeyDelete(

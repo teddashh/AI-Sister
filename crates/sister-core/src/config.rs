@@ -350,6 +350,9 @@ pub struct ShellConfig {
     /// 目的地由 sister-tts 釘死在 127.0.0.1:8231。預設關閉；服務未就緒時
     /// desktop 不得把它畫成可用開關。
     pub local_tts: LocalTtsConfig,
+    /// 本機 session 用量與公開重置看板。預設全關；開啟看板才准 desktop 的
+    /// 固定 LimitReset GET。本機讀取只吃使用者指定的絕對目錄，不搜家目錄。
+    pub usage: UsageConfig,
 }
 
 impl Default for ShellConfig {
@@ -363,6 +366,7 @@ impl Default for ShellConfig {
             persona: PersonaConfig::default(),
             azure_tts: AzureTtsConfig::default(),
             local_tts: LocalTtsConfig::default(),
+            usage: UsageConfig::default(),
         }
     }
 }
@@ -447,6 +451,70 @@ impl Default for AzureTtsConfig {
             region: None,
             voice: AzureTtsVoice::HsiaoChen,
         }
+    }
+}
+
+/// 本機用量與公開重置看板。兩個開關彼此獨立；開看板不會打開本機讀取。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UsageConfig {
+    pub public_status_enabled: bool,
+    pub reset_reaction: bool,
+    pub local_sessions_enabled: bool,
+    /// 空字串 = 還沒指定。必須是絕對路徑才會讀；程式不補 `~` 或家目錄。
+    pub local_sessions_dir: String,
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self {
+            public_status_enabled: false,
+            reset_reaction: false,
+            local_sessions_enabled: false,
+            local_sessions_dir: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UsagePublicStatusEnabled(bool);
+
+impl UsagePublicStatusEnabled {
+    pub const fn new(value: bool) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> bool {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UsageResetReactionEnabled(bool);
+
+impl UsageResetReactionEnabled {
+    pub const fn new(value: bool) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> bool {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UsageLocalSessionsEnabled(bool);
+
+impl UsageLocalSessionsEnabled {
+    pub const fn new(value: bool) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> bool {
+        self.0
     }
 }
 
@@ -1322,6 +1390,22 @@ impl Config {
     pub fn set_local_tts_from_page(&mut self, enabled: LocalTtsEnabled) {
         self.shell.local_tts = LocalTtsConfig {
             enabled: enabled.get(),
+        };
+    }
+
+    /// 用量卡獨立立即存檔，不重建整份 `ShellConfig`。
+    pub fn set_usage_from_page(
+        &mut self,
+        public_status: UsagePublicStatusEnabled,
+        reset_reaction: UsageResetReactionEnabled,
+        local_sessions: UsageLocalSessionsEnabled,
+        local_sessions_dir: String,
+    ) {
+        self.shell.usage = UsageConfig {
+            public_status_enabled: public_status.get(),
+            reset_reaction: reset_reaction.get(),
+            local_sessions_enabled: local_sessions.get(),
+            local_sessions_dir,
         };
     }
 }
@@ -2431,6 +2515,34 @@ mod tests {
         assert_eq!(old.shell.local_tts, LocalTtsConfig::default());
         assert!(!old.shell.local_tts.enabled);
         assert!(!old.shell.persona.voice_enabled);
+        assert_eq!(old.shell.usage, UsageConfig::default());
+        assert!(!old.shell.usage.public_status_enabled);
+        assert!(!old.shell.usage.reset_reaction);
+        assert!(!old.shell.usage.local_sessions_enabled);
+        assert!(old.shell.usage.local_sessions_dir.is_empty());
+    }
+
+    #[test]
+    fn usage_config_round_trips_and_stays_off_by_default() {
+        let mut config = Config::default();
+        config.set_usage_from_page(
+            UsagePublicStatusEnabled::new(true),
+            UsageResetReactionEnabled::new(true),
+            UsageLocalSessionsEnabled::new(true),
+            "/tmp/synthetic-sessions".to_owned(),
+        );
+        let text = toml::to_string_pretty(&config).expect("serialize usage");
+        let back: Config = toml::from_str(&text).expect("deserialize usage");
+        assert!(back.shell.usage.public_status_enabled);
+        assert!(back.shell.usage.reset_reaction);
+        assert_eq!(
+            back.shell.usage.local_sessions_dir,
+            "/tmp/synthetic-sessions"
+        );
+        assert!(
+            toml::from_str::<Config>("[shell.usage]\npublic_status_enabled = true\nunknown = 1\n")
+                .is_err()
+        );
     }
 
     #[test]

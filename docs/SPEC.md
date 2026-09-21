@@ -452,7 +452,8 @@ claude code / codex / grok / gemini cli。所以 L2/L3 那個腦要接的第一�
 recorder／core／capture／brain／hands 繼續禁 HTTP client 與本機推論引擎，沒有
 例外。desktop 的 Persona 下載能力收在 root workspace 的 `crates/sister-assets`：預設
 feature 集合沒有 `download`；Azure 答案朗讀收在 `crates/sister-tts`：預設 feature
-集合沒有 `azure`。只有 desktop 明確啟用這兩個窄 transport；它們都不把 HTTP 能力
+集合沒有 `azure`；公開重置看板收在 `crates/sister-usage`：預設 feature 集合沒有
+`public-status`。只有 desktop 明確啟用這三個窄 transport；它們都不把 HTTP 能力
 交給 brain，Azure TTS 也不是模型接入或 OCR 出境路徑。
 
 - **alpha.123 的設定入口**：設定頁固定列 Claude Code、Codex、Gemini CLI、Grok CLI

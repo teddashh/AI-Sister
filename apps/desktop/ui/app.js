@@ -40,6 +40,7 @@ const avatar = document.querySelector("[data-avatar]");
 const personaPortrait = document.querySelector("[data-persona-portrait]");
 const personaReel = document.querySelector("[data-persona-reel]");
 const personaLine = document.querySelector("[data-persona-line]");
+const usageResetLine = document.querySelector("[data-usage-reset-line]");
 const personaAudio = document.querySelector("[data-persona-audio]");
 const stateLine = document.querySelector("[data-state-line]");
 const askInput = document.querySelector("[data-ask-input]");
@@ -3986,6 +3987,10 @@ function setMasterStopPhase(next) {
     // 而她其實已經停了。
     stopThinking();
     stopPersonaMedia();
+    if (usageResetLine) {
+      usageResetLine.textContent = "";
+      usageResetLine.hidden = true;
+    }
     if (state === "thinking") state = "idle";
     // Gatekeeper 是 brain 的產品寫入／主動說話面。外部 CLI stop 沒有 renderer
     // event 時由 poll 補上；一旦觀察到非 clear，舊 poll 失效、卡片立即撤掉。
@@ -4389,6 +4394,15 @@ globalThis.__TAURI__?.event
   // 開場 read 和 listener 真正 ready 中間，CLI 可能剛好切了 durable latch；那一個
   // event 沒有 listener 可收。註冊完成後重讀一次磁碟，才封得住這個缺口。
   ?.then?.(() => readMasterStopState())
+  ?.catch?.(() => {});
+
+globalThis.__TAURI__?.event
+  ?.listen?.("usage-reset-reaction", (event) => {
+    const line = event?.payload?.line;
+    if (typeof line !== "string" || line === "" || !usageResetLine) return;
+    usageResetLine.textContent = line;
+    usageResetLine.hidden = false;
+  })
   ?.catch?.(() => {});
 
 globalThis.__TAURI__?.event

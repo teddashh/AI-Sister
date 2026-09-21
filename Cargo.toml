@@ -20,6 +20,7 @@ sister-cli = { path = "crates/sister-cli" }
 sister-hands = { path = "crates/sister-hands" }
 sister-assets = { path = "crates/sister-assets", default-features = false }
 sister-tts = { path = "crates/sister-tts", default-features = false }
+sister-usage = { path = "crates/sister-usage", default-features = false }
 
 anyhow = "1"
 thiserror = "2"

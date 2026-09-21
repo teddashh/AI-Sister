@@ -282,6 +282,55 @@
         <p class="hint">這一區的設定各自立即儲存。</p>
       </section>
 
+      <section class="usage-status" data-usage-section>
+        <h2>用量與公開重置看板（選配）</h2>
+        <p class="hint">
+          預設關閉。本機用量只讀你指定的 session JSONL 目錄，不讀 auth、也不搜家目錄。
+          公開看板是 LimitReset 的全球產品重置紀錄，不是你的帳號額度。
+        </p>
+        <label class="check">
+          <input type="checkbox" data-usage-local-enabled />
+          <span>
+            讀本機 Codex／Claude session JSONL
+            <em>只讀這個絕對目錄裡的 *.jsonl。不會打開 auth 或憑證檔。</em>
+          </span>
+        </label>
+        <label class="field">
+          <span>Session JSONL 目錄（絕對路徑）</span>
+          <input
+            type="text"
+            data-usage-local-dir
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="例如 D:\synthetic-sessions"
+          />
+        </label>
+        <label class="check">
+          <input type="checkbox" data-usage-public-enabled />
+          <span>
+            向 LimitReset 查詢公開重置看板
+            <em>只對固定網址做 HTTPS GET，不帶帳號、cookie、query 或 body。</em>
+          </span>
+        </label>
+        <label class="check">
+          <input type="checkbox" data-usage-reaction />
+          <span>
+            公開看板新確認一次重置時，角色說一句
+            <em>只在開啟看板後新出現且已驗證的重置才說；開機舊事件和預測都不會說。</em>
+          </span>
+        </label>
+        <p class="hint">固定 GET：<code data-usage-endpoint></code></p>
+        <p class="hint" data-usage-attribution></p>
+        <div class="azure-actions">
+          <button class="ghost" type="button" data-usage-refresh>重新查詢看板</button>
+        </div>
+        <p class="state" role="status" aria-live="polite" data-usage-state>
+          正在讀用量狀態…
+        </p>
+        <div class="usage-board" data-usage-board></div>
+        <p class="hint">這一區的設定各自立即儲存。</p>
+      </section>
+
       <!--
         這一格決定「她看到的螢幕文字會不會交給 CLI」——比排除規則更外面一層。
         排除規則決定她看得到什麼；沒填命令（或第二張同意書沒勾），那些字

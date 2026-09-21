@@ -47,6 +47,7 @@ mod platform_access;
 mod recorder_supervisor;
 #[cfg(any(windows, test))]
 mod single_instance;
+mod usage_status;
 
 use login_startup::{login_startup_read, login_startup_set};
 use master_stop_dispatch::{MasterStopAction, master_stop_action_for_menu_id, run_fifo};
@@ -222,6 +223,7 @@ struct Shell {
     /// forget／export／prune 三條刪除路就各要接一次，而且它自己會變成一個新
     /// 的隱私面。代價是重開機之後這本簿子是空的，而報告會把那句話印出來。
     diagnostics: Mutex<sister_core::diagnose::Notebook>,
+    usage: usage_status::Runtime,
     /// renderer 說「游標剛動了，現在就去看」。
     ///
     /// 和 `hit_solid` 是兩件事：那個是**算答案的材料**，這個是**該重算了的
@@ -1281,6 +1283,11 @@ fn dispatch_master_stop_menu(app: &tauri::AppHandle, menu_id: &str) {
     let Some(action) = master_stop_action_for_menu_id(menu_id) else {
         return;
     };
+    if matches!(action, MasterStopAction::Engage) {
+        let shell = app.state::<Shell>();
+        usage_status::stop_intent(&shell.usage);
+        let _ = app.emit("usage-status-changed", usage_status::read_view(&shell.usage, shell.data_dir.as_deref(), true));
+    }
     let data_dir = app.state::<Shell>().data_dir.clone();
     if master_stop_queue()
         .send(MasterStopJob {
@@ -5800,6 +5807,131 @@ fn config_path() -> Result<PathBuf, String> {
     sister_core::config::Config::default_path().ok_or_else(|| "找不到設定檔路徑".to_string())
 }
 
+fn usage_is_stopped(shell: &Shell) -> bool {
+    matches!(
+        master_stop_phase(shell.data_dir.as_deref()),
+        Some(
+            sister_hands::master_stop::State::Stopping
+                | sister_hands::master_stop::State::Stopped
+                | sister_hands::master_stop::State::Uncertain
+        )
+    )
+}
+
+fn start_usage_poll_thread(app: tauri::AppHandle) {
+    std::thread::Builder::new()
+        .name("usage-public-status-poll".into())
+        .spawn(move || loop {
+            std::thread::sleep(usage_status::poll_interval());
+            let Some(shell) = app.try_state::<Shell>() else {
+                continue;
+            };
+            let stopped = usage_is_stopped(&shell);
+            if stopped {
+                continue;
+            }
+            let Ok(path) = config_path() else {
+                continue;
+            };
+            let Ok(config) = sister_core::config::Config::load(&path) else {
+                continue;
+            };
+            if !config.shell.usage.public_status_enabled {
+                continue;
+            }
+            if !usage_status::due_for_poll(shell.data_dir.as_deref(), sister_core::now_ms()) {
+                continue;
+            }
+            let generation = shell.usage.generation.load(Ordering::Acquire);
+            let data_dir = shell.data_dir.clone();
+            let runtime_generation = generation;
+            drop(shell);
+            let app_clone = app.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                let Some(shell) = app_clone.try_state::<Shell>() else {
+                    return;
+                };
+                if let Ok((view, reaction)) = usage_status::refresh_blocking(
+                    &shell.usage,
+                    data_dir.as_deref(),
+                    usage_is_stopped(&shell),
+                    sister_usage::RefreshReason::Poll,
+                    runtime_generation,
+                ) {
+                    let _ = app_clone.emit("usage-status-changed", view);
+                    if let Some(reaction) = reaction {
+                        let _ = app_clone.emit("usage-reset-reaction", reaction);
+                    }
+                }
+            });
+        })
+        .ok();
+}
+
+#[tauri::command]
+fn usage_status_read(shell: tauri::State<'_, Shell>) -> usage_status::UsageStatusView {
+    usage_status::read_view(&shell.usage, shell.data_dir.as_deref(), usage_is_stopped(&shell))
+}
+
+#[tauri::command]
+fn usage_public_status_set(
+    enabled: sister_core::config::UsagePublicStatusEnabled,
+    reaction_enabled: sister_core::config::UsageResetReactionEnabled,
+    local_sessions_enabled: sister_core::config::UsageLocalSessionsEnabled,
+    local_sessions_dir: String,
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+) -> Result<usage_status::UsageStatusView, String> {
+    usage_status::stop_intent(&shell.usage);
+    usage_status::set_from_page(
+        enabled,
+        reaction_enabled,
+        local_sessions_enabled,
+        local_sessions_dir,
+    )?;
+    let stopped = usage_is_stopped(&shell);
+    if enabled.get() && !stopped {
+        let generation = shell.usage.generation.load(Ordering::Acquire);
+        let data_dir = shell.data_dir.clone();
+        let (view, reaction) = usage_status::refresh_blocking(
+            &shell.usage,
+            data_dir.as_deref(),
+            stopped,
+            sister_usage::RefreshReason::Enable,
+            generation,
+        )?;
+        let _ = app.emit("usage-status-changed", view.clone());
+        if let Some(reaction) = reaction {
+            let _ = app.emit("usage-reset-reaction", reaction);
+        }
+        return Ok(view);
+    }
+    let view = usage_status::read_view(&shell.usage, shell.data_dir.as_deref(), stopped);
+    let _ = app.emit("usage-status-changed", view.clone());
+    Ok(view)
+}
+
+#[tauri::command]
+fn usage_public_status_refresh(
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+) -> Result<usage_status::UsageStatusView, String> {
+    let stopped = usage_is_stopped(&shell);
+    let generation = shell.usage.generation.load(Ordering::Acquire);
+    let (view, reaction) = usage_status::refresh_blocking(
+        &shell.usage,
+        shell.data_dir.as_deref(),
+        stopped,
+        sister_usage::RefreshReason::Manual,
+        generation,
+    )?;
+    let _ = app.emit("usage-status-changed", view.clone());
+    if let Some(reaction) = reaction {
+        let _ = app.emit("usage-reset-reaction", reaction);
+    }
+    Ok(view)
+}
+
 #[tauri::command]
 fn settings_read() -> Result<Settings, String> {
     let path = config_path()?;
@@ -7549,6 +7681,7 @@ fn main() {
             azure_tts_admission: Arc::new(Mutex::new(())),
             azure_tts_transition: Arc::new(Mutex::new(())),
             local_tts: local_tts::Runtime::new(),
+            usage: usage_status::Runtime::new(),
             brain_cli_state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             answer_cli: Mutex::new(None),
             diagnostics: Mutex::new(sister_core::diagnose::Notebook::new()),
@@ -7601,6 +7734,9 @@ fn main() {
             local_tts::local_tts_config_set,
             local_tts::local_tts_cancel,
             local_tts::local_tts_speak,
+            usage_status_read,
+            usage_public_status_set,
+            usage_public_status_refresh,
             login_startup_read,
             login_startup_set,
             platform_access_read,
@@ -7657,6 +7793,7 @@ fn main() {
                 shell.data_dir.clone(),
             );
             *shell.recorder.lock().expect("recorder supervisor") = Some(recorder.clone());
+            start_usage_poll_thread(app.handle().clone());
             let should_start_for_login = launch_intent == LaunchIntent::Login;
             #[cfg(windows)]
             let should_start_for_login = should_start_for_login

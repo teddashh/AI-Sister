@@ -71,6 +71,16 @@ const el = {
   azureKeyDelete: document.querySelector("[data-azure-key-delete]"),
   azureConsent: document.querySelector("[data-azure-consent]"),
   azureState: document.querySelector("[data-azure-state]"),
+  usageSection: document.querySelector("[data-usage-section]"),
+  usageLocalEnabled: document.querySelector("[data-usage-local-enabled]"),
+  usageLocalDir: document.querySelector("[data-usage-local-dir]"),
+  usagePublicEnabled: document.querySelector("[data-usage-public-enabled]"),
+  usageReaction: document.querySelector("[data-usage-reaction]"),
+  usageEndpoint: document.querySelector("[data-usage-endpoint]"),
+  usageAttribution: document.querySelector("[data-usage-attribution]"),
+  usageRefresh: document.querySelector("[data-usage-refresh]"),
+  usageState: document.querySelector("[data-usage-state]"),
+  usageBoard: document.querySelector("[data-usage-board]"),
   loginStartup: document.querySelector("[data-login-startup]"),
   loginStartupSay: document.querySelector("[data-login-startup-say]"),
   loginStartupSection: document.querySelector("[data-login-startup-section]"),
@@ -1800,6 +1810,126 @@ async function openAzureConsent(event) {
   }
 }
 
+let usageStatus = null;
+
+function paintUsage(view, actionError = "") {
+  if (!el.usageState) return;
+  usageStatus = view;
+  if (el.usageEndpoint) {
+    el.usageEndpoint.textContent = view?.endpoint || "https://limitreset.net/api/v1/status";
+  }
+  if (el.usageAttribution) {
+    el.usageAttribution.textContent = view?.attribution || "LimitReset（limitreset.net），CC BY 4.0";
+  }
+  if (el.usageLocalEnabled && typeof view?.local_sessions_enabled === "boolean") {
+    el.usageLocalEnabled.checked = view.local_sessions_enabled;
+  }
+  if (el.usagePublicEnabled && typeof view?.enabled === "boolean") {
+    el.usagePublicEnabled.checked = view.enabled;
+  }
+  if (el.usageReaction && typeof view?.reaction_enabled === "boolean") {
+    el.usageReaction.checked = view.reaction_enabled;
+  }
+  if (el.usageLocalDir && typeof view?.local_sessions_dir === "string") {
+    el.usageLocalDir.value = view.local_sessions_dir;
+  }
+  if (el.usageRefresh) el.usageRefresh.disabled = view?.enabled !== true || view?.stopped === true;
+  el.usageState.classList.remove("bad", "ok");
+  let message;
+  if (actionError) {
+    el.usageState.classList.add("bad");
+    message = actionError;
+  } else if (!view?.config_readable) {
+    el.usageState.classList.add("bad");
+    message = "用量設定讀不出來；沒有連線，也沒有把未知畫成 0。";
+  } else if (view.stopped) {
+    message = "全停中，公開看板不會連線。";
+  } else if (!view.enabled) {
+    message = "公開看板關閉，不會送出 GET。";
+  } else if (view.fetch_error) {
+    el.usageState.classList.add("bad");
+    message = `公開看板這次沒查到：${view.fetch_error}`;
+  } else if (view.board_live) {
+    el.usageState.classList.add("ok");
+    message = "已讀到公開看板。這是全球產品公告，不是你的帳號重置證明。";
+  } else {
+    message = "公開看板已開啟，尚無即時結果。";
+  }
+  if (view?.local_error) {
+    message += `\n本機用量：${view.local_error}`;
+  } else if (view?.local_sessions_enabled && (!view.local_products || view.local_products.length === 0)) {
+    message += "\n本機用量：未知（還沒讀到 token_count，不是量到 0）。";
+  }
+  el.usageState.textContent = message;
+  if (!el.usageBoard) return;
+  const rows = [];
+  for (const local of view?.local_products || []) {
+    const observed =
+      local.observed_tokens == null ? "已觀察 token：未知" : `已觀察 token：${local.observed_tokens}（本機記錄，不是帳單）`;
+    const remaining = "剩餘 token：未知";
+    const quota =
+      local.quota_used_percent == null
+        ? "額度快照：未知"
+        : `額度快照已用 ${local.quota_used_percent}%（不是剩餘額度）`;
+    rows.push(`<p><strong>${local.name}</strong> ${observed}；${remaining}；${quota}</p>`);
+  }
+  for (const product of view?.products || []) {
+    let reset = "公開看板沒有已驗證重置事件";
+    if (product.reset === "confirmed") {
+      reset = `已驗證重置 ${product.announced_at || ""}`.trim();
+    } else if (product.reset === "unverified") {
+      reset = "有事件但未驗證，不當成重置";
+    }
+    const forecast =
+      product.forecast_p24 == null
+        ? "無預測"
+        : `預測 24h ${Math.round(product.forecast_p24 * 100)}%／48h ${Math.round((product.forecast_p48 || 0) * 100)}%（不是確認）`;
+    rows.push(`<p><strong>${product.name}</strong> ${reset}。${forecast}</p>`);
+  }
+  el.usageBoard.innerHTML = rows.join("");
+}
+
+async function refreshUsage() {
+  if (!el.usageSection) return null;
+  if (invoke === null) {
+    paintUsage(null, "這一頁不在 AI-Sister desktop 裡，沒有讀取用量。");
+    return null;
+  }
+  try {
+    const view = await invoke("usage_status_read");
+    paintUsage(view);
+    return view;
+  } catch (err) {
+    paintUsage(null, `問不到用量狀態：${String(err?.message ?? err)}`);
+    return null;
+  }
+}
+
+async function setUsageConfig(event) {
+  if (!isTrustedUserAction(event) || invoke === null) return;
+  try {
+    const view = await invoke("usage_public_status_set", {
+      enabled: el.usagePublicEnabled?.checked === true,
+      reactionEnabled: el.usageReaction?.checked === true,
+      localSessionsEnabled: el.usageLocalEnabled?.checked === true,
+      localSessionsDir: el.usageLocalDir?.value ?? "",
+    });
+    paintUsage(view);
+  } catch (err) {
+    paintUsage(usageStatus, `用量設定沒有存好：${String(err?.message ?? err)}`);
+  }
+}
+
+async function refreshUsageBoard(event) {
+  if (!isTrustedUserAction(event) || invoke === null) return;
+  try {
+    const view = await invoke("usage_public_status_refresh");
+    paintUsage(view);
+  } catch (err) {
+    paintUsage(usageStatus, `公開看板沒有查到：${String(err?.message ?? err)}`);
+  }
+}
+
 async function installPersonaAssets(event) {
   if (!isTrustedUserAction(event) || invoke === null || personaAssetOperation !== null) return;
   if (personaAssetStatus?.phase !== "available" && personaAssetStatus?.phase !== "repair-needed") {
@@ -2275,6 +2405,7 @@ async function load() {
   const platformAccessRead = refreshPlatformAccess();
   const localTtsRead = refreshLocalTts();
   const azureTtsRead = refreshAzureTts();
+  const usageRead = refreshUsage();
   let ok = false;
   try {
     apply(await invoke("settings_read"));
@@ -2309,6 +2440,7 @@ async function load() {
   // 說得出 credential 是 present、missing、unreadable 還是 unsupported。
   await localTtsRead;
   await azureTtsRead;
+  await usageRead;
   if (unreadable) {
     // setUnreadable 已推進 revision，所以開場那份平行 snapshot 不得再合併。重新
     // 問一次 authoritative native state，只借它獨立的 credential／consent 四態；
@@ -2763,6 +2895,16 @@ el.azureKey?.addEventListener("input", () => paintAzureTts(azureTtsStatus));
 el.azureKeySave?.addEventListener("click", (event) => void saveAzureTtsKey(event));
 el.azureKeyDelete?.addEventListener("click", (event) => void deleteAzureTtsKey(event));
 el.azureConsent?.addEventListener("click", (event) => void openAzureConsent(event));
+el.usageLocalEnabled?.addEventListener("change", (event) => void setUsageConfig(event));
+el.usagePublicEnabled?.addEventListener("change", (event) => void setUsageConfig(event));
+el.usageReaction?.addEventListener("change", (event) => void setUsageConfig(event));
+el.usageLocalDir?.addEventListener("change", (event) => void setUsageConfig(event));
+el.usageRefresh?.addEventListener("click", (event) => void refreshUsageBoard(event));
+globalThis.__TAURI__?.event
+  ?.listen?.("usage-status-changed", () => {
+    void refreshUsage();
+  })
+  ?.catch?.(() => {});
 
 // 下載在後端完成、取消、修復或被另一扇視窗刪除時，這一頁重讀本機真相。
 // 這個事件只會讀 status；不會自己啟動下載。

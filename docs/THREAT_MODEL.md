@@ -285,9 +285,10 @@ Windows 10 是 Release 1.0 最低支援版本；不把 Windows 7／Server 2008 R
   但其實記不住東西**」，不報「N 條規則 ✓」
 - 承諾能被機器檢查的就交給機器：`scripts/check-no-network.sh` 在 CI 上逐棵檢查
   root workspace 預設無 Persona download 或 Azure transport、recorder／core／capture／
-  brain／hands 無 HTTP client，且只有兩條核准的 reverse dependency path：
-  `client → sister-assets[download] → sister-desktop` 與
-  `client → sister-tts[azure] → sister-desktop`；renderer/CSP 仍無遠端出口。
+  brain／hands 無 HTTP client，且只有三條核准的 reverse dependency path：
+  `client → sister-assets[download] → sister-desktop`、
+  `client → sister-tts[azure] → sister-desktop` 與
+  `client → sister-usage[public-status] → sister-desktop`；renderer/CSP 仍無遠端出口。
   這讓 PRIVACY.md 的能力邊界由建置保證而不是由記性保證。缺口通常不是人手動
   打開的，是相依套件或 feature 默默帶進來的
 - 平台相關的假設要在**那個平台上**驗，不能只靠推理：OCR 有一個 CI 步驟真的
