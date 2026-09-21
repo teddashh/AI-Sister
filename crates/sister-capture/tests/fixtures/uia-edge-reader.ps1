@@ -388,16 +388,16 @@ window.addEventListener('keydown', event => {
             # the wrong PDF page. Do not poke a document that is already the
             # provider we want while its text pattern is still filling in.
             if ($Pdf -and $mode -eq 'top') {
-                Invoke-SisterPdfFirstPageGroupFocus
-                $activated = [DateTime]::UtcNow
                 $page = Get-SisterPdfPage
-                if ($null -eq $page -or $page.Kind -ne 'Group' -or $page.Scope.Contains('PDF-SECOND')) {
-                    # Ctrl+Home puts focus back on the TextPattern Document.
-                    # Once a page Group is found, only click that Group again.
-                    if ($script:SisterPdfGroupScan -notlike '*picked=group*') {
-                        [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'PDF focus is not a page group; activating again')
-                        $sent = ''
-                    }
+                $documentReady = $null -ne $page -and $page.Kind -eq 'Document' -and -not $page.Offscreen -and (
+                    $page.Scope.Contains('PDF-FIRST') -or $page.Visible.Contains('PDF-FIRST')
+                )
+                $groupReady = $null -ne $page -and $page.Kind -eq 'Group' -and -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND')
+                if (-not $documentReady -and -not $groupReady) {
+                    Invoke-SisterPdfFirstPageGroupFocus
+                    $activated = [DateTime]::UtcNow
+                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'PDF focus is not a page group; activating again')
+                    $sent = ''
                     continue
                 }
             } elseif ($mode -in @('top', 'bottom') -and -not $Pdf) {
@@ -421,14 +421,19 @@ window.addEventListener('keydown', event => {
                 $extra += (@($ancestors | ForEach-Object { "ancestor$($_.Depth) offscreen=$($_.Offscreen) visible=[$($_.Visible)]" }))
                 if ($mode -eq 'bottom') {
                     $live = $ancestors | Where-Object { $_.Visible.Contains('PDF-SECOND') -and -not $_.Visible.Contains('PDF-FIRST') } | Select-Object -First 1
-                    # Native CI leaves TextPattern visible-ranges on the old page
-                    # (empty or still PDF-FIRST). The first-page Group moving fully
-                    # above the viewport is the scroll; product UIA still refuses it.
-                    $ready = $page.Kind -eq 'Group' -and $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and (
+                    $groupOffscreen = $page.Kind -eq 'Group' -and $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and (
                         ($null -ne $live) -or ($page.Top -lt -100)
                     )
+                    # Focus may stay on the Document. The visible page is ready
+                    # when its ranges show only the second page.
+                    $documentScrolled = $page.Kind -eq 'Document' -and -not $page.Offscreen -and $page.Visible.Contains('PDF-SECOND')
+                    $ready = $groupOffscreen -or $documentScrolled
                 } else {
-                    $ready = $page.Kind -eq 'Group' -and -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND') -and $page.Visible.Contains('PDF-FIRST')
+                    $groupTop = $page.Kind -eq 'Group' -and -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and -not $page.Scope.Contains('PDF-SECOND') -and $page.Visible.Contains('PDF-FIRST')
+                    $documentTop = $page.Kind -eq 'Document' -and -not $page.Offscreen -and (
+                        $page.Scope.Contains('PDF-FIRST') -or $page.Visible.Contains('PDF-FIRST')
+                    )
+                    $ready = $groupTop -or $documentTop
                 }
             } else {
                 $extra += 'focused-page=none'

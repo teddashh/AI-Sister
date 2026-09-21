@@ -163,6 +163,17 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
+fn pdf_page_text(blocks: &[AssistiveBlock]) -> String {
+    let role = blocks
+        .first()
+        .map(|block| block.role.as_str())
+        .unwrap_or("");
+    assert!(
+        role == "document" || role == "document-region",
+        "PDF page role: {role:?}"
+    );
+    text(blocks, role)
+}
 fn text(blocks: &[AssistiveBlock], role: &str) -> String {
     assert!(
         blocks
@@ -564,7 +575,8 @@ fn native_edge_pdf_scroll_keeps_uia_ocr_and_screenshot_evidence_together() {
     fixture.show("top");
     let mut focus = WindowsFocus::new();
     let permit = fixture.observe(&mut focus, SensitiveFieldState::Clear);
-    let first = text(&focus.assistive_text(permit), "document-region");
+    let first_blocks = focus.assistive_text(permit);
+    let first = pdf_page_text(&first_blocks);
     println!(
         "Edge PDF first-page provider: {}",
         std::fs::read_to_string(fixture.dir.join("metadata")).unwrap()
@@ -590,28 +602,35 @@ fn native_edge_pdf_scroll_keeps_uia_ocr_and_screenshot_evidence_together() {
         None,
     );
     assert!(
-        text(
-            &recorder.db().assistive_blocks(first_frame).unwrap(),
-            "document-region"
-        )
-        .contains("0800-444-555")
+        pdf_page_text(&recorder.db().assistive_blocks(first_frame).unwrap())
+            .contains("0800-444-555")
     );
 
     fixture.show("bottom");
     let bottom_permit = fixture.observe(&mut focus, SensitiveFieldState::Clear);
-    assert!(
-        focus.assistive_text(bottom_permit).is_empty(),
-        "the offscreen first-page focus must not authorize second-page UIA text"
-    );
+    let bottom_live = focus.assistive_text(bottom_permit);
     let bottom_frame = retained(recorder.tick(6000).unwrap());
     assert_ne!(first_frame, bottom_frame);
-    assert!(
-        recorder
-            .db()
-            .assistive_blocks(bottom_frame)
-            .unwrap()
-            .is_empty()
-    );
+    let bottom_stored = recorder.db().assistive_blocks(bottom_frame).unwrap();
+    if bottom_live.is_empty() {
+        // Keyboard focus stayed on the offscreen first-page Group.
+        assert!(
+            bottom_stored.is_empty(),
+            "stored UIA must stay empty with the offscreen first-page focus"
+        );
+    } else {
+        // Focus stayed on the live Document. UIA is the visible page only.
+        let bottom = pdf_page_text(&bottom_live);
+        assert!(
+            bottom.contains("02-6655-4433"),
+            "visible PDF page: {bottom:?}"
+        );
+        assert!(
+            !bottom.contains("0800-444-555"),
+            "offscreen PDF page: {bottom:?}"
+        );
+        assert!(pdf_page_text(&bottom_stored).contains("02-6655-4433"));
+    }
     assert_native_screenshot(
         &mut recorder,
         &fixture.dir,

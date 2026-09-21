@@ -136,6 +136,58 @@ impl FocusedText<'_> {
         }
     }
 }
+impl FocusedText<'_> {
+    /// The single on-screen page-sized Group under this Document, if there is
+    /// exactly one. A deeper walk is capped so a PDF viewer cannot turn a
+    /// text read into a full tree build.
+    fn onscreen_page_scope(
+        &self,
+        pattern: &IUIAutomationTextPattern,
+    ) -> Option<IUIAutomationTextRange> {
+        let walker = unsafe { self.automation.ControlViewWalker() }.ok()?;
+        let mut pending = Vec::new();
+        if let Ok(first) = unsafe { walker.GetFirstChildElement(&self.element) } {
+            pending.push((first, 1u32));
+        }
+        let mut scanned = 0u32;
+        let mut found: Option<IUIAutomationTextRange> = None;
+        while let Some((current, depth)) = pending.pop() {
+            scanned += 1;
+            if scanned > 40 {
+                return found;
+            }
+            let is_page = unsafe { current.CurrentControlType() }.ok()
+                == Some(UIA_GroupControlTypeId)
+                && unsafe { current.CurrentIsOffscreen() }
+                    .ok()
+                    .is_some_and(|value| !value.as_bool())
+                && unsafe { current.CurrentBoundingRectangle() }
+                    .ok()
+                    .is_some_and(|bounds| {
+                        bounds.right - bounds.left >= 200 && bounds.bottom - bounds.top >= 80
+                    });
+            if is_page && let Ok(range) = unsafe { pattern.RangeFromChild(&current) } {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(range);
+            }
+            if depth < 4
+                && let Ok(mut child) = unsafe { walker.GetFirstChildElement(&current) }
+            {
+                loop {
+                    let next = unsafe { walker.GetNextSiblingElement(&child) }.ok();
+                    pending.push((child, depth + 1));
+                    match next {
+                        Some(sibling) => child = sibling,
+                        None => break,
+                    }
+                }
+            }
+        }
+        found
+    }
+}
 fn text_pattern(element: &IUIAutomationElement) -> Option<IUIAutomationTextPattern> {
     unsafe {
         element
@@ -172,6 +224,16 @@ impl FocusedText<'_> {
             }
         }
         if let Some(pattern) = text_pattern(&self.element) {
+            // Edge PDF often keeps keyboard focus on the TextPattern Document.
+            // GetVisibleRanges then flattens offscreen pages into the same
+            // range. One on-screen page-sized Group is that page; clip to it.
+            // Two page-sized groups means more than one page is on screen, so
+            // leave the document ranges alone.
+            if self.role()? == TextRole::Document
+                && let Some(scope) = self.onscreen_page_scope(&pattern)
+            {
+                self.scope = Some(scope);
+            }
             return Some(pattern);
         }
         // Only a positively identified Document can borrow an enclosing provider.
