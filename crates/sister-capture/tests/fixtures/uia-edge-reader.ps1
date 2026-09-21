@@ -383,8 +383,12 @@ window.addEventListener('keydown', event => {
             if ($Pdf -and $mode -eq 'bottom') {
                 # Scroll without transferring accessibility focus. Edge can
                 # leave it on the old, now offscreen page; OCR must continue.
+                # PDF-SECOND sits at the bottom of page 2. A short wheel does
+                # not reach it, and querying text ranges in this loop after
+                # Ctrl+End does not return, so only send the key and wait.
                 [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'scrolling PDF bottom with old focus')
-                Invoke-SisterWheelDown
+                [System.Windows.Forms.SendKeys]::SendWait('^{END}')
+                $script:SisterPdfWheelAt = [DateTime]::UtcNow
                 $acted = $true
             } elseif ($Pdf -and $mode -ne 'address') {
                 if (-not $browser.MainWindowTitle.Contains('reader.pdf')) {
