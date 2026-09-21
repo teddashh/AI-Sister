@@ -275,6 +275,7 @@ $script:SisterPdfMarked = $null
 $script:SisterPdfMarkAt = $null
 $script:SisterPdfPageElement = $null
 $script:SisterPdfWheelAt = $null
+$script:SisterPdfTopSince = $null
 $browser = $null
 $backdrop = $null
 . (Join-Path $PSScriptRoot 'uia-backdrop.ps1')
@@ -463,7 +464,7 @@ window.addEventListener('keydown', event => {
                 } catch {
                     $extra += 'marked-page stale'
                 }
-            } elseif ($null -ne $script:SisterPdfWheelAt -and (([DateTime]::UtcNow - $script:SisterPdfWheelAt).TotalSeconds -ge 1)) {
+            } elseif ($null -ne $script:SisterPdfWheelAt -and (([DateTime]::UtcNow - $script:SisterPdfWheelAt).TotalSeconds -ge 2.5)) {
                 # This Edge tree had no page-sized Group (full walk, large=0).
                 # The wheel already happened; do not call GetVisibleRanges here.
                 $extra += 'marked-page wheel'
@@ -498,6 +499,18 @@ window.addEventListener('keydown', event => {
             $ready = $true
         }
         Write-SisterUiaMetadata -Hwnd $hwnd -Extra $extra
+        # Document focus is ready before the PDF canvas has painted. The first
+        # screenshot then OCRs only the Edge chrome.
+        if ($ready -and $Pdf -and $mode -eq 'top') {
+            if ($null -eq $script:SisterPdfTopSince) {
+                $script:SisterPdfTopSince = [DateTime]::UtcNow
+                $ready = $false
+            } elseif (([DateTime]::UtcNow - $script:SisterPdfTopSince).TotalSeconds -lt 2.5) {
+                $ready = $false
+            }
+        } elseif ($Pdf -and $mode -eq 'top') {
+            $script:SisterPdfTopSince = $null
+        }
         if ($ready) {
             [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "ready $mode")
             [IO.File]::WriteAllText((Join-Path $StateDir 'ready'), $mode)
