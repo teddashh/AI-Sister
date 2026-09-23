@@ -1215,9 +1215,45 @@ body.has-consent-guide .answer-bubble {
   user-select: text;
 }
 
-/* 「我沒看到過」底下那幾句「但也可能是因為……」。比那句話再淡一階：它們是
-   註腳，不是答案；但也不能淡到看不見——這是整個畫面上唯一會讓他知道
-   「東西可能在，只是我不准看」的地方。 */
+/* 「我沒看到過」底下那幾句「但也可能是因為……」，現在收在一顆按鈕底下。
+ *
+ * **它們預設看不見，而這一行以前寫著「不能淡到看不見」。** 那句話沒有錯——
+ * 這仍然是整個畫面上唯一會讓他知道「東西可能在，只是我不准看」的地方。
+ * 2026-09-23 還是把它收起來了，因為使用者親口說：對話框裡那些「我不知道」
+ * 「我沒有相關 memory」「我有多少條在那邊但是是我不能看的」都是 guardrail，
+ * 「沒有人跟朋友講話會講這些 guardrail 的」。
+ *
+ * 所以這是一次知情的取捨，不是把那個理由忘掉了：診斷能力一個字都沒少，
+ * 代價是他要按一下才看得到。**代價寫在這裡，下一個人才知道它被付過。**
+ * 要是哪天發現他從來不按那顆按鈕，該回來看的是這一段。
+ *
+ * 收合靠的是 `.hits-why-lines` 的原生 `hidden`，所以**這底下任何一條規則都
+ * 不准給它 `display`**——UA 的 `[hidden]` 壓不過自訂的 display，上面
+ * `.avatar[hidden]` 那一段就是這棟房子被咬過的那一次。
+ */
+.hits-why-disclosure {
+  text-align: center;
+}
+.hits-why-toggle {
+  background: transparent;
+  border: 1px solid var(--letter-accent);
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  margin: 0 0 6px;
+  padding: 4px 10px;
+}
+.hits-why-toggle:focus-visible {
+  outline: 2px solid var(--letter-accent);
+  outline-offset: 2px;
+}
+.hits-why-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
 .hits-why {
   font-size: 11.5px;
   line-height: 1.6;

@@ -6354,11 +6354,31 @@ function renderHits(
       hitList.append(empty);
 
       // 後端只給事實（排除過幾段、暫停過幾次），句子在這裡組。
-      for (const line of blindLines(blind)) {
-        const li = document.createElement("li");
-        li.className = "hits-why";
-        li.textContent = line;
-        hitList.append(li);
+      const reasons = blindLines(blind);
+      if (reasons.length > 0) {
+        const disclosure = document.createElement("li");
+        disclosure.className = "hits-why-disclosure";
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "hits-why-toggle";
+        toggle.textContent = "為什麼？";
+        toggle.setAttribute("aria-expanded", "false");
+        const lines = document.createElement("ul");
+        lines.className = "hits-why-lines";
+        lines.hidden = true;
+        for (const line of reasons) {
+          const li = document.createElement("li");
+          li.className = "hits-why";
+          li.textContent = line;
+          lines.append(li);
+        }
+        // 只切換本頁版面，不講話、不開東西；不擋 isTrusted，shot.mjs 也能展開。
+        toggle.addEventListener("click", () => {
+          lines.hidden = !lines.hidden;
+          toggle.setAttribute("aria-expanded", String(!lines.hidden));
+        });
+        disclosure.append(toggle, lines);
+        hitList.append(disclosure);
       }
     }
   }
