@@ -2709,9 +2709,16 @@ console.log("A152 R2. 內容命中的卡片就是一份本機答案");
 
 
 {
+  // 這條守的是「升級那一步吃的是真的那幾個集合，而且排在 prepare 前面」。
+  //
+  // **尾逗號不可以寫死。** 原本的針要求 `&mut readings,`，而那個逗號是 rustfmt
+  // 把呼叫折成多行時才加的：把同一個呼叫排成一行（語意一模一樣）就紅，訊息和
+  // 「真的搬到 prepare 後面」那種紅**一字不差**。實測兩刀各紅一條、同一條。
+  // 寫死下限會把「產品變了」和「儀器壞了」混成同一則診斷，所以逗號收成 `,?`：
+  // 現在只剩順序那一種紅得出來，而訊息講的正是順序。
   const memory = read(join(UI, "../src-tauri/src/main.rs"));
   check("A153 native promotion uses actual collections before prepare",
-    /present_time_readings\(\s*asked_chapters.as_ref\(\),\s*&facts,\s*&hits,\s*&mut readings,/u.test(memory) &&
+    /present_time_readings\(\s*asked_chapters\.as_ref\(\),\s*&facts,\s*&hits,\s*&mut readings\s*,?\s*\)/u.test(memory) &&
     memory.indexOf("answer_readings::present_time_readings(") < memory.indexOf("sister_core::grounded_answer::prepare(question"));
 }
 console.log("A153 R1. 先開口與終局分開記帳");
