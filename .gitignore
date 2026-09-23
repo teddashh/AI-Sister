@@ -31,6 +31,12 @@ apps/desktop/src-tauri/gen/
 /d.txt
 /f.txt
 /s.txt
+# 稽核那道閘門（`ci.yml` 的 replay→stats→check-audit.py，本機由 gates-all.sh
+# 重跑）也把兩顆輸出寫在 repo 根目錄。它成功跑完會自己 `rm`，所以這兩行顧的
+# 一樣是**中途紅掉／被我砍掉**那條路——上面那幾行是 check-erased-db.sh 留下的，
+# 這兩顆來源不同、名字不帶前綴，所以另外列。
+/stats.txt
+/stats.json
 
 # 私下 roundtable 辯論的逐字萃取 — 設計源頭，不公開
 research/extracts/
