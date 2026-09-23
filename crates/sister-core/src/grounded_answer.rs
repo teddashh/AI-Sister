@@ -176,6 +176,9 @@ impl Source {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reading {
     pub card_id: i64,
+    /// 被問題本身的字找到，而非時間背景；兩條路重疊時仍為 true。
+    /// 內容命中直接呈現，時間背景只交給模型當材料。
+    pub matched: bool,
     /// 這一段是什麼時候開始的（`segment_core_start`）。
     pub at: Millis,
     /// 她當時寫下的那句話。
@@ -183,9 +186,16 @@ pub struct Reading {
     /// 這張卡自己的證據裡第一張畫面。
     ///
     /// 有的話，畫面上那顆出處鍵就點得開——他讀到一句判讀，可以當場去看她
-    /// 是看著什麼想出來的。沒有的話（那張卡的證據全是 fact），那顆鍵只會
-    /// 捲到底下對應那一列。
+    /// 是看著什麼想出來的。沒有的話，內容命中的卡可捲到原句；時間背景
+    /// 沒有自己的列，出處只顯示文字。
     pub frame_id: Option<i64>,
+}
+
+/// 每個建構端明確選擇卡片來源，避免布林參數接反。
+#[derive(Debug, Clone, Copy)]
+pub enum ReadingOrigin {
+    Time,
+    Content,
 }
 
 impl Reading {
@@ -194,7 +204,7 @@ impl Reading {
     /// `evidence_json` 是一個 `["frame:12","fact:7"]` 這樣的陣列，格式由
     /// [`crate::brain::EvidenceRef`] 定義；這裡只取**第一張畫面**。取不到
     /// 就是 `None`，不是錯——一張只靠 fact 立起來的卡仍然是一句判讀。
-    pub fn from_card(card: &crate::db::L2CardRow) -> Self {
+    pub fn from_card(card: &crate::db::L2CardRow, origin: ReadingOrigin) -> Self {
         let frame_id = serde_json::from_str::<Vec<String>>(&card.evidence_json)
             .unwrap_or_default()
             .iter()
@@ -204,11 +214,61 @@ impl Reading {
             });
         Self {
             card_id: card.id,
+            matched: matches!(origin, ReadingOrigin::Content),
             at: card.segment_core_start,
             activity: card.activity.clone(),
             frame_id,
         }
     }
+}
+
+/// MAX_READINGS 的 8 張中，內容命中最多 4 張，保留另一半給時間背景。
+pub const MATCHED_READINGS: usize = 4;
+
+/// 在既有時間候選之後查每條原問句／planner 查詢。先保住內容命中，再補時間
+/// 背景；挑選優先序不等於呈現順序，最後依段落開始時間排列。
+pub fn match_answer_readings(
+    db: &crate::db::Db,
+    questions: &[String],
+    time_rows: Vec<crate::db::L2CardRow>,
+    mut truncated: bool,
+) -> anyhow::Result<(Vec<Reading>, bool)> {
+    let mut batches = Vec::new();
+    for question in questions {
+        let (rows, more) = db.search_readings(question, MATCHED_READINGS)?;
+        truncated |= more;
+        batches.push(rows);
+    }
+    let mut selected = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    // 與 facts／hits 一樣輪流取各查詢的排名，避免第一條查詢吃滿配額。
+    for rank in 0..MATCHED_READINGS {
+        for batch in &batches {
+            if let Some(row) = batch.get(rank)
+                && ids.insert(row.id)
+            {
+                if selected.len() < MATCHED_READINGS {
+                    selected.push(Reading::from_card(row, ReadingOrigin::Content));
+                } else {
+                    truncated = true;
+                }
+            }
+        }
+    }
+    for row in &time_rows {
+        if let Some(existing) = selected.iter_mut().find(|r| r.card_id == row.id) {
+            existing.matched = true;
+        } else if ids.contains(&row.id) {
+            // 超過四張內容配額的命中已標 truncated，不能改裝成時間背景再送出。
+            truncated = true;
+        } else if selected.len() < MAX_READINGS {
+            selected.push(Reading::from_card(row, ReadingOrigin::Time));
+        } else {
+            truncated = true;
+        }
+    }
+    selected.sort_by_key(|r| (r.at, r.card_id));
+    Ok((selected, truncated))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -745,6 +805,7 @@ mod tests {
     fn reading(card_id: i64, at: Millis, activity: &str) -> Reading {
         Reading {
             card_id,
+            matched: false,
             at,
             activity: activity.into(),
             frame_id: Some(700 + card_id),
@@ -903,7 +964,7 @@ mod tests {
         assert_eq!(to, 231 + READING_SLACK_MS, "上界從最晚那一筆往後放寬");
     }
 
-    /// 一筆證據都沒有就沒有窗，也就不必去撈判讀。
+    /// 一筆原文／事實都沒有就沒有時間窗；內容比對判讀不依賴這個窗。
     #[test]
     fn no_evidence_means_no_window_to_look_for_readings_in() {
         assert_eq!(evidence_window(&[], &[]), None);
@@ -930,7 +991,7 @@ mod tests {
             author: crate::db::L2Author::Interpreter,
             tombstoned_at: None,
         };
-        let reading = Reading::from_card(&card);
+        let reading = Reading::from_card(&card, ReadingOrigin::Time);
         assert_eq!(reading.card_id, 12);
         assert_eq!(reading.at, 5_000, "掛的是這一段開始的時刻");
         assert_eq!(reading.activity, "你在追一個天氣警報");
@@ -958,10 +1019,16 @@ mod tests {
             author: crate::db::L2Author::Reviewer,
             tombstoned_at: None,
         };
-        let payload = prepare("剛剛在幹嘛", &[Reading::from_card(&card)], &[], &[], NOW)
-            .unwrap()
-            .unwrap()
-            .payload;
+        let payload = prepare(
+            "剛剛在幹嘛",
+            &[Reading::from_card(&card, ReadingOrigin::Time)],
+            &[],
+            &[],
+            NOW,
+        )
+        .unwrap()
+        .unwrap()
+        .payload;
         assert!(payload.contains("你在追一個天氣警報"));
         for internal in [
             "INTERNAL_SEGMENT_MARK",
@@ -997,7 +1064,10 @@ mod tests {
             author: crate::db::L2Author::Interpreter,
             tombstoned_at: None,
         };
-        assert_eq!(Reading::from_card(&card).frame_id, None);
+        assert_eq!(
+            Reading::from_card(&card, ReadingOrigin::Time).frame_id,
+            None
+        );
     }
 
     /// 引用一張這一題沒送出去的判讀，整份作廢——和另外兩種一樣。
