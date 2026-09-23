@@ -787,7 +787,11 @@ console.log("A151 R1. 先開口，再想；先開口不是答完了");
 // renderer 夾具只會回 mock；單靠下面畫面測試抓不到 main.rs 接錯 stage/brain。
 {
   const main = read(MAIN);
-  const local = main.slice(main.indexOf("fn ask_local("), main.indexOf("fn nothing_was_asked("));
+  const localStart = main.indexOf("fn ask_local(");
+  const localEnd = main.indexOf("fn nothing_was_asked(");
+  check("A151 R1 抽取前提：ask_local 與 nothing_was_asked 錨點存在且有序", localStart >= 0 && localEnd > localStart);
+  if (localStart < 0 || localEnd <= localStart) throw new Error("A151 R1 抽取錨點不存在或順序錯誤");
+  const local = main.slice(localStart, localEnd);
   check(
     "A151 native 接線：先開口不得接 Brain，否則題庫記了兩次／結案講了兩遍",
     /answer_from_memory\(&shell, &question, AskStage::Local, brain\)/u.test(local) &&
@@ -801,6 +805,51 @@ console.log("A151 R1. 先開口，再想；先開口不是答完了");
       /BrainPlan::Go \{ cli, \.\. \} => BrainAnswer::new\("thinking", Some\(cli.label\)\)/u.test(local),
     local,
   );
+}
+// Rust 原碼位置檢查：先遮掉字串／註解，括號才不會被文案干擾。
+// 保留長度，抽取位置仍然對應原始檔；test module 不算產品呼叫。
+{
+  const main = read(MAIN);
+  const code = main.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|r(#+)"[\s\S]*?"\1|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'/gu,
+    token => token.replace(/[^\n]/gu, " "));
+  function blockEnd(start, name) {
+    const open = code.indexOf("{", start);
+    check(`A151 R2 抽取：${name} 開括號存在`, open >= start && start >= 0);
+    if (start < 0 || open < start) throw new Error(`A151 R2 抽取失敗：${name}`);
+    let depth = 0;
+    for (let i = open; i < code.length; i++) {
+      if (code[i] === "{") depth++;
+      if (code[i] === "}" && --depth === 0) return i + 1;
+    }
+    check(`A151 R2 抽取：${name} 結尾存在`, false);
+    throw new Error(`A151 R2 抽取沒有結尾：${name}`);
+  }
+  function extract(anchor) {
+    const start = code.indexOf(anchor);
+    check(`A151 R2 抽取錨點：${anchor}`, start >= 0);
+    if (start < 0) throw new Error(`A151 R2 抽取錨點不存在：${anchor}`);
+    const end = blockEnd(start, anchor);
+    return { start, end, body: code.slice(start, end) };
+  }
+  const ask = extract("fn ask(");
+  const local = extract("fn ask_local(");
+  const memory = extract("fn answer_from_memory(");
+  let production = code;
+  const testRanges = [...code.matchAll(/#\[cfg\(test\)\]\s*(?:mod|fn)\s+\w+/gu)]
+    .map(m => [m.index, blockEnd(m.index, m[0])]);
+  for (const [start, end] of testRanges.reverse()) {
+    production = production.slice(0, start) + " ".repeat(end - start) + production.slice(end);
+  }
+  const count = (body, word) => [...body.matchAll(new RegExp(`\\b${word}\\b`, "gu"))].length;
+  check("A151 R2 抽取正例：ask 找得到 close_from_message", count(ask.body, "close_from_message") >= 1);
+  for (const word of ["close_from_message", "record_followup", "log_query"]) {
+    check(`A151 R2 寫入位置：${word} 在非測試區只出現於 ask 一次`,
+      count(production, word) === 1 && count(ask.body, word) === 1,
+      { production: count(production, word), ask: count(ask.body, word) });
+    check(`A151 R2 無寫入：ask_local 與 answer_from_memory 沒有 ${word}`,
+      count(local.body, word) === 0 && count(memory.body, word) === 0,
+      { local: count(local.body, word), memory: count(memory.body, word) });
+  }
 }
 {
   let finish;
@@ -820,6 +869,17 @@ console.log("A151 R1. 先開口，再想；先開口不是答完了");
   const text = p.hitTexts().join("\n");
   check("A151 3：正式回答整份取代本機那份", text.includes("A151_FINAL_MEMORY") && !text.includes("A151_LOCAL_MEMORY"), text);
   check("A151 3：正式回答後才清輸入並停計時", p.input().value === "" && p.thinking() === null, { input: p.input().value, thinking: p.thinking() });
+  const landed = p.diagnoseNotes.filter(n => n?.kind === "answered");
+  check("A151 R2 接線：app.js 先畫再把 spoke_ms 數字送到 answered note",
+    landed.length === 1 && Number.isInteger(landed[0].spoke_ms) && landed[0].spoke_ms >= 0 && landed[0].spoke_ms <= landed[0].took_ms, landed);
+
+}
+{
+  const p = await open({ ask_local: new Error("R2_NO_EARLY"), ask: answer() });
+  await p.type("本機那段沒畫出來");
+  const notes = p.diagnoseNotes.filter(n => n?.kind === "answered");
+  check("A151 R2 接線：先開口失敗送 null，不冒充零毫秒",
+    notes.length === 1 && notes[0].spoke_ms === null, notes);
 }
 for (const [name, table] of [
   ["A151 4：ask_local throw 仍由 ask 完成且不顯示錯誤", { ask_local: new Error("A151_EARLY_THROW") }],

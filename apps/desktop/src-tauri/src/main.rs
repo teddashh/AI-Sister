@@ -3258,9 +3258,9 @@ mod answer_cli_selection_tests {
     /// 只釘住具名判斷，守不住 ask_local 接錯 stage 或 brain。
     /// 產品接線的牙齒在 JS 閘門；這條不能冒充整條本機問答的唯讀驗證。
     #[test]
-    fn local_stage_does_not_write_to_the_database() {
-        assert!(!AskStage::Local.writes_to_the_database());
-        assert!(AskStage::Brain { planned: None }.writes_to_the_database());
+    fn local_stage_is_not_the_brain_stage() {
+        assert!(!AskStage::Local.is_brain());
+        assert!(AskStage::Brain { planned: None }.is_brain());
     }
 
     #[test]
@@ -3658,7 +3658,10 @@ fn synthesize_grounded_answer(
 
 /// 這一題走到哪一段。
 enum AskStage<'a> {
-    /// 先開口只讀；正式那一段會整份重畫，不得重複結案、follow-up 或記題庫。
+    /// 階段決定查詢字串、cli_directed 與連線模式，不授權非冪等寫入。
+    /// close_from_message、record_followup、log_query 只由 ask 呼叫，一題一次。
+    /// chapters_for_question 不在這份名單：replace_stuck／replace_segments 是
+    /// 冪等的快取重算；Local 的唯讀連線仍走不寫快取的查詢。
     Local,
     Brain {
         planned: Option<&'a PlannedAnswerSearches>,
@@ -3666,7 +3669,7 @@ enum AskStage<'a> {
 }
 
 impl AskStage<'_> {
-    fn writes_to_the_database(&self) -> bool {
+    fn is_brain(&self) -> bool {
         matches!(self, Self::Brain { .. })
     }
 }
@@ -3677,7 +3680,7 @@ fn with_answer_db<T>(
     stage: &AskStage<'_>,
     f: impl FnOnce(&mut sister_core::db::Db) -> Result<T, String>,
 ) -> Result<T, String> {
-    if stage.writes_to_the_database() {
+    if stage.is_brain() {
         return with_db_mut(shell, f);
     }
     let dir = shell
@@ -3689,12 +3692,26 @@ fn with_answer_db<T>(
     f(&mut db)
 }
 
+/// 題庫需要的材料；這裡不記，一題只能由正式呼叫端留一列。
+struct QueryLogFacts {
+    shape: &'static str,
+    hits: usize,
+    latency_ms: i64,
+}
+
 fn answer_from_memory(
     shell: &tauri::State<'_, Shell>,
     question: &str,
     stage: AskStage<'_>,
     brain: BrainAnswer,
-) -> Result<(Answer, Option<sister_core::grounded_answer::Prepared>), String> {
+) -> Result<
+    (
+        Answer,
+        Option<sister_core::grounded_answer::Prepared>,
+        QueryLogFacts,
+    ),
+    String,
+> {
     use sister_core::question::Shape;
     let started = std::time::Instant::now();
     let retrieval_questions = match &stage {
@@ -3746,7 +3763,7 @@ fn answer_from_memory(
             hits.truncate(HITS);
             // 章節問的是**使用者原本那句話**有沒有時間範圍，不是 planner 最後回了
             // 幾條查詢。舊版只要 CLI 加一條同義詞，`昨天下午` 的整段章節就消失。
-            let asked_chapters = if stage.writes_to_the_database() {
+            let asked_chapters = if stage.is_brain() {
                 db.chapters_for_question(question, now)
             } else {
                 db.chapters_for_question_read_only(question, now)
@@ -3859,77 +3876,7 @@ fn answer_from_memory(
                 prepared,
             ))
         };
-        let retrieved;
-        let (closure_notice, followup, query_id) = if stage.writes_to_the_database() {
-            let close = sister_core::reviewer::close_from_message(db, question, now)
-                .map_err(|e| format!("{e:#}"))?;
-            let closure_notice = match close {
-                sister_core::followup::CloseIntent::NotAClosure => None,
-                sister_core::followup::CloseIntent::Unrecognized => {
-                    Some("我認不出你指哪一張記憶，所以沒有動任何一張。".to_string())
-                }
-                sister_core::followup::CloseIntent::Ambiguous { .. } => {
-                    Some("這句話對得上不只一張記憶，所以沒有動任何一張。".to_string())
-                }
-                sister_core::followup::CloseIntent::Close { .. } => {
-                    Some("這張記憶已結案，不會再提。".to_string())
-                }
-            };
-            let previous =
-                sister_core::reviewer::followup_state(db).map_err(|e| format!("{e:#}"))?;
-            let followup = match sister_core::followup::decide(
-                &db.live_commitments().map_err(|e| format!("{e:#}"))?,
-                now,
-                previous.as_ref(),
-            ) {
-                sister_core::followup::FollowupDecision::Ask {
-                    commitment_id,
-                    text,
-                } => {
-                    sister_core::reviewer::record_followup(db, commitment_id, now)
-                        .map_err(|e| format!("{e:#}"))?;
-                    Some(text)
-                }
-                sister_core::followup::FollowupDecision::NoEligibleCommitment
-                | sister_core::followup::FollowupDecision::CoolingDown { .. } => None,
-            };
-            retrieved = retrieve(db)?;
-            let (shape, _, facts, hits, ..) = &retrieved;
-            // 進題庫。他打的原話在**資料庫**裡，不在記錄檔裡——記錄檔是我會看的
-            // 東西，資料庫是他的。刪得掉（時間軸上那條「忘掉這一段」會一起帶走）、
-            // 過得了期（跟著文字的保留期）。理由與代價寫在 DATA_INVENTORY。
-            //
-            // 記不進去不算失敗：他要的是答案。
-            //
-            // 每次都重讀設定檔，不快取：他剛在設定頁上把那個勾拿掉，下一個問題就
-            // 不該再被記。和暫停控制狀態同一條紀律——真相在磁碟上，這個行程只是鏡子。
-            // 讀不到設定檔就當成不要記（`unwrap_or(false)`）：不確定的時候少存
-            // 一點，方向和其他每一個 fail-closed 一致。
-            let wanted = config_path()
-                .and_then(|p| sister_core::config::Config::load(&p).map_err(|e| format!("{e:#}")))
-                .map(|c| c.privacy.query_log)
-                .unwrap_or(false);
-            let query_id = wanted
-                .then(|| {
-                    db.log_query(&sister_core::db::QueryLogEntry {
-                        ts: sister_core::now_ms(),
-                        question,
-                        shape: shape.name(),
-                        // ★ 答案也算——她給了他東西就不是「答不出來」。
-                        // 見 `QueryLogEntry::hits`。
-                        hits: facts.len() + hits.len(),
-                        latency_ms: started.elapsed().as_millis() as i64,
-                        source: sister_core::db::SOURCE_DESKTOP,
-                    })
-                    .map_err(|e| tracing::warn!("這一題沒記進題庫：{e}"))
-                    .ok()
-                })
-                .flatten();
-            (closure_notice, followup, query_id)
-        } else {
-            retrieved = retrieve(db)?;
-            (None, None, None)
-        };
+        let retrieved = retrieve(db)?;
         let (
             shape,
             first_range,
@@ -3941,6 +3888,11 @@ fn answer_from_memory(
             readings,
             prepared,
         ) = retrieved;
+        let query_facts = QueryLogFacts {
+            shape: shape.name(),
+            hits: facts.len() + hits.len(),
+            latency_ms: started.elapsed().as_millis() as i64,
+        };
         // 只有兩手空空的時候才去問。有答案的話這幾個 COUNT 是白跑的，而這條
         // 路上使用者正等著看畫面。
         let blind = if facts.is_empty() && hits.is_empty() {
@@ -3978,8 +3930,8 @@ fn answer_from_memory(
         let answer = Answer {
             presentation_id: None,
             kind: shape.name(),
-            followup,
-            closure_notice,
+            followup: None,
+            closure_notice: None,
             // 只在**不一樣**的時候送。一樣的時候送過去，畫面那邊還要再比一次，
             // 而「這兩串字算不算同一句」是這裡才知道的事（`terms` 回的是原句的
             // 一個切片）。`Shape::Recent` 根本沒走比對那條路，所以也不送。
@@ -3996,7 +3948,7 @@ fn answer_from_memory(
                 // 不能把它畫成這一輪的搜尋真相。
                 Shape::Keywords => None,
             },
-            query_id,
+            query_id: None,
             blind,
             truncated,
             answers_truncated: facts_truncated,
@@ -4046,7 +3998,7 @@ fn answer_from_memory(
             synthesis: None,
             brain,
         };
-        Ok((answer, prepared))
+        Ok((answer, prepared, query_facts))
     })
 }
 
@@ -4072,7 +4024,7 @@ fn ask_local(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer,
         answer.presentation_id = Some(hold_presentation(master_stop_admission));
         return Ok(answer);
     }
-    let (mut answer, _) = answer_from_memory(&shell, &question, AskStage::Local, brain)?;
+    let (mut answer, _, _) = answer_from_memory(&shell, &question, AskStage::Local, brain)?;
     answer.presentation_id = Some(hold_presentation(master_stop_admission));
     Ok(answer)
 }
@@ -4131,7 +4083,42 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         return Ok(answer);
     }
 
-    let (mut answer, prepared) = answer_from_memory(
+    let (closure_notice, followup) = with_db_mut(&shell, |db| {
+        let now = sister_core::now_ms();
+        let close = sister_core::reviewer::close_from_message(db, &question, now)
+            .map_err(|e| format!("{e:#}"))?;
+        let closure_notice = match close {
+            sister_core::followup::CloseIntent::NotAClosure => None,
+            sister_core::followup::CloseIntent::Unrecognized => {
+                Some("我認不出你指哪一張記憶，所以沒有動任何一張。".to_string())
+            }
+            sister_core::followup::CloseIntent::Ambiguous { .. } => {
+                Some("這句話對得上不只一張記憶，所以沒有動任何一張。".to_string())
+            }
+            sister_core::followup::CloseIntent::Close { .. } => {
+                Some("這張記憶已結案，不會再提。".to_string())
+            }
+        };
+        let previous = sister_core::reviewer::followup_state(db).map_err(|e| format!("{e:#}"))?;
+        let followup = match sister_core::followup::decide(
+            &db.live_commitments().map_err(|e| format!("{e:#}"))?,
+            now,
+            previous.as_ref(),
+        ) {
+            sister_core::followup::FollowupDecision::Ask {
+                commitment_id,
+                text,
+            } => {
+                sister_core::reviewer::record_followup(db, commitment_id, now)
+                    .map_err(|e| format!("{e:#}"))?;
+                Some(text)
+            }
+            sister_core::followup::FollowupDecision::NoEligibleCommitment
+            | sister_core::followup::FollowupDecision::CoolingDown { .. } => None,
+        };
+        Ok((closure_notice, followup))
+    })?;
+    let (mut answer, prepared, query_facts) = answer_from_memory(
         &shell,
         &question,
         AskStage::Brain {
@@ -4139,6 +4126,44 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
         },
         brain,
     )?;
+    answer.closure_notice = closure_notice;
+    answer.followup = followup;
+    answer.query_id = with_db(&shell, |db| {
+        // 進題庫。他打的原話在**資料庫**裡，不在記錄檔裡——記錄檔是我會看的
+        // 東西，資料庫是他的。刪得掉（時間軸上那條「忘掉這一段」會一起帶走）、
+        // 過得了期（跟著文字的保留期）。理由與代價寫在 DATA_INVENTORY。
+        //
+        // 記不進去不算失敗：他要的是答案。
+        //
+        // 每次都重讀設定檔，不快取：他剛在設定頁上把那個勾拿掉，下一個問題就
+        // 不該再被記。和暫停控制狀態同一條紀律——真相在磁碟上，這個行程只是鏡子。
+        // 讀不到設定檔就當成不要記（`unwrap_or(false)`）：不確定的時候少存
+        // 一點，方向和其他每一個 fail-closed 一致。
+        let wanted = config_path()
+            .and_then(|p| sister_core::config::Config::load(&p).map_err(|e| format!("{e:#}")))
+            .map(|c| c.privacy.query_log)
+            .unwrap_or(false);
+        let query_id = wanted
+            .then(|| {
+                db.log_query(&sister_core::db::QueryLogEntry {
+                    ts: sister_core::now_ms(),
+                    question: &question,
+                    shape: query_facts.shape,
+                    // ★ 答案也算——她給了他東西就不是「答不出來」。
+                    // 見 `QueryLogEntry::hits`。
+                    hits: query_facts.hits,
+                    latency_ms: query_facts.latency_ms,
+                    source: sister_core::db::SOURCE_DESKTOP,
+                })
+                .map_err(|e| tracing::warn!("這一題沒記進題庫：{e}"))
+                .ok()
+            })
+            .flatten();
+        Ok(query_id)
+    })
+    .map_err(|e| tracing::warn!("這一題沒記進題庫：{e}"))
+    .ok()
+    .flatten();
     if let Some(planned) = planned_searches {
         if let Some(prepared) = prepared {
             answer.synthesis = synthesize_grounded_answer(

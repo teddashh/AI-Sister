@@ -1228,6 +1228,9 @@ impl Db {
     pub fn open_read_only(path: &Path) -> Result<Self> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("open read-only sqlite at {}", path.display()))?;
+        // 唯讀查詢也要等 recorder／WAL checkpoint 放鎖，避免立即 SQLITE_BUSY。
+        // 只設這條連線的等待時間；不改 journal_mode、synchronous 或 foreign_keys。
+        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
         let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(version == SCHEMA_VERSION, "本機記憶格式尚未就緒");
         Ok(Self { conn })

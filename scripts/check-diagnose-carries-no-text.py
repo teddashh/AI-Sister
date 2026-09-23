@@ -36,7 +36,7 @@ from pathlib import Path
 SOURCE = Path(__file__).resolve().parent.parent / "crates" / "sister-core" / "src" / "diagnose.rs"
 
 # 放得下數字、放不下字。
-PLAIN = {"Millis", "u32", "u64", "i64", "usize", "f64", "bool"}
+PLAIN = {"Millis", "u32", "u64", "i64", "usize", "f64", "bool", "Option<i64>"}
 
 # 例外，以及它為什麼可以是例外。
 #
@@ -137,8 +137,26 @@ def fields_of(block: str) -> list[tuple[str, str, str]]:
     return found
 
 
+def check_ask_failure_translations(source: str) -> bool:
+    app = (SOURCE.parents[3] / "apps/desktop/ui/app.js").read_text(encoding="utf-8")
+    values = set(re.findall(r'\bgaveUp\s*=\s*"((?:\\.|[^"\\])*)"', app))
+    match = re.search(r'fn ask_why\(word: &str\) -> &str\s*\{\s*match word\s*\{(.*?)\n    \}', source, re.S)
+    arms = set(re.findall(r'"((?:\\.|[^"\\])*)"\s*=>', match.group(1))) if match else set()
+    checks = [
+        ("A151 R2 gaveUp 抽取正例：superseded 存在", bool(values) and "superseded" in values),
+        ("A151 R2 ask_why 具名表抽取正例：superseded 存在", match is not None and "superseded" in arms),
+        ("A151 R2 gaveUp 每個代號都有具名中文翻譯", bool(values) and values <= arms),
+    ]
+    for name, ok in checks:
+        print(f"  {'✔' if ok else '✗'} {name}")
+    if values - arms:
+        print("    缺少具名翻譯：" + ", ".join(sorted(values - arms)))
+    return all(ok for _, ok in checks)
+
+
 def main() -> int:
     source = SOURCE.read_text(encoding="utf-8")
+    translations_ok = check_ask_failure_translations(source)
     block = strip_comments(note_enum(source))
 
     fields = fields_of(block)
@@ -182,7 +200,7 @@ def main() -> int:
         return 1
 
     print("\n✔ 線以上每一格，型別上就放不下螢幕上的字。")
-    return 0
+    return 0 if translations_ok else 1
 
 
 if __name__ == "__main__":

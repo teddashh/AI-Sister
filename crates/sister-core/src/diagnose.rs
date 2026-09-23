@@ -380,6 +380,7 @@ fn ask_why(word: &str) -> &str {
         "error" => "出錯了，錯誤訊息在畫面上和底下的 log 尾巴",
         "consent_asked" => "先跳出同意書，這一題還沒答",
         "superseded" => "你又送了下一題，這一題不算了",
+        "brain_error" => "本機那份畫出來了，大腦那一段沒成",
         "not_presented" => "畫面那關沒讓它畫出來",
         "unknown" => "畫面那半有一條出口沒講它是哪一條",
         other => other,
@@ -810,6 +811,13 @@ pub enum Note {
         question_chars: u32,
         /// 從按下去到畫面上出現。
         took_ms: i64,
+        /// 她第一次把東西畫到畫面上，是第幾毫秒。
+        ///
+        /// None 不是 Some(0)：None 是這一題沒有先開口那一段，例如唯讀連線
+        /// 開不起來、schema 未就緒、全停擋住，或正在問同意書。
+        /// Some(ms) 才是她在第 ms 毫秒已經講話了。沒有 CLI 時和 took_ms
+        /// 很接近是對的：她一次就講完，沒有第二段可等。
+        spoke_ms: Option<i64>,
         /// 她講的句子。這是唯一一個自由文字欄位，只會出現在線的下面。
         sentences: Vec<String>,
         sources: Vec<String>,
@@ -939,6 +947,7 @@ impl Notebook {
                     took_ms,
                     sentences,
                     sources,
+                    ..
                 } => Some(Answer {
                     at: *at,
                     question_chars: *question_chars as usize,
@@ -1177,11 +1186,20 @@ impl Notebook {
                 _ => None,
             })
             .collect();
+        let spoke: Vec<i64> = self
+            .notes
+            .iter()
+            .filter_map(|note| match note {
+                Note::Answered { spoke_ms, .. } => *spoke_ms,
+                _ => None,
+            })
+            .collect();
         let flops = self.ask_failures();
         let slowest = took.iter().copied().max();
         let middle = median(took.clone());
         let mut answer_measured = vec![
             m("答了幾題", MeasureValue::Int(took.len() as i64)),
+            m("先開口幾題", MeasureValue::Int(spoke.len() as i64)),
             m("中位數毫秒", MeasureValue::Int(middle.unwrap_or_default())),
             m("最慢那一題", MeasureValue::Int(slowest.unwrap_or_default())),
             /* 「沒答成幾題」無條件出現，0 也要印。
@@ -1191,6 +1209,9 @@ impl Notebook {
              * 分不出那兩件事——而那正是這一格存在的理由。 */
             m("問了沒答成的", MeasureValue::Int(flops.len() as i64)),
         ];
+        if let Some(ms) = median(spoke) {
+            answer_measured.push(m("先開口中位數毫秒", MeasureValue::Int(ms)));
+        }
         if let Some(top) = Self::named_commonest(&flops) {
             answer_measured.push(m("最常沒答成的原因", MeasureValue::AskWhy(top)));
         }
@@ -2748,6 +2769,7 @@ mod notebook_tests {
             at,
             question_chars: 12,
             took_ms,
+            spoke_ms: None,
             sentences: vec!["她講的話".to_string()],
             sources: vec![],
         }
@@ -2925,6 +2947,7 @@ mod notebook_tests {
             at: 1,
             question_chars: 7,
             took_ms,
+            spoke_ms: None,
             sentences: vec!["喏，在這裡。".into()],
             sources: vec!["文字#5443".into()],
         };
@@ -2940,6 +2963,87 @@ mod notebook_tests {
         // 邊界：剛好四秒還算過。
         let edge = book(vec![started(), answered(4_000)]);
         assert_eq!(item(&edge, 4).verdict, Verdict::AsAsked);
+    }
+
+    fn spoke_answer(took_ms: i64, spoke_ms: Option<i64>) -> Note {
+        let mut note = answered(1, took_ms);
+        if let Note::Answered {
+            spoke_ms: measured, ..
+        } = &mut note
+        {
+            *measured = spoke_ms;
+        }
+        note
+    }
+
+    #[test]
+    fn r2_two_spoken_answers_report_count_and_median() {
+        let fourth = item(
+            &book(vec![
+                spoke_answer(6_000, Some(120)),
+                spoke_answer(8_000, Some(360)),
+            ]),
+            4,
+        );
+        assert_eq!(value(&fourth, "先開口幾題"), MeasureValue::Int(2));
+        // 沿用報告既有 median：偶數筆取排序後的上中位數。
+        assert_eq!(value(&fourth, "先開口中位數毫秒"), MeasureValue::Int(360));
+        assert_eq!(fourth.verdict, Verdict::Off);
+    }
+
+    #[test]
+    fn r2_missing_spoke_is_not_zero_in_median() {
+        let fourth = item(
+            &book(vec![
+                spoke_answer(6_000, Some(360)),
+                spoke_answer(8_000, None),
+            ]),
+            4,
+        );
+        assert_eq!(value(&fourth, "先開口幾題"), MeasureValue::Int(1));
+        assert_eq!(value(&fourth, "先開口中位數毫秒"), MeasureValue::Int(360));
+        // 多一題沒有先開口，仍不可拉低中位數。
+        let fourth = item(
+            &book(vec![
+                spoke_answer(6_000, Some(360)),
+                spoke_answer(8_000, None),
+                spoke_answer(9_000, None),
+            ]),
+            4,
+        );
+        assert_eq!(value(&fourth, "先開口中位數毫秒"), MeasureValue::Int(360));
+    }
+
+    #[test]
+    fn r2_no_spoke_reports_zero_and_preserves_r1_verdicts() {
+        // 同一份 notes 的 R1 判決，涵蓋原 match middle 的每一臂與四秒邊界。
+        for (notes, before_r2) in [
+            (vec![], Verdict::NotSeen),
+            (vec![failed(1, "error")], Verdict::NeverLanded),
+            (
+                vec![answered(1, 2_100), answered(2, 3_900)],
+                Verdict::AsAsked,
+            ),
+            (vec![answered(1, 4_000)], Verdict::AsAsked),
+            (vec![answered(1, 4_001)], Verdict::Off),
+            (
+                vec![answered(1, 4_500), answered(2, 6_200), failed(3, "error")],
+                Verdict::Off,
+            ),
+        ] {
+            let fourth = item(&book(notes), 4);
+            assert_eq!(value(&fourth, "先開口幾題"), MeasureValue::Int(0));
+            assert!(
+                !fourth
+                    .measured
+                    .iter()
+                    .any(|m| m.label == "先開口中位數毫秒")
+            );
+            assert_eq!(
+                fourth.verdict, before_r2,
+                "R2 必須保留同一份 notes 的 R1 判決"
+            );
+        }
     }
 
     /// 幾何要看「捲得到多少」，不是看 `scrollHeight - clientHeight`。
@@ -3003,6 +3107,7 @@ mod notebook_tests {
             at,
             question_chars: 5,
             took_ms: 1_000,
+            spoke_ms: None,
             sentences: vec![text.to_string()],
             sources: vec!["文字#1".into()],
         };
@@ -3115,6 +3220,7 @@ mod notebook_tests {
             at: 1_789_222_100_000,
             question_chars: 12,
             took_ms: 1_200,
+            spoke_ms: None,
             sentences: vec!["她講的話".to_string()],
             sources: vec![],
         }]);
@@ -3341,6 +3447,7 @@ mod notebook_tests {
             at: 1_789_222_700_000,
             question_chars: 9,
             took_ms: 2_780,
+            spoke_ms: None,
             sentences: vec!["她的答案".to_string()],
             sources: vec![],
         });

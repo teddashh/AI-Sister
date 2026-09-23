@@ -865,7 +865,7 @@ function observation(measure) {
  * log 尾巴分成兩節——他可以只刪掉其中一節。他打的問題不送，只送字數：那是
  * 他的話，不是她的。
  */
-const noteTheAnswer = observation((question, answer, tookMs) => {
+const noteTheAnswer = observation((question, answer, tookMs, spokeAtMs) => {
   const sentences = [];
   const sources = [];
   for (const sentence of answer?.synthesis?.sentences ?? []) {
@@ -883,6 +883,7 @@ const noteTheAnswer = observation((question, answer, tookMs) => {
     at: Date.now(),
     question_chars: [...String(question ?? "")].length,
     took_ms: tookMs,
+    spoke_ms: spokeAtMs,
     sentences,
     sources,
   });
@@ -6458,6 +6459,7 @@ async function ask(event = null) {
    * 它追的是**產品的流程**（畫面上有沒有出現一份答案），不是簿子有沒有記
    * 到。簿子壞掉是另一件事，⑤ 的「！」為那一種留著。 */
   let gaveUp = "unknown";
+  let spokeAtMs = null;
   let spokeEarly = false;
   try {
     if (invoke === null) throw new Error("這一頁不是在 AI-Sister 裡打開的");
@@ -6493,6 +6495,7 @@ async function ask(event = null) {
             early.readings ?? [],
           );
         });
+        if (spokeEarly) spokeAtMs = Date.now() - askedAt;
       } else {
         releaseNativePresentation(early);
       }
@@ -6551,7 +6554,7 @@ async function ask(event = null) {
       );
       // 畫完了才量得到。這一段不改任何東西——`noteTheBubble` 量完會把
       // `scrollTop` 放回去，他看到的第一眼仍是最上面那一句。
-      noteTheAnswer(question, answer, Date.now() - askedAt);
+      noteTheAnswer(question, answer, Date.now() - askedAt, spokeAtMs);
       // 畫出來了就不算沒答成。
       gaveUp = null;
       setState("idle");
