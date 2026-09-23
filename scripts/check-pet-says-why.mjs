@@ -1164,6 +1164,41 @@ for (const [name, extra] of [
     { hidden: p.hits().hidden, texts: p.hitTexts(), thinking: p.thinking(), line: p.line() });
 }
 
+/*
+ * 那個旗標的不變式，用原始碼結構守，不用情境守。
+ *
+ * `showingProvisional` 的規矩是「答案區的內容只剩那句承諾」。維持它靠三件事：
+ * 唯一畫承諾的 helper 設真、每個**替換**答案區內容的地方清假、renderHits 開頭
+ * 清假。前兩件事跑得到的情境測得出來，**第三個替換端測不到**——
+ * `showConsentCompletion` 只有在「同意書不是被問題叫出來的」那條路才走得到，
+ * 而那條路上沒有 in-flight 的 ask 可以丟例外。
+ *
+ * 我拿掉 `showConsentCompletion` 裡那行 `showingProvisional = false;` 跑過一次
+ * 整支腳本：**880 綠、一條都沒紅**。那一行是對的，但沒有人守它——下一個把它
+ * 當成多餘而刪掉的人不會收到任何警告。所以這裡改成數**寫入端**：哪天多一個
+ * 替換答案區的函式，它就得自己表態。
+ */
+const CONTENT_REPLACERS = [...new Set(
+  [...APP_SOURCE.matchAll(/hitList\.replaceChildren\(/gu)]
+    .map(m => APP_FUNCTIONS.find(fn => m.index >= fn.start && m.index < fn.end)?.name)
+    .filter(name => name !== undefined),
+)];
+const replacersNotClearing = CONTENT_REPLACERS.filter(name =>
+  !/\bshowingProvisional\s*=\s*false\b/u.test(APP_FUNCTIONS.find(fn => fn.name === name).body));
+const provisionalSetters = [...new Set(
+  [...APP_SOURCE.matchAll(/\bshowingProvisional\s*=\s*true\b/gu)]
+    .map(m => APP_FUNCTIONS.find(fn => m.index >= fn.start && m.index < fn.end)?.name),
+)];
+
+console.log("A151 R5b. 那個旗標的不變式由原始碼結構守著");
+// 抽不到東西的掃描器和「全部都合格」長得一模一樣，所以前提自己先斷言一次。
+check("R5b 真的抽到至少三個替換答案區內容的函式", CONTENT_REPLACERS.length >= 3, CONTENT_REPLACERS);
+check("R5b 每個替換答案區內容的函式都在同一支裡清掉 showingProvisional",
+  replacersNotClearing.length === 0, replacersNotClearing);
+check("R5b 只有 appendProvisionalLine 把 showingProvisional 設成 true",
+  provisionalSetters.length === 1 && provisionalSetters[0] === "appendProvisionalLine",
+  provisionalSetters);
+
 console.log("A150. has-hits 寫入端會在同一個函式重畫對話");
 check("A150 has-hits 寫入端真的抽到至少一個", uniqueHasHitsWriters.length >= 1);
 check("A150 每個 has-hits 寫入端同函式呼叫 paintConversation", writersWithoutPaint.length === 0,
