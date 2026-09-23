@@ -35,7 +35,7 @@ use crate::model::{
 };
 
 /// 目前的 schema 版本。每次改結構就 +1 並附一段 migration。
-pub const SCHEMA_VERSION: i32 = 20;
+pub const SCHEMA_VERSION: i32 = 21;
 
 /// 可以替無人值守 URL 背書的 recorder 來源版本。
 ///
@@ -880,6 +880,39 @@ CREATE INDEX IF NOT EXISTS idx_utterance_day ON utterance(day_key, decision, tom
 CREATE INDEX IF NOT EXISTS idx_utterance_category ON utterance(category, decision, ts, tombstoned_at);
 "#;
 
+/// 同一段只取 (version, id) 最新且未被忘記的版本；呼叫端固定用 card 別名。
+const L2_LATEST_LIVE: &str = "card.tombstoned_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM l2_card AS newer
+                   WHERE newer.segment_core_start = card.segment_core_start
+                     AND newer.tombstoned_at IS NULL
+                     AND (newer.version > card.version
+                          OR (newer.version = card.version AND newer.id > card.id))
+               )";
+
+/// 自帶 content 的 activity 索引，讓測試能直接檢查副本是否清除。
+/// 不用 external content：SELECT 索引時必須讀到副本本身，而不是母表。
+/// UPDATE 包含墓碑與原文清空；不要求每條連線註冊 Rust SQL 函式。
+const MIGRATION_021: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS l2_activity_fts USING fts5(activity, tokenize='trigram');
+CREATE TRIGGER IF NOT EXISTS l2_activity_ai AFTER INSERT ON l2_card
+WHEN new.tombstoned_at IS NULL BEGIN
+  INSERT INTO l2_activity_fts(rowid, activity) VALUES(new.id, new.activity);
+END;
+CREATE TRIGGER IF NOT EXISTS l2_activity_ad AFTER DELETE ON l2_card BEGIN
+  DELETE FROM l2_activity_fts WHERE rowid = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS l2_activity_au AFTER UPDATE ON l2_card BEGIN
+  DELETE FROM l2_activity_fts WHERE rowid = old.id;
+  INSERT INTO l2_activity_fts(rowid, activity)
+    SELECT new.id, new.activity WHERE new.tombstoned_at IS NULL;
+END;
+DELETE FROM l2_activity_fts;
+INSERT INTO l2_activity_fts(rowid, activity)
+  SELECT id, activity FROM l2_card WHERE tombstoned_at IS NULL;
+"#;
+
 const L2_SELECT: &str = "SELECT id, segment_core_start, segment_ref, version, supersedes,
                     activity, entities_json, continues_json, commitments_json,
                     model_confidence, evidence_json, open_questions_json, created_at,
@@ -1419,6 +1452,7 @@ impl Db {
             18 => tx.execute_batch(MIGRATION_018)?,
             19 => tx.execute_batch(MIGRATION_019)?,
             20 => tx.execute_batch(MIGRATION_020)?,
+            21 => tx.execute_batch(MIGRATION_021)?,
             // ── 加下一段之前，這兩題一定要問 ──────────────────────────
             //
             // 1. **重跑一次會不會安靜地弄壞東西？** 不是「會不會炸」——炸掉是
@@ -4475,21 +4509,62 @@ impl Db {
         let mut stmt = self.conn.prepare(&format!(
             "{L2_SELECT}
              FROM l2_card AS card
-             WHERE card.tombstoned_at IS NULL
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM l2_card AS newer
-                   WHERE newer.segment_core_start = card.segment_core_start
-                     AND newer.tombstoned_at IS NULL
-                     AND (newer.version > card.version
-                          OR (newer.version = card.version AND newer.id > card.id))
-               )
+             WHERE {L2_LATEST_LIVE}
              ORDER BY card.segment_core_start DESC, card.version DESC, card.id DESC
              LIMIT ?1"
         ))?;
         let rows = stmt.query_map([limit as i64], map_l2_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    /// 依 activity 找每段最新的活卡，按段落由新到舊；第二格表示仍有命中未回傳。
+    /// 空白查詢或零額度與 readings_spanning 一樣回空、不報截斷。
+    ///
+    /// 空白分隔的詞全部要出現；三字以上用 trigram 的連續短語 MATCH，
+    /// 一、兩字在 FTS 自帶的原文上做 LIKE 掃描。短詞不設年代下限，
+    /// 不因其他詞已命中就漏掉兩字中文。萬用字元一律視為字面文字。
+    /// 這些列仍是判讀，不是 L0 證據；保留 evidence_json 供呼叫端沿血緣取證。
+    pub fn search_readings(&self, query: &str, limit: usize) -> Result<(Vec<L2CardRow>, bool)> {
+        let terms: Vec<&str> = query.split_whitespace().collect();
+        if limit == 0 || terms.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+        let mut conditions = Vec::new();
+        let mut values = Vec::new();
+        let long_terms: Vec<&str> = terms
+            .iter()
+            .copied()
+            .filter(|t| t.chars().count() >= 3)
+            .collect();
+        if !long_terms.is_empty() {
+            values.push(fts_query(&long_terms.join(" ")));
+            conditions.push(format!("l2_activity_fts MATCH ?{}", values.len()));
+        }
+        for term in terms.iter().filter(|t| t.chars().count() < 3) {
+            let escaped = term
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            values.push(format!("%{escaped}%"));
+            conditions.push(format!("activity LIKE ?{} ESCAPE '\\'", values.len()));
+        }
+        // 多取一列才判定截斷；先選每段最新版再比內容，舊版命中不能復活。
+        let take = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let sql = format!(
+            "{L2_SELECT} FROM l2_card AS card
+             WHERE {L2_LATEST_LIVE}
+               AND card.id IN (SELECT rowid FROM l2_activity_fts WHERE {})
+             ORDER BY card.segment_core_start DESC, card.version DESC, card.id DESC
+             LIMIT {take}",
+            conditions.join(" AND ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), map_l2_row)?;
+        let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = rows.len() > limit;
+        rows.truncate(limit);
+        Ok((rows, truncated))
     }
 
     /// 現在是否還留著至少一列她記下來的原始內容。
@@ -4551,17 +4626,9 @@ impl Db {
         let mut stmt = self.conn.prepare(&format!(
             "{L2_SELECT}
              FROM l2_card AS card
-             WHERE card.tombstoned_at IS NULL
+             WHERE {L2_LATEST_LIVE}
                AND card.segment_core_start >= ?1
                AND card.segment_core_start < ?2
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM l2_card AS newer
-                   WHERE newer.segment_core_start = card.segment_core_start
-                     AND newer.tombstoned_at IS NULL
-                     AND (newer.version > card.version
-                          OR (newer.version = card.version AND newer.id > card.id))
-               )
              ORDER BY card.segment_core_start DESC, card.version DESC, card.id DESC
              LIMIT ?3"
         ))?;
@@ -4587,17 +4654,9 @@ impl Db {
         if limit == 0 || to <= from {
             return Ok((Vec::new(), false));
         }
-        let latest = "card.tombstoned_at IS NULL
-             AND card.segment_core_start >= ?1
-             AND card.segment_core_start < ?2
-             AND NOT EXISTS (
-                 SELECT 1
-                 FROM l2_card AS newer
-                 WHERE newer.segment_core_start = card.segment_core_start
-                   AND newer.tombstoned_at IS NULL
-                   AND (newer.version > card.version
-                        OR (newer.version = card.version AND newer.id > card.id))
-             )";
+        let latest = format!(
+            "{L2_LATEST_LIVE} AND card.segment_core_start >= ?1 AND card.segment_core_start < ?2"
+        );
         let total: i64 = self.conn.query_row(
             &format!("SELECT COUNT(*) FROM l2_card AS card WHERE {latest}"),
             params![from, to],
@@ -4649,17 +4708,9 @@ impl Db {
         let mut stmt = self.conn.prepare(&format!(
             "{L2_SELECT}
              FROM l2_card AS card
-             WHERE card.tombstoned_at IS NULL
+             WHERE {L2_LATEST_LIVE}
                AND card.segment_core_start >= ?1
                AND card.segment_core_start < ?2
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM l2_card AS newer
-                   WHERE newer.segment_core_start = card.segment_core_start
-                     AND newer.tombstoned_at IS NULL
-                     AND (newer.version > card.version
-                          OR (newer.version = card.version AND newer.id > card.id))
-               )
              ORDER BY
                CASE WHEN card.segment_core_start >= ?3
                     THEN card.segment_core_start - ?3
@@ -8743,6 +8794,227 @@ mod tests {
         Db::open_in_memory().expect("open in-memory db")
     }
 
+    #[test]
+    fn reading_search_finds_chinese_activity_and_only_activity() {
+        let mut db = test_db();
+        let id = insert_test_l2(&mut db, 100, "這段在處理退款申請，客服已確認 DNS 50% a_b");
+        db.conn.execute("UPDATE l2_card SET entities_json = '[\"獨有姓名\"]', commitments_json = '[\"獨有承諾\"]' WHERE id = ?1", [id]).unwrap();
+        for query in [
+            "退款",
+            "退款申請",
+            "退款 DNS",
+            "客服 申請",
+            "50%",
+            "a_b",
+            "%",
+            "款",
+        ] {
+            let (rows, truncated) = db.search_readings(query, 10).unwrap();
+            assert_eq!(
+                rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+                [id],
+                "chinese_activity_hit: {query}"
+            );
+            assert!(!truncated);
+        }
+        for query in [
+            "獨有姓名",
+            "獨有承諾",
+            "退款 不存在",
+            "OR",
+            "\"",
+            "[",
+            "   ",
+        ] {
+            assert!(
+                db.search_readings(query, 10).unwrap().0.is_empty(),
+                "activity_only_literal_query: {query}"
+            );
+        }
+        assert!(db.search_readings("退款", 0).unwrap().0.is_empty());
+        let chunks: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM text_chunks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(chunks, 0, "卡片可獨立命中，不借 L0 命中當錨點");
+    }
+
+    #[test]
+    fn reading_search_latest_versions_and_truncation() {
+        let mut db = test_db();
+        insert_test_l2(&mut db, 100, "退款舊版");
+        let latest = insert_test_l2(&mut db, 100, "退款新版");
+        insert_test_l2(&mut db, 200, "退款已推翻");
+        insert_test_l2(&mut db, 200, "現在處理出貨");
+        let newest = insert_test_l2(&mut db, 300, "退款另一段");
+        let (rows, truncated) = db.search_readings("退款", 20).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            [newest, latest],
+            "latest_version_only"
+        );
+        assert!(!truncated, "exact_hit_count_not_versions");
+        let (rows, truncated) = db.search_readings("退款", 1).unwrap();
+        assert_eq!(rows[0].id, newest);
+        assert!(truncated, "one_more_hit_is_truncated");
+        assert!(
+            !db.search_readings("退款", 2).unwrap().1,
+            "exact_limit_is_complete"
+        );
+        assert!(
+            db.search_readings("退款舊版", 20).unwrap().0.is_empty(),
+            "superseded_match_stays_hidden"
+        );
+        let tied = insert_test_l2(&mut db, 100, "退款同版較大 id");
+        db.conn
+            .execute("UPDATE l2_card SET version = 2 WHERE id = ?1", [tied])
+            .unwrap();
+        assert_eq!(
+            db.search_readings("退款", 20).unwrap().0[1].id,
+            tied,
+            "id_breaks_version_ties"
+        );
+    }
+
+    #[test]
+    fn reading_search_a_dead_newer_version_does_not_hide_live_older() {
+        let mut db = test_db();
+        let live = insert_test_l2(&mut db, 100, "退款仍有效");
+        let dead = insert_test_l2(&mut db, 100, "退款已撤回");
+        db.conn
+            .execute("UPDATE l2_card SET tombstoned_at = 1 WHERE id = ?1", [dead])
+            .unwrap();
+        let rows = db.search_readings("退款", 10).unwrap().0;
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            [live],
+            "dead_newer_does_not_shadow_live"
+        );
+    }
+
+    #[test]
+    fn reading_search_update_and_delete_remove_the_fts_copy() {
+        let mut db = test_db();
+        let id = insert_test_l2(&mut db, 100, "退款原句");
+        db.conn
+            .execute(
+                "UPDATE l2_card SET activity = '出貨新句' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        let copy: String = db
+            .conn
+            .query_row(
+                "SELECT activity FROM l2_activity_fts WHERE rowid = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(copy, "出貨新句", "updated_copy_replaces_original");
+        assert!(db.search_readings("退款原句", 10).unwrap().0.is_empty());
+        db.conn
+            .execute("DELETE FROM l2_card WHERE id = ?1", [id])
+            .unwrap();
+        let copies: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM l2_activity_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(copies, 0, "deleted_copy_has_no_words");
+    }
+
+    #[test]
+    fn reading_search_upgrade_backfills_existing_cards() {
+        let dir = migrate_tmp("l2-search-upgrade");
+        let path = dir.join("v20.db");
+        let id;
+        {
+            let mut db = Db::open(&path).unwrap();
+            db.conn.execute_batch("DROP TRIGGER l2_activity_ai; DROP TRIGGER l2_activity_ad; DROP TRIGGER l2_activity_au; DROP TABLE l2_activity_fts; PRAGMA user_version = 20;").unwrap();
+            id = insert_test_l2(&mut db, 100, "去年處理退款申請");
+            let dead = insert_test_l2(&mut db, 200, "已忘掉的原句");
+            db.conn
+                .execute("UPDATE l2_card SET tombstoned_at = 1 WHERE id = ?1", [dead])
+                .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        for query in ["退款", "退款申請"] {
+            assert_eq!(
+                db.search_readings(query, 10)
+                    .unwrap()
+                    .0
+                    .iter()
+                    .map(|r| r.id)
+                    .collect::<Vec<_>>(),
+                [id],
+                "upgrade_old_activity_searchable: {query}"
+            );
+        }
+        let copies: Vec<String> = db
+            .conn
+            .prepare("SELECT activity FROM l2_activity_fts")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            copies,
+            ["去年處理退款申請"],
+            "backfill_excludes_tombstone_words"
+        );
+    }
+
+    #[test]
+    fn reading_search_export_preserves_live_index_and_forget_clears_exported_copy() {
+        let dir = migrate_tmp("l2-search-export");
+        let mut db = test_db();
+        let id = insert_test_l2(&mut db, 100, "處理退款申請");
+        let before = dir.join("before.db");
+        db.export_to(&before).unwrap();
+        let mut backup = Db::open(&before).unwrap();
+        assert_eq!(
+            backup.search_readings("退款", 10).unwrap().0[0].id,
+            id,
+            "backup_retains_live_index"
+        );
+        backup.forget(0, 200, None).unwrap();
+        let after = dir.join("after.db");
+        backup.export_to(&after).unwrap();
+        let exported = Db::open(&after).unwrap();
+        let copies: i64 = exported
+            .conn
+            .query_row("SELECT COUNT(*) FROM l2_activity_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(copies, 0, "forgotten_export_has_no_fts_words");
+        assert_eq!(
+            db.search_readings("退款", 10).unwrap().0[0].id,
+            id,
+            "backup_forget_does_not_change_source"
+        );
+    }
+
+    #[test]
+    fn reading_search_tokenizer_measurement() {
+        let db = test_db();
+        db.conn.execute_batch("CREATE VIRTUAL TABLE probe_tri USING fts5(text, tokenize='trigram'); CREATE VIRTUAL TABLE probe_uni USING fts5(text, tokenize='unicode61'); INSERT INTO probe_tri VALUES ('這段在處理退款申請'); INSERT INTO probe_uni VALUES ('這段在處理退款申請');").unwrap();
+        for (table, query, expected) in [
+            ("probe_tri", "退款", 0),
+            ("probe_uni", "退款", 0),
+            ("probe_tri", "退款申請", 1),
+            ("probe_uni", "退款申請", 0),
+        ] {
+            let count: i64 = db
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {table} MATCH ?1"),
+                    [fts_query(query)],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, expected, "tokenizer_probe: {table} {query}");
+        }
+    }
+
     fn insert_test_l2(db: &mut Db, segment: Millis, activity: &str) -> i64 {
         db.insert_l2_card(&L2Insert {
             segment_core_start: segment,
@@ -11584,8 +11856,8 @@ mod tests {
     /// 東西砍掉**，再蓋回上一版的版號，也就是一顆真的上一版檔案。
     #[test]
     fn a_database_from_the_previous_release_gets_this_versions_new_tables() {
-        // Schema 19 -> 20 adds assistive_blocks and its frame index.
-        assert_eq!(SCHEMA_VERSION, 20, "更新上一版 schema 的差集");
+        // Schema 19 -> 21: 保留 assistive_blocks 的舊驗收，另測 20 -> 21 的真實差集。
+        assert_eq!(SCHEMA_VERSION, 21, "更新上一版 schema 的差集");
         let dir = migrate_tmp("upgrade");
         let path = dir.join("previous-release.db");
         {
@@ -11595,8 +11867,8 @@ mod tests {
                 .execute_batch("DROP TABLE assistive_blocks;")
                 .expect("退回上一版的結構");
             db.conn
-                .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
-                .expect("退回上一版的版號");
+                .pragma_update(None, "user_version", 19)
+                .expect("退回 assistive_blocks 加入前的版號");
         }
 
         let mut db = Db::open(&path).unwrap_or_else(|e| panic!("上一版的資料庫升不上來：{e:#}"));
@@ -13308,6 +13580,10 @@ mod tests {
             ("text_fts", "text_chunks 的索引"),
             ("text_fts_uni", "text_chunks 的索引"),
             ("text_fts_bi", "text_chunks 的索引"),
+            (
+                "l2_activity_fts",
+                "L2 activity 的可搜尋副本；UPDATE 墓碑與 DELETE 觸發器清除，備份隨 SQLite 一起帶走",
+            ),
         ];
 
         let db = test_db();
