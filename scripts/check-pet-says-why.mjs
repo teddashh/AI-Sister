@@ -163,7 +163,7 @@ function answer(over = {}) {
     presentation_id: null,
     kind: "keywords",
     searched: null,
-    query_id: 7,
+    query_id: null,
     answers: [],
     hits: [],
     // 她自己稍早想過、而這一題用得到的那幾段。出處鍵回查得到 `card:` 靠它。
@@ -750,10 +750,13 @@ async function open(
 }
 
 let failed = 0;
+let passed = 0;
+process.on("exit", () => console.log(`${passed} passed; ${failed} failed`));
 /** 這一輪所有夾具送出去的診斷觀測，不分是哪一個 view。 */
 const everyDiagnoseNote = [];
 
 function check(name, ok, detail) {
+  if (ok) passed++;
   console.log(`  ${ok ? "✔" : "✗"} ${name}`);
   if (!ok) {
     failed++;
@@ -2677,7 +2680,7 @@ console.log("A152 R2. 內容命中的卡片就是一份本機答案");
   const terminal = await open({
     azure_tts_read: AZURE_READY,
     azure_tts_speak: new Error("capture A152 body"),
-    ask: () => ++calls === 1 ? answer({ readings: [card], blind: blind() }) : Promise.reject(new Error("A152 second failed")),
+    ask: () => ++calls === 1 ? answer({ query_id: 7, readings: [card], blind: blind() }) : Promise.reject(new Error("A152 second failed")),
   });
   await terminal.type("退款");
   check("A152 空結果牆：卡片終局沒有空結果或盲點行", terminal.hits().querySelectorAll(".hits-empty, .hits-why").length === 0, terminal.hitTexts());
@@ -2702,6 +2705,63 @@ console.log("A152 R2. 內容命中的卡片就是一份本機答案");
   check("A152 sourceTarget：出處鍵真的捲到卡片", scrolled === 1, scrolled);
   check("A152 無圖不提供看画面按鈕", grounded.hits().querySelector(".reading-evidence") === null);
   check("A152 有成句時 Azure 不重念卡片", azureCalls(grounded).length === 1 && azureCalls(grounded)[0].arg?.text === "你已經送出退款申請。", azureCalls(grounded));
+}
+
+
+{
+  // 這條守的是「升級那一步吃的是真的那幾個集合，而且排在 prepare 前面」。
+  //
+  // **尾逗號不可以寫死。** 原本的針要求 `&mut readings,`，而那個逗號是 rustfmt
+  // 把呼叫折成多行時才加的：把同一個呼叫排成一行（語意一模一樣）就紅，訊息和
+  // 「真的搬到 prepare 後面」那種紅**一字不差**。實測兩刀各紅一條、同一條。
+  // 寫死下限會把「產品變了」和「儀器壞了」混成同一則診斷，所以逗號收成 `,?`：
+  // 現在只剩順序那一種紅得出來，而訊息講的正是順序。
+  const memory = read(join(UI, "../src-tauri/src/main.rs"));
+  check("A153 native promotion uses actual collections before prepare",
+    /present_time_readings\(\s*asked_chapters\.as_ref\(\),\s*&facts,\s*&hits,\s*&mut readings\s*,?\s*\)/u.test(memory) &&
+    memory.indexOf("answer_readings::present_time_readings(") < memory.indexOf("sister_core::grounded_answer::prepare(question"));
+}
+console.log("A153 R1. 先開口與終局分開記帳");
+for (const state of ["thinking", "not_configured"]) {
+  for (const [name, data] of [
+    ["hit", { hits: [hit()] }],
+    ["card", { time_range: { from: 1757290000000, to: 1757300000000, said: "昨天下午" }, chapters: [], readings: [{ card_id: 153, at: 1757299200000, frame_id: null, activity: "那段時間在處理退款" }] }],
+  ]) {
+    const early = answer({ ...data, brain: { state, provider: null } });
+    check(`A153 early ${state} ${name} fixture default null`, early.query_id === null);
+    const p = await open({ ask_local: early, ask: () => new Promise(() => {}) });
+    await p.type("昨天下午在做什麼");
+    check(`A153 early ${state} ${name} no accounting`,
+      !p.hitTexts().join("\n").includes("這一題沒進題庫") && p.hits().querySelector(".mark-toggle") === null, p.hitTexts());
+    if (name === "card") check(`A153 time card ${state} visible without empty wall`,
+      p.hits().querySelector(".reading-card")?.textContent.includes("那段時間在處理退款") &&
+      !p.hitTexts().join("\n").includes("我好像不太知道你在說什麼耶") &&
+      p.hits().querySelectorAll(".hits-empty, .hits-why").length === 0, p.hitTexts());
+  }
+}
+{
+  const p = await open({ ask: answer({ hits: [hit()] }) });
+  await p.type("退款");
+  check("A153 terminal null retains exact explanation", p.hitTexts().includes("（這一題沒進題庫，所以「我本來已經忘了」標不了：可能是設定裡「你問過她什麼」關著，也可能是設定檔讀不回來，還可能是剛剛寫不進資料庫。）"), p.hitTexts());
+  const q = await open({ ask: answer({ query_id: 153, hits: [hit()] }), mark_query: true });
+  await q.type("退款");
+  await q.clickElement(q.hits().querySelector(".mark-toggle"));
+  check("A153 terminal id mark works", q.invokes.some(c => c.cmd === "mark_query" && c.arg?.queryId === 153 && c.arg?.marked === true), q.invokes);
+}
+
+// 同一組背景 DTO；golden 由本輪動手前的 app.js 擷取。
+for (const [name, extra] of [
+  ["chapters", { time_range: { from: 1000, to: 2000, said: "昨天" }, chapters: [chapter()] }],
+  ["hits", { time_range: { from: 1000, to: 2000, said: "昨天" }, chapters: [], hits: [hit()] }],
+  ["no-range", {}],
+]) {
+  const p = await open({ ask: answer({ query_id: 7, ...extra,
+    readings: [{ card_id: 153, frame_id: null, at: 1757299200000, activity: null }] }) });
+  await p.type("昨天");
+  check(`A153 ${name} background invisible`, p.hits().querySelector(".reading-card") === null, p.hitTexts());
+  const actual = JSON.stringify(a152Dom(p.hits()));
+  const expected = read(join(UI, `../../../scripts/fixtures/a153-${name}.json`)).trim();
+  check(`A153 ${name} DOM bytes unchanged`, actual === expected, actual);
 }
 
 // Golden snapshots captured from base 759aa12, before content-card rendering existed.

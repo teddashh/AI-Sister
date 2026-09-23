@@ -175,3 +175,78 @@ fn combined_query_overflow_does_not_demote_matches_to_background() {
     );
     assert!(more);
 }
+
+fn time_only_cards() -> Vec<Reading> {
+    let mut db = Db::open_in_memory().unwrap();
+    let now = 1_757_299_200_000;
+    let asked = db
+        .chapters_for_question_read_only("今天", now)
+        .unwrap()
+        .unwrap();
+    assert!(asked.1.is_empty());
+    insert(&mut db, asked.0.from + 1000, "那段時間在處理退款");
+    let rows = db.readings_spanning(asked.0.from, asked.0.to, 8).unwrap().0;
+    assert_eq!(rows.len(), 1);
+    rows.iter()
+        .map(|r| Reading::from_card(r, ReadingOrigin::Time))
+        .collect()
+}
+
+#[test]
+fn a153_time_only_card_becomes_visible_answer() {
+    let mut readings = time_only_cards();
+    desktop::present_time_readings(
+        Some(&((), Vec::<i32>::new())),
+        &[] as &[i32],
+        &[] as &[i32],
+        &mut readings,
+    );
+    assert_eq!(
+        desktop::Reading::from_core(&readings[0], &Default::default())
+            .activity
+            .as_deref(),
+        Some("那段時間在處理退款")
+    );
+    assert_eq!(
+        desktop::answer_hit_count::<i32, i32>(&[], &[], &readings),
+        1
+    );
+    assert!(!desktop::needs_answer_blind_spots::<i32, i32>(
+        &[],
+        &[],
+        &readings,
+        &desktop::BrainAnswer::not_configured()
+    ));
+}
+
+#[test]
+fn a153_chapters_keep_background_byte_identical() {
+    assert_background_unchanged(Some(&((), vec![1])), &[], &[]);
+}
+#[test]
+fn a153_hits_keep_background_byte_identical() {
+    assert_background_unchanged(Some(&((), vec![])), &[], &[1]);
+}
+#[test]
+fn a153_facts_keep_background_byte_identical() {
+    assert_background_unchanged(Some(&((), vec![])), &[1], &[]);
+}
+#[test]
+fn a153_no_range_keeps_background_byte_identical() {
+    assert_background_unchanged(None, &[], &[]);
+}
+fn assert_background_unchanged(asked: Option<&((), Vec<i32>)>, facts: &[i32], hits: &[i32]) {
+    let mut readings = time_only_cards();
+    let before = serde_json::to_vec(&desktop::Reading::from_core(
+        &readings[0],
+        &Default::default(),
+    ))
+    .unwrap();
+    desktop::present_time_readings(asked, facts, hits, &mut readings);
+    let after = serde_json::to_vec(&desktop::Reading::from_core(
+        &readings[0],
+        &Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(before, after);
+}

@@ -6079,6 +6079,7 @@ function renderHits(
   synthesis = null,
   brain = null,
   readings = [],
+  earlyPass = false,
 ) {
   azureAnswerLine = null;
   azureAnswerButton = null;
@@ -6432,7 +6433,7 @@ function renderHits(
   // 「這一題我本來已經忘了」。**只在她真的給了東西的時候才出現**——一份空手
   // 而回的答案沒有什麼好標的，而一個掛在「我沒看過這件事」底下的「我早就忘了」
   // 按鈕，記下來的會是一次失敗。
-  if (hits.length > 0 || facts.length > 0 || hasChapters || matchedReadings.length > 0) {
+  if (!earlyPass && (hits.length > 0 || facts.length > 0 || hasChapters || matchedReadings.length > 0)) {
     // 沒有題號就標不了，而**這件事要講出來**。以前 `query_id` 是 `null` 只代
     // 表「這次點擊不會記帳」——看不見也無所謂。現在它代表那顆按鈕整個不見，
     // 而那顆按鈕是 Phase 1 第一條退場條件唯一的量法：安靜地少一個禮拜的證據，
@@ -6591,6 +6592,7 @@ async function ask(event = null) {
             early.time_range, early.chapters, early.followup,
             early.closure_notice, early.overview, early.synthesis, early.brain,
             early.readings ?? [],
+            true, // 先開口尚未記帳，與 brain 是否還在想無關。
           );
         });
         if (spokeEarly) spokeAtMs = Date.now() - askedAt;

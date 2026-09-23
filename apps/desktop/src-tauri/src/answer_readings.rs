@@ -75,13 +75,13 @@ mod answer_blind_count_tests {
     }
 }
 
-/// 時間背景只供出處回查；只有被問題打中的卡片帶文字。
+/// 時間背景只供出處回查；被問題打中或指定時段唯一可用的卡片帶文字。
 /// 本機快答還沒有模型正文，因此這些文字本身就是要呈現的答案。
 #[derive(Debug, Serialize)]
 pub(crate) struct Reading {
     pub(crate) card_id: i64,
     pub(crate) frame_id: Option<i64>,
-    /// 只有內容命中才有值，與 core matched 恰好相等。
+    /// 直接作答時才有值，與答案組裝後的 matched 恰好相等。
     pub(crate) activity: Option<String>,
     /// 卡片所屬段落開始時間，用來標示直接呈現的判讀。
     pub(crate) at: i64,
@@ -180,6 +180,24 @@ mod matched_tests {
                     }
                 }
             }
+        }
+    }
+}
+
+/// 只有指定時段沒有章節、原文或事實時，時間卡才直接作答。
+/// 收原集合，避免呼叫端把「有時間」誤接成「有章節」。
+pub(crate) fn present_time_readings<R, C, F, H>(
+    asked_chapters: Option<&(R, Vec<C>)>,
+    facts: &[F],
+    hits: &[H],
+    readings: &mut [sister_core::grounded_answer::Reading],
+) {
+    if asked_chapters.is_some_and(|(_, chapters)| chapters.is_empty())
+        && facts.is_empty()
+        && hits.is_empty()
+    {
+        for reading in readings {
+            reading.matched = true;
         }
     }
 }
