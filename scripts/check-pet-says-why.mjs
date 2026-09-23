@@ -2837,6 +2837,35 @@ for (const [name, supplied] of [["null", null], ["空陣列", blind({ chunks: 10
   check("R2.provisional 只留先開口句、不畫收合區", p.hits().querySelectorAll(".hits-why-toggle, .hits-why-lines, .hits-why-disclosure, .hits-why").length === 0 && p.hits().querySelector(".hits-empty")?.textContent === "我好像不太知道你在說什麼耶，我再認真想一下。", p.hitTexts());
 }
 
+// 這一條守的是**整支假瀏覽器看不到的那一格**：它沒有版面引擎，
+// `hidden` 在這裡永遠等於「收起來了」。真的瀏覽器不是——UA 的 `[hidden]`
+// 是一條優先權極低的 `display: none`，任何一條自訂的 `display` 都壓得過它。
+// 這棟房子被咬過一次（`styles.css` 的 `.avatar[hidden]` 那一段就是收據），
+// 而那一次的症狀正是「每一條斷言都說收起來了，畫面上攤開著」。
+//
+// 判準看的是 CSS 原始碼，不是行為，所以它先證明自己不是一支空工具：
+// 剖析得到夠多規則、而且那根針真的打得到東西。
+console.log("A153 R2. 收合靠的是原生 hidden，所以沒有人可以給它 display");
+{
+  const css = read(join(UI, "styles.css")).replace(/\/\*[\s\S]*?\*\//gu, "");
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/gu)].map((m) => ({
+    sel: m[1].trim().replace(/\s+/gu, " "),
+    body: m[2].replace(/\s+/gu, " "),
+  }));
+  const setsDisplay = (r) => /(^|[\s;])display\s*:/u.test(r.body);
+  const displayRules = rules.filter(setsDisplay);
+  check("R2.css 前提：真的剖析到規則", rules.length > 100, rules.length);
+  check("R2.css 前提：display 這根針打得到東西", displayRules.length > 5, displayRules.length);
+  const couldHitCollapsed = (r) =>
+    r.sel.split(",").some((part) => {
+      const last = part.trim().split(/[\s>+~]+/u).filter(Boolean).pop() ?? "";
+      return last === "ul" || last === "*" || last.includes("hits-why-lines");
+    });
+  const offenders = displayRules.filter(couldHitCollapsed);
+  check("R2.css 收起來的那份清單沒有被任何 display 規則壓過",
+    offenders.length === 0, offenders.map((r) => `${r.sel} { ${r.body} }`));
+}
+
 console.log("54. Azure ready 時最新答案完成自動送一次；只有 trusted click 能手動重播");
 {
   const p = await open({
