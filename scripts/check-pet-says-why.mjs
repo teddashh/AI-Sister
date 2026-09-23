@@ -1109,6 +1109,61 @@ console.log("A151 R3. 先開口空手時不先斷言沒有");
   finalChecks(twoTrips, "R3 5 第二張");
 }
 
+console.log("A151 R5. 承諾必須有結果");
+for (const [name, extra] of [
+  ["空手", { hits: [] }],
+  ["空總覽", { kind: "memory_overview", overview: { kind: "empty" } }],
+]) {
+  let rejectAsk;
+  const p = await open({
+    ask_local: answer({ ...extra, brain: { state: "thinking", provider: "Grok CLI" } }),
+    ask: () => new Promise((_, reject) => { rejectAsk = reject; }),
+  });
+  await p.type("字面查不到的問題");
+  check(`R5 ${name} 1 前提：先開口只有承諾且正式回答 pending`,
+    typeof rejectAsk === "function" && p.hitTexts().length === 1 &&
+    p.hitTexts()[0].includes("我再認真想一下"), p.hitTexts());
+  rejectAsk(new Error("CLI 沒有回來"));
+  await tick(40);
+  const text = p.hitTexts().join("\n");
+  check(`R5 ${name} 2：throw 解除承諾`, !text.includes("我再認真想一下"), text);
+  check(`R5 ${name} 3：throw 明講這一題我沒答成`, text.includes("這一題我沒答成。"), text);
+  // 不只排除長句：必須真的出現失敗結果，避免承諾未解除時真空通過。
+  check(`R5 ${name} 4：失敗只用短句不冒稱上一題有幾筆`,
+    p.hitTexts().length === 1 && text === "這一題我沒答成。" && !text.includes("底下原本那幾筆是上一題的"), text);
+  check(`R5 ${name} 5：無本機答案記 error 而非 brain_error`,
+    p.diagnoseNotes.some(n => n.why === "error") && !p.diagnoseNotes.some(n => n.why === "brain_error"), p.diagnoseNotes);
+  check(`R5 ${name} 6：失敗後停止思考秒數`, p.thinking() === null, p.thinking());
+}
+{
+  const p = await open({
+    ask_local: answer({ hits: [hit({ snippet: "R5_KEEP_LOCAL" })], brain: { state: "thinking", provider: "Grok CLI" } }),
+    ask: new Error("CLI 沒有回來"),
+  });
+  await p.type("有本機答案");
+  check("R5 7：本機答案仍在、不冒充沒答成且記 brain_error",
+    !p.hits().hidden && p.hitTexts().join("\n").includes("R5_KEEP_LOCAL") &&
+    !p.hitTexts().join("\n").includes("這一題我沒答成") &&
+    p.diagnoseNotes.some(n => n.why === "brain_error") && !p.diagnoseNotes.some(n => n.why === "error"),
+    { texts: p.hitTexts(), notes: p.diagnoseNotes });
+}
+{
+  let rejectAsk;
+  const p = await open({
+    ask_local: answer({ brain: { state: "thinking", provider: "Grok CLI" } }),
+    ask: () => new Promise((_, reject) => { rejectAsk = reject; }),
+  });
+  await p.type("收起等待中的問題");
+  await p.key("Escape");
+  rejectAsk(new Error("R5 收起後 CLI 沒有回來"));
+  await tick(40);
+  check("R5 Esc：收起後失敗不彈回、內容換結果、秒數停且角落報錯",
+    p.hits().hidden && !p.body().classList.contains("has-hits") &&
+    p.hitTexts().join("\n") === "這一題我沒答成。" && p.thinking() === null &&
+    p.line().includes("R5 收起後 CLI 沒有回來"),
+    { hidden: p.hits().hidden, texts: p.hitTexts(), thinking: p.thinking(), line: p.line() });
+}
+
 console.log("A150. has-hits 寫入端會在同一個函式重畫對話");
 check("A150 has-hits 寫入端真的抽到至少一個", uniqueHasHitsWriters.length >= 1);
 check("A150 每個 has-hits 寫入端同函式呼叫 paintConversation", writersWithoutPaint.length === 0,
