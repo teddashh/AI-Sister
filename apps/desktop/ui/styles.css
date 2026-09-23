@@ -1215,9 +1215,30 @@ body.has-consent-guide .answer-bubble {
   user-select: text;
 }
 
-/* 「我沒看到過」底下那幾句「但也可能是因為……」。比那句話再淡一階：它們是
-   註腳，不是答案；但也不能淡到看不見——這是整個畫面上唯一會讓他知道
-   「東西可能在，只是我不准看」的地方。 */
+/* 空手時的理由預設收起，按「為什麼？」才展開。 */
+.hits-why-disclosure {
+  text-align: center;
+}
+.hits-why-toggle {
+  background: transparent;
+  border: 1px solid var(--letter-accent);
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  margin: 0 0 6px;
+  padding: 4px 10px;
+}
+.hits-why-toggle:focus-visible {
+  outline: 2px solid var(--letter-accent);
+  outline-offset: 2px;
+}
+.hits-why-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
 .hits-why {
   font-size: 11.5px;
   line-height: 1.6;

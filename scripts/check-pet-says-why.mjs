@@ -2789,6 +2789,54 @@ for (const state of ["thinking", "not_configured"]) {
   check("A152 接線：題庫命中與盲點使用同一組 readings", memory.includes("hits: answer_hit_count(&facts, &hits, &readings)") && memory.includes("needs_answer_blind_spots(&facts, &hits, &readings, &brain)"), memory);
 }
 
+console.log("A153 R2. 空手理由按需展開，正文與朗讀仍只有一句");
+{
+  const p = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("capture R2 body"),
+    ask: answer({ blind: blind({ chunks: 10, ever_recorded: true,
+      excluded: [["excluded app: private", 2]], paused_episodes: 3 }) }),
+  });
+  await p.type("沒有命中的問題");
+  const root = p.hits();
+  const empty = root.querySelector(".hits-empty");
+  const toggle = root.querySelector(".hits-why-toggle");
+  const lines = root.querySelector(".hits-why-lines");
+  const reasons = root.querySelectorAll(".hits-why");
+  check("R2.1 主句直接可見且在收合容器外", empty?.parentNode === root && empty?.hidden === false && root.hidden === false && empty?.textContent === "我記得的東西裡沒有這件事。", p.hitTexts());
+  check("R2.2 按鈕存在且文字正好為什麼？", toggle?.textContent === "為什麼？", toggle?.textContent);
+  check("R2.2k 原生鍵盤按鈕可用", toggle?.tag === "button" && toggle?.type === "button" && toggle?.disabled === false && toggle.hidden === false && toggle.parentNode?.hidden === false, toggle?.tag);
+  check("R2.3 理由在 hidden 容器內且 aria 收起", lines?.hidden === true && toggle?.dataset["aria-expanded"] === "false" && reasons.length === 2 && reasons.every((line) => line.parentNode === lines), lines?.hidden);
+  check("R2.3text 理由逐字保留且順序不變", JSON.stringify(reasons.map((line) => line.textContent)) === JSON.stringify([
+    "不過你的排除規則（和自動防線）擋掉過東西（excluded app: private 2 段）——在那裡面的我本來就不會知道。",
+    "我也被暫停過 3 次，那幾段是空的。",
+  ]), reasons.map((line) => line.textContent));
+  await p.clickElement(toggle);
+  check("R2.4a 點一下展開且 aria 同步", lines?.hidden === false && toggle?.dataset["aria-expanded"] === "true", lines?.hidden);
+  await p.clickElement(toggle);
+  check("R2.4b 再點一次收回且 aria 同步", lines?.hidden === true && toggle?.dataset["aria-expanded"] === "false", lines?.hidden);
+  await p.clickElement(toggle, { trusted: false });
+  check("R2.5a 合成 click 也能展開（shot 契約）", lines?.hidden === false && toggle?.dataset["aria-expanded"] === "true", lines?.hidden);
+  await p.clickElement(toggle, { trusted: false });
+  check("R2.5b 合成 click 也能收回", lines?.hidden === true && toggle?.dataset["aria-expanded"] === "false", lines?.hidden);
+  const bodies = root.querySelectorAll("[data-azure-answer-body]");
+  check("R2.7 DOM 正文只有 hits-empty，理由及祖先沒有正文標記", bodies.length === 1 && bodies[0] === empty && reasons.length === 2 && reasons.every((line) => !Object.hasOwn(line.dataset, "azureAnswerBody")), bodies.map((line) => line.className));
+  check("R2.7send 展開收回後 Azure 仍只送主句一次", azureCalls(p).length === 1 && azureCalls(p)[0].arg?.text === "我記得的東西裡沒有這件事。", azureCalls(p));
+  await p.clickElement(toggle);
+  await p.type("再問一次");
+  check("R2.reset 新答案重新收起", root.querySelector(".hits-why-lines")?.hidden === true && root.querySelector(".hits-why-toggle")?.dataset["aria-expanded"] === "false");
+}
+for (const [name, supplied] of [["null", null], ["空陣列", blind({ chunks: 10, ever_recorded: true })]]) {
+  const p = await open({ ask: answer({ blind: supplied }) });
+  await p.type("空理由");
+  check(`R2.6 ${name} 整顆按鈕及容器不出現`, p.hits().querySelectorAll(".hits-why-toggle, .hits-why-lines, .hits-why-disclosure").length === 0, p.hitTexts());
+}
+{
+  const p = await open({ ask_local: answer({ brain: { state: "thinking", provider: "codex" }, blind: blind() }), ask: () => new Promise(() => {}) });
+  await p.type("先開口");
+  check("R2.provisional 只留先開口句、不畫收合區", p.hits().querySelectorAll(".hits-why-toggle, .hits-why-lines, .hits-why-disclosure, .hits-why").length === 0 && p.hits().querySelector(".hits-empty")?.textContent === "我好像不太知道你在說什麼耶，我再認真想一下。", p.hitTexts());
+}
+
 console.log("54. Azure ready 時最新答案完成自動送一次；只有 trusted click 能手動重播");
 {
   const p = await open({
