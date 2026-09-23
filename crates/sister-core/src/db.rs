@@ -4552,7 +4552,9 @@ impl Db {
     /// 實測值的時間門檻是這個 repo 踩過的坑（見 `AGENTS.md` §三 第 5 條）。
     ///
     /// 排序是時間新到舊，不是相關度。命中數超過 `limit` 時拿到的是「最新的幾
-    /// 張」而不是「最像的幾張」；等接上答題那條路再決定要不要換。
+    /// 張」而不是「最像的幾張」。答題路維持此順序：trigram 配 CJK 短字串時
+    /// bm25 分數雜訊大，短詞 LIKE 更沒有分數，混排會失去可解釋的順序。
+    /// 內容配額 MATCHED_READINGS 只有 4，預期通常不會超過；相關度排序留待下一刀。
     pub fn search_readings(&self, query: &str, limit: usize) -> Result<(Vec<L2CardRow>, bool)> {
         let terms: Vec<&str> = query.split_whitespace().collect();
         if limit == 0 || terms.is_empty() {

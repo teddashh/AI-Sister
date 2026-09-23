@@ -5920,11 +5920,9 @@ function renderGrounded(synthesis, readings, facts, hits, queryId) {
   /**
    * 這個出處指到哪一筆，以及它在畫面上有沒有自己那一列。
    *
-   * `row` 講的是底下那幾列身上的 `data-evidence-ref`：★ 和原文每一筆都
-   * 掛著一個（見底下那兩個迴圈），判讀沒有——`Reading` 刻意不把文字送過
-   * 來，所以畫面上根本不存在一列可以捲過去。出處鍵沒有圖可以開的時候就
-   * 只剩那條捲動的路，所以這個欄位決定的是「這顆鍵按下去到底還有沒有事
-   * 會發生」。
+   * `row` 對應下方的 `data-evidence-ref`。事實、原文與內容命中的判讀
+   * 都有自己的列；時間背景判讀不送文字，仍然沒有可捲動的列。
+   * 沒有畫面時，只有前者能畫成可捲動的出處鍵。
    */
   const sourceTarget = (reference) => {
     if (reference.startsWith("fact:")) {
@@ -5946,9 +5944,12 @@ function renderGrounded(synthesis, readings, facts, hits, queryId) {
       // 某一版變成「他點的是第一名」那種假資料。
       const id = Number(reference.slice("card:".length));
       const index = readings.findIndex((reading) => reading.card_id === id);
-      return index < 0
-        ? null
-        : { item: readings[index], rank: null, row: false };
+      if (index < 0) return null;
+      const item = readings[index];
+      if (typeof item.activity === "string" && item.activity !== "") {
+        return { item, rank: null, row: true };
+      }
+      return { item, rank: null, row: false };
     }
     return null;
   };
@@ -5992,10 +5993,8 @@ function renderGrounded(synthesis, readings, facts, hits, queryId) {
       // （`sourceLine()`）早就照這條規則寫了，而這裡漏掉了判讀。
       //
       // 這顆鍵按下去只有兩條路：有圖就開圖，沒圖就捲到底下自己那一列。
-      // 判讀兩條都沒有。`frame_id` 是後端拿 `frames_with_image()` 濾過的，而
-      // 只簽第一張同意書（只記字、不留圖）的人是**每一筆**都被濾掉，不是
-      // 零星幾筆；判讀又沒有自己那一列。於是那顆鍵永遠什麼都不會發生，而
-      // 它長得跟真的開得了圖的那幾顆一模一樣。
+      // 時間背景判讀可能兩條都沒有：`frame_id` 經 `frames_with_image()`
+      // 過濾，且沒有自己的列；內容命中的判讀即使沒有圖，仍可捲到卡片原句。
       //
       // 所以不畫成鍵：同一個標籤，用出處那一行說「沒有留下畫面」時的同一
       // 個樣式（`.no-frame`，斜體、暗一點）。標籤本身不可以省掉——「這句是
@@ -6101,9 +6100,10 @@ function renderHits(
   // 先開口那一趟照建構式就是 synthesis: None；唯一非 None 寫入端在 fn ask。
   // 哪天先開口學會自己成句，先讓不變式報錯，不讓成句和空手文案同時出現。
   if (stillThinking && synthesis) throw new Error("先開口那一趟不該帶成句答案");
+  const matchedReadings = readings.filter((r) => typeof r?.activity === "string" && r.activity !== "");
   const foundNothing =
     hits.length === 0 && facts.length === 0 && !hasChapters &&
-    (!hasOverview || overview.kind === "empty");
+    (!hasOverview || overview.kind === "empty") && matchedReadings.length === 0;
   const provisional = stillThinking && foundNothing;
   if ((kind === "memory_overview") !== hasOverview) {
     throw new Error(
@@ -6309,7 +6309,7 @@ function renderHits(
     hitList.append(more);
   }
 
-  if (hits.length === 0 && facts.length === 0 && !hasChapters) {
+  if (hits.length === 0 && facts.length === 0 && !hasChapters && matchedReadings.length === 0) {
     // 第二趟還會改寫問題再查；現在不能先斷言「沒有」，也不提早講盲點。
     // blindLines 保留在終局，先開口即使收到 blind 也只說這一句。
     if (provisional) {
@@ -6362,6 +6362,40 @@ function renderHits(
     }
   }
 
+  if (matchedReadings.length > 0) {
+    const lead = document.createElement("li");
+    lead.className = "hits-note";
+    if (!hasGroundedAnswer) lead.dataset.azureAnswerBody = "";
+    lead.textContent = "你問的這個，我那時候看到的是——";
+    hitList.append(lead);
+  }
+  for (const reading of matchedReadings) {
+    const li = document.createElement("li");
+    li.className = "hit reading-card";
+    li.dataset.evidenceRef = `card:${reading.card_id}`;
+    const activity = document.createElement("p");
+    activity.className = "hit-text";
+    if (!hasGroundedAnswer) activity.dataset.azureAnswerBody = "";
+    activity.textContent = reading.activity;
+    li.append(activity);
+    const meta = document.createElement("p");
+    meta.className = "hit-source";
+    meta.textContent = when(reading.at);
+    if (Number.isSafeInteger(reading.frame_id) && reading.frame_id > 0) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "reading-evidence";
+      button.textContent = "看當時的畫面";
+      button.addEventListener("click", (event) => {
+        if (event?.isTrusted !== true) return;
+        openFrame(reading.frame_id);
+      });
+      meta.append(button);
+    }
+    li.append(meta);
+    hitList.append(li);
+  }
+
   for (const [i, hit] of hits.entries()) {
     const li = document.createElement("li");
     li.className = "hit";
@@ -6398,7 +6432,7 @@ function renderHits(
   // 「這一題我本來已經忘了」。**只在她真的給了東西的時候才出現**——一份空手
   // 而回的答案沒有什麼好標的，而一個掛在「我沒看過這件事」底下的「我早就忘了」
   // 按鈕，記下來的會是一次失敗。
-  if (hits.length > 0 || facts.length > 0 || hasChapters) {
+  if (hits.length > 0 || facts.length > 0 || hasChapters || matchedReadings.length > 0) {
     // 沒有題號就標不了，而**這件事要講出來**。以前 `query_id` 是 `null` 只代
     // 表「這次點擊不會記帳」——看不見也無所謂。現在它代表那顆按鈕整個不見，
     // 而那顆按鈕是 Phase 1 第一條退場條件唯一的量法：安靜地少一個禮拜的證據，
@@ -6450,7 +6484,7 @@ function renderHits(
   // 是上一題的」，而空手而回的那一次底下躺的是「我記得的東西裡沒有這件事。」
   // 加上幾行理由——一筆都沒有。寫死 `true` 的話，下一題失敗會請他去看幾筆
   // 不存在的東西，而**空手而回正是他最可能連問第二次的那一種結果**。
-  showingAnswer = hasGroundedAnswer || hits.length > 0 || facts.length > 0 || hasChapters;
+  showingAnswer = hasGroundedAnswer || hits.length > 0 || facts.length > 0 || hasChapters || matchedReadings.length > 0;
 }
 
 /**

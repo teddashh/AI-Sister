@@ -2208,10 +2208,8 @@ struct Answer {
     hits: Vec<Hit>,
     /// 她自己稍早想過、而這一題用得到的那幾段。
     ///
-    /// 送到畫面上不是為了畫它——畫面現在一列都不印。送它是因為成句答案的
-    /// 每一顆出處鍵都要**回查得到它指的東西**（`renderGrounded` 的
-    /// `sourceTarget`），而 `card:` 這一種以前不存在。少了這一欄，那顆鍵會
-    /// 找不到落點，整份答案被丟掉。
+    /// 內容命中直接畫成卡片列；時間背景只供成句答案的出處鍵回查
+    /// （`renderGrounded` 的 `sourceTarget`）。兩種都保留 `card:` 身分。
     ///
     /// 和 `overview` 分開的理由跟它自己寫的一樣：那一欄是「她知道了什麼」的
     /// 專用總覽，這一欄是這一題的出處清單。
@@ -2232,8 +2230,8 @@ struct Answer {
     /// 很有道理，但它把「她只知道這十個」和「她知道更多、只是沒送過來」壓成
     /// 同一個畫面——而這正是隔壁那一欄存在的全部理由。
     answers_truncated: bool,
-    /// 一筆都沒找到的時候，她**查得到**的那幾個理由。兩邊都有東西時是 `None`
-    /// ——沒答不出來就沒有什麼好解釋的，而且那幾個查詢不必白跑。
+    /// 一筆都沒找到的時候，她**查得到**的那幾個理由。有事實、原文或內容命中
+    /// 判讀時是 `None`，不必計算沒有人需要的盲點。
     ///
     /// 她原本說的是「這件事我沒看到過」，一句斷言；而正確答案可能是「你自己
     /// 叫我不要看那個網站」。SPEC §8.2 的語氣規範講的就是這個。
@@ -2250,68 +2248,14 @@ struct Answer {
     /// 放在最外層而不是塞進 `hits`：L2 是可修正的假設，不是 OCR 原文。兩種東西
     /// 共用一個陣列，renderer 遲早會把其中一種畫成另一種。
     overview: Option<MemoryOverview>,
-    /// 本機候選經 CLI 成句後的答案。`None` 時畫面直接使用下面的本機 facts／hits。
+    /// 本機候選經 CLI 成句後的答案。`None` 時直接呈現 facts／hits 與內容命中的判讀。
     synthesis: Option<GroundedSynthesis>,
     /// 已選的大腦有沒有實際接手這題。畫面只用它給可採取的下一步，不猜 CLI 狀態。
     brain: BrainAnswer,
 }
 
-#[derive(Debug, Serialize)]
-struct BrainAnswer {
-    state: &'static str,
-    provider: Option<String>,
-}
-
-impl BrainAnswer {
-    fn new(state: &'static str, provider: Option<String>) -> Self {
-        Self { state, provider }
-    }
-
-    fn not_configured() -> Self {
-        Self::new("not_configured", None)
-    }
-}
-
-// 只決定是否要算盲點；畫面先開口的措辭由 renderHits 自己決定。
-// 收切片與同一顆 brain，避免另傳一組容易接反的布林。
-fn needs_answer_blind_spots<F, H>(facts: &[F], hits: &[H], brain: &BrainAnswer) -> bool {
-    facts.is_empty() && hits.is_empty() && brain.state != "thinking"
-}
-
-#[cfg(test)]
-mod answer_blind_count_tests {
-    use super::*;
-
-    #[test]
-    fn blind_counts_only_run_for_empty_terminal_answers() {
-        for state in ["thinking", "not_configured", "search_failed", "no_sources"] {
-            for (facts, hits) in [
-                (vec![], vec![]),
-                (vec![1], vec![]),
-                (vec![], vec![1]),
-                (vec![1], vec![1]),
-            ] {
-                let brain = BrainAnswer::new(state, None);
-                let mut count_calls = 0;
-                if needs_answer_blind_spots(&facts, &hits, &brain) {
-                    count_calls += 1;
-                }
-                let expected = match (state, facts.len(), hits.len()) {
-                    ("thinking", _, _) => 0,
-                    (_, 0, 0) => 1,
-                    _ => 0,
-                };
-                assert_eq!(
-                    count_calls,
-                    expected,
-                    "COUNT 呼叫次數：state={state}, facts={}, hits={}",
-                    facts.len(),
-                    hits.len()
-                );
-            }
-        }
-    }
-}
+mod answer_readings;
+use answer_readings::{BrainAnswer, Reading, answer_hit_count, needs_answer_blind_spots};
 
 #[derive(Debug, Serialize)]
 struct GroundedSynthesis {
@@ -2322,16 +2266,6 @@ struct GroundedSynthesis {
 struct GroundedSentence {
     text: String,
     sources: Vec<GroundedSource>,
-}
-
-/// 一張她自己的判讀，送到畫面上只為了讓出處鍵回查得到。
-///
-/// 不帶 `activity`：那句話已經在答案本文裡了（模型把它寫成句子），再送一份
-/// 只會給 renderer 一個可以印出來、而沒有人在守的第二份文字。
-#[derive(Debug, Serialize)]
-struct Reading {
-    card_id: i64,
-    frame_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3168,6 +3102,8 @@ mod grounded_synthesis_tests {
 
     fn reading() -> Reading {
         Reading {
+            activity: None,
+            at: 0,
             card_id: 5,
             frame_id: Some(42),
         }
@@ -3882,10 +3818,14 @@ fn answer_from_memory(
                     (rows, readings_truncated)
                 }
             };
-            let readings = reading_rows
-                .iter()
-                .map(sister_core::grounded_answer::Reading::from_card)
-                .collect::<Vec<_>>();
+            let (readings, readings_truncated) =
+                sister_core::grounded_answer::match_answer_readings(
+                    db,
+                    &retrieval_questions,
+                    reading_rows,
+                    readings_truncated,
+                )
+                .map_err(|e| format!("{e:#}"))?;
             let mut prepared =
                 sister_core::grounded_answer::prepare(question, &readings, &facts, &hits, now)
                     .map_err(|e| format!("{e:#}"))?;
@@ -3931,12 +3871,12 @@ fn answer_from_memory(
         ) = retrieved;
         let query_facts = QueryLogFacts {
             shape: shape.name(),
-            hits: facts.len() + hits.len(),
+            hits: answer_hit_count(&facts, &hits, &readings),
             latency_ms: started.elapsed().as_millis() as i64,
         };
         // 有答案的話這幾個 COUNT 是白跑的——還有第二趟要來的時候也是。
         // thinking 空手時畫面不讀盲點，所以這裡也不算沒有人讀的值。
-        let blind = if needs_answer_blind_spots(&facts, &hits, &brain) {
+        let blind = if needs_answer_blind_spots(&facts, &hits, &readings, &brain) {
             // 比對用的是 `terms`，掃描界線也照 `terms` 判——理由和
             // `sister query` 那邊同一條。
             let asked = sister_core::question::terms(&retrieval_questions[0]);
@@ -4023,10 +3963,7 @@ fn answer_from_memory(
                 .collect(),
             readings: readings
                 .iter()
-                .map(|r| Reading {
-                    card_id: r.card_id,
-                    frame_id: r.frame_id.filter(|id| openable.contains(id)),
-                })
+                .map(|r| Reading::from_core(r, &openable))
                 .collect(),
             time_range: asked_chapters.as_ref().map(|(r, _)| AskedTimeRange {
                 from: r.from,

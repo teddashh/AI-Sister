@@ -333,7 +333,9 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   原文 20。CLI 不取得 DB path、整份資料庫或 screenshot bytes；目前沒有向量索引。
 - 命中的 facts、原文與鄰近 L2 判讀文字依配額選最多 18 筆，再按時間交回同一支 CLI 成句。原問題
   若含時間範圍，以原問題解析出的範圍補入開頭、中段與結尾的 L2；其餘問題從命中時間附近
-  補 L2。答題 CLI 只拿到判讀文字、時間與 `kind=reading`，不外送 L2 的 segment、confidence、author、
+  補 L2。每條本機查詢另比對 L2 activity，內容命中最多四張，優先保留後以時間背景
+  補到八張並按時間排序；同卡只留一次，內容命中優先。內容命中在成句前直接呈現，
+  時間背景不另畫列；沒有內容命中時沿用既有呈現。答題 CLI 只拿到判讀文字、時間與 `kind=reading`，不外送 L2 的 segment、confidence、author、
   continues 或 open questions。送進 CLI 的問題副本最多 2 KiB；nonce 圍欄內的問題與來源
   資料合計最多 24 KiB，單筆來源正文最多 4 KiB，
   app／title／URL 也各自有界。來源裡的控制字元與指令樣文字一律是資料，不能改寫回答契約。

@@ -460,11 +460,13 @@ async function open(
   const playbackTrace = [];
 
   // fake-dom 的 selector 子集刻意很小；這一頁新增的 Azure allowlist 是 attribute
-  // selector。只在真正的 [data-hits] 子樹補上這一種，避免測試自己用 class
+  // selector。只在真正的 [data-hits] 子樹補上正文與出處屬性查詢，避免測試自己用 class
   // denylist 重抄產品邏輯。
   const hitsNode = node("[data-hits]");
   const basicQuerySelectorAll = hitsNode.querySelectorAll.bind(hitsNode);
   hitsNode.querySelectorAll = (selector) => {
+    const evidence = /^\[data-evidence-ref="([^"]+)"\]$/u.exec(selector);
+    if (evidence) return basicQuerySelectorAll("li").filter(n => n.dataset.evidenceRef === evidence[1]);
     if (selector !== "[data-azure-answer-body]") return basicQuerySelectorAll(selector);
     const selected = [];
     const walk = (parent) => {
@@ -2651,6 +2653,82 @@ function azureCalls(page, command = "azure_tts_speak") {
   return page.invokes.filter(({ cmd }) => cmd === command);
 }
 
+console.log("A152 R2. 內容命中的卡片就是一份本機答案");
+{
+  const card = { card_id: 152, frame_id: 42, at: 1_757_299_200_000, activity: "退款申請已送出" };
+  const thinking = { state: "thinking", provider: "Codex" };
+  const p = await open({
+    azure_tts_read: AZURE_READY,
+    ask_local: answer({ readings: [card], brain: thinking }),
+    ask: () => new Promise(() => {}),
+  });
+  await p.type("退款");
+  check("A152 foundNothing：卡片快答不被當成 provisional", p.hits().querySelector(".brain-thinking") !== null, p.hitTexts());
+  check("A152 卡片原句在模型完成前可見", p.hits().querySelector(".reading-card")?.querySelector(".hit-text")?.textContent === card.activity, p.hitTexts());
+  check("A152 快答不送 Azure", azureCalls(p).length === 0, azureCalls(p));
+  const evidence = p.hits().querySelector(".reading-evidence");
+  check("A152 卡片有時間和看畫面按鈕", p.hits().querySelector(".reading-card")?.querySelector(".hit-source")?.textContent.includes("2025") && evidence?.textContent === "看當時的畫面", p.hitTexts());
+  await p.clickElement(evidence, { trusted: false });
+  check("A152 合成 click 不開圖", !p.invokes.some(c => c.cmd === "open_frame"), p.invokes);
+  await p.clickElement(evidence);
+  check("A152 trusted click 開原卡畫面", p.invokes.some(c => c.cmd === "open_frame" && c.arg?.frameId === 42), p.invokes);
+
+  let calls = 0;
+  const terminal = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("capture A152 body"),
+    ask: () => ++calls === 1 ? answer({ readings: [card], blind: blind() }) : Promise.reject(new Error("A152 second failed")),
+  });
+  await terminal.type("退款");
+  check("A152 空結果牆：卡片終局沒有空結果或盲點行", terminal.hits().querySelectorAll(".hits-empty, .hits-why").length === 0, terminal.hitTexts());
+  check("A152 忘記標記：只有卡片仍可標我本來已經忘了", terminal.hits().querySelector(".mark-toggle") !== null, terminal.hitTexts());
+  check("A152 Azure 正文只有一次開場與卡片原句且只送一次", azureCalls(terminal).length === 1 && azureCalls(terminal)[0].arg?.text === "你問的這個，我那時候看到的是——\n退款申請已送出", azureCalls(terminal));
+  await terminal.type("下一題");
+  check("A152 showingAnswer：下一題失敗指出上一題卡片", terminal.hitTexts().some(t => t.includes("上一題的，先收起來了")), terminal.hitTexts());
+
+  const source = { ref: "card:152", label: "我的判讀", frame_id: null };
+  const grounded = await open({
+    azure_tts_read: AZURE_READY,
+    azure_tts_speak: new Error("capture A152 synthesis"),
+    ask: answer({ readings: [{ ...card, frame_id: null }], synthesis: { sentences: [{ text: "你已經送出退款申請。", sources: [source] }] } }),
+  });
+  await grounded.type("退款");
+  const row = grounded.hits().querySelector('[data-evidence-ref="card:152"]');
+  let scrolled = 0;
+  if (row) row.scrollIntoView = () => { scrolled++; };
+  const sourceButton = grounded.hits().querySelector(".grounded-source");
+  check("A152 sourceTarget：無圖內容卡仍有出處鍵及列", row !== null && sourceButton !== null, grounded.hitTexts());
+  if (sourceButton) await grounded.clickElement(sourceButton);
+  check("A152 sourceTarget：出處鍵真的捲到卡片", scrolled === 1, scrolled);
+  check("A152 無圖不提供看画面按鈕", grounded.hits().querySelector(".reading-evidence") === null);
+  check("A152 有成句時 Azure 不重念卡片", azureCalls(grounded).length === 1 && azureCalls(grounded)[0].arg?.text === "你已經送出退款申請。", azureCalls(grounded));
+}
+
+// Golden snapshots captured from base 759aa12, before content-card rendering existed.
+// Serialize the entire answer DOM, including classes, datasets, state and all descendants.
+function a152Dom(node) {
+  return { tag: node.tag, text: node._text, className: node.className,
+    classes: [...node.classList._s].sort(), dataset: node.dataset, hidden: node.hidden,
+    disabled: node.disabled, type: node.type, title: node.title,
+    children: node.children.map(a152Dom) };
+}
+for (const state of ["thinking", "not_configured"]) {
+  const background = { card_id: 152, frame_id: null, at: 1_757_299_200_000, activity: null };
+  const value = answer({ readings: [background], brain: { state, provider: null }, blind: blind() });
+  const p = await open(state === "thinking"
+    ? { ask_local: value, ask: () => new Promise(() => {}) }
+    : { ask: value });
+  await p.type("不存在");
+  const actual = JSON.stringify(a152Dom(p.hits()));
+  const expected = read(join(UI, `../../../scripts/fixtures/a152-background-${state}.json`)).trim();
+  check(`A152 反向 ${state}：只有時間背景時整份答案 DOM 與 759aa12 逐字相同`, actual === expected, actual);
+}
+{
+  const memory = read(MAIN).split("fn answer_from_memory(")[1]?.split("fn ")[0] ?? "";
+  check("A152 接線：answer_from_memory 呼叫內容查詢合併並交給 prepare", /match_answer_readings\(\s*db,\s*&retrieval_questions,\s*reading_rows,\s*readings_truncated,/u.test(memory) && memory.indexOf("match_answer_readings") < memory.indexOf("::prepare("), memory);
+  check("A152 接線：題庫命中與盲點使用同一組 readings", memory.includes("hits: answer_hit_count(&facts, &hits, &readings)") && memory.includes("needs_answer_blind_spots(&facts, &hits, &readings, &brain)"), memory);
+}
+
 console.log("54. Azure ready 時最新答案完成自動送一次；只有 trusted click 能手動重播");
 {
   const p = await open({
@@ -3093,9 +3171,9 @@ console.log("56e. 一句判讀的出處說得出它是判讀");
 console.log("56h. 沒有圖、又沒有自己那一列的判讀，不可以畫成一顆按不動的鍵");
 {
   // 出處鍵按下去只有兩條路：有圖就開圖，沒圖就捲到底下自己那一列
-  // （`data-evidence-ref`）。判讀兩條都沒有——`frames_with_image()` 會把只
+  // （`data-evidence-ref`）。這份時間背景判讀兩條都沒有——`frames_with_image()` 會把只
   // 簽第一張同意書（只記字、不留圖）那個人的 frame_id 濾成 null，而那是
-  // **每一筆**不是零星幾筆；`Reading` 又刻意不把文字送過來，所以畫面上根本
+  // **每一筆**不是零星幾筆；這份時間背景 `Reading` 不帶文字，所以畫面上根本
   // 不存在一列可以捲過去。於是那顆鍵永遠什麼都不會發生，卻長得跟真的開得
   // 了圖的那幾顆一模一樣。`sourceLine()` 那一行早就寫著這條規則：「看起來
   // 能點但點了沒反應」比「看得出來不能點」差。
@@ -3180,7 +3258,7 @@ console.log("56h. 沒有圖、又沒有自己那一列的判讀，不可以畫�
     .map((node) => node.dataset.evidenceRef)
     .filter(Boolean);
   check("而底下那一列真的掛著 fact:9", refs.includes("fact:9"), refs);
-  check("判讀沒有自己那一列（所以上面那格才無處可去）", !refs.includes("card:5"), refs);
+  check("**時間背景**判讀沒有自己那一列（所以上面那格才無處可去）", !refs.includes("card:5"), refs);
 }
 
 console.log("56h-src. 「底下有自己那一列」這句話，兩邊要對得起來");
