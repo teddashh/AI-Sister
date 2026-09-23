@@ -6077,6 +6077,15 @@ function renderHits(
   hitList.replaceChildren();
 
   const hasOverview = overview !== null && overview !== undefined;
+  const hasChapters = Array.isArray(chapters) && chapters.length > 0;
+  // 先開口那一趟只是先開口，不是結論：`ask()` 還在路上，而它會把問題換個說法
+  // 再查一次，常常查得到。所以這一趟空手的時候她不准講「沒有」——講了三十秒後
+  // 就要自己打自己的臉（AGENTS.md §二）。判準讀的是送給畫面的同一顆 `brain`，
+  // 產品裡只有 main.rs 的 BrainPlan::Go 那一臂寫得出 "thinking"。
+  const stillThinking = brain?.state === "thinking";
+  const foundNothing =
+    hits.length === 0 && facts.length === 0 && !hasChapters && !hasOverview && !synthesis;
+  const provisional = stillThinking && foundNothing;
   if ((kind === "memory_overview") !== hasOverview) {
     throw new Error(
       kind === "memory_overview"
@@ -6085,7 +6094,7 @@ function renderHits(
     );
   }
 
-  if (closureNotice) {
+  if (closureNotice && !provisional) {
     const notice = document.createElement("li");
     notice.className = "hits-note";
     notice.textContent = closureNotice;
@@ -6107,7 +6116,8 @@ function renderHits(
       not_configured: "到設定選一個 CLI，大腦才會接手文字問題。",
     };
     const text = messages[brain.state];
-    if (text) {
+    // 空手時「這些是我自己記得的」指著不存在的清單，先不畫這整塊。
+    if (text && !provisional) {
       const status = document.createElement("li");
       status.className = `brain-note brain-${brain.state}`;
       const overviewText = hasOverview ? {
@@ -6130,7 +6140,7 @@ function renderHits(
   if (hasOverview) {
     const hasOverviewAnswer = renderOverview(overview);
 
-    if (followup) {
+    if (followup && !provisional) {
       const aside = document.createElement("li");
       aside.className = "hits-note";
       aside.textContent = followup;
@@ -6163,7 +6173,7 @@ function renderHits(
   //
   // 後端只在**黏過**的時候送這個欄位（剝掉「剛剛那個」留下「優惠方案」是剝對
   // 了，每次都報一句只會讓人學會忽略它），所以這裡有值就一定要講。
-  if (searched) {
+  if (searched && !provisional) {
     const why = document.createElement("li");
     why.className = "hits-note";
     why.textContent = `我拿去比對的是「${searched}」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。`;
@@ -6187,7 +6197,7 @@ function renderHits(
 
   // 日曆範圍是另算的一區。`chapters === null` 時不要說「沒有章節」——那是
   // 沒算過，和算過但切不出來是兩件事。
-  if (timeRange) {
+  if (timeRange && !provisional) {
     const recap = document.createElement("li");
     recap.className = "hits-note";
     recap.textContent = `你問的是「${timeRange.said}」，那段時間是 ${when(timeRange.from)} 到 ${when(timeRange.to)}`;
@@ -6210,7 +6220,7 @@ function renderHits(
     }
   }
 
-  if (followup) {
+  if (followup && !provisional) {
     const aside = document.createElement("li");
     aside.className = "hits-note";
     aside.textContent = followup;
@@ -6266,59 +6276,64 @@ function renderHits(
   // ★ 那一半也會被切掉，而這裡以前什麼都沒說。理由曾經寫成「十個不同答案
   // 代表問題出在問法」——那句話對，但它把「她只知道這十個」和「她知道更多、
   // 只是沒送過來」壓成同一個畫面，而那正是隔壁那一句存在的全部理由。
-  if (factsTruncated) {
+  if (factsTruncated && !provisional) {
     const more = document.createElement("li");
     more.className = "hits-note hits-more";
     more.textContent = "還有別的答案沒列出來——問得再具體一點，或用 sister facts 看全部。";
     hitList.append(more);
   }
 
-  const hasChapters = Array.isArray(chapters) && chapters.length > 0;
-
   if (hits.length === 0 && facts.length === 0 && !hasChapters) {
     const empty = document.createElement("li");
     empty.className = "hits-empty";
     empty.dataset.azureAnswerBody = "";
-    // 「我沒看過這件事」和「我什麼都還沒看過」是兩件不同的事。
-    //
-    // 但問時間卻空手而回，**不是**只有「她還沒錄過東西」這一種解釋——三十行
-    // 上面的 `blindLines()` 自己就列得出另外四種。以前這裡寫死了那一句，於是
-    // 他在時間軸按過「忘掉這一整天」之後回來問「剛剛發生什麼事」，讀到的是
-    //
-    //     我什麼都還沒看到——要先跑 sister record 我才記得住。
-    //     （我錄過，但現在什麼都不剩了——被忘掉了，或是過了保留期。）
-    //
-    // 上下兩行互相打臉，而錯的是**標題**那一行。OCR 斷掉的版本更糟：標題說
-    // 「我什麼都還沒看到」，底下那行說「我看過 12000 張畫面」，然後叫他再去
-    // 錄一天同樣讀不出字的畫面——那正是這個專案已知的主要故障形狀。
-    //
-    // `sister query` 修過同一句（見 ops.rs 裡 `Shape::Recent` 那段註解：
-    // 空手的時候標題不講話，讓 `blind_lines` 講）。這裡是它在視窗這一邊的
-    // 另一半，晚了三個版本。標題只講一件她一定知道的事——手上沒有東西——
-    // 原因交給底下那幾行，它們是照著資料庫算出來的。
-    //
-    // 這一句本來是「這件事我沒看到過。」——一句關於**世界**的斷言，而她
-    // 唯一有資格講的是關於**她自己的紀錄**的話（SPEC §8.2，和 ★ 上面那句
-    // 「我最後看到的是：」同一條紀律）。那個差別不是措辭：東西可能就在螢幕
-    // 上，只是被排除規則擋掉、被暫停跳過，或者 OCR 沒讀出來——最後這一種
-    // 她連數都數不出來，所以下面那幾行理由永遠不會是完整的。
-    //
-    // 「我記得的東西」這幾個字也要看她這次到底翻了多少：只翻了 30 天卻說
-    // 「我記得的東西」，是把十二分之一講成全部（見 `scan_horizon_days`）。
-    empty.textContent =
-      kind === "recent" || kind === "range"
-        ? "我手上一件事都沒有。"
-        : blind?.scan_horizon_days
-          ? "我翻過的那幾段裡沒有這件事。"
-          : "我記得的東西裡沒有這件事。";
-    hitList.append(empty);
+    // 第二趟還會改寫問題再查；現在不能先斷言「沒有」，也不提早講盲點。
+    // blindLines 保留在終局，先開口即使收到 blind 也只說這一句。
+    if (provisional) {
+      empty.textContent = "我好像不太知道你在說什麼耶，我再認真想一下。";
+      hitList.append(empty);
+    } else {
+      // 「我沒看過這件事」和「我什麼都還沒看過」是兩件不同的事。
+      //
+      // 但問時間卻空手而回，**不是**只有「她還沒錄過東西」這一種解釋——三十行
+      // 上面的 `blindLines()` 自己就列得出另外四種。以前這裡寫死了那一句，於是
+      // 他在時間軸按過「忘掉這一整天」之後回來問「剛剛發生什麼事」，讀到的是
+      //
+      //     我什麼都還沒看到——要先跑 sister record 我才記得住。
+      //     （我錄過，但現在什麼都不剩了——被忘掉了，或是過了保留期。）
+      //
+      // 上下兩行互相打臉，而錯的是**標題**那一行。OCR 斷掉的版本更糟：標題說
+      // 「我什麼都還沒看到」，底下那行說「我看過 12000 張畫面」，然後叫他再去
+      // 錄一天同樣讀不出字的畫面——那正是這個專案已知的主要故障形狀。
+      //
+      // `sister query` 修過同一句（見 ops.rs 裡 `Shape::Recent` 那段註解：
+      // 空手的時候標題不講話，讓 `blind_lines` 講）。這裡是它在視窗這一邊的
+      // 另一半，晚了三個版本。標題只講一件她一定知道的事——手上沒有東西——
+      // 原因交給底下那幾行，它們是照著資料庫算出來的。
+      //
+      // 這一句本來是「這件事我沒看到過。」——一句關於**世界**的斷言，而她
+      // 唯一有資格講的是關於**她自己的紀錄**的話（SPEC §8.2，和 ★ 上面那句
+      // 「我最後看到的是：」同一條紀律）。那個差別不是措辭：東西可能就在螢幕
+      // 上，只是被排除規則擋掉、被暫停跳過，或者 OCR 沒讀出來——最後這一種
+      // 她連數都數不出來，所以下面那幾行理由永遠不會是完整的。
+      //
+      // 「我記得的東西」這幾個字也要看她這次到底翻了多少：只翻了 30 天卻說
+      // 「我記得的東西」，是把十二分之一講成全部（見 `scan_horizon_days`）。
+      empty.textContent =
+        kind === "recent" || kind === "range"
+          ? "我手上一件事都沒有。"
+          : blind?.scan_horizon_days
+            ? "我翻過的那幾段裡沒有這件事。"
+            : "我記得的東西裡沒有這件事。";
+      hitList.append(empty);
 
-    // 後端只給事實（排除過幾段、暫停過幾次），句子在這裡組。
-    for (const line of blindLines(blind)) {
-      const li = document.createElement("li");
-      li.className = "hits-why";
-      li.textContent = line;
-      hitList.append(li);
+      // 後端只給事實（排除過幾段、暫停過幾次），句子在這裡組。
+      for (const line of blindLines(blind)) {
+        const li = document.createElement("li");
+        li.className = "hits-why";
+        li.textContent = line;
+        hitList.append(li);
+      }
     }
   }
 
@@ -6343,7 +6358,7 @@ function renderHits(
   // ——而後者是他會下的結論，因為這個視窗就是拿來問她記得什麼的。
   //
   // 講得出下一步才有意義：她這裡沒有第二頁，`sister query` 有 `--limit`。
-  if (truncated) {
+  if (truncated && !provisional) {
     const more = document.createElement("li");
     more.className = "hits-note hits-more";
     // 反引號和角括號留給終端機。這一頁的規矩是直接寫 `sister record`
@@ -6385,10 +6400,13 @@ function renderHits(
 
   // 本機朗讀仍是另一個明確 click。Azure 開關打開且第四張有效時，
   // `ask()` 只會在最新新答案完成後啟動一次；`renderHits()` 自己不觸發出境。
-  hitList.append(answerReadLine());
-  if (azureSpeechEnabled) {
-    azureAnswerLine = answerAzureLine();
-    hitList.append(azureAnswerLine);
+  // 先開口空手只有那一句；朗讀操作等正式答案回來再提供。
+  if (!provisional) {
+    hitList.append(answerReadLine());
+    if (azureSpeechEnabled) {
+      azureAnswerLine = answerAzureLine();
+      hitList.append(azureAnswerLine);
+    }
   }
 
   showAnswerHits();
