@@ -1163,6 +1163,35 @@ for (const [name, extra] of [
     p.line().includes("R5 收起後 CLI 沒有回來"),
     { hidden: p.hits().hidden, texts: p.hitTexts(), thinking: p.thinking(), line: p.line() });
 }
+{
+  // 收起之後那一題**成功**了，氣泡要彈回來——和上面失敗那一條相反，而那是對的。
+  // 理由與 `renderHits` 裡 `showAnswerHits()` 上面那段註解是同一個，第二條斷言
+  // 守的就是那個理由本身：哪天有人加了「重新打開」的控制，它會紅，逼人回來
+  // 重讀，而不是看到兩條分支不對稱就把它們「修」成一樣。
+  let resolveAsk;
+  const p = await open({
+    ask_local: answer({ brain: { state: "thinking", provider: "Grok CLI" } }),
+    ask: () => new Promise((resolve) => { resolveAsk = resolve; }),
+  });
+  await p.type("收起之後會成功的問題");
+  await p.key("Escape");
+  check("A152 收起後成功 1 前提：收起已生效而正式回答仍 pending",
+    p.hits().hidden && typeof resolveAsk === "function",
+    { hidden: p.hits().hidden, texts: p.hitTexts() });
+  resolveAsk(answer({ hits: [hit({ snippet: "A152_ESC_THEN_OK" })] }));
+  await tick(40);
+  check("A152 收起後成功：氣泡彈回來，而且換成這一題真正的答案",
+    !p.hits().hidden && p.body().classList.contains("has-hits") &&
+    p.hitTexts().join("\n").includes("A152_ESC_THEN_OK") &&
+    !p.hitTexts().join("\n").includes("我再認真想一下"),
+    { hidden: p.hits().hidden, texts: p.hitTexts() });
+}
+{
+  const opens = [...APP_SOURCE.matchAll(/hitList\.hidden\s*=\s*false/gu)]
+    .map(m => APP_FUNCTIONS.find(fn => m.index >= fn.start && m.index < fn.end)?.name);
+  check("A152 收起之後只有重畫救得回來：打開答案區的寫入端只有 showAnswerHits 一處",
+    opens.length === 1 && opens[0] === "showAnswerHits", opens);
+}
 
 /*
  * 那個旗標的不變式，用原始碼結構守，不用情境守。
