@@ -75,6 +75,12 @@ fn eight_time_cards_cannot_displace_content_match() {
     assert!(truncated);
 }
 
+/// 同一張卡被時間路和內容路同時撈到，只留一張、而且算內容命中。
+///
+/// **這條守的是「`from_card` 建構時就把 matched 設對了」，不是「去重那一行
+/// 把它救回來」。** `match_answer_readings` 裡那句 `existing.matched = true;`
+/// 今天是 no-op（整行拿掉仍然 10 綠 0 紅，2026-09-23 實測），所以讀到這個
+/// 名字的時候不要以為那一行有人守著——理由寫在它自己上面。
 #[test]
 fn duplicate_time_and_content_card_keeps_match() {
     let mut db = Db::open_in_memory().unwrap();

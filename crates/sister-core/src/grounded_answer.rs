@@ -257,6 +257,21 @@ pub fn match_answer_readings(
     }
     for row in &time_rows {
         if let Some(existing) = selected.iter_mut().find(|r| r.card_id == row.id) {
+            // **這一行今天是 no-op，留著是防禦，不是它在守那個不變式。**
+            //
+            // `selected` 這時候只裝得下內容命中的卡（時間卡在這個迴圈裡才會被
+            // 推進去，而推進去的都先過了上面那個 `ids` / `find`），而它們一律
+            // 由 `from_card(row, ReadingOrigin::Content)` 產生——`matched` 建構
+            // 的當下就是 `true` 了。把整行拿掉是 10 綠 0 紅（2026-09-23 實測）。
+            //
+            // 所以「同一張卡被兩條路撈到要算 matched」這件事，守住它的是
+            // `from_card` 第 217 行那個 `matches!(origin, …)`，不是這裡。
+            // 把這一行**翻面**成 `= false` 會紅，但那是往產品生不出來的方向推，
+            // 紅得對、說得錯——見 `AGENTS.md` §三 關於「紅了不等於被這一行抓到」。
+            //
+            // 留著的條件：哪天內容命中的卡也可能 `matched == false`（例如多了
+            // 第三種 `ReadingOrigin`），這一行就會變成真的在做事。那時候要補一條
+            // 直接針對它的測試，不要再靠翻面當證據。
             existing.matched = true;
         } else if ids.contains(&row.id) {
             // 超過四張內容配額的命中已標 truncated，不能改裝成時間背景再送出。

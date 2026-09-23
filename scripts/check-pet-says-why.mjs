@@ -3258,7 +3258,7 @@ console.log("56h. 沒有圖、又沒有自己那一列的判讀，不可以畫�
     .map((node) => node.dataset.evidenceRef)
     .filter(Boolean);
   check("而底下那一列真的掛著 fact:9", refs.includes("fact:9"), refs);
-  check("判讀沒有自己那一列（所以上面那格才無處可去）", !refs.includes("card:5"), refs);
+  check("**時間背景**判讀沒有自己那一列（所以上面那格才無處可去）", !refs.includes("card:5"), refs);
 }
 
 console.log("56h-src. 「底下有自己那一列」這句話，兩邊要對得起來");
