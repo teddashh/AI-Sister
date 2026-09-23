@@ -109,6 +109,42 @@ if (!hiddenInHtml("[data-hits]")) {
 }
 
 const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 等輸入框上面那一格真的重畫一次，回傳重畫之後的字。
+ *
+ * 底下三條斷言以前是 `await tick(4300)` 然後看一眼。那個寫法藏著一個 race：
+ * 那個秒數是 `setInterval(paintThinking, 1000)` 重畫出來的，**要連跳四次**才跨
+ * 過四秒線；而取樣用的 `tick()` 是一個**只跳一次**的 `setTimeout`。兩支排在同
+ * 一個 event loop 上，機器一忙，要跳四次的那支落後得多——取樣就落在第三跳和第
+ * 四跳之間，讀到還沒有數字的「思考中…」。
+ *
+ * 餘裕是算得出來的，而且很小：⑪ 那一組取樣在第二題送出後 1200+3600 = 4800 ms，
+ * 第四跳排在 4000 ms，所以**最多**容得下 800 ms 的落後；上面那一組取樣在
+ * 60+4300 = 4360 ms，只容得下 **360 ms**。兩個都還要再扣掉「`p.type()` 被呼叫」
+ * 到「`startThinking()` 真的跑到」之間那一段，所以是上界不是實測值。
+ *
+ * 這不是新的：`v0.1.0-alpha.150` 之前就會偶發紅，而 2026-09-23 一天之內讓三輪
+ * 派工白跑（同一族三條都中過）。
+ *
+ * 改成等「重畫真的發生」：`from` 是重畫之前那一格的字，等到它**變了**才回來。
+ * 等不到就逾時，回傳的還是 `from`，呼叫端的斷言照樣紅。原本守的三件事一件都
+ * 沒少——數字是哪一題的（呼叫端自己斷言值）、計時器還活著（死了就逾時）、
+ * 以及確實跨過了一次重畫（這個函式等的就是那一次）。
+ *
+ * **`from` 要傳現況，不要傳寫死的「思考中…」。** 起算點沒跟著新題目走的那個
+ * bug，會讓畫面在取樣之前就已經有數字；寫死的話這個迴圈會立刻回來、把那個錯
+ * 的數字當成「重畫過了」交出去，那一刀就再也打不紅——修法會把偵測器一起刪掉。
+ */
+const awaitRepaint = async (p, from, budgetMs = 8000) => {
+  const deadline = Date.now() + budgetMs;
+  let now = p.thinking();
+  while (now === from && Date.now() < deadline) {
+    await tick(50);
+    now = p.thinking();
+  }
+  return now;
+};
 const nativeSetInterval = globalThis.setInterval.bind(globalThis);
 const nativeClearInterval = globalThis.clearInterval.bind(globalThis);
 
@@ -1292,8 +1328,7 @@ console.log("③ 送出去了他就看得到，等久了才多一個秒數");
   await tick(60);
   check("按下去就看得到「思考中…」", p.thinking() === "思考中…", p.thinking());
   check("而她的泡泡裡還是她自己的話", p.line().includes("想一下"), p.line());
-  await tick(4300);
-  const late = p.thinking();
+  const late = await awaitRepaint(p, p.thinking());
   check("等久了會多一個秒數", /^思考中… \d+ 秒$/u.test(late ?? ""), late);
   check("那個秒數是真的在數", Number(/(\d+)/u.exec(late ?? "")?.[1] ?? 0) >= 4, late);
   await p.repaint();
@@ -1429,12 +1464,37 @@ console.log("⑪ 那個秒數數的是這一題，不是上一題");
   });
   void p.type("第一題");
   await tick(3800);
+  // 第二題送出的時刻。底下那條斷言的期望值是從這裡算出來的，不是寫死的——
+  // 見那一段的理由。
+  const secondAskedAt = Date.now();
   void p.type("第二題");
   await tick(1200); // t=5000：第二題才 1.2 秒大，還不到那條四秒線
   check("還在想第二題", p.line().includes("想一下") || p.line().includes("在聽"), p.line());
   check("第二題還沒到四秒，就不該有數字", p.thinking() === "思考中…", p.thinking());
-  await tick(3600); // t=8600：第二題 4.8 秒大——第一題已經 8.6 秒了
-  check("過線之後數的是第二題那 4 秒", p.thinking() === "思考中… 4 秒", p.thinking());
+  // 取樣點不是 `tick()` 猜的，是等重畫真的發生（見 `awaitRepaint`）。
+  //
+  // **期望值也不寫死。** 以前這裡是 `p.thinking() === "思考中… 4 秒"`，而那個
+  // `4` 綁著一件沒有人承諾過的事：重畫**剛好**落在 4000–5000 ms 那一格裡。
+  // 機器一卡，第四跳整格跳過去印 5——產品一個字都沒錯（它印的一直是真的秒數），
+  // 紅的是測試自己多加的那個假設。
+  //
+  // 改成拿測試自己的碼錶對：`expected` 是**第二題**到現在的秒數，而畫面上那個
+  // 數字必須跟它對得起來（差一格，因為讀到的那次重畫發生在取樣之前）。
+  // 這樣就完全不管它是第幾跳：
+  //
+  //   - 起算點沒跟著新題目走 → 畫面印的是**第一題**的年紀，比 `expected` 多 3 秒以上 → 紅。
+  //   - 計時器死掉 → 逾時，`crossed` 還是沒有數字的那串 → `NaN` → 紅。
+  //   - 機器卡到第四跳晚了一整秒 → 畫面 5、`expected` 也 5 → 綠，本來就該綠。
+  //
+  // `>= 4` 保留的是另一件事：它真的跨過了那條四秒線才開始印數字。
+  const crossed = await awaitRepaint(p, p.thinking());
+  const crossedSecs = Number(/^思考中… (\d+) 秒$/u.exec(crossed ?? "")?.[1] ?? NaN);
+  const expected = Math.floor((Date.now() - secondAskedAt) / 1000);
+  check(
+    "過線之後數的是第二題那 4 秒",
+    crossedSecs >= 4 && Math.abs(crossedSecs - expected) <= 1,
+    { crossed, expected },
+  );
 }
 
 console.log("⑪b 全停下來的時候，那個秒數不可以繼續數");
