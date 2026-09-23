@@ -1224,6 +1224,15 @@ impl Db {
         Self::init(conn)
     }
 
+    /// 先開口只讀現有 schema，不建立資料庫、不執行 migration。
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("open read-only sqlite at {}", path.display()))?;
+        let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        anyhow::ensure!(version == SCHEMA_VERSION, "本機記憶格式尚未就緒");
+        Ok(Self { conn })
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }
@@ -4142,18 +4151,45 @@ impl Db {
         if from_ts >= to_ts {
             return Ok(Vec::new());
         }
-        let pad = crate::segment::LOOKAROUND_MS;
-        let stream = self.segment_events(from_ts.saturating_sub(pad), to_ts.saturating_add(pad))?;
-        let raw: Vec<crate::segment::Segment> = crate::segment::segment(&stream)
-            .into_iter()
-            .filter(|s| s.core_started_at >= from_ts && s.core_started_at < to_ts)
-            .collect();
+        let raw = self.raw_chapters_for_range(from_ts, to_ts)?;
         // 卡住偵測看的是演算法自己切的活動，不看人改過的章節。
         self.replace_stuck(from_ts, to_ts, &raw)?;
         let edits = self.segment_edits_overlapping(from_ts, to_ts)?;
         let kept = crate::segment_edit::apply_edits(raw, &edits);
         self.replace_segments(from_ts, to_ts, &kept)?;
         Ok(kept)
+    }
+
+    fn raw_chapters_for_range(
+        &self,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<Vec<crate::segment::Segment>> {
+        if from_ts >= to_ts {
+            return Ok(Vec::new());
+        }
+        let pad = crate::segment::LOOKAROUND_MS;
+        let stream = self.segment_events(from_ts.saturating_sub(pad), to_ts.saturating_add(pad))?;
+        let raw: Vec<crate::segment::Segment> = crate::segment::segment(&stream)
+            .into_iter()
+            .filter(|s| s.core_started_at >= from_ts && s.core_started_at < to_ts)
+            .collect();
+        Ok(raw)
+    }
+
+    /// 和正式問答共用斷句與使用者編輯，只計算，不保存 segment 或 stuck。
+    pub fn chapters_for_question_read_only(
+        &self,
+        question: &str,
+        now: Millis,
+    ) -> Result<Option<(crate::question::TimeRange, Vec<crate::activity::Activity>)>> {
+        let Some(range) = crate::question::time_range(question, now) else {
+            return Ok(None);
+        };
+        let raw = self.raw_chapters_for_range(range.from, range.to)?;
+        let edits = self.segment_edits_overlapping(range.from, range.to)?;
+        let segments = crate::segment_edit::apply_edits(raw, &edits);
+        Ok(Some((range, crate::activity::group(&segments))))
     }
 
     /// 最新一場尚未收尾的錄製起點。Presence 已先證明 recorder 活著；這裡只提供
@@ -10470,6 +10506,64 @@ mod tests {
                 url: url.map(|u| u.into()),
                 ..Default::default()
             },
+        }
+    }
+
+    #[test]
+    fn read_only_chapters_match_saved_chapters_without_writing() {
+        let dir = TmpDir::new("read-only");
+        let path = dir.join("memory.db");
+        assert!(Db::open_read_only(&path).is_err());
+        assert!(!path.exists(), "先開口不得建立空資料庫");
+        let mut db = Db::open(&path).unwrap();
+        let now = crate::now_ms();
+        let range = crate::question::time_range("今天", now).unwrap();
+        let session = db.start_session("test", "0.0.1").unwrap();
+        for event in [
+            focus_at(range.from + 60_000, "code.exe", "db.rs", None),
+            focus_at(range.from + 180_000, "chrome.exe", "mail", None),
+        ] {
+            db.insert_focus(session, &event).unwrap();
+        }
+        let reader = Db::open_read_only(&path).unwrap();
+        let before = reader.conn.total_changes();
+        let early = reader
+            .chapters_for_question_read_only("今天", now)
+            .unwrap()
+            .unwrap();
+        assert!(!early.1.is_empty(), "先開口必須真的算出章節");
+        assert_eq!(reader.conn.total_changes(), before);
+        let stored: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, 0, "先開口不保存章節");
+        assert!(
+            reader.conn.execute("DELETE FROM segment", []).is_err(),
+            "連線本身拒絕寫入"
+        );
+        let final_answer = db.chapters_for_question("今天", now).unwrap().unwrap();
+        assert_eq!(early, final_answer);
+        assert!(
+            reader
+                .chapters_for_question_read_only("電話", now)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_only_open_does_not_migrate_old_or_future_schema() {
+        let dir = TmpDir::new("read-only");
+        for version in [1, SCHEMA_VERSION + 1] {
+            let path = dir.join(&format!("schema-{version}.db"));
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+            assert!(Db::open_read_only(&path).is_err());
+            let kept: i32 = conn
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap();
+            assert_eq!(kept, version);
         }
     }
 

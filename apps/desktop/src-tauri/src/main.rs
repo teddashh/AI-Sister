@@ -3215,6 +3215,54 @@ mod answer_cli_selection_tests {
     use super::*;
     use sister_core::provider_cli::{BrainProvider, bridge_args};
 
+    fn selected_cli() -> ConfiguredAnswerCli {
+        ConfiguredAnswerCli {
+            command: "sister".into(),
+            args: vec![],
+            label: "設定選的 CLI".into(),
+        }
+    }
+
+    #[test]
+    fn brain_plan_without_a_cli_is_not_configured() {
+        let plan = decide_brain_plan(None, Some(Path::new("memory")), &Default::default(), "電話");
+        assert!(matches!(plan, BrainPlan::Skip(b) if b.state == "not_configured"));
+    }
+
+    #[test]
+    fn brain_plan_without_cloud_permission_requires_consent() {
+        let plan = decide_brain_plan(
+            Some(selected_cli()),
+            Some(Path::new("memory")),
+            &Default::default(),
+            "電話",
+        );
+        assert!(matches!(plan, BrainPlan::Skip(b) if b.state == "consent_required"));
+    }
+
+    #[test]
+    fn brain_plan_uses_the_configured_cli_with_cloud_permission() {
+        let consent = sister_core::consent::Consent {
+            version: sister_core::consent::VERSION,
+            local_recording: Some(1),
+            cloud_reading: Some(1),
+            cloud_reading_terms_version: sister_core::consent::CLOUD_READING_TERMS_VERSION,
+            ..Default::default()
+        };
+        let selected = selected_cli();
+        let label = selected.label.clone();
+        let plan = decide_brain_plan(Some(selected), Some(Path::new("memory")), &consent, "電話");
+        assert!(matches!(plan, BrainPlan::Go { cli, .. } if cli.label == label));
+    }
+
+    /// 只釘住具名判斷，守不住 ask_local 接錯 stage 或 brain。
+    /// 產品接線的牙齒在 JS 閘門；這條不能冒充整條本機問答的唯讀驗證。
+    #[test]
+    fn local_stage_does_not_write_to_the_database() {
+        assert!(!AskStage::Local.writes_to_the_database());
+        assert!(AskStage::Brain { planned: None }.writes_to_the_database());
+    }
+
     #[test]
     fn the_last_provider_selected_in_config_is_the_answer_cli() {
         let mut config = sister_core::config::Config::default();
@@ -3368,6 +3416,68 @@ fn record_answer_outbound(
     })
 }
 
+/// 這一題的第二段會不會去問 CLI；只讀設定與同意書，不 spawn、不連網。
+enum BrainPlan {
+    Skip(BrainAnswer),
+    Go {
+        cli: ConfiguredAnswerCli,
+        permit: sister_core::consent::CloudAllowed,
+        payload: String,
+        data_dir: PathBuf,
+    },
+}
+
+fn decide_brain_plan(
+    cli: Option<ConfiguredAnswerCli>,
+    data_dir: Option<&Path>,
+    consent: &sister_core::consent::Consent,
+    question: &str,
+) -> BrainPlan {
+    let Some(cli) = cli else {
+        return BrainPlan::Skip(BrainAnswer::not_configured());
+    };
+    let status = |state| BrainAnswer::new(state, Some(cli.label.clone()));
+    let Some(data_dir) = data_dir else {
+        return BrainPlan::Skip(status("search_failed"));
+    };
+    let Some(permit) = consent.cloud_permit() else {
+        return BrainPlan::Skip(status("consent_required"));
+    };
+    let payload = match sister_core::grounded_answer::prepare_search_plan(question) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!("答題大腦無法準備記憶查詢：{error:#}");
+            return BrainPlan::Skip(status("search_failed"));
+        }
+    };
+    BrainPlan::Go {
+        cli,
+        permit,
+        payload,
+        data_dir: data_dir.to_path_buf(),
+    }
+}
+
+fn brain_plan(shell: &tauri::State<'_, Shell>, question: &str) -> BrainPlan {
+    let cli = match configured_answer_cli() {
+        Ok(cli) => cli,
+        Err(error) => {
+            tracing::warn!("讀不到答題 CLI 設定：{error}");
+            return BrainPlan::Skip(BrainAnswer::new("search_failed", None));
+        }
+    };
+    let consent = if cli.is_some() {
+        shell
+            .data_dir
+            .as_deref()
+            .map(sister_core::consent::load)
+            .unwrap_or_default()
+    } else {
+        sister_core::consent::Consent::default()
+    };
+    decide_brain_plan(cli, shell.data_dir.as_deref(), &consent, question)
+}
+
 /// 每個問題先讓已選 CLI 寫出最多三條本機記憶查詢。CLI 只收到問題；SQLite 路徑、
 /// SQL 與整顆資料庫都不交出去，查詢由 AI-Sister 在本機執行。
 fn plan_answer_searches(
@@ -3375,29 +3485,17 @@ fn plan_answer_searches(
     question: &str,
     cancellation: &sister_core::brain::Cancellation,
 ) -> (BrainAnswer, Option<PlannedAnswerSearches>) {
-    let cli = match configured_answer_cli() {
-        Ok(Some(cli)) => cli,
-        Ok(None) => return (BrainAnswer::not_configured(), None),
-        Err(error) => {
-            tracing::warn!("讀不到答題 CLI 設定：{error}");
-            return (BrainAnswer::new("search_failed", None), None);
-        }
+    let (cli, permit, payload, data_dir) = match brain_plan(shell, question) {
+        BrainPlan::Skip(brain) => return (brain, None),
+        BrainPlan::Go {
+            cli,
+            permit,
+            payload,
+            data_dir,
+        } => (cli, permit, payload, data_dir),
     };
+    let data_dir = data_dir.as_path();
     let status = |state| BrainAnswer::new(state, Some(cli.label.clone()));
-    let Some(data_dir) = shell.data_dir.as_deref() else {
-        return (status("search_failed"), None);
-    };
-    let consent = sister_core::consent::load(data_dir);
-    let Some(permit) = consent.cloud_permit() else {
-        return (status("consent_required"), None);
-    };
-    let payload = match sister_core::grounded_answer::prepare_search_plan(question) {
-        Ok(payload) => payload,
-        Err(error) => {
-            tracing::warn!("答題大腦無法準備記憶查詢：{error:#}");
-            return (status("search_failed"), None);
-        }
-    };
     let Some(not_stopped) = sister_core::brain::not_stopped(data_dir) else {
         return (status("search_failed"), None);
     };
@@ -3558,264 +3656,291 @@ fn synthesize_grounded_answer(
     }
 }
 
-#[tauri::command(async)]
-fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, String> {
-    use sister_core::question::{Intent, Shape};
-    let question = question.trim().to_string();
-    if question.is_empty() {
-        return Ok(Answer {
-            presentation_id: None,
-            kind: "keywords",
-            followup: None,
-            closure_notice: None,
-            searched: None,
-            query_id: None,
-            answers: Vec::new(),
-            hits: Vec::new(),
-            readings: Vec::new(),
-            // 空字串不是「問了但沒找到」，是根本沒問。
-            blind: None,
-            truncated: false,
-            answers_truncated: false,
-            time_range: None,
-            chapters: None,
-            overview: None,
-            synthesis: None,
-            brain: BrainAnswer::not_configured(),
-        });
+/// 這一題走到哪一段。
+enum AskStage<'a> {
+    /// 先開口只讀；正式那一段會整份重畫，不得重複結案、follow-up 或記題庫。
+    Local,
+    Brain {
+        planned: Option<&'a PlannedAnswerSearches>,
+    },
+}
+
+impl AskStage<'_> {
+    fn writes_to_the_database(&self) -> bool {
+        matches!(self, Self::Brain { .. })
     }
-    // 每個非空問題都接管「最新題」槽。即使這一題隨後被全停擋住，也不能讓
-    // 上一題的 provider 繼續在背景跑完。
-    let answer_cli_claim = begin_answer_cli(&shell);
-    // 問答不只是讀：closure、follow-up 與 query log 都可能寫 DB。整份 admission
-    // 活到 renderer 同步畫完，讓 stop-all 能先發佈 Stopping、再等這一題收乾淨；
-    // 全停後來的新題連 retrieval 都不進。
-    let master_stop_admission = admit_desktop_brain(shell.data_dir.as_deref(), "這一題")?;
-    let (brain, planned_searches) =
-        plan_answer_searches(&shell, &question, answer_cli_claim.cancellation());
-    // 題庫 latency 只量本機問答工作；CLI 查詢規劃已另記在
-    // brain_outbound role=answer_search，不能把兩段時間混成一個數字。
+}
+
+/// Local 不開可寫連線，也不在第一次問話時順便建立 DB 或執行 migration。
+fn with_answer_db<T>(
+    shell: &tauri::State<'_, Shell>,
+    stage: &AskStage<'_>,
+    f: impl FnOnce(&mut sister_core::db::Db) -> Result<T, String>,
+) -> Result<T, String> {
+    if stage.writes_to_the_database() {
+        return with_db_mut(shell, f);
+    }
+    let dir = shell
+        .data_dir
+        .as_deref()
+        .ok_or_else(|| "找不到資料目錄".to_string())?;
+    let path = sister_core::config::Config::db_path(dir);
+    let mut db = sister_core::db::Db::open_read_only(&path).map_err(|e| format!("{e:#}"))?;
+    f(&mut db)
+}
+
+fn answer_from_memory(
+    shell: &tauri::State<'_, Shell>,
+    question: &str,
+    stage: AskStage<'_>,
+    brain: BrainAnswer,
+) -> Result<(Answer, Option<sister_core::grounded_answer::Prepared>), String> {
+    use sister_core::question::Shape;
     let started = std::time::Instant::now();
-
-    // 沒有可用 CLI 時仍保留純本機的 L2 總覽；只要已選 CLI 且這題的查詢計畫
-    // 完成，總覽問法也走同一條 CLI-directed retrieval，不再繞過大腦。
-    if sister_core::question::intent(&question) == Intent::MemoryOverview
-        && planned_searches.is_none()
-    {
-        let mut answer = with_db(&shell, |db| memory_overview_answer(db, started))?;
-        answer.brain = brain;
-        answer.presentation_id = Some(hold_presentation(master_stop_admission));
-        return Ok(answer);
-    }
-
-    let retrieval_questions = planned_searches
-        .as_ref()
-        .map_or_else(|| vec![question.clone()], |planned| planned.queries.clone());
-    let cli_directed = planned_searches.is_some();
-
-    // 章節那一支要寫 `segment`，所以整條改拿可變借用。沒認到時間範圍
-    // 時 `chapters_for_question` 立刻回 `None`，不會重算。
-    let (mut answer, prepared) = with_db_mut(&shell, |db| {
+    let retrieval_questions = match &stage {
+        AskStage::Brain { planned: Some(p) } => p.queries.clone(),
+        _ => vec![question.to_string()],
+    };
+    let cli_directed = matches!(stage, AskStage::Brain { planned: Some(_) });
+    with_answer_db(shell, &stage, |db| {
         let now = sister_core::now_ms();
-        let close = sister_core::reviewer::close_from_message(db, &question, now)
-            .map_err(|e| format!("{e:#}"))?;
-        let closure_notice = match close {
-            sister_core::followup::CloseIntent::NotAClosure => None,
-            sister_core::followup::CloseIntent::Unrecognized => {
-                Some("我認不出你指哪一張記憶，所以沒有動任何一張。".to_string())
-            }
-            sister_core::followup::CloseIntent::Ambiguous { .. } => {
-                Some("這句話對得上不只一張記憶，所以沒有動任何一張。".to_string())
-            }
-            sister_core::followup::CloseIntent::Close { .. } => {
-                Some("這張記憶已結案，不會再提。".to_string())
-            }
-        };
-        let previous = sister_core::reviewer::followup_state(db).map_err(|e| format!("{e:#}"))?;
-        let followup = match sister_core::followup::decide(
-            &db.live_commitments().map_err(|e| format!("{e:#}"))?,
-            now,
-            previous.as_ref(),
-        ) {
-            sister_core::followup::FollowupDecision::Ask {
-                commitment_id,
-                text,
-            } => {
-                sister_core::reviewer::record_followup(db, commitment_id, now)
+        let retrieve = |db: &mut sister_core::db::Db| -> Result<_, String> {
+            // 每條都是已選 CLI 要求的自然語言查詢，由 AI-Sister 在本機執行。多條
+            // 查詢各自保留排名，再公平合併並去重；最後仍守 facts 10／原文 20 的上限。
+            const FACTS: usize = 10;
+            const HITS: usize = 20;
+            let mut shape = Shape::Keywords;
+            let mut first_range = None;
+            let mut fact_batches = Vec::new();
+            let mut hit_batches = Vec::new();
+            let mut facts_truncated = false;
+            let mut truncated = false;
+            for (index, retrieval_question) in retrieval_questions.iter().enumerate() {
+                let retrieval = sister_core::retrieval::RetrievalProfile::TextAndFacts
+                    .retrieve_for_question_at(
+                        db,
+                        retrieval_question,
+                        question,
+                        sister_core::retrieval::RetrievalLimits::new(FACTS, HITS),
+                        now,
+                    )
                     .map_err(|e| format!("{e:#}"))?;
-                Some(text)
-            }
-            sister_core::followup::FollowupDecision::NoEligibleCommitment
-            | sister_core::followup::FollowupDecision::CoolingDown { .. } => None,
-        };
-        // 每條都是已選 CLI 要求的自然語言查詢，由 AI-Sister 在本機執行。多條
-        // 查詢各自保留排名，再公平合併並去重；最後仍守 facts 10／原文 20 的上限。
-        const FACTS: usize = 10;
-        const HITS: usize = 20;
-        let mut shape = Shape::Keywords;
-        let mut first_range = None;
-        let mut fact_batches = Vec::new();
-        let mut hit_batches = Vec::new();
-        let mut facts_truncated = false;
-        let mut truncated = false;
-        for (index, retrieval_question) in retrieval_questions.iter().enumerate() {
-            let retrieval = sister_core::retrieval::RetrievalProfile::TextAndFacts
-                .retrieve_for_question_at(
-                    db,
-                    retrieval_question,
-                    &question,
-                    sister_core::retrieval::RetrievalLimits::new(FACTS, HITS),
-                    now,
-                )
-                .map_err(|e| format!("{e:#}"))?;
-            if index == 0 {
-                shape = retrieval.shape;
-                first_range = retrieval.time_range.clone();
-            }
-            facts_truncated |= retrieval.answers_truncated;
-            truncated |= retrieval.hits_truncated;
-            fact_batches.push(retrieval.answers);
-            hit_batches.push(retrieval.hits);
-        }
-        // 每條查詢輪流拿第一名、第二名……。舊接線是第一條先塞滿 10／20 筆
-        // 才輪到第二條，所以 planner 特地找的「之前為什麼」與「後來怎樣」在
-        // 第一條命中夠多時永遠進不了 prompt。
-        let mut facts = sister_core::grounded_answer::merge_ranked_facts(fact_batches, FACTS + 1);
-        let mut hits = sister_core::grounded_answer::merge_ranked_hits(hit_batches, HITS + 1);
-        facts_truncated |= facts.len() > FACTS;
-        truncated |= hits.len() > HITS;
-        facts.truncate(FACTS);
-        hits.truncate(HITS);
-        // 章節問的是**使用者原本那句話**有沒有時間範圍，不是 planner 最後回了
-        // 幾條查詢。舊版只要 CLI 加一條同義詞，`昨天下午` 的整段章節就消失。
-        let asked_chapters = db
-            .chapters_for_question(&question, now)
-            .map_err(|e| format!("{e:#}"))?;
-        // **她已經想過的那幾段，排在證據最前面。**
-        //
-        // 解釋層平常沒事就會自己醒過來，看著剛過去那一段寫一張卡。以前答題
-        // 這條路完全不讀它——於是每一題都是從二十行 OCR 開始重新想一遍，
-        // 慢，而且想出來的東西就是二十行 OCR 排成中文。
-        //
-        // 撈不到判讀不是失敗：那只是這一段她還沒想過（或者她根本沒被開起
-        // 來）。空的照樣往下走，答案就是舊的那個形狀。
-        let (reading_rows, readings_truncated) = match asked_chapters.as_ref() {
-            // 時間問題要橫跨原問句的整個範圍，不能只從當天最後幾張、或第一批
-            // OCR 命中旁邊取樣。
-            Some((range, _)) => db
-                .readings_spanning(
-                    range.from,
-                    range.to,
-                    sister_core::grounded_answer::MAX_READINGS,
-                )
-                .map_err(|e| format!("{e:#}"))?,
-            None => {
-                // 關鍵字可能同時命中上週和今天。各自在最相關的幾筆原文附近找
-                // 判讀，避免用最早到最晚的一個巨大窗口，把中間幾天無關的卡片
-                // 誤塞進答案。
-                const READING_ANCHORS: usize = 4;
-                const READINGS_PER_ANCHOR: usize = 2;
-                let mut anchors = Vec::with_capacity(READING_ANCHORS);
-                let mut stamps = HashSet::new();
-                let mut hit_stamps = hits.iter().map(|hit| hit.ts);
-                let mut fact_stamps = facts.iter().map(|answer| answer.latest.ts);
-                while anchors.len() < READING_ANCHORS {
-                    let mut advanced = false;
-                    if let Some(ts) = hit_stamps.next() {
-                        advanced = true;
-                        if stamps.insert(ts) {
-                            anchors.push(ts);
-                        }
-                    }
-                    if anchors.len() < READING_ANCHORS
-                        && let Some(ts) = fact_stamps.next()
-                    {
-                        advanced = true;
-                        if stamps.insert(ts) {
-                            anchors.push(ts);
-                        }
-                    }
-                    if !advanced {
-                        break;
-                    }
+                if index == 0 {
+                    shape = retrieval.shape;
+                    first_range = retrieval.time_range.clone();
                 }
-                let mut rows = Vec::new();
-                let mut card_ids = HashSet::new();
-                let mut readings_truncated = false;
-                for at in anchors {
-                    let (nearby, nearby_truncated) = db
-                        .readings_near(
-                            at,
-                            sister_core::grounded_answer::READING_SLACK_MS,
-                            READINGS_PER_ANCHOR,
-                        )
-                        .map_err(|e| format!("{e:#}"))?;
-                    readings_truncated |= nearby_truncated;
-                    for row in nearby {
-                        if card_ids.insert(row.id) {
-                            rows.push(row);
-                        }
-                    }
-                }
-                rows.sort_by_key(|row| (row.segment_core_start, row.id));
-                readings_truncated |= rows.len() > sister_core::grounded_answer::MAX_READINGS;
-                rows.truncate(sister_core::grounded_answer::MAX_READINGS);
-                (rows, readings_truncated)
+                facts_truncated |= retrieval.answers_truncated;
+                truncated |= retrieval.hits_truncated;
+                fact_batches.push(retrieval.answers);
+                hit_batches.push(retrieval.hits);
             }
-        };
-        let readings = reading_rows
-            .iter()
-            .map(sister_core::grounded_answer::Reading::from_card)
-            .collect::<Vec<_>>();
-        let mut prepared =
-            sister_core::grounded_answer::prepare(&question, &readings, &facts, &hits, now)
-                .map_err(|e| format!("{e:#}"))?;
-        if readings_truncated && let Some(prepared) = &mut prepared {
-            prepared.truncated = true;
-        }
-        // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
-        // 足以回答「她是不是又卡住了」，而問題本身是他的東西，不是我的。
-        tracing::info!(
-            "問了一次（{}）：{} 個答案、{} 筆原文，{} ms",
-            if shape == Shape::Recent || shape == Shape::Range {
-                "時間"
+            // 每條查詢輪流拿第一名、第二名……。舊接線是第一條先塞滿 10／20 筆
+            // 才輪到第二條，所以 planner 特地找的「之前為什麼」與「後來怎樣」在
+            // 第一條命中夠多時永遠進不了 prompt。
+            let mut facts =
+                sister_core::grounded_answer::merge_ranked_facts(fact_batches, FACTS + 1);
+            let mut hits = sister_core::grounded_answer::merge_ranked_hits(hit_batches, HITS + 1);
+            facts_truncated |= facts.len() > FACTS;
+            truncated |= hits.len() > HITS;
+            facts.truncate(FACTS);
+            hits.truncate(HITS);
+            // 章節問的是**使用者原本那句話**有沒有時間範圍，不是 planner 最後回了
+            // 幾條查詢。舊版只要 CLI 加一條同義詞，`昨天下午` 的整段章節就消失。
+            let asked_chapters = if stage.writes_to_the_database() {
+                db.chapters_for_question(question, now)
             } else {
-                "關鍵字"
-            },
-            facts.len(),
-            hits.len(),
-            started.elapsed().as_millis()
-        );
-        // 進題庫。他打的原話在**資料庫**裡，不在記錄檔裡——記錄檔是我會看的
-        // 東西，資料庫是他的。刪得掉（時間軸上那條「忘掉這一段」會一起帶走）、
-        // 過得了期（跟著文字的保留期）。理由與代價寫在 DATA_INVENTORY。
-        //
-        // 記不進去不算失敗：他要的是答案。
-        //
-        // 每次都重讀設定檔，不快取：他剛在設定頁上把那個勾拿掉，下一個問題就
-        // 不該再被記。和暫停控制狀態同一條紀律——真相在磁碟上，這個行程只是鏡子。
-        // 讀不到設定檔就當成不要記（`unwrap_or(false)`）：不確定的時候少存
-        // 一點，方向和其他每一個 fail-closed 一致。
-        let wanted = config_path()
-            .and_then(|p| sister_core::config::Config::load(&p).map_err(|e| format!("{e:#}")))
-            .map(|c| c.privacy.query_log)
-            .unwrap_or(false);
-        let query_id = wanted
-            .then(|| {
-                db.log_query(&sister_core::db::QueryLogEntry {
-                    ts: sister_core::now_ms(),
-                    question: &question,
-                    shape: shape.name(),
-                    // ★ 答案也算——她給了他東西就不是「答不出來」。
-                    // 見 `QueryLogEntry::hits`。
-                    hits: facts.len() + hits.len(),
-                    latency_ms: started.elapsed().as_millis() as i64,
-                    source: sister_core::db::SOURCE_DESKTOP,
+                db.chapters_for_question_read_only(question, now)
+            }
+            .map_err(|e| format!("{e:#}"))?;
+            // **她已經想過的那幾段，排在證據最前面。**
+            //
+            // 解釋層平常沒事就會自己醒過來，看著剛過去那一段寫一張卡。以前答題
+            // 這條路完全不讀它——於是每一題都是從二十行 OCR 開始重新想一遍，
+            // 慢，而且想出來的東西就是二十行 OCR 排成中文。
+            //
+            // 撈不到判讀不是失敗：那只是這一段她還沒想過（或者她根本沒被開起
+            // 來）。空的照樣往下走，答案就是舊的那個形狀。
+            let (reading_rows, readings_truncated) = match asked_chapters.as_ref() {
+                // 時間問題要橫跨原問句的整個範圍，不能只從當天最後幾張、或第一批
+                // OCR 命中旁邊取樣。
+                Some((range, _)) => db
+                    .readings_spanning(
+                        range.from,
+                        range.to,
+                        sister_core::grounded_answer::MAX_READINGS,
+                    )
+                    .map_err(|e| format!("{e:#}"))?,
+                None => {
+                    // 關鍵字可能同時命中上週和今天。各自在最相關的幾筆原文附近找
+                    // 判讀，避免用最早到最晚的一個巨大窗口，把中間幾天無關的卡片
+                    // 誤塞進答案。
+                    const READING_ANCHORS: usize = 4;
+                    const READINGS_PER_ANCHOR: usize = 2;
+                    let mut anchors = Vec::with_capacity(READING_ANCHORS);
+                    let mut stamps = HashSet::new();
+                    let mut hit_stamps = hits.iter().map(|hit| hit.ts);
+                    let mut fact_stamps = facts.iter().map(|answer| answer.latest.ts);
+                    while anchors.len() < READING_ANCHORS {
+                        let mut advanced = false;
+                        if let Some(ts) = hit_stamps.next() {
+                            advanced = true;
+                            if stamps.insert(ts) {
+                                anchors.push(ts);
+                            }
+                        }
+                        if anchors.len() < READING_ANCHORS
+                            && let Some(ts) = fact_stamps.next()
+                        {
+                            advanced = true;
+                            if stamps.insert(ts) {
+                                anchors.push(ts);
+                            }
+                        }
+                        if !advanced {
+                            break;
+                        }
+                    }
+                    let mut rows = Vec::new();
+                    let mut card_ids = HashSet::new();
+                    let mut readings_truncated = false;
+                    for at in anchors {
+                        let (nearby, nearby_truncated) = db
+                            .readings_near(
+                                at,
+                                sister_core::grounded_answer::READING_SLACK_MS,
+                                READINGS_PER_ANCHOR,
+                            )
+                            .map_err(|e| format!("{e:#}"))?;
+                        readings_truncated |= nearby_truncated;
+                        for row in nearby {
+                            if card_ids.insert(row.id) {
+                                rows.push(row);
+                            }
+                        }
+                    }
+                    rows.sort_by_key(|row| (row.segment_core_start, row.id));
+                    readings_truncated |= rows.len() > sister_core::grounded_answer::MAX_READINGS;
+                    rows.truncate(sister_core::grounded_answer::MAX_READINGS);
+                    (rows, readings_truncated)
+                }
+            };
+            let readings = reading_rows
+                .iter()
+                .map(sister_core::grounded_answer::Reading::from_card)
+                .collect::<Vec<_>>();
+            let mut prepared =
+                sister_core::grounded_answer::prepare(question, &readings, &facts, &hits, now)
+                    .map_err(|e| format!("{e:#}"))?;
+            if readings_truncated && let Some(prepared) = &mut prepared {
+                prepared.truncated = true;
+            }
+            // **他打的那句話不進記錄檔。** 只留形狀、幾筆、幾毫秒——這三個數字
+            // 足以回答「她是不是又卡住了」，而問題本身是他的東西，不是我的。
+            tracing::info!(
+                "問了一次（{}）：{} 個答案、{} 筆原文，{} ms",
+                if shape == Shape::Recent || shape == Shape::Range {
+                    "時間"
+                } else {
+                    "關鍵字"
+                },
+                facts.len(),
+                hits.len(),
+                started.elapsed().as_millis()
+            );
+            Ok((
+                shape,
+                first_range,
+                facts,
+                hits,
+                facts_truncated,
+                truncated,
+                asked_chapters,
+                readings,
+                prepared,
+            ))
+        };
+        let retrieved;
+        let (closure_notice, followup, query_id) = if stage.writes_to_the_database() {
+            let close = sister_core::reviewer::close_from_message(db, question, now)
+                .map_err(|e| format!("{e:#}"))?;
+            let closure_notice = match close {
+                sister_core::followup::CloseIntent::NotAClosure => None,
+                sister_core::followup::CloseIntent::Unrecognized => {
+                    Some("我認不出你指哪一張記憶，所以沒有動任何一張。".to_string())
+                }
+                sister_core::followup::CloseIntent::Ambiguous { .. } => {
+                    Some("這句話對得上不只一張記憶，所以沒有動任何一張。".to_string())
+                }
+                sister_core::followup::CloseIntent::Close { .. } => {
+                    Some("這張記憶已結案，不會再提。".to_string())
+                }
+            };
+            let previous =
+                sister_core::reviewer::followup_state(db).map_err(|e| format!("{e:#}"))?;
+            let followup = match sister_core::followup::decide(
+                &db.live_commitments().map_err(|e| format!("{e:#}"))?,
+                now,
+                previous.as_ref(),
+            ) {
+                sister_core::followup::FollowupDecision::Ask {
+                    commitment_id,
+                    text,
+                } => {
+                    sister_core::reviewer::record_followup(db, commitment_id, now)
+                        .map_err(|e| format!("{e:#}"))?;
+                    Some(text)
+                }
+                sister_core::followup::FollowupDecision::NoEligibleCommitment
+                | sister_core::followup::FollowupDecision::CoolingDown { .. } => None,
+            };
+            retrieved = retrieve(db)?;
+            let (shape, _, facts, hits, ..) = &retrieved;
+            // 進題庫。他打的原話在**資料庫**裡，不在記錄檔裡——記錄檔是我會看的
+            // 東西，資料庫是他的。刪得掉（時間軸上那條「忘掉這一段」會一起帶走）、
+            // 過得了期（跟著文字的保留期）。理由與代價寫在 DATA_INVENTORY。
+            //
+            // 記不進去不算失敗：他要的是答案。
+            //
+            // 每次都重讀設定檔，不快取：他剛在設定頁上把那個勾拿掉，下一個問題就
+            // 不該再被記。和暫停控制狀態同一條紀律——真相在磁碟上，這個行程只是鏡子。
+            // 讀不到設定檔就當成不要記（`unwrap_or(false)`）：不確定的時候少存
+            // 一點，方向和其他每一個 fail-closed 一致。
+            let wanted = config_path()
+                .and_then(|p| sister_core::config::Config::load(&p).map_err(|e| format!("{e:#}")))
+                .map(|c| c.privacy.query_log)
+                .unwrap_or(false);
+            let query_id = wanted
+                .then(|| {
+                    db.log_query(&sister_core::db::QueryLogEntry {
+                        ts: sister_core::now_ms(),
+                        question,
+                        shape: shape.name(),
+                        // ★ 答案也算——她給了他東西就不是「答不出來」。
+                        // 見 `QueryLogEntry::hits`。
+                        hits: facts.len() + hits.len(),
+                        latency_ms: started.elapsed().as_millis() as i64,
+                        source: sister_core::db::SOURCE_DESKTOP,
+                    })
+                    .map_err(|e| tracing::warn!("這一題沒記進題庫：{e}"))
+                    .ok()
                 })
-                .map_err(|e| tracing::warn!("這一題沒記進題庫：{e}"))
-                .ok()
-            })
-            .flatten();
+                .flatten();
+            (closure_notice, followup, query_id)
+        } else {
+            retrieved = retrieve(db)?;
+            (None, None, None)
+        };
+        let (
+            shape,
+            first_range,
+            facts,
+            hits,
+            facts_truncated,
+            truncated,
+            asked_chapters,
+            readings,
+            prepared,
+        ) = retrieved;
         // 只有兩手空空的時候才去問。有答案的話這幾個 COUNT 是白跑的，而這條
         // 路上使用者正等著看畫面。
         let blind = if facts.is_empty() && hits.is_empty() {
@@ -3864,7 +3989,7 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
                     // 只在**黏過**的時候送。剝掉「剛剛那個」留下「優惠方案」是
                     // 剝對了，每次都報一句只會讓人學會忽略它；黏出「個板」才是
                     // 她找了一個不是詞的東西。
-                    let (t, glued) = sister_core::question::terms_with_retreat(&question);
+                    let (t, glued) = sister_core::question::terms_with_retreat(question);
                     glued.then(|| t.to_string())
                 }
                 // CLI 已經改寫過查詢時，原問句的 `terms` 不再是實際拿去比對的字；
@@ -3922,7 +4047,98 @@ fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, Strin
             brain,
         };
         Ok((answer, prepared))
-    })?;
+    })
+}
+
+/// 先開口那一段只讀本機記憶，不等 CLI、不接管 CLI 取消槽。
+/// 正式 [`ask`] 會再算一次並整份重畫；題庫、結案與 follow-up 都只在那一次寫入。
+/// 失敗由畫面自己的 try 接住，繼續等待正式回答。
+#[tauri::command(async)]
+fn ask_local(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, String> {
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Ok(nothing_was_asked());
+    }
+    let master_stop_admission = admit_desktop_brain(shell.data_dir.as_deref(), "先開口這一段")?;
+    let brain = match brain_plan(&shell, &question) {
+        BrainPlan::Skip(b) => b,
+        BrainPlan::Go { cli, .. } => BrainAnswer::new("thinking", Some(cli.label)),
+    };
+    if sister_core::question::intent(&question) == sister_core::question::Intent::MemoryOverview {
+        let mut answer = with_answer_db(&shell, &AskStage::Local, |db| {
+            memory_overview_answer(db, std::time::Instant::now())
+        })?;
+        answer.brain = brain;
+        answer.presentation_id = Some(hold_presentation(master_stop_admission));
+        return Ok(answer);
+    }
+    let (mut answer, _) = answer_from_memory(&shell, &question, AskStage::Local, brain)?;
+    answer.presentation_id = Some(hold_presentation(master_stop_admission));
+    Ok(answer)
+}
+
+fn nothing_was_asked() -> Answer {
+    Answer {
+        presentation_id: None,
+        kind: "keywords",
+        followup: None,
+        closure_notice: None,
+        searched: None,
+        query_id: None,
+        answers: Vec::new(),
+        hits: Vec::new(),
+        readings: Vec::new(),
+        // 空字串不是「問了但沒找到」，是根本沒問。
+        blind: None,
+        truncated: false,
+        answers_truncated: false,
+        time_range: None,
+        chapters: None,
+        overview: None,
+        synthesis: None,
+        brain: BrainAnswer::not_configured(),
+    }
+}
+
+#[tauri::command(async)]
+fn ask(question: String, shell: tauri::State<'_, Shell>) -> Result<Answer, String> {
+    use sister_core::question::Intent;
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Ok(nothing_was_asked());
+    }
+    // 每個非空問題都接管「最新題」槽。即使這一題隨後被全停擋住，也不能讓
+    // 上一題的 provider 繼續在背景跑完。
+    let answer_cli_claim = begin_answer_cli(&shell);
+    // 問答不只是讀：closure、follow-up 與 query log 都可能寫 DB。整份 admission
+    // 活到 renderer 同步畫完，讓 stop-all 能先發佈 Stopping、再等這一題收乾淨；
+    // 全停後來的新題連 retrieval 都不進。
+    let master_stop_admission = admit_desktop_brain(shell.data_dir.as_deref(), "這一題")?;
+    let (brain, planned_searches) =
+        plan_answer_searches(&shell, &question, answer_cli_claim.cancellation());
+    // 題庫 latency 只量本機問答工作；CLI 查詢規劃已另記在
+    // brain_outbound role=answer_search，不能把兩段時間混成一個數字。
+    let started = std::time::Instant::now();
+
+    // 沒有可用 CLI 時仍保留純本機的 L2 總覽；只要已選 CLI 且這題的查詢計畫
+    // 完成，總覽問法也走同一條 CLI-directed retrieval，不再繞過大腦。
+    if sister_core::question::intent(&question) == Intent::MemoryOverview
+        && planned_searches.is_none()
+    {
+        let mut answer = with_db(&shell, |db| memory_overview_answer(db, started))?;
+        answer.brain = brain;
+        answer.presentation_id = Some(hold_presentation(master_stop_admission));
+        return Ok(answer);
+    }
+
+    let (mut answer, prepared) = answer_from_memory(
+        &shell,
+        &question,
+        AskStage::Brain {
+            planned: planned_searches.as_ref(),
+        },
+        brain,
+    )?;
     if let Some(planned) = planned_searches {
         if let Some(prepared) = prepared {
             answer.synthesis = synthesize_grounded_answer(
@@ -7793,6 +8009,7 @@ fn main() {
             diagnose_export,
             hide_to_tray,
             ask,
+            ask_local,
             answer_cli_cancel,
             open_frame,
             log_click,

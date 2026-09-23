@@ -782,6 +782,95 @@ if (observationSource.length === 1 && chromeSources.length === 1) {
     { status: child.status, stderr: child.stderr });
 }
 
+console.log("A151 R1. 先開口，再想；先開口不是答完了");
+// 這兩條是 Rust 接線的原碼檢查，不是 native 執行或 SQLite 寫入次數的量測。
+// renderer 夾具只會回 mock；單靠下面畫面測試抓不到 main.rs 接錯 stage/brain。
+{
+  const main = read(MAIN);
+  const local = main.slice(main.indexOf("fn ask_local("), main.indexOf("fn nothing_was_asked("));
+  check(
+    "A151 native 接線：先開口不得接 Brain，否則題庫記了兩次／結案講了兩遍",
+    /answer_from_memory\(&shell, &question, AskStage::Local, brain\)/u.test(local) &&
+      !local.includes("AskStage::Brain"),
+    local,
+  );
+  check(
+    "A151 native 接線：先開口的 thinking 必須來自共用 brain_plan 與設定的 CLI",
+    /let brain = match brain_plan\(&shell, &question\)/u.test(local) &&
+      /BrainPlan::Skip\(b\) => b/u.test(local) &&
+      /BrainPlan::Go \{ cli, \.\. \} => BrainAnswer::new\("thinking", Some\(cli.label\)\)/u.test(local),
+    local,
+  );
+}
+{
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const p = await open({
+    ask_local: answer({ presentation_id: "15101", hits: [hit({ snippet: "A151_LOCAL_MEMORY" })], brain: { state: "thinking", provider: "Grok CLI" } }),
+    ask: () => pending,
+  });
+  await p.type("本機那幾筆");
+  check("A151 1 前提：ask_local 已呼叫而 ask 正在 pending", p.calls.includes("ask_local") && p.calls.includes("ask"), p.calls);
+  check("A151 1：正式回答 pending 時先看得到本機記憶", p.hitTexts().join("\n").includes("A151_LOCAL_MEMORY"), p.hitTexts());
+  check("A151 1：本機記憶旁如實說選定 CLI 還在想", p.hitTexts().some(t => t.includes("Grok CLI 還在想怎麼把它們講成一句話")), p.hitTexts());
+  check("A151 2：先開口不清輸入也不停思考中", p.input().value === "本機那幾筆" && /^思考中/u.test(p.thinking() ?? ""), { input: p.input().value, thinking: p.thinking() });
+  check("A151 2：先開口不記答完觀測", !p.diagnoseNotes.some(n => n?.kind === "answered"), p.diagnoseNotes);
+  finish(answer({ hits: [hit({ snippet: "A151_FINAL_MEMORY" })] }));
+  await tick(40);
+  const text = p.hitTexts().join("\n");
+  check("A151 3：正式回答整份取代本機那份", text.includes("A151_FINAL_MEMORY") && !text.includes("A151_LOCAL_MEMORY"), text);
+  check("A151 3：正式回答後才清輸入並停計時", p.input().value === "" && p.thinking() === null, { input: p.input().value, thinking: p.thinking() });
+}
+for (const [name, table] of [
+  ["A151 4：ask_local throw 仍由 ask 完成且不顯示錯誤", { ask_local: new Error("A151_EARLY_THROW") }],
+  // 不 mock ask_local：這條明確守住既有幾百個夾具為什麼還是綠的。
+  ["A151 5：未 mock 的 null 保持既有幾百個夾具行為", {}],
+]) {
+  const p = await open({ ...table, ask: answer({ hits: [hit({ snippet: "A151_FALLBACK_FINAL" })] }) });
+  await p.type("先開口沒開成");
+  const text = p.hitTexts().join("\n");
+  check(name, p.calls.includes("ask") && text.includes("A151_FALLBACK_FINAL") && !text.includes("沒答成") && !p.line().includes("A151_EARLY_THROW") && !p.line().includes("沒有回東西"), { text, line: p.line(), calls: p.calls });
+}
+{
+  const p = await open({
+    ask_local: answer({ hits: [hit({ snippet: "A151_KEEP_LOCAL" })] }),
+    ask: new Error("A151 正式回答沒有完成"),
+  });
+  await p.type("保留這一題的本機記憶");
+  const text = p.hitTexts().join("\n");
+  check("A151 6：正式回答 throw 保留本機那份並說明，不冒充這一題我沒答成", text.includes("A151_KEEP_LOCAL") && !text.includes("這一題我沒答成") && p.line().includes("A151 正式回答沒有完成"), { text, line: p.line() });
+  check("A151 6：有本機答案的失敗另記 brain_error", p.diagnoseNotes.some(n => n.why === "brain_error"), p.diagnoseNotes);
+}
+{
+  const state = consentView();
+  const p = await open({
+    consent_read: () => structuredClone(state),
+    ask_local: () => {
+      state.sheets[1].reviewed = false;
+      state.sheets[1].effective = false;
+      state.sheets[1].granted_at = null;
+      return answer({ presentation_id: "15107", hits: [hit({ snippet: "A151_CONSENT_HIDDEN" })], brain: { state: "consent_required", provider: "Grok CLI" } });
+    },
+    ask: answer({ brain: { state: "consent_required", provider: "Grok CLI" } }),
+  });
+  await p.type("先問條文");
+  check("A151 7：consent_required 先開口不畫，只出同意書", !p.hitTexts().join("\n").includes("A151_CONSENT_HIDDEN") && p.consentProgress() === "同意書 2 / 4", { hits: p.hitTexts(), consent: p.consentProgress() });
+  check("A151 7：不畫的先開口仍歸還 native lease", p.invokes.some(i => i.cmd === "master_stop_presentation_end" && i.arg.presentationId === "15107"), p.invokes);
+}
+{
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const p = await open({
+    ask_local: answer({ presentation_id: "15108", hits: [hit({ snippet: "A151_STOP_HIDDEN" })] }),
+    ask: () => pending,
+    master_stop_presentation_begin: false,
+  });
+  await p.type("全停先擋住");
+  check("A151 8：native presentation begin 拒絕時先開口不畫", !p.hitTexts().join("\n").includes("A151_STOP_HIDDEN"), p.hitTexts());
+  finish(answer());
+  await tick(40);
+}
+
 console.log("A150. has-hits 寫入端會在同一個函式重畫對話");
 check("A150 has-hits 寫入端真的抽到至少一個", uniqueHasHitsWriters.length >= 1);
 check("A150 每個 has-hits 寫入端同函式呼叫 paintConversation", writersWithoutPaint.length === 0,
@@ -4208,6 +4297,7 @@ console.log("81a. 全停事件夾在 native Answer 與 renderer continuation 之
   void p.type("全停前開始的慢題");
   await tick(40);
   check("前提：native ask 已經在飛", p.calls.filter((cmd) => cmd === "ask").length === 1, p.calls);
+  check("A151 前提：native ask_local 也剛好一次", p.calls.filter((cmd) => cmd === "ask_local").length === 1, p.calls);
   await p.fromOutside("master-stop-changed", "stopping");
   finishAsk(answer({ hits: [hit({ snippet: "LATE_MASTER_STOP_ANSWER" })] }));
   await tick(40);

@@ -6097,6 +6097,7 @@ function renderHits(
         ? brain.provider.trim()
         : "CLI 大腦";
     const messages = {
+      thinking: `這些是我自己記得的；${provider} 還在想怎麼把它們講成一句話。`,
       used: `${provider} · 已使用本機記憶`,
       no_sources: `${provider} 已查過本機記憶；目前沒有可引用的內容。`,
       answer_failed: `${provider} 沒有完成回答；下方保留它查到的本機記憶。到設定按「測試目前大腦」即可重測。`,
@@ -6457,8 +6458,47 @@ async function ask(event = null) {
    * 它追的是**產品的流程**（畫面上有沒有出現一份答案），不是簿子有沒有記
    * 到。簿子壞掉是另一件事，⑤ 的「！」為那一種留著。 */
   let gaveUp = "unknown";
+  let spokeEarly = false;
   try {
     if (invoke === null) throw new Error("這一頁不是在 AI-Sister 裡打開的");
+    // **先開口，再想。**
+    //
+    // 本機記憶是毫秒級的；它以前被排在一趟 20–120 秒的 CLI 後面，於是他按下
+    // Enter 看到的是一片空白加一個跳動的秒數。這一段先把她自己記得的東西畫
+    // 出來，CLI 回來之後底下那一趟再整份重畫。
+    //
+    // 整段包在自己的 try 裡，而且**不做任何一件「答完了」的事**：不清輸入框、
+    // 不停計時、不記簿子、不朗讀、不出聲。那些全歸底下那一趟。先開口沒開成就
+    // 是回到今天的樣子——等 `ask`——不是「這一題沒答成」，所以這裡不碰 `gaveUp`
+    // 也不寫 `notice`。
+    try {
+      const early = await invoke("ask_local", { question });
+      if (early === null || early === undefined) {
+        throw new Error("先開口那一段沒有回東西");
+      }
+      if (mine !== asking) {
+        gaveUp = "superseded";
+        releaseNativePresentation(early);
+        return;
+      }
+      // 同意書那一關要先過。今天的規矩是「還沒答過就先問條文，不畫答案」，
+      // 先畫一份出來再叫他看條文會把那條規矩倒過來。
+      if (early.brain?.state !== "consent_required") {
+        spokeEarly = await commitNativePresentation(early, () => {
+          renderHits(
+            early.hits, early.kind, early.query_id, early.answers, early.blind,
+            early.truncated, early.answers_truncated, early.searched,
+            early.time_range, early.chapters, early.followup,
+            early.closure_notice, early.overview, early.synthesis, early.brain,
+            early.readings ?? [],
+          );
+        });
+      } else {
+        releaseNativePresentation(early);
+      }
+    } catch {
+      // 先開口失敗不是這一題失敗。底下那一趟才是正式的，錯誤由它報。
+    }
     const answer = await invoke("ask", { question });
     // 這一份過期了。畫面歸還在跑的那一次管，這裡連 idle 都不要設。
     if (mine !== asking) {
@@ -6534,6 +6574,12 @@ async function ask(event = null) {
   } catch (err) {
     if (mine !== asking) {
       gaveUp = "superseded";
+      return;
+    }
+    if (spokeEarly) {
+      gaveUp = "brain_error";
+      noticeAboutSomethingElse(err?.message ?? err);
+      setState("idle");
       return;
     }
     gaveUp = "error";
