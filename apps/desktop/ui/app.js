@@ -2368,6 +2368,7 @@ function hideAnswerHits() {
   document.body.classList.remove("has-hits");
   hitList.hidden = true;
   hitsClose.hidden = true;
+  // 只藏起來，承諾仍在 DOM；保留旗標，失敗時才能更新成結果而不彈回。
   showingAnswer = false;
   paintConversation();
 }
@@ -2384,6 +2385,7 @@ function showConsentCompletion(view) {
     ? "四張都問完了。日後可從上方齒輪查看或更改；按「開始記錄」後，我才會開始看。"
     : "四張都問完了。沒有同意的功能維持關閉；日後可從上方齒輪查看或更改。";
   hitList.replaceChildren(message);
+  showingProvisional = false;
   showAnswerHits();
   showingAnswer = false;
   paintConversation();
@@ -4721,6 +4723,18 @@ const hitList = document.querySelector("[data-hits]");
  * 那後半句是在描述它剛剛做掉的事，而那件事不一定發生過——見 [`ask`] 的 catch。
  */
 let showingAnswer = false;
+// 為真當且僅當答案區內容只有那句承諾，沒有其他內容（收起仍保留內容）。
+// 唯一畫出承諾的 helper 設真；清空或替換內容的地方必須清掉。
+let showingProvisional = false;
+
+function appendProvisionalLine(hitList) {
+  const empty = document.createElement("li");
+  empty.className = "hits-empty";
+  empty.dataset.azureAnswerBody = "";
+  empty.textContent = "我好像不太知道你在說什麼耶，我再認真想一下。";
+  hitList.append(empty);
+  showingProvisional = true;
+}
 
 /**
  * 把 FTS 的片段標記（`[` `]`）變成 `<mark>`。
@@ -6075,6 +6089,7 @@ function renderHits(
   // 有、一個沒有；**不要替它宣稱成因**。
   localAnswerButton = null;
   hitList.replaceChildren();
+  showingProvisional = false;
 
   const hasOverview = overview !== null && overview !== undefined;
   const hasChapters = Array.isArray(chapters) && chapters.length > 0;
@@ -6144,11 +6159,7 @@ function renderHits(
   if (hasOverview) {
     let hasOverviewAnswer = false;
     if (provisional) {
-      const empty = document.createElement("li");
-      empty.className = "hits-empty";
-      empty.dataset.azureAnswerBody = "";
-      empty.textContent = "我好像不太知道你在說什麼耶，我再認真想一下。";
-      hitList.append(empty);
+      appendProvisionalLine(hitList);
     } else {
       hasOverviewAnswer = renderOverview(overview);
     }
@@ -6299,15 +6310,14 @@ function renderHits(
   }
 
   if (hits.length === 0 && facts.length === 0 && !hasChapters) {
-    const empty = document.createElement("li");
-    empty.className = "hits-empty";
-    empty.dataset.azureAnswerBody = "";
     // 第二趟還會改寫問題再查；現在不能先斷言「沒有」，也不提早講盲點。
     // blindLines 保留在終局，先開口即使收到 blind 也只說這一句。
     if (provisional) {
-      empty.textContent = "我好像不太知道你在說什麼耶，我再認真想一下。";
-      hitList.append(empty);
+      appendProvisionalLine(hitList);
     } else {
+      const empty = document.createElement("li");
+      empty.className = "hits-empty";
+      empty.dataset.azureAnswerBody = "";
       // 「我沒看過這件事」和「我什麼都還沒看過」是兩件不同的事。
       //
       // 但問時間卻空手而回，**不是**只有「她還沒錄過東西」這一種解釋——三十行
@@ -6623,7 +6633,7 @@ async function ask(event = null) {
       gaveUp = "superseded";
       return;
     }
-    if (spokeEarly) {
+    if (spokeEarly && !showingProvisional) {
       gaveUp = "brain_error";
       noticeAboutSomethingElse(err?.message ?? err);
       setState("idle");
@@ -6653,7 +6663,10 @@ async function ask(event = null) {
     failed.textContent = showingAnswer
       ? "這一題我沒答成——底下原本那幾筆是上一題的，先收起來了。"
       : "這一題我沒答成。";
+    // 收起的是等待中的承諾，不是取消問題；更新結果但尊重收起，不自行彈回。
+    const keepProvisionalHidden = showingProvisional && hitList.hidden;
     hitList.replaceChildren(failed);
+    showingProvisional = false;
     showingAnswer = false;
     // **那個 `<ul>` 開場是 hidden 的**（`index.html` 上寫死，`styles.css` 還
     // 補了一條 `.hits[hidden] { display: none }`），而唯一會拿掉它的是
@@ -6661,7 +6674,7 @@ async function ask(event = null) {
     // 塞進一個 `display: none` 的容器裡，狀態那一行也只是一句錯誤訊息。
     // 也就是說這條路對「資料庫打不開」的新機器完全沉默——而那正是它要講話的
     // 那一台。答成過一次之後才會自己好，所以它專挑新使用者。
-    showAnswerHits();
+    if (!keepProvisionalHidden) showAnswerHits();
     paintConversation();
   } finally {
     if (gaveUp !== null) noteTheAskThatFailed(question, gaveUp);
