@@ -6083,8 +6083,12 @@ function renderHits(
   // 就要自己打自己的臉（AGENTS.md §二）。判準讀的是送給畫面的同一顆 `brain`，
   // 產品裡只有 main.rs 的 BrainPlan::Go 那一臂寫得出 "thinking"。
   const stillThinking = brain?.state === "thinking";
+  // 先開口那一趟照建構式就是 synthesis: None；唯一非 None 寫入端在 fn ask。
+  // 哪天先開口學會自己成句，先讓不變式報錯，不讓成句和空手文案同時出現。
+  if (stillThinking && synthesis) throw new Error("先開口那一趟不該帶成句答案");
   const foundNothing =
-    hits.length === 0 && facts.length === 0 && !hasChapters && !hasOverview && !synthesis;
+    hits.length === 0 && facts.length === 0 && !hasChapters &&
+    (!hasOverview || overview.kind === "empty");
   const provisional = stillThinking && foundNothing;
   if ((kind === "memory_overview") !== hasOverview) {
     throw new Error(
@@ -6138,7 +6142,16 @@ function renderHits(
   }
 
   if (hasOverview) {
-    const hasOverviewAnswer = renderOverview(overview);
+    let hasOverviewAnswer = false;
+    if (provisional) {
+      const empty = document.createElement("li");
+      empty.className = "hits-empty";
+      empty.dataset.azureAnswerBody = "";
+      empty.textContent = "我好像不太知道你在說什麼耶，我再認真想一下。";
+      hitList.append(empty);
+    } else {
+      hasOverviewAnswer = renderOverview(overview);
+    }
 
     if (followup && !provisional) {
       const aside = document.createElement("li");
@@ -6147,10 +6160,12 @@ function renderHits(
       hitList.append(aside);
     }
 
-    hitList.append(answerReadLine());
-    if (azureSpeechEnabled) {
-      azureAnswerLine = answerAzureLine();
-      hitList.append(azureAnswerLine);
+    if (!provisional) {
+      hitList.append(answerReadLine());
+      if (azureSpeechEnabled) {
+        azureAnswerLine = answerAzureLine();
+        hitList.append(azureAnswerLine);
+      }
     }
     showAnswerHits();
     paintConversation();

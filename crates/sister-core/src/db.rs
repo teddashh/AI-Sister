@@ -10536,6 +10536,18 @@ mod tests {
             .unwrap();
         assert!(!early.1.is_empty(), "先開口必須真的算出章節");
         assert_eq!(reader.conn.total_changes(), before);
+        // 唯讀連線本來就寫不動；同一支函式在寫得動的連線上也不准動任何一列。
+        let rw_before = db.conn.total_changes();
+        let rw_early = db
+            .chapters_for_question_read_only("今天", now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rw_early, early, "兩條連線要算出同一個答案");
+        assert_eq!(
+            db.conn.total_changes(),
+            rw_before,
+            "先開口那條路在寫得動的連線上也不准寫"
+        );
         let stored: i64 = db
             .conn
             .query_row("SELECT COUNT(*) FROM segment", [], |r| r.get(0))

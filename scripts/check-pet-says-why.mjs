@@ -45,7 +45,16 @@ for (const [word, why] of LADDER_WORDS) {
     process.exit(1);
   }
 }
-const boot = loader(read(SRC));
+// 只在測試副本觀察 renderHits 的例外，仍重拋給產品原本的 ask catch。
+const boot = loader(read(SRC) + `
+const renderForTest = renderHits;
+const renderErrorsForTest = [];
+globalThis.__renderErrorsForTest = renderErrorsForTest;
+renderHits = (...args) => {
+  try { return renderForTest(...args); }
+  catch (error) { renderErrorsForTest.push(error); throw error; }
+};
+`);
 const APP_SOURCE = read(SRC);
 
 function functionRanges(source) {
@@ -587,6 +596,7 @@ async function open(
   }
   return {
     node,
+    renderErrors: globalThis.__renderErrorsForTest,
     calls,
     diagnoseNotes,
     invokes,
@@ -916,6 +926,15 @@ for (const [name, table] of [
   await p.type("先問條文");
   check("A151 7：consent_required 先開口不畫，只出同意書", !p.hitTexts().join("\n").includes("A151_CONSENT_HIDDEN") && p.consentProgress() === "同意書 2 / 4", { hits: p.hitTexts(), consent: p.consentProgress() });
   check("A151 7：不畫的先開口仍歸還 native lease", p.invokes.some(i => i.cmd === "master_stop_presentation_end" && i.arg.presentationId === "15107"), p.invokes);
+  // 上面那題終止於同意書，沒有 answered；另讓同樣被擋的先開口走完正式回答。
+  const finished = await open({
+    ask_local: answer({ presentation_id: "15107", brain: { state: "consent_required", provider: "Grok CLI" } }),
+    ask: answer(),
+  });
+  await finished.type("同意要求擋下先開口之後完成回答");
+  const notes = finished.diagnoseNotes.filter(n => n?.kind === "answered");
+  check("A151 7：consent_required 沒畫出來就不准報先開口毫秒數（報告會說謊）",
+    notes.length === 1 && notes[0].spoke_ms === null, notes);
 }
 {
   let finish;
@@ -929,7 +948,24 @@ for (const [name, table] of [
   check("A151 8：native presentation begin 拒絕時先開口不畫", !p.hitTexts().join("\n").includes("A151_STOP_HIDDEN"), p.hitTexts());
   finish(answer());
   await tick(40);
+  const notes = p.diagnoseNotes.filter(n => n?.kind === "answered");
+  check("A151 8：native 拒絕、沒畫出來就不准報先開口毫秒數（報告會說謊）",
+    notes.length === 1 && notes[0].spoke_ms === null, notes);
 }
+
+const AZURE_READY = {
+  generation: 7,
+  config_readable: true,
+  enabled: true,
+  region: "eastasia",
+  voice: "zh-TW-HsiaoChenNeural",
+  endpoint: "https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1",
+  credential: "present",
+  consented: true,
+  consent_at: 1_757_299_200_000,
+  ready: true,
+  config_error: null,
+};
 
 console.log("A151 R3. 先開口空手時不先斷言沒有");
 {
@@ -963,6 +999,30 @@ console.log("A151 R3. 先開口空手時不先斷言沒有");
     check(`${name} 前提：ask_local 已回而 ask pending`, p.calls.includes("ask_local") && p.calls.includes("ask"), p.calls);
     provisionalChecks(p, name);
   }
+  const emptyOverview = await open({
+    azure_tts_read: AZURE_READY,
+    ask_local: answer({ kind: "memory_overview", overview: { kind: "empty" }, brain: thinking,
+      followup: "R4_FOLLOWUP", closure_notice: "R4_CLOSURE" }),
+    ask: () => new Promise(() => {}),
+  });
+  await emptyOverview.type("空的記憶總覽");
+  provisionalChecks(emptyOverview, "R4 空總覽");
+  check("R4 空總覽：不畫 followup、收尾或朗讀按鈕", emptyOverview.localReadButton() === null && emptyOverview.azureButton() === null && !emptyOverview.hitTexts().join("\n").includes("R4_"), emptyOverview.hitTexts());
+  const readyOverview = await open({
+    ask_local: answer({ kind: "memory_overview", overview: { kind: "ready", cards: [overviewCard()], truncated: false, evidence_unavailable: 0 }, brain: thinking, followup: "R4_READY_FOLLOWUP" }),
+    ask: () => new Promise(() => {}),
+  });
+  await readyOverview.type("有內容的記憶總覽");
+  check("R4 有內容總覽加 thinking：仍畫卡片、brain-note 與 followup", readyOverview.hits().querySelectorAll(".overview-card").length === 1 && readyOverview.hits().querySelectorAll(".brain-note").length === 1 && readyOverview.hitTexts().join("\n").includes("R4_READY_FOLLOWUP") && !readyOverview.hitTexts().join("\n").includes(line), readyOverview.hitTexts());
+  const invalidEarly = await open({
+    ask_local: answer({ brain: thinking, answers: [fact({ frame_id: 42 })], synthesis: {
+      sentences: [{ text: "R4_INVALID_SYNTHESIS", sources: [{ ref: "fact:9", label: "畫面 #42", frame_id: 42 }] }],
+    } }),
+    ask: answer({ hits: [hit({ snippet: "R4_FINAL_AFTER_THROW" })] }),
+  });
+  await invalidEarly.type("故意讓先開口帶成句答案");
+  check("R4 synthesis 不變式：ask_local 帶成句答案必須 throw 指定錯誤", invalidEarly.renderErrors.length === 1 && invalidEarly.renderErrors[0].message === "先開口那一趟不該帶成句答案", invalidEarly.renderErrors.map(e => e.message));
+  check("R4 synthesis 不變式：throw 後正式回答仍完成且先開口計時為 null", invalidEarly.hitTexts().join("\n").includes("R4_FINAL_AFTER_THROW") && invalidEarly.diagnoseNotes.some(n => n.kind === "answered" && n.spoke_ms === null), invalidEarly.diagnoseNotes);
   // 真正的先開口也會帶 searched／空時間範圍；不能因此多出另一句「沒有」。
   const withContext = await open({
     ask_local: answer({
@@ -2394,19 +2454,7 @@ console.log("53. 拔手失敗不是 recorder 回條，heartbeat transition 不�
   );
 }
 
-const AZURE_READY = {
-  generation: 7,
-  config_readable: true,
-  enabled: true,
-  region: "eastasia",
-  voice: "zh-TW-HsiaoChenNeural",
-  endpoint: "https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1",
-  credential: "present",
-  consented: true,
-  consent_at: 1_757_299_200_000,
-  ready: true,
-  config_error: null,
-};
+
 
 const AZURE_OFF = {
   ...AZURE_READY,
