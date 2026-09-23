@@ -2486,6 +2486,27 @@ mod tests {
             .join("\n")
     }
 
+    fn assert_l2_fts_words_gone(db: &Db) {
+        let copies: Vec<String> = db
+            .conn
+            .prepare("SELECT activity FROM l2_activity_fts")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            copies
+                .iter()
+                .all(|s| !s.contains("王小明") && !s.contains("12,000")),
+            "forgotten_fts_copy_has_no_original_words: {copies:?}"
+        );
+        let dead_copies: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM l2_activity_fts WHERE rowid IN (SELECT id FROM l2_card WHERE tombstoned_at IS NOT NULL)",
+            [], |r| r.get(0)).unwrap();
+        assert_eq!(dead_copies, 0, "forgotten_fts_copy_row_is_absent");
+    }
+
     /// 保留期到了，卡片上的字也要跟著走。
     ///
     /// `forget` 是他親手按的，`prune` 是自己在跑的——後者沒有人看著，所以
@@ -2523,6 +2544,7 @@ mod tests {
         )
         .expect("prune");
 
+        assert_l2_fts_words_gone(&db);
         let blob = l2_blob(&db);
         assert!(!blob.contains("王小明"), "過期的卡片還留著人名：{blob}");
         assert!(!blob.contains("12,000"), "過期的卡片還留著金額：{blob}");
@@ -2551,6 +2573,7 @@ mod tests {
         db.forget(days_ago(61), days_ago(59), Some(tmp.path()))
             .expect("forget");
 
+        assert_l2_fts_words_gone(&db);
         let blob = l2_blob(&db);
         assert!(!blob.contains("王小明"), "人名還留在墓碑裡：{blob}");
         assert!(!blob.contains("12,000"), "金額還留在墓碑裡：{blob}");
