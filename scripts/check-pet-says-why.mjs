@@ -871,6 +871,88 @@ for (const [name, table] of [
   await tick(40);
 }
 
+console.log("A151 R3. 先開口空手時不先斷言沒有");
+{
+  const thinking = { state: "thinking", provider: "Grok CLI" };
+  const finalBrain = { state: "not_configured", provider: null };
+  const fullBlind = blind({
+    ever_recorded: true, ever_stored: true, chunks: 12, frames: 12,
+    excluded: [["excluded 規則", 3]], paused_episodes: 2, paused_ms: 1200,
+    scan_horizon_days: 30,
+  });
+  // 有掃描界線的終局原文是「我翻過的那幾段」；未限天數才是「我記得的東西」。
+  const finalBlind = { ...fullBlind, scan_horizon_days: null };
+  const line = "我好像不太知道你在說什麼耶，我再認真想一下。";
+  const provisionalChecks = (p, name) => {
+    const texts = p.hitTexts();
+    const text = texts.join("\n");
+    check(`${name}：有「我好像不太知道你在說什麼耶」`, text.includes("我好像不太知道你在說什麼耶"), text);
+    check(`${name}：只有完整那一句，一字不變`, texts.length === 1 && texts[0] === line, texts);
+    check(`${name}：沒有「我記得的東西裡沒有這件事」`, !text.includes("我記得的東西裡沒有這件事"), text);
+    check(`${name}：沒有「我翻過的那幾段裡沒有這件事」`, !text.includes("我翻過的那幾段裡沒有這件事"), text);
+    check(`${name}：沒有「還在想怎麼把它們講成一句話」`, !text.includes("還在想怎麼把它們講成一句話"), text);
+    check(`${name}：.hits-why 元素數是 0`, p.hits().querySelectorAll(".hits-why").length === 0, texts);
+    check(`${name}：brain-note 整塊不畫`, p.hits().querySelectorAll(".brain-note").length === 0, texts);
+  };
+  for (const [name, suppliedBlind] of [["R3 1", null], ["R3 2", fullBlind]]) {
+    const p = await open({
+      ask_local: answer({ hits: [], answers: [], brain: thinking, blind: suppliedBlind }),
+      ask: () => new Promise(() => {}),
+    });
+    await p.type("本機查不到的問題");
+    check(`${name} 前提：ask_local 已回而 ask pending`, p.calls.includes("ask_local") && p.calls.includes("ask"), p.calls);
+    provisionalChecks(p, name);
+  }
+  // 真正的先開口也會帶 searched／空時間範圍；不能因此多出另一句「沒有」。
+  const withContext = await open({
+    ask_local: answer({
+      kind: "range", brain: thinking, blind: fullBlind, searched: "個板",
+      time_range: { from: 1000, to: 2000, said: "昨天" }, chapters: [],
+    }),
+    ask: () => new Promise(() => {}),
+  });
+  await withContext.type("昨天那個板");
+  provisionalChecks(withContext, "R3 2 時間與黏詞");
+  const withHit = await open({
+    ask_local: answer({ hits: [hit()], brain: thinking }),
+    ask: () => new Promise(() => {}),
+  });
+  await withHit.type("有本機記憶");
+  check("R3 3：有東西時 brain-note 一字不變", withHit.hitTexts().includes("這些是我自己記得的；Grok CLI 還在想怎麼把它們講成一句話。"), withHit.hitTexts());
+  check("R3 3：有東西時不說空手那句", !withHit.hitTexts().join("\n").includes("我好像不太知道你在說什麼耶"), withHit.hitTexts());
+
+  const finalChecks = (p, name) => {
+    const text = p.hitTexts().join("\n");
+    check(`${name}：終局仍有「我記得的東西裡沒有這件事」`, text.includes("我記得的東西裡沒有這件事"), text);
+    check(`${name}：終局 .hits-why 元素數 > 0`, p.hits().querySelectorAll(".hits-why").length > 0, text);
+    check(`${name}：終局不留先開口那句`, !text.includes("我好像不太知道你在說什麼耶"), text);
+  };
+  const terminal = await open({
+    ask_local: answer({ hits: [], brain: finalBrain, blind: finalBlind }),
+    ask: () => new Promise(() => {}),
+  });
+  await terminal.type("沒有設定大腦");
+  finalChecks(terminal, "R3 4");
+  const limited = await open({
+    ask_local: answer({ brain: finalBrain, blind: fullBlind }),
+    ask: () => new Promise(() => {}),
+  });
+  await limited.type("只翻過三十天");
+  check("R3 4：30 天終局仍說「我翻過的那幾段裡沒有這件事」", limited.hitTexts().includes("我翻過的那幾段裡沒有這件事。"), limited.hitTexts());
+
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const twoTrips = await open({
+    ask_local: answer({ hits: [], brain: thinking, blind: fullBlind }),
+    ask: () => pending,
+  });
+  await twoTrips.type("走完兩趟");
+  provisionalChecks(twoTrips, "R3 5 第一張");
+  finish(answer({ hits: [], brain: finalBrain, blind: finalBlind }));
+  await tick(40);
+  finalChecks(twoTrips, "R3 5 第二張");
+}
+
 console.log("A150. has-hits 寫入端會在同一個函式重畫對話");
 check("A150 has-hits 寫入端真的抽到至少一個", uniqueHasHitsWriters.length >= 1);
 check("A150 每個 has-hits 寫入端同函式呼叫 paintConversation", writersWithoutPaint.length === 0,

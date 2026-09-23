@@ -2272,6 +2272,47 @@ impl BrainAnswer {
     }
 }
 
+// 只決定是否要算盲點；畫面先開口的措辭由 renderHits 自己決定。
+// 收切片與同一顆 brain，避免另傳一組容易接反的布林。
+fn needs_answer_blind_spots<F, H>(facts: &[F], hits: &[H], brain: &BrainAnswer) -> bool {
+    facts.is_empty() && hits.is_empty() && brain.state != "thinking"
+}
+
+#[cfg(test)]
+mod answer_blind_count_tests {
+    use super::*;
+
+    #[test]
+    fn blind_counts_only_run_for_empty_terminal_answers() {
+        for state in ["thinking", "not_configured", "search_failed", "no_sources"] {
+            for (facts, hits) in [
+                (vec![], vec![]),
+                (vec![1], vec![]),
+                (vec![], vec![1]),
+                (vec![1], vec![1]),
+            ] {
+                let brain = BrainAnswer::new(state, None);
+                let mut count_calls = 0;
+                if needs_answer_blind_spots(&facts, &hits, &brain) {
+                    count_calls += 1;
+                }
+                let expected = match (state, facts.len(), hits.len()) {
+                    ("thinking", _, _) => 0,
+                    (_, 0, 0) => 1,
+                    _ => 0,
+                };
+                assert_eq!(
+                    count_calls,
+                    expected,
+                    "COUNT 呼叫次數：state={state}, facts={}, hits={}",
+                    facts.len(),
+                    hits.len()
+                );
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct GroundedSynthesis {
     sentences: Vec<GroundedSentence>,
@@ -3941,9 +3982,9 @@ fn answer_from_memory(
             readings,
             prepared,
         ) = retrieved;
-        // 只有兩手空空的時候才去問。有答案的話這幾個 COUNT 是白跑的，而這條
-        // 路上使用者正等著看畫面。
-        let blind = if facts.is_empty() && hits.is_empty() {
+        // 有答案的話這幾個 COUNT 是白跑的——還有第二趟要來的時候也是。
+        // thinking 空手時畫面不讀盲點，所以這裡也不算沒有人讀的值。
+        let blind = if needs_answer_blind_spots(&facts, &hits, &brain) {
             // 比對用的是 `terms`，掃描界線也照 `terms` 判——理由和
             // `sister query` 那邊同一條。
             let asked = sister_core::question::terms(&retrieval_questions[0]);
