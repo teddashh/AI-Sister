@@ -3818,7 +3818,7 @@ fn answer_from_memory(
                     (rows, readings_truncated)
                 }
             };
-            let (readings, readings_truncated) =
+            let (mut readings, readings_truncated) =
                 sister_core::grounded_answer::match_answer_readings(
                     db,
                     &retrieval_questions,
@@ -3826,6 +3826,12 @@ fn answer_from_memory(
                     readings_truncated,
                 )
                 .map_err(|e| format!("{e:#}"))?;
+            answer_readings::present_time_readings(
+                asked_chapters.as_ref(),
+                &facts,
+                &hits,
+                &mut readings,
+            );
             let mut prepared =
                 sister_core::grounded_answer::prepare(question, &readings, &facts, &hits, now)
                     .map_err(|e| format!("{e:#}"))?;

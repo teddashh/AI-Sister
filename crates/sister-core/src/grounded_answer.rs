@@ -176,8 +176,8 @@ impl Source {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reading {
     pub card_id: i64,
-    /// 被問題本身的字找到，而非時間背景；兩條路重疊時仍為 true。
-    /// 內容命中直接呈現，時間背景只交給模型當材料。
+    /// 核心檢索以內容命中設真；兩條路重疊時仍為 true。
+    /// 桌面組裝答案時，指定時段沒有章節、原文或事實才會把時間卡升為直接答案。
     pub matched: bool,
     /// 這一段是什麼時候開始的（`segment_core_start`）。
     pub at: Millis,
