@@ -11,12 +11,13 @@
 //! 測試會把語料規模印出來，任何人都能自己判斷這個數字能外推到哪裡。
 
 use sister_core::db::Db;
-use sister_core::model::{FocusSnapshot, FrameCapture, OcrBlock};
+use sister_core::model::{FocusEvent, FocusKind, FocusSnapshot, FrameCapture, OcrBlock};
 use std::time::Instant;
 
 /// 一個工作日的規模：8 小時、每 5 秒一張留下來的畫面。
 const FRAMES_PER_DAY: usize = 5_760;
 const LINES_PER_FRAME: usize = 12;
+const SWITCH_EVERY: usize = 60;
 
 /// 要灌幾天。預設 1 天，因為 `cargo test` 每次都要跑，而 debug build 灌一天
 /// 要 3 秒——灌一個月就是 100 秒，那會變成一個大家開始想辦法跳過的測試。
@@ -131,10 +132,28 @@ fn finding_a_phone_number_in_a_days_worth_of_screens_stays_under_budget() {
 
     let frames = FRAMES_PER_DAY * days();
     let built = Instant::now();
+    let mut focus_events = 0;
     for i in 0..frames {
-        db.insert_frame(session, &frame(ts_of(i), i), None, 0)
-            .expect("insert");
+        let mut capture = frame(ts_of(i), i);
+        let app = ["chrome.exe", "code.exe", "terminal.exe", "notepad.exe"][(i / SWITCH_EVERY) % 4];
+        capture.focus.app_id = Some(app.into());
+        capture.focus.app_name = Some(app.into());
+        db.insert_frame(session, &capture, None, 0).expect("insert");
+        // insert_frame 不會寫 focus_events；章節需要的焦點事件須另寫入。
+        if i % SWITCH_EVERY == 0 {
+            db.insert_focus(
+                session,
+                &FocusEvent {
+                    ts: capture.ts,
+                    kind: FocusKind::Focus,
+                    snapshot: capture.focus,
+                },
+            )
+            .expect("insert focus");
+            focus_events += 1;
+        }
     }
+    println!("焦點事件：{focus_events} 筆（每 {SWITCH_EVERY} 張切換，四個 app 輪替）");
     let chunks = frames * LINES_PER_FRAME;
     println!(
         "語料：{} 天 = {frames} 張畫面 × {LINES_PER_FRAME} 行 = {chunks} 行字（灌了 {:.1} 秒）",
@@ -204,9 +223,88 @@ fn finding_a_phone_number_in_a_days_worth_of_screens_stays_under_budget() {
         }
     }
 
+    measure_answer_steps(&mut db, frames);
+
     println!(
         "\n  兩個字的中文（「客服」）與查不到的東西，都在 schema 3 的 bigram 索引上。\n  \
          在這之前它們走的是「掃 30 天」——45 天語料上分別是 224 ms 與 96.7 ms。\n  \
          剩下只有**一個字**的查詢還在掃描，因為單字產不出雙字。"
     );
+}
+
+/// 中位數只用來觀察，不替章節、盲點或判讀新增時間門檻。
+fn measure<T>(mut step: impl FnMut() -> T) -> (T, f64) {
+    let mut samples = Vec::new();
+    let mut last = None;
+    for _ in 0..5 {
+        let start = Instant::now();
+        last = Some(step());
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    (last.unwrap(), samples[2])
+}
+
+fn measure_answer_steps(db: &mut Db, frames: usize) {
+    let now = 1_700_000_000_000;
+    // 交集不代表有段落。實際算出非零活動才選它；全空必須紅。
+    let question = ["昨天", "前天", "這禮拜", "上禮拜", "今天"]
+        .into_iter()
+        .find(|question| {
+            let chapters = db.chapters_for_question_read_only(question, now).unwrap();
+            let count = chapters
+                .as_ref()
+                .map_or(0, |(_, activities)| activities.len());
+            println!("章節候選：{question} = {count} 段");
+            count > 0
+        });
+    assert!(
+        question.is_some(),
+        "一種問法都撈不到章節：focus_events 語料沒有走到章節路徑"
+    );
+    let question = question.unwrap();
+    println!("回答步驟：{question}，各取 5 次中位數（無新增時間門檻）");
+    let ((range, early), ms) = measure(|| {
+        db.chapters_for_question_read_only(question, now)
+            .unwrap()
+            .unwrap()
+    });
+    assert!(!early.is_empty(), "先開口必須真的算出章節");
+    println!(
+        "  chapters_for_question_read_only：{} 段，{ms:.3} ms",
+        early.len()
+    );
+    let ((_, saved), ms) = measure(|| db.chapters_for_question(question, now).unwrap().unwrap());
+    assert_eq!(early, saved, "正式與唯讀章節應相同");
+    println!("  chapters_for_question：{} 段，{ms:.3} ms", saved.len());
+
+    // 盲點會數整份 DB；仍用上面那份完整畫面語料，不另造小資料庫。
+    let data_dir =
+        std::env::temp_dir().join(format!("sister-search-latency-{}", std::process::id()));
+    assert!(!data_dir.exists(), "盲點夾具不可讀到別場的錄製狀態");
+    let (blind, ms) = measure(|| {
+        sister_core::answer::blind_spots_during(db, &data_dir, question, Some(&range)).unwrap()
+    });
+    assert!(
+        blind.frames > 0 && blind.chunks > 0,
+        "盲點必須數到非零 frames／chunks"
+    );
+    assert_eq!(blind.frames as usize, frames);
+    println!(
+        "  blind_spots_during：{} frames／{} chunks，{ms:.3} ms",
+        blind.frames, blind.chunks
+    );
+    let ((cards, truncated), ms) =
+        measure(|| db.readings_spanning(range.from, range.to, 18).unwrap());
+    println!(
+        "  readings_spanning：{} 張卡，truncated={truncated}，{ms:.3} ms",
+        cards.len()
+    );
+    let ((cards, truncated), ms) =
+        measure(|| db.readings_near(ts_of(frames / 2), 300_000, 18).unwrap());
+    println!(
+        "  readings_near：{} 張卡，truncated={truncated}，{ms:.3} ms",
+        cards.len()
+    );
+    println!("  判讀夾具未灌 L2 卡；上述兩列只量空卡表查詢，不代表有卡時的延遲。");
 }
