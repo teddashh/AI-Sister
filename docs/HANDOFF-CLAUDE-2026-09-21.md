@@ -1684,3 +1684,103 @@ R3 也退回我四個數字：基線是 71 不是 58、接行是 207 不是 156�
 - R3 的分支 `a155-r3` 停在「閘門紅 40 條」，**沒有出貨**。R4 接著做。
 - `scripts/check-told-native.py` 收尾沒有解析 `N passed; M failed`（跑 0 條會讀成綠）。
 - 尾端雜訊那一類沒做。
+
+## 23. alpha.155 的出貨收據，以及那份清單「引對句子、引錯那一臂」（2026-09-24）
+
+### 出貨收據
+
+tag `v0.1.0-alpha.155`（`03b2a66`）推上去之後，**CI 紅了、release 被靜靜跳過**。
+`gh api repos/teddashh/AI-Sister/releases/tags/v0.1.0-alpha.155` 回 404——
+這是權威，`gh release view` 對只有 tag 的東西也 exit 0。
+
+紅的是 `Windows — test and build` 的
+`UIA — read WPF and Edge visible paragraphs; reject excluded text`。
+**先確認指紋再重跑**，兩次抓 log 都失敗（job logs API 回 0 bytes、
+`gh run view --log-failed` 只回收尾那幾行 UNKNOWN STEP），
+第三次用 `gh run view <id> --log` 抓整份才看到：
+
+```
+thread 'native_uia_reads_visible_edits_and_documents_and_rejects_excluded_text'
+  panicked at crates\sister-capture\tests\windows_uia.rs:220:5:
+assertion failed: changed.contains("CHANGED-SENTINEL 02-2233-4455")
+test result: FAILED. 2 passed; 1 failed
+```
+
+就是紀錄在案的 UIA read-after-write 時序 flake。**兩個對照組**才敢重跑：
+
+- `git diff --stat v0.1.0-alpha.154 v0.1.0-alpha.155 -- crates/sister-capture` 是**空的**；
+  整份 diff 18 個檔，`grep -Ei "cfg\(|windows|uia|assistive|focus"` 在
+  `apps/desktop/src-tauri/src/main.rs` 那 52 行上一個都沒有。
+- alpha.154 的 tag run 在**同一支 workflow、同一條測試**上是 success。
+
+`gh run rerun <id> --failed` 之後 attempt 2 八個 job 全綠，
+release 於 **2026-09-24T22:35:51Z** 發出，四個 asset 和 alpha.154 同一組。
+body 比**前綴**：預先算好的 3931 字一字不差，後面只多了 105 字的
+`**Full Changelog**: …`。
+
+### 那份清單，之前只有三分之一被檢查
+
+§21 記過 `check-checklist-quotes-exist.py` 逐行配對的盲點。這一輪修好了，
+**在 main 上實測：檢查數 71 → 183**。
+
+修好之後第一次跑就露出**四句對不上的**，四句都不是產品退化：
+
+| 行 | 清單引的 | 真相 |
+|---|---|---|
+| 999 | 她今天不會記得任何事 | 產品**刻意**改掉了；`app.js:26` 的註解寫著為什麼——早上錄過中午按停的人會看到它自己打自己 |
+| 1698 | 她錄過，那些東西被 forget 忘掉了或過了保留期 | 全庫 0 命中，是轉述；產品那句在 `ops.rs:16704` |
+| 2016 | ■ 收到停止的請求，這就收工。 | 兩層錯，見下 |
+| 2069 | 證據鏈記得兩個以上不同的 app… | 把 `Ambiguous` 那句抄成了 `Unknown` 那句的句型，而這一條自己的重點正是這兩句**不可以**混成一句 |
+
+### 第 2016 行：這條閘門結構上驗不出來的那一類
+
+`■` 是 `println!("  ■ {}", …)` 的前綴，不在字串裡——這一層只是引號畫錯範圍。
+**真正的問題是引錯了那一臂。** 這一格叫他按系統匣的「結束」，走的是
+`request_desktop_quit`（`recorder_supervisor.rs:2199` 是它**唯一的非測試呼叫端**）
+→ `StopReason::DesktopQuit` → 印「收到 desktop 結束的停止要求，這就收工。」。
+清單引的「收到停止的請求，這就收工。」是 `Requested`，
+只有 CLI 的 `sister stop`（`ops.rs:12495`）走得到。
+
+**兩句都在原始碼裡，所以 `q in src` 永遠是綠的。**
+這條閘門問的是「產品說得出這句嗎」，不是「這一格走到的是哪一臂」。
+抓到它的是去讀呼叫端，不是任何一道閘門。
+
+機械偵測器（把「同一個 `match` 的相鄰臂」收成一族，報出清單只引到其中一臂的句子）
+在這份清單上找到 **11 句**——閘門對這 11 句都只驗存在。那是下一輪的題目。
+
+### 收貨時要自己重量一次的三件事
+
+1. **交回來的樹可能建在錯的基底上。** R4 的 merge-base 是 `4af2428`（R1 的頭），
+   **R2 的 merge 不在裡面**。它回報的 180 句／1 紅，量的是一份少了整個
+   alpha.155 章節的清單；那 1 紅在 main 上根本不存在（R2 早就把那句還原了）。
+   在 main 上重量才是真的：**183 句／0 紅**。
+   偵測法一行：`git merge-base <branch> main`。
+2. **「原始碼沒有這句」要自己驗。** R4 有一條理由寫錯：
+   「她起不來，因為資料庫打不開」其實在 `check-pet-says-why.mjs:1922` 的註解裡。
+   結論對（那是一種讀法，不是產品字串），理由錯。
+   機械驗法：把**被拿掉的每一句**回頭 grep 一次原始碼——31 條裡只有這 1 條命中。
+3. **被拿掉的東西要逐條對得上收據。** 31 條長引號：27 條 R4 寫了，
+   4 條是這一輪自己改的，**零條沒有交代**。
+
+### 我自己在這一輪犯的三個錯
+
+- **`cd` 失敗之後，cherry-pick 就地跑在主 repo 上。**
+  `git worktree add <已 checkout 的 branch>` 失敗 → `cd` 失敗 →
+  後面整條鏈在 `/home/ted-h/projects/AI-Sister` 執行。
+  在衝突那一步才發現，reset 回 `0867041`。
+  **改用 `git -C <path>`，不要用 `cd` 串。**（同族：那條「cd 失敗之後 cargo 在主 repo 建了 binary」。）
+- **我保留了原句，而原句引的是錯的那一臂。** 第 2016 行我只把 `■` 移出引號，
+  沒問「這一格走到的是哪一句」。是 R3 改對的。
+  我獨立跑出來的四句裡，**三句和 R3 一致，第四句是我錯**。
+- **我寫的偵測器連續兩次沒通過自己的對照組。** 第一版用字串相似度，
+  已知那一對是 0.595 而我把門檻設在 0.62——**剛好把唯一已知的正例排除掉**；
+  第二版改抓 `match` 臂，又漏了 `=> {` 換行才寫字串的那種臂，
+  而 `DesktopQuit` 正是那樣寫的。
+  兩次都是因為先跑「已知正例抓不抓得到」才發現。
+  **寫偵測器的第一行是把已知正例釘成 assert，不是先看它報了幾條。**
+
+### 這一輪沒有打 tag
+
+產出是一道閘門加四句文件更正，**產品一個字都沒變**。
+照「不要加 gate，要交出看得見的體驗」那條，這種東西不自己發一版，
+併進 main 等下一個功能帶走。
