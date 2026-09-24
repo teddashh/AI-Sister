@@ -7540,6 +7540,10 @@ pub enum FactOrigin {
 impl FactOrigin {
     pub fn from_target_row(source_kind: &str, frame_id: Option<i64>) -> Self {
         match (source_kind, frame_id) {
+            // 今天沒有任何路徑會產生 source_kind='told' 的 **fact**：
+            // `remember_told` 只寫 text_chunks，不建 L1 fact。這一臂和它底下那
+            // 幾句話是替 `FramelessOrigin::Told` 補的對稱，不是「已經有人走過」
+            // 的證據——引用它們的時候不要把它當成 told fact 存在的憑據。
             ("told", None) => Self::Told,
             ("ocr", Some(_)) => Self::Screen,
             ("window_title", None) => Self::WindowTitle,
@@ -7618,9 +7622,18 @@ pub fn target_provenance(target: Option<&TargetApp>) -> String {
     };
     match target {
         TargetApp::Forgotten => "這個目標的來源已經不在了（被忘掉、或過了保留期）".to_owned(),
-        TargetApp::AppNotRecorded { origin } => {
-            format!("這個目標的{}沒有記是哪個 app", origin_subject(origin))
-        }
+        TargetApp::AppNotRecorded { origin } => match origin {
+            // Told 不能填進下面那個「這個目標的 X」的格子。其他四種都是這筆
+            // 目標**擁有**的東西（它的畫面、它的視窗標題⋯⋯），填進去是通順的；
+            // 他打進來的那句話不是目標擁有的東西，它**就是**目標本身，於是
+            // 組出來的是「這個目標的你告訴她的話沒有記是哪個 app」。
+            //
+            // 而這一格正是 told 真的走得到的那一格：`remember_told` 從不寫
+            // `app_id`，所以 `app_for_target_fact` 對它一定回 `AppNotRecorded`。
+            // 上面 `Known` 那一臂要有 app_id 才到得了——今天沒有任何路徑產得出來。
+            FactOrigin::Told => "這個目標來自你告訴她的話".to_owned(),
+            _ => format!("這個目標的{}沒有記是哪個 app", origin_subject(origin)),
+        },
         TargetApp::Known { app, origin } => match origin {
             FactOrigin::Told => "這個目標來自你告訴她的話".to_owned(),
             FactOrigin::Screen => format!("這個目標是在 {app} 的畫面上看到的"),
@@ -16218,9 +16231,14 @@ mod a154_r2_tests {
         assert_eq!(origin_subject(&origin), "你告訴她的話");
         let said = target_provenance(Some(&TargetApp::Known {
             app: "test".into(),
-            origin,
+            origin: origin.clone(),
         }));
         assert_eq!(said, "這個目標來自你告訴她的話");
         assert!(!said.contains("來源沒有記清楚"));
+        // told 真的走得到的是這一格（`remember_told` 從不寫 app_id），而它
+        // 原本會把人稱代詞填進所有格：「這個目標的你告訴她的話沒有記是哪個 app」。
+        let no_app = target_provenance(Some(&TargetApp::AppNotRecorded { origin }));
+        assert_eq!(no_app, "這個目標來自你告訴她的話");
+        assert!(!no_app.contains("這個目標的"));
     }
 }
