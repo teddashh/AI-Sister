@@ -44,15 +44,33 @@
   - 守不住第 3 種（字串在、但那條路走不到）。要驗那個得能判斷可達性，這裡
     做不到。所以「你應該看到 X」還是要自己問一次：X 那條 `if` 在他那台機器
     上進得去嗎？
-  - 只認**逐字**出現，而且只在「這一行有宣告動詞」的時候才看。散文裡的引號
+  - 只認**逐字**出現，而且只在「這一條有宣告動詞」的時候才看。散文裡的引號
     多半是轉述（實測 167 個候選裡 41% 對不上），全掃的話這支腳本會變成一台
     誤報機器，然後被關掉——關掉之後它守的那條線是一格空白。
-  - **否定句一律不驗**（「不可以說 X」）。理由和正面的剛好相反：X 最好不要
-    存在，那多半正是上一輪修掉的那句話。代價是真的漏得掉一種——「摘要裡不該
-    出現 X」那種，X 是產品**進得去**的壞狀態，抄錯了他會看著真的那一行覺得
-    對不上，然後回報「乾淨」。第 7 條就是這樣活下來的，只能靠人讀。
-  - 內插進去的值抄不下來（`「兩個都只留 {} 天」`、`「OCR 語言是 {lang}」`）。
-    清單要嘛抄模板外面那一段，要嘛用 `…` 讓 TEMPLATE 跳過它。
+  - SAYS 不是語意分析器：不把「不可以說」當正面動詞，但同一條有正面
+    動詞時，否定句、歷史文案、輸入問題與比喻的引號也會被挑中。它分不出
+    哪句才是產品承諾；這些紅燈要人工分類，不能拿來宣告產品退化。
+  - 已修掉兩個漏掃：同一條的折行先接起來（引號與宣告動詞可以分行），
+    『』不再當佔位符，擷取外層引號之後才換成產品的「」。…⋯*{} 仍整句跳過
+    （TEMPLATE），不拿去對模板。接縫按字元判斷：中文接中文不加空格；英數／
+    反引號邊界或原有尾空白保留一格。英文字內折行、刻意多空格、中英刻意無空格
+    仍無法推知，這些逐字引號應避免折在歧義處。接法不以原始碼是否命中來猜。
+  - 清單上的實例（數字、`MM-DD HH:MM` 這種日期時間、`2026-08-26 18:04:12`
+    這種實時刻、`en-US` 這種語言代碼、`1.2 GB` 這種位元組、單獨占位的
+    M／N／X，以及括號裡用來占時刻的「時間」）和產品側的 `{}`、`{name}`、
+    `${expr}`、`%s` 收成同一個萬用格再比。固定的字仍要逐字在。所以
+    「留著 1 場錄製的紀錄本身」對得上「留著 {} 場錄製的紀錄本身」；把「錄製」
+    寫成「錄音」仍然要紅。字面寫死的數字不會被產品側吃掉：清單寫 2、產品
+    寫死 1，而且那個 1 不是內插，這條要紅。
+  - 萬用格吃掉之後**看不見**的漂移，是格子裡那個具體值。1 換成 2、en-US
+    換成 zh-TW、時刻換一個，四周的字沒動，閘門還是綠。組裝再鬆一階：產品用
+    `{verb}`、`${why}` 留一個洞，清單在洞裡寫了一段固定的字時，只要求這段字
+    在原始碼某處連續出現，不要求它就是填進這個洞的那個值。字還躺在別的註解
+    裡、這個洞已經改填別句，這裡不會紅。
+  - 第 3 種（舊版文案、禁止範例、使用者心裡的話、一段推論、叫他去按的操作
+    說明）不是這支腳本分得出來的。2026-09-24 那 27 條是人讀過上下文之後改成
+    散文的，沒有機械保證。以後再寫進「」的同類句子會亮紅燈，要人判；這支
+    腳本不會自己把它們跳過，也沒有豁免表。
   - 原始碼裡有沒有那句話 ≠ 那句話出得來。註解裡寫著也算過，`#[cfg(test)]`
     裡寫著也算過。這是刻意放寬的：要抓的是「改了文案忘了改清單」，不是可達性。
 """
@@ -77,7 +95,7 @@ SOURCES = (
     ".github/workflows/*.yml",
 )
 
-# 「這一行在宣告產品會說什麼」。沒有這幾個字的行不看——見上面那段「守不住的
+# 「這一條在宣告產品會說什麼」。沒有這幾個字的條目不看——見上面那段「守不住的
 # 那一半」，散文裡的引號多半是轉述。
 #
 # **只收正面的宣告動詞，不收「不可以說」。** 兩者對這支腳本的意思相反：
@@ -108,10 +126,247 @@ SAYS = re.compile(r"(要說|要寫|會寫|要出現|要換成|要講|講出|寫�
 POSITION = re.compile(r"「([^「」\n]+)」\s*(?:前面|後面|底下|上面|旁邊)")
 QUOTE = re.compile(r"「([^「」\n]+)」")
 
-# 太短的引號多半是名詞（「電話」「門號」），對不上也沒意義；帶刪節號或
-# 佔位符的是模板，不是逐字。
+# 太短的引號多半是名詞（「電話」「門號」），對不上也沒意義。
+# 帶刪節號、星號或花括號的整句仍整句跳過：清單自己在省略，不是一個可以
+# 拿去對模板的實例。數字、語言代碼不要塞進這裡——那些要正規化之後真的比，
+# 跳過就是把承諾刪掉。
 MIN = 8
-TEMPLATE = re.compile(r"[…⋯『』*{}]|\bX \b|\bN ")
+# 2026-09-24 未改清單量測：『』增加 5 句，3 句產品現文、1 句待復原、
+# 1 句 OCR 情境轉述。先抽外層再正規化，否則會誤抽成內層短句。
+TEMPLATE = re.compile(r"[…⋯*{}]|\bX \b|\bN ")
+
+# 萬用格。只出現在「產品的內插」和「清單的實例值」，不拿來吃固定的字。
+# 私用區字元，原始碼裡不該有；有的話寧願停，也不要跟原文撞車。
+SLOT = "\ue000"
+
+# 清單側。長的形要排在短的前面，不然 `1.2 GB` 會先被吃成數字，單位留下。
+# 「（時間 」是清單拿兩個字占住一個時刻內插的寫法（上一場（時間 起））。
+# 不把散文裡的「時間」吃掉，所以要求前面是全形括號、後面是空白。
+_INSTANCE = re.compile(
+    "|".join(
+        (
+            r"MM-DD HH:MM:SS",
+            r"MM-DD HH:MM",
+            r"YYYY-MM-DD HH:MM:SS",
+            r"YYYY-MM-DD",
+            r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?",
+            r"\d{2}:\d{2}:\d{2}",
+            r"\b[a-z]{2,3}-[A-Z][a-z]{3}\b",
+            r"\b[a-z]{2,3}-[A-Z]{2}\b",
+            r"\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB|B)\b",
+            r"(?<![A-Za-z0-9])[MNX](?![A-Za-z0-9])",
+            r"\d+(?:\.\d+)?",
+        )
+    )
+)
+_JS_INTERP = re.compile(r"\$\{[^}]*\}")
+# `{}`、`{name}`、`{pct:.0}`、`{0}`。不含中間有空白的程式區塊。
+_RUST_INTERP = re.compile(r"\{(?:[A-Za-z_][A-Za-z0-9_]*|\d+)?(?::[^}]{0,32})?\}")
+# `%s` 這族。不碰 `%APPDATA%`：後面那個大寫不是轉換字。
+_PRINTF_INTERP = re.compile(r"%[-+0 #]?\d*(?:\.\d+)?[diufFeEgGxXoscp]")
+
+
+def normalize_source(src: str) -> str:
+    """產品側只把內插收成萬用格。寫死的數字留著，不准拿去對清單上的另一個數。"""
+    if SLOT in src:
+        die("原始碼裡出現了萬用格用的私用字元", "換一個 SLOT，不要讓它和原文撞車。")
+    # `{{`／`}}` 是格式字串裡的字面括號，不是洞。先挪走，免得被看成內插。
+    out = src.replace("{{", "\ue001").replace("}}", "\ue002")
+    out = _JS_INTERP.sub(SLOT, out)
+    out = _RUST_INTERP.sub(SLOT, out)
+    out = _PRINTF_INTERP.sub(SLOT, out)
+    return out.replace("\ue001", "{").replace("\ue002", "}")
+
+
+def normalize_quote(q: str) -> str:
+    """清單側只把實例值收成萬用格。固定的字一個都不動。"""
+    # 「上一場（時間 起）」的「時間」是時刻占位，括號和空格是固定的字。
+    q = re.sub(rf"(?<=（)時間(?= )", SLOT, q)
+    return _INSTANCE.sub(SLOT, q)
+
+
+def _fits_forward(q, qi, s, si, raw, floor, memo):
+    """q[qi:] 對上 s[si:] 的一個前綴。清單的萬用格只准對上產品的萬用格。"""
+    key = (qi, si)
+    if key in memo:
+        return memo[key]
+    if qi == len(q):
+        memo[key] = True
+        return True
+    if si >= len(s) or si > floor:
+        memo[key] = False
+        return False
+    ok = False
+    if s[si] == SLOT:
+        if q[qi] == SLOT and _fits_forward(q, qi + 1, s, si + 1, raw, floor, memo):
+            ok = True
+        else:
+            # 產品的洞吃清單上的一段固定字（組裝）。這段字必須在原始碼裡
+            # 連續出現，但不必證明就是這個洞填進去的那個值。
+            limit = min(len(q), qi + 160)
+            k = 1
+            while qi + k <= limit and SLOT not in q[qi : qi + k]:
+                filler = q[qi : qi + k]
+                if filler in raw and _fits_forward(
+                    q, qi + k, s, si + 1, raw, floor, memo
+                ):
+                    ok = True
+                    break
+                k += 1
+    elif q[qi] != SLOT and q[qi] == s[si]:
+        ok = _fits_forward(q, qi + 1, s, si + 1, raw, floor, memo)
+    memo[key] = ok
+    return ok
+
+
+def _fits_back(q, qi, s, si, raw, floor, memo):
+    """q[:qi] 對上 s[:si] 的一個後綴。方向相反，規則和向前那支一樣。"""
+    key = (qi, si)
+    if key in memo:
+        return memo[key]
+    if qi == 0:
+        memo[key] = True
+        return True
+    if si <= 0 or si < floor:
+        memo[key] = False
+        return False
+    ok = False
+    if s[si - 1] == SLOT:
+        if q[qi - 1] == SLOT and _fits_back(q, qi - 1, s, si - 1, raw, floor, memo):
+            ok = True
+        else:
+            k = 1
+            while k <= qi and k <= 160 and SLOT not in q[qi - k : qi]:
+                filler = q[qi - k : qi]
+                if filler in raw and _fits_back(q, qi - k, s, si - 1, raw, floor, memo):
+                    ok = True
+                    break
+                k += 1
+    elif q[qi - 1] != SLOT and q[qi - 1] == s[si - 1]:
+        ok = _fits_back(q, qi - 1, s, si - 1, raw, floor, memo)
+    memo[key] = ok
+    return ok
+
+
+def _longest_affix(text, q, prefix):
+    """`text` 貼著萬用格的那一側，取清單裡真的有的最長一段。"""
+    lo, hi, best = 4, len(text), ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        piece = text[:mid] if prefix else text[len(text) - mid :]
+        if piece in q:
+            best = piece
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
+def _slot_anchors(q, norm):
+    """產品每個洞左右的固定字。組裝句的最長子字串常常是洞裡那段，不是骨架。"""
+    found = []
+    start = 0
+    while True:
+        i = norm.find(SLOT, start)
+        if i < 0:
+            break
+        start = i + 1
+        after = norm[i + 1 : i + 65]
+        nxt = after.find(SLOT)
+        if nxt >= 0:
+            after = after[:nxt]
+        nl = after.find("\n")
+        if nl >= 0:
+            after = after[:nl]
+        piece = _longest_affix(after, q, True)
+        if len(piece) >= 6:
+            found.append((len(piece), q.find(piece), i + 1, piece))
+        before = norm[max(0, i - 64) : i]
+        prev = before.rfind(SLOT)
+        if prev >= 0:
+            before = before[prev + 1 :]
+        nl = before.rfind("\n")
+        if nl >= 0:
+            before = before[nl + 1 :]
+        piece = _longest_affix(before, q, False)
+        if len(piece) >= 6:
+            found.append((len(piece), q.find(piece), i - len(piece), piece))
+    found.sort(key=lambda item: item[0], reverse=True)
+    out, seen = [], set()
+    for item in found:
+        key = (item[1], item[2], item[3])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+        if len(out) >= 24:
+            break
+    return out
+
+
+def _anchor_pieces(q, norm):
+    """挑清單裡一段夠長、而且產品側真的有的字當錨。太常見的錨會對到別句。"""
+    found = []
+    for run in re.finditer(rf"[^{SLOT}]{{4,}}", q):
+        text, start = run.group(), run.start()
+        lo, hi, best = 4, len(text), 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            hit = False
+            for i in range(0, len(text) - mid + 1):
+                if text[i : i + mid] in norm:
+                    hit = True
+                    break
+            if hit:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if best < 4:
+            continue
+        for i in range(0, len(text) - best + 1):
+            piece = text[i : i + best]
+            if piece not in norm:
+                continue
+            positions = []
+            at = 0
+            while len(positions) < 12:
+                j = norm.find(piece, at)
+                if j < 0:
+                    break
+                positions.append(j)
+                at = j + 1
+            if len(positions) >= 12:
+                continue
+            for j in positions:
+                found.append((best, start + i, j, piece))
+    found.extend(_slot_anchors(q, norm))
+    found.sort(key=lambda item: item[0], reverse=True)
+    return found[:24]
+
+
+def template_match(q, raw, norm):
+    """逐字沒中的時候，才用萬用格再試一次。對不上就仍是紅，不因此跳過。"""
+    nq = normalize_quote(q)
+    if nq in norm:
+        return True
+    for _length, qpos, spos, piece in _anchor_pieces(nq, norm):
+        q_end = qpos + len(piece)
+        s_end = spos + len(piece)
+        # 每個清單字最多吃掉一個產品字；視窗外面的對齊不是這一錨。
+        if not _fits_forward(
+            nq,
+            q_end,
+            norm,
+            s_end,
+            raw,
+            s_end + (len(nq) - q_end),
+            {},
+        ):
+            continue
+        if _fits_back(nq, qpos, norm, spos, raw, spos - qpos, {}):
+            return True
+    return False
 
 
 def die(msg, *extra):
@@ -141,19 +396,34 @@ def haystack():
 
 
 def items(lines):
-    """只走 `- [ ]` 那些條目（含它們的縮排續行），不走前言散文。
+    """合併每個 checkbox 與六格縮排續行；逐字保留來源行號。
 
-    第 9 行那句「八張都寫著『去 Windows 上測』的紙條」是散文裡的比喻，掃它
-    只會誤報。條目的形狀在這份檔案裡很穩定：`- [ ]` 開頭，續行縮排 6 格。
+    空行不結束條目；下一個 checkbox 或非縮排散文才結束。接縫只處理
+    換行和縮排，不改行內空白。origins[k] 是合併後第 k 個字的原始行號。
     """
-    inside = False
+    text, origins = "", []
+    trailing_space = False
     for i, ln in enumerate(lines, 1):
-        if re.match(r"\s*- \[[ x]\]", ln):
-            inside = True
-        elif inside and not ln.startswith("      ") and ln.strip() != "":
-            inside = False
-        if inside:
-            yield i, ln
+        start = bool(re.match(r"\s*- \[[ x]\]", ln))
+        if start or (text and ln.strip() and not ln.startswith("      ")):
+            if text:
+                yield origins, text
+            text, origins = "", []
+            trailing_space = False
+        if start or (text and ln.startswith("      ") and ln.strip()):
+            part = ln.strip()
+            # 保留既有尾空白，或英數／code 邊界的一格；中文折行直接相接。
+            space = text and (
+                trailing_space
+                or re.search(r"[A-Za-z0-9`]$", text)
+                or re.match(r"[A-Za-z0-9`]", part)
+            )
+            joined = (" " if space else "") + part
+            text += joined
+            origins.extend([i] * len(joined))
+            trailing_space = ln != ln.rstrip()
+    if text:
+        yield origins, text
 
 
 def main():
@@ -162,36 +432,53 @@ def main():
         die(f"{DOC} 不見了", "這支腳本整個沒有意義了——要嘛改路徑，要嘛把它刪掉。")
     lines = path.read_text(encoding="utf-8").split("\n")
     src = haystack()
+    norm = normalize_source(src)
 
     checked, bad = 0, []
-    for i, ln in items(lines):
-        wanted = QUOTE.findall(ln) if SAYS.search(ln) else []
-        wanted += POSITION.findall(ln)
-        # 兩條規則都挑到同一句的時候只算一次，不然活體那個數字會虛胖。
-        for q in dict.fromkeys(wanted):
+    for origins, ln in items(lines):
+        wanted = list(QUOTE.finditer(ln)) if SAYS.search(ln) else []
+        wanted += list(POSITION.finditer(ln))
+        # 同一引號被兩條規則挑中只算一次；不同位置的相同文案各自有行號。
+        seen = set()
+        for match in wanted:
+            if match.start() in seen:
+                continue
+            seen.add(match.start())
+            q = match[1]
             if len(q) < MIN or TEMPLATE.search(q):
                 continue
+            q = q.translate(str.maketrans("『』", "「」"))
             checked += 1
-            if q not in src:
-                bad.append((i, q))
+            if q not in src and not template_match(q, src, norm):
+                bad.append((origins[match.start()], q))
 
-    # 活體檢查。哪天條目的排版換了、或那幾個宣告動詞被改掉，這支腳本會安靜地
-    # 一句都掃不到然後回報綠——那正是它要抓的那種壞法，發生在它自己身上。
-    if checked < 10:
+    # 活體下限。守的是「掃描器還活著」，不是「今天有幾句」。
+    #
+    # 擋得住兩種儀器壞法：
+    #   - 條目排版整個對不上（`- [ ]` / 六格縮排變了），checked 掉到接近 0。
+    #   - 接行被拿掉、每一行自己掃。2026-09-24 用這支掃描器量過：接行是
+    #     180 句，不接行是 74 句。改散文之前的清單逐行也是 74，那 27 條
+    #     本來就不是逐行看得到的。上一輪的逐行實作量到 71，差 3 句；74 仍
+    #     遠低於 100。
+    # 擋不住：產品或清單少了幾十句，但剩下的仍明顯多於逐行（74）。那種
+    # 下降和「掃描器漏了幾十句」只要沒掉到 100 以下，會印出同一則通過，
+    # 不會走到這裡。所以這條不拿來分辨它們，也不把下限釘死在今天的 180。
+    # 少數漏掃、散文被當成承諾、字串在但那條路走不到，靠定點突變和人工分類。
+    if checked < 100:
         die(
             f"只挑出 {checked} 句話來對，太少了",
-            "這份清單有幾百行，正常會挑出二十句上下。",
-            "多半是條目的排版變了（`- [ ]` / 六格縮排），或 SAYS 那幾個動詞對不上了。",
+            "少於 100 句代表掃描器壞了：要嘛條目排版對不上，要嘛退回了逐行掃描。",
+            "這條線不代表產品少了幾句——那種下降只要還明顯多於逐行，不會走到這裡。",
         )
 
     if bad:
-        print(f"✗ 清單叫他去對照 {len(bad)} 句產品說不出口的話：")
+        print(f"✗ 檢查 {checked} 句，其中 {len(bad)} 句在原始碼找不到，需分類：")
         for i, q in bad:
             print(f"  {DOC}:{i}")
             print(f"      「{q}」")
         print()
-        print("  他會照著找、找不到，然後回報一個沒有壞的東西壞了。")
-        print("  把清單改成程式裡真正那句話（逐字抄），或者把那句話加回程式裡。")
+        print("  逐條分辨清單過期、產品退化、轉述／模板／組裝；找不到不等於產品說不出口。")
+        print("  有現行文案證據才更新清單；產品退化須修產品，不能為了綠燈改承諾。")
         sys.exit(1)
 
     print(f"✓ 清單裡那 {checked} 句「產品會說 X」，X 在原始碼裡都找得到")
