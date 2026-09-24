@@ -6247,7 +6247,7 @@ function renderHits(
   if (searched && !provisional) {
     const why = document.createElement("li");
     why.className = "hits-note";
-    why.textContent = `我拿去比對的是「${searched}」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。`;
+    why.textContent = `我拿去比對的是「${searched}」。`;
     hitList.append(why);
   }
 

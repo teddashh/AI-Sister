@@ -1,0 +1,293 @@
+{
+  "format_version": 1,
+  "name": "synthetic-recall-phrasing",
+  "review": "reviewed",
+  "corpus_fingerprint": "fnv1a64:b50c968e052ca82e",
+  "questions": [
+    {
+      "id": "phrasing-00",
+      "question": "客服電話",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-01",
+      "question": "客服電話幾號",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-02",
+      "question": "客服電話是多少",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-03",
+      "question": "那個客服專線的號碼是什麼",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-04",
+      "question": "這期帳單要繳多少錢",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "NT$1,350",
+          "TWD:1350"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-05",
+      "question": "我的電信帳單金額是多少",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "NT$1,350",
+          "TWD:1350"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-06",
+      "question": "剛剛那個客服電話",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-07",
+      "question": "剛剛那個 ERR_DEPLOY_42",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "ERR_DEPLOY_42"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-08",
+      "question": "幫我找客服電話",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-09",
+      "question": "找客服電話",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-10",
+      "question": "查客服電話",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-11",
+      "question": "打客服電話",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-12",
+      "question": "我打客服電話",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-13",
+      "question": "我要打客服電話",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "0800-000-123",
+          "+886800000123"
+        ],
+        "evidence": [
+          {
+            "event_index": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-14",
+      "question": "查 ERR_DEPLOY_42",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "ERR_DEPLOY_42"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-15",
+      "question": "查一下 ERR_DEPLOY_42",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "ERR_DEPLOY_42"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "phrasing-16",
+      "question": "幫我找 ERR_DEPLOY_42",
+      "source": "hand_labeled",
+      "expected": {
+        "outcome": "answer",
+        "any_of": [
+          "ERR_DEPLOY_42"
+        ],
+        "evidence": [
+          {
+            "event_index": 1
+          }
+        ]
+      }
+    }
+  ]
+}

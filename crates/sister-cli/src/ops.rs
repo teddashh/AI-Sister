@@ -14658,14 +14658,8 @@ pub mod query {
         }
     }
 
-    fn glued_note(text: &str) -> Option<[String; 2]> {
-        let (asked, glued) = sister_core::question::terms_with_retreat(text);
-        glued.then(|| {
-            [
-                format!("   我拿去比對的是「{asked}」——那是從你打的字黏出來的，不是一個詞。"),
-                "   直接打你要的那個詞再問一次。".to_string(),
-            ]
-        })
+    fn glued_note(searched: Option<&str>) -> Option<String> {
+        searched.map(|asked| format!("   我拿去比對的是「{asked}」。"))
     }
 
     /// 把「一筆都沒找到」的那幾個查得到的理由講成人話。
@@ -15003,6 +14997,7 @@ pub mod query {
         let sister_core::retrieval::Retrieval {
             shape,
             terms,
+            searched,
             answers,
             hits,
             answers_truncated,
@@ -15157,10 +15152,8 @@ pub mod query {
             // 理由寫的是「終端機那一份是靠人看出來的（答案就在眼前）」——那
             // 句話預設了她找的字認得出來，正好是這裡不成立的前提。
             //
-            // 只在**黏過**的時候講。剝掉「剛剛那個」留下「優惠方案」是剝對
-            // 了，每次都報一句只會讓人學會忽略它；黏出「個板」才是她找了一
-            // 個不是詞的東西。句子在 `glued_note`（那裡才驗得到）。
-            for line in glued_note(text).into_iter().flatten() {
+            // 顯示檢索實際回傳的字，不從原問句重算。
+            if let Some(line) = glued_note(searched.as_deref()) {
                 println!("{line}");
             }
         }
@@ -16082,18 +16075,22 @@ pub mod query {
         /// 多印一句只會讓他學會忽略這一句話——而下一次它真的重要。
         #[test]
         fn a_needle_glued_out_of_a_particle_says_so_next_to_the_headline() {
-            let note = glued_note("剛剛那個板").expect("黏出「個板」就要出聲");
-            let said = note.join("\n");
+            let said = glued_note(Some("個板")).expect("有實際比對字就要出聲");
             assert!(said.contains("個板"), "要指得出她到底拿什麼去比對：{said}");
             assert!(
-                said.contains("再問一次"),
-                "下一步是重打一個詞，不是去設定頁翻規則：{said}"
+                said == "   我拿去比對的是「個板」。",
+                "只呈現實際比對字：{said}"
             );
 
             for asked_properly in ["剛剛那個優惠方案", "客服專線", "剛剛發生什麼事"]
             {
                 assert!(
-                    glued_note(asked_properly).is_none(),
+                    glued_note(
+                        sister_core::question::terms_with_retreat(asked_properly)
+                            .1
+                            .then_some(asked_properly)
+                    )
+                    .is_none(),
                     "{asked_properly} 沒黏過東西，多講一句只會讓他學會忽略它"
                 );
             }

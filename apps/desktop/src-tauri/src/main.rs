@@ -2188,11 +2188,8 @@ struct Answer {
     /// 前者他無能為力；後者他只要把那個詞重打一次就好。唯一能讓他分辨的，是
     /// 看到她到底拿什麼去比對。
     ///
-    /// 和 `sister query --json` 的 `terms` 是同一件事的兩種送法，**不要合成
-    /// 一個**：那一份給機器讀（也是 Phase 2 評測語料的來源），所以每一題都要
-    /// 有；這一份給人看，每次都報一句只會讓人學會忽略它，所以剝對了就閉嘴，
-    /// 只有黏出不是詞的東西才出聲。判斷交給 `terms_with_retreat`——它答的是
-    /// 「有沒有退過邊界」，而退邊界是唯一一種黏得出非詞的來源。
+    /// 由共用檢索結果提供實際比對字，包含退格與空手後的口語放寬。
+    /// 多查詢只列需要說明的字；原字命中時不多說一句。
     searched: Option<String>,
     /// 這一題在題庫裡的編號。點開出處的時候要掛回來（見 `log_click`）。
     ///
@@ -3641,7 +3638,7 @@ fn synthesize_grounded_answer(
 
 /// 這一題走到哪一段。
 enum AskStage<'a> {
-    /// 階段決定查詢字串、cli_directed 與連線模式，不授權非冪等寫入。
+    /// 階段決定查詢字串與連線模式，不授權非冪等寫入。
     /// close_from_message、record_followup、log_query 只由 ask 呼叫，一題一次。
     /// chapters_for_question 不在這份名單：replace_stuck／replace_segments 是
     /// 冪等的快取重算；Local 的唯讀連線仍走不寫快取的查詢。
@@ -3701,7 +3698,6 @@ fn answer_from_memory(
         AskStage::Brain { planned: Some(p) } => p.queries.clone(),
         _ => vec![question.to_string()],
     };
-    let cli_directed = matches!(stage, AskStage::Brain { planned: Some(_) });
     with_answer_db(shell, &stage, |db| {
         let now = sister_core::now_ms();
         let retrieve = |db: &mut sister_core::db::Db| -> Result<_, String> {
@@ -3711,6 +3707,8 @@ fn answer_from_memory(
             const HITS: usize = 20;
             let mut shape = Shape::Keywords;
             let mut first_range = None;
+            let mut first_terms = None;
+            let mut searched_terms = Vec::new();
             let mut fact_batches = Vec::new();
             let mut hit_batches = Vec::new();
             let mut facts_truncated = false;
@@ -3728,6 +3726,10 @@ fn answer_from_memory(
                 if index == 0 {
                     shape = retrieval.shape;
                     first_range = retrieval.time_range.clone();
+                    first_terms = retrieval.terms.clone();
+                }
+                if let Some(terms) = retrieval.searched {
+                    searched_terms.push(terms);
                 }
                 facts_truncated |= retrieval.answers_truncated;
                 truncated |= retrieval.hits_truncated;
@@ -3860,6 +3862,8 @@ fn answer_from_memory(
             Ok((
                 shape,
                 first_range,
+                first_terms,
+                (!searched_terms.is_empty()).then(|| searched_terms.join("」、「")),
                 facts,
                 hits,
                 facts_truncated,
@@ -3873,6 +3877,8 @@ fn answer_from_memory(
         let (
             shape,
             first_range,
+            first_terms,
+            searched,
             facts,
             hits,
             facts_truncated,
@@ -3891,7 +3897,7 @@ fn answer_from_memory(
         let blind = if needs_answer_blind_spots(&facts, &hits, &readings, &brain) {
             // 比對用的是 `terms`，掃描界線也照 `terms` 判——理由和
             // `sister query` 那邊同一條。
-            let asked = sister_core::question::terms(&retrieval_questions[0]);
+            let asked = first_terms.as_deref().unwrap_or(&retrieval_questions[0]);
             // 不給空路徑當退路：`pause::is_paused` 的規矩是「問不出來就當成
             // 暫停」，而 `Path::new("")` 會讓它去工作目錄找一個不存在的旗標、
             // 然後回一個很有把握的「沒有暫停」。寧可這一段沒有理由可講。
@@ -3925,22 +3931,7 @@ fn answer_from_memory(
             kind: shape.name(),
             followup: None,
             closure_notice: None,
-            // 只在**不一樣**的時候送。一樣的時候送過去，畫面那邊還要再比一次，
-            // 而「這兩串字算不算同一句」是這裡才知道的事（`terms` 回的是原句的
-            // 一個切片）。`Shape::Recent` 根本沒走比對那條路，所以也不送。
-            searched: match shape {
-                Shape::Recent | Shape::Range => None,
-                Shape::Keywords if !cli_directed => {
-                    // 只在**黏過**的時候送。剝掉「剛剛那個」留下「優惠方案」是
-                    // 剝對了，每次都報一句只會讓人學會忽略它；黏出「個板」才是
-                    // 她找了一個不是詞的東西。
-                    let (t, glued) = sister_core::question::terms_with_retreat(question);
-                    glued.then(|| t.to_string())
-                }
-                // CLI 已經改寫過查詢時，原問句的 `terms` 不再是實際拿去比對的字；
-                // 不能把它畫成這一輪的搜尋真相。
-                Shape::Keywords => None,
-            },
+            searched,
             query_id: None,
             blind,
             truncated,

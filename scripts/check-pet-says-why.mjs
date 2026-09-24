@@ -777,6 +777,26 @@ function check(name, ok, detail) {
   }
 }
 
+// A155：核心檢索的比對字一路進 native 回條，再由真 renderer 畫出來。
+{
+  const native = read(MAIN).split("fn answer_from_memory(")[1]?.split("fn ")[0] ?? "";
+  check("A155 native 接收實際檢索字", /if let Some\(terms\) = retrieval\.searched[\s\S]*?searched_terms\.push\(terms\)/u.test(native));
+  check("A155 native 多查詢回傳比對字", native.includes('(!searched_terms.is_empty()).then(|| searched_terms.join("」、「"))'));
+  check("A155 native Answer 帶回比對字", /let answer = Answer \{[\s\S]*?\n\s+searched,/u.test(native));
+  for (const [label, searched, hits] of [
+    ["命中", "客服電話", [hit()]],
+    ["空手", "ERR_DEPLOY_42", []],
+    ["多查詢", "客服電話」、「ERR_DEPLOY_42", [hit()]],
+    ["原字", null, [hit()]],
+  ]) {
+    const p = await open({ ask: answer({ searched, hits }) });
+    await p.type("找客服電話");
+    const notes = p.hitTexts().filter(text => text.includes("我拿去比對的是"));
+    const expected = searched ? [`我拿去比對的是「${searched}」。`] : [];
+    check(`A155 ${label}只說實際比對字`, JSON.stringify(notes) === JSON.stringify(expected), notes);
+  }
+}
+
 // A154 R2：用真 app.js 的按送出路徑；只在突變取證時單跑此組。
 {
   // 使用者原話的後半句。前半句由空手那一格自己那三種說法負責，理由寫在 app.js

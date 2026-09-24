@@ -82,30 +82,6 @@ impl RetrievalProfile {
         let shape = question::shape(query);
         let range =
             question::time_range(question, now).or_else(|| question::time_range(query, now));
-        let (terms, answer_set, mut hits) = match shape {
-            Shape::Recent | Shape::Range => {
-                let hits = match range.as_ref() {
-                    Some(range) => db.chunks_in_range(range.from, range.to, limits.text + 1)?,
-                    None if shape == Shape::Recent => db.recent(limits.text + 1)?,
-                    None => Vec::new(),
-                };
-                (None, Default::default(), hits)
-            }
-            Shape::Keywords => {
-                let terms = question::terms(query).to_string();
-                let answer_set = if self.wants_facts() {
-                    answers_during(db, query, limits.answers, range.as_ref())?
-                } else {
-                    Default::default()
-                };
-                let hits = db.search_during(&terms, limits.text + 1, range.as_ref())?;
-                (Some(terms), answer_set, hits)
-            }
-        };
-
-        let hits_truncated = hits.len() > limits.text;
-        hits.truncate(limits.text);
-
         let mut activities = Vec::new();
         let mut activities_truncated = false;
         if self.wants_session()
@@ -116,11 +92,52 @@ impl RetrievalProfile {
             activities.truncate(limits.text);
         }
 
+        let mut searched = None;
+        let (terms, answer_set, mut hits) = match shape {
+            Shape::Recent | Shape::Range => {
+                let hits = match range.as_ref() {
+                    Some(range) => db.chunks_in_range(range.from, range.to, limits.text + 1)?,
+                    None if shape == Shape::Recent => db.recent(limits.text + 1)?,
+                    None => Vec::new(),
+                };
+                (None, Default::default(), hits)
+            }
+            Shape::Keywords => {
+                let (original, changed) = question::terms_with_retreat(query);
+                let mut terms = original.to_string();
+                searched = changed.then(|| terms.clone());
+                let mut answer_set = if self.wants_facts() {
+                    answers_during(db, query, limits.answers, range.as_ref())?
+                } else {
+                    Default::default()
+                };
+                let mut hits = db.search_during(&terms, limits.text + 1, range.as_ref())?;
+                // 保留所有既有命中的答案與排序；facts、原文與章節都空手才放寬。
+                if answer_set.items.is_empty()
+                    && hits.is_empty()
+                    && activities.is_empty()
+                    && let Some(candidate) = question::phrasing_candidate(query)
+                {
+                    terms = candidate.to_string();
+                    searched = Some(terms.clone());
+                    if self.wants_facts() {
+                        answer_set = answers_during(db, candidate, limits.answers, range.as_ref())?;
+                    }
+                    hits = db.search_during(candidate, limits.text + 1, range.as_ref())?;
+                }
+                (Some(terms), answer_set, hits)
+            }
+        };
+
+        let hits_truncated = hits.len() > limits.text;
+        hits.truncate(limits.text);
+
         Ok(Retrieval {
             profile: self,
             shape,
             time_range: range,
             terms,
+            searched,
             answers: answer_set.items,
             hits,
             activities,
@@ -155,6 +172,8 @@ pub struct Retrieval {
     pub time_range: Option<question::TimeRange>,
     /// `None` 代表時間題，沒有拿任何字去比對。
     pub terms: Option<String>,
+    /// 退格或空結果後的口語放寬，實際比對的字。呼叫端不可從原問句重算。
+    pub searched: Option<String>,
     pub answers: Vec<Answer>,
     pub hits: Vec<SearchHit>,
     /// 活動級章節。只有 [`RetrievalProfile::TextFactsAndSession`] 會填。
@@ -206,6 +225,176 @@ mod tests {
         )
         .expect("frame");
         db
+    }
+
+    #[test]
+    fn phrasing_never_replaces_an_existing_session_answer() {
+        let corpus: crate::replay::Corpus = serde_json::from_str(include_str!(
+            "../../../scenarios/recall-baseline.corpus.json"
+        ))
+        .unwrap();
+        let mut db = Db::open_in_memory().unwrap();
+        let now = crate::now_ms();
+        let noon = question::time_range("今天", now).unwrap().from + 13 * 60 * 60 * 1000;
+        db.import_replay(&corpus, noon).unwrap();
+        let query = "今天找客服電話";
+        let original = db
+            .chapters_for_question(query, noon + corpus.duration_ms)
+            .unwrap()
+            .unwrap()
+            .1;
+        assert!(!original.is_empty(), "對照組必須真的有章節答案");
+        let result = RetrievalProfile::TextFactsAndSession
+            .retrieve_at(
+                &mut db,
+                query,
+                RetrievalLimits::same(5),
+                noon + corpus.duration_ms,
+            )
+            .unwrap();
+        assert!(
+            result.answers.is_empty(),
+            "既有章節已能回答，不可加入放寬後排在前面的 facts"
+        );
+        assert_eq!(
+            format!("{:?}", result.activities),
+            format!("{original:?}"),
+            "既有章節內容和排名不能變"
+        );
+        assert_eq!(result.searched, None, "沿用原查詢的章節不宣告改字");
+    }
+
+    #[test]
+    fn spoken_prefix_must_not_remain_a_required_fact_topic() {
+        let mut db = db_with_bill();
+        assert_eq!(question::shape("找客服電話"), Shape::Keywords);
+        assert_eq!(question::terms("找客服電話"), "找客服電話");
+        assert_eq!(
+            crate::facts::topic_constraint("找客服電話").as_deref(),
+            Some("找客服")
+        );
+        assert_eq!(
+            crate::facts::topic_constraint("幫我找客服電話").as_deref(),
+            Some("客服")
+        );
+        assert_eq!(
+            crate::db::fts_query(question::terms("查 ERR_DEPLOY_42")),
+            "\"查\" AND \"ERR_DEPLOY_42\""
+        );
+        let result = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, "找客服電話", 5)
+            .unwrap();
+        assert_eq!(
+            result.answers.len(),
+            1,
+            "口語前綴『找』殘留在 facts 必要主題『找客服』；原查詢空手後應以『客服電話』重查"
+        );
+    }
+
+    #[test]
+    fn phrasing_reports_actual_terms_even_when_the_second_lookup_is_empty() {
+        let mut db = db_with_bill();
+        for query in [
+            "找客服電話",
+            "查客服電話",
+            "打客服電話",
+            "我打客服電話",
+            "我要打客服電話",
+        ] {
+            let result = RetrievalProfile::TextAndFacts
+                .retrieve(&mut db, query, 5)
+                .unwrap();
+            assert_eq!(
+                result.answers[0].latest.raw, "0800-000-123",
+                "{query}: 放寬後仍查同一支電話"
+            );
+            assert_eq!(
+                result.searched.as_deref(),
+                Some("客服電話"),
+                "{query}: 要呈現實際放寬的字"
+            );
+        }
+        for query in [
+            "查 ERR_DEPLOY_42",
+            "查一下 ERR_DEPLOY_42",
+            "幫我找 ERR_DEPLOY_42",
+        ] {
+            let result = RetrievalProfile::TextAndFacts
+                .retrieve(&mut db, query, 5)
+                .unwrap();
+            assert!(
+                result.hits.is_empty() && result.answers.is_empty(),
+                "fixture 沒有錯誤碼，不可拿電話作答"
+            );
+            assert_eq!(
+                result.terms.as_deref(),
+                Some("ERR_DEPLOY_42"),
+                "{query}: FTS 不再要求口語動詞"
+            );
+            assert_eq!(
+                result.searched, result.terms,
+                "{query}: 空結果仍呈現實際比對字"
+            );
+        }
+    }
+
+    #[test]
+    fn phrasing_never_replaces_existing_facts_or_text() {
+        let mut db = db_with_bill();
+        for query in ["客服電話", "幫我找客服電話"] {
+            let result = RetrievalProfile::TextAndFacts
+                .retrieve(&mut db, query, 5)
+                .unwrap();
+            let original = answers_during(&db, query, 5, None).unwrap();
+            assert_eq!(
+                format!("{:?}", result.answers),
+                format!("{:?}", original.items),
+                "{query}: 既有 facts 不可替換、重排或改出處"
+            );
+            assert_eq!(
+                result.terms.as_deref(),
+                Some(query),
+                "{query}: 已命中就不改查詢"
+            );
+            assert_eq!(result.searched, None, "{query}: 沿用原字不多說一句");
+        }
+        let privacy = crate::config::PrivacyConfig {
+            remember_told: true,
+            ..Default::default()
+        };
+        db.remember_told(&privacy, 200, "找客服電話").unwrap();
+        db.remember_told(&privacy, 300, "客服電話").unwrap();
+        let original = db.search("找客服電話", 6).unwrap();
+        for profile in [RetrievalProfile::TextOnly, RetrievalProfile::TextAndFacts] {
+            let result = profile.retrieve(&mut db, "找客服電話", 5).unwrap();
+            assert_eq!(
+                format!("{:?}", result.hits),
+                format!("{original:?}"),
+                "原文已命中不可放寬，否則會帶入較新的別筆文字"
+            );
+            assert!(
+                result.answers.is_empty(),
+                "不能替原有文字結果增加放寬的 facts"
+            );
+            assert_eq!(result.searched, None, "原文命中不宣告改字");
+        }
+    }
+
+    #[test]
+    fn phrasing_keeps_the_original_calendar_window() {
+        let mut db = db_with_bill();
+        let result = RetrievalProfile::TextAndFacts
+            .retrieve_at(&mut db, "昨天查客服電話", RetrievalLimits::same(5), 200)
+            .unwrap();
+        assert!(
+            result.answers.is_empty() && result.hits.is_empty(),
+            "昨天不能拿到今天的電話"
+        );
+        assert_eq!(
+            result.searched.as_deref(),
+            Some("客服電話"),
+            "帶日期的原查詢空手後也有實際比對字"
+        );
     }
 
     #[test]
