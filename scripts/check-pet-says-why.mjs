@@ -27,6 +27,17 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { domOf, fakeDocument, hiddenIn, loader, read, watchNonsense } from "./fake-dom.mjs";
 
+// **這支閘門的時鐘釘死在 UTC，而且要釘在讀 app.js 之前。**
+//
+// `clock()` 和 `when()`（`app.js:4766`／`4774`）用的是 `getHours()`，吃的是這個
+// 行程的時區。底下兩份 golden 快照裡有牆上的時鐘，所以不釘死的話，這支閘門
+// 只在寫它的人那一個時區是綠的。
+//
+// 這不是假設，是量出來的：alpha.153 R1 的 golden 是在 EDT 上產生的，本機 53 條
+// 閘門全綠推出去，CI（UTC）上 `938 passed; 2 failed` 紅了五個 commit 才被發現。
+// 本機 `TZ=UTC` 跑同一支，逐字重現那兩條。
+process.env.TZ = "UTC";
+
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/ui");
 const SRC = process.argv[2] ?? join(UI, "app.js");
 const MAIN = join(UI, "../src-tauri/src/main.rs");
@@ -2761,6 +2772,11 @@ for (const [name, extra] of [
   check(`A153 ${name} background invisible`, p.hits().querySelector(".reading-card") === null, p.hitTexts());
   const actual = JSON.stringify(a152Dom(p.hits()));
   const expected = read(join(UI, `../../../scripts/fixtures/a153-${name}.json`)).trim();
+  // 時鐘沒釘住的話底下那條會紅，而它的訊息是一整棵 DOM——讀起來像「產品變了」。
+  // 這一條先講出真正的原因，它自己就是那個釘子還在不在的證據。
+  check(`A153 ${name} 前提：時鐘釘在 UTC`,
+    new Date(0).getHours() === 0 && new Date(0).getDate() === 1,
+    `getHours=${new Date(0).getHours()} getDate=${new Date(0).getDate()}（golden 是 UTC 產的）`);
   check(`A153 ${name} DOM bytes unchanged`, actual === expected, actual);
 }
 
