@@ -345,6 +345,7 @@ function momentRow(m) {
 
   const where = document.createElement("div");
   where.className = "where";
+  if (m.source_kind === "told") where.append(chip("你告訴她的話"));
   if (m.app) where.append(chip(m.app, "app"));
   if (m.title) where.append(chip(m.title));
   if (m.url) where.append(chip(m.url));
@@ -357,7 +358,9 @@ function momentRow(m) {
   text.textContent = m.text;
   body.append(text);
 
-  if (m.frame_id === null) {
+  if (m.source_kind === "told") {
+    // 使用者說的話沒有擷取畫面，不描述成遺失的截圖。
+  } else if (m.frame_id === null) {
     // 正常狀態，不是壞掉——原因有好幾種（只記字、節流、額度、保留期），
     // 這裡分不出是哪一種。理由同 app.js 那一段。
     const gone = document.createElement("p");
@@ -965,6 +968,8 @@ function armReset() {
  */
 function scale(e) {
   const bits = [];
+  // 親口告訴她的話不併入觀察文字；真後端、假後端與預覽都要分開。
+  if (e.told > 0) bits.push(`${e.told} 段你告訴她的話`);
   if (e.chunks > 0) bits.push(`${e.chunks} 段文字`);
   if (e.facts > 0) bits.push(`${e.facts} 個事實`);
   // 沒有截圖的那幾列也是紀錄。text-only 模式下、或圖已經過了保留期之後，
@@ -2351,6 +2356,7 @@ function fakeBackend(mode = "1") {
         }
         return {
           chunks: gone.length,
+          told: Math.ceil(gone.length / 3),
           facts: gone.length * 2,
           frames: gone.length,
           images: images.length,

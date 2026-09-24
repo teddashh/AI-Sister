@@ -2193,6 +2193,41 @@ let consentGuideView = null;
 let consentGuideSheet = null;
 let consentGuideBusy = false;
 let pendingConsentQuestion = null;
+// 回答與下一題無法從文字判別；只收一次，成功或失敗都退出，下一次送出就是新題。
+// 這是在答完後才詢問，沒有被打斷的問題需要排隊。
+let awaitingTold = false;
+let toldBusy = false;
+
+async function handleToldReply() {
+  if (toldBusy || !awaitingTold || invoke === null) return;
+  const text = askInput.value;
+  if (text.trim() === "") return;
+  toldBusy = true;
+  askInput.disabled = true;
+  askSend.disabled = true;
+  stopPersonaMedia();
+  const result = document.createElement("li");
+  result.className = "told-result";
+  try {
+    const outcome = await invoke("remember_told", { text });
+    if (outcome === "remembered") result.textContent = "記住了。";
+    else if (outcome === "disabled") result.textContent = "記住你說的話已關閉，這句話沒有記住。";
+    else throw new Error("沒有收到保存結果");
+  } catch (error) {
+    result.textContent = `這句話沒有記住：${String(error?.message ?? error)}`;
+  } finally {
+    awaitingTold = false;
+    toldBusy = false;
+    askInput.value = "";
+    setConsentGuideInput(true);
+  }
+  hitList.replaceChildren(result);
+  showingProvisional = false;
+  showingAnswer = false;
+  showAnswerHits();
+  paintConversation();
+  askInput.focus?.();
+}
 
 function usableConsentView(raw) {
   if (
@@ -2239,7 +2274,7 @@ function setConsentGuideInput(enabled) {
   paintConsentListen();
   askInput.placeholder = consentGuideSheet
     ? "也可以在這裡回答…"
-    : "問我一件事…";
+    : awaitingTold ? "告訴我這件事…" : "問我一件事…";
 }
 
 function showConsentGuide(view) {
@@ -4850,6 +4885,12 @@ function sourceLine(item, li, queryId, rank) {
   time.textContent = when(item.ts);
   source.append(time);
 
+  if (item.source_kind === "told") {
+    const label = document.createElement("span");
+    label.textContent = "你告訴她的話";
+    source.append(label);
+    return source;
+  }
   for (const part of [item.app, item.title, item.url]) {
     if (!part) continue;
     const span = document.createElement("span");
@@ -6080,7 +6121,10 @@ function renderHits(
   brain = null,
   readings = [],
   earlyPass = false,
+  canRememberTold = false,
 ) {
+  awaitingTold = false;
+  setConsentGuideInput(true);
   azureAnswerLine = null;
   azureAnswerButton = null;
   // 和上面那一行對稱。今天產品裡唯一走到 `renderHits()` 的是 `ask()`，而它開頭
@@ -6351,6 +6395,28 @@ function renderHits(
           : blind?.scan_horizon_days
             ? "我翻過的那幾段裡沒有這件事。"
             : "我記得的東西裡沒有這件事。";
+      if (canRememberTold && consentGuideSheet === null && !earlyPass) {
+        // 使用者的原話是「我記憶中都沒有這一塊，你可以告訴我嗎?」，**這裡只接
+        // 後半句**，而那不是在改他的字——前半句上面那三行已經講過了，而且講得
+        // 比它準。
+        //
+        // 把整句接上去，畫面上會變成：
+        //
+        //     我翻過的那幾段裡沒有這件事。我記憶中都沒有這一塊，你可以告訴我嗎?
+        //
+        // 第一句刻意收窄成「我翻過的那幾段」，因為她可能只翻了 30 天；第二句
+        // 立刻把它放大回「我記憶中都沒有」——正是上面那段註解花十四行在避免的
+        // 那一句（把十二分之一講成全部）。兩句各自都是真的，湊起來在說謊。
+        //
+        // 另外兩種變體（「我手上一件事都沒有。」「我記得的東西裡沒有這件事。」）
+        // 也一樣：接上去就是同一件事講兩次。
+        //
+        // 守這條的是閘門裡那條「空手那一格只講一次『沒有』」——它數的是四種
+        // 說法在同一格裡出現幾次，要求剛好一次。
+        empty.textContent += "你可以告訴我嗎?";
+        awaitingTold = true;
+        setConsentGuideInput(true);
+      }
       hitList.append(empty);
 
       // 後端只給事實（排除過幾段、暫停過幾次），句子在這裡組。
@@ -6542,6 +6608,11 @@ async function ask(event = null) {
     return;
   }
 
+  if (awaitingTold || toldBusy) {
+    await handleToldReply();
+    return;
+  }
+
   // 上一題若還在等開場 status，現在也不再是「最新那題」。
   pendingAzureAutoAsk = null;
   stopPersonaMedia();
@@ -6651,6 +6722,15 @@ async function ask(event = null) {
         return;
       }
     }
+    let canRememberTold = false;
+    try {
+      canRememberTold = (await invoke("settings_read"))?.remember_told === true;
+    } catch { /* 讀不到設定就不邀請保存。 */ }
+    if (mine !== asking) {
+      gaveUp = "superseded";
+      releaseNativePresentation(answer);
+      return;
+    }
     const presented = await commitNativePresentation(answer, () => {
       // begin 成功後 native guard 仍活著；這一段同步畫完才 end。外部 CLI 即使
       // 已發佈 pending，也只能在畫完之後回報全停成功。
@@ -6671,6 +6751,8 @@ async function ask(event = null) {
         answer.synthesis,
         answer.brain,
         answer.readings ?? [],
+        false,
+        canRememberTold,
       );
       // 畫完了才量得到。這一段不改任何東西——`noteTheBubble` 量完會把
       // `scrollTop` 放回去，他看到的第一眼仍是最上面那一句。

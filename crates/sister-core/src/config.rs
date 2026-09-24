@@ -227,6 +227,8 @@ pub struct PrivacyConfig {
     /// 有這個開關，是因為這一欄和其他每一欄不一樣：其他的都是她**觀察**到的
     /// 東西，這一欄是他**主動打進去**的字。他有權利說不要。
     pub query_log: bool,
+    /// 記下你告訴她的話；關閉只停止新寫入，既有內容依文字保留期與忘掉清除。
+    pub remember_told: bool,
 }
 
 impl Default for PrivacyConfig {
@@ -281,6 +283,7 @@ impl Default for PrivacyConfig {
             pause_on_screenshare: true,
             redact_clipboard_secrets: true,
             query_log: true,
+            remember_told: true,
         }
     }
 }

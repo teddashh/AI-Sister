@@ -366,6 +366,7 @@ fn quit_recorder(shell: &Shell) -> Result<(), String> {
 /// 過了保留期，通通收在同一個 `None` 底下。
 #[derive(Serialize)]
 struct Hit {
+    source_kind: String,
     /// 題庫要靠它記下「他點開的是哪一筆」（見 `log_click`）。畫面上不顯示。
     chunk_id: i64,
     ts: i64,
@@ -3000,10 +3001,14 @@ fn synthesis_from_grounded(
                             .ok_or_else(|| format!("找不到回答引用的本機文字 #{id}"))?;
                         Ok(GroundedSource {
                             r#ref: reference.as_str(),
-                            label: hit.frame_id.map_or_else(
-                                || format!("文字 #{id}"),
-                                |frame| format!("畫面 #{frame}"),
-                            ),
+                            label: if hit.source_kind == "told" {
+                                "你告訴她的話".to_owned()
+                            } else {
+                                hit.frame_id.map_or_else(
+                                    || format!("文字 #{id}"),
+                                    |frame| format!("畫面 #{frame}"),
+                                )
+                            },
                             frame_id: hit.frame_id,
                         })
                     }
@@ -3057,6 +3062,7 @@ mod grounded_synthesis_tests {
 
     fn hit() -> Hit {
         Hit {
+            source_kind: "ocr".into(),
             chunk_id: 77,
             ts: 200,
             text: "昨天完成匯出".into(),
@@ -3957,6 +3963,7 @@ fn answer_from_memory(
             hits: hits
                 .into_iter()
                 .map(|h| Hit {
+                    source_kind: h.source_kind.as_str().to_owned(),
                     chunk_id: h.chunk_id,
                     ts: h.ts,
                     text: h.text,
@@ -4211,6 +4218,7 @@ fn timeline_days(tz_offset_ms: i64, shell: tauri::State<'_, Shell>) -> Result<Ve
 /// 時間軸上的一格。
 #[derive(Serialize)]
 struct Moment {
+    source_kind: String,
     ts: i64,
     app: Option<String>,
     title: Option<String>,
@@ -4277,6 +4285,7 @@ fn timeline_moments(
             moments: rows
                 .into_iter()
                 .map(|m| Moment {
+                    source_kind: m.source_kind,
                     ts: m.ts,
                     app: m.app,
                     title: m.title,
@@ -6060,6 +6069,7 @@ struct Settings {
     pause_on_screenshare: bool,
     redact_clipboard_secrets: bool,
     query_log: bool,
+    remember_told: bool,
     frames_days: u32,
     text_days: u32,
     persona_enabled: sister_core::config::PersonaVisible,
@@ -6256,6 +6266,7 @@ fn settings_read() -> Result<Settings, String> {
         pause_on_screenshare: c.privacy.pause_on_screenshare,
         redact_clipboard_secrets: c.privacy.redact_clipboard_secrets,
         query_log: c.privacy.query_log,
+        remember_told: c.privacy.remember_told,
         frames_days: c.retention.frames_days,
         text_days: c.retention.text_days,
         persona_enabled: c.shell.persona.visible(),
@@ -6521,6 +6532,7 @@ fn settings_write(
         c.privacy.pause_on_screenshare = settings.pause_on_screenshare;
         c.privacy.redact_clipboard_secrets = settings.redact_clipboard_secrets;
         c.privacy.query_log = settings.query_log;
+        c.privacy.remember_told = settings.remember_told;
         c.retention.frames_days = settings.frames_days;
         c.retention.text_days = settings.text_days;
         c.set_consent_read_aloud(settings.persona_consent_read_aloud);
@@ -7338,6 +7350,7 @@ async fn open_onboarding(app: tauri::AppHandle) -> Result<(), String> {
 #[derive(Serialize)]
 struct Erasure {
     chunks: u64,
+    told: u64,
     facts: u64,
     frames: u64,
     images: u64,
@@ -7410,6 +7423,7 @@ impl From<sister_core::retention::PruneReport> for Erasure {
     fn from(r: sister_core::retention::PruneReport) -> Self {
         Self {
             chunks: r.chunks_deleted,
+            told: r.told_deleted,
             facts: r.facts_deleted,
             frames: r.frames_deleted,
             images: r.images_deleted,
@@ -7624,6 +7638,29 @@ fn log_click(
             tracing::warn!("這一次點擊沒記進題庫：{e}");
             e.to_string()
         })
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RememberToldOutcome {
+    Remembered,
+    Disabled,
+}
+
+#[tauri::command(async)]
+fn remember_told(
+    text: String,
+    shell: tauri::State<'_, Shell>,
+) -> Result<RememberToldOutcome, String> {
+    with_db_mut(&shell, |db| {
+        let c = sister_core::config::Config::load(&config_path()?).map_err(|e| format!("{e:#}"))?;
+        db.remember_told(&c.privacy, sister_core::now_ms(), &text)
+            .map(|id| match id {
+                Some(_) => RememberToldOutcome::Remembered,
+                None => RememberToldOutcome::Disabled,
+            })
+            .map_err(|e| format!("{e:#}"))
     })
 }
 
@@ -8023,6 +8060,7 @@ fn main() {
             open_frame,
             log_click,
             mark_query,
+            remember_told,
             frame_image,
             pause_state,
             master_stop_state,

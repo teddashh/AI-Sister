@@ -97,6 +97,7 @@ const el = {
   screenshare: document.querySelector("[data-screenshare]"),
   redact: document.querySelector("[data-redact]"),
   querylog: document.querySelector("[data-querylog]"),
+  rememberTold: document.querySelector("[data-remember-told]"),
   framesDays: document.querySelector("[data-frames-days]"),
   textDays: document.querySelector("[data-text-days]"),
   lint: document.querySelector("[data-lint]"),
@@ -969,6 +970,7 @@ async function reloadHotkey() {
  * 下一次比的是新的基準。
  */
 let queryLogWas = null;
+let rememberToldWas = null;
 
 /**
  * 第二張同意書現在算不算數。`true` / `false` / `null`（問不到）。
@@ -2334,6 +2336,7 @@ function apply(s) {
     throw new Error("設定回傳了這一版不認得的角色 ID；沒有套用這份設定。");
   }
   queryLogWas = s.query_log;
+  rememberToldWas = s.remember_told;
   el.path.textContent = s.path;
   if (el.personaEnabled) el.personaEnabled.checked = s.persona_enabled !== false;
   if (el.personaId) {
@@ -2349,6 +2352,7 @@ function apply(s) {
   el.screenshare.checked = s.pause_on_screenshare;
   el.redact.checked = s.redact_clipboard_secrets;
   el.querylog.checked = s.query_log;
+  el.rememberTold.checked = s.remember_told;
   el.framesDays.value = s.frames_days;
   el.textDays.value = s.text_days;
   // 只有完整 settings_read 套用到這裡，才有資格把某位叫作「設定檔目前存的」。
@@ -2623,6 +2627,7 @@ function setUnreadable(on) {
     el.screenshare,
     el.redact,
     el.querylog,
+    el.rememberTold,
     el.framesDays,
     el.textDays,
     el.save,
@@ -2809,6 +2814,7 @@ function demo(variant) {
     pause_on_screenshare: true,
     redact_clipboard_secrets: true,
     query_log: true,
+    remember_told: true,
     frames_days: 30,
     text_days: 365,
     persona_enabled: true,
@@ -3026,6 +3032,7 @@ async function save() {
         pause_on_screenshare: el.screenshare.checked,
         redact_clipboard_secrets: el.redact.checked,
         query_log: el.querylog.checked,
+        remember_told: el.rememberTold.checked,
         frames_days: days(el.framesDays, "畫面"),
         text_days: days(el.textDays, "文字"),
         persona_enabled: el.personaEnabled?.checked === true,
@@ -3084,9 +3091,12 @@ async function save() {
     // **在 `load()` 之前算完**：它會把 `el.querylog.checked` 和 `queryLogWas`
     // 一起換成剛存進去的那一份，那之後這個比較永遠是 false。
     const justTurnedOff = queryLogWas === true && el.querylog.checked === false;
-    const persistedMessage = justTurnedOff
+    let persistedMessage = justTurnedOff
       ? `${watching}\n從現在起她不會再記你問過的問題。先前記下的那些不會因為這個動作消失——要清掉請用時間軸的「忘掉這一段」，或等文字保留期到。`
       : watching;
+    if (rememberToldWas === true && el.rememberTold.checked === false) {
+      persistedMessage += "\n從現在起她不會再記你告訴她的話。先前記下的那些不會因為這個動作消失——要清掉請用時間軸的「忘掉這一段」，或等文字保留期到。";
+    }
     const personaEventMissed = outcome?.persona_event_emitted === false;
     const message = personaEventMissed
       ? `${persistedMessage}\n角色設定已存進檔案，但即時更新事件沒能送出；重新啟動 AI-Sister desktop 後會讀到。`

@@ -2710,6 +2710,7 @@ pub mod act {
 
     fn origin_subject(origin: &sister_core::db::FactOrigin) -> &'static str {
         match origin {
+            sister_core::db::FactOrigin::Told => "你告訴她的話",
             sister_core::db::FactOrigin::Screen => "畫面",
             sister_core::db::FactOrigin::WindowTitle => "視窗標題",
             sister_core::db::FactOrigin::Clipboard => "剪貼簿來源",
@@ -3025,6 +3026,7 @@ pub mod act {
                 // 這裡收的是 `FramelessOrigin`，不是 `FactOrigin`：後者的 `Screen`
                 // 填進下面那句話會變成「來自畫面，沒有畫面出處」。見型別上的註解。
                 let origin_text = match origin {
+                    sister_core::db::FramelessOrigin::Told => "來自你告訴她的話",
                     sister_core::db::FramelessOrigin::WindowTitle => "來自視窗標題",
                     sister_core::db::FramelessOrigin::Clipboard => "來自剪貼簿",
                     sister_core::db::FramelessOrigin::ScreenTextWithoutFrame => {
@@ -12862,6 +12864,9 @@ pub mod prune {
         // （註解裡的「他」和印出來的「你」是兩件事。這一行原本寫成「他自己
         // 問過的話」，是註解的人稱漏到輸出裡了——整個 CLI 對使用者一律講
         // 「你」，只有這一句在旁邊講他。）
+        if r.told_deleted > 0 {
+            writeln!(out, "  {verb} {} 段你告訴她的話", r.told_deleted)?;
+        }
         if r.queries_deleted > 0 {
             writeln!(
                 out,
@@ -15242,7 +15247,14 @@ pub mod query {
             );
             println!("    {}", fmt::one_line(&h.snippet, 120));
             // 出處：每一句話都要能被追回去
-            let mut src = format!("↳ {}", h.source_kind.as_str());
+            let mut src = format!(
+                "↳ {}",
+                if h.source_kind == sister_core::model::SourceKind::Told {
+                    "你告訴她的話"
+                } else {
+                    h.source_kind.as_str()
+                }
+            );
             if let Some(fid) = h.frame_id {
                 src.push_str(&format!(" · frame #{fid}"));
             }
@@ -19517,6 +19529,7 @@ pub mod doctor {
                     (r.images_deleted, "個畫面檔"),
                     (r.frames_deleted, "列畫面紀錄"),
                     (r.chunks_deleted, "段文字"),
+                    (r.told_deleted, "段你告訴她的話"),
                     (r.facts_deleted, "個事實"),
                     (r.events_deleted, "筆事件"),
                     (r.queries_deleted, "題你問過的話"),
@@ -24138,7 +24151,11 @@ pub mod replay {
                     .collect::<Vec<_>>()
                     .join(","),
                 item.channel,
-                item.source_kind,
+                if item.source_kind == "told" {
+                    "你告訴她的話"
+                } else {
+                    &item.source_kind
+                },
                 item.at_ms,
                 concise(&item.values.join(" / "), 180)
             )?;

@@ -2865,6 +2865,36 @@ impl Db {
         Ok(out)
     }
 
+    /// 記住使用者告訴她的話。關閉時回傳 None，且不寫入任何資料。
+    /// 呼叫端在 A154 R2 的對話框那條路上，在那之前這裡只有測試會走。
+    /// 呼叫時傳入目前有效的隱私設定；不建立錄製場次、畫面或 L1 facts。
+    pub fn remember_told(
+        &mut self,
+        privacy: &crate::config::PrivacyConfig,
+        ts: Millis,
+        text: &str,
+    ) -> Result<Option<i64>> {
+        if !privacy.remember_told {
+            return Ok(None);
+        }
+        anyhow::ensure!(!text.trim().is_empty(), "不能記下空白的話");
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO text_chunks(ts, source_kind, text) VALUES(?1, ?2, ?3)",
+            params![ts, SourceKind::Told.as_str(), text],
+        )?;
+        let id = tx.last_insert_rowid();
+        let grams = cjk_bigrams(text);
+        if !grams.is_empty() {
+            tx.execute(
+                "INSERT INTO text_fts_bi(rowid, text) VALUES(?1, ?2)",
+                params![id, grams],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
     // ---------- 檢索 ----------
 
     /// 全文檢索。trigram 與 unicode61 兩個索引各查一次再合併取最佳分數，
@@ -2918,7 +2948,13 @@ impl Db {
                     Ok(SearchHit {
                         chunk_id: row.get(0)?,
                         ts: row.get(1)?,
-                        source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                        source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                format!("unknown text source kind: {kind}").into(),
+                            )
+                        })?,
                         frame_id: row.get(3)?,
                         app_id: row.get(4)?,
                         window_title: row.get(5)?,
@@ -3039,7 +3075,13 @@ impl Db {
                 Ok(SearchHit {
                     chunk_id: row.get(0)?,
                     ts: row.get(1)?,
-                    source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                    source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            format!("unknown text source kind: {kind}").into(),
+                        )
+                    })?,
                     frame_id: row.get(3)?,
                     app_id: row.get(4)?,
                     window_title: row.get(5)?,
@@ -3099,7 +3141,13 @@ impl Db {
                 Ok(SearchHit {
                     chunk_id: row.get(0)?,
                     ts: row.get(1)?,
-                    source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                    source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            format!("unknown text source kind: {kind}").into(),
+                        )
+                    })?,
                     frame_id: row.get(3)?,
                     app_id: row.get(4)?,
                     window_title: row.get(5)?,
@@ -3172,7 +3220,13 @@ impl Db {
             Ok(SearchHit {
                 chunk_id: row.get(0)?,
                 ts: row.get(1)?,
-                source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        format!("unknown text source kind: {kind}").into(),
+                    )
+                })?,
                 frame_id: row.get(3)?,
                 app_id: row.get(4)?,
                 window_title: row.get(5)?,
@@ -3568,7 +3622,13 @@ impl Db {
                 Ok(SearchHit {
                     chunk_id: row.get(0)?,
                     ts: row.get(1)?,
-                    source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                    source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            format!("unknown text source kind: {kind}").into(),
+                        )
+                    })?,
                     frame_id: row.get(3)?,
                     app_id: row.get(4)?,
                     window_title: row.get(5)?,
@@ -3714,7 +3774,13 @@ impl Db {
             Ok(SearchHit {
                 chunk_id: row.get(0)?,
                 ts: row.get(1)?,
-                source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        format!("unknown text source kind: {kind}").into(),
+                    )
+                })?,
                 frame_id: row.get(3)?,
                 app_id: row.get(4)?,
                 window_title: row.get(5)?,
@@ -4049,13 +4115,14 @@ impl Db {
     /// 像不存在。`frame_id` 可以是 `None`，那就是「字還在、圖過期了」。
     pub fn timeline(&self, from_ts: Millis, to_ts: Millis, limit: usize) -> Result<Vec<Moment>> {
         let mut stmt = self.conn.prepare(
-            "SELECT ts, app_id, window_title, url, text, frame_id
+            "SELECT ts, app_id, window_title, url, text, frame_id, source_kind
              FROM text_chunks
              WHERE ts >= ?1 AND ts < ?2
              ORDER BY ts LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![from_ts, to_ts, limit as i64], |r| {
             Ok(Moment {
+                source_kind: r.get(6)?,
                 ts: r.get(0)?,
                 app: r.get(1)?,
                 title: r.get(2)?,
@@ -7459,19 +7526,25 @@ pub fn fts_query(input: &str) -> String {
 /// 「在畫面上看到的」不可能由單獨的 `app_id` 推出來。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FactOrigin {
+    Told,
     /// `source_kind = 'ocr'` 而且 `frame_id` 有值。
     Screen,
     WindowTitle,
     Clipboard,
     /// `source_kind = 'ocr'`，卻沒有記是哪一張畫面。
     ScreenTextWithoutFrame,
-    /// 這一版看不懂的 `source_kind`；刻意不保留原始字串。
+    /// 未辨識的來源，或來源與畫面欄位不符合上述組合；不保留原始字串。
     Unknown,
 }
 
 impl FactOrigin {
     pub fn from_target_row(source_kind: &str, frame_id: Option<i64>) -> Self {
         match (source_kind, frame_id) {
+            // 今天沒有任何路徑會產生 source_kind='told' 的 **fact**：
+            // `remember_told` 只寫 text_chunks，不建 L1 fact。這一臂和它底下那
+            // 幾句話是替 `FramelessOrigin::Told` 補的對稱，不是「已經有人走過」
+            // 的證據——引用它們的時候不要把它當成 told fact 存在的憑據。
+            ("told", None) => Self::Told,
             ("ocr", Some(_)) => Self::Screen,
             ("window_title", None) => Self::WindowTitle,
             ("clipboard", None) => Self::Clipboard,
@@ -7494,6 +7567,7 @@ impl FactOrigin {
 /// 資料列記著它來自畫面文字，同時明講畫面編號缺失；未知值也不帶原始字串。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FramelessOrigin {
+    Told,
     WindowTitle,
     Clipboard,
     /// `source_kind` 說是畫面文字，卻沒有記畫面編號的矛盾列。
@@ -7508,6 +7582,7 @@ impl FramelessOrigin {
         match source_kind {
             "window_title" => Self::WindowTitle,
             "clipboard" => Self::Clipboard,
+            "told" => Self::Told,
             "ocr" => Self::ScreenTextWithoutFrame,
             _ => Self::Unknown,
         }
@@ -7547,10 +7622,20 @@ pub fn target_provenance(target: Option<&TargetApp>) -> String {
     };
     match target {
         TargetApp::Forgotten => "這個目標的來源已經不在了（被忘掉、或過了保留期）".to_owned(),
-        TargetApp::AppNotRecorded { origin } => {
-            format!("這個目標的{}沒有記是哪個 app", origin_subject(origin))
-        }
+        TargetApp::AppNotRecorded { origin } => match origin {
+            // Told 不能填進下面那個「這個目標的 X」的格子。其他四種都是這筆
+            // 目標**擁有**的東西（它的畫面、它的視窗標題⋯⋯），填進去是通順的；
+            // 他打進來的那句話不是目標擁有的東西，它**就是**目標本身，於是
+            // 組出來的是「這個目標的你告訴她的話沒有記是哪個 app」。
+            //
+            // 而這一格正是 told 真的走得到的那一格：`remember_told` 從不寫
+            // `app_id`，所以 `app_for_target_fact` 對它一定回 `AppNotRecorded`。
+            // 上面 `Known` 那一臂要有 app_id 才到得了——今天沒有任何路徑產得出來。
+            FactOrigin::Told => "這個目標來自你告訴她的話".to_owned(),
+            _ => format!("這個目標的{}沒有記是哪個 app", origin_subject(origin)),
+        },
         TargetApp::Known { app, origin } => match origin {
+            FactOrigin::Told => "這個目標來自你告訴她的話".to_owned(),
             FactOrigin::Screen => format!("這個目標是在 {app} 的畫面上看到的"),
             FactOrigin::WindowTitle => format!("這個目標是在 {app} 的視窗標題上記下來的"),
             FactOrigin::Clipboard => format!("這個目標是從 {app} 複製起來的"),
@@ -7564,6 +7649,7 @@ pub fn target_provenance(target: Option<&TargetApp>) -> String {
 
 fn origin_subject(origin: &FactOrigin) -> &'static str {
     match origin {
+        FactOrigin::Told => "你告訴她的話",
         FactOrigin::Screen => "畫面",
         FactOrigin::WindowTitle => "視窗標題",
         FactOrigin::Clipboard => "剪貼簿來源",
@@ -8540,6 +8626,7 @@ pub struct DaySummary {
 /// 時間軸上的一格。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Moment {
+    pub source_kind: String,
     pub ts: Millis,
     pub app: Option<String>,
     pub title: Option<String>,
@@ -16050,5 +16137,108 @@ mod tests {
             suggestion.target_provenance,
             "這個目標是從哪個畫面來的沒有記"
         );
+    }
+}
+
+#[cfg(test)]
+mod a154_source_tests {
+    use super::*;
+
+    #[test]
+    fn a154_unknown_sources_are_never_reported_as_ocr() {
+        let mut db = Db::open_in_memory().unwrap();
+        let id = db
+            .remember_told(
+                &crate::config::PrivacyConfig::default(),
+                10,
+                "紫色雨傘 violetumbrella",
+            )
+            .unwrap()
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE text_chunks SET source_kind='future-kind' WHERE id=?1",
+                [id],
+            )
+            .unwrap();
+        assert!(db.search("violetumbrella", 10).unwrap().is_empty());
+        assert!(db.recent(10).unwrap().is_empty());
+        assert!(db.chunks_in_range(0, 20, 10).unwrap().is_empty());
+        assert!(
+            db.chunks_in_range_preferring_after(0, 20, 10, Some(5))
+                .unwrap()
+                .is_empty()
+        );
+        let (hits, complete) = db.search_bigram("紫色", "紫色", 10, None).unwrap();
+        assert!(hits.is_empty());
+        assert!(!complete);
+        assert!(db.search_like("紫色", 10, None).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod a154_r2_tests {
+    use super::*;
+
+    #[test]
+    fn a154_r2_told_searches_all_indexes_and_prepares_answer() {
+        let mut db = Db::open_in_memory().unwrap();
+        let text = "紫色雨傘在玄關 violetumbrella";
+        let id = db
+            .remember_told(&crate::config::PrivacyConfig::default(), 10, text)
+            .unwrap()
+            .unwrap();
+        // search 有 LIKE 退路，單靠搜得到不能證明三個索引都有寫。
+        for (table, query) in [
+            ("text_fts", "紫色雨傘"),
+            ("text_fts_uni", "violetumbrella"),
+            ("text_fts_bi", "紫色"),
+        ] {
+            let found: i64 = db
+                .conn
+                .query_row(
+                    &format!("SELECT rowid FROM {table} WHERE {table} MATCH ?1"),
+                    [query],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, id, "{table}");
+        }
+        let hits = db.search("紫色雨傘", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, text);
+        let prepared = crate::grounded_answer::prepare("紫色雨傘", &[], &[], &hits, 20)
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.sources[0].origin.as_str(), "told");
+        assert_eq!(
+            prepared.sources[0].reference.as_str(),
+            format!("chunk:{id}")
+        );
+        let moments = db.timeline(0, 20, 10).unwrap();
+        assert_eq!(moments[0].text, text);
+        assert_eq!(moments[0].source_kind, "told");
+    }
+
+    #[test]
+    fn a154_r2_fact_origin_agrees_with_frameless() {
+        let origin = FactOrigin::from_target_row("told", None);
+        assert_eq!(origin, FactOrigin::Told);
+        assert_eq!(
+            FramelessOrigin::from_source_kind("told"),
+            FramelessOrigin::Told
+        );
+        assert_eq!(origin_subject(&origin), "你告訴她的話");
+        let said = target_provenance(Some(&TargetApp::Known {
+            app: "test".into(),
+            origin: origin.clone(),
+        }));
+        assert_eq!(said, "這個目標來自你告訴她的話");
+        assert!(!said.contains("來源沒有記清楚"));
+        // told 真的走得到的是這一格（`remember_told` 從不寫 app_id），而它
+        // 原本會把人稱代詞填進所有格：「這個目標的你告訴她的話沒有記是哪個 app」。
+        let no_app = target_provenance(Some(&TargetApp::AppNotRecorded { origin }));
+        assert_eq!(no_app, "這個目標來自你告訴她的話");
+        assert!(!no_app.contains("這個目標的"));
     }
 }

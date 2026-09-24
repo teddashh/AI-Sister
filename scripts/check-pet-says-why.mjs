@@ -21,6 +21,8 @@
  * `setPaused` → `paint()`），和輪詢走的是同一條，只是不必真的等五秒。
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import { join, dirname, resolve } from "node:path";
@@ -774,6 +776,113 @@ function check(name, ok, detail) {
     if (detail !== undefined) console.log(`      實際：${JSON.stringify(detail)}`);
   }
 }
+
+// A154 R2：用真 app.js 的按送出路徑；只在突變取證時單跑此組。
+{
+  // 使用者原話的後半句。前半句由空手那一格自己那三種說法負責，理由寫在 app.js
+  // 接這一句的地方；底下「只講一次沒有」那條就是守著不讓兩邊重複的那一條。
+  const invitation = "你可以告訴我嗎?";
+  check("A154 native command 已註冊", /generate_handler!\[([\s\S]*?)\]/u.exec(read(MAIN))?.[1].includes("remember_told,"));
+  const fixture = { ask: answer(), settings_read: { remember_told: true }, remember_told: "remembered" };
+  const p = await open(fixture);
+  await p.type("紫色雨傘在哪裡");
+  check("A154-1 終局邀請與輸入模式", p.hitTexts().join("").includes(invitation) && p.input().placeholder === "告訴我這件事…", p.hitTexts());
+  await p.type("   ");
+  check("A154 空白沒有送出", !p.calls.includes("remember_told"));
+
+  // 空手那一格**只准講一次「沒有」**。
+  //
+  // 使用者的原話是「我記憶中都沒有這一塊，你可以告訴我嗎?」，而這一格自己那三
+  // 句各自已經講過前半段了。整句接上去會變成同一件事講兩次，而且第二次講得比
+  // 第一次寬——只翻了 30 天卻說「我記憶中都沒有」，就是把十二分之一講成全部，
+  // 正是 app.js 那一格上面那段註解花十四行在避免的那一句。
+  //
+  // 所以這一條數的是四種說法在同一格裡出現幾次，要求剛好一次。底下那條前提
+  // 不可以拿掉：邀請沒出現的時候，數到 1 只是因為根本沒有人接第二句。
+  {
+    const ABSENCE = ["我手上一件事都沒有", "我翻過的那幾段裡沒有這件事",
+                     "我記得的東西裡沒有這件事", "我記憶中都沒有"];
+    for (const [name, extra] of [
+      ["預設", {}],
+      ["只翻了幾天", { blind: blind({ ever_recorded: true, ever_stored: true, chunks: 12, scan_horizon_days: 30 }) }],
+    ]) {
+      const q = await open({ ...fixture, ask: answer(extra) });
+      await q.type("紫色雨傘在哪裡");
+      const said = q.hitTexts().join("");
+      check(`A154 前提：這一格真的在邀請（${name}）`, said.includes(invitation), said);
+      check(`A154 空手那一格只講一次沒有（${name}）`,
+        ABSENCE.filter((phrase) => said.includes(phrase)).length === 1,
+        ABSENCE.filter((phrase) => said.includes(phrase)));
+    }
+  }
+  const words = "  紫色雨傘在玄關 violetumbrella？\n任何格式都收  ";
+  await p.type(words);
+  check("A154-3 原文送進 command", p.invokes.some(x => x.cmd === "remember_told" && x.arg.text === words));
+  check("A154-4 成功", p.hitTexts().join("").includes("記住了。"));
+  check("A154-4a 不講保存機制", !/已儲存至本機資料庫|這台電腦|保留期設定/u.test(p.hitTexts().join("")));
+  check("A154-4b 不複誦授權或刪除承諾", !/隨時刪除|允許的範圍|隱私承諾/u.test(p.hitTexts().join("")));
+  check("A154 成功還原輸入", p.input().value === "" && p.input().placeholder === "問我一件事…" && !p.input().disabled);
+  const before = p.calls.filter(x => x === "ask").length;
+  await p.type("下一題");
+  check("A154-7 第二次走問答", p.calls.filter(x => x === "ask").length === before + 1 && p.calls.filter(x => x === "remember_told").length === 1);
+  const off = await open({ ...fixture, settings_read: { remember_told: false } });
+  await off.type("紫色雨傘");
+  check("A154-2 關閉不邀請且保留原句", !off.hitTexts().join("").includes(invitation) && off.hitTexts().join("").includes("我記得的東西裡沒有這件事。") && off.input().placeholder === "問我一件事…");
+  const unavailable = await open({ ...fixture, settings_read: new Error("config unreadable") });
+  await unavailable.type("紫色雨傘");
+  check("A154 設定讀不到不邀請", !unavailable.hitTexts().join("").includes(invitation));
+  let finishTold;
+  const busy = await open({ ...fixture, remember_told: () => new Promise(resolve => { finishTold = resolve; }) });
+  await busy.type("紫色雨傘");
+  await busy.type("在玄關");
+  await busy.type("重複按送出");
+  check("A154 保存中不重複寫入", busy.calls.filter(x => x === "remember_told").length === 1 && busy.input().disabled);
+  finishTold("remembered");
+  await tick();
+  check("A154 保存完成解鎖", !busy.input().disabled);
+  const messages = [];
+  for (const outcome of [new Error("database is locked"), "disabled"]) {
+    const q = await open({ ...fixture, remember_told: outcome });
+    await q.type("紫色雨傘");
+    await q.type("放在玄關");
+    const said = q.hitTexts().join("");
+    messages.push(said);
+    check(outcome instanceof Error ? "A154-5 失敗如實說明" : "A154-6 關閉回條", said.includes(outcome instanceof Error ? "這句話沒有記住：database is locked" : "記住你說的話已關閉，這句話沒有記住。"), said);
+    check("A154 失敗也還原模式", q.input().placeholder === "問我一件事…");
+    await q.type("新的題目");
+    check("A154 失敗後問答", q.calls.filter(x => x === "ask").length === 2 && q.calls.filter(x => x === "remember_told").length === 1);
+  }
+  check("A154 兩種沒記住不同", messages[0] !== messages[1]);
+  // 同一輪 renderer 輸入 → 真 native command 本體 → SQLite → 檢索 → renderer。
+  // 只替代 Tauri IPC 與外殼；不模擬 remember_told、DB、出處 mapper。
+  const temp = mkdtempSync(join(tmpdir(), "a154-recall-"));
+  const fixturePath = join(temp, "recall.json");
+  let stored = false;
+  try {
+    const live = await open({
+      ...fixture,
+      remember_told: ({ text }) => {
+        const run = spawnSync("timeout", ["120", "python3", resolve(UI, "../../../scripts/check-told-native.py")], {
+          encoding: "utf8", env: { ...process.env, A154_TOLD_TEXT: text, A154_RECALL_FIXTURE: fixturePath },
+        });
+        check("A154-8 native 執行非空測試", run.status === 0 && /2 passed; 0 failed/u.test(run.stdout), run.stderr + run.stdout);
+        if (run.status !== 0) throw new Error("native probe failed");
+        stored = true;
+        return "remembered";
+      },
+      ask: () => stored ? answer(JSON.parse(read(fixturePath))) : answer(),
+    });
+    await live.type("紫色雨傘在哪裡");
+    await live.type("紫色雨傘在玄關 violetumbrella");
+    await live.type("紫色雨傘");
+    check("A154-8 寫入後再次提問找到原話與出處", live.hitTexts().join("").includes("紫色雨傘在玄關") && live.hitTexts().join("").includes("你告訴她的話"), live.hitTexts());
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+  const hit = { chunk_id: 42, ts: 10, text: "紫色雨傘在玄關", snippet: "紫色雨傘在玄關", source_kind: "told", frame_id: null };
+  const recall = await open({ ask: answer({ hits: [hit] }) });
+  await recall.type("紫色雨傘");
+  check("A154-8 命中出處", recall.hitTexts().join("").includes("你告訴她的話") && !recall.hitTexts().join("").includes("沒有留下畫面"));
+}
+if (process.env.A154_ONLY === "1") process.exit(failed > 0 ? 1 : 0);
 
 // 執行產品原碼的探針；假動畫在下一個 tick 才完成，CSS 在此前仍回 visible。
 const observationSource = APP_FUNCTIONS.filter(fn => fn.name === "observation")

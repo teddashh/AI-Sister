@@ -78,6 +78,7 @@ const EMPTY_DAY = { moments: [], pauses: [], truncated: false };
 function erasure(over = {}) {
   return {
     chunks: 3,
+    told: 0,
     facts: 2,
     frames: 5,
     images: 5,
@@ -177,12 +178,51 @@ async function open(table = {}) {
 }
 
 let failed = 0;
+let passed = 0;
 function check(name, ok, detail) {
+  if (ok) passed++;
   console.log(`  ${ok ? "✔" : "✗"} ${name}`);
   if (!ok) {
     failed++;
     if (detail !== undefined) console.log(`      實際：${JSON.stringify(detail)}`);
   }
+}
+
+{
+  const p = await open({ timeline_moments: { ...MOMENTS, moments: [moment({ source_kind: "told", app: null, title: null, url: null, frame_id: null, text: "紫色雨傘在玄關" })] } });
+  check("A154-9 時間軸列出原話與來源", p.rows().join("").includes("紫色雨傘在玄關") && p.rows().join("").includes("你告訴她的話"), p.rows());
+  check("A154-9 沒有宣稱是遺失的畫面", !p.rows().join("").includes("只剩這些字"), p.rows());
+}
+if (process.env.A154_ONLY === "1") {
+  console.log(`${passed} passed; ${failed} failed`);
+  process.exit(failed > 0 ? 1 : 0);
+}
+
+{
+  const p = await open({ forget_preview: erasure({ told: 2 }), forget_range: erasure({ told: 2 }) });
+  await p.press();
+  check("預覽列出親口告訴她的話", p.say().includes("2 段你告訴她的話"), p.say());
+  await p.press();
+  check("刪除結果列出親口告訴她的話", p.say().includes("2 段你告訴她的話"), p.say());
+}
+
+{
+  const source = read(SRC);
+  const start = source.indexOf('function fakeBackend(');
+  const end = source.indexOf('\n// `1` 是平常', start);
+  const demo = new Function('DAY', 'tzOffsetMs', `${source.slice(start, end)}; return fakeBackend();`)(DAY, () => 0);
+  const args = { fromTs: 0, toTs: Date.UTC(2027, 0, 1) };
+  const preview = await demo('forget_preview', args);
+  const actual = await demo('forget_range', args);
+  check("假後端真的給非零親口記憶", preview.told > 0);
+  check("假後端預覽與刪除親口記憶一致", preview.told === actual.told);
+  check("假後端刪完不再列親口記憶", (await demo('forget_preview', args)).told === 0);
+}
+
+{
+  const native = read(resolve(UI, "../src-tauri/src/main.rs"));
+  const conversion = native.match(/impl From<sister_core::retention::PruneReport> for Erasure[\s\S]*?\n}/)?.[0] ?? "";
+  check("native 刪除回條有 told 欄", conversion.includes("told: r.told_deleted,"));
 }
 
 console.log("① 兩段式：第一下只問，第二下才刪");
@@ -1212,6 +1252,7 @@ console.log("⑭ 圖刪不掉：字已經移除、檔還在、下一輪只再試
 }
 
 console.log("");
+console.log(`${passed} passed; ${failed} failed`);
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——那顆不可逆的按鈕停在一個它不該停的狀態。`);
   process.exit(1);
