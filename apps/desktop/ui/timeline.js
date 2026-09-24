@@ -345,6 +345,7 @@ function momentRow(m) {
 
   const where = document.createElement("div");
   where.className = "where";
+  if (m.source_kind === "told") where.append(chip("你告訴她的話"));
   if (m.app) where.append(chip(m.app, "app"));
   if (m.title) where.append(chip(m.title));
   if (m.url) where.append(chip(m.url));
@@ -357,7 +358,9 @@ function momentRow(m) {
   text.textContent = m.text;
   body.append(text);
 
-  if (m.frame_id === null) {
+  if (m.source_kind === "told") {
+    // 使用者說的話沒有擷取畫面，不描述成遺失的截圖。
+  } else if (m.frame_id === null) {
     // 正常狀態，不是壞掉——原因有好幾種（只記字、節流、額度、保留期），
     // 這裡分不出是哪一種。理由同 app.js 那一段。
     const gone = document.createElement("p");

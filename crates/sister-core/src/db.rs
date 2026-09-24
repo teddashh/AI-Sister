@@ -4115,13 +4115,14 @@ impl Db {
     /// 像不存在。`frame_id` 可以是 `None`，那就是「字還在、圖過期了」。
     pub fn timeline(&self, from_ts: Millis, to_ts: Millis, limit: usize) -> Result<Vec<Moment>> {
         let mut stmt = self.conn.prepare(
-            "SELECT ts, app_id, window_title, url, text, frame_id
+            "SELECT ts, app_id, window_title, url, text, frame_id, source_kind
              FROM text_chunks
              WHERE ts >= ?1 AND ts < ?2
              ORDER BY ts LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![from_ts, to_ts, limit as i64], |r| {
             Ok(Moment {
+                source_kind: r.get(6)?,
                 ts: r.get(0)?,
                 app: r.get(1)?,
                 title: r.get(2)?,
@@ -7525,19 +7526,21 @@ pub fn fts_query(input: &str) -> String {
 /// 「在畫面上看到的」不可能由單獨的 `app_id` 推出來。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FactOrigin {
+    Told,
     /// `source_kind = 'ocr'` 而且 `frame_id` 有值。
     Screen,
     WindowTitle,
     Clipboard,
     /// `source_kind = 'ocr'`，卻沒有記是哪一張畫面。
     ScreenTextWithoutFrame,
-    /// 這一版看不懂的 `source_kind`；刻意不保留原始字串。
+    /// 未辨識的來源，或來源與畫面欄位不符合上述組合；不保留原始字串。
     Unknown,
 }
 
 impl FactOrigin {
     pub fn from_target_row(source_kind: &str, frame_id: Option<i64>) -> Self {
         match (source_kind, frame_id) {
+            ("told", None) => Self::Told,
             ("ocr", Some(_)) => Self::Screen,
             ("window_title", None) => Self::WindowTitle,
             ("clipboard", None) => Self::Clipboard,
@@ -7619,6 +7622,7 @@ pub fn target_provenance(target: Option<&TargetApp>) -> String {
             format!("這個目標的{}沒有記是哪個 app", origin_subject(origin))
         }
         TargetApp::Known { app, origin } => match origin {
+            FactOrigin::Told => "這個目標來自你告訴她的話".to_owned(),
             FactOrigin::Screen => format!("這個目標是在 {app} 的畫面上看到的"),
             FactOrigin::WindowTitle => format!("這個目標是在 {app} 的視窗標題上記下來的"),
             FactOrigin::Clipboard => format!("這個目標是從 {app} 複製起來的"),
@@ -7632,6 +7636,7 @@ pub fn target_provenance(target: Option<&TargetApp>) -> String {
 
 fn origin_subject(origin: &FactOrigin) -> &'static str {
     match origin {
+        FactOrigin::Told => "你告訴她的話",
         FactOrigin::Screen => "畫面",
         FactOrigin::WindowTitle => "視窗標題",
         FactOrigin::Clipboard => "剪貼簿來源",
@@ -8608,6 +8613,7 @@ pub struct DaySummary {
 /// 時間軸上的一格。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Moment {
+    pub source_kind: String,
     pub ts: Millis,
     pub app: Option<String>,
     pub title: Option<String>,
@@ -16154,5 +16160,67 @@ mod a154_source_tests {
         assert!(hits.is_empty());
         assert!(!complete);
         assert!(db.search_like("紫色", 10, None).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod a154_r2_tests {
+    use super::*;
+
+    #[test]
+    fn a154_r2_told_searches_all_indexes_and_prepares_answer() {
+        let mut db = Db::open_in_memory().unwrap();
+        let text = "紫色雨傘在玄關 violetumbrella";
+        let id = db
+            .remember_told(&crate::config::PrivacyConfig::default(), 10, text)
+            .unwrap()
+            .unwrap();
+        // search 有 LIKE 退路，單靠搜得到不能證明三個索引都有寫。
+        for (table, query) in [
+            ("text_fts", "紫色雨傘"),
+            ("text_fts_uni", "violetumbrella"),
+            ("text_fts_bi", "紫色"),
+        ] {
+            let found: i64 = db
+                .conn
+                .query_row(
+                    &format!("SELECT rowid FROM {table} WHERE {table} MATCH ?1"),
+                    [query],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, id, "{table}");
+        }
+        let hits = db.search("紫色雨傘", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, text);
+        let prepared = crate::grounded_answer::prepare("紫色雨傘", &[], &[], &hits, 20)
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.sources[0].origin.as_str(), "told");
+        assert_eq!(
+            prepared.sources[0].reference.as_str(),
+            format!("chunk:{id}")
+        );
+        let moments = db.timeline(0, 20, 10).unwrap();
+        assert_eq!(moments[0].text, text);
+        assert_eq!(moments[0].source_kind, "told");
+    }
+
+    #[test]
+    fn a154_r2_fact_origin_agrees_with_frameless() {
+        let origin = FactOrigin::from_target_row("told", None);
+        assert_eq!(origin, FactOrigin::Told);
+        assert_eq!(
+            FramelessOrigin::from_source_kind("told"),
+            FramelessOrigin::Told
+        );
+        assert_eq!(origin_subject(&origin), "你告訴她的話");
+        let said = target_provenance(Some(&TargetApp::Known {
+            app: "test".into(),
+            origin,
+        }));
+        assert_eq!(said, "這個目標來自你告訴她的話");
+        assert!(!said.contains("來源沒有記清楚"));
     }
 }

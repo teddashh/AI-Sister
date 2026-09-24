@@ -2710,6 +2710,7 @@ pub mod act {
 
     fn origin_subject(origin: &sister_core::db::FactOrigin) -> &'static str {
         match origin {
+            sister_core::db::FactOrigin::Told => "你告訴她的話",
             sister_core::db::FactOrigin::Screen => "畫面",
             sister_core::db::FactOrigin::WindowTitle => "視窗標題",
             sister_core::db::FactOrigin::Clipboard => "剪貼簿來源",

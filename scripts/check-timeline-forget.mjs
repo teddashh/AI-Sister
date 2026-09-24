@@ -189,6 +189,16 @@ function check(name, ok, detail) {
 }
 
 {
+  const p = await open({ timeline_moments: { ...MOMENTS, moments: [moment({ source_kind: "told", app: null, title: null, url: null, frame_id: null, text: "紫色雨傘在玄關" })] } });
+  check("A154-9 時間軸列出原話與來源", p.rows().join("").includes("紫色雨傘在玄關") && p.rows().join("").includes("你告訴她的話"), p.rows());
+  check("A154-9 沒有宣稱是遺失的畫面", !p.rows().join("").includes("只剩這些字"), p.rows());
+}
+if (process.env.A154_ONLY === "1") {
+  console.log(`${passed} passed; ${failed} failed`);
+  process.exit(failed > 0 ? 1 : 0);
+}
+
+{
   const p = await open({ forget_preview: erasure({ told: 2 }), forget_range: erasure({ told: 2 }) });
   await p.press();
   check("預覽列出親口告訴她的話", p.say().includes("2 段你告訴她的話"), p.say());
