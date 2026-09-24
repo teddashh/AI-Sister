@@ -770,7 +770,9 @@ function check(name, ok, detail) {
 
 // A154 R2：用真 app.js 的按送出路徑；只在突變取證時單跑此組。
 {
-  const invitation = "我記憶中都沒有這一塊，你可以告訴我嗎?";
+  // 使用者原話的後半句。前半句由空手那一格自己那三種說法負責，理由寫在 app.js
+  // 接這一句的地方；底下「只講一次沒有」那條就是守著不讓兩邊重複的那一條。
+  const invitation = "你可以告訴我嗎?";
   check("A154 native command 已註冊", /generate_handler!\[([\s\S]*?)\]/u.exec(read(MAIN))?.[1].includes("remember_told,"));
   const fixture = { ask: answer(), settings_read: { remember_told: true }, remember_told: "remembered" };
   const p = await open(fixture);
@@ -778,6 +780,32 @@ function check(name, ok, detail) {
   check("A154-1 終局邀請與輸入模式", p.hitTexts().join("").includes(invitation) && p.input().placeholder === "告訴我這件事…", p.hitTexts());
   await p.type("   ");
   check("A154 空白沒有送出", !p.calls.includes("remember_told"));
+
+  // 空手那一格**只准講一次「沒有」**。
+  //
+  // 使用者的原話是「我記憶中都沒有這一塊，你可以告訴我嗎?」，而這一格自己那三
+  // 句各自已經講過前半段了。整句接上去會變成同一件事講兩次，而且第二次講得比
+  // 第一次寬——只翻了 30 天卻說「我記憶中都沒有」，就是把十二分之一講成全部，
+  // 正是 app.js 那一格上面那段註解花十四行在避免的那一句。
+  //
+  // 所以這一條數的是四種說法在同一格裡出現幾次，要求剛好一次。底下那條前提
+  // 不可以拿掉：邀請沒出現的時候，數到 1 只是因為根本沒有人接第二句。
+  {
+    const ABSENCE = ["我手上一件事都沒有", "我翻過的那幾段裡沒有這件事",
+                     "我記得的東西裡沒有這件事", "我記憶中都沒有"];
+    for (const [name, extra] of [
+      ["預設", {}],
+      ["只翻了幾天", { blind: blind({ ever_recorded: true, ever_stored: true, chunks: 12, scan_horizon_days: 30 }) }],
+    ]) {
+      const q = await open({ ...fixture, ask: answer(extra) });
+      await q.type("紫色雨傘在哪裡");
+      const said = q.hitTexts().join("");
+      check(`A154 前提：這一格真的在邀請（${name}）`, said.includes(invitation), said);
+      check(`A154 空手那一格只講一次沒有（${name}）`,
+        ABSENCE.filter((phrase) => said.includes(phrase)).length === 1,
+        ABSENCE.filter((phrase) => said.includes(phrase)));
+    }
+  }
   const words = "  紫色雨傘在玄關 violetumbrella？\n任何格式都收  ";
   await p.type(words);
   check("A154-3 原文送進 command", p.invokes.some(x => x.cmd === "remember_told" && x.arg.text === words));
