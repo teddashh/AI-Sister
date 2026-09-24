@@ -297,7 +297,8 @@ pub fn terms(question: &str) -> &str {
 ///
 /// 所以第二個回傳值是「退過**而且**退出來的東西跟他打的不一樣」。退回原句就
 /// 沒有什麼好講的：她比對的正是他打的那幾個字。判斷寫在這裡而不是呼叫端，
-/// 因為呼叫端有兩個（`ops.rs` 的 `glued_note`、字母人的 `searched`），而
+/// 由共用 retrieval 接到 `ops.rs` 的 `glued_note` 與桌面的 `searched`；
+/// 空手後的索引放寬由 retrieval 用另一個 enum variant 表示。而
 /// 「同一個判斷散在兩個 process 裡」是這個 repo 修過很多次的那一種。
 ///
 /// **守不住的那一半**：`有效期限` 會被剝成 `效期限`（`有` 在虛字表裡），而
@@ -332,7 +333,7 @@ pub fn terms_with_retreat(question: &str) -> (&str, bool) {
     }
     let terms = span(lo, hi);
     // 退回原句就等於沒有退。這一行是那三句假話唯一的閘門，而它必須留在這裡
-    // ——兩個呼叫端都只寫 `glued.then(...)`，判斷一搬出去就會有一邊漏掉。
+    // ——retrieval 把原因裝進 enum，兩個呼叫端只呈現，不重算這個判斷。
     (terms, retreated && terms != question.trim())
 }
 

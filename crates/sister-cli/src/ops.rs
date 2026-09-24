@@ -14594,17 +14594,6 @@ pub mod query {
     #[cfg(test)]
     use sister_core::answer::answers;
 
-    /// 她拿去比對的字是**黏出來的**的時候要補的那兩行（`None` = 沒黏過，閉嘴）。
-    ///
-    /// `question::terms` 會把「剛剛」「那個」剝掉，剝到不足兩個字還會往回退一
-    /// 格——而那一格常常退進虛字裡：「剛剛那個板」→「個板」、「剛剛看到的人」
-    /// →「的人」。標題那一行印的是**他打的字**，所以「『剛剛那個板』 20 筆
-    /// 原文」讀起來像她找到了二十件關於板子的事，而那二十筆是拿「個板」比出
-    /// 來的。空手的那一半更平：他打的字真的沒出現過，跟她根本沒找他打的字，
-    /// 印出來是同一句「沒有找到」。前者他無能為力，後者他重打一個詞就好。
-    ///
-    /// 只在黏過的時候講。剝掉「剛剛那個」留下「優惠方案」是剝對了，每次都報
-    /// 一句只會讓人學會忽略它。見 [`sister_core::question::terms_with_retreat`]。
     /// 時間範圍那一區。只有呼叫端同時握有 `TimeRange` 和算過的章節時才印，
     /// 所以空清單的意思是「算過、沒有段落」，不是「沒算過」。
     ///
@@ -14658,14 +14647,8 @@ pub mod query {
         }
     }
 
-    fn glued_note(text: &str) -> Option<[String; 2]> {
-        let (asked, glued) = sister_core::question::terms_with_retreat(text);
-        glued.then(|| {
-            [
-                format!("   我拿去比對的是「{asked}」——那是從你打的字黏出來的，不是一個詞。"),
-                "   直接打你要的那個詞再問一次。".to_string(),
-            ]
-        })
+    fn glued_note(searched: Option<&sister_core::retrieval::SearchAdjustment>) -> Option<String> {
+        searched.map(|adjustment| format!("   {}", adjustment.message()))
     }
 
     /// 把「一筆都沒找到」的那幾個查得到的理由講成人話。
@@ -15003,6 +14986,7 @@ pub mod query {
         let sister_core::retrieval::Retrieval {
             shape,
             terms,
+            searched,
             answers,
             hits,
             answers_truncated,
@@ -15157,10 +15141,8 @@ pub mod query {
             // 理由寫的是「終端機那一份是靠人看出來的（答案就在眼前）」——那
             // 句話預設了她找的字認得出來，正好是這裡不成立的前提。
             //
-            // 只在**黏過**的時候講。剝掉「剛剛那個」留下「優惠方案」是剝對
-            // 了，每次都報一句只會讓人學會忽略它；黏出「個板」才是她找了一
-            // 個不是詞的東西。句子在 `glued_note`（那裡才驗得到）。
-            for line in glued_note(text).into_iter().flatten() {
+            // 顯示檢索實際回傳的字，不從原問句重算。
+            if let Some(line) = glued_note(searched.as_ref()) {
                 println!("{line}");
             }
         }
@@ -16082,8 +16064,10 @@ pub mod query {
         /// 多印一句只會讓他學會忽略這一句話——而下一次它真的重要。
         #[test]
         fn a_needle_glued_out_of_a_particle_says_so_next_to_the_headline() {
-            let note = glued_note("剛剛那個板").expect("黏出「個板」就要出聲");
-            let said = note.join("\n");
+            let said = glued_note(Some(&sister_core::retrieval::SearchAdjustment::Glued(
+                "個板".into(),
+            )))
+            .expect("有實際比對字就要出聲");
             assert!(said.contains("個板"), "要指得出她到底拿什麼去比對：{said}");
             assert!(
                 said.contains("再問一次"),
@@ -16093,10 +16077,31 @@ pub mod query {
             for asked_properly in ["剛剛那個優惠方案", "客服專線", "剛剛發生什麼事"]
             {
                 assert!(
-                    glued_note(asked_properly).is_none(),
+                    glued_note(
+                        sister_core::question::terms_with_retreat(asked_properly)
+                            .1
+                            .then(|| sister_core::retrieval::SearchAdjustment::Glued(
+                                asked_properly.into()
+                            ))
+                            .as_ref()
+                    )
+                    .is_none(),
                     "{asked_properly} 沒黏過東西，多講一句只會讓他學會忽略它"
                 );
             }
+        }
+
+        #[test]
+        fn relaxed_note_keeps_the_reason_and_actual_terms() {
+            use sister_core::retrieval::SearchAdjustment;
+            assert_eq!(
+                glued_note(Some(&SearchAdjustment::Relaxed("客服電話".into()))).unwrap(),
+                "   我對不到你打的那一串，所以改用「客服電話」去找。"
+            );
+            assert_eq!(
+                glued_note(Some(&SearchAdjustment::Glued("個板".into()))).unwrap(),
+                "   我拿去比對的是「個板」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。"
+            );
         }
 
         /// 「我找不到」和「我沒去找」不可以是同一句話。
