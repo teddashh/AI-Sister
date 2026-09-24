@@ -6242,13 +6242,16 @@ function renderHits(
   // 於是他拿到一串毫不相干的東西，而唯一的解讀是「這東西壞了」。所以這一句擺在
   // 最上面，兩種結果都蓋得到，而不是只掛在空手的那一邊。
   //
-  // 後端只在**黏過**的時候送這個欄位（剝掉「剛剛那個」留下「優惠方案」是剝對
-  // 了，每次都報一句只會讓人學會忽略它），所以這裡有值就一定要講。
+  // 每條查詢保留自己的原因；正常剝詞不出聲，黏詞提供重打的下一步。
   if (searched && !provisional) {
-    const why = document.createElement("li");
-    why.className = "hits-note";
-    why.textContent = `我拿去比對的是「${searched}」。`;
-    hitList.append(why);
+    for (const adjustment of searched) {
+      const why = document.createElement("li");
+      why.className = "hits-note";
+      why.textContent = adjustment.kind === "glued"
+        ? `我拿去比對的是「${adjustment.terms}」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。`
+        : `我對不到你打的那一串，所以改用「${adjustment.terms}」去找。`;
+      hitList.append(why);
+    }
   }
 
   // 他打了「剛剛發生什麼事」，而底下這幾筆跟那七個字一個都對不上。不先講

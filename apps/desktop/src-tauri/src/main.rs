@@ -2176,21 +2176,8 @@ struct Answer {
     kind: &'static str,
     followup: Option<String>,
     closure_notice: Option<String>,
-    /// 她拿去比對的那串字，**但只在它是黏出來的時候**。`None` = 沒什麼好講。
-    ///
-    /// `question::terms` 會把「剛剛」「那個」剝掉，剝到不足兩個字還會往回退
-    /// 一格——而那一格常常退進虛字裡：「剛剛那個板」→「個板」、「剛剛看到的
-    /// 人」→「的人」。於是兩種完全不同的處境印出同一句「我記得的東西裡沒有
-    /// 這件事」：他打的字真的沒出現過，跟她根本沒找他打的字。有命中的那一半
-    /// 更難看出來——「的人」在一年份的螢幕文字裡什麼都比得到，於是他拿到一串
-    /// 毫不相干的東西，而唯一讀得出來的意思是「這東西壞了」。
-    ///
-    /// 前者他無能為力；後者他只要把那個詞重打一次就好。唯一能讓他分辨的，是
-    /// 看到她到底拿什麼去比對。
-    ///
-    /// 由共用檢索結果提供實際比對字，包含退格與空手後的口語放寬。
-    /// 多查詢只列需要說明的字；原字命中時不多說一句。
-    searched: Option<String>,
+    /// 多查詢各自保留退格／索引放寬原因與實際比對字。
+    searched: Option<Vec<sister_core::retrieval::SearchAdjustment>>,
     /// 這一題在題庫裡的編號。點開出處的時候要掛回來（見 `log_click`）。
     ///
     /// `None` = 沒記成功。畫面那一邊要能在沒有編號的情況下照常運作——記不成
@@ -3863,7 +3850,7 @@ fn answer_from_memory(
                 shape,
                 first_range,
                 first_terms,
-                (!searched_terms.is_empty()).then(|| searched_terms.join("」、「")),
+                (!searched_terms.is_empty()).then_some(searched_terms),
                 facts,
                 hits,
                 facts_truncated,

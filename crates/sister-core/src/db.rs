@@ -2910,12 +2910,85 @@ impl Db {
         self.search_during(query, limit, None)
     }
 
+    /// 全期間索引只判斷條件是否存在；真正取證仍使用原時間窗。
+    pub(crate) fn indexed_term_exists(&self, term: &str) -> Result<bool> {
+        let q = fts_query(term);
+        for table in ["text_fts", "text_fts_uni", "text_fts_bi"] {
+            let exists: bool = self.conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {table} MATCH ?1)"),
+                [&q],
+                |row| row.get(0),
+            )?;
+            if exists {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// 只跳過開頭連續零命中的條件；第一個已知條件之後保留原字與 AND。
+    /// 不刪中間或尾端的未知條件，避免把內容題縮成只有其中一個名詞。
+    /// 最多檢查 128 字；長題維持原查詢，避免無上限的索引探測。
+    pub(crate) fn indexed_candidate(&self, query: &str) -> Result<Option<String>> {
+        let chars: Vec<(usize, char)> = query.char_indices().take(129).collect();
+        if chars.len() > 128 {
+            return Ok(None);
+        }
+        let suffix = |at: usize| {
+            let candidate = query[at..].trim();
+            (candidate != query.trim()).then(|| candidate.to_owned())
+        };
+        let byte_at = |i: usize| chars.get(i).map_or(query.len(), |&(at, _)| at);
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i].1.is_whitespace() {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let cjk = is_cjk(chars[i].1);
+            while i < chars.len() && !chars[i].1.is_whitespace() && is_cjk(chars[i].1) == cjk {
+                i += 1;
+            }
+            if cjk && i - start >= 2 {
+                for j in start..i - 1 {
+                    if self.indexed_term_exists(&query[byte_at(j)..byte_at(j + 2)])? {
+                        return Ok(suffix(byte_at(j)));
+                    }
+                }
+            } else if self.indexed_term_exists(&query[byte_at(start)..byte_at(i)])? {
+                return Ok(suffix(byte_at(start)));
+            }
+        }
+        // 全部零筆不能變成沒有主題的查詢。
+        Ok(None)
+    }
+
     /// 時間條件在每條索引與掃描的 LIMIT 前成立，避免較新的資料擠掉指定日期。
     pub fn search_during(
         &self,
         query: &str,
         limit: usize,
         range: Option<&crate::question::TimeRange>,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_with_scan(query, limit, range, true)
+    }
+
+    pub(crate) fn search_indexed_during(
+        &self,
+        query: &str,
+        limit: usize,
+        range: Option<&crate::question::TimeRange>,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_with_scan(query, limit, range, false)
+    }
+
+    fn search_with_scan(
+        &self,
+        query: &str,
+        limit: usize,
+        range: Option<&crate::question::TimeRange>,
+        allow_scan: bool,
     ) -> Result<Vec<SearchHit>> {
         let q = fts_query(query);
         if q.is_empty() {
@@ -3026,7 +3099,7 @@ impl Db {
         // 但 bigram **把整個候選集看完了**還是空的，那就是真的沒有——回填是
         // 在同一個 transaction 裡做完的（見 `migrate`），所以索引不會落後於
         // 資料。這時再掃一次全表只是把「查無此資料」這個答案賣得比較貴。
-        if hits.is_empty() && !bigram_saw_everything {
+        if allow_scan && hits.is_empty() && !bigram_saw_everything {
             for hit in self.search_like(query, limit, range)? {
                 if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(hit.chunk_id) {
                     e.insert(hits.len());

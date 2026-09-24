@@ -298,7 +298,7 @@ pub fn terms(question: &str) -> &str {
 /// 所以第二個回傳值是「退過**而且**退出來的東西跟他打的不一樣」。退回原句就
 /// 沒有什麼好講的：她比對的正是他打的那幾個字。判斷寫在這裡而不是呼叫端，
 /// 由共用 retrieval 接到 `ops.rs` 的 `glued_note` 與桌面的 `searched`；
-/// 空手後的口語放寬也由 retrieval 更新同一個呈現訊號。而
+/// 空手後的索引放寬由 retrieval 用另一個 enum variant 表示。而
 /// 「同一個判斷散在兩個 process 裡」是這個 repo 修過很多次的那一種。
 ///
 /// **守不住的那一半**：`有效期限` 會被剝成 `效期限`（`有` 在虛字表裡），而
@@ -333,20 +333,8 @@ pub fn terms_with_retreat(question: &str) -> (&str, bool) {
     }
     let terms = span(lo, hi);
     // 退回原句就等於沒有退。這一行是那三句假話唯一的閘門，而它必須留在這裡
-    // ——兩個呼叫端都只寫 `glued.then(...)`，判斷一搬出去就會有一邊漏掉。
+    // ——retrieval 把原因裝進 enum，兩個呼叫端只呈現，不重算這個判斷。
     (terms, retreated && terms != question.trim())
-}
-
-/// 原查詢完全沒有命中時，才嘗試拿掉一句口語請求的開頭。
-/// 不改 shape、日曆或既有 terms；只提供一次較短的候選，不遞迴剝詞。
-pub(crate) fn phrasing_candidate(question: &str) -> Option<&str> {
-    const PREFIXES: &[&str] = &["幫我找", "要打", "查一下", "找", "查", "打"];
-    let original = terms(question);
-    let rest = PREFIXES
-        .iter()
-        .find_map(|prefix| original.strip_prefix(prefix))?;
-    let candidate = terms(rest.trim());
-    (candidate.chars().count() >= 2).then_some(candidate)
 }
 
 /// 在開頭比對得到的最長那個詞，以及它的角色。
@@ -610,27 +598,6 @@ fn at_hour(date: NaiveDate, hour: u32) -> Option<Millis> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn phrasing_candidate_keeps_a_searchable_content_span() {
-        for (query, expected) in [
-            ("查一下 ERR_DEPLOY_42", Some("ERR_DEPLOY_42")),
-            ("幫我找 ERR_DEPLOY_42", Some("ERR_DEPLOY_42")),
-            ("我要打客服電話", Some("客服電話")),
-            ("我打客服電話", Some("客服電話")),
-            ("找客服電話", Some("客服電話")),
-            ("查客服電話", Some("客服電話")),
-            ("查板", None),
-            ("查一下", None),
-            ("客服電話", None),
-        ] {
-            assert_eq!(
-                phrasing_candidate(query),
-                expected,
-                "{query}: 只移除請求開頭；無開頭或剩不足兩字不增加查詢"
-            );
-        }
-    }
 
     /// 這一句就是那張截圖。它非過不可。
     #[test]

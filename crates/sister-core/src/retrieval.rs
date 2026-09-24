@@ -12,6 +12,37 @@ use crate::db::Db;
 use crate::model::{Millis, SearchHit};
 use crate::question::{self, Shape};
 
+/// 呼叫端保留原因與實際比對字，不得由原問句重算。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "terms", rename_all = "snake_case")]
+pub enum SearchAdjustment {
+    Glued(String),
+    Relaxed(String),
+}
+
+impl SearchAdjustment {
+    pub fn message(&self) -> String {
+        match self {
+            Self::Glued(x) => format!(
+                "我拿去比對的是「{x}」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。"
+            ),
+            Self::Relaxed(x) => format!("我對不到你打的那一串，所以改用「{x}」去找。"),
+        }
+    }
+}
+
+fn retry_candidate(db: &Db, query: &str) -> Result<Option<String>> {
+    let original = question::terms(query);
+    // 類型詞不能冒充必要主題。主題全部零筆時，不能退成任意電話／網址。
+    if !crate::facts::kinds_for_query(query).is_empty()
+        && let Some(topic) = crate::facts::topic_constraint(query)
+        && db.indexed_candidate(&topic)?.is_none()
+    {
+        return Ok(None);
+    }
+    db.indexed_candidate(original)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetrievalProfile {
     /// 文字檢索產品路徑；不是 raw FTS，必要時仍會走正確性用的 LIKE fallback。
@@ -105,7 +136,7 @@ impl RetrievalProfile {
             Shape::Keywords => {
                 let (original, changed) = question::terms_with_retreat(query);
                 let mut terms = original.to_string();
-                searched = changed.then(|| terms.clone());
+                searched = changed.then(|| SearchAdjustment::Glued(terms.clone()));
                 let mut answer_set = if self.wants_facts() {
                     answers_during(db, query, limits.answers, range.as_ref())?
                 } else {
@@ -116,14 +147,15 @@ impl RetrievalProfile {
                 if answer_set.items.is_empty()
                     && hits.is_empty()
                     && activities.is_empty()
-                    && let Some(candidate) = question::phrasing_candidate(query)
+                    && let Some(candidate) = retry_candidate(db, query)?
                 {
                     terms = candidate.to_string();
-                    searched = Some(terms.clone());
+                    searched = Some(SearchAdjustment::Relaxed(terms.clone()));
                     if self.wants_facts() {
-                        answer_set = answers_during(db, candidate, limits.answers, range.as_ref())?;
+                        answer_set =
+                            answers_during(db, &candidate, limits.answers, range.as_ref())?;
                     }
-                    hits = db.search_during(candidate, limits.text + 1, range.as_ref())?;
+                    hits = db.search_indexed_during(&candidate, limits.text + 1, range.as_ref())?;
                 }
                 (Some(terms), answer_set, hits)
             }
@@ -172,8 +204,8 @@ pub struct Retrieval {
     pub time_range: Option<question::TimeRange>,
     /// `None` 代表時間題，沒有拿任何字去比對。
     pub terms: Option<String>,
-    /// 退格或空結果後的口語放寬，實際比對的字。呼叫端不可從原問句重算。
-    pub searched: Option<String>,
+    /// 退格或空結果後的索引放寬，實際比對的字。呼叫端不可從原問句重算。
+    pub searched: Option<SearchAdjustment>,
     pub answers: Vec<Answer>,
     pub hits: Vec<SearchHit>,
     /// 活動級章節。只有 [`RetrievalProfile::TextFactsAndSession`] 會填。
@@ -225,6 +257,107 @@ mod tests {
         )
         .expect("frame");
         db
+    }
+
+    fn generated_noise(db: &Db, count: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        for code in 0x4e00..0x9fff {
+            let a = char::from_u32(code).unwrap();
+            let b = char::from_u32(code + 1).unwrap();
+            let noise = format!("{a}{b}{a}");
+            if question::terms(&noise) == noise
+                && !db.indexed_term_exists(&format!("{a}{b}")).unwrap()
+                && !db.indexed_term_exists(&format!("{b}{a}")).unwrap()
+                && !db.indexed_term_exists(&format!("{a}客")).unwrap()
+            {
+                out.push(noise);
+                if out.len() == count {
+                    return out;
+                }
+            }
+        }
+        panic!("沒有產生足夠的零命中雜訊");
+    }
+
+    #[test]
+    fn generated_zero_gram_prefixes_preserve_evidence() {
+        let corpus: crate::replay::Corpus = serde_json::from_str(include_str!(
+            "../../../scenarios/recall-baseline.corpus.json"
+        ))
+        .unwrap();
+        let mut db = Db::open_in_memory().unwrap();
+        db.import_replay(&corpus, 100).unwrap();
+        let noises = generated_noise(&db, 32);
+        assert_eq!(noises.len(), 32);
+        for noise in noises {
+            for base in ["客服電話", "ERR_DEPLOY_42"] {
+                let original = RetrievalProfile::TextAndFacts
+                    .retrieve(&mut db, base, 5)
+                    .unwrap();
+                assert!(!original.answers.is_empty() || !original.hits.is_empty());
+                let query = if base == "客服電話" {
+                    format!("{noise}{base}")
+                } else {
+                    format!("{noise} {base}")
+                };
+                let found = RetrievalProfile::TextAndFacts
+                    .retrieve(&mut db, &query, 5)
+                    .unwrap();
+                assert_eq!(
+                    format!("{:?}", found.answers),
+                    format!("{:?}", original.answers),
+                    "{query}"
+                );
+                assert_eq!(
+                    format!("{:?}", found.hits),
+                    format!("{:?}", original.hits),
+                    "{query}"
+                );
+                assert_eq!(
+                    found.searched,
+                    Some(SearchAdjustment::Relaxed(base.into())),
+                    "{query}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_noise_remains_a_required_condition() {
+        let mut db = db_with_bill();
+        let noise = generated_noise(&db, 1).pop().unwrap();
+        let privacy = crate::config::PrivacyConfig {
+            remember_told: true,
+            ..Default::default()
+        };
+        db.remember_told(&privacy, 200, &noise).unwrap();
+        assert!(db.indexed_term_exists(&noise).unwrap());
+        for query in [format!("{noise} 客服電話"), format!("{noise} 客服專線")] {
+            let result = RetrievalProfile::TextAndFacts
+                .retrieve(&mut db, &query, 5)
+                .unwrap();
+            assert!(
+                result.answers.is_empty() && result.hits.is_empty(),
+                "{query}"
+            );
+            assert_eq!(result.searched, None, "存在的條件不可丟掉");
+        }
+    }
+
+    #[test]
+    fn all_zero_topic_never_becomes_an_unconstrained_fact_query() {
+        let mut db = db_with_bill();
+        for noise in generated_noise(&db, 8) {
+            let query = format!("{noise}電話");
+            let result = RetrievalProfile::TextAndFacts
+                .retrieve(&mut db, &query, 5)
+                .unwrap();
+            assert!(
+                result.answers.is_empty() && result.hits.is_empty(),
+                "{query}"
+            );
+            assert_eq!(result.searched, None);
+        }
     }
 
     #[test]
@@ -309,8 +442,8 @@ mod tests {
                 "{query}: 放寬後仍查同一支電話"
             );
             assert_eq!(
-                result.searched.as_deref(),
-                Some("客服電話"),
+                result.searched,
+                Some(SearchAdjustment::Relaxed("客服電話".into())),
                 "{query}: 要呈現實際放寬的字"
             );
         }
@@ -326,15 +459,7 @@ mod tests {
                 result.hits.is_empty() && result.answers.is_empty(),
                 "fixture 沒有錯誤碼，不可拿電話作答"
             );
-            assert_eq!(
-                result.terms.as_deref(),
-                Some("ERR_DEPLOY_42"),
-                "{query}: FTS 不再要求口語動詞"
-            );
-            assert_eq!(
-                result.searched, result.terms,
-                "{query}: 空結果仍呈現實際比對字"
-            );
+            assert_eq!(result.searched, None, "全部零筆不重試");
         }
     }
 
@@ -391,8 +516,8 @@ mod tests {
             "昨天不能拿到今天的電話"
         );
         assert_eq!(
-            result.searched.as_deref(),
-            Some("客服電話"),
+            result.searched,
+            Some(SearchAdjustment::Relaxed("客服電話".into())),
             "帶日期的原查詢空手後也有實際比對字"
         );
     }

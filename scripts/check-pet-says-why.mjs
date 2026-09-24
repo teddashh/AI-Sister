@@ -166,7 +166,7 @@ const nativeClearInterval = globalThis.clearInterval.bind(globalThis);
  *
  * 第一版寫的是 `{ hits: [], kind: "none", answers: [], blind: [], searched: [] }`
  * ——三個欄位的型別是錯的，而且 `"none"` 不是真的 kind（只有 `"keywords"` 和
- * `"recent"`）。`searched` 真的是 `Option<String>`，而 `[]` 在 JS 裡是 truthy，
+ * `"recent"`）。當時 `searched` 是 `Option<String>`，而 `[]` 在 JS 裡是 truthy，
  * 所以產品當場印出「我拿去比對的是「」——那是從你打的字黏出來的，不是一個
  * 詞」：一句只在她黏出非詞的時候才該出現的話，被一個空陣列叫了出來。沒有一條
  * 斷言問過它。
@@ -781,18 +781,18 @@ function check(name, ok, detail) {
 {
   const native = read(MAIN).split("fn answer_from_memory(")[1]?.split("fn ")[0] ?? "";
   check("A155 native 接收實際檢索字", /if let Some\(terms\) = retrieval\.searched[\s\S]*?searched_terms\.push\(terms\)/u.test(native));
-  check("A155 native 多查詢回傳比對字", native.includes('(!searched_terms.is_empty()).then(|| searched_terms.join("」、「"))'));
+  check("A155 native 多查詢回傳比對字", native.includes('(!searched_terms.is_empty()).then_some(searched_terms)'));
   check("A155 native Answer 帶回比對字", /let answer = Answer \{[\s\S]*?\n\s+searched,/u.test(native));
   for (const [label, searched, hits] of [
-    ["命中", "客服電話", [hit()]],
-    ["空手", "ERR_DEPLOY_42", []],
-    ["多查詢", "客服電話」、「ERR_DEPLOY_42", [hit()]],
+    ["命中", [{kind: "relaxed", terms: "客服電話"}], [hit()]],
+    ["空手", [{kind: "relaxed", terms: "ERR_DEPLOY_42"}], []],
+    ["多查詢", [{kind: "glued", terms: "個板"}, {kind: "relaxed", terms: "客服電話"}], [hit()]],
     ["原字", null, [hit()]],
   ]) {
     const p = await open({ ask: answer({ searched, hits }) });
     await p.type("找客服電話");
-    const notes = p.hitTexts().filter(text => text.includes("我拿去比對的是"));
-    const expected = searched ? [`我拿去比對的是「${searched}」。`] : [];
+    const notes = p.hitTexts().filter(text => text.includes("我拿去比對的是") || text.includes("我對不到你打的那一串"));
+    const expected = searched ? searched.map(a => a.kind === "glued" ? `我拿去比對的是「${a.terms}」——那是從你打的字黏出來的，不是一個詞。直接打你要的那個詞再問一次。` : `我對不到你打的那一串，所以改用「${a.terms}」去找。`) : [];
     check(`A155 ${label}只說實際比對字`, JSON.stringify(notes) === JSON.stringify(expected), notes);
   }
 }
@@ -1207,7 +1207,7 @@ console.log("A151 R3. 先開口空手時不先斷言沒有");
   // 真正的先開口也會帶 searched／空時間範圍；不能因此多出另一句「沒有」。
   const withContext = await open({
     ask_local: answer({
-      kind: "range", brain: thinking, blind: fullBlind, searched: "個板",
+      kind: "range", brain: thinking, blind: fullBlind, searched: [{kind: "glued", terms: "個板"}],
       time_range: { from: 1000, to: 2000, said: "昨天" }, chapters: [],
     }),
     ask: () => new Promise(() => {}),
@@ -3058,7 +3058,7 @@ console.log("55. Azure payload 是正文 allowlist：hit/chapter 進，所有提
 {
   const answerWithEverything = answer({
     kind: "range",
-    searched: "SEARCH_DIAGNOSTIC_MUST_STAY_LOCAL",
+    searched: [{kind: "glued", terms: "SEARCH_DIAGNOSTIC_MUST_STAY_LOCAL"}],
     query_id: 7007,
     hits: [
       hit({
@@ -4169,7 +4169,7 @@ console.log("64. 記憶總覽只畫有證據的 L2 假設；證據要真人按�
       return answer({
         kind: "memory_overview",
         query_id: 99123,
-        searched: "SEARCHED_MUST_STAY_LOCAL",
+        searched: [{kind: "glued", terms: "SEARCHED_MUST_STAY_LOCAL"}],
         hits: [hit({ snippet: "OCR_MUST_STAY_LOCAL" })],
         answers: [fact({ value: "FACT_MUST_STAY_LOCAL" })],
         followup: "FOLLOWUP_MUST_STAY_LOCAL",
