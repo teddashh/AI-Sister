@@ -1189,3 +1189,217 @@ Node 對 unhandled rejection 直接殺 process，測試提早結束印出
 **載入時**就炸」，而 `getAttribute` 是在 click callback 裡讀的——載入只註冊
 callback，要點下去才炸。結論（fake-dom 缺 `getAttribute`、所以改用 `hidden`）沒變，
 錯的是失敗時機。**派工單裡我自己的事實宣稱，連續三輪都是缺陷密度最高的地方。**
+
+## 19. alpha.153 其實從來沒發出去，因為我種的 golden 只在我的時區成立（2026-09-24）
+
+### 19.1 症狀：53 條全綠、量的是打 tag 那棵樹，CI 還是紅
+
+`c39df33` 之後 CI 連紅五個 commit，其中一個就是 `v0.1.0-alpha.153` 那個 tag。
+那個 tag 沒有對應的 release——Linux job 一紅，Release job 被靜靜跳過，
+**使用者從來沒拿到過 alpha.153**。
+
+而 `/home/ted-h/tmp-tests/gates-all.sh` 在打 tag 前跑過 53 條全綠，量的是
+detached worktree、樹指紋對得上。**兩件事都是真的。**
+
+### 19.2 病因：`getHours()` 讀的是行程的時區
+
+`check-pet-says-why.mjs` 的 a153 golden 是整棵 DOM 的 JSON 快照，
+裡面有 `08:00`、`19:00` 這種牆上時鐘的字串。產生它們的 `clock()` 和 `when()`
+（`apps/desktop/ui/app.js` 第 4766 和 4774 行）用的是 `d.getHours()`。
+開發機是 EDT，CI 是 UTC。同一批裡**沒有時間字串**的那一份 no-range 快照
+從頭到尾是綠的——那就是對照組。
+
+`TZ=UTC node scripts/check-pet-says-why.mjs` 在本機逐字重現了 CI 的
+`938 passed; 2 failed`，兩條紅的名字一模一樣。
+
+**所以「閘門的綠只對它跑過的那棵樹有效」這句話還不夠。**
+它只對「**那棵樹 ＋ 那個行程環境**」有效。
+
+### 19.3 修法有三件事，少一件都不算修好
+
+1. **釘死時鐘**。`process.env.TZ = "UTC";` 放在 import 之後。
+   實測 Node v24.21.0 這個賦值中途生效。
+2. **加一條指名原因的前提斷言**。沒有它的話，唯一會紅的是一整棵 DOM，
+   訊息讀起來像「產品變了」，而真正的原因是時區。
+   把釘子拿掉跑本機 EDT 得到 `938 passed; 5 failed`：三條前提各自指名時鐘，
+   其中 `A153 no-range 前提` 紅了**而它的 DOM 沒紅**——
+   那就是「這條前提獨立在量時鐘、不是 golden 的副作用」的證據。
+3. **重產 golden 不准用「跑一次、把輸出覆蓋回檔案」**。做了兩件事：
+   - 結構逐節點比對：chapters 14 個節點、hits 20 個節點，兩邊路徑完全一樣，
+     各只有 2 個欄位變。
+   - 那 4 個新值用 Python 的 `zoneinfo` 從**輸入時間戳**獨立算一次。
+     位移**不是常數**：1969-12-31 那個是 EST 差 5 小時、2025-08-12 那個是
+     EDT 差 4 小時，各自對得上那一刻真實的偏移。套一個常數上去就是沒驗。
+
+四個時區各跑一次都是 `943 passed; 0 failed`，含加德滿都（UTC+5:45）。
+
+### 19.4 全族掃描：只有這一支有病
+
+找到一個洞之後下一個動作是拿同一把刀去試它的每一個兄弟。
+十二支 node 閘門 × 三個時區（UTC、Asia/Kathmandu +5:45、Pacific/Kiritimati +14），
+**比斷言數不比 exit code**。結果：只有 `check-pet-says-why.mjs` 有病，
+其餘十一支三個時區斷言數一字不差。
+
+挑那兩個時區是因為偏移不是整點、而且跨日界線；整點時區會讓分鐘那一格的
+bug 躲過去。
+
+掃描本身踩了一個已經記在案的坑：`check-cli-status` 三個時區都紅 ✗=4，
+差點被我當成第二個受害者。真因是掃描迴圈**忘了把 cargo 加進 PATH**，
+紅的是 `cargo: command not found`。單獨跑（PATH 對的）89 條全過。
+**紅了要先比環境再比產品。**
+
+### 19.5 alpha.153 重新打了 tag，不是燒掉版號
+
+沒有 release 是關鍵前提：沒發布過就沒有使用者看過它，把 tag 移到修好的
+commit 是零影響。動手前先確認 `scripts/release-notes.sh` 產出的 body 和打
+tag 當天那一份**逐位元組相同**（8131 bytes，一字不差），所以重打不會讓任何
+人讀到不同的說明。
+
+那次紅的 job **只有一個**：`Linux — test, lint, privacy`。
+Windows、macOS、X11 全綠。時區那一條就是唯一擋住它發布的東西。
+
+重打之後的收據：tag 指向 `394f419`，兩輪 CI（main 那一輪和 tag 那一輪）
+六個 job 全綠，Release job success，2026-09-24T05:30:23Z 發布，四個 asset
+都是 `uploaded`（`AI-Sister-Setup.exe` 277,983,959 bytes）。
+body 的**前綴**和事前算好的那 8131 bytes 逐位元組相同，後面只多了 GitHub
+自己附的 Full Changelog 那一行。
+
+### 19.6 `gh release view` 對「沒有 release 的 tag」也會 exit 0
+
+查證的時候差點被騙第二次。`gh release view v0.1.0-alpha.153 --json
+tagName,publishedAt,assets` 回的是 `tag=v0.1.0-alpha.153 published=null
+assets=0` 而且 exit 0——讀起來像「有這個 release，只是還沒發布」。
+同一秒 `gh api repos/<repo>/releases/tags/<tag>` 回 404。
+
+**權威是 API 那一條。** 這和已經記在案的
+「`gh run view --json` 把還沒跑到的步驟回成 `""` 不是 `null`」是同一族：
+`gh` 的高階指令會替不存在的東西編一個看起來合理的空殼。
+
+### 19.7 流程上真正的失敗
+
+專案的規矩本來寫的是「打完 tag 要確認 release 真的發出去」。
+這次更早一步就錯了：**平常的 commit 推上去也要看 CI**，不是只有打 tag 那一次。
+一行就夠：
+
+```
+gh api "repos/teddashh/AI-Sister/actions/runs?head_sha=<sha>" \
+  --jq '.workflow_runs[] | "\(.status)\t\(.conclusion)"'
+```
+
+## 20. alpha.154：她問得出「你可以告訴我嗎」，而且真的記下來（2026-09-24）
+
+### 20.0 這一版在做什麼
+
+他的原話是：「不要忘記她除了看到的資料以外，他本來就是一個 AI agent，
+也可以透過聊天得到使用者的資訊記在資料庫裡啊，結果現在大量思考反而把聊天的
+功能廢掉了。」
+
+alpha.153 做完了空手那一格的前三刀（先講沒有、再邀請、按鈕收起理由）。
+**第四刀是把他講的話收下來。** 分兩輪派工：R1 是儲存層（新的
+`SourceKind::Told`、`remember_told`、三條刪除路、設定開關），
+R2 是接線（tauri command、對話那一格的接話、出處標籤）。
+
+**兩輪必須合成同一個版本出貨。** R1 自己有設定頁的勾勾而沒有非測試呼叫端，
+單獨出貨就是 AGENTS.md §零的違規（功能要嘛整條出貨、要嘛完全不進產品）。
+
+### 20.1 R1 的鏡頭擺在「它憑自己判斷加的行」
+
+Delegate 打了 23 刀。刀多的時候鏡頭不該重跑它的刀，該擺在**它做了決定而
+派工單沒有要求的地方**。五條查過站得住：
+
+- 六個 `from_str_kind` 呼叫端改成回 `Err`，逐一數過**沒有一條**會因為一列壞掉
+  就整支查詢死掉（全是 `rows.flatten()` 或逐列處理）。
+- `PruneReport::is_empty()` 是**整個結構比對**（`*self == Self::default()`），
+  所以新增一欄自動被算進去——這是房子原本就做對的形狀，不是手抄欄位清單。
+- prune / forget 先刪 told 再刪其餘，兩個 rowcount 各自正確。
+- `PrivacyConfig` 的 `#[serde(default)]` 讓舊設定檔少那一欄時拿預設值。
+
+我本來要報一條 SQL 三值邏輯的問題（預覽用 `source_kind != 'told'`，
+而 `NULL != 'told'` 是 NULL 不是 true）。查 schema：`source_kind TEXT NOT NULL`。
+**不可達，不成立。** 讀取端推不出可達性，要去看寫入端——這條規矩救了一次假警報。
+
+### 20.2 R1 真的漏的那一條：一對姊妹型別只補了一支
+
+派工單要的是「**每一個**把 `SourceKind` 變成給人看的字的地方」。
+它找到 7 處，漏了 `FactOrigin::from_target_row`（`crates/sister-core/src/db.rs`）。
+它的姊妹 `FramelessOrigin::from_source_kind` 補了 `"told"`，這一支沒補，
+`("told", None)` 掉進 `Self::Unknown`，於是她會對一句他自己打進來的話說
+「來源沒有記清楚」。
+
+兩支吃的是**同一種資料**，差別只在 frame_id 有沒有值。
+偵測法是數 `match` 上有沒有 `_ =>`：全樹 15 個 match 碰到這兩個型別，
+3 個有 catch-all，delegate 補了其中兩個。
+
+### 20.3 R2：delegate 糾正我五件事，兩件打在方法論上
+
+1. 我寫「端到端那條紅了，代表三個索引有一個沒灌到」——**假的**。
+   `search` 有 `search_like` 退路，漏索引照樣搜得到。它改成直接 MATCH 三張
+   FTS 表，另外用「bigram 內容錯誤」那一刀證明它真的抓得到漏索引。
+   我那句話正是我自己記憶裡的「一條紅可以紅在別的理由上」。
+2. 我寫「每一刀另外問：整段刪掉會不會也紅？」——**不能當通則**。
+   要求功能**存在**的測試，本來就必須在功能被刪掉時紅。那條規矩是給
+   「守某個特定語意」的刀用的。
+3. `with_db` 只給 `&Db`，`remember_told` 要 `&mut Db`——它用了現成的 `with_db_mut`。
+4. 不只 `apps/desktop/ui/timeline.js` 缺來源：native 的 `Hit` / `Moment` 本來
+   就沒把 `source_kind` 帶到 renderer。我低估了工作量。
+5. 它**獨立撞到同一顆時區 bug**（分支是從我修之前切出去的），
+   用原始產品程式在 UTC 重擷取，結果和我推上 main 的那兩份**逐位元組相同**。
+   兩支獨立抽取器給出同一個答案，比任何一邊自己的說法都強。
+
+### 20.4 我改的第一件事：兩句話各自是真的，接起來把十二分之一講成全部
+
+畫面上會變成：
+
+> 我翻過的那幾段裡沒有這件事。**我記憶中都沒有這一塊**，你可以告訴我嗎?
+
+第一句是刻意收窄的——她可能只翻了 30 天，說「我記得的東西」就是把
+十二分之一講成全部，那段註解花十四行解釋為什麼。**第二句立刻把它放大回去。**
+三種變體裡有兩種是同一件事講兩次。
+
+改成只接後半句「你可以告訴我嗎?」。這不是改他的字：前半句這一格自己已經
+講過了，而且講得比它準。這就是 AGENTS.md §二那個簽名 bug——
+**每一行都是真的，湊起來在說謊。**
+
+新斷言數四種「沒有」的說法在同一格出現幾次，要求剛好一次；外加一條
+「這一格真的在邀請」的前提（邀請不出現時數到 1 只是因為沒人接第二句）。
+
+### 20.5 我改的第二件事：被測到的那一格永遠到不了
+
+`FactOrigin::Told` 補上之後會產生三句話，其中一句是壞的：
+
+> 這個目標的**你告訴她的話**沒有記是哪個 app
+
+`origin_subject()` 填的是「這個目標的 X」這個所有格。其他四種都是目標
+**擁有**的東西（它的畫面、它的視窗標題）；他打進來的話不是目標擁有的東西，
+**它就是目標**。
+
+**漏掉的地方比句子本身值錢**：delegate 的測試蓋的是 `TargetApp::Known`，
+而那一格要有 `app_id` 才到得了，`remember_told` 從不寫 `app_id`。
+所以真的有 told fact 的那天走到的是 `AppNotRecorded`——也就是壞掉那一句。
+**被測到的是永遠到不了的那一格。**
+
+### 20.6 查過站得住的
+
+- `remember_told` 是 `#[tauri::command(async)]`，不在主執行緒上搶 DB 鎖。
+  這棟房子被同步 command 和輪詢執行緒搶鎖死鎖過。
+- 每次呼叫重新 `Config::load`，沒有快取開機時讀的設定。
+- 三種結果分得開：`RememberToldOutcome::{Remembered, Disabled}` ＋ `Err`。
+  「開關關著」和「出錯了」不是同一個 false。
+- **不講 guardrail**：成功只說「記住了。」。閘門有兩條獨立的否定斷言
+  （`已儲存至本機資料庫|這台電腦|保留期設定` 和 `隨時刪除|允許的範圍|隱私承諾`）。
+  他的原話：「沒有人跟朋友講話會講這些 guardrail 的。」
+- `check-told-native.py` **不是沒人跑的閘門**——我一開始以為它沒接進 CI，錯了：
+  它是被 `check-pet-says-why.mjs` 的 A154-8 用 `spawnSync` 叫起來的，
+  而那一支在 `.github/workflows/ci.yml` 有跑。它把真的 command 本體從
+  `apps/desktop/src-tauri/src/main.rs` 抽出來、接真 Config／真 SQLite 跑，
+  是這棵樹上第一份 tauri command 的執行覆蓋。
+- 合併沒有弄丟任何人：`LC_ALL=C comm -23` 量過，main 的 901 個斷言名字一個
+  都沒少、沒改名。合併後 `970 passed; 0 failed`（main 943 ＋ A154 27）。
+
+### 20.7 登記在案、這一版不修的
+
+- 另外五個 `from_str_kind` 呼叫端沒有「我少給了你幾列」這個頻道。
+  今天不可達（沒有寫入端產得出第七種 kind），但它是一顆會自己上膛的雷。
+- `origin_subject` 在 `crates/sister-core/src/db.rs` 和 `crates/sister-cli/src/ops.rs`
+  有**兩份逐字相同**的拷貝。這個重複不是這次造成的，但補 told 的時候兩邊都要動。
+- 她不會拿他剛剛告訴她的那句話**回頭重答原來那個問題**。下一次問才找得到。
