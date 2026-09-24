@@ -2865,6 +2865,36 @@ impl Db {
         Ok(out)
     }
 
+    /// 記住使用者告訴她的話。關閉時回傳 None，且不寫入任何資料。
+    /// 呼叫端在 A154 R2 的對話框那條路上，在那之前這裡只有測試會走。
+    /// 呼叫時傳入目前有效的隱私設定；不建立錄製場次、畫面或 L1 facts。
+    pub fn remember_told(
+        &mut self,
+        privacy: &crate::config::PrivacyConfig,
+        ts: Millis,
+        text: &str,
+    ) -> Result<Option<i64>> {
+        if !privacy.remember_told {
+            return Ok(None);
+        }
+        anyhow::ensure!(!text.trim().is_empty(), "不能記下空白的話");
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO text_chunks(ts, source_kind, text) VALUES(?1, ?2, ?3)",
+            params![ts, SourceKind::Told.as_str(), text],
+        )?;
+        let id = tx.last_insert_rowid();
+        let grams = cjk_bigrams(text);
+        if !grams.is_empty() {
+            tx.execute(
+                "INSERT INTO text_fts_bi(rowid, text) VALUES(?1, ?2)",
+                params![id, grams],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
     // ---------- 檢索 ----------
 
     /// 全文檢索。trigram 與 unicode61 兩個索引各查一次再合併取最佳分數，
@@ -2918,7 +2948,13 @@ impl Db {
                     Ok(SearchHit {
                         chunk_id: row.get(0)?,
                         ts: row.get(1)?,
-                        source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                        source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                format!("unknown text source kind: {kind}").into(),
+                            )
+                        })?,
                         frame_id: row.get(3)?,
                         app_id: row.get(4)?,
                         window_title: row.get(5)?,
@@ -3039,7 +3075,13 @@ impl Db {
                 Ok(SearchHit {
                     chunk_id: row.get(0)?,
                     ts: row.get(1)?,
-                    source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                    source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            format!("unknown text source kind: {kind}").into(),
+                        )
+                    })?,
                     frame_id: row.get(3)?,
                     app_id: row.get(4)?,
                     window_title: row.get(5)?,
@@ -3099,7 +3141,13 @@ impl Db {
                 Ok(SearchHit {
                     chunk_id: row.get(0)?,
                     ts: row.get(1)?,
-                    source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                    source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            format!("unknown text source kind: {kind}").into(),
+                        )
+                    })?,
                     frame_id: row.get(3)?,
                     app_id: row.get(4)?,
                     window_title: row.get(5)?,
@@ -3172,7 +3220,13 @@ impl Db {
             Ok(SearchHit {
                 chunk_id: row.get(0)?,
                 ts: row.get(1)?,
-                source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        format!("unknown text source kind: {kind}").into(),
+                    )
+                })?,
                 frame_id: row.get(3)?,
                 app_id: row.get(4)?,
                 window_title: row.get(5)?,
@@ -3568,7 +3622,13 @@ impl Db {
                 Ok(SearchHit {
                     chunk_id: row.get(0)?,
                     ts: row.get(1)?,
-                    source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                    source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            format!("unknown text source kind: {kind}").into(),
+                        )
+                    })?,
                     frame_id: row.get(3)?,
                     app_id: row.get(4)?,
                     window_title: row.get(5)?,
@@ -3714,7 +3774,13 @@ impl Db {
             Ok(SearchHit {
                 chunk_id: row.get(0)?,
                 ts: row.get(1)?,
-                source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                source_kind: SourceKind::from_str_kind(&kind).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        format!("unknown text source kind: {kind}").into(),
+                    )
+                })?,
                 frame_id: row.get(3)?,
                 app_id: row.get(4)?,
                 window_title: row.get(5)?,
@@ -7494,6 +7560,7 @@ impl FactOrigin {
 /// 資料列記著它來自畫面文字，同時明講畫面編號缺失；未知值也不帶原始字串。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FramelessOrigin {
+    Told,
     WindowTitle,
     Clipboard,
     /// `source_kind` 說是畫面文字，卻沒有記畫面編號的矛盾列。
@@ -7508,6 +7575,7 @@ impl FramelessOrigin {
         match source_kind {
             "window_title" => Self::WindowTitle,
             "clipboard" => Self::Clipboard,
+            "told" => Self::Told,
             "ocr" => Self::ScreenTextWithoutFrame,
             _ => Self::Unknown,
         }
@@ -16050,5 +16118,41 @@ mod tests {
             suggestion.target_provenance,
             "這個目標是從哪個畫面來的沒有記"
         );
+    }
+}
+
+#[cfg(test)]
+mod a154_source_tests {
+    use super::*;
+
+    #[test]
+    fn a154_unknown_sources_are_never_reported_as_ocr() {
+        let mut db = Db::open_in_memory().unwrap();
+        let id = db
+            .remember_told(
+                &crate::config::PrivacyConfig::default(),
+                10,
+                "紫色雨傘 violetumbrella",
+            )
+            .unwrap()
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE text_chunks SET source_kind='future-kind' WHERE id=?1",
+                [id],
+            )
+            .unwrap();
+        assert!(db.search("violetumbrella", 10).unwrap().is_empty());
+        assert!(db.recent(10).unwrap().is_empty());
+        assert!(db.chunks_in_range(0, 20, 10).unwrap().is_empty());
+        assert!(
+            db.chunks_in_range_preferring_after(0, 20, 10, Some(5))
+                .unwrap()
+                .is_empty()
+        );
+        let (hits, complete) = db.search_bigram("紫色", "紫色", 10, None).unwrap();
+        assert!(hits.is_empty());
+        assert!(!complete);
+        assert!(db.search_like("紫色", 10, None).unwrap().is_empty());
     }
 }

@@ -553,6 +553,8 @@ pub enum SourceKind {
     /// OCR 區塊——同一份報告上兩句互相打臉的話。而且出處那一排會對使用者
     /// 宣稱「這幾個字是從畫面像素認出來的」，那是假的。
     Assistive,
+    /// 使用者親口告訴她的話，不是觀察。
+    Told,
 }
 
 impl SourceKind {
@@ -563,6 +565,7 @@ impl SourceKind {
             SourceKind::WindowTitle => "window_title",
             SourceKind::Url => "url",
             SourceKind::Assistive => "assistive",
+            SourceKind::Told => "told",
         }
     }
 
@@ -573,6 +576,7 @@ impl SourceKind {
             "window_title" => SourceKind::WindowTitle,
             "url" => SourceKind::Url,
             "assistive" => SourceKind::Assistive,
+            "told" => SourceKind::Told,
             _ => return None,
         })
     }
@@ -673,6 +677,7 @@ mod tests {
             SourceKind::WindowTitle,
             SourceKind::Url,
             SourceKind::Assistive,
+            SourceKind::Told,
         ] {
             assert_eq!(SourceKind::from_str_kind(k.as_str()), Some(k));
         }

@@ -63,6 +63,7 @@ const BASE = {
   pause_on_screenshare: true,
   redact_clipboard_secrets: true,
   query_log: true,
+  remember_told: true,
   frames_days: 14,
   text_days: 90,
   persona_enabled: true,
@@ -739,7 +740,9 @@ async function open({
 const KEPT = "從現在起她不會再記你問過的問題";
 
 let failed = 0;
+let passed = 0;
 function check(name, ok, detail) {
+  if (ok) passed++;
   console.log(`  ${ok ? "✔" : "✗"} ${name}`);
   if (!ok) {
     failed++;
@@ -1033,6 +1036,24 @@ console.log("⓪ᵍ set 失敗後一定重讀，不拿點擊後的勾勾冒充�
       p.loginStartupSay().includes("連 readback 也失敗"),
     p.loginStartupSay(),
   );
+}
+
+{
+  const p = await open();
+  check("親口告訴她的話預設勾選", p.node("[data-remember-told]").checked === true);
+  p.node("[data-remember-told]").checked = false;
+  await p.save();
+  check("關閉親口記憶說清楚舊資料保留", p.say().includes("不會再記你告訴她的話") && p.say().includes("先前記下的那些不會因為這個動作消失"), p.say());
+  check("重新讀取仍為關閉", p.node("[data-remember-told]").checked === false);
+  await p.save();
+  check("沒有重複關閉通知", !p.say().includes("不會再記你告訴她的話"));
+}
+
+{
+  const readBody = MAIN.match(/fn settings_read\([\s\S]*?fn /)?.[0] ?? "";
+  const writeBody = MAIN.match(/fn settings_write\([\s\S]*?struct PrivacyHealth/)?.[0] ?? "";
+  check("native 設定讀取接上親口記憶", readBody.includes("remember_told: c.privacy.remember_told,"));
+  check("native 設定寫入接上親口記憶", writeBody.includes("c.privacy.remember_told = settings.remember_told;"));
 }
 
 console.log("① 題庫本來開著，關掉按儲存");
@@ -4211,6 +4232,7 @@ console.log("㉚ᵠ 打開系統設定時 invoke 丟出空值，仍走失敗那�
 }
 
 console.log("");
+console.log(`${passed} passed; ${failed} failed`);
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——設定頁在某一種情況下說了謊，或什麼都沒說。`);
   process.exit(1);

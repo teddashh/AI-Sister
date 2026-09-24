@@ -66,8 +66,10 @@ pub struct PruneReport {
     pub missing: u64,
     /// 整列消失的 frame 數。
     pub frames_deleted: u64,
-    /// 連帶消失的可搜尋文字段落數。
+    /// 連帶消失的觀察文字段落數，不含 told_deleted。
     pub chunks_deleted: u64,
+    /// 你告訴她的話，與觀察文字分開計數；兩者合計才是 text_chunks 刪除列數。
+    pub told_deleted: u64,
     /// 連帶消失的 L1 事實數。
     pub facts_deleted: u64,
     /// focus / clipboard / input / system 四張表加總。
@@ -510,7 +512,14 @@ impl crate::db::Db {
             Ok(self.conn.query_row(sql, [cut], |r| r.get::<_, i64>(0))? as u64)
         };
         let mut r = PruneReport {
-            chunks_deleted: n("SELECT COUNT(*) FROM text_chunks WHERE ts < ?1", text_cut)?,
+            chunks_deleted: n(
+                "SELECT COUNT(*) FROM text_chunks WHERE ts < ?1 AND source_kind != 'told'",
+                text_cut,
+            )?,
+            told_deleted: n(
+                "SELECT COUNT(*) FROM text_chunks WHERE ts < ?1 AND source_kind = 'told'",
+                text_cut,
+            )?,
             facts_deleted: n("SELECT COUNT(*) FROM facts WHERE ts < ?1", text_cut)?,
             frames_deleted: n("SELECT COUNT(*) FROM frames WHERE ts < ?1", text_cut)?,
             ..Default::default()
@@ -630,6 +639,10 @@ impl crate::db::Db {
         // text_chunks 一定要走 DELETE：AFTER DELETE 觸發器負責把兩個 FTS
         // 索引同步掉。繞過它會留下孤兒索引，搜尋會撈到已經不存在的內容
         // （DATA_INVENTORY 有記這一條）。
+        report.told_deleted += tx.execute(
+            "DELETE FROM text_chunks WHERE ts < ?1 AND source_kind = 'told'",
+            [text_cut],
+        )? as u64;
         report.chunks_deleted += tx
             .execute("DELETE FROM text_chunks WHERE ts < ?1", [text_cut])
             .context("prune text_chunks")? as u64;
@@ -762,7 +775,12 @@ impl crate::db::Db {
                 .query_row(sql, [from_ts, to_ts], |r| r.get::<_, i64>(0))? as u64)
         };
         let mut r = PruneReport {
-            chunks_deleted: n("SELECT COUNT(*) FROM text_chunks WHERE ts >= ?1 AND ts < ?2")?,
+            chunks_deleted: n(
+                "SELECT COUNT(*) FROM text_chunks WHERE ts >= ?1 AND ts < ?2 AND source_kind != 'told'",
+            )?,
+            told_deleted: n(
+                "SELECT COUNT(*) FROM text_chunks WHERE ts >= ?1 AND ts < ?2 AND source_kind = 'told'",
+            )?,
             facts_deleted: n("SELECT COUNT(*) FROM facts WHERE ts >= ?1 AND ts < ?2")?,
             frames_deleted: n("SELECT COUNT(*) FROM frames WHERE ts >= ?1 AND ts < ?2")?,
             ..Default::default()
@@ -875,6 +893,10 @@ impl crate::db::Db {
                 [from_ts, to_ts],
             )
             .context("forget facts")? as u64;
+        report.told_deleted += tx.execute(
+            "DELETE FROM text_chunks WHERE ts >= ?1 AND ts < ?2 AND source_kind = 'told'",
+            [from_ts, to_ts],
+        )? as u64;
         report.chunks_deleted += tx
             .execute(
                 "DELETE FROM text_chunks WHERE ts >= ?1 AND ts < ?2",
@@ -2831,5 +2853,211 @@ mod tests {
             1,
             "窗外那一個標記被一起帶走了"
         );
+    }
+}
+
+#[cfg(test)]
+mod a154_tests {
+    use super::*;
+    use crate::{Db, config::PrivacyConfig, model::SourceKind};
+
+    fn count(db: &Db) -> u64 {
+        db.conn
+            .query_row("SELECT COUNT(*) FROM text_chunks", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap() as u64
+    }
+    fn seed(db: &mut Db) {
+        db.remember_told(&PrivacyConfig::default(), 10, "紫色雨傘 violetumbrella")
+            .unwrap()
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO text_chunks(ts,source_kind,text) VALUES(10,'ocr','screen')",
+                [],
+            )
+            .unwrap();
+    }
+    fn absent(db: &Db) {
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM text_chunks WHERE text LIKE '%紫色雨傘%'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        for (table, query) in [
+            ("text_fts", "violetumbrella"),
+            ("text_fts_uni", "violetumbrella"),
+            ("text_fts_bi", "紫色"),
+        ] {
+            assert_eq!(
+                db.conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE {table} MATCH ?1"),
+                        [query],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0,
+                "{table}"
+            );
+        }
+        assert!(db.search("紫色雨傘", 10).unwrap().is_empty());
+    }
+    #[test]
+    fn a154_write_and_switch() {
+        let mut db = Db::open_in_memory().unwrap();
+        let mut p: PrivacyConfig = toml::from_str("").unwrap();
+        let id = db
+            .remember_told(&p, 10, "紫色雨傘 violetumbrella")
+            .unwrap()
+            .unwrap();
+        let row: (String, Option<i64>, String) = db
+            .conn
+            .query_row(
+                "SELECT source_kind,frame_id,text FROM text_chunks WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("told".into(), None, "紫色雨傘 violetumbrella".into()));
+        assert_eq!(
+            db.search("紫色", 10).unwrap()[0].source_kind,
+            SourceKind::Told
+        );
+        assert_eq!(
+            db.conn
+                .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        p.remember_told = false;
+        assert_eq!(db.remember_told(&p, 11, "不能記下這句話").unwrap(), None);
+        assert_eq!(count(&db), 1);
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM text_chunks WHERE text='不能記下這句話'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(db.search("紫色雨傘", 10).unwrap().len(), 1);
+        assert!(
+            db.remember_told(&PrivacyConfig::default(), 12, "  ")
+                .is_err()
+        );
+    }
+    #[test]
+    fn a154_prune_words_and_counts() {
+        let mut db = Db::open_in_memory().unwrap();
+        seed(&mut db);
+        let cfg = RetentionConfig {
+            text_days: 0,
+            frames_days: 0,
+        };
+        let before = count(&db);
+        let preview = db.prune_preview(11, &cfg, None).unwrap();
+        let report = db.prune(11, &cfg, None).unwrap();
+        absent(&db);
+        assert_eq!((report.chunks_deleted, report.told_deleted), (1, 1));
+        assert_eq!(
+            report.chunks_deleted + report.told_deleted,
+            before - count(&db)
+        );
+        assert_eq!(preview, report);
+    }
+    #[test]
+    fn a154_forget_words_and_counts() {
+        let mut db = Db::open_in_memory().unwrap();
+        seed(&mut db);
+        db.remember_told(&PrivacyConfig::default(), 11, "留下邊界")
+            .unwrap();
+        let before = count(&db);
+        let preview = db.forget_preview(10, 11, None).unwrap();
+        let report = db.forget(10, 11, None).unwrap();
+        absent(&db);
+        assert_eq!((report.chunks_deleted, report.told_deleted), (1, 1));
+        assert_eq!(
+            report.chunks_deleted + report.told_deleted,
+            before - count(&db)
+        );
+        assert_eq!(preview, report);
+        assert_eq!(db.search("留下邊界", 10).unwrap().len(), 1);
+    }
+    #[test]
+    fn a154_old_schema_reopen_and_export() {
+        let dir = std::env::temp_dir().join(format!("sister-a154-reopen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let db = Db::open(&path).unwrap();
+            db.conn
+                .execute_batch("DROP TABLE assistive_blocks; PRAGMA user_version=19;")
+                .unwrap();
+        }
+        let mut db = Db::open(&path).unwrap();
+        let cfg = RetentionConfig {
+            text_days: 0,
+            frames_days: 0,
+        };
+        assert_eq!(
+            db.prune_preview(11, &cfg, None).unwrap(),
+            PruneReport::default()
+        );
+        assert_eq!(
+            db.forget_preview(10, 11, None).unwrap(),
+            PruneReport::default()
+        );
+        seed(&mut db);
+        drop(db);
+        let mut db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.search("紫色雨傘", 10).unwrap()[0].source_kind,
+            SourceKind::Told
+        );
+        let backup = dir.join("export.db");
+        let _ = std::fs::remove_file(&backup);
+        db.export_to(&backup).unwrap();
+        let exported = Db::open(&backup).unwrap();
+        assert_eq!(
+            exported.search("紫色雨傘", 10).unwrap()[0].source_kind,
+            SourceKind::Told
+        );
+        assert_eq!(db.forget(10, 11, None).unwrap().told_deleted, 1);
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        absent(&db);
+        drop(db);
+        drop(exported);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a154_old_data_zero_told() {
+        let mut db = Db::open_in_memory().unwrap();
+        // Existing schema needs no migration: same text_chunks DDL, no new columns/tables.
+        db.conn
+            .execute(
+                "INSERT INTO text_chunks(ts,source_kind,text) VALUES(10,'ocr','old')",
+                [],
+            )
+            .unwrap();
+        let cfg = RetentionConfig {
+            text_days: 0,
+            frames_days: 0,
+        };
+        assert_eq!(db.prune_preview(11, &cfg, None).unwrap().told_deleted, 0);
+        assert_eq!(db.forget_preview(10, 11, None).unwrap().told_deleted, 0);
+        assert_eq!(db.forget(10, 11, None).unwrap().told_deleted, 0);
+        assert_eq!(db.prune(11, &cfg, None).unwrap(), PruneReport::default());
     }
 }

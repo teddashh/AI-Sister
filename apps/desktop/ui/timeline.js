@@ -965,6 +965,8 @@ function armReset() {
  */
 function scale(e) {
   const bits = [];
+  // 親口告訴她的話不併入觀察文字；真後端、假後端與預覽都要分開。
+  if (e.told > 0) bits.push(`${e.told} 段你告訴她的話`);
   if (e.chunks > 0) bits.push(`${e.chunks} 段文字`);
   if (e.facts > 0) bits.push(`${e.facts} 個事實`);
   // 沒有截圖的那幾列也是紀錄。text-only 模式下、或圖已經過了保留期之後，
@@ -2351,6 +2353,7 @@ function fakeBackend(mode = "1") {
         }
         return {
           chunks: gone.length,
+          told: Math.ceil(gone.length / 3),
           facts: gone.length * 2,
           frames: gone.length,
           images: images.length,

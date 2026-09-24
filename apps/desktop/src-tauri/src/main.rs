@@ -6060,6 +6060,7 @@ struct Settings {
     pause_on_screenshare: bool,
     redact_clipboard_secrets: bool,
     query_log: bool,
+    remember_told: bool,
     frames_days: u32,
     text_days: u32,
     persona_enabled: sister_core::config::PersonaVisible,
@@ -6256,6 +6257,7 @@ fn settings_read() -> Result<Settings, String> {
         pause_on_screenshare: c.privacy.pause_on_screenshare,
         redact_clipboard_secrets: c.privacy.redact_clipboard_secrets,
         query_log: c.privacy.query_log,
+        remember_told: c.privacy.remember_told,
         frames_days: c.retention.frames_days,
         text_days: c.retention.text_days,
         persona_enabled: c.shell.persona.visible(),
@@ -6521,6 +6523,7 @@ fn settings_write(
         c.privacy.pause_on_screenshare = settings.pause_on_screenshare;
         c.privacy.redact_clipboard_secrets = settings.redact_clipboard_secrets;
         c.privacy.query_log = settings.query_log;
+        c.privacy.remember_told = settings.remember_told;
         c.retention.frames_days = settings.frames_days;
         c.retention.text_days = settings.text_days;
         c.set_consent_read_aloud(settings.persona_consent_read_aloud);
@@ -7338,6 +7341,7 @@ async fn open_onboarding(app: tauri::AppHandle) -> Result<(), String> {
 #[derive(Serialize)]
 struct Erasure {
     chunks: u64,
+    told: u64,
     facts: u64,
     frames: u64,
     images: u64,
@@ -7410,6 +7414,7 @@ impl From<sister_core::retention::PruneReport> for Erasure {
     fn from(r: sister_core::retention::PruneReport) -> Self {
         Self {
             chunks: r.chunks_deleted,
+            told: r.told_deleted,
             facts: r.facts_deleted,
             frames: r.frames_deleted,
             images: r.images_deleted,
