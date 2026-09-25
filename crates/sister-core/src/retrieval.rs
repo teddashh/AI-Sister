@@ -50,22 +50,23 @@ impl SearchAdjustment {
 /// 主題也有同一個洞：`退款電話怎麼打` 的主題被算成「退款 怎麼打」，「怎麼」看過，
 /// 保護放行，改去找「電話怎麼打」。
 ///
-/// 這一輪在問索引之前先走一張封閉的問句詞清單，不靠那些字剛好沒看過。清單就是
-/// [`QUESTION_WORDS`]，只有一份。中文整段比對；英文是獨立 token、不分大小寫，
-/// 邊界與類型詞同一支 [`crate::facts::kind_word_match_end`]（`show` 裡的 how
-/// 不算）。落在類型詞裡面的不算：「什麼時候」「多少錢」「繳多少」「付多少」
-/// 「欠多少」是答案種類，不是問句。前面已經有內容，就只留前面，後面連類型詞
-/// 一起丟、不接回去。前面只有空白或虛字，就只拿掉這個詞再往後看，所以
-/// 「為什麼部署失敗」留下「部署失敗」，「怎麼找客服電話」留下「找客服電話」，
+/// 第二輪在問索引之前先走一張封閉的問句詞清單 [`QUESTION_WORDS`]，不靠那些字
+/// 剛好沒看過。問句詞是這一張；口語開頭是旁邊另一張 [`SPOKEN_LEAD_INS`]，
+/// 各只有一份，不複製到 facts 或索引。中文整段比對；英文是獨立 token、不分
+/// 大小寫，邊界與類型詞同一支 [`crate::facts::kind_word_match_end`]（`show`
+/// 裡的 how 不算）。落在類型詞裡面的不算：「什麼時候」「多少錢」「繳多少」
+/// 「付多少」「欠多少」是答案種類，不是問句。前面已經有內容，就只留前面，
+/// 後面連類型詞一起丟、不接回去。前面只有空白或虛字，就只拿掉這個詞再往後看，
+/// 所以「為什麼部署失敗」留下「部署失敗」，「怎麼找客服電話」留下「找客服電話」，
 /// 再交給索引把「找」拿掉。
 ///
 /// 刻意不收：「幾」（「幾號」分不出日期和號碼，還有「幾乎」）、嗎／呢／吧
 /// （[`question::terms`] 已經剝頭尾虛字）、when（它自己就是類型詞）。
 ///
 /// 問句頭尾另外套 [`crate::facts::strip_fact_question_edges`]，和 facts 主題
-/// 同一張表。這一輪那張表只多「幫我看一下」「幫我看」「查一下」「找一下」
-/// 「看一下」。切完再跑一次 [`question::terms`]，把「敗是」「案在」這種交界
-/// 虛字剝掉。交界雙字在用過的索引裡常常看過，只靠尾端零命中拿不掉。
+/// 同一張表。那張表多的是「幫我看一下」「幫我看」「查一下」「找一下」「看一下」。
+/// 口語開頭不進那張表。切完再跑一次 [`question::terms`]，把「敗是」「案在」這種
+/// 交界虛字剝掉。交界雙字在用過的索引裡常常看過，只靠尾端零命中拿不掉。
 ///
 /// 主題保護改看這段剝完的字，不看原問句：原問句有類型詞，而且剝完之後的主題
 /// 在索引裡一個條件都沒看過，就不放寬。「不用改」和「太長沒檢查」仍然不是
@@ -80,9 +81,60 @@ impl SearchAdjustment {
 ///   就是 0 筆、不說改用了什麼，也不再縮。畫面上有「這個東西在桌上」時，第一次
 ///   就命中，同樣不放寬。「這個東西怎麼用」的「怎麼」不是虛字，第一次「東西怎麼用」
 ///   對不到，放寬才改用「東西」，那一筆就找到了。
+///
+/// 第三輪用同一份 repo 中文文件（約 24 萬字，主題字都排除）當背景，量問句詞
+/// 前面的口語。那些字在用過的索引裡一定看過，第二輪又規定前面有內容就留下：
+///
+/// - `所以為什麼部署失敗` 改用「所以」，5 張不相干的畫面。沒有背景時索引沒看過
+///   「所以」，整段 [`IndexedCandidate::NoneSeen`]，連「部署失敗」都不再找。
+///   `我想問為什麼部署失敗` 一樣：有背景改用「想問」，沒有背景空手。
+/// - `可是怎麼辦` 改用「可是」，4 張。
+/// - `怎麼回事`／`這是怎麼回事` 改用「回」。[`question::terms`] 的理由是：一個字的
+///   查詢不是查詢，是掃描。
+/// - `電話怎麼打` 改用「電話」，任意一支號碼。`應繳金額怎麼算` 改用「應繳金額」，
+///   5 筆不相干的金額。`哪個網址` 改用「網址」，5 個任意網址。alpha.155 已經出貨
+///   的話是：整句話裡她看過的字只剩「多少錢」這種類型詞，那時候她寧可說不知道，
+///   也不會拿另一個數字來湊。
+/// - `哪裡有客服電話` 只切掉「哪」，改用「裡有客服電話」，0 筆。
+///
+/// 口語開頭因此另做一張封閉清單，而且只給這一次放寬用。封閉是因為只收這份背景
+/// 裡量到、又會被第二輪留在前面的那些說法；「找」「查」「打」這種索引分得出來的
+/// 字不寫進來。只給放寬用，是因為 [`crate::facts::strip_fact_question_edges`]
+/// 那張表 facts 主題也在用，加進去第一次查詢的答案就變了。
+/// 「到底」「那麼」的第一個字是虛字。先跑 [`question::terms`] 再認開頭，整段
+/// 已經不在了，所以每一圈先看原樣開頭；不是口語開頭才跑 terms、剝問句頭尾，
+/// 再認一次。「所以我想問為什麼部署失敗」先拿掉「所以」，terms 剝掉「我」，
+/// 再拿掉「想問」。
+///
+/// 「哪」單獨一個字會切在詞中間，所以「哪裡」「哪個」「哪一個」整段收進
+/// [`QUESTION_WORDS`]。同一位置本來就取最長。「哪裡有客服電話」拿掉「哪裡」，
+/// 最後一次 [`question::terms`] 再剝掉「有」。
+///
+/// 最後的候選字，不論索引改過（[`IndexedCandidate::Changed`]）還是原樣留著
+/// （[`IndexedCandidate::Unchanged`]），都再過兩道出口，過不了就不放寬：
+///
+/// - 去掉空白後不到兩個字。一個字的查詢不是查詢，是掃描。
+/// - 有類型詞、而且沒有主題：[`crate::facts::kinds_for_query`] 非空，並且
+///   [`crate::facts::topic_constraint`] 是 `None`。只剩類型詞就寧可說不知道。
+///
+/// 第三輪自己量到的代價（背景探針：bg=0 是基準語料加「月報連結已更新」，沒有
+/// 那 24 萬字；bg=1 再灌進 repo 中文文件）：
+///
+/// - `應繳金額怎麼算`：沒有那 24 萬字時，上一輪改用「應繳金額」答得出 NT$1,350。
+///   這一輪 bg=0 和 bg=1 都是 `searched=None`、answers 空、hits 0。候選字只剩
+///   類型詞，不放寬，所以不答那筆 NT$1,350，也不拿背景裡別的金額來湊。
+/// - `到底部設定在哪`：「到底」正好是「到底部」的開頭，整段被拿掉。bg=0 剩下的
+///   「部設定」沒看過，不放寬；畫面上的 terms 仍是「底部設定在哪」（「到」本來
+///   就是虛字），answers 空、hits 0。bg=1 索引把「部」拿掉，改用「設定」，
+///   answers 空、hits 5，是不相干的原文。
+/// - `誰改了月報連結`：bg=1 改用「改了月報連結」，answers 空、hits 0。這一輪不修。
+///   「誰」拿掉之後「改了」在那 24 萬字裡看過，整段留著，對不到「月報連結已更新」。
+///   bg=0「改了」沒看過，會縮成「月報連結」並命中那一筆，answers 仍是空的。
 fn retry_candidate(db: &Db, query: &str) -> Result<Option<String>> {
     let original = question::terms(query);
-    let peeled = peel_retry_terms(original);
+    // 傳原句，不傳 `original`。「到」「那」是虛字，先跑 terms 會把「到底」「那麼」
+    // 吃成「底」「麼」，口語開頭整段對不到。剝完再和 `original` 比。
+    let peeled = peel_retry_terms(query);
     if peeled.is_empty() {
         return Ok(None);
     }
@@ -100,10 +152,26 @@ fn retry_candidate(db: &Db, query: &str) -> Result<Option<String>> {
     if candidate.is_empty() || candidate == original {
         return Ok(None);
     }
+    // 兩道出口只放在這裡。`Changed` 和 `Unchanged` 都已經折成 `candidate`。
+    if candidate_refused(&candidate) {
+        return Ok(None);
+    }
     Ok(Some(candidate))
 }
 
+/// 去掉空白後不到兩個字，或只剩類型詞、沒有主題。
+fn candidate_refused(candidate: &str) -> bool {
+    let chars = candidate.chars().filter(|c| !c.is_whitespace()).count();
+    if chars < 2 {
+        return true;
+    }
+    !crate::facts::kinds_for_query(candidate).is_empty()
+        && crate::facts::topic_constraint(candidate).is_none()
+}
+
 /// 封閉問句詞。加字之前先看 [`retry_candidate`] 上面為什麼不收。
+/// 「哪裡」「哪個」「哪一個」要整段在這張表裡；只留「哪」會切在詞中間。
+/// 口語開頭不在這裡，見 [`SPOKEN_LEAD_INS`]。
 const QUESTION_WORDS: &[&str] = &[
     "為什麼",
     "为什么",
@@ -120,6 +188,19 @@ const QUESTION_WORDS: &[&str] = &[
     "什么",
     "甚麼",
     "啥",
+    "哪裡",
+    "哪裏",
+    "哪里",
+    "哪兒",
+    "哪儿",
+    "哪邊",
+    "哪边",
+    "哪個",
+    "哪个",
+    "哪些",
+    "哪一個",
+    "哪一个",
+    "哪位",
     "哪",
     "誰",
     "谁",
@@ -132,10 +213,101 @@ const QUESTION_WORDS: &[&str] = &[
     "which",
 ];
 
-/// 頭尾問句用語、問句詞、再一次 [`question::terms`]。空字串表示沒有東西可找。
+/// 口語開頭。只給放寬用，不進 [`crate::facts::strip_fact_question_edges`]。
+/// 中文整段、只認開頭、同一位置取最長；英文是獨立 token，邊界與問句詞同一支。
+const SPOKEN_LEAD_INS: &[&str] = &[
+    "所以",
+    "但是",
+    "可是",
+    "不過",
+    "不过",
+    "然後",
+    "然后",
+    "那麼",
+    "那么",
+    "而且",
+    "還有",
+    "还有",
+    "另外",
+    "如果",
+    "到底",
+    "究竟",
+    "想問",
+    "想问",
+    "想請問",
+    "想请问",
+    "問一下",
+    "问一下",
+    "問你",
+    "问你",
+    "請教",
+    "请教",
+    "記得",
+    "记得",
+    "還記得",
+    "还记得",
+    "知道",
+    "so",
+    "but",
+    "and",
+    "then",
+    "also",
+];
+
+/// 開頭是口語開頭就拿掉，回傳剩下的那段。不是開頭就 `None`。
+fn strip_spoken_lead_in(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (lower, orig_at) = crate::facts::lowercase_with_orig_bytes(trimmed);
+    let mut best_end: Option<usize> = None;
+    for word in SPOKEN_LEAD_INS {
+        let end = if word.is_ascii() {
+            let Some(lower_end) = crate::facts::kind_word_match_end(&lower, word, 0) else {
+                continue;
+            };
+            orig_at[lower_end]
+        } else if trimmed.starts_with(word) {
+            word.len()
+        } else {
+            continue;
+        };
+        if end > 0 && best_end.is_none_or(|prev| end > prev) {
+            best_end = Some(end);
+        }
+    }
+    best_end.map(|end| &trimmed[end..])
+}
+
+/// 口語開頭、頭尾問句用語、問句詞、再一次 [`question::terms`]。空字串表示沒有東西可找。
 fn peel_retry_terms(terms: &str) -> &str {
-    let edged = crate::facts::strip_fact_question_edges(terms);
-    let cut = cut_question_words(edged);
+    let mut current = terms;
+    // 口語開頭至少一個字，拿掉之後一定比這一圈開始時短；長度有下界，所以迴圈一定結束。
+    // 沒有變短就停，避免空詞在原地打轉。
+    // 先看原樣開頭：`question::terms` 會把虛字「到」「那」從「到底」「那麼」的頭上拿掉。
+    loop {
+        let before = current;
+        if let Some(rest) = strip_spoken_lead_in(current) {
+            if rest.len() >= before.len() {
+                break;
+            }
+            current = rest;
+            continue;
+        }
+        let termed = question::terms(current);
+        let edged = crate::facts::strip_fact_question_edges(termed);
+        let Some(rest) = strip_spoken_lead_in(edged) else {
+            current = edged;
+            break;
+        };
+        if rest.len() >= before.len() {
+            current = edged;
+            break;
+        }
+        current = rest;
+    }
+    let cut = cut_question_words(current);
     if question::only_filler(cut) {
         ""
     } else {
@@ -1286,5 +1458,119 @@ mod tests {
             "{:?}",
             ordinary.hits
         );
+    }
+
+    /// 「所以」拿掉之後還有「我想問」。只剝一次、不回頭跑 [`question::terms`]，
+    /// 「我」還擋在「想問」前面，剝完不是「部署失敗」。
+    #[test]
+    fn stacked_spoken_lead_ins_peel_to_the_topic() {
+        assert_eq!(peel_retry_terms("所以我想問為什麼部署失敗"), "部署失敗");
+        // 「想問」是「想請問」的開頭。同一位置不取最長，會留下「問」。
+        assert_eq!(peel_retry_terms("想請問為什麼部署失敗"), "部署失敗");
+        // 「到」是虛字。先跑 terms 再認開頭，會把「到底」吃成「底」。
+        assert_eq!(peel_retry_terms("到底為什麼部署失敗"), "部署失敗");
+    }
+
+    /// `butter`／`sonic`／`thence` 的開頭幾個字母不是獨立的 but／so／then。
+    #[test]
+    fn english_lead_in_does_not_strip_inside_a_longer_token() {
+        assert_eq!(
+            peel_retry_terms("butter 為什麼部署失敗"),
+            "butter",
+            "but 沒有切在 butter 裡面"
+        );
+        assert_eq!(
+            peel_retry_terms("sonic 怎麼辦"),
+            "sonic",
+            "so 沒有切在 sonic 裡面"
+        );
+        assert_eq!(
+            peel_retry_terms("thence 為什麼部署失敗"),
+            "thence",
+            "then 沒有切在 thence 裡面"
+        );
+    }
+
+    #[test]
+    fn na_question_words_are_removed_whole() {
+        assert_eq!(peel_retry_terms("哪一個客服電話"), "客服電話");
+        assert_eq!(peel_retry_terms("哪裡有客服電話"), "客服電話");
+    }
+
+    /// 整句都是口語開頭。迴圈要結束，而且不能拿其中一個字去放寬。
+    #[test]
+    fn only_spoken_lead_ins_finish_and_do_not_relax() {
+        let mut db = Db::open_in_memory().unwrap();
+        let privacy = crate::config::PrivacyConfig {
+            remember_told: true,
+            ..Default::default()
+        };
+        db.remember_told(&privacy, 100, "所以為什麼會這樣").unwrap();
+        db.remember_told(&privacy, 200, "但是我不知道").unwrap();
+        db.remember_told(&privacy, 300, "可是我不想去").unwrap();
+        assert_eq!(
+            db.indexed_candidate("所以").unwrap(),
+            IndexedCandidate::Unchanged,
+            "前提：「所以」看過；沒剝乾淨就會被放出去"
+        );
+        assert_eq!(
+            db.indexed_candidate("但是").unwrap(),
+            IndexedCandidate::Unchanged,
+            "前提：「但是」看過"
+        );
+        // 「是」是虛字。整句已經夠長時，尾端那個「是」不會被退回來，
+        // 「可是」對不到整段，最後剩「可」。迴圈要在這裡停，而且不放寬。
+        let peeled = peel_retry_terms("所以但是可是");
+        assert!(
+            peeled.chars().filter(|c| !c.is_whitespace()).count() < 2,
+            "只有口語開頭，剝完不該還有兩個字：「{peeled}」"
+        );
+        assert_eq!(retry_candidate(&db, "所以但是可是").unwrap(), None);
+    }
+
+    /// 「回」是索引裡的一個 token，`indexed_candidate` 回 `Unchanged`。
+    /// 出口若只寫在 `Changed` 那一臂，這一條會放行。
+    #[test]
+    fn one_leftover_character_is_not_relaxed_when_the_index_has_seen_it() {
+        let mut db = Db::open_in_memory().unwrap();
+        let privacy = crate::config::PrivacyConfig {
+            remember_told: true,
+            ..Default::default()
+        };
+        db.remember_told(&privacy, 100, "請按 回 上一頁").unwrap();
+        assert_eq!(peel_retry_terms("怎麼回事"), "回");
+        assert_eq!(
+            db.indexed_candidate("回").unwrap(),
+            IndexedCandidate::Unchanged,
+            "前提：沒有出口的話，「回」會被放出去"
+        );
+        assert_eq!(retry_candidate(&db, "怎麼回事").unwrap(), None);
+    }
+
+    /// 「電話」看過，而且是類型詞、沒有主題。沒有出口就會改用「電話」。
+    #[test]
+    fn a_bare_type_word_is_not_relaxed_when_the_index_has_seen_it() {
+        let mut db = Db::open_in_memory().unwrap();
+        let privacy = crate::config::PrivacyConfig {
+            remember_told: true,
+            ..Default::default()
+        };
+        db.remember_told(&privacy, 100, "晚點打電話給你").unwrap();
+        assert_eq!(peel_retry_terms("電話怎麼打"), "電話");
+        assert!(
+            !crate::facts::kinds_for_query("電話").is_empty(),
+            "前提：「電話」是類型詞"
+        );
+        assert_eq!(
+            crate::facts::topic_constraint("電話"),
+            None,
+            "前提：「電話」沒有主題"
+        );
+        assert_eq!(
+            db.indexed_candidate("電話").unwrap(),
+            IndexedCandidate::Unchanged,
+            "前提：沒有出口的話，「電話」會被放出去"
+        );
+        assert_eq!(retry_candidate(&db, "電話怎麼打").unwrap(), None);
     }
 }
