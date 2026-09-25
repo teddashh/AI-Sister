@@ -35,8 +35,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
     HWND_TOPMOST, LWA_ALPHA, MSG, PM_REMOVE, PeekMessageW, RegisterClassW, SW_SHOWNOACTIVATE,
     SWP_NOACTIVATE, SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowPos, ShowWindow,
-    TranslateMessage, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    TranslateMessage, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::w;
 
@@ -44,6 +44,7 @@ const HELPER: &str = "SISTER_OWN_WINDOW_HELPER";
 const HELPER_RECT: &str = "SISTER_OWN_WINDOW_RECT";
 const HELPER_COLOR: &str = "SISTER_OWN_WINDOW_COLOR";
 const HELPER_ALPHA: &str = "SISTER_OWN_WINDOW_ALPHA";
+const HELPER_NO_REDIRECTION: &str = "SISTER_OWN_WINDOW_NO_REDIRECTION";
 /// 輔助視窗畫好之後印的那一行。libtest 單執行緒時會先印 `test 名字 ... `
 /// 不換行，所以這一行可能接在它後面，只比結尾。
 const READY: &str = "SISTER_OWN_WINDOW_READY";
@@ -88,6 +89,11 @@ fn own_window_helper() {
         let mut ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
         if alpha.is_some() {
             ex_style |= WS_EX_LAYERED;
+        }
+        // 沒有重導向表面、也不交 DirectComposition 內容：DWM 什麼都不畫，
+        // 整扇透明，而它的外框、z-order 和一扇實心的視窗一模一樣，只差這一個樣式位元。
+        if std::env::var(HELPER_NO_REDIRECTION).as_deref() == Ok("1") {
+            ex_style |= WS_EX_NOREDIRECTIONBITMAP;
         }
         let hwnd = CreateWindowExW(
             ex_style,
@@ -182,6 +188,17 @@ impl Area {
     }
 }
 
+/// 輔助視窗長什麼樣子。
+#[derive(Debug, Clone, Copy)]
+enum Look {
+    /// 一般視窗，整片純色。
+    Solid,
+    /// layered，整扇設同一個 alpha。
+    Alpha(u8),
+    /// DirectComposition 那一類，什麼都沒畫。
+    NoRedirection,
+}
+
 /// 一份被複製出去、開著一扇純色視窗的執行檔。掉出範圍就砍掉、刪乾淨。
 struct Helper {
     child: Child,
@@ -189,7 +206,7 @@ struct Helper {
 }
 
 impl Helper {
-    fn spawn(name: &'static str, area: Area, color: [u8; 3], alpha: Option<u8>) -> Helper {
+    fn spawn(name: &'static str, area: Area, color: [u8; 3], look: Look) -> Helper {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "sister-own-window-{}-{}",
@@ -219,10 +236,18 @@ impl Helper {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        match alpha {
-            Some(alpha) => command.env(HELPER_ALPHA, alpha.to_string()),
-            None => command.env_remove(HELPER_ALPHA),
-        };
+        command
+            .env_remove(HELPER_ALPHA)
+            .env_remove(HELPER_NO_REDIRECTION);
+        match look {
+            Look::Solid => {}
+            Look::Alpha(alpha) => {
+                command.env(HELPER_ALPHA, alpha.to_string());
+            }
+            Look::NoRedirection => {
+                command.env(HELPER_NO_REDIRECTION, "1");
+            }
+        }
         let mut child = command.spawn().expect("spawn helper");
         let stdout = child.stdout.take().expect("stdout");
         let (ready, said) = mpsc::channel();
@@ -436,7 +461,7 @@ fn her_visible_windows_are_blanked_in_her_own_capture() {
 
     // 1) 對照組：同一個位置、同一個顏色，名字不是她的時候要看得到。
     {
-        let _not_her = Helper::spawn("not-her.exe", her, MAGENTA, None);
+        let _not_her = Helper::spawn("not-her.exe", her, MAGENTA, Look::Solid);
         wait_for(
             &mut screen,
             "對照組：別人的洋紅色視窗一直沒出現在擷取裡，底下每一條都證明不了什麼",
@@ -447,9 +472,9 @@ fn her_visible_windows_are_blanked_in_her_own_capture() {
     }
 
     // 2) 她：先開她，再開一扇青色的對照，等到對照出現，她那一塊要全黑。
-    let _her = Helper::spawn("sister-desktop.exe", her, MAGENTA, None);
+    let _her = Helper::spawn("sister-desktop.exe", her, MAGENTA, Look::Solid);
     {
-        let _beacon = Helper::spawn("not-her.exe", beacon, CYAN, None);
+        let _beacon = Helper::spawn("not-her.exe", beacon, CYAN, Look::Solid);
         let frame = wait_for(
             &mut screen,
             "青色對照視窗一直沒出現在擷取裡",
@@ -473,7 +498,7 @@ fn her_visible_windows_are_blanked_in_her_own_capture() {
 
     // 3) 一扇不透明的別人蓋在她上面：蓋住的那一塊是別人的，其餘還是黑的。
     {
-        let _above = Helper::spawn("occluder.exe", over, GREEN, None);
+        let _above = Helper::spawn("occluder.exe", over, GREEN, Look::Solid);
         let frame = wait_for(
             &mut screen,
             "綠色那扇一直沒出現在擷取裡",
@@ -502,7 +527,7 @@ fn her_visible_windows_are_blanked_in_her_own_capture() {
     // 4) 一扇半透明的別人蓋在她上面：擋不住她，她整塊照塗。
     //    要是把它當成擋得住，重疊那一塊會是洋紅和綠混出來的灰。
     {
-        let _above = Helper::spawn("occluder.exe", over, GREEN, Some(128));
+        let _above = Helper::spawn("occluder.exe", over, GREEN, Look::Alpha(128));
         let frame = wait_for(
             &mut screen,
             "半透明的綠色那扇一直沒出現在擷取裡",
@@ -520,5 +545,24 @@ fn her_visible_windows_are_blanked_in_her_own_capture() {
             0,
             "她那一塊附近還看得到她的顏色\n{why}"
         );
+    }
+
+    // 5) 一扇 DirectComposition 的別人蓋在她上面，什麼都沒畫：畫面上整片透明，
+    //    外框、z-order 卻和實心的一模一樣。擋不住她，她整塊照塗。
+    //    它沒有東西可以等著出現；說畫好了（DwmFlush 之後）就開始抓。
+    {
+        let _above = Helper::spawn("occluder.exe", over, GREEN, Look::NoRedirection);
+        for frame in [grab(&mut screen), grab(&mut screen), grab(&mut screen)] {
+            let why = describe(&frame, monitor, &areas);
+            assert!(
+                pixels(&frame, monitor, her, None).iter().all(is_black),
+                "看得穿的視窗底下看得到她，她整塊都要塗黑\n{why}"
+            );
+            assert_eq!(
+                magenta(&frame, monitor, around),
+                0,
+                "她那一塊附近還看得到她的顏色\n{why}"
+            );
+        }
     }
 }

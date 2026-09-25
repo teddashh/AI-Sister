@@ -12,8 +12,8 @@
 use std::cell::RefCell;
 
 use sister_capture::own_windows::{
-    DesktopRect, LayeredAttributes, OwnWindowUnlocated, WindowFacts, blank, grab_without_her,
-    is_her_program, layered_is_see_through, own_parts,
+    DesktopRect, ExStyle, LayeredAttributes, OwnWindowUnlocated, WindowFacts, blank,
+    grab_without_her, is_her_program, is_see_through, layered_is_see_through, own_parts,
 };
 use sister_core::config::OWN_APP_KEYS;
 
@@ -780,6 +780,65 @@ fn only_a_layered_window_that_proves_it_is_opaque_can_hide_her() {
     assert!(
         !layered_is_see_through(true, attrs(false, None)),
         "沒設 alpha 也沒色鍵"
+    );
+}
+
+#[test]
+fn a_window_whose_transparency_cannot_be_read_from_outside_is_see_through() {
+    let opaque = Some(LayeredAttributes {
+        color_key: false,
+        alpha: Some(255),
+    });
+    let plain = ExStyle::default();
+    assert!(!is_see_through(plain, None), "一般視窗是實心的");
+    assert!(
+        is_see_through(
+            ExStyle {
+                no_redirection_bitmap: true,
+                ..plain
+            },
+            None
+        ),
+        "DirectComposition 畫的，讀不出透明度"
+    );
+    assert!(
+        is_see_through(
+            ExStyle {
+                click_through: true,
+                ..plain
+            },
+            None
+        ),
+        "點得穿的覆蓋層"
+    );
+    let layered = ExStyle {
+        layered: true,
+        ..plain
+    };
+    assert!(
+        !is_see_through(layered, opaque),
+        "layered 而且證明了自己是實心的"
+    );
+    assert!(is_see_through(layered, None), "layered 照 layered 那張表");
+    assert!(
+        is_see_through(
+            ExStyle {
+                no_redirection_bitmap: true,
+                ..layered
+            },
+            opaque
+        ),
+        "alpha 255 也救不了 DirectComposition 那一層"
+    );
+    assert!(
+        is_see_through(
+            ExStyle {
+                click_through: true,
+                ..layered
+            },
+            opaque
+        ),
+        "alpha 255 也救不了點得穿"
     );
 }
 

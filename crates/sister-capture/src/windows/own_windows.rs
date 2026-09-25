@@ -19,11 +19,12 @@ use windows::Win32::Graphics::Gdi::{GetWindowRgnBox, RGN_ERROR};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GWL_EXSTYLE, GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect, IsIconic,
     IsWindowVisible, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, LWA_COLORKEY, WS_EX_LAYERED,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TRANSPARENT,
 };
 use windows::core::BOOL;
 
 use super::focus::{file_name, process_id, process_image_path_for_pid};
-use crate::own_windows::{DesktopRect, LayeredAttributes, WindowFacts, layered_is_see_through};
+use crate::own_windows::{DesktopRect, ExStyle, LayeredAttributes, WindowFacts, is_see_through};
 
 /// 每一扇看得見的頂層視窗，z-order 最上面的排第一個（`EnumWindows` 的順序）。
 ///
@@ -67,8 +68,12 @@ fn facts(hwnd: HWND, names: &mut HashMap<u32, Option<String>>) -> WindowFacts {
             .clone()
     });
     let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
-    let layered = ex_style & WS_EX_LAYERED.0 != 0;
-    let attributes = if layered {
+    let style = ExStyle {
+        layered: ex_style & WS_EX_LAYERED.0 != 0,
+        no_redirection_bitmap: ex_style & WS_EX_NOREDIRECTIONBITMAP.0 != 0,
+        click_through: ex_style & WS_EX_TRANSPARENT.0 != 0,
+    };
+    let attributes = if style.layered {
         layered_attributes(hwnd)
     } else {
         None
@@ -79,7 +84,7 @@ fn facts(hwnd: HWND, names: &mut HashMap<u32, Option<String>>) -> WindowFacts {
         visible: true,
         minimized: unsafe { IsIconic(hwnd) }.as_bool(),
         cloaked: cloaked(hwnd),
-        see_through: layered_is_see_through(layered, attributes),
+        see_through: is_see_through(style, attributes),
         // 沒有 `SetWindowRgn` 設過形狀的視窗回 `RGN_ERROR`（出錯也是它）。
         shaped: unsafe { GetWindowRgnBox(hwnd, &mut region) } != RGN_ERROR,
         window_rect: window_rect(hwnd),

@@ -81,7 +81,7 @@ pub struct WindowFacts {
     pub minimized: bool,
     /// DWM 把它藏起來了（另一個虛擬桌面、暫停中的 UWP）。
     pub cloaked: Option<bool>,
-    /// 它可能是半透明的，見 [`layered_is_see_through`]。
+    /// 它可能看得穿，見 [`is_see_through`]。
     pub see_through: bool,
     /// 它有 `SetWindowRgn` 設的不規則形狀。
     pub shaped: bool,
@@ -98,6 +98,18 @@ pub struct LayeredAttributes {
     pub color_key: bool,
     /// `LWA_ALPHA` 有設才是 `Some`。
     pub alpha: Option<u8>,
+}
+
+/// 延伸樣式裡和「看不看得穿」有關的三個位元，平台層照讀。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExStyle {
+    /// `WS_EX_LAYERED`，見 [`layered_is_see_through`]。
+    pub layered: bool,
+    /// `WS_EX_NOREDIRECTIONBITMAP`：畫面由 DirectComposition／DirectX 直接交給
+    /// DWM，可以整片透明，而從外面讀不出來。
+    pub no_redirection_bitmap: bool,
+    /// `WS_EX_TRANSPARENT`：點得穿。疊在最上層的透明覆蓋層通常帶著它。
+    pub click_through: bool,
 }
 
 /// 她的一扇視窗看得見，卻讀不到它在哪裡。這一拍整張不抓。
@@ -133,6 +145,17 @@ pub fn layered_is_see_through(layered: bool, attributes: Option<LayeredAttribute
             attributes.color_key || attributes.alpha.is_some_and(|alpha| alpha != 255)
         }
     }
+}
+
+/// 一扇別人的視窗可能看得穿，就不能拿來擋她。
+///
+/// 她是釘在最上層的，蓋得到她的多半也是最上層的覆蓋層，而那些常常是透明的。
+/// DirectComposition 畫的和點得穿的，從外面讀不出透明度，一律當看得穿；
+/// layered 的見 [`layered_is_see_through`]。
+pub fn is_see_through(style: ExStyle, attributes: Option<LayeredAttributes>) -> bool {
+    style.no_redirection_bitmap
+        || style.click_through
+        || layered_is_see_through(style.layered, attributes)
 }
 
 /// 她看得見的那幾塊，桌面座標。`windows_top_first` 照 z-order 由上往下排
