@@ -269,6 +269,7 @@ fn a_seen_aspect_word_is_still_required_on_a_used_index() {
         assert!(got.empty, "有背景「{q}」");
         assert_eq!(got.searched, None, "有背景「{q}」");
         let got = ask(&mut plain, q);
+        assert!(!got.empty, "沒有背景「{q}」反而找得到");
         assert_eq!(got.searched, relaxed(base), "沒有背景「{q}」");
     }
 }
@@ -315,4 +316,80 @@ fn a_phrase_the_previous_step_finds_is_not_split() {
         "上一步找得到就不切段：{}",
         got.hits
     );
+}
+
+/// `docs/WINDOWS-CHECKLIST.md` alpha.162 那一節逐題照打：記事本那四行是同一張畫面，
+/// 索引是用過的（背景看過「改了」「上次看到」）。清單引號裡的句子就是這裡的字面值，
+/// 這裡改了清單要跟著改。
+#[test]
+fn the_windows_checklist_hears_what_the_checklist_says() {
+    const NOTEPAD: &str =
+        "週報網址已更新\n部署失敗 ERR_DEPLOY_42\n客服專線 0800-000-123\nstaging build is ready";
+    let mut db = Db::open_in_memory().unwrap();
+    let session = db.start_session("test", "test").unwrap();
+    for (i, line) in BACKGROUND.iter().enumerate() {
+        add(&mut db, session, 1_000 + i as i64, 100 + i as u64, line);
+    }
+    add(&mut db, session, 5_000, 90, NOTEPAD);
+    assert_seen(&db, &["改了", "上次看到"]);
+
+    let notepad_only = |got: &Seen, q: &str| {
+        assert!(
+            got.hits.contains("週報網址已更新"),
+            "「{q}」要找到記事本那一張：{}",
+            got.hits
+        );
+        assert!(
+            !got.hits.contains("上次看到的那個人") && !got.hits.contains("我改了一下設定"),
+            "「{q}」：{}",
+            got.hits
+        );
+    };
+    for q in ["週報網址", "staging build"] {
+        let got = ask(&mut db, q);
+        assert_eq!(got.searched, None, "基準線「{q}」");
+        notepad_only(&got, q);
+    }
+    for (q, said) in [
+        (
+            "週報的網址",
+            "我對不到你打的那一串，所以改用「週報 網址」去找。",
+        ),
+        (
+            "週報的網址在哪",
+            "我對不到你打的那一串，所以改用「週報 網址」去找。",
+        ),
+        (
+            "誰改了週報網址",
+            "我對不到你打的那一串，所以改用「週報網址」去找。",
+        ),
+        (
+            "誰更新了週報網址",
+            "我對不到你打的那一串，所以改用「更新 週報網址」去找。",
+        ),
+        (
+            "where is the staging build",
+            "我對不到你打的那一串，所以改用「is staging build」去找。",
+        ),
+        (
+            "when is the staging build",
+            "我對不到你打的那一串，所以改用「is staging build」去找。底下每一筆的時間，是我記下那一筆的時候。",
+        ),
+    ] {
+        let got = ask(&mut db, q);
+        assert_eq!(
+            got.searched
+                .as_ref()
+                .map(SearchAdjustment::message)
+                .as_deref(),
+            Some(said),
+            "「{q}」"
+        );
+        notepad_only(&got, q);
+    }
+    for q in ["週報的備份網址", "上次看到的週報網址"] {
+        let got = ask(&mut db, q);
+        assert!(got.empty, "「{q}」要印「沒有找到。」：{}", got.hits);
+        assert_eq!(got.searched, None, "「{q}」標題下面不可以有「改用」那一行");
+    }
 }
