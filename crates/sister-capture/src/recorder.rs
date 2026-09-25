@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use sister_core::config::Config;
+use sister_core::config::{Config, Exclusion};
 use sister_core::db::Db;
 use sister_core::dedup::{Deduper, FrameVerdict};
 use sister_core::model::{
@@ -80,6 +80,8 @@ pub enum Tick {
     Resumed,
     /// 被排除規則擋下。畫面沒有被抓取。
     Excluded { reason: String },
+    /// 她自己的視窗在前景。畫面沒有被抓取，也不算排除規則。
+    OwnWindow,
     /// 這一刻 OS 已知不允許讀內容，或 screen source 沒有 frame。
     NoScreen,
     /// 這一拍真的觀察到 OS lifecycle transition；audit 寫好後仍停拍，
@@ -184,6 +186,10 @@ pub struct RecorderStats {
     /// 用理由字串當 key 是刻意的：那就是寫進 `system_events` 的同一串字，
     /// 所以摘要上看到的東西，可以原封不動拿去資料庫裡查。
     pub excluded_reasons: std::collections::BTreeMap<String, u64>,
+    /// 她自己的視窗在前景、因此沒有擷取的拍數。
+    ///
+    /// 這不是 `excluded`：設定檔關不掉，也不寫 excluded 稽核。
+    pub own_window: u64,
     pub no_screen: u64,
     /// OS 狀態根本問不到，並在任何內容來源前停下的 tick。
     pub system_unknown: u64,
@@ -193,6 +199,8 @@ pub struct RecorderStats {
     pub clipboard_source_unknown: u64,
     /// Clipboard 來源 app 命中 excluded_apps/screenshare policy 而丟掉的事件。
     pub clipboard_source_excluded: u64,
+    /// 剪貼簿來源是她自己的視窗而丟掉的事件。不計入 `clipboard_source_excluded`。
+    pub clipboard_source_own_window: u64,
     /// 要封 privacy/system gap 時，clipboard source 沒能建立可信水位。
     pub clipboard_watermark_unknown: u64,
     /// 因為沒有人動、而**完全沒有碰螢幕**的 tick 數。
@@ -1425,6 +1433,102 @@ impl<B: Backend> Recorder<B> {
         matches!(self.begin_master_activity(), Ok(MasterActivity::Guard(_)))
     }
 
+    /// 排除規則與她自己的視窗共用這一段：畫面、OCR、剪貼簿內容都不讀，
+    /// 輸入節奏仍落地。兩條路只有稽核、計數與回傳的 tick 不同。
+    fn hold_blocked_tick(
+        &mut self,
+        ts: Millis,
+        pause_probe: &mut dyn FnMut() -> PauseSignal,
+        master_activity: &MasterActivity,
+        exclusion: &Exclusion,
+    ) -> Result<Tick> {
+        // 這三步是 privacy gate 本身，必須排在任何可能失敗的稽核寫入前。
+        // 第一次進排除時若 DB 剛好寫不進去，仍然不准跨過這段盲區拼舊 OCR，
+        // 更不准把這裡複製的剪貼簿留給下一個未排除 tick 去讀。
+        self.deduper.reset();
+        self.last_frame_id = None;
+        self.last_assistive.clear();
+        self.backend.reset_ocr();
+        let _ = self.establish_clipboard_watermark(ts);
+        self.exclusion_clipboard_gap = true;
+
+        // 排除期間仍保留不含內容的節奏，但先只 drain 到 RAM。系統可能
+        // 正好在 atomic drain 時鎖定；下一道 post-check 不通過就整份丟掉。
+        let staged_input =
+            if !self.pause_input_gap && !self.master_input_gap && !self.system_input_gap {
+                self.stage_input(ts)?
+            } else {
+                None
+            };
+        if let Some(tick) = self.master_postcheck(ts, master_activity)? {
+            return Ok(tick);
+        }
+        if let Some(boundary) = pause_boundary_tick(self.observe_pause_request(pause_probe)?) {
+            return Ok(boundary);
+        }
+        match self.observe_system(ts)? {
+            SystemGate::Stable => {}
+            SystemGate::Transitioned | SystemGate::PendingCommitted => {
+                return Ok(Tick::SystemChanged);
+            }
+            SystemGate::Blocked => {
+                self.stats.no_screen += 1;
+                return Ok(Tick::NoScreen);
+            }
+            SystemGate::Unknown => return Ok(Tick::SystemUnknown),
+        }
+        let pause_commit_guard = match self.observe_pause_request(pause_probe)? {
+            PauseCheck::Continue(guard) => guard,
+            PauseCheck::Paused => return Ok(Tick::Paused),
+            PauseCheck::Resumed => return Ok(Tick::Resumed),
+        };
+        let master_commit_guard = match self.master_commit_boundary(ts, master_activity)? {
+            MasterBoundaryCheck::Continue(guard) => guard,
+            MasterBoundaryCheck::Stopped => return Ok(Tick::MasterStopped),
+        };
+
+        let tick = match exclusion {
+            Exclusion::OwnWindow => {
+                self.stats.own_window += 1;
+                // 一般放行的 tick 在內容落地前把 `last_exclusion` 清成 None。
+                // 她的視窗不是排除段，下一段真的排除要自己寫出稽核列。
+                self.last_exclusion = None;
+                Tick::OwnWindow
+            }
+            Exclusion::Blocked(reason) => {
+                self.stats.excluded += 1;
+                *self
+                    .stats
+                    .excluded_reasons
+                    .entry(reason.clone())
+                    .or_default() += 1;
+                if self.last_exclusion.as_deref() != Some(reason.as_str()) {
+                    self.db.insert_system(
+                        self.session_id,
+                        &SystemEvent {
+                            ts,
+                            kind: SystemKind::Excluded,
+                            detail: Some(reason.clone()),
+                        },
+                    )?;
+                    self.last_exclusion = Some(reason.clone());
+                }
+                Tick::Excluded {
+                    reason: reason.clone(),
+                }
+            }
+            Exclusion::Allowed => {
+                anyhow::bail!("privacy hold called for an allowed context");
+            }
+        };
+        self.commit_input(staged_input)?;
+        // Exclusion audit/input persistence is now entirely before a waiting pause
+        // writer, or entirely after it. Do not carry the lock into the next tick.
+        drop(pause_commit_guard);
+        drop(master_commit_guard);
+        Ok(tick)
+    }
+
     fn tick_inner(
         &mut self,
         ts: Millis,
@@ -1548,77 +1652,8 @@ impl<B: Backend> Recorder<B> {
         }
         self.close_system_input_gap(ts);
 
-        if let Some(reason) = exclusion.reason() {
-            // 這三步是 privacy gate 本身，必須排在任何可能失敗的稽核寫入前。
-            // 第一次進排除時若 DB 剛好寫不進去，仍然不准跨過這段盲區拼舊 OCR，
-            // 更不准把這裡複製的剪貼簿留給下一個未排除 tick 去讀。
-            self.deduper.reset();
-            self.last_frame_id = None;
-            self.last_assistive.clear();
-            self.backend.reset_ocr();
-            let _ = self.establish_clipboard_watermark(ts);
-            self.exclusion_clipboard_gap = true;
-
-            // 排除期間仍保留不含內容的節奏，但先只 drain 到 RAM。系統可能
-            // 正好在 atomic drain 時鎖定；下一道 post-check 不通過就整份丟掉。
-            let staged_input =
-                if !self.pause_input_gap && !self.master_input_gap && !self.system_input_gap {
-                    self.stage_input(ts)?
-                } else {
-                    None
-                };
-            if let Some(tick) = self.master_postcheck(ts, &master_activity)? {
-                return Ok(tick);
-            }
-            if let Some(boundary) = pause_boundary_tick(self.observe_pause_request(pause_probe)?) {
-                return Ok(boundary);
-            }
-            match self.observe_system(ts)? {
-                SystemGate::Stable => {}
-                SystemGate::Transitioned | SystemGate::PendingCommitted => {
-                    return Ok(Tick::SystemChanged);
-                }
-                SystemGate::Blocked => {
-                    self.stats.no_screen += 1;
-                    return Ok(Tick::NoScreen);
-                }
-                SystemGate::Unknown => return Ok(Tick::SystemUnknown),
-            }
-            let pause_commit_guard = match self.observe_pause_request(pause_probe)? {
-                PauseCheck::Continue(guard) => guard,
-                PauseCheck::Paused => return Ok(Tick::Paused),
-                PauseCheck::Resumed => return Ok(Tick::Resumed),
-            };
-            let master_commit_guard = match self.master_commit_boundary(ts, &master_activity)? {
-                MasterBoundaryCheck::Continue(guard) => guard,
-                MasterBoundaryCheck::Stopped => return Ok(Tick::MasterStopped),
-            };
-
-            self.stats.excluded += 1;
-            *self
-                .stats
-                .excluded_reasons
-                .entry(reason.to_string())
-                .or_default() += 1;
-            if self.last_exclusion.as_deref() != Some(reason) {
-                self.db.insert_system(
-                    self.session_id,
-                    &SystemEvent {
-                        ts,
-                        kind: SystemKind::Excluded,
-                        detail: Some(reason.to_string()),
-                    },
-                )?;
-                self.last_exclusion = Some(reason.to_string());
-            }
-            self.commit_input(staged_input)?;
-            // Exclusion audit/input persistence is now entirely before a waiting pause
-            // writer, or entirely after it. Do not carry the lock into the next tick.
-            drop(pause_commit_guard);
-            drop(master_commit_guard);
-            return Ok(Tick::Excluded {
-                reason: reason.to_string(),
-            });
+        if exclusion.is_blocked() {
+            return self.hold_blocked_tick(ts, pause_probe, &master_activity, &exclusion);
         }
         if self.exclusion_clipboard_gap {
             // 排除 tick 最後一次 skip 後，使用者仍可能再複製一次才切回普通視窗。
@@ -2328,19 +2363,29 @@ impl<B: Backend> Recorder<B> {
             return Ok(ClipboardStage::Ready(None));
         };
 
-        if let Some(reason) = self
+        match self
             .config
             .privacy
             .check_clipboard_source(event.source_app.as_deref())
-            .reason()
         {
-            if event.source_app.is_none() {
-                self.stats.clipboard_source_unknown += 1;
-            } else {
-                self.stats.clipboard_source_excluded += 1;
+            Exclusion::OwnWindow => {
+                self.stats.clipboard_source_own_window += 1;
+                tracing::debug!(
+                    reason = sister_core::config::OWN_WINDOW_REASON,
+                    "discard clipboard copied from her own window"
+                );
+                return Ok(ClipboardStage::Ready(None));
             }
-            tracing::debug!(reason, "discard clipboard event at source privacy gate");
-            return Ok(ClipboardStage::Ready(None));
+            Exclusion::Blocked(reason) => {
+                if event.source_app.is_none() {
+                    self.stats.clipboard_source_unknown += 1;
+                } else {
+                    self.stats.clipboard_source_excluded += 1;
+                }
+                tracing::debug!(reason, "discard clipboard event at source privacy gate");
+                return Ok(ClipboardStage::Ready(None));
+            }
+            Exclusion::Allowed => {}
         }
         Ok(ClipboardStage::Ready(Some(event)))
     }
@@ -7614,5 +7659,273 @@ mod tests {
         assert!(frames >= 3, "distinct screens must all be kept");
         assert_eq!(stats.excluded, 2, "the vault is excluded at 6s and 7s");
         assert!(outcomes.iter().any(|t| matches!(t, Tick::Duplicate { .. })));
+    }
+
+    fn is_own_app_key(app: &str) -> bool {
+        let key = app.to_ascii_lowercase();
+        sister_core::config::OWN_APP_KEYS.contains(&key.as_str())
+    }
+
+    fn app_at(steps: &[Step], ts: Millis) -> Option<&str> {
+        steps
+            .iter()
+            .rev()
+            .find(|step| step.at_ms <= ts)
+            .and_then(|step| step.app.as_deref())
+    }
+
+    /// 來源閘門只在「這一拍放行，而且排除剪貼簿空洞已經關上」時看得到事件。
+    /// 她在前景時那一拍走 watermark skip，不讀來源，所以不算進這個數字。
+    fn clipboard_source_gate_own_drops(steps: &[Step], ticks: &[Millis]) -> u64 {
+        let mut step_index = 0usize;
+        let mut current_app: Option<&str> = None;
+        let mut pending_source: Option<&str> = None;
+        let mut gap = false;
+        let mut drops = 0u64;
+        for ts in ticks {
+            while step_index < steps.len() && steps[step_index].at_ms <= *ts {
+                let step = &steps[step_index];
+                if step.clipboard.is_some() {
+                    pending_source = step.clipboard_source_app.as_deref();
+                }
+                if step.app.is_some() {
+                    current_app = step.app.as_deref();
+                }
+                step_index += 1;
+            }
+            if current_app.is_some_and(is_own_app_key) {
+                pending_source = None;
+                gap = true;
+                continue;
+            }
+            if gap {
+                pending_source = None;
+                gap = false;
+            }
+            if pending_source.take().is_some_and(is_own_app_key) {
+                drops += 1;
+            }
+        }
+        drops
+    }
+
+    fn text_hits(recorder: &Recorder<impl Backend>, needle: &str) -> Vec<String> {
+        let conn = recorder.db().conn();
+        let mut hits = Vec::new();
+        for (table, column) in [
+            ("text_chunks", "text"),
+            ("ocr_blocks", "text"),
+            ("assistive_blocks", "text"),
+            ("facts", "raw"),
+            ("facts", "normalized"),
+            ("clipboard_events", "text"),
+            ("frames", "window_title"),
+            ("frames", "app_id"),
+            ("focus_events", "window_title"),
+            ("focus_events", "app_id"),
+            ("system_events", "detail"),
+        ] {
+            let sql = format!(
+                "SELECT COUNT(*) FROM {table} WHERE IFNULL({column}, '') LIKE '%' || ?1 || '%'"
+            );
+            let count: i64 = conn
+                .query_row(&sql, [needle], |row| row.get(0))
+                .unwrap_or_else(|error| panic!("count {table}.{column}: {error}"));
+            if count > 0 {
+                hits.push(format!("{table}.{column}={count}"));
+            }
+        }
+        hits
+    }
+
+    /// 她在前景的那幾拍不留畫面、文字、事實，也不寫 excluded 稽核。
+    /// 離開之後的一般 app 照錄。前景當下的剪貼簿被水位丟掉；之後在一般
+    /// app 裡看到、來源是她的那一筆才走來源閘門，算在 own window 而不是排除。
+    #[test]
+    fn her_foreground_window_is_not_recorded_and_is_not_an_exclusion() {
+        let phone = "0800-000-123";
+        let before = "一般工作的一行字";
+        let after = "她的視窗之後的一般工作";
+        let her = "sister-desktop.exe";
+        let her_keystrokes = 9;
+        let steps = vec![
+            step(0, "code.exe", "notes", &[before]),
+            Step {
+                at_ms: 1_000,
+                app: Some(her.into()),
+                title: Some("問她".into()),
+                text: vec![phone.into()],
+                clipboard: Some(phone.into()),
+                clipboard_source_app: Some(her.into()),
+                keystrokes: her_keystrokes,
+                ..Default::default()
+            },
+            step(3_000, "code.exe", "notes", &[after]),
+            Step {
+                at_ms: 4_000,
+                app: Some("code.exe".into()),
+                title: Some("notes".into()),
+                text: vec![after.into()],
+                clipboard: Some(phone.into()),
+                clipboard_source_app: Some(her.into()),
+                ..Default::default()
+            },
+        ];
+        let ticks: Vec<Millis> = (0..=4).map(|i| i * 1_000).collect();
+        let own_at_tick: Vec<bool> = ticks
+            .iter()
+            .map(|ts| app_at(&steps, *ts).is_some_and(is_own_app_key))
+            .collect();
+        let own_expected = own_at_tick.iter().filter(|own| **own).count() as u64;
+        assert!(own_expected > 0, "腳本沒有排到她的視窗");
+        let drops_expected = clipboard_source_gate_own_drops(&steps, &ticks);
+        assert!(
+            drops_expected > 0,
+            "腳本沒有一筆會走到剪貼簿來源閘門的她的複製"
+        );
+        let scripted_keystrokes: i64 = steps
+            .iter()
+            .filter(|step| step.app.as_deref().is_some_and(is_own_app_key))
+            .map(|step| step.keystrokes)
+            .sum();
+        assert!(scripted_keystrokes > 0, "夾具沒有在她的視窗送出輸入");
+
+        let mut config = Config::default();
+        config.privacy.excluded_apps.clear();
+        config.privacy.excluded_titles.clear();
+        config.privacy.excluded_urls.clear();
+        let mut recorder = recorder(steps, config);
+        for (ts, own) in ticks.iter().zip(own_at_tick) {
+            let tick = recorder.tick(*ts).expect("tick");
+            if own {
+                assert!(
+                    matches!(tick, Tick::OwnWindow),
+                    "ts={ts} 她在前景卻回了 {tick:?}"
+                );
+            }
+        }
+
+        assert_eq!(recorder.stats().own_window, own_expected);
+        assert_eq!(recorder.stats().excluded, 0);
+        assert!(
+            recorder.stats().excluded_reasons.is_empty(),
+            "{:?}",
+            recorder.stats().excluded_reasons
+        );
+        assert_eq!(recorder.stats().clipboard_source_own_window, drops_expected);
+        assert_eq!(recorder.stats().clipboard_source_excluded, 0);
+        assert_eq!(recorder.stats().clipboard_events, 0);
+        assert_eq!(stored_keystrokes(&recorder), Some(scripted_keystrokes));
+
+        let hits = text_hits(&recorder, phone);
+        assert!(hits.is_empty(), "{phone} 漏進資料庫：{hits:?}");
+        let kept_after = text_hits(&recorder, after);
+        assert!(
+            kept_after.iter().any(|hit| hit.starts_with("text_chunks")),
+            "離開她的視窗之後的那一拍沒有錄到：{kept_after:?}"
+        );
+        let excluded_rows: i64 = recorder
+            .db()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM system_events WHERE kind='excluded'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count excluded audits");
+        assert_eq!(excluded_rows, 0);
+        let her_frames: i64 = recorder
+            .db()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM frames WHERE lower(IFNULL(app_id, '')) = ?1",
+                [her],
+                |row| row.get(0),
+            )
+            .expect("count her frames");
+        assert_eq!(her_frames, 0, "她自己的視窗不該留下 frame");
+    }
+
+    #[test]
+    fn her_window_does_not_swallow_the_following_exclusion_audit() {
+        let secret = "vault-secret-not-hers";
+        let after = "排除規則之後的一般工作";
+        let steps = vec![
+            step(0, "sister-desktop.exe", "問她", &["只是在跟她說話"]),
+            step(1_000, "keepassxc.exe", "Vault", &[secret]),
+            step(2_000, "code.exe", "notes", &[after]),
+        ];
+        let ticks = [0, 1_000, 1_500, 2_000];
+        let own_expected = ticks
+            .iter()
+            .filter(|ts| app_at(&steps, **ts).is_some_and(is_own_app_key))
+            .count() as u64;
+        assert!(own_expected > 0);
+        let mut recorder = recorder(steps, Config::default());
+        for ts in ticks {
+            recorder.tick(ts).expect("tick");
+        }
+
+        assert_eq!(recorder.stats().own_window, own_expected);
+        assert!(recorder.stats().excluded > 0, "KeePassXC 那幾拍要算排除");
+        let excluded_rows: Vec<String> = {
+            let conn = recorder.db().conn();
+            let mut statement = conn
+                .prepare(
+                    "SELECT IFNULL(detail, '') FROM system_events WHERE kind='excluded' ORDER BY id",
+                )
+                .expect("prepare");
+            let rows = statement.query_map([], |row| row.get(0)).expect("query");
+            rows.map(|row| row.expect("detail")).collect()
+        };
+        assert_eq!(
+            excluded_rows.len(),
+            1,
+            "她的視窗清掉 debounce 之後，KeePassXC 仍要寫出自己的一列：{excluded_rows:?}"
+        );
+        assert!(
+            excluded_rows[0].contains("keepassxc"),
+            "稽核要寫得出是 KeePassXC：{}",
+            excluded_rows[0]
+        );
+        assert!(
+            !excluded_rows.iter().any(|detail| detail == "own window"),
+            "她的視窗不寫 excluded 稽核：{excluded_rows:?}"
+        );
+        let hits = text_hits(&recorder, secret);
+        assert!(hits.is_empty(), "{secret} 漏進資料庫：{hits:?}");
+        let kept_after = text_hits(&recorder, after);
+        assert!(
+            kept_after.iter().any(|hit| hit.starts_with("text_chunks")),
+            "排除之後的一般 app 沒有錄到：{kept_after:?}"
+        );
+    }
+
+    /// 一般放行會把 `last_exclusion` 清掉，所以同一條規則中間夾一段別的東西
+    /// 要再寫一列。她的視窗要做一樣的事，不能把前一段的理由留著。
+    #[test]
+    fn her_window_resets_exclusion_debounce_like_an_allowed_tick() {
+        let steps = vec![
+            step(0, "keepassxc.exe", "Vault", &["first secret"]),
+            step(1_000, "sister-desktop.exe", "問她", &["中間只看她"]),
+            step(2_000, "keepassxc.exe", "Vault", &["second secret"]),
+        ];
+        let mut recorder = recorder(steps, Config::default());
+        for ts in [0, 1_000, 2_000] {
+            recorder.tick(ts).expect("tick");
+        }
+        let excluded_rows: i64 = recorder
+            .db()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM system_events WHERE kind='excluded'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count exclusion segments");
+        assert_eq!(
+            excluded_rows, 2,
+            "夾著她的視窗的兩段 KeePassXC 各自要有一列稽核"
+        );
     }
 }

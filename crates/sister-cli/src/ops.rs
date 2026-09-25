@@ -1021,21 +1021,37 @@ fn report_idle(stats: &sister_capture::RecorderStats) {
     }
 }
 
-fn report_exclusions(stats: &sister_capture::RecorderStats) {
-    if stats.excluded_reasons.is_empty() {
-        return;
+fn exclusion_lines(stats: &sister_capture::RecorderStats) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !stats.excluded_reasons.is_empty() {
+        // 擋最多的排前面：真正在吃掉一天的那條規則要第一個被看見
+        let mut by_count: Vec<_> = stats.excluded_reasons.iter().collect();
+        by_count.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (reason, n) in by_count {
+            lines.push(format!("        排除 {n} 次：{reason}"));
+        }
     }
-    // 擋最多的排前面：真正在吃掉一天的那條規則要第一個被看見
-    let mut by_count: Vec<_> = stats.excluded_reasons.iter().collect();
-    by_count.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-    for (reason, n) in by_count {
-        println!("        排除 {n} 次：{reason}");
+    if stats.own_window > 0 {
+        lines.push(format!(
+            "  她自己的視窗在前景 {} 拍，那幾拍沒有錄。",
+            stats.own_window
+        ));
     }
-    if stats.kept == 0 && stats.excluded > 0 {
-        println!(
+    // 這句只在真的有排除規則擋掉畫面時出現。只跟她說話的那一場
+    // excluded 是 0，改 config 也改不到。
+    if stats.kept == 0 && stats.excluded > 0 && !stats.excluded_reasons.is_empty() {
+        lines.push(
             "  ⚠  這一整段沒有留下任何畫面，全部被上面的規則擋掉了。\
              如果那不是你要的，改 config 的 privacy 那一段。"
+                .to_string(),
         );
+    }
+    lines
+}
+
+fn report_exclusions(stats: &sister_capture::RecorderStats) {
+    for line in exclusion_lines(stats) {
+        println!("{line}");
     }
 }
 
@@ -1072,6 +1088,12 @@ fn safety_gap_lines(stats: &sister_capture::RecorderStats) -> Vec<String> {
         lines.push(format!(
             "  剪貼簿丟棄 {} 筆：來源命中隱私規則，或瀏覽器來源網址無法證明。",
             stats.clipboard_source_excluded
+        ));
+    }
+    if stats.clipboard_source_own_window > 0 {
+        lines.push(format!(
+            "  剪貼簿丟棄 {} 筆：從她自己的視窗複製的。",
+            stats.clipboard_source_own_window
         ));
     }
     lines
@@ -1159,6 +1181,53 @@ mod summary_tests {
         ] {
             assert!(text.contains(fact), "摘要漏了 {fact:?}：{text}");
         }
+    }
+
+    #[test]
+    fn talking_only_to_her_is_not_reported_as_an_exclusion_rule() {
+        let own = sister_capture::RecorderStats {
+            kept: 0,
+            excluded: 0,
+            own_window: 3,
+            ..Default::default()
+        };
+        let text = exclusion_lines(&own).join("\n");
+        assert!(
+            text.contains("她自己的視窗在前景 3 拍，那幾拍沒有錄。"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("全部被上面的規則擋掉了"),
+            "只跟她說話不是規則擋的：{text}"
+        );
+
+        let mut ruled = sister_capture::RecorderStats {
+            kept: 0,
+            excluded: 3,
+            ..Default::default()
+        };
+        ruled
+            .excluded_reasons
+            .insert("excluded app: keepassxc".into(), 3);
+        let ruled_text = exclusion_lines(&ruled).join("\n");
+        assert!(
+            ruled_text.contains("全部被上面的規則擋掉了"),
+            "真的被規則擋光時那句話要還在：{ruled_text}"
+        );
+    }
+
+    #[test]
+    fn clipboard_from_her_window_is_not_counted_as_an_exclusion_rule() {
+        let stats = sister_capture::RecorderStats {
+            clipboard_source_own_window: 2,
+            ..Default::default()
+        };
+        let text = safety_gap_lines(&stats).join("\n");
+        assert!(
+            text.contains("剪貼簿丟棄 2 筆：從她自己的視窗複製的。"),
+            "{text}"
+        );
+        assert!(!text.contains("隱私規則"), "{text}");
     }
 }
 
@@ -24731,6 +24800,9 @@ pub mod replay {
                     );
                 }
                 Tick::Excluded { reason } => println!("  {offset:>7} ms  排除：{reason}"),
+                Tick::OwnWindow => {
+                    println!("  {offset:>7} ms  她自己的視窗在前景，這一拍沒有錄")
+                }
                 Tick::NoScreen => println!("  {offset:>7} ms  沒有畫面"),
                 Tick::SystemUnknown => {
                     println!("  {offset:>7} ms  系統狀態不明（未讀任何內容）")
@@ -26095,7 +26167,8 @@ pub mod record {
                 *was_idle = false;
                 true
             }
-            Duplicate { .. } | Excluded { .. } => {
+            // 她的視窗跟排除一樣：沒有新畫面。剛離開閒置才代表上一段可能關上。
+            Duplicate { .. } | Excluded { .. } | OwnWindow => {
                 let left_idle = *was_idle;
                 *was_idle = false;
                 left_idle
@@ -28504,6 +28577,15 @@ pub mod record {
             assert!(!should_ping_brain(&Tick::Resumed, &mut idle));
             assert!(!should_ping_brain(&Tick::Disabled, &mut idle));
             assert!(!should_ping_brain(&Tick::MasterStopped, &mut idle));
+        }
+
+        #[test]
+        fn her_window_pings_the_brain_only_when_leaving_idle() {
+            use sister_capture::Tick;
+            let mut idle = true;
+            assert!(should_ping_brain(&Tick::OwnWindow, &mut idle));
+            assert!(!idle);
+            assert!(!should_ping_brain(&Tick::OwnWindow, &mut idle));
         }
 
         fn replay_live_recorder() -> Recorder<ReplayBackend> {

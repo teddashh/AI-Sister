@@ -152,6 +152,9 @@ fn run_minefield(name: &str) -> Run {
     // 每秒一格跑完整段腳本
     for ts in (0..=22_000).step_by(1_000) {
         match rec.tick(ts) {
+            Ok(Tick::OwnWindow) => {
+                panic!("minefield 沒有她的視窗，不該出現 OwnWindow")
+            }
             Ok(Tick::Kept { .. }) | Ok(_) => {}
             Err(e) => panic!("tick {ts} failed: {e:#}"),
         }

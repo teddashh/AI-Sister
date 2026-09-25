@@ -961,6 +961,20 @@ pub fn app_is_browser(app_key: &str) -> bool {
     })
 }
 
+/// 她自己的桌面程式在三個平台上的 `app_key()`。整串相等才算。
+pub const OWN_APP_KEYS: [&str; 3] = [
+    "sister-desktop.exe",
+    "sister-desktop",
+    "com.ted-h.ai-sister",
+];
+
+/// `Exclusion::OwnWindow` 的 `reason()`。
+pub const OWN_WINDOW_REASON: &str = "own window";
+
+fn is_own_app_key(app_key: &str) -> bool {
+    OWN_APP_KEYS.contains(&app_key)
+}
+
 /// 排除判定結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Exclusion {
@@ -968,16 +982,22 @@ pub enum Exclusion {
     Allowed,
     /// 不可擷取，附上人類看得懂的理由（會寫進 system_events 供稽核）。
     Blocked(String),
+    /// 她自己的視窗在前景。不擷取，但這不是設定檔裡的規則。
+    OwnWindow,
 }
 
 impl Exclusion {
     pub fn is_blocked(&self) -> bool {
-        matches!(self, Exclusion::Blocked(_))
+        match self {
+            Exclusion::Blocked(_) | Exclusion::OwnWindow => true,
+            Exclusion::Allowed => false,
+        }
     }
 
     pub fn reason(&self) -> Option<&str> {
         match self {
             Exclusion::Blocked(r) => Some(r),
+            Exclusion::OwnWindow => Some(OWN_WINDOW_REASON),
             Exclusion::Allowed => None,
         }
     }
@@ -996,6 +1016,9 @@ impl PrivacyConfig {
             return Exclusion::Blocked("clipboard source app unknown".to_string());
         };
         let app = source_app.to_ascii_lowercase();
+        if is_own_app_key(&app) {
+            return Exclusion::OwnWindow;
+        }
         if self.pause_on_screenshare
             && SCREENSHARE_APPS
                 .iter()
@@ -1022,8 +1045,8 @@ impl PrivacyConfig {
 
     /// 依前景脈絡判斷這一刻能不能擷取。
     ///
-    /// 這個函式是 capture 迴圈裡最先被呼叫的東西——它回 `Blocked` 時，
-    /// 連截圖都不會發生。
+    /// 這個函式是 capture 迴圈裡最先被呼叫的東西——它回 `Blocked` 或
+    /// `OwnWindow` 時，連截圖都不會發生。
     pub fn check(&self, context: &crate::model::PrivacyContext) -> Exclusion {
         use crate::model::{BrowserUrlState, PrivacyContext, SensitiveFieldState};
 
@@ -1039,8 +1062,14 @@ impl PrivacyConfig {
             }
         };
 
-        // 這個三態是 capture-time 的最前面一道門。「問不出來」和
-        // 「確定沒有」的後果不對稱：前者若被當成 clear，被寫下的
+        // 她自己的視窗排在敏感欄前面：答案裡的電話不該再被記成一次新的
+        // 「看到」。這條不進設定檔，`excluded_apps` 清空也擋。
+        let app = focus.app_key();
+        if is_own_app_key(&app) {
+            return Exclusion::OwnWindow;
+        }
+
+        // 「問不出來」和「確定沒有」的後果不對稱：前者若被當成 clear，被寫下的
         // 秘密不會有任何症狀。因此 Unknown 要有自己的穩定稽核理由。
         match sensitive_field {
             SensitiveFieldState::Focused => {
@@ -1051,8 +1080,6 @@ impl PrivacyConfig {
             }
             SensitiveFieldState::Clear => {}
         }
-
-        let app = focus.app_key();
 
         // 只有真的量到位址列，才能聲稱 URL 排除規則已比對。
         // `NotApplicable` 不能只靠 backend 自律：即將加入的 Linux/macOS
@@ -3010,5 +3037,108 @@ mod tests {
             assert!(v.is_blocked(), "{app} must pause capture");
             assert!(v.reason().unwrap_or_default().contains("screenshare"));
         }
+    }
+
+    fn rules_off() -> PrivacyConfig {
+        PrivacyConfig {
+            excluded_apps: Vec::new(),
+            excluded_titles: Vec::new(),
+            excluded_urls: Vec::new(),
+            ..PrivacyConfig::default()
+        }
+    }
+
+    /// 三個平台的身分都擋，而且空的排除清單關不掉。
+    #[test]
+    fn her_own_window_is_blocked_with_no_exclusion_rules() {
+        let privacy = rules_off();
+        assert!(
+            privacy.excluded_apps.is_empty()
+                && privacy.excluded_titles.is_empty()
+                && privacy.excluded_urls.is_empty()
+        );
+        for key in OWN_APP_KEYS {
+            assert_eq!(
+                privacy.check(&app(key)),
+                Exclusion::OwnWindow,
+                "{key} 應該是她自己的視窗"
+            );
+        }
+    }
+
+    #[test]
+    fn her_window_match_uses_the_lowercased_app_key() {
+        let privacy = rules_off();
+        assert_eq!(
+            privacy.check(&app("Sister-Desktop.EXE")),
+            Exclusion::OwnWindow
+        );
+    }
+
+    #[test]
+    fn names_that_only_look_like_hers_stay_allowed() {
+        let privacy = rules_off();
+        for id in [
+            "sister.exe",
+            "my-sister-desktop.exe",
+            "sister-desktop-helper.exe",
+            "ai-sister",
+            "com.ted-h.ai-sister.helper",
+        ] {
+            assert_eq!(privacy.check(&app(id)), Exclusion::Allowed, "{id} 不是她");
+        }
+    }
+
+    /// 她的判定在敏感欄之前。焦點在密碼欄上仍回 OwnWindow，不改寫成
+    /// sensitive field 那條稽核理由。
+    #[test]
+    fn her_window_wins_over_a_focused_sensitive_field() {
+        let context = PrivacyContext::known(
+            FocusSnapshot {
+                app_id: Some("sister-desktop.exe".into()),
+                ..Default::default()
+            },
+            SensitiveFieldState::Focused,
+            BrowserUrlState::NotApplicable,
+        );
+        assert_eq!(rules_off().check(&context), Exclusion::OwnWindow);
+    }
+
+    #[test]
+    fn unknown_privacy_context_stays_blocked_when_her_window_exists() {
+        assert_eq!(
+            rules_off().check(&PrivacyContext::Unknown),
+            Exclusion::Blocked("privacy context unavailable".to_string())
+        );
+    }
+
+    #[test]
+    fn own_window_is_blocked_and_names_its_reason() {
+        assert!(Exclusion::OwnWindow.is_blocked());
+        assert_eq!(Exclusion::OwnWindow.reason(), Some(OWN_WINDOW_REASON));
+    }
+
+    #[test]
+    fn clipboard_copied_from_her_window_is_own_window_not_an_exclusion_rule() {
+        let privacy = rules_off();
+        assert_eq!(
+            privacy.check_clipboard_source(Some("sister-desktop.exe")),
+            Exclusion::OwnWindow
+        );
+        assert_eq!(
+            privacy.check_clipboard_source(Some("  SISTER-DESKTOP  ")),
+            Exclusion::OwnWindow
+        );
+        // 子字串規則會命中她的檔名；整串相等仍然先回 OwnWindow。
+        let mut substring = privacy;
+        substring.excluded_apps = vec!["sister".into()];
+        assert_eq!(
+            substring.check_clipboard_source(Some("sister-desktop.exe")),
+            Exclusion::OwnWindow
+        );
+        assert_eq!(
+            substring.check(&app("sister-desktop.exe")),
+            Exclusion::OwnWindow
+        );
     }
 }
