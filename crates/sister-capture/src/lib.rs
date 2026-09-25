@@ -16,6 +16,7 @@ pub mod frames;
 pub mod ocr_languages;
 pub mod ocr_layout;
 pub mod ocr_regions;
+pub mod own_windows;
 #[cfg(any(windows, test))]
 mod page_crop;
 pub mod recorder;
