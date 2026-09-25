@@ -18,9 +18,10 @@ use crate::question::{self, Shape};
 pub enum SearchAdjustment {
     Glued(String),
     Relaxed(String),
-    /// 放寬過、他問的是「什麼時候」（[`crate::facts::WHEN_ASKS`]），而且放寬之後
-    /// 底下有東西。改找的字裡已經沒有那幾個字了，底下的時間只剩她記下每一筆的
-    /// 時刻，所以要講明。放寬之後還是空手的話用 [`Self::Relaxed`]。
+    /// 放寬過、他問的是「什麼時候」（[`crate::facts::WHEN_ASKS`]，或尾巴的「時間」，
+    /// 見 [`TAIL_ASKS`]），而且放寬之後底下有東西。改找的字裡已經沒有那幾個字了，
+    /// 底下的時間只剩她記下每一筆的時刻，所以要講明。放寬之後還是空手的話用
+    /// [`Self::Relaxed`]。
     RelaxedWhen(String),
 }
 
@@ -79,6 +80,9 @@ impl SearchAdjustment {
 /// 「預算表」那幾張畫面的時間，不是要交的那一天。所以這種放寬另用
 /// [`SearchAdjustment::RelaxedWhen`]，多講一句「底下每一筆的時間，是我記下那一筆的
 /// 時候」，不沿用籠統的那一句。`when_questions.rs` 釘著這個代價。
+///
+/// 同一種問法換成名詞放在尾巴（「部署失敗的時間」「部署失敗的原因」），alpha.163
+/// 起剝完問句詞再剝，見 [`TAIL_ASKS`]。「時間」照上一段講明底下的時間是記下的時候。
 ///
 /// 刻意不收：單獨的「幾」（「幾號」分不出日期和號碼，還有「幾乎」；「幾點」在
 /// [`crate::facts::WHEN_ASKS`]）、嗎／呢／吧（[`question::terms`] 已經剝頭尾虛字）。
@@ -176,31 +180,44 @@ struct RelaxPlan {
     indexed: Option<String>,
     /// [`joint_retry`]：`indexed` 沒有或空手才找。
     joint: Option<String>,
+    /// 他問的是時間：問句裡有 [`crate::facts::WHEN_ASKS`]，或剝字時拿掉了尾巴的
+    /// 「時間」（[`TAIL_ASKS`]）。兩種字都不會留在候選字裡。
+    asks_when: AsksWhen,
 }
+
+/// 他是不是在問「什麼時候」。放寬之後找得到時，決定要不要多講「底下每一筆的
+/// 時間，是我記下那一筆的時候」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AsksWhen(bool);
 
 /// 產品路徑和測試都從這裡拿放寬的候選字。`None` 就是這一題不放寬。
 fn relax_plan(db: &Db, query: &str) -> Result<Option<RelaxPlan>> {
     let Some(peeled) = relax_base(db, query)? else {
         return Ok(None);
     };
-    let indexed = retry_candidate(db, query, peeled)?;
+    let indexed = retry_candidate(db, query, peeled.text)?;
     // 第一次查詢拿去比對的就是這一串（`question::terms_with_retreat` 的第一格）。
     let original = question::terms(query);
-    let joint = joint_retry(peeled, &[Some(original), indexed.as_deref()]);
-    Ok(Some(RelaxPlan { indexed, joint }))
+    let joint = joint_retry(peeled.text, &[Some(original), indexed.as_deref()]);
+    let asks_when = AsksWhen(crate::facts::asks_when(query) || peeled.tail_when.0);
+    Ok(Some(RelaxPlan {
+        indexed,
+        joint,
+        asks_when,
+    }))
 }
 
 /// 兩步放寬共用的前提：剝完的字，和類型詞保護。`None` 就是這一題不放寬，
 /// [`retry_candidate`] 和 [`joint_retry`] 都不跑。
-fn relax_base<'q>(db: &Db, query: &'q str) -> Result<Option<&'q str>> {
+fn relax_base<'q>(db: &Db, query: &'q str) -> Result<Option<Peeled<'q>>> {
     // 傳原句，不傳 `question::terms(query)`。「到」「那」是虛字，先跑 terms 會把
     // 「到底」「那麼」吃成「底」「麼」，口語開頭整段對不到。剝完再和它比。
-    let peeled = peel_retry_terms(query);
-    if peeled.is_empty() {
+    let peeled = peel_retry(query);
+    if peeled.text.is_empty() {
         return Ok(None);
     }
     if !crate::facts::kinds_for_query(query).is_empty()
-        && let Some(topic) = crate::facts::topic_constraint(peeled)
+        && let Some(topic) = crate::facts::topic_constraint(peeled.text)
         && db.indexed_candidate(&topic)? == IndexedCandidate::NoneSeen
     {
         return Ok(None);
@@ -246,10 +263,12 @@ const JOINT_INSIDE_WORDS: &[&str] = &["目的", "了解"];
 ///   `月報的連結`、`月報的連結在哪`（「月報 連結」）、`where is the release candidate`
 ///   和 `when is the release candidate`（「is release candidate」，後者多講記下的時間）。
 ///   `誰改了月報連結`、`為了部署失敗`、`部署失敗的話怎麼辦` 以前只有 58 萬字那份空手。
-/// - 還是空手：58 萬字那份上的 `部署失敗的原因`、`上次看到的月報連結`（「原因」
-///   「上次看到」看過，是必要條件）；三份都空手的 `部署失敗的時間`、`部署失敗的期限`
-///   （類型詞）、`退款的電話`、`上次看到的連結`。英文 is 仍是條件，`when is
-///   ERR_DEPLOY_42` 空手（`when_questions.rs`）。
+/// - 還是空手：三份都空手的 `部署失敗的期限`（類型詞）、`退款的電話`、
+///   `上次看到的連結`（剝完只剩類型詞，[`candidate_refused`]）。英文 is 仍是條件，
+///   `when is ERR_DEPLOY_42` 空手（`when_questions.rs`）。這一輪還列著 58 萬字那份上的
+///   `部署失敗的原因`、`上次看到的月報連結`（「原因」「上次看到」看過，是必要條件），
+///   和三份都空手的 `部署失敗的時間`（類型詞）；alpha.163 起這三題在剝字時就把
+///   「原因」「上次」「時間」拿掉（[`TAIL_ASKS`]、[`SPOKEN_LEAD_INS`]），三份都找到。
 ///
 /// 代價：`部署失敗的目的` 改用「部署失敗」。[`question::terms`] 先把句尾的「的」
 /// 當虛字剝掉，剩「部署失敗的目」，「目」只剩一個字；另外兩份以前就是這樣答
@@ -375,6 +394,11 @@ const SPOKEN_LEAD_INS: &[&str] = &[
     "還記得",
     "还记得",
     "知道",
+    // 「上次看到的月報連結」：「上次」在用過的索引裡看過，照原樣是必要條件，畫面上
+    // 寫的卻是「月報連結已更新」。後面的「看到的」本來就是虛字。
+    "上次",
+    "上一次",
+    "之前",
     "so",
     "but",
     "and",
@@ -428,8 +452,17 @@ fn ascii_lead_in_end(trimmed: &str, lower: &str, orig_at: &[usize], word: &str) 
     }
 }
 
-/// 口語開頭、頭尾問句用語、問句詞、再一次 [`question::terms`]。空字串表示沒有東西可找。
-fn peel_retry_terms(terms: &str) -> &str {
+/// [`peel_retry`] 剝完的字。
+struct Peeled<'q> {
+    /// 空字串表示沒有東西可找。
+    text: &'q str,
+    /// 剝的時候拿掉了尾巴的「時間」（[`TAIL_ASKS`]）。
+    tail_when: AsksWhen,
+}
+
+/// 口語開頭、頭尾問句用語、問句詞、尾巴的問法名詞（[`TAIL_ASKS`]），再一次
+/// [`question::terms`]。
+fn peel_retry(terms: &str) -> Peeled<'_> {
     let mut current = terms;
     // 口語開頭至少一個字，拿掉之後一定比這一圈開始時短；長度有下界，所以迴圈一定結束。
     // 沒有變短就停，避免空詞在原地打轉。
@@ -456,10 +489,54 @@ fn peel_retry_terms(terms: &str) -> &str {
         current = rest;
     }
     let cut = cut_question_words(current);
-    if question::only_filler(cut) {
+    let (cut, tail_when) = cut_tail_asks(cut);
+    let text = if question::only_filler(cut) {
         ""
     } else {
         question::terms(cut)
+    };
+    Peeled { text, tail_when }
+}
+
+#[cfg(test)]
+fn peel_retry_terms(terms: &str) -> &str {
+    peel_retry(terms).text
+}
+
+/// 問句尾巴的名詞說法：「部署失敗的時間」就是「部署失敗什麼時候」，「部署失敗的
+/// 原因」就是「為什麼部署失敗」。放寬時和問句詞（[`QUESTION_WORDS`]、
+/// [`crate::facts::WHEN_ASKS`]）一樣切掉。只認尾巴，前面也要還有內容：「時間軸」
+/// 「時間表」「原因分析」不是在問時間或原因，照舊不切；只剩「時間」也不切。
+///
+/// alpha.162 以前這兩個詞留在候選字裡，是必要條件。「時間」是類型詞，索引那一步碰到
+/// 就停，所以「部署失敗的時間」在三份背景上都空手；「原因」在用過的索引裡看過，
+/// 「部署失敗的原因」只有沒背景時找得到（那時「原因」沒看過，被當成尾巴拿掉）。
+/// 「部署失敗是什麼時候」「為什麼部署失敗」三份都找得到：同一件事換一個問法就答不出來。
+///
+/// 「時間」照「什麼時候」講明底下的時間是記下的時候（[`AsksWhen`]）。理由和代價
+/// 同 [`crate::facts::WHEN_ASKS`]：錄影機對「什麼時候」本來就有答案，就是她記下它的
+/// 那一刻；問的是還沒到的事（「開會時間」而畫面上沒寫日期），找到的是她看到「開會」
+/// 那幾張畫面的時間。「期限」「日期」不收：截圖的時間不是期限，也不是帳單上的日期。
+const TAIL_ASKS: &[(&str, AsksWhen)] = &[("時間", AsksWhen(true)), ("原因", AsksWhen(false))];
+
+/// 尾巴是 [`TAIL_ASKS`] 的名詞、前面還有內容，就拿掉那個名詞，可以連著拿
+/// （「部署失敗原因的時間」剩「部署失敗」）。回傳剩下的字，和拿掉的裡面有沒有「時間」。
+fn cut_tail_asks(text: &str) -> (&str, AsksWhen) {
+    let mut rest = text;
+    let mut when = false;
+    loop {
+        let termed = question::terms(rest);
+        let Some(&(word, AsksWhen(asks))) =
+            TAIL_ASKS.iter().find(|(word, _)| termed.ends_with(word))
+        else {
+            return (rest, AsksWhen(when));
+        };
+        let before = &termed[..termed.len() - word.len()];
+        if question::only_filler(before) {
+            return (rest, AsksWhen(when));
+        }
+        rest = before;
+        when |= asks;
     }
 }
 
@@ -637,6 +714,7 @@ impl RetrievalProfile {
                     && let Some(plan) = relax_plan(db, query)?
                 {
                     let wants_facts = self.wants_facts();
+                    let asks_when = plan.asks_when;
                     let search = |db: &Db, candidate: &str| -> Result<(Answers, Vec<SearchHit>)> {
                         let answers = if wants_facts {
                             answers_during(db, candidate, limits.answers, range.as_ref())?
@@ -668,10 +746,11 @@ impl RetrievalProfile {
                         terms = candidate;
                         answer_set = answers;
                         hits = relaxed_hits;
-                        // 候選字裡不會再有問時間的字：`cut_question_words` 碰到就切。
+                        // 候選字裡不會再有問時間的字：`cut_question_words` 碰到就切，
+                        // 尾巴的「時間」由 `cut_tail_asks` 切。
                         // 「底下每一筆的時間」只在底下有東西時講，空手就是籠統那一句。
                         let found = !answer_set.items.is_empty() || !hits.is_empty();
-                        searched = Some(if found && crate::facts::asks_when(query) {
+                        searched = Some(if found && asks_when.0 {
                             SearchAdjustment::RelaxedWhen(terms.clone())
                         } else {
                             SearchAdjustment::Relaxed(terms.clone())
@@ -1816,6 +1895,34 @@ mod tests {
     fn na_question_words_are_removed_whole() {
         assert_eq!(peel_retry_terms("哪一個客服電話"), "客服電話");
         assert_eq!(peel_retry_terms("哪裡有客服電話"), "客服電話");
+    }
+
+    /// 尾巴的「時間」「原因」前面還有內容才切，可以連著切；有沒有切掉「時間」要
+    /// 記下來。不在尾巴、或前面只剩虛字的照舊留著。
+    #[test]
+    fn a_trailing_time_or_reason_is_cut_only_after_something() {
+        for (query, text, when) in [
+            ("部署失敗的時間", "部署失敗", true),
+            ("部署失敗時間", "部署失敗", true),
+            ("部署失敗的時間是幾點", "部署失敗", true),
+            ("部署失敗的原因", "部署失敗", false),
+            ("部署失敗的原因是什麼", "部署失敗", false),
+            ("部署失敗原因的時間", "部署失敗", true),
+            ("部署失敗時間的原因", "部署失敗", true),
+            ("上次部署失敗的時間", "部署失敗", true),
+            ("時間表", "時間表", false),
+            ("原因分析", "原因分析", false),
+            ("時間", "時間", false),
+            ("的時間", "時間", false),
+            ("原因", "原因", false),
+        ] {
+            let peeled = peel_retry(query);
+            assert_eq!(
+                (peeled.text, peeled.tail_when),
+                (text, AsksWhen(when)),
+                "{query}"
+            );
+        }
     }
 
     /// 整句都是口語開頭。迴圈要結束，而且不能拿其中一個字去放寬。

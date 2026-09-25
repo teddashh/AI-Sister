@@ -247,31 +247,12 @@ fn every_piece_of_two_or_more_is_still_required() {
     }
 }
 
-/// 類型詞那一段留著：截圖的時間不是期限，放掉「電話」就失去種類。
+/// 類型詞那一段留著：截圖的時間不是期限，放掉「電話」就失去種類。尾巴的「時間」
+/// alpha.163 起照「什麼時候」答，見 `asked_another_way.rs`。
 #[test]
 fn a_type_word_piece_is_what_he_asked_for() {
-    nothing_everywhere("部署失敗的時間", "他問的是時間；畫面上沒有就是空手");
     nothing_everywhere("部署失敗的期限", "他問的是期限；畫面上沒有就是空手");
     nothing_everywhere("退款的電話", "主題沒看過，不可以拿別的電話來湊");
-}
-
-/// 登記在案的代價：看過的「原因」「上次看到」也是必要條件，用過的索引上空手。
-/// 沒有背景時是上一步把沒看過的頭尾拿掉，找得到。
-#[test]
-fn a_seen_aspect_word_is_still_required_on_a_used_index() {
-    let mut busy = fixture(true);
-    let mut plain = fixture(false);
-    for (q, base) in [
-        ("部署失敗的原因", "部署失敗"),
-        ("上次看到的月報連結", "月報連結"),
-    ] {
-        let got = ask(&mut busy, q);
-        assert!(got.empty, "有背景「{q}」");
-        assert_eq!(got.searched, None, "有背景「{q}」");
-        let got = ask(&mut plain, q);
-        assert!(!got.empty, "沒有背景「{q}」反而找得到");
-        assert_eq!(got.searched, relaxed(base), "沒有背景「{q}」");
-    }
 }
 
 /// 從剝完的字切，不從上一步的候選字切。背景看過「議的」（「他建議的做法」）而沒看過
@@ -319,8 +300,8 @@ fn a_phrase_the_previous_step_finds_is_not_split() {
 }
 
 /// `docs/WINDOWS-CHECKLIST.md` alpha.162 那一節逐題照打：記事本那四行是同一張畫面，
-/// 索引是用過的（背景看過「改了」「上次看到」）。清單引號裡的句子就是這裡的字面值，
-/// 這裡改了清單要跟著改。
+/// 索引是用過的（背景看過「改了」）。清單引號裡的句子就是這裡的字面值，這裡改了
+/// 清單要跟著改。
 #[test]
 fn the_windows_checklist_hears_what_the_checklist_says() {
     const NOTEPAD: &str =
@@ -331,7 +312,7 @@ fn the_windows_checklist_hears_what_the_checklist_says() {
         add(&mut db, session, 1_000 + i as i64, 100 + i as u64, line);
     }
     add(&mut db, session, 5_000, 90, NOTEPAD);
-    assert_seen(&db, &["改了", "上次看到"]);
+    assert_seen(&db, &["改了"]);
 
     let notepad_only = |got: &Seen, q: &str| {
         assert!(
@@ -387,9 +368,8 @@ fn the_windows_checklist_hears_what_the_checklist_says() {
         );
         notepad_only(&got, q);
     }
-    for q in ["週報的備份網址", "上次看到的週報網址"] {
-        let got = ask(&mut db, q);
-        assert!(got.empty, "「{q}」要印「沒有找到。」：{}", got.hits);
-        assert_eq!(got.searched, None, "「{q}」標題下面不可以有「改用」那一行");
-    }
+    let q = "週報的備份網址";
+    let got = ask(&mut db, q);
+    assert!(got.empty, "「{q}」要印「沒有找到。」：{}", got.hits);
+    assert_eq!(got.searched, None, "「{q}」標題下面不可以有「改用」那一行");
 }
