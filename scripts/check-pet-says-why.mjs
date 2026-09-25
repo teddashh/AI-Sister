@@ -962,9 +962,22 @@ const adjustmentSaid = (a) => ADJUSTMENT_SAID.get(a.kind)?.replaceAll("{x}", a.t
     await p.type("ERR_DEPLOY_42 什麼時候發生的");
     check(`A161 ${kind}：畫的是 Rust 那一句`, want.includes("「ERR_DEPLOY_42」") && p.hitTexts().filter(text => text === want).length === 1, p.hitTexts());
   }
+  // 不出聲是「和沒有改字一模一樣」，不是「沒有那幾個字」：空的一行也是多畫了一行。
   const unknown = await open({ ask: answer({ searched: [{ kind: "someday", terms: "ERR_DEPLOY_42" }], hits: [hit()] }) });
   await unknown.type("ERR_DEPLOY_42");
-  check("A161 認不得的種類不出聲", unknown.hitTexts().length > 0 && unknown.hitTexts().every(text => !text.includes("「ERR_DEPLOY_42」")), unknown.hitTexts());
+  const plain = await open({ ask: answer({ searched: null, hits: [hit()] }) });
+  await plain.type("ERR_DEPLOY_42");
+  check("A161 認不得的種類不出聲",
+    plain.hitTexts().length > 0 && JSON.stringify(unknown.hitTexts()) === JSON.stringify(plain.hitTexts()),
+    { unknown: unknown.hitTexts(), plain: plain.hitTexts() });
+  // 開發用示範的 `?glued=` 給的也是產品那個形狀：一串 `{kind, terms}`，不是一個字串。
+  for (const [search, terms] of [["?hits=demo&glued=的人", "的人"], ["?hits=none&glued=個板", "個板"]]) {
+    const demo = await open({}, { search, browserOnly: true });
+    const want = adjustmentSaid({ kind: "glued", terms });
+    check(`A161 示範 ${search} 畫的是黏詞那一句`,
+      demo.hitTexts().filter(text => text === want).length === 1 && !demo.hitTexts().some(text => text.includes("undefined")),
+      demo.hitTexts());
+  }
 }
 
 // A154 R2：用真 app.js 的按送出路徑；只在突變取證時單跑此組。
