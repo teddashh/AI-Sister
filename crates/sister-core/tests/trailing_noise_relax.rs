@@ -193,17 +193,20 @@ fn an_unseen_topic_with_a_type_word_still_gets_nothing() {
     }
 }
 
-/// 類型詞在前、沒看過的主題在後。索引看過「網址」「時間」和「的退」（別的畫面上的
-/// 「按下的退出鍵」），拿掉尾巴沒看過的「款」，剩下的「網址的退」「時間的退」過得了
-/// 兩道出口（「退」算主題）。擋住它們的只有放寬之前那一道：類型題的主題整段沒看過
-/// 就不放寬。那一道拿掉，facts 會拿別張畫面上的網址和日期來答。
+/// 類型詞在前、沒看過的主題在後。索引看過「網址」「時間」和「的退」（「按下的退出鍵」
+/// 那一張），拿掉尾巴沒看過的「款」，剩下的「網址的退」「時間的退」過得了兩道出口
+/// （「退」算主題）。擋住它們的只有放寬之前那一道：類型題的主題整段沒看過就不放寬。
+/// 那一道拿掉，她改用「網址的退」「時間的退」去找，拿退出鍵那張畫面上的網址和日期來答。
 #[test]
 fn a_type_word_before_an_unseen_topic_still_gets_nothing() {
-    let mut db = db_with("設定頁的網址 https://example.com/dl");
+    let mut db = db_with("設定頁的網址");
     let session = db.start_session("test", "test").unwrap();
-    for (i, text) in ["按下的退出鍵", "開會的時間 2026-08-23 14:00"]
-        .iter()
-        .enumerate()
+    for (i, text) in [
+        "按下的退出鍵 https://example.com/exit 2026-08-23 14:00",
+        "開會的時間",
+    ]
+    .iter()
+    .enumerate()
     {
         db.insert_frame(
             session,
