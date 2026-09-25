@@ -7,7 +7,8 @@
 //! （選單、提示、沒被管理的視窗）也一樣往下問，只是問到的都是同一個程式。
 //!
 //! 「是誰的」問 X server（X-Resource 擴充）：它從連線認得出是哪個行程建的，
-//! 程式自己改不了。程式自己掛的 `_NET_WM_PID` 不用——GTK 的彈出選單根本沒掛。
+//! 程式自己改不了。`_NET_WM_PID` 不用：那是程式自己填的，填什麼都可以，
+//! 也不是每個程式都填（xmessage 就沒有）。
 //!
 //! 看不看得穿，讀得到的只有三種：32 位元色深（帶 alpha）、`_NET_WM_WINDOW_OPACITY`
 //! 不是全不透明、形狀不是方的。框或框裡任何一扇有其中一種，就不拿它擋她。
@@ -226,6 +227,7 @@ mod tests {
     use super::*;
     use crate::linux::tests::Xvfb;
     use crate::linux::{capture_x11, foreground, grab_x11};
+    use crate::own_windows::own_parts;
     use std::path::PathBuf;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
@@ -1170,5 +1172,176 @@ mod tests {
             bottom: hers.bottom,
         };
         assert_eq!(shot.count(below, rgb(BLUE)), below.size() - overlap.size());
+    }
+
+    /// CI 從 .deb 裝好、開起來的那一支 `sister-desktop` 的 pid。
+    const INSTALLED_PID: &str = "AI_SISTER_X11_INSTALLED_PID";
+
+    /// 真的裝好的她（Tauri＋WebKitGTK，不是 xmessage 替身）開著的時候，她畫在
+    /// 畫面上的每一扇視窗，產品要塗的範圍都整扇蓋住。
+    ///
+    /// 哪幾扇是她的，這裡用產品不讀的另一個訊號找：GTK 在每一扇頂層視窗上掛的
+    /// `_NET_WM_PID`，對上 CI 開她時拿到的 pid。CI 那台沒有視窗管理員，她的視窗
+    /// 直接掛在 root 底下。畫面上每一扇頂層視窗、產品讀到的事實和要塗的範圍都
+    /// 印出來，找不到她的時候也印。
+    #[test]
+    #[ignore = "release：要一支真的在跑的 sister-desktop，CI 裝完 .deb 開起來之後才跑"]
+    fn the_installed_app_is_all_hers() {
+        let pid: u32 = std::env::var(INSTALLED_PID)
+            .unwrap_or_else(|_| panic!("{INSTALLED_PID} 沒設"))
+            .parse()
+            .expect("pid");
+        let (connection, screen_index) = x11rb::connect(None).expect("連不上 DISPLAY");
+        let screen = &connection.setup().roots[screen_index];
+        let root = screen.root;
+        let desktop = Area {
+            left: 0,
+            top: 0,
+            right: i32::from(screen.width_in_pixels),
+            bottom: i32::from(screen.height_in_pixels),
+        };
+        let atoms = XAtoms::new(&connection).expect("atoms");
+
+        // 開起來到畫出第一扇視窗要一點時間。問事實的前後各找一次她，兩次一樣才算數。
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (hers, facts) = loop {
+            let before = declared_by(&connection, root, atoms.pid, pid);
+            let facts = window_facts(&connection, root, &atoms);
+            let after = declared_by(&connection, root, atoms.pid, pid);
+            match facts {
+                Ok(facts) if !before.is_empty() && before == after => break (before, facts),
+                _ if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+                facts => {
+                    print_tops(&connection, root, atoms.pid);
+                    panic!(
+                        "三十秒內沒有穩定出現 _NET_WM_PID={pid} 的視窗；最後一次問事實：{facts:?}"
+                    );
+                }
+            }
+        };
+        let parts = own_parts(&facts).expect("她的視窗找得到範圍");
+        print_tops(&connection, root, atoms.pid);
+        println!("產品讀到的事實（最上面的排第一個）：");
+        for fact in &facts {
+            println!("  {fact:?}");
+        }
+        println!("要塗的範圍：{parts:?}");
+
+        for &(window, area) in &hers {
+            let shown = Area {
+                left: area.left.max(desktop.left),
+                top: area.top.max(desktop.top),
+                right: area.right.min(desktop.right),
+                bottom: area.bottom.min(desktop.bottom),
+            };
+            assert!(
+                shown.left < shown.right && shown.top < shown.bottom,
+                "她的視窗 {window:#x} {area:?} 不在畫面上"
+            );
+            let bare = (shown.top..shown.bottom)
+                .flat_map(|y| (shown.left..shown.right).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    !parts.iter().any(|part| {
+                        part.left <= x && x < part.right && part.top <= y && y < part.bottom
+                    })
+                })
+                .count();
+            assert_eq!(
+                bare,
+                0,
+                "她的視窗 {window:#x} {shown:?} 有 {bare}/{} 個像素不在要塗的範圍裡",
+                shown.size()
+            );
+        }
+    }
+
+    /// root 底下看得見、畫得出東西、`_NET_WM_PID` 是 `pid` 的每一扇，和它的外框。
+    fn declared_by(
+        connection: &RustConnection,
+        root: Window,
+        pid_atom: u32,
+        pid: u32,
+    ) -> Vec<(Window, Area)> {
+        shown_tops(connection, root)
+            .into_iter()
+            .filter(|&window| declared_pid(connection, window, pid_atom) == Some(pid))
+            .map(|window| (window, outer_area(connection, window)))
+            .collect()
+    }
+
+    /// root 底下看得見、畫得出東西的每一扇，最上面的排第一個。
+    fn shown_tops(connection: &RustConnection, root: Window) -> Vec<Window> {
+        let tops = connection
+            .query_tree(root)
+            .expect("tree")
+            .reply()
+            .expect("tree reply")
+            .children;
+        tops.into_iter()
+            .rev()
+            .filter(|&window| {
+                // 列完到問屬性之間關掉的那一扇，當成看不見。
+                connection
+                    .get_window_attributes(window)
+                    .expect("attributes")
+                    .reply()
+                    .is_ok_and(|attributes| {
+                        attributes.map_state == MapState::VIEWABLE
+                            && attributes.class != WindowClass::INPUT_ONLY
+                    })
+            })
+            .collect()
+    }
+
+    fn declared_pid(connection: &RustConnection, window: Window, pid_atom: u32) -> Option<u32> {
+        connection
+            .get_property(false, window, pid_atom, AtomEnum::CARDINAL, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?
+            .value32()?
+            .next()
+    }
+
+    fn outer_area(connection: &RustConnection, window: Window) -> Area {
+        match connection.get_geometry(window).expect("geometry").reply() {
+            Ok(geometry) => {
+                let border = 2 * i32::from(geometry.border_width);
+                Area {
+                    left: i32::from(geometry.x),
+                    top: i32::from(geometry.y),
+                    right: i32::from(geometry.x) + i32::from(geometry.width) + border,
+                    bottom: i32::from(geometry.y) + i32::from(geometry.height) + border,
+                }
+            }
+            // 關掉了：範圍當成空的，下一輪「前後兩次一樣」會把這一輪丟掉。
+            Err(_) => Area {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+        }
+    }
+
+    fn print_tops(connection: &RustConnection, root: Window, pid_atom: u32) {
+        println!("畫面上看得見的頂層視窗（最上面的排第一個）：");
+        for window in shown_tops(connection, root) {
+            let depth = connection
+                .get_geometry(window)
+                .expect("geometry")
+                .reply()
+                .map(|geometry| geometry.depth);
+            let class = connection
+                .get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 64)
+                .expect("class")
+                .reply()
+                .map(|reply| String::from_utf8_lossy(&reply.value).replace('\0', " "));
+            println!(
+                "  {window:#x} {:?} depth={depth:?} _NET_WM_PID={:?} WM_CLASS={class:?}",
+                outer_area(connection, window),
+                declared_pid(connection, window, pid_atom),
+            );
+        }
     }
 }

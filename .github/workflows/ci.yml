@@ -473,6 +473,21 @@ jobs:
           AI_SISTER_REQUIRE_LINUX_OCR_SMOKE: "1"
         run: cargo test -p sister-capture linux::tests::x11_frame_runs_through_local_tesseract --locked -- --nocapture
 
+      # 她自己的視窗在真的 X server 上被塗掉：改名成 sister-desktop 的 xmessage
+      # 當她，測試自己扮視窗管理員和別的程式。少了 Xvfb 或 xmessage 要紅，不准
+      # 安靜跳過；名字篩選一條都沒配到也要紅——cargo 跑 0 條是 exit 0。
+      - name: Own windows — masked in her own X11 capture
+        env:
+          AI_SISTER_REQUIRE_X11_OWN_WINDOWS: "1"
+        run: |
+          set -euo pipefail
+          status=0
+          log="$RUNNER_TEMP/own-windows.log"
+          cargo test -p sister-capture --lib linux::own_windows --locked -- --nocapture > "$log" 2>&1 || status=$?
+          cat "$log"
+          test "$status" -eq 0
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$log"
+
       - name: Build the native recorder sidecar
         run: |
           set -euo pipefail
@@ -546,6 +561,17 @@ jobs:
             2>"$AI_SISTER_LINUX_SMOKE/desktop.stderr" &
           app_pid=$!
           sleep 5
+          kill -0 "$app_pid"
+          # 真的裝好的她開著：她畫在畫面上的每一扇視窗，產品要塗的範圍都整扇蓋住。
+          # 名字配不到 cargo 也是 exit 0，所以另外要求「1 passed」。
+          status=0
+          AI_SISTER_X11_INSTALLED_PID="$app_pid" cargo test -p sister-capture --lib --locked \
+            linux::own_windows::tests::the_installed_app_is_all_hers \
+            -- --ignored --exact --nocapture >"$AI_SISTER_LINUX_SMOKE/own-windows.log" 2>&1 \
+            || status=$?
+          cat "$AI_SISTER_LINUX_SMOKE/own-windows.log"
+          test "$status" -eq 0
+          grep -Eq '^test result: ok\. 1 passed; 0 failed' "$AI_SISTER_LINUX_SMOKE/own-windows.log"
           kill -0 "$app_pid"
           SH
 
