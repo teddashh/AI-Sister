@@ -418,26 +418,40 @@ mod tests {
                 std::fs::copy(&self.xmessage, &program).expect("把 xmessage 改名成她");
             }
             let before = self.shown_tops();
-            let child = Command::new(&program)
-                .env("DISPLAY", &self.xvfb.display)
-                .args([
-                    "-geometry",
-                    geometry,
-                    "-bg",
-                    "red",
-                    "-fg",
-                    "red",
-                    "-bd",
-                    "red",
-                    "-buttons",
-                    "",
-                    "AI SISTER",
-                ])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("開她");
+            // 剛複製完的程式檔，別的測試執行緒 fork 出去的子行程可能還握著它的
+            // 寫入 fd（exec 之前），這時執行它會拿到 ETXTBSY。等一下再試。
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let child = loop {
+                match Command::new(&program)
+                    .env("DISPLAY", &self.xvfb.display)
+                    .args([
+                        "-geometry",
+                        geometry,
+                        "-bg",
+                        "red",
+                        "-fg",
+                        "red",
+                        "-bd",
+                        "red",
+                        "-buttons",
+                        "",
+                        "AI SISTER",
+                    ])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    Ok(child) => break child,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("開她: {error}"),
+                }
+            };
             let pid = child.id();
             self.running.push(child);
             let deadline = Instant::now() + Duration::from_secs(10);
