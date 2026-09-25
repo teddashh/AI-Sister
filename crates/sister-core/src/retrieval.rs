@@ -52,9 +52,9 @@ impl SearchAdjustment {
 ///
 /// 第二輪在問索引之前先走一張封閉的問句詞清單 [`QUESTION_WORDS`]，不靠那些字
 /// 剛好沒看過。問句詞是這一張；口語開頭是旁邊另一張 [`SPOKEN_LEAD_INS`]，
-/// 各只有一份，不複製到 facts 或索引。中文整段比對；英文是獨立 token、不分
-/// 大小寫，邊界與類型詞同一支 [`crate::facts::kind_word_match_end`]（`show`
-/// 裡的 how 不算）。落在類型詞裡面的不算：「什麼時候」「多少錢」「繳多少」
+/// 各只有一份，不複製到 facts 或索引。問句詞中文整段比對；英文是獨立 token、
+/// 不分大小寫，邊界與類型詞同一支 [`crate::facts::kind_word_match_end`]（`show`
+/// 裡的 how 不算）。口語開頭的英文另有更嚴的邊界，見 [`ascii_lead_in_end`]。落在類型詞裡面的不算：「什麼時候」「多少錢」「繳多少」
 /// 「付多少」「欠多少」是答案種類，不是問句。前面已經有內容，就只留前面，
 /// 後面連類型詞一起丟、不接回去。前面只有空白或虛字，就只拿掉這個詞再往後看，
 /// 所以「為什麼部署失敗」留下「部署失敗」，「怎麼找客服電話」留下「找客服電話」，
@@ -214,7 +214,8 @@ const QUESTION_WORDS: &[&str] = &[
 ];
 
 /// 口語開頭。只給放寬用，不進 [`crate::facts::strip_fact_question_edges`]。
-/// 中文整段、只認開頭、同一位置取最長；英文是獨立 token，邊界與問句詞同一支。
+/// 中文整段、只認開頭、同一位置取最長；英文只認獨立的一個字，不認複數 s、
+/// 不認連字號，見 [`ascii_lead_in_end`]。
 const SPOKEN_LEAD_INS: &[&str] = &[
     "所以",
     "但是",
@@ -264,10 +265,10 @@ fn strip_spoken_lead_in(text: &str) -> Option<&str> {
     let mut best_end: Option<usize> = None;
     for word in SPOKEN_LEAD_INS {
         let end = if word.is_ascii() {
-            let Some(lower_end) = crate::facts::kind_word_match_end(&lower, word, 0) else {
+            let Some(end) = ascii_lead_in_end(trimmed, &lower, &orig_at, word) else {
                 continue;
             };
-            orig_at[lower_end]
+            end
         } else if trimmed.starts_with(word) {
             word.len()
         } else {
@@ -278,6 +279,26 @@ fn strip_spoken_lead_in(text: &str) -> Option<&str> {
         }
     }
     best_end.map(|end| &trimmed[end..])
+}
+
+/// 英文口語開頭只認一個獨立的字：後面接空白、中文、句讀（`,` `:` `;` `!` `?`）
+/// 或整句結束。不借類型詞那支邊界：它認複數 s，會把 `SOS` 當成 so 切掉；
+/// 連字號也算它的邊界，`So-net 帳單怎麼繳` 會剩「net 帳單」，在用過的索引上
+/// 拿任意幾筆金額來湊。
+fn ascii_lead_in_end(trimmed: &str, lower: &str, orig_at: &[usize], word: &str) -> Option<usize> {
+    if !lower.starts_with(word) {
+        return None;
+    }
+    let end = orig_at[word.len()];
+    match trimmed[end..].chars().next() {
+        None => Some(end),
+        Some(c)
+            if c.is_whitespace() || !c.is_ascii() || matches!(c, ',' | ':' | ';' | '!' | '?') =>
+        {
+            Some(end)
+        }
+        Some(_) => None,
+    }
 }
 
 /// 口語開頭、頭尾問句用語、問句詞、再一次 [`question::terms`]。空字串表示沒有東西可找。
@@ -1465,7 +1486,8 @@ mod tests {
     #[test]
     fn stacked_spoken_lead_ins_peel_to_the_topic() {
         assert_eq!(peel_retry_terms("所以我想問為什麼部署失敗"), "部署失敗");
-        // 「想問」是「想請問」的開頭。同一位置不取最長，會留下「問」。
+        // 「想請問」整段在表上。表裡沒有哪個詞是另一個詞的開頭，所以這一條
+        // 不守「同一位置取最長」；那一行現在沒有例子可以測。
         assert_eq!(peel_retry_terms("想請問為什麼部署失敗"), "部署失敗");
         // 「到」是虛字。先跑 terms 再認開頭，會把「到底」吃成「底」。
         assert_eq!(peel_retry_terms("到底為什麼部署失敗"), "部署失敗");
@@ -1489,6 +1511,16 @@ mod tests {
             "thence",
             "then 沒有切在 thence 裡面"
         );
+    }
+
+    /// 類型詞那支邊界認複數 s，也把連字號當邊界。口語開頭借它的話，
+    /// `SOS` 會被當成 so，`So-net` 的 So 會被當成口語切掉。
+    #[test]
+    fn english_lead_in_is_not_a_plural_or_part_of_a_hyphenated_name() {
+        assert_eq!(peel_retry_terms("SOS 怎麼回事"), "SOS");
+        assert_eq!(peel_retry_terms("So-net 帳單怎麼繳"), "So-net 帳單");
+        // 句讀照樣是一個字的結尾。
+        assert_eq!(peel_retry_terms("But, why ERR_DEPLOY_42"), "ERR_DEPLOY_42");
     }
 
     #[test]
