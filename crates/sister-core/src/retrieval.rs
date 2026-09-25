@@ -31,23 +31,165 @@ impl SearchAdjustment {
     }
 }
 
+/// 第一次查詢整段都空了之後，能不能改拿較短的一段再查一次。
+///
+/// 第一次拿去比對的字一個都不改。這裡只決定第二次。
+///
+/// alpha.157 第一輪只問索引：頭尾連續沒看過的條件可以拿掉，看過的就停。
+/// 帳單夾具裡「怎麼」「哪裡」「請問」從來沒出現，所以那一輪是綠的。把 repo
+/// 的中文文件（約 24 萬字，主題字都排除）當背景，灌進同一套演算法之後，
+/// 這些字一定看過，放寬就停在它們前面：
+///
+/// - `ERR_DEPLOY_42 怎麼回事`：沒有背景改用「ERR_DEPLOY_42」並找到；有背景改用
+///   「ERR_DEPLOY_42 怎麼」，0 筆。
+/// - `部署失敗怎麼辦`／`部署失敗是什麼原因`：沒有背景找到；有背景空手。
+/// - `客服電話怎麼打`：沒有背景找到號碼；有背景改用「客服電話怎麼」，空手。
+/// - `月報連結在哪裡`／`告訴我 月報連結`／`電信帳單寄到哪`：沒有背景找到；有背景空手。
+/// - `幫我看一下客服專線`：沒有背景找到；有背景空手。
+///
+/// 主題也有同一個洞：`退款電話怎麼打` 的主題被算成「退款 怎麼打」，「怎麼」看過，
+/// 保護放行，改去找「電話怎麼打」。
+///
+/// 這一輪在問索引之前先走一張封閉的問句詞清單，不靠那些字剛好沒看過。清單就是
+/// [`QUESTION_WORDS`]，只有一份。中文整段比對；英文是獨立 token、不分大小寫，
+/// 邊界與類型詞同一支 [`crate::facts::kind_word_match_end`]（`show` 裡的 how
+/// 不算）。落在類型詞裡面的不算：「什麼時候」「多少錢」「繳多少」「付多少」
+/// 「欠多少」是答案種類，不是問句。前面已經有內容，就只留前面，後面連類型詞
+/// 一起丟、不接回去。前面只有空白或虛字，就只拿掉這個詞再往後看，所以
+/// 「為什麼部署失敗」留下「部署失敗」，「怎麼找客服電話」留下「找客服電話」，
+/// 再交給索引把「找」拿掉。
+///
+/// 刻意不收：「幾」（「幾號」分不出日期和號碼，還有「幾乎」）、嗎／呢／吧
+/// （[`question::terms`] 已經剝頭尾虛字）、when（它自己就是類型詞）。
+///
+/// 問句頭尾另外套 [`crate::facts::strip_fact_question_edges`]，和 facts 主題
+/// 同一張表。這一輪那張表只多「幫我看一下」「幫我看」「查一下」「找一下」
+/// 「看一下」。切完再跑一次 [`question::terms`]，把「敗是」「案在」這種交界
+/// 虛字剝掉。交界雙字在用過的索引裡常常看過，只靠尾端零命中拿不掉。
+///
+/// 主題保護改看這段剝完的字，不看原問句：原問句有類型詞，而且剝完之後的主題
+/// 在索引裡一個條件都沒看過，就不放寬。「不用改」和「太長沒檢查」仍然不是
+/// 「沒看過」。剝完是空的，或最後的候選字和原本的 terms 相同，也不放寬。
+///
+/// 代價（`relax_peel_pays_the_measured_cost` 量的，帳單那一張畫面）：
+///
+/// - 問句詞後面的類型詞會一起丟掉。「客服怎麼打電話」改用「客服」。facts 答案
+///   0 筆，因為候選裡已經沒有「電話」；原文 1 筆，就是「客服專線 0800-000-123」。
+/// - 沒有具體主題時，剩下的普通字會被拿去找，但是兩種走法不一樣。「這個東西是什麼」
+///   的「這個」「是什麼」本來就是虛字，第一次查詢就拿「東西」去找：畫面上沒有，
+///   就是 0 筆、不說改用了什麼，也不再縮。畫面上有「這個東西在桌上」時，第一次
+///   就命中，同樣不放寬。「這個東西怎麼用」的「怎麼」不是虛字，第一次「東西怎麼用」
+///   對不到，放寬才改用「東西」，那一筆就找到了。
 fn retry_candidate(db: &Db, query: &str) -> Result<Option<String>> {
     let original = question::terms(query);
-    // 類型詞不能冒充必要主題。主題裡一個看過的條件都沒有時，不能退成任意電話／網址。
-    // 「不用改」和「太長沒檢查」不是「沒看過」——先前這三個都是 None，主題明明
-    // 在索引裡（請問月報連結 → 月報）也被擋下來。
+    let peeled = peel_retry_terms(original);
+    if peeled.is_empty() {
+        return Ok(None);
+    }
     if !crate::facts::kinds_for_query(query).is_empty()
-        && let Some(topic) = crate::facts::topic_constraint(query)
+        && let Some(topic) = crate::facts::topic_constraint(peeled)
         && db.indexed_candidate(&topic)? == IndexedCandidate::NoneSeen
     {
         return Ok(None);
     }
-    Ok(match db.indexed_candidate(original)? {
-        IndexedCandidate::Changed(candidate) => Some(candidate),
-        IndexedCandidate::NoneSeen | IndexedCandidate::Unchanged | IndexedCandidate::TooLong => {
-            None
+    let candidate = match db.indexed_candidate(peeled)? {
+        IndexedCandidate::Changed(candidate) => candidate,
+        IndexedCandidate::Unchanged => peeled.to_string(),
+        IndexedCandidate::NoneSeen | IndexedCandidate::TooLong => return Ok(None),
+    };
+    if candidate.is_empty() || candidate == original {
+        return Ok(None);
+    }
+    Ok(Some(candidate))
+}
+
+/// 封閉問句詞。加字之前先看 [`retry_candidate`] 上面為什麼不收。
+const QUESTION_WORDS: &[&str] = &[
+    "為什麼",
+    "为什么",
+    "為何",
+    "为何",
+    "怎麼",
+    "怎麽",
+    "怎么",
+    "怎樣",
+    "怎样",
+    "如何",
+    "什麼",
+    "什麽",
+    "什么",
+    "甚麼",
+    "啥",
+    "哪",
+    "誰",
+    "谁",
+    "多少",
+    "what",
+    "how",
+    "why",
+    "where",
+    "who",
+    "which",
+];
+
+/// 頭尾問句用語、問句詞、再一次 [`question::terms`]。空字串表示沒有東西可找。
+fn peel_retry_terms(terms: &str) -> &str {
+    let edged = crate::facts::strip_fact_question_edges(terms);
+    let cut = cut_question_words(edged);
+    if question::only_filler(cut) {
+        ""
+    } else {
+        question::terms(cut)
+    }
+}
+
+/// 由左往右第一個不在類型詞裡的問句詞。前面有內容就留下前面；前面只有虛字
+/// 就拿掉這個詞，繼續看後面。
+fn cut_question_words(text: &str) -> &str {
+    let (lower, orig_at) = crate::facts::lowercase_with_orig_bytes(text);
+    let mut search_from = 0;
+    loop {
+        let Some((rel_lo, rel_hi)) = find_question_word(&lower[search_from..]) else {
+            return text;
+        };
+        let abs_lo = search_from + rel_lo;
+        let abs_hi = search_from + rel_hi;
+        let orig_lo = orig_at[abs_lo];
+        let orig_hi = orig_at[abs_hi];
+        if crate::facts::condition_is_kind_word(text, orig_lo, orig_hi) {
+            search_from = abs_hi;
+            continue;
         }
-    })
+        if question::only_filler(&text[..orig_lo]) {
+            return cut_question_words(&text[orig_hi..]);
+        }
+        return &text[..orig_lo];
+    }
+}
+
+/// `lower` 裡最左邊的問句詞，同一位置取最長的。回傳的是 `lower` 的 byte 範圍。
+fn find_question_word(lower: &str) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+    let mut i = 0;
+    while i < lower.len() {
+        if best.is_some_and(|(start, _)| i > start) {
+            break;
+        }
+        for word in QUESTION_WORDS {
+            let Some(end) = crate::facts::kind_word_match_end(lower, word, i) else {
+                continue;
+            };
+            let replace = best.is_none_or(|(start, prev_end)| {
+                i < start || (i == start && end - i > prev_end - start)
+            });
+            if replace {
+                best = Some((i, end));
+            }
+        }
+        let ch = lower[i..].chars().next().expect("i 在字元邊界");
+        i += ch.len_utf8();
+    }
+    best
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1013,6 +1155,136 @@ mod tests {
         assert_eq!(
             format!("{:?}", shrunk.answers),
             format!("{:?}", clean.answers)
+        );
+    }
+
+    /// 「敗是」在別的句子裡看過。索引那一圈會把「部署失敗是」整段留下；
+    /// 再跑一次 terms 才把尾端的「是」剝掉。
+    #[test]
+    fn relax_peel_drops_a_seen_boundary_filler() {
+        let mut db = Db::open_in_memory().unwrap();
+        let privacy = crate::config::PrivacyConfig {
+            remember_told: true,
+            ..Default::default()
+        };
+        db.remember_told(&privacy, 100, "部署失敗的紀錄").unwrap();
+        db.remember_told(&privacy, 200, "打敗是另一件事").unwrap();
+        assert!(
+            db.indexed_term_exists("敗是").unwrap(),
+            "前提：交界雙字「敗是」看過"
+        );
+        assert_eq!(
+            db.indexed_candidate("部署失敗是").unwrap(),
+            IndexedCandidate::Unchanged,
+            "前提：索引不會自己把看過的「是」拿掉"
+        );
+
+        let result = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, "部署失敗是什麼原因", 5)
+            .unwrap();
+        assert_eq!(
+            result.searched,
+            Some(SearchAdjustment::Relaxed("部署失敗".into()))
+        );
+        assert!(
+            result
+                .hits
+                .iter()
+                .any(|hit| hit.text.contains("部署失敗的紀錄")),
+            "{:?}",
+            result.hits
+        );
+        assert!(
+            result.hits.iter().all(|hit| !hit.text.contains("打敗是")),
+            "不該改去找那句只為了讓「敗是」看過的話: {:?}",
+            result.hits
+        );
+    }
+
+    /// `showtime` 裡的 how 不是獨立的問句詞。不看邊界的話會從 h 切開，
+    /// 候選變成「部署失敗」。
+    #[test]
+    fn relax_peel_does_not_cut_how_inside_show() {
+        let mut db = Db::open_in_memory().unwrap();
+        let privacy = crate::config::PrivacyConfig {
+            remember_told: true,
+            ..Default::default()
+        };
+        db.remember_told(&privacy, 100, "部署失敗 showtime")
+            .unwrap();
+        let result = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, "部署失敗 showtime 怎麼辦", 5)
+            .unwrap();
+        assert_eq!(
+            result.searched,
+            Some(SearchAdjustment::Relaxed("部署失敗 showtime".into())),
+            "show 裡的 how 不是問句詞"
+        );
+        assert!(
+            result
+                .hits
+                .iter()
+                .any(|hit| hit.text.contains("部署失敗 showtime")),
+            "{:?}",
+            result.hits
+        );
+    }
+
+    /// 問句詞清單的代價。數字寫在 `retry_candidate` 上面，這裡把量到的結果釘住。
+    #[test]
+    fn relax_peel_pays_the_measured_cost() {
+        let mut db = db_with_bill();
+        let cut = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, "客服怎麼打電話", 5)
+            .unwrap();
+        assert_eq!(cut.searched, Some(SearchAdjustment::Relaxed("客服".into())));
+        assert!(
+            cut.answers.is_empty(),
+            "「電話」在問句詞後面，跟著被丟掉，facts 沒有種類: {:?}",
+            cut.answers
+        );
+        assert_eq!(cut.hits.len(), 1, "{:?}", cut.hits);
+        assert_eq!(cut.hits[0].text, "客服專線 0800-000-123");
+
+        let missing = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, "這個東西是什麼", 5)
+            .unwrap();
+        assert_eq!(missing.terms.as_deref(), Some("東西"));
+        assert_eq!(missing.searched, None);
+        assert!(missing.answers.is_empty() && missing.hits.is_empty());
+
+        let privacy = crate::config::PrivacyConfig {
+            remember_told: true,
+            ..Default::default()
+        };
+        db.remember_told(&privacy, 200, "這個東西在桌上").unwrap();
+        let seen = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, "這個東西是什麼", 5)
+            .unwrap();
+        assert_eq!(seen.terms.as_deref(), Some("東西"));
+        assert_eq!(seen.searched, None, "第一次就用「東西」找到，不再放寬");
+        assert!(
+            seen.hits
+                .iter()
+                .any(|hit| hit.text.contains("這個東西在桌上")),
+            "{:?}",
+            seen.hits
+        );
+
+        let ordinary = RetrievalProfile::TextAndFacts
+            .retrieve(&mut db, "這個東西怎麼用", 5)
+            .unwrap();
+        assert_eq!(
+            ordinary.searched,
+            Some(SearchAdjustment::Relaxed("東西".into()))
+        );
+        assert!(
+            ordinary
+                .hits
+                .iter()
+                .any(|hit| hit.text.contains("這個東西在桌上")),
+            "{:?}",
+            ordinary.hits
         );
     }
 }

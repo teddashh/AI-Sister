@@ -337,6 +337,14 @@ pub fn terms_with_retreat(question: &str) -> (&str, bool) {
     (terms, retreated && terms != question.trim())
 }
 
+/// 這一段裡沒有內容詞：只有空白、標點、虛字。
+///
+/// 問句詞貼在這種字後面時，放寬只拿掉那個問句詞，繼續看後面。
+/// 日曆詞和「剛剛」不是虛字，算內容的前面。
+pub(crate) fn only_filler(text: &str) -> bool {
+    words(text).iter().all(|&(_, _, role)| role == Role::Filler)
+}
+
 /// 在開頭比對得到的最長那個詞，以及它的角色。
 fn longest(rest: &str) -> Option<(usize, Role)> {
     let mut best: Option<(usize, Role)> = None;

@@ -269,10 +269,16 @@ const QUERY_KIND_TABLE: &[(&str, FactKind)] = &[
 /// 英文必須是獨立詞（可接複數 s），不能把 hotel 的 tel、profile 的
 /// file 或識別字 error_code 當成類型要求。中文沒有空白，仍允許連寫；
 /// 共用的 ASCII 邊界也保留「phone是多少」這種中英相接的問法。
-/// [`query_kind_word_hits`] 與 [`condition_is_kind_word`] 都走這裡，避免兩套邊界。
-fn kind_word_match_end(q: &str, word: &str, start: usize) -> Option<usize> {
+/// [`query_kind_word_hits`]、[`condition_is_kind_word`] 與放寬的問句詞
+/// 都走這裡，避免英文邊界寫成兩套。
+pub(crate) fn kind_word_match_end(q: &str, word: &str, start: usize) -> Option<usize> {
     let end = start.checked_add(word.len())?;
-    if end > q.len() || &q[start..end] != word {
+    // 問句詞會在每個字的起點試英文詞。對不齊就不是這個詞，不能切進中文字裡。
+    if end > q.len()
+        || !q.is_char_boundary(start)
+        || !q.is_char_boundary(end)
+        || &q[start..end] != word
+    {
         return None;
     }
     if !word.is_ascii() {
@@ -320,7 +326,8 @@ pub(crate) fn condition_is_kind_word(query: &str, start: usize, end: usize) -> b
 
 /// 小寫後每個 byte 對回原字串的 byte。ASCII 摺大小寫不改變長度；
 /// 少數字元會變長，對回去時整個原字元都算進類型詞的範圍。
-fn lowercase_with_orig_bytes(query: &str) -> (String, Vec<usize>) {
+/// 放寬切問句詞也用這張位移，畫面上的「改用「X」」才留得住原來的大小寫。
+pub(crate) fn lowercase_with_orig_bytes(query: &str) -> (String, Vec<usize>) {
     let mut lower = String::with_capacity(query.len());
     let mut orig_at = Vec::with_capacity(query.len() + 1);
     for (orig, ch) in query.char_indices() {
@@ -396,14 +403,23 @@ fn strip_kind_words(rest: &str) -> String {
 
 // 只剝頭尾完整問句用語，不把中間的「我家」「是否」等名稱切碎。
 // 單字虛字交給 [`crate::question::terms`]，避免「是否」被「是」從開頭切掉。
-fn strip_fact_question_edges(mut text: &str) -> &str {
+//
+// 主題（[`topic_constraint`]）和放寬共用這一張，不複製。ASCII 比對不分大小寫，
+// 回傳的仍是呼叫端那條字串的一段，所以放寬印出來的「改用「X」」留得住原大小寫。
+// 中文沒有大小寫。這一輪只加五個請求頭；帶它們的問法，主題會一起變短。
+pub(crate) fn strip_fact_question_edges(mut text: &str) -> &str {
     const CJK: &[&str] = &[
+        "幫我看一下",
         "請幫我找",
         "請幫我查",
+        "幫我看",
         "幫我找",
         "幫我查",
         "我想知道",
         "告訴我",
+        "查一下",
+        "找一下",
+        "看一下",
         "請問",
         "我要",
         "要繳",
@@ -451,25 +467,46 @@ fn strip_fact_question_edges(mut text: &str) -> &str {
             c.is_whitespace() || matches!(c, '?' | '？' | '。' | '!' | '！' | ',')
         });
         let old = text;
-        if let Some(tail) = CJK.iter().find_map(|word| text.strip_prefix(word)) {
-            text = tail;
-        } else if let Some(head) = CJK.iter().find_map(|word| text.strip_suffix(word)) {
-            text = head;
-        } else if let Some(tail) = ASCII.iter().find_map(|word| {
-            text.strip_prefix(word)
-                .filter(|_| ascii_word_boundary(text, 0, word.len()))
-        }) {
-            text = tail;
-        } else if let Some(head) = ASCII.iter().find_map(|word| {
-            text.strip_suffix(word)
-                .filter(|_| ascii_word_boundary(text, text.len() - word.len(), text.len()))
-        }) {
-            text = head;
+        if let Some(word) = CJK.iter().find(|word| text.starts_with(*word)) {
+            text = &text[word.len()..];
+        } else if let Some(word) = CJK.iter().find(|word| text.ends_with(*word)) {
+            text = &text[..text.len() - word.len()];
+        } else if let Some(rest) = ASCII
+            .iter()
+            .find_map(|word| strip_ascii_edge(text, word, true))
+        {
+            text = rest;
+        } else if let Some(rest) = ASCII
+            .iter()
+            .find_map(|word| strip_ascii_edge(text, word, false))
+        {
+            text = rest;
         }
         if text == old {
             return text;
         }
     }
+}
+
+/// 頭或尾的 ASCII 問句詞。`word` 是表上的小寫。邊界與舊的 `strip_prefix` 相同，
+/// 不把 `showtime` 當成 `show`。
+fn strip_ascii_edge<'a>(text: &'a str, word: &str, at_start: bool) -> Option<&'a str> {
+    if word.len() > text.len() {
+        return None;
+    }
+    let start = if at_start { 0 } else { text.len() - word.len() };
+    let end = start + word.len();
+    if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return None;
+    }
+    if !text[start..end].eq_ignore_ascii_case(word) || !ascii_word_boundary(text, start, end) {
+        return None;
+    }
+    Some(if at_start {
+        &text[end..]
+    } else {
+        &text[..start]
+    })
 }
 
 // ---------- 共用工具 ----------
