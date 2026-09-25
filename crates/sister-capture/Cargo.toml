@@ -54,6 +54,8 @@ windows = { version = "0.62", features = [
     # 以下是 Win32 那一半
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # 她自己的視窗：有沒有被 DWM 藏起來、畫面上真的看得到的外框
+    "Win32_Graphics_Dwm",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Threading",
@@ -68,6 +70,10 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# `tests/windows_own_windows.rs` 的輔助視窗要拿自己的模組 handle 註冊視窗類別。
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62", features = ["Win32_System_LibraryLoader"] }
 
 # X11 Preview 走 x11rb 自己的純 Rust transport，不啟用 XCB FFI／dlopen。
 # `image` 供之後把 GetImage reply 正規化，`randr` 供 monitor 枚舉；先不把

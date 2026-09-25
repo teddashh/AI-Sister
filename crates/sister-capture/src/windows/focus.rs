@@ -227,7 +227,7 @@ pub fn process_image_path(hwnd: HWND) -> Option<String> {
     process_image_path_for_pid(pid)
 }
 
-fn process_image_path_for_pid(pid: u32) -> Option<String> {
+pub(crate) fn process_image_path_for_pid(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
 
@@ -248,7 +248,7 @@ fn process_image_path_for_pid(pid: u32) -> Option<String> {
     }
 }
 
-fn file_name(path: &str) -> String {
+pub(crate) fn file_name(path: &str) -> String {
     path.rsplit(['\\', '/']).next().unwrap_or(path).to_string()
 }
 

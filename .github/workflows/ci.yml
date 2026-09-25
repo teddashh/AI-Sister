@@ -802,6 +802,12 @@ jobs:
         timeout-minutes: 3
         run: cargo test -p sister-capture --test windows_uia -- --ignored --nocapture --test-threads=1
 
+      # 她自己的視窗在真的 Windows 桌面上被塗掉。Linux 那一半只驗得到規則；
+      # EnumWindows／DWM 讀回來的東西對不對，只有這一步真的跑到。
+      - name: Own windows — masked in her own capture on a real desktop
+        timeout-minutes: 3
+        run: cargo test -p sister-capture --test windows_own_windows -- --ignored --nocapture --test-threads=1
+
       # 這一步是 Linux 上做不到的事：Win32 程式碼真的被執行
       - name: Test
         run: cargo test --workspace

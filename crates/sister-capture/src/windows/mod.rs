@@ -11,6 +11,7 @@ pub mod clipboard;
 pub mod focus;
 pub mod input;
 pub mod ocr;
+mod own_windows;
 pub mod screen;
 pub mod system;
 mod text;
