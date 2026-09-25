@@ -76,10 +76,11 @@ windows = { version = "0.62", features = [
 windows = { version = "0.62", features = ["Win32_System_LibraryLoader"] }
 
 # X11 Preview 走 x11rb 自己的純 Rust transport，不啟用 XCB FFI／dlopen。
-# `image` 供之後把 GetImage reply 正規化，`randr` 供 monitor 枚舉；先不把
-# xinput／xfixes 等尚未實作的能力一起帶進來。
+# `image` 供之後把 GetImage reply 正規化，`randr` 供 monitor 枚舉；`res` 問
+# X server 每扇視窗是哪個行程建的、`shape` 問它是不是方的——擷取時認出並塗掉
+# 她自己的視窗要用。先不把 xinput／xfixes 等尚未實作的能力一起帶進來。
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "=0.13.2", default-features = false, features = ["image", "randr"] }
+x11rb = { version = "=0.13.2", default-features = false, features = ["image", "randr", "res", "shape"] }
 atspi-common = { version = "=0.13.0", default-features = false, features = ["zbus"] }
 zbus = { version = "=5.12.0", default-features = true }
 wait-timeout = "=0.2.1"

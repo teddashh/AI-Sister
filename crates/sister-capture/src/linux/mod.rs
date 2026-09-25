@@ -34,6 +34,9 @@ use zbus::blocking::{Connection as BusConnection, Proxy};
 use zbus::names::BusName;
 use zbus::zvariant::OwnedObjectPath;
 
+mod own_windows;
+
+use crate::own_windows::{DesktopRect, grab_without_her, own_parts};
 use crate::traits::{
     Backend, CapturePermit, ClipboardCapture, ClipboardWatermark, DhashRecheck, OcrAttempt,
     PrivacyObservation, RawFrame, ScreenCapture, SystemContentState, SystemObservation,
@@ -762,6 +765,8 @@ struct XAtoms {
     pid: u32,
     net_wm_name: u32,
     utf8_string: u32,
+    wm_state: u32,
+    window_opacity: u32,
 }
 
 impl XAtoms {
@@ -774,8 +779,24 @@ impl XAtoms {
             pid: atom(connection, b"_NET_WM_PID")?,
             net_wm_name: atom(connection, b"_NET_WM_NAME")?,
             utf8_string: atom(connection, b"UTF8_STRING")?,
+            wm_state: atom(connection, b"WM_STATE")?,
+            window_opacity: atom(connection, b"_NET_WM_WINDOW_OPACITY")?,
         })
     }
+}
+
+/// 行程 `pid` 的程式檔名，只有檔名、不含路徑。
+///
+/// 程式還開著的時候它的檔案被換掉（套件升級就是這樣換的），`/proc/<pid>/exe`
+/// 會在後面接一段 ` (deleted)`。那還是同一支程式，把那段拿掉：不然升級完、
+/// 重開之前，排除規則和「這是不是她」都會認不出它。
+fn process_file_name(pid: u32) -> Option<String> {
+    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    Some(match name.strip_suffix(" (deleted)") {
+        Some(kept) => kept.to_owned(),
+        None => name,
+    })
 }
 
 fn property_u32(
@@ -854,13 +875,7 @@ fn foreground(
             .rfind(|part| !part.trim().is_empty())
             .map(str::to_owned)
     });
-    let app_id = std::fs::read_link(format!("/proc/{pid}/exe"))
-        .ok()
-        .and_then(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .or_else(|| app_name.clone());
+    let app_id = process_file_name(pid).or_else(|| app_name.clone());
     Ok(WindowIdentity {
         window,
         pid,
@@ -1290,24 +1305,64 @@ impl LinuxBackend {
     }
 
     fn capture(&self, ts: Millis) -> Result<RawFrame> {
-        capture_x11(&self.connection, self.screen_index, ts)
+        capture_x11(&self.connection, self.screen_index, &self.atoms, ts)
     }
 }
 
-fn capture_x11(connection: &RustConnection, screen_index: usize, ts: Millis) -> Result<RawFrame> {
+/// 整個 X11 畫面，她自己看得見的那幾塊塗黑（`crate::own_windows::grab_without_her`：
+/// 抓之前、抓之後各問一次她在哪）。塗完才算 dhash、跑 OCR、存圖。
+fn capture_x11(
+    connection: &RustConnection,
+    screen_index: usize,
+    atoms: &XAtoms,
+    ts: Millis,
+) -> Result<RawFrame> {
     let screen = connection
         .setup()
         .roots
         .get(screen_index)
         .ok_or_else(|| anyhow!("X11 screen 不存在"))?;
-    let (image, visual_id) = Image::get(
-        connection,
-        screen.root,
-        0,
-        0,
-        screen.width_in_pixels,
-        screen.height_in_pixels,
+    let (width, height) = (screen.width_in_pixels, screen.height_in_pixels);
+    let rgba = grab_without_her(
+        || {
+            Ok(own_parts(&own_windows::window_facts(
+                connection,
+                screen.root,
+                atoms,
+            )?)?)
+        },
+        || grab_x11(connection, screen_index, width, height),
+        u32::from(width),
+        u32::from(height),
+        DesktopRect {
+            left: 0,
+            top: 0,
+            right: i32::from(width),
+            bottom: i32::from(height),
+        },
     )?;
+    Ok(RawFrame::from_rgba(
+        ts,
+        i32::try_from(screen_index).unwrap_or(i32::MAX),
+        u32::from(width),
+        u32::from(height),
+        rgba,
+    ))
+}
+
+/// root 從 (0, 0) 起 `width × height` 的 RGBA8，由上往下。
+fn grab_x11(
+    connection: &RustConnection,
+    screen_index: usize,
+    width: u16,
+    height: u16,
+) -> Result<Vec<u8>> {
+    let screen = connection
+        .setup()
+        .roots
+        .get(screen_index)
+        .ok_or_else(|| anyhow!("X11 screen 不存在"))?;
+    let (image, visual_id) = Image::get(connection, screen.root, 0, 0, width, height)?;
     let visual = connection
         .setup()
         .roots
@@ -1328,13 +1383,7 @@ fn capture_x11(connection: &RustConnection, screen_index: usize, ts: Millis) -> 
             rgba.extend_from_slice(&[(red >> 8) as u8, (green >> 8) as u8, (blue >> 8) as u8, 255]);
         }
     }
-    Ok(RawFrame::from_rgba(
-        ts,
-        i32::try_from(screen_index).unwrap_or(i32::MAX),
-        u32::from(image.width()),
-        u32::from(image.height()),
-        rgba,
-    ))
+    Ok(rgba)
 }
 
 impl Backend for LinuxBackend {
@@ -1679,9 +1728,9 @@ mod tests {
         );
     }
 
-    struct Xvfb {
+    pub(super) struct Xvfb {
         child: Child,
-        display: String,
+        pub(super) display: String,
     }
 
     impl Xvfb {
@@ -1689,7 +1738,7 @@ mod tests {
             Self::start_with_geometry("64x64x24")
         }
 
-        fn start_with_geometry(geometry: &str) -> Option<Self> {
+        pub(super) fn start_with_geometry(geometry: &str) -> Option<Self> {
             let mut child = match Command::new("Xvfb")
                 .args([
                     "-displayfd",
@@ -1972,7 +2021,7 @@ mod tests {
     /// 兩半都要：**沒有前景視窗**的 Xvfb 上必須是 `NoForeground`（畫成 ✗ 是對的），
     /// 真的掛上一個 `_NET_ACTIVE_WINDOW` 之後必須讀得回來（畫成 ✗ 就是假話）。
     /// 標題用字面值比對；app 用另一條 API（`current_exe`）獨立算出期望值，不跟
-    /// 產品共用 `read_link("/proc/{pid}/exe")` 那一行。
+    /// 產品共用 `process_file_name` 那一支。
     #[test]
     fn the_doctor_probe_reads_the_same_two_strings_the_exclusion_rules_match_on() {
         use x11rb::protocol::xproto::{CreateWindowAux, PropMode, WindowClass};
@@ -2073,7 +2122,9 @@ mod tests {
         let Outcome::Available(ready) = &result.outcome else {
             panic!("exact verifier did not produce an available transport")
         };
-        let frame = capture_x11(&ready.connection, ready.screen_index, 123).expect("X11 frame");
+        let atoms = XAtoms::new(&ready.connection).expect("atoms");
+        let frame =
+            capture_x11(&ready.connection, ready.screen_index, &atoms, 123).expect("X11 frame");
         assert_eq!((frame.width, frame.height), (64, 64));
         assert_eq!(frame.ts, 123);
         assert_eq!(frame.rgba.as_ref().map(Vec::len), Some(64 * 64 * 4));
@@ -2144,9 +2195,10 @@ mod tests {
                     "exact verifier did not produce an available transport"
                 ));
             };
+            let atoms = XAtoms::new(&ready.connection)?;
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             let frame = loop {
-                let frame = capture_x11(&ready.connection, ready.screen_index, 123)?;
+                let frame = capture_x11(&ready.connection, ready.screen_index, &atoms, 123)?;
                 let rgba = frame
                     .rgba
                     .as_deref()
