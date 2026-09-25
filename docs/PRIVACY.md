@@ -382,7 +382,7 @@ uninstall 的人工通過證據；那份 checklist 目前仍未勾。
 | 密碼管理員 | KeePass(XC) / 1Password / Bitwarden / Dashlane / LastPass / Enpass 等整段不擷取 |
 | 網銀與登入頁 | 16 條網址規則（讀的是位址列上的縮寫網址，見下） |
 | 敏感欄 | 焦點在敏感欄時整幀不擷取；所有前景 app 都問，問不出來也不讀內容 |
-| 她自己的視窗 | 桌寵、設定、時間軸等她的視窗在前景時整段不擷取；看得見但不在前景時，存下來的畫面上她那一塊是黑的（Windows）。設定裡關不掉 |
+| 她自己的視窗 | 桌寵、設定、時間軸等她的視窗在前景時整段不擷取；看得見但不在前景時，存下來的畫面上她那一塊是黑的（Windows、Linux X11 預覽版）。設定裡關不掉 |
 | 敏感視窗標題 | `*password*`、`*密碼*`、`*無痕*`、`*private browsing*` |
 | 會議 app | Zoom / Teams / Meet / WebEx / TeamViewer 等前景時自動暫停 |
 | 剪貼簿秘密 | 疑似 API key / 私鑰時只記「發生過」，不記內容 |
