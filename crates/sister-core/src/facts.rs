@@ -1433,6 +1433,18 @@ mod tests {
         assert_eq!(topic_constraint("是否電話"), None);
     }
 
+    /// 表是照順序拿第一個對上的，所以長的要排在它的開頭前面。「幫我看」排在
+    /// 「幫我看一下」前面的話，主題會剩「一下客服」，第一趟就答不出號碼；
+    /// 答案照樣會在放寬那一趟出來，所以只看答案的測試不會紅。
+    #[test]
+    fn a_request_is_stripped_whole_not_by_its_shorter_prefix() {
+        assert_eq!(strip_fact_question_edges("幫我看一下客服專線"), "客服專線");
+        assert_eq!(
+            topic_constraint("幫我看一下客服專線").as_deref(),
+            Some("客服")
+        );
+    }
+
     #[test]
     fn words_and_identifiers_do_not_accidentally_request_fact_types() {
         for query in [

@@ -29,6 +29,8 @@ README_END = "<!-- END GENERATED: recall-benchmark -->"
 # 一模一樣——只登第一張的話，README 會讓人以為章節什麼都沒帶來。章節幫得上
 # 忙的是「昨天下午」這種問法，證據要跟著登出來，否則 PHASES.md 那條
 # 「找回率提升可量測」是一句沒有公開憑據的話。
+# alpha.157 起 baseline_text 和 facts 也答得出「昨天下午那份週報寫了什麼」，這張表三個
+# 配置打平；PHASES.md 那一格照實加註，不准為了重新拉開差距去動 fixture。
 SESSION_README_START = "<!-- BEGIN GENERATED: recall-session-benchmark -->"
 SESSION_README_END = "<!-- END GENERATED: recall-session-benchmark -->"
 
