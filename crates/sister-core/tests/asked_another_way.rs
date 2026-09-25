@@ -311,21 +311,52 @@ fn an_empty_relaxed_time_question_says_only_what_it_searched() {
     }
 }
 
-/// 登記在案的代價：「上次」「之前」和「所以」一樣是口語開頭。剝完剩「那個人」時，
-/// 放寬拿去找的是往左退一個字的「個人」，和「所以那個人」一模一樣。
+/// 登記在案的代價：「上次」「之前」和「所以」「到底」一樣是口語開頭。後面只剩「那個人」
+/// 「看到的東西」「那個事件」「的原因」這種話時，看過「個人」「東西」「事件」「原因」
+/// 的機器上，放寬拿去找的就是這幾個字（「那個人」往左退一個字剩「個人」），和
+/// 「所以……」「到底什麼原因」一模一樣。尾巴的「原因」前面沒有別的字就不切
+/// （`TAIL_ASKS`），所以「上次的原因」找的是「原因」，不是什麼都不找。
 #[test]
-fn a_lead_in_before_that_person_pays_the_same_cost_as_so() {
-    for (label, mut db) in both() {
-        let so = ask(&mut db, "所以那個人");
-        for q in ["上次那個人", "之前那個人"] {
-            let got = ask(&mut db, q);
-            assert_eq!(got.searched, so.searched, "{label}「{q}」");
-            assert_eq!(got.answers, so.answers, "{label}「{q}」");
-            assert_eq!(got.hits, so.hits, "{label}「{q}」");
+fn a_lead_in_before_a_vague_word_pays_the_same_cost_as_so() {
+    fn with_things(background: bool) -> Db {
+        let mut db = fixture(background);
+        let session = db.start_session("test", "test").unwrap();
+        add(&mut db, session, 7_000, 120, "東西放在桌上");
+        add(&mut db, session, 7_001, 121, "這個事件已經結案");
+        db
+    }
+    for (label, background) in [("沒有背景", false), ("有背景", true)] {
+        let mut db = with_things(background);
+        for (so_q, same) in [
+            ("所以那個人", ["上次那個人", "之前那個人"]),
+            ("所以看到的東西", ["上次看到的東西", "之前看到的東西"]),
+            ("所以那個事件", ["上次那個事件", "之前那個事件"]),
+            ("到底什麼原因", ["上次的原因", "之前的原因"]),
+        ] {
+            let so = ask(&mut db, so_q);
+            for q in same {
+                let got = ask(&mut db, q);
+                assert_eq!(got.searched, so.searched, "{label}「{q}」");
+                assert_eq!(got.answers, so.answers, "{label}「{q}」");
+                assert_eq!(got.hits, so.hits, "{label}「{q}」");
+            }
         }
     }
-    let got = ask(&mut fixture(true), "上次那個人");
-    assert_eq!(got.searched, relaxed("個人"), "版本說明寫的就是這一格");
+    let mut db = with_things(true);
+    for (q, said) in [
+        ("上次那個人", "個人"),
+        ("上次看到的東西", "東西"),
+        ("之前那個事件", "事件"),
+        ("上次的原因", "原因"),
+    ] {
+        let got = ask(&mut db, q);
+        assert_eq!(
+            got.searched,
+            relaxed(said),
+            "版本說明寫的就是這一格：「{q}」"
+        );
+        assert!(!got.empty, "「{q}」");
+    }
 }
 
 /// `docs/WINDOWS-CHECKLIST.md` alpha.163 那一節逐題照打：記事本那三行是同一張畫面。
@@ -338,9 +369,9 @@ fn the_windows_checklist_hears_what_the_checklist_says() {
     const NOTEPAD: &str = "週報網址已更新\n同步失敗 ERR_SYNC_7\n客服專線 0800-000-123";
     const NOTEPAD_162: &str =
         "週報網址已更新\n部署失敗 ERR_DEPLOY_42\n客服專線 0800-000-123\nstaging build is ready";
-    const BACKUP_WHEN: &str =
+    const SYNC_WHEN: &str =
         "我對不到你打的那一串，所以改用「同步失敗」去找。底下每一筆的時間，是我記下那一筆的時候。";
-    const BACKUP: &str = "我對不到你打的那一串，所以改用「同步失敗」去找。";
+    const SYNC: &str = "我對不到你打的那一串，所以改用「同步失敗」去找。";
     const URL: &str = "我對不到你打的那一串，所以改用「週報網址」去找。";
     const PHONE: &str = "我對不到你打的那一串，所以改用「客服專線」去找。";
     for (label, background) in [("沒有背景", false), ("有背景", true)] {
@@ -363,17 +394,17 @@ fn the_windows_checklist_hears_what_the_checklist_says() {
                 assert!(!got.hits.contains(line), "{label}「{q}」：{}", got.hits);
             }
         };
-        let backup = ask(&mut db, "同步失敗");
+        let sync = ask(&mut db, "同步失敗");
         let url = ask(&mut db, "週報網址");
-        for (q, got) in [("同步失敗", &backup), ("週報網址", &url)] {
+        for (q, got) in [("同步失敗", &sync), ("週報網址", &url)] {
             assert_eq!(got.searched, None, "{label}基準線「{q}」");
             notepad_only(got, q);
         }
         for (q, said, same_as) in [
-            ("同步失敗的時間", BACKUP_WHEN, &backup),
-            ("同步失敗是什麼時候", BACKUP_WHEN, &backup),
-            ("同步失敗的原因", BACKUP, &backup),
-            ("為什麼同步失敗", BACKUP, &backup),
+            ("同步失敗的時間", SYNC_WHEN, &sync),
+            ("同步失敗是什麼時候", SYNC_WHEN, &sync),
+            ("同步失敗的原因", SYNC, &sync),
+            ("為什麼同步失敗", SYNC, &sync),
             ("上次看到的週報網址", URL, &url),
             ("之前的週報網址", URL, &url),
         ] {
